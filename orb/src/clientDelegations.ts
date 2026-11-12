@@ -5,19 +5,23 @@ import { localBinding, localDirectory, recordLocalFailure, refreshLocalAgents, r
 import { captureWakeupFences, enqueueLocalMessage } from './localMessageQueue';
 
 type Delivery = {id:ReturnType<typeof crypto.randomUUID>;target_mission_id?:string;content:string;scheduled?:boolean};
+let unsupportedClientRunVersion: number | null = null;
 /** One inbox poll per computer, independent of the number of sessions.
  * Acknowledge only after saving locally; receipt tombstones prevent replays. */
 export function startClientDelegations(missions: () => Mission[]) {
   if (!nativeInvoke()) return () => {};
   let stopped = false, busy = false;
   const version = connectionVersion();
+  const missingAnchors = new Set<string>();
   const valid = () => !stopped && version === connectionVersion();
   const tick = async () => {
     if (!valid() || busy) return;
+    if (unsupportedClientRunVersion !== null && unsupportedClientRunVersion === version) return;
     busy = true;
     try {
       const [clientId] = await Promise.all([machineIdentity(), restoreLocalBindings()]);
       const anchor = missions().find(mission => isClientPlacement(mission) &&
+        !mission.local_sync_pending && !mission.local_sync_local_only && !missingAnchors.has(mission.id) &&
         (mission.tags?.includes(`worker-client:${clientId}`) || !!localBinding(mission.id)));
       if (!anchor || !valid()) return;
       const post = <T>(id:string,body:object) => api<T>(`/api/control/missions/${id}/client-run`, {
@@ -25,7 +29,18 @@ export function startClientDelegations(missions: () => Mission[]) {
       });
       const fences = await captureWakeupFences();
       if (!valid()) return;
-      const inbox = await post<{messages:Delivery[]}>(anchor.id,{op:'inbox_all'});
+      let inbox: {messages:Delivery[]};
+      try {
+        inbox = await post<{messages:Delivery[]}>(anchor.id,{op:'inbox_all'});
+      } catch (error) {
+        const status = (error as {status?: number} | undefined)?.status;
+        if (status === 405 || status === 501) { unsupportedClientRunVersion = version; return; }
+        if (status === 404 || /\b404\b|Mission .*not found|Mission not found/i.test(String(error))) {
+          missingAnchors.add(anchor.id);
+          return;
+        }
+        throw error;
+      }
       for (const message of inbox.messages ?? []) {
         if (!valid()) return;
         const id = message.target_mission_id ?? anchor.id;

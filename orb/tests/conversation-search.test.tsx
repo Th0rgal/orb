@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { render, fireEvent, screen, waitFor } from "@solidjs/testing-library";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import SearchDialog from "../src/SearchDialog";
@@ -451,5 +453,11 @@ describe("telemetry redaction and SearchDialog state discipline", () => {
       expect(screen.getByTestId("search-disconnected")).toBeTruthy();
     });
     raceView.unmount();
+  });
+
+  it("highlights the preview target turn as a quiet card without a left bar", () => {
+    const css = readFileSync(resolve(__dirname, "../src/SearchDialog.css"), "utf8");
+    expect(css).not.toContain(".sd-turn.is-target::before");
+    expect(css).toMatch(/\.sd-turn\.is-target\s*\{[^}]*border-color:\s*var\(--stroke-soft\)/);
   });
 });

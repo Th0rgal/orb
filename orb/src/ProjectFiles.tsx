@@ -1120,11 +1120,11 @@ export function LiveProjectsSection(p: {
               .filter(key => expanded[key] && key.startsWith(`${slug}:`))
               .map(key => key.slice(slug.length + 1));
             await Promise.all([
-              loadMissions(slug),
-              loadController(slug),
-              loadCrons(slug),
-              loadDir(slug, "", true),
-              ...subdirs.map(sub => loadDir(slug, sub, true)),
+              loadMissions(slug, { transcripts: false, background: true }),
+              loadController(slug, true, true),
+              loadCrons(slug, false, true),
+              loadDir(slug, "", true, true),
+              ...subdirs.map(sub => loadDir(slug, sub, true, true)),
             ]);
           }));
         }
@@ -1204,7 +1204,15 @@ export function LiveProjectsSection(p: {
           if (prevActivityByProject.get(slug) === nextSignatures.get(slug)) continue;
           const existing = missions[slug];
           const incoming = incomingByProject.get(slug);
+          let hasUnseenMission = false;
           if (existing && incoming?.length) {
+            const existingIds = new Set(existing.map(item => item.id));
+            for (const item of incoming) {
+              if (!existingIds.has(item.id) && !deletedInSession.has(item.id) && !archivedInSession.has(item.id)) {
+                hasUnseenMission = true;
+                break;
+              }
+            }
             const byId = new Map(incoming.map(item => [item.id, item]));
             let changed = false;
             const patched = existing.map(row => {
@@ -1216,9 +1224,11 @@ export function LiveProjectsSection(p: {
               return withArch;
             });
             if (changed) setMissions(slug, patched);
+          } else if (!existing && incoming?.length) {
+            hasUnseenMission = true;
           }
-          if (warmed.has(slug)) {
-            void loadMissions(slug);
+          if (warmed.has(slug) && (hasUnseenMission || !existing)) {
+            void loadMissions(slug, { transcripts: false, cached: true, background: true });
           }
         }
       });

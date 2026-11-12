@@ -28,6 +28,7 @@ open OrbCore.Skills
 open OrbCore.QueueCont
 open OrbCore.R7Core
 open OrbCore.TelemetryAndVoice
+open OrbCore.MacTether
 open OrbCore.Control
 open OrbCore.HostTests
 open OrbCore.HarnessSessionRegistry
@@ -2397,8 +2398,13 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
    let rows ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM deploy_receipts;" #[]
    let nReceipts := match rows with | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0 | .error _ => 0
    closeCoreStore store
+   let coreSrvBin :=
+     if (← System.FilePath.pathExists "./lean/OrbCore/.lake/build/bin/orb-server") then
+       "./lean/OrbCore/.lake/build/bin/orb-server"
+     else
+       "./lean/OrbCore/.lake/build/bin/sandboxed-sh"
    let cliNoLease ← IO.Process.output {
-     cmd := "./lean/OrbCore/.lake/build/bin/sandboxed-sh"
+     cmd := coreSrvBin
      args := #["deploy", "--service", "sandboxed-sh-dev.service", "--dry-run"]
      env := #[("WORKING_DIR", some r7Root), ("DEV_MODE", some "true")]
    }
@@ -2411,7 +2417,7 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
    } | do closeCoreStore cliStore; IO.FS.removeDirAll r7Root; return 1
    closeCoreStore cliStore
    let cliWithLease ← IO.Process.output {
-     cmd := "./lean/OrbCore/.lake/build/bin/sandboxed-sh"
+     cmd := coreSrvBin
      args := #["deploy", "--service", "sandboxed-sh-dev.service", "--dry-run", "--lease", "lease-r7-cli-01", "--force"]
      env := #[("WORKING_DIR", some cliSubRoot), ("DEV_MODE", some "true")]
    }
@@ -3268,6 +3274,267 @@ private def runWarmClaudeControlAndCheckpointsCoreTests (prodValid : CoreConfig)
      wtGetResp?.map (·.status) != some 200 || (wtGetStr.splitOn "\"decision_word\":513").length < 2 ||
      cpRestoreResp?.map (·.status) != some 200 || restoredContent != "initial\n" then
     IO.eprintln s!"[orb-core-test] FAIL: warm claude Core control/checkpoints/worktree mismatch: hdr={hasEventsHdr} req={sawNativeReq} toolRes={toolResStr} done={sawCompleted} ref={firstRef} restored={repr restoredContent}"
+    return 1
+  return 0
+
+private def mkTestWgInitPacket (peerPub32 : ByteArray) (senderIdx : UInt32) : IO ByteArray := do
+  let mut prefix116 := ByteArray.emptyWithCapacity 116
+  prefix116 := prefix116.push 1 |>.push 0 |>.push 0 |>.push 0
+  prefix116 := prefix116.push (senderIdx &&& 0xFF).toUInt8
+    |>.push ((senderIdx >>> 8) &&& 0xFF).toUInt8
+    |>.push ((senderIdx >>> 16) &&& 0xFF).toUInt8
+    |>.push ((senderIdx >>> 24) &&& 0xFF).toUInt8
+  while prefix116.size < 116 do
+    prefix116 := prefix116.push 0x42
+  let mac1 ← OrbBin.PosixExt.wgMac1 peerPub32 prefix116
+  let mut mac2 := ByteArray.emptyWithCapacity 16
+  for _ in [0:16] do mac2 := mac2.push 0
+  return prefix116 ++ mac1 ++ mac2
+
+private def mkTestWgRespPacket (initPub32 : ByteArray) (senderIdx receiverIdx : UInt32) : IO ByteArray := do
+  let mut prefix60 := ByteArray.emptyWithCapacity 60
+  prefix60 := prefix60.push 2 |>.push 0 |>.push 0 |>.push 0
+  prefix60 := prefix60.push (senderIdx &&& 0xFF).toUInt8
+    |>.push ((senderIdx >>> 8) &&& 0xFF).toUInt8
+    |>.push ((senderIdx >>> 16) &&& 0xFF).toUInt8
+    |>.push ((senderIdx >>> 24) &&& 0xFF).toUInt8
+  prefix60 := prefix60.push (receiverIdx &&& 0xFF).toUInt8
+    |>.push ((receiverIdx >>> 8) &&& 0xFF).toUInt8
+    |>.push ((receiverIdx >>> 16) &&& 0xFF).toUInt8
+    |>.push ((receiverIdx >>> 24) &&& 0xFF).toUInt8
+  while prefix60.size < 60 do
+    prefix60 := prefix60.push 0x24
+  let mac1 ← OrbBin.PosixExt.wgMac1 initPub32 prefix60
+  let mut mac2 := ByteArray.emptyWithCapacity 16
+  for _ in [0:16] do mac2 := mac2.push 0
+  return prefix60 ++ mac1 ++ mac2
+
+private def mkTestWgDataPacket (receiverIdx : UInt32) : ByteArray := Id.run do
+  let mut p := ByteArray.emptyWithCapacity 64
+  p := p.push 4 |>.push 0 |>.push 0 |>.push 0
+  p := p.push (receiverIdx &&& 0xFF).toUInt8
+    |>.push ((receiverIdx >>> 8) &&& 0xFF).toUInt8
+    |>.push ((receiverIdx >>> 16) &&& 0xFF).toUInt8
+    |>.push ((receiverIdx >>> 24) &&& 0xFF).toUInt8
+  while p.size < 64 do
+    p := p.push 0xAA
+  return p
+
+private def runMacTetherAndRelayCoreTests (prodValid : CoreConfig) : IO UInt32 := do
+  let ts ← IO.monoNanosNow
+  let root := s!"/tmp/orb-core-mac-tether-{ts}"
+  IO.FS.createDirAll root
+  let .ok store ← openCoreStore s!"{root}/store"
+    | do IO.FS.removeDirAll root; IO.eprintln "[orb-core-test] FAIL: openCoreStore for mac-tether failed"; return 1
+  OrbBin.PosixExt.setenvVar "ORB_WG_RELAY_PORT" "0"
+  OrbBin.PosixExt.setenvVar "ORB_WG_RELAY_BIND" "127.0.0.1"
+  OrbBin.PosixExt.setenvVar "ORB_WG_RELAY_PUBLIC_ENDPOINT" "127.0.0.1:51890"
+  let tetherRt ← startMacTetherRuntime store "127.0.0.1"
+  OrbBin.PosixExt.unsetenvVar "ORB_WG_RELAY_PORT"
+  OrbBin.PosixExt.unsetenvVar "ORB_WG_RELAY_BIND"
+  OrbBin.PosixExt.unsetenvVar "ORB_WG_RELAY_PUBLIC_ENDPOINT"
+  let managedRef ← IO.mkRef ({ enabled := true } : ManagedFleetState)
+  let chainsRef ← IO.mkRef (#[] : Array RoutingChain)
+  let cooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
+  let seqRef ← IO.mkRef (1 : UInt64)
+  let bunkerRef ← IO.mkRef (0 : UInt8)
+  let app : CoreAppState := {
+    cfg := { prodValid with workingDir := root }
+    store := store
+    searchIdx? := none
+    managedRef := managedRef
+    chainsRef := chainsRef
+    proxyCooldownsRef := cooldownsRef
+    seqRef := seqRef
+    bunkerStateRef? := some bunkerRef
+    macTether? := some tetherRt
+  }
+  let nowSec ← coreEpochSec
+  let adminJwt := mintSessionToken prodValid.jwtSecret (nowSec + 3600)
+  let execClaims1 : McpSessionClaims := {
+    sessionId := "11111111-1111-4111-8111-111111111111",
+    missionId := "m-tether-1", role := "executor", project := "orb",
+    isExternal := false, expiresAt := nowSec + 3600
+  }
+  let execClaims2 : McpSessionClaims := {
+    sessionId := "22222222-2222-4222-8222-222222222222",
+    missionId := "m-tether-2", role := "executor", project := "orb",
+    isExternal := false, expiresAt := nowSec + 3600
+  }
+  let execTok1 := mintScopedMcpToken prodValid.jwtSecret execClaims1
+  let execTok2 := mintScopedMcpToken prodValid.jwtSecret execClaims2
+
+  let dispatch (raw : String) : IO (Option CoreHttpResponse) := do
+    match parseRequest raw.toUTF8 none with
+    | .ok req =>
+      match ← dispatchCoreRequest app req nowSec with
+      | .ok resp => return some resp
+      | .error _ => return none
+    | .error _ => return none
+
+  -- 1. Create mission `m-tether-1` so session-scoped auto-revoke on cancel can be tested
+  let mCreateBody := OrbBin.Json.renderCompact (.obj #[
+    ("id", .str "m-tether-1"),
+    ("title", .str "NextJS Preview Mission"),
+    ("backend", .str "codex"),
+    ("working_directory", .str root),
+    ("prompt", .str "Test NextJS preview")
+  ])
+  let _ ← dispatch s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {adminJwt}\r\nContent-Length: {mCreateBody.utf8ByteSize}\r\n\r\n{mCreateBody}"
+
+  -- 2. Generate ephemeral agent + mac WireGuard & KEM keys
+  let (.ok (_, agentWgPub, agentWgPub32)) ← OrbBin.PosixExt.generateWireguardKeypair
+    | do closeCoreStore store; IO.FS.removeDirAll root; return 1
+  let (.ok (agentKemPriv, agentKemPub, _)) ← OrbBin.PosixExt.generateWireguardKeypair
+    | do closeCoreStore store; IO.FS.removeDirAll root; return 1
+  let (.ok (_, macWgPub, macWgPub32)) ← OrbBin.PosixExt.generateWireguardKeypair
+    | do closeCoreStore store; IO.FS.removeDirAll root; return 1
+  let (.ok (macKemPriv, macKemPub, _)) ← OrbBin.PosixExt.generateWireguardKeypair
+    | do closeCoreStore store; IO.FS.removeDirAll root; return 1
+  let (.ok (_, pskPlainB64, _)) ← OrbBin.PosixExt.generateWireguardKeypair
+    | do closeCoreStore store; IO.FS.removeDirAll root; return 1
+  let (.ok (_, agentSshPub)) ← OrbBin.PosixExt.generateOpenSshEd25519Keypair "m-tether-1"
+    | do closeCoreStore store; IO.FS.removeDirAll root; return 1
+
+  -- 3. Executor calls `request_macbook_tether` via `/api/mcp/call` (`wait_secs = 0`)
+  let mcpReqBody := OrbBin.Json.renderCompact (.obj #[
+    ("name", .str "request_macbook_tether"),
+    ("arguments", .obj #[
+      ("scope", .str "sandbox_ssh"),
+      ("agent_ports", .arr #[.nat 3000]),
+      ("ttl_minutes", .nat 30),
+      ("session_scoped", .bool true),
+      ("wait_secs", .nat 0),
+      ("reason", .str "Test NextJS build & run sandbox tests"),
+      ("agent_wg_pubkey", .str agentWgPub),
+      ("agent_kem_pubkey", .str agentKemPub),
+      ("agent_ssh_pubkey", .str agentSshPub)
+    ])
+  ])
+  let some reqResp ← dispatch s!"POST /api/mcp/call HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {execTok1}\r\nContent-Length: {mcpReqBody.utf8ByteSize}\r\n\r\n{mcpReqBody}"
+    | do closeCoreStore store; IO.FS.removeDirAll root; return 1
+  let reqJson := (OrbBin.Json.parseBytes reqResp.body).toOption.getD (.obj #[])
+  let reqRes := reqJson.fieldOrNull "result"
+  let reqId := (reqRes.fieldStr? "request_id").getD ""
+  if reqResp.status != 200 || (reqRes.fieldStr? "status") != some "pending" || reqId.isEmpty then
+    closeCoreStore store; IO.FS.removeDirAll root
+    IO.eprintln s!"[orb-core-test] FAIL: request_macbook_tether pending creation failed: {String.fromUTF8! reqResp.body}"
+    return 1
+
+  -- 4. Approval WITHOUT `biometric_verified: true` MUST fail closed (`LeanMesh.Kernel.jitLeaseStep != 1`)
+  let (.ok sealedPsk) ← OrbBin.PosixExt.sealTetherPsk macKemPriv agentKemPub reqId pskPlainB64
+    | do closeCoreStore store; IO.FS.removeDirAll root; return 1
+  let noBioBody := OrbBin.Json.renderCompact (.obj #[
+    ("biometric_verified", .bool false),
+    ("mac_wg_pubkey", .str macWgPub),
+    ("mac_kem_pubkey", .str macKemPub),
+    ("sealed_psk_b64", .str sealedPsk)
+  ])
+  let some noBioResp ← dispatch s!"POST /api/mac-tether/requests/{reqId}/approve HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {adminJwt}\r\nContent-Length: {noBioBody.utf8ByteSize}\r\n\r\n{noBioBody}"
+    | do closeCoreStore store; IO.FS.removeDirAll root; return 1
+  if noBioResp.status != 403 then
+    closeCoreStore store; IO.FS.removeDirAll root
+    IO.eprintln s!"[orb-core-test] FAIL: approveMacTetherRequest admitted without Touch ID: {noBioResp.status}"
+    return 1
+
+  -- 5. Valid Touch ID approval succeeds, allocates `10.88.200.10`, and E2EE PSK opens on agent
+  let okApproveBody := OrbBin.Json.renderCompact (.obj #[
+    ("biometric_verified", .bool true),
+    ("effective_scope", .str "host_ssh"),
+    ("effective_target", .str "thomas"),
+    ("ttl_minutes", .nat 15),
+    ("mac_wg_pubkey", .str macWgPub),
+    ("mac_kem_pubkey", .str macKemPub),
+    ("mac_direct_endpoint", .str "192.168.1.165:51889"),
+    ("sealed_psk_b64", .str sealedPsk)
+  ])
+  let some appResp ← dispatch s!"POST /api/mac-tether/requests/{reqId}/approve HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {adminJwt}\r\nContent-Length: {okApproveBody.utf8ByteSize}\r\n\r\n{okApproveBody}"
+    | do closeCoreStore store; IO.FS.removeDirAll root; return 1
+  if appResp.status != 200 then
+    closeCoreStore store; IO.FS.removeDirAll root
+    IO.eprintln s!"[orb-core-test] FAIL: Touch ID approve failed ({appResp.status}): {String.fromUTF8! appResp.body}"
+    return 1
+
+  -- 6. Owning executor polls `list_macbook_tethers` and receives `lease_token` + `sealed_psk_b64`; cross-mission executor cannot revoke
+  let listBody := OrbBin.Json.renderCompact (.obj #[("name", .str "list_macbook_tethers"), ("arguments", .obj #[])])
+  let some listResp ← dispatch s!"POST /api/mcp/call HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {execTok1}\r\nContent-Length: {listBody.utf8ByteSize}\r\n\r\n{listBody}"
+    | do closeCoreStore store; IO.FS.removeDirAll root; return 1
+  let listJson := (OrbBin.Json.parseBytes listResp.body).toOption.getD (.obj #[])
+  let tethersArr := ((listJson.fieldOrNull "result").fieldArr? "tethers").getD #[]
+  let firstTether := tethersArr[0]?.getD (.obj #[])
+  let leaseTok := (firstTether.fieldStr? "lease_token").getD ""
+  let rxSealed := (firstTether.fieldStr? "sealed_psk_b64").getD ""
+  let rxOverlay := (firstTether.fieldStr? "overlay_ip").getD ""
+  let openedPskRes ← OrbBin.PosixExt.openTetherPsk agentKemPriv macKemPub reqId rxSealed
+  if !leaseTok.startsWith "tether1." || rxOverlay != "10.88.200.10" || openedPskRes.toOption != some pskPlainB64 then
+    closeCoreStore store; IO.FS.removeDirAll root
+    IO.eprintln s!"[orb-core-test] FAIL: approved tether token/IP/PSK mismatch: ip={rxOverlay} tok={leaseTok.take 8}"
+    return 1
+
+  let crossRevokeBody := OrbBin.Json.renderCompact (.obj #[
+    ("name", .str "revoke_macbook_tether"),
+    ("arguments", .obj #[("request_id", .str reqId)])
+  ])
+  let some crossRevResp ← dispatch s!"POST /api/mcp/call HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {execTok2}\r\nContent-Length: {crossRevokeBody.utf8ByteSize}\r\n\r\n{crossRevokeBody}"
+    | do closeCoreStore store; IO.FS.removeDirAll root; return 1
+  let crossJson := (OrbBin.Json.parseBytes crossRevResp.body).toOption.getD (.obj #[])
+  if (crossJson.fieldBool? "ok") != some false then
+    closeCoreStore store; IO.FS.removeDirAll root
+    IO.eprintln "[orb-core-test] FAIL: cross-mission revoke_macbook_tether was not rejected"
+    return 1
+
+  -- 7. Verify `/api/mac-tether/verify-lease` admits valid lease and fails closed under Bunker
+  let verBody := OrbBin.Json.renderCompact (.obj #[
+    ("request_id", .str reqId),
+    ("lease_token", .str leaseTok),
+    ("mission_id", .str "m-tether-1")
+  ])
+  let some verOkResp ← dispatch s!"POST /api/mac-tether/verify-lease HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {adminJwt}\r\nContent-Length: {verBody.utf8ByteSize}\r\n\r\n{verBody}"
+    | do closeCoreStore store; IO.FS.removeDirAll root; return 1
+  bunkerRef.set 1
+  let some verBunkerResp ← dispatch s!"POST /api/mac-tether/verify-lease HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {adminJwt}\r\nContent-Length: {verBody.utf8ByteSize}\r\n\r\n{verBody}"
+    | do closeCoreStore store; IO.FS.removeDirAll root; return 1
+  bunkerRef.set 0
+  if verOkResp.status != 200 || verBunkerResp.status != 403 then
+    closeCoreStore store; IO.FS.removeDirAll root
+    IO.eprintln s!"[orb-core-test] FAIL: verify-lease bunker gate mismatch: ok={verOkResp.status} bunker={verBunkerResp.status}"
+    return 1
+
+  -- 8. Blind WireGuard UDP relay (`stepBlindRelayDatagram`): Type 1 + Type 2 + Type 4 forwarding & spoofed Type 1 non-hijack!
+  let activeSlots ← tetherRt.slotsMu.atomically get
+  let epMac : UdpEndpoint := { ipHostOrder := 0xC633640A, port := 51889 }   -- 198.51.100.10:51889
+  let epVm  : UdpEndpoint := { ipHostOrder := 0xCB007114, port := 41900 }   -- 203.0.113.20:41900
+  let epEvil : UdpEndpoint := { ipHostOrder := 0xC0000299, port := 6666 }   -- 192.0.2.153:6666
+  let initFromMac ← mkTestWgInitPacket agentWgPub32 0x1001
+  let initFromVm  ← mkTestWgInitPacket macWgPub32   0x2002
+  let respFromMac ← mkTestWgRespPacket agentWgPub32 0x1005 0x2002
+  let d1 ← stepBlindRelayDatagram activeSlots tetherRt.fwdMu { srcIpHostOrder := epMac.ipHostOrder, srcPort := epMac.port, payload := initFromMac } nowSec
+  let d2 ← stepBlindRelayDatagram activeSlots tetherRt.fwdMu { srcIpHostOrder := epVm.ipHostOrder, srcPort := epVm.port, payload := initFromVm } nowSec
+  let d3 ← stepBlindRelayDatagram activeSlots tetherRt.fwdMu { srcIpHostOrder := epMac.ipHostOrder, srcPort := epMac.port, payload := respFromMac } nowSec
+  -- Spoofed Type 1 from `epEvil` knowing `macWgPub32` MUST NOT overwrite established `epVm` route for `0x2002`!
+  let spoofInit ← mkTestWgInitPacket macWgPub32 0x9999
+  let _ ← stepBlindRelayDatagram activeSlots tetherRt.fwdMu { srcIpHostOrder := epEvil.ipHostOrder, srcPort := epEvil.port, payload := spoofInit } (nowSec + 1)
+  let dataMacToVm := mkTestWgDataPacket 0x2002
+  let dataVmToMac := mkTestWgDataPacket 0x1005
+  let fwdToVm  ← stepBlindRelayDatagram activeSlots tetherRt.fwdMu { srcIpHostOrder := epMac.ipHostOrder, srcPort := epMac.port, payload := dataMacToVm } (nowSec + 2)
+  let fwdToMac ← stepBlindRelayDatagram activeSlots tetherRt.fwdMu { srcIpHostOrder := epVm.ipHostOrder, srcPort := epVm.port, payload := dataVmToMac } (nowSec + 2)
+  if !d1.isEmpty || d2 != #[epMac] || d3 != #[epVm] || fwdToVm != #[epVm] || fwdToMac != #[epMac] then
+    closeCoreStore store; IO.FS.removeDirAll root
+    IO.eprintln s!"[orb-core-test] FAIL: blind WG UDP relay routing/anti-hijack mismatch: d2={repr d2} d3={repr d3} fwdVm={repr fwdToVm} fwdMac={repr fwdToMac}"
+    return 1
+
+  -- 9. Cancelling mission `m-tether-1` auto-revokes session-scoped tether AND immediately evicts blind UDP relay session!
+  let some cancelResp ← dispatch s!"POST /api/control/missions/m-tether-1/cancel HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {adminJwt}\r\nContent-Length: 2\r\n\r\n\{}"
+    | do closeCoreStore store; IO.FS.removeDirAll root; return 1
+  let slotsAfterRevoke ← tetherRt.slotsMu.atomically get
+  let fwdAfterRevoke ← stepBlindRelayDatagram slotsAfterRevoke tetherRt.fwdMu { srcIpHostOrder := epMac.ipHostOrder, srcPort := epMac.port, payload := dataMacToVm } (nowSec + 3)
+  let some verAfterRevoke ← dispatch s!"POST /api/mac-tether/verify-lease HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {adminJwt}\r\nContent-Length: {verBody.utf8ByteSize}\r\n\r\n{verBody}"
+    | do closeCoreStore store; IO.FS.removeDirAll root; return 1
+  stopMacTetherRuntime tetherRt
+  closeCoreStore store
+  IO.FS.removeDirAll root
+  if cancelResp.status != 200 || !fwdAfterRevoke.isEmpty || verAfterRevoke.status != 403 then
+    IO.eprintln s!"[orb-core-test] FAIL: mission cancel auto-revoke failed: cancel={cancelResp.status} fwd={repr fwdAfterRevoke} ver={verAfterRevoke.status}"
     return 1
   return 0
 
@@ -4947,6 +5214,8 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   let capHitStr := String.fromUTF8! capHitResp.body
   if capHitResp.status != 429 ||
      (capHitStr.splitOn "\"error\":\"parallel_missions_cap\"").length != 2 ||
+     (capHitStr.splitOn "\"scope\":\"project\"").length != 2 ||
+     (capHitStr.splitOn "\"project\":\"proj-cap\"").length != 2 ||
      (capHitStr.splitOn "\"cap\":1").length != 2 ||
      (capHitStr.splitOn "\"active\":1").length != 2 then
     closeCoreStore store
@@ -5794,6 +6063,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   if (← runR7CoreTests prodValid) != 0 then return 1
   if (← runMultiUserCoreTests prodValid) != 0 then return 1
   if (← runWarmClaudeControlAndCheckpointsCoreTests prodValid) != 0 then return 1
+  if (← runMacTetherAndRelayCoreTests prodValid) != 0 then return 1
 
   IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":11,\"harness_contracts\":10,\"host_tests\":101}"
   return 0

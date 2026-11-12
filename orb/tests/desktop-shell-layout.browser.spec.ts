@@ -221,7 +221,7 @@ test("desktop shell layout: translucent titlebar, pinned Settings footer, scroll
   }
   const initialPlatform = await page.evaluate(() => document.documentElement.dataset.platform);
   const tbLeftBox = (await page.locator(".titlebar .tb-left").boundingBox())!;
-  expect(tbLeftBox.x).toBeGreaterThanOrEqual(initialPlatform === "linux" ? 8 : 80);
+  expect(tbLeftBox.x).toBeGreaterThanOrEqual(initialPlatform === "macos" ? 80 : 8);
   expect(tbLeftBox.x + tbLeftBox.width).toBeLessThanOrEqual(sbBox.width);
 
   const scrollMask = await page.locator(".main > .scroll").evaluate((el) => {
@@ -342,6 +342,21 @@ test("desktop shell layout: translucent titlebar, pinned Settings footer, scroll
   const linuxTbLeft = (await page.locator(".titlebar .tb-left").boundingBox())!;
   expect(linuxTbLeft.x).toBe(8);
   expect(linuxTbLeft.x + linuxTbLeft.width).toBeCloseTo(sbBox.width - 8, 0);
+
+  // Closing and reopening the sidebar keeps the toggle and search icons flush-left on Linux/non-macOS.
+  const sbToggleBtn = page.getByRole("button", { name: "Toggle sidebar" });
+  await sbToggleBtn.click();
+  expect(((await page.locator(".titlebar .tb-left").boundingBox())!).x).toBe(14);
+  await sbToggleBtn.click();
+  expect(((await page.locator(".titlebar .tb-left").boundingBox())!).x).toBe(8);
+
+  await page.evaluate(() => {
+    delete document.documentElement.dataset.platform;
+  });
+  expect(((await page.locator(".titlebar .tb-left").boundingBox())!).x).toBe(8);
+  await page.evaluate(() => {
+    document.documentElement.dataset.platform = "linux";
+  });
 
   await page.evaluate(() => {
     document.documentElement.dataset.platform = "linux";

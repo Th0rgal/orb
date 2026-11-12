@@ -82,7 +82,7 @@ end OrbCore.CliMain
 def main (args : List String) : IO UInt32 := do
   match args with
   | ["--version"] | ["-V"] =>
-    IO.println "sandboxed-sh 0.7.10"
+    IO.println "orb-server 0.7.10"
     return 0
   | ["--harness-contract-tests"] =>
     if OrbCore.Harness.runAllHarnessContractTests then

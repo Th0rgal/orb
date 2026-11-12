@@ -1247,6 +1247,155 @@ def handleExec
     ("stderr", .str out.stderr)
   ]
 
+private def runPrivNetCmd (cmd : String) (args : Array String) : IO IO.Process.Output :=
+  IO.Process.output {
+    cmd := cmd
+    args := args
+    env := #[
+      ("PATH", some "/run/current-system/sw/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
+      ("LANG", some "C.UTF-8")
+    ]
+  }
+
+private def tearDownMacTetherState (iface : String) (stateDir : System.FilePath) : IO Unit := do
+  let _ ← try runPrivNetCmd "ip" #["link", "del", "dev", iface] catch _ => pure { exitCode := 1, stdout := "", stderr := "" }
+  for fname in ["wg.key", "peer.psk", "lease.json"] do
+    try IO.FS.removeFile (stateDir / fname) catch _ => pure ()
+  try IO.FS.removeDir stateDir catch _ => pure ()
+
+def handleMacTetherUp (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : PeerCred) (req : JVal) : IO Unit := do
+  let some reqId := (req.fieldStr? "request_id").bind parseUuidCanonical?
+    | return (← replyError cfd "Invalid or missing canonical UUID `request_id`" 2)
+  let leaseTok := ((req.fieldStr? "lease_token").getD "").trimAscii.toString
+  let mid := ((req.fieldStr? "mission_id").getD "").trimAscii.toString
+  let wgPrivB64 := ((req.fieldStr? "wg_private_key").getD "").trimAscii.toString
+  let pskB64 := ((req.fieldStr? "psk_b64").getD "").trimAscii.toString
+  if !leaseTok.startsWith "tether1." then
+    return (← replyError cfd "Valid `tether1.*` lease_token is required" 126)
+  let some wgPrivBytes := base64Decode? wgPrivB64 | return (← replyError cfd "Invalid wg_private_key Base64" 2)
+  let some pskBytes := base64Decode? pskB64 | return (← replyError cfd "Invalid psk_b64 Base64" 2)
+  if wgPrivBytes.size != 32 || pskBytes.size != 32 then
+    return (← replyError cfd "wg_private_key and psk_b64 must each decode to 32 bytes" 2)
+  let verifyUrl := stripTrailingSlash cfg.apiUrl ++ "/api/mac-tether/verify-lease"
+  let verifyBody := JVal.obj #[
+    ("request_id", .str reqId),
+    ("lease_token", .str leaseTok),
+    ("mission_id", .str mid)
+  ]
+  let verifiedTether ← match ← sendJsonRequest "POST" verifyUrl cfg.apiToken (some verifyBody) #[("User-Agent", "orb-privd/1.3")] 10000 with
+    | .error err =>
+      return (← replyError cfd s!"Failed contacting Core /api/mac-tether/verify-lease: {err}" 126)
+    | .ok (status, text, j?) =>
+      if !(200 ≤ status && status < 300) then
+        return (← replyError cfd s!"Core rejected mac_tether_up ({status}): {text}" 126)
+      let some j := j? | return (← replyError cfd "Non-JSON response from Core /api/mac-tether/verify-lease" 126)
+      if (j.fieldBool? "allowed") != some true || ((j.fieldNat? "bunker_state").getD 1) != 0 then
+        return (← replyError cfd "Core denied mac_tether_up lease" 126)
+      pure (j.fieldOrNull "tether")
+  let overlayIp := ((verifiedTether.fieldStr? "overlay_ip").getD "").trimAscii.toString
+  let some ovU32 := parseIpv4U32? overlayIp | return (← replyError cfd s!"Invalid verified overlay_ip `{overlayIp}`" 126)
+  if (ovU32 &&& 0xFFFFFF00) != 0x0A58C800 || (ovU32 &&& 0xFF) < 10 || (ovU32 &&& 0xFF) > 250 then
+    return (← replyError cfd s!"Verified overlay_ip `{overlayIp}` is outside 10.88.200.10..250" 126)
+  let macWgPub := ((verifiedTether.fieldStr? "mac_wg_pubkey").getD "").trimAscii.toString
+  let some macPubBytes := base64Decode? macWgPub | return (← replyError cfd "Invalid verified mac_wg_pubkey" 126)
+  if macPubBytes.size != 32 then
+    return (← replyError cfd "Verified mac_wg_pubkey is not 32 bytes" 126)
+  let isManaged := (verifiedTether.fieldBool? "is_managed_vm").getD false
+  let macDirect := ((verifiedTether.fieldStr? "mac_direct_endpoint").getD "").trimAscii.toString
+  let relayEp := ((verifiedTether.fieldStr? "relay_endpoint").getD "").trimAscii.toString
+  let peerEndpoint :=
+    if !isManaged && !macDirect.isEmpty then macDirect
+    else if !relayEp.isEmpty then relayEp
+    else macDirect
+  let expiresAt := ((verifiedTether.fieldNat? "expires_at").getD 0).toUInt64
+  let iface := (← getEnvNonEmpty "ORB_MAC_TETHER_IFACE").getD "wg-macmesh0"
+  let rootBase := System.FilePath.mk ((← getEnvNonEmpty "ORB_MAC_TETHER_RUN_DIR").getD "/run/orb-mac-tether")
+  let stateDir := rootBase / reqId
+  if let .error e ← ensurePrivateDir0700 stateDir then
+    return (← replyError cfd s!"Failed creating private tether run dir: {e}" 126)
+  let keyFile := stateDir / "wg.key"
+  let pskFile := stateDir / "peer.psk"
+  if let .error e ← writeAtomicPrivate0600 keyFile (wgPrivB64 ++ "\n").toUTF8 then
+    return (← replyError cfd e 126)
+  if let .error e ← writeAtomicPrivate0600 pskFile (pskB64 ++ "\n").toUTF8 then
+    return (← replyError cfd e 126)
+  let dryRun := (← getEnvNonEmpty "ORB_PRIVD_MAC_TETHER_DRY_RUN") == some "1"
+  if !dryRun then
+    let _ ← runPrivNetCmd "ip" #["link", "del", "dev", iface]
+    let addOut ← runPrivNetCmd "ip" #["link", "add", "dev", iface, "type", "wireguard"]
+    if addOut.exitCode != 0 then
+      tearDownMacTetherState iface stateDir
+      return (← replyError cfd s!"ip link add {iface} failed: {addOut.stderr}" 1)
+    let addrOut ← runPrivNetCmd "ip" #["address", "replace", s!"{overlayIp}/32", "dev", iface]
+    if addrOut.exitCode != 0 then
+      tearDownMacTetherState iface stateDir
+      return (← replyError cfd s!"ip address replace failed: {addrOut.stderr}" 1)
+    let mut wgArgs : Array String := #[
+      "set", iface, "private-key", keyFile.toString,
+      "peer", macWgPub, "preshared-key", pskFile.toString,
+      "allowed-ips", "10.88.200.1/32", "persistent-keepalive", "25"
+    ]
+    if !peerEndpoint.isEmpty then
+      wgArgs := wgArgs ++ #["endpoint", peerEndpoint]
+    let wgOut ← runPrivNetCmd "wg" wgArgs
+    try IO.FS.removeFile keyFile catch _ => pure ()
+    try IO.FS.removeFile pskFile catch _ => pure ()
+    if wgOut.exitCode != 0 then
+      tearDownMacTetherState iface stateDir
+      return (← replyError cfd s!"wg set {iface} failed: {wgOut.stderr}" 1)
+    let upOut ← runPrivNetCmd "ip" #["link", "set", "mtu", "1420", "up", "dev", iface]
+    if upOut.exitCode != 0 then
+      tearDownMacTetherState iface stateDir
+      return (← replyError cfd s!"ip link set up {iface} failed: {upOut.stderr}" 1)
+    let _ ← runPrivNetCmd "ip" #["route", "replace", "10.88.200.1/32", "dev", iface]
+    if expiresAt > 0 then
+      let _ ← IO.asTask (prio := .dedicated) do
+        while true do
+          let nowSec ← nowEpoch
+          if nowSec ≥ expiresAt then
+            tearDownMacTetherState iface stateDir
+            break
+          IO.sleep 2000
+  let ts ← nowEpoch
+  appendAuditLine cfg.auditLog <| JVal.obj #[
+    ("ts", .uint64 ts),
+    ("action", .str "mac_tether_up"),
+    ("request_id", .str reqId),
+    ("mission_id", .str mid),
+    ("overlay_ip", .str overlayIp),
+    ("endpoint", .str peerEndpoint),
+    ("peer_uid", match peer.uid with | some u => .nat u.toNat | none => .null)
+  ]
+  replyJson cfd <| JVal.obj #[
+    ("ok", .bool true),
+    ("interface", .str iface),
+    ("overlay_ip", .str overlayIp),
+    ("mac_overlay_ip", .str "10.88.200.1"),
+    ("endpoint", .str peerEndpoint),
+    ("expires_at", .nat expiresAt.toNat)
+  ]
+
+def handleMacTetherDown (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : PeerCred) (req : JVal) : IO Unit := do
+  let some reqId := (req.fieldStr? "request_id").bind parseUuidCanonical?
+    | return (← replyError cfd "Invalid or missing canonical UUID `request_id`" 2)
+  let iface := (← getEnvNonEmpty "ORB_MAC_TETHER_IFACE").getD "wg-macmesh0"
+  let rootBase := System.FilePath.mk ((← getEnvNonEmpty "ORB_MAC_TETHER_RUN_DIR").getD "/run/orb-mac-tether")
+  let dryRun := (← getEnvNonEmpty "ORB_PRIVD_MAC_TETHER_DRY_RUN") == some "1"
+  if !dryRun then
+    tearDownMacTetherState iface (rootBase / reqId)
+  else
+    for fname in ["wg.key", "peer.psk", "lease.json"] do
+      try IO.FS.removeFile ((rootBase / reqId) / fname) catch _ => pure ()
+    try IO.FS.removeDir (rootBase / reqId) catch _ => pure ()
+  let ts ← nowEpoch
+  appendAuditLine cfg.auditLog <| JVal.obj #[
+    ("ts", .uint64 ts),
+    ("action", .str "mac_tether_down"),
+    ("request_id", .str reqId),
+    ("peer_uid", match peer.uid with | some u => .nat u.toNat | none => .null)
+  ]
+  replyJson cfd <| JVal.obj #[("ok", .bool true), ("request_id", .str reqId), ("interface", .str iface)]
+
 def handleConnection (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) : IO Unit := do
   try
     let peer ← getPeerCred (Int32.ofBitVec (BitVec.ofNat 32 cfd.raw.toNat))
@@ -1288,6 +1437,10 @@ def handleConnection (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) : IO Unit := d
         handleControlUserJob cfd cfg peer req
       else if action == "user_fs_op" then
         handleUserFsOp cfd cfg peer req
+      else if action == "mac_tether_up" then
+        handleMacTetherUp cfd cfg peer req
+      else if action == "mac_tether_down" then
+        handleMacTetherDown cfd cfg peer req
       else
         replyError cfd s!"Unknown action: {action}" 2
     let _ ← LeanSys.Posix.closeFd cfd

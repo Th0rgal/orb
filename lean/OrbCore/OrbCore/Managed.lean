@@ -148,9 +148,9 @@ def validateDeployServiceUnit (rawUnit : String) : Except String String :=
   let leaf := ((trimmed.splitOn "/").getLast?).getD trimmed
   let canonical := if leaf.endsWith ".service" then (leaf.dropEnd 8).toString else leaf
   let (unitCode, systemdUnit) : UInt8 × String :=
-    if canonical == "sandboxed-sh" || canonical == "orb-core" then (1, "sandboxed-sh.service")
+    if canonical == "sandboxed-sh" || canonical == "orb-core" || canonical == "orb-server" then (1, "sandboxed-sh.service")
     else if canonical == "sandboxed-sh-prod" then (1, "sandboxed-sh-prod.service")
-    else if canonical == "sandboxed-sh-dev" || canonical == "orb-core-dev" then (1, "sandboxed-sh-dev.service")
+    else if canonical == "sandboxed-sh-dev" || canonical == "orb-core-dev" || canonical == "orb-server-dev" then (1, "sandboxed-sh-dev.service")
     else if canonical == "sandboxed-node" || canonical == "orb-node" then (2, "sandboxed-node.service")
     else if canonical == "orb-privd" then (3, "orb-privd.service")
     else (0, "")

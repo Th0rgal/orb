@@ -206,7 +206,8 @@ const numberOr = (value: unknown, fallback: number) => (typeof value === "number
 export function launchRefusal(error: unknown, project?: string | null): LaunchRefusal {
   const body = errorBody(error);
   const code = typeof body?.error === "string" ? body.error : null;
-  const where = project ? `"${project}"` : "this project";
+  const resolvedProject = project || (typeof body?.project === "string" && body.project ? body.project : null);
+  const where = resolvedProject ? `"${resolvedProject}"` : "this project";
   if (code === "parallel_missions_cap") {
     const active = numberOr(body?.active, 0);
     const cap = numberOr(body?.cap, 0);

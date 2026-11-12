@@ -61,13 +61,41 @@ def withReplacedExt (p : String) (newExt : String) : String :=
     if ds.isEmpty || ds == "." then s!"{stem}.{newExt}" else s!"{ds}/{stem}.{newExt}"
   | none => s!"{stem}.{newExt}"
 
+def parseRenderConfig (args : List String) : Except String MeshRenderConfig := do
+  let iface := (findOptVal? args "--interface").getD "wg-leanmesh0"
+  let nftTbl := (findOptVal? args "--nft-table").getD "lean_mesh"
+  let portNat ← match findOptVal? args "--listen-port" with
+    | none => pure 51888
+    | some s =>
+      match s.toNat? with
+      | some p =>
+        if 1 ≤ p && p ≤ 65535 then pure p
+        else throw s!"--listen-port `{s}` must be in 1..65535"
+      | none => throw s!"invalid --listen-port `{s}`"
+  let denyGid? ← match findOptVal? args "--deny-skgid" with
+    | none => pure none
+    | some s =>
+      match s.toNat? with
+      | some g =>
+        if g ≤ 0xFFFFFFFF then pure (some g.toUInt32)
+        else throw s!"--deny-skgid `{s}` out of UInt32 range"
+      | none => throw s!"invalid --deny-skgid `{s}`"
+  validateRenderConfig {
+    interfaceName := iface
+    nftTableName  := nftTbl
+    defaultPort   := portNat.toUInt16
+    pskDir?       := findOptVal? args "--psk-dir"
+    denySkGid?    := denyGid?
+    jitBiometric  := hasFlag args "--jit-biometric"
+  }
+
 def runMeshCli (args : List String) : IO (Except String Unit) := do
   match args with
   | [] | ["-h"] | ["--help"] | ["help"] =>
-    IO.println "lean-mesh 0.1.0 (Lean 4)\nSubcommands: init-fleet, verify-manifest, eval-route, render-wg, sign-manifest, node-keygen, sign-canary, render-nft, reconcile-wg, bunker-step, audit-abi"
+    IO.println "lean-mesh 0.2.0 (Lean 4)\nSubcommands: init-fleet, verify-manifest, eval-route, render-wg, sign-manifest, node-keygen, sign-canary, render-nft, reconcile-wg, roam-select, bunker-step, audit-abi"
     return .ok ()
   | ["-V"] | ["--version"] =>
-    IO.println "lean-mesh 0.1.0"
+    IO.println "lean-mesh 0.2.0"
     return .ok ()
   | sub :: rest =>
     if rest.contains "--help" || rest.contains "-h" then
@@ -146,10 +174,13 @@ def runMeshCli (args : List String) : IO (Except String Unit) := do
           try pure (← IO.FS.readFile pkf).trimAscii.toString
           catch e => return .error s!"failed reading `{pkf}`: {e}"
         | none => pure "<NODE_WG_PRIVATE_KEY>"
+      let rcfg ← match parseRenderConfig rest with
+        | .ok c => pure c
+        | .error e => return .error e
       let m ← match (← loadManifestFile mPath) with
         | .ok x => pure x
         | .error e => return .error e
-      match (← m.renderWireguardConfig node privKey bunker nowVal) with
+      match (← m.renderWireguardConfig node privKey bunker nowVal rcfg) with
       | .ok cfg =>
         IO.print cfg
         return .ok ()
@@ -224,10 +255,13 @@ def runMeshCli (args : List String) : IO (Except String Unit) := do
       let bunkerStr := (findOptVal? rest "--bunker").getD "normal"
       let some bunker := BunkerState.ofCliArg? bunkerStr | return .error s!"invalid --bunker `{bunkerStr}`"
       let nowVal := ((findOptVal? rest "--now") >>= String.toNat?).map (·.toUInt64) |>.getD sysNow
+      let rcfg ← match parseRenderConfig rest with
+        | .ok c => pure c
+        | .error e => return .error e
       let m ← match (← loadManifestFile mPath) with
         | .ok x => pure x
         | .error e => return .error e
-      match (← m.renderNftablesPolicy node bunker nowVal) with
+      match (← m.renderNftablesPolicy node bunker nowVal rcfg) with
       | .ok nft =>
         IO.print nft
         return .ok ()
@@ -239,15 +273,38 @@ def runMeshCli (args : List String) : IO (Except String Unit) := do
       let bunkerStr := (findOptVal? rest "--bunker").getD "normal"
       let some bunker := BunkerState.ofCliArg? bunkerStr | return .error s!"invalid --bunker `{bunkerStr}`"
       let nowVal := ((findOptVal? rest "--now") >>= String.toNat?).map (·.toUInt64) |>.getD sysNow
+      let rcfg ← match parseRenderConfig rest with
+        | .ok c => pure c
+        | .error e => return .error e
       let m ← match (← loadManifestFile mPath) with
         | .ok x => pure x
         | .error e => return .error e
       let dumpRaw ← try IO.FS.readFile dumpPath catch e => return .error s!"failed reading `{dumpPath}`: {e}"
-      match (← m.reconcileWireguardDump node dumpRaw bunker nowVal) with
+      match (← m.reconcileWireguardDump node dumpRaw bunker nowVal rcfg) with
       | .ok plans =>
         IO.println (renderPretty plans)
         return .ok ()
       | .error e => return .error e
+    | "roam-select" =>
+      let srcId := (((findOptVal? rest "--src-id") >>= String.toNat?).getD 10).toUInt32
+      let dstId := (((findOptVal? rest "--dst-id") >>= String.toNat?).getD 20).toUInt32
+      let relayId := (((findOptVal? rest "--relay-id") >>= String.toNat?).getD 1).toUInt32
+      let activeRelays := (((findOptVal? rest "--active-relays") >>= String.toNat?).getD 0).toUInt32
+      let maxRelays := (((findOptVal? rest "--max-relays") >>= String.toNat?).getD 64).toUInt32
+      let nowVal := ((findOptVal? rest "--now") >>= String.toNat?).map (·.toUInt64) |>.getD sysNow
+      let hsAt := (((findOptVal? rest "--direct-handshake-at") >>= String.toNat?).map (·.toUInt64)).getD nowVal
+      let maxStale := (((findOptVal? rest "--max-stale-secs") >>= String.toNat?).getD 120).toUInt64
+      let lanEp? := findOptVal? rest "--lan-endpoint"
+      let wanEp? := findOptVal? rest "--wan-endpoint"
+      let relayEp? := findOptVal? rest "--relay-endpoint"
+      let routeOk := !(hasFlag rest "--route-denied")
+      let lanOk := hasFlag rest "--lan-ok"
+      let wanOk := hasFlag rest "--wan-ok"
+      let relayOk := hasFlag rest "--relay-ok"
+      let j := selectTransportPathJson routeOk lanOk wanOk relayOk
+        srcId dstId relayId activeRelays maxRelays nowVal hsAt maxStale lanEp? wanEp? relayEp?
+      IO.println (renderCompact j)
+      return .ok ()
     | "bunker-step" =>
       let curStr := (findOptVal? rest "--current").getD "normal"
       let some cur := BunkerState.ofCliArg? curStr | return .error s!"invalid --current `{curStr}`"

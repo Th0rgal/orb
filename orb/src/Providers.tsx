@@ -1,9 +1,11 @@
 import { pollWhileVisible } from "./poll";
-import { cachePeek, cachePeekArray, cachePut } from "./pageCache";
+import { cacheLoad, cachePeek, cachePeekArray, cachePut } from "./pageCache";
 import { swallow } from "./log";
 import { AntigravityProvider } from "./AntigravityProvider";
 import { ErrorToast } from "./toast";
 import {CloudProviders} from './CloudProviders';
+import { cloudAccounts } from "./cloudAgentApi";
+import { ProvidersLoadingCard } from "./ProvidersSkeleton";
 import {ProviderUsageChip, ProviderUsageMeter} from './ProviderUsageMeter';
 import { Dynamic } from "solid-js/web";
 import { quotaStatus, usageChips, codingPlanWindows, kimiWindows, codexWindowLabel, effectiveProviderStatus, hasProviderUsageDetails, sharedAnthropicOrganizations, subscriptionResetSummary, supportsSubscriptionReset, usageLimitStatus, usageWindows, verificationUrl } from "./providerUsage";
@@ -30,6 +32,7 @@ import {
   isAdminUser,
   isConnected,
   listProviders,
+  peekCachedProviders,
   setProviderEnabled,
   setProviderUserPreference,
   setProviderAutoResetOnLimit,
@@ -120,10 +123,22 @@ const KINDS: Kind[] = [
   { id: "custom", name: "Custom", methods: [{ label: "OpenAI-compatible", kind: "api", desc: "Base URL + key." }] },
 ];
 
+type LoginOptionsSnapshot = { available: boolean; providers: { id: string; name: string }[]; reason?: string };
+
+function fetchLoginOptions(): Promise<LoginOptionsSnapshot> {
+  return api<LoginOptionsSnapshot>("/api/ai/providers/cli-proxy-login").then((res) => {
+    const providers = Array.isArray(res.providers) ? [...res.providers] : [];
+    if (!providers.some((p) => p.id === "mistral")) {
+      providers.push({ id: "mistral", name: "Mistral Vibe" });
+    }
+    return { ...res, available: true, providers };
+  });
+}
+
 export function Providers() {
-  const [remote, setRemote] = createSignal<AIProvider[] | null>(
-    isConnected() ? (cachePeekArray<AIProvider>("providers:list") ?? null) : null,
-  );
+  const initialCached = () =>
+    isConnected() ? (cachePeekArray<AIProvider>("providers:list") ?? peekCachedProviders() ?? null) : null;
+  const [remote, setRemote] = createSignal<AIProvider[] | null>(initialCached());
   // Router circuit-breaker state per account ("Out of credit", "Auth failed").
   const [health, setHealth] = createSignal<Record<string, AccountHealthSnapshot>>(
     isConnected() ? (cachePeek<Record<string, AccountHealthSnapshot>>("providers:health") ?? {}) : {},
@@ -146,21 +161,32 @@ export function Providers() {
     // a different backend's page or overwrite a newer refresh.
     const timer = setTimeout(() => controller.abort(), 15_000);
     const active = () => current === generation && version === connectionVersion() && isConnected();
+    // Kick off health, bulk usage, login options, and cloud accounts in parallel
+    // with `listProviders` so cold opens avoid a two-stage network waterfall.
+    void listHealth()
+      .then((list) => {
+        if (active() && Array.isArray(list)) {
+          const nextHealth = Object.fromEntries(list.map((h) => [h.account_id, h]));
+          cachePut("providers:health", nextHealth);
+          setHealth(nextHealth);
+        }
+      })
+      .catch(() => {});
+    if (cachePeek<Record<string, ProviderUsage>>("providers:usage") === undefined) {
+      void cacheLoad("providers:usage", () => getAllProviderUsage("p1")).catch(() => {});
+    }
+    if (cachePeek<LoginOptionsSnapshot>("providers:login-options") === undefined) {
+      void cacheLoad("providers:login-options", fetchLoginOptions).catch(() => {});
+    }
+    if (isAdminUser() && cachePeekArray("settings:cloud-accounts") === undefined) {
+      void cacheLoad("settings:cloud-accounts", () => cloudAccounts()).catch(() => {});
+    }
     try {
       const providers = await listProviders(controller.signal);
       if (active()) {
         cachePut("providers:list", providers);
         setRemote(providers);
       }
-      listHealth()
-        .then(list => {
-          if (active() && Array.isArray(list)) {
-            const nextHealth = Object.fromEntries(list.map(h => [h.account_id, h]));
-            cachePut("providers:health", nextHealth);
-            setHealth(nextHealth);
-          }
-        })
-        .catch(() => {});
     } catch (error) {
       if (active()) setLoadError(controller.signal.aborted
         ? "Loading providers timed out. Check your connection and try again."
@@ -175,12 +201,18 @@ export function Providers() {
     const connected = isConnected();
     request?.abort();
     ++generation;
-    setRemote(connected ? (cachePeekArray<AIProvider>("providers:list") ?? null) : null);
+    setRemote(connected ? (cachePeekArray<AIProvider>("providers:list") ?? peekCachedProviders() ?? null) : null);
     setHealth(connected ? (cachePeek<Record<string, AccountHealthSnapshot>>("providers:health") ?? {}) : {});
     setLoadError(null);
     if (connected) void reloadRemote();
   });
-  onCleanup(() => { ++generation; request?.abort(); });
+  const onExternalRefresh = () => { if (isConnected()) void reloadRemote(); };
+  window.addEventListener("orb:providers-external-refresh", onExternalRefresh);
+  onCleanup(() => {
+    window.removeEventListener("orb:providers-external-refresh", onExternalRefresh);
+    ++generation;
+    request?.abort();
+  });
 
   const live = () => (isConnected() ? remote() : null);
   return (
@@ -196,11 +228,7 @@ export function Providers() {
       <Show when={live()} fallback={<div class="page">
         <div class="page-head"><h2>Inference</h2></div>
         <Show when={loading()}>
-          <div class="s-card p-skeleton-card" role="status" aria-label="Loading inference accounts">
-            <div class="s-row p-skeleton-row"><span class="sk-bar p-sk-logo" /><div class="p-sk-lines"><span class="sk-bar p-sk-title" /><span class="sk-bar p-sk-sub" /></div></div>
-            <div class="s-row p-skeleton-row"><span class="sk-bar p-sk-logo" /><div class="p-sk-lines"><span class="sk-bar p-sk-title" /><span class="sk-bar p-sk-sub" /></div></div>
-            <div class="s-row p-skeleton-row"><span class="sk-bar p-sk-logo" /><div class="p-sk-lines"><span class="sk-bar p-sk-title" /><span class="sk-bar p-sk-sub" /></div></div>
-          </div>
+          <ProvidersLoadingCard />
         </Show>
         <ErrorToast title="Could not load providers" error={loadError()} background action={{ label: "Try again", run: () => reloadRemote() }} />
       </div>}>
@@ -252,15 +280,14 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
   };
   onMount(() => {
     const version = connectionVersion();
-    void api<{available: boolean; providers: {id: string; name: string}[]; reason?: string}>("/api/ai/providers/cli-proxy-login")
-      .then(res => {
-        const providers = Array.isArray(res.providers) ? [...res.providers] : [];
-        if (!providers.some(p => p.id === "mistral")) {
-          providers.push({ id: "mistral", name: "Mistral Vibe" });
-        }
-        const next = { ...res, available: true, providers };
-        if (version === connectionVersion()) cachePut("providers:login-options", next);
-        setLoginOptions(next);
+    const cached = cachePeek<LoginOptionsSnapshot>("providers:login-options");
+    if (cached !== undefined) {
+      setLoginOptions(cached);
+      return;
+    }
+    void cacheLoad("providers:login-options", fetchLoginOptions)
+      .then((next) => {
+        if (version === connectionVersion()) setLoginOptions(next);
       })
       .catch(() => {
         if (!loginOptions()) setLoginOptions({available: false, providers: [], reason: "Update the backend to add subscription accounts here."});
@@ -323,13 +350,16 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
 
   let disposed = false;
   let fetching = false;
-  const refreshUsage = async (foreground = false) => {
+  const refreshUsage = async (foreground = false, forceBulk = false) => {
     if (fetching) return;
     fetching = true;
     const prio = foreground ? "p1" : "p2";
     const version = connectionVersion();
     try {
-      const snapshot = (await getAllProviderUsage(prio)) ?? {};
+      const snapshot =
+        ((!forceBulk && foreground && cachePeek<Record<string, ProviderUsage>>("providers:usage")) ||
+          (await (forceBulk ? getAllProviderUsage(prio) : cacheLoad("providers:usage", () => getAllProviderUsage(prio))))) ??
+        {};
       if (!disposed) {
         setUsage(prev => {
           const merged = { ...prev, ...snapshot };
@@ -338,7 +368,8 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
         });
       }
       // The bulk endpoint returns its cache before starting background probes.
-      // Probe only missing/stale subscription accounts with bounded concurrency (4).
+      // Probe only missing/stale subscription accounts with bounded concurrency (4)
+      // at P2 so slow upstream OAuth quota probes never occupy P1 foreground slots.
       const candidates = p.list.filter(a => {
         const cached = snapshot[a.id];
         if (cached && cached.stale === false && !foreground) return false;
@@ -354,7 +385,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
           while (!disposed && idx < candidates.length) {
             const a = candidates[idx++]!;
             try {
-              const value = await getProviderUsage(a.id, false, prio);
+              const value = await getProviderUsage(a.id, false, "p2");
               if (!disposed && value && !Array.isArray(value) && typeof value.provider_type === "string") {
                 setUsage(previous => {
                   const merged = { ...previous, [a.id]: value };
@@ -371,9 +402,15 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
     } finally { fetching = false; }
   };
   onMount(() => {
-    void refreshUsage(true).catch(swallow("providers.usage"));
-    const stop = pollWhileVisible(() => refreshUsage(false), 30_000, "providers.usage");
-    onCleanup(() => { disposed = true; stop(); });
+    void refreshUsage(true, false).catch(swallow("providers.usage"));
+    const stop = pollWhileVisible(() => refreshUsage(false, true), 30_000, "providers.usage");
+    const onExternalUsageRefresh = () => { void refreshUsage(true, true).catch(swallow("providers.usage")); };
+    window.addEventListener("orb:providers-external-refresh", onExternalUsageRefresh);
+    onCleanup(() => {
+      window.removeEventListener("orb:providers-external-refresh", onExternalUsageRefresh);
+      disposed = true;
+      stop();
+    });
   });
 
   const confirmAddSubscription = () => {
@@ -399,7 +436,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
         <button class="s-btn quiet" onClick={() => window.dispatchEvent(new CustomEvent("orb:open-page", { detail: "usage-settings" }))}>
           <Ic.UsageIcon size={13} /> Usage history
         </button>
-        <button class="s-btn" disabled={p.loading} onClick={() => { void refreshUsage(true).catch(swallow("providers.usage")); p.onRefresh(); }}>
+        <button class="s-btn" disabled={p.loading} onClick={() => { void refreshUsage(true, true).catch(swallow("providers.usage")); p.onRefresh(); }}>
           <Ic.RefreshIcon size={13} /> Refresh
         </button>
       </div>

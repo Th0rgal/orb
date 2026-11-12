@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { launchRefusal } from "../src/missionLaunch";
+import { describeError } from "../src/ErrorNotice";
 import { ApiError, NO_PROJECT_LIMIT, holdsCapSlot, projectLimitOf, setProjectLimit, updateGlobalSettings, setConnection } from "../src/api";
 
 const CONTROL_LEAN = resolve(__dirname, "../../lean/OrbCore/OrbCore/Control.lean");
@@ -17,6 +18,16 @@ describe("the project cap refusal is explained, not dumped", () => {
     expect(r.message).not.toContain("{");
     expect(r.message).toContain("lido-srv3-report");
     expect(r.message).toContain("limit of 2 unfinished agents (2 in use)");
+    const fromBody = launchRefusal(
+      new ApiError(429, JSON.stringify({ error: "parallel_missions_cap", scope: "project", project: "verity-core", cap: 50, active: 54 })),
+    );
+    expect(fromBody.message).toContain('"verity-core"');
+    expect(
+      describeError(JSON.stringify({ error: "parallel_missions_cap", scope: "project", project: "verity-core", cap: 50, active: 54 })),
+    ).toMatchObject({
+      title: "Project agent limit reached",
+      message: 'Finish an agent in "verity-core" or increase the limit in Project settings.',
+    });
   });
 
   it("leaks no raw identifiers or storage internals into the message", () => {

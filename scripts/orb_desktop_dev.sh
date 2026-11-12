@@ -148,7 +148,7 @@ if [[ "$OS_NAME" == "Linux" && -e /etc/NIXOS ]]; then
     done
     return 1
   }
-  if [[ -z "${ORB_IN_NIX_SHELL:-}" ]] && { ! command -v pnpm >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1 || ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists webkit2gtk-4.1 2>/dev/null || ! has_gio_tls_module; }; then
+  if [[ -z "${ORB_IN_NIX_SHELL:-}" ]] && { ! command -v pnpm >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1 || ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists webkitgtk-6.0 2>/dev/null || ! has_gio_tls_module; }; then
     echo "==> Entering nix develop environment for $ROOT_DIR..."
     exec nix develop "$ROOT_DIR" -c env ORB_IN_NIX_SHELL=1 "$ROOT_DIR/scripts/orb_desktop_dev.sh" "${ORIG_ARGS[@]}"
   fi
@@ -385,71 +385,33 @@ EOF
     if [[ "$INSTALL_APP" == "1" ]]; then
       XDG_DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
       LINUX_APP_DIR="$XDG_DATA/orb-app"
-      PY_BIN="$(command -v python3)"
       mkdir -p "$LINUX_APP_DIR/bin" "$LINUX_APP_DIR/share/orb" "$XDG_DATA/applications" "$XDG_DATA/icons/hicolor/256x256/apps"
       install -m 0755 "$STAGE_BIN_DIR/orb" "$LINUX_APP_DIR/bin/.orb-desktop-unwrapped"
       install -m 0755 "$STAGE_BIN_DIR/orb-locald" "$LINUX_APP_DIR/bin/orb-locald"
       install -m 0755 "$STAGE_BIN_DIR/orb-signer" "$LINUX_APP_DIR/bin/orb-signer"
       install -m 0755 "$STAGE_BIN_DIR/sandboxed-mcp" "$LINUX_APP_DIR/bin/sandboxed-mcp"
+      rm -f "$LINUX_APP_DIR/bin/.orb-static-server"
       rm -rf "$LINUX_APP_DIR/share/orb"
       cp -R "$ROOT_DIR/orb/dist" "$LINUX_APP_DIR/share/orb"
       if [[ -f "$ROOT_DIR/macos_shell/icons/icon.png" ]]; then
         install -m 0644 "$ROOT_DIR/macos_shell/icons/icon.png" "$XDG_DATA/icons/hicolor/256x256/apps/orb.png"
       fi
-      cat > "$LINUX_APP_DIR/bin/.orb-static-server" <<EOF
-#!${PY_BIN}
-import os, sys
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-
-ROOT = os.path.realpath(sys.argv[1])
-MIME = {
-    ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
-    ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
-    ".wasm": "application/wasm", ".json": "application/json; charset=utf-8",
-    ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg", ".webp": "image/webp", ".ico": "image/x-icon",
-    ".woff2": "font/woff2", ".woff": "font/woff", ".ttf": "font/ttf",
-}
-
-class Handler(SimpleHTTPRequestHandler):
-    def log_message(self, fmt, *args): return
-    def end_headers(self):
-        req_p = getattr(self, "path", "").split("?", 1)[0]
-        if req_p.startswith(("/assets/", "/provider-icons/")) or req_p.endswith((".woff2", ".woff", ".ttf", ".wasm")):
-            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
-        else:
-            self.send_header("Cache-Control", "no-cache")
-        super().end_headers()
-    def guess_type(self, path):
-        return MIME.get(os.path.splitext(path)[1].lower(), "application/octet-stream")
-    def translate_path(self, path):
-        rel = path.split("?", 1)[0].split("#", 1)[0].lstrip("/") or "index.html"
-        cand = os.path.normpath(os.path.join(ROOT, rel))
-        if not (cand == ROOT or cand.startswith(ROOT + os.sep)):
-            return os.path.join(ROOT, "__missing__")
-        if os.path.isfile(cand):
-            return cand
-        return os.path.join(ROOT, "index.html") if not os.path.splitext(rel)[1] else os.path.join(ROOT, "__missing__")
-
-class ReusableServer(ThreadingHTTPServer):
-    allow_reuse_address = True
-
-try:
-    srv = ReusableServer(("127.0.0.1", 1431), Handler)
-except OSError:
-    srv = ReusableServer(("127.0.0.1", 0), Handler)
-sys.stdout.write(str(srv.server_address[1]) + "\n")
-sys.stdout.flush()
-srv.serve_forever()
-EOF
-      chmod 0755 "$LINUX_APP_DIR/bin/.orb-static-server"
+      BAKED_GIO_MODULES="${GIO_EXTRA_MODULES:-}"
+      BAKED_XDG_DATA_DIRS="${XDG_DATA_DIRS:-}"
       cat > "$LINUX_APP_DIR/bin/orb" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 APP_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")/.." && pwd)"
-export PATH="\$APP_DIR/bin:/etc/profiles/per-user/\${USER:-\$(id -un)}/bin:/run/current-system/sw/bin:\$PATH"
+export PATH="\$APP_DIR/bin:\$HOME/.nix-profile/bin:\$HOME/.local/state/nix/profile/bin:/etc/profiles/per-user/\${USER:-\$(id -un)}/bin:/run/current-system/sw/bin:\$PATH"
+if [[ -n "${BAKED_GIO_MODULES}" ]]; then
+  export GIO_EXTRA_MODULES="${BAKED_GIO_MODULES}\${GIO_EXTRA_MODULES:+:\$GIO_EXTRA_MODULES}"
+fi
+if [[ -n "${BAKED_XDG_DATA_DIRS}" ]]; then
+  export XDG_DATA_DIRS="${BAKED_XDG_DATA_DIRS}:\${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+fi
 export ORB_LOCALD_BIN="\$APP_DIR/bin/orb-locald"
 export ORB_SIGNER_BIN="\$APP_DIR/bin/orb-signer"
+export ORB_UI_ROOT="\$APP_DIR/share/orb"
 if [[ -d /run/opengl-driver/share ]]; then
   export XDG_DATA_DIRS="/run/opengl-driver/share:\${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 fi
@@ -457,7 +419,7 @@ if [[ -d /run/opengl-driver/lib ]]; then
   export LD_LIBRARY_PATH="/run/opengl-driver/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
 fi
 if [[ -d /run/opengl-driver/lib/dri ]]; then
-  export LIBGL_DRIVERS_PATH="/run/opengl-driver/lib/dri"
+  export LIBGL_DRIVERS_PATH="/run/opengl-driver/lib/dri\${LIBGL_DRIVERS_PATH:+:\$LIBGL_DRIVERS_PATH}"
 fi
 if [[ -d /run/opengl-driver/lib/gbm ]]; then
   export GBM_BACKENDS_PATH="/run/opengl-driver/lib/gbm"
@@ -465,41 +427,7 @@ fi
 if [[ -d /run/opengl-driver/share/glvnd/egl_vendor.d ]]; then
   export __EGL_VENDOR_LIBRARY_DIRS="/run/opengl-driver/share/glvnd/egl_vendor.d"
 fi
-if [[ " \$* " == *" --self-test "* ]]; then
-  exec "\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
-fi
-server_pid=""
-cleanup_orb() {
-  if [[ -n "\$server_pid" ]]; then
-    kill "\$server_pid" 2>/dev/null || true
-    wait "\$server_pid" 2>/dev/null || true
-  fi
-}
-if [[ -z "\${ORB_DEV_URL:-}" ]]; then
-  fifo="\$(mktemp -u)"
-  mkfifo "\$fifo"
-  "${PY_BIN}" "\$APP_DIR/bin/.orb-static-server" "\$APP_DIR/share/orb" >"\$fifo" &
-  server_pid=\$!
-  trap cleanup_orb EXIT HUP INT TERM
-  IFS= read -r port <"\$fifo" || true
-  rm -f "\$fifo"
-  if [[ -z "\${port:-}" ]]; then
-    echo "error: failed to start local static asset server" >&2
-    exit 1
-  fi
-  export ORB_DEV_URL="http://127.0.0.1:\$port/"
-fi
-if [[ -z "\${ORB_LOCALD_PORT:-}" ]]; then
-  export ORB_LOCALD_PORT=\$("${PY_BIN}" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
-fi
-if [[ -z "\$server_pid" ]]; then
-  exec "\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
-fi
-set +e
-"\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
-rc=\$?
-set -e
-exit "\$rc"
+exec "\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
 EOF
       chmod 0755 "$LINUX_APP_DIR/bin/orb"
       cat > "$XDG_DATA/applications/orb.desktop" <<EOF

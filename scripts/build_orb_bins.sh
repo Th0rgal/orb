@@ -65,6 +65,15 @@ do
   fi
 done
 
+if [[ -z "${LEAN_CC:-}" && ( -n "${NIX_CC:-}" || -e /etc/NIXOS ) ]]; then
+  if command -v clang >/dev/null 2>&1; then
+    export LEAN_CC="$(command -v clang)"
+  elif command -v cc >/dev/null 2>&1; then
+    export LEAN_CC="$(command -v cc)"
+  fi
+elif [[ -n "${LEAN_CC:-}" && "${LEAN_CC}" != /* ]] && command -v "${LEAN_CC}" >/dev/null 2>&1; then
+  export LEAN_CC="$(command -v "${LEAN_CC}")"
+fi
 if [[ -n "${LEAN_CC:-}" && -x "${LEAN_CC}" ]]; then
   export PATH="$(dirname "${LEAN_CC}"):$PATH"
   if command -v lean >/dev/null 2>&1; then
@@ -145,7 +154,7 @@ ALL_BINS=(
   "desktop-mcp"
   "automation-manager-mcp"
   "sandboxed-node"
-  "sandboxed-sh"
+  "orb-server"
   "orb-locald"
 )
 
@@ -164,7 +173,11 @@ for bin in "${BINS_TO_STAGE[@]}"; do
     ORB_NODE_TARGETS+=("orb-node")
   elif [[ "$bin" == "orb-node-test" ]]; then
     ORB_NODE_TARGETS+=("orb-node-test")
-  elif [[ "$bin" == "sandboxed-sh" || "$bin" == "orb-core-test" || "$bin" == "orb-spec-runner" ]]; then
+  elif [[ "$bin" == "orb-server" || "$bin" == "sandboxed-sh" ]]; then
+    ORB_CORE_TARGETS+=("orb-server")
+  elif [[ "$bin" == "orb-core-test" ]]; then
+    ORB_CORE_TARGETS+=("orb-server" "orb-core-test")
+  elif [[ "$bin" == "orb-spec-runner" ]]; then
     ORB_CORE_TARGETS+=("$bin")
   elif [[ "$bin" == "orb-locald" || "$bin" == "orb-locald-test" ]]; then
     ORB_LOCALD_TARGETS+=("$bin")
@@ -221,9 +234,10 @@ run_lean_pkg_build() {
       if [[ -n "${TURBO_LEAN_HOME:-}" ]]; then
         tl_flags+=(--cache-dir "${TURBO_LEAN_HOME}")
       fi
-      RAYON_NUM_THREADS="${ORB_TURBO_LEAN_JOBS:-2}" TURBO_LEAN_EMIT_C=1 \
-        turbo-lean "${tl_flags[@]}" build "$@" \
-        || SANDBOXED_ALLOW_RAW_LAKE=1 lake build "$@" -- -DwarningAsError=true
+      if ! RAYON_NUM_THREADS="${ORB_TURBO_LEAN_JOBS:-2}" TURBO_LEAN_EMIT_C=1 \
+        turbo-lean "${tl_flags[@]}" build "$@"; then
+        SANDBOXED_ALLOW_RAW_LAKE=1 lake build "$@" -- -DwarningAsError=true
+      fi
     else
       SANDBOXED_ALLOW_RAW_LAKE=1 lake build "$@" -- -DwarningAsError=true
     fi
@@ -255,12 +269,17 @@ LAKE_BIN_DIR="$ROOT_DIR/lean/OrbBin/.lake/build/bin"
 LAKE_NODE_BIN_DIR="$ROOT_DIR/lean/OrbNode/.lake/build/bin"
 LAKE_CORE_BIN_DIR="$ROOT_DIR/lean/OrbCore/.lake/build/bin"
 LAKE_LOCALD_BIN_DIR="$ROOT_DIR/lean/OrbLocald/.lake/build/bin"
+if [[ -x "$LAKE_CORE_BIN_DIR/orb-server" ]]; then
+  ln -sfn orb-server "$LAKE_CORE_BIN_DIR/sandboxed-sh"
+fi
 for out_dir in "${OUT_DIRS[@]}"; do
   mkdir -p "$out_dir"
   for bin in "${BINS_TO_STAGE[@]}"; do
     if [[ "$bin" == "sandboxed-node" || "$bin" == "orb-node-test" ]]; then
       src="$LAKE_NODE_BIN_DIR/$bin"
-    elif [[ "$bin" == "sandboxed-sh" || "$bin" == "orb-core-test" || "$bin" == "orb-spec-runner" ]]; then
+    elif [[ "$bin" == "orb-server" || "$bin" == "sandboxed-sh" ]]; then
+      src="$LAKE_CORE_BIN_DIR/orb-server"
+    elif [[ "$bin" == "orb-core-test" || "$bin" == "orb-spec-runner" ]]; then
       src="$LAKE_CORE_BIN_DIR/$bin"
     elif [[ "$bin" == "orb-locald" || "$bin" == "orb-locald-test" ]]; then
       src="$LAKE_LOCALD_BIN_DIR/$bin"
@@ -276,7 +295,15 @@ for out_dir in "${OUT_DIRS[@]}"; do
       echo "error: production binary $src links lean_elab ($elab_syms symbols)" >&2
       exit 1
     fi
-    install -m 0755 "$src" "$out_dir/$bin"
+    if [[ "$bin" == "orb-server" || "$bin" == "sandboxed-sh" ]]; then
+      install -m 0755 "$src" "$out_dir/orb-server"
+      if [[ -e /etc/NIXOS && -n "${LD_LIBRARY_PATH:-}" ]] && command -v patchelf >/dev/null 2>&1; then
+        patchelf --add-rpath "$LD_LIBRARY_PATH" "$out_dir/orb-server"
+      fi
+      ln -sfn orb-server "$out_dir/sandboxed-sh"
+    else
+      install -m 0755 "$src" "$out_dir/$bin"
+    fi
   done
 done
 
@@ -289,7 +316,8 @@ if [[ "$WITH_TESTS" == "1" ]]; then
   "$ROOT_DIR/lean/OrbNode/.lake/build/bin/orb-node-test"
   run_lean_pkg_build "$ROOT_DIR/lean/OrbClient" orb-client-test
   "$ROOT_DIR/lean/OrbClient/.lake/build/bin/orb-client-test"
-  run_lean_pkg_build "$ROOT_DIR/lean/OrbCore" orb-core-test orb-spec-runner
+  run_lean_pkg_build "$ROOT_DIR/lean/OrbCore" orb-server orb-core-test orb-spec-runner
+  ln -sfn orb-server "$ROOT_DIR/lean/OrbCore/.lake/build/bin/sandboxed-sh"
   "$ROOT_DIR/lean/OrbCore/.lake/build/bin/orb-core-test"
   "$ROOT_DIR/lean/OrbCore/.lake/build/bin/orb-spec-runner" --fixtures "$ROOT_DIR/shared/orb-spec/fixtures"
   run_lean_pkg_build "$ROOT_DIR/lean/OrbLocald" orb-locald-test

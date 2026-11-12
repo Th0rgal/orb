@@ -1,4 +1,4 @@
-import { isRecord, readJson, writeJson } from "./storage";
+import { isRecord, readJson, readString, removeKey, writeJson, writeString } from "./storage";
 import { missionAssignedNode, missionNode } from "./machines/nodes";
 import { isQueued, WORKING_STATUSES } from "./missionStatus";
 import { swallow } from "./log";
@@ -47,7 +47,7 @@ export type BtwSession={id:string;question:string;harness:string;model:string;lo
 const storageKey=(parent:string)=>'agent:'+sideQuestionKey(parent);
 export function btwSession(parent:string):BtwSession|undefined{sessionRevision();const s=readJson<BtwSession|undefined>(storageKey(parent),undefined,isRecord);return s?{...s}:undefined;}
 function save(parent:string,s:BtwSession){writeJson(storageKey(parent),s);setSessionRevision(v=>v+1);}
-function removeSession(parent:string){localStorage.removeItem(storageKey(parent));setSessionRevision(v=>v+1);}
+function removeSession(parent:string){removeKey(storageKey(parent));setSessionRevision(v=>v+1);}
 /** Arm the next side question on `parent` to launch a clean `/btw` mission while
  * keeping prior side turns visible in the panel and summarized in the prompt. */
 export function startFreshBtwSession(parent:string):void{
@@ -476,7 +476,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
    else{
     msgLogical=await attachmentLogicalKey(question,attachments);
     try{
-     const parsed=JSON.parse(localStorage.getItem(msgAttemptKey)||'null');
+     const parsed=JSON.parse(readString(msgAttemptKey)||'null');
      if(parsed?.logical===msgLogical&&typeof parsed.prompt==='string'&&parsed.snapshot)cachedMsg=parsed;
     }catch{}
    }
@@ -494,37 +494,37 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   if(launchSignal.aborted||connectionVersion()!==version)throw new Error('Side question launch cancelled or connection changed.');
   const createSide=async()=>{
    const attemptKey=key+':attempt:'+config.harness+':'+config.model+':'+placement;
-   const stored=localStorage.getItem(attemptKey);
+   const stored=readString(attemptKey);
    let cached:{id:string;logical:string;prompt:string;snapshot:typeof snapshot}|undefined;
    try{const parsed=JSON.parse(stored||'null');if(parsed?.id)cached=parsed;}catch{/* Legacy UUID-only attempt. */}
    const logical=await attachmentLogicalKey(question,attachments);
    const attempt=cached?.id||stored||crypto.randomUUID();
    if(cached?.logical===logical){prompt=cached.prompt;snapshot=cached.snapshot;}
    const retained=cached?.logical===logical?cached:{id:attempt,logical,prompt,snapshot};
-   localStorage.setItem(attemptKey,JSON.stringify(retained));
+   writeString(attemptKey,JSON.stringify(retained));
    const m=await api<Mission>(`/api/control/missions/${parent}/btw/agent`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({backend:config.harness,model_override:config.model,model_effort:null,idempotency_key:attempt,side_question:prompt,side_context_mode:"incremental"})}).catch(error=>{
-    if(error instanceof ApiError&&error.status===409&&(error.detail.startsWith('This side request key was already used for different launch content;')||isIdempotencyConflictError(error))&&localStorage.getItem(attemptKey)===JSON.stringify(retained))localStorage.removeItem(attemptKey);
+    if(error instanceof ApiError&&error.status===409&&(error.detail.startsWith('This side request key was already used for different launch content;')||isIdempotencyConflictError(error))&&readString(attemptKey)===JSON.stringify(retained))removeKey(attemptKey);
     throw error;
    });
    // Core owns placement. A stale local view must not launch a native run for
    // a side session Core already started elsewhere.
    if(local&&!isClientPlacement(m))local=false;
-   s={id:m.id,question,harness:config.harness,model:config.model,local,placement,active:!local,baseline:0,turnCount:1,startedAt:m.created_at||new Date().toISOString()};save(parent,s);localStorage.removeItem(attemptKey);accepted=true;
+   s={id:m.id,question,harness:config.harness,model:config.model,local,placement,active:!local,baseline:0,turnCount:1,startedAt:m.created_at||new Date().toISOString()};save(parent,s);removeKey(attemptKey);accepted=true;
   };
   if(!reuse)await createSide();
   else{
-   if(!cachedMsg)localStorage.setItem(msgAttemptKey,JSON.stringify({logical:msgLogical,prompt,snapshot}));
+   if(!cachedMsg)writeString(msgAttemptKey,JSON.stringify({logical:msgLogical,prompt,snapshot}));
    const next:BtwSession={...s!,question,active:!local,baseline:0,afterSequence:headSeq,turnCount:(s!.turnCount??1)+1,lastSequence:headSeq,startedAt:new Date().toISOString()};
    delete next.brokenSession;delete next.freshSession;
    try{
     if(!local)await sendMissionMessage(next.id,prompt,undefined,clientMessageId);
-    localStorage.removeItem(msgAttemptKey);
+    removeKey(msgAttemptKey);
     s=next;save(parent,s);accepted=!local;
     reusedExisting=true;
    }catch(error){
-    if(isIdempotencyConflictError(error))localStorage.removeItem(msgAttemptKey);
+    if(isIdempotencyConflictError(error))removeKey(msgAttemptKey);
     if(!(error instanceof ApiError)||error.status!==409||!error.detail.startsWith('REMOTE_RESUME_REQUIRES_REPLACEMENT:'))throw error;
-    localStorage.removeItem(msgAttemptKey);
+    removeKey(msgAttemptKey);
     // Only an explicit pre-submit refusal permits a fresh native side session.
     // Keep previous side turns in its archive, never in the process argv.
     snapshot=await prepareBtwContext(source,context,destination,undefined,history);

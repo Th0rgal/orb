@@ -86,3 +86,30 @@ it("drops retired Gemini CLI from stale Core choices without removing Antigravit
   expect(choices[0].models[0].value).toBe("gemini-account");
   expect(destinationHarnessChoices([retired], "local", [])).toEqual([]);
 });
+
+describe("this computer's OpenCode models", () => {
+  const coreOpenCode = {
+    backend: { id: "opencode", name: "OpenCode", native_plan: true },
+    models: [{ value: "builtin/smart", label: "Routing — smart" }],
+  };
+  const localOpenCode: [string, string][] = [
+    ["orbrouter/builtin/smart", "Routing — Smart"],
+    ["orbrouter/builtin/fast", "Routing — Fast"],
+    ["orbrouter/anthropic/claude-opus-5-5", "Orb Router (Anthropic) — claude-opus-5-5"],
+  ];
+  it("uses local OpenCode models on this computer while preserving Core's list elsewhere", () => {
+    expect(destinationHarnessChoices([coreOpenCode], "local", [], false, [], localOpenCode)[0].models.map(m => m.value)).toEqual([
+      "orbrouter/builtin/smart",
+      "orbrouter/builtin/fast",
+      "orbrouter/anthropic/claude-opus-5-5",
+    ]);
+    expect(destinationHarnessChoices([coreOpenCode], "core", [], false, [], localOpenCode)).toEqual([coreOpenCode]);
+    expect(destinationHarnessChoices([coreOpenCode], "nimrud", [], false, [], localOpenCode)).toEqual([coreOpenCode]);
+  });
+  it("exposes local OpenCode on this computer even when Core has no OpenCode catalog", () => {
+    const res = destinationHarnessChoices([], "local", [], false, [], localOpenCode);
+    expect(res).toHaveLength(1);
+    expect(res[0].backend).toEqual({ id: "opencode", name: "OpenCode", native_plan: true });
+    expect(res[0].models[0].value).toBe("orbrouter/builtin/smart");
+  });
+});

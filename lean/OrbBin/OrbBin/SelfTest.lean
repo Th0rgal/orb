@@ -971,6 +971,16 @@ def runAllTests : IO UInt32 := do
     assertEq "clusterDiagnostics top count" (clsArr[0]!.fieldNat? "count") (some 2)
   assertEq "prGateRecommendation 8" (prGateRecommendation 8) "ready_for_review_or_merge"
 
+  let initFableMythosEarlyRaw := "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"orb-model-discovery\",\"response\":{\"models\":[{\"value\":\"default\",\"resolvedModel\":\"claude-fable-5-1\"},{\"value\":\"fable\",\"resolvedModel\":\"claude-fable-5-2\"},{\"value\":\"claude-fable-5-1\"},{\"value\":\"claude-mythos-5-1\"},{\"value\":\"claude-mythos-5-2\"},{\"value\":\"claude-mythos-5-2[1m]\"},{\"value\":\"sonnet\",\"resolvedModel\":\"claude-sonnet-5-5\"},{\"value\":\"opus\",\"resolvedModel\":\"claude-opus-5-5\"}]}}}"
+  let initFableMythosEarly := (OrbBin.Json.parse initFableMythosEarlyRaw).toOption.bind (parseClaudeInitializeModels? · "orb-model-discovery")
+  assertEq "parseClaudeInitializeModels? keeps Opus first and picks Fable 5.2 + Mythos 5.2"
+    initFableMythosEarly (some #[
+      ("claude-opus-5-5", "Claude Opus 5.5"),
+      ("claude-fable-5-2", "Claude Fable 5.2"),
+      ("claude-mythos-5-2", "Claude Mythos 5.2"),
+      ("claude-sonnet-5-5", "Claude Sonnet 5.5")
+    ])
+
   -- 7. `sandboxed-mcp` catalogue, overlays, ACP injection & Antigravity lock
   for (role, expectedMin) in [("executor", 44), ("coordinator", 74), ("operator", 89)] do
     let some catTxt := OrbBin.McpCatalog.catalogPrettyJsonForRole role
@@ -978,7 +988,8 @@ def runAllTests : IO UInt32 := do
     match Json.parse catTxt with
     | .ok (.arr tools) =>
       assertTrue s!"Catalog {role} count ({tools.size} >= {expectedMin})" (tools.size ≥ expectedMin)
-      for memTool in ["memory_search_knowledge", "memory_get_knowledge_page", "memory_get_knowledge_tree", "memory_recall"] do
+      for memTool in ["memory_search_knowledge", "memory_get_knowledge_page", "memory_get_knowledge_tree", "memory_recall",
+                      "request_macbook_tether", "list_macbook_tethers", "revoke_macbook_tether"] do
         assertTrue s!"Catalog {role} includes {memTool}"
           (tools.any (fun t => (t.fieldStr? "name") == some memTool))
     | _ => throw <| IO.userError s!"Failed parsing catalog JSON for {role}"
@@ -1445,6 +1456,64 @@ def runAllTests : IO UInt32 := do
   let coordSeed ← OrbBin.MeshCli.generateCsprngSeed32
   let initFleetRes ← OrbBin.MeshCli.initPalomaFleet 1700000000 coordSeed
   assertTrue "initPalomaFleet signs and verifies Ed25519 manifest" initFleetRes.toOption.isSome
+
+  -- 10. Multi-instance `lean-mesh` (`wg-homemesh0`, `wg-macmesh0`, PSKs, `skgid` pivot block, `roam-select`) & UDP/PSK-KEM helpers
+  let (.ok (initManifest, _)) := initFleetRes | throw <| IO.userError "initPalomaFleet failed"
+  let pskDir := tmpDir / "psks"
+  IO.FS.createDirAll pskDir
+  IO.FS.writeFile (pskDir / "agent-core--dgx-spark.psk") "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n"
+  let homeCfg : OrbBin.MeshCli.MeshRenderConfig := {
+    interfaceName := "wg-homemesh0"
+    nftTableName  := "home_mesh"
+    defaultPort   := 51891
+    pskDir?       := some pskDir.toString
+    denySkGid?    := some 991
+    jitBiometric  := false
+  }
+  let wgRenderedRes ← initManifest.renderWireguardConfig "dgx-spark" "PRIVKEY=" .normal 1700000010 homeCfg
+  assertTrue "Multi-instance renderWireguardConfig succeeds" wgRenderedRes.isOk
+  let wgRendered : String := wgRenderedRes.toOption.getD ""
+  assertTrue "Multi-instance WG config uses custom port 51891" ((wgRendered.splitOn "ListenPort = 51891").length ≥ 2)
+  assertTrue "Multi-instance WG config injects pairwise PresharedKey" ((wgRendered.splitOn "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").length ≥ 2)
+  let nftRenderedRes ← initManifest.renderNftablesPolicy "agent-core" .normal 1700000010 homeCfg
+  assertTrue "Multi-instance renderNftablesPolicy succeeds" nftRenderedRes.isOk
+  let nftRendered : String := nftRenderedRes.toOption.getD ""
+  assertTrue "Multi-instance nftables uses custom table home_mesh" ((nftRendered.splitOn "table inet home_mesh").length ≥ 2)
+  assertTrue "Multi-instance nftables uses custom interface wg-homemesh0" ((nftRendered.splitOn "\"wg-homemesh0\"").length ≥ 2)
+  assertTrue "Multi-instance nftables enforces meta skgid 991 lateral pivot drop" ((nftRendered.splitOn "meta skgid 991 counter drop").length ≥ 2)
+  let roamLanVal := OrbBin.MeshCli.selectTransportPathJson true true false true 10 20 1 0 64 1000 990 120
+    (some "192.168.1.20:51891") none (some "65.109.98.246:51890")
+  assertEq "roam-select chooses direct_lan when LAN handshake is fresh" (roamLanVal.fieldStr? "path_kind") (some "direct_lan")
+  let roamRelayVal := OrbBin.MeshCli.selectTransportPathJson true false false true 10 20 1 0 64 1000 500 120
+    (some "192.168.1.20:51891") none (some "65.109.98.246:51890")
+  assertEq "roam-select falls back to control_plane_relay when direct path is stale" (roamRelayVal.fieldStr? "path_kind") (some "control_plane_relay")
+
+  -- Loopback UDP + WireGuard mac1 + X25519/ChaCha20-Poly1305 PSK KEM + OpenSSH Ed25519 keygen
+  let (.ok (ufdA, uportA)) ← udpBind "127.0.0.1" 0 | throw <| IO.userError "udpBind A failed"
+  let (.ok (ufdB, uportB)) ← udpBind "127.0.0.1" 0 | throw <| IO.userError "udpBind B failed"
+  let loIp := (parseIpv4U32? "127.0.0.1").get!
+  let sendRc ← udpSendTo ufdA loIp uportB "ping-lean-udp".toUTF8
+  assertEq "udpSendTo loopback succeeds" sendRc 0
+  let rxOpt ← udpRecvFromPoll ufdB 500 256
+  closeFdRaw ufdA
+  closeFdRaw ufdB
+  let (some rxPkt) := rxOpt | throw <| IO.userError "udpRecvFromPoll timed out"
+  assertEq "udpRecvFromPoll payload matches" (String.fromUTF8! rxPkt.payload) "ping-lean-udp"
+  assertEq "udpRecvFromPoll srcPort matches" rxPkt.srcPort uportA
+
+  let (.ok (kemPrivA, kemPubA, pubBytesA)) ← generateWireguardKeypair | throw <| IO.userError "WG keygen A failed"
+  let (.ok (kemPrivB, kemPubB, _)) ← generateWireguardKeypair | throw <| IO.userError "WG keygen B failed"
+  let (.ok (_, pskSampleB64, _)) ← generateWireguardKeypair | throw <| IO.userError "PSK sample gen failed"
+  let mac1Val ← wgMac1 pubBytesA ("test-wg-handshake-prefix".toUTF8)
+  assertEq "wgMac1 returns 16-byte BLAKE2s tag" mac1Val.size 16
+  let (.ok sealedPsk) ← sealTetherPsk kemPrivA kemPubB "req-uuid-1" pskSampleB64 | throw <| IO.userError "sealTetherPsk failed"
+  let (.ok openedPsk) ← openTetherPsk kemPrivB kemPubA "req-uuid-1" sealedPsk | throw <| IO.userError "openTetherPsk failed"
+  assertEq "E2EE X25519+ChaCha20-Poly1305 PSK round-trip matches" openedPsk pskSampleB64
+  let wrongReqOpen ← openTetherPsk kemPrivB kemPubA "req-uuid-2" sealedPsk
+  assertTrue "openTetherPsk rejects mismatched requestId AAD" wrongReqOpen.isOk.not
+  let (.ok (sshPem, sshPub)) ← generateOpenSshEd25519Keypair "orb-tether-test" | throw <| IO.userError "SSH keygen failed"
+  assertTrue "OpenSSH PEM header present" (sshPem.startsWith "-----BEGIN OPENSSH PRIVATE KEY-----")
+  assertTrue "OpenSSH authorized_keys line valid" (sshPub.startsWith "ssh-ed25519 ")
 
   try IO.FS.removeDirAll tmpDir catch _ => pure ()
   IO.println "=== ALL ORB-BIN WAVE 1 SELF-TESTS PASSED ==="

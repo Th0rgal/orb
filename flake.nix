@@ -1,12 +1,14 @@
-# Orb Core (the sandboxed-sh backend and its companion binaries) for Nix.
+# Orb Core (`orb-server`, with `sandboxed-sh` compatibility alias) and its
+# companion binaries for Nix.
 #
-#   nix build .#sandboxed-sh        # or just `nix build`
-#   nix develop                     # Lean 4, turbo-lean, OpenSSL, SQLite and native build inputs
+#   nix build .#orb-server          # or just `nix build`
+#   nix develop                     # Lean 4, OpenSSL, SQLite, Node/pnpm & Linux GTK/WebKitGTK shell
+#   nix develop -c ./scripts/orb_desktop_dev.sh
 #
 # A NixOS or home-manager configuration takes the package from
-# `packages.<system>.default` or through `overlays.default` (pkgs.sandboxed-sh)
-# and runs bin/sandboxed-sh as a service; see nix/package.nix for what that
-# service must put on PATH.
+# `packages.<system>.default` (`orb-server`) or through `overlays.default`
+# (`pkgs.orb-server`, with `pkgs.sandboxed-sh` kept as an alias) and runs
+# `bin/orb-server` as a service; see nix/package.nix for runtime PATH tools.
 {
   description = "Orb Core: self-hosted orchestrator for AI coding agents";
 
@@ -22,13 +24,15 @@
   in {
     overlays.default = final: prev: rec {
       turbo-lean = prev.turbo-lean or (final.callPackage ./nix/turbo-lean.nix {});
-      sandboxed-sh = final.callPackage ./nix/package.nix {inherit turbo-lean;};
+      orb-server = final.callPackage ./nix/package.nix {inherit turbo-lean;};
+      sandboxed-sh = orb-server;
     };
 
     packages = forAllSystems (pkgs: rec {
       turbo-lean = pkgs.callPackage ./nix/turbo-lean.nix {};
-      sandboxed-sh = pkgs.callPackage ./nix/package.nix {inherit turbo-lean;};
-      default = sandboxed-sh;
+      orb-server = pkgs.callPackage ./nix/package.nix {inherit turbo-lean;};
+      sandboxed-sh = orb-server;
+      default = orb-server;
     });
 
     devShells = forAllSystems (pkgs: let
@@ -122,7 +126,7 @@ SHIM
       '';
     in {
       default = pkgs.mkShell {
-        inputsFrom = [self.packages.${pkgs.stdenv.hostPlatform.system}.sandboxed-sh];
+        inputsFrom = [self.packages.${pkgs.stdenv.hostPlatform.system}.orb-server];
         CC = "${pkgs.clang}/bin/clang";
         LEAN_CC = "${pkgs.clang}/bin/clang";
         TURBO_LEAN_EMIT_C = "1";
@@ -147,8 +151,8 @@ SHIM
             pkgs.dconf
             pkgs.glib-networking
             pkgs.gsettings-desktop-schemas
-            pkgs.gtk3
-            pkgs.webkitgtk_4_1
+            pkgs.gtk4
+            pkgs.webkitgtk_6_0
           ];
         shellHook =
           ''
@@ -157,7 +161,7 @@ SHIM
             export LEAN_CC="${pkgs.clang}/bin/clang"
           ''
           + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
-            export XDG_DATA_DIRS="${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:${pkgs.gtk3}/share/gsettings-schemas/${pkgs.gtk3.name}:''${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+            export XDG_DATA_DIRS="${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:${pkgs.gtk4}/share/gsettings-schemas/${pkgs.gtk4.name}:''${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
             if [ -d /run/opengl-driver/share ]; then
               export XDG_DATA_DIRS="/run/opengl-driver/share:$XDG_DATA_DIRS"
             fi

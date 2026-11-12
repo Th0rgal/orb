@@ -9,9 +9,9 @@ export function detectDesktopPlatform(
     typeof navigator === "undefined" ? undefined : navigator,
 ): DesktopPlatform {
   const ua = nav?.userAgent || "";
-  const raw = nav?.userAgentData?.platform || nav?.platform || ua;
-  if (/mac|iphone|ipad|ipod/i.test(raw)) return "macos";
-  if (/linux/i.test(raw) && !/android/i.test(ua) && !/android/i.test(raw)) return "linux";
+  const hint = `${nav?.userAgentData?.platform || ""} ${nav?.platform || ""} ${ua}`.trim();
+  if (/mac|iphone|ipad|ipod/i.test(hint)) return "macos";
+  if (/linux/i.test(hint) && !/android/i.test(hint)) return "linux";
   return "other";
 }
 
@@ -45,7 +45,10 @@ export function setThemePref(pref: ThemePref) {
 }
 
 export function initTheme() {
-  document.documentElement.dataset.platform = detectDesktopPlatform();
+  const pre = document.documentElement.dataset.platform;
+  if (pre !== "macos" && pre !== "linux" && pre !== "other") {
+    document.documentElement.dataset.platform = detectDesktopPlatform();
+  }
   apply(getThemePref());
   window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => {
     if (getThemePref() === "auto") apply("auto");

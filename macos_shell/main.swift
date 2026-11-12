@@ -873,6 +873,7 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         let tokLit = Self.jsonStringLiteral(token)
         return """
         (() => {
+          if (document.documentElement) document.documentElement.dataset.platform = "macos";
           const _fetch = window.fetch.bind(window);
           const _jsonStringify = JSON.stringify;
           const _postNative = window.webkit?.messageHandlers?.orbNative
@@ -1124,6 +1125,20 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         installMainMenu()
         installTerminationSignalHandlers()
         let env = ProcessInfo.processInfo.environment
+        if Bundle.main.bundleURL.pathExtension != "app" {
+            let exeDir = Bundle.main.executableURL?.deletingLastPathComponent()
+            let iconCandidates: [String] = [
+                env["ORB_APP_ICON"] ?? "",
+                exeDir?.appendingPathComponent("../icons/icon.icns").standardizedFileURL.path ?? "",
+                exeDir?.appendingPathComponent("../icons/icon.png").standardizedFileURL.path ?? ""
+            ].filter { !$0.isEmpty }
+            for candidate in iconCandidates where FileManager.default.fileExists(atPath: candidate) {
+                if let img = NSImage(contentsOfFile: candidate) {
+                    NSApp.applicationIconImage = img
+                    break
+                }
+            }
+        }
         let explicitPortEnv = env["ORB_LOCALD_PORT"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let rawPort = Int(explicitPortEnv) ?? 19479
         let preferredPort = (1024...65535).contains(rawPort) ? rawPort : 19479

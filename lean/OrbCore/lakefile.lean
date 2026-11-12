@@ -30,8 +30,8 @@ lean_lib «OrbCore» where
   precompileModules := false
 
 @[default_target]
-lean_exe «sandboxed-sh» where
-  exeName := "sandboxed-sh"
+lean_exe «orb-server» where
+  exeName := "orb-server"
   root := `OrbCore.CliMain
   supportInterpreter := false
 

@@ -356,7 +356,10 @@ private def handleTransportProxyRequest (stRef : IO.Ref LocaldState) (isShardPor
                   s!"Content-Length: {finalBody.size}\r\n" ++
                   connHdr
                 match ← writeAll fd (head.toUTF8 ++ finalBody) false with
-                | .ok _ => canReuse := keepAlive
+                | .ok _ =>
+                  canReuse := keepAlive
+                  if let some (imm, limOnly) := shouldTriggerOmarchySyncForProxy req.method relPath up.status then
+                    triggerOmarchyAgentSync stRef imm limOnly
                 | .error _ => canReuse := false
                 done := true
           | .error _ =>

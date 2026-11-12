@@ -1,6 +1,6 @@
 CC ?= $(shell command -v clang >/dev/null 2>&1 && echo clang || echo cc)
 PKG_CONFIG ?= pkg-config
-WEBKIT_PKGS := gtk+-3.0 webkit2gtk-4.1
+WEBKIT_PKGS := gtk4 webkitgtk-6.0
 
 HAS_WEBKIT := $(shell $(PKG_CONFIG) --exists $(WEBKIT_PKGS) 2>/dev/null && echo 1 || echo 0)
 UNAME_S := $(shell uname -s)

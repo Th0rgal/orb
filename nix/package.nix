@@ -1,13 +1,12 @@
-# Core: the sandboxed-sh API server and the companion binaries it launches
-# beside itself (sandboxed-mcp, workspace-mcp, desktop-mcp, sandboxed-node,
-# palomactl, orb-locald, ...). Core finds companions next to its own executable,
-# so they must stay in one bin/ directory.
+# Core: the orb-server API server (with `sandboxed-sh` symlink alias) and the
+# companion binaries it launches beside itself (sandboxed-mcp, workspace-mcp,
+# desktop-mcp, sandboxed-node, palomactl, orb-locald, ...). Core finds companions
+# next to its own executable, so they must stay in one bin/ directory.
 #
 # Core and all companion binaries are compiled directly from the repository's
 # Pure Lean 4 packages (`lean/OrbBin`, `lean/OrbNode`, `lean/OrbCore`,
 # `lean/OrbLocald`) with the pinned Lean 4 v4.35.0 toolchain (`lean/lean-toolchain`)
-# via `turbo-lean` + `clang`/`lld` and linked against OpenSSL (`libssl`, `libcrypto`)
-# and SQLite (`libsqlite3`).
+# and linked against OpenSSL (`libssl`, `libcrypto`) and SQLite (`libsqlite3`).
 #
 # Programs Core spawns at runtime (git, python3, bash, the harness CLIs) are
 # looked up on PATH; the service that runs Core provides them.
@@ -102,17 +101,27 @@
     else callPackage ./turbo-lean.nix {inherit leanToolchain;};
 in
   stdenv.mkDerivation {
-    pname = "sandboxed-sh";
+    pname = "orb-server";
     inherit (orbPackageJson) version;
 
-    src = lib.fileset.toSource {
-      root = ../.;
-      fileset = lib.fileset.unions [
-        ../lean
-        ../shared
-        ../catalog
-        ../scripts
-      ];
+    src = lib.cleanSourceWith {
+      src = ../.;
+      filter = path: _type: let
+        rootStr = toString ../.;
+        base = baseNameOf (toString path);
+        rel = lib.removePrefix (rootStr + "/") (toString path);
+        topDir = builtins.head (lib.splitString "/" rel);
+      in
+        base != ".lake"
+        && base != "target"
+        && base != "node_modules"
+        && base != ".git"
+        && builtins.elem topDir [
+          "lean"
+          "shared"
+          "catalog"
+          "scripts"
+        ];
     };
 
     nativeBuildInputs =
@@ -156,8 +165,10 @@ in
       export TURBO_LEAN_EMIT_C=1
       export TURBO_LEAN_NO_DAEMON=1
       export TURBO_LEAN_TELEMETRY=off
+      export ORB_TURBO_LEAN_JOBS="''${ORB_TURBO_LEAN_JOBS:-1}"
+      export ORB_TURBO_LEAN_MAX_MB="''${ORB_TURBO_LEAN_MAX_MB:-6144}"
       export CPATH="${lib.makeSearchPathOutput "dev" "include" [openssl sqlite]}''${CPATH:+:$CPATH}"
-      export LIBRARY_PATH="${leanToolchain}/lib:${lib.makeLibraryPath [openssl sqlite]}''${LIBRARY_PATH:+:$LIBRARY_PATH}"
+      export LIBRARY_PATH="${lib.makeLibraryPath [openssl sqlite]}''${LIBRARY_PATH:+:$LIBRARY_PATH}"
 
       # Stage pinned `lean-sys` as a sibling path package so `turbo-lean` and Lake 4.35
       # build strictly offline inside the Nix sandbox without `.git` network fetches.
@@ -211,11 +222,16 @@ in
 
       mkdir -p "$out/bin"
       for f in "$TMPDIR/orb-bins"/*; do
-        install -m 0755 "$f" "$out/bin/"
-        ${lib.optionalString stdenv.hostPlatform.isLinux ''
-          patchelf --add-rpath "${lib.makeLibraryPath [openssl sqlite]}" "$out/bin/$(basename "$f")"
-        ''}
+        if [ -L "$f" ]; then
+          cp -P "$f" "$out/bin/"
+        else
+          install -m 0755 "$f" "$out/bin/"
+          ${lib.optionalString stdenv.hostPlatform.isLinux ''
+            patchelf --add-rpath "${lib.makeLibraryPath [openssl sqlite]}" "$out/bin/$(basename "$f")"
+          ''}
+        fi
       done
+      ln -sfn orb-server "$out/bin/sandboxed-sh"
 
       runHook postInstall
     '';
@@ -228,7 +244,7 @@ in
     meta = {
       description = "Self-hosted orchestrator for AI coding agents";
       homepage = "https://orb.thomas.md";
-      mainProgram = "sandboxed-sh";
+      mainProgram = "orb-server";
       platforms = lib.platforms.linux ++ lib.platforms.darwin;
     };
   }

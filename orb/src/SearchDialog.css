@@ -588,7 +588,8 @@
 
 .sd-turn {
   position: relative;
-  padding: 9px 12px 9px 13px;
+  padding: 9px 12px;
+  border: 1px solid transparent;
   border-radius: var(--radius-md);
   display: flex;
   flex-direction: column;
@@ -596,18 +597,12 @@
 }
 
 .sd-turn.is-target {
-  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  background: color-mix(in srgb, var(--fg) 5.5%, transparent);
+  border-color: var(--stroke-soft);
 }
 
-.sd-turn.is-target::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 9px;
-  bottom: 9px;
-  width: 2.5px;
-  border-radius: 99px;
-  background: color-mix(in srgb, var(--amber) 82%, var(--fg-2));
+.sd-turn.is-target .sd-turn-role {
+  color: var(--fg-strong);
 }
 
 .sd-turn-meta {

@@ -24,6 +24,8 @@ import OrbCore.HarnessSessionRegistry
 import OrbCore.QueueCont
 import OrbCore.R7Core
 import OrbCore.TelemetryAndVoice
+import OrbCore.MacTether
+import OrbBin.HttpClient
 import OrbNetLeaf.TlsHttp
 
 namespace OrbCore.Control
@@ -50,6 +52,7 @@ open OrbCore.HarnessSessionRegistry
 open OrbCore.QueueCont
 open OrbCore.R7Core
 open OrbCore.TelemetryAndVoice
+open OrbCore.MacTether
 open OrbNetLeaf.TlsHttp
 
 /-- Core runtime configuration parsed from environment variables (`HOST`, `PORT`, `WORKING_DIR`,
@@ -96,6 +99,7 @@ structure CoreAppState where
   warmMgr?        : Option OrbBin.ClaudeControl.WarmHarnessManager := none
   warmHarnessBinOverride? : Option String := none
   pendingControlCallsRef? : Option (IO.Ref (Array (String × String))) := none
+  macTether?      : Option MacTetherRuntime := none
 
 /-- Authenticated multi-user request principal resolved by `resolveCallerPrincipal?`. -/
 structure CallerPrincipal where
@@ -293,6 +297,32 @@ def verifySessionTokenV2
       | _ => none
     | _ => none
 
+/-- Verify a standard RFC 7519 HS256 JWT (`<hdrB64Url>.<payB64Url>.<sigB64Url>`) signed with `secret`
+    against `nowEpochSec`, returning `some expEpochSec` when `alg == "HS256"`, the HMAC-SHA256 tag
+    matches in constant time, and `nowEpochSec < exp`. -/
+def verifyHs256JwtExp? (secret token : String) (nowEpochSec : UInt64) : Option UInt64 := do
+  if secret.isEmpty then none
+  match token.splitOn "." with
+  | [hdrB64, payB64, sigB64] =>
+    let hdrBytes ← OrbBin.PosixExt.base64Decode? hdrB64
+    let payBytes ← OrbBin.PosixExt.base64Decode? payB64
+    let sigBytes ← OrbBin.PosixExt.base64Decode? sigB64
+    if sigBytes.size != 32 then none
+    let hdrStr ← String.fromUTF8? hdrBytes
+    let payStr ← String.fromUTF8? payBytes
+    let hdrJson ← (OrbBin.Json.parse hdrStr).toOption
+    let payJson ← (OrbBin.Json.parse payStr).toOption
+    if (hdrJson.field? "alg").bind JVal.asStr? != some "HS256" then none
+    let exp ← (payJson.field? "exp").bind JVal.asUInt64?
+    let signingInput := s!"{hdrB64}.{payB64}"
+    let expectedMac := hmacSha256Bytes secret.toUTF8 signingInput.toUTF8
+    if ctEqSlice (LeanSys.Posix.ByteSlice.ofByteArray sigBytes) (LeanSys.Posix.ByteSlice.ofByteArray expectedMac) &&
+       nowEpochSec < exp then
+      some exp
+    else
+      none
+  | _ => none
+
 private def effectiveJwtSecret (cfg : CoreConfig) : String :=
   if cfg.jwtSecret.isEmpty then "dev-mode-ephemeral-jwt-secret-012345" else cfg.jwtSecret
 
@@ -300,7 +330,9 @@ private def verifyAnySessionTokenExp? (secret token : String) (nowEpochSec : UIn
   if token.startsWith "orb-jwt-v2:" then
     (verifySessionTokenV2 secret token nowEpochSec).map (fun (_, _, _, exp) => exp)
   else
-    verifySessionToken secret token nowEpochSec
+    match verifySessionToken secret token nowEpochSec with
+    | some exp => some exp
+    | none     => verifyHs256JwtExp? secret token nowEpochSec
 
 private def lookupHeaderCI (hdrs : Array (String × String)) (target : String) : Option String :=
   let low := target.toLower
@@ -444,7 +476,7 @@ def authenticateProxyRequest (st : CoreAppState) (hdrs : Array (String × String
           return !u.disabled && u.sessionEpoch == tokEp
       return false
     if st.cfg.proxySecret.isEmpty &&
-       ((verifySessionToken (effectiveJwtSecret st.cfg) pTok nowEpochSec).isSome ||
+       ((verifyAnySessionTokenExp? (effectiveJwtSecret st.cfg) pTok nowEpochSec).isSome ||
         verifyLoginCredentials st.cfg none pTok) then
       return true
     return false
@@ -1522,6 +1554,359 @@ private def dispatchMissionControlAndGitRoutes?
 
   return none
 
+private def macTetherQueryParam? (rawTarget key : String) : Option String := do
+  let qs ← match rawTarget.splitOn "?" with
+    | _ :: rest => if rest.isEmpty then none else some (String.intercalate "?" rest)
+    | [] => none
+  for pair in qs.splitOn "&" do
+    match pair.splitOn "=" with
+    | k :: vs =>
+      if k == key then
+        let rawVal := String.intercalate "=" vs
+        return (percentDecodeStrict rawVal).getD rawVal
+    | [] => pure ()
+  none
+
+def isMacTetherToolName (name : String) : Bool :=
+  name == "request_macbook_tether" ||
+  name == "list_macbook_tethers" ||
+  name == "revoke_macbook_tether"
+
+private def resolveMissionTetherMeta
+    (st : CoreAppState)
+    (missionId : String)
+    (hostHint : String)
+    (explicitManaged? : Option Bool) : IO (String × String × Bool) := do
+  let mut label := if missionId.isEmpty then "operator-cli" else s!"mission:{missionId.take 8}"
+  let mut hostId := hostHint
+  let mut isManaged := explicitManaged?.getD (hostHint.startsWith "managed-")
+  if !missionId.isEmpty then
+    if let .ok mRs ← execParamQuery st.store.missionsDb
+        "SELECT title, project, placement_kind FROM missions WHERE id=?1;" #[missionId] then
+      if mRs.size > 1 then
+        let title := ((mRs[1]?.bind (·[0]?)).getD "").trimAscii.toString
+        let proj := ((mRs[1]?.bind (·[1]?)).getD "").trimAscii.toString
+        let pk := ((mRs[1]?.bind (·[2]?)).getD "").trimAscii.toString
+        if !title.isEmpty && !proj.isEmpty then label := s!"[{proj}] {title}"
+        else if !title.isEmpty then label := title
+        else if !proj.isEmpty then label := s!"[{proj}] {missionId.take 8}"
+        if hostId.isEmpty && !pk.isEmpty then hostId := pk
+        if pk == "managed_vm" || pk.startsWith "managed-" then isManaged := true
+    if !isManaged then
+      if let some mst := st.managedStore? then
+        if let .ok vmRs ← execParamQuery mst.db
+            ("SELECT name FROM managed_machines WHERE owner_mission=?1 AND status<>'destroyed' LIMIT 1;")
+            #[missionId] then
+          if vmRs.size > 1 then
+            isManaged := true
+            if hostId.isEmpty || hostId == "managed" then
+              hostId := s!"managed-{(vmRs[1]?.bind (·[0]?)).getD "vm"}"
+  if hostId.isEmpty then hostId := "paloma-worker"
+  return (label, hostId, isManaged)
+
+private def waitTetherDecision
+    (st : CoreAppState)
+    (reqId : String)
+    (waitSecs : Nat) : IO (Option MacTetherRequestRecord) := do
+  let clampedSecs := Nat.min waitSecs 25
+  if clampedSecs == 0 then
+    return ← getMacTetherRequest? st.store reqId (← coreEpochSec)
+  let startSec ← coreEpochSec
+  let deadline := startSec + clampedSecs.toUInt64
+  while true do
+    let nowSec ← coreEpochSec
+    let some cur ← getMacTetherRequest? st.store reqId nowSec
+      | return none
+    if cur.state != "pending" || nowSec ≥ deadline then
+      return some cur
+    match st.macTether? with
+    | some rt =>
+      let seen ← rt.gen.atomically get
+      let remMs : UInt32 := (Nat.min 1000 ((deadline - nowSec).toNat * 1000)).toUInt32
+      let _ ← waitForMacTetherGen rt seen remMs
+    | none =>
+      IO.sleep 100
+  return none
+
+def executeMacTetherMcpTool
+    (st : CoreAppState)
+    (claims : McpSessionClaims)
+    (toolName : String)
+    (args : JVal)
+    (nowEpochSec : UInt64) : IO (Except String JVal) := do
+  let bunkerSt ← match st.bunkerStateRef? with | some r => r.get | none => pure (0 : UInt8)
+  let isOp := normalizeMcpRole claims.role == "operator"
+  let effMid :=
+    if !claims.missionId.isEmpty then claims.missionId
+    else ((args.fieldStr? "mission_id").getD "").trimAscii.toString
+  if toolName == "request_macbook_tether" then
+    let waitSecs := (args.fieldNat? "wait_secs").getD 20
+    if let some existingId := (args.fieldStr? "request_id").filter (!·.trimAscii.isEmpty) then
+      let some cur ← waitTetherDecision st existingId.trimAscii.toString waitSecs
+        | return .error "Unknown tether request_id"
+      if !isOp && cur.missionId != effMid then
+        return .error "Tether request belongs to another mission"
+      let incTok := cur.state == "approved" && (isOp || cur.missionId == effMid)
+      return .ok (.obj #[
+        ("status", .str cur.state),
+        ("request_id", .str cur.id),
+        ("tether", renderMacTetherRequestJson cur incTok)
+      ])
+    let hostHint := ((args.fieldStr? "host_id").getD "").trimAscii.toString
+    let explicitManaged? := args.fieldBool? "is_managed_vm"
+    let (reqLabel, resolvedHost, isManaged) ← resolveMissionTetherMeta st effMid hostHint explicitManaged?
+    let created ← match ← createMacTetherRequest st.store st.macTether? bunkerSt effMid reqLabel resolvedHost isManaged args nowEpochSec with
+      | .ok r => pure r
+      | .error e => return .error e
+    let settled ← (← waitTetherDecision st created.id waitSecs).getDM (pure created)
+    let incTok := settled.state == "approved"
+    return .ok (.obj #[
+      ("status", .str settled.state),
+      ("request_id", .str settled.id),
+      ("tether", renderMacTetherRequestJson settled incTok)
+    ])
+  else if toolName == "list_macbook_tethers" then
+    let stateFilter? := (args.fieldStr? "state").filter (!·.trimAscii.isEmpty)
+    let midFilter? : Option String :=
+      if isOp then (args.fieldStr? "mission_id").filter (!·.trimAscii.isEmpty)
+      else some effMid
+    let rows ← listMacTetherRequests st.store midFilter? stateFilter? nowEpochSec
+    let items := rows.map fun r =>
+      let incTok := r.state == "approved" && (isOp || (!effMid.isEmpty && r.missionId == effMid))
+      renderMacTetherRequestJson r incTok
+    return .ok (.obj #[("tethers", .arr items)])
+  else if toolName == "revoke_macbook_tether" then
+    let reqId := ((args.fieldStr? "request_id").orElse (fun _ => args.fieldStr? "id")).getD ""
+    if reqId.trimAscii.toString.isEmpty then
+      return .error "request_id is required"
+    let callerMid? := if effMid.isEmpty then none else some effMid
+    match ← revokeMacTetherRequest st.store st.macTether? reqId.trimAscii.toString callerMid? isOp nowEpochSec with
+    | .ok r =>
+      return .ok (.obj #[
+        ("status", .str r.state),
+        ("request_id", .str r.id),
+        ("revoked", .bool (r.state == "revoked")),
+        ("tether", renderMacTetherRequestJson r false)
+      ])
+    | .error "forbidden" => return .error "Cannot revoke another mission's MacBook tether"
+    | .error "not_found" => return .error "MacBook tether request not found"
+    | .error e => return .error e
+  else
+    return .error s!"Unsupported MacBook tether tool `{toolName}`"
+
+private def handleMacTetherHttp?
+    (st : CoreAppState)
+    (req : HttpRequest)
+    (rawTarget cleanPath : String)
+    (reqOrigin? : Option String)
+    (nowEpochSec : UInt64) : IO (Option (Except ByteArray CoreHttpResponse)) := do
+  if !cleanPath.startsWith "/api/mac-tether/" && cleanPath != "/api/mac-tether" then
+    return none
+  let mkJson (code : Nat) (bodyStr : String) : CoreHttpResponse :=
+    jsonResponse code bodyStr #[] reqOrigin?
+
+  -- `POST /api/mac-tether/mcp-call` (direct or nginx-proxied MCP tool bridge for `sandboxed-mcp`)
+  if req.method == "POST" && cleanPath == "/api/mac-tether/mcp-call" then
+    let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+      | return some (.ok (mkJson 400 "{\"ok\":false,\"error\":{\"code\":\"invalid_json\",\"message\":\"Malformed JSON body\",\"accepted\":\"no\",\"retryable\":false}}"))
+    let toolName := (jv.fieldStr? "name").getD ""
+    let mut args := (jv.field? "arguments").getD (.obj #[])
+    if !isMacTetherToolName toolName then
+      return some (.ok (mkJson 400 "{\"ok\":false,\"error\":{\"code\":\"unsupported_tool\",\"message\":\"Not a MacBook tether tool\",\"accepted\":\"no\",\"retryable\":false}}"))
+    let bearerTok? := extractBearerToken? req.headers nowEpochSec
+    let localScoped? := bearerTok?.bind (verifyScopedMcpToken? st.cfg.jwtSecret · nowEpochSec)
+    let mut activeClaims? : Option McpSessionClaims := localScoped?
+    if activeClaims?.isNone then
+      if let some _ ← resolveCallerPrincipal? st req.headers nowEpochSec then
+        activeClaims? := some {
+          sessionId := "00000000-0000-4000-8000-000000000000"
+          missionId := ""
+          role := "operator"
+          project := ""
+          isExternal := false
+          expiresAt := nowEpochSec + 3600
+        }
+    if activeClaims?.isNone then
+      if let (some tok, some capUrl) := (bearerTok?, ← OrbBin.PosixExt.getEnvNonEmpty "ORB_UPSTREAM_MCP_CAPABILITIES_URL") then
+        if let .ok (200, _, some caps) ← OrbBin.HttpClient.sendJsonRequest "GET" capUrl (some tok) none #[] 5000 then
+          if let some ident := caps.field? "identity" then
+            let sid := (ident.fieldStr? "session_id").getD "00000000-0000-4000-8000-000000000000"
+            let mid := (ident.fieldStr? "mission_id").getD ""
+            let role := normalizeMcpRole ((ident.fieldStr? "role").getD "executor")
+            let proj := (ident.fieldStr? "project").getD ""
+            let subj := ident.fieldOrNull "subject"
+            let isExt := (subj.fieldStr? "kind") == some "external_session"
+            if let some cl := (subj.fieldStr? "client_label").filter (!·.trimAscii.isEmpty) then
+              if (args.fieldStr? "mission_label").isNone then
+                args := args.setField "mission_label" (.str cl)
+            if let some hh := (subj.fieldStr? "host_hint").filter (!·.trimAscii.isEmpty) then
+              if (args.fieldStr? "host_id").isNone then
+                args := args.setField "host_id" (.str hh)
+            activeClaims? := some {
+              sessionId := sid, missionId := mid, role := role,
+              project := proj, isExternal := isExt, expiresAt := nowEpochSec + 3600
+            }
+    let some claims := activeClaims?
+      | return some (.ok (mkJson 401 "{\"error\":\"unauthorized_mcp\"}"))
+    match ← executeMacTetherMcpTool st claims toolName args nowEpochSec with
+    | .ok resVal =>
+      return some (.ok (mkJson 200 (renderCompact (.obj #[("ok", .bool true), ("result", resVal)]))))
+    | .error errMsg =>
+      let errJson := renderCompact (.obj #[
+        ("ok", .bool false),
+        ("error", .obj #[
+          ("code", .str "mac_tether_rejected"),
+          ("message", .str errMsg),
+          ("accepted", .str "no"),
+          ("retryable", .bool false)
+        ])
+      ])
+      return some (.ok (mkJson 200 errJson))
+
+  let some caller ← resolveCallerPrincipal? st req.headers nowEpochSec
+    | return some (.ok (mkJson 401 "{\"error\":\"unauthorized\"}"))
+  let isAdmin := caller.isLegacyUnscoped || caller.role == "admin"
+  let bunkerSt ← match st.bunkerStateRef? with | some r => r.get | none => pure (0 : UInt8)
+
+  -- `POST /api/mac-tether/verify-lease` (for `orb-privd` `mac_tether_up`)
+  if req.method == "POST" && cleanPath == "/api/mac-tether/verify-lease" then
+    if !isAdmin then
+      return some (.ok (mkJson 403 "{\"allowed\":false,\"error\":\"admin_required\"}"))
+    let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+      | return some (.ok (mkJson 400 "{\"allowed\":false,\"error\":\"invalid_json\"}"))
+    let reqId := (jv.fieldStr? "request_id").getD ""
+    let leaseTok := (jv.fieldStr? "lease_token").getD ""
+    let mid := (jv.fieldStr? "mission_id").getD ""
+    match ← verifyMacTetherLease st.store bunkerSt reqId leaseTok mid nowEpochSec with
+    | .error err =>
+      return some (.ok (mkJson 403 s!"\{\"allowed\":false,\"bunker_state\":{bunkerSt.toNat},\"error\":{jsonEscape err}}"))
+    | .ok rec =>
+      let out := JVal.obj #[
+        ("allowed", .bool true),
+        ("bunker_state", .nat bunkerSt.toNat),
+        ("tether", renderMacTetherRequestJson rec false)
+      ]
+      return some (.ok (mkJson 200 (renderCompact out)))
+
+  -- `GET /api/mac-tether/events` (long-poll for `mac-meshd` on `m2air`)
+  if req.method == "GET" && cleanPath == "/api/mac-tether/events" then
+    if !isAdmin then
+      return some (.ok (mkJson 403 "{\"error\":\"admin_required\"}"))
+    let sinceGen? := (macTetherQueryParam? rawTarget "since_gen").bind String.toNat?
+    let waitSecs := Nat.min 25 (((macTetherQueryParam? rawTarget "wait_secs").bind String.toNat?).getD 0)
+    let curGen ← match st.macTether? with
+      | some rt =>
+        if let some sg := sinceGen? then
+          if waitSecs > 0 then
+            waitForMacTetherGen rt sg.toUInt64 (waitSecs * 1000).toUInt32
+          else
+            rt.gen.atomically get
+        else
+          rt.gen.atomically get
+      | none => pure 0
+    let liveNow ← coreEpochSec
+    let rows ← listMacTetherRequests st.store none none liveNow
+    let relayEp := match st.macTether? with | some rt => rt.relayEndpoint | none => ""
+    let out := JVal.obj #[
+      ("generation", .nat curGen.toNat),
+      ("server_epoch", .nat liveNow.toNat),
+      ("bunker_state", .nat bunkerSt.toNat),
+      ("relay_endpoint", if relayEp.isEmpty then .null else .str relayEp),
+      ("requests", .arr (rows.map (renderMacTetherRequestJson · false)))
+    ]
+    return some (.ok (mkJson 200 (renderCompact out)))
+
+  -- `POST|GET /api/mac-tether/relay-pairs` & `DELETE /api/mac-tether/relay-pairs/:id`
+  if cleanPath == "/api/mac-tether/relay-pairs" then
+    if !isAdmin then
+      return some (.ok (mkJson 403 "{\"error\":\"admin_required\"}"))
+    if req.method == "GET" then
+      let pairs ← listWgRelayPairs st.store
+      return some (.ok (mkJson 200 (renderCompact (.obj #[("pairs", .arr (pairs.map renderWgRelayPairJson))]))))
+    if req.method == "POST" then
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return some (.ok (mkJson 400 "{\"error\":\"invalid_json\"}"))
+      let pid := (jv.fieldStr? "pair_id").getD ""
+      let lbl := (jv.fieldStr? "label").getD ""
+      let pa := (jv.fieldStr? "peer_a_wg_pubkey").getD ""
+      let pb := (jv.fieldStr? "peer_b_wg_pubkey").getD ""
+      let en := (jv.fieldBool? "enabled").getD true
+      match ← upsertWgRelayPair st.store st.macTether? pid lbl pa pb en nowEpochSec with
+      | .ok p => return some (.ok (mkJson 200 (renderCompact (.obj #[("ok", .bool true), ("pair", renderWgRelayPairJson p)]))))
+      | .error e => return some (.ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}"))
+
+  if req.method == "DELETE" then
+    if let some params := matchRoutePattern? "/api/mac-tether/relay-pairs/:id" cleanPath then
+      if !isAdmin then
+        return some (.ok (mkJson 403 "{\"error\":\"admin_required\"}"))
+      let pid := ((params.find? (fun p => p.1 == "id")).map Prod.snd).getD ""
+      let _ ← deleteWgRelayPair st.store st.macTether? pid nowEpochSec
+      return some (.ok (mkJson 200 s!"\{\"ok\":true,\"pair_id\":{jsonEscape pid}}"))
+
+  -- `POST|GET /api/mac-tether/requests`
+  if cleanPath == "/api/mac-tether/requests" then
+    if req.method == "GET" then
+      if !isAdmin then
+        return some (.ok (mkJson 403 "{\"error\":\"admin_required\"}"))
+      let midFilter? := (macTetherQueryParam? rawTarget "mission_id").filter (!·.isEmpty)
+      let stFilter? := (macTetherQueryParam? rawTarget "state").filter (!·.isEmpty)
+      let rows ← listMacTetherRequests st.store midFilter? stFilter? nowEpochSec
+      return some (.ok (mkJson 200 (renderCompact (.obj #[("requests", .arr (rows.map (renderMacTetherRequestJson · false)))]))))
+    if req.method == "POST" then
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return some (.ok (mkJson 400 "{\"error\":\"invalid_json\"}"))
+      let mid := ((jv.fieldStr? "mission_id").getD "").trimAscii.toString
+      if !mid.isEmpty then
+        if let some (cCode, cBody) ← authorizeMissionOp st caller mid false then
+          return some (.ok (mkJson cCode cBody))
+      let hostHint := ((jv.fieldStr? "host_id").getD "").trimAscii.toString
+      let (reqLbl, resHost, isManaged) ← resolveMissionTetherMeta st mid hostHint (jv.fieldBool? "is_managed_vm")
+      match ← createMacTetherRequest st.store st.macTether? bunkerSt mid reqLbl resHost isManaged jv nowEpochSec with
+      | .ok r => return some (.ok (mkJson 201 (renderCompact (.obj #[("ok", .bool true), ("tether", renderMacTetherRequestJson r false)]))))
+      | .error e => return some (.ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}"))
+
+  -- `GET /api/mac-tether/requests/:id`
+  if req.method == "GET" then
+    if let some params := matchRoutePattern? "/api/mac-tether/requests/:id" cleanPath then
+      if !isAdmin then
+        return some (.ok (mkJson 403 "{\"error\":\"admin_required\"}"))
+      let rid := ((params.find? (fun p => p.1 == "id")).map Prod.snd).getD ""
+      let waitSecs := Nat.min 25 (((macTetherQueryParam? rawTarget "wait_secs").bind String.toNat?).getD 0)
+      match ← waitTetherDecision st rid waitSecs with
+      | none => return some (.ok (mkJson 404 "{\"error\":\"not_found\"}"))
+      | some r => return some (.ok (mkJson 200 (renderCompact (.obj #[("tether", renderMacTetherRequestJson r (r.state == "approved"))]))))
+
+  -- `POST /api/mac-tether/requests/:id/{approve,deny,revoke}`
+  if req.method == "POST" then
+    if let some params := matchRoutePattern? "/api/mac-tether/requests/:id/:action" cleanPath then
+      let rid := ((params.find? (fun p => p.1 == "id")).map Prod.snd).getD ""
+      let act := ((params.find? (fun p => p.1 == "action")).map Prod.snd).getD ""
+      let jv := (OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption.getD (.obj #[])
+      if act == "approve" then
+        if !isAdmin then
+          return some (.ok (mkJson 403 "{\"error\":\"admin_required\"}"))
+        match ← approveMacTetherRequest st.store st.macTether? bunkerSt rid jv nowEpochSec with
+        | .ok r => return some (.ok (mkJson 200 (renderCompact (.obj #[("ok", .bool true), ("tether", renderMacTetherRequestJson r false)]))))
+        | .error "not_found" => return some (.ok (mkJson 404 "{\"error\":\"not_found\"}"))
+        | .error e => return some (.ok (mkJson 403 s!"\{\"error\":{jsonEscape e}}"))
+      if act == "deny" then
+        if !isAdmin then
+          return some (.ok (mkJson 403 "{\"error\":\"admin_required\"}"))
+        let reason := (jv.fieldStr? "reason").getD "Denied by operator"
+        match ← denyMacTetherRequest st.store st.macTether? rid reason nowEpochSec with
+        | .ok r => return some (.ok (mkJson 200 (renderCompact (.obj #[("ok", .bool true), ("tether", renderMacTetherRequestJson r false)]))))
+        | .error "not_found" => return some (.ok (mkJson 404 "{\"error\":\"not_found\"}"))
+        | .error e => return some (.ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}"))
+      if act == "revoke" then
+        if !isAdmin then
+          return some (.ok (mkJson 403 "{\"error\":\"admin_required\"}"))
+        match ← revokeMacTetherRequest st.store st.macTether? rid none true nowEpochSec with
+        | .ok r => return some (.ok (mkJson 200 (renderCompact (.obj #[("ok", .bool true), ("tether", renderMacTetherRequestJson r false)]))))
+        | .error "not_found" => return some (.ok (mkJson 404 "{\"error\":\"not_found\"}"))
+        | .error e => return some (.ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}"))
+
+  return some (.ok (mkJson 404 "{\"error\":\"unknown_mac_tether_endpoint\"}"))
+
 set_option maxHeartbeats 800000 in
 /-- Dispatch a parsed `HttpRequest` against `CoreAppState` (`routes` capability parity:
     `"/api/control/missions/:id/automations"`, `"/api/model-routing"`). -/
@@ -1602,6 +1987,10 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
     if !(← authenticateProxyRequest st req.headers nowEpochSec) then
       return .ok (mkJson 401 "{\"error\":\"unauthorized_proxy\"}")
     return .ok (← handleProxyRequest st req cleanPath reqOrigin? nowEpochSec)
+
+  -- 4b. Sovereign MacBook Tether Broker (`/api/mac-tether/*`)
+  if let some macResp ← handleMacTetherHttp? st req rawTarget cleanPath reqOrigin? nowEpochSec then
+    return macResp
 
   -- 5. Privilege Broker Verification & Audit Log (`POST /api/privilege-access/verify-and-log`)
   if req.method == "POST" && cleanPath == "/api/privilege-access/verify-and-log" then
@@ -1935,6 +2324,21 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
             ("ok", .bool false),
             ("error", .obj #[
               ("code", .str "memory_tool_denied"),
+              ("message", .str errMsg),
+              ("accepted", .str "no"),
+              ("retryable", .bool false)
+            ])
+          ])
+          return .ok (mkJson 200 errJson)
+      else if isMacTetherToolName toolName then
+        match ← executeMacTetherMcpTool st activeClaims toolName args nowEpochSec with
+        | .ok resVal =>
+          return .ok (mkJson 200 (renderCompact (.obj #[("ok", .bool true), ("result", resVal)])))
+        | .error errMsg =>
+          let errJson := renderCompact (.obj #[
+            ("ok", .bool false),
+            ("error", .obj #[
+              ("code", .str "mac_tether_rejected"),
               ("message", .str errMsg),
               ("accepted", .str "no"),
               ("retryable", .bool false)
@@ -2311,7 +2715,9 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
         return .ok (mkJson cCode cBody)
       match ← hostedStop st.store mid s!"{nowEpochSec}" with
-      | .ok gen => return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"run_generation\":{gen}}")
+      | .ok gen =>
+        revokeSessionScopedMacTethersForMission st.store st.macTether? mid nowEpochSec
+        return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"run_generation\":{gen}}")
       | .error "mission_not_found" => return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
       | .error e =>
         if e.startsWith "interrupt_rejected:" || e == "interrupt_cas_lost" || e == "mission_terminal" || e == "fence_cas_lost" then
@@ -3087,7 +3493,7 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
               let held := (statuses.filter campaignSlotHeldBy).size
               if held ≥ cap then
                 abortIdem
-                return .ok (mkJson 429 s!"\{\"error\":\"parallel_missions_cap\",\"cap\":{cap},\"active\":{held}}")
+                return .ok (mkJson 429 s!"\{\"error\":\"parallel_missions_cap\",\"scope\":\"project\",\"project\":{jsonEscape projSlug},\"cap\":{cap},\"active\":{held}}")
       let initTagsJson := projectCompatibilityTagsJson authMode placeKind "" "" diskGib reqTags
       let effTrack := if isBtwReq then "" else track
       let mRec : MissionRecord := {
@@ -3224,6 +3630,7 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       if let some (cCode, cBody) := (← authorizeMissionOp st caller mid true) then
         return .ok (mkJson cCode cBody)
       revokeMissionProxyTokensForMission st.store mid
+      revokeSessionScopedMacTethersForMission st.store st.macTether? mid nowEpochSec
       let delRes ← withImmediateTx st.store.missionsDb do
         discard <| execParamQueryUnlocked st.store.missionsDb "DELETE FROM mission_shares WHERE mission_id=?1;" #[mid]
         discard <| execParamQueryUnlocked st.store.missionsDb "DELETE FROM mission_events WHERE mission_id=?1;" #[mid]
@@ -3530,6 +3937,11 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
       "}}"
     return .ok (mkJson 200 payload)
 
+  if req.method == "GET" && cleanPath == "/api/projects" then
+    let rows ← execParamQuery st.store.projectsDb
+      "SELECT id AS slug, name AS title, root_path, updated_at FROM projects ORDER BY id ASC;" #[]
+    let arrJson := match rows with | .ok rs => rowsToJsonArray rs | .error _ => "[]"
+    return .ok (mkJson 200 s!"\{\"projects\":{arrJson}}")
   -- Model Routing Controls (`"/api/model-routing"` / `/api/model-routing/chains`)
   if cleanPath.startsWith "/api/model-routing" then
     if req.method != "GET" && !caller.isLegacyUnscoped then
@@ -4751,6 +5163,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let voiceSlots ← newVoiceRelaySlots
     let warmMgr ← OrbBin.ClaudeControl.newWarmHarnessManager
     let pendingControlCallsRef ← IO.mkRef (#[] : Array (String × String))
+    let macTetherRt ← startMacTetherRuntime store cfg.host
     let appState : CoreAppState := {
       cfg := cfg
       store := store
@@ -4773,10 +5186,12 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       voiceSlots? := some voiceSlots
       warmMgr? := some warmMgr
       pendingControlCallsRef? := some pendingControlCallsRef
+      macTether? := some macTetherRt
     }
     let bindHost := if cfg.host == "localhost" then "127.0.0.1" else cfg.host
     let .ok (listenFd, boundPort) ← tcpListen bindHost cfg.port 128
       | do
+        stopMacTetherRuntime macTetherRt
         closeManagedComputeStore managedStore
         closeCoreStore store
         IO.eprintln s!"[sandboxed-sh] FATAL: failed to bind {bindHost}:{cfg.port}"
@@ -4816,6 +5231,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     if !notifySock.isEmpty then
       discard <| sdNotifyRaw notifySock "STOPPING=1\n"
     discard <| closeFd listenFd
+    stopMacTetherRuntime macTetherRt
     closeManagedComputeStore managedStore
     closeCoreStore store
     return 0

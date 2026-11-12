@@ -52,7 +52,8 @@ export const harnessChoices = (machine = "core"): HarnessChoice[] => {
     ? (localInstalled().find(row => row.id === "antigravity")?.models ?? [])
     : (nodeModels[`${version}:${machine}`]?.length ? nodeModels[`${version}:${machine}`] : (nodeModels[`${version}:core`] ?? []));
   const claude = machine === "local" ? (localInstalled().find(row => row.id === "claudecode")?.models ?? []) : [];
-  return destinationHarnessChoices(remoteHarnessChoices(), machine, models, localInstalled().some(row => row.id === "vibe" && row.installed), claude);
+  const opencode = machine === "local" ? (localInstalled().find(row => row.id === "opencode")?.models ?? []) : [];
+  return destinationHarnessChoices(remoteHarnessChoices(), machine, models, localInstalled().some(row => row.id === "vibe" && row.installed), claude, opencode);
 };
 export const [harnessPick, setHarnessPick] = jsonSignal<HarnessPick | null>(PICK_KEY, null);
 /** Preserve an explicit selection; launch validation reports unavailable models.
@@ -64,12 +65,28 @@ export const effectivePick = (machine = "core"): HarnessPick | null => {
   const stored = harnessPick();
   if (stored) {
     const effort = normalizeEffort(stored.effort, stored.backend);
+    const choice = choices.find((c) => c.backend.id === stored.backend);
     if (RETIRED_DEFAULT_MODELS.has(stored.model)) {
-      const choice = choices.find((c) => c.backend.id === stored.backend);
       const fallback = choice?.models[0]?.value;
       if (fallback && !RETIRED_DEFAULT_MODELS.has(fallback)) {
         return { ...stored, model: fallback, effort: effort ?? undefined };
       }
+    }
+    // On this computer, Core-scoped OpenCode IDs (e.g. `builtin/fast`) map to
+    // the local OpenCode provider namespace (e.g. `orbrouter/builtin/fast`) or
+    // the user's configured default local OpenCode model.
+    if (
+      machine === "local" &&
+      stored.backend === "opencode" &&
+      choice?.models.length &&
+      !choice.models.some((m) => m.value === stored.model)
+    ) {
+      const bare = stored.model.replace(/^sandboxed-sh\//, "");
+      const matched =
+        choice.models.find((m) => m.value === `orbrouter/${bare}`) ??
+        choice.models.find((m) => m.value.endsWith(`/${bare}`)) ??
+        choice.models[0];
+      return { ...stored, model: matched.value, effort: effort ?? undefined };
     }
     return { ...stored, effort: effort ?? undefined };
   }

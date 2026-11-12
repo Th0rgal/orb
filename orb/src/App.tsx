@@ -101,12 +101,14 @@ import type { ActiveProviderSubmenu, Pending24hLeasePrompt } from "./MachineClou
 const NewAgentCloudVmSection = lazy(() => import("./MachineCloudMenu").then(module => ({ default: module.NewAgentCloudVmSection })));
 const AgentSpawnedVmsToggle = lazy(() => import("./MachineCloudMenu").then(module => ({ default: module.AgentSpawnedVmsToggle })));
 const Lazy24hConfirmDialog = lazy(() => import("./MachineCloudMenu").then(module => ({ default: module.Lazy24hConfirmDialog })));
-const Providers=lazy(()=>import("./Providers").then(module=>({default:module.Providers})));
+const loadProvidersModule = () => import("./Providers");
+const Providers = lazy(() => loadProvidersModule().then((module) => ({ default: module.Providers })));
+import { ProvidersPageSkeleton } from "./ProvidersSkeleton";
 const Resources = lazy(() => import("./Resources"));
 import { PopupMenu, type MenuEntry } from "./Menu";
 import { mdSource, toggleMdSource } from "./Markdown";
 import { applyPendingMoves } from "./missionMove";
-import { cachePut, cacheRecents } from "./pageCache";
+import { cachePrefetch, cachePut, cacheRecents } from "./pageCache";
 import { effortLabel, normalizeEffort } from "./effort";
 import { loadTranscript, noteLiveMissionIds, peekReadyTranscript, prefetchTranscript, selectLivePrefetchIds, transcriptVersion } from "./missionCache";
 import { loadPersistedSidebar, savePersistedSidebar } from "./persistentCache";
@@ -142,6 +144,7 @@ import {
   listMissions,
   listProjectMissions,
   listProjects,
+  listProviders,
   peekCachedProjects,
   readMissionSyncCursor,
   refreshCurrentUser,
@@ -172,7 +175,8 @@ import { shouldRequestInboxDigest } from "./inboxPolicy";
 import { pendingMissionInteraction } from "./missionAttention";
 import { markMissionRead, unreadVersion } from "./missionUnread";
 
-import { harnessChoices, harnessPick, effectivePick, refreshHarnessChoices, refreshNodeAntigravityModels, type HarnessPick } from "./harnessPick";
+import { harnessChoices, harnessPick, setHarnessPick, effectivePick, refreshHarnessChoices, refreshNodeAntigravityModels, type HarnessPick } from "./harnessPick";
+import { startDesktopCommandListener } from "./desktopCommands";
 import { Composer } from "./composer/Composer";
 import { MissionView, NativeMissionView } from "./mission/MissionView";
 
@@ -235,6 +239,40 @@ export default function App() {
     });
   });
   onMount(() => onCleanup(startUsageTelemetry()));
+  onMount(() =>
+    onCleanup(
+      startDesktopCommandListener({
+        onProvidersRefresh: () => {
+          window.dispatchEvent(new Event("orb:providers-external-refresh"));
+          window.dispatchEvent(new Event("orb:providers-refresh"));
+        },
+        onNewAgent: ({ backend, prompt, cwd }) => {
+          if (backend && backend.startsWith("cloud_")) {
+            open("cloud-agent");
+            return;
+          }
+          setNewFolder(null);
+          if (cwd && newMachine() === "local") chooseDirectory(cwd);
+          if (backend) {
+            const targetBackend = backend === "hermes" ? "claudecode" : backend;
+            const choices = harnessChoices(newMachine());
+            const matched = choices.find((c) => c.backend.id === targetBackend);
+            if (matched && matched.models[0]?.value) {
+              const cur = harnessPick();
+              if (!cur || cur.backend !== matched.backend.id) {
+                setHarnessPick({ backend: matched.backend.id, model: matched.models[0].value });
+              }
+            }
+          }
+          open(null);
+          if (prompt) setNewAgentRevision({ text: prompt });
+        },
+        onOpenPage: (page) => {
+          open(page);
+        },
+      }),
+    ),
+  );
   // One page view per selected page; the previous page is the entry point.
   createEffect(on(() => screenName(selected()), (screen, previous) => {
     const close = usageTelemetry.page(screen, "screen", previous ?? "launch");
@@ -848,6 +886,11 @@ export default function App() {
       void refreshFleet();
       warmManagedCatalog();
       void refreshHarnessChoices();
+      cachePrefetch("providers:list", async () => {
+        const providers = await listProviders();
+        cachePut("providers:list", providers);
+        return providers;
+      });
       listProjects()
         .then((projects) => {
           setLiveProjects(projects);
@@ -1480,7 +1523,12 @@ export default function App() {
               <span class="row-ico"><Ic.MachinesIcon /></span>
               <span class="row-label">Machines</span><kbd aria-hidden="true">{shortcutLabel("machines")}</kbd>
             </button>
-            <button class={`row ${selected() === "providers" ? "active" : ""}`} onClick={() => open("providers")}>
+            <button
+              class={`row ${selected() === "providers" ? "active" : ""}`}
+              onPointerEnter={() => void loadProvidersModule()}
+              onFocus={() => void loadProvidersModule()}
+              onClick={() => open("providers")}
+            >
               <span class="row-ico"><Ic.CubeIcon /></span>
               <span class="row-label">Inference</span><kbd aria-hidden="true">{shortcutLabel("providers")}</kbd>
             </button>
@@ -2094,10 +2142,14 @@ export default function App() {
             </Suspense>
           </Match>
           <Match when={selected() === "machines"}>
-            <Machines />
+            <Suspense>
+              <Machines />
+            </Suspense>
           </Match>
           <Match when={selected() === "providers"}>
-            <Providers />
+            <Suspense fallback={<ProvidersPageSkeleton />}>
+              <Providers />
+            </Suspense>
           </Match>
           <Match when={selected() === "resources" || Boolean(currentResourcesMissionId())}>
             <Suspense>

@@ -496,12 +496,16 @@ def resolveHarnessBinary? (binName : String) (overridePath? : Option String := n
       else
         return none
   let home := ((← IO.getEnv "HOME").getD "").trimAscii.toString
+  let user := ((← IO.getEnv "USER").getD "").trimAscii.toString
   let pathEnv := ((← IO.getEnv "PATH").getD "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin").trimAscii.toString
   let mut dirs : Array String := (pathEnv.splitOn ":").filter (!·.isEmpty) |>.toArray
   if !home.isEmpty then
-    for extra in #[s!"{home}/.local/bin", s!"{home}/.claude/local", s!"{home}/.bun/bin", s!"{home}/.npm-global/bin", s!"{home}/.cargo/bin"] do
+    for extra in #[s!"{home}/.local/bin", s!"{home}/.opencode/bin", s!"{home}/.claude/local", s!"{home}/.bun/bin", s!"{home}/.npm-global/bin", s!"{home}/.cargo/bin", s!"{home}/.nix-profile/bin", s!"{home}/.local/state/nix/profile/bin", s!"{home}/bin"] do
       if !dirs.contains extra then dirs := dirs.push extra
-  for extraSys in #["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] do
+  if !user.isEmpty then
+    let nixUserDir := s!"/etc/profiles/per-user/{user}/bin"
+    if !dirs.contains nixUserDir then dirs := dirs.push nixUserDir
+  for extraSys in #["/run/current-system/sw/bin", "/nix/var/nix/profiles/default/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] do
     if !dirs.contains extraSys then dirs := dirs.push extraSys
   for d in dirs do
     let cand := if d.endsWith "/" then s!"{d}{binName}" else s!"{d}/{binName}"
@@ -619,12 +623,215 @@ def probeAntigravityModels (binPath : String) : IO (Except String (Array (String
       return .error "No Antigravity models are available for this account"
     return .ok grouped
 
+/-- Capitalize well-known provider/vendor slugs for human-readable OpenCode model labels. -/
+private def formatOpenCodeVendorName (slug : String) : String :=
+  match slug.trimAscii.toString.toLower with
+  | "orbrouter" => "Orb Router"
+  | "opencode" => "OpenCode"
+  | "anthropic" => "Anthropic"
+  | "openai" => "OpenAI"
+  | "antigravity" => "Antigravity"
+  | "google" | "gemini" => "Google"
+  | "xai" | "grok" => "xAI"
+  | "mistral" => "Mistral"
+  | "deepseek" => "DeepSeek"
+  | "openrouter" => "OpenRouter"
+  | other =>
+    match other.toList with
+    | [] => "OpenCode"
+    | c :: cs => String.ofList (c.toUpper :: cs)
+
+/-- Format an OpenCode `<provider>/<model>` ID into Orb's `<Group> — <Model>` picker convention. -/
+def formatOpenCodeModelLabel (modelId : String) (providerNames : Array (String × String) := #[]) : String := Id.run do
+  let lookupProv (p : String) : String :=
+    match providerNames.find? (fun (k, _) => k == p) with
+    | some (_, n) => if n.trimAscii.toString.isEmpty then formatOpenCodeVendorName p else n.trimAscii.toString
+    | none => formatOpenCodeVendorName p
+  let capWord (w : String) : String :=
+    match w.toList with
+    | [] => w
+    | c :: cs => String.ofList (c.toUpper :: cs)
+  let segs := (modelId.trimAscii.toString.splitOn "/").filter (!·.isEmpty)
+  match segs with
+  | ["builtin", chain] =>
+    return s!"Routing — {capWord chain}"
+  | [_prov, "builtin", chain] =>
+    return s!"Routing — {capWord chain}"
+  | [prov, modelName] =>
+    return s!"{lookupProv prov} — {modelName}"
+  | prov :: subprov :: rest =>
+    if rest.isEmpty then
+      return s!"{lookupProv prov} — {subprov}"
+    else
+      let tail := String.intercalate "/" rest
+      return s!"{lookupProv prov} ({formatOpenCodeVendorName subprov}) — {tail}"
+  | _ => return modelId.trimAscii.toString
+
+/-- Strip `//` line comments outside JSON string literals for `opencode.jsonc` configs. -/
+private def stripJsoncLineComments (s : String) : String := Id.run do
+  let mut out := ""
+  let mut inStr := false
+  let mut esc := false
+  let chars := s.toList.toArray
+  let mut i : Nat := 0
+  while i < chars.size do
+    let c := chars[i]!
+    if inStr then
+      out := out.push c
+      if esc then esc := false
+      else if c == '\\' then esc := true
+      else if c == '"' then inStr := false
+      i := i + 1
+    else if c == '"' then
+      inStr := true
+      out := out.push c
+      i := i + 1
+    else if c == '/' && i + 1 < chars.size && chars[i + 1]! == '/' then
+      i := i + 2
+      while i < chars.size && chars[i]! != '\n' do
+        i := i + 1
+    else
+      out := out.push c
+      i := i + 1
+  return out
+
+/-- Read non-secret model & provider metadata from `~/.config/opencode/opencode.json` (or `opencode.jsonc`). -/
+def readLocalOpenCodeConfigInfo : IO (Option String × Array (String × String) × Array String) := do
+  let xdg := ((← IO.getEnv "XDG_CONFIG_HOME").getD "").trimAscii.toString
+  let home := ((← IO.getEnv "HOME").getD "").trimAscii.toString
+  let cfgDir :=
+    if !xdg.isEmpty then System.FilePath.mk xdg / "opencode"
+    else if !home.isEmpty then System.FilePath.mk home / ".config" / "opencode"
+    else System.FilePath.mk "/nonexistent"
+  let jsonPath := cfgDir / "opencode.json"
+  let jsoncPath := cfgDir / "opencode.jsonc"
+  let (cfgPath, isJsonc) ←
+    if ← jsonPath.pathExists then pure (jsonPath, false)
+    else if ← jsoncPath.pathExists then pure (jsoncPath, true)
+    else return (none, #[], #[])
+  let raw0 ← try IO.FS.readFile cfgPath catch _ => pure ""
+  let raw := if isJsonc then stripJsoncLineComments raw0 else raw0
+  if raw.trimAscii.toString.isEmpty then
+    return (none, #[], #[])
+  let .ok jv := OrbBin.Json.parse raw
+    | return (none, #[], #[])
+  let defModel? := (jv.fieldStr? "model").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+  let provObj := match jv.field? "providers" with
+    | some p => p
+    | none => jv.fieldOrNull "provider"
+  let mut provNames : Array (String × String) := #[]
+  let mut cfgModels : Array String := #[]
+  if let .obj kvs := provObj then
+    for (pk, pv) in kvs do
+      let disp := (pv.fieldStr? "name").getD ""
+      provNames := provNames.push (pk, disp)
+      if let .obj mkvs := pv.fieldOrNull "models" then
+        for (mk, _) in mkvs do
+          let fullId := s!"{pk}/{mk}"
+          if !cfgModels.contains fullId then
+            cfgModels := cfgModels.push fullId
+  return (defModel?, provNames, cfgModels)
+
+/-- Resolve a requested OpenCode model ID against the local OpenCode configuration so Core/saved/btw
+    unprefixed IDs (e.g. `builtin/fast`, `builtin/smart`, `sandboxed-sh/builtin/smart`) map cleanly to
+    the user's configured local provider (e.g. `orbrouter/builtin/fast`). -/
+def resolveOpenCodeModelForLocal
+    (requestedModel? : Option String)
+    (defaultModel? : Option String)
+    (knownProviders : Array String)
+    (knownModels : Array String) : Option String := Id.run do
+  let some raw := requestedModel?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+    | return defaultModel?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+  let clean :=
+    if raw.startsWith "sandboxed-sh/" then (raw.drop 13).toString else raw
+  if knownModels.contains clean then
+    return some clean
+  let firstSeg := (clean.splitOn "/").headD ""
+  if firstSeg == "opencode" || knownProviders.contains firstSeg then
+    return some clean
+  let defProv? : Option String :=
+    match defaultModel? with
+    | some dm =>
+      let segs := dm.trimAscii.toString.splitOn "/"
+      if segs.length >= 2 && !segs[0]!.isEmpty then some segs[0]! else none
+    | none => knownProviders[0]?
+  if let some dp := defProv? then
+    let cand := s!"{dp}/{clean}"
+    if knownModels.contains cand || clean.startsWith "builtin/" then
+      return some cand
+  let suffix := s!"/{clean}"
+  if let some matched := knownModels.find? (fun km => km.endsWith suffix) then
+    return some matched
+  return some clean
+
+/-- Order discovered OpenCode model IDs with the user's configured default model and routing chains first. -/
+def orderOpenCodeModelIds (ids : Array String) (defaultModel? : Option String) : Array String := Id.run do
+  let mut unique : Array String := #[]
+  for raw in ids do
+    let m := raw.trimAscii.toString
+    if !m.isEmpty && m.contains '/' && !m.contains ' ' && !unique.contains m then
+      unique := unique.push m
+  let defClean? := defaultModel?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+  let defProv? : Option String :=
+    match defClean? with
+    | some dm =>
+      let segs := dm.splitOn "/"
+      if segs.length >= 2 && !segs[0]!.isEmpty then some (segs[0]! ++ "/") else none
+    | none => none
+  let mut out : Array String := Array.mkEmpty unique.size
+  let pushIfPresent (cand : String) (arr : Array String) : Array String :=
+    if unique.contains cand && !arr.contains cand then arr.push cand else arr
+  if let some dm := defClean? then
+    out := pushIfPresent dm out
+  for suffix in #["/builtin/smart", "/builtin/fast", "/builtin/cheap", "/builtin/assistant"] do
+    for m in unique do
+      if (m.endsWith suffix || m == (suffix.drop 1).toString) && !out.contains m then
+        out := out.push m
+  for m in unique do
+    if ((m.splitOn "/builtin/").length > 1 || m.startsWith "builtin/") && !out.contains m then
+      out := out.push m
+  if let some pfx := defProv? then
+    for m in unique do
+      if m.startsWith pfx && !out.contains m then
+        out := out.push m
+  for m in unique do
+    if !out.contains m then
+      out := out.push m
+  return out
+
+/-- Discover OpenCode (`opencode`) models via `opencode models` combined with `~/.config/opencode/opencode.json`. -/
+def probeOpenCodeModels (binPath : String) : IO (Except String (Array (String × String))) := do
+  if binPath.trimAscii.toString.isEmpty || !(← System.FilePath.pathExists binPath) then
+    return .error "OpenCode CLI is not installed"
+  let (defModel?, provNames, cfgModels) ← readLocalOpenCodeConfigInfo
+  let cliIds ← match ← (IO.Process.output {
+    cmd := binPath
+    args := #["models"]
+    env := #[("CI", some "1"), ("NO_COLOR", some "1")]
+  }).toBaseIO with
+  | .error _ => pure #[]
+  | .ok out =>
+    if out.exitCode != 0 then
+      pure #[]
+    else
+      let mut parsed : Array String := #[]
+      for line in out.stdout.splitOn "\n" do
+        let clean := (line.dropEndWhile (· == '\r')).trimAscii.toString
+        if !clean.isEmpty && clean.contains '/' && !clean.contains ' ' && !clean.startsWith "\x1b" then
+          parsed := parsed.push clean
+      pure parsed
+  let combined := if cliIds.isEmpty then cfgModels else cliIds ++ cfgModels
+  let ordered := orderOpenCodeModelIds combined defModel?
+  if ordered.isEmpty then
+    return .error "No OpenCode models are configured on this computer"
+  return .ok (ordered.map fun id => (id, formatOpenCodeModelLabel id provNames))
+
 /-- Scan local agent CLIs (`claudecode`, `codex`, `opencode`, `antigravity`, `grok`, `vibe`) matching `ScanRow[]` in `orb/src/localAgents.ts`. -/
 def scanInstalledHarnesses (overrides : JVal := .obj #[]) : IO JVal := do
   let specs : Array (String × String × Bool) := #[
     ("claudecode",  "claude",   true),
     ("codex",       "codex",    true),
-    ("opencode",    "opencode", false),
+    ("opencode",    "opencode", true),
     ("antigravity", "agy",      false),
     ("grok",        "grok",     false),
     ("vibe",        "vibe-acp", false)
@@ -1175,13 +1382,32 @@ def normalizeAntigravityCliModel (rawModel : String) (eff? : Option String) : St
     (s!"{base}-{lvl}", none)
   | none => (m, cleanEff?)
 
-/-- Build CLI invocation `(args, parseKind)` for non-Claude local harnesses (`codex`, `opencode`, `antigravity`, `grok`, `vibe`). -/
-private def buildOneShotHarnessArgs
+/-- Detect OpenCode auto-compaction summary blocks (`## Objective` ... `## Next Move` ... `## Relevant Files`)
+    so they are never concatenated into assistant answers. -/
+def isOpenCodeCompactionSummary (text : String) : Bool :=
+  let t := text.trimAscii.toString
+  (t.startsWith "## Objective\n" || t.startsWith "## Objective\r\n") &&
+  (((t.splitOn "\n## Next Move").length > 1 && (t.splitOn "\n## Relevant Files").length > 1) ||
+   (t.splitOn "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.").length > 1)
+
+/-- Structured result extracted from a single stdout line of a one-shot CLI harness (`opencode`, `codex`, `grok`, etc.). -/
+structure OneShotLineParsed where
+  sessionId? : Option String := none
+  textDelta  : String := ""
+  errorMsg?  : Option String := none
+  activity?  : Option LocalActivityItem := none
+  thinking?  : Option String := none
+  deriving Repr, BEq, Inhabited
+
+/-- Build CLI invocation `args` for non-Claude local harnesses (`codex`, `opencode`, `antigravity`, `grok`, `vibe`). -/
+def buildOneShotHarnessArgs
     (harness : String)
     (prompt : String)
     (model? : Option String)
     (effort? : Option String)
-    (sessionId? : Option String) : Array String := Id.run do
+    (sessionId? : Option String)
+    (permissionMode : ClaudePermissionMode := .bypassPermissions)
+    (imagePaths : Array String := #[]) : Array String := Id.run do
   let mdl? := model?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
   let eff? := effort?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
   let sid? := sessionId?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
@@ -1192,16 +1418,31 @@ private def buildOneShotHarnessArgs
       args := args ++ #["-m", bare]
     if let some e := eff? then
       args := args ++ #["-c", s!"model_reasoning_effort=\"{e}\""]
+    for img in imagePaths do
+      let cleanImg := img.trimAscii.toString
+      if !cleanImg.isEmpty then args := args ++ #["-i", cleanImg]
     if let some s := sid? then
-      args := args ++ #["resume", s, prompt]
+      args := args ++ #["resume", s, "--", prompt]
     else
-      args := args.push prompt
+      args := args ++ #["--", prompt]
     return args
   else if harness == "opencode" then
-    let mut args := #["run", "--format", "json"]
-    if let some m := mdl? then args := args ++ #["--model", m]
-    if let some s := sid? then args := args ++ #["--session", s]
-    args := args.push prompt
+    let mut args := #["run", "--format", "json", "--auto"]
+    let trimmedPrompt := prompt.trimAscii.toString
+    let isPlanPrompt := trimmedPrompt == "/plan" || trimmedPrompt.startsWith "/plan "
+    if permissionMode == .plan || isPlanPrompt then
+      args := args ++ #["--agent", "plan"]
+    if let some m := mdl? then
+      args := args ++ #["--model", m]
+    if let some s := sid? then
+      if s.startsWith "ses_" then
+        args := args ++ #["--session", s]
+    for img in imagePaths do
+      let cleanImg := img.trimAscii.toString
+      if !cleanImg.isEmpty then
+        args := args ++ #["--file", cleanImg]
+    let delivered := if isPlanPrompt && trimmedPrompt.length > 6 then (trimmedPrompt.drop 6).trimAscii.toString else prompt
+    args := args ++ #["--", delivered]
     return args
   else if harness == "antigravity" then
     let mut args := #["--print"]
@@ -1215,37 +1456,123 @@ private def buildOneShotHarnessArgs
     args := args.push prompt
     return args
   else if harness == "grok" then
-    let mut args := #["-p", prompt, "--output-format", "streaming-json"]
+    let mut args := #["--always-approve", "--no-plan", "--output-format", "streaming-json"]
     if let some m := mdl? then args := args ++ #["--model", m]
+    if let some s := sid? then args := args ++ #["--resume", s]
+    args := args ++ #["-p", prompt]
     return args
   else
     -- `vibe` or custom CLI
     return #["--prompt", prompt]
 
-/-- Extract incremental assistant text & session ID from a single stdout line of `codex` / `opencode` / `grok` / plain CLI. -/
-private def parseOneShotHarnessLine (harness : String) (rawLine : String) : Option String × String :=
+/-- Extract session ID, assistant text, tool activities, thinking, and structured JSON errors from a single stdout line. -/
+def parseOneShotHarnessEvent (harness : String) (rawLine : String) : OneShotLineParsed := Id.run do
   let trimmed := rawLine.trimAscii.toString
-  if trimmed.isEmpty then (none, "")
-  else if harness == "codex" || harness == "opencode" || harness == "grok" then
-    match OrbBin.Json.parse trimmed with
-    | .error _ => (none, "")
-    | .ok jv =>
-      let sid? := (jv.fieldStr? "thread_id").orElse (fun _ => jv.fieldStr? "sessionID") |>.orElse (fun _ => jv.fieldStr? "session_id")
-      let ty := (jv.fieldStr? "type").getD ""
-      if ty == "item.completed" then
-        let item := jv.fieldOrNull "item"
-        if (item.fieldStr? "type") == some "agent_message" then
-          (sid?, (item.fieldStr? "text").getD "")
-        else (sid?, "")
-      else if ty == "text" then
-        let part := jv.fieldOrNull "part"
-        (sid?, (part.fieldStr? "text").orElse (fun _ => jv.fieldStr? "text") |>.getD "")
-      else if ty == "assistant" || ty == "message" then
-        (sid?, (jv.fieldStr? "content").orElse (fun _ => jv.fieldStr? "text") |>.getD "")
+  if trimmed.isEmpty then return {}
+  if harness == "codex" || harness == "opencode" || harness == "grok" then
+    let .ok jv := OrbBin.Json.parse trimmed
+      | return {}
+    let part := jv.fieldOrNull "part"
+    let sid? :=
+      (jv.fieldStr? "thread_id")
+        |>.orElse (fun _ => jv.fieldStr? "sessionID")
+        |>.orElse (fun _ => jv.fieldStr? "session_id")
+        |>.orElse (fun _ => part.fieldStr? "sessionID")
+    let ty := (jv.fieldStr? "type").getD ""
+    if ty == "error" then
+      let errObj := jv.fieldOrNull "error"
+      let errData := errObj.fieldOrNull "data"
+      let rawMsg :=
+        (errData.fieldStr? "message")
+          |>.orElse (fun _ => errObj.fieldStr? "message")
+          |>.orElse (fun _ => jv.fieldStr? "error")
+          |>.orElse (fun _ => jv.fieldStr? "message")
+          |>.getD "Harness reported a protocol error"
+      return { sessionId? := sid?, errorMsg? := some ((rawMsg.take 1000).toString) }
+    else if ty == "item.completed" || ty == "item.started" then
+      let item := jv.fieldOrNull "item"
+      let itemTy := (item.fieldStr? "type").getD ""
+      if ty == "item.completed" && itemTy == "agent_message" then
+        return { sessionId? := sid?, textDelta := (item.fieldStr? "text").getD "" }
+      else if itemTy == "command_execution" then
+        let aid := (item.fieldStr? "id").getD "cmd"
+        let cmdStr := (item.fieldStr? "command").getD "command"
+        let stStr := (item.fieldStr? "status").getD (if ty == "item.completed" then "completed" else "running")
+        let isDone := ty == "item.completed" || stStr == "completed" || stStr == "failed"
+        let exitCode := (item.fieldInt? "exit_code").getD 0
+        let isFailed := stStr == "failed" || (isDone && exitCode != 0)
+        return {
+          sessionId? := sid?
+          activity? := some {
+            id := aid
+            label := "Bash"
+            done := isDone
+            failed := isFailed
+            kind := "command"
+            toolUseId? := some aid
+            detail? := some ((cmdStr.take 240).toString)
+            status := if isFailed then "failed" else if isDone then "completed" else "running"
+          }
+        }
       else
-        (sid?, "")
+        return { sessionId? := sid? }
+    else if ty == "tool_use" then
+      let toolName := (part.fieldStr? "tool").orElse (fun _ => jv.fieldStr? "name") |>.getD "tool"
+      let stateObj := part.fieldOrNull "state"
+      let stStr := (stateObj.fieldStr? "status").getD "completed"
+      let isDone := stStr == "completed" || stStr == "error" || stStr == "failed" || stStr == "cancelled"
+      let isFailed := stStr == "error" || stStr == "failed"
+      let aid :=
+        (part.fieldStr? "id")
+          |>.orElse (fun _ => part.fieldStr? "callID")
+          |>.orElse (fun _ => part.fieldStr? "partID")
+          |>.orElse (fun _ => jv.fieldStr? "id")
+          |>.getD s!"tool-{toolName}"
+      let inputObj := stateObj.fieldOrNull "input"
+      let detailRaw? :=
+        (inputObj.fieldStr? "command")
+          |>.orElse (fun _ => inputObj.fieldStr? "filePath")
+          |>.orElse (fun _ => inputObj.fieldStr? "path")
+          |>.orElse (fun _ => inputObj.fieldStr? "pattern")
+          |>.orElse (fun _ => inputObj.fieldStr? "url")
+          |>.orElse (fun _ => (stateObj.fieldStr? "title").filter (· != toolName))
+      let kind :=
+        if toolName == "shell" || toolName == "bash" then "command"
+        else if toolName == "read" || toolName == "glob" || toolName == "grep" then "read"
+        else if toolName == "edit" || toolName == "write" || toolName == "multiedit" then "edit"
+        else "tool"
+      let timeObj := stateObj.fieldOrNull "time"
+      let startTs := (timeObj.fieldUInt64? "start").orElse (fun _ => jv.fieldUInt64? "timestamp") |>.getD 0
+      let endTs? := timeObj.fieldUInt64? "end"
+      return {
+        sessionId? := sid?
+        activity? := some {
+          id := aid
+          label := toolName
+          done := isDone
+          failed := isFailed
+          kind := kind
+          toolUseId? := some aid
+          detail? := detailRaw?.map (fun d => (d.take 240).toString)
+          status := if isFailed then "failed" else if isDone then "completed" else "running"
+          startedAt := startTs
+          updatedAt := endTs?.getD startTs
+          finishedAt? := if isDone then endTs? else none
+        }
+      }
+    else if ty == "reasoning" then
+      let rText := (part.fieldStr? "text").orElse (fun _ => jv.fieldStr? "text") |>.getD ""
+      return { sessionId? := sid?, thinking? := if rText.isEmpty then none else some rText }
+    else if ty == "text" then
+      let rawTxt := (part.fieldStr? "text").orElse (fun _ => jv.fieldStr? "text") |>.getD ""
+      let cleanTxt := if harness == "opencode" && isOpenCodeCompactionSummary rawTxt then "" else rawTxt
+      return { sessionId? := sid?, textDelta := cleanTxt }
+    else if ty == "assistant" || ty == "message" then
+      return { sessionId? := sid?, textDelta := (jv.fieldStr? "content").orElse (fun _ => jv.fieldStr? "text") |>.getD "" }
+    else
+      return { sessionId? := sid? }
   else
-    (none, rawLine ++ "\n")
+    return { textDelta := rawLine ++ "\n" }
 
 /-- Launch a turn for any supported local harness (`claudecode` via warm bidirectional stdio, or one-shot CLI for others).
     Automatically evaluates worktree isolation when requested and captures pre/post-turn git checkpoints! -/
@@ -1324,9 +1651,34 @@ def startHarnessTurn
     | .ok () =>
       return .ok (← stRef.get)
   else
-    let cliArgs := buildOneShotHarnessArgs harness prompt model? effort? effSid?
+    let resolvedModel? ←
+      if harness == "opencode" then
+        let (defModel?, provNames, cfgModels) ← readLocalOpenCodeConfigInfo
+        let firstChoice := resolveOpenCodeModelForLocal model? defModel? (provNames.map Prod.fst) cfgModels
+        let needsCliProbe :=
+          defModel?.isNone && cfgModels.isEmpty &&
+          (match model? with
+           | none => false
+           | some m =>
+             let t := m.trimAscii.toString
+             t.startsWith "builtin/" || t.startsWith "sandboxed-sh/" || !(t.contains '/'))
+        if needsCliProbe then
+          match ← probeOpenCodeModels actualBin with
+          | .ok probed =>
+            let probedIds := probed.map Prod.fst
+            pure (resolveOpenCodeModelForLocal model? probedIds[0]? #[] probedIds)
+          | .error _ => pure firstChoice
+        else
+          pure firstChoice
+      else
+        pure model?
+    let cliArgs := buildOneShotHarnessArgs harness prompt resolvedModel? effort? effSid? permissionMode imagePaths
     let envPairs ← currentEnvPairs
-    let envStrs := envPairs.map fun (k, v) => s!"{k}={v}"
+    let mut envStrs := envPairs.map fun (k, v) => s!"{k}={v}"
+    if !envPairs.any (fun (k, _) => k == "NO_COLOR") then
+      envStrs := envStrs.push "NO_COLOR=1"
+    if harness == "opencode" && !envPairs.any (fun (k, _) => k == "OPENCODE_PERMISSION") && permissionMode != .plan then
+      envStrs := envStrs.push "OPENCODE_PERMISSION={\"*\":\"allow\"}"
     let shArgs := #["-c", "cd \"$1\" && shift && exec \"$@\"", "sh", effectiveCwd, actualBin] ++ cliArgs
     let spawned ← match ← (spawnPgrp "/bin/sh" shArgs envStrs (pipeStdin := false) (nullStdio := true) (pipeStdout := true)).toBaseIO with
       | .error e =>
@@ -1349,14 +1701,37 @@ def startHarnessTurn
             let (lines, rem) := drainNewlineByteLines (buf ++ chunk)
             buf := rem
             for ln in lines do
-              let (sid?, delta) := parseOneShotHarnessLine harness ln
-              if let some sid := sid? then
+              let parsed := parseOneShotHarnessEvent harness ln
+              if let some sid := parsed.sessionId? then
                 stRef.modify fun s => { s with sessionId? := some sid }
-              if !delta.isEmpty then
-                stRef.modify fun s => { s with text := s.text ++ delta }
+              if let some errMsg := parsed.errorMsg? then
+                stRef.modify fun s => { s with error? := some errMsg }
+              if let some th := parsed.thinking? then
                 let cb ← getCallbacksFor mgr id
-                cb.onStructuredEvent "text_delta" (.obj #[("content", .str delta)])
-                cb.onOutputEvent (.obj #[("text", .str delta), ("reset", .bool false)])
+                cb.onStructuredEvent "thinking" (.obj #[("content", .str th)])
+              if let some act := parsed.activity? then
+                let nextActs ← stRef.modifyGet fun s =>
+                  let updated :=
+                    if s.activities.any (fun a => a.id == act.id) then
+                      s.activities.map (fun a => if a.id == act.id then act else a)
+                    else
+                      s.activities.push act
+                  (updated, { s with activities := updated })
+                let cb ← getCallbacksFor mgr id
+                cb.onStructuredEvent (if act.done then "tool_result" else "tool_call") act.toJVal
+                cb.onOutputEvent (.obj #[
+                  ("text", .str ""),
+                  ("reset", .bool false),
+                  ("activities", .arr (nextActs.map LocalActivityItem.toJVal))
+                ])
+              if !parsed.textDelta.isEmpty then
+                let emittedDelta ← stRef.modifyGet fun s =>
+                  let sep := if harness == "opencode" && !s.text.isEmpty && !s.text.endsWith "\n" && !parsed.textDelta.startsWith "\n" then "\n\n" else ""
+                  let piece := sep ++ parsed.textDelta
+                  (piece, { s with text := s.text ++ piece })
+                let cb ← getCallbacksFor mgr id
+                cb.onStructuredEvent "text_delta" (.obj #[("content", .str emittedDelta)])
+                cb.onOutputEvent (.obj #[("text", .str emittedDelta), ("reset", .bool false)])
       closeFdRaw spawned.stdoutFd
       let code ← waitpidBlock spawned.pid
       mgr.mu.atomically do
@@ -1364,7 +1739,8 @@ def startHarnessTurn
         mgr.activePidsRef.set (pids.filter (fun (k, _) => k != id))
       let postTurnIdx := prevTurns + 1
       discard <| captureCheckpoint effectiveCwd id postTurnIdx s!"post-{generation}" s!"Turn {postTurnIdx}"
-      let err? := if code == 0 then none else some s!"{harness} exited with code {code}"
+      let priorErr? := (← stRef.get).error?
+      let err? := priorErr?.orElse (fun _ => if code == 0 then none else some s!"{harness} exited with code {code}")
       stRef.modify fun s => {
         s with
         done := true

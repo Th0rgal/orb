@@ -64,6 +64,11 @@ describe("poor-network resilience suite", () => {
     expect(classifyClientRequestPriority("POST", "/api/file-resources")).toBe("p1");
     expect(classifyClientRequestPriority("POST", "/api/control/missions/m1/opened")).toBe("p1");
     expect(classifyClientRequestPriority("PUT", "/api/control/inbox-state/seen/m1")).toBe("p1");
+    expect(classifyClientRequestPriority("POST", "/api/usage-telemetry/events")).toBe("p2");
+    expect(classifyClientRequestPriority("GET", "/api/privilege-access")).toBe("p2");
+    expect(classifyClientRequestPriority("POST", "/api/privilege-access/req-1/approve")).toBe("p0");
+    expect(classifyClientRequestPriority("GET", "/api/control/missions?project=verity-core&limit=200")).toBe("p1");
+    expect(classifyClientRequestPriority("GET", "/api/control/missions?project=verity-core&limit=200&offset=200")).toBe("p2");
 
     let releaseP0!: () => void;
     const p0Promise = scheduleTransportRequest(
@@ -364,5 +369,63 @@ describe("poor-network resilience suite", () => {
     releaseP0Gate();
     await p0Gate;
     forgetPrefetchPauses();
+  });
+
+  it("dispatches listProviders immediately on P1 without queueing behind background project pagination or telemetry flushes", async () => {
+    const { listProjectMissions, listProviders, transportFetch } = await import("../src/api");
+    setConnection("https://orbcore.thomas.md", "tok-inference-lane");
+
+    const releasePagination: Array<() => void> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/control/missions?project=")) {
+          return new Promise<Response>((resolve) => {
+            releasePagination.push(() => resolve(Response.json([])));
+          });
+        }
+        if (url.endsWith("/api/usage-telemetry/events")) {
+          return new Promise<Response>((resolve) => {
+            releasePagination.push(() => resolve(Response.json({ accepted: 1 })));
+          });
+        }
+        if (url.endsWith("/api/ai/providers")) {
+          return Promise.resolve(
+            Response.json([
+              { id: "claude-1", name: "Claude Max", provider_type: "anthropic", uses_oauth: true, status: { type: "connected" } },
+            ]),
+          );
+        }
+        return Promise.resolve(Response.json([]));
+      }),
+    );
+
+    // Simulate multiple expanded projects running background sweeps plus a page-change telemetry POST.
+    const bgSweeps = [
+      listProjectMissions("verity-core", { background: true }),
+      listProjectMissions("default", { background: true }),
+      listProjectMissions("health-manager", { background: true }),
+      transportFetch("/api/usage-telemetry/events", { method: "POST", body: "{}" }),
+    ];
+    await new Promise((r) => setTimeout(r, 15));
+    expect(networkHealthSnapshot().p0InFlight).toBe(0);
+    expect(transportSchedulerStats().p1Active).toBe(0);
+
+    // Foreground Inference load resolves immediately with 0 ms P1 queue delay.
+    const t0 = performance.now();
+    const providers = await listProviders();
+    const elapsedMs = performance.now() - t0;
+    expect(providers.map((p) => p.id)).toEqual(["claude-1"]);
+    expect(elapsedMs).toBeLessThan(50);
+
+    // Drain P2 queue across capacity waves until all background sweeps settle.
+    let done = false;
+    const allBg = Promise.allSettled(bgSweeps).then(() => { done = true; });
+    while (!done) {
+      while (releasePagination.length > 0) releasePagination.shift()?.();
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    await allBg;
   });
 });
