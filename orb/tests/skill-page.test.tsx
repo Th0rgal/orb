@@ -99,6 +99,46 @@ describe("skill page", () => {
       ],
     });
   });
+
+  it("prunes local harnesses when deleting a skill from SkillPage", async () => {
+    let deleted = false;
+    let syncedReq: unknown = null;
+    const back = vi.fn();
+    (window as unknown as { __TAURI__: { core: { invoke: (_cmd: string, args?: { request?: unknown }) => Promise<unknown> } } }).__TAURI__ = {
+      core: {
+        invoke: async (cmd, args) => {
+          if (cmd === "local_skills_sync") syncedReq = args?.request ?? null;
+          return { synced_skills: 0, harnesses_updated: 3, skipped_unmanaged: [], pruned: ["~/.gemini/config/skills/agent-browser", "~/.config/opencode/skills/agent-browser", "~/.claude/skills/agent-browser"], report: { skills: [], harnesses: [], sources: [] } };
+        },
+      },
+    };
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input).replace("https://core.test", ""), method = init?.method ?? "GET";
+      const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (url.startsWith("/api/library/skill?include=bundle") || url === "/api/library/skill") {
+        return ok(deleted ? [] : [{ name: "agent-browser", path: "skill/agent-browser", content }]);
+      }
+      if (url === "/api/library/skill/agent-browser") {
+        if (method === "DELETE") { deleted = true; return new Response("Skill deleted"); }
+        return ok({ name: "agent-browser", path: "skill/agent-browser", content, files: [], references: [] });
+      }
+      if (url === "/api/library/commit" || url === "/api/library/push") return new Response("ok");
+      if (url === "/api/projects") return ok({ projects: [] });
+      return ok({});
+    });
+    render(() => <SkillPage name="agent-browser" onBack={back} />);
+    await screen.findByText("Agent browser");
+    fireEvent.click(screen.getByRole("button", { name: "Actions for agent-browser" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Delete/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(back).toHaveBeenCalled());
+    await waitFor(() => expect(syncedReq).not.toBeNull());
+    expect(syncedReq).toMatchObject({
+      library_skills: [],
+      library_loaded: true,
+      prune_removed: true,
+    });
+  });
 });
 
 describe("middleTruncate", () => {

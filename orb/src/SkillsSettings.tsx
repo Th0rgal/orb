@@ -26,8 +26,6 @@ import {
 } from "./api";
 import {
   localInstalled,
-  localSkillsStatus,
-  localSkillsSync,
   readLegacySkillFiles,
   refreshLocalAgents,
   type HarnessSkillTarget,
@@ -35,6 +33,7 @@ import {
   type SkillSourceRef,
   type SyncSkillPayload,
 } from "./localAgents";
+import { localSkillsStatus, localSkillsSync } from "./localLibrarySync";
 import { refreshSoftware, softwareMachines } from "./softwareInventory";
 import { effectiveAudience, newSkillTemplate, normalizeSkillName, parseSkillMeta, setSandboxedMeta } from "./skillModel";
 import { SKILL_BADGE_LABEL, buildSkillRows, isOldCopy, needsAttention, skillBadge, type ProjectContextSkill, type SkillRow } from "./skillRows";
@@ -215,7 +214,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   };
 
   const refreshReport = async () => {
-    const rep = await localSkillsStatus(libraryPayloads());
+    const rep = await localSkillsStatus(libraryPayloads(), libraryLoaded());
     if (rep) {
       rememberSkillsReport(rep);
       setLocalReport(rep);
@@ -466,7 +465,13 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
         const extra = await Promise.all(refs.map(async (rel) => ({ rel, content: await readSkillFile(pl.name, rel).catch(() => "") })));
         return { ...pl, files: [...(pl.files ?? []), ...extra] };
       }));
-      const result = await localSkillsSync({ librarySkills: payloads, pruneRemoved: prune && libraryLoaded(), replaceUnmanaged, forceMcpPrompt });
+      const result = await localSkillsSync({
+        librarySkills: payloads,
+        libraryLoaded: libraryLoaded(),
+        pruneRemoved: prune && libraryLoaded(),
+        replaceUnmanaged,
+        forceMcpPrompt,
+      });
       setLocalReport(result.report);
       rememberKnownSkillNames(result.report.skills.map((s) => s.name));
       rememberSkillsReport(result.report);

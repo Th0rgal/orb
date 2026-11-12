@@ -1920,7 +1920,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let multiDb ← hasMultipleActiveUsers st.store
     -- `ORB_BUILD_SHA` is set by the deploy step, so a caller can tell which commit a service runs.
     let buildSha := ((← IO.getEnv "ORB_BUILD_SHA").getD "").trimAscii.toString
-    let health := renderHealthJson st.cfg multiDb
+    let effLibRem ← resolveEffectiveLibraryRemote st.store.rootDir st.cfg.libraryRemote
+    let health := renderHealthJson { st.cfg with libraryRemote := effLibRem } multiDb
     let body :=
       if buildSha.isEmpty || !health.endsWith "}" then health
       else (health.dropEnd 1).toString ++ s!",\"build\":{jsonEscape buildSha}}"
@@ -3634,7 +3635,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let mut selectedSkills : Array SelectedSkill := #[]
       if !clientPlaced then
         if let some prompt := prompt? then
-          match ← selectDelivered st.cfg.workingDir (if rawProjSlug.isEmpty then none else some rawProjSlug) backend prompt with
+          match ← selectDelivered st.cfg.workingDir (if rawProjSlug.isEmpty then none else some rawProjSlug) backend prompt st.store.rootDir with
           | .error e =>
             abortIdem
             return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
@@ -5073,7 +5074,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         else if caller.isLegacyUnscoped then some m.project
         else some ((unscopeProjectSlugForOwner m.ownerUserId st.bootstrapAdminId m.project).getD m.project))
       let harness := (mission?.map (·.backend)).getD "opencode"
-      match ← selectDelivered st.cfg.workingDir proj? harness content with
+      match ← selectDelivered st.cfg.workingDir proj? harness content st.store.rootDir with
       | .error e => return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
       | .ok sel => selectedSkills := sel
     if let some (mid, saved, effectiveModel) := promoteCyber? then
@@ -5200,7 +5201,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             if m.project.isEmpty then none
             else if caller.isLegacyUnscoped then some m.project
             else some ((unscopeProjectSlugForOwner m.ownerUserId st.bootstrapAdminId m.project).getD m.project)
-          match ← selectDelivered st.cfg.workingDir proj? m.backend content with
+          match ← selectDelivered st.cfg.workingDir proj? m.backend content st.store.rootDir with
           | .error e => return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
           | .ok sel => selectedSkills := sel
       if let some (saved, effectiveModel) := promoteCyber? then
@@ -5258,7 +5259,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   if req.method == "GET" && cleanPath == "/api/library/skill-delivery" then
     let q := parseQueryParams rawTarget
     let proj? := (q.find? (fun p => p.1 == "project")).map Prod.snd
-    match ← buildDeliveryPlan st.cfg.workingDir proj? with
+    match ← buildDeliveryPlan st.cfg.workingDir proj? st.store.rootDir with
     | .error e => return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
     | .ok plan => return .ok (mkJson 200 (planToJson plan))
 
@@ -5730,7 +5731,12 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       return .ok (mkJson 403 "{\"error\":\"admin_required\"}")
     if req.method == "GET" then
       let rawSettings ← readSettingsJson st.store.rootDir
-      return .ok (mkJson 200 (renderCompact (redactSettingsSecrets rawSettings)))
+      let withLib :=
+        if (rawSettings.field? "library_remote").isSome || st.cfg.libraryRemote.isEmpty then
+          rawSettings
+        else
+          rawSettings.setField "library_remote" (.str st.cfg.libraryRemote)
+      return .ok (mkJson 200 (renderCompact (redactSettingsSecrets withLib)))
     else
       let .ok patchJv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
         | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")

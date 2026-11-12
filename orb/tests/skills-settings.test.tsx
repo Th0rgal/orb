@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SkillsSettings, knownSkillNames } from "../src/SkillsSettings";
 import { clearConnection, setConnection } from "../src/api";
+import { syncConnectedLibraryToLocalHarnesses } from "../src/localLibrarySync";
 import type { LocalSkillsReport } from "../src/localAgents";
 
 function sampleLocalReport(syncedAntigravity = false): LocalSkillsReport {
@@ -599,5 +600,82 @@ describe("SkillsSettings", () => {
     allowMint = true;
     fireEvent.click(connectBtn);
     expect(await screen.findByText("Synced · 4 harnesses")).toBeTruthy();
+  });
+
+  it("background startup sync uses ?include=bundle in 1 request and syncs drifted harnesses without opening Settings", async () => {
+    setConnection("https://orbcore.thomas.md", "test-jwt");
+    let synced = false;
+    const syncCalls: any[] = [];
+    const fetchedUrls: string[] = [];
+
+    (window as unknown as { __TAURI__: { core: { invoke: (cmd: string, args?: any) => Promise<unknown> } } }).__TAURI__ = {
+      core: {
+        invoke: async (cmd: string, args?: any) => {
+          if (cmd === "local_skills_status") return sampleLocalReport(synced);
+          if (cmd === "local_skills_sync") {
+            synced = true;
+            syncCalls.push(args.request);
+            return {
+              synced_skills: 1,
+              harnesses_updated: 2,
+              skipped_unmanaged: [],
+              pruned: [],
+              report: sampleLocalReport(true),
+            };
+          }
+          return null;
+        },
+      },
+    };
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      fetchedUrls.push(url);
+      const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (url.endsWith("/api/library/skill?include=bundle")) {
+        return ok([
+          {
+            name: "orb-basics",
+            path: "skill/orb-basics",
+            audience: ["mission", "local"],
+            scope: "global",
+            content: "---\nname: orb-basics\n---\n# Basics\n",
+            files: [{ name: "guide.md", path: "references/guide.md", content: "# Guide\n" }],
+            references: [],
+          },
+        ]);
+      }
+      return ok({});
+    });
+
+    const res1 = await syncConnectedLibraryToLocalHarnesses({
+      onlyIfNeeded: true,
+      pruneRemoved: true,
+      skipMcpMint: true,
+    });
+    expect(res1?.harnesses_updated).toBe(2);
+    expect(fetchedUrls).toEqual(["https://orbcore.thomas.md/api/library/skill?include=bundle"]);
+    expect(syncCalls).toHaveLength(1);
+    expect(syncCalls[0]).toMatchObject({
+      library_loaded: true,
+      prune_removed: true,
+      library_skills: [
+        {
+          name: "orb-basics",
+          audience: ["mission", "local"],
+          scope: "global",
+          files: [{ rel: "references/guide.md", content: "# Guide\n" }],
+        },
+      ],
+    });
+
+    // Second check when already synced performs zero disk sync calls.
+    const res2 = await syncConnectedLibraryToLocalHarnesses({
+      onlyIfNeeded: true,
+      pruneRemoved: true,
+      skipMcpMint: true,
+    });
+    expect(res2).toBeNull();
+    expect(syncCalls).toHaveLength(1);
   });
 });

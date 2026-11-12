@@ -6158,6 +6158,175 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
   stopEnvAndMock
   return 0
 
+set_option maxHeartbeats 400000 in
+private def runLibraryGitAndSkillParityTests : IO UInt32 := do
+  let ts ← IO.monoNanosNow
+  let workRoot := s!"/tmp/orb_library_parity_{ts}"
+  let dataRoot := s!"{workRoot}/.sandboxed-sh"
+  let bareRepo := s!"{workRoot}/remote-library.git"
+  let seedRepo := s!"{workRoot}/seed-library"
+  let peerRepo := s!"{workRoot}/peer-library"
+  discard <| (IO.FS.removeDirAll workRoot).toBaseIO
+  IO.FS.createDirAll (System.FilePath.mk s!"{dataRoot}/missions")
+  IO.FS.createDirAll (System.FilePath.mk bareRepo)
+  IO.FS.createDirAll (System.FilePath.mk s!"{seedRepo}/skill/orb-basics/references")
+  IO.FS.createDirAll (System.FilePath.mk s!"{seedRepo}/skill/orb-basics/tools")
+  IO.FS.createDirAll (System.FilePath.mk s!"{seedRepo}/skill/proton-mail")
+
+  let shRun (cmd : String) : IO Nat := do
+    let env ← OrbBin.PosixExt.environList
+    let sp ← OrbBin.PosixExt.spawnPgrp "/bin/sh" #["-c", cmd] env false false true
+    if sp.pid < 0 then return 127
+    if sp.stdoutFd >= 0 then
+      let mut eof := false
+      while !eof do
+        let chunk ← OrbBin.PosixExt.readFdChunk sp.stdoutFd 4096
+        if chunk.isEmpty then eof := true
+      OrbBin.PosixExt.closeFdRaw sp.stdoutFd
+    let st ← OrbBin.PosixExt.waitpidBlock sp.pid
+    return st.toNat
+
+  IO.FS.writeFile (System.FilePath.mk s!"{seedRepo}/skill/orb-basics/SKILL.md")
+    "---\nname: orb-basics\ndescription: \"Orient an Orb agent to its environment.\"\nmetadata:\n  sandboxed:\n    audience: [mission, local]\n    scope: global\n---\n\n# Orb Basics\n\nFollow Core contracts.\n"
+  IO.FS.writeFile (System.FilePath.mk s!"{seedRepo}/skill/orb-basics/references/guide.md") "# Guide\nRead carefully.\n"
+  IO.FS.writeFile (System.FilePath.mk s!"{seedRepo}/skill/orb-basics/tools/helper.py") "#!/usr/bin/env python3\nprint('ok')\n"
+  IO.FS.writeFile (System.FilePath.mk s!"{seedRepo}/skill/proton-mail/SKILL.md")
+    "---\nname: proton-mail\ndescription: \"Coordinator mail helper.\"\nmetadata:\n  sandboxed:\n    audience: [coordinator]\n    scope: on-demand\n---\n\n# Proton Mail\n"
+
+  let initRc ← shRun
+    (s!"git init --bare '{bareRepo}' && " ++
+     s!"cd '{seedRepo}' && git init -b main && " ++
+     "git config user.name 'Seed' && git config user.email 'seed@example.com' && " ++
+     s!"git add -A && git commit -m 'initial library' && git remote add origin '{bareRepo}' && git push -u origin main")
+  if initRc != 0 then
+    discard <| (IO.FS.removeDirAll workRoot).toBaseIO
+    IO.eprintln s!"[orb-core-test] FAIL (library-parity): failed to seed bare git repo (rc={initRc})"
+    return 1
+
+  let store ← match ← openCoreStore dataRoot 0 "prod" with
+    | .ok s => pure s
+    | .error e =>
+      discard <| (IO.FS.removeDirAll workRoot).toBaseIO
+      IO.eprintln s!"[orb-core-test] FAIL (library-parity): openCoreStore failed: {e}"
+      return 1
+
+  let fail (msg : String) : IO UInt32 := do
+    closeCoreStore store
+    discard <| (IO.FS.removeDirAll workRoot).toBaseIO
+    IO.eprintln s!"[orb-core-test] FAIL (library-parity): {msg}"
+    return 1
+
+  let jwtSec := "library-parity-jwt-secret-0123456789abcdef"
+  let nowSec : UInt64 := 1794500000
+  let hsJwt := issueHs256Jwt jwtSec "prod" "admin" nowSec (nowSec + 86400) "admin"
+  let cfg : CoreConfig := {
+    host := "127.0.0.1"
+    port := 13001
+    workingDir := workRoot
+    devMode := false
+    dashboardPassword := "strong-prod-pass-1234"
+    jwtSecret := jwtSec
+  }
+  let _ ← bootstrapUsersAndBackfill store #[("admin", cfg.dashboardPassword)] (formatEpochIso8601Utc nowSec)
+  let managedRef ← IO.mkRef ({} : ManagedFleetState)
+  let chainsRef ← IO.mkRef (#[] : Array RoutingChain)
+  let cooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
+  let seqRef ← IO.mkRef (0 : UInt64)
+  let appSt : CoreAppState := {
+    cfg := cfg
+    store := store
+    searchIdx? := none
+    managedRef := managedRef
+    chainsRef := chainsRef
+    proxyCooldownsRef := cooldownsRef
+    seqRef := seqRef
+  }
+
+  let sendReq (method path tok body : String) : IO (Nat × String × String) := do
+    let bBytes := body.toUTF8
+    let authLine := if tok.isEmpty then "" else s!"Authorization: Bearer {tok}\r\n"
+    let rawWire :=
+      (s!"{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authLine}" ++
+       s!"Content-Type: application/json\r\nContent-Length: {bBytes.size}\r\n\r\n").toUTF8 ++ bBytes
+    match parseRequest rawWire none with
+    | .error _ => return (599, "", "parse_err")
+    | .ok req =>
+      match ← dispatchCoreRequest appSt req nowSec with
+      | .error _ => return (101, "", "")
+      | .ok resp => return (resp.status, resp.contentType, (String.fromUTF8? resp.body).getD "")
+
+  -- 1. Reject option-injection git remote URLs; initialize from valid bare repo via `PUT /api/settings/library-remote`
+  let (badRemSt, _, _) ← sendReq "PUT" "/api/settings/library-remote" hsJwt "{\"library_remote\":\"--upload-pack=/bin/false\"}"
+  let (setRemSt, _, setRemBody) ← sendReq "PUT" "/api/settings/library-remote" hsJwt
+    s!"\{\"library_remote\":{jsonEscape bareRepo},\"force_reinitialize\":true}"
+  let (hlthSt, _, hlthBody) ← sendReq "GET" "/api/health" "" ""
+  let (stCode, _, stBody) ← sendReq "GET" "/api/library/status" hsJwt ""
+  if badRemSt != 400 || setRemSt != 200 ||
+     (setRemBody.splitOn "\"library_reinitialized\":true").length != 2 ||
+     hlthSt != 200 || (hlthBody.splitOn bareRepo).length < 2 ||
+     stCode != 200 || (stBody.splitOn "\"clean\":true").length != 2 then
+    return (← fail s!"library-remote init/health/status mismatch: bad={badRemSt} set={setRemSt}:{setRemBody} hlth={hlthBody} st={stBody}")
+
+  -- 2. Canonical `skill/` catalog listing (`?include=bundle`), single-skill bundle, raw text reference read, and `SKILL.md` delete guard
+  let (listSt, _, listBody) ← sendReq "GET" "/api/library/skill" hsJwt ""
+  let (bundleSt, _, bundleBody) ← sendReq "GET" "/api/library/skill?include=bundle" hsJwt ""
+  let (oneSt, _, oneBody) ← sendReq "GET" "/api/library/skill/orb-basics" hsJwt ""
+  let (refSt, refCtype, refBody) ← sendReq "GET" "/api/library/skill/orb-basics/files/references/guide.md" hsJwt ""
+  let (delMdSt, _, _) ← sendReq "DELETE" "/api/library/skill/orb-basics/files/SKILL.md" hsJwt ""
+  let (delivSt, _, delivBody) ← sendReq "GET" "/api/library/skill-delivery" hsJwt ""
+  if listSt != 200 ||
+     (listBody.splitOn "\"path\":\"skill/orb-basics\"").length != 2 ||
+     (listBody.splitOn "\"scope\":\"global\"").length != 2 ||
+     bundleSt != 200 ||
+     (bundleBody.splitOn "\"references/guide.md\"").length < 2 ||
+     (bundleBody.splitOn "\"tools/helper.py\"").length < 2 ||
+     oneSt != 200 ||
+     (oneBody.splitOn "\"references\":[\"tools/helper.py\"]").length != 2 ||
+     refSt != 200 || !(refCtype.startsWith "text/plain") || refBody != "# Guide\nRead carefully.\n" ||
+     delMdSt != 400 ||
+     delivSt != 200 ||
+     (delivBody.splitOn "\"orb-basics\"").length != 2 ||
+     (delivBody.splitOn "\"proton-mail\"").length != 1 then
+    return (← fail s!"skill catalog/files/delivery mismatch: list={listBody} one={oneBody} ref=({refSt},{refCtype},{refBody}) delMd={delMdSt} deliv={delivBody}")
+
+  -- 3. Update skill, commit, push, and inspect git history + revision content
+  let updatedContent := "---\nname: orb-basics\ndescription: \"Updated description.\"\nmetadata:\n  sandboxed:\n    audience: [mission, local]\n    scope: global\n---\n\n# Orb Basics v2\n"
+  let (putSkSt, _, _) ← sendReq "PUT" "/api/library/skill/orb-basics" hsJwt s!"\{\"content\":{jsonEscape updatedContent}}"
+  let (cmtSt, _, cmtBody) ← sendReq "POST" "/api/library/commit" hsJwt "{\"message\":\"skill: update orb-basics\"}"
+  let (pushSt, _, pushBody) ← sendReq "POST" "/api/library/push" hsJwt ""
+  let (histSt, _, histBody) ← sendReq "GET" "/api/library/skill/orb-basics/history" hsJwt ""
+  let histArr := ((OrbBin.Json.parse histBody).toOption >>= OrbBin.Json.JVal.asArr?).getD #[]
+  let oldestRev := (histArr.back?.bind (·.fieldStr? "rev")).getD ""
+  let (revSt, revCtype, revBody) ← sendReq "GET" s!"/api/library/skill/orb-basics/history/{oldestRev}" hsJwt ""
+  if putSkSt != 200 || cmtSt != 200 || pushSt != 200 || histSt != 200 || histArr.size < 2 ||
+     revSt != 200 || !(revCtype.startsWith "text/plain") || (revBody.splitOn "Follow Core contracts.").length != 2 then
+    return (← fail s!"commit/push/history roundtrip failed: put={putSkSt} cmt={cmtSt}:{cmtBody} push={pushSt}:{pushBody} hist={histBody} rev=({revSt},{revBody})")
+
+  -- 4. Diverged history (`409 DIVERGED_HISTORY`) on `sync`/`push` and recovery via `force-sync`
+  let divergeRc ← shRun
+    (s!"git clone -b main '{bareRepo}' '{peerRepo}' && cd '{peerRepo}' && " ++
+     "git config user.name 'Peer' && git config user.email 'peer@example.com' && " ++
+     "printf '\\nPeer remote line.\\n' >> skill/orb-basics/SKILL.md && " ++
+     "git commit -am 'peer update' && git push origin main")
+  if divergeRc != 0 then
+    return (← fail s!"peer clone/push failed (rc={divergeRc})")
+  let localDivContent := updatedContent ++ "\nLocal diverged line.\n"
+  let _ ← sendReq "PUT" "/api/library/skill/orb-basics" hsJwt s!"\{\"content\":{jsonEscape localDivContent}}"
+  let (divCmtSt, _, _) ← sendReq "POST" "/api/library/commit" hsJwt "{\"message\":\"local diverge\"}"
+  let (divPushSt, _, divPushBody) ← sendReq "POST" "/api/library/push" hsJwt ""
+  let (divSyncSt, _, divSyncBody) ← sendReq "POST" "/api/library/sync" hsJwt ""
+  let (fSyncSt, _, _) ← sendReq "POST" "/api/library/force-sync" hsJwt ""
+  let (afterSt, _, afterBody) ← sendReq "GET" "/api/library/skill/orb-basics" hsJwt ""
+  if divCmtSt != 200 ||
+     divPushSt != 409 || (divPushBody.splitOn "DIVERGED_HISTORY").length < 2 ||
+     divSyncSt != 409 || (divSyncBody.splitOn "DIVERGED_HISTORY").length < 2 ||
+     fSyncSt != 200 || afterSt != 200 || (afterBody.splitOn "Peer remote line.").length < 2 then
+    return (← fail s!"diverged history detection/force-sync failed: push=({divPushSt},{divPushBody}) sync=({divSyncSt},{divSyncBody}) fSync={fSyncSt} after={afterBody}")
+
+  closeCoreStore store
+  discard <| (IO.FS.removeDirAll workRoot).toBaseIO
+  return 0
+
 set_option maxHeartbeats 800000 in
 set_option maxRecDepth 4000 in
 def runSuite (emitLogPath? : Option String) : IO UInt32 := do
@@ -7344,6 +7513,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   if (← runOrbUriCorsTests) != 0 then return 1
   if (← runProdParityAndMissionMoveTests prodValid) != 0 then return 1
   if (← runRemoteDispatchWakeupAndBtwTests prodValid) != 0 then return 1
+  if (← runLibraryGitAndSkillParityTests) != 0 then return 1
 
   IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":11,\"harness_contracts\":10,\"host_tests\":101}"
   return 0

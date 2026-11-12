@@ -932,6 +932,88 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
     stagedRead.isOk
   if (← assertTrue "software_inventory_skills_sync_and_staged_upload_roundtrip" invAndSkillsOk) then passed := passed + 1
 
+  -- F1b. Bundled reference drift, `+x` tool script mode, `.orb-lib.lock` exclusion, `~/.agents/skills` pruning, and empty-library prune (`library_loaded: true`)
+  IO.FS.createDirAll (invHome / ".agents" / "skills" / "retired-agents-skill")
+  IO.FS.writeFile (invHome / ".agents" / "skills" / "retired-agents-skill" / "SKILL.md") "---\nname: retired-agents-skill\n---\nOld.\n"
+  IO.FS.writeFile (invHome / ".agents" / "skills" / "retired-agents-skill" / ".managed-by-orb-skills") "managed-by-orb-skills\n"
+  IO.FS.createDirAll (invHome / ".agents" / "skills" / "demo-skill")
+  IO.FS.writeFile (invHome / ".agents" / "skills" / "demo-skill" / "SKILL.md") "---\nname: demo-skill\n---\nKeep active.\n"
+  IO.FS.writeFile (invHome / ".agents" / "skills" / "demo-skill" / ".managed-by-orb-skills") "managed-by-orb-skills\n"
+  let libPayloadsWithBundle : Array JVal := #[
+    .obj #[
+      ("name", .str "demo-skill"),
+      ("content", .str "---\nname: demo-skill\ndescription: \"Demo\"\nmetadata:\n  sandboxed:\n    audience: [mission, coordinator, local]\n    scope: on-demand\n---\nUse demo.\n"),
+      ("audience", .arr #[.str "mission", .str "coordinator", .str "local"]),
+      ("scope", .str "on-demand"),
+      ("files", .arr #[
+        .obj #[("rel", .str "references/guide.md"), ("content", .str "# Guide\n")],
+        .obj #[("rel", .str "tools/helper.py"), ("content", .str "#!/usr/bin/env python3\nprint(1)\n")]
+      ])
+    ],
+    .obj #[
+      ("name", .str "user-edited"),
+      ("content", .str "---\nname: user-edited\ndescription: \"Lib version\"\n---\nLibrary body.\n")
+    ]
+  ]
+  let bundleDriftStatus ← dispatchRpcCommand stInv "local_skills_status" (.obj #[
+    ("request", .obj #[("library_skills", .arr libPayloadsWithBundle)])
+  ])
+  let bundleSyncRes ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
+    ("request", .obj #[
+      ("library_skills", .arr libPayloadsWithBundle),
+      ("library_loaded", .bool true),
+      ("prune_removed", .bool true)
+    ])
+  ])
+  let agyGuideExists ← (invHome / ".gemini" / "config" / "skills" / "demo-skill" / "references" / "guide.md").pathExists
+  let ocGuideExists ← (invHome / ".config" / "opencode" / "skills" / "demo-skill" / "references" / "guide.md").pathExists
+  let claudeToolSt ← OrbBin.PosixExt.statPath (invHome / ".claude" / "skills" / "demo-skill" / "tools" / "helper.py").toString
+  let retiredAgentsGone := !(← (invHome / ".agents" / "skills" / "retired-agents-skill").pathExists)
+  let activeAgentsKept ← (invHome / ".agents" / "skills" / "demo-skill").pathExists
+  let emptyPruneRes ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
+    ("request", .obj #[
+      ("library_skills", .arr #[]),
+      ("library_loaded", .bool true),
+      ("prune_removed", .bool true)
+    ])
+  ])
+  let agyDemoPruned := !(← (invHome / ".gemini" / "config" / "skills" / "demo-skill").pathExists)
+  let userEditedPreserved ← (invHome / ".claude" / "skills" / "user-edited" / "SKILL.md").pathExists
+  -- Restore `libPayloads` state before F2
+  let _ ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
+    ("request", .obj #[("library_skills", .arr libPayloads)])
+  ])
+  total := total + 1
+  let bundleDriftDetected :=
+    match bundleDriftStatus with
+    | .ok rep =>
+      let hs := (rep.fieldArr? "harnesses").getD #[]
+      let agy? := hs.find? (fun h => h.fieldStr? "id" == some "antigravity")
+      let oc? := hs.find? (fun h => h.fieldStr? "id" == some "opencode")
+      let outdatedAgy := ((agy?.bind (·.fieldArr? "outdated_skills")).getD #[]).filterMap (·.asStr?)
+      let outdatedOc := ((oc?.bind (·.fieldArr? "outdated_skills")).getD #[]).filterMap (·.asStr?)
+      outdatedAgy.contains "demo-skill" && outdatedOc.contains "demo-skill"
+    | _ => false
+  let bundleSyncOk :=
+    match bundleSyncRes, emptyPruneRes with
+    | .ok sJv, .ok pJv =>
+      let pruned1 := ((sJv.fieldArr? "pruned").getD #[]).filterMap (·.asStr?)
+      let pruned2 := ((pJv.fieldArr? "pruned").getD #[]).filterMap (·.asStr?)
+      let rep1 := (sJv.field? "report").getD (.obj #[])
+      let hs1 := (rep1.fieldArr? "harnesses").getD #[]
+      let agy1? := hs1.find? (fun h => h.fieldStr? "id" == some "antigravity")
+      bundleDriftDetected &&
+      agyGuideExists && ocGuideExists &&
+      claudeToolSt.exists_ && (claudeToolSt.mode &&& 0o111) != 0 &&
+      agy1?.bind (·.fieldNat? "synced_count") == some 2 &&
+      agy1?.bind (·.fieldNat? "skill_count") == some 2 &&
+      retiredAgentsGone && activeAgentsKept &&
+      pruned1.contains "~/.agents/skills/retired-agents-skill" &&
+      agyDemoPruned && userEditedPreserved &&
+      pruned2.contains "~/.gemini/config/skills/demo-skill"
+    | _, _ => false
+  if (← assertTrue "skill_bundle_reference_drift_exec_mode_and_atomic_prune" bundleSyncOk) then passed := passed + 1
+
   -- F2. Local MCP auto-provisioning (`~/.orb/mcp/credential` `0600`, 0-byte Antigravity `mcp_config.json`, Claude/Codex/OpenCode preservation & endpoint fencing)
   IO.FS.createDirAll (invHome / ".local" / "bin")
   let fakeMcpBin := invHome / ".local" / "bin" / "sandboxed-mcp"

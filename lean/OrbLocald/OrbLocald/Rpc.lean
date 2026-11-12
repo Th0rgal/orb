@@ -3345,6 +3345,141 @@ private structure CanonicalSkillEntry where
   desiredLocal  : Bool
   deriving Inhabited
 
+private def sanitizedDesiredSkillFiles (entry : CanonicalSkillEntry) : Array (String × String) := Id.run do
+  let mut out : Array (String × String) := #[]
+  for (rawRel, rfContent) in entry.files do
+    if let some cleanRel := isSafeRelSubpath rawRel then
+      if !isSecretRelPath cleanRel && cleanRel != "SKILL.md" &&
+         cleanRel != ".managed-by-orb-skills" && cleanRel != ".managed-by-agent-skills-repo" then
+        if let some idx := out.findIdx? (fun (r, _) => r == cleanRel) then
+          out := out.set! idx (cleanRel, rfContent)
+        else
+          out := out.push (cleanRel, rfContent)
+  return out.qsort (fun a b => a.1 < b.1)
+
+private def shouldSetExecutableSkillFile (cleanRel content : String) : Bool :=
+  cleanRel.startsWith "scripts/" ||
+  cleanRel.startsWith "tools/" ||
+  cleanRel.startsWith "bin/" ||
+  cleanRel.endsWith ".sh" ||
+  content.startsWith "#!"
+
+private partial def collectInstalledRegularSkillRels
+    (curDir : System.FilePath)
+    (relPrefix : String)
+    (depth : Nat) : IO (Array String) := do
+  if depth > 6 then return #[]
+  let entries ← try curDir.readDir catch _ => pure #[]
+  let mut out : Array String := #[]
+  for e in entries do
+    let fn := e.fileName
+    if !fn.isEmpty && !fn.startsWith "." then
+      let rel := if relPrefix.isEmpty then fn else s!"{relPrefix}/{fn}"
+      if rel != "SKILL.md" then
+        let st ← OrbBin.PosixExt.statPath e.path.toString
+        if st.isSymlink then
+          out := out.push rel
+        else if st.isDir then
+          out := out ++ (← collectInstalledRegularSkillRels e.path rel (depth + 1))
+        else if st.isReg then
+          out := out.push rel
+  return out
+
+private def isInstalledSkillBundleSynced
+    (sdir : System.FilePath)
+    (entry : CanonicalSkillEntry)
+    (isManaged : Bool) : IO Bool := do
+  let md := sdir / "SKILL.md"
+  let mst ← OrbBin.PosixExt.statPath md.toString
+  if !mst.exists_ || !mst.isReg || mst.isSymlink then
+    return false
+  let existingMd ← try IO.FS.readFile md catch _ => pure ""
+  if normalizeSkillBody existingMd != normalizeSkillBody entry.content then
+    return false
+  if entry.copyDir?.isSome then
+    return true
+  let wantFiles := sanitizedDesiredSkillFiles entry
+  for (cleanRel, rfContent) in wantFiles do
+    let rfp := sdir / cleanRel
+    let rst ← OrbBin.PosixExt.statPath rfp.toString
+    if !rst.exists_ || !rst.isReg || rst.isSymlink then
+      return false
+    let diskTxt ← try IO.FS.readFile rfp catch _ => pure ""
+    if normalizeSkillBody diskTxt != normalizeSkillBody rfContent then
+      return false
+  if isManaged then
+    let installedRels ← collectInstalledRegularSkillRels sdir "" 0
+    for rel in installedRels do
+      if !(wantFiles.any (fun (wRel, _) => wRel == rel)) then
+        return false
+  return true
+
+private def withSkillDirFlock {α : Type} (gdir : System.FilePath) (act : IO α) : IO (Option α) := do
+  let lockFp := gdir / ".orb-lib.lock"
+  let lockSt ← OrbBin.PosixExt.statPath lockFp.toString
+  if lockSt.isSymlink then
+    return none
+  let some lockFd ← acquireUiPrefsFlock lockFp.toString
+    | return none
+  try
+    let res ← act
+    OrbBin.PosixExt.closeFdRaw lockFd
+    return some res
+  catch e =>
+    OrbBin.PosixExt.closeFdRaw lockFd
+    throw e
+
+private def installSkillEntryAtomic (gdir : System.FilePath) (entry : CanonicalSkillEntry) : IO Bool := do
+  let nonce ← IO.monoNanosNow
+  let sname := entry.name
+  let sdir := gdir / sname
+  let stageDir := gdir / s!".stage-{sname}-{nonce}"
+  let prevDir := gdir / s!".prev-{sname}-{nonce}"
+  try
+    try IO.FS.removeDirAll stageDir catch _ => pure ()
+    IO.FS.createDirAll stageDir
+    if let some srcDir := entry.copyDir? then
+      let srcEntries ← try srcDir.readDir catch _ => pure #[]
+      for se in srcEntries do
+        let fname := se.fileName
+        if fname != ".git" && fname != ".DS_Store" && !fname.startsWith "." then
+          let seSt ← OrbBin.PosixExt.statPath se.path.toString
+          if seSt.exists_ && seSt.isReg && !seSt.isSymlink then
+            let bytes ← IO.FS.readBinFile se.path
+            let dstFp := stageDir / fname
+            IO.FS.writeBinFile dstFp bytes
+            if (seSt.mode &&& 0o111) != 0 then
+              discard <| OrbBin.PosixExt.chmod dstFp.toString 0o755
+    else
+      IO.FS.writeFile (stageDir / "SKILL.md") entry.content
+      for (cleanRel, rfContent) in sanitizedDesiredSkillFiles entry do
+        let rfp := stageDir / cleanRel
+        if let some rp := rfp.parent then IO.FS.createDirAll rp
+        IO.FS.writeFile rfp rfContent
+        if shouldSetExecutableSkillFile cleanRel rfContent then
+          discard <| OrbBin.PosixExt.chmod rfp.toString 0o755
+    IO.FS.writeFile (stageDir / ".managed-by-orb-skills") "managed-by-orb-skills\n"
+    let sdirSt ← OrbBin.PosixExt.statPath sdir.toString
+    if sdirSt.isSymlink then
+      IO.FS.removeFile sdir
+      IO.FS.rename stageDir sdir
+    else if sdirSt.exists_ then
+      try IO.FS.removeDirAll prevDir catch _ => pure ()
+      IO.FS.rename sdir prevDir
+      try
+        IO.FS.rename stageDir sdir
+      catch swapErr =>
+        try IO.FS.rename prevDir sdir catch _ => pure ()
+        try IO.FS.removeDirAll stageDir catch _ => pure ()
+        throw swapErr
+      try IO.FS.removeDirAll prevDir catch _ => pure ()
+    else
+      IO.FS.rename stageDir sdir
+    return true
+  catch _ =>
+    try IO.FS.removeDirAll stageDir catch _ => pure ()
+    return false
+
 private def buildCanonicalSkillCatalog (homeFp : System.FilePath) (libSkills : Array JVal) :
     IO (Array CanonicalSkillEntry × Bool) := do
   let mut entries : Array CanonicalSkillEntry := #[]
@@ -3791,7 +3926,8 @@ private def syncLocalHarnessesMcp
 private def buildLocalSkillsReport
     (st : LocaldState)
     (libSkills : Array JVal)
-    (requestedApiUrl? : Option String := none) : IO JVal := do
+    (requestedApiUrl? : Option String := none)
+    (libraryLoadedFlag : Bool := false) : IO JVal := do
   let checkedAt := (← OrbBin.PosixExt.nowEpoch).toNat * 1000
   let envHome := (← IO.getEnv "HOME").getD "/tmp"
   let homeStr := if st.homeDir.trimAscii.toString.isEmpty then envHome else st.homeDir
@@ -3819,7 +3955,7 @@ private def buildLocalSkillsReport
     ("identity_fingerprint", match idFingerprint? with | some fp => .str fp | none => .null),
     ("identity_updated_at", match idUpdatedAt? with | some ts => JVal.nat ts | none => .null)
   ]
-  let libraryKnown := !libSkills.isEmpty
+  let libraryKnown := libraryLoadedFlag || !libSkills.isEmpty
   let desiredEntries := catalog.filter (·.desiredLocal)
   let idDir := homeFp / ".config" / "sandboxed-sh" / "development-identity" / "current" / "skill"
   let sourcesJson : Array JVal := #[
@@ -3857,7 +3993,7 @@ private def buildLocalSkillsReport
       let mut staleManaged : Array String := #[]
       for ent in entries do
         let sname := ent.fileName
-        if validSkillIdentifier sname then
+        if !sname.startsWith "." && validSkillIdentifier sname then
           let entSt ← OrbBin.PosixExt.statPath ent.path.toString
           let md := ent.path / "SKILL.md"
           let mst ← OrbBin.PosixExt.statPath md.toString
@@ -3872,7 +4008,8 @@ private def buildLocalSkillsReport
             let mut removedHere := false
             match desiredEntries.find? (fun e => e.name == sname) with
             | some want =>
-              if normalizeSkillBody content == normalizeSkillBody want.content then
+              let bundleSynced ← isInstalledSkillBundleSynced ent.path want isManaged
+              if bundleSynced then
                 syncedCount := syncedCount + 1
               else
                 outdated := outdated.push sname
@@ -6302,12 +6439,14 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
   | "local_skills_status" =>
     let reqObj := (args.field? "request").getD args
     let libSkills := (reqObj.fieldArr? "library_skills").getD #[]
+    let libraryLoadedFlag := (reqObj.fieldBool? "library_loaded").getD false
     let requestedApiUrl? := (reqObj.fieldStr? "api_url").orElse (fun _ => reqObj.fieldStr? "apiUrl")
-    let report ← buildLocalSkillsReport st libSkills requestedApiUrl?
+    let report ← buildLocalSkillsReport st libSkills requestedApiUrl? libraryLoadedFlag
     return .ok report
   | "local_skills_sync" =>
     let reqObj := (args.field? "request").getD args
     let libSkills := (reqObj.fieldArr? "library_skills").getD #[]
+    let libraryLoadedFlag := (reqObj.fieldBool? "library_loaded").getD false
     let pruneRemoved := (reqObj.fieldBool? "prune_removed").getD false
     let replaceUnmanaged := ((reqObj.fieldArr? "replace_unmanaged").getD #[]).filterMap (·.asStr?)
     let mcpSess? := (reqObj.field? "mcp_session").filter (!·.isNull)
@@ -6319,96 +6458,114 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let (catalog, _) ← buildCanonicalSkillCatalog homeFp libSkills
     let desiredEntries := catalog.filter (·.desiredLocal)
     let desiredNames := desiredEntries.map (·.name)
-    let prune := pruneRemoved && !libSkills.isEmpty
+    let prune := pruneRemoved && (libraryLoadedFlag || !libSkills.isEmpty)
     let mut harnessesUpdated : Nat := 0
     let mut skippedUnmanaged : Array String := #[]
     let mut skippedNames : Array String := #[]
     let mut pruned : Array String := #[]
-    let installSkillEntry (sdir : System.FilePath) (entry : CanonicalSkillEntry) : IO Bool := do
+    let removeManagedDirAtomic (gdir entPath : System.FilePath) (sname : String) : IO Bool := do
+      let nonce ← IO.monoNanosNow
+      let goneFp := gdir / s!".prev-{sname}-{nonce}"
       try
-        let sdirSt ← OrbBin.PosixExt.statPath sdir.toString
-        if sdirSt.exists_ || sdirSt.isSymlink then
-          if sdirSt.isSymlink then
-            IO.FS.removeFile sdir
-          else
-            IO.FS.removeDirAll sdir
-        IO.FS.createDirAll sdir
-        if let some srcDir := entry.copyDir? then
-          let srcEntries ← try srcDir.readDir catch _ => pure #[]
-          for se in srcEntries do
-            let fname := se.fileName
-            if fname != ".git" && fname != ".DS_Store" then
-              let seSt ← OrbBin.PosixExt.statPath se.path.toString
-              if seSt.exists_ && seSt.isReg && !seSt.isSymlink then
-                let bytes ← IO.FS.readBinFile se.path
-                IO.FS.writeBinFile (sdir / fname) bytes
-        else
-          IO.FS.writeFile (sdir / "SKILL.md") entry.content
-          for (rawRel, rfContent) in entry.files do
-            if let some cleanRel := isSafeRelSubpath rawRel then
-              if !isSecretRelPath cleanRel && cleanRel != "SKILL.md" &&
-                 cleanRel != ".managed-by-orb-skills" && cleanRel != ".managed-by-agent-skills-repo" then
-                let rfp := sdir / cleanRel
-                if let some rp := rfp.parent then IO.FS.createDirAll rp
-                IO.FS.writeFile rfp rfContent
-        IO.FS.writeFile (sdir / ".managed-by-orb-skills") "managed-by-orb-skills\n"
+        IO.FS.rename entPath goneFp
+        try IO.FS.removeDirAll goneFp catch _ => pure ()
         return true
       catch _ =>
-        return false
+        try
+          IO.FS.removeDirAll entPath
+          return true
+        catch _ =>
+          return false
+    let reapStaleStaging (gdir : System.FilePath) : IO Unit := do
+      let nowSec ← OrbBin.PosixExt.nowEpoch
+      let entries ← try gdir.readDir catch _ => pure #[]
+      for ent in entries do
+        let fn := ent.fileName
+        if fn.startsWith ".stage-" || fn.startsWith ".prev-" then
+          let stEnt ← OrbBin.PosixExt.statPath ent.path.toString
+          let idEnt ← OrbBin.PosixExt.statIdentity ent.path.toString
+          if stEnt.exists_ && stEnt.isDir && !stEnt.isSymlink && idEnt.exists_ && nowSec > idEnt.mtime + 300 then
+            try IO.FS.removeDirAll ent.path catch _ => pure ()
     for (hid, _) in skillHarnessDisplayNames do
       if let some (globalRel, _) := harnessSkillTargets hid then
         let gdir := homeFp / globalRel
         let gdirMeta ← OrbBin.PosixExt.statPath gdir.toString
         if !gdirMeta.isSymlink then
-          let mut touchedHarness := false
           try IO.FS.createDirAll gdir catch _ => pure ()
-          for entry in desiredEntries do
-            let sname := entry.name
-            let sdir := gdir / sname
-            let sdirSt ← OrbBin.PosixExt.statPath sdir.toString
-            if sdirSt.isSymlink then
-              -- Preserve unbroken user symlinks; replace broken ones.
-              let targetExists ← sdir.pathExists
-              if !targetExists then
-                if (← installSkillEntry sdir entry) then touchedHarness := true
-            else if sdirSt.exists_ && sdirSt.isDir then
-              let md := sdir / "SKILL.md"
-              let existingMd ← try IO.FS.readFile md catch _ => pure ""
-              let same := normalizeSkillBody existingMd == normalizeSkillBody entry.content
-              let isManaged ← isManagedSkillDir sdir
-              if !isManaged then
-                if same then
-                  -- Adopt identical unmanaged copy without overwriting reference files.
-                  try IO.FS.writeFile (sdir / ".managed-by-orb-skills") "managed-by-orb-skills\n" catch _ => pure ()
-                else if replaceUnmanaged.contains sname then
-                  if (← installSkillEntry sdir entry) then touchedHarness := true
+          let lockRes? ← withSkillDirFlock gdir do
+            reapStaleStaging gdir
+            let mut touchedHarness := false
+            let mut localSkippedUnmanaged : Array String := #[]
+            let mut localSkippedNames : Array String := #[]
+            let mut localPruned : Array String := #[]
+            for entry in desiredEntries do
+              let sname := entry.name
+              let sdir := gdir / sname
+              let sdirSt ← OrbBin.PosixExt.statPath sdir.toString
+              if sdirSt.isSymlink then
+                -- Preserve unbroken user symlinks; replace broken ones.
+                let targetExists ← sdir.pathExists
+                if !targetExists then
+                  if (← installSkillEntryAtomic gdir entry) then touchedHarness := true
+              else if sdirSt.exists_ && sdirSt.isDir then
+                let isManaged ← isManagedSkillDir sdir
+                let bundleSame ← isInstalledSkillBundleSynced sdir entry isManaged
+                if !isManaged then
+                  if bundleSame then
+                    -- Adopt identical unmanaged copy without overwriting reference files.
+                    try IO.FS.writeFile (sdir / ".managed-by-orb-skills") "managed-by-orb-skills\n" catch _ => pure ()
+                  else if replaceUnmanaged.contains sname then
+                    if (← installSkillEntryAtomic gdir entry) then touchedHarness := true
+                  else
+                    let skipPath := s!"~/{globalRel}/{sname}"
+                    localSkippedUnmanaged := localSkippedUnmanaged.push skipPath
+                    localSkippedNames := localSkippedNames.push sname
                 else
-                  let skipPath := s!"~/{globalRel}/{sname}"
-                  if !(skippedUnmanaged.contains skipPath) then skippedUnmanaged := skippedUnmanaged.push skipPath
-                  if !(skippedNames.contains sname) then skippedNames := skippedNames.push sname
+                  if !bundleSame then
+                    if (← installSkillEntryAtomic gdir entry) then touchedHarness := true
               else
-                if same && entry.copyDir?.isSome then
-                  pure ()
-                else
-                  let ok ← installSkillEntry sdir entry
-                  if ok && !same then touchedHarness := true
-            else
-              if (← installSkillEntry sdir entry) then touchedHarness := true
-          if prune then
-            let entries ← try gdir.readDir catch _ => pure #[]
+                if (← installSkillEntryAtomic gdir entry) then touchedHarness := true
+            if prune then
+              let entries ← try gdir.readDir catch _ => pure #[]
+              for ent in entries do
+                let sname := ent.fileName
+                if !sname.startsWith "." && validSkillIdentifier sname && !(desiredNames.contains sname) then
+                  let entSt ← OrbBin.PosixExt.statPath ent.path.toString
+                  if entSt.exists_ && entSt.isDir && !entSt.isSymlink then
+                    if (← isManagedSkillDir ent.path) then
+                      if (← removeManagedDirAtomic gdir ent.path sname) then
+                        touchedHarness := true
+                        localPruned := localPruned.push s!"~/{globalRel}/{sname}"
+            return (touchedHarness, localSkippedUnmanaged, localSkippedNames, localPruned)
+          if let some (touchedHarness, lSkipPaths, lSkipNames, lPruned) := lockRes? then
+            if touchedHarness then harnessesUpdated := harnessesUpdated + 1
+            for sp in lSkipPaths do
+              if !(skippedUnmanaged.contains sp) then skippedUnmanaged := skippedUnmanaged.push sp
+            for sn in lSkipNames do
+              if !(skippedNames.contains sn) then skippedNames := skippedNames.push sn
+            for pp in lPruned do
+              if !(pruned.contains pp) then pruned := pruned.push pp
+    -- Also prune stale Orb-managed skills removed from the Library inside `~/.agents/skills`
+    if prune then
+      let agentsRel := ".agents/skills"
+      let agentsDir := homeFp / agentsRel
+      let agentsSt ← OrbBin.PosixExt.statPath agentsDir.toString
+      if agentsSt.exists_ && agentsSt.isDir && !agentsSt.isSymlink then
+        if let some extraPruned ← withSkillDirFlock agentsDir (do
+            reapStaleStaging agentsDir
+            let mut acc : Array String := #[]
+            let entries ← try agentsDir.readDir catch _ => pure #[]
             for ent in entries do
               let sname := ent.fileName
-              if validSkillIdentifier sname && !(desiredNames.contains sname) then
+              if !sname.startsWith "." && validSkillIdentifier sname && !(desiredNames.contains sname) then
                 let entSt ← OrbBin.PosixExt.statPath ent.path.toString
                 if entSt.exists_ && entSt.isDir && !entSt.isSymlink then
                   if (← isManagedSkillDir ent.path) then
-                    try
-                      IO.FS.removeDirAll ent.path
-                      touchedHarness := true
-                      let pPath := s!"~/{globalRel}/{sname}"
-                      if !(pruned.contains pPath) then pruned := pruned.push pPath
-                    catch _ => pure ()
-          if touchedHarness then harnessesUpdated := harnessesUpdated + 1
+                    if (← removeManagedDirAtomic agentsDir ent.path sname) then
+                      acc := acc.push s!"~/{agentsRel}/{sname}"
+            return acc) then
+          for pp in extraPruned do
+            if !(pruned.contains pp) then pruned := pruned.push pp
     let mut mcpErr? : Option String := none
     if let some sessObj := mcpSess? then
       if let .error e ← persistLocalMcpSession homeFp sessObj then
@@ -6419,7 +6576,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       if let some binPath ← resolveSandboxedMcpBin? st homeFp then
         mcpSyncedNow ← syncLocalHarnessesMcp homeFp binPath credSt.targetApiUrl credSt.role (replaceUnmanaged.contains "sandboxed")
     let syncedSkills := desiredNames.filter (fun n => !(skippedNames.contains n)) |>.size
-    let report ← buildLocalSkillsReport st libSkills requestedApiUrl?
+    let report ← buildLocalSkillsReport st libSkills requestedApiUrl? libraryLoadedFlag
     return .ok (.obj #[
       ("synced_skills", JVal.nat syncedSkills),
       ("harnesses_updated", JVal.nat harnessesUpdated),
