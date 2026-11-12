@@ -1179,7 +1179,6 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
       kind := "archive"
       depth := 0
       title := "Archived"
-      icon := if archExpanded then "folder-open" else "folder"
       expandable := true
       expanded := archExpanded
     }
