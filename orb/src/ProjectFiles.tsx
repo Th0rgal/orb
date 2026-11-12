@@ -47,8 +47,6 @@ import {
   peekCachedProjects,
   updateProject,
   renameMission,
-  archiveMission,
-  reopenMission,
   archiveProject,
   bumpProjects,
   createProjectCron,
@@ -96,6 +94,7 @@ import { type TreeRow } from "./treeModel";
 const ShareMissionDialog = lazy(() => import("./ShareMissionDialog").then(module => ({ default: module.ShareMissionDialog })));
 import { deletingIds, setDeletingIds, createTreeSelection } from "./tree/selection";
 import { createArchivePager } from "./tree/archivePager";
+import { applyArchiveState, archiveStateTargets } from "./archiveState";
 import { createMissionMoves, type ApprovalConfirmationPrompt } from "./tree/moves";
 const ApprovalTransferDialog = lazy(() => import("./ApprovalTransferDialog"));
 import { createProjectTree, missionFolder, missionIdFromTreeId, type Node, type RowData } from "./tree/TreeView";
@@ -1976,16 +1975,11 @@ export function LiveProjectsSection(p: {
   };
   const changeArchiveState = async (mission: Mission, restore: boolean) => {
     if (archiving.has(mission.id) || deletingIds().has(mission.id)) return false;
-    const subtree = missionSubtree(allKnownMissions(), [mission.id]);
-    const fullSubtree = subtree.some(m => m.id === mission.id) ? subtree : [mission, ...subtree];
-    if (fullSubtree.some(m => deletingIds().has(m.id))) return false;
-    if (!restore && fullSubtree.some(m => isWorking(m.status))) {
-      setActionError("Stop or finish this agent before archiving it.");
-      return false;
-    }
-    const targets = restore
-      ? [mission, ...fullSubtree.filter(m => m.id !== mission.id && isArchived(m))]
-      : fullSubtree.filter(m => !isArchived(m) && !archiving.has(m.id));
+    const known = allKnownMissions();
+    if (missionSubtree(known, [mission.id]).some(m => deletingIds().has(m.id))) return false;
+    let targets: Mission[];
+    try { targets = archiveStateTargets(mission, known, restore, id => archiving.has(id)); }
+    catch (e) { setActionError(e instanceof Error ? e.message : String(e)); return false; }
     if (!targets.length) return true;
     const id = mission.id, version = connectionVersion();
     const status = restore ? "paused" : "acknowledged";
@@ -2018,15 +2012,7 @@ export function LiveProjectsSection(p: {
     });
     updateStatus(() => status);
     try {
-      if (!restore && targets.length > 1 && targets.some(t => t.id === mission.id)) {
-        // Core cascades status=acknowledged to parent_mission_id descendants;
-        // archiving the root first avoids N redundant POSTs while still
-        // archiving callback-only children and confirming local origins.
-        await archiveMission(mission.id);
-        await Promise.all(targets.filter(t => t.id !== mission.id).map(t => archiveMission(t.id)));
-      } else {
-        await Promise.all(targets.map(t => restore ? reopenMission(t.id) : archiveMission(t.id)));
-      }
+      await applyArchiveState(mission, targets, restore);
       if (!currentConnection(version)) return;
       if (restore) {
         for (const t of targets) archivedInSession.delete(t.id);

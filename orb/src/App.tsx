@@ -57,6 +57,7 @@ import { imagePrompt, stageLocalImages, stageRemoteImages, type DraftImage } fro
 import { FilePanelProvider, FilePanelButton } from "./FilePanel";
 import { ErrorToast, SlotActiveContext, notify } from "./toast";
 import { copyText } from "./clipboard";
+import { applyArchiveState, archiveStateTargets } from "./archiveState";
 import { rememberLaunch, recalledLaunch, missionDestination, launchRefusal, isAdministrationNode, remoteLaunchPreflight, remoteHarnessSupport, remoteLaunchUnconfirmed, missionGoal, type LaunchReceipt, type LaunchRefusal, type RemoteSupport } from "./missionLaunch";
 import { goalDraft, goalPrompt, planObjective, missionTitle, displayTitle, EMPTY_GOAL_ERROR } from "./goal";
 import { chipToAttachment, type AttachChip } from "./attach";
@@ -143,12 +144,10 @@ import {
   isClientPlacement,
   isConnected,
   isMissionParticipant,
-  archiveMission,
   listArchivedMissions,
   listCompletedMissions,
   listMissions,
   renameMission,
-  reopenMission,
   listProjectMissions,
   listProjects,
   listProviders,
@@ -1079,11 +1078,15 @@ export default function App() {
         void moveMission(id, arg, "", mission.project ?? null).then(settle, fail("Couldn’t move the conversation"));
         return true;
       case "archive":
-        void archiveMission(id).then(settle, fail("Couldn’t archive the conversation"));
+      case "restore": {
+        // Same subtree targeting as the HTML sidebar (`changeArchiveState`).
+        const restore = action === "restore";
+        const known = [...missions(), ...completedMissions(), ...Object.values(projectMissions()).flat(), ...nativeArchived()];
+        void Promise.resolve()
+          .then(() => applyArchiveState(mission, archiveStateTargets(mission, known, restore), restore))
+          .then(settle, fail(restore ? "Couldn’t restore the conversation" : "Couldn’t archive the conversation"));
         return true;
-      case "restore":
-        void reopenMission(id).then(settle, fail("Couldn’t restore the conversation"));
-        return true;
+      }
       case "copy-id":
         void copyText(missionCopyId(mission)).catch(fail("Couldn’t copy the mission ID"));
         return true;
@@ -1138,12 +1141,12 @@ export default function App() {
       // (an optimistic send keeps `updated_at`), so per-project and completed copies take their
       // status from it instead of overriding it on a timestamp tie in `orb-locald`'s merge.
       const live = new Map(missions().map(m => [m.id, m]));
-      const shown = (rows: readonly Mission[]) => withLiveExecution(rows, live).map(m => {
+      const shown = (rows: readonly Mission[]) => withLiveExecution(withRenamedTitles("mission", [...rows], m => m.id), live).map(m => {
         const status = presentedStatus(m, missionActivity(m, [], { localRun: localRunActive(m.id) }));
         return status === m.status ? m : { ...m, status };
       });
-      const liveMissions = shown(withRenamedTitles("mission", missions(), m => m.id));
-      const archived = withRenamedTitles("mission", nativeArchived(), m => m.id);
+      const liveMissions = shown(missions());
+      const archived = shown(nativeArchived());
       const compMissions = shown(completedMissions());
       const projMissions = Object.fromEntries(Object.entries(projectMissions()).map(([slug, rows]) => [slug, shown(rows)]));
       const projFolders = projectFolders();

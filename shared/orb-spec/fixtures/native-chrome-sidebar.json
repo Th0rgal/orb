@@ -195,13 +195,14 @@
         { "id": "m-live", "title": "Live core mission", "status": "completed", "project": "core", "updated_at_ms": 1500 }
       ],
       "archived_missions": [
-        { "id": "m-old", "title": "Old archived session", "status": "acknowledged", "project": "core", "updated_at_ms": 500 }
+        { "id": "m-old", "title": "Old archived session", "status": "acknowledged", "project": "core", "updated_at_ms": 500 },
+        { "id": "m-old-child", "title": "Archived worker", "status": "acknowledged", "project": "core", "parent_mission_id": "m-old", "updated_at_ms": 400 }
       ]
     },
     "expected_collapsed_row_ids": ["nav:new-agent", "nav:inbox", "nav:cloud-agent", "nav:machines", "nav:providers", "nav:resources", "section:projects", "proj:core", "proj:default", "archive"],
     "expected_default_project_title": "Default",
     "toggle_row_id": "archive",
-    "expected_expanded_tail": ["archive", "m:m-old"]
+    "expected_expanded_tail": ["archive", "m:m-old", "m:m-old-child"]
   },
   "move_admit_cases": [
     {

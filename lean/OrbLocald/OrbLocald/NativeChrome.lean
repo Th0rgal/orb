@@ -1163,7 +1163,8 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
       (!filterActive || matchesFilterNeedle m needleLower)).qsort fun a b =>
         if a.updatedAtMs != b.updatedAtMs then a.updatedAtMs > b.updatedAtMs else a.id < b.id
   if !filterActive || !archivedRoots.isEmpty then
-    let archExpanded := resolveExpanded archiveRowId (archivedRoots.any fun m => isSelectedMissionTarget sel m.id)
+    let selArchived := placedMerged.any fun m => m.acknowledged && !retainedIds.contains m.id && isSelectedMissionTarget sel m.id
+    let archExpanded := resolveExpanded archiveRowId selArchived
     rows := rows.push {
       rowId := archiveRowId
       kind := "archive"
@@ -1176,20 +1177,35 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
     if archExpanded then
       if archivedRoots.isEmpty then
         rows := rows.push { rowId := "note:archive-empty", kind := "note", depth := 1, title := "No archived conversations." }
+      -- Archived children and earlier fork versions stay under their archived root
+      -- (newest first), so every archived conversation remains reachable.
+      let mut archivedKids : Std.HashMap String (Array ChromeMissionInput) := {}
+      for m in placedMerged do
+        if m.acknowledged && !retainedIds.contains m.id then
+          if let some pid := safeParentMap[m.id]? then
+            archivedKids := archivedKids.insert pid (((archivedKids[pid]?).getD #[]).push m)
+      let rec emitArchived (fuel : Nat) (m : ChromeMissionInput) (depth : Nat) (acc : Array SidebarRow) : Array SidebarRow :=
+        match fuel with
+        | 0 => acc
+        | fuel' + 1 =>
+          let row : SidebarRow := {
+            rowId := s!"m:{m.id}"
+            kind := "mission"
+            depth := depth
+            title := m.title
+            subtitle := m.status
+            target := s!"m:{m.id}"
+            project := m.project
+            folder := m.folder
+            status := m.status
+            icon := "bot"
+            selected := isSelectedMissionTarget sel m.id
+          }
+          let kids := ((archivedKids[m.id]?).getD #[]).qsort fun a b =>
+            if a.updatedAtMs != b.updatedAtMs then a.updatedAtMs > b.updatedAtMs else a.id < b.id
+          kids.foldl (fun a c => emitArchived fuel' c (depth + 1) a) (acc.push row)
       for m in archivedRoots do
-        rows := rows.push {
-          rowId := s!"m:{m.id}"
-          kind := "mission"
-          depth := 1
-          title := m.title
-          subtitle := m.status
-          target := s!"m:{m.id}"
-          project := m.project
-          folder := m.folder
-          status := m.status
-          icon := "bot"
-          selected := isSelectedMissionTarget sel m.id
-        }
+        rows := emitArchived (placedMerged.size + 1) m 1 rows
 
   if projects.isEmpty && unassigned.isEmpty then
     rows := rows.push {
