@@ -61,6 +61,34 @@ Bitwarden vault cannot silently activate the reconciler and reap production's
    fast in `quote_spawn` with `503 provider_at_capacity` before creating any DB row
    or queued orphan VM.
 
+## Lean provider transport contract
+
+`lean/OrbCore/OrbCore/ManagedProvider.lean` defines the shared provider I/O
+boundary. Its Boat adapter is checked with injected transport and sleep functions
+by `ManagedProviderTests.run` in the Core self-test; these tests rent no machines.
+This boundary is separate from admission, persistence, bootstrap and relay readiness.
+
+- Creation and fork require a stable idempotency key before any provider call.
+  Boat receives `type`, `name`, `ttlSeconds`, `noEnv: true` and optional `from`
+  (a saved snapshot). Never inherit the Boat account's environment into a guest.
+- A successful response must contain a nonempty machine ID, either at the top
+  level or under `sandbox`. Transport errors, malformed JSON and non-2xx status
+  never manufacture a machine or a successful snapshot.
+- List pagination encodes cursors and rejects malformed pages, repeated cursors
+  and exhausted page limits. An incomplete list is an error, not evidence that
+  unobserved machines disappeared.
+- Boat guest-command readiness includes `ready`, `idle`, `running`, `busy`;
+  nonbilling states include `archived`, `stopped`, `deleted`, `error`, `archiving`.
+  Provider readiness alone must never mark a managed worker ready for dispatch:
+  bootstrap and its first authenticated relay poll must complete within 360 s.
+- Resume uses Boat fork, not `/start`; the returned provider identity may change
+  without changing Core's managed identity. Core must fence the new boot epoch.
+- Destroy is idempotent on 404, with stop fallback. `stop_failed` retries are
+  bounded (3, 6, 9, 12 seconds); other failures propagate. Extend PATCHes
+  `ttlSeconds` at the provider, not just in SQLite.
+- Named snapshots use `/saved-snapshots` and encoded names. Saving is distinct
+  from observing `ready`. Errors omit upstream bodies and credentials.
+
 ## Ownership & Lineage
 
 | Field | Meaning |

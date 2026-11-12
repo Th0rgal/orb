@@ -9,6 +9,7 @@
   7. All 85 `OrbCore.HostTests` & optional `--emit-evidence-log <path>` receipt generation.
 -/
 import OrbCore
+import OrbCore.ManagedProviderTests
 
 namespace OrbCore.SelfTest
 
@@ -5942,6 +5943,13 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
      verifyConsoleWsAuth 1 1 1 0 1700000000 1700003600 != 0 ||
      verifyConsoleWsAuth 1 1 0 0 1700000000 1700003600 != 1 then
     IO.eprintln "[orb-core-test] FAIL: validateRuntimeSecurity or verifyConsoleWsAuth checks failed"
+    return 1
+
+  -- Provider contracts use a mock transport: no live machines or provider credentials.
+  try
+    OrbCore.ManagedProviderTests.run
+  catch e =>
+    IO.eprintln s!"[orb-core-test] FAIL: {e}"
     return 1
 
   -- 2. Service-scoped VM prefix & deploy unit confinement (including path traversal rejection)

@@ -1,0 +1,103 @@
+import OrbCore.ManagedProvider
+
+namespace OrbCore.ManagedProviderTests
+
+open OrbCore.ManagedProvider OrbBin.Json
+
+private def check (condition : Bool) (label : String) : IO Unit := do
+  unless condition do throw (IO.userError s!"managed provider contract: {label}")
+
+/-- Deterministic provider contract replay; never opens sockets or rents machines. -/
+def run : IO Unit := do
+  let requests ← IO.mkRef (#[] : Array Request)
+  let replies ← IO.mkRef (#[] : Array (Nat × JVal))
+  let transport : Transport := fun req => do
+    requests.modify (·.push req)
+    let rest ← replies.get
+    match rest[0]? with
+    | none => return .error { code := "unexpected_mock_request" }
+    | some response =>
+      replies.set (rest.extract 1 rest.size)
+      return .ok response
+  let sleeps ← IO.mkRef (#[] : Array UInt32)
+  let provider := boat transport (fun ms => sleeps.modify (·.push ms))
+  let spec : SpawnSpec := {
+    name := "orb-managed-test"
+    size := "small"
+    ttlSeconds := 300
+    idempotencyKey := "spawn-test"
+    fromSnapshot := "warm snapshot"
+  }
+  let machine := JVal.obj #[("sandbox", .obj #[("id", .str "sb-1"), ("state", .str "busy")])]
+  replies.set #[(201, machine)]
+  let .ok created ← provider.spawn spec | throw (IO.userError "spawn failed")
+  check (created.providerId == "sb-1" && provider.isReady created.state) "nested sandbox / busy state"
+  let sent := (← requests.get)[0]!
+  let body := sent.body.getD .null
+  check (sent.path == "/sandboxes" && sent.idempotencyKey == spec.idempotencyKey &&
+    body.fieldStr? "type" == some "small" && body.fieldUInt64? "ttlSeconds" == some 300 &&
+    body.fieldBool? "noEnv" == some true && body.fieldStr? "from" == some "warm snapshot" &&
+    (body.field? "size").isNone && (body.field? "ttl_minutes").isNone) "credential-free Boat spawn wire contract"
+  check ((boatSpawnBody { spec with fromSnapshot := "provider-default" }).field? "from").isNone "provider default omits from"
+  replies.set #[(403, .obj #[("message", .str "do not return upstream secrets")])]
+  check (!(← provider.spawn spec).isOk) "provider failure is not a synthetic machine"
+  replies.set #[(201, .obj #[])]
+  check (!(← provider.spawn spec).isOk) "missing machine identity rejected"
+  let before := (← requests.get).size
+  check (!(← provider.spawn { spec with idempotencyKey := "" }).isOk &&
+    (← requests.get).size == before) "creation requires a stable idempotency key before I/O"
+
+  requests.set #[]
+  replies.set #[(200, .obj #[("sandboxes", .arr #[.obj #[("id", .str "a")]]),
+    ("nextCursor", .str "a/b &c")]), (200, .obj #[("sandboxes", .arr #[.obj #[("id", .str "b")]])])]
+  let .ok machines ← provider.list | throw (IO.userError "paged list failed")
+  check (machines.size == 2 && (← requests.get)[1]!.path == "/sandboxes?limit=200&cursor=a%2Fb%20%26c") "paged list and encoded cursor"
+  replies.set #[(200, .obj #[("sandboxes", .arr #[]), ("nextCursor", .str "repeat")]),
+    (200, .obj #[("sandboxes", .arr #[]), ("nextCursor", .str "repeat")])]
+  check (!(← provider.list).isOk) "repeated cursor does not return partial fleet"
+  replies.set #[(200, .obj #[])]
+  check (!(← provider.list).isOk) "malformed fleet is not an empty observation"
+
+  requests.set #[]
+  replies.set #[(200, machine)]
+  check (← provider.resume "old/id" spec).isOk "resume succeeded"
+  check ((← requests.get)[0]!.path == "/sandboxes/old%2Fid/fork") "resume forks archived sandbox"
+  replies.set #[(200, machine)]
+  check (← provider.fork "sb-1" spec).isOk "fork succeeded"
+  replies.set #[(200, .null)]
+  check (← provider.extend "sb-1" 900).isOk "extend succeeded"
+  let last := (← requests.get).back!
+  check (last.method == "PATCH" && (last.body.getD .null).fieldUInt64? "ttlSeconds" == some 900) "provider TTL extension"
+
+  requests.set #[]
+  replies.set #[(409, .obj #[]), (400, .obj #[("code", .str "stop_failed")]), (200, .null)]
+  check (← provider.destroy "sb-1").isOk "destroy falls back to retryable stop"
+  check ((← requests.get).size == 3 && (← sleeps.get) == #[3000]) "bounded stop retry"
+  replies.set #[(404, .null)]
+  check (← provider.destroy "missing").isOk "destroy missing is idempotent"
+  replies.set #[(403, .null), (403, .null)]
+  check (!(← provider.destroy "denied").isOk) "destroy errors are preserved"
+  replies.set (Array.replicate 5 (400, .obj #[("code", .str "stop_failed")]))
+  sleeps.set #[]
+  check (!(← provider.stop "starting").isOk && (← sleeps.get) == #[3000, 6000, 9000, 12000]) "stop retries terminate"
+  check (provider.isStopped "archiving" && !provider.isReady "starting" && !provider.isStopped "mystery") "Boat state mapping"
+
+  requests.set #[]
+  replies.set #[(201, .null), (200, .obj #[("snapshot", .obj #[("name", .str "warm / 1"),
+    ("status", .str "ready"), ("sizeBytes", .nat 1024)])]),
+    (200, .obj #[("snapshots", .arr #[.obj #[("name", .str "warm / 1"), ("status", .str "ready")]])]),
+    (204, .null)]
+  check (← provider.saveSnapshot "sb-1" "warm / 1").isOk "snapshot saved"
+  let .ok snapshot ← provider.getSnapshot "warm / 1" | throw (IO.userError "snapshot get failed")
+  let .ok snapshots ← provider.listSnapshots | throw (IO.userError "snapshot list failed")
+  check (snapshot.name == "warm / 1" && snapshot.status == "ready" && snapshot.sizeBytes == some 1024 && snapshots.size == 1) "snapshot round trip"
+  check (← provider.deleteSnapshot "warm / 1").isOk "snapshot deleted"
+  let sent ← requests.get
+  check (sent[0]!.path == "/saved-snapshots" &&
+    (sent[0]!.body.getD .null).fieldStr? "sandboxId" == some "sb-1" &&
+    sent[1]!.path == "/saved-snapshots/warm%20%2F%201" &&
+    sent[3]!.method == "DELETE") "named snapshot wire contract"
+  replies.set #[(503, .null)]
+  check (!(← provider.saveSnapshot "sb-1" "failed").isOk) "failed snapshot is not recorded ready"
+
+end OrbCore.ManagedProviderTests
