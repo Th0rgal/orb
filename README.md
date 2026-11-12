@@ -110,6 +110,18 @@ The same control plane is available over MCP for coordinators such as
 [Hermes](https://github.com/Th0rgal/hermes-agent). Automation uses the same project
 and mission records as Orb.
 
+### Lightweight by default
+
+Orb Desktop avoids bundling Chromium or Node.js, pairing a native WebKit shell (`macos_shell/`, `linux_shell/`) with the compiled Lean 4 `orb-locald` daemon and SQLite tail-slice hydration:
+
+| Metric *(ARM64 Linux, Wayland)* | Orb Desktop | Electron Agent IDE *(Antigravity 2.25)* | Difference |
+| --- | ---: | ---: | --- |
+| **App bundle on disk** | **29 MB** *(12 MB UI + 17 MB native)* | ~493 MB | **17x smaller** |
+| **Cold launch RAM (PSS)** | **~250 MB** *(4 procs; `orb-locald`: 18 MB)* | ~801 MB *(10–12 procs)* | **3.2x less RAM** |
+| **8-hour active session RAM (PSS)** | **~630 MB** *(`orb-locald`: 35 MB)* | ~1.81 GB | **2.9x less RAM** |
+| **Cold launch CPU work** | **1.2 CPU-s** | 3.3 CPU-s | **2.6x less CPU** |
+| **2,000-event transcript open** | **12 ms cold / 0.2 ms warm** | — | `198 kB` SQLite tail slice |
+
 [Documentation index](docs/README.md) ·
 [Execution architecture](AGENTS.md) ·
 [Workspaces](docs/WORKSPACES.md) ·

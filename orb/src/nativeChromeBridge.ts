@@ -39,6 +39,7 @@ export type NativeChromeMissionWire = {
 export type NativeChromeProjectWire = {
   slug: string;
   name: string;
+  color?: string;
   folders: string[];
 };
 
@@ -52,6 +53,7 @@ export type NativeChromeSyncSnapshot = {
   settingsBadge: number;
   settingsDots: readonly string[];
   projects: readonly ProjectSummary[];
+  projectColors?: Readonly<Record<string, string | undefined>>;
   projectFolders?: Readonly<Record<string, readonly string[]>>;
   missions: readonly Mission[];
   completedMissions: readonly Mission[];
@@ -105,11 +107,15 @@ export function buildNativeChromeSyncArgs(
   snap: NativeChromeSyncSnapshot,
   revision: number,
 ): Record<string, unknown> {
-  const projects: NativeChromeProjectWire[] = snap.projects.map((p) => ({
-    slug: p.slug,
-    name: (p.title ?? "").trim() || p.slug,
-    folders: [...(snap.projectFolders?.[p.slug] ?? [])],
-  }));
+  const projects: NativeChromeProjectWire[] = snap.projects.map((p) => {
+    const col = snap.projectColors?.[p.slug] ?? p.color ?? "";
+    return {
+      slug: p.slug,
+      name: (p.title ?? "").trim() || p.slug,
+      ...(col ? { color: col } : {}),
+      folders: [...(snap.projectFolders?.[p.slug] ?? [])],
+    };
+  });
   const projectMissionsWire: Record<string, NativeChromeMissionWire[]> = {};
   for (const [slug, rows] of Object.entries(snap.projectMissions)) {
     projectMissionsWire[slug] = rows.map(serializeNativeChromeMission);

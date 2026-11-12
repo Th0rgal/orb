@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "gtk_chrome.h"
 #include <arpa/inet.h>
+#include <cairo/cairo.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,16 +16,11 @@
 char *orb_json_escape_string(const char *s) {
     if (!s) { s = ""; }
     size_t len = strlen(s), j = 0; char *out = len <= 4096 ? malloc(len * 6 + 4) : NULL; if (!out) { return NULL; }
-    out[j++] = '"';
-    for (size_t i = 0; i < len; ++i) { unsigned char c = (unsigned char)s[i]; if (c == '"' || c == '\\') { out[j++] = '\\'; out[j++] = (char)c; } else if (c < 0x20 || c == 0x7F) { j += (size_t)snprintf(out + j, 8, "\\u%04x", c); } else { out[j++] = (char)c; } }
+    out[j++] = '"'; for (size_t i = 0; i < len; ++i) { unsigned char c = (unsigned char)s[i]; if (c == '"' || c == '\\') { out[j++] = '\\'; out[j++] = (char)c; } else if (c < 0x20 || c == 0x7F) { j += (size_t)snprintf(out + j, 8, "\\u%04x", c); } else { out[j++] = (char)c; } }
     return out[j++] = '"', out[j] = '\0', out;
 }
 #if defined(ORB_HAS_WEBKITGTK)
-typedef struct {
-    GtkWidget *win, *wv, *paned, *sb_box, *sb_list, *pal_pop, *pal_entry, *pal_list;
-    JSCContext *jsc; GIOChannel *sse_ch; guint sse_src, retry_src; GString *sse_buf;
-    unsigned port; char token[128], *sb_scope; guint64 pal_gen, sb_req_gen, sb_scope_gen, sb_min_gen, sb_rev; int sb_inflight, sb_dirty, closed;
-} OrbGtkChrome;
+typedef struct { GtkWidget *win, *wv, *paned, *sb_box, *sb_list, *foot_btn, *foot_badge, *pal_pop, *pal_entry, *pal_list; JSCContext *jsc; GIOChannel *sse_ch; guint sse_src, retry_src; GString *sse_buf; unsigned port; char token[128], *sb_scope; guint64 pal_gen, sb_req_gen, sb_scope_gen, sb_min_gen, sb_rev; int sb_inflight, sb_dirty, closed; } OrbGtkChrome;
 typedef struct { OrbGtkChrome *c; unsigned port; char token[128], *body, *resp; int kind; guint64 gen; } RpcJob;
 static int accept_sb_resp(char **cur_sc, guint64 *sc_gen, guint64 min_gen, guint64 *cur_rv, guint64 rg, const char *sc, double rv) {
     const char *cs = *cur_sc ? *cur_sc : ""; guint64 gate = *sc_gen > min_gen ? *sc_gen : min_gen;
@@ -34,19 +30,42 @@ static int accept_sb_resp(char **cur_sc, guint64 *sc_gen, guint64 min_gen, guint
 static int connect_loopback(unsigned port, int nonblock) {
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | (nonblock ? SOCK_NONBLOCK : 0), 0); if (fd < 0) { return -1; }
     struct timeval tv = { .tv_sec = 0, .tv_usec = 350000 }; if (!nonblock) { setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)); setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)); }
-    struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port) }; sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    return (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0 && (!nonblock || errno != EINPROGRESS)) ? (close(fd), -1) : fd;
+    struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port) }; sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK); return (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0 && (!nonblock || errno != EINPROGRESS)) ? (close(fd), -1) : fd;
 }
 static char *jv_str(JSCValue *o, const char *k) { JSCValue *v = jsc_value_object_get_property(o, k); char *s = (v && jsc_value_is_string(v)) ? jsc_value_to_string(v) : g_strdup(""); if (v) { g_object_unref(v); } return s; }
 static gint32 jv_int(JSCValue *o, const char *k) { JSCValue *v = jsc_value_object_get_property(o, k); gint32 n = (v && jsc_value_is_number(v)) ? jsc_value_to_int32(v) : 0; if (v) { g_object_unref(v); } return n; }
 static double jv_num(JSCValue *o, const char *k) { JSCValue *v = jsc_value_object_get_property(o, k); double n = (v && jsc_value_is_number(v)) ? jsc_value_to_double(v) : -1.0; if (v) { g_object_unref(v); } return n; }
 static gboolean jv_bool(JSCValue *o, const char *k) { JSCValue *v = jsc_value_object_get_property(o, k); gboolean b = (v && jsc_value_is_boolean(v)) ? jsc_value_to_boolean(v) : FALSE; if (v) { g_object_unref(v); } return b; }
 static char *row_item_sig(JSCValue *it, int pal) {
-    char *k = jv_str(it, "kind"), *t = jv_str(it, "title"), *s = jv_str(it, "subtitle"), *tg = jv_str(it, "target"), *sc = jv_str(it, "shortcut");
-    char *sig = g_strdup_printf("%d|%d|%d|%d|%d|%d|%s|%s|%s|%s|%s", pal, pal ? 0 : (int)jv_int(it, "depth"), pal ? 0 : (int)jv_int(it, "badge"), !pal && jv_bool(it, "expandable"), !pal && jv_bool(it, "expanded"), !pal && jv_bool(it, "attention"), k, t, pal ? s : "", tg, sc);
-    g_free(k); g_free(t); g_free(s); g_free(tg); g_free(sc); return sig;
+    char *k = jv_str(it, "kind"), *t = jv_str(it, "title"), *s = jv_str(it, "subtitle"), *tg = jv_str(it, "target"), *sc = jv_str(it, "shortcut"), *ic = jv_str(it, "icon"), *co = jv_str(it, "color");
+    char *sig = g_strdup_printf("%d|%d|%d|%d|%d|%d|%s|%s|%s|%s|%s|%s|%s", pal, pal ? 0 : (int)jv_int(it, "depth"), pal ? 0 : (int)jv_int(it, "badge"), !pal && jv_bool(it, "expandable"), !pal && jv_bool(it, "expanded"), !pal && jv_bool(it, "attention"), k, t, pal ? s : "", tg, sc, ic, co);
+    return g_free(k), g_free(t), g_free(s), g_free(tg), g_free(sc), g_free(ic), g_free(co), sig;
 }
 static void set_row_selected(GtkWidget *row, gboolean sel) { GtkStyleContext *ctx = gtk_widget_get_style_context(row); if (sel) { gtk_style_context_add_class(ctx, "orb-selected"); } else { gtk_style_context_remove_class(ctx, "orb-selected"); } }
+static gboolean on_draw_icon(GtkWidget *w, cairo_t *cr, gpointer ud) {
+    (void)ud; const char *ic = g_object_get_data(G_OBJECT(w), "orb-icon"), *co = g_object_get_data(G_OBJECT(w), "orb-color"); GdkRGBA col; if (!ic || !*ic) { return FALSE; }
+    if (co && *co && gdk_rgba_parse(&col, co)) { gdk_cairo_set_source_rgba(cr, &col); } else { gtk_style_context_get_color(gtk_widget_get_style_context(w), gtk_widget_get_state_flags(w), &col); gdk_cairo_set_source_rgba(cr, &col); }
+    cairo_set_line_width(cr, 1.15); cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND); cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+    if (strcmp(ic, "new-agent") == 0) { cairo_move_to(cr, 2.5, 4); cairo_line_to(cr, 13.5, 4); cairo_move_to(cr, 4.5, 8); cairo_line_to(cr, 11.5, 8); cairo_move_to(cr, 6.5, 12); cairo_line_to(cr, 9.5, 12); }
+    else if (strcmp(ic, "inbox") == 0) { cairo_move_to(cr, 2.3, 9.3); cairo_line_to(cr, 4, 3); cairo_line_to(cr, 12, 3); cairo_line_to(cr, 13.7, 9.3); cairo_line_to(cr, 13.7, 12.8); cairo_line_to(cr, 2.3, 12.8); cairo_close_path(cr); cairo_move_to(cr, 2.4, 9.3); cairo_line_to(cr, 5.7, 9.3); cairo_line_to(cr, 6.6, 10.8); cairo_line_to(cr, 9.4, 10.8); cairo_line_to(cr, 10.3, 9.3); cairo_line_to(cr, 13.6, 9.3); }
+    else if (strcmp(ic, "cloud") == 0) { cairo_arc(cr, 4.8, 9.7, 2.6, 1.57, 4.5); cairo_arc(cr, 8.3, 7.6, 3.6, 3.4, 6.15); cairo_arc(cr, 11.5, 10.1, 2.2, 4.71, 1.57); cairo_close_path(cr); }
+    else if (strcmp(ic, "machines") == 0) { cairo_rectangle(cr, 2.2, 2.6, 11.6, 8); cairo_move_to(cr, 8, 10.6); cairo_line_to(cr, 8, 13.4); cairo_move_to(cr, 5.2, 13.5); cairo_line_to(cr, 10.8, 13.5); }
+    else if (strcmp(ic, "cube") == 0) { cairo_move_to(cr, 8, 2.4); cairo_line_to(cr, 13.4, 5.4); cairo_line_to(cr, 13.4, 10.6); cairo_line_to(cr, 8, 13.6); cairo_line_to(cr, 2.6, 10.6); cairo_line_to(cr, 2.6, 5.4); cairo_close_path(cr); cairo_move_to(cr, 2.6, 5.4); cairo_line_to(cr, 8, 8.4); cairo_line_to(cr, 13.4, 5.4); cairo_move_to(cr, 8, 8.4); cairo_line_to(cr, 8, 13.6); }
+    else if (strcmp(ic, "resources") == 0) { cairo_move_to(cr, 2.4, 4.4); cairo_line_to(cr, 5.2, 4.4); cairo_line_to(cr, 9.2, 8); cairo_line_to(cr, 13.6, 8); cairo_move_to(cr, 2.4, 11.6); cairo_line_to(cr, 5.2, 11.6); cairo_line_to(cr, 9.2, 8); cairo_move_to(cr, 11.4, 5.8); cairo_line_to(cr, 13.8, 8); cairo_line_to(cr, 11.4, 10.2); }
+    else if (strcmp(ic, "gear") == 0) { cairo_arc(cr, 8, 8, 2.1, 0, 6.29); cairo_new_sub_path(cr); cairo_arc(cr, 8, 8, 4.7, 0, 6.29); for (int a = 0; a < 8; ++a) { static const double dx[8] = {1,.71,0,-.71,-1,-.71,0,.71}, dy[8] = {0,.71,1,.71,0,-.71,-1,-.71}; cairo_move_to(cr, 8 + dx[a] * 4.7, 8 + dy[a] * 4.7); cairo_line_to(cr, 8 + dx[a] * 6.2, 8 + dy[a] * 6.2); } }
+    else if (strcmp(ic, "folder") == 0 || strcmp(ic, "folder-open") == 0) { cairo_move_to(cr, 2, 4.2); cairo_line_to(cr, 2, 12.6); cairo_line_to(cr, 13.8, 12.6); cairo_line_to(cr, 13.8, 5.2); cairo_line_to(cr, 7.6, 5.2); cairo_line_to(cr, 6.1, 3.4); cairo_line_to(cr, 2.6, 3.4); cairo_close_path(cr); if (ic[6] == '-') { cairo_move_to(cr, 2.2, 8.2); cairo_line_to(cr, 13.8, 8.2); } }
+    else if (strcmp(ic, "arrow-left") == 0) { cairo_move_to(cr, 13, 8); cairo_line_to(cr, 3, 8); cairo_move_to(cr, 7, 4); cairo_line_to(cr, 3, 8); cairo_line_to(cr, 7, 12); }
+    else if (strcmp(ic, "skills") == 0) { cairo_move_to(cr, 2.5, 5.2); cairo_line_to(cr, 8, 2.4); cairo_line_to(cr, 13.5, 5.2); cairo_line_to(cr, 8, 8); cairo_close_path(cr); cairo_move_to(cr, 2.5, 8.2); cairo_line_to(cr, 8, 11); cairo_line_to(cr, 13.5, 8.2); cairo_move_to(cr, 2.5, 11.2); cairo_line_to(cr, 8, 14); cairo_line_to(cr, 13.5, 11.2); }
+    else if (strcmp(ic, "key") == 0) { cairo_arc(cr, 5.8, 8, 2.4, 0, 6.29); cairo_move_to(cr, 8.2, 8); cairo_line_to(cr, 13.4, 8); cairo_line_to(cr, 12.1, 9.4); cairo_move_to(cr, 11, 8); cairo_line_to(cr, 11, 9.7); }
+    else if (strcmp(ic, "bell") == 0) { cairo_arc(cr, 8, 5.8, 3.2, 3.14, 6.28); cairo_line_to(cr, 11.2, 8.2); cairo_line_to(cr, 12.8, 10.6); cairo_line_to(cr, 3.2, 10.6); cairo_line_to(cr, 4.8, 8.2); cairo_close_path(cr); cairo_new_sub_path(cr); cairo_arc(cr, 8, 12.2, 1.5, 0, 3.14); }
+    else { cairo_rectangle(cr, 3.2, 5.4, 9.6, 7.2); cairo_move_to(cr, 8, 5.4); cairo_line_to(cr, 8, 3); cairo_line_to(cr, 5.6, 3); cairo_move_to(cr, 6, 8.6); cairo_line_to(cr, 6, 9.8); cairo_move_to(cr, 10, 8.6); cairo_line_to(cr, 10, 9.8); }
+    return cairo_stroke(cr), FALSE;
+}
+static GtkWidget *make_icon_widget(const char *icon, const char *color) {
+    GtkWidget *da = gtk_drawing_area_new(); gtk_widget_set_size_request(da, 16, 16); gtk_widget_set_valign(da, GTK_ALIGN_CENTER); gtk_style_context_add_class(gtk_widget_get_style_context(da), "orb-ico");
+    g_object_set_data_full(G_OBJECT(da), "orb-icon", g_strdup(icon ? icon : ""), g_free); if (color && *color) { g_object_set_data_full(G_OBJECT(da), "orb-color", g_strdup(color), g_free); }
+    return g_signal_connect(da, "draw", G_CALLBACK(on_draw_icon), NULL), da;
+}
 static void eval_wv_target(OrbGtkChrome *c, const char *kind, const char *target) {
     if (!c->wv || !target || !*target) { return; }
     char *lit = orb_json_escape_string(target); if (!lit) { return; }
@@ -54,6 +73,11 @@ static void eval_wv_target(OrbGtkChrome *c, const char *kind, const char *target
     char js[4600]; snprintf(js, sizeof(js), "window.%s&&window.%s(%s);", fn, fn, lit); free(lit); webkit_web_view_evaluate_javascript(WEBKIT_WEB_VIEW(c->wv), js, -1, NULL, NULL, NULL, NULL, NULL);
 }
 static void refresh_sidebar_rows(OrbGtkChrome *c); static void populate_from_array(OrbGtkChrome *c, GtkWidget *lb, JSCValue *arr, int pal);
+static void apply_footer_state(OrbGtkChrome *c, JSCValue *ft) {
+    if (!ft || !jsc_value_is_object(ft)) { return; }
+    set_row_selected(c->foot_btn, jv_bool(ft, "selected")); gint32 b = jv_int(ft, "badge");
+    if (b > 0) { char bs[24]; snprintf(bs, sizeof(bs), "%d", (int)b); gtk_label_set_text(GTK_LABEL(c->foot_badge), bs); gtk_widget_show(c->foot_badge); } else { gtk_widget_hide(c->foot_badge); }
+}
 static gboolean rpc_done(gpointer p) {
     RpcJob *j = (RpcJob *)p; OrbGtkChrome *c = j->c;
     if (!c->closed) {
@@ -66,77 +90,56 @@ static gboolean rpc_done(gpointer p) {
                 GtkListBoxRow *first = gtk_list_box_get_row_at_index(GTK_LIST_BOX(c->pal_list), 0); if (first) { gtk_list_box_select_row(GTK_LIST_BOX(c->pal_list), first); }
                 if (items) { g_object_unref(items); }
             } else if (j->kind != 1) {
-                JSCValue *rows = jsc_value_object_get_property(res, "rows"); char *sc = jv_str(res, "scope"); double rv = jv_num(res, "revision");
-                if (rows && jsc_value_is_array(rows)) { if (accept_sb_resp(&c->sb_scope, &c->sb_scope_gen, c->sb_min_gen, &c->sb_rev, j->gen, sc, rv)) { populate_from_array(c, c->sb_list, rows, 0); } }
-                else if (j->kind == 2) { refresh_sidebar_rows(c); }
-                g_free(sc); if (rows) { g_object_unref(rows); }
+                JSCValue *rows = jsc_value_object_get_property(res, "rows"), *ft = jsc_value_object_get_property(res, "footer"); char *sc = jv_str(res, "scope"); double rv = jv_num(res, "revision");
+                if (rows && jsc_value_is_array(rows)) { if (accept_sb_resp(&c->sb_scope, &c->sb_scope_gen, c->sb_min_gen, &c->sb_rev, j->gen, sc, rv)) { populate_from_array(c, c->sb_list, rows, 0); apply_footer_state(c, ft); } } else if (j->kind == 2) { refresh_sidebar_rows(c); }
+                g_free(sc); if (ft) { g_object_unref(ft); } if (rows) { g_object_unref(rows); }
             }
         } else if (j->kind == 2) { refresh_sidebar_rows(c); }
         if (res) { g_object_unref(res); }
         if (j->kind == 0 && c->sb_dirty) { c->sb_dirty = 0; refresh_sidebar_rows(c); }
     }
-    g_free(j->body); g_free(j->resp); g_free(j); return FALSE;
+    return g_free(j->body), g_free(j->resp), g_free(j), FALSE;
 }
 static gpointer rpc_worker(gpointer p) {
     RpcJob *j = (RpcJob *)p; int fd = connect_loopback(j->port, 0);
     if (fd >= 0) {
-        size_t blen = strlen(j->body); char hdr[512];
-        int hl = snprintf(hdr, sizeof(hdr), "POST /__orb_rpc HTTP/1.1\r\nHost: 127.0.0.1:%u\r\nContent-Type: application/json\r\nConnection: close\r\nX-Orb-Token: %s\r\nContent-Length: %zu\r\n\r\n", j->port, j->token, blen);
+        size_t blen = strlen(j->body); char hdr[512]; int hl = snprintf(hdr, sizeof(hdr), "POST /__orb_rpc HTTP/1.1\r\nHost: 127.0.0.1:%u\r\nContent-Type: application/json\r\nConnection: close\r\nX-Orb-Token: %s\r\nContent-Length: %zu\r\n\r\n", j->port, j->token, blen);
         if (hl > 0 && (size_t)hl < sizeof(hdr) && send(fd, hdr, (size_t)hl, MSG_NOSIGNAL) == hl && send(fd, j->body, blen, MSG_NOSIGNAL) == (ssize_t)blen) {
-            GString *raw = g_string_sized_new(4096); char buf[4096]; ssize_t n;
-            while ((n = recv(fd, buf, sizeof(buf), 0)) > 0 && raw->len < (4u << 20)) { g_string_append_len(raw, buf, n); }
+            GString *raw = g_string_sized_new(4096); char buf[4096]; ssize_t n; while ((n = recv(fd, buf, sizeof(buf), 0)) > 0 && raw->len < (4u << 20)) { g_string_append_len(raw, buf, n); }
             const char *sep = strstr(raw->str, "\r\n\r\n"); if (sep && strncmp(raw->str, "HTTP/1.1 200", 12) == 0) { j->resp = g_strdup(sep + 4); }
             g_string_free(raw, TRUE);
         }
         close(fd);
     }
-    g_idle_add(rpc_done, j); return NULL;
+    return g_idle_add(rpc_done, j), NULL;
 }
-static void rpc_call_async(OrbGtkChrome *c, const char *body, int kind, guint64 gen) {
-    if (c->closed) { return; }
-    RpcJob *j = g_new0(RpcJob, 1); j->c = c; j->port = c->port; snprintf(j->token, sizeof(j->token), "%s", c->token); j->body = g_strdup(body); j->kind = kind; j->gen = gen;
-    g_thread_unref(g_thread_new("orb-rpc", rpc_worker, j));
-}
+static void rpc_call_async(OrbGtkChrome *c, const char *body, int kind, guint64 gen) { if (c->closed) { return; } RpcJob *j = g_new0(RpcJob, 1); j->c = c; j->port = c->port; snprintf(j->token, sizeof(j->token), "%s", c->token); j->body = g_strdup(body); j->kind = kind; j->gen = gen; g_thread_unref(g_thread_new("orb-rpc", rpc_worker, j)); }
 static void toggle_row_expand(OrbGtkChrome *c, const char *rid) { char *lit = rid ? orb_json_escape_string(rid) : NULL; if (!lit) { return; } char req[1024]; snprintf(req, sizeof(req), "{\"command\":\"native_chrome_toggle_expand\",\"args\":{\"row_id\":%s}}", lit); free(lit); rpc_call_async(c, req, 2, ++c->sb_req_gen); }
-static void on_chevron_clicked(GtkButton *b, gpointer ud) { toggle_row_expand((OrbGtkChrome *)ud, g_object_get_data(G_OBJECT(b), "orb-row-id")); }
 static GtkWidget *make_row_widget(OrbGtkChrome *c, JSCValue *it, int pal, char *sig) {
-    char *rid = jv_str(it, pal ? "id" : "row_id"), *kind = jv_str(it, "kind"), *title = jv_str(it, "title"), *sub = jv_str(it, "subtitle"), *target = jv_str(it, "target"), *sc = jv_str(it, "shortcut");
-    gint32 depth = pal ? 0 : jv_int(it, "depth"), badge = pal ? 0 : jv_int(it, "badge");
-    gboolean exp = !pal && jv_bool(it, "expandable"), open = !pal && jv_bool(it, "expanded"), sel = !pal && jv_bool(it, "selected"), attn = !pal && jv_bool(it, "attention");
-    GtkWidget *row = gtk_list_box_row_new(), *hb = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    gtk_widget_set_margin_start(hb, 8 + (depth > 8 ? 8 : depth) * 12); gtk_widget_set_margin_end(hb, 8); gtk_widget_set_margin_top(hb, 4); gtk_widget_set_margin_bottom(hb, 4); set_row_selected(row, sel);
-    if (exp) {
-        GtkWidget *cb = gtk_button_new_with_label(open ? "\xE2\x96\xBE" : "\xE2\x96\xB8"); gtk_button_set_relief(GTK_BUTTON(cb), GTK_RELIEF_NONE); gtk_widget_set_focus_on_click(cb, FALSE);
-        gtk_style_context_add_class(gtk_widget_get_style_context(cb), "orb-chev"); g_object_set_data_full(G_OBJECT(cb), "orb-row-id", g_strdup(rid), g_free);
-        g_signal_connect(cb, "clicked", G_CALLBACK(on_chevron_clicked), c); gtk_box_pack_start(GTK_BOX(hb), cb, FALSE, FALSE, 0);
-    }
-    GtkWidget *lbl = gtk_label_new(title); gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f); gtk_label_set_ellipsize(GTK_LABEL(lbl), PANGO_ELLIPSIZE_END);
-    if (strcmp(kind, "project") == 0) { gtk_style_context_add_class(gtk_widget_get_style_context(lbl), "orb-proj"); }
+    (void)c; char *rid = jv_str(it, pal ? "id" : "row_id"), *kind = jv_str(it, "kind"), *title = jv_str(it, "title"), *sub = jv_str(it, "subtitle"), *target = jv_str(it, "target"), *sc = jv_str(it, "shortcut"), *ic = jv_str(it, "icon"), *co = jv_str(it, "color");
+    gint32 depth = pal ? 0 : jv_int(it, "depth"), badge = pal ? 0 : jv_int(it, "badge"); gboolean exp = !pal && jv_bool(it, "expandable"), sel = !pal && jv_bool(it, "selected"), attn = !pal && jv_bool(it, "attention"), nonact = !pal && (strcmp(kind, "section") == 0 || strcmp(kind, "note") == 0);
+    GtkWidget *row = gtk_list_box_row_new(), *hb = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8), *lbl = gtk_label_new(title);
+    if (nonact) { gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), FALSE); gtk_list_box_row_set_selectable(GTK_LIST_BOX_ROW(row), FALSE); gtk_style_context_add_class(gtk_widget_get_style_context(row), strcmp(kind, "section") == 0 ? "orb-sec" : "orb-note"); }
+    gtk_widget_set_margin_start(hb, 6 + (depth > 8 ? 8 : depth) * 12); gtk_widget_set_margin_end(hb, 6); set_row_selected(row, sel); if (*ic) { gtk_box_pack_start(GTK_BOX(hb), make_icon_widget(ic, co), FALSE, FALSE, 0); }
+    gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f); gtk_label_set_ellipsize(GTK_LABEL(lbl), PANGO_ELLIPSIZE_END); if (strcmp(kind, "project") == 0) { gtk_style_context_add_class(gtk_widget_get_style_context(lbl), "orb-proj"); }
     gtk_box_pack_start(GTK_BOX(hb), lbl, TRUE, TRUE, 0);
-    if (attn || badge > 0 || (pal && *sub) || *sc) {
-        char meta[96];
-        if (badge > 0) { snprintf(meta, sizeof(meta), "%d", (int)badge); } else if (*sc) { snprintf(meta, sizeof(meta), "%s", sc); } else if (pal && *sub) { snprintf(meta, sizeof(meta), "%s", sub); } else { snprintf(meta, sizeof(meta), "\xE2\x80\xA2"); }
-        GtkWidget *ml = gtk_label_new(meta); gtk_style_context_add_class(gtk_widget_get_style_context(ml), "orb-dim"); gtk_box_pack_end(GTK_BOX(hb), ml, FALSE, FALSE, 0);
-    }
-    g_object_set_data_full(G_OBJECT(row), "orb-row-id", rid, g_free); g_object_set_data_full(G_OBJECT(row), "orb-kind", kind, g_free);
-    g_object_set_data_full(G_OBJECT(row), "orb-target", target, g_free); g_object_set_data_full(G_OBJECT(row), "orb-sig", sig, g_free); g_object_set_data(G_OBJECT(row), "orb-exp", GINT_TO_POINTER(exp ? 1 : 0));
-    g_free(title); g_free(sub); g_free(sc); gtk_container_add(GTK_CONTAINER(row), hb); gtk_widget_show_all(row); return row;
+    if (badge > 0) { char bs[24]; snprintf(bs, sizeof(bs), "%d", (int)badge); GtkWidget *bl = gtk_label_new(bs); gtk_widget_set_valign(bl, GTK_ALIGN_CENTER); gtk_style_context_add_class(gtk_widget_get_style_context(bl), "orb-badge"); gtk_box_pack_end(GTK_BOX(hb), bl, FALSE, FALSE, 0); }
+    if (*sc || (pal && *sub) || attn) { GtkWidget *ml = gtk_label_new(*sc ? sc : ((pal && *sub) ? sub : "\xE2\x80\xA2")); gtk_style_context_add_class(gtk_widget_get_style_context(ml), attn && !*sc ? "orb-attn" : "orb-kbd"); gtk_box_pack_end(GTK_BOX(hb), ml, FALSE, FALSE, 0); }
+    g_object_set_data_full(G_OBJECT(row), "orb-row-id", rid, g_free); g_object_set_data_full(G_OBJECT(row), "orb-kind", kind, g_free); g_object_set_data_full(G_OBJECT(row), "orb-target", target, g_free); g_object_set_data_full(G_OBJECT(row), "orb-sig", sig, g_free); g_object_set_data(G_OBJECT(row), "orb-exp", GINT_TO_POINTER(exp ? 1 : 0));
+    return g_free(title), g_free(sub), g_free(sc), g_free(ic), g_free(co), gtk_container_add(GTK_CONTAINER(row), hb), gtk_widget_show_all(row), row;
 }
 static void populate_from_array(OrbGtkChrome *c, GtkWidget *lb, JSCValue *arr, int pal) {
     const char *idk = pal ? "id" : "row_id"; gint32 len = (arr && jsc_value_is_array(arr)) ? jv_int(arr, "length") : 0, out = 0; if (len < 0) { len = 0; }
     GHashTable *keep = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     for (gint32 i = 0; i < len; ++i) { JSCValue *it = jsc_value_object_get_property_at_index(arr, (guint)i); if (it && jsc_value_is_object(it)) { char *id = jv_str(it, idk); if (*id) { g_hash_table_add(keep, id); } else { g_free(id); } } if (it) { g_object_unref(it); } }
-    GList *ch = gtk_container_get_children(GTK_CONTAINER(lb));
-    for (GList *l = ch; l; l = l->next) { const char *id = g_object_get_data(G_OBJECT(l->data), "orb-row-id"); if (!id || !*id || !g_hash_table_contains(keep, id)) { gtk_widget_destroy(GTK_WIDGET(l->data)); } }
+    GList *ch = gtk_container_get_children(GTK_CONTAINER(lb)); for (GList *l = ch; l; l = l->next) { const char *id = g_object_get_data(G_OBJECT(l->data), "orb-row-id"); if (!id || !*id || !g_hash_table_contains(keep, id)) { gtk_widget_destroy(GTK_WIDGET(l->data)); } }
     g_list_free(ch); g_hash_table_destroy(keep);
     for (gint32 i = 0; i < len; ++i) {
         JSCValue *it = jsc_value_object_get_property_at_index(arr, (guint)i); if (!it || !jsc_value_is_object(it)) { if (it) { g_object_unref(it); } continue; }
-        char *rid = jv_str(it, idk), *sig = row_item_sig(it, pal);
-        GtkListBoxRow *cur = gtk_list_box_get_row_at_index(GTK_LIST_BOX(lb), out), *lat;
+        char *rid = jv_str(it, idk), *sig = row_item_sig(it, pal); GtkListBoxRow *cur = gtk_list_box_get_row_at_index(GTK_LIST_BOX(lb), out), *lat;
         const char *cid = cur ? g_object_get_data(G_OBJECT(cur), "orb-row-id") : NULL, *csig = cur ? g_object_get_data(G_OBJECT(cur), "orb-sig") : NULL;
         if (cur && *rid && cid && strcmp(cid, rid) == 0) {
-            if (csig && strcmp(csig, sig) == 0) { set_row_selected(GTK_WIDGET(cur), !pal && jv_bool(it, "selected")); g_free(sig); }
-            else { gtk_widget_destroy(GTK_WIDGET(cur)); gtk_list_box_insert(GTK_LIST_BOX(lb), make_row_widget(c, it, pal, sig), out); }
+            if (csig && strcmp(csig, sig) == 0) { set_row_selected(GTK_WIDGET(cur), !pal && jv_bool(it, "selected")); g_free(sig); } else { gtk_widget_destroy(GTK_WIDGET(cur)); gtk_list_box_insert(GTK_LIST_BOX(lb), make_row_widget(c, it, pal, sig), out); }
         } else {
             for (gint32 j = out + 1; *rid && (lat = gtk_list_box_get_row_at_index(GTK_LIST_BOX(lb), j)) != NULL; ++j) { const char *lid = g_object_get_data(G_OBJECT(lat), "orb-row-id"); if (lid && strcmp(lid, rid) == 0) { gtk_widget_destroy(GTK_WIDGET(lat)); break; } }
             gtk_list_box_insert(GTK_LIST_BOX(lb), make_row_widget(c, it, pal, sig), out);
@@ -149,15 +152,13 @@ static void refresh_sidebar_rows(OrbGtkChrome *c) { if (c->sb_inflight) { c->sb_
 static void refresh_palette_items(OrbGtkChrome *c, const char *q) { char *lit = orb_json_escape_string(q ? q : ""); if (!lit) { return; } char req[1200]; snprintf(req, sizeof(req), "{\"command\":\"native_chrome_palette_query\",\"args\":{\"query\":%s,\"limit\":24}}", lit); free(lit); rpc_call_async(c, req, 1, ++c->pal_gen); }
 static void on_sb_row_activated(GtkListBox *lb, GtkListBoxRow *r, gpointer ud) {
     (void)lb; OrbGtkChrome *c = (OrbGtkChrome *)ud; if (!r) { return; }
-    const char *t = g_object_get_data(G_OBJECT(r), "orb-target"), *k = g_object_get_data(G_OBJECT(r), "orb-kind");
-    if (t && *t && (!k || strcmp(k, "folder") != 0) && strncmp(t, "folder:", 7) != 0) { eval_wv_target(c, k, t); }
-    else if (GPOINTER_TO_INT(g_object_get_data(G_OBJECT(r), "orb-exp"))) { toggle_row_expand(c, g_object_get_data(G_OBJECT(r), "orb-row-id")); }
+    const char *t = g_object_get_data(G_OBJECT(r), "orb-target"), *k = g_object_get_data(G_OBJECT(r), "orb-kind"), *rid = g_object_get_data(G_OBJECT(r), "orb-row-id");
+    if (k && (strcmp(k, "project") == 0 || strcmp(k, "folder") == 0)) { toggle_row_expand(c, rid); } else if (t && *t && strncmp(t, "folder:", 7) != 0) { eval_wv_target(c, k, t); } else if (GPOINTER_TO_INT(g_object_get_data(G_OBJECT(r), "orb-exp"))) { toggle_row_expand(c, rid); }
 }
+static void on_foot_clicked(GtkButton *b, gpointer ud) { (void)b; OrbGtkChrome *c = (OrbGtkChrome *)ud; if (!gtk_style_context_has_class(gtk_widget_get_style_context(c->foot_btn), "orb-selected")) { eval_wv_target(c, "footer", "settings"); } }
 static void on_pal_row_activated(GtkListBox *lb, GtkListBoxRow *r, gpointer ud) {
     (void)lb; OrbGtkChrome *c = (OrbGtkChrome *)ud; if (!r) { return; }
-    const char *t = g_object_get_data(G_OBJECT(r), "orb-target"), *k = g_object_get_data(G_OBJECT(r), "orb-kind");
-    if (t && strncmp(t, "folder:", 7) == 0) { toggle_row_expand(c, t); } else { eval_wv_target(c, k, t); }
-    ++c->pal_gen; gtk_popover_popdown(GTK_POPOVER(c->pal_pop));
+    const char *t = g_object_get_data(G_OBJECT(r), "orb-target"), *k = g_object_get_data(G_OBJECT(r), "orb-kind"); if (t && strncmp(t, "folder:", 7) == 0) { toggle_row_expand(c, t); } else { eval_wv_target(c, k, t); } ++c->pal_gen; gtk_popover_popdown(GTK_POPOVER(c->pal_pop));
 }
 static void on_pal_closed(GtkPopover *p, gpointer ud) { (void)p; ++((OrbGtkChrome *)ud)->pal_gen; }
 static void on_win_destroy(GtkWidget *w, gpointer ud) { (void)w; ((OrbGtkChrome *)ud)->closed = 1; }
@@ -173,45 +174,42 @@ static gboolean start_sse_watch(gpointer ud);
 static gboolean on_sse_io(GIOChannel *ch, GIOCondition cond, gpointer ud) {
     OrbGtkChrome *c = (OrbGtkChrome *)ud; int fd = g_io_channel_unix_get_fd(ch); if (cond & (G_IO_HUP | G_IO_ERR | G_IO_NVAL)) { goto drop; }
     char buf[4096]; ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0); if (n <= 0) { if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) { return TRUE; } goto drop; }
-    g_string_append_len(c->sse_buf, buf, n); char *p; int hit = 0;
-    while ((p = strstr(c->sse_buf->str, "\n\n")) != NULL) { size_t fl = (size_t)(p - c->sse_buf->str); if (g_strstr_len(c->sse_buf->str, (gssize)fl, "native_chrome_rows_changed")) { hit = 1; } g_string_erase(c->sse_buf, 0, (gssize)(fl + 2)); }
+    g_string_append_len(c->sse_buf, buf, n); char *p; int hit = 0; while ((p = strstr(c->sse_buf->str, "\n\n")) != NULL) { size_t fl = (size_t)(p - c->sse_buf->str); if (g_strstr_len(c->sse_buf->str, (gssize)fl, "native_chrome_rows_changed")) { hit = 1; } g_string_erase(c->sse_buf, 0, (gssize)(fl + 2)); }
     if (hit) { c->sb_min_gen = c->sb_req_gen + 1; refresh_sidebar_rows(c); } return TRUE;
 drop: c->sse_src = 0; g_io_channel_unref(c->sse_ch); c->sse_ch = NULL; close(fd); if (!c->retry_src) { c->retry_src = g_timeout_add(900, start_sse_watch, c); } return FALSE;
 }
 static gboolean start_sse_watch(gpointer ud) {
-    OrbGtkChrome *c = (OrbGtkChrome *)ud; c->retry_src = 0; refresh_sidebar_rows(c);
-    int fd = connect_loopback(c->port, 1); if (fd < 0) { return c->retry_src = g_timeout_add(450, start_sse_watch, c), FALSE; }
+    OrbGtkChrome *c = (OrbGtkChrome *)ud; c->retry_src = 0; refresh_sidebar_rows(c); int fd = connect_loopback(c->port, 1); if (fd < 0) { return c->retry_src = g_timeout_add(450, start_sse_watch, c), FALSE; }
     char req[512]; int len = snprintf(req, sizeof(req), "GET /__orb_events HTTP/1.1\r\nHost: 127.0.0.1:%u\r\nAccept: text/event-stream\r\nX-Orb-Token: %s\r\n\r\n", c->port, c->token); if (len > 0) { (void)send(fd, req, (size_t)len, MSG_NOSIGNAL); }
     g_string_truncate(c->sse_buf, 0); c->sse_ch = g_io_channel_unix_new(fd); c->sse_src = g_io_add_watch(c->sse_ch, G_IO_IN | G_IO_HUP | G_IO_ERR, on_sse_io, c); return FALSE;
 }
 GtkWidget *orb_gtk_chrome_wrap(GtkWidget *win, GtkWidget *wv, WebKitUserContentManager *ucm, unsigned port, const char *token) {
     OrbGtkChrome *c = g_new0(OrbGtkChrome, 1); c->win = win; c->wv = wv; c->port = port; c->jsc = jsc_context_new(); c->sse_buf = g_string_sized_new(1024); snprintf(c->token, sizeof(c->token), "%s", token ? token : "");
     GtkCssProvider *cp = gtk_css_provider_new();
-    gtk_css_provider_load_from_data(cp, ".orb-sb{background:#151517;color:#e4e4e7;border-right:1px solid #27272a;}.orb-sb list,.orb-pal list{background:transparent;color:#e4e4e7;}.orb-sb row,.orb-pal row{border:1px solid transparent;border-radius:6px;margin:1px 6px;outline:none;box-shadow:none;}.orb-sb row:hover,.orb-pal row:hover{background:rgba(255,255,255,0.05);}.orb-sb row.orb-selected,.orb-pal row:selected{background:rgba(255,255,255,0.09);}.orb-sb row:focus-visible,.orb-pal row:focus-visible,.orb-pal entry:focus{border-color:#52525b;outline:none;box-shadow:none;}.orb-proj{font-weight:600;color:#fafafa;}.orb-dim{color:#a1a1aa;font-size:11px;}.orb-chev{padding:0 2px;min-width:16px;min-height:16px;color:#a1a1aa;}", -1, NULL);
+    gtk_css_provider_load_from_data(cp, ".orb-paned,.orb-sb scrolledwindow,.orb-sb viewport,.orb-pal scrolledwindow,.orb-pal viewport{background:transparent;background-image:none;border:none;box-shadow:none;}.orb-paned>separator{min-width:1px;min-height:1px;padding:0;margin:0;background-color:#2c2c2c;background-image:none;border:none;box-shadow:none;}.orb-sb{background-color:rgba(18,19,19,0.78);background-image:none;color:#d8d8d7;font-size:13px;}.orb-sb list,.orb-pal list{background:transparent;color:#d8d8d7;}.orb-sb row,.orb-pal row{min-height:30px;padding:0;margin:0 6px 1px 6px;border:1px solid transparent;border-radius:6px;background:transparent;color:#d8d8d7;outline:none;box-shadow:none;}.orb-sb row:hover:not(.orb-selected):not(.orb-sec):not(.orb-note),.orb-pal row:hover{background-color:rgba(216,216,215,0.045);}.orb-sb row.orb-selected,.orb-pal row:selected{background-color:rgba(216,216,215,0.075);color:#e6e6e5;}.orb-sb row.orb-sec{min-height:20px;margin:13px 8px 4px 10px;color:#8a8a8a;font-size:11px;}.orb-sb row.orb-note{min-height:26px;margin:2px 8px 2px 10px;color:#8a8a8a;font-size:12px;}.orb-ico{color:rgba(216,216,215,0.62);}.orb-sb row.orb-selected .orb-ico,.orb-foot button.orb-selected .orb-ico{color:#e6e6e5;}.orb-proj{color:#b1b1b1;}.orb-sb row:hover .orb-proj{color:#d8d8d7;}.orb-kbd{color:#5c5c5c;font-size:11px;}.orb-attn{color:#c9a227;font-size:12px;}.orb-badge{min-width:16px;min-height:16px;padding:0 5px;border-radius:999px;background-color:rgba(216,216,215,0.075);color:#8a8a8a;font-size:11px;}.orb-foot{padding:6px;border-top:1px solid #2c2c2c;}.orb-foot button{min-height:32px;padding:0 8px;border-radius:8px;border:1px solid transparent;background:transparent;background-image:none;color:#b1b1b1;box-shadow:none;outline:none;}.orb-foot button:hover:not(.orb-selected){background-color:rgba(216,216,215,0.045);color:#d8d8d7;}.orb-foot button.orb-selected{color:#d8d8d7;font-weight:500;}.orb-pal,.orb-pal contents{background-color:#212121;background-image:none;border-color:#3a3a3a;border-radius:10px;color:#d8d8d7;}.orb-pal entry{background-color:#1e1e1e;background-image:none;color:#d8d8d7;border:1px solid #2f2f2f;border-radius:6px;box-shadow:none;outline:none;}.orb-sb row:focus-visible,.orb-pal row:focus-visible,.orb-foot button:focus-visible,.orb-pal entry:focus{border-color:#5b5b5a;outline:none;box-shadow:none;}", -1, NULL);
     gtk_style_context_add_provider_for_screen(gtk_widget_get_screen(win), GTK_STYLE_PROVIDER(cp), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION); g_object_unref(cp);
     c->sb_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0); gtk_widget_set_size_request(c->sb_box, 220, -1); gtk_style_context_add_class(gtk_widget_get_style_context(c->sb_box), "orb-sb");
-    GtkWidget *top = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6), *kb = gtk_button_new_with_label("Search  Ctrl+K"), *scw = gtk_scrolled_window_new(NULL, NULL);
-    gtk_widget_set_margin_start(top, 8); gtk_widget_set_margin_end(top, 8); gtk_widget_set_margin_top(top, 8); gtk_widget_set_margin_bottom(top, 6);
-    g_signal_connect_swapped(kb, "clicked", G_CALLBACK(open_palette), c); gtk_box_pack_start(GTK_BOX(top), kb, TRUE, TRUE, 0); gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scw), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    c->sb_list = gtk_list_box_new(); gtk_list_box_set_selection_mode(GTK_LIST_BOX(c->sb_list), GTK_SELECTION_NONE); gtk_list_box_set_activate_on_single_click(GTK_LIST_BOX(c->sb_list), TRUE);
-    g_signal_connect(c->sb_list, "row-activated", G_CALLBACK(on_sb_row_activated), c); gtk_container_add(GTK_CONTAINER(scw), c->sb_list); gtk_box_pack_start(GTK_BOX(c->sb_box), top, FALSE, FALSE, 0); gtk_box_pack_start(GTK_BOX(c->sb_box), scw, TRUE, TRUE, 0);
-    c->pal_pop = gtk_popover_new(kb); gtk_style_context_add_class(gtk_widget_get_style_context(c->pal_pop), "orb-pal"); g_signal_connect(c->pal_pop, "closed", G_CALLBACK(on_pal_closed), c);
-    GtkWidget *pb = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6), *pscw = gtk_scrolled_window_new(NULL, NULL); gtk_widget_set_size_request(pb, 420, 320); gtk_container_set_border_width(GTK_CONTAINER(pb), 8);
-    c->pal_entry = gtk_search_entry_new(); c->pal_list = gtk_list_box_new(); gtk_list_box_set_activate_on_single_click(GTK_LIST_BOX(c->pal_list), TRUE);
+    GtkWidget *top = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0), *scw = gtk_scrolled_window_new(NULL, NULL), *foot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0), *fhb = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8), *fl = gtk_label_new("Settings");
+    gtk_widget_set_size_request(top, -1, 35); gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scw), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC); gtk_style_context_add_class(gtk_widget_get_style_context(foot), "orb-foot");
+    c->sb_list = gtk_list_box_new(); gtk_list_box_set_selection_mode(GTK_LIST_BOX(c->sb_list), GTK_SELECTION_NONE); gtk_list_box_set_activate_on_single_click(GTK_LIST_BOX(c->sb_list), TRUE); g_signal_connect(c->sb_list, "row-activated", G_CALLBACK(on_sb_row_activated), c); gtk_container_add(GTK_CONTAINER(scw), c->sb_list);
+    c->foot_btn = gtk_button_new(); gtk_button_set_relief(GTK_BUTTON(c->foot_btn), GTK_RELIEF_NONE); gtk_widget_set_focus_on_click(c->foot_btn, FALSE); gtk_label_set_xalign(GTK_LABEL(fl), 0.0f); c->foot_badge = gtk_label_new(""); gtk_style_context_add_class(gtk_widget_get_style_context(c->foot_badge), "orb-badge"); gtk_widget_set_valign(c->foot_badge, GTK_ALIGN_CENTER); gtk_widget_set_no_show_all(c->foot_badge, TRUE);
+    gtk_box_pack_start(GTK_BOX(fhb), make_icon_widget("gear", NULL), FALSE, FALSE, 0); gtk_box_pack_start(GTK_BOX(fhb), fl, TRUE, TRUE, 0); gtk_box_pack_end(GTK_BOX(fhb), c->foot_badge, FALSE, FALSE, 0); gtk_container_add(GTK_CONTAINER(c->foot_btn), fhb); g_signal_connect(c->foot_btn, "clicked", G_CALLBACK(on_foot_clicked), c); gtk_box_pack_start(GTK_BOX(foot), c->foot_btn, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(c->sb_box), top, FALSE, FALSE, 0); gtk_box_pack_start(GTK_BOX(c->sb_box), scw, TRUE, TRUE, 0); gtk_box_pack_end(GTK_BOX(c->sb_box), foot, FALSE, FALSE, 0);
+    c->paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL); gtk_style_context_add_class(gtk_widget_get_style_context(c->paned), "orb-paned"); gtk_paned_pack1(GTK_PANED(c->paned), c->sb_box, FALSE, FALSE); gtk_paned_pack2(GTK_PANED(c->paned), wv, TRUE, FALSE); gtk_paned_set_position(GTK_PANED(c->paned), 220);
+    c->pal_pop = gtk_popover_new(c->paned); GdkRectangle pr = { .x = 260, .y = 36, .width = 1, .height = 1 }; gtk_popover_set_pointing_to(GTK_POPOVER(c->pal_pop), &pr); gtk_style_context_add_class(gtk_widget_get_style_context(c->pal_pop), "orb-pal"); g_signal_connect(c->pal_pop, "closed", G_CALLBACK(on_pal_closed), c);
+    GtkWidget *pb = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6), *pscw = gtk_scrolled_window_new(NULL, NULL); gtk_widget_set_size_request(pb, 440, 320); gtk_container_set_border_width(GTK_CONTAINER(pb), 8);
+    c->pal_entry = gtk_search_entry_new(); gtk_entry_set_placeholder_text(GTK_ENTRY(c->pal_entry), "Jump to mission, project, or page\xE2\x80\xA6"); c->pal_list = gtk_list_box_new(); gtk_list_box_set_activate_on_single_click(GTK_LIST_BOX(c->pal_list), TRUE);
     g_signal_connect(c->pal_entry, "search-changed", G_CALLBACK(on_pal_search_changed), c); g_signal_connect(c->pal_entry, "activate", G_CALLBACK(on_pal_entry_activate), c); g_signal_connect(c->pal_list, "row-activated", G_CALLBACK(on_pal_row_activated), c);
     gtk_container_add(GTK_CONTAINER(pscw), c->pal_list); gtk_box_pack_start(GTK_BOX(pb), c->pal_entry, FALSE, FALSE, 0); gtk_box_pack_start(GTK_BOX(pb), pscw, TRUE, TRUE, 0); gtk_widget_show_all(pb); gtk_container_add(GTK_CONTAINER(c->pal_pop), pb);
-    c->paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL); gtk_paned_pack1(GTK_PANED(c->paned), c->sb_box, FALSE, FALSE); gtk_paned_pack2(GTK_PANED(c->paned), wv, TRUE, FALSE); gtk_paned_set_position(GTK_PANED(c->paned), 220);
     g_signal_connect(ucm, "script-message-received::orbNative", G_CALLBACK(on_script_msg), c); webkit_user_content_manager_register_script_message_handler(ucm, "orbNative");
-    g_signal_connect(win, "destroy", G_CALLBACK(on_win_destroy), c); g_signal_connect(win, "key-press-event", G_CALLBACK(on_win_key_press), c); g_idle_add(start_sse_watch, c); return c->paned;
+    return g_signal_connect(win, "destroy", G_CALLBACK(on_win_destroy), c), g_signal_connect(win, "key-press-event", G_CALLBACK(on_win_key_press), c), g_idle_add(start_sse_watch, c), c->paned;
 }
 #endif
 int orb_gtk_chrome_self_test(void) {
     char *esc = orb_json_escape_string("m:\"1\""); int ok = esc && strcmp(esc, "\"m:\\\"1\\\"\"") == 0; free(esc);
 #if defined(ORB_HAS_WEBKITGTK)
     JSCContext *ctx = jsc_context_new(); char *sc = NULL; guint64 sg = 0, rv = 0;
-    JSCValue *a = jsc_value_new_from_json(ctx, "{\"row_id\":\"nav:inbox\",\"kind\":\"nav\",\"title\":\"Inbox\",\"selected\":false,\"badge\":1}");
-    JSCValue *b = jsc_value_new_from_json(ctx, "{\"row_id\":\"nav:inbox\",\"kind\":\"nav\",\"title\":\"Inbox\",\"selected\":true,\"badge\":1}");
-    JSCValue *d = jsc_value_new_from_json(ctx, "{\"row_id\":\"nav:inbox\",\"kind\":\"nav\",\"title\":\"Inbox\",\"selected\":true,\"badge\":2}");
+    JSCValue *a = jsc_value_new_from_json(ctx, "{\"row_id\":\"nav:inbox\",\"kind\":\"nav\",\"title\":\"Inbox\",\"icon\":\"inbox\",\"selected\":false,\"badge\":1}"), *b = jsc_value_new_from_json(ctx, "{\"row_id\":\"nav:inbox\",\"kind\":\"nav\",\"title\":\"Inbox\",\"icon\":\"inbox\",\"selected\":true,\"badge\":1}"), *d = jsc_value_new_from_json(ctx, "{\"row_id\":\"nav:inbox\",\"kind\":\"nav\",\"title\":\"Inbox\",\"icon\":\"gear\",\"selected\":true,\"badge\":1}");
     char *sa = a ? row_item_sig(a, 0) : NULL, *sb = b ? row_item_sig(b, 0) : NULL, *sd = d ? row_item_sig(d, 0) : NULL;
     ok = ok && sa && sb && sd && strcmp(sa, sb) == 0 && strcmp(sa, sd) != 0 && accept_sb_resp(&sc, &sg, 0, &rv, 1, "s:a", 50) && !accept_sb_resp(&sc, &sg, 0, &rv, 2, "s:a", 49) && accept_sb_resp(&sc, &sg, 3, &rv, 3, "s:b", 2) && !accept_sb_resp(&sc, &sg, 3, &rv, 2, "s:a", 99);
     g_free(sc); g_free(sa); g_free(sb); g_free(sd); if (a) { g_object_unref(a); } if (b) { g_object_unref(b); } if (d) { g_object_unref(d); } g_object_unref(ctx);

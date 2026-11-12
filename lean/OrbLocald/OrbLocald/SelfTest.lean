@@ -1834,7 +1834,7 @@ private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat ×
           let selId := if selRows.size == 1 then (selRows[0]!.fieldStr? "row_id").getD "" else ""
           let expSel := (syncCase.fieldStr? "expected_selected_row_id").getD ""
           let inboxRow? := gotRows.find? (fun r => r.fieldStr? "row_id" == some "nav:inbox")
-          let settingsRow? := gotRows.find? (fun r => r.fieldStr? "row_id" == some "nav:settings")
+          let footerObj? := rjv.field? "footer"
           let rootRow? := gotRows.find? (fun r => r.fieldStr? "row_id" == some "m:m-root")
           let childRow? := gotRows.find? (fun r => r.fieldStr? "row_id" == some "m:m-child")
           let sseFired := sseEvs.size == 1 && (sseEvs[0]!.fieldStr? "event") == some "native_chrome_rows_changed"
@@ -1842,7 +1842,10 @@ private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat ×
           gotIds == expIds &&
           selId == expSel &&
           (inboxRow?.bind (·.fieldNat? "badge")) == syncCase.fieldNat? "expected_inbox_badge" &&
-          (settingsRow?.bind (·.fieldNat? "badge")) == syncCase.fieldNat? "expected_settings_badge" &&
+          (inboxRow?.bind (·.fieldStr? "icon")) == some "inbox" &&
+          (footerObj?.bind (·.fieldStr? "row_id")) == syncCase.fieldStr? "expected_footer_row_id" &&
+          (footerObj?.bind (·.fieldNat? "badge")) == syncCase.fieldNat? "expected_settings_badge" &&
+          (footerObj?.bind (·.fieldStr? "icon")) == some "gear" &&
           (rootRow?.bind (·.fieldStr? "title")) == syncCase.fieldStr? "expected_m_root_title" &&
           (childRow?.bind (·.fieldNat? "depth")) == syncCase.fieldNat? "expected_m_child_depth"
         | _, _, _ => false

@@ -54,10 +54,15 @@ All commands run over `127.0.0.1:<rpcPort>/__orb_rpc` gated by the 32-byte launc
 | Command | Arguments | Response |
 | --- | --- | --- |
 | `native_chrome_sync_state` | `{ scope, revision, selected, on_settings?, is_admin?, inbox_enabled?, inbox_unread?, settings_badge?, settings_dots?, filter_query?, projects, missions, completed_missions?, project_missions? }` | `{ revision, sync_revision, scope, applied, row_count }` |
-| `native_chrome_get_rows` | `{ scope?, filter_query? }` | `{ scope, revision, sync_revision, on_settings, selected, rows: SidebarRow[] }` |
-| `native_chrome_toggle_expand` | `{ scope?, row_id, expanded? }` | `{ scope, revision, row_id, expanded, rows: SidebarRow[] }` |
+| `native_chrome_get_rows` | `{ scope?, filter_query? }` | `{ scope, revision, sync_revision, on_settings, selected, rows: SidebarRow[], footer: SidebarRow }` |
+| `native_chrome_toggle_expand` | `{ scope?, row_id, expanded? }` | `{ scope, revision, row_id, expanded, rows: SidebarRow[], footer: SidebarRow }` |
 | `native_chrome_move_admit` | `{ item_kind, src_project, src_path?, dst_project, dst_path? }` | `{ admitted: Bool }` |
 | `native_chrome_palette_query` | `{ scope?, query, limit? }` | `{ scope, query, items: PaletteItem[] }` |
+
+Each `SidebarRow` and `PaletteItem` includes `icon` and `color` metadata so native shells
+(`macos_shell/` SF Symbols and `linux_shell/` Cairo vector glyphs) render crisp HiDPI icons,
+per-project folder colors, mission status tints, non-selectable `section` / `note` rows, and
+the pinned bottom `Settings` `footer` button identically to the standard WebView sidebar.
 
 Whenever `native_chrome_sync_state` applies a state change or `native_chrome_toggle_expand`
 flips a container's expansion state, `orb-locald` broadcasts SSE event

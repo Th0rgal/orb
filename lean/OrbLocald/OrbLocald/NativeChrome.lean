@@ -20,6 +20,7 @@ def maxNativeChromeScopes : Nat := 8
 structure ChromeProjectInput where
   slug    : String
   name    : String
+  color   : String := ""
   folders : Array String := #[]
   deriving Repr, Inhabited, BEq
 
@@ -52,6 +53,8 @@ structure SidebarRow where
   folder     : String := ""
   status     : String := ""
   shortcut   : String := ""
+  icon       : String := ""
+  color      : String := ""
   badge      : Nat := 0
   expandable : Bool := false
   expanded   : Bool := false
@@ -71,6 +74,8 @@ def SidebarRow.toJson (r : SidebarRow) : JVal :=
     ("folder", .str r.folder),
     ("status", .str r.status),
     ("shortcut", .str r.shortcut),
+    ("icon", .str r.icon),
+    ("color", .str r.color),
     ("badge", .nat r.badge),
     ("expandable", .bool r.expandable),
     ("expanded", .bool r.expanded),
@@ -85,6 +90,8 @@ structure PaletteItem where
   subtitle : String := ""
   target   : String
   shortcut : String := ""
+  icon     : String := ""
+  color    : String := ""
   score    : Nat := 0
   deriving Repr, Inhabited, BEq
 
@@ -96,6 +103,8 @@ def PaletteItem.toJson (p : PaletteItem) : JVal :=
     ("subtitle", .str p.subtitle),
     ("target", .str p.target),
     ("shortcut", .str p.shortcut),
+    ("icon", .str p.icon),
+    ("color", .str p.color),
     ("score", .nat p.score)
   ]
 
@@ -270,17 +279,27 @@ def parseUpdatedAtMs (jv : JVal) : UInt64 := Id.run do
         return normalizeEpochScale dec.toUInt64
   return 0
 
+private def normalizeProjectColor (raw : String) : String :=
+  let c := raw.trimAscii.toString.toLower
+  if c == "#8aaed4" || c == "blue" then "#8aaed4"
+  else if c == "#94b89a" || c == "green" then "#94b89a"
+  else if c == "#c5aa70" || c == "amber" then "#c5aa70"
+  else if c == "#cb929f" || c == "rose" then "#cb929f"
+  else if c == "#ad9acb" || c == "purple" then "#ad9acb"
+  else ""
+
 def parseProjectInput? (jv : JVal) : Option ChromeProjectInput := do
   let slug := ((jv.fieldStr? "slug").orElse (fun _ => jv.fieldStr? "id")).getD "" |>.trimAscii.toString
   if slug.isEmpty then none
   let name := ((jv.fieldStr? "name").orElse (fun _ => jv.fieldStr? "title")).getD slug |>.trimAscii.toString
+  let color := normalizeProjectColor ((jv.fieldStr? "color").getD "")
   let rawFolders := (jv.fieldArr? "folders").getD #[]
   let folders := rawFolders.filterMap fun f =>
     let p := match f.asStr? with
       | some s => normalizeFolderPath s
       | none => normalizeFolderPath ((f.fieldStr? "path").getD "")
     if p.isEmpty then none else some p
-  some { slug := slug, name := if name.isEmpty then slug else name, folders := folders }
+  some { slug := slug, name := if name.isEmpty then slug else name, color := color, folders := folders }
 
 def parseMissionInput? (jv : JVal) (fallbackProject : String := "") : Option ChromeMissionInput := do
   let id := (jv.fieldStr? "id").getD "" |>.trimAscii.toString
@@ -597,8 +616,39 @@ private def settingsSectionsMeta : Array (String × String × String) := #[
   ("notifications", "Notifications", "inbox-settings")
 ]
 
+private def settingsSectionIcon (secId : String) : String :=
+  if secId == "account" then "gear"
+  else if secId == "models" then "cube"
+  else if secId == "agents" then "skills"
+  else if secId == "security" then "key"
+  else if secId == "notifications" then "bell"
+  else "gear"
+
+private def missionStatusColor (status : String) : String :=
+  let s := status.trimAscii.toString.toLower
+  if isWorkingMissionStatus s then "#86aee4"
+  else if s == "completed" || s == "succeeded" then "#80b28d"
+  else if s == "blocked" || s == "failed" || s == "error" || s == "errored" || s == "timed_out" || s == "not_feasible" || s == "waiting_for_approval" || s == "awaiting_approval" then "#c9a227"
+  else "#8a8a8a"
+
 private def isSelectedMissionTarget (sel : String) (mid : String) : Bool :=
   sel == s!"m:{mid}" || sel == s!"ms:{mid}" || sel == s!"rm:{mid}"
+
+/-- Project the pinned bottom Settings footer row (`sb-foot` / `.gear-btn` in `orb/src/App.tsx`). -/
+def projectSidebarFooter (st : ChromeScopeState) : SidebarRow :=
+  let sel := st.selected.trimAscii.toString
+  let inSettings := st.onSettings || (settingsSectionIdForSelected sel).isSome
+  {
+    rowId := "nav:settings"
+    kind := "footer"
+    depth := 0
+    title := "Settings"
+    target := "settings"
+    icon := "gear"
+    badge := st.settingsBadge
+    selected := inSettings
+    attention := !st.settingsDots.isEmpty
+  }
 
 /-- Project canonical flat `Array SidebarRow` from `ChromeScopeState` + optional `filterQuery`. -/
 def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Array SidebarRow := Id.run do
@@ -613,6 +663,7 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
         depth := 0
         title := "Back"
         target := "settings-back"
+        icon := "arrow-left"
       }
     ]
     for (secId, label, firstTab) in settingsSectionsMeta do
@@ -625,6 +676,7 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
           depth := 0
           title := label
           target := firstTab
+          icon := settingsSectionIcon secId
           badge := badge
           selected := activeSec == secId
           attention := attn
@@ -643,6 +695,7 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
       title := "New Agent"
       target := "new-agent"
       shortcut := "⌘N"
+      icon := "new-agent"
       selected := sel.isEmpty || sel == "new-agent"
     }
   ]
@@ -653,7 +706,8 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
       depth := 0
       title := "Inbox"
       target := "inbox"
-      shortcut := "⌘2"
+      shortcut := "⌘I"
+      icon := "inbox"
       badge := st.inboxUnread
       selected := sel == "inbox"
     }
@@ -664,7 +718,8 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
       depth := 0
       title := "Cloud agent"
       target := "cloud-agent"
-      shortcut := "⌘3"
+      shortcut := "⌘2"
+      icon := "cloud"
       selected := sel == "cloud-agent"
     },
     {
@@ -673,7 +728,8 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
       depth := 0
       title := "Machines"
       target := "machines"
-      shortcut := "⌘4"
+      shortcut := "⌘3"
+      icon := "machines"
       selected := sel == "machines"
     },
     {
@@ -682,6 +738,8 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
       depth := 0
       title := "Inference"
       target := "providers"
+      shortcut := "⌘4"
+      icon := "cube"
       selected := sel == "providers"
     },
     {
@@ -690,6 +748,8 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
       depth := 0
       title := "Resources"
       target := "resources"
+      shortcut := "⌘6"
+      icon := "resources"
       selected := sel == "resources" || sel.startsWith "rm:"
     },
     {
@@ -846,6 +906,8 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
         project := m.project
         folder := m.folder
         status := m.status
+        icon := "bot"
+        color := missionStatusColor m.status
         expandable := hasChildren
         expanded := if hasChildren then exp else false
         selected := isSelectedMissionTarget sel m.id
@@ -868,6 +930,8 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
       let projRowId := s!"proj:{proj.slug}"
       let projExpandable := !sortedFolders.isEmpty || !projMissions.isEmpty
       let projExpanded := !isCollapsed projRowId
+      let projShowOpen := projExpandable && projExpanded
+      let projIconColor := if proj.color.isEmpty then "#8a8a8a" else proj.color
       rows := rows.push {
         rowId := projRowId
         kind := "project"
@@ -875,8 +939,10 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
         title := proj.name
         target := s!"project:{proj.slug}"
         project := proj.slug
+        icon := if projShowOpen then "folder-open" else "folder"
+        color := projIconColor
         expandable := projExpandable
-        expanded := if projExpandable then projExpanded else false
+        expanded := projShowOpen
         selected := sel == s!"c:{proj.slug}"
       }
       if projExpanded then
@@ -894,6 +960,7 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
                 let fRowId := s!"folder:{proj.slug}:{fp}"
                 let fExpandable := hasSubfolders || !folderMissions.isEmpty
                 let fExpanded := !isCollapsed fRowId
+                let fShowOpen := fExpandable && fExpanded
                 let fRow : SidebarRow := {
                   rowId := fRowId
                   kind := "folder"
@@ -903,8 +970,10 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
                   target := fRowId
                   project := proj.slug
                   folder := fp
+                  icon := if fShowOpen then "folder-open" else "folder"
+                  color := projIconColor
                   expandable := fExpandable
-                  expanded := if fExpandable then fExpanded else false
+                  expanded := fShowOpen
                 }
                 let a1 := a.push fRow
                 if fExpanded then
@@ -919,16 +988,14 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
   for m in unassigned do
     rows := emitMissionSubtree (retainedMissions.size + 1) m 0 rows
 
-  rows := rows.push {
-    rowId := "nav:settings"
-    kind := "nav"
-    depth := 0
-    title := "Settings"
-    target := "settings"
-    shortcut := "⌘,"
-    badge := st.settingsBadge
-    attention := !st.settingsDots.isEmpty
-  }
+  if projects.isEmpty && unassigned.isEmpty then
+    rows := rows.push {
+      rowId := "note:projects-empty"
+      kind := "note"
+      depth := 0
+      title := if st.scope.isEmpty then "No backend connected." else "No projects on the core backend."
+    }
+
   return rows
 
 /-- Check whether moving `(itemKind, srcProject, srcPath)` into `(dstProject, dstPath)` is admitted
@@ -1008,19 +1075,19 @@ def queryPaletteItems (st : ChromeScopeState) (rawQuery : String) (limit : Nat :
   let cap := Nat.max 1 (Nat.min limit 100)
 
   let mut candidates : Array (PaletteItem × Nat) := #[]
-  let navItems : Array (String × String × String × String × String) := #[
-    ("nav:new-agent", "New Agent", "Start a new conversation", "new-agent", "⌘N"),
-    ("nav:inbox", "Inbox", "Missions awaiting attention", "inbox", "⌘2"),
-    ("nav:cloud-agent", "Cloud agent", "Launch on managed cloud compute", "cloud-agent", "⌘3"),
-    ("nav:machines", "Machines", "Fleet nodes & managed VMs", "machines", "⌘4"),
-    ("nav:providers", "Inference", "Model routing & providers", "providers", ""),
-    ("nav:resources", "Resources", "Compute, memory & budgets", "resources", "")
+  let navItems : Array (String × String × String × String × String × String) := #[
+    ("nav:new-agent", "New Agent", "Start a new conversation", "new-agent", "⌘N", "new-agent"),
+    ("nav:inbox", "Inbox", "Missions awaiting attention", "inbox", "⌘I", "inbox"),
+    ("nav:cloud-agent", "Cloud agent", "Launch on managed cloud compute", "cloud-agent", "⌘2", "cloud"),
+    ("nav:machines", "Machines", "Fleet nodes & managed VMs", "machines", "⌘3", "machines"),
+    ("nav:providers", "Inference", "Model routing & providers", "providers", "⌘4", "cube"),
+    ("nav:resources", "Resources", "Compute, memory & budgets", "resources", "⌘6", "resources")
   ]
-  for (id, title, sub, target, sc) in navItems do
+  for (id, title, sub, target, sc, ic) in navItems do
     if id != "nav:inbox" || st.inboxEnabled then
       if let some scVal := scorePaletteCandidate qLower qTris title sub 30 then
         candidates := candidates.push ({
-          itemId := id, kind := "nav", title := title, subtitle := sub, target := target, shortcut := sc, score := scVal
+          itemId := id, kind := "nav", title := title, subtitle := sub, target := target, shortcut := sc, icon := ic, score := scVal
         }, scVal)
 
   for (secId, label, firstTab) in settingsSectionsMeta do
@@ -1028,13 +1095,14 @@ def queryPaletteItems (st : ChromeScopeState) (rawQuery : String) (limit : Nat :
       let sub := s!"Settings · {label}"
       if let some scVal := scorePaletteCandidate qLower qTris label sub 20 then
         candidates := candidates.push ({
-          itemId := s!"settings:{secId}", kind := "settings", title := label, subtitle := sub, target := firstTab, score := scVal
+          itemId := s!"settings:{secId}", kind := "settings", title := label, subtitle := sub, target := firstTab, icon := settingsSectionIcon secId, score := scVal
         }, scVal)
 
   for proj in st.projects do
+    let projCol := if proj.color.isEmpty then "#8a8a8a" else proj.color
     if let some scVal := scorePaletteCandidate qLower qTris proj.name s!"Project · {proj.slug}" 25 then
       candidates := candidates.push ({
-        itemId := s!"proj:{proj.slug}", kind := "project", title := proj.name, subtitle := s!"Project · {proj.slug}", target := s!"project:{proj.slug}", score := scVal
+        itemId := s!"proj:{proj.slug}", kind := "project", title := proj.name, subtitle := s!"Project · {proj.slug}", target := s!"project:{proj.slug}", icon := "folder", color := projCol, score := scVal
       }, scVal)
 
   let merged := sortMissions (excludeBtwMissionInputs (mergeMissionInputs st.missions))
@@ -1052,7 +1120,7 @@ def queryPaletteItems (st : ChromeScopeState) (rawQuery : String) (limit : Nat :
         else s!"{m.project}/{m.folder} · {m.status}"
       if let some scVal := scorePaletteCandidate qLower qTris m.title (sub ++ " " ++ m.id) (recencyBoost + activeBoost) then
         candidates := candidates.push ({
-          itemId := s!"m:{m.id}", kind := "mission", title := m.title, subtitle := sub, target := s!"m:{m.id}", score := scVal
+          itemId := s!"m:{m.id}", kind := "mission", title := m.title, subtitle := sub, target := s!"m:{m.id}", icon := "bot", color := missionStatusColor m.status, score := scVal
         }, scVal)
       rankIdx := rankIdx + 1
 

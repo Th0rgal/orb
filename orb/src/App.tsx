@@ -109,6 +109,7 @@ const Resources = lazy(() => import("./Resources"));
 import { PopupMenu, type MenuEntry } from "./Menu";
 import { mdSource, toggleMdSource, warmTranscriptMarkdown } from "./Markdown";
 import { createMissionKeepAlivePool } from "./missionKeepAlive";
+import { projectColor } from "./projectAppearance";
 import { applyPendingMoves } from "./missionMove";
 import { cachePrefetch, cachePut, cacheRecents } from "./pageCache";
 import { effortLabel, normalizeEffort } from "./effort";
@@ -1063,6 +1064,11 @@ export default function App() {
       const badge = secretRequests() + accessRequests() + privilegeRequests();
       const dots = Array.from(settingsDots());
       const projs = liveProjects();
+      const projColors: Record<string, string | undefined> = {};
+      for (const proj of projs) {
+        const c = projectColor(proj.slug);
+        if (c) projColors[proj.slug] = c;
+      }
       const liveMissions = missions();
       const compMissions = completedMissions();
       const projMissions = projectMissions();
@@ -1076,6 +1082,7 @@ export default function App() {
         settingsBadge: badge,
         settingsDots: dots,
         projects: projs,
+        projectColors: projColors,
         missions: liveMissions,
         completedMissions: compMissions,
         projectMissions: projMissions,

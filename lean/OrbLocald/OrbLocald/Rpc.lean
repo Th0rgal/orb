@@ -5194,6 +5194,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let filterQ := (args.fieldStr? "filter_query").getD ""
     let scopeSt ← resolveNativeChromeScope stRef reqScope
     let rows := OrbLocald.NativeChrome.projectSidebarRows scopeSt filterQ
+    let footer := OrbLocald.NativeChrome.projectSidebarFooter scopeSt
     let inSettings :=
       scopeSt.onSettings || (OrbLocald.NativeChrome.settingsSectionIdForSelected scopeSt.selected).isSome
     return .ok (.obj #[
@@ -5202,6 +5203,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       ("sync_revision", JVal.uint64 scopeSt.syncRevision),
       ("on_settings", .bool inSettings),
       ("selected", .str scopeSt.selected),
+      ("footer", footer.toJson),
       ("rows", .arr (rows.map OrbLocald.NativeChrome.SidebarRow.toJson))
     ])
   | "native_chrome_toggle_expand" =>
@@ -5216,6 +5218,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       | none => (.error "Unknown native chrome scope", s)
       | some (expandedNow, scopeSt, nextHub) =>
         let rows := OrbLocald.NativeChrome.projectSidebarRows scopeSt
+        let footer := OrbLocald.NativeChrome.projectSidebarFooter scopeSt
         let s1 := { s with nativeChrome := nextHub }
         let s2 := s1.enqueueNamedEvent "native_chrome_rows_changed" (.obj #[
           ("scope", .str scopeSt.scope),
@@ -5229,6 +5232,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
           ("sync_revision", JVal.uint64 scopeSt.syncRevision),
           ("row_id", .str rowId.trimAscii.toString),
           ("expanded", .bool expandedNow),
+          ("footer", footer.toJson),
           ("rows", .arr (rows.map OrbLocald.NativeChrome.SidebarRow.toJson))
         ]), s2)
     return res

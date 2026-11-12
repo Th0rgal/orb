@@ -101,6 +101,7 @@ describe("nativeChromeBridge", () => {
       settingsBadge: 1,
       settingsDots: ["security"],
       projects: [proj],
+      projectColors: { orb: "blue" },
       missions: [m],
       completedMissions: [],
       projectMissions: {},
@@ -110,7 +111,8 @@ describe("nativeChromeBridge", () => {
     expect(args.scope).toBe("scope:test:1");
     expect(args.selected).toBe("m:m-1");
     expect(args.inbox_unread).toBe(4);
-    expect((args.projects as Array<{ name: string }>)[0]?.name).toBe("Orb Core");
+    expect((args.projects as Array<{ name: string; color?: string }>)[0]?.name).toBe("Orb Core");
+    expect((args.projects as Array<{ name: string; color?: string }>)[0]?.color).toBe("blue");
   });
 
   it("installs window.__ORB_SELECT_MISSION__, __ORB_NATIVE_NAV__, and __ORB_TOGGLE_NATIVE_SIDEBAR__", () => {

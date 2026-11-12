@@ -257,6 +257,8 @@ struct OrbSidebarRowItem: Equatable {
     let subtitle: String
     let target: String
     let shortcut: String
+    let icon: String
+    let color: String
     let badge: Int
     let expandable: Bool
     let expanded: Bool
@@ -271,6 +273,8 @@ struct OrbSidebarRowItem: Equatable {
             subtitle == other.subtitle &&
             target == other.target &&
             shortcut == other.shortcut &&
+            icon == other.icon &&
+            color == other.color &&
             badge == other.badge &&
             expandable == other.expandable &&
             expanded == other.expanded &&
@@ -289,6 +293,8 @@ struct OrbSidebarRowItem: Equatable {
             subtitle: (d["subtitle"] as? String) ?? "",
             target: (d["target"] as? String) ?? "",
             shortcut: (d["shortcut"] as? String) ?? "",
+            icon: (d["icon"] as? String) ?? "",
+            color: (d["color"] as? String) ?? "",
             badge: isPalette ? 0 : ((d["badge"] as? Int) ?? 0),
             expandable: !isPalette && ((d["expandable"] as? Bool) ?? false),
             expanded: !isPalette && ((d["expanded"] as? Bool) ?? false),
@@ -308,6 +314,10 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
     let splitView = NSSplitView()
     let sidebarPane = NSView()
     let sidebarTable = NSTableView()
+    private let footerPane = NSView()
+    private let footerButton = NSButton()
+    private let footerBadgeLabel = NSTextField(labelWithString: "")
+    private var footerSelected = false
     private let palettePanel: OrbNativePalettePanel
     private let paletteSearch = NSSearchField()
     private let paletteTable = NSTableView()
@@ -346,6 +356,35 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         setupPalettePanel()
     }
 
+    private static func parseHexColor(_ hex: String) -> NSColor? {
+        let s = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard s.count == 7, s.hasPrefix("#"), let v = UInt32(s.dropFirst(), radix: 16) else { return nil }
+        let r = CGFloat((v >> 16) & 0xFF) / 255.0
+        let g = CGFloat((v >> 8) & 0xFF) / 255.0
+        let b = CGFloat(v & 0xFF) / 255.0
+        return NSColor(srgbRed: r, green: g, blue: b, alpha: 1.0)
+    }
+
+    private static func symbolName(for icon: String) -> String? {
+        switch icon {
+        case "new-agent": return "line.3.horizontal.decrease"
+        case "inbox": return "tray"
+        case "cloud": return "cloud"
+        case "machines": return "display"
+        case "cube": return "cube"
+        case "resources": return "arrow.triangle.branch"
+        case "gear": return "gearshape"
+        case "folder": return "folder"
+        case "folder-open": return "folder.fill"
+        case "arrow-left": return "arrow.left"
+        case "skills": return "square.3.layers.3d"
+        case "key": return "key"
+        case "bell": return "bell"
+        case "bot": return "cpu"
+        default: return nil
+        }
+    }
+
     private func setupSplitView(frame: NSRect, webView: OrbWebView) {
         splitView.frame = frame
         splitView.isVertical = true
@@ -355,22 +394,15 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
 
         sidebarPane.frame = NSRect(x: 0, y: 0, width: 220, height: frame.height)
         sidebarPane.autoresizingMask = [.height]
-
-        let searchBtn = NSButton(title: "Search  ⌘K", target: self, action: #selector(onOpenPaletteButton(_:)))
-        searchBtn.bezelStyle = .recessed
-        searchBtn.showsBorderOnlyWhileMouseInside = true
-        searchBtn.alignment = .left
-        searchBtn.font = NSFont.systemFont(ofSize: 12, weight: .regular)
-        searchBtn.frame = NSRect(x: 10, y: max(0, frame.height - 68), width: 200, height: 26)
-        searchBtn.autoresizingMask = [.width, .minYMargin]
-        sidebarPane.addSubview(searchBtn)
+        sidebarPane.wantsLayer = true
+        sidebarPane.layer?.backgroundColor = NSColor(srgbRed: 18.0 / 255.0, green: 19.0 / 255.0, blue: 19.0 / 255.0, alpha: 0.78).cgColor
 
         let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("orbSidebarCol"))
         col.resizingMask = .autoresizingMask
         sidebarTable.addTableColumn(col)
         sidebarTable.headerView = nil
-        sidebarTable.rowHeight = 28
-        sidebarTable.intercellSpacing = NSSize(width: 0, height: 2)
+        sidebarTable.rowHeight = 30
+        sidebarTable.intercellSpacing = NSSize(width: 0, height: 1)
         sidebarTable.backgroundColor = .clear
         sidebarTable.focusRingType = .none
         sidebarTable.selectionHighlightStyle = .regular
@@ -380,13 +412,51 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         sidebarTable.target = self
         sidebarTable.action = #selector(onSidebarTableClick(_:))
 
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 220, height: max(0, frame.height - 74)))
+        let footerHeight: CGFloat = 45
+        let topInset: CGFloat = 35
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: footerHeight, width: 220, height: max(0, frame.height - topInset - footerHeight)))
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.autoresizingMask = [.width, .height]
         scroll.documentView = sidebarTable
         sidebarPane.addSubview(scroll)
+
+        footerPane.frame = NSRect(x: 0, y: 0, width: 220, height: footerHeight)
+        footerPane.autoresizingMask = [.width, .maxYMargin]
+        let sep = NSBox(frame: NSRect(x: 0, y: footerHeight - 1, width: 220, height: 1))
+        sep.boxType = .custom
+        sep.borderWidth = 0
+        sep.fillColor = NSColor(srgbRed: 44.0 / 255.0, green: 44.0 / 255.0, blue: 44.0 / 255.0, alpha: 1.0)
+        sep.autoresizingMask = [.width, .minYMargin]
+        footerPane.addSubview(sep)
+
+        footerButton.title = "  Settings"
+        footerButton.bezelStyle = .recessed
+        footerButton.showsBorderOnlyWhileMouseInside = true
+        footerButton.isBordered = false
+        footerButton.alignment = .left
+        footerButton.imagePosition = .imageLeading
+        footerButton.font = NSFont.systemFont(ofSize: 13, weight: .regular)
+        footerButton.contentTintColor = .secondaryLabelColor
+        if #available(macOS 11.0, *), let gearImg = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Settings") {
+            let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+            footerButton.image = gearImg.withSymbolConfiguration(cfg) ?? gearImg
+        }
+        footerButton.target = self
+        footerButton.action = #selector(onFooterSettingsClick(_:))
+        footerButton.frame = NSRect(x: 12, y: 6, width: 196, height: 32)
+        footerButton.autoresizingMask = [.width]
+        footerPane.addSubview(footerButton)
+
+        footerBadgeLabel.alignment = .right
+        footerBadgeLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
+        footerBadgeLabel.textColor = .tertiaryLabelColor
+        footerBadgeLabel.frame = NSRect(x: 168, y: 14, width: 40, height: 16)
+        footerBadgeLabel.autoresizingMask = [.minXMargin]
+        footerBadgeLabel.isHidden = true
+        footerPane.addSubview(footerBadgeLabel)
+        sidebarPane.addSubview(footerPane)
 
         webView.frame = NSRect(x: 221, y: 0, width: max(200, frame.width - 221), height: frame.height)
         splitView.addSubview(sidebarPane)
@@ -472,8 +542,27 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         palettePanel.makeFirstResponder(paletteSearch)
     }
 
-    @objc private func onOpenPaletteButton(_ sender: Any?) {
-        openPalette()
+    @objc private func onFooterSettingsClick(_ sender: Any?) {
+        guard !footerSelected else { return }
+        let lit = OrbAppDelegate.jsonStringLiteral("settings")
+        webView?.evaluateJavaScript("window.__ORB_NATIVE_NAV__&&window.__ORB_NATIVE_NAV__(\(lit));", completionHandler: nil)
+        if let win = hostWindow, let wv = webView { win.makeFirstResponder(wv) }
+    }
+
+    func applyFooterPayload(_ rawFooter: [String: Any]?) {
+        guard let ft = rawFooter else { return }
+        let sel = (ft["selected"] as? Bool) ?? false
+        let badge = (ft["badge"] as? Int) ?? 0
+        footerSelected = sel
+        footerButton.font = NSFont.systemFont(ofSize: 13, weight: sel ? .medium : .regular)
+        footerButton.contentTintColor = sel ? .labelColor : .secondaryLabelColor
+        if badge > 0 {
+            footerBadgeLabel.stringValue = "\(badge)"
+            footerBadgeLabel.isHidden = false
+        } else {
+            footerBadgeLabel.stringValue = ""
+            footerBadgeLabel.isHidden = true
+        }
     }
 
     private func callLocald(command: String, args: [String: Any], completion: @escaping ([String: Any]?) -> Void) {
@@ -584,6 +673,7 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
             let rev = (res?["revision"] as? NSNumber)?.uint64Value
             guard self.acceptSidebarResponse(reqGen: gen, scope: scope, revision: rev) else { return }
             self.applyRowsPayload(raw)
+            self.applyFooterPayload(res?["footer"] as? [String: Any])
         }
     }
 
@@ -646,9 +736,12 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
     }
 
-    private func dispatchItem(_ item: OrbSidebarRowItem) {
-        if item.kind == "folder" || item.target.hasPrefix("folder:") {
+    private func dispatchItem(_ item: OrbSidebarRowItem, fromPalette: Bool = false) {
+        if item.kind == "section" || item.kind == "note" { return }
+        if !fromPalette && (item.kind == "project" || item.kind == "folder" || item.target.hasPrefix("folder:")) {
             toggleExpand(rowId: item.rowId)
+        } else if item.target.hasPrefix("folder:") {
+            toggleExpand(rowId: item.target)
         } else if !item.target.isEmpty {
             let lit = OrbAppDelegate.jsonStringLiteral(item.target)
             let fn = (item.kind == "mission") ? "__ORB_SELECT_MISSION__" : "__ORB_NATIVE_NAV__"
@@ -669,16 +762,11 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
                 let rev = (res?["revision"] as? NSNumber)?.uint64Value
                 guard self.acceptSidebarResponse(reqGen: gen, scope: scope, revision: rev) else { return }
                 self.applyRowsPayload(raw)
+                self.applyFooterPayload(res?["footer"] as? [String: Any])
             } else {
                 self.refreshSidebar()
             }
         }
-    }
-
-    @objc private func onChevronButton(_ sender: NSButton) {
-        let idx = sidebarTable.row(for: sender)
-        guard idx >= 0, idx < rows.count else { return }
-        toggleExpand(rowId: rows[idx].rowId)
     }
 
     @objc private func onSidebarTableClick(_ sender: Any?) {
@@ -698,7 +786,7 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         let chosen = paletteItems[idx]
         paletteQueryGeneration &+= 1
         palettePanel.orderOut(nil)
-        dispatchItem(chosen)
+        dispatchItem(chosen, fromPalette: true)
     }
 
     func controlTextDidChange(_ obj: Notification) {
@@ -714,7 +802,7 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
                 let chosen = paletteItems[idx]
                 paletteQueryGeneration &+= 1
                 palettePanel.orderOut(nil)
-                dispatchItem(chosen)
+                dispatchItem(chosen, fromPalette: true)
             }
             return true
         }
@@ -747,16 +835,21 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         let item = list[row]
 
         let cell = NSTableCellView()
+        let isSection = !isPal && item.kind == "section"
+        let isNote = !isPal && item.kind == "note"
         let indent = CGFloat(min(8, item.depth) * 12)
-        var cursorX: CGFloat = 8 + indent
+        var cursorX: CGFloat = (isSection || isNote) ? 10 : (8 + indent)
 
-        if item.expandable {
-            let btn = NSButton(title: item.expanded ? "▾" : "▸", target: self, action: #selector(onChevronButton(_:)))
-            btn.isBordered = false
-            btn.font = NSFont.systemFont(ofSize: 11, weight: .medium)
-            btn.frame = NSRect(x: cursorX, y: 4, width: 16, height: 20)
-            cell.addSubview(btn)
-            cursorX += 18
+        if #available(macOS 11.0, *), !item.icon.isEmpty, let symName = Self.symbolName(for: item.icon),
+           let rawImg = NSImage(systemSymbolName: symName, accessibilityDescription: item.title) {
+            let cfg = NSImage.SymbolConfiguration(pointSize: 12.5, weight: .regular)
+            let imgView = NSImageView(image: rawImg.withSymbolConfiguration(cfg) ?? rawImg)
+            imgView.contentTintColor = Self.parseHexColor(item.color)
+                ?? (item.selected ? .labelColor : .secondaryLabelColor)
+            imgView.frame = NSRect(x: cursorX, y: 7, width: 16, height: 16)
+            cell.addSubview(imgView)
+            cell.imageView = imgView
+            cursorX += 24
         }
 
         let metaText: String = {
@@ -771,11 +864,20 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         let rightReserve: CGFloat = metaText.isEmpty ? 8 : 72
         let lbl = NSTextField(labelWithString: item.title)
         lbl.lineBreakMode = .byTruncatingTail
-        lbl.font = (item.kind == "project")
-            ? NSFont.systemFont(ofSize: 12, weight: .semibold)
-            : NSFont.systemFont(ofSize: 13, weight: .regular)
-        lbl.textColor = (item.kind == "project") ? .secondaryLabelColor : .labelColor
-        lbl.frame = NSRect(x: cursorX, y: 5, width: max(40, width - cursorX - rightReserve), height: 18)
+        if isSection {
+            lbl.font = NSFont.systemFont(ofSize: 11, weight: .regular)
+            lbl.textColor = .tertiaryLabelColor
+        } else if isNote {
+            lbl.font = NSFont.systemFont(ofSize: 12, weight: .regular)
+            lbl.textColor = .tertiaryLabelColor
+        } else if item.kind == "project" {
+            lbl.font = NSFont.systemFont(ofSize: 13, weight: .regular)
+            lbl.textColor = .secondaryLabelColor
+        } else {
+            lbl.font = NSFont.systemFont(ofSize: 13, weight: .regular)
+            lbl.textColor = .labelColor
+        }
+        lbl.frame = NSRect(x: cursorX, y: 6, width: max(40, width - cursorX - rightReserve), height: 18)
         lbl.autoresizingMask = [.width]
         cell.addSubview(lbl)
         cell.textField = lbl
@@ -785,8 +887,10 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
             meta.alignment = .right
             meta.lineBreakMode = .byTruncatingTail
             meta.font = NSFont.systemFont(ofSize: 11, weight: .regular)
-            meta.textColor = .tertiaryLabelColor
-            meta.frame = NSRect(x: width - 68, y: 6, width: 60, height: 16)
+            meta.textColor = (item.attention && item.shortcut.isEmpty && item.badge == 0)
+                ? (Self.parseHexColor("#c9a227") ?? .systemYellow)
+                : .tertiaryLabelColor
+            meta.frame = NSRect(x: width - 68, y: 7, width: 60, height: 16)
             meta.autoresizingMask = [.minXMargin]
             cell.addSubview(meta)
         }
@@ -797,7 +901,10 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         if tableView === paletteTable { return row >= 0 && row < paletteItems.count }
         guard row >= 0, row < rows.count else { return false }
         let item = rows[row]
-        return !item.target.isEmpty && item.kind != "folder" && !item.target.hasPrefix("folder:")
+        if item.kind == "section" || item.kind == "note" || item.kind == "project" || item.kind == "folder" {
+            return false
+        }
+        return !item.target.isEmpty && !item.target.hasPrefix("folder:")
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -807,7 +914,8 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         let idx = sidebarTable.selectedRow
         guard idx >= 0, idx < rows.count else { return }
         let item = rows[idx]
-        if !item.target.isEmpty && item.kind != "folder" && !item.target.hasPrefix("folder:") {
+        if item.kind != "section" && item.kind != "note" && item.kind != "project" && item.kind != "folder"
+            && !item.target.isEmpty && !item.target.hasPrefix("folder:") {
             lastSelectionDispatchedRowId = (sidebarTable.clickedRow == idx) ? item.rowId : nil
             dispatchItem(item)
         }
@@ -1989,10 +2097,12 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         // Verify Hybrid Native Chrome controller row hydration & sidebar toggle headless-safely.
         let testChrome = OrbNativeChromeController(port: 19479, token: "0123456789abcdef0123456789abcdef", webView: OrbWebView(frame: rect), hostWindow: window, frame: rect)
         testChrome.applyRowsPayload([
-            ["row_id": "nav:new-agent", "kind": "nav", "depth": 0, "title": "New agent", "target": "new-agent", "selected": false],
-            ["row_id": "mission:m-1", "kind": "mission", "depth": 1, "title": "Verify native chrome", "target": "m:m-1", "selected": true]
+            ["row_id": "nav:new-agent", "kind": "nav", "depth": 0, "title": "New Agent", "icon": "new-agent", "shortcut": "⌘N", "target": "new-agent", "selected": false],
+            ["row_id": "mission:m-1", "kind": "mission", "depth": 1, "title": "Verify native chrome", "icon": "bot", "color": "#86aee4", "target": "m:m-1", "selected": true]
         ])
-        guard testChrome.rows.count == 2, testChrome.sidebarTable.numberOfRows == 2, testChrome.sidebarTable.selectedRow == 1 else {
+        testChrome.applyFooterPayload(["row_id": "nav:settings", "kind": "footer", "title": "Settings", "icon": "gear", "badge": 2, "selected": false])
+        guard testChrome.rows.count == 2, testChrome.rows[0].icon == "new-agent", testChrome.rows[1].color == "#86aee4",
+              testChrome.sidebarTable.numberOfRows == 2, testChrome.sidebarTable.selectedRow == 1 else {
             fputs("self-test failed: OrbNativeChromeController applyRowsPayload mismatch\n", stderr)
             exit(1)
         }
