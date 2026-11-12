@@ -6274,9 +6274,9 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     | do closeCoreStore store; return 1
   let .ok (some childCountDetail) ← missionDetailJson store "m-alpha"
     | do closeCoreStore store; return 1
-  let .ok childCountListJ ← OrbBin.Json.parse childCountList
+  let .ok childCountListJ := OrbBin.Json.parse childCountList
     | do closeCoreStore store; return 1
-  let .ok childCountDetailJ ← OrbBin.Json.parse childCountDetail
+  let .ok childCountDetailJ := OrbBin.Json.parse childCountDetail
     | do closeCoreStore store; return 1
   let countListOk := match childCountListJ with
     | .arr rows => rows.size == 1 && rows[0]!.fieldStr? "id" == some "m-alpha" &&
