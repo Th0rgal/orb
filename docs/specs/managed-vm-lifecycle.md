@@ -61,6 +61,30 @@ Bitwarden vault cannot silently activate the reconciler and reap production's
    fast in `quote_spawn` with `503 provider_at_capacity` before creating any DB row
    or queued orphan VM.
 
+### Operator-triggered reserved key sealing
+
+`POST /api/managed-machines/providers/:provider/seal` accepts only canonical
+`boat`, `leanci` and `colab`. It requires a live `orb-jwt-v2` administrator
+session on an authentication-enforced Core instance with strong configured
+secrets. It rejects open `DEV_MODE=true`, fallback signing keys, legacy JWTs,
+raw passwords and mission/node credentials. A dev *deployment* with normal
+authentication (`DEV_MODE=false`) is supported. Core resolves `BOAT_API_KEY`, `LEANCI_API_KEY`
+or `COLAB_API_TOKEN` from its own environment or an unambiguous Bitwarden entry,
+then seals it under `<Core data root>/managed-secrets` (0700, files 0600).
+The request contains no key and the response is only `{provider, sealed: true}`.
+No key is delivered to the calling mission, no provider API is called, and no
+operator enabled toggle is changed. Lookup failures return a stable 503 without
+vault output. An advisory file lock fences concurrent master-key creation;
+contention fails closed without replacing an existing key.
+
+**Spec Card** (`Th0rgal/orb@31f24317b`, `Orb.ManagedProviderPolicy`,
+`ManagedProviderSealing.lean`, the Control seal route): `seal_authority_iff`
+connects the pure gate to authenticated operator / non-mission / non-managed
+flags. Positive trace: operator seals a synthetic lean.ci key, and only Core can
+open it. The pure theorem does not verify HTTP credential classification,
+Bitwarden, filesystem primitives or AEAD; route and synthetic-vault tests cover
+those integrations. No live vault result is evidence from the self-test.
+
 ## Lean provider transport contract
 
 `lean/OrbCore/OrbCore/ManagedProvider.lean` defines the shared provider I/O

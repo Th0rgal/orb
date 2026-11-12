@@ -10,6 +10,7 @@
 -/
 import OrbCore
 import OrbCore.ManagedProviderTests
+import OrbCore.ManagedProviderSealingTests
 import OrbCore.ManagedProvisioningTests
 import OrbCore.ManagedResumeTests
 
@@ -4314,6 +4315,53 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   if alLogSt != 200 || boLogSt != 200 || !aliceTok0.startsWith "orb-jwt-v2:" || !bobTok.startsWith "orb-jwt-v2:" then
     return (← fail "alice/bob login failed")
 
+  -- Reserved sealing authenticates an operator before any vault call. Unknown
+  -- provider + real admin tests dispatch without ever resolving a real key.
+  let (sealUnknown, _, _) ← sendReq "POST" "/api/managed-machines/providers/unknown/seal" adminTok ""
+  let (sealMember, _, _) ← sendReq "POST" "/api/managed-machines/providers/leanci/seal" aliceTok0 ""
+  let (sealAnon, _, _) ← sendReq "POST" "/api/managed-machines/providers/leanci/seal" "" ""
+  let (sealMission, _, _) ← sendReq "POST" "/api/managed-machines/providers/leanci/seal" "mcp1.invalid" ""
+  if sealUnknown != 400 || sealMember != 403 || sealAnon != 401 || sealMission != 401 then
+    return (← fail s!"reserved sealing route authority failed: {sealUnknown}/{sealMember}/{sealAnon}/{sealMission}")
+  let .ok openDevReq := parseRequest
+      "POST /api/managed-machines/providers/leanci/seal HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".toUTF8 none
+    | return (← fail "open dev seal request parse failed")
+  let .ok openDevSeal ← dispatchCoreRequest { app with cfg := { app.cfg with devMode := true } } openDevReq nowSec
+    | return (← fail "open dev seal dispatch failed")
+  if openDevSeal.status != 401 then return (← fail "dev-mode bypass granted vault sealing authority")
+  let sealWith (state : CoreAppState) (token : String) : IO Nat := do
+    let raw := s!"POST /api/managed-machines/providers/leanci/seal HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+    let .ok request := parseRequest raw.toUTF8 none | return 0
+    let .ok response ← dispatchCoreRequest state request nowSec | return 0
+    return response.status
+  let configuredMember := { app with cfg := { app.cfg with
+    usersJson := "[{\"username\":\"alice\",\"password\":\"alice-passphrase-1234\"}]" } }
+  if (← sealWith configuredMember "alice-passphrase-1234") != 401 then
+    return (← fail "configured member raw password granted sealing authority")
+  let openDev := { app with cfg := { app.cfg with devMode := true } }
+  let devLoginBody := "{\"username\":\"admin\",\"password\":\"wrong-password\"}"
+  let devLoginRaw := s!"POST /api/auth/login HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {devLoginBody.utf8ByteSize}\r\n\r\n{devLoginBody}"
+  let .ok devLoginReq := parseRequest devLoginRaw.toUTF8 none | return (← fail "dev login parse failed")
+  let .ok devLoginResp ← dispatchCoreRequest openDev devLoginReq nowSec | return (← fail "dev login dispatch failed")
+  let devToken := ((OrbBin.Json.parse ((String.fromUTF8? devLoginResp.body).getD "")).toOption.getD .null).fieldStr? "token" |>.getD ""
+  if devToken.isEmpty || (← sealWith openDev devToken) != 403 then
+    return (← fail "open dev login token granted sealing authority")
+  let fallbackState := { app with cfg := { app.cfg with jwtSecret := "" } }
+  let fallbackToken := mintSessionTokenV2 "dev-mode-ephemeral-jwt-secret-012345"
+    app.bootstrapAdminId "admin" 1 (nowSec + 3600)
+  if (← sealWith fallbackState fallbackToken) != 403 then
+    return (← fail "fallback signing key granted sealing authority")
+  let .ok () ← OrbBin.PosixExt.ensurePrivateDir0700 (managedSecretDir store.rootDir)
+    | return (← fail "seal contention directory fixture failed")
+  let sealLock ← OrbBin.PosixExt.flockExclusiveNb (managedSecretDir store.rootDir / "seal.lock").toString
+  if sealLock == 0xFFFFFFFF || sealLock == 0xFFFFFFFE then return (← fail "seal contention lock fixture failed")
+  let sealConflict ← try
+      let (status, _, _) ← sendReq "PUT" "/api/managed-machines/providers/leanci" adminTok
+        "{\"api_key\":\"synthetic-contention-key\"}"
+      pure status
+    finally OrbBin.PosixExt.closeFdRaw sealLock.toInt32
+  if sealConflict != 409 then return (← fail "provider update silently ignored seal lock contention")
+
   -- Session epoch revocation: password reset bumps `session_epoch`, immediately invalidating `aliceTok0`!
   let (rstSt, _, _) ← sendReq "POST" s!"/api/admin/users/{aliceId}/reset-password" adminTok "{\"password\":\"alice-newpass-123456\"}"
   let (staleMeSt, _, _) ← sendReq "GET" "/api/auth/me" aliceTok0 ""
@@ -6162,6 +6210,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   try
     OrbCore.ManagedProvisioningTests.run tmpRoot
     OrbCore.ManagedResumeTests.run tmpRoot
+    OrbCore.ManagedProviderSealingTests.run tmpRoot
   catch e =>
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: {e}"

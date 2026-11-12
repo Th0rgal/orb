@@ -29,6 +29,7 @@ import OrbCore.TelemetryAndVoice
 import OrbCore.LegacyHydrate
 import OrbCore.SecretAndApproval
 import OrbCore.RemoteFleetAndRelay
+import OrbCore.ManagedProviderSealing
 import OrbCore.RemoteDispatch
 import OrbCore.ProjectFilesAndController
 import OrbCore.CloudHttpAndWorker
@@ -2422,6 +2423,41 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     | return .ok (mkJson 401 "{\"error\":\"unauthorized\"}")
   let utcDay := currentUtcDay nowEpochSec
 
+  -- Explicit operator-triggered vault-to-Core sealing. Reauthenticate with dev
+  -- bypass disabled: an open dev-mode API must not grant vault authority.
+  let sealSegments := cleanPath.splitOn "/" |>.filter (!·.isEmpty)
+  if req.method == "POST" && sealSegments.length == 5 &&
+      sealSegments.take 3 == ["api", "managed-machines", "providers"] &&
+      sealSegments[4]? == some "seal" then
+    let some rawToken := extractBearerToken? req.headers nowEpochSec
+      | return .ok (mkJson 401 "{\"error\":\"operator_authentication_required\"}")
+    -- Dev login can mint an admin token without checking a password, and the
+    -- legacy raw-password fallback maps any configured password to bootstrap
+    -- admin. Neither is authority to access the provider vault.
+    if st.cfg.devMode || !(validateRuntimeSecurity st.cfg).isOk then
+      return .ok (mkJson 403 "{\"error\":\"managed_sealing_requires_secure_auth\"}")
+    if !rawToken.startsWith "orb-jwt-v2:" then
+      return .ok (mkJson 401 "{\"error\":\"operator_session_required\"}")
+    let some operator ← resolveCallerPrincipal? st req.headers nowEpochSec
+      | return .ok (mkJson 401 "{\"error\":\"operator_authentication_required\"}")
+    let missionCredential := rawToken.startsWith "mcp1." || rawToken.startsWith "orb-mpt-v1_"
+    let provider := sealSegments[3]!
+    -- V2 sessions resolve a live user's stored role and epoch, never a generic
+    -- password, legacy JWT, guest node token or caller-supplied authority flag.
+    let result ← ManagedProviderSealing.sealReserved st.store.rootDir provider
+      (operator.role == "admin") missionCredential false
+      (resolveReservedComputeSecret st.cfg.workingDir st.store.rootDir)
+    match result with
+    | .ok () =>
+      return .ok (mkJson 200 (renderCompact (.obj #[("provider", .str provider), ("sealed", .bool true)])))
+    | .error error =>
+      let (status, code) := if error == "operator_required" then (403, error)
+        else if error == "managed_provider_secret_unsupported" then (400, error)
+        else if error == "managed_provider_secret_lookup_failed" then (503, error)
+        else if error == "managed_secret_seal_busy" then (409, error)
+        else (500, "managed_provider_secret_seal_failed")
+      return .ok (mkJson status (renderCompact (.obj #[("error", .str code)])))
+
   -- 6a. Self-Account, Auth Status & User Directory (`opClass = 0`)
   if req.method == "GET" && (cleanPath == "/api/auth/me" || cleanPath == "/api/auth/status") then
     let multiDb ← hasMultipleActiveUsers st.store
@@ -4600,7 +4636,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let nextFleetEn := (jv.fieldBool? "enabled").getD mf.enabled || nextBoatEn
       let nextMaxConc := (jv.fieldUInt64? "max_concurrent").getD mf.maxConcurrent
       if let some apiKey := (jv.fieldStr? "api_key").map (·.trimAscii.toString) |>.filter (!·.isEmpty) then
-        discard <| sealProviderSecret st.store.rootDir prov apiKey
+        if let .error error ← sealProviderSecret st.store.rootDir prov apiKey then
+          return .ok (mkJson (if error == "managed_secret_seal_busy" then 409 else 500)
+            (renderCompact (.obj #[("error", .str "managed_provider_secret_seal_failed")])))
       if let .error e ← saveManagedFleetConfig mst nextFleetEn nextBoatEn mf.dailyCapCents mf.spentTodayCents nextMaxConc then
         return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       if let .ok live ← loadManagedFleet mst nextFleetEn nextBoatEn mf.dailyCapCents mf.spentTodayCents nextMaxConc then

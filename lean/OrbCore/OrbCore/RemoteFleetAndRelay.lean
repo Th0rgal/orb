@@ -1199,7 +1199,9 @@ def dispatchRemoteFleetAndRelayRoutes?
         let nextCap := (jv.fieldUInt64? "daily_cap_cents").getD fleet.dailyCapCents
         let nextMax := (jv.fieldUInt64? "max_concurrent").getD fleet.maxConcurrent
         if let some bKey := (jv.fieldStr? "boat_api_key").filter (!·.trimAscii.toString.isEmpty) then
-          discard <| sealProviderSecret store.rootDir "boat" bKey.trimAscii.toString
+          if let .error error ← sealProviderSecret store.rootDir "boat" bKey.trimAscii.toString then
+            return some (jsonErr (if error == "managed_secret_seal_busy" then 409 else 500)
+              "managed_provider_secret_seal_failed")
         discard <| saveManagedFleetConfig mc nextEn nextBoat nextCap fleet.spentTodayCents nextMax
         return some (jsonResp 200 (.obj #[
           ("ok", .bool true),

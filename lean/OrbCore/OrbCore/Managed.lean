@@ -509,13 +509,20 @@ def sealProviderSecret (rootDir provider plaintext : String) : IO (Except String
   match ← ensurePrivateDir0700 (managedSecretDir rootDir) with
   | .error e => return .error e
   | .ok () =>
-    let .ok key ← loadOrCreateMasterKey rootDir | return .error "master_key_unavailable"
-    let .ok nonce ← randBytes 12 | return .error "secret_nonce_rng_failed"
-    let aad := s!"orb-core-reserved:{prov}".toUTF8
-    match ← aeadSeal .aes256Gcm key nonce aad plaintext.toUTF8 with
-    | .error e => return .error e
-    | .ok sealed =>
-      writeAtomicPrivate0600 (managedSecretPath rootDir prov) (nonce ++ sealed)
+    -- Serialize first master-key creation and reseals across threads/processes.
+    -- Otherwise two first-time seals could replace master.key and lose a key.
+    let lock ← flockExclusiveNb (managedSecretDir rootDir / "seal.lock").toString
+    if lock == 0xFFFFFFFF || lock == 0xFFFFFFFE then return .error "managed_secret_seal_busy"
+    try
+      let .ok key ← loadOrCreateMasterKey rootDir | return .error "master_key_unavailable"
+      let .ok nonce ← randBytes 12 | return .error "secret_nonce_rng_failed"
+      let aad := s!"orb-core-reserved:{prov}".toUTF8
+      match ← aeadSeal .aes256Gcm key nonce aad plaintext.toUTF8 with
+      | .error e => return .error e
+      | .ok sealed =>
+        writeAtomicPrivate0600 (managedSecretPath rootDir prov) (nonce ++ sealed)
+    finally
+      closeFdRaw lock.toInt32
 
 def openProviderSecret (rootDir provider : String)
     (callerOnManagedNode : Bool) (operatorBreakGlass : Bool := true) :

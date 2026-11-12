@@ -271,6 +271,27 @@ def admitsSecretDelivery (key : String) (callerOnManagedNode : Bool) : Bool :=
     (if isAllowlistedManagedSecret key then 1 else 0)
     0 == 257
 
+/-- Core-only resolution for the operator's reserved sealing path. This value
+    must never be placed in an MCP response, file delivery, action receipt or log. -/
+def resolveReservedComputeSecret (workingDir dataRoot key : String) : IO (Except String String) := do
+  if !isCoreReservedComputeSecret key then return .error "not_core_reserved"
+  if let some value ← IO.getEnv key then
+    let clean := value.trimAscii.toString
+    if !clean.isEmpty then return .ok clean
+  let some token ← resolveBwsToken? workingDir dataRoot
+    | return .error "reserved_secret_vault_unconfigured"
+  let .ok (_, secrets) ← listBitwardenProjectsAndSecrets workingDir dataRoot
+    | return .error "reserved_secret_vault_unavailable"
+  let matchingSecrets := secrets.filter (fun secret => secret.fieldStr? "key" == some key)
+  if matchingSecrets.size != 1 then return .error "reserved_secret_missing_or_ambiguous"
+  let some id := matchingSecrets[0]!.fieldStr? "id"
+    | return .error "reserved_secret_missing_id"
+  let .ok secret ← runBwsJson token #["secret", "get", id]
+    | return .error "reserved_secret_vault_unavailable"
+  let value := (secret.fieldStr? "value").getD "" |>.trimAscii.toString
+  if value.isEmpty then return .error "reserved_secret_empty"
+  return .ok value
+
 private def defaultBwProjectsForSlug (broker : JVal) (projectSlug : String) : Array String :=
   if projectSlug.isEmpty then #[]
   else
