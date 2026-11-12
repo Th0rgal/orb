@@ -1499,8 +1499,26 @@ def renderManagedProvidersJson
     ] ++ ManagedProvider.catalogFields p))
   "[" ++ String.intercalate "," items.toList ++ "]"
 
+/-- The provider's declared shape for a machine's size, when Core knows it. -/
+def managedSizeSpec? (provider size : String) : Option ManagedProvider.Size :=
+  (ManagedProvider.declaration? (canonicalizeProvider provider)).bind fun entry =>
+    entry.sizes.find? (·.name == size)
+
+/-- Hourly price as a JSON number of dollars, from the declared milli-cent rate. -/
+def managedUsdPerHourJson (provider size : String) : String :=
+  match managedSizeSpec? provider size with
+  | none => "null"
+  | some spec =>
+    let fraction := toString (spec.milliCentsPerHour % 100000)
+    s!"{spec.milliCentsPerHour / 100000}.{String.ofList (List.replicate (5 - fraction.length) '0')}{fraction}"
+
+private def optNatJson (value : Option Nat) : String :=
+  match value with
+  | some n => toString n
+  | none => "null"
+
 def renderManagedMachineItemJson (m : ManagedMachine) : String :=
-  s!"\{\"id\":{jsonEscape m.id},\"name\":{jsonEscape m.sandboxName},\"sandbox_name\":{jsonEscape m.sandboxName},\"provider\":{jsonEscape m.provider},\"provider_id\":{jsonEscape m.effectiveProviderId},\"node_id\":{jsonEscape s!"managed-{m.id}"},\"image\":{jsonEscape m.image},\"size\":{jsonEscape m.size},\"cpu\":4,\"ram_gb\":8,\"state\":{jsonEscape m.status},\"owner_mission\":{jsonEscape m.ownerMission},\"owner_mission_id\":{if m.ownerMission.isEmpty then "null" else jsonEscape m.ownerMission},\"owner_kind\":{if m.ownerKind.isEmpty then "\"user\"" else jsonEscape m.ownerKind},\"node_boot_epoch\":{m.nodeBootEpoch},\"last_poll_sec\":{m.lastPollSec},\"created_at_sec\":{m.createdAtSec},\"expires_at_sec\":{m.expiresAtSec},\"deletable_at\":{m.deletableAtSec},\"spent_cents\":{m.spentCents},\"cost_usd\":{formatCentsUsd2 m.spentCents},\"usd_per_hour\":0.10,\"expiry_provider_state\":{jsonEscape m.expiryProviderState},\"expiry_cleanup_state\":{jsonEscape m.expiryCleanupState},\"ledger_closed\":{if m.status == "destroyed" || m.expiryCleanupState == "completed" then "true" else "false"},\"cordoned\":{if m.cordoned then "true" else "false"}}"
+  s!"\{\"id\":{jsonEscape m.id},\"name\":{jsonEscape m.sandboxName},\"sandbox_name\":{jsonEscape m.sandboxName},\"provider\":{jsonEscape m.provider},\"provider_id\":{jsonEscape m.effectiveProviderId},\"node_id\":{jsonEscape s!"managed-{m.id}"},\"image\":{jsonEscape m.image},\"size\":{jsonEscape m.size},\"cpu\":{optNatJson ((managedSizeSpec? m.provider m.size).map (·.cpu))},\"ram_gb\":{optNatJson ((managedSizeSpec? m.provider m.size).map (·.ramGb))},\"state\":{jsonEscape m.status},\"owner_mission\":{jsonEscape m.ownerMission},\"owner_mission_id\":{if m.ownerMission.isEmpty then "null" else jsonEscape m.ownerMission},\"owner_kind\":{if m.ownerKind.isEmpty then "\"user\"" else jsonEscape m.ownerKind},\"node_boot_epoch\":{m.nodeBootEpoch},\"last_poll_sec\":{m.lastPollSec},\"created_at_sec\":{m.createdAtSec},\"expires_at_sec\":{m.expiresAtSec},\"deletable_at\":{m.deletableAtSec},\"spent_cents\":{m.spentCents},\"cost_usd\":{formatCentsUsd2 m.spentCents},\"usd_per_hour\":{managedUsdPerHourJson m.provider m.size},\"expiry_provider_state\":{jsonEscape m.expiryProviderState},\"expiry_cleanup_state\":{jsonEscape m.expiryCleanupState},\"ledger_closed\":{if m.status == "destroyed" || m.expiryCleanupState == "completed" then "true" else "false"},\"cordoned\":{if m.cordoned then "true" else "false"}}"
 
 def renderManagedMachinesJson
     (st : ManagedFleetState)

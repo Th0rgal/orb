@@ -20,6 +20,7 @@ import OrbBin.PosixExt
 import OrbBin.HttpClient
 import OrbCore.Store
 import OrbCore.Managed
+import OrbCore.NodeLiveness
 import OrbCore.ManagedProvisioning
 import OrbCore.ManagedTtl
 import OrbCore.ManagedSnapshotCatalog
@@ -626,6 +627,38 @@ def probeAllStaticNodesParallel
       ])
   return out
 
+/-- Last successful heartbeat per static node (`<dataRoot>/node_heartbeats.json`). -/
+def loadNodeHeartbeatCache (dataRoot : String) : IO JVal := do
+  let trimmed := dataRoot.trimAscii.toString
+  if trimmed.isEmpty then return .obj #[]
+  match ← (IO.FS.readFile s!"{trimmed}/node_heartbeats.json").toBaseIO with
+  | .error _ => return .obj #[]
+  | .ok raw =>
+    match OrbBin.Json.parse raw with
+    | .ok (.obj fields) => return .obj fields
+    | _ => return .obj #[]
+
+/-- Written through a temporary file and a rename, so a concurrent reader never
+    sees a partial cache. Skipped when nothing changed. -/
+def saveNodeHeartbeatCache (dataRoot : String) (previous next : JVal) : IO Unit := do
+  let trimmed := dataRoot.trimAscii.toString
+  if trimmed.isEmpty || previous == next then return
+  let path := s!"{trimmed}/node_heartbeats.json"
+  let tmp := s!"{path}.{← newUuidV4}.tmp"
+  match ← (IO.FS.writeFile tmp (renderCompact next ++ "\n")).toBaseIO with
+  | .error _ => pure ()
+  | .ok () =>
+    if let .error _ ← (IO.FS.rename tmp path).toBaseIO then
+      discard <| (IO.FS.removeFile tmp).toBaseIO
+
+/-- Non-terminal jobs per node in Core's ledger. -/
+def activeJobsByNode (store : CoreStore) : IO (Array (String × Nat)) := do
+  match ← execParamQuery store.missionsDb
+      ("SELECT node_id, COUNT(*) FROM remote_node_jobs WHERE state NOT IN " ++
+       "('terminal','completed','succeeded','failed','aborted','cancelled','lost') GROUP BY node_id;") #[] with
+  | .ok rows => return (rows.extract 1 rows.size).map fun row => (cell row 0, ((cell row 1).toNat?).getD 0)
+  | .error _ => return #[]
+
 def buildComputeFleetJVal
     (hub? : Option RelayHub)
     (_mc? : Option ManagedComputeStore)
@@ -634,12 +667,20 @@ def buildComputeFleetJVal
     (userSpentTodayCents : UInt64 := 0)
     (userDailyCapCents? : Option UInt64 := none)
     (dataRoot : String := "")
-    (nowIso : String := "") : IO JVal := do
+    (nowIso : String := "")
+    (store? : Option CoreStore := none) : IO JVal := do
   let (rnEnabled, staticNodes) ← loadStaticRemoteNodes
   let nowSec ← nowEpoch
   let effIso := if nowIso.isEmpty then formatEpochIso8601Utc nowSec else nowIso
   let persistedCordons ← loadPersistedNodeCordons dataRoot
-  let staticItems ← probeAllStaticNodesParallel staticNodes persistedCordons effIso
+  let probed ← probeAllStaticNodesParallel staticNodes persistedCordons effIso
+  -- A node that did not answer keeps what its last heartbeat reported.
+  let heartbeatCache ← loadNodeHeartbeatCache dataRoot
+  let staticItems := probed.map (NodeLiveness.applyCache heartbeatCache)
+  saveNodeHeartbeatCache dataRoot heartbeatCache (NodeLiveness.updateCache heartbeatCache probed)
+  let jobLoad ← match store? with
+    | some store => activeJobsByNode store
+    | none => pure #[]
   let visibleMachines :=
     match callerUserId? with
     | none => fleet.machines
@@ -647,17 +688,15 @@ def buildComputeFleetJVal
   let mut managedItems : Array JVal := #[]
   for m in visibleMachines do
     if m.status != "destroyed" then
-      let seenSec? ← match hub? with
+      let hubSeen? ← match hub? with
         | some h => getMachineLastSeen? h m.id
         | none => pure none
-      let relayConnected :=
-        match seenSec? with
-        | some s => nowSec ≤ s + 90
-        | none => m.status == "ready"
-      let nodeStatus :=
-        if m.status == "ready" then (if relayConnected then "online" else "offline")
-        else if m.status == "provisioning" then "provisioning"
-        else "offline"
+      -- The persisted poll counts too, so a Core restart does not erase liveness.
+      let seenSec? := NodeLiveness.lastSeen hubSeen? m.lastPollSec
+      let relayConnected := NodeLiveness.relayConnected seenSec? nowSec
+      let nodeStatus := NodeLiveness.managedStatus m.status seenSec? nowSec
+      let sizeSpec? := managedSizeSpec? m.provider m.size
+      let activeJobs := ((jobLoad.find? (·.1 == s!"managed-{m.id}")).map (·.2)).getD 0
       let ownerKind :=
         if !m.ownerMission.isEmpty then "mission"
         else if m.ownerKind.isEmpty then "user"
@@ -665,7 +704,7 @@ def buildComputeFleetJVal
       let lastSeenVal :=
         match seenSec? with
         | some s => JVal.str (formatEpochIso8601Utc s)
-        | none => if nodeStatus == "online" then JVal.str effIso else .null
+        | none => .null
       managedItems := managedItems.push (.obj #[
         ("resource_history", .arr #[]),
         ("id", .str s!"managed-{m.id}"),
@@ -690,12 +729,16 @@ def buildComputeFleetJVal
         ("version", .null),
         ("capacity_total", JVal.nat 2),
         ("capacity_available", JVal.nat (if nodeStatus == "online" then 2 else 0)),
-        ("active_jobs", JVal.nat 0),
+        ("active_jobs", JVal.nat activeJobs),
         ("queued_jobs", JVal.nat 0),
-        ("cpu_total", JVal.nat 4),
-        ("mem_total_bytes", JVal.uint64 (8 * 1024 * 1024 * 1024)),
+        ("cpu_total", match sizeSpec? with | some spec => JVal.nat spec.cpu | none => .null),
+        ("mem_total_bytes", match sizeSpec? with
+          | some spec => JVal.uint64 (spec.ramGb.toUInt64 * 1024 * 1024 * 1024)
+          | none => .null),
         ("mem_available_bytes", .null),
-        ("disk_total_bytes", .null),
+        ("disk_total_bytes", match sizeSpec? with
+          | some spec => JVal.uint64 (spec.diskGb.toUInt64 * 1024 * 1024 * 1024)
+          | none => .null),
         ("disk_available_bytes", .null),
         ("last_seen", lastSeenVal),
         ("error", .null),
@@ -1345,7 +1388,7 @@ def dispatchRemoteFleetAndRelayRoutes?
         let (_, cmp) ← getUserSpentTodayCents store callerUserId (nowIso.take 10).toString
         pure cmp
       else pure 0
-    let fv ← buildComputeFleetJVal hub? (some mc) fleet scopedUid? uSpent none store.rootDir nowIso
+    let fv ← buildComputeFleetJVal hub? (some mc) fleet scopedUid? uSpent none store.rootDir nowIso (some store)
     return some (jsonResp 200 fv)
 
   -- 4. `/api/managed-machines/{settings,providers*,snapshots*,:id*}`

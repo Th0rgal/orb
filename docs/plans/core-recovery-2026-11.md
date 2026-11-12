@@ -76,6 +76,10 @@ lean.ci, and the blocked missions (evm.fast, ldgr workers) can get machines agai
    At the time of writing 18 machines are `ready` in the database and none answers through the relay.
 2. **Real node liveness.** `/api/remote-nodes` reports every node `online` with one shared timestamp.
    Derive it from heartbeats and relay polls, and cache each node's CPU and RAM so capacity is real.
+   *Done on master:* a managed node is `online` only while its authenticated relay poll (in memory or
+   persisted) is under 90 seconds old, `last_seen` is that poll, and CPU, memory, disk and hourly price
+   come from the provider's declared size. A static node that does not answer keeps the contact time
+   and size of its last successful heartbeat (`node_heartbeats.json`), marked `capacity_cached`.
 3. **Compute history.** Nothing writes `compute_rollup_1m`, so Resources compute charts only show the
    live sample. Sample per minute and read it in `buildResourcesOverviewJson`.
 

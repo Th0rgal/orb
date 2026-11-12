@@ -457,7 +457,7 @@ def dispatchMcpToolCall
             defaultFleet.dailyCapCents defaultFleet.spentTodayCents defaultFleet.maxConcurrent with
           | .ok f => pure f
           | .error _ => pure defaultFleet
-        buildComputeFleetJVal relayHub? mc fl none 0 none
+        buildComputeFleetJVal relayHub? mc fl none 0 none store.rootDir nowIso (some store)
       | none => pure (.obj #[("nodes", .arr #[])])
     return mcpOk (.obj #[
       ("active_missions", JVal.nat activeCnt),
@@ -979,7 +979,7 @@ def dispatchMcpToolCall
         defaultFleet.dailyCapCents defaultFleet.spentTodayCents defaultFleet.maxConcurrent with
       | .ok f => pure f
       | .error _ => pure defaultFleet
-    let fv ← buildComputeFleetJVal relayHub? mc fleet none 0 none
+    let fv ← buildComputeFleetJVal relayHub? mc fleet none 0 none store.rootDir nowIso (some store)
     return mcpOk fv
 
   | "list_managed_machines" =>
