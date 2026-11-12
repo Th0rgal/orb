@@ -115,8 +115,34 @@ During recovery, configured entry points accept only the allowlisted base images
 (`orb-node-base`, `provider-default`). Named restore labels and arbitrary images
 fail before reservation until project/tenant snapshot lookup is connected.
 The trusted provider adapter's saved-snapshot wire contract is tested separately.
-Stop and destroy require provider success before committing local state; resume
-and extend fail explicitly until their remaining orchestration is connected.
+Stop and destroy require provider success before committing local state. Resume
+uses an archived Boat sandbox as a fork source, bootstraps a successor, and keeps
+the same Core machine/node ID. Extend remains fail-closed pending its orchestration.
+
+### Existing Boat machines and resume
+
+At startup and every 120 seconds, Core lists Boat inventory and reconciles only
+registered machines. Pre-cutover empty `provider_id` values are backfilled by
+exact sandbox name (`orb-managed-<Core id>` in prod). Ambiguous names are never
+guessed. `archived`/`archiving` observations move a previously ready record to
+stopped; provider-ready observations never manufacture relay readiness or erase
+an unreported cost. An unbound timed-out provisioning reservation can close only
+against a complete inventory with no matching sandbox. A legacy resume also runs
+this repair on demand before selecting its archived provider source.
+
+A resume reserves capacity/cost and revokes the old credential before provider
+I/O. A durable intent holds the source identity and successor boot. Only the
+successor's authenticated poll atomically advances the boot epoch, marks ready,
+and completes the intent. Retries cannot rent another successor. Stale inventory
+observations are fenced by provider ID and boot epoch. Timeout cleanup first
+fences late polls, destroys only the successor, then restores the retained stopped
+source; old credentials never revive. Unknown provider outcomes remain pending
+for reconciliation rather than claiming success or deleting the source.
+
+The Core self-test replays archived pre-cutover rows, exact/ambiguous name
+matching, missing and fresh reservations, on-demand legacy resume, preserved
+machine/node identity, stale source observations, REST/MCP retry parity, old-token
+and old-command rejection, and deadline/cleanup races.
 
 The guest receives a one-use enrollment token through a private file, not a
 command argument. `scripts/orb-node-provision.sh` installs the current node,

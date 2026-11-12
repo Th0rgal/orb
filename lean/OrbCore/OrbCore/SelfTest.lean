@@ -11,6 +11,7 @@
 import OrbCore
 import OrbCore.ManagedProviderTests
 import OrbCore.ManagedProvisioningTests
+import OrbCore.ManagedResumeTests
 
 namespace OrbCore.SelfTest
 
@@ -63,7 +64,7 @@ private def provisionReadyFixture (st : ManagedComputeStore) (fleet : ManagedFle
     (machine : ManagedMachine) (nowEpoch : UInt64) : IO (Except String ManagedMachine) := do
   let .ok m ← provisionManagedMachine st fleet machine nowEpoch
     | return .error "fixture_reservation_failed"
-  let .ok () ← recordAuthenticatedManagedPoll st m.id m.nodeBootEpoch nowEpoch
+  let .ok _ ← recordAuthenticatedManagedPoll st m.id m.nodeBootEpoch nowEpoch
     | return .error "fixture_poll_failed"
   return .ok { m with status := "ready", lastPollSec := nowEpoch }
 
@@ -4572,6 +4573,15 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   if privateImageSt != 409 || privateSnapshotSt != 409 || beforeImageGuard != afterImageGuard then
     return (← fail "unscoped image/snapshot labels must rent nothing")
   let bobVmId := ((OrbBin.Json.parse bobVmAutoBody).toOption.getD (.obj #[]) |>.fieldStr? "id").getD ""
+  let (bobStopVmSt, _, _) ← sendReq "POST" s!"/api/managed-machines/{bobVmId}/stop" bobTok "{}"
+  let (bobResumeVmSt, bobResumeBody, _) ← sendReq "POST" s!"/api/managed-machines/{bobVmId}/resume" bobTok
+    "{\"ttl_minutes\":5}" "bob-rest-resume"
+  let (bobResumeRetrySt, bobResumeRetryBody, _) ← sendReq "POST" s!"/api/managed-machines/{bobVmId}/resume" bobTok
+    "{\"ttl_minutes\":5}" "bob-rest-resume"
+  let resumedRest := (OrbBin.Json.parse bobResumeBody).toOption.getD .null
+  if bobStopVmSt != 200 || bobResumeVmSt != 200 || bobResumeRetrySt != 200 || bobResumeRetryBody != bobResumeBody ||
+      ((resumedRest.field? "machine").getD .null).fieldUInt64? "node_boot_epoch" != some 2 then
+    return (← fail s!"REST resume must preserve identity and advance only on poll: {bobResumeVmSt}:{bobResumeBody}")
   let (_, admVmsBody, _) ← sendReq "GET" "/api/managed-machines" adminTok ""
   let (admDelBobVmSt, _, _) ← sendReq "DELETE" s!"/api/managed-machines/{bobVmId}" adminTok ""
   let (bobDelBobVmSt, _, _) ← sendReq "DELETE" s!"/api/managed-machines/{bobVmId}" bobTok ""
@@ -4627,6 +4637,18 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let some (stillReady, _) ← getManagedMachine? mStore parityId
     | return (← fail "foreign caller erased managed machine")
   if stillReady.status != "ready" then return (← fail "foreign caller changed managed machine")
+  let mcpStopped ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
+    "stop_managed_machine" (.obj #[("machine_id", .str parityId)]) nowSec none app.managedProvisioningOverride?
+  let resumeArgs := OrbBin.Json.JVal.obj #[("machine_id", .str parityId), ("ttl_minutes", .nat 5),
+    ("idempotency_key", .str "mcp-managed-resume")]
+  let mcpResumed ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
+    "resume_managed_machine" resumeArgs nowSec none app.managedProvisioningOverride?
+  let mcpResumeReplay ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
+    "resume_managed_machine" resumeArgs nowSec none app.managedProvisioningOverride?
+  let resumedMcp := ((OrbBin.Json.parse mcpResumed).toOption.getD .null |>.field? "result").getD .null
+  if ((OrbBin.Json.parse mcpStopped).toOption.getD .null).fieldBool? "ok" != some true ||
+      mcpResumed != mcpResumeReplay || ((resumedMcp.field? "machine").getD .null).fieldUInt64? "node_boot_epoch" != some 2 then
+    return (← fail s!"MCP resume/poll/retry parity failed: {mcpResumed}")
   let mcpDestroyed ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
     "destroy_managed_machine" (.obj #[("machine_id", .str parityId)]) nowSec none app.managedProvisioningOverride?
   if ((OrbBin.Json.parse mcpDestroyed).toOption.getD .null).fieldBool? "ok" != some true then
@@ -6139,6 +6161,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     | do IO.eprintln "[orb-core-test] FAIL: openCoreStore failed"; return 1
   try
     OrbCore.ManagedProvisioningTests.run tmpRoot
+    OrbCore.ManagedResumeTests.run tmpRoot
   catch e =>
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: {e}"

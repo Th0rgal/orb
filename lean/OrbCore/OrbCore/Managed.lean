@@ -209,7 +209,24 @@ structure ProviderObservation where
   machineId : String
   observedStatus : String
   spentCents : UInt64 := 0
+  spentObserved : Bool := false
   orphaned : Bool := false
+  expectedProviderId? : Option String := none
+  expectedBootEpoch? : Option UInt64 := none
+  deriving Repr, DecidableEq
+
+structure ManagedResumeIntent where
+  id : String
+  machineId : String
+  expectedBoot : UInt64
+  oldProviderId : String
+  newProviderId : String
+  oldTtl : UInt64
+  oldExpiry : UInt64
+  newTtl : UInt64
+  newExpiry : UInt64
+  deadlineSec : UInt64
+  state : String
   deriving Repr, DecidableEq
 
 /-- Durable VM claim. `phaseCode` is `Orb.ManagedNode.ClaimPhase.encode`. -/
@@ -254,7 +271,7 @@ def managedComputeDdl : String :=
   "claim_boot INTEGER NOT NULL,owner_mission TEXT NOT NULL);" ++
   "CREATE TABLE IF NOT EXISTS managed_node_tokens(" ++
   "machine_id TEXT PRIMARY KEY,node_id TEXT NOT NULL,node_token TEXT NOT NULL," ++
-  "enroll_token TEXT NOT NULL,node_boot_epoch INTEGER NOT NULL);" ++
+  "enroll_token TEXT NOT NULL,node_boot_epoch INTEGER NOT NULL,readiness_deadline_sec INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE TABLE IF NOT EXISTS managed_relay_commands(" ++
   "command_id TEXT PRIMARY KEY,machine_id TEXT NOT NULL,phase_code INTEGER NOT NULL," ++
   "held_lease_id INTEGER NOT NULL,lease_seq INTEGER NOT NULL,lease_epoch INTEGER NOT NULL," ++
@@ -268,9 +285,20 @@ def managedComputeDdl : String :=
   "reset_period TEXT NOT NULL DEFAULT 'total'," ++
   "vm_limits_json TEXT NOT NULL DEFAULT ''," ++
   "bandwidth_limits_json TEXT NOT NULL DEFAULT ''," ++
-  "updated_at INTEGER NOT NULL DEFAULT 0);"
+  "updated_at INTEGER NOT NULL DEFAULT 0);" ++
+  "CREATE TABLE IF NOT EXISTS managed_cost_reservations(" ++
+  "id TEXT PRIMARY KEY,machine_id TEXT NOT NULL,owner_user_id TEXT NOT NULL,day_start INTEGER NOT NULL,cents INTEGER NOT NULL);" ++
+  "CREATE TABLE IF NOT EXISTS managed_resume_intents(" ++
+  "id TEXT PRIMARY KEY,machine_id TEXT NOT NULL,expected_boot INTEGER NOT NULL," ++
+  "old_provider_id TEXT NOT NULL,new_provider_id TEXT NOT NULL DEFAULT ''," ++
+  "old_ttl INTEGER NOT NULL,old_expiry INTEGER NOT NULL,new_ttl INTEGER NOT NULL,new_expiry INTEGER NOT NULL," ++
+  "deadline_sec INTEGER NOT NULL,state TEXT NOT NULL DEFAULT 'pending');" ++
+  "CREATE UNIQUE INDEX IF NOT EXISTS one_active_managed_resume ON managed_resume_intents(machine_id) WHERE state IN ('pending','aborting');"
 
 def managedAdditiveAlters : Array String := #[
+  "ALTER TABLE managed_machines ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT '';",
+  "CREATE INDEX IF NOT EXISTS idx_managed_machines_owner ON managed_machines(owner_user_id);",
+  "ALTER TABLE managed_node_tokens ADD COLUMN readiness_deadline_sec INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE managed_machines ADD COLUMN provider_id TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE managed_machines ADD COLUMN created_at_sec INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE managed_machines ADD COLUMN expires_at_sec INTEGER NOT NULL DEFAULT 0;",
@@ -279,8 +307,8 @@ def managedAdditiveAlters : Array String := #[
   "ALTER TABLE managed_machines ADD COLUMN image TEXT NOT NULL DEFAULT '';",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_managed_provider_identity ON managed_machines(provider,provider_id) WHERE provider_id<>'';",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_managed_request ON managed_machines(provider,request_key) WHERE request_key<>'';",
-  "ALTER TABLE managed_machines ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT '';",
-  "CREATE INDEX IF NOT EXISTS idx_managed_machines_owner ON managed_machines(owner_user_id);",
+  "CREATE INDEX IF NOT EXISTS managed_cost_reservation_day ON managed_cost_reservations(owner_user_id,day_start);",
+  "INSERT OR IGNORE INTO managed_cost_reservations(id,machine_id,owner_user_id,day_start,cents) SELECT 'create:'||id,id,owner_user_id,(created_at_sec/86400)*86400,spent_cents FROM managed_machines WHERE created_at_sec>0;",
   "CREATE TABLE IF NOT EXISTS mission_budgets(mission_id TEXT PRIMARY KEY,budget_deci_milli_usd INTEGER,reset_period TEXT NOT NULL DEFAULT 'total',vm_limits_json TEXT NOT NULL DEFAULT '',bandwidth_limits_json TEXT NOT NULL DEFAULT '',updated_at INTEGER NOT NULL DEFAULT 0);"
 ]
 
@@ -322,7 +350,7 @@ private def machineFromRow (row : Array String) : ManagedMachine :=
     sandboxName := cell row 1
     provider := cell row 2
     size := cell row 3
-    status := cell row 4
+    status := if cell row 22 == "1" then "provisioning" else cell row 4
     ownerMission := cell row 5
     ttlMinutes := cellU64 row 6
     spentCents := cellU64 row 7
@@ -358,10 +386,14 @@ def closeManagedComputeStore (st : ManagedComputeStore) : IO Unit :=
 
 def backfillManagedMachineOwner (st : ManagedComputeStore) (bootstrapAdminId : String) : IO (Except String Unit) := do
   if bootstrapAdminId.isEmpty then return .ok ()
-  match ← execParamQuery st.db
-      "UPDATE managed_machines SET owner_user_id=?1 WHERE owner_user_id='';" #[bootstrapAdminId] with
-  | .error e => return .error e
-  | .ok _ => return .ok ()
+  withImmediateTx st.db do
+    let .ok _ ← execParamQueryUnlocked st.db
+        "UPDATE managed_machines SET owner_user_id=?1 WHERE owner_user_id='';" #[bootstrapAdminId]
+      | return .error "managed_owner_backfill_failed"
+    match ← execParamQueryUnlocked st.db
+        "UPDATE managed_cost_reservations SET owner_user_id=?1 WHERE owner_user_id='';" #[bootstrapAdminId] with
+    | .error e => return .error e
+    | .ok _ => return .ok ()
 
 def getUserManagedPrefs (st : ManagedComputeStore) (userId : String) : IO (Array (String × Bool)) := do
   match ← execParamQuery st.db
@@ -393,7 +425,7 @@ def setUserManagedPref (st : ManagedComputeStore) (userId provider : String) (en
 
 private def loadMachineRows (db : SqliteDb) : IO (Except String (Array (Array String))) :=
   execParamQuery db
-    "SELECT id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents,cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,owner_user_id,provider_id,created_at_sec,expires_at_sec,last_poll_sec,request_key,image FROM managed_machines ORDER BY id ASC;" #[]
+    "SELECT id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents,cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,owner_user_id,provider_id,created_at_sec,expires_at_sec,last_poll_sec,request_key,image,EXISTS(SELECT 1 FROM managed_resume_intents r WHERE r.machine_id=managed_machines.id AND r.state IN ('pending','aborting')) FROM managed_machines ORDER BY id ASC;" #[]
 
 def saveManagedFleetConfig (st : ManagedComputeStore) (enabled boatEnabled : Bool)
     (dailyCapCents spentTodayCents maxConcurrent : UInt64) : IO (Except String Unit) := do
@@ -540,7 +572,7 @@ private def upsertMachineTx (db : SqliteDb) (m : ManagedMachine) (slice : VmSlic
 private def selectMachineTx (db : SqliteDb) (machineId : String) :
     IO (Except String (Option (ManagedMachine × VmSliceState))) := do
   match ← execParamQueryUnlocked db
-      "SELECT id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents,cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,owner_user_id,provider_id,created_at_sec,expires_at_sec,last_poll_sec,request_key,image FROM managed_machines WHERE id=?1;"
+      "SELECT id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents,cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,owner_user_id,provider_id,created_at_sec,expires_at_sec,last_poll_sec,request_key,image,EXISTS(SELECT 1 FROM managed_resume_intents r WHERE r.machine_id=managed_machines.id AND r.state IN ('pending','aborting')) FROM managed_machines WHERE id=?1;"
       #[machineId] with
   | .error e => return .error e
   | .ok rows =>
@@ -566,13 +598,15 @@ def getManagedMachineByRequestKey? (st : ManagedComputeStore) (provider requestK
 /-- Apply one lifecycle event through `verifyVmLifecycleAdmit` / `stepVmSlice` and persist it in one
     immediate transaction. `resume` and `replace` store the successor boot epoch the reducer returns.
     `destroy` closes the ledger only when the reducer emits `closeCostLedger`. -/
-def applyVmLifecycle (st : ManagedComputeStore) (machineId : String) (ev : VmSliceEvent) :
-    IO (Except String (VmSliceState × List VmEffect)) := do
+def applyVmLifecycle (st : ManagedComputeStore) (machineId : String) (ev : VmSliceEvent)
+    (expectedProviderId? : Option String := none) : IO (Except String (VmSliceState × List VmEffect)) := do
   withImmediateTx st.db do
     match ← selectMachineTx st.db machineId with
     | .error e => return .error e
     | .ok none => return .error "managed_machine_missing"
     | .ok (some (machine, slice)) =>
+      if let some expected := expectedProviderId? then
+        if machine.providerId != expected then return .error "stale_provider_identity"
       if verifyVmLifecycleAdmit slice.phaseCode ev.opCode ev.ownerLive ev.idleElapsed
            slice.nodeBootEpoch ev.presentedBootEpoch ev.nowEpoch slice.deletableAt != 1 then
         return .error "vm_lifecycle_rejected"
@@ -581,7 +615,66 @@ def applyVmLifecycle (st : ManagedComputeStore) (machineId : String) (ev : VmSli
         return .error "vm_lifecycle_rejected"
       match ← upsertMachineTx st.db machine next with
       | .error e => return .error e
-      | .ok () => return .ok (next, effs)
+      | .ok () =>
+        if next.phaseCode == 3 then
+          let .ok _ ← execParamQueryUnlocked st.db
+              "UPDATE managed_resume_intents SET state='failed' WHERE machine_id=?1 AND state IN ('pending','aborting');" #[machineId]
+            | return .error "managed_resume_close_failed"
+        return .ok (next, effs)
+
+private def admitManagedCostTx (st : ManagedComputeStore) (fleet : ManagedFleetState)
+    (provider ownerUserId : String) (cost ttlMinutes nowEpoch : UInt64) (newSlot : Bool)
+    (userAdmission? : Option ManagedUserAdmission) : IO (Except String ManagedFleetState) := do
+  if ttlMinutes < 5 || ttlMinutes > 720 then return .error "managed_ttl_invalid"
+  let .ok counts ← execParamQueryUnlocked st.db
+      "SELECT COUNT(*) FROM managed_machines m WHERE phase_code IN (0,1) OR EXISTS(SELECT 1 FROM managed_resume_intents r WHERE r.machine_id=m.id AND r.state IN ('pending','aborting'));" #[]
+    | return .error "managed_admission_read_failed"
+  let .ok rows ← execParamQueryUnlocked st.db
+      "SELECT enabled,boat_enabled,daily_cap_cents,spent_today_cents,max_concurrent FROM managed_fleet_state WHERE singleton_id=1;" #[]
+    | return .error "managed_admission_read_failed"
+  let current := if rows.size > 1 then { fleet with
+      enabled := cell rows[1]! 0 == "1", boatEnabled := cell rows[1]! 1 == "1",
+      dailyCapCents := cellU64 rows[1]! 2, spentTodayCents := cellU64 rows[1]! 3,
+      maxConcurrent := cellU64 rows[1]! 4
+    } else fleet
+  if counts.size < 2 then return .error "managed_admission_read_failed"
+  let active := (cellU64 counts[1]! 0).toNat
+  -- An extension replaces one already-counted slot; a create/resume adds one.
+  let chargedActive := if newSlot then active else active - 1
+  if !admitManagedSpawnCount current chargedActive cost ttlMinutes.toUInt32 then
+    return .error "managed_spawn_rejected"
+  if provider == "boat" && !current.boatEnabled then return .error "provider_disabled"
+  if let some budget := userAdmission? then
+    if ownerUserId.isEmpty then return .error "managed_user_missing"
+    let dayStart := (nowEpoch / 86400) * 86400
+    let .ok reservedRows ← execParamQueryUnlocked st.db
+        "SELECT COALESCE(SUM(cents),0) FROM managed_cost_reservations WHERE owner_user_id=?1 AND day_start=?2;"
+        #[ownerUserId, s!"{dayStart}"]
+      | return .error "managed_user_admission_read_failed"
+    if reservedRows.size < 2 then return .error "managed_user_admission_read_failed"
+    let compute := max budget.computeCents (cellU64 reservedRows[1]! 0)
+    if budget.inferenceCents > budget.capCents || compute > budget.capCents - budget.inferenceCents then
+      return .error "managed_user_spend_cap_exceeded"
+    let spent := budget.inferenceCents + compute
+    if cost > budget.capCents - spent ||
+        admitManagedSpawnMultiUser { current with machines := #[] } cost spent
+          (some budget.capCents) ttlMinutes.toUInt32 != 0 then
+      return .error "managed_user_spend_cap_exceeded"
+  return .ok current
+
+private def chargeManagedCostTx (st : ManagedComputeStore) (current : ManagedFleetState)
+    (reservationId machineId ownerUserId : String) (cost nowEpoch : UInt64) : IO (Except String Unit) := do
+  let .ok _ ← execParamQueryUnlocked st.db
+      "INSERT INTO managed_cost_reservations(id,machine_id,owner_user_id,day_start,cents) VALUES(?1,?2,?3,?4,?5);"
+      #[reservationId, machineId, ownerUserId, s!"{(nowEpoch / 86400) * 86400}", s!"{cost}"]
+    | return .error "managed_cost_reservation_failed"
+  match ← execParamQueryUnlocked st.db
+      ("INSERT INTO managed_fleet_state(singleton_id,enabled,boat_enabled,daily_cap_cents,spent_today_cents,max_concurrent) " ++
+       "VALUES(1,?1,?2,?3,?4,?5) ON CONFLICT(singleton_id) DO UPDATE SET spent_today_cents=spent_today_cents+?6;")
+      #[if current.enabled then "1" else "0", if current.boatEnabled then "1" else "0",
+        s!"{current.dailyCapCents}", s!"{current.spentTodayCents + cost}", s!"{current.maxConcurrent}", s!"{cost}"] with
+  | .error e => return .error e
+  | .ok _ => return .ok ()
 
 def provisionManagedMachine (st : ManagedComputeStore) (fleet : ManagedFleetState)
     (machine : ManagedMachine) (nowEpoch : UInt64)
@@ -605,40 +698,10 @@ def provisionManagedMachine (st : ManagedComputeStore) (fleet : ManagedFleetStat
     expiresAtSec := if machine.expiresAtSec == 0 then nowEpoch + machine.ttlMinutes * 60 else machine.expiresAtSec
   }
   withImmediateTx st.db do
-    let .ok counts ← execParamQueryUnlocked st.db
-        "SELECT COUNT(*) FROM managed_machines WHERE phase_code IN (0,1);" #[]
-      | return .error "managed_admission_read_failed"
-    let .ok configRows ← execParamQueryUnlocked st.db
-        "SELECT enabled,boat_enabled,daily_cap_cents,spent_today_cents,max_concurrent FROM managed_fleet_state WHERE singleton_id=1;" #[]
-      | return .error "managed_admission_read_failed"
-    let current := if configRows.size > 1 then
-      { fleet with
-        enabled := cell configRows[1]! 0 == "1"
-        boatEnabled := cell configRows[1]! 1 == "1"
-        dailyCapCents := cellU64 configRows[1]! 2
-        spentTodayCents := cellU64 configRows[1]! 3
-        maxConcurrent := cellU64 configRows[1]! 4
-      }
-      else fleet
-    if counts.size < 2 || !admitManagedSpawnCount current (cellU64 counts[1]! 0).toNat machine.spentCents machine.ttlMinutes.toUInt32 then
-      return .error "managed_spawn_rejected"
-    if machine.provider == "boat" && !current.boatEnabled then return .error "provider_disabled"
-    if let some budget := userAdmission? then
-      if machine.ownerUserId.isEmpty then return .error "managed_user_missing"
-      let dayStart := (nowEpoch / 86400) * 86400
-      let .ok reservedRows ← execParamQueryUnlocked st.db
-          "SELECT COALESCE(SUM(spent_cents),0) FROM managed_machines WHERE owner_user_id=?1 AND created_at_sec>=?2;"
-          #[machine.ownerUserId, s!"{dayStart}"]
-        | return .error "managed_user_admission_read_failed"
-      if reservedRows.size < 2 then return .error "managed_user_admission_read_failed"
-      let compute := max budget.computeCents (cellU64 reservedRows[1]! 0)
-      if budget.inferenceCents > budget.capCents || compute > budget.capCents - budget.inferenceCents then
-        return .error "managed_user_spend_cap_exceeded"
-      let spent := budget.inferenceCents + compute
-      if machine.spentCents > budget.capCents - spent ||
-          admitManagedSpawnMultiUser { current with machines := #[] } machine.spentCents spent
-            (some budget.capCents) machine.ttlMinutes.toUInt32 != 0 then
-        return .error "managed_user_spend_cap_exceeded"
+    let current ← match ← admitManagedCostTx st fleet machine.provider machine.ownerUserId
+        machine.spentCents machine.ttlMinutes nowEpoch true userAdmission? with
+      | .ok value => pure value
+      | .error e => return .error e
     match ← selectMachineTx st.db machine.id with
     | .error e => return .error e
     | .ok (some _) => return .error "managed_machine_exists"
@@ -646,16 +709,8 @@ def provisionManagedMachine (st : ManagedComputeStore) (fleet : ManagedFleetStat
       match ← upsertMachineTx st.db reserved slice with
       | .error e => return .error e
       | .ok () =>
-        let newSpent := current.spentTodayCents + machine.spentCents
-        let fleetSql :=
-          "INSERT INTO managed_fleet_state(singleton_id,enabled,boat_enabled,daily_cap_cents,spent_today_cents,max_concurrent) " ++
-          "VALUES(1,?1,?2,?3,?4,?5) ON CONFLICT(singleton_id) DO UPDATE SET " ++
-          "enabled=excluded.enabled,boat_enabled=excluded.boat_enabled,daily_cap_cents=excluded.daily_cap_cents," ++
-          "spent_today_cents=spent_today_cents+?6,max_concurrent=excluded.max_concurrent;"
-        match ← execParamQueryUnlocked st.db fleetSql #[
-          if current.enabled then "1" else "0", if current.boatEnabled then "1" else "0",
-          s!"{current.dailyCapCents}", s!"{newSpent}", s!"{current.maxConcurrent}", s!"{machine.spentCents}"
-        ] with
+        match ← chargeManagedCostTx st current s!"create:{machine.id}" machine.id
+            machine.ownerUserId machine.spentCents nowEpoch with
         | .error e => return .error e
         | .ok _ => return .ok reserved
 
@@ -669,25 +724,208 @@ def bindManagedProviderId (st : ManagedComputeStore) (machineId providerId : Str
     if slice.nodeBootEpoch != bootEpoch || slice.phaseCode != 0 then return .error "stale_boot_epoch"
     upsertMachineTx st.db { m with providerId } slice
 
-/-- Called only after authenticating a real relay poll. Enrollment and provider
-    readiness do not make a worker eligible. The poll and readiness commit together. -/
-def recordAuthenticatedManagedPoll (st : ManagedComputeStore) (machineId : String)
-    (bootEpoch nowEpoch : UInt64) : IO (Except String Unit) := do
+/-- Reconciliation may fill a legacy binding in any live phase, but never
+    replace a known provider identity or change the durable machine/node ID. -/
+def backfillManagedProviderIdentity (st : ManagedComputeStore) (machineId provider providerId : String) :
+    IO (Except String Unit) := do
+  if providerId.isEmpty then return .error "provider_machine_id_missing"
   withImmediateTx st.db do
+    let .ok (some (m, slice)) ← selectMachineTx st.db machineId | return .error "managed_machine_missing"
+    if canonicalizeProvider m.provider != provider || slice.phaseCode == 3 then return .error "managed_provider_mismatch"
+    if !m.providerId.isEmpty then
+      if m.providerId == providerId then return .ok () else return .error "managed_provider_identity_conflict"
+    upsertMachineTx st.db { m with providerId } slice
+
+private def resumeIntentFromRow (r : Array String) : ManagedResumeIntent := {
+  id := cell r 0, machineId := cell r 1, expectedBoot := cellU64 r 2,
+  oldProviderId := cell r 3, newProviderId := cell r 4,
+  oldTtl := cellU64 r 5, oldExpiry := cellU64 r 6,
+  newTtl := cellU64 r 7, newExpiry := cellU64 r 8,
+  deadlineSec := cellU64 r 9, state := cell r 10
+}
+
+private def getResumeIntentTx (st : ManagedComputeStore) (requestKey : String) :
+    IO (Except String (Option ManagedResumeIntent)) := do
+  match ← execParamQueryUnlocked st.db
+      "SELECT id,machine_id,expected_boot,old_provider_id,new_provider_id,old_ttl,old_expiry,new_ttl,new_expiry,deadline_sec,state FROM managed_resume_intents WHERE id=?1;" #[requestKey] with
+  | .error e => return .error e
+  | .ok rows => return .ok (if rows.size > 1 then some (resumeIntentFromRow rows[1]!) else none)
+
+def getManagedResumeIntent? (st : ManagedComputeStore) (requestKey : String) :
+    IO (Except String (Option ManagedResumeIntent)) :=
+  st.db.mu.atomically (getResumeIntentTx st requestKey)
+
+/-- Reserve a resume before provider I/O. The old boot stays stopped and its
+    token is revoked; the successor only becomes live on its authenticated poll. -/
+def prepareManagedResume (st : ManagedComputeStore) (fleet : ManagedFleetState)
+    (machineId requestKey enrollToken : String) (ttl cost nowEpoch deadlineSec : UInt64)
+    (userAdmission? : Option ManagedUserAdmission := none) :
+    IO (Except String (ManagedResumeIntent × Bool)) := do
+  if requestKey.isEmpty || enrollToken.isEmpty then return .error "managed_resume_invalid"
+  withImmediateTx st.db do
+    let prior ← match ← getResumeIntentTx st requestKey with
+      | .ok value => pure value
+      | .error e => return .error e
+    if let some p := prior then
+      if p.machineId != machineId || p.newTtl != ttl then return .error "managed_idempotency_conflict"
+      return .ok (p, false)
     let .ok (some (m, slice)) ← selectMachineTx st.db machineId
       | return .error "managed_machine_missing"
-    if slice.nodeBootEpoch != bootEpoch || slice.phaseCode > 1 then return .error "stale_boot_epoch"
-    let next ← if slice.phaseCode == 0 then do
-      let ev : VmSliceEvent := {
-        opCode := VmOp.encode .provision, ownerLive := 0, idleElapsed := 0,
-        presentedBootEpoch := bootEpoch, nowEpoch
-      }
-      if verifyVmLifecycleAdmit slice.phaseCode ev.opCode ev.ownerLive ev.idleElapsed
-          slice.nodeBootEpoch ev.presentedBootEpoch ev.nowEpoch slice.deletableAt != 1 then
-        return .error "vm_provision_rejected"
-      pure (stepVmSlice slice ev).1
-      else pure slice
-    upsertMachineTx st.db { m with lastPollSec := max m.lastPollSec nowEpoch } next
+    let successor := slice.nodeBootEpoch + 1
+    if verifyVmLifecycleAdmit slice.phaseCode (VmOp.encode .resume) 0 0
+        slice.nodeBootEpoch successor nowEpoch slice.deletableAt != 1 then
+      return .error "vm_resume_rejected"
+    if deadlineSec ≤ nowEpoch || m.spentCents + cost < m.spentCents then
+      return .error "managed_resume_invalid"
+    let current ← match ← admitManagedCostTx st fleet m.provider m.ownerUserId cost ttl nowEpoch true userAdmission? with
+      | .ok value => pure value
+      | .error e => return .error e
+    let intent : ManagedResumeIntent := {
+      id := requestKey, machineId, expectedBoot := successor,
+      oldProviderId := m.effectiveProviderId, newProviderId := "",
+      oldTtl := m.ttlMinutes, oldExpiry := m.expiresAtSec,
+      newTtl := ttl, newExpiry := nowEpoch + ttl * 60,
+      deadlineSec, state := "pending"
+    }
+    let .ok _ ← execParamQueryUnlocked st.db
+        "INSERT INTO managed_resume_intents(id,machine_id,expected_boot,old_provider_id,old_ttl,old_expiry,new_ttl,new_expiry,deadline_sec) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9);"
+        #[intent.id, machineId, s!"{successor}", intent.oldProviderId, s!"{intent.oldTtl}", s!"{intent.oldExpiry}", s!"{ttl}", s!"{intent.newExpiry}", s!"{deadlineSec}"]
+      | return .error "managed_resume_already_pending"
+    let .ok () ← chargeManagedCostTx st current s!"resume:{requestKey}" m.id m.ownerUserId cost nowEpoch
+      | return .error "managed_resume_cost_reservation_failed"
+    let .ok () ← upsertMachineTx st.db { m with spentCents := m.spentCents + cost, lastPollSec := 0 } slice
+      | return .error "managed_resume_store_failed"
+    let .ok _ ← execParamQueryUnlocked st.db
+        ("INSERT INTO managed_node_tokens(machine_id,node_id,node_token,enroll_token,node_boot_epoch,readiness_deadline_sec) VALUES(?1,'','',?2,?3,?4) " ++
+         "ON CONFLICT(machine_id) DO UPDATE SET node_id='',node_token='',enroll_token=excluded.enroll_token,node_boot_epoch=excluded.node_boot_epoch,readiness_deadline_sec=excluded.readiness_deadline_sec;")
+        #[machineId, enrollToken, s!"{successor}", s!"{deadlineSec}"]
+      | return .error "managed_resume_token_store_failed"
+    return .ok (intent, true)
+
+def bindManagedResumeProvider (st : ManagedComputeStore) (requestKey providerId : String) : IO (Except String Unit) := do
+  if providerId.isEmpty then return .error "provider_machine_id_missing"
+  withImmediateTx st.db do
+    let .ok (some intent) ← getResumeIntentTx st requestKey | return .error "managed_resume_missing"
+    let .ok (some (m, slice)) ← selectMachineTx st.db intent.machineId | return .error "managed_machine_missing"
+    if intent.state != "pending" || slice.phaseCode != 2 || slice.nodeBootEpoch + 1 != intent.expectedBoot then
+      return .error "stale_boot_epoch"
+    let .ok _ ← execParamQueryUnlocked st.db
+        "UPDATE managed_resume_intents SET new_provider_id=?2 WHERE id=?1 AND state='pending';" #[requestKey, providerId]
+      | return .error "managed_resume_binding_failed"
+    upsertMachineTx st.db { m with providerId, ttlMinutes := intent.newTtl, expiresAtSec := intent.newExpiry } slice
+
+/-- Fence first-poll admission before deleting a timed-out successor. This
+    prevents a late poll (or a wall-clock adjustment) racing provider cleanup. -/
+def fenceManagedResumeCleanup (st : ManagedComputeStore) (requestKey : String) :
+    IO (Except String ManagedResumeIntent) := do
+  withImmediateTx st.db do
+    let .ok (some intent) ← getResumeIntentTx st requestKey | return .error "managed_resume_missing"
+    let .ok (some (_, slice)) ← selectMachineTx st.db intent.machineId | return .error "managed_machine_missing"
+    if intent.state == "completed" then return .error "managed_resume_already_ready"
+    if (intent.state != "pending" && intent.state != "aborting") || slice.phaseCode != 2 ||
+        slice.nodeBootEpoch + 1 != intent.expectedBoot then return .error "stale_boot_epoch"
+    let .ok _ ← execParamQueryUnlocked st.db "UPDATE managed_resume_intents SET state='aborting' WHERE id=?1;" #[requestKey]
+      | return .error "managed_resume_fence_failed"
+    let .ok _ ← execParamQueryUnlocked st.db "DELETE FROM managed_node_tokens WHERE machine_id=?1;" #[intent.machineId]
+      | return .error "managed_resume_token_revoke_failed"
+    return .ok { intent with state := "aborting" }
+
+/-- Called only after the failed successor guest is confirmed destroyed. The
+    retained stopped source remains resumable, but none of its old tokens revive. -/
+def abortManagedResume (st : ManagedComputeStore) (requestKey : String) : IO (Except String Unit) := do
+  withImmediateTx st.db do
+    let .ok (some intent) ← getResumeIntentTx st requestKey | return .error "managed_resume_missing"
+    let .ok (some (m, slice)) ← selectMachineTx st.db intent.machineId | return .error "managed_machine_missing"
+    if (intent.state != "pending" && intent.state != "aborting") || slice.phaseCode != 2 || slice.nodeBootEpoch + 1 != intent.expectedBoot then
+      return .error "stale_boot_epoch"
+    let .ok () ← upsertMachineTx st.db {
+        m with
+        providerId := intent.oldProviderId
+        ttlMinutes := intent.oldTtl
+        expiresAtSec := intent.oldExpiry
+        lastPollSec := 0
+      } slice | return .error "managed_resume_rollback_failed"
+    let .ok _ ← execParamQueryUnlocked st.db "DELETE FROM managed_node_tokens WHERE machine_id=?1;" #[m.id]
+      | return .error "managed_resume_token_revoke_failed"
+    match ← execParamQueryUnlocked st.db "UPDATE managed_resume_intents SET state='failed' WHERE id=?1;" #[requestKey] with
+    | .error e => return .error e
+    | .ok _ => return .ok ()
+
+private def expectedManagedBootTx (st : ManagedComputeStore) (machineId : String)
+    (vm : VmSliceState) : IO (Except String UInt64) := do
+  if vm.phaseCode == 2 then
+    let .ok rows ← execParamQueryUnlocked st.db
+        "SELECT expected_boot FROM managed_resume_intents WHERE machine_id=?1 AND state='pending' AND new_provider_id<>'';" #[machineId]
+      | return .error "managed_resume_read_failed"
+    if rows.size > 1 then
+      let expected := cellU64 rows[1]! 0
+      if verifyVmLifecycleAdmit vm.phaseCode (VmOp.encode .resume) 0 0 vm.nodeBootEpoch expected 0 vm.deletableAt != 1 then
+        return .error "stale_boot_epoch"
+      return .ok expected
+  return .ok vm.nodeBootEpoch
+
+private def authenticateNodeTokenTx (st : ManagedComputeStore) (machineId nodeToken : String)
+    (presentedBootEpoch? : Option UInt64) : IO (Except String UInt64) := do
+  let .ok (some (_, vm)) ← selectMachineTx st.db machineId | return .error "node_unauthorized"
+  let .ok rows ← execParamQueryUnlocked st.db
+      "SELECT node_token,node_boot_epoch FROM managed_node_tokens WHERE machine_id=?1;" #[machineId]
+    | return .error "node_unauthorized"
+  if rows.size < 2 || nodeToken.isEmpty || cell rows[1]! 0 != nodeToken then return .error "node_unauthorized"
+  if vm.phaseCode == 3 then return .error "stale_boot_epoch"
+  let .ok expected ← expectedManagedBootTx st machineId vm | return .error "stale_boot_epoch"
+  if cellU64 rows[1]! 1 != expected then return .error "stale_boot_epoch"
+  if let some presented := presentedBootEpoch? then
+    if presented != expected then return .error "stale_boot_epoch"
+  return .ok expected
+
+private def recordManagedPollTx (st : ManagedComputeStore) (machineId : String)
+    (bootEpoch nowEpoch : UInt64) : IO (Except String UInt64) := do
+  let .ok (some (m, slice)) ← selectMachineTx st.db machineId | return .error "managed_machine_missing"
+  if slice.phaseCode == 3 then return .error "stale_boot_epoch"
+  let .ok expected ← expectedManagedBootTx st machineId slice | return .error "stale_boot_epoch"
+  if expected != bootEpoch || (slice.phaseCode == 2 && expected == slice.nodeBootEpoch) then
+    return .error "stale_boot_epoch"
+  if m.expiresAtSec != 0 && nowEpoch ≥ m.expiresAtSec then return .error "managed_machine_expired"
+  if slice.phaseCode != 1 then
+    let .ok rows ← execParamQueryUnlocked st.db
+        "SELECT readiness_deadline_sec FROM managed_node_tokens WHERE machine_id=?1;" #[machineId]
+      | return .error "node_unauthorized"
+    let deadline := if rows.size > 1 then cellU64 rows[1]! 0 else 0
+    if deadline != 0 && nowEpoch ≥ deadline then return .error "managed_bootstrap_deadline_expired"
+  let next ← if slice.phaseCode == 0 || slice.phaseCode == 2 then do
+    let ev : VmSliceEvent := {
+      opCode := if slice.phaseCode == 0 then VmOp.encode .provision else VmOp.encode .resume,
+      ownerLive := 0, idleElapsed := 0, presentedBootEpoch := bootEpoch, nowEpoch
+    }
+    if verifyVmLifecycleAdmit slice.phaseCode ev.opCode ev.ownerLive ev.idleElapsed
+        slice.nodeBootEpoch ev.presentedBootEpoch ev.nowEpoch slice.deletableAt != 1 then
+      return .error "vm_provision_rejected"
+    pure (stepVmSlice slice ev).1
+    else pure slice
+  if slice.phaseCode == 2 then
+    let .ok _ ← execParamQueryUnlocked st.db
+        "UPDATE managed_resume_intents SET state='completed' WHERE machine_id=?1 AND expected_boot=?2 AND state='pending';"
+        #[machineId, s!"{bootEpoch}"] | return .error "managed_resume_commit_failed"
+  let .ok () ← upsertMachineTx st.db { m with lastPollSec := max m.lastPollSec nowEpoch } next
+    | return .error "managed_poll_store_failed"
+  return .ok next.nodeBootEpoch
+
+/-- Trusted fixture/internal entry point; external polls use the atomic token
+    authentication + observation function below to fence concurrent revocation. -/
+def recordAuthenticatedManagedPoll (st : ManagedComputeStore) (machineId : String)
+    (bootEpoch nowEpoch : UInt64) : IO (Except String UInt64) :=
+  withImmediateTx st.db (recordManagedPollTx st machineId bootEpoch nowEpoch)
+
+/-- Authentication, boot transition and heartbeat have one transaction/owner. -/
+def authenticateAndRecordManagedPoll (st : ManagedComputeStore) (machineId nodeToken : String)
+    (presentedBootEpoch? : Option UInt64) (nowEpoch : UInt64) : IO (Except String UInt64) :=
+  withImmediateTx st.db do
+    let boot ← match ← authenticateNodeTokenTx st machineId nodeToken presentedBootEpoch? with
+      | .ok value => pure value
+      | .error e => return .error e
+    match ← recordManagedPollTx st machineId boot nowEpoch with
+    | .ok value => return .ok value
+    | .error _ => return .error "stale_boot_epoch"
 
 private def claimFromRow (row : Array String) : ManagedClaim :=
   {
@@ -764,9 +1002,9 @@ def enrollManagedNode (st : ManagedComputeStore) (machineId presentedEnrollToken
     | .ok (some (_, vm)) =>
       if vm.phaseCode == 3 then
         return .error "stale_boot_epoch"
+      let .ok expected ← expectedManagedBootTx st machineId vm | return .error "stale_boot_epoch"
       if let some b := presentedBootEpoch? then
-        if b != vm.nodeBootEpoch then
-          return .error "stale_boot_epoch"
+        if b != expected then return .error "stale_boot_epoch"
       match ← execParamQueryUnlocked st.db
           "SELECT machine_id,node_id,node_token,enroll_token,node_boot_epoch FROM managed_node_tokens WHERE machine_id=?1;"
           #[machineId] with
@@ -774,7 +1012,7 @@ def enrollManagedNode (st : ManagedComputeStore) (machineId presentedEnrollToken
       | .ok rows =>
         if rows.size ≤ 1 then return .error "enrollment_missing"
         let row := rows[1]!
-        if cell row 3 != presentedEnrollToken || cellU64 row 4 != vm.nodeBootEpoch || (cell row 3).isEmpty then
+        if cell row 3 != presentedEnrollToken || cellU64 row 4 != expected || (cell row 3).isEmpty then
           return .error "enrollment_rejected"
         if !(cell row 2).isEmpty then
           return .error "enrollment_rejected"
@@ -782,43 +1020,26 @@ def enrollManagedNode (st : ManagedComputeStore) (machineId presentedEnrollToken
         let nodeId := s!"managed-{machineId}"
         match ← execParamQueryUnlocked st.db
             "UPDATE managed_node_tokens SET node_id=?2,node_token=?3,enroll_token='' WHERE machine_id=?1 AND enroll_token=?4 AND node_boot_epoch=?5;"
-            #[machineId, nodeId, nodeToken, presentedEnrollToken, s!"{vm.nodeBootEpoch}"] with
+            #[machineId, nodeId, nodeToken, presentedEnrollToken, s!"{expected}"] with
         | .error e => return .error e
         | .ok _ => return .ok (nodeId, nodeToken)
 
-def putEnrollmentToken (st : ManagedComputeStore) (machineId enrollToken : String) :
-    IO (Except String Unit) := do
+def putEnrollmentToken (st : ManagedComputeStore) (machineId enrollToken : String)
+    (readinessDeadlineSec : UInt64 := 0) : IO (Except String Unit) := do
   withImmediateTx st.db do
     match ← selectMachineTx st.db machineId with
     | .error e => return .error e
     | .ok none => return .error "managed_machine_missing"
     | .ok (some (_, vm)) =>
       match ← execParamQueryUnlocked st.db
-          "INSERT INTO managed_node_tokens(machine_id,node_id,node_token,enroll_token,node_boot_epoch) VALUES(?1,'','',?2,?3) ON CONFLICT(machine_id) DO UPDATE SET enroll_token=excluded.enroll_token,node_token='',node_boot_epoch=excluded.node_boot_epoch;"
-          #[machineId, enrollToken, s!"{vm.nodeBootEpoch}"] with
+          "INSERT INTO managed_node_tokens(machine_id,node_id,node_token,enroll_token,node_boot_epoch,readiness_deadline_sec) VALUES(?1,'','',?2,?3,?4) ON CONFLICT(machine_id) DO UPDATE SET enroll_token=excluded.enroll_token,node_token='',node_boot_epoch=excluded.node_boot_epoch,readiness_deadline_sec=excluded.readiness_deadline_sec;"
+          #[machineId, enrollToken, s!"{vm.nodeBootEpoch}", s!"{readinessDeadlineSec}"] with
       | .error e => return .error e
       | .ok _ => return .ok ()
 
 def authenticateNodeToken (st : ManagedComputeStore) (machineId nodeToken : String)
-    (presentedBootEpoch? : Option UInt64 := none) : IO (Except String UInt64) := do
-  match ← execParamQuery st.db
-      "SELECT t.node_token,t.node_boot_epoch,m.node_boot_epoch,m.phase_code FROM managed_node_tokens t JOIN managed_machines m ON m.id=t.machine_id WHERE t.machine_id=?1;"
-      #[machineId] with
-  | .error e => return .error e
-  | .ok rows =>
-    if rows.size ≤ 1 then return .error "node_unauthorized"
-    let row := rows[1]!
-    if cell row 0 != nodeToken || (cell row 0).isEmpty then
-      return .error "node_unauthorized"
-    let tokBoot := cellU64 row 1
-    let vmBoot := cellU64 row 2
-    let phase := cellU8 row 3
-    if phase == 3 || tokBoot != vmBoot then
-      return .error "stale_boot_epoch"
-    if let some b := presentedBootEpoch? then
-      if b != vmBoot then
-        return .error "stale_boot_epoch"
-    return .ok vmBoot
+    (presentedBootEpoch? : Option UInt64 := none) : IO (Except String UInt64) :=
+  st.db.mu.atomically (authenticateNodeTokenTx st machineId nodeToken presentedBootEpoch?)
 
 private def relayFromRow (row : Array String) : ManagedRelayCommand :=
   {
@@ -980,17 +1201,22 @@ def observeProviderPayload (provider machineId : String) (httpStatus : Nat) (pay
         |>.trimAscii.toString.toLower
     let spentCents := (payload.fieldUInt64? "spent_cents").getD 0
     let (normStatus, orphaned) :=
-      if rawState == "running" || rawState == "ready" || rawState == "online" || rawState == "connected" then
+      if rawState == "running" || rawState == "ready" || rawState == "online" || rawState == "connected" ||
+          (prov == "boat" && (rawState == "idle" || rawState == "busy")) then
         ("ready", false)
       else if rawState == "stopped" || rawState == "halted" || rawState == "off" ||
-          rawState == "exited" || rawState == "stopped_in_place" || rawState == "disconnected" then
+          rawState == "exited" || rawState == "stopped_in_place" || rawState == "disconnected" ||
+          (prov == "boat" && (rawState == "archived" || rawState == "archiving" || rawState == "error")) then
         ("stopped", false)
       else if rawState == "destroyed" || rawState == "deleted" || rawState == "terminated" ||
           rawState == "missing" || rawState == "reaped" then
         ("destroyed", true)
       else
         ("provisioning", false)
-    .ok { provider := prov, machineId, observedStatus := normStatus, spentCents, orphaned }
+    .ok {
+      provider := prov, machineId, observedStatus := normStatus, spentCents,
+      spentObserved := (payload.fieldUInt64? "spent_cents").isSome, orphaned
+    }
 
 /-- Apply one pure observation. Orphans and ledger closure happen only when `stepVmSlice` admits
     `destroy` and emits `closeCostLedger`. -/
@@ -1001,29 +1227,37 @@ def applyProviderObservation (st : ManagedComputeStore) (obs : ProviderObservati
     return .error "unknown_provider"
   let legacyProv := if prov == "leanci" then "boost" else prov
   match ← execParamQuery st.db
-      "SELECT node_boot_epoch FROM managed_machines WHERE id=?1 AND (provider=?2 OR provider=?3);" #[obs.machineId, prov, legacyProv] with
+      "SELECT node_boot_epoch,phase_code FROM managed_machines WHERE id=?1 AND (provider=?2 OR provider=?3);" #[obs.machineId, prov, legacyProv] with
   | .error e => return .error e
   | .ok rows =>
     if rows.size ≤ 1 then return .error "managed_machine_missing"
-    let boot := cellU64 rows[1]! 0
+    let boot := obs.expectedBootEpoch?.getD (cellU64 rows[1]! 0)
+    let phase := cellU8 rows[1]! 1
+    if (obs.orphaned && phase == 3) || (obs.observedStatus == "stopped" && phase == 2) then
+      return .ok []
     if obs.orphaned then
       match ← applyVmLifecycle st obs.machineId {
         opCode := VmOp.encode .destroy, ownerLive, idleElapsed,
         presentedBootEpoch := boot, nowEpoch
-      } with
+      } obs.expectedProviderId? with
       | .error e => return .error e
       | .ok (_, effs) => return .ok effs
     else if obs.observedStatus == "stopped" then
       match ← applyVmLifecycle st obs.machineId {
         opCode := VmOp.encode .stop, ownerLive := 0, idleElapsed := 0,
         presentedBootEpoch := boot, nowEpoch
-      } with
+      } obs.expectedProviderId? with
       | .error e => return .error e
       | .ok (_, effs) => return .ok effs
+    else if !obs.spentObserved then
+      return .ok []
     else
       match ← execParamQuery st.db
-          "UPDATE managed_machines SET spent_cents=?2 WHERE id=?1 AND (provider=?3 OR provider=?4);"
-          #[obs.machineId, s!"{obs.spentCents}", prov, legacyProv] with
+          ("UPDATE managed_machines SET spent_cents=?2 WHERE id=?1 AND (provider=?3 OR provider=?4) " ++
+           "AND (?5='0' OR provider_id=?6) AND (?7='0' OR node_boot_epoch=?8);")
+          #[obs.machineId, s!"{obs.spentCents}", prov, legacyProv,
+            if obs.expectedProviderId?.isSome then "1" else "0", obs.expectedProviderId?.getD "",
+            if obs.expectedBootEpoch?.isSome then "1" else "0", s!"{boot}"] with
       | .error e => return .error e
       | .ok _ => return .ok []
 

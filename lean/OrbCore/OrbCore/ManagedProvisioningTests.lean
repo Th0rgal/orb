@@ -18,6 +18,7 @@ def run (root : String) : IO Unit := do
     let shouldPoll ← IO.mkRef true
     let createStatus ← IO.mkRef (201 : Nat)
     let currentId ← IO.mkRef "core-id-1"
+    let providerIdOverride ← IO.mkRef (none : Option String)
     let runtime : Runtime := {
       nowEpoch := do return 1000 + (← clock.get) / 1000
       monotonicMs := clock.get
@@ -25,9 +26,9 @@ def run (root : String) : IO Unit := do
     }
     let transport : Transport := fun req => do
       requests.modify (·.push req)
-      let providerId := "provider-" ++ (← currentId.get)
+      let providerId := (← providerIdOverride.get).getD ("provider-" ++ (← currentId.get))
       let providerPath := "/sandboxes/" ++ providerId
-      if req.method == "POST" && req.path == "/sandboxes" then
+      if req.method == "POST" && (req.path == "/sandboxes" || req.path.endsWith "/fork") then
         return .ok (← createStatus.get, .obj #[("sandbox", .obj #[("id", .str providerId), ("state", .str "idle")])])
       if req.method == "GET" && req.path == providerPath then
         return .ok (200, .obj #[("id", .str providerId), ("state", .str "idle")])
@@ -35,14 +36,15 @@ def run (root : String) : IO Unit := do
         let cmd := ((req.body.getD .null).fieldStr? "command").getD ""
         if (cmd.splitOn "sudo bash").length > 1 && (← shouldPoll.get) then
           let mid ← currentId.get
-          let .ok rows ← execParamQuery mc.db "SELECT enroll_token FROM managed_node_tokens WHERE machine_id=?1;" #[mid]
+          let .ok rows ← execParamQuery mc.db "SELECT enroll_token,node_boot_epoch FROM managed_node_tokens WHERE machine_id=?1;" #[mid]
             | return .error { code := "mock_missing_enrollment" }
           let token := if rows.size > 1 then cell rows[1]! 0 else ""
-          let .ok (_, nodeToken) ← enrollManagedNode mc mid token (some 1)
+          let expected := if rows.size > 1 then cellU64 rows[1]! 1 else 0
+          let .ok (_, nodeToken) ← enrollManagedNode mc mid token (some expected)
             | return .error { code := "mock_enrollment_failed" }
-          let .ok boot ← authenticateNodeToken mc mid nodeToken (some 1)
+          let .ok boot ← authenticateNodeToken mc mid nodeToken (some expected)
             | return .error { code := "mock_authentication_failed" }
-          let .ok () ← recordAuthenticatedManagedPoll mc mid boot (← runtime.nowEpoch)
+          let .ok _ ← recordAuthenticatedManagedPoll mc mid boot (← runtime.nowEpoch)
             | return .error { code := "mock_poll_failed" }
         return .ok (200, .obj #[("exitCode", .nat 0)])
       if req.method == "PUT" && req.path == providerPath ++ "/files" then return .ok (200, .null)
@@ -82,6 +84,37 @@ def run (root : String) : IO Unit := do
     for request in commands do
       let cmd := ((request.body.getD .null).fieldStr? "command").getD ""
       check ((cmd.splitOn "SANDBOXED_NODE_ENROLL_TOKEN").length == 1) "enrollment token is not in command argv"
+
+    -- Provider-backed resume preserves the public ID, uses Boat fork, and
+    -- replays without another provider request. A failed successor never deletes
+    -- the retained source.
+    let .ok _ ← applyVmLifecycle mc ready.id {
+      opCode := Orb.ManagedNode.VmOp.encode .stop, ownerLive := 0, idleElapsed := 0,
+      presentedBootEpoch := 1, nowEpoch := 1000
+    } | throw (IO.userError "resume source stop failed")
+    providerIdOverride.set (some "resumed-provider-one")
+    let .ok resumed ← resumeManagedWorker mc fleet ready.id "provider-resume-one" 5 provider cfg runtime
+      | throw (IO.userError "provider resume failed")
+    check (resumed.id == ready.id && resumed.providerId == "resumed-provider-one" && resumed.nodeBootEpoch == 2 &&
+      resumed.status == "ready") "provider-backed resume commits the successor poll"
+    check ((← requests.get).any (fun r => r.method == "POST" && r.path == "/sandboxes/provider-core-id-1/fork")) "resume calls provider fork, never start"
+    let beforeResumeReplay := (← requests.get).size
+    let .ok resumedReplay ← resumeManagedWorker mc fleet ready.id "provider-resume-one" 5 provider cfg runtime
+      | throw (IO.userError "resume replay failed")
+    check (resumedReplay.providerId == resumed.providerId && (← requests.get).size == beforeResumeReplay) "resume retry performs no duplicate I/O"
+    let .ok _ ← applyVmLifecycle mc ready.id {
+      opCode := Orb.ManagedNode.VmOp.encode .stop, ownerLive := 0, idleElapsed := 0,
+      presentedBootEpoch := 2, nowEpoch := 1000
+    } | throw (IO.userError "second resume source stop failed")
+    providerIdOverride.set (some "failed-resume-child")
+    shouldPoll.set false
+    clock.set 0
+    check (!(← resumeManagedWorker mc fleet ready.id "provider-resume-timeout" 5 provider cfg runtime).isOk) "resume timeout propagated"
+    let some (retained, retainedSlice) ← getManagedMachine? mc ready.id
+      | throw (IO.userError "retained source missing")
+    check (retained.providerId == "resumed-provider-one" && retained.status == "stopped" && retainedSlice.nodeBootEpoch == 2 &&
+      (← requests.get).back!.path == "/sandboxes/failed-resume-child") "resume timeout deletes only the new guest and retains the source"
+    providerIdOverride.set none
 
     -- Timeout runs 360 seconds of virtual time, destroys at provider, then
     -- closes the reservation through the same verified lifecycle reducer.
@@ -167,7 +200,8 @@ def mockPolicyProvider (mc : ManagedComputeStore) (providerName : String) : Prov
   list := pure (.ok #[])
   destroy := fun _ => pure (.ok ())
   stop := fun _ => pure (.ok ())
-  resume := fun _ _ => pure (.error { code := "mock_not_implemented" })
+  resume := fun _ spec => do
+    return .ok { providerId := (← OrbBin.PosixExt.newUuidV4), name := spec.name, state := "ready" }
   fork := fun _ _ => pure (.error { code := "mock_not_implemented" })
   extend := fun _ _ => pure (.error { code := "mock_not_implemented" })
   saveSnapshot := fun _ _ => pure (.error { code := "mock_not_implemented" })
@@ -178,7 +212,7 @@ def mockPolicyProvider (mc : ManagedComputeStore) (providerName : String) : Prov
   exec := fun providerId command _ => do
     if (command.splitOn "sudo bash").length > 1 then
       let .ok rows ← execParamQuery mc.db
-          "SELECT m.id,t.enroll_token,m.node_boot_epoch FROM managed_machines m JOIN managed_node_tokens t ON t.machine_id=m.id WHERE m.provider_id=?1;" #[providerId]
+          "SELECT m.id,t.enroll_token,t.node_boot_epoch FROM managed_machines m JOIN managed_node_tokens t ON t.machine_id=m.id WHERE m.provider_id=?1;" #[providerId]
         | return .error { code := "mock_enrollment_missing" }
       if rows.size < 2 then return .error { code := "mock_enrollment_missing" }
       let mid := cell rows[1]! 0
@@ -187,7 +221,7 @@ def mockPolicyProvider (mc : ManagedComputeStore) (providerName : String) : Prov
         | return .error { code := "mock_enrollment_failed" }
       let .ok _ ← authenticateNodeToken mc mid token (some boot)
         | return .error { code := "mock_authentication_failed" }
-      let .ok () ← recordAuthenticatedManagedPoll mc mid boot (← coreEpochSec)
+      let .ok _ ← recordAuthenticatedManagedPoll mc mid boot (← coreEpochSec)
         | return .error { code := "mock_poll_failed" }
     return .ok (.obj #[("exitCode", .nat 0)])
 }

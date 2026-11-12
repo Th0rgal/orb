@@ -2353,12 +2353,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let mid := (lookupHeaderCI req.headers "x-orb-machine-id").getD ""
     let boot? := ((lookupHeaderCI req.headers "x-orb-boot-epoch").bind String.toNat?).map Nat.toUInt64
     let nodeTok := (extractBearerToken? req.headers nowEpochSec).getD ""
-    match ← authenticateNodeToken mst mid nodeTok boot? with
+    match ← authenticateAndRecordManagedPoll mst mid nodeTok boot? nowEpochSec with
     | .error "stale_boot_epoch" => return .ok (mkJson 410 "{\"error\":\"stale_boot_epoch\"}")
     | .error _ => return .ok (mkJson 401 "{\"error\":\"node_unauthorized\"}")
     | .ok vmBoot =>
-      if let .error _ ← recordAuthenticatedManagedPoll mst mid vmBoot nowEpochSec then
-        return .ok (mkJson 410 "{\"error\":\"stale_boot_epoch\"}")
       if let some rHub := st.relayHub? then
         recordMachinePollSeen rHub mid nowEpochSec
         let httpReqs ← drainRelayHttpReqs rHub mid
@@ -4737,7 +4735,14 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       if !caller.isLegacyUnscoped && mRec.ownerUserId != caller.userId then
         return .ok (mkJson 404 "{\"error\":\"managed_machine_not_found\"}")
       let action := if cleanPath.endsWith "/stop" then "stop" else "resume"
-      match ← runConfiguredManagedLifecycle mst st.store.rootDir vmId action nowEpochSec (st.managedProvisioningOverride?.map Prod.fst) with
+      let body := req.bodySlice.toByteArray
+      let .ok operationArgs := if body.isEmpty then Except.ok (.obj #[]) else OrbBin.Json.parseBytes body
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let ctx : ManagedLifecycleContext := {
+        store := st.store, fleet := (← st.managedRef.get), override? := st.managedProvisioningOverride?
+      }
+      match ← runConfiguredManagedLifecycle mst ctx vmId action nowEpochSec operationArgs
+          ((lookupHeaderCI req.headers "idempotency-key").getD "") with
       | .error e => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape e}}")
       | .ok result =>
         let mf ← st.managedRef.get
@@ -4756,7 +4761,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         return .ok (mkJson 404 "{\"error\":\"managed_machine_not_found\"}")
       if req.method == "GET" then
         return .ok (mkJson 200 (renderManagedMachineItemJson mRec))
-      match ← runConfiguredManagedLifecycle mst st.store.rootDir vmId "destroy" nowEpochSec (st.managedProvisioningOverride?.map Prod.fst) with
+      let ctx : ManagedLifecycleContext := {
+        store := st.store, fleet := (← st.managedRef.get), override? := st.managedProvisioningOverride?
+      }
+      match ← runConfiguredManagedLifecycle mst ctx vmId "destroy" nowEpochSec with
       | .error e => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape e}}")
       | .ok _ =>
         let mf ← st.managedRef.get
@@ -6502,6 +6510,23 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
         while true do
           discard <| tickContinuationScheduler store (some managedStore) (some relayHub) (some broadcastHub) remoteSup (some warmMgr) cfg.workingDir (some localWakeupLaunch)
           IO.sleep 2000
+      discard <| IO.asTask (prio := .dedicated) do
+        while true do
+          let cached ← managedRef.get
+          if cached.boatEnabled || cached.machines.any (fun m => canonicalizeProvider m.provider == "boat" && m.status != "destroyed") then
+            let observedAt ← coreEpochSec
+            match ← reconcileConfiguredBoatInventory managedStore store.rootDir observedAt with
+            | .error e => IO.eprintln s!"[orb-core] Boat inventory reconciliation deferred: {e}"
+            | .ok report =>
+              let bound := ((report.fieldArr? "backfilled").getD #[]).size
+              let stopped := ((report.fieldArr? "stopped").getD #[]).size
+              let closed := ((report.fieldArr? "closed").getD #[]).size
+              if bound + stopped + closed > 0 then
+                IO.eprintln s!"[orb-core] Boat inventory reconciled: {bound} bindings, {stopped} stopped, {closed} closed reservations"
+              if let .ok fresh ← loadManagedFleet managedStore cached.enabled cached.boatEnabled
+                  cached.dailyCapCents cached.spentTodayCents cached.maxConcurrent then
+                managedRef.set fresh
+          IO.sleep 120000
     let notifySock := ((← IO.getEnv "NOTIFY_SOCKET").getD "").trimAscii.toString
     let simulateWedge := ((← IO.getEnv "SANDBOXED_SH_SIMULATE_WEDGE").getD "") == "1"
     let watchdogUsec := ((← IO.getEnv "WATCHDOG_USEC").bind String.toNat?).getD 0

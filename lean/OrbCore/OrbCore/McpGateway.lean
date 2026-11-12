@@ -823,7 +823,8 @@ def dispatchMcpToolCall
     let action := if toolName == "stop_managed_machine" then "stop"
       else if toolName == "destroy_managed_machine" then "destroy"
       else if toolName == "extend_managed_machine" then "extend" else "resume"
-    match ← runConfiguredManagedLifecycle mc store.rootDir m.id action nowEpochSec (managedProvisioningOverride?.map Prod.fst) with
+    match ← runConfiguredManagedLifecycle mc { store, fleet := defaultFleet, override? := managedProvisioningOverride? }
+        m.id action nowEpochSec args with
     | .error e => return mcpErr "lifecycle_rejected" e
     | .ok result => return mcpOk result
 

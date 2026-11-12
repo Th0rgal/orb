@@ -832,26 +832,132 @@ def spawnConfiguredManagedWorker (mc : ManagedComputeStore) (dataRoot : String)
   }
   ManagedProvisioning.spawnManagedWorker mc fleet machine provider spec bootstrap {} userAdmission?
 
-/-- Explicit lifecycle calls must succeed at the provider before committing the
-    verified local transition. Unsupported operations fail without mutating state. -/
-def runConfiguredManagedLifecycle (mc : ManagedComputeStore) (dataRoot machineId action : String)
-    (nowEpoch : UInt64) (providerOverride? : Option ManagedProvider.Provider := none) : IO (Except String JVal) := do
-  let some (m, slice) ← getManagedMachine? mc machineId
-    | return .error "managed_machine_missing"
+/-- Reconcile only Core-owned records against a complete provider list. Exact
+    names repair pre-cutover bindings; known IDs and boot epochs fence stale lists.
+    Provider readiness never substitutes for an authenticated relay poll. -/
+def reconcileManagedProviderInventory (mc : ManagedComputeStore) (providerName servicePrefix : String)
+    (inventory : Array ManagedProvider.Machine) (nowEpoch : UInt64) : IO (Except String JVal) := do
+  let .ok fleet ← loadManagedFleet mc false false 0 0 100 | return .error "managed_inventory_read_failed"
+  let completeNames := inventory.all (fun remote => !remote.name.trimAscii.toString.isEmpty)
+  let mut backfilled : Array JVal := #[]
+  let mut stopped : Array JVal := #[]
+  let mut closed : Array JVal := #[]
+  let mut ambiguous : Array JVal := #[]
+  let mut missing : Array JVal := #[]
+  for m in fleet.machines do
+    if canonicalizeProvider m.provider != providerName || m.status == "destroyed" then continue
+    let canonicalName := servicePrefix ++ m.id
+    let ownRecordedName := !m.sandboxName.isEmpty && m.sandboxName.startsWith servicePrefix
+    let candidates := inventory.filter fun remote =>
+      if !m.providerId.isEmpty then remote.providerId == m.providerId
+      else remote.name == canonicalName || (ownRecordedName && remote.name == m.sandboxName)
+    let candidates := candidates.foldl (fun acc remote =>
+      if acc.any (fun other => other.providerId == remote.providerId) then acc else acc.push remote)
+      (#[] : Array ManagedProvider.Machine)
+    if candidates.size > 1 then
+      ambiguous := ambiguous.push (.str m.id)
+      continue
+    if let some remote := candidates[0]? then
+      if m.providerId.isEmpty then
+        if let .error _ ← backfillManagedProviderIdentity mc m.id providerName remote.providerId then
+          ambiguous := ambiguous.push (.str m.id)
+          continue
+        backfilled := backfilled.push (.str m.id)
+      let .ok observed := observeProviderPayload providerName m.id 200 (.obj #[("state", .str remote.state)])
+        | continue
+      let observed := { observed with expectedProviderId? := some remote.providerId, expectedBootEpoch? := some m.nodeBootEpoch }
+      if observed.observedStatus == "stopped" && m.status == "ready" then
+        if (← applyProviderObservation mc observed nowEpoch 0 1).isOk then stopped := stopped.push (.str m.id)
+      else if observed.orphaned then
+        if (← applyProviderObservation mc observed nowEpoch 0 1).isOk then closed := closed.push (.str m.id)
+    else
+      missing := missing.push (.str m.id)
+      -- A timed-out, unbound reservation with no matching sandbox can close
+      -- locally. Unknown legacy names remain visible for operator investigation.
+      if completeNames && m.providerId.isEmpty && m.status == "provisioning" && m.createdAtSec > 0 &&
+          !inventory.any (fun remote => remote.name == m.sandboxName) &&
+          nowEpoch ≥ m.createdAtSec + 360 then
+        let observed : ProviderObservation := {
+          provider := providerName, machineId := m.id, observedStatus := "destroyed", orphaned := true,
+          expectedProviderId? := some "", expectedBootEpoch? := some m.nodeBootEpoch
+        }
+        if (← applyProviderObservation mc observed nowEpoch 0 1).isOk then closed := closed.push (.str m.id)
+  return .ok (.obj #[("backfilled", .arr backfilled), ("stopped", .arr stopped),
+    ("closed", .arr closed), ("ambiguous", .arr ambiguous), ("missing", .arr missing)])
+
+def reconcileConfiguredBoatInventory (mc : ManagedComputeStore) (dataRoot : String)
+    (nowEpoch : UInt64) (override? : Option ManagedProvider.Provider := none) : IO (Except String JVal) := do
+  let provider ← match override? with
+    | some p => pure p
+    | none => do
+      let .ok p ← resolveManagedProvider dataRoot "boat" | return .error "boat_provider_unavailable"
+      pure p
+  if provider.name != "boat" then return .error "managed_provider_mismatch"
+  let .ok inventory ← provider.list | return .error "boat_inventory_unavailable"
+  reconcileManagedProviderInventory mc "boat" (sandboxNamePrefixFor (← IO.appPath).toString) inventory nowEpoch
+
+structure ManagedLifecycleContext where
+  store : CoreStore
+  fleet : ManagedFleetState := {}
+  override? : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) := none
+
+def loadManagedUserAdmission (store : CoreStore) (userId : String) (nowEpoch : UInt64) :
+    IO (Except String (Option ManagedUserAdmission)) := do
+  if userId.isEmpty then return .ok none
+  let some user ← getUserById? store userId | return .error "managed_user_missing"
+  if user.disabled then return .error "managed_user_disabled"
+  let some cap := user.dailySpendCapCents? | return .ok none
+  let (inf, cmp) ← getUserSpentTodayCents store userId (formatEpochIso8601Utc nowEpoch |>.take 10 |>.toString)
+  return .ok (some { capCents := cap, inferenceCents := inf, computeCents := cmp })
+
+private def managedLifecycleResult (m : ManagedMachine) : JVal :=
+  .obj #[("ok", .bool true), ("id", .str m.id), ("state", .str m.status),
+    ("machine", (OrbBin.Json.parse (renderManagedMachineItemJson m)).toOption.getD .null)]
+
+/-- One lifecycle implementation for REST and MCP. A resume is not committed
+    until the successor's authenticated first poll; provider failures propagate. -/
+def runConfiguredManagedLifecycle (mc : ManagedComputeStore) (ctx : ManagedLifecycleContext)
+    (machineId action : String) (nowEpoch : UInt64) (args : JVal := .obj #[])
+    (retryKey : String := "") : IO (Except String JVal) := do
+  let some (m, slice) ← getManagedMachine? mc machineId | return .error "managed_machine_missing"
+  let provider ← match ctx.override? with
+    | some pair => pure pair.1
+    | none => do
+      let .ok p ← resolveManagedProvider ctx.store.rootDir m.provider | return .error "managed_provider_unavailable"
+      pure p
+  if provider.name != m.provider then return .error "managed_provider_mismatch"
+  if action == "resume" then
+    if provider.name == "boat" && (m.providerId.isEmpty || (m.status == "ready" && m.lastPollSec == 0)) then
+      let .ok _ ← reconcileConfiguredBoatInventory mc ctx.store.rootDir nowEpoch (some provider)
+        | return .error "boat_inventory_reconciliation_failed"
+    let some (m, _) ← getManagedMachine? mc machineId | return .error "managed_machine_missing"
+    let bootstrap ← match ctx.override? with
+      | some pair => pure pair.2
+      | none => do
+        let .ok cfg ← loadManagedBootstrapConfig | return .error "managed_bootstrap_configuration_unavailable"
+        pure cfg
+    let .ok budget ← loadManagedUserAdmission ctx.store m.ownerUserId nowEpoch | return .error "managed_user_unavailable"
+    let fleet ← match ← loadManagedFleet mc ctx.fleet.enabled ctx.fleet.boatEnabled
+        ctx.fleet.dailyCapCents ctx.fleet.spentTodayCents ctx.fleet.maxConcurrent with
+      | .ok f => pure f
+      | .error e => return .error e
+    let rawKey ← if !retryKey.isEmpty then pure retryKey else
+      match (args.fieldStr? "idempotency_key").filter (!·.isEmpty) with
+      | some key => pure key
+      | none => newUuidV4
+    let key := bytesToHexLower (sha256Bytes (renderCompact (.arr #[.str "managed-resume", .str m.id, .str m.ownerUserId, .str rawKey])).toUTF8)
+    let ttl := (args.fieldUInt64? "ttl_minutes").getD 60
+    match ← ManagedProvisioning.resumeManagedWorker mc fleet m.id key ttl provider bootstrap {} budget with
+    | .error e => return .error e
+    | .ok ready => return .ok (managedLifecycleResult ready)
   let op ← if action == "stop" then pure (Orb.ManagedNode.VmOp.encode .stop)
     else if action == "destroy" then pure (Orb.ManagedNode.VmOp.encode .destroy)
     else return .error "managed_lifecycle_bootstrap_not_implemented"
+  if slice.phaseCode == 2 && m.status == "provisioning" then return .error "managed_resume_pending"
   if Orb.ManagedNode.verifyVmLifecycleAdmit slice.phaseCode op 0 1
       slice.nodeBootEpoch slice.nodeBootEpoch nowEpoch slice.deletableAt != 1 then
     return .error "vm_lifecycle_rejected"
   if slice.phaseCode == 0 && m.providerId.isEmpty then return .error "managed_provider_identity_pending"
-  let provider ← match providerOverride? with
-    | some p => pure p
-    | none => do
-      let .ok p ← resolveManagedProvider dataRoot m.provider
-        | return .error "managed_provider_unavailable"
-      pure p
-  if provider.name != m.provider then return .error "managed_provider_mismatch"
   let outcome ← if action == "stop" then provider.stop m.effectiveProviderId else provider.destroy m.effectiveProviderId
   if let .error e := outcome then return .error e.code
   let .ok _ ← applyVmLifecycle mc m.id {
@@ -861,8 +967,7 @@ def runConfiguredManagedLifecycle (mc : ManagedComputeStore) (dataRoot machineId
     | return .error "managed_lifecycle_commit_failed"
   let some (saved, _) ← getManagedMachine? mc m.id
     | return .error "managed_machine_missing"
-  return .ok (.obj #[("ok", .bool true), ("id", .str saved.id), ("state", .str saved.status),
-    ("machine", (OrbBin.Json.parse (renderManagedMachineItemJson saved)).toOption.getD .null)])
+  return .ok (managedLifecycleResult saved)
 
 def callBoatApi
     (dataRoot method relPath : String)
@@ -1198,7 +1303,7 @@ def dispatchRemoteFleetAndRelayRoutes?
             discard <| putEnrollmentToken mc saved.id enrollTok
             return some (jsonRawResp 201 (renderManagedMachineItemJson saved))
         else if action == "stop" || action == "resume" || action == "destroy" then
-          match ← runConfiguredManagedLifecycle mc store.rootDir m.id action nowEpochSec with
+          match ← runConfiguredManagedLifecycle mc { store, fleet := defaultFleet } m.id action nowEpochSec jv with
           | .error e => return some (jsonErr 409 e)
           | .ok result => return some (jsonResp 200 result)
       else if method == "DELETE" && segs.length == 3 then
@@ -1206,7 +1311,7 @@ def dispatchRemoteFleetAndRelayRoutes?
           | return some (jsonErr 404 "managed_machine_not_found")
         if !isAdmin && !isLegacyUnscoped && !m.ownerUserId.isEmpty && m.ownerUserId != callerUserId then
           return some (jsonErr 404 "managed_machine_not_found")
-        match ← runConfiguredManagedLifecycle mc store.rootDir m.id "destroy" nowEpochSec with
+        match ← runConfiguredManagedLifecycle mc { store, fleet := defaultFleet } m.id "destroy" nowEpochSec with
         | .error e => return some (jsonErr 409 e)
         | .ok result => return some (jsonResp 200 result)
 
