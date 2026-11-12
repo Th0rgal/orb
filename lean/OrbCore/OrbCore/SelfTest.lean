@@ -5058,6 +5058,7 @@ private def runZeroWaitPerfAndSyncTests (prodValid : CoreConfig) : IO UInt32 := 
   return 0
 
 set_option maxHeartbeats 800000 in
+set_option maxRecDepth 8000 in
 private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32 := do
   let ts ← IO.monoNanosNow
   let workRoot := s!"/tmp/orb_prod_parity_{ts}"
@@ -5859,11 +5860,11 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
 
   let _ ← execParamQuery store.missionsDb
     "INSERT OR REPLACE INTO model_routing_chains(id,name,models_json,updated_at) VALUES('builtin/smart','Smart (Default)','[{\"provider_id\":\"antigravity\",\"model_id\":\"gemini-4-argon-low\"}]','t1');" #[]
-  setEnvVar "CLI_PROXY_API_KEY" "test-cli-proxy-key"
-  setEnvVar "CLI_PROXY_API_BASE_URL" "http://127.0.0.1:18317"
+  OrbBin.PosixExt.setenvVar "CLI_PROXY_API_KEY" "test-cli-proxy-key"
+  OrbBin.PosixExt.setenvVar "CLI_PROXY_API_BASE_URL" "http://127.0.0.1:18317"
   let loadedChains ← loadRoutingChainsFromStore store workRoot
-  setEnvVar "CLI_PROXY_API_KEY" ""
-  setEnvVar "CLI_PROXY_API_BASE_URL" ""
+  OrbBin.PosixExt.setenvVar "CLI_PROXY_API_KEY" ""
+  OrbBin.PosixExt.setenvVar "CLI_PROXY_API_BASE_URL" ""
   appSt.chainsRef.set loadedChains
   let forwardedModelRef ← IO.mkRef ""
   let appWithMockProxy : CoreAppState := {
@@ -5872,9 +5873,10 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
       forwardedModelRef.set tgt.modelId
       return .ok { status := 200, headers := #[], body := "{\"id\":\"chatcmpl-1\",\"choices\":[]}".toUTF8 })
   }
+  let smartBody := "{\"model\":\"smart\",\"messages\":[]}".toUTF8
   let smartReqRaw :=
     (s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {hsJwt}\r\n" ++
-     "Content-Type: application/json\r\nContent-Length: 38\r\n\r\n{\"model\":\"smart\",\"messages\":[]}").toUTF8
+     s!"Content-Type: application/json\r\nContent-Length: {smartBody.size}\r\n\r\n").toUTF8 ++ smartBody
   match parseRequest smartReqRaw none with
   | .error _ => return (← fail "parse smartReqRaw failed")
   | .ok sReq =>
@@ -7068,5 +7070,5 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
 end OrbCore.SelfTest
 
 def main (args : List String) : IO UInt32 := do
-  discard <| LeanSys.Posix.setenv "ORB_HERMETIC_TEST" "1" true
+  OrbBin.PosixExt.setenvVar "ORB_HERMETIC_TEST" "1"
   OrbCore.SelfTest.runSuite (OrbCore.SelfTest.findFlag? args "--emit-evidence-log")
