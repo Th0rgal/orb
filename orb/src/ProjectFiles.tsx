@@ -156,6 +156,7 @@ export function LiveProjectsSection(p: {
   onNewCloudAgent?: (slug: string, path?: string) => void;
   onDeleted?: (ids: string[]) => void;
   onProjectMissions?: (slug: string, rows: Mission[]) => void;
+  onProjectEntries?: (slug: string, folders: string[], files: string[]) => void;
   /** "+" on the section header: create a project (opens the picker flow). */
   onNewProject: (anchor: HTMLButtonElement) => void;
   /** False while Settings hides the main sidebar so background sweeps pause without unmounting state. */
@@ -1153,8 +1154,29 @@ export function LiveProjectsSection(p: {
         projectSweepBusy = false;
       }
     }, 10000);
+    const onNativeExpand = (ev: Event) => {
+      if (!p.headless) return;
+      const rowId = ((ev as CustomEvent<{ rowId?: string }>).detail?.rowId ?? "").trim();
+      if (rowId.startsWith("proj:")) {
+        const slug = rowId.slice(5).trim();
+        if (slug) {
+          void loadMissions(slug, { transcripts: false });
+          void loadDir(slug, "");
+        }
+      } else if (rowId.startsWith("folder:")) {
+        const rest = rowId.slice(7);
+        const sep = rest.indexOf(":");
+        if (sep > 0) {
+          const slug = rest.slice(0, sep).trim();
+          const path = rest.slice(sep + 1).trim();
+          if (slug && path) void loadDir(slug, path);
+        }
+      }
+    };
+    window.addEventListener("orb:native-expand", onNativeExpand);
     onCleanup(() => {
       stop();
+      window.removeEventListener("orb:native-expand", onNativeExpand);
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("orb:cron-changed", onCronChanged);
       window.removeEventListener("orb:project-created", onProjectCreated);
@@ -1263,6 +1285,25 @@ export function LiveProjectsSection(p: {
     prevActivityByProject = nextSignatures;
   }));
 
+  const emitProjectEntries = (slug: string) => {
+    if (!p.onProjectEntries) return;
+    const prefix = `${slug}:`;
+    const folderSet = new Set<string>();
+    const fileSet = new Set<string>();
+    for (const key of Object.keys(dirs)) {
+      if (!key.startsWith(prefix)) continue;
+      const dirPath = key.slice(prefix.length);
+      const entries = dirs[key];
+      if (!Array.isArray(entries)) continue;
+      for (const e of entries) {
+        if (!dirPath && e.name === "attachments") continue;
+        const full = dirPath ? `${dirPath}/${e.name}` : e.name;
+        if (e.kind === "dir") folderSet.add(full);
+        else fileSet.add(full);
+      }
+    }
+    p.onProjectEntries(slug, [...folderSet], [...fileSet]);
+  };
   const dirGenerations = new Map<string, number>();
   const loadDir = (slug: string, path: string, force = false, background = false) => {
     if (!isConnected()) return Promise.resolve();
@@ -1272,13 +1313,21 @@ export function LiveProjectsSection(p: {
     if (force) dirGenerations.set(key, gen);
     setDirErrors(key, null);
     return requests.read(`files:${version}:${key}`, () => listProjectFiles(slug, path, { background }), force)
-      .then((entries) => { if (currentConnection(version) && (dirGenerations.get(key) ?? 0) === gen) setDirs(key, reconcile(Array.isArray(entries) ? entries : [], {key: "name"})); })
+      .then((entries) => {
+        if (currentConnection(version) && (dirGenerations.get(key) ?? 0) === gen) {
+          setDirs(key, reconcile(Array.isArray(entries) ? entries : [], {key: "name"}));
+          emitProjectEntries(slug);
+        }
+      })
       .catch((e) => { if (currentConnection(version) && (dirGenerations.get(key) ?? 0) === gen) setDirErrors(key, e instanceof Error ? e.message : String(e)); });
   };
 
   const warmupOne = async (slug: string) => {
     if (p.headless) {
-      await loadMissions(slug, { transcripts: false, cached: true, background: true });
+      await Promise.all([
+        loadMissions(slug, { transcripts: false, cached: true, background: true }),
+        loadDir(slug, "", false, true),
+      ]);
       return;
     }
     const isOpen = !!expanded[slug];

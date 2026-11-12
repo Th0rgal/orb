@@ -151,6 +151,9 @@
       { "id": "w", "title": "Worker v1", "status": "completed", "parent_mission_id": "boss", "updated_at": "2026-10-14T10:00:00Z" },
       { "id": "w2", "title": "Worker v2", "status": "completed", "tags": ["fork-of:w"], "updated_at": "2026-10-14T11:00:00Z" }
     ],
+    "expected_collapsed_mission_rows": [
+      { "row_id": "m:boss", "depth": 2, "folder": "ui", "expandable": true, "expanded": false, "child_count": 1, "live_child_count": 0 }
+    ],
     "expected_mission_rows": [
       { "row_id": "m:boss", "depth": 2, "folder": "ui" },
       { "row_id": "m:w2", "depth": 3, "folder": "ui" },
@@ -172,6 +175,9 @@
       { "id": "btw-worker", "title": "Btw worker consult", "status": "completed", "project": "core", "parent_mission_id": "btw-root", "updated_at_ms": 4900 },
       { "id": "btw-sub", "title": "Direct btw subagent", "status": "completed", "project": "core", "tags": ["btw-subagent"], "updated_at_ms": 4950 }
     ],
+    "expected_unselected_collapsed_ids": ["m:main"],
+    "expected_main_child_count": 1,
+    "expected_main_live_child_count": 1,
     "expected_unselected_mission_ids": ["m:main", "m:sup-running"],
     "selected_for_superseded": "m:sup-stopped",
     "expected_selected_mission_ids": ["m:main", "m:sup-running", "m:sup-stopped"]

@@ -1847,6 +1847,9 @@ private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat ×
           (footerObj?.bind (·.fieldNat? "badge")) == syncCase.fieldNat? "expected_settings_badge" &&
           (footerObj?.bind (·.fieldStr? "icon")) == some "gear" &&
           (rootRow?.bind (·.fieldStr? "title")) == syncCase.fieldStr? "expected_m_root_title" &&
+          (rootRow?.bind (·.fieldStr? "color")) == some "" &&
+          (rootRow?.bind (·.fieldNat? "child_count")) == some 1 &&
+          (rootRow?.bind (·.fieldBool? "expanded")) == some true &&
           (childRow?.bind (·.fieldNat? "depth")) == syncCase.fieldNat? "expected_m_child_depth"
         | _, _, _ => false
       if (← assertTrue "native_chrome_sync_dedup_cycle_hierarchy_and_sse_fence" syncOk) then
@@ -1971,16 +1974,27 @@ private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat ×
       if (← assertTrue "native_chrome_skill_detail_pages_map_to_agents_section" allSkillNavOk) then
         ncPassed := ncPassed + 1
 
-      -- Fork-group leader & worker-fork parent inheritance (`boss` -> `w2` -> `w`)
+      -- Fork-group leader & worker-fork parent inheritance (`boss` -> `w2` -> `w`, collapsed by default until expanded)
       let wfCase := (fixJv.field? "worker_fork_case").getD (.obj #[])
       let _ ← dispatchRpcCommand ncRef "native_chrome_sync_state" wfCase
+      let wfCollapsedRes ← dispatchRpcCommand ncRef "native_chrome_get_rows" (.obj #[("scope", .str "scope:worker-fork:1")])
+      let _ ← dispatchRpcCommand ncRef "native_chrome_toggle_expand" (.obj #[("scope", .str "scope:worker-fork:1"), ("row_id", .str "m:boss")])
+      let _ ← dispatchRpcCommand ncRef "native_chrome_toggle_expand" (.obj #[("scope", .str "scope:worker-fork:1"), ("row_id", .str "m:w2")])
       let wfRowsRes ← dispatchRpcCommand ncRef "native_chrome_get_rows" (.obj #[("scope", .str "scope:worker-fork:1")])
       ncTotal := ncTotal + 1
       let wfOk : Bool :=
-        match wfRowsRes with
-        | .ok wfr =>
+        match wfCollapsedRes, wfRowsRes with
+        | .ok wfc, .ok wfr =>
+          let cmrows := ((wfc.fieldArr? "rows").getD #[]).filter (fun r => r.fieldStr? "kind" == some "mission")
+          let expCmrows := (wfCase.fieldArr? "expected_collapsed_mission_rows").getD #[]
           let mrows := ((wfr.fieldArr? "rows").getD #[]).filter (fun r => r.fieldStr? "kind" == some "mission")
           let expMrows := (wfCase.fieldArr? "expected_mission_rows").getD #[]
+          cmrows.size == expCmrows.size && cmrows.size == 1 &&
+          cmrows[0]!.fieldStr? "row_id" == expCmrows[0]!.fieldStr? "row_id" &&
+          cmrows[0]!.fieldBool? "expandable" == expCmrows[0]!.fieldBool? "expandable" &&
+          cmrows[0]!.fieldBool? "expanded" == expCmrows[0]!.fieldBool? "expanded" &&
+          cmrows[0]!.fieldNat? "child_count" == expCmrows[0]!.fieldNat? "child_count" &&
+          cmrows[0]!.fieldNat? "live_child_count" == expCmrows[0]!.fieldNat? "live_child_count" &&
           mrows.size == expMrows.size && mrows.size > 0 &&
           (List.range mrows.size).all fun i =>
             let got := mrows[i]!
@@ -1988,34 +2002,45 @@ private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat ×
             got.fieldStr? "row_id" == exp.fieldStr? "row_id" &&
             got.fieldNat? "depth" == exp.fieldNat? "depth" &&
             got.fieldStr? "folder" == exp.fieldStr? "folder"
-        | .error _ => false
+        | _, _ => false
       if (← assertTrue "native_chrome_worker_fork_leader_inherits_parent_and_placement" wfOk) then
         ncPassed := ncPassed + 1
 
       -- Superseded retention (running & selected kept; stopped & stopped descendants excluded) + `/btw` subtree exclusion
       let sbCase := (fixJv.field? "superseded_and_btw_case").getD (.obj #[])
       let _ ← dispatchRpcCommand ncRef "native_chrome_sync_state" sbCase
-      let sbRows1 ← dispatchRpcCommand ncRef "native_chrome_get_rows" (.obj #[("scope", .str "scope:sup-btw:1")])
+      let sbRowsCollapsed ← dispatchRpcCommand ncRef "native_chrome_get_rows" (.obj #[("scope", .str "scope:sup-btw:1")])
+      let sbRows1 ← dispatchRpcCommand ncRef "native_chrome_toggle_expand" (.obj #[("scope", .str "scope:sup-btw:1"), ("row_id", .str "m:main")])
+      let _ ← dispatchRpcCommand ncRef "native_chrome_toggle_expand" (.obj #[("scope", .str "scope:sup-btw:1"), ("row_id", .str "m:main"), ("expanded", .bool false)])
       let sbSelSync := JVal.setField (JVal.setField sbCase "revision" (.nat 2))
         "selected" (.str ((sbCase.fieldStr? "selected_for_superseded").getD "m:sup-stopped"))
       let _ ← dispatchRpcCommand ncRef "native_chrome_sync_state" sbSelSync
-      let sbRows2 ← dispatchRpcCommand ncRef "native_chrome_get_rows" (.obj #[("scope", .str "scope:sup-btw:1")])
+      -- Clear explicit collapse on `m:main` by syncing on a fresh scope so auto-expand on selected descendant is exercised
+      let sbAutoCase := JVal.setField sbSelSync "scope" (.str "scope:sup-btw:auto")
+      let _ ← dispatchRpcCommand ncRef "native_chrome_sync_state" sbAutoCase
+      let sbRows2 ← dispatchRpcCommand ncRef "native_chrome_get_rows" (.obj #[("scope", .str "scope:sup-btw:auto")])
       let sbPal ← dispatchRpcCommand ncRef "native_chrome_palette_query" (.obj #[("scope", .str "scope:sup-btw:1"), ("query", .str "btw")])
       ncTotal := ncTotal + 1
       let sbOk : Bool :=
-        match sbRows1, sbRows2, sbPal with
-        | .ok r1, .ok r2, .ok pj =>
+        match sbRowsCollapsed, sbRows1, sbRows2, sbPal with
+        | .ok rc, .ok r1, .ok r2, .ok pj =>
+          let cmids := (((rc.fieldArr? "rows").getD #[]).filter (fun r => r.fieldStr? "kind" == some "mission")).filterMap (·.fieldStr? "row_id")
+          let mainRow? := ((rc.fieldArr? "rows").getD #[]).find? (fun r => r.fieldStr? "row_id" == some "m:main")
           let mids1 := (((r1.fieldArr? "rows").getD #[]).filter (fun r => r.fieldStr? "kind" == some "mission")).filterMap (·.fieldStr? "row_id")
           let mids2 := (((r2.fieldArr? "rows").getD #[]).filter (fun r => r.fieldStr? "kind" == some "mission")).filterMap (·.fieldStr? "row_id")
+          let expCol := ((sbCase.fieldArr? "expected_unselected_collapsed_ids").getD #[]).filterMap (·.asStr?)
           let exp1 := ((sbCase.fieldArr? "expected_unselected_mission_ids").getD #[]).filterMap (·.asStr?)
           let exp2 := ((sbCase.fieldArr? "expected_selected_mission_ids").getD #[]).filterMap (·.asStr?)
           let palIds := ((pj.fieldArr? "items").getD #[]).filterMap (·.fieldStr? "id")
+          cmids == expCol &&
+          (mainRow?.bind (·.fieldNat? "child_count")) == sbCase.fieldNat? "expected_main_child_count" &&
+          (mainRow?.bind (·.fieldNat? "live_child_count")) == sbCase.fieldNat? "expected_main_live_child_count" &&
           mids1 == exp1 &&
           mids2 == exp2 &&
           !palIds.contains "m:btw-root" &&
           !palIds.contains "m:btw-worker" &&
           !palIds.contains "m:btw-sub"
-        | _, _, _ => false
+        | _, _, _, _ => false
       if (← assertTrue "native_chrome_superseded_running_selected_and_btw_exclusion" sbOk) then
         ncPassed := ncPassed + 1
 
@@ -2083,6 +2108,75 @@ private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat ×
           (unprojRow?.bind (·.fieldStr? "project")) == some ""
         | .error _ => false
       if (← assertTrue "native_chrome_iso_epoch_ms_and_empty_placement_clear" mvAndTsOk) then
+        ncPassed := ncPassed + 1
+
+      -- Folder/file expansion + empty project/folder notes + 1,500-mission O(N log N) latency bound
+      let mut bigMissions : Array JVal := #[]
+      for i in [0:1500] do
+        let pid := if i % 5 == 0 then "" else s!"m-big-{(i / 5) * 5}"
+        let forkTag : Array JVal := if i % 17 == 16 then #[.str s!"fork-of:m-big-{i - 1}"] else #[]
+        bigMissions := bigMissions.push (.obj #[
+          ("id", .str s!"m-big-{i}"),
+          ("title", .str s!"Scale mission {i}"),
+          ("status", .str (if i % 11 == 0 then "active" else "completed")),
+          ("project", .str "core"),
+          ("parent_mission_id", .str pid),
+          ("tags", .arr forkTag),
+          ("updated_at_ms", .nat (10000 + i))
+        ])
+      let folderAndScaleSync := .obj #[
+        ("scope", .str "scope:folder-scale:1"),
+        ("revision", .nat 1),
+        ("projects", .arr #[
+          .obj #[
+            ("slug", .str "core"),
+            ("name", .str "Core"),
+            ("folders", .arr #[.str "Audits", .str "EmptyDir"]),
+            ("files", .arr #[.str "Audits/report.md", .str "README.md"])
+          ],
+          .obj #[
+            ("slug", .str "empty-proj"),
+            ("name", .str "Empty"),
+            ("folders", .arr #[])
+          ]
+        ]),
+        ("missions", .arr bigMissions)
+      ]
+      let tScale0 ← IO.monoMsNow
+      let _ ← dispatchRpcCommand ncRef "native_chrome_sync_state" folderAndScaleSync
+      let initFolderRows ← dispatchRpcCommand ncRef "native_chrome_get_rows" (.obj #[("scope", .str "scope:folder-scale:1")])
+      let openProjRows ← dispatchRpcCommand ncRef "native_chrome_toggle_expand" (.obj #[("scope", .str "scope:folder-scale:1"), ("row_id", .str "proj:core"), ("expanded", .bool true)])
+      let openAuditsRows ← dispatchRpcCommand ncRef "native_chrome_toggle_expand" (.obj #[("scope", .str "scope:folder-scale:1"), ("row_id", .str "folder:core:Audits")])
+      let openEmptyDirRows ← dispatchRpcCommand ncRef "native_chrome_toggle_expand" (.obj #[("scope", .str "scope:folder-scale:1"), ("row_id", .str "folder:core:EmptyDir")])
+      let openEmptyProjRows ← dispatchRpcCommand ncRef "native_chrome_toggle_expand" (.obj #[("scope", .str "scope:folder-scale:1"), ("row_id", .str "proj:empty-proj")])
+      let tScaleMs := (← IO.monoMsNow) - tScale0
+      ncTotal := ncTotal + 1
+      let folderScaleOk : Bool :=
+        tScaleMs < 500 &&
+        match initFolderRows, openProjRows, openAuditsRows, openEmptyDirRows, openEmptyProjRows with
+        | .ok rInit, .ok rProj, .ok rAud, .ok rEmpD, .ok rEmpP =>
+          let idsInit := ((rInit.fieldArr? "rows").getD #[]).filterMap (·.fieldStr? "row_id")
+          let rowsProj := (rProj.fieldArr? "rows").getD #[]
+          let audClosed? := rowsProj.find? (fun r => r.fieldStr? "row_id" == some "folder:core:Audits")
+          let rowsAud := (rAud.fieldArr? "rows").getD #[]
+          let audOpen? := rowsAud.find? (fun r => r.fieldStr? "row_id" == some "folder:core:Audits")
+          let repFile? := rowsAud.find? (fun r => r.fieldStr? "row_id" == some "pf:core:Audits/report.md")
+          let idsEmpD := ((rEmpD.fieldArr? "rows").getD #[]).filterMap (·.fieldStr? "row_id")
+          let rowsEmpP := (rEmpP.fieldArr? "rows").getD #[]
+          let empProjOpen? := rowsEmpP.find? (fun r => r.fieldStr? "row_id" == some "proj:empty-proj")
+          let idsEmpP := rowsEmpP.filterMap (·.fieldStr? "row_id")
+          !idsInit.contains "folder:core:Audits" &&
+          (audClosed?.bind (·.fieldBool? "expanded")) == some false &&
+          (audClosed?.bind (·.fieldStr? "icon")) == some "folder" &&
+          (audOpen?.bind (·.fieldBool? "expanded")) == some true &&
+          (audOpen?.bind (·.fieldStr? "icon")) == some "folder-open" &&
+          (repFile?.bind (·.fieldStr? "kind")) == some "file" &&
+          idsEmpD.contains "empty:core:EmptyDir" &&
+          (empProjOpen?.bind (·.fieldBool? "expanded")) == some true &&
+          (empProjOpen?.bind (·.fieldStr? "icon")) == some "folder-open" &&
+          idsEmpP.contains "empty:empty-proj"
+        | _, _, _, _, _ => false
+      if (← assertTrue "native_chrome_folder_file_expand_and_1500_mission_scale" folderScaleOk) then
         ncPassed := ncPassed + 1
 
   return (passed + e2ePassed + ncPassed, total + e2eTotal + ncTotal)

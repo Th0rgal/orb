@@ -662,8 +662,12 @@ export default function App() {
     }
   };
   const [projectMissions, setProjectMissions] = createSignal<Record<string, Mission[]>>({});
+  const [projectFolders, setProjectFolders] = createSignal<Record<string, string[]>>({});
+  const [projectFiles, setProjectFiles] = createSignal<Record<string, string[]>>({});
   createEffect(on(connectionVersion, () => {
     setProjectMissions({});
+    setProjectFolders({});
+    setProjectFiles({});
     setCompletedMissions([]);
     resetMissionHierarchy();
     resetMissionLookup();
@@ -1040,6 +1044,7 @@ export default function App() {
     const disposeHandlers = installNativeChromeWindowHandlers({
       open: (target) => open(target),
       leaveSettings,
+      navHistory: (delta) => nav(delta),
       getSidebarOpen: () => sidebar(),
       setSidebarOpen: setSidebarWithNative,
       selectProject: (slug) => {
@@ -1054,6 +1059,11 @@ export default function App() {
     });
   });
   if (nativeChromeSyncer) {
+    createEffect(() => {
+      const canBack = hIdx() > 0;
+      const canForward = hIdx() < history().length - 1;
+      notifyNativeChromeShell("set_native_history", { can_back: canBack, can_forward: canForward });
+    });
     createEffect(() => {
       const scope = historyScope();
       const sel = selected();
@@ -1072,6 +1082,8 @@ export default function App() {
       const liveMissions = missions();
       const compMissions = completedMissions();
       const projMissions = projectMissions();
+      const projFolders = projectFolders();
+      const projFiles = projectFiles();
       nativeChromeSyncer.schedule({
         scope,
         selected: sel,
@@ -1083,6 +1095,8 @@ export default function App() {
         settingsDots: dots,
         projects: projs,
         projectColors: projColors,
+        projectFolders: projFolders,
+        projectFiles: projFiles,
         missions: liveMissions,
         completedMissions: compMissions,
         projectMissions: projMissions,
@@ -1602,6 +1616,10 @@ export default function App() {
         const clean = rows.filter(m => !isMissionDeleting(m.id));
         setProjectMissions(prev => ({ ...prev, [slug]: clean }));
       }}
+      onProjectEntries={(slug, folders, files) => {
+        setProjectFolders(prev => ({ ...prev, [slug]: folders }));
+        setProjectFiles(prev => ({ ...prev, [slug]: files }));
+      }}
       open={open}
       onNewCloudAgent={(project, path) => { setNewProject(project); setNewFolder(path ? {project, path} : null); open("cloud-agent"); }}
       onNewAgent={(slug, path) => {
@@ -1617,7 +1635,7 @@ export default function App() {
   );
 
   return (
-    <div class={`app ${onSettings() ? "settings-view" : ""} ${(nativeChromeActive || !sidebar()) ? "sb-hidden" : ""}`} data-native-chrome={nativeChromeActive ? "true" : undefined} data-pane={currentMissionId() ? "mission" : (currentController() || currentProjectFile() || currentProjectSettings()) ? "project" : "page"} style={{ "--sb-w": `${onSettings() ? 220 : sbWidth()}px` }}>
+    <div class={`app ${onSettings() ? "settings-view" : ""} ${(nativeChromeActive || !sidebar()) ? "sb-hidden" : ""}`} data-native-chrome={nativeChromeActive ? "true" : undefined} data-native-sb-open={nativeChromeActive ? (sidebar() ? "true" : "false") : undefined} data-pane={currentMissionId() ? "mission" : (currentController() || currentProjectFile() || currentProjectSettings()) ? "project" : "page"} style={{ "--sb-w": `${onSettings() ? 220 : sbWidth()}px` }}>
       <MentionProjectContext.Provider value={()=>openMission()?.project??currentController()?.slug??effectiveNewProject()}>
       <FilePanelProvider missionOpen={currentMissionId()} scope={{ mission: fileScopeMission() ?? undefined, project: currentController()?.slug, controller: currentController()?.id }} sidebar={sidebar} onSetSidebar={setSidebarWithNative}>
       <Show when={!nativeChromeActive}>

@@ -255,11 +255,14 @@ struct OrbSidebarRowItem: Equatable {
     let depth: Int
     let title: String
     let subtitle: String
+    let status: String
     let target: String
     let shortcut: String
     let icon: String
     let color: String
     let badge: Int
+    let childCount: Int
+    let liveChildCount: Int
     let expandable: Bool
     let expanded: Bool
     let selected: Bool
@@ -271,11 +274,14 @@ struct OrbSidebarRowItem: Equatable {
             depth == other.depth &&
             title == other.title &&
             subtitle == other.subtitle &&
+            status == other.status &&
             target == other.target &&
             shortcut == other.shortcut &&
             icon == other.icon &&
             color == other.color &&
             badge == other.badge &&
+            childCount == other.childCount &&
+            liveChildCount == other.liveChildCount &&
             expandable == other.expandable &&
             expanded == other.expanded &&
             attention == other.attention
@@ -291,11 +297,14 @@ struct OrbSidebarRowItem: Equatable {
             depth: isPalette ? 0 : ((d["depth"] as? Int) ?? 0),
             title: title,
             subtitle: (d["subtitle"] as? String) ?? "",
+            status: (d["status"] as? String) ?? "",
             target: (d["target"] as? String) ?? "",
             shortcut: (d["shortcut"] as? String) ?? "",
             icon: (d["icon"] as? String) ?? "",
             color: (d["color"] as? String) ?? "",
             badge: isPalette ? 0 : ((d["badge"] as? Int) ?? 0),
+            childCount: isPalette ? 0 : ((d["child_count"] as? Int) ?? 0),
+            liveChildCount: isPalette ? 0 : ((d["live_child_count"] as? Int) ?? 0),
             expandable: !isPalette && ((d["expandable"] as? Bool) ?? false),
             expanded: !isPalette && ((d["expanded"] as? Bool) ?? false),
             selected: !isPalette && ((d["selected"] as? Bool) ?? false),
@@ -314,6 +323,9 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
     let splitView = NSSplitView()
     let sidebarPane = NSView()
     let sidebarTable = NSTableView()
+    private let topBarPane = NSView()
+    private let backHistoryButton = NSButton()
+    private let forwardHistoryButton = NSButton()
     private let footerPane = NSView()
     private let footerButton = NSButton()
     private let footerBadgeLabel = NSTextField(labelWithString: "")
@@ -376,6 +388,7 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         case "gear": return "gearshape"
         case "folder": return "folder"
         case "folder-open": return "folder.fill"
+        case "file": return "doc.text"
         case "arrow-left": return "arrow.left"
         case "skills": return "square.3.layers.3d"
         case "key": return "key"
@@ -414,6 +427,38 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
 
         let footerHeight: CGFloat = 45
         let topInset: CGFloat = 35
+        topBarPane.frame = NSRect(x: 0, y: max(0, frame.height - topInset), width: 220, height: topInset)
+        topBarPane.autoresizingMask = [.width, .minYMargin]
+        let configTopBtn = { [weak self] (btn: NSButton, sym: String, tip: String, action: Selector, x: CGFloat, autoMask: NSView.AutoresizingMask) in
+            btn.frame = NSRect(x: x, y: 5, width: 24, height: 24)
+            btn.bezelStyle = .recessed
+            btn.showsBorderOnlyWhileMouseInside = true
+            btn.isBordered = false
+            btn.imagePosition = .imageOnly
+            btn.contentTintColor = .secondaryLabelColor
+            btn.toolTip = tip
+            btn.autoresizingMask = autoMask
+            if #available(macOS 11.0, *), let img = NSImage(systemSymbolName: sym, accessibilityDescription: tip) {
+                let cfg = NSImage.SymbolConfiguration(pointSize: 12.5, weight: .regular)
+                btn.image = img.withSymbolConfiguration(cfg) ?? img
+            }
+            btn.target = self
+            btn.action = action
+        }
+        let sbToggleBtn = NSButton()
+        configTopBtn(sbToggleBtn, "sidebar.left", "Toggle sidebar", #selector(onTopSidebarToggleClick(_:)), 82, [.maxXMargin])
+        topBarPane.addSubview(sbToggleBtn)
+        let searchTopBtn = NSButton()
+        configTopBtn(searchTopBtn, "magnifyingglass", "Search conversations (⌘K)", #selector(openPalette), 108, [.maxXMargin])
+        topBarPane.addSubview(searchTopBtn)
+        configTopBtn(backHistoryButton, "arrow.left", "Back", #selector(onTopBackClick(_:)), 162, [.minXMargin])
+        backHistoryButton.isEnabled = false
+        topBarPane.addSubview(backHistoryButton)
+        configTopBtn(forwardHistoryButton, "arrow.right", "Forward", #selector(onTopForwardClick(_:)), 188, [.minXMargin])
+        forwardHistoryButton.isEnabled = false
+        topBarPane.addSubview(forwardHistoryButton)
+        sidebarPane.addSubview(topBarPane)
+
         let scroll = NSScrollView(frame: NSRect(x: 0, y: footerHeight, width: 220, height: max(0, frame.height - topInset - footerHeight)))
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
@@ -528,6 +573,50 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         if open && sidebarPane.frame.width < 140 {
             splitView.setPosition(220, ofDividerAt: 0)
         }
+    }
+
+    func setHistoryState(canBack: Bool, canForward: Bool) {
+        backHistoryButton.isEnabled = canBack
+        forwardHistoryButton.isEnabled = canForward
+    }
+
+    @objc private func onTopSidebarToggleClick(_ sender: Any?) {
+        setSidebarOpen(false)
+        webView?.evaluateJavaScript("window.__ORB_TOGGLE_NATIVE_SIDEBAR__&&window.__ORB_TOGGLE_NATIVE_SIDEBAR__(false);", completionHandler: nil)
+    }
+
+    @objc private func onTopBackClick(_ sender: Any?) {
+        webView?.evaluateJavaScript("window.__ORB_NATIVE_NAV__&&window.__ORB_NATIVE_NAV__(\"history-back\");", completionHandler: nil)
+    }
+
+    @objc private func onTopForwardClick(_ sender: Any?) {
+        webView?.evaluateJavaScript("window.__ORB_NATIVE_NAV__&&window.__ORB_NATIVE_NAV__(\"history-forward\");", completionHandler: nil)
+    }
+
+    @objc private func onMissionSubToggleClick(_ sender: NSButton) {
+        guard let rid = sender.identifier?.rawValue, !rid.isEmpty else { return }
+        toggleExpand(rowId: rid)
+    }
+
+    private static func missionBadgePresentation(for status: String) -> (symbol: String, color: NSColor, spinning: Bool)? {
+        let s = status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let blue = parseHexColor("#86aee4") ?? .systemBlue
+        let green = parseHexColor("#80b28d") ?? .systemGreen
+        let amber = parseHexColor("#c9a227") ?? .systemYellow
+        let gray = parseHexColor("#8a8a8a") ?? .secondaryLabelColor
+        if ["active", "running", "starting", "resuming", "working", "in_progress", "processing", "streaming"].contains(s) {
+            return ("arrow.triangle.2.circlepath", blue, true)
+        }
+        if s == "waiting_background" { return ("clock", blue, false) }
+        if s == "pending" || s == "queued" { return ("clock", gray, false) }
+        if s == "completed" || s == "succeeded" { return ("checkmark.circle", green, false) }
+        if ["blocked", "failed", "error", "errored", "timed_out", "not_feasible", "waiting_for_approval"].contains(s) {
+            return ("exclamationmark.circle", amber, false)
+        }
+        if ["paused", "interrupted", "cancelled", "canceled"].contains(s) {
+            return ("pause.circle", gray, false)
+        }
+        return nil
     }
 
     @objc func openPalette() {
@@ -753,6 +842,10 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
     }
 
     private func toggleExpand(rowId: String) {
+        if rowId.hasPrefix("proj:") || rowId.hasPrefix("folder:") {
+            let lit = OrbAppDelegate.jsonStringLiteral(rowId)
+            webView?.evaluateJavaScript("window.__ORB_NATIVE_EXPAND__&&window.__ORB_NATIVE_EXPAND__(\(lit));", completionHandler: nil)
+        }
         sidebarReqGeneration &+= 1
         let gen = sidebarReqGeneration
         callLocald(command: "native_chrome_toggle_expand", args: ["row_id": rowId]) { [weak self] res in
@@ -842,16 +935,42 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
 
         if #available(macOS 11.0, *), !item.icon.isEmpty, let symName = Self.symbolName(for: item.icon),
            let rawImg = NSImage(systemSymbolName: symName, accessibilityDescription: item.title) {
+            let slot = NSView(frame: NSRect(x: cursorX, y: 6, width: 18, height: 18))
+            slot.wantsLayer = true
             let cfg = NSImage.SymbolConfiguration(pointSize: 12.5, weight: .regular)
             let imgView = NSImageView(image: rawImg.withSymbolConfiguration(cfg) ?? rawImg)
             imgView.contentTintColor = Self.parseHexColor(item.color)
                 ?? (item.selected ? .labelColor : .secondaryLabelColor)
-            imgView.frame = NSRect(x: cursorX, y: 7, width: 16, height: 16)
-            cell.addSubview(imgView)
+            imgView.frame = NSRect(x: 0, y: 1, width: 16, height: 16)
+            slot.addSubview(imgView)
+            if item.icon == "bot", let badge = Self.missionBadgePresentation(for: item.status),
+               let bImg = NSImage(systemSymbolName: badge.symbol, accessibilityDescription: item.status) {
+                let bWrap = NSView(frame: NSRect(x: 9, y: -1, width: 11, height: 11))
+                bWrap.wantsLayer = true
+                bWrap.layer?.backgroundColor = NSColor(srgbRed: 20.0 / 255.0, green: 20.0 / 255.0, blue: 20.0 / 255.0, alpha: 1.0).cgColor
+                bWrap.layer?.cornerRadius = 5.5
+                let bCfg = NSImage.SymbolConfiguration(pointSize: 8.5, weight: .semibold)
+                let bView = NSImageView(image: bImg.withSymbolConfiguration(bCfg) ?? bImg)
+                bView.contentTintColor = badge.color
+                bView.frame = NSRect(x: 1, y: 1, width: 9, height: 9)
+                if badge.spinning {
+                    bView.wantsLayer = true
+                    let rot = CABasicAnimation(keyPath: "transform.rotation.z")
+                    rot.fromValue = 0.0
+                    rot.toValue = -Double.pi * 2.0
+                    rot.duration = 1.2
+                    rot.repeatCount = .infinity
+                    bView.layer?.add(rot, forKey: "orbSpin")
+                }
+                bWrap.addSubview(bView)
+                slot.addSubview(bWrap)
+            }
+            cell.addSubview(slot)
             cell.imageView = imgView
             cursorX += 24
         }
 
+        let hasSubToggle = !isPal && item.kind == "mission" && item.expandable
         let metaText: String = {
             if item.badge > 0 { return "\(item.badge)" }
             if !item.shortcut.isEmpty { return item.shortcut }
@@ -861,7 +980,7 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         }()
 
         let width = max(120, tableView.bounds.width)
-        let rightReserve: CGFloat = metaText.isEmpty ? 8 : 72
+        let rightReserve: CGFloat = (hasSubToggle || !metaText.isEmpty) ? 68 : 8
         let lbl = NSTextField(labelWithString: item.title)
         lbl.lineBreakMode = .byTruncatingTail
         if isSection {
@@ -882,7 +1001,30 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         cell.addSubview(lbl)
         cell.textField = lbl
 
-        if !metaText.isEmpty {
+        if hasSubToggle {
+            let chev = item.expanded ? "⌄" : "›"
+            let countLabel: String
+            if item.childCount > 0 && item.liveChildCount > 0 {
+                countLabel = "\(item.liveChildCount)/\(item.childCount) \(chev)"
+            } else if item.childCount > 0 {
+                countLabel = "\(item.childCount) \(chev)"
+            } else {
+                countLabel = chev
+            }
+            let subBtn = NSButton(frame: NSRect(x: width - 62, y: 5, width: 56, height: 20))
+            subBtn.title = countLabel
+            subBtn.bezelStyle = .recessed
+            subBtn.showsBorderOnlyWhileMouseInside = true
+            subBtn.isBordered = false
+            subBtn.alignment = .right
+            subBtn.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+            subBtn.contentTintColor = item.liveChildCount > 0 ? .secondaryLabelColor : .tertiaryLabelColor
+            subBtn.identifier = NSUserInterfaceItemIdentifier(item.rowId)
+            subBtn.target = self
+            subBtn.action = #selector(onMissionSubToggleClick(_:))
+            subBtn.autoresizingMask = [.minXMargin]
+            cell.addSubview(subBtn)
+        } else if !metaText.isEmpty {
             let meta = NSTextField(labelWithString: metaText)
             meta.alignment = .right
             meta.lineBreakMode = .byTruncatingTail
@@ -1405,6 +1547,13 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
             if let reqId = dict["id"] as? Int { replyToWebView(id: reqId, result: open) }
             return
         }
+        if cmd == "set_native_history" {
+            let canBack = (rawArgs["can_back"] as? Bool) ?? false
+            let canForward = (rawArgs["can_forward"] as? Bool) ?? false
+            nativeChrome?.setHistoryState(canBack: canBack, canForward: canForward)
+            if let reqId = dict["id"] as? Int { replyToWebView(id: reqId, result: true) }
+            return
+        }
         guard let reqId = dict["id"] as? Int else { return }
         let args = rawArgs
         switch cmd {
@@ -1876,7 +2025,8 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
             self.localdProc = p
         }
 
-        let nativeChromeEnabled = (env["ORB_NATIVE_CHROME"] == "1")
+        let ncEnv = env["ORB_NATIVE_CHROME"]?.lowercased()
+        let nativeChromeEnabled = (ncEnv != "0" && ncEnv != "false")
         let initJs = Self.buildInitScript(port: port, token: token, nativeChrome: nativeChromeEnabled)
 
         let cfg = WKWebViewConfiguration()

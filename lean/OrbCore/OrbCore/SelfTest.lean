@@ -5276,6 +5276,26 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
      mcpFleetSt != 200 || (mcpFleetBody.splitOn "\"ok\":true").length < 2 then
     return (← fail s!"MCP gateway call failed: proj={mcpCallSt}:{mcpCallBody} fleet={mcpFleetSt}:{mcpFleetBody}")
 
+  -- 4b. Project roster parity (`listProjectsJVal`): no phantom inferred mission-tag projects,
+  --     `routes.json` alias folding (`verity` -> `verity-core`), and `board-overrides.json` archiving.
+  let _ ← execParamQuery store.missionsDb
+    "INSERT OR IGNORE INTO missions(id,status,title,project,folder,owner_user_id,created_at,updated_at) VALUES('m-phantom-proj','completed','Old','verity-phase1k-fix','','prod','2026-08-05T00:00:00Z','2026-08-05T00:00:00Z');" #[]
+  let _ ← OrbCore.ProjectFilesAndController.upsertProjectRecord store "verity" "verity" "Legacy Verity" "" "active" "" "2026-08-16T00:00:00Z" (some "prod")
+  let _ ← OrbCore.ProjectFilesAndController.upsertProjectRecord store "verity-core" "verity-core" "Ethereum" "" "active" "" "2026-11-12T00:00:00Z" (some "prod")
+  let _ ← OrbCore.ProjectFilesAndController.upsertProjectRecord store "sandboxed-sh-dev" "sandboxed-sh-dev" "sandboxed-sh-dev" "" "active" "" "2026-11-12T00:00:00Z" (some "prod")
+  let hermesProjDir := s!"{workRoot}/.hermes-projects-test"
+  IO.FS.createDirAll (System.FilePath.mk hermesProjDir)
+  IO.FS.writeFile (System.FilePath.mk s!"{hermesProjDir}/routes.json") "{\"verity\":\"verity-core\"}"
+  IO.FS.writeFile (System.FilePath.mk s!"{hermesProjDir}/board-overrides.json") "{\"sandboxed-sh-dev\":\"archived\",\"verity\":\"archived\"}"
+  let dedupedProjs ← OrbCore.ProjectFilesAndController.listProjectsJVal store "prod" "prod" false false (some hermesProjDir)
+  let dedupedJson := OrbBin.Json.renderCompact (.arr dedupedProjs)
+  if (dedupedJson.splitOn "\"slug\":\"verity-phase1k-fix\"").length > 1 ||
+     (dedupedJson.splitOn "\"slug\":\"verity\"").length > 1 ||
+     (dedupedJson.splitOn "\"slug\":\"sandboxed-sh-dev\"").length > 1 ||
+     (dedupedJson.splitOn "\"slug\":\"verity-core\"").length != 2 ||
+     (dedupedJson.splitOn "\"title\":\"Ethereum\"").length < 2 then
+    return (← fail s!"listProjectsJVal alias/override/phantom parity failed: {dedupedJson}")
+
   let fleetBoat : ManagedFleetState := { enabled := true, boatEnabled := true, dailyCapCents := 5000, maxConcurrent := 20 }
   let vmBoat : ManagedMachine := {
     id := "vm-boat-1", sandboxName := "orb-managed-vm-boat-1", provider := "boat",

@@ -102,6 +102,8 @@ describe("nativeChromeBridge", () => {
       settingsDots: ["security"],
       projects: [proj],
       projectColors: { orb: "blue" },
+      projectFolders: { orb: ["audits"] },
+      projectFiles: { orb: ["audits/report.md", "README.md"] },
       missions: [m],
       completedMissions: [],
       projectMissions: {},
@@ -111,19 +113,32 @@ describe("nativeChromeBridge", () => {
     expect(args.scope).toBe("scope:test:1");
     expect(args.selected).toBe("m:m-1");
     expect(args.inbox_unread).toBe(4);
-    expect((args.projects as Array<{ name: string; color?: string }>)[0]?.name).toBe("Orb Core");
-    expect((args.projects as Array<{ name: string; color?: string }>)[0]?.color).toBe("blue");
+    expect((args.projects as Array<{ name: string; color?: string; folders?: string[]; files?: string[] }>)[0]?.name).toBe("Orb Core");
+    expect((args.projects as Array<{ name: string; color?: string; folders?: string[]; files?: string[] }>)[0]?.color).toBe("blue");
+    expect((args.projects as Array<{ name: string; color?: string; folders?: string[]; files?: string[] }>)[0]?.folders).toEqual(["audits"]);
+    expect((args.projects as Array<{ name: string; color?: string; folders?: string[]; files?: string[] }>)[0]?.files).toEqual(["audits/report.md", "README.md"]);
   });
 
-  it("installs window.__ORB_SELECT_MISSION__, __ORB_NATIVE_NAV__, and __ORB_TOGGLE_NATIVE_SIDEBAR__", () => {
+  it("installs window.__ORB_SELECT_MISSION__, __ORB_NATIVE_NAV__, __ORB_NATIVE_EXPAND__, and __ORB_TOGGLE_NATIVE_SIDEBAR__", () => {
     const opened: Array<string | null> = [];
     const projects: string[] = [];
     const toggledFolders: string[] = [];
+    const expandedEvents: string[] = [];
+    const historySteps: Array<-1 | 1> = [];
     let leftSettings = 0;
     let sbOpen = true;
-    const fakeWin = {} as Window & {
+    const fakeWin = {
+      dispatchEvent: (ev: Event) => {
+        const ce = ev as CustomEvent<{ rowId?: string }>;
+        if (ce.type === "orb:native-expand" && ce.detail?.rowId) {
+          expandedEvents.push(ce.detail.rowId);
+        }
+        return true;
+      },
+    } as unknown as Window & {
       __ORB_SELECT_MISSION__?: (id: string) => boolean;
       __ORB_NATIVE_NAV__?: (t: string) => boolean;
+      __ORB_NATIVE_EXPAND__?: (r: string) => boolean;
       __ORB_TOGGLE_NATIVE_SIDEBAR__?: (o?: boolean) => boolean;
     };
     const cleanup = installNativeChromeWindowHandlers(
@@ -135,6 +150,7 @@ describe("nativeChromeBridge", () => {
         leaveSettings: () => {
           leftSettings += 1;
         },
+        navHistory: (d) => historySteps.push(d),
         getSidebarOpen: () => sbOpen,
         setSidebarOpen: (next) => {
           sbOpen = next;
@@ -152,17 +168,24 @@ describe("nativeChromeBridge", () => {
     expect(fakeWin.__ORB_NATIVE_NAV__?.("project:orb")).toBe(true);
     expect(fakeWin.__ORB_NATIVE_NAV__?.("folder:orb:audits/2026")).toBe(true);
     expect(fakeWin.__ORB_NATIVE_NAV__?.("settings-back")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_NAV__?.("history-back")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_NAV__?.("history-forward")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_EXPAND__?.("proj:orb")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_EXPAND__?.("folder:orb:audits")).toBe(true);
     expect(fakeWin.__ORB_TOGGLE_NATIVE_SIDEBAR__?.()).toBe(false);
     expect(sbOpen).toBe(false);
 
     expect(opened).toEqual(["m:abc", "m:xyz", null, "inbox", null]);
     expect(projects).toEqual(["orb"]);
     expect(toggledFolders).toEqual(["folder:orb:audits/2026"]);
+    expect(expandedEvents).toEqual(["proj:orb", "folder:orb:audits"]);
     expect(leftSettings).toBe(1);
+    expect(historySteps).toEqual([-1, 1]);
 
     cleanup();
     expect(fakeWin.__ORB_SELECT_MISSION__).toBeUndefined();
     expect(fakeWin.__ORB_NATIVE_NAV__).toBeUndefined();
+    expect(fakeWin.__ORB_NATIVE_EXPAND__).toBeUndefined();
   });
 
   it("coalesces rapid schedule calls with strictly monotonic revisions", async () => {
