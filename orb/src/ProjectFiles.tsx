@@ -140,6 +140,11 @@ export function newFilePath(dir: string, raw: string): { path: string; name: str
 export function LiveProjectsSection(p: {
   /** Reuse the same confirmation and deletion pipeline from other views. */
   deleteRequest?: readonly string[] | null;
+  /** Archive/restore requests from the native sidebar, run through `changeArchiveState`
+   *  (optimistic status, in-flight guard, rollback). Consumed then acknowledged. */
+  archiveRequests?: readonly { mission: Mission; restore: boolean }[];
+  onArchiveRequestsHandled?: (count: number) => void;
+  onArchiveSettled?: (id: string, ok: boolean) => void;
   onDeleteRequestHandled?: () => void;
   activityMissions?: Mission[];
   /** Details from the open conversation, including restored/local sessions. */
@@ -2062,6 +2067,11 @@ export function LiveProjectsSection(p: {
     } finally { for (const t of targets) archiving.delete(t.id); missionRevision++; }
   };
   const archiveConversation = (mission: Mission) => changeArchiveState(mission, false);
+  createEffect(on(() => p.archiveRequests, reqs => {
+    if (!reqs?.length) return;
+    p.onArchiveRequestsHandled?.(reqs.length);
+    for (const r of reqs) void changeArchiveState(r.mission, r.restore).then(ok => p.onArchiveSettled?.(r.mission.id, ok !== false));
+  }));
   const reopenConversation = (mission: Mission) => changeArchiveState(mission, true);
   const archiveSelection = async (id: string) => {
     if (batchBusy()) return;

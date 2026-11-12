@@ -57,7 +57,6 @@ import { imagePrompt, stageLocalImages, stageRemoteImages, type DraftImage } fro
 import { FilePanelProvider, FilePanelButton } from "./FilePanel";
 import { ErrorToast, SlotActiveContext, notify } from "./toast";
 import { copyText } from "./clipboard";
-import { applyArchiveState, archiveStateTargets } from "./archiveState";
 import type { ApprovalConfirmationPrompt } from "./tree/moves";
 const ApprovalTransferDialog = lazy(() => import("./ApprovalTransferDialog"));
 import { rememberLaunch, recalledLaunch, missionDestination, launchRefusal, isAdministrationNode, remoteLaunchPreflight, remoteHarnessSupport, remoteLaunchUnconfirmed, missionGoal, type LaunchReceipt, type LaunchRefusal, type RemoteSupport } from "./missionLaunch";
@@ -1053,6 +1052,7 @@ export default function App() {
   // The HTML sidebar (and its archive pager) is not mounted under native chrome, so the
   // native Archived section is fed from here.
   const [nativeArchived, setNativeArchived] = createSignal<Mission[]>([]);
+  const [archiveRequests, setArchiveRequests] = createSignal<{ mission: Mission; restore: boolean }[]>([]);
   const [nativeApprovalPrompt, setNativeApprovalPrompt] = createSignal<ApprovalConfirmationPrompt | null>(null);
   const loadNativeArchived = () => {
     const version = connectionVersion();
@@ -1104,13 +1104,12 @@ export default function App() {
         return true;
       case "archive":
       case "restore": {
-        // Same subtree targeting as the HTML sidebar (`changeArchiveState`).
+        // Runs through the HTML sidebar's `changeArchiveState` (headless ProjectFiles): same subtree
+        // targeting, optimistic status, in-flight guard and rollback. The Archived list moves now too.
         const restore = action === "restore";
         if (restore !== (mission.status === "acknowledged")) return false; // bulk: skip rows already in that state
-        const known = [...missions(), ...completedMissions(), ...Object.values(projectMissions()).flat(), ...nativeArchived()];
-        void Promise.resolve()
-          .then(() => applyArchiveState(mission, archiveStateTargets(mission, known, restore), restore))
-          .then(settle, fail(restore ? "Couldn’t restore the conversation" : "Couldn’t archive the conversation"));
+        setNativeArchived(rows => restore ? rows.filter(m => m.id !== id) : [{ ...mission, status: "acknowledged" }, ...rows.filter(m => m.id !== id)]);
+        setArchiveRequests(q => [...q, { mission, restore }]);
         return true;
       }
       case "copy-id":
@@ -1679,6 +1678,9 @@ export default function App() {
       headless={headless}
       active={() => !onSettings()}
       deleteRequest={deleteMissionRequest()}
+      archiveRequests={archiveRequests()}
+      onArchiveRequestsHandled={n => setArchiveRequests(q => q.slice(n))}
+      onArchiveSettled={() => { void refreshMissions(); loadNativeArchived(); }}
       onDeleteRequestHandled={() => setDeleteMissionRequest(null)}
       activityMissions={missions()}
       currentMission={(() => { const m = findKnownMission(currentMissionId()); return m ? movedMission(m) : undefined; })()}
