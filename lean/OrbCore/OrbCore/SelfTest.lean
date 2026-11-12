@@ -5065,18 +5065,22 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
   IO.FS.createDirAll (System.FilePath.mk s!"{dataRoot}/project-files/verity-core/Audits")
   IO.FS.writeFile (System.FilePath.mk s!"{dataRoot}/project-files/verity-core/Audits/report.md") "# Audit\n"
 
-  -- 1. Seed legacy 47-col `missions-prod.db` with `Pareto` + legacy `orb-folder:Audits` mission
+  -- 1. Seed legacy `missions-prod.db` with `Pareto`, legacy `orb-folder:Audits` mission,
+  -- AND exact legacy `mission_events` DDL (`sequence`/`timestamp` NOT NULL, NO `seq` column yet!)
   let legMissionsPath := s!"{dataRoot}/missions/missions-prod.db"
   let seedSql :=
-    "CREATE TABLE IF NOT EXISTS missions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'awaiting_user', backend TEXT NOT NULL DEFAULT 'codex', working_directory TEXT NOT NULL DEFAULT '', project TEXT, tags TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL DEFAULT '', parent_mission_id TEXT);" ++
-    "INSERT INTO missions(id,title,status,backend,working_directory,project,tags,updated_at) VALUES('8a349331-41cf-4223-a25f-459c00cd0d98','Pareto','awaiting_user','codex','/tmp','verity-core','[]','2026-11-10T10:00:00Z');" ++
-    "INSERT INTO missions(id,title,status,backend,working_directory,project,tags,updated_at) VALUES('c1665d11-0000-4000-8000-000000000001','Legacy Audit','completed','codex','/tmp','verity-core','[\"orb-folder:Audits\",\"audit\"]','2026-11-01T12:00:00Z');"
+    "CREATE TABLE IF NOT EXISTS missions (id TEXT PRIMARY KEY NOT NULL, title TEXT, status TEXT NOT NULL DEFAULT 'awaiting_user', backend TEXT NOT NULL DEFAULT 'codex', workspace_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000', working_directory TEXT, project TEXT, tags TEXT, created_at TEXT NOT NULL DEFAULT '2026-11-01T00:00:00Z', updated_at TEXT NOT NULL DEFAULT '', parent_mission_id TEXT);" ++
+    "CREATE TABLE IF NOT EXISTS mission_events (id INTEGER PRIMARY KEY AUTOINCREMENT, mission_id TEXT NOT NULL, sequence INTEGER NOT NULL, event_type TEXT NOT NULL, timestamp TEXT NOT NULL, event_id TEXT, tool_call_id TEXT, tool_name TEXT, content TEXT, content_file TEXT, metadata TEXT, FOREIGN KEY (mission_id) REFERENCES missions(id) ON DELETE CASCADE);" ++
+    "INSERT INTO missions(id,title,status,backend,workspace_id,working_directory,project,tags,created_at,updated_at) VALUES('8a349331-41cf-4223-a25f-459c00cd0d98','Pareto','awaiting_user','codex','00000000-0000-0000-0000-000000000000','/tmp','verity-core','[]','2026-11-10T09:00:00Z','2026-11-10T10:00:00Z');" ++
+    "INSERT INTO missions(id,title,status,backend,workspace_id,working_directory,project,tags,created_at,updated_at) VALUES('c1665d11-0000-4000-8000-000000000001','Legacy Audit','completed','codex','00000000-0000-0000-0000-000000000000','/tmp','verity-core','[\"orb-folder:Audits\",\"audit\"]','2026-11-01T11:00:00Z','2026-11-01T12:00:00Z');" ++
+    "INSERT INTO mission_events(mission_id,sequence,event_type,timestamp,content) VALUES('8a349331-41cf-4223-a25f-459c00cd0d98',1,'user_message','2026-11-10T09:00:01Z','Audit Pareto invariants');"
   let .ok preDb ← openSqliteDb legMissionsPath seedSql #[]
     | do cleanup; IO.eprintln "[orb-core-test] FAIL: seed legacy Pareto db failed"; return 1
   sqliteCloseRaw preDb.handle
 
-  let .ok store ← openCoreStore dataRoot 0 "prod"
-    | do cleanup; IO.eprintln "[orb-core-test] FAIL: openCoreStore on Pareto db failed"; return 1
+  let store ← match ← openCoreStore dataRoot 0 "prod" with
+    | .ok s => pure s
+    | .error openErr => cleanup; IO.eprintln s!"[orb-core-test] FAIL: openCoreStore on Pareto db failed: {openErr}"; return 1
   let .ok () ← ensureQueueContSchema store
     | do closeCoreStore store; cleanup; IO.eprintln "[orb-core-test] FAIL: ensureQueueContSchema on Pareto db failed"; return 1
   let .ok mStore ← openManagedComputeStore s!"{dataRoot}/managed_compute.db"
@@ -5162,6 +5166,17 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
      (listBody.splitOn "8a349331-41cf-4223-a25f-459c00cd0d98").length < 2 ||
      (listBody.splitOn "\"folder\":\"Audits\"").length < 2 then
     return (← fail s!"GET /api/control/missions with eyJ JWT failed: {listSt} {listBody}")
+
+  -- Verify legacy `mission_events` (`sequence=1`, `seq=0`, `content`) works on `/messages` + sync replay + follow-up `/api/control/message`
+  let (msgGetSt, msgGetBody) ← sendJson "GET" "/api/control/missions/8a349331-41cf-4223-a25f-459c00cd0d98/messages" hsJwt ""
+  let replayRes ← queryMissionSyncReplayFrames store "8a349331-41cf-4223-a25f-459c00cd0d98" (some 0)
+  let (postMsgSt, _) ← sendJson "POST" "/api/control/message" hsJwt
+    "{\"mission_id\":\"8a349331-41cf-4223-a25f-459c00cd0d98\",\"content\":\"Follow-up on Pareto\"}"
+  let replayOk := match replayRes with
+    | .ok (frames, maxSeq, false) => frames.size == 1 && maxSeq == 1
+    | _ => false
+  if msgGetSt != 200 || (msgGetBody.splitOn "Audit Pareto invariants").length < 2 || !replayOk || postMsgSt != 200 then
+    return (← fail s!"legacy mission_events messages/replay/post failed: get={msgGetSt}:{msgGetBody} replayOk={replayOk} post={postMsgSt}")
 
   -- 3. Move `Pareto` into `Audits` inside `verity-core` (`POST /api/control/missions/move`)
   let (_, subQ) ← registerSseSubscriber bHub none

@@ -214,7 +214,12 @@ def validateRuntimeSecurity (cfg : CoreConfig) : Except String Unit :=
 def loadConfigFromEnv : IO CoreConfig := do
   let host := ((← IO.getEnv "HOST").getD "127.0.0.1").trimAscii.toString
   let portNat := (((← IO.getEnv "PORT").getD "3000").trimAscii.toString.toNat?).getD 3000
-  let workingDir := (← IO.getEnv "WORKING_DIR").getD "."
+  let rawWork := ((← IO.getEnv "WORKING_DIR").getD "").trimAscii.toString
+  let workingDir ←
+    if rawWork.isEmpty || rawWork == "." then
+      pure (← IO.currentDir).toString
+    else
+      pure rawWork
   let devRaw := ((← IO.getEnv "DEV_MODE").getD "false").trimAscii.toString.toLower
   let devMode := devRaw == "true" || devRaw == "1"
   let allowRaw := ((← IO.getEnv "ALLOW_INSECURE_REMOTE_DEV_AUTH").getD "false").trimAscii.toString.toLower
@@ -3087,8 +3092,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
       if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
         return .ok (mkJson cCode cBody)
+      let effSeqExpr := "(CASE WHEN COALESCE(seq,0)>0 THEN seq ELSE COALESCE(sequence,0) END)"
       let rows ← execParamQuery st.store.missionsDb
-        "SELECT seq,event_type,payload,created_at FROM mission_events WHERE mission_id=?1 AND event_type='user_message' ORDER BY seq ASC;" #[mid]
+        (s!"SELECT {effSeqExpr} AS seq, event_type, " ++
+         "CASE WHEN COALESCE(payload,'')<>'' AND COALESCE(payload,'')<>'{}' THEN payload ELSE json_object('content',COALESCE(content,'')) END AS payload, " ++
+         s!"COALESCE(NULLIF(created_at,''),timestamp,'') AS created_at FROM mission_events WHERE mission_id=?1 AND event_type='user_message' ORDER BY {effSeqExpr} ASC, id ASC;") #[mid]
       return .ok (mkJson 200 (match rows with | .ok rs => rowsToJsonArray rs | .error _ => "[]"))
 
   if let some params := matchRoutePattern? "/api/control/missions/:id/files" rawTarget then
@@ -4456,12 +4464,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       | .ok (.Edited missionId source?) =>
         let sourceJson := match source? with | some s => jsonEscape s | none => "null"
         let eventPayload := s!"\{\"type\":\"user_message\",\"id\":{jsonEscape messageId},\"content\":{jsonEscape content},\"queued\":true,\"mission_id\":{jsonEscape missionId},\"source\":{sourceJson},\"sender_user_id\":{jsonEscape caller.userId},\"sender_username\":{jsonEscape caller.username}}"
-        let seq ← st.seqRef.modifyGet fun n => (n + 1, n + 1)
-        match ← execParamQuery st.store.missionsDb
-          "INSERT INTO mission_events(mission_id,seq,event_type,payload,created_at) VALUES(?1,?2,'user_message',?3,?4);"
-          #[missionId, s!"{seq}", eventPayload, s!"{nowEpochSec}"] with
-        | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
-        | .ok _ => return .ok (mkJson 200 s!"\{\"ok\":true,\"id\":{jsonEscape messageId},\"content\":{jsonEscape content}}")
+        let _ ← appendMissionEvent st.store missionId "user_message" eventPayload s!"{nowEpochSec}"
+        return .ok (mkJson 200 s!"\{\"ok\":true,\"id\":{jsonEscape messageId},\"content\":{jsonEscape content}}")
 
   -- Mission Cyber Access (`GET|PATCH /api/control/missions/:id/cyber`)
   if let some params := matchRoutePattern? "/api/control/missions/:id/cyber" rawTarget then
@@ -4591,10 +4595,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let evPayload :=
         s!"\{\"type\":\"user_message\",\"id\":{jsonEscape msgId},\"content\":{jsonEscape content}," ++
         s!"\"mission_id\":{jsonEscape mid},\"sender_user_id\":{jsonEscape caller.userId},\"sender_username\":{jsonEscape caller.username}}"
-      let seq ← st.seqRef.modifyGet fun n => (n + 1, n + 1)
-      discard <| execParamQuery st.store.missionsDb
-        "INSERT INTO mission_events(mission_id,seq,event_type,payload,created_at) VALUES(?1,?2,'user_message',?3,?4);"
-        #[mid, s!"{seq}", evPayload, s!"{nowEpochSec}"]
+      let _ ← appendMissionEvent st.store mid "user_message" evPayload s!"{nowEpochSec}"
       if let some tSink := st.telemetrySink? then
         let actorUid? := if caller.isLegacyUnscoped || caller.userId.isEmpty then none else some caller.userId
         let actorUname? := if caller.isLegacyUnscoped || caller.username.isEmpty then none else some caller.username
@@ -5842,10 +5843,17 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let dataRoot :=
       if normWork.endsWith "/.sandboxed-sh" || normWork == ".sandboxed-sh" then normWork
       else s!"{normWork}/.sandboxed-sh"
-    let .ok store ← openCoreStore dataRoot
-      | do IO.eprintln s!"[sandboxed-sh] FATAL: failed to open SQLite CoreStore at {dataRoot}"; return 1
-    let .ok managedStore ← openManagedComputeStore s!"{dataRoot}/managed_compute.db"
-      | do closeCoreStore store; IO.eprintln s!"[sandboxed-sh] FATAL: failed to open managed_compute.db at {dataRoot}"; return 1
+    let store ← match ← openCoreStore dataRoot with
+      | .ok s => pure s
+      | .error storeErr =>
+        IO.eprintln s!"[sandboxed-sh] FATAL: failed to open SQLite CoreStore at {dataRoot}: {storeErr}"
+        return 1
+    let managedStore ← match ← openManagedComputeStore s!"{dataRoot}/managed_compute.db" with
+      | .ok ms => pure ms
+      | .error msErr =>
+        closeCoreStore store
+        IO.eprintln s!"[sandboxed-sh] FATAL: failed to open managed_compute.db at {dataRoot}: {msErr}"
+        return 1
     let nowBootSec ← coreEpochSec
     let seedAdmins :=
       let fromUsers := parseConfiguredUsers cfg.usersJson
