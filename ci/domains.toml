@@ -89,7 +89,15 @@ paths = [
   "scripts/ci_harden_ubuntu_apt.sh",
   "lean/.gitignore",
 ]
-jobs = ["test", "harness-contract", "policy-lint", "capability-matrix", "orb-desktop-shell", "docker"]
+# Package Spec/MutantSuite files are audited by kernel-abi and import the
+# implementation modules, so any package change re-runs that audit.
+jobs = ["test", "harness-contract", "policy-lint", "capability-matrix", "orb-desktop-shell", "docker", "wf:kernel-abi"]
+
+# Wakeup MCP: only the desktop-shell job runs orb/tests/wakeup_mcp_test.py.
+[[domain]]
+name = "wakeup_mcp"
+paths = ["scripts/wakeup_mcp.py", "orb/tests/wakeup_mcp_test.py"]
+jobs = ["orb-desktop-shell", "harness-contract", "policy-lint", "capability-matrix", "docker"]
 
 [[domain]]
 name = "desktop_linux"

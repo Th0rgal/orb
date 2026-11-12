@@ -44,7 +44,16 @@ class PlanTest(unittest.TestCase):
         got = jobs(["lean/OrbCore/OrbCore/Managed.lean"])
         self.assertIn("test", got)
         self.assertIn("docker", got)
-        self.assertFalse({"orb-unit", "orb-browser", "wf:kernel-abi"} & got)
+        self.assertIn("wf:kernel-abi", got)  # package specs are audited there
+        self.assertFalse({"orb-unit", "orb-browser", "orb-macos-shell"} & got)
+
+    def test_package_spec_runs_kernel_audit(self):
+        for p in ("lean/OrbCore/OrbCore/Spec.lean", "lean/OrbClient/OrbClient/Reducers.lean"):
+            self.assertIn("wf:kernel-abi", jobs([p]), p)
+
+    def test_wakeup_mcp_runs_desktop_shell(self):
+        for p in ("scripts/wakeup_mcp.py", "orb/tests/wakeup_mcp_test.py"):
+            self.assertIn("orb-desktop-shell", jobs([p]), p)
 
     def test_macos_shell_only_on_macos_inputs(self):
         self.assertNotIn("orb-macos-shell", jobs(["linux_shell/main.c"]))
