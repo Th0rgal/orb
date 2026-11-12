@@ -152,8 +152,39 @@ private def recordSettledMcpAction
     #[actId, ownerVal, scope, effRetryKey, principalVal, toolName, reqJson, resJson, nowIso]
   return enriched
 
+/-- Only persisted external sessions carry an authenticated user independently of a mission.
+    Roles are deliberately not used here: external roles and mission-session roles are
+    selected at mint time, not evidence of cross-tenant operator authority. -/
+private def externalManagedOwner? (store : CoreStore) (claims : McpSessionClaims)
+    (nowEpochSec : UInt64) : IO (Option (String × String)) := do
+  if !claims.isExternal || !claims.missionId.isEmpty then return none
+  let .ok rows ← execParamQuery store.projectsDb
+      ("SELECT owner, project_scope FROM mcp_sessions_v1 WHERE id=?1 " ++
+       "AND subject_kind='external_session' AND mission_id='' AND owner<>'' AND revoked=0 " ++
+       "AND expires_at>?2 AND (hard_expires_at=0 OR hard_expires_at>?2);")
+      #[claims.sessionId, toString nowEpochSec]
+    | return none
+  if rows.size ≤ 1 then return none
+  let project := cell rows[1]! 1
+  if !claims.project.isEmpty && !project.isEmpty && claims.project != project then return none
+  return some (cell rows[1]! 0, if project.isEmpty then claims.project else project)
+
+/-- Follow a single parent chain, never a shared ancestor's other children. `UNION`
+    terminates even malformed cycles; every hop remains in the same tenant/project. -/
+private def managedMissionAncestor (store : CoreStore) (ancestor descendant userId project : String) : IO Bool := do
+  let .ok rows ← execParamQuery store.missionsDb
+      ("WITH RECURSIVE lineage(id,parent) AS (" ++
+       "SELECT id,COALESCE(parent_mission_id,'') FROM missions WHERE id=?1 AND owner_user_id=?3 AND project=?4 " ++
+       "UNION SELECT m.id,COALESCE(m.parent_mission_id,'') FROM missions m JOIN lineage l ON m.id=l.parent " ++
+       "WHERE m.owner_user_id=?3 AND m.project=?4) SELECT id FROM lineage WHERE id=?2 LIMIT 1;")
+      #[descendant, ancestor, userId, project]
+    | return false
+  return rows.size > 1
+
 set_option maxHeartbeats 1200000 in
-/-- Execute a non-memory MCP tool call from `POST /api/mcp/call` and return the serialized JSON response body. -/
+/-- Execute a non-memory MCP tool call from `POST /api/mcp/call` and return the serialized JSON response body.
+    `authenticatedUserId` must come from Control's verified Core principal, never tool
+    arguments, and is accepted only for its synthetic unscoped operator fallback. -/
 def dispatchMcpToolCall
     (store : CoreStore)
     (mc? : Option ManagedComputeStore)
@@ -166,9 +197,13 @@ def dispatchMcpToolCall
     (args : JVal)
     (nowEpochSec : UInt64)
     (remoteSup? : Option RemoteJobSupervisor := none)
-    (managedProvisioningOverride? : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) := none) : IO String := do
+    (managedProvisioningOverride? : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) := none)
+    (authenticatedUserId : String := "") : IO String := do
   let nowIso := formatEpochIso8601Utc nowEpochSec
   let callerMid := claims.missionId
+  let directOperator := !authenticatedUserId.isEmpty && !claims.isExternal &&
+    claims.sessionId == "00000000-0000-4000-8000-000000000000" &&
+    callerMid.isEmpty && claims.project.isEmpty && claims.role == "operator"
   let mut callerWorkDir := workingDir
   let mut callerProj := claims.project
   let mut callerUserId := ""
@@ -182,12 +217,30 @@ def dispatchMcpToolCall
         if callerProj.isEmpty && !pj.isEmpty then callerProj := pj
         callerUserId := cell mRows[1]! 2
 
+  if claims.isExternal then
+    -- Never fall back to a mission or request-body identity for an external session.
+    callerUserId := ""
+    if let some (userId, project) ← externalManagedOwner? store claims nowEpochSec then
+      callerUserId := userId
+      callerProj := project
+  else if directOperator then
+    callerUserId := authenticatedUserId
+
   let canManageMachine (machine : ManagedMachine) : IO Bool := do
-    if normalizeMcpRole claims.role != "operator" && machine.ownerUserId != callerUserId then
-      return false
-    if claims.project.isEmpty then return true
-    let owner? ← getMission? store machine.ownerMission
-    return (owner?.map (·.project)).getD "" == claims.project
+    -- An empty identity is only the unscoped single-tenant case: a mission whose
+    -- row has no owner may manage a machine that has none either, through lineage.
+    if callerUserId.isEmpty && (claims.isExternal || directOperator || !machine.ownerUserId.isEmpty) then return false
+    if !machine.ownerUserId.isEmpty && machine.ownerUserId != callerUserId then return false
+    if machine.ownerMission.isEmpty then
+      -- User-owned machines have no project/lineage to delegate to a mission.
+      return (claims.isExternal || directOperator) && machine.ownerUserId == callerUserId && callerProj.isEmpty
+    let some owner ← getMission? store machine.ownerMission | return false
+    if owner.ownerUserId != callerUserId then return false
+    if !callerProj.isEmpty && owner.project != callerProj then return false
+    if claims.isExternal || directOperator then return true
+    if callerMid.isEmpty then return false
+    if ← managedMissionAncestor store callerMid machine.ownerMission callerUserId owner.project then return true
+    return ← managedMissionAncestor store machine.ownerMission callerMid callerUserId owner.project
 
   -- Idempotent replay for retried mutating MCP calls carrying `idempotency_key`
   let idemKeyTop := ((args.fieldStr? "idempotency_key").getD "").trimAscii.toString
@@ -821,7 +874,9 @@ def dispatchMcpToolCall
   | "stop_managed_machine" | "resume_managed_machine" | "destroy_managed_machine" | "extend_managed_machine" =>
     let some mc := mc? | return mcpErr "unavailable" "managed compute store not configured"
     let mid := (args.fieldStr? "machine_id").orElse (fun _ => args.fieldStr? "id") |>.getD ""
-    let some (m, _) ← getManagedMachine? mc mid
+    let some canonicalId ← resolveManagedMachineId? mc mid
+      | return mcpErr "not_found" "Managed machine not found"
+    let some (m, _) ← getManagedMachine? mc canonicalId
       | return mcpErr "not_found" "Managed machine not found"
     if !(← canManageMachine m) then return mcpErr "not_found" "Managed machine not found"
     let action := if toolName == "stop_managed_machine" then "stop"

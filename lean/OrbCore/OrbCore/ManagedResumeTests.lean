@@ -67,10 +67,12 @@ private def runInventoryTests (root : String) : IO Unit := do
     }
     let template := OrbCore.ManagedProvisioningTests.mockPolicyProvider mc "boat"
     let requestedSource ← IO.mkRef ""
+    let requestedName ← IO.mkRef ""
     let provider := { template with
       list := pure (.ok (inventory.push source))
       resume := fun id spec => do
         requestedSource.set id
+        requestedName.set spec.name
         template.resume id spec
     }
     let ctx : OrbCore.RemoteFleetAndRelay.ManagedLifecycleContext := {
@@ -81,7 +83,8 @@ private def runInventoryTests (root : String) : IO Unit := do
         (.obj #[("ttl_minutes", .nat 5)]) "restore-existing-boat"
       | throw (IO.userError "on-demand legacy resume failed")
     let some (current, _) ← getManagedMachine? mc "mmondemand" | throw (IO.userError "resumed legacy missing")
-    check ((← requestedSource.get) == "bx_on_demand" && current.id == "mmondemand" && current.nodeBootEpoch == 2 &&
+    check ((← requestedSource.get) == "bx_on_demand" && (← requestedName.get) == prefixName ++ "mmondemand" &&
+      current.id == "mmondemand" && current.nodeBootEpoch == 2 &&
       current.status == "ready" && current.providerId != "bx_on_demand" &&
       (((resumed.field? "machine").getD .null).fieldStr? "node_id") == some "managed-mmondemand") "archived source forks under the same machine and node ID"
     let stale : ProviderObservation := {

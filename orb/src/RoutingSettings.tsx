@@ -55,7 +55,7 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
   let copyFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
   onCleanup(() => clearTimeout(copyFeedbackTimer));
   const [chains, setChains] = createSignal<R.ModelChain[]>(
-    isConnected() ? (cachePeekArray<R.ModelChain>("routing:chains") ?? []) : [],
+    isConnected() ? R.normalizeChains(cachePeekArray<unknown>("routing:chains") ?? []) : [],
   );
   const [health, setHealth] = createSignal<R.AccountHealthSnapshot[]>(
     isConnected() ? (cachePeekArray<R.AccountHealthSnapshot>("routing:health") ?? []) : [],
@@ -206,7 +206,7 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
     queuedFullRefresh = false;
     queuedForceRefresh = false;
     queuedManualRefresh = false;
-    setChains(connected ? (cachePeekArray<R.ModelChain>("routing:chains") ?? []) : []);
+    setChains(connected ? R.normalizeChains(cachePeekArray<unknown>("routing:chains") ?? []) : []);
     setHealth(connected ? (cachePeekArray<R.AccountHealthSnapshot>("routing:health") ?? []) : []);
     setAccounts(connected ? (cachePeekArray<AIProvider>("providers:list") ?? []) : []);
     setCatalog(connected ? (cachePeek<R.RoutingCatalog>("routing:catalog") ?? { providers: [] }) : { providers: [] });
@@ -668,7 +668,8 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
                   <div class="routing-chain-heading">
                   <button
                     class="routing-chain-summary"
-                    aria-expanded={expanded() === chain.id}
+                    disabled={!!chain.malformed}
+                    aria-expanded={chain.malformed ? undefined : expanded() === chain.id}
                     onClick={() => {
                       const next = expanded() === chain.id ? null : chain.id;
                       const apply = () => { if (next) edit(chain); else { setEditing(null); setExpanded(null); } };
@@ -692,7 +693,10 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
                     <Show when={copiedId() === chain.id} fallback={<Ic.CopyIcon size={13} />}><span aria-live="polite">✓</span></Show>
                   </button>
                   </div>
-                  <Show when={editing() === chain.id}>
+                  <Show when={chain.malformed}>
+                    <p class="inline-error routing-chain-malformed" role="alert">{chain.malformed}</p>
+                  </Show>
+                  <Show when={editing() === chain.id && !chain.malformed}>
                     <Editor />
                   </Show>
                 </article>

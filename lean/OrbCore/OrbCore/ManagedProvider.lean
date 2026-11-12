@@ -67,6 +67,30 @@ structure Provider where
   deleteSnapshot : String → IO (Result Unit)
   writeFile : String → String → String → IO (Result Unit)
   exec : String → String → UInt32 → IO (Result JVal)
+  usageCents : String → IO (Result (Option UInt64)) := fun _ => pure (.ok none)
+
+/-- Parse nonnegative provider USD decimals (including bounded exponent form)
+    and round half-up to cents without binary floating-point arithmetic. -/
+def usdCents? (raw : String) : Option UInt64 := do
+  if raw.length > 64 then none else do
+    let parts := raw.toLower.splitOn "e"
+    let (mantissa, exponent) ← match parts with
+      | [m] => some (m, (0 : Int))
+      | [m,e] => do let x ← e.toInt?; pure (m,x)
+      | _ => none
+    if exponent < -12 || exponent > 12 then none else do
+      let (whole, fraction) ← match mantissa.splitOn "." with
+        | [w] => some (w, "")
+        | [w,f] => some (w,f)
+        | _ => none
+      let digits := whole ++ fraction
+      if whole.isEmpty || !digits.toList.all (fun c => '0' ≤ c && c ≤ '9') then none else do
+        let n ← digits.toNat?
+        let power := exponent - (Int.ofNat fraction.length) + 2
+        let cents := if power ≥ 0 then n * 10 ^ power.toNat else
+          let denominator := 10 ^ (-power).toNat
+          (n + denominator / 2) / denominator
+        if cents > 9000000000000000 then none else some cents.toUInt64
 
 /-- Integer milli-cents avoid floating point and conservatively reserve full leases. -/
 structure Size where

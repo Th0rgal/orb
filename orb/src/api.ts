@@ -1137,6 +1137,8 @@ export interface Mission {
   recovery?: { kind: "transient" | "background" | "quota" | "output_limit"; reason: string; resume_at: string; attempt: number; max_attempts: number } | null;
   scheduling?: { owner: "sandboxed"; durable: boolean; native_schedule_wakeup: boolean; native_cron: boolean; transport: "mcp" | "acp_mcp" | "local_command" | "unavailable" };
   continuation?: import("./continuations").ContinuationSummary | null;
+  /** Authoritative pending direct children, including those absent from the sidebar. */
+  live_children_count?: number;
   /** The mission that launched this one through the MCP, if any. */
   parent_mission_id?: string | null;
   /** Verified source of an isolated Hermes callback; presentation lineage only. */

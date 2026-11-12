@@ -16,6 +16,20 @@ it("shows both account quotas on the first visit even when the bulk cache is emp
   expect(container.textContent).toContain("Weekly");
   expect(container.textContent).not.toContain("5h");
 });
+it("renders Core's ready subscription status as configured, not unknown or verified connected", async () => {
+  setConnection("http://core.test", "test-token");
+  // renderHydratedProviderJv reports saved credentials as ready, not connected.
+  const ready = { ...account("saved-subscription"), status: { type: "ready", message: "Connected via OAuth" } };
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(url.endsWith("/providers") ? [ready] : {}))));
+  const { container } = render(() => <Providers />);
+  await waitFor(() => expect(container.querySelector(".p-st")?.textContent).toBe("Configured"));
+  expect(container.querySelector(".p-st")?.getAttribute("title")).toBe("Configured");
+  expect(container.textContent).not.toContain("Unknown");
+  expect(effectiveProviderStatus(ready)).toBe("ready");
+  expect(effectiveProviderStatus(ready, { ...usage(10), status: "needs_reauth" })).toBe("needs_reauth");
+  expect(effectiveProviderStatus(ready, usage(100))).toBe("quota_exhausted");
+});
+
 it("uses actual window lengths and excludes absent zero-duration windows", () => {
   expect(usageWindows(usage(45))).toEqual([{ label: "Weekly", used: .45 }]);
   expect(usageWindows({ ...usage(45), codex_primary_window_minutes: 300 })).toEqual([{ label: "5h", used: .45 }]);

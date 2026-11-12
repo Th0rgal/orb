@@ -1133,20 +1133,10 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
    * a tool call counts, not just text — and never runs for a state the user
    * has to act on, which keeps its own banner.
    */
-  // A delivered follow-up whose turn has not started yet. Between the send
-  // receipt and Core's user_message/status, neither the draft nor `busy()`
-  // held the Working row: it unmounted for ~0.7 s and the transcript shifted
-  // under the new bubble, then shifted back when the turn started.
-  const awaitingTurn = () => {
-    const list = items();
-    for (let i = list.length - 1; i >= 0; i--) {
-      const item = list[i];
-      if (item.kind !== "user") return false;
-      if (item.queued) continue;
-      return item.receipt === true;
-    }
-    return false;
-  };
+  // Keep send continuity through the shared, bounded handoff lifecycle. An HTTP
+  // receipt is only message identity, not liveness: if canonical transcript
+  // events are missed, it can remain the tail long after the job/status settles.
+  const awaitingTurn = () => runState().reason === "handoff";
   // A turn ended with messages still queued: Core delivers the next one in a
   // moment. Keep the Working row across that gap via deterministic `SM-24`
   // `orbFollowupQueueStep` reconciliation (clearing immediately when the new
@@ -1198,7 +1188,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
     if(!p.id)return !p.launchError;
     if(sendingImmediate()&&!handoff())return false;
     if(clientPlaced() && !localRunActive(p.id) && (localFailure(p.id) || queuedLocalMessages(p.id).some(row=>row.interrupted)))return false;
-    return busy() || optimisticList().some(item => !item.waiting && !item.failed) || awaitingTurn() || queuedLocalMessages(p.id).some(row=>!row.error && (!row.waiting || row.state==='dispatching' || row.state==='accepted'));
+    return busy() || optimisticList().some(item => !item.waiting && !item.failed) || queuedLocalMessages(p.id).some(row=>!row.error && (!row.waiting || row.state==='dispatching' || row.state==='accepted'));
   };
   // Unified execution-derived phase label (`missionStatus.ts`): starting/transferred
   // missions say "Starting <Harness>" until execution or first output is confirmed.

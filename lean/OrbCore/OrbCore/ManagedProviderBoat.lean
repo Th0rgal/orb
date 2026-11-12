@@ -165,6 +165,14 @@ def boat (transport : Transport) (sleep : UInt32 → IO Unit := fun ms => do IO.
       body := some (.obj #[("command", .str command), ("timeoutSeconds", .nat timeout.toNat)])
       timeoutMs := timeout * 1000 + 5000
     }
+  usageCents := fun id => do
+    match ← call transport { method := "GET", path := sandboxPath id ++ "/usage" } with
+    | .error e => return .error e
+    | .ok body =>
+      let amount := match body.field? "dollars" with
+        | some (.num raw) | some (.str raw) => usdCents? raw
+        | _ => none
+      return .ok amount
 }
 
 

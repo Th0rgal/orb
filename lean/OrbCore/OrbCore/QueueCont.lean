@@ -1240,7 +1240,8 @@ def missionDetailJson
     "COALESCE(NULLIF(m.created_at,''),m.updated_at),COALESCE(m.metadata_updated_at,'')," ++
     "COALESCE(m.short_description,''),COALESCE(m.workspace_id,'00000000-0000-0000-0000-000000000000')," ++
     "COALESCE(m.workspace_name,''),COALESCE(m.agent,''),COALESCE(m.config_profile,''),COALESCE(m.resumable,0)," ++
-    "COALESCE(m.history_json,'[]') " ++
+    "COALESCE(m.history_json,'[]')," ++
+    liveChildrenCountSql ++ " AS live_children_count " ++
     "FROM missions m LEFT JOIN mission_terminal_evidence e ON e.mission_id=m.id WHERE m.id=?1;"
   let rows ← execParamQuery st.missionsDb sql #[missionId]
   match rows with
@@ -1302,6 +1303,7 @@ def missionDetailJson
     let cfgProfVal := cell r 45
     let cfgProfJson := if cfgProfVal.isEmpty then "null" else jsonEscape cfgProfVal
     let resumableBool := (cellNat r 46) != 0
+    let liveChildrenCount := cellNat r 48
     let rawHist := cell r 47
     let mut histOut := if rawHist.startsWith "[" then rawHist else "[]"
     if (cell r 3).startsWith "cloud_" && histOut == "[]" then
@@ -1346,7 +1348,7 @@ def missionDetailJson
       s!"\{\"id\":{jsonEscape (cell r 0)},\"title\":{jsonEscape (cell r 1)},\"status\":{jsonEscape status}," ++
       s!"\"backend\":{jsonEscape (cell r 3)},\"model_override\":{jsonEscape modelOverride},\"model_effort\":{jsonEscape modelEffort}," ++
       s!"\"project\":{projJson},\"folder\":{jsonEscape folderVal},\"placement_revision\":{placeRev}," ++
-      s!"\"parent_mission_id\":{parentJson},\"track\":{jsonEscape track},\"github_pr\":{jsonEscape githubPr}," ++
+      s!"\"parent_mission_id\":{parentJson},\"live_children_count\":{liveChildrenCount},\"track\":{jsonEscape track},\"github_pr\":{jsonEscape githubPr}," ++
       s!"\"working_directory\":{jsonEscape workDir},\"workspace_id\":{jsonEscape wsIdVal},\"workspace_name\":{wsNameJson}," ++
       s!"\"agent\":{agentJson},\"config_profile\":{cfgProfJson},\"resumable\":{if resumableBool then "true" else "false"}," ++
       s!"\"short_description\":{shortDescJson},\"created_at\":{jsonEscape createdAtVal}," ++

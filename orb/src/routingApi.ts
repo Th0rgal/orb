@@ -18,6 +18,32 @@ export interface ModelChain {
   strip_thinking: boolean;
   created_at: string;
   updated_at: string;
+  /** Client-only: why this row cannot be shown or edited (never sent to Core). */
+  malformed?: string;
+}
+
+const text = (value: unknown) => (typeof value === "string" ? value : "");
+
+/**
+ * The one reader of Core's chain list. A row without a valid `entries` list
+ * (an older Core sends `models_json` instead) is kept, marked `malformed`, and
+ * shown with an inline error: it must never blank the tab, and it is never
+ * editable, because saving it would overwrite the server's real models.
+ */
+export function normalizeChains(rows: unknown): ModelChain[] {
+  if (!Array.isArray(rows)) throw new Error("Core returned an unexpected Fallback Chains response.");
+  return rows.map((row, index) => {
+    const r = (row && typeof row === "object" ? row : {}) as Record<string, unknown>;
+    const id = text(r.id), name = text(r.name) || id || `Chain ${index + 1}`;
+    const entries = Array.isArray(r.entries) ? r.entries : null;
+    const kept = text(r.malformed); // a row already marked in the local cache stays marked
+    const valid = !kept && !!id && !!entries && entries.every(e => !!e && typeof e === "object" && typeof (e as ChainEntry).provider_id === "string" && typeof (e as ChainEntry).model_id === "string");
+    if (valid) return { ...(r as unknown as ModelChain), name };
+    const malformed = kept ? kept : !id ? "Core sent this chain without an id."
+      : "models_json" in r && !entries ? "Core sent this chain in an older format (models_json instead of entries). Update the server to view or edit it."
+      : "Core sent this chain without a valid list of models.";
+    return { id: id || `malformed:${index}`, name, entries: [], is_default: r.is_default === true, strip_thinking: r.strip_thinking === true, created_at: text(r.created_at), updated_at: text(r.updated_at), malformed };
+  });
 }
 
 export interface ResolvedEntry {
@@ -124,7 +150,7 @@ function cached<T>(load: () => Promise<T>, ttl: number) {
     return current.pending;
   };
 }
-export const listChains = cached(() => api<ModelChain[]>(`${root}/chains`), 30_000);
+export const listChains = cached(() => api<unknown>(`${root}/chains`).then(normalizeChains), 30_000);
 export const listHealth = () => api<AccountHealthSnapshot[]>(`${root}/health`);
 export const listEvents = () => api<FallbackEvent[]>(`${root}/events`);
 export const routingCatalog = cached(() =>

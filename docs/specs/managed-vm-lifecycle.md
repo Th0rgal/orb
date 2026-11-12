@@ -141,7 +141,40 @@ fail before reservation until project/tenant snapshot lookup is connected.
 The trusted provider adapter's saved-snapshot wire contract is tested separately.
 Stop and destroy require provider success before committing local state. Resume
 uses an archived Boat sandbox as a fork source, bootstraps a successor, and keeps
-the same Core machine/node ID. Extend remains fail-closed pending its orchestration.
+the same Core machine/node ID.
+
+### TTL: explicit extension, expiry cleanup, operator probe (Lean Core)
+
+The Lean Core implements a **fixed TTL with explicit extension only**. The retired
+Rust server's busy auto-extension (`SANDBOXED_MANAGED_AUTO_EXTEND_MINUTES`, the
+`auto_extended` ledger event, described further below) is **not implemented**; the MCP
+tool text says so. A busy machine still stops at its TTL.
+
+- **Extend** (`extend_managed_machine`, `POST /api/managed-machines/:id/extend`, legacy
+  alias `/api/managed/machines/...`): `ttl_minutes`/`minutes` is an integer 5..=720 added
+  to the current deadline, capped at 720 minutes after the current boot started (creation,
+  or the resume that produced this boot). Core reserves the fixed target and the price
+  difference under the admission transaction, then sends the provider the remaining seconds
+  (`PATCH ttlSeconds` on Boat). Only a provider acknowledgement moves `expires_at_sec`.
+  A definitive refusal releases the reservation; an uncertain outcome stays pending and is
+  retried against the same absolute target, so a retry never adds the duration twice.
+- **Who may extend through MCP:** the owning mission, its ancestors and its descendants
+  (same tenant and project; not siblings), an external session of the owning user, and a
+  Core-authenticated operator call whose verified user owns the machine. Role labels and
+  request-body identities grant nothing. Both `<id>` and `managed-<id>` are accepted;
+  anything else answers `not_found`.
+- **Expiry** (`ManagedTtl.tick`, every 30 s): within 2 minutes of the deadline the owner
+  mission gets one `managed_machine_expiring` event. At the deadline Core claims the expiry
+  (which fences extensions, heartbeats and resume), emits `managed_machine_expired`, reads
+  the provider's state and usage, destroys a still-billable guest, and only then closes the
+  row and emits `managed_machine_expiry_cleaned`. An already archived, nonbilling disk is
+  kept for recovery and the row becomes `stopped`. Provider errors leave the cleanup
+  `pending` (row shown as `destroying`) and it is retried; nothing is marked done on
+  silence. Spend is the provider's metered figure when it reports one, otherwise the lease
+  reservation, labelled `lease_reservation_estimate`. Events are deduplicated per boot.
+- **Operator probe:** `orb-core managed-inspect <id|managed-<id>|unique-prefix>...` prints,
+  per machine, Core's row beside the provider's state (`provider_exists`, `provider_state`,
+  `provider_billable`, `provider_usage_cents`). It is read-only.
 
 ### Existing Boat machines and resume
 
