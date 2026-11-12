@@ -11,6 +11,7 @@ import OrbCore.ManagedSpawnActions
 import OrbCore.Managed
 import OrbCore.ManagedHarvest
 import OrbCore.AutoPlacement
+import OrbCore.ManagedReuse
 import OrbCore.MemoryAndCloud
 import OrbCore.QueueCont
 import OrbCore.R7Core
@@ -658,23 +659,45 @@ def dispatchMcpToolCall
       return mcpErr "invalid_arguments" "managed_from_snapshot requires remote_node_id auto-managed[:size]"
     -- `auto-managed[:size]` rents one machine for this child through the shared spawn
     -- path. Nothing is rented when validation, admission or the snapshot lookup fails.
-    let (explicitRn?, rentedMachineId) ← if !autoManaged then pure (requestedRn?, "") else do
+    let (explicitRn?, rentedMachineId, reused?) ← if !autoManaged then pure (requestedRn?, "", none) else do
       let parts := (((requestedRn?.getD "").toLower.splitOn ":").drop 1).filter (fun part => part != "boat" && !part.isEmpty)
-      let retryKey ← match (args.fieldStr? "idempotency_key").filter (!·.isEmpty) with
-        | some key => pure key
-        | none => newUuidV4
-      let spawnArgs := JVal.obj #[
-        ("provider", .str "boat"), ("size", .str (parts.head?.getD "small")),
-        ("ttl_minutes", JVal.uint64 ((args.fieldUInt64? "managed_ttl_minutes").getD 60)),
-        ("from_snapshot", .str ((args.fieldStr? "managed_from_snapshot").getD "")),
-        ("idempotency_key", .str ("start-mission:" ++ retryKey))]
-      match ← spawnForCaller spawnArgs with
-      | .error (_, message) => return mcpErr "managed_placement_failed" message
-      | .ok rented => pure (some s!"managed-{rented.id}", rented.id)
+      -- An idle VM left by an ended child of this same caller is taken over instead
+      -- of renting another. A snapshot request always gets a fresh machine.
+      let reuseRequest : ManagedReuse.Request := {
+        provider := "boat"
+        size := parts.head?.getD "small"
+        parentMission := callerMid
+        userId := callerUserId
+        project := effProj
+        now := nowEpochSec
+      }
+      let reused? : Option ManagedReuse.Claimed ← match mc? with
+        | some mc =>
+          if wantsSnapshot || callerMid.isEmpty || parentMid != callerMid then pure none
+          else ManagedReuse.claim store mc reuseRequest callerMid
+        | none => pure none
+      if let some claimed := reused? then
+        pure (some s!"managed-{claimed.machine.id}", claimed.machine.id, reused?)
+      else
+        let retryKey ← match (args.fieldStr? "idempotency_key").filter (!·.isEmpty) with
+          | some key => pure key
+          | none => newUuidV4
+        let spawnArgs := JVal.obj #[
+          ("provider", .str "boat"), ("size", .str (parts.head?.getD "small")),
+          ("ttl_minutes", JVal.uint64 ((args.fieldUInt64? "managed_ttl_minutes").getD 60)),
+          ("from_snapshot", .str ((args.fieldStr? "managed_from_snapshot").getD "")),
+          ("idempotency_key", .str ("start-mission:" ++ retryKey))]
+        match ← spawnForCaller spawnArgs with
+        | .error (_, message) => return mcpErr "managed_placement_failed" message
+        | .ok rented => pure (some s!"managed-{rented.id}", rented.id, none)
+    -- A failed start destroys what it rented, and hands back what it took over.
     let releaseRented : IO Unit := do
       if let (some mc, false) := (mc?, rentedMachineId.isEmpty) then
-        discard <| runConfiguredManagedLifecycle mc
-          { store, fleet := defaultFleet, override? := managedProvisioningOverride? } rentedMachineId "destroy" nowEpochSec
+        match reused? with
+        | some claimed => ManagedReuse.restore mc claimed
+        | none =>
+          discard <| runConfiguredManagedLifecycle mc
+            { store, fleet := defaultFleet, override? := managedProvisioningOverride? } rentedMachineId "destroy" nowEpochSec
     -- Nodes this mission may not use: named here, or tagged on any ancestor.
     let excluded := AutoPlacement.normalizeAll
       ((((args.fieldArr? "exclude_nodes").getD #[]).filterMap JVal.asStr?) ++
@@ -777,7 +800,11 @@ def dispatchMcpToolCall
       ("remote_node_id", match inheritedRn? with | some rn => .str rn | none => .null),
       ("project", if effProj.isEmpty then .null else .str effProj),
       ("folder", .str folder),
-      ("placement_revision", JVal.uint64 initRev)
+      ("placement_revision", JVal.uint64 initRev),
+      -- A reused machine keeps its remaining lifetime: the child extends it if it needs more.
+      ("managed_machine_reused", .bool reused?.isSome),
+      ("managed_machine_expires_at_sec",
+        match reused? with | some claimed => JVal.uint64 claimed.machine.expiresAtSec | none => .null)
     ]
     let settled ← recordSettledMcpAction store claims toolName args resObj nowIso mid
     return mcpOk settled

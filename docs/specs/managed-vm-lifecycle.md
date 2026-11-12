@@ -690,6 +690,33 @@ A mission whose stored tag is still `remote-node:auto` (created before this
 rule, or through REST) resolves as before to the first configured node, and its
 children stay with it unless that node is excluded.
 
+## Reusing an idle VM for the next child
+
+Code: `lean/OrbCore/OrbCore/ManagedReuse.lean`, applied by `start_mission(auto-managed[:size])`.
+
+Before renting, Core looks for a VM it can hand to the new child. All of these
+must hold:
+
+- it was rented by this same caller for an earlier child (requester is the
+  caller, owner is that child), with the same provider, size, owner user and
+  project; a VM a mission spawned for itself is never taken;
+- that child has ended (`completed`, `failed`, `cancelled`, `archived`,
+  `acknowledged`); a child that is `awaiting_user` or `interrupted` may continue
+  and keeps its VM;
+- the VM is running, not cordoned, polled within the last 2 minutes, has no
+  non-terminal job in Core's ledger, has no expiry in progress, and has at least
+  15 minutes left;
+- the call does not ask for a snapshot (`managed_from_snapshot` always rents).
+
+The transfer is one compare-and-set on the owner, so concurrent starts cannot
+both take the same VM. Nothing is rented and no budget is reserved. The expiry is
+not reset: the result carries `managed_machine_reused` and
+`managed_machine_expires_at_sec`, and the child extends if it needs longer. If
+the start then fails, the previous owner is restored and the VM is not destroyed.
+
+An auto-managed VM is not released when its child ends. It runs until its TTL or
+until `destroy_managed_machine`.
+
 ## Harvesting a file from a VM
 
 Code: `lean/OrbCore/OrbCore/ManagedHarvest.lean`, tool `harvest_managed_file(machine_id, path)`.
