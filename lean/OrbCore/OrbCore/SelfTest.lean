@@ -4607,6 +4607,26 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
       parityVm.ownerUserId != bobId || parityVm.ownerMission != "m-managed-parity" ||
       parityVm.status != "ready" || parityVm.lastPollSec == 0 || parityVm.providerId == parityVm.id then
     return (← fail "REST/MCP provisioning parity or retry identity failed")
+  let .ok () ← upsertMission store {
+    id := "m-managed-foreign", title := "Foreign managed caller", status := "awaiting_user",
+    backend := "opencode", modelOverride := "", updatedAt := formatEpochIso8601Utc nowSec,
+    workingDirectory := muRoot, ownerUserId := aliceId
+  } | return (← fail "foreign managed caller fixture failed")
+  let foreignClaims := { parityClaims with sessionId := "foreign-managed-session", missionId := "m-managed-foreign" }
+  let foreignDestroy ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot foreignClaims
+    "destroy_managed_machine" (.obj #[("machine_id", .str parityId)]) nowSec none app.managedProvisioningOverride?
+  let foreignExec ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot foreignClaims
+    "exec_raw_managed_machine" (.obj #[("machine_id", .str parityId), ("command", .str "true")]) nowSec none app.managedProvisioningOverride?
+  let wrongProject ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot
+    { parityClaims with project := "another-project" }
+    "destroy_managed_machine" (.obj #[("machine_id", .str parityId)]) nowSec none app.managedProvisioningOverride?
+  for response in #[foreignDestroy, foreignExec, wrongProject] do
+    let parsed := (OrbBin.Json.parse response).toOption.getD .null
+    if ((parsed.field? "error").getD .null).fieldStr? "code" != some "not_found" then
+      return (← fail "managed mutations must not cross tenant/project boundaries")
+  let some (stillReady, _) ← getManagedMachine? mStore parityId
+    | return (← fail "foreign caller erased managed machine")
+  if stillReady.status != "ready" then return (← fail "foreign caller changed managed machine")
   let mcpDestroyed ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
     "destroy_managed_machine" (.obj #[("machine_id", .str parityId)]) nowSec none app.managedProvisioningOverride?
   if ((OrbBin.Json.parse mcpDestroyed).toOption.getD .null).fieldBool? "ok" != some true then

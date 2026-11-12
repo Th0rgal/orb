@@ -182,6 +182,13 @@ def dispatchMcpToolCall
         if callerProj.isEmpty && !pj.isEmpty then callerProj := pj
         callerUserId := cell mRows[1]! 2
 
+  let canManageMachine (machine : ManagedMachine) : IO Bool := do
+    if normalizeMcpRole claims.role != "operator" && machine.ownerUserId != callerUserId then
+      return false
+    if claims.project.isEmpty then return true
+    let owner? ← getMission? store machine.ownerMission
+    return (owner?.map (·.project)).getD "" == claims.project
+
   -- Idempotent replay for retried mutating MCP calls carrying `idempotency_key`
   let idemKeyTop := ((args.fieldStr? "idempotency_key").getD "").trimAscii.toString
   if !idemKeyTop.isEmpty && toolName != "get_action" && toolName != "wait_actions" &&
@@ -790,8 +797,13 @@ def dispatchMcpToolCall
     let cmd := (args.fieldStr? "command").getD ""
     if mid.isEmpty || cmd.isEmpty then
       return mcpErr "invalid_arguments" "machine_id and command are required"
+    let some canonicalId ← resolveManagedMachineId? mc mid
+      | return mcpErr "not_found" "Managed machine not found"
+    let some (machine, _) ← getManagedMachine? mc canonicalId
+      | return mcpErr "not_found" "Managed machine not found"
+    if !(← canManageMachine machine) then return mcpErr "not_found" "Managed machine not found"
     let timeoutMs := ((args.fieldNat? "timeout_secs").getD 60) * 1000
-    match ← execOnRemoteNode relayHub? mc mid callerMid cmd false timeoutMs with
+    match ← execOnRemoteNode relayHub? mc canonicalId callerMid cmd false timeoutMs with
     | .ok res => return mcpOk res
     | .error e => return mcpErr "exec_failed" e true
 
@@ -799,7 +811,8 @@ def dispatchMcpToolCall
     let some mc := mc? | return mcpErr "unavailable" "managed compute store not configured"
     let mid := (args.fieldStr? "machine_id").orElse (fun _ => args.fieldStr? "id") |>.getD ""
     let some (m, _) ← getManagedMachine? mc mid
-      | return mcpErr "not_found" s!"Managed machine `{mid}` not found"
+      | return mcpErr "not_found" "Managed machine not found"
+    if !(← canManageMachine m) then return mcpErr "not_found" "Managed machine not found"
     let action := if toolName == "stop_managed_machine" then "stop"
       else if toolName == "destroy_managed_machine" then "destroy"
       else if toolName == "extend_managed_machine" then "extend" else "resume"
@@ -811,6 +824,9 @@ def dispatchMcpToolCall
     let some mc := mc? | return mcpErr "unavailable" "managed compute store not configured"
     let mid := (args.fieldStr? "machine_id").orElse (fun _ => args.fieldStr? "id") |>.getD ""
     let sName := (args.fieldStr? "name").getD ""
+    let some (machine, _) ← getManagedMachine? mc mid
+      | return mcpErr "not_found" "Managed machine not found"
+    if !(← canManageMachine machine) then return mcpErr "not_found" "Managed machine not found"
     match ← createManagedSnapshot mc store.rootDir mid sName nowIso with
     | .ok sv => return mcpOk sv
     | .error e => return mcpErr "snapshot_failed" e
@@ -833,7 +849,8 @@ def dispatchMcpToolCall
       | .error _ => pure defaultFleet
     let srcId := (args.fieldStr? "machine_id").orElse (fun _ => args.fieldStr? "source_machine_id") |>.getD ""
     let some (m, _) ← getManagedMachine? mc srcId
-      | return mcpErr "not_found" s!"Managed machine `{srcId}` not found"
+      | return mcpErr "not_found" "Managed machine not found"
+    if !(← canManageMachine m) then return mcpErr "not_found" "Managed machine not found"
     let forkId ← newUuidV4
     let forkName := ((args.fieldStr? "name").filter (!·.isEmpty)).getD s!"{m.sandboxName}-fork"
     let forked : ManagedMachine := {
