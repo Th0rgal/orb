@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, waitFor } from "@solidjs/testing-library";
 import "../src/SearchDialog";
 import "../src/Settings";
 import "../src/SettingsShell";
+import "../src/Inbox";
 import "../src/MachineCloudMenu";
 import "../src/managedMachineModel";
 import "../src/cloudAgentApi";
@@ -78,12 +79,22 @@ describe("Settings navigation sidebar preservation and connection scoping", () =
           ];
           return Response.json(rows);
         }
-        if (path === "/api/control/missions") return Response.json([]);
+        if (path === "/api/control/missions") return Response.json([{
+          id: "done-mission",
+          title: "Finished audit",
+          project: "verity",
+          status: "completed",
+          tags: [],
+          history: [{ role: "assistant", content: "Audit complete." }],
+          created_at: "2026-11-09T15:00:00Z",
+          updated_at: "2026-11-09T15:05:00Z",
+        }]);
         if (path === "/api/remote-nodes") return Response.json({ nodes: [] });
         if (path === "/api/cloud/accounts") return Response.json([]);
         if (path === "/api/backends") return Response.json([]);
         if (path === "/api/providers/backend-models") return Response.json({ backends: {} });
         if (path === "/api/model-routing/chains") return Response.json([]);
+        if (path.endsWith("/events")) return Response.json({ events: [], has_more: false });
         if (path.endsWith("/files")) return Response.json({ entries: [] });
         if (path.endsWith("/controller")) return Response.json({ job: null, runs: [] });
         if (path.endsWith("/crons")) return Response.json({ jobs: [] });
@@ -140,5 +151,17 @@ describe("Settings navigation sidebar preservation and connection scoping", () =
     const secondaryBtn = await view.findByRole("button", { name: "Secondary", exact: true });
     expect(secondaryBtn).toBeTruthy();
     expect(view.queryByRole("button", { name: "Verity", exact: true })).toBeNull();
+  });
+
+  it("opens a single-agent delete confirmation from Inbox Delete action", async () => {
+    vi.stubGlobal("CSS", { escape: (s: string) => s });
+    render(() => <App />);
+    const { screen } = await import("@solidjs/testing-library");
+    fireEvent.click(await screen.findByRole("button", { name: /^Inbox/ }));
+    const peekBtn = await screen.findByRole("button", { name: /^Peek and reply/ });
+    fireEvent.click(peekBtn);
+    const deleteBtn = await screen.findByRole("button", { name: "Delete…", exact: true });
+    fireEvent.click(deleteBtn);
+    expect(await screen.findByRole("dialog", { name: "Delete 1 agent?" })).toBeTruthy();
   });
 });

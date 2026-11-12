@@ -1,12 +1,9 @@
-import { isRecord, readJson, writeJson } from "./storage";
+import { writeJson } from "./storage";
 import { SIDE_QUESTION_HARNESSES, harnessName } from "./harnesses";
 import {For,createSignal} from 'solid-js';
 import {Select} from './Select';
-import {sideQuestionKey} from './sideQuestionStorage';
-export type BtwConfig={harness:string;model:string};
-export function btwConfig():BtwConfig {
- return {...{harness:'opencode',model:'builtin/smart'},...readJson<Partial<BtwConfig>>(sideQuestionKey('settings:btw'),{},isRecord)};
-}
+import {btwConfig, sideQuestionKey, type BtwConfig} from './sideQuestionStorage';
+export {btwConfig, type BtwConfig};
 export function BtwSettings(){
  const [config,setConfig]=createSignal(btwConfig());const [message,setMessage]=createSignal('');
  const save=()=>setMessage(writeJson(sideQuestionKey('settings:btw'),config())?'Saved. Applies to the next side question.':'Could not save settings.');
