@@ -179,8 +179,10 @@ export function renderInlineAst(nodes: InlineNode[]): JSX.Element[] {
   });
 }
 
-function inline(text: string, preParsed?: InlineNode[]): JSX.Element[] {
-  return renderInlineAst(preParsed ?? parseInlineAst(text, true));
+function inline(text: string, preParsed?: InlineNode[], pendingWorker?: boolean): JSX.Element[] {
+  if (preParsed) return renderInlineAst(preParsed);
+  if (pendingWorker) return [text];
+  return renderInlineAst(parseInlineAst(text, true));
 }
 
 export function parseMarkdown(src: string): Block[] {
@@ -195,33 +197,33 @@ export function incrementalMarkdown(): IncrementalMarkdownParser {
   return createIncrementalMarkdown(parseMarkdown);
 }
 
-function renderListItem(it: string | ListItem, preInl?: InlineNode[], compact?: boolean): JSX.Element {
-  if (typeof it === "string") return <li>{inline(it, preInl)}</li>;
+function renderListItem(it: string | ListItem, preInl?: InlineNode[], compact?: boolean, pendingWorker?: boolean): JSX.Element {
+  if (typeof it === "string") return <li>{inline(it, preInl, pendingWorker)}</li>;
   return (
     <li>
-      {inline(it.text, it.inl ?? preInl)}
+      {inline(it.text, it.inl ?? preInl, pendingWorker)}
       <Show when={it.sub?.length}>
-        <For each={it.sub}>{(sub) => renderBlock(sub, compact)}</For>
+        <For each={it.sub}>{(sub) => renderBlock(sub, compact, pendingWorker)}</For>
       </Show>
     </li>
   );
 }
 
-function renderBlock(b: Block, compact?: boolean): JSX.Element {
+function renderBlock(b: Block, compact?: boolean, pendingWorker?: boolean): JSX.Element {
   return b.t === "hr" ? (
     <hr />
   ) : b.t === "math" ? (
     <MathFormula text={b.text} display />
   ) : b.t === "h" && b.n === 1 ? (
-    <h1>{inline(b.text, b.inl)}</h1>
+    <h1>{inline(b.text, b.inl, pendingWorker)}</h1>
   ) : b.t === "h" && b.n === 2 ? (
-    <h2>{inline(b.text, b.inl)}</h2>
+    <h2>{inline(b.text, b.inl, pendingWorker)}</h2>
   ) : b.t === "h" ? (
-    <h3>{inline(b.text, b.inl)}</h3>
+    <h3>{inline(b.text, b.inl, pendingWorker)}</h3>
   ) : b.t === "ol" ? (
-    <ol start={b.start}>{b.items.map((item, idx) => renderListItem(item, b.inl?.[idx], compact))}</ol>
+    <ol start={b.start}>{b.items.map((item, idx) => renderListItem(item, b.inl?.[idx], compact, pendingWorker))}</ol>
   ) : b.t === "ul" ? (
-    <ul>{b.items.map((it, idx) => renderListItem(it, b.inl?.[idx], compact))}</ul>
+    <ul>{b.items.map((it, idx) => renderListItem(it, b.inl?.[idx], compact, pendingWorker))}</ul>
   ) : b.t === "pre" ? (
     isMermaidLang(b.lang) ? (
       <MermaidBlock text={b.text} complete={!b.open} />
@@ -232,7 +234,7 @@ function renderBlock(b: Block, compact?: boolean): JSX.Element {
     <blockquote>
       {b.sub ? (
         <div class={`md ${compact ? "md-compact" : ""}`}>
-          <Index each={b.sub}>{(sub) => renderBlockSlot(sub, compact)}</Index>
+          <Index each={b.sub}>{(sub) => renderBlockSlot(sub, compact, () => Boolean(pendingWorker))}</Index>
         </div>
       ) : (
         <MdView text={b.text} compact={compact} />
@@ -246,7 +248,7 @@ function renderBlock(b: Block, compact?: boolean): JSX.Element {
           <thead>
             <tr>
               {b.heads.map((h, i) => (
-                <th style={{ "text-align": b.aligns[i] ?? "left" }}>{inline(h, b.headInl?.[i])}</th>
+                <th style={{ "text-align": b.aligns[i] ?? "left" }}>{inline(h, b.headInl?.[i], pendingWorker)}</th>
               ))}
             </tr>
           </thead>
@@ -255,7 +257,7 @@ function renderBlock(b: Block, compact?: boolean): JSX.Element {
           {b.rows.map((row, rIdx) => (
             <tr>
               {row.map((c, i) => (
-                <td style={{ "text-align": b.aligns[i] ?? "left" }}>{inline(c, b.rowInl?.[rIdx]?.[i])}</td>
+                <td style={{ "text-align": b.aligns[i] ?? "left" }}>{inline(c, b.rowInl?.[rIdx]?.[i], pendingWorker)}</td>
               ))}
             </tr>
           ))}
@@ -263,11 +265,11 @@ function renderBlock(b: Block, compact?: boolean): JSX.Element {
       </table>
     </div>
   ) : (
-    <p>{inline(b.text, b.inl)}</p>
+    <p>{inline(b.text, b.inl, pendingWorker)}</p>
   );
 }
 
-function renderBlockSlot(block: () => Block, compact?: boolean): JSX.Element {
+function renderBlockSlot(block: () => Block, compact?: boolean, pendingWorker: () => boolean = () => false): JSX.Element {
   const kind = createMemo(() => {
     const b = block();
     if (b.t === "pre") return isMermaidLang(b.lang) ? "pre:mermaid" : "pre:code";
@@ -287,9 +289,9 @@ function renderBlockSlot(block: () => Block, compact?: boolean): JSX.Element {
         }
         if (k === "p") {
           const p = () => block() as Extract<Block, { t: "p" }>;
-          return <p>{inline(p().text, p().inl)}</p>;
+          return <p>{inline(p().text, p().inl, pendingWorker())}</p>;
         }
-        return <>{() => renderBlock(block(), compact)}</>;
+        return <>{() => renderBlock(block(), compact, pendingWorker())}</>;
       }}
     </Show>
   );
@@ -387,12 +389,13 @@ export function MdView(p: { text: string; compact?: boolean; searchable?: boolea
   const parse = incrementalMarkdown();
   let mountText: string | undefined;
   let sawMultipleTexts = false;
-  const [workerParsed, setWorkerParsed] = createSignal<{ text: string; blocks: Block[] } | null>(null);
+  const [workerParsed, setWorkerParsed] = createSignal<{ text: string; blocks: Block[]; settled: boolean } | null>(null);
 
-  const shouldDeferToWorker = (text: string): boolean => {
+  const shouldDeferInlineToWorker = (text: string): boolean => {
     if (typeof Worker === "undefined") return false;
     if (text.length < WORKER_DEFER_THRESHOLD_CHARS || text.length >= 50_000) return false;
-    if (parsedMessages.has(text)) return false;
+    const cached = parsedMessages.get(text);
+    if (cached && cached.every((b) => b.hydrated === true)) return false;
     if (workerParsed()?.text === text) return false;
     // Live streaming updates mutate `p.text` incrementally; keep the incremental O(tail) scanner for streams.
     if (sawMultipleTexts) return false;
@@ -401,47 +404,45 @@ export function MdView(p: { text: string; compact?: boolean; searchable?: boolea
 
   createEffect(() => {
     const text = p.text;
-    if (!shouldDeferToWorker(text)) return;
+    if (!shouldDeferInlineToWorker(text)) return;
     const cancel = requestMarkdownParse(text, (res) => {
       const resolved = applyWorkerMarkdownResult(text, res) ?? parse(text);
       rememberParsedMessage(text, resolved);
-      setWorkerParsed({ text, blocks: resolved });
+      setWorkerParsed({ text, blocks: resolved, settled: true });
     });
     onCleanup(cancel);
   });
 
-  const blocks = createMemo<Block[] | null>(() => {
+  const resolvedState = createMemo<{ blocks: Block[]; pendingInline: boolean }>(() => {
     const text = p.text;
     if (mountText === undefined) mountText = text;
     else if (text !== mountText) sawMultipleTexts = true;
 
+    const asyncHit = workerParsed();
+    if (asyncHit && asyncHit.text === text) {
+      return { blocks: asyncHit.blocks, pendingInline: false };
+    }
     const hit = parsedMessages.get(text);
     if (hit) {
       parsedMessages.delete(text);
       parsedMessages.set(text, hit);
-      return hit;
+      return { blocks: hit, pendingInline: shouldDeferInlineToWorker(text) };
     }
-    const asyncHit = workerParsed();
-    if (asyncHit && asyncHit.text === text) return asyncHit.blocks;
-    if (shouldDeferToWorker(text)) return null;
 
     const out = parse(text);
-    if (!sawMultipleTexts || !parsedMessages.has(text)) rememberParsedMessage(text, out);
-    return out;
+    const pendingInline = shouldDeferInlineToWorker(text);
+    if (!pendingInline && (!sawMultipleTexts || !parsedMessages.has(text))) {
+      rememberParsedMessage(text, out);
+    }
+    return { blocks: out, pendingInline };
   });
+
+  const blocks = () => resolvedState().blocks;
+  const pendingInline = () => resolvedState().pendingInline;
 
   return (
     <div class={`md ${p.compact ? "md-compact" : ""}`} data-find-message={p.searchable ? "" : undefined}>
-      <Show
-        when={blocks()}
-        fallback={
-          <div class="md-pending" style={{ "white-space": "pre-wrap", "overflow-wrap": "anywhere" }}>
-            {p.text}
-          </div>
-        }
-      >
-        {(resolved) => <Index each={resolved()}>{(b) => renderBlockSlot(b, p.compact)}</Index>}
-      </Show>
+      <Index each={blocks()}>{(b) => renderBlockSlot(b, p.compact, pendingInline)}</Index>
     </div>
   );
 }

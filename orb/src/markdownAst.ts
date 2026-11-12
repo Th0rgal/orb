@@ -166,14 +166,14 @@ function inlineTextAst(text: string, links = true): InlineNode[] {
 export type Align = "left" | "center" | "right";
 export type ListItem = { text: string; inl?: InlineNode[]; sub?: Block[] };
 export type Block =
-  | { t: "hr" }
-  | { t: "math"; text: string }
-  | { t: "h"; n: number; text: string; inl?: InlineNode[] }
-  | { t: "p"; text: string; inl?: InlineNode[] }
-  | { t: "ul"; items: (string | ListItem)[]; inl?: Array<InlineNode[] | undefined> }
-  | { t: "ol"; items: (string | ListItem)[]; start: number; inl?: Array<InlineNode[] | undefined> }
-  | { t: "pre"; lang: string; text: string; open?: true }
-  | { t: "quote"; text: string; sub?: Block[] }
+  | { t: "hr"; hydrated?: true }
+  | { t: "math"; text: string; hydrated?: true }
+  | { t: "h"; n: number; text: string; inl?: InlineNode[]; hydrated?: true }
+  | { t: "p"; text: string; inl?: InlineNode[]; hydrated?: true }
+  | { t: "ul"; items: (string | ListItem)[]; inl?: Array<InlineNode[] | undefined>; hydrated?: true }
+  | { t: "ol"; items: (string | ListItem)[]; start: number; inl?: Array<InlineNode[] | undefined>; hydrated?: true }
+  | { t: "pre"; lang: string; text: string; open?: true; hydrated?: true }
+  | { t: "quote"; text: string; sub?: Block[]; hydrated?: true }
   | {
       t: "table";
       heads: string[];
@@ -181,6 +181,7 @@ export type Block =
       aligns: Align[];
       headInl?: InlineNode[][];
       rowInl?: InlineNode[][][];
+      hydrated?: true;
     };
 
 function tableCells(line: string): string[] {
@@ -441,6 +442,7 @@ export function hydrateMarkdownAst(blocks: Block[]): {
 
   const visit = (list: Block[]) => {
     for (const b of list) {
+      b.hydrated = true;
       if (b.t === "math") {
         if (b.text.length < 4000) {
           const key = `D${b.text}`;

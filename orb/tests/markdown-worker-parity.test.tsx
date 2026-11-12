@@ -100,7 +100,7 @@ describe("off-main-thread Markdown AST + KaTeX + Prism parity", () => {
     expect(cachedHighlight(tsCode, "typescript")).toBe(tsHtml);
   });
 
-  it("defers cold >= 4096-char turns to the Worker and falls back cleanly on worker error", async () => {
+  it("preserves exact block/table/code geometry on frame 0 for cold >= 4096-char turns while deferring inline AST to Worker, and falls back cleanly on worker error", async () => {
     const originalWorker = globalThis.Worker;
     let createdWorkers = 0;
     class FailingMockWorker {
@@ -118,18 +118,32 @@ describe("off-main-thread Markdown AST + KaTeX + Prism parity", () => {
     }
     (globalThis as unknown as { Worker: unknown }).Worker = FailingMockWorker;
     try {
-      const huge = `# Large Turn\n\n${"Paragraph body with **bold** text and `code` span. ".repeat(110)}`;
+      const huge = [
+        "# Large Turn",
+        "",
+        "| Col A | Col B |",
+        "| --- | --- |",
+        "| **val** | `code` |",
+        "",
+        "```ts",
+        `const longLine = "${"x".repeat(300)}";`,
+        "```",
+        "",
+        "Paragraph body with **bold** text and `code` span. ".repeat(110),
+      ].join("\n");
       expect(huge.length).toBeGreaterThanOrEqual(4096);
 
       const { container } = render(() => <MdView text={huge} compact />);
-      // Frame 0 renders layout-preserving plain text without blocking main thread on regexes
-      expect(container.querySelector(".md-pending")).toBeTruthy();
+      // Frame 0 already renders the real <h1>, <table>, and .md-code-block (<pre>) geometry
+      // while deferring expensive inline regex/AST parsing to the worker!
+      expect(container.querySelector("h1")?.textContent).toBe("Large Turn");
+      expect(container.querySelectorAll("table")).toHaveLength(1);
+      expect(container.querySelectorAll(".md-code-block")).toHaveLength(1);
+      expect(container.querySelectorAll("strong")).toHaveLength(0);
       expect(createdWorkers).toBe(1);
 
-      // Worker error triggers synchronous fallback so no turn ever stays stuck in .md-pending
+      // Worker error triggers synchronous inline AST fallback so inline formatting still resolves
       await waitFor(() => {
-        expect(container.querySelector(".md-pending")).toBeNull();
-        expect(container.querySelector("h1")?.textContent).toBe("Large Turn");
         expect(container.querySelectorAll("strong").length).toBeGreaterThan(10);
       });
     } finally {
