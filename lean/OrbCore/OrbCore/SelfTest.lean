@@ -1911,7 +1911,7 @@ private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let adapterOk :=
     match observeProviderPayload "boat" "m1" 200 (.obj #[("state", .str "running"), ("spent_cents", .nat 12)]),
           observeProviderPayload "leanci" "m2" 200 (.obj #[("status", .str "halted")]),
-          observeProviderPayload "boost" "m2b" 200 (.obj #[("status", .str "reaped")]),
+          observeProviderPayload "leanci" "m2b" 200 (.obj #[("status", .str "reaped")]),
           observeProviderPayload "hetzner" "m3" 200 (.obj #[("status", .str "off")]),
           observeProviderPayload "vastai" "m4" 200 (.obj #[("state", .str "exited")]),
           observeProviderPayload "scaleway" "m5" 200 (.obj #[("state", .str "stopped_in_place")]),
@@ -1922,7 +1922,10 @@ private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
       o2b.provider == "leanci" && o2b.observedStatus == "destroyed" && o2b.orphaned &&
       o3.observedStatus == "stopped" &&
       o4.observedStatus == "stopped" && o5.observedStatus == "stopped" &&
-      o6.orphaned && (observeProviderPayload "aws" "m7" 200 (.obj #[])).isOk == false
+      o6.orphaned && (observeProviderPayload "aws" "m7" 200 (.obj #[])).isOk == false &&
+      -- The former provider name is not an alias: only the one-time migration knows it.
+      (observeProviderPayload "boost" "m8" 200 (.obj #[])).isOk == false &&
+      canonicalizeProvider "boost" == "boost" && !isKnownProvider "boost" && canonicalizeProvider "lean.ci" == "leanci"
     | _, _, _, _, _, _, _ => false
   if !adapterOk then
     closeManagedComputeStore mst

@@ -14,13 +14,13 @@ Code: `src/managed/lifecycle.rs` (pure decision backed by
 | Provider (`provider`) | Workloads | Bootstrap | `supports_free_stop` | `supports_snapshots` | Minimum lease |
 | --- | --- | --- | --- | --- | --- |
 | `boat` (default) | Fast ephemeral Linux x86\_64 workers (`small`..`xlarge`) & raw sandboxes | Provider file/exec API | Yes (14d disk retention, \$0) | Yes (named + fork) | Per-second |
-| `leanci` (`lean.ci`, legacy alias `boost`) | Warm Cloud Hypervisor Linux x86\_64 microVMs (`lean-2vcpu-ubuntu-2604`..`lean-32vcpu`, `lean-32vcpu-96gb`) with optional CoW `.olean` overlays (`repo`/`base_key`/`lean_mode`) & `turbo-lean` | Provider file/exec API -> reverse relay | No | Yes (named + fork, engine-pinned CoW) | Per-second (60s..24h fixed TTL; no live extend) |
+| `leanci` (`lean.ci`) | Warm Cloud Hypervisor Linux x86\_64 microVMs (`lean-2vcpu-ubuntu-2604`..`lean-32vcpu`, `lean-32vcpu-96gb`) with optional CoW `.olean` overlays (`repo`/`base_key`/`lean_mode`) & `turbo-lean` | Provider file/exec API -> reverse relay | No | Yes (named + fork, engine-pinned CoW) | Per-second (60s..24h fixed TTL; no live extend) |
 | `hetzner` | Larger x86\_64 / ARM64 CPU & RAM instances (`cpx22`..`ccx43`, `cax31`; legacy `cpx21`..`cpx51` aliases map to `cpx22`..`cpx62` with EU location fallback `fsn1` -> `hel1` -> `nbg1`) | Cloud-init `user_data` -> reverse relay | No (stopped servers still bill) | No | Hourly / per-minute |
 | `vastai` | Ephemeral CUDA GPUs (`rtx4090`, `a100`, `h100`, or explicit `gpu` filter) | Offer `onstart` -> reverse relay | No (stopped instances bill storage/GPU) | No | On-demand |
 | `scaleway` | EU Linux/GPU Instances (`DEV1-*`, `PRO2-*`, `L4-*`, `H100-*`) & Apple Silicon Mac minis (`M1-M`, `M2-M`, `M2-PRO`, `M4-M`) | Cloud-init / SSH -> reverse relay | No | No | Instances: per-minute; Apple Silicon: **24h (`deletable_at`)** |
 | `colab` (`Google Colab`) | Pooled Google Colab CUDA GPUs (`colab-auto`, `t4`, `l4`, `a100`, `h100`) & TPUs (`v5e1`, `v6e1`) via `colab-api`, shadow-priced at ½ Vast.ai | Worker file/exec API -> reverse relay | No | No | On-demand (shadow-metered at ½ Vast.ai; explicit-only) |
 
-Provider credentials (`BOAT_API_KEY`, `LEANCI_API_KEY`/`LEANCI_TOKEN` or legacy `BOOST_API_KEY`/`BOOST_TOKEN`, `HETZNER_CLOUD_APIKEY`, `VASTAI_API_KEY`,
+Provider credentials (`BOAT_API_KEY`, `LEANCI_API_KEY`, `HETZNER_CLOUD_APIKEY`, `VASTAI_API_KEY`,
 `SCALEWAY_SECRET_KEY`, `SCALEWAY_KEY_ID`, `COLAB_API_TOKEN`, etc.) are resolved inside Core from
 operator settings (`.sandboxed-sh/managed_providers.json`, `0600`, AES-256-GCM
 via `env_crypto`), environment variables, or Bitwarden Secrets Manager
@@ -154,6 +154,15 @@ native tests (concurrent submit, changed arguments, tenant and mission
 isolation, uncertain replay), not by the theorem.
 
 ### lean.ci adapter
+
+The provider's former name `boost` is not accepted anywhere: not as a provider
+alias, not as a sealed-key file, not as a credential name Core reads. Two
+one-time migrations run at start and are no-ops afterwards: rows with
+`provider='boost'` are renamed to `leanci`, and a key sealed as `boost.aead` is
+opened under its old name and sealed again as `leanci.aead` (the name is bound
+into the AEAD, so the file cannot simply be renamed). An unreadable old file is
+kept and reported, never deleted. The secret broker still refuses `BOOST_*`
+names to missions; refusing a name is not an alias.
 
 `ManagedProviderLeanci.lean` is the `leanci` client for `https://api.lean.ci/v1`
 (`LEANCI_API_URL` overrides the base, `LEANCI_API_KEY` is sealed in Core). Its wire

@@ -6543,6 +6543,10 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       | .error _ => pure ""
     discard <| backfillManagedMachineOwner managedStore bootAdminId
     hydrateLegacyDataDir cfg.workingDir dataRoot store managedStore bootAdminId cfg.devMode
+    match ← migrateLegacyLeanciSecret dataRoot with
+    | .ok true => IO.eprintln "[sandboxed-sh] sealed lean.ci key moved to its current name"
+    | .ok false => pure ()
+    | .error e => IO.eprintln s!"[sandboxed-sh] sealed lean.ci key migration failed: {e}"
     let repairedOwners ← repairManagedMachineOwners store managedStore
     if repairedOwners > 0 then
       IO.eprintln s!"[orb-core] repaired the owner of {repairedOwners} pre-cutover managed machine row(s)"

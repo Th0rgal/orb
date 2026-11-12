@@ -315,6 +315,10 @@ def managedComputeDdl : String :=
   "CREATE TABLE IF NOT EXISTS managed_expirations(machine_id TEXT NOT NULL,boot_epoch INTEGER NOT NULL,provider_id TEXT NOT NULL,expires_at_sec INTEGER NOT NULL,observed_state TEXT NOT NULL DEFAULT 'unknown',spend_cents INTEGER NOT NULL DEFAULT 0,spend_source TEXT NOT NULL DEFAULT 'lease_reservation_estimate',state TEXT NOT NULL DEFAULT 'pending',PRIMARY KEY(machine_id,boot_epoch));"
 
 def managedAdditiveAlters : Array String := #[
+  -- One-time rename of rows written under lean.ci's former provider name
+  -- (`boost`). Idempotent; nothing else in Core accepts that name any more.
+  "UPDATE managed_machines SET provider='leanci' WHERE provider='boost';",
+  "UPDATE OR IGNORE user_managed_provider_prefs SET provider='leanci' WHERE provider='boost';",
   "ALTER TABLE managed_machines ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT '';",
   "CREATE INDEX IF NOT EXISTS idx_managed_machines_owner ON managed_machines(owner_user_id);",
   "ALTER TABLE managed_node_tokens ADD COLUMN readiness_deadline_sec INTEGER NOT NULL DEFAULT 0;",
@@ -336,7 +340,7 @@ def knownProviders : Array String :=
 
 def canonicalizeProvider (provider : String) : String :=
   let key := provider.trimAscii.toString.toLower
-  if key == "boost" || key == "boost.ci" || key == "lean.ci" then "leanci" else key
+  if key == "lean.ci" then "leanci" else key
 
 def isKnownProvider (provider : String) : Bool :=
   let c := canonicalizeProvider provider
@@ -557,26 +561,40 @@ def openProviderSecret (rootDir provider : String)
     | return .error "master_key_unavailable"
   if key.size != 32 then
     return .error "master_key_invalid_length"
-  let mut usedProv := prov
-  let raw ← match ← readPrivate0600 (managedSecretPath rootDir prov) with
-    | .ok bytes => pure bytes
-    | .error _ =>
-      if prov == "leanci" then
-        match ← readPrivate0600 (managedSecretPath rootDir "boost") with
-        | .ok bytes =>
-          usedProv := "boost"
-          pure bytes
-        | .error _ => return .error "sealed_secret_unavailable"
-      else
-        return .error "sealed_secret_unavailable"
+  let .ok raw ← readPrivate0600 (managedSecretPath rootDir prov)
+    | return .error "sealed_secret_unavailable"
   if raw.size < 28 then
     return .error "sealed_secret_truncated"
   let nonce := raw.extract 0 12
   let sealed := raw.extract 12 raw.size
-  let aad := s!"orb-core-reserved:{usedProv}".toUTF8
+  let aad := s!"orb-core-reserved:{prov}".toUTF8
   match ← aeadOpen .aes256Gcm key nonce aad sealed with
   | .error e => return .error e
   | .ok pt => return .ok (String.fromUTF8? pt |>.getD "")
+
+/-- One-time rename of the sealed lean.ci key from its pre-rename file. The
+    provider name is bound into the AEAD, so the old file is opened under its old
+    name and sealed again under `leanci`; the old file is removed only after the
+    new one is written. Safe to run on every start: it does nothing once done. -/
+def migrateLegacyLeanciSecret (rootDir : String) : IO (Except String Bool) := do
+  let legacyName := "boost"
+  let legacyPath := managedSecretPath rootDir legacyName
+  if !(← statPath legacyPath.toString).exists_ then return .ok false
+  if (← statPath (managedSecretPath rootDir "leanci").toString).exists_ then
+    -- A current key already exists; the old file is only a stale copy.
+    IO.FS.removeFile legacyPath
+    return .ok true
+  let .ok key ← readPrivate0600 (managedMasterKeyPath rootDir) | return .error "master_key_unavailable"
+  let .ok raw ← readPrivate0600 legacyPath | return .error "legacy_sealed_secret_unreadable"
+  if key.size != 32 || raw.size < 28 then return .error "legacy_sealed_secret_invalid"
+  let .ok plain ← aeadOpen .aes256Gcm key (raw.extract 0 12) s!"orb-core-reserved:{legacyName}".toUTF8 (raw.extract 12 raw.size)
+    | return .error "legacy_sealed_secret_invalid"
+  let some text := String.fromUTF8? plain | return .error "legacy_sealed_secret_invalid"
+  match ← sealProviderSecret rootDir "leanci" text with
+  | .error e => return .error e
+  | .ok () =>
+    IO.FS.removeFile legacyPath
+    return .ok true
 
 private def machineParams (m : ManagedMachine) (slice : VmSliceState) : Array String :=
   #[
@@ -1411,9 +1429,8 @@ def applyProviderObservation (st : ManagedComputeStore) (obs : ProviderObservati
   let prov := canonicalizeProvider obs.provider
   if !isKnownProvider prov then
     return .error "unknown_provider"
-  let legacyProv := if prov == "leanci" then "boost" else prov
   match ← execParamQuery st.db
-      "SELECT node_boot_epoch,phase_code FROM managed_machines WHERE id=?1 AND (provider=?2 OR provider=?3);" #[obs.machineId, prov, legacyProv] with
+      "SELECT node_boot_epoch,phase_code FROM managed_machines WHERE id=?1 AND provider=?2;" #[obs.machineId, prov] with
   | .error e => return .error e
   | .ok rows =>
     if rows.size ≤ 1 then return .error "managed_machine_missing"
@@ -1439,9 +1456,9 @@ def applyProviderObservation (st : ManagedComputeStore) (obs : ProviderObservati
       return .ok []
     else
       match ← execParamQuery st.db
-          ("UPDATE managed_machines SET spent_cents=?2 WHERE id=?1 AND (provider=?3 OR provider=?4) " ++
-           "AND (?5='0' OR provider_id=?6) AND (?7='0' OR node_boot_epoch=?8);")
-          #[obs.machineId, s!"{obs.spentCents}", prov, legacyProv,
+          ("UPDATE managed_machines SET spent_cents=?2 WHERE id=?1 AND provider=?3 " ++
+           "AND (?4='0' OR provider_id=?5) AND (?6='0' OR node_boot_epoch=?7);")
+          #[obs.machineId, s!"{obs.spentCents}", prov,
             if obs.expectedProviderId?.isSome then "1" else "0", obs.expectedProviderId?.getD "",
             if obs.expectedBootEpoch?.isSome then "1" else "0", s!"{boot}"] with
       | .error e => return .error e
@@ -1450,7 +1467,7 @@ def applyProviderObservation (st : ManagedComputeStore) (obs : ProviderObservati
 private def providerDisplayName (p : String) : String :=
   match p with
   | "boat" => "boat.dev"
-  | "leanci" | "boost" => "lean.ci"
+  | "leanci" => "lean.ci"
   | "hetzner" => "Hetzner"
   | "vastai" => "Vast.ai"
   | "scaleway" => "Scaleway"
