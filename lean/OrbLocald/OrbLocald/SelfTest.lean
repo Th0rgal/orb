@@ -1974,6 +1974,40 @@ private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat ×
       if (← assertTrue "native_chrome_cold_sqlite_ui_sidebar_hydration" coldOk) then
         ncPassed := ncPassed + 1
 
+      -- Mixed ISO-8601 precision (`01:00:00.000Z` vs `02:00:00Z`) + explicit move back to root (`folder: ""`, `project: null`)
+      let tsOlderMs := OrbLocald.NativeChrome.parseUpdatedAtMs (.obj #[("updated_at", .str "2026-11-12T01:00:00.000Z")])
+      let tsNewerNoFracMs := OrbLocald.NativeChrome.parseUpdatedAtMs (.obj #[("updated_at", .str "2026-11-12T02:00:00Z")])
+      let moveRootSync := .obj #[
+        ("scope", .str "scope:move-root:1"),
+        ("revision", .nat 1),
+        ("projects", .arr #[.obj #[("slug", .str "orb"), ("name", .str "Orb"), ("folders", .arr #[.str "lean"])]]),
+        ("missions", .arr #[
+          .obj #[("id", .str "m-mv"), ("title", .str "Old in folder"), ("status", .str "active"), ("project", .str "orb"), ("folder", .str "lean"), ("updated_at", .str "2026-11-12T01:00:00.000Z")],
+          .obj #[("id", .str "m-mv"), ("title", .str "Moved to root"), ("status", .str "active"), ("project", .str "orb"), ("folder", .str ""), ("updated_at", .str "2026-11-12T02:00:00Z")],
+          .obj #[("id", .str "m-unproj"), ("title", .str "Old assigned"), ("status", .str "active"), ("project", .str "orb"), ("folder", .str "lean"), ("updated_at", .str "2026-11-12T01:00:00.000Z")],
+          .obj #[("id", .str "m-unproj"), ("title", .str "Unassigned project"), ("status", .str "active"), ("project", .null), ("folder", .str ""), ("updated_at", .str "2026-11-12T02:00:00Z")]
+        ])
+      ]
+      let _ ← dispatchRpcCommand ncRef "native_chrome_sync_state" moveRootSync
+      let mvRowsRes ← dispatchRpcCommand ncRef "native_chrome_get_rows" (.obj #[("scope", .str "scope:move-root:1")])
+      ncTotal := ncTotal + 1
+      let mvAndTsOk : Bool :=
+        tsNewerNoFracMs > tsOlderMs &&
+        (tsNewerNoFracMs - tsOlderMs == 3600000) &&
+        match mvRowsRes with
+        | .ok mrjv =>
+          let mrows := (mrjv.fieldArr? "rows").getD #[]
+          let mvRow? := mrows.find? (fun r => r.fieldStr? "row_id" == some "m:m-mv")
+          let unprojRow? := mrows.find? (fun r => r.fieldStr? "row_id" == some "m:m-unproj")
+          (mvRow?.bind (·.fieldStr? "title")) == some "Moved to root" &&
+          (mvRow?.bind (·.fieldStr? "folder")) == some "" &&
+          (mvRow?.bind (·.fieldNat? "depth")) == some 1 &&
+          (unprojRow?.bind (·.fieldStr? "title")) == some "Unassigned project" &&
+          (unprojRow?.bind (·.fieldStr? "project")) == some ""
+        | .error _ => false
+      if (← assertTrue "native_chrome_iso_epoch_ms_and_empty_placement_clear" mvAndTsOk) then
+        ncPassed := ncPassed + 1
+
   return (passed + e2ePassed + ncPassed, total + e2eTotal + ncTotal)
 
 def main : IO UInt32 := do

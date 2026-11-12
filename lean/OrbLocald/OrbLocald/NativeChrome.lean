@@ -29,6 +29,8 @@ structure ChromeMissionInput where
   status          : String := "completed"
   project         : String := ""
   folder          : String := ""
+  hasProjectField : Bool := true
+  hasFolderField  : Bool := true
   parentMissionId : String := ""
   isFork          : Bool := false
   acknowledged    : Bool := false
@@ -150,23 +152,103 @@ def ancestorFolderPaths (normPath : String) : Array String := Id.run do
     acc := acc.push cur
   return acc
 
-/-- Parse an ISO-8601-like timestamp or integer epoch ms into monotonic lexical UInt64 order.
-    Accepts explicit `updated_at_ms` first, or packs ASCII digits of `updated_at` (`YYYYMMDDHHMMSSmmm`)
-    so newer ISO-8601 UTC strings compare strictly greater without C `strptime`. -/
+private def isLeapYearUtc (y : Nat) : Bool :=
+  (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+
+private def daysInMonthUtc (y m : Nat) : Nat :=
+  match m with
+  | 1 | 3 | 5 | 7 | 8 | 10 | 12 => 31
+  | 4 | 6 | 9 | 11 => 30
+  | 2 => if isLeapYearUtc y then 29 else 28
+  | _ => 0
+
+/-- Parse an ISO-8601 / RFC-3339 timestamp (`YYYY-MM-DDTHH:MM:SS[.fff...](Z|±HH:MM)`) into UTC epoch milliseconds. -/
+def parseIso8601EpochMs? (raw : String) : Option UInt64 := do
+  let s := raw.trimAscii.toString
+  if s.isEmpty then none
+  let (datePart, rest0) ← match s.splitOn "T" with
+    | [d, t] => some (d, t)
+    | _ => match s.splitOn "t" with
+      | [d, t] => some (d, t)
+      | _ => match s.splitOn " " with
+        | [d, t] => some (d, t)
+        | _ => none
+  let [yStr, mStr, dStr] := datePart.splitOn "-" | none
+  if yStr.length != 4 || mStr.length != 2 || dStr.length != 2 then none
+  if !yStr.all Char.isDigit || !mStr.all Char.isDigit || !dStr.all Char.isDigit then none
+  let y ← yStr.toNat?
+  let mo ← mStr.toNat?
+  let da ← dStr.toNat?
+  if y < 1970 || y > 9999 || mo < 1 || mo > 12 || da < 1 || da > daysInMonthUtc y mo then none
+  let (timePart, tzOffsetSec) ←
+    if rest0.endsWith "Z" || rest0.endsWith "z" then
+      some ((rest0.dropEnd 1).toString, (0 : Int))
+    else if rest0.length > 6 then
+      let tzSignPos := rest0.length - 6
+      let pfx := (rest0.take tzSignPos).toString
+      let sfx := (rest0.drop tzSignPos).toString
+      let signChar := sfx.toList.headD ' '
+      if signChar != '+' && signChar != '-' then
+        some (rest0, (0 : Int))
+      else
+        match (sfx.drop 1).toString.splitOn ":" with
+        | [ohS, omS] =>
+          if ohS.length != 2 || omS.length != 2 || !ohS.all Char.isDigit || !omS.all Char.isDigit then none
+          else
+            let oh ← ohS.toNat?
+            let om ← omS.toNat?
+            if oh > 23 || om > 59 then none
+            else
+              let mag : Int := Int.ofNat (oh * 3600 + om * 60)
+              some (pfx, if signChar == '+' then mag else -mag)
+        | _ => none
+    else
+      some (rest0, (0 : Int))
+  let (baseTime, fracMs) ← match timePart.splitOn "." with
+    | [h] => some (h, (0 : UInt64))
+    | [h, frac] =>
+      let digits := (frac.takeWhile Char.isDigit).toString
+      if digits.isEmpty then none
+      else
+        let d3 := ((digits ++ "000").take 3).toString
+        some (h, (d3.toNat?.getD 0).toUInt64)
+    | _ => none
+  let [hhS, mmS, ssS] := baseTime.splitOn ":" | none
+  if hhS.length != 2 || mmS.length != 2 || ssS.length != 2 then none
+  if !hhS.all Char.isDigit || !mmS.all Char.isDigit || !ssS.all Char.isDigit then none
+  let hh ← hhS.toNat?
+  let mm ← mmS.toNat?
+  let ss ← ssS.toNat?
+  if hh > 23 || mm > 59 || ss > 60 then none
+  let mut yearDays : Nat := 0
+  for yr in [1970:y] do
+    yearDays := yearDays + (if isLeapYearUtc yr then 366 else 365)
+  let mut monthDays : Nat := 0
+  for mn in [1:mo] do
+    monthDays := monthDays + daysInMonthUtc y mn
+  let totalDays : Int := Int.ofNat (yearDays + monthDays + (da - 1))
+  let utcSec : Int := totalDays * 86400 + Int.ofNat (hh * 3600 + mm * 60 + ss) - tzOffsetSec
+  if utcSec < 0 then none else some (utcSec.toNat.toUInt64 * 1000 + fracMs)
+
+private def normalizeEpochScale (n : UInt64) : UInt64 :=
+  if n > 0 && n < 100000000000 then n * 1000 else n
+
+/-- Normalize explicit `updated_at_ms` / `updatedAtMs` or ISO-8601 `updated_at` / `created_at` to UTC epoch milliseconds. -/
 def parseUpdatedAtMs (jv : JVal) : UInt64 := Id.run do
   if let some n := jv.fieldUInt64? "updated_at_ms" then
-    return n
-  if let some n := jv.fieldNat? "updatedAtMs" then
-    return n.toUInt64
-  let iso := ((jv.fieldStr? "updated_at").orElse (fun _ => jv.fieldStr? "updatedAt")).getD ""
-  if iso.isEmpty then return 0
-  let mut acc : UInt64 := 0
-  let mut count : Nat := 0
-  for c in iso.toList do
-    if '0' ≤ c && c ≤ '9' && count < 17 then
-      acc := acc * 10 + (c.toNat - '0'.toNat).toUInt64
-      count := count + 1
-  return acc
+    return normalizeEpochScale n
+  if let some n := jv.fieldUInt64? "updatedAtMs" then
+    return normalizeEpochScale n
+  for key in #["updated_at", "updatedAt", "created_at", "createdAt"] do
+    if let some n := jv.fieldUInt64? key then
+      return normalizeEpochScale n
+    if let some s := jv.fieldStr? key then
+      let clean := s.trimAscii.toString
+      if let some ms := parseIso8601EpochMs? clean then
+        return ms
+      if let some dec := clean.toNat? then
+        return normalizeEpochScale dec.toUInt64
+  return 0
 
 def parseProjectInput? (jv : JVal) : Option ChromeProjectInput := do
   let slug := ((jv.fieldStr? "slug").orElse (fun _ => jv.fieldStr? "id")).getD "" |>.trimAscii.toString
@@ -188,8 +270,18 @@ def parseMissionInput? (jv : JVal) (fallbackProject : String := "") : Option Chr
   let title := if firstLine.isEmpty then "Untitled" else firstLine
   let status := (jv.fieldStr? "status").getD "completed" |>.trimAscii.toString
   let statusLower := status.toLower
-  let proj := (jv.fieldStr? "project").getD fallbackProject |>.trimAscii.toString
-  let folder := normalizeFolderPath ((jv.fieldStr? "folder").getD "")
+  let hasProjField := (jv.field? "project").isSome || !fallbackProject.isEmpty
+  let proj :=
+    match jv.field? "project" with
+    | some .null => ""
+    | some v => (v.asStr?.getD "").trimAscii.toString
+    | none => fallbackProject.trimAscii.toString
+  let hasFolderField := (jv.field? "folder").isSome
+  let folder :=
+    match jv.field? "folder" with
+    | some .null => ""
+    | some v => normalizeFolderPath (v.asStr?.getD "")
+    | none => ""
   let parentId :=
     ((jv.fieldStr? "parent_mission_id")
       |>.orElse (fun _ => jv.fieldStr? "parentMissionId")
@@ -218,6 +310,8 @@ def parseMissionInput? (jv : JVal) (fallbackProject : String := "") : Option Chr
     status := status
     project := proj
     folder := folder
+    hasProjectField := hasProjField
+    hasFolderField := hasFolderField
     parentMissionId := parentId
     isFork := isFork
     acknowledged := ack
@@ -250,9 +344,15 @@ def mergeMissionInputs (inputs : Array ChromeMissionInput) : Array ChromeMission
       if supFlag == 1 && (lo32 &&& 4) != 0 then
         acc := acc.eraseIdx! idx
       else if (lo32 &&& 1) != 0 then
-        let mergedProj := if inc.project.isEmpty then ex.project else inc.project
-        let mergedFolder := if inc.folder.isEmpty then ex.folder else inc.folder
-        acc := acc.set! idx { inc with project := mergedProj, folder := mergedFolder }
+        let mergedProj := if inc.hasProjectField then inc.project else ex.project
+        let mergedFolder := if inc.hasFolderField then inc.folder else ex.folder
+        acc := acc.set! idx {
+          inc with
+          project := mergedProj
+          folder := mergedFolder
+          hasProjectField := inc.hasProjectField || ex.hasProjectField
+          hasFolderField := inc.hasFolderField || ex.hasFolderField
+        }
   return acc
 
 /-- Sort rank for mission status (`active`/`running` first, then `updatedAtMs` descending, then `id`). -/
