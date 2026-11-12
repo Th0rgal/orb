@@ -277,7 +277,10 @@ def addProjectSteerJVal (store : CoreStore) (scopedSlug body origin nowIso : Str
   let cleanBody := body.trimAscii.toString
   if cleanBody.isEmpty then return .error "missing_steer_body"
   let sid ← newUuidV4
-  let effOrigin := if origin.trimAscii.toString.isEmpty then "orb" else origin.trimAscii.toString
+  let rawOrigin := origin.trimAscii.toString.toLower
+  let effOrigin :=
+    if rawOrigin == "mcp" || rawOrigin == "api" || rawOrigin == "orb" then rawOrigin
+    else "orb"
   if let .error e ← execParamQuery store.projectsDb
       "INSERT INTO project_steers(id,slug,body,created_at,origin) VALUES(?1,?2,?3,?4,?5);"
       #[sid, scopedSlug, cleanBody, nowIso, effOrigin] then

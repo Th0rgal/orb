@@ -210,8 +210,8 @@ def dispatchMcpToolCall
     let mid ← newUuidV4
     let initRev : UInt64 := if effProj.isEmpty && folder.isEmpty then 0 else 1
     let insSql :=
-      "INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,project,folder,placement_revision,parent_mission_id,created_at,updated_at,metadata_updated_at,node_boot_epoch) " ++
-      "VALUES(?1,?2,'active',?3,?4,?5,?6,?7,?8,CAST(?9 AS INTEGER),NULLIF(?10,''),?11,?11,?11,CAST(?12 AS INTEGER));"
+      "INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,workspace_id,project,folder,placement_revision,parent_mission_id,created_at,updated_at,metadata_updated_at,node_boot_epoch) " ++
+      "VALUES(?1,?2,'active',?3,?4,?5,?6,'00000000-0000-0000-0000-000000000000',?7,?8,CAST(?9 AS INTEGER),NULLIF(?10,''),?11,?11,?11,CAST(?12 AS INTEGER));"
     if let .error e ← execParamQuery store.missionsDb insSql
         #[mid, title, backend, modelOv, effort, workingDir, effProj, folder, s!"{initRev}", parentMid, nowIso, s!"{store.bootEpoch}"] then
       return mcpErr "db_error" e

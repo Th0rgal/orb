@@ -219,8 +219,6 @@ def missionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS mission_runs (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 1, execution_state TEXT NOT NULL DEFAULT 'terminal', terminal_reason TEXT NOT NULL DEFAULT '', remote_job_id TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_remote_waits (mission_id TEXT PRIMARY KEY, node_id TEXT NOT NULL, failed_job_id TEXT NOT NULL, scheduled_origin_job_id TEXT NOT NULL DEFAULT '', retries INTEGER NOT NULL DEFAULT 0, max_retries INTEGER NOT NULL DEFAULT 10, replays INTEGER NOT NULL DEFAULT 0, deadline_epoch INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_events (id INTEGER PRIMARY KEY AUTOINCREMENT, mission_id TEXT NOT NULL, seq INTEGER NOT NULL DEFAULT 0, sequence INTEGER NOT NULL DEFAULT 0, event_type TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '', timestamp TEXT NOT NULL DEFAULT '', event_id TEXT, tool_call_id TEXT, tool_name TEXT, content TEXT, content_file TEXT, metadata TEXT);" ++
-  "CREATE INDEX IF NOT EXISTS idx_mission_events_mission_seq ON mission_events(mission_id, seq);" ++
-  "CREATE INDEX IF NOT EXISTS idx_mission_events_mission_type_seq ON mission_events(mission_id, event_type, seq);" ++
   "CREATE INDEX IF NOT EXISTS idx_missions_updated_at ON missions(updated_at DESC);" ++
   "CREATE TABLE IF NOT EXISTS cloud_executions (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'hermes', prompt TEXT NOT NULL DEFAULT '', response_text TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', request_key TEXT, revision INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_automations (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, cron_expr TEXT NOT NULL, prompt TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, variables_used TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '');" ++
@@ -419,6 +417,8 @@ def missionsAdditiveAlters : Array String := #[
   "CREATE INDEX IF NOT EXISTS idx_missions_owner ON missions(owner_user_id);",
   "CREATE INDEX IF NOT EXISTS idx_missions_project_folder ON missions(project, folder);",
   "CREATE INDEX IF NOT EXISTS idx_events_mission ON mission_events(mission_id, sequence);",
+  "CREATE INDEX IF NOT EXISTS idx_mission_events_mission_seq ON mission_events(mission_id, seq) WHERE seq > 0;",
+  "CREATE INDEX IF NOT EXISTS idx_mission_events_mission_type_seq ON mission_events(mission_id, event_type, seq) WHERE seq > 0;",
   "CREATE INDEX IF NOT EXISTS idx_missions_updated_at ON missions(updated_at DESC);",
   "CREATE INDEX IF NOT EXISTS idx_missions_project_updated ON missions(project, updated_at DESC);",
   "CREATE UNIQUE INDEX IF NOT EXISTS deferred_message_batches_uuid ON deferred_message_batches(mission_id, message_id);"
@@ -4480,8 +4480,9 @@ def queryMissionSyncReplayFrames
     (sinceSeq? : Option UInt64)
     (maxPayload? : Option Nat := some 4096)
     (maxReplay : Nat := 500) : IO (Except String (Array String × UInt64 × Bool)) := do
+  let effSeqExpr := "(CASE WHEN COALESCE(seq,0)>0 THEN seq ELSE COALESCE(sequence,0) END)"
   let maxRes ← execParamQuery st.missionsDb
-    "SELECT COALESCE(MAX(seq), 0) FROM mission_events WHERE mission_id=?1;" #[missionId]
+    s!"SELECT COALESCE(MAX({effSeqExpr}), 0) FROM mission_events WHERE mission_id=?1;" #[missionId]
   let .ok maxRs := maxRes | return .error "mission_events_max_failed"
   let maxSeq : UInt64 := (((maxRs[1]?.bind (·[0]?)).bind String.toNat?).getD 0).toUInt64
   match sinceSeq? with
@@ -4491,7 +4492,9 @@ def queryMissionSyncReplayFrames
       return .ok (#[], maxSeq, false)
     let fetchLim := maxReplay + 1
     let res ← execParamQuery st.missionsDb
-      "SELECT seq,event_type,payload,created_at FROM mission_events WHERE mission_id=?1 AND seq>?2 ORDER BY seq ASC LIMIT ?3;"
+      (s!"SELECT {effSeqExpr} AS eff_seq,event_type,COALESCE(payload,''),COALESCE(NULLIF(created_at,''),timestamp,'')," ++
+       "COALESCE(event_id,''),COALESCE(tool_call_id,''),COALESCE(tool_name,''),COALESCE(content,''),COALESCE(content_file,''),COALESCE(metadata,'') " ++
+       s!"FROM mission_events WHERE mission_id=?1 AND {effSeqExpr}>CAST(?2 AS INTEGER) ORDER BY eff_seq ASC, id ASC LIMIT CAST(?3 AS INTEGER);")
       #[missionId, s!"{s}", s!"{fetchLim}"]
     let .ok rs := res | return .error "mission_events_replay_failed"
     let cnt := if rs.size > 0 then rs.size - 1 else 0
@@ -4503,7 +4506,9 @@ def queryMissionSyncReplayFrames
       let r := rs[i]!
       let seq := (((r[0]?).bind String.toNat?).getD 0).toUInt64
       let et := (r[1]?).getD ""
-      let pl := (r[2]?).getD ""
+      let pl ← hydrateMissionEventPayload st.rootDir
+        ((r[2]?).getD "") ((r[4]?).getD "") ((r[5]?).getD "") ((r[6]?).getD "")
+        ((r[7]?).getD "") ((r[8]?).getD "") ((r[9]?).getD "")
       let ts := (r[3]?).getD ""
       lastSeq := seq
       frames := frames.push (renderSyncWsEventJson missionId seq et pl ts maxPayload? false)
