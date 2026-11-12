@@ -1917,26 +1917,28 @@ private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat ×
       if (← assertTrue "native_chrome_palette_query_ranking_fixtures" allPalOk) then
         ncPassed := ncPassed + 1
 
-      -- Settings mode projection
+      -- Settings mode projection (at producer revision 11 right after 2 local expansion toggles,
+      -- verifying `toggleExpand` advances `viewRevision` without blocking `syncRevision == 11`)
       let setMode := (fixJv.field? "settings_mode_case").getD (.obj #[])
-      let setSync := JVal.setField (JVal.setField (JVal.setField syncCase "revision" (.nat 20))
+      let setSync := JVal.setField (JVal.setField (JVal.setField syncCase "revision" (.nat 11))
         "on_settings" (.bool true))
         "selected" (.str ((setMode.fieldStr? "selected").getD "security-settings"))
-      let _ ← dispatchRpcCommand ncRef "native_chrome_sync_state" setSync
+      let setSyncRes ← dispatchRpcCommand ncRef "native_chrome_sync_state" setSync
       let setRowsRes ← dispatchRpcCommand ncRef "native_chrome_get_rows" (.obj #[])
       ncTotal := ncTotal + 1
       let setModeOk : Bool :=
-        match setRowsRes with
-        | .ok srjv =>
+        match setSyncRes, setRowsRes with
+        | .ok ssjv, .ok srjv =>
           let srows := (srjv.fieldArr? "rows").getD #[]
           let sids := srows.filterMap (·.fieldStr? "row_id")
           let expSids := ((setMode.fieldArr? "expected_row_ids").getD #[]).filterMap (·.asStr?)
           let secRow? := srows.find? (fun r => r.fieldStr? "row_id" == some "settings:security")
+          (ssjv.fieldBool? "applied") == some true &&
           sids == expSids &&
           (secRow?.bind (·.fieldBool? "selected")) == some true &&
           (secRow?.bind (·.fieldBool? "attention")) == setMode.fieldBool? "expected_security_attention" &&
           (secRow?.bind (·.fieldNat? "badge")) == setMode.fieldNat? "expected_security_badge"
-        | .error _ => false
+        | _, _ => false
       if (← assertTrue "native_chrome_settings_mode_projection" setModeOk) then
         ncPassed := ncPassed + 1
 

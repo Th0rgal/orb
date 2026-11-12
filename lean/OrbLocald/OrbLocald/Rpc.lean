@@ -5176,13 +5176,15 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
           if applied then
             s1.enqueueNamedEvent "native_chrome_rows_changed" (.obj #[
               ("scope", .str scopeSt.scope),
-              ("revision", JVal.uint64 scopeSt.revision),
+              ("revision", JVal.uint64 scopeSt.viewRevision),
+              ("sync_revision", JVal.uint64 scopeSt.syncRevision),
               ("row_count", .nat rows.size)
             ])
           else s1
         (.ok (.obj #[
           ("scope", .str scopeSt.scope),
-          ("revision", JVal.uint64 scopeSt.revision),
+          ("revision", JVal.uint64 scopeSt.viewRevision),
+          ("sync_revision", JVal.uint64 scopeSt.syncRevision),
           ("applied", .bool applied),
           ("row_count", .nat rows.size)
         ]), s2)
@@ -5196,7 +5198,8 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       scopeSt.onSettings || (OrbLocald.NativeChrome.settingsSectionIdForSelected scopeSt.selected).isSome
     return .ok (.obj #[
       ("scope", .str scopeSt.scope),
-      ("revision", JVal.uint64 scopeSt.revision),
+      ("revision", JVal.uint64 scopeSt.viewRevision),
+      ("sync_revision", JVal.uint64 scopeSt.syncRevision),
       ("on_settings", .bool inSettings),
       ("selected", .str scopeSt.selected),
       ("rows", .arr (rows.map OrbLocald.NativeChrome.SidebarRow.toJson))
@@ -5216,12 +5219,14 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         let s1 := { s with nativeChrome := nextHub }
         let s2 := s1.enqueueNamedEvent "native_chrome_rows_changed" (.obj #[
           ("scope", .str scopeSt.scope),
-          ("revision", JVal.uint64 scopeSt.revision),
+          ("revision", JVal.uint64 scopeSt.viewRevision),
+          ("sync_revision", JVal.uint64 scopeSt.syncRevision),
           ("row_count", .nat rows.size)
         ])
         (.ok (.obj #[
           ("scope", .str scopeSt.scope),
-          ("revision", JVal.uint64 scopeSt.revision),
+          ("revision", JVal.uint64 scopeSt.viewRevision),
+          ("sync_revision", JVal.uint64 scopeSt.syncRevision),
           ("row_id", .str rowId.trimAscii.toString),
           ("expanded", .bool expandedNow),
           ("rows", .arr (rows.map OrbLocald.NativeChrome.SidebarRow.toJson))

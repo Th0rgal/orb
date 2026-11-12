@@ -36,7 +36,7 @@
         "title": "Add WAL busy timeout",
         "status": "completed",
         "project": "core",
-        "folder": "ui/desktop",
+        "folder": "",
         "parent_mission_id": "m-root",
         "updated_at_ms": 3000
       },
@@ -67,10 +67,8 @@
       {
         "id": "m-archived",
         "title": "Old archived session",
-        "status": "completed",
+        "status": "acknowledged",
         "project": "core",
-        "acknowledged": true,
-        "superseded": true,
         "updated_at_ms": 500
       }
     ],

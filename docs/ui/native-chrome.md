@@ -12,11 +12,13 @@ renders transcripts, Markdown, diffs, KaTeX, Mermaid, PDFs, and the composer.
 `OrbLocald.NativeChrome` (`lean/OrbLocald/OrbLocald/NativeChrome.lean`, `0 import Lean`,
 `0 sorryAx`) is the single canonical owner of the flattened native chrome row model:
 
-1. **Monotonic revision fencing**: `native_chrome_sync_state` accepts state snapshots
-   scoped by `scope` (`historyScope()`) and `revision : UInt64`. Any payload whose
-   `revision` is strictly older than the last applied revision for the same `scope` is
-   ignored without erasing newer state. Switching `scope` resets the active scope view
-   cleanly while preserving per-scope expand/collapse sets (`maxScopes = 8`).
+1. **Monotonic revision fencing (`syncRevision` vs `viewRevision`)**: `native_chrome_sync_state`
+   accepts state snapshots scoped by `scope` (`historyScope()`) and producer `revision : UInt64`
+   (`sync_revision`). Any payload whose `revision` is strictly older than `syncRevision` for the
+   same `scope` is ignored without erasing newer state, while local `native_chrome_toggle_expand`
+   updates bump only the output `viewRevision` (`revision`) so local expand/collapse toggles never
+   fence out subsequent WebView snapshots. Switching `scope` resets the active scope view cleanly
+   while preserving per-scope expand/collapse sets (`maxScopes = 8`).
 2. **`0 ms` cold-start hydration from `~/.orb/ui-cache.sqlite3`**: When `native_chrome_get_rows`
    or `native_chrome_palette_query` is called before the WebView has pushed its first live
    `native_chrome_sync_state` (or with `scope` omitted, defaulting to the most recently saved
@@ -51,8 +53,8 @@ All commands run over `127.0.0.1:<rpcPort>/__orb_rpc` gated by the 32-byte launc
 
 | Command | Arguments | Response |
 | --- | --- | --- |
-| `native_chrome_sync_state` | `{ scope, revision, selected, on_settings?, is_admin?, inbox_enabled?, inbox_unread?, settings_badge?, settings_dots?, filter_query?, projects, missions, completed_missions?, project_missions? }` | `{ revision, scope, applied, row_count }` |
-| `native_chrome_get_rows` | `{ scope?, filter_query? }` | `{ scope, revision, on_settings, selected, rows: SidebarRow[] }` |
+| `native_chrome_sync_state` | `{ scope, revision, selected, on_settings?, is_admin?, inbox_enabled?, inbox_unread?, settings_badge?, settings_dots?, filter_query?, projects, missions, completed_missions?, project_missions? }` | `{ revision, sync_revision, scope, applied, row_count }` |
+| `native_chrome_get_rows` | `{ scope?, filter_query? }` | `{ scope, revision, sync_revision, on_settings, selected, rows: SidebarRow[] }` |
 | `native_chrome_toggle_expand` | `{ scope?, row_id, expanded? }` | `{ scope, revision, row_id, expanded, rows: SidebarRow[] }` |
 | `native_chrome_move_admit` | `{ item_kind, src_project, src_path?, dst_project, dst_path? }` | `{ admitted: Bool }` |
 | `native_chrome_palette_query` | `{ scope?, query, limit? }` | `{ scope, query, items: PaletteItem[] }` |
