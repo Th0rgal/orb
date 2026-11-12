@@ -86,12 +86,16 @@ export async function getApprovalQueue(): Promise<{ items: ApprovalItem[] }> {
       secret_requests?: unknown[];
       mission_access_requests?: unknown[];
     }>("/api/approvals/queue");
+    const hasPerKindLists =
+      Array.isArray(res?.privilege_requests) ||
+      Array.isArray(res?.secret_requests) ||
+      Array.isArray(res?.mission_access_requests);
+    // A body with neither `items` nor the per-kind lists is not a queue. Reading it as
+    // "nothing pending" would dismiss the card and hide the error of a failed approval.
+    if (!Array.isArray(res?.items) && !hasPerKindLists) throw new Error("Core returned a malformed approval queue.");
     const rawItems = Array.isArray(res?.items) ? res.items : [];
     const isTransitionalStub =
-      rawItems.length === 0 &&
-      (Array.isArray(res?.privilege_requests) ||
-        Array.isArray(res?.secret_requests) ||
-        Array.isArray(res?.mission_access_requests));
+      rawItems.length === 0 && hasPerKindLists;
     // If every item carries canonical `kind`, `tier`, `risk`, and `request` (and not an empty
     // transitional stub from a pre-parity Core), use the queue directly; otherwise fall back.
     if (

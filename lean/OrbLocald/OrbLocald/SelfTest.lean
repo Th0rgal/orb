@@ -2236,11 +2236,19 @@ private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat ×
           let rowsArr := (rres.fieldArr? "rows").getD #[]
           let frowsArr := (fres.fieldArr? "rows").getD #[]
           (sres.fieldBool? "applied") == some true &&
-          rc > 1000 &&
+          -- Projects start collapsed, so the unfiltered view is one row per project plus navigation;
+          -- the filter expands them and must reach a mission deep in the last project.
+          rc ≥ 80 &&
           rowsArr.size == rc &&
           frowsArr.any (fun r => r.fieldStr? "row_id" == some "m:m-79-29")
         | _, _, _ => false
-      if (← assertTrue s!"native_chrome_80_projects_2400_missions_under_1500ms ({scaleElapsedMs}ms)" scaleOk) then
+      let scaleDetail : String :=
+        match scaleSyncRes, scaleRowsRes, scaleFilterRes with
+        | .ok sres, .ok rres, .ok fres =>
+          s!"applied={(sres.fieldBool? "applied").getD false} row_count={(sres.fieldNat? "row_count").getD 0} " ++
+          s!"rows={((rres.fieldArr? "rows").getD #[]).size} filtered={((fres.fieldArr? "rows").getD #[]).size}"
+        | _, _, _ => "rpc error"
+      if (← assertTrue s!"native_chrome_80_projects_2400_missions_under_1500ms ({scaleElapsedMs}ms, {scaleDetail})" scaleOk) then
         ncPassed := ncPassed + 1
 
   return (passed + e2ePassed + ncPassed, total + e2eTotal + ncTotal)
