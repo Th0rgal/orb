@@ -137,7 +137,7 @@ def wakeupPhaseName (phase : UInt8) : String :=
   if phase == 0 then "disarmed"
   else if phase == 1 then "scheduled"
   else if phase == 2 then "queued"
-  else if phase == 3 then "error"
+  else if phase == 3 then "superseded"
   else "cancelled"
 
 def continuationApiState (phase : UInt8) (triggerKind : String) : String :=
@@ -941,8 +941,10 @@ def actOnContinuation
 
 def continuationJsonForMission (st : CoreStore) (missionId : String) : IO (Except String String) := do
   let rows ← execParamQuery st.missionsDb
-    ("SELECT id,phase,due_epoch,trigger_kind,reason,source,error,recurrence FROM mission_continuations " ++
-     "WHERE mission_id=?1 AND phase IN (1,2,3) ORDER BY due_epoch ASC, id ASC;")
+    ("SELECT c.id,c.phase,c.due_epoch,c.trigger_kind,c.reason,c.source,c.error,c.recurrence " ++
+     "FROM mission_continuations c JOIN missions m ON m.id=c.mission_id " ++
+     "WHERE c.mission_id=?1 AND (c.phase=1 OR (c.phase=2 AND c.run_generation>=COALESCE(m.run_generation,1))) " ++
+     "ORDER BY c.due_epoch ASC, c.id ASC;")
     #[missionId]
   match rows with
   | .error e => return .error e
