@@ -1830,7 +1830,7 @@ private def dispatchMissionControlAndGitRoutes?
           | return some (.ok (mkJson 400 "{\"error\":\"worktree_outside_workspace_root\"}"))
         discard <| execParamQuery st.store.missionsDb
           "UPDATE missions SET working_directory=?2,state_revision=state_revision+1,updated_at=?3 WHERE id=?1;"
-          #[mid, safeWt, s!"{nowEpochSec}"]
+          #[mid, safeWt, formatEpochIso8601Utc nowEpochSec]
         return some (.ok (mkJson 201 (renderCompact created.toJVal)))
       | Except.error err =>
         return some (.ok (mkJson 409 s!"\{\"error\":{jsonEscape err}}"))
@@ -3360,7 +3360,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let nextTagsJson := "[" ++ String.intercalate "," (nextTags.toList.map jsonEscape) ++ "]"
       match ← execParamQuery st.store.missionsDb
         "UPDATE missions SET tags=?2, state_revision=state_revision+1, updated_at=?3 WHERE id=?1;"
-        #[mid, nextTagsJson, s!"{nowEpochSec}"] with
+        #[mid, nextTagsJson, formatEpochIso8601Utc nowEpochSec] with
       | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       | .ok _ => return .ok (mkJson 200 s!"\{\"ok\":true,\"id\":{jsonEscape mid},\"archived\":{if arch then "true" else "false"}}")
 
