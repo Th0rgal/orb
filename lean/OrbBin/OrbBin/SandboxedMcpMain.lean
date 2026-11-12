@@ -66,14 +66,20 @@ def persistScopedCredential (path : System.FilePath) (token : String) : IO (Exce
   let hasPrefix : UInt8 := if token.startsWith "mcp1." then 1 else 0
   if hasPrefix != 1 then
     return .error "Core returned an invalid scoped credential"
-  let parent := path.parent.getD (System.FilePath.mk ".")
-  let ps := parent.toString
-  if ps != "." && ps != "/" && ps != "/tmp" && ps != "/var/tmp" && ps != "/private/tmp" then
-    let _ ← ensurePrivateDir0700 parent
+  let rawParent := path.parent.getD (System.FilePath.mk ".")
+  let rawPs := rawParent.toString
+  if rawPs == "." || rawPs == "/" || rawPs == "/tmp" || rawPs == "/var/tmp" || rawPs == "/private/tmp" then
+    IO.FS.createDirAll rawParent
   else
-    IO.FS.createDirAll parent
-  let pst ← statPath ps
+    let rawSt ← statPath rawPs
+    if !rawSt.exists_ then
+      IO.FS.createDirAll rawParent
+  let parent ← try IO.FS.realPath rawParent catch _ => pure rawParent
+  let ps := parent.toString
   let isStickySharedTmp := ps == "/tmp" || ps == "/var/tmp" || ps == "/private/tmp"
+  if ps != "." && ps != "/" && !isStickySharedTmp then
+    let _ ← chmod ps 0o700
+  let pst ← statPath ps
   let dirPriv : UInt8 :=
     if pst.exists_ && pst.isDir && ((pst.ownedByEuid && (pst.mode &&& 0o077) == 0) || isStickySharedTmp) then 1 else 0
   let dirNotSym : UInt8 := if !pst.isSymlink then 1 else 0
@@ -82,15 +88,16 @@ def persistScopedCredential (path : System.FilePath) (token : String) : IO (Exce
   let preGate := OrbBin.Spec.verifyMcpSecretPersistence hasPrefix dirPriv dirNotSym 1 safeName
   if preGate != 1 then
     return .error "Credential parent directory failed verified private confinement check"
-  match (← writeAtomicPrivate0600 path token.toUTF8) with
+  let canonTarget := parent / fileName
+  match (← writeAtomicPrivate0600 canonTarget token.toUTF8) with
   | .error e => return .error e
   | .ok () =>
-    let fst ← statPath path.toString
+    let fst ← statPath canonTarget.toString
     let fileMode0600 : UInt8 :=
       if fst.exists_ && !fst.isSymlink && fst.isReg && fst.ownedByEuid && (fst.mode &&& 0o777) == 0o600 then 1 else 0
     let postGate := OrbBin.Spec.verifyMcpSecretPersistence hasPrefix dirPriv dirNotSym fileMode0600 safeName
     if postGate != 1 then
-      try IO.FS.removeFile path catch _ => pure ()
+      try IO.FS.removeFile canonTarget catch _ => pure ()
       return .error "Persisted credential failed post-write 0600 verification"
     return .ok ()
 
