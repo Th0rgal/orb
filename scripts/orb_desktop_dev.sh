@@ -127,7 +127,7 @@ if [[ "${ORB_DEV_LOGGED:-}" == "1" ]]; then
 fi
 
 # Ensure NixOS user/system profile directories are on PATH (GUI launchers may have a minimal PATH),
-# and transparently enter `nix develop` if pnpm, GTK/WebKitGTK dev headers, or GIO TLS modules are missing.
+# and transparently enter `nix develop` if bun, GTK/WebKitGTK dev headers, or GIO TLS modules are missing.
 if [[ "$OS_NAME" == "Linux" && -e /etc/NIXOS ]]; then
   for p in \
     "$HOME/.nix-profile/bin" \
@@ -148,7 +148,7 @@ if [[ "$OS_NAME" == "Linux" && -e /etc/NIXOS ]]; then
     done
     return 1
   }
-  if [[ -z "${ORB_IN_NIX_SHELL:-}" ]] && { ! command -v pnpm >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1 || ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists webkit2gtk-4.1 2>/dev/null || ! has_gio_tls_module; }; then
+  if [[ -z "${ORB_IN_NIX_SHELL:-}" ]] && { ! command -v bun >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1 || ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists webkit2gtk-4.1 2>/dev/null || ! has_gio_tls_module; }; then
     echo "==> Entering nix develop environment for $ROOT_DIR..."
     exec nix develop "$ROOT_DIR" -c env ORB_IN_NIX_SHELL=1 "$ROOT_DIR/scripts/orb_desktop_dev.sh" "${ORIG_ARGS[@]}"
   fi
@@ -172,7 +172,7 @@ mkdir -p "$STAGE_BIN_DIR"
 
 if [[ "$UI_ONLY" == "1" ]]; then
   echo "==> Fast UI-only build (orb/dist)..."
-  (cd "$ROOT_DIR/orb" && pnpm build)
+  (cd "$ROOT_DIR/orb" && bun run build)
   GIT_SHA="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo dev)"
   if [[ "$OS_NAME" == "Darwin" ]]; then
     APP_BUNDLE="$STAGE_BIN_DIR/Orb.app"
@@ -295,13 +295,13 @@ else
 fi
 
 if [[ ! -d "$ROOT_DIR/orb/node_modules" ]]; then
-  echo "==> Installing frontend dependencies (pnpm install --frozen-lockfile)..."
-  (cd "$ROOT_DIR/orb" && CI=true pnpm install --frozen-lockfile)
+  echo "==> Installing frontend dependencies (bun install)..."
+  (cd "$ROOT_DIR/orb" && CI=true bun install)
 fi
 
 if [[ "$MODE" == "bundle" ]]; then
   echo "==> Building frontend dist/..."
-  (cd "$ROOT_DIR/orb" && pnpm build)
+  (cd "$ROOT_DIR/orb" && bun run build)
 
   if [[ "$OS_NAME" == "Darwin" ]]; then
     APP_BUNDLE="$STAGE_BIN_DIR/Orb.app"
@@ -716,7 +716,7 @@ fi
 if [[ "$MODE" == "static" ]]; then
   if [[ ! -f "$ROOT_DIR/orb/dist/index.html" || "$FORCE_REBUILD" == "1" ]]; then
     echo "==> Building frontend dist/ for static mode (zero vite/esbuild runtime overhead)..."
-    (cd "$ROOT_DIR/orb" && pnpm build)
+    (cd "$ROOT_DIR/orb" && bun run build)
   fi
   echo "==> Starting lightweight static asset server on http://127.0.0.1:${VITE_PORT}/..."
   python3 - "$ROOT_DIR/orb/dist" "$VITE_PORT" <<'PY' &
@@ -749,12 +749,12 @@ elif ! curl -fsS "http://127.0.0.1:${VITE_PORT}/" >/dev/null 2>&1; then
   if command -v setsid >/dev/null 2>&1; then
     (
       cd "$ROOT_DIR/orb"
-      exec setsid pnpm dev --host 127.0.0.1 --port "$VITE_PORT" --strictPort </dev/null
+      exec setsid bun run dev --host 127.0.0.1 --port "$VITE_PORT" --strictPort </dev/null
     ) &
   else
     (
       cd "$ROOT_DIR/orb"
-      exec pnpm dev --host 127.0.0.1 --port "$VITE_PORT" --strictPort </dev/null
+      exec bun run dev --host 127.0.0.1 --port "$VITE_PORT" --strictPort </dev/null
     ) &
   fi
   VITE_PID="$!"

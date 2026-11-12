@@ -143,6 +143,7 @@ SHIM
             pkgs.openssl
             pkgs.pkg-config
             pkgs.pnpm_10
+            pkgs.bun
             pkgs.python3
           ]
           ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
