@@ -59,8 +59,8 @@ printf '%s\n' 'd /tmp/opencode 1777 orbnode orbnode -' > /etc/tmpfiles.d/orb-ope
 # `orbnode`, so copy only the LEANCI_* lines to a file that user's login shells
 # source. Absent on other providers: this block then does nothing.
 rm -f /etc/orb/leanci-env /etc/profile.d/zz-orb-leanci.sh
-leanci_env=$(cat /etc/profile.d/boost-vm.sh /home/runner/.boost-env 2>/dev/null |
-  grep -E "^export LEANCI_[A-Z0-9_]+='[^']*'$" || true)
+leanci_env=$(grep -hE "^export LEANCI_[A-Z0-9_]+='[^']*'$" \
+  /etc/profile.d/boost-vm.sh /home/runner/.boost-env 2>/dev/null || true)
 if [[ -n $leanci_env ]]; then
   ( umask 027; printf '%s\n' "$leanci_env" > /etc/orb/leanci-env )
   chown root:orbnode /etc/orb/leanci-env
@@ -73,11 +73,17 @@ fi
 if [[ ! -d /run/systemd/system ]]; then
   # No systemd (a Colab runtime): run the node under a small restart loop,
   # detached from the provider's exec call. The enrolment file stays root-only;
-  # the loop reads it without evaluating it and passes a minimal environment.
+  # the loop reads it without evaluating it, and hands the node its settings
+  # through the environment, never on a command line.
+  command -v setsid >/dev/null || { printf '%s\n' 'setsid is required without systemd' >&2; exit 1; }
+  command -v setpriv >/dev/null || command -v runuser >/dev/null ||
+    { printf '%s\n' 'setpriv or runuser is required without systemd' >&2; exit 1; }
+  [[ -r /etc/ssl/certs/ca-certificates.crt ]] || { printf '%s\n' 'system CA bundle missing' >&2; exit 1; }
   cat > /opt/orb/bin/orb-node-supervise <<'SUPERVISE'
 #!/usr/bin/env bash
 set -u
-node_env=(HOME=/var/lib/orb-node PATH=/opt/orb/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+umask 022
+node_env=(HOME=/var/lib/orb-node "PATH=/opt/orb/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
   SANDBOXED_NODE_WORK_DIR=/var/lib/orb-node/work SANDBOXED_NODE_CREDENTIAL_FILE=/var/lib/orb-node/node.cred
   SANDBOXED_NODE_BIND=127.0.0.1:3088 OPENCODE_TMPDIR=/tmp/opencode GIT_TERMINAL_PROMPT=0
   SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt SSL_CERT_DIR=/etc/ssl/certs)
@@ -90,20 +96,32 @@ while IFS= read -r name; do
 done < <(compgen -e)
 cd /var/lib/orb-node || exit 1
 while :; do
-  runuser -u orbnode -- env -i "${node_env[@]}" /opt/orb/bin/sandboxed-node || :
+  (
+    while IFS= read -r name; do unset "$name" 2>/dev/null || true; done < <(compgen -e)
+    export "${node_env[@]}"
+    if command -v setpriv >/dev/null; then
+      exec setpriv --reuid=orbnode --regid=orbnode --init-groups /opt/orb/bin/sandboxed-node
+    fi
+    exec runuser -p -u orbnode -- /opt/orb/bin/sandboxed-node
+  ) || :
   sleep 2
 done
 SUPERVISE
   chmod 0755 /opt/orb/bin/orb-node-supervise
-  [[ -r /etc/ssl/certs/ca-certificates.crt ]] || { printf '%s\n' 'system CA bundle missing' >&2; exit 1; }
+  # Stop a previous loop only if that PID still is one; never signal PID 0 or 1.
   if [[ -r /run/orb-node-supervise.pid ]]; then
     old_pid=$(cat /run/orb-node-supervise.pid)
-    [[ $old_pid =~ ^[0-9]+$ ]] && kill -- "-$old_pid" 2>/dev/null || true
+    if [[ $old_pid =~ ^[0-9]+$ ]] && (( old_pid > 1 )) &&
+        tr '\0' ' ' < "/proc/$old_pid/cmdline" 2>/dev/null | grep -q 'orb-node-supervise'; then
+      kill -- "-$old_pid" 2>/dev/null || true
+    fi
   fi
   pkill -u orbnode -x sandboxed-node 2>/dev/null || true
-  : > /var/lib/orb-node/orb-node.log
-  chown orbnode:orbnode /var/lib/orb-node/orb-node.log
-  setsid nohup /opt/orb/bin/orb-node-supervise </dev/null >>/var/lib/orb-node/orb-node.log 2>&1 &
+  # The log lives where only root can create files, so the unprivileged node
+  # cannot redirect root's writes with a symlink.
+  : > /var/log/orb-node.log
+  chmod 0640 /var/log/orb-node.log
+  setsid nohup /opt/orb/bin/orb-node-supervise </dev/null >>/var/log/orb-node.log 2>&1 &
   printf '%s\n' "$!" > /run/orb-node-supervise.pid
   printf '%s\n' 'orb-node started without systemd; readiness requires a Core relay poll'
   exit 0

@@ -667,11 +667,14 @@ In order, the script:
   provider's exec call: a restart loop that runs the node as `orbnode` with a
   minimal environment (the enrolment values, `SSL_CERT_FILE`, and only the
   accelerator variables `NVIDIA_*`, `CUDA_*`, `TPU_*`, `PJRT_*`,
-  `LD_LIBRARY_PATH`, `COLAB_GPU` from the runtime). The enrolment file is read
-  without being evaluated by a shell. A second run stops the previous loop first.
+  `LD_LIBRARY_PATH`, `COLAB_GPU` from the runtime), handed over through the
+  environment and never on a command line. The enrolment file is read without
+  being evaluated by a shell. A second run stops the previous loop first, after
+  checking that the recorded PID still is one. Output goes to
+  `/var/log/orb-node.log`, which only root can create.
 
 Starting the node is not readiness: only the first authenticated relay poll,
-inside the provider's deadline (360 s Boat, 480 s lean.ci, 600 s Colab), marks
+inside the provider's deadline (360 s Boat, 480 s lean.ci, 900 s Colab), marks
 the machine ready; otherwise Core destroys it.
 
 ### Google Colab adapter
@@ -685,11 +688,17 @@ source (`Th0rgal/colab-api`):
   machine name (the service is idempotent on the name), the accelerator
   candidates for the size and `worker: true`. Delete is
   `POST /notebooks/:id/delete`. IDs contain `~` and `@` and are percent-encoded.
-- A runtime is ready for commands only once its worker tunnel URL is published.
+- The service tries each requested accelerator in turn before it answers, so
+  the per-candidate wait is divided to keep the whole create call near seven
+  minutes; the 900 s readiness deadline, which starts before the call, covers it.
+- A runtime is ready for commands only once its worker tunnel URL is published;
+  a record that is connected but has no tunnel URL yet is not ready.
   The worker is called at that URL with a per-runtime token from the notebook
   record; a URL that is not HTTPS is refused.
 - Commands are `POST /exec` on the worker (`bash -lc`, working directory
-  `/content`). A timed-out command has no exit code and is a failure. The worker's
+  `/content`). A timed-out command has no exit code and is a failure. An answer
+  from the tunnel edge (502, 503, 530) is retried once after re-reading the
+  record; a lost connection is not, since the command may have run. The worker's
   upload route cannot leave `/content`, so files are written through `exec` as
   base64, mode 0600.
 - Sizes `colab-auto`, `t4`, `l4`, `a100`, `h100`, `v5e1`, `v6e1`, shadow-priced

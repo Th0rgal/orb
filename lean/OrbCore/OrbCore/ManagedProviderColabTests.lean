@@ -24,6 +24,9 @@ def run : IO Unit := do
   let notebooks ← IO.mkRef (#[] : Array JVal)
   let eligible ← IO.mkRef #["T4", "L4"]
   let tunnelUp ← IO.mkRef true
+  let connectedOnly ← IO.mkRef false
+  let workerBlips ← IO.mkRef (0 : Nat)
+  let sleeps ← IO.mkRef (#[] : Array UInt32)
   let clock ← IO.mkRef (0 : Nat)
   let cache ← IO.mkRef none
   let notebookId := "rt-1~a0@example.com"
@@ -46,6 +49,9 @@ def run : IO Unit := do
     if req.path == "/notebooks/rt-1~a0%40example.com" && req.method == "GET" then
       if (← notebooks.get).isEmpty then return .ok (404, .obj #[("error", .str "HTTP 404")])
       if !(← tunnelUp.get) then return .ok (502, .obj #[("error", .str "no connection info")])
+      -- The record can exist and be connected before its tunnel is published.
+      if ← connectedOnly.get then
+        return .ok (200, .obj #[("id", .str notebookId), ("connected", .bool true), ("worker_url", .null), ("worker_token", .null)])
       return .ok (200, .obj #[("id", .str notebookId), ("name", .str "orb-managed-dev-t"),
         ("worker_url", .str "https://unit-test.trycloudflare.com/"), ("worker_token", .str "per-runtime-token")])
     if req.path == "/notebooks/rt-1~a0%40example.com/delete" && req.method == "POST" then
@@ -55,6 +61,9 @@ def run : IO Unit := do
   let worker : String → String → Transport := fun url token req => do
     workerRequests.modify (·.push (url, token, req))
     if token != "per-runtime-token" then return .ok (401, .obj #[("error", .str "unauthorized")])
+    if (← workerBlips.get) > 0 then
+      workerBlips.modify (· - 1)
+      return .ok (530, .null)
     let body := req.body.getD .null
     if req.method == "POST" && req.path == "/exec" then
       let some cmd := body.fieldStr? "cmd" | return .ok (400, .obj #[("error", .str "missing cmd")])
@@ -62,7 +71,7 @@ def run : IO Unit := do
         return .ok (200, .obj #[("exit_code", .null), ("timed_out", .bool true), ("output", .str "")])
       return .ok (200, .obj #[("exit_code", .nat 0), ("timed_out", .bool false), ("output", .str "")])
     return .ok (404, .null)
-  let provider := colab api worker cache clock.get
+  let provider := colab api worker cache clock.get (fun ms => sleeps.modify (·.push ms))
 
   let some entry := declaration? "colab" | throw (IO.userError "colab missing from registry")
   check (entry.secretName == "COLAB_API_TOKEN" && entry.defaultApiBase == "http://127.0.0.1:8790/v1" &&
@@ -90,6 +99,19 @@ def run : IO Unit := do
   tunnelUp.set false
   check (!(← provider.get notebookId).isOk && !(← provider.exec notebookId "true" 30).isOk) "no tunnel yet: neither ready nor executable"
   tunnelUp.set true
+  connectedOnly.set true
+  let .ok early ← provider.get notebookId | throw (IO.userError "connected-only get failed")
+  check (!provider.isReady early.state && !(← provider.exec notebookId "true" 30).isOk)
+    "connected without a tunnel URL is not ready"
+  connectedOnly.set false
+  sleeps.set #[]
+  workerBlips.set 1
+  let blipBefore := (← workerRequests.get).size
+  check ((← provider.exec notebookId "true" 30).isOk && (← workerRequests.get).size == blipBefore + 2 && (← sleeps.get) == #[2000])
+    "one tunnel-edge failure is retried once"
+  workerBlips.set 2
+  check (!(← provider.exec notebookId "true" 30).isOk) "a second failure is not retried again"
+  workerBlips.set 0
   let .ok ready ← provider.get notebookId | throw (IO.userError "get failed")
   let .ok listed ← provider.list | throw (IO.userError "list failed")
   check (provider.isReady ready.state && listed.size == 1 && !listed.any (fun m => provider.isReady m.state)) "ready follows the published tunnel"
@@ -123,21 +145,29 @@ def run : IO Unit := do
   check ((← observe spec).status == .available && (← apiRequests.get).size == 3) "available"
   check ((← observe spec).status == .available && (← apiRequests.get).size == 3) "cached within 30 s"
   check ((← observe { spec with size := "h100" }).status == .saturated) "requested accelerator not eligible"
-  clock.set 30001
+  check (colabAssignTimeoutSecs 1 == 180 && colabAssignTimeoutSecs 4 == 105 && 4 * colabAssignTimeoutSecs 4 + 90 < 900)
+    "the whole create call fits inside the readiness deadline"
+  eligible.set #["T4"]
+  clock.set 31000
+  check ((← observe spec).status == .degraded) "only T4 eligible degrades"
+  eligible.set #["T4", "L4"]
+  clock.set 62000
+  check ((← observe spec).status == .available) "back to available"
+  clock.set 100000
   accounts.set (accountsBody 1 2)
   check ((← observe spec).status == .degraded) "an unusable account degrades"
-  clock.set 70000
+  clock.set 140000
   accounts.set (accountsBody 0 2)
   check ((← observe spec).status == .saturated) "no usable account"
-  clock.set 110000
+  clock.set 180000
   accounts.set (accountsBody 1 1)
   notebooks.set #[.obj #[("id", .str "busy~a0@example.com"), ("connected", .bool true)]]
   check ((← observe spec).status == .saturated) "every usable account already runs a notebook"
-  clock.set 150000
+  clock.set 220000
   notebooks.set #[]
   eligible.set #[]
   check ((← observe spec).status == .saturated) "no eligible accelerator"
-  clock.set 190000
+  clock.set 260000
   accounts.set (.obj #[])
   check ((← observe spec).status == .unknown) "an uninterpretable account list is unknown"
 

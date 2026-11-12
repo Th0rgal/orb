@@ -156,6 +156,12 @@ def httpTransport (baseUrl apiKey : String) : Transport := fun req => do
     if text.trimAscii.toString.isEmpty then return .ok (status, .null)
     return .error { status, code := "provider_invalid_json_outcome_uncertain" }
 
+/-- Prefix for a guest command that already runs as root on an image that may
+    not ship `sudo`: a function of that name which drops leading option flags
+    (`-n`, `-E`) and runs the rest. Unused where `sudo` exists. -/
+def sudoShim : String :=
+  "command -v sudo >/dev/null 2>&1 || sudo() { while [ \"${1#-}\" != \"$1\" ]; do shift; done; \"$@\"; }; "
+
 def call (transport : Transport) (req : Request) : IO (Result JVal) := do
   match ← transport req with
   | .error e => return .error e

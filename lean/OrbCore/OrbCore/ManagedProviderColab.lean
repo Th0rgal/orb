@@ -45,8 +45,11 @@ def colabQuoteCents (size : String) (ttlMinutes : UInt64) : Result UInt64 := do
 def colabValidName (name : String) : Bool :=
   !name.isEmpty && name.length ≤ 64 && name.toList.all (fun c => c.isAlphanum || c == '_' || c == '-')
 
-/-- Seconds the service may spend trying each requested accelerator. -/
-def colabAssignTimeoutSecs : Nat := 180
+/-- Seconds the service may spend on each requested accelerator. The service
+    tries candidates in turn before it answers, so the per-candidate wait is
+    divided to keep the whole create call near seven minutes, inside the
+    readiness deadline that started before it. -/
+def colabAssignTimeoutSecs (candidates : Nat) : Nat := max 60 (min 180 (420 / max 1 candidates))
 
 def colabSpawnBody (spec : SpawnSpec) : Result JVal := do
   let some profile := colabProfile? spec.size | throw { code := "provider_invalid_size" }
@@ -55,15 +58,18 @@ def colabSpawnBody (spec : SpawnSpec) : Result JVal := do
   if !(#["", "orb-node-base", "provider-default"].contains spec.fromSnapshot) then
     throw { code := "provider_snapshots_unsupported" }
   return .obj #[("name", .str spec.name), ("accelerator", .arr (profile.accelerators.map .str)),
-    ("assign_timeout_secs", .nat colabAssignTimeoutSecs), ("worker", .bool true)]
+    ("assign_timeout_secs", .nat (colabAssignTimeoutSecs profile.accelerators.size)), ("worker", .bool true)]
 
 private def notebookPath (id : String) : String := "/notebooks/" ++ urlEncodeComponent id
 
-/-- A runtime accepts guest commands once its worker tunnel is published. -/
-private def colabMachine (item : JVal) : Result Machine := do
+/-- A runtime accepts guest commands once its worker tunnel is published. The
+    list has no tunnel URL and reports `connected` instead; a notebook record can
+    be connected before its tunnel exists, so there only the URL counts. -/
+private def colabMachine (item : JVal) (fromList : Bool := false) : Result Machine := do
   let id := (item.fieldStr? "id").getD ""
   if id.trimAscii.toString.isEmpty then throw { code := "provider_missing_machine_id" }
-  let reachable := ((item.fieldStr? "worker_url").filter (!·.isEmpty)).isSome || item.fieldBool? "connected" == some true
+  let reachable := if fromList then item.fieldBool? "connected" == some true
+    else ((item.fieldStr? "worker_url").filter (!·.isEmpty)).isSome
   return { providerId := id, name := (item.fieldStr? "name").getD "", state := if reachable then "running" else "provisioning" }
 
 /-- The worker's address and per-runtime token come only from the notebook
@@ -102,6 +108,7 @@ def colabAvailabilityOf (spec : SpawnSpec) (accounts : JVal) (notebooks accelera
           | some profile =>
             if !profile.accelerators.any names.contains then { status := .saturated, reason := "accelerator_ineligible" }
             else if usable < all.size then { status := .degraded, reason := "some_accounts_unusable" }
+            else if !(#["H100", "A100", "L4", "V6E1", "V5E1"].any names.contains) then { status := .degraded, reason := "only_t4_eligible" }
             else { status := .available }
           | none =>
             if usable < all.size then { status := .degraded, reason := "some_accounts_unusable" } else { status := .available }
@@ -119,9 +126,9 @@ private def unsupportedColab {α : Type} : IO (Result α) :=
 /-- `worker` builds the transport for one runtime from its URL and token. -/
 def colab (api : Transport)
     (worker : String → String → Transport := fun url token => httpTransport url token)
-    (cache : ColabAvailabilityCache := colabAvailabilityCache) (nowMs : IO Nat := IO.monoMsNow) : Provider :=
-  let execOn (id script : String) (timeoutSecs : UInt32) : IO (Result JVal) := do
-    let timeout := max 1 (min timeoutSecs 600)
+    (cache : ColabAvailabilityCache := colabAvailabilityCache) (nowMs : IO Nat := IO.monoMsNow)
+    (sleep : UInt32 → IO Unit := fun ms => do IO.sleep ms) : Provider :=
+  let execOnce (id script : String) (timeout : UInt32) : IO (Result JVal) := do
     match ← colabWorker api id with
     | .error e => return .error e
     | .ok (url, token) =>
@@ -138,9 +145,21 @@ def colab (api : Transport)
         if (reply.fieldInt? "exit_code").isNone || reply.fieldBool? "timed_out" == some true then
           return .error { code := "provider_exec_failed" }
         return .ok reply
+  -- A quick tunnel drops requests for a moment now and then. Those answers come
+  -- from the tunnel edge or from a record without a tunnel yet, before the
+  -- worker ran anything, so one retry after re-reading the record is safe. A
+  -- lost connection (no status) is not retried: the command may have run.
+  let execOn (id script : String) (timeoutSecs : UInt32) : IO (Result JVal) := do
+    let timeout := max 1 (min timeoutSecs 600)
+    match ← execOnce id script timeout with
+    | .ok reply => return .ok reply
+    | .error e =>
+      if !(#[502, 503, 530].contains e.status) then return .error e
+      sleep 2000
+      execOnce id script timeout
   {
     name := "colab"
-    readinessDeadlineSecs := 600
+    readinessDeadlineSecs := 900
     isReady := fun s => s == "running"
     isStopped := fun s => #["stopped", "deleted", "error", "failed", "offline"].contains s
     quoteCents := colabQuoteCents
@@ -154,7 +173,11 @@ def colab (api : Transport)
       | .error e => return .error e
       | .ok accounts =>
         let notebooks := (← call api { method := "GET", path := "/notebooks" }).toOption
-        let accelerators := (← call api { method := "GET", path := "/accelerators", timeoutMs := 60000 }).toOption
+        -- Eligibility is only meaningful, and only answered, for usable accounts.
+        let anyUsable := ((accounts.fieldArr? "accounts").getD #[]).any (·.fieldBool? "usable" == some true)
+        let accelerators ← if anyUsable
+          then pure (← call api { method := "GET", path := "/accelerators", timeoutMs := 60000 }).toOption
+          else pure none
         cache.set (some (now, accounts, notebooks, accelerators))
         return .ok (colabAvailabilityOf spec accounts notebooks accelerators)
     spawn := fun spec => do
@@ -168,7 +191,7 @@ def colab (api : Transport)
           method := "POST"
           path := "/notebooks"
           body := some body
-          timeoutMs := ((candidates * colabAssignTimeoutSecs + 90) * 1000).toUInt32
+          timeoutMs := ((candidates * colabAssignTimeoutSecs candidates + 90) * 1000).toUInt32
         }
         cache.set none
         match ← call api request with
@@ -185,7 +208,7 @@ def colab (api : Transport)
         let some items := body.fieldArr? "notebooks" | return .error { code := "provider_invalid_machine_list" }
         let mut out := #[]
         for item in items do
-          match colabMachine item with
+          match colabMachine item true with
           | .error e => return .error e
           | .ok machine => out := out.push machine
         return .ok out
@@ -215,7 +238,7 @@ def colab (api : Transport)
     -- The worker runs as root; `sudo` in the shared bootstrap command is a shim
     -- when the runtime image does not ship it.
     exec := fun id command timeoutSecs =>
-      execOn id ("command -v sudo >/dev/null 2>&1 || sudo() { \"$@\"; }; " ++ command) timeoutSecs
+      execOn id (sudoShim ++ command) timeoutSecs
   }
 
 def colabDeclaration : Declaration := {
@@ -225,7 +248,7 @@ def colabDeclaration : Declaration := {
   apiBaseEnv := "COLAB_API_URL"
   defaultApiBase := "http://127.0.0.1:8790/v1"
   sizes := colabProfiles.map (·.size)
-  readinessDeadlineSecs := 600
+  readinessDeadlineSecs := 900
   bootstrapMode := .execSupervised
   supportsStopResume := false
   supportsSnapshots := false

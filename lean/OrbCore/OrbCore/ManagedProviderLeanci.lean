@@ -250,7 +250,7 @@ def leanci (transport : Transport) (cache : LeanciCapabilityCache := leanciCapab
   -- `ok` (timeout, guest unreachable) is a failure, never a silent success.
   exec := fun id command timeoutSecs => do
     let timeout := max 1 (min timeoutSecs 600)
-    let script := "command -v sudo >/dev/null 2>&1 || sudo() { \"$@\"; }; " ++ command
+    let script := sudoShim ++ command
     -- The server rejects an argument over 4096 bytes and waits max(t+30, 120) s
     -- for the guest; wait longer than that so its answer is not lost.
     if script.utf8ByteSize > 4096 then return .error { code := "provider_exec_command_too_long" }
