@@ -65,6 +65,18 @@ class PlanTest(unittest.TestCase):
             d = ci_plan.claim(r, DOMAINS)
             self.assertTrue(d and (d.get("full") or "wf:kernel-abi" in d["jobs"]), r)
 
+    def test_generated_bindings_select_kernel_abi(self):
+        import gen_kernel_bindings as g
+        for out in g.outputs(g.load_manifest()):
+            rel = str(out.relative_to(g.ROOT))
+            self.assertIn("wf:kernel-abi", jobs([rel]), rel)
+
+    def test_performance_specs_and_virtualization_run_performance(self):
+        for p in ("orb/tests/performance.browser.spec.ts",
+                  "orb/tests/sidebar-performance.tsx",
+                  "orb/src/VirtualTurns.tsx"):
+            self.assertIn("orb-performance", jobs([p]), p)
+
     def test_wakeup_mcp_runs_desktop_shell(self):
         for p in ("scripts/wakeup_mcp.py", "orb/tests/wakeup_mcp_test.py"):
             self.assertIn("orb-desktop-shell", jobs([p]), p)
