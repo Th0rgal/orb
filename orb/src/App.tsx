@@ -1579,6 +1579,57 @@ export default function App() {
     window.addEventListener("pointerup", up);
   };
 
+  const renderLiveProjectsSection = (headless: boolean) => (
+    <LiveProjectsSection
+      headless={headless}
+      extraMissions={headless ? projectMissions() : undefined}
+      active={() => !headless && !onSettings()}
+      deleteRequest={deleteMissionRequest()}
+      onDeleteRequestHandled={() => setDeleteMissionRequest(null)}
+      activityMissions={missions()}
+      currentMission={(() => { const m = findKnownMission(currentMissionId()); return m ? movedMission(m) : undefined; })()}
+      harnessChoices={harnessChoices()}
+      forkChoices={mission => harnessChoices(mission.remote_node_id ?? "core")}
+      onForkOpen={mission => void refreshNodeAntigravityModels(mission.remote_node_id ?? "core")}
+      onFork={commitFork}
+      selected={selected}
+      onDeleted={ids => {
+        const idSet = new Set(ids);
+        const removed = new Set(ids.flatMap(id => [`m:${id}`, `ms:${id}`, `rm:${id}`]));
+        batch(() => {
+          for (const id of ids) keepAlivePool.evictMission(id);
+          setMissions(rows => rows.filter(m => !idSet.has(m.id)));
+          setCompletedMissions(rows => rows.filter(m => !idSet.has(m.id)));
+          setProjectMissions(prev => {
+            const next: Record<string, Mission[]> = {};
+            for (const [k, rows] of Object.entries(prev)) {
+              next[k] = rows.filter(m => !idSet.has(m.id));
+            }
+            return next;
+          });
+          if (removed.has(selected() ?? "")) setSelected(null);
+          // Back/forward must not reopen conversations that no longer exist.
+          setHistory(entries => entries.map(id => id && removed.has(id) ? null : id));
+        });
+      }}
+      onProjectMissions={(slug, rows) => {
+        const clean = rows.filter(m => !isMissionDeleting(m.id));
+        setProjectMissions(prev => ({ ...prev, [slug]: clean }));
+      }}
+      open={open}
+      onNewCloudAgent={(project, path) => { setNewProject(project); setNewFolder(path ? {project, path} : null); open("cloud-agent"); }}
+      onNewAgent={(slug, path) => {
+        setNewFolder(path ? { project: slug, path } : null);
+        setNewProject(slug);
+        open(null);
+      }}
+      onNewProject={anchor => {
+        setProjectCreationAnchor(anchor);
+        setNewProjectDraft(true);
+      }}
+    />
+  );
+
   return (
     <div class={`app ${onSettings() ? "settings-view" : ""} ${(nativeChromeActive || !sidebar()) ? "sb-hidden" : ""}`} data-native-chrome={nativeChromeActive ? "true" : undefined} data-pane={currentMissionId() ? "mission" : (currentController() || currentProjectFile() || currentProjectSettings()) ? "project" : "page"} style={{ "--sb-w": `${onSettings() ? 220 : sbWidth()}px` }}>
       <MentionProjectContext.Provider value={()=>openMission()?.project??currentController()?.slug??effectiveNewProject()}>
@@ -1643,52 +1694,7 @@ export default function App() {
                   const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1 : (current + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
                   rows[next].focus();
                 }}>
-                  <LiveProjectsSection
-                    active={() => !onSettings()}
-                    deleteRequest={deleteMissionRequest()}
-                    onDeleteRequestHandled={() => setDeleteMissionRequest(null)}
-                    activityMissions={missions()}
-                    currentMission={(() => { const m = findKnownMission(currentMissionId()); return m ? movedMission(m) : undefined; })()}
-                    harnessChoices={harnessChoices()}
-                    forkChoices={mission => harnessChoices(mission.remote_node_id ?? "core")}
-                    onForkOpen={mission => void refreshNodeAntigravityModels(mission.remote_node_id ?? "core")}
-                    onFork={commitFork}
-                    selected={selected}
-                    onDeleted={ids => {
-                      const idSet = new Set(ids);
-                      const removed = new Set(ids.flatMap(id => [`m:${id}`, `ms:${id}`, `rm:${id}`]));
-                      batch(() => {
-                        for (const id of ids) keepAlivePool.evictMission(id);
-                        setMissions(rows => rows.filter(m => !idSet.has(m.id)));
-                        setCompletedMissions(rows => rows.filter(m => !idSet.has(m.id)));
-                        setProjectMissions(prev => {
-                          const next: Record<string, Mission[]> = {};
-                          for (const [k, rows] of Object.entries(prev)) {
-                            next[k] = rows.filter(m => !idSet.has(m.id));
-                          }
-                          return next;
-                        });
-                        if (removed.has(selected() ?? "")) setSelected(null);
-                        // Back/forward must not reopen conversations that no longer exist.
-                        setHistory(entries => entries.map(id => id && removed.has(id) ? null : id));
-                      });
-                    }}
-                    onProjectMissions={(slug, rows) => {
-                      const clean = rows.filter(m => !isMissionDeleting(m.id));
-                      setProjectMissions(prev => ({ ...prev, [slug]: clean }));
-                    }}
-                    open={open}
-                    onNewCloudAgent={(project, path) => { setNewProject(project); setNewFolder(path ? {project, path} : null); open("cloud-agent"); }}
-                    onNewAgent={(slug, path) => {
-                      setNewFolder(path ? { project: slug, path } : null);
-                      setNewProject(slug);
-                      open(null);
-                    }}
-                    onNewProject={anchor => {
-                      setProjectCreationAnchor(anchor);
-                      setNewProjectDraft(true);
-                    }}
-                  />
+                  {renderLiveProjectsSection(false)}
                 </div>
               )}
             </Show>
@@ -1726,6 +1732,9 @@ export default function App() {
         </div>
         <div class="sb-resize" onPointerDown={startResize} />
       </aside>
+      </Show>
+      <Show when={nativeChromeActive && isConnected() ? connectionVersion() + 1 : 0} keyed>
+        {(_ver) => renderLiveProjectsSection(true)}
       </Show>
 
       <header class="titlebar" data-orb-drag-region>

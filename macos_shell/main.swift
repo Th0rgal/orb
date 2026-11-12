@@ -323,6 +323,8 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
     private var sseRetryWork: DispatchWorkItem?
     private var isProgrammaticSelect = false
     private var lastSelectionDispatchedRowId: String?
+    private var paletteQueryGeneration: UInt64 = 0
+    private var lastAppliedViewRevision: UInt64 = 0
 
     init(port: Int, token: String, webView: OrbWebView, hostWindow: NSWindow, frame: NSRect) {
         self.port = port
@@ -554,13 +556,19 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
     func refreshSidebar() {
         callLocald(command: "native_chrome_get_rows", args: [:]) { [weak self] res in
             guard let self, let raw = res?["rows"] as? [[String: Any]] else { return }
+            if let rev = (res?["revision"] as? NSNumber)?.uint64Value {
+                guard rev >= self.lastAppliedViewRevision else { return }
+                self.lastAppliedViewRevision = rev
+            }
             self.applyRowsPayload(raw)
         }
     }
 
     private func refreshPalette(query: String) {
+        paletteQueryGeneration &+= 1
+        let gen = paletteQueryGeneration
         callLocald(command: "native_chrome_palette_query", args: ["query": query, "limit": 24]) { [weak self] res in
-            guard let self, let raw = res?["items"] as? [[String: Any]] else { return }
+            guard let self, self.paletteQueryGeneration == gen, let raw = res?["items"] as? [[String: Any]] else { return }
             self.paletteItems = raw.compactMap { OrbSidebarRowItem.parse($0, isPalette: true) }
             self.paletteTable.reloadData()
             if !self.paletteItems.isEmpty {
@@ -629,6 +637,10 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         callLocald(command: "native_chrome_toggle_expand", args: ["row_id": rowId]) { [weak self] res in
             guard let self else { return }
             if let raw = res?["rows"] as? [[String: Any]] {
+                if let rev = (res?["revision"] as? NSNumber)?.uint64Value {
+                    guard rev >= self.lastAppliedViewRevision else { return }
+                    self.lastAppliedViewRevision = rev
+                }
                 self.applyRowsPayload(raw)
             } else {
                 self.refreshSidebar()
@@ -657,6 +669,7 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         let idx = paletteTable.clickedRow >= 0 ? paletteTable.clickedRow : paletteTable.selectedRow
         guard idx >= 0, idx < paletteItems.count else { return }
         let chosen = paletteItems[idx]
+        paletteQueryGeneration &+= 1
         palettePanel.orderOut(nil)
         dispatchItem(chosen)
     }
@@ -672,6 +685,7 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
             let idx = paletteTable.selectedRow >= 0 ? paletteTable.selectedRow : 0
             if idx < paletteItems.count {
                 let chosen = paletteItems[idx]
+                paletteQueryGeneration &+= 1
                 palettePanel.orderOut(nil)
                 dispatchItem(chosen)
             }
@@ -688,6 +702,7 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
             return true
         }
         if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            paletteQueryGeneration &+= 1
             palettePanel.orderOut(nil)
             return true
         }

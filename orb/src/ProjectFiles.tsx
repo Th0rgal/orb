@@ -160,8 +160,12 @@ export function LiveProjectsSection(p: {
   onNewProject: (anchor: HTMLButtonElement) => void;
   /** False while Settings hides the main sidebar so background sweeps pause without unmounting state. */
   active?: () => boolean;
+  /** True when Hybrid Native Chrome renders the sidebar natively: omits sidebar DOM rows while keeping the shared deletion confirmation pipeline mounted. */
+  headless?: boolean;
+  /** Project mission listings already hydrated by `App.tsx` when `headless` is true. */
+  extraMissions?: Record<string, Mission[]>;
 }) {
-  const isSidebarActive = () => (p.active ? p.active() : true);
+  const isSidebarActive = () => !p.headless && (p.active ? p.active() : true);
   const rowEffectiveStatus = (m: Mission) =>
     presentedStatus(m, missionActivity(m, [], { localRun: localRunActive(m.id) }));
   const initialCachedProjects = isConnected() ? peekCachedProjects() : null;
@@ -217,6 +221,7 @@ export function LiveProjectsSection(p: {
   const allKnownMissions = (): Mission[] => {
     const byId = new Map<string, Mission>();
     for (const m of p.activityMissions ?? []) byId.set(m.id, m);
+    for (const rows of Object.values(p.extraMissions ?? {})) for (const m of rows) byId.set(m.id, m);
     for (const m of archivedMissions()) byId.set(m.id, m);
     for (const m of resolvedParents<Mission>()) byId.set(m.id, m);
     for (const m of Object.values(missions).flat()) byId.set(m.id, m);
@@ -921,7 +926,7 @@ export function LiveProjectsSection(p: {
     setDirErrors(reconcile({})); setCronErrors(reconcile({}));
     warmed.clear();
     warmupQueue.length = 0;
-    if (!isConnected()) return;
+    if (!isConnected() || p.headless) return;
     refresh();
     for (const slug of Object.keys(expanded)) if (expanded[slug] && !slug.includes(":")) void loadCrons(slug);
   }, { defer: true }));
@@ -986,7 +991,7 @@ export function LiveProjectsSection(p: {
     }
   }, { defer: true }));
   onMount(() => {
-    refresh();
+    if (!p.headless) refresh();
     const onProjectCreated = (event: Event) => {
       const detail = (event as CustomEvent<ProjectSummary>).detail;
       if (!detail?.slug) return;
@@ -2715,6 +2720,8 @@ export function LiveProjectsSection(p: {
 
   return (
     <>
+      <ErrorToast error={!deleteTargets().length ? actionError() : null} title="This action couldn’t be completed" onDismiss={() => setActionError(null)} />
+      <Show when={!p.headless}>
       <Show when={sharedWithMeMissions().length > 0}>
         <div class="section" data-testid="shared-with-me-section">Shared with me</div>
         <div class="sb-shared-list">
@@ -2761,7 +2768,6 @@ export function LiveProjectsSection(p: {
         <div class="row note">{error()} <button class="text-btn" onClick={() => refresh(true)}>Retry</button></div>
       </Show>
       <ErrorToast error={cronWarning()} onDismiss={() => setCronWarning(null)} />
-      <ErrorToast error={!deleteTargets().length ? actionError() : null} title="This action couldn’t be completed" onDismiss={() => setActionError(null)} />
       <Show when={importStatus()}><div class="row note" role="status">{importStatus()}</div></Show>
       <For each={backgroundUploads().filter(t => t.scope?.startsWith("project:"))}>
         {task => {
@@ -2819,6 +2825,7 @@ export function LiveProjectsSection(p: {
           <Show when={!archivesLoading() && !archivesError() && !archiveNodes().length}><div class="row note">No archived conversations.</div></Show>
           <Show when={archivesMore()}><button class="row note" disabled={archivesLoading()} onClick={() => void loadArchives(true)}>Load older conversations</button></Show>
         </div>
+      </Show>
       </Show>
       <Show when={stopPrompt()}>{prompt => (
         <ConfirmDialog title={`${prompt().workers} worker${prompt().workers === 1 ? " is" : "s are"} still running`} destructive action="Stop and delete"
