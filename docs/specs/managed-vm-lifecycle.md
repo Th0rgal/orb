@@ -631,6 +631,31 @@ the real `dph_total` rate rather than catalog placeholders. Scaleway Apple Silic
 from the worker size catalog (`raw`-only with `allow_24h_commitment: true`). The
 `online` ledger event records `ready_ms`, `provision_ms`, `enroll_ms` and `total_ms`.
 
+## Automatic placement on the static fleet
+
+Code: `lean/OrbCore/OrbCore/AutoPlacement.lean`, applied by `start_mission`.
+
+A mission started through MCP with no node of its own inherits its parent's node
+and workspace. When there is none to inherit, or `remote_node_id` is `auto`, Core
+chooses a static node once and records it as `remote-node:<id>`, so later turns
+stay with the workspace.
+
+- **Exclusions.** A mission tag `exclude-node:<id>` binds that mission and every
+  descendant. `start_mission(exclude_nodes: [...])` adds exclusions for the child
+  and its descendants; they are written as tags on the child. Naming an excluded
+  node is refused (`placement_excluded`). A parent's node that the lineage
+  excludes is not inherited, and neither is its workspace.
+- **Eligibility.** Cordoned nodes and control-plane or admin-only nodes are never
+  chosen automatically; a caller allowed to use one names it.
+- **Choice.** Fewest non-terminal jobs in Core's ledger; configuration order
+  breaks ties. Reachability is not probed.
+- **No fallback.** If a fleet is configured and no node is eligible, the call
+  fails with `placement_failed: no_eligible_node` and no mission is created.
+
+A mission whose stored tag is still `remote-node:auto` (created before this
+rule, or through REST) resolves as before to the first configured node, and its
+children stay with it unless that node is excluded.
+
 ## Harvesting a file from a VM
 
 Code: `lean/OrbCore/OrbCore/ManagedHarvest.lean`, tool `harvest_managed_file(machine_id, path)`.

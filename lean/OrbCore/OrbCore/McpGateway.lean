@@ -9,6 +9,7 @@ import OrbBin.McpCatalog
 import OrbCore.Store
 import OrbCore.Managed
 import OrbCore.ManagedHarvest
+import OrbCore.AutoPlacement
 import OrbCore.MemoryAndCloud
 import OrbCore.QueueCont
 import OrbCore.R7Core
@@ -654,14 +655,44 @@ def dispatchMcpToolCall
       if let (some mc, false) := (mc?, rentedMachineId.isEmpty) then
         discard <| runConfiguredManagedLifecycle mc
           { store, fleet := defaultFleet, override? := managedProvisioningOverride? } rentedMachineId "destroy" nowEpochSec
-    let inheritedRn? ←
+    -- Nodes this mission may not use: named here, or tagged on any ancestor.
+    let excluded := AutoPlacement.normalizeAll
+      ((((args.fieldArr? "exclude_nodes").getD #[]).filterMap JVal.asStr?) ++
+        (← AutoPlacement.lineageExclusions store parentMid))
+    if let some rn := explicitRn? then
+      if excluded.contains (AutoPlacement.normalize rn) then
+        releaseRented
+        return mcpErr "placement_excluded" s!"node `{rn}` is excluded for this mission"
+    let parentRn? ←
       if explicitRn?.isSome then pure explicitRn?
       else if !parentMid.isEmpty then resolveMissionRemoteNode? store mc? parentMid
       else pure none
+    -- A parent recorded as `auto` predates concrete placement: it runs wherever the
+    -- legacy resolver sends it, and its children share that workspace.
+    let parentRn? ← match explicitRn?, parentRn? with
+      | none, some rn =>
+        if rn.toLower == "auto" || rn.toLower.startsWith "auto:" then
+          match ← resolveConcreteRemoteTargetNode mc? rn with
+          | .ok concrete => pure (some concrete)
+          | .error _ => pure none
+        else pure parentRn?
+      | _, _ => pure parentRn?
+    -- A parent's node the lineage excludes is not inherited, and neither is its workspace.
+    let inheritedRn? := parentRn?.filter (fun rn => !excluded.contains (AutoPlacement.normalize rn))
+    let parentNodeExcluded := parentRn?.isSome && inheritedRn?.isNone
     -- Core has no local harness execution: a mission created through MCP with no
     -- node of its own and none to inherit would sit `active` forever without a
-    -- job. Let the fleet scheduler place it.
-    let inheritedRn? := inheritedRn?.orElse (fun _ => some "auto")
+    -- job. Choose a node now and record it, so later turns stay with the workspace.
+    let wantsAuto := match inheritedRn? with
+      | none => true
+      | some rn => rn.toLower == "auto" || rn.toLower.startsWith "auto:"
+    let inheritedRn? ← if !wantsAuto then pure inheritedRn? else
+      match ← AutoPlacement.decide store excluded with
+      | .node id => pure (some id)
+      | .noFleet => pure (some "auto")
+      | .noneEligible =>
+        releaseRented
+        return mcpErr "placement_failed" "no_eligible_node" true
     let effWorkDir :=
       match (args.fieldStr? "working_directory").map (·.trimAscii.toString) |>.filter (!·.isEmpty) with
       | some wd => wd
@@ -669,8 +700,10 @@ def dispatchMcpToolCall
     let mut tagsArr : Array String := #[]
     if let some rn := inheritedRn? then
       tagsArr := tagsArr.push s!"remote-node:{rn}"
-      if effWorkDir.isEmpty && !parentMid.isEmpty && explicitRn?.isNone then
+      if effWorkDir.isEmpty && !parentMid.isEmpty && explicitRn?.isNone && !parentNodeExcluded then
         tagsArr := tagsArr.push s!"fork-workspace:{parentMid}"
+    for nodeId in excluded do
+      tagsArr := tagsArr.push (AutoPlacement.exclusionTagPrefix ++ nodeId)
     let tagsJson := renderCompact (.arr (tagsArr.map JVal.str))
     let authMode := if toolName == "consult_model" then "readonly" else "writer"
     let mid ← newUuidV4
