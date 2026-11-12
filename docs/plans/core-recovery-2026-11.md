@@ -13,6 +13,22 @@ References:
 - Build and test on the server: see "Build and test before pushing" in `AGENTS.md`. The Core self-test
   must be run from the repository root.
 
+## Operator update (2026-11-12, 15:05 UTC)
+
+- Recovery owns Boat restore/lifecycle and fleet reconciliation. Immediate priority:
+  backfill existing Boat IDs by exact sandbox name, observe archived guests as stopped,
+  then resume by fork/bootstrap under the same Core machine/node ID. evm.fast and
+  Pareto are blocked on this. Scoped snapshots/restore, fork, extend and automatic
+  placement through `start_mission` follow.
+- Mission `2bf5e847` owns the provider registry, key sealing, availability, prompt spawn
+  receipts, transport error retention, lean.ci and Colab. Its plan is
+  `docs/plans/managed-providers-leanci-colab.md`; do not duplicate that work here.
+- Mission `68e2a387` owns the Rust/Lean documentation audit. All three missions are
+  in Refinery. Pull/rebase before every push because shared Lean files overlap.
+- The operator deploys master to dev/prod and verifies live results. Recovery does
+  not need SSH or deploy access. Read `/api/health`'s `build` to identify deployments.
+- End the turn at every milestone so queued operator notes can be delivered.
+
 ## 0. Prerequisites
 
 1. Hindsight is unreachable from Core (`HINDSIGHT_API_KEY` / `SPARK_MEMORY_API_TOKEN` are not in Core's
@@ -75,6 +91,8 @@ lean.ci, and the blocked missions (evm.fast, ldgr workers) can get machines agai
    shared vertical rhythm instead of per-component margins.
 3. Add a browser test for each that replays the failing layout (narrow viewport with `/btw` open;
    error card followed by a user message). Check light and dark mode. Mobile parity per `AGENTS.md`.
+4. **Linux hybrid native chrome:** the header toolbar is rendered twice (sidebar, search,
+   back/forward icons). Keep one toolbar owner and add a hybrid-shell regression test.
 
 ## 4. Other gaps found
 
@@ -82,7 +100,8 @@ lean.ci, and the blocked missions (evm.fast, ldgr workers) can get machines agai
   succeeded (`resume_mission`, `send_message_to_mission`).
 - `get_mission_events` ignores `since_seq` and `before_seq` and always returns the first page;
   `get_mission_health` and `get_mission_diagnostics` return only the bare digest.
-- `resume_mission` ignores its `content` and sends "Continue.".
+- `resume_mission`'s `content`/title handling was fixed by the operator in `5dd9753ce`;
+  preserve that fix rather than implementing it again.
 - Some missions have `updated_at` stored as a bare epoch string instead of ISO-8601.
 - The harness nudge text "Continue if you have next steps, or stop and ask..." leaks into assistant
   messages.
@@ -95,6 +114,30 @@ lean.ci, and the blocked missions (evm.fast, ldgr workers) can get machines agai
   deploys stop being hand-run shell.
 - A single failed model call ends the harness turn and fails the mission. Decide where transient
   upstream errors are retried (proxy or harness) and make it one place.
+
+### Additional operator findings (2026-11-12)
+
+- Secret audit logging stopped at the cutover; the last append is `2026-11-11T23:59Z`.
+- Queue: add `DELETE /api/control/queue/:id`; send-now must deliver into the running
+  turn between tools, not merely reorder queued messages (as the Rust server did).
+- `start_workspace_job` and related tools report completed without executing work.
+- `sandboxed-worker-rolling-upgrade` fails every minute. The deployed
+  `/opt/sandboxed-sh/vaduz-v1/scripts/rolling_upgrade_nodes.py` searches for the old
+  binary name; the repository version also matches `orb-core-dev`. Use the unit's
+  `MainPID`, and inspect which nodes/jobs it would upgrade before deploying it.
+- `sandboxed-development-identity` fails for Babylon and Nippur;
+  `sandboxed-harness-update` fails its Vibe CLI probe.
+- `/var/lib` on agent-core was incorrectly mode `0700` on November 11 and is now
+  restored to `0755`. If it is changed again, find and fix the writer.
+- The manually added `claude-fable-5-2` entry in
+  `/etc/cli-proxy-api/models.local.json` must be generated from `catalog/`.
+- Automatic placement must honor mission exclusions: a Pareto worker was placed
+  on Ashur although that mission excludes it.
+- Preserve operator fixes already on master: Bitwarden stored-field names
+  (`f0435a193`), mission status POST (`49a2761be`), Hindsight credentials/tool names
+  and health build ID (`904913331`), verified TLS/relay size (`3f3eb3b93`), and Boat
+  file upload PUT (`f61f816e0`). Opening a mission no longer rewrites `updated_at`
+  (`0ff162c2b`); verify any remaining legacy epoch-string data separately.
 
 ## 5. Main checkout clean-up
 
