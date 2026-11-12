@@ -563,6 +563,9 @@ def dispatchMcpToolCall
     let content := ((args.fieldStr? "message").orElse (fun _ => (args.fieldStr? "content").orElse (fun _ => (args.fieldStr? "question").orElse (fun _ => args.fieldStr? "answer"))) |>.getD "").trimAscii.toString
     if mid.isEmpty || content.isEmpty then
       return mcpErr "invalid_arguments" "mission_id and message/content are required"
+    if let some t := (args.fieldStr? "title").map (·.trimAscii.toString) then
+      if !t.isEmpty then
+        discard <| execParamQuery store.missionsDb "UPDATE missions SET title=?2, metadata_updated_at=?3 WHERE id=?1;" #[mid, t, nowIso]
     let noteId ← newUuidV4
     discard <| execParamQuery store.askDb
       "INSERT INTO main.operator_notes(note_id,id,mission_id,content,body,created_at_iso,created_at) VALUES(?1,?1,?2,?3,?3,?4,?4);"
@@ -625,9 +628,13 @@ def dispatchMcpToolCall
         (.obj #[("ok", .bool true), ("mission_id", .str mid), ("status", .str "cancelled")]) nowIso mid
       return mcpOk settled
     else if toolName == "resume_mission" then
+      if let some t := (args.fieldStr? "title").map (·.trimAscii.toString) then
+        if !t.isEmpty then
+          discard <| execParamQuery store.missionsDb "UPDATE missions SET title=?2, metadata_updated_at=?3 WHERE id=?1;" #[mid, t, nowIso]
       if let (some sup, some mr) := (remoteSup?, ← getMission? store mid) then
         if let some targetNode ← resolveMissionRemoteNode? store mc? mid then
-          let prompt := ((args.fieldStr? "prompt").orElse (fun _ => args.fieldStr? "message") |>.getD "Continue.").trimAscii.toString
+          -- The tool schema names the steering text `content`; `prompt`/`message` are legacy aliases.
+          let prompt := ((args.fieldStr? "content").orElse (fun _ => (args.fieldStr? "prompt").orElse (fun _ => args.fieldStr? "message")) |>.getD "Continue.").trimAscii.toString
           let effPrompt := if prompt.isEmpty then "Continue." else prompt
           let mut resumeSid? : Option String := none
           if let .ok sRows ← execParamQuery store.missionsDb "SELECT COALESCE(session_id,'') FROM missions WHERE id=?1;" #[mid] then
