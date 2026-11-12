@@ -116,6 +116,7 @@ describe("nativeChromeBridge", () => {
   it("installs window.__ORB_SELECT_MISSION__, __ORB_NATIVE_NAV__, and __ORB_TOGGLE_NATIVE_SIDEBAR__", () => {
     const opened: Array<string | null> = [];
     const projects: string[] = [];
+    const toggledFolders: string[] = [];
     let leftSettings = 0;
     let sbOpen = true;
     const fakeWin = {} as Window & {
@@ -137,6 +138,7 @@ describe("nativeChromeBridge", () => {
           sbOpen = next;
         },
         selectProject: (slug) => projects.push(slug),
+        toggleFolderExpand: (rowId) => toggledFolders.push(rowId),
       },
       fakeWin,
     );
@@ -146,12 +148,14 @@ describe("nativeChromeBridge", () => {
     expect(fakeWin.__ORB_NATIVE_NAV__?.("new-agent")).toBe(true);
     expect(fakeWin.__ORB_NATIVE_NAV__?.("inbox")).toBe(true);
     expect(fakeWin.__ORB_NATIVE_NAV__?.("project:orb")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_NAV__?.("folder:orb:audits/2026")).toBe(true);
     expect(fakeWin.__ORB_NATIVE_NAV__?.("settings-back")).toBe(true);
     expect(fakeWin.__ORB_TOGGLE_NATIVE_SIDEBAR__?.()).toBe(false);
     expect(sbOpen).toBe(false);
 
     expect(opened).toEqual(["m:abc", "m:xyz", null, "inbox", null]);
     expect(projects).toEqual(["orb"]);
+    expect(toggledFolders).toEqual(["folder:orb:audits/2026"]);
     expect(leftSettings).toBe(1);
 
     cleanup();

@@ -93,7 +93,7 @@ static GtkWidget *make_row_widget(OrbGtkChrome *c, JSCValue *it, int pal, char *
     g_free(title); g_free(sub); g_free(sc); gtk_container_add(GTK_CONTAINER(row), hb); gtk_widget_show_all(row); return row;
 }
 static void populate_from_array(OrbGtkChrome *c, GtkWidget *lb, JSCValue *arr, int pal) {
-    const char *idk = pal ? "id" : "row_id"; gint32 len = (arr && jsc_value_is_array(arr)) ? jv_int(arr, "length") : 0, out = 0; if (len > 400) { len = 400; }
+    const char *idk = pal ? "id" : "row_id"; gint32 len = (arr && jsc_value_is_array(arr)) ? jv_int(arr, "length") : 0, out = 0; if (len < 0) { len = 0; }
     GHashTable *keep = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     for (gint32 i = 0; i < len; ++i) { JSCValue *it = jsc_value_object_get_property_at_index(arr, (guint)i); if (it && jsc_value_is_object(it)) { char *id = jv_str(it, idk); if (*id) { g_hash_table_add(keep, id); } else { g_free(id); } } if (it) { g_object_unref(it); } }
     GList *ch = gtk_container_get_children(GTK_CONTAINER(lb));
@@ -129,12 +129,15 @@ static void refresh_palette_items(OrbGtkChrome *c, const char *q) {
 }
 static void on_sb_row_activated(GtkListBox *lb, GtkListBoxRow *r, gpointer ud) {
     (void)lb; OrbGtkChrome *c = (OrbGtkChrome *)ud; if (!r) { return; }
-    const char *t = g_object_get_data(G_OBJECT(r), "orb-target");
-    if (t && *t) { eval_wv_target(c, g_object_get_data(G_OBJECT(r), "orb-kind"), t); } else if (GPOINTER_TO_INT(g_object_get_data(G_OBJECT(r), "orb-exp"))) { toggle_row_expand(c, g_object_get_data(G_OBJECT(r), "orb-row-id")); }
+    const char *t = g_object_get_data(G_OBJECT(r), "orb-target"), *k = g_object_get_data(G_OBJECT(r), "orb-kind");
+    if (t && *t && (!k || strcmp(k, "folder") != 0) && strncmp(t, "folder:", 7) != 0) { eval_wv_target(c, k, t); }
+    else if (GPOINTER_TO_INT(g_object_get_data(G_OBJECT(r), "orb-exp"))) { toggle_row_expand(c, g_object_get_data(G_OBJECT(r), "orb-row-id")); }
 }
 static void on_pal_row_activated(GtkListBox *lb, GtkListBoxRow *r, gpointer ud) {
     (void)lb; OrbGtkChrome *c = (OrbGtkChrome *)ud; if (!r) { return; }
-    eval_wv_target(c, g_object_get_data(G_OBJECT(r), "orb-kind"), g_object_get_data(G_OBJECT(r), "orb-target")); gtk_popover_popdown(GTK_POPOVER(c->pal_pop));
+    const char *t = g_object_get_data(G_OBJECT(r), "orb-target"), *k = g_object_get_data(G_OBJECT(r), "orb-kind");
+    if (t && strncmp(t, "folder:", 7) == 0) { toggle_row_expand(c, t); } else { eval_wv_target(c, k, t); }
+    gtk_popover_popdown(GTK_POPOVER(c->pal_pop));
 }
 static void on_pal_search_changed(GtkSearchEntry *se, gpointer ud) { refresh_palette_items((OrbGtkChrome *)ud, gtk_entry_get_text(GTK_ENTRY(se))); }
 static void on_pal_entry_activate(GtkEntry *e, gpointer ud) {

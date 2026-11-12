@@ -613,7 +613,9 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
     }
 
     private func dispatchItem(_ item: OrbSidebarRowItem) {
-        if !item.target.isEmpty {
+        if item.kind == "folder" || item.target.hasPrefix("folder:") {
+            toggleExpand(rowId: item.rowId)
+        } else if !item.target.isEmpty {
             let lit = OrbAppDelegate.jsonStringLiteral(item.target)
             let fn = (item.kind == "mission") ? "__ORB_SELECT_MISSION__" : "__ORB_NATIVE_NAV__"
             webView?.evaluateJavaScript("window.\(fn)&&window.\(fn)(\(lit));", completionHandler: nil)
@@ -749,6 +751,13 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         return cell
     }
 
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        if tableView === paletteTable { return row >= 0 && row < paletteItems.count }
+        guard row >= 0, row < rows.count else { return false }
+        let item = rows[row]
+        return !item.target.isEmpty && item.kind != "folder" && !item.target.hasPrefix("folder:")
+    }
+
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard !isProgrammaticSelect,
               let tv = notification.object as? NSTableView,
@@ -756,7 +765,7 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         let idx = sidebarTable.selectedRow
         guard idx >= 0, idx < rows.count else { return }
         let item = rows[idx]
-        if !item.target.isEmpty {
+        if !item.target.isEmpty && item.kind != "folder" && !item.target.hasPrefix("folder:") {
             lastSelectionDispatchedRowId = (sidebarTable.clickedRow == idx) ? item.rowId : nil
             dispatchItem(item)
         }

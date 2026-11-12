@@ -1037,6 +1037,7 @@ export default function App() {
         setNewFolder(null);
         setNewProject(slug);
       },
+      getScope: historyScope,
     });
     onCleanup(() => {
       disposeHandlers();
@@ -1044,8 +1045,14 @@ export default function App() {
     });
   });
   if (nativeChromeSyncer) {
+    let hydratedConnectionVersion = -1;
     const hydratedProjectSlugs = new Set<string>();
     createEffect(() => {
+      const connVer = connectionVersion();
+      if (connVer !== hydratedConnectionVersion) {
+        hydratedConnectionVersion = connVer;
+        hydratedProjectSlugs.clear();
+      }
       if (!isConnected()) {
         hydratedProjectSlugs.clear();
         return;
@@ -1056,10 +1063,14 @@ export default function App() {
         hydratedProjectSlugs.add(slug);
         void listProjectMissions(slug, { background: true })
           .then((rows) => {
+            if (connectionVersion() !== connVer) return;
             const clean = rows.filter((m) => !isMissionDeleting(m.id));
             setProjectMissions((cur) => ({ ...cur, [slug]: clean }));
           })
-          .catch(swallow("app.nativeChromeProjectMissions", { slug }));
+          .catch((err) => {
+            if (connectionVersion() === connVer) hydratedProjectSlugs.delete(slug);
+            swallow("app.nativeChromeProjectMissions", { slug })(err);
+          });
       }
     });
     createEffect(() => {

@@ -137,6 +137,8 @@ export type NativeChromeBridgeHandlers = {
   getSidebarOpen: () => boolean;
   setSidebarOpen: (open: boolean) => void;
   selectProject?: (slug: string) => void;
+  getScope?: () => string;
+  toggleFolderExpand?: (rowId: string) => void;
 };
 
 /** Notify native macOS/Linux shell when the titlebar sidebar toggle or Cmd+K shortcut fires inside WebView. */
@@ -175,6 +177,18 @@ export function installNativeChromeWindowHandlers(
       return true;
     }
     if (clean.startsWith("m:")) return handlers.open(clean);
+    if (clean.startsWith("folder:")) {
+      if (handlers.toggleFolderExpand) {
+        handlers.toggleFolderExpand(clean);
+      } else {
+        const scope = handlers.getScope?.();
+        void nativeInvoke()?.("native_chrome_toggle_expand", {
+          ...(scope ? { scope } : {}),
+          row_id: clean,
+        }).catch(() => {});
+      }
+      return true;
+    }
     if (clean.startsWith("project:")) {
       const slug = clean.slice("project:".length).trim();
       if (!slug) return false;
