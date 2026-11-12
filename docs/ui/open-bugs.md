@@ -47,8 +47,10 @@ prevents false completion.
 Tests: `mission-status-truth.test.tsx`, `launch.test.ts`, and the **ldgr status
 replay** cases in `sidebar-hierarchy.browser.spec.ts` (light/dark, Enter/Escape).
 The browser replay passes. The Core count's actual SQL/schema, count deduplication,
-zero case and indexed lookup were checked with SQLite. Lean SelfTest coverage was
-added but not compiled/run; no warm package build cache was present.
+zero case and indexed lookup were checked with SQLite. The SelfTest check was first
+pushed uncompiled and broke the Core build (deploy of `8446948f2` stopped; prod
+untouched). Fixed in `6fbec1601`: the CI command `lake build orb-core orb-core-test
+orb-spec-runner -- -DwarningAsError=true` completes and `orb-core-test` exits 0.
 
 ## 2. Stale startup progress and timer (C2)
 
@@ -96,7 +98,14 @@ server/parity portion of C3 remains open.
 
 ## 5. Sidebar hierarchy / disappearing or reverting missions (C4)
 
-**State: existing replay coverage; no new screenshot-specific defect established.**
+**State: fixed in Core (`0ff162c2b`, #1704, #1705); client replay added and passing.**
+
+The reported order is now replayed in the browser by **open, rename and move
+replay (2026-11-12)** in `sidebar-hierarchy.browser.spec.ts`: open a mission,
+rename it, let a detail read that started before the rename answer with the old
+title, poll, reopen, then have another client move it into a folder and replay a
+stale pre-move answer. A per-frame recorder fails the test if the row is ever
+absent or the old title is ever drawn again after the rename.
 
 Reproduce with `sidebar-hierarchy.browser.spec.ts`: children arrive before their
 parent; parent fetch fails or is delayed; resume a callback child after its link
@@ -105,7 +114,7 @@ The frame recorder rejects root-level children or vanished watched rows.
 `mission-hierarchy.test.ts` covers lineage ownership. Existing Core fixes remain
 the roadmap's resolution; do not invent another hierarchy merge path.
 
-The complete Chromium hierarchy/status suite passes (11 tests). Reopen with the exact live
+The complete Chromium hierarchy/status suite passes (12 tests). Reopen with the exact live
 event order if the reported screenshot still reproduces after authenticated dev
 access; that comparison is currently blocked, not claimed verified.
 
@@ -138,7 +147,26 @@ WebKit and macOS visual reference comparison were not run successfully on this
 Linux host. The screenshot-specific report stays open until its exact reproduction
 and authenticated target are available.
 
-## 8. Build identity unavailable in normal Settings (C5)
+## 8. Settings → Models → Fallback Chains renders blank
+
+**State: client guard fixed; server shape owned by the parity mission.**
+
+Reproduce: have `GET /api/model-routing/chains` return a row with `models_json`
+and no `entries` (what dev sent on 2026-11-12). The tab threw while rendering
+`chain.entries` and drew nothing.
+
+Fix: `normalizeChains` in `routingApi.ts` is the one reader of that response
+(network and local cache). A row without a valid `entries` list is kept, marked,
+and drawn with an inline error; its summary is disabled so it cannot be opened
+or saved over the server's real models. Valid rows next to it render as before,
+and a response that is not a list raises the existing load error instead of an
+empty tab. The client deliberately does not parse `models_json`: that would be a
+second parser for a shape the server is about to stop sending.
+
+Test: `routing-malformed.test.tsx` (fails without the guard). Not checked against
+live dev. Mobile: iOS and Android not changed.
+
+## 9. Build identity unavailable in normal Settings (C5)
 
 **State: fixed; native installed-app smoke check open.**
 

@@ -246,3 +246,71 @@ test("long-dead open missions beyond the page stay hidden; live and recent ones 
   expect(stale.length).toBeGreaterThan(30);
   expect(await violations(page)).toEqual([]);
 });
+
+test("open, rename and move replay (2026-11-12): the row never vanishes and the old title never comes back", async ({ page }) => {
+  // Core after 0ff162c2b: opening a mission does not rewrite updated_at; a rename
+  // stamps metadata_updated_at. A detail read that started before the rename
+  // still answers afterwards with the old title.
+  const core = new Core();
+  const id = "22222222-2222-4222-8222-222222222222";
+  let row = mission(id, "Draft title", 5, { folder: "" });
+  const others = [1, 2, 3].map(i => mission(`o${i}`, `Other ${i}`, 50 + i));
+  const stale = { ...row };
+  let detailReads = 0;
+  core.list = project => project === "other" ? [] : [row, ...others];
+  core.get = mid => mid === id ? (++detailReads === 2 ? stale : row) : others.find(o => o.id === mid);
+  await core.install(page);
+  await page.route(`**/api/control/missions/${id}/title`, async route => {
+    row = { ...row, title: route.request().postDataJSON().title, metadata_updated_at: at(90) };
+    await route.fulfill({ json: { ok: true } });
+  });
+  await page.addInitScript(mid => {
+    const w = window as unknown as { __titleLog: string[] };
+    w.__titleLog = [];
+    const check = () => {
+      const el = document.querySelector(`[data-tree-id="m:${mid}"]`);
+      const title = el ? (el.textContent ?? "").trim() : "<absent>";
+      if (w.__titleLog[w.__titleLog.length - 1] !== title) w.__titleLog.push(title);
+    };
+    const frame = () => { check(); requestAnimationFrame(frame); };
+    requestAnimationFrame(frame);
+  }, id);
+  await record(page, [], [id]);
+  await openProject(page);
+  const tree = page.getByRole("tree", { name: "Projects", exact: true });
+  const target = tree.locator(`[data-tree-id="m:${id}"]`).first();
+  await expect(target).toContainText("Draft title");
+  await target.click();                                   // open: detail read 1
+  await poll(page); await settle(page);
+  await target.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("textbox").fill("Final title");
+  await dialog.getByRole("button", { name: "Rename", exact: true }).click();
+  await expect(target).toContainText("Final title");
+  for (let i = 0; i < 3; i++) { await poll(page); await settle(page); }   // includes the stale detail answer
+  await tree.getByRole("button", { name: "Other 1", exact: true }).click();
+  await target.click();                                   // reopen
+  await poll(page); await settle(page);
+  expect(await violations(page)).toEqual([]);
+  const log = await page.evaluate(() => (window as unknown as { __titleLog: string[] }).__titleLog);
+  const renamedAt = log.findIndex(t => t.includes("Final title"));
+  expect(renamedAt).toBeGreaterThan(-1);
+  expect(log.slice(renamedAt).filter(t => t.includes("Draft title") || t === "<absent>")).toEqual([]);
+  // Moved into a folder by another client: it leaves the root for that folder
+  // (collapsed folders hide their rows), keeps its title, and a stale answer
+  // from before the move cannot bring it back to the root.
+  const moved = { ...row, folder: "Research", placement_revision: 1 };
+  const beforeMove = row;
+  row = moved;
+  await poll(page); await settle(page);
+  const folder = tree.getByRole("button", { name: "Research", exact: true });
+  await expect(folder).toBeVisible();
+  if (!(await target.isVisible())) await folder.click();
+  await expect(target).toContainText("Final title");
+  await expect(target).not.toHaveAttribute("data-depth", "1");
+  row = beforeMove; await poll(page); await settle(page);
+  row = moved; await poll(page); await settle(page);
+  await expect(target).toContainText("Final title");
+  await expect(target).not.toHaveAttribute("data-depth", "1");
+});
