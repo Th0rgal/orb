@@ -13,6 +13,12 @@ set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 ORIG_ARGS=("$@")
+if [[ "${1:-}" == "--native" ]]; then
+  shift
+  [[ "$(uname -s)" == "Linux" ]] || { echo "error: --native requires Linux" >&2; exit 2; }
+  "$ROOT_DIR/scripts/build_orb_bins.sh" --only orb-desktop-native --out-dir "$ROOT_DIR/target/native"
+  exec "$ROOT_DIR/target/native/orb-desktop-native" "$@"
+fi
 MODE="dev"
 INSTALL_APP=0
 INSTALL_DESKTOP=0
