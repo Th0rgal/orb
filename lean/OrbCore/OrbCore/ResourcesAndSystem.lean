@@ -1464,7 +1464,9 @@ def handleLibraryRoute
     if !(← gitFp.pathExists) && !effRemote.isEmpty then
       if let .error e ← ensureLibraryRepo libDir effRemote false then
         return some (jsonErr 502 s!"Failed to initialize Library repository: {e}")
-    return some (jsonResp 200 (← buildLibraryStatusJson libDir effRemote))
+    let libSt ← buildLibraryStatusJson libDir effRemote
+    -- Members see sync state only, not the host path or the remote URL.
+    return some (jsonResp 200 (if effAdmin then libSt else (libSt.setField "path" (.str "")).setField "remote" (.str "")))
 
   if method == "POST" && segs == ["api", "library", "sync"] then
     if !effAdmin then return some (jsonErr 403 "admin_required")
@@ -1591,6 +1593,11 @@ def handleLibraryRoute
         return some (409, "text/plain; charset=utf-8", s!"DIVERGED_HISTORY: {cleanErr}".toUTF8)
       return some (500, "text/plain; charset=utf-8", s!"git push failed: {cleanErr}".toUTF8)
     return some (200, "text/plain; charset=utf-8", "Pushed successfully".toUTF8)
+
+  -- Skill sources can describe the owner's infrastructure: members get no Library skill bodies.
+  if !effAdmin && segs.length >= 3 && segs[2]? == some "skill" then
+    if method == "GET" && segs.length == 3 then return some (jsonResp 200 (.arr #[]))
+    return some (jsonErr (if method == "GET" then 404 else 403) (if method == "GET" then "Skill not found" else "admin_required"))
 
   if method == "GET" && segs == ["api", "library", "skill"] then
     if !(← gitFp.pathExists) && !effRemote.isEmpty then
@@ -1960,7 +1967,22 @@ def dispatchResourcesAndSystemRoute
   -- 1. `GET /api/resources/overview` & `GET /api/resources/missions/:id`
   if method == "GET" && segs == ["api", "resources", "overview"] then
     let jv ← buildResourcesOverviewJson store managedStore? qMap
-    return some (jsonResp 200 jv)
+    if effAdmin then return some (jsonResp 200 jv)
+    -- Members: only their own missions; no fleet sources or instance-wide inference totals.
+    let mut mine : Array JVal := #[]
+    for m in (jv.fieldArr? "missions").getD #[] do
+      if ← canAccessMission store ((m.fieldStr? "id").getD "") callerUserId bootstrapAdminId isLegacyUnscoped true then
+        mine := mine.push m
+    let compute : JVal := .obj #[
+      ("total_vcpu", numFixed 0 3), ("active_vcpu", numFixed 0 3),
+      ("idle_leased_vcpu", .num "0.0"), ("hourly_burn_usd", .num "0.0"),
+      ("sources", .arr #[])]
+    let inference : JVal := .obj #[
+      ("current_b_tok_per_h", JVal.nat 0), ("est_usd_per_h", JVal.nat 0),
+      ("window_total_tokens", JVal.nat 0), ("window_est_usd", JVal.nat 0),
+      ("throttled_429_count", JVal.nat 0), ("pools", .arr #[])]
+    let reduced := (((jv.setField "missions" (.arr mine)).setField "compute" compute).setField "inference" inference).setField "links" (.arr #[])
+    return some (jsonResp 200 reduced)
 
   if method == "GET" && segs.length == 4 && segs[0]? == some "api" && segs[1]? == some "resources" && segs[2]? == some "missions" then
     let mid := segs[3]!
@@ -2126,6 +2148,14 @@ def dispatchResourcesAndSystemRoute
   -- 4. Agent Software (`/api/software`, `/api/software/updates`, `/api/software/updates/cancel`)
   if segs.length >= 2 && segs[0]? == some "api" && segs[1]? == some "software" then
     let targetNode := ((qParam? qMap "node").getD "local").trimAscii.toString
+    let localNode := targetNode.isEmpty || targetNode == "local" || targetNode == "core" || targetNode == "orb-core" || targetNode == "agent-core"
+    if !effAdmin then
+      -- Members: local inventory only, without host paths or install job history.
+      if !(method == "GET" && segs.length == 2 && localNode) then return some (jsonErr 403 "admin_required")
+      let inv ← buildSoftwareInventoryJson hub false
+      let comps := ((inv.fieldArr? "components").getD #[]).map fun c =>
+        (c.setField "binary_path" .null).setField "can_update" (.bool false)
+      return some (jsonResp 200 (((inv.setField "components" (.arr comps)).setField "jobs" (.arr #[])).setField "active_job" .null))
     if !targetNode.isEmpty && targetNode != "local" && targetNode != "core" && targetNode != "orb-core" && targetNode != "agent-core" then
       if let some mc := managedStore? then
         let subPath := "/" ++ String.intercalate "/" (segs.drop 1)
@@ -2189,7 +2219,7 @@ def dispatchResourcesAndSystemRoute
         ("version", (c.field? "installed_version").getD .null),
         ("installed", .bool ((c.fieldBool? "installed").getD false)),
         ("update_available", .null),
-        ("path", (c.field? "binary_path").getD .null),
+        ("path", if effAdmin then (c.field? "binary_path").getD .null else .null),
         ("status", .str (if (c.fieldBool? "installed").getD false then "ok" else "not_installed"))
       ]
     return some (jsonResp 200 (.obj #[("components", .arr comps)]))
