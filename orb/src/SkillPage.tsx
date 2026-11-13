@@ -6,12 +6,22 @@ import { FileDocument } from "./ProjectFiles";
 import { mdSource, setMdSource } from "./Markdown";
 import { cachedSkill } from "./skillCache";
 import { isConnected, listProjects } from "./api";
-import { localSkillsSync } from "./localAgents";
 import { SidebarTree, TreeConnectors } from "./Tree";
 import type { TreeNode } from "./treeModel";
 import * as Ic from "./icons";
 import type { LibrarySkill } from "./api";
-import { commitAndPush, deleteLibrarySkill, fetchLibrarySkill, getProjectSkills, getSkillAt, getSkillHistory, putLibrarySkill, putProjectSkills, UnsupportedEndpoint } from "./skillsApi";
+import {
+  commitAndPush,
+  deleteLibrarySkill,
+  fetchLibrarySkill,
+  getProjectSkills,
+  getSkillAt,
+  getSkillHistory,
+  putLibrarySkill,
+  putProjectSkills,
+  UnsupportedEndpoint,
+} from "./skillsApi";
+import { syncConnectedLibraryToLocalHarnesses } from "./localLibrarySync";
 import { orbRelativeTimeString } from "./orbKernel";
 import {
   compactDiff,
@@ -170,25 +180,22 @@ export function SkillPage(p: { name: string; initialView?: "edit" | "history"; o
     const s = await fetchLibrarySkill(p.name).catch(() => null);
     if (!s) return;
     setSkill(s);
-    const inlineFiles = (s.files ?? []).filter((f) => (f.path || f.name) !== SKILL_MD).map((f) => ({ rel: f.path || f.name, content: f.content }));
-    const missingRefs = (s.references ?? []).filter((r) => r && r !== SKILL_MD && !inlineFiles.some((f) => f.rel === r));
-    const extraFiles = await Promise.all(missingRefs.map(async (rel) => ({ rel, content: await readSkillFile(s.name, rel).catch(() => "") })));
-    await localSkillsSync({ librarySkills: [{ name: s.name, content: s.content, files: [...inlineFiles, ...extraFiles], audience: s.audience ?? null, scope: s.scope ?? null }] }).catch(() => null);
+    await syncConnectedLibraryToLocalHarnesses({ fallbackSkill: s }).catch(() => null);
   };
   const discardLocal = async () => {
     const s = skill();
     if (!s) return;
-    const inlineFiles = (s.files ?? []).filter((f) => (f.path || f.name) !== SKILL_MD).map((f) => ({ rel: f.path || f.name, content: f.content }));
-    const missingRefs = (s.references ?? []).filter((r) => r && r !== SKILL_MD && !inlineFiles.some((f) => f.rel === r));
-    const extraFiles = await Promise.all(missingRefs.map(async (rel) => ({ rel, content: await readSkillFile(s.name, rel).catch(() => "") })));
-    await localSkillsSync({ librarySkills: [{ name: s.name, content: s.content, files: [...inlineFiles, ...extraFiles], audience: s.audience ?? null, scope: s.scope ?? null }], replaceUnmanaged: [s.name] });
+    await syncConnectedLibraryToLocalHarnesses({
+      fallbackSkill: s,
+      replaceUnmanaged: [s.name],
+    });
   };
   const remove = async () => {
     setDeleteBusy(true); setDeleteError(null);
     try {
       await deleteLibrarySkill(p.name).catch((e) => { if (!/not found|404/i.test(errorText(e))) throw e; });
       await commitAndPush(`skill: delete ${p.name}`);
-      void localSkillsSync({ librarySkills: [], pruneRemoved: false }).catch(() => null);
+      void syncConnectedLibraryToLocalHarnesses({ pruneRemoved: true, skipMcpMint: true }).catch(() => null);
       p.onBack();
     } catch (e) { setDeleteError(deleteMessage(p.name, e)); }
     finally { setDeleteBusy(false); }

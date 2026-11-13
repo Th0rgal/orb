@@ -128,8 +128,6 @@ import {
   installedIds,
   localBinding,
   localAgentsScanning,
-  localSkillsStatus,
-  localSkillsSync,
   localWorkspace,
   localDirectory,
   materializeMentions,
@@ -920,13 +918,15 @@ export default function App() {
       if (newMachine() === "local") void refreshLocalAgents(false);
       if (desktopInvoke()) {
         const repairTimer = setTimeout(() => {
-          void localSkillsStatus()
-            .then((rep) => {
-              if (rep?.mcp?.ready && rep.mcp.missing_harnesses.length > 0) {
-                return localSkillsSync({ pruneRemoved: false, skipMcpMint: true });
-              }
-            })
-            .catch(swallow("app.localMcpRepair"));
+          void import("./localLibrarySync")
+            .then((m) =>
+              m.syncConnectedLibraryToLocalHarnesses({
+                onlyIfNeeded: true,
+                pruneRemoved: true,
+                skipMcpMint: true,
+              }),
+            )
+            .catch(swallow("app.localLibrarySync"));
         }, 1500);
         onCleanup(() => clearTimeout(repairTimer));
       }

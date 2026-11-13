@@ -146,9 +146,97 @@ def planToJson (plan : SkillDeliveryPlan) : String :=
     ]
   renderCompact (.obj #[("skills", .arr skills), ("missing", .arr (plan.missing.map .str))])
 
+private def unquoteYamlScalar (raw : String) : String :=
+  let v := raw.trimAscii.toString
+  if v.length ≥ 2 && ((v.startsWith "\"" && v.endsWith "\"") || (v.startsWith "'" && v.endsWith "'")) then
+    (((v.drop 1).dropEnd 1).toString).trimAscii.toString
+  else
+    v
+
+/-- Parse `metadata.sandboxed.audience` and `metadata.sandboxed.scope` from `SKILL.md` YAML frontmatter. -/
+def parseSandboxedMeta (markdown : String) : Option (Array String) × Option String := Id.run do
+  let text := (markdown.replace "\r\n" "\n").replace "\uFEFF" ""
+  if !text.startsWith "---\n" then
+    return (none, none)
+  let rest := (text.drop 4).toString
+  let lines := rest.splitOn "\n"
+  let mut yaml : Array String := #[]
+  let mut closed := false
+  for line in lines do
+    if !closed then
+      if line == "---" then closed := true
+      else yaml := yaml.push line
+  if !closed then
+    return (none, none)
+  let indentOf (s : String) : Nat := s.length - s.trimAsciiStart.toString.length
+  let mut audience? : Option (Array String) := none
+  let mut scope? : Option String := none
+  let mut metaIndent? : Option Nat := none
+  let mut sandIndent? : Option Nat := none
+  let mut i : Nat := 0
+  while i < yaml.size do
+    let line := yaml[i]!
+    let trimmed := line.trimAscii.toString
+    if trimmed.isEmpty || trimmed.startsWith "#" then
+      i := i + 1
+      continue
+    let ind := indentOf line
+    if let some si := sandIndent? then
+      if ind ≤ si then sandIndent? := none
+    if let some mi := metaIndent? then
+      if ind ≤ mi then
+        metaIndent? := none
+        sandIndent? := none
+    if metaIndent?.isNone then
+      if trimmed == "metadata:" then metaIndent? := some ind
+      i := i + 1
+      continue
+    if sandIndent?.isNone then
+      if trimmed == "sandboxed:" then sandIndent? := some ind
+      i := i + 1
+      continue
+    if trimmed.startsWith "audience:" then
+      let val := ((trimmed.drop 9).toString).trimAscii.toString
+      if val.isEmpty then
+        let mut items : Array String := #[]
+        let mut j := i + 1
+        while j < yaml.size do
+          let t := yaml[j]!.trimAscii.toString
+          if t.startsWith "-" then
+            let item := unquoteYamlScalar ((t.drop 1).toString)
+            if !item.isEmpty then items := items.push item
+            j := j + 1
+          else if t.isEmpty then
+            j := j + 1
+          else
+            break
+        audience? := some items
+        i := j
+        continue
+      else
+        let inner :=
+          if val.startsWith "[" && val.endsWith "]" && val.length ≥ 2 then
+            ((val.drop 1).dropEnd 1).toString
+          else val
+        let items := (inner.splitOn ",").toArray.filterMap fun part =>
+          let u := unquoteYamlScalar part
+          if u.isEmpty then none else some u
+        audience? := some items
+    else if trimmed.startsWith "scope:" then
+      let v := unquoteYamlScalar ((trimmed.drop 6).toString)
+      if !v.isEmpty then scope? := some v
+    i := i + 1
+  return (audience?, scope?)
+
+def effectiveAudience (markdown : String) : Array String :=
+  let raw := (parseSandboxedMeta markdown).1.getD #["mission", "local"]
+  raw.filterMap fun a =>
+    let clean := a.trimAscii.toString.toLower
+    if clean.isEmpty then none else some clean
+
 /-- First non-empty `description:` in YAML frontmatter, else the first paragraph (≤220 chars). -/
 def extractDescription (content : String) : Option String := Id.run do
-  let text := content.replace "\r\n" "\n"
+  let text := (content.replace "\r\n" "\n").replace "\uFEFF" ""
   if text.startsWith "---\n" then
     let rest := (text.drop 4).toString
     let lines := rest.splitOn "\n"
@@ -159,8 +247,7 @@ def extractDescription (content : String) : Option String := Id.run do
       if inFm then
         if line == "---" then inFm := false
         else if line.startsWith "description:" then
-          let raw := ((line.drop 12).toString).trimAscii.toString
-          let v := if raw.startsWith "\"" && raw.endsWith "\"" && raw.length ≥ 2 then ((raw.drop 1).dropEnd 1).toString else raw
+          let v := unquoteYamlScalar ((line.drop 12).toString)
           if !v.isEmpty then desc? := some v
       else
         body := body.push line
@@ -205,33 +292,53 @@ def isPlainProjectKey (slug : String) : Bool :=
       ('a' ≤ c && c ≤ 'z') || ('A' ≤ c && c ≤ 'Z') || ('0' ≤ c && c ≤ '9') || c == '-' || c == '_' || c == '.'
 
 /-- Scan `<dir>/<name>/SKILL.md` entries sorted by skill name. -/
-def scanSkillDir (dir : System.FilePath) : IO (Array (String × Option String × String)) := do
+def scanSkillDir (dir : System.FilePath) (requireMissionAudience : Bool := false) :
+    IO (Array (String × Option String × String)) := do
   let entries ← try dir.readDir catch _ => pure #[]
   let sorted := entries.qsort (fun a b => a.fileName < b.fileName)
   let mut out : Array (String × Option String × String) := #[]
   for entry in sorted do
     let name := entry.fileName
-    if nameCharsValid name then
+    if nameCharsValid name && !name.startsWith "." then
       let md := entry.path / "SKILL.md"
       let st ← statPath md.toString
       if st.exists_ && st.isReg && !st.isSymlink then
         let raw ← try IO.FS.readFile md catch _ => pure ""
-        out := out.push (name, extractDescription raw, md.toString)
+        if !requireMissionAudience || (effectiveAudience raw).contains "mission" then
+          out := out.push (name, extractDescription raw, md.toString)
   return out
 
+/-- Resolve the active Library checkout root on Core (`LIBRARY_PATH`, `.sandboxed-sh/library`,
+    `{storeRoot}/library`, or `{workingDir}/library`). -/
+def resolveLibraryRoot (workingDir : String) (storeRoot : String := "") : IO String := do
+  if let some p ← IO.getEnv "LIBRARY_PATH" then
+    let pt := p.trimAscii.toString
+    if !pt.isEmpty then return pt
+  let mut cands : Array String := #[s!"{workingDir}/.sandboxed-sh/library"]
+  if !storeRoot.trimAscii.isEmpty then
+    cands := cands.push s!"{storeRoot}/library"
+  cands := cands.push s!"{workingDir}/library"
+  for c in cands do
+    if (← (System.FilePath.mk c).pathExists) then return c
+  return s!"{workingDir}/.sandboxed-sh/library"
+
 /-- Build the delivered skill plan for `(workingDir, project?)` from Library + project context. -/
-def buildDeliveryPlan (workingDir : String) (project? : Option String) : IO (Except String SkillDeliveryPlan) := do
+def buildDeliveryPlan (workingDir : String) (project? : Option String) (storeRoot : String := "") :
+    IO (Except String SkillDeliveryPlan) := do
   let mut plan := SkillDeliveryPlan.empty
-  let libDir := System.FilePath.mk workingDir / "library" / "skills"
-  for (name, desc, _) in (← scanSkillDir libDir) do
-    plan := addDelivered plan name desc .global
+  let libRoot := System.FilePath.mk (← resolveLibraryRoot workingDir storeRoot)
+  for sub in #["skill", "skills"] do
+    let sdir := libRoot / sub
+    if (← sdir.pathExists) && (← sdir.isDir) then
+      for (name, desc, _) in (← scanSkillDir sdir true) do
+        plan := addDelivered plan name desc .global
   if let some rawProj := project? then
     let slug := rawProj.trimAscii.toString
     if !slug.isEmpty then
       if !isPlainProjectKey slug then
         return .error "Invalid context project"
       let ctxDir := System.FilePath.mk workingDir / "project-files" / slug / "skills"
-      for (name, desc, _) in (← scanSkillDir ctxDir) do
+      for (name, desc, _) in (← scanSkillDir ctxDir false) do
         plan := extendContext plan name desc
   return .ok plan
 
@@ -251,11 +358,18 @@ def installScript (harness : String) (files : Array (String × String)) : String
 /-- The delivered skills (`buildDeliveryPlan`: Library plus project context, context wins)
     as an install prelude for a turn that runs on a node, where the Library is not mounted.
     Skills whose names the installer cannot quote safely, or that exceed the size caps, are skipped. -/
-def remoteInstallPrelude (workingDir : String) (project? : Option String) (harness : String) : IO String := do
-  let libDir := System.FilePath.mk workingDir / "library" / "skills"
-  let mut found : Array (String × String) := (← scanSkillDir libDir).map fun (name, _, path) => (name, path)
+def remoteInstallPrelude (workingDir : String) (project? : Option String) (harness : String)
+    (storeRoot : String := "") : IO String := do
+  let libRoot := System.FilePath.mk (← resolveLibraryRoot workingDir storeRoot)
+  let mut found : Array (String × String) := #[]
+  for sub in #["skill", "skills"] do
+    let sdir := libRoot / sub
+    if (← sdir.pathExists) && (← sdir.isDir) then
+      for (name, _, path) in (← scanSkillDir sdir true) do
+        if !(found.any (·.1 == name)) then
+          found := found.push (name, path)
   if let some slug := project?.map (·.trimAscii.toString) |>.filter (fun s => !s.isEmpty && isPlainProjectKey s) then
-    for (name, _, path) in (← scanSkillDir (System.FilePath.mk workingDir / "project-files" / slug / "skills")) do
+    for (name, _, path) in (← scanSkillDir (System.FilePath.mk workingDir / "project-files" / slug / "skills") false) do
       found := (found.filter (·.1 != name)).push (name, path)
   let mut files : Array (String × String) := #[]
   let mut total : Nat := 0
@@ -268,10 +382,10 @@ def remoteInstallPrelude (workingDir : String) (project? : Option String) (harne
         total := total + size
   return installScript (if harness == "claude" then "claudecode" else harness) files
 
-def selectDelivered (workingDir : String) (project? : Option String) (harness prompt : String) :
-    IO (Except String (Array SelectedSkill)) := do
+def selectDelivered (workingDir : String) (project? : Option String) (harness prompt : String)
+    (storeRoot : String := "") : IO (Except String (Array SelectedSkill)) := do
   if (references prompt).isEmpty then return .ok #[]
-  match ← buildDeliveryPlan workingDir project? with
+  match ← buildDeliveryPlan workingDir project? storeRoot with
   | .error e => return .error e
   | .ok plan =>
     let available := plan.skills.map fun s =>

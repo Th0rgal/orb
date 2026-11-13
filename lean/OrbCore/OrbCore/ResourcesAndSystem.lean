@@ -20,6 +20,7 @@ import OrbCore.Managed
 import OrbCore.R7Core
 import OrbCore.LegacyHydrate
 import OrbCore.RemoteFleetAndRelay
+import OrbCore.Skills
 
 namespace OrbCore.ResourcesAndSystem
 
@@ -154,8 +155,29 @@ private def runCmdCapture (prog : String) (args : Array String) (cwd? : Option S
       if chunk.isEmpty then eof := true else acc := acc ++ chunk
     closeFdRaw sp.stdoutFd
   let st ← waitpidBlock sp.pid
-  let rc := ((st >>> 8) &&& 0xFF).toNat
-  return (rc, (String.fromUTF8? acc).getD "")
+  return (st.toNat, (String.fromUTF8? acc).getD "")
+
+/-- Execute `git` non-interactively (`GIT_TERMINAL_PROMPT=0`, batch SSH) and capture combined stdout+stderr. -/
+private def runGitCapture (args : Array String) (cwd? : Option String := none) : IO (Nat × String) := do
+  let env ← environList
+  let hasSshCmd := env.any (fun e => e.startsWith "GIT_SSH_COMMAND=")
+  let envPrefix :=
+    "GIT_TERMINAL_PROMPT=0 " ++
+    (if hasSshCmd then "" else "GIT_SSH_COMMAND='ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new' ")
+  let cdPrefix := match cwd? with | some dir => "cd " ++ shellSingleQuote dir ++ " && " | none => ""
+  let cmdLine := cdPrefix ++ envPrefix ++ "exec 'git'" ++
+    (if args.isEmpty then "" else " " ++ String.intercalate " " (args.toList.map shellSingleQuote)) ++ " 2>&1"
+  let sp ← spawnPgrp "/bin/sh" #["-c", cmdLine] env false false true
+  if sp.pid < 0 then return (127, "failed to spawn git")
+  let mut acc := ByteArray.empty
+  if sp.stdoutFd >= 0 then
+    let mut eof := false
+    while !eof && acc.size < 524288 do
+      let chunk ← readFdChunk sp.stdoutFd 8192
+      if chunk.isEmpty then eof := true else acc := acc ++ chunk
+    closeFdRaw sp.stdoutFd
+  let st ← waitpidBlock sp.pid
+  return (st.toNat, (String.fromUTF8? acc).getD "")
 
 private def sanitizeRelPath? (raw : String) : Option String := Id.run do
   let norm := String.ofList (raw.toList.map (fun c => if c == '\\' then '/' else c))
@@ -1053,24 +1075,149 @@ def buildSoftwareInventoryJson (hub : SystemRuntimeHub) (force : Bool) : IO JVal
     set { st with softwareCache? := some (nowSec, inv) }
   return inv
 
-/-! ## 4. Library (`/api/library/*`) -/
+/-! ## 4. Library (`/api/library/*` & `PUT /api/settings/library-remote`) -/
 
-def resolveLibraryDir (workingDir storeRoot : String) : IO String := do
-  if let some p ← IO.getEnv "LIBRARY_PATH" then
-    let pt := p.trimAscii.toString
-    if !pt.isEmpty then return pt
-  let cands := #[s!"{workingDir}/.sandboxed-sh/library", s!"{storeRoot}/library"]
-  for c in cands do
-    if (← (System.FilePath.mk c).pathExists) then return c
-  return s!"{workingDir}/.sandboxed-sh/library"
+def resolveLibraryDir (workingDir storeRoot : String) : IO String :=
+  OrbCore.Skills.resolveLibraryRoot workingDir storeRoot
 
-private def extractSkillDescription? (md : String) : Option String := Id.run do
-  for line in md.splitOn "\n" do
-    let t := line.trimAscii.toString
-    if t.startsWith "description:" then
-      let v := ((t.drop 12).toString.trimAscii.toString)
-      if !v.isEmpty then return some v
+private def hasLoopbackHttpPrefix (u pfx : String) : Bool :=
+  if !u.startsWith pfx then false
+  else
+    let rest := (u.drop pfx.length).toString
+    if rest.startsWith "/" then true
+    else if rest.startsWith ":" then
+      let afterColon := (rest.drop 1).toString
+      let portDigits := String.ofList (afterColon.toList.takeWhile Char.isDigit)
+      let afterPort := (afterColon.drop portDigits.length).toString
+      !portDigits.isEmpty && afterPort.startsWith "/"
+    else false
+
+def isValidGitRemote (raw : String) : Bool := Id.run do
+  let u := raw.trimAscii.toString
+  if u.isEmpty || u.length > 1024 || u.startsWith "-" then
+    return false
+  for ch in u.toList do
+    if ch.toNat ≤ 0x20 || ch.toNat == 0x7F then
+      return false
+  return u.startsWith "https://" ||
+         hasLoopbackHttpPrefix u "http://127.0.0.1" ||
+         hasLoopbackHttpPrefix u "http://localhost" ||
+         u.startsWith "ssh://" ||
+         u.startsWith "git@" ||
+         u.startsWith "file://" ||
+         u.startsWith "/"
+
+private def findHeaderCI? (hdrs : Array (String × String)) (target : String) : Option String :=
+  let t := target.toLower
+  (hdrs.find? (fun (k, _) => k.toLower == t)).map Prod.snd
+
+def resolveEffectiveLibraryRemote
+    (storeRoot defaultRemote : String)
+    (headers : Array (String × String) := #[]) : IO String := do
+  if let some hdrRem := findHeaderCI? headers "x-sandboxed-library-remote" then
+    let h := hdrRem.trimAscii.toString
+    if isValidGitRemote h then return h
+  let settings ← readSettingsJson storeRoot
+  match settings.field? "library_remote" with
+  | some .null => return ""
+  | some (.str r) => return r.trimAscii.toString
+  | _ => return defaultRemote.trimAscii.toString
+
+private def isDivergedGitOutput (out : String) : Bool :=
+  let low := out.toLower
+  (low.splitOn "diverged").length > 1 ||
+  (low.splitOn "not possible to fast-forward").length > 1 ||
+  (low.splitOn "non-fast-forward").length > 1 ||
+  (low.splitOn "fetch first").length > 1
+
+private def resolveRemoteTrackingRef (libDir branch : String) : IO (Option String) := do
+  let (rcUp, upOut) ← runGitCapture #["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"] (some libDir)
+  let up := upOut.trimAscii.toString
+  if rcUp == 0 && !up.isEmpty && !up.startsWith "-" then
+    return some up
+  for cand in #[s!"origin/{branch}", "origin/main", "origin/master"] do
+    let (rcC, _) ← runGitCapture #["rev-parse", "--verify", "--quiet", cand] (some libDir)
+    if rcC == 0 then return some cand
   return none
+
+private def gitOriginUrl? (libDir : String) : IO (Option String) := do
+  let (rc, out) ← runGitCapture #["remote", "get-url", "origin"] (some libDir)
+  let u := out.trimAscii.toString
+  if rc == 0 && !u.isEmpty then return some u else return none
+
+private def gitCurrentBranch (libDir : String) : IO String := do
+  let (rc, out) ← runGitCapture #["rev-parse", "--abbrev-ref", "HEAD"] (some libDir)
+  let b := out.trimAscii.toString
+  if rc == 0 && !b.isEmpty && b != "HEAD" then return b else return "main"
+
+/-- Ensure `libDir` is initialized/updated for `effRemote` (`clone` when absent, `remote add`/`set-url` + `fetch` when changed). -/
+def ensureLibraryRepo (libDir effRemote : String) (forceReinit : Bool := false) : IO (Except String Bool) := do
+  let rem := effRemote.trimAscii.toString
+  if rem.isEmpty then return .ok false
+  if !isValidGitRemote rem then return .error "Invalid Library repository URL"
+  let fp := System.FilePath.mk libDir
+  let gitFp := fp / ".git"
+  if (← fp.pathExists) && !(← gitFp.pathExists) then
+    let entries ← try fp.readDir catch _ => pure #[]
+    if forceReinit || entries.isEmpty then
+      let _ ← runCmdCapture "rm" #["-rf", "--", libDir]
+    else
+      let (rcInit, outInit) ← runGitCapture #["init", "-b", "main"] (some libDir)
+      if rcInit != 0 then
+        let (rcInit2, outInit2) ← runGitCapture #["init"] (some libDir)
+        if rcInit2 != 0 then
+          let msg := (if outInit2.trimAscii.isEmpty then outInit else outInit2).trimAscii.toString
+          return .error (if msg.isEmpty then "git init failed" else msg)
+  if !(← fp.pathExists) then
+    if let some parent := fp.parent then
+      IO.FS.createDirAll parent
+    let (rc, out) ← runGitCapture #["clone", "--", rem, libDir] none
+    if rc != 0 then
+      if !(← gitFp.pathExists) then
+        let _ ← runCmdCapture "rm" #["-rf", "--", libDir]
+      let msg := out.trimAscii.toString
+      return .error (if msg.isEmpty then "git clone failed" else msg)
+    let (rcHead, _) ← runGitCapture #["rev-parse", "--verify", "--quiet", "HEAD"] (some libDir)
+    if rcHead != 0 then
+      if let some ref ← resolveRemoteTrackingRef libDir "main" then
+        let targetBr := if ref.startsWith "origin/" then (ref.drop 7).toString else "main"
+        let _ ← runGitCapture #["checkout", "-B", targetBr, "--track", ref] (some libDir)
+    return .ok true
+  if !(← gitFp.pathExists) then
+    return .error "Library directory exists without a Git repository"
+  let curRem? ← gitOriginUrl? libDir
+  if !forceReinit && curRem? == some rem then
+    return .ok false
+  let (rcRem, outRem) ←
+    match curRem? with
+    | none => runGitCapture #["remote", "add", "origin", "--", rem] (some libDir)
+    | some _ => runGitCapture #["remote", "set-url", "origin", "--", rem] (some libDir)
+  if rcRem != 0 then
+    let msg := outRem.trimAscii.toString
+    return .error (if msg.isEmpty then "git remote configuration failed" else msg)
+  let (rcFetch, outFetch) ← runGitCapture #["fetch", "--prune", "origin"] (some libDir)
+  if rcFetch != 0 then
+    let msg := outFetch.trimAscii.toString
+    return .error (if msg.isEmpty then "git fetch failed" else msg)
+  let (rcHead, _) ← runGitCapture #["rev-parse", "--verify", "--quiet", "HEAD"] (some libDir)
+  if rcHead != 0 then
+    if let some ref ← resolveRemoteTrackingRef libDir "main" then
+      let targetBr := if ref.startsWith "origin/" then (ref.drop 7).toString else "main"
+      let coArgs :=
+        if forceReinit then #["checkout", "-f", "-B", targetBr, "--track", ref]
+        else #["checkout", "-B", targetBr, "--track", ref]
+      let (rcCo, outCo) ← runGitCapture coArgs (some libDir)
+      if rcCo != 0 then
+        let msg := outCo.trimAscii.toString
+        return .error (if msg.isEmpty then "git checkout failed" else msg)
+  else if forceReinit then
+    let (rcSt, stOut) ← runGitCapture #["status", "--porcelain"] (some libDir)
+    if rcSt == 0 && stOut.trimAscii.isEmpty then
+      let br ← gitCurrentBranch libDir
+      if let some ref ← resolveRemoteTrackingRef libDir br then
+        let targetBr := if ref.startsWith "origin/" then (ref.drop 7).toString else br
+        let _ ← runGitCapture #["checkout", "-B", targetBr, "--track", ref] (some libDir)
+  return .ok true
 
 def buildLibraryStatusJson (libDir : String) (defaultRemote : String) : IO JVal := do
   let fp := System.FilePath.mk libDir
@@ -1084,21 +1231,508 @@ def buildLibraryStatusJson (libDir : String) (defaultRemote : String) : IO JVal 
       ("behind", JVal.nat 0),
       ("modified_files", .arr #[])
     ]
-  let (_, brOut) ← runCmdCapture "git" #["rev-parse", "--abbrev-ref", "HEAD"] (some libDir)
-  let branch := let b := brOut.trimAscii.toString; if b.isEmpty then "main" else b
-  let (_, remOut) ← runCmdCapture "git" #["remote", "get-url", "origin"] (some libDir)
-  let rem := let r := remOut.trimAscii.toString; if r.isEmpty then defaultRemote else r
-  let (_, stOut) ← runCmdCapture "git" #["status", "--porcelain"] (some libDir)
-  let modLines := (stOut.splitOn "\n").map (fun l => (l.drop 3).toString.trimAscii.toString) |>.filter (!·.isEmpty)
-  return .obj #[
+  let branch ← gitCurrentBranch libDir
+  let rem ← if defaultRemote.isEmpty then pure "" else pure ((← gitOriginUrl? libDir).getD defaultRemote)
+  let (rcSt, stOut) ← runGitCapture #["status", "--porcelain"] (some libDir)
+  let modLines :=
+    if rcSt == 0 then
+      (stOut.splitOn "\n").map (fun l => (l.drop 3).toString.trimAscii.toString) |>.filter (!·.isEmpty)
+    else []
+  let mut ahead : Nat := 0
+  let mut behind : Nat := 0
+  if !rem.isEmpty then
+    if let some upRef ← resolveRemoteTrackingRef libDir branch then
+      let (rcCnt, cntOut) ← runGitCapture #["rev-list", "--left-right", "--count", s!"HEAD...{upRef}"] (some libDir)
+      if rcCnt == 0 then
+        let nums := (cntOut.trimAscii.toString.split (fun c => c == '\t' || c == ' ')).toArray.filterMap (fun s => s.toString.toNat?)
+        if nums.size ≥ 2 then
+          ahead := nums[0]!
+          behind := nums[1]!
+  let fetchSt ← statIdentity (fp / ".git" / "FETCH_HEAD").toString true
+  let headSt ← statIdentity (fp / ".git" / "HEAD").toString true
+  let syncedMtime : UInt64 :=
+    if fetchSt.exists_ && fetchSt.mtime > 0 then fetchSt.mtime
+    else if headSt.exists_ && headSt.mtime > 0 then headSt.mtime
+    else 0
+  let mut fields : Array (String × JVal) := #[
     ("path", .str libDir),
     ("remote", if rem.isEmpty then .null else .str rem),
     ("branch", .str branch),
     ("clean", .bool modLines.isEmpty),
-    ("ahead", JVal.nat 0),
-    ("behind", JVal.nat 0),
+    ("ahead", JVal.nat ahead),
+    ("behind", JVal.nat behind),
     ("modified_files", .arr (modLines.toArray.map JVal.str))
   ]
+  if syncedMtime > 0 then
+    fields := fields.push ("last_synced_at", JVal.uint64 syncedMtime)
+  return .obj fields
+
+private def countSkillLines (s : String) : Nat :=
+  if s.isEmpty then 0 else (s.splitOn "\n").length
+
+private def hasSymlinkSegment (baseDir : System.FilePath) (cleanRel : String) : IO Bool := do
+  let baseSt ← statPath baseDir.toString
+  if baseSt.isSymlink then return true
+  let mut cur := baseDir
+  for seg in (cleanRel.splitOn "/").filter (!·.isEmpty) do
+    cur := cur / seg
+    let st ← statPath cur.toString
+    if st.isSymlink then return true
+  return false
+
+/-- Collect companion files (`files` inline UTF-8 text + `references` non-markdown paths) inside `skillDir`.
+    Fails closed (`.error`) if any readable companion directory or regular file cannot be enumerated/read,
+    or if companion directory nesting exceeds the safety depth cap (`16`), so a partial directory read
+    never erases installed local companion files. -/
+private partial def collectSkillCompanionFiles
+    (curDir : System.FilePath)
+    (relPrefix : String)
+    (depth : Nat) : IO (Except String (Array (String × String × String) × Array String)) := do
+  if depth > 16 then
+    return .error s!"Skill companion directory exceeds maximum nesting depth (16): '{curDir}'"
+  let entries ← match ← curDir.readDir.toBaseIO with
+    | .ok xs => pure xs
+    | .error err => return .error s!"Failed to enumerate skill directory '{curDir}': {err}"
+  let sorted := entries.qsort (fun a b => a.fileName < b.fileName)
+  let mut inlineFiles : Array (String × String × String) := #[]
+  let mut refPaths : Array String := #[]
+  for e in sorted do
+    let fname := e.fileName
+    if !fname.isEmpty && !fname.startsWith "." then
+      let rel := if relPrefix.isEmpty then fname else s!"{relPrefix}/{fname}"
+      if rel != "SKILL.md" then
+        let st ← statPath e.path.toString
+        if !st.isSymlink then
+          if st.isDir then
+            match ← collectSkillCompanionFiles e.path rel (depth + 1) with
+            | .error err => return .error err
+            | .ok (subInline, subRefs) =>
+              inlineFiles := inlineFiles ++ subInline
+              refPaths := refPaths ++ subRefs
+          else if st.isReg then
+            let mut inlined := false
+            let idSt ← statIdentity e.path.toString
+            if !idSt.exists_ then
+              return .error s!"Failed to stat skill companion file '{e.path}'"
+            if idSt.size ≤ 262144 then
+              match ← (IO.FS.readBinFile e.path).toBaseIO with
+              | .error err => return .error s!"Failed to read skill companion file '{e.path}': {err}"
+              | .ok bytes =>
+                let mut hasNul := false
+                for i in [0:bytes.size] do
+                  if bytes.get! i == 0 then hasNul := true
+                if !hasNul then
+                  if let some txt := String.fromUTF8? bytes then
+                    inlineFiles := inlineFiles.push (fname, rel, txt)
+                    inlined := true
+            if !inlined || !fname.toLower.endsWith ".md" then
+              refPaths := refPaths.push rel
+  return .ok (inlineFiles, refPaths)
+
+private def buildSkillSummaryJson (name prefixDir content : String) (includeBundle : Bool)
+    (skillDir : System.FilePath) : IO (Except String JVal) := do
+  let desc? := OrbCore.Skills.extractDescription content
+  let (_, scope?) := OrbCore.Skills.parseSandboxedMeta content
+  let aud := OrbCore.Skills.effectiveAudience content
+  let mut fields : Array (String × JVal) := #[
+    ("name", .str name),
+    ("description", match desc? with | some d => .str d | none => .null),
+    ("path", .str s!"{prefixDir}/{name}"),
+    ("audience", .arr (aud.map .str)),
+    ("scope", match scope? with | some sc => .str sc | none => .null),
+    ("line_count", JVal.nat (countSkillLines content))
+  ]
+  if includeBundle then
+    match ← collectSkillCompanionFiles skillDir "" 0 with
+    | .error err => return .error err
+    | .ok (inlineFiles, refPaths) =>
+      let filesJv := inlineFiles.map fun (fn, rp, txt) =>
+        JVal.obj #[("name", .str fn), ("path", .str rp), ("content", .str txt)]
+      fields := fields ++ #[
+        ("content", .str content),
+        ("files", .arr filesJv),
+        ("references", .arr (refPaths.map .str))
+      ]
+  return .ok (.obj fields)
+
+private def locateSkillDir (libDir cleanSkill : String) (forWrite : Bool) : IO (String × System.FilePath) := do
+  let canonDir := System.FilePath.mk s!"{libDir}/skill/{cleanSkill}"
+  let legacyDir := System.FilePath.mk s!"{libDir}/skills/{cleanSkill}"
+  if ← canonDir.pathExists then return ("skill", canonDir)
+  if ← legacyDir.pathExists then return ("skills", legacyDir)
+  if forWrite then
+    let canonRoot := System.FilePath.mk s!"{libDir}/skill"
+    let legacyRoot := System.FilePath.mk s!"{libDir}/skills"
+    if !(← canonRoot.pathExists) && (← legacyRoot.pathExists) then
+      return ("skills", legacyDir)
+  return ("skill", canonDir)
+
+private def isHexGitRev (s : String) : Bool :=
+  7 ≤ s.length && s.length ≤ 64 &&
+  s.toList.all fun c => ('0' ≤ c && c ≤ '9') || ('a' ≤ c && c ≤ 'f') || ('A' ≤ c && c ≤ 'F')
+
+private def sanitizeGitAuthorField (raw : String) : String :=
+  String.ofList ((raw.trimAscii.toString.take 120).toString.toList.filter fun c =>
+    c.toNat ≥ 0x20 && c.toNat != 0x7F && c != '<' && c != '>')
+
+def handleUpdateLibraryRemote
+    (store : CoreStore)
+    (workingDir : String)
+    (effAdmin : Bool)
+    (bodyBytes : ByteArray) : IO (Nat × String × ByteArray) := do
+  if !effAdmin then return jsonErr 403 "admin_required"
+  let .ok reqJv := OrbBin.Json.parseBytes bodyBytes
+    | return jsonErr 400 "Invalid JSON"
+  let nextRemote? : Option String ←
+    match reqJv.field? "library_remote" with
+    | some .null => pure none
+    | some (.str s) =>
+      let t := s.trimAscii.toString
+      pure (if t.isEmpty then none else some t)
+    | none => return jsonErr 400 "Missing library_remote field"
+    | _ => return jsonErr 400 "Invalid library_remote field"
+  if let some u := nextRemote? then
+    if !isValidGitRemote u then
+      return jsonErr 400 "Invalid Library repository URL"
+  let curSettings ← readSettingsJson store.rootDir
+  let nextVal : JVal := match nextRemote? with | some u => .str u | none => .null
+  let updatedSettings := curSettings.setField "library_remote" nextVal
+  if let .error e ← writeSettingsJson store.rootDir updatedSettings then
+    return jsonErr 500 e
+  let libDir ← resolveLibraryDir workingDir store.rootDir
+  match nextRemote? with
+  | none =>
+    let gitFp := System.FilePath.mk libDir / ".git"
+    if (← gitFp.pathExists) && (← gitOriginUrl? libDir).isSome then
+      let _ ← runGitCapture #["remote", "remove", "origin"] (some libDir)
+    return jsonResp 200 (.obj #[
+      ("library_remote", .null),
+      ("library_reinitialized", .bool false)
+    ])
+  | some u =>
+    let forceReinit := (reqJv.fieldBool? "force_reinitialize").getD false
+    match ← ensureLibraryRepo libDir u forceReinit with
+    | .ok reinit =>
+      return jsonResp 200 (.obj #[
+        ("library_remote", .str u),
+        ("library_reinitialized", .bool reinit)
+      ])
+    | .error err =>
+      return jsonResp 200 (.obj #[
+        ("library_remote", .str u),
+        ("library_reinitialized", .bool false),
+        ("library_error", .str err)
+      ])
+
+set_option maxHeartbeats 400000 in
+def handleLibraryRoute
+    (store : CoreStore)
+    (workingDir defaultLibraryRemote : String)
+    (effAdmin : Bool)
+    (method : String)
+    (segs : List String)
+    (qMap headers : Array (String × String))
+    (bodyBytes : ByteArray) : IO (Option (Nat × String × ByteArray)) := do
+  let libDir ← resolveLibraryDir workingDir store.rootDir
+  let hdrsForRemote := if effAdmin then headers else #[]
+  let effRemote ← resolveEffectiveLibraryRemote store.rootDir defaultLibraryRemote hdrsForRemote
+  let libFp := System.FilePath.mk libDir
+  let gitFp := libFp / ".git"
+
+  if method == "GET" && segs == ["api", "library", "status"] then
+    if !(← gitFp.pathExists) && !effRemote.isEmpty then
+      if let .error e ← ensureLibraryRepo libDir effRemote false then
+        return some (jsonErr 502 s!"Failed to initialize Library repository: {e}")
+    return some (jsonResp 200 (← buildLibraryStatusJson libDir effRemote))
+
+  if method == "POST" && segs == ["api", "library", "sync"] then
+    if !effAdmin then return some (jsonErr 403 "admin_required")
+    if !effRemote.isEmpty then
+      if !(← gitFp.pathExists) then
+        if let .error e ← ensureLibraryRepo libDir effRemote false then
+          return some (500, "text/plain; charset=utf-8", e.toUTF8)
+      else
+        if isValidGitRemote effRemote then
+          match ← gitOriginUrl? libDir with
+          | none => discard <| runGitCapture #["remote", "add", "origin", "--", effRemote] (some libDir)
+          | some cur =>
+            if cur != effRemote then
+              discard <| runGitCapture #["remote", "set-url", "origin", "--", effRemote] (some libDir)
+        if (← gitOriginUrl? libDir).isSome then
+          let (rcF, outF) ← runGitCapture #["fetch", "--prune", "origin"] (some libDir)
+          if rcF != 0 then
+            return some (500, "text/plain; charset=utf-8", outF.trimAscii.toString.toUTF8)
+          let branch ← gitCurrentBranch libDir
+          if let some upRef ← resolveRemoteTrackingRef libDir branch then
+            let (rcM, outM) ← runGitCapture #["merge", "--ff-only", upRef] (some libDir)
+            if rcM != 0 then
+              let cleanErr := outM.trimAscii.toString
+              if isDivergedGitOutput cleanErr then
+                return some (409, "text/plain; charset=utf-8", s!"DIVERGED_HISTORY: {cleanErr}".toUTF8)
+              let (rcCnt, cntOut) ← runGitCapture #["rev-list", "--left-right", "--count", s!"HEAD...{upRef}"] (some libDir)
+              if rcCnt == 0 then
+                let nums := (cntOut.trimAscii.toString.split (fun c => c == '\t' || c == ' ')).toArray.filterMap (fun s => s.toString.toNat?)
+                if nums.size ≥ 2 && nums[0]! > 0 && nums[1]! > 0 then
+                  return some (409, "text/plain; charset=utf-8", s!"DIVERGED_HISTORY: {cleanErr}".toUTF8)
+              return some (500, "text/plain; charset=utf-8", cleanErr.toUTF8)
+    return some (jsonResp 200 (← buildLibraryStatusJson libDir effRemote))
+
+  if method == "POST" && segs == ["api", "library", "force-sync"] then
+    if !effAdmin then return some (jsonErr 403 "admin_required")
+    if effRemote.isEmpty then
+      return some (jsonErr 400 "Library remote is not configured")
+    if !(← gitFp.pathExists) then
+      if let .error e ← ensureLibraryRepo libDir effRemote true then
+        return some (500, "text/plain; charset=utf-8", e.toUTF8)
+    else
+      if isValidGitRemote effRemote then
+        match ← gitOriginUrl? libDir with
+        | none => discard <| runGitCapture #["remote", "add", "origin", "--", effRemote] (some libDir)
+        | some cur =>
+          if cur != effRemote then
+            discard <| runGitCapture #["remote", "set-url", "origin", "--", effRemote] (some libDir)
+      if (← gitOriginUrl? libDir).isNone then
+        return some (jsonErr 400 "Library remote is not configured")
+      let (rcF, outF) ← runGitCapture #["fetch", "--prune", "origin"] (some libDir)
+      if rcF != 0 then
+        return some (500, "text/plain; charset=utf-8", outF.trimAscii.toString.toUTF8)
+      let branch ← gitCurrentBranch libDir
+      let targetRef := (← resolveRemoteTrackingRef libDir branch).getD "FETCH_HEAD"
+      let (rcR, outR) ← runGitCapture #["reset", "--hard", targetRef] (some libDir)
+      if rcR != 0 then
+        return some (500, "text/plain; charset=utf-8", outR.trimAscii.toString.toUTF8)
+      let _ ← runGitCapture #["clean", "-fd"] (some libDir)
+    return some (jsonResp 200 (← buildLibraryStatusJson libDir effRemote))
+
+  if method == "POST" && segs == ["api", "library", "commit"] then
+    if !effAdmin then return some (jsonErr 403 "admin_required")
+    let .ok reqJv := OrbBin.Json.parseBytes bodyBytes
+      | return some (jsonErr 400 "Invalid JSON")
+    let message := ((reqJv.fieldStr? "message").getD "").trimAscii.toString
+    if message.isEmpty then
+      return some (jsonErr 400 "Commit message required")
+    IO.FS.createDirAll libFp
+    if !(← gitFp.pathExists) then
+      let (rcInit, outInit) ← runGitCapture #["init", "-b", "main"] (some libDir)
+      if rcInit != 0 then
+        let _ ← runGitCapture #["init"] (some libDir)
+        let _ := outInit
+    let (rcAdd, outAdd) ← runGitCapture #["add", "-A"] (some libDir)
+    if rcAdd != 0 then
+      return some (500, "text/plain; charset=utf-8", s!"git add failed: {outAdd.trimAscii.toString}".toUTF8)
+    let (rcSt, stOut) ← runGitCapture #["status", "--porcelain"] (some libDir)
+    if rcSt != 0 then
+      return some (500, "text/plain; charset=utf-8", s!"git status failed: {stOut.trimAscii.toString}".toUTF8)
+    if stOut.trimAscii.isEmpty then
+      return some (200, "text/plain; charset=utf-8", "Nothing to commit".toUTF8)
+    let hdrName := sanitizeGitAuthorField ((findHeaderCI? headers "x-sandboxed-git-author-name").getD "")
+    let hdrEmail := sanitizeGitAuthorField ((findHeaderCI? headers "x-sandboxed-git-author-email").getD "")
+    let (rcCfgName, cfgNameOut) ← runGitCapture #["config", "user.name"] (some libDir)
+    let (rcCfgEmail, cfgEmailOut) ← runGitCapture #["config", "user.email"] (some libDir)
+    let mut commitArgs : Array String := #[]
+    if !hdrName.isEmpty then
+      commitArgs := commitArgs ++ #["-c", s!"user.name={hdrName}"]
+    else if rcCfgName != 0 || cfgNameOut.trimAscii.isEmpty then
+      commitArgs := commitArgs ++ #["-c", "user.name=Orb"]
+    if !hdrEmail.isEmpty then
+      commitArgs := commitArgs ++ #["-c", s!"user.email={hdrEmail}"]
+    else if rcCfgEmail != 0 || cfgEmailOut.trimAscii.isEmpty then
+      commitArgs := commitArgs ++ #["-c", "user.email=orb@localhost"]
+    commitArgs := commitArgs ++ #["commit", "-m", message]
+    let (rcC, outC) ← runGitCapture commitArgs (some libDir)
+    if rcC != 0 then
+      return some (500, "text/plain; charset=utf-8", s!"git commit failed: {outC.trimAscii.toString}".toUTF8)
+    return some (200, "text/plain; charset=utf-8", "Committed successfully".toUTF8)
+
+  if method == "POST" && (segs == ["api", "library", "push"] || segs == ["api", "library", "force-push"]) then
+    if !effAdmin then return some (jsonErr 403 "admin_required")
+    let isForce := segs == ["api", "library", "force-push"]
+    if !(← gitFp.pathExists) then
+      return some (400, "text/plain; charset=utf-8", "Library repository is not initialized".toUTF8)
+    if effRemote.isEmpty then
+      -- When no remote is configured, treat push as a clean local-only no-op unless `force-push` was requested.
+      if !isForce then
+        return some (200, "text/plain; charset=utf-8", "No remote configured; saved locally".toUTF8)
+      return some (400, "text/plain; charset=utf-8", "No Library remote configured".toUTF8)
+    if isValidGitRemote effRemote then
+      match ← gitOriginUrl? libDir with
+      | none => discard <| runGitCapture #["remote", "add", "origin", "--", effRemote] (some libDir)
+      | some cur =>
+        if cur != effRemote then
+          discard <| runGitCapture #["remote", "set-url", "origin", "--", effRemote] (some libDir)
+    if (← gitOriginUrl? libDir).isNone then
+      return some (400, "text/plain; charset=utf-8", "No Library remote configured".toUTF8)
+    let pushArgs := if isForce then #["push", "--force", "-u", "origin", "HEAD"] else #["push", "-u", "origin", "HEAD"]
+    let (rcP, outP) ← runGitCapture pushArgs (some libDir)
+    if rcP != 0 then
+      let cleanErr := outP.trimAscii.toString
+      if !isForce && isDivergedGitOutput cleanErr then
+        return some (409, "text/plain; charset=utf-8", s!"DIVERGED_HISTORY: {cleanErr}".toUTF8)
+      return some (500, "text/plain; charset=utf-8", s!"git push failed: {cleanErr}".toUTF8)
+    return some (200, "text/plain; charset=utf-8", "Pushed successfully".toUTF8)
+
+  if method == "GET" && segs == ["api", "library", "skill"] then
+    if !(← gitFp.pathExists) && !effRemote.isEmpty then
+      if let .error e ← ensureLibraryRepo libDir effRemote false then
+        return some (jsonErr 502 s!"Failed to initialize Library repository: {e}")
+    let includeBundle :=
+      ((qParam? qMap "include").getD "") == "bundle" ||
+      ((qParam? qMap "bundle").getD "") == "1"
+    let mut seenNames : Array String := #[]
+    let mut items : Array (String × JVal) := #[]
+    for prefixDir in #["skill", "skills"] do
+      let skillsRoot := System.FilePath.mk s!"{libDir}/{prefixDir}"
+      let rootSt ← statPath skillsRoot.toString
+      if rootSt.exists_ && rootSt.isDir && !rootSt.isSymlink then
+        let entries ← match ← skillsRoot.readDir.toBaseIO with
+          | .ok xs => pure xs
+          | .error err => return some (jsonErr 500 s!"Failed to enumerate Library skills directory: {err}")
+        for e in entries do
+          let sname := e.fileName
+          if OrbCore.Skills.nameCharsValid sname && !sname.startsWith "." && !seenNames.contains sname then
+            let eSt ← statPath e.path.toString
+            let mdPath := e.path / "SKILL.md"
+            let mdSt ← statPath mdPath.toString
+            if !eSt.isSymlink && mdSt.exists_ && mdSt.isReg && !mdSt.isSymlink then
+              let md ← match ← (IO.FS.readFile mdPath).toBaseIO with
+                | .ok txt => pure txt
+                | .error err => return some (jsonErr 500 s!"Failed to read SKILL.md for '{sname}': {err}")
+              match ← buildSkillSummaryJson sname prefixDir md includeBundle e.path with
+              | .error err => return some (jsonErr 500 err)
+              | .ok jv =>
+                seenNames := seenNames.push sname
+                items := items.push (sname, jv)
+    let sorted := (items.qsort (fun a b => a.1 < b.1)).map Prod.snd
+    return some (jsonResp 200 (.arr sorted))
+
+  if segs.length >= 4 && segs[2]? == some "skill" then
+    let rawName := (percentDecodeStrict segs[3]!).getD segs[3]!
+    if !OrbCore.Skills.nameCharsValid rawName || rawName.startsWith "." then
+      return some (jsonErr 400 "Invalid skill name")
+    let cleanSkill := rawName
+
+    if segs.length == 4 then
+      if method == "GET" then
+        let (prefixDir, skillDir) ← locateSkillDir libDir cleanSkill false
+        let dirSt ← statPath skillDir.toString
+        let mdPath := skillDir / "SKILL.md"
+        let mdSt ← statPath mdPath.toString
+        if dirSt.isSymlink || !mdSt.exists_ || !mdSt.isReg || mdSt.isSymlink then
+          return some (jsonErr 404 "Skill not found")
+        let content ← match ← (IO.FS.readFile mdPath).toBaseIO with
+          | .ok txt => pure txt
+          | .error err => return some (jsonErr 500 s!"Failed to read SKILL.md for '{cleanSkill}': {err}")
+        match ← buildSkillSummaryJson cleanSkill prefixDir content true skillDir with
+        | .error err => return some (jsonErr 500 err)
+        | .ok jv => return some (jsonResp 200 jv)
+
+      if method == "PUT" then
+        if !effAdmin then return some (jsonErr 403 "admin_required")
+        let .ok reqJv := OrbBin.Json.parseBytes bodyBytes
+          | return some (jsonErr 400 "Invalid JSON")
+        let content := (reqJv.fieldStr? "content").getD ""
+        let (prefixDir, skillDir) ← locateSkillDir libDir cleanSkill true
+        let dirSt ← statPath skillDir.toString
+        if dirSt.isSymlink then
+          return some (jsonErr 400 "Refusing to write through symlinked skill directory")
+        let mdPath := skillDir / "SKILL.md"
+        let mdSt ← statPath mdPath.toString
+        if mdSt.isSymlink then
+          return some (jsonErr 400 "Refusing to write through symlinked SKILL.md")
+        IO.FS.createDirAll skillDir
+        IO.FS.writeFile mdPath content
+        match ← buildSkillSummaryJson cleanSkill prefixDir content true skillDir with
+        | .error err => return some (jsonErr 500 err)
+        | .ok jv => return some (jsonResp 200 jv)
+
+      if method == "DELETE" then
+        if !effAdmin then return some (jsonErr 403 "admin_required")
+        let canonDir := System.FilePath.mk s!"{libDir}/skill/{cleanSkill}"
+        let legacyDir := System.FilePath.mk s!"{libDir}/skills/{cleanSkill}"
+        let cExists ← canonDir.pathExists
+        let lExists ← legacyDir.pathExists
+        if !cExists && !lExists then
+          return some (jsonErr 404 s!"Skill not found: {cleanSkill}")
+        if cExists then
+          let _ ← runCmdCapture "rm" #["-rf", "--", canonDir.toString]
+        if lExists then
+          let _ ← runCmdCapture "rm" #["-rf", "--", legacyDir.toString]
+        return some (jsonResp 200 (.obj #[("ok", .bool true)]))
+
+    if method == "GET" && segs.length == 5 && segs[4]? == some "history" then
+      let (prefixDir, skillDir) ← locateSkillDir libDir cleanSkill false
+      if !(← (skillDir / "SKILL.md").pathExists) then
+        return some (jsonErr 404 "Skill not found")
+      if !(← gitFp.pathExists) then
+        return some (jsonResp 200 (.arr #[]))
+      let relMd := s!"{prefixDir}/{cleanSkill}/SKILL.md"
+      let (rcH, outH) ← runGitCapture #["log", "-n", "50", "--format=%H%x09%an%x09%ct%x09%s", "--", relMd] (some libDir)
+      if rcH != 0 then
+        return some (jsonResp 200 (.arr #[]))
+      let mut hist : Array JVal := #[]
+      for line in outH.splitOn "\n" do
+        let l := line.trimAscii.toString
+        if !l.isEmpty then
+          let cols := l.splitOn "\t"
+          if cols.length ≥ 4 then
+            let rev := cols[0]!
+            let author := cols[1]!
+            let ts := cols[2]!.toNat?.getD 0
+            let subj := String.intercalate "\t" (cols.drop 3)
+            hist := hist.push (.obj #[
+              ("rev", .str rev),
+              ("author", .str author),
+              ("timestamp", JVal.nat ts),
+              ("subject", .str subj)
+            ])
+      return some (jsonResp 200 (.arr hist))
+
+    if method == "GET" && segs.length == 6 && segs[4]? == some "history" then
+      let rawRev := ((percentDecodeStrict segs[5]!).getD segs[5]!).trimAscii.toString
+      if !isHexGitRev rawRev then
+        return some (jsonErr 400 "Invalid git revision")
+      if !(← gitFp.pathExists) then
+        return some (jsonErr 404 "Revision not found")
+      for pfx in #["skill", "skills"] do
+        let (rcS, outS) ← runGitCapture #["show", s!"{rawRev}:{pfx}/{cleanSkill}/SKILL.md"] (some libDir)
+        if rcS == 0 then
+          return some (200, "text/plain; charset=utf-8", outS.toUTF8)
+      return some (jsonErr 404 "Revision not found")
+
+    if segs.length >= 6 && segs[4]? == some "files" then
+      let decodedSegs := (segs.drop 5).map (fun s => (percentDecodeStrict s).getD s)
+      let relFile := String.intercalate "/" decodedSegs
+      let some cleanRel := sanitizeRelPath? relFile
+        | return some (jsonErr 400 "Invalid file path")
+      if cleanRel.isEmpty then
+        return some (jsonErr 400 "Invalid file path")
+      let (_, skillDir) ← locateSkillDir libDir cleanSkill (method == "PUT")
+      if (← hasSymlinkSegment skillDir cleanRel) then
+        return some (jsonErr 400 "Refusing symlinked skill file path")
+      let fullFile := skillDir / cleanRel
+      if method == "GET" then
+        if !(← fullFile.pathExists) || (← fullFile.isDir) then
+          return some (jsonErr 404 "File not found")
+        match ← (IO.FS.readBinFile fullFile).toBaseIO with
+        | .ok bytes => return some (200, "text/plain; charset=utf-8", bytes)
+        | .error _ => return some (jsonErr 404 "File not readable")
+      if method == "PUT" then
+        if !effAdmin then return some (jsonErr 403 "admin_required")
+        let .ok reqJv := OrbBin.Json.parseBytes bodyBytes
+          | return some (jsonErr 400 "Invalid JSON")
+        if let some parent := fullFile.parent then IO.FS.createDirAll parent
+        IO.FS.writeFile fullFile ((reqJv.fieldStr? "content").getD "")
+        return some (jsonResp 200 (.obj #[("ok", .bool true), ("path", .str cleanRel)]))
+      if method == "DELETE" then
+        if !effAdmin then return some (jsonErr 403 "admin_required")
+        if cleanRel == "SKILL.md" then
+          return some (jsonErr 400 "Cannot delete SKILL.md")
+        if !(← fullFile.pathExists) || (← fullFile.isDir) then
+          return some (jsonErr 404 "File not found")
+        try IO.FS.removeFile fullFile catch _ => pure ()
+        return some (jsonResp 200 (.obj #[("ok", .bool true)]))
+
+  return none
 
 /-! ## 5. Inbox Digest (`POST /api/control/missions/:id/inbox-digest`, `schemaVersion: 7`) & Mission Stats -/
 
@@ -1517,97 +2151,13 @@ def dispatchResourcesAndSystemRoute
         ("results", .arr #[]), ("logs", .arr #[])
       ])]))
 
-  -- 5. Library (`/api/library/*`)
+  -- 5. Library (`/api/library/*` & `PUT /api/settings/library-remote`)
+  if method == "PUT" && segs == ["api", "settings", "library-remote"] then
+    return some (← handleUpdateLibraryRemote store workingDir effAdmin bodyBytes)
+
   if segs.length >= 2 && segs[0]? == some "api" && segs[1]? == some "library" then
-    let libDir ← resolveLibraryDir workingDir store.rootDir
-    if method == "GET" && segs == ["api", "library", "status"] then
-      return some (jsonResp 200 (← buildLibraryStatusJson libDir libraryRemote))
-
-    if method == "POST" && (segs == ["api", "library", "sync"] || segs == ["api", "library", "force-sync"]) then
-      if !effAdmin then return some (jsonErr 403 "admin_required")
-      if (← (System.FilePath.mk libDir).pathExists) then
-        let _ ← runCmdCapture "git" #["pull", "--ff-only"] (some libDir)
-      return some (jsonResp 200 (← buildLibraryStatusJson libDir libraryRemote))
-
-    if method == "POST" && (segs == ["api", "library", "commit"] || segs == ["api", "library", "push"] || segs == ["api", "library", "force-push"]) then
-      if !effAdmin then return some (jsonErr 403 "admin_required")
-      return some (jsonResp 200 .null)
-
-    if method == "GET" && segs == ["api", "library", "skill"] then
-      let skillsRoot := System.FilePath.mk s!"{libDir}/skills"
-      let mut out : Array JVal := #[]
-      if (← skillsRoot.pathExists) && (← skillsRoot.isDir) then
-        if let .ok entries ← skillsRoot.readDir.toBaseIO then
-          for e in entries do
-            let mdPath := e.path / "SKILL.md"
-            if (← mdPath.pathExists) then
-              let md ← (try IO.FS.readFile mdPath catch _ => pure "")
-              let desc? := extractSkillDescription? md
-              out := out.push (.obj #[
-                ("name", .str e.fileName),
-                ("description", match desc? with | some d => .str d | none => .null),
-                ("path", .str s!"skills/{e.fileName}/SKILL.md")
-              ])
-      return some (jsonResp 200 (.arr out))
-
-    if segs.length >= 4 && segs[2]? == some "skill" then
-      let sName := segs[3]!
-      let some cleanSkill := sanitizeRelPath? sName | return some (jsonErr 400 "Invalid skill name")
-      if cleanSkill.isEmpty || cleanSkill.contains '/' then return some (jsonErr 400 "Invalid skill name")
-      let skillDir := System.FilePath.mk s!"{libDir}/skills/{cleanSkill}"
-      let mdPath := skillDir / "SKILL.md"
-
-      if segs.length == 4 then
-        if method == "GET" then
-          if !(← mdPath.pathExists) then return some (jsonErr 404 "Skill not found")
-          let content ← (try IO.FS.readFile mdPath catch _ => pure "")
-          let desc? := extractSkillDescription? content
-          return some (jsonResp 200 (.obj #[
-            ("name", .str cleanSkill),
-            ("description", match desc? with | some d => .str d | none => .null),
-            ("path", .str s!"skills/{cleanSkill}/SKILL.md"),
-            ("content", .str content),
-            ("references", .arr #[])
-          ]))
-        if method == "PUT" then
-          if !effAdmin then return some (jsonErr 403 "admin_required")
-          let .ok reqJv := OrbBin.Json.parseBytes bodyBytes | return some (jsonErr 400 "Invalid JSON")
-          let content := (reqJv.fieldStr? "content").getD ""
-          IO.FS.createDirAll skillDir
-          IO.FS.writeFile mdPath content
-          return some (jsonResp 200 (.obj #[
-            ("name", .str cleanSkill),
-            ("description", match extractSkillDescription? content with | some d => .str d | none => .null),
-            ("path", .str s!"skills/{cleanSkill}/SKILL.md"),
-            ("content", .str content),
-            ("references", .arr #[])
-          ]))
-        if method == "DELETE" then
-          if !effAdmin then return some (jsonErr 403 "admin_required")
-          let _ ← runCmdCapture "rm" #["-rf", "--", skillDir.toString]
-          return some (jsonResp 200 (.obj #[("ok", .bool true)]))
-
-      if method == "GET" && segs.length == 5 && segs[4]? == some "history" then
-        return some (jsonResp 200 (.arr #[]))
-
-      if segs.length >= 6 && segs[4]? == some "files" then
-        let relFile := String.intercalate "/" (segs.drop 5)
-        let some cleanRel := sanitizeRelPath? relFile | return some (jsonErr 400 "Invalid file path")
-        let fullFile := skillDir / cleanRel
-        if method == "GET" then
-          if !(← fullFile.pathExists) then return some (jsonErr 404 "File not found")
-          let c ← (try IO.FS.readFile fullFile catch _ => pure "")
-          return some (jsonResp 200 (.obj #[("path", .str cleanRel), ("content", .str c)]))
-        if method == "PUT" then
-          if !effAdmin then return some (jsonErr 403 "admin_required")
-          let .ok reqJv := OrbBin.Json.parseBytes bodyBytes | return some (jsonErr 400 "Invalid JSON")
-          if let some parent := fullFile.parent then IO.FS.createDirAll parent
-          IO.FS.writeFile fullFile ((reqJv.fieldStr? "content").getD "")
-          return some (jsonResp 200 (.obj #[("ok", .bool true), ("path", .str cleanRel)]))
-        if method == "DELETE" then
-          if !effAdmin then return some (jsonErr 403 "admin_required")
-          try IO.FS.removeFile fullFile catch _ => pure ()
-          return some (jsonResp 200 (.obj #[("ok", .bool true)]))
+    if let some res ← handleLibraryRoute store workingDir libraryRemote effAdmin method segs qMap headers bodyBytes then
+      return some res
 
   -- 6. System, Mesh, FIDO & GitHub Integration (`/api/system/*`, `/api/mesh/status`, `/api/fido/*`, `/api/integrations/github*`)
   if method == "GET" && segs == ["api", "system", "info"] then
