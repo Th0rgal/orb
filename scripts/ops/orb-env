@@ -306,6 +306,17 @@ def check(base, overlay, policy=None):
         raise InvalidConfig("ORB_INSTANCE must be prod or dev")
 
 
+def classify(prod, dev):
+    common = (prod.keys() & dev.keys()) - INSTANCE_KEYS
+    return {
+        "shared": sorted(key for key in common if literal(prod[key]) == literal(dev[key])),
+        "different": sorted(key for key in common if literal(prod[key]) != literal(dev[key])),
+        "prod_only": sorted((prod.keys() - dev.keys()) - INSTANCE_KEYS),
+        "dev_only": sorted((dev.keys() - prod.keys()) - INSTANCE_KEYS),
+        "instance": sorted((prod.keys() | dev.keys()) & INSTANCE_KEYS),
+    }
+
+
 def split_envs(prod, dev, policy=None):
     policy = ownership(policy)
     instance_keys = INSTANCE_KEYS | PROD_ONLY_KEYS
@@ -390,8 +401,16 @@ def main():
     report.add_argument("--prod", type=Path, required=True)
     report.add_argument("--dev", type=Path, required=True)
     migration.add_argument("--apply", action="store_true", help="write files; default only validates")
+    classification = commands.add_parser("classify")
+    classification.add_argument("--prod", type=Path, required=True)
+    classification.add_argument("--dev", type=Path, required=True)
     args = parser.parse_args()
     try:
+        if args.command == "classify":
+            groups = classify(parse_env(args.prod.read_bytes()), parse_env(args.dev.read_bytes()))
+            for group, keys in groups.items():
+                print(group + ": " + ", ".join(keys))
+            return 0
         if args.command == "check":
             policy_path = args.base.parent / "ownership.json"
             policy = read_ownership(policy_path) if policy_path.exists() else None

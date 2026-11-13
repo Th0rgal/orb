@@ -135,6 +135,24 @@ class OrbEnvTest(unittest.TestCase):
         policy = {"schema_version": 1, "instance_keys": [], "shared_from": {"MAX_ITERATIONS": "prod"}}
         with self.assertRaisesRegex(env.InvalidConfig, "absent from both inputs: MAX_ITERATIONS"):
             env.migrate(self.prod, self.dev, self.output, apply=True, policy=policy)
+
+    def test_classification_reports_names_not_values(self):
+        prod = env.parse_env(self.prod.read_bytes()) | {"PROD_ONLY": "private-prod"}
+        dev = env.parse_env(self.dev.read_bytes()) | {"DEV_ONLY": "private-dev", "CLI_PROXY_API_KEY": "private-different"}
+        result = env.classify(prod, dev)
+        self.assertEqual(result["prod_only"], ["PROD_ONLY"])
+        self.assertEqual(result["dev_only"], ["DEV_ONLY"])
+        self.assertEqual(result["different"], ["CLI_PROXY_API_KEY"])
+        self.assertEqual(result["shared"], ["CLI_PROXY_API_BASE_URL"])
+        self.assertNotIn("private", str(result))
+
+    def test_classify_cli_never_writes_or_discloses_values(self):
+        self.dev.write_bytes(self.dev.read_bytes() + b"DEV_FEATURE=private-value\n")
+        stdout = io.StringIO()
+        with patch("sys.argv", [str(SCRIPT), "classify", "--prod", str(self.prod), "--dev", str(self.dev)]), contextlib.redirect_stdout(stdout):
+            self.assertEqual(env.main(), 0)
+        self.assertIn("DEV_FEATURE", stdout.getvalue())
+        self.assertNotIn("private-value", stdout.getvalue())
         self.assertFalse(self.output.exists())
 
     def test_shared_identity_cannot_be_disguised_by_quotes(self):
