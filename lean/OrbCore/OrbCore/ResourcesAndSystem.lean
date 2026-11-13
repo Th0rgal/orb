@@ -1458,13 +1458,17 @@ def handleLibraryRoute
       if fetched != 0 then return some (jsonErr 502 "library_revision_unavailable")
       let (checkedOut, _) ← runGitCapture #["checkout", "--detach", revision] (some libDir)
       if checkedOut != 0 then return some (jsonErr 409 "library_revision_checkout_failed")
-      return some (jsonResp 200 (← buildLibraryStatusJson libDir effRemote))
+      let st ← buildLibraryStatusJson libDir effRemote
+    -- Members see sync state only, not the host path or the remote URL.
+    return some (jsonResp 200 (if effAdmin then st else (st.setField "path" (.str "")).setField "remote" (.str "")))
 
   if method == "GET" && segs == ["api", "library", "status"] then
     if !(← gitFp.pathExists) && !effRemote.isEmpty then
       if let .error e ← ensureLibraryRepo libDir effRemote false then
         return some (jsonErr 502 s!"Failed to initialize Library repository: {e}")
-    return some (jsonResp 200 (← buildLibraryStatusJson libDir effRemote))
+    let st ← buildLibraryStatusJson libDir effRemote
+    -- Members see sync state only, not the host path or the remote URL.
+    return some (jsonResp 200 (if effAdmin then st else (st.setField "path" (.str "")).setField "remote" (.str "")))
 
   if method == "POST" && segs == ["api", "library", "sync"] then
     if !effAdmin then return some (jsonErr 403 "admin_required")
@@ -1496,7 +1500,9 @@ def handleLibraryRoute
                 if nums.size ≥ 2 && nums[0]! > 0 && nums[1]! > 0 then
                   return some (409, "text/plain; charset=utf-8", s!"DIVERGED_HISTORY: {cleanErr}".toUTF8)
               return some (500, "text/plain; charset=utf-8", cleanErr.toUTF8)
-    return some (jsonResp 200 (← buildLibraryStatusJson libDir effRemote))
+    let st ← buildLibraryStatusJson libDir effRemote
+    -- Members see sync state only, not the host path or the remote URL.
+    return some (jsonResp 200 (if effAdmin then st else (st.setField "path" (.str "")).setField "remote" (.str "")))
 
   if method == "POST" && segs == ["api", "library", "force-sync"] then
     if !effAdmin then return some (jsonErr 403 "admin_required")
@@ -1523,7 +1529,9 @@ def handleLibraryRoute
       if rcR != 0 then
         return some (500, "text/plain; charset=utf-8", outR.trimAscii.toString.toUTF8)
       let _ ← runGitCapture #["clean", "-fd"] (some libDir)
-    return some (jsonResp 200 (← buildLibraryStatusJson libDir effRemote))
+    let st ← buildLibraryStatusJson libDir effRemote
+    -- Members see sync state only, not the host path or the remote URL.
+    return some (jsonResp 200 (if effAdmin then st else (st.setField "path" (.str "")).setField "remote" (.str "")))
 
   if method == "POST" && segs == ["api", "library", "commit"] then
     if !effAdmin then return some (jsonErr 403 "admin_required")
@@ -1960,7 +1968,19 @@ def dispatchResourcesAndSystemRoute
   -- 1. `GET /api/resources/overview` & `GET /api/resources/missions/:id`
   if method == "GET" && segs == ["api", "resources", "overview"] then
     let jv ← buildResourcesOverviewJson store managedStore? qMap
-    return some (jsonResp 200 jv)
+    if effAdmin then return some (jsonResp 200 jv)
+    -- Members: only their own missions; no fleet sources or instance-wide inference totals.
+    let mut mine : Array JVal := #[]
+    for m in (jv.fieldArr? "missions").getD #[] do
+      if ← canAccessMission store ((m.fieldStr? "id").getD "") callerUserId bootstrapAdminId isLegacyUnscoped false then
+        mine := mine.push m
+    let compute := ((jv.field? "compute").getD (.obj #[])).setField "sources" (.arr #[])
+    let inference : JVal := .obj #[
+      ("current_b_tok_per_h", JVal.nat 0), ("est_usd_per_h", JVal.nat 0),
+      ("window_total_tokens", JVal.nat 0), ("window_est_usd", JVal.nat 0),
+      ("throttled_429_count", JVal.nat 0), ("pools", .arr #[])]
+    let reduced := ((jv.setField "missions" (.arr mine)).setField "compute" compute).setField "inference" inference
+    return some (jsonResp 200 reduced)
 
   if method == "GET" && segs.length == 4 && segs[0]? == some "api" && segs[1]? == some "resources" && segs[2]? == some "missions" then
     let mid := segs[3]!
@@ -2189,7 +2209,7 @@ def dispatchResourcesAndSystemRoute
         ("version", (c.field? "installed_version").getD .null),
         ("installed", .bool ((c.fieldBool? "installed").getD false)),
         ("update_available", .null),
-        ("path", (c.field? "binary_path").getD .null),
+        ("path", if effAdmin then (c.field? "binary_path").getD .null else .null),
         ("status", .str (if (c.fieldBool? "installed").getD false then "ok" else "not_installed"))
       ]
     return some (jsonResp 200 (.obj #[("components", .arr comps)]))

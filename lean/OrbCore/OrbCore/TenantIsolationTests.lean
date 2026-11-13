@@ -597,6 +597,18 @@ def run (root : String) : IO Unit := do
         siblingLeaks := siblingLeaks.push s!"{routeName} ({mStatus}) -> [{joinedMarkers}]"
     let joinedSiblingLeaks := String.intercalate "; " siblingLeaks.toList
     check siblingLeaks.isEmpty s!"member sibling provider/ai routes leaked owner identity: {joinedSiblingLeaks}"
+    -- Host-level views: members get their own missions only and no host paths.
+    let (ovSt, ovDoc) ← send "GET" "/api/resources/overview" member (.obj #[]) stWithProviders
+    check (ovSt == 200 && ((renderCompact ovDoc).splitOn "admin-mission").length == 1 &&
+        ((ovDoc.field? "compute").bind (·.fieldArr? "sources")) == some #[] &&
+        ((ovDoc.field? "inference").bind (·.fieldArr? "pools")) == some #[])
+      "member resources overview hides other users' missions, fleet sources and inference pools"
+    let (lsSt, lsDoc) ← send "GET" "/api/library/status" member (.obj #[]) stWithProviders
+    check (lsSt != 200 || (lsDoc.fieldStr? "path" == some "" && lsDoc.fieldStr? "remote" == some ""))
+      "member library status hides host path and remote"
+    let (siSt, siDoc) ← send "GET" "/api/system/info" member (.obj #[]) stWithProviders
+    check (siSt == 200 && ((siDoc.fieldArr? "components").getD #[]).all (fun c => (c.field? "path").getD .null == .null))
+      "member system info hides binary paths"
     let (_, mCatDoc) ← send "GET" "/api/providers/catalog" member (.obj #[]) stWithProviders
     let mCatProvs := (mCatDoc.fieldArr? "providers").getD #[]
     check (mCatProvs.size == 2 &&
