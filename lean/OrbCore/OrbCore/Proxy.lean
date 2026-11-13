@@ -486,6 +486,13 @@ def snapshotActiveHealthCooldowns (tracker : ProviderHealthTracker) (nowEpoch : 
     set { st with accounts := updated }
     return active
 
+/-- Operator reset: forget the cooldown, quota park, poison and streaks of every account whose
+    id satisfies `pick`. Used by the health "clear" route and after a completed login. -/
+def clearAccountHealthWhere (tracker : ProviderHealthTracker) (pick : String → Bool) : IO Unit :=
+  tracker.health.atomically do
+    let st ← get
+    set { st with accounts := st.accounts.filter (fun r => !pick r.accountId) }
+
 /-- Plan a `RoutingChain` directly from `ProviderHealthTracker`'s single-owner state at `nowEpoch`. -/
 def planChainFromHealth (tracker : ProviderHealthTracker) (chain : RoutingChain) (nowEpoch : UInt64) : IO ChainPlan := do
   let active ← snapshotActiveHealthCooldowns tracker nowEpoch

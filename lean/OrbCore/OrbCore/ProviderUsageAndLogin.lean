@@ -1171,10 +1171,14 @@ def dispatchProviderAndAiRoute
     (method cleanPath rawTarget : String)
     (bodyBytes : ByteArray)
     (callerUserId : String)
-    (isAdmin isLegacyUnscoped : Bool) : IO (Option (Nat × String × ByteArray)) := do
+    (isAdmin isLegacyUnscoped : Bool)
+    (healthTracker? : Option ProviderHealthTracker := none) : IO (Option (Nat × String × ByteArray)) := do
   let segs := (cleanPath.splitOn "/").filter (!·.isEmpty)
   let qMap := parseQueryMap rawTarget
   let effAdmin := isLegacyUnscoped || isAdmin
+  -- The proxy records a login held by CLIProxyAPI under `cliproxyapi:<type>`, not the row id.
+  let healthKeys (hp : HydratedProvider) : Array String :=
+    if hp.hasOAuth && !hp.hasApiKey then #[hp.id, s!"cliproxyapi:{hp.providerType}"] else #[hp.id]
 
   -- 1. `GET /api/providers/antigravity-models` & `GET /api/antigravity-models` (300s cached!)
   if method == "GET" && (segs == ["api", "providers", "antigravity-models"] || segs == ["api", "antigravity-models"]) then
@@ -1296,18 +1300,18 @@ def dispatchProviderAndAiRoute
   if method == "GET" && segs == ["api", "model-routing", "health"] then
     let nowSec ← nowEpoch
     let hps ← loadHydratedProviders store workingDir
-    let cooldowns ← proxyCooldownsRef.get
+    -- Both owners of a cooldown: the legacy ref and the health tracker the proxy plans from.
+    let tracked ← match healthTracker? with
+      | some t => snapshotActiveHealthCooldowns t nowSec
+      | none => pure #[]
+    let cooldowns := (← proxyCooldownsRef.get) ++ tracked
     let usageCached ← hub.mu.atomically (do return (← get).usageEntries)
     let mut snaps : Array JVal := #[]
     for hp in hps do
+      let keys := healthKeys hp
       let cdRem : UInt64 :=
-        match cooldowns.find? (fun c => c.accountId == hp.id) with
-        | some c => c.remainingSecs nowSec
-        | none => 0
-      let failCnt : Nat :=
-        match cooldowns.find? (fun c => c.accountId == hp.id) with
-        | some c => if c.untilEpoch > nowSec then 1 else 0
-        | none => 0
+        (cooldowns.filter (fun c => keys.contains c.accountId)).foldl (fun acc c => max acc (c.remainingSecs nowSec)) 0
+      let failCnt : Nat := if cdRem > 0 then 1 else 0
       let remQuota : JVal :=
         match usageCached.find? (fun u => u.providerId == hp.id) with
         | some u =>
@@ -1331,8 +1335,13 @@ def dispatchProviderAndAiRoute
   if method == "POST" && segs.length == 5 && segs[0]? == some "api" && segs[1]? == some "model-routing" && segs[2]? == some "health" && segs[4]? == some "clear" then
     if !effAdmin then return some (jsonErr 403 "admin_required")
     let acctId := segs[3]!
+    let hps ← loadHydratedProviders store workingDir
+    let keys := match hps.find? (fun hp => hp.id == acctId) with
+      | some hp => healthKeys hp
+      | none => #[acctId]
     let cur ← proxyCooldownsRef.get
-    proxyCooldownsRef.set (cur.filter (fun c => c.accountId != acctId))
+    proxyCooldownsRef.set (cur.filter (fun c => !keys.contains c.accountId))
+    if let some t := healthTracker? then clearAccountHealthWhere t keys.contains
     return some (204, "text/plain", ByteArray.empty)
 
   if method == "POST" && segs.length == 5 && segs[0]? == some "api" && segs[1]? == some "model-routing" && segs[2]? == some "chains" && segs[4]? == some "test" then
@@ -1598,6 +1607,16 @@ def dispatchProviderAndAiRoute
           -- that is still dead is recorded again by the next request.
           if 200 ≤ c && c < 300 then
             discard <| execParamQuery store.missionsDb "DELETE FROM provider_auth_health WHERE account_key LIKE 'cliproxyapi:%';" #[]
+            -- The same goes for what Core itself remembers: the cooldowns it put on the
+            -- sidecar's logins, and cached usage that still says the login was refused.
+            let viaSidecar (k : String) : Bool := k.startsWith "cliproxyapi:"
+            let cur ← proxyCooldownsRef.get
+            proxyCooldownsRef.set (cur.filter (fun c => !viaSidecar c.accountId))
+            if let some t := healthTracker? then clearAccountHealthWhere t viaSidecar
+            hub.mu.atomically do
+              let st ← get
+              let kept := st.usageEntries.filter (fun e => e.payload.fieldStr? "status" != some "needs_reauth")
+              set { st with usageEntries := kept }
           let okSt := if 200 ≤ c && c < 300 then "completing" else "failed"
           return some (jsonResp 200 (.obj #[("status", .str okSt), ("auth_url", .str sess.authUrl), ("message", .null)]))
         | .error e =>
