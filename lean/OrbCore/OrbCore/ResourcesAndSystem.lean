@@ -1464,9 +1464,9 @@ def handleLibraryRoute
     if !(← gitFp.pathExists) && !effRemote.isEmpty then
       if let .error e ← ensureLibraryRepo libDir effRemote false then
         return some (jsonErr 502 s!"Failed to initialize Library repository: {e}")
-    let st ← buildLibraryStatusJson libDir effRemote
+    let libSt ← buildLibraryStatusJson libDir effRemote
     -- Members see sync state only, not the host path or the remote URL.
-    return some (jsonResp 200 (if effAdmin then st else (st.setField "path" (.str "")).setField "remote" (.str "")))
+    return some (jsonResp 200 (if effAdmin then libSt else (libSt.setField "path" (.str "")).setField "remote" (.str "")))
 
   if method == "POST" && segs == ["api", "library", "sync"] then
     if !effAdmin then return some (jsonErr 403 "admin_required")
@@ -1498,9 +1498,7 @@ def handleLibraryRoute
                 if nums.size ≥ 2 && nums[0]! > 0 && nums[1]! > 0 then
                   return some (409, "text/plain; charset=utf-8", s!"DIVERGED_HISTORY: {cleanErr}".toUTF8)
               return some (500, "text/plain; charset=utf-8", cleanErr.toUTF8)
-    let st ← buildLibraryStatusJson libDir effRemote
-    -- Members see sync state only, not the host path or the remote URL.
-    return some (jsonResp 200 (if effAdmin then st else (st.setField "path" (.str "")).setField "remote" (.str "")))
+    return some (jsonResp 200 (← buildLibraryStatusJson libDir effRemote))
 
   if method == "POST" && segs == ["api", "library", "force-sync"] then
     if !effAdmin then return some (jsonErr 403 "admin_required")
@@ -1527,9 +1525,7 @@ def handleLibraryRoute
       if rcR != 0 then
         return some (500, "text/plain; charset=utf-8", outR.trimAscii.toString.toUTF8)
       let _ ← runGitCapture #["clean", "-fd"] (some libDir)
-    let st ← buildLibraryStatusJson libDir effRemote
-    -- Members see sync state only, not the host path or the remote URL.
-    return some (jsonResp 200 (if effAdmin then st else (st.setField "path" (.str "")).setField "remote" (.str "")))
+    return some (jsonResp 200 (← buildLibraryStatusJson libDir effRemote))
 
   if method == "POST" && segs == ["api", "library", "commit"] then
     if !effAdmin then return some (jsonErr 403 "admin_required")
@@ -1597,6 +1593,11 @@ def handleLibraryRoute
         return some (409, "text/plain; charset=utf-8", s!"DIVERGED_HISTORY: {cleanErr}".toUTF8)
       return some (500, "text/plain; charset=utf-8", s!"git push failed: {cleanErr}".toUTF8)
     return some (200, "text/plain; charset=utf-8", "Pushed successfully".toUTF8)
+
+  -- Skill sources can describe the owner's infrastructure: members get no Library skill bodies.
+  if !effAdmin && segs.length >= 3 && segs[2]? == some "skill" then
+    if method == "GET" && segs.length == 3 then return some (jsonResp 200 (.arr #[]))
+    return some (jsonErr (if method == "GET" then 404 else 403) (if method == "GET" then "Skill not found" else "admin_required"))
 
   if method == "GET" && segs == ["api", "library", "skill"] then
     if !(← gitFp.pathExists) && !effRemote.isEmpty then
@@ -2144,6 +2145,14 @@ def dispatchResourcesAndSystemRoute
   -- 4. Agent Software (`/api/software`, `/api/software/updates`, `/api/software/updates/cancel`)
   if segs.length >= 2 && segs[0]? == some "api" && segs[1]? == some "software" then
     let targetNode := ((qParam? qMap "node").getD "local").trimAscii.toString
+    let localNode := targetNode.isEmpty || targetNode == "local" || targetNode == "core" || targetNode == "orb-core" || targetNode == "agent-core"
+    if !effAdmin then
+      -- Members: local inventory only, without host paths or install job history.
+      if !(method == "GET" && segs.length == 2 && localNode) then return some (jsonErr 403 "admin_required")
+      let inv ← buildSoftwareInventoryJson hub false
+      let comps := ((inv.fieldArr? "components").getD #[]).map fun c =>
+        (c.setField "binary_path" .null).setField "can_update" (.bool false)
+      return some (jsonResp 200 (((inv.setField "components" (.arr comps)).setField "jobs" (.arr #[])).setField "active_job" .null))
     if !targetNode.isEmpty && targetNode != "local" && targetNode != "core" && targetNode != "orb-core" && targetNode != "agent-core" then
       if let some mc := managedStore? then
         let subPath := "/" ++ String.intercalate "/" (segs.drop 1)

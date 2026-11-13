@@ -609,6 +609,15 @@ def run (root : String) : IO Unit := do
     let (siSt, siDoc) ← send "GET" "/api/system/info" member (.obj #[]) stWithProviders
     check (siSt == 200 && ((siDoc.fieldArr? "components").getD #[]).all (fun c => (c.field? "path").getD .null == .null))
       "member system info hides binary paths"
+    let (skSt, skDoc) ← send "GET" "/api/library/skill" member (.obj #[]) stWithProviders
+    check (skSt == 200 && skDoc.asArr? == some #[]) "member Library skill list is empty"
+    check ((← send "GET" "/api/library/skill/paloma-infra" member (.obj #[]) stWithProviders).1 == 404)
+      "member cannot read a Library skill body"
+    let (swSt, swDoc) ← send "GET" "/api/software" member (.obj #[]) stWithProviders
+    check (swSt == 200 && ((swDoc.fieldArr? "components").getD #[]).all (fun c => (c.field? "binary_path").getD .null == .null))
+      "member software inventory hides binary paths"
+    check ((← send "POST" "/api/software/updates" member (.obj #[]) stWithProviders).1 == 403)
+      "member cannot start software updates"
     let (_, mCatDoc) ← send "GET" "/api/providers/catalog" member (.obj #[]) stWithProviders
     let mCatProvs := (mCatDoc.fieldArr? "providers").getD #[]
     check (mCatProvs.size == 2 &&
