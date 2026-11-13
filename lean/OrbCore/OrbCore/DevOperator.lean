@@ -79,6 +79,8 @@ def restrictedPath (path : String) : Bool :=
   path.startsWith "/api/approvals" || path.startsWith "/api/system/" ||
   path.startsWith "/api/software/" || path.startsWith "/api/fido/" ||
   path.startsWith "/api/bitwarden" || path.startsWith "/api/secrets" ||
+  path.startsWith "/api/settings" || path.startsWith "/api/proxy-keys" ||
+  path.startsWith "/api/control/auth/" ||
   path.startsWith "/api/workspaces/" || path.startsWith "/api/desktop/" ||
   path.startsWith "/api/console/"
 

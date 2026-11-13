@@ -2417,7 +2417,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let toolName := (jv.fieldStr? "name").getD ""
       let args := (jv.field? "arguments").getD (.obj #[])
       if (mcpCaller?.map (·.isDevOperator)).getD false &&
-          (toolName.startsWith "secret_" || #["request_privileged_access", "list_privileged_access",
+          (isMemoryToolName toolName || toolName.startsWith "secret_" || #["request_privileged_access", "list_privileged_access",
             "revoke_privileged_access", "execute_privileged_command", "deploy_sandboxed_sh"].contains toolName) then
         return .ok (mkJson 403 "{\"error\":\"dev_operator_scope_required\"}")
       if isMemoryToolName toolName then
@@ -2665,6 +2665,21 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   if cleanPath == "/api/admin/users" || cleanPath.startsWith "/api/admin/users/" then
     if let some (cCode, cBody) := requireAdminPrincipal caller then
       return .ok (mkJson cCode cBody)
+    -- A short-lived dev pass may prepare capped member fixtures, but cannot
+    -- turn them (or an existing administrator's password) into a lasting admin
+    -- credential. Linux identity assignment remains with the real operator.
+    if caller.isDevOperator && req.method != "GET" then
+      let segs := (cleanPath.splitOn "/").filter (!·.isEmpty)
+      if let some targetUid := segs[3]? then
+        if ((← getUserById? st.store targetUid).map (·.role)) == some "admin" then
+          return .ok (mkJson 403 "{\"error\":\"dev_operator_scope_required\"}")
+      let body := (OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption.getD .null
+      if (body.fieldStr? "role").any (fun role => role.trimAscii.toString.toLower != "member") ||
+          (body.field? "unix_username").isSome then
+        return .ok (mkJson 403 "{\"error\":\"dev_operator_scope_required\"}")
+      if req.method == "POST" && cleanPath == "/api/admin/users" &&
+          body.fieldUInt64? "daily_spend_cap_cents" != some 0 then
+        return .ok (mkJson 403 "{\"error\":\"dev_operator_requires_zero_budget_member\"}")
     if req.method == "GET" && cleanPath == "/api/admin/users" then
       match ← listUsersAdminJson st.store utcDay with
       | .ok body => return .ok (mkJson 200 body)

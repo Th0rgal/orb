@@ -31,8 +31,12 @@ The operator installs the reviewed deploy script at the fixed path above.
 
 A dev bearer cannot approve privileged requests, read Bitwarden/secrets, mint
 independent sessions, run generic privileged commands, change host software or
-services, use host workspace/console endpoints or deploy prod. Normal dev API
-admin functions remain available, including creating the isolation test user.
+services, use host workspace/console endpoints or deploy prod. It cannot alter
+an existing administrator, create/promote an administrator, assign Linux
+identities, mint proxy keys, read or restore raw settings, run provider logins or
+access the owner's shared personal memory. It may create a zero-budget member
+for isolation acceptance and disable that member afterwards. Account and
+credential changes needing broader authority remain with the real operator.
 Provider sealing remains reserved to a real operator session. Production
 promotion remains an operator action.
 

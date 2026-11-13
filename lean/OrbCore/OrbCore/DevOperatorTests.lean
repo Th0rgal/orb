@@ -118,8 +118,32 @@ def run (root : String) : IO Unit := do
       return response
     for path in #["/api/mcp/session", "/api/mcp/external-sessions", "/api/privilege-access/request",
         "/api/approvals/queue", "/api/system/deploy", "/api/system/hermes-assistant/control",
-        "/api//system/hermes-assistant/control", "/api/software/updates", "/api/secrets", "/api/bitwarden/status", "/api/workspaces/host/shell"] do
+        "/api//system/hermes-assistant/control", "/api/software/updates", "/api/secrets", "/api/bitwarden/status", "/api/workspaces/host/shell",
+        "/api/settings", "/api/settings/restore", "/api/proxy-keys", "/api/control/auth/codex"] do
       check ((← send "POST" path bearer "{}").status == 403) s!"dev bearer excludes host and independent credentials: {path}"
+    let fixtureBody := "{\"username\":\"isolation_fixture\",\"password\":\"synthetic-member-password-123\",\"role\":\"member\",\"daily_spend_cap_cents\":0}"
+    let .ok fixtureDoc := OrbBin.Json.parse fixtureBody | throw (IO.userError "dev account fixture")
+    for bad in #[fixtureDoc.setField "role" (.str "admin"), fixtureDoc.removeField "daily_spend_cap_cents",
+        fixtureDoc.setField "daily_spend_cap_cents" (.nat 100), fixtureDoc.setField "unix_username" (.str "orb-admin")] do
+      check ((← send "POST" "/api/admin/users" bearer (renderCompact bad)).status == 403)
+        "dev pass cannot create an admin, uncapped member or assigned Linux identity"
+    for (method, path, body) in #[("POST", "/api/admin/users/admin/reset-password", "{\"password\":\"synthetic-replacement-password\"}"),
+        ("POST", "/api/admin/users/admin/password", "{\"password\":\"synthetic-replacement-password\"}"),
+        ("PATCH", "/api/admin/users/admin", "{\"disabled\":true}"), ("DELETE", "/api/admin/users/admin", "")] do
+      check ((← send method path bearer body).status == 403) "dev pass cannot change existing admin credentials or identity"
+    let fixtureResponse ← send "POST" "/api/admin/users" bearer fixtureBody
+    let fixture := ((OrbBin.Json.parseBytes fixtureResponse.body).toOption.bind (·.fieldStr? "id")).getD ""
+    check (fixtureResponse.status == 201 && !fixture.isEmpty) "dev pass can create zero-budget test member"
+    for body in #["{\"role\":\"admin\"}", "{\"unix_username\":\"orb-admin\"}"] do
+      check ((← send "PATCH" ("/api/admin/users/" ++ fixture) bearer body).status == 403)
+        "dev pass cannot promote or remap its test member"
+    check ((← send "PATCH" ("/api/admin/users/" ++ fixture) bearer "{\"disabled\":true}").status == 200)
+      "dev pass can revoke its test member after acceptance"
+    let some unchangedAdmin ← getUserById? store "admin" | throw (IO.userError "dev admin vanished")
+    check (unchangedAdmin.passwordHash == "synthetic-hash" && !unchangedAdmin.disabled)
+      "rejected credential escalation leaves the administrator unchanged"
+    check ((← send "POST" "/api/mcp/call" bearer "{\"name\":\"memory_get_knowledge_tree\",\"arguments\":{}}").status == 403)
+      "dev-only bearer cannot use the owner's shared personal memory broker"
     let response ← send "POST" "/api/dev-operator/verify" bearer ""
     check (response.status == 200 && (OrbBin.Json.parseBytes response.body).toOption.bind (·.fieldBool? "active") == some true)
       "issuer endpoint verifies capability without echoing token"
