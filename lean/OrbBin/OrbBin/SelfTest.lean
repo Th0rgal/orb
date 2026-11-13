@@ -872,7 +872,78 @@ private def runMultiUserPrivdBrokerTests (tmpDir : System.FilePath) : IO Unit :=
     cleanupPrivdEnv
     throw e
 
+/-- OpenCode over ACP against a scripted mock agent (`python3`). -/
+def runOpenCodeAcpTests : IO Unit := do
+  let tmpDir : System.FilePath := s!"/tmp/orb-bin-acp-{← IO.monoNanosNow}"
+  IO.FS.createDirAll tmpDir
+  -- OpenCode over ACP: chunks reach the caller while the agent is still producing them
+  -- (regression: `opencode run --format json` printed a reply only once it was finished).
+  let mockAcpBin := tmpDir / "mock-opencode-acp.py"
+  let acpLog := tmpDir / "mock-acp-methods.log"
+  let acpPy :=
+    "#!/usr/bin/env python3\n" ++
+    "import sys, json, time\n" ++
+    s!"log = open('{acpLog}', 'w')\n" ++
+    "def out(o):\n    print(json.dumps(o), flush=True)\n" ++
+    "def upd(u):\n    out({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'ses_mock','update':u}})\n" ++
+    "for line in sys.stdin:\n" ++
+    "    m = json.loads(line)\n" ++
+    "    meth = m.get('method')\n" ++
+    "    if meth is None:\n        log.write('reply ' + json.dumps(m.get('result')) + '\\n'); log.flush(); continue\n" ++
+    "    log.write(meth + ' ' + json.dumps(m.get('params', {}).get('configId', m.get('params', {}).get('sessionId', ''))) + '\\n'); log.flush()\n" ++
+    "    if meth == 'initialize': out({'jsonrpc':'2.0','id':m['id'],'result':{'protocolVersion':1}})\n" ++
+    "    elif meth == 'session/resume': out({'jsonrpc':'2.0','id':m['id'],'error':{'code':-32602,'message':'no such session'}})\n" ++
+    "    elif meth == 'session/new': out({'jsonrpc':'2.0','id':m['id'],'result':{'sessionId':'ses_mock'}})\n" ++
+    "    elif meth == 'session/set_config_option': out({'jsonrpc':'2.0','id':m['id'],'result':{}})\n" ++
+    "    elif meth == 'session/prompt':\n" ++
+    "        out({'jsonrpc':'2.0','id':99,'method':'session/request_permission','params':{'options':[{'optionId':'no','kind':'reject_once'},{'optionId':'yes','kind':'allow_once'}]}})\n" ++
+    "        upd({'sessionUpdate':'agent_thought_chunk','content':{'type':'text','text':'thinking'}})\n" ++
+    "        for piece in ['Hello', ' world', '!']:\n" ++
+    "            upd({'sessionUpdate':'agent_message_chunk','messageId':'msg_1','content':{'type':'text','text':piece}})\n" ++
+    "            time.sleep(0.3)\n" ++
+    "        upd({'sessionUpdate':'tool_call','toolCallId':'t1','name':'shell','kind':'execute','status':'pending','rawInput':{'command':'ls'}})\n" ++
+    "        upd({'sessionUpdate':'tool_call_update','toolCallId':'t1','kind':'execute','status':'completed','title':'ls'})\n" ++
+    "        upd({'sessionUpdate':'agent_message_chunk','messageId':'msg_2','content':{'type':'text','text':'Done.'}})\n" ++
+    "        out({'jsonrpc':'2.0','id':m['id'],'result':{'stopReason':'end_turn'}})\n"
+  IO.FS.writeFile mockAcpBin acpPy
+  let _ ← chmod mockAcpBin.toString 0o755
+  let acpLinesRef ← IO.mkRef (#[] : Array (Nat × String))
+  let acpT0 ← IO.monoMsNow
+  let acpEnv := (← currentEnvPairs).map fun (k, v) => s!"{k}={v}"
+  let acpCode ← runOpenCodeAcpTurn mockAcpBin.toString acpEnv
+    { cwd := tmpDir.toString, prompt := "hi", model? := some "builtin/smart", sessionId? := some "ses_gone" }
+    (fun ln => do acpLinesRef.modify (·.push ((← IO.monoMsNow) - acpT0, ln)))
+  let acpLines ← acpLinesRef.get
+  let parsedAcp := acpLines.map (fun (_, ln) => parseOneShotHarnessEvent "opencode" ln)
+  let mut acpText := ""
+  let mut acpLast : Option String := none
+  for pl in parsedAcp do
+    if !pl.textDelta.isEmpty then
+      let (piece, nextLast) := joinHarnessText "opencode" acpText acpLast pl
+      acpText := acpText ++ piece
+      acpLast := nextLast
+  let chunkTimes := (acpLines.zip parsedAcp).filterMap (fun ((t, _), pl) => if pl.isChunk then some t else none)
+  assertEq "OpenCode ACP turn exits cleanly" acpCode 0
+  assertEq "OpenCode ACP chunks of one message join, a new message starts a paragraph" acpText "Hello world!\n\nDone."
+  assertTrue "OpenCode ACP chunks arrive as produced"
+    (chunkTimes.size ≥ 3 && chunkTimes[0]! + 400 ≤ chunkTimes[2]!)
+  assertTrue "OpenCode ACP reports the new session after a failed resume"
+    (parsedAcp.any (fun pl => pl.sessionId? == some "ses_mock"))
+  assertTrue "OpenCode ACP maps thinking and tool updates"
+    (parsedAcp.any (fun pl => pl.thinking? == some "thinking") &&
+     parsedAcp.any (fun pl => (pl.activity?.map (fun a => a.done && a.label == "shell" && a.kind == "command")) == some true))
+  let acpMethods ← IO.FS.readFile acpLog
+  assertTrue "OpenCode ACP resumes, falls back to a new session, sets the model, then prompts"
+    ((acpMethods.splitOn "session/resume \"ses_gone\"").length > 1 &&
+     (acpMethods.splitOn "session/set_config_option \"model\"").length > 1 &&
+     (acpMethods.splitOn "session/prompt").length > 1)
+  assertTrue "OpenCode ACP permission prompts pick the allow option"
+    ((acpMethods.splitOn "\"optionId\": \"yes\"").length > 1)
+
+  IO.FS.removeDirAll tmpDir
+
 def runAllTests : IO UInt32 := do
+  runOpenCodeAcpTests
   IO.println "=== OrbBin Wave 1 Companion Binaries Self-Test ==="
 
   -- 1. Spec gates & framing
