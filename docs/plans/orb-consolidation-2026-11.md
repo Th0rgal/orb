@@ -114,7 +114,7 @@ bounded artifacts and do not rewrite this board.
 | Track | Mission UUID | Managed machine UUID | Owned files/sections and dependency | State / evidence |
 | --- | --- | --- | --- | --- |
 | A | `35cd3390-5a58-4cd7-8444-172a84d5faa8` | `0f88c8f6-084e-46a3-89ad-29aa52d300de` | Build script, turbo-lean pin/upstream soundness fix | Public HTTPS source/build proceeding; SSH clone fails host-key verification and gh has no auth; push/PR/merge blocked; full build not yet demonstrated |
-| B | `36bddaa5-fcc4-4fbf-a78a-b717e1e198a7` | `f9444f29-2b15-49f4-ad81-37346c0844e5` | `.github/**`, `scripts/ci*`, `ci/**`, CI proposal; B.1 waits A | Active B.2 tested opt-in routing preparation, Ubuntu default/fork fallback and public 20-PR baseline; private lean.ci clone/auth runner checks and signed publication blocked by absent provisioned identity; B.1 waits A |
+| B | `36bddaa5-fcc4-4fbf-a78a-b717e1e198a7` | `f9444f29-2b15-49f4-ad81-37346c0844e5` | `.github/**`, `scripts/ci*`, `ci/**`, CI proposal; B.1 waits A | Checkpoint harvested/hash-verified; direct-runner routing superseded by API bridge, NOT merge-ready. Baseline/tests reported; full native/live/after checks absent. VM destroy failed provider_http_error; cleanup open. B.1 waits A |
 | C | `816f574f-6e85-4d3a-8123-8429f10e86b3` | `21fa6dec-b7d5-4b8a-9ab3-12f7a3218af4` | Managed REST/lifecycle sections and managed UI/models on desktop/iOS/Android | Active; regression-first REST extend, provider gating, ready/epoch contracts on three clients; live dev→prod and Mac validation depend on E+G; access/slot not established |
 | D | `95ad3d8d-5af8-4228-943d-509baa9394d8` | `6b6d2464-4997-42e1-b6d4-00b5fbb61264` | Proxy/Control downstream streaming sections, OrbNetLeaf TLS, streaming tests | Active RUN-07; public HTTPS clone succeeded, SSH host verification/gh auth block publication; bundle fallback; VM expires 15:12:52Z; no streaming acceptance claimed |
 | E+G | `6fa970f7-8799-4c80-a312-f7884efc21f4` | `a474d57a-39d7-4b0f-a447-5f7f888de185` | Environment/settings ops, principal/security/MCP admission; sole live deployment owner; real Linux desktop ben test | Active; live agent-core inspection/authority required before changes |
@@ -170,6 +170,34 @@ worker observation is forwarded to A for reproduction and script/pin repair;
 coordinator has not independently reproduced it. No script ownership transferred.
 D plans an optional per-connection downstream sink on `forwardProxyChain`, with
 H account/classification sections preserved; H notified to avoid broad rewrites.
+
+### B checkpoint — harvested, not accepted for merge
+
+- Trusted nimrud artifact:
+  `/var/lib/sandboxed-node/uploads/a4835823-bd85-4d79-90cc-35cb113ecc0b/orb-b2-checkpoint.tar.gz`,
+  26,425 bytes; governed harvest SHA-256
+  `97ef187265ff34da8cb0d9e43538afe87359bf2e26fedd0e57336daf7009989a`
+  matches worker report. Base `de3fd0fa1bf025cf29258bc3b3bda953a12877fe`;
+  worker branch `ci/leanci-opt-in`, no commit/PR/merge.
+- Archive listing independently checked: `.github/workflows/{ci,kernel-abi}.yml`,
+  `docs/ci/refactor-proposal.md`, `scripts/ci_measure.py`, `ci/test_runners.py`,
+  `ci/baseline-2026-11-13.json`. No extraction/integration yet.
+- Prepared direct-runner opt-in for five jobs is superseded by the operator's
+  API-bridge decision. Do not land inaccessible direct runner labels as B.2 done.
+  Baseline/measurement code may be reused only after diff/test review.
+- Worker reports 5 regression tests/48 routing cases, 23 planner tests,
+  actionlint (existing config-inline warning filtered), Python compile,
+  kernel-call lint/state inventory/whitespace pass. Native full parity, live App,
+  cache/base and after measurements absent: **not merge-ready**.
+- Worker baseline: newest 20 PRs #1704–1723, 16 complete, median wall 23.53 min,
+  median summed job time 74.85 min; name-inferred macOS total 41.85 min including
+  partials. Queue/billed time excluded. These figures are not independently
+  recomputed yet; no before/after speedup claim.
+- Worker reports #1708 head `8fcf5038` has multiple failures and remains open;
+  master snapshot kernel-abi running/plan success is not a green master verdict.
+- Artifact safe on nimrud; destroy VM request failed
+  `lifecycle_rejected/provider_http_error`. Resource cleanup is **open**, not
+  silently treated as destroyed. Reconcile provider state before further action.
 
 ## Waiting on Thomas
 
@@ -273,3 +301,4 @@ classification before operator application. No hand-edited production env.
 | 13 Nov, operator B/G update | Replace immediate direct-runner plan with hosted lean.ci API-dispatch bridge, keep Ubuntu fallback; implement generic repo-JIT separately and list two web approvals | Operator verified App lacks Orb installation and repository administration; direct runner labels cannot work today, bridge must not wait for web clicks |
 | 13 Nov, operator B/G update | Accept operator REST checks as scoped evidence only; assign provider-account redaction to E+G coordinated with H | Member account-email/id leakage is live-reproduced; REST first pass does not certify MCP, execution, sharing or desktop isolation |
 | 13 Nov, operator B/G update | Record trusted-host-only lean.ci OIDC allowlisting through governed ops; no BOOST_CI_SSH_PRIVATE_KEY on managed guests | Operator authorizes lean.ci host administration, but broker delivery and verified target/host policy still required |
+| 13 Nov, B checkpoint | Harvest B archive immediately, preserve baseline/tests, reject direct-runner changes as completion, request VM destruction | SHA/size match; operator API bridge supersedes prepared label routing; no native/live parity; destruction failed provider_http_error so cleanup remains open |
