@@ -58,14 +58,22 @@ def run : IO Unit := do
       -- The durable scheduler relaunches it; each relaunch that is empty again counts.
       let sup ← newRemoteJobSupervisor "turn-outcome-fixture-secret" false
       let launches ← IO.mkRef (0 : Nat)
-      let launch : MissionRecord → String → Option String → IO Bool := fun mr _ _ => do
+      let prompts ← IO.mkRef (#[] : Array String)
+      let launch : MissionRecord → String → Option String → IO Bool := fun mr prompt _ => do
         launches.modify (· + 1)
+        prompts.modify (·.push prompt)
         discard <| execParamQuery db "UPDATE missions SET status='active' WHERE id=?1;" #[mr.id]
         return true
       let tick := fun (now : UInt64) =>
         discard <| tickContinuationScheduler store none none none sup none root (some launch) (some now)
       tick 4000000000
       check ((← launches.get) == 1 && (← statusOf "m-empty") == "active") "the retry relaunches the turn"
+      -- The retry is a NEW user turn for every backend: the conversation the harness
+      -- resumes never ends on the empty assistant message (vendors reject that).
+      check ((← prompts.get).all (fun p => (p.splitOn "ended without any output").length == 2))
+        s!"the retry delivers a continuation prompt: {← prompts.get}"
+      check ((← cellOf db "SELECT event_type || ':' || (instr(payload,'ended without any output')>0) FROM mission_events WHERE mission_id='m-empty' ORDER BY id DESC LIMIT 1;") == "user_message:1")
+        "the retry is recorded as a user message after the empty turn"
       finishEmpty "m-empty"
       check ((← retries "m-empty") == "empty_turn_retry:1/4,empty_turn_retry:2/1") s!"second empty turn, got '{← retries "m-empty"}'"
       tick 4000000100
