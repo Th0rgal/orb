@@ -69,3 +69,8 @@ Both instances run from the base plus overlays; a settings round trip (export pr
   the exact healthy SHA. See [dev auto-deployment](../operations/dev-autodeploy.md).
   The repository tests use fake systemd/network effects; live timer installation
   and observing a merge reach dev are still pending.
+- Item 6: dev rentals carry the provider-visible dev name and usage attribution,
+  with a default $5 daily commitment ceiling checked transactionally across all
+  users, including resumes and extensions. Settings imports cannot override it.
+  See [dev spending](../operations/dev-spending.md). Live rental and cap
+  acceptance remains pending dev installation.

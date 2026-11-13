@@ -36,8 +36,30 @@ def sandboxNamePrefixFor (exeName : String) : String :=
   else
     "orb-managed-"
 
+/-- Explicit instance identity also covers an unsuffixed dev binary. A dev
+    executable cannot opt out of its safety ceiling by claiming to be prod. -/
+def managedInstanceFor (configured exeName : String) : String :=
+  if configured == "dev" || sandboxNamePrefixFor exeName == "orb-managed-dev-" then "dev" else "prod"
+
+def currentManagedInstance : IO String := do
+  return managedInstanceFor ((← IO.getEnv "ORB_INSTANCE").getD "") (← IO.appPath).toString
+
+def managedSandboxNamePrefix : IO String := do
+  if (← currentManagedInstance) == "dev" then return "orb-managed-dev-"
+  return sandboxNamePrefixFor (← IO.appPath).toString
+
+/-- Five dollars of daily rental commitments by default. Invalid configuration
+    disables new dev spending instead of silently dropping the ceiling. -/
+def devDailyCapCeiling (raw : Option String) : UInt64 :=
+  match raw with
+  | none => 500
+  | some value =>
+    match value.toNat? with
+    | some n => if n ≤ 0x7FFFFFFFFFFFFFFF then n.toUInt64 else 0
+    | none => 0
+
 def newManagedSandboxName (requested : String := "") : IO String := do
-  let namePrefix := sandboxNamePrefixFor (← IO.appPath).toString
+  let namePrefix ← managedSandboxNamePrefix
   let suffix ← if requested.trimAscii.toString.isEmpty then do
     let id ← newUuidV4
     pure (id.take 12).toString
@@ -76,6 +98,8 @@ def ManagedMachine.effectiveProviderId (m : ManagedMachine) : String :=
 
 /-- Managed fleet budget & concurrency state. -/
 structure ManagedFleetState where
+  instanceName    : String := "prod"
+  instanceDailyCapCents? : Option UInt64 := none
   enabled         : Bool   := false
   boatEnabled     : Bool   := false
   dailyCapCents   : UInt64 := 2000
@@ -144,7 +168,7 @@ private def formatCentsUsd2 (cents : UInt64) : String :=
 
 /-- Render `/api/managed-machines/spend` & budget summary JSON.
     When `callerUserId?` is `none`, preserves the exact single-tenant wire fields. -/
-def renderManagedBudgetJson
+private def renderManagedBudgetBaseJson
     (st : ManagedFleetState)
     (callerUserId? : Option String := none)
     (userSpentTodayCents : UInt64 := 0)
@@ -173,6 +197,17 @@ def renderManagedBudgetJson
     s!"\"user_spent_today_cents\":{effSpentCents},\"user_daily_cap_cents\":{uCapCentsJson}," ++
     s!"\"user_spent_today_usd\":{formatCentsUsd2 effSpentCents},\"user_daily_cap_usd\":{uCapUsdJson}," ++
     s!"\"budget_exhausted_scope\":{exhaustedScope},\"default_ttl_minutes\":60,\"max_ttl_minutes\":720,\"default_size\":\"small\",\"max_size\":\"xlarge\"}"
+
+/-- Usage is explicitly attributed to this instance. Per-user responses retain
+    their own spend fields; no other user's usage is added to that projection. -/
+def renderManagedBudgetJson
+    (st : ManagedFleetState)
+    (callerUserId? : Option String := none)
+    (userSpentTodayCents : UInt64 := 0)
+    (userDailyCapCents? : Option UInt64 := none) : String :=
+  let body := renderManagedBudgetBaseJson st callerUserId? userSpentTodayCents userDailyCapCents?
+  let ceiling := match st.instanceDailyCapCents? with | some n => toString n | none => "null"
+  (body.dropEnd 1).toString ++ s!",\"instance\":{jsonEscape st.instanceName},\"instance_daily_cap_cents\":{ceiling},\"cost_basis\":\"rental_commitments\"}"
 
 /-- Map systemd unit alias (`sandboxed-sh`, `sandboxed-sh-prod`, `sandboxed-sh-dev`,
     `orb-core`, `orb-core-dev`, `sandboxed-node`, `orb-node`, `orb-privd`) to
@@ -204,6 +239,8 @@ def deployUnitIsProd (systemdUnit : String) : Bool :=
 /-- Open handle for `managed_compute.db`. Credentials never live in this database. -/
 structure ManagedComputeStore where
   db : SqliteDb
+  instanceName : String := "prod"
+  dailyCapCeilingCents : UInt64 := 500
 
 /-- Pure provider observation. Adapters emit these; they never write the machine table. -/
 structure ProviderObservation where
@@ -409,7 +446,9 @@ private def vmSliceOf (row : Array String) : VmSliceState :=
 def openManagedComputeStore (path : String) : IO (Except String ManagedComputeStore) := do
   match ← openSqliteDb path managedComputeDdl managedAdditiveAlters false with
   | .error e => return .error e
-  | .ok db => return .ok { db := db }
+  | .ok db => return .ok {
+      db := db, instanceName := ← currentManagedInstance,
+      dailyCapCeilingCents := devDailyCapCeiling (← IO.getEnv "ORB_DEV_DAILY_CAP_CENTS") }
 
 def closeManagedComputeStore (st : ManagedComputeStore) : IO Unit :=
   st.db.mu.atomically (sqliteCloseRaw st.db.handle)
@@ -471,8 +510,8 @@ def saveManagedFleetConfig (st : ManagedComputeStore) (enabled boatEnabled : Boo
   | .error e => return .error e
   | .ok _ => return .ok ()
 
-def loadManagedFleet (st : ManagedComputeStore) (enabled boatEnabled : Bool)
-    (dailyCapCents spentTodayCents maxConcurrent : UInt64) : IO (Except String ManagedFleetState) := do
+def loadManagedFleetAt (st : ManagedComputeStore) (enabled boatEnabled : Bool)
+    (dailyCapCents spentTodayCents maxConcurrent nowEpoch : UInt64) : IO (Except String ManagedFleetState) := do
   let (en, boatEn, capC, spentC, maxConc) ← do
     match ← execParamQuery st.db
         "SELECT enabled,boat_enabled,daily_cap_cents,spent_today_cents,max_concurrent FROM managed_fleet_state WHERE singleton_id=1;" #[] with
@@ -484,6 +523,13 @@ def loadManagedFleet (st : ManagedComputeStore) (enabled boatEnabled : Bool)
         pure (enabled, boatEnabled, dailyCapCents, spentTodayCents, maxConcurrent)
     | .error _ =>
       pure (enabled, boatEnabled, dailyCapCents, spentTodayCents, maxConcurrent)
+  let (capC, spentC) ← if st.instanceName == "dev" then do
+      let .ok costs ← execParamQuery st.db
+          "SELECT COALESCE(SUM(cents),0) FROM managed_cost_reservations WHERE day_start=?1;"
+          #[s!"{(nowEpoch / 86400) * 86400}"] | return .error "managed_instance_budget_read_failed"
+      if costs.size < 2 then return .error "managed_instance_budget_read_failed"
+      pure (min capC st.dailyCapCeilingCents, cellU64 costs[1]! 0)
+    else pure (capC, spentC)
   match ← loadMachineRows st.db with
   | .error e => return .error e
   | .ok rows =>
@@ -491,9 +537,15 @@ def loadManagedFleet (st : ManagedComputeStore) (enabled boatEnabled : Bool)
     for i in [1:rows.size] do
       machines := machines.push (machineFromRow rows[i]!)
     return .ok {
+      instanceName := st.instanceName,
+      instanceDailyCapCents? := if st.instanceName == "dev" then some st.dailyCapCeilingCents else none,
       enabled := en, boatEnabled := boatEn, dailyCapCents := capC,
       spentTodayCents := spentC, maxConcurrent := maxConc, machines
     }
+
+def loadManagedFleet (st : ManagedComputeStore) (enabled boatEnabled : Bool)
+    (dailyCapCents spentTodayCents maxConcurrent : UInt64) : IO (Except String ManagedFleetState) := do
+  loadManagedFleetAt st enabled boatEnabled dailyCapCents spentTodayCents maxConcurrent (← nowEpoch)
 
 /-- `257` admits only an explicit break-glass Core read from a non-managed host. `512` rejects
     every ordinary mission read (`operatorBreakGlass = false`) and every managed-node caller. -/
@@ -688,6 +740,18 @@ private def admitManagedCostTx (st : ManagedComputeStore) (fleet : ManagedFleetS
       dailyCapCents := cellU64 rows[1]! 2, spentTodayCents := cellU64 rows[1]! 3,
       maxConcurrent := cellU64 rows[1]! 4
     } else fleet
+  -- This is inside the SAME immediate transaction as charging. Settings imports,
+  -- stale snapshots, counter resets and concurrent callers cannot raise or race
+  -- the dev ceiling. Creates, forks, resumes and extensions share this gate.
+  let current ← if st.instanceName == "dev" then do
+      let .ok costs ← execParamQueryUnlocked st.db
+          "SELECT COALESCE(SUM(cents),0) FROM managed_cost_reservations WHERE day_start=?1;"
+          #[s!"{(nowEpoch / 86400) * 86400}"] | return .error "managed_instance_budget_read_failed"
+      if costs.size < 2 then return .error "managed_instance_budget_read_failed"
+      pure { current with
+        instanceName := "dev", instanceDailyCapCents? := some st.dailyCapCeilingCents,
+        dailyCapCents := min current.dailyCapCents st.dailyCapCeilingCents, spentTodayCents := cellU64 costs[1]! 0 }
+    else pure current
   if counts.size < 2 then return .error "managed_admission_read_failed"
   let active := (cellU64 counts[1]! 0).toNat
   -- An extension replaces one already-counted slot; a create/resume adds one.
@@ -880,7 +944,7 @@ def provisionManagedMachine (st : ManagedComputeStore) (fleet : ManagedFleetStat
     (machine : ManagedMachine) (nowEpoch : UInt64)
     (userAdmission? : Option ManagedUserAdmission := none) : IO (Except String ManagedMachine) := do
   if machine.ttlMinutes < 5 || machine.ttlMinutes > 720 then return .error "managed_ttl_invalid"
-  if !admitManagedSpawn fleet machine.spentCents machine.ttlMinutes.toUInt32 then
+  if st.instanceName != "dev" && !admitManagedSpawn fleet machine.spentCents machine.ttlMinutes.toUInt32 then
     return .error "managed_spawn_rejected"
   if !isKnownProvider machine.provider || machine.id.isEmpty || machine.nodeBootEpoch == 0 then
     return .error "managed_spawn_invalid"
@@ -1522,8 +1586,11 @@ private def optNatJson (value : Option Nat) : String :=
   | some n => toString n
   | none => "null"
 
+def managedMachineInstance (name : String) : String :=
+  if name.startsWith "orb-managed-dev-" then "dev" else "prod"
+
 def renderManagedMachineItemJson (m : ManagedMachine) : String :=
-  s!"\{\"id\":{jsonEscape m.id},\"name\":{jsonEscape m.sandboxName},\"sandbox_name\":{jsonEscape m.sandboxName},\"provider\":{jsonEscape m.provider},\"provider_id\":{jsonEscape (ManagedProvider.publicProviderId m.provider m.effectiveProviderId)},\"node_id\":{jsonEscape s!"managed-{m.id}"},\"image\":{jsonEscape m.image},\"size\":{jsonEscape m.size},\"cpu\":{optNatJson ((managedSizeSpec? m.provider m.size).map (·.cpu))},\"ram_gb\":{optNatJson ((managedSizeSpec? m.provider m.size).map (·.ramGb))},\"state\":{jsonEscape m.status},\"owner_mission\":{jsonEscape m.ownerMission},\"owner_mission_id\":{if m.ownerMission.isEmpty then "null" else jsonEscape m.ownerMission},\"owner_kind\":{if m.ownerKind.isEmpty then "\"user\"" else jsonEscape m.ownerKind},\"node_boot_epoch\":{m.nodeBootEpoch},\"last_poll_sec\":{m.lastPollSec},\"created_at_sec\":{m.createdAtSec},\"expires_at_sec\":{m.expiresAtSec},\"deletable_at\":{m.deletableAtSec},\"spent_cents\":{m.spentCents},\"cost_usd\":{formatCentsUsd2 m.spentCents},\"usd_per_hour\":{managedUsdPerHourJson m.provider m.size},\"expiry_provider_state\":{jsonEscape m.expiryProviderState},\"expiry_cleanup_state\":{jsonEscape m.expiryCleanupState},\"ledger_closed\":{if m.status == "destroyed" || m.expiryCleanupState == "completed" then "true" else "false"},\"cordoned\":{if m.cordoned then "true" else "false"}}"
+  s!"\{\"instance\":{jsonEscape (managedMachineInstance m.sandboxName)},\"id\":{jsonEscape m.id},\"name\":{jsonEscape m.sandboxName},\"sandbox_name\":{jsonEscape m.sandboxName},\"provider\":{jsonEscape m.provider},\"provider_id\":{jsonEscape (ManagedProvider.publicProviderId m.provider m.effectiveProviderId)},\"node_id\":{jsonEscape s!"managed-{m.id}"},\"image\":{jsonEscape m.image},\"size\":{jsonEscape m.size},\"cpu\":{optNatJson ((managedSizeSpec? m.provider m.size).map (·.cpu))},\"ram_gb\":{optNatJson ((managedSizeSpec? m.provider m.size).map (·.ramGb))},\"state\":{jsonEscape m.status},\"owner_mission\":{jsonEscape m.ownerMission},\"owner_mission_id\":{if m.ownerMission.isEmpty then "null" else jsonEscape m.ownerMission},\"owner_kind\":{if m.ownerKind.isEmpty then "\"user\"" else jsonEscape m.ownerKind},\"node_boot_epoch\":{m.nodeBootEpoch},\"last_poll_sec\":{m.lastPollSec},\"created_at_sec\":{m.createdAtSec},\"expires_at_sec\":{m.expiresAtSec},\"deletable_at\":{m.deletableAtSec},\"spent_cents\":{m.spentCents},\"cost_usd\":{formatCentsUsd2 m.spentCents},\"usd_per_hour\":{managedUsdPerHourJson m.provider m.size},\"expiry_provider_state\":{jsonEscape m.expiryProviderState},\"expiry_cleanup_state\":{jsonEscape m.expiryCleanupState},\"ledger_closed\":{if m.status == "destroyed" || m.expiryCleanupState == "completed" then "true" else "false"},\"cordoned\":{if m.cordoned then "true" else "false"}}"
 
 def renderManagedMachinesJson
     (st : ManagedFleetState)

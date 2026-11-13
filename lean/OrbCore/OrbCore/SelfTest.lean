@@ -31,6 +31,7 @@ import OrbCore.ManagedSnapshotCatalogTests
 import OrbCore.ProviderContractTests
 import OrbCore.ProxyRoutingTests
 import OrbCore.SettingsDocumentTests
+import OrbCore.DevSpendingTests
 import OrbCore.DevOperatorTests
 import OrbCore.SettingsTransferTests
 
@@ -6613,6 +6614,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   try
     OrbCore.ManagedProvisioningTests.run tmpRoot
     OrbCore.ManagedResumeTests.run tmpRoot
+    OrbCore.DevSpendingTests.run tmpRoot
     OrbCore.DevOperatorTests.run tmpRoot
     OrbCore.ManagedAccessTests.run tmpRoot
     OrbCore.ManagedTtlTests.run tmpRoot
