@@ -16,9 +16,9 @@ restore, automatic placement) and fleet reconciliation.
 - `https://api.lean.ci/v1` answers (401 without a key). The `colab-api` service listens on agent-core at
   `127.0.0.1:8790` (401 without a token).
 - Prod has only Boat's key sealed (`/root/.sandboxed-sh/managed-secrets/boat.aead`). Bitwarden holds
-  `LEANCI_API_KEY` (renamed from `BOOST_API_KEY`) and `COLAB_API_TOKEN`.
-- The retired Rust clients are the reference: `git show 4199fc06e^:src/managed/boost.rs` (lean.ci) and
-  `git show 4199fc06e^:src/managed/colab.rs`, with the orchestration in `src/managed/mod.rs`. The behaviour
+  `LEANCI_API_KEY` and `COLAB_API_TOKEN`.
+- The retired Rust provider clients at `4199fc06e^` are historical references only, with the
+  orchestration in `src/managed/mod.rs`. The behaviour
   spec is `docs/specs/managed-vm-lifecycle.md`.
 - lean.ci context is in Hindsight, page `kp-7660c626095640c08f6742f9e60c2946`, section 3.
 
@@ -42,14 +42,20 @@ restore, automatic placement) and fleet reconciliation.
 
 1. Client under the name `leanci` only, against `https://api.lean.ci/v1`: `POST /vms`, `GET /vms/:id`,
    list, `DELETE`, `/vms/:id/exec`, `/vms/:id/files`, `/vms/:id/snapshots`, `/vms/snapshots`.
-   No `boost` alias, no `BOOST_*` variable, in code, environment, sealed-secret name, UI or docs.
+   No retired provider alias or credential prefix in code, environment, sealed-secret name, UI or docs.
 2. Capacity preflight: `GET /v1/vms/capabilities`, 20 s cache, `?repo=` / `?snapshot_id=` for warm images.
    `online_engines == 0`, `schedulable_vcpus == 0` or no profile fitting `largest_bootable_vm` means
    temporarily unavailable: skipped in unpinned selection, `503 provider_at_capacity` when pinned.
-3. Sizes and prices as decided by Thomas: 2 vCPU/8 GiB/50 GB (small, $0.018/h); 4/16/75 (default, medium,
+3. Sizes and prices: 2 vCPU/8 GiB/98 GB root (small, $0.018/h); 4/16/75 (default, medium,
    $0.036/h); 8/32/100 (large, $0.072/h); 16/64/150 (xlarge, $0.20/h); 24/96/175 ($0.30/h); 32/96/200
-   (2xlarge, $0.40/h); 32/128/200 (3xlarge, $0.45/h); optional `memory_mib` 4096..=131072 in steps of 1024.
-   First live check: which labels the API accepts today (`lean-<n>vcpu-ubuntu-2604` or `boost-...`).
+   (2xlarge, $0.40/h). Labels are `lean-<n>vcpu-ubuntu-2604`; the 32-vCPU label defaults to 96 GiB.
+   The live service reports 3 online engines, 96 schedulable vCPUs, 323796 MiB schedulable memory,
+   and 107520 MiB largest bootable memory. Aggregate pool memory is not a per-VM limit. Remove the
+   impossible 128 GiB size; keep 32 vCPU/96 GiB. Optional `memory_mib` is 4096..=107520 in steps of
+   1024, further bounded by live capacity. Filter catalog profiles against the capabilities endpoint
+   where possible; on lookup failure retain only the conservative declared sizes. `small` has only
+   about 14 GB free on a fresh guest: use a larger, capacity-checked profile for Lean builds and check
+   actual free disk first; larger disk figures still need live verification.
 4. Bootstrap by exec, reusing the Boat path, with the 480 s deadline. Guest gets its `LEANCI_*` cache
    variables. Native TTL 60 s to 86,400 s; Orb caps at 720 min. Snapshots yes; stop/resume no.
 5. Live test on dev: smallest size; spawn, enrol, mission, snapshot, destroy, provider no longer lists it.

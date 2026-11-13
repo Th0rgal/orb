@@ -472,11 +472,6 @@ Names and source anchors only; **no values**. Both process readers and producers
 | `BOAT_E2E` | `R:scripts/managed_machines_e2e.py:63`<br>`R:src/managed/tests.rs:431` | `L:scripts/managed_machines_e2e.py:63` | U — occurrence/flow candidate; see semantic rows for confirmed reads and differences |
 | `BOAT_GUEST_TOK` | `R:src/api/control/dispatch_admission_tests.rs:17450` | — | U — occurrence/flow candidate; see semantic rows for confirmed reads and differences |
 | `BOAT_REG_GUEST_TOK` | `R:src/api/control/dispatch_admission_tests.rs:18197` | — | U — occurrence/flow candidate; see semantic rows for confirmed reads and differences |
-| `BOOST_API_KEY` | `R:src/api/secret_broker.rs:393`<br>`R:src/managed/tests.rs:4899` | — | U — occurrence/flow candidate; see semantic rows for confirmed reads and differences |
-| `BOOST_REPO_DIR` | `R:src/managed/orb-node-provision.sh:122,131,228,229` | — | U — occurrence/flow candidate; see semantic rows for confirmed reads and differences |
-| `BOOST_TOKEN` | `R:src/api/secret_broker.rs:394` | — | U — occurrence/flow candidate; see semantic rows for confirmed reads and differences |
-| `BOOST_VM_ID` | `R:src/managed/orb-node-provision.sh:215` | — | U — occurrence/flow candidate; see semantic rows for confirmed reads and differences |
-| `BOOST_WARM_REPO_DIR` | `R:src/managed/orb-node-provision.sh:122,131`<br>`R:src/managed/tests.rs:4912` | — | U — occurrence/flow candidate; see semantic rows for confirmed reads and differences |
 | `BOOT_RECONCILE_ACTIVE_GRACE_SECS` | `R:src/api/reconcile.rs:99` | — | U — occurrence/flow candidate; see semantic rows for confirmed reads and differences |
 | `BOOT_RECONCILE_DELAY_SECS` | `R:src/api/reconcile.rs:88` | — | U — occurrence/flow candidate; see semantic rows for confirmed reads and differences |
 | `BOOT_RECONCILE_ENABLED` | `R:src/api/reconcile.rs:81` | — | U — occurrence/flow candidate; see semantic rows for confirmed reads and differences |
