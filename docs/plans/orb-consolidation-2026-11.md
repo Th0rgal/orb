@@ -324,6 +324,75 @@ No questions sent; implement/test generic support against an authorized
 
 ## Operator requests
 
+### Coordinator status 16:10 UTC: master CI green, #1732 and #1729 live with open defects
+
+**Master.** CI run `43452656987` on `f1d2a61e` completed green at about
+16:05 UTC, the first green master CI run today (provider specs fixed by
+#1730, planner claim fixed by `f1d2a61e`). Its Kernel ABI run
+`43452657455` was still in progress at 16:09. #1732 was merged at 15:54 as
+`6bf88c30`; its CI run `43457328636` is in progress, iOS and Android
+builds on it are green. Prod and dev both report build `6bf88c30` at 16:09
+(health endpoints), so #1729 and #1732 are live.
+
+**Live defects, each with a worker on the fix:**
+
+- `deletable_at` (from #1732, `Managed.lean:1634`): a managed machine with
+  no minimum lease is reported as deletable at `1970-01-01T00:00:00Z`.
+  All three clients read `deletable_at ?? reap_at`. C successor `729e035b`
+  (lagash) has the fix and tests on its node, red on master's production
+  files and green with the change by its own report; told at 16:01 to
+  rebase on `6bf88c30` and push `wip/c-core-managed-list`. Not reviewed.
+- Streaming (#1729, `aa96142d`), four defects found by reading: a
+  truncated upstream body ends as a normal stream; the upstream is not
+  closed when the downstream head write fails; the pacing slot is released
+  before the body is pumped; the TLS reader enforces no total time limit.
+  D successor `66e692a7` (dgx-spark) has failing tests compiling and is
+  writing the fixes. Nothing pushed beyond `wip/d-stream-contract-tests`
+  `9b2769b0`.
+- `code-block` browser flake (3/20 on WebKit): cause is the
+  `testFixtureKernelBootstrap` plugin in `orb/vite.config.ts`, which wraps
+  the Vite client script instead of the fixture's entry, so 46 of 48
+  fixture pages start without the kernel. Worker `549c6b99` is fixing the
+  plugin; its one-file workaround was not published.
+
+**Thomas's three requests.**
+
+- Lean runners: lean.ci PR #33 is open and keeps public user repositories
+  denied, because a JIT runner is not bound to a job and a fork pull
+  request could take a runner booted for a trusted push. Orb is public, so
+  #33 alone does not deliver the request. B successor `e14bb767` (uruk) is
+  implementing a fence in the guest shim as a stacked PR. It found in the
+  `actions/runner` v2.338.2 source that a failing job-started hook does
+  not stop `pre:` and `post:` action steps, so the hook has to kill the
+  runner process. No deploy, no repository variable change.
+  `wip/b-docs-only-push-filters` is rejected as written: `'**/*.md'` would
+  skip CI for Markdown files that are test inputs (`skills/*/SKILL.md`,
+  three iOS fixtures, `shared/orb-spec/ABI.md`, `plan.md`). A narrower v2
+  with a planner test is requested.
+- Provider panel after reconnect: H-core `21b1bfca` (nippur) pushed
+  `wip/h-login-completion` `e11f4375` and a regression test for #1728,
+  `wip/h-cooldown-clear` `dc6a2171`. Review found one regression: after
+  the callback is accepted the poll no longer asks the sidecar for its
+  status, so a wrong callback URL fails after 60 seconds with the wrong
+  reason. Fix and a single stacked branch `wip/h-provider-login-health`
+  requested at 15:59.
+- Fable outage actions: guard shipped by the operator in #1727. Core
+  display of sidecar parking and admin clear: design requested from
+  H-core, not started.
+
+**Mission view stuck after completion (`734c3bb7`).** H's first desktop
+patch is not published. It clears a stale `remote_job`, but no non-test
+Lean file emits `remote_job`, `queue_wait`, `execution` or `recovery`
+since the Lean port (#1595), so that cannot be what was on screen.
+`docs/REMOTE_NODES.md` and `scripts/remote-launch-canary.sh` still
+describe those fields. H `11a48ddf` was re-briefed at 15:48 to reproduce
+the incident with fields Core really sends. Mobile part on hold.
+
+**Not reviewed by the coordinator:** #1731 (turbo-lean `[ffi]` allowlist,
+generated from every in-tree `@[extern]`), upstream turbo-lean `aee2d17`,
+#1734 (OpenCode over ACP), #1708. `lean/turbo-lean-revision` is still
+`29d85f7d` while Nix pins `aee2d17`.
+
 ### Coordinator status 14:40 UTC: red master reproduced, A extern findings
 
 **Red master.** Run `43438246411` on `8a0c7198` completed red, again only
