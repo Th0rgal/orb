@@ -24,6 +24,9 @@ it("renders each Anthropic account's own numbers and a friendly warning", async 
   const thomas = anthropic("org-thomas", 0.37, 0.12);
   vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(url.endsWith("/providers") ? [account("ben", "ben@example.com"), account("thomas", "thomas@example.com")] : url.endsWith("/providers/usage") ? { entries: { ben, thomas } } : url.includes("/ben/usage") ? ben : url.includes("/thomas/usage") ? thomas : {}))));
   const { container } = render(() => <Providers />);
+  // Several accounts of one provider start collapsed under one row.
+  await waitFor(() => expect(container.querySelector(".p-group-head")).not.toBeNull());
+  (container.querySelector(".p-group-head") as HTMLButtonElement).click();
   await waitFor(() => expect(container.textContent).toContain("thomas@example.com"));
   for (const btn of [...container.querySelectorAll("button")].filter(b => /(ben|thomas)@example\.com/.test(b.textContent ?? ""))) fireEvent.click(btn);
   await waitFor(() => expect(container.textContent).toContain("91%"));

@@ -68,6 +68,14 @@ def directEntry? (requested _path : String)
       return some ("google", googleModel model)
     return none
 
+/-- Antigravity serves every Google account through one CLIProxyAPI pool, and Google meters
+    Claude/GPT and Gemini as separate quotas. Health, breaker and cooldown state is keyed by
+    account id, so give each quota pool its own id: a spent Gemini quota must not block Claude. -/
+def antigravityPoolAccount (model : String) : String :=
+  let m := model.toLower
+  if m.startsWith "claude" || m.startsWith "gpt" then "cliproxyapi:antigravity:claude-gpt"
+  else "cliproxyapi:antigravity:gemini"
+
 /-- Fresh-store definitions only. Never replace a persisted definition, and never
     guess targets for user-configured reviewer/scout/MiniMax-M3 aliases. -/
 def stockChains : Array (String × String × Array (String × String)) := #[

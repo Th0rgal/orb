@@ -305,6 +305,10 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
   createEffect(on(() => p.list, () => setOrdered(null), { defer: true }));
   const list = () => ordered() ?? p.list;
   const oauth = () => orderAccounts(list().filter(a => !isKey(a) && a.provider_type !== "google"));
+  /** Provider types in list order: several accounts of one provider collapse into one row. */
+  const oauthTypes = createMemo(() => [...new Set(oauth().map(a => a.provider_type))], undefined, { equals: (a, b) => a.length === b.length && a.every((t, i) => t === b[i]) });
+  const [openGroups, setOpenGroups] = createSignal<Set<string>>(new Set());
+  const toggleGroup = (type: string) => setOpenGroups(prev => { const next = new Set(prev); if (next.has(type)) next.delete(type); else next.add(type); return next; });
   const modelConnections = () => list().filter(a => !isKey(a) && a.provider_type === "google");
   const keys = () => orderAccounts(list().filter(isKey));
   const [toggleError, setToggleError] = createSignal<string | null>(null);
@@ -456,8 +460,28 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
         </div>
         <Show when={isAdminUser() && loginOptions()?.reason}><p class="s-row-desc">{loginOptions()?.reason}</p></Show>
         <div class="s-card">
-          <For each={oauth()}>
-            {(a) => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} rank={rankIn(oauth, a)} usage={usage()[a.id]} sharedOrgs={sharedOrgs()} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={isAdminUser() ? () => setReauth(a) : undefined} onRemove={isAdminUser() ? () => { setRemoveError(null); setRemoving(a); } : undefined} onToggle={enabled => toggle(a, enabled)} onToggleUserPref={enabled => toggleUserPref(a, enabled)} onUseReset={isAdminUser() ? () => setResetting(a) : undefined} onToggleAutoReset={isAdminUser() ? autoReset => toggleAutoReset(a, autoReset) : undefined} />}
+          <For each={oauthTypes()}>
+            {(type) => {
+              const accounts = () => oauth().filter(a => a.provider_type === type);
+              const row = (a: AIProvider) => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} rank={rankIn(oauth, a)} usage={usage()[a.id]} sharedOrgs={sharedOrgs()} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={isAdminUser() ? () => setReauth(a) : undefined} onRemove={isAdminUser() ? () => { setRemoveError(null); setRemoving(a); } : undefined} onToggle={enabled => toggle(a, enabled)} onToggleUserPref={enabled => toggleUserPref(a, enabled)} onUseReset={isAdminUser() ? () => setResetting(a) : undefined} onToggleAutoReset={isAdminUser() ? autoReset => toggleAutoReset(a, autoReset) : undefined} />;
+              const open = () => openGroups().has(type);
+              const summary = () => {
+                const st = accounts().map(a => effectiveProviderStatus(a, usage()[a.id], p.health?.[a.id]));
+                const limited = st.filter(s => s === "quota_exhausted" || s === "pool_exhausted").length;
+                const near = st.filter(s => s === "quota_warning").length;
+                return [`${accounts().length} accounts`, limited ? `${limited} limited` : "", near ? `${near} near limit` : ""].filter(Boolean).join(" · ");
+              };
+              return (
+                <Show when={accounts().length > 1} fallback={<For each={accounts()}>{row}</For>}>
+                  <button type="button" class="s-row p-acc-btn p-group-head" aria-expanded={open()} onClick={() => toggleGroup(type)}>
+                    <span class={`chev p-acc-chev ${open() ? "open" : ""}`} aria-hidden="true"><Ic.ChevronRight size={14} /></span>
+                    <span class="s-row-title">{accounts()[0].provider_type_name || type}</span>
+                    <span class="s-row-desc">{summary()}</span>
+                  </button>
+                  <Show when={open()}><div class="p-group-body"><For each={accounts()}>{row}</For></div></Show>
+                </Show>
+              );
+            }}
           </For>
           <Show when={oauth().length === 0}>
             <div class="s-row"><div class="s-row-desc">No subscription accounts connected.</div></div>
