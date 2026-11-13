@@ -324,6 +324,42 @@ No questions sent; implement/test generic support against an authorized
 
 ## Operator requests
 
+### A status 13:40 UTC: audit patch on security hold, lean.ci successor failed
+
+- **lean.ci successor failed.** Mission `d76cd199-448d-44ad-ab2b-afff1011c0f1`
+  on `leanci:2xlarge` exited 127 twice before the harness produced any model
+  turn. Cause not established: a diagnostic workspace job returned `completed`
+  with no output. VM `f322ed0f-7ea3-4b5f-8cf2-154d17bc3622` destroyed; $0.80
+  committed, no build ran, no memory figure obtained.
+- **Static-node measurement started.** Read-only mission
+  `7de6fc9b-30b2-453e-9e44-dc8553cd0e0a` placed on `lagash` by the fleet
+  scheduler: report effective cgroup limits first, then one `orb-core` build on
+  unmodified master with wall time, peak RSS and major faults. No source edits.
+- **turbo-lean IO-extern admission is on HOLD**, raised by the A worker itself.
+  The matcher is a syntactic `.const ``IO` check: no attestation of the canonical
+  IO definition, no tampered-canonical fixture, aliases rejected rather than
+  normalized. Independent read-only review `41a10629-d3f7-4aa8-9158-894681f38399`
+  is running with the expanded patch. No upstream commit, no pin bump, no merge
+  until it returns.
+- **Fail-closed build script is separable but not landable yet.** Independent
+  read of `orb.patch` (applies on `2fe03910`): fallback and `ORB_SKIP_TURBO_LEAN`
+  bypass are removed. Open points sent to A: preflight runs after the
+  `--ensure-lean` toolchain bootstrap; staging checks only that a binary exists,
+  not that this run built it; no regression test. Landing blocker: `ci.yml`,
+  `kernel-abi.yml`, `Dockerfile` and `scripts/managed_image.py` have no
+  compatible `turbo-lean` on PATH, and `nix/turbo-lean.nix` pins `f240450a`
+  while `lean/turbo-lean-revision` says `29d85f7d`. Merging the script alone
+  would turn those callers red.
+- **Worker-reported, not reproduced here:** nine OrbBin binaries 77.28 s,
+  OrbLocald 159.54 s, OrbNode 111.03 s, all with the held candidate turbo-lean;
+  kernel audit suite 20 tests. Core has no passing build on any track.
+- Harvested on nimrud, hashes verified: `track-a-checkpoint.tar.gz`
+  (`c0b87da1…`), `track-a-interface-checkpoint.tar.gz` (`0392ed25…`),
+  `track-a-security-hold.tar.gz` (`51920dcf…`), under
+  `/var/lib/sandboxed-node/uploads/{cf816647…,77b3639f…,a85d0885…}/`.
+- Old A (`35cd3390…`, VM `0f88c8f6…`, expires 15:12:52Z) keeps the script and
+  its new test only; the turbo-lean patch and ConformanceRunner are frozen.
+
 ### Operator decisions: A replacement and H terminal-state replay
 
 Operator declines managed-VM hand cgroup retuning; the older intervention
