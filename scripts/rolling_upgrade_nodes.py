@@ -681,6 +681,7 @@ def _remote_worker_prelude():
         inspect.getsource(_normalize_service_unit_name),
         inspect.getsource(_discover_unit_env_files),
         inspect.getsource(_load_unit_env_files),
+        inspect.getsource(_is_zombie),
         inspect.getsource(default_runtime_busy_probe),
         inspect.getsource(_discover_live_work_dir),
         inspect.getsource(_discover_sibling_units),
