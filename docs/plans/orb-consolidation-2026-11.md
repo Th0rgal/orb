@@ -324,6 +324,35 @@ No questions sent; implement/test generic support against an authorized
 
 ## Operator requests
 
+### Immediate A memory-cap intervention
+
+A mission `35cd3390-5a58-4cd7-8444-172a84d5faa8`, VM
+`0f88c8f6-084e-46a3-89ad-29aa52d300de`: reported effective
+`memory.max=4471676928` despite 16 GiB VM. ProviderUsageAndLogin attempts
+8m26 and 30m55 exhausted module deadlines, with 607 GB reads / 2.44 million
+major faults / zero swap: incomplete production build, not compiler failure.
+Worker instructed not to repeat until resources fixed; collecting read-only
+PID/cgroup/ancestor limits and active-job evidence.
+
+**Operator request, no deployment:** identify the actual remote build execution
+systemd scope (job/execution UUID, not mission UUID); verify no competing heavy
+jobs and enough VM/ancestor headroom; retune only that authorized scope to
+`MemoryMax=12884901888`, `MemoryHigh=11596411692`, keeping zero swap and existing
+CPU policy. Confirm actual cgroup max/high and ancestor limits before A retries.
+Use authorized operator host effects, not worker self-modification. Current
+Lean source has no workspace resource-retune endpoint. Runner.lean:801 derives
+80% host RAM divided by normal+side capacity; :895 applies per-job properties.
+For subsequent scopes, operator may consider node-wide
+`SANDBOXED_NODE_JOB_MEMORY_BYTES=12884901888` only with exclusive concurrency
+policy and controlled provisioning; do not silently grant all jobs 12 GiB.
+If scope retune cannot be authorized, preserve artifacts and re-place with a
+verified per-job allowance, not merely a larger advertised VM.
+
+A reports IO audit 19/19 remains GREEN; fail-closed build-script fallback removal
+has bash syntax/whitespace checks only. Request harvest now for independent
+bounded script review; full Core acceptance and ConformanceRunner boundary
+remain open. Source coordination does not permit blanket pure extern admission.
+
 No new deployment requested yet. Future entries must give an exact SHA, dev or
 prod target, verification command and result; do not repeat an in-flight deploy.
 
