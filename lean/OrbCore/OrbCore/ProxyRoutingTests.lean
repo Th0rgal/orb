@@ -609,6 +609,234 @@ def run : IO Unit := do
         attempts.set #[]
         let response ← post alias
         check (response.status == 200 && !(← attempts.get).isEmpty) s!"stock alias {alias}"
+
+    -- Cooling-chain & unconfigured-chain mission turn termination (`wip/h-cooling-chain-ends-turn`):
+    -- When a mission-bound proxy request hits a chain with no eligible target and the soonest
+    -- cooling target is > 60s away (or no target is configured at all, 503 `skipped_configuration`),
+    -- Core immediately emits one mission `error` event (naming the chain and return time, with
+    -- zero account identifiers), stops the running turn via the same entry point user Stop uses,
+    -- and leaves the mission in a state (`interrupted`, `terminal_reason = "remote_quota"` or
+    -- `"remote_configuration"`) from which a follow-up message starts a new turn.
+    let nowT : UInt64 := 1700001000
+    let nowIso := formatEpochIso8601Utc nowT
+    let coolChain : RoutingChain := {
+      id := "cool-test", name := "Cool Test",
+      targets := #[{
+        accountId := "acct-secret-alice@example.test",
+        provider := "openai",
+        baseUrl := "http://127.0.0.1:1",
+        apiKey := "sk-super-secret-key-999",
+        modelId := "gpt-6-astra"
+      }]
+    }
+    let emptyChain : RoutingChain := {
+      id := "empty-test", name := "Empty Test",
+      targets := #[]
+    }
+    let sideCoolChain : RoutingChain := {
+      id := "side-cool-test", name := "Side Cool Test",
+      targets := #[{
+        accountId := "acct-secret-alice@example.test",
+        provider := "openai",
+        baseUrl := "http://127.0.0.1:1",
+        apiKey := "sk-super-secret-key-999",
+        modelId := "gpt-6-astra"
+      }]
+    }
+    chainsRef.modify fun cs => ((cs.push coolChain).push emptyChain).push sideCoolChain
+    let seedRunningMissionWithModel := fun (mid ownerUid modelOverride : String) => do
+      let .ok _ ← execParamQuery store.missionsDb
+        ("INSERT INTO missions(id,title,status,backend,model_override,working_directory,owner_user_id,run_generation,state_revision,created_at,updated_at) " ++
+         "VALUES(?1,?2,'active','opencode',?3,?4,?5,1,1,?6,?6);")
+        #[mid, s!"Mission {mid}", modelOverride, root, ownerUid, nowIso]
+        | throw (IO.userError s!"seed mission {mid} failed")
+      let .ok _ ← execParamQuery store.missionsDb
+        ("INSERT INTO mission_runs(id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) " ++
+         "VALUES(?1,?2,1,'running','','',?3);")
+        #[s!"run-{mid}-1", mid, nowIso]
+        | throw (IO.userError s!"seed mission_run {mid} failed")
+      let .ok mpt ← mintMissionProxyToken store mid ownerUid (nowT + 3600)
+        | throw (IO.userError s!"mint proxy token {mid} failed")
+      return mpt
+    let seedRunningMission := fun (mid ownerUid : String) =>
+      seedRunningMissionWithModel mid ownerUid "cool-test"
+    let postBoundWithHeader := fun (bearer model : String) (execKey? : Option String) => do
+      let body := renderCompact (.obj #[("model", .str model), ("messages", .arr #[])])
+      let execHdr := match execKey? with
+        | some k => s!"X-Sandboxed-Execution-Key: {k}\r\n"
+        | none => ""
+      let raw := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bearer}\r\n{execHdr}Content-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+      let .ok req := parseRequest raw.toUTF8 none
+        | throw (IO.userError "proxy bound request parse failed")
+      let .ok response ← dispatchCoreRequest app req nowT
+        | throw (IO.userError "unexpected proxy bound websocket upgrade")
+      return response
+    let postBound := fun (bearer model : String) =>
+      postBoundWithHeader bearer model none
+    let readMissionState := fun (mid : String) => do
+      let .ok mRows ← execParamQuery store.missionsDb
+        "SELECT status, COALESCE(terminal_reason,''), COALESCE(run_generation,1) FROM missions WHERE id=?1;" #[mid]
+        | throw (IO.userError "mission state query failed")
+      let st := (mRows[1]?.bind (·[0]?)).getD ""
+      let tr := (mRows[1]?.bind (·[1]?)).getD ""
+      let gen := ((mRows[1]?.bind (·[2]?)).bind String.toNat?).getD 0
+      let .ok rRows ← execParamQuery store.missionsDb
+        "SELECT COUNT(*) FROM mission_runs WHERE mission_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted');" #[mid]
+        | throw (IO.userError "mission live runs query failed")
+      let liveRuns := ((rRows[1]?.bind (·[0]?)).bind String.toNat?).getD 0
+      let .ok eRows ← execParamQuery store.missionsDb
+        "SELECT payload FROM mission_events WHERE mission_id=?1 AND event_type='error' ORDER BY seq ASC;" #[mid]
+        | throw (IO.userError "mission error events query failed")
+      let errs := (eRows.drop 1).map (fun r => (r[0]?).getD "")
+      return (st, tr, gen, liveRuns, errs)
+
+    let tok1 ← seedRunningMission "m-cool-2400" ""
+    let _tokOther ← seedRunningMission "m-other-member" "user-other"
+    -- (i) All-cooling chain, 2400 seconds left: mission gets one `error` event, turn is no longer
+    -- running, status='interrupted' and terminal_reason='remote_quota', no account identifier in text.
+    cooldowns.set #[{
+      accountId := "acct-secret-alice@example.test",
+      untilEpoch := nowT + 2400,
+      reason := .usageLimit,
+      label := "acct-secret-alice@example.test"
+    }]
+    let r2400 ← postBound tok1 "cool-test"
+    check (r2400.status == 429) s!"2400s cooling proxy status: {r2400.status}"
+    let (st1, tr1, gen1, live1, errs1) ← readMissionState "m-cool-2400"
+    check (errs1.size == 1 && live1 == 0 && st1 == "interrupted" && tr1 == "remote_quota" && gen1 == 2)
+      s!"(i) 2400s cooling chain must emit 1 error event and stop turn with interrupted/remote_quota: errs={errs1.size} live={live1} status={st1} reason={tr1} gen={gen1}"
+    let errText1 := errs1[0]?.getD ""
+    check ((errText1.splitOn "cool-test").length > 1 &&
+           ((errText1.splitOn "2400").length > 1 || (errText1.splitOn "40m").length > 1 || (errText1.splitOn (formatEpochIso8601Utc (nowT + 2400))).length > 1) &&
+           (errText1.splitOn "acct-secret").length == 1 &&
+           (errText1.splitOn "alice@example.test").length == 1 &&
+           (errText1.splitOn "sk-super-secret").length == 1)
+      s!"(i) error event must name chain and return time without account identifiers: {errText1}"
+
+    -- (ii) Same turn, second request: still one event and no second cancel/generation bump.
+    let r2400Again ← postBound tok1 "cool-test"
+    check (r2400Again.status == 429) s!"second 2400s cooling status: {r2400Again.status}"
+    let (st2, tr2, gen2, live2, errs2) ← readMissionState "m-cool-2400"
+    check (errs2.size == 1 && live2 == 0 && st2 == "interrupted" && tr2 == "remote_quota" && gen2 == 2)
+      s!"(ii) second request from same stopped turn must not add a second event or cancel: errs={errs2.size} gen={gen2}"
+
+    -- (v) Another member's mission is untouched.
+    let (stOther, trOther, genOther, liveOther, errsOther) ← readMissionState "m-other-member"
+    check (stOther == "active" && trOther == "" && genOther == 1 && liveOther == 1 && errsOther.isEmpty)
+      s!"(v) another member's mission must remain untouched: status={stOther} reason={trOther} gen={genOther} live={liveOther} errs={errsOther.size}"
+
+    -- (iii) 30 seconds left: no event, mission still running.
+    let tokShort ← seedRunningMission "m-cool-30" ""
+    cooldowns.set #[{
+      accountId := "acct-secret-alice@example.test",
+      untilEpoch := nowT + 30,
+      reason := .rateLimit,
+      label := ""
+    }]
+    let r30 ← postBound tokShort "cool-test"
+    check (r30.status == 429) s!"30s cooling proxy status: {r30.status}"
+    let (st30, tr30, gen30, live30, errs30) ← readMissionState "m-cool-30"
+    check (errs30.isEmpty && live30 == 1 && st30 == "active" && tr30 == "" && gen30 == 1)
+      s!"(iii) <=60s wait must leave mission running with no error event: errs={errs30.size} live={live30} status={st30}"
+
+    -- (iv) Unbound caller: reply bytes unchanged, no event anywhere.
+    cooldowns.set #[{
+      accountId := "acct-secret-alice@example.test",
+      untilEpoch := nowT + 2400,
+      reason := .rateLimit,
+      label := ""
+    }]
+    let .ok evBeforeRows ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM mission_events;" #[]
+      | throw (IO.userError "count mission_events before unbound failed")
+    let evBefore := ((evBeforeRows[1]?.bind (·[0]?)).bind String.toNat?).getD 0
+    let rUnbound ← post "cool-test"
+    let expectedUnbound := cooldownReply "cool-test" 2400
+    let .ok evAfterRows ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM mission_events;" #[]
+      | throw (IO.userError "count mission_events after unbound failed")
+    let evAfter := ((evAfterRows[1]?.bind (·[0]?)).bind String.toNat?).getD 0
+    check (rUnbound.status == expectedUnbound.status &&
+           String.fromUTF8? rUnbound.body == some expectedUnbound.body &&
+           evAfter == evBefore)
+      s!"(iv) unbound caller reply bytes and event count must be unchanged: status={rUnbound.status} evBefore={evBefore} evAfter={evAfter}"
+
+    -- 503 `skipped_configuration` (nothing eligible, nothing cooling) on a mission-bound request:
+    -- gets the same treatment with an error event saying the chain has no configured target.
+    cooldowns.set #[]
+    let tokEmpty ← seedRunningMissionWithModel "m-empty-chain" "" "empty-test"
+    let rEmpty ← postBound tokEmpty "empty-test"
+    check (rEmpty.status == 503) s!"empty chain status: {rEmpty.status}"
+    let (stEmp, trEmp, genEmp, liveEmp, errsEmp) ← readMissionState "m-empty-chain"
+    check (errsEmp.size == 1 && liveEmp == 0 && stEmp == "interrupted" && trEmp == "remote_configuration" && genEmp == 2)
+      s!"503 skipped_configuration must emit 1 error event and stop turn with interrupted/remote_configuration: errs={errsEmp.size} live={liveEmp} status={stEmp} reason={trEmp} gen={genEmp}"
+    let errTextEmp := errsEmp[0]?.getD ""
+    check ((errTextEmp.splitOn "empty-test").length > 1 && (errTextEmp.splitOn "no configured target").length > 1)
+      s!"503 skipped_configuration error event must name chain and say it has no configured target: {errTextEmp}"
+
+    -- Point 1 (proven per-mission proxy token):
+    -- (1a) Token of mission A + X-Sandboxed-Execution-Key header naming running mission B + cooling chain:
+    -- B stays active, no error event on B.
+    cooldowns.set #[{
+      accountId := "acct-secret-alice@example.test",
+      untilEpoch := nowT + 2400,
+      reason := .usageLimit,
+      label := "acct-secret-alice@example.test"
+    }]
+    let tokA ← seedRunningMission "m-pt1-caller-a" ""
+    let _tokB ← seedRunningMission "m-pt1-victim-b" ""
+    let rSpoofFromA ← postBoundWithHeader tokA "cool-test" (some "remote-launch:m-pt1-victim-b")
+    check (rSpoofFromA.status == 429) s!"(1a) spoof from A status: {rSpoofFromA.status}"
+    let (stB1, trB1, genB1, liveB1, errsB1) ← readMissionState "m-pt1-victim-b"
+    check (stB1 == "active" && trB1 == "" && genB1 == 1 && liveB1 == 1 && errsB1.isEmpty)
+      s!"(1a) token of A with header naming B must leave B active with 0 errors: status={stB1} reason={trB1} gen={genB1} live={liveB1} errs={errsB1.size}"
+
+    -- (1b) Global proxy secret + X-Sandboxed-Execution-Key header naming running mission B + cooling chain:
+    -- B stays active, no error event on B.
+    let _tokB2 ← seedRunningMission "m-pt1-victim-b2" ""
+    let rSpoofGlobal ← postBoundWithHeader cfg.proxySecret "cool-test" (some "remote-launch:m-pt1-victim-b2")
+    check (rSpoofGlobal.status == 429) s!"(1b) spoof with global proxy secret status: {rSpoofGlobal.status}"
+    let (stB2, trB2, genB2, liveB2, errsB2) ← readMissionState "m-pt1-victim-b2"
+    check (stB2 == "active" && trB2 == "" && genB2 == 1 && liveB2 == 1 && errsB2.isEmpty)
+      s!"(1b) global proxy secret with header naming B2 must leave B2 active with 0 errors: status={stB2} reason={trB2} gen={genB2} live={liveB2} errs={errsB2.size}"
+
+    -- (1c) Token of B + header naming B: B is stopped as today.
+    let tokB3 ← seedRunningMission "m-pt1-valid-b3" ""
+    let rValidB ← postBoundWithHeader tokB3 "cool-test" (some "remote-launch:m-pt1-valid-b3")
+    check (rValidB.status == 429) s!"(1c) valid token B3 + matching header B3 status: {rValidB.status}"
+    let (stB3, trB3, genB3, liveB3, errsB3) ← readMissionState "m-pt1-valid-b3"
+    check (errsB3.size == 1 && liveB3 == 0 && stB3 == "interrupted" && trB3 == "remote_quota" && genB3 == 2)
+      s!"(1c) token of B3 with matching header B3 must stop B3: status={stB3} reason={trB3} gen={genB3} live={liveB3} errs={errsB3.size}"
+
+    -- Point 2 (wrong chain — side calls on another model must not stop the turn):
+    -- Mission's own stored model is `cool-test`, but it makes a side call on `side-cool-test` which is cooling.
+    let tokSide ← seedRunningMissionWithModel "m-pt2-side-chain" "" "cool-test"
+    let rSide ← postBound tokSide "side-cool-test"
+    check (rSide.status == 429) s!"(2) side chain cooling status: {rSide.status}"
+    let (stSide, trSide, genSide, liveSide, errsSide) ← readMissionState "m-pt2-side-chain"
+    check (stSide == "active" && trSide == "" && genSide == 1 && liveSide == 1 && errsSide.isEmpty)
+      s!"(2) side-call on a different cooling chain must not stop mission turn: status={stSide} reason={trSide} gen={genSide} live={liveSide} errs={errsSide.size}"
+
+    -- Point 3 (non-quota cooldown reason label and message):
+    -- When the soonest cooldown is `.overloaded` / `.serverError` / `.authFailure` (not `.rateLimit` or `.usageLimit`),
+    -- `terminal_reason` is `"provider_unavailable"` (not `"remote_quota"`) and the `error` event says the provider
+    -- is unavailable while naming the chain and return time with zero account identifiers.
+    cooldowns.set #[{
+      accountId := "acct-secret-alice@example.test",
+      untilEpoch := nowT + 2400,
+      reason := .overloaded,
+      label := "acct-secret-alice@example.test"
+    }]
+    let tokNonQuota ← seedRunningMission "m-pt3-overloaded" ""
+    let rNonQuota ← postBound tokNonQuota "cool-test"
+    check (rNonQuota.status == 429) s!"(3) overloaded cooling status: {rNonQuota.status}"
+    let (stNq, trNq, genNq, liveNq, errsNq) ← readMissionState "m-pt3-overloaded"
+    let errTextNq := errsNq[0]?.getD ""
+    check (errsNq.size == 1 && liveNq == 0 && stNq == "interrupted" && trNq == "provider_unavailable" && genNq == 2 &&
+           (errTextNq.splitOn "Provider is unavailable").length > 1 &&
+           (errTextNq.splitOn "cool-test").length > 1 &&
+           (errTextNq.splitOn "2400").length > 1 &&
+           (errTextNq.splitOn "acct-secret").length == 1 &&
+           (errTextNq.splitOn "alice@example.test").length == 1)
+      s!"(3) non-quota cooldown must set terminal_reason=provider_unavailable and say provider is unavailable: status={stNq} reason={trNq} errs={errsNq.size} text={errTextNq}"
   finally
     closeCoreStore store
     IO.FS.removeDirAll root
