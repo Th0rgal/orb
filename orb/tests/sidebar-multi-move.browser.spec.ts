@@ -579,6 +579,7 @@ test('selecting transcript text while Composer textarea is focused blurs empty C
   await page.getByRole('button',{name:'Verity',exact:true}).click();
   await page.getByRole('tree',{name:'Projects',exact:true}).getByRole('button',{name:'Pareto',exact:true}).click();
   await expect(page.getByText('COPY_TOKEN_ALPHA_99')).toBeVisible();
+  await expect(page.locator('.scroll')).not.toHaveClass(/\blanding\b/);
 
   // Focus Composer with empty selection (matching Orb launch/mission open behavior), then select transcript text.
   const composer=page.locator('.composer textarea');
