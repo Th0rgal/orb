@@ -7,6 +7,7 @@ Diagnostics contain names and line numbers, never environment values.
 """
 
 import argparse
+import json
 import os
 from pathlib import Path
 import re
@@ -20,6 +21,7 @@ INSTANCE_KEYS = frozenset({
     "ORB_INSTANCE", "HOST", "PORT", "WORKING_DIR", "SANDBOXED_PUBLIC_URL",
     "JWT_SECRET", "DASHBOARD_PASSWORD", "SANDBOXED_USERS", "SANDBOXED_SH_USERS",
     "LIBRARY_PATH", "SANDBOXED_SH_ASK_TMP_ROOT", "TMPDIR",
+    "OPENAGENT_DATA_DIR", "SANDBOXED_SINGLE_TENANT_USER_ID", "SINGLE_TENANT_USER_ID",
 })
 REQUIRED = frozenset({"ORB_INSTANCE", "PORT", "WORKING_DIR", "JWT_SECRET"})
 
@@ -85,11 +87,59 @@ def parse_env(raw):
     return result
 
 
-def check(base, overlay):
+def ownership(document=None):
+    """Operator decisions contain names and source labels, never env values."""
+    if document is None:
+        document = {"schema_version": 1, "instance_keys": [], "shared_from": {}}
+    if (not isinstance(document, dict) or set(document) != {"schema_version", "instance_keys", "shared_from"}
+            or type(document["schema_version"]) is not int or document["schema_version"] != 1
+            or not isinstance(document["instance_keys"], list)
+            or not isinstance(document["shared_from"], dict)):
+        raise InvalidConfig("invalid ownership document")
+    keys, shared = document["instance_keys"], document["shared_from"]
+    def key_name(value):
+        return isinstance(value, str) and re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", value)
+    if (not all(key_name(key) for key in keys) or len(set(keys)) != len(keys)
+            or not all(key_name(key) and source in ("prod", "dev") for key, source in shared.items())
+            or set(shared) & (INSTANCE_KEYS | set(keys))):
+        raise InvalidConfig("invalid or conflicting ownership decisions")
+    return {"schema_version": 1, "instance_keys": sorted(keys), "shared_from": dict(sorted(shared.items()))}
+
+
+def read_ownership(path):
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise InvalidConfig("duplicate ownership decision")
+            result[key] = value
+        return result
+    try:
+        return ownership(json.loads(path.read_bytes(), object_pairs_hook=unique_object))
+    except (ValueError, UnicodeError):
+        raise InvalidConfig("invalid ownership document") from None
+
+
+def differences(prod, dev):
+    return {key: ("dev_only" if key not in prod else "prod_only" if key not in dev else "different")
+            for key in sorted((prod.keys() | dev.keys()) - INSTANCE_KEYS)
+            if key not in prod or key not in dev or literal(prod[key]) != literal(dev[key])}
+
+
+def inventory(prod, dev):
+    # The conservative template preserves every difference, including absence.
+    # The operator can deliberately share selected keys by choosing a source.
+    return {"differences": differences(prod, dev), "ownership": ownership({
+        "schema_version": 1, "instance_keys": list(differences(prod, dev)), "shared_from": {}})}
+
+
+def check(base, overlay, policy=None):
+    policy = ownership(policy)
+    instance_keys = INSTANCE_KEYS | set(policy["instance_keys"])
     overlap = base.keys() & overlay.keys()
     if overlap:
         raise InvalidConfig("overlay redefines base keys: " + ", ".join(sorted(overlap)))
-    misplaced = (base.keys() & INSTANCE_KEYS) | (overlay.keys() - INSTANCE_KEYS)
+    misplaced = (base.keys() & instance_keys) | (overlay.keys() - instance_keys)
     if misplaced:
         raise InvalidConfig("keys in the wrong layer: " + ", ".join(sorted(misplaced)))
     missing = REQUIRED - overlay.keys()
@@ -101,19 +151,28 @@ def check(base, overlay):
         raise InvalidConfig("ORB_INSTANCE must be prod or dev")
 
 
-def split_envs(prod, dev):
-    common = (prod.keys() | dev.keys()) - INSTANCE_KEYS
-    conflicts = {key for key in common if key not in prod or key not in dev or literal(prod[key]) != literal(dev[key])}
+def split_envs(prod, dev, policy=None):
+    policy = ownership(policy)
+    instance_keys = INSTANCE_KEYS | set(policy["instance_keys"])
+    shared_from = policy["shared_from"]
+    unknown = (set(policy["instance_keys"]) | shared_from.keys()) - (prod.keys() | dev.keys())
+    if unknown:
+        raise InvalidConfig("ownership names absent from both inputs: " + ", ".join(sorted(unknown)))
+    for key, source in shared_from.items():
+        if key not in (prod if source == "prod" else dev):
+            raise InvalidConfig("selected shared source is missing key: " + key)
+    common = (prod.keys() | dev.keys()) - instance_keys
+    conflicts = set(differences(prod, dev)) - instance_keys - shared_from.keys()
     if conflicts:
         raise InvalidConfig("resolve shared setting differences before migration: " + ", ".join(sorted(conflicts)))
-    base = {key: prod[key] for key in common}
+    base = {key: (dev if shared_from.get(key) == "dev" else prod)[key] for key in common}
     overlays = []
     for name, source in (("prod", prod), ("dev", dev)):
-        overlay = {key: value for key, value in source.items() if key in INSTANCE_KEYS}
+        overlay = {key: value for key, value in source.items() if key in instance_keys}
         if "ORB_INSTANCE" in overlay and literal(overlay["ORB_INSTANCE"]) != name:
             raise InvalidConfig("legacy ORB_INSTANCE disagrees with its instance")
         overlay["ORB_INSTANCE"] = name
-        check(base, overlay)
+        check(base, overlay, policy)
         overlays.append(overlay)
     # Sharing these would silently defeat instance isolation. Do not mint or
     # change credentials here: the operator resolves conflicts in the source.
@@ -135,9 +194,10 @@ def render(settings):
     return ("".join(f"{key}={settings[key]}\n" for key in sorted(settings))).encode("utf-8")
 
 
-def migrate(prod_path, dev_path, output, apply=False):
+def migrate(prod_path, dev_path, output, apply=False, policy=None):
     prod_raw, dev_raw = prod_path.read_bytes(), dev_path.read_bytes()
-    base, prod, dev = split_envs(parse_env(prod_raw), parse_env(dev_raw))
+    policy = ownership(policy)
+    base, prod, dev = split_envs(parse_env(prod_raw), parse_env(dev_raw), policy)
     if output.exists():
         raise InvalidConfig("output directory already exists; refusing to overwrite it")
     if not apply:
@@ -149,6 +209,7 @@ def migrate(prod_path, dev_path, output, apply=False):
         (output / "backups").mkdir(mode=0o700)
         write_private(output / "backups/prod.env", prod_raw)
         write_private(output / "backups/dev.env", dev_raw)
+        write_private(output / "ownership.json", (json.dumps(policy, indent=2) + "\n").encode())
         for name, settings in (("core", base), ("prod", prod), ("dev", dev)):
             write_private(output / f"{name}.env", render(settings))
     except BaseException:
@@ -166,13 +227,23 @@ def main():
     migration.add_argument("--prod", type=Path, required=True)
     migration.add_argument("--dev", type=Path, required=True)
     migration.add_argument("--output", type=Path, required=True)
+    migration.add_argument("--ownership", type=Path, help="reviewed names-only ownership JSON from inventory")
+    report = commands.add_parser("inventory", help="print names and a conservative ownership template, never values")
+    report.add_argument("--prod", type=Path, required=True)
+    report.add_argument("--dev", type=Path, required=True)
     migration.add_argument("--apply", action="store_true", help="write files; default only validates")
     args = parser.parse_args()
     try:
         if args.command == "check":
-            check(parse_env(args.base.read_bytes()), parse_env(args.overlay.read_bytes()))
+            policy_path = args.base.parent / "ownership.json"
+            policy = read_ownership(policy_path) if policy_path.exists() else None
+            check(parse_env(args.base.read_bytes()), parse_env(args.overlay.read_bytes()), policy)
+        elif args.command == "inventory":
+            print(json.dumps(inventory(parse_env(args.prod.read_bytes()), parse_env(args.dev.read_bytes())), indent=2))
+            return 0
         else:
-            migrate(args.prod, args.dev, args.output, args.apply)
+            policy = read_ownership(args.ownership) if args.ownership else None
+            migrate(args.prod, args.dev, args.output, args.apply, policy)
         print("Core env check passed" if args.command == "check" else
               "Migration written with both backups" if args.apply else "Migration validated (no files written)")
         return 0

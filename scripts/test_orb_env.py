@@ -3,6 +3,7 @@
 import contextlib
 import importlib.machinery
 import io
+import json
 from pathlib import Path
 import stat
 import tempfile
@@ -57,6 +58,69 @@ class OrbEnvTest(unittest.TestCase):
                 with self.assertRaises(env.InvalidConfig):
                     env.migrate(self.prod, self.dev, self.output, apply=True)
                 self.assertFalse(self.output.exists())
+
+    def test_inventory_and_instance_policy_preserve_one_sided_authority(self):
+        self.prod.write_bytes(self.prod.read_bytes() + b'HERMES_TOKEN=prod-private-marker\nCONSOLE_SSH_KEY=prod-host-only\n')
+        self.dev.write_bytes(self.dev.read_bytes() + b'BROWSER_ENABLED=false\n')
+        before = [p.read_bytes() for p in (self.prod, self.dev)]
+        report = env.inventory(*(env.parse_env(raw) for raw in before))
+        self.assertEqual(report["differences"], {"BROWSER_ENABLED": "dev_only", "CONSOLE_SSH_KEY": "prod_only", "HERMES_TOKEN": "prod_only"})
+        for value in ("prod-private-marker", "prod-host-only", "false"):
+            self.assertNotIn(value, json.dumps(report))
+        policy = report["ownership"]
+        env.migrate(self.prod, self.dev, self.output, apply=True, policy=policy)
+        self.assertEqual(env.read_ownership(self.output / "ownership.json"), policy)
+        base = env.parse_env((self.output / "core.env").read_bytes())
+        for name, raw in zip(("prod", "dev"), before):
+            overlay = env.parse_env((self.output / (name + ".env")).read_bytes())
+            env.check(base, overlay, policy)
+            merged = base | overlay
+            merged.pop("ORB_INSTANCE")
+            self.assertEqual(merged, env.parse_env(raw))
+            self.assertEqual((self.output / ("backups/" + name + ".env")).read_bytes(), raw)
+        self.assertNotIn("HERMES_TOKEN", base)
+        with self.assertRaisesRegex(env.InvalidConfig, "redefines base"):
+            env.check(base, overlay | {"TOKEN": base["TOKEN"]}, policy)
+        # The unchanged service check loads the manifest beside the shared base.
+        with patch("sys.argv", [str(SCRIPT), "check", "--base", str(self.output / "core.env"),
+                                "--overlay", str(self.output / "dev.env")]), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(env.main(), 0)
+
+    def test_operator_selects_shared_source_without_exposing_values(self):
+        self.prod.write_bytes(self.prod.read_bytes() + b'PROD_ONLY=private-prod-value\n')
+        self.dev.write_bytes(self.dev.read_bytes().replace(b'http://localhost:8317', b'http://localhost:8318'))
+        policy = {"schema_version": 1, "instance_keys": [],
+                  "shared_from": {"PROD_ONLY": "prod", "PROXY_URL": "dev"}}
+        base, prod, dev = env.split_envs(env.parse_env(self.prod.read_bytes()), env.parse_env(self.dev.read_bytes()), policy)
+        self.assertEqual(base["PROD_ONLY"], "private-prod-value")
+        self.assertEqual(env.literal(base["PROXY_URL"]), "http://localhost:8318")
+        for overlay in (prod, dev):
+            self.assertFalse(base.keys() & overlay.keys())
+            env.check(base, overlay, policy)
+        policy["shared_from"]["PROD_ONLY"] = "dev"
+        with self.assertRaisesRegex(env.InvalidConfig, "source is missing key: PROD_ONLY"):
+            env.migrate(self.prod, self.dev, self.output, apply=True, policy=policy)
+        self.assertFalse(self.output.exists())
+
+    def test_ownership_rejects_ambiguous_and_secret_bearing_decisions(self):
+        invalid = [[], {}, {"schema_version": True, "instance_keys": [], "shared_from": {}},
+                   {"schema_version": 1, "instance_keys": ["KEY", "KEY"], "shared_from": {}},
+                   {"schema_version": 1, "instance_keys": ["KEY=secret-marker"], "shared_from": {}},
+                   {"schema_version": 1, "instance_keys": [], "shared_from": {"JWT_SECRET": "prod"}},
+                   {"schema_version": 1, "instance_keys": ["KEY"], "shared_from": {"KEY": "dev"}},
+                   {"schema_version": 1, "instance_keys": [], "shared_from": {"KEY": "secret-marker"}}]
+        for policy in invalid:
+            with self.subTest(policy=policy), self.assertRaises(env.InvalidConfig) as caught:
+                env.ownership(policy)
+            self.assertNotIn("secret-marker", str(caught.exception))
+        manifest = self.root / "ownership.json"
+        manifest.write_text('{"schema_version":1,"instance_keys":[],"shared_from":{"KEY":"prod","KEY":"dev"}}')
+        with self.assertRaisesRegex(env.InvalidConfig, "duplicate ownership"):
+            env.read_ownership(manifest)
+        policy = {"schema_version": 1, "instance_keys": ["ABSENT"], "shared_from": {}}
+        with self.assertRaisesRegex(env.InvalidConfig, "absent from both inputs: ABSENT"):
+            env.migrate(self.prod, self.dev, self.output, apply=True, policy=policy)
+        self.assertFalse(self.output.exists())
 
     def test_shared_identity_cannot_be_disguised_by_quotes(self):
         self.dev.write_bytes(self.dev.read_bytes().replace(b"dev-secret", b'"prod-secret"'))

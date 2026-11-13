@@ -46,6 +46,8 @@ Both instances run from the base plus overlays; a settings round trip (export pr
   `scripts/ops/orb-env`. The migration preserves both legacy env files as
   private backups and does not change running services. See
   [the operator migration procedure](../operations/core-environments.md).
+  A reviewed names-only ownership manifest handles the operator's one-sided
+  inventory without implicitly enabling prod-only authority on dev.
   Live application and dev verification are still required.
 - Item 2: `orb-core settings export|import|refresh-dev|promote-dev` uses a
   strict non-secret document, a printed diff, explicit `--yes` confirmation and
