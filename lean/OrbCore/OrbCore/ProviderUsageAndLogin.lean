@@ -1327,6 +1327,14 @@ private def cooldownReasonSlug : CooldownReason → String
   | .overloaded  => "overloaded"
   | .serverError => "server_error"
 
+private def validSidecarReasonSlug (s : String) : Bool :=
+  1 ≤ s.length && s.length ≤ 40 &&
+  s.all (fun c => ('a' ≤ c && c ≤ 'z') || ('0' ≤ c && c ≤ '9') || c == '_')
+
+private def validSidecarRetryAt (s : String) : Bool :=
+  1 ≤ s.length && s.length ≤ 35 &&
+  s.all (fun c => ('0' ≤ c && c ≤ '9') || c == '-' || c == ':' || c == 'T' || c == 'Z' || c == '+' || c == '.')
+
 /-- Read CLIProxyAPI `/v0/management/auth-files` with a strict 2-second timeout.
     Any transport error, missing management key, or malformed payload degrades to `#[]`. -/
 private def fetchSidecarAuthFiles : IO (Array SidecarAuthFileEntry) := do
@@ -1351,8 +1359,8 @@ private def fetchSidecarAuthFiles : IO (Array SidecarAuthFileEntry) := do
           let rem := (cd.fieldUInt64? "remaining_seconds").getD 0
           if rem > bestRem then
             bestRem := rem
-            bestRetry? := (cd.fieldStr? "retry_at").filter (!·.isEmpty)
-            bestReason? := (cd.fieldStr? "reason").filter (!·.isEmpty)
+            bestRetry? := (cd.fieldStr? "retry_at").filter validSidecarRetryAt
+            bestReason? := (cd.fieldStr? "reason").filter validSidecarReasonSlug
         out := out.push {
           name := name
           provider := prov
