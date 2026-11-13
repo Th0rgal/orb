@@ -85,6 +85,10 @@ def monitorDefaults : JVal := .obj #[
   ("proxy_5xx_count", .num "20"), ("proxy_4xx_count", .num "30"),
   ("vm_expiry_grace_seconds", .num "0"), ("long_build_minutes", .num "90")]
 
+def validLibraryRevision (revision : String) : Bool :=
+  revision.length == 40 && revision.toList.all (fun c =>
+    ('0' ≤ c && c ≤ '9') || ('a' ≤ c && c ≤ 'f'))
+
 private def provider (value : JVal) : Except String Unit := do
   flatObject value #[("id", .text), ("enabled", .flag)] #["id", "enabled"]
   nonempty value "id"
@@ -132,6 +136,8 @@ def validate (value : JVal) : Except String Unit := do
   objectKeys value sections sections
   unless value.fieldNat? "version" == some 1 do throw "settings_unsupported_version"
   flatObject (value.fieldOrNull "global") globalFields #[]
+  if let some revision := (value.fieldOrNull "global").fieldStr? "library_revision" then
+    unless validLibraryRevision revision do throw "settings_invalid_library_revision"
   -- URLs with embedded credentials must never be serialized as settings.
   if let some remote := (value.fieldOrNull "global").fieldStr? "library_remote" then
     if remote.contains '?' || remote.contains '#' ||

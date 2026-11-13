@@ -8,6 +8,7 @@ import OrbCore.SettingsDocument
 import OrbCore.SettingsFile
 import OrbCore.LocalOperator
 import OrbCore.ProxyModelRouting
+import OrbCore.Skills
 
 namespace OrbCore.SettingsTransfer
 
@@ -43,7 +44,17 @@ private def project (value : JVal) (fields : Array (String × SettingsDocument.S
 private def toggles (rows : Array (Array String)) : JVal :=
   .arr (rows.map fun row => .obj #[("id", .str (row.getD 0 "")), ("enabled", .bool (row.getD 1 "" == "1"))])
 
-private def readDocument (db : SqliteDb) (settings : JVal) : Action JVal := do
+private def readDocument (db : SqliteDb) (settings : JVal) (root : String) : Action JVal := do
+  let mut global := project settings SettingsDocument.globalFields
+  if (global.field? "library_revision").isNone then
+    let library ← ExceptT.lift (Skills.resolveLibraryRoot root root)
+    let revision ← ExceptT.lift do
+      try
+        let output ← IO.Process.output { cmd := "git", args := #["-C", library, "rev-parse", "--verify", "HEAD"] }
+        let revision := output.stdout.trimAscii.toString
+        return if output.exitCode == 0 && SettingsDocument.validLibraryRevision revision then some revision else none
+      catch _ => return none
+    global := global.setField "library_revision" (revision.map JVal.str |>.getD .null)
   let chainRows ← query db ProxyModelRouting.chainRowsSql
   let chains := (ProxyModelRouting.chainResponses chainRows (fun _ => "") "").map fun chain =>
     (chain.removeField "created_at").removeField "updated_at"
@@ -72,7 +83,7 @@ private def readDocument (db : SqliteDb) (settings : JVal) : Action JVal := do
       ("inference", toggles inference), ("managed", toggles compute),
       ("daily_spend_cap_cents", if cap.isEmpty then .null else .num cap)])
   let doc := JVal.obj #[
-    ("version", .num "1"), ("global", project settings SettingsDocument.globalFields),
+    ("version", .num "1"), ("global", global),
     ("routing_chains", .arr chains), ("inference_providers", toggles providers),
     ("managed_providers", .arr managed), ("user_preferences", .arr preferences),
     ("fleet", .obj #[("enabled", .bool (fleet.getD 0 "" == "1")),
@@ -86,7 +97,7 @@ private def readDocument (db : SqliteDb) (settings : JVal) : Action JVal := do
 def exportDocument (root : String) : IO (Except String JVal) :=
   SettingsFile.withLock root do
     let .ok snapshot ← SettingsFile.read root | return .error "settings_file_unavailable"
-    withStore root fun db => withImmediateTx db (readDocument db snapshot.value).run
+    withStore root fun db => withImmediateTx db (readDocument db snapshot.value root).run
 
 private def array (doc : JVal) (key : String) : Array JVal := (doc.fieldArr? key).getD #[]
 private def text (row : JVal) (key : String) : String := (row.fieldStr? key).getD ""
@@ -195,7 +206,7 @@ def importDocument (root : String) (doc before : JVal)
     let .ok snapshot ← SettingsFile.read root | return .error "settings_file_unavailable"
     let wrote ← IO.mkRef false
     let result ← try withStore root fun db => withImmediateTx db (do
-      let live ← readDocument db snapshot.value
+      let live ← readDocument db snapshot.value root
       if SettingsDocument.render live != SettingsDocument.render before then throw "settings_changed"
       let users ← preflight db doc
       let backup := System.FilePath.mk root / "settings-before-import.json"
@@ -217,7 +228,7 @@ def preview (root : String) (doc : JVal) : IO (Except String (JVal × String)) :
   SettingsFile.withLock root do
     let .ok snapshot ← SettingsFile.read root | return .error "settings_file_unavailable"
     withStore root fun db => withImmediateTx db (do
-      let before ← readDocument db snapshot.value
+      let before ← readDocument db snapshot.value root
       discard <| preflight db doc
       let delta ← liftExcept (SettingsDocument.diff before doc)
       return (before, delta) : Action (JVal × String)).run

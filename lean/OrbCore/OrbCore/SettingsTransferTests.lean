@@ -39,8 +39,13 @@ private def fixture (root uid marker : String) (source : Bool) : IO (CoreStore �
   require <| sealProviderSecret root "boat" (marker ++ "-sealed-key")
   require <| SettingsFile.write root (.obj #[("bws_access_token", .str (marker ++ "-vault-token")),
     ("dashboard_password_hash", .str (marker ++ "-dashboard-hash")),
-    ("max_parallel_missions", .num (if source then "3" else "1")),
-    ("library_revision", .str "abcdef1234567890abcdef1234567890abcdef1234")])
+    ("max_parallel_missions", .num (if source then "3" else "1"))])
+  let library := root ++ "/library"
+  IO.FS.createDirAll library
+  let init ← IO.Process.output { cmd := "git", args := #["-C", library, "init", "-q"] }
+  let commit ← IO.Process.output { cmd := "git", args := #["-C", library, "-c", "user.name=Fixture",
+    "-c", "user.email=fixture@example.invalid", "commit", "-q", "--allow-empty", "-m", marker] }
+  check (init.exitCode == 0 && commit.exitCode == 0) "seed local Library revision"
   return (st, mc)
 
 private def invariant (st : CoreStore) (mc : ManagedComputeStore) : IO String := do
@@ -72,6 +77,8 @@ def run : IO Unit := do
   try
     let doc ← require (SettingsTransfer.exportDocument prodRoot)
     let rendered := SettingsDocument.render doc
+    check (((doc.fieldOrNull "global").fieldStr? "library_revision").any SettingsDocument.validLibraryRevision)
+      "export captures the current Library commit when no explicit pin exists"
     check ((rendered.splitOn "source-password").length == 1 && (rendered.splitOn "source-provider-key").length == 1 &&
       (rendered.splitOn "source-inline-key").length == 1 && (rendered.splitOn "source-vault-token").length == 1 &&
       (rendered.splitOn "source-mission").length == 1 && (rendered.splitOn "prod-local-id").length == 1)

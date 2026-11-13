@@ -6502,6 +6502,21 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
      fSyncSt != 200 || afterSt != 200 || (afterBody.splitOn "Peer remote line.").length < 2 then
     return (← fail s!"diverged history detection/force-sync failed: push=({divPushSt},{divPushBody}) sync=({divSyncSt},{divSyncBody}) fSync={fSyncSt} after={afterBody}")
 
+  -- A transferred Library pin selects that commit, never the moving branch.
+  let pinSettings ← readSettingsJson dataRoot
+  let .ok () ← writeSettingsJson dataRoot (pinSettings.setField "library_revision" (.str oldestRev))
+    | return (← fail "could not set Library revision fixture")
+  let (pinSyncSt, _, _) ← sendReq "POST" "/api/library/sync" hsJwt ""
+  let (pinReadSt, _, pinReadBody) ← sendReq "GET" "/api/library/skill/orb-basics" hsJwt ""
+  if pinSyncSt != 200 || pinReadSt != 200 || (pinReadBody.splitOn "Follow Core contracts.").length != 2 ||
+      (pinReadBody.splitOn "Peer remote line.").length != 1 then
+    return (← fail "Library synchronization did not honor the transferred revision")
+  let libraryDir ← resolveLibraryDir workRoot dataRoot
+  IO.FS.writeFile (System.FilePath.mk libraryDir / "keep-local.txt") "local draft"
+  let (dirtyPinSt, _, _) ← sendReq "POST" "/api/library/force-sync" hsJwt ""
+  if dirtyPinSt != 409 || (← IO.FS.readFile (System.FilePath.mk libraryDir / "keep-local.txt")) != "local draft" then
+    return (← fail "Library revision sync must preserve local drafts even on force-sync")
+
   closeCoreStore store
   discard <| (IO.FS.removeDirAll workRoot).toBaseIO
   return 0

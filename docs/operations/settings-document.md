@@ -78,3 +78,10 @@ Monitor thresholds live in a dedicated non-secret `core_monitor_settings` row
 in `managed_compute.db`. `orb-monitor` reads that row without opening the
 credentials-bearing settings file; older databases use its existing defaults.
 Installing the updated monitor script is an operator action.
+
+Export records the Library checkout's current commit when no revision was
+explicitly configured. An imported revision is a full lowercase Git SHA and
+pins the next `POST /api/library/sync` (or `force-sync`) to that exact commit.
+Configuration import does not move Library files. Synchronizing a pinned
+revision refuses a dirty checkout, including untracked drafts; unpin it by
+setting `global.library_revision` to `null` in a confirmed settings import.
