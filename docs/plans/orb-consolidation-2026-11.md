@@ -102,6 +102,23 @@ test, a fix, a deploy, and a re-test. This extends track E's isolation test.
 - `orb-env migrate` reports ~80 "shared setting differences" between prod and
   dev env files; it needs a way to classify one-sided keys instead of failing.
 
+## Operator requests
+
+Missions cannot SSH to agent-core. Append here: exact SHA, dev or prod, and the
+verification command. The operator session runs them and records the result.
+
+| When (UTC) | Request | Result |
+| --- | --- | --- |
+| 13 Nov 12:09 | deploy master `de3fd0fa1` to dev | done 12:18, self-test 11/10/101, dev healthy |
+| 13 Nov 12:19 | deploy `de3fd0fa1` to prod | started 12:19 |
+
+### Env migration inventory (names only, 13 Nov)
+
+`orb-env migrate` refuses: prod has 116 keys, dev 61.
+- Differ: `BROWSER_ENABLED`, `DASHBOARD_PASSWORD`, `DEFAULT_MODEL`, `JWT_SECRET`, `PORT`, `SANDBOXED_MANAGED_REAPER_DRY_RUN`, `SANDBOXED_PUBLIC_URL`, `SANDBOXED_REMOTE_NODES`, `SANDBOXED_REMOTE_NODE_SEPOLIA_TOKEN`, `SANDBOXED_SH_OPENCODE_DEFAULT_MODEL`, `SANDBOXED_SINGLE_TENANT_USER_ID`.
+- Dev-only: `AUTOMATION_MANAGER_MCP_BIN`, `CODEX_APP_SERVER_MODE`, `LIBRARY_PATH`, `OPENAGENT_DATA_DIR`, `RUST_MIN_STACK`, `SANDBOXED_MANAGED_ENABLED`, `SANDBOXED_PROXY_SECRET`, `SANDBOXED_SH_RTK_ENABLED`, `SCOPE_REAPER_ENABLED`, `WORKING_DIR`.
+- Prod-only (65): Hermes (`HERMES_*`), console SSH (`CONSOLE_SSH_*`), browser, disk admission/alerts (`DISK_*`, `MISSION_DISK_*`), mission CPU caps, managed-compute tuning (`SANDBOXED_MANAGED_*`), node tokens for dgx-spark-admin/lagash/nimrud, Supabase, Spark arbiter, Tavily, AMP, Boat, CLIProxy management, workspace GC, container tmp, and others. Several must stay prod-only (Hermes authority, console SSH, node tokens); the tool needs a declared classification rather than failing on every one-sided key.
+
 ## Decision log
 
 | When (UTC) | Decision | Why |
@@ -114,3 +131,8 @@ test, a fix, a deploy, and a re-test. This extends track E's isolation test.
 | 13 Nov 12:08 | Cancelled the stuck turns of ldgr (`b6934223`) and Pareto (`8a349331`) and re-sent Thomas's last question with "answer once, no wake-ups, no children, stop" | He wants the answer and to continue manually |
 | 13 Nov 12:10 | Orchestrator runs on opencode with the `genius` chain instead of Claude Code + Fable | Claude Code needs Anthropic, which is refused until the quota resets or Thomas signs in again; `genius` returns to Fable by itself when it recovers |
 | 13 Nov 12:10 | CLIProxyAPI not restarted to clear the parked Claude credential | It would cut the streams of ~20 running missions, and the quota park is probably real |
+| 13 Nov 12:09 | ldgr answer taken from the original mission `734c3bb7`, not the fork `b6934223` | The fork's opencode session had no history and answered "no prior work visible" |
+| 13 Nov 12:10 | ldgr's running children (`f1e3aa73` site, `819a0cd5` Bitcoin suites, `f711ad14`) left running | They are work Thomas asked for; cancelling would lose it. Their completion notes can still wake the parent |
+| 13 Nov 12:12 | Env migration (dev/prod item 1) not applied | 86 key conflicts; hand-editing prod env under time pressure is the wrong risk. Fix the tool first |
+| 13 Nov 12:19 | Deployed `de3fd0fa1` to dev, then prod | Thomas approved prod deploys; dev build + self-test were green |
+| 13 Nov 12:20 | Orchestrator is the git integrator with `GITHUB_TOKEN` from the broker; worker VMs stay credential-free | Managed VMs have no GitHub identity, and workers refused to improvise one |
