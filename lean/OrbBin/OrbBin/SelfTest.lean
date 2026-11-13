@@ -1007,12 +1007,12 @@ def runAllTests : IO UInt32 := do
       for tool in [spawn, listMachines] do
         let desc := (tool.fieldStr? "description").getD ""
         for term in ["boat", "leanci", "colab", "opt-in", "catalog", "2xlarge", "32 vCPU/96 GiB", "t4", "disk"] do
-          assertTrue s!"Catalog {role} managed description includes {term}" (desc.splitOn term |>.length > 1)
+          assertTrue s!"Catalog {role} managed description includes {term}" ((desc.splitOn term).length > 1)
       let some start := tools.find? (·.fieldStr? "name" == some "start_mission")
         | throw <| IO.userError s!"Missing start_mission for {role}"
       let remote := ((start.fieldOrNull "inputSchema").fieldOrNull "properties").fieldOrNull "remote_node_id"
       assertTrue s!"Catalog {role} provider-qualified managed placement"
-        (((remote.fieldStr? "description").getD "").splitOn "auto-managed:<provider>:<size>" |>.length > 1)
+        ((((remote.fieldStr? "description").getD "").splitOn "auto-managed:<provider>:<size>").length > 1)
     | _ => throw <| IO.userError s!"Failed parsing catalog JSON for {role}"
 
   -- 7b. `sandboxed-mcp` `--preflight-cache` zero-RTT hit & fail-closed rejection

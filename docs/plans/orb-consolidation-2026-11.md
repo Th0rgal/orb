@@ -326,6 +326,37 @@ No questions sent; implement/test generic support against an authorized
 
 No new deployment requested yet. Future entries must give an exact SHA, dev or
 prod target, verification command and result; do not repeat an in-flight deploy.
+
+### E+G operational checkpoint and coordinator probes
+
+E+G has no dev-operator grant ID or privileged-access request tool on its managed
+VM; host config inspection and deployment therefore remain operator work, not
+an SSH workaround. No deployment/restart performed. Operator requests:
+
+| Request | Target / SHA | Verification / status |
+| --- | --- | --- |
+| Provide complete 65 prod-only environment key names, never values | Current dev/prod inventory; no deployment | Confirm names-only inventory covers 116 prod / 61 dev keys; needed for checked-in classification, unknown keys fail closed |
+| Supply governed dev access for full G member tests, or execute exact endpoint tests on behalf of E+G | Current dev, observed short build `de3fd0fa1`; resolve full SHA before any deploy | Grant ID scoped to mission if supported, otherwise sanitized HTTP status/schema evidence; no member password or bearer on managed VM |
+
+Coordinator independently probed both public `/api/health` endpoints: status ok,
+build `de3fd0fa1`; dev `multi_user`, legacy Library SSH remote; prod
+`single_tenant`, canonical HTTPS Library remote. E+G's observed `f6961606a` is
+a discrepant observation, not a verified deployment transition. Full deployed
+SHA remains unverified. No change requested on partial short SHA.
+
+E+G reports environment CLI names-only classification and explicit
+`--share-one-sided KEY` red-to-green, 15 tests; broader Python ops 30 tests pass,
+4 sealing CLI tests skipped for absent binary. These are worker reports, not
+acceptance: explicit checked-in `shared` / `instance-owned` / `prod-only-allowed`
+classification remains required; arbitrary CLI sharing is insufficient.
+Prescribed and direct supported turbo builds time out, no full build pass.
+Desktop dependencies/session absent; E+G to evaluate VM-local dependencies and
+real native member session, not substitute browser-only or fabricated evidence.
+
+Fetched master `36b4205ab94bd8a97cb9a1b9058672640b2ee11b`: contains
+`OrbBin/SelfTest.lean:1010` syntax repair for historical master Test failure.
+This explains that Test failure only; browser failures and current CI still
+need their own evidence. Operator ledger/inventory below retained verbatim.
 E+G to supply exact multi-user dev configuration and checked-in environment-key
 classification before operator application. No hand-edited production env.
 
@@ -354,6 +385,22 @@ classification before operator application. No hand-edited production env.
   provisioned); push not yet performed. Repeated named-secret retrieval still
   returned pending, latest request `8487270d-d454-4efa-9fdd-73428faffd8f`.
   Do not infer credential delivery or GitHub publication from the local commit.
+### Original operator request ledger
+
+Missions cannot SSH to agent-core. Append here: exact SHA, dev or prod, and the
+verification command. The operator session runs them and records the result.
+
+| When (UTC) | Request | Result |
+| --- | --- | --- |
+| 13 Nov 12:09 | deploy master `de3fd0fa1` to dev | done 12:18, self-test 11/10/101, dev healthy |
+| 13 Nov 12:19 | deploy `de3fd0fa1` to prod | started 12:19 |
+
+### Env migration inventory (names only, 13 Nov)
+
+`orb-env migrate` refuses: prod has 116 keys, dev 61.
+- Differ: `BROWSER_ENABLED`, `DASHBOARD_PASSWORD`, `DEFAULT_MODEL`, `JWT_SECRET`, `PORT`, `SANDBOXED_MANAGED_REAPER_DRY_RUN`, `SANDBOXED_PUBLIC_URL`, `SANDBOXED_REMOTE_NODES`, `SANDBOXED_REMOTE_NODE_SEPOLIA_TOKEN`, `SANDBOXED_SH_OPENCODE_DEFAULT_MODEL`, `SANDBOXED_SINGLE_TENANT_USER_ID`.
+- Dev-only: `AUTOMATION_MANAGER_MCP_BIN`, `CODEX_APP_SERVER_MODE`, `LIBRARY_PATH`, `OPENAGENT_DATA_DIR`, `RUST_MIN_STACK`, `SANDBOXED_MANAGED_ENABLED`, `SANDBOXED_PROXY_SECRET`, `SANDBOXED_SH_RTK_ENABLED`, `SCOPE_REAPER_ENABLED`, `WORKING_DIR`.
+- Prod-only (65): Hermes (`HERMES_*`), console SSH (`CONSOLE_SSH_*`), browser, disk admission/alerts (`DISK_*`, `MISSION_DISK_*`), mission CPU caps, managed-compute tuning (`SANDBOXED_MANAGED_*`), node tokens for dgx-spark-admin/lagash/nimrud, Supabase, Spark arbiter, Tavily, AMP, Boat, CLIProxy management, workspace GC, container tmp, and others. Several must stay prod-only (Hermes authority, console SSH, node tokens); the tool needs a declared classification rather than failing on every one-sided key.
 
 ## Decision log
 
@@ -395,3 +442,8 @@ classification before operator application. No hand-edited production env.
 | 13 Nov, B v3 harvest | Preserve hash-matched API scaffold v3 as current checkpoint; do not mark bridge complete | 32 tests are worker-reported, no HTTP/auth adapter or CI wiring exists; managed resource cleanup remains separately open |
 | 13 Nov, A partial GREEN | Extend A ownership narrowly to ConformanceRunner runtime bindings/callers after sink/caller-cone review; preserve strict pure-extern rejection | Partial IO-extern success exposes pure foreign conformance boundary, which must be honest runtime-unsafe/IO rather than unsoundly admitted as safe proof code; full A remains open |
 | 13 Nov, C regression update | Keep C acceptance open and route confirmed installed-tool flag mismatch to existing A repair | Initial regression RED and 280/299 timed-out fallback build are not passing gates; same defect corroborates D without duplicate script edits |
+| 13 Nov 12:09 | ldgr answer taken from the original mission `734c3bb7`, not the fork `b6934223` | The fork's opencode session had no history and answered "no prior work visible" |
+| 13 Nov 12:10 | ldgr's running children (`f1e3aa73` site, `819a0cd5` Bitcoin suites, `f711ad14`) left running | They are work Thomas asked for; cancelling would lose it. Their completion notes can still wake the parent |
+| 13 Nov 12:12 | Env migration (dev/prod item 1) not applied | 86 key conflicts; hand-editing prod env under time pressure is the wrong risk. Fix the tool first |
+| 13 Nov 12:19 | Deployed `de3fd0fa1` to dev, then prod | Thomas approved prod deploys; dev build + self-test were green |
+| 13 Nov 12:20 | Orchestrator is the git integrator with `GITHUB_TOKEN` from the broker; worker VMs stay credential-free | Managed VMs have no GitHub identity, and workers refused to improvise one |
