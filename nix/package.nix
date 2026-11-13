@@ -245,6 +245,13 @@
           ${restoreLake deps}
           mkdir -p "$TMPDIR/orb-bins"
           ./scripts/build_orb_bins.sh --out-dir "$TMPDIR/orb-bins" ${lib.concatMapStringsSep " " (b: "--only ${b}") bins}
+          ${lib.optionalString keepLake ''
+            # Later layers import shared modules (e.g. Orb.Spec) that this
+            # layer's own binaries do not, so build the whole shared libraries
+            # here; otherwise Node, Core and Locald each recompile them.
+            (cd lean && SANDBOXED_ALLOW_RAW_LAKE=1 lake build Orb -- -DwarningAsError=true)
+            (cd lean/OrbBin && SANDBOXED_ALLOW_RAW_LAKE=1 lake build OrbBin -- -DwarningAsError=true)
+          ''}
           runHook postBuild
         '';
         installPhase = ''
