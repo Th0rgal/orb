@@ -9,6 +9,22 @@ Code: `src/managed/lifecycle.rs` (pure decision backed by
 `claim_for_mission` backed by `orb_vm_claim_step`), and
 `src/api/secret_broker.rs` (`orb_compute_secret_gate`).
 
+## Client lifecycle wire contract
+
+`GET /api/managed-machines` retains Core's `ready` state; all established
+clients treat `ready` and legacy `online` as running for status, cost and actions.
+Machine records expose `created_at` and `expires_at` as UTC ISO-8601 strings,
+while retaining `created_at_sec` and `expires_at_sec` for epoch-based callers.
+`deletable_at` is also a UTC ISO-8601 string.
+
+`POST /api/managed-machines/:id/extend` uses the same owner-filtered lifecycle
+and budget gate as MCP, accepts `ttl_minutes`, and honors `Idempotency-Key`.
+Controls follow provider capabilities: lean.ci has no extend or stop/resume;
+Colab has no stop/resume and extension changes only Core's TTL, never Google's
+runtime lifetime. Unknown capabilities must not grant non-Boat stop/resume.
+Regression replay: a real-shaped `ready` list record must render its countdown
+and supported actions; extending then refreshing must preserve those contracts.
+
 ## Providers & Secret Confinement
 
 | Provider (`provider`) | Workloads | Bootstrap | `supports_free_stop` | `supports_snapshots` | Minimum lease |

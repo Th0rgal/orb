@@ -10,7 +10,7 @@ import { pollWhileVisible } from "./poll";
 import { useNow } from "./time";
 import * as Ic from "./icons";
 import {
-  MANAGED_GROUP_PREVIEW_LIMIT, allowedSizes, budgetFull, budgetLeft, budgetLine, canStopMachine, costLine, credentialSourceLabel, groupMachinesByProvider, isProviderPersonallyEnabled, isProviderGloballyEnabled, isProviderUsable, listManagedProviders, managedSectionTitle, providerGroupSummary, providerLabel, providerStatusLine, sizeLabel, specLine, stopManagedMachine, ttlFraction, ttlShort, createManagedMachine, destroyManagedMachine, estimateCost, extendManagedMachine, isLive,
+  MANAGED_GROUP_PREVIEW_LIMIT, allowedSizes, budgetFull, budgetLeft, budgetLine, canExtendMachine, canStopMachine, costLine, credentialSourceLabel, groupMachinesByProvider, isProviderPersonallyEnabled, isProviderGloballyEnabled, isProviderUsable, listManagedProviders, managedSectionTitle, providerGroupSummary, providerLabel, providerStatusLine, sizeLabel, specLine, stopManagedMachine, ttlFraction, ttlShort, createManagedMachine, destroyManagedMachine, estimateCost, extendManagedMachine, isLive,
   isStarting, listManagedMachines, liveCost, machineName, managedNodeIds, managedError, minutesLabel, recentMachines, setManagedProviderPreference, sizeSpec, stateLabel, ttlLeft, ttlUrgent, updateManagedProvider,
   spendDayDetail, spendFraction, spendSummary, spendWeekday,
   machineOwner, reapLine, usd, usdPerHour, isStopped, resumeManagedMachine, listManagedSnapshots, deleteManagedSnapshot, snapshotLine, type ManagedSnapshot, type CreateManagedMachine, type DailySpend, type ManagedBudget, type ManagedMachine, type ManagedMachinesResponse, type ManagedProviderInfo, type ManagedProviderPatch, type ManagedSize,
@@ -106,7 +106,7 @@ function ManagedRow(p: { m: ManagedMachine; fetchedAt: number; disk?: number | n
   const starting = () => isStarting(p.m);
   const failed = () => p.m.state === "failed";
   const destroying = () => p.m.state === "destroying";
-  const dot = () => p.m.state === "online" ? "on" : failed() ? "off" : live() ? "warn" : "";
+  const dot = () => (p.m.state === "online" || p.m.state === "ready") ? "on" : failed() ? "off" : live() ? "warn" : "";
   const details = () => [p.m.reason ? `Reason: ${p.m.reason}` : "", p.m.project ? `Project: ${p.m.project}` : "", p.m.id && !p.m.id.startsWith("pending-") ? `Machine ${p.m.id}` : "", p.m.provider_id ? `${p.m.provider} ${p.m.provider_id}` : "", p.m.node_id ? `Node ${p.m.node_id}` : "", p.m.image ? `Image ${p.m.image}` : ""].filter(Boolean).join("\n");
   const owner = () => p.m.owner_mission_id ?? undefined;
   const ownerKind = () => machineOwner(p.m).kind;
@@ -115,7 +115,7 @@ function ManagedRow(p: { m: ManagedMachine; fetchedAt: number; disk?: number | n
   const canAct = () => live() && !destroying() && !!p.onDestroy;
   const [menu, setMenu] = createSignal<{ x: number; y: number } | null>(null);
   const menuItems = (): MenuEntry[] => [
-    ...(!starting() ? [{ kind: "item" as const, label: "Extend +1 h", disabled: p.busy, onClick: () => p.onExtend?.() }] : []),
+    ...(p.onExtend ? [{ kind: "item" as const, label: p.m.provider === "colab" ? "Extend Core TTL +1 h (runtime not guaranteed)" : "Extend +1 h", disabled: p.busy, onClick: () => p.onExtend?.() }] : []),
     ...(p.onStop ? [{ kind: "item" as const, label: "Stop", disabled: p.busy, onClick: () => p.onStop?.() }] : []),
     { kind: "item", label: "Destroy", danger: true, disabled: p.busy, onClick: () => p.onDestroy?.() },
   ];
@@ -159,7 +159,7 @@ function ManagedRow(p: { m: ManagedMachine; fetchedAt: number; disk?: number | n
       </Show>
       <Show when={canAct()}>
         <span class="managed-inline-actions">
-          <Show when={!starting()}><button class="s-btn sm" disabled={p.busy} onClick={p.onExtend}>Extend +1 h</button></Show>
+          <Show when={p.onExtend}><button class="s-btn sm" disabled={p.busy} onClick={p.onExtend}>{p.m.provider === "colab" ? "Core TTL +1 h" : "Extend +1 h"}</button></Show>
           <Show when={p.onStop}><button class="s-btn sm quiet" disabled={p.busy} onClick={p.onStop}>Stop</button></Show>
           <button class="s-btn sm quiet danger" disabled={p.busy} onClick={p.onDestroy}>Destroy</button>
         </span>
@@ -589,7 +589,7 @@ export function ManagedMachines(p: { nodes?: readonly RemoteNodeView[] | null; o
     if (m.state === "failed") return { onRetry: () => { const r = watched().get(m.id)!; dismiss(m.id); void create(r, sizeOf(r.size ?? m.size)); }, onDismiss: () => dismiss(m.id) };
     return {
       busy: busy() === m.id,
-      onExtend: () => void extend(m),
+      ...(canExtendMachine(m, data()?.providers) ? { onExtend: () => void extend(m) } : {}),
       ...(canStopMachine(m, data()?.providers) ? { onStop: () => void stop(m) } : {}),
       onDestroy: () => setConfirm(m),
     };

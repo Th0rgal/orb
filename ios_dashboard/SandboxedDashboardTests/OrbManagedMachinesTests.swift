@@ -32,6 +32,22 @@ final class OrbManagedMachinesTests: XCTestCase {
         XCTAssertEqual(try OrbManaged.decode(json), r)
     }
 
+    func testReadyLifecycleCapabilities() throws {
+        var m = try OrbManaged.decode(Data(payload.utf8)).machines[0]
+        m.state = "ready"
+        m.provider = "boat"
+        XCTAssertTrue(OrbManaged.canStop(m))
+        XCTAssertTrue(OrbManaged.canExtend(m))
+        m.provider = "leanci"
+        XCTAssertFalse(OrbManaged.canStop(m))
+        XCTAssertFalse(OrbManaged.canExtend(m))
+        m.provider = "colab"
+        XCTAssertFalse(OrbManaged.canStop(m))
+        XCTAssertTrue(OrbManaged.canExtend(m))
+        m.state = "stopped"
+        XCTAssertFalse(OrbManaged.canExtend(m))
+    }
+
     func testCountdown() {
         let exp = "2026-10-22T11:05:09.500Z"
         XCTAssertEqual(OrbManaged.ttlLeft(exp, now: at("2026-10-22T10:00:00Z")), "1h 05m")
