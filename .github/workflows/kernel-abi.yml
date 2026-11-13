@@ -3,6 +3,8 @@ name: Kernel ABI
 on:
   push:
     branches: [master, main, "release/*"]
+    # Roadmap/docs pushes must not queue behind (and so cancel) pending master runs.
+    paths-ignore: ['docs/**']
   pull_request:
     branches: [master, main]
     types: [opened, synchronize, reopened, ready_for_review]
