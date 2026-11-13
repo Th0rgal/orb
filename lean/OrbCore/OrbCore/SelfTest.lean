@@ -5020,6 +5020,77 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   if bobStopVmSt != 200 || bobResumeVmSt != 200 || bobResumeRetrySt != 200 || bobResumeRetryBody != bobResumeBody ||
       ((resumedRest.field? "machine").getD .null).fieldUInt64? "node_boot_epoch" != some 2 then
     return (← fail s!"REST resume must preserve identity and advance only on poll: {bobResumeVmSt}:{bobResumeBody}")
+  let (aliceExtBobVmSt, _, _) ← sendReq "POST" s!"/api/managed-machines/{bobVmId}/extend" aliceTok
+    "{\"ttl_minutes\":5}" "alice-rest-extend-bob"
+  let (admExtBobVmSt, _, _) ← sendReq "POST" s!"/api/managed-machines/{bobVmId}/extend" adminTok
+    "{\"ttl_minutes\":5}" "adm-rest-extend-bob"
+  let noOverrideApp := { app with managedProvisioningOverride? := none }
+  let sendNoOverrideReq (method target tok body : String) (retryKey : String := "") : IO (Nat × String) := do
+    let authHdr := (if tok.isEmpty then "" else s!"Authorization: Bearer {tok}\r\n") ++
+      (if retryKey.isEmpty then "" else s!"Idempotency-Key: {retryKey}\r\n")
+    let raw := if body.isEmpty then
+        s!"{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authHdr}\r\n"
+      else
+        s!"{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authHdr}Content-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+    match parseRequest raw.toUTF8 none with
+    | .error e => return (0, s!"parse_err:{e}")
+    | .ok req =>
+      match ← dispatchCoreRequest noOverrideApp req nowSec with
+      | .error _ => return (0, "dispatch_err")
+      | .ok resp => return (resp.status, (String.fromUTF8? resp.body).getD "")
+  let (bobExtendLeanciSt, bobExtendLeanciBody) ← sendNoOverrideReq "POST"
+    s!"/api/managed-machines/{bobVmId}/extend" bobTok "{\"ttl_minutes\":5}" "bob-rest-extend-leanci"
+  if aliceExtBobVmSt != 404 || admExtBobVmSt != 404 || bobExtendLeanciSt != 409 ||
+      (bobExtendLeanciBody.splitOn "managed_provider_extend_unsupported").length != 2 then
+    return (← fail s!"REST extend must stay owner-scoped and reject unsupported providers: alice={aliceExtBobVmSt} adm={admExtBobVmSt} leanci={bobExtendLeanciSt}:{bobExtendLeanciBody}")
+  let boatExtCalls ← IO.mkRef (0 : Nat)
+  let boatExtApp := { app with
+    managedProvisioningOverride? := some (
+      { ManagedProvisioningTests.mockPolicyProvider mStore "boat" with
+        quoteCents := fun _ ttl => .ok ttl
+        extend := fun _ _ => do boatExtCalls.modify (· + 1); return .ok ()
+      },
+      { coreUrl := "https://core.example", script := "#!/bin/sh\nexit 0\n" })
+  }
+  let sendBoatReq (method target tok body : String) (retryKey : String := "") : IO (Nat × String) := do
+    let authHdr := (if tok.isEmpty then "" else s!"Authorization: Bearer {tok}\r\n") ++
+      (if retryKey.isEmpty then "" else s!"Idempotency-Key: {retryKey}\r\n")
+    let raw := if body.isEmpty then
+        s!"{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authHdr}\r\n"
+      else
+        s!"{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authHdr}Content-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+    match parseRequest raw.toUTF8 none with
+    | .error e => return (0, s!"parse_err:{e}")
+    | .ok req =>
+      match ← dispatchCoreRequest boatExtApp req nowSec with
+      | .error _ => return (0, "dispatch_err")
+      | .ok resp => return (resp.status, (String.fromUTF8? resp.body).getD "")
+  let .ok _ ← provisionManagedMachine mStore mfBoot {
+    id := "bob-boat-ext", sandboxName := "orb-managed-bob-boat-ext", provider := "boat",
+    size := "small", ownerUserId := bobId, ownerKind := "user", ttlMinutes := 5, spentCents := 5
+  } nowSec | return (← fail "bob boat extend fixture failed")
+  let .ok _ ← bindManagedProviderId mStore "bob-boat-ext" "remote-bob-boat-ext" 1
+    | return (← fail "bob boat bind fixture failed")
+  let .ok _ ← recordAuthenticatedManagedPoll mStore "bob-boat-ext" 1 nowSec
+    | return (← fail "bob boat poll fixture failed")
+  let (boatExtSt, boatExtBody) ← sendBoatReq "POST" "/api/managed-machines/bob-boat-ext/extend" bobTok
+    "{\"ttl_minutes\":5}" "bob-boat-rest-extend"
+  let (boatExtRetrySt, boatExtRetryBody) ← sendBoatReq "POST" "/api/managed-machines/bob-boat-ext/extend" bobTok
+    "{\"ttl_minutes\":5}" "bob-boat-rest-extend"
+  let (boatListSt, boatListBody) ← sendBoatReq "GET" "/api/managed-machines" bobTok ""
+  let _ ← sendBoatReq "DELETE" "/api/managed-machines/bob-boat-ext" bobTok ""
+  let boatExtMachine := ((OrbBin.Json.parse boatExtBody).toOption.getD .null).field? "machine" |>.getD .null
+  let boatListMachine := (((OrbBin.Json.parse boatListBody).toOption.getD .null).fieldArr? "machines" |>.getD #[]).find?
+    (·.fieldStr? "id" == some "bob-boat-ext") |>.getD .null
+  if boatExtSt != 200 || boatExtRetrySt != 200 || boatExtBody != boatExtRetryBody || (← boatExtCalls.get) != 1 ||
+      boatListSt != 200 || boatExtMachine.fieldStr? "state" != some "ready" ||
+      boatExtMachine.fieldUInt64? "expires_at_sec" != some (nowSec + 600) ||
+      boatExtMachine.fieldStr? "expires_at" != some (formatEpochIso8601Utc (nowSec + 600)) ||
+      boatExtMachine.field? "deletable_at" != some .null ||
+      boatExtMachine.fieldNat? "deletable_at_sec" != some 0 ||
+      boatListMachine.fieldStr? "expires_at" != some (formatEpochIso8601Utc (nowSec + 600)) ||
+      boatListMachine.field? "deletable_at" != some .null then
+    return (← fail s!"REST extend must update and replay the ready machine lease: st={boatExtSt}/{boatExtRetrySt} calls={← boatExtCalls.get} ext={boatExtBody} list={boatListBody}")
   let (_, admVmsBody, _) ← sendReq "GET" "/api/managed-machines" adminTok ""
   let (admDelBobVmSt, _, _) ← sendReq "DELETE" s!"/api/managed-machines/{bobVmId}" adminTok ""
   let (bobDelBobVmSt, _, _) ← sendReq "DELETE" s!"/api/managed-machines/{bobVmId}" bobTok ""
