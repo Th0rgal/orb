@@ -192,6 +192,7 @@ import {
   withLiveExecution,
   nativeActionTargets,
   isNativeChromeEnabled,
+  shouldAutoCollapseSidebar,
   notifyNativeChromeShell,
 } from "./nativeChromeBridge";
 
@@ -268,11 +269,16 @@ export default function App() {
     registerTranscriptWarmer(warmTranscriptMarkdown);
     onCleanup(() => registerTranscriptWarmer(null));
   });
-  const [sidebar, setSidebar] = createSignal(!window.matchMedia("(max-width: 720px)").matches);
-  const setSidebarWithNative = (next: boolean) => {
-    setSidebar(next);
-    if (nativeChromeActive) notifyNativeChromeShell("set_native_sidebar", { open: next });
-  };
+  const narrowSidebar = () => shouldAutoCollapseSidebar(window.matchMedia("(max-width: 720px)").matches, nativeChromeActive);
+  const [sidebar, setSidebar] = createSignal(!narrowSidebar());
+  const setSidebarWithNative = setSidebar;
+  // The WebView's sidebar signal is the single owner of sidebar visibility. The native pane
+  // mirrors every change, including the initial value, so its toolbar and the WebView's are
+  // never both on screen.
+  createEffect(() => {
+    const open = sidebar();
+    if (nativeChromeActive) notifyNativeChromeShell("set_native_sidebar", { open });
+  });
   const [sbWidth, setSbWidth] = createSignal(220);
   const keepAlivePool = createMissionKeepAlivePool();
   const [deleteMissionRequest, setDeleteMissionRequest] = createSignal<string[] | null>(null);
@@ -1014,7 +1020,7 @@ export default function App() {
       savedSidebarScrollTop = sbScrollEl.scrollTop;
     }
     navigationVersion++;
-    if (window.matchMedia("(max-width: 720px)").matches) setSidebar(false);
+    if (narrowSidebar()) setSidebar(false);
     batch(() => {
       setSelected(id);
       if (push) {
@@ -1402,7 +1408,7 @@ export default function App() {
       } else open(destination.id === 'new-agent' ? null : destination.id);
       return;
     }
-    if (e.key === "Escape" && sidebar() && window.matchMedia("(max-width: 720px)").matches) {
+    if (e.key === "Escape" && sidebar() && narrowSidebar()) {
       e.preventDefault(); setSidebar(false); return;
     }
     if (ctx() && e.key === "Escape") {
@@ -2342,7 +2348,7 @@ export default function App() {
             <Match when={selected() === "inbox"}>
               <Suspense>
                 <InboxPage
-                  onFocusContent={() => { if (window.matchMedia("(max-width: 720px)").matches) setSidebar(false); }}
+                  onFocusContent={() => { if (narrowSidebar()) setSidebar(false); }}
                   onDeleteMission={(id) => setDeleteMissionRequest([id])}
                   missions={inboxMissions()}
                   projects={liveProjects()}

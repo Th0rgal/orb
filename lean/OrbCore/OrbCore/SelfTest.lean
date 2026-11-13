@@ -10,11 +10,26 @@
 -/
 import OrbCore
 import OrbCore.ManagedProviderTests
+import OrbCore.ManagedProviderLeanciTests
+import OrbCore.ManagedProviderColabTests
 import OrbCore.ManagedProviderSealingTests
+import OrbCore.ManagedProviderAvailabilityTests
+import OrbCore.ManagedSpawnActionsTests
 import OrbCore.ManagedProvisioningTests
 import OrbCore.ManagedResumeTests
+import OrbCore.WakeupRestartTests
+import OrbCore.TurnOutcomeTests
 import OrbCore.ManagedAccessTests
 import OrbCore.ManagedTtlTests
+import OrbCore.ManagedHarvestTests
+import OrbCore.AutoPlacementTests
+import OrbCore.ManagedReuseTests
+import OrbCore.ManagedSnapshotLifecycleTests
+import OrbCore.NodeLivenessTests
+import OrbCore.ComputeRollupTests
+import OrbCore.ManagedSnapshotCatalogTests
+import OrbCore.ProviderContractTests
+import OrbCore.ProxyRoutingTests
 
 namespace OrbCore.SelfTest
 
@@ -1903,7 +1918,7 @@ private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let adapterOk :=
     match observeProviderPayload "boat" "m1" 200 (.obj #[("state", .str "running"), ("spent_cents", .nat 12)]),
           observeProviderPayload "leanci" "m2" 200 (.obj #[("status", .str "halted")]),
-          observeProviderPayload "boost" "m2b" 200 (.obj #[("status", .str "reaped")]),
+          observeProviderPayload "leanci" "m2b" 200 (.obj #[("status", .str "reaped")]),
           observeProviderPayload "hetzner" "m3" 200 (.obj #[("status", .str "off")]),
           observeProviderPayload "vastai" "m4" 200 (.obj #[("state", .str "exited")]),
           observeProviderPayload "scaleway" "m5" 200 (.obj #[("state", .str "stopped_in_place")]),
@@ -1914,7 +1929,10 @@ private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
       o2b.provider == "leanci" && o2b.observedStatus == "destroyed" && o2b.orphaned &&
       o3.observedStatus == "stopped" &&
       o4.observedStatus == "stopped" && o5.observedStatus == "stopped" &&
-      o6.orphaned && (observeProviderPayload "aws" "m7" 200 (.obj #[])).isOk == false
+      o6.orphaned && (observeProviderPayload "aws" "m7" 200 (.obj #[])).isOk == false &&
+      -- The former provider name is not an alias: only the one-time migration knows it.
+      (observeProviderPayload "boost" "m8" 200 (.obj #[])).isOk == false &&
+      canonicalizeProvider "boost" == "boost" && !isKnownProvider "boost" && canonicalizeProvider "lean.ci" == "leanci"
     | _, _, _, _, _, _, _ => false
   if !adapterOk then
     closeManagedComputeStore mst
@@ -4378,6 +4396,29 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
       pure status
     finally OrbBin.PosixExt.closeFdRaw sealLock.toInt32
   if sealConflict != 409 then return (← fail "provider update silently ignored seal lock contention")
+  -- A credential edit must not turn the global fleet back on merely because
+  -- Boat's independent switch was left on when the global switch was disabled.
+  let priorFleet ← app.managedRef.get
+  let (disableFleetStatus, _, _) ← sendReq "PUT" "/api/managed-machines/settings" adminTok
+    "{\"enabled\":false,\"boat_enabled\":true}"
+  let (credentialStatus, _, _) ← sendReq "PATCH" "/api/managed-machines/providers/leanci" adminTok
+    "{\"api_key\":\"synthetic-credential-only-fixture\"}"
+  let (readFleetStatus, readFleetBody, _) ← sendReq "GET" "/api/managed-machines/settings" adminTok ""
+  let observedFleet := (OrbBin.Json.parse readFleetBody).toOption.getD .null
+  let restoreBody := OrbBin.Json.renderCompact (.obj #[("enabled", .bool priorFleet.enabled), ("boat_enabled", .bool priorFleet.boatEnabled)])
+  let (restoreStatus, _, _) ← sendReq "PUT" "/api/managed-machines/budget" adminTok restoreBody
+  if disableFleetStatus != 200 || credentialStatus != 200 || readFleetStatus != 200 || restoreStatus != 200 ||
+      observedFleet.fieldBool? "enabled" != some false || observedFleet.fieldBool? "boat_enabled" != some true then
+    return (← fail s!"credential-only edit changed independent fleet enablement: {disableFleetStatus}/{credentialStatus}/{readFleetStatus}/{restoreStatus}: {readFleetBody}")
+  let (providersStatus, providersBody, _) ← sendReq "GET" "/api/managed-machines/providers" adminTok ""
+  let (machinesStatus, machinesBody, _) ← sendReq "GET" "/api/managed-machines" adminTok ""
+  let dedicatedProviders := (OrbBin.Json.parse providersBody).toOption.bind (·.asArr?) |>.getD #[]
+  let embeddedProviders := ((OrbBin.Json.parse machinesBody).toOption.getD .null).fieldArr? "providers" |>.getD #[]
+  let dedicatedLean := dedicatedProviders.find? (fun p => p.fieldStr? "provider" == some "leanci")
+  let embeddedLean := embeddedProviders.find? (fun p => p.fieldStr? "provider" == some "leanci")
+  if providersStatus != 200 || machinesStatus != 200 || dedicatedProviders.size != knownProviders.size ||
+      (dedicatedLean.bind (·.fieldBool? "configured")) != some true || dedicatedLean != embeddedLean then
+    return (← fail "reserved provider route or embedded catalog projection diverged")
 
   -- Session epoch revocation: password reset bumps `session_epoch`, immediately invalidating `aliceTok0`!
   let (rstSt, _, _) ← sendReq "POST" s!"/api/admin/users/{aliceId}/reset-password" adminTok "{\"password\":\"alice-newpass-123456\"}"
@@ -4461,7 +4502,8 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
      (alCatBody.splitOn "vllm-internal.corp.local").length != 1 ||
      (alCatDisabledBody.splitOn "qwen3-coder").length != 1 ||
      admChainsSt != 200 || (admChainsBody.splitOn "sk-inline-chain-secret").length != 1 ||
-     (admChainsBody.splitOn "vllm-internal.corp.local").length < 2 ||
+     (admChainsBody.splitOn "vllm-internal.corp.local").length != 1 ||
+     (admChainsBody.splitOn "\"entries\":[{\"provider_id\":\"custom:cust-vllm\",\"model_id\":\"qwen3-coder\"}]").length < 2 ||
      alChainsSt != 200 || (alChainsBody.splitOn "cust-chain").length < 2 ||
      (alChainsBody.splitOn "sk-inline-chain-secret").length != 1 ||
      (alChainsBody.splitOn "vllm-internal.corp.local").length != 1 ||
@@ -4602,16 +4644,20 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
      (admProvsBody.splitOn "internal-a.example").length < 2 then
     return (← fail s!"provider secret/baseUrl redaction mismatch: al={alProvsBody} adm={admProvsBody}")
 
-  -- `alice` disables `prov-a` for her missions; mints `mission_proxy_token`; `/v1/responses` routes `alice` to `prov-b` while `admin` still uses `prov-a`!
+  -- `alice` disables `prov-a` (OpenAI). A model is never served by another model family: her `gpt-5`
+  -- request is refused (403), it is NOT rerouted to the Anthropic account as the old expectation
+  -- encoded. Her Claude requests use `prov-b`; `admin` still reaches `prov-a` for `gpt-5`.
   let (alPrefSt, _, _) ← sendReq "PUT" "/api/ai/providers/prov-a/preference" aliceTok "{\"enabled\":false}"
   let (mptSt, mptBody, _) ← sendReq "POST" s!"/api/control/missions/{alMisId}/proxy-token" aliceTok "{}"
   let mptTok := ((OrbBin.Json.parse mptBody).toOption.getD (.obj #[]) |>.fieldStr? "token").getD ""
-  let (alProxy1St, alProxy1Body, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"gpt-5\",\"input\":\"hi\"}"
+  let (alGptSt, alGptBody, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"gpt-5\",\"input\":\"hi\"}"
+  let (alProxy1St, alProxy1Body, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"claude-fable-5-2\",\"input\":\"hi\"}"
   let (admProxy1St, admProxy1Body, _) ← sendReq "POST" "/v1/responses" adminTok "{\"model\":\"gpt-5\",\"input\":\"hi\"}"
   -- Second call (`30` cents each -> `30 < 50` admitted, becomes `60 >= 50`), third call hits `alice`'s 50-cent daily cap -> `429`!
-  let (alProxy2St, _, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"gpt-5\",\"input\":\"hi2\"}"
-  let (alProxy3St, alProxy3Body, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"gpt-5\",\"input\":\"hi3\"}"
+  let (alProxy2St, _, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"claude-fable-5-2\",\"input\":\"hi2\"}"
+  let (alProxy3St, alProxy3Body, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"claude-fable-5-2\",\"input\":\"hi3\"}"
   if alPrefSt != 200 || (mptSt != 200 && mptSt != 201) || !mptTok.startsWith "orb-mpt-v1_" ||
+     alGptSt != 403 || (alGptBody.splitOn "no_user_enabled_providers").length < 2 ||
      alProxy1St != 200 || (alProxy1Body.splitOn "\"acct\":\"prov-b\"").length < 2 ||
      admProxy1St != 200 || (admProxy1Body.splitOn "\"acct\":\"prov-a\"").length < 2 ||
      alProxy2St != 200 || alProxy3St != 429 ||
@@ -4621,9 +4667,9 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   -- Managed VMs: `alice` hitting daily spend cap gets `429` on `POST /api/managed-machines`, while `bob` (`no cap`, disables `boat`) spawns an auto VM (`leanci`) owned by `bob`, invisible to `admin` (`404` on `DELETE`)!
   let (alVmCapSt, _, _) ← sendReq "POST" "/api/managed-machines" aliceTok "{\"provider\":\"boat\",\"name\":\"alice-vm\"}"
   let (bobPrefBoatSt, _, _) ← sendReq "PUT" "/api/managed-machines/providers/boat/preference" bobTok "{\"enabled\":false}"
-  let (bobVmAutoSt, bobVmAutoBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"auto\",\"name\":\"bob-vm\"}" "bob-managed-create"
+  let (bobVmAutoSt, bobVmAutoBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"auto\",\"name\":\"bob-vm\",\"wait\":true}" "bob-managed-create"
   let beforeRetrySpend ← getUserSpentTodayCents store bobId (formatEpochIso8601Utc nowSec |>.take 10 |>.toString)
-  let (bobRetrySt, bobRetryBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"auto\",\"name\":\"bob-vm\"}" "bob-managed-create"
+  let (bobRetrySt, bobRetryBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"auto\",\"name\":\"bob-vm\",\"wait\":true}" "bob-managed-create"
   let afterRetrySpend ← getUserSpentTodayCents store bobId (formatEpochIso8601Utc nowSec |>.take 10 |>.toString)
   if bobRetrySt != 201 || bobRetryBody != bobVmAutoBody || beforeRetrySpend != afterRetrySpend then
     return (← fail "managed REST retry must not create another VM or charge spend twice")
@@ -4656,6 +4702,45 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
      admDelBobVmSt != 404 || bobDelBobVmSt != 200 then
     return (← fail s!"managed VM multi-user isolation/prefs/cap failed: alCap={alVmCapSt} bobVm={bobVmAutoSt}:{bobVmAutoBody} admVms={admVmsBody} admDel={admDelBobVmSt} bobDel={bobDelBobVmSt}")
 
+  -- A disabled fleet is reported as such, not as a spend cap.
+  let (fleetOffSt, _, _) ← sendReq "PUT" "/api/managed-machines/settings" adminTok "{\"enabled\":false}"
+  let (offCreateSt, offCreateBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"leanci\",\"name\":\"bob-off\"}"
+  let (fleetOnSt, _, _) ← sendReq "PUT" "/api/managed-machines/settings" adminTok "{\"enabled\":true}"
+  let (provOffSt, _, _) ← sendReq "PATCH" "/api/managed-machines/providers/leanci" adminTok "{\"enabled\":false}"
+  let (provOffCreateSt, provOffCreateBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"leanci\",\"name\":\"bob-off\"}"
+  let (provOnSt, _, _) ← sendReq "PATCH" "/api/managed-machines/providers/leanci" adminTok "{\"enabled\":true}"
+  if fleetOffSt != 200 || fleetOnSt != 200 || provOffSt != 200 || provOnSt != 200 || offCreateSt != 409 ||
+      (offCreateBody.splitOn "managed_fleet_disabled").length != 2 || provOffCreateSt != 409 ||
+      (provOffCreateBody.splitOn "provider_disabled").length != 2 then
+    return (← fail s!"disabled fleet or provider must be named: {offCreateSt}:{offCreateBody} / {provOffCreateSt}:{provOffCreateBody}")
+
+  -- REST create without `wait` answers 202 at once with the provisioning machine
+  -- and an action to poll; a retry with the same key returns the same machine.
+  let (asyncSt, asyncBody, _) ← sendReq "POST" "/api/managed-machines" bobTok
+    "{\"provider\":\"leanci\",\"name\":\"bob-async\",\"ttl_minutes\":5}" "bob-async-create"
+  let (asyncRetrySt, asyncRetryBody, _) ← sendReq "POST" "/api/managed-machines" bobTok
+    "{\"provider\":\"leanci\",\"name\":\"bob-async\",\"ttl_minutes\":5}" "bob-async-create"
+  let asyncJson := (OrbBin.Json.parse asyncBody).toOption.getD .null
+  let asyncRetry := (OrbBin.Json.parse asyncRetryBody).toOption.getD .null
+  let asyncAction := (asyncJson.fieldStr? "action_id").getD ""
+  let asyncId := (asyncJson.fieldStr? "id").getD ""
+  if asyncSt != 202 || asyncRetrySt != 202 || asyncAction.isEmpty || asyncId.isEmpty ||
+      asyncRetry.fieldStr? "action_id" != some asyncAction || asyncRetry.fieldStr? "id" != some asyncId then
+    return (← fail s!"managed REST create must return one prompt receipt: {asyncSt}:{asyncBody} / {asyncRetrySt}:{asyncRetryBody}")
+  let mut asyncState := ""
+  let mut asyncFinal := OrbBin.Json.JVal.null
+  for _ in [0:2000] do
+    let (_, pollBody, _) ← sendReq "GET" s!"/api/managed-machines/actions/{asyncAction}" bobTok ""
+    asyncFinal := (OrbBin.Json.parse pollBody).toOption.getD .null
+    asyncState := (asyncFinal.fieldStr? "state").getD ""
+    if asyncState != "accepted" && asyncState != "running" then break
+    IO.sleep 5
+  let (alicePollSt, _, _) ← sendReq "GET" s!"/api/managed-machines/actions/{asyncAction}" aliceTok ""
+  let (asyncDelSt, _, _) ← sendReq "DELETE" s!"/api/managed-machines/{asyncId}" bobTok ""
+  if asyncState != "succeeded" || ((asyncFinal.field? "result").getD .null).fieldStr? "state" != some "ready" ||
+      ((asyncFinal.field? "result").getD .null).fieldStr? "id" != some asyncId || alicePollSt != 404 || asyncDelSt != 200 then
+    return (← fail s!"managed REST action must settle on the real machine and stay owner-scoped: {OrbBin.Json.renderCompact asyncFinal} alice={alicePollSt} del={asyncDelSt}")
+
   -- MCP uses exactly the same mock provider/bootstrap pipeline as REST, with
   -- ownership derived from its authenticated mission rather than tool arguments.
   let .ok () ← upsertMission store {
@@ -4673,12 +4758,33 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
     "spawn_managed_machine" parityArgs nowSec none app.managedProvisioningOverride?
   let mcpReplay ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
     "spawn_managed_machine" parityArgs nowSec none app.managedProvisioningOverride?
-  let createdJson := (OrbBin.Json.parse mcpCreated).toOption.getD .null
-  let createdItem := (createdJson.field? "result").getD .null
+  -- The spawn tool answers at once with an action; the machine arrives through get_action.
+  let acceptedJson := (OrbBin.Json.parse mcpCreated).toOption.getD .null
+  let acceptedAction := ((acceptedJson.field? "result").getD .null).fieldStr? "action_id" |>.getD ""
+  let replayAction := (((OrbBin.Json.parse mcpReplay).toOption.getD .null).field? "result").getD .null
+  if acceptedAction.isEmpty || replayAction.fieldStr? "action_id" != some acceptedAction then
+    return (← fail s!"managed MCP spawn must return one action receipt for a retried key: {mcpCreated} / {mcpReplay}")
+  let mut createdJson := OrbBin.Json.JVal.null
+  let mut actionState := ""
+  for _ in [0:2000] do
+    let polled ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
+      "get_action" (.obj #[("action_id", .str acceptedAction)]) nowSec none app.managedProvisioningOverride?
+    createdJson := (OrbBin.Json.parse polled).toOption.getD .null
+    actionState := (((createdJson.field? "result").getD .null).fieldStr? "state").getD ""
+    if actionState != "accepted" && actionState != "running" then break
+    IO.sleep 5
+  if actionState != "succeeded" then
+    return (← fail s!"managed MCP spawn action did not succeed: {OrbBin.Json.renderCompact createdJson}")
+  let foreignPoll ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot
+    { parityClaims with sessionId := "foreign-action-session", missionId := "m-not-the-owner" }
+    "get_action" (.obj #[("action_id", .str acceptedAction)]) nowSec none app.managedProvisioningOverride?
+  if (((OrbBin.Json.parse foreignPoll).toOption.getD .null).fieldBool? "ok") == some true then
+    return (← fail "another mission read a managed spawn receipt")
+  let createdItem := (((createdJson.field? "result").getD .null).field? "result").getD .null
   let parityId := (createdItem.fieldStr? "id").getD ""
   let some (parityVm, _) ← getManagedMachine? mStore parityId
     | return (← fail "managed MCP parity VM missing")
-  if createdJson.fieldBool? "ok" != some true || mcpReplay != mcpCreated ||
+  if createdJson.fieldBool? "ok" != some true ||
       parityVm.ownerUserId != bobId || parityVm.ownerMission != "m-managed-parity" ||
       parityVm.status != "ready" || parityVm.lastPollSec == 0 || parityVm.providerId == parityVm.id then
     return (← fail "REST/MCP provisioning parity or retry identity failed")
@@ -6283,11 +6389,12 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
     return (← fail s!"failed to init freshBareRepo (rc={freshRc})")
   let (putLocalSt, _, _) ← sendReq "PUT" "/api/library/skill/local-first" hsJwt
     "{\"content\":\"---\\nname: local-first\\ndescription: \\\"Local first\\\"\\n---\\n# Local\\n\"}"
-  -- Attach `freshBareRepo` while `library/` already exists on disk WITHOUT `.git` (before first `commit`)
+  -- Attach `freshBareRepo` while `library/` already exists on disk WITHOUT `.git` (before first `commit`),
+  -- then disconnect via `library_remote: null` and verify `origin` is actually removed without manual `git remote remove`!
   let (attachPreGitSt, _, attachPreGitBody) ← sendReq "PUT" "/api/settings/library-remote" hsJwt
     s!"\{\"library_remote\":{jsonEscape freshBareRepo}}"
   let (clrForNoopSt, _, _) ← sendReq "PUT" "/api/settings/library-remote" hsJwt "{\"library_remote\":null}"
-  let _ ← shRun s!"cd '{dataRoot}/library' && git remote remove origin"
+  let (discStatSt, _, discStatBody) ← sendReq "GET" "/api/library/status" hsJwt ""
   let (cmtLocalSt, _, _) ← sendReq "POST" "/api/library/commit" hsJwt "{\"message\":\"skill: local-first\"}"
   let (pushNoRemSt, _, pushNoRemBody) ← sendReq "POST" "/api/library/push" hsJwt ""
   let (attachRemSt, _, attachRemBody) ← sendReq "PUT" "/api/settings/library-remote" hsJwt
@@ -6296,12 +6403,13 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
   if putLocalSt != 200 ||
      attachPreGitSt != 200 || (attachPreGitBody.splitOn "\"library_reinitialized\":true").length != 2 ||
      (attachPreGitBody.splitOn "\"library_error\"").length != 1 || clrForNoopSt != 200 ||
+     discStatSt != 200 || (discStatBody.splitOn "\"remote\":null").length != 2 ||
      cmtLocalSt != 200 ||
      pushNoRemSt != 200 || (pushNoRemBody.splitOn "No remote configured").length != 2 ||
      attachRemSt != 200 || (attachRemBody.splitOn "\"library_reinitialized\":true").length != 2 ||
      (attachRemBody.splitOn "\"library_error\"").length != 1 ||
      pushFreshSt != 200 || (pushFreshBody.splitOn "Pushed successfully").length != 2 then
-    return (← fail s!"local-first library -> attach remote -> push failed: put={putLocalSt} preGit=({attachPreGitSt},{attachPreGitBody}) cmt={cmtLocalSt} noRem=({pushNoRemSt},{pushNoRemBody}) attach=({attachRemSt},{attachRemBody}) pushFresh=({pushFreshSt},{pushFreshBody})")
+    return (← fail s!"local-first library -> attach remote -> push failed: put={putLocalSt} preGit=({attachPreGitSt},{attachPreGitBody}) disc=({discStatSt},{discStatBody}) cmt={cmtLocalSt} noRem=({pushNoRemSt},{pushNoRemBody}) attach=({attachRemSt},{attachRemBody}) pushFresh=({pushFreshSt},{pushFreshBody})")
 
   let (badRemSt, _, _) ← sendReq "PUT" "/api/settings/library-remote" hsJwt "{\"library_remote\":\"--upload-pack=/bin/false\"}"
   let (setRemSt, _, setRemBody) ← sendReq "PUT" "/api/settings/library-remote" hsJwt
@@ -6322,6 +6430,15 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
   let (hugeRefSt, _, hugeRefBody) ← sendReq "GET" "/api/library/skill/orb-basics/files/references/huge.md" hsJwt ""
   let (delMdSt, _, _) ← sendReq "DELETE" "/api/library/skill/orb-basics/files/SKILL.md" hsJwt ""
   let (delivSt, _, delivBody) ← sendReq "GET" "/api/library/skill-delivery" hsJwt ""
+  -- Unreadable companion directory (`chmod 000`) MUST fail closed (`500`) on bundle reads instead of returning a truncated bundle
+  let euid ← OrbBin.PosixExt.geteuid
+  if euid != 0 then
+    discard <| OrbBin.PosixExt.chmod s!"{dataRoot}/library/skill/orb-basics/references" 0o000
+    let (unreadBundleSt, _, _) ← sendReq "GET" "/api/library/skill?include=bundle" hsJwt ""
+    let (unreadOneSt, _, _) ← sendReq "GET" "/api/library/skill/orb-basics" hsJwt ""
+    discard <| OrbBin.PosixExt.chmod s!"{dataRoot}/library/skill/orb-basics/references" 0o755
+    if unreadBundleSt != 500 || unreadOneSt != 500 then
+      return (← fail s!"unreadable companion directory did not fail closed: bundle={unreadBundleSt} one={unreadOneSt}")
   if listSt != 200 ||
      (listBody.splitOn "\"path\":\"skill/orb-basics\"").length != 2 ||
      (listBody.splitOn "\"scope\":\"global\"").length != 2 ||
@@ -6380,6 +6497,19 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
 set_option maxHeartbeats 800000 in
 set_option maxRecDepth 4000 in
 def runSuite (emitLogPath? : Option String) : IO UInt32 := do
+  try
+    OrbCore.WakeupRestartTests.run
+    OrbCore.TurnOutcomeTests.run
+  catch e =>
+    IO.eprintln s!"[orb-core-test] FAIL: {e}"
+    return 1
+  -- Wire compatibility regressions run before the broader integration suite.
+  try
+    OrbCore.ProviderContractTests.run
+    OrbCore.ProxyRoutingTests.run
+  catch e =>
+    IO.eprintln s!"[orb-core-test] FAIL: {e}"
+    return 1
   -- 1. Startup security fail-closed gates (`validateRuntimeSecurity`) + conflicting WS credential rejection
   let prodNoSecrets : CoreConfig := { devMode := false, host := "127.0.0.1" }
   let prodPlaceholder : CoreConfig := {
@@ -6419,6 +6549,8 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   -- Provider contracts use a mock transport: no live machines or provider credentials.
   try
     OrbCore.ManagedProviderTests.run
+    OrbCore.ManagedProviderLeanciTests.run
+    OrbCore.ManagedProviderColabTests.run
   catch e =>
     IO.eprintln s!"[orb-core-test] FAIL: {e}"
     return 1
@@ -6455,7 +6587,16 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     OrbCore.ManagedResumeTests.run tmpRoot
     OrbCore.ManagedAccessTests.run tmpRoot
     OrbCore.ManagedTtlTests.run tmpRoot
+    OrbCore.ManagedHarvestTests.run tmpRoot
+    OrbCore.AutoPlacementTests.run tmpRoot
+    OrbCore.ManagedReuseTests.run tmpRoot
+    OrbCore.ManagedSnapshotLifecycleTests.run tmpRoot
+    OrbCore.NodeLivenessTests.run tmpRoot
+    OrbCore.ComputeRollupTests.run tmpRoot
+    OrbCore.ManagedSnapshotCatalogTests.run tmpRoot
     OrbCore.ManagedProviderSealingTests.run tmpRoot
+    OrbCore.ManagedProviderAvailabilityTests.run tmpRoot
+    OrbCore.ManagedSpawnActionsTests.run store
   catch e =>
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: {e}"

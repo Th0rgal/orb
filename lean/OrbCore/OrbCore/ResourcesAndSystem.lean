@@ -295,7 +295,7 @@ private def inferencePoolLabel (id : String) : String :=
 private def managedClassLabel (provider size : String) : String :=
   let prov := match provider with
     | "boat" => "Boat"
-    | "boost" => "boost.ci"
+    | "leanci" => "lean.ci"
     | "hetzner" => "Hetzner"
     | "vastai" => "Vast.ai"
     | "scaleway" => "Scaleway"
@@ -304,14 +304,12 @@ private def managedClassLabel (provider size : String) : String :=
     | other => other
   s!"{prov} · {if size.isEmpty then "vm" else size}"
 
-/-- Nominal vCPU count for a managed VM size, in thousandths. -/
-private def managedSizeVcpuMilli (size : String) : Nat :=
-  match size with
-  | "small" => 2000
-  | "medium" => 4000
-  | "large" => 8000
-  | "xlarge" => 16000
-  | _ => 4000
+/-- vCPU of a managed VM in thousandths, from the provider's declared size.
+    An undeclared size counts as 4. -/
+private def managedSizeVcpuMilli (provider size : String) : Nat :=
+  match managedSizeSpec? provider size with
+  | some spec => spec.cpu * 1000
+  | none => 4000
 
 /-- vCPU assumed for a static node whose capacity Core has not sampled, in thousandths. -/
 private def staticNodeVcpuMilli : Nat := 8000
@@ -349,6 +347,84 @@ private def resourceBarState (status : String) : String :=
 private def missionStatusIsLive (status : String) : Bool :=
   status == "active" || status == "running" || status == "pending" || status == "queued" ||
   status == "waiting_background" || status == "blocked"
+
+structure ComputeSources where
+  /-- `(id, label, sublabel, totalMilli, activeMilli)` per machine class. -/
+  sources : Array (String × String × String × Nat × Nat)
+  classCounts : Array (String × Nat)
+  /-- `(class id, root mission, leased milli-vCPU)`. -/
+  links : Array (String × String × Nat)
+
+/-- Live compute capacity and use per machine class: the Core host by load,
+    the static fleet by size, managed VMs by what a mission holds. -/
+def liveComputeSources (store : CoreStore) (managedStore? : Option ManagedComputeStore) : IO ComputeSources := do
+  let (hostVcpu, load1Str, _, _) ← readHostCpuAndRam
+  let hostTotalMilli := hostVcpu * 1000
+  let mut sources : Array (String × String × String × Nat × Nat) :=
+    #[("core:host", "Local host", "local", hostTotalMilli, Nat.min hostTotalMilli (parseDecimalMilli load1Str))]
+  let (_, staticNodes) ← loadStaticRemoteNodes
+  if !staticNodes.isEmpty then
+    let n := staticNodes.size
+    sources := sources.push ("static:fleet", "Static fleet", s!"{n} host{if n == 1 then "" else "s"}", n * staticNodeVcpuMilli, 0)
+  let mut classCounts : Array (String × Nat) := #[]
+  let mut compLinks : Array (String × String × Nat) := #[]
+  if let some mc := managedStore? then
+    if let .ok mf ← loadManagedFleet mc true true 0 0 8 then
+      for vm in mf.machines do
+        if vm.status == "destroyed" then continue
+        let classId := s!"{vm.provider}:{if vm.size.isEmpty then "vm" else vm.size}"
+        let vcpu := managedSizeVcpuMilli vm.provider vm.size
+        let mut leased := 0
+        if !vm.ownerMission.isEmpty then
+          if let some root ← resolveRootMission store vm.ownerMission then
+            leased := vcpu
+            match compLinks.findIdx? (fun l => l.1 == classId && l.2.1 == root) with
+            | some li => compLinks := compLinks.modify li fun (c, m, v) => (c, m, v + vcpu)
+            | none => compLinks := compLinks.push (classId, root, vcpu)
+        match classCounts.findIdx? (·.1 == classId) with
+        | some ci => classCounts := classCounts.modify ci fun (c, k) => (c, k + 1)
+        | none => classCounts := classCounts.push (classId, 1)
+        match sources.findIdx? (·.1 == classId) with
+        | some si => sources := sources.modify si fun (i, l, s, t, a) => (i, l, s, t + vcpu, a + leased)
+        | none => sources := sources.push (classId, managedClassLabel vm.provider vm.size, "", vcpu, leased)
+  return { sources, classCounts, links := compLinks }
+
+/-- Record this minute's compute use per machine class. One row per class and
+    minute; a second sample in the same minute replaces the first. -/
+def sampleComputeRollup (store : CoreStore) (managedStore? : Option ManagedComputeStore) (nowSec : UInt64) :
+    IO (Except String Nat) := do
+  let live ← liveComputeSources store managedStore?
+  let bucket := nowSec / 60
+  for (id, _, _, total, active) in live.sources do
+    if let .error e ← execParamQuery store.missionsDb
+        ("INSERT OR REPLACE INTO compute_rollup_1m(bucket_unix_min,machine_class,node_id,root_mission_id,mission_id,state," ++
+         "vcpu_allocated,vcpu_busy) VALUES(CAST(?1 AS INTEGER),?2,'','','','sampled'," ++
+         "CAST(?3 AS REAL)/1000.0,CAST(?4 AS REAL)/1000.0);")
+        #[toString bucket, id, toString total, toString active] then
+      return .error e
+  -- The longest chart is seven days; keep a little more.
+  discard <| execParamQuery store.missionsDb
+    "DELETE FROM compute_rollup_1m WHERE bucket_unix_min < CAST(?1 AS INTEGER);" #[toString (bucket - min bucket (8 * 24 * 60))]
+  return .ok live.sources.size
+
+/-- Mean busy vCPU (thousandths) per chart bucket for each machine class, from
+    the minute samples. A bucket with no sample is absent. -/
+def computeRollupSeries (store : CoreStore) (firstMin step nb : Nat) : IO (Array (String × Array (Option Nat))) := do
+  let mut out : Array (String × Array (Option Nat)) := #[]
+  if let .ok rows ← execParamQuery store.missionsDb
+      ("SELECT machine_class, (bucket_unix_min - CAST(?1 AS INTEGER))/CAST(?2 AS INTEGER), " ++
+       "CAST(ROUND(AVG(vcpu_busy)*1000) AS INTEGER) FROM compute_rollup_1m " ++
+       "WHERE bucket_unix_min >= CAST(?1 AS INTEGER) AND state='sampled' GROUP BY 1,2;")
+      #[toString firstMin, toString step] then
+    for row in rows.extract 1 rows.size do
+      let id := (row[0]?).getD ""
+      let some index := (row[1]?).bind String.toNat? | continue
+      if index ≥ nb then continue
+      let value := ((row[2]?).bind String.toNat?).getD 0
+      match out.findIdx? (·.1 == id) with
+      | some at_ => out := out.modify at_ fun (k, series) => (k, series.set! index (some value))
+      | none => out := out.push (id, (Array.replicate nb none).set! index (some value))
+  return out
 
 /-- `GET /api/resources/overview`: the `ResourcesOverviewResponse` contract shared by desktop, iOS and Android.
     Inference figures are aggregated from `proxy_usage`. Core keeps no compute history, so compute series
@@ -400,36 +476,12 @@ def buildResourcesOverviewJson
       | some li => infLinks := infLinks.modify li fun (p, m, t, c) => (p, m, t + tok, c + cents)
       | none => infLinks := infLinks.push (pool, target, tok, cents)
 
-  -- Compute: live capacity per machine class as `(id, label, sublabel, totalMilli, activeMilli)`.
-  let (hostVcpu, load1Str, _, _) ← readHostCpuAndRam
-  let hostTotalMilli := hostVcpu * 1000
-  let mut sources : Array (String × String × String × Nat × Nat) :=
-    #[("core:host", "Local host", "local", hostTotalMilli, Nat.min hostTotalMilli (parseDecimalMilli load1Str))]
-  let (_, staticNodes) ← loadStaticRemoteNodes
-  if !staticNodes.isEmpty then
-    let n := staticNodes.size
-    sources := sources.push ("static:fleet", "Static fleet", s!"{n} host{if n == 1 then "" else "s"}", n * staticNodeVcpuMilli, 0)
-  let mut classCounts : Array (String × Nat) := #[]
-  let mut compLinks : Array (String × String × Nat) := #[]
-  if let some mc := managedStore? then
-    if let .ok mf ← loadManagedFleet mc true true 0 0 8 then
-      for vm in mf.machines do
-        if vm.status == "destroyed" then continue
-        let classId := s!"{vm.provider}:{if vm.size.isEmpty then "vm" else vm.size}"
-        let vcpu := managedSizeVcpuMilli vm.size
-        let mut leased := 0
-        if !vm.ownerMission.isEmpty then
-          if let some root ← resolveRootMission store vm.ownerMission then
-            leased := vcpu
-            match compLinks.findIdx? (fun l => l.1 == classId && l.2.1 == root) with
-            | some li => compLinks := compLinks.modify li fun (c, m, v) => (c, m, v + vcpu)
-            | none => compLinks := compLinks.push (classId, root, vcpu)
-        match classCounts.findIdx? (·.1 == classId) with
-        | some ci => classCounts := classCounts.modify ci fun (c, k) => (c, k + 1)
-        | none => classCounts := classCounts.push (classId, 1)
-        match sources.findIdx? (·.1 == classId) with
-        | some si => sources := sources.modify si fun (i, l, s, t, a) => (i, l, s, t + vcpu, a + leased)
-        | none => sources := sources.push (classId, managedClassLabel vm.provider vm.size, "", vcpu, leased)
+  -- Compute: live capacity per machine class, and its history from the minute samples.
+  let live ← liveComputeSources store managedStore?
+  let sources := live.sources
+  let classCounts := live.classCounts
+  let compLinks := live.links
+  let history ← computeRollupSeries store firstMin step nb
   let mut sourceVals : Array JVal := #[]
   let mut totalMilli := 0
   let mut activeMilli := 0
@@ -443,7 +495,11 @@ def buildResourcesOverviewJson
       ("id", .str id), ("label", .str label), ("sublabel", .str sublabel),
       ("total_vcpu", numFixed total 3), ("active_vcpu", numFixed active 3),
       ("idle_leased_vcpu", .num "0.0"), ("est_usd_per_h", .num "0.0"), ("health", .str "ok"),
-      ("series_vcpu", .arr ((Array.replicate (nb - 1) (.num "0.0")).push (numFixed active 3))),
+      -- Past buckets come from the samples; the last one is the live reading.
+      ("series_vcpu", .arr (((Array.range (nb - 1)).map fun index =>
+        match (history.find? (·.1 == id)).bind (fun (_, series) => (series[index]?).join) with
+        | some milli => numFixed milli 3
+        | none => .num "0.0").push (numFixed active 3))),
       ("series_usd_per_h", zeroSeries nb)
     ])
 
@@ -1176,7 +1232,7 @@ def buildLibraryStatusJson (libDir : String) (defaultRemote : String) : IO JVal 
       ("modified_files", .arr #[])
     ]
   let branch ← gitCurrentBranch libDir
-  let rem := (← gitOriginUrl? libDir).getD defaultRemote
+  let rem ← if defaultRemote.isEmpty then pure "" else pure ((← gitOriginUrl? libDir).getD defaultRemote)
   let (rcSt, stOut) ← runGitCapture #["status", "--porcelain"] (some libDir)
   let modLines :=
     if rcSt == 0 then
@@ -1184,13 +1240,14 @@ def buildLibraryStatusJson (libDir : String) (defaultRemote : String) : IO JVal 
     else []
   let mut ahead : Nat := 0
   let mut behind : Nat := 0
-  if let some upRef ← resolveRemoteTrackingRef libDir branch then
-    let (rcCnt, cntOut) ← runGitCapture #["rev-list", "--left-right", "--count", s!"HEAD...{upRef}"] (some libDir)
-    if rcCnt == 0 then
-      let nums := (cntOut.trimAscii.toString.split (fun c => c == '\t' || c == ' ')).toArray.filterMap (fun s => s.toString.toNat?)
-      if nums.size ≥ 2 then
-        ahead := nums[0]!
-        behind := nums[1]!
+  if !rem.isEmpty then
+    if let some upRef ← resolveRemoteTrackingRef libDir branch then
+      let (rcCnt, cntOut) ← runGitCapture #["rev-list", "--left-right", "--count", s!"HEAD...{upRef}"] (some libDir)
+      if rcCnt == 0 then
+        let nums := (cntOut.trimAscii.toString.split (fun c => c == '\t' || c == ' ')).toArray.filterMap (fun s => s.toString.toNat?)
+        if nums.size ≥ 2 then
+          ahead := nums[0]!
+          behind := nums[1]!
   let fetchSt ← statIdentity (fp / ".git" / "FETCH_HEAD").toString true
   let headSt ← statIdentity (fp / ".git" / "HEAD").toString true
   let syncedMtime : UInt64 :=
@@ -1223,13 +1280,17 @@ private def hasSymlinkSegment (baseDir : System.FilePath) (cleanRel : String) : 
     if st.isSymlink then return true
   return false
 
-/-- Collect companion files (`files` inline UTF-8 text + `references` non-markdown paths) inside `skillDir`. -/
+/-- Collect companion files (`files` inline UTF-8 text + `references` non-markdown paths) inside `skillDir`.
+    Fails closed (`.error`) if any readable companion directory or regular file cannot be enumerated/read,
+    so a partial directory read never erases installed local companion files. -/
 private partial def collectSkillCompanionFiles
     (curDir : System.FilePath)
     (relPrefix : String)
-    (depth : Nat) : IO (Array (String × String × String) × Array String) := do
-  if depth > 6 then return (#[], #[])
-  let entries ← try curDir.readDir catch _ => pure #[]
+    (depth : Nat) : IO (Except String (Array (String × String × String) × Array String)) := do
+  if depth > 6 then return .ok (#[], #[])
+  let entries ← match ← curDir.readDir.toBaseIO with
+    | .ok xs => pure xs
+    | .error err => return .error s!"Failed to enumerate skill directory '{curDir}': {err}"
   let sorted := entries.qsort (fun a b => a.fileName < b.fileName)
   let mut inlineFiles : Array (String × String × String) := #[]
   let mut refPaths : Array String := #[]
@@ -1241,14 +1302,20 @@ private partial def collectSkillCompanionFiles
         let st ← statPath e.path.toString
         if !st.isSymlink then
           if st.isDir then
-            let (subInline, subRefs) ← collectSkillCompanionFiles e.path rel (depth + 1)
-            inlineFiles := inlineFiles ++ subInline
-            refPaths := refPaths ++ subRefs
+            match ← collectSkillCompanionFiles e.path rel (depth + 1) with
+            | .error err => return .error err
+            | .ok (subInline, subRefs) =>
+              inlineFiles := inlineFiles ++ subInline
+              refPaths := refPaths ++ subRefs
           else if st.isReg then
             let mut inlined := false
             let idSt ← statIdentity e.path.toString
+            if !idSt.exists_ then
+              return .error s!"Failed to stat skill companion file '{e.path}'"
             if idSt.size ≤ 262144 then
-              if let .ok bytes ← (IO.FS.readBinFile e.path).toBaseIO then
+              match ← (IO.FS.readBinFile e.path).toBaseIO with
+              | .error err => return .error s!"Failed to read skill companion file '{e.path}': {err}"
+              | .ok bytes =>
                 let mut hasNul := false
                 for i in [0:bytes.size] do
                   if bytes.get! i == 0 then hasNul := true
@@ -1258,10 +1325,10 @@ private partial def collectSkillCompanionFiles
                     inlined := true
             if !inlined || !fname.toLower.endsWith ".md" then
               refPaths := refPaths.push rel
-  return (inlineFiles, refPaths)
+  return .ok (inlineFiles, refPaths)
 
 private def buildSkillSummaryJson (name prefixDir content : String) (includeBundle : Bool)
-    (skillDir : System.FilePath) : IO JVal := do
+    (skillDir : System.FilePath) : IO (Except String JVal) := do
   let desc? := OrbCore.Skills.extractDescription content
   let (_, scope?) := OrbCore.Skills.parseSandboxedMeta content
   let aud := OrbCore.Skills.effectiveAudience content
@@ -1274,15 +1341,17 @@ private def buildSkillSummaryJson (name prefixDir content : String) (includeBund
     ("line_count", JVal.nat (countSkillLines content))
   ]
   if includeBundle then
-    let (inlineFiles, refPaths) ← collectSkillCompanionFiles skillDir "" 0
-    let filesJv := inlineFiles.map fun (fn, rp, txt) =>
-      JVal.obj #[("name", .str fn), ("path", .str rp), ("content", .str txt)]
-    fields := fields ++ #[
-      ("content", .str content),
-      ("files", .arr filesJv),
-      ("references", .arr (refPaths.map .str))
-    ]
-  return .obj fields
+    match ← collectSkillCompanionFiles skillDir "" 0 with
+    | .error err => return .error err
+    | .ok (inlineFiles, refPaths) =>
+      let filesJv := inlineFiles.map fun (fn, rp, txt) =>
+        JVal.obj #[("name", .str fn), ("path", .str rp), ("content", .str txt)]
+      fields := fields ++ #[
+        ("content", .str content),
+        ("files", .arr filesJv),
+        ("references", .arr (refPaths.map .str))
+      ]
+  return .ok (.obj fields)
 
 private def locateSkillDir (libDir cleanSkill : String) (forWrite : Bool) : IO (String × System.FilePath) := do
   let canonDir := System.FilePath.mk s!"{libDir}/skill/{cleanSkill}"
@@ -1328,14 +1397,17 @@ def handleUpdateLibraryRemote
   let updatedSettings := curSettings.setField "library_remote" nextVal
   if let .error e ← writeSettingsJson store.rootDir updatedSettings then
     return jsonErr 500 e
+  let libDir ← resolveLibraryDir workingDir store.rootDir
   match nextRemote? with
   | none =>
+    let gitFp := System.FilePath.mk libDir / ".git"
+    if (← gitFp.pathExists) && (← gitOriginUrl? libDir).isSome then
+      let _ ← runGitCapture #["remote", "remove", "origin"] (some libDir)
     return jsonResp 200 (.obj #[
       ("library_remote", .null),
       ("library_reinitialized", .bool false)
     ])
   | some u =>
-    let libDir ← resolveLibraryDir workingDir store.rootDir
     let forceReinit := (reqJv.fieldBool? "force_reinitialize").getD false
     match ← ensureLibraryRepo libDir u forceReinit with
     | .ok reinit =>
@@ -1373,43 +1445,50 @@ def handleLibraryRoute
 
   if method == "POST" && segs == ["api", "library", "sync"] then
     if !effAdmin then return some (jsonErr 403 "admin_required")
-    if !(← gitFp.pathExists) then
-      if !effRemote.isEmpty then
+    if !effRemote.isEmpty then
+      if !(← gitFp.pathExists) then
         if let .error e ← ensureLibraryRepo libDir effRemote false then
           return some (500, "text/plain; charset=utf-8", e.toUTF8)
-    else
-      if (← gitOriginUrl? libDir).isNone && !effRemote.isEmpty && isValidGitRemote effRemote then
-        let _ ← runGitCapture #["remote", "add", "origin", "--", effRemote] (some libDir)
-      if (← gitOriginUrl? libDir).isSome then
-        let (rcF, outF) ← runGitCapture #["fetch", "--prune", "origin"] (some libDir)
-        if rcF != 0 then
-          return some (500, "text/plain; charset=utf-8", outF.trimAscii.toString.toUTF8)
-        let branch ← gitCurrentBranch libDir
-        if let some upRef ← resolveRemoteTrackingRef libDir branch then
-          let (rcM, outM) ← runGitCapture #["merge", "--ff-only", upRef] (some libDir)
-          if rcM != 0 then
-            let cleanErr := outM.trimAscii.toString
-            if isDivergedGitOutput cleanErr then
-              return some (409, "text/plain; charset=utf-8", s!"DIVERGED_HISTORY: {cleanErr}".toUTF8)
-            let (rcCnt, cntOut) ← runGitCapture #["rev-list", "--left-right", "--count", s!"HEAD...{upRef}"] (some libDir)
-            if rcCnt == 0 then
-              let nums := (cntOut.trimAscii.toString.split (fun c => c == '\t' || c == ' ')).toArray.filterMap (fun s => s.toString.toNat?)
-              if nums.size ≥ 2 && nums[0]! > 0 && nums[1]! > 0 then
+      else
+        if isValidGitRemote effRemote then
+          match ← gitOriginUrl? libDir with
+          | none => discard <| runGitCapture #["remote", "add", "origin", "--", effRemote] (some libDir)
+          | some cur =>
+            if cur != effRemote then
+              discard <| runGitCapture #["remote", "set-url", "origin", "--", effRemote] (some libDir)
+        if (← gitOriginUrl? libDir).isSome then
+          let (rcF, outF) ← runGitCapture #["fetch", "--prune", "origin"] (some libDir)
+          if rcF != 0 then
+            return some (500, "text/plain; charset=utf-8", outF.trimAscii.toString.toUTF8)
+          let branch ← gitCurrentBranch libDir
+          if let some upRef ← resolveRemoteTrackingRef libDir branch then
+            let (rcM, outM) ← runGitCapture #["merge", "--ff-only", upRef] (some libDir)
+            if rcM != 0 then
+              let cleanErr := outM.trimAscii.toString
+              if isDivergedGitOutput cleanErr then
                 return some (409, "text/plain; charset=utf-8", s!"DIVERGED_HISTORY: {cleanErr}".toUTF8)
-            return some (500, "text/plain; charset=utf-8", cleanErr.toUTF8)
+              let (rcCnt, cntOut) ← runGitCapture #["rev-list", "--left-right", "--count", s!"HEAD...{upRef}"] (some libDir)
+              if rcCnt == 0 then
+                let nums := (cntOut.trimAscii.toString.split (fun c => c == '\t' || c == ' ')).toArray.filterMap (fun s => s.toString.toNat?)
+                if nums.size ≥ 2 && nums[0]! > 0 && nums[1]! > 0 then
+                  return some (409, "text/plain; charset=utf-8", s!"DIVERGED_HISTORY: {cleanErr}".toUTF8)
+              return some (500, "text/plain; charset=utf-8", cleanErr.toUTF8)
     return some (jsonResp 200 (← buildLibraryStatusJson libDir effRemote))
 
   if method == "POST" && segs == ["api", "library", "force-sync"] then
     if !effAdmin then return some (jsonErr 403 "admin_required")
+    if effRemote.isEmpty then
+      return some (jsonErr 400 "Library remote is not configured")
     if !(← gitFp.pathExists) then
-      if effRemote.isEmpty then
-        return some (jsonErr 400 "Library remote is not configured")
       if let .error e ← ensureLibraryRepo libDir effRemote true then
         return some (500, "text/plain; charset=utf-8", e.toUTF8)
     else
-      if !effRemote.isEmpty && isValidGitRemote effRemote then
-        if (← gitOriginUrl? libDir).isNone then
-          let _ ← runGitCapture #["remote", "add", "origin", "--", effRemote] (some libDir)
+      if isValidGitRemote effRemote then
+        match ← gitOriginUrl? libDir with
+        | none => discard <| runGitCapture #["remote", "add", "origin", "--", effRemote] (some libDir)
+        | some cur =>
+          if cur != effRemote then
+            discard <| runGitCapture #["remote", "set-url", "origin", "--", effRemote] (some libDir)
       if (← gitOriginUrl? libDir).isNone then
         return some (jsonErr 400 "Library remote is not configured")
       let (rcF, outF) ← runGitCapture #["fetch", "--prune", "origin"] (some libDir)
@@ -1468,12 +1547,18 @@ def handleLibraryRoute
     let isForce := segs == ["api", "library", "force-push"]
     if !(← gitFp.pathExists) then
       return some (400, "text/plain; charset=utf-8", "Library repository is not initialized".toUTF8)
-    if (← gitOriginUrl? libDir).isNone && !effRemote.isEmpty && isValidGitRemote effRemote then
-      let _ ← runGitCapture #["remote", "add", "origin", "--", effRemote] (some libDir)
-    if (← gitOriginUrl? libDir).isNone then
-      -- When no remote is configured locally, treat push as a clean local-only no-op unless explicitly requested.
-      if effRemote.isEmpty then
+    if effRemote.isEmpty then
+      -- When no remote is configured, treat push as a clean local-only no-op unless `force-push` was requested.
+      if !isForce then
         return some (200, "text/plain; charset=utf-8", "No remote configured; saved locally".toUTF8)
+      return some (400, "text/plain; charset=utf-8", "No Library remote configured".toUTF8)
+    if isValidGitRemote effRemote then
+      match ← gitOriginUrl? libDir with
+      | none => discard <| runGitCapture #["remote", "add", "origin", "--", effRemote] (some libDir)
+      | some cur =>
+        if cur != effRemote then
+          discard <| runGitCapture #["remote", "set-url", "origin", "--", effRemote] (some libDir)
+    if (← gitOriginUrl? libDir).isNone then
       return some (400, "text/plain; charset=utf-8", "No Library remote configured".toUTF8)
     let pushArgs := if isForce then #["push", "--force", "-u", "origin", "HEAD"] else #["push", "-u", "origin", "HEAD"]
     let (rcP, outP) ← runGitCapture pushArgs (some libDir)
@@ -1497,16 +1582,22 @@ def handleLibraryRoute
       let skillsRoot := System.FilePath.mk s!"{libDir}/{prefixDir}"
       let rootSt ← statPath skillsRoot.toString
       if rootSt.exists_ && rootSt.isDir && !rootSt.isSymlink then
-        if let .ok entries ← skillsRoot.readDir.toBaseIO then
-          for e in entries do
-            let sname := e.fileName
-            if OrbCore.Skills.nameCharsValid sname && !sname.startsWith "." && !seenNames.contains sname then
-              let eSt ← statPath e.path.toString
-              let mdPath := e.path / "SKILL.md"
-              let mdSt ← statPath mdPath.toString
-              if !eSt.isSymlink && mdSt.exists_ && mdSt.isReg && !mdSt.isSymlink then
-                let md ← (try IO.FS.readFile mdPath catch _ => pure "")
-                let jv ← buildSkillSummaryJson sname prefixDir md includeBundle e.path
+        let entries ← match ← skillsRoot.readDir.toBaseIO with
+          | .ok xs => pure xs
+          | .error err => return some (jsonErr 500 s!"Failed to enumerate Library skills directory: {err}")
+        for e in entries do
+          let sname := e.fileName
+          if OrbCore.Skills.nameCharsValid sname && !sname.startsWith "." && !seenNames.contains sname then
+            let eSt ← statPath e.path.toString
+            let mdPath := e.path / "SKILL.md"
+            let mdSt ← statPath mdPath.toString
+            if !eSt.isSymlink && mdSt.exists_ && mdSt.isReg && !mdSt.isSymlink then
+              let md ← match ← (IO.FS.readFile mdPath).toBaseIO with
+                | .ok txt => pure txt
+                | .error err => return some (jsonErr 500 s!"Failed to read SKILL.md for '{sname}': {err}")
+              match ← buildSkillSummaryJson sname prefixDir md includeBundle e.path with
+              | .error err => return some (jsonErr 500 err)
+              | .ok jv =>
                 seenNames := seenNames.push sname
                 items := items.push (sname, jv)
     let sorted := (items.qsort (fun a b => a.1 < b.1)).map Prod.snd
@@ -1526,9 +1617,12 @@ def handleLibraryRoute
         let mdSt ← statPath mdPath.toString
         if dirSt.isSymlink || !mdSt.exists_ || !mdSt.isReg || mdSt.isSymlink then
           return some (jsonErr 404 "Skill not found")
-        let content ← (try IO.FS.readFile mdPath catch _ => pure "")
-        let jv ← buildSkillSummaryJson cleanSkill prefixDir content true skillDir
-        return some (jsonResp 200 jv)
+        let content ← match ← (IO.FS.readFile mdPath).toBaseIO with
+          | .ok txt => pure txt
+          | .error err => return some (jsonErr 500 s!"Failed to read SKILL.md for '{cleanSkill}': {err}")
+        match ← buildSkillSummaryJson cleanSkill prefixDir content true skillDir with
+        | .error err => return some (jsonErr 500 err)
+        | .ok jv => return some (jsonResp 200 jv)
 
       if method == "PUT" then
         if !effAdmin then return some (jsonErr 403 "admin_required")
@@ -1545,8 +1639,9 @@ def handleLibraryRoute
           return some (jsonErr 400 "Refusing to write through symlinked SKILL.md")
         IO.FS.createDirAll skillDir
         IO.FS.writeFile mdPath content
-        let jv ← buildSkillSummaryJson cleanSkill prefixDir content true skillDir
-        return some (jsonResp 200 jv)
+        match ← buildSkillSummaryJson cleanSkill prefixDir content true skillDir with
+        | .error err => return some (jsonErr 500 err)
+        | .ok jv => return some (jsonResp 200 jv)
 
       if method == "DELETE" then
         if !effAdmin then return some (jsonErr 403 "admin_required")

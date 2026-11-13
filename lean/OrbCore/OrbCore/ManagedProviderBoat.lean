@@ -88,7 +88,8 @@ private def boatSnapshotList (transport : Transport) : IO (Result (Array Snapsho
   match ← call transport { method := "GET", path := "/saved-snapshots" } with
   | .error e => return .error e
   | .ok body =>
-    let some items := (body.fieldArr? "snapshots").orElse (fun _ => body.asArr?)
+    let some items := (body.fieldArr? "snapshots").orElse (fun _ => body.fieldArr? "savedSnapshots")
+        |>.orElse (fun _ => body.fieldArr? "items") |>.orElse (fun _ => body.asArr?)
       | return .error { code := "provider_invalid_snapshot_list" }
     let mut out := #[]
     for item in items do
@@ -98,7 +99,9 @@ private def boatSnapshotList (transport : Transport) : IO (Result (Array Snapsho
     return .ok out
 
 def boatSizes : Array Size := #[
-  { name := "small", cpu := 2, ramGb := 4, diskGb := 12, milliCentsPerHour := 1800 },
+  -- Disk measured on a fresh guest (2026-11-13, dev): 79 GB root, 53 GB free.
+  -- The other sizes are not measured.
+  { name := "small", cpu := 2, ramGb := 4, diskGb := 79, milliCentsPerHour := 1800 },
   { name := "default", cpu := 4, ramGb := 8, diskGb := 50, milliCentsPerHour := 3600 },
   { name := "large", cpu := 8, ramGb := 16, diskGb := 125, milliCentsPerHour := 7200 },
   { name := "xlarge", cpu := 16, ramGb := 32, diskGb := 251, milliCentsPerHour := 20000 }
@@ -117,6 +120,9 @@ def boatQuoteCents (size : String) (ttlMinutes : UInt64) : Result UInt64 := do
     Core's durable managed ID and boot epoch must not be replaced with this ID. -/
 def boat (transport : Transport) (sleep : UInt32 → IO Unit := fun ms => do IO.sleep ms) : Provider := {
   name := "boat"
+  -- Boat has no pool-capacity introspection in its supported API. Preserve its
+  -- explicit create-admission behavior; provider rejection still cannot imply ready.
+  availability := fun _ => pure (.ok { status := .available, reason := "capacity_not_exposed" })
   readinessDeadlineSecs := 360
   isReady := fun s => #["ready", "idle", "running", "busy"].contains s
   isStopped := fun s => #["archived", "stopped", "deleted", "error", "archiving"].contains s

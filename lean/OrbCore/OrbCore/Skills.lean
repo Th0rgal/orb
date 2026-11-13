@@ -342,6 +342,46 @@ def buildDeliveryPlan (workingDir : String) (project? : Option String) (storeRoo
         plan := extendContext plan name desc
   return .ok plan
 
+/-- Largest SKILL.md shipped to a node, and the cap on all of them together. -/
+def remoteSkillMaxBytes : Nat := 64 * 1024
+def remoteSkillTotalBytes : Nat := 256 * 1024
+
+/-- Shell that writes each `(name, SKILL.md)` into the harness's native skill directory of
+    the current directory. An existing file is left alone, and a failure never stops the
+    turn. Names must already satisfy `remoteInstallable`; content travels as base64. -/
+def installScript (harness : String) (files : Array (String × String)) : String :=
+  let dir := nativeDirectory harness
+  String.join (files.toList.map fun (name, content) =>
+    let target := s!"{dir}/{name}"
+    s!"[ -e '{target}/SKILL.md' ] || \{ mkdir -p '{target}' && printf %s '{base64Encode content.toUTF8}' | base64 -d > '{target}/SKILL.md'; } 2>/dev/null || true; ")
+
+/-- The delivered skills (`buildDeliveryPlan`: Library plus project context, context wins)
+    as an install prelude for a turn that runs on a node, where the Library is not mounted.
+    Skills whose names the installer cannot quote safely, or that exceed the size caps, are skipped. -/
+def remoteInstallPrelude (workingDir : String) (project? : Option String) (harness : String)
+    (storeRoot : String := "") : IO String := do
+  let libRoot := System.FilePath.mk (← resolveLibraryRoot workingDir storeRoot)
+  let mut found : Array (String × String) := #[]
+  for sub in #["skill", "skills"] do
+    let sdir := libRoot / sub
+    if (← sdir.pathExists) && (← sdir.isDir) then
+      for (name, _, path) in (← scanSkillDir sdir true) do
+        if !(found.any (·.1 == name)) then
+          found := found.push (name, path)
+  if let some slug := project?.map (·.trimAscii.toString) |>.filter (fun s => !s.isEmpty && isPlainProjectKey s) then
+    for (name, _, path) in (← scanSkillDir (System.FilePath.mk workingDir / "project-files" / slug / "skills") false) do
+      found := (found.filter (·.1 != name)).push (name, path)
+  let mut files : Array (String × String) := #[]
+  let mut total : Nat := 0
+  for (name, path) in found do
+    if remoteInstallable name then
+      let content ← try IO.FS.readFile path catch _ => pure ""
+      let size := content.utf8ByteSize
+      if size > 0 && size ≤ remoteSkillMaxBytes && total + size ≤ remoteSkillTotalBytes then
+        files := files.push (name, content)
+        total := total + size
+  return installScript (if harness == "claude" then "claudecode" else harness) files
+
 def selectDelivered (workingDir : String) (project? : Option String) (harness prompt : String)
     (storeRoot : String := "") : IO (Except String (Array SelectedSkill)) := do
   if (references prompt).isEmpty then return .ok #[]

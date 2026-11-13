@@ -689,6 +689,67 @@ def splitUpstreamBaseUrl (raw : String) : Bool × String × UInt16 × String :=
       | _ => (hostPort, 0)
   (isTls, host, port, pfx)
 
+/-- The request sent to one chain target, as the Rust proxy built it (`proxy.rs`,
+    `default_base_url` + `completions_url`): `(tls, host, port, path, headers, body)`.
+    - A base URL that already carries its API version (`/v1`, `/api/coding/paas/v4`,
+      `/v1beta/openai`) replaces the client's `/v1`; it is never doubled.
+    - JSON bodies are declared as such (MiniMax rejects the body otherwise).
+    - Kimi's own endpoint needs its CLI user agent and `temperature: 1`; z.ai has no
+      `[1m]` model suffix. -/
+def upstreamRequest (tgt : ProviderTarget) (relPath : String)
+    (extraHeaders : Array (String × String)) (body : ByteArray) :
+    Bool × String × UInt16 × String × Array (String × String) × ByteArray :=
+  let (isTls, host, port, pfx) := splitUpstreamBaseUrl tgt.baseUrl
+  let versioned := (pfx.splitOn "/").any fun seg =>
+    match seg.toList with
+    | 'v' :: d :: _ => d.isDigit
+    | _ => false
+  let rel :=
+    if versioned && relPath.startsWith "/v1/" then (relPath.drop 3).toString
+    else if versioned && relPath == "/v1" then ""
+    else relPath
+  let fullPath := if pfx.isEmpty then rel else pfx ++ rel
+  let direct := fun (name : String) => tgt.provider == name && (host.splitOn name).length > 1
+  let kimiDirect := direct "kimi"
+  let tgt' := if tgt.provider == "zai" && tgt.modelId.endsWith "[1m]" then { tgt with modelId := (tgt.modelId.dropEnd 4).toString } else tgt
+  let rewritten := rewriteTargetModelBody tgt' body
+  let outBody :=
+    if !kimiDirect then rewritten
+    else match (String.fromUTF8? rewritten).bind (fun raw => (OrbBin.Json.parse raw).toOption) with
+      | some obj@(.obj _) => (renderCompact (obj.setField "temperature" (.nat 1))).toUTF8
+      | _ => rewritten
+  let has := fun (name : String) => extraHeaders.any (fun h => h.1.toLower == name)
+  let hdrs := extraHeaders.push ("Authorization", s!"Bearer {tgt.apiKey}")
+  let hdrs := if outBody.isEmpty || has "content-type" then hdrs else hdrs.push ("Content-Type", "application/json")
+  let hdrs := if kimiDirect && !has "user-agent" then hdrs.push ("User-Agent", "KimiCLI/1.5") else hdrs
+  (isTls, host, port, fullPath, hdrs, outBody)
+
+/-- Short machine code from an upstream error body (`error.code`, `error.type`, `code`,
+    `type`), for the per-target failure list. Never the message: it can name accounts. -/
+def upstreamErrorCode (body : String) : String :=
+  match OrbBin.Json.parse body with
+  | .ok jv =>
+    let err := jv.fieldOrNull "error"
+    let code := (err.fieldStr? "code").orElse (fun _ => err.fieldStr? "type")
+      |>.orElse (fun _ => jv.fieldStr? "code") |>.orElse (fun _ => jv.fieldStr? "type")
+      |>.orElse (fun _ => err.asStr?) |>.getD ""
+    if code.length ≤ 64 && code.all (fun c => c.isAlphanum || c == '_' || c == '-' || c == '.') then code else ""
+  | .error _ => ""
+
+/-- An upstream answer that means "this account's login is no longer accepted": a 401, or
+    the auth error codes of CLIProxyAPI and the vendors' OAuth endpoints. A 403 alone is
+    not enough (it is also used for model or region permission). -/
+def isAuthRejection (status : Nat) (code body : String) : Bool :=
+  status == 401 || code == "auth_unavailable" || code == "invalid_grant" ||
+    code == "authentication_error" || code == "invalid_api_key" ||
+    (body.splitOn "invalid_grant").length > 1
+
+/-- Body returned when every target of a chain failed: the class, and each target's outcome. -/
+def chainExhaustedBody (errCode errMsg : String) (failures : Array (String × String × Nat × String)) : ByteArray :=
+  (renderCompact (.obj #[("error", .str errCode), ("message", .str errMsg),
+    ("targets", .arr (failures.map fun (provider, model, status, code) =>
+      .obj #[("provider", .str provider), ("model", .str model), ("status", .nat status), ("code", .str code)]))])).toUTF8
+
 /-- Decide whether upstream `status` may fail over to `attemptIdx + 1` in `chainLen`.
     Chains longer than 16 are compared against the capped length so `attemptIdx = 0` is not
     disabled solely because `targets.size > 16`. Still gated by `Orb.Kernel.proxyStep`
@@ -805,7 +866,8 @@ def forwardProxyChain
     (healthTracker? : Option ProviderHealthTracker := none)
     (attemptGeneration? : Option UInt64 := none)
     (nowEpoch? : Option UInt64 := none)
-    (pinnedAccount? : Option String := none) :
+    (pinnedAccount? : Option String := none)
+    (authEvidence? : Option (IO.Ref (Array (String × String))) := none) :
     IO ProxyOutcome := do
   let nowSec ← match nowEpoch? with
     | some ep => pure ep
@@ -957,6 +1019,7 @@ def forwardProxyChain
   let mut rateLimitCount : UInt32 := 0
   let mut paymentRequiredCount : UInt32 := 0
   let mut clientAuthErrorCount : UInt32 := 0
+  let mut failures : Array (String × String × Nat × String) := #[]
   let mut serverErrorCount : UInt32 := 0
   let mut transportValidationCount : UInt32 := 0
   let mut hasContextOverflow : Bool := false
@@ -1053,15 +1116,7 @@ def forwardProxyChain
           verdictCode := vCode
         }
     else
-      let (isTls, host, port, pfx) := splitUpstreamBaseUrl tgt.baseUrl
-      let cleanPfx :=
-        if pfx.endsWith "/v1" && (relPath == "/v1" || relPath.startsWith "/v1/") then
-          (pfx.dropEnd 3).toString
-        else
-          pfx
-      let fullPath := if cleanPfx.isEmpty then relPath else cleanPfx ++ relPath
-      let reqHdrs := extraHeaders.push ("Authorization", s!"Bearer {tgt.apiKey}")
-      let outBody := rewriteTargetModelBody tgt body
+      let (isTls, host, port, fullPath, reqHdrs, outBody) := upstreamRequest tgt relPath extraHeaders body
       let respRes ← try
         match mockTransport? with
         | some mockFn => mockFn tgt
@@ -1132,6 +1187,12 @@ def forwardProxyChain
             pinnedAccountId := nextSlice.pinnedAccountId
             verdictCode := vCode
           }
+        let upstreamCode := upstreamErrorCode respBodyStr
+        failures := failures.push (tgt.provider, tgt.modelId, resp.status, upstreamCode)
+        -- The upstream refused this account's login: evidence for the provider's status.
+        if let some evidence := authEvidence? then
+          if isAuthRejection resp.status upstreamCode respBodyStr then
+            evidence.modify (·.push (tgt.accountId, if upstreamCode.isEmpty then s!"http_{resp.status}" else upstreamCode))
         if resp.status == 429 then
           rateLimitCount := rateLimitCount + 1
         else if resp.status == 402 then
@@ -1204,8 +1265,10 @@ def forwardProxyChain
         else if canFailoverUpstream idx n resp.status false then
           attemptSlice := { attemptSlice with cooldownUntilEpoch := 0 }
           idx := idx + 1
-        else if paymentRequiredCount > 0 ||
+        else if paymentRequiredCount > 0 || failures.size > 1 ||
                 paymentRequiredCount + rateLimitCount + serverErrorCount > 1 then
+          -- Every target of the chain failed: one classified error naming each target's
+          -- outcome. A single-target request keeps the upstream's own answer (below).
           let (st, errCode, errMsg) :=
             classifyExhaustionOutcome rateLimitCount paymentRequiredCount clientAuthErrorCount
               serverErrorCount transportValidationCount hasContextOverflow
@@ -1213,7 +1276,7 @@ def forwardProxyChain
             status := st
             contentType := "application/json"
             headers := #[("X-Orb-Exhaustion-Class", errCode)]
-            body := s!"\{\"error\":{jsonEscape errCode},\"message\":{jsonEscape errMsg}}".toUTF8
+            body := chainExhaustedBody errCode errMsg failures
             selectedAccount := tgt.accountId
             attemptsUsed := idx + 1
             exhaustionClass := errCode
@@ -1235,6 +1298,7 @@ def forwardProxyChain
             verdictCode := vCode
           }
       | .error errMsg =>
+        failures := failures.push (tgt.provider, tgt.modelId, 0, "transport_error")
         serverErrorCount := serverErrorCount + 1
         if errMsg == "invalid_upstream_port" || errMsg == "plaintext_upstream_disabled" then
           transportValidationCount := transportValidationCount + 1
@@ -1315,7 +1379,7 @@ def forwardProxyChain
     status := st
     contentType := "application/json"
     headers := #[("X-Orb-Exhaustion-Class", errCode)]
-    body := s!"\{\"error\":{jsonEscape errCode},\"message\":{jsonEscape errMsg}}".toUTF8
+    body := chainExhaustedBody errCode errMsg failures
     selectedAccount := ""
     attemptsUsed := n
     exhaustionClass := errCode
@@ -1421,12 +1485,13 @@ def estimateUsageCostCents (u : ProxyUsage) : UInt64 :=
 
 /-- Appends one `proxy_usage` row; calls that report no tokens are not recorded. -/
 def recordProxyUsage (store : CoreStore) (nowEpochSec : UInt64) (model provider accountId apiKeyName missionId callerKind : String)
-    (u : ProxyUsage) : IO Unit := do
+    (u : ProxyUsage) (requestedModel : String := "") : IO Unit := do
   if u.total == 0 then return
   discard <| execParamQuery store.missionsDb
     ("INSERT INTO proxy_usage(timestamp,model,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,cost_cents," ++
-     "provider,account_id,api_key_name,mission_id,caller_kind,reasoning_tokens) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,NULLIF(?11,''),?12,?13);")
+     "provider,account_id,api_key_name,mission_id,caller_kind,reasoning_tokens,requested_model) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,NULLIF(?11,''),?12,?13,NULLIF(?14,''));")
     #[formatEpochIso8601Utc nowEpochSec, model, toString u.input, toString u.output, toString u.cacheCreate, toString u.cacheRead,
-      toString (estimateUsageCostCents u), provider, accountId, apiKeyName, missionId, callerKind, toString u.reasoning]
+      toString (estimateUsageCostCents u), provider, accountId, apiKeyName, missionId, callerKind, toString u.reasoning,
+      requestedModel]
 
 end OrbCore.Proxy

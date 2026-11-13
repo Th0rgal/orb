@@ -278,6 +278,7 @@ def managedComputeDdl : String :=
   "created_at_sec INTEGER NOT NULL DEFAULT 0,expires_at_sec INTEGER NOT NULL DEFAULT 0," ++
   "last_poll_sec INTEGER NOT NULL DEFAULT 0,request_key TEXT NOT NULL DEFAULT '',image TEXT NOT NULL DEFAULT '');" ++
   "CREATE INDEX IF NOT EXISTS idx_managed_machines_owner ON managed_machines(owner_user_id);" ++
+  "CREATE TABLE IF NOT EXISTS managed_provider_settings(provider TEXT PRIMARY KEY,enabled INTEGER NOT NULL DEFAULT 1,updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS user_managed_provider_prefs(" ++
   "user_id TEXT NOT NULL,provider TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1," ++
   "updated_at TEXT NOT NULL DEFAULT '',PRIMARY KEY(user_id,provider));" ++
@@ -314,6 +315,10 @@ def managedComputeDdl : String :=
   "CREATE TABLE IF NOT EXISTS managed_expirations(machine_id TEXT NOT NULL,boot_epoch INTEGER NOT NULL,provider_id TEXT NOT NULL,expires_at_sec INTEGER NOT NULL,observed_state TEXT NOT NULL DEFAULT 'unknown',spend_cents INTEGER NOT NULL DEFAULT 0,spend_source TEXT NOT NULL DEFAULT 'lease_reservation_estimate',state TEXT NOT NULL DEFAULT 'pending',PRIMARY KEY(machine_id,boot_epoch));"
 
 def managedAdditiveAlters : Array String := #[
+  -- One-time rename of rows written under lean.ci's former provider name
+  -- (`boost`). Idempotent; nothing else in Core accepts that name any more.
+  "UPDATE managed_machines SET provider='leanci' WHERE provider='boost';",
+  "UPDATE OR IGNORE user_managed_provider_prefs SET provider='leanci' WHERE provider='boost';",
   "ALTER TABLE managed_machines ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT '';",
   "CREATE INDEX IF NOT EXISTS idx_managed_machines_owner ON managed_machines(owner_user_id);",
   "ALTER TABLE managed_node_tokens ADD COLUMN readiness_deadline_sec INTEGER NOT NULL DEFAULT 0;",
@@ -335,7 +340,7 @@ def knownProviders : Array String :=
 
 def canonicalizeProvider (provider : String) : String :=
   let key := provider.trimAscii.toString.toLower
-  if key == "boost" || key == "boost.ci" || key == "lean.ci" then "leanci" else key
+  if key == "lean.ci" then "leanci" else key
 
 def isKnownProvider (provider : String) : Bool :=
   let c := canonicalizeProvider provider
@@ -556,26 +561,40 @@ def openProviderSecret (rootDir provider : String)
     | return .error "master_key_unavailable"
   if key.size != 32 then
     return .error "master_key_invalid_length"
-  let mut usedProv := prov
-  let raw ← match ← readPrivate0600 (managedSecretPath rootDir prov) with
-    | .ok bytes => pure bytes
-    | .error _ =>
-      if prov == "leanci" then
-        match ← readPrivate0600 (managedSecretPath rootDir "boost") with
-        | .ok bytes =>
-          usedProv := "boost"
-          pure bytes
-        | .error _ => return .error "sealed_secret_unavailable"
-      else
-        return .error "sealed_secret_unavailable"
+  let .ok raw ← readPrivate0600 (managedSecretPath rootDir prov)
+    | return .error "sealed_secret_unavailable"
   if raw.size < 28 then
     return .error "sealed_secret_truncated"
   let nonce := raw.extract 0 12
   let sealed := raw.extract 12 raw.size
-  let aad := s!"orb-core-reserved:{usedProv}".toUTF8
+  let aad := s!"orb-core-reserved:{prov}".toUTF8
   match ← aeadOpen .aes256Gcm key nonce aad sealed with
   | .error e => return .error e
   | .ok pt => return .ok (String.fromUTF8? pt |>.getD "")
+
+/-- One-time rename of the sealed lean.ci key from its pre-rename file. The
+    provider name is bound into the AEAD, so the old file is opened under its old
+    name and sealed again under `leanci`; the old file is removed only after the
+    new one is written. Safe to run on every start: it does nothing once done. -/
+def migrateLegacyLeanciSecret (rootDir : String) : IO (Except String Bool) := do
+  let legacyName := "boost"
+  let legacyPath := managedSecretPath rootDir legacyName
+  if !(← statPath legacyPath.toString).exists_ then return .ok false
+  if (← statPath (managedSecretPath rootDir "leanci").toString).exists_ then
+    -- A current key already exists; the old file is only a stale copy.
+    IO.FS.removeFile legacyPath
+    return .ok true
+  let .ok key ← readPrivate0600 (managedMasterKeyPath rootDir) | return .error "master_key_unavailable"
+  let .ok raw ← readPrivate0600 legacyPath | return .error "legacy_sealed_secret_unreadable"
+  if key.size != 32 || raw.size < 28 then return .error "legacy_sealed_secret_invalid"
+  let .ok plain ← aeadOpen .aes256Gcm key (raw.extract 0 12) s!"orb-core-reserved:{legacyName}".toUTF8 (raw.extract 12 raw.size)
+    | return .error "legacy_sealed_secret_invalid"
+  let some text := String.fromUTF8? plain | return .error "legacy_sealed_secret_invalid"
+  match ← sealProviderSecret rootDir "leanci" text with
+  | .error e => return .error e
+  | .ok () =>
+    IO.FS.removeFile legacyPath
+    return .ok true
 
 private def machineParams (m : ManagedMachine) (slice : VmSliceState) : Array String :=
   #[
@@ -671,6 +690,11 @@ private def admitManagedCostTx (st : ManagedComputeStore) (fleet : ManagedFleetS
   if !admitManagedSpawnCount current chargedActive cost ttlMinutes.toUInt32 then
     return .error "managed_spawn_rejected"
   if provider == "boat" && !current.boatEnabled then return .error "provider_disabled"
+  if provider != "boat" then
+    let .ok providerRows ← execParamQueryUnlocked st.db
+        "SELECT enabled FROM managed_provider_settings WHERE provider=?1;" #[provider]
+      | return .error "managed_provider_settings_unavailable"
+    if providerRows.size > 1 && cell providerRows[1]! 0 != "1" then return .error "provider_disabled"
   if let some budget := userAdmission? then
     if ownerUserId.isEmpty then return .error "managed_user_missing"
     let dayStart := (nowEpoch / 86400) * 86400
@@ -805,6 +829,18 @@ def finishManagedExtension (st : ManagedComputeStore) (key : String) (succeeded 
         #[key, if succeeded then "completed" else "failed"] with
     | .error e => return .error e
     | .ok _ => return .ok ()
+
+/-- No live machine runs without a deadline. A row written before deadlines existed
+    gets one: its creation time plus its TTL, or one TTL from now when even the creation
+    time is unknown. Stopped and destroyed rows are untouched. -/
+def assignMissingDeadlines (st : ManagedComputeStore) (nowEpoch : UInt64) : IO (Except String Unit) := do
+  match ← execParamQuery st.db
+      ("UPDATE managed_machines SET " ++
+       "expires_at_sec=(CASE WHEN created_at_sec>0 THEN created_at_sec ELSE ?1 END)+MAX(5,MIN(ttl_minutes,720))*60," ++
+       "created_at_sec=CASE WHEN created_at_sec>0 THEN created_at_sec ELSE ?1 END " ++
+       "WHERE expires_at_sec=0 AND phase_code IN (0,1);") #[s!"{nowEpoch}"] with
+  | .error e => return .error e
+  | .ok _ => return .ok ()
 
 def claimManagedExpiry (st : ManagedComputeStore) (machineId : String) (nowEpoch : UInt64) : IO (Except String ManagedMachine) := do
   withImmediateTx st.db do
@@ -1393,9 +1429,8 @@ def applyProviderObservation (st : ManagedComputeStore) (obs : ProviderObservati
   let prov := canonicalizeProvider obs.provider
   if !isKnownProvider prov then
     return .error "unknown_provider"
-  let legacyProv := if prov == "leanci" then "boost" else prov
   match ← execParamQuery st.db
-      "SELECT node_boot_epoch,phase_code FROM managed_machines WHERE id=?1 AND (provider=?2 OR provider=?3);" #[obs.machineId, prov, legacyProv] with
+      "SELECT node_boot_epoch,phase_code FROM managed_machines WHERE id=?1 AND provider=?2;" #[obs.machineId, prov] with
   | .error e => return .error e
   | .ok rows =>
     if rows.size ≤ 1 then return .error "managed_machine_missing"
@@ -1421,9 +1456,9 @@ def applyProviderObservation (st : ManagedComputeStore) (obs : ProviderObservati
       return .ok []
     else
       match ← execParamQuery st.db
-          ("UPDATE managed_machines SET spent_cents=?2 WHERE id=?1 AND (provider=?3 OR provider=?4) " ++
-           "AND (?5='0' OR provider_id=?6) AND (?7='0' OR node_boot_epoch=?8);")
-          #[obs.machineId, s!"{obs.spentCents}", prov, legacyProv,
+          ("UPDATE managed_machines SET spent_cents=?2 WHERE id=?1 AND provider=?3 " ++
+           "AND (?4='0' OR provider_id=?5) AND (?6='0' OR node_boot_epoch=?7);")
+          #[obs.machineId, s!"{obs.spentCents}", prov,
             if obs.expectedProviderId?.isSome then "1" else "0", obs.expectedProviderId?.getD "",
             if obs.expectedBootEpoch?.isSome then "1" else "0", s!"{boot}"] with
       | .error e => return .error e
@@ -1432,7 +1467,7 @@ def applyProviderObservation (st : ManagedComputeStore) (obs : ProviderObservati
 private def providerDisplayName (p : String) : String :=
   match p with
   | "boat" => "boat.dev"
-  | "leanci" | "boost" => "lean.ci"
+  | "leanci" => "lean.ci"
   | "hetzner" => "Hetzner"
   | "vastai" => "Vast.ai"
   | "scaleway" => "Scaleway"
@@ -1443,24 +1478,47 @@ def renderManagedProvidersJson
     (st : ManagedFleetState)
     (isAdmin : Bool := true)
     (userPrefs : Array (String × Bool) := #[])
-    (configuredProviders : Array String := #[]) : String :=
+    (configuredProviders : Array String := #[])
+    (disabledProviders : Array String := #[])
+    (observations : Array (String × JVal) := #[]) : String :=
   let items := knownProviders.map fun p =>
     let globallyConfigured := configuredProviders.any (fun cp => canonicalizeProvider cp == p) || (p == "boat" && st.boatEnabled)
-    let globallyEnabled := st.enabled && (if p == "boat" then st.boatEnabled else globallyConfigured)
+    let globallyEnabled := st.enabled && !disabledProviders.contains p &&
+      (if p == "boat" then st.boatEnabled else globallyConfigured)
+    let observation := ((observations.find? (·.1 == p)).map Prod.snd).getD
+      (ManagedProvider.availabilityJson { status := .unknown, reason := "not_observed" })
     let userEnabled := isUserManagedProviderEnabled userPrefs p
     let effectiveEnabled := globallyEnabled && userEnabled
     OrbBin.Json.renderCompact (.obj (#[
       ("provider", .str p), ("display_name", .str (providerDisplayName p)),
       ("configured", .bool globallyConfigured), ("enabled", .bool effectiveEnabled),
       ("globally_enabled", .bool globallyEnabled), ("user_enabled", .bool userEnabled),
-      ("effective_enabled", .bool effectiveEnabled),
+      ("effective_enabled", .bool effectiveEnabled), ("availability", observation),
       ("credential_source", if isAdmin && globallyConfigured then .str "settings" else .null),
       ("key_hint", if isAdmin && globallyConfigured then .str "••••" else .null)
     ] ++ ManagedProvider.catalogFields p))
   "[" ++ String.intercalate "," items.toList ++ "]"
 
+/-- The provider's declared shape for a machine's size, when Core knows it. -/
+def managedSizeSpec? (provider size : String) : Option ManagedProvider.Size :=
+  (ManagedProvider.declaration? (canonicalizeProvider provider)).bind fun entry =>
+    entry.sizes.find? (·.name == size)
+
+/-- Hourly price as a JSON number of dollars, from the declared milli-cent rate. -/
+def managedUsdPerHourJson (provider size : String) : String :=
+  match managedSizeSpec? provider size with
+  | none => "null"
+  | some spec =>
+    let fraction := toString (spec.milliCentsPerHour % 100000)
+    s!"{spec.milliCentsPerHour / 100000}.{String.ofList (List.replicate (5 - fraction.length) '0')}{fraction}"
+
+private def optNatJson (value : Option Nat) : String :=
+  match value with
+  | some n => toString n
+  | none => "null"
+
 def renderManagedMachineItemJson (m : ManagedMachine) : String :=
-  s!"\{\"id\":{jsonEscape m.id},\"name\":{jsonEscape m.sandboxName},\"sandbox_name\":{jsonEscape m.sandboxName},\"provider\":{jsonEscape m.provider},\"provider_id\":{jsonEscape m.effectiveProviderId},\"node_id\":{jsonEscape s!"managed-{m.id}"},\"image\":{jsonEscape m.image},\"size\":{jsonEscape m.size},\"cpu\":4,\"ram_gb\":8,\"state\":{jsonEscape m.status},\"owner_mission\":{jsonEscape m.ownerMission},\"owner_mission_id\":{if m.ownerMission.isEmpty then "null" else jsonEscape m.ownerMission},\"owner_kind\":{if m.ownerKind.isEmpty then "\"user\"" else jsonEscape m.ownerKind},\"node_boot_epoch\":{m.nodeBootEpoch},\"last_poll_sec\":{m.lastPollSec},\"created_at_sec\":{m.createdAtSec},\"expires_at_sec\":{m.expiresAtSec},\"deletable_at\":{m.deletableAtSec},\"spent_cents\":{m.spentCents},\"cost_usd\":{formatCentsUsd2 m.spentCents},\"usd_per_hour\":0.10,\"expiry_provider_state\":{jsonEscape m.expiryProviderState},\"expiry_cleanup_state\":{jsonEscape m.expiryCleanupState},\"ledger_closed\":{if m.status == "destroyed" || m.expiryCleanupState == "completed" then "true" else "false"},\"cordoned\":{if m.cordoned then "true" else "false"}}"
+  s!"\{\"id\":{jsonEscape m.id},\"name\":{jsonEscape m.sandboxName},\"sandbox_name\":{jsonEscape m.sandboxName},\"provider\":{jsonEscape m.provider},\"provider_id\":{jsonEscape (ManagedProvider.publicProviderId m.provider m.effectiveProviderId)},\"node_id\":{jsonEscape s!"managed-{m.id}"},\"image\":{jsonEscape m.image},\"size\":{jsonEscape m.size},\"cpu\":{optNatJson ((managedSizeSpec? m.provider m.size).map (·.cpu))},\"ram_gb\":{optNatJson ((managedSizeSpec? m.provider m.size).map (·.ramGb))},\"state\":{jsonEscape m.status},\"owner_mission\":{jsonEscape m.ownerMission},\"owner_mission_id\":{if m.ownerMission.isEmpty then "null" else jsonEscape m.ownerMission},\"owner_kind\":{if m.ownerKind.isEmpty then "\"user\"" else jsonEscape m.ownerKind},\"node_boot_epoch\":{m.nodeBootEpoch},\"last_poll_sec\":{m.lastPollSec},\"created_at_sec\":{m.createdAtSec},\"expires_at_sec\":{m.expiresAtSec},\"deletable_at\":{m.deletableAtSec},\"spent_cents\":{m.spentCents},\"cost_usd\":{formatCentsUsd2 m.spentCents},\"usd_per_hour\":{managedUsdPerHourJson m.provider m.size},\"expiry_provider_state\":{jsonEscape m.expiryProviderState},\"expiry_cleanup_state\":{jsonEscape m.expiryCleanupState},\"ledger_closed\":{if m.status == "destroyed" || m.expiryCleanupState == "completed" then "true" else "false"},\"cordoned\":{if m.cordoned then "true" else "false"}}"
 
 def renderManagedMachinesJson
     (st : ManagedFleetState)
@@ -1469,7 +1527,8 @@ def renderManagedMachinesJson
     (userPrefs : Array (String × Bool) := #[])
     (userSpentTodayCents : UInt64 := 0)
     (userDailyCapCents? : Option UInt64 := none)
-    (configuredProviders : Array String := #[]) : String :=
+    (configuredProviders : Array String := #[])
+    (disabledProviders : Array String := #[]) : String :=
   match callerUserId? with
   | none =>
     let active := (st.machines.filter (fun m => m.status == "ready" || m.status == "provisioning")).size
@@ -1484,7 +1543,7 @@ def renderManagedMachinesJson
     let boatStr := if st.boatEnabled then "true" else "false"
     let items := visible.map renderManagedMachineItemJson
     let budgetJson := renderManagedBudgetJson st (some uid) userSpentTodayCents userDailyCapCents?
-    let provsJson := renderManagedProvidersJson st isAdmin userPrefs configuredProviders
+    let provsJson := renderManagedProvidersJson st isAdmin userPrefs configuredProviders disabledProviders
     s!"\{\"enabled\":{enStr},\"boat_enabled\":{boatStr},\"active_machines\":{active},\"max_concurrent\":{st.maxConcurrent},\"spent_today_cents\":{userSpentTodayCents},\"daily_cap_cents\":{st.dailyCapCents},\"machines\":[{String.intercalate "," items.toList}],\"sizes\":[],\"providers\":{provsJson},\"budget\":{budgetJson},\"daily_spend\":[]}"
 
 def renderRemoteNodesJson

@@ -14,13 +14,13 @@ Code: `src/managed/lifecycle.rs` (pure decision backed by
 | Provider (`provider`) | Workloads | Bootstrap | `supports_free_stop` | `supports_snapshots` | Minimum lease |
 | --- | --- | --- | --- | --- | --- |
 | `boat` (default) | Fast ephemeral Linux x86\_64 workers (`small`..`xlarge`) & raw sandboxes | Provider file/exec API | Yes (14d disk retention, \$0) | Yes (named + fork) | Per-second |
-| `leanci` (`lean.ci`, legacy alias `boost`) | Warm Cloud Hypervisor Linux x86\_64 microVMs (`lean-2vcpu-ubuntu-2604`..`lean-32vcpu`, `lean-32vcpu-96gb`) with optional CoW `.olean` overlays (`repo`/`base_key`/`lean_mode`) & `turbo-lean` | Provider file/exec API -> reverse relay | No | Yes (named + fork, engine-pinned CoW) | Per-second (60s..24h fixed TTL; no live extend) |
+| `leanci` (`lean.ci`) | Warm Cloud Hypervisor Linux x86\_64 microVMs (`lean-2vcpu-ubuntu-2604`..`lean-32vcpu`, `lean-32vcpu-96gb`) with optional CoW `.olean` overlays (`repo`/`base_key`/`lean_mode`) & `turbo-lean` | Provider file/exec API -> reverse relay | No | Yes (named + fork, engine-pinned CoW) | Per-second (60s..24h fixed TTL; no live extend) |
 | `hetzner` | Larger x86\_64 / ARM64 CPU & RAM instances (`cpx22`..`ccx43`, `cax31`; legacy `cpx21`..`cpx51` aliases map to `cpx22`..`cpx62` with EU location fallback `fsn1` -> `hel1` -> `nbg1`) | Cloud-init `user_data` -> reverse relay | No (stopped servers still bill) | No | Hourly / per-minute |
 | `vastai` | Ephemeral CUDA GPUs (`rtx4090`, `a100`, `h100`, or explicit `gpu` filter) | Offer `onstart` -> reverse relay | No (stopped instances bill storage/GPU) | No | On-demand |
 | `scaleway` | EU Linux/GPU Instances (`DEV1-*`, `PRO2-*`, `L4-*`, `H100-*`) & Apple Silicon Mac minis (`M1-M`, `M2-M`, `M2-PRO`, `M4-M`) | Cloud-init / SSH -> reverse relay | No | No | Instances: per-minute; Apple Silicon: **24h (`deletable_at`)** |
 | `colab` (`Google Colab`) | Pooled Google Colab CUDA GPUs (`colab-auto`, `t4`, `l4`, `a100`, `h100`) & TPUs (`v5e1`, `v6e1`) via `colab-api`, shadow-priced at ½ Vast.ai | Worker file/exec API -> reverse relay | No | No | On-demand (shadow-metered at ½ Vast.ai; explicit-only) |
 
-Provider credentials (`BOAT_API_KEY`, `LEANCI_API_KEY`/`LEANCI_TOKEN` or legacy `BOOST_API_KEY`/`BOOST_TOKEN`, `HETZNER_CLOUD_APIKEY`, `VASTAI_API_KEY`,
+Provider credentials (`BOAT_API_KEY`, `LEANCI_API_KEY`, `HETZNER_CLOUD_APIKEY`, `VASTAI_API_KEY`,
 `SCALEWAY_SECRET_KEY`, `SCALEWAY_KEY_ID`, `COLAB_API_TOKEN`, etc.) are resolved inside Core from
 operator settings (`.sandboxed-sh/managed_providers.json`, `0600`, AES-256-GCM
 via `env_crypto`), environment variables, or Bitwarden Secrets Manager
@@ -77,6 +77,14 @@ operator enabled toggle is changed. Lookup failures return a stable 503 without
 vault output. An advisory file lock fences concurrent master-key creation;
 contention fails closed without replacing an existing key.
 
+The same sealing is available without HTTP as `orb-core[-dev] seal-provider
+<boat|leanci|colab>`, run on the Core host in the service's environment. Its
+authority is ownership of Core's data root by the invoking user; it has no login,
+so dev-mode sessions and fallback signing keys cannot reach it, and a process
+carrying a mission identity (`SANDBOXED_MISSION_ID`, `SANDBOXED_JOB_ID`) is
+refused. It prints only `{provider, sealed}`. The running service picks the key
+up on its next provider call; no restart is needed.
+
 **Spec Card** (`Th0rgal/orb@31f24317b`, `Orb.ManagedProviderPolicy`,
 `ManagedProviderSealing.lean`, the Control seal route): `seal_authority_iff`
 connects the pure gate to authenticated operator / non-mission / non-managed
@@ -84,6 +92,110 @@ flags. Positive trace: operator seals a synthetic lean.ci key, and only Core can
 open it. The pure theorem does not verify HTTP credential classification,
 Bitwarden, filesystem primitives or AEAD; route and synthetic-vault tests cover
 those integrations. No live vault result is evidence from the self-test.
+
+### Availability and persisted operator intent
+
+Each adapter exposes read-only `Provider.availability`. `available` and `degraded`
+may pass admission; `saturated` returns `provider_at_capacity` (REST 503) and
+`unknown`/observation failures fail closed before a VM reservation or rental.
+Availability is independent of the operator toggle in `managed_provider_settings`.
+Only explicit operator configuration writes that table; Boat retains its existing
+`managed_fleet_state.boat_enabled` as its sole toggle owner. Adapter availability
+defaults to unknown. Boat explicitly admits attempts with `capacity_not_exposed`,
+since its supported API offers no pool preflight; it makes no capacity guarantee.
+Admission rechecks the
+toggle in the reservation transaction, including resume and extend cost admission.
+Catalog responses expose `availability` separately and never change `enabled`
+because a provider is full or unreachable. Existing idempotent completed creates
+replay before capacity preflight; an observation does not revoke a prior receipt.
+
+**Spec Card** (`Th0rgal/orb@1349b797f`, `Orb.ManagedProviderAvailability`,
+`ManagedProvisioning.preflightAvailability`): `admission_iff` captures the enabled
+and usable-status conjunction; positive available/degraded traces and saturated /
+disabled rejection theorems are kernel checked. Deliberate capacity mutants live
+separately. HTTP decoding, caches, database transactions and capacity races remain
+the I/O TCB, covered by mock-transport and persistence regressions, not this theorem.
+A successful preflight does not promise the subsequent provider create succeeds.
+Transport failures keep a bounded, credential-redacted, single-line cause in the
+Core log while the returned provider error remains a stable uncertain-outcome code.
+
+### Prompt spawn receipt
+
+Readiness takes minutes, so creation no longer holds the caller's connection.
+
+- `spawn_managed_machine` (MCP) with an `idempotency_key` returns an action
+  receipt at once (`state: accepted`). `get_action` returns `running`, then
+  `succeeded` with the machine, or `failed` / `uncertain` with the error.
+- `POST /api/managed-machines` returns 202 with the provisioning machine plus
+  `action_id`, `action_state` and `poll_url`
+  (`GET /api/managed-machines/actions/:id`). `"wait": true` keeps the blocking
+  201 contract for callers that need a ready node (Change machine).
+- The receipt lives in `mcp_actions_v1`, keyed by the caller (user and owning
+  mission) and the idempotency key. One insert wins; a retry with the same key
+  and arguments returns the same receipt and never provisions again, and
+  different arguments under the same key are a conflict.
+- A receipt is readable only by its owner (user, and for MCP the same mission)
+  or an operator. Others get not-found.
+- Arguments that can never be admitted (unknown size, bad TTL) are refused
+  before a receipt exists.
+- A transport failure or an unfinished cleanup settles as `uncertain`, which is
+  never retried automatically. On start, Core marks receipts left `accepted` or
+  `running` by a previous process as `uncertain`
+  (`core_restarted_during_managed_spawn`); the reservation row stays for
+  reconciliation.
+
+**Spec Card** (`Orb.ManagedSpawnPolicy`, `ManagedSpawnActions.lean`):
+`receipt_execute_iff` proves only the request whose fresh ID equals the stored
+winner with the same digest may provision; `receipt_retry_replays` and
+`receipt_missing_never_executes` cover retries and a missing row, and a mutant
+that drops the inserter identity is shown to dispatch twice. SQLite uniqueness,
+UUID freshness and the authenticated scope are the I/O boundary, covered by the
+native tests (concurrent submit, changed arguments, tenant and mission
+isolation, uncertain replay), not by the theorem.
+
+### lean.ci adapter
+
+The provider's former name `boost` is not accepted anywhere: not as a provider
+alias, not as a sealed-key file, not as a credential name Core reads. Two
+one-time migrations run at start and are no-ops afterwards: rows with
+`provider='boost'` are renamed to `leanci`, and a key sealed as `boost.aead` is
+opened under its old name and sealed again as `leanci.aead` (the name is bound
+into the AEAD, so the file cannot simply be renamed). An unreadable old file is
+kept and reported, never deleted. The secret broker still refuses `BOOST_*`
+names to missions; refusing a name is not an alias.
+
+`ManagedProviderLeanci.lean` is the `leanci` client for `https://api.lean.ci/v1`
+(`LEANCI_API_URL` overrides the base, `LEANCI_API_KEY` is sealed in Core). Its wire
+contract was read from the server source (`lfglabs-dev/lean.ci`,
+`crates/leanci-ctrl/src/vms.rs`), not from the retired client:
+
+- Create is `POST /vms` (202, `{vm}`) with `name`, `runner_label`, `ttl_secs` and
+  optional `memory_mib`, `repo`, `snapshot_id`. Sizes map to
+  `lean-<n>vcpu-ubuntu-2604`; both 32-vCPU sizes send explicit memory because the
+  label's default is 96 GiB. Orb caps the lease at 720 minutes.
+- Only `running` is ready. `stopped`, `failed` and `reaped` are terminal. There is
+  no stop/resume and no live TTL extension; those calls fail, they are not faked.
+- Guest commands are `POST /vms/:id/exec` with an argv array, run as root; files
+  are `PUT /vms/:id/files` with base64 content, mode 0600. A reply that is not
+  `ok` and has no exit code is a failure. The client waits longer than the
+  server's own guest wait so an answer is not reported as uncertain.
+- Snapshots are identified by ID and labelled; labels are not unique and failed
+  saves stay listed. Lookup prefers a `ready` entry, delete removes every entry
+  with the label, and a spawn from a label resolves it to a ready snapshot's ID
+  or rents nothing.
+- Availability is `GET /vms/capabilities` (`?repo=` / `?snapshot_id=`), cached
+  20 s. No online engine, no schedulable vCPU, a profile above
+  `largest_bootable_vm` or `max_launchable_now == 0` is `saturated`; a reply the
+  client cannot interpret is `unknown`. Both reject before any reservation.
+
+Its mock transport uses UUID identifiers and the server's status codes, and
+rejects what the server rejects (POST uploads, string commands, unknown labels).
+Verified on the dev deployment on 2026-11-13: a `small` VM is created, enrols
+about 26 s after the request, and is destroyed and gone at the provider. It has
+2 vCPU, 8 GiB and a 98 GB root filesystem of which only about 14 GB is free on a
+fresh VM (`/workspace` is on the same filesystem), so `small` is tight for Lean
+builds. Not yet verified: the disk of the larger sizes, a mission on the VM,
+snapshots, a warm image, and the guest's `LEANCI_*` cache variables.
 
 ## Lean provider transport contract
 
@@ -135,10 +247,29 @@ lease; `estimated_cents` is not trusted. User-cap admission includes pending
 reservations under the same transaction, and replaying a completed request does
 not add another user spend charge.
 
-During recovery, configured entry points accept only the allowlisted base images
-(`orb-node-base`, `provider-default`). Named restore labels and arbitrary images
-fail before reservation until project/tenant snapshot lookup is connected.
-The trusted provider adapter's saved-snapshot wire contract is tested separately.
+Configured entry points accept the allowlisted base images (`orb-node-base`,
+`provider-default`) or a saved snapshot of the caller's own project. Arbitrary image
+names fail before reservation.
+
+**Saved snapshots are project-scoped** (`ManagedSnapshotCatalog`). The provider's
+`/saved-snapshots` list is the only evidence that one exists. A snapshot named
+`orb-snap-<project>-<label>-<suffix>` belongs to the project its pre-cutover registry
+record (`managed_snapshots.json`) names, otherwise to the longest known project slug its
+name starts with. `list_managed_snapshots` returns the caller's project's snapshots;
+`spawn_managed_machine(from_snapshot=...)` accepts a provider name or label, resolves it
+inside that project, and refuses a missing, still-saving or ambiguous one. An unresolved
+label never reaches the provider. Only an admin's operator session may name another
+project. A failed provider list is an error, not an empty list.
+
+The same resolution serves `start_mission(remote_node_id="auto-managed[:size]",
+managed_from_snapshot=..., managed_ttl_minutes=...)` and the REST create route. For
+`start_mission`, Core rents one Boat machine through the shared spawn path before creating
+the child, then makes the child its owner and records the caller as requester; if the child
+cannot be created or dispatched the machine is destroyed. `managed_from_snapshot` without
+`auto-managed` is refused. On REST the project is the owning mission's when the caller
+owns that mission; an admin may pass `project`. The call is synchronous: it returns once
+the machine has made its first relay poll. Reuse of an idle sibling machine and the
+fleet-wide `auto` scheduler are not implemented here.
 Stop and destroy require provider success before committing local state. Resume
 uses an archived Boat sandbox as a fork source, bootstraps a successor, and keeps
 the same Core machine/node ID.
@@ -163,8 +294,12 @@ tool text says so. A busy machine still stops at its TTL.
   Core-authenticated operator call whose verified user owns the machine. Role labels and
   request-body identities grant nothing. Both `<id>` and `managed-<id>` are accepted;
   anything else answers `not_found`.
-- **Expiry** (`ManagedTtl.tick`, every 30 s): within 2 minutes of the deadline the owner
-  mission gets one `managed_machine_expiring` event. At the deadline Core claims the expiry
+- **Expiry** (`ManagedTtl.tick`, every 30 s): the owner mission gets a
+  `managed_machine_expiring` event 20 minutes and again 5 minutes before the deadline
+  (`minutes_before` in the payload), once each per deadline, so an extension re-arms both.
+  The 20-minute event is skipped for a machine whose whole lifetime is shorter, and is not
+  sent late if Core was down across it. These are mission events: they appear in the
+  mission's event stream and are not injected into a running agent's context. At the deadline Core claims the expiry
   (which fences extensions, heartbeats and resume), emits `managed_machine_expired`, reads
   the provider's state and usage, destroys a still-billable guest, and only then closes the
   row and emits `managed_machine_expiry_cleaned`. An already archived, nonbilling disk is
@@ -172,6 +307,25 @@ tool text says so. A busy machine still stops at its TTL.
   `pending` (row shown as `destroying`) and it is retried; nothing is marked done on
   silence. Spend is the provider's metered figure when it reports one, otherwise the lease
   reservation, labelled `lease_reservation_estimate`. Events are deduplicated per boot.
+- **No live machine without a deadline:** a `ready` or `provisioning` row with
+  `expires_at_sec = 0` (written before deadlines existed) gets creation time plus TTL,
+  or one TTL from discovery when the creation time is unknown, and then follows the
+  normal expiry path. An expired row never bound to a provider id is matched by exact
+  sandbox name in the complete inventory: found once, it is bound and cleaned up on the
+  next pass; absent, the row is closed without a provider call.
+- **Operator authority:** a non-external session with role `operator` acts with the
+  authority of the user who minted it (`mcp_sessions_v1.owner`, or the Core-authenticated
+  caller): an admin's operator session manages any machine, another user's only that
+  user's. The role label alone grants nothing, and external sessions cannot hold it.
+  For a direct call (a Core login token, not a mission token) Core passes its own verdict
+  that the caller is an administrator; the single-tenant administrator has no user id, so
+  the verdict, not an id lookup, decides. A mission's own MCP token always carries the
+  role `executor`: a mission reaches only its lineage's machines, whoever owns the mission.
+- **Legacy owners:** pre-cutover rows may carry a tenant label (`prod`) in
+  `owner_user_id`. At startup `repairManagedMachineOwners` replaces it with the owning
+  mission's user when that user exists; other rows are left alone. For a mission-owned
+  machine the owning mission's user decides lineage access. A missing owner is reported as
+  `managed_user_missing:<id>`.
 - **Operator probe:** `orb-core managed-inspect <id|managed-<id>|unique-prefix>...` prints,
   per machine, Core's row beside the provider's state (`provider_exists`, `provider_state`,
   `provider_billable`, `provider_usage_cents`). It is read-only.
@@ -494,65 +648,238 @@ Hierarchical inheritance & pace/delay enforcement:
 
 ## Provisioning
 
-`provision` runs `src/managed/orb-node-provision.sh` as root before
-starting `orb-node` (best effort, logged): `/tmp/opencode` writable by
-`orbnode`, a git credential helper answering only `https://github.com` with
-the mission's GitHub token (the `paloma-secrets` file Core delivered, else
-`GITHUB_TOKEN`/`GH_TOKEN`; never written by the script), ssh GitHub URLs
-rewritten to https, and the orbnode rustup env when the image has it (skipping
-recursive `chown -R` when `$CACHES/{rustup,cargo}` is already owned by
-`orbnode`). Boot-time state preparation wipes `node.cred`, `managed-auth`,
-`/run/user/*/paloma-secrets`, `.paloma-secrets`, and `/var/lib/orb-node/.boost-env`
-while pruning heavy
-toolchain/build/VCS trees (`caches/{elan,rustup,cargo,lake,xdg}`, `.git`,
-`.lake`, `target`, `node_modules`) and skipping global `sync` so lazy CoW
-snapshot hydration never times out (`SECRETS_WIPE` before snapshot/fork save
-retains `&& sync`). On `leanci` microVMs, `orb-node-provision.sh` also extracts
-guest `LEANCI_*` / `BOOST_*` environment variables (including the VM-scoped `LEANCI_CACHE_TOKEN` / `BOOST_CACHE_TOKEN`
-for `turbo-lean`) into `/var/lib/orb-node/.boost-env` (`0600` `orbnode:orbnode`),
-makes `/workspace/repo` and `/workspace/boost-cvm/lean-overlay/merged` readable to
-`orbnode`, and installs `/usr/local/bin/orb-cow-worktree` so concurrent sub-agents
-can create isolated git worktrees seeded with `cp -al` hardlinked `.lake/build`
-artifacts without Lake lock contention. Post-create provisioning enforces an overall wall-clock
-deadline (`360s` for Boat, `480s` for cloud-init and `leanci` reverse-relay providers) strictly below
-`AssistantMcp`'s `540s` HTTP timeout (and Hermes's `600s` MCP stdio timeout) so
-Core always destroys any partial VM and returns structured JSON before the
-caller's HTTP socket times out. For cloud-init/onstart providers (`hetzner`, `vastai`, `scaleway`) and `leanci` (executed directly over `POST /v1/vms/:id/exec`), Core generates a
-one-time `<4 KiB` enrollment script (fitting Vast.ai's `onstart` limit) that
-fetches `sandboxed-node`, `sandboxed-mcp`, and verified native harnesses
-(`opencode`, `claude`, `codex`) over streaming `GET /api/managed-machines/bootstrap-binary/:id`
-(which verifies ELF `e_machine` matches the machine's `arch`), keeps
-`/home/user/.orb/enroll.env` `0600` unprivileged-unreadable, enables `orbnode`'s
-lingering user D-Bus session (`XDG_RUNTIME_DIR` + `DBUS_SESSION_BUS_ADDRESS`), and
-dials back over the reverse relay (`SANDBOXED_NODE_DIAL_CORE_URL`). Marketplace
-providers (`vastai`) quote a verified offer (`quote_spawn`) enforcing CPU/RAM floors
-before budget admission so daily caps, pool reservations, and machine ledger rows use
-the real `dph_total` rate rather than catalog placeholders. Scaleway Apple Silicon
-(`M2-*`, 24h minimum lease) is rejected for Linux `worker` provisioning and omitted
-from the worker size catalog (`raw`-only with `allow_24h_commitment: true`). The
-`online` ledger event records `ready_ms`, `provision_ms`, `enroll_ms` and `total_ms`.
+`scripts/orb-node-provision.sh` is the one guest script for every provider. Core
+delivers it with a private `enroll.env` through the provider's file call and runs
+it as root; Core serves the installed copy
+(`/usr/local/lib/orb/orb-node-provision.sh`, or `ORB_NODE_PROVISION_SCRIPT`, which
+lets a dev instance use its own copy without touching the one prod serves).
+
+In order, the script:
+
+- creates the `orbnode` user and its work directory, and installs `enroll.env` as
+  `/etc/orb/enroll.env` (root, 0600);
+- removes a cached node identity and delivered mission secrets, so a fork or a
+  restored snapshot never reuses its parent's;
+- downloads the node from `GET /api/managed-machines/bootstrap-binary/:id` and
+  refuses anything that is not an x86_64 ELF (checked with `od`, so a minimal
+  image without Python can still enrol). It sets the mode of every directory on
+  the binary's path explicitly, because the script runs with umask 077 and some
+  coreutils builds create missing parents with the umask; then it checks, as
+  `orbnode`, that the binary is executable and fails with the path's
+  permissions and mount options if it is not (first seen on lean.ci, where the
+  unit restarted with 203/EXEC "Permission denied" until the deadline);
+- on a lean.ci guest, copies the provider's `LEANCI_*` settings, including the
+  VM-scoped cache token, to `/etc/orb/leanci-env` (root:orbnode, 0640), sourced by
+  `orbnode` login shells. lean.ci writes them only for its own `runner` user, in
+  `/etc/profile.d/boost-vm.sh` and `/home/runner/.boost-env` (its file names).
+  The token exists only when the VM was created with a `repo`, and expires an
+  hour after the VM's TTL. lean.ci blanks its own files before a snapshot but not
+  this copy, so a snapshot taken through Core must remove `/etc/orb/leanci-env`
+  first;
+- starts the node. With systemd it writes the `orb-node` unit and its enrolment
+  drop-in (including `SSL_CERT_FILE`, without which the node's static OpenSSL
+  cannot verify Core), enables the user bus for remote jobs and starts the unit.
+  **Without systemd** (a Colab runtime) it starts
+  `/opt/orb/bin/orb-node-supervise` in its own session, detached from the
+  provider's exec call: a restart loop that runs the node as `orbnode` with a
+  minimal environment (the enrolment values, `SSL_CERT_FILE`, and only the
+  accelerator variables `NVIDIA_*`, `CUDA_*`, `TPU_*`, `PJRT_*`,
+  `LD_LIBRARY_PATH`, `COLAB_GPU` from the runtime), handed over through the
+  environment and never on a command line. The enrolment file is read without
+  being evaluated by a shell. A second run stops the previous loop first, after
+  checking that the recorded PID still is one. Output goes to
+  `/var/log/orb-node.log`, which only root can create.
+
+Every bootstrap also logs what the provider delivered: one guest line with the
+CPU count, memory, root and `/workspace` disk sizes and the GPU name, next to the
+requested size, so the catalog can be checked against real machines.
+
+A bootstrap that fails says where. Core logs one `[managed-bootstrap]` line per
+stage (provider ready, files delivered, script finished) with the machine ID and
+elapsed time, and the failure is one of:
+`managed_bootstrap_timeout_provider_not_ready` (the provider never reported the
+machine ready; the last state it gave is logged),
+`managed_bootstrap_timeout_during_delivery`, `managed_bootstrap_launch_failed`
+(the script exited with an error; its output is logged), or
+`managed_bootstrap_timeout_no_relay_poll`. In the last case Core asks the guest,
+before destroying it, for PID 1 and architecture, the permissions and mount of the
+node binary's path, the unit's user and command, the unit state, the node process count, whether
+it can reach Core's `/api/health`, and the tail of the node's log. Guest text is
+logged with the enrolment token removed, control characters dropped, bounded to
+4000 characters, and one prefixed line per guest line. None of it goes into the
+action receipt.
+
+Starting the node is not readiness: only the first authenticated relay poll,
+inside the provider's deadline (360 s Boat, 480 s lean.ci, 900 s Colab), marks
+the machine ready; otherwise Core destroys it.
+
+### Google Colab adapter
+
+`ManagedProviderColab.lean` is the `colab` client for the `colab-api` service on
+the Core host (`http://127.0.0.1:8790/v1`, `COLAB_API_URL`, token
+`COLAB_API_TOKEN` sealed in Core). Its wire contract was read from the service
+source (`Th0rgal/colab-api`):
+
+- The control API speaks GET and POST only. Create is `POST /notebooks` with the
+  machine name (the service is idempotent on the name), the accelerator
+  candidates for the size and `worker: true`. Delete is
+  `POST /notebooks/:id/delete`. IDs contain `~` and `@` and are percent-encoded.
+- The service tries each requested accelerator in turn before it answers, so
+  the per-candidate wait is divided to keep the whole create call near seven
+  minutes; the 900 s readiness deadline, which starts before the call, covers it.
+- A runtime is ready for commands only once its worker tunnel URL is published;
+  a record that is connected but has no tunnel URL yet is not ready.
+  The worker is called at that URL with a per-runtime token from the notebook
+  record; a URL that is not HTTPS is refused.
+- Commands are `POST /exec` on the worker (`bash -lc`, working directory
+  `/content`). A timed-out command has no exit code and is a failure. An answer
+  from the tunnel edge (502, 503, 530) is retried once after re-reading the
+  record; a lost connection is not, since the command may have run. The worker's
+  upload route cannot leave `/content`, so files are written through `exec` as
+  base64, mode 0600.
+- Sizes `colab-auto`, `t4`, `l4`, `a100`, `h100`, `v5e1`, `v6e1`, shadow-priced
+  at half the Vast.ai rate. `colab-auto` asks for H100, A100, L4, T4 in that order.
+- No snapshots and no stop/resume. A runtime has no lease at the provider, so
+  extending changes nothing there and Core's TTL is the only one.
+- Availability: no usable account, every usable account already running a
+  notebook, or the requested accelerator not eligible is `saturated`; an unusable
+  account is `degraded`. Cached 30 s.
+
+Verified on the dev deployment on 2026-11-13: a `t4` runtime publishes its
+tunnel in about 17 s, the node started without systemd enrols about 40 s after
+the request and stays up, the guest reports a Tesla T4 with 2 vCPU, about
+12.7 GiB and a 113 GB disk, and the notebook is deleted on destroy. The other
+sizes are not verified.
+
+## Automatic placement on the static fleet
+
+Code: `lean/OrbCore/OrbCore/AutoPlacement.lean`, applied by `start_mission`.
+
+A mission started through MCP with no node of its own inherits its parent's node
+and workspace. When there is none to inherit, or `remote_node_id` is `auto`, Core
+chooses a static node once and records it as `remote-node:<id>`, so later turns
+stay with the workspace.
+
+- **Exclusions.** A mission tag `exclude-node:<id>` binds that mission and every
+  descendant. `start_mission(exclude_nodes: [...])` adds exclusions for the child
+  and its descendants; they are written as tags on the child. Naming an excluded
+  node is refused (`placement_excluded`). A parent's node that the lineage
+  excludes is not inherited, and neither is its workspace.
+- **Eligibility.** Cordoned nodes and control-plane or admin-only nodes are never
+  chosen automatically; a caller allowed to use one names it.
+- **Choice.** Fewest non-terminal jobs in Core's ledger; configuration order
+  breaks ties. Reachability is not probed.
+- **No fallback.** If a fleet is configured and no node is eligible, the call
+  fails with `placement_failed: no_eligible_node` and no mission is created.
+
+A mission whose stored tag is still `remote-node:auto` (created before this
+rule, or through REST) resolves as before to the first configured node, and its
+children stay with it unless that node is excluded.
+
+## Reusing an idle VM for the next child
+
+Code: `lean/OrbCore/OrbCore/ManagedReuse.lean`, applied by `start_mission(auto-managed[:size])`.
+
+Before renting, Core looks for a VM it can hand to the new child. All of these
+must hold:
+
+- it was rented by this same caller for an earlier child (requester is the
+  caller, owner is that child), with the same provider, size, owner user and
+  project; a VM a mission spawned for itself is never taken;
+- that child has ended (`completed`, `failed`, `cancelled`, `archived`,
+  `acknowledged`); a child that is `awaiting_user` or `interrupted` may continue
+  and keeps its VM;
+- the VM is running, not cordoned, polled within the last 2 minutes, has no
+  non-terminal job in Core's ledger, has no expiry in progress, and has at least
+  15 minutes left;
+- the call does not ask for a snapshot (`managed_from_snapshot` always rents).
+
+The transfer is one compare-and-set on the owner, so concurrent starts cannot
+both take the same VM. Nothing is rented and no budget is reserved. The expiry is
+not reset: the result carries `managed_machine_reused` and
+`managed_machine_expires_at_sec`, and the child extends if it needs longer. If
+the start then fails, the previous owner is restored and the VM is not destroyed.
+
+An auto-managed VM is not released when its child ends. It runs until its TTL or
+until `destroy_managed_machine`.
+
+## Unnamed managed targets
+
+A mission whose stored target is `auto-managed[:size]` (or `auto` when no static
+fleet is configured) is dispatched to a ready managed machine chosen at dispatch
+time. The choice is confined to the mission: a machine owned by that mission or
+one of its ancestors, or a user-owned machine of the mission's own user. A ready
+machine of any other mission or user is never used; with none in scope the
+dispatch fails with `no_managed_machines_available`. A machine's sandbox name
+resolves under the same rule; a `managed-<id>` node id is used as given. `start_mission` does not
+rely on this: it rents or reuses a machine and records its concrete node id.
+Mission creation over REST with `auto-managed` does not rent a machine.
+
+## Harvesting a file from a VM
+
+Code: `lean/OrbCore/OrbCore/ManagedHarvest.lean`, tool `harvest_managed_file(machine_id, path)`.
+
+A mission brings a result back from a managed VM without the VM holding any
+credential and without the content entering a transcript. Authorization is the
+same lineage rule as the lifecycle tools; a caller outside it gets `not_found`.
+
+- The path must be inside the VM work directory (`/var/lib/orb-node/work`;
+  relative paths start there). `..` and control characters are refused before any
+  command is built, and the guest resolves symlinks and refuses a target outside
+  the work directory, so a link to the enrollment file cannot be read.
+- Only regular files up to 20 MiB (`max_bytes` can lower this). The limit is the
+  node's single-upload limit.
+- Core reads the size and SHA-256 on the guest, then the content through the
+  provider command API in 72 000-byte chunks (96 000 base64 characters), re-hashes
+  what it received, and fails closed on any size, chunk or digest disagreement
+  (`harvest_file_changed`, `harvest_checksum_mismatch`). The provider's own file
+  API is not used: Boat's serves only `/home/user` and `/tmp` as UTF-8.
+- Delivery goes to the node the calling mission's latest job ran on (a stored
+  target such as `auto` is resolved first, never used as a node name), as an ordinary upload
+  (`uploads/<uuid>/<name>` under the node work directory), and the node's receipt
+  digest must match. A mission on the Core host gets
+  `<working_directory>/harvest/<uuid>/<name>`; an operator session with no mission
+  gets it under the Core data directory. External sessions without a mission are
+  refused.
+- The reply is `machine_id`, `source_path`, `node`, `path`, `bytes`, `sha256`,
+  `chunks`.
 
 ## Snapshots, forks, stop
 
-Code: `src/managed/snapshots.rs`. Agent guide: `skills/managed-compute/SKILL.md`.
+Code: `lean/OrbCore/OrbCore/ManagedSnapshotCatalog.lean` (naming and scope, pure),
+`saveProjectSnapshot` / `deleteProjectSnapshot` / `projectSnapshotEntries` in
+`RemoteFleetAndRelay.lean`.
 
-- **Named snapshots** (`snapshot_managed_machine`, `POST
-  /api/managed-machines/:id/snapshot`, `boat` and `leanci`) are recorded in
-  `.sandboxed-sh/managed_snapshots.json` with `provider`, owner mission, tenant, project
-  (the owner mission's), source machine and size. Delivered
-  `.paloma-secrets` and `.boost-env` are deleted on the VM first; a VM holding a projected
-  Antigravity sign-in cannot be saved or forked. Visible and usable only
-  within the same tenant, project, and provider (arbitrary `image` strings on `leanci`
-  cannot reference snapshot IDs directly). Boat pricing: 10 included, then \$1.70/month.
+The provider's saved-snapshot list is the only store. A snapshot's provider name
+is `orb-snap-<project>-<label>-<suffix>`, and that name is what places it in a
+project; the pre-cutover `managed_snapshots.json` only supplies project and
+label for older names.
+
+- **Save** (`snapshot_managed_machine`): the caller must manage the machine, have
+  a project, and the machine must be running. The label is slugged; a label is
+  taken until its snapshot is deleted or failed. Core first removes the
+  credential files its own bootstrap wrote for this VM (`/etc/orb/leanci-env`
+  and `/etc/profile.d/zz-orb-leanci.sh`, the copy of lean.ci's VM-scoped cache
+  token) and `sync`s; if that command fails the snapshot is not taken
+  (`managed_snapshot_scrub_failed`). The running VM loses those settings until
+  it is provisioned again. Nothing else is removed: mission files, checkouts and
+  any credential a mission placed on the VM are saved as they are.
+- **List** (`list_managed_snapshots`): the caller's project only.
+- **Delete** (`delete_managed_snapshot`): by label or provider name, resolved
+  inside the caller's project; a name from another project is `not_found` and
+  never reaches the provider. An ambiguous label deletes nothing.
 - **From a snapshot**: `spawn_managed_machine(from_snapshot)` and
-  `start_mission(auto-managed, managed_from_snapshot)` (explicit snapshot
-  name/label or `"latest"`; omitted or `"light"`/`"none"`/`"base"` boots the
-  clean base image); `last_used_at` is
-  recorded. Budget and caps apply as for any rent.
-- **Fork** (`fork_managed_machine`, `POST /:id/fork`): new machine from the
-  source's latest background snapshot (up to ~1 min stale), owner = caller,
-  `forked_from` recorded. Provisioning deletes the copied `node.cred` and
-  `managed-auth` before enrolling.
+  `start_mission(auto-managed, managed_from_snapshot)` resolve the label inside
+  the caller's project before anything is rented.
+- **Fork** (`fork_managed_machine`): the source must be running and managed by
+  the caller. The fork goes through the same path as a spawn (reservation, user
+  cap, bootstrap, readiness on its own authenticated poll) with the provider's
+  fork call in place of create; it has the source's size and the caller owns it.
+  The bootstrap script stops the copied node service and deletes the copied
+  `node.cred` before enrolling. Until it runs, a forked or restored guest may
+  briefly start the copied node service with the source's identity.
+- The REST routes under `/api/managed-machines/.../snapshot` still use the
+  pre-cutover code and are not project-scoped.
 - **Stop / resume** (`supports_free_stop == true`, `boat`): stop keeps the disk
   (`Stopped`, unregistered, no billing). Resume forks the stopped sandbox and
   keeps the machine's id, node id, owner and pool; cost of earlier runs is kept

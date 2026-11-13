@@ -17,6 +17,7 @@ import OrbCore.Store
 import OrbCore.Search
 import OrbCore.Harness
 import OrbCore.Proxy
+import OrbCore.ProxyModelRouting
 import OrbCore.Cyber
 import OrbCore.Skills
 import OrbCore.AuthSidecar
@@ -636,7 +637,7 @@ private def matchProviderForChainTarget? (providers : Array AIProviderRecord) (a
       (!slug.isEmpty && providerSlugOf p.name == slug)
     )
 
-private def defaultProviderBaseUrl (provType : String) : String :=
+def defaultProviderBaseUrl (provType : String) : String :=
   match provType with
   | "muse"        => "https://api.meta.ai"
   | "anthropic"   => "https://api.anthropic.com"
@@ -646,10 +647,12 @@ private def defaultProviderBaseUrl (provType : String) : String :=
   | "groq"        => "https://api.groq.com/openai"
   | "mistral"     => "https://api.mistral.ai"
   | "minimax"     => "https://api.minimax.io"
-  | "zai"         => "https://api.z.ai/api/paas/v4"
+  | "zai"         => "https://api.z.ai/api/coding/paas/v4"
   | "kimi"        => "https://api.kimi.com/coding"
   | "google"      => "https://generativelanguage.googleapis.com/v1beta/openai"
-  | _             => "https://api.openai.com"
+  | "openai"      => "https://api.openai.com"
+  -- Unsupported/explicit-only providers must never leak their key to OpenAI.
+  | _             => ""
 
 private def loadSnapshotModelsForProvider (pid : String) : IO (Array (String × String × String)) := do
   let mut out : Array (String × String × String) := #[]
@@ -836,7 +839,7 @@ def parseChainTargetsJson
             provider               := provRaw
             baseUrl                := cliProxyUrl
             apiKey                 := cliProxyKey
-            modelId                := mdl
+            modelId                := if isAg then mdl else OrbCore.ProxyModelRouting.cliProxyModelId effProvType mdl
             accountRpmLimit?       := inlineAcctRpm?.orElse (fun _ => matchedHydrated?.bind (·.rpmLimit?))
             accountMaxConcurrency? := inlineAcctConc?.orElse (fun _ => matchedHydrated?.bind (·.maxConcurrency?))
             modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
@@ -865,7 +868,7 @@ def parseChainTargetsJson
               provider               := provRaw
               baseUrl                := cliProxyUrl
               apiKey                 := cliProxyKey
-              modelId                := mdl
+              modelId                := if isAg then mdl else OrbCore.ProxyModelRouting.cliProxyModelId effProvType mdl
               accountRpmLimit?       := inlineAcctRpm?.orElse (fun _ => matchedProv?.bind (·.rpmLimit?))
               accountMaxConcurrency? := inlineAcctConc?.orElse (fun _ => matchedProv?.bind (·.maxConcurrency?))
               modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
@@ -895,18 +898,21 @@ def loadRoutingChainsFromStore (st : CoreStore) (workingDir : String := "") : IO
   let hydratedProvs ← loadHydratedProviders st effWorkDir
   let cliKey := ((← lookupEnvWithFiles? "CLI_PROXY_API_KEY").getD "").trimAscii.toString
   let cliUrl ← resolveCliProxyBaseUrl
-  match ← execParamQuery st.missionsDb "SELECT id,name,models_json FROM model_routing_chains ORDER BY id ASC;" #[] with
-  | .error _ => return #[]
-  | .ok rows =>
-    if rows.size ≤ 1 then return #[]
-    let mut out : Array RoutingChain := #[]
-    for i in [1:rows.size] do
-      let r := rows[i]!
-      let cid := (r[0]?).getD ""
-      let nm := (r[1]?).getD cid
-      let mj := (r[2]?).getD "[]"
-      out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey }
-    return out
+  let .ok rows ← execParamQuery st.missionsDb "SELECT id,name,models_json FROM model_routing_chains ORDER BY id ASC;" #[]
+    | throw (IO.userError "routing_chain_store_unavailable")
+  let mut out : Array RoutingChain := #[]
+  for i in [1:rows.size] do
+    let r := rows[i]!
+    let cid := (r[0]?).getD ""
+    let nm := (r[1]?).getD cid
+    let mj := (r[2]?).getD "[]"
+    out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey }
+  -- Immutable defaults are a derived view, not a second mutable config store.
+  -- Persisted ids (even empty/unavailable chains) always win over stock entries.
+  for (id, name, entries) in OrbCore.ProxyModelRouting.stockChains do
+    if !out.any (fun c => c.id == id) then
+      out := out.push { id := id, name := name, targets := parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson entries) providers hydratedProvs cliUrl cliKey }
+  return out
 
 private def optU32Json (v? : Option UInt32) : String :=
   match v? with | some v => s!"{v}" | none => "null"
@@ -937,17 +943,55 @@ def renderResolvedChainJson (chain : RoutingChain) (pacingTracker? : Option Prox
     items := items.push entryJson
   return "[" ++ String.intercalate "," items.toList ++ "]"
 
-private def chainMatchesRequestedModel (c : RoutingChain) (m : String) : Bool :=
-  let clean := m.trimAscii.toString
-  if clean.isEmpty then false
-  else
-    let bare := bareModel clean
-    c.id == clean || c.name == clean ||
-    c.id == bare || c.id == s!"builtin/{bare}" ||
-    (c.id.startsWith "builtin/" && (c.id.drop 8).toString == bare)
-
 private def findMatchingRoutingChain? (chains : Array RoutingChain) (m : String) : Option RoutingChain :=
-  chains.find? (fun c => chainMatchesRequestedModel c m)
+  OrbCore.ProxyModelRouting.storedChain? chains m
+
+/-- Resolve direct model ids through the same account/limit hydration as saved
+    chains. Unknown bare names do not become CLIProxy model ids or default routes. -/
+private def directRoutingChain? (st : CoreAppState) (chains : Array RoutingChain)
+    (requested path : String) : IO (Option RoutingChain) := do
+  let providers ← listAIProviders st.store
+  let mut customModels : Array (String × String) := #[]
+  for p in providers do
+    if p.providerType == "custom" then
+      let name := OrbCore.ProxyModelRouting.customProviderName p.name
+      for model in p.customModels do customModels := customModels.push (name, model.id)
+  -- Preserve successful discovery membership without contacting an upstream.
+  for fp in #[s!"{st.store.rootDir}/model-discovery.json", s!"{st.cfg.workingDir}/.sandboxed-sh/model-discovery.json"] do
+    if let some raw ← (try some <$> IO.FS.readFile fp catch _ => pure none) then
+      if let .ok discovery := OrbBin.Json.parse raw then
+        if discovery.fieldNat? "schema_version" == some 1 then
+          for observation in (discovery.fieldArr? "connections").getD #[] do
+            let pid := (observation.fieldStr? "provider_id").getD ""
+            for p in providers do
+              let name := OrbCore.ProxyModelRouting.customProviderName p.name
+              if p.providerType == "custom" && (pid == name || pid == p.id || pid == s!"custom:{p.id}") then
+                let success := observation.fieldOrNull "last_success"
+                let models := (success.fieldArr? "models").getD #[]
+                let fallback := if success.isNull || success.fieldStr? "completeness" == some "partial" then
+                    (observation.fieldArr? "fallback_models").getD #[] else #[]
+                for model in models ++ fallback do
+                  if let some id := model.fieldStr? "id" then customModels := customModels.push (name, id)
+  let some (provider, model) := OrbCore.ProxyModelRouting.directEntry? requested path customModels
+    | return none
+  let hydrated ← loadHydratedProviders st.store st.cfg.workingDir
+  let cliKey := ((← lookupEnvWithFiles? "CLI_PROXY_API_KEY").getD "").trimAscii.toString
+  let cliUrl ← resolveCliProxyBaseUrl
+  let targets := (parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson #[(provider, model)])
+    providers hydrated cliUrl cliKey).filter (fun t => !t.apiKey.isEmpty)
+  -- Explicit in-memory chain snapshots can be the configured standard accounts
+  -- (including hermetic transports). Do not resurrect them over disabled store rows.
+  let hasConfiguredOwner := providers.any (fun p => p.providerType == provider || p.id == provider ||
+      (p.providerType == "custom" && OrbCore.ProxyModelRouting.customProviderName p.name == provider)) ||
+    hydrated.any (fun p => p.providerType == provider || p.id == provider)
+  let targets := if targets.isEmpty && !hasConfiguredOwner then
+      (chains.flatMap (·.targets)).filter (fun t =>
+        t.provider == provider && t.modelId == model && !t.apiKey.isEmpty)
+    else targets
+  -- Structural guarantee: a direct route can only carry the requested model.
+  let keep := fun (t : ProviderTarget) =>
+    t.modelId == model || t.modelId == canonicalAntigravityProxyModelId model
+  return some { id := requested, name := requested, targets := targets.filter keep }
 
 private def selectRoutingChainForBody (chains : Array RoutingChain) (body : ByteArray) : RoutingChain :=
   let reqModel? :=
@@ -1335,37 +1379,35 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
         let denyReason := ((capWord >>> 1) &&& 0x7).toNat
         let scopeStr := if denyReason == 2 then "user" else "global"
         return mkJson 429 s!"\{\"error\":\{\"type\":\"spend_cap_exceeded\",\"code\":\"daily_spend_cap_exceeded\",\"scope\":{jsonEscape scopeStr},\"message\":\"Daily spend cap reached\"}}"
-  let rawRequestedModel := ((bodyJv.fieldStr? "model").getD defaultCodexModel).trimAscii.toString
+  let rawRequestedModel := (bodyJv.fieldStr? "model").getD defaultCodexModel
   let chains ← st.chainsRef.get
-  let exactChainMatch? :=
-    (findMatchingRoutingChain? chains rawRequestedModel).orElse
-      (fun _ => findMatchingRoutingChain? chains requestedModel)
-  let rawActiveChain0 := selectRoutingChainForBody chains req.bodySlice.toByteArray
-  let rawActiveChain ← do
-    if st.proxyMockTransport?.isSome then
-      pure rawActiveChain0
-    else
-      let cliKey := ((← lookupEnvWithFiles? "CLI_PROXY_API_KEY").getD "").trimAscii.toString
-      let cliUrl ← resolveCliProxyBaseUrl
-      if cliKey.isEmpty then
-        pure rawActiveChain0
-      else
-        match exactChainMatch? with
-        | some mc => pure mc
-        | none =>
-          let cliTgt : ProviderTarget := {
-            accountId := "cliproxyapi"
-            provider := "openai"
-            baseUrl := cliUrl
-            apiKey := cliKey
-            modelId := canonicalAntigravityProxyModelId requestedModel
-          }
-          if let some defChain := chains.find? (fun c => c.id == "default") then
-            pure { defChain with targets := defChain.targets.push cliTgt }
-          else if rawActiveChain0.targets.isEmpty then
-            pure { id := "cliproxyapi", name := "CLIProxyAPI", targets := #[cliTgt] }
-          else
-            pure { id := requestedModel, name := requestedModel, targets := #[cliTgt] ++ rawActiveChain0.targets }
+  -- A named model is served by its saved chain or by the provider owning that
+  -- exact model. It is NEVER rewritten to another model: only a chain the caller
+  -- named may fall back across models. Only a request with no `model` field
+  -- keeps the default chain.
+  let mut routed? : Option RoutingChain := none
+  let mut routeKind := "chain"
+  if (bodyJv.fieldStr? "model").isNone then
+    routed? := some (selectRoutingChainForBody chains req.bodySlice.toByteArray)
+    routeKind := "default"
+  else
+    match findMatchingRoutingChain? chains rawRequestedModel with
+    | some matched => routed? := some matched
+    | none =>
+      routed? ← directRoutingChain? st chains rawRequestedModel cleanPath
+      routeKind := "direct"
+      if routed?.isNone then
+        -- The in-memory snapshot can predate a chain saved by another path (import,
+        -- another process). Look at the store once before refusing a name.
+        let fresh ← loadRoutingChainsFromStore st.store st.cfg.workingDir
+        if let some matched := findMatchingRoutingChain? fresh rawRequestedModel then
+          discard <| publishRoutingChainsUpdate st fresh (forceBump := false)
+          routed? := some matched
+          routeKind := "chain"
+  let some rawActiveChain := routed?
+    | return mkJson 400 (OrbCore.ProxyModelRouting.unknownModelBody rawRequestedModel)
+  if routeKind == "direct" && rawActiveChain.targets.isEmpty then
+    return mkJson 503 (OrbCore.ProxyModelRouting.noProviderBody rawRequestedModel)
   let activeChain := filterChainTargetsForUserPrefs rawActiveChain userPrefs
   if proxyOwnerUserId?.isSome && !rawActiveChain.targets.isEmpty && activeChain.targets.isEmpty then
     return mkJson 403 "{\"error\":\"no_user_enabled_providers\",\"message\":\"All configured inference providers for this model are disabled in your preferences.\"}"
@@ -1438,6 +1480,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   let skipAccountIds := if headersAlreadyCommitted then #[] else plan.cooling.map (fun c => c.accountId)
   let explicitPinned? : Option String :=
     if headersAlreadyCommitted then some pinnedAcctHdr else none
+  let authEvidence ← IO.mkRef (#[] : Array (String × String))
   let out ← forwardProxyChain dispatchChain req.method cleanPath #[] forwardBody
     st.proxyMockTransport? headersAlreadyCommitted st.pacingTracker?
     (skipAccountIds := skipAccountIds)
@@ -1445,6 +1488,17 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     (attemptGeneration? := attemptGen?)
     (nowEpoch? := some nowEpochSec)
     (pinnedAccount? := explicitPinned?)
+    (authEvidence? := some authEvidence)
+  -- Provider status follows what real requests saw: a refused login is recorded per
+  -- upstream account, and an account that just served a request is cleared.
+  for (accountKey, code) in (← authEvidence.get) do
+    discard <| execParamQuery st.store.missionsDb
+      ("INSERT INTO provider_auth_health(account_key,code,observed_at) VALUES(?1,?2,?3) " ++
+       "ON CONFLICT(account_key) DO UPDATE SET code=excluded.code,observed_at=excluded.observed_at;")
+      #[accountKey, code, formatEpochIso8601Utc nowEpochSec]
+  if out.status ≥ 200 && out.status < 300 && !out.selectedAccount.isEmpty then
+    discard <| execParamQuery st.store.missionsDb
+      "DELETE FROM provider_auth_health WHERE account_key=?1;" #[out.selectedAccount]
   match st.healthTracker? with
   | some htr =>
     let active ← snapshotActiveHealthCooldowns htr nowEpochSec
@@ -1473,6 +1527,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     recordProxyUsage st.store nowEpochSec
       ((usedTarget?.map (·.modelId)).getD requestedModel) ((usedTarget?.map (·.provider)).getD "")
       out.selectedAccount (execKey?.getD "") usedMissionId callerKind (extractProxyUsage out.body)
+      (requestedModel := rawRequestedModel)
   if let (some program, some mid, some sel) := (expected?, boundMid?, selection?) then
     let text := String.fromUTF8? out.body |>.getD ""
     for line in text.splitOn "\n" do
@@ -1483,7 +1538,19 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
           discard <| writeReceipt st.cfg.workingDir mid {
             revision := sel.revision, requestedModel := requestedModel, program := confirmed, model := model
           }
+  let servedTarget? := dispatchChain.targets.find? (fun t => t.accountId == out.selectedAccount)
+  let effectiveModel := (servedTarget?.map (·.modelId)).filter (!·.isEmpty) |>.getD rawRequestedModel
+  discard <| execParamQuery st.store.missionsDb
+    ("INSERT INTO proxy_outcomes(timestamp,chain_id,provider,account_id,model,requested_model,status,http_status,retries) " ++
+     "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9);")
+    #[formatEpochIso8601Utc nowEpochSec, (if routeKind == "chain" then dispatchChain.id else routeKind),
+      (servedTarget?.map (·.provider)).getD "", out.selectedAccount, effectiveModel, rawRequestedModel,
+      (if out.status ≥ 200 && out.status < 300 then "ok" else "error"), toString out.status,
+      toString (out.attemptsUsed - 1)]
   let diagHdrs := out.headers ++ #[
+    ("X-Orb-Requested-Model", rawRequestedModel),
+    ("X-Orb-Effective-Model", effectiveModel),
+    ("X-Orb-Route", if routeKind == "chain" then s!"chain:{dispatchChain.id}" else routeKind),
     ("X-Orb-Selected-Account", out.selectedAccount),
     ("X-Orb-Attempts-Used", s!"{out.attemptsUsed}"),
     ("X-Orb-Verdict-Code", s!"{out.verdictCode}"),
@@ -1493,7 +1560,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
 
 /-- Map structured `HarnessCallbacks` from `OrbBin.ClaudeControl` onto persisted `mission_events` rows
     and record pending `control_request` call IDs so `POST /api/control/tool_result` can route answers cleanly. -/
-private def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) : OrbBin.ClaudeControl.HarnessCallbacks := {
+def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) : OrbBin.ClaudeControl.HarnessCallbacks := {
   onStructuredEvent := fun evType payload => do
     let nowSec ← coreEpochSec
     let ts := formatEpochIso8601Utc nowSec
@@ -1527,8 +1594,14 @@ private def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) :
           "SELECT COALESCE(tags,'[]') FROM missions WHERE id=?1;" #[missionId] then
         let tRaw := (tRows[1]?.bind (·[0]?)).getD "[]"
         isSideQ := (tRaw.splitOn "\"side-question\"").length > 1
+    -- Exit 0 with no text and no tool call is not a finished turn: retry, then fail.
+    let emptyVerdict? ←
+      if !isErr && finalSnap.text.trimAscii.toString.isEmpty then
+        OrbCore.RemoteDispatch.settleEmptyTurn st.store st.broadcastHub? missionId ts nowSec (retryable := !isSideQ)
+      else pure none
     let nextStatus :=
-      if isErr then "failed"
+      if let some verdict := emptyVerdict? then verdict
+      else if isErr then "failed"
       else if armedWakeups > 0 then "awaiting_user"
       else if isSideQ then "completed"
       else "awaiting_user"
@@ -1578,9 +1651,7 @@ private def launchLocalCoreMissionTurn
     match prevSt? with
     | some s => max (dbGen + 1) (s.generation + 1)
     | none => if sessionId?.isSome then dbGen + 1 else dbGen
-  discard <| execParamQuery st.store.missionsDb
-    "UPDATE mission_continuations SET phase=3, error='stale_run_generation', updated_at=?3 WHERE mission_id=?1 AND phase=1 AND run_generation<CAST(?2 AS INTEGER);"
-    #[missionId, s!"{nextGen}", ts]
+  carryArmedWakeupsForward (execParamQuery st.store.missionsDb) missionId nextGen.toNat ts
   discard <| execParamQuery st.store.missionsDb
     "UPDATE missions SET status='active', run_generation=CAST(?2 AS INTEGER), state_revision=state_revision+1, updated_at=?3 WHERE id=?1;"
     #[missionId, s!"{nextGen}", ts]
@@ -1600,6 +1671,11 @@ private def launchLocalCoreMissionTurn
         return .ok safeWt
     return .ok safeCwd
   | .error err =>
+    -- Nothing was started: the mission must not keep showing `active`.
+    discard <| execParamQuery st.store.missionsDb
+      ("UPDATE missions SET status='interrupted', terminal_reason='launch_failed', state_revision=state_revision+1, updated_at=?3 " ++
+       "WHERE id=?1 AND status='active' AND run_generation=CAST(?2 AS INTEGER);")
+      #[missionId, s!"{nextGen}", ts]
     return .error err
 
 /-- Launch a live warm harness turn when `spawn_harness: true` is supplied by an authorized admin/legacy caller on a managed mission. -/
@@ -2342,6 +2418,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           st.store st.managedStore? st.relayHub? st.broadcastHub? (← st.managedRef.get)
           st.cfg.workingDir activeClaims toolName args nowEpochSec st.remoteSup? st.managedProvisioningOverride?
           (if scopedClaims?.isNone then (mcpCaller?.map (·.userId)).getD "" else "")
+          (scopedClaims?.isNone && (mcpCaller?.map (fun c => !c.disabled && (c.isLegacyUnscoped || c.role == "admin"))).getD false)
         return .ok (mkJson 200 outJson)
 
   -- 5c. Managed Node Dial-Out Enrollment & Leased Relay
@@ -4557,62 +4634,95 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | some ch =>
           let resolvedJson ← renderResolvedChainJson ch st.pacingTracker?
           return .ok (mkJson 200 resolvedJson)
+    -- Chain CRUD in the Rust `ChainResponse` shape. One loader serves list, get,
+    -- create and update, so the clients' `ModelChain` type has a single producer.
+    let isoOf := fun (raw : String) =>
+      let t := raw.trimAscii.toString
+      if t.isEmpty then formatEpochIso8601Utc nowEpochSec
+      else match t.toNat? with
+        | some n => formatEpochIso8601Utc n.toUInt64
+        | none => t
+    let loadChainRows : IO (Array JVal) := do
+      let .ok rs ← execParamQuery st.store.missionsDb
+          "SELECT id,name,models_json,COALESCE(updated_at,''),COALESCE(created_at,''),COALESCE(is_default,-1),COALESCE(strip_thinking,-1) FROM model_routing_chains ORDER BY id ASC;" #[]
+        | throw (IO.userError "routing_chain_store_unavailable")
+      let rows := rs.extract 1 rs.size
+      let explicitDefault := rows.any (fun r => r[5]? == some "1")
+      let mut out : Array JVal := #[]
+      for r in rows do
+        let cid := (r[0]?).getD ""
+        let updated := isoOf ((r[3]?).getD "")
+        let created := if ((r[4]?).getD "").isEmpty then updated else isoOf ((r[4]?).getD "")
+        let isDef := if explicitDefault then r[5]? == some "1" else cid == "builtin/smart"
+        let strip := if r[6]? == some "-1" then cid == "builtin/assistant" else r[6]? == some "1"
+        out := out.push (OrbCore.ProxyModelRouting.chainResponse cid ((r[1]?).getD cid) ((r[2]?).getD "[]") isDef strip created updated)
+      -- Stock chains the proxy serves are listed even before anyone edits them.
+      for (sid, sname, entries) in OrbCore.ProxyModelRouting.stockChains do
+        if !out.any (fun c => c.fieldStr? "id" == some sid) then
+          let now := formatEpochIso8601Utc nowEpochSec
+          out := out.push (OrbCore.ProxyModelRouting.chainResponse sid sname
+            (OrbCore.ProxyModelRouting.entriesJson entries) (!explicitDefault && sid == "builtin/smart") (sid == "builtin/assistant") now now)
+      return out
+    let chainId? := (matchRoutePattern? "/api/model-routing/chains/:id" rawTarget).bind fun ps =>
+      (ps.find? (fun p => p.1 == "id")).map Prod.snd
     if req.method == "GET" && cleanPath == "/api/model-routing/chains" then
-      let isAdm := caller.isLegacyUnscoped || caller.role == "admin"
-      let sanitizeModelsJson (rawMj : String) : JVal :=
-        match OrbBin.Json.parse rawMj with
-        | .ok (.arr items) =>
-          .arr <| items.map fun
-            | .obj kvs =>
-              .obj <| kvs.filter fun (k, _) =>
-                k != "api_key" && k != "apiKey" &&
-                (isAdm || (
-                  k != "base_url" && k != "baseUrl" &&
-                  k != "rpm_limit" && k != "max_concurrency" &&
-                  k != "model_rpm_limit" && k != "model_tpm_limit" && k != "model_max_concurrency"))
-            | other => other
-        | _ => .arr #[]
-      match ← execParamQuery st.store.missionsDb
-        "SELECT id,name,models_json,updated_at FROM model_routing_chains ORDER BY id ASC;" #[] with
-      | .error _ => return .ok (mkJson 200 "[]")
-      | .ok rs =>
-        if rs.size ≤ 1 then return .ok (mkJson 200 "[]")
-        let mut out : Array JVal := Array.mkEmpty (rs.size - 1)
-        for i in [1:rs.size] do
-          let r := rs[i]!
-          let cid := (r[0]?).getD ""
-          let nm := (r[1]?).getD cid
-          let mj := sanitizeModelsJson ((r[2]?).getD "[]")
-          let up := (r[3]?).getD ""
-          out := out.push (.obj #[
-            ("id", .str cid),
-            ("name", .str nm),
-            ("models_json", mj),
-            ("updated_at", .str up)
-          ])
-        return .ok (mkJson 200 (renderCompact (.arr out)))
+      return .ok (mkJson 200 (renderCompact (.arr (← loadChainRows))))
+    else if req.method == "GET" && chainId?.isSome then
+      match (← loadChainRows).find? (fun c => c.fieldStr? "id" == chainId?) with
+      | some c => return .ok (mkJson 200 (renderCompact c))
+      | none => return .ok (mkJson 404 "{\"error\":\"chain_not_found\"}")
+    else if req.method == "DELETE" && chainId?.isSome then
+      let cid := chainId?.getD ""
+      if cid.startsWith "builtin/" then
+        return .ok (mkJson 400 "{\"error\":\"builtin_chain_cannot_be_deleted\"}")
+      let .ok found ← execParamQuery st.store.missionsDb "SELECT 1 FROM model_routing_chains WHERE id=?1;" #[cid]
+        | return .ok (mkJson 500 "{\"error\":\"routing_chain_store_unavailable\"}")
+      if found.size ≤ 1 then return .ok (mkJson 404 "{\"error\":\"chain_not_found\"}")
+      discard <| execParamQuery st.store.missionsDb "DELETE FROM model_routing_chains WHERE id=?1;" #[cid]
+      discard <| publishRoutingChainsUpdate st (← loadRoutingChainsFromStore st.store st.cfg.workingDir)
+      return .ok (mkJson 200 "{\"ok\":true}")
     else if (req.method == "POST" && cleanPath == "/api/model-routing/chains") ||
-            (req.method == "PUT" && (matchRoutePattern? "/api/model-routing/chains/:id" rawTarget).isSome) then
-      let pathCid? := (matchRoutePattern? "/api/model-routing/chains/:id" rawTarget).bind fun ps =>
-        (ps.find? (fun p => p.1 == "id")).map Prod.snd
-      let rawBody := String.fromUTF8? req.bodySlice.toByteArray |>.getD "{}"
-      let jv := (OrbBin.Json.parse rawBody).toOption.getD (.obj #[])
+            (req.method == "PUT" && chainId?.isSome) then
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
       let defCid ← nextUniqueId st "chain" nowEpochSec
-      let cid := pathCid?.orElse (fun _ => jv.fieldStr? "id") |>.getD defCid
-      let nm := (jv.fieldStr? "name").getD cid
-      let modelsJson := match (jv.field? "models").orElse (fun _ => jv.field? "entries") with
-        | some arr@(.arr _) => renderCompact arr
-        | _ => (jv.fieldStr? "models_json").getD "[]"
+      let cid := chainId?.orElse (fun _ => jv.fieldStr? "id") |>.getD defCid
+      let existing? := (← loadChainRows).find? (fun c => c.fieldStr? "id" == some cid)
+      let .ok storedRows ← execParamQuery st.store.missionsDb "SELECT models_json FROM model_routing_chains WHERE id=?1;" #[cid]
+        | return .ok (mkJson 500 "{\"error\":\"routing_chain_store_unavailable\"}")
+      -- A partial update keeps every field it does not name (the desktop's
+      -- "set default" sends only `is_default`).
+      let modelsJson? := match (jv.field? "entries").orElse (fun _ => jv.field? "models") with
+        | some arr@(.arr _) => some (OrbCore.ProxyModelRouting.keepStoredEntrySettings (renderCompact arr)
+            ((storedRows[1]?.bind (·[0]?)).getD "[]"))
+        | _ => (jv.fieldStr? "models_json").orElse fun _ =>
+            (storedRows[1]?.bind (·[0]?)).orElse fun _ =>
+              existing?.map (fun (c : JVal) => renderCompact (c.fieldOrNull "entries"))
+      let some modelsJson := modelsJson?
+        | return .ok (mkJson 400 "{\"error\":\"entries_required\"}")
+      if modelsJson == "[]" then return .ok (mkJson 400 "{\"error\":\"entries_required\"}")
+      let nm := (jv.fieldStr? "name").orElse (fun _ => existing?.bind (·.fieldStr? "name")) |>.getD cid
+      let strip := (jv.fieldBool? "strip_thinking").orElse (fun _ => existing?.bind (·.fieldBool? "strip_thinking")) |>.getD false
+      let nowIso := formatEpochIso8601Utc nowEpochSec
+      let created := (existing?.bind (·.fieldStr? "created_at")).getD nowIso
+      if jv.fieldBool? "is_default" == some true then
+        -- Materialise the current flags first so exactly one chain is the default.
+        for c in (← loadChainRows) do
+          discard <| execParamQuery st.store.missionsDb "UPDATE model_routing_chains SET is_default=0 WHERE id=?1;" #[(c.fieldStr? "id").getD ""]
+      let isDefSql := match jv.fieldBool? "is_default" with
+        | some true => "1" | some false => "0"
+        | none => if (existing?.bind (·.fieldBool? "is_default")).getD false then "1" else "0"
       match ← execParamQuery st.store.missionsDb
-        "INSERT OR REPLACE INTO model_routing_chains(id,name,models_json,updated_at) VALUES(?1,?2,?3,?4);"
-        #[cid, nm, modelsJson, s!"{nowEpochSec}"] with
+        ("INSERT INTO model_routing_chains(id,name,models_json,updated_at,created_at,is_default,strip_thinking) VALUES(?1,?2,?3,?4,?5,CAST(?6 AS INTEGER),CAST(?7 AS INTEGER)) " ++
+         "ON CONFLICT(id) DO UPDATE SET name=excluded.name,models_json=excluded.models_json,updated_at=excluded.updated_at,created_at=excluded.created_at,is_default=excluded.is_default,strip_thinking=excluded.strip_thinking;")
+        #[cid, nm, modelsJson, nowIso, created, isDefSql, if strip then "1" else "0"] with
       | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       | .ok _ =>
-        let refreshed ← loadRoutingChainsFromStore st.store st.cfg.workingDir
-        discard <| publishRoutingChainsUpdate st refreshed
-        return .ok (mkJson (if req.method == "POST" then 201 else 200) s!"\{\"id\":{jsonEscape cid},\"name\":{jsonEscape nm}}")
+        discard <| publishRoutingChainsUpdate st (← loadRoutingChainsFromStore st.store st.cfg.workingDir)
+        let saved := ((← loadChainRows).find? (fun (c : JVal) => c.fieldStr? "id" == some cid)).getD .null
+        return .ok (mkJson (if req.method == "POST" then 201 else 200) (renderCompact saved))
     else
-      return .ok (mkJson 200 "{\"ok\":true,\"router\":\"/api/model-routing\"}")
+      return .ok (mkJson 404 "{\"error\":\"not_found\"}")
 
   -- Managed Compute Fleet (`/api/managed-machines*`, `/api/remote-nodes`)
   if let some params := matchRoutePattern? "/api/managed-machines/providers/:provider/preference" rawTarget then
@@ -4642,14 +4752,21 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let some mst := st.managedStore?
         | return .ok (mkJson 503 "{\"error\":\"managed_store_unavailable\"}")
       let jv := (OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption.getD (.obj #[])
-      let mf ← st.managedRef.get
-      let nextBoatEn := if prov == "boat" then (jv.fieldBool? "enabled").getD (req.method != "DELETE") else mf.boatEnabled
-      let nextFleetEn := (jv.fieldBool? "enabled").getD mf.enabled || nextBoatEn
+      let cachedFleet ← st.managedRef.get
+      let .ok mf ← loadManagedFleet mst cachedFleet.enabled cachedFleet.boatEnabled
+          cachedFleet.dailyCapCents cachedFleet.spentTodayCents cachedFleet.maxConcurrent
+        | return .ok (mkJson 503 "{\"error\":\"managed_fleet_unavailable\"}")
+      let nextBoatEn := if prov == "boat" then (jv.fieldBool? "enabled").getD (if req.method == "DELETE" then false else mf.boatEnabled) else mf.boatEnabled
+      let nextFleetEn := Orb.ManagedProviderAvailability.fleetAfterProviderUpdate mf.enabled (jv.fieldBool? "enabled")
+      let providerEnabled? := if req.method == "DELETE" then some false else jv.fieldBool? "enabled"
       let nextMaxConc := (jv.fieldUInt64? "max_concurrent").getD mf.maxConcurrent
       if let some apiKey := (jv.fieldStr? "api_key").map (·.trimAscii.toString) |>.filter (!·.isEmpty) then
         if let .error error ← sealProviderSecret st.store.rootDir prov apiKey then
           return .ok (mkJson (if error == "managed_secret_seal_busy" then 409 else 500)
             (renderCompact (.obj #[("error", .str "managed_provider_secret_seal_failed")])))
+      if let some enabled := providerEnabled?.filter (fun _ => prov != "boat") then
+        if let .error error ← ManagedProviderSettings.setEnabled mst prov enabled (formatEpochIso8601Utc nowEpochSec) then
+          return .ok (mkJson 500 (renderCompact (.obj #[("error", .str error)])))
       if let .error e ← saveManagedFleetConfig mst nextFleetEn nextBoatEn mf.dailyCapCents mf.spentTodayCents nextMaxConc then
         return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       if let .ok live ← loadManagedFleet mst nextFleetEn nextBoatEn mf.dailyCapCents mf.spentTodayCents nextMaxConc then
@@ -4663,7 +4780,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       | return .ok (mkJson 503 "{\"error\":\"managed_store_unavailable\"}")
     let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
       | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
-    let mf ← st.managedRef.get
+    let cachedFleet ← st.managedRef.get
+    let .ok mf ← loadManagedFleet mst cachedFleet.enabled cachedFleet.boatEnabled
+        cachedFleet.dailyCapCents cachedFleet.spentTodayCents cachedFleet.maxConcurrent
+      | return .ok (mkJson 503 "{\"error\":\"managed_fleet_unavailable\"}")
     let nextEn := (jv.fieldBool? "enabled").getD mf.enabled
     let nextBoat := (jv.fieldBool? "boat_enabled").getD mf.boatEnabled
     let nextCap := (jv.fieldUInt64? "daily_cap_cents").getD mf.dailyCapCents
@@ -4702,7 +4822,12 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
         | .ok live =>
           st.managedRef.set live
-          return .ok (mkJson 200 (renderManagedMachinesJson live callerUidOpt (caller.role == "admin") uPrefs (infS + cmpS) caller.dailySpendCapCents?))
+          let .ok catalog ← loadManagedProviderCatalog mst st.store.rootDir live (caller.role == "admin") uPrefs
+              (st.managedProvisioningOverride?.map Prod.fst)
+            | return .ok (mkJson 503 "{\"error\":\"managed_provider_catalog_unavailable\"}")
+          let machines := (OrbBin.Json.parse (renderManagedMachinesJson live callerUidOpt
+            (caller.role == "admin") uPrefs (infS + cmpS) caller.dailySpendCapCents?)).toOption.getD (.obj #[])
+          return .ok (mkJson 200 (renderCompact (machines.setField "providers" catalog)))
     else if req.method == "POST" then
       if let some (cCode, cBody) := checkPlacementForCaller caller 3 0 then
         return .ok (mkJson cCode cBody)
@@ -4724,6 +4849,29 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           return .ok (mkJson 403 "{\"error\":\"provider_disabled_for_user\",\"message\":\"This cloud provider is disabled in your preferences.\"}")
         else
           pure canonProv
+      -- A retry gets its receipt back before any admission is re-run.
+      let waitReady := (jv.fieldBool? "wait").getD false
+      let providerRetryKey := (lookupHeaderCI req.headers "idempotency-key").getD ""
+      let actionArgs := jv.setField "provider" (.str prov)
+      let actionOwner : ManagedSpawnActions.Owner := {
+        userId := caller.userId, missionId := (jv.fieldStr? "owner_mission_id").getD "" }
+      let actionReply (accepted preview : JVal) : CoreHttpResponse :=
+        let stored := (accepted.field? "result").getD (.obj #[])
+        let state := (accepted.fieldStr? "state").getD ""
+        if (state == "failed" || state == "uncertain") && (stored.fieldStr? "error").isSome then
+          mkJson ((stored.fieldNat? "http_status").getD 409) (renderCompact
+            (stored.setField "action_id" ((accepted.field? "action_id").getD .null) |>.setField "action_state" (.str state)))
+        else
+          -- A replay returns the first request's machine, not this request's fresh ID.
+          let machine := if (stored.fieldStr? "id").isSome then stored else preview
+          mkJson 202 (renderCompact (machine.setField "action_id" ((accepted.field? "action_id").getD .null)
+            |>.setField "action_state" (.str state)
+            |>.setField "poll_url" ((accepted.field? "poll_url").getD .null)))
+      if !waitReady then
+        match ← ManagedSpawnActions.replay? st.store actionOwner providerRetryKey actionArgs with
+        | .error e => return .ok (mkJson 409 (renderCompact (.obj #[("error", .str e)])))
+        | .ok (some prior) => return .ok (actionReply prior (.obj #[]))
+        | .ok none => pure ()
       let mf0 ← st.managedRef.get
       let live ← match ← loadManagedFleet mst mf0.enabled mf0.boatEnabled mf0.dailyCapCents mf0.spentTodayCents mf0.maxConcurrent with
         | .ok l => pure l
@@ -4737,11 +4885,24 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let userAdmission? : Option ManagedUserAdmission := caller.dailySpendCapCents?.map fun cap => {
         capCents := cap, inferenceCents := infS, computeCents := cmpS
       }
+      -- Name the real refusal: a disabled fleet or provider is not a spend cap.
+      if !live.enabled then
+        return .ok (mkJson 409 "{\"error\":\"managed_fleet_disabled\",\"message\":\"Managed machines are turned off for this Core.\"}")
+      let providerEnabled ← match ← ManagedProviderSettings.isEnabled mst prov with
+        | .ok value => pure value
+        | .error e => return .ok (mkJson 503 (renderCompact (.obj #[("error", .str e)])))
+      if !providerEnabled then
+        return .ok (mkJson 409 (renderCompact (.obj #[("error", .str "provider_disabled"), ("provider", .str prov)])))
       let denyCode :=
         admitManagedSpawnMultiUser live estCents (infS + cmpS) caller.dailySpendCapCents? ttlMins.toUInt32
+      if denyCode == 2 then
+        return .ok (mkJson 429 "{\"error\":\"daily_spend_cap_exceeded\",\"scope\":\"user\"}")
       if denyCode != 0 then
-        let scopeStr := if denyCode == 2 then "user" else "global"
-        return .ok (mkJson 429 s!"\{\"error\":\"daily_spend_cap_exceeded\",\"scope\":{jsonEscape scopeStr}}")
+        -- The shared gate also refuses a full fleet; only report a cap that is really exceeded.
+        if estCents > live.dailyCapCents || live.spentTodayCents > live.dailyCapCents - estCents then
+          return .ok (mkJson 429 "{\"error\":\"daily_spend_cap_exceeded\",\"scope\":\"global\"}")
+        return .ok (mkJson 429 (renderCompact (.obj #[("error", .str "managed_concurrency_limit_reached"),
+          ("max_concurrent", JVal.uint64 live.maxConcurrent)])))
       let defVmId ← nextUniqueId st "vm" nowEpochSec
       let vmId := (jv.fieldStr? "id").getD defVmId
       let sbName ← newManagedSandboxName ((jv.fieldStr? "name").orElse (fun _ => jv.fieldStr? "sandbox_name") |>.getD "")
@@ -4762,16 +4923,55 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         requestedByMissionId := (jv.fieldStr? "owner_mission_id").getD ""
         ownerUserId := caller.userId
       }
-      let providerRetryKey := (lookupHeaderCI req.headers "idempotency-key").getD ""
-      match ← spawnConfiguredManagedWorker mst st.store.rootDir live vmRec jv providerRetryKey st.managedProvisioningOverride? userAdmission? with
-      | .error e => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape e}}")
-      | .ok spawned =>
-        let createdVm := spawned.machine
-        if spawned.created && !caller.userId.isEmpty && estCents > 0 then
-          discard <| addUserSpendCents st.store caller.userId utcDay 0 estCents s!"{nowEpochSec}"
-        if let .ok refreshed ← loadManagedFleet mst live.enabled live.boatEnabled live.dailyCapCents (live.spentTodayCents + estCents) live.maxConcurrent then
-          st.managedRef.set refreshed
-        return .ok (mkJson 201 (renderManagedMachineItemJson createdVm))
+      -- A saved snapshot is restored only inside one project: the owning mission's,
+      -- when the caller owns that mission; an admin may name the project directly.
+      let requestedSnapshot := ((jv.fieldStr? "from_snapshot").orElse
+        (fun _ => jv.fieldStr? "managed_from_snapshot") |>.getD "").trimAscii.toString
+      let resolvedSnapshot ← if requestedSnapshot.isEmpty then pure "" else do
+        let privileged := caller.role == "admin" || caller.isLegacyUnscoped
+        let ownerMission? ← getMission? st.store vmRec.ownerMission
+        let missionProject := match ownerMission? with
+          | some mission => if privileged || mission.ownerUserId == caller.userId then mission.project else ""
+          | none => ""
+        let askedProject := ((jv.fieldStr? "project").getD "").trimAscii.toString
+        let snapshotProject := if privileged && !askedProject.isEmpty then askedProject else missionProject
+        let snapshotProvider ← match st.managedProvisioningOverride? with
+          | some pair => pure pair.1
+          | none => match ← resolveManagedProvider st.store.rootDir prov with
+            | .ok p => pure p
+            | .error e => return .ok (mkJson 409 (renderCompact (.obj #[("error", .str e)])))
+        match ← resolveProjectSnapshot st.store snapshotProvider snapshotProject requestedSnapshot with
+        | .ok name => pure name
+        | .error e => return .ok (mkJson 409 (renderCompact (.obj #[("error", .str e)])))
+      let work : IO (Except String JVal) := do
+        match ← spawnConfiguredManagedWorker mst st.store.rootDir live vmRec jv providerRetryKey st.managedProvisioningOverride? userAdmission? resolvedSnapshot with
+        | .error e => return .error e
+        | .ok spawned =>
+          if spawned.created && !caller.userId.isEmpty && estCents > 0 then
+            discard <| addUserSpendCents st.store caller.userId utcDay 0 estCents s!"{nowEpochSec}"
+          if let .ok refreshed ← loadManagedFleet mst live.enabled live.boatEnabled live.dailyCapCents (live.spentTodayCents + estCents) live.maxConcurrent then
+            st.managedRef.set refreshed
+          return .ok ((OrbBin.Json.parse (renderManagedMachineItemJson spawned.machine)).toOption.getD (.obj #[]))
+      -- `wait: true` keeps the blocking contract (Change machine needs a ready
+      -- node). Otherwise answer at once with the provisioning machine and an
+      -- action to poll; readiness takes minutes.
+      if waitReady then
+        match ← work with
+        | .error e =>
+          let status := if e == "provider_at_capacity" || e == "managed_provider_availability_unavailable" then 503 else 409
+          return .ok (mkJson status s!"\{\"error\":{jsonEscape e}}")
+        | .ok item => return .ok (mkJson 201 (renderCompact item))
+      let actionKey ← if providerRetryKey.trimAscii.toString.isEmpty then newUuidV4 else pure providerRetryKey
+      let preview := (OrbBin.Json.parse (renderManagedMachineItemJson vmRec)).toOption.getD (.obj #[])
+      -- What the spawn would refuse without renting is refused now, with the
+      -- same status as before, so a client never sees a machine that vanishes.
+      let admit := preflightConfiguredManagedSpawn mst st.store.rootDir live vmRec jv
+        st.managedProvisioningOverride? resolvedSnapshot
+      match ← ManagedSpawnActions.submit st.store actionOwner actionKey actionArgs work admit preview with
+      | .error e =>
+        let status := if e == "provider_at_capacity" || e == "managed_provider_availability_unavailable" then 503 else 409
+        return .ok (mkJson status (renderCompact (.obj #[("error", .str e)])))
+      | .ok accepted => return .ok (actionReply accepted preview)
 
   if let some params := (matchRoutePattern? "/api/managed-machines/:id/stop" rawTarget).orElse
        (fun _ => matchRoutePattern? "/api/managed-machines/:id/resume" rawTarget) then
@@ -4799,9 +4999,19 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           st.managedRef.set live
         return .ok (mkJson 200 (renderCompact result))
 
+  if let some params := matchRoutePattern? "/api/managed-machines/actions/:id" rawTarget then
+    if req.method == "GET" then
+      let actionId := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      match ← ManagedSpawnActions.read? st.store actionId { userId := caller.userId, missionId := "" }
+          (caller.isLegacyUnscoped || caller.role == "admin") false with
+      | .ok (some action) => return .ok (mkJson 200 (renderCompact action))
+      | _ => return .ok (mkJson 404 "{\"error\":\"managed_action_not_found\"}")
+
   if let some params := matchRoutePattern? "/api/managed-machines/:id" rawTarget then
-    if req.method == "DELETE" || req.method == "GET" then
-      let vmId := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+    let vmId := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+    -- Keep the provider settings/catalog routes out of the machine-ID matcher.
+    let reserved := #["settings", "providers"]
+    if (req.method == "DELETE" || req.method == "GET") && !reserved.contains vmId then
       let some mst := st.managedStore?
         | return .ok (mkJson 503 "{\"error\":\"managed_store_unavailable\"}")
       let some (mRec, _) ← getManagedMachine? mst vmId
@@ -4828,14 +5038,14 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let nowIsoRn := formatEpochIso8601Utc nowEpochSec
     match st.managedStore? with
     | none =>
-      let fv ← buildComputeFleetJVal st.relayHub? none mf callerUidOpt (infS + cmpS) caller.dailySpendCapCents? st.store.rootDir nowIsoRn
+      let fv ← buildComputeFleetJVal st.relayHub? none mf callerUidOpt (infS + cmpS) caller.dailySpendCapCents? st.store.rootDir nowIsoRn (some st.store)
       return .ok (mkJson 200 (renderCompact fv))
     | some mst =>
       match ← loadManagedFleet mst mf.enabled mf.boatEnabled mf.dailyCapCents mf.spentTodayCents mf.maxConcurrent with
       | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       | .ok live =>
         st.managedRef.set live
-        let fv ← buildComputeFleetJVal st.relayHub? (some mst) live callerUidOpt (infS + cmpS) caller.dailySpendCapCents? st.store.rootDir nowIsoRn
+        let fv ← buildComputeFleetJVal st.relayHub? (some mst) live callerUidOpt (infS + cmpS) caller.dailySpendCapCents? st.store.rootDir nowIsoRn (some st.store)
         return .ok (mkJson 200 (renderCompact fv))
 
   -- Durable follow-up queue (`GET|POST /api/control/queue`, `PATCH /api/control/queue/:id`, `POST /api/control/queue/:id/step`, `POST /api/control/queue/:id/requeue`)
@@ -6462,6 +6672,13 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       | .error _ => pure ""
     discard <| backfillManagedMachineOwner managedStore bootAdminId
     hydrateLegacyDataDir cfg.workingDir dataRoot store managedStore bootAdminId cfg.devMode
+    match ← migrateLegacyLeanciSecret dataRoot with
+    | .ok true => IO.eprintln "[sandboxed-sh] sealed lean.ci key moved to its current name"
+    | .ok false => pure ()
+    | .error e => IO.eprintln s!"[sandboxed-sh] sealed lean.ci key migration failed: {e}"
+    let repairedOwners ← repairManagedMachineOwners store managedStore
+    if repairedOwners > 0 then
+      IO.eprintln s!"[orb-core] repaired the owner of {repairedOwners} pre-cutover managed machine row(s)"
     let effAskTmpRoot : System.FilePath :=
       let fromCfg := cfg.askSandboxTmpRoot.trimAscii.toString
       if !fromCfg.isEmpty then System.FilePath.mk fromCfg else System.FilePath.mk "/tmp"
@@ -6550,6 +6767,13 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
         IO.eprintln s!"[sandboxed-sh] FATAL: failed to bind {bindHost}:{cfg.port}"
         return 1
     remoteSup.boundPortRef.set boundPort
+    let lostTurns ← interruptTurnsLostToRestart store.missionsDb
+    if lostTurns > 0 then
+      IO.eprintln s!"[sandboxed-sh] {lostTurns} mission turn(s) lost to the restart marked interrupted"
+    -- Only the process that owns the port fences receipts a previous process left
+    -- open: such a spawn cannot be resumed or safely replayed.
+    if let .error e ← ManagedSpawnActions.fenceInterrupted store then
+      IO.eprintln s!"[sandboxed-sh] managed spawn action recovery failed: {e}"
     IO.eprintln s!"[sandboxed-sh] listening on http://{bindHost}:{boundPort} (dev_mode={cfg.devMode})"
     if maxRequests?.isNone then
       let localWakeupLaunch : MissionRecord → String → Option String → IO Bool :=
@@ -6558,17 +6782,30 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
           | .ok _ => return true
           | .error _ => return false
       discard <| IO.asTask (prio := .dedicated) do
-        let reattached ← reattachActiveRemoteJobsOnStartup store (some managedStore) (some relayHub) (some broadcastHub) remoteSup cfg.workingDir
-        if reattached > 0 then
-          IO.eprintln s!"[sandboxed-sh] re-attached {reattached} active remote-node job(s)"
+        -- An error in one pass must never end the scheduler for the life of the process.
+        try
+          let reattached ← reattachActiveRemoteJobsOnStartup store (some managedStore) (some relayHub) (some broadcastHub) remoteSup cfg.workingDir
+          if reattached > 0 then
+            IO.eprintln s!"[sandboxed-sh] re-attached {reattached} active remote-node job(s)"
+        catch e =>
+          IO.eprintln s!"[sandboxed-sh] remote job re-attach failed: {e}"
         while true do
-          discard <| tickContinuationScheduler store (some managedStore) (some relayHub) (some broadcastHub) remoteSup (some warmMgr) cfg.workingDir (some localWakeupLaunch)
+          try
+            discard <| tickContinuationScheduler store (some managedStore) (some relayHub) (some broadcastHub) remoteSup (some warmMgr) cfg.workingDir (some localWakeupLaunch)
+          catch e =>
+            IO.eprintln s!"[sandboxed-sh] wake-up scheduler pass failed: {e}"
           IO.sleep 2000
       discard <| IO.asTask (prio := .dedicated) do
         let mut lastInventory : UInt64 := 0
+        let mut lastSampledMinute : UInt64 := 0
         while true do
           let cached ← managedRef.get
           let observedAt ← coreEpochSec
+          -- One compute sample per minute feeds the Resources history.
+          if observedAt / 60 != lastSampledMinute then
+            lastSampledMinute := observedAt / 60
+            if let .error e ← OrbCore.ResourcesAndSystem.sampleComputeRollup store (some managedStore) observedAt then
+              IO.eprintln s!"[orb-core] compute sample skipped: {e}"
           if cached.enabled || cached.machines.any (fun m => m.status != "destroyed") then
             match ← ManagedTtl.tick managedStore store cached (resolveManagedProvider store.rootDir) observedAt with
             | .error e => IO.eprintln s!"[orb-core] managed TTL maintenance deferred: {e}"

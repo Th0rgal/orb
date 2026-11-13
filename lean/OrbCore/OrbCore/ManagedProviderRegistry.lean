@@ -4,12 +4,14 @@ quotes and catalog capabilities all consume the same entry. A known provider nam
 without an entry remains unimplemented, never a synthetic successful machine.
 -/
 import OrbCore.ManagedProviderBoat
+import OrbCore.ManagedProviderLeanci
+import OrbCore.ManagedProviderColab
 
 namespace OrbCore.ManagedProvider
 
 open OrbBin.Json
 
-def registry : Array Declaration := #[boatDeclaration]
+def registry : Array Declaration := #[boatDeclaration, leanciDeclaration, colabDeclaration]
 
 def declaration? (name : String) : Option Declaration :=
   registry.find? (·.name == name)
@@ -18,6 +20,11 @@ def quote (provider size : String) (ttlMinutes : UInt64) : Result UInt64 := do
   let some entry := declaration? provider
     | throw { code := "managed_provider_not_implemented" }
   entry.quoteCents size ttlMinutes
+
+def publicProviderId (provider id : String) : String :=
+  match declaration? provider with
+  | some entry => entry.publicId id
+  | none => id
 
 def sizeJson (size : Size) : JVal := .obj #[
   ("size", .str size.name),

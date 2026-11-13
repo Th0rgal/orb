@@ -9,19 +9,23 @@ private def check (condition : Bool) (label : String) : IO Unit := do
 
 /-- Deterministic provider contract replay; never opens sockets or rents machines. -/
 def run : IO Unit := do
+  let diagnostic := transportDiagnostic "private-test-key" "TLS refused private-test-key\nforged log\rline"
+  check (diagnostic == "TLS refused [redacted]\\nforged log\\rline" &&
+    (transportDiagnostic "key" (String.ofList (List.replicate 2000 'x'))).length == 1024)
+    "bounded redacted transport cause without log injection"
   let some entry := declaration? "boat" | throw (IO.userError "Boat missing from registry")
   check (entry.name == "boat" && entry.secretName == "BOAT_API_KEY" &&
     entry.readinessDeadlineSecs == 360 && entry.bootstrapMode == .execSystemd &&
     entry.supportsSnapshots && entry.supportsStopResume && entry.supportsExtend &&
     entry.sizes.size == 4) "provider-owned capabilities and sizes"
-  check ((declaration? "unknown").isNone && (declaration? "colab").isNone &&
-    !(quote "colab" "small" 60).isOk) "unimplemented registry entries fail closed"
+  check ((declaration? "unknown").isNone && (declaration? "hetzner").isNone &&
+    !(quote "hetzner" "small" 60).isOk) "unimplemented registry entries fail closed"
   for profile in entry.sizes do
     for ttl in [5:721] do
       let actual := (quote "boat" profile.name ttl.toUInt64).toOption
       let expected := (profile.milliCentsPerHour.toNat * ttl + 59999) / 60000
       check (actual == some expected.toUInt64) "registry lease quote matches catalog price"
-  let unsupported := JVal.obj (catalogFields "colab")
+  let unsupported := JVal.obj (catalogFields "hetzner")
   check (unsupported.fieldBool? "implemented" == some false &&
     unsupported.fieldBool? "supports_snapshots" == some false &&
     unsupported.fieldBool? "supports_free_stop" == some false) "no synthetic capabilities"

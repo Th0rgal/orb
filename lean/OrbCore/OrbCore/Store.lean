@@ -318,6 +318,12 @@ def idempotencySchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS idempotency_keys (scope TEXT NOT NULL, request_key TEXT NOT NULL, response_json TEXT NOT NULL, status_code INTEGER NOT NULL DEFAULT 200, committed_oversize INTEGER NOT NULL DEFAULT 0, body_bytes INTEGER NOT NULL DEFAULT 0, phase TEXT NOT NULL DEFAULT 'committed', created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(scope, request_key));"
 
 def missionsAdditiveAlters : Array String := #[
+  -- NULL means "never set": the stock default applies (see `chainResponse`).
+  "ALTER TABLE model_routing_chains ADD COLUMN is_default INTEGER;",
+  "ALTER TABLE model_routing_chains ADD COLUMN strip_thinking INTEGER;",
+  "ALTER TABLE model_routing_chains ADD COLUMN created_at TEXT;",
+  "ALTER TABLE proxy_usage ADD COLUMN requested_model TEXT;",
+  "ALTER TABLE proxy_outcomes ADD COLUMN requested_model TEXT;",
   "ALTER TABLE missions ADD COLUMN project TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE missions ADD COLUMN folder TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE missions ADD COLUMN placement_revision INTEGER NOT NULL DEFAULT 0;",
@@ -414,6 +420,9 @@ def missionsAdditiveAlters : Array String := #[
   "CREATE INDEX IF NOT EXISTS idx_proxy_usage_timestamp ON proxy_usage(timestamp);",
   "CREATE INDEX IF NOT EXISTS idx_proxy_usage_mission ON proxy_usage(mission_id);",
   "CREATE INDEX IF NOT EXISTS idx_proxy_outcomes_timestamp ON proxy_outcomes(timestamp);",
+  -- Last authentication verdict of real proxied requests, per upstream account
+  -- (`cliproxyapi:<type>` when CLIProxyAPI holds the login). A row means "rejected".
+  "CREATE TABLE IF NOT EXISTS provider_auth_health (account_key TEXT PRIMARY KEY, code TEXT NOT NULL DEFAULT '', observed_at TEXT NOT NULL DEFAULT '');",
   "CREATE INDEX IF NOT EXISTS idx_mission_search_docs_mission ON mission_search_docs(mission_id);",
   "CREATE UNIQUE INDEX IF NOT EXISTS deferred_message_batches_uuid ON deferred_message_batches(mission_id, message_id);"
 ]
@@ -1411,6 +1420,20 @@ def execParamQueryUnlocked (db : SqliteDb) (sql : String) (params : Array String
 
 def execParamQuery (db : SqliteDb) (sql : String) (params : Array String) : IO (Except String (Array (Array String))) :=
   db.mu.atomically (sqliteQueryRowsRaw db.handle sql params)
+
+/-- Server start only (after the listen socket is bound, before any turn is launched):
+    a mission still `active` with no surviving run belonged to a previous Core process.
+    Left `active` it would look busy forever and its armed wake-up would never be
+    admitted. `interrupted` is truthful and resumable. Never call this from a CLI or
+    a second process: there, `active` local turns are owned by the running server. -/
+def interruptTurnsLostToRestart (mDb : SqliteDb) : IO Nat := do
+  let res ← execParamQuery mDb
+    ("UPDATE missions SET status='interrupted',terminal_reason='core_restarted',state_revision=state_revision+1 " ++
+     "WHERE status='active' AND COALESCE(placement_kind,'')<>'client' AND NOT EXISTS " ++
+     "(SELECT 1 FROM mission_runs r WHERE r.mission_id=missions.id AND r.execution_state<>'terminal') RETURNING id;") #[]
+  match res with
+  | .ok rows => return rows.size - 1
+  | .error _ => return 0
 
 /-- Execute `act` inside an atomic, mutex-serialized `BEGIN IMMEDIATE ... COMMIT` SQLite write transaction. -/
 def withImmediateTx {α : Type} (db : SqliteDb) (act : IO (Except String α)) : IO (Except String α) :=

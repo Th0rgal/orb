@@ -76,8 +76,16 @@ lean.ci, and the blocked missions (evm.fast, ldgr workers) can get machines agai
    At the time of writing 18 machines are `ready` in the database and none answers through the relay.
 2. **Real node liveness.** `/api/remote-nodes` reports every node `online` with one shared timestamp.
    Derive it from heartbeats and relay polls, and cache each node's CPU and RAM so capacity is real.
+   *Done on master:* a managed node is `online` only while its authenticated relay poll (in memory or
+   persisted) is under 90 seconds old, `last_seen` is that poll, and CPU, memory, disk and hourly price
+   come from the provider's declared size. A static node that does not answer keeps the contact time
+   and size of its last successful heartbeat (`node_heartbeats.json`), marked `capacity_cached`.
 3. **Compute history.** Nothing writes `compute_rollup_1m`, so Resources compute charts only show the
    live sample. Sample per minute and read it in `buildResourcesOverviewJson`.
+   *Done on master:* Core's maintenance loop writes one row per machine class each minute
+   (`sampleComputeRollup`), keeps eight days, and the overview's `series_vcpu` is the mean of those
+   samples per chart bucket with the live reading last. History starts when this version is deployed;
+   earlier buckets stay zero. Cost history (`series_usd_per_h`) is still not sampled.
 
 ## 3. Desktop UI bugs
 
@@ -93,6 +101,13 @@ lean.ci, and the blocked missions (evm.fast, ldgr workers) can get machines agai
    error card followed by a user message). Check light and dark mode. Mobile parity per `AGENTS.md`.
 4. **Linux hybrid native chrome:** the header toolbar is rendered twice (sidebar, search,
    back/forward icons). Keep one toolbar owner and add a hybrid-shell regression test.
+
+*Done on master:* 1 (`btw-narrow-layout.browser.spec.ts`: full content area, opaque, scroll thumb no
+longer drawn over the panel), 2 (`transcript-rhythm.browser.spec.ts`: 22px above every turn, 12px
+between blocks; the failed-card case itself was fixed earlier in #1703), 3 (both specs run in light
+and dark), 4 (`native-chrome-toolbar.browser.spec.ts`). Verified in Chromium only; the GTK shell and
+WebKit were not available on the build node. These are desktop window-layout fixes with no mobile
+counterpart.
 
 ## 4. Other gaps found
 

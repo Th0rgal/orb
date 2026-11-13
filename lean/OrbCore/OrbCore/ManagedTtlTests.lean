@@ -338,11 +338,112 @@ private def reaperTests (root : String) : IO Unit := do
     closeManagedComputeStore mc
     closeCoreStore core
 
+/-- Live rows without a deadline get one; an expired row with no sandbox closes; a row
+    never bound to a provider id is bound by exact name before anything is destroyed. -/
+private def deadlineTests (root : String) : IO Unit := do
+  let mc ← requireOk (← openManagedComputeStore s!"{root}/ttl-deadline.db") "open deadline"
+  let core ← requireOk (← openCoreStore s!"{root}/ttl-deadline-core") "open deadline core"
+  try
+    let legacy (id status phase : String) : IO Unit := do
+      discard <| requireOk (← execParamQuery mc.db
+        ("INSERT INTO managed_machines(id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents,cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,owner_user_id) " ++
+         "VALUES(?1,?2,'boat','xlarge',?3,'',60,0,0,1,0,'user','',?4,1,'');")
+        #[id, s!"orb-managed-{id}", status, phase]) "legacy fixture"
+    legacy "no-deadline-gone" "ready" "1"
+    legacy "no-deadline-live" "ready" "1"
+    legacy "no-deadline-stopped" "stopped" "2"
+    let destroys ← IO.mkRef (#[] : Array String)
+    let template := OrbCore.ManagedProvisioningTests.mockPolicyProvider mc "boat"
+    let provider : Provider := { template with
+      list := pure (.ok #[{ providerId := "bx-live", name := "orb-managed-no-deadline-live", state := "idle" }])
+      get := fun id => pure (.ok { providerId := id, state := "idle" })
+      destroy := fun id => do destroys.modify (·.push id); return .ok ()
+    }
+    let resolve : Resolver := fun _ => pure (.ok provider)
+    discard <| requireOk (← tick mc core fleet resolve 5000) "deadline assignment tick"
+    check ((← machine mc "no-deadline-gone").expiresAtSec == 5000 + 3600 &&
+      (← machine mc "no-deadline-live").expiresAtSec == 5000 + 3600 &&
+      (← machine mc "no-deadline-stopped").expiresAtSec == 0 && (← destroys.get).isEmpty)
+      "live rows get one TTL from discovery; stopped rows and the provider are untouched"
+    discard <| requireOk (← tick mc core fleet resolve 8599) "before deadline"
+    check ((← machine mc "no-deadline-gone").status == "ready" && (← destroys.get).isEmpty) "nothing is reaped before the deadline"
+    discard <| requireOk (← tick mc core fleet resolve 8600) "deadline tick"
+    check ((← machine mc "no-deadline-gone").status == "destroyed" && (← destroys.get).isEmpty)
+      "an expired row with no sandbox closes without a provider delete"
+    check ((← machine mc "no-deadline-live").providerId == "bx-live" && (← destroys.get).isEmpty)
+      "an unbound live row is bound by exact name first"
+    discard <| requireOk (← tick mc core fleet resolve 8630) "cleanup tick"
+    check ((← destroys.get) == #["bx-live"] && (← machine mc "no-deadline-live").status == "destroyed" &&
+      (← machine mc "no-deadline-live").expiryCleanupState == "completed")
+      "the bound billable guest is destroyed at the provider and its lease closed"
+    discard <| requireOk (← tick mc core fleet resolve 8660) "repeat"
+    check ((← destroys.get).size == 1) "cleanup is not repeated"
+  finally
+    closeManagedComputeStore mc
+    closeCoreStore core
+
+/-- The owner hears 20 and 5 minutes ahead, once each, and again after an extension. -/
+private def warningTests (root : String) : IO Unit := do
+  let mc ← requireOk (← openManagedComputeStore s!"{root}/ttl-warning.db") "open warning"
+  let core ← requireOk (← openCoreStore s!"{root}/ttl-warning-core") "open warning core"
+  try
+    discard <| requireOk (← execParamQuery core.missionsDb
+      "INSERT INTO missions(id,owner_user_id,project) VALUES('warn-owner','alice','ttl-tests');" #[]) "owner fixture"
+    let hour ← seed mc "hour" 1000 60 1000 "warn-owner"
+    let brief ← seed mc "brief" 1000 15 1000 "warn-owner"
+    let provider := OrbCore.ManagedProvisioningTests.mockPolicyProvider mc "boat"
+    let resolve : Resolver := fun _ => pure (.ok provider)
+    let stages (machineId : String) : IO (Array String) := do
+      let rows ← requireOk (← execParamQuery core.missionsDb
+        ("SELECT json_extract(payload,'$.minutes_before') FROM mission_events WHERE mission_id='warn-owner' " ++
+         "AND json_extract(payload,'$.code')='managed_machine_expiring' AND json_extract(payload,'$.machine_id')=?1 ORDER BY sequence;")
+        #[machineId]) "warning rows"
+      return (rows.extract 1 rows.size).map (cell · 0)
+    let tickAt (now : UInt64) : IO Unit := do
+      discard <| requireOk (← tick mc core fleet resolve now) s!"tick {now}"
+      discard <| requireOk (← tick mc core fleet resolve now) s!"repeat tick {now}"
+    -- `hour` lives 1000..4600, `brief` 1000..1900.
+    tickAt 1010
+    check ((← stages hour.id).isEmpty && (← stages brief.id).isEmpty)
+      "no warning early, and none at birth for a VM shorter than the 20-minute notice"
+    check (warningDue (← machine mc hour.id) 3399 == none && warningDue (← machine mc hour.id) 3400 == some 20 &&
+      warningDue (← machine mc hour.id) 4299 == some 20 && warningDue (← machine mc hour.id) 4300 == some 5 &&
+      warningDue (← machine mc hour.id) 4600 == none) "the thresholds are 20 and 5 minutes before expiry"
+    tickAt 1650
+    check ((← stages brief.id) == #["5"]) "a short VM still gets the 5-minute warning"
+    tickAt 3400
+    check ((← stages hour.id) == #["20"]) "one warning 20 minutes ahead"
+    tickAt 4350
+    check ((← stages hour.id) == #["20", "5"]) "one warning 5 minutes ahead"
+    let text ← requireOk (← execParamQuery core.missionsDb
+      ("SELECT json_extract(payload,'$.message'), event_type FROM mission_events WHERE mission_id='warn-owner' " ++
+       "AND json_extract(payload,'$.machine_id')=?1 ORDER BY sequence DESC LIMIT 1;") #[hour.id]) "warning text"
+    check ((cell text[1]! 0).startsWith s!"Managed VM {hour.sandboxName} (managed-{hour.id}) expires in at most 5 minutes" &&
+      ((cell text[1]! 0).splitOn "extend_managed_machine").length == 2 && cell text[1]! 1 == "system")
+      "the warning names the machine and what to do"
+    -- A later deadline re-arms both warnings.
+    discard <| requireOk (← execParamQuery mc.db "UPDATE managed_machines SET expires_at_sec=8200 WHERE id=?1;" #[hour.id]) "extend fixture"
+    tickAt 4400
+    check ((← stages hour.id) == #["20", "5"]) "an extended VM is quiet again"
+    tickAt 7000
+    tickAt 7950
+    check ((← stages hour.id) == #["20", "5", "20", "5"]) "both warnings repeat for the new deadline"
+    -- Core down across the 20-minute mark: only the warning that is still true is sent.
+    let late ← seed mc "late" 1000 60 1000 "warn-owner"
+    discard <| requireOk (← execParamQuery mc.db "UPDATE managed_machines SET expires_at_sec=20000 WHERE id=?1;" #[late.id]) "late fixture"
+    tickAt 19800
+    check ((← stages late.id) == #["5"]) "a missed 20-minute warning is not sent late"
+  finally
+    closeManagedComputeStore mc
+    closeCoreStore core
+
 /-- Self-test entry point. All clocks, provider observations, usage and failures
     are injected; only isolated SQLite fixtures under the supplied root are used. -/
 def run (root : String) : IO Unit := do
+  warningTests root
   extensionTests root
   fencingTests root
   reaperTests root
+  deadlineTests root
 
 end OrbCore.ManagedTtlTests
