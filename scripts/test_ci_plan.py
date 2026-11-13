@@ -1,4 +1,5 @@
 """Replays real change shapes through scripts/ci_plan.py (stdlib unittest)."""
+import fnmatch
 import json
 import os
 import re
@@ -17,6 +18,36 @@ DOMAINS = ci_plan.load_domains()
 
 def jobs(paths, **kw):
     return set(ci_plan.plan(paths, DOMAINS, **kw)["jobs"])
+
+
+def push_paths_ignore(workflow: Path) -> list[str]:
+    text = workflow.read_text()
+    m = re.search(r"(?ms)^on:\s*\n.*?^  push:\s*\n(.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)", text)
+    if not m:
+        return []
+    push_block = m.group(1)
+    inline = re.search(r"(?m)^\s*paths-ignore:\s*\[(.*?)\]\s*$", push_block)
+    if inline:
+        return [s.strip().strip("'\"") for s in inline.group(1).split(",") if s.strip()]
+    block = re.search(r"(?ms)^\s*paths-ignore:\s*\n((?:\s*-\s*[^\n]+\n?)+)", push_block)
+    if not block:
+        return []
+    return [
+        re.sub(r"^\s*-\s*", "", line).strip().strip("'\"")
+        for line in block.group(1).splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+
+def matches_paths_ignore(path: str, patterns: list[str]) -> bool:
+    matched = False
+    for pat in patterns:
+        neg = pat.startswith("!")
+        g = pat[1:] if neg else pat
+        hit = path.startswith(g[:-2]) if g.endswith("/**") else fnmatch.fnmatchcase(path, g)
+        if hit:
+            matched = not neg
+    return matched
 
 
 class PlanTest(unittest.TestCase):
@@ -118,6 +149,24 @@ class PlanTest(unittest.TestCase):
         tracked = subprocess.check_output(["git", "ls-files"], cwd=ROOT, text=True).split()
         unclaimed = [p for p in tracked if ci_plan.claim(p, DOMAINS) is None]
         self.assertEqual(unclaimed, [], "add these paths to ci/domains.toml")
+
+    def test_push_paths_ignore_only_matches_always_only_files(self):
+        tracked = subprocess.check_output(["git", "ls-files"], cwd=ROOT, text=True).split()
+        always = set(ci_plan.ALWAYS)
+        for wf_name in ("ci.yml", "kernel-abi.yml"):
+            patterns = push_paths_ignore(ROOT / ".github" / "workflows" / wf_name)
+            self.assertTrue(patterns, wf_name)
+            mismatched = []
+            for p in tracked:
+                if matches_paths_ignore(p, patterns):
+                    extra = sorted(jobs([p]) - always)
+                    if extra:
+                        mismatched.append((p, extra))
+            self.assertEqual(
+                mismatched,
+                [],
+                f"{wf_name} push paths-ignore matches files with non-always jobs",
+            )
 
     def test_domain_jobs_exist_in_workflows(self):
         wf = ROOT / ".github" / "workflows"

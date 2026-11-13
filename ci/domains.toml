@@ -37,10 +37,7 @@ paths = [
   "DEBUGGING.md",
   "AGENTS.md",
   "plan.md",
-  "docs/*.md",
-  "docs/*.png",
-  "docs/*.svg",
-  "docs/*.webp",
+  "docs/*",
   "docs-site/*",
   "screenshots/*",
 ]
@@ -168,7 +165,6 @@ name = "policy"
 paths = [
   "scripts/*",
   "tests/*",
-  "docs/*",
   "skills/*",
   "capabilities/*",
   "catalog/*",
