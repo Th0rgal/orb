@@ -523,6 +523,38 @@ booleans only. And the names-only output of `orb-env inventory --prod …
 --dev …` (key names and `unknown_keys`, no values) so the remaining
 environment differences can be judged.
 
+**Update 23:05 UTC.**
+
+- Merged: #1748 (`0bcf82d0`, streamed-relay fixes for the five #1729
+  defects) and #1749 (`b6afa205`, tests pinning that a member's session
+  cannot call the `secret_*` tools). Master CI on `0bcf82d0` passed; on
+  `b6afa205` it is running. Not deployed.
+- #1745 (member sibling routes, sidecar parked logins): head is now
+  `55813fd1`. The red `Test` was a real leak in the member resources
+  overview (a shared mission of the admin, its provider links, fleet-wide
+  vCPU totals). The worker's 9-line correction and its tests are
+  cherry-picked on the branch; `Test` passed on that head, `kernel-abi`
+  still running. Decision taken there: a mission shared with a member no
+  longer shows its cost card in that member's overview.
+- #1751 opened (`ready/c-cooling-chain-ends-turn`, `c3d79bd1`): Core ends a
+  mission turn with a visible reason when its model chain has no usable
+  target for more than 60 s. Operator item C (a), second half. Coordinator
+  removed the worker's two poller edits before publishing (untested, and
+  they changed what clients receive after a user Stop). Covers remote
+  opencode, claudecode and codex turns only; `provider_unavailable` has no
+  client card yet. First build on this base is the PR's CI.
+- D2 `wip/d-stream-untilclose-eof` (`498fd8a4`) read. One correction
+  ordered: over TLS only `close_notify` may count as a clean end of a
+  close-delimited body, not a bare TCP close. Not published.
+- Fixture kernel race: the slow run (3 s kernel delay) gave 51 failed /
+  214 passed on shard 1; 31 failures are `launch.browser.spec.ts` on the
+  real app, so the delay breaks unrelated tests and the run proves nothing
+  about fixtures. Slow runs stopped; worker is closing out (classification
+  table, one normal-speed confirmation, two patches). Nothing published.
+  Master browser shards are green without it.
+- Line "lean-ci App `5538046` is installed only on `lfglabs-dev`" further
+  up is superseded by "CI: lean runners and docs-only pushes" below.
+
 **Still open, no owner.** Track A / #1708; lean.ci PR #34 fence review
 (interdiff unread, lean runners stay on hold); isolation acceptance and
 managed-lifecycle live validation (need the `dev_operator` grant
