@@ -4399,7 +4399,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     if let some (pCode, pCtype, pBody) ← dispatchProviderAndAiRoute
         pHub st.store st.cfg.workingDir st.cfg.port st.pacingTracker? st.proxyCooldownsRef
         req.method cleanPath rawTarget req.bodySlice.toByteArray
-        caller.userId (caller.role == "admin") caller.isLegacyUnscoped then
+        caller.userId (caller.role == "admin") caller.isLegacyUnscoped (healthTracker? := st.healthTracker?) then
       return .ok { status := pCode, contentType := pCtype, corsOrigin? := reqOrigin?, body := pBody }
 
   if cleanPath == "/api/ai/providers" || cleanPath.startsWith "/api/ai/providers/" then
@@ -4425,7 +4425,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     if let some (pCode, pCtype, pBody) ← dispatchProviderAndAiRoute
         pHub st.store st.cfg.workingDir st.cfg.port st.pacingTracker? st.proxyCooldownsRef
         req.method cleanPath rawTarget req.bodySlice.toByteArray
-        caller.userId (caller.role == "admin") caller.isLegacyUnscoped then
+        caller.userId (caller.role == "admin") caller.isLegacyUnscoped (healthTracker? := st.healthTracker?) then
       return .ok { status := pCode, contentType := pCtype, corsOrigin? := reqOrigin?, body := pBody }
     if req.method == "GET" && cleanPath == "/api/ai/providers" then
       let providers ← listAIProviders st.store
@@ -4575,7 +4575,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       if let some (pCode, pCtype, pBody) ← dispatchProviderAndAiRoute
           pHub st.store st.cfg.workingDir st.cfg.port st.pacingTracker? st.proxyCooldownsRef
           req.method cleanPath rawTarget req.bodySlice.toByteArray
-          caller.userId (caller.role == "admin") caller.isLegacyUnscoped then
+          caller.userId (caller.role == "admin") caller.isLegacyUnscoped (healthTracker? := st.healthTracker?) then
         return .ok { status := pCode, contentType := pCtype, corsOrigin? := reqOrigin?, body := pBody }
 
   if req.method == "GET" && cleanPath == "/api/providers/backend-models" then
@@ -4662,7 +4662,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     if let some (mCode, mCtype, mBody) ← dispatchProviderAndAiRoute
         pHub st.store st.cfg.workingDir st.cfg.port st.pacingTracker? st.proxyCooldownsRef
         req.method cleanPath rawTarget req.bodySlice.toByteArray
-        caller.userId (caller.role == "admin") caller.isLegacyUnscoped then
+        caller.userId (caller.role == "admin") caller.isLegacyUnscoped (healthTracker? := st.healthTracker?) then
       return .ok { status := mCode, contentType := mCtype, corsOrigin? := reqOrigin?, body := mBody }
     if req.method != "GET" && !caller.isLegacyUnscoped then
       if let some (cCode, cBody) := requireAdminPrincipal caller then
