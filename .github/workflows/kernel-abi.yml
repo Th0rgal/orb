@@ -143,6 +143,8 @@ jobs:
           python3 -m unittest -v scripts/test_leannative_ll.py
       - name: Generated bindings are up to date
         run: python3 scripts/gen_kernel_bindings.py --check
+      - name: turbo-lean FFI allowlist matches the @[extern] declarations
+        run: python3 scripts/gen_turbo_lean_ffi.py --check
       - name: Scalar shared WASM validates its complete ABI and has no imports
         run: |
           set -euo pipefail

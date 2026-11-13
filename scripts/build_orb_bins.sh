@@ -244,9 +244,13 @@ run_lean_pkg_build() {
       if [[ -n "${TURBO_LEAN_HOME:-}" ]]; then
         tl_flags+=(--cache-dir "${TURBO_LEAN_HOME}")
       fi
-      RAYON_NUM_THREADS="${ORB_TURBO_LEAN_JOBS:-2}" TURBO_LEAN_EMIT_C=1 \
-        turbo-lean "${tl_flags[@]}" build "$@" \
-        || SANDBOXED_ALLOW_RAW_LAKE=1 lake build "$@" -- -DwarningAsError=true
+      if ! RAYON_NUM_THREADS="${ORB_TURBO_LEAN_JOBS:-2}" TURBO_LEAN_EMIT_C=1 \
+        turbo-lean "${tl_flags[@]}" build "$@"; then
+        # The raw Lake fallback rebuilds the package without the turbo-lean
+        # cache, so a silent fallback hides a large slowdown.
+        echo "WARNING: turbo-lean build failed in ${pkg_dir##*/}; falling back to uncached raw lake build" >&2
+        SANDBOXED_ALLOW_RAW_LAKE=1 lake build "$@" -- -DwarningAsError=true
+      fi
     else
       SANDBOXED_ALLOW_RAW_LAKE=1 lake build "$@" -- -DwarningAsError=true
     fi

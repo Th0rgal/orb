@@ -100,20 +100,93 @@
     if turbo-lean != null
     then turbo-lean
     else callPackage ./turbo-lean.nix {inherit leanToolchain;};
-in
-  stdenv.mkDerivation {
-    pname = "orb-core";
-    inherit (orbPackageJson) version;
 
-    src = lib.fileset.toSource {
+  # The Lean build is split into one derivation per Lake package layer, so Nix
+  # caches each layer and a change rebuilds only the packages that depend on it:
+  #
+  #   orb-lean-base   lean-sys, orb-spec (lean/Orb), LeanMesh, OrbNetLeaf, OrbBin
+  #   orb-lean-node   OrbNode   (sandboxed-node)
+  #   orb-lean-core   OrbCore   (orb-core)
+  #   orb-core        OrbLocald (orb-locald), then assembles every binary
+  #
+  # Each later layer copies the earlier layer's `.lake` build trees into place, so
+  # Lake reuses them instead of rebuilding. Every source set below holds only the
+  # files that layer compiles, so editing one package leaves the others cached.
+  baseLeanFiles = with lib.fileset; [
+    ../lean/lakefile.lean
+    ../lean/lean-toolchain
+    ../lean/turbo-lean.toml
+    ../lean/Orb
+    ../lean/LeanMesh
+    ../lean/OrbNetLeaf
+    ../lean/OrbBin
+    ../scripts/build_orb_bins.sh
+  ];
+
+  leanSource = extra:
+    lib.fileset.toSource {
       root = ../.;
-      fileset = lib.fileset.unions [
-        ../lean
-        ../shared
-        ../catalog
-        ../scripts
-      ];
+      fileset = lib.fileset.unions (baseLeanFiles ++ extra);
     };
+
+  buildEnv = ''
+    export HOME="$TMPDIR/home"
+    mkdir -p "$HOME"
+    export PATH="${clang}/bin:${lld}/bin:${binutils}/bin:${leanToolchain}/bin:$PATH"
+    export LEAN_BIN_DIR="${leanToolchain}/bin"
+    export CC="${clang}/bin/clang"
+    export LEAN_CC="${clang}/bin/clang"
+    export TURBO_LEAN_BIN="${leanToolchain}/bin/lean"
+    export TURBO_LEAN_HOME="$TMPDIR/turbo-lean-state"
+    export TURBO_LEAN_STATE_DIR="$TMPDIR/turbo-lean-state"
+    export TURBO_LEAN_EMIT_C=1
+    export TURBO_LEAN_NO_DAEMON=1
+    export TURBO_LEAN_TELEMETRY=off
+    export CPATH="${lib.makeSearchPathOutput "dev" "include" [openssl sqlite]}''${CPATH:+:$CPATH}"
+    export LIBRARY_PATH="${leanToolchain}/lib:${lib.makeLibraryPath [openssl sqlite]}''${LIBRARY_PATH:+:$LIBRARY_PATH}"
+
+    # Stage pinned `lean-sys` as a sibling path package so `turbo-lean` and Lake 4.35
+    # build strictly offline inside the Nix sandbox without `.git` network fetches.
+    cp -R "${pinnedLeanSys}" lean/lean-sys
+    chmod -R u+w lean/lean-sys
+    python3 - <<'PY'
+    import glob, json, pathlib, re
+
+    lf = pathlib.Path("lean/OrbNetLeaf/lakefile.lean")
+    lf.write_text(
+        re.sub(
+            r'require\s+«lean-sys»\s+from\s+git\s+"[^"]+"\s*@\s*"[^"]+"',
+            'require «lean-sys» from "../lean-sys"',
+            lf.read_text(),
+        )
+    )
+
+    for path in glob.glob("lean/*/lake-manifest.json"):
+        p = pathlib.Path(path)
+        data = json.loads(p.read_text())
+        new_pkgs = []
+        for entry in data.get("packages", []):
+            if entry.get("name") in ("«lean-sys»", "lean-sys"):
+                new_pkgs.append({
+                    "type": "path",
+                    "scope": entry.get("scope", ""),
+                    "name": entry["name"],
+                    "manifestFile": entry.get("manifestFile", "lake-manifest.json"),
+                    "inherited": entry.get("inherited", False),
+                    "dir": "../lean-sys",
+                    "copy": False,
+                    "configFile": entry.get("configFile", "lakefile.lean"),
+                })
+            else:
+                new_pkgs.append(entry)
+        data["packages"] = new_pkgs
+        p.write_text(json.dumps(data, indent=1) + "\n")
+    PY
+    patchShebangs scripts/build_orb_bins.sh
+  '';
+
+  commonAttrs = {
+    inherit (orbPackageJson) version;
 
     nativeBuildInputs =
       [
@@ -139,100 +212,135 @@ in
     # bake them into DT_RUNPATH during `installPhase` on Linux.
     LD_LIBRARY_PATH = lib.makeLibraryPath [openssl sqlite];
 
+    # Each layer builds in a fresh sandbox, so turbo-lean's module cache always
+    # starts empty there and its extra kernel audits only add time (OrbCore:
+    # 7m22s with turbo-lean vs 4m45s with Lake on DGX Spark). Nix caches the
+    # layers instead; turbo-lean stays the default for warm local and CI builds.
+    ORB_SKIP_TURBO_LEAN = "1";
+
     dontConfigure = true;
-
-    buildPhase = ''
-      runHook preBuild
-
-      export HOME="$TMPDIR/home"
-      mkdir -p "$HOME"
-      export PATH="${clang}/bin:${lld}/bin:${binutils}/bin:${leanToolchain}/bin:$PATH"
-      export LEAN_BIN_DIR="${leanToolchain}/bin"
-      export CC="${clang}/bin/clang"
-      export LEAN_CC="${clang}/bin/clang"
-      export TURBO_LEAN_BIN="${leanToolchain}/bin/lean"
-      export TURBO_LEAN_HOME="$TMPDIR/turbo-lean-state"
-      export TURBO_LEAN_STATE_DIR="$TMPDIR/turbo-lean-state"
-      export TURBO_LEAN_EMIT_C=1
-      export TURBO_LEAN_NO_DAEMON=1
-      export TURBO_LEAN_TELEMETRY=off
-      export CPATH="${lib.makeSearchPathOutput "dev" "include" [openssl sqlite]}''${CPATH:+:$CPATH}"
-      export LIBRARY_PATH="${leanToolchain}/lib:${lib.makeLibraryPath [openssl sqlite]}''${LIBRARY_PATH:+:$LIBRARY_PATH}"
-
-      # Stage pinned `lean-sys` as a sibling path package so `turbo-lean` and Lake 4.35
-      # build strictly offline inside the Nix sandbox without `.git` network fetches.
-      if [ ! -d "lean/lean-sys" ]; then
-        cp -R "${pinnedLeanSys}" lean/lean-sys
-        chmod -R u+w lean/lean-sys
-        python3 - <<'PY'
-      import glob, json, pathlib, re
-
-      lf = pathlib.Path("lean/OrbNetLeaf/lakefile.lean")
-      lf.write_text(
-          re.sub(
-              r'require\s+«lean-sys»\s+from\s+git\s+"[^"]+"\s*@\s*"[^"]+"',
-              'require «lean-sys» from "../lean-sys"',
-              lf.read_text(),
-          )
-      )
-
-      for path in glob.glob("lean/*/lake-manifest.json"):
-          p = pathlib.Path(path)
-          data = json.loads(p.read_text())
-          new_pkgs = []
-          for entry in data.get("packages", []):
-              if entry.get("name") in ("«lean-sys»", "lean-sys"):
-                  new_pkgs.append({
-                      "type": "path",
-                      "scope": entry.get("scope", ""),
-                      "name": entry["name"],
-                      "manifestFile": entry.get("manifestFile", "lake-manifest.json"),
-                      "inherited": entry.get("inherited", False),
-                      "dir": "../lean-sys",
-                      "copy": False,
-                      "configFile": entry.get("configFile", "lakefile.lean"),
-                  })
-              else:
-                  new_pkgs.append(entry)
-          data["packages"] = new_pkgs
-          p.write_text(json.dumps(data, indent=1) + "\n")
-      PY
-      fi
-
-      patchShebangs scripts/build_orb_bins.sh
-      mkdir -p "$TMPDIR/orb-bins"
-      ./scripts/build_orb_bins.sh --out-dir "$TMPDIR/orb-bins"
-
-      runHook postBuild
-    '';
-
-    installPhase = ''
-      runHook preInstall
-
-      mkdir -p "$out/bin"
-      for f in "$TMPDIR/orb-bins"/*; do
-        if [ -L "$f" ]; then
-          cp -P "$f" "$out/bin/$(basename "$f")"
-        else
-          install -m 0755 "$f" "$out/bin/"
-          ${lib.optionalString stdenv.hostPlatform.isLinux ''
-            patchelf --add-rpath "${lib.makeLibraryPath [openssl sqlite]}" "$out/bin/$(basename "$f")"
-          ''}
-        fi
-      done
-
-      runHook postInstall
-    '';
 
     # The test suite runs in CI (`scripts/build_orb_bins.sh --with-tests`);
     # several integration tests expect loopback sockets, git, and runtime tools
     # outside the pure build sandbox.
     doCheck = false;
+  };
 
-    meta = {
-      description = "Self-hosted orchestrator for AI coding agents";
-      homepage = "https://orb.thomas.md";
-      mainProgram = "orb-core";
-      platforms = lib.platforms.linux ++ lib.platforms.darwin;
-    };
-  }
+  # Builds `bins` (names understood by `build_orb_bins.sh --only`) on top of
+  # `deps`, and outputs the binaries plus this layer's `.lake` build trees.
+  mkLeanLayer = {
+    pname,
+    src,
+    bins,
+    deps ? [],
+    keepLake ? false,
+  }:
+    stdenv.mkDerivation (commonAttrs
+      // {
+        inherit pname src;
+        buildPhase = ''
+          runHook preBuild
+          ${buildEnv}
+          ${restoreLake deps}
+          mkdir -p "$TMPDIR/orb-bins"
+          ./scripts/build_orb_bins.sh --out-dir "$TMPDIR/orb-bins" ${lib.concatMapStringsSep " " (b: "--only ${b}") bins}
+          runHook postBuild
+        '';
+        installPhase = ''
+          runHook preInstall
+          mkdir -p "$out/bin"
+          cp -P "$TMPDIR/orb-bins"/* "$out/bin/"
+          ${lib.optionalString keepLake ''
+            mkdir -p "$out/lake"
+            (cd lean && find . -name .lake -type d -prune -exec cp -a --parents {} "$out/lake/" \;)
+          ''}
+          runHook postInstall
+        '';
+        dontFixup = true;
+      });
+
+  restoreLake = deps:
+    lib.concatMapStrings (dep: ''
+      cp -a --no-preserve=ownership "${dep}/lake/." lean/
+      chmod -R u+w lean
+    '')
+    deps;
+
+  orbBinBins = [
+    "fido-agent-proxy"
+    "orb-privd"
+    "orb-sudo"
+    "lean-mesh"
+    "palomactl"
+    "sandboxed-mcp"
+    "workspace-mcp"
+    "desktop-mcp"
+    "automation-manager-mcp"
+  ];
+
+  leanBase = mkLeanLayer {
+    pname = "orb-lean-base";
+    src = leanSource [];
+    bins = orbBinBins;
+    keepLake = true;
+  };
+
+  leanNode = mkLeanLayer {
+    pname = "orb-lean-node";
+    src = leanSource [../lean/OrbNode];
+    bins = ["sandboxed-node"];
+    deps = [leanBase];
+  };
+
+  leanCore = mkLeanLayer {
+    pname = "orb-lean-core";
+    src = leanSource [../lean/OrbCore];
+    bins = ["orb-core"];
+    deps = [leanBase];
+  };
+in
+  # The top-level package builds OrbLocald itself, so downstream overrides of
+  # `postPatch` that patch `lean/OrbLocald` (as omarchnix does) still apply and
+  # rebuild only that layer.
+  stdenv.mkDerivation (commonAttrs
+    // {
+      pname = "orb-core";
+      src = leanSource [../lean/OrbLocald];
+
+      buildPhase = ''
+        runHook preBuild
+        ${buildEnv}
+        ${restoreLake [leanBase]}
+        mkdir -p "$TMPDIR/orb-bins"
+        ./scripts/build_orb_bins.sh --out-dir "$TMPDIR/orb-bins" --only orb-locald
+        cp -P ${leanBase}/bin/* ${leanNode}/bin/* ${leanCore}/bin/* "$TMPDIR/orb-bins/"
+        runHook postBuild
+      '';
+
+      installPhase = ''
+        runHook preInstall
+
+        mkdir -p "$out/bin"
+        for f in "$TMPDIR/orb-bins"/*; do
+          if [ -L "$f" ]; then
+            cp -P "$f" "$out/bin/$(basename "$f")"
+          else
+            install -m 0755 "$f" "$out/bin/"
+            ${lib.optionalString stdenv.hostPlatform.isLinux ''
+          patchelf --add-rpath "${lib.makeLibraryPath [openssl sqlite]}" "$out/bin/$(basename "$f")"
+        ''}
+          fi
+        done
+
+        runHook postInstall
+      '';
+
+      passthru = {inherit leanBase leanNode leanCore;};
+
+      meta = {
+        description = "Self-hosted orchestrator for AI coding agents";
+        homepage = "https://orb.thomas.md";
+        mainProgram = "orb-core";
+        platforms = lib.platforms.linux ++ lib.platforms.darwin;
+      };
+    })
