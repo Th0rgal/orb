@@ -17,6 +17,11 @@ private def chain (id name model : String) : RoutingChain := {
   targets := #[{ accountId := id, provider := "openai", baseUrl := "http://127.0.0.1:1", apiKey := "fixture-only", modelId := model }]
 }
 
+private class PumpOutcome (α : Type) where
+  unpack : α → ByteArray × Bool
+private instance : PumpOutcome ByteArray := ⟨(·, true)⟩
+private instance : PumpOutcome (ByteArray × Bool) := ⟨id⟩
+
 /-- A streamed reply reaches the client while the upstream is still producing it
     (regression: every `/v1/*` reply used to be buffered until its last byte). -/
 def runStreaming : IO Unit := do
@@ -56,17 +61,241 @@ def runStreaming : IO Unit := do
     | throw (IO.userError "proxy streaming: 2xx stream reply was buffered")
   let t0 ← IO.monoMsNow
   let arrivals ← IO.mkRef (#[] : Array Nat)
-  let copy ← pump fun _ => do
-    arrivals.modify (·.push ((← IO.monoMsNow) - t0))
+  let (copy, _) := PumpOutcome.unpack <| ← pump fun piece => do
+    if !piece.isEmpty then
+      arrivals.modify (·.push ((← IO.monoMsNow) - t0))
     return true
   let times ← arrivals.get
   check (String.fromUTF8? copy == some (String.join pieces.toList)) "streamed body is intact"
   -- The first event must not wait for the upstream to finish (~3 pauses).
   check (times.size ≥ 2 && times[0]! + pauseMs.toNat ≤ times[times.size - 1]!) s!"events arrive as produced: {times}"
 
+def runStreamingPumpContracts : IO Unit := do
+  let failures ← IO.mkRef (#[] : Array String)
+  let expect (ok : Bool) (label : String) : IO Unit := do
+    if !ok then failures.modify (·.push label)
+  let binary := ByteArray.mk #[0, 255, 13, 10]
+  let payload := binary ++ "é".toUTF8
+  let wire := encodeHttpChunk payload ++ encodeHttpChunk ByteArray.empty
+  let cursor ← IO.mkRef (0 : Nat)
+  let closes ← IO.mkRef (0 : Nat)
+  let reader : UpstreamReader := {
+    read := do
+      let i ← cursor.get
+      if i ≥ wire.size then return none
+      cursor.set (i + 1)
+      return some (wire.extract i (i + 1))
+    close := closes.modify (· + 1)
+  }
+  let emitted ← IO.mkRef ByteArray.empty
+  let (copy, copyComplete) := PumpOutcome.unpack <| ← pumpUpstreamBody reader (bodyFramingFor true none) ByteArray.empty fun bytes => do
+    emitted.modify (· ++ bytes)
+    return true
+  expect (copy == payload && copyComplete && (← emitted.get) == payload) "byte-fragmented binary and UTF-8 body"
+  expect ((← closes.get) == 1) "successful pump closes upstream exactly once"
+  let reads ← IO.mkRef (0 : Nat)
+  let cancelCloses ← IO.mkRef (0 : Nat)
+  let cancelledReader : UpstreamReader := {
+    read := do
+      reads.modify (· + 1)
+      return some "unexpected".toUTF8
+    close := cancelCloses.modify (· + 1)
+  }
+  discard <| pumpUpstreamBody cancelledReader .untilClose "first".toUTF8 (fun _ => pure false)
+  expect ((← reads.get) == 0 && (← cancelCloses.get) == 1)
+    "failed downstream emit prevents further reads and closes upstream"
+  let headOnlyReads ← IO.mkRef (0 : Nat)
+  let headOnlyCloses ← IO.mkRef (0 : Nat)
+  let headOnlyReader : UpstreamReader := {
+    read := do
+      headOnlyReads.modify (· + 1)
+      return some "unexpected".toUTF8
+    close := headOnlyCloses.modify (· + 1)
+  }
+  discard <| pumpUpstreamBody headOnlyReader (bodyFramingFor true none) ByteArray.empty (fun _ => pure false)
+  expect ((← headOnlyReads.get) == 0 && (← headOnlyCloses.get) == 1)
+    "aborted pump with empty tail closes upstream without reading"
+  let truncatedCloses ← IO.mkRef (0 : Nat)
+  let truncatedReader : UpstreamReader := {
+    read := pure none
+    close := truncatedCloses.modify (· + 1)
+  }
+  let (truncCopy, truncComplete) := PumpOutcome.unpack <|
+    ← pumpUpstreamBody truncatedReader (.length 5) "ab".toUTF8 (fun _ => pure true)
+  expect ((← truncatedCloses.get) == 1) "truncated pump closes upstream exactly once"
+  expect (truncCopy == "ab".toUTF8 && !truncComplete)
+    "truncated content-length must not report normal stream completion"
+
+  let chunkCloses ← IO.mkRef (0 : Nat)
+  let chunkReader : UpstreamReader := {
+    read := pure none
+    close := chunkCloses.modify (· + 1)
+  }
+  let (chunkCopy, chunkComplete) := PumpOutcome.unpack <|
+    ← pumpUpstreamBody chunkReader (bodyFramingFor true none) (encodeHttpChunk "ab".toUTF8) (fun _ => pure true)
+  expect ((← chunkCloses.get) == 1) "incomplete chunked pump closes upstream exactly once"
+  expect (chunkCopy == "ab".toUTF8 && !chunkComplete)
+    "chunked body without its final chunk must not report normal stream completion"
+
+  let badChunkCloses ← IO.mkRef (0 : Nat)
+  let badChunkReader : UpstreamReader := {
+    read := pure none
+    close := badChunkCloses.modify (· + 1)
+  }
+  let (badChunkCopy, badChunkComplete) := PumpOutcome.unpack <|
+    ← pumpUpstreamBody badChunkReader (bodyFramingFor true none) "zz\r\n".toUTF8 (fun _ => pure true)
+  expect ((← badChunkCloses.get) == 1) "malformed chunk pump closes upstream exactly once"
+  expect (badChunkCopy.isEmpty && !badChunkComplete)
+    "chunk decoding error must not report normal stream completion"
+
+  -- Defect 1 (downstream wire) & (b): a cut-off upstream stream must not get a closing chunk
+  -- from Core, and its partial SSE copy must still be accounted in proxy_usage.
+  -- Defect 2 & (e): a refused downstream head write must immediately close the upstream
+  -- connection even when the upstream sent only the response head and no body bytes.
+  -- (c): a non-2xx error reply whose body is cut off preserves its HTTP status and partial body.
+  let .ok (upLfd, upPort) ← tcpListen "127.0.0.1" 0 4
+    | throw (IO.userError "proxy streaming head-fail: listen failed")
+  let upClosed ← IO.mkRef false
+  let partialSse := "data: {\"usage\":{\"input_tokens\":42,\"output_tokens\":7}}\n\n"
+  let partialErr := "{\"error\":\"rate_limited\"}"
+  let upTask ← IO.asTask (prio := .dedicated) do
+    -- First connection: upstream cuts off a chunked stream without the final 0-length chunk.
+    if let .ok ufd1 ← tcpAcceptPoll upLfd 5000 then
+      discard <| pollReadable ufd1 2000
+      discard <| readStreamChunk ufd1 65536
+      discard <| writeAll ufd1 (("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n").toUTF8 ++ encodeHttpChunk partialSse.toUTF8) false
+      discard <| closeFd ufd1
+    -- Second connection: upstream sends only the head; downstream head write is refused.
+    if let .ok ufd2 ← tcpAcceptPoll upLfd 5000 then
+      discard <| pollReadable ufd2 2000
+      discard <| readStreamChunk ufd2 65536
+      discard <| writeAll ufd2 ("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n").toUTF8 false
+      if let .ok () ← pollReadable ufd2 1000 then
+        let rest ← readStreamChunk ufd2 65536
+        upClosed.set rest.isEmpty
+      discard <| closeFd ufd2
+    discard <| closeFd upLfd
+  let .ok (errLfd, errPort) ← tcpListen "127.0.0.1" 0 4
+    | throw (IO.userError "proxy streaming err-trunc: listen failed")
+  let errTask ← IO.asTask (prio := .dedicated) do
+    if let .ok ufd3 ← tcpAcceptPoll errLfd 5000 then
+      discard <| pollReadable ufd3 2000
+      discard <| readStreamChunk ufd3 65536
+      discard <| writeAll ufd3 (s!"HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\n" ++
+        s!"Content-Length: 100\r\n\r\n{partialErr}").toUTF8 false
+      discard <| closeFd ufd3
+    discard <| closeFd errLfd
+  let headFailRoot := s!"/tmp/orb-stream-head-fail-{← newUuidV4}"
+  let .ok headFailStore ← openCoreStore headFailRoot
+    | throw (IO.userError "proxy streaming head-fail: store failed")
+  let mut downstreamWire := ByteArray.empty
+  let mut usageRows : Array (Array String) := #[]
+  let mut truncErrStatus : Nat := 0
+  let mut truncErrBody := ByteArray.empty
+  try
+    let hfManaged ← IO.mkRef ({} : ManagedFleetState)
+    let hfChains ← IO.mkRef #[({
+      id := "s", name := "s",
+      targets := #[{ accountId := "s", provider := "openai", baseUrl := s!"http://127.0.0.1:{upPort}",
+                     apiKey := "k", modelId := "m" }]
+    } : RoutingChain)]
+    let hfCooldowns ← IO.mkRef (#[] : Array AccountCooldown)
+    let hfSeq ← IO.mkRef (1 : UInt64)
+    let hfCfg : CoreConfig := {
+      workingDir := headFailRoot
+      dashboardPassword := "proxy-head-fail-password"
+      proxySecret := "proxy-head-fail-secret-0123456789"
+      jwtSecret := "proxy-head-fail-jwt-secret-0123456789"
+    }
+    let hfApp : CoreAppState := {
+      cfg := hfCfg, store := headFailStore, searchIdx? := none,
+      managedRef := hfManaged, chainsRef := hfChains,
+      proxyCooldownsRef := hfCooldowns, seqRef := hfSeq
+    }
+    let .ok (cLfd, cPort) ← tcpListen "127.0.0.1" 0 4
+      | throw (IO.userError "proxy streaming head-fail: client listen failed")
+    let srvTask ← IO.asTask (prio := .dedicated) do
+      if let .ok sfd1 ← tcpAcceptPoll cLfd 5000 then
+        handleClientConn hfApp sfd1 false
+      if let .ok sfd2 ← tcpAcceptPoll cLfd 5000 then
+        handleClientConn hfApp sfd2 false (some fun _ => pure false)
+      discard <| closeFd cLfd
+    let body := "{\"model\":\"s\",\"stream\":true}"
+    let req := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {hfCfg.proxySecret}\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+    if let .ok cfd1 ← tcpConnect "127.0.0.1" cPort then
+      discard <| writeAll cfd1 req.toUTF8 false
+      let mut done1 := false
+      while !done1 do
+        match ← pollReadable cfd1 2000 with
+        | .ok () =>
+          let part ← readStreamChunk cfd1 65536
+          if part.isEmpty then done1 := true else downstreamWire := downstreamWire ++ part
+        | .error _ => done1 := true
+      discard <| closeFd cfd1
+    if let .ok cfd2 ← tcpConnect "127.0.0.1" cPort then
+      discard <| writeAll cfd2 req.toUTF8 false
+      discard <| closeFd cfd2
+    let _ := srvTask.get
+    if let .ok (errResp, none) ← streamingUpstreamRequest false "POST" "127.0.0.1" errPort "/v1/chat/completions" #[] body.toUTF8 then
+      truncErrStatus := errResp.status
+      truncErrBody := errResp.body
+    let _ := upTask.get
+    let _ := errTask.get
+    if let .ok rows ← execParamQuery headFailStore.missionsDb
+        "SELECT input_tokens, output_tokens FROM proxy_usage ORDER BY id DESC LIMIT 1;" #[] then
+      usageRows := rows
+  finally
+    closeCoreStore headFailStore
+    discard <| (IO.FS.removeDirAll headFailRoot).toBaseIO
+  let downstreamText := String.fromUTF8! downstreamWire
+  expect (!downstreamText.endsWith "0\r\n\r\n")
+    "cut-off upstream stream must not write closing chunk to client"
+  expect (usageRows.size > 1 && usageRows[1]! == #["42", "7"])
+    s!"cut-off upstream stream still accounts partial usage: {usageRows}"
+  expect (← upClosed.get) "refused downstream head write still closes head-only upstream stream"
+  expect (truncErrStatus == 429 && truncErrBody == partialErr.toUTF8)
+    s!"truncated non-2xx reply keeps status and partial body: status={truncErrStatus}"
+
+  -- Defect 3: the pacing concurrency slot must stay held until the stream body is relayed.
+  let .ok (pLfd, pPort) ← tcpListen "127.0.0.1" 0 4
+    | throw (IO.userError "proxy streaming pacing: listen failed")
+  let pUpTask ← IO.asTask (prio := .dedicated) do
+    if let .ok ufd ← tcpAcceptPoll pLfd 5000 then
+      discard <| pollReadable ufd 2000
+      discard <| readStreamChunk ufd 65536
+      discard <| writeAll ufd ("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n").toUTF8 false
+      discard <| closeFd ufd
+    discard <| closeFd pLfd
+  let pTgt : ProviderTarget := {
+    accountId := "paced-stream", provider := "openai",
+    baseUrl := s!"http://127.0.0.1:{pPort}", apiKey := "k", modelId := "m",
+    accountMaxConcurrency? := some 1, modelMaxConcurrency? := some 1
+  }
+  let pChain : RoutingChain := { id := "ps", name := "ps", targets := #[pTgt] }
+  let tracker ← newProxyPacingTracker
+  let pOut ← forwardProxyChain pChain "POST" "/v1/chat/completions" #[]
+    "{\"model\":\"m\",\"stream\":true}".toUTF8 (pacingTracker? := some tracker)
+  let some pPump := pOut.stream?
+    | throw (IO.userError "proxy streaming pacing: expected a stream pump")
+  let heldWhileOpen ← tryAcquireTargetSlot tracker pTgt (← IO.monoMsNow).toUInt64
+  if heldWhileOpen then releaseTargetSlot tracker pTgt
+  expect (!heldWhileOpen) "pacing concurrency slot stays held while the stream body is open"
+  discard <| pPump (fun _ => pure true)
+  let _ := pUpTask.get
+  let admittedAfter ← tryAcquireTargetSlot tracker pTgt (← IO.monoMsNow).toUInt64
+  if admittedAfter then releaseTargetSlot tracker pTgt
+  expect admittedAfter "pacing concurrency slot is released once the stream body is relayed"
+  let bad ← failures.get
+  check bad.isEmpty (String.intercalate "; " bad.toList)
+
+
 /-- Actual request routing, including unknown errors and no default/name/suffix aliasing. -/
 def run : IO Unit := do
   runStreaming
+  runStreamingPumpContracts
   -- A spent Antigravity quota cools only that model: Opus 4.6 and Gemini stay eligible.
   let agClaude := OrbCore.ProxyModelRouting.antigravityPoolAccount "claude-opus-5-5-high"
   let agGemini := OrbCore.ProxyModelRouting.antigravityPoolAccount "gemini-4-carbon-eap"
