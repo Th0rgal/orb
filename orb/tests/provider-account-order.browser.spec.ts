@@ -25,6 +25,12 @@ for (const theme of ['dark', 'light']) test(`Antigravity account order is editab
   });
   await page.goto('/');
   await page.getByRole('button', { name: 'Inference', exact: true }).click();
+  const group = page.getByRole('button', { name: 'Google Antigravity 2 accounts', exact: true });
+  await expect(group).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.locator('.p-group-body .p-acc-wrap')).toHaveCount(0);
+  await group.click();
+  await expect(group).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('.p-group-body .p-acc-wrap')).toHaveCount(2);
   const emails = () => page.locator('.p-acc-wrap .p-account-email .sr-only').allTextContents();
   await expect.poll(emails).toEqual(['first@example.com', 'second@example.com']);
   await expect(page.locator('.p-rank')).toHaveText(['1st', '2nd']);

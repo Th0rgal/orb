@@ -20,6 +20,12 @@ for (const theme of ['dark', 'light']) test(`Anthropic subscriptions show per-ac
   await page.goto('/');
   await page.getByRole('button', { name: 'Inference', exact: true }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+  const group = page.getByRole('button', { name: 'anthropic 2 accounts · 1 near limit', exact: true });
+  await expect(group).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.locator('.p-group-body .p-acc-wrap')).toHaveCount(0);
+  await group.click();
+  await expect(group).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('.p-group-body .p-acc-wrap')).toHaveCount(2);
   for (const email of ['ben@example.com', 'thomas@example.com']) await page.getByRole('button', { name: new RegExp(email.replace('.', '\\.')) }).first().click();
   await expect(page.getByTestId('usage-limit-status')).toHaveText('Approaching limit · weekly 91%');
   await expect(page.getByText(/allowed_warning|status:/)).toHaveCount(0);

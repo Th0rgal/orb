@@ -37,6 +37,12 @@ async function open(page: Page, theme: string, width: number) {
   await page.setViewportSize({ width, height: 900 });
   const toggle = page.getByRole('button', { name: 'Toggle sidebar' });
   if (width < 700 && await toggle.getAttribute('aria-expanded') === 'true') await toggle.click();
+  const group = page.getByRole('button', { name: 'antigravity 2 accounts · 2 limited', exact: true });
+  await expect(group).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.locator('.p-group-body .p-acc-wrap')).toHaveCount(0);
+  await group.click();
+  await expect(group).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('.p-group-body .p-acc-wrap')).toHaveCount(2);
   // Subscription rows open collapsed by default, showing compact summary chips.
   for (const email of ['thomas.her3sy@gmail.com', 'thomas.marchand.44@gmail.com']) {
     const row = page.locator('.p-acc-btn', { hasText: email });
