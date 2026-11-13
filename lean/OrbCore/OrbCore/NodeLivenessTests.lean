@@ -83,9 +83,15 @@ private def fleetTests (root : String) : IO Unit := do
     check (item.fieldNat? "cpu" == some 2 && item.fieldNat? "ram_gb" == some 4) "the machine record reports its real size"
     check (item.fieldStr? "created_at" == some (formatEpochIso8601Utc small.createdAtSec) &&
       item.fieldStr? "expires_at" == some (formatEpochIso8601Utc small.expiresAtSec) &&
-      item.fieldStr? "deletable_at" == some (formatEpochIso8601Utc small.deletableAtSec) &&
+      item.field? "deletable_at" == some .null &&
+      item.fieldNat? "deletable_at_sec" == some 0 &&
       item.fieldNat? "expires_at_sec" == some small.expiresAtSec.toNat)
-      "client ISO timestamps and epoch compatibility fields describe the same lease"
+      s!"client ISO timestamps and epoch compatibility fields describe the same lease (got deletable_at={item.field? "deletable_at" |>.map OrbBin.Json.renderCompact})"
+    let .ok boundItem := OrbBin.Json.parse (renderManagedMachineItemJson { small with deletableAtSec := now + 3600 })
+      | throw (IO.userError "bound machine JSON invalid")
+    check (boundItem.fieldStr? "deletable_at" == some (formatEpochIso8601Utc (now + 3600)) &&
+      boundItem.fieldNat? "deletable_at_sec" == some (now + 3600).toNat)
+      "minimum-lease deletable_at renders as UTC ISO-8601 alongside deletable_at_sec"
     check (managedUsdPerHourJson "boat" "small" == "0.01800" && managedUsdPerHourJson "boat" "xlarge" == "0.20000" &&
       managedUsdPerHourJson "boat" "no-such-size" == "null") "the hourly price is the declared rate"
     let some (unknown, _) ← getManagedMachine? mc "odd" | throw (IO.userError "liveness machine missing")

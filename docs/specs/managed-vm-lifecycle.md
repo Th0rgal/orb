@@ -15,7 +15,8 @@ Code: `src/managed/lifecycle.rs` (pure decision backed by
 clients treat `ready` and legacy `online` as running for status, cost and actions.
 Machine records expose `created_at` and `expires_at` as UTC ISO-8601 strings,
 while retaining `created_at_sec` and `expires_at_sec` for epoch-based callers.
-`deletable_at` is also a UTC ISO-8601 string.
+`deletable_at` is a UTC ISO-8601 string, or null when no minimum-lease bound is
+set (`deletable_at_sec == 0`); `deletable_at_sec` always carries the epoch value.
 
 `POST /api/managed-machines/:id/extend` uses the same owner-filtered lifecycle
 and budget gate as MCP, accepts `ttl_minutes`, and honors `Idempotency-Key`.
