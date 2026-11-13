@@ -425,11 +425,15 @@ def dispatchMcpToolCall
   -- Vault and host-approval state belong to the server owner. Members cannot
   -- inspect or enqueue owner actions, even with a self-selected operator role.
   let legacyOwner := !tenantScoped && (← getBootstrapAdmin? store).isNone
+  let devTool := #["get_dev_access", "deploy_dev", "read_dev_logs", "list_privileged_access"].contains toolName ||
+    (toolName == "request_privileged_access" && (args.fieldStr? "scope").getD "" == "dev_operator")
+  let ownsDevMission ← if devTool && !claims.isExternal && !callerMid.isEmpty then
+    checkTenantMission callerMid false else pure false
   if tenantScoped && #["request_mission_access", "list_mission_access"].contains toolName &&
       (!userIsAdmin || !callerMid.isEmpty) then
     unless !callerMid.isEmpty && (← checkTenantMission callerMid false) do
       return mcpErr "not_found" "Mission not found"
-  if !userIsAdmin && !legacyOwner && (toolName.startsWith "secret_" ||
+  if !userIsAdmin && !legacyOwner && !ownsDevMission && (toolName.startsWith "secret_" ||
       #["list_privileged_access", "request_privileged_access", "revoke_privileged_access",
         "execute_privileged_command", "get_dev_access", "deploy_dev", "read_dev_logs",
         "get_fleet_sweep", "reconcile_action", "list_cloud_accounts"].contains toolName) then
@@ -796,10 +800,10 @@ def dispatchMcpToolCall
         | return mcpErr "db_error" "Project lookup failed"
       if rows.size > 1 then pure checkedProj
       else
-        let some scoped := scopeProjectSlug callerUserId
+        let some scopedSlug := scopeProjectSlug callerUserId
           (((← getBootstrapAdmin? store).map (·.id)).getD "") checkedProj
           | return mcpErr "invalid_arguments" "Invalid project"
-        pure scoped
+        pure scopedSlug
     let folder := normalizeMissionFolder ((args.fieldStr? "folder").getD "")
     let rawBackend :=
       if toolName == "consult_model" then ((args.fieldStr? "backend").getD "opencode")
@@ -1676,7 +1680,14 @@ def dispatchMcpToolCall
     return mcpOk (← mcpRequestPrivilegedAccess (some store) store.rootDir callerMid claims.sessionId scope host reason units ttlMins nowEpochSec sessScoped)
 
   | "list_privileged_access" =>
-    return mcpOk (← mcpListPrivilegedAccess store store.rootDir callerMid nowEpochSec claims.sessionId true)
+    let listing ← mcpListPrivilegedAccess store store.rootDir callerMid nowEpochSec claims.sessionId true
+    if !userIsAdmin && !legacyOwner then
+      -- A member may discover its own approved dev pass, never the host audit,
+      -- generic privilege leases or the raw lease token behind the dev bearer.
+      let onlyDev := fun (values : Array JVal) => values.filter (fun value => value.fieldStr? "scope" == some "dev_operator")
+      return mcpOk (.obj #[("requests", .arr (onlyDev ((listing.fieldArr? "requests").getD #[]))),
+        ("grants", .arr ((onlyDev ((listing.fieldArr? "grants").getD #[])).map (·.removeField "lease_token")))])
+    return mcpOk listing
 
   | "revoke_privileged_access" =>
     let gid := (args.fieldStr? "grant_id").orElse (fun _ => args.fieldStr? "id") |>.getD ""

@@ -5,6 +5,11 @@ A mission requests `request_privileged_access` with `scope: "dev_operator"`,
 one lease; the target is always `dev` and no arbitrary units are permitted.
 `dev_operator` has no generic privileged-command rank.
 
+A member's mission may request and redeem its own separately approved dev pass.
+The member's dashboard session or a participant in another user's shared mission
+cannot take that mission's grant. Member grant listings contain only their own
+mission's dev request/grant metadata, without raw host lease tokens or host audit.
+
 With its own approved `grant_id`, the mission calls:
 
 - `get_dev_access`: returns an opaque admin bearer and the dev URL. Use it in

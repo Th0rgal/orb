@@ -427,7 +427,7 @@ def authorizeRemotePlacement (mc? : Option ManagedComputeStore) (owner : UserRec
   let managed := node?.isNone && target.startsWith "managed-"
   let targetKind : UInt8 := if node?.isSome then 2 else if managed then 3 else 0
   let adminOnly : UInt8 := if (node?.map OrbCore.AutoPlacement.reserved).getD (!managed) then 1 else 0
-  let validUx : UInt8 := if (owner.unixUsername?.map validUnixUsername).getD false then 1 else 0
+  let validUx : UInt8 := if (owner.unixUsername?.map Orb.Kernel.validUnixUsername).getD false then 1 else 0
   unless Orb.Kernel.placementRoleAdmit 0 targetKind adminOnly validUx == 1 do
     return .error "remote_placement_forbidden"
   if managed then

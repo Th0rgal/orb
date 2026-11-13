@@ -5040,7 +5040,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   if let some params := matchRoutePattern? "/api/managed-machines/:id" rawTarget then
     let vmId := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
     -- Keep the provider settings/catalog routes out of the machine-ID matcher.
-    let reserved := #["settings", "providers"]
+    let reserved := #["settings", "providers", "snapshots"]
     if (req.method == "DELETE" || req.method == "GET") && !reserved.contains vmId then
       let some mst := st.managedStore?
         | return .ok (mkJson 503 "{\"error\":\"managed_store_unavailable\"}")

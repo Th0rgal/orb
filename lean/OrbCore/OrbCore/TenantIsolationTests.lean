@@ -153,14 +153,44 @@ def run (root : String) : IO Unit := do
       let doc ← call member tool (.obj #[("name", .str "SYNTHETIC_DENIED_PROBE")])
       check (doc.fieldBool? "ok" == some false) s!"MCP member cannot use owner broker {tool}"
     -- Choosing a more powerful role at session minting must not change tenant ownership.
+    let mut memberSession := ""
     for role in #["executor", "coordinator", "operator"] do
       let (status, minted) ← send "POST" "/api/mcp/session" member
         (.obj #[("mission_id", .str "member-mission"), ("role", .str role)])
       let scopedToken := (minted.fieldStr? "token").getD ""
+      if role == "executor" then memberSession := scopedToken
       check (status == 200 && !scopedToken.isEmpty) s!"session mint {role}"
       for tool in #["get_mission", "get_mission_events", "cancel_mission", "schedule_wakeup"] do
         let doc ← call scopedToken tool foreign
         check (doc.fieldBool? "ok" == some false) s!"scoped role cannot cross tenant {role}/{tool}"
+    -- Members can request the plan's dev-only pass for their OWN mission. It
+    -- still requires a separately approved live lease and never exposes host
+    -- audit or generic privilege tokens. Dashboard role labels cannot redeem it.
+    let requested ← call memberSession "request_privileged_access" (.obj #[("scope", .str "dev_operator"),
+      ("reason", .str "synthetic approval test"), ("ttl_minutes", .nat 30)])
+    check (requested.fieldBool? "ok" == some true && (requested.fieldOrNull "result").fieldStr? "state" == some "pending")
+      "member mission can request a dev pass without bypassing approval"
+    let devArgs : JVal := .obj #[("grant_id", .str "member-dev-grant")]
+    check ((← call memberSession "get_dev_access" devArgs).fieldBool? "ok" == some false)
+      "dev access denied before approval"
+    for uid in #["admin", "member"] do
+      let .ok () ← upsertPrivilegeLease store {
+        grantId := uid ++ "-dev-grant", leaseToken := "synthetic-" ++ uid ++ "-dev-pass",
+        missionId := uid ++ "-mission", scope := "dev_operator", targetHost := "dev", expiresAtEpoch := now + 1800 }
+        | throw (IO.userError "isolation approved dev lease fixture")
+    let devAccess ← call memberSession "get_dev_access" devArgs
+    check (devAccess.fieldBool? "ok" == some true && (devAccess.fieldOrNull "result").fieldStr? "instance" == some "dev")
+      "member mission may redeem its own approved dev pass"
+    check ((← call member "get_dev_access" devArgs).fieldBool? "ok" == some false)
+      "direct member cannot take a mission's approved pass"
+    check ((← call memberSession "get_dev_access" (devArgs.setField "grant_id" (.str "admin-dev-grant"))).fieldBool? "ok" == some false)
+      "member mission cannot redeem the admin mission's approved pass"
+    let ownGrants ← call memberSession "list_privileged_access"
+    check (ownGrants.fieldBool? "ok" == some true &&
+      ((renderCompact ownGrants).splitOn "admin-dev-grant").length == 1 &&
+      ((renderCompact ownGrants).splitOn "lease_token").length == 1 &&
+      ((ownGrants.fieldOrNull "result").field? "command_audit").isNone)
+      "member grant listing contains only dev grant metadata for its own mission"
     let (externalStatus, externalDoc) ← send "POST" "/api/mcp/external-sessions" member
       (.obj #[("role", .str "coordinator")])
     let externalToken := (externalDoc.fieldStr? "token").getD ""
@@ -203,6 +233,8 @@ def run (root : String) : IO Unit := do
       "shared session cannot acquire owner mutation rights"
     check ((← call sharedToken "secret_list").fieldBool? "ok" == some false)
       "shared admin mission does not grant its owner's secret authority"
+    check ((← call sharedToken "get_dev_access" (devArgs.setField "grant_id" (.str "admin-dev-grant"))).fieldBool? "ok" == some false)
+      "shared admin mission does not delegate its owner's approved dev pass"
     let sharedMemory ← call sharedToken "memory_get_knowledge_tree"
     check ((sharedMemory.fieldOrNull "error").fieldStr? "message" == some "Administrator required")
       "shared admin mission does not grant its owner's personal memory"
