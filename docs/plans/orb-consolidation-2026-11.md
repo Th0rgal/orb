@@ -479,6 +479,46 @@ member, `GET /api/ai/providers`; report only the set of key names per row
 (and inside `status` and `custom_models`), and for each row `id` a yes/no
 on "contains an email, account name or login file name". No values.
 
+**Addendum 22:28 to the member provider-row follow-up.** Read on master,
+not run: the store renderer `renderAIProviderForCallerJson`
+(`Store.lean:4154`) passes custom models through `renderCustomModelsJson`
+for members too, which adds `rpm_limit`, `tpm_limit` and `max_concurrency`
+per model. The member toggle response (`Control.lean:4459`) always uses
+that renderer; the test fixture's custom model carries no limits, so no
+test would see it. Rate-limit internals, not account identity. Added to
+H-core's task: a toggle-response test expected to fail on master, then a
+fix confined to the member path of that renderer; plus marker coverage of
+the login-list and auth-methods routes and a 403 check for a member
+starting a login.
+
+**Relays received 22:25 and 22:27 (isolation worker `6fa970f7`, completed
+14:04; its "newer master `0da01d9e`" is 29 commits behind).** Both read as
+delayed. Their line numbers for the provider renderers describe
+`de3fd0fa` and no longer match master (#1742 rewrote those paths). What
+was done and decided:
+
+- Second leftover patch harvested and kept (SHA-256 `c766c07f…e115a1`, one
+  hunk in `SelfTest.lean`); its added lines are identical to the
+  `SelfTest` hunk of the first patch. Still **not integrated**: never run,
+  and it expects code `admin_required` where the only gate read on master
+  (`McpGateway.lean:442`) answers `forbidden`. Whether an earlier branch
+  answers first for an operator-role principal was not traced.
+- Native Linux shell: worker-reported only, `make -C linux_shell test`
+  built and self-tested against GTK 3.24.41 / WebKitGTK 2.52.3. No
+  authorized display (it refused, correctly, to reuse another user's X
+  cookie), no test member. **No desktop isolation pass.**
+- No grant exists for this mission or for `6fa970f7`
+  (`list_mission_access`: none), and the coordinator has no tool to request
+  one. Nothing live was done.
+
+**Waiting on Thomas / operator for isolation acceptance, unchanged:** a
+`dev_operator` grant (dev, 30 min is enough) for the mission that will run
+the checks, or the operator running `scripts/dev_user_isolation.py` and
+the member provider-row read on dev itself and pasting key names and
+booleans only. And the names-only output of `orb-env inventory --prod …
+--dev …` (key names and `unknown_keys`, no values) so the remaining
+environment differences can be judged.
+
 **Still open, no owner.** Track A / #1708; lean.ci PR #34 fence review
 (interdiff unread, lean runners stay on hold); isolation acceptance and
 managed-lifecycle live validation (need the `dev_operator` grant
