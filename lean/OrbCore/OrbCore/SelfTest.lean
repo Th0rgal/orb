@@ -30,6 +30,7 @@ import OrbCore.ComputeRollupTests
 import OrbCore.ManagedSnapshotCatalogTests
 import OrbCore.ProviderContractTests
 import OrbCore.ProxyRoutingTests
+import OrbCore.SettingsDocumentTests
 
 namespace OrbCore.SelfTest
 
@@ -7766,4 +7767,5 @@ end OrbCore.SelfTest
 
 def main (args : List String) : IO UInt32 := do
   OrbBin.PosixExt.setenvVar "ORB_HERMETIC_TEST" "1"
+  OrbCore.SettingsDocumentTests.run
   OrbCore.SelfTest.runSuite (OrbCore.SelfTest.findFlag? args "--emit-evidence-log")
