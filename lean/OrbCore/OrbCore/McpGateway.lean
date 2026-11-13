@@ -1147,7 +1147,7 @@ def dispatchMcpToolCall
     let project ← snapshotProject
     if project.isEmpty then
       return mcpOk (.obj #[("snapshots", .arr #[]), ("note", .str "This mission has no project; snapshots are project-scoped.")])
-    let provider ← match ← snapshotProvider "boat" with
+    let provider ← match ← snapshotProvider (canonicalizeProvider ((args.fieldStr? "provider").getD "boat")) with
       | .ok p => pure p
       | .error e => return mcpErr "unavailable" e true
     match ← projectSnapshotEntries store provider project with
@@ -1160,7 +1160,7 @@ def dispatchMcpToolCall
     if mc?.isNone then return mcpErr "unavailable" "managed compute store not configured"
     let requested := (args.fieldStr? "name").orElse (fun _ => args.fieldStr? "snapshot_id")
       |>.orElse (fun _ => args.fieldStr? "id") |>.getD ""
-    let provider ← match ← snapshotProvider "boat" with
+    let provider ← match ← snapshotProvider (canonicalizeProvider ((args.fieldStr? "provider").getD "boat")) with
       | .ok p => pure p
       | .error e => return mcpErr "unavailable" e true
     match ← deleteProjectSnapshot store provider (← snapshotProject) requested with

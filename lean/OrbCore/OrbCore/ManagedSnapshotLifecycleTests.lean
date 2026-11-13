@@ -144,6 +144,8 @@ private def gatewayTests (root : String) : IO Unit := do
     let deleted ← call "alpha-lead" "delete_managed_snapshot" #[("name", .str "Warm Build")]
     check ((resultOf deleted).fieldStr? "deleted" == some name && (← names) == #["orb-snap-beta-warm-zzzz"])
       "the owning project deletes by label"
+    let otherProvider ← call "alpha-lead" "list_managed_snapshots" #[("provider", .str "leanci")]
+    check (otherProvider.fieldBool? "ok" == some true) "the provider can be named"
     let reuse ← call "alpha-lead" "snapshot_managed_machine" #[("machine_id", .str "alpha-vm"), ("name", .str "warm build")]
     check (reuse.fieldBool? "ok" == some true) "a deleted label can be used again"
     -- Fork: a real machine from the source's disk, owned by the caller.
