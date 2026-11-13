@@ -190,8 +190,10 @@ contract was read from the server source (`lfglabs-dev/lean.ci`,
 
 Its mock transport uses UUID identifiers and the server's status codes, and
 rejects what the server rejects (POST uploads, string commands, unknown labels).
-Not yet verified against the live service: which labels production accepts,
-the real disk sizes, and the guest's `LEANCI_*` cache variables.
+Verified on the dev deployment on 2026-11-13: a `small` VM is created, enrols
+about 26 s after the request, and is destroyed and gone at the provider. Not yet
+verified: the real disk sizes, a mission on the VM, snapshots, and the guest's
+`LEANCI_*` cache variables.
 
 ## Lean provider transport contract
 
@@ -685,6 +687,10 @@ In order, the script:
   being evaluated by a shell. A second run stops the previous loop first, after
   checking that the recorded PID still is one. Output goes to
   `/var/log/orb-node.log`, which only root can create.
+
+Every bootstrap also logs what the provider delivered: one guest line with the
+CPU count, memory, root and `/workspace` disk sizes and the GPU name, next to the
+requested size, so the catalog can be checked against real machines.
 
 A bootstrap that fails says where. Core logs one `[managed-bootstrap]` line per
 stage (provider ready, files delivered, script finished) with the machine ID and

@@ -77,6 +77,14 @@ def guestLogLines (machineId token text : String) : Array String :=
   ((clean.splitOn "\n").filter (!·.trimAscii.toString.isEmpty)).toArray.map
     (fun line => s!"[managed-bootstrap] machine={machineId} guest: {line}")
 
+/-- CPU count, memory and root disk of a guest, on one line. Read-only. -/
+def guestFactsCommand : String :=
+  "echo \"cpus=$(nproc) memory_mib=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo) " ++
+  "root_disk_gb=$(df -BG --output=size / 2>/dev/null | tail -n 1 | tr -dc 0-9) " ++
+  "root_free_gb=$(df -BG --output=avail / 2>/dev/null | tail -n 1 | tr -dc 0-9) " ++
+  "workspace_disk_gb=$(df -BG --output=size /workspace 2>/dev/null | tail -n 1 | tr -dc 0-9) " ++
+  "gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n 1)\""
+
 /-- What to ask a guest whose node never reached Core. Read-only. -/
 def guestDiagnosticCommand (coreUrl : String) : String :=
   "echo \"pid1=$(cat /proc/1/comm 2>/dev/null) arch=$(uname -m)\"; " ++
@@ -147,7 +155,7 @@ def bootstrapAndWait (mc : ManagedComputeStore) (provider : ManagedProvider.Prov
   if (← elapsed) ≥ deadlineMs then return .error "managed_bootstrap_timeout_during_delivery"
   stage "enrolment file and provisioning script delivered"
   let command := "chmod 600 /home/user/.orb/enroll.env && sudo bash /home/user/.orb/orb-node-provision.sh " ++
-    shellSingleQuote cfg.coreUrl ++ " " ++ shellSingleQuote machine.id
+    shellSingleQuote cfg.coreUrl ++ " " ++ shellSingleQuote machine.id ++ " && " ++ guestFactsCommand
   let .ok launched ← provider.exec machine.effectiveProviderId command 90
     | do stage "guest command call failed (provisioning script)"; return .error "managed_bootstrap_launch_failed"
   if execFailed launched then
@@ -155,6 +163,10 @@ def bootstrapAndWait (mc : ManagedComputeStore) (provider : ManagedProvider.Prov
     for line in guestLogLines machine.id token (guestOutput launched) do IO.eprintln line
     return .error "managed_bootstrap_launch_failed"
   stage "provisioning script finished; waiting for the node's first relay poll"
+  -- The same call reported what the provider actually delivered, so the catalog's
+  -- sizes can be checked against every real machine.
+  stage s!"guest output for size {machine.size} follows"
+  for line in guestLogLines machine.id token (guestOutput launched) do IO.eprintln line
   while (← elapsed) < deadlineMs do
     let some (live, slice) ← getManagedMachine? mc machine.id
       | return .error "managed_machine_missing"
