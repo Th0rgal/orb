@@ -324,6 +324,74 @@ No questions sent; implement/test generic support against an authorized
 
 ## Operator requests
 
+### Claude (Fable) outage 2026-11-13, 03:45 to 13:29 UTC: root cause
+
+Established by the operator session; recorded here as reported, not
+re-derived by the coordinator.
+
+1. 03:45:07 UTC: Anthropic answered one 429 `rate_limit_error` ("would exceed
+   your account's rate limit") to a Fable request on the thomas.marchand
+   credential during a burst (15 requests/minute at 03:43). CLIProxyAPI
+   (`claude_ratelimit.go:254`) took the weekly reset (18 Nov 15:00 UTC) as the
+   cooldown and escalated it from model scope to credential scope
+   (`credential_quota`). Fable, Opus 5.5, Opus 4.6 and Haiku were parked for
+   131 h while the account was at 8% weekly use.
+2. The second Claude login (benjamin) had an expired refresh token
+   (`invalid_grant`), so there was no other candidate: every Claude request
+   returned 503 `auth_unavailable` for the whole window.
+3. Orb turned each 503 into its own 40-minute provider cooldown.
+   `POST /api/model-routing/health/:id/clear` did not clear it and
+   `GET /api/model-routing/health` showed 0 s.
+4. The `genius` chain had a single target, so missions hung on
+   "Starting OpenCode…" with no error.
+5. The provider panel showed thomas.marchand as connected at 8% throughout.
+
+Proof the park was wrong: at 13:28 the operator cleared the sidecar cooldown
+(disable/enable the auth file through the management API) and, with benjamin's
+credential disabled for the test, the thomas.marchand credential answered Fable
+and Opus 5.5 with 200.
+
+Related panel bug, same day: after Thomas reconnected benjamin at 13:20 UTC the
+panel kept showing "the provider rejected this login" with stale 98% usage
+until a real request was served at 13:29. Cause in
+`lean/OrbCore/OrbCore/ProviderUsageAndLogin.lean`: the oauth-callback success
+path (~1597) deletes `provider_auth_health` rows but leaves the cached usage
+entry at `needs_reauth` (read by `loginRejected`, ~1143), returns "completing"
+before the auth file exists so the client refresh (`orb/src/Providers.tsx`
+~618) re-caches the old state, and clears neither cooldown store.
+
+Actions and owners:
+
+| Action | Owner | State |
+|---|---|---|
+| Login completion: drop cached usage, clear both cooldown stores, report done only when the auth file is visible; replay test | H-core `21b1bfca-fc38-4d05-8896-94f733e7baf2` (nippur) | dispatched 13:50 |
+| Cooldown clear clears every store; health GET reports real remaining time | H-core | queued behind the above |
+| Core reads sidecar `/v0/management/auth-files` cooldowns, shows "parked until …, reason", admin clear | H-core | API shape to be proposed first |
+| CLIProxyAPI: 429 without a 7-day `rejected` status uses the short reset; model-scope quota must not park the credential | H-core, research only | options write-up; no third-party issue or PR without Thomas |
+| Clients (desktop, iOS, Android) need no change beyond the Core fix | H `11a48ddf-fb0b-49b4-8c42-2bd95518b296` | check requested |
+| Single-target `genius` chain hangs with no error | H-core | to be located and reported |
+
+### CI: lean runners and docs-only pushes
+
+- lean-ci App `5538046` is now installed on user `Th0rgal` (installation
+  `181598910`, all repositories) with `administration: write`. The two
+  "Waiting on Thomas" items for B are resolved, and the hosted-dispatcher
+  bridge design is superseded.
+- B successor `e14bb767-3a6e-4251-a078-97c2c70cdb4a` (static node uruk):
+  repo-level JIT runner support in `lfglabs-dev/lean.ci` for user-owned repos,
+  a deploy runbook for `leanci-ctrl`, Orb Linux jobs on `runs-on: lean-*`
+  behind a repository variable with `ubuntu-latest` when unset, then measured
+  wall time. Brief requires an explicit decision on which repositories and
+  events may obtain a runner (public repo, fork PRs, all-repos installation).
+- `BOOST_CI_SSH_PRIVATE_KEY` granted to the coordinator at 13:48; kept on
+  nimrud. `leanci-ctrl` deploy is done by the coordinator after review, not by
+  the worker.
+- Docs-only pushes: `0dea70c8` (Thomas) added `paths-ignore: ['docs/**']` to
+  `ci.yml` and `kernel-abi.yml`. `'**/*.md'` is not yet covered; assigned to
+  the B successor. At 13:47 CI run `43434265856` on `0dea70c8` was in progress;
+  every earlier master run since 12:04 was cancelled.
+- Live at 13:47: prod and dev both report build `7a9dfa936`.
+
 ### A status 13:40 UTC: audit patch on security hold, lean.ci successor failed
 
 - **lean.ci successor failed.** Mission `d76cd199-448d-44ad-ab2b-afff1011c0f1`
