@@ -188,7 +188,11 @@ sessions act for Thomas as admin; mission authority stays lineage-only. Dev depl
   Corrections pushed as 4c8744516. Master advanced to 3ff631a15, causing an overlapping
   MCP cursor conflict with #1719. Merge retains cursor semantics plus trace filtering and payload
   limits. CI-parity build (299 jobs) and full self-test (11/10/101) passed again after resolution.
-  Await checks on the new merge head; earlier-head green checks are not sufficient.
+  Merge head was 184595520. New review identified provider-stopped failed/error/offline states:
+  normalize accepted stopped states before phase-zero cleanup and preserve failed/reaped/offline
+  in TTL's state allowlist (otherwise they became unknown and triggered deletion). Added provider
+  matrix regressions, reproduced the unintended deletion, then passed CI-parity 299-job build and
+  full self-test (11/10/101) with the correction. Await exact new-head CI before merge.
   Background-build survival exploration found a wider ownership boundary: PrivdMain around862
   also stops completed scopes and Runner cancel around2071 ignores terminal jobs. Safe fix needs
   reparent-safe process ownership/supervision across both paths, not just skipping normal cleanup.

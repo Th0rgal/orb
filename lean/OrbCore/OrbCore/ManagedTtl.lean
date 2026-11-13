@@ -47,7 +47,7 @@ def extendWorker (mc : ManagedComputeStore) (fleet : ManagedFleetState) (provide
   return .ok updated
 
 private def safeState (state : String) : String :=
-  if #["ready","running","idle","busy","starting","provisioning","archived","archiving","stopped","deleted","destroyed","error"].contains state
+  if #["ready","running","idle","busy","starting","provisioning","archived","archiving","stopped","deleted","destroyed","error","failed","reaped","offline"].contains state
     then state else "unknown"
 
 /-- Read-only operator probe: Core's row beside the provider's own view. It never
@@ -235,7 +235,7 @@ def tick (mc : ManagedComputeStore) (store : CoreStore) (defaults : ManagedFleet
           presentedBootEpoch := claimed.nodeBootEpoch, nowEpoch
         } (some claimed.providerId) | do pending := pending.push (.str m.id); continue
       else if vm.phaseCode == 0 then
-        let .ok observation := observeProviderPayload claimed.provider m.id 200 (.obj #[("state", .str state)])
+        let .ok observation := observeProviderPayload claimed.provider m.id 200 (.obj #[("state", .str "stopped")])
           | do pending := pending.push (.str m.id); continue
         let .ok _ ← applyProviderObservation mc { observation with
             expectedProviderId? := some claimed.providerId, expectedBootEpoch? := some claimed.nodeBootEpoch

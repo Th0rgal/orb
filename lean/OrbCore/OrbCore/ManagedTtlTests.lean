@@ -481,6 +481,32 @@ private def provisioningArchiveTests (root : String) : IO Unit := do
       stoppedSlice.phaseCode == 2 && stoppedSlice.activeComputeEligible == 0 &&
       !(← enrollManagedNode mc stopped.id "old-enrollment" (some 1)).isOk)
       "phase-zero stopped payload normalizes without deletion or credential revival"
+    for (providerName, states) in #[("leanci", #["stopped", "failed", "error", "reaped"]),
+        ("colab", #["stopped", "failed", "error", "offline"]),
+        ("boat", #["error", "archiving"])] do
+      for state in states do
+        let id := providerName ++ "-" ++ state
+        discard <| requireOk (← provisionManagedMachine mc fleet {
+          id, sandboxName := s!"orb-managed-{id}", ttlMinutes := 5, deletableAtSec := 1000
+        } 1000) "reserve provider-stopped fixture"
+        discard <| requireOk (← bindManagedProviderId mc id ("remote-" ++ id) 1) "bind provider-stopped fixture"
+        discard <| sql mc "UPDATE managed_machines SET provider=?2 WHERE id=?1;" #[id, providerName]
+        discard <| requireOk (← putEnrollmentToken mc id "old-enrollment") "provider-stopped enrollment"
+        let stoppedProvider := { provider with
+          name := providerName
+          isStopped := fun s => states.contains s
+          get := fun remoteId => pure (.ok { providerId := remoteId, state })
+        }
+        let cleaned ← requireOk (← tick mc core fleet (fun _ => pure (.ok stoppedProvider)) 1300)
+          "provider-stopped expiry"
+        let normalized ← machine mc id
+        let some (_, slice) ← getManagedMachine? mc id
+          | throw (IO.userError "provider-stopped fixture missing")
+        check (normalized.status == "stopped" && normalized.expiryCleanupState == "completed" &&
+          slice.phaseCode == 2 && slice.activeComputeEligible == 0 &&
+          !(← enrollManagedNode mc id "old-enrollment" (some 1)).isOk &&
+          ((cleaned.fieldArr? "pending").getD #[]).isEmpty && (← destroys.get).isEmpty)
+          s!"{providerName} {state} releases phase-zero capacity: status={normalized.status} cleanup={normalized.expiryCleanupState} phase={slice.phaseCode} active={slice.activeComputeEligible} result={renderCompact cleaned} destroys={repr (← destroys.get)}"
     let repeated ← requireOk (← tick mc core fleet (fun _ => pure (.ok provider)) 1301) "repeat stopped expiry"
     check (((repeated.fieldArr? "reaped").getD #[]).isEmpty &&
       ((repeated.fieldArr? "pending").getD #[]).isEmpty && (← destroys.get).isEmpty)
