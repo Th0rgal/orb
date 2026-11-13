@@ -1,5 +1,24 @@
 # Rust → Lean Core behavioral parity audit
 
+## Handoff 2026-11-13
+
+**Owner: Orb: consolidation.** This supersedes the split mission assignments below; reconcile fresh master and the recovery/provider/isolation owners' deliveries before implementing any item. These are the next ten ranked findings still unclosed in this ledger, not a fresh audit of their current implementation. File names below are under `lean/OrbCore/OrbCore/` unless qualified.
+
+1. **SEC-01:** restore request-bound enrolled-device signature verification before protected approval/lease issuance — `SecretAndApproval.lean`, `Control.lean`.
+2. **MCP-01:** centralize registry role/schema/target admission before tool effects — `McpGateway.lean`, `Control.lean`, `lean/OrbBin/OrbBin/McpCatalog.lean`.
+3. **SEC-02:** preserve real bearer/legacy principal identity instead of bootstrap-admin substitution — `Control.lean`, `Store.lean`; reconcile isolation-owner work first.
+4. **FLT-13:** contain raw worker execution using default-admin rather than confined identity — `McpGateway.lean`, `RemoteFleetAndRelay.lean`, `lean/OrbNode/OrbNode/{Server,Runner}.lean`.
+5. **MCP-13 (+ SEC-04):** scope external grants/tokens/access records to the actual requesting session — `SecretAndApproval.lean`, `McpGateway.lean`.
+6. **SEC-08:** enforce mission/session liveness at lease verification and reaping, not TTL alone — `SecretAndApproval.lean`, `Store.lean`, `Control.lean`.
+7. **FLT-05:** persist original remote job identity before submit and reconcile uncertain acceptance — `RemoteDispatch.lean`, `Control.lean`; reconcile recovery-owner work first.
+8. **FLT-07:** fence stale remote observers by run/generation before mission/queue settlement — `RemoteDispatch.lean`, `McpGateway.lean`.
+9. **FLT-08:** enforce lineage dollar pools with atomic charged-pool reservations before provider creation — `Managed.lean`, `RemoteFleetAndRelay.lean`, `LegacyHydrate.lean`; reconcile provider-owner work first.
+10. **RUN-07:** implement incremental upstream-to-client streaming with actual-write commitment, cancellation, backpressure and pacing lifetime — `Proxy.lean`, `Control.lean`, `lean/OrbNetLeaf/OrbNetLeaf/TlsHttp.lean`; share downstream transport with RUN-05, do not duplicate separately owned TLS quiet-socket/retry/pricing fixes.
+
+**Half-done / evidence:** this handoff's response-head/body split removes the combined fixed-length response allocation; responses remain buffered and RUN-07 is **not fixed**. Exact empty/binary/UTF-8/CORS/header wire tests, injected head/body failures, pipeline frame boundaries, and socket failure/no-reuse tests pass. CI-parity warnings-as-errors build passed (293 jobs), Core self-test passed (`11` spec gates, `10` harness contracts, `101` host tests), five shared fixtures and capability/state/whitespace checks passed. No deployment or restart. PR #1715's empty-turn continuation regression already merged as `ec48d780be3ec3285d6f70404dc784935c64c5b7`; dev restart/empty-response acceptance remains unverified. OCR 502/timeouts at 08:30–08:47 UTC remain unattributed: obtain sanitized prod nginx/proxy_outcomes records through an authorized host owner; worker SSH timed out and protected health reads returned 403.
+
+**Local continuation paths:** checkout `/var/lib/sandboxed-node/68e2a387-6c45-400d-a88a-7f0c6c2e37b3/orb`; existing artifacts `lean/OrbCore/.lake/build/`. User-local OpenSSL headers/link cache `$HOME/.cache/parity-openssl.pltU7U`: set `CPATH` to its `extracted/usr/include` and `extracted/usr/include/x86_64-linux-gnu`, `LIBRARY_PATH` to its `link`. These are local build aids, not portable service configuration. `turbo-lean` rejected the existing `OrbCore.Spec` audit-materialization sidecar; the successful final check used `SANDBOXED_ALLOW_RAW_LAKE=1 LEAN_NUM_THREADS=1 lake build orb-core orb-core-test orb-spec-runner -- -DwarningAsError=true` from `lean/OrbCore`, then the binaries from repository root. Check all active builds before any heavy work; never terminate another mission's build. Historical area appendices and the ledger below preserve unresolved qualifications and existing-owner context.
+
 > **Follow-up added after initial publication:** see “Operator follow-up” and **“Probes for the operator”** below. The initial 75-entry cohort is preserved; 13 independently source-checked provider/queue comparisons bring the combined comparative inventory to **88** (D 49 / S 16 / M 23), with **zero live-confirmed findings**. One initial missing gate was superseded during the first audit. The separate Lean-only policy defect is not included in these Rust-parity totals. No operator probe responses have been received or inferred.
 
 ## Implementation ledger — scope expanded after the audit

@@ -1182,7 +1182,7 @@ private def safeHeaderLine? (k v : String) : Option String :=
   else
     some s!"{k}: {v}\r\n"
 
-def encodeCoreHttpResponse (r : CoreHttpResponse) (keepAlive : Bool := false) : ByteArray := Id.run do
+def encodeCoreHttpResponseHead (r : CoreHttpResponse) (keepAlive : Bool := false) : ByteArray := Id.run do
   let corsHdr :=
     match r.corsOrigin? with
     | some orig =>
@@ -1207,7 +1207,16 @@ def encodeCoreHttpResponse (r : CoreHttpResponse) (keepAlive : Bool := false) : 
     if let some ln := safeHeaderLine? k v then
       head := head ++ ln
   head := head ++ "\r\n"
-  return head.toUTF8 ++ r.body
+  return head.toUTF8
+
+def encodeCoreHttpResponse (r : CoreHttpResponse) (keepAlive : Bool := false) : ByteArray :=
+  encodeCoreHttpResponseHead r keepAlive ++ r.body
+
+def writeCoreHttpResponse (write : ByteArray → IO Bool)
+    (r : CoreHttpResponse) (keepAlive : Bool := false) : IO Bool := do
+  if !(← write (encodeCoreHttpResponseHead r keepAlive)) then return false
+  if r.body.isEmpty then return true
+  write r.body
 
 private def acceptsGzipEncoding (hdrs : Array (String × String)) : Bool :=
   match lookupHeaderCI hdrs "accept-encoding" with
@@ -6578,7 +6587,9 @@ def runSyncWebSocketSessionLoop
 
 /-- Serve an accepted TCP connection on `cfd`, supporting bounded HTTP/1.1 keep-alive reuse
     when `allowKeepAlive == true` and RFC 6455 WebSocket upgrade (`/api/control/sync` et al.). -/
-def handleClientConn (st : CoreAppState) (cfd : Fd) (allowKeepAlive : Bool := false) : IO Unit := do
+def handleClientConn (st : CoreAppState) (cfd : Fd) (allowKeepAlive : Bool := false)
+    (responseWrite? : Option (ByteArray → IO Bool) := none) : IO Unit := do
+  let responseWrite := responseWrite?.getD (fun bytes => return (← writeAll cfd bytes false).isOk)
   let maxReqs : Nat := if allowKeepAlive then 64 else 1
   let mut reqCount : Nat := 0
   let mut carryBuf := ByteArray.empty
@@ -6603,7 +6614,7 @@ def handleClientConn (st : CoreAppState) (cfd : Fd) (allowKeepAlive : Bool := fa
           reqCount < maxReqs &&
           req.version == "HTTP/1.1" &&
           !headerRequestsClose req.headers
-        let wrote := (← writeAll cfd (encodeCoreHttpResponse httpResp wantKeep) false).isOk
+        let wrote ← writeCoreHttpResponse responseWrite httpResp wantKeep
         if !wrote || !wantKeep then
           keepGoing := false
       | .error rawUpgrade101 =>
