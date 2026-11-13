@@ -1,6 +1,6 @@
 import { missionAssignedNode, missionNode, nodeLabel } from "../machines/nodes";
 import { followProjectFolder, seedDelivered, seededPrompt } from "../localFolder";
-import { canForceSlot, executionPhaseLabel, isArchived, isFailedStatus, isLive, isRunning, isSettingsIdle, isWorking, remoteJobEnded } from "../missionStatus";
+import { canForceSlot, executionPhaseLabel, isArchived, isFailedStatus, isLive, isReopenable, isRunning, isSettingsIdle, isWorking, remoteJobEnded } from "../missionStatus";
 import { errorText, log, swallow } from "../log";
 import { flushClientLink } from "../clientLink";
 import {CodexSpeedPicker, missionSpeed} from '../CodexSpeedPicker';
@@ -1144,7 +1144,10 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
   // turn starts, a failure lands, or all handover message IDs retire/cancel).
   const hasMissionFailure = () =>
     isFailedStatus(mission()?.status) || missionPhase(mission(), false).failed === true;
-  const isTerminalMission = () => Boolean(mission()?.status && !isLive(mission()?.status) && !runState().working);
+  const isTerminalMission = () => {
+    const s = mission()?.status;
+    return Boolean(s && isReopenable(s) && !isArchived(s) && !runState().working);
+  };
   const [queueHandoverState, setQueueHandoverState] = createSignal<{ ids: string[]; postedAfterSeq: number } | null>(null);
   createEffect(on(busy, (now, before) => {
     if (now) { setQueueHandoverState(null); return; }
@@ -1198,7 +1201,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
   // queue: never mark it not_sent or discard while its id is in the list.
   createEffect(() => {
     const m = mission();
-    if (!m || clientPlaced() || isLive(m.status) || runState().working) return;
+    if (!m || clientPlaced() || !isTerminalMission()) return;
     const listedIds = new Set(remoteQueuedIds());
     const terminalAt = Date.parse(m.updated_at ?? "");
     const users = items().filter((i): i is Extract<StreamItem, { kind: "user" }> => i.kind === "user" && !i.queued);

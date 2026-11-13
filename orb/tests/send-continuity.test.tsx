@@ -675,6 +675,24 @@ it('734c3bb7 view-level sequence: feeding Core-emitted snapshots clears the Star
   await waitFor(()=>expect(view.container.querySelector('.st-working')?.textContent).toContain('Starting'));
   expect(screen.getByText('1 Queued')).toBeDefined();
 
+  // A turn ending in awaiting_user with a listed queue row keeps the Queued label
+  // and the queue handover (working row stays mounted while Core delivers the row).
+  currentSnap={
+    id,
+    backend:'opencode',
+    status:'awaiting_user',
+    run_generation:3,
+    state_revision:6,
+    remote_node_id:'ashur',
+    history:[],
+    created_at:'2026-11-13T11:00:00Z',
+    updated_at:'2026-11-13T11:55:00Z',
+  };
+  setPropMission({...currentSnap});
+  await waitFor(()=>expect(screen.getByText('1 Queued')).toBeDefined());
+  expect(screen.queryByText('1 Not delivered')).toBeNull();
+  expect(view.container.querySelector('.st-working')).not.toBeNull();
+
    // Feed the 734c3bb7 completion snapshot from another session (only Core-emitted fields),
    // with the reply that makes the transcript show activity.
    replyLanded=true;

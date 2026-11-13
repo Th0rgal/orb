@@ -60,11 +60,14 @@ reconciliation:
   network-health Reconnecting chip (`orb/src/networkHealth.ts`) reflects client
   link and poll health rather than mission snapshots, so a mission snapshot
   cannot decide it.
-- A follow-up that Core has not acknowledged when an admitted terminal snapshot
+- A follow-up that Core has not acknowledged when an admitted ended snapshot
+  (`completed`, `succeeded`, `failed`, `not_feasible`, `error`, `errored`,
+  `timed_out`, `cancelled`, `interrupted` — never `READY_STATUSES` such as
+  `awaiting_user`, where the turn ended and Core hands over the next queued row)
   newer than the send arrives is shown as **Not sent** with Retry, unless its id
   is still listed in `GET /api/control/queue` or its content was delivered after
   it was posted. A row Core still lists in the queue is real and is never marked
-  `not_sent` or `discard`; on a terminal mission, listed queue rows are labeled
+  `not_sent` or `discard`; on an ended mission, listed queue rows are labeled
   as not delivered (`Not delivered`) and Send uses delete-then-send (sending
   only after `DELETE /api/control/queue/:id` returns `200` or `404` with
   `"message not in queue"`).
