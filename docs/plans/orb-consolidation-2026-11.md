@@ -636,6 +636,52 @@ managed-lifecycle live validation (need the `dev_operator` grant
 validation request received for 816f574f" was read as a delayed message;
 nothing was done on it.
 
+### Operator night log, 13 Nov 21:15 to 23:45 UTC (Claude, for Thomas)
+
+Thomas approved a night plan at about 21:15 UTC and is away. Facts and decisions:
+
+- **Deploys.** Prod and dev ran `e43a808d4` from 21:32, then `c77d4e162` from
+  23:39 (dev first each time, self-test green). After the second deploy
+  `builtin/smart` and `genius` both answer on prod. The operator session is the
+  deploy owner for the night and deploys each green master tip; no deploy
+  request is needed.
+- **Member isolation, measured.** A probe on agent-core compares about 300 GET
+  routes as admin and as `ben` on dev (`/root/benprobe.py`, names and sizes
+  only). On `c77d4e162` the member no longer receives owner provider names,
+  the discovery file, other users' usage rows or failures, Library skill
+  bodies, other users' missions in the resources overview, host paths, or the
+  software inventory paths. Still identical for members: `/api/model-routing/chains`,
+  `/api/cloud/accounts`, `/api/mesh/status`, `/api/usage-telemetry`,
+  `/api/mcp/capabilities`, `/api/library/skill-delivery`.
+- **Real client walk as `ben`.** Run in a throwaway NixOS VM on Thomas's laptop
+  (Playwright WebKit, `orb/dist` at `0fc4d71af`, dev Core), 69 screenshots.
+  Not the native shell. Findings are in the brief sent to the coordinator at
+  23:40: three settings pages crash for every user because Core's reply shape
+  differs from `orb/src` (usage summary, proxy health, routing health); search
+  answers 404; the presentation stream closes 0.4 s after its snapshot; admin
+  controls are shown to members; a member has no mission target on desktop;
+  the session token appears in a WebKit WebSocket error message.
+- **Decision: token only, laptop only.** Managed VMs must not hold
+  credentials, so the VM ran locally with `ben`'s dev session token and never
+  his password. The token was printed once in the local session log, so
+  `ben`'s dev password was reset at 22:40 (old token answers 401).
+- **Decision: member reduced views, not 403**, wherever member screens call the
+  route. Usage summary for members is zeroed; per-member usage is a follow-up.
+- **Decision left to Thomas:** members' missions still receive Library skill
+  bodies in their workspace, and the delivery catalog lists skill names and
+  descriptions to members. Per-skill visibility is a policy choice.
+- **Bug: `send_message_to_mission` (MCP) answered `action_outcome: rejected`
+  three times** for this mission tonight while `queued: true`; the notes never
+  arrived. The same text sent through `POST /api/control/message` was accepted.
+  No owner yet.
+- **Bug: `PUT /api/model-routing/chains/:id` cannot address built-in ids that
+  contain a slash** (`builtin/smart`); it creates a stray chain that can take
+  `is_default`. Workaround: `POST /api/model-routing/chains` with the id in the
+  body. No owner yet.
+- **Surplus Intelligence** is a provider on prod since 16:00 UTC and serves
+  `gemini-4-argon` as third target of `builtin/smart`; Thomas entered the key
+  and lowered its discount floor to 97 %.
+
 ### Coordinator status 18:45 UTC: two fixes merged, queue delete missing in Core, lean runner fence not ready
 
 **Master.** Tip is `eb2791e5` (#1736, merged by the coordinator at 18:31
