@@ -1342,6 +1342,68 @@ private def redactSettingsSecrets (settings : JVal) : JVal :=
   | some bw => base.setField "bitwarden" ((bw.removeField "encrypted_access_token").removeField "access_token")
   | none => base
 
+/-- When a mission-bound `/v1/*` request authenticated by the mission's own `orb-mpt-v1_...`
+    proxy token hits the mission's own routing chain with no eligible target and the soonest
+    cooling target is > 60 seconds away (or the chain has no configured target at all),
+    stop the mission's running turn once via the same entry point user Stop uses (`hostedStop` +
+    `cancelActiveRemoteJobForMission` with actor `provider_error` + local warm harness stop),
+    and emit one mission `error` event with zero account identifiers. -/
+private def stopMissionTurnForUnavailableChain
+    (st : CoreAppState) (provenMid? : Option String) (chains : Array RoutingChain)
+    (cleanPath : String) (chainId : String)
+    (cooling : Array AccountCooldown) (nowEpochSec : UInt64) : IO Unit := do
+  let some mid := provenMid? | return ()
+  let some mRec ← getMission? st.store mid | return ()
+  let rawMissionModel := mRec.modelOverride.trimAscii.toString
+  let bLow := mRec.backend.trimAscii.toString.toLower
+  let effMissionModel :=
+    if !rawMissionModel.isEmpty then rawMissionModel
+    else if bLow == "opencode" then "builtin/smart"
+    else if bLow == "codex" then defaultCodexModel
+    else ""
+  let isMissionChain ←
+    if effMissionModel.isEmpty then
+      pure (chainId == "default" || chainId == "builtin/smart" || chainId == "smart")
+    else
+      match findMatchingRoutingChain? chains effMissionModel with
+      | some mc => pure (mc.id == chainId)
+      | none =>
+        match ← directRoutingChain? st chains effMissionModel cleanPath with
+        | some dc => pure (dc.id == chainId)
+        | none => pure (bareModel effMissionModel == bareModel chainId)
+  if !isMissionChain then return ()
+  let nowIso := formatEpochIso8601Utc nowEpochSec
+  let (shouldStop, termReason, errMsg) :=
+    if cooling.isEmpty then
+      (true, "remote_configuration", s!"Routing chain '{chainId}' has no configured target. Stopping turn.")
+    else
+      let soonest := (soonestCooldown? cooling).getD
+        { accountId := "", untilEpoch := nowEpochSec + 60, reason := .rateLimit, label := "" }
+      let waitSecs := soonest.remainingSecs nowEpochSec
+      if waitSecs > 60 then
+        let returnIso := formatEpochIso8601Utc soonest.untilEpoch
+        match soonest.reason with
+        | .rateLimit | .usageLimit =>
+          (true, "remote_quota",
+           s!"No eligible provider target in chain '{chainId}'; soonest target returns at {returnIso} (in {waitSecs}s). Stopping turn.")
+        | .authFailure | .overloaded | .serverError =>
+          (true, "provider_unavailable",
+           s!"Provider is unavailable in chain '{chainId}'; soonest target returns at {returnIso} (in {waitSecs}s). Stopping turn.")
+      else
+        (false, "", "")
+  if !shouldStop then return ()
+  match ← hostedStop st.store mid nowIso termReason (onlyWhenRunning := true) with
+  | .error _ => return ()
+  | .ok _ =>
+    discard <| cancelActiveRemoteJobForMission st.store st.managedStore? st.relayHub? mid errMsg "provider_error"
+    if let some mgr := st.warmMgr? then
+      OrbBin.ClaudeControl.stopHarnessRun mgr mid
+    let errPayload := renderCompact (.obj #[("message", .str errMsg)])
+    discard <| appendMissionEvent st.store mid "error" errPayload nowIso
+    publishControlEvent st.broadcastHub? "error" errPayload (some mid)
+    let statusPayload := renderCompact (.obj #[("status", .str "interrupted"), ("reason", .str termReason), ("mission_id", .str mid)])
+    publishControlEvent st.broadcastHub? "mission_status_changed" statusPayload (some mid)
+
 /-- Gate `/v1/*` proxy requests against execution-bound mission Cyber selections (`#1497`)
     and per-account cooldowns (`#1612`). -/
 private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPath : String)
@@ -1385,16 +1447,23 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     | some htr => some <$> currentRouteGeneration htr
     | none => pure none
   let mut proxyOwnerUserId? : Option String := none
+  let mut provenMptMid? : Option String := none
   if let some pTok := extractProxyToken? req.headers nowEpochSec then
     if pTok.startsWith "orb-mpt-v1_" then
       if let some (mptMid, mptOwnerUid) ← resolveMissionProxyToken? st.store pTok nowEpochSec then
         if !mptOwnerUid.isEmpty then proxyOwnerUserId? := some mptOwnerUid
+        provenMptMid? := some mptMid
         if boundMid?.isNone then boundMid? := some mptMid
     else if pTok.startsWith "orb-jwt-v2:" then
       if let some (uid, _, tokEp, _) := verifySessionTokenV2 (effectiveJwtSecret st.cfg) pTok nowEpochSec then
         if let some u ← getUserById? st.store uid then
           if !u.disabled && u.sessionEpoch == tokEp then
             proxyOwnerUserId? := some u.id
+  let stopMid? : Option String :=
+    match provenMptMid?, boundMid? with
+    | some mptMid, some bMid => if mptMid == bMid then some mptMid else none
+    | some mptMid, none => some mptMid
+    | none, _ => none
   let utcDay := currentUtcDay nowEpochSec
   let mut userPrefs : Array (String × Bool) := #[]
   if let some ownerUid := proxyOwnerUserId? then
@@ -1484,15 +1553,17 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     | none =>
       let cooldowns ← st.proxyCooldownsRef.get
       pure (planChain activeChain cooldowns nowEpochSec)
-  if !headersAlreadyCommitted && plan.eligible.isEmpty && !plan.cooling.isEmpty then
-    if plan.allUsageLimited then
-      let limit := (soonestCooldown? plan.cooling).getD
-        { accountId := "", untilEpoch := nowEpochSec + 60, reason := .usageLimit, label := "" }
-      let reply := usageLimitReply activeChain.id limit nowEpochSec
+  if !headersAlreadyCommitted && plan.eligible.isEmpty then
+    stopMissionTurnForUnavailableChain st stopMid? chains cleanPath activeChain.id plan.cooling nowEpochSec
+    if !plan.cooling.isEmpty then
+      if plan.allUsageLimited then
+        let limit := (soonestCooldown? plan.cooling).getD
+          { accountId := "", untilEpoch := nowEpochSec + 60, reason := .usageLimit, label := "" }
+        let reply := usageLimitReply activeChain.id limit nowEpochSec
+        return mkJsonHdr reply.status reply.body reply.headers
+      let retryAfter := (plan.retryAfterSecs? nowEpochSec).getD 60
+      let reply := cooldownReply activeChain.id retryAfter
       return mkJsonHdr reply.status reply.body reply.headers
-    let retryAfter := (plan.retryAfterSecs? nowEpochSec).getD 60
-    let reply := cooldownReply activeChain.id retryAfter
-    return mkJsonHdr reply.status reply.body reply.headers
   let effectiveChain ←
     if expected?.isSome then
       match plan.eligible[0]?.orElse (fun _ => activeChain.targets[0]?) with

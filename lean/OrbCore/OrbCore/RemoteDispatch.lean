@@ -883,7 +883,8 @@ def cancelActiveRemoteJobForMission
     (store : CoreStore)
     (mc? : Option ManagedComputeStore)
     (relayHub? : Option RelayHub)
-    (missionId reason : String) : IO Bool := do
+    (missionId reason : String)
+    (cancelActor : String := "core") : IO Bool := do
   let mut jobId := ""
   let mut nodeId := ""
   if let .ok rRows ← execParamQuery store.missionsDb
@@ -914,7 +915,7 @@ def cancelActiveRemoteJobForMission
     | .ok n => pure n
     | .error _ => pure nodeId
   let hdrs := #[
-    ("x-sandboxed-cancel-actor", "core"),
+    ("x-sandboxed-cancel-actor", if cancelActor.isEmpty then "core" else cancelActor),
     ("x-sandboxed-cancel-reason", if reason.isEmpty then "Mission stopped on Core" else reason)
   ]
   match ← callRemoteNodeHttpOpt relayHub? mc? effNode "POST" s!"/jobs/{jobId}/cancel" (some (.obj #[])) hdrs 10000 with
