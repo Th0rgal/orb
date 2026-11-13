@@ -70,10 +70,17 @@ export function isAutomaticRecovery(content: string): boolean {
   return /^\[Automatic (?:recovery|resume after a usage limit)\]/i.test(content.trimStart());
 }
 
+/** Sources Core uses for a mission's own scheduled wakeups: `scheduler` (Rust
+ * Core) and `wakeup` (Lean Core). */
+export function isSchedulerSource(source: unknown): boolean {
+  return source === "scheduler" || source === "wakeup";
+}
+
 const AUTOMATIC_USER_SOURCES = new Set([
   "api:usage-limit-replay",
   "background-task",
   "scheduler",
+  "wakeup",
   "idle-worker-watchdog",
   "transport_auto_resume",
   "remote-build-terminal",
