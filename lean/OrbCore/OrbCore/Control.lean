@@ -637,7 +637,7 @@ private def matchProviderForChainTarget? (providers : Array AIProviderRecord) (a
       (!slug.isEmpty && providerSlugOf p.name == slug)
     )
 
-private def defaultProviderBaseUrl (provType : String) : String :=
+def defaultProviderBaseUrl (provType : String) : String :=
   match provType with
   | "muse"        => "https://api.meta.ai"
   | "anthropic"   => "https://api.anthropic.com"
@@ -647,7 +647,7 @@ private def defaultProviderBaseUrl (provType : String) : String :=
   | "groq"        => "https://api.groq.com/openai"
   | "mistral"     => "https://api.mistral.ai"
   | "minimax"     => "https://api.minimax.io"
-  | "zai"         => "https://api.z.ai/api/paas/v4"
+  | "zai"         => "https://api.z.ai/api/coding/paas/v4"
   | "kimi"        => "https://api.kimi.com/coding"
   | "google"      => "https://generativelanguage.googleapis.com/v1beta/openai"
   | "openai"      => "https://api.openai.com"
@@ -839,7 +839,7 @@ def parseChainTargetsJson
             provider               := provRaw
             baseUrl                := cliProxyUrl
             apiKey                 := cliProxyKey
-            modelId                := mdl
+            modelId                := if isAg then mdl else OrbCore.ProxyModelRouting.cliProxyModelId effProvType mdl
             accountRpmLimit?       := inlineAcctRpm?.orElse (fun _ => matchedHydrated?.bind (·.rpmLimit?))
             accountMaxConcurrency? := inlineAcctConc?.orElse (fun _ => matchedHydrated?.bind (·.maxConcurrency?))
             modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
@@ -868,7 +868,7 @@ def parseChainTargetsJson
               provider               := provRaw
               baseUrl                := cliProxyUrl
               apiKey                 := cliProxyKey
-              modelId                := mdl
+              modelId                := if isAg then mdl else OrbCore.ProxyModelRouting.cliProxyModelId effProvType mdl
               accountRpmLimit?       := inlineAcctRpm?.orElse (fun _ => matchedProv?.bind (·.rpmLimit?))
               accountMaxConcurrency? := inlineAcctConc?.orElse (fun _ => matchedProv?.bind (·.maxConcurrency?))
               modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))

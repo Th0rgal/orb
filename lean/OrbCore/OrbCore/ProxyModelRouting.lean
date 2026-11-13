@@ -141,6 +141,17 @@ def keepStoredEntrySettings (incomingJson storedJson : String) : String :=
       | other => other))
   | _, _ => incomingJson
 
+/-- Model id CLIProxyAPI expects for a chain entry it serves (Rust `proxy.rs`: Kimi ids are
+    listed as `kimi-*`; xAI has no `-latest` aliases). Other providers keep the entry's id. -/
+def cliProxyModelId (providerType modelId : String) : String :=
+  if providerType == "kimi" then
+    if modelId == "kimi-for-coding" then "kimi-k3"
+    else if modelId == "kimi-for-coding-highspeed" then "kimi-k2.7-code-highspeed"
+    else if modelId.startsWith "kimi-" || modelId.isEmpty then modelId
+    else s!"kimi-{modelId}"
+  else if providerType == "xai" && modelId.endsWith "-latest" then (modelId.dropEnd 7).toString
+  else modelId
+
 def noProviderBody (requested : String) : String :=
   renderCompact (.obj #[("error", .obj #[
     ("message", .str s!"No configured provider account can serve model '{requested}'. It was not rerouted to another model."),

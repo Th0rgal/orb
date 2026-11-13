@@ -395,12 +395,16 @@ inductive UpstreamFailureClass where
   | outOfCredit402
   | rateLimited429
   | serverError5xx (code : Nat)
+  /-- The target cannot serve this request (unknown model, wrong endpoint, dead login,
+      rejected parameters): the next target of the same chain may. -/
+  | unservable4xx (code : Nat)
   deriving Repr, DecidableEq
 
 def UpstreamFailureClass.classifyRetryable? (code : Nat) : Option UpstreamFailureClass :=
   if code = 402 then some .outOfCredit402
   else if code = 429 then some .rateLimited429
   else if 500 ≤ code ∧ code ≤ 599 then some (.serverError5xx code)
+  else if 400 ≤ code ∧ code ≤ 499 then some (.unservable4xx code)
   else none
 
 structure ProxyFailoverCheck where
@@ -413,7 +417,8 @@ structure ProxyFailoverCheck where
     the fallback chain has `1..16` candidates, at least one unvisited fallback candidate remains
     (`attemptIdx + 1 < chainLen` in `Nat`, overflow-free), downstream response headers have not yet
     been committed (`headersCommitted = 0`), and `UpstreamFailureClass.classifyRetryable?` succeeds
-    (`402` out-of-credit, `429` rate-limited, or `500..599` upstream server error). -/
+    (any upstream `400..599`: nothing has reached the client, so another target of the chain the
+    caller named may serve the request, as the Rust proxy did). -/
 def ProxyFailoverDomainSafe (c : ProxyFailoverCheck) : Prop :=
   1 ≤ c.chain.2.toNat ∧
   c.chain.2.toNat ≤ 16 ∧
@@ -427,8 +432,7 @@ def verifyProxyFailoverStep
   if chainLen ≥ 1 && chainLen ≤ 16 &&
      attemptIdx < 16 && attemptIdx + 1 < chainLen &&
      headersCommitted == 0 &&
-     (upstreamStatus == 402 || upstreamStatus == 429 ||
-      (upstreamStatus ≥ 500 && upstreamStatus ≤ 599)) then 1 else 0
+     (upstreamStatus ≥ 400 && upstreamStatus ≤ 599) then 1 else 0
 
 def proxyFailoverMetaGate : MetaGateSpec ProxyFailoverCheck ProxyFailoverDomainSafe where
   gate c :=
@@ -440,29 +444,32 @@ def proxyFailoverMetaGate : MetaGateSpec ProxyFailoverCheck ProxyFailoverDomainS
     unfold verifyProxyFailoverStep at h
     have hc :
         (clen ≥ 1 && clen ≤ 16 && att < 16 && att + 1 < clen && hcFlag == 0 &&
-         (st == 402 || st == 429 || (st ≥ 500 && st ≤ 599))) = true := by
+         (st ≥ 400 && st ≤ 599)) = true := by
       cases hb :
           (clen ≥ 1 && clen ≤ 16 && att < 16 && att + 1 < clen && hcFlag == 0 &&
-           (st == 402 || st == 429 || (st ≥ 500 && st ≤ 599)))
+           (st ≥ 400 && st ≤ 599))
       · rw [hb] at h; contradiction
       · rfl
-    simp only [Bool.and_eq_true, Bool.or_eq_true, decide_eq_true_eq, beq_iff_eq] at hc
-    rcases hc with ⟨⟨⟨⟨⟨hcl1, hcl2⟩, hatt16⟩, hatt⟩, hcomm⟩, hst⟩
+    simp only [Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq] at hc
+    rcases hc with ⟨⟨⟨⟨⟨hcl1, hcl2⟩, hatt16⟩, hatt⟩, hcomm⟩, ⟨h400, h599⟩⟩
     have hclN1 : 1 ≤ clen.toNat := UInt8.le_iff_toNat_le.mp hcl1
     have hclN2 : clen.toNat ≤ 16 := UInt8.le_iff_toNat_le.mp hcl2
     have hattN16 : att.toNat < 16 := UInt8.lt_iff_toNat_lt.mp hatt16
     have hattMod : (att.toNat + 1) % 256 < clen.toNat := UInt8.lt_iff_toNat_lt.mp hatt
     have hattNat : att.toNat + 1 < clen.toNat := by omega
     refine ⟨hclN1, hclN2, hattNat, by subst hcomm; rfl, ?_⟩
+    have hs1 : 400 ≤ st.toNat := UInt32.le_iff_toNat_le.mp h400
+    have hs2 : st.toNat ≤ 599 := UInt32.le_iff_toNat_le.mp h599
     unfold UpstreamFailureClass.classifyRetryable?
-    rcases hst with (h402 | h429) | ⟨h500, h599⟩
-    · subst h402; rfl
-    · subst h429; rfl
-    · have hs1 : 500 ≤ st.toNat := UInt32.le_iff_toNat_le.mp h500
-      have hs2 : st.toNat ≤ 599 := UInt32.le_iff_toNat_le.mp h599
-      have hne402 : st.toNat ≠ 402 := by omega
-      have hne429 : st.toNat ≠ 429 := by omega
-      simp [hne402, hne429, hs1, hs2]
+    split
+    · rfl
+    · split
+      · rfl
+      · split
+        · rfl
+        · split
+          · rfl
+          · exfalso; omega
   complete c h := by
     rcases c with ⟨⟨att, clen⟩, st, hcFlag⟩
     change (verifyProxyFailoverStep att clen st hcFlag == 1) = true
@@ -478,31 +485,20 @@ def proxyFailoverMetaGate : MetaGateSpec ProxyFailoverCheck ProxyFailoverDomainS
       omega
     have hcommB : (hcFlag == 0) = true := by
       rw [beq_iff_eq]; exact u8_eq_of_toNat hcFlag 0 (by omega) hcomm
-    unfold UpstreamFailureClass.classifyRetryable? at hst
-    split at hst
-    · rename_i h402
-      have hstEq : (st == 402) = true := by
-        rw [beq_iff_eq]
-        apply UInt32.eq_of_toBitVec_eq
-        apply BitVec.eq_of_toNat_eq
-        change st.toNat = 402
-        exact h402
-      simp [hclGe, hclLe, hatt16, hattB, hcommB, hstEq]
-    · split at hst
-      · rename_i h429
-        have hstEq : (st == 429) = true := by
-          rw [beq_iff_eq]
-          apply UInt32.eq_of_toBitVec_eq
-          apply BitVec.eq_of_toNat_eq
-          change st.toNat = 429
-          exact h429
-        simp [hclGe, hclLe, hatt16, hattB, hcommB, hstEq]
+    have hb : 400 ≤ st.toNat ∧ st.toNat ≤ 599 := by
+      unfold UpstreamFailureClass.classifyRetryable? at hst
+      split at hst
+      · omega
       · split at hst
-        · rename_i h5xx
-          have h500 : st ≥ 500 := UInt32.le_iff_toNat_le.mpr h5xx.1
-          have h599 : st ≤ 599 := UInt32.le_iff_toNat_le.mpr h5xx.2
-          simp [hclGe, hclLe, hatt16, hattB, hcommB, h500, h599]
-        · contradiction
+        · omega
+        · split at hst
+          · omega
+          · split at hst
+            · omega
+            · contradiction
+    have h400 : st ≥ 400 := by apply UInt32.le_iff_toNat_le.mpr; change 400 ≤ st.toNat; exact hb.1
+    have h599 : st ≤ 599 := by apply UInt32.le_iff_toNat_le.mpr; change st.toNat ≤ 599; exact hb.2
+    simp [hclGe, hclLe, hatt16, hattB, hcommB, h400, h599]
   posWitness := { chain := (0, 3), upstreamStatus := 402, headersCommitted := 0 }
   negWitness := { chain := (0, 3), upstreamStatus := 402, headersCommitted := 1 }
   nonVacuous := by decide

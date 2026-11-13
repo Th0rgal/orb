@@ -75,6 +75,24 @@ def run : IO Unit := do
       proxyCooldownsRef := cooldowns, seqRef,
       proxyMockTransport? := some (fun target => do
         attempts.modify (·.push target.modelId)
+        if target.modelId.startsWith "fail400-" then
+          return .ok {
+            status := 400
+            headers := #[("content-type", "application/json")]
+            body := "{\"error\":{\"message\":\"unknown provider for model k3\",\"code\":\"model_not_found\"}}".toUTF8
+          }
+        if target.modelId.startsWith "fail404-" then
+          return .ok {
+            status := 404
+            headers := #[("content-type", "text/plain")]
+            body := "Not Found".toUTF8
+          }
+        if target.modelId.startsWith "fail401-" then
+          return .ok {
+            status := 401
+            headers := #[("content-type", "application/json")]
+            body := "{\"error\":{\"type\":\"auth_unavailable\",\"message\":\"account someone@example.test: invalid_grant\"}}".toUTF8
+          }
         if target.modelId.startsWith "claude-" then
           return .ok {
             status := 503
@@ -229,6 +247,60 @@ def run : IO Unit := do
     attempts.set #[]
     let late ← post "late-reviewer"
     check (late.status == 200 && !(← attempts.get).isEmpty) s!"a chain saved behind the snapshot is served, got {late.status}"
+    -- A target that cannot serve the request (unknown model, wrong endpoint, dead login)
+    -- hands over to the next target of the SAME chain; nothing has reached the client yet.
+    let multi := fun (id : String) (models : Array String) =>
+      { chain id id "" with targets := models.map fun m => (chain s!"{id}-{m}" id m).targets[0]! }
+    chainsRef.modify fun cs => ((cs.push (multi "fo-recover" #["fail400-a", "fail404-b", "good-c"])).push
+      (multi "fo-dead" #["fail400-a", "fail404-b", "fail401-c"])).push (multi "fo-single" #["fail400-a"])
+    attempts.set #[]
+    let recovered ← post "fo-recover"
+    check (recovered.status == 200 && (← attempts.get) == #["fail400-a", "fail404-b", "good-c"])
+      s!"a chain fails over past unservable targets: {recovered.status} {← attempts.get}"
+    attempts.set #[]
+    let dead ← post "fo-dead"
+    let deadText := (String.fromUTF8? dead.body).getD ""
+    check (dead.status == 502 && (← attempts.get).size == 3 &&
+        (deadText.splitOn ("\"targets\":[{\"provider\":\"openai\",\"model\":\"fail400-a\",\"status\":400,\"code\":\"model_not_found\"}," ++
+          "{\"provider\":\"openai\",\"model\":\"fail404-b\",\"status\":404,\"code\":\"\"}," ++
+          "{\"provider\":\"openai\",\"model\":\"fail401-c\",\"status\":401,\"code\":\"auth_unavailable\"}]")).length == 2)
+      s!"an exhausted chain lists each target's failure: {dead.status} {deadText}"
+    check ((deadText.splitOn "example.test").length == 1) "upstream messages are not relayed in the failure list"
+    attempts.set #[]
+    let single ← post "fo-single"
+    check (single.status == 400 && (((String.fromUTF8? single.body).getD "").splitOn "unknown provider for model k3").length == 2)
+      s!"a single target keeps the upstream's own answer: {single.status}"
+
+    -- Request each provider adapter sends, as the Rust proxy built it (base URL with its
+    -- API version + /chat/completions, JSON content type, bearer key, only `model` rewritten).
+    let sent := fun (provider base model : String) =>
+      let target := { (chain "a" "a" model).targets[0]! with provider := provider, baseUrl := base, apiKey := "k" }
+      let (tls, host, _, path, hdrs, body) := upstreamRequest target
+        "/v1/chat/completions" #[] "{\"model\":\"chain-name\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}".toUTF8
+      (s!"{if tls then "https" else "http"}://{host}{path}", hdrs, (OrbBin.Json.parse ((String.fromUTF8? body).getD "")).toOption.getD .null)
+    for (provider, model, url) in #[
+        ("minimax", "MiniMax-M3", "https://api.minimax.io/v1/chat/completions"),
+        ("zai", "glm-5.3", "https://api.z.ai/api/coding/paas/v4/chat/completions"),
+        ("kimi", "kimi-k3", "https://api.kimi.com/coding/v1/chat/completions"),
+        ("cerebras", "zai-glm-4.7", "https://api.cerebras.ai/v1/chat/completions"),
+        ("openai", "gpt-6-astra", "https://api.openai.com/v1/chat/completions"),
+        ("xai", "grok-4.6", "https://api.x.ai/v1/chat/completions"),
+        ("muse", "muse-spark-1.3", "https://api.meta.ai/v1/chat/completions"),
+        ("groq", "m", "https://api.groq.com/openai/v1/chat/completions"),
+        ("google", "gemini-4-argon", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")] do
+      let (gotUrl, hdrs, body) := sent provider (defaultProviderBaseUrl provider) model
+      check (gotUrl == url) s!"{provider} upstream URL: {gotUrl}"
+      check (hdrs.contains ("Content-Type", "application/json") && hdrs.contains ("Authorization", "Bearer k")) s!"{provider} headers"
+      check (body.fieldStr? "model" == some model && ((body.fieldArr? "messages").getD #[]).size == 1) s!"{provider} body keeps messages, names its model"
+      check (hdrs.any (fun h => h.1 == "User-Agent") == (provider == "kimi") &&
+          ((body.field? "temperature").isSome == (provider == "kimi"))) s!"{provider}: only Kimi's own endpoint gets its CLI agent and temperature"
+    check ((sent "custom:lab" "https://llm.example/v1" "m").1 == "https://llm.example/v1/chat/completions") "custom base ending in /v1"
+    check ((sent "kimi" "http://127.0.0.1:8317" "kimi-k3").1 == "http://127.0.0.1/v1/chat/completions") "CLIProxy base without a version"
+    check (((sent "zai" (defaultProviderBaseUrl "zai") "glm-5.3[1m]").2.2.fieldStr? "model") == some "glm-5.3") "z.ai has no [1m] suffix"
+    for (provider, entry, upstream) in #[("kimi", "k3", "kimi-k3"), ("kimi", "kimi-for-coding", "kimi-k3"),
+        ("kimi", "kimi-for-coding-highspeed", "kimi-k2.7-code-highspeed"), ("kimi", "kimi-k3.1-pro", "kimi-k3.1-pro"),
+        ("xai", "grok-4.6-latest", "grok-4.6"), ("minimax", "MiniMax-M3", "MiniMax-M3")] do
+      check (OrbCore.ProxyModelRouting.cliProxyModelId provider entry == upstream) s!"CLIProxy model id for {provider}/{entry}"
     for c in stock do
       let bare := if c.id.startsWith "builtin/" then (c.id.drop 8).toString else c.id
       for alias in #[c.id, bare, s!"builtin/{bare}"] do
