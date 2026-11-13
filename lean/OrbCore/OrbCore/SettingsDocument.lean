@@ -47,7 +47,26 @@ partial def canonical (value : JVal) : JVal :=
   | .arr values => .arr (values.map canonical)
   | other => other
 
-def render (value : JVal) : String := renderPretty (canonical value) ++ "\n"
+private def sortedRows (value : JVal) (identity : String) : JVal :=
+  match value with
+  | .arr values => .arr (values.qsort (fun a b =>
+      (a.fieldStr? identity).getD "" < (b.fieldStr? identity).getD ""))
+  | other => other
+
+/-- Row order is not configuration; routing entry order is. Usernames follow the
+    existing case-insensitive user table without exporting local account IDs. -/
+def normalize (value : JVal) : JVal := Id.run do
+  let mut result := value
+  for key in #["routing_chains", "inference_providers", "managed_providers"] do
+    result := result.setField key (sortedRows (result.fieldOrNull key) "id")
+  let users := ((value.fieldArr? "user_preferences").getD #[]).map fun user =>
+    let user := user.setField "username" (.str ((user.fieldStr? "username").getD "").toLower)
+    (user.setField "inference" (sortedRows (user.fieldOrNull "inference") "id")).setField
+      "managed" (sortedRows (user.fieldOrNull "managed") "id")
+  result := result.setField "user_preferences" (sortedRows (.arr users) "username")
+  return canonical result
+
+def render (value : JVal) : String := renderPretty (normalize value) ++ "\n"
 
 def globalFields : Array (String × Scalar) := #[
   ("library_remote", .nullableText), ("library_revision", .nullableText),
@@ -60,6 +79,11 @@ def monitorFields : Array (String × Scalar) := #[
   ("stall_minutes", .count), ("proxy_window_seconds", .count),
   ("proxy_5xx_count", .count), ("proxy_4xx_count", .count),
   ("vm_expiry_grace_seconds", .count), ("long_build_minutes", .count)]
+
+def monitorDefaults : JVal := .obj #[
+  ("stall_minutes", .num "30"), ("proxy_window_seconds", .num "600"),
+  ("proxy_5xx_count", .num "20"), ("proxy_4xx_count", .num "30"),
+  ("vm_expiry_grace_seconds", .num "0"), ("long_build_minutes", .num "90")]
 
 private def provider (value : JVal) : Except String Unit := do
   flatObject value #[("id", .text), ("enabled", .flag)] #["id", "enabled"]
@@ -124,12 +148,19 @@ def validate (value : JVal) : Except String Unit := do
     ("daily_cap_cents", .count), ("max_concurrent", .count)]
   flatObject (value.fieldOrNull "fleet") fleetFields (fleetFields.map Prod.fst)
   flatObject (value.fieldOrNull "monitor") monitorFields #[]
+  for (key, _) in monitorFields do
+    if let some n := (value.fieldOrNull "monitor").fieldNat? key then
+      let maximum := if key == "proxy_5xx_count" || key == "proxy_4xx_count" then 1000000
+        else if key == "stall_minutes" || key == "long_build_minutes" then 10080 else 86400
+      if n > maximum || (n == 0 && key != "vm_expiry_grace_seconds") then throw "settings_monitor_threshold_out_of_range"
 
 /-- A printable diff contains only validated, non-secret sections. Invalid input
     produces a fixed error code, never a rendering of the rejected content. -/
 def diff (before after : JVal) : Except String String := do
   validate before
   validate after
+  let before := normalize before
+  let after := normalize after
   let mut lines : Array String := #[]
   for field in #["global", "routing_chains", "inference_providers", "managed_providers",
       "user_preferences", "fleet", "monitor"] do

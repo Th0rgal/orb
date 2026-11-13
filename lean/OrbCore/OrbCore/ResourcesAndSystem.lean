@@ -1397,8 +1397,8 @@ def handleUpdateLibraryRemote
   let curSettings ← readSettingsJson store.rootDir
   let nextVal : JVal := match nextRemote? with | some u => .str u | none => .null
   let updatedSettings := curSettings.setField "library_remote" nextVal
-  if let .error e ← writeSettingsJson store.rootDir updatedSettings then
-    return jsonErr 500 e
+  if let .error e ← writeSettingsJson store.rootDir updatedSettings (some curSettings) then
+    return jsonErr (OrbCore.SettingsFile.errorStatus e) e
   let libDir ← resolveLibraryDir workingDir store.rootDir
   match nextRemote? with
   | none =>

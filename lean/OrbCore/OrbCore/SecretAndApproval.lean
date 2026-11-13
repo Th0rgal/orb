@@ -1137,15 +1137,16 @@ def dispatchSecretAndApprovalRoutes?
       let settings ← readSettingsJson dataRoot
       let bwObj := (((settings.field? "bitwarden").getD (.obj #[])).removeField "access_token").setField
         "encrypted_access_token" (.str enc)
-      if let .error e ← writeSettingsJson dataRoot (settings.setField "bitwarden" bwObj) then
-        return okJson 500 s!"\{\"error\":{jsonEscape e}}"
+      if let .error e ← writeSettingsJson dataRoot (settings.setField "bitwarden" bwObj) (some settings) then
+        return okJson (OrbCore.SettingsFile.errorStatus e) s!"\{\"error\":{jsonEscape e}}"
       return okJson 200 "{\"ok\":true,\"configured\":true}"
     if method == "DELETE" && cleanPath == "/api/bitwarden/config" then
       -- Disconnecting removes the token only; default project access stays for the next token.
       let settings ← readSettingsJson dataRoot
       let bwObj := (((settings.field? "bitwarden").getD (.obj #[])).removeField "access_token").removeField
         "encrypted_access_token"
-      discard <| writeSettingsJson dataRoot ((settings.setField "bitwarden" bwObj).removeField "bws_access_token")
+      if let .error e ← writeSettingsJson dataRoot ((settings.setField "bitwarden" bwObj).removeField "bws_access_token") (some settings) then
+        return okJson (OrbCore.SettingsFile.errorStatus e) s!"\{\"error\":{jsonEscape e}}"
       return okJson 200 "{\"ok\":true,\"configured\":false}"
     if method == "GET" && cleanPath == "/api/bitwarden/projects" then
       match ← listBitwardenProjectsAndSecrets workingDir dataRoot with
@@ -1212,8 +1213,8 @@ def dispatchSecretAndApprovalRoutes?
       let settings ← readSettingsJson dataRoot
       let bwObj := (settings.field? "bitwarden").getD (.obj #[])
       let da := ((bwObj.field? "default_access").getD (.obj #[])).setField slug (.arr bwProjs)
-      if let .error e ← writeSettingsJson dataRoot (settings.setField "bitwarden" (bwObj.setField "default_access" da)) then
-        return okJson 500 s!"\{\"error\":{jsonEscape e}}"
+      if let .error e ← writeSettingsJson dataRoot (settings.setField "bitwarden" (bwObj.setField "default_access" da)) (some settings) then
+        return okJson (OrbCore.SettingsFile.errorStatus e) s!"\{\"error\":{jsonEscape e}}"
       return okJson 200 (renderCompact (.obj #[("ok", .bool true), ("project", .str slug), ("bitwarden_projects", .arr bwProjs)]))
 
   -- 3. Legacy `/api/secrets*`

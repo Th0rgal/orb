@@ -16,6 +16,7 @@ import OrbNetLeaf.Crypto
 import OrbCore.Store
 import OrbCore.Managed
 import OrbCore.R7Core
+import OrbCore.SettingsFile
 
 namespace OrbCore.LegacyHydrate
 
@@ -213,21 +214,15 @@ def configuredSingleTenantUserId (devMode : Bool) : IO String := do
   | none => return if devMode then "dev" else "default"
 
 def settingsFilePath (dataRoot : String) : System.FilePath :=
-  System.FilePath.mk s!"{dataRoot}/settings.json"
+  OrbCore.SettingsFile.path dataRoot
 
 def readSettingsJson (dataRoot : String) : IO JVal := do
-  let p := settingsFilePath dataRoot
-  if !(← p.pathExists) then
-    return .obj #[]
-  match ← (try some <$> IO.FS.readFile p catch _ => pure none) with
-  | none => return .obj #[]
-  | some raw =>
-    match OrbBin.Json.parse raw with
-    | .ok v@(.obj _) => return v
-    | _ => return .obj #[]
+  match ← OrbCore.SettingsFile.read dataRoot with
+  | .ok snapshot => return snapshot.value
+  | .error _ => return .obj #[]
 
-def writeSettingsJson (dataRoot : String) (jv : JVal) : IO (Except String Unit) :=
-  writeAtomicPrivate0600 (settingsFilePath dataRoot) ((renderPretty jv) ++ "\n").toUTF8
+def writeSettingsJson (dataRoot : String) (jv : JVal) (expected? : Option JVal := none) : IO (Except String Unit) :=
+  OrbCore.SettingsFile.write dataRoot jv expected?
 
 /-- Check `dashboard_password_hash` inside `.sandboxed-sh/settings.json` (`pbkdf2:...` or `pbkdf2-sha256$...`). -/
 def verifySettingsPasswordHash (dataRoot suppliedPassword : String) : IO Bool := do

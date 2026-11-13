@@ -14,6 +14,7 @@ import OrbCore.Harness
 import OrbCore.Store
 import OrbCore.R7Core
 import OrbCore.ManagedProviderSealing
+import OrbCore.SettingsCli
 
 namespace OrbCore.CliMain
 
@@ -118,11 +119,8 @@ def runSealProviderSubcommand (args : List String) : IO UInt32 := do
   let dataRoot :=
     if normWork.endsWith "/.sandboxed-sh" || normWork == ".sandboxed-sh" then normWork
     else s!"{normWork}/.sandboxed-sh"
-  let st ← OrbBin.PosixExt.statPath dataRoot
-  let ownsDataRoot := st.exists_ && st.isDir && !st.isSymlink && st.ownedByEuid
-  let mut missionIdentity := false
-  for name in #["SANDBOXED_MISSION_ID", "SANDBOXED_SH_MISSION_ID", "SANDBOXED_JOB_ID"] do
-    if ((← IO.getEnv name).getD "").trimAscii.toString != "" then missionIdentity := true
+  let ownsDataRoot ← OrbCore.LocalOperator.ownsRoot dataRoot
+  let missionIdentity ← OrbCore.LocalOperator.isMission
   match ← OrbCore.ManagedProviderSealing.sealReserved dataRoot provider ownsDataRoot missionIdentity false
       (OrbCore.SecretAndApproval.resolveReservedComputeSecret cfg.workingDir dataRoot) with
   | .ok () =>
@@ -152,6 +150,11 @@ def main (args : List String) : IO UInt32 := do
     OrbCore.CliMain.runManagedInspectSubcommand rest
   | "seal-provider" :: rest =>
     OrbCore.CliMain.runSealProviderSubcommand rest
+  | "settings" :: rest =>
+    let cfg ← OrbCore.Control.loadConfigFromEnv
+    let work := cfg.workingDir.trimAscii.toString
+    let root := if work.endsWith "/.sandboxed-sh" || work == ".sandboxed-sh" then work else s!"{work}/.sandboxed-sh"
+    OrbCore.SettingsCli.run rest root
   | _ =>
     let cfg ← OrbCore.Control.loadConfigFromEnv
     OrbCore.Control.runCoreServer cfg none

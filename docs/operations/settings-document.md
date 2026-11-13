@@ -2,8 +2,8 @@
 
 The approved dev/prod plan transfers configuration, never instance data or
 credentials. `OrbCore.SettingsDocument` owns the version 1 JSON contract and
-validates the entire document before a diff can be rendered. CLI and storage
-integration are still in progress; this document defines their boundary.
+validates the entire document before a diff can be rendered. The CLI accesses
+existing stores without starting Core or running its startup migrations.
 
 The required top-level fields are:
 
@@ -29,6 +29,8 @@ Provider configuration is intentionally projected to IDs and switches.
 entry projection; export must use the same boundary. Import must preserve
 matching inline settings already stored in the target through
 `keepStoredEntrySettings`, including credentials that were never exported.
+Removing a chain or entry with local inline settings is refused; resolve that
+configuration separately before transferring settings.
 Library remotes with URL credentials, query strings or fragments are rejected.
 
 The persistence integration must resolve usernames to accounts that already
@@ -50,3 +52,29 @@ export/validate/diff/import path and confirmation. Promotion is a local
 operator action. Mission credentials cannot authorize it. These directions
 transfer no database files, env files or secrets. Tests use temporary local
 stores; live round trips and account-isolation checks run on dev.
+
+Run as the local service operator, with the instance's service environment:
+
+```bash
+orb-core settings export --data-root /root/.sandboxed-sh --output /tmp/orb-settings.json
+orb-core-dev settings import /tmp/orb-settings.json --data-root /var/lib/sandboxed-sh-dev
+orb-core-dev settings import /tmp/orb-settings.json --data-root /var/lib/sandboxed-sh-dev --yes
+orb-core-dev settings refresh-dev                  # preview prod → dev
+orb-core-dev settings refresh-dev --yes            # confirm prod → dev
+orb-core settings promote-dev                     # preview dev → prod
+orb-core settings promote-dev --yes               # operator confirms dev → prod
+```
+
+`--prod-root` and `--dev-root` override the two roots for direction commands.
+They must name distinct existing instances. Export files and the target's
+`settings-before-import.json` recovery document are private (`0600`). Imports
+lock both SQLite stores and the settings file, reject stale previews, and roll
+back ordinary SQL/file failures, including commit failures. SQLite WAL commits
+across two databases and a filesystem rename are not crash-atomic; after a host
+crash during import, compare with the recovery document and reapply the desired
+document. Unrelated settings, credentials and usage remain local.
+
+Monitor thresholds live in a dedicated non-secret `core_monitor_settings` row
+in `managed_compute.db`. `orb-monitor` reads that row without opening the
+credentials-bearing settings file; older databases use its existing defaults.
+Installing the updated monitor script is an operator action.

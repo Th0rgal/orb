@@ -4644,25 +4644,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | none => t
     let loadChainRows : IO (Array JVal) := do
       let .ok rs ← execParamQuery st.store.missionsDb
-          "SELECT id,name,models_json,COALESCE(updated_at,''),COALESCE(created_at,''),COALESCE(is_default,-1),COALESCE(strip_thinking,-1) FROM model_routing_chains ORDER BY id ASC;" #[]
+          OrbCore.ProxyModelRouting.chainRowsSql #[]
         | throw (IO.userError "routing_chain_store_unavailable")
-      let rows := rs.extract 1 rs.size
-      let explicitDefault := rows.any (fun r => r[5]? == some "1")
-      let mut out : Array JVal := #[]
-      for r in rows do
-        let cid := (r[0]?).getD ""
-        let updated := isoOf ((r[3]?).getD "")
-        let created := if ((r[4]?).getD "").isEmpty then updated else isoOf ((r[4]?).getD "")
-        let isDef := if explicitDefault then r[5]? == some "1" else cid == "builtin/smart"
-        let strip := if r[6]? == some "-1" then cid == "builtin/assistant" else r[6]? == some "1"
-        out := out.push (OrbCore.ProxyModelRouting.chainResponse cid ((r[1]?).getD cid) ((r[2]?).getD "[]") isDef strip created updated)
-      -- Stock chains the proxy serves are listed even before anyone edits them.
-      for (sid, sname, entries) in OrbCore.ProxyModelRouting.stockChains do
-        if !out.any (fun c => c.fieldStr? "id" == some sid) then
-          let now := formatEpochIso8601Utc nowEpochSec
-          out := out.push (OrbCore.ProxyModelRouting.chainResponse sid sname
-            (OrbCore.ProxyModelRouting.entriesJson entries) (!explicitDefault && sid == "builtin/smart") (sid == "builtin/assistant") now now)
-      return out
+      return OrbCore.ProxyModelRouting.chainResponses (rs.extract 1 rs.size) isoOf (formatEpochIso8601Utc nowEpochSec)
     let chainId? := (matchRoutePattern? "/api/model-routing/chains/:id" rawTarget).bind fun ps =>
       (ps.find? (fun p => p.1 == "id")).map Prod.snd
     if req.method == "GET" && cleanPath == "/api/model-routing/chains" then
@@ -5966,8 +5950,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
                 acc := acc.setField k v
             return acc
         | _, _ => curSettings
-      if let .error e ← writeSettingsJson st.store.rootDir merged then
-        return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      if let .error e ← writeSettingsJson st.store.rootDir merged (some curSettings) then
+        return .ok (mkJson (OrbCore.SettingsFile.errorStatus e) s!"\{\"error\":{jsonEscape e}}")
       return .ok (mkJson 200 (renderCompact (redactSettingsSecrets merged)))
 
   if cleanPath == "/api/proxy-keys" || cleanPath.startsWith "/api/proxy-keys/" then

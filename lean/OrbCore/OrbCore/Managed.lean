@@ -279,6 +279,7 @@ def managedComputeDdl : String :=
   "last_poll_sec INTEGER NOT NULL DEFAULT 0,request_key TEXT NOT NULL DEFAULT '',image TEXT NOT NULL DEFAULT '');" ++
   "CREATE INDEX IF NOT EXISTS idx_managed_machines_owner ON managed_machines(owner_user_id);" ++
   "CREATE TABLE IF NOT EXISTS managed_provider_settings(provider TEXT PRIMARY KEY,enabled INTEGER NOT NULL DEFAULT 1,updated_at TEXT NOT NULL DEFAULT '');" ++
+  "CREATE TABLE IF NOT EXISTS core_monitor_settings(singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1),data TEXT NOT NULL DEFAULT '{}');" ++
   "CREATE TABLE IF NOT EXISTS user_managed_provider_prefs(" ++
   "user_id TEXT NOT NULL,provider TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1," ++
   "updated_at TEXT NOT NULL DEFAULT '',PRIMARY KEY(user_id,provider));" ++

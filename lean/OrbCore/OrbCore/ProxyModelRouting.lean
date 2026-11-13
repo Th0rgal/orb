@@ -141,6 +141,26 @@ def keepStoredEntrySettings (incomingJson storedJson : String) : String :=
       | other => other))
   | _, _ => incomingJson
 
+def chainRowsSql : String :=
+  "SELECT id,name,models_json,COALESCE(updated_at,''),COALESCE(created_at,''),COALESCE(is_default,-1),COALESCE(strip_thinking,-1) FROM model_routing_chains ORDER BY id ASC;"
+
+/-- Shared effective-chain projection for REST and the operator settings export. -/
+def chainResponses (rows : Array (Array String)) (isoOf : String → String) (nowIso : String) : Array JVal := Id.run do
+  let explicitDefault := rows.any (fun r => r[5]? == some "1")
+  let mut out : Array JVal := #[]
+  for r in rows do
+    let cid := r.getD 0 ""
+    let updated := isoOf (r.getD 3 "")
+    let created := if (r.getD 4 "").isEmpty then updated else isoOf (r.getD 4 "")
+    let isDef := if explicitDefault then r[5]? == some "1" else cid == "builtin/smart"
+    let strip := if r[6]? == some "-1" then cid == "builtin/assistant" else r[6]? == some "1"
+    out := out.push (chainResponse cid (r.getD 1 cid) (r.getD 2 "[]") isDef strip created updated)
+  for (sid, sname, entries) in stockChains do
+    if !out.any (fun c => c.fieldStr? "id" == some sid) then
+      out := out.push (chainResponse sid sname (entriesJson entries)
+        (!explicitDefault && sid == "builtin/smart") (sid == "builtin/assistant") nowIso nowIso)
+  return out.qsort (fun a b => (a.fieldStr? "id").getD "" < (b.fieldStr? "id").getD "")
+
 /-- Model id CLIProxyAPI expects for a chain entry it serves (Rust `proxy.rs`: Kimi ids are
     listed as `kimi-*`; xAI has no `-latest` aliases). Other providers keep the entry's id. -/
 def cliProxyModelId (providerType modelId : String) : String :=
