@@ -77,8 +77,16 @@ export const getBitwardenStatus = () =>
 export const updateBitwardenConfig = (payload: UpdateBitwardenConfigPayload) =>
   signedApi<BitwardenStatus>("PUT", "/api/bitwarden/config", payload, "change the Bitwarden connection");
 
-export const listBitwardenProjects = () =>
-  api<BitwardenProject[]>("/api/bitwarden/projects");
+/** Core answers `{projects: [...]}` (with `error` on failure); older servers answer a bare array. */
+const listOf = <T>(raw: unknown, field: string): T[] => {
+  if (Array.isArray(raw)) return raw as T[];
+  const obj = (raw ?? {}) as Record<string, unknown>;
+  if (typeof obj.error === "string" && obj.error) throw new Error(obj.error);
+  return Array.isArray(obj[field]) ? (obj[field] as T[]) : [];
+};
+
+export const listBitwardenProjects = async () =>
+  listOf<BitwardenProject>(await api<unknown>("/api/bitwarden/projects"), "projects");
 
 export const listBitwardenSecrets = (projectId: string) =>
   api<BitwardenSecretSummary[]>(
@@ -191,8 +199,8 @@ export interface SecretBrokerSnapshot {
   audit: SecretAuditEntry[];
 }
 
-export const listAllBitwardenSecrets = () =>
-  api<BitwardenSecretWithProject[]>("/api/bitwarden/secrets");
+export const listAllBitwardenSecrets = async () =>
+  listOf<BitwardenSecretWithProject>(await api<unknown>("/api/bitwarden/secrets"), "secrets");
 
 export const getSecretBroker = () =>
   api<SecretBrokerSnapshot>("/api/bitwarden/broker");

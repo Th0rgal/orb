@@ -128,6 +128,21 @@ def run : IO Unit := do
       check (((flat served).splitOn "\"served_models\":[{\"requested_model\":\"smart\",\"effective_model\":\"glm-5.3\",\"provider\":\"zai\",\"requests\":1}]").length == 2)
         s!"the mission reports the model that served it: {served}"
 
+      -- `get_mission_events` pages from the newest event unless a cursor says otherwise.
+      for i in [0:5] do
+        discard <| appendMissionEvent store "m-tools" "assistant_message" s!"\{\"content\":\"reply-{i}\"}" "t2"
+      let evPage := fun (extra : Array (String × JVal)) =>
+        OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+          "get_mission_events" (.obj (#[("mission_id", .str "m-tools"), ("limit", JVal.uint64 2)] ++ extra)) 4000000000
+      let newest := flat (← evPage #[])
+      check ((newest.splitOn "reply-4").length == 2 && (newest.splitOn "reply-3").length == 2 &&
+             (newest.splitOn "reply-2").length == 1) s!"no cursor returns the newest page: {newest}"
+      let maxSeq := ((flat (← evPage #[])).splitOn "\"max_seq\":")[1]? |>.bind (fun s => (s.takeWhile Char.isDigit).toString.toNat?) |>.getD 0
+      let back := flat (← evPage #[("before_seq", JVal.uint64 (maxSeq - 1).toUInt64)])
+      check ((back.splitOn "reply-2").length == 2 && (back.splitOn "reply-4").length == 1) s!"before_seq pages backwards: {back}"
+      let fwd := flat (← evPage #[("since_seq", JVal.uint64 (maxSeq - 1).toUInt64)])
+      check ((fwd.splitOn "reply-4").length == 2 && (fwd.splitOn "reply-3").length == 1) s!"since_seq returns newer events: {fwd}"
+
       -- Library skills reach a node workspace in the directory each harness reads.
       IO.FS.createDirAll s!"{root}/library/skills/lean-audit"
       IO.FS.writeFile s!"{root}/library/skills/lean-audit/SKILL.md" "---\nname: lean-audit\n---\nAudit it's \"proofs\".\n"
