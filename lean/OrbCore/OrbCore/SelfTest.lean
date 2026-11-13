@@ -17,6 +17,7 @@ import OrbCore.ManagedProviderAvailabilityTests
 import OrbCore.ManagedSpawnActionsTests
 import OrbCore.ManagedProvisioningTests
 import OrbCore.ManagedResumeTests
+import OrbCore.WakeupRestartTests
 import OrbCore.ManagedAccessTests
 import OrbCore.ManagedTtlTests
 import OrbCore.ManagedHarvestTests
@@ -6266,6 +6267,11 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
 set_option maxHeartbeats 800000 in
 set_option maxRecDepth 4000 in
 def runSuite (emitLogPath? : Option String) : IO UInt32 := do
+  try
+    OrbCore.WakeupRestartTests.run
+  catch e =>
+    IO.eprintln s!"[orb-core-test] FAIL: {e}"
+    return 1
   -- Wire compatibility regressions run before the broader integration suite.
   try
     OrbCore.ProviderContractTests.run

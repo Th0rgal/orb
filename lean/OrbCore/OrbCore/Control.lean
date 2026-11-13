@@ -6698,6 +6698,9 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
         IO.eprintln s!"[sandboxed-sh] FATAL: failed to bind {bindHost}:{cfg.port}"
         return 1
     remoteSup.boundPortRef.set boundPort
+    let lostTurns ← interruptTurnsLostToRestart store.missionsDb
+    if lostTurns > 0 then
+      IO.eprintln s!"[sandboxed-sh] {lostTurns} mission turn(s) lost to the restart marked interrupted"
     -- Only the process that owns the port fences receipts a previous process left
     -- open: such a spawn cannot be resumed or safely replayed.
     if let .error e ← ManagedSpawnActions.fenceInterrupted store then
@@ -6710,11 +6713,18 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
           | .ok _ => return true
           | .error _ => return false
       discard <| IO.asTask (prio := .dedicated) do
-        let reattached ← reattachActiveRemoteJobsOnStartup store (some managedStore) (some relayHub) (some broadcastHub) remoteSup cfg.workingDir
-        if reattached > 0 then
-          IO.eprintln s!"[sandboxed-sh] re-attached {reattached} active remote-node job(s)"
+        -- An error in one pass must never end the scheduler for the life of the process.
+        try
+          let reattached ← reattachActiveRemoteJobsOnStartup store (some managedStore) (some relayHub) (some broadcastHub) remoteSup cfg.workingDir
+          if reattached > 0 then
+            IO.eprintln s!"[sandboxed-sh] re-attached {reattached} active remote-node job(s)"
+        catch e =>
+          IO.eprintln s!"[sandboxed-sh] remote job re-attach failed: {e}"
         while true do
-          discard <| tickContinuationScheduler store (some managedStore) (some relayHub) (some broadcastHub) remoteSup (some warmMgr) cfg.workingDir (some localWakeupLaunch)
+          try
+            discard <| tickContinuationScheduler store (some managedStore) (some relayHub) (some broadcastHub) remoteSup (some warmMgr) cfg.workingDir (some localWakeupLaunch)
+          catch e =>
+            IO.eprintln s!"[sandboxed-sh] wake-up scheduler pass failed: {e}"
           IO.sleep 2000
       discard <| IO.asTask (prio := .dedicated) do
         let mut lastInventory : UInt64 := 0

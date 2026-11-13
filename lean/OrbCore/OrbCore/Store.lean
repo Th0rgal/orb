@@ -1414,6 +1414,20 @@ def execParamQueryUnlocked (db : SqliteDb) (sql : String) (params : Array String
 def execParamQuery (db : SqliteDb) (sql : String) (params : Array String) : IO (Except String (Array (Array String))) :=
   db.mu.atomically (sqliteQueryRowsRaw db.handle sql params)
 
+/-- Server start only (after the listen socket is bound, before any turn is launched):
+    a mission still `active` with no surviving run belonged to a previous Core process.
+    Left `active` it would look busy forever and its armed wake-up would never be
+    admitted. `interrupted` is truthful and resumable. Never call this from a CLI or
+    a second process: there, `active` local turns are owned by the running server. -/
+def interruptTurnsLostToRestart (mDb : SqliteDb) : IO Nat := do
+  let res ← execParamQuery mDb
+    ("UPDATE missions SET status='interrupted',terminal_reason='core_restarted',state_revision=state_revision+1 " ++
+     "WHERE status='active' AND COALESCE(placement_kind,'')<>'client' AND NOT EXISTS " ++
+     "(SELECT 1 FROM mission_runs r WHERE r.mission_id=missions.id AND r.execution_state<>'terminal') RETURNING id;") #[]
+  match res with
+  | .ok rows => return rows.size - 1
+  | .error _ => return 0
+
 /-- Execute `act` inside an atomic, mutex-serialized `BEGIN IMMEDIATE ... COMMIT` SQLite write transaction. -/
 def withImmediateTx {α : Type} (db : SqliteDb) (act : IO (Except String α)) : IO (Except String α) :=
   db.mu.atomically do
