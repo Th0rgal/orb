@@ -40,6 +40,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if ! command -v turbo-lean >/dev/null 2>&1 || ! turbo-lean --no-telemetry --help >/dev/null; then
+  echo "error: install turbo-lean at revision $(<"$ROOT_DIR/lean/turbo-lean-revision"); no Lake fallback is permitted" >&2
+  exit 1
+fi
+
 if [[ -z "${LEAN_CC:-}" && ( -n "${NIX_CC:-}" || -e /etc/NIXOS ) ]]; then
   if command -v clang >/dev/null 2>&1; then
     export LEAN_CC="$(command -v clang)"
@@ -236,20 +241,24 @@ run_lean_pkg_build() {
   ensure_lean_sys_pkg "$pkg_dir"
   (
     cd "$pkg_dir"
-    if [[ "${ORB_SKIP_TURBO_LEAN:-0}" != "1" ]] && command -v turbo-lean >/dev/null 2>&1; then
-      local -a tl_flags=(--no-telemetry --max-memory-mb "${ORB_TURBO_LEAN_MAX_MB:-6144}")
-      if [[ "${TURBO_LEAN_NO_DAEMON:-0}" == "1" ]]; then
-        tl_flags+=(--no-daemon)
-      fi
-      if [[ -n "${TURBO_LEAN_HOME:-}" ]]; then
-        tl_flags+=(--cache-dir "${TURBO_LEAN_HOME}")
-      fi
-      RAYON_NUM_THREADS="${ORB_TURBO_LEAN_JOBS:-2}" TURBO_LEAN_EMIT_C=1 \
-        turbo-lean "${tl_flags[@]}" build "$@" \
-        || SANDBOXED_ALLOW_RAW_LAKE=1 lake build "$@" -- -DwarningAsError=true
-    else
-      SANDBOXED_ALLOW_RAW_LAKE=1 lake build "$@" -- -DwarningAsError=true
+    local target output
+    for target in "$@"; do
+      case "$target" in
+        lean-mesh-cli) output=lean-mesh ;;
+        orb-node) output=sandboxed-node ;;
+        *) output="$target" ;;
+      esac
+      rm -f -- ".lake/build/bin/$output"
+    done
+    local -a tl_flags=(--no-telemetry --max-memory-mb "${ORB_TURBO_LEAN_MAX_MB:-6144}")
+    if [[ "${TURBO_LEAN_NO_DAEMON:-0}" == "1" ]]; then
+      tl_flags+=(--no-daemon)
     fi
+    if [[ -n "${TURBO_LEAN_HOME:-}" ]]; then
+      tl_flags+=(--cache-dir "${TURBO_LEAN_HOME}")
+    fi
+    RAYON_NUM_THREADS="${ORB_TURBO_LEAN_JOBS:-2}" TURBO_LEAN_EMIT_C=1 \
+      turbo-lean "${tl_flags[@]}" build "$@"
   )
 }
 
@@ -281,8 +290,7 @@ if [[ ${#ORB_DESKTOP_TARGETS[@]} -gt 0 ]]; then
         export LIBRARY_PATH="$lean_prefix/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
       fi
     fi
-    RAYON_NUM_THREADS="${ORB_TURBO_LEAN_JOBS:-2}" TURBO_LEAN_EMIT_C=1 \
-      turbo-lean --max-memory-mb "${ORB_TURBO_LEAN_MAX_MB:-6144}" build "${ORB_DESKTOP_TARGETS[@]}"
+    run_lean_pkg_build "$ROOT_DIR/lean/OrbDesktop" "${ORB_DESKTOP_TARGETS[@]}"
   )
 fi
 
