@@ -176,6 +176,20 @@ sessions act for Thomas as admin; mission authority stays lineage-only. Dev depl
   Orb unit failed because effort.test.ts scanned the old Control definition. Updated it to scan
   shared MissionSettings and grouped Lean match arms. No node/npm/pnpm installed locally, so
   focused Vitest could not run; await CI for this test-only correction before merge.
+  Current pushed head f27fdaed3: Orb unit now passes, Core Test/kernel-abi still pending at
+  last check. Independent source review found three gaps; UNCOMMITTED fixes/tests now in
+  Control, Managed, ManagedProvisioning, ManagedResumeTests, ManagedTtlTests,
+  RemoteFleetAndRelay: replay completed/pending resume intents before provider calls; normalize
+  confirmed stopped phase-zero machines; include all-destroyed Boat fleet in maintenance even
+  when disabled, remembering confirmed-missing destroyed records to avoid repeated scans.
+  Follow-up fixes now pass CI-parity build (299 jobs) and full Core self-test
+  (11 spec gates, 10 harness contracts, 101 host tests); log reviewfix-selftest.log under
+  /tmp/opencode/boat-recovery. Fixed missing sandboxName fields in the added test fixture.
+  Commit/push corrections, then wait for new exact-head CI before merge.
+  Background-build survival exploration found a wider ownership boundary: PrivdMain around862
+  also stops completed scopes and Runner cancel around2071 ignores terminal jobs. Safe fix needs
+  reparent-safe process ownership/supervision across both paths, not just skipping normal cleanup.
+  No node code edited yet.
   Sections below describe the original handoff; implemented items are now in these commits.
 - Uncommitted `MissionSettings.lean` shares validation and persistence between REST settings and
   MCP. Actual backend changes clear `session_id`/`resumable`; model-only and same-backend changes

@@ -6739,6 +6739,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
           IO.sleep 2000
       discard <| IO.asTask (prio := .dedicated) do
         let mut lastInventory : UInt64 := 0
+        let mut checkedDestroyed : Array String := #[]
         let mut lastSampledMinute : UInt64 := 0
         while true do
           let cached ← managedRef.get
@@ -6755,11 +6756,16 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
               let reaped := ((report.fieldArr? "reaped").getD #[]).size
               if reaped > 0 then IO.eprintln s!"[orb-core] verified expiry cleanup for {reaped} managed lease(s)"
           if observedAt ≥ lastInventory + 120 &&
-              (cached.boatEnabled || cached.machines.any (fun m => canonicalizeProvider m.provider == "boat" && m.status != "destroyed")) then
+              boatInventoryNeeded cached checkedDestroyed then
             lastInventory := observedAt
             match ← reconcileConfiguredBoatInventory managedStore store.rootDir observedAt with
             | .error e => IO.eprintln s!"[orb-core] Boat inventory reconciliation deferred: {e}"
             | .ok report =>
+              let missing := (report.fieldArr? "missing").getD #[]
+              let closedRecords := (report.fieldArr? "closed").getD #[]
+              checkedDestroyed := cached.machines.filterMap (fun m =>
+                if canonicalizeProvider m.provider == "boat" && m.status == "destroyed" &&
+                    (missing.contains (.str m.id) || closedRecords.contains (.str m.id)) then some m.id else none)
               let bound := ((report.fieldArr? "backfilled").getD #[]).size
               let stopped := ((report.fieldArr? "stopped").getD #[]).size
               let closed := ((report.fieldArr? "closed").getD #[]).size

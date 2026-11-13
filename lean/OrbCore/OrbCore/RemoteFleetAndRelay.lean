@@ -1060,6 +1060,10 @@ def reconcileManagedProviderInventory (mc : ManagedComputeStore) (providerName s
   return .ok (.obj #[("backfilled", .arr backfilled), ("stopped", .arr stopped),
     ("closed", .arr closed), ("ambiguous", .arr ambiguous), ("missing", .arr missing)])
 
+def boatInventoryNeeded (fleet : ManagedFleetState) (checkedDestroyed : Array String) : Bool :=
+  fleet.boatEnabled || fleet.machines.any (fun m => canonicalizeProvider m.provider == "boat" &&
+    (m.status != "destroyed" || !checkedDestroyed.contains m.id))
+
 def reconcileConfiguredBoatInventory (mc : ManagedComputeStore) (dataRoot : String)
     (nowEpoch : UInt64) (override? : Option ManagedProvider.Provider := none) : IO (Except String JVal) := do
   let provider ← match override? with
@@ -1122,6 +1126,19 @@ def runConfiguredManagedLifecycle (mc : ManagedComputeStore) (ctx : ManagedLifec
     (machineId action : String) (nowEpoch : UInt64) (args : JVal := .obj #[])
     (retryKey : String := "") : IO (Except String JVal) := do
   let some (m, slice) ← getManagedMachine? mc machineId | return .error "managed_machine_missing"
+  let ttl := (args.fieldUInt64? "ttl_minutes").getD 60
+  let resumeKey ← if action == "resume" then do
+      let rawKey ← if !retryKey.isEmpty then pure retryKey else
+        match (args.fieldStr? "idempotency_key").filter (!·.isEmpty) with
+        | some key => pure key
+        | none => newUuidV4
+      pure (bytesToHexLower (sha256Bytes (renderCompact (.arr #[.str "managed-resume", .str m.id, .str m.ownerUserId, .str rawKey])).toUTF8))
+    else pure ""
+  if action == "resume" then
+    match ← ManagedProvisioning.replayManagedResume mc machineId resumeKey ttl with
+    | .error e => return .error e
+    | .ok (some current) => return .ok (managedLifecycleResult current)
+    | .ok none => pure ()
   let provider ← match ctx.override? with
     | some pair => pure pair.1
     | none => do
@@ -1179,13 +1196,7 @@ def runConfiguredManagedLifecycle (mc : ManagedComputeStore) (ctx : ManagedLifec
         ctx.fleet.dailyCapCents ctx.fleet.spentTodayCents ctx.fleet.maxConcurrent with
       | .ok f => pure f
       | .error e => return .error e
-    let rawKey ← if !retryKey.isEmpty then pure retryKey else
-      match (args.fieldStr? "idempotency_key").filter (!·.isEmpty) with
-      | some key => pure key
-      | none => newUuidV4
-    let key := bytesToHexLower (sha256Bytes (renderCompact (.arr #[.str "managed-resume", .str m.id, .str m.ownerUserId, .str rawKey])).toUTF8)
-    let ttl := (args.fieldUInt64? "ttl_minutes").getD 60
-    match ← ManagedProvisioning.resumeManagedWorker mc fleet m.id key ttl provider bootstrap {} budget with
+    match ← ManagedProvisioning.resumeManagedWorker mc fleet m.id resumeKey ttl provider bootstrap {} budget with
     | .error e => return .error e
     | .ok ready => return .ok (managedLifecycleResult ready)
   let op ← if action == "stop" then pure (Orb.ManagedNode.VmOp.encode .stop)

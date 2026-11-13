@@ -95,6 +95,57 @@ private def runInventoryTests (root : String) : IO Unit := do
     check (!(← applyProviderObservation mc stale now 0 1).isOk) "stale source observations cannot stop the successor"
     let some (stillReady, _) ← getManagedMachine? mc current.id | throw (IO.userError "successor missing")
     check (stillReady.status == "ready" && stillReady.nodeBootEpoch == 2) "reconciliation preserves the live successor"
+    let replayCalls ← IO.mkRef (0 : Nat)
+    for failing in #[true, false] do
+      let replayProvider := { provider with
+        get := fun id => do
+          replayCalls.modify (· + 1)
+          if failing then return .error { code := "provider_unavailable", status := 503 }
+          return .ok { providerId := id, state := "archived" }
+        resume := fun _ _ => do
+          replayCalls.modify (· + 1)
+          return .error { code := "unexpected_resume", status := 503 }
+      }
+      let replayCtx := { ctx with override? := some (replayProvider,
+        { coreUrl := "https://core.example", script := "#!/bin/sh\nexit 0\n" }) }
+      let .ok replayed ← OrbCore.RemoteFleetAndRelay.runConfiguredManagedLifecycle mc replayCtx current.id "resume" now
+          (.obj #[("ttl_minutes", .nat 5)]) "restore-existing-boat"
+        | throw (IO.userError "completed wrapper replay failed")
+      check (replayed.fieldStr? "state" == some "ready" && (← replayCalls.get) == 0)
+        "completed wrapper replay ignores provider failure and archived successor payload"
+      check (!(← OrbCore.RemoteFleetAndRelay.runConfiguredManagedLifecycle mc replayCtx current.id "resume" now
+        (.obj #[("ttl_minutes", .nat 10)]) "restore-existing-boat").isOk && (← replayCalls.get) == 0)
+        "wrapper TTL conflict precedes provider observation"
+    let .ok _ ← applyVmLifecycle mc current.id {
+      opCode := VmOp.encode .stop, ownerLive := 0, idleElapsed := 0, presentedBootEpoch := 2, nowEpoch := now
+    } | throw (IO.userError "pending wrapper stop failed")
+    let pendingKey := LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes
+      (OrbBin.Json.renderCompact (.arr #[.str "managed-resume", .str current.id, .str current.ownerUserId,
+        .str "pending-wrapper"])).toUTF8)
+    let .ok _ ← prepareManagedResume mc fleet current.id pendingKey "pending-wrapper-token" 5 1 now (now + 360)
+      | throw (IO.userError "pending wrapper prepare failed")
+    let .ok () ← bindManagedResumeProvider mc pendingKey "pending-wrapper-child"
+      | throw (IO.userError "pending wrapper binding failed")
+    for failing in #[true, false] do
+      let replayProvider := { provider with
+        get := fun id => do
+          replayCalls.modify (· + 1)
+          if failing then return .error { code := "provider_unavailable", status := 503 }
+          return .ok { providerId := id, state := "archived" }
+      }
+      let replayCtx := { ctx with override? := some (replayProvider,
+        { coreUrl := "https://core.example", script := "#!/bin/sh\nexit 0\n" }) }
+      let outcome ← OrbCore.RemoteFleetAndRelay.runConfiguredManagedLifecycle mc replayCtx current.id "resume" now
+        (.obj #[("ttl_minutes", .nat 5)]) "pending-wrapper"
+      check (match outcome with | .error e => e == "managed_resume_pending:" ++ pendingKey | _ => false)
+        "pending wrapper returns durable pending outcome"
+      let some (unchanged, unchangedSlice) ← getManagedMachine? mc current.id
+        | throw (IO.userError "pending wrapper machine missing")
+      let .ok (some pendingIntent) ← getManagedResumeIntent? mc pendingKey
+        | throw (IO.userError "pending wrapper intent missing")
+      check ((← replayCalls.get) == 0 && unchanged.providerId == "pending-wrapper-child" &&
+        unchanged.nodeBootEpoch == 2 && unchangedSlice.phaseCode == 2 && pendingIntent.state == "pending")
+        "pending replay never observes or mutates the successor"
 
     let actualId := "a6fed7e9-950b-40e8-ad83-4c599ceee4b4"
     let seedDestroyed (id providerId : String) : IO Unit := do
@@ -104,6 +155,15 @@ private def runInventoryTests (root : String) : IO Unit := do
           #[id, providerId] | throw (IO.userError "destroyed fixture failed")
       let .ok () ← putEnrollmentToken mc id "stale-enrollment" | throw (IO.userError "stale fixture failed")
     seedDestroyed actualId "bx_xcew9qru"
+    let destroyedFleet : ManagedFleetState := { machines := #[{
+      id := actualId, sandboxName := prefixName ++ actualId, provider := "boat", status := "destroyed", providerId := "bx_xcew9qru"
+    }] }
+    check (OrbCore.RemoteFleetAndRelay.boatInventoryNeeded destroyedFleet #[] &&
+      !OrbCore.RemoteFleetAndRelay.boatInventoryNeeded destroyedFleet #[actualId] &&
+      OrbCore.RemoteFleetAndRelay.boatInventoryNeeded { destroyedFleet with boatEnabled := true } #[actualId] &&
+      OrbCore.RemoteFleetAndRelay.boatInventoryNeeded
+        { destroyedFleet with machines := destroyedFleet.machines.push { id := "new-destroyed", sandboxName := prefixName ++ "new-destroyed", provider := "boat", status := "destroyed" } }
+        #[actualId]) "disabled Boat checks destroyed records once and discovers newly destroyed records"
     check (!(← prepareManagedResume mc fleet actualId "unobserved" "new-token" 5 1 now (now + 360)).isOk)
       "destroyed resume requires provider observation"
     let retained : OrbCore.ManagedProvider.Machine := {

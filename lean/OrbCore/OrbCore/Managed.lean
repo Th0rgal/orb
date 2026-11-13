@@ -1427,12 +1427,14 @@ def observeProviderPayload (provider machineId : String) (httpStatus : Nat) (pay
       retainedArchived := prov == "boat" && rawState == "archived"
     }
 
-private def repairRetainedArchive (st : ManagedComputeStore) (obs : ProviderObservation) :
+private def repairProviderStopped (st : ManagedComputeStore) (obs : ProviderObservation) :
     IO (Except String (List VmEffect)) :=
   withImmediateTx st.db do
     let .ok (some (m, slice)) ← selectMachineTx st.db obs.machineId
       | return .error "managed_machine_missing"
-    if m.provider != "boat" || !obs.retainedArchived || obs.observedStatus != "stopped" || obs.orphaned ||
+    if canonicalizeProvider m.provider != canonicalizeProvider obs.provider ||
+        obs.observedStatus != "stopped" || obs.orphaned ||
+        (slice.phaseCode == 3 && (m.provider != "boat" || !obs.retainedArchived)) ||
         obs.expectedProviderId? != some m.providerId || m.providerId.isEmpty then
       return .error "stale_provider_identity"
     if obs.expectedBootEpoch? != some slice.nodeBootEpoch then return .error "stale_boot_epoch"
@@ -1462,8 +1464,8 @@ def applyProviderObservation (st : ManagedComputeStore) (obs : ProviderObservati
     if let some expected := obs.expectedProviderId? then
       if expected != cell rows[1]! 2 then return .error "stale_provider_identity"
     if boot != cellU64 rows[1]! 0 then return .error "stale_boot_epoch"
-    if obs.retainedArchived && (phase == 0 || phase == 3) then
-      return ← repairRetainedArchive st obs
+    if obs.observedStatus == "stopped" && (phase == 0 || (obs.retainedArchived && phase == 3)) then
+      return ← repairProviderStopped st obs
     if (obs.orphaned && phase == 3) || (obs.observedStatus == "stopped" && phase == 2) then
       return .ok []
     if obs.orphaned then
