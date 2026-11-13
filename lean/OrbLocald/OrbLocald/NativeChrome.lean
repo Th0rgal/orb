@@ -1,5 +1,6 @@
 import LeanSys
 import Orb.Kernel
+import OrbDesktop.State
 import OrbBin.Json
 import Std.Data.HashMap
 
@@ -1471,5 +1472,26 @@ def NativeChromeHub.toggleExpand
   let updated := { cur with expandedIds := nextExpandedIds, collapsedIds := nextCollapsedIds, viewRevision := nextViewRev }
   let nextHub := { hub with scopes := hub.scopes.set! idx updated }
   some (nextExpanded, updated, nextHub)
+
+/-- Convert a projected `OrbLocald.NativeChrome.SidebarRow` into an `OrbDesktop.ChromeSidebarRow`. -/
+@[inline]
+def SidebarRow.toDesktopSidebarRow (widgetId : LeanUI.WidgetId) (r : SidebarRow) : OrbDesktop.ChromeSidebarRow :=
+  { widgetId := widgetId
+    rowId := r.rowId
+    kind := r.kind
+    depth := r.depth
+    title := r.title
+    subtitle := r.subtitle
+    status := r.status
+    shortcut := r.shortcut
+    badge := r.badge
+    selected := r.selected
+    attention := r.attention }
+
+/-- Project `ChromeScopeState` sidebar rows directly into `OrbDesktop.ChromeSidebarRow` list (`baseWidgetId + idx`). -/
+def projectDesktopSidebarRows (st : ChromeScopeState) (baseWidgetId : LeanUI.WidgetId := 100) :
+    List OrbDesktop.ChromeSidebarRow :=
+  (projectSidebarRows st).toList.mapIdx fun idx r =>
+    r.toDesktopSidebarRow (baseWidgetId + idx)
 
 end OrbLocald.NativeChrome

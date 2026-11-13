@@ -8,6 +8,8 @@ package «orb-client» where
     ⟨`warningAsError, true⟩
   ]
 
+require «orb-spec» from ".."
+
 @[default_target]
 lean_lib «OrbClient» where
   roots := #[`OrbClient]

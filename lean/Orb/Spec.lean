@@ -12408,15 +12408,15 @@ private theorem lo32_mask256_eq (a : UInt32) :
   rw [h1, h2]
   simp [UInt32.toBitVec_toUInt64, BitVec.getLsbD_setWidth]
 
-private theorem followup_lo32_admit_bit (reason : UInt32) (admit live ret : Bool)
+private theorem followup_lo32_admit_bit (reason : UInt32) (admitted live ret : Bool)
     (hr : reason == 0 || reason == 1 || reason == 2 || reason == 3 || reason == 4 || reason == 5) :
-    (((reason ||| (if admit then (256 : UInt32) else 0) |||
+    (((reason ||| (if admitted then (256 : UInt32) else 0) |||
         (if live then (512 : UInt32) else 0) |||
-        (if ret then (1024 : UInt32) else 0)) &&& 256) != 0) = admit := by
+        (if ret then (1024 : UInt32) else 0)) &&& 256) != 0) = admitted := by
   rcases (by simpa [Bool.or_eq_true, beq_iff_eq] using hr :
     (((((reason = 0 ∨ reason = 1) ∨ reason = 2) ∨ reason = 3) ∨ reason = 4) ∨ reason = 5)) with
     ((((rfl | rfl) | rfl) | rfl) | rfl) | rfl <;>
-    cases admit <;>
+    cases admitted <;>
     cases live <;>
     cases ret <;>
     decide

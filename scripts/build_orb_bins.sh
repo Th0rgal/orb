@@ -166,6 +166,7 @@ ORB_BIN_TARGETS=()
 ORB_NODE_TARGETS=()
 ORB_CORE_TARGETS=()
 ORB_LOCALD_TARGETS=()
+ORB_DESKTOP_TARGETS=()
 for bin in "${BINS_TO_STAGE[@]}"; do
   if [[ "$bin" == "sandboxed-node" ]]; then
     ORB_NODE_TARGETS+=("orb-node")
@@ -175,6 +176,8 @@ for bin in "${BINS_TO_STAGE[@]}"; do
     ORB_CORE_TARGETS+=("$bin")
   elif [[ "$bin" == "orb-locald" || "$bin" == "orb-locald-test" ]]; then
     ORB_LOCALD_TARGETS+=("$bin")
+  elif [[ "$bin" == "orb-desktop" || "$bin" == "lean-ui-canary" ]]; then
+    ORB_DESKTOP_TARGETS+=("$bin")
   elif [[ "$bin" == "lean-mesh" ]]; then
     ORB_BIN_TARGETS+=("lean-mesh-cli")
   else
@@ -266,11 +269,32 @@ if [[ ${#ORB_LOCALD_TARGETS[@]} -gt 0 ]]; then
   run_lean_pkg_build "$ROOT_DIR/lean/OrbLocald" "${ORB_LOCALD_TARGETS[@]}"
 fi
 
+if [[ ${#ORB_DESKTOP_TARGETS[@]} -gt 0 ]]; then
+  (
+    cd "$ROOT_DIR/lean"
+    if [[ -z "${LEAN_CC:-}" && -x /usr/bin/clang ]]; then
+      export LEAN_CC=/usr/bin/clang
+    fi
+    if command -v lean >/dev/null 2>&1; then
+      lean_prefix="$(lean --print-prefix 2>/dev/null || true)"
+      if [[ -n "$lean_prefix" && -d "$lean_prefix/lib" ]]; then
+        export LIBRARY_PATH="$lean_prefix/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+      fi
+    fi
+    if [[ "${ORB_SKIP_TURBO_LEAN:-0}" != "1" ]] && command -v turbo-lean >/dev/null 2>&1; then
+      RAYON_NUM_THREADS="${ORB_TURBO_LEAN_JOBS:-2}" TURBO_LEAN_EMIT_C=1 \
+        turbo-lean --no-telemetry --max-memory-mb "${ORB_TURBO_LEAN_MAX_MB:-6144}" build Orb LeanUI LeanUISpec || true
+    fi
+    SANDBOXED_ALLOW_RAW_LAKE=1 lake build "${ORB_DESKTOP_TARGETS[@]}" -- -DwarningAsError=true
+  )
+fi
+
 if [[ ${#OUT_DIRS[@]} -eq 0 ]]; then
   target_base="${CARGO_TARGET_DIR:-$ROOT_DIR/target}"
   OUT_DIRS=("$target_base/debug" "$target_base/release")
 fi
 
+LAKE_ROOT_BIN_DIR="$ROOT_DIR/lean/.lake/build/bin"
 LAKE_BIN_DIR="$ROOT_DIR/lean/OrbBin/.lake/build/bin"
 LAKE_NODE_BIN_DIR="$ROOT_DIR/lean/OrbNode/.lake/build/bin"
 LAKE_CORE_BIN_DIR="$ROOT_DIR/lean/OrbCore/.lake/build/bin"
@@ -284,6 +308,8 @@ for out_dir in "${OUT_DIRS[@]}"; do
       src="$LAKE_CORE_BIN_DIR/$bin"
     elif [[ "$bin" == "orb-locald" || "$bin" == "orb-locald-test" ]]; then
       src="$LAKE_LOCALD_BIN_DIR/$bin"
+    elif [[ "$bin" == "orb-desktop" || "$bin" == "lean-ui-canary" ]]; then
+      src="$LAKE_ROOT_BIN_DIR/$bin"
     else
       src="$LAKE_BIN_DIR/$bin"
     fi

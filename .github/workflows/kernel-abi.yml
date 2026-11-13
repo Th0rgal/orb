@@ -241,15 +241,15 @@ jobs:
           core_c_lines=$(wc -l < lean/OrbCore/c/orb_core_sqlite.c)
           echo "orb_core_sqlite.c LOC: $core_c_lines"
           test "$core_c_lines" -le 220
-          shell_c_lines=$(wc -l < linux_shell/main.c)
-          echo "linux_shell/main.c LOC: $shell_c_lines"
-          test "$shell_c_lines" -le 220
-          gtk_c_lines=$(wc -l < linux_shell/gtk_chrome.c)
-          echo "linux_shell/gtk_chrome.c LOC: $gtk_c_lines"
-          test "$gtk_c_lines" -le 220
-          gtk_ic_lines=$(wc -l < linux_shell/gtk_icons.c)
-          echo "linux_shell/gtk_icons.c LOC: $gtk_ic_lines"
-          test "$gtk_ic_lines" -le 220
+          wl_c_lines=$(wc -l < c/lean_ui_wayland.c)
+          echo "c/lean_ui_wayland.c LOC: $wl_c_lines"
+          test "$wl_c_lines" -le 220
+          tx_c_lines=$(wc -l < c/lean_ui_text.c)
+          echo "c/lean_ui_text.c LOC: $tx_c_lines"
+          test "$tx_c_lines" -le 220
+          vk_c_lines=$(wc -l < c/lean_ui_vulkan.c)
+          echo "c/lean_ui_vulkan.c LOC: $vk_c_lines"
+          test "$vk_c_lines" -le 220
           ./scripts/build_orb_bins.sh --out-dir target/debug
           (cd lean/OrbBin && lake build orb-bin-test -- -DwarningAsError=true && ./.lake/build/bin/orb-bin-test)
           (cd lean/OrbNode && lake build orb-node-test -- -DwarningAsError=true && ./.lake/build/bin/orb-node-test)

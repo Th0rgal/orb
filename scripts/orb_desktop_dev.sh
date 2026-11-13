@@ -148,7 +148,7 @@ if [[ "$OS_NAME" == "Linux" && -e /etc/NIXOS ]]; then
     done
     return 1
   }
-  if [[ -z "${ORB_IN_NIX_SHELL:-}" ]] && { ! command -v pnpm >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1 || ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists webkit2gtk-4.1 2>/dev/null || ! has_gio_tls_module; }; then
+  if [[ -z "${ORB_IN_NIX_SHELL:-}" ]] && { ! command -v pnpm >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1 || ! command -v pkg-config >/dev/null 2>&1; }; then
     echo "==> Entering nix develop environment for $ROOT_DIR..."
     exec nix develop "$ROOT_DIR" -c env ORB_IN_NIX_SHELL=1 "$ROOT_DIR/scripts/orb_desktop_dev.sh" "${ORIG_ARGS[@]}"
   fi
@@ -280,9 +280,9 @@ if [[ "$OS_NAME" == "Darwin" ]]; then
     python3 "$ROOT_DIR/orb/scripts/build-signer.py"
   fi
 elif [[ "$OS_NAME" == "Linux" ]]; then
-  if [[ "$FORCE_REBUILD" == "1" || "$MODE" == "bundle" || ! -x "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/linux_shell/main.c" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/linux_shell/gtk_chrome.c" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/linux_shell/gtk_chrome.h" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/linux_shell/Makefile" -nt "$STAGE_BIN_DIR/orb" ]]; then
+  if [[ "$FORCE_REBUILD" == "1" || "$MODE" == "bundle" || ! -x "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/c/lean_ui_wayland.c" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/c/lean_ui_text.c" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/c/lean_ui_vulkan.c" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/c/lean_ui.h" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/linux_shell/Makefile" -nt "$STAGE_BIN_DIR/orb" ]]; then
     notify_gui_build
-    echo "==> Compiling native linux_shell..."
+    echo "==> Compiling native lean-ui orb-desktop..."
     make -C "$ROOT_DIR/linux_shell"
     install -m 0755 "$ROOT_DIR/linux_shell/orb-desktop" "$STAGE_BIN_DIR/orb"
   fi
