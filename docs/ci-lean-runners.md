@@ -13,14 +13,16 @@ After the controller and scheduling security prerequisite are reviewed, deployed
 and verified, set repository Actions variable `ORB_LEAN_RUNNERS` to exactly
 `true`. Linux jobs use `lean-16vcpu-ubuntu-2604`, with Test and Kernel ABI using
 `lean-32vcpu-ubuntu-2604`; the Kernel ABI plan job uses 16 vCPU. Every pull request
-(including same-repository PRs) stays on `ubuntu-latest`; macOS and iOS stay on
+(including same-repository PRs) keeps its original hosted label; macOS and iOS stay on
 `macos-26`. Fork repositories also stay hosted, even if they copy the variable.
 This conservative initial rollout only accelerates `push`, `schedule` and
 `workflow_dispatch` on the repository default branch, matching controller admission.
-Tags, release branches and non-default-branch dispatches stay on `ubuntu-latest`;
-all other event types stay hosted. It makes no PR-speedup claim.
+Tags, release branches, non-default-branch dispatches and all other event types
+stay hosted. It makes no PR-speedup claim.
 
-Unset, false, misspelled or other variable values select `ubuntu-latest`.
+Unset, false, misspelled or other variable values preserve each original hosted
+label: `ubuntu-24.04` for orb-browser, orb-performance and orb-desktop-shell;
+`ubuntu-latest` for the other Linux jobs.
 There is no automatic outage fallback: a selected lean runner that is unavailable
 leaves the job queued awaiting a matching runner. To disable, delete the
 repository variable (Settings → Secrets and variables → Actions → Variables),
