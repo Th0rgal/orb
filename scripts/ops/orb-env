@@ -67,14 +67,14 @@ def parse_env(raw):
         raise InvalidConfig("env file must be UTF-8") from None
     result = {}
     for number, line in enumerate(source.split("\n"), 1):
-        line = line.rstrip("\r").strip()
+        line = line.rstrip("\r").strip(" \t")
         if not line or line.startswith(("#", ";")):
             continue
-        match = re.fullmatch(r"([A-Za-z_][A-Za-z_0-9]*)\s*=(.*)", line)
+        match = re.fullmatch(r"([A-Za-z_][A-Za-z_0-9]*)[ \t]*=(.*)", line)
         if not match or any(ord(c) < 32 and c != "\t" for c in line):
             raise InvalidConfig(f"unsupported assignment at line {number}")
         key, value = match.groups()
-        value = value.strip()
+        value = value.strip(" \t")
         if key in result:
             raise InvalidConfig(f"duplicate key {key} at line {number}")
         try:

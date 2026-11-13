@@ -85,6 +85,14 @@ class OrbEnvTest(unittest.TestCase):
         self.assertEqual(env.literal('"a\\q \\$HOME \\"b\\""'), 'a\\q $HOME "b"')
         self.assertEqual(env.literal("a\\ b # literal"), "a b # literal")
 
+    def test_non_ascii_whitespace_in_values_is_preserved(self):
+        value = "\u00a0non-ascii\u00a0"
+        parsed = env.parse_env(f"KEY={value}\n".encode())
+        self.assertEqual(parsed["KEY"], value)
+        self.assertEqual(env.parse_env(env.render(parsed)), parsed)
+        with self.assertRaises(env.InvalidConfig):
+            env.parse_env("KEY\u00a0=value\n".encode())
+
     def test_cli_errors_do_not_disclose_values(self):
         self.dev.write_bytes(self.dev.read_bytes().replace(b"dev-secret", b"prod-secret"))
         stderr = io.StringIO()
