@@ -2805,6 +2805,18 @@ select.orb-select-native:disabled { cursor: default; }
   .btw-sidebar .btw-panel header > div:first-child { display:none; }
   .btw-sidebar .btw-thread { padding-top:4px; }
 }
+/* Narrow windows: the side question never shares the content area with the conversation.
+   It used to float over the right part of the transcript at up to 780px, cutting lines
+   mid-word, with its own controls directly under the conversation header's. It now takes
+   the whole content area below the title bar on an opaque surface. The conversation stays
+   mounted and focusable underneath, so shortcuts that act on it keep working. */
+@media(max-width:1150px) {
+  .app:not([data-files-split="true"]) > .file-panel.btw-sidebar:not(.maximized) { left:var(--sb-w); right:0; width:auto; background:var(--bg); box-shadow:none; }
+  .app.sb-hidden:not([data-files-split="true"]) > .file-panel.btw-sidebar:not(.maximized) { left:0; width:auto; }
+}
+@media(max-width:720px) {
+  .app:not([data-files-split="true"]) > .file-panel.btw-sidebar:not(.maximized) { left:0; }
+}
 .composer.drop-active { border-color:var(--fg-2); background:var(--bg-active); }
 .btw-panel .btw-composer-dock .composer { margin-top:10px; box-shadow:0 4px 18px rgb(0 0 0 / 8%); }
 
