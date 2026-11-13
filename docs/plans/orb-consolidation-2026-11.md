@@ -582,7 +582,7 @@ needs no grant and stays the shortest path.
 - Managed VM `a474d57a` stopped at 23:25Z (disk kept about 24 h). It reached its 12-hour limit at 00:12Z, so a later dev grant needs a successor mission on another node.
 - No deploy request yet: no master tip after `e43a808d` has both CI and Kernel ABI green.
 
-**Update 23:32 UTC.**
+**Update 23:30 UTC.**
 
 - Merged: #1751 as `37541b466009a7b144d966bbb419b9cfa0654f58` (11 checks passed on base `b6afa205`; trial merge with `2b06d8a1` clean, no file changed on both sides, #1745 does not call the functions whose signature #1751 changes). Master CI on `37541b46` is the first combined build.
 - **Sidecar cooldown fields are not observed.** Core (`fetchSidecarAuthFiles`, merged in #1745) reads `cooldowns[].remaining_seconds`, `cooldowns[].retry_at` and `cooldowns[].reason` from CLIProxyAPI `GET /v0/management/auth-files`. Only `remaining_seconds` is also used by `scripts/ops/orb-sidecar-guard`. `retry_at` and `reason` rest on the worker's reading and on test fixtures, not on a live reply. If they are absent, Core falls back to `now + remaining_seconds` and `credential_quota`, so the card stays correct. If they are free text, Core passes them unchanged to members as `parked_until` / `parked_reason`. H-core (`21b1bfca`) has Task 4: accept `reason` only as a short lowercase slug and `retry_at` only as a timestamp-shaped string, branch `wip/h-parked-reason-closed-shape`. No client reads `parked_*` yet.
