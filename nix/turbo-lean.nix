@@ -12,14 +12,15 @@
   git,
   gnutar,
   lld,
+  llvm,
   makeWrapper,
   procps,
   zstd,
   turboLeanSrc ? fetchFromGitHub {
     owner = "Th0rgal";
     repo = "turbo-lean";
-    rev = "f240450af444a302a0e02d5a5f8af00351089386";
-    hash = "sha256-Ovtl0aJsBASBuEk2eZjEF/uVfsDgOW+B3p7XI6DPWs0=";
+    rev = "aee2d179abf12aa2f9140cfec539f9465359d776";
+    hash = "sha256-V9Kq92gqnRe3zk3VaVyynZ25uABTn/U2qg+13nVfPoo=";
   },
   leanToolchain ? null,
 }:
@@ -280,10 +281,15 @@ stdenv.mkDerivation (finalAttrs: {
 
     export HOME="$TMPDIR/home"
     export TURBO_LEAN_HOME="$TMPDIR/turbo-lean-state"
-    "$out/bin/turbo-lean" --version >/dev/null
-    "$out/bin/lean-native" --help >/dev/null
-    (cd lean && "$out/bin/lean-native" audit-axioms >/dev/null)
-    (cd lean && "$out/bin/lean-native" self-test >/dev/null)
+    # Keep each self-check quiet on success but show its output on failure.
+    selfCheck() { "$@" >"$TMPDIR/self-check.log" 2>&1 || { cat "$TMPDIR/self-check.log"; return 1; }; }
+    selfCheck "$out/bin/turbo-lean" --version
+    selfCheck "$out/bin/lean-native" --help
+    (cd lean && selfCheck "$out/bin/lean-native" audit-axioms)
+    # The freestanding 32-bit smoke test cross-compiles with plain `clang` and
+    # inspects objects with `llvm-nm`; the cc-wrapper adds host hardening flags
+    # those targets reject, so put raw clang and LLVM's tools first.
+    (cd lean && PATH="${clang.cc}/bin:${lib.getBin llvm}/bin:$PATH" selfCheck "$out/bin/lean-native" self-test)
 
     runHook postInstall
   '';
