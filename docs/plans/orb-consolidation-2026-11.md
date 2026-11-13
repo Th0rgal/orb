@@ -324,6 +324,71 @@ No questions sent; implement/test generic support against an authorized
 
 ## Operator requests
 
+### Coordinator status 22:15 UTC: master moved to #1747, four pull requests open, one red with a real gap
+
+**Master.** Tip is `33b24769` (#1747, operator). Its `CI` and `Kernel ABI`
+runs were still in progress at 22:08; `989b801a` (#1746) `CI` also still in
+progress, `c0557790` (#1744) `CI` green. No tip after `e43a808d` has been
+seen fully green yet, so **no deploy request in this section**.
+
+**Merged since 18:45.** #1737 (login completion), #1738, #1739, #1740
+(first-event watchdog), #1741 (docs-only push filters), #1742 (member
+provider projection), #1744 (`DELETE /api/control/queue/:id`), #1746
+(copy-selection flake), #1747. #1738, #1739, #1740 and #1747 were merged by
+the operator and not reviewed by the coordinator. None of these is live:
+prod and dev were on `313ec310d` at 19:21, not rechecked since.
+
+**Open pull requests.**
+
+| PR | What | State at 22:08 | Next |
+| --- | --- | --- | --- |
+| #1743 | desktop: a mission that ended keeps no phantom queue; `awaiting_user` is not ended | all green except `kernel-abi` pending | squash-merge on green |
+| #1748 | Core: a cut-off streamed reply is not a clean end; pacing slot held for the whole stream | `Test`, `kernel-abi` pending | squash-merge on green |
+| #1749 | tests: member-minted MCP sessions are refused every `secret_*` tool | just opened | squash-merge on green |
+| #1745 | Core: reduced member views on sibling routes; sidecar parked logins on the health route | **`Test` red** | do not merge, see below |
+
+**#1745 is red for a real reason.** `[orb-core-test] FAIL: tenant isolation:
+member resources overview hides other users' missions, fleet sources and
+inference pools` (check added by operator commit `2fc87261`). Read in the
+code, not run: the member branch of `GET /api/resources/overview` keeps
+missions *shared* with the member, never reduces `links` (pool ids and other
+users' mission ids), and leaves fleet-wide vCPU totals. Correction ordered
+from the H-core worker on `wip/g-overview-member-links` (owner-only missions,
+`links: []`, compute totals zeroed, admin reply unchanged, failing tests
+first), together with a fix of the `orb-sidecar-guard` paragraph in
+`docs/model-routing-health-cooldowns.md`, which describes a restart the
+script never does. Review comment:
+https://github.com/Th0rgal/orb/pull/1745#issuecomment-6866119448. The sidecar
+part of the PR is accepted. **Operator: please do not merge #1745 before
+that correction lands on it.**
+
+**Workers.**
+
+- D2 (uruk): #1748 and #1749 delivered. Now on a bounded follow-up
+  (`wip/d-stream-untilclose-eof`): with close-delimited framing a timeout or
+  read error is still reported as a complete body.
+- C (lagash): silent turn on a cooling chain. First patch not published: it
+  trusted the `x-sandboxed-execution-key` header to pick the mission to
+  stop, so one mission's credential could stop another's turn. Corrections
+  in progress, no patch received yet.
+- H-core (nippur): the #1745 correction above.
+- Red-master worker (VM `a474d57a`, expires 23:42): fixture kernel race.
+  42-file patch plus a ready-promise patch for `approval-queue` and
+  `smooth-send` exist; worker reports 24 passed with and without a 3 s
+  kernel delay for those two. The full two-shard run under the delay is not
+  established (one log partial, one run died on a busy port). Nothing
+  published; master browser shards are green without it.
+- H (VM `7ca70124`, stopped): #1743 delivered.
+
+**Still open, no owner.** Track A / #1708; lean.ci PR #34 fence review
+(interdiff unread, lean runners stay on hold); isolation acceptance and
+managed-lifecycle live validation (need the `dev_operator` grant
+`f0eadef4`); the three operator findings in `core-recovery-2026-11.md`
+166-178; a remote turn whose queued follow-up fails to dispatch stays
+`active` with no run (`RemoteDispatch.lean:1185`). The 19:06 relay "C live
+validation request received for 816f574f" was read as a delayed message;
+nothing was done on it.
+
 ### Coordinator status 18:45 UTC: two fixes merged, queue delete missing in Core, lean runner fence not ready
 
 **Master.** Tip is `eb2791e5` (#1736, merged by the coordinator at 18:31
