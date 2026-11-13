@@ -114,7 +114,7 @@ bounded artifacts and do not rewrite this board.
 | Track | Mission UUID | Managed machine UUID | Owned files/sections and dependency | State / evidence |
 | --- | --- | --- | --- | --- |
 | A | `35cd3390-5a58-4cd7-8444-172a84d5faa8` | `0f88c8f6-084e-46a3-89ad-29aa52d300de` | Build script, turbo-lean pin/upstream soundness fix | RED reported upstream `15676ea`: 24 safe extern IO opaques rejected, 40.69s/1.53GiB; pin `29d85f7` also Lake-config failure. Generic audit repair under investigation, security review required; no full build pass |
-| B | `36bddaa5-fcc4-4fbf-a78a-b717e1e198a7` | `f9444f29-2b15-49f4-ad81-37346c0844e5` | `.github/**`, `scripts/ci*`, `ci/**`, CI proposal; B.1 waits A | Checkpoint harvested/hash-verified; direct-runner routing superseded by API bridge, NOT merge-ready. Baseline/tests reported; full native/live/after checks absent. VM destroy failed provider_http_error; cleanup open. B.1 waits A |
+| B | `36bddaa5-fcc4-4fbf-a78a-b717e1e198a7` | `f9444f29-2b15-49f4-ad81-37346c0844e5` | `.github/**`, `scripts/ci*`, `ci/**`, CI proposal; B.1 waits A | API scaffold v3 harvested/hash-verified, supersedes v2; Ubuntu hosted only, no HTTP/auth adapter/CI wiring. Worker reports32 tests; NOT merge-ready/live-verified. VM destroy failed provider_http_error; cleanup open. B.1 waits A |
 | C | `816f574f-6e85-4d3a-8123-8429f10e86b3` | `21fa6dec-b7d5-4b8a-9ab3-12f7a3218af4` | Managed REST/lifecycle sections and managed UI/models on desktop/iOS/Android | Active; regression-first REST extend, provider gating, ready/epoch contracts on three clients; live dev→prod and Mac validation depend on E+G; access/slot not established |
 | D | `95ad3d8d-5af8-4228-943d-509baa9394d8` | `6b6d2464-4997-42e1-b6d4-00b5fbb61264` | Proxy/Control downstream streaming sections, OrbNetLeaf TLS, streaming tests | Active RUN-07; public HTTPS clone succeeded, SSH host verification/gh auth block publication; bundle fallback; VM expires 15:12:52Z; no streaming acceptance claimed |
 | E+G | `6fa970f7-8799-4c80-a312-f7884efc21f4` | `a474d57a-39d7-4b0f-a447-5f7f888de185` | Environment/settings ops, principal/security/MCP admission; sole live deployment owner; real Linux desktop ben test | Active; live agent-core inspection/authority required before changes |
@@ -245,6 +245,21 @@ readiness, cursor/truncation/exit and immutable-base publication contracts befor
 adapter wiring. Private clone is pending trusted nimrud secret delivery; no guest
 credential transfer. Generic JIT remains separate from the immediate bridge.
 
+### B API scaffold v3 — current harvested checkpoint
+
+Governed harvest delivered 34,122 bytes to trusted nimrud:
+`/var/lib/sandboxed-node/uploads/11225fa2-94b5-408f-adb7-886d6a6dc41a/orb-b2-api-checkpoint-v3.tar.gz`.
+SHA-256 matches worker report:
+`4790335fddeda63bd10df1ef3bbf02400ab75bb820f7fc2f539957ff6978be50`.
+Base remains `de3fd0fa1bf025cf29258bc3b3bda953a12877fe`; v3 supersedes v2.
+Archive listing checked independently: `b2-tracked.patch`, two Orb workflows,
+CI proposal, `ci_bridge.py`, `ci_measure.py`, routing tests and raw baseline.
+No extraction/integration performed yet. Worker reports 32 passing tests
+(9 hosted-route/bridge/measurement + 23 planner), actionlint, Python compilation
+and whitespace checks. No direct labels; all hosted Ubuntu. No HTTP/auth adapter
+or CI bridge wiring: source-dependent implementation and live acceptance remain
+open. This checkpoint is artifact preservation, not B.2 completion.
+
 ## Waiting on Thomas
 
 These GitHub web approvals block only direct repo-level JIT runners, not the
@@ -351,3 +366,4 @@ classification before operator application. No hand-edited production env.
 | 13 Nov, B public CI update | Record historical master red and current head pending separately; prioritize cause-specific CI repair, keep B.1 gated by A | Public API establishes failed Test/browser gates on a34d76da, not failure cause or current green status; baseline obtained in checkpoint, not yet independently recomputed |
 | 13 Nov, A RED update | Require narrow generic IO-extern audit fix with adversarial negatives and independent review before acceptance; retain timed execution as evidence, not empty workspace-job completion | A reproduced 24 rejected IO opaques on upstream15676ea; name-based blanket admission could weaken soundness and is not an acceptable speed workaround |
 | 13 Nov, B API bridge checkpoint | Do not publish superseded label-routing v2; preserve new bridge skeleton separately and wait for authoritative upstream auth/transport/base contracts before wiring | B removed direct labels, keeps hosted Ubuntu fallback; transport-neutral tests are not a live adapter; prevent guessed OIDC/prebuild schemas or ambiguous-create leaks |
+| 13 Nov, B v3 harvest | Preserve hash-matched API scaffold v3 as current checkpoint; do not mark bridge complete | 32 tests are worker-reported, no HTTP/auth adapter or CI wiring exists; managed resource cleanup remains separately open |
