@@ -1615,8 +1615,8 @@ def dispatchProviderAndAiRoute
             if let some t := healthTracker? then clearAccountHealthWhere t viaSidecar
             hub.mu.atomically do
               let st ← get
-              set { st with usageEntries := st.usageEntries.filter
-                (fun e => e.payload.fieldStr? "status" != some "needs_reauth") }
+              let kept := st.usageEntries.filter (fun e => e.payload.fieldStr? "status" != some "needs_reauth")
+              set { st with usageEntries := kept }
           let okSt := if 200 ≤ c && c < 300 then "completing" else "failed"
           return some (jsonResp 200 (.obj #[("status", .str okSt), ("auth_url", .str sess.authUrl), ("message", .null)]))
         | .error e =>
