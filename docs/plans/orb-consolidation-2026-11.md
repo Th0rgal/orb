@@ -187,6 +187,11 @@ classification before operator application. No hand-edited production env.
 - Broker retrieval of `GITHUB_TOKEN` is **pending**, request
   `e0a36684-bd02-4c3b-ba9e-7253bf56eb23`; no usable secret path delivered yet.
   Workers continue local checks and produce harvestable patch/bundle artifacts.
+- Documented local author identity configured under the operator's explicit
+  exception. Roadmap committed as `0b8b09b8`, unsigned (no signing material
+  provisioned); push not yet performed. Repeated named-secret retrieval still
+  returned pending, latest request `8487270d-d454-4efa-9fdd-73428faffd8f`.
+  Do not infer credential delivery or GitHub publication from the local commit.
 
 ## Decision log
 
