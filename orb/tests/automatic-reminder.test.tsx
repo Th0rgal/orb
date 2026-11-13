@@ -16,6 +16,8 @@ describe('automatic reminders',()=>{
  });
  it('shows scheduled messages without guessing the author',()=>{
   expect(reminderMessages([{kind:'user',key:'u',text:'Check',source:'scheduler'}]).get('u')).toEqual({origin:'Mission scheduler'});
+  // Lean Core stamps a mission's own wakeups with source `wakeup` (ldgr, 2026-11-13).
+  expect(reminderMessages([{kind:'user',key:'w',text:'Continuer T7.',source:'wakeup'}]).get('w')).toEqual({origin:'Mission scheduler'});
  });
  it('keeps instructions collapsed without editing or resend controls',()=>{
   const {container}=render(()=><AutomaticReminder text="Full instructions" reminder={{origin:'Scheduled by Claude',seconds:1800}}/>);
