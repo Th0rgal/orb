@@ -235,7 +235,8 @@ def dispatchMcpToolCall
     (remoteSup? : Option RemoteJobSupervisor := none)
     (managedProvisioningOverride? : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) := none)
     (authenticatedUserId : String := "")
-    (authenticatedAdmin : Bool := false) : IO String := do
+    (authenticatedAdmin : Bool := false)
+    (askSide? : Option (String → String → String → IO (Except String String)) := none) : IO String := do
   let nowIso := formatEpochIso8601Utc nowEpochSec
   let callerMid := claims.missionId
   -- `authenticatedAdmin` is Core's own verdict on the caller of a direct (not
@@ -1024,7 +1025,27 @@ def dispatchMcpToolCall
         | other => other)
     | _ => return mcpErr "not_found" s!"Mission `{mid}` not found"
 
-  | "send_message_to_mission" | "ask_mission" | "answer_mission_question" =>
+  | "ask_mission" =>
+    -- Ask a read-only `/btw` side agent about the mission. It never writes into the
+    -- mission's own transcript; read the answer from the returned side mission.
+    let mid := (args.fieldStr? "mission_id").orElse (fun _ => args.fieldStr? "target_mission_id") |>.getD ""
+    let question := ((args.fieldStr? "content").orElse (fun _ => (args.fieldStr? "question").orElse (fun _ => args.fieldStr? "message")) |>.getD "").trimAscii.toString
+    if mid.isEmpty || question.isEmpty then
+      return mcpErr "invalid_arguments" "mission_id and content are required"
+    if let .error e ← checkMissionReadAccess store claims mid nowEpochSec then
+      return mcpErr "forbidden" e
+    let some askSide := askSide?
+      | return mcpErr "unavailable" "ask_mission needs the Core server's side-agent launcher" true
+    let idem := ((args.fieldStr? "idempotency_key").getD "").trimAscii.toString
+    let idem ← if idem.isEmpty then newUuidV4 else pure idem
+    match ← askSide mid question idem with
+    | .error e => return mcpErr "ask_failed" e true
+    | .ok body =>
+      let side := (OrbBin.Json.parse body).toOption.getD (.obj #[])
+      let sideId := (side.fieldStr? "id").getD ""
+      return mcpOk (.obj #[("side_mission_id", .str sideId), ("status", .str ((side.fieldStr? "status").getD "")),
+        ("hint", .str s!"Read the answer with get_mission_events on `{sideId}`.")])
+  | "send_message_to_mission" | "answer_mission_question" =>
     let mid := (args.fieldStr? "mission_id").orElse (fun _ => args.fieldStr? "target_mission_id") |>.getD ""
     let content := ((args.fieldStr? "message").orElse (fun _ => (args.fieldStr? "content").orElse (fun _ => (args.fieldStr? "question").orElse (fun _ => args.fieldStr? "answer"))) |>.getD "").trimAscii.toString
     if mid.isEmpty || content.isEmpty then

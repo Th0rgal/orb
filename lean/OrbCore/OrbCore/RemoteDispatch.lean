@@ -698,6 +698,8 @@ private structure RemoteStreamAcc where
   sessionId?       : Option String := none
   lastError?       : Option String := none
   lastMessageId?   : Option String := none
+  /-- The harness has produced thinking, a tool call or text this turn. -/
+  sawActivity      : Bool := false
 
 private def emitMissionEventAndBroadcast
     (store : CoreStore)
@@ -836,7 +838,9 @@ private def ingestRemoteHarnessLine
   let bLow := backend.trimAscii.toString.toLower
   let harness := if bLow == "claude" then "claudecode" else bLow
   if harness == "claudecode" then
-    ingestClaudeStreamLine store broadcastHub? missionId rawLine nowIso acc
+    let next ← ingestClaudeStreamLine store broadcastHub? missionId rawLine nowIso acc
+    let active := ["\"type\":\"assistant\"", "\"type\":\"stream_event\""].any (fun k => (rawLine.splitOn k).length > 1)
+    return { next with sawActivity := next.sawActivity || active }
   else
     let parsed := OrbBin.ClaudeControl.parseOneShotHarnessEvent harness rawLine
     let mut next := acc
@@ -846,6 +850,8 @@ private def ingestRemoteHarnessLine
         persistDiscoveredSessionId store missionId sid
     if let some em := parsed.errorMsg? then
       next := { next with lastError? := some em }
+    if parsed.thinking?.isSome || parsed.activity?.isSome || !parsed.textDelta.isEmpty then
+      next := { next with sawActivity := true }
     if let some th := parsed.thinking? then
       emitMissionEventAndBroadcast store broadcastHub? missionId "thinking"
         (renderCompact (.obj #[("content", .str th)])) nowIso
@@ -968,6 +974,11 @@ partial def spawnRemoteJobPoller
     let mut cancelSent : Bool := false
     let mut keepRunning : Bool := true
     let mut consecNetErrors : Nat := 0
+    -- A harness that never produces its first event (e.g. OpenCode after a failed model
+    -- stream, which logs the error but does not exit) would otherwise hang the turn forever.
+    -- Only fresh turns are watched: a poller resumed mid-turn may be inside a long tool call.
+    let firstEventSecs := ((← IO.getEnv "SANDBOXED_TURN_FIRST_EVENT_SECS").bind String.toNat?).getD 900
+    let turnStartSec ← nowEpoch
     while keepRunning do
       IO.sleep 350
       let nowSec ← nowEpoch
@@ -1067,7 +1078,27 @@ partial def spawnRemoteJobPoller
             discard <| execParamQuery store.projectsDb
               "UPDATE remote_jobs SET state=?2, heartbeat_at=?3, finished_at=CASE WHEN ?2 IN ('succeeded','failed','cancelled','lost') THEN ?3 ELSE finished_at END, updated_at=?3 WHERE job_id=?1;"
               #[jobId, jState, nowIso]
-            if jState == "succeeded" || jState == "failed" || jState == "cancelled" || jState == "lost" then
+            if jState == "running" && initialOffset == 0 && firstEventSecs > 0 && !acc.sawActivity &&
+                nowSec ≥ turnStartSec + firstEventSecs.toUInt64 then
+              keepRunning := false
+              let hdrs := #[("x-sandboxed-cancel-actor", "core"), ("x-sandboxed-cancel-reason", "No harness output")]
+              discard <| callRemoteNodeHttpOpt relayHub? mc? effNodeId "POST" s!"/jobs/{jobId}/cancel" (some (.obj #[])) hdrs 8000
+              if !proxyTok.isEmpty then revokeSingleMissionProxyToken store proxyTok
+              let reason := "harness_no_output"
+              let logTail := ((jv.fieldStr? "log_tail").getD "").trimAscii.toString
+              let detail := acc.lastError?.getD (if logTail.isEmpty then "" else (logTail.takeEnd 600).toString)
+              discard <| execParamQuery store.missionsDb
+                "UPDATE mission_runs SET execution_state='terminal', terminal_reason=?2, updated_at=?3 WHERE mission_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted');"
+                #[missionId, reason, nowIso]
+              discard <| execParamQuery store.missionsDb
+                "UPDATE missions SET status='failed', terminal_reason=?2, state_revision=state_revision+1, updated_at=?3 WHERE id=?1 AND status IN ('active','pending');"
+                #[missionId, reason, nowIso]
+              emitMissionEventAndBroadcast store broadcastHub? missionId "error"
+                (renderCompact (.obj #[("message", .str (s!"{backend} produced no output for {firstEventSecs / 60} min and was stopped." ++
+                  (if detail.isEmpty then "" else s!" Last log: {detail}")))])) nowIso
+              emitMissionEventAndBroadcast store broadcastHub? missionId "mission_status_changed"
+                (renderCompact (.obj #[("status", .str "failed"), ("reason", .str reason)])) nowIso
+            else if jState == "succeeded" || jState == "failed" || jState == "cancelled" || jState == "lost" then
               -- Final log drain after terminal transition
               if let .ok (flSt, _, flJv?, _, _) ← callRemoteNodeHttpOpt relayHub? mc? effNodeId "GET" s!"/jobs/{jobId}/log?offset={offset}&max_bytes=262144" none #[] 10000 then
                 if 200 ≤ flSt && flSt < 300 then

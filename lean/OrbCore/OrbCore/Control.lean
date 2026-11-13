@@ -1725,6 +1725,138 @@ private def launchLocalCoreMissionTurn
       #[missionId, s!"{nextGen}", ts]
     return .error err
 
+/-- Launch a read-only `/btw` side mission that answers `jv.side_question` about `srcMid`.
+    Shared by `POST /api/control/missions/:id/btw/agent` and the `ask_mission` MCP tool.
+    The caller has already been authorized for `srcMid`. Returns (HTTP status, JSON body). -/
+private def launchBtwSideAgent (st : CoreAppState) (caller : CallerPrincipal) (srcMid : String)
+    (jv : JVal) (hdrIdemKey : String) (nowEpochSec : UInt64) : IO (Nat × String) := do
+  let bodyIdemKey := ((jv.fieldStr? "idempotency_key").getD "").trimAscii.toString
+  let idemKey := if !hdrIdemKey.isEmpty then hdrIdemKey else bodyIdemKey
+  if idemKey.isEmpty then
+    return (400, "{\"error\":\"missing_idempotency_key\"}")
+  let idemScope := s!"btw_agent:{srcMid}"
+  match ← claimIdempotencySlot st.store idemScope idemKey s!"{nowEpochSec}" with
+  | .error e => return (500, s!"\{\"error\":{jsonEscape e}}")
+  | .ok (.Replayed rec) => return (rec.statusCode, rec.bodyJson)
+  | .ok .InFlight => return (409, "{\"error\":\"idempotency_key_in_flight\"}")
+  | .ok .Claimed => pure ()
+  let abortBtwIdem : IO Unit :=
+    discard <| abortIdempotencySlot st.store idemScope idemKey
+  let reqBackend? := jv.fieldStr? "backend"
+  let reqModelOv? := jv.fieldStr? "model_override"
+  let rawEffort? := jv.fieldStr? "model_effort"
+  if let some re := rawEffort? then
+    let trimmedRe := re.trimAscii.toString
+    if !trimmedRe.isEmpty then
+      let checkBack := reqBackend?.orElse (fun _ => some "codex")
+      if (normalizeModelEffortForBackend checkBack trimmedRe).isNone then
+        abortBtwIdem
+        return (400, s!"\{\"error\":\"unsupported_model_effort\",\"effort\":{jsonEscape trimmedRe}}")
+  let sidePrompt? := (jv.fieldStr? "side_question").orElse (fun _ => jv.fieldStr? "prompt")
+  let ctxMode := ((jv.fieldStr? "side_context_mode").getD "").trimAscii.toString.toLower
+  let defaultSafeBase ← do
+    match ← confineWorkingDirectory st.cfg.workingDir st.cfg.workingDir with
+    | .ok b => pure b
+    | .error _ => pure st.cfg.workingDir
+  let defNewId ← newUuidV4
+  let newMid := (jv.fieldStr? "id").getD defNewId
+  if !isSafeMissionId newMid then
+    abortBtwIdem
+    return (400, "{\"error\":\"invalid_mission_id\"}")
+  let nowIso := formatEpochIso8601Utc nowEpochSec
+  let explicitBtwRn? := (jv.fieldStr? "remote_node_id").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+  let inheritedBtwRn? ←
+    if explicitBtwRn?.isSome then pure explicitBtwRn?
+    else resolveMissionRemoteNode? st.store st.managedStore? srcMid
+  let forkReq : ForkMissionRequest := {
+    sourceMissionId := srcMid
+    newMissionId := newMid
+    targetBackend? := reqBackend?
+    modelOverride? := reqModelOv?
+    modelEffort? := rawEffort?.map (fun s => s.trimAscii.toString.toLower) |>.filter (!·.isEmpty)
+    remoteNodeId? := inheritedBtwRn?
+    sideQuestion := true
+    sidePrompt? := sidePrompt?
+    incrementalSide := ctxMode == "incremental"
+    ownerUserId := caller.userId
+    nowAt := nowIso
+  }
+  match ← forkOrHandoffMission st.store defaultSafeBase forkReq with
+  | .error (code, msg) =>
+    abortBtwIdem
+    return (code, s!"\{\"error\":{jsonEscape msg}}")
+  | .ok out =>
+    let cleanupUnbornBtw : IO Unit := do
+      discard <| execParamQuery st.store.missionsDb "DELETE FROM mission_events WHERE mission_id=?1;" #[out.missionId]
+      discard <| execParamQuery st.store.missionsDb "DELETE FROM mission_runs WHERE mission_id=?1;" #[out.missionId]
+      discard <| execParamQuery st.store.missionsDb "DELETE FROM missions WHERE id=?1;" #[out.missionId]
+      abortBtwIdem
+    let sideQuestionText := (sidePrompt?.getD "").trimAscii.toString
+    let mut effStatus := "awaiting_user"
+    if !sideQuestionText.isEmpty && out.placementKind != "client" then
+      -- When full transcript turns were copied (`turnsCopied > 1`), include parent history in initial turn prompt
+      let mut turnPrompt := sideQuestionText
+      if out.turnsCopied > 1 then
+        let pTurns ← loadCanonicalMissionTurns st.store srcMid false
+        if !pTurns.isEmpty then
+          let lines := pTurns.map fun (r, c) =>
+            s!"[{(if r == "user" then "User" else "Assistant")}]\n{c}"
+          turnPrompt :=
+            "Parent mission conversation context:\n\n" ++
+            String.intercalate "\n\n---\n\n" lines.toList ++
+            "\n\n---\n\nSide question (read-only `/btw`):\n" ++ sideQuestionText
+      match out.remoteNodeId? with
+      | some targetNode =>
+        if let some sup := st.remoteSup? then
+          let effModel :=
+            if out.backend == "opencode" && out.modelOverride.trimAscii.toString.isEmpty then "builtin/smart"
+            else out.modelOverride
+          let spec : RemoteTurnSpec := {
+            missionId        := out.missionId
+            targetNodeId     := targetNode
+            backend          := out.backend
+            modelOverride    := effModel
+            modelEffort      := out.modelEffort
+            workingDirectory := out.workingDirectory
+            project          := out.project
+            ownerUserId      := caller.userId
+            authorityMode    := "readonly"
+            placementKind    := out.placementKind
+            tagsJson         := out.tagsJson
+            prompt           := turnPrompt
+            sideQuestion     := true
+            companionOf?     := some srcMid
+          }
+          match ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec with
+          | .ok _ => effStatus := "active"
+          | .error dispErr =>
+            cleanupUnbornBtw
+            return (502, s!"\{\"error\":{jsonEscape dispErr}}")
+      | none =>
+        if st.warmMgr?.isSome then
+          let effModel :=
+            if out.backend == "opencode" && out.modelOverride.trimAscii.toString.isEmpty then "builtin/smart"
+            else out.modelOverride
+          match ← launchLocalCoreMissionTurn st out.missionId out.backend out.workingDirectory turnPrompt effModel out.modelEffort "bypassPermissions" none "local" false with
+          | .ok _ => effStatus := "active"
+          | .error launchErr =>
+            cleanupUnbornBtw
+            return (502, s!"\{\"error\":{jsonEscape launchErr}}")
+    let rnJson := match out.remoteNodeId? with | some rn => jsonEscape rn | none => "null"
+    let modOvJson := if out.modelOverride.isEmpty then "null" else jsonEscape out.modelOverride
+    let effJson := if out.modelEffort.isEmpty then "null" else jsonEscape out.modelEffort
+    let projField := if out.project.isEmpty then "" else s!",\"project\":{jsonEscape out.project}"
+    let body :=
+      s!"\{\"id\":{jsonEscape out.missionId},\"title\":{jsonEscape out.title},\"status\":{jsonEscape effStatus}," ++
+      s!"\"backend\":{jsonEscape out.backend},\"model_override\":{modOvJson},\"model_effort\":{effJson}," ++
+      s!"\"authority_mode\":\"readonly\",\"working_directory\":{jsonEscape out.workingDirectory},\"remote_node_id\":{rnJson}," ++
+      s!"\"placement_kind\":{jsonEscape out.placementKind}{projField},\"created_at\":{jsonEscape nowIso},\"updated_at\":{jsonEscape nowIso},\"state_revision\":1,\"tags\":{out.tagsJson}}"
+    match ← recordOrReplayIdempotency st.store idemScope idemKey 201 body nowIso with
+    | .ok rec => return (rec.statusCode, rec.bodyJson)
+    | .error e =>
+      cleanupUnbornBtw
+      return (500, s!"\{\"error\":{jsonEscape e}}")
+
 /-- Launch a live warm harness turn when `spawn_harness: true` is supplied by an authorized admin/legacy caller on a managed mission. -/
 private def maybeSpawnWarmHarnessTurn
     (st : CoreAppState)
@@ -2500,6 +2632,16 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           st.cfg.workingDir activeClaims toolName args nowEpochSec st.remoteSup? st.managedProvisioningOverride?
           (if scopedClaims?.isNone then (mcpCaller?.map (·.userId)).getD "" else "")
           (scopedClaims?.isNone && (mcpCaller?.map (fun c => !c.disabled && (c.isLegacyUnscoped || c.role == "admin"))).getD false)
+          (some fun srcMid question idem => do
+            -- The gateway has checked read access; the side mission belongs to the mission's owner.
+            let owner ← match ← execParamQuery st.store.missionsDb
+                "SELECT COALESCE(owner_user_id,'') FROM missions WHERE id=?1;" #[srcMid] with
+              | .ok rs => pure ((rs[1]?.bind (·[0]?)).getD "")
+              | .error _ => pure ""
+            let asker : CallerPrincipal := (mcpCaller?.getD { userId := owner, username := "", isLegacyUnscoped := true })
+            let (code, body) ← launchBtwSideAgent st { asker with userId := if asker.userId.isEmpty then owner else asker.userId }
+              srcMid (.obj #[("side_question", .str question)]) idem nowEpochSec
+            pure (if code < 300 then .ok body else .error body))
         return .ok (mkJson 200 outJson)
 
   -- 5c. Managed Node Dial-Out Enrollment & Leased Relay
@@ -3258,132 +3400,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
         | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
       let hdrIdemKey := (lookupHeaderCI req.headers "idempotency-key").map (·.trimAscii.toString) |>.getD ""
-      let bodyIdemKey := ((jv.fieldStr? "idempotency_key").getD "").trimAscii.toString
-      let idemKey := if !hdrIdemKey.isEmpty then hdrIdemKey else bodyIdemKey
-      if idemKey.isEmpty then
-        return .ok (mkJson 400 "{\"error\":\"missing_idempotency_key\"}")
-      let idemScope := s!"btw_agent:{srcMid}"
-      match ← claimIdempotencySlot st.store idemScope idemKey s!"{nowEpochSec}" with
-      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
-      | .ok (.Replayed rec) => return .ok (mkJson rec.statusCode rec.bodyJson)
-      | .ok .InFlight => return .ok (mkJson 409 "{\"error\":\"idempotency_key_in_flight\"}")
-      | .ok .Claimed => pure ()
-      let abortBtwIdem : IO Unit :=
-        discard <| abortIdempotencySlot st.store idemScope idemKey
-      let reqBackend? := jv.fieldStr? "backend"
-      let reqModelOv? := jv.fieldStr? "model_override"
-      let rawEffort? := jv.fieldStr? "model_effort"
-      if let some re := rawEffort? then
-        let trimmedRe := re.trimAscii.toString
-        if !trimmedRe.isEmpty then
-          let checkBack := reqBackend?.orElse (fun _ => some "codex")
-          if (normalizeModelEffortForBackend checkBack trimmedRe).isNone then
-            abortBtwIdem
-            return .ok (mkJson 400 s!"\{\"error\":\"unsupported_model_effort\",\"effort\":{jsonEscape trimmedRe}}")
-      let sidePrompt? := (jv.fieldStr? "side_question").orElse (fun _ => jv.fieldStr? "prompt")
-      let ctxMode := ((jv.fieldStr? "side_context_mode").getD "").trimAscii.toString.toLower
-      let defaultSafeBase ← do
-        match ← confineWorkingDirectory st.cfg.workingDir st.cfg.workingDir with
-        | .ok b => pure b
-        | .error _ => pure st.cfg.workingDir
-      let defNewId ← newUuidV4
-      let newMid := (jv.fieldStr? "id").getD defNewId
-      if !isSafeMissionId newMid then
-        abortBtwIdem
-        return .ok (mkJson 400 "{\"error\":\"invalid_mission_id\"}")
-      let nowIso := formatEpochIso8601Utc nowEpochSec
-      let explicitBtwRn? := (jv.fieldStr? "remote_node_id").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
-      let inheritedBtwRn? ←
-        if explicitBtwRn?.isSome then pure explicitBtwRn?
-        else resolveMissionRemoteNode? st.store st.managedStore? srcMid
-      let forkReq : ForkMissionRequest := {
-        sourceMissionId := srcMid
-        newMissionId := newMid
-        targetBackend? := reqBackend?
-        modelOverride? := reqModelOv?
-        modelEffort? := rawEffort?.map (fun s => s.trimAscii.toString.toLower) |>.filter (!·.isEmpty)
-        remoteNodeId? := inheritedBtwRn?
-        sideQuestion := true
-        sidePrompt? := sidePrompt?
-        incrementalSide := ctxMode == "incremental"
-        ownerUserId := caller.userId
-        nowAt := nowIso
-      }
-      match ← forkOrHandoffMission st.store defaultSafeBase forkReq with
-      | .error (code, msg) =>
-        abortBtwIdem
-        return .ok (mkJson code s!"\{\"error\":{jsonEscape msg}}")
-      | .ok out =>
-        let cleanupUnbornBtw : IO Unit := do
-          discard <| execParamQuery st.store.missionsDb "DELETE FROM mission_events WHERE mission_id=?1;" #[out.missionId]
-          discard <| execParamQuery st.store.missionsDb "DELETE FROM mission_runs WHERE mission_id=?1;" #[out.missionId]
-          discard <| execParamQuery st.store.missionsDb "DELETE FROM missions WHERE id=?1;" #[out.missionId]
-          abortBtwIdem
-        let sideQuestionText := (sidePrompt?.getD "").trimAscii.toString
-        let mut effStatus := "awaiting_user"
-        if !sideQuestionText.isEmpty && out.placementKind != "client" then
-          -- When full transcript turns were copied (`turnsCopied > 1`), include parent history in initial turn prompt
-          let mut turnPrompt := sideQuestionText
-          if out.turnsCopied > 1 then
-            let pTurns ← loadCanonicalMissionTurns st.store srcMid false
-            if !pTurns.isEmpty then
-              let lines := pTurns.map fun (r, c) =>
-                s!"[{(if r == "user" then "User" else "Assistant")}]\n{c}"
-              turnPrompt :=
-                "Parent mission conversation context:\n\n" ++
-                String.intercalate "\n\n---\n\n" lines.toList ++
-                "\n\n---\n\nSide question (read-only `/btw`):\n" ++ sideQuestionText
-          match out.remoteNodeId? with
-          | some targetNode =>
-            if let some sup := st.remoteSup? then
-              let effModel :=
-                if out.backend == "opencode" && out.modelOverride.trimAscii.toString.isEmpty then "builtin/smart"
-                else out.modelOverride
-              let spec : RemoteTurnSpec := {
-                missionId        := out.missionId
-                targetNodeId     := targetNode
-                backend          := out.backend
-                modelOverride    := effModel
-                modelEffort      := out.modelEffort
-                workingDirectory := out.workingDirectory
-                project          := out.project
-                ownerUserId      := caller.userId
-                authorityMode    := "readonly"
-                placementKind    := out.placementKind
-                tagsJson         := out.tagsJson
-                prompt           := turnPrompt
-                sideQuestion     := true
-                companionOf?     := some srcMid
-              }
-              match ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec with
-              | .ok _ => effStatus := "active"
-              | .error dispErr =>
-                cleanupUnbornBtw
-                return .ok (mkJson 502 s!"\{\"error\":{jsonEscape dispErr}}")
-          | none =>
-            if st.warmMgr?.isSome then
-              let effModel :=
-                if out.backend == "opencode" && out.modelOverride.trimAscii.toString.isEmpty then "builtin/smart"
-                else out.modelOverride
-              match ← launchLocalCoreMissionTurn st out.missionId out.backend out.workingDirectory turnPrompt effModel out.modelEffort "bypassPermissions" none "local" false with
-              | .ok _ => effStatus := "active"
-              | .error launchErr =>
-                cleanupUnbornBtw
-                return .ok (mkJson 502 s!"\{\"error\":{jsonEscape launchErr}}")
-        let rnJson := match out.remoteNodeId? with | some rn => jsonEscape rn | none => "null"
-        let modOvJson := if out.modelOverride.isEmpty then "null" else jsonEscape out.modelOverride
-        let effJson := if out.modelEffort.isEmpty then "null" else jsonEscape out.modelEffort
-        let projField := if out.project.isEmpty then "" else s!",\"project\":{jsonEscape out.project}"
-        let body :=
-          s!"\{\"id\":{jsonEscape out.missionId},\"title\":{jsonEscape out.title},\"status\":{jsonEscape effStatus}," ++
-          s!"\"backend\":{jsonEscape out.backend},\"model_override\":{modOvJson},\"model_effort\":{effJson}," ++
-          s!"\"authority_mode\":\"readonly\",\"working_directory\":{jsonEscape out.workingDirectory},\"remote_node_id\":{rnJson}," ++
-          s!"\"placement_kind\":{jsonEscape out.placementKind}{projField},\"created_at\":{jsonEscape nowIso},\"updated_at\":{jsonEscape nowIso},\"state_revision\":1,\"tags\":{out.tagsJson}}"
-        match ← recordOrReplayIdempotency st.store idemScope idemKey 201 body nowIso with
-        | .ok rec => return .ok (mkJson rec.statusCode rec.bodyJson)
-        | .error e =>
-          cleanupUnbornBtw
-          return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      let (code, body) ← launchBtwSideAgent st caller srcMid jv hdrIdemKey nowEpochSec
+      return .ok (mkJson code body)
+
 
   -- Mission Fork & Cloud-to-Workspace Handoff (`POST /api/control/missions/:id/fork`)
   if let some params := matchRoutePattern? "/api/control/missions/:id/fork" rawTarget then
