@@ -200,6 +200,13 @@ structure RoutingChain where
   targets : Array ProviderTarget
   deriving Repr, DecidableEq
 
+/-- Hands decoded body bytes to the client; `false` means the client went away. -/
+abbrev BodyEmit := ByteArray → IO Bool
+
+/-- Relays an upstream body through `BodyEmit` and returns a bounded copy of it for
+    usage accounting once the stream ends. -/
+abbrev BodyPump := BodyEmit → IO ByteArray
+
 /-- Upstream proxy attempt outcome. -/
 structure ProxyOutcome where
   status             : Nat
@@ -212,6 +219,8 @@ structure ProxyOutcome where
   firstByteCommitted : Bool := false
   pinnedAccountId    : UInt32 := 0
   verdictCode        : UInt8 := 0
+  /-- Set for a committed 2xx streamed reply: `body` is empty and the pump relays it. -/
+  stream?            : Option BodyPump := none
   deriving Inhabited
 
 /-- Why a routing-chain target is temporarily unavailable. -/
@@ -855,6 +864,171 @@ private def loopbackHttpRequest
     discard <| closeFd fd
   return parseHttpResponseWire rawBuf 16777216 true method
 
+/-! ### Streaming passthrough
+
+A model reply asked for with `"stream": true` is relayed to the client as the upstream
+produces it instead of after the last byte. Failover still happens only before the
+response head: a non-2xx head is drained and handled exactly like a buffered reply. -/
+
+/-- Largest body copy kept for accounting; the relay itself is not bounded by it. -/
+def maxStreamCopyBytes : Nat := 16777216
+
+/-- Raw response bytes from one upstream connection; `none` ends the read
+    (EOF, socket error, or an idle/total limit). -/
+structure UpstreamReader where
+  read  : IO (Option ByteArray)
+  close : IO Unit
+
+/-- How the response body is delimited on the wire. -/
+inductive BodyFraming where
+  | chunked (st : ChunkedStreamState)
+  | length (remaining : Nat)
+  | untilClose
+  deriving Inhabited
+
+/-- Decode one wire piece: `(payload, nextFraming, finished)`. -/
+def stepBodyFraming : BodyFraming → ByteArray → Except String (ByteArray × BodyFraming × Bool)
+  | .chunked st, input => do
+    let (out, st', fin) ← stepChunkedStream st input
+    return (out, .chunked st', fin)
+  | .length rem, input =>
+    let take := Nat.min rem input.size
+    .ok (input.extract 0 take, .length (rem - take), rem - take == 0)
+  | .untilClose, input => .ok (input, .untilClose, false)
+
+/-- Framing for a response head: `chunked`, then `Content-Length`, else read until close. -/
+def bodyFramingFor (isChunked : Bool) (contentLen? : Option Nat) : BodyFraming :=
+  if isChunked then .chunked (.readSizeLine ByteArray.empty)
+  else match contentLen? with
+    | some n => .length n
+    | none => .untilClose
+
+/-- Whether a client asked for a streamed reply (OpenAI/Anthropic `"stream": true`,
+    Gemini `:streamGenerateContent`). -/
+def requestWantsStream (relPath : String) (body : ByteArray) : Bool :=
+  (relPath.splitOn "streamGenerateContent").length > 1 ||
+  match OrbBin.Json.parseBytes body with
+  | .ok jv => match jv.field? "stream" with
+    | some (.bool true) => true
+    | _ => false
+  | .error _ => false
+
+/-- Relay the body: `tail` first, then reads from `r`, until framing ends, the upstream
+    closes, or `emit` reports the client gone. Always closes `r`. -/
+def pumpUpstreamBody (r : UpstreamReader) (framing0 : BodyFraming) (tail : ByteArray)
+    (emit : BodyEmit) : IO ByteArray := do
+  let mut framing := framing0
+  let mut copy := ByteArray.empty
+  let mut pending : Option ByteArray := some tail
+  let mut done := match framing0 with | .length 0 => true | _ => false
+  try
+    while !done do
+      let piece? ← match pending with
+        | some p => pure (some p)
+        | none => r.read
+      pending := none
+      match piece? with
+      | none => done := true
+      | some piece =>
+        match stepBodyFraming framing piece with
+        | .error _ => done := true
+        | .ok (out, next, fin) =>
+          framing := next
+          if !out.isEmpty then
+            if copy.size + out.size ≤ maxStreamCopyBytes then
+              copy := copy ++ out
+            if !(← emit out) then done := true
+          if fin then done := true
+  finally
+    r.close
+  return copy
+
+/-- Read until the response head (after any `1xx`) is complete. -/
+def readUpstreamHead (r : UpstreamReader) :
+    IO (Except String (Nat × Array (String × String) × Bool × Option Nat × ByteArray)) := do
+  let mut acc := ByteArray.empty
+  while true do
+    match ← r.read with
+    | none => return .error "upstream_closed_before_headers"
+    | some c =>
+      acc := acc ++ c
+      match extractStreamingResponseHeadEx? acc with
+      | .error e => return .error e
+      | .ok none => pure ()
+      | .ok (some head) => return .ok head
+  return .error "upstream_head_unreachable"
+
+private def openTlsUpstreamReader (method host : String) (port : UInt16) (path : String)
+    (headers : Array (String × String)) (body : ByteArray) : IO (Except String UpstreamReader) := do
+  match ← openHttps11Stream method host port path headers body true 15000 with
+  | .error e => return .error e
+  | .ok sess =>
+    return .ok {
+      -- A model can think for minutes before its first byte: only `upstreamIdleLimitMs`
+      -- of silence ends the read.
+      read := do
+        match ← readTlsSessionChunk sess 16384 upstreamIdleLimitMs.toUInt32 with
+        | .chunk c => return if c.isEmpty then none else some c
+        | _ => return none
+      close := closeTlsSession sess
+    }
+
+private def openLoopbackUpstreamReader (method host : String) (port : UInt16) (path : String)
+    (headers : Array (String × String)) (body : ByteArray) : IO (Except String UpstreamReader) := do
+  let connectHost := if host == "localhost" then "127.0.0.1" else host
+  let hostAuth := formatHostAuthority host port 80
+  let reqWire ← match buildOutboundHttp11Request method hostAuth path headers body with
+    | .ok w => pure w
+    | .error e => return .error e
+  let .ok fd ← tcpConnect connectHost port
+    | return .error "loopback_connect_failed"
+  if let .error _ ← writeAll fd reqWire false then
+    discard <| closeFd fd
+    return .error "loopback_write_failed"
+  let t0 ← IO.monoMsNow
+  let lastByte ← IO.mkRef t0
+  return .ok {
+    read := do
+      while true do
+        let nowMs ← IO.monoMsNow
+        if nowMs - t0 > upstreamTotalLimitMs || nowMs - (← lastByte.get) > upstreamIdleLimitMs then
+          return none
+        match ← pollReadable fd 5000 with
+        | .error .eagain => pure ()
+        | .error _ => return none
+        | .ok () =>
+          let chunk ← readStreamChunk fd 65536
+          if chunk.isEmpty then return none
+          lastByte.set (← IO.monoMsNow)
+          return some chunk
+      return none
+    close := discard <| closeFd fd
+  }
+
+/-- One upstream call that relays a 2xx body as it arrives. A non-2xx (or bodyless)
+    reply is read whole so the failover logic sees the same `HttpsResponse` as before. -/
+def streamingUpstreamRequest (isTls : Bool) (method host : String) (port : UInt16) (path : String)
+    (headers : Array (String × String)) (body : ByteArray) :
+    IO (Except String (HttpsResponse × Option BodyPump)) := do
+  let opened ← if isTls then openTlsUpstreamReader method host port path headers body
+    else openLoopbackUpstreamReader method host port path headers body
+  let r ← match opened with
+    | .ok r => pure r
+    | .error e => return .error e
+  match ← readUpstreamHead r with
+  | .error e =>
+    r.close
+    return .error e
+  | .ok (status, hdrs, isChunked, contentLen?, tail) =>
+    let framing := bodyFramingFor isChunked contentLen?
+    if status ≥ 200 && status < 300 && !isBodylessHttpResponse method status then
+      return .ok ({ status, headers := hdrs, body := ByteArray.empty },
+        some (pumpUpstreamBody r framing tail))
+    else
+      let whole ← if isBodylessHttpResponse method status then do r.close; pure ByteArray.empty
+        else pumpUpstreamBody r framing tail (fun _ => pure true)
+      return .ok ({ status, headers := hdrs, body := whole }, none)
+
 /-- Execute a bounded `/v1/*` proxy forward across `chain.targets` with proactive pacing spillover,
     sticky `firstByteCommitted` pin enforcement via `Orb.HarnessCloud.stepProviderAttemptSlice` /
     `classifyProviderAttempt` (`SM-21`), pre-header failover on `402`, `429`, and `5xx` via
@@ -876,6 +1050,7 @@ def forwardProxyChain
     (pinnedAccount? : Option String := none)
     (authEvidence? : Option (IO.Ref (Array (String × String))) := none) :
     IO ProxyOutcome := do
+  let wantsStream := requestWantsStream relPath body
   let nowSec ← match nowEpoch? with
     | some ep => pure ep
     | none => coreEpochSec
@@ -1124,23 +1299,25 @@ def forwardProxyChain
         }
     else
       let (isTls, host, port, fullPath, reqHdrs, outBody) := upstreamRequest tgt relPath extraHeaders body
-      let respRes ← try
+      let respRes : Except String (HttpsResponse × Option BodyPump) ← try
         match mockTransport? with
-        | some mockFn => mockFn tgt
+        | some mockFn => pure ((← mockFn tgt).map (·, none))
         | none =>
           if port == 0 then
             pure (.error "invalid_upstream_port")
-          else if isTls then
-            httpsRequest method host port fullPath reqHdrs outBody
-          else if isPrivatePlaintextHost host then
-            loopbackHttpRequest method host port fullPath reqHdrs outBody
-          else
+          else if !isTls && !isPrivatePlaintextHost host then
             pure (.error "plaintext_upstream_disabled")
+          else if wantsStream then
+            streamingUpstreamRequest isTls method host port fullPath reqHdrs outBody
+          else if isTls then
+            pure ((← httpsRequest method host port fullPath reqHdrs outBody).map (·, none))
+          else
+            pure ((← loopbackHttpRequest method host port fullPath reqHdrs outBody).map (·, none))
       finally
         if let some tracker := effPacing? then
           releaseTargetSlot tracker tgt
       match respRes with
-      | .ok resp =>
+      | .ok (resp, pump?) =>
         if let some tracker := effPacing? then
           recordObservedHeaders tracker tgt.accountId resp.headers
         let respBodyStr := (String.fromUTF8? resp.body).getD ""
@@ -1171,6 +1348,8 @@ def forwardProxyChain
               pure (s', v, effs)
           let (ctype, safeHdrs) := sanitizeUpstreamHeaders resp.headers
           if vCode == ProviderAttemptVerdict.encode .rejectStaleOrPin && !isCommitted then
+            if let some pump := pump? then
+              discard <| pump (fun _ => pure false)
             return {
               status := 409
               contentType := "application/json"
@@ -1193,6 +1372,7 @@ def forwardProxyChain
             firstByteCommitted := nextSlice.firstByteCommitted == 1
             pinnedAccountId := nextSlice.pinnedAccountId
             verdictCode := vCode
+            stream? := pump?
           }
         let upstreamCode := upstreamErrorCode respBodyStr
         failures := failures.push (tgt.provider, tgt.modelId, resp.status, upstreamCode)

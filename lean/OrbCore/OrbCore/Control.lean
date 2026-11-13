@@ -1160,6 +1160,9 @@ structure CoreHttpResponse where
   corsOrigin? : Option String := none
   extraHdrs   : Array (String × String) := #[]
   body        : ByteArray
+  /-- When set, `body` is ignored and the connection writer relays the body as
+      `Transfer-Encoding: chunked` pieces handed to the given emitter. -/
+  bodyStream? : Option ((ByteArray → IO Bool) → IO Unit) := none
   deriving Inhabited
 
 private def reasonPhrase : Nat → String
@@ -1196,6 +1199,11 @@ private def safeHeaderLine? (k v : String) : Option String :=
   else
     some s!"{k}: {v}\r\n"
 
+/-- One `Transfer-Encoding: chunked` frame (`size-hex CRLF data CRLF`); empty input is the terminator. -/
+def encodeHttpChunk (data : ByteArray) : ByteArray :=
+  if data.isEmpty then "0\r\n\r\n".toUTF8
+  else (String.ofList (Nat.toDigits 16 data.size) ++ "\r\n").toUTF8 ++ data ++ "\r\n".toUTF8
+
 def encodeCoreHttpResponseHead (r : CoreHttpResponse) (keepAlive : Bool := false) : ByteArray := Id.run do
   let corsHdr :=
     match r.corsOrigin? with
@@ -1214,7 +1222,8 @@ def encodeCoreHttpResponseHead (r : CoreHttpResponse) (keepAlive : Bool := false
   let mut head :=
     s!"HTTP/1.1 {r.status} {reasonPhrase r.status}\r\n" ++
     s!"Content-Type: {r.contentType}\r\n" ++
-    s!"Content-Length: {r.body.size}\r\n" ++
+    (if r.bodyStream?.isSome then "Transfer-Encoding: chunked\r\nCache-Control: no-cache\r\nX-Accel-Buffering: no\r\n"
+     else s!"Content-Length: {r.body.size}\r\n") ++
     corsHdr ++
     connHdr
   for (k, v) in r.extraHdrs do
@@ -1224,12 +1233,12 @@ def encodeCoreHttpResponseHead (r : CoreHttpResponse) (keepAlive : Bool := false
   return head.toUTF8
 
 def encodeCoreHttpResponse (r : CoreHttpResponse) (keepAlive : Bool := false) : ByteArray :=
-  encodeCoreHttpResponseHead r keepAlive ++ r.body
+  encodeCoreHttpResponseHead r keepAlive ++ (if r.bodyStream?.isSome then ByteArray.empty else r.body)
 
 def writeCoreHttpResponse (write : ByteArray → IO Bool)
     (r : CoreHttpResponse) (keepAlive : Bool := false) : IO Bool := do
   if !(← write (encodeCoreHttpResponseHead r keepAlive)) then return false
-  if r.body.isEmpty then return true
+  if r.bodyStream?.isSome || r.body.isEmpty then return true
   write r.body
 
 private def acceptsGzipEncoding (hdrs : Array (String × String)) : Bool :=
@@ -1246,7 +1255,7 @@ private def headerRequestsClose (hdrs : Array (String × String)) : Bool :=
   | some raw => (raw.splitOn ",").any (fun t => t.trimAscii.toString.toLower == "close")
 
 def maybeGzipHttpResponse (req : HttpRequest) (r : CoreHttpResponse) : CoreHttpResponse :=
-  if req.method == "HEAD" || (r.status != 200 && r.status != 201) || r.body.size < 1024 then
+  if req.method == "HEAD" || r.bodyStream?.isSome || (r.status != 200 && r.status != 201) || r.body.size < 1024 then
     r
   else if !acceptsGzipEncoding req.headers then
     r
@@ -1541,32 +1550,35 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
       | some c => withoutSelected.push c
       | none => withoutSelected
     st.proxyCooldownsRef.set refreshed
-  if out.status ≥ 200 && out.status < 300 then
-    if let some ownerUid := proxyOwnerUserId? then
-      let estCents := estimateProxyUsageCostCents out.headers out.body
-      if estCents > 0 then
-        discard <| addUserSpendCents st.store ownerUid utcDay estCents 0 s!"{nowEpochSec}"
-    let usedTarget? := dispatchChain.targets.find? (fun t => t.accountId == out.selectedAccount)
-    let usedMissionId := boundMid?.getD ""
-    let callerKind ←
-      if usedMissionId.isEmpty then pure "api"
-      else do
-        let parent := ((← getMission? st.store usedMissionId).map (·.parentMissionId)).getD ""
-        pure (if parent.isEmpty then "mission" else "subagent")
-    recordProxyUsage st.store nowEpochSec
-      ((usedTarget?.map (·.modelId)).getD requestedModel) ((usedTarget?.map (·.provider)).getD "")
-      out.selectedAccount (execKey?.getD "") usedMissionId callerKind (extractProxyUsage out.body)
-      (requestedModel := rawRequestedModel)
-  if let (some program, some mid, some sel) := (expected?, boundMid?, selection?) then
-    let text := String.fromUTF8? out.body |>.getD ""
-    for line in text.splitOn "\n" do
-      let t := line.trimAscii.toString
-      if t.startsWith "data:" then
-        let data := (t.drop 5).toString.trimAscii.toString
-        if let some (confirmed, model) := observeSseData? data program then
-          discard <| writeReceipt st.cfg.workingDir mid {
-            revision := sel.revision, requestedModel := requestedModel, program := confirmed, model := model
-          }
+  -- Usage, spend and access-program receipts read the reply body, so for a relayed
+  -- stream they run once the stream has ended.
+  let accountBody : ByteArray → IO Unit := fun body => do
+    if out.status ≥ 200 && out.status < 300 then
+      if let some ownerUid := proxyOwnerUserId? then
+        let estCents := estimateProxyUsageCostCents out.headers body
+        if estCents > 0 then
+          discard <| addUserSpendCents st.store ownerUid utcDay estCents 0 s!"{nowEpochSec}"
+      let usedTarget? := dispatchChain.targets.find? (fun t => t.accountId == out.selectedAccount)
+      let usedMissionId := boundMid?.getD ""
+      let callerKind ←
+        if usedMissionId.isEmpty then pure "api"
+        else do
+          let parent := ((← getMission? st.store usedMissionId).map (·.parentMissionId)).getD ""
+          pure (if parent.isEmpty then "mission" else "subagent")
+      recordProxyUsage st.store nowEpochSec
+        ((usedTarget?.map (·.modelId)).getD requestedModel) ((usedTarget?.map (·.provider)).getD "")
+        out.selectedAccount (execKey?.getD "") usedMissionId callerKind (extractProxyUsage body)
+        (requestedModel := rawRequestedModel)
+    if let (some program, some mid, some sel) := (expected?, boundMid?, selection?) then
+      let text := String.fromUTF8? body |>.getD ""
+      for line in text.splitOn "\n" do
+        let t := line.trimAscii.toString
+        if t.startsWith "data:" then
+          let data := (t.drop 5).toString.trimAscii.toString
+          if let some (confirmed, model) := observeSseData? data program then
+            discard <| writeReceipt st.cfg.workingDir mid {
+              revision := sel.revision, requestedModel := requestedModel, program := confirmed, model := model
+            }
   let servedTarget? := dispatchChain.targets.find? (fun t => t.accountId == out.selectedAccount)
   let effectiveModel := (servedTarget?.map (·.modelId)).filter (!·.isEmpty) |>.getD rawRequestedModel
   discard <| execParamQuery st.store.missionsDb
@@ -1585,7 +1597,13 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     ("X-Orb-Verdict-Code", s!"{out.verdictCode}"),
     ("X-Orb-First-Byte-Committed", if out.firstByteCommitted then "true" else "false")
   ]
-  return { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := diagHdrs, body := out.body }
+  match out.stream? with
+  | some pump =>
+    return { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := diagHdrs,
+             body := ByteArray.empty, bodyStream? := some fun emit => do accountBody (← pump emit) }
+  | none =>
+    accountBody out.body
+    return { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := diagHdrs, body := out.body }
 
 /-- Map structured `HarnessCallbacks` from `OrbBin.ClaudeControl` onto persisted `mission_events` rows
     and record pending `control_request` call IDs so `POST /api/control/tool_result` can route answers cleanly. -/
@@ -6654,8 +6672,23 @@ def handleClientConn (st : CoreAppState) (cfd : Fd) (allowKeepAlive : Bool := fa
           reqCount < maxReqs &&
           req.version == "HTTP/1.1" &&
           !headerRequestsClose req.headers
-        let wrote ← writeCoreHttpResponse responseWrite httpResp wantKeep
-        if !wrote || !wantKeep then
+        match httpResp.bodyStream? with
+        | none =>
+          let wrote ← writeCoreHttpResponse responseWrite httpResp wantKeep
+          if !wrote || !wantKeep then
+            keepGoing := false
+        | some pump =>
+          -- A relayed stream ends the connection: its length is unknown up front and a
+          -- client that stopped reading must not hold a keep-alive slot.
+          if ← writeCoreHttpResponse responseWrite httpResp false then
+            let alive ← IO.mkRef true
+            pump fun piece => do
+              if !(← alive.get) then return false
+              let ok ← responseWrite (encodeHttpChunk piece)
+              alive.set ok
+              return ok
+            if ← alive.get then
+              discard <| responseWrite (encodeHttpChunk ByteArray.empty)
           keepGoing := false
       | .error rawUpgrade101 =>
         let wrote := (← writeAll cfd rawUpgrade101 false).isOk
