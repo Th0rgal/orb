@@ -122,6 +122,10 @@ class PlanTest(unittest.TestCase):
     def test_skill_markdown_is_not_docs(self):
         self.assertIn("policy-lint", jobs(["skills/foo/SKILL.md"]))
 
+    def test_state_inventory_inputs_run_policy_lint(self):
+        for p in ("plan.md", "docs/specs/state-machine-inventory.md"):
+            self.assertIn("policy-lint", jobs([p]), p)
+
     def test_ci_inputs_force_full(self):
         for p in (".github/workflows/ci.yml", "lean/lean-toolchain",
                   "lean/turbo-lean-revision", "ci/domains.toml"):

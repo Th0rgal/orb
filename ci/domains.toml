@@ -28,21 +28,6 @@ paths = [
   "nix/*",
 ]
 
-# Prose-only changes. docs-site and screenshots have no CI job of their own yet.
-[[domain]]
-name = "docs"
-paths = [
-  "README.md",
-  "INSTALL.md",
-  "DEBUGGING.md",
-  "AGENTS.md",
-  "plan.md",
-  "docs/*",
-  "docs-site/*",
-  "screenshots/*",
-]
-jobs = []
-
 # The formal kernel and everything generated from it: affects every client.
 [[domain]]
 name = "kernel"
@@ -165,6 +150,8 @@ name = "policy"
 paths = [
   "scripts/*",
   "tests/*",
+  "plan.md",
+  "docs/specs/state-machine-inventory.md",
   "skills/*",
   "capabilities/*",
   "catalog/*",
@@ -182,3 +169,17 @@ paths = [
   ".gitattributes",
 ]
 jobs = ["harness-contract", "policy-lint", "capability-matrix", "docker"]
+
+# Prose-only changes. docs-site and screenshots have no CI job of their own yet.
+[[domain]]
+name = "docs"
+paths = [
+  "README.md",
+  "INSTALL.md",
+  "DEBUGGING.md",
+  "AGENTS.md",
+  "docs/*",
+  "docs-site/*",
+  "screenshots/*",
+]
+jobs = []
