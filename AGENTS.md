@@ -449,11 +449,27 @@ Orb follows the **"Lean Decides, Rust Does"** boundary across the control plane,
 See **[DEBUGGING.md](DEBUGGING.md)** for service management, logs and
 deployment procedures.
 
-Production deploys have one implementation (`run_deploy` in
-`src/api/system.rs`) and two entry points: the operator runs
-`ssh agent-core '/usr/local/bin/sandboxed-sh-prod deploy --service
-sandboxed-sh-prod.service'` (no grant needed; also the fallback when the
-approval UI or broker is down), and missions call `POST /api/system/deploy`
-with a session-scoped `service_deploy` grant. Both health-check the restart
-and roll back automatically. Do not deploy by copying binaries or with a bare
-`systemctl restart`.
+## Dev and prod instances
+
+Two Core instances run on `agent-core`: prod (`sandboxed-sh-prod`, `:3000`,
+data `/root/.sandboxed-sh`) and dev (`sandboxed-sh-dev`, `:3002`,
+`agent-backend-dev.thomas.md`, data `/var/lib/sandboxed-sh-dev`). Their users,
+missions, settings and sealed provider keys are separate; the host and the
+cloud provider accounts are shared, so dev machines cost real money. Test risky
+changes on dev first. The plan to put both on one base configuration, sync
+settings between them and give missions a dev pass is
+[docs/plans/dev-prod-environments.md](docs/plans/dev-prod-environments.md).
+
+Deploy with `orb-deploy [--detach] <sha|master> [--dev-only]` on agent-core
+(`scripts/ops/orb-deploy`): it builds that exact commit with the CI-parity
+command, runs the Core self-test, installs dev, health-checks, then prod with a
+backup and automatic rollback; `--detach` runs it as a transient unit
+(`journalctl -u orb-deploy`, log `/var/log/orb-deploy.log`). Missions use
+`--dev-only` only. Do not deploy by copying binaries or with a bare
+`systemctl restart`. The legacy Rust `deploy` subcommand described in
+DEBUGGING.md no longer applies to the Lean server.
+
+`orb-monitor` (`scripts/ops/orb-monitor`, every 5 min) checks Core health and
+build, proxy error rates, stalled missions, expiring or orphaned VMs, failed
+units and long builds, and reports only changes to Paloma's webhook and the
+"Orb monitor" mission in the Inbox.
