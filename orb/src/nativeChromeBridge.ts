@@ -86,6 +86,18 @@ export function isNativeChromeEnabled(win: Window | undefined = typeof window ==
   return (win as NativeChromeWindow).__ORB_NATIVE_CHROME__ === true;
 }
 
+/**
+ * Whether the WebView should collapse its own sidebar because the viewport is narrow.
+ *
+ * In Hybrid Native Chrome the sidebar and its toolbar (toggle, search, back, forward) live in
+ * the native pane beside the WebView, so the WebView's width says nothing about room for a
+ * sidebar. Collapsing on a narrow WebView changed only the WebView's idea of the sidebar: the
+ * native pane stayed open with its toolbar and the WebView drew a second one.
+ */
+export function shouldAutoCollapseSidebar(narrowViewport: boolean, nativeChrome: boolean): boolean {
+  return narrowViewport && !nativeChrome;
+}
+
 export function serializeNativeChromeMission(m: Mission): NativeChromeMissionWire {
   const createdMs = Date.parse(m.created_at || "");
   const updatedMs = Date.parse(m.updated_at || m.created_at || "");

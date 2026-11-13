@@ -298,3 +298,12 @@ describe("nativeChromeBridge", () => {
     }
   });
 });
+
+it("a narrow WebView collapses its sidebar only when it draws the sidebar itself", async () => {
+  const { shouldAutoCollapseSidebar } = await import("../src/nativeChromeBridge");
+  expect(shouldAutoCollapseSidebar(true, false)).toBe(true);
+  expect(shouldAutoCollapseSidebar(false, false)).toBe(false);
+  // Hybrid Native Chrome: the sidebar is a native pane beside the WebView.
+  expect(shouldAutoCollapseSidebar(true, true)).toBe(false);
+  expect(shouldAutoCollapseSidebar(false, true)).toBe(false);
+});
