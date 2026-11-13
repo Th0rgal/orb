@@ -342,7 +342,7 @@ prod and dev were on `313ec310d` at 19:21, not rechecked since.
 
 | PR | What | State at 22:08 | Next |
 | --- | --- | --- | --- |
-| #1743 | desktop: a mission that ended keeps no phantom queue; `awaiting_user` is not ended | all green except `kernel-abi` pending | squash-merge on green |
+| #1743 | desktop: a mission that ended keeps no phantom queue; `awaiting_user` is not ended | **merged 22:10 as `74f89ae0`**, every check green on `1c1a3c3a` | rides the next deploy |
 | #1748 | Core: a cut-off streamed reply is not a clean end; pacing slot held for the whole stream | `Test`, `kernel-abi` pending | squash-merge on green |
 | #1749 | tests: member-minted MCP sessions are refused every `secret_*` tool | just opened | squash-merge on green |
 | #1745 | Core: reduced member views on sibling routes; sidecar parked logins on the health route | **`Test` red** | do not merge, see below |
@@ -379,6 +379,34 @@ that correction lands on it.**
   established (one log partial, one run died on a busy port). Nothing
   published; master browser shards are green without it.
 - H (VM `7ca70124`, stopped): #1743 delivered.
+
+**Docs-only push filter (#1741) confirmed.** The push of this section
+(`e98ee7cd`, one file under `docs/`) started no `CI` and no `Kernel ABI`
+run (Actions API: 0 runs for that SHA, checked 22:10 and 22:11).
+
+**Relay received 22:11: "H request recorded … branch `fix/h-provider-health`
+base `de3fd0fa1`".** Read as a delayed message from the isolation worker,
+written against the 13:08 state. Checked: no branch `fix/h-provider-health`
+exists on origin; H's mission `11a48ddf` is completed. What it asks for
+now lives elsewhere:
+
+- H's provider work: #1737 (merged, `51beb2e8`) and #1743 (merged,
+  `74f89ae0`).
+- Parked sidecar logins on the health route and the admin clear: commits
+  `e080233e` + `33eabd77` inside #1745, **not merged** (PR red, see above).
+  Read contract: `GET /api/model-routing/health` rows gain `parked_until`,
+  `parked_reason`, `parked_source` (`sidecar` / `core` / null) next to
+  `cooldown_secs_remaining`; `POST /api/model-routing/health/:id/clear` is
+  admin only. Source: `ProviderUsageAndLogin.lean`, doc
+  `docs/model-routing-health-cooldowns.md`. No final tested SHA can be
+  given until #1745 is corrected and merged.
+- Prompt error when a chain has one target and it is cooling: C's patch,
+  not published (security correction pending).
+
+Nothing live was done on this relay. The rules it states are adopted for
+the live validation once a `dev_operator` grant exists: dev only, never
+restart the sidecar, never clear a real quota park, clear only cooldowns
+the test created, no account identifier in any evidence.
 
 **Still open, no owner.** Track A / #1708; lean.ci PR #34 fence review
 (interdiff unread, lean runners stay on hold); isolation acceptance and
