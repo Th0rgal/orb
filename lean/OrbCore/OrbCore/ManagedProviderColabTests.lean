@@ -82,6 +82,9 @@ def run : IO Unit := do
     (quote "colab" "v5e1" 60).toOption == some 48 && (quote "colab" "colab-auto" 720).toOption == some 270 &&
     !(quote "colab" "small" 60).isOk && !(quote "colab" "t4" 721).isOk) "shadow prices at half the Vast.ai rate"
 
+  check (publicProviderId "colab" notebookId == "rt-1" && publicProviderId "boat" "sb-1~x" == "sb-1~x" &&
+    publicProviderId "leanci" "11111111-2222-3333-4444-555555555555" == "11111111-2222-3333-4444-555555555555")
+    "the pool account's email is not part of the ID shown to a machine's owner"
   let spec : SpawnSpec := { name := "orb-managed-dev-t", size := "t4", ttlSeconds := 600, idempotencyKey := "k1" }
   let before := (← apiRequests.get).size
   check (!(← provider.spawn { spec with name := "bad name!" }).isOk && !(← provider.spawn { spec with idempotencyKey := "" }).isOk &&

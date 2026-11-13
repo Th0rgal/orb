@@ -255,6 +255,9 @@ def colabDeclaration : Declaration := {
   supportsExtend := true
   quoteCents := colabQuoteCents
   create := fun transport => colab transport
+  -- A notebook ID is `<runtime>~<Google account email>`. The pool's accounts
+  -- are the operator's; a user who rents a runtime sees only the runtime part.
+  publicId := fun id => (id.splitOn "~").headD id
 }
 
 end OrbCore.ManagedProvider

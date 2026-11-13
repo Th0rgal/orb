@@ -21,6 +21,11 @@ def quote (provider size : String) (ttlMinutes : UInt64) : Result UInt64 := do
     | throw { code := "managed_provider_not_implemented" }
   entry.quoteCents size ttlMinutes
 
+def publicProviderId (provider id : String) : String :=
+  match declaration? provider with
+  | some entry => entry.publicId id
+  | none => id
+
 def sizeJson (size : Size) : JVal := .obj #[
   ("size", .str size.name),
   ("cpu", .nat size.cpu),

@@ -137,6 +137,9 @@ structure Declaration where
   supportsExtend : Bool
   quoteCents : String → UInt64 → Result UInt64
   create : Transport → Provider
+  /-- The part of a provider's machine ID that may be shown to the machine's
+      owner. Core always calls the provider with the full ID. -/
+  publicId : String → String := id
 
 /-- Retain transport diagnostics privately, without a credential or log injection. -/
 def transportDiagnostic (apiKey cause : String) : String :=
