@@ -59,6 +59,21 @@ def run (root : String) : IO Unit := do
     check (capped == range 1 45) s!"view=all returns at most 50 events, here all 45: {capped.size}"
     let (cappedTail, _, _, _) ← call #[("view", .str "all"), ("limit", .nat 500), ("before_seq", .nat 100)]
     check (cappedTail.size == 45) "an out-of-range cursor is harmless"
+    -- ask_mission asks a side agent; it never posts the question into the mission itself.
+    let askArgs : JVal := .obj #[("mission_id", .str "reader"), ("content", .str "status?")]
+    let unavailable ← OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root claims "ask_mission" askArgs 1000
+    check (((OrbBin.Json.parse unavailable).toOption.getD .null).fieldBool? "ok" != some true)
+      "ask_mission without a side-agent launcher fails"
+    let asked ← IO.mkRef ("", "")
+    let launcher : String → String → String → IO (Except String String) := fun mid q _ => do
+      asked.set (mid, q); pure (.ok "{\"id\":\"side-1\",\"status\":\"active\"}")
+    let raw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root claims "ask_mission" askArgs 1000
+      none none "" false (some launcher)
+    let res := (((OrbBin.Json.parse raw).toOption.getD .null).field? "result").getD .null
+    check (res.fieldStr? "side_mission_id" == some "side-1" && (← asked.get) == ("reader", "status?"))
+      s!"ask_mission launches a side agent: {raw}"
+    let (_, kinds, _, maxAfter) ← call #[("limit", .nat 1)]
+    check (maxAfter == 45 && !kinds.contains "operator_note") "ask_mission adds no event to the mission"
   finally
     closeCoreStore store
 
