@@ -5,7 +5,7 @@
 import OrbCore.Control
 
 namespace OrbCore.ProxyRoutingTests
-open LeanSys.Http OrbBin.Json OrbBin.PosixExt OrbBin.Sqlite
+open LeanSys.Http LeanSys.Posix OrbBin.Json OrbBin.PosixExt OrbBin.Sqlite
 open OrbCore.Control OrbCore.Store OrbCore.Proxy OrbCore.Managed
 
 private def check (ok : Bool) (label : String) : IO Unit := do
@@ -17,8 +17,56 @@ private def chain (id name model : String) : RoutingChain := {
   targets := #[{ accountId := id, provider := "openai", baseUrl := "http://127.0.0.1:1", apiKey := "fixture-only", modelId := model }]
 }
 
+/-- A streamed reply reaches the client while the upstream is still producing it
+    (regression: every `/v1/*` reply used to be buffered until its last byte). -/
+def runStreaming : IO Unit := do
+  -- Framing and request detection.
+  check (requestWantsStream "/v1/chat/completions" "{\"stream\":true}".toUTF8) "stream flag"
+  check (!requestWantsStream "/v1/chat/completions" "{\"stream\":false}".toUTF8) "stream false"
+  check (requestWantsStream "/v1beta/models/g:streamGenerateContent" ByteArray.empty) "gemini stream path"
+  check (encodeHttpChunk "hello".toUTF8 == "5\r\nhello\r\n".toUTF8 &&
+    encodeHttpChunk ByteArray.empty == "0\r\n\r\n".toUTF8) "chunk frames"
+  match stepBodyFraming (.length 3) "abcdef".toUTF8 with
+  | .ok (out, _, fin) => check (out == "abc".toUTF8 && fin) "content-length framing"
+  | .error _ => check false "content-length framing"
+  -- Live relay over a loopback upstream that pauses between SSE events.
+  let pieces := #["data: {\"n\":1}\n\n", "data: {\"n\":2}\n\n", "data: [DONE]\n\n"]
+  let pauseMs : UInt32 := 400
+  let .ok (lfd, port) ← tcpListen "127.0.0.1" 0 4
+    | throw (IO.userError "proxy streaming: listen failed")
+  let _ ← IO.asTask (prio := .dedicated) do
+    if let .ok cfd ← tcpAcceptPoll lfd 5000 then
+      discard <| pollReadable cfd 2000
+      discard <| readStreamChunk cfd 65536
+      discard <| writeAll cfd ("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n").toUTF8 false
+      for p in pieces do
+        discard <| writeAll cfd (encodeHttpChunk p.toUTF8) false
+        IO.sleep pauseMs
+      discard <| writeAll cfd (encodeHttpChunk ByteArray.empty) false
+      discard <| closeFd cfd
+    discard <| closeFd lfd
+  let streamChain : RoutingChain := {
+    id := "s", name := "s",
+    targets := #[{ accountId := "s", provider := "openai", baseUrl := s!"http://127.0.0.1:{port}", apiKey := "k", modelId := "m" }] }
+  let out ← forwardProxyChain streamChain "POST" "/v1/chat/completions" #[]
+    "{\"model\":\"m\",\"stream\":true}".toUTF8
+  check (out.status == 200) s!"streamed status {out.status}"
+  let some pump := out.stream?
+    | throw (IO.userError "proxy streaming: 2xx stream reply was buffered")
+  let t0 ← IO.monoMsNow
+  let arrivals ← IO.mkRef (#[] : Array Nat)
+  let copy ← pump fun _ => do
+    arrivals.modify (·.push ((← IO.monoMsNow) - t0))
+    return true
+  let times ← arrivals.get
+  check (String.fromUTF8? copy == some (String.join pieces.toList)) "streamed body is intact"
+  -- The first event must not wait for the upstream to finish (~3 pauses).
+  check (times.size ≥ 2 && times[0]! + pauseMs.toNat ≤ times[times.size - 1]!) s!"events arrive as produced: {times}"
+
 /-- Actual request routing, including unknown errors and no default/name/suffix aliasing. -/
 def run : IO Unit := do
+  runStreaming
   -- A spent Antigravity quota cools only that model: Opus 4.6 and Gemini stay eligible.
   let agClaude := OrbCore.ProxyModelRouting.antigravityPoolAccount "claude-opus-5-5-high"
   let agGemini := OrbCore.ProxyModelRouting.antigravityPoolAccount "gemini-4-carbon-eap"
