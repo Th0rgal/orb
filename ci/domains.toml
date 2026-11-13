@@ -91,6 +91,7 @@ paths = [
   "lean/OrbLocald/*",
   "lean/OrbNetLeaf/*",
   "scripts/build_orb_bins.sh",
+  "scripts/test_build_orb_bins.py",
   "scripts/ci_harden_ubuntu_apt.sh",
   "lean/.gitignore",
 ]

@@ -38,7 +38,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -46,75 +48,25 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - name: Install pinned Lean 4.35.0 toolchain (direct SHA-256 verified release, no elan)
+      - uses: ./.github/actions/setup-turbo-lean
+        with:
+          provenance-path: audit-results/turbo-lean-provenance.json
+      - name: Lean build via turbo-lean, pr-verify / ci-verify, and axiom / vacuity audit
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          LEAN_ARCHIVE="/tmp/lean-4.35.0-linux.tar.zst"
-          LEAN_SHA256="7289597a44543246c9227b8cae501767e095ce17f6d448b95fc4a8dc97268f6d"
-          curl --retry 5 --retry-all-errors -fsSL \
-            "https://github.com/leanprover/lean4/releases/download/v4.35.0/lean-4.35.0-linux.tar.zst" \
-            -o "$LEAN_ARCHIVE"
-          echo "${LEAN_SHA256}  ${LEAN_ARCHIVE}" | sha256sum -c -
-          mkdir -p "$HOME/.local/lean-4.35.0"
-          tar --zstd -xf "$LEAN_ARCHIVE" --strip-components=1 -C "$HOME/.local/lean-4.35.0"
-          rm -f "$LEAN_ARCHIVE"
-          echo "$HOME/.local/lean-4.35.0/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/lean-4.35.0/bin/lean" --version
-      - name: Lean build (direct compiler, sorry is an error) and axiom / vacuity audit
-        working-directory: lean
-        run: |
-          set -euo pipefail
-          mkdir -p .lake/build/lib/lean/Orb .lake/build/ir/Orb
-          lean -DwarningAsError=true -DautoImplicit=false Orb/Scroll.lean \
-            -o .lake/build/lib/lean/Orb/Scroll.olean \
-            -i .lake/build/lib/lean/Orb/Scroll.ilean
-          lean -DwarningAsError=true -DautoImplicit=false Orb/Stream.lean \
-            -o .lake/build/lib/lean/Orb/Stream.olean \
-            -i .lake/build/lib/lean/Orb/Stream.ilean
-          lean -DwarningAsError=true -DautoImplicit=false Orb/Kernel.lean \
-            -o .lake/build/lib/lean/Orb/Kernel.olean \
-            -i .lake/build/lib/lean/Orb/Kernel.ilean \
-            -c .lake/build/ir/Orb/Kernel.c
-          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/Spec.lean \
-            -o .lake/build/lib/lean/Orb/Spec.olean \
-            -i .lake/build/lib/lean/Orb/Spec.ilean
-          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/MutantSuite.lean \
-            -o .lake/build/lib/lean/Orb/MutantSuite.olean \
-            -i .lake/build/lib/lean/Orb/MutantSuite.ilean
-          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/StatefulMutantSuite.lean \
-            -o .lake/build/lib/lean/Orb/StatefulMutantSuite.olean \
-            -i .lake/build/lib/lean/Orb/StatefulMutantSuite.ilean
-          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/Lifecycle.lean \
-            -o .lake/build/lib/lean/Orb/Lifecycle.olean \
-            -i .lake/build/lib/lean/Orb/Lifecycle.ilean
-          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/LifecycleSpec.lean \
-            -o .lake/build/lib/lean/Orb/LifecycleSpec.olean \
-            -i .lake/build/lib/lean/Orb/LifecycleSpec.ilean
-          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/LifecycleMutants.lean \
-            -o .lake/build/lib/lean/Orb/LifecycleMutants.olean \
-            -i .lake/build/lib/lean/Orb/LifecycleMutants.ilean
-          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/HarnessCloud.lean \
-            -o .lake/build/lib/lean/Orb/HarnessCloud.olean \
-            -i .lake/build/lib/lean/Orb/HarnessCloud.ilean
-          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/HarnessCloudSpec.lean \
-            -o .lake/build/lib/lean/Orb/HarnessCloudSpec.olean \
-            -i .lake/build/lib/lean/Orb/HarnessCloudSpec.ilean
-          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/HarnessCloudMutants.lean \
-            -o .lake/build/lib/lean/Orb/HarnessCloudMutants.olean \
-            -i .lake/build/lib/lean/Orb/HarnessCloudMutants.ilean
-          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/ManagedNode.lean \
-            -o .lake/build/lib/lean/Orb/ManagedNode.olean \
-            -i .lake/build/lib/lean/Orb/ManagedNode.ilean
-          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/ManagedNodeSpec.lean \
-            -o .lake/build/lib/lean/Orb/ManagedNodeSpec.olean \
-            -i .lake/build/lib/lean/Orb/ManagedNodeSpec.ilean
-          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/ManagedNodeMutants.lean \
-            -o .lake/build/lib/lean/Orb/ManagedNodeMutants.olean \
-            -i .lake/build/lib/lean/Orb/ManagedNodeMutants.ilean
-          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true audit/AuditSpec.lean
-          lean -DwarningAsError=true -DautoImplicit=false Orb/Transcript.lean \
-            -o .lake/build/lib/lean/Orb/Transcript.olean \
-            -i .lake/build/lib/lean/Orb/Transcript.ilean
+          mkdir -p audit-results
+          TURBO_LEAN_EMIT_C=1 turbo-lean build --project-dir lean
+          LEAN_PATH=lean/.lake/build/lib/lean lean -DwarningAsError=true lean/audit/AuditSpec.lean
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            base_ref="${PR_BASE_SHA:-origin/master}"
+            git cat-file -e "${base_ref}^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$base_ref"
+            turbo-lean --json pr-verify --project-dir lean --scope Orb --base "$base_ref" --mode untrusted --kernel auto --receipt audit-results/kernel-verify-receipt.json
+          else
+            turbo-lean --json ci-verify --project-dir lean --scope Orb --mode trusted --seed-shards --kernel auto --receipt audit-results/kernel-verify-receipt.json
+          fi
       - name: Scroll policy fixtures match Lean (Orb.Scroll)
         run: |
           set -euo pipefail
@@ -196,159 +148,76 @@ jobs:
       - name: Android JNI libraries rebuild with the NDK and match sources / ABI
         run: scripts/build_android_kernel_so.sh --check
 
-      - name: Read reviewed turbo-lean source revision
-        id: turbo-pin
-        run: |
-          revision=$(cat lean/turbo-lean-revision)
-          [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
-          echo "revision=$revision" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v4
-        with:
-          repository: Th0rgal/turbo-lean
-          ref: ${{ steps.turbo-pin.outputs.revision }}
-          path: .tools/turbo-lean
-          persist-credentials: false
-      - name: Build reviewed turbo-lean and record binary provenance
-        env:
-          CARGO_PROFILE_DEV_DEBUG: "0"
-        run: |
-          set -euo pipefail
-          source_dir="$PWD/.tools/turbo-lean"
-          expected=$(cat lean/turbo-lean-revision)
-          test "$(git -C "$source_dir" rev-parse HEAD)" = "$expected"
-          test -z "$(git -C "$source_dir" status --porcelain)"
-          test "$(cat "$source_dir/lean/lean-toolchain")" = "$(cat lean/lean-toolchain)"
-          (cd "$source_dir/lean" && lake build LeanSys LeanNative.Spec)
-          cargo build --locked -j 1 --manifest-path "$source_dir/Cargo.toml" -p turbo-lean
-          git -C "$source_dir" diff --exit-code
-          mkdir -p audit-results
-          python3 - <<'PYCODE'
-          import hashlib, json, pathlib, subprocess
-          binary = pathlib.Path(".tools/turbo-lean/target/debug/turbo-lean")
-          receipt = {
-              "repository": "https://github.com/Th0rgal/turbo-lean",
-              "revision": pathlib.Path("lean/turbo-lean-revision").read_text().strip(),
-              "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
-              "version": subprocess.check_output([str(binary), "--version"], text=True).strip(),
-          }
-          pathlib.Path("audit-results/turbo-lean-provenance.json").write_text(json.dumps(receipt, indent=2) + "\n")
-          print(json.dumps(receipt, indent=2))
-          PYCODE
-      - name: Build and self-test OrbNetLeaf foundation (<= 220 C LOC, zero lean_elab)
+      - name: Build and self-test OrbNetLeaf + Wave 1-4 native binaries and test suites (<= 220 C LOC, zero lean_elab)
         run: |
           set -euo pipefail
           ./scripts/ci_harden_ubuntu_apt.sh
           sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev libsqlite3-dev
-          c_lines=$(wc -l < lean/OrbNetLeaf/c/orb_net_leaf.c)
-          echo "orb_net_leaf.c LOC: $c_lines"
-          test "$c_lines" -le 220
-          (cd lean/OrbNetLeaf && lake build -- -DwarningAsError=true && ./.lake/build/bin/orb-net-leaf-test)
-          elab_syms=$(nm -u lean/OrbNetLeaf/.lake/build/bin/orb-net-leaf-test | grep -c lean_elab || true)
-          test "$elab_syms" -eq 0
-      - name: Build and self-test Wave 1 OrbBin + Wave 2 OrbNode + Wave 3 OrbClient + Wave 4 OrbCore & OrbLocald (<= 220 C LOC, zero lean_elab)
-        run: |
-          set -euo pipefail
-          c_lines=$(wc -l < lean/OrbBin/c/orb_bin_posix.c)
-          echo "orb_bin_posix.c LOC: $c_lines"
-          test "$c_lines" -le 220
-          sq_c_lines=$(wc -l < lean/OrbBin/c/orb_bin_sqlite.c)
-          echo "orb_bin_sqlite.c LOC: $sq_c_lines"
-          test "$sq_c_lines" -le 220
-          node_c_lines=$(wc -l < lean/OrbNode/c/orb_node_posix.c)
-          echo "orb_node_posix.c LOC: $node_c_lines"
-          test "$node_c_lines" -le 220
-          core_c_lines=$(wc -l < lean/OrbCore/c/orb_core_sqlite.c)
-          echo "orb_core_sqlite.c LOC: $core_c_lines"
-          test "$core_c_lines" -le 220
-          shell_c_lines=$(wc -l < linux_shell/main.c)
-          echo "linux_shell/main.c LOC: $shell_c_lines"
-          test "$shell_c_lines" -le 220
-          gtk_c_lines=$(wc -l < linux_shell/gtk_chrome.c)
-          echo "linux_shell/gtk_chrome.c LOC: $gtk_c_lines"
-          test "$gtk_c_lines" -le 220
-          gtk_ic_lines=$(wc -l < linux_shell/gtk_icons.c)
-          echo "linux_shell/gtk_icons.c LOC: $gtk_ic_lines"
-          test "$gtk_ic_lines" -le 220
-          gtk_menu_lines=$(wc -l < linux_shell/gtk_menu.c)
-          echo "linux_shell/gtk_menu.c LOC: $gtk_menu_lines"
-          test "$gtk_menu_lines" -le 220
-          ./scripts/build_orb_bins.sh --out-dir target/debug
-          (cd lean/OrbBin && lake build orb-bin-test -- -DwarningAsError=true && ./.lake/build/bin/orb-bin-test)
-          (cd lean/OrbNode && lake build orb-node-test -- -DwarningAsError=true && ./.lake/build/bin/orb-node-test)
-          (cd lean/OrbClient && lake build -- -DwarningAsError=true && ./.lake/build/bin/orb-client-test)
-          (cd lean/OrbCore && lake build orb-core-test orb-spec-runner -- -DwarningAsError=true)
-          ./lean/OrbCore/.lake/build/bin/orb-core-test
-          ./lean/OrbCore/.lake/build/bin/orb-spec-runner --fixtures shared/orb-spec/fixtures
-          (cd lean/OrbLocald && lake build orb-locald-test -- -DwarningAsError=true && ./.lake/build/bin/orb-locald-test)
-          for test_bin in lean/OrbBin/.lake/build/bin/orb-bin-test lean/OrbNode/.lake/build/bin/orb-node-test lean/OrbClient/.lake/build/bin/orb-client-test lean/OrbCore/.lake/build/bin/orb-core-test lean/OrbCore/.lake/build/bin/orb-spec-runner lean/OrbLocald/.lake/build/bin/orb-locald-test; do
-            elab_syms=$(nm -u "$test_bin" | grep -c lean_elab || true)
-            test "$elab_syms" -eq 0
+          for cfile in \
+            lean/OrbNetLeaf/c/orb_net_leaf.c \
+            lean/OrbBin/c/orb_bin_posix.c \
+            lean/OrbBin/c/orb_bin_sqlite.c \
+            lean/OrbNode/c/orb_node_posix.c \
+            lean/OrbCore/c/orb_core_sqlite.c \
+            linux_shell/main.c \
+            linux_shell/gtk_chrome.c \
+            linux_shell/gtk_icons.c \
+            linux_shell/gtk_menu.c
+          do
+            c_lines=$(wc -l < "$cfile")
+            echo "$cfile LOC: $c_lines"
+            test "$c_lines" -le 220
           done
+          ./scripts/build_orb_bins.sh --with-tests --out-dir target/debug
           ax_out=$(printf 'import OrbClient.Reducers\n#print axioms OrbClient.Reducers.parse_encode_orb_client_patch_roundtrip\n' | LEAN_PATH="lean/OrbClient/.lake/build/lib/lean:$(lean --print-prefix)/lib/lean" lean --stdin)
           echo "$ax_out"
           echo "$ax_out" | grep -qF "depends on axioms: [propext, Classical.choice, Quot.sound]"
           out=$(LEAN_PATH="lean/OrbClient/.lake/build/lib/lean:$(lean --print-prefix)/lib/lean" lean --run scripts/gen_client_core_fixtures.lean)
           diff <(printf '%s\n' "$out") shared/orb-spec/fixtures/client-core.json
-          for bin in fido-agent-proxy orb-privd orb-sudo lean-mesh palomactl sandboxed-mcp workspace-mcp desktop-mcp automation-manager-mcp sandboxed-node orb-core orb-locald; do
-            test -x "target/debug/$bin"
-            elab_syms=$(nm -u "target/debug/$bin" | grep -c lean_elab || true)
-            test "$elab_syms" -eq 0
-          done
-      - name: Fresh turbo-lean tightness and horizontal-packing gate
+      - name: Batched turbo-lean tightness and horizontal-packing gate
         env:
-          TURBO_LEAN_NO_AUDIT_CACHE: "1"
           SANDBOXED_TELEMETRY_BATCH_ONLY: "1"
         run: |
           set -euo pipefail
           python3 -m unittest -v scripts/test_spec_audit.py
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/Spec.lean > audit-results/spec-audit.json
-          python3 scripts/check_spec_audit.py audit-results/spec-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/MutantSuite.lean > audit-results/mutant-audit.json
-          python3 scripts/check_spec_audit.py audit-results/mutant-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/StatefulMutantSuite.lean > audit-results/stateful-mutant-audit.json
-          python3 scripts/check_spec_audit.py audit-results/stateful-mutant-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/LifecycleSpec.lean > audit-results/lifecycle-spec-audit.json
-          python3 scripts/check_spec_audit.py audit-results/lifecycle-spec-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/LifecycleMutants.lean > audit-results/lifecycle-mutant-audit.json
-          python3 scripts/check_spec_audit.py audit-results/lifecycle-mutant-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/HarnessCloudSpec.lean > audit-results/harness-cloud-spec-audit.json
-          python3 scripts/check_spec_audit.py audit-results/harness-cloud-spec-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/HarnessCloudMutants.lean > audit-results/harness-cloud-mutant-audit.json
-          python3 scripts/check_spec_audit.py audit-results/harness-cloud-mutant-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/ManagedNodeSpec.lean > audit-results/managed-node-spec-audit.json
-          python3 scripts/check_spec_audit.py audit-results/managed-node-spec-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/ManagedNodeMutants.lean > audit-results/managed-node-mutant-audit.json
-          python3 scripts/check_spec_audit.py audit-results/managed-node-mutant-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/Stream.lean > audit-results/stream-audit.json
-          python3 scripts/check_spec_audit.py audit-results/stream-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/Transcript.lean > audit-results/transcript-audit.json
-          python3 scripts/check_spec_audit.py audit-results/transcript-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbNetLeaf/OrbNetLeaf/Spec.lean > audit-results/orb-net-leaf-spec-audit.json
-          python3 scripts/check_spec_audit.py audit-results/orb-net-leaf-spec-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbNetLeaf/OrbNetLeaf/MutantSuite.lean > audit-results/orb-net-leaf-mutant-audit.json
-          python3 scripts/check_spec_audit.py audit-results/orb-net-leaf-mutant-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbBin/OrbBin/Spec.lean > audit-results/orb-bin-spec-audit.json
-          python3 scripts/check_spec_audit.py audit-results/orb-bin-spec-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbBin/OrbBin/MutantSuite.lean > audit-results/orb-bin-mutant-audit.json
-          python3 scripts/check_spec_audit.py audit-results/orb-bin-mutant-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbNode/OrbNode/Spec.lean > audit-results/orb-node-spec-audit.json
-          python3 scripts/check_spec_audit.py audit-results/orb-node-spec-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbNode/OrbNode/MutantSuite.lean > audit-results/orb-node-mutant-audit.json
-          python3 scripts/check_spec_audit.py audit-results/orb-node-mutant-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbClient/OrbClient/Spec.lean > audit-results/orb-client-spec-audit.json
-          python3 scripts/check_spec_audit.py audit-results/orb-client-spec-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbClient/OrbClient/MutantSuite.lean > audit-results/orb-client-mutant-audit.json
-          python3 scripts/check_spec_audit.py audit-results/orb-client-mutant-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbClient/OrbClient/Reducers.lean > audit-results/orb-client-reducers-audit.json
-          python3 scripts/check_spec_audit.py audit-results/orb-client-reducers-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbCore/OrbCore/Spec.lean > audit-results/orb-core-spec-audit.json
-          python3 scripts/check_spec_audit.py audit-results/orb-core-spec-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbCore/OrbCore/MutantSuite.lean > audit-results/orb-core-mutant-audit.json
-          python3 scripts/check_spec_audit.py audit-results/orb-core-mutant-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbLocald/OrbLocald/Spec.lean > audit-results/orb-locald-spec-audit.json
-          python3 scripts/check_spec_audit.py audit-results/orb-locald-spec-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbLocald/OrbLocald/MutantSuite.lean > audit-results/orb-locald-mutant-audit.json
-          python3 scripts/check_spec_audit.py audit-results/orb-locald-mutant-audit.json
+          turbo-lean --json audit-spec --policy strict-proofs --require-nonempty \
+            lean/Orb/Spec.lean \
+            lean/Orb/MutantSuite.lean \
+            lean/Orb/StatefulMutantSuite.lean \
+            lean/Orb/LifecycleSpec.lean \
+            lean/Orb/LifecycleMutants.lean \
+            lean/Orb/HarnessCloudSpec.lean \
+            lean/Orb/HarnessCloudMutants.lean \
+            lean/Orb/ManagedNodeSpec.lean \
+            lean/Orb/ManagedNodeMutants.lean \
+            lean/Orb/Stream.lean \
+            lean/Orb/Transcript.lean \
+            lean/OrbNetLeaf/OrbNetLeaf/Spec.lean \
+            lean/OrbNetLeaf/OrbNetLeaf/MutantSuite.lean \
+            lean/OrbBin/OrbBin/Spec.lean \
+            lean/OrbBin/OrbBin/MutantSuite.lean \
+            lean/OrbNode/OrbNode/Spec.lean \
+            lean/OrbNode/OrbNode/MutantSuite.lean \
+            lean/OrbClient/OrbClient/Spec.lean \
+            lean/OrbClient/OrbClient/MutantSuite.lean \
+            lean/OrbClient/OrbClient/Reducers.lean \
+            lean/OrbCore/OrbCore/Spec.lean \
+            lean/OrbCore/OrbCore/MutantSuite.lean \
+            lean/OrbLocald/OrbLocald/Spec.lean \
+            lean/OrbLocald/OrbLocald/MutantSuite.lean \
+            > audit-results/spec-audit-batch.json
+          python3 scripts/check_spec_audit.py audit-results/spec-audit-batch.json
+      - name: Export turbo-lean CAS bundle (.tlpack)
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+        run: |
+          mkdir -p "${RUNNER_TEMP}/.turbo-pack"
+          turbo-lean export "${RUNNER_TEMP}/.turbo-pack/cache.tlpack"
+      - name: Save turbo-lean CAS bundle (.tlpack)
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/.turbo-pack
+          key: turbo-lean-cas-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lake-manifest.json', 'lean/**/*.lean') }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
