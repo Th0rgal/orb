@@ -9,6 +9,9 @@ open OrbCore.Control OrbCore.Store OrbCore.Managed OrbCore.ProviderUsageAndLogin
 private def check (condition : Bool) (label : String) : IO Unit := do
   unless condition do throw (IO.userError s!"tenant isolation: {label}")
 
+set_option maxHeartbeats 800000
+set_option maxRecDepth 200000
+
 /-- Two real stored principals through the REST/desktop and MCP HTTP boundary.
     All records, credentials and provider state are synthetic; no host effects. -/
 def run (root : String) : IO Unit := do
@@ -491,6 +494,128 @@ def run (root : String) : IO Unit := do
       match priorScKey with
       | some v => OrbBin.PosixExt.setenvVar "CLI_PROXY_MANAGEMENT_KEY" v
       | none => OrbBin.PosixExt.unsetenvVar "CLI_PROXY_MANAGEMENT_KEY"
+    -- Delete `iso-claude-oauth` from SQLite so subsequent checks see the two baseline active providers.
+    sql store.missionsDb "DELETE FROM ai_providers WHERE id='iso-claude-oauth';" #[]
+    -- Sibling provider/AI/model-routing GET routes must not leak admin provider names,
+    -- disabled admin provider rows, discovery labels, or global proxy usage/outcome rows to members,
+    -- while returning 200 reduced views to members and leaving admin/legacy-unscoped responses unchanged.
+    let disabledProvMarker := "admin-disabled-prov-marker"
+    let .ok () ← upsertAIProvider store {
+      id := disabledProvMarker, providerType := "openai", name := disabledProvMarker,
+      enabled := false, apiKey := ""
+    } | throw (IO.userError "isolation disabled provider")
+    let hydratedWithDisabled : JVal := .arr ((hydratedJson.asArr?.getD #[]).push (.obj #[
+      ("id", .str disabledProvMarker),
+      ("provider_type", .str "openai"),
+      ("name", .str disabledProvMarker),
+      ("enabled", .bool false),
+      ("account_email", .str provEmailMarker),
+      ("priority", .nat 9)
+    ]))
+    IO.FS.writeFile (System.FilePath.mk (store.rootDir ++ "/ai_providers.json")) (renderCompact hydratedWithDisabled)
+    let accountMarker := "admin-proxy-account-marker-1"
+    let modelMarker := "admin-proxy-model-marker-v1"
+    let discoveryMarker := "admin-discovery-connection-marker"
+    let nowIsoReal := formatEpochIso8601Utc nowReal
+    sql store.missionsDb
+      "INSERT INTO proxy_usage(timestamp,model,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,cost_cents,provider,account_id,api_key_id,api_key_name,mission_id,caller_kind,purpose,reasoning_tokens,account_bound) VALUES(?1,?2,100,50,0,0,12,'anthropic',?3,'','','admin-mission','mission','turn',0,1);"
+      #[nowIsoReal, modelMarker, accountMarker]
+    sql store.missionsDb
+      "INSERT INTO proxy_outcomes(timestamp,chain_id,provider,account_id,model,status,http_status,retries,ttft_ms,total_ms,fallback_depth,stream,superseded) VALUES(?1,'builtin/smart','anthropic',?2,?3,'error',502,1,0,120,0,0,0);"
+      #[nowIsoReal, accountMarker, modelMarker]
+    let discoveryJson : JVal := .obj #[
+      ("schema_version", .nat 1),
+      ("connections", .arr #[
+        .obj #[
+          ("provider_id", .str "anthropic"),
+          ("label", .str discoveryMarker),
+          ("access_profile", .str discoveryMarker),
+          ("account_email", .str provEmailMarker),
+          ("organization", .str provOrgMarker),
+          ("diagnostic", .str discoveryMarker),
+          ("status", .str "discovered"),
+          ("source", .str "discovery"),
+          ("checked_at", .str nowIsoReal),
+          ("last_success", .obj #[
+            ("observed_at", .str nowIsoReal),
+            ("completeness", .str "complete"),
+            ("models", .arr #[.obj #[("id", .str "claude-sonnet-4-5")]])
+          ])
+        ]
+      ])
+    ]
+    IO.FS.writeFile (System.FilePath.mk (store.rootDir ++ "/model-discovery.json")) (renderCompact discoveryJson)
+    let siblingRoutes : Array (String × String) := #[
+      ("GET /api/providers/catalog", "/api/providers/catalog"),
+      ("GET /api/providers/discovery", "/api/providers/discovery"),
+      ("GET /api/ai/usage/summary", "/api/ai/usage/summary"),
+      ("GET /api/ai/proxy/health", "/api/ai/proxy/health"),
+      ("GET /api/ai/proxy/timing", "/api/ai/proxy/timing"),
+      ("GET /api/model-routing/health", "/api/model-routing/health")
+    ]
+    let siblingMarkers : Array String := #[
+      provNameMarker,
+      "admin-provider-name-marker-beta",
+      disabledProvMarker,
+      provEmailMarker,
+      provOrgMarker,
+      "admin-mission",
+      accountMarker,
+      modelMarker,
+      discoveryMarker
+    ]
+    let stripGeneratedAt (jv : JVal) : JVal :=
+      match jv with
+      | .obj kvs => .obj (kvs.filter (fun (k, _) => k != "generated_at" && k != "window_start"))
+      | other => other
+    let mut adminSiblingDocs : Array JVal := #[]
+    for (routeName, target) in siblingRoutes do
+      let (aStatus, aDoc) ← send "GET" target admin (.obj #[]) stWithProviders
+      let some (lStatus, _, lBytes) ← dispatchProviderAndAiRoute pHub store path 3000 none
+          stWithProviders.proxyCooldownsRef "GET" target target ByteArray.empty "" false true stWithProviders.healthTracker?
+        | throw (IO.userError s!"legacy unscoped dispatch missing on {routeName}")
+      let .ok lDoc := OrbBin.Json.parseBytes lBytes
+        | throw (IO.userError s!"legacy unscoped JSON parse failed on {routeName}")
+      check (aStatus == 200 && lStatus == 200) s!"admin and legacy unscoped status 200 on {routeName}"
+      check (renderCompact (stripGeneratedAt aDoc) == renderCompact (stripGeneratedAt lDoc))
+        s!"admin and legacy unscoped receive identical response on {routeName}"
+      adminSiblingDocs := adminSiblingDocs.push aDoc
+    let adminSiblingCombined := renderCompact (.arr adminSiblingDocs)
+    for marker in #[provNameMarker, "admin-provider-name-marker-beta", disabledProvMarker, "admin-mission", accountMarker, modelMarker, discoveryMarker] do
+      check ((adminSiblingCombined.splitOn marker).length > 1) s!"admin sees sibling route marker {marker}"
+    let mut siblingLeaks : Array String := #[]
+    for (routeName, target) in siblingRoutes do
+      let (mStatus, mDoc) ← send "GET" target member (.obj #[]) stWithProviders
+      check (mStatus == 200) s!"member status 200 on {routeName}"
+      let raw := renderCompact mDoc
+      let mut leakedOnRoute : Array String := #[]
+      for marker in siblingMarkers do
+        if (raw.splitOn marker).length > 1 then
+          leakedOnRoute := leakedOnRoute.push marker
+      if !leakedOnRoute.isEmpty then
+        let joinedMarkers := String.intercalate ", " leakedOnRoute.toList
+        siblingLeaks := siblingLeaks.push s!"{routeName} ({mStatus}) -> [{joinedMarkers}]"
+    let joinedSiblingLeaks := String.intercalate "; " siblingLeaks.toList
+    check siblingLeaks.isEmpty s!"member sibling provider/ai routes leaked owner identity: {joinedSiblingLeaks}"
+    let (_, mCatDoc) ← send "GET" "/api/providers/catalog" member (.obj #[]) stWithProviders
+    let mCatProvs := (mCatDoc.fieldArr? "providers").getD #[]
+    check (mCatProvs.size == 2 &&
+      (mCatProvs[0]?.bind (·.fieldStr? "name")) == some "Anthropic 1" &&
+      (mCatProvs[1]?.bind (·.fieldStr? "name")) == some "Anthropic 2")
+      "member /api/providers/catalog keeps enabled configured rows with memberProviderDisplayName"
+    let (_, mDiscDoc) ← send "GET" "/api/providers/discovery" member (.obj #[]) stWithProviders
+    let mConns := (mDiscDoc.fieldArr? "connections").getD #[]
+    check (mConns.size == 1 &&
+      (mConns[0]?.bind (·.fieldStr? "provider_id")) == some "anthropic" &&
+      (mConns[0]?.bind (·.fieldStr? "status")) == some "discovered" &&
+      (mConns[0]?.bind (·.fieldStr? "access_profile")) == some "Anthropic 1")
+      "member /api/providers/discovery keeps model-evidence connection with projected display name"
+    let (_, mHealthDoc) ← send "GET" "/api/model-routing/health" member (.obj #[]) stWithProviders
+    let mHealthRows := mHealthDoc.asArr?.getD #[]
+    check (mHealthRows.size == 2 &&
+      (mHealthRows[0]?.bind (·.fieldStr? "account_id")) == some "prov-anth-1" &&
+      (mHealthRows[1]?.bind (·.fieldStr? "account_id")) == some "prov-anth-2")
+      "member /api/model-routing/health keeps only enabled configured providers"
     -- Disabling/deleting an issuer must stop every previously minted session,
     -- including an external session with no mission id and a shared mission.
     for update in #["UPDATE users SET disabled=1 WHERE id='member';", "DELETE FROM users WHERE id='member';"] do
