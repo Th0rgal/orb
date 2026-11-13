@@ -636,9 +636,14 @@ def dispatchMcpToolCall
     let mid := (args.fieldStr? "mission_id").orElse (fun _ => args.fieldStr? "id") |>.getD callerMid
     if let .error e ← checkMissionReadAccess store claims mid nowEpochSec then
       return mcpErr "forbidden" e
-    let lim := Nat.min ((args.fieldNat? "limit").getD 100) 500
-    let afterSeq := (args.fieldUInt64? "after_seq").getD 0
-    match ← queryMissionEventsPage store mid (some afterSeq) none lim #[] (some 32768) with
+    let lim := Nat.min ((args.fieldNat? "limit").getD 40) 500
+    -- Published contract: no cursor = newest page; `before_seq` pages back and wins
+    -- over `since_seq`; `after_seq` is the legacy alias of `since_seq`.
+    let beforeSeq? := args.fieldUInt64? "before_seq"
+    let sinceSeq? := if beforeSeq?.isSome then none
+      else (args.fieldUInt64? "since_seq").orElse (fun _ => args.fieldUInt64? "after_seq")
+    let view? := (args.fieldStr? "view").map (·.trimAscii.toString) |>.filter (fun v => !v.isEmpty && v != "all")
+    match ← queryMissionEventsPage store mid sinceSeq? beforeSeq? lim #[] (some 32768) view? with
     | .error e => return mcpErr "mission_events_query_failed" e
     | .ok page =>
       let evs := (OrbBin.Json.parse page.eventsJson).toOption.getD (.arr #[])
