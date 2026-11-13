@@ -324,6 +324,73 @@ No questions sent; implement/test generic support against an authorized
 
 ## Operator requests
 
+### Coordinator status 14:25 UTC: red master, overlaps, A measurement
+
+**Master CI is red since 12:19 UTC.** Last green run: `ce131e11` (11:44).
+Every completed run since fails only in `Orb browser (1/2)` and `(2/2)`
+(`afae6c68`, `36b4205a`, `5852cc15`, `6b34935e`, `0dea70c8`); the others
+were cancelled by newer pushes. Run `43438246411` on `8a0c7198` is in
+progress with `Orb browser (2/2)` already failed.
+
+- Failing specs on `0dea70c8`: `provider-quota-levels` (4 cases),
+  `provider-account-order` (2), `anthropic-usage` (2), `code-block` (1).
+- Likely cause, from reading the diff, not yet reproduced: #1722
+  (`f6961606`, 11:59) collapses several accounts of one provider into a
+  group closed by default (`.p-group-head` in `orb/src/Providers.tsx`).
+  The three provider specs use two accounts of one type and look for the
+  account rows directly; none was updated.
+- `code-block` did not fail in the first red run, so it may be flaky.
+- Worker `549c6b99-4b6f-4870-96e9-f523187218c4` (reusing VM `a474d57a`,
+  expires 17:12 UTC) reproduces, fixes and delivers a patch. Scope:
+  browser specs, product code only if a defect is proven.
+
+**Overlap with operator PRs.**
+
+- #1728 (`8a0c7198`, merged 13:57) fixes cooldown GET and clear across
+  both owners and resets cooldowns and refused-login usage on a completed
+  sidecar login. It adds no tests. H-core (`21b1bfca`) was told to rebase,
+  drop duplicates and deliver what is left: the auth-file wait before the
+  login session reports done, the re-probe, and the replay tests.
+- #1729 (`fix/proxy-stream-passthrough`, head `6376a23b`, open, conflicts
+  with master, no checks yet) implements incremental proxy streaming, which
+  is track D's RUN-07. D (`95ad3d8d`) was told not to land a second
+  implementation and to report what #1729 leaves open, with tests.
+- #1708 (`ci/cached-turbo-lean`, head `8fcf5038`, opened 12 Nov, 8 checks
+  failing) already provisions a cached `turbo-lean` in CI, removes raw
+  Lake from `scripts/build_orb_bins.sh` and bumps the pin to `bca79f34`.
+  It covers the same ground as track A's script change and B's CI work.
+  Not yet reviewed by the coordinator; A and B must build on it or
+  replace it, not run beside it.
+
+**A.**
+
+- `wip/a-fail-closed-build-script` at `e5208b1a` holds the reviewed script
+  and test patch (source SHA-256 `9678ae0c…`). Verified on nimrud only by
+  `bash -n`, `git diff --check` and its 7 unit tests. Not mergeable: no
+  caller has a compatible `turbo-lean`, and the audit rejects the extern
+  opaques in `OrbBin.PosixExt` and `ConformanceRunner`.
+- Measurement on lagash (`7de6fc9b`, master `01f505a9`, cgroup
+  `memory.max` 8 GiB): `orb-core` builds in 11:43.84, exit 0, peak RSS
+  4.54 GiB, cgroup peak 7.05 GiB, 4574 major faults, no OOM events.
+  `ProviderUsageAndLogin` took 30 s. The build went through **raw Lake**
+  because the installed `turbo-lean 0.1.0` rejects `--no-telemetry`, so
+  the turbo-lean path and the kernel audit were not exercised. The managed
+  VM cap of 4.16 GiB is below the measured peak RSS.
+- Extern admission design still unassigned.
+
+**Workers.**
+
+- B successor (`e14bb767`, uruk, cgroup 16 GiB): stopped at 13:51 because
+  its `GITHUB_TOKEN` request `0de37764-51be-4a62-9905-00ee372d5301` is
+  pending. Resumed at 14:17 on the parts that need no token (Orb workflow
+  patch, baseline, gating design). **Thomas: approve that request** or
+  lean.ci work cannot start.
+- C (`816f574f`): no tool activity since 13:23 UTC although reported
+  active; no checkpoint delivered. To be checked at the next wake.
+- E+G (`6fa970f7`): mission completed; member redaction of
+  `/api/ai/providers` not delivered. Dev grant `f0eadef4…` still pending.
+- VMs for C, D, E+G and H extended to 17:12 UTC.
+
 ### Claude (Fable) outage 2026-11-13, 03:45 to 13:29 UTC: root cause
 
 Established by the operator session; recorded here as reported, not
