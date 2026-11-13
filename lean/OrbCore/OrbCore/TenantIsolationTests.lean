@@ -164,6 +164,11 @@ def run (root : String) : IO Unit := do
       for tool in #["get_mission", "get_mission_events", "cancel_mission", "schedule_wakeup"] do
         let doc ← call scopedToken tool foreign
         check (doc.fieldBool? "ok" == some false) s!"scoped role cannot cross tenant {role}/{tool}"
+      for tool in #["secret_list", "secret_get", "secret_request", "secret_put", "secret_delete", "secret_move"] do
+        let doc ← call scopedToken tool (.obj #[("name", .str "SYNTHETIC_DENIED_PROBE")])
+        check (doc.fieldBool? "ok" == some false &&
+          (doc.fieldOrNull "error").fieldStr? "code" == some "forbidden")
+          s!"scoped role cannot use owner secret broker {role}/{tool}"
     -- Members can request the plan's dev-only pass for their OWN mission. It
     -- still requires a separately approved live lease and never exposes host
     -- audit or generic privilege tokens. Dashboard role labels cannot redeem it.
