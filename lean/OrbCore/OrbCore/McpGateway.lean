@@ -7,6 +7,7 @@ import OrbBin.Json
 import OrbBin.PosixExt
 import OrbBin.McpCatalog
 import OrbCore.Store
+import OrbCore.MissionSettings
 import OrbCore.ManagedSpawnActions
 import OrbCore.Managed
 import OrbCore.ManagedHarvest
@@ -636,9 +637,18 @@ def dispatchMcpToolCall
     let mid := (args.fieldStr? "mission_id").orElse (fun _ => args.fieldStr? "id") |>.getD callerMid
     if let .error e ← checkMissionReadAccess store claims mid nowEpochSec then
       return mcpErr "forbidden" e
-    let lim := Nat.min ((args.fieldNat? "limit").getD 100) 500
-    let afterSeq := (args.fieldUInt64? "after_seq").getD 0
-    match ← queryMissionEventsPage store mid (some afterSeq) none lim #[] (some 32768) with
+    -- The published contract: with no cursor, the newest page in ascending order;
+    -- `before_seq` pages backwards and takes precedence; `since_seq` returns what
+    -- came after. Every call used to start again from the first event.
+    let view := ((args.fieldStr? "view").getD "").trimAscii.toString
+    let lim := Nat.max 1 (Nat.min ((args.fieldNat? "limit").getD 40) (if view == "all" then 50 else 500))
+    let beforeSeq? := (args.fieldUInt64? "before_seq").filter (· > 0)
+    let sinceSeq? := if beforeSeq?.isSome then none
+      else (args.fieldUInt64? "since_seq").orElse (fun _ => args.fieldUInt64? "after_seq")
+    let maxPayload := Nat.max 1024 (Nat.min ((args.fieldNat? "max_payload").getD 4096) 65536)
+    let types := if view == "trace" then #["tool_call", "tool_result", "error"] else #[]
+    match ← queryMissionEventsPage store mid sinceSeq? beforeSeq? lim types (some maxPayload)
+        (if view == "transcript" then some "transcript" else none) with
     | .error e => return mcpErr "mission_events_query_failed" e
     | .ok page =>
       let evs := (OrbBin.Json.parse page.eventsJson).toOption.getD (.arr #[])
@@ -993,12 +1003,22 @@ def dispatchMcpToolCall
   | "update_mission_settings" =>
     let mid := (args.fieldStr? "mission_id").getD callerMid
     if mid.isEmpty then return mcpErr "invalid_arguments" "missing mission_id"
-    if let some t := args.fieldStr? "title" then
-      discard <| execParamQuery store.missionsDb "UPDATE missions SET title=?2, metadata_updated_at=?3 WHERE id=?1;" #[mid, t, nowIso]
-    if let some mo := args.fieldStr? "model_override" then
-      discard <| execParamQuery store.missionsDb "UPDATE missions SET model_override=?2, metadata_updated_at=?3 WHERE id=?1;" #[mid, mo, nowIso]
-    if let some me := args.fieldStr? "model_effort" then
-      discard <| execParamQuery store.missionsDb "UPDATE missions SET model_effort=?2, metadata_updated_at=?3 WHERE id=?1;" #[mid, me, nowIso]
+    let some existing ← getMission? store mid
+      | return mcpErr "not_found" "mission_not_found"
+    let allowed ← (show IO Bool from do
+      if !claims.project.isEmpty && claims.project != existing.project then return false
+      if operatorIsAdmin then return true
+      if let some uid := operatorPrincipal? then
+        if !uid.isEmpty && uid == existing.ownerUserId then return true
+      if claims.isExternal || callerMid.isEmpty || callerUserId != existing.ownerUserId then return false
+      if !callerProj.isEmpty && callerProj != existing.project then return false
+      return ← managedMissionAncestor store callerMid mid callerUserId existing.project)
+    if !allowed then return mcpErr "forbidden" "mission_settings_mutation_forbidden"
+    let settings ← match MissionSettings.resolve existing args with
+      | .ok settings => pure settings
+      | .error e => return mcpErr "invalid_arguments" e
+    if let .error _ ← MissionSettings.persist store existing settings nowIso then
+      return mcpErr "mission_settings_update_failed" "mission_settings_update_failed"
     return mcpOk (.obj #[("ok", .bool true), ("mission_id", .str mid)])
 
   | "link_mission_to_project" =>
