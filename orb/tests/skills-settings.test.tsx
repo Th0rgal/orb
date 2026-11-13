@@ -820,4 +820,61 @@ describe("SkillsSettings", () => {
       { rel: "references/large-guide.md", content: "# Large Guide\n" },
     ]);
   });
+
+  it("aborts in-flight local skill sync when backend connection switches mid-sync", async () => {
+    setConnection("https://old-core.example", "jwt-old");
+    const syncCalls: any[] = [];
+
+    (window as unknown as { __TAURI__: { core: { invoke: (cmd: string, args?: any) => Promise<unknown> } } }).__TAURI__ = {
+      core: {
+        invoke: async (cmd: string, args?: any) => {
+          if (cmd === "local_skills_status") {
+            // Simulate user switching to another backend while `local_skills_status` is pending.
+            setConnection("https://new-core.example", "jwt-new");
+            return sampleLocalReport(false);
+          }
+          if (cmd === "local_skills_sync") {
+            syncCalls.push(args.request);
+            return {
+              synced_skills: 1,
+              harnesses_updated: 1,
+              skipped_unmanaged: [],
+              pruned: [],
+              report: sampleLocalReport(true),
+            };
+          }
+          return null;
+        },
+      },
+    };
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/library/skill?include=bundle")) {
+        return new Response(
+          JSON.stringify([
+            {
+              name: "old-backend-skill",
+              path: "skill/old-backend-skill",
+              audience: ["mission", "local"],
+              scope: "on-demand",
+              content: "---\nname: old-backend-skill\n---\n# Old\n",
+              files: [],
+              references: [],
+            },
+          ]),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+
+    const res = await syncConnectedLibraryToLocalHarnesses({
+      onlyIfNeeded: true,
+      pruneRemoved: true,
+      skipMcpMint: true,
+    });
+    expect(res).toBeNull();
+    expect(syncCalls).toHaveLength(0);
+  });
 });

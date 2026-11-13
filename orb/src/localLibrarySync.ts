@@ -1,6 +1,7 @@
 import {
   api,
   apiBytes,
+  connectionVersion,
   getApiUrl,
   isConnected,
   type LibrarySkill,
@@ -124,10 +125,11 @@ async function mintLocalMcpSessionIfNeeded(
 export async function localSkillsStatus(
   librarySkills?: SyncSkillPayload[],
   libraryLoaded?: boolean,
+  apiUrlOverride?: string,
 ): Promise<LocalSkillsReport | null> {
   const invoke = desktopInvoke();
   if (!invoke) return null;
-  const apiUrl = normalizedConnectedApiUrl();
+  const apiUrl = apiUrlOverride !== undefined ? apiUrlOverride : normalizedConnectedApiUrl();
   const hasSkills = Boolean(librarySkills && librarySkills.length > 0);
   const loadedFlag =
     typeof libraryLoaded === "boolean" ? libraryLoaded : hasSkills ? true : undefined;
@@ -149,17 +151,23 @@ export async function localSkillsSync(
     mcpSession?: McpSessionPayload;
     forceMcpPrompt?: boolean;
     skipMcpMint?: boolean;
+    apiUrl?: string;
+    expectedConnectionVersion?: number;
   } = {},
 ): Promise<SyncSkillsResult> {
   const invoke = desktopInvoke();
   if (!invoke) throw new Error("Unified local skill sync requires the Orb desktop app.");
-  const apiUrl = normalizedConnectedApiUrl();
+  const startVersion = options.expectedConnectionVersion ?? connectionVersion();
+  const apiUrl = options.apiUrl !== undefined ? options.apiUrl : normalizedConnectedApiUrl();
   let mcpSession = options.mcpSession;
   let mintError: string | undefined;
   if (!mcpSession && !options.skipMcpMint && apiUrl) {
     const minted = await mintLocalMcpSessionIfNeeded(invoke, apiUrl, options.forceMcpPrompt);
     mcpSession = minted.session;
     mintError = minted.error;
+  }
+  if (connectionVersion() !== startVersion) {
+    throw new Error("Active backend connection changed during Library sync.");
   }
   const hasSkills = Boolean(options.librarySkills && options.librarySkills.length > 0);
   const loadedFlag =
@@ -215,10 +223,13 @@ export async function fetchLibrarySyncPayloads(): Promise<{
   complete: boolean;
 }> {
   if (!isConnected()) return { payloads: [], loaded: false, complete: false };
+  const startVersion = connectionVersion();
   const raw = await api<Array<LibrarySkillSummary & Partial<LibrarySkill>>>(
     "/api/library/skill?include=bundle",
   ).catch(() => api<Array<LibrarySkillSummary & Partial<LibrarySkill>>>("/api/library/skill"));
-  if (!Array.isArray(raw)) return { payloads: [], loaded: false, complete: false };
+  if (connectionVersion() !== startVersion || !Array.isArray(raw)) {
+    return { payloads: [], loaded: false, complete: false };
+  }
   rememberKnownSkillNames(raw.map((s) => s.name).filter((n): n is string => Boolean(n)));
   const payloads: SyncSkillPayload[] = [];
   let complete = true;
@@ -243,6 +254,9 @@ export async function fetchLibrarySyncPayloads(): Promise<{
       }
     }),
   );
+  if (connectionVersion() !== startVersion) {
+    return { payloads: [], loaded: false, complete: false };
+  }
   payloads.sort((a, b) => a.name.localeCompare(b.name));
   return { payloads, loaded: true, complete };
 }
@@ -256,6 +270,8 @@ export async function syncConnectedLibraryToLocalHarnesses(options: {
   fallbackSkill?: LibrarySkill;
 } = {}): Promise<SyncSkillsResult | null> {
   if (!desktopInvoke()) return null;
+  const startVersion = connectionVersion();
+  const startApiUrl = normalizedConnectedApiUrl();
   let payloads: SyncSkillPayload[] = [];
   let loaded = false;
   let complete = false;
@@ -270,6 +286,7 @@ export async function syncConnectedLibraryToLocalHarnesses(options: {
       complete = false;
     }
   }
+  if (connectionVersion() !== startVersion) return null;
   if (!loaded && options.fallbackSkill) {
     try {
       payloads = [await skillToSyncPayload(options.fallbackSkill)];
@@ -286,11 +303,12 @@ export async function syncConnectedLibraryToLocalHarnesses(options: {
       complete = false;
     }
   }
+  if (connectionVersion() !== startVersion) return null;
   const snapshotComplete = loaded && complete;
   const prune = Boolean(options.pruneRemoved && snapshotComplete);
   if (options.onlyIfNeeded) {
-    const rep = await localSkillsStatus(payloads, snapshotComplete);
-    if (!rep) return null;
+    const rep = await localSkillsStatus(payloads, snapshotComplete, startApiUrl);
+    if (!rep || connectionVersion() !== startVersion) return null;
     if (snapshotComplete) {
       rememberSkillsReport(rep);
       rememberKnownSkillNames(rep.skills.map((s) => s.name));
@@ -305,14 +323,22 @@ export async function syncConnectedLibraryToLocalHarnesses(options: {
     const hasMcpDrift = Boolean(rep.mcp?.ready && rep.mcp.missing_harnesses.length > 0);
     if (!hasSkillDrift && !hasMcpDrift) return null;
   }
-  const res = await localSkillsSync({
-    librarySkills: payloads,
-    libraryLoaded: snapshotComplete,
-    pruneRemoved: prune,
-    replaceUnmanaged: options.replaceUnmanaged,
-    skipMcpMint: options.skipMcpMint,
-  });
-  if (snapshotComplete && res?.report) {
+  let res: SyncSkillsResult;
+  try {
+    res = await localSkillsSync({
+      librarySkills: payloads,
+      libraryLoaded: snapshotComplete,
+      pruneRemoved: prune,
+      replaceUnmanaged: options.replaceUnmanaged,
+      skipMcpMint: options.skipMcpMint,
+      apiUrl: startApiUrl,
+      expectedConnectionVersion: startVersion,
+    });
+  } catch (err) {
+    if (connectionVersion() !== startVersion) return null;
+    throw err;
+  }
+  if (connectionVersion() === startVersion && snapshotComplete && res?.report) {
     rememberSkillsReport(res.report);
     rememberKnownSkillNames(res.report.skills.map((s) => s.name));
   }

@@ -3403,7 +3403,7 @@ private def isInstalledSkillBundleSynced
   if entry.copyDir?.isSome then
     return true
   let wantFiles := sanitizedDesiredSkillFiles entry
-  for (cleanRel, rfBytes, isBin) in wantFiles do
+  for (cleanRel, rfBytes, _) in wantFiles do
     let rfp := sdir / cleanRel
     let rst ← OrbBin.PosixExt.statPath rfp.toString
     if !rst.exists_ || !rst.isReg || rst.isSymlink then
@@ -3411,12 +3411,7 @@ private def isInstalledSkillBundleSynced
     let .ok diskBytes ← (IO.FS.readBinFile rfp).toBaseIO
       | return false
     if diskBytes != rfBytes then
-      if isBin then
-        return false
-      match String.fromUTF8? diskBytes, String.fromUTF8? rfBytes with
-      | some dt, some wt =>
-        if normalizeSkillBody dt != normalizeSkillBody wt then return false
-      | _, _ => return false
+      return false
   let .ok installedRels ← collectInstalledRegularSkillRels sdir "" 0
     | return false
   for rel in installedRels do

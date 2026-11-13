@@ -12,6 +12,7 @@ import { readJson, writeJson } from "./storage";
 import { PopupMenu, type MenuEntry } from "./Menu";
 import {
   connectionVersion,
+  getApiUrl,
   getGlobalSettings,
   getRemoteNodes,
   isConnected,
@@ -178,15 +179,16 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
 
 
   const [libraryBundles, setLibraryBundles] = createSignal<Record<string, SyncSkillPayload>>({});
+  const [libraryVersion, setLibraryVersion] = createSignal(-1);
 
   const libraryPayloads = (): SyncSkillPayload[] | undefined => {
-    if (!libraryLoaded()) return undefined;
+    if (!libraryLoaded() || libraryVersion() !== connectionVersion()) return undefined;
     const bundles = libraryBundles();
     return librarySkills().flatMap((s) => (bundles[s.name] ? [bundles[s.name]] : []));
   };
 
   const libraryComplete = (): boolean => {
-    if (!libraryLoaded()) return false;
+    if (!libraryLoaded() || libraryVersion() !== connectionVersion()) return false;
     const bundles = libraryBundles();
     return librarySkills().every((s) => Boolean(bundles[s.name]));
   };
@@ -194,8 +196,9 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   /** Fetch every Library skill body and companion bundle; the Library is the canonical source for local sync. */
   // Rows render from the Library index at once; bodies (needed for drift and
   // divergence) arrive in the background and land in one update.
-  const loadLibrary = async (): Promise<{ bodies: Promise<void> }> => {
+  const loadLibrary = async (version: number): Promise<{ bodies: Promise<void> }> => {
     const items = await listLibrarySkills();
+    if (connectionVersion() !== version) return { bodies: Promise.resolve() };
     setLibrarySkills(items);
     setLibraryError(null);
     rememberKnownSkillNames(items.map((s) => s.name));
@@ -211,6 +214,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
           }
         }),
       );
+      if (connectionVersion() !== version) return;
       const map: Record<string, LibrarySkill> = {};
       const bundles: Record<string, SyncSkillPayload> = {};
       for (const row of fetched) {
@@ -221,15 +225,17 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
       }
       setLibraryFull(map);
       setLibraryBundles(bundles);
+      setLibraryVersion(version);
       setLibraryLoaded(true);
     })();
     // Wrapped: an async function returning a bare promise would wait for it.
     return { bodies };
   };
 
-  const refreshReport = async () => {
+  const refreshReport = async (version = connectionVersion()) => {
+    if (connectionVersion() !== version) return;
     const rep = await localSkillsStatus(libraryPayloads(), libraryComplete());
-    if (rep) {
+    if (rep && connectionVersion() === version) {
       rememberSkillsReport(rep);
       setLocalReport(rep);
       rememberKnownSkillNames(rep.skills.map((s) => s.name));
@@ -237,35 +243,42 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   };
 
   const loadAll = async (force = false) => {
+    const version = connectionVersion();
     setLoading(true);
     setSyncError(null);
+    if (!force || libraryVersion() !== version) {
+      setLibraryLoaded(false);
+    }
     try {
       const side: Promise<unknown>[] = [refreshLocalAgents(force).catch(() => []), refreshSoftware(force).catch(swallow("skills.refreshSoftware"))];
       if (isConnected()) {
-        void getLibraryStatus().then((st) => { setRepo(st); if (st.remote) setConfiguredRemote(st.remote); }).catch(() => setRepo(null));
-        void getGlobalSettings().then((s) => { if (s.library_remote != null) setConfiguredRemote(s.library_remote); }).catch(() => {});
-        side.push(getRemoteNodes().then((res) => setRemoteNodes(res.nodes ?? [])).catch(swallow("skills.remoteNodes")));
+        void getLibraryStatus().then((st) => { if (connectionVersion() === version) { setRepo(st); if (st.remote) setConfiguredRemote(st.remote); } }).catch(() => { if (connectionVersion() === version) setRepo(null); });
+        void getGlobalSettings().then((s) => { if (connectionVersion() === version && s.library_remote != null) setConfiguredRemote(s.library_remote); }).catch(() => {});
+        side.push(getRemoteNodes().then((res) => { if (connectionVersion() === version) setRemoteNodes(res.nodes ?? []); }).catch(swallow("skills.remoteNodes")));
         side.push(loadProjectSkills());
-        const { bodies } = await loadLibrary().catch((e) => {
-          setLibraryLoaded(false);
-          setLibraryError(errorText(e));
+        const { bodies } = await loadLibrary(version).catch((e) => {
+          if (connectionVersion() === version) {
+            setLibraryLoaded(false);
+            setLibraryError(errorText(e));
+          }
           return { bodies: Promise.resolve() };
         });
         // Drift needs the bodies; it fills the badges in when ready.
-        side.push(bodies.then(() => refreshReport()).catch((e) => setSyncError(errorText(e))));
+        side.push(bodies.then(() => refreshReport(version)).catch((e) => { if (connectionVersion() === version) setSyncError(errorText(e)); }));
       } else {
         setLibrarySkills([]);
         setLibraryFull({});
         setLibraryBundles({});
+        setLibraryVersion(version);
         setLibraryLoaded(false);
         setProjects([]);
         setProjectSkills([]);
       }
-      if (!isConnected()) side.push(refreshReport().catch((e) => setSyncError(errorText(e))));
+      if (!isConnected()) side.push(refreshReport(version).catch((e) => { if (connectionVersion() === version) setSyncError(errorText(e)); }));
       setLoading(false);
       await Promise.all(side);
     } finally {
-      setLoading(false);
+      if (connectionVersion() === version) setLoading(false);
     }
   };
 
@@ -468,6 +481,8 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
 
   /** Sync local harnesses from the Library snapshot. Pruning removes Orb-managed leftovers only. */
   const syncNow = async (prune: boolean, label?: string, replaceUnmanaged: string[] = [], forceMcpPrompt = false) => {
+    const version = connectionVersion();
+    const apiUrl = isConnected() ? getApiUrl().trim().replace(/\/+$/, "") : "";
     setSyncing(true);
     setSyncNotice(null);
     setSyncError(null);
@@ -479,7 +494,10 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
         pruneRemoved: prune && complete,
         replaceUnmanaged,
         forceMcpPrompt,
+        apiUrl,
+        expectedConnectionVersion: version,
       });
+      if (connectionVersion() !== version) return;
       setLocalReport(result.report);
       rememberKnownSkillNames(result.report.skills.map((s) => s.name));
       rememberSkillsReport(result.report);
@@ -489,7 +507,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
         setSyncNotice(label);
       }
     } catch (e) {
-      setSyncError(errorText(e));
+      if (connectionVersion() === version) setSyncError(errorText(e));
     } finally {
       setSyncing(false);
     }

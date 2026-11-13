@@ -972,6 +972,23 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
   let agyLogoBytes ← try IO.FS.readBinFile (invHome / ".gemini" / "config" / "skills" / "demo-skill" / "assets" / "logo.bin") catch _ => pure ByteArray.empty
   let claudeLogoBytes ← try IO.FS.readBinFile (invHome / ".claude" / "skills" / "demo-skill" / "assets" / "logo.bin") catch _ => pure ByteArray.empty
   let claudeToolSt ← OrbBin.PosixExt.statPath (invHome / ".claude" / "skills" / "demo-skill" / "tools" / "helper.py").toString
+  -- Leading-whitespace change inside an executable text companion MUST be detected as drift and updated (never stripped by Markdown normalization)
+  IO.FS.writeFile (invHome / ".claude" / "skills" / "demo-skill" / "tools" / "helper.py") "    #!/usr/bin/env python3\nprint(1)\n"
+  let indentDriftStatus ← dispatchRpcCommand stInv "local_skills_status" (.obj #[
+    ("request", .obj #[("library_skills", .arr libPayloadsWithBundle), ("library_loaded", .bool true)])
+  ])
+  let _ ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
+    ("request", .obj #[("library_skills", .arr libPayloadsWithBundle), ("library_loaded", .bool true)])
+  ])
+  let repairedHelperTxt ← try IO.FS.readFile (invHome / ".claude" / "skills" / "demo-skill" / "tools" / "helper.py") catch _ => pure ""
+  let indentDriftOk :=
+    repairedHelperTxt == "#!/usr/bin/env python3\nprint(1)\n" &&
+    (match indentDriftStatus with
+     | .ok iRep =>
+       let hsI := (iRep.fieldArr? "harnesses").getD #[]
+       let clI? := hsI.find? (fun h => h.fieldStr? "id" == some "claudecode")
+       (((clI?.bind (·.fieldArr? "outdated_skills")).getD #[]).filterMap (·.asStr?)).contains "demo-skill"
+     | _ => false)
   let retiredAgentsGone := !(← (invHome / ".agents" / "skills" / "retired-agents-skill").pathExists)
   let activeAgentsKept ← (invHome / ".agents" / "skills" / "demo-skill").pathExists
   -- Partial Library snapshot (`library_loaded: false`) must NEVER prune or flag missing managed skills even with non-empty `library_skills`
@@ -1068,7 +1085,7 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
       retiredAgentsGone && activeAgentsKept &&
       pruned1.contains "~/.agents/skills/retired-agents-skill" &&
       agyDemoKeptOnPartial && partialNotRemovedOk &&
-      agyDemoPruned && userEditedPreserved && unmgSkippedOk &&
+      agyDemoPruned && userEditedPreserved && unmgSkippedOk && indentDriftOk &&
       pruned2.contains "~/.gemini/config/skills/demo-skill"
     | _, _ => false
   if (← assertTrue "skill_bundle_reference_drift_exec_mode_and_atomic_prune" bundleSyncOk) then passed := passed + 1
