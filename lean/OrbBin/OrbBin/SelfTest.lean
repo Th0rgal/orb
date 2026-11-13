@@ -940,6 +940,10 @@ def runOpenCodeAcpTests : IO Unit := do
   assertTrue "OpenCode ACP permission prompts pick the allow option"
     ((acpMethods.splitOn "\"optionId\": \"yes\"").length > 1)
 
+  assertEq "ACP model keeps an advertised name" (resolveAcpModel "orbrouter/builtin/smart" #["orbrouter/builtin/smart"]) (some "orbrouter/builtin/smart")
+  assertEq "ACP model maps another provider prefix" (resolveAcpModel "opencode/builtin/smart" #["x/a", "orbrouter/builtin/smart"]) (some "orbrouter/builtin/smart")
+  assertEq "ACP model maps a bare name" (resolveAcpModel "builtin/smart" #["orbrouter/builtin/smart"]) (some "orbrouter/builtin/smart")
+  assertEq "ACP model unknown to the agent" (resolveAcpModel "nope/zzz" #["orbrouter/builtin/smart"]) none
   IO.FS.removeDirAll tmpDir
 
 def runAllTests : IO UInt32 := do

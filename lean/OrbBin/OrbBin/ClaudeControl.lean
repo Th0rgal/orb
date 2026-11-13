@@ -1690,6 +1690,22 @@ def acpClientReply (req : JVal) : ByteArray :=
   else
     acpFrame #[("id", rid), ("error", .obj #[("code", .int (-32601)), ("message", .str "method not supported")])]
 
+/-- Pick the agent's own name for `requested` among the `model` options it advertises:
+    the exact value, else the same model under another provider prefix
+    (`opencode/builtin/smart` → `orbrouter/builtin/smart`). No options: keep `requested`. -/
+def resolveAcpModel (requested : String) (options : Array String) : Option String :=
+  let tail := fun (s : String) => match s.splitOn "/" with
+    | _ :: rest@(_ :: _) => "/".intercalate rest
+    | _ => s
+  if options.isEmpty || options.contains requested then some requested
+  else options.find? (fun o => tail o == tail requested || tail o == requested || o == tail requested)
+
+/-- `model` option values from a `session/new` / `session/resume` result. -/
+def acpModelOptions (result : JVal) : Array String :=
+  match ((result.fieldArr? "configOptions").getD #[]).find? (fun o => (o.fieldStr? "id") == some "model") with
+  | some o => ((o.fieldArr? "options").getD #[]).filterMap (·.fieldStr? "value")
+  | none => #[]
+
 /-- Config changes applied after the session exists, in order: model, effort, plan mode. -/
 def acpConfigSteps (turn : OpenCodeAcpTurn) : List (String × String) :=
   (turn.model?.filter (!·.isEmpty) |>.map (("model", ·)) |>.toList) ++
@@ -1757,6 +1773,10 @@ def runOpenCodeAcpTurn (bin : String) (env : Array String) (turn : OpenCodeAcpTu
             | none =>
               sid := if resuming then (resumeSid?.getD "") else ((m.fieldOrNull "result").fieldStr? "sessionId").getD ""
               onLine (renderCompact (.obj #[("type", .str "acp_session"), ("sessionId", .str sid)]))
+              let options := acpModelOptions (m.fieldOrNull "result")
+              steps := steps.filterMap fun (cfg, v) =>
+                if cfg == "model" then (resolveAcpModel v options).map (cfg, ·) |>.orElse (fun _ => some (cfg, v))
+                else some (cfg, v)
               match steps with
               | (cfg, v) :: _ => send (acpRequest 10 "session/set_config_option"
                   (.obj #[("sessionId", .str sid), ("configId", .str cfg), ("value", .str v)]))
