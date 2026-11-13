@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "description": "Wire shape of GET /api/model-routing/chains rows, from the Rust ChainResponse and the ModelChain type in orb/src/routingApi.ts (normalizeChains rejects a row without a string id and an entries array of {provider_id, model_id}).",
+  "required": {"id": "string", "name": "string", "entries": "array", "is_default": "boolean", "strip_thinking": "boolean", "created_at": "string", "updated_at": "string"},
+  "entry_required": {"provider_id": "string", "model_id": "string"},
+  "forbidden": ["models_json", "api_key", "apiKey", "base_url"]
+}

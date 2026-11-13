@@ -66,6 +66,7 @@ def run : IO Unit := do
     let attempts ← IO.mkRef (#[] : Array String)
     let cfg : CoreConfig := {
       workingDir := root
+      dashboardPassword := "proxy-routing-fixture-password"
       proxySecret := "proxy-routing-fixture-secret-0123456789"
       jwtSecret := "proxy-routing-fixture-jwt-secret-0123456789"
     }
@@ -158,6 +159,57 @@ def run : IO Unit := do
         "SELECT COUNT(*) FROM proxy_outcomes WHERE requested_model='reviewer' AND chain_id='reviewer' AND model='review-model' AND status='ok';" #[]
       | throw (IO.userError "proxy_outcomes chain query failed")
     check ((((chainRows[1]?.bind (·[0]?)).bind String.toNat?).getD 0) > 0) "chain alias outcome records requested and effective model"
+    -- Fallback Chains contract: every row decodes as the clients' `ModelChain`.
+    let jwt := mintSessionToken cfg.jwtSecret (1700001000 + 3600)
+    let api := fun (method path body : String) => do
+      let raw := s!"{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+      let .ok req := parseRequest raw.toUTF8 none
+        | throw (IO.userError "chain contract request parse failed")
+      let .ok response ← dispatchCoreRequest app req 1700001000
+        | throw (IO.userError "chain contract unexpected upgrade")
+      return (response.status, (OrbBin.Json.parseBytes response.body).toOption.getD .null)
+    let .ok contract := OrbBin.Json.parse (← IO.FS.readFile "shared/orb-spec/fixtures/model-chains-response.json")
+      | throw (IO.userError "model-chains-response fixture failed to parse")
+    let typeOf := fun (v : JVal) => match v with
+      | .str _ => "string" | .bool _ => "boolean" | .arr _ => "array" | .num _ => "number" | .obj _ => "object" | .null => "null"
+    let conforms := fun (row : JVal) =>
+      ((contract.fieldOrNull "required").asObj?.getD #[]).all (fun (k, t) => (row.field? k).map typeOf == t.asStr?) &&
+      ((row.fieldArr? "entries").getD #[]).all (fun e =>
+        ((contract.fieldOrNull "entry_required").asObj?.getD #[]).all (fun (k, t) => (e.field? k).map typeOf == t.asStr?)) &&
+      ((contract.fieldArr? "forbidden").getD #[]).all (fun k => !((renderCompact row).splitOn s!"\"{k.asStr?.getD "?"}\"").length > 1)
+    let (createSt, created) ← api "POST" "/api/model-routing/chains"
+      "{\"id\":\"contract\",\"name\":\"Contract\",\"entries\":[{\"provider_id\":\"zai\",\"model_id\":\"glm-5.3\",\"api_key\":\"sk-inline-secret\"}]}"
+    check (createSt == 201 && conforms created) s!"create returns the chain row: {createSt} {renderCompact created}"
+    let (listSt, listed) ← api "GET" "/api/model-routing/chains" ""
+    let rows := listed.asArr?.getD #[]
+    check (listSt == 200 && rows.size ≥ 7 && rows.all conforms) s!"chain list rows must match the client type: {renderCompact listed}"
+    check ((rows.filter (fun r => r.fieldBool? "is_default" == some true)).map (·.fieldStr? "id") == #[some "builtin/smart"])
+      "exactly the stock default chain is default before anyone chooses one"
+    -- The desktop's "set default" sends only `is_default`; entries and name survive.
+    let (putSt, updated) ← api "PUT" "/api/model-routing/chains/contract" "{\"is_default\":true}"
+    check (putSt == 200 && conforms updated && updated.fieldBool? "is_default" == some true &&
+      updated.fieldStr? "name" == some "Contract" && ((updated.fieldArr? "entries").getD #[]).size == 1)
+      s!"partial update must keep entries and name: {putSt} {renderCompact updated}"
+    let (_, relisted) ← api "GET" "/api/model-routing/chains" ""
+    check (((relisted.asArr?.getD #[]).filter (fun r => r.fieldBool? "is_default" == some true)).map (·.fieldStr? "id") == #[some "contract"])
+      "setting a default leaves exactly one default chain"
+    let (getSt, got) ← api "GET" "/api/model-routing/chains/contract" ""
+    let (missSt, _) ← api "GET" "/api/model-routing/chains/absent-chain" ""
+    let (delBuiltinSt, _) ← api "DELETE" "/api/model-routing/chains/builtin/smart" ""
+    let (delSt, _) ← api "DELETE" "/api/model-routing/chains/contract" ""
+    let (delAgainSt, _) ← api "DELETE" "/api/model-routing/chains/contract" ""
+    let (emptySt, _) ← api "POST" "/api/model-routing/chains" "{\"id\":\"empty\",\"entries\":[]}"
+    let (unknownSt, _) ← api "GET" "/api/model-routing/no-such-route" ""
+    check (getSt == 200 && conforms got && missSt == 404 && delBuiltinSt != 200 && delSt == 200 && delAgainSt == 404 &&
+      emptySt == 400 && unknownSt == 404)
+      s!"chain get/delete/create must not fabricate success: get={getSt} miss={missSt} builtin={delBuiltinSt} del={delSt} again={delAgainSt} empty={emptySt} unknown={unknownSt}"
+    -- A client can only echo provider + model: saving must not erase a stored inline
+    -- setting for an entry it kept, and must drop the entries it removed.
+    check (OrbCore.ProxyModelRouting.keepStoredEntrySettings
+        "[{\"provider_id\":\"b\",\"model_id\":\"m2\"},{\"provider_id\":\"a\",\"model_id\":\"m1\"}]"
+        "[{\"provider_id\":\"a\",\"model_id\":\"m1\",\"base_url\":\"http://h\"},{\"provider_id\":\"c\",\"model_id\":\"m3\"}]"
+      == "[{\"provider_id\":\"b\",\"model_id\":\"m2\"},{\"provider_id\":\"a\",\"model_id\":\"m1\",\"base_url\":\"http://h\"}]")
+      "saving a chain keeps stored entry settings"
     check (OrbCore.ProxyModelRouting.directEntry? "my_spark_42/org/model-x" "/v1/chat/completions"
       #[("my_spark_42", "org/model-x")] == some ("my_spark_42", "org/model-x")) "advertised custom namespace"
     check ((OrbCore.ProxyModelRouting.directEntry? "my_spark_42/typo" "/v1/chat/completions"

@@ -4603,62 +4603,95 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | some ch =>
           let resolvedJson ← renderResolvedChainJson ch st.pacingTracker?
           return .ok (mkJson 200 resolvedJson)
+    -- Chain CRUD in the Rust `ChainResponse` shape. One loader serves list, get,
+    -- create and update, so the clients' `ModelChain` type has a single producer.
+    let isoOf := fun (raw : String) =>
+      let t := raw.trimAscii.toString
+      if t.isEmpty then formatEpochIso8601Utc nowEpochSec
+      else match t.toNat? with
+        | some n => formatEpochIso8601Utc n.toUInt64
+        | none => t
+    let loadChainRows : IO (Array JVal) := do
+      let .ok rs ← execParamQuery st.store.missionsDb
+          "SELECT id,name,models_json,COALESCE(updated_at,''),COALESCE(created_at,''),COALESCE(is_default,-1),COALESCE(strip_thinking,-1) FROM model_routing_chains ORDER BY id ASC;" #[]
+        | throw (IO.userError "routing_chain_store_unavailable")
+      let rows := rs.extract 1 rs.size
+      let explicitDefault := rows.any (fun r => r[5]? == some "1")
+      let mut out : Array JVal := #[]
+      for r in rows do
+        let cid := (r[0]?).getD ""
+        let updated := isoOf ((r[3]?).getD "")
+        let created := if ((r[4]?).getD "").isEmpty then updated else isoOf ((r[4]?).getD "")
+        let isDef := if explicitDefault then r[5]? == some "1" else cid == "builtin/smart"
+        let strip := if r[6]? == some "-1" then cid == "builtin/assistant" else r[6]? == some "1"
+        out := out.push (OrbCore.ProxyModelRouting.chainResponse cid ((r[1]?).getD cid) ((r[2]?).getD "[]") isDef strip created updated)
+      -- Stock chains the proxy serves are listed even before anyone edits them.
+      for (sid, sname, entries) in OrbCore.ProxyModelRouting.stockChains do
+        if !out.any (fun c => c.fieldStr? "id" == some sid) then
+          let now := formatEpochIso8601Utc nowEpochSec
+          out := out.push (OrbCore.ProxyModelRouting.chainResponse sid sname
+            (OrbCore.ProxyModelRouting.entriesJson entries) (!explicitDefault && sid == "builtin/smart") (sid == "builtin/assistant") now now)
+      return out
+    let chainId? := (matchRoutePattern? "/api/model-routing/chains/:id" rawTarget).bind fun ps =>
+      (ps.find? (fun p => p.1 == "id")).map Prod.snd
     if req.method == "GET" && cleanPath == "/api/model-routing/chains" then
-      let isAdm := caller.isLegacyUnscoped || caller.role == "admin"
-      let sanitizeModelsJson (rawMj : String) : JVal :=
-        match OrbBin.Json.parse rawMj with
-        | .ok (.arr items) =>
-          .arr <| items.map fun
-            | .obj kvs =>
-              .obj <| kvs.filter fun (k, _) =>
-                k != "api_key" && k != "apiKey" &&
-                (isAdm || (
-                  k != "base_url" && k != "baseUrl" &&
-                  k != "rpm_limit" && k != "max_concurrency" &&
-                  k != "model_rpm_limit" && k != "model_tpm_limit" && k != "model_max_concurrency"))
-            | other => other
-        | _ => .arr #[]
-      match ← execParamQuery st.store.missionsDb
-        "SELECT id,name,models_json,updated_at FROM model_routing_chains ORDER BY id ASC;" #[] with
-      | .error _ => return .ok (mkJson 200 "[]")
-      | .ok rs =>
-        if rs.size ≤ 1 then return .ok (mkJson 200 "[]")
-        let mut out : Array JVal := Array.mkEmpty (rs.size - 1)
-        for i in [1:rs.size] do
-          let r := rs[i]!
-          let cid := (r[0]?).getD ""
-          let nm := (r[1]?).getD cid
-          let mj := sanitizeModelsJson ((r[2]?).getD "[]")
-          let up := (r[3]?).getD ""
-          out := out.push (.obj #[
-            ("id", .str cid),
-            ("name", .str nm),
-            ("models_json", mj),
-            ("updated_at", .str up)
-          ])
-        return .ok (mkJson 200 (renderCompact (.arr out)))
+      return .ok (mkJson 200 (renderCompact (.arr (← loadChainRows))))
+    else if req.method == "GET" && chainId?.isSome then
+      match (← loadChainRows).find? (fun c => c.fieldStr? "id" == chainId?) with
+      | some c => return .ok (mkJson 200 (renderCompact c))
+      | none => return .ok (mkJson 404 "{\"error\":\"chain_not_found\"}")
+    else if req.method == "DELETE" && chainId?.isSome then
+      let cid := chainId?.getD ""
+      if cid.startsWith "builtin/" then
+        return .ok (mkJson 400 "{\"error\":\"builtin_chain_cannot_be_deleted\"}")
+      let .ok found ← execParamQuery st.store.missionsDb "SELECT 1 FROM model_routing_chains WHERE id=?1;" #[cid]
+        | return .ok (mkJson 500 "{\"error\":\"routing_chain_store_unavailable\"}")
+      if found.size ≤ 1 then return .ok (mkJson 404 "{\"error\":\"chain_not_found\"}")
+      discard <| execParamQuery st.store.missionsDb "DELETE FROM model_routing_chains WHERE id=?1;" #[cid]
+      discard <| publishRoutingChainsUpdate st (← loadRoutingChainsFromStore st.store st.cfg.workingDir)
+      return .ok (mkJson 200 "{\"ok\":true}")
     else if (req.method == "POST" && cleanPath == "/api/model-routing/chains") ||
-            (req.method == "PUT" && (matchRoutePattern? "/api/model-routing/chains/:id" rawTarget).isSome) then
-      let pathCid? := (matchRoutePattern? "/api/model-routing/chains/:id" rawTarget).bind fun ps =>
-        (ps.find? (fun p => p.1 == "id")).map Prod.snd
-      let rawBody := String.fromUTF8? req.bodySlice.toByteArray |>.getD "{}"
-      let jv := (OrbBin.Json.parse rawBody).toOption.getD (.obj #[])
+            (req.method == "PUT" && chainId?.isSome) then
+      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
       let defCid ← nextUniqueId st "chain" nowEpochSec
-      let cid := pathCid?.orElse (fun _ => jv.fieldStr? "id") |>.getD defCid
-      let nm := (jv.fieldStr? "name").getD cid
-      let modelsJson := match (jv.field? "models").orElse (fun _ => jv.field? "entries") with
-        | some arr@(.arr _) => renderCompact arr
-        | _ => (jv.fieldStr? "models_json").getD "[]"
+      let cid := chainId?.orElse (fun _ => jv.fieldStr? "id") |>.getD defCid
+      let existing? := (← loadChainRows).find? (fun c => c.fieldStr? "id" == some cid)
+      let .ok storedRows ← execParamQuery st.store.missionsDb "SELECT models_json FROM model_routing_chains WHERE id=?1;" #[cid]
+        | return .ok (mkJson 500 "{\"error\":\"routing_chain_store_unavailable\"}")
+      -- A partial update keeps every field it does not name (the desktop's
+      -- "set default" sends only `is_default`).
+      let modelsJson? := match (jv.field? "entries").orElse (fun _ => jv.field? "models") with
+        | some arr@(.arr _) => some (OrbCore.ProxyModelRouting.keepStoredEntrySettings (renderCompact arr)
+            ((storedRows[1]?.bind (·[0]?)).getD "[]"))
+        | _ => (jv.fieldStr? "models_json").orElse fun _ =>
+            (storedRows[1]?.bind (·[0]?)).orElse fun _ =>
+              existing?.map (fun (c : JVal) => renderCompact (c.fieldOrNull "entries"))
+      let some modelsJson := modelsJson?
+        | return .ok (mkJson 400 "{\"error\":\"entries_required\"}")
+      if modelsJson == "[]" then return .ok (mkJson 400 "{\"error\":\"entries_required\"}")
+      let nm := (jv.fieldStr? "name").orElse (fun _ => existing?.bind (·.fieldStr? "name")) |>.getD cid
+      let strip := (jv.fieldBool? "strip_thinking").orElse (fun _ => existing?.bind (·.fieldBool? "strip_thinking")) |>.getD false
+      let nowIso := formatEpochIso8601Utc nowEpochSec
+      let created := (existing?.bind (·.fieldStr? "created_at")).getD nowIso
+      if jv.fieldBool? "is_default" == some true then
+        -- Materialise the current flags first so exactly one chain is the default.
+        for c in (← loadChainRows) do
+          discard <| execParamQuery st.store.missionsDb "UPDATE model_routing_chains SET is_default=0 WHERE id=?1;" #[(c.fieldStr? "id").getD ""]
+      let isDefSql := match jv.fieldBool? "is_default" with
+        | some true => "1" | some false => "0"
+        | none => if (existing?.bind (·.fieldBool? "is_default")).getD false then "1" else "0"
       match ← execParamQuery st.store.missionsDb
-        "INSERT OR REPLACE INTO model_routing_chains(id,name,models_json,updated_at) VALUES(?1,?2,?3,?4);"
-        #[cid, nm, modelsJson, s!"{nowEpochSec}"] with
+        ("INSERT INTO model_routing_chains(id,name,models_json,updated_at,created_at,is_default,strip_thinking) VALUES(?1,?2,?3,?4,?5,CAST(?6 AS INTEGER),CAST(?7 AS INTEGER)) " ++
+         "ON CONFLICT(id) DO UPDATE SET name=excluded.name,models_json=excluded.models_json,updated_at=excluded.updated_at,created_at=excluded.created_at,is_default=excluded.is_default,strip_thinking=excluded.strip_thinking;")
+        #[cid, nm, modelsJson, nowIso, created, isDefSql, if strip then "1" else "0"] with
       | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       | .ok _ =>
-        let refreshed ← loadRoutingChainsFromStore st.store st.cfg.workingDir
-        discard <| publishRoutingChainsUpdate st refreshed
-        return .ok (mkJson (if req.method == "POST" then 201 else 200) s!"\{\"id\":{jsonEscape cid},\"name\":{jsonEscape nm}}")
+        discard <| publishRoutingChainsUpdate st (← loadRoutingChainsFromStore st.store st.cfg.workingDir)
+        let saved := ((← loadChainRows).find? (fun (c : JVal) => c.fieldStr? "id" == some cid)).getD .null
+        return .ok (mkJson (if req.method == "POST" then 201 else 200) (renderCompact saved))
     else
-      return .ok (mkJson 200 "{\"ok\":true,\"router\":\"/api/model-routing\"}")
+      return .ok (mkJson 404 "{\"error\":\"not_found\"}")
 
   -- Managed Compute Fleet (`/api/managed-machines*`, `/api/remote-nodes`)
   if let some params := matchRoutePattern? "/api/managed-machines/providers/:provider/preference" rawTarget then

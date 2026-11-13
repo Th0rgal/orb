@@ -108,6 +108,39 @@ def consultModel? (raw : String) : Option String :=
     some s!"anthropic/claude-{m.replace "." "-"}"
   else (directEntry? m "").map (fun (provider, model) => s!"{provider}/{model}")
 
+/-- Rust `ChainResponse` wire shape read by every client (`ModelChain` in
+    `orb/src/routingApi.ts`): entries carry only provider and model, so stored
+    inline credentials or limits never reach a client. -/
+def chainResponse (id name modelsJson : String) (isDefault stripThinking : Bool)
+    (createdAt updatedAt : String) : JVal :=
+  let entries := match OrbBin.Json.parse modelsJson with
+    | .ok (.arr items) => items.filterMap fun it =>
+        let provider := (it.fieldStr? "provider_id").orElse (fun _ => it.fieldStr? "provider")
+        let model := (it.fieldStr? "model_id").orElse (fun _ => it.fieldStr? "modelId")
+        match provider, model with
+        | some p, some m => some (JVal.obj #[("provider_id", .str p), ("model_id", .str m)])
+        | _, _ => none
+    | _ => #[]
+  .obj #[("id", .str id), ("name", .str name), ("entries", .arr entries),
+    ("is_default", .bool isDefault), ("strip_thinking", .bool stripThinking),
+    ("created_at", .str createdAt), ("updated_at", .str updatedAt)]
+
+/-- Clients only ever see and send `provider_id` + `model_id`. When they save a chain,
+    an entry that matches a stored one keeps the stored inline settings (endpoint,
+    key, limits) it could not have echoed back; entries it removed are dropped. -/
+def keepStoredEntrySettings (incomingJson storedJson : String) : String :=
+  let key := fun (it : JVal) =>
+    ((it.fieldStr? "provider_id").orElse (fun _ => it.fieldStr? "provider"),
+     (it.fieldStr? "model_id").orElse (fun _ => it.fieldStr? "modelId"))
+  match OrbBin.Json.parse incomingJson, OrbBin.Json.parse storedJson with
+  | .ok (.arr incoming), .ok (.arr stored) =>
+    renderCompact (.arr (incoming.map fun it =>
+      match it with
+      | .obj kvs =>
+        if kvs.size ≤ 2 then (stored.find? (fun s => key s == key it && (key it).1.isSome)).getD it else it
+      | other => other))
+  | _, _ => incomingJson
+
 def noProviderBody (requested : String) : String :=
   renderCompact (.obj #[("error", .obj #[
     ("message", .str s!"No configured provider account can serve model '{requested}'. It was not rerouted to another model."),

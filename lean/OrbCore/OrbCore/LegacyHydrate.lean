@@ -502,6 +502,11 @@ def hydrateLegacyDataDir
               discard <| execParamQuery st.missionsDb
                 "INSERT OR IGNORE INTO model_routing_chains(id,name,models_json,updated_at) VALUES(?1,?2,?3,?4);"
                 #[cid, nm, mj, nowIso]
+              -- Rust also persisted these three fields; import them once (NULL = not yet imported).
+              discard <| execParamQuery st.missionsDb
+                "UPDATE model_routing_chains SET is_default=CAST(?2 AS INTEGER), strip_thinking=CAST(?3 AS INTEGER), created_at=COALESCE(NULLIF(?4,''),created_at) WHERE id=?1 AND is_default IS NULL;"
+                #[cid, if (c.fieldBool? "is_default").getD false then "1" else "0",
+                  if (c.fieldBool? "strip_thinking").getD false then "1" else "0", (c.fieldStr? "created_at").getD ""]
 
   -- 4. Hydrate `workspaces.json` -> `workspaces`
   let wsPath := System.FilePath.mk s!"{dataRoot}/workspaces.json"

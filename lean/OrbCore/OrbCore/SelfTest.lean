@@ -4501,7 +4501,8 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
      (alCatBody.splitOn "vllm-internal.corp.local").length != 1 ||
      (alCatDisabledBody.splitOn "qwen3-coder").length != 1 ||
      admChainsSt != 200 || (admChainsBody.splitOn "sk-inline-chain-secret").length != 1 ||
-     (admChainsBody.splitOn "vllm-internal.corp.local").length < 2 ||
+     (admChainsBody.splitOn "vllm-internal.corp.local").length != 1 ||
+     (admChainsBody.splitOn "\"entries\":[{\"provider_id\":\"custom:cust-vllm\",\"model_id\":\"qwen3-coder\"}]").length < 2 ||
      alChainsSt != 200 || (alChainsBody.splitOn "cust-chain").length < 2 ||
      (alChainsBody.splitOn "sk-inline-chain-secret").length != 1 ||
      (alChainsBody.splitOn "vllm-internal.corp.local").length != 1 ||

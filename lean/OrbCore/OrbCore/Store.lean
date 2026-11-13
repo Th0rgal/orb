@@ -318,6 +318,10 @@ def idempotencySchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS idempotency_keys (scope TEXT NOT NULL, request_key TEXT NOT NULL, response_json TEXT NOT NULL, status_code INTEGER NOT NULL DEFAULT 200, committed_oversize INTEGER NOT NULL DEFAULT 0, body_bytes INTEGER NOT NULL DEFAULT 0, phase TEXT NOT NULL DEFAULT 'committed', created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(scope, request_key));"
 
 def missionsAdditiveAlters : Array String := #[
+  -- NULL means "never set": the stock default applies (see `chainResponse`).
+  "ALTER TABLE model_routing_chains ADD COLUMN is_default INTEGER;",
+  "ALTER TABLE model_routing_chains ADD COLUMN strip_thinking INTEGER;",
+  "ALTER TABLE model_routing_chains ADD COLUMN created_at TEXT;",
   "ALTER TABLE proxy_usage ADD COLUMN requested_model TEXT;",
   "ALTER TABLE proxy_outcomes ADD COLUMN requested_model TEXT;",
   "ALTER TABLE missions ADD COLUMN project TEXT NOT NULL DEFAULT '';",
