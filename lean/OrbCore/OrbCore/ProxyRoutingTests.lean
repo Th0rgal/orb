@@ -221,6 +221,14 @@ def run : IO Unit := do
         "google-opus", "google-sonnet"] do
       check (stock.any (fun c => c.id == id)) s!"missing stock chain {id}"
     chainsRef.set stock
+    -- A chain saved behind the running snapshot (import, another process) is found
+    -- in the store before its name is refused.
+    let .ok _ ← execParamQuery store.missionsDb
+        "INSERT INTO model_routing_chains(id,name,models_json,updated_at) VALUES('late-reviewer','Late','[{\"provider_id\":\"zai\",\"model_id\":\"glm-5.3\"}]','t0');" #[]
+      | throw (IO.userError "late chain insert failed")
+    attempts.set #[]
+    let late ← post "late-reviewer"
+    check (late.status == 200 && !(← attempts.get).isEmpty) s!"a chain saved behind the snapshot is served, got {late.status}"
     for c in stock do
       let bare := if c.id.startsWith "builtin/" then (c.id.drop 8).toString else c.id
       for alias in #[c.id, bare, s!"builtin/{bare}"] do

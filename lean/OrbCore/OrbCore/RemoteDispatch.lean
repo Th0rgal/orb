@@ -15,6 +15,7 @@ import OrbCore.R7Core
 import OrbCore.LegacyHydrate
 import OrbCore.ProviderUsageAndLogin
 import OrbCore.RemoteFleetAndRelay
+import OrbCore.Skills
 
 namespace OrbCore.RemoteDispatch
 
@@ -499,6 +500,10 @@ private def prepareRemoteHarnessCommand
       (trimmedPrompt.drop 5).trimAscii.toString
     else
       spec.prompt
+  -- The Library lives on Core: ship the delivered skills into the node workspace so every
+  -- harness finds them where it looks (`.opencode/skills`, `.claude/skills`, `.agents/skills`).
+  let wsPrefix := wsPrefix ++ (← OrbCore.Skills.remoteInstallPrelude coreWorkDir
+    (if spec.project.trimAscii.toString.isEmpty then none else some spec.project) spec.backend.trimAscii.toString.toLower)
   let (fd3Prelude, promptEnvs) := stagePromptOnFd3 deliveredPrompt
   let resumeSid? := spec.resumeSessionId?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
   let bLow := spec.backend.trimAscii.toString.toLower

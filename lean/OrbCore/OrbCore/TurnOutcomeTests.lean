@@ -101,6 +101,41 @@ def run : IO Unit := do
         "start_mission" (.obj #[("title", .str "ghost"), ("prompt", .str "work that can never start")]) 4000000000
       check ((reply.splitOn "no_execution_placement").length > 1) s!"an undispatchable start is refused: {reply}"
       check ((← cellOf db "SELECT COUNT(*) FROM missions WHERE title='ghost';") == "0") "no ghost mission is left behind"
+
+      -- Receipts name the model asked for and the model the turn is launched with;
+      -- afterwards the mission reports which model and provider actually answered.
+      let receipt ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+        "start_mission" (.obj #[("title", .str "receipt"), ("backend", .str "opencode")]) 4000000000
+      -- Tool results may carry their JSON as an escaped string: compare without the escapes.
+      let flat := fun (raw : String) => raw.replace "\\" ""
+      check (((flat receipt).splitOn "\"effective_model\":\"builtin/smart\"").length == 2)
+        s!"an opencode start with no model reports the chain it will use: {receipt}"
+      check (((flat receipt).splitOn "\"requested_model\":null").length == 2) "no model was requested"
+      let .ok _ ← execParamQuery db
+          ("INSERT INTO proxy_usage(timestamp,model,input_tokens,output_tokens,cost_cents,mission_id,provider,requested_model) " ++
+           "VALUES('t0','glm-5.3',10,5,1,'m-tools','zai','smart');") #[]
+        | throw (IO.userError "usage row insert failed")
+      let served ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+        "get_mission" (.obj #[("mission_id", .str "m-tools")]) 4000000000
+      check (((flat served).splitOn "\"served_models\":[{\"requested_model\":\"smart\",\"effective_model\":\"glm-5.3\",\"provider\":\"zai\",\"requests\":1}]").length == 2)
+        s!"the mission reports the model that served it: {served}"
+
+      -- Library skills reach a node workspace in the directory each harness reads.
+      IO.FS.createDirAll s!"{root}/library/skills/lean-audit"
+      IO.FS.writeFile s!"{root}/library/skills/lean-audit/SKILL.md" "---\nname: lean-audit\n---\nAudit it's \"proofs\".\n"
+      IO.FS.createDirAll s!"{root}/library/skills/Bad Name"
+      IO.FS.writeFile s!"{root}/library/skills/Bad Name/SKILL.md" "x"
+      let prelude ← OrbCore.Skills.remoteInstallPrelude root none "opencode"
+      check ((prelude.splitOn "'.opencode/skills/lean-audit/SKILL.md'").length > 1) s!"opencode skill path: {prelude}"
+      check ((prelude.splitOn "Bad Name").length == 1 && (prelude.splitOn "Audit it").length == 1)
+        "unsafe names are skipped and content is never inlined as shell text"
+      check (((← OrbCore.Skills.remoteInstallPrelude root none "claude").splitOn "'.claude/skills/lean-audit/SKILL.md'").length > 1)
+        "claude skill path"
+      -- The script really installs the file, and leaves an existing one alone.
+      let ws := s!"{root}/node-workspace"
+      IO.FS.createDirAll ws
+      let sh ← IO.Process.output { cmd := "/bin/sh", args := #["-c", prelude ++ prelude ++ "cat .opencode/skills/lean-audit/SKILL.md"], cwd := some ws }
+      check (sh.exitCode == 0 && sh.stdout == "---\nname: lean-audit\n---\nAudit it's \"proofs\".\n") s!"installed skill content: {sh.stdout} {sh.stderr}"
     finally
       closeCoreStore store
   finally

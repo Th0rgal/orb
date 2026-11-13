@@ -1396,6 +1396,14 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     | none =>
       routed? ← directRoutingChain? st chains rawRequestedModel cleanPath
       routeKind := "direct"
+      if routed?.isNone then
+        -- The in-memory snapshot can predate a chain saved by another path (import,
+        -- another process). Look at the store once before refusing a name.
+        let fresh ← loadRoutingChainsFromStore st.store st.cfg.workingDir
+        if let some matched := findMatchingRoutingChain? fresh rawRequestedModel then
+          discard <| publishRoutingChainsUpdate st fresh (forceBump := false)
+          routed? := some matched
+          routeKind := "chain"
   let some rawActiveChain := routed?
     | return mkJson 400 (OrbCore.ProxyModelRouting.unknownModelBody rawRequestedModel)
   if routeKind == "direct" && rawActiveChain.targets.isEmpty then

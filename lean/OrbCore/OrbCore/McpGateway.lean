@@ -187,6 +187,18 @@ private def managedMissionAncestor (store : CoreStore) (ancestor descendant user
   return rows.size > 1
 
 set_option maxHeartbeats 1200000 in
+/-- Models that actually served a mission's proxied requests, from the usage ledger:
+    the name the harness asked for, the model and provider that answered, and how often.
+    Empty when no request has completed or the harness does not use the proxy. -/
+def servedModelsJson (store : CoreStore) (missionId : String) : IO JVal := do
+  let .ok rows ← execParamQuery store.missionsDb
+      ("SELECT COALESCE(requested_model,''),COALESCE(model,''),COALESCE(provider,''),COUNT(*) FROM proxy_usage " ++
+       "WHERE mission_id=?1 GROUP BY 1,2,3 ORDER BY 4 DESC LIMIT 20;") #[missionId]
+    | return .arr #[]
+  return .arr ((rows.extract 1 rows.size).map fun r =>
+    .obj #[("requested_model", .str (r[0]?.getD "")), ("effective_model", .str (r[1]?.getD "")),
+      ("provider", .str (r[2]?.getD "")), ("requests", JVal.nat ((r[3]?.bind String.toNat?).getD 0))])
+
 /-- Execute a non-memory MCP tool call from `POST /api/mcp/call` and return the serialized JSON response body.
     `authenticatedUserId` must come from Control's verified Core principal, never tool
     arguments, and is accepted only for its synthetic unscoped operator fallback. -/
@@ -615,7 +627,10 @@ def dispatchMcpToolCall
           ("resumable", detail.fieldOrNull "resumable")
         ])
       else
-        return mcpOk detail
+        let served ← servedModelsJson store mid
+        return mcpOk (match detail with
+          | .obj fields => .obj (fields.push ("served_models", served))
+          | other => other)
 
   | "get_mission_events" =>
     let mid := (args.fieldStr? "mission_id").orElse (fun _ => args.fieldStr? "id") |>.getD callerMid
@@ -780,6 +795,8 @@ def dispatchMcpToolCall
       releaseRented
       return mcpErr "no_execution_placement" "The mission was not started: no execution node is available for its first turn. Pass remote_node_id, or start it without a prompt." true
     let mid ← newUuidV4
+    -- The model name the turn is launched with. Empty means the harness's own default.
+    let sentModel := if backend == "opencode" && modelOv.isEmpty then "builtin/smart" else modelOv
     let initRev : UInt64 := if effProj.isEmpty && folder.isEmpty then 0 else 1
     let initStatus := if !prompt.isEmpty then "active" else "awaiting_user"
     let insSql :=
@@ -801,7 +818,7 @@ def dispatchMcpToolCall
           missionId        := mid
           targetNodeId     := targetNode
           backend          := backend
-          modelOverride    := if backend == "opencode" && modelOv.isEmpty then "builtin/smart" else modelOv
+          modelOverride    := sentModel
           modelEffort      := effort
           workingDirectory := effWorkDir
           project          := effProj
@@ -827,6 +844,10 @@ def dispatchMcpToolCall
       ("status", .str initStatus),
       ("backend", .str backend),
       ("model_override", if modelOv.isEmpty then .null else .str modelOv),
+      -- What the caller asked for and what the turn is launched with (null: harness default).
+      -- A chain name is resolved per request by the proxy; `get_mission` reports what served it.
+      ("requested_model", if rawModelOv.isEmpty then .null else .str rawModelOv),
+      ("effective_model", if sentModel.isEmpty then .null else .str sentModel),
       ("remote_node_id", match inheritedRn? with | some rn => .str rn | none => .null),
       ("project", if effProj.isEmpty then .null else .str effProj),
       ("folder", .str folder),
@@ -844,7 +865,12 @@ def dispatchMcpToolCall
     if let .error e ← checkMissionReadAccess store claims mid nowEpochSec then
       return mcpErr "forbidden" e
     match ← missionDetailJson store mid none "" with
-    | .ok (some raw) => return mcpOk ((OrbBin.Json.parse raw).toOption.getD (.obj #[]))
+    | .ok (some raw) =>
+      let detail := (OrbBin.Json.parse raw).toOption.getD (.obj #[])
+      let served ← servedModelsJson store mid
+      return mcpOk (match detail with
+        | .obj fields => .obj (fields.push ("served_models", served))
+        | other => other)
     | _ => return mcpErr "not_found" s!"Mission `{mid}` not found"
 
   | "send_message_to_mission" | "ask_mission" | "answer_mission_question" =>
