@@ -875,10 +875,13 @@ response head: a non-2xx head is drained and handled exactly like a buffered rep
 def maxStreamCopyBytes : Nat := 16777216
 
 /-- Raw response bytes from one upstream connection; `none` ends the read
-    (EOF, socket error, or an idle/total limit). -/
+    (EOF, socket error, or an idle/total limit). `eof` reports whether the
+    read ended cleanly: TLS `close_notify` only over TLS, or an orderly close
+    (`read == 0`) over plain TCP. -/
 structure UpstreamReader where
   read  : IO (Option ByteArray)
   close : IO Unit
+  eof   : IO Bool := pure true
 
 /-- How the response body is delimited on the wire. -/
 inductive BodyFraming where
