@@ -689,6 +689,39 @@ def parseAntigravitySummary (payload : JVal) : Array JVal := Id.run do
       out := out.push (antigravityWindowJv s!"{name} · {window}" (antigravityUsedTenths remaining) (antigravityReset? bucket))
   return out
 
+/-- Gemini quota from `retrieveUserQuota` (`buckets` or `models.*.quotaInfo`) when the summary
+    has no Gemini group: the tightest remaining fraction, named 5h or Weekly from its reset. -/
+def antigravityGeminiWindow? (payload : JVal) (nowSec : UInt64) : Option JVal := Id.run do
+  let isGemini (id : String) : Bool :=
+    let m := id.toLower
+    ((m.splitOn "gemini").length > 1 && (m.splitOn "carbon").length == 1) || m.startsWith "agy-demo"
+  let mut entries : Array (String × JVal) := #[]
+  for b in (payload.fieldArr? "buckets").getD #[] do
+    if let some id := b.fieldStr? "modelId" then entries := entries.push (id, b)
+  if let some (.obj models) := payload.field? "models" then
+    for (id, m) in models do
+      entries := entries.push (id, (m.field? "quotaInfo").getD .null)
+  let mut remaining : Option Nat := none
+  let mut reset : Option UInt64 := none
+  for (id, info) in entries do
+    if !isGemini id then continue
+    let resetAt := antigravityReset? info
+    let frac? : Option Nat := match info.field? "remainingFraction", resetAt with
+      | some (.num raw), _ => antigravityFractionMicros? raw
+      | _, some _ => some 0
+      | _, none => none
+    let some frac := frac? | continue
+    remaining := some (match remaining with | some r => min r frac | none => frac)
+    if frac < 1000000 then
+      reset := match reset, resetAt with
+        | some a, some b => some (min a b)
+        | a, b => a <|> b
+  let some rem := remaining | return none
+  let window := match reset with
+    | some r => if r > nowSec + 5 * 3600 + 600 then "Weekly" else "5h"
+    | none => "5h"
+  return some (antigravityWindowJv s!"Gemini · {window}" (antigravityUsedTenths rem) reset)
+
 private def antigravityFamily? (model : String) : Option String :=
   let m := model.toLower
   if (m.splitOn "claude").length > 1 then some "Claude"
@@ -836,9 +869,12 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
         if let .ok (c2, _, some sJv) ← sendJsonRequest "POST" s!"{base}:retrieveUserQuotaSummary" (some hp.oauthToken) (some quotaBody) ua 10000 1048576 then
           if 200 ≤ c2 && c2 < 300 then windows := parseAntigravitySummary sJv
           else if c2 == 401 || c2 == 403 then unauthorized := true
-        if windows.isEmpty && !unauthorized then
+        let hasGemini := windows.any fun w => ((w.fieldStr? "label").getD "").startsWith "Gemini"
+        if !unauthorized && (windows.isEmpty || !hasGemini) then
           if let .ok (c3, _, some qJv) ← sendJsonRequest "POST" s!"{base}:retrieveUserQuota" (some hp.oauthToken) (some quotaBody) ua 10000 1048576 then
-            if 200 ≤ c3 && c3 < 300 then windows := parseAntigravityQuota qJv
+            if 200 ≤ c3 && c3 < 300 then
+              if windows.isEmpty then windows := parseAntigravityQuota qJv
+              else if let some g := antigravityGeminiWindow? qJv (← nowEpoch) then windows := #[g] ++ windows
             else if c3 == 401 || c3 == 403 then unauthorized := true
         if unauthorized then statusStr := "needs_reauth"
         else extraFields := extraFields.push ("antigravity_windows", .arr windows)
