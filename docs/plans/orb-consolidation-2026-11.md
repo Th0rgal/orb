@@ -324,6 +324,109 @@ No questions sent; implement/test generic support against an authorized
 
 ## Operator requests
 
+### Coordinator status 18:45 UTC: two fixes merged, queue delete missing in Core, lean runner fence not ready
+
+**Master.** Tip is `eb2791e5` (#1736, merged by the coordinator at 18:31
+with all checks green). CI `43463948426` and Kernel ABI on `e9786d7e` (#1735)
+both completed green. Open pull requests: #1708 only.
+
+**Merged since 16:40.**
+
+- #1735 (`e9786d7e`): `tests/code-block.tsx` initialises the kernel itself.
+  This fixes the red-master flake. The plugin change described in the 16:40
+  section below (`edde09e8`) is dropped: with it the fixture loads through a
+  dynamic `import()` after a top-level `await`, `page.goto()` returns before
+  the fixture ran, and shard 1 ended 9 failed, 4 flaky.
+- #1736 (`eb2791e5`): `deletable_at` is `null` when a machine has no minimum
+  lease, instead of `1970-01-01T00:00:00Z`; the number is in
+  `deletable_at_sec`. Not verified: iOS and Android builds beyond CI.
+
+**No deploy request for #1736.** Correction of an earlier coordinator note:
+the `deletable_at` equal to `created_at` seen on prod at 18:36 (machine
+`a474d57a`) is not the 1970 defect. The create path sets
+`deletableAtSec := nowEpochSec` (`Control.lean:4968`, `McpGateway.lean:376`),
+so a new machine is deletable from creation. #1736 changes only rows whose
+stored value is 0, and clients read the field only while `reap_reason` starts
+with `awaiting_deletable_at:` (`orb/src/managedMachineModel.ts:541-543`). It
+can ride the next deploy. CI and Kernel ABI on `eb2791e5` were still running
+at 18:55.
+
+**New finding, by reading master, nothing run: Core has no
+`DELETE /api/control/queue/:id`.** Desktop, iOS and Android all call it to
+remove a queued follow-up. The `:id` arm in `Control.lean` (~5191) handles
+`PATCH` only, so the call ends in the generic 404. The desktop treats that
+404 as success (`orb/src/RemoteQueue.tsx:238-245`): the card disappears, the
+row stays, the card returns on the next fetch and the message is delivered
+after a later turn. `POST …/send-now?interrupt=true`
+(`ResourcesAndSystem.lean:2739`) only moves the row to the head and answers
+`promoted: true`; nothing stops the running turn. Both are already listed in
+`docs/plans/core-recovery-2026-11.md` line 172. This explains the queued
+steer that could not be removed on mission `734c3bb7`. C (`729e035b`, lagash)
+has the route as `wip/c-queue-delete`, tests first.
+
+**Member isolation.** Still not passed.
+
+- `wip/e-member-provider-projection` (`79473e60`) is reviewed and accepted;
+  it waits behind the login fix because both edit
+  `ProviderUsageAndLogin.lean`.
+- Six neighbouring routes have no role check. C's test, pushed as
+  `wip/e-member-sibling-routes-tests` (`dac3d30e`, expected to fail), shows a
+  member reading the owner's provider names (`/api/providers/catalog`), the
+  discovery file (`/api/providers/discovery`), every user's usage rows
+  (`/api/ai/usage/summary`) and failures (`/api/ai/proxy/health`).
+  `/api/ai/proxy/timing` and `/api/model-routing/health` return no marker.
+  Member screens on all three clients call usage summary and routing health,
+  so the fix is a reduced view, not a 403. Fix assigned to H-core after its
+  current tasks.
+
+**Provider reconnect (Thomas's panel bug).** `wip/h-provider-login-health`
+(`50d7b0d0`) is reviewed and accepted with one correction: Antigravity
+cooldowns are keyed per model (`cliproxyapi:antigravity:<model>`) and the
+branch cleared exact keys only. H-core (`21b1bfca`, nippur) confirmed the
+reading and pushed the corrected commit (`85aa81a9`) at 18:50. The
+coordinator read the change (one rule, used in the three places that clear
+evidence), cherry-picked it onto `eb2791e5` and opened #1737
+(`ready/h-provider-login-health`, `d8e70607`). The build and test results are
+the worker's report (build 4:59 with plain Lake); the coordinator has not
+seen the log lines, so CI on #1737 is the independent run. Merge when green.
+
+**Streaming (#1729 defects, live).** The D worker on dgx-spark produced no
+events in two turns and is cancelled. D2 (`4549d257`, uruk) replaces it and
+was reading the code at 18:30. No fix is merged; the four defects in the
+16:10 section stand.
+
+**Lean runners (lean.ci #34).** Reviewed by reading plus running the verifier
+script on 13 environments: it refuses `pull_request_target`, `workflow_run`,
+another run, a rerun attempt and a missing event file. Not ready:
+
+1. `write_job_started_summary_hook(...).ok()` (`leanci-shim/src/lib.rs:404`):
+   if the hook cannot be written the runner starts without it.
+2. `runner_fence` is an optional field: a guest image with an older shim
+   ignores it and runs the job unfenced, while the new controller admits
+   public repositories.
+3. No test evidence: only Vercel checks ran on the pull request.
+
+Th0rgal/orb is public, so this is the path that matters. Corrections sent to
+`e14bb767` (uruk) at 18:40. No deploy, no label or variable change.
+
+**Other work in progress.**
+
+- Docs-only push filters: v2 rejected (`!` is documented for `paths`, not
+  `paths-ignore`; `docs/**` hides five docs that tests read). v3 asked from
+  `e14bb767`.
+- Fixture kernel start: with the kernel delayed 3 s, `approval-queue`,
+  `machine-transfer` and `send-experience` fail with "Shared kernel is not
+  initialized". 45 of 48 fixture pages depend on the race. Worker `549c6b99`
+  adds the two lines per fixture and runs both shards.
+- Desktop mission view (`734c3bb7` symptoms): v2 not publishable (docs named
+  mobile code that does not exist; cases replayed fields Core never sends;
+  the queue card cause is the missing route above). v3 asked from `11a48ddf`,
+  due 20:15.
+
+**No owner.** Independent review of the #1731 `[ffi]` allowlist and
+turbo-lean `aee2d17`; `lean/turbo-lean-revision` still `29d85f7`; installed
+turbo-lean rejects `--no-telemetry`, so every node builds with plain Lake.
+
 ### Coordinator status 16:40 UTC: member provider identity exposed, fixture fix held back
 
 **Master.** Tip is `313ec310` (#1734, OpenCode over ACP, merged by the
