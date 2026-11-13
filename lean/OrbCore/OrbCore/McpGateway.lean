@@ -1553,21 +1553,16 @@ def dispatchMcpToolCall
     -- old schema; an upsert must not overwrite another project's task.
     for t in tasksArr do
       let mid := (t.fieldStr? "mission_id").getD ""
-      unless mid.isEmpty do
-        unless ← checkTenantMission mid false do return mcpErr "not_found" "Mission not found"
-      if let some key := (t.fieldStr? "task_key").orElse (fun _ => t.fieldStr? "key") then
-        let .ok rows ← execParamQuery store.missionsDb
-            "SELECT project_slug FROM mission_board_tasks WHERE task_key=?1;" #[key]
-          | return mcpErr "db_error" "Task lookup failed"
-        if rows.size > 1 && cell rows[1]! 0 != slug then return mcpErr "not_found" "Task not found"
+      let key := (t.fieldStr? "task_key").orElse (fun _ => t.fieldStr? "key") |>.getD ""
+      if let .error error ← validateProjectBoardTask store slug key mid callerUserId (!tenantScoped) then
+        return mcpErr error "Task unavailable"
     for t in tasksArr do
       let tKey ← match (t.fieldStr? "task_key").orElse (fun _ => t.fieldStr? "key") with | some k => pure k | none => newUuidV4
       let trk := (t.fieldStr? "track").getD "default"
       let mid := (t.fieldStr? "mission_id").getD ""
       let stVal := (t.fieldStr? "status").getD "open"
-      discard <| execParamQuery store.missionsDb
-        "INSERT INTO mission_board_tasks(task_key,project_slug,track,mission_id,attempt_seq,status) VALUES(?1,?2,?3,?4,0,?5) ON CONFLICT(task_key) DO UPDATE SET track=excluded.track,mission_id=excluded.mission_id,status=excluded.status WHERE mission_board_tasks.project_slug=excluded.project_slug;"
-        #[tKey, slug, trk, mid, stVal]
+      if let .error error ← putProjectBoardTask store slug tKey trk mid stVal callerUserId (!tenantScoped) then
+        return mcpErr error "Task unavailable"
     let sit ← buildProjectSituationJVal store slug slug
     return mcpOk (.obj #[("ok", .bool true), ("tasks", (sit.field? "tasks").getD (.arr #[]))])
 

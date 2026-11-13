@@ -44,6 +44,10 @@ own managed snapshot metadata; snapshot creation and deletion check the source
 machine before any provider or vault access. Provider inventory without a verified
 local owner is visible only to the operator. Fleet settings return a member's own
 usage, and global board task keys cannot overwrite another project's tasks.
+REST and MCP share that board admission path. Session-to-project lookups require
+the recorded project owner. The project controller/cron endpoints operate the
+shared host Hermes scheduler and require a real operator; members and dev passes
+cannot use those routes to read prompts, change jobs or launch host work.
 
 Remote dispatch binds the mission's stored owner before minting MCP, model-proxy
 or node credentials. A missing or disabled owner fails closed. Member placement

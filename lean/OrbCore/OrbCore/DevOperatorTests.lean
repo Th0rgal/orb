@@ -144,6 +144,9 @@ def run (root : String) : IO Unit := do
       "rejected credential escalation leaves the administrator unchanged"
     check ((← send "POST" "/api/mcp/call" bearer "{\"name\":\"memory_get_knowledge_tree\",\"arguments\":{}}").status == 403)
       "dev-only bearer cannot use the owner's shared personal memory broker"
+    for suffix in #["controller", "controller/action", "crons", "crons/existing-job", "crons/existing-job/action"] do
+      check ((← send "POST" ("/api/projects/example/" ++ suffix) bearer "{}").status == 403)
+        "dev pass cannot enqueue work on the shared host scheduler"
     let response ← send "POST" "/api/dev-operator/verify" bearer ""
     check (response.status == 200 && (OrbBin.Json.parseBytes response.body).toOption.bind (·.fieldBool? "active") == some true)
       "issuer endpoint verifies capability without echoing token"

@@ -400,6 +400,11 @@ def recordProjectDecisionJVal (store : CoreStore) (scopedSlug : String) (jv : JV
   let q := ((jv.fieldStr? "question").orElse (fun _ => jv.fieldStr? "summary") |>.getD "").trimAscii.toString
   if q.isEmpty then return .error "missing_question"
   let did ← match (jv.fieldStr? "id").filter (!·.isEmpty) with | some x => pure x | none => newUuidV4
+  let .ok existing ← execParamQuery store.projectsDb
+      "SELECT slug,project_slug FROM project_decisions WHERE id=?1;" #[did]
+    | return .error "decision_lookup_failed"
+  if existing.size > 1 && cell existing[1]! 0 != scopedSlug && cell existing[1]! 1 != scopedSlug then
+    return .error "not_found"
   let rat := (jv.fieldStr? "rationale").getD ""
   let auth := (jv.fieldStr? "authority").getD "escalation"
   let evid := (jv.fieldStr? "evidence").getD ""
@@ -410,7 +415,7 @@ def recordProjectDecisionJVal (store : CoreStore) (scopedSlug : String) (jv : JV
   if let .error e ← execParamQuery store.projectsDb
       ("INSERT INTO project_decisions(id,slug,project_slug,at,status,question,rationale,answered,authority,answer,answered_at,evidence,updated_at) " ++
        "VALUES(?1,?2,?2,?3,?4,?5,?6,CAST(?7 AS INTEGER),?8,NULLIF(?9,''),NULLIF(?10,''),?11,?3) " ++
-       "ON CONFLICT(id) DO UPDATE SET status=excluded.status,question=excluded.question,rationale=excluded.rationale,answered=excluded.answered,answer=excluded.answer,answered_at=excluded.answered_at,evidence=excluded.evidence,updated_at=excluded.updated_at;")
+       "ON CONFLICT(id) DO UPDATE SET status=excluded.status,question=excluded.question,rationale=excluded.rationale,answered=excluded.answered,answer=excluded.answer,answered_at=excluded.answered_at,evidence=excluded.evidence,updated_at=excluded.updated_at WHERE project_decisions.slug=excluded.slug OR project_decisions.project_slug=excluded.project_slug;")
       #[did, scopedSlug, nowIso, status, q, rat, answered, auth, ans, ansAt, evid] then
     return .error e
   return .ok (.obj #[
@@ -1100,6 +1105,30 @@ private def dispatchProjectFilesAndCronsTail?
         return some (jsonResp 200 (.obj #[("ok", .bool true)]))
     return none
 
+/-- Board keys are globally unique in the legacy schema. Validate both the
+    existing task's project and any linked mission before a REST/MCP write. -/
+def validateProjectBoardTask (store : CoreStore) (project key mission userId : String)
+    (isLegacyUnscoped : Bool) : IO (Except String Unit) := do
+  if !isLegacyUnscoped && !mission.isEmpty then
+    let (exists_, owns, _) ← getMissionRelationship store mission userId
+    unless exists_ && owns do return .error "not_found"
+  let .ok rows ← execParamQuery store.missionsDb
+      "SELECT project_slug FROM mission_board_tasks WHERE task_key=?1;" #[key]
+    | return .error "db_error"
+  if rows.size > 1 && cell rows[1]! 0 != project then return .error "not_found"
+  return .ok ()
+
+def putProjectBoardTask (store : CoreStore) (project key track mission status userId : String)
+    (isLegacyUnscoped : Bool) : IO (Except String Unit) := do
+  if let .error error ← validateProjectBoardTask store project key mission userId isLegacyUnscoped then
+    return .error error
+  let .ok _ ← execParamQuery store.missionsDb
+    ("INSERT INTO mission_board_tasks(task_key,project_slug,track,mission_id,attempt_seq,status) VALUES(?1,?2,?3,?4,0,?5) " ++
+     "ON CONFLICT(task_key) DO UPDATE SET track=excluded.track,mission_id=excluded.mission_id,status=excluded.status " ++
+     "WHERE mission_board_tasks.project_slug=excluded.project_slug;") #[key, project, track, mission, status]
+    | return .error "db_error"
+  return .ok ()
+
 set_option maxHeartbeats 800000 in
 def dispatchProjectAndControllerRoutes?
     (store : CoreStore)
@@ -1108,7 +1137,7 @@ def dispatchProjectAndControllerRoutes?
     (method cleanPath rawTarget : String)
     (bodyBytes : ByteArray)
     (callerUserId bootstrapAdminId : String)
-    (_isAdmin isLegacyUnscoped : Bool)
+    (isAdmin isLegacyUnscoped : Bool)
     (nowIso : String) : IO (Option (Nat × String × ByteArray)) := do
   let segs := (cleanPath.splitOn "/").filter (!·.isEmpty)
   let qMap := parseQueryMap rawTarget
@@ -1145,7 +1174,9 @@ def dispatchProjectAndControllerRoutes?
     let sid := (percentDecodeStrict segs[3]!).getD segs[3]!
     if method == "GET" then
       if let .ok rows ← execParamQuery store.projectsDb
-          "SELECT slug FROM project_bindings WHERE control_session_id=?1 LIMIT 1;" #[sid] then
+          ("SELECT b.slug FROM project_bindings b LEFT JOIN project_owners o ON o.slug=b.slug " ++
+           "WHERE b.control_session_id=?1 AND (?2='1' OR o.owner_user_id=?3) LIMIT 1;")
+          #[sid, if isLegacyUnscoped then "1" else "0", callerUserId] then
         if rows.size > 1 then
           let sl := unscopeProjectSlug callerUserId (cell rows[1]! 0)
           return some (jsonResp 200 (.obj #[("slug", .str sl)]))
@@ -1161,6 +1192,10 @@ def dispatchProjectAndControllerRoutes?
       if isLegacyUnscoped then clientSlug
       else (scopeProjectSlug callerUserId bootstrapAdminId clientSlug).getD clientSlug
     let tail := segs.drop 3
+    -- These endpoints read/write the shared host Hermes scheduler. Core-native
+    -- tenant projects and missions do not delegate that operator authority.
+    if !isAdmin && (tail[0]? == some "controller" || tail[0]? == some "crons") then
+      return some (jsonErr 403 "admin_required")
 
     -- `GET|DELETE /api/projects/:slug`
     if tail.isEmpty then
@@ -1329,9 +1364,8 @@ def dispatchProjectAndControllerRoutes?
         let trk := (jv.fieldStr? "track").getD "default"
         let mid := (jv.fieldStr? "mission_id").getD ""
         let stVal := (jv.fieldStr? "status").getD "open"
-        discard <| execParamQuery store.missionsDb
-          "INSERT INTO mission_board_tasks(task_key,project_slug,track,mission_id,attempt_seq,status) VALUES(?1,?2,?3,?4,0,?5) ON CONFLICT(task_key) DO UPDATE SET track=excluded.track,mission_id=excluded.mission_id,status=excluded.status;"
-          #[tKey, scopedSlug, trk, mid, stVal]
+        if let .error error ← putProjectBoardTask store scopedSlug tKey trk mid stVal callerUserId isLegacyUnscoped then
+          return some (jsonErr (if error == "not_found" then 404 else 500) error)
         return some (jsonResp 200 (.obj #[("ok", .bool true), ("task_key", .str tKey), ("status", .str stVal)]))
     if tail.length == 2 && tail[0]? == some "tasks" then
       let tKey := (percentDecodeStrict tail[1]!).getD tail[1]!

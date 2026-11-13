@@ -240,9 +240,22 @@ def run (root : String) : IO Unit := do
       "shared admin mission does not grant its owner's personal memory"
     let ownProject ← call member "get_project" (.obj #[("project", .str "member-project")])
     check (ownProject.fieldBool? "ok" == some true) "member retains own project access"
+    sql store.projectsDb "INSERT INTO project_bindings(slug,control_session_id) VALUES('admin-project','admin-session');"
+    let (_, hiddenBinding) ← send "GET" "/api/projects/by-session/admin-session" member
+    check ((hiddenBinding.field? "slug").getD .null == .null) "project session binding cannot disclose another user's project"
+    let (_, ownBinding) ← send "GET" "/api/projects/by-session/admin-session" admin
+    check (ownBinding.fieldStr? "slug" == some "admin-project") "owner retains project session binding"
+    for suffix in #["controller", "controller/action", "crons", "crons/defaults", "crons/admin-job", "crons/admin-job/action"] do
+      for method in #["GET", "POST", "PATCH", "DELETE"] do
+        check ((← send method ("/api/projects/admin-project/" ++ suffix) member).1 == 403)
+          "member cannot read or change the shared host scheduler through project routes"
     -- A global task-key collision must not overwrite the admin's board row,
     -- even though the member legitimately owns the project named in the call.
     sql store.missionsDb "INSERT INTO mission_board_tasks(task_key,project_slug,track,mission_id,attempt_seq,status) VALUES('admin-task','admin-project','private','admin-mission',0,'open');"
+    for task in #[.obj #[("task_key", .str "admin-task"), ("status", .str "done")],
+        .obj #[("task_key", .str "new-rest-task"), ("mission_id", .str "admin-mission")]] do
+      check ((← send "POST" "/api/projects/member-project/tasks" member task).1 == 404)
+        "REST task upserts cannot overwrite admin tasks or link admin missions"
     for tool in #["plan_tasks", "plan_project_tasks"] do
       let task : JVal := .obj #[("task_key", .str "admin-task"), ("status", .str "done")]
       let collision ← call member tool (.obj #[("project", .str "member-project"), ("tasks", .arr #[task])])
@@ -254,6 +267,19 @@ def run (root : String) : IO Unit := do
       "SELECT mission_id,status FROM mission_board_tasks WHERE task_key='admin-task';" #[]
       | throw (IO.userError "isolation task verification")
     check (taskRows[1]? == some #["admin-mission", "open"]) "admin board survives denied task upserts"
+    let decision : JVal := .obj #[("id", .str "admin-decision"), ("project", .str "admin-project"),
+      ("question", .str "admin-private-decision")]
+    check ((← call admin "record_project_decision" decision).fieldBool? "ok" == some true)
+      "admin decision positive control"
+    let attemptedDecision := decision.setField "project" (.str "member-project") |>.setField "question" (.str "unauthorized change")
+    check ((← call member "record_project_decision" attemptedDecision).fieldBool? "ok" == some false)
+      "MCP global decision id cannot overwrite another project"
+    check ((← send "POST" "/api/projects/member-project/decision" member attemptedDecision).1 == 400)
+      "REST global decision id cannot overwrite another project"
+    let .ok decisionRows ← execParamQuery store.projectsDb
+      "SELECT question FROM project_decisions WHERE id='admin-decision';" #[]
+      | throw (IO.userError "isolation decision verification")
+    check (decisionRows[1]? == some #["admin-private-decision"]) "admin decision survives rejected cross-project writes"
     -- No prompt is supplied: a bad placement must fail even for an inert MCP
     -- create, before any machine rental, credential minting or job submission.
     for node in #["agent-core", "sepolia", "managed-admin-machine", "managed-legacy-machine"] do

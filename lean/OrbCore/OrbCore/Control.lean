@@ -6045,7 +6045,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   if let some (pCode, pCtype, pBody) ← dispatchProjectAndControllerRoutes?
       st.store st.broadcastHub? st.cfg.workingDir
       req.method cleanPath rawTarget req.bodySlice.toByteArray
-      caller.userId st.bootstrapAdminId isAdmCaller caller.isLegacyUnscoped nowIsoDisp then
+      caller.userId st.bootstrapAdminId (isAdmCaller && !caller.isDevOperator) caller.isLegacyUnscoped nowIsoDisp then
     return .ok { status := pCode, contentType := pCtype, corsOrigin? := reqOrigin?, body := pBody }
 
   let cHubFallback ← match st.cloudHub? with | some h => pure h | none => newCloudRuntimeHub
