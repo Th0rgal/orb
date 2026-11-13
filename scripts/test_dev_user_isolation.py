@@ -12,6 +12,97 @@ SPEC.loader.exec_module(probe)
 
 
 class DevProbeSafetyTests(unittest.TestCase):
+    def test_shared_session_leaks_and_revocation_are_reported_without_bodies(self):
+        class SharedApi:
+            def __init__(self, leak):
+                self.leak = leak
+                self.missions = {}
+                self.projects = {}
+                self.shared = False
+                self.disabled = False
+                self.shared_tokens = set()
+
+            def call(self, method, path, token="", body=None):
+                if path == "/api/health":
+                    return 200, {"build": "a" * 40}
+                if path == "/api/admin/users":
+                    if method == "POST":
+                        return 201, {"id": "test-user"}
+                    return 403, {}
+                if path == "/api/auth/login":
+                    return 200, {"token": "synthetic-member"}
+                if path == "/api/admin/users/test-user":
+                    self.disabled = True
+                    return 200, {}
+                if path == "/api/mcp/session":
+                    shared = body["mission_id"] == self.admin_mid
+                    bearer = ("shared-" if shared else "own-") + body["role"]
+                    if shared:
+                        self.shared_tokens.add(bearer)
+                    return 200, {"token": bearer}
+                if path == "/api/mcp/external-sessions":
+                    return 200, {"token": "synthetic-external"}
+                if path == "/api/projects":
+                    if method == "PUT":
+                        self.projects[(token, body["slug"])] = {**body, "status": "active"}
+                    return 200, {}
+                if path.startswith("/api/projects/"):
+                    slug = path.split("/")[3]
+                    if path.endswith("/status"):
+                        return 404, {}
+                    if len(path.split("/")) > 4:
+                        return 403, {}
+                    return 200, {"project": self.projects.get((token, slug), {})}
+                if path == "/api/control/missions":
+                    if method == "POST":
+                        self.missions[body["id"]] = {**body, "status": "awaiting_user", "owner": token}
+                        if token == "synthetic-admin":
+                            self.admin_mid = body["id"]
+                        return 201, body
+                    return 200, []
+                if path.startswith("/api/control/missions/"):
+                    if "/shares" in path:
+                        self.shared = method == "POST"
+                        return (201 if self.shared else 200), {}
+                    mission = self.missions.get(path.split("/")[4], {})
+                    if mission.get("owner") != token:
+                        return 404, {}
+                    return 200, mission
+                if path in {"/api/workspaces", "/api/managed-machines"}:
+                    return 200, []
+                return 403, {}
+
+            def mcp(self, bearer, tool, arguments=None):
+                arguments = arguments or {}
+                if self.disabled:
+                    return 401, {"error": "disabled"}
+                if bearer in self.shared_tokens:
+                    if tool == "get_mission" and self.shared:
+                        return 200, {"ok": True}
+                    if tool == self.leak and self.shared:
+                        return 200, {"ok": True, "result": "sensitive-body-marker"}
+                    if tool == "get_mission" and self.leak == "revocation":
+                        return 200, {"ok": True, "result": "sensitive-body-marker"}
+                elif tool == "get_budget" and not arguments:
+                    return 200, {"ok": True, "result": {"spent_today_cents": 0}}
+                elif tool == "get_mission" and arguments.get("mission_id") != self.admin_mid:
+                    return 200, {"ok": True}
+                return 200, {"ok": False}
+
+        for leak in [None, "secret_list", "revocation"]:
+            with self.subTest(leak=leak):
+                output = io.StringIO()
+                api = SharedApi(leak)
+                with contextlib.redirect_stdout(output):
+                    passed = probe.run(api, "synthetic-admin", "a" * 40)
+                report = json.loads(output.getvalue())
+                self.assertEqual(passed, leak is None)
+                self.assertTrue(all(report["cleanup"].values()))
+                self.assertEqual(len(api.shared_tokens), 3)
+                self.assertTrue(any(row["case"].startswith("disabled_member_session_") for row in report["results"]))
+                self.assertNotIn("sensitive-body-marker", output.getvalue())
+                self.assertNotIn("synthetic-admin", output.getvalue())
+
     def test_only_exact_dev_targets(self):
         self.assertEqual(probe.dev_url("https://agent-backend-dev.thomas.md/"),
                          "https://agent-backend-dev.thomas.md")

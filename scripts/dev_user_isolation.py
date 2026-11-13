@@ -96,6 +96,8 @@ def run(api, admin, expected_sha):
     uid, member = "", ""
     created = []
     projects = []
+    sessions = []
+    shared_sessions = []
     results = []
     cleanup = {"user_disabled": False, "missions_deleted": True, "projects_deleted": True}
 
@@ -164,6 +166,7 @@ def run(api, admin, expected_sha):
                 if code != 200 or not isinstance(session, dict) or not session.get("token"):
                     raise IsolationError("member scoped-session mint failed")
                 bearer = session["token"]
+                sessions.append(bearer)
             for tool in ["get_mission", "get_mission_events", "get_budget", "send_message_to_mission",
                          "cancel_mission", "resume_mission", "schedule_wakeup"]:
                 expect("mcp_" + (role or "dashboard") + "_" + tool, api.mcp(bearer, tool, foreign), {200},
@@ -176,6 +179,7 @@ def run(api, admin, expected_sha):
         if code != 200 or not isinstance(external, dict) or not external.get("token"):
             raise IsolationError("member external-session mint failed")
         external_bearer = external["token"]
+        sessions.append(external_bearer)
         expect("external_own_mission_positive_control",
                api.mcp(external_bearer, "get_mission", {"mission_id": member_mid}), {200},
                lambda doc: isinstance(doc, dict) and doc.get("ok") is True)
@@ -193,6 +197,42 @@ def run(api, admin, expected_sha):
         expect("owner_project_unchanged", api.call("GET", "/api/projects/" + marker, admin), {200},
                lambda doc: isinstance(doc, dict) and isinstance(doc.get("project"), dict)
                and doc["project"].get("objective") == project_objective and doc["project"].get("status") == "active")
+
+        # Sharing permits participation, never adoption of the owner's identity.
+        if not expect("share_owner_fixture", api.call("POST", "/api/control/missions/" + admin_mid + "/shares",
+                                                      admin, {"username": username}), {201}):
+            raise IsolationError("could not share the synthetic mission fixture")
+        for role in ["executor", "coordinator", "operator"]:
+            code, shared = api.call("POST", "/api/mcp/session", member,
+                                   {"mission_id": admin_mid, "role": role})
+            if code != 200 or not isinstance(shared, dict) or not shared.get("token"):
+                raise IsolationError("shared member session mint failed")
+            shared_bearer = shared["token"]
+            sessions.append(shared_bearer)
+            shared_sessions.append(shared_bearer)
+            expect("shared_" + role + "_read_positive_control",
+                   api.mcp(shared_bearer, "get_mission", {"mission_id": admin_mid}), {200},
+                   lambda doc: isinstance(doc, dict) and doc.get("ok") is True)
+            for tool, arguments in [
+                ("resume_mission", foreign),
+                ("update_mission_settings", {"mission_id": admin_mid, "title": "unauthorized"}),
+                ("get_project", {"project": marker}),
+                ("secret_list", {}),
+                ("list_privileged_access", {}),
+                ("memory_get_knowledge_tree", {}),
+            ]:
+                expect("shared_" + role + "_denied_" + tool,
+                       api.mcp(shared_bearer, tool, arguments), {200},
+                       lambda doc: isinstance(doc, dict) and doc.get("ok") is False)
+        expect("unshare_owner_fixture",
+               api.call("DELETE", "/api/control/missions/" + admin_mid + "/shares/" + uid, admin), {200})
+        expect("revoked_share_rest", api.call("GET", "/api/control/missions/" + admin_mid, member), {404})
+        for index, bearer in enumerate(shared_sessions):
+            expect("revoked_share_mcp_" + str(index),
+                   api.mcp(bearer, "get_mission", {"mission_id": admin_mid}), {200, 401, 403},
+                   lambda doc: isinstance(doc, dict) and doc.get("ok") is not True)
+        expect("shared_owner_fixture_unchanged", api.call("GET", "/api/control/missions/" + admin_mid, admin), {200},
+               lambda doc: isinstance(doc, dict) and doc.get("title") == marker and doc.get("status") == "awaiting_user")
     finally:
         for bearer, mid in reversed(created):
             try:
@@ -210,11 +250,16 @@ def run(api, admin, expected_sha):
             try:
                 code, _ = api.call("PATCH", "/api/admin/users/" + uid, admin, {"disabled": True})
                 cleanup["user_disabled"] = code == 200
+                if cleanup["user_disabled"] and member:
+                    for index, bearer in enumerate([member] + sessions):
+                        expect("disabled_member_session_" + str(index),
+                               api.mcp(bearer, "get_budget"), {200, 401, 403},
+                               lambda doc: isinstance(doc, dict) and doc.get("ok") is not True)
             except IsolationError:
-                pass
+                cleanup["user_disabled"] = False
         # No response bodies, passwords, tokens, transcripts or provider values.
         print(json.dumps({"build": build, "results": results, "cleanup": cleanup,
-                          "coverage_pending": ["live machine lifecycle", "desktop", "shared mission sessions"]}))
+                          "coverage_pending": ["live machine lifecycle", "desktop"]}))
     return all(row["passed"] for row in results) and all(cleanup.values())
 
 
