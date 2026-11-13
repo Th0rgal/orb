@@ -6658,9 +6658,15 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
           IO.sleep 2000
       discard <| IO.asTask (prio := .dedicated) do
         let mut lastInventory : UInt64 := 0
+        let mut lastSampledMinute : UInt64 := 0
         while true do
           let cached ← managedRef.get
           let observedAt ← coreEpochSec
+          -- One compute sample per minute feeds the Resources history.
+          if observedAt / 60 != lastSampledMinute then
+            lastSampledMinute := observedAt / 60
+            if let .error e ← OrbCore.ResourcesAndSystem.sampleComputeRollup store (some managedStore) observedAt then
+              IO.eprintln s!"[orb-core] compute sample skipped: {e}"
           if cached.enabled || cached.machines.any (fun m => m.status != "destroyed") then
             match ← ManagedTtl.tick managedStore store cached (resolveManagedProvider store.rootDir) observedAt with
             | .error e => IO.eprintln s!"[orb-core] managed TTL maintenance deferred: {e}"

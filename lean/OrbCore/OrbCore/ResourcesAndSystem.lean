@@ -282,14 +282,12 @@ private def managedClassLabel (provider size : String) : String :=
     | other => other
   s!"{prov} · {if size.isEmpty then "vm" else size}"
 
-/-- Nominal vCPU count for a managed VM size, in thousandths. -/
-private def managedSizeVcpuMilli (size : String) : Nat :=
-  match size with
-  | "small" => 2000
-  | "medium" => 4000
-  | "large" => 8000
-  | "xlarge" => 16000
-  | _ => 4000
+/-- vCPU of a managed VM in thousandths, from the provider's declared size.
+    An undeclared size counts as 4. -/
+private def managedSizeVcpuMilli (provider size : String) : Nat :=
+  match managedSizeSpec? provider size with
+  | some spec => spec.cpu * 1000
+  | none => 4000
 
 /-- vCPU assumed for a static node whose capacity Core has not sampled, in thousandths. -/
 private def staticNodeVcpuMilli : Nat := 8000
@@ -327,6 +325,84 @@ private def resourceBarState (status : String) : String :=
 private def missionStatusIsLive (status : String) : Bool :=
   status == "active" || status == "running" || status == "pending" || status == "queued" ||
   status == "waiting_background" || status == "blocked"
+
+structure ComputeSources where
+  /-- `(id, label, sublabel, totalMilli, activeMilli)` per machine class. -/
+  sources : Array (String × String × String × Nat × Nat)
+  classCounts : Array (String × Nat)
+  /-- `(class id, root mission, leased milli-vCPU)`. -/
+  links : Array (String × String × Nat)
+
+/-- Live compute capacity and use per machine class: the Core host by load,
+    the static fleet by size, managed VMs by what a mission holds. -/
+def liveComputeSources (store : CoreStore) (managedStore? : Option ManagedComputeStore) : IO ComputeSources := do
+  let (hostVcpu, load1Str, _, _) ← readHostCpuAndRam
+  let hostTotalMilli := hostVcpu * 1000
+  let mut sources : Array (String × String × String × Nat × Nat) :=
+    #[("core:host", "Local host", "local", hostTotalMilli, Nat.min hostTotalMilli (parseDecimalMilli load1Str))]
+  let (_, staticNodes) ← loadStaticRemoteNodes
+  if !staticNodes.isEmpty then
+    let n := staticNodes.size
+    sources := sources.push ("static:fleet", "Static fleet", s!"{n} host{if n == 1 then "" else "s"}", n * staticNodeVcpuMilli, 0)
+  let mut classCounts : Array (String × Nat) := #[]
+  let mut compLinks : Array (String × String × Nat) := #[]
+  if let some mc := managedStore? then
+    if let .ok mf ← loadManagedFleet mc true true 0 0 8 then
+      for vm in mf.machines do
+        if vm.status == "destroyed" then continue
+        let classId := s!"{vm.provider}:{if vm.size.isEmpty then "vm" else vm.size}"
+        let vcpu := managedSizeVcpuMilli vm.provider vm.size
+        let mut leased := 0
+        if !vm.ownerMission.isEmpty then
+          if let some root ← resolveRootMission store vm.ownerMission then
+            leased := vcpu
+            match compLinks.findIdx? (fun l => l.1 == classId && l.2.1 == root) with
+            | some li => compLinks := compLinks.modify li fun (c, m, v) => (c, m, v + vcpu)
+            | none => compLinks := compLinks.push (classId, root, vcpu)
+        match classCounts.findIdx? (·.1 == classId) with
+        | some ci => classCounts := classCounts.modify ci fun (c, k) => (c, k + 1)
+        | none => classCounts := classCounts.push (classId, 1)
+        match sources.findIdx? (·.1 == classId) with
+        | some si => sources := sources.modify si fun (i, l, s, t, a) => (i, l, s, t + vcpu, a + leased)
+        | none => sources := sources.push (classId, managedClassLabel vm.provider vm.size, "", vcpu, leased)
+  return { sources, classCounts, links := compLinks }
+
+/-- Record this minute's compute use per machine class. One row per class and
+    minute; a second sample in the same minute replaces the first. -/
+def sampleComputeRollup (store : CoreStore) (managedStore? : Option ManagedComputeStore) (nowSec : UInt64) :
+    IO (Except String Nat) := do
+  let live ← liveComputeSources store managedStore?
+  let bucket := nowSec / 60
+  for (id, _, _, total, active) in live.sources do
+    if let .error e ← execParamQuery store.missionsDb
+        ("INSERT OR REPLACE INTO compute_rollup_1m(bucket_unix_min,machine_class,node_id,root_mission_id,mission_id,state," ++
+         "vcpu_allocated,vcpu_busy) VALUES(CAST(?1 AS INTEGER),?2,'','','','sampled'," ++
+         "CAST(?3 AS REAL)/1000.0,CAST(?4 AS REAL)/1000.0);")
+        #[toString bucket, id, toString total, toString active] then
+      return .error e
+  -- The longest chart is seven days; keep a little more.
+  discard <| execParamQuery store.missionsDb
+    "DELETE FROM compute_rollup_1m WHERE bucket_unix_min < CAST(?1 AS INTEGER);" #[toString (bucket - min bucket (8 * 24 * 60))]
+  return .ok live.sources.size
+
+/-- Mean busy vCPU (thousandths) per chart bucket for each machine class, from
+    the minute samples. A bucket with no sample is absent. -/
+def computeRollupSeries (store : CoreStore) (firstMin step nb : Nat) : IO (Array (String × Array (Option Nat))) := do
+  let mut out : Array (String × Array (Option Nat)) := #[]
+  if let .ok rows ← execParamQuery store.missionsDb
+      ("SELECT machine_class, (bucket_unix_min - CAST(?1 AS INTEGER))/CAST(?2 AS INTEGER), " ++
+       "CAST(ROUND(AVG(vcpu_busy)*1000) AS INTEGER) FROM compute_rollup_1m " ++
+       "WHERE bucket_unix_min >= CAST(?1 AS INTEGER) AND state='sampled' GROUP BY 1,2;")
+      #[toString firstMin, toString step] then
+    for row in rows.extract 1 rows.size do
+      let id := (row[0]?).getD ""
+      let some index := (row[1]?).bind String.toNat? | continue
+      if index ≥ nb then continue
+      let value := ((row[2]?).bind String.toNat?).getD 0
+      match out.findIdx? (·.1 == id) with
+      | some at_ => out := out.modify at_ fun (k, series) => (k, series.set! index (some value))
+      | none => out := out.push (id, (Array.replicate nb none).set! index (some value))
+  return out
 
 /-- `GET /api/resources/overview`: the `ResourcesOverviewResponse` contract shared by desktop, iOS and Android.
     Inference figures are aggregated from `proxy_usage`. Core keeps no compute history, so compute series
@@ -378,36 +454,12 @@ def buildResourcesOverviewJson
       | some li => infLinks := infLinks.modify li fun (p, m, t, c) => (p, m, t + tok, c + cents)
       | none => infLinks := infLinks.push (pool, target, tok, cents)
 
-  -- Compute: live capacity per machine class as `(id, label, sublabel, totalMilli, activeMilli)`.
-  let (hostVcpu, load1Str, _, _) ← readHostCpuAndRam
-  let hostTotalMilli := hostVcpu * 1000
-  let mut sources : Array (String × String × String × Nat × Nat) :=
-    #[("core:host", "Local host", "local", hostTotalMilli, Nat.min hostTotalMilli (parseDecimalMilli load1Str))]
-  let (_, staticNodes) ← loadStaticRemoteNodes
-  if !staticNodes.isEmpty then
-    let n := staticNodes.size
-    sources := sources.push ("static:fleet", "Static fleet", s!"{n} host{if n == 1 then "" else "s"}", n * staticNodeVcpuMilli, 0)
-  let mut classCounts : Array (String × Nat) := #[]
-  let mut compLinks : Array (String × String × Nat) := #[]
-  if let some mc := managedStore? then
-    if let .ok mf ← loadManagedFleet mc true true 0 0 8 then
-      for vm in mf.machines do
-        if vm.status == "destroyed" then continue
-        let classId := s!"{vm.provider}:{if vm.size.isEmpty then "vm" else vm.size}"
-        let vcpu := managedSizeVcpuMilli vm.size
-        let mut leased := 0
-        if !vm.ownerMission.isEmpty then
-          if let some root ← resolveRootMission store vm.ownerMission then
-            leased := vcpu
-            match compLinks.findIdx? (fun l => l.1 == classId && l.2.1 == root) with
-            | some li => compLinks := compLinks.modify li fun (c, m, v) => (c, m, v + vcpu)
-            | none => compLinks := compLinks.push (classId, root, vcpu)
-        match classCounts.findIdx? (·.1 == classId) with
-        | some ci => classCounts := classCounts.modify ci fun (c, k) => (c, k + 1)
-        | none => classCounts := classCounts.push (classId, 1)
-        match sources.findIdx? (·.1 == classId) with
-        | some si => sources := sources.modify si fun (i, l, s, t, a) => (i, l, s, t + vcpu, a + leased)
-        | none => sources := sources.push (classId, managedClassLabel vm.provider vm.size, "", vcpu, leased)
+  -- Compute: live capacity per machine class, and its history from the minute samples.
+  let live ← liveComputeSources store managedStore?
+  let sources := live.sources
+  let classCounts := live.classCounts
+  let compLinks := live.links
+  let history ← computeRollupSeries store firstMin step nb
   let mut sourceVals : Array JVal := #[]
   let mut totalMilli := 0
   let mut activeMilli := 0
@@ -421,7 +473,11 @@ def buildResourcesOverviewJson
       ("id", .str id), ("label", .str label), ("sublabel", .str sublabel),
       ("total_vcpu", numFixed total 3), ("active_vcpu", numFixed active 3),
       ("idle_leased_vcpu", .num "0.0"), ("est_usd_per_h", .num "0.0"), ("health", .str "ok"),
-      ("series_vcpu", .arr ((Array.replicate (nb - 1) (.num "0.0")).push (numFixed active 3))),
+      -- Past buckets come from the samples; the last one is the live reading.
+      ("series_vcpu", .arr (((Array.range (nb - 1)).map fun index =>
+        match (history.find? (·.1 == id)).bind (fun (_, series) => (series[index]?).join) with
+        | some milli => numFixed milli 3
+        | none => .num "0.0").push (numFixed active 3))),
       ("series_usd_per_h", zeroSeries nb)
     ])
 

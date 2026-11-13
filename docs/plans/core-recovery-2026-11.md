@@ -82,6 +82,10 @@ lean.ci, and the blocked missions (evm.fast, ldgr workers) can get machines agai
    and size of its last successful heartbeat (`node_heartbeats.json`), marked `capacity_cached`.
 3. **Compute history.** Nothing writes `compute_rollup_1m`, so Resources compute charts only show the
    live sample. Sample per minute and read it in `buildResourcesOverviewJson`.
+   *Done on master:* Core's maintenance loop writes one row per machine class each minute
+   (`sampleComputeRollup`), keeps eight days, and the overview's `series_vcpu` is the mean of those
+   samples per chart bucket with the live reading last. History starts when this version is deployed;
+   earlier buckets stay zero. Cost history (`series_usd_per_h`) is still not sampled.
 
 ## 3. Desktop UI bugs
 
