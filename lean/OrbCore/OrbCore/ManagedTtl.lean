@@ -101,12 +101,27 @@ def inspectMachine (mc : ManagedComputeStore) (resolve : Resolver) (rawId : Stri
       ("provider_billable", .bool (!provider.isStopped remote.state)),
       ("provider_usage_cents", usage)])
 
+/-- Minutes before expiry at which the owning mission is warned, most urgent first. -/
+def warningMinutes : Array UInt64 := #[5, 20]
+
+/-- The warning due now, if any: the most urgent threshold the machine has
+    crossed. The 20-minute warning is skipped for a machine whose whole lifetime
+    is shorter, so a 15-minute VM is not "warned" at birth; the 5-minute one
+    always applies. -/
+def warningDue (m : ManagedMachine) (nowEpoch : UInt64) : Option UInt64 :=
+  if m.status == "destroyed" || m.expiresAtSec == 0 || nowEpoch ≥ m.expiresAtSec then none else
+  warningMinutes.find? fun minutes =>
+    nowEpoch + minutes * 60 ≥ m.expiresAtSec &&
+      (minutes == 5 || m.createdAtSec == 0 || m.createdAtSec + minutes * 60 + 60 ≤ m.expiresAtSec)
+
 private def eventOnce (store : CoreStore) (m : ManagedMachine) (kind message : String)
-    (nowEpoch : UInt64) (providerState : String := "unknown") (usageCents? : Option UInt64 := none) : IO (Except String Unit) := do
+    (nowEpoch : UInt64) (providerState : String := "unknown") (usageCents? : Option UInt64 := none)
+    (stage : String := "") : IO (Except String Unit) := do
   if m.ownerMission.isEmpty then return .ok ()
   let some owner ← getMission? store m.ownerMission | return .ok ()
   if !m.ownerUserId.isEmpty && owner.ownerUserId != m.ownerUserId then return .error "managed_owner_mismatch"
-  let key := s!"managed-ttl:{m.id}:{m.nodeBootEpoch}:{m.expiresAtSec}:{kind}"
+  -- The expiry is part of the key, so an extension re-arms both warnings.
+  let key := s!"managed-ttl:{m.id}:{m.nodeBootEpoch}:{m.expiresAtSec}:{kind}{if stage.isEmpty then "" else ":" ++ stage}"
   let .ok rows ← execParamQuery store.missionsDb
       "SELECT 1 FROM mission_events WHERE mission_id=?1 AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.id') ELSE NULL END=?2 LIMIT 1;"
       #[m.ownerMission,key] | return .error "managed_expiry_event_read_failed"
@@ -115,6 +130,7 @@ private def eventOnce (store : CoreStore) (m : ManagedMachine) (kind message : S
     ("id",.str key), ("code",.str kind), ("message",.str message), ("content",.str message),
     ("machine_id",.str m.id), ("node_id",.str s!"managed-{m.id}"),
     ("expires_at_sec",JVal.uint64 m.expiresAtSec), ("provider_state",.str providerState),
+    ("minutes_before", match stage.toNat? with | some n => JVal.nat n | none => .null),
     ("spend_cents",JVal.uint64 (usageCents?.getD m.spentCents)),
     ("spend_source",.str (if usageCents?.isSome then "provider_usage" else "lease_reservation_estimate"))])
   match ← appendMissionEvent store m.ownerMission (if kind == "managed_machine_expired" then "error" else "system")
@@ -139,9 +155,12 @@ def tick (mc : ManagedComputeStore) (store : CoreStore) (defaults : ManagedFleet
   let mut pending : Array JVal := #[]
   for m in fleet.machines do
     if m.expiresAtSec == 0 then continue
-    if m.status != "destroyed" && nowEpoch < m.expiresAtSec && nowEpoch + 120 ≥ m.expiresAtSec then
+    if let some minutes := warningDue m nowEpoch then
       discard <| eventOnce store m "managed_machine_expiring"
-        s!"Managed VM {m.sandboxName} expires in at most 2 minutes. Push/checkpoint work and explicitly extend it before the deadline; busy VMs are not auto-extended." nowEpoch
+        (s!"Managed VM {m.sandboxName} (managed-{m.id}) expires in at most {minutes} minutes, at " ++
+         s!"{formatEpochIso8601Utc m.expiresAtSec}. Busy VMs are not auto-extended: call extend_managed_machine " ++
+         "to keep it, or bring results back with harvest_managed_file and push work before the deadline.")
+        nowEpoch "unknown" none (toString minutes)
     if nowEpoch < m.expiresAtSec then continue
     -- Retry an owner notification after a crash even if cleanup already completed.
     let .ok prior ← execParamQuery mc.db
