@@ -32,10 +32,10 @@ private def runInventoryTests (root : String) : IO Unit := do
       let ctx : OrbCore.RemoteFleetAndRelay.ManagedLifecycleContext := { store := core, fleet }
       for action in #["stop", "resume"] do
         let outcome ← OrbCore.RemoteFleetAndRelay.runConfiguredManagedLifecycle mc ctx id action now
-        check (outcome == .error "managed_provider_stop_resume_unsupported") "unsupported actions fail before provider resolution"
+        check (match outcome with | .error e => e == "managed_provider_stop_resume_unsupported" | .ok _ => false) "unsupported actions fail before provider resolution"
       if provider == "leanci" then
         let outcome ← OrbCore.RemoteFleetAndRelay.runConfiguredManagedLifecycle mc ctx id "extend" now
-        check (outcome == .error "managed_provider_extend_unsupported") "fixed lean.ci lease cannot be extended"
+        check (match outcome with | .error e => e == "managed_provider_extend_unsupported" | .ok _ => false) "fixed lean.ci lease cannot be extended"
     let .ok _ ← provisionManagedMachine mc fleet {
       id := "orphan-reservation", sandboxName := "orb-managed-orphan-reservation", ttlMinutes := 60,
       spentCents := 1, deletableAtSec := 0

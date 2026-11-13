@@ -822,8 +822,8 @@ struct OrbManagedMachinesSection: View {
         if live {
             if OrbManaged.canExtend(m, providers: response.providers) {
                 Button(m.provider == "colab" ? "Extend Core TTL 1 h (runtime not guaranteed)" : "Extend 1 h", systemImage: "clock.arrow.circlepath") { onExtend(m) }.disabled(!canAct(m))
+                    .accessibilityIdentifier("managed.extend")
             }
-                .accessibilityIdentifier("managed.extend")
             if OrbManaged.canStop(m, providers: response.providers), let onStop {
                 Button("Stop", systemImage: "pause.circle") { onStop(m) }.disabled(!canAct(m))
                     .accessibilityIdentifier("managed.stop")
