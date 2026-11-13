@@ -65,6 +65,7 @@ structure CliLoginSession where
   flow          : String
   createdSec    : UInt64
   beforeFiles   : Array (String × UInt64)
+  completionStartedSec? : Option UInt64 := none
   status        : String := "pending"
   message?      : Option String := none
   deriving Repr, Inhabited
@@ -72,11 +73,13 @@ structure CliLoginSession where
 structure ProviderHubState where
   agyModelsCache? : Option (UInt64 × Array (String × String)) := none
   usageEntries    : Array CachedUsageEntry := #[]
+  usageGeneration : Nat := 0
   loginSessions   : Array CliLoginSession := #[]
   catalogRefreshedSec : UInt64 := 0
 
 structure ProviderRuntimeHub where
   mu : Std.Mutex ProviderHubState
+  usageProbe? : Option (String → IO JVal) := none
 
 def newProviderRuntimeHub : IO ProviderRuntimeHub := do
   let mu ← Std.Mutex.new ({} : ProviderHubState)
@@ -221,6 +224,7 @@ structure CliAuthFileInfo where
   prefixId    : String
   disabled    : Bool
   mtimeSec    : UInt64
+  fingerprint : UInt64 := 0
   deriving Repr, Inhabited
 
 def scanCliProxyAuthFiles : IO (Array CliAuthFileInfo) := do
@@ -262,6 +266,7 @@ def scanCliProxyAuthFiles : IO (Array CliAuthFileInfo) := do
                   prefixId := pfx
                   disabled := dis
                   mtimeSec := st.mtime
+                  fingerprint := hash raw
                 }
   return out
 
@@ -923,7 +928,13 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
   ]
   return .obj baseFields
 
+private def probeProviderUsage (hub : ProviderRuntimeHub) (hp : HydratedProvider) : IO JVal :=
+  match hub.usageProbe? with
+  | some probe => probe hp.id
+  | none => fetchLiveProviderUsage hp
+
 private def refreshProviderUsageAsync (hub : ProviderRuntimeHub) (hp : HydratedProvider) : IO Unit := do
+  let generation ← hub.mu.atomically (do return (← get).usageGeneration)
   let shouldSpawn ← hub.mu.atomically do
     let st ← get
     match st.usageEntries.find? (fun e => e.providerId == hp.id) with
@@ -947,14 +958,15 @@ private def refreshProviderUsageAsync (hub : ProviderRuntimeHub) (hp : HydratedP
       return true
   if shouldSpawn then
     let _ ← IO.asTask (prio := .dedicated) do
-      let fresh ← (try fetchLiveProviderUsage hp catch _ =>
+      let fresh ← (try probeProviderUsage hub hp catch _ =>
         pure (.obj #[("provider_type", .str hp.providerType), ("provider_name", .str hp.name), ("status", .str "error")]))
       let ts ← nowEpoch
       let tsIso := formatEpochIso8601Utc ts
       hub.mu.atomically do
         let st ← get
-        let others := st.usageEntries.filter (fun e => e.providerId != hp.id)
-        set { st with usageEntries := others.push { providerId := hp.id, fetchedSec := ts, fetchedIso := tsIso, payload := fresh, refreshing := false } }
+        if st.usageGeneration == generation then
+          let others := st.usageEntries.filter (fun e => e.providerId != hp.id)
+          set { st with usageEntries := others.push { providerId := hp.id, fetchedSec := ts, fetchedIso := tsIso, payload := fresh, refreshing := false } }
 
 private def decorateCachedUsage (entry : CachedUsageEntry) (nowSec : UInt64) : JVal :=
   let withCached := (entry.payload.setField "cached" (.bool true)).setField "fetched_at" (.str entry.fetchedIso)
@@ -1157,6 +1169,47 @@ def loginRejectedFor (hub : ProviderRuntimeHub) (store : CoreStore) (hp : Hydrat
       #[hp.id, if viaCliProxy then s!"cliproxyapi:{hp.providerType}" else ""] with
   | .ok rows => return rows.size > 1
   | .error _ => return false
+
+def reconcileCliLoginCompletion
+    (hub : ProviderRuntimeHub) (store : CoreStore) (workingDir : String)
+    (cooldowns : IO.Ref (Array AccountCooldown)) (tracker? : Option ProviderHealthTracker)
+    (sess : CliLoginSession) (now : UInt64) : IO CliLoginSession := do
+  if sess.status == "completed" || sess.status == "failed" then return sess
+  let started := sess.completionStartedSec?.getD now
+  let files ← scanCliProxyAuthFiles
+  let visible := files.any fun f =>
+    f.authType == sess.authFileType && !f.disabled && !f.accessToken.isEmpty &&
+    !(sess.beforeFiles.contains (f.fileName, f.fingerprint))
+  let mut result := { sess with status := "completing", completionStartedSec? := some started }
+  if visible then
+    let providers ← loadHydratedProviders store workingDir
+    let affected := providers.filter (fun hp => providerTypeMatchesAuthType hp.providerType sess.authFileType)
+    let ids := affected.map (·.id)
+    hub.mu.atomically do
+      modify fun st => { st with
+        usageGeneration := st.usageGeneration + 1
+        usageEntries := (st.usageEntries.filter (fun e => !ids.contains e.providerId)).map (fun e => { e with refreshing := false })
+      }
+    let providerType := (affected[0]?.map (·.providerType)).getD
+      (if sess.authFileType == "claude" then "anthropic" else if sess.authFileType == "codex" then "openai" else sess.authFileType)
+    let keys := #[s!"cliproxyapi:{providerType}"] ++
+      (affected.filter (fun hp => hp.hasOAuth && !hp.hasApiKey)).map (·.id)
+    for k in keys do
+      discard <| execParamQuery store.missionsDb "DELETE FROM provider_auth_health WHERE account_key=?1;" #[k]
+    cooldowns.modify (fun cs => cs.filter (fun c => !keys.contains c.accountId))
+    if let some tracker := tracker? then clearAccountHealthWhere tracker keys.contains
+    for hp in affected do
+      refreshProviderUsageAsync hub hp
+    result := { result with status := "completed", message? := some "Connected" }
+  else if now >= started + 60 then
+    result := { result with status := "failed", message? := some "Authentication completed but the new auth file was not visible within 60 seconds. Try reconnecting again." }
+  hub.mu.atomically do
+    modify fun st => { st with loginSessions := st.loginSessions.map (fun s => if s.sessionId == sess.sessionId then result else s) }
+  return result
+
+private def loginSessionResponse (sess : CliLoginSession) : Nat × String × ByteArray :=
+  jsonResp 200 (.obj #[("status", .str sess.status), ("auth_url", .str sess.authUrl),
+    ("message", sess.message?.map JVal.str |>.getD .null)])
 
 /-! ## Unified Dispatcher for AI Providers, Proxy Analytics, Model-Routing Health/Test & Catalog -/
 
@@ -1510,7 +1563,7 @@ def dispatchProviderAndAiRoute
         let some (slug, authType, flow) := mapLoginSlug rawProv
           | return some (jsonErr 400 s!"Unsupported CLIProxy login provider `{rawProv}`")
         let targetProvId? := reqJv.fieldStr? "provider_id"
-        let beforeFiles := (← scanCliProxyAuthFiles).map (fun af => (af.fileName, af.mtimeSec))
+        let beforeFiles := (← scanCliProxyAuthFiles).map (fun af => (af.fileName, af.fingerprint))
         match ← sendJsonRequest "GET" s!"{mgmtBase}/v0/management/{slug}-auth-url" (some mgmtKey) none #[] 15000 262144 with
         | .ok (code, rawTxt, some uJv) =>
           if 200 ≤ code && code < 300 then
@@ -1559,11 +1612,15 @@ def dispatchProviderAndAiRoute
           return some (jsonResp 200 (.obj #[("status", .str "ok")]))
 
         if method == "GET" then
+          if sess.status == "completed" || sess.status == "failed" then
+            return some (loginSessionResponse sess)
+          if sess.completionStartedSec?.isSome then
+            return some (loginSessionResponse (← reconcileCliLoginCompletion hub store workingDir proxyCooldownsRef healthTracker? sess nowSec))
           match ← sendJsonRequest "GET" s!"{mgmtBase}/v0/management/get-auth-status?state={urlEncodeComponent sess.stateToken}" (some mgmtKey) none #[] 8000 262144 with
           | .ok (200, _, some stJv) =>
             let stStr := ((stJv.fieldStr? "status").getD "wait").toLower
             if stStr == "ok" then
-              return some (jsonResp 200 (.obj #[("status", .str "completed"), ("auth_url", .str sess.authUrl), ("message", .str "Connected")]))
+              return some (loginSessionResponse (← reconcileCliLoginCompletion hub store workingDir proxyCooldownsRef healthTracker? sess nowSec))
             else if stStr == "error" then
               let errMsg := (stJv.fieldStr? "error").getD "Authentication failed"
               return some (jsonResp 200 (.obj #[("status", .str "failed"), ("auth_url", .str sess.authUrl), ("message", .str errMsg)]))
@@ -1603,22 +1660,9 @@ def dispatchProviderAndAiRoute
         ]
         match ← sendJsonRequest "POST" s!"{mgmtBase}/v0/management/oauth-callback" (some mgmtKey) (some cbPayload) #[] 15000 262144 with
         | .ok (c, _, _) =>
-          -- A completed login supersedes earlier refusals seen through CLIProxyAPI; a login
-          -- that is still dead is recorded again by the next request.
           if 200 ≤ c && c < 300 then
-            discard <| execParamQuery store.missionsDb "DELETE FROM provider_auth_health WHERE account_key LIKE 'cliproxyapi:%';" #[]
-            -- The same goes for what Core itself remembers: the cooldowns it put on the
-            -- sidecar's logins, and cached usage that still says the login was refused.
-            let viaSidecar (k : String) : Bool := k.startsWith "cliproxyapi:"
-            let cur ← proxyCooldownsRef.get
-            proxyCooldownsRef.set (cur.filter (fun c => !viaSidecar c.accountId))
-            if let some t := healthTracker? then clearAccountHealthWhere t viaSidecar
-            hub.mu.atomically do
-              let st ← get
-              let kept := st.usageEntries.filter (fun e => e.payload.fieldStr? "status" != some "needs_reauth")
-              set { st with usageEntries := kept }
-          let okSt := if 200 ≤ c && c < 300 then "completing" else "failed"
-          return some (jsonResp 200 (.obj #[("status", .str okSt), ("auth_url", .str sess.authUrl), ("message", .null)]))
+            return some (loginSessionResponse (← reconcileCliLoginCompletion hub store workingDir proxyCooldownsRef healthTracker? sess nowSec))
+          return some (loginSessionResponse { sess with status := "failed", message? := some "CLIProxy rejected the callback" })
         | .error e =>
           return some (jsonResp 200 (.obj #[("status", .str "failed"), ("auth_url", .str sess.authUrl), ("message", .str e)]))
 
@@ -1662,13 +1706,15 @@ def dispatchProviderAndAiRoute
             ("status", .str "pending"),
             ("cached", .bool false)
           ]))
-        let live ← fetchLiveProviderUsage hp
+        let generation ← hub.mu.atomically (do return (← get).usageGeneration)
+        let live ← probeProviderUsage hub hp
         let ts ← nowEpoch
         let tsIso := formatEpochIso8601Utc ts
         hub.mu.atomically do
           let st ← get
-          let others := st.usageEntries.filter (fun e => e.providerId != hp.id)
-          set { st with usageEntries := others.push { providerId := hp.id, fetchedSec := ts, fetchedIso := tsIso, payload := live, refreshing := false } }
+          if st.usageGeneration == generation then
+            let others := st.usageEntries.filter (fun e => e.providerId != hp.id)
+            set { st with usageEntries := others.push { providerId := hp.id, fetchedSec := ts, fetchedIso := tsIso, payload := live, refreshing := false } }
         return some (jsonResp 200 live)
 
       -- `POST /api/ai/providers/:id/default`
@@ -1703,7 +1749,7 @@ def dispatchProviderAndAiRoute
           | return some (jsonErr 404 "Provider not found")
         let cur ← proxyCooldownsRef.get
         proxyCooldownsRef.set (cur.filter (fun c => c.accountId != hp.id))
-        let live ← fetchLiveProviderUsage hp
+        let live ← probeProviderUsage hub hp
         let enriched := (live.setField "reset_redeemed" (.bool true)).setField "woken_missions" (JVal.nat 0)
         return some (jsonResp 200 enriched)
 
@@ -1714,7 +1760,7 @@ def dispatchProviderAndAiRoute
           | return some (jsonErr 404 "Provider not found")
         let cur ← proxyCooldownsRef.get
         proxyCooldownsRef.set (cur.filter (fun c => c.accountId != hp.id))
-        let live ← fetchLiveProviderUsage hp
+        let live ← probeProviderUsage hub hp
         return some (jsonResp 200 live)
 
       -- `GET /api/ai/providers/:id/auth/methods`
