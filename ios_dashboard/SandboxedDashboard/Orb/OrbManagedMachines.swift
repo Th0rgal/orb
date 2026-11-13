@@ -295,7 +295,7 @@ enum OrbManaged {
     static func providerLabel(_ provider: String?) -> String {
         switch (provider ?? "boat").lowercased() {
         case "boat": return "boat.dev"
-        case "leanci", "lean.ci", "boost", "boost.ci": return "lean.ci"
+        case "leanci": return "lean.ci"
         case "hetzner": return "Hetzner"
         case "vastai": return "Vast.ai"
         case "scaleway": return "Scaleway"
@@ -308,7 +308,6 @@ enum OrbManaged {
 
     static func machineProviderKey(_ provider: String?) -> String {
         let key = (provider ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if key == "boost" || key == "boost.ci" || key == "lean.ci" { return "leanci" }
         return key.isEmpty ? "boat" : key
     }
 
@@ -359,7 +358,7 @@ enum OrbManaged {
     }
 
     static func nodeProvider(_ node: OrbJSON) -> String? {
-        let known: Set<String> = ["boat", "leanci", "boost", "hetzner", "vastai", "scaleway", "colab"]
+        let known: Set<String> = ["boat", "leanci", "hetzner", "vastai", "scaleway", "colab"]
         for item in node["labels"].items {
             let l = item.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             if l.hasPrefix("provider=") { return String(l.dropFirst("provider=".count)) }
@@ -368,9 +367,32 @@ enum OrbManaged {
         return nil
     }
 
+    static func isProviderPersonallyEnabled(_ p: OrbManagedProviderInfo) -> Bool {
+        p.user_enabled ?? (p.provider == "boat")
+    }
+
+    static func isProviderGloballyEnabled(_ p: OrbManagedProviderInfo) -> Bool {
+        p.globally_enabled ?? (p.enabled != false)
+    }
+
     static func isProviderEnabled(_ p: OrbManagedProviderInfo) -> Bool {
-        if let eff = p.effective_enabled { return eff }
-        return p.enabled != false
+        isProviderGloballyEnabled(p) && isProviderPersonallyEnabled(p) && p.effective_enabled != false
+    }
+
+    static func updatingProvider(_ p: OrbManagedProviderInfo, enabled: Bool, personal: Bool) -> OrbManagedProviderInfo {
+        var copy = p
+        if personal {
+            copy.user_enabled = enabled
+        } else {
+            copy.enabled = enabled
+            copy.globally_enabled = enabled
+        }
+        copy.effective_enabled = isProviderGloballyEnabled(copy) && isProviderPersonallyEnabled(copy)
+        return copy
+    }
+
+    static func providerTogglePath(_ provider: String, personal: Bool) -> String {
+        "/api/managed-machines/providers/\(OrbCore.escape(provider))" + (personal ? "/preference" : "")
     }
 
     static func isProviderUsable(_ p: OrbManagedProviderInfo) -> Bool {
@@ -387,6 +409,8 @@ enum OrbManaged {
     }
 
     static func providerStatusLine(_ p: OrbManagedProviderInfo) -> String {
+        if !isProviderGloballyEnabled(p) { return p.configured ? "Disabled by admin" : "Disabled · Not configured" }
+        if !isProviderPersonallyEnabled(p) { return p.configured ? "Skipped for your missions" : "Not configured" }
         let enabled = isProviderEnabled(p)
         if !p.configured { return enabled ? "Not configured" : "Disabled · Not configured" }
         let cred = [credentialSourceLabel(p.credential_source), p.key_hint ?? ""].filter { !$0.isEmpty }.joined(separator: " ")
@@ -394,12 +418,7 @@ enum OrbManaged {
             ? (p.availability?.status == "saturated" ? "At capacity"
                 : p.availability?.status == "degraded" ? "Limited capacity" : "")
             : ""
-        let stateLabel: String = {
-            if enabled { return "Configured" }
-            if p.globally_enabled == false { return "Disabled by admin" }
-            if p.user_enabled == false { return "Skipped for your missions" }
-            return "Disabled"
-        }()
+        let stateLabel = enabled ? "Configured" : "Disabled"
         return [
             stateLabel,
             avail,
@@ -1128,7 +1147,7 @@ struct OrbNewManagedMachineSheet: View {
 struct OrbMachineProvidersSection: View {
     let providers: [OrbManagedProviderInfo]
     let busyProvider: String?
-    let onToggle: (OrbManagedProviderInfo, Bool) -> Void
+    let onToggle: (OrbManagedProviderInfo, Bool, Bool) -> Void
     let onSave: (String, [String: OrbJSON]) async throws -> Void
     @State private var editing: OrbManagedProviderInfo?
 
@@ -1136,35 +1155,41 @@ struct OrbMachineProvidersSection: View {
         Section("Machine providers") {
             ForEach(providers) { pr in
                 let label = pr.display_name.isEmpty ? OrbManaged.providerLabel(pr.provider) : pr.display_name
-                let enabled = OrbManaged.isProviderEnabled(pr)
-                HStack(spacing: 10) {
-                    Circle()
-                        .fill(
-                            !OrbManaged.isProviderUsable(pr) ? OrbStyle.textMuted
-                                : pr.availability?.status == "saturated" ? OrbStyle.warning
-                                : OrbStyle.success
-                        )
-                        .frame(width: 8, height: 8)
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(label).font(.body.weight(.medium)).lineLimit(1)
-                        Text(OrbManaged.providerStatusLine(pr)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 10) {
+                        Circle()
+                            .fill(
+                                !OrbManaged.isProviderUsable(pr) ? OrbStyle.textMuted
+                                    : pr.availability?.status == "saturated" ? OrbStyle.warning
+                                    : OrbStyle.success
+                            )
+                            .frame(width: 8, height: 8)
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(label).font(.body.weight(.medium)).lineLimit(1)
+                            Text(OrbManaged.providerStatusLine(pr)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        Spacer(minLength: 6)
+                        if OrbCore.shared.isAdminUser {
+                            Button(pr.configured ? "Configure" : "Set up") { editing = pr }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                        }
                     }
-                    Spacer(minLength: 6)
-                    Toggle(
-                        "Enable \(label)",
-                        isOn: Binding(
-                            get: { enabled },
-                            set: { next in onToggle(pr, next) }
-                        )
-                    )
-                    .labelsHidden()
-                    .disabled(busyProvider == pr.provider || (!OrbCore.shared.isAdminUser && pr.globally_enabled == false))
                     if OrbCore.shared.isAdminUser {
-                        Button(pr.configured ? "Configure" : "Set up") { editing = pr }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
+                        Toggle("Globally enabled", isOn: Binding(
+                            get: { OrbManaged.isProviderGloballyEnabled(pr) },
+                            set: { onToggle(pr, $0, false) }
+                        ))
+                        .disabled(busyProvider != nil)
+                        .accessibilityIdentifier("managed.provider.global.\(pr.provider)")
                     }
+                    Toggle("Use for my missions", isOn: Binding(
+                        get: { OrbManaged.isProviderPersonallyEnabled(pr) },
+                        set: { onToggle(pr, $0, true) }
+                    ))
+                    .disabled(busyProvider != nil || !OrbManaged.isProviderGloballyEnabled(pr))
+                    .accessibilityIdentifier("managed.provider.personal.\(pr.provider)")
                 }
                 .padding(.vertical, 2)
                 .accessibilityIdentifier("managed.provider.\(pr.provider)")
@@ -1246,7 +1271,7 @@ struct OrbConfigureMachineProviderSheet: View {
                         Text("Preferred Hetzner Cloud location (falls back across fsn1, hel1, nbg1 if unavailable).")
                     }
                 }
-                if provider.provider == "leanci" || provider.provider == "boost" {
+                if provider.provider == "leanci" {
                     Section {
                         TextField("Auto-detected from token", text: $projectID)
                             .textInputAutocapitalization(.never)
@@ -1313,7 +1338,7 @@ struct OrbConfigureMachineProviderSheet: View {
             if provider.provider == "hetzner" || provider.provider == "scaleway" || provider.provider == "colab" {
                 patch["region"] = .string(region.trimmingCharacters(in: .whitespacesAndNewlines))
             }
-            if provider.provider == "scaleway" || provider.provider == "leanci" || provider.provider == "boost" {
+            if provider.provider == "scaleway" || provider.provider == "leanci" {
                 patch["project_id"] = .string(projectID.trimmingCharacters(in: .whitespacesAndNewlines))
             }
             if maxChanged {

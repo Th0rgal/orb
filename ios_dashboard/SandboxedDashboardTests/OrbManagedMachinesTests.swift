@@ -176,7 +176,10 @@ final class OrbManagedMachinesTests: XCTestCase {
         XCTAssertTrue(OrbManaged.canResume(m, busy: false))
         XCTAssertFalse(OrbManaged.canResume(m, busy: true))
         XCTAssertEqual(OrbManaged.providerLabel("leanci"), "lean.ci")
-        XCTAssertEqual(OrbManaged.providerLabel("boost"), "lean.ci")
+        XCTAssertEqual(OrbManaged.providerLabel("lean.ci"), "lean.ci")
+        XCTAssertEqual(OrbManaged.machineProviderKey("leanci"), "leanci")
+        XCTAssertEqual(OrbManaged.machineProviderKey("lean.ci"), "lean.ci")
+        XCTAssertEqual(OrbManaged.nodeProvider(.object(["labels": .array([.string("leanci")])])), "leanci")
         XCTAssertEqual(OrbManaged.providerLabel("hetzner"), "Hetzner")
         XCTAssertEqual(OrbManaged.providerLabel("vastai"), "Vast.ai")
         XCTAssertEqual(OrbManaged.providerLabel("scaleway"), "Scaleway")
@@ -194,17 +197,18 @@ final class OrbManagedMachinesTests: XCTestCase {
         XCTAssertEqual(providers.map(\.provider), ["boat", "leanci", "hetzner", "vastai", "scaleway", "colab"])
         XCTAssertEqual(providers.map(\.display_name), ["boat.dev", "lean.ci", "Hetzner Cloud", "Vast.ai", "Scaleway", "Google Colab"])
         XCTAssertEqual(providers.map(\.configured), [true, true, true, false, false, false])
-        XCTAssertEqual(providers.map(OrbManaged.isProviderEnabled), [true, true, true, true, false, true])
-        XCTAssertEqual(providers.map(OrbManaged.isProviderUsable), [true, true, true, false, false, false])
+        XCTAssertEqual(providers.map(OrbManaged.isProviderEnabled), [true, false, false, false, false, false])
+        XCTAssertEqual(providers.map(OrbManaged.isProviderUsable), [true, false, false, false, false, false])
         XCTAssertEqual(providers[0].max_concurrent, 100)
         XCTAssertEqual(providers[1].availability?.status, "degraded")
         XCTAssertEqual(providers[1].availability?.reason, "pool_memory")
         XCTAssertEqual(OrbManaged.providerStatusLine(providers[0]), "Configured · Bitwarden ••••1234 · up to 100 VMs")
-        XCTAssertEqual(OrbManaged.providerStatusLine(providers[1]), "Configured · Limited capacity · Settings ••••9012 · proj ws-evm-fast")
+        XCTAssertEqual(OrbManaged.providerStatusLine(providers[1]), "Skipped for your missions")
         var saturated = providers[1]
+        saturated.user_enabled = true
         saturated.availability?.status = "saturated"
         XCTAssertEqual(OrbManaged.providerStatusLine(saturated), "Configured · At capacity · Settings ••••9012 · proj ws-evm-fast")
-        XCTAssertEqual(OrbManaged.providerStatusLine(providers[2]), "Configured · Settings ••••5678 · fsn1")
+        XCTAssertEqual(OrbManaged.providerStatusLine(providers[2]), "Skipped for your missions")
         XCTAssertEqual(OrbManaged.providerStatusLine(providers[3]), "Not configured")
         XCTAssertEqual(OrbManaged.providerStatusLine(providers[4]), "Disabled · Not configured")
         XCTAssertEqual(OrbManaged.providerStatusLine(providers[5]), "Not configured")
@@ -240,6 +244,75 @@ final class OrbManagedMachinesTests: XCTestCase {
         XCTAssertEqual(OrbManaged.providerGroupSummary([failed]), "1 machine")
     }
 
+    @MainActor
+    func testAIProviderPersonalSwitchDoesNotFollowGlobalState() {
+        let provider: OrbJSON = .object(["enabled": .bool(true), "user_enabled": .bool(false), "effective_enabled": .bool(false)])
+        XCTAssertTrue(OrbProvidersSettings.isGloballyEnabled(provider))
+        XCTAssertFalse(OrbProvidersSettings.isPersonallyEnabled(provider))
+        XCTAssertFalse(OrbProvidersSettings.isEffectiveEnabled(provider))
+        let globallyDisabled: OrbJSON = .object(["globally_enabled": .bool(false), "user_enabled": .bool(true), "effective_enabled": .bool(true)])
+        XCTAssertFalse(OrbProvidersSettings.isGloballyEnabled(globallyDisabled))
+        XCTAssertTrue(OrbProvidersSettings.isPersonallyEnabled(globallyDisabled))
+        XCTAssertFalse(OrbProvidersSettings.isEffectiveEnabled(globallyDisabled))
+        XCTAssertTrue(OrbProvidersSettings.isPersonallyEnabled(.object([:])))
+    }
+
+    func testMissingPersonalPreferenceDefaultsToBoatOnly() {
+        func provider(_ id: String) -> OrbManagedProviderInfo {
+            OrbManagedProviderInfo(provider: id, display_name: OrbManaged.providerLabel(id), configured: true, enabled: true,
+                                   supports_snapshots: false, supports_free_stop: false, sizes: [])
+        }
+        let boat = provider("boat")
+        XCTAssertTrue(OrbManaged.isProviderPersonallyEnabled(boat))
+        XCTAssertTrue(OrbManaged.isProviderUsable(boat))
+        for id in ["leanci", "hetzner", "vastai", "scaleway", "colab"] {
+            var p = provider(id)
+            XCTAssertFalse(OrbManaged.isProviderPersonallyEnabled(p), id)
+            XCTAssertFalse(OrbManaged.isProviderEnabled(p), id)
+            XCTAssertEqual(OrbManaged.providerStatusLine(p), "Skipped for your missions", id)
+            p.effective_enabled = true
+            XCTAssertFalse(OrbManaged.isProviderEnabled(p), id)
+            p.user_enabled = true
+            XCTAssertTrue(OrbManaged.isProviderEnabled(p), id)
+            p.globally_enabled = false
+            XCTAssertFalse(OrbManaged.isProviderEnabled(p), id)
+        }
+        var mutedBoat = boat
+        mutedBoat.user_enabled = false
+        mutedBoat.effective_enabled = true
+        XCTAssertFalse(OrbManaged.isProviderEnabled(mutedBoat))
+    }
+
+    func testAdminGlobalAndPersonalSwitchesStayDistinct() {
+        let hetzner = OrbManagedProviderInfo(provider: "hetzner", display_name: "Hetzner Cloud", configured: true, enabled: true,
+                                             supports_snapshots: false, supports_free_stop: false, sizes: [])
+        let globalOff = OrbManaged.updatingProvider(hetzner, enabled: false, personal: false)
+        XCTAssertEqual(globalOff.globally_enabled, false)
+        XCTAssertEqual(globalOff.enabled, false)
+        XCTAssertNil(globalOff.user_enabled)
+        XCTAssertEqual(globalOff.effective_enabled, false)
+        XCTAssertEqual(OrbManaged.providerStatusLine(globalOff), "Disabled by admin")
+
+        let globalOn = OrbManaged.updatingProvider(globalOff, enabled: true, personal: false)
+        XCTAssertTrue(OrbManaged.isProviderGloballyEnabled(globalOn))
+        XCTAssertFalse(OrbManaged.isProviderPersonallyEnabled(globalOn))
+        XCTAssertFalse(OrbManaged.isProviderEnabled(globalOn))
+
+        let personalOn = OrbManaged.updatingProvider(globalOn, enabled: true, personal: true)
+        XCTAssertEqual(personalOn.user_enabled, true)
+        XCTAssertEqual(personalOn.globally_enabled, true)
+        XCTAssertEqual(personalOn.effective_enabled, true)
+        XCTAssertTrue(OrbManaged.isProviderEnabled(personalOn))
+
+        let personalOff = OrbManaged.updatingProvider(personalOn, enabled: false, personal: true)
+        XCTAssertEqual(personalOff.globally_enabled, true)
+        XCTAssertEqual(personalOff.user_enabled, false)
+        XCTAssertFalse(OrbManaged.isProviderEnabled(personalOff))
+
+        XCTAssertEqual(OrbManaged.providerTogglePath("leanci", personal: false), "/api/managed-machines/providers/leanci")
+        XCTAssertEqual(OrbManaged.providerTogglePath("leanci", personal: true), "/api/managed-machines/providers/leanci/preference")
+    }
+
     func testStaticNodeSlotSummaryAndCapacityBounds() {
         let legacy: OrbJSON = .object(["id": .string("ashur"), "active_jobs": .number(2)])
         XCTAssertEqual(OrbNodeCapacity.slotSummary(legacy), "2 active")
@@ -271,7 +344,10 @@ final class OrbManagedMachinesTests: XCTestCase {
 
         let data = try Data(contentsOf: OrbSpec.url("fixtures/managed-machines-response.json"))
         let r = try OrbManaged.decode(data)
-        XCTAssertEqual(OrbManaged.usableProviders(r).map(\.provider), ["boat", "leanci", "hetzner"])
+        XCTAssertEqual(OrbManaged.usableProviders(r).map(\.provider), ["boat"])
+        var optedIn = r
+        optedIn.providers = r.providers?.map { $0.provider == "leanci" || $0.provider == "hetzner" ? OrbManaged.updatingProvider($0, enabled: true, personal: true) : $0 }
+        XCTAssertEqual(OrbManaged.usableProviders(optedIn).map(\.provider), ["boat", "leanci", "hetzner"])
 
         let missionNode: OrbJSON = .object(["id": .string("managed-m1"), "labels": .array([.string("managed")]), "owner_kind": .string("mission")])
         let userNode: OrbJSON = .object(["id": .string("managed-u1"), "labels": .array([.string("managed")]), "owner_kind": .string("user")])

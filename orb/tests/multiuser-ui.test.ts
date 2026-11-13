@@ -104,7 +104,7 @@ describe("multi-user RBAC, confinement, and sharing models", () => {
   });
 
   it("computes effective managed-provider state across global and per-user preferences", () => {
-    const base = { configured: true, globally_enabled: true, user_enabled: true, effective_enabled: true };
+    const base = { provider: "leanci", configured: true, globally_enabled: true, user_enabled: true, effective_enabled: true };
     expect(isProviderEnabled(base)).toBe(true);
     expect(isProviderUsable(base)).toBe(true);
 
@@ -116,6 +116,19 @@ describe("multi-user RBAC, confinement, and sharing models", () => {
     const adminMuted = { ...base, globally_enabled: false, user_enabled: true, effective_enabled: false };
     expect(isProviderEnabled(adminMuted)).toBe(false);
     expect(providerStatusLine(adminMuted)).toBe("Disabled by admin");
+  });
+
+  it("requires personal opt-in for every non-Boat provider even with stale effective state", () => {
+    for (const provider of ["leanci", "hetzner", "vastai", "scaleway", "colab", "future"]) {
+      const p = { provider, configured: true, enabled: true, effective_enabled: true };
+      expect(isProviderEnabled(p)).toBe(false);
+      expect(isProviderUsable(p)).toBe(false);
+      expect(providerStatusLine(p)).toBe("Skipped for your missions");
+      expect(isProviderEnabled({ ...p, user_enabled: true })).toBe(true);
+      expect(isProviderEnabled({ ...p, user_enabled: true, globally_enabled: false })).toBe(false);
+    }
+    expect(isProviderEnabled({ provider: "boat", enabled: true })).toBe(true);
+    expect(isProviderEnabled({ provider: "boat", user_enabled: false, effective_enabled: true })).toBe(false);
   });
 
   it("parses and formats daily USD spend caps in cents", () => {

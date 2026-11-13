@@ -143,6 +143,30 @@ class OrbMultiUserTest {
         assertFalse(OrbManagedMachines.isProviderEnabled(managed))
         assertTrue(OrbManagedMachines.providerStatusLine(managed).contains("Disabled by admin"))
 
+        val missingBoat = OrbManagedMachines.parseProvider(mapOf("provider" to "boat", "configured" to true, "globally_enabled" to true))!!
+        val missingHetzner = OrbManagedMachines.parseProvider(mapOf("provider" to "hetzner", "configured" to true, "globally_enabled" to true))!!
+        val explicitHetzner = OrbManagedMachines.parseProvider(mapOf("provider" to "hetzner", "configured" to true, "globally_enabled" to true, "user_enabled" to true))!!
+        assertTrue(missingBoat.userEnabled)
+        assertTrue(OrbManagedMachines.isProviderEnabled(missingBoat))
+        assertTrue(missingHetzner.globallyEnabled)
+        assertFalse(missingHetzner.userEnabled)
+        assertFalse(OrbManagedMachines.isProviderEnabled(missingHetzner))
+        assertTrue(OrbManagedMachines.isProviderEnabled(explicitHetzner))
+        for (provider in listOf("boat", "leanci", "hetzner", "vastai", "scaleway", "colab")) {
+            val base = mapOf<String, Any>("provider" to provider, "configured" to true, "effective_enabled" to true)
+            val missingPreference = OrbManagedMachines.parseProvider(base)!!
+            assertEquals(provider == "boat", missingPreference.userEnabled)
+            assertEquals(provider == "boat", missingPreference.effectiveEnabled)
+            assertTrue(missingPreference.globallyEnabled)
+            val optedIn = base + ("user_enabled" to true)
+            assertTrue(OrbManagedMachines.parseProvider(optedIn)!!.effectiveEnabled)
+            assertFalse(OrbManagedMachines.parseProvider(optedIn + ("globally_enabled" to false))!!.effectiveEnabled)
+            assertFalse(OrbManagedMachines.parseProvider(optedIn + ("enabled" to false))!!.effectiveEnabled)
+            assertFalse(OrbManagedMachines.parseProvider(optedIn + ("user_enabled" to false))!!.effectiveEnabled)
+            assertFalse(OrbManagedMachines.parseProvider(optedIn + ("effective_enabled" to false))!!.effectiveEnabled)
+            assertTrue(OrbManagedMachines.parseProvider(optedIn + mapOf("globally_enabled" to true, "enabled" to false))!!.effectiveEnabled)
+        }
+
         val adminUser = OrbAdminUser.from(
             mapOf(
                 "id" to "u1",

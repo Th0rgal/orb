@@ -662,14 +662,13 @@ data class OrbMissionBudget(
         )
 
         fun providerLabel(id: String): String {
-            if (id == "boost" || id == "boost.ci" || id == "lean.ci") return "lean.ci"
             return PROVIDERS.firstOrNull { it.first == id }?.second ?: id
         }
 
         fun providerLimitsSummary(limits: VmConcurrencyLimits?): String {
             val map = limits?.providerMaxConcurrent ?: return ""
             return PROVIDERS.mapNotNull { (id, label) ->
-                val v = map[id] ?: (if (id == "leanci") map["boost"] else null) ?: return@mapNotNull null
+                val v = map[id] ?: return@mapNotNull null
                 "$label: ${if (v == 0) "off" else v.toString()}"
             }.joinToString(" · ")
         }

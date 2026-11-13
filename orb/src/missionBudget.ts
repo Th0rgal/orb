@@ -188,7 +188,6 @@ export const formatDurationEta = (secs: number): string => {
 };
 
 export const managedProviderLabel = (id: string) => {
-  if (id === "boost" || id === "boost.ci" || id === "lean.ci") return "lean.ci";
   return MANAGED_PROVIDERS.find(p => p.id === id)?.label ?? id;
 };
 
@@ -352,7 +351,7 @@ export function parseBandwidthLimits(
 export function normalizeVmLimits(limits: VmConcurrencyLimits | null | undefined): string {
   if (!limits) return "null";
   const provEntries = MANAGED_PROVIDERS
-    .map(p => [p.id, limits.provider_max_concurrent?.[p.id] ?? (p.id === "leanci" ? limits.provider_max_concurrent?.boost : undefined)] as const)
+    .map(p => [p.id, limits.provider_max_concurrent?.[p.id]] as const)
     .filter(([, v]) => v != null);
   return JSON.stringify({ m: limits.max_concurrent ?? null, p: provEntries });
 }
@@ -624,7 +623,7 @@ export function providerLimitsSummary(limits: VmConcurrencyLimits | null | undef
   const map = limits?.provider_max_concurrent;
   if (!map) return "";
   return MANAGED_PROVIDERS
-    .map(p => [p, map[p.id] ?? (p.id === "leanci" ? map.boost : undefined)] as const)
+    .map(p => [p, map[p.id]] as const)
     .filter(([, v]) => v != null)
     .map(([p, v]) => `${p.label}: ${v === 0 ? "off" : v}`)
     .join(" · ");

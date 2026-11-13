@@ -26,7 +26,7 @@ struct OrbMachinesSettings: View {
                 OrbMachineProvidersSection(
                     providers: providers,
                     busyProvider: busyProvider,
-                    onToggle: { pr, next in Task { await toggleProvider(pr, enabled: next) } },
+                    onToggle: { pr, next, personal in Task { await toggleProvider(pr, enabled: next, personal: personal) } },
                     onSave: { id, patch in try await saveProvider(id, patch: patch) }
                 )
             }
@@ -191,30 +191,18 @@ struct OrbMachinesSettings: View {
         catch is CancellationError {} catch { fleetError = OrbManaged.message(error) }
     }
     /// Optimistic provider enable/disable toggle with rollback on failure.
-    private func toggleProvider(_ pr: OrbManagedProviderInfo, enabled: Bool) async {
+    private func toggleProvider(_ pr: OrbManagedProviderInfo, enabled: Bool, personal: Bool) async {
         guard busyProvider == nil, let before = managed else { return }
-        let isAdmin = OrbCore.shared.isAdminUser
+        guard personal || OrbCore.shared.isAdminUser else { return }
         busyProvider = pr.provider
         defer { busyProvider = nil }
         if var copy = managed, var list = copy.providers, let idx = list.firstIndex(where: { $0.provider == pr.provider }) {
-            var item = list[idx]
-            if isAdmin {
-                item.enabled = enabled
-                item.globally_enabled = enabled
-                item.effective_enabled = enabled && (item.user_enabled != false)
-            } else {
-                item.user_enabled = enabled
-                item.effective_enabled = enabled && (item.globally_enabled != false)
-            }
-            list[idx] = item
+            list[idx] = OrbManaged.updatingProvider(list[idx], enabled: enabled, personal: personal)
             copy.providers = list
             managed = copy
         }
         do {
-            let endpoint = isAdmin
-                ? "/api/managed-machines/providers/\(OrbCore.escape(pr.provider))"
-                : "/api/managed-machines/providers/\(OrbCore.escape(pr.provider))/preference"
-            _ = try await client.call(endpoint, method: "PUT", body: .object(["enabled": .bool(enabled)]))
+            _ = try await client.call(OrbManaged.providerTogglePath(pr.provider, personal: personal), method: "PUT", body: .object(["enabled": .bool(enabled)]))
             fleetError = ""
             await loadManaged()
         } catch is CancellationError {}

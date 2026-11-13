@@ -169,7 +169,7 @@ describe("ownership and reaping", () => {
     expect(providerLabel("scaleway")).toBe("Scaleway");
     expect(providerLabel("colab")).toBe("Google Colab");
     expect(managedSectionTitle([{ provider: "boat", display_name: "boat.dev", configured: true, supports_snapshots: true, supports_free_stop: true, sizes: [] }], [])).toBe("Managed (boat.dev)");
-    expect(managedSectionTitle([{ provider: "hetzner", display_name: "Hetzner", configured: true, supports_snapshots: false, supports_free_stop: false, sizes: [] }], [])).toBe("Managed cloud");
+    expect(managedSectionTitle([{ provider: "hetzner", display_name: "Hetzner", configured: true, user_enabled: true, supports_snapshots: false, supports_free_stop: false, sizes: [] }], [])).toBe("Managed cloud");
     expect(managedSectionTitle([
       { provider: "boat", display_name: "boat.dev", configured: true, enabled: true, supports_snapshots: true, supports_free_stop: true, sizes: [] },
       { provider: "hetzner", display_name: "Hetzner", configured: true, enabled: false, supports_snapshots: false, supports_free_stop: false, sizes: [] },
@@ -188,19 +188,19 @@ describe("ownership and reaping", () => {
     expect(resp.enabled).toBe(true);
     expect(resp.providers?.map(p => [p.provider, p.display_name, p.configured, isProviderEnabled(p), isProviderUsable(p), p.supports_free_stop, p.supports_snapshots])).toEqual([
       ["boat", "boat.dev", true, true, true, true, true],
-      ["leanci", "lean.ci", true, true, true, false, true],
-      ["hetzner", "Hetzner Cloud", true, true, true, false, false],
-      ["vastai", "Vast.ai", false, true, false, false, false],
+      ["leanci", "lean.ci", true, false, false, false, true],
+      ["hetzner", "Hetzner Cloud", true, false, false, false, false],
+      ["vastai", "Vast.ai", false, false, false, false, false],
       ["scaleway", "Scaleway", false, false, false, false, false],
-      ["colab", "Google Colab", false, true, false, false, false],
+      ["colab", "Google Colab", false, false, false, false, false],
     ]);
     expect(resp.providers![0]!.max_concurrent).toBe(100);
     expect(resp.providers![1]!.availability?.status).toBe("degraded");
     expect(resp.providers![1]!.availability?.reason).toBe("pool_memory");
     expect(providerStatusLine(resp.providers![0]!)).toBe("Configured · Bitwarden ••••1234 · up to 100 VMs");
-    expect(providerStatusLine(resp.providers![1]!)).toBe("Configured · Limited capacity · Settings ••••9012 · proj ws-evm-fast");
-    expect(providerStatusLine({ ...resp.providers![1]!, availability: { status: "saturated", reason: "quota_vcpus" } })).toBe("Configured · At capacity · Settings ••••9012 · proj ws-evm-fast");
-    expect(providerStatusLine(resp.providers![2]!)).toBe("Configured · Settings ••••5678 · fsn1");
+    expect(providerStatusLine(resp.providers![1]!)).toBe("Skipped for your missions");
+    expect(providerStatusLine({ ...resp.providers![1]!, user_enabled: true, availability: { status: "saturated", reason: "quota_vcpus" } })).toBe("Configured · At capacity · Settings ••••9012 · proj ws-evm-fast");
+    expect(providerStatusLine(resp.providers![2]!)).toBe("Skipped for your missions");
     expect(providerStatusLine(resp.providers![3]!)).toBe("Not configured");
     expect(providerStatusLine(resp.providers![4]!)).toBe("Disabled · Not configured");
     expect(providerStatusLine(resp.providers![5]!)).toBe("Not configured");
@@ -253,10 +253,20 @@ import {
   parseAutoManagedTarget,
   rememberManagedMachines,
 } from "../src/machines/nodes";
-import { compactSizeSpec, is24hCommitmentSize } from "../src/managedMachineModel";
+import { compactSizeSpec, is24hCommitmentSize, machineProviderKey } from "../src/managedMachineModel";
+import { managedProviderLabel, normalizeVmLimits, providerLimitsSummary } from "../src/missionBudget";
 import { remoteLaunchPreflight } from "../src/missionLaunch";
 
 describe("cloud VM submenus, on-demand targets, and agent-spawned VM collapsing", () => {
+  it("uses only the canonical lean.ci provider id for labels and limits", () => {
+    expect(providerLabel("leanci")).toBe("lean.ci");
+    expect(managedProviderLabel("leanci")).toBe("lean.ci");
+    expect(machineProviderKey("lean.ci")).toBe("lean.ci");
+    expect(managedProviderLabel("lean.ci")).toBe("lean.ci");
+    expect(providerLimitsSummary({ provider_max_concurrent: { "lean.ci": 2 } })).toBe("");
+    expect(normalizeVmLimits({ provider_max_concurrent: { "lean.ci": 2 } })).toBe('{"m":null,"p":[]}');
+    expect(providerLimitsSummary({ provider_max_concurrent: { leanci: 3 } })).toBe("lean.ci: 3");
+  });
   it("parses, formats, and labels auto-managed cloud VM targets", () => {
     expect(formatAutoManagedTarget("boat", "large")).toBe("auto-managed:boat:large");
     expect(isAutoManagedTarget("auto-managed:boat:large")).toBe(true);
