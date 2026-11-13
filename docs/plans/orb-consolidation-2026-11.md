@@ -408,6 +408,33 @@ the live validation once a `dev_operator` grant exists: dev only, never
 restart the sidecar, never clear a real quota park, clear only cooldowns
 the test created, no account identifier in any evidence.
 
+**Relay received 22:12: "Operator delegation acknowledged …" (isolation
+worker `6fa970f7`, completed 14:04).** Read as a delayed message; its
+"current fetched master `6f17599d`" is 29 commits behind today's tip.
+Checked on origin: `b1320c6f` (per-key `orb-env` ownership), `d2e580e9`
+(dev/prod handoff in `docs/plans/dev-prod-environments.md`) and
+`scripts/dev_user_isolation.py` (`--url`, `--token-file`, `--sha`; creates a
+member with `daily_spend_cap_cents: 0`, disables it on cleanup) are all on
+master. Decisions:
+
+- The worker's leftover patch is harvested to the coordinator's keep
+  directory (SHA-256 `fd8fa880…add77`, 4 files). Its `orb-env`, doc and
+  `test_orb_env.py` hunks are the superseded `--share-one-sided` idea:
+  **not applied**. Its 8-line `SelfTest.lean` secret-tool check was never
+  run and expects error code `admin_required`, while the gate on master
+  answers `forbidden` (`McpGateway.lean:442`); the same intent is now
+  covered by #1749. **Not integrated.**
+- Nothing live was done: no config change, no user created, no grant.
+- Isolation is still **not** accepted. The live run needs a dev admin
+  bearer the coordinator does not hold (grant `f0eadef4` pending).
+
+**Operator, when convenient (dev only, no env edit, no restart):** run
+`scripts/dev_user_isolation.py --url http://127.0.0.1:3002 --sha <full SHA
+dev reports> --token-file <private dev admin bearer file>` on agent-core
+and paste the JSON result here with usernames and ids removed. Best done
+after the next deploy so it exercises #1742 and #1749's gate on the live
+build.
+
 **Still open, no owner.** Track A / #1708; lean.ci PR #34 fence review
 (interdiff unread, lean runners stay on hold); isolation acceptance and
 managed-lifecycle live validation (need the `dev_operator` grant
