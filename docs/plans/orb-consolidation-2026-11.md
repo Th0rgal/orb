@@ -160,6 +160,17 @@ upstream repairs and authenticated runner/cache/warm-base acceptance remain
 blocked. Prepare opt-in routing with Ubuntu default/fork fallback and public
 baseline evidence without claiming an upstream fix or runner validation.
 
+### D baseline and shared proxy interface update
+
+D reports installed turbo-lean rejects script flag `--no-telemetry`, after which
+`scripts/build_orb_bins.sh` silently starts raw Lake. The baseline reached about
+263 jobs / 200 seconds before tool deadline: **not a turbo-lean pass, not a
+completed build**. D set no explicit audit bypass/fallback environment. This
+worker observation is forwarded to A for reproduction and script/pin repair;
+coordinator has not independently reproduced it. No script ownership transferred.
+D plans an optional per-connection downstream sink on `forwardProxyChain`, with
+H account/classification sections preserved; H notified to avoid broad rewrites.
+
 ## Operator requests
 
 No new deployment requested yet. Future entries must give an exact SHA, dev or
@@ -222,3 +233,4 @@ classification before operator application. No hand-edited production env.
 | 13 Nov, operator unblocking update | Route unavailable host effects through exact-SHA Operator requests instead of SSH; treat reported dev deploy as evidence and prod as in progress | Missions cannot SSH agent-core; prevent duplicate deployments and retain runtime-grant boundaries |
 | 13 Nov, operator unblocking update | Implement checked-in environment-key classification before migration; request exact multi-user dev config through E+G | Existing migration refuses 65 prod-only/10 dev-only/11 different keys; do not hand-edit prod env or test multi-user claims on single-tenant dev |
 | 13 Nov, operator unblocking update | Wait for dev/prod mission handoff commit before cancellation; prior three handoffs are reported complete | Preserve final delivery; completed report is not an independently verified wake-up cleanup receipt |
+| 13 Nov, D build/interface update | Assign unsupported --no-telemetry and silent raw-Lake fallback repair to A; classify D baseline incomplete/non-turbo; notify H of optional forwardProxyChain sink | Avoid false turbo acceptance and duplicate script ownership; preserve account/classification behavior while D changes streaming transport |
