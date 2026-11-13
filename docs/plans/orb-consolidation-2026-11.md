@@ -327,6 +327,42 @@ No questions sent; implement/test generic support against an authorized
 No new deployment requested yet. Future entries must give an exact SHA, dev or
 prod target, verification command and result; do not repeat an in-flight deploy.
 
+### Current integration and B source contract — supersedes earlier blockers
+
+GitHub broker access granted on trusted nimrud; authenticated as Th0rgal.
+Operator relay merged diagnostic as #1724; duplicate #1725 closed without
+branch deletion. Local master fast-forwarded to `c49c64df`, including operator
+per-key env policy `b1320c6f` and account-switch fix `84b74c3e`. Coordinator reran
+`python3 -m unittest scripts.test_orb_env scripts.test_dev_user_isolation`:
+22/22 pass; relevant Python compilation passes. This is not full G acceptance.
+`ready/e-env-classification-report` remains preserved. Local master stays docs
+only; finished code uses ready branches and operator relay remains fallback.
+
+Private `lfglabs-dev/lean.ci` cloned on trusted nimrud at
+`71f71f3fc69fc7f9ed3ce2cd37cd6638abc89c03`. Credential-free source archive:
+`/tmp/opencode/leanci-source.tar.gz`, SHA-256
+`1d7703677f6f86efe7e9ba275b5511e138a92ea6c818d76bdcb1e9f7e8c22479`.
+**Operator request:** relay this archive to B VM
+`f9444f29-2b15-49f4-ad81-37346c0844e5` work directory and return destination;
+our exposed tools have harvest-out but no confirmed existing-mission upload.
+No token/key in the archive (git archive of tracked source).
+
+Source contract review sent to B: VM APIs reject OIDC JWT; OIDC works directly
+only on prebuild/base APIs. No VM-token exchange found. Prebuild compiles Lean
+exports, not arbitrary shell CI. VM exec supports JSON/SSE output and terminal
+exit, files capped 32 MiB, exec capped 600 seconds. Idempotency is in-memory
+15 minutes and SSE bypasses it; no TTL-extension/resume/log-poll endpoint found.
+Do not implement guessed auth, durable-exactly-once claims or misuse prebuild as
+general dispatcher. Workspace VM API credential remains Core-reserved after
+operator-requested retry; use governed integration or reviewed upstream scoped
+auth support, never raw provider key extraction. Host SSH key approval remains
+pending after retry. Boat/Colab secrets not requested: no need outside Core.
+
+E+G dev grant request tool remains absent; operator admin submission required:
+`POST /api/privilege-access/request`, body mission id
+`6fa970f7-8799-4c80-a312-f7884efc21f4`, scope `dev_operator`, target_host `dev`,
+ttl_minutes 240, session_scoped true. Submission/approval not yet established.
+
 ### E+G operational checkpoint and coordinator probes
 
 E+G has no dev-operator grant ID or privileged-access request tool on its managed
