@@ -435,6 +435,50 @@ and paste the JSON result here with usernames and ids removed. Best done
 after the next deploy so it exercises #1742 and #1749's gate on the live
 build.
 
+**Live builds changed (health endpoints, 22:19).** Prod reports build
+`e43a808d4` (`auth_mode: single_tenant`), dev reports `0fc4d71af`
+(`auth_mode: multi_user`). Both contain #1735 to #1742; neither contains
+#1744, #1746 or #1743. Dev's `0fc4d71a` is the fourth commit of the #1745
+branch (sidecar parked logins + reduced sibling routes), without the later
+operator commits and without the overview correction. This replaces the
+"`313ec310d`" line above.
+
+**Relay received 22:13: "member `GET /api/ai/providers` leaks owner
+account-email display names + IDs" (found on `de3fd0fa1`).** Not routed to
+H (`11a48ddf` is completed and client-only); the provider module belongs to
+the H-core worker `21b1bfca`. State of the finding, read in the code on
+master, not run live:
+
+- **Display names and emails: fixed by #1742** (`e6e4541f`, in both live
+  builds). Member rows come from `renderMemberHydratedProviderJv`
+  (`ProviderUsageAndLogin.lean:510`) and `renderAIProviderForCallerJson`
+  (`Store.lean:4154`): `name` is the provider type name, numbered when
+  there are several ("Anthropic 1"); no `account_email`, `base_url`,
+  limits or status account. Tests at `TenantIsolationTests.lean` 407-449.
+  Note: the CI run on the #1742 merge commit itself was cancelled by the
+  next push; the tests ran green on later tips.
+- **Row `id`: still returned, on purpose.** It is the key of the member
+  toggle (`PUT /api/ai/providers/:id/preference`, `Control.lean:4443`) and
+  of `user_provider_prefs`. Ids are `prov-<epoch>-<seq>` when Core mints
+  them (`Control.lean:4496`), but an admin can supply one and old ones are
+  copied from `ai_providers.json` (`LegacyHydrate.lean:446`). **Whether any
+  live id contains an account name is not established**; it depends on
+  stored data the coordinator cannot read.
+- **Gap:** no test holds the member row to a closed list of keys, and the
+  member response of the toggle route has no isolation test.
+
+Ordered from H-core (after its current task, branch
+`wip/g-member-provider-row-allowlist`): closed-key tests for the member
+list, detail and toggle response, an admin positive control, a fix only
+if one fails, and a code answer on every path that mints a provider id.
+If an id can derive from an account identifier it must stop and report:
+replacing the id with an alias changes the toggle key and is not decided.
+
+**Operator, dev only, read-only, possible now on `0fc4d71af`:** as a
+member, `GET /api/ai/providers`; report only the set of key names per row
+(and inside `status` and `custom_models`), and for each row `id` a yes/no
+on "contains an email, account name or login file name". No values.
+
 **Still open, no owner.** Track A / #1708; lean.ci PR #34 fence review
 (interdiff unread, lean runners stay on hold); isolation acceptance and
 managed-lifecycle live validation (need the `dev_operator` grant
