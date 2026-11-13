@@ -15,14 +15,159 @@ import shutil
 import sys
 
 
-# These describe instance identity, storage and authentication. Everything else
-# belongs to the base, including provider setup and fleet configuration.
-INSTANCE_KEYS = frozenset({
-    "ORB_INSTANCE", "HOST", "PORT", "WORKING_DIR", "SANDBOXED_PUBLIC_URL",
-    "JWT_SECRET", "DASHBOARD_PASSWORD", "SANDBOXED_USERS", "SANDBOXED_SH_USERS",
-    "LIBRARY_PATH", "SANDBOXED_SH_ASK_TMP_ROOT", "TMPDIR",
-    "OPENAGENT_DATA_DIR", "SANDBOXED_SINGLE_TENANT_USER_ID", "SINGLE_TENANT_USER_ID",
+# Explicit per-key policy. New live names require a reviewed repository change;
+# a migration manifest cannot reclassify host authority or admit an unknown key.
+SHARED_KEYS = frozenset({
+    "BOAT_API_KEY",
+    "CLI_PROXY_API_BASE_URL",
+    "CLI_PROXY_API_KEY",
+    "CLI_PROXY_AUTH_DIR",
+    "CLI_PROXY_MANAGEMENT_KEY",
+    "DEPLOY_BACKUP_KEEP",
+    "DESKTOP_DISPLAY",
+    "DESKTOP_ENABLED",
+    "DESKTOP_RESOLUTION",
+    "DISK_ADMISSION_AT_WARN",
+    "DISK_ADMISSION_ENABLED",
+    "DISK_ALERT_REPEAT_HOURS",
+    "DISK_CRITICAL_PCT",
+    "DISK_WARN_PCT",
+    "GITHUB_OAUTH_ALLOWLIST",
+    "GITHUB_OAUTH_CLIENT_ID",
+    "GITHUB_OAUTH_REDIRECT_ALLOWLIST",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_AUTHOR_NAME",
+    "JWT_TTL_DAYS",
+    "LIBRARY_REMOTE",
+    "MAX_ITERATIONS",
+    "MAX_PARALLEL_MISSIONS",
+    "META_MODEL_API_KEY",
+    "MISSION_CPU_QUOTA",
+    "MISSION_CPU_WEIGHT",
+    "MISSION_DISK_DEFAULT_ESTIMATE_GIB",
+    "MISSION_DISK_EMERGENCY_RESERVE_GB",
+    "MISSION_MEMORY_HIGH",
+    "MISSION_MEMORY_MAX",
+    "MISSION_MEMORY_SWAP_MAX",
+    "OPENCODE_BASE_URL",
+    "OPENCODE_PERMISSIVE",
+    "ORB_NODE_PROVISION_SCRIPT",
+    "PALOMA_WEBHOOK_FORWARD_URL",
+    "PALOMA_WEBHOOK_SECRET",
+    "REMOTE_BUILD_ESTIMATED_DISK_GB",
+    "REMOTE_BUILD_MAX_ESTIMATED_DISK_GB",
+    "REMOTE_BUILD_TOKEN_TTL_SECS",
+    "REMOTE_NODE_DISK_EMERGENCY_GB",
+    "REMOTE_NODE_MIN_DISK_GB",
+    "REMOTE_NODE_MIN_MEM_GB",
+    "REMOTE_NODE_MONITOR_SECS",
+    "SANDBOXED_MANAGED_ANTIGRAVITY",
+    "SANDBOXED_MANAGED_BOAT_MAX_CONCURRENT",
+    "SANDBOXED_MANAGED_DAILY_CAP_USD",
+    "SANDBOXED_MANAGED_DEFAULT_SIZE",
+    "SANDBOXED_MANAGED_DEFAULT_TTL_MINUTES",
+    "SANDBOXED_MANAGED_IDLE_MINUTES",
+    "SANDBOXED_MANAGED_IMAGE",
+    "SANDBOXED_MANAGED_MAX_CONCURRENT",
+    "SANDBOXED_MANAGED_MAX_SIZE",
+    "SANDBOXED_MANAGED_MAX_TTL_MINUTES",
+    "SANDBOXED_MANAGED_RAW_IMAGES",
+    "SANDBOXED_OAUTH_OWNER",
+    "SANDBOXED_REMOTE_NODES_ENABLED",
+    "SANDBOXED_SH_CONTAINER_TMP_RETENTION_HOURS",
+    "SANDBOXED_SH_IDLE_WORKER_NOTIFY_SECS",
+    "SANDBOXED_SH_OPENCODE_BASH_TIMEOUT_MS",
+    "SCOPE_REAPER_ENABLED",
+    "SCOPE_REAPER_INTERVAL_MINUTES",
+    "SCOPE_STOP_ON_AWAITING_USER",
+    "SCOPE_STOP_ON_PAUSE",
+    "SCOPE_TEARDOWN_GRACE_SECS",
+    "SCOPE_ZOMBIE_MAX_AGE_HOURS",
+    "STALE_MISSION_HOURS",
+    "TAVILY_API_KEY",
+    "TOOL_STUCK_ABORT_TIMEOUT_SECS",
+    "WORKSPACE_GC_EXECUTE",
+    "WORKSPACE_GC_INTERVAL_MINUTES",
 })
+INSTANCE_KEYS = frozenset({
+    "SANDBOXED_SH_CONTAINER_TMP_ROOT",
+    "SANDBOXED_PROXY_PUBLIC_URL",
+    "SANDBOXED_MANAGED_CORE_URL",
+    "SANDBOXED_SECRET_PASSPHRASE",
+    "DEV_MODE",
+    "AGENT_SOFTWARE_STATE_DIR",
+    "ALLOW_INSECURE_REMOTE_DEV_AUTH",
+    "AMP_API_KEY",
+    "AUTOMATION_MANAGER_MCP_BIN",
+    "BOAT_API_URL",
+    "BROWSER_ENABLED",
+    "CODEX_APP_SERVER_MODE",
+    "DASHBOARD_PASSWORD",
+    "DEFAULT_MODEL",
+    "GITHUB_CLIENT_ID",
+    "GITHUB_OAUTH_CLIENT_SECRET",
+    "GITHUB_TOKEN",
+    "HOME",
+    "HOST",
+    "INVOCATION_ID",
+    "JWT_SECRET",
+    "LIBRARY_PATH",
+    "MISSION_WORKSPACE_ROOT",
+    "NOTIFY_SOCKET",
+    "OPENAGENT_DATA_DIR",
+    "OPENCODE_CONFIG_DIR",
+    "ORB_BUILD_SHA",
+    "ORB_DEV_DAILY_CAP_CENTS",
+    "ORB_DEV_GRANT_ISSUER_HOST",
+    "ORB_HERMETIC_TEST",
+    "ORB_INSTANCE",
+    "ORB_SERVICE_UNIT",
+    "PORT",
+    "PRIVATE_KEY_FILE",
+    "RUST_MIN_STACK",
+    "SANDBOXED_MANAGED_ENABLED",
+    "SANDBOXED_MANAGED_REAPER_DRY_RUN",
+    "SANDBOXED_PROXY_SECRET",
+    "SANDBOXED_PUBLIC_URL",
+    "SANDBOXED_REMOTE_NODES",
+    "SANDBOXED_REMOTE_NODE_BABYLON_TOKEN",
+    "SANDBOXED_REMOTE_NODE_NIPPUR_TOKEN",
+    "SANDBOXED_REMOTE_NODE_DGX_SPARK_ADMIN_TOKEN",
+    "SANDBOXED_REMOTE_NODE_LAGASH_TOKEN",
+    "SANDBOXED_REMOTE_NODE_NIMRUD_TOKEN",
+    "SANDBOXED_REMOTE_NODE_SEPOLIA_TOKEN",
+    "SANDBOXED_SH_ASK_TMP_ROOT",
+    "SANDBOXED_SH_OPENCODE_DEFAULT_MODEL",
+    "SANDBOXED_SH_RTK_ENABLED",
+    "SANDBOXED_SH_SIMULATE_WEDGE",
+    "SANDBOXED_SH_USERS",
+    "SANDBOXED_SINGLE_TENANT_USER_ID",
+    "SANDBOXED_USERS",
+    "SANDBOXED_VOICE_TRANSCRIPTION_TOKEN",
+    "SANDBOXED_VOICE_TRANSCRIPTION_URL",
+    "SINGLE_TENANT_USER_ID",
+    "SPARK_MEMORY_MCP_BASE_URL",
+    "SYSTEMD_UNIT",
+    "TMPDIR",
+    "WATCHDOG_USEC",
+    "WORKING_DIR",
+})
+PROD_ONLY_KEYS = frozenset({
+    "CONSOLE_SSH_KEY",
+    "HERMES_ASSISTANT_MODEL",
+    "HERMES_CLOUD_OWNER",
+    "HERMES_DASHBOARD_PORT",
+    "HERMES_DASHBOARD_SESSION_TOKEN",
+    "HERMES_DASHBOARD_WS_URL",
+    "HERMES_ENABLED",
+    "HERMES_HOME",
+    "HERMES_PROJECTS_DIR",
+    "HERMES_SERVICE_NAME",
+    "HERMES_STATE_DB",
+    "HERMES_TOKEN",
+    "PRIVATE_KEY",
+})
+KNOWN_KEYS = SHARED_KEYS | INSTANCE_KEYS | PROD_ONLY_KEYS
 REQUIRED = frozenset({"ORB_INSTANCE", "PORT", "WORKING_DIR", "JWT_SECRET"})
 
 
@@ -101,7 +246,8 @@ def ownership(document=None):
         return isinstance(value, str) and re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", value)
     if (not all(key_name(key) for key in keys) or len(set(keys)) != len(keys)
             or not all(key_name(key) and source in ("prod", "dev") for key, source in shared.items())
-            or set(shared) & (INSTANCE_KEYS | set(keys))):
+            or not set(keys) <= (INSTANCE_KEYS | PROD_ONLY_KEYS)
+            or not set(shared) <= SHARED_KEYS):
         raise InvalidConfig("invalid or conflicting ownership decisions")
     return {"schema_version": 1, "instance_keys": sorted(keys), "shared_from": dict(sorted(shared.items()))}
 
@@ -127,15 +273,24 @@ def differences(prod, dev):
 
 
 def inventory(prod, dev):
-    # The conservative template preserves every difference, including absence.
-    # The operator can deliberately share selected keys by choosing a source.
-    return {"differences": differences(prod, dev), "ownership": ownership({
-        "schema_version": 1, "instance_keys": list(differences(prod, dev)), "shared_from": {}})}
+    changed = differences(prod, dev)
+    return {"differences": changed,
+            "classifications": {key: ("shared" if key in SHARED_KEYS else "instance-owned" if key in INSTANCE_KEYS
+                                      else "prod-only-allowed" if key in PROD_ONLY_KEYS else "unclassified")
+                                for key in sorted(prod.keys() | dev.keys())},
+            "unknown_keys": sorted((prod.keys() | dev.keys()) - KNOWN_KEYS),
+            "ownership": {"schema_version": 1, "instance_keys": [],
+                          "shared_from": {key: "review" for key in changed if key in SHARED_KEYS}}}
 
 
 def check(base, overlay, policy=None):
     policy = ownership(policy)
-    instance_keys = INSTANCE_KEYS | set(policy["instance_keys"])
+    instance_keys = INSTANCE_KEYS | PROD_ONLY_KEYS
+    unknown = (base.keys() | overlay.keys()) - KNOWN_KEYS
+    if unknown:
+        raise InvalidConfig("unclassified environment keys: " + ", ".join(sorted(unknown)))
+    if literal(overlay.get("ORB_INSTANCE", "")) == "dev" and overlay.keys() & PROD_ONLY_KEYS:
+        raise InvalidConfig("prod-only authority configured on dev: " + ", ".join(sorted(overlay.keys() & PROD_ONLY_KEYS)))
     overlap = base.keys() & overlay.keys()
     if overlap:
         raise InvalidConfig("overlay redefines base keys: " + ", ".join(sorted(overlap)))
@@ -153,8 +308,11 @@ def check(base, overlay, policy=None):
 
 def split_envs(prod, dev, policy=None):
     policy = ownership(policy)
-    instance_keys = INSTANCE_KEYS | set(policy["instance_keys"])
+    instance_keys = INSTANCE_KEYS | PROD_ONLY_KEYS
     shared_from = policy["shared_from"]
+    unclassified = (prod.keys() | dev.keys()) - KNOWN_KEYS
+    if unclassified:
+        raise InvalidConfig("unclassified environment keys: " + ", ".join(sorted(unclassified)))
     unknown = (set(policy["instance_keys"]) | shared_from.keys()) - (prod.keys() | dev.keys())
     if unknown:
         raise InvalidConfig("ownership names absent from both inputs: " + ", ".join(sorted(unknown)))

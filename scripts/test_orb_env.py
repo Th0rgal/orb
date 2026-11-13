@@ -23,7 +23,7 @@ class OrbEnvTest(unittest.TestCase):
         self.prod = self.root / "legacy-prod.env"
         self.dev = self.root / "legacy-dev.env"
         self.output = self.root / "environments"
-        self.shared = b'PROXY_URL="http://localhost:8317"\nTOKEN=\'$(must-not-run)\'\n'
+        self.shared = b'CLI_PROXY_API_BASE_URL="http://localhost:8317"\nCLI_PROXY_API_KEY=\'$(must-not-run)\'\n'
         self.prod.write_bytes(self.shared + b"PORT=3000\nWORKING_DIR=/root\nJWT_SECRET=prod-secret\n")
         self.dev.write_bytes(self.shared + b"PORT=3002\nWORKING_DIR=/var/lib/dev\nJWT_SECRET=dev-secret\n")
 
@@ -51,20 +51,20 @@ class OrbEnvTest(unittest.TestCase):
             env.migrate(self.prod, self.dev, self.output, apply=True)
 
     def test_conflicting_and_one_sided_base_values_fail_before_writes(self):
-        for extra in (b"ONLY_IN_DEV=value\n", b"PROXY_URL=different\n"):
+        for extra in (b"ONLY_IN_DEV=value\n", b"CLI_PROXY_API_BASE_URL=different\n"):
             with self.subTest(extra=extra):
                 # Replace, not duplicate, the existing proxy assignment.
-                self.dev.write_bytes(self.dev.read_bytes().replace(b'PROXY_URL="http://localhost:8317"\n', b"") + extra)
+                self.dev.write_bytes(self.dev.read_bytes().replace(b'CLI_PROXY_API_BASE_URL="http://localhost:8317"\n', b"") + extra)
                 with self.assertRaises(env.InvalidConfig):
                     env.migrate(self.prod, self.dev, self.output, apply=True)
                 self.assertFalse(self.output.exists())
 
     def test_inventory_and_instance_policy_preserve_one_sided_authority(self):
         self.prod.write_bytes(self.prod.read_bytes() + b'HERMES_TOKEN=prod-private-marker\nCONSOLE_SSH_KEY=prod-host-only\n')
-        self.dev.write_bytes(self.dev.read_bytes() + b'BROWSER_ENABLED=false\n')
+        self.dev.write_bytes(self.dev.read_bytes() + b'CODEX_APP_SERVER_MODE=false\n')
         before = [p.read_bytes() for p in (self.prod, self.dev)]
         report = env.inventory(*(env.parse_env(raw) for raw in before))
-        self.assertEqual(report["differences"], {"BROWSER_ENABLED": "dev_only", "CONSOLE_SSH_KEY": "prod_only", "HERMES_TOKEN": "prod_only"})
+        self.assertEqual(report["differences"], {"CONSOLE_SSH_KEY": "prod_only", "HERMES_TOKEN": "prod_only"})
         for value in ("prod-private-marker", "prod-host-only", "false"):
             self.assertNotIn(value, json.dumps(report))
         policy = report["ownership"]
@@ -80,25 +80,40 @@ class OrbEnvTest(unittest.TestCase):
             self.assertEqual((self.output / ("backups/" + name + ".env")).read_bytes(), raw)
         self.assertNotIn("HERMES_TOKEN", base)
         with self.assertRaisesRegex(env.InvalidConfig, "redefines base"):
-            env.check(base, overlay | {"TOKEN": base["TOKEN"]}, policy)
+            env.check(base, overlay | {"CLI_PROXY_API_KEY": base["CLI_PROXY_API_KEY"]}, policy)
         # The unchanged service check loads the manifest beside the shared base.
         with patch("sys.argv", [str(SCRIPT), "check", "--base", str(self.output / "core.env"),
                                 "--overlay", str(self.output / "dev.env")]), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(env.main(), 0)
 
+    def test_protected_authority_and_unknown_names_cannot_be_shared(self):
+        for key in ["HERMES_TOKEN", "CONSOLE_SSH_KEY", "SANDBOXED_REMOTE_NODE_SEPOLIA_TOKEN", "JWT_SECRET", "UNREVIEWED_AUTHORITY"]:
+            policy = {"schema_version": 1, "instance_keys": [], "shared_from": {key: "prod"}}
+            with self.subTest(key=key), self.assertRaises(env.InvalidConfig):
+                env.migrate(self.prod, self.dev, self.output, apply=True, policy=policy)
+            self.assertFalse(self.output.exists())
+        self.dev.write_bytes(self.dev.read_bytes() + b'HERMES_TOKEN=synthetic-host-authority\n')
+        with self.assertRaisesRegex(env.InvalidConfig, "prod-only authority configured on dev: HERMES_TOKEN"):
+            env.migrate(self.prod, self.dev, self.output, apply=True)
+        self.dev.write_bytes(self.dev.read_bytes().replace(b'HERMES_TOKEN=synthetic-host-authority\n', b'UNKNOWN_KEY=hidden-value\n'))
+        with self.assertRaises(env.InvalidConfig):
+            env.migrate(self.prod, self.dev, self.output, apply=True,
+                        policy={"schema_version": 1, "instance_keys": ["UNKNOWN_KEY"], "shared_from": {}})
+        self.assertFalse(self.output.exists())
+
     def test_operator_selects_shared_source_without_exposing_values(self):
-        self.prod.write_bytes(self.prod.read_bytes() + b'PROD_ONLY=private-prod-value\n')
+        self.prod.write_bytes(self.prod.read_bytes() + b'MAX_ITERATIONS=private-prod-value\n')
         self.dev.write_bytes(self.dev.read_bytes().replace(b'http://localhost:8317', b'http://localhost:8318'))
         policy = {"schema_version": 1, "instance_keys": [],
-                  "shared_from": {"PROD_ONLY": "prod", "PROXY_URL": "dev"}}
+                  "shared_from": {"MAX_ITERATIONS": "prod", "CLI_PROXY_API_BASE_URL": "dev"}}
         base, prod, dev = env.split_envs(env.parse_env(self.prod.read_bytes()), env.parse_env(self.dev.read_bytes()), policy)
-        self.assertEqual(base["PROD_ONLY"], "private-prod-value")
-        self.assertEqual(env.literal(base["PROXY_URL"]), "http://localhost:8318")
+        self.assertEqual(base["MAX_ITERATIONS"], "private-prod-value")
+        self.assertEqual(env.literal(base["CLI_PROXY_API_BASE_URL"]), "http://localhost:8318")
         for overlay in (prod, dev):
             self.assertFalse(base.keys() & overlay.keys())
             env.check(base, overlay, policy)
-        policy["shared_from"]["PROD_ONLY"] = "dev"
-        with self.assertRaisesRegex(env.InvalidConfig, "source is missing key: PROD_ONLY"):
+        policy["shared_from"]["MAX_ITERATIONS"] = "dev"
+        with self.assertRaisesRegex(env.InvalidConfig, "source is missing key: MAX_ITERATIONS"):
             env.migrate(self.prod, self.dev, self.output, apply=True, policy=policy)
         self.assertFalse(self.output.exists())
 
@@ -117,8 +132,8 @@ class OrbEnvTest(unittest.TestCase):
         manifest.write_text('{"schema_version":1,"instance_keys":[],"shared_from":{"KEY":"prod","KEY":"dev"}}')
         with self.assertRaisesRegex(env.InvalidConfig, "duplicate ownership"):
             env.read_ownership(manifest)
-        policy = {"schema_version": 1, "instance_keys": ["ABSENT"], "shared_from": {}}
-        with self.assertRaisesRegex(env.InvalidConfig, "absent from both inputs: ABSENT"):
+        policy = {"schema_version": 1, "instance_keys": [], "shared_from": {"MAX_ITERATIONS": "prod"}}
+        with self.assertRaisesRegex(env.InvalidConfig, "absent from both inputs: MAX_ITERATIONS"):
             env.migrate(self.prod, self.dev, self.output, apply=True, policy=policy)
         self.assertFalse(self.output.exists())
 
@@ -130,9 +145,9 @@ class OrbEnvTest(unittest.TestCase):
 
     def test_startup_refuses_duplicate_even_when_equal_and_unknown_overlay(self):
         base, prod, _ = env.split_envs(env.parse_env(self.prod.read_bytes()), env.parse_env(self.dev.read_bytes()))
-        with self.assertRaisesRegex(env.InvalidConfig, "redefines base keys: PROXY_URL"):
-            env.check(base, prod | {"PROXY_URL": base["PROXY_URL"]})
-        with self.assertRaisesRegex(env.InvalidConfig, "wrong layer: UNKNOWN"):
+        with self.assertRaisesRegex(env.InvalidConfig, "redefines base keys: CLI_PROXY_API_BASE_URL"):
+            env.check(base, prod | {"CLI_PROXY_API_BASE_URL": base["CLI_PROXY_API_BASE_URL"]})
+        with self.assertRaisesRegex(env.InvalidConfig, "unclassified environment keys: UNKNOWN"):
             env.check(base, prod | {"UNKNOWN": "hidden"})
         with self.assertRaisesRegex(env.InvalidConfig, "wrong layer: JWT_SECRET"):
             env.check(base | {"JWT_SECRET": "hidden"}, {key: value for key, value in prod.items() if key != "JWT_SECRET"})

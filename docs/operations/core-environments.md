@@ -50,35 +50,41 @@ Path('/etc/orb/env-ownership.json').write_text(json.dumps(report['ownership'], i
 PY
 ```
 
-Review these two files locally. The inventory reports key names and `prod_only`,
-`dev_only` or `different` only. The template lists every difference in
-`instance_keys`; using it preserves both instances' exact effective assignments,
-including absence. Keep Hermes authority, console SSH configuration and
-instance-specific node tokens in this list. To make a setting common deliberately,
-remove its name from `instance_keys` and add it to `shared_from` with the source
-label `"prod"` or `"dev"`. For example:
+Review these two files locally. The inventory reports names and classifications
+only, never values. The script has a checked-in per-key policy: `shared`,
+`instance-owned` and `prod-only-allowed`. Instance-owned assignments always stay
+in their own overlay, even if equal, and an absent key stays absent. Hermes and
+console SSH authority cannot appear on dev. Instance-specific fleet tokens,
+authentication, storage paths and security switches cannot be made shared by a
+manifest. Unknown live names appear in `unknown_keys` and migration refuses them;
+add a reviewed repository classification rather than bypassing the check.
+
+For each differing or one-sided shared key, the ownership template places
+`"review"` in `shared_from`. Replace that marker locally with `"prod"` or `"dev"`
+to select an existing assignment for the common base. For example:
 
 ```json
-{"schema_version": 1, "instance_keys": ["HERMES_ENABLED"], "shared_from": {"LIBRARY_REMOTE": "prod"}}
+{"schema_version": 1, "instance_keys": [], "shared_from": {"LIBRARY_REMOTE": "prod"}}
 ```
 
-This illustrates the shape, not a policy for the live inventory. No environment
-values belong in this file. Identity, storage and authentication keys cannot be
-made shared. Unknown names, duplicate decisions, missing source assignments and
-unresolved differences fail before any write. Source selection deliberately
-changes the other instance's next-start configuration; review it accordingly.
+This illustrates the shape, not a policy for the live inventory. Selecting a
+source deliberately changes the other instance's next-start configuration.
+The manifest cannot reclassify a key: `instance_keys` accepts only names already
+classified instance-owned/prod-only and is unnecessary in new manifests. Unknown
+names, duplicate decisions, missing source assignments, `"review"` markers and
+unresolved shared differences fail before any write.
 Run both migration commands above with the additional argument
 `--ownership /etc/orb/env-ownership.json`, first validating, then `--apply`.
 The resulting private `ownership.json` is automatically loaded by the existing
-startup check. Overlay/base overlap remains forbidden even for explicitly
-instance-owned keys. A missing manifest retains the original strict overlay
-check; malformed manifests fail.
+startup check. Overlay/base overlap remains forbidden, including instance-owned
+keys. A missing manifest still uses the checked-in ownership policy; malformed
+manifests fail. Adding a shared key to an overlay cannot bypass the policy.
 
 Migration preserves existing paths, adds only `ORB_INSTANCE`, and requires
 distinct ports, working directories, JWT secrets and dashboard passwords when
 present. It does not mint credentials or touch users, missions, transcripts or
-provider keys. The template preserves differences until the operator deliberately
-consolidates them; it does not certify identical setup.
+provider keys. Instance-owned differences stay local; shared differences require a deliberate
+source choice. Migration does not certify identical setup.
 
 The output directory must not already exist. It is mode 700, with mode 600
 files and exact copies of **both** inputs in `backups/prod.env` and
