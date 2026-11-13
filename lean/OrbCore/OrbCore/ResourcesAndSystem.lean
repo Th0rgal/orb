@@ -1971,14 +1971,17 @@ def dispatchResourcesAndSystemRoute
     -- Members: only their own missions; no fleet sources or instance-wide inference totals.
     let mut mine : Array JVal := #[]
     for m in (jv.fieldArr? "missions").getD #[] do
-      if ← canAccessMission store ((m.fieldStr? "id").getD "") callerUserId bootstrapAdminId isLegacyUnscoped false then
+      if ← canAccessMission store ((m.fieldStr? "id").getD "") callerUserId bootstrapAdminId isLegacyUnscoped true then
         mine := mine.push m
-    let compute := ((jv.field? "compute").getD (.obj #[])).setField "sources" (.arr #[])
+    let compute : JVal := .obj #[
+      ("total_vcpu", numFixed 0 3), ("active_vcpu", numFixed 0 3),
+      ("idle_leased_vcpu", .num "0.0"), ("hourly_burn_usd", .num "0.0"),
+      ("sources", .arr #[])]
     let inference : JVal := .obj #[
       ("current_b_tok_per_h", JVal.nat 0), ("est_usd_per_h", JVal.nat 0),
       ("window_total_tokens", JVal.nat 0), ("window_est_usd", JVal.nat 0),
       ("throttled_429_count", JVal.nat 0), ("pools", .arr #[])]
-    let reduced := ((jv.setField "missions" (.arr mine)).setField "compute" compute).setField "inference" inference
+    let reduced := (((jv.setField "missions" (.arr mine)).setField "compute" compute).setField "inference" inference).setField "links" (.arr #[])
     return some (jsonResp 200 reduced)
 
   if method == "GET" && segs.length == 4 && segs[0]? == some "api" && segs[1]? == some "resources" && segs[2]? == some "missions" then
