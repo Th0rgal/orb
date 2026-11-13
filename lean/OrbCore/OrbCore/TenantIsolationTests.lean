@@ -435,6 +435,69 @@ def run (root : String) : IO Unit := do
       (memberUsageDoc.field? "organization").isNone &&
       (memberUsageDoc.field? "organization_id").isNone)
       "member provider usage keeps quota windows without account identity"
+    -- Sibling provider/AI/model-routing GET routes must not leak admin provider names,
+    -- discovery labels, or global proxy usage/outcome rows to members.
+    let accountMarker := "admin-proxy-account-marker-1"
+    let modelMarker := "admin-proxy-model-marker-v1"
+    let discoveryMarker := "admin-discovery-connection-marker"
+    let nowIsoReal := formatEpochIso8601Utc nowReal
+    sql store.missionsDb
+      "INSERT INTO proxy_usage(timestamp,model,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,cost_cents,provider,account_id,api_key_id,api_key_name,mission_id,caller_kind,purpose,reasoning_tokens,account_bound) VALUES(?1,?2,100,50,0,0,12,'anthropic',?3,'','','admin-mission','mission','turn',0,1);"
+      #[nowIsoReal, modelMarker, accountMarker]
+    sql store.missionsDb
+      "INSERT INTO proxy_outcomes(timestamp,chain_id,provider,account_id,model,status,http_status,retries,ttft_ms,total_ms,fallback_depth,stream,superseded) VALUES(?1,'builtin/smart','anthropic',?2,?3,'error',502,1,0,120,0,0,0);"
+      #[nowIsoReal, accountMarker, modelMarker]
+    let discoveryJson : JVal := .obj #[
+      ("schema_version", .nat 1),
+      ("connections", .arr #[
+        .obj #[
+          ("provider_id", .str "anthropic"),
+          ("label", .str discoveryMarker),
+          ("access_profile", .str discoveryMarker),
+          ("status", .str "discovered"),
+          ("checked_at", .str nowIsoReal)
+        ]
+      ])
+    ]
+    IO.FS.writeFile (System.FilePath.mk (store.rootDir ++ "/model-discovery.json")) (renderCompact discoveryJson)
+    let siblingRoutes : Array (String × String) := #[
+      ("GET /api/providers/catalog", "/api/providers/catalog"),
+      ("GET /api/providers/discovery", "/api/providers/discovery"),
+      ("GET /api/ai/usage/summary", "/api/ai/usage/summary"),
+      ("GET /api/ai/proxy/health", "/api/ai/proxy/health"),
+      ("GET /api/ai/proxy/timing", "/api/ai/proxy/timing"),
+      ("GET /api/model-routing/health", "/api/model-routing/health")
+    ]
+    let siblingMarkers : Array String := #[
+      provNameMarker,
+      "admin-provider-name-marker-beta",
+      provEmailMarker,
+      "admin-mission",
+      accountMarker,
+      modelMarker,
+      discoveryMarker
+    ]
+    let mut adminSiblingDocs : Array JVal := #[]
+    for (routeName, target) in siblingRoutes do
+      let (aStatus, aDoc) ← send "GET" target admin (.obj #[]) stWithProviders
+      check (aStatus == 200) s!"admin status 200 on {routeName}"
+      adminSiblingDocs := adminSiblingDocs.push aDoc
+    let adminSiblingCombined := renderCompact (.arr adminSiblingDocs)
+    for marker in #[provNameMarker, "admin-provider-name-marker-beta", "admin-mission", accountMarker, modelMarker, discoveryMarker] do
+      check ((adminSiblingCombined.splitOn marker).length > 1) s!"admin sees sibling route marker {marker}"
+    let mut siblingLeaks : Array String := #[]
+    for (routeName, target) in siblingRoutes do
+      let (mStatus, mDoc) ← send "GET" target member (.obj #[]) stWithProviders
+      let raw := renderCompact mDoc
+      let mut leakedOnRoute : Array String := #[]
+      for marker in siblingMarkers do
+        if (raw.splitOn marker).length > 1 then
+          leakedOnRoute := leakedOnRoute.push marker
+      if !leakedOnRoute.isEmpty then
+        let joinedMarkers := String.intercalate ", " leakedOnRoute.toList
+        siblingLeaks := siblingLeaks.push s!"{routeName} ({mStatus}) -> [{joinedMarkers}]"
+    let joinedSiblingLeaks := String.intercalate "; " siblingLeaks.toList
+    check siblingLeaks.isEmpty s!"member sibling provider/ai routes leaked owner identity: {joinedSiblingLeaks}"
     -- Disabling/deleting an issuer must stop every previously minted session,
     -- including an external session with no mission id and a shared mission.
     for update in #["UPDATE users SET disabled=1 WHERE id='member';", "DELETE FROM users WHERE id='member';"] do
