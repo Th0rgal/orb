@@ -1129,6 +1129,9 @@ button.under-model { color: inherit; }
 .p-acc-btn:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; border-radius: var(--radius-sm); }
 .p-acc-chev { width: 16px; height: 16px; color: var(--fg-4); font-size: 15px; flex: none; display: inline-flex; align-items: center; justify-content: center; opacity: 1; transition: transform .12s ease, color .12s ease; }
 .p-acc-chev.open { transform: rotate(90deg); }
+.p-group-head { width: 100%; display: flex; align-items: center; gap: 10px; background: none; border: 0; color: inherit; text-align: left; cursor: pointer; }
+.p-group-head .s-row-desc { margin-left: auto; }
+.p-group-body { padding-left: 16px; }
 .p-acc-btn:hover .p-acc-chev { color: var(--fg-2); }
 .p-acc-body { padding: 2px 14px 14px 48px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px 12px; }
 .p-acc-body > .s-row-desc { grid-column: 1 / -1; }

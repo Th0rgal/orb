@@ -19,6 +19,16 @@ private def chain (id name model : String) : RoutingChain := {
 
 /-- Actual request routing, including unknown errors and no default/name/suffix aliasing. -/
 def run : IO Unit := do
+  -- A spent Antigravity Gemini quota must not cool Claude: each quota pool is its own account.
+  let agClaude := OrbCore.ProxyModelRouting.antigravityPoolAccount "claude-opus-5-5-high"
+  let agGemini := OrbCore.ProxyModelRouting.antigravityPoolAccount "gemini-4-carbon-eap"
+  check (agClaude == OrbCore.ProxyModelRouting.antigravityPoolAccount "gpt-oss-120b") "Claude and GPT share one pool"
+  check (agClaude != agGemini && agGemini == OrbCore.ProxyModelRouting.antigravityPoolAccount "agy-model-high")
+    "Gemini is a separate pool"
+  let agChain : RoutingChain := { id := "google-opus", name := "g", targets := #[
+    { accountId := agClaude, provider := "antigravity", baseUrl := "", apiKey := "", modelId := "claude-opus-5-5-high" }] }
+  let geminiSpent : AccountCooldown := { accountId := agGemini, untilEpoch := 2000, reason := .usageLimit }
+  check ((planChain agChain #[geminiSpent] 1000).eligible.size == 1) "Gemini limit leaves Claude eligible"
   let fixtureRaw ← IO.FS.readFile "shared/orb-spec/fixtures/proxy-model-aliases.json"
   let .ok fixture := OrbBin.Json.parse fixtureRaw
     | throw (IO.userError "proxy alias reference fixture failed to parse")

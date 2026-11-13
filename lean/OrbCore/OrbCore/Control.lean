@@ -847,8 +847,8 @@ def parseChainTargetsJson
           let acct :=
             if hasExplicitAcct then acctRaw
             else match matchedHydrated? with
-              | some hp => if isAg then "cliproxyapi:antigravity" else s!"cliproxyapi:{hp.providerType}"
-              | none => if isAg then "cliproxyapi:antigravity" else "cliproxyapi"
+              | some hp => if isAg then OrbCore.ProxyModelRouting.antigravityPoolAccount mdl else s!"cliproxyapi:{hp.providerType}"
+              | none => if isAg then OrbCore.ProxyModelRouting.antigravityPoolAccount mdl else "cliproxyapi"
           out := out.push {
             accountId              := acct
             provider               := provRaw

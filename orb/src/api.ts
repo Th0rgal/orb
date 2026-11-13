@@ -1521,6 +1521,7 @@ export interface ProviderUsage {
   woken_missions?: number;
   antigravity_plan?: string;
   antigravity_windows?: { label: string; used_percent: number; reset_at?: number }[];
+  anthropic_model_windows?: { label: string; used_percent: number; reset_at?: number }[];
   muse_plan?: string;
   muse_5h_used_percent?: number;
   muse_5h_reset?: number;

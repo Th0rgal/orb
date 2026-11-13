@@ -34,6 +34,8 @@ export function codingPlanWindows(u: ProviderUsage) {
   }
   // Google omits a zero remaining fraction; a window with a reset but no figure is spent.
   if (u.provider_type === "antigravity") for (const w of u.antigravity_windows ?? []) add(w.label, w.used_percent ?? (w.reset_at != null ? 100 : undefined), w.reset_at);
+  // Per-model weekly limits (e.g. "Fable · Weekly"), metered apart from the overall weekly limit.
+  if (u.provider_type === "anthropic") for (const w of u.anthropic_model_windows ?? []) add(w.label, w.used_percent, w.reset_at);
   if (u.provider_type === "mistral") add("Monthly", u.mistral_monthly_used_percent, u.mistral_monthly_reset);
   if (u.provider_type === "zai") {
     add("5h", u.zai_5h_used_percent, u.zai_5h_reset);

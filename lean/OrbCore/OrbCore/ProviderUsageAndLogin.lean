@@ -680,7 +680,9 @@ def parseAntigravitySummary (payload : JVal) : Array JVal := Id.run do
     let name := antigravityGroupLabel group
     let buckets := ((group.fieldArr? "buckets").getD #[]).toList.mergeSort (fun a b => rank a ≤ rank b)
     for bucket in buckets do
-      let some remaining := antigravityRemaining? bucket | continue
+      -- Google omits a zero remaining fraction: a bucket with a reset but no figure is spent.
+      let some remaining := (antigravityRemaining? bucket).orElse
+          (fun _ => (antigravityReset? bucket).map (fun _ => 0)) | continue
       let window := match (bucket.fieldStr? "window").getD "" with
         | "weekly" => "Weekly"
         | "daily" => "Daily"
@@ -756,6 +758,24 @@ def parseAntigravityQuota (payload : JVal) : Array JVal := Id.run do
     | none => wins := wins.push (label, used, reset)
   return wins.map fun (l, u, r) => antigravityWindowJv l u r
 
+/-- `seven_day_<model>` objects of Anthropic's OAuth usage (`{utilization, resets_at}`, percent)
+    as `{label: "<Model> · Weekly", used_percent, reset_at?}`. Unknown model keys pass through,
+    so a newly metered model appears without a client change. -/
+def anthropicModelWindows (usage : JVal) : Array JVal := Id.run do
+  let .obj fields := usage | return #[]
+  let mut out : Array JVal := #[]
+  for (key, v) in fields do
+    if !key.startsWith "seven_day_" || key == "seven_day_oauth_apps" then continue
+    let some (.num pct) := v.field? "utilization" | continue
+    let model := (key.drop 10).toString.replace "_" " "
+    let label := (model.capitalize) ++ " · Weekly"
+    let base := #[("label", JVal.str label), ("used_percent", JVal.num pct)]
+    let reset? := (v.fieldStr? "resets_at").bind parseIso8601EpochU64?
+    out := out.push (.obj (match reset? with
+      | some r => base.push ("reset_at", JVal.num (toString r))
+      | none => base))
+  return out
+
 def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
   let nowSec ← nowEpoch
   let nowIso := formatEpochIso8601Utc nowSec
@@ -818,6 +838,14 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
           extraFields := extraFields.push ("unified_7d_utilization", .num u7.trimAscii.toString)
           if let some rv := r7 then extraFields := extraFields.push ("unified_7d_reset", .str rv)
           optWindows := optWindows.push (buildOptimizeWindow "7d" "7-day" "utilization_pct" "anthropic_unified_headers" pct7 604800 r7)
+      -- Model-specific weekly limits (Opus, Sonnet, Fable, ...) are metered apart from the
+      -- overall weekly limit and only reported by the OAuth usage endpoint.
+      if !hp.oauthToken.isEmpty then
+        if let .ok (code, _, some uJv) ← sendJsonRequest "GET" "https://api.anthropic.com/api/oauth/usage"
+            (some hp.oauthToken) none #[("anthropic-beta", "oauth-2025-04-20")] 6000 65536 then
+          if 200 ≤ code && code < 300 then
+            let wins := anthropicModelWindows uJv
+            if !wins.isEmpty then extraFields := extraFields.push ("anthropic_model_windows", .arr wins)
 
   -- 3. Kimi Coding Usage
   else if pType == "kimi" then

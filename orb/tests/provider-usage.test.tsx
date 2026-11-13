@@ -10,6 +10,9 @@ it("shows both account quotas on the first visit even when the bulk cache is emp
   setConnection("http://core.test", "test-token");
   vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(url.endsWith("/providers") ? [account("ben"), account("thomas")] : url.includes("/ben/usage") ? usage(45) : url.includes("/thomas/usage") ? usage(100) : {}))));
   const { container } = render(() => <Providers />);
+  // Several accounts of one provider start collapsed under one row.
+  await waitFor(() => expect(container.querySelector(".p-group-head")).not.toBeNull());
+  (container.querySelector(".p-group-head") as HTMLButtonElement).click();
   await waitFor(() => expect(container.textContent).toContain("45%"));
   expect(container.textContent).toContain("100%");
   expect(container.textContent).toContain("Quota exhausted");
