@@ -1,0 +1,114 @@
+{
+  "spec": "docs/ui/mission-status.md#terminal-snapshot-reconciliation",
+  "snapshots": [
+    {
+      "name": "734c3bb7: completion from another session settles an active turn",
+      "prev": { "status": "active", "updated_at": "2026-11-13T12:00:00Z", "run_generation": 3, "state_revision": 7 },
+      "incoming": { "status": "completed", "terminal_reason": "completed", "updated_at": "2026-11-13T12:10:00Z", "run_generation": 3, "state_revision": 9 },
+      "expected": { "admitted": true, "status": "completed", "terminal_reason": "completed", "working": false }
+    },
+    {
+      "name": "734c3bb7: restart replays the same terminal snapshot",
+      "prev": { "status": "completed", "terminal_reason": "completed", "updated_at": "2026-11-13T12:10:00Z", "run_generation": 3, "state_revision": 9 },
+      "incoming": { "status": "completed", "terminal_reason": "completed", "updated_at": "2026-11-13T12:19:30Z", "run_generation": 3, "state_revision": 9 },
+      "expected": { "admitted": true, "status": "completed", "terminal_reason": "completed", "working": false }
+    },
+    {
+      "name": "734c3bb7: stale active snapshot from lower state revision is rejected after completion",
+      "prev": { "status": "completed", "terminal_reason": "completed", "updated_at": "2026-11-13T12:10:00Z", "run_generation": 3, "state_revision": 9 },
+      "incoming": { "status": "active", "updated_at": "2026-11-13T12:19:30Z", "run_generation": 3, "state_revision": 7 },
+      "expected": { "admitted": false, "status": "completed", "terminal_reason": "completed", "working": false }
+    },
+    {
+      "name": "restart serves an older generation with a newer clock",
+      "prev": { "status": "active", "updated_at": "2026-11-13T12:20:00Z", "run_generation": 4, "state_revision": 11 },
+      "incoming": { "status": "interrupted", "terminal_reason": "service_restart", "updated_at": "2026-11-13T12:21:00Z", "run_generation": 3, "state_revision": 9 },
+      "expected": { "admitted": false, "status": "active", "terminal_reason": null, "working": true }
+    },
+    {
+      "name": "delayed terminal snapshot after a newer turn started",
+      "prev": { "status": "active", "updated_at": "2026-11-13T12:20:00Z", "run_generation": 4, "state_revision": 11 },
+      "incoming": { "status": "completed", "terminal_reason": "completed", "updated_at": "2026-11-13T12:20:00Z", "run_generation": 3, "state_revision": 9 },
+      "expected": { "admitted": false, "status": "active", "terminal_reason": null, "working": true }
+    },
+    {
+      "name": "same generation, lower state revision is stale",
+      "prev": { "status": "completed", "terminal_reason": "completed", "updated_at": "2026-11-13T12:10:00Z", "run_generation": 3, "state_revision": 9 },
+      "incoming": { "status": "active", "updated_at": "2026-11-13T12:10:00Z", "run_generation": 3, "state_revision": 8 },
+      "expected": { "admitted": false, "status": "completed", "terminal_reason": "completed", "working": false }
+    },
+    {
+      "name": "a genuinely newer turn reactivates a completed mission and clears terminal_reason",
+      "prev": { "status": "completed", "terminal_reason": "completed", "updated_at": "2026-11-13T12:10:00Z", "run_generation": 3, "state_revision": 9 },
+      "incoming": { "status": "active", "updated_at": "2026-11-13T12:30:00Z", "run_generation": 4, "state_revision": 10 },
+      "expected": { "admitted": true, "status": "active", "terminal_reason": null, "working": true }
+    },
+    {
+      "name": "list row without run_generation older than detail snapshot by state_revision is discarded",
+      "prev": { "status": "completed", "terminal_reason": "completed", "updated_at": "2026-11-13T12:10:00Z", "run_generation": 3, "state_revision": 9 },
+      "incoming": { "status": "active", "updated_at": "2026-11-13T12:15:00Z", "state_revision": 8 },
+      "expected": { "admitted": false, "status": "completed", "terminal_reason": "completed", "working": false }
+    },
+    {
+      "name": "list row without run_generation newer than detail snapshot by state_revision is admitted",
+      "prev": { "status": "active", "updated_at": "2026-11-13T12:00:00Z", "run_generation": 3, "state_revision": 7 },
+      "incoming": { "status": "completed", "terminal_reason": "completed", "updated_at": "2026-11-13T12:10:00Z", "state_revision": 9 },
+      "expected": { "admitted": true, "status": "completed", "terminal_reason": "completed", "working": false }
+    },
+    {
+      "name": "detail snapshot with run_generation newer than list row by state_revision is admitted",
+      "prev": { "status": "active", "updated_at": "2026-11-13T12:00:00Z", "state_revision": 7 },
+      "incoming": { "status": "completed", "terminal_reason": "completed", "updated_at": "2026-11-13T12:10:00Z", "run_generation": 3, "state_revision": 9 },
+      "expected": { "admitted": true, "status": "completed", "terminal_reason": "completed", "working": false }
+    },
+    {
+      "name": "rows without fences fall back to updated_at",
+      "prev": { "status": "active", "updated_at": "2026-11-13T12:00:00Z" },
+      "incoming": { "status": "completed", "terminal_reason": "completed", "updated_at": "2026-11-13T12:10:00Z" },
+      "expected": { "admitted": true, "status": "completed", "terminal_reason": "completed", "working": false }
+    },
+    {
+      "name": "older unfenced row is discarded",
+      "prev": { "status": "completed", "terminal_reason": "completed", "updated_at": "2026-11-13T12:10:00Z" },
+      "incoming": { "status": "active", "updated_at": "2026-11-13T12:00:00Z" },
+      "expected": { "admitted": false, "status": "completed", "terminal_reason": "completed", "working": false }
+    }
+  ],
+  "followups": [
+    {
+      "name": "734c3bb7: unacknowledged steer after terminal completion is not sent",
+      "draft": { "content": "Please stop and summarize", "posted_at": "2026-11-13T12:00:00Z", "acknowledged": false },
+      "terminal_updated_at": "2026-11-13T12:10:00Z",
+      "delivered": [],
+      "expected": "not_sent"
+    },
+    {
+      "name": "steer delivered by content after posting is superseded",
+      "draft": { "content": "Please stop and summarize", "posted_at": "2026-11-13T12:00:00Z", "acknowledged": false },
+      "terminal_updated_at": "2026-11-13T12:10:00Z",
+      "delivered": [{ "content": "Please stop and summarize", "at": "2026-11-13T12:05:00Z" }],
+      "expected": "discard"
+    },
+    {
+      "name": "identical content delivered before posting does not supersede",
+      "draft": { "content": "Please stop and summarize", "posted_at": "2026-11-13T12:00:00Z", "acknowledged": false },
+      "terminal_updated_at": "2026-11-13T12:10:00Z",
+      "delivered": [{ "content": "Please stop and summarize", "at": "2026-11-13T11:48:00Z" }],
+      "expected": "not_sent"
+    },
+    {
+      "name": "terminal snapshot older than the send leaves it in flight",
+      "draft": { "content": "Please stop and summarize", "posted_at": "2026-11-13T12:11:00Z", "acknowledged": false },
+      "terminal_updated_at": "2026-11-13T12:10:00Z",
+      "delivered": [],
+      "expected": "keep"
+    },
+    {
+      "name": "acknowledged follow-up is owned by the queue",
+      "draft": { "content": "Please stop and summarize", "posted_at": "2026-11-13T12:00:00Z", "acknowledged": true },
+      "terminal_updated_at": "2026-11-13T12:10:00Z",
+      "delivered": [],
+      "expected": "keep"
+    }
+  ]
+}

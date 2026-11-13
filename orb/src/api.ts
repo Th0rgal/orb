@@ -1189,7 +1189,10 @@ export interface Mission {
   remote_node_id?: string | null;
   terminal_reason?: string | null;
   status_message?: string | null;
-  execution?: { state?: string; terminal_reason?: string | null; generation?: number };
+  execution?: { state?: string; terminal_reason?: string | null; generation?: number } | null;
+  /** Core's run generation and row revision: the snapshot fence (missionSnapshot.ts). */
+  run_generation?: number;
+  state_revision?: number;
   remote_job?: RemoteJob | null;
   /** Set while a pending mission waits for Core to free a parallel slot. */
   queue_wait?: QueueWait | null;

@@ -632,3 +632,98 @@ it('surfaces Remote job stopped notice even when a pending remote mission also h
  expect(view.container.querySelector('.st-working')).toBeNull();
  view.unmount();
 });
+
+it('734c3bb7 view-level sequence: feeding Core-emitted snapshots clears the Starting row and launch/status banner while keeping listed queue rows as Not delivered',async()=>{
+ const {getMission}=await import('../src/api');
+ const {cacheReset}=await import('../src/pageCache');
+ const {setBackgroundSyncMode}=await import('../src/backgroundSync');
+ const {putTranscript,warmRecentMissionIds}=await import('../src/missionCache');
+ cacheReset();
+ setBackgroundSyncMode('off');
+ try{
+  const id='734c3bb7-view';
+  let currentSnap:Mission={
+   id,
+   backend:'opencode',
+   status:'starting',
+   run_generation:3,
+   state_revision:5,
+   remote_node_id:'ashur',
+   remote_job:{job_id:'stale-job',node_id:'ashur',phase:'reconnecting',node_state:'reconnecting'},
+   history:[],
+   created_at:'2026-11-13T11:00:00Z',
+   updated_at:'2026-11-13T11:48:00Z',
+  };
+  let replyLanded=false;
+  vi.mocked(getMission).mockImplementation(async()=>({...currentSnap}));
+  vi.stubGlobal('fetch',vi.fn(async(url)=>{
+   if(String(url).includes('/queue?')){
+    return Response.json([{id:'steer-1',mission_id:id,content:'Please stop and summarize',source:'remote-queue'}]);
+   }
+   if(String(url).includes(`/missions/${id}/events`)){
+    const user={id:1,event_id:'u1',sequence:1,event_type:'user_message',timestamp:'2026-11-13T11:00:00Z',content:'Initial prompt',metadata:{queued:false}};
+    const assistant={id:2,event_id:'a1',sequence:2,event_type:'assistant_message',timestamp:'2026-11-13T11:05:00Z',content:'Finished summary.',metadata:{success:true}};
+    const rows=replyLanded?[user,assistant]:[user];
+    const max=String(replyLanded?2:1);
+    return Response.json(rows,{headers:{'X-Orb-Events-Protocol':'1','X-Has-More':'false','X-Max-Sequence':max,'X-Next-Cursor':max,'X-Page-Max-Sequence':max}});
+   }
+   return Response.json([]);
+  }));
+  const [propMission,setPropMission]=createSignal<Mission>(currentSnap);
+  const view=render(()=><NativeMissionView id={id} initial={propMission()}/>);
+  // Before the terminal snapshot: the Starting row is visible and the queue is plain.
+  await waitFor(()=>expect(view.container.querySelector('.st-working')?.textContent).toContain('Starting'));
+  expect(screen.getByText('1 Queued')).toBeDefined();
+
+   // Feed the 734c3bb7 completion snapshot from another session (only Core-emitted fields),
+   // with the reply that makes the transcript show activity.
+   replyLanded=true;
+   state.event?.({type:'assistant_message',sequence:2,eventId:'a1',data:{id:'a1',content:'Finished summary.',success:true}});
+   currentSnap={
+   id,
+   backend:'opencode',
+   status:'completed',
+   terminal_reason:'completed',
+   run_generation:3,
+   state_revision:9,
+   remote_node_id:'ashur',
+   history:[],
+   created_at:'2026-11-13T11:00:00Z',
+   updated_at:'2026-11-13T12:10:00Z',
+  };
+  setPropMission({...currentSnap});
+   // View level: no Starting row, no launch/status banner, and the listed queue row is real, labeled Not delivered.
+   await waitFor(()=>expect(view.container.querySelector('.st-working')).toBeNull());
+   // Once the reply is in the transcript, the settled phase is quiet: no banner at all.
+   await waitFor(()=>expect(view.container.textContent).toContain('Finished summary.'));
+   expect(view.container.querySelector('.launch-status')).toBeNull();
+   expect(view.container.textContent).not.toMatch(/Starting\b/);
+  expect(screen.getByText('1 Not delivered')).toBeDefined();
+  expect(screen.getByText('Please stop and summarize')).toBeDefined();
+  expect(view.container.textContent).not.toContain('Not sent: the mission ended before Core accepted this message');
+
+  // Feed the stale active snapshot from lower state_revision with a newer updated_at:
+  // it is rejected, so the view stays settled.
+   setPropMission({
+    id,
+    backend:'opencode',
+    status:'active',
+    run_generation:3,
+    state_revision:7,
+    remote_node_id:'ashur',
+    remote_job:{job_id:'stale-job',node_id:'ashur',phase:'reconnecting',node_state:'reconnecting'},
+    history:[],
+    created_at:'2026-11-13T11:00:00Z',
+    updated_at:'2026-11-13T12:19:30Z',
+   });
+   await waitFor(()=>expect(view.container.querySelector('.st-working')).toBeNull());
+   expect(view.container.querySelector('.launch-status')).toBeNull();
+   expect(view.container.textContent).not.toMatch(/Starting\b/);
+   expect(view.container.textContent).toContain('Finished summary.');
+   view.unmount();
+ }finally{
+  cacheReset();
+  setBackgroundSyncMode('auto');
+  warmRecentMissionIds().length=0;
+ }
+});

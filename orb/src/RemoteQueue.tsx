@@ -35,6 +35,7 @@ export type PendingRemoteQueueItem = { id: string; content: string; attached?: b
 export function RemoteQueue(p: {
   mission: string;
   active?: boolean;
+  terminal?: boolean;
   confirmed?: (QueuedMessage & {attached?:boolean})[];
   /** Ids already shown as sent in the transcript. Core keeps a remote follow-up in
    * its inbox until the node accepts the job, which can be long when the node is
@@ -217,6 +218,11 @@ export function RemoteQueue(p: {
     });
     onCleanup(() => { disposed = true; if (refreshInbox === refresh) refreshInbox = undefined; });
   });
+  const isQueueMessageGone = (e: unknown): boolean => {
+    const detail = e instanceof ApiError ? e.detail : (e instanceof Error ? e.message : String(e));
+    const status404 = e instanceof ApiError ? e.status === 404 : /\b404\b/.test(detail);
+    return status404 && /message not in queue/i.test(detail);
+  };
   const cancel = async (id: string) => {
     setError("");
     const version = connectionVersion(), mission = p.mission;
@@ -234,8 +240,7 @@ export function RemoteQueue(p: {
       p.onRemove?.(id);
       p.onCancel(id);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (/\b404\b/.test(msg)) {
+      if (isQueueMessageGone(e)) {
         if (!destroyed && version === connectionVersion() && mission === p.mission) {
           p.onRows(rows().map(row => row.id));
           p.onRemove?.(id);
@@ -243,6 +248,7 @@ export function RemoteQueue(p: {
         }
         return;
       }
+      const msg = e instanceof Error ? e.message : String(e);
       // Roll back optimistic delete if the network request failed
       deletedIds.delete(id);
       if (!destroyed && version === connectionVersion() && mission === p.mission) {
@@ -274,29 +280,39 @@ export function RemoteQueue(p: {
       void p.onSendImmediate?.([], [injected]);
     });
     try {
-      // A network error or timeout does not prove the message was not delivered:
-      // it must never fall through to delete-and-resend. Only an explicit
-      // `delivered: false` from Core means "no live injection, stop then send".
-      // `interrupt=true`: when there is no live injection, Core stops the turn and
-      // delivers THIS queued message next under its same id (`promoted`).
-      const live = await api<{ ok?: boolean; delivered?: boolean; promoted?: boolean }>(`/api/control/queue/${encodeURIComponent(target.id)}/send-now?interrupt=true`, { method: "POST" });
-      if (live?.delivered || live?.promoted) {
-        if (destroyed || version !== connectionVersion() || mission !== p.mission) return;
-        p.onSendNowAccepted?.(target.id, !!live.delivered);
-        revision++;
-        p.onRows(rows().map(row => row.id));
-        p.onCancel(target.id);
-        return;
+      if (!p.terminal) {
+        // A network error or timeout does not prove the message was not delivered:
+        // it must never fall through to delete-and-resend. Only an explicit
+        // `delivered: false` from Core means "no live injection, stop then send".
+        // `interrupt=true`: when there is no live injection, Core stops the turn and
+        // delivers THIS queued message next under its same id (`promoted`).
+        const live = await api<{ ok?: boolean; delivered?: boolean; promoted?: boolean }>(`/api/control/queue/${encodeURIComponent(target.id)}/send-now?interrupt=true`, { method: "POST" });
+        if (live?.delivered || live?.promoted) {
+          if (destroyed || version !== connectionVersion() || mission !== p.mission) return;
+          p.onSendNowAccepted?.(target.id, !!live.delivered);
+          revision++;
+          p.onRows(rows().map(row => row.id));
+          p.onCancel(target.id);
+          return;
+        }
       }
-      // Older Core without promote: the fallback below shows its own copy while
-      // it stops the turn and sends.
+      // Terminal mission (where send-now only moves the row to head without
+      // waking the ended mission) or older Core without promote: delete from
+      // the queue first, and send only after each delete answers 200 or
+      // 404 "message not in queue", so a message is never delivered twice.
       p.onRetract?.(target.id);
       const ordered = [target, ...list.filter(r => r.id !== target.id)];
       const payload = ordered.map(r => {
         const presented = messagePresentation(r.content);
         return { id: r.id, content: isBtwWrappedPrompt(r.content) ? r.content : presented.text, attached: r.attached || presented.attached || undefined };
       });
-      await Promise.allSettled(ordered.map(r => api(`/api/control/queue/${encodeURIComponent(r.id)}`, { method: "DELETE" })));
+      await Promise.all(ordered.map(async r => {
+        try {
+          await api(`/api/control/queue/${encodeURIComponent(r.id)}`, { method: "DELETE" });
+        } catch (err) {
+          if (!isQueueMessageGone(err)) throw err;
+        }
+      }));
       if (destroyed || version !== connectionVersion() || mission !== p.mission) return;
       revision++;
       for (const r of ordered) deletedIds.add(r.id);
@@ -435,7 +451,7 @@ export function RemoteQueue(p: {
           hint reserves its space and each row reserves its action area, so the
           dock height changes only when a row is added or removed. */}
       <Show when={rowIds().length}><header>
-        <span class="queue-count">{`${displayRows().length} Queued`}</span>
+        <span class="queue-count">{p.terminal ? `${displayRows().length} Not delivered` : `${displayRows().length} Queued`}</span>
         <span class="queue-hint" classList={{"queue-hint-hidden": !(visibleRows().length > 0 && !p.editing)}} aria-hidden={!(visibleRows().length > 0 && !p.editing)}><Ic.ReturnIcon size={13}/> to Send</span>
         <div class="queue-options">
           <button type="button" class="queue-collapse" aria-label={collapsed()?"Show queued messages":"Hide queued messages"} aria-expanded={!collapsed()} onClick={()=>setCollapsed(!collapsed())}><Ic.ChevronDown size={14}/></button>
@@ -449,7 +465,7 @@ export function RemoteQueue(p: {
         const text = () => messagePresentation(edits()[r().id] ?? r().content).text;
         const attached = () => r().attached || messagePresentation(r().content).attached;
         const inert = () => !!r().sending;
-        return <li class="queue-row" classList={{editing:p.editing===r().id,sending:!!r().sending,failed:!!r().queue_error}}>
+        return <li class="queue-row" classList={{editing:p.editing===r().id,sending:!!r().sending,failed:!!r().queue_error||!!p.terminal}}>
           <div class="queue-line">
             <div class="queue-text" title={text()}><span>{text()}</span><Show when={attached()}><small class="user-context">Attached context</small></Show></div>
             <span class="queue-trailing">
@@ -461,7 +477,7 @@ export function RemoteQueue(p: {
               </span>}><span class="queue-editing">Editing</span></Show>
             </span>
           </div>
-          <Show when={r().queue_error}><small title={r().queue_error ?? undefined}>Delivery paused · {r().queue_error}</small></Show>
+          <Show when={r().queue_error || (p.terminal && !r().sending)}><small title={r().queue_error ?? undefined}>{r().queue_error ? `Delivery paused · ${r().queue_error}` : "Not delivered · mission ended before delivery"}</small></Show>
         </li>;
       }}</For></ol></Show>
       <ErrorToast error={error()} onDismiss={() => setError("")} />
