@@ -179,6 +179,30 @@ def core_env(key):
     return ""
 
 
+def sidecar_logins():
+    """The CLIProxyAPI sidecar's own account list (loopback, management key from Core's env)."""
+    req = urllib.request.Request(
+        ENV("ORB_MONITOR_SIDECAR_URL", "http://127.0.0.1:8317") + "/v0/management/auth-files",
+        headers={"Authorization": "Bearer " + core_env("CLI_PROXY_MANAGEMENT_KEY")})
+    with urllib.request.urlopen(req, timeout=10) as res:
+        return json.load(res).get("files") or []
+
+
+def check_sidecar(problems):
+    """A Claude login the sidecar refuses to use is invisible in Core (13 Nov 2026: ten hours)."""
+    claude = [f for f in sidecar_logins() if f.get("provider") == "claude" and not f.get("disabled")]
+    banned = {}
+    for entry in claude:
+        seconds = max([int(c.get("remaining_seconds") or 0) for c in entry.get("cooldowns") or []] or [0])
+        if seconds:
+            banned[entry.get("email") or entry.get("name") or "?"] = seconds
+    for who, seconds in banned.items():
+        if seconds > 5 * 3600:
+            problems[f"claude-banned:{who}"] = f"the sidecar has banned Claude login {who} for {seconds // 3600} h; orb-sidecar-guard releases it unless the limit is real"
+    if claude and len(banned) == len(claude):
+        problems["claude:none"] = "no Claude login can serve requests: every one is banned by the sidecar"
+
+
 def warn_paloma(text, opened, cleared):
     """POST the report to Paloma's webhook, signed like Core's own forwarder
     (GitHub-style X-Hub-Signature-256 over the raw body)."""
@@ -259,7 +283,7 @@ def main():
     except (OSError, sqlite3.Error, ValueError, TypeError):
         THRESHOLDS.update(DEFAULT_THRESHOLDS)
         problems["config:monitor"] = "cannot read valid monitor thresholds; using defaults"
-    for check in (check_health, check_proxy, check_missions, check_machines, check_units, check_builds):
+    for check in (check_health, check_proxy, check_missions, check_machines, check_units, check_builds, check_sidecar):
         try:
             check(problems, info) if check is check_health else check(problems)
         except Exception as exc:  # a broken check is itself a problem, never a crash

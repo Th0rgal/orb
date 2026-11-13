@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""orb-sidecar-guard: lift wrong long bans on Claude logins held by CLIProxyAPI.
+
+On 2026-11-13 one short 429 from Anthropic made the sidecar ban a healthy
+Claude login (8% weekly use) for 131 hours, for every model, because it used
+the weekly reset time as the wait. Anthropic's short rate-limit window is five
+hours, so a ban longer than that is only right when the weekly limit is
+really spent, and then the next request is refused again.
+
+Each run (systemd timer) reads the sidecar's own account list on loopback.
+A Claude login banned for longer than GUARD_MAX_BAN_SECONDS is released by
+switching it off and on through the same management API. A login released
+GUARD_MAX_LIFTS times within GUARD_WINDOW_SECONDS is left banned: the limit is
+real. Nothing is read from or written to the login files, and no model
+request is sent. `--print` shows the decision without changing anything.
+
+Config (environment, see deploy/systemd/orb-sidecar-guard.service):
+  GUARD_STATE, GUARD_CORE_ENV, GUARD_SIDECAR_URL,
+  GUARD_MAX_BAN_SECONDS (21600), GUARD_MAX_LIFTS (3), GUARD_WINDOW_SECONDS (21600)
+"""
+import json, os, sys, time, urllib.request
+
+ENV = os.environ.get
+STATE = ENV("GUARD_STATE", "/var/lib/orb-sidecar-guard/state.json")
+CORE_ENV = ENV("GUARD_CORE_ENV", "/etc/open_agent/open_agent.env")
+URL = ENV("GUARD_SIDECAR_URL", "http://127.0.0.1:8317")
+MAX_BAN = int(ENV("GUARD_MAX_BAN_SECONDS", "21600"))
+MAX_LIFTS = int(ENV("GUARD_MAX_LIFTS", "3"))
+WINDOW = int(ENV("GUARD_WINDOW_SECONDS", "21600"))
+
+
+def longest_ban(entry):
+    return max([int(c.get("remaining_seconds") or 0) for c in entry.get("cooldowns") or []] or [0])
+
+
+def decide(files, lifts, now, max_ban=MAX_BAN, max_lifts=MAX_LIFTS, window=WINDOW):
+    """Pure decision. `lifts` maps a login name to the times it was released.
+    Returns (names to release, names left banned because the limit looks real, kept lifts)."""
+    release, real, kept = [], [], {}
+    for entry in files:
+        name = entry.get("name") or ""
+        if entry.get("provider") != "claude" or entry.get("disabled") or not name:
+            continue
+        recent = [t for t in lifts.get(name, []) if now - t < window]
+        if recent:
+            kept[name] = recent
+        if longest_ban(entry) <= max_ban:
+            continue
+        (real if len(recent) >= max_lifts else release).append(name)
+    return release, real, kept
+
+
+def management_key():
+    for line in open(CORE_ENV):
+        if line.startswith("CLI_PROXY_MANAGEMENT_KEY="):
+            return line.split("=", 1)[1].strip().strip('"').strip("'")
+    raise SystemExit("orb-sidecar-guard: no sidecar management key in Core's env file")
+
+
+def call(key, method, path, body=None):
+    req = urllib.request.Request(
+        URL + "/v0/management" + path, method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as res:
+        return json.load(res)
+
+
+def main():
+    key, now = management_key(), int(time.time())
+    try:
+        state = json.load(open(STATE))
+    except (OSError, ValueError):
+        state = {}
+    files = call(key, "GET", "/auth-files").get("files") or []
+    release, real, kept = decide(files, state.get("lifts", {}), now)
+    if "--print" in sys.argv:
+        print(json.dumps({"release": release, "left_banned": real}))
+        return 0
+    for name in release:
+        for disabled in (True, False):
+            call(key, "PATCH", "/auth-files/status", {"name": name, "disabled": disabled})
+            time.sleep(1)
+        kept.setdefault(name, []).append(now)
+        print(f"orb-sidecar-guard: released {name} (ban longer than {MAX_BAN}s)")
+    for name in real:
+        print(f"orb-sidecar-guard: left {name} banned; released {MAX_LIFTS} times already, the limit looks real")
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    json.dump({"lifts": kept, "left_banned": real, "at": now}, open(STATE + ".tmp", "w"))
+    os.replace(STATE + ".tmp", STATE)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
