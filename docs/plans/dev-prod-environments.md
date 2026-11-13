@@ -47,3 +47,14 @@ Both instances run from the base plus overlays; a settings round trip (export pr
   private backups and does not change running services. See
   [the operator migration procedure](../operations/core-environments.md).
   Live application and dev verification are still required.
+- Item 2: `orb-core settings export|import|refresh-dev|promote-dev` uses a
+  strict non-secret document, a printed diff, explicit `--yes` confirmation and
+  stale-preview detection. Existing target users are matched by username;
+  target credentials and instance data stay local. Library revision and monitor
+  thresholds are included. See [the transfer contract](../operations/settings-document.md).
+  Temporary-store round trips and rollback tests pass; the live dev round trip
+  still requires operator application and verification.
+- Item 3: `seal-provider --all` discovers configured provider keys through
+  Bitwarden metadata and seals them inside Core for the current instance.
+  See [the operator procedure](../operations/provider-sealing.md). Live sealing
+  remains an operator step; no vault values are delivered to a mission.

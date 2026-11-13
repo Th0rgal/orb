@@ -62,7 +62,9 @@ private def readDocument (db : SqliteDb) (settings : JVal) (root : String) : Act
   let fleetRows ← query db "SELECT enabled,boat_enabled,daily_cap_cents,max_concurrent FROM cfg_managed.managed_fleet_state WHERE singleton_id=1;"
   let some fleet := fleetRows[0]? | throw "settings_fleet_missing"
   let managedRows ← query db "SELECT provider,enabled FROM cfg_managed.managed_provider_settings ORDER BY provider;"
-  let monitorRows ← query db "SELECT data FROM cfg_managed.core_monitor_settings WHERE singleton_id=1;"
+  let monitorTable ← query db "SELECT name FROM cfg_managed.sqlite_master WHERE type='table' AND name='core_monitor_settings';"
+  let monitorRows ← if monitorTable.isEmpty then pure #[] else
+    query db "SELECT data FROM cfg_managed.core_monitor_settings WHERE singleton_id=1;"
   let .ok monitorObj@(.obj monitorPairs) := OrbBin.Json.parse ((monitorRows[0]?).map (·.getD 0 "{}") |>.getD "{}")
     | throw "settings_monitor_invalid"
   let mut monitor := SettingsDocument.monitorDefaults
@@ -149,6 +151,9 @@ private def preflight (db : SqliteDb) (doc : JVal) : Action (Array (String × St
   return users
 
 private def applySql (db : SqliteDb) (doc : JVal) (users : Array (String × String)) : Action Unit := do
+  -- Older instances have no monitor-settings table. Only a confirmed import
+  -- creates this configuration table, inside the same rollback boundary.
+  discard <| query db (coreMonitorSettingsDdl "cfg_managed.")
   let oldChains ← query db "SELECT id,models_json FROM model_routing_chains;"
   let desired := array doc "routing_chains"
   for row in oldChains do

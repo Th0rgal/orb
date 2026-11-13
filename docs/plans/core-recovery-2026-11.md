@@ -185,7 +185,10 @@ sessions act for Thomas as admin; mission authority stays lineage-only. Dev depl
   Follow-up fixes now pass CI-parity build (299 jobs) and full Core self-test
   (11 spec gates, 10 harness contracts, 101 host tests); log reviewfix-selftest.log under
   /tmp/opencode/boat-recovery. Fixed missing sandboxName fields in the added test fixture.
-  Commit/push corrections, then wait for new exact-head CI before merge.
+  Corrections pushed as 4c8744516. Master advanced to 3ff631a15, causing an overlapping
+  MCP cursor conflict with #1719. Merge retains cursor semantics plus trace filtering and payload
+  limits. CI-parity build (299 jobs) and full self-test (11/10/101) passed again after resolution.
+  Await checks on the new merge head; earlier-head green checks are not sufficient.
   Background-build survival exploration found a wider ownership boundary: PrivdMain around862
   also stops completed scopes and Runner cancel around2071 ignores terminal jobs. Safe fix needs
   reparent-safe process ownership/supervision across both paths, not just skipping normal cleanup.

@@ -637,9 +637,6 @@ def dispatchMcpToolCall
     let mid := (args.fieldStr? "mission_id").orElse (fun _ => args.fieldStr? "id") |>.getD callerMid
     if let .error e ← checkMissionReadAccess store claims mid nowEpochSec then
       return mcpErr "forbidden" e
-    -- The published contract: with no cursor, the newest page in ascending order;
-    -- `before_seq` pages backwards and takes precedence; `since_seq` returns what
-    -- came after. Every call used to start again from the first event.
     let view := ((args.fieldStr? "view").getD "").trimAscii.toString
     let lim := Nat.max 1 (Nat.min ((args.fieldNat? "limit").getD 40) (if view == "all" then 50 else 500))
     let beforeSeq? := (args.fieldUInt64? "before_seq").filter (· > 0)

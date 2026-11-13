@@ -9,11 +9,7 @@ namespace OrbCore.ManagedProviderSealing
 
 /-- No arbitrary vault lookup and no legacy provider aliases on the operator path. -/
 def reservedKey? (provider : String) : Option String :=
-  match provider with
-  | "boat" => some "BOAT_API_KEY"
-  | "leanci" => some "LEANCI_API_KEY"
-  | "colab" => some "COLAB_API_TOKEN"
-  | _ => none
+  (OrbCore.ManagedProvider.declaration? provider).map (·.secretName)
 
 abbrev Resolver := String → IO (Except String String)
 
@@ -28,5 +24,22 @@ def sealReserved (root provider : String) (admin mission managed : Bool)
   let clean := value.trimAscii.toString
   if clean.isEmpty then return .error "managed_provider_secret_empty"
   OrbCore.Managed.sealProviderSecret root provider clean
+
+/-- Discover configured provider names through vault metadata only, then feed
+    each value directly into the same reserved sealing boundary. Authority is
+    checked before metadata lookup, value lookup or any filesystem mutation. -/
+def sealConfigured (root : String) (admin mission managed : Bool)
+    (discover : IO (Except String (Array String))) (resolve : Resolver) :
+    IO (Except String (Array String)) := do
+  if !Orb.ManagedProviderPolicy.maySeal admin mission managed then return .error "operator_required"
+  let .ok providers ← discover | return .error "managed_provider_inventory_failed"
+  if providers.toList.eraseDups.length != providers.size || providers.any (fun p => (reservedKey? p).isNone) then
+    return .error "managed_provider_inventory_invalid"
+  let mut sealed : Array String := #[]
+  for provider in providers do
+    if let .error _ ← sealReserved root provider admin mission managed resolve then
+      return .error ("managed_provider_seal_failed:" ++ provider)
+    sealed := sealed.push provider
+  return .ok sealed
 
 end OrbCore.ManagedProviderSealing

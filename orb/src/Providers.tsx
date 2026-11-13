@@ -1217,7 +1217,9 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
     : stLabel();
   const canReconnect = () => !!p.onReconnect && reconnectable(a);
   const mistralSubscription = () => isAdminUser() && a.provider_type === "mistral" && a.uses_oauth;
-  const expandable = () => !!p.rank || resetSupported() || !!resetInfo() || status() === "out_of_credit" || status() === "auth_failed" || status() === "needs_verification" || a.provider_type === "antigravity" || !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;
+  // Core sends an informational message ("Connected via OAuth") for healthy accounts; only a problem is worth showing.
+  const problem = () => status() === "connected" ? undefined : (a.status.reason || a.status.message);
+  const expandable = () => !!p.rank || resetSupported() || !!resetInfo() || status() === "out_of_credit" || status() === "auth_failed" || status() === "needs_verification" || a.provider_type === "antigravity" || !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!problem();
   const [localOpen, setLocalOpen] = createSignal(false);
   const open = () => p.open ?? localOpen();
   const setOpen = (nextOpen: boolean) => p.onOpenChange ? p.onOpenChange(nextOpen) : setLocalOpen(nextOpen);
@@ -1341,7 +1343,7 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
               ? "The router got 402 / out of credit from this account and skips it."
               : "The router got 401 / 403 from this account and skips it."}{p.health?.next_probe_at ? ` Next probe ${new Date(p.health.next_probe_at).toLocaleTimeString()}.` : ""}</p>
           </Show>
-          <Show when={!p.usage?.error && (a.status.reason || a.status.message)}><p class="s-row-desc inline-error">{(a.status.reason || a.status.message)?.replace(/\s*—\s*/g, ". ")}</p></Show>
+          <Show when={!p.usage?.error && problem()}><p class="s-row-desc inline-error">{problem()?.replace(/\s*—\s*/g, ". ")}</p></Show>
           <Show when={p.onEditKey}><div class="p-acc-actions"><button class="s-btn" onClick={p.onEditKey}>Edit API key</button></div></Show>
           <Show when={canReconnect() && needsAuth()}>
             <div class="p-acc-actions">
