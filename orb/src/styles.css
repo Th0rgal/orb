@@ -1849,9 +1849,22 @@ button.fork-trigger:hover { color: var(--fg); }
 /* Timeline/modal error cards share the exact card grammar of floating toasts (toast.tsx). */
 .error-notice { display: flex; align-items: flex-start; gap: 10px; min-width: 0; margin-top: 10px; padding: 10px 8px 10px 14px; border: 1px solid var(--overlay-border, var(--stroke)); border-radius: 8px; background: var(--overlay-surface, var(--bg-elev)); color: var(--fg-2); text-align: left; font-size: 12px; line-height: 1.4; }
 .error-notice-icon { flex: none; color: var(--red); margin-top: 2px; }
-/* Each virtual-transcript item is its own flow-root box and a following user bubble drops its
-   top margin (`.user:first-child`), so a transcript error card supplies the gap below itself. */
-[data-turn-key] > .error-notice { margin-bottom: 22px; }
+/* One vertical rhythm for the transcript, measured between what the reader sees.
+   Each turn is its own flow-root box that starts with the user bubble, so the space
+   above a turn belongs to that bubble, not to whatever happened to end the turn before
+   it: an answer used to sit 10px above the next message, a tool group 4px, an error
+   card 22px. Inside a turn every block is one block gap from the next. An answer's
+   own padding (6px above, 10px below its text) is counted, not added. */
+:root { --tx-turn-gap: 22px; --tx-block-gap: 12px; --tx-tight-gap: 4px; }
+[data-turn-key] > .user { margin-bottom: var(--tx-block-gap); }
+[data-turn-key] > .user:first-child { margin-top: var(--tx-turn-gap); }
+[data-turn-key]:first-child > .user:first-child { margin-top: 0; }
+[data-turn-key] > .st-text:last-child > .md { padding-bottom: 0; }
+[data-turn-key] > .st-work:last-child, [data-turn-key] > .st-think:last-child { margin-bottom: 0; }
+[data-turn-key] > .user + .st-text > .md { padding-top: 0; }
+[data-turn-key] > .st-work + .st-text > .md, [data-turn-key] > .st-think + .st-text > .md { padding-top: calc(var(--tx-block-gap) - var(--tx-tight-gap)); }
+[data-turn-key] > .error-notice { margin-top: var(--tx-block-gap); margin-bottom: 0; }
+[data-turn-key] > .st-text + .error-notice { margin-top: calc(var(--tx-block-gap) - 10px); }
 /* Provider limits are a wait, not a failure: amber instead of red. */
 .error-notice.warning .error-notice-icon { color: var(--amber); }
 .error-notice-link { display: inline-flex; align-items: center; gap: 5px; min-height: 24px; padding: 0 9px; border: 0; border-radius: 6px; background: var(--bg-active); color: var(--fg); font: 500 11.5px/1 var(--sans); cursor: pointer; }

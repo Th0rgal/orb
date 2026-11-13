@@ -102,6 +102,13 @@ lean.ci, and the blocked missions (evm.fast, ldgr workers) can get machines agai
 4. **Linux hybrid native chrome:** the header toolbar is rendered twice (sidebar, search,
    back/forward icons). Keep one toolbar owner and add a hybrid-shell regression test.
 
+*Done on master:* 1 (`btw-narrow-layout.browser.spec.ts`: full content area, opaque, scroll thumb no
+longer drawn over the panel), 2 (`transcript-rhythm.browser.spec.ts`: 22px above every turn, 12px
+between blocks; the failed-card case itself was fixed earlier in #1703), 3 (both specs run in light
+and dark), 4 (`native-chrome-toolbar.browser.spec.ts`). Verified in Chromium only; the GTK shell and
+WebKit were not available on the build node. These are desktop window-layout fixes with no mobile
+counterpart.
+
 ## 4. Other gaps found
 
 - MCP action receipts report `action_outcome: "rejected"` / `durable_success: false` for actions that
