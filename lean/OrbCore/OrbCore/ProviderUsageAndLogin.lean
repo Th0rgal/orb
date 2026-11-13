@@ -551,10 +551,11 @@ def projectMemberProviderUsageJv (jv : JVal) (displayName : String) : JVal :=
   | .obj fields =>
     let scrubbed := fields.filterMap fun (k, v) =>
       if k == "account_email" || k == "account_name" || k == "account" ||
-         k == "organization" || k == "organization_id" || k == "google_project_id" then
+         k == "organization" || k == "organization_id" || k == "google_project_id" ||
+         k == "label" || k == "diagnostic" then
         none
-      else if k == "provider_name" then
-        some ("provider_name", .str displayName)
+      else if k == "provider_name" || k == "access_profile" then
+        some (k, .str displayName)
       else
         some (k, v)
     .obj scrubbed
@@ -1103,7 +1104,7 @@ private def queryGroupedUsageBuckets (store : CoreStore) (colExpr : String) (sin
       out := out.push (.obj (#[("key", .str effKey), ("label", .str effKey)] ++ totPairs))
   return out
 
-def buildAiUsageSummaryJson (store : CoreStore) (qMap : Array (String × String)) : IO JVal := do
+def buildAiUsageSummaryJson (store : CoreStore) (qMap : Array (String × String)) (effAdmin : Bool := true) : IO JVal := do
   let nowSec ← nowEpoch
   let nowIso := formatEpochIso8601Utc nowSec
   let win := ((qParam? qMap "window").getD "24h").trimAscii.toString
@@ -1111,6 +1112,34 @@ def buildAiUsageSummaryJson (store : CoreStore) (qMap : Array (String × String)
   let topLimit := Nat.min 50 (Nat.max 1 (((qParam? qMap "top_limit").bind String.toNat?).getD 10))
   let winSecs? := parseWindowSeconds? win
   let winStartIso? := winSecs?.map (fun s => formatEpochIso8601Utc (if nowSec > s then nowSec - s else 0))
+  if !effAdmin then
+    let zeroTotals := mkTotalsJv 0 0 0 0 0 0 0
+    return .obj #[
+      ("window", .str win),
+      ("window_start", match winStartIso? with | some s => .str s | none => .null),
+      ("generated_at", .str nowIso),
+      ("totals", zeroTotals),
+      ("today", zeroTotals),
+      ("this_week", zeroTotals),
+      ("by_source", .arr #[]),
+      ("by_backend", .arr #[]),
+      ("by_provider", .arr #[]),
+      ("by_account", .arr #[]),
+      ("by_model", .arr #[]),
+      ("by_api_key", .arr #[]),
+      ("by_caller_kind", .arr #[]),
+      ("by_purpose", .arr #[]),
+      ("by_mission", .arr #[]),
+      ("by_day", .arr #[]),
+      ("recent", .arr #[]),
+      ("filters_available", .obj #[
+        ("backends", .arr #[.str "claudecode", .str "codex", .str "opencode", .str "antigravity"]),
+        ("providers", .arr #[]),
+        ("models", .arr #[]),
+        ("caller_kinds", .arr #[]),
+        ("api_keys", .arr #[])
+      ])
+    ]
   let dayStartSec := (nowSec / 86400) * 86400
   let todayIso := formatEpochIso8601Utc dayStartSec
   let weekIso := formatEpochIso8601Utc (if nowSec > 604800 then nowSec - 604800 else 0)
@@ -1431,13 +1460,23 @@ def dispatchProviderAndAiRoute
   if segs == ["api", "providers", "discovery"] && method == "GET" then
     let disc ← readDataJsonFile workingDir store.rootDir "model-discovery.json"
     let res := if disc.isNull then JVal.obj #[("schema_version", JVal.nat 1), ("connections", .arr #[])] else disc
-    return some (jsonResp 200 res)
+    if effAdmin then
+      return some (jsonResp 200 res)
+    let hps ← loadHydratedProviders store workingDir
+    let conns := ((res.fieldArr? "connections").getD #[]).filterMap fun c =>
+      let pid := (c.fieldStr? "provider_id").getD ""
+      match hps.find? (fun hp => hp.enabled && (hp.hasApiKey || hp.hasOAuth) &&
+          (hp.id == pid || hp.providerType.toLower == pid.toLower)) with
+      | some hp => some (projectMemberProviderUsageJv c (memberProviderDisplayName hps hp))
+      | none => none
+    return some (jsonResp 200 (res.setField "connections" (.arr conns)))
 
   if segs == ["api", "providers", "catalog"] && method == "GET" then
     let hps ← loadHydratedProviders store workingDir
-    let items := hps.map (fun hp => JVal.obj #[
+    let visibleHps := if effAdmin then hps else hps.filter (fun hp => hp.enabled && (hp.hasApiKey || hp.hasOAuth))
+    let items := visibleHps.map (fun hp => JVal.obj #[
       ("id", .str hp.id),
-      ("name", .str hp.name),
+      ("name", .str (if effAdmin then hp.name else memberProviderDisplayName hps hp)),
       ("provider_type", .str hp.providerType),
       ("enabled", .bool hp.enabled),
       ("has_credentials", .bool (hp.hasApiKey || hp.hasOAuth)),
@@ -1458,7 +1497,7 @@ def dispatchProviderAndAiRoute
 
   -- 3. `GET /api/ai/usage/summary`, `GET /api/ai/proxy/health`, `GET /api/ai/proxy/timing`
   if method == "GET" && segs == ["api", "ai", "usage", "summary"] then
-    let summary ← buildAiUsageSummaryJson store qMap
+    let summary ← buildAiUsageSummaryJson store qMap effAdmin
     return some (jsonResp 200 summary)
 
   if method == "GET" && segs == ["api", "ai", "proxy", "health"] then
@@ -1471,31 +1510,32 @@ def dispatchProviderAndAiRoute
     let mut totalReqs : Nat := 0
     let mut okReqs : Nat := 0
     let mut failReqs : Nat := 0
-    if let .ok ors ← execParamQuery store.missionsDb
-        s!"SELECT COUNT(*), COALESCE(SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN status<>'ok' THEN 1 ELSE 0 END),0) FROM proxy_outcomes {wSql};"
-        wArgs then
-      if ors.size > 1 then
-        totalReqs := ((ors[1]![0]?).bind String.toNat?).getD 0
-        okReqs := ((ors[1]![1]?).bind String.toNat?).getD 0
-        failReqs := ((ors[1]![2]?).bind String.toNat?).getD 0
     let mut recentFailures : Array JVal := #[]
-    if let .ok frs ← execParamQuery store.missionsDb
-        "SELECT timestamp, chain_id, COALESCE(provider,''), COALESCE(account_id,''), COALESCE(model,''), status, COALESCE(http_status,0), retries, total_ms, fallback_depth FROM proxy_outcomes WHERE status<>'ok' ORDER BY id DESC LIMIT 20;"
-        #[] then
-      for i in [1:frs.size] do
-        let r := frs[i]!
-        recentFailures := recentFailures.push (.obj #[
-          ("timestamp", .str ((r[0]?).getD nowIso)),
-          ("chain_id", .str ((r[1]?).getD "")),
-          ("provider", .str ((r[2]?).getD "")),
-          ("account_id", .str ((r[3]?).getD "")),
-          ("model", .str ((r[4]?).getD "")),
-          ("status", .str ((r[5]?).getD "error")),
-          ("http_status", JVal.nat (((r[6]?).bind String.toNat?).getD 502)),
-          ("retries", JVal.nat (((r[7]?).bind String.toNat?).getD 0)),
-          ("total_ms", JVal.nat (((r[8]?).bind String.toNat?).getD 0)),
-          ("fallback_depth", JVal.nat (((r[9]?).bind String.toNat?).getD 0))
-        ])
+    if effAdmin then
+      if let .ok ors ← execParamQuery store.missionsDb
+          s!"SELECT COUNT(*), COALESCE(SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN status<>'ok' THEN 1 ELSE 0 END),0) FROM proxy_outcomes {wSql};"
+          wArgs then
+        if ors.size > 1 then
+          totalReqs := ((ors[1]![0]?).bind String.toNat?).getD 0
+          okReqs := ((ors[1]![1]?).bind String.toNat?).getD 0
+          failReqs := ((ors[1]![2]?).bind String.toNat?).getD 0
+      if let .ok frs ← execParamQuery store.missionsDb
+          "SELECT timestamp, chain_id, COALESCE(provider,''), COALESCE(account_id,''), COALESCE(model,''), status, COALESCE(http_status,0), retries, total_ms, fallback_depth FROM proxy_outcomes WHERE status<>'ok' ORDER BY id DESC LIMIT 20;"
+          #[] then
+        for i in [1:frs.size] do
+          let r := frs[i]!
+          recentFailures := recentFailures.push (.obj #[
+            ("timestamp", .str ((r[0]?).getD nowIso)),
+            ("chain_id", .str ((r[1]?).getD "")),
+            ("provider", .str ((r[2]?).getD "")),
+            ("account_id", .str ((r[3]?).getD "")),
+            ("model", .str ((r[4]?).getD "")),
+            ("status", .str ((r[5]?).getD "error")),
+            ("http_status", JVal.nat (((r[6]?).bind String.toNat?).getD 502)),
+            ("retries", JVal.nat (((r[7]?).bind String.toNat?).getD 0)),
+            ("total_ms", JVal.nat (((r[8]?).bind String.toNat?).getD 0)),
+            ("fallback_depth", JVal.nat (((r[9]?).bind String.toNat?).getD 0))
+          ])
     let emptyPct : JVal := .obj #[("samples", JVal.nat 0), ("p50", .null), ("p95", .null), ("max", .null)]
     return some (jsonResp 200 (.obj #[
       ("window", .str win),
@@ -1547,8 +1587,9 @@ def dispatchProviderAndAiRoute
     let cooldowns := (← proxyCooldownsRef.get) ++ tracked
     let sidecarFiles ← fetchSidecarAuthFiles
     let usageCached ← hub.mu.atomically (do return (← get).usageEntries)
+    let visibleHps := if effAdmin then hps else hps.filter (fun hp => hp.enabled && (hp.hasApiKey || hp.hasOAuth))
     let mut snaps : Array JVal := #[]
-    for hp in hps do
+    for hp in visibleHps do
       let keys := healthKeys hp
       let coreCooldowns := cooldowns.filter (fun c => keys.contains c.accountId)
       let coreRem : UInt64 :=
