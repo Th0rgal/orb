@@ -19,12 +19,16 @@ private def chain (id name model : String) : RoutingChain := {
 
 /-- Actual request routing, including unknown errors and no default/name/suffix aliasing. -/
 def run : IO Unit := do
-  -- A spent Antigravity Gemini quota must not cool Claude: each quota pool is its own account.
+  -- A spent Antigravity quota cools only that model: Opus 4.6 and Gemini stay eligible.
   let agClaude := OrbCore.ProxyModelRouting.antigravityPoolAccount "claude-opus-5-5-high"
   let agGemini := OrbCore.ProxyModelRouting.antigravityPoolAccount "gemini-4-carbon-eap"
-  check (agClaude == OrbCore.ProxyModelRouting.antigravityPoolAccount "gpt-oss-120b") "Claude and GPT share one pool"
-  check (agClaude != agGemini && agGemini == OrbCore.ProxyModelRouting.antigravityPoolAccount "agy-model-high")
-    "Gemini is a separate pool"
+  let agOpus46 := OrbCore.ProxyModelRouting.antigravityPoolAccount "claude-opus-4-6-thinking"
+  check (agClaude != agGemini && agClaude != agOpus46) "each Antigravity model is its own pool"
+  let opus55Spent : AccountCooldown := { accountId := agClaude, untilEpoch := 2000, reason := .usageLimit }
+  let fallbackChain : RoutingChain := { id := "google-opus", name := "g", targets := #[
+    { accountId := agClaude, provider := "antigravity", baseUrl := "", apiKey := "", modelId := "claude-opus-5-5-high" },
+    { accountId := agOpus46, provider := "antigravity", baseUrl := "", apiKey := "", modelId := "claude-opus-4-6-thinking" }] }
+  check ((planChain fallbackChain #[opus55Spent] 1000).eligible.size == 1) "Opus 5.5 limit leaves Opus 4.6 eligible"
   let agChain : RoutingChain := { id := "google-opus", name := "g", targets := #[
     { accountId := agClaude, provider := "antigravity", baseUrl := "", apiKey := "", modelId := "claude-opus-5-5-high" }] }
   let geminiSpent : AccountCooldown := { accountId := agGemini, untilEpoch := 2000, reason := .usageLimit }
