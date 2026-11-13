@@ -936,7 +936,7 @@ def pumpUpstreamBody (r : UpstreamReader) (framing0 : BodyFraming) (tail : ByteA
       pending := none
       match piece? with
       | none =>
-        if let .untilClose := framing then complete := true
+        if let .untilClose := framing then complete ← r.eof
         done := true
       | some piece =>
         match stepBodyFraming framing piece with
@@ -981,6 +981,7 @@ private def openTlsUpstreamReader (method host : String) (port : UInt16) (path :
   | .error e => return .error e
   | .ok sess =>
     let t0 ← IO.monoMsNow
+    let sawEof ← IO.mkRef false
     return .ok {
       -- A model can think for minutes before its first byte: `upstreamIdleLimitMs`
       -- bounds silence between reads and `upstreamTotalLimitMs` bounds total wall time.
@@ -991,8 +992,12 @@ private def openTlsUpstreamReader (method host : String) (port : UInt16) (path :
         let waitMs := Nat.min upstreamIdleLimitMs (upstreamTotalLimitMs - elapsed)
         match ← readTlsSessionChunk sess 16384 waitMs.toUInt32 with
         | .chunk c => return if c.isEmpty then none else some c
-        | _ => return none
+        | .closeNotify =>
+          sawEof.set true
+          return none
+        | .tcpEof | .timeout | .transportError => return none
       close := closeTlsSession sess
+      eof := sawEof.get
     }
 
 private def openLoopbackUpstreamReader (method host : String) (port : UInt16) (path : String)
@@ -1009,6 +1014,7 @@ private def openLoopbackUpstreamReader (method host : String) (port : UInt16) (p
     return .error "loopback_write_failed"
   let t0 ← IO.monoMsNow
   let lastByte ← IO.mkRef t0
+  let sawEof ← IO.mkRef false
   return .ok {
     read := do
       while true do
@@ -1020,11 +1026,14 @@ private def openLoopbackUpstreamReader (method host : String) (port : UInt16) (p
         | .error _ => return none
         | .ok () =>
           let chunk ← readStreamChunk fd 65536
-          if chunk.isEmpty then return none
+          if chunk.isEmpty then
+            sawEof.set true
+            return none
           lastByte.set (← IO.monoMsNow)
           return some chunk
       return none
     close := discard <| closeFd fd
+    eof := sawEof.get
   }
 
 /-- One upstream call that relays a 2xx body as it arrives. A non-2xx (or bodyless)
