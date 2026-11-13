@@ -171,6 +171,42 @@ coordinator has not independently reproduced it. No script ownership transferred
 D plans an optional per-connection downstream sink on `forwardProxyChain`, with
 H account/classification sections preserved; H notified to avoid broad rewrites.
 
+## Waiting on Thomas
+
+These GitHub web approvals block only direct repo-level JIT runners, not the
+immediate API-dispatch bridge:
+
+1. Approve lean-ci App repository permission `administration: write`.
+2. Install/authorize the lean-ci App on `Th0rgal`, including `Th0rgal/orb`.
+
+No questions sent; implement/test generic support against an authorized
+`lfglabs-dev` test repository while the bridge proceeds.
+
+### Operator verified B/G update
+
+- Both dev and prod reported healthy on `de3fd0fa1` since 12:19 UTC. This
+  supersedes the prior in-progress prod status; independent live probes pending.
+- Operator's App-JWT read: lean-ci App `5538046` is installed only on
+  `lfglabs-dev` selected repos; Orb installation lookup is 404. App grants
+  actions/checks/contents/pull_requests/workflows and organization runners write,
+  but no repository administration. Direct `runs-on: lean-*` on Orb is not usable.
+- B.2 now prioritizes a thin hosted API-dispatch bridge to `/v1/vms` or
+  `/v1/prebuilds`, truthful streamed logs/result, server-side warm base/CAS,
+  authorized GitHub OIDC preferred, repo-secret fallback otherwise. Retain
+  `ubuntu-latest` fallback and hosted macOS/iOS. Generic user-repo JIT support
+  is a separate bounded upstream delivery gated by the two approvals above.
+- Operator dev REST first pass: member `ben`, id
+  `1fc5e9f6-72a6-4dc1-a308-ee79de5bf776`, Unix `orb-ben`, cap 200 cents;
+  `/api/auth/me` 200 `multi_user`, empty own inventory; admin mission
+  GET/events/cancel 404; admin-users/secrets/settings/system-deploy 403;
+  projects/workspaces/nodes empty. Password retained privately on agent-core;
+  never copied to a managed VM or printed.
+- **Live finding:** member provider list exposes owner account-display emails
+  and account IDs. E+G owns failing regression and member-safe type/toggle
+  projection; H retains admin health/cooldown ownership. Full G remains open:
+  MCP, create/run with managed placement/spend/proxy tokens, sharing, search,
+  Inbox, files and real Linux desktop member login still unverified.
+
 ## Operator requests
 
 No new deployment requested yet. Future entries must give an exact SHA, dev or
@@ -234,3 +270,6 @@ classification before operator application. No hand-edited production env.
 | 13 Nov, operator unblocking update | Implement checked-in environment-key classification before migration; request exact multi-user dev config through E+G | Existing migration refuses 65 prod-only/10 dev-only/11 different keys; do not hand-edit prod env or test multi-user claims on single-tenant dev |
 | 13 Nov, operator unblocking update | Wait for dev/prod mission handoff commit before cancellation; prior three handoffs are reported complete | Preserve final delivery; completed report is not an independently verified wake-up cleanup receipt |
 | 13 Nov, D build/interface update | Assign unsupported --no-telemetry and silent raw-Lake fallback repair to A; classify D baseline incomplete/non-turbo; notify H of optional forwardProxyChain sink | Avoid false turbo acceptance and duplicate script ownership; preserve account/classification behavior while D changes streaming transport |
+| 13 Nov, operator B/G update | Replace immediate direct-runner plan with hosted lean.ci API-dispatch bridge, keep Ubuntu fallback; implement generic repo-JIT separately and list two web approvals | Operator verified App lacks Orb installation and repository administration; direct runner labels cannot work today, bridge must not wait for web clicks |
+| 13 Nov, operator B/G update | Accept operator REST checks as scoped evidence only; assign provider-account redaction to E+G coordinated with H | Member account-email/id leakage is live-reproduced; REST first pass does not certify MCP, execution, sharing or desktop isolation |
+| 13 Nov, operator B/G update | Record trusted-host-only lean.ci OIDC allowlisting through governed ops; no BOOST_CI_SSH_PRIVATE_KEY on managed guests | Operator authorizes lean.ci host administration, but broker delivery and verified target/host policy still required |
