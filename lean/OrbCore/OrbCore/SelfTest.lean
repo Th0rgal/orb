@@ -518,10 +518,17 @@ private def runR3cdQueueAndContinuationTests
   if sClaim1 != 200 || (bClaim1.splitOn "\"phase_name\":\"claimed\"").length != 2 then
     return (← failWith s!"claim q-r3c-1 mismatch: {sClaim1} {bClaim1}")
 
-  -- Editing a claimed item MUST return 409
+  -- Editing or deleting a claimed item MUST return 409 and change nothing
   let .ok (sEditClaimed, _) ← sendTestHttp appSt validJwt "PATCH" "/api/control/queue/q-r3c-1" "{\"content\":\"late edit\"}" nowSec
     | return (← failWith "PATCH claimed transport")
   if sEditClaimed != 409 then return (← failWith s!"PATCH claimed expected 409, got {sEditClaimed}")
+  let .ok (sDelClaimed, _) ← sendTestHttp appSt validJwt "DELETE" "/api/control/queue/q-r3c-1" "" nowSec
+    | return (← failWith "DELETE claimed transport")
+  let claimedAfterDelRows ← execParamQuery store.missionsDb
+    "SELECT state,phase,json_extract(payload,'$.message.content') FROM remote_message_queue WHERE user_id='core' AND message_id='q-r3c-1';" #[]
+  let claimedAfterDel := match claimedAfterDelRows with | .ok rs => rs[1]?.getD #[] | .error _ => #[]
+  if sDelClaimed != 409 || claimedAfterDel != #["claimed", "1", "first step"] then
+    return (← failWith s!"DELETE claimed expected 409 with row unchanged, got {sDelClaimed} {repr claimedAfterDel}")
 
   -- Confirm delivered (`op=1`, `delivery_seq=77`)
   let .ok (sDeliv1, bDeliv1) ← sendTestHttp appSt validJwt "POST" "/api/control/queue/q-r3c-1/step"
@@ -530,7 +537,7 @@ private def runR3cdQueueAndContinuationTests
   if sDeliv1 != 200 || (bDeliv1.splitOn "\"delivered_seq\":77").length != 2 then
     return (← failWith s!"deliver q-r3c-1 mismatch: {sDeliv1} {bDeliv1}")
 
-  -- Delivered item NEVER replays (`op=0`), edits (`PATCH`), or cancels (`op=5`)
+  -- Delivered item NEVER replays (`op=0`), edits (`PATCH`), or cancels (`op=5` / `DELETE`)
   let .ok (sReplayDeliv, _) ← sendTestHttp appSt validJwt "POST" "/api/control/queue/q-r3c-1/step"
     s!"\{\"op\":0,\"run_generation\":2,\"node_boot_epoch\":{store.bootEpoch}}" nowSec
     | return (← failWith "replay delivered transport")
@@ -539,8 +546,55 @@ private def runR3cdQueueAndContinuationTests
   let .ok (sCancelDeliv, _) ← sendTestHttp appSt validJwt "POST" "/api/control/queue/q-r3c-1/step"
     s!"\{\"op\":5,\"run_generation\":2,\"node_boot_epoch\":{store.bootEpoch}}" nowSec
     | return (← failWith "cancel delivered transport")
-  if sReplayDeliv != 409 || sEditDeliv != 409 || sCancelDeliv != 409 then
-    return (← failWith s!"delivered queue fence violated: replay={sReplayDeliv} edit={sEditDeliv} cancel={sCancelDeliv}")
+  let .ok (sDelDeliv, _) ← sendTestHttp appSt validJwt "DELETE" "/api/control/queue/q-r3c-1" "" nowSec
+    | return (← failWith "DELETE delivered transport")
+  let delivAfterDelRows ← execParamQuery store.missionsDb
+    "SELECT state,phase,delivered_seq,json_extract(payload,'$.message.content') FROM remote_message_queue WHERE user_id='core' AND message_id='q-r3c-1';" #[]
+  let delivAfterDel := match delivAfterDelRows with | .ok rs => rs[1]?.getD #[] | .error _ => #[]
+  if sReplayDeliv != 409 || sEditDeliv != 409 || sCancelDeliv != 409 || sDelDeliv != 409 ||
+     delivAfterDel != #["delivered", "2", "77", "first step"] then
+    return (← failWith s!"delivered queue fence violated: replay={sReplayDeliv} edit={sEditDeliv} cancel={sCancelDeliv} delete={sDelDeliv} row={repr delivAfterDel}")
+
+  -- `DELETE /api/control/queue/:id` on a waiting, unclaimed row cancels it cleanly (`200`),
+  -- removes it from `GET /api/control/queue?mission_id=...` and the `popNextQueuedFollowup?` query filter,
+  -- prevents claiming (`POST .../step`), and answers `404 {"error":"message not in queue"}` on unknown or repeat delete.
+  let .ok (sDelUnknown, bDelUnknown) ← sendTestHttp appSt validJwt "DELETE" "/api/control/queue/q-r3c-nonexistent" "" nowSec
+    | return (← failWith "DELETE unknown transport")
+  if sDelUnknown != 404 || bDelUnknown != "{\"error\":\"message not in queue\"}" then
+    return (← failWith s!"DELETE unknown expected 404 message not in queue, got {sDelUnknown} {bDelUnknown}")
+  let .ok (sEnqDel, _) ← sendTestHttp appSt validJwt "POST" "/api/control/queue"
+    "{\"id\":\"q-r3c-del\",\"mission_id\":\"m-r3c-local\",\"content\":\"remove me\",\"source\":\"desktop\"}" nowSec
+    | return (← failWith "enqueue q-r3c-del")
+  if sEnqDel != 201 then return (← failWith s!"enqueue q-r3c-del expected 201, got {sEnqDel}")
+  let .ok (sListBeforeDel, bListBeforeDel) ← sendTestHttp appSt validJwt "GET" "/api/control/queue?mission_id=m-r3c-local" "" nowSec
+    | return (← failWith "list queue before delete")
+  if sListBeforeDel != 200 || (bListBeforeDel.splitOn "\"id\":\"q-r3c-del\"").length != 2 then
+    return (← failWith s!"q-r3c-del missing before DELETE: {sListBeforeDel} {bListBeforeDel}")
+  let .ok (sDelWait, bDelWait) ← sendTestHttp appSt validJwt "DELETE" "/api/control/queue/q-r3c-del" "" nowSec
+    | return (← failWith "DELETE waiting transport")
+  let delWaitJv := (OrbBin.Json.parse bDelWait).toOption.getD .null
+  if sDelWait != 200 || delWaitJv.fieldBool? "ok" != some true ||
+     delWaitJv.fieldStr? "id" != some "q-r3c-del" || delWaitJv.fieldStr? "mission_id" != some "m-r3c-local" then
+    return (← failWith s!"DELETE waiting q-r3c-del mismatch: {sDelWait} {bDelWait}")
+  let .ok (sListAfterDel, bListAfterDel) ← sendTestHttp appSt validJwt "GET" "/api/control/queue?mission_id=m-r3c-local" "" nowSec
+    | return (← failWith "list queue after delete")
+  if sListAfterDel != 200 || (bListAfterDel.splitOn "q-r3c-del").length != 1 then
+    return (← failWith s!"q-r3c-del still listed after DELETE: {sListAfterDel} {bListAfterDel}")
+  let .ok (sClaimDeleted, _) ← sendTestHttp appSt validJwt "POST" "/api/control/queue/q-r3c-del/step"
+    s!"\{\"op\":0,\"run_generation\":3,\"node_boot_epoch\":{store.bootEpoch}}" nowSec
+    | return (← failWith "claim deleted transport")
+  if sClaimDeleted != 409 then
+    return (← failWith s!"claim after DELETE expected 409, got {sClaimDeleted}")
+  let popFilterRows ← execParamQuery store.missionsDb
+    ("SELECT COUNT(*) FROM remote_message_queue " ++
+     "WHERE mission_id='m-r3c-local' AND state='waiting' AND COALESCE(phase,0)=0 AND message_id='q-r3c-del';") #[]
+  let popFilterCnt := match popFilterRows with | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 1 | .error _ => 1
+  if popFilterCnt != 0 then
+    return (← failWith s!"deleted row still matches popNextQueuedFollowup? filter: {repr popFilterRows}")
+  let .ok (sDelRepeat, bDelRepeat) ← sendTestHttp appSt validJwt "DELETE" "/api/control/queue/q-r3c-del" "" nowSec
+    | return (← failWith "DELETE repeat transport")
+  if sDelRepeat != 404 || bDelRepeat != "{\"error\":\"message not in queue\"}" then
+    return (← failWith s!"second DELETE expected 404 message not in queue, got {sDelRepeat} {bDelRepeat}")
 
   -- Crash-tombstone flow (`q-r3c-tomb`): claim -> uncertain timeout (`op=3`) -> silent claim/requeue without operator confirmation rejected -> operator requeue (`operator_confirmed=true`) succeeds!
   let .ok (sEnq2, _) ← sendTestHttp appSt validJwt "POST" "/api/control/queue"

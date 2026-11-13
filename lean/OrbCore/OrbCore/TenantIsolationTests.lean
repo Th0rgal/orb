@@ -1,9 +1,10 @@
 import OrbCore.Control
 import OrbCore.ManagedProvisioningTests
+import OrbCore.ProviderUsageAndLogin
 
 namespace OrbCore.TenantIsolationTests
 
-open OrbCore.Control OrbCore.Store OrbCore.Managed OrbBin.Json LeanSys.Http
+open OrbCore.Control OrbCore.Store OrbCore.Managed OrbCore.ProviderUsageAndLogin OrbBin.Json LeanSys.Http
 
 private def check (condition : Bool) (label : String) : IO Unit := do
   unless condition do throw (IO.userError s!"tenant isolation: {label}")
@@ -222,6 +223,18 @@ def run (root : String) : IO Unit := do
     check (memory.fieldBool? "ok" == some false &&
       (memory.fieldOrNull "error").fieldStr? "message" == some "Administrator required")
       "member is denied before the owner's personal memory broker"
+    -- A member who cannot see a mission cannot delete its queued follow-up (`404`, row unchanged).
+    let (enqAdminQueueStatus, _) ← send "POST" "/api/control/queue" admin
+      (.obj #[("id", .str "admin-queue-item"), ("mission_id", .str "admin-mission"),
+        ("content", .str "admin-queued-followup"), ("source", .str "desktop")])
+    check (enqAdminQueueStatus == 201) "admin queue enqueue positive control"
+    let (memberDelForeignQueueStatus, _) ← send "DELETE" "/api/control/queue/admin-queue-item" member
+    check (memberDelForeignQueueStatus == 404) "member cannot delete foreign mission queue item"
+    let .ok foreignQueueRows ← execParamQuery store.missionsDb
+      "SELECT state,COALESCE(phase,0),json_extract(payload,'$.message.content') FROM remote_message_queue WHERE user_id='core' AND message_id='admin-queue-item';" #[]
+      | throw (IO.userError "isolation foreign queue verification")
+    check (foreignQueueRows[1]? == some #["waiting", "0", "admin-queued-followup"])
+      "foreign mission queue row survives denied member DELETE"
     -- A role chosen for a shared admin mission must not adopt the admin's identity.
     sql store.missionsDb "INSERT INTO mission_shares(mission_id,user_id,granted_by) VALUES('admin-mission','member','admin');"
     let (sharedStatus, sharedDoc) ← send "POST" "/api/mcp/session" member
@@ -311,6 +324,129 @@ def run (root : String) : IO Unit := do
     check (adm.fieldBool? "ok" == some true) "admin retains own mission access"
     let some unchanged ← getMission? store "admin-mission" | throw (IO.userError "admin mission disappeared")
     check (unchanged.status == "awaiting_user" && unchanged.title == "admin-private-marker") "denied operations have no effects"
+    -- Hydrated provider routes must project anonymous type labels and quota windows for members
+    -- while preserving full account identity for admins.
+    let provNameMarker := "admin-provider-name-marker-alpha"
+    let provEmailMarker := "admin-provider-email-marker@example.com"
+    let provBaseUrlMarker := "https://admin-provider-baseurl-marker.internal/v1"
+    let provGoogleProjMarker := "admin-google-project-marker-999"
+    let provOrgMarker := "admin-org-marker-corp"
+    let provOrgIdMarker := "org-admin-marker-777"
+    let provEnvMarker := "ANTHROPIC_API_KEY"
+    let .ok () ← upsertAIProvider store {
+      id := "prov-anth-1", providerType := "anthropic", name := provNameMarker,
+      enabled := true, baseUrl := provBaseUrlMarker, apiKey := "sk-ant-secret-key-marker-1",
+      rpmLimit? := some 4321, maxConcurrency? := some 17,
+      customModels := #[{ id := "custom-claude", name? := some "Custom Claude" }],
+      updatedAt := "2026-11-13T10:00:00Z" }
+      | throw (IO.userError "isolation provider 1")
+    let .ok () ← upsertAIProvider store {
+      id := "prov-anth-2", providerType := "anthropic", name := "admin-provider-name-marker-beta",
+      enabled := true, baseUrl := provBaseUrlMarker, apiKey := "sk-ant-secret-key-marker-2",
+      updatedAt := "2026-11-13T10:00:00Z" }
+      | throw (IO.userError "isolation provider 2")
+    let hydratedJson : JVal := .arr #[
+      .obj #[
+        ("id", .str "prov-anth-1"),
+        ("provider_type", .str "anthropic"),
+        ("name", .str provNameMarker),
+        ("enabled", .bool true),
+        ("base_url", .str provBaseUrlMarker),
+        ("account_email", .str provEmailMarker),
+        ("google_project_id", .str provGoogleProjMarker),
+        ("priority", .nat 7)
+      ],
+      .obj #[
+        ("id", .str "prov-anth-2"),
+        ("provider_type", .str "anthropic"),
+        ("name", .str "admin-provider-name-marker-beta"),
+        ("enabled", .bool true),
+        ("base_url", .str provBaseUrlMarker),
+        ("account_email", .str provEmailMarker),
+        ("google_project_id", .str provGoogleProjMarker),
+        ("priority", .nat 8)
+      ]
+    ]
+    IO.FS.writeFile (System.FilePath.mk (store.rootDir ++ "/ai_providers.json")) (renderCompact hydratedJson)
+    let pHub ← newProviderRuntimeHub
+    let mkUsagePayload (pName : String) : JVal := .obj #[
+      ("provider_type", .str "anthropic"),
+      ("provider_name", .str pName),
+      ("account_email", .str provEmailMarker),
+      ("account_name", .str provNameMarker),
+      ("organization", .str provOrgMarker),
+      ("organization_id", .str provOrgIdMarker),
+      ("status", .str "connected"),
+      ("unified_5h_utilization", .num "0.42"),
+      ("optimize", .obj #[
+        ("as_of", .str "2026-11-13T10:00:00Z"),
+        ("primary_window", .str "5h"),
+        ("windows", .arr #[.obj #[("key", .str "5h"), ("label", .str "5-hour"), ("pct_used", .num "42"), ("pct_remaining", .nat 58)]])
+      ])
+    ]
+    let nowReal ← OrbBin.PosixExt.nowEpoch
+    pHub.mu.atomically do
+      let cur ← get
+      set { cur with
+        usageEntries := #[
+          { providerId := "prov-anth-1", fetchedSec := nowReal, fetchedIso := "2026-11-13T10:00:00Z", payload := mkUsagePayload provNameMarker },
+          { providerId := "prov-anth-2", fetchedSec := nowReal, fetchedIso := "2026-11-13T10:00:00Z", payload := mkUsagePayload "admin-provider-name-marker-beta" }
+        ]
+      }
+    let stWithProviders := { st with providerHub? := some pHub }
+    let (_, adminProvDetailUsage) ← send "GET" "/api/ai/providers/prov-anth-1/usage" admin (.obj #[]) stWithProviders
+    let (_, adminProvList) ← send "GET" "/api/ai/providers" admin (.obj #[]) stWithProviders
+    let (_, adminProvDetail) ← send "GET" "/api/ai/providers/prov-anth-1" admin (.obj #[]) stWithProviders
+    let (_, adminProvUsage) ← send "GET" "/api/ai/providers/usage" admin (.obj #[]) stWithProviders
+    let (_, adminForBackend) ← send "GET" "/api/ai/providers/for-backend/claudecode" admin (.obj #[]) stWithProviders
+    let adminCombined := renderCompact (.arr #[adminProvList, adminProvDetail, adminProvUsage, adminProvDetailUsage, adminForBackend])
+    for marker in #[provNameMarker, provEmailMarker, provBaseUrlMarker, provGoogleProjMarker, provOrgMarker, provOrgIdMarker, provEnvMarker] do
+      check ((adminCombined.splitOn marker).length > 1) s!"admin sees provider marker {marker}"
+    let mut routeLeaks : Array String := #[]
+    for (routeName, target) in #[
+        ("GET /api/ai/providers", "/api/ai/providers"),
+        ("GET /api/ai/providers/:id", "/api/ai/providers/prov-anth-1"),
+        ("GET /api/ai/providers/usage", "/api/ai/providers/usage"),
+        ("GET /api/ai/providers/:id/usage", "/api/ai/providers/prov-anth-1/usage"),
+        ("GET /api/ai/providers/for-backend/claudecode", "/api/ai/providers/for-backend/claudecode")] do
+      let (mStatus, mDoc) ← send "GET" target member (.obj #[]) stWithProviders
+      let raw := renderCompact mDoc
+      check (mStatus == 200) s!"member status 200 on {routeName}"
+      let mut leakedOnRoute : Array String := #[]
+      for marker in #[provNameMarker, "admin-provider-name-marker-beta", provEmailMarker, provBaseUrlMarker,
+          provGoogleProjMarker, provOrgMarker, provOrgIdMarker, provEnvMarker, "4321", "sk-ant-secret"] do
+        if (raw.splitOn marker).length > 1 then
+          leakedOnRoute := leakedOnRoute.push marker
+      if !leakedOnRoute.isEmpty then
+        let joinedMarkers := String.intercalate ", " leakedOnRoute.toList
+        routeLeaks := routeLeaks.push s!"{routeName} -> [{joinedMarkers}]"
+    let joinedLeaks := String.intercalate "; " routeLeaks.toList
+    check routeLeaks.isEmpty s!"member provider routes leaked owner identity: {joinedLeaks}"
+    let (_, memberListDoc) ← send "GET" "/api/ai/providers" member (.obj #[]) stWithProviders
+    let memberRows := match memberListDoc with | .arr xs => xs | _ => #[]
+    let mRow1 := memberRows[0]?.getD .null
+    let mRow2 := memberRows[1]?.getD .null
+    check (mRow1.fieldStr? "id" == some "prov-anth-1" && mRow1.fieldStr? "name" == some "Anthropic 1" &&
+      mRow2.fieldStr? "id" == some "prov-anth-2" && mRow2.fieldStr? "name" == some "Anthropic 2" &&
+      (mRow1.field? "account_email").isNone && ((mRow1.fieldOrNull "status").field? "account").isNone &&
+      (mRow1.field? "base_url").isNone && (mRow1.field? "google_project_id").isNone &&
+      (mRow1.field? "env_var").isNone && (mRow1.field? "rpm_limit").isNone &&
+      (mRow1.field? "max_concurrency").isNone && (mRow1.field? "priority").isNone)
+      "member provider row keeps only projected fields and indexed type display name"
+    let (_, memberDetailDoc) ← send "GET" "/api/ai/providers/prov-anth-1" member (.obj #[]) stWithProviders
+    check (memberDetailDoc.fieldStr? "id" == some "prov-anth-1" &&
+      memberDetailDoc.fieldStr? "name" == some "Anthropic 1" &&
+      (memberDetailDoc.field? "account_email").isNone &&
+      ((memberDetailDoc.fieldOrNull "status").field? "account").isNone)
+      "member provider detail uses unified member projection"
+    let (_, memberUsageDoc) ← send "GET" "/api/ai/providers/prov-anth-1/usage" member (.obj #[]) stWithProviders
+    check (memberUsageDoc.fieldStr? "status" == some "connected" &&
+      (memberUsageDoc.field? "unified_5h_utilization").isSome &&
+      (((memberUsageDoc.fieldOrNull "optimize").fieldArr? "windows").getD #[]).size == 1 &&
+      (memberUsageDoc.field? "account_email").isNone &&
+      (memberUsageDoc.field? "organization").isNone &&
+      (memberUsageDoc.field? "organization_id").isNone)
+      "member provider usage keeps quota windows without account identity"
     -- Disabling/deleting an issuer must stop every previously minted session,
     -- including an external session with no mission id and a shared mission.
     for update in #["UPDATE users SET disabled=1 WHERE id='member';", "DELETE FROM users WHERE id='member';"] do
