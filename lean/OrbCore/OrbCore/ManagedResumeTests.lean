@@ -70,6 +70,7 @@ private def runInventoryTests (root : String) : IO Unit := do
     let requestedName ← IO.mkRef ""
     let provider := { template with
       list := pure (.ok (inventory.push source))
+      get := fun id => if id == source.providerId then pure (.ok source) else template.get id
       resume := fun id spec => do
         requestedSource.set id
         requestedName.set spec.name
@@ -94,6 +95,70 @@ private def runInventoryTests (root : String) : IO Unit := do
     check (!(← applyProviderObservation mc stale now 0 1).isOk) "stale source observations cannot stop the successor"
     let some (stillReady, _) ← getManagedMachine? mc current.id | throw (IO.userError "successor missing")
     check (stillReady.status == "ready" && stillReady.nodeBootEpoch == 2) "reconciliation preserves the live successor"
+
+    let actualId := "a6fed7e9-950b-40e8-ad83-4c599ceee4b4"
+    let seedDestroyed (id providerId : String) : IO Unit := do
+      seedLegacy id (prefixName ++ id)
+      let .ok _ ← execParamQuery mc.db
+          "UPDATE managed_machines SET status='destroyed',phase_code=3,active_compute_eligible=0,provider_id=?2 WHERE id=?1;"
+          #[id, providerId] | throw (IO.userError "destroyed fixture failed")
+      let .ok () ← putEnrollmentToken mc id "stale-enrollment" | throw (IO.userError "stale fixture failed")
+    seedDestroyed actualId "bx_xcew9qru"
+    check (!(← prepareManagedResume mc fleet actualId "unobserved" "new-token" 5 1 now (now + 360)).isOk)
+      "destroyed resume requires provider observation"
+    let retained : OrbCore.ManagedProvider.Machine := {
+      providerId := "bx_xcew9qru", name := prefixName ++ actualId, state := "archived"
+    }
+    let .ok _ ← execParamQuery mc.db
+        "UPDATE managed_node_tokens SET node_token='stale-node-token' WHERE machine_id=?1;" #[actualId]
+      | throw (IO.userError "stale node fixture failed")
+    let .ok archivedObservation := observeProviderPayload "boat" actualId 200 (.obj #[("state", .str "archived")])
+      | throw (IO.userError "archive adapter failed")
+    check (!(← applyProviderObservation mc { archivedObservation with
+        expectedProviderId? := some "wrong-source", expectedBootEpoch? := some 1 } now 0 1).isOk &&
+      !(← applyProviderObservation mc { archivedObservation with
+        expectedProviderId? := some "bx_xcew9qru", expectedBootEpoch? := some 2 } now 0 1).isOk)
+      "archive repair requires matching provider and boot fences"
+    let .ok _ ← OrbCore.RemoteFleetAndRelay.reconcileManagedProviderInventory mc "boat" prefixName #[retained] now
+      | throw (IO.userError "destroyed archive reconciliation failed")
+    let some (repaired, repairedSlice) ← getManagedMachine? mc actualId | throw (IO.userError "repair missing")
+    check (repaired.status == "stopped" && repaired.providerId == "bx_xcew9qru" &&
+      repaired.nodeBootEpoch == 1 && repairedSlice.activeComputeEligible == 0 &&
+      !(← enrollManagedNode mc actualId "stale-enrollment" (some 1)).isOk &&
+      !(← authenticateNodeToken mc actualId "stale-node-token" (some 1)).isOk)
+      "archived observation repairs false destruction without reviving enrollment"
+    check (!(← prepareManagedResume mc fleet actualId
+      "budget-recovery" "new-token" 5 1 now (now + 360)
+      (some { capCents := 0, inferenceCents := 0, computeCents := 0 })).isOk)
+      "archive correction does not bypass user budget admission"
+    let .ok _ ← execParamQuery mc.db
+        "UPDATE managed_machines SET status='destroyed',phase_code=3 WHERE id=?1;" #[actualId]
+      | throw (IO.userError "on-demand destroyed fixture failed")
+    let observedIds ← IO.mkRef (#[] : Array String)
+    let recoveryProvider := { provider with
+      get := fun id => do
+        observedIds.modify (·.push id)
+        if id == "bx_xcew9qru" then return .ok retained
+        if #["mm5xvnw6ha", "mm3dagt4ua", "mmp2t4xd94"].contains id then
+          return .error { code := "provider_http_404", status := 404 }
+        template.get id
+    }
+    let recoveryCtx := { ctx with override? := some (recoveryProvider,
+      { coreUrl := "https://core.example", script := "#!/bin/sh\nexit 0\n" }) }
+    let .ok recovered ← OrbCore.RemoteFleetAndRelay.runConfiguredManagedLifecycle mc recoveryCtx actualId "resume" now
+        (.obj #[("ttl_minutes", .nat 5)]) "recover-false-destroy"
+      | throw (IO.userError "destroyed bound resume failed")
+    check ((← requestedSource.get) == "bx_xcew9qru" &&
+      (((recovered.field? "machine").getD .null).fieldStr? "node_id") == some ("managed-" ++ actualId))
+      "fork uses Boat id while retaining actual Core and node identity"
+    for id in #["mm5xvnw6ha", "mm3dagt4ua", "mmp2t4xd94"] do
+      seedDestroyed id id
+      requestedSource.set ""
+      check (!(← OrbCore.RemoteFleetAndRelay.runConfiguredManagedLifecycle mc recoveryCtx id "resume" now
+        (.obj #[("ttl_minutes", .nat 5)]) ("missing-" ++ id)).isOk) "genuine 404 resume rejected"
+      let some (gone, _) ← getManagedMachine? mc id | throw (IO.userError "404 fixture missing")
+      check (gone.status == "destroyed" && (← requestedSource.get).isEmpty && (← observedIds.get).contains id)
+        "genuine 404 stays destroyed and never forks"
   finally
     closeManagedComputeStore mc
     closeCoreStore core

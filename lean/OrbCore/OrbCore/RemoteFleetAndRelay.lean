@@ -1019,7 +1019,7 @@ def reconcileManagedProviderInventory (mc : ManagedComputeStore) (providerName s
   let mut ambiguous : Array JVal := #[]
   let mut missing : Array JVal := #[]
   for m in fleet.machines do
-    if canonicalizeProvider m.provider != providerName || m.status == "destroyed" then continue
+    if canonicalizeProvider m.provider != providerName then continue
     let canonicalName := servicePrefix ++ m.id
     let ownRecordedName := !m.sandboxName.isEmpty && m.sandboxName.startsWith servicePrefix
     let candidates := inventory.filter fun remote =>
@@ -1040,7 +1040,8 @@ def reconcileManagedProviderInventory (mc : ManagedComputeStore) (providerName s
       let .ok observed := observeProviderPayload providerName m.id 200 (.obj #[("state", .str remote.state)])
         | continue
       let observed := { observed with expectedProviderId? := some remote.providerId, expectedBootEpoch? := some m.nodeBootEpoch }
-      if observed.observedStatus == "stopped" && m.status == "ready" then
+      if observed.observedStatus == "stopped" && (m.status == "ready" ||
+          (observed.retainedArchived && (m.status == "destroyed" || m.status == "provisioning"))) then
         if (← applyProviderObservation mc observed nowEpoch 0 1).isOk then stopped := stopped.push (.str m.id)
       else if observed.orphaned then
         if (← applyProviderObservation mc observed nowEpoch 0 1).isOk then closed := closed.push (.str m.id)
@@ -1146,9 +1147,25 @@ def runConfiguredManagedLifecycle (mc : ManagedComputeStore) (ctx : ManagedLifec
     | .ok updated => return .ok (managedLifecycleResult updated)
     | .error e => return .error e
   if action == "resume" then
-    if provider.name == "boat" && (m.providerId.isEmpty || (m.status == "ready" && m.lastPollSec == 0)) then
-      let .ok _ ← reconcileConfiguredBoatInventory mc ctx.store.rootDir nowEpoch (some provider)
-        | return .error "boat_inventory_reconciliation_failed"
+    if provider.name == "boat" then
+      if m.providerId.isEmpty then
+        let .ok _ ← reconcileConfiguredBoatInventory mc ctx.store.rootDir nowEpoch (some provider)
+          | return .error "boat_inventory_reconciliation_failed"
+      let some (observedMachine, _) ← getManagedMachine? mc machineId | return .error "managed_machine_missing"
+      if observedMachine.providerId.isEmpty then return .error "managed_provider_identity_pending"
+      if !observedMachine.providerId.isEmpty then
+        let observation ← match ← provider.get observedMachine.providerId with
+          | .ok remote =>
+            if remote.providerId != observedMachine.providerId then return .error "stale_provider_identity"
+            pure (observeProviderPayload "boat" machineId 200 (.obj #[("state", .str remote.state)]))
+          | .error e =>
+            if e.status != 404 then return .error e.code
+            pure (observeProviderPayload "boat" machineId 404 .null)
+        let .ok observation := observation | return .error "boat_observation_invalid"
+        let .ok _ ← applyProviderObservation mc { observation with
+            expectedProviderId? := some observedMachine.providerId,
+            expectedBootEpoch? := some observedMachine.nodeBootEpoch } nowEpoch 0 1
+          | return .error "boat_observation_commit_failed"
     let some (m, _) ← getManagedMachine? mc machineId | return .error "managed_machine_missing"
     let bootstrap ← match ctx.override? with
       | some pair => pure pair.2

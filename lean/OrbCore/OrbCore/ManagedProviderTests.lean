@@ -101,9 +101,18 @@ def run : IO Unit := do
   check (last.method == "PATCH" && (last.body.getD .null).fieldUInt64? "ttlSeconds" == some 900) "provider TTL extension"
 
   requests.set #[]
-  replies.set #[(409, .obj #[]), (400, .obj #[("code", .str "stop_failed")]), (200, .null)]
-  check (← provider.destroy "sb-1").isOk "destroy falls back to retryable stop"
-  check ((← requests.get).size == 3 && (← sleeps.get) == #[3000]) "bounded stop retry"
+  for status in #[409, 403, 503] do
+    requests.set #[]
+    replies.set #[(status, .obj #[]), (200, .null)]
+    let .error failure ← provider.destroy "sb-1" | throw (IO.userError "failed DELETE reported success")
+    check (failure.status == status && (← requests.get).size == 1 &&
+      (← requests.get)[0]!.method == "DELETE" && (← sleeps.get).isEmpty)
+      "failed DELETE preserves error without STOP fallback"
+  replies.set #[(204, .null)]
+  check (← provider.destroy "sb-1").isOk "successful DELETE confirms destruction"
+  replies.set #[(400, .obj #[("code", .str "stop_failed")]), (200, .null)]
+  check (← provider.stop "sb-1").isOk "explicit stop retains retry behavior"
+  check ((← sleeps.get) == #[3000]) "bounded stop retry"
   replies.set #[(404, .null)]
   check (← provider.destroy "missing").isOk "destroy missing is idempotent"
   replies.set #[(403, .null), (403, .null)]

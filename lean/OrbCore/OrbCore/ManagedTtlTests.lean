@@ -437,9 +437,40 @@ private def warningTests (root : String) : IO Unit := do
     closeManagedComputeStore mc
     closeCoreStore core
 
-/-- Self-test entry point. All clocks, provider observations, usage and failures
-    are injected; only isolated SQLite fixtures under the supplied root are used. -/
+private def provisioningArchiveTests (root : String) : IO Unit := do
+  let mc ← requireOk (← openManagedComputeStore s!"{root}/ttl-provisioning-archive.db") "open archive"
+  let core ← requireOk (← openCoreStore s!"{root}/ttl-provisioning-archive-core") "open archive core"
+  try
+    for id in #["archived-provisioning", "missing-provisioning"] do
+      discard <| requireOk (← provisionManagedMachine mc fleet {
+        id, sandboxName := s!"orb-managed-{id}", ttlMinutes := 5, deletableAtSec := 1000
+      } 1000) "reserve provisioning"
+      discard <| requireOk (← bindManagedProviderId mc id ("bx-" ++ id) 1) "bind provisioning"
+      discard <| requireOk (← putEnrollmentToken mc id "old-enrollment") "enrollment fixture"
+    let destroys ← IO.mkRef (#[] : Array String)
+    let template := OrbCore.ManagedProvisioningTests.mockPolicyProvider mc "boat"
+    let provider := { template with
+      isStopped := fun state => state == "archived"
+      get := fun id => if id == "bx-missing-provisioning" then
+        pure (.error { code := "provider_http_404", status := 404 })
+        else pure (.ok { providerId := id, state := "archived" })
+      destroy := fun id => do destroys.modify (·.push id); return .ok ()
+    }
+    let result ← requireOk (← tick mc core fleet (fun _ => pure (.ok provider)) 1300) "archive expiry"
+    let saved ← machine mc "archived-provisioning"
+    check (saved.status == "stopped" && saved.providerId == "bx-archived-provisioning" &&
+      saved.nodeBootEpoch == 1 && saved.expiryCleanupState == "completed" &&
+      (← machine mc "missing-provisioning").status == "destroyed" && (← destroys.get).isEmpty &&
+      ((result.fieldArr? "pending").getD #[]).isEmpty)
+      "phase-zero archived disk stays stopped; genuine 404 closes without delete"
+    check (!(← enrollManagedNode mc saved.id "old-enrollment" (some 1)).isOk)
+      "archive correction revokes provisioning credentials"
+  finally
+    closeManagedComputeStore mc
+    closeCoreStore core
+
 def run (root : String) : IO Unit := do
+  provisioningArchiveTests root
   warningTests root
   extensionTests root
   fencingTests root
