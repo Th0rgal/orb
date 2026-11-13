@@ -311,6 +311,15 @@ def run (root : String) : IO Unit := do
     check (adm.fieldBool? "ok" == some true) "admin retains own mission access"
     let some unchanged ← getMission? store "admin-mission" | throw (IO.userError "admin mission disappeared")
     check (unchanged.status == "awaiting_user" && unchanged.title == "admin-private-marker") "denied operations have no effects"
+    -- Disabling/deleting an issuer must stop every previously minted session,
+    -- including an external session with no mission id and a shared mission.
+    for update in #["UPDATE users SET disabled=1 WHERE id='member';", "DELETE FROM users WHERE id='member';"] do
+      sql store.missionsDb update
+      for bearer in #[memberSession, externalToken, sharedToken] do
+        let (status, doc) ← send "POST" "/api/mcp/call" bearer (.obj #[("name", .str "get_mission"),
+          ("arguments", .obj #[("mission_id", .str "member-mission")])])
+        check (status == 401 || status == 403 || (status == 200 && doc.fieldBool? "ok" == some false))
+          "disabled or deleted issuer cannot use old MCP sessions"
   finally
     closeManagedComputeStore mc
     closeCoreStore store

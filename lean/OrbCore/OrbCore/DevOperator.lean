@@ -26,7 +26,10 @@ def activeLease? (store : CoreStore) (token : String) (now : UInt64) : IO (Optio
   let some lease ← lookupPrivilegeLease? store token | return none
   unless leaseAllowed lease now do return none
   unless ← bunkerClear store do return none
-  unless (← getMission? store lease.missionId).isSome do return none
+  let some mission ← getMission? store lease.missionId | return none
+  unless mission.ownerUserId.isEmpty do
+    let some owner ← getUserById? store mission.ownerUserId | return none
+    if owner.disabled then return none
   return some lease
 
 /-- A token for another mission is never redeemable, even by a coordinator. -/
@@ -45,7 +48,10 @@ def tokenExpiry? (store : CoreStore) (isDev : Bool) (token : String) (now : UInt
   unless isDev && token.startsWith tokenPrefix do return none
   unless ← bunkerClear store do return none
   let raw := (token.drop tokenPrefix.length).toString
-  if let some lease ← activeLease? store raw now then return some lease.expiresAtEpoch
+  -- A local revoked/expired/orphaned grant is authoritative; it must never be
+  -- rescued by falling back to a different issuer with the same token text.
+  if (← lookupPrivilegeLease? store raw).isSome then
+    return (← activeLease? store raw now).map (·.expiresAtEpoch)
   let some expiry ← verifyIssuer raw | return none
   if now < expiry && expiry - now ≤ 14400 then return some expiry
   return none

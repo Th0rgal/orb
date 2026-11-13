@@ -398,7 +398,8 @@ def dispatchMcpToolCall
   let user? ← getUserById? store callerUserId
   let userIsAdmin := (user?.map (fun u => !u.disabled && u.role == "admin")).getD false ||
     (directOperator && authenticatedAdmin)
-  if (user?.map (·.disabled)).getD false then
+  if (claims.isExternal && callerUserId.isEmpty) ||
+      (!callerUserId.isEmpty && !(user?.map (fun u => !u.disabled)).getD false) then
     return mcpErr "forbidden" "Account unavailable"
   let missionReadTools := #["get_mission", "get_mission_health", "get_mission_diagnostics",
     "get_mission_events", "list_mission_shared_files", "get_consult_result", "get_cloud_execution", "get_budget"]

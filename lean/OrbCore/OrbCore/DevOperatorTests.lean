@@ -15,6 +15,9 @@ def run (root : String) : IO Unit := do
     check ((childEnv.splitOn "\n").filter (!·.isEmpty) |>.all (fun line =>
       line.startsWith "PATH=" || line.startsWith "LANG=")) "host tooling inherits no Core credentials"
     let now : UInt64 := 1000
+    let .ok _ ← execParamQuery store.missionsDb
+      "INSERT INTO users(id,username,password_hash,role) VALUES('admin','admin','synthetic-hash','admin');" #[]
+      | throw (IO.userError "admin fixture")
     let .ok () ← upsertMission store {
       id := "owner", title := "Orb development", status := "awaiting_user", backend := "codex",
       modelOverride := "", workingDirectory := root, updatedAt := "2026-11-13T00:00:00Z", ownerUserId := "admin" }
@@ -91,15 +94,14 @@ def run (root : String) : IO Unit := do
     check ((← activeLease? store lease.leaseToken now).isNone &&
       !(← call store "owner" "deploy_dev" (args.setField "sha" (.str sha)) now runner).isOk)
       "revocation stops redemption and host operations immediately"
+    check ((← tokenExpiry? store true bearer now issuer).isNone && (← issuerCalls.get) == 1)
+      "a local revoked grant cannot fall back to another issuer"
     save lease
     let .ok () ← writePersistedBunkerState store 1 | throw (IO.userError "bunker fixture")
     check ((← tokenExpiry? store true bearer now issuer).isNone &&
       (← tokenExpiry? store true (tokenPrefix ++ "remote") now issuer).isNone && (← issuerCalls.get) == 1)
       "local bunker blocks local and remote grants before contacting issuer"
     let .ok () ← writePersistedBunkerState store 0 | throw (IO.userError "unbunker fixture")
-    let .ok _ ← execParamQuery store.missionsDb
-      "INSERT INTO users(id,username,password_hash,role) VALUES('admin','admin','synthetic-hash','admin');" #[]
-      | throw (IO.userError "admin fixture")
     let st : CoreAppState := {
       cfg := { instanceName := "dev", jwtSecret := "synthetic-dev-jwt-secret-not-shared" }, store := store,
       searchIdx? := none, managedRef := ← IO.mkRef {}, chainsRef := ← IO.mkRef #[],
@@ -163,6 +165,12 @@ def run (root : String) : IO Unit := do
     save { lease with revoked := true }
     check ((← send "POST" "/api/dev-operator/verify" bearer "").status == 401)
       "issuer observes revocation immediately"
+    save lease
+    let .ok _ ← execParamQuery store.missionsDb "UPDATE users SET disabled=1 WHERE id='admin';" #[]
+      | throw (IO.userError "disabled grant owner fixture")
+    check ((← activeLease? store lease.leaseToken now).isNone &&
+      (← tokenExpiry? store true bearer now issuer).isNone && (← issuerCalls.get) == 1)
+      "disabled grant owner loses local dev authority without issuer fallback"
   finally closeCoreStore store
 
 end OrbCore.DevOperatorTests
