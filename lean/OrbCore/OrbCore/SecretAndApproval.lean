@@ -594,7 +594,7 @@ private def normalizeMissionAccessRequestJVal (r : JVal) (nowIso : String) : JVa
 private def riskOfApprovalKindTier (kind tier : String) (allProjects : Bool := false) : String :=
   if kind == "privilege" then
     if tier == "root_exec" || tier == "host_admin" then "critical"
-    else if tier == "service_deploy" then "elevated"
+    else if tier == "service_deploy" || tier == "dev_operator" then "elevated"
     else "routine"
   else if kind == "mission_access" then
     "elevated"
@@ -810,6 +810,8 @@ def mcpRequestPrivilegedAccess
   let cleanScope :=
     let sc := scope.trimAscii.toString
     if sc == "systemctl" || sc.isEmpty then "service_deploy" else sc
+  let cleanHost := if cleanScope == "dev_operator" then "dev" else cleanHost
+  let allowedUnits := if cleanScope == "dev_operator" then #[] else allowedUnits
   let cleanUnits := allowedUnits.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
   let allowedUnitField : JVal := match cleanUnits[0]? with | some u => .str u | none => .null
   let titleOpt ← match st? with
@@ -871,11 +873,11 @@ def mcpListPrivilegedAccess (st : CoreStore) (dataRoot missionId : String) (nowE
   let nowIso := formatEpochIso8601Utc nowEpochSec
   let doc ← readDataJsonObj dataRoot "privilege_access.json"
   let sql :=
-    if missionId.isEmpty then
+    if missionId.isEmpty && !includeLeaseTokensForOwner then
       "SELECT grant_id, mission_id, target_host, scope, allowed_units_json, revoked, expires_at_epoch, lease_token FROM privilege_leases ORDER BY expires_at_epoch DESC LIMIT 100;"
     else
       "SELECT grant_id, mission_id, target_host, scope, allowed_units_json, revoked, expires_at_epoch, lease_token FROM privilege_leases WHERE mission_id=?1 ORDER BY expires_at_epoch DESC LIMIT 100;"
-  let args := if missionId.isEmpty then #[] else #[missionId]
+  let args := if missionId.isEmpty && !includeLeaseTokensForOwner then #[] else #[missionId]
   let mut grants : Array JVal := #[]
   let mut leaseLookup : Array (String × Bool × UInt64) := #[]
   if let .ok rs ← execParamQuery st.missionsDb sql args then
@@ -883,6 +885,13 @@ def mcpListPrivilegedAccess (st : CoreStore) (dataRoot missionId : String) (nowE
       let r := rs[i]!
       let gid := (r[0]?).getD ""
       let mid := (r[1]?).getD ""
+      -- Empty-mission sessions are distinct external/operator identities, not
+      -- an invitation to enumerate or redeem every other mission's host lease.
+      if includeLeaseTokensForOwner && missionId.isEmpty then
+        let owned := !sessionId.isEmpty && ((doc.fieldArr? "requests").getD #[]).any (fun req =>
+          req.fieldStr? "grant_id" == some gid && req.fieldStr? "session_id" == some sessionId &&
+          ((req.fieldStr? "requester_mission_id").getD "").isEmpty)
+        unless owned do continue
       let th := (r[2]?).getD "self"
       let sc := (r[3]?).getD ""
       let units := (OrbBin.Json.parse ((r[4]?).getD "[]")).toOption.getD (.arr #[])
@@ -914,7 +923,7 @@ def mcpListPrivilegedAccess (st : CoreStore) (dataRoot missionId : String) (nowE
     else if includeLeaseTokensForOwner && !sessionId.isEmpty then
       let rMid := (r.fieldStr? "requester_mission_id").orElse (fun _ => r.fieldStr? "mission_id") |>.getD ""
       let rSid := (r.fieldStr? "session_id").getD ""
-      rMid.isEmpty && (rSid.isEmpty || rSid == sessionId)
+      rMid.isEmpty && rSid == sessionId
     else
       true)
   let normReqs := (rawReqs.map (fun r => normalizePrivilegeRequestJVal r leaseLookup nowEpochSec nowIso)).reverse

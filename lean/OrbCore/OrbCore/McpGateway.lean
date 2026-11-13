@@ -6,6 +6,7 @@
 import OrbBin.Json
 import OrbBin.PosixExt
 import OrbBin.McpCatalog
+import OrbCore.DevOperator
 import OrbCore.Store
 import OrbCore.ManagedSpawnActions
 import OrbCore.Managed
@@ -1482,6 +1483,13 @@ def dispatchMcpToolCall
 
   | "list_mission_access" =>
     return mcpOk (← mcpListMissionAccess store.rootDir callerMid nowEpochSec)
+
+  | "get_dev_access" | "deploy_dev" | "read_dev_logs" =>
+    if claims.isExternal || callerMid.isEmpty then
+      return mcpErr "dev_operator_mission_required" "A mission with its own approved dev_operator grant is required"
+    match ← OrbCore.DevOperator.call store callerMid toolName args nowEpochSec OrbCore.DevOperator.runCommand with
+    | .ok value => return mcpOk value
+    | .error err => return mcpErr err "Dev operation denied or unavailable"
 
   | "request_privileged_access" =>
     let scope := (args.fieldStr? "scope").getD "service_deploy"

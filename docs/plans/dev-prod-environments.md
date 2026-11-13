@@ -58,3 +58,9 @@ Both instances run from the base plus overlays; a settings round trip (export pr
   Bitwarden metadata and seals them inside Core for the current instance.
   See [the operator procedure](../operations/provider-sealing.md). Live sealing
   remains an operator step; no vault values are delivered to a mission.
+
+- Item 4: `dev_operator` reuses hardware-approved mission leases for an opaque
+  dev-only admin bearer, fixed dev deployment and bounded dev journal tools.
+  See [the dev pass contract](../operations/dev-operator.md). Cross-instance
+  redemption requires the issuing Core to support verification; live acceptance
+  remains pending operator installation.

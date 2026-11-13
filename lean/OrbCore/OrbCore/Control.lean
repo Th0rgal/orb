@@ -36,6 +36,7 @@ import OrbCore.ProjectFilesAndController
 import OrbCore.CloudHttpAndWorker
 import OrbCore.ProviderUsageAndLogin
 import OrbCore.ResourcesAndSystem
+import OrbCore.DevOperator
 import OrbCore.McpGateway
 import OrbNetLeaf.TlsHttp
 import OrbNetLeaf.Gzip
@@ -78,6 +79,8 @@ open OrbNetLeaf.TlsHttp
 /-- Core runtime configuration parsed from environment variables (`HOST`, `PORT`, `WORKING_DIR`,
     `DEV_MODE`, `DASHBOARD_PASSWORD`, `JWT_SECRET`, `SANDBOXED_USERS`, `ALLOW_INSECURE_REMOTE_DEV_AUTH`). -/
 structure CoreConfig where
+  instanceName               : String := ""
+  devGrantIssuerHost         : String := "orbcore.thomas.md"
   host                       : String := "127.0.0.1"
   port                       : UInt16 := 3000
   workingDir                 : String := "."
@@ -136,6 +139,7 @@ structure CallerPrincipal where
   sessionEpoch        : UInt64 := 1
   disabled            : Bool := false
   dailySpendCapCents? : Option UInt64 := none
+  isDevOperator       : Bool := false
   isLegacyUnscoped    : Bool := false
   deriving Repr, DecidableEq, Inhabited
 
@@ -257,6 +261,8 @@ def loadConfigFromEnv : IO CoreConfig := do
     workingDir := workingDir
     devMode := devMode
     allowInsecureRemoteDevAuth := allowRemote
+    instanceName := (← IO.getEnv "ORB_INSTANCE").getD ""
+    devGrantIssuerHost := (← IO.getEnv "ORB_DEV_GRANT_ISSUER_HOST").getD "orbcore.thomas.md"
     dashboardPassword := pwd
     jwtSecret := jwt
     usersJson := users
@@ -434,6 +440,15 @@ def resolveCallerPrincipal?
     | some b => some b
     | none => if allowWsSubproto then extractWsJwtSubproto? hdrs else none
   if let some tok := rawTok? then
+    if tok.startsWith OrbCore.DevOperator.tokenPrefix then
+      let some _ ← OrbCore.DevOperator.tokenExpiry? st.store
+          (st.cfg.instanceName == "dev") tok nowEpochSec
+          (OrbCore.DevOperator.verifyIssuer st.cfg.devGrantIssuerHost) | return none
+      let bunker ← match st.bunkerStateRef? with | some ref => ref.get | none => pure 0
+      unless bunker == 0 do return none
+      let some admin ← getBootstrapAdmin? st.store | return none
+      if admin.disabled || admin.role != "admin" then return none
+      return some { CallerPrincipal.ofUserRecord admin false with isDevOperator := true }
     if tok.startsWith "orb-jwt-v2:" then
       let some (uid, _tokRole, tokEpoch, _exp) := verifySessionTokenV2 sec tok nowEpochSec
         | return none
@@ -2006,6 +2021,26 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       else (health.dropEnd 1).toString ++ s!",\"build\":{jsonEscape buildSha}}"
     return .ok (mkJsonHdr 200 body #[("Cache-Control", "private, max-age=5")])
 
+  -- This capability authenticates only a dev grant, never a production API
+  -- session. The response contains no JWT secret, user, mission, or lease token.
+  if req.method == "POST" && cleanPath == "/api/dev-operator/verify" then
+    let token := (extractBearerToken? req.headers nowEpochSec).getD ""
+    unless token.startsWith OrbCore.DevOperator.tokenPrefix do
+      return .ok (mkJson 401 "{\"error\":\"dev_grant_required\"}")
+    let raw := (token.drop OrbCore.DevOperator.tokenPrefix.length).toString
+    let some lease ← OrbCore.DevOperator.activeLease? st.store raw nowEpochSec
+      | return .ok (mkJson 401 "{\"error\":\"dev_grant_invalid\"}")
+    let bunker ← match st.bunkerStateRef? with | some ref => ref.get | none => pure 0
+    unless bunker == 0 do return .ok (mkJson 403 "{\"error\":\"bunker_active\"}")
+    return .ok (mkJson 200 (renderCompact (.obj #[("active", .bool true),
+      ("expires_at", JVal.uint64 lease.expiresAtEpoch)])))
+
+  -- Refuse host operations and independent credential minting before any early
+  -- dispatcher (including WebSocket upgrades and MCP session creation).
+  if (extractBearerToken? req.headers nowEpochSec).any (·.startsWith OrbCore.DevOperator.tokenPrefix) &&
+      OrbCore.DevOperator.restrictedPath cleanPath then
+    return .ok (mkJson 403 "{\"error\":\"dev_operator_scope_required\"}")
+
   -- 2. Public Auth Login (`POST /api/auth/login`)
   if req.method == "POST" && cleanPath == "/api/auth/login" then
     let tape := JsonTape.indexJsonObject req.bodySlice
@@ -2367,6 +2402,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | return .ok (mkJson 400 "{\"ok\":false,\"error\":{\"code\":\"invalid_json\",\"message\":\"Malformed JSON body\",\"accepted\":\"no\",\"retryable\":false}}")
       let toolName := (jv.fieldStr? "name").getD ""
       let args := (jv.field? "arguments").getD (.obj #[])
+      if (mcpCaller?.map (·.isDevOperator)).getD false &&
+          (toolName.startsWith "secret_" || #["request_privileged_access", "list_privileged_access",
+            "revoke_privileged_access", "execute_privileged_command", "deploy_sandboxed_sh"].contains toolName) then
+        return .ok (mkJson 403 "{\"error\":\"dev_operator_scope_required\"}")
       if isMemoryToolName toolName then
         let mut onManagedNode := false
         let mut hasProjSkill := !activeClaims.isExternal && !activeClaims.project.isEmpty
