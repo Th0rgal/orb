@@ -1,4 +1,5 @@
 """Replays real change shapes through scripts/ci_plan.py (stdlib unittest)."""
+import fnmatch
 import json
 import os
 import re
@@ -17,6 +18,61 @@ DOMAINS = ci_plan.load_domains()
 
 def jobs(paths, **kw):
     return set(ci_plan.plan(paths, DOMAINS, **kw)["jobs"])
+
+
+def _push_block(workflow: Path) -> str:
+    text = workflow.read_text()
+    m = re.search(r"(?ms)^on:\s*\n(.*?)(?=^[a-zA-Z0-9_-]+:|\Z)", text)
+    if not m:
+        return ""
+    pm = re.search(r"(?ms)^  push:\s*\n(.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)", m.group(1))
+    return pm.group(1) if pm else ""
+
+
+def push_paths(workflow: Path) -> list[str]:
+    block = _push_block(workflow)
+    if "paths-ignore" in block:
+        raise AssertionError(f"{workflow.name} push block still uses paths-ignore")
+    m = re.search(r"(?ms)^\s+paths:\s*\n((?:\s+-\s*[^\n]+\n?)+)", block)
+    if not m:
+        return []
+    return [
+        re.sub(r"^\s*-\s*", "", line).strip().strip("'\"")
+        for line in m.group(1).splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+
+def matches_push_paths(path: str, patterns: list[str]) -> bool:
+    """Mirror GitHub's ordered paths: later matching pattern wins, `!` negates."""
+    matched = False
+    for pat in patterns:
+        neg = pat.startswith("!")
+        g = pat[1:] if neg else pat
+        if g == "**":
+            hit = True
+        elif g.endswith("/**"):
+            hit = path.startswith(g[:-2])
+        else:
+            hit = fnmatch.fnmatchcase(path, g)
+        if hit:
+            matched = not neg
+    return matched
+
+
+def script_docs_inputs() -> dict[str, list[str]]:
+    """docs/ files the scripts themselves read: {script: [rel paths]}.
+
+    Derived from the source, so a new input cannot be forgotten silently.
+    """
+    out: dict[str, list[str]] = {}
+    for script in sorted((ROOT / "scripts").glob("*.py")):
+        if script.name == "test_ci_plan.py":
+            continue
+        refs = re.findall(r"""['"](docs/[A-Za-z0-9_./-]+)['"]""", script.read_text(encoding="utf-8"))
+        if refs:
+            out[script.name] = sorted(set(refs))
+    return out
 
 
 class PlanTest(unittest.TestCase):
@@ -90,6 +146,58 @@ class PlanTest(unittest.TestCase):
 
     def test_skill_markdown_is_not_docs(self):
         self.assertIn("policy-lint", jobs(["skills/foo/SKILL.md"]))
+
+    def test_script_docs_inputs_trigger_push_and_select_running_jobs(self):
+        by_script = script_docs_inputs()
+        self.assertTrue(by_script)
+        ci_patterns = push_paths(ROOT / ".github/workflows/ci.yml")
+        kabi_wf = (ROOT / ".github/workflows/kernel-abi.yml").read_text(encoding="utf-8")
+        kabi_patterns = push_paths(ROOT / ".github/workflows/kernel-abi.yml")
+        self.assertEqual(ci_patterns[0], "**")
+        self.assertEqual(kabi_patterns[0], "**")
+        for script_name, doc_paths in sorted(by_script.items()):
+            runs_in_kernel_abi = script_name in kabi_wf
+            for doc in doc_paths:
+                self.assertTrue((ROOT / doc).is_file(), f"{script_name}: missing {doc}")
+                self.assertTrue(
+                    matches_push_paths(doc, ci_patterns),
+                    f"{doc} (read by {script_name}) is excluded by ci.yml push.paths",
+                )
+                planned = jobs([doc])
+                self.assertIn(
+                    "policy-lint",
+                    planned,
+                    f"{doc} (read by {script_name}) must run policy-lint",
+                )
+                if runs_in_kernel_abi:
+                    self.assertTrue(
+                        matches_push_paths(doc, kabi_patterns),
+                        f"{doc} (read by {script_name}) is excluded by kernel-abi.yml push.paths",
+                    )
+                    self.assertIn(
+                        "wf:kernel-abi",
+                        planned,
+                        f"{doc} (read by {script_name}) must run wf:kernel-abi",
+                    )
+        self.assertIn("policy-lint", jobs(["plan.md"]))
+
+    def test_push_paths_only_exclude_always_only_files(self):
+        tracked = subprocess.check_output(["git", "ls-files"], cwd=ROOT, text=True).split()
+        always = set(ci_plan.ALWAYS)
+        for wf_name in ("ci.yml", "kernel-abi.yml"):
+            patterns = push_paths(ROOT / ".github" / "workflows" / wf_name)
+            self.assertTrue(patterns and patterns[0] == "**", wf_name)
+            mismatched = []
+            for p in tracked:
+                if not matches_push_paths(p, patterns):
+                    extra = sorted(jobs([p]) - always)
+                    if extra:
+                        mismatched.append((p, extra))
+            self.assertEqual(
+                mismatched,
+                [],
+                f"{wf_name} push paths filter excludes files with non-always jobs",
+            )
 
     def test_ci_inputs_force_full(self):
         for p in (".github/workflows/ci.yml", "lean/lean-toolchain",
