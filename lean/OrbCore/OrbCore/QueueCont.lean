@@ -887,6 +887,23 @@ inductive ContinuationActOutcome where
   | superseded
   deriving Repr
 
+/-- A new turn is starting at `nextGen`. "An ordinary follow-up does not cancel the next
+    wake-up" (docs/SCHEDULED_CONTINUATIONS.md): wake-ups armed at the mission's current
+    generation move to the new one. Wake-ups from an older generation stay fenced and are
+    superseded, as is a pending empty-turn retry, which the new turn replaces.
+    `query` is the locked or in-transaction query function of the caller. -/
+def carryArmedWakeupsForward
+    (query : String → Array String → IO (Except String (Array (Array String))))
+    (missionId : String) (nextGen : Nat) (nowIso : String) : IO Unit := do
+  discard <| query
+    ("UPDATE mission_continuations SET run_generation=CAST(?2 AS INTEGER), updated_at=?3 WHERE mission_id=?1 AND phase=1 " ++
+     "AND COALESCE(source,'')<>'empty-turn-retry' AND run_generation<CAST(?2 AS INTEGER) " ++
+     "AND run_generation=(SELECT COALESCE(run_generation,1) FROM missions WHERE id=?1);")
+    #[missionId, s!"{nextGen}", nowIso]
+  discard <| query
+    "UPDATE mission_continuations SET phase=3, error='stale_run_generation', updated_at=?3 WHERE mission_id=?1 AND phase=1 AND run_generation<CAST(?2 AS INTEGER);"
+    #[missionId, s!"{nextGen}", nowIso]
+
 def actOnContinuation
     (st : CoreStore) (contId action nowAt : String) (nowEpoch : UInt64) : IO (Except String ContinuationActOutcome) :=
   withImmediateTx st.missionsDb do

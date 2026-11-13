@@ -1259,9 +1259,7 @@ partial def submitRemoteMissionTurn
         store.missionsDb runId spec.missionId s!"{nextGen}" "running" "" jobId nowIso true
         s!"remote-job:{jobId}" s!"remote-node:{effTarget}"
       if let .error e := insRun then return .error e
-      discard <| execParamQueryUnlocked store.missionsDb
-        "UPDATE mission_continuations SET phase=3, error='stale_run_generation', updated_at=?3 WHERE mission_id=?1 AND phase=1 AND run_generation<CAST(?2 AS INTEGER);"
-        #[spec.missionId, s!"{nextGen}", nowIso]
+      carryArmedWakeupsForward (execParamQueryUnlocked store.missionsDb) spec.missionId nextGen nowIso
       execParamQueryUnlocked store.missionsDb
         ("UPDATE missions SET status='active', terminal_reason='remote_node_job', placement_job_id=?2, " ++
          "run_generation=CAST(?3 AS INTEGER), state_revision=state_revision+1, updated_at=?4 WHERE id=?1;")
@@ -1477,7 +1475,7 @@ def tickContinuationScheduler
      "WHERE phase = 1 AND (" ++
      "  (trigger_kind = 'time' AND due_epoch <= CAST(?1 AS INTEGER)) OR " ++
      "  trigger_kind = 'durable_job_terminal'" ++
-     ") ORDER BY due_epoch ASC LIMIT 32;")
+     ") ORDER BY due_epoch ASC LIMIT 256;")
     #[s!"{nowSec}"]
   let .ok rows := dueRes | return 0
   if rows.size ≤ 1 then return 0

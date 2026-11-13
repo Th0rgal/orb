@@ -102,6 +102,21 @@ def run : IO Unit := do
         "an abandoned wake-up is retired with a stated error"
       check ((← cellOf store.missionsDb "SELECT COUNT(*) FROM mission_events WHERE mission_id='m-wk-job' AND event_type='user_message';" #[]) == "2")
         "one transcript entry per wake-up, not per attempt"
+      -- An ordinary follow-up turn keeps the next wake-up; older generations stay fenced.
+      let .ok _ ← execParamQuery store.missionsDb
+          ("INSERT INTO missions(id,title,status,backend,working_directory,project,placement_kind,tags,run_generation,node_boot_epoch,created_at,updated_at) " ++
+           "VALUES('m-follow','wakeup','awaiting_user','claudecode','','','managed','[]',3,1,'t0','t0');") #[]
+        | throw (IO.userError "follow-up mission insert failed")
+      for (cid, gen, phase, source) in #[("f-keep", "3", "1", "mcp"), ("f-old", "2", "1", "mcp"),
+          ("f-retry", "3", "1", "empty-turn-retry"), ("f-fired", "3", "2", "mcp")] do
+        let .ok _ ← execParamQuery store.missionsDb
+            ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,error,recurrence,stop_after_first,created_at,updated_at) " ++
+             "VALUES(?1,'m-follow',CAST(?2 AS INTEGER),CAST(?3 AS INTEGER),1900000000,'time','test','continue',?1,'',?4,'','',1,'t0','t0');") #[cid, gen, phase, source]
+          | throw (IO.userError "follow-up continuation insert failed")
+      OrbCore.QueueCont.carryArmedWakeupsForward (execParamQuery store.missionsDb) "m-follow" 4 "t1"
+      check ((← cellOf store.missionsDb "SELECT group_concat(id || ':' || run_generation || ':' || phase, ' ') FROM (SELECT * FROM mission_continuations WHERE mission_id='m-follow' ORDER BY id);" #[])
+          == "f-fired:3:2 f-keep:4:1 f-old:2:3 f-retry:3:3")
+        "a follow-up turn carries the armed wake-up forward and fences the rest"
     finally
       closeCoreStore store
   finally

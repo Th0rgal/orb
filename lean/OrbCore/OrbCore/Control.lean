@@ -1639,9 +1639,7 @@ private def launchLocalCoreMissionTurn
     match prevSt? with
     | some s => max (dbGen + 1) (s.generation + 1)
     | none => if sessionId?.isSome then dbGen + 1 else dbGen
-  discard <| execParamQuery st.store.missionsDb
-    "UPDATE mission_continuations SET phase=3, error='stale_run_generation', updated_at=?3 WHERE mission_id=?1 AND phase=1 AND run_generation<CAST(?2 AS INTEGER);"
-    #[missionId, s!"{nextGen}", ts]
+  carryArmedWakeupsForward (execParamQuery st.store.missionsDb) missionId nextGen.toNat ts
   discard <| execParamQuery st.store.missionsDb
     "UPDATE missions SET status='active', run_generation=CAST(?2 AS INTEGER), state_revision=state_revision+1, updated_at=?3 WHERE id=?1;"
     #[missionId, s!"{nextGen}", ts]
