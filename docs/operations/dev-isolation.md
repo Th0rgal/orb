@@ -39,6 +39,13 @@ Never print response bodies that could contain secrets or existing transcripts.
 Record route/tool, response status, pass/fail, build SHA and fixture integrity.
 No live test has been certified by this document.
 
+Account switches clear remote missions, projects and fleet state before the next
+read, including the data sent to the native desktop sidebar. Failed member reads
+must never retain the previous administrator's snapshot under the member's scope.
+`tenant-switch.browser.spec.ts` replays admin-to-member switching with failed
+catalog reads in both HTML and native-bridge modes. This local browser regression
+does not substitute for the live desktop acceptance above.
+
 Legacy rows without a recorded owner stay operator data. Members see only their
 own managed snapshot metadata; snapshot creation and deletion check the source
 machine before any provider or vault access. Provider inventory without a verified

@@ -674,6 +674,13 @@ export default function App() {
   const [projectFolders, setProjectFolders] = createSignal<Record<string, string[]>>({});
   const [projectFiles, setProjectFiles] = createSignal<Record<string, string[]>>({});
   createEffect(on(connectionVersion, () => {
+    // A new endpoint or account owns a new snapshot. Never merge the previous
+    // user's remote state into it while waiting for successful reads.
+    setMissions([]);
+    setMissionsLoading(true);
+    setLiveProjects([]);
+    setFleetNodes([]);
+    setRemoteLaunch({ state: "loading", capability: null });
     setProjectMissions({});
     setProjectFolders({});
     setProjectFiles({});
@@ -865,7 +872,7 @@ export default function App() {
   // Keyed on the connection only: the body reads selected()/newMachine()/
   // fleetNodes(), and tracking those made every fleet poll re-run the
   // effect, which re-polled the fleet — an endless fetch loop.
-  createEffect(on(isConnected, (connected) => {
+  createEffect(on([isConnected, connectionVersion], ([connected]) => {
     if (connected) {
       const syncCachedProjects = peekCachedProjects();
       if (rawLiveProjects().length === 0 && syncCachedProjects && syncCachedProjects.length > 0) {
