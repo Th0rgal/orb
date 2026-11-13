@@ -569,6 +569,19 @@ that mission; the coordinator will write its id here before asking. The
 operator running `scripts/dev_user_isolation.py` itself (operator request 1)
 needs no grant and stays the shortest path.
 
+**Update 23:27 UTC.**
+
+- Merged: #1745 as `2b06d8a199c31dc1cc9ef5178bf96758036ae6fc` (member sibling routes, sidecar parked logins, overview correction). Its CI ran on a base before #1749; master CI on `2b06d8a1` is the first combined build and was still running at 23:25Z.
+- Open, waiting for CI:
+  - #1751 (`c3d79bd1`): a mission whose model chain is cooling for more than 60 s now ends its turn with a reason instead of staying silent. `Test` passed, `kernel-abi` pending at 23:25Z.
+  - #1752 (`19fe8ace`): a close-delimited stream cut off by a timeout, a read error or a TCP close without TLS `close_notify` is no longer reported complete. Worker-tested on `b6afa205`; this is the same two commits on `2b06d8a1`. Known limit: on a plain-TCP (loopback) upstream a connection reset after the socket polled readable still counts as a clean end.
+  - #1753 (`d3953b32`): the member provider toggle reply no longer carries the admin's per-model rate limits; tests pin the exact member field set on provider rows. The coordinator resolved a conflict with #1745 in `TenantIsolationTests.lean` (both blocks kept); that file is first compiled by this PR's CI.
+- Provider row ids: Core never builds an id from an email, account name or login file name (worker trace: new rows get `prov-<epoch>-<seq>` unless an admin supplies an id; `ai_providers.json` ids are copied as stored; login never creates a row). Operator request 2 (yes/no per live `id`) is still the only way to rule out a hand-typed id.
+- Browser fixture kernel race: closed without a PR. Two patches are kept on nimrud (`keep/fixture-kernel-init-42.patch`, sha256 `e5e771e6…d6a0`, 42 files under `orb/tests`; `keep/fixture-kernel-ready-promise.patch`, sha256 `c2a68970…419b`, 3 files), base `eb2791e5`. Evidence: `approval-queue`, `smooth-send`, `mermaid` repeated 3 times with both patches, `84 passed` (log read by the coordinator). Not run: both full shards with both patches together. The slow-network run (51 failed) proved nothing: the 3 s delay broke unrelated real-app tests. Master shards are green without the patches, so nothing is published; reopen only if the `Shared kernel is not initialized` failure returns.
+- Isolation worker (`6fa970f7`): its provider patch `g-provider-identity-only-0da01d9e.patch` is rejected (does not apply after #1742, the leak is already fixed, its member shape drops `id`/`name` and breaks the toggle, never compiled). It will not be deployed. Its `orb-env` patch is superseded by the per-key policy on master. All four patches are preserved on nimrud; none is applied.
+- Managed VM `a474d57a` stopped at 23:25Z (disk kept about 24 h). It reached its 12-hour limit at 00:12Z, so a later dev grant needs a successor mission on another node.
+- No deploy request yet: no master tip after `e43a808d` has both CI and Kernel ABI green.
+
 **Still open, no owner.** Track A / #1708; lean.ci PR #34 fence review
 (interdiff unread, lean runners stay on hold); isolation acceptance and
 managed-lifecycle live validation (need the `dev_operator` grant
