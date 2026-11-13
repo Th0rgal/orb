@@ -4951,7 +4951,7 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let .ok () ← setUserManagedPref mStore "managed-pref-missing-user" "leanci" true "operator-pref-test"
     | return (← fail "missing-user preference fixture failed")
   let missingUser ← operatorCall directOperator "spawn_managed_machine" "managed-pref-missing-user" true
-  if operatorErrorCode missingUser != some "user_unavailable" ||
+  if operatorErrorCode missingUser != some "forbidden" ||
       (← operatorObservations.get) != 0 then
     return (← fail "managed preference principal must not bypass the owning-user guard")
   let storedCatalog ← operatorCall storedOperator "list_managed_machines"

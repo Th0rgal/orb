@@ -124,6 +124,9 @@ private def gatewayTests (root : String) : IO Unit := do
     let .ok mc ← openManagedComputeStore s!"{root}/harvest-managed.db"
       | throw (IO.userError "harvest managed open failed")
     try
+      let .ok _ ← execParamQuery store.missionsDb
+          "INSERT INTO users(id,username,password_hash,role) VALUES('alice','alice','synthetic-hash','member');" #[]
+        | throw (IO.userError "harvest user fixture failed")
       let now : UInt64 := 1000
       let fleet : ManagedFleetState := { enabled := true, boatEnabled := true, dailyCapCents := 100000 }
       let workspace := s!"{root}/harvest-workspace"

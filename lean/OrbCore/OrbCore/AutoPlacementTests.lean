@@ -42,6 +42,7 @@ private def gatewayTests (root : String) : IO Unit := do
       match ← execParamQuery store.missionsDb query args with
       | .ok rows => pure rows
       | .error e => throw (IO.userError s!"auto placement: fixture query failed: {e}")
+    discard <| sql "INSERT INTO users(id,username,password_hash,role) VALUES('alice','alice','synthetic-hash','admin');"
     for (id, parent, tags) in #[("pareto", "", "[\"exclude-node:Ashur\"]"), ("worker", "pareto", "[]"),
         ("free", "", "[]"), ("legacy", "", "[\"remote-node:auto\"]")] do
       discard <| sql "INSERT INTO missions(id,parent_mission_id,owner_user_id,project,tags) VALUES(?1,NULLIF(?2,''),'alice','p',?3);"

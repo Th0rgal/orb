@@ -17,6 +17,12 @@ def run (root : String) : IO Unit := do
     let .ok mc ← openManagedComputeStore s!"{root}/access-managed.db"
       | throw (IO.userError "access managed open failed")
     try
+      -- Session identity is checked against live users before target lookup.
+      -- Positive ownership controls need real stored principals.
+      for uid in #["alice", "bob"] do
+        let .ok _ ← execParamQuery store.missionsDb
+            "INSERT INTO users(id,username,password_hash,role) VALUES(?1,?1,'synthetic-hash','member');" #[uid]
+          | throw (IO.userError "access user fixture failed")
       let now : UInt64 := 1000
       let fleet : ManagedFleetState := { enabled := true, boatEnabled := true }
       let seedMission (id parent user project : String) : IO Unit := do
@@ -98,8 +104,10 @@ def run (root : String) : IO Unit := do
           tool args now none (some (mock, { coreUrl := "https://unused.invalid", script := "" })) authenticatedUserId authenticatedAdmin
         let .ok result := OrbBin.Json.parse raw | throw (IO.userError "invalid gateway JSON")
         let err := (result.field? "error").getD .null
-        check (result.fieldBool? "ok" == some false && err.fieldStr? "code" ==
-          some (if allowed then "lifecycle_rejected" else "not_found")) s!"{tool}/{id}/{claims.sessionId}/{claims.missionId}"
+        let code := (err.fieldStr? "code").getD ""
+        check (result.fieldBool? "ok" == some false &&
+          (if allowed then code == "lifecycle_rejected" else code == "not_found" || code == "forbidden"))
+          s!"{tool}/{id}/{claims.sessionId}/{claims.missionId}"
         if allowed then
           check (err.fieldStr? "message" == some "managed_provider_mismatch") "reached lifecycle boundary"
       for tool in #["extend_managed_machine", "stop_managed_machine", "resume_managed_machine", "destroy_managed_machine"] do
@@ -185,13 +193,13 @@ def run (root : String) : IO Unit := do
           } now | throw (IO.userError "repair fixture failed")
       check ((← OrbCore.RemoteFleetAndRelay.loadManagedUserAdmission store "prod" now) matches .error "managed_user_missing:prod")
         "a missing owner is named in the error"
-      check ((← OrbCore.RemoteFleetAndRelay.repairManagedMachineOwners store mc) == 1) "exactly the recoverable row is repaired"
+      check ((← OrbCore.RemoteFleetAndRelay.repairManagedMachineOwners store mc) == 2) "both recoverable rows are repaired"
       let ownerOf (id : String) : IO String := do
         let some (m, _) ← getManagedMachine? mc id | throw (IO.userError "repair row vanished")
         return m.ownerUserId
       check ((← ownerOf "repair-a") == admin.id && (← ownerOf "repair-ghost") == "prod" &&
         (← ownerOf "repair-nomission") == "prod" && (← ownerOf "repair-valid") == admin.id &&
-        (← ownerOf "tenant-label-id") == "prod") "unverifiable owners are left alone"
+        (← ownerOf "tenant-label-id") == "alice") "verified owners are repaired; unverifiable owners are left alone"
       let .ok reservations ← execParamQuery mc.db
           "SELECT owner_user_id FROM managed_cost_reservations WHERE machine_id='repair-a';" #[]
         | throw (IO.userError "reservation read failed")

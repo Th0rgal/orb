@@ -28,6 +28,8 @@ def run (root : String) : IO Unit := do
       let .ok rows ← execParamQuery store.missionsDb q params
         | throw (IO.userError "settings fixture query failed")
       return rows
+    for uid in #["alice", "bob"] do
+      discard <| sql "INSERT INTO users(id,username,password_hash,role) VALUES(?1,?1,'synthetic-hash','member');" #[uid]
     for (id, parent, owner, project) in #[
         ("parent", "", "alice", "p"), ("rest", "parent", "alice", "p"),
         ("mcp", "parent", "alice", "p"), ("grandchild", "mcp", "alice", "p"),
