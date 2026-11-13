@@ -838,7 +838,9 @@ private def applyMissionInterrupt
     return .ok ()
 
 /-- Hosted Stop: interrupt + run-generation fence + continuation/outbox/queue revocation inside ONE `BEGIN IMMEDIATE` transaction. -/
-def hostedStop (st : CoreStore) (missionId nowAt : String) : IO (Except String UInt64) :=
+def hostedStop (st : CoreStore) (missionId nowAt : String)
+    (terminalReason : String := "hosted_stop")
+    (onlyWhenRunning : Bool := false) : IO (Except String UInt64) :=
   withImmediateTx st.missionsDb do
     let rows ← execParamQueryUnlocked st.missionsDb
       "SELECT status,superseded_by_mission_id,COALESCE(owner_epoch,1),COALESCE(state_revision,0),COALESCE(not_before,0),COALESCE(resume_intent,0),COALESCE(run_generation,1) FROM missions WHERE id=?1;"
@@ -846,6 +848,8 @@ def hostedStop (st : CoreStore) (missionId nowAt : String) : IO (Except String U
     let .ok rs := rows | return .error "interrupt_select_failed"
     if rs.size ≤ 1 then return .error "mission_not_found"
     let status := cell (rs[1]!) 0
+    if onlyWhenRunning && status != "active" && status != "pending" then
+      return .error s!"interrupt_rejected:{status}"
     let superseded : UInt8 := if (cell (rs[1]!) 1).isEmpty then 0 else 1
     let ownerEpoch := cellNat (rs[1]!) 2 |>.toUInt64
     let stateRev := cellNat (rs[1]!) 3 |>.toUInt32
@@ -864,17 +868,18 @@ def hostedStop (st : CoreStore) (missionId nowAt : String) : IO (Except String U
     if nextState.stateRevision == 0xFFFFFFFF then return .error "state_revision_overflow"
     let nextGen := curGen + 1
     let nextRev := nextState.stateRevision + 1
+    let effReason := if terminalReason.trimAscii.toString.isEmpty then "hosted_stop" else terminalReason
     let upd ← execParamQueryUnlocked st.missionsDb
-      "UPDATE missions SET status='interrupted',terminal_reason='hosted_stop',not_before=0,resume_intent=0,run_generation=?2,state_revision=?3,updated_at=?4 WHERE id=?1 AND status=?5 AND COALESCE(state_revision,0)=CAST(?6 AS INTEGER) AND COALESCE(run_generation,1)=CAST(?7 AS INTEGER);"
-      #[missionId, s!"{nextGen}", s!"{nextRev}", nowAt, status, s!"{stateRev}", s!"{curGen}"]
+      "UPDATE missions SET status='interrupted',terminal_reason=?8,not_before=0,resume_intent=0,run_generation=?2,state_revision=?3,updated_at=?4 WHERE id=?1 AND status=?5 AND COALESCE(state_revision,0)=CAST(?6 AS INTEGER) AND COALESCE(run_generation,1)=CAST(?7 AS INTEGER);"
+      #[missionId, s!"{nextGen}", s!"{nextRev}", nowAt, status, s!"{stateRev}", s!"{curGen}", effReason]
     if let .error e := upd then return .error e
     let ch ← execParamQueryUnlocked st.missionsDb "SELECT changes();" #[]
     let .ok crs := ch | return .error "interrupt_changes_failed"
     if changesOf crs == 0 then return .error "interrupt_cas_lost"
     let isoNow := normalizeContinuationIso8601 nowAt
     let _ ← execParamQueryUnlocked st.missionsDb
-      "UPDATE mission_runs SET execution_state='terminal',terminal_reason='hosted_stop',updated_at=?2 WHERE mission_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted');"
-      #[missionId, isoNow]
+      "UPDATE mission_runs SET execution_state='terminal',terminal_reason=?3,updated_at=?2 WHERE mission_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted');"
+      #[missionId, isoNow, effReason]
     match ← revokeContinuationsUnlocked st missionId nowAt true with
     | .error e => return .error e
     | .ok _ => return .ok nextGen
