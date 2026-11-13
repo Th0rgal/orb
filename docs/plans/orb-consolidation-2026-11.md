@@ -9,11 +9,12 @@ dev/prod), whose handoffs are at the top of their plan documents in this folder.
 
 ## How the work is run
 
-- One orchestrator (Claude Code, Fable 5.2). It keeps the task board, reviews
+- One orchestrator (opencode, `builtin/genius`; mission
+  `b8062114-2687-43fe-9c75-e6ca123694f6`). It keeps the task board, reviews
   and merges; it does not write feature code itself.
 - Workers are child missions (`builtin/smart` on opencode by default), each on
   **its own managed VM** (`auto-managed:<provider>:<size>`, Boat or lean.ci) so
-  Lean builds never share a build slot. At most 5 writers at once, one per
+  Lean builds never share a build slot. At most 6 writers at once, one per
   track, one branch per bounded change. Destroy VMs when a worker ends.
 - Merge policy today: a worker merges its own PR once its local CI-parity build
   and self-test pass; GitHub CI is checked afterwards and any red master is the
@@ -102,6 +103,91 @@ test, a fix, a deploy, and a re-test. This extends track E's isolation test.
 - `orb-env migrate` reports ~80 "shared setting differences" between prod and
   dev env files; it needs a way to classify one-sided keys instead of failing.
 
+## Task board — 13 Nov 12:14 UTC
+
+Launch receipts report all six workers active on distinct Boat large VMs, with
+requested and effective backend/model `opencode` / `builtin/smart`. These are
+launch attestations, not completed build, merge or live acceptance evidence.
+All tracks remain open. The orchestrator owns this document; workers report
+bounded artifacts and do not rewrite this board.
+
+| Track | Mission UUID | Managed machine UUID | Owned files/sections and dependency | State / evidence |
+| --- | --- | --- | --- | --- |
+| A | `35cd3390-5a58-4cd7-8444-172a84d5faa8` | `0f88c8f6-084e-46a3-89ad-29aa52d300de` | Build script, turbo-lean pin/upstream soundness fix | Public HTTPS source/build proceeding; SSH clone fails host-key verification and gh has no auth; push/PR/merge blocked; full build not yet demonstrated |
+| B | `36bddaa5-fcc4-4fbf-a78a-b717e1e198a7` | `f9444f29-2b15-49f4-ad81-37346c0844e5` | `.github/**`, `scripts/ci*`, `ci/**`, CI proposal; B.1 waits A | Active B.2 tested opt-in routing preparation, Ubuntu default/fork fallback and public 20-PR baseline; private lean.ci clone/auth runner checks and signed publication blocked by absent provisioned identity; B.1 waits A |
+| C | `816f574f-6e85-4d3a-8123-8429f10e86b3` | `21fa6dec-b7d5-4b8a-9ab3-12f7a3218af4` | Managed REST/lifecycle sections and managed UI/models on desktop/iOS/Android | Active; regression-first REST extend, provider gating, ready/epoch contracts on three clients; live dev→prod and Mac validation depend on E+G; access/slot not established |
+| D | `95ad3d8d-5af8-4228-943d-509baa9394d8` | `6b6d2464-4997-42e1-b6d4-00b5fbb61264` | Proxy/Control downstream streaming sections, OrbNetLeaf TLS, streaming tests | Active RUN-07; public HTTPS clone succeeded, SSH host verification/gh auth block publication; bundle fallback; VM expires 15:12:52Z; no streaming acceptance claimed |
+| E+G | `6fa970f7-8799-4c80-a312-f7884efc21f4` | `a474d57a-39d7-4b0f-a447-5f7f888de185` | Environment/settings ops, principal/security/MCP admission; sole live deployment owner; real Linux desktop ben test | Active; live agent-core inspection/authority required before changes |
+| F | Orchestrator | None | Governed Hindsight writes after track acceptance | Pending; no track closed |
+| H | `11a48ddf-fb0b-49b4-8c42-2bd95518b296` | `7ca70124-a137-4aab-ba1d-9a584333ffa1` | Proxy account-health/provider-auth sections, fast launch errors, obsolete locald palette RPC | Active branch `fix/h-provider-health` base `de3fd0fa1`; reports legacy-ref-only health route and missing synthetic account/tracker handling (source-derived, not independently accepted); TTL 15:12:52Z; live evidence requested from E |
+
+Shared Core files have section-level ownership, not permission for broad rewrites.
+Each worker must report branch/PR/last pushed SHA; none exists at launch.
+Read-only independent scope review: `24b8c6f7-7e24-4769-ac1d-f2163171fe81`,
+requested/effective `opencode` / `builtin/smart`, no managed build slot.
+Quorum is degraded to the reachable builtin chain; no cross-family vote claimed.
+
+### Initial reconciliation / blockers
+
+- Master read at `de3fd0fa`: parity handoff in #1723 merge `a34d76da`, recovery
+  handoff `566dd2d6`, provider handoff `de3fd0fa` are present. The environment
+  plan has no handoff heading, so its implementation ledger was read instead.
+- Old parity mission full ID was source-resolved as
+  `68e2a387-6c45-400d-a88a-7f0c6c2e37b3`. Read was forbidden, but its cancellation
+  was accepted (action `858f0f12-5692-419e-9def-6248012376fb`). Terminal health
+  and wake-up cancellation still require verification. Other three full IDs and
+  environment handoff publication remain to resolve; do not invent UUIDs.
+- Coordinator has no provisioned Git author/signing profile or `gh` login.
+  Public clone succeeds; master CI inspection failed at `gh` authentication.
+  `git diff --check` passed for this document; the requested small commit failed
+  with `Author identity unknown` (exit 128), so no commit or push is claimed.
+  Publication and independent CI checks are blocked until provisioned transport
+  is available. No key/token workaround or invented CI result is permitted.
+- Installed ops skill references are absent. Repository runbooks were read as
+  fallback; runtime JIT/dev grant availability is not yet established. User
+  deployment authority does not itself supply an operational credential.
+- No unrelated project mission or machine was changed. No deployment performed
+  by this coordinator. Reconcile live state before any deployment repetition.
+
+C coordination: E+G UUID supplied to C; request forwarded to E+G for sanctioned
+live access, exact-SHA rental/UI checks, resource cleanup and Mac validation.
+No Mac slot or live bearer has been established; Linux/source checks cannot
+substitute for native iOS execution.
+
+B independently confirms no GitHub identity/signing configuration; public reads
+work but private `lfglabs-dev/lean.ci` clone requires authentication. Generic
+upstream repairs and authenticated runner/cache/warm-base acceptance remain
+blocked. Prepare opt-in routing with Ubuntu default/fork fallback and public
+baseline evidence without claiming an upstream fix or runner validation.
+
+## Operator requests
+
+No new deployment requested yet. Future entries must give an exact SHA, dev or
+prod target, verification command and result; do not repeat an in-flight deploy.
+E+G to supply exact multi-user dev configuration and checked-in environment-key
+classification before operator application. No hand-edited production env.
+
+### Operator update — 13 Nov, after 12:18 UTC
+
+- Operator reports dev at `de3fd0fa1`, self-test 11/10/101 green and healthy at
+  12:18 UTC; prod deployment is underway, not yet confirmed complete. These are
+  operator reports, not independent coordinator live verification.
+- Environment migration is not applied: 65 prod-only, 10 dev-only, 11 differing
+  keys. Await operator's pushed key-name inventory; E owns explicit checked-in
+  classification (`shared`, `instance-owned`, `prod-only-allowed`).
+- Dev is currently `auth_mode: single_tenant`; G requires operator-applied
+  multi-user configuration before its isolation acceptance can run.
+- Operator reports parity/Boat/provider completed with handoffs on master
+  (`a34d76da8`, `566dd2d62`, `de3fd0fa1`). Dev/prod mission `9382ef4d` still
+  writing handoff: cancellation must wait for its published commit.
+- Trusted nimrud integrator is authorized to retrieve `GITHUB_TOKEN`, use it
+  only via local private file/process environment for gh and HTTPS Git, and
+  set the documented development author identity. Signing unavailable: unsigned
+  publication explicitly permitted with disclosure. No credentials to managed VMs.
+- Broker retrieval of `GITHUB_TOKEN` is **pending**, request
+  `e0a36684-bd02-4c3b-ba9e-7253bf56eb23`; no usable secret path delivered yet.
+  Workers continue local checks and produce harvestable patch/bundle artifacts.
+
 ## Decision log
 
 | When (UTC) | Decision | Why |
@@ -114,3 +200,20 @@ test, a fix, a deploy, and a re-test. This extends track E's isolation test.
 | 13 Nov 12:08 | Cancelled the stuck turns of ldgr (`b6934223`) and Pareto (`8a349331`) and re-sent Thomas's last question with "answer once, no wake-ups, no children, stop" | He wants the answer and to continue manually |
 | 13 Nov 12:10 | Orchestrator runs on opencode with the `genius` chain instead of Claude Code + Fable | Claude Code needs Anthropic, which is refused until the quota resets or Thomas signs in again; `genius` returns to Fable by itself when it recovers |
 | 13 Nov 12:10 | CLIProxyAPI not restarted to clear the parked Claude credential | It would cut the streams of ~20 running missions, and the quota park is probably real |
+| 13 Nov 12:14 | Use six isolated Boat large workers, requested/effective opencode builtin/smart | Latest explicit instruction allows six writers; separate VM per build; no Anthropic selection |
+| 13 Nov 12:14 | E+G is the only deploy executor; C/D/H request live checks through it | Avoid simultaneous orb-deploy and duplicate dev/prod operations; inspect live state first |
+| 13 Nov 12:14 | Assign orb-env one-sided-key handling to E rather than H | E owns environment migration, preventing a second writer on the same script |
+| 13 Nov 12:14 | Keep A build-script/pin ownership separate from B workflow ownership, and B.1 dependent on A | Avoid landing no-fallback CI before the soundness root fix works |
+| 13 Nov 12:14 | Use section-local changes in shared Control/Proxy modules and exact-revision review before acceptance | Six tracks cannot have disjoint files throughout this backend; broad rewrites would conflict |
+| 13 Nov 12:14 | Record credential and runtime-grant gaps as blocked; do not change Git config, fabricate signatures, or extract fleet/provider credentials | Explicit autonomy is not evidence of provisioned operational access; preserve security boundaries |
+| 13 Nov 12:14 | Start independent read-only scope review using reachable builtin/smart and record degraded quorum | Anthropic unavailable; no independent family execution has been established |
+| 13 Nov 12:14 | Request old parity cancellation after confirming its handoff on master; retain wake-up/health verification as open | Read ACL refused but cancellation accepted; an action receipt alone does not prove complete cleanup |
+| 13 Nov, A transport update | A continues public HTTPS clone/build, preserving local commits or a harvestable git bundle; publication remains blocked | Worker independently confirms SSH host-key verification failure, no gh auth or provisioned Git transport; do not disable host-key checking or introduce credentials |
+| 13 Nov, D transport update | D continues local RUN-07/RUN-05 transport implementation, preserving a bundle before 15:12:52Z expiry | HTTPS clone succeeds but SSH host verification and gh auth fail; keep H account/error sections untouched and retain publication as blocked |
+| 13 Nov, C coordination update | Route C live rental/UI checks and Mac validation request through E+G; keep native iOS verification pending | One deployment owner prevents overlapping promotions; no sanctioned live access or Mac validation slot established yet |
+| 13 Nov, H coordination update | Ask E+G for sanitized parked-quota schema and exact-SHA health/dispatch/startup-error evidence; cooldown-clear mutations restricted to test-owned fixtures | Verify H's source findings without restarting CLIProxyAPI or un-parking a real exhausted credential; H transport and orb-env exclusions preserved |
+| 13 Nov, B provisioning update | Keep lean.ci runner routing opt-in with Ubuntu default/fork fallback; report private upstream and authenticated runner checks as blocked | B independently lacks GitHub/signing identity and cannot clone private lean.ci; routing tests do not establish runner/cache/warm-base operation; B.1 remains dependent on A |
+| 13 Nov, operator unblocking update | Centralize bundle integration/publication on trusted nimrud, request GITHUB_TOKEN through broker, permit documented author config and disclosed unsigned commits if signing unavailable | Operator explicitly authorizes this exception; managed VMs intentionally remain credential-free; secret retrieval currently pending |
+| 13 Nov, operator unblocking update | Route unavailable host effects through exact-SHA Operator requests instead of SSH; treat reported dev deploy as evidence and prod as in progress | Missions cannot SSH agent-core; prevent duplicate deployments and retain runtime-grant boundaries |
+| 13 Nov, operator unblocking update | Implement checked-in environment-key classification before migration; request exact multi-user dev config through E+G | Existing migration refuses 65 prod-only/10 dev-only/11 different keys; do not hand-edit prod env or test multi-user claims on single-tenant dev |
+| 13 Nov, operator unblocking update | Wait for dev/prod mission handoff commit before cancellation; prior three handoffs are reported complete | Preserve final delivery; completed report is not an independently verified wake-up cleanup receipt |
