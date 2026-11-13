@@ -2,10 +2,21 @@ import { describe, expect, it } from "vitest";
 import { ApiError } from "../src/api";
 import { machineOwner, reapLine, allowedSizes, budgetLine, managedNodeIds, estimateCost, isManagedNode, liveCost, managedError, minutesLabel, recentMachines, ttlLeft, ttlUrgent, usd, usdPerHour, type ManagedMachine } from "../src/managedMachineModel";
 import { ttlChoices } from "../src/ManagedMachines";
+import { canExtendMachine } from "../src/managedMachineModel";
 
 const now = Date.parse("2026-10-21T12:00:00Z");
 const machine = (over: Partial<ManagedMachine>): ManagedMachine => ({ id: "a", provider: "boat", provider_id: "p", node_id: "managed-a", image: "img", size: "small", cpu: 2, ram_gb: 4,
   state: "online", created_at: "2026-10-21T11:00:00Z", expires_at: "2026-10-21T13:00:00Z", cost_usd: 0.1, usd_per_hour: 0.12, ledger_closed: false, ...over });
+
+describe("managed lifecycle capabilities", () => {
+  it("replays ready provider records without granting unsupported actions", () => {
+    expect(canStopMachine(machine({ state: "ready", provider: "boat" }))).toBe(true);
+    expect(canStopMachine(machine({ state: "ready", provider: "leanci" }))).toBe(false);
+    expect(canExtendMachine(machine({ state: "ready", provider: "leanci" }))).toBe(false);
+    expect(canExtendMachine(machine({ state: "ready", provider: "colab" }))).toBe(true);
+    expect(canExtendMachine(machine({ state: "stopped", provider: "boat" }))).toBe(false);
+  });
+});
 
 describe("managed machine formatting", () => {
   it("formats money", () => {

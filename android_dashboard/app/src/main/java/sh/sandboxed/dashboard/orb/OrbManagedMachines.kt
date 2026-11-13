@@ -484,6 +484,7 @@ fun OrbManagedMachinesBlock(
                                     busy = busyId == m.id,
                                     muted = false,
                                     canStop = OrbManagedMachines.canStop(m, d.providers),
+                                    canExtend = OrbManagedMachines.canExtend(m, d.providers),
                                     onExtend = { extend(m) },
                                     onStop = { stop(m) },
                                     onResume = {},
@@ -786,6 +787,7 @@ private fun ManagedMachineRow(
     busy: Boolean,
     muted: Boolean,
     canStop: Boolean,
+    canExtend: Boolean = false,
     onExtend: () -> Unit,
     onStop: () -> Unit,
     onResume: () -> Unit,
@@ -793,7 +795,7 @@ private fun ManagedMachineRow(
     onDetails: () -> Unit
 ) {
     val dot = when (m.state) {
-        "online" -> OrbStyle.success
+        "online", "ready" -> OrbStyle.success
         "failed" -> OrbStyle.error
         "destroyed" -> OrbStyle.textMuted
         else -> OrbStyle.warning
@@ -918,14 +920,14 @@ private fun ManagedMachineRow(
                             Icon(Icons.Default.MoreVert, contentDescription = "Actions", tint = secondary, modifier = Modifier.size(18.dp))
                         }
                         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                            DropdownMenuItem(text = { Text("Extend +1 h") }, onClick = { open = false; onExtend() })
+                            if (canExtend) DropdownMenuItem(text = { Text(if (m.provider == "colab") "Extend Core TTL +1 h (runtime not guaranteed)" else "Extend +1 h") }, onClick = { open = false; onExtend() })
                             if (canStop) DropdownMenuItem(text = { Text("Stop") }, onClick = { open = false; onStop() })
                             DropdownMenuItem(text = { Text("Destroy", color = OrbStyle.error) }, onClick = { open = false; onDestroy() })
                         }
                     }
                 } else {
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        ManagedPill("+1 h", OrbStyle.inboxBlue, busy, onExtend)
+                        if (canExtend) ManagedPill(if (m.provider == "colab") "Core TTL +1 h" else "+1 h", OrbStyle.inboxBlue, busy, onExtend)
                         if (canStop) ManagedPill("Stop", OrbStyle.textSecondary, busy, onStop, quiet = true)
                         ManagedPill("Destroy", OrbStyle.error.copy(alpha = 0.85f), busy, onDestroy, quiet = true)
                     }

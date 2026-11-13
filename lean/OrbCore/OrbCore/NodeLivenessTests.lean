@@ -81,6 +81,11 @@ private def fleetTests (root : String) : IO Unit := do
     let some (small, _) ← getManagedMachine? mc "fresh" | throw (IO.userError "liveness machine missing")
     let .ok item := OrbBin.Json.parse (renderManagedMachineItemJson small) | throw (IO.userError "machine JSON invalid")
     check (item.fieldNat? "cpu" == some 2 && item.fieldNat? "ram_gb" == some 4) "the machine record reports its real size"
+    check (item.fieldStr? "created_at" == some (formatEpochIso8601Utc small.createdAtSec) &&
+      item.fieldStr? "expires_at" == some (formatEpochIso8601Utc small.expiresAtSec) &&
+      item.fieldStr? "deletable_at" == some (formatEpochIso8601Utc small.deletableAtSec) &&
+      item.fieldNat? "expires_at_sec" == some small.expiresAtSec.toNat)
+      "client ISO timestamps and epoch compatibility fields describe the same lease"
     check (managedUsdPerHourJson "boat" "small" == "0.01800" && managedUsdPerHourJson "boat" "xlarge" == "0.20000" &&
       managedUsdPerHourJson "boat" "no-such-size" == "null") "the hourly price is the declared rate"
     let some (unknown, _) ← getManagedMachine? mc "odd" | throw (IO.userError "liveness machine missing")

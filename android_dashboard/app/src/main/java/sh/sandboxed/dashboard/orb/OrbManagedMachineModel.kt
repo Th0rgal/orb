@@ -85,7 +85,8 @@ data class ManagedProviderInfo(
     val region: String? = null,
     val projectId: String? = null,
     val maxConcurrent: Int? = null,
-    val availability: ManagedProviderAvailability? = null
+    val availability: ManagedProviderAvailability? = null,
+    val supportsExtend: Boolean? = null
 )
 
 data class ManagedProviderGroup(
@@ -176,6 +177,7 @@ object OrbManagedMachines {
             configured = OrbJSON.bool(d, "configured") ?: false,
             supportsSnapshots = OrbJSON.bool(d, "supports_snapshots") ?: false,
             supportsFreeStop = OrbJSON.bool(d, "supports_free_stop") ?: false,
+            supportsExtend = OrbJSON.bool(d, "supports_extend"),
             sizes = OrbJSON.dictList(d["sizes"]).mapNotNull { parseSize(it) },
             enabled = globallyEnabled,
             globallyEnabled = globallyEnabled,
@@ -491,7 +493,7 @@ object OrbManagedMachines {
     private fun stateKind(state: String): Int = when (state) {
         "provisioning" -> 0
         "enrolling" -> 1
-        "online" -> 2
+        "online", "ready" -> 2
         "destroying" -> 3
         "destroyed" -> 4
         "failed" -> 5
@@ -511,8 +513,14 @@ object OrbManagedMachines {
     fun canResume(m: ManagedMachine, busy: Boolean = false): Boolean =
         OrbKernel.machineActionAdmitted(stateKind(m.state), isBusy = busy).canResume
 
+    fun canExtend(m: ManagedMachine, providers: List<ManagedProviderInfo> = emptyList()): Boolean {
+        if (m.state != "online" && m.state != "ready") return false
+        val p = m.provider ?: "boat"
+        return providers.firstOrNull { it.provider == p }?.supportsExtend ?: (p == "boat" || p == "colab")
+    }
+
     fun canStop(m: ManagedMachine, providers: List<ManagedProviderInfo> = emptyList()): Boolean {
-        if (m.state != "online") return false
+        if (m.state != "online" && m.state != "ready") return false
         val p = m.provider ?: "boat"
         return providers.firstOrNull { it.provider == p }?.supportsFreeStop ?: (p == "boat")
     }
@@ -570,7 +578,7 @@ object OrbManagedMachines {
     fun providerGroupSummary(machines: List<ManagedMachine>): String {
         val running = machines.filter { isLive(it) }
         val rate = machines
-            .filter { it.state == "online" || it.state == "provisioning" || it.state == "enrolling" }
+            .filter { it.state == "online" || it.state == "ready" || it.state == "provisioning" || it.state == "enrolling" }
             .sumOf { it.usdPerHour }
         if (running.isNotEmpty()) {
             return "${running.size} running" + if (rate > 0.0) " · ${usdPerHour(rate)}" else ""
@@ -653,7 +661,7 @@ object OrbManagedMachines {
 
     /** Cost so far, extrapolated between polls so it ticks with the countdown. */
     fun liveCost(m: ManagedMachine, fetchedAt: Long, now: Long): Double {
-        if (m.state != "online" && m.state != "enrolling" && m.state != "provisioning") return m.costUsd
+        if (m.state != "online" && m.state != "ready" && m.state != "enrolling" && m.state != "provisioning") return m.costUsd
         val until = minOf(now, parseTime(m.expiresAt) ?: now)
         return m.costUsd + maxOf(0L, until - fetchedAt) / 3_600_000.0 * m.usdPerHour
     }
@@ -661,7 +669,7 @@ object OrbManagedMachines {
     fun stateLabel(s: String): String = when (s) {
         "provisioning" -> "Provisioning"
         "enrolling" -> "Enrolling"
-        "online" -> "Online"
+        "online", "ready" -> "Online"
         "destroying" -> "Destroying…"
         "destroyed" -> "Destroyed"
         "failed" -> "Failed"

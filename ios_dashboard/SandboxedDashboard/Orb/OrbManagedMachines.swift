@@ -92,6 +92,7 @@ struct OrbManagedProviderInfo: Codable, Equatable, Identifiable, Sendable {
     var max_concurrent: Int?
     var availability: OrbManagedProviderAvailability?
     var supports_snapshots: Bool
+    var supports_extend: Bool? = nil
     var supports_free_stop: Bool
     var sizes: [OrbManagedSize]
     var id: String { provider }
@@ -264,7 +265,7 @@ enum OrbManaged {
         switch state {
         case "provisioning": 0
         case "enrolling": 1
-        case "online": 2
+        case "online", "ready": 2
         case "destroying": 3
         case "destroyed": 4
         case "failed": 5
@@ -286,10 +287,16 @@ enum OrbManaged {
     }
 
     static func canStop(_ m: OrbManagedMachine, providers: [OrbManagedProviderInfo]? = nil) -> Bool {
-        guard m.state == "online" else { return false }
+        guard m.state == "online" || m.state == "ready" else { return false }
         let p = m.provider ?? "boat"
         if let info = providers?.first(where: { $0.provider == p }) { return info.supports_free_stop }
         return p == "boat"
+    }
+
+    static func canExtend(_ m: OrbManagedMachine, providers: [OrbManagedProviderInfo]? = nil) -> Bool {
+        guard m.state == "online" || m.state == "ready" else { return false }
+        let p = m.provider ?? "boat"
+        return providers?.first(where: { $0.provider == p })?.supports_extend ?? (p == "boat" || p == "colab")
     }
 
     static func providerLabel(_ provider: String?) -> String {
@@ -345,7 +352,7 @@ enum OrbManaged {
     static func providerGroupSummary(_ machines: [OrbManagedMachine]) -> String {
         let running = machines.filter(isLive)
         let rate = machines
-            .filter { $0.state == "online" || $0.state == "provisioning" || $0.state == "enrolling" }
+            .filter { $0.state == "online" || $0.state == "ready" || $0.state == "provisioning" || $0.state == "enrolling" }
             .reduce(0.0) { $0 + $1.usd_per_hour }
         if !running.isEmpty {
             return "\(running.count) running" + (rate > 0 ? " · \(usdPerHour(rate))" : "")
@@ -489,7 +496,7 @@ enum OrbManaged {
         return m.cost_usd + max(0, until.timeIntervalSince(fetchedAt)) / 3600 * m.usd_per_hour
     }
     static func stateLabel(_ s: String) -> String {
-        ["provisioning": "Provisioning", "enrolling": "Enrolling", "online": "Online", "destroying": "Destroying…", "destroyed": "Destroyed", "failed": "Failed", "stopped": "Stopped"][s] ?? s
+        ["provisioning": "Provisioning", "enrolling": "Enrolling", "online": "Online", "ready": "Online", "destroying": "Destroying…", "destroyed": "Destroyed", "failed": "Failed", "stopped": "Stopped"][s] ?? s
     }
     static func number(_ v: Double) -> String { v == v.rounded() ? String(Int(v)) : String(v) }
     static func sizeSpec(cpu: Double, ramGB: Double, diskGB: Double? = nil) -> String {
@@ -711,7 +718,9 @@ struct OrbManagedMachinesSection: View {
                             if OrbManaged.canStop(machine, providers: response.providers), let onStop {
                                 Button("Stop") { onStop(machine) }.tint(.orange).disabled(!canAct(machine))
                             }
-                            Button("+1 h") { onExtend(machine) }.tint(.accentColor).disabled(!canAct(machine))
+                            if OrbManaged.canExtend(machine, providers: response.providers) {
+                                Button(machine.provider == "colab" ? "Core TTL +1 h" : "+1 h") { onExtend(machine) }.tint(.accentColor).disabled(!canAct(machine))
+                            }
                         }
                         .contextMenu { menu(machine, live: true) }
                         .accessibilityIdentifier("managed.machine.\(machine.id)")
@@ -811,8 +820,10 @@ struct OrbManagedMachinesSection: View {
     /// Long-press details: the raw reason, node and error live here, never inline.
     @ViewBuilder private func menu(_ m: OrbManagedMachine, live: Bool) -> some View {
         if live {
-            Button("Extend 1 h", systemImage: "clock.arrow.circlepath") { onExtend(m) }.disabled(!canAct(m))
-                .accessibilityIdentifier("managed.extend")
+            if OrbManaged.canExtend(m, providers: response.providers) {
+                Button(m.provider == "colab" ? "Extend Core TTL 1 h (runtime not guaranteed)" : "Extend 1 h", systemImage: "clock.arrow.circlepath") { onExtend(m) }.disabled(!canAct(m))
+                    .accessibilityIdentifier("managed.extend")
+            }
             if OrbManaged.canStop(m, providers: response.providers), let onStop {
                 Button("Stop", systemImage: "pause.circle") { onStop(m) }.disabled(!canAct(m))
                     .accessibilityIdentifier("managed.stop")
@@ -932,7 +943,7 @@ struct OrbManagedMachineRow: View {
 
     static func statusColor(_ state: String) -> Color {
         switch state {
-        case "online": OrbStyle.success
+        case "online", "ready": OrbStyle.success
         case "provisioning", "enrolling": OrbStyle.warning
         case "failed": OrbStyle.error
         default: OrbStyle.textMuted
