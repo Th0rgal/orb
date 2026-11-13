@@ -16,6 +16,7 @@ import OrbCore.LegacyHydrate
 import OrbCore.ProviderUsageAndLogin
 import OrbCore.RemoteFleetAndRelay
 import OrbCore.Skills
+import OrbCore.AutoPlacement
 
 namespace OrbCore.RemoteDispatch
 
@@ -414,6 +415,40 @@ structure RemoteTurnSpec where
   coordinatorPrio    : Bool := false
   rawCommandOverride?: Option String := none
   deriving Repr
+
+/-- Remote execution uses the stored tenant's Linux identity and a dedicated
+    node or that tenant's VM. Static metadata is Core configuration, never tool
+    arguments; aliases and control-plane labels cannot bypass the placement gate. -/
+def authorizeRemotePlacement (mc? : Option ManagedComputeStore) (owner : UserRecord)
+    (target : String) (nodes : Array StaticRemoteNode) : IO (Except String Unit) := do
+  if owner.disabled then return .error "remote_owner_unavailable"
+  if owner.role == "admin" then return .ok ()
+  let node? := nodes.find? (·.id == target)
+  let managed := node?.isNone && target.startsWith "managed-"
+  let targetKind : UInt8 := if node?.isSome then 2 else if managed then 3 else 0
+  let adminOnly : UInt8 := if (node?.map OrbCore.AutoPlacement.reserved).getD (!managed) then 1 else 0
+  let validUx : UInt8 := if (owner.unixUsername?.map validUnixUsername).getD false then 1 else 0
+  unless Orb.Kernel.placementRoleAdmit 0 targetKind adminOnly validUx == 1 do
+    return .error "remote_placement_forbidden"
+  if managed then
+    let some mc := mc? | return .error "remote_placement_forbidden"
+    let some (machine, _) ← getManagedMachine? mc (target.drop 8).toString
+      | return .error "remote_placement_forbidden"
+    unless machine.ownerUserId == owner.id do return .error "remote_placement_forbidden"
+  return .ok ()
+
+/-- A call site omitting `ownerUserId` must never mint admin MCP/proxy/node
+    credentials for a member's mission. Bind it before any credential or host I/O. -/
+def bindRemoteTurnOwner (store : CoreStore) (mc? : Option ManagedComputeStore)
+    (spec : RemoteTurnSpec) (target : String) (nodes : Array StaticRemoteNode) : IO (Except String RemoteTurnSpec) := do
+  let some mission ← getMission? store spec.missionId | return .error "remote_mission_missing"
+  unless spec.ownerUserId.isEmpty || spec.ownerUserId == mission.ownerUserId do
+    return .error "remote_owner_mismatch"
+  let ownedSpec := { spec with ownerUserId := mission.ownerUserId }
+  if mission.ownerUserId.isEmpty then return .ok ownedSpec
+  let some owner ← getUserById? store mission.ownerUserId | return .error "remote_owner_unavailable"
+  if let .error error ← authorizeRemotePlacement mc? owner target nodes then return .error error
+  return .ok ownedSpec
 
 structure PreparedRemoteCommand where
   command     : String
@@ -1163,6 +1198,9 @@ partial def submitRemoteMissionTurn
 
   -- Resolve node auth `(leaseNodeId, nodeSecret)` so we can sign the HMAC `job:submit` lease token
   let (_, staticNodes) ← loadStaticRemoteNodes
+  let spec ← match ← bindRemoteTurnOwner store mc? spec effTarget staticNodes with
+    | .ok owned => pure owned
+    | .error error => return .error error
   let (leaseNodeId, nodeSecret) ← do
     if let some sn := staticNodes.find? (fun n => n.id == effTarget) then
       let some tok ← resolveStaticNodeToken? sn
@@ -1183,6 +1221,8 @@ partial def submitRemoteMissionTurn
 
   let jobId ← newUuidV4
   let ownerUser? ← if spec.ownerUserId.isEmpty then pure none else getUserById? store spec.ownerUserId
+  unless spec.ownerUserId.isEmpty || (ownerUser?.map (fun u => !u.disabled)).getD false do
+    return .error "remote_owner_unavailable"
   let callerRole :=
     match ownerUser? with
     | some u => if u.role == "member" then "member" else "admin"

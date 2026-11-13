@@ -684,7 +684,7 @@ def buildComputeFleetJVal
   let visibleMachines :=
     match callerUserId? with
     | none => fleet.machines
-    | some uid => fleet.machines.filter (fun m => m.ownerUserId == uid || m.ownerUserId.isEmpty)
+    | some uid => fleet.machines.filter (fun m => m.ownerUserId == uid)
   let mut managedItems : Array JVal := #[]
   for m in visibleMachines do
     if m.status != "destroyed" then
@@ -1288,11 +1288,15 @@ def callBoatApi
   | .ok (st, txt, jv?) =>
     return .ok (st, jv?.getD (.obj #[("raw", .str txt)]))
 
-def listManagedSnapshotsJson (mc : ManagedComputeStore) (dataRoot : String) : IO JVal := do
+def listManagedSnapshotsJson (mc : ManagedComputeStore) (dataRoot : String)
+    (callerUserId? : Option String := none) : IO JVal := do
   ensureManagedSnapshotsTable mc
   let mut localSnaps : Array JVal := #[]
   if let .ok rows ← execParamQuery mc.db
-      "SELECT id,name,provider,source_machine_id,status,size_gb,created_at FROM managed_snapshots ORDER BY created_at DESC;" #[] then
+      ("SELECT s.id,s.name,s.provider,s.source_machine_id,s.status,s.size_gb,s.created_at " ++
+       "FROM managed_snapshots s LEFT JOIN managed_machines m ON m.id=s.source_machine_id " ++
+       "WHERE (?1='0' OR m.owner_user_id=?2) ORDER BY s.created_at DESC;")
+      #[if callerUserId?.isSome then "1" else "0", callerUserId?.getD ""] then
     for i in [1:rows.size] do
       let r := rows[i]!
       localSnaps := localSnaps.push (.obj #[
@@ -1304,13 +1308,14 @@ def listManagedSnapshotsJson (mc : ManagedComputeStore) (dataRoot : String) : IO
         ("size_gb", JVal.uint64 (cellU64 r 5)),
         ("created_at", .str (cell r 6))
       ])
-  -- Merge live Boat snapshots if Boat API responds quickly
-  if let .ok (200, bJv) ← callBoatApi dataRoot "GET" "/snapshots" none 4000 then
-    let remoteArr := (bJv.fieldArr? "snapshots").orElse (fun _ => bJv.asArr?) |>.getD #[]
-    for rs in remoteArr do
-      let rid := (rs.fieldStr? "id").getD ""
-      if !rid.isEmpty && !localSnaps.any (fun ls => (ls.fieldStr? "id") == some rid) then
-        localSnaps := localSnaps.push rs
+  -- Provider inventory has no verified tenant owner. Only the operator may see it.
+  if callerUserId?.isNone then
+    if let .ok (200, bJv) ← callBoatApi dataRoot "GET" "/snapshots" none 4000 then
+      let remoteArr := (bJv.fieldArr? "snapshots").orElse (fun _ => bJv.asArr?) |>.getD #[]
+      for rs in remoteArr do
+        let rid := (rs.fieldStr? "id").getD ""
+        if !rid.isEmpty && !localSnaps.any (fun ls => (ls.fieldStr? "id") == some rid) then
+          localSnaps := localSnaps.push rs
   return .obj #[("snapshots", .arr localSnaps)]
 
 def createManagedSnapshot
@@ -1430,6 +1435,8 @@ def dispatchRemoteFleetAndRelayRoutes?
     IO (Option (Nat × String × ByteArray)) := do
   let segs := (cleanPath.splitOn "/").filter (!·.isEmpty)
   let scopedUid? : Option String := if isLegacyUnscoped then none else some callerUserId
+  let canManageMachine := fun (m : ManagedMachine) =>
+    isAdmin || isLegacyUnscoped || (!callerUserId.isEmpty && m.ownerUserId == callerUserId)
 
   -- 1. Public node bootstrap binary download (`GET /api/managed-machines/bootstrap-binary/:id`)
   if method == "GET" && segs.length == 4 &&
@@ -1491,11 +1498,12 @@ def dispatchRemoteFleetAndRelayRoutes?
 
     if segs == ["api", "managed-machines", "settings"] then
       if method == "GET" then
+        let (_, userComputeSpent) ← getUserSpentTodayCents store callerUserId (nowIso.take 10).toString
         return some (jsonResp 200 (.obj #[
           ("enabled", .bool fleet.enabled),
           ("boat_enabled", .bool fleet.boatEnabled),
           ("daily_cap_cents", JVal.uint64 fleet.dailyCapCents),
-          ("spent_today_cents", JVal.uint64 fleet.spentTodayCents),
+          ("spent_today_cents", JVal.uint64 (if isAdmin || isLegacyUnscoped then fleet.spentTodayCents else userComputeSpent)),
           ("max_concurrent", JVal.uint64 fleet.maxConcurrent)
         ]))
       else if method == "PUT" || method == "POST" || method == "PATCH" then
@@ -1551,16 +1559,28 @@ def dispatchRemoteFleetAndRelayRoutes?
 
     if segs == ["api", "managed-machines", "snapshots"] then
       if method == "GET" then
-        return some (jsonResp 200 (← listManagedSnapshotsJson mc store.rootDir))
+        return some (jsonResp 200 (← listManagedSnapshotsJson mc store.rootDir
+          (if isAdmin || isLegacyUnscoped then none else some callerUserId)))
       else if method == "POST" then
         let jv := (OrbBin.Json.parse ((String.fromUTF8? bodyBytes).getD "{}")).toOption.getD (.obj #[])
         let mid := (jv.fieldStr? "machine_id").getD ""
         let sName := (jv.fieldStr? "name").getD ""
+        let some (m, _) ← getManagedMachine? mc mid
+          | return some (jsonErr 404 "managed_machine_not_found")
+        unless canManageMachine m do return some (jsonErr 404 "managed_machine_not_found")
         match ← createManagedSnapshot mc store.rootDir mid sName nowIso with
         | .ok sv => return some (jsonResp 201 sv)
         | .error e => return some (jsonErr 400 e)
 
     if method == "DELETE" && segs.length == 4 && segs[2]? == some "snapshots" then
+      if !isAdmin && !isLegacyUnscoped then
+        ensureManagedSnapshotsTable mc
+        let .ok rows ← execParamQuery mc.db
+            ("SELECT m.owner_user_id FROM managed_snapshots s JOIN managed_machines m ON m.id=s.source_machine_id " ++
+             "WHERE s.id=?1;") #[segs[3]!]
+          | return some (jsonErr 404 "managed_snapshot_not_found")
+        unless rows.size > 1 && !callerUserId.isEmpty && cell rows[1]! 0 == callerUserId do
+          return some (jsonErr 404 "managed_snapshot_not_found")
       let ok ← deleteManagedSnapshot mc store.rootDir segs[3]!
       return some (jsonResp 200 (.obj #[("ok", .bool ok)]))
 
@@ -1571,16 +1591,19 @@ def dispatchRemoteFleetAndRelayRoutes?
         match ← getManagedMachine? mc sub2 with
         | none => return some (jsonErr 404 "managed_machine_not_found")
         | some (m, _) =>
-          if !isAdmin && !isLegacyUnscoped && !m.ownerUserId.isEmpty && m.ownerUserId != callerUserId then
+          if !canManageMachine m then
             return some (jsonErr 404 "managed_machine_not_found")
           return some (jsonRawResp 200 (renderManagedMachineItemJson m))
       else if method == "GET" && segs.length == 4 && segs[3]? == some "operations" then
+        let some (m, _) ← getManagedMachine? mc sub2
+          | return some (jsonErr 404 "managed_machine_not_found")
+        unless canManageMachine m do return some (jsonErr 404 "managed_machine_not_found")
         return some (jsonResp 200 (.obj #[("operations", .arr #[])]))
       else if method == "POST" && segs.length == 4 then
         let action := segs[3]!
         let some (m, _) ← getManagedMachine? mc sub2
           | return some (jsonErr 404 "managed_machine_not_found")
-        if !isAdmin && !isLegacyUnscoped && !m.ownerUserId.isEmpty && m.ownerUserId != callerUserId then
+        if !canManageMachine m then
           return some (jsonErr 404 "managed_machine_not_found")
         let jv := (OrbBin.Json.parse ((String.fromUTF8? bodyBytes).getD "{}")).toOption.getD (.obj #[])
         if action == "extend" then
@@ -1624,7 +1647,7 @@ def dispatchRemoteFleetAndRelayRoutes?
       else if method == "DELETE" && segs.length == 3 then
         let some (m, _) ← getManagedMachine? mc sub2
           | return some (jsonErr 404 "managed_machine_not_found")
-        if !isAdmin && !isLegacyUnscoped && !m.ownerUserId.isEmpty && m.ownerUserId != callerUserId then
+        if !canManageMachine m then
           return some (jsonErr 404 "managed_machine_not_found")
         match ← runConfiguredManagedLifecycle mc { store, fleet := defaultFleet, override? := providerOverride? } m.id "destroy" nowEpochSec with
         | .error e => return some (jsonErr 409 e)

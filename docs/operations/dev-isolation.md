@@ -39,6 +39,18 @@ Never print response bodies that could contain secrets or existing transcripts.
 Record route/tool, response status, pass/fail, build SHA and fixture integrity.
 No live test has been certified by this document.
 
+Legacy rows without a recorded owner stay operator data. Members see only their
+own managed snapshot metadata; snapshot creation and deletion check the source
+machine before any provider or vault access. Provider inventory without a verified
+local owner is visible only to the operator. Fleet settings return a member's own
+usage, and global board task keys cannot overwrite another project's tasks.
+
+Remote dispatch binds the mission's stored owner before minting MCP, model-proxy
+or node credentials. A missing or disabled owner fails closed. Member placement
+requires that user's stored Linux identity and a dedicated fleet node or their
+own VM; control-plane node labels remain authoritative. The MCP create path uses
+the same placement check even for missions created without an initial prompt.
+
 The initial live REST/MCP probe is `scripts/dev_user_isolation.py`. It requires
 the exact tested SHA and an already-approved dev bearer in an owner-only local
 file; it does not obtain credentials. For example, from the checkout:

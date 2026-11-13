@@ -33,13 +33,22 @@ def run (root : String) : IO Unit := do
       sql store.missionsDb "INSERT INTO workspaces(id,name,path,owner_user_id) VALUES(?1,?1,?2,?3);"
         #[uid ++ "-workspace", path ++ "/" ++ uid ++ "-private-marker", uid]
     let fleet : ManagedFleetState := { enabled := true, boatEnabled := true, dailyCapCents := 5000, maxConcurrent := 10 }
+    -- Pre-cutover rows are operator data, never implicitly shared with members.
+    sql store.projectsDb "INSERT INTO projects(slug,name,objective) VALUES('legacy-project','admin-private-marker-legacy','legacy owner data');"
     let .ok () ← saveManagedFleetConfig mc true true 5000 0 10 | throw (IO.userError "isolation fleet")
+    let .ok _ ← provisionManagedMachine mc fleet {
+      id := "legacy-machine", sandboxName := "admin-private-marker-legacy", ownerUserId := "",
+      ownerKind := "user", spentCents := 0 } now | throw (IO.userError "isolation legacy machine")
     for uid in #["admin", "member"] do
       let .ok _ ← provisionManagedMachine mc fleet {
         id := uid ++ "-machine", sandboxName := uid ++ "-private-marker", ownerUserId := uid,
         ownerKind := "user", spentCents := 0 } now | throw (IO.userError "isolation machine")
       let .ok () ← addUserSpendCents store uid (currentUtcDay now) 0 (if uid == "admin" then 73 else 2)
         | throw (IO.userError "isolation usage")
+    sql mc.db "CREATE TABLE IF NOT EXISTS managed_snapshots (id TEXT PRIMARY KEY,name TEXT NOT NULL,provider TEXT NOT NULL DEFAULT 'boat',source_machine_id TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'ready',size_gb INTEGER NOT NULL DEFAULT 20,created_at TEXT NOT NULL DEFAULT '');"
+    for uid in #["admin", "member", "legacy"] do
+      sql mc.db "INSERT INTO managed_snapshots(id,name,source_machine_id) VALUES(?1,?2,?3);"
+        #[uid ++ "-snapshot", (if uid == "member" then "member" else "admin") ++ "-private-marker-snapshot", uid ++ "-machine"]
     let .ok loadedFleet ← loadManagedFleet mc true true 5000 0 10 | throw (IO.userError "isolation fleet load")
     let st : CoreAppState := {
       cfg := { instanceName := "dev", jwtSecret := "synthetic-isolation-jwt-not-a-live-secret", workingDir := path },
@@ -95,6 +104,25 @@ def run (root : String) : IO Unit := do
       let target := if method == "GET" then "/api/managed-machines/admin-machine" else "/api/managed-machines/admin-machine/stop"
       check ((← send method target member).1 == 404) "REST foreign machine read/action"
     check ((← send "GET" "/api/managed-machines/member-machine" member).1 == 200) "REST own machine"
+    for target in #["/api/managed-machines/legacy-machine", "/api/managed-machines/legacy-machine/operations"] do
+      check ((← send "GET" target member).1 == 404) "unowned legacy machine is operator-only"
+    check ((← send "POST" "/api/managed-machines/legacy-machine/stop" member).1 == 404)
+      "unowned legacy machine cannot be controlled by member"
+    -- Denials happen before provider lookup, mutation or any vault/network I/O.
+    let (snapStatus, snaps) ← send "GET" "/api/managed-machines/snapshots" member
+    check (snapStatus == 200 && ((renderCompact snaps).splitOn "admin-private-marker").length == 1 &&
+      ((renderCompact snaps).splitOn "member-snapshot").length > 1) "REST snapshot inventory has verified ownership"
+    check ((← send "POST" "/api/managed-machines/snapshots" member
+      (.obj #[("machine_id", .str "admin-machine"), ("name", .str "unauthorized-snapshot")])).1 == 404)
+      "foreign snapshot creation denied before provider"
+    for sid in #["admin-snapshot", "legacy-snapshot", "absent-snapshot"] do
+      check ((← send "DELETE" ("/api/managed-machines/snapshots/" ++ sid) member).1 == 404)
+        "foreign or unowned snapshot deletion denied before provider"
+    let .ok snapshots ← execParamQuery mc.db "SELECT COUNT(*) FROM managed_snapshots;" #[]
+      | throw (IO.userError "isolation snapshot verification")
+    check ((snapshots[1]?.bind (·[0]?)) == some "3") "denied snapshot operations leave fixtures intact"
+    let (_, memberSettings) ← send "GET" "/api/managed-machines/settings" member
+    check (memberSettings.fieldNat? "spent_today_cents" == some 2) "REST settings never disclose fleet usage to a member"
     for target in #["/api/managed-machines/providers/boat", "/api/managed-machines/settings"] do
       check ((← send "PUT" target member).1 == 403) s!"REST provider mutation {target}"
     -- Member dashboard bearer used to become an unconstrained MCP operator.
@@ -180,6 +208,45 @@ def run (root : String) : IO Unit := do
       "shared admin mission does not grant its owner's personal memory"
     let ownProject ← call member "get_project" (.obj #[("project", .str "member-project")])
     check (ownProject.fieldBool? "ok" == some true) "member retains own project access"
+    -- A global task-key collision must not overwrite the admin's board row,
+    -- even though the member legitimately owns the project named in the call.
+    sql store.missionsDb "INSERT INTO mission_board_tasks(task_key,project_slug,track,mission_id,attempt_seq,status) VALUES('admin-task','admin-project','private','admin-mission',0,'open');"
+    for tool in #["plan_tasks", "plan_project_tasks"] do
+      let task : JVal := .obj #[("task_key", .str "admin-task"), ("status", .str "done")]
+      let collision ← call member tool (.obj #[("project", .str "member-project"), ("tasks", .arr #[task])])
+      check (collision.fieldBool? "ok" == some false) "task-key collision cannot mutate a foreign project"
+      let foreignLink ← call member tool (.obj #[("project", .str "member-project"),
+        ("tasks", .arr #[task.setField "task_key" (.str "member-new-task") |>.setField "mission_id" (.str "admin-mission")])])
+      check (foreignLink.fieldBool? "ok" == some false) "member board cannot disclose a foreign mission through a link"
+    let .ok taskRows ← execParamQuery store.missionsDb
+      "SELECT mission_id,status FROM mission_board_tasks WHERE task_key='admin-task';" #[]
+      | throw (IO.userError "isolation task verification")
+    check (taskRows[1]? == some #["admin-mission", "open"]) "admin board survives denied task upserts"
+    -- No prompt is supplied: a bad placement must fail even for an inert MCP
+    -- create, before any machine rental, credential minting or job submission.
+    for node in #["agent-core", "sepolia", "managed-admin-machine", "managed-legacy-machine"] do
+      let denied ← call member "start_mission" (.obj #[("title", .str "denied placement"), ("remote_node_id", .str node)])
+      check (denied.fieldBool? "ok" == some false) s!"MCP cannot bypass placement authority: {node}"
+    let some memberRecord ← getUserById? store "member" | throw (IO.userError "member fixture disappeared")
+    let nodes : Array OrbCore.RemoteFleetAndRelay.StaticRemoteNode := #[{
+      id := "dedicated", baseUrl := "https://unused.invalid", tokenEnv := "SYNTHETIC_UNUSED_NODE_TOKEN" }]
+    let remoteSpec : OrbCore.RemoteDispatch.RemoteTurnSpec := {
+      missionId := "member-mission", targetNodeId := "dedicated", backend := "codex", prompt := "synthetic" }
+    let .ok owned ← OrbCore.RemoteDispatch.bindRemoteTurnOwner store (some mc) remoteSpec "dedicated" nodes
+      | throw (IO.userError "valid member remote placement rejected")
+    check (owned.ownerUserId == "member") "omitted dispatch owner is restored before minting any credentials"
+    check (!(← OrbCore.RemoteDispatch.bindRemoteTurnOwner store (some mc)
+      { remoteSpec with ownerUserId := "admin" } "dedicated" nodes).isOk) "dispatch cannot spoof another owner"
+    check (!(← OrbCore.RemoteDispatch.authorizeRemotePlacement (some mc)
+      { memberRecord with unixUsername? := none } "dedicated" nodes).isOk) "member needs a stored Linux identity"
+    check (!(← OrbCore.RemoteDispatch.authorizeRemotePlacement (some mc) memberRecord "dedicated"
+      (nodes.map (fun n => { n with labels := #["control-plane"] }))).isOk) "control-plane node labels are authoritative"
+    check ((← OrbCore.RemoteDispatch.authorizeRemotePlacement (some mc) memberRecord "managed-member-machine" nodes).isOk)
+      "member may use its own managed VM"
+    for tool in #["list_cloud_accounts", "list_mission_access"] do
+      check ((← call member tool).fieldBool? "ok" == some false) "direct member cannot enumerate owner account/grant metadata"
+    check ((← call sharedToken "list_mission_access").fieldBool? "ok" == some false)
+      "shared mission cannot disclose the owner's mission grants"
     let own ← call member "get_mission" (.obj #[("mission_id", .str "member-mission")])
     check (own.fieldBool? "ok" == some true) "member retains own mission access"
     let adm ← call admin "get_mission" foreign

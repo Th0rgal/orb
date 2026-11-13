@@ -425,10 +425,14 @@ def dispatchMcpToolCall
   -- Vault and host-approval state belong to the server owner. Members cannot
   -- inspect or enqueue owner actions, even with a self-selected operator role.
   let legacyOwner := !tenantScoped && (← getBootstrapAdmin? store).isNone
+  if tenantScoped && #["request_mission_access", "list_mission_access"].contains toolName &&
+      (!userIsAdmin || !callerMid.isEmpty) then
+    unless !callerMid.isEmpty && (← checkTenantMission callerMid false) do
+      return mcpErr "not_found" "Mission not found"
   if !userIsAdmin && !legacyOwner && (toolName.startsWith "secret_" ||
       #["list_privileged_access", "request_privileged_access", "revoke_privileged_access",
         "execute_privileged_command", "get_dev_access", "deploy_dev", "read_dev_logs",
-        "get_fleet_sweep", "reconcile_action"].contains toolName) then
+        "get_fleet_sweep", "reconcile_action", "list_cloud_accounts"].contains toolName) then
     return mcpErr "forbidden" "Administrator required"
   let projectTools := #["get_project", "get_situation", "update_project_status", "set_project_track",
     "accept_project_track_evidence", "reopen_project_track", "accept_project_track", "invalidate_project_track_evidence",
@@ -783,9 +787,19 @@ def dispatchMcpToolCall
     if isConsult && prompt.isEmpty then
       return mcpErr "invalid_request" "consult_model requires a non-empty `question`"
     let rawProj := (args.fieldStr? "project").getD callerProj
-    let effProj ← match checkProjectScope claims rawProj with
+    let checkedProj ← match checkProjectScope claims rawProj with
       | .ok p => pure p
       | .error e => return mcpErr "project_scope_violation" e
+    let effProj ← if !tenantScoped || checkedProj.isEmpty then pure checkedProj else do
+      let .ok rows ← execParamQuery store.projectsDb
+          "SELECT slug FROM project_owners WHERE slug=?1 AND owner_user_id=?2;" #[checkedProj, callerUserId]
+        | return mcpErr "db_error" "Project lookup failed"
+      if rows.size > 1 then pure checkedProj
+      else
+        let some scoped := scopeProjectSlug callerUserId
+          (((← getBootstrapAdmin? store).map (·.id)).getD "") checkedProj
+          | return mcpErr "invalid_arguments" "Invalid project"
+        pure scoped
     let folder := normalizeMissionFolder ((args.fieldStr? "folder").getD "")
     let rawBackend :=
       if toolName == "consult_model" then ((args.fieldStr? "backend").getD "opencode")
@@ -896,6 +910,11 @@ def dispatchMcpToolCall
       | .noneEligible =>
         releaseRented
         return mcpErr "placement_failed" "no_eligible_node" true
+    if let (some owner, some target) := (user?, inheritedRn?) then
+      let (_, nodes) ← loadStaticRemoteNodes
+      if let .error _ ← authorizeRemotePlacement mc? owner target nodes then
+        releaseRented
+        return mcpErr "placement_forbidden" "This execution target is unavailable to this user"
     let effWorkDir :=
       match (args.fieldStr? "working_directory").map (·.trimAscii.toString) |>.filter (!·.isEmpty) with
       | some wd => wd
@@ -929,6 +948,10 @@ def dispatchMcpToolCall
         #[mid, title, initStatus, backend, modelOv, effort, effWorkDir, effProj, folder, s!"{initRev}", parentMid, authMode, tagsJson, nowIso, s!"{store.bootEpoch}", callerUserId] then
       releaseRented
       return mcpErr "db_error" e
+    if tenantScoped && !effProj.isEmpty then
+      discard <| execParamQuery store.projectsDb
+        "INSERT OR IGNORE INTO project_owners(slug,owner_user_id,created_at) VALUES(?1,?2,?3);"
+        #[effProj, callerUserId, nowIso]
     -- The child owns the machine it was rented for; the caller is recorded as requester.
     if let (some mc, false) := (mc?, rentedMachineId.isEmpty) then
       discard <| execParamQuery mc.db
@@ -1522,13 +1545,24 @@ def dispatchMcpToolCall
       | .ok s => pure s
       | .error e => return mcpErr "project_scope_violation" e
     let tasksArr := (args.fieldArr? "tasks").getD #[]
+    -- Validate the complete batch before writing. Task keys are global in the
+    -- old schema; an upsert must not overwrite another project's task.
+    for t in tasksArr do
+      let mid := (t.fieldStr? "mission_id").getD ""
+      unless mid.isEmpty do
+        unless ← checkTenantMission mid false do return mcpErr "not_found" "Mission not found"
+      if let some key := (t.fieldStr? "task_key").orElse (fun _ => t.fieldStr? "key") then
+        let .ok rows ← execParamQuery store.missionsDb
+            "SELECT project_slug FROM mission_board_tasks WHERE task_key=?1;" #[key]
+          | return mcpErr "db_error" "Task lookup failed"
+        if rows.size > 1 && cell rows[1]! 0 != slug then return mcpErr "not_found" "Task not found"
     for t in tasksArr do
       let tKey ← match (t.fieldStr? "task_key").orElse (fun _ => t.fieldStr? "key") with | some k => pure k | none => newUuidV4
       let trk := (t.fieldStr? "track").getD "default"
       let mid := (t.fieldStr? "mission_id").getD ""
       let stVal := (t.fieldStr? "status").getD "open"
       discard <| execParamQuery store.missionsDb
-        "INSERT INTO mission_board_tasks(task_key,project_slug,track,mission_id,attempt_seq,status) VALUES(?1,?2,?3,?4,0,?5) ON CONFLICT(task_key) DO UPDATE SET track=excluded.track,mission_id=excluded.mission_id,status=excluded.status;"
+        "INSERT INTO mission_board_tasks(task_key,project_slug,track,mission_id,attempt_seq,status) VALUES(?1,?2,?3,?4,0,?5) ON CONFLICT(task_key) DO UPDATE SET track=excluded.track,mission_id=excluded.mission_id,status=excluded.status WHERE mission_board_tasks.project_slug=excluded.project_slug;"
         #[tKey, slug, trk, mid, stVal]
     let sit ← buildProjectSituationJVal store slug slug
     return mcpOk (.obj #[("ok", .bool true), ("tasks", (sit.field? "tasks").getD (.arr #[]))])

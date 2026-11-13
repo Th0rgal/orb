@@ -177,7 +177,7 @@ def listProjectsJVal
       let color := cell r 5
       let ownerUid := cell r 6
       let visible :=
-        isLegacyUnscoped || ownerUid.isEmpty || ownerUid == callerUserId ||
+        isLegacyUnscoped || ownerUid == callerUserId ||
         (callerUserId == bootstrapAdminId && !rawSlug.contains ':')
       if visible then
         let rawClientSlug := unscopeProjectSlug callerUserId rawSlug
