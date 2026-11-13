@@ -435,6 +435,62 @@ def run (root : String) : IO Unit := do
       (memberUsageDoc.field? "organization").isNone &&
       (memberUsageDoc.field? "organization_id").isNone)
       "member provider usage keeps quota windows without account identity"
+    -- `/api/model-routing/health*` must never expose sidecar auth file names or emails to any role.
+    let .ok () ← upsertAIProvider store {
+      id := "iso-claude-oauth", providerType := "anthropic", name := "Owner Personal Claude",
+      enabled := true, apiKey := "cli-proxy-managed"
+    } | throw (IO.userError "isolation oauth provider")
+    let (scFd, scPort) ← IO.ofExcept (← LeanSys.Posix.tcpListen "127.0.0.1" 0 8)
+    let priorScBase ← IO.getEnv "CLAUDE_CODE_PROXY_BASE_URL"
+    let priorScKey ← IO.getEnv "CLI_PROXY_MANAGEMENT_KEY"
+    OrbBin.PosixExt.setenvVar "CLAUDE_CODE_PROXY_BASE_URL" s!"http://127.0.0.1:{scPort}"
+    OrbBin.PosixExt.setenvVar "CLI_PROXY_MANAGEMENT_KEY" "fixture-isolation-mgmt"
+    let scStop ← IO.mkRef false
+    let scBody := "{\"files\":[{\"name\":\"claude-owner-secret.json\",\"provider\":\"claude\",\"email\":\"owner-secret@example.com\",\"disabled\":false,\"status\":\"error\",\"cooldowns\":[{\"scope\":\"credential\",\"reason\":\"credential_quota\",\"retry_at\":\"2026-11-14T00:00:00Z\",\"remaining_seconds\":7200}]}]}"
+    let hydratedWithOauth : JVal := .arr ((hydratedJson.asArr?.getD #[]).push (.obj #[
+      ("id", .str "iso-claude-oauth"),
+      ("provider_type", .str "anthropic"),
+      ("name", .str "Owner Personal Claude"),
+      ("enabled", .bool true),
+      ("account_email", .str "owner-secret@example.com"),
+      ("oauth", .obj #[("access_token", .str "fixture-only-no-live-access")])
+    ]))
+    IO.FS.writeFile (System.FilePath.mk (store.rootDir ++ "/ai_providers.json")) (renderCompact hydratedWithOauth)
+    let scTask ← IO.asTask (prio := .dedicated) do
+      while !(← scStop.get) do
+        match ← LeanSys.Posix.tcpAcceptPoll scFd 50 with
+        | .ok client =>
+          discard <| LeanSys.Posix.readStreamChunk client 8192
+          discard <| LeanSys.Posix.writeAll client
+            s!"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {scBody.utf8ByteSize}\r\nConnection: close\r\n\r\n{scBody}".toUTF8
+          discard <| LeanSys.Posix.closeFd client
+        | .error _ => pure ()
+    try
+      for (roleLbl, bearer) in #[("admin", admin), ("member", member)] do
+        let (hSt, hDoc) ← send "GET" "/api/model-routing/health" bearer (.obj #[]) stWithProviders
+        let hRaw := renderCompact hDoc
+        let hRow := ((hDoc.asArr?.getD #[]).find? (fun v => v.fieldStr? "account_id" == some "iso-claude-oauth")).getD .null
+        check (hSt == 200 &&
+          hRow.fieldUInt64? "cooldown_secs_remaining" == some 7200 &&
+          hRow.fieldStr? "parked_until" == some "2026-11-14T00:00:00Z" &&
+          hRow.fieldStr? "parked_reason" == some "credential_quota" &&
+          (hRaw.splitOn "claude-owner-secret.json").length == 1 &&
+          (hRaw.splitOn "owner-secret@example.com").length == 1 &&
+          (hRaw.splitOn provEmailMarker).length == 1)
+          s!"model-routing health exposes parked state without file name or email ({roleLbl})"
+      check ((← send "POST" "/api/model-routing/health/iso-claude-oauth/clear" member (.obj #[]) stWithProviders).1 == 403)
+        "member cannot clear model-routing health"
+    finally
+      IO.FS.writeFile (System.FilePath.mk (store.rootDir ++ "/ai_providers.json")) (renderCompact hydratedJson)
+      scStop.set true
+      discard <| IO.wait scTask
+      discard <| LeanSys.Posix.closeFd scFd
+      match priorScBase with
+      | some v => OrbBin.PosixExt.setenvVar "CLAUDE_CODE_PROXY_BASE_URL" v
+      | none => OrbBin.PosixExt.unsetenvVar "CLAUDE_CODE_PROXY_BASE_URL"
+      match priorScKey with
+      | some v => OrbBin.PosixExt.setenvVar "CLI_PROXY_MANAGEMENT_KEY" v
+      | none => OrbBin.PosixExt.unsetenvVar "CLI_PROXY_MANAGEMENT_KEY"
     -- Disabling/deleting an issuer must stop every previously minted session,
     -- including an external session with no mission id and a shared mission.
     for update in #["UPDATE users SET disabled=1 WHERE id='member';", "DELETE FROM users WHERE id='member';"] do

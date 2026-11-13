@@ -321,6 +321,283 @@ private def healthCooldownOwners (app : CoreAppState) (jwt : String)
   cooldownsRef.set #[]
   return #[]
 
+/-- Scriptable sidecar for `/v0/management/auth-files` and `PATCH /v0/management/auth-files/status`.
+    `delayMs` holds the response open so the 2-second timeout can be checked; `handler` returns
+    `(httpStatus, jsonBody)` given `(reqLine, reqBody)`. -/
+private def mockSidecarAuthFiles
+    (fd : LeanSys.Posix.Fd)
+    (delayMs : IO.Ref UInt32)
+    (handler : IO.Ref (String → String → IO (Nat × String)))
+    (stop : IO.Ref Bool) : IO (Task (Except IO.Error (Array (String × String)))) :=
+  IO.asTask (prio := .dedicated) do
+    let mut seen : Array (String × String) := #[]
+    while !(← stop.get) do
+      match ← LeanSys.Posix.tcpAcceptPoll fd 50 with
+      | .ok client =>
+        let raw := String.fromUTF8! (← LeanSys.Posix.readStreamChunk client 16384)
+        let reqLine := (raw.splitOn "\r\n").headD ""
+        let reqBody := match raw.splitOn "\r\n\r\n" with
+          | _ :: rest => String.intercalate "\r\n\r\n" rest
+          | [] => ""
+        seen := seen.push (reqLine, reqBody)
+        let d ← delayMs.get
+        if d > 0 then IO.sleep d
+        let fn ← handler.get
+        let (st, body) ← fn reqLine reqBody
+        let stText := if st == 200 then "200 OK" else s!"{st} Error"
+        discard <| LeanSys.Posix.writeAll client
+          s!"HTTP/1.1 {stText}\r\nContent-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\nConnection: close\r\n\r\n{body}".toUTF8
+        discard <| LeanSys.Posix.closeFd client
+      | .error _ => pure ()
+    return seen
+
+/-- Sidecar parked credentials on `GET /api/model-routing/health` and `POST /api/model-routing/health/:id/clear`:
+    1) Matching cases (a), (b), (c), (d):
+       (a) row email set and 1 row + 1 enabled file of that type carry it -> match without leaking file name/email;
+       (b) otherwise, 1 OAuth-only row + 1 enabled file of that type and file email empty (or equal to row's) -> match;
+       (c) 1 row + 1 file, both emails set and different -> no match and no PATCH on clear;
+       (d) anything else (e.g. multiple OAuth rows without decisive email) -> no match and no PATCH on clear;
+    2) Clear on a row whose matched file has `remainingSecs == 0` makes zero PATCH calls and answers 204;
+    3) Clear when `disabled: true` fails returns 502 naming the provider row id and stating the sidecar cooldown
+       was not cleared and the login was not disabled (after clearing Core's own cooldowns);
+    4) Clear when `disabled: false` fails once retries and answers 204; when both enable calls fail it returns 502
+       naming the provider row id, stating the login was left disabled, and telling the operator to re-enable it
+       in CLIProxyAPI (never leaking file name or email);
+    5) A slow or unreachable sidecar times out within 2 seconds and leaves Core's own cooldowns untouched. -/
+private def sidecarParkedHealthContract
+    (app : CoreAppState) (root jwt : String)
+    (cooldownsRef : IO.Ref (Array AccountCooldown)) : IO (Array String) := do
+  let mut failures : Array String := #[]
+  let oauthOnly := "10000000-0000-4000-8000-000000000001"
+  let keyOwned := "10000000-0000-4000-8000-000000000002"
+  let agOauth := "10000000-0000-4000-8000-000000000003"
+  let now : UInt64 := 0
+  let (fd, port) ← IO.ofExcept (← LeanSys.Posix.tcpListen "127.0.0.1" 0 16)
+  let priorBase ← IO.getEnv "CLAUDE_CODE_PROXY_BASE_URL"
+  let priorKey ← IO.getEnv "CLI_PROXY_MANAGEMENT_KEY"
+  setenvVar "CLAUDE_CODE_PROXY_BASE_URL" s!"http://127.0.0.1:{port}"
+  setenvVar "CLI_PROXY_MANAGEMENT_KEY" "fixture-only"
+  let delayMs ← IO.mkRef (0 : UInt32)
+  let patchCalls ← IO.mkRef (#[] : Array String)
+  let disableFailRemaining ← IO.mkRef (0 : Nat)
+  let enableFailRemaining ← IO.mkRef (0 : Nat)
+  let sidecarFilesJsonRef ← IO.mkRef
+    ("{\"files\":[" ++
+      "{\"name\":\"claude-secret-file.json\",\"provider\":\"claude\",\"email\":\"owner-secret@fixture.invalid\",\"disabled\":false,\"status\":\"error\",\"cooldowns\":[{\"scope\":\"credential\",\"reason\":\"credential_quota\",\"retry_at\":\"2026-11-18T12:00:00Z\",\"remaining_seconds\":471600,\"http_status\":429}]}," ++
+      "{\"name\":\"claude-second-file.json\",\"provider\":\"claude\",\"email\":\"other-claude@fixture.invalid\",\"disabled\":false,\"status\":\"ok\",\"cooldowns\":[]}," ++
+      "{\"name\":\"antigravity-ambig.json\",\"provider\":\"antigravity\",\"email\":\"ag-secret@fixture.invalid\",\"disabled\":false,\"status\":\"error\",\"cooldowns\":[{\"scope\":\"credential\",\"reason\":\"quota\",\"retry_at\":\"2026-11-13T20:00:00Z\",\"remaining_seconds\":3600}]}" ++
+    "]}")
+  let defaultHandler : String → String → IO (Nat × String) := fun reqLine reqBody => do
+    if reqLine.startsWith "GET /v0/management/auth-files" then
+      return (200, ← sidecarFilesJsonRef.get)
+    if reqLine.startsWith "PATCH /v0/management/auth-files/status" then
+      patchCalls.modify (·.push reqBody)
+      if ((reqBody.splitOn "\"disabled\":true").length > 1) then
+        let dRem ← disableFailRemaining.get
+        if dRem > 0 then
+          disableFailRemaining.set (dRem - 1)
+          return (500, "{\"error\":\"sidecar disable failed for claude-secret-file.json owner-secret@fixture.invalid\"}")
+      if ((reqBody.splitOn "\"disabled\":false").length > 1) then
+        let rem ← enableFailRemaining.get
+        if rem > 0 then
+          enableFailRemaining.set (rem - 1)
+          return (500, "{\"error\":\"sidecar enable failed for claude-secret-file.json owner-secret@fixture.invalid\"}")
+      return (200, "{\"status\":\"ok\"}")
+    return (404, "{\"error\":\"not_found\"}")
+  let handlerRef ← IO.mkRef defaultHandler
+  let stop ← IO.mkRef false
+  let server ← mockSidecarAuthFiles fd delayMs handlerRef stop
+  let origProvidersRaw ← IO.FS.readFile s!"{root}/.sandboxed-sh/ai_providers.json"
+  let .ok origArr := (OrbBin.Json.parse origProvidersRaw).map (fun j => j.asArr?.getD #[])
+    | throw (IO.userError "orig providers parse")
+  let setOauthEmail (email? : Option String) (extraRows : Array JVal := #[]) : IO Unit := do
+    let updated := origArr.map fun row =>
+      if row.fieldStr? "id" == some oauthOnly then
+        match row, email? with
+        | .obj kvs, some em =>
+          .obj ((kvs.filter (fun (k, _) => k != "account_email")).push ("account_email", .str em))
+        | .obj kvs, none =>
+          .obj (kvs.filter (fun (k, _) => k != "account_email"))
+        | other, _ => other
+      else row
+    IO.FS.writeFile s!"{root}/.sandboxed-sh/ai_providers.json" (renderCompact (.arr (updated ++ extraRows)))
+  try
+    -- Case 1(a): row email set and 1 row + 1 enabled file of that type carry it (even with a 2nd OAuth row & file).
+    let extraClaudeNoEmail : JVal := .obj #[
+      ("id", .str "10000000-0000-4000-8000-000000000009"),
+      ("name", .str "Claude second"),
+      ("provider_type", .str "anthropic"),
+      ("enabled", .bool true),
+      ("oauth", .obj #[("access_token", .str "fixture-only-no-live-access")])
+    ]
+    setOauthEmail (some "owner-secret@fixture.invalid") #[extraClaudeNoEmail]
+    let health1a ← getJson app jwt "/api/model-routing/health" now
+    let raw1a := renderCompact health1a
+    let rows1a := health1a.asArr?.getD #[]
+    let row1a := (rows1a.find? (fun v => v.fieldStr? "account_id" == some oauthOnly)).getD .null
+    if (row1a.fieldUInt64? "cooldown_secs_remaining").getD 0 != 471600 then
+      failures := failures.push s!"sidecar parked (a): expected cooldown_secs_remaining=471600, got {row1a.fieldUInt64? "cooldown_secs_remaining"}"
+    if row1a.fieldStr? "parked_until" != some "2026-11-18T12:00:00Z" ||
+       row1a.fieldStr? "parked_reason" != some "credential_quota" ||
+       row1a.fieldStr? "parked_source" != some "sidecar" then
+      failures := failures.push s!"sidecar parked (a): expected parked_until/parked_reason/parked_source on {oauthOnly}, got {renderCompact row1a}"
+    if (row1a.field? "cooldown_remaining_secs").isSome then
+      failures := failures.push "sidecar parked (a): must keep cooldown_secs_remaining as the only cooldown field"
+    if (raw1a.splitOn "claude-secret-file.json").length > 1 ||
+       (raw1a.splitOn "owner-secret@fixture.invalid").length > 1 ||
+       (raw1a.splitOn "ag-secret@fixture.invalid").length > 1 then
+      failures := failures.push s!"sidecar parked (a): health response leaked auth file name or email: {raw1a}"
+
+    -- Case 1(b): 1 OAuth-only row (even with row email set) and 1 enabled file of that type whose email is empty -> match.
+    setOauthEmail (some "lone-row@fixture.invalid")
+    sidecarFilesJsonRef.set
+      ("{\"files\":[" ++
+        "{\"name\":\"claude-secret-file.json\",\"provider\":\"claude\",\"email\":\"\",\"disabled\":false,\"status\":\"error\",\"cooldowns\":[{\"scope\":\"credential\",\"reason\":\"credential_quota\",\"retry_at\":\"2026-11-18T12:00:00Z\",\"remaining_seconds\":471600}]}" ++
+      "]}")
+    let rows1b := (← getJson app jwt "/api/model-routing/health" now).asArr?.getD #[]
+    let row1b := (rows1b.find? (fun v => v.fieldStr? "account_id" == some oauthOnly)).getD .null
+    if (row1b.fieldUInt64? "cooldown_secs_remaining").getD 0 != 471600 ||
+       row1b.fieldStr? "parked_source" != some "sidecar" then
+      failures := failures.push s!"sidecar parked (b): lone row with empty-email file must match, got {renderCompact row1b}"
+
+    -- Case 1(c): 1 row, 1 file, both emails set and different -> no match and no PATCH on clear.
+    setOauthEmail (some "row-a@fixture.invalid")
+    sidecarFilesJsonRef.set
+      ("{\"files\":[" ++
+        "{\"name\":\"claude-secret-file.json\",\"provider\":\"claude\",\"email\":\"file-b@fixture.invalid\",\"disabled\":false,\"status\":\"error\",\"cooldowns\":[{\"scope\":\"credential\",\"reason\":\"credential_quota\",\"retry_at\":\"2026-11-18T12:00:00Z\",\"remaining_seconds\":471600}]}" ++
+      "]}")
+    let rows1c := (← getJson app jwt "/api/model-routing/health" now).asArr?.getD #[]
+    let row1c := (rows1c.find? (fun v => v.fieldStr? "account_id" == some oauthOnly)).getD .null
+    if (row1c.fieldUInt64? "cooldown_secs_remaining").getD 0 != 0 ||
+       (row1c.field? "parked_until") != some .null ||
+       (row1c.field? "parked_reason") != some .null ||
+       (row1c.field? "parked_source") != some .null then
+      failures := failures.push s!"sidecar parked (c): mismatched emails must not match, got {renderCompact row1c}"
+    patchCalls.set #[]
+    let (clear1cCode, _) ← postJson app jwt s!"/api/model-routing/health/{oauthOnly}/clear" "" now
+    if clear1cCode != 204 || !(← patchCalls.get).isEmpty then
+      failures := failures.push s!"sidecar parked (c): clear on mismatched emails must not PATCH, got code={clear1cCode} calls={← patchCalls.get}"
+
+    -- Case 1(d): multiple OAuth rows of same type without matching email -> no match and no PATCH on clear.
+    let extraAg : JVal := .obj #[
+      ("id", .str "10000000-0000-4000-8000-000000000008"),
+      ("name", .str "Antigravity second"),
+      ("provider_type", .str "antigravity"),
+      ("enabled", .bool true),
+      ("oauth", .obj #[("access_token", .str "fixture-only-no-live-access")])
+    ]
+    setOauthEmail (some "owner-secret@fixture.invalid") #[extraAg]
+    sidecarFilesJsonRef.set
+      ("{\"files\":[" ++
+        "{\"name\":\"claude-secret-file.json\",\"provider\":\"claude\",\"email\":\"owner-secret@fixture.invalid\",\"disabled\":false,\"status\":\"error\",\"cooldowns\":[{\"scope\":\"credential\",\"reason\":\"credential_quota\",\"retry_at\":\"2026-11-18T12:00:00Z\",\"remaining_seconds\":471600}]}," ++
+        "{\"name\":\"antigravity-ambig.json\",\"provider\":\"antigravity\",\"email\":\"ag-secret@fixture.invalid\",\"disabled\":false,\"status\":\"error\",\"cooldowns\":[{\"scope\":\"credential\",\"reason\":\"quota\",\"retry_at\":\"2026-11-13T20:00:00Z\",\"remaining_seconds\":3600}]}" ++
+      "]}")
+    let rowsAmbig := (← getJson app jwt "/api/model-routing/health" now).asArr?.getD #[]
+    for aid in #[agOauth, "10000000-0000-4000-8000-000000000008"] do
+      let r := (rowsAmbig.find? (fun v => v.fieldStr? "account_id" == some aid)).getD .null
+      if (r.fieldUInt64? "cooldown_secs_remaining").getD 0 != 0 ||
+         (r.field? "parked_until") != some .null ||
+         (r.field? "parked_reason") != some .null ||
+         (r.field? "parked_source") != some .null then
+        failures := failures.push s!"sidecar parked (d): ambiguous OAuth row {aid} must show no parked state, got {renderCompact r}"
+    patchCalls.set #[]
+    let (ambigClearCode, _) ← postJson app jwt s!"/api/model-routing/health/{agOauth}/clear" "" now
+    if ambigClearCode != 204 || !(← patchCalls.get).isEmpty then
+      failures := failures.push s!"sidecar parked (d): ambiguous OAuth clear must not toggle any sidecar file, got code={ambigClearCode} calls={← patchCalls.get}"
+
+    -- Case 2: Clear on a row whose matched file is healthy (`remainingSecs == 0`) makes zero PATCH calls and answers 204.
+    setOauthEmail (some "owner-secret@fixture.invalid")
+    sidecarFilesJsonRef.set
+      ("{\"files\":[" ++
+        "{\"name\":\"claude-secret-file.json\",\"provider\":\"claude\",\"email\":\"owner-secret@fixture.invalid\",\"disabled\":false,\"status\":\"ok\",\"cooldowns\":[]}" ++
+      "]}")
+    patchCalls.set #[]
+    let (healthyClearCode, _) ← postJson app jwt s!"/api/model-routing/health/{oauthOnly}/clear" "" now
+    if healthyClearCode != 204 || !(← patchCalls.get).isEmpty then
+      failures := failures.push s!"sidecar parked: clear on healthy matched file must make 0 PATCH calls and answer 204, got code={healthyClearCode} calls={← patchCalls.get}"
+
+    -- Restore parked sidecar file for clear error/retry tests.
+    sidecarFilesJsonRef.set
+      ("{\"files\":[" ++
+        "{\"name\":\"claude-secret-file.json\",\"provider\":\"claude\",\"email\":\"owner-secret@fixture.invalid\",\"disabled\":false,\"status\":\"error\",\"cooldowns\":[{\"scope\":\"credential\",\"reason\":\"credential_quota\",\"retry_at\":\"2026-11-18T12:00:00Z\",\"remaining_seconds\":471600}]}" ++
+      "]}")
+
+    -- Case 3: Clear when first PATCH (`disabled: true`) fails -> 502 naming provider row id, stating cooldown was not cleared
+    -- and login was not disabled, while Core's own cooldown was already cleared.
+    let wallNow0 ← nowEpoch
+    cooldownsRef.set #[{ accountId := "cliproxyapi:anthropic", untilEpoch := wallNow0 + 600, reason := .rateLimit }]
+    patchCalls.set #[]
+    disableFailRemaining.set 1
+    let (disableFailCode, disableFailBody) ← postJson app jwt s!"/api/model-routing/health/{oauthOnly}/clear" "" now
+    let disableFailRaw := renderCompact disableFailBody
+    let callsAfterDisableFail ← patchCalls.get
+    if disableFailCode != 502 || callsAfterDisableFail.size != 1 then
+      failures := failures.push s!"sidecar parked: failed disable PATCH must return 502 after 1 call, got code={disableFailCode} calls={callsAfterDisableFail}"
+    if (disableFailRaw.splitOn oauthOnly).length == 1 ||
+       (disableFailRaw.splitOn "not cleared").length == 1 ||
+       (disableFailRaw.splitOn "not disabled").length == 1 then
+      failures := failures.push s!"sidecar parked: failed disable 502 must name {oauthOnly} and say cooldown was not cleared and login was not disabled, got {disableFailRaw}"
+    if (disableFailRaw.splitOn "claude-secret-file.json").length > 1 ||
+       (disableFailRaw.splitOn "owner-secret@fixture.invalid").length > 1 then
+      failures := failures.push s!"sidecar parked: failed disable 502 leaked file name or email: {disableFailRaw}"
+    if !(← cooldownsRef.get).isEmpty then
+      failures := failures.push "sidecar parked: clear must remove Core's cooldowns before calling sidecar"
+    disableFailRemaining.set 0
+
+    -- Case 4a: Clear when first enable (`disabled: false`) fails, retry succeeds -> 204 (3 PATCH calls: true, false, false).
+    patchCalls.set #[]
+    enableFailRemaining.set 1
+    let (retryClearCode, _) ← postJson app jwt s!"/api/model-routing/health/{oauthOnly}/clear" "" now
+    let callsAfterRetry ← patchCalls.get
+    if retryClearCode != 204 || callsAfterRetry.size != 3 then
+      failures := failures.push s!"sidecar parked: clear with one transient enable failure must retry and succeed (204, 3 calls), got code={retryClearCode} calls={callsAfterRetry}"
+
+    -- Case 4b: Clear when enable fails on both attempts -> 502 naming provider row id, stating login was left disabled
+    -- and how to recover ("re-enable it in CLIProxyAPI"), never leaking file name or email.
+    patchCalls.set #[]
+    enableFailRemaining.set 2
+    let (failClearCode, failClearBody) ← postJson app jwt s!"/api/model-routing/health/{oauthOnly}/clear" "" now
+    let failClearRaw := renderCompact failClearBody
+    let callsAfterFail ← patchCalls.get
+    if failClearCode != 502 || callsAfterFail.size != 3 then
+      failures := failures.push s!"sidecar parked: clear with persistent enable failure must return 502 after retry, got code={failClearCode} calls={callsAfterFail}"
+    if (failClearRaw.splitOn oauthOnly).length == 1 ||
+       (failClearRaw.splitOn "left disabled").length == 1 ||
+       (failClearRaw.splitOn "re-enable it in CLIProxyAPI").length == 1 then
+      failures := failures.push s!"sidecar parked: failed enable error must state login was left disabled, name {oauthOnly}, and advise re-enable it in CLIProxyAPI, got {failClearRaw}"
+    if (failClearRaw.splitOn "claude-secret-file.json").length > 1 ||
+       (failClearRaw.splitOn "owner-secret@fixture.invalid").length > 1 then
+      failures := failures.push s!"sidecar parked: failed enable error leaked file name or email: {failClearRaw}"
+    enableFailRemaining.set 0
+
+    -- Case 5: Slow sidecar (> 2s) times out within 2s and leaves Core's own cooldowns intact.
+    let wallNow ← nowEpoch
+    cooldownsRef.set #[{ accountId := keyOwned, untilEpoch := wallNow + 900, reason := .serverError }]
+    delayMs.set 3500
+    let t0 ← IO.monoMsNow
+    let slowHealth ← getJson app jwt "/api/model-routing/health" now
+    let elapsed := (← IO.monoMsNow) - t0
+    if elapsed > 2500 then
+      failures := failures.push s!"sidecar parked: GET /api/model-routing/health waited {elapsed}ms (> 2s cap)"
+    let slowRows := slowHealth.asArr?.getD #[]
+    let keyRow := (slowRows.find? (fun v => v.fieldStr? "account_id" == some keyOwned)).getD .null
+    let keyRem := (keyRow.fieldUInt64? "cooldown_secs_remaining").getD 0
+    if keyRem < 890 || keyRem > 900 then
+      failures := failures.push s!"sidecar parked: slow/unreachable sidecar must preserve Core cooldowns, got {keyRem}"
+  finally
+    cooldownsRef.set #[]
+    IO.FS.writeFile s!"{root}/.sandboxed-sh/ai_providers.json" origProvidersRaw
+    stop.set true
+    discard <| IO.wait server
+    discard <| LeanSys.Posix.closeFd fd
+    match priorBase with
+    | some v => setenvVar "CLAUDE_CODE_PROXY_BASE_URL" v
+    | none => unsetenvVar "CLAUDE_CODE_PROXY_BASE_URL"
+    match priorKey with
+    | some v => setenvVar "CLI_PROXY_MANAGEMENT_KEY" v
+    | none => unsetenvVar "CLI_PROXY_MANAGEMENT_KEY"
+  return failures
+
 /-- Replay the production renderers and HTTP dispatch, never a live usage fetch. -/
 def run : IO Unit := do
   let fixtureRaw ← IO.FS.readFile "shared/orb-spec/fixtures/provider-response-contract.json"
@@ -442,6 +719,7 @@ def run : IO Unit := do
       failures := failures ++ (← reconcileNegatives hub store root cooldownsRef)
       failures := failures ++ (← antigravityReconnectClearsPerModelKeys hub store root cooldownsRef)
       failures := failures ++ (← healthCooldownOwners app jwt cooldownsRef)
+      failures := failures ++ (← sidecarParkedHealthContract app root jwt cooldownsRef)
       if !failures.isEmpty then
         throw (IO.userError ("provider response contract failures:\n" ++ String.intercalate "\n" failures.toList))
     finally
