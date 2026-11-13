@@ -244,17 +244,25 @@ final class OrbManagedMachinesTests: XCTestCase {
         XCTAssertEqual(OrbManaged.providerGroupSummary([failed]), "1 machine")
     }
 
-    @MainActor
-    func testAIProviderPersonalSwitchDoesNotFollowGlobalState() {
-        let provider: OrbJSON = .object(["enabled": .bool(true), "user_enabled": .bool(false), "effective_enabled": .bool(false)])
-        XCTAssertTrue(OrbProvidersSettings.isGloballyEnabled(provider))
-        XCTAssertFalse(OrbProvidersSettings.isPersonallyEnabled(provider))
-        XCTAssertFalse(OrbProvidersSettings.isEffectiveEnabled(provider))
-        let globallyDisabled: OrbJSON = .object(["globally_enabled": .bool(false), "user_enabled": .bool(true), "effective_enabled": .bool(true)])
-        XCTAssertFalse(OrbProvidersSettings.isGloballyEnabled(globallyDisabled))
-        XCTAssertTrue(OrbProvidersSettings.isPersonallyEnabled(globallyDisabled))
-        XCTAssertFalse(OrbProvidersSettings.isEffectiveEnabled(globallyDisabled))
-        XCTAssertTrue(OrbProvidersSettings.isPersonallyEnabled(.object([:])))
+    func testManagedProviderPersonalSwitchDoesNotFollowGlobalState() {
+        var provider = OrbManagedProviderInfo(provider: "hetzner", display_name: "Hetzner Cloud", configured: true, enabled: true,
+                                             supports_snapshots: false, supports_free_stop: false, sizes: [])
+        provider.user_enabled = false
+        provider.effective_enabled = false
+        XCTAssertTrue(OrbManaged.isProviderGloballyEnabled(provider))
+        XCTAssertFalse(OrbManaged.isProviderPersonallyEnabled(provider))
+        XCTAssertFalse(OrbManaged.isProviderEnabled(provider))
+        var globallyDisabled = provider
+        globallyDisabled.globally_enabled = false
+        globallyDisabled.user_enabled = true
+        globallyDisabled.effective_enabled = true
+        XCTAssertFalse(OrbManaged.isProviderGloballyEnabled(globallyDisabled))
+        XCTAssertTrue(OrbManaged.isProviderPersonallyEnabled(globallyDisabled))
+        XCTAssertFalse(OrbManaged.isProviderEnabled(globallyDisabled))
+        provider.user_enabled = nil
+        XCTAssertFalse(OrbManaged.isProviderPersonallyEnabled(provider))
+        provider.provider = "boat"
+        XCTAssertTrue(OrbManaged.isProviderPersonallyEnabled(provider))
     }
 
     func testMissingPersonalPreferenceDefaultsToBoatOnly() {
