@@ -4,7 +4,21 @@ on:
   push:
     branches: [master, main, "release/*"]
     # Roadmap/docs pushes must not queue behind (and so cancel) pending master runs.
-    paths-ignore: ['docs/**']
+    # Ordered paths filter (later matching pattern wins): include everything,
+    # exclude prose docs, then re-include docs/ inputs read by CI scripts.
+    paths:
+      - '**'
+      - '!docs/**'
+      - '!README.md'
+      - '!INSTALL.md'
+      - '!DEBUGGING.md'
+      - '!AGENTS.md'
+      - 'docs/FORMAL_AUDIT.md'
+      - 'docs/P1_SHARED_KERNEL_CONFORMANCE.md'
+      - 'docs/P2_SHARED_WASM_ARTIFACT.md'
+      - 'docs/P3_TARGET_QUALIFICATION_REPORT.md'
+      - 'docs/TRUSTWORTHY_SHARED_LEAN_ROADMAP.md'
+      - 'docs/specs/state-machine-inventory.md'
   pull_request:
     branches: [master, main]
     types: [opened, synchronize, reopened, ready_for_review]

@@ -4125,30 +4125,61 @@ def revokeMissionProxyTokensForMission (st : CoreStore) (missionId : String) : I
   discard <| execParamQuery st.missionsDb
     "UPDATE mission_proxy_tokens SET revoked=1 WHERE mission_id=?1;" #[missionId]
 
+def fallbackProviderTypeDisplayName (pType : String) : String :=
+  match pType.trimAscii.toString.toLower with
+  | "anthropic" => "Anthropic"
+  | "openai" => "OpenAI"
+  | "google" => "Google AI"
+  | "open-router" => "OpenRouter"
+  | "xai" => "xAI (Grok)"
+  | "kimi" => "Kimi"
+  | "antigravity" => "Antigravity"
+  | "muse-code" => "Muse Code"
+  | "mistral" => "Mistral"
+  | "zai" => "Z.ai (GLM)"
+  | "minimax" => "MiniMax"
+  | "cerebras" => "Cerebras"
+  | "groq" => "Groq"
+  | "deepseek" => "DeepSeek"
+  | "together" => "Together AI"
+  | "perplexity" => "Perplexity"
+  | "cohere" => "Cohere"
+  | "github-copilot" => "GitHub Copilot"
+  | "amp" => "Sourcegraph Amp"
+  | "custom" => "Custom (OpenAI-compatible)"
+  | _ => pType
+
 /-- Render `AIProviderRecord` with multi-user role redaction & `user_enabled` / `effective_enabled` overlay.
-    For `member`, strips `base_url` and rate-limit internals while keeping `globally_enabled`, `user_enabled`, and `effective_enabled`. -/
+    For `member`, strips `base_url`, stored account `name`, and rate-limit internals while keeping `globally_enabled`, `user_enabled`, and `effective_enabled`. -/
 def renderAIProviderForCallerJson
     (p : AIProviderRecord)
     (isAdmin : Bool)
     (userEnabled : Bool := true)
-    (observedKeyRpm? : Option UInt32 := none) : String := Id.run do
+    (observedKeyRpm? : Option UInt32 := none)
+    (memberDisplayName? : Option String := none) : String := Id.run do
   let effEnabled := p.enabled && userEnabled
   let enStr := if p.enabled then "true" else "false"
   let userEnStr := if userEnabled then "true" else "false"
   let effEnStr := if effEnabled then "true" else "false"
   let hasKeyStr := if p.apiKey.isEmpty then "false" else "true"
   let statusStr := if effEnabled then "{\"type\":\"connected\"}" else "{\"type\":\"disabled\"}"
+  let typeDisp := fallbackProviderTypeDisplayName p.providerType
+  let dispName := if isAdmin then p.name else memberDisplayName?.getD typeDisp
   let mut kvs : Array String := #[
     s!"\"id\":{jsonEscape p.id}",
     s!"\"provider_type\":{jsonEscape p.providerType}",
-    s!"\"name\":{jsonEscape p.name}",
+    s!"\"provider_type_name\":{jsonEscape typeDisp}",
+    s!"\"name\":{jsonEscape dispName}",
     s!"\"enabled\":{enStr}",
     s!"\"globally_enabled\":{enStr}",
     s!"\"user_enabled\":{userEnStr}",
     s!"\"effective_enabled\":{effEnStr}",
+    s!"\"has_credentials\":{hasKeyStr}",
     s!"\"has_api_key\":{hasKeyStr}",
+    "\"has_oauth\":false",
     "\"uses_oauth\":false",
-    s!"\"status\":{statusStr}"
+    s!"\"status\":{statusStr}",
+    s!"\"custom_models\":{renderCustomModelsJson p.customModels}"
   ]
   if isAdmin then
     if !p.baseUrl.isEmpty then
@@ -4161,8 +4192,6 @@ def renderAIProviderForCallerJson
       kvs := kvs.push s!"\"observed_key_rpm_limit\":{obs}"
     if !p.updatedAt.isEmpty then
       kvs := kvs.push s!"\"updated_at\":{jsonEscape p.updatedAt}"
-  if !p.customModels.isEmpty || (isAdmin && p.providerType == "custom") then
-    kvs := kvs.push s!"\"custom_models\":{renderCustomModelsJson p.customModels}"
   return "{" ++ String.intercalate "," kvs.toList ++ "}"
 
 /-- Register a live `appendMissionEvent` listener on `st` and return an idempotent unregister action. -/
