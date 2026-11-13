@@ -1282,12 +1282,14 @@ private def hasSymlinkSegment (baseDir : System.FilePath) (cleanRel : String) : 
 
 /-- Collect companion files (`files` inline UTF-8 text + `references` non-markdown paths) inside `skillDir`.
     Fails closed (`.error`) if any readable companion directory or regular file cannot be enumerated/read,
-    so a partial directory read never erases installed local companion files. -/
+    or if companion directory nesting exceeds the safety depth cap (`16`), so a partial directory read
+    never erases installed local companion files. -/
 private partial def collectSkillCompanionFiles
     (curDir : System.FilePath)
     (relPrefix : String)
     (depth : Nat) : IO (Except String (Array (String × String × String) × Array String)) := do
-  if depth > 6 then return .ok (#[], #[])
+  if depth > 16 then
+    return .error s!"Skill companion directory exceeds maximum nesting depth (16): '{curDir}'"
   let entries ← match ← curDir.readDir.toBaseIO with
     | .ok xs => pure xs
     | .error err => return .error s!"Failed to enumerate skill directory '{curDir}': {err}"

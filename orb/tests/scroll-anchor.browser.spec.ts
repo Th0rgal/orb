@@ -122,7 +122,15 @@ for (const where of ["bottom", "middle"] as const) test(`stale cache then networ
   let pick = 0;
   if (where === "middle") {
     await page.locator("#scroller").hover(); await page.mouse.wheel(0, -1500); await frame(page); await frame(page);
-    pick = await page.evaluate(() => { const s = document.getElementById("scroller")!, b = s.getBoundingClientRect(); const el = document.elementFromPoint(b.left + b.width / 2, b.top + 8)!.closest(".user, .st-text")!; el.setAttribute("data-anchor", ""); return el.getBoundingClientRect().top; });
+    pick = await page.evaluate(() => {
+      const s = document.getElementById("scroller")!, b = s.getBoundingClientRect();
+      const x = b.left + b.width / 2;
+      for (let dy = 8; dy < b.height; dy += 6) {
+        const el = document.elementFromPoint(x, b.top + dy)?.closest(".user, .st-text");
+        if (el) { el.setAttribute("data-anchor", ""); return el.getBoundingClientRect().top; }
+      }
+      throw new Error("no visible turn block in scroller");
+    });
   } else expect(await bottomGap(page)).toBeLessThan(2);
   await page.waitForTimeout(300);
   await page.evaluate(() => (window as any).deliver());

@@ -3368,7 +3368,7 @@ private partial def collectInstalledRegularSkillRels
     (curDir : System.FilePath)
     (relPrefix : String)
     (depth : Nat) : IO (Array String) := do
-  if depth > 6 then return #[]
+  if depth > 16 then return #[]
   let entries ← try curDir.readDir catch _ => pure #[]
   let mut out : Array String := #[]
   for e in entries do

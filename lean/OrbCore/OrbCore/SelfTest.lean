@@ -6439,6 +6439,16 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
     discard <| OrbBin.PosixExt.chmod s!"{dataRoot}/library/skill/orb-basics/references" 0o755
     if unreadBundleSt != 500 || unreadOneSt != 500 then
       return (← fail s!"unreadable companion directory did not fail closed: bundle={unreadBundleSt} one={unreadOneSt}")
+  -- Companion directory nested deeper than 16 levels MUST also fail closed (`500`) instead of omitting deep companions
+  let deepRoot := s!"{dataRoot}/library/skill/orb-basics/deep_test"
+  let deepLeaf := s!"{deepRoot}/d1/d2/d3/d4/d5/d6/d7/d8/d9/d10/d11/d12/d13/d14/d15/d16/d17"
+  IO.FS.createDirAll deepLeaf
+  IO.FS.writeFile s!"{deepLeaf}/leaf.txt" "deep"
+  let (deepBundleSt, _, _) ← sendReq "GET" "/api/library/skill?include=bundle" hsJwt ""
+  let (deepOneSt, _, _) ← sendReq "GET" "/api/library/skill/orb-basics" hsJwt ""
+  discard <| IO.Process.output { cmd := "rm", args := #["-rf", deepRoot] }
+  if deepBundleSt != 500 || deepOneSt != 500 then
+    return (← fail s!"over-nested companion directory did not fail closed: bundle={deepBundleSt} one={deepOneSt}")
   if listSt != 200 ||
      (listBody.splitOn "\"path\":\"skill/orb-basics\"").length != 2 ||
      (listBody.splitOn "\"scope\":\"global\"").length != 2 ||
