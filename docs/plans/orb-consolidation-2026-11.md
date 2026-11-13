@@ -423,6 +423,31 @@ Th0rgal/orb is public, so this is the path that matters. Corrections sent to
   the queue card cause is the missing route above). v3 asked from `11a48ddf`,
   due 20:15.
 
+**Added 19:06 UTC.**
+
+- **Master is red on `eb2791e5`.** CI job "Orb browser (1/2)" failed:
+  `tests/sidebar-multi-move.browser.spec.ts:552` (Cmd+C copies transcript
+  text) lost its selection on 3 of 3 attempts. The same test failed once and
+  passed on retry on `e9786d7e`. #1736 touches no file under `orb/`, so this
+  is an existing flake, not caused by the merge. Failed job re-run by the
+  coordinator at 19:03 (attempt 2 in progress). Worker `549c6b99` has the
+  cause and fix as its next step; nothing was merged on top of the red run.
+- **Silent turn on a cooling chain (Thomas's outage request).** Traced by
+  reading, nothing run: when every target of a chain is cooling, the proxy
+  answers 429 with `Retry-After` up to 3600 s (`Control.lean` ~1486-1493,
+  `Proxy.lean` 253-257, 635-651) and writes nothing to the mission, although
+  it knows which mission asked. No watchdog ends a silent turn before the
+  node's 4 hour job limit; `stall_minutes` has no consumer. Assigned to C
+  (`729e035b`) as `wip/h-cooling-chain-ends-turn`, after its queue-delete
+  branch: one mission error event and the turn stopped when the wait is over
+  60 s, tests first.
+- **Operator relay passed to H-core:** the sidecar management schema for the
+  parked-credential task, and that the guard from #1727 is installed on prod.
+  The branch `fix/provider-health-clear-and-login` named in that relay is
+  already on master as #1728; #1737 sits on top of it.
+- **Build option for workers:** push a `wip/` branch and ask here for
+  "build+self-test `<full sha>` dev-only". None requested yet.
+
 **No owner.** Independent review of the #1731 `[ffi]` allowlist and
 turbo-lean `aee2d17`; `lean/turbo-lean-revision` still `29d85f7`; installed
 turbo-lean rejects `--no-telemetry`, so every node builds with plain Lake.
