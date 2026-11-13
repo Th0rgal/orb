@@ -1409,7 +1409,24 @@ structure OneShotLineParsed where
   errorMsg?  : Option String := none
   activity?  : Option LocalActivityItem := none
   thinking?  : Option String := none
+  /-- Set for a streamed piece of an assistant message (OpenCode ACP `agent_message_chunk`):
+      pieces of one message are joined as-is, a new message starts a new paragraph. -/
+  messageId? : Option String := none
+  isChunk    : Bool := false
   deriving Repr, BEq, Inhabited
+
+/-- Append `parsed.textDelta` to `prevText`: returns `(piece, nextLastMessageId?)`.
+    OpenCode emits whole text parts (`run --format json`) or streamed chunks (ACP); separate
+    parts and separate messages get a blank line, chunks of one message are concatenated. -/
+def joinHarnessText (harness prevText : String) (lastMessageId? : Option String)
+    (parsed : OneShotLineParsed) : String × Option String :=
+  let boundary := harness == "opencode" && !prevText.isEmpty && !prevText.endsWith "\n" &&
+    !parsed.textDelta.startsWith "\n"
+  if parsed.isChunk then
+    let sep := if boundary && parsed.messageId? != lastMessageId? then "\n\n" else ""
+    (sep ++ parsed.textDelta, parsed.messageId?)
+  else
+    ((if boundary then "\n\n" else "") ++ parsed.textDelta, none)
 
 /-- Build CLI invocation `args` for non-Claude local harnesses (`codex`, `opencode`, `antigravity`, `grok`, `vibe`). -/
 def buildOneShotHarnessArgs
@@ -1477,6 +1494,51 @@ def buildOneShotHarnessArgs
     -- `vibe` or custom CLI
     return #["--prompt", prompt]
 
+/-- Map one OpenCode ACP `session/update` payload onto the shared line result. -/
+def parseOpenCodeAcpUpdate (u : JVal) : OneShotLineParsed :=
+  let kind := (u.fieldStr? "sessionUpdate").getD ""
+  let text := ((u.fieldOrNull "content").fieldStr? "text").getD ""
+  if kind == "agent_message_chunk" then
+    let clean := if isOpenCodeCompactionSummary text then "" else text
+    { textDelta := clean, isChunk := true, messageId? := u.fieldStr? "messageId" }
+  else if kind == "agent_thought_chunk" then
+    { thinking? := if text.isEmpty then none else some text }
+  else if kind == "tool_call" || kind == "tool_call_update" then
+    match (u.fieldStr? "toolCallId").filter (!·.isEmpty) with
+    | none => {}
+    | some aid =>
+      let stStr := (u.fieldStr? "status").getD "pending"
+      let isDone := stStr == "completed" || stStr == "failed"
+      let isFailed := stStr == "failed"
+      let acpKind := (u.fieldStr? "kind").getD ""
+      -- Updates often carry only a `title` (the command line); keep the tool name stable.
+      let label := (u.fieldStr? "name").getD
+        (if acpKind == "execute" then "shell" else (u.fieldStr? "title").getD "tool")
+      let input := u.fieldOrNull "rawInput"
+      let detail? :=
+        (input.fieldStr? "command")
+          |>.orElse (fun _ => input.fieldStr? "filePath")
+          |>.orElse (fun _ => input.fieldStr? "path")
+          |>.orElse (fun _ => input.fieldStr? "pattern")
+          |>.orElse (fun _ => input.fieldStr? "url")
+          |>.orElse (fun _ => (u.fieldStr? "title").filter (· != label))
+      let kindStr :=
+        if acpKind == "execute" then "command"
+        else if acpKind == "read" || acpKind == "search" then "read"
+        else if acpKind == "edit" || acpKind == "delete" || acpKind == "move" then "edit"
+        else "tool"
+      { activity? := some {
+          id := aid
+          label := label
+          done := isDone
+          failed := isFailed
+          kind := kindStr
+          toolUseId? := some aid
+          detail? := detail?.map (fun d => (d.take 240).toString)
+          status := if isFailed then "failed" else if isDone then "completed" else "running"
+        } }
+  else {}
+
 /-- Extract session ID, assistant text, tool activities, thinking, and structured JSON errors from a single stdout line. -/
 def parseOneShotHarnessEvent (harness : String) (rawLine : String) : OneShotLineParsed := Id.run do
   let trimmed := rawLine.trimAscii.toString
@@ -1491,6 +1553,10 @@ def parseOneShotHarnessEvent (harness : String) (rawLine : String) : OneShotLine
         |>.orElse (fun _ => jv.fieldStr? "session_id")
         |>.orElse (fun _ => part.fieldStr? "sessionID")
     let ty := (jv.fieldStr? "type").getD ""
+    if harness == "opencode" && (jv.fieldStr? "method") == some "session/update" then
+      return parseOpenCodeAcpUpdate ((jv.fieldOrNull "params").fieldOrNull "update")
+    if ty == "acp_session" then
+      return { sessionId? := (jv.fieldStr? "sessionId").filter (!·.isEmpty) }
     if ty == "error" then
       let errObj := jv.fieldOrNull "error"
       let errData := errObj.fieldOrNull "data"
@@ -1585,6 +1651,167 @@ def parseOneShotHarnessEvent (harness : String) (rawLine : String) : OneShotLine
       return { sessionId? := sid? }
   else
     return { textDelta := rawLine ++ "\n" }
+
+/-! ### OpenCode over ACP
+
+`opencode run --format json` prints a text part only once it is finished, so a reply
+appears all at once. `opencode acp` (Agent Client Protocol, JSON-RPC over stdio) streams
+`agent_message_chunk` / `agent_thought_chunk` / `tool_call` updates as they happen. -/
+
+/-- One OpenCode turn driven over ACP. -/
+structure OpenCodeAcpTurn where
+  cwd        : String
+  prompt     : String
+  model?     : Option String := none
+  effort?    : Option String := none
+  sessionId? : Option String := none
+  plan       : Bool := false
+  deriving Repr, Inhabited
+
+private def acpFrame (fields : Array (String × JVal)) : ByteArray :=
+  (renderCompact (.obj (#[("jsonrpc", .str "2.0")] ++ fields)) ++ "\n").toUTF8
+
+private def acpRequest (id : Nat) (method : String) (params : JVal) : ByteArray :=
+  acpFrame #[("id", .nat id), ("method", .str method), ("params", params)]
+
+/-- Answer an agent-to-client request: permission prompts pick the first allow option
+    (Orb runs OpenCode with `OPENCODE_PERMISSION` allow-all, so these are rare); anything
+    else is refused, since no client file-system or terminal capability is advertised. -/
+def acpClientReply (req : JVal) : ByteArray :=
+  let rid := (req.field? "id").getD .null
+  if (req.fieldStr? "method") == some "session/request_permission" then
+    let opts := ((req.fieldOrNull "params").fieldArr? "options").getD #[]
+    let allow? := (opts.find? (fun o => (o.fieldStr? "kind") == some "allow_always")).orElse
+      (fun _ => opts.find? (fun o => (o.fieldStr? "kind") == some "allow_once"))
+    match allow?.bind (·.fieldStr? "optionId") with
+    | some oid => acpFrame #[("id", rid), ("result", .obj #[("outcome",
+        .obj #[("outcome", .str "selected"), ("optionId", .str oid)])])]
+    | none => acpFrame #[("id", rid), ("result", .obj #[("outcome", .obj #[("outcome", .str "cancelled")])])]
+  else
+    acpFrame #[("id", rid), ("error", .obj #[("code", .int (-32601)), ("message", .str "method not supported")])]
+
+/-- Pick the agent's own name for `requested` among the `model` options it advertises:
+    the exact value, else the same model under another provider prefix
+    (`opencode/builtin/smart` → `orbrouter/builtin/smart`). No options: keep `requested`. -/
+def resolveAcpModel (requested : String) (options : Array String) : Option String :=
+  let tail := fun (s : String) => match s.splitOn "/" with
+    | _ :: rest@(_ :: _) => "/".intercalate rest
+    | _ => s
+  if options.isEmpty || options.contains requested then some requested
+  else options.find? (fun o => tail o == tail requested || tail o == requested || o == tail requested)
+
+/-- `model` option values from a `session/new` / `session/resume` result. -/
+def acpModelOptions (result : JVal) : Array String :=
+  match ((result.fieldArr? "configOptions").getD #[]).find? (fun o => (o.fieldStr? "id") == some "model") with
+  | some o => ((o.fieldArr? "options").getD #[]).filterMap (·.fieldStr? "value")
+  | none => #[]
+
+/-- Config changes applied after the session exists, in order: model, effort, plan mode. -/
+def acpConfigSteps (turn : OpenCodeAcpTurn) : List (String × String) :=
+  (turn.model?.filter (!·.isEmpty) |>.map (("model", ·)) |>.toList) ++
+  (turn.effort?.filter (!·.isEmpty) |>.map (("effort", ·)) |>.toList) ++
+  (if turn.plan then [("mode", "plan")] else [])
+
+/-- Run one turn of `bin acp` in `turn.cwd`. Every `session/update` line is passed to `onLine`
+    unchanged; the session id is reported as `{"type":"acp_session","sessionId":…}` and a
+    failed request as `{"type":"error",…}`, so `parseOneShotHarnessEvent "opencode"` reads
+    all of it. Returns the process exit code (non-zero when the turn failed). -/
+def runOpenCodeAcpTurn (bin : String) (env : Array String) (turn : OpenCodeAcpTurn)
+    (onLine : String → IO Unit) (onSpawn : Int64 → IO Unit := fun _ => pure ()) : IO UInt32 := do
+  let shArgs := #["-c", "cd \"$1\" && shift && exec \"$@\"", "sh", turn.cwd, bin, "acp"]
+  let sp ← spawnPgrp "/bin/sh" shArgs env (pipeStdin := true) (nullStdio := true) (pipeStdout := true)
+  onSpawn sp.pid
+  let send := fun (b : ByteArray) => do discard <| writeFdAll sp.stdinFd b
+  let cwdJ := JVal.str turn.cwd
+  let resumeSid? := turn.sessionId?.filter (fun s => s.startsWith "ses_")
+  let newSession := acpRequest 2 "session/new" (.obj #[("cwd", cwdJ), ("mcpServers", .arr #[])])
+  let mut sid := ""
+  let mut steps := acpConfigSteps turn
+  let mut failed := false
+  let mut finished := false
+  let mut resuming := resumeSid?.isSome
+  let mut buf := ByteArray.empty
+  send (acpRequest 1 "initialize" (.obj #[("protocolVersion", .nat 1), ("clientCapabilities", .obj #[])]))
+  let report := fun (msg : String) =>
+    onLine (renderCompact (.obj #[("type", .str "error"), ("error", .obj #[("message", .str ((msg.take 1000).toString))])]))
+  while !finished do
+    let chunk ← match ← (readFdChunk sp.stdoutFd 16384).toBaseIO with
+      | .ok c => pure c
+      | .error _ => pure ByteArray.empty
+    if chunk.isEmpty then
+      if !finished then
+        failed := true
+        report "OpenCode ACP process ended before the turn finished"
+      break
+    let (lines, rem) := drainNewlineByteLines (buf ++ chunk)
+    buf := rem
+    for ln in lines do
+      let .ok m := OrbBin.Json.parse ln.trimAscii.toString | continue
+      let method? := m.fieldStr? "method"
+      let id? := (m.field? "id").bind (fun v => match v with | .num r => r.toNat? | _ => none)
+      match method?, id? with
+      | some "session/update", _ => onLine ln
+      | some _, some _ => send (acpClientReply m)
+      | some _, none => pure ()
+      | none, some rid =>
+        let err? := (m.field? "error").map (fun e => (e.fieldStr? "message").getD (renderCompact e))
+        if rid == 1 then
+          match err? with
+          | some e => failed := true; report s!"OpenCode ACP initialize failed: {e}"; finished := true
+          | none =>
+            match resumeSid? with
+            | some s => send (acpRequest 2 "session/resume" (.obj #[("sessionId", .str s), ("cwd", cwdJ), ("mcpServers", .arr #[])]))
+            | none => send newSession
+        else if rid == 2 then
+          if err?.isSome && resuming then
+            -- The stored session is gone (other machine, pruned): start a fresh one.
+            resuming := false
+            send newSession
+          else
+            match err? with
+            | some e => failed := true; report s!"OpenCode ACP session failed: {e}"; finished := true
+            | none =>
+              sid := if resuming then (resumeSid?.getD "") else ((m.fieldOrNull "result").fieldStr? "sessionId").getD ""
+              onLine (renderCompact (.obj #[("type", .str "acp_session"), ("sessionId", .str sid)]))
+              let options := acpModelOptions (m.fieldOrNull "result")
+              steps := steps.filterMap fun (cfg, v) =>
+                if cfg == "model" then (resolveAcpModel v options).map (cfg, ·) |>.orElse (fun _ => some (cfg, v))
+                else some (cfg, v)
+              match steps with
+              | (cfg, v) :: _ => send (acpRequest 10 "session/set_config_option"
+                  (.obj #[("sessionId", .str sid), ("configId", .str cfg), ("value", .str v)]))
+              | [] => send (acpRequest 3 "session/prompt" (.obj #[("sessionId", .str sid),
+                  ("prompt", .arr #[.obj #[("type", .str "text"), ("text", .str turn.prompt)]])]))
+        else if rid == 10 then
+          if let some e := err? then
+            if (steps.head?.map Prod.fst) == some "model" then
+              failed := true; report s!"OpenCode rejected model {turn.model?.getD ""}: {e}"; finished := true
+          if !finished then
+            steps := steps.drop 1
+            match steps with
+            | (cfg, v) :: _ => send (acpRequest 10 "session/set_config_option"
+                (.obj #[("sessionId", .str sid), ("configId", .str cfg), ("value", .str v)]))
+            | [] => send (acpRequest 3 "session/prompt" (.obj #[("sessionId", .str sid),
+                ("prompt", .arr #[.obj #[("type", .str "text"), ("text", .str turn.prompt)]])]))
+        else if rid == 3 then
+          if let some e := err? then
+            failed := true; report e
+          finished := true
+      | none, none => pure ()
+      if finished then break
+  -- The agent stays up for further prompts: closing stdin ends it; after a 3 s grace
+  -- period SIGTERM to its process group covers a hang.
+  closeFdRaw sp.stdinFd
+  let mut exited := false
+  for _ in [0:60] do
+    if !exited then
+      if (← waitpidWnohang sp.pid) != 0xFFFFFFFF then exited := true
+      else IO.sleep 50
+  if !exited then
+    discard <| killSig (-sp.pid) 15
+    discard <| waitpidBlock sp.pid
+  closeFdRaw sp.stdoutFd
+  return if failed then 1 else 0
 
 /-- Launch a turn for any supported local harness (`claudecode` via warm bidirectional stdio, or one-shot CLI for others).
     Automatically evaluates worktree isolation when requested and captures pre/post-turn git checkpoints! -/
@@ -1691,62 +1918,45 @@ def startHarnessTurn
       envStrs := envStrs.push "NO_COLOR=1"
     if harness == "opencode" && !envPairs.any (fun (k, _) => k == "OPENCODE_PERMISSION") && permissionMode != .plan then
       envStrs := envStrs.push "OPENCODE_PERMISSION={\"*\":\"allow\"}"
-    let shArgs := #["-c", "cd \"$1\" && shift && exec \"$@\"", "sh", effectiveCwd, actualBin] ++ cliArgs
-    let spawned ← match ← (spawnPgrp "/bin/sh" shArgs envStrs (pipeStdin := false) (nullStdio := true) (pipeStdout := true)).toBaseIO with
-      | .error e =>
-        stRef.modify fun s => { s with done := true, exitCode? := some 1, error? := some s!"{e}" }
-        return .error s!"Failed to start {harness}: {e}"
-      | .ok sp => pure sp
-    mgr.mu.atomically do
+    let lastMsgRef ← IO.mkRef (none : Option String)
+    let registerPid := fun (pid : Int64) => mgr.mu.atomically do
       let pids ← mgr.activePidsRef.get
-      mgr.activePidsRef.set ((pids.filter (fun (k, _) => k != id)).push (id, spawned.pid))
-
-    discard <| IO.asTask (prio := .dedicated) do
-      let mut buf := ByteArray.empty
-      let mut keep := true
-      while keep do
-        match ← (readFdChunk spawned.stdoutFd 16384).toBaseIO with
-        | .error _ => keep := false
-        | .ok chunk =>
-          if chunk.isEmpty then keep := false
-          else
-            let (lines, rem) := drainNewlineByteLines (buf ++ chunk)
-            buf := rem
-            for ln in lines do
-              let parsed := parseOneShotHarnessEvent harness ln
-              if let some sid := parsed.sessionId? then
-                stRef.modify fun s => { s with sessionId? := some sid }
-              if let some errMsg := parsed.errorMsg? then
-                stRef.modify fun s => { s with error? := some errMsg }
-              if let some th := parsed.thinking? then
-                let cb ← getCallbacksFor mgr id
-                cb.onStructuredEvent "thinking" (.obj #[("content", .str th)])
-              if let some act := parsed.activity? then
-                let nextActs ← stRef.modifyGet fun s =>
-                  let updated :=
-                    if s.activities.any (fun a => a.id == act.id) then
-                      s.activities.map (fun a => if a.id == act.id then act else a)
-                    else
-                      s.activities.push act
-                  (updated, { s with activities := updated })
-                let cb ← getCallbacksFor mgr id
-                cb.onStructuredEvent (if act.done then "tool_result" else "tool_call") act.toJVal
-                cb.onOutputEvent (.obj #[
-                  ("text", .str ""),
-                  ("reset", .bool false),
-                  ("activities", .arr (nextActs.map LocalActivityItem.toJVal))
-                ])
-              if !parsed.textDelta.isEmpty then
-                let (emittedDelta, fullText) ← stRef.modifyGet fun s =>
-                  let sep := if harness == "opencode" && !s.text.isEmpty && !s.text.endsWith "\n" && !parsed.textDelta.startsWith "\n" then "\n\n" else ""
-                  let piece := sep ++ parsed.textDelta
-                  let nextText := s.text ++ piece
-                  ((piece, nextText), { s with text := nextText })
-                let cb ← getCallbacksFor mgr id
-                cb.onStructuredEvent "text_delta" (.obj #[("content", .str fullText)])
-                cb.onOutputEvent (.obj #[("text", .str emittedDelta), ("reset", .bool false)])
-      closeFdRaw spawned.stdoutFd
-      let code ← waitpidBlock spawned.pid
+      mgr.activePidsRef.set ((pids.filter (fun (k, _) => k != id)).push (id, pid))
+    let handleLine : String → IO Unit := fun ln => do
+      let parsed := parseOneShotHarnessEvent harness ln
+      if let some sid := parsed.sessionId? then
+        stRef.modify fun s => { s with sessionId? := some sid }
+      if let some errMsg := parsed.errorMsg? then
+        stRef.modify fun s => { s with error? := some errMsg }
+      if let some th := parsed.thinking? then
+        let cb ← getCallbacksFor mgr id
+        cb.onStructuredEvent "thinking" (.obj #[("content", .str th)])
+      if let some act := parsed.activity? then
+        let nextActs ← stRef.modifyGet fun s =>
+          let updated :=
+            if s.activities.any (fun a => a.id == act.id) then
+              s.activities.map (fun a => if a.id == act.id then act else a)
+            else
+              s.activities.push act
+          (updated, { s with activities := updated })
+        let cb ← getCallbacksFor mgr id
+        cb.onStructuredEvent (if act.done then "tool_result" else "tool_call") act.toJVal
+        cb.onOutputEvent (.obj #[
+          ("text", .str ""),
+          ("reset", .bool false),
+          ("activities", .arr (nextActs.map LocalActivityItem.toJVal))
+        ])
+      if !parsed.textDelta.isEmpty then
+        let lastMsg ← lastMsgRef.get
+        let (emittedDelta, fullText) ← stRef.modifyGet fun s =>
+          let (piece, _) := joinHarnessText harness s.text lastMsg parsed
+          let nextText := s.text ++ piece
+          ((piece, nextText), { s with text := nextText })
+        lastMsgRef.set (joinHarnessText harness "" lastMsg parsed).2
+        let cb ← getCallbacksFor mgr id
+        cb.onStructuredEvent "text_delta" (.obj #[("content", .str fullText)])
+        cb.onOutputEvent (.obj #[("text", .str emittedDelta), ("reset", .bool false)])
+    let finishTurn : UInt32 → IO Unit := fun code => do
       mgr.mu.atomically do
         let pids ← mgr.activePidsRef.get
         mgr.activePidsRef.set (pids.filter (fun (k, _) => k != id))
@@ -1773,6 +1983,44 @@ def startHarnessTurn
         ("state", finalSnap.toPollJVal)
       ])
       cb.onTurnFinished finalSnap
+
+    if harness == "opencode" && imagePaths.isEmpty then
+      let trimmedPrompt := prompt.trimAscii.toString
+      let isPlanPrompt := trimmedPrompt == "/plan" || trimmedPrompt.startsWith "/plan "
+      let delivered := if isPlanPrompt && trimmedPrompt.length > 6 then (trimmedPrompt.drop 6).trimAscii.toString else prompt
+      let turn : OpenCodeAcpTurn := {
+        cwd := effectiveCwd, prompt := delivered, model? := resolvedModel?, effort? := effort?,
+        sessionId? := effSid?, plan := permissionMode == .plan || isPlanPrompt }
+      discard <| IO.asTask (prio := .dedicated) do
+        let code ← try runOpenCodeAcpTurn actualBin envStrs turn handleLine registerPid
+          catch e => do
+            handleLine (renderCompact (.obj #[("type", .str "error"), ("error", .obj #[("message", .str s!"Failed to start opencode: {e}")])]))
+            pure 1
+        finishTurn code
+      return .ok (← stRef.get)
+    let shArgs := #["-c", "cd \"$1\" && shift && exec \"$@\"", "sh", effectiveCwd, actualBin] ++ cliArgs
+    let spawned ← match ← (spawnPgrp "/bin/sh" shArgs envStrs (pipeStdin := false) (nullStdio := true) (pipeStdout := true)).toBaseIO with
+      | .error e =>
+        stRef.modify fun s => { s with done := true, exitCode? := some 1, error? := some s!"{e}" }
+        return .error s!"Failed to start {harness}: {e}"
+      | .ok sp => pure sp
+    registerPid spawned.pid
+
+    discard <| IO.asTask (prio := .dedicated) do
+      let mut buf := ByteArray.empty
+      let mut keep := true
+      while keep do
+        match ← (readFdChunk spawned.stdoutFd 16384).toBaseIO with
+        | .error _ => keep := false
+        | .ok chunk =>
+          if chunk.isEmpty then keep := false
+          else
+            let (lines, rem) := drainNewlineByteLines (buf ++ chunk)
+            buf := rem
+            for ln in lines do
+              handleLine ln
+      closeFdRaw spawned.stdoutFd
+      finishTurn (← waitpidBlock spawned.pid)
     return .ok (← stRef.get)
 
 end OrbBin.ClaudeControl

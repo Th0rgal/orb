@@ -3,12 +3,15 @@
   - `(no args)`: Optional dial-out enrollment (`OrbNode.Dial`) + `:3088` HTTP/1.1 worker daemon.
   - `reload [--unit NAME]`: Validates `sandboxed-node*` unit name and invokes `systemctl reload`.
   - `--sandboxed-scope-exec-cleared-env <KEY...> -- <program> <args...>`: Cleared-env scope trampoline.
+  - `opencode-acp [--model M] [--effort E] [--session S] [--plan]`: one OpenCode turn over ACP,
+    prompt on stdin, streamed `session/update` lines on stdout (`--probe` checks support).
 -/
 import OrbNode.Posix
 import OrbNode.Store
 import OrbNode.Dial
 import OrbNode.Runner
 import OrbNode.Server
+import OrbBin.ClaudeControl
 
 namespace OrbNode.Main
 
@@ -52,8 +55,32 @@ private def runClearedEnvTrampoline (rest : List String) : IO UInt32 := do
   }
   child.wait
 
+/-- Parse `opencode-acp` flags into a turn (prompt filled in later). -/
+def parseOpenCodeAcpArgs (cwd : String) : List String → Option OrbBin.ClaudeControl.OpenCodeAcpTurn
+  | [] => some { cwd := cwd, prompt := "" }
+  | "--plan" :: rest => (parseOpenCodeAcpArgs cwd rest).map ({ · with plan := true })
+  | "--model" :: v :: rest => (parseOpenCodeAcpArgs cwd rest).map ({ · with model? := some v })
+  | "--effort" :: v :: rest => (parseOpenCodeAcpArgs cwd rest).map ({ · with effort? := some v })
+  | "--session" :: v :: rest => (parseOpenCodeAcpArgs cwd rest).map ({ · with sessionId? := some v })
+  | _ => none
+
+private def runOpenCodeAcp (rest : List String) : IO UInt32 := do
+  if rest == ["--probe"] then
+    IO.println "opencode-acp 1"
+    return 0
+  let cwd := (← IO.currentDir).toString
+  let some turn := parseOpenCodeAcpArgs cwd rest
+    | IO.eprintln "usage: sandboxed-node opencode-acp [--model M] [--effort E] [--session S] [--plan] < prompt"; return 2
+  let prompt ← (← IO.getStdin).readToEnd
+  let env := (← OrbBin.PosixExt.currentEnvPairs).map fun (k, v) => s!"{k}={v}"
+  let out ← IO.getStdout
+  OrbBin.ClaudeControl.runOpenCodeAcpTurn "opencode" env { turn with prompt := prompt }
+    (fun ln => do out.putStrLn ln; out.flush)
+
 def runCli (args : List String) : IO UInt32 := do
   match args with
+  | "opencode-acp" :: rest =>
+    runOpenCodeAcp rest
   | "--version" :: _ | "-V" :: _ =>
     IO.println "sandboxed-node 1.3.0-lean4"
     return 0

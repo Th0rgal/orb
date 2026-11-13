@@ -563,10 +563,15 @@ private def prepareRemoteHarnessCommand
       | some sid => if sid.startsWith "ses_" then s!" --session {shellSingleQuote sid}" else ""
       | none => ""
     let inner := s!"opencode run --format json --thinking{planArg}{sessArg} --model {shellSingleQuote s!"builtin/{modelKey}"}"
+    -- Streams over ACP when the node's `sandboxed-node` supports it; older nodes keep
+    -- `opencode run`, which prints each text part only once it is finished.
+    let acpPlan := if planArg.isEmpty then "" else " --plan"
+    let acpInner := s!"sandboxed-node opencode-acp{acpPlan}{sessArg} --model {shellSingleQuote s!"builtin/{modelKey}"}"
     let cmd :=
       wsPrefix ++ fd3Prelude ++
       "command -v opencode >/dev/null 2>&1 || { echo 'opencode is not installed on this node' >&2; exit 127; }; " ++
-      wrapWithRemoteMcp "opencode" inner ++ " <&3"
+      "if sandboxed-node opencode-acp --probe </dev/null >/dev/null 2>&1; then " ++
+      wrapWithRemoteMcp "opencode" acpInner ++ "; else " ++ wrapWithRemoteMcp "opencode" inner ++ "; fi <&3"
     let envs :=
       promptEnvs ++ mcpEnvs ++ #[
         ("SANDBOXED_PROXY_API_KEY", pTok),
@@ -692,6 +697,7 @@ private structure RemoteStreamAcc where
   sawPartialDeltas : Bool   := false
   sessionId?       : Option String := none
   lastError?       : Option String := none
+  lastMessageId?   : Option String := none
 
 private def emitMissionEventAndBroadcast
     (store : CoreStore)
@@ -848,12 +854,9 @@ private def ingestRemoteHarnessLine
       let pl := act.toJVal
       emitMissionEventAndBroadcast store broadcastHub? missionId evTy (renderCompact pl) nowIso
     if !parsed.textDelta.isEmpty then
-      let sep :=
-        if harness == "opencode" && !next.text.isEmpty && !next.text.endsWith "\n" && !parsed.textDelta.startsWith "\n" then
-          "\n\n"
-        else ""
-      let full := next.text ++ sep ++ parsed.textDelta
-      next := { next with text := full }
+      let (piece, lastMsg?) := OrbBin.ClaudeControl.joinHarnessText harness next.text next.lastMessageId? parsed
+      let full := next.text ++ piece
+      next := { next with text := full, lastMessageId? := lastMsg? }
       emitMissionEventAndBroadcast store broadcastHub? missionId "text_delta"
         (renderCompact (.obj #[("content", .str full)])) nowIso
     return next

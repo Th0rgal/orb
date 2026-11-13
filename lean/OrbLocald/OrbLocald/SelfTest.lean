@@ -1688,6 +1688,23 @@ private def runLocalOpenCodeE2eChecks (validTok tmpStateDir : String) : IO (Nat 
     "  printf 'opencode/glm-5.3-flash-free\\norbrouter/anthropic/claude-opus-5-5\\norbrouter/builtin/fast\\norbrouter/builtin/smart\\n'\n" ++
     "  exit 0\n" ++
     "fi\n" ++
+    "if [ \"$1\" = \"acp\" ]; then\n" ++
+    "  while IFS= read -r line; do\n" ++
+    "    id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9]*\\).*/\\1/p')\n" ++
+    "    case \"$line\" in\n" ++
+    "      *'\"method\":\"initialize\"'*) printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"protocolVersion\":1}}\\n' \"$id\" ;;\n" ++
+    "      *'\"method\":\"session/new\"'*) printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"sessionId\":\"ses_oc_e2e_99\"}}\\n' \"$id\" ;;\n" ++
+    "      *'\"method\":\"session/prompt\"'*)\n" ++
+    "        printf '{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"tool_call\",\"toolCallId\":\"call_1\",\"name\":\"shell\",\"kind\":\"execute\",\"status\":\"completed\",\"rawInput\":{\"command\":\"echo hi\"}}}}\\n'\n" ++
+    "        printf '{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"messageId\":\"m1\",\"content\":{\"type\":\"text\",\"text\":\"## Objective\\\\nGoal\\\\n## Work State\\\\nDone\\\\n## Next Move\\\\nNone\\\\n## Relevant Files\\\\na.lean\"}}}}\\n'\n" ++
+    "        printf '{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"messageId\":\"m2\",\"content\":{\"type\":\"text\",\"text\":\"OPENCODE_LOCAL_\"}}}}\\n'\n" ++
+    "        printf '{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"messageId\":\"m2\",\"content\":{\"type\":\"text\",\"text\":\"READY\"}}}}\\n'\n" ++
+    "        printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"stopReason\":\"end_turn\"}}\\n' \"$id\" ;;\n" ++
+    "      *'\"method\":'*) printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{}}\\n' \"$id\" ;;\n" ++
+    "    esac\n" ++
+    "  done\n" ++
+    "  exit 0\n" ++
+    "fi\n" ++
     "printf '{\"type\":\"step_start\",\"sessionID\":\"ses_oc_e2e_99\"}\\n'\n" ++
     "printf '{\"type\":\"tool_use\",\"sessionID\":\"ses_oc_e2e_99\",\"part\":{\"id\":\"call_1\",\"tool\":\"shell\",\"state\":{\"status\":\"completed\",\"input\":{\"command\":\"echo hi\"},\"title\":\"shell\"}}}\\n'\n" ++
     "printf '{\"type\":\"text\",\"sessionID\":\"ses_oc_e2e_99\",\"part\":{\"type\":\"text\",\"text\":\"## Objective\\nGoal\\n## Work State\\nDone\\n## Next Move\\nNone\\n## Relevant Files\\na.lean\"}}\\n'\n" ++
