@@ -350,8 +350,23 @@ E+G reports environment CLI names-only classification and explicit
 acceptance: explicit checked-in `shared` / `instance-owned` / `prod-only-allowed`
 classification remains required; arbitrary CLI sharing is insufficient.
 Prescribed and direct supported turbo builds time out, no full build pass.
-Desktop dependencies/session absent; E+G to evaluate VM-local dependencies and
-real native member session, not substitute browser-only or fabricated evidence.
+Correction: VM has existing Xorg/Openbox processes; this harness lacks DISPLAY
+attachment and GTK3/WebKit development packages for linux_shell. No real Orb
+shell test has run. E+G to inspect authorized local display attachment and
+VM-local build dependencies, not substitute browser-only or fabricated evidence.
+
+E+G checkpoint preserved on trusted nimrud:
+`/var/lib/sandboxed-node/uploads/1df8648c-344f-4fac-9312-586b25877710/eg-orb-env-one-sided-classification.patch`,
+9,329 bytes, SHA-256
+`bb3e21f8d64038095dfb90cc32befffa18b716ad6dc42e40ee365e162322235b`.
+Source review: changes ops documentation, `scripts/ops/orb-env` and its tests;
+no integration. Current `split_envs` permits arbitrary one-sided keys into shared
+base and cannot preserve prod-only authority outside existing INSTANCE_KEYS.
+It does not satisfy declared classification acceptance: require explicit
+checked-in per-key policy, retained prod-only/instance overlays, unknown-key
+rejection and no CLI bypass of protected authority. Revision requested with
+regressions for Hermes/console SSH/node tokens and forbidden sharing. Worker
+commit/PR identity absence does not block harvesting; base SHA still requested.
 
 Fetched master `36b4205ab94bd8a97cb9a1b9058672640b2ee11b`: contains
 `OrbBin/SelfTest.lean:1010` syntax repair for historical master Test failure.
