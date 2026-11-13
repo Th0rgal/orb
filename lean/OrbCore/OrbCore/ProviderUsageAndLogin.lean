@@ -494,7 +494,8 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
 
   return out.qsort (fun a b => a.priority < b.priority)
 
-def renderHydratedProviderJv (hp : HydratedProvider) (userEnabled? : Option Bool := none) (observedRpm? : Option UInt32 := none) : JVal := Id.run do
+def renderHydratedProviderJv (hp : HydratedProvider) (userEnabled? : Option Bool := none) (observedRpm? : Option UInt32 := none)
+    (rejected : Bool := false) : JVal := Id.run do
   let metaInfo := lookupProviderMeta hp.providerType
   let hasCreds := hp.hasApiKey || hp.hasOAuth
   let authMethods : Array JVal :=
@@ -502,7 +503,14 @@ def renderHydratedProviderJv (hp : HydratedProvider) (userEnabled? : Option Bool
     else if metaInfo.usesOAuth then #[.str "oauth"]
     else #[.str "api_key"]
   let statusObj : JVal :=
-    if hasCreds then
+    if hasCreds && rejected then
+      -- The vendor refused this login on the last usage probe (dead refresh token).
+      .obj #[
+        ("type", .str "needs_reauth"),
+        ("auth_methods", .arr authMethods),
+        ("message", .str "Sign in again: the provider rejected this login")
+      ]
+    else if hasCreds then
       .obj #[
         ("type", .str "connected"),
         ("auth_methods", .arr authMethods),
@@ -952,6 +960,12 @@ private def mapLoginSlug (raw : String) : Option (String × String × String) :=
   | "muse-code" | "meta" => some ("meta", "meta", "redirect")
   | _ => none
 
+/-- The last usage probe of this account was refused for authentication. -/
+def loginRejected (hub : ProviderRuntimeHub) (providerId : String) : IO Bool := do
+  let entries ← hub.mu.atomically (do return (← get).usageEntries)
+  return (entries.find? (fun e => e.providerId == providerId)).any
+    (fun e => e.payload.fieldStr? "status" == some "needs_reauth")
+
 /-! ## Unified Dispatcher for AI Providers, Proxy Analytics, Model-Routing Health/Test & Catalog -/
 
 set_option maxHeartbeats 800000 in
@@ -1186,7 +1200,7 @@ def dispatchProviderAndAiRoute
             | some tr => lookupObservedKeyRpm? tr hp.id
             | none => pure none
           let uEn? := if isLegacyUnscoped then none else some (isUserProviderEnabled uPrefs hp.id)
-          arr := arr.push (renderHydratedProviderJv hp uEn? obs?)
+          arr := arr.push (renderHydratedProviderJv hp uEn? obs? (← loginRejected hub hp.id))
       return some (jsonResp 200 (.arr arr))
 
     -- 5b. `GET /api/ai/providers/usage`
@@ -1408,7 +1422,7 @@ def dispatchProviderAndAiRoute
         let obs? ← match pacingTracker? with
           | some tr => lookupObservedKeyRpm? tr hp.id
           | none => pure none
-        return some (jsonResp 200 (renderHydratedProviderJv hp none obs?))
+        return some (jsonResp 200 (renderHydratedProviderJv hp none obs? (← loginRejected hub hp.id)))
 
       -- `GET /api/ai/providers/:id/usage`
       if method == "GET" && segs.length == 5 && segs[4]? == some "usage" then

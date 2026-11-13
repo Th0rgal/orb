@@ -107,8 +107,17 @@ def run : IO Unit := do
               fetchedSec := 1, fetchedIso := "1970-01-01T00:00:01Z", payload := payload
             }] }
           -- Metadata replay after the rejection is present must not erase it.
-          discard <| getJson app jwt "/api/ai/providers" now
-          discard <| getJson app jwt "/api/ai/providers/10000000-0000-4000-8000-000000000002" now
+          -- Dead login: the list and detail rows report the reconnect state for
+          -- that account only; the other accounts stay connected.
+          let relisted := (← getJson app jwt "/api/ai/providers" now).asArr?.getD #[]
+          let redetail ← getJson app jwt "/api/ai/providers/10000000-0000-4000-8000-000000000002" now
+          let statusOf := fun (v : JVal) => (v.fieldOrNull "status").fieldStr? "type"
+          let dead := relisted.filter (fun v => statusOf v == some "needs_reauth")
+          if dead.map (·.fieldStr? "id") != #[some "10000000-0000-4000-8000-000000000002"] ||
+             statusOf redetail != some "needs_reauth" then
+            failures := failures.push "a rejected login must show needs_reauth on its own row only"
+          if (relisted.filter (fun v => statusOf v == some "connected")).size != 5 then
+            failures := failures.push "other credentialed accounts must stay connected"
           let cached ← getJson app jwt
             "/api/ai/providers/10000000-0000-4000-8000-000000000002/usage?cached_only=true" now
           if cached.fieldInt? "codex_primary_reset_at" != some 1740001800 ||
