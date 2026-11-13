@@ -38,6 +38,48 @@ terminal_reason available. A plain awaiting_user mission without pending work
 must not be shown as running. Tests cover the pure owner and rendered glyph;
 header tests consume the same derivation.
 
+## Terminal snapshot reconciliation
+
+A mission read (`GET /api/control/missions/:id`, a list row) is a full snapshot.
+On desktop, `orb/src/missionSnapshot.ts` (consumed by `mergeIncomingMission` in
+`orb/src/mission/MissionView.tsx`) owns snapshot admission and follow-up
+reconciliation:
+
+- Fence by `run_generation`, then `state_revision`, then `updated_at`. When
+  either side omits `run_generation` (for example a mission list row, which
+  carries `state_revision` and `updated_at` without `run_generation`), ordering
+  falls through to `state_revision`, then `updated_at`. A snapshot from an older
+  run generation, or with a lower state revision in the same (or unrecorded)
+  generation, is discarded even when its `updated_at` is equal or newer. A late
+  terminal snapshot never ends a newer turn.
+- Core emits `status`, `terminal_reason`, `run_generation`, `state_revision`,
+  and `updated_at` on mission snapshots (and omits `remote_job`, `queue_wait`,
+  `execution`, and `recovery`). An admitted snapshot clears any stale execution
+  fields the client still holds (`withOwnedExecution`), so a terminal snapshot
+  clears the `"Starting …"` working row and any launch/status banner. The
+  network-health Reconnecting chip (`orb/src/networkHealth.ts`) reflects client
+  link and poll health rather than mission snapshots, so a mission snapshot
+  cannot decide it.
+- A follow-up that Core has not acknowledged when an admitted ended snapshot
+  (`completed`, `succeeded`, `failed`, `not_feasible`, `error`, `errored`,
+  `timed_out`, `cancelled`, `interrupted` — never `READY_STATUSES` such as
+  `awaiting_user`, where the turn ended and Core hands over the next queued row)
+  newer than the send arrives is shown as **Not sent** with Retry, unless its id
+  is still listed in `GET /api/control/queue` or its content was delivered after
+  it was posted. A row Core still lists in the queue is real and is never marked
+  `not_sent` or `discard`; on an ended mission, listed queue rows are labeled
+  as not delivered (`Not delivered`) and Send uses delete-then-send (sending
+  only after `DELETE /api/control/queue/:id` returns `200` or `404` with
+  `"message not in queue"`).
+
+Required replay (`shared/orb-spec/fixtures/mission-terminal-reconcile.json`):
+the 734c3bb7 order from Core-emitted fields (`status`, `terminal_reason`,
+`run_generation`, `state_revision`, `updated_at`: running turn, Core restart,
+completion from another session, and a stale replay), list-row vs detail-snapshot
+ordering when `run_generation` is absent on the list row, a Core restart that
+replays an older generation, and a delayed terminal snapshot after a newer turn
+started.
+
 ## Mobile gap
 
 Desktop derivation and `live_children_count` consumption are not yet mirrored by

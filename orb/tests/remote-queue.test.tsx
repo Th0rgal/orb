@@ -431,3 +431,76 @@ it('refuses to CAS-edit a delivered queue row and refreshes on a typed 409 revis
   expect(await handle.editInPlace('q1', 'too late')).toBe('failed');
   expect(backend.api.mock.calls.filter(([url, init]: [string, RequestInit]) => String(url).endsWith('/q1') && init?.method === 'PATCH')).toHaveLength(1);
 });
+
+it('treats DELETE 404 as gone only when the body says "message not in queue" and rolls back on route-missing 404', async () => {
+  backend.list.mockResolvedValue([
+    { id: 'route-404', content: 'Route missing', source: 'remote-queue' },
+    { id: 'gone-404', content: 'Already gone', source: 'remote-queue' },
+  ]);
+  const { ApiError } = await import('../src/api');
+  backend.api
+    .mockImplementationOnce(async () => {
+      throw new ApiError(404, JSON.stringify({ error: 'not_found', path: '/api/control/queue/route-404' }));
+    })
+    .mockImplementationOnce(async () => {
+      throw new ApiError(404, JSON.stringify({ error: 'message not in queue' }));
+    });
+  const cancel = vi.fn(), remove = vi.fn(), rows = vi.fn();
+  render(() => <RemoteQueue mission="remote" onRows={rows} onRemove={remove} onCancel={cancel}/>);
+  await screen.findByText('2 Queued');
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove queued message: Route missing' }));
+  expect((await screen.findByRole('alert')).textContent).toContain('not_found');
+  expect(screen.getByText('Route missing')).toBeTruthy();
+  expect(cancel).not.toHaveBeenCalledWith('route-404');
+  expect(remove).not.toHaveBeenCalledWith('route-404');
+  expect(rows).toHaveBeenLastCalledWith(['route-404', 'gone-404']);
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove queued message: Already gone' }));
+  await waitFor(() => expect(cancel).toHaveBeenCalledWith('gone-404'));
+  expect(remove).toHaveBeenCalledWith('gone-404');
+  expect(screen.queryByText('Already gone')).toBeNull();
+  expect(rows).toHaveBeenLastCalledWith(['route-404']);
+});
+
+it('on a terminal mission labels listed rows as not delivered and sends via delete-then-send only after DELETE 200 or "message not in queue"', async () => {
+  backend.list.mockResolvedValue([
+    { id: 'q1', content: 'Please stop and summarize', source: 'remote-queue' },
+    { id: 'q2', content: 'Follow-up two', source: 'remote-queue' },
+  ]);
+  const { ApiError } = await import('../src/api');
+  // First attempt: DELETE returns route-missing 404 -> must NOT call onSendImmediate(payload).
+  backend.api.mockImplementationOnce(async () => {
+    throw new ApiError(404, JSON.stringify({ error: 'not_found', path: '/api/control/queue/q1' }));
+  });
+  const send = vi.fn().mockResolvedValue(undefined), retract = vi.fn(), cancel = vi.fn();
+  render(() => <RemoteQueue mission="remote" terminal={true} onSendImmediate={send} onRetract={retract} onRows={() => {}} onCancel={cancel}/>);
+  await screen.findByText('2 Not delivered');
+  expect(screen.getAllByText(/Not delivered · mission ended before delivery/)).toHaveLength(2);
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Send now: Please stop and summarize' }));
+  expect((await screen.findByRole('alert')).textContent).toContain('not_found');
+  // Never called /send-now on a terminal mission, and did not dispatch payload after failed DELETE:
+  expect(backend.api).not.toHaveBeenCalledWith('/api/control/queue/q1/send-now?interrupt=true', expect.anything());
+  expect(send).toHaveBeenCalledTimes(1); // only the optimistic liveInjected preview before retract
+  expect(retract).toHaveBeenCalledWith('q1');
+  expect(cancel).not.toHaveBeenCalled();
+  expect(screen.getByText('Please stop and summarize')).toBeTruthy();
+
+  // Second attempt: q1 DELETE returns 200, q2 DELETE returns 404 "message not in queue" -> sends both in order.
+  send.mockClear();
+  backend.api.mockImplementation(async (url: string, init?: RequestInit) => {
+    if (url === '/api/control/queue/q1' && init?.method === 'DELETE') return { ok: true, id: 'q1', mission_id: 'remote' };
+    if (url === '/api/control/queue/q2' && init?.method === 'DELETE') {
+      throw new ApiError(404, JSON.stringify({ error: 'message not in queue' }));
+    }
+    throw new Error(`unexpected call ${url}`);
+  });
+  await fireEvent.click(screen.getByRole('button', { name: 'Send now: Please stop and summarize' }));
+  await waitFor(() => expect(send).toHaveBeenLastCalledWith([
+    { id: 'q1', content: 'Please stop and summarize', attached: undefined },
+    { id: 'q2', content: 'Follow-up two', attached: undefined },
+  ]));
+  expect(cancel).toHaveBeenCalledWith('q1');
+  expect(cancel).toHaveBeenCalledWith('q2');
+});

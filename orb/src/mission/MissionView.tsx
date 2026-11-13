@@ -1,6 +1,6 @@
 import { missionAssignedNode, missionNode, nodeLabel } from "../machines/nodes";
 import { followProjectFolder, seedDelivered, seededPrompt } from "../localFolder";
-import { canForceSlot, executionPhaseLabel, isArchived, isFailedStatus, isLive, isRunning, isSettingsIdle, isWorking, remoteJobEnded } from "../missionStatus";
+import { canForceSlot, executionPhaseLabel, isArchived, isFailedStatus, isLive, isReopenable, isRunning, isSettingsIdle, isWorking, remoteJobEnded } from "../missionStatus";
 import { errorText, log, swallow } from "../log";
 import { flushClientLink } from "../clientLink";
 import {CodexSpeedPicker, missionSpeed} from '../CodexSpeedPicker';
@@ -30,7 +30,7 @@ import { ErrorToast } from "../toast";
 import { MissionFailure, LaunchStatus, MissionPending, missionPhase, rememberLaunch, recalledLaunch, missionDestination, withInitialPrompt, launchError, missionGoal, dockModelLabel, type LaunchReceipt } from "../missionLaunch";
 import { chipToAttachment, loadAttachItems, mentionedChips, type AttachChip } from "../attach";
 import { shallowEqual } from "../poll";
-import { Show, Suspense, batch, createMemo, createSignal, createEffect, lazy, on, onCleanup, onMount } from "solid-js";
+import { Show, Suspense, batch, createMemo, createSignal, createEffect, lazy, on, onCleanup, onMount, untrack } from "solid-js";
 import { Portal } from "solid-js/web";
 import * as Ic from "../icons";
 import { observeTransferDestination, stopSource, transferForDestination } from "../forkTransfer";
@@ -115,6 +115,7 @@ import { deliverInOrder } from "./sendQueue";
 import { missionActivity, beginHandoff, endHandoff, missionHandoff } from "../missionStatus";
 import { createHandoffTracker } from "./handoff";
 import { createOptimisticList } from "./optimisticList";
+import { followupAfterTerminal, snapshotAdmitted, withOwnedExecution } from "../missionSnapshot";
 import {
   normalizeFollowupPrompt,
   stepFollowupEnqueueOptimistic,
@@ -140,11 +141,10 @@ function trackMissionSettings<T>(missionId: string, request: Promise<T>): Promis
 export function mergeIncomingMission(prev: Mission | null, incoming: Mission): Mission {
   if (!prev || prev.id !== incoming.id) return incoming;
   const history = incoming.history?.length ? incoming.history : prev.history;
-  const prevTs = Date.parse(prev.updated_at || "");
-  const nextTs = Date.parse(incoming.updated_at || "");
-  if (!Number.isNaN(prevTs) && !Number.isNaN(nextTs) && nextTs < prevTs) {
+  if (!snapshotAdmitted(prev, incoming)) {
     return prev.history === history ? prev : { ...prev, history };
   }
+  incoming = withOwnedExecution(incoming);
   const reconciledSyncFlags: Pick<Mission, "local_sync_pending" | "local_sync_local_only" | "local_sync_error"> = {
     local_sync_pending: incoming.local_sync_pending ?? false,
     local_sync_local_only: incoming.local_sync_local_only ?? false,
@@ -613,7 +613,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
       setRevertingCheckpoint(false);
     }
   };
-  const drafts = createOptimisticList<{id:ReturnType<typeof crypto.randomUUID>;text:string; images:DraftImage[];waiting:boolean;postedAfterSeq:number;failed?:boolean;retry?:()=>void}>();
+  const drafts = createOptimisticList<{id:ReturnType<typeof crypto.randomUUID>;text:string; images:DraftImage[];waiting:boolean;postedAfterSeq:number;postedAt:number;failed?:boolean;retry?:()=>void}>();
   const optimisticList = drafts.items;
   const optimistic = drafts.first;
   let sendingIds:ReturnType<typeof crypto.randomUUID>[]=[];
@@ -640,6 +640,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
     const reused = Boolean(prevErr && firstOpt?.text === draft.text);
     const nextId = reused ? firstOpt!.id : crypto.randomUUID();
     const postedAfterSeq = reused ? firstOpt!.postedAfterSeq : countDeliveredUserTurns();
+    const postedAt = reused ? firstOpt!.postedAt : Date.parse(mission()?.updated_at ?? "");
     const enqueueStep = stepFollowupEnqueueOptimistic({
       serverRev: 1,
       clientMsgId: nextId,
@@ -652,7 +653,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
     sendingIds.push(nextId);
     setSendError(null);
     const waiting = busy() || drafts.inFlightOtherThan(nextId);
-    drafts.upsert({ ...draft, id: nextId, waiting, postedAfterSeq });
+    drafts.upsert({ ...draft, id: nextId, waiting, postedAfterSeq, postedAt });
     if (!waiting) {
       if (p.id && !clientPlaced() && !editingQueued()) beginHandoff(p.id, nextId);
       pin.pin();
@@ -1143,10 +1144,14 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
   // turn starts, a failure lands, or all handover message IDs retire/cancel).
   const hasMissionFailure = () =>
     isFailedStatus(mission()?.status) || missionPhase(mission(), false).failed === true;
+  const isTerminalMission = () => {
+    const s = mission()?.status;
+    return Boolean(s && isReopenable(s) && !isArchived(s) && !runState().working);
+  };
   const [queueHandoverState, setQueueHandoverState] = createSignal<{ ids: string[]; postedAfterSeq: number } | null>(null);
   createEffect(on(busy, (now, before) => {
     if (now) { setQueueHandoverState(null); return; }
-    if (!before || clientPlaced() || hasMissionFailure()) return;
+    if (!before || clientPlaced() || hasMissionFailure() || isTerminalMission()) return;
     const queuedTranscriptIds = items().flatMap(i => i.kind === "user" && i.queued && i.messageId ? [i.messageId] : []);
     const candidateIds = [...new Set([...remoteQueuedIds(), ...queuedTranscriptIds])];
     if (!candidateIds.length) return;
@@ -1155,7 +1160,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
   createEffect(() => {
     const handover = queueHandoverState();
     if (!handover) return;
-    if (busy() || clientPlaced() || hasMissionFailure()) {
+    if (busy() || clientPlaced() || hasMissionFailure() || isTerminalMission()) {
       setQueueHandoverState(null);
       return;
     }
@@ -1190,6 +1195,26 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
     if(clientPlaced() && !localRunActive(p.id) && (localFailure(p.id) || queuedLocalMessages(p.id).some(row=>row.interrupted)))return false;
     return busy() || optimisticList().some(item => !item.waiting && !item.failed) || queuedLocalMessages(p.id).some(row=>!row.error && (!row.waiting || row.state==='dispatching' || row.state==='accepted'));
   };
+  // A terminal snapshot newer than an unacknowledged send: the message is not
+  // sent (Retry keeps its id), unless it was delivered after it was posted.
+  // A row Core still lists in GET /api/control/queue is real and owned by the
+  // queue: never mark it not_sent or discard while its id is in the list.
+  createEffect(() => {
+    const m = mission();
+    if (!m || clientPlaced() || !isTerminalMission()) return;
+    const listedIds = new Set(remoteQueuedIds());
+    const terminalAt = Date.parse(m.updated_at ?? "");
+    const users = items().filter((i): i is Extract<StreamItem, { kind: "user" }> => i.kind === "user" && !i.queued);
+    let unsent = false;
+    for (const draft of untrack(optimisticList)) {
+      if (draft.failed) continue;
+      const delivered = users.slice(draft.postedAfterSeq).map(u => ({ content: u.text, at: draft.postedAt }));
+      const fate = followupAfterTerminal({ content: draft.text, postedAt: draft.postedAt, acknowledged: listedIds.has(draft.id) }, terminalAt, delivered);
+      if (fate === "discard") drafts.remove(draft.id);
+      else if (fate === "not_sent") { drafts.setFailed(draft.id, true); endHandoff(m.id, draft.id); unsent = true; }
+    }
+    if (unsent) untrack(() => { if (!sendError()) setSendError("Not sent: the mission ended before Core accepted this message. Retry sends it again."); });
+  });
   // Unified execution-derived phase label (`missionStatus.ts`): starting/transferred
   // missions say "Starting <Harness>" until execution or first output is confirmed.
   const transferStarting = () => Boolean(p.id && transferForDestination(p.id)?.stage === "destination_starting");
@@ -1597,7 +1622,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
     // several seconds, and the queue row has already disappeared.
     const projected = ordered.map(row => row.id as ReturnType<typeof crypto.randomUUID>);
     const basePostedAfterSeq = countDeliveredUserTurns();
-    drafts.replaceAll(ordered.map(row => ({ id: row.id as ReturnType<typeof crypto.randomUUID>, text: messagePresentation(row.content).text, images: [], waiting: false, postedAfterSeq: basePostedAfterSeq })));
+    drafts.replaceAll(ordered.map(row => ({ id: row.id as ReturnType<typeof crypto.randomUUID>, text: messagePresentation(row.content).text, images: [], waiting: false, postedAfterSeq: basePostedAfterSeq, postedAt: Date.parse(mission()?.updated_at ?? "") })));
     pin.pin();
     try {
       if (wasBusy) {
@@ -1737,6 +1762,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
         <div class="col">
           <Show when={p.id}><SideQuestions mission={p.id} active={p.active !== false} items={viewItems()} ref={handle=>sideQuestions=handle} onTransfer={text=>setSideRevision({text,append:true})}/></Show>
           <RemoteQueue mission={p.id} active={p.active !== false}
+            terminal={isTerminalMission()}
             ref={handle => remoteQueue = handle}
             editing={editingQueued()}
             onEdit={row => void queuedEdit.start(row)}
