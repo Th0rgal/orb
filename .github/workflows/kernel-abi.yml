@@ -4,7 +4,7 @@ on:
   push:
     branches: [master, main, "release/*"]
     # Roadmap/docs pushes must not queue behind (and so cancel) pending master runs.
-    paths-ignore: ['docs/**']
+    paths-ignore: ['docs/**', '**/*.md']
   pull_request:
     branches: [master, main]
     types: [opened, synchronize, reopened, ready_for_review]
@@ -20,7 +20,7 @@ jobs:
   # Same planner as ci.yml: skip the kernel audit when no kernel input changed.
   plan:
     name: Plan
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && github.repository == 'Th0rgal/orb' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'lean-16vcpu-ubuntu-2604' || 'ubuntu-latest' }}
     outputs:
       run: ${{ steps.plan.outputs.run_wf_kernel_abi }}
     steps:
@@ -37,7 +37,7 @@ jobs:
   kernel-abi:
     needs: plan
     if: needs.plan.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && github.repository == 'Th0rgal/orb' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'lean-32vcpu-ubuntu-2604' || 'ubuntu-latest' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
