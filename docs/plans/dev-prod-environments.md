@@ -74,3 +74,7 @@ Both instances run from the base plus overlays; a settings round trip (export pr
   users, including resumes and extensions. Settings imports cannot override it.
   See [dev spending](../operations/dev-spending.md). Live rental and cap
   acceptance remains pending dev installation.
+- Isolation: the two-user HTTP regression suite covers REST and MCP ownership,
+  including caller-selected MCP roles and sessions minted for shared missions.
+  See [the acceptance procedure](../operations/dev-isolation.md). These local
+  regressions do not certify live dev or desktop acceptance; that work is pending.

@@ -489,6 +489,20 @@ def resolveCallerPrincipal?
   if !authenticateHttpBearer st.cfg hdrs nowEpochSec &&
      !(allowWsSubproto && authenticateConsoleWsUpgrade st.cfg hdrs nowEpochSec) then
     return none
+  -- Legacy configured passwords must resolve to their own stored user. The
+  -- boolean login check authenticates any configured account, not just admin.
+  -- Ambiguous/missing users fail closed instead of becoming bootstrap admin.
+  if !st.cfg.devMode then
+    if let some token := rawTok? then
+      let dashboardMatch := !st.cfg.dashboardPassword.isEmpty &&
+        ctEqSlice (ByteSlice.ofString token) (ByteSlice.ofString st.cfg.dashboardPassword)
+      if !dashboardMatch && (verifyAnySessionTokenExp? sec token nowEpochSec).isNone then
+        let credentialMatches := (parseConfiguredUsers st.cfg.usersJson).filter (fun (_, password) =>
+          ctEqSlice (ByteSlice.ofString token) (ByteSlice.ofString password))
+        unless credentialMatches.size == 1 do return none
+        let some user ← getUserByUsername? st.store credentialMatches[0]!.1 | return none
+        if user.disabled then return none
+        return some (CallerPrincipal.ofUserRecord user false)
   if !st.bootstrapAdminId.isEmpty then
     if let some adm ← getUserById? st.store st.bootstrapAdminId then
       if !adm.disabled then
@@ -2407,6 +2421,16 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             "revoke_privileged_access", "execute_privileged_command", "deploy_sandboxed_sh"].contains toolName) then
         return .ok (mkJson 403 "{\"error\":\"dev_operator_scope_required\"}")
       if isMemoryToolName toolName then
+        -- Personal memory is the server owner's data, not shared tenant state.
+        -- Reuse the persisted MCP issuer identity, including shared missions.
+        let ownerAllowed ← match scopedClaims? with
+          | none => pure ((mcpCaller?.map (fun c => !c.disabled && (c.role == "admin" || c.isLegacyUnscoped))).getD false)
+          | some claims => do
+            let some uid ← OrbCore.McpGateway.scopedCallerUserId? st.store claims nowEpochSec | pure false
+            if uid.isEmpty then pure (← getBootstrapAdmin? st.store).isNone
+            else pure (((← getUserById? st.store uid).map (fun u => !u.disabled && u.role == "admin")).getD false)
+        unless ownerAllowed do
+          return .ok (mkJson 200 "{\"ok\":false,\"error\":{\"code\":\"memory_tool_denied\",\"message\":\"Administrator required\"}}")
         let mut onManagedNode := false
         let mut hasProjSkill := !activeClaims.isExternal && !activeClaims.project.isEmpty
         if !activeClaims.missionId.isEmpty then
@@ -3659,14 +3683,15 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let hdrIdemKey := (lookupHeaderCI req.headers "idempotency-key").map (·.trimAscii.toString) |>.getD ""
       let bodyIdemKey := (bodyVal?.bind (·.fieldStr? "idempotency_key")).map (·.trimAscii.toString) |>.getD ""
       let idemKey := if !hdrIdemKey.isEmpty then hdrIdemKey else bodyIdemKey
+      let createScope := if caller.isLegacyUnscoped then "missions_create" else "missions_create:" ++ caller.userId
       if !idemKey.isEmpty then
-        match ← claimIdempotencySlot st.store "missions_create" idemKey s!"{nowEpochSec}" with
+        match ← claimIdempotencySlot st.store createScope idemKey s!"{nowEpochSec}" with
         | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
         | .ok (.Replayed rec) => return .ok (mkJson rec.statusCode rec.bodyJson)
         | .ok .InFlight => return .ok (mkJson 409 "{\"error\":\"idempotency_key_in_flight\"}")
         | .ok .Claimed => pure ()
       let abortIdem : IO Unit :=
-        if !idemKey.isEmpty then discard <| abortIdempotencySlot st.store "missions_create" idemKey else pure ()
+        if !idemKey.isEmpty then discard <| abortIdempotencySlot st.store createScope idemKey else pure ()
       let tape := JsonTape.indexJsonObject req.bodySlice
       let defMid ← newUuidV4
       let mid := (JsonTape.lookupString? tape "id").getD defMid
@@ -3903,7 +3928,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               revision := rev, key := s!"remote-launch:{mid}", model := effModel
             }
         if !idemKey.isEmpty then
-          match ← recordOrReplayIdempotency st.store "missions_create" idemKey 201 respBody s!"{nowEpochSec}" with
+          match ← recordOrReplayIdempotency st.store createScope idemKey 201 respBody s!"{nowEpochSec}" with
           | .ok rec =>
             persistInitialCyber
             if let some sIdx := st.searchIdx? then

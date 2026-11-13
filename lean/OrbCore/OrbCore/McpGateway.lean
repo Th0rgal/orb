@@ -130,10 +130,18 @@ private def lookupMcpActionByRetryKey? (store : CoreStore) (scope retryKey : Str
   if raw.isEmpty then return none
   return (OrbBin.Json.parse raw).toOption
 
+/-- Direct dashboard callers share a synthetic session id. Partition their retry
+    keys by the verified user; real scoped sessions already have unique ids. -/
+private def actionScope (claims : McpSessionClaims) (userId tool : String) : String :=
+  let actor := if claims.sessionId == "00000000-0000-4000-8000-000000000000" &&
+      !userId.isEmpty then ":user:" ++ userId else ""
+  s!"{claims.sessionId}:{claims.missionId}{actor}:{tool}"
+
 /-- Persist a settled MCP action receipt in `mcp_actions_v1` and enrich `resObj` with `action_id`/`state`/`accepted`. -/
 private def recordSettledMcpAction
     (store : CoreStore)
     (claims : McpSessionClaims)
+    (callerUserId : String)
     (toolName : String)
     (args : JVal)
     (resObj : JVal)
@@ -142,7 +150,7 @@ private def recordSettledMcpAction
   let actId ← newUuidV4
   let retryKey := ((args.fieldStr? "idempotency_key").getD "").trimAscii.toString
   let effRetryKey := if retryKey.isEmpty then s!"auto:{actId}" else retryKey
-  let scope := s!"{claims.sessionId}:{claims.missionId}:{toolName}"
+  let scope := actionScope claims callerUserId toolName
   let enriched :=
     resObj
       |>.setField "action_id" (.str actId)
@@ -151,7 +159,7 @@ private def recordSettledMcpAction
   let resJson := renderCompact enriched
   let reqJson := renderCompact args
   let ownerVal := if targetMissionId.isEmpty then claims.missionId else targetMissionId
-  let principalVal := s!"{claims.role}:{claims.missionId}"
+  let principalVal := s!"{claims.role}:{callerUserId}:{claims.missionId}"
   discard <| execParamQuery store.projectsDb
     ("INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state,result,created_at,updated_at) " ++
      "VALUES(?1,?2,?3,?4,?4,?5,?6,?7,'succeeded',?8,?9,?9) " ++
@@ -175,6 +183,15 @@ private def externalManagedOwner? (store : CoreStore) (claims : McpSessionClaims
   let project := cell rows[1]! 1
   if !claims.project.isEmpty && !project.isEmpty && claims.project != project then return none
   return some (cell rows[1]! 0, if project.isEmpty then claims.project else project)
+
+/-- The live stored session issuer, with a mission-owner fallback only for native
+    mission tokens that predate persisted sessions. Never accept a body identity. -/
+def scopedCallerUserId? (store : CoreStore) (claims : McpSessionClaims) (now : UInt64) : IO (Option String) := do
+  if claims.isExternal then return (← externalManagedOwner? store claims now).map Prod.fst
+  let .ok rows ← execParamQuery store.projectsDb
+      "SELECT owner FROM mcp_sessions_v1 WHERE id=?1;" #[claims.sessionId] | return none
+  if rows.size > 1 then return some (cell rows[1]! 0)
+  return (← getMission? store claims.missionId).map (·.ownerUserId)
 
 /-- Follow a single parent chain, never a shared ancestor's other children. `UNION`
     terminates even malformed cycles; every hop remains in the same tenant/project. -/
@@ -248,6 +265,11 @@ def dispatchMcpToolCall
       callerProj := project
   else if directOperator then
     callerUserId := authenticatedUserId
+
+  -- A shared mission's owner is not the identity of the user who minted its
+  -- session. The persisted issuer remains authoritative for every tool/role.
+  if !claims.isExternal && !directOperator && !claims.missionId.isEmpty then
+    if let some uid ← scopedCallerUserId? store claims nowEpochSec then callerUserId := uid
 
   -- Operator authority comes from who minted the session, never from the role label
   -- alone: `/api/mcp/session` requires a Core-authenticated user and records it. An
@@ -370,11 +392,83 @@ def dispatchMcpToolCall
     | .error e => return .error (if e == "provider_at_capacity" then e else "spawn_rejected", e)
     | .ok spawned => return .ok spawned.machine
 
+  -- Enforce tenant ownership BEFORE dispatch and idempotent replay. An MCP role
+  -- describes mission delegation, never authority over another user's objects.
+  let tenantScoped := !callerUserId.isEmpty || claims.isExternal
+  let user? ← getUserById? store callerUserId
+  let userIsAdmin := (user?.map (fun u => !u.disabled && u.role == "admin")).getD false ||
+    (directOperator && authenticatedAdmin)
+  if (user?.map (·.disabled)).getD false then
+    return mcpErr "forbidden" "Account unavailable"
+  let missionReadTools := #["get_mission", "get_mission_health", "get_mission_diagnostics",
+    "get_mission_events", "list_mission_shared_files", "get_consult_result", "get_cloud_execution", "get_budget"]
+  let missionWriteTools := #["send_message_to_mission", "ask_mission", "answer_mission_question",
+    "cancel_mission", "acknowledge_mission", "adopt_mission", "resume_mission", "update_mission_settings",
+    "link_mission_to_project", "schedule_wakeup", "schedule_job_wakeup"]
+  -- The REST collaboration class permits messages and cancellation to shared
+  -- participants; changing owner settings/placement or resuming remains owner-only.
+  let collaborateTools := #["send_message_to_mission", "ask_mission", "answer_mission_question", "cancel_mission"]
+  let checkTenantMission (mid : String) (allowParticipant : Bool) : IO Bool := do
+    if !tenantScoped then return true
+    let (exists_, owns, shares) ← getMissionRelationship store mid callerUserId
+    return exists_ && (owns || (allowParticipant && shares))
+  if missionReadTools.contains toolName || missionWriteTools.contains toolName then
+    let mid := (args.fieldStr? "mission_id").orElse (fun _ =>
+      (args.fieldStr? "target_mission_id").orElse (fun _ => args.fieldStr? "id")) |>.getD callerMid
+    unless mid.isEmpty && toolName == "get_budget" do
+      unless ← checkTenantMission mid (missionReadTools.contains toolName || collaborateTools.contains toolName) do
+        return mcpErr "not_found" "Mission not found"
+  if toolName == "start_mission" || toolName == "consult_model" then
+    let parent := (args.fieldStr? "parent_mission_id").getD callerMid
+    unless parent.isEmpty do
+      unless ← checkTenantMission parent false do return mcpErr "not_found" "Mission not found"
+  -- Vault and host-approval state belong to the server owner. Members cannot
+  -- inspect or enqueue owner actions, even with a self-selected operator role.
+  let legacyOwner := !tenantScoped && (← getBootstrapAdmin? store).isNone
+  if !userIsAdmin && !legacyOwner && (toolName.startsWith "secret_" ||
+      #["list_privileged_access", "request_privileged_access", "revoke_privileged_access",
+        "execute_privileged_command", "get_dev_access", "deploy_dev", "read_dev_logs",
+        "get_fleet_sweep", "reconcile_action"].contains toolName) then
+    return mcpErr "forbidden" "Administrator required"
+  let projectTools := #["get_project", "get_situation", "update_project_status", "set_project_track",
+    "accept_project_track_evidence", "reopen_project_track", "accept_project_track", "invalidate_project_track_evidence",
+    "get_project_grant", "add_project_steer", "record_project_decision", "answer_project_decision",
+    "get_project_tasks", "board_status", "plan_project_tasks", "plan_tasks", "update_project_task",
+    "cancel_project_task", "review_task", "accept_task", "reject_task", "link_mission_to_project"]
+  let mut args := args
+  if tenantScoped && projectTools.contains toolName then
+    let raw := (args.fieldStr? "project").orElse (fun _ => args.fieldStr? "slug") |>.getD callerProj
+    let bootstrap := ((← getBootstrapAdmin? store).map (·.id)).getD ""
+    let scopedSlug := (scopeProjectSlug callerUserId bootstrap raw).getD raw
+    let .ok rows ← execParamQuery store.projectsDb
+        "SELECT slug FROM project_owners WHERE owner_user_id=?1 AND (slug=?2 OR slug=?3) ORDER BY (slug=?3) DESC LIMIT 1;"
+        #[callerUserId, raw, scopedSlug] | return mcpErr "not_found" "Project not found"
+    unless rows.size > 1 do return mcpErr "not_found" "Project not found"
+    let slug := cell rows[1]! 0
+    args := args.setField "project" (.str slug) |>.setField "slug" (.str slug)
+  let scopedUid? := if tenantScoped then some callerUserId else none
+  let (_, userComputeSpent) ← if tenantScoped then getUserSpentTodayCents store callerUserId (nowIso.take 10).toString
+    else pure (0, 0)
+  let userCap? := user?.bind (·.dailySpendCapCents?)
+
+  let lookupCallerAction? (aid : String) : IO (Option JVal) := do
+    if tenantScoped then
+      let .ok rows ← execParamQuery store.projectsDb
+          "SELECT COALESCE(owner,''),scope FROM mcp_actions_v1 WHERE id=?1;" #[aid] | return none
+      unless rows.size > 1 do return none
+      let owner := cell rows[1]! 0
+      if owner.isEmpty then
+        let scope := cell rows[1]! 1
+        unless scope.startsWith ((actionScope claims callerUserId "") ) do return none
+      else
+        unless ← checkTenantMission owner true do return none
+    lookupMcpActionById? store aid
+
   -- Idempotent replay for retried mutating MCP calls carrying `idempotency_key`
   let idemKeyTop := ((args.fieldStr? "idempotency_key").getD "").trimAscii.toString
   if !idemKeyTop.isEmpty && toolName != "get_action" && toolName != "wait_actions" &&
      toolName != "reconcile_action" && toolName != "cancel_action" then
-    let scope := s!"{claims.sessionId}:{claims.missionId}:{toolName}"
+    let scope := actionScope claims callerUserId toolName
     if let some prevRes ← lookupMcpActionByRetryKey? store scope idemKeyTop then
       return mcpOk prevRes
 
@@ -392,14 +486,9 @@ def dispatchMcpToolCall
     | .ok (some spawnAction) => return mcpOk spawnAction
     | .error _ => return mcpErr "not_found" "Action not found"
     | .ok none => pure ()
-    if let some rec ← lookupMcpActionById? store aid then
+    if let some rec ← lookupCallerAction? aid then
       return mcpOk rec
-    return mcpOk (.obj #[
-      ("action_id", .str aid),
-      ("status", .str "completed"),
-      ("state", .str "succeeded"),
-      ("accepted", .str "yes")
-    ])
+    return mcpErr "not_found" "Action not found"
 
   | "reconcile_action" =>
     if normalizeMcpRole claims.role != "operator" then
@@ -407,6 +496,7 @@ def dispatchMcpToolCall
     let aid := (args.fieldStr? "action_id").orElse (fun _ => args.fieldStr? "id") |>.getD ""
     if aid.trimAscii.toString.isEmpty then
       return mcpErr "invalid_arguments" "missing action_id"
+    unless (← lookupCallerAction? aid).isSome do return mcpErr "not_found" "Action not found"
     let resolution := ((args.fieldStr? "resolution").getD "completed").trimAscii.toString
     let nextState := if resolution == "rejected" then "rejected" else "succeeded"
     -- A spawn receipt is reconciled only from `uncertain`: a running one still
@@ -414,7 +504,7 @@ def dispatchMcpToolCall
     discard <| execParamQuery store.projectsDb
       "UPDATE mcp_actions_v1 SET state=?2, updated_at=?3 WHERE id=?1 AND (tool<>'spawn_managed_machine' OR state='uncertain');"
       #[aid, nextState, nowIso]
-    if let some rec ← lookupMcpActionById? store aid then
+    if let some rec ← lookupCallerAction? aid then
       return mcpOk rec
     return mcpOk (.obj #[
       ("action_id", .str aid),
@@ -439,14 +529,13 @@ def dispatchMcpToolCall
         | .ok (some spawnAction) => receipts := receipts.push spawnAction
         | _ => receipts := receipts.push (.obj #[("action_id", .str aid), ("state", .str "not_found"), ("status", .str "not_found")])
         continue
-      match ← lookupMcpActionById? store aid with
+      match ← lookupCallerAction? aid with
       | some rec => receipts := receipts.push rec
       | none =>
         receipts := receipts.push (.obj #[
           ("action_id", .str aid),
-          ("status", .str "completed"),
-          ("state", .str "succeeded"),
-          ("accepted", .str "yes")
+          ("status", .str "not_found"),
+          ("state", .str "not_found")
         ])
     return mcpOk (.obj #[
       ("receipts", .arr receipts),
@@ -465,7 +554,7 @@ def dispatchMcpToolCall
       match ← ManagedSpawnActions.cancel store aid { userId := callerUserId, missionId := callerMid } operatorIsAdmin with
       | .ok cancelled => return mcpOk cancelled
       | .error _ => return mcpErr "not_found" "Action not found"
-    if let some rec ← lookupMcpActionById? store aid then
+    if let some rec ← lookupCallerAction? aid then
       let curSt := (rec.fieldStr? "state").getD "succeeded"
       let cancelled := curSt == "queued" || curSt == "pending"
       if cancelled then
@@ -492,7 +581,7 @@ def dispatchMcpToolCall
             defaultFleet.dailyCapCents defaultFleet.spentTodayCents defaultFleet.maxConcurrent with
           | .ok f => pure f
           | .error _ => pure defaultFleet
-        buildComputeFleetJVal relayHub? mc fl none 0 none store.rootDir nowIso (some store)
+        buildComputeFleetJVal relayHub? mc fl scopedUid? userComputeSpent userCap? store.rootDir nowIso (some store)
       | none => pure (.obj #[("nodes", .arr #[])])
     return mcpOk (.obj #[
       ("active_missions", JVal.nat activeCnt),
@@ -551,7 +640,7 @@ def dispatchMcpToolCall
         ("due_epoch", JVal.uint64 dueEpoch),
         ("next_at", .str nextIso)
       ]
-      let settled ← recordSettledMcpAction store claims toolName args resObj nowIso reqMid
+      let settled ← recordSettledMcpAction store claims callerUserId toolName args resObj nowIso reqMid
       return mcpOk settled
 
   | "schedule_job_wakeup" =>
@@ -596,7 +685,7 @@ def dispatchMcpToolCall
         ("job_id", .str jobId),
         ("trigger_kind", .str "durable_job_terminal")
       ]
-      let settled ← recordSettledMcpAction store claims toolName args resObj nowIso reqMid
+      let settled ← recordSettledMcpAction store claims callerUserId toolName args resObj nowIso reqMid
       return mcpOk settled
 
   -- Mission Discovery & Inspection
@@ -622,7 +711,7 @@ def dispatchMcpToolCall
       folder? := args.fieldStr? "folder"
       track? := args.fieldStr? "track"
     }
-    match ← listMissionsJson store none none flt with
+    match ← listMissionsJson store none scopedUid? flt with
     | .error e => return mcpErr "db_error" e
     | .ok rawArr =>
       let arr := (OrbBin.Json.parse rawArr).toOption.getD (.arr #[])
@@ -891,7 +980,7 @@ def dispatchMcpToolCall
       ("managed_machine_expires_at_sec",
         match reused? with | some claimed => JVal.uint64 claimed.machine.expiresAtSec | none => .null)
     ]
-    let settled ← recordSettledMcpAction store claims toolName args resObj nowIso mid
+    let settled ← recordSettledMcpAction store claims callerUserId toolName args resObj nowIso mid
     return mcpOk settled
 
   | "get_consult_result" =>
@@ -958,7 +1047,7 @@ def dispatchMcpToolCall
       ("note_id", .str noteId),
       ("queued", .bool queued)
     ]
-    let settled ← recordSettledMcpAction store claims toolName args resObj nowIso mid
+    let settled ← recordSettledMcpAction store claims callerUserId toolName args resObj nowIso mid
     return mcpOk settled
 
   | "cancel_mission" | "acknowledge_mission" | "adopt_mission" | "resume_mission" =>
@@ -973,7 +1062,7 @@ def dispatchMcpToolCall
       discard <| execParamQuery store.missionsDb
         "UPDATE missions SET status='cancelled', terminal_reason='cancelled', updated_at=?2, state_revision=state_revision+1 WHERE id=?1;"
         #[mid, nowIso]
-      let settled ← recordSettledMcpAction store claims toolName args
+      let settled ← recordSettledMcpAction store claims callerUserId toolName args
         (.obj #[("ok", .bool true), ("mission_id", .str mid), ("status", .str "cancelled")]) nowIso mid
       return mcpOk settled
     else if toolName == "resume_mission" then
@@ -1010,7 +1099,7 @@ def dispatchMcpToolCall
           }
           if let .error dispErr ← submitRemoteMissionTurn store mc? relayHub? broadcastHub? sup workingDir spec nowEpochSec then
             return mcpErr "remote_dispatch_failed" dispErr true
-          let settled ← recordSettledMcpAction store claims toolName args
+          let settled ← recordSettledMcpAction store claims callerUserId toolName args
             (.obj #[("ok", .bool true), ("mission_id", .str mid), ("status", .str "active")]) nowIso mid
           return mcpOk settled
       -- No node to run the turn on: say so; never mark the mission active.
@@ -1020,7 +1109,7 @@ def dispatchMcpToolCall
       discard <| execParamQuery store.missionsDb
         "UPDATE missions SET status=?2, updated_at=?3, state_revision=state_revision+1 WHERE id=?1;"
         #[mid, nextSt, nowIso]
-      let settled ← recordSettledMcpAction store claims toolName args
+      let settled ← recordSettledMcpAction store claims callerUserId toolName args
         (.obj #[("ok", .bool true), ("mission_id", .str mid), ("status", .str nextSt)]) nowIso mid
       return mcpOk settled
 
@@ -1075,7 +1164,7 @@ def dispatchMcpToolCall
         defaultFleet.dailyCapCents defaultFleet.spentTodayCents defaultFleet.maxConcurrent with
       | .ok f => pure f
       | .error _ => pure defaultFleet
-    let fv ← buildComputeFleetJVal relayHub? mc fleet none 0 none store.rootDir nowIso (some store)
+    let fv ← buildComputeFleetJVal relayHub? mc fleet scopedUid? userComputeSpent userCap? store.rootDir nowIso (some store)
     return mcpOk fv
 
   | "list_managed_machines" =>
@@ -1087,15 +1176,15 @@ def dispatchMcpToolCall
       | .error _ => pure defaultFleet
     let prefs ← if managedPreferenceUserId.isEmpty then pure #[] else getUserManagedPrefs mc managedPreferenceUserId
     let .ok catalog ← loadManagedProviderCatalog mc store.rootDir fleet
-        (normalizeMcpRole claims.role == "operator") prefs (managedProvisioningOverride?.map Prod.fst)
+        userIsAdmin prefs (managedProvisioningOverride?.map Prod.fst)
       | return mcpErr "unavailable" "managed_provider_catalog_unavailable"
     -- Destroyed machines are history, and there are thousands of them: the
     -- default list is the live ones; `verbose` adds the last 24 hours.
     let verbose := (args.fieldBool? "verbose").getD false
     let shown := fleet.machines.filter fun m =>
-      m.status != "destroyed" ||
-        (verbose && max m.createdAtSec m.expiresAtSec + 86400 ≥ nowEpochSec)
-    let raw := renderManagedMachinesJson { fleet with machines := shown }
+      (!tenantScoped || m.ownerUserId == callerUserId) &&
+        (m.status != "destroyed" || (verbose && max m.createdAtSec m.expiresAtSec + 86400 ≥ nowEpochSec))
+    let raw := renderManagedMachinesJson { fleet with machines := shown } scopedUid? userIsAdmin prefs userComputeSpent userCap?
     return mcpOk (((OrbBin.Json.parse raw).toOption.getD (.obj #[])).setField "providers" catalog)
 
   | "get_budget" =>
@@ -1111,7 +1200,7 @@ def dispatchMcpToolCall
       let raw := renderMissionBudgetJson fleet bCfg nowEpochSec
       return mcpOk ((OrbBin.Json.parse raw).toOption.getD (.obj #[]))
     else
-      let raw := renderManagedBudgetJson fleet
+      let raw := renderManagedBudgetJson fleet scopedUid? userComputeSpent userCap?
       return mcpOk ((OrbBin.Json.parse raw).toOption.getD (.obj #[]))
 
   | "spawn_managed_machine" =>
@@ -1324,7 +1413,8 @@ def dispatchMcpToolCall
 
   -- Projects, Controller & Board
   | "list_projects" =>
-    let allProjs ← listProjectsJVal store "" "" true false
+    let allProjs ← listProjectsJVal store callerUserId
+      (((← getBootstrapAdmin? store).map (·.id)).getD "") (!tenantScoped) false
     let filtered :=
       if claims.project.isEmpty then allProjs
       else allProjs.filter (fun p => (p.fieldStr? "slug") == some claims.project)
@@ -1463,7 +1553,8 @@ def dispatchMcpToolCall
   | "list_workspaces" =>
     let mut items : Array JVal := #[]
     if let .ok rows ← execParamQuery store.missionsDb
-        "SELECT id, name, workspace_type, path, status FROM workspaces ORDER BY name ASC;" #[] then
+        "SELECT id, name, workspace_type, path, status FROM workspaces WHERE (?1='0' OR owner_user_id=?2) ORDER BY name ASC;"
+        #[if tenantScoped then "1" else "0", callerUserId] then
       for i in [1:rows.size] do
         let r := rows[i]!
         items := items.push (.obj #[
@@ -1478,7 +1569,8 @@ def dispatchMcpToolCall
   | "get_workspace" =>
     let wid := (args.fieldStr? "workspace_id").orElse (fun _ => args.fieldStr? "id") |>.getD ""
     if let .ok rows ← execParamQuery store.missionsDb
-        "SELECT id, name, workspace_type, path, status FROM workspaces WHERE id=?1 OR name=?1 LIMIT 1;" #[wid] then
+        "SELECT id, name, workspace_type, path, status FROM workspaces WHERE (id=?1 OR name=?1) AND (?2='0' OR owner_user_id=?3) LIMIT 1;"
+        #[wid, if tenantScoped then "1" else "0", callerUserId] then
       if rows.size > 1 then
         let r := rows[1]!
         return mcpOk (.obj #[

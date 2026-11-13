@@ -33,6 +33,7 @@ import OrbCore.ManagedSnapshotCatalogTests
 import OrbCore.ProviderContractTests
 import OrbCore.ProxyRoutingTests
 import OrbCore.SettingsDocumentTests
+import OrbCore.TenantIsolationTests
 import OrbCore.DevSpendingTests
 import OrbCore.DevOperatorTests
 import OrbCore.SettingsTransferTests
@@ -6352,7 +6353,8 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
     dashboardPassword := "strong-prod-pass-1234"
     jwtSecret := jwtSec
   }
-  let _ ← bootstrapUsersAndBackfill store #[("admin", cfg.dashboardPassword)] (formatEpochIso8601Utc nowSec)
+  let .ok remoteAdminId ← bootstrapUsersAndBackfill store #[("admin", cfg.dashboardPassword)] (formatEpochIso8601Utc nowSec)
+    | return (← fail "remote fixture bootstrap failed")
   let managedRef ← IO.mkRef ({ enabled := true, boatEnabled := true, dailyCapCents := 5000, maxConcurrent := 20 } : ManagedFleetState)
   let chainsRef ← IO.mkRef (#[] : Array RoutingChain)
   let cooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
@@ -6392,6 +6394,10 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
   let _ ← execParamQuery store.missionsDb
     ("INSERT INTO missions(id,title,status,backend,working_directory,project,placement_kind,tags,run_generation,created_at,updated_at) " ++
      "VALUES('m-parent-rem','leanvm faster','active','opencode','','leanvm','managed','[]',1,'2026-11-12T06:00:00Z','2026-11-12T06:05:00Z');") #[]
+  -- This mission is inserted after bootstrap; give it the same real owner as
+  -- normal REST/runner-created rows rather than relying on an unowned fixture.
+  let _ ← execParamQuery store.missionsDb
+    "UPDATE missions SET owner_user_id=?1 WHERE id='m-parent-rem';" #[remoteAdminId]
   let _ ← store.missionsDb.mu.atomically do
     insertMissionRunUnlocked store.missionsDb
       "r-parent-1" "m-parent-rem" "1" "running" "" "" "2026-11-12T06:05:00Z" false "orb-core" "remote-node:mocknode"
@@ -6467,8 +6473,8 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
 
   let (_, crossWakeBody) ← sendJson "POST" "/api/mcp/call" wMcpTok
     "{\"name\":\"schedule_wakeup\",\"arguments\":{\"mission_id\":\"other-mission\",\"delay_seconds\":60,\"prompt\":\"nope\",\"reason\":\"test\",\"idempotency_key\":\"wk-cross\"}}"
-  if (crossWakeBody.splitOn "\"forbidden\"").length < 2 then
-    return (← fail s!"worker session should forbid cross-mission schedule_wakeup: {crossWakeBody}")
+  if (crossWakeBody.splitOn "\"not_found\"").length < 2 then
+    return (← fail s!"worker session must not disclose an absent or foreign wakeup target: {crossWakeBody}")
 
   let wakeCallPayload :=
     "{\"name\":\"schedule_wakeup\",\"arguments\":{\"delay_seconds\":60,\"prompt\":\"Check wave 4\",\"reason\":\"poll\",\"idempotency_key\":\"wk-idem-1\"}}"
@@ -6969,6 +6975,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   let .ok store ← openCoreStore tmpRoot
     | do IO.eprintln "[orb-core-test] FAIL: openCoreStore failed"; return 1
   try
+    OrbCore.TenantIsolationTests.run tmpRoot
     OrbCore.ManagedProvisioningTests.run tmpRoot
     OrbCore.ManagedResumeTests.run tmpRoot
     OrbCore.DevSpendingTests.run tmpRoot
