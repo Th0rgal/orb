@@ -4165,6 +4165,9 @@ def renderAIProviderForCallerJson
   let statusStr := if effEnabled then "{\"type\":\"connected\"}" else "{\"type\":\"disabled\"}"
   let typeDisp := fallbackProviderTypeDisplayName p.providerType
   let dispName := if isAdmin then p.name else memberDisplayName?.getD typeDisp
+  let modelsForCaller :=
+    if isAdmin then p.customModels
+    else p.customModels.map fun m => { m with rpmLimit? := none, tpmLimit? := none, maxConcurrency? := none }
   let mut kvs : Array String := #[
     s!"\"id\":{jsonEscape p.id}",
     s!"\"provider_type\":{jsonEscape p.providerType}",
@@ -4179,7 +4182,7 @@ def renderAIProviderForCallerJson
     "\"has_oauth\":false",
     "\"uses_oauth\":false",
     s!"\"status\":{statusStr}",
-    s!"\"custom_models\":{renderCustomModelsJson p.customModels}"
+    s!"\"custom_models\":{renderCustomModelsJson modelsForCaller}"
   ]
   if isAdmin then
     if !p.baseUrl.isEmpty then
