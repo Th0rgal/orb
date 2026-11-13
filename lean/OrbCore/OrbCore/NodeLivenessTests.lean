@@ -61,8 +61,12 @@ private def fleetTests (root : String) : IO Unit := do
     let fresh ← node "fresh"
     check (fresh.fieldStr? "status" == some "online" && fresh.fieldBool? "relay_connected" == some true &&
       fresh.fieldStr? "last_seen" == some (formatEpochIso8601Utc (now - 10))) "a recent persisted poll is online, with its own time"
-    check (fresh.fieldNat? "cpu_total" == some 2 && fresh.fieldNat? "mem_total_bytes" == some (4 * 1024 * 1024 * 1024) &&
-      fresh.fieldNat? "disk_total_bytes" == some (12 * 1024 * 1024 * 1024)) "capacity is the declared size"
+    -- The declared size is the provider catalog's entry, not a number repeated here.
+    let some declared := OrbCore.ManagedProvider.boatSizes.find? (·.name == "small")
+      | throw (IO.userError "node liveness: Boat small missing from the catalog")
+    check (fresh.fieldNat? "cpu_total" == some declared.cpu &&
+      fresh.fieldNat? "mem_total_bytes" == some (declared.ramGb * 1024 * 1024 * 1024) &&
+      fresh.fieldNat? "disk_total_bytes" == some (declared.diskGb * 1024 * 1024 * 1024)) "capacity is the declared size"
     let stale ← node "stale"
     check (stale.fieldStr? "status" == some "offline" && stale.fieldBool? "relay_connected" == some false &&
       stale.fieldNat? "capacity_available" == some 0 && stale.fieldStr? "state" == some "ready" &&

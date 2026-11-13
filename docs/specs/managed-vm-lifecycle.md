@@ -191,9 +191,11 @@ contract was read from the server source (`lfglabs-dev/lean.ci`,
 Its mock transport uses UUID identifiers and the server's status codes, and
 rejects what the server rejects (POST uploads, string commands, unknown labels).
 Verified on the dev deployment on 2026-11-13: a `small` VM is created, enrols
-about 26 s after the request, and is destroyed and gone at the provider. Not yet
-verified: the real disk sizes, a mission on the VM, snapshots, and the guest's
-`LEANCI_*` cache variables.
+about 26 s after the request, and is destroyed and gone at the provider. It has
+2 vCPU, 8 GiB and a 98 GB root filesystem of which only about 14 GB is free on a
+fresh VM (`/workspace` is on the same filesystem), so `small` is tight for Lean
+builds. Not yet verified: the disk of the larger sizes, a mission on the VM,
+snapshots, a warm image, and the guest's `LEANCI_*` cache variables.
 
 ## Lean provider transport contract
 
@@ -743,8 +745,11 @@ source (`Th0rgal/colab-api`):
   notebook, or the requested accelerator not eligible is `saturated`; an unusable
   account is `degraded`. Cached 30 s.
 
-Not yet verified against the live service: the runtime's user, the time a T4
-takes to publish its tunnel, and that the supervised node survives the exec call.
+Verified on the dev deployment on 2026-11-13: a `t4` runtime publishes its
+tunnel in about 17 s, the node started without systemd enrols about 40 s after
+the request and stays up, the guest reports a Tesla T4 with 2 vCPU, about
+12.7 GiB and a 113 GB disk, and the notebook is deleted on destroy. The other
+sizes are not verified.
 
 ## Automatic placement on the static fleet
 

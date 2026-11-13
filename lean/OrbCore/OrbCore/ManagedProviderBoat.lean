@@ -99,7 +99,9 @@ private def boatSnapshotList (transport : Transport) : IO (Result (Array Snapsho
     return .ok out
 
 def boatSizes : Array Size := #[
-  { name := "small", cpu := 2, ramGb := 4, diskGb := 12, milliCentsPerHour := 1800 },
+  -- Disk measured on a fresh guest (2026-11-13, dev): 79 GB root, 53 GB free.
+  -- The other sizes are not measured.
+  { name := "small", cpu := 2, ramGb := 4, diskGb := 79, milliCentsPerHour := 1800 },
   { name := "default", cpu := 4, ramGb := 8, diskGb := 50, milliCentsPerHour := 3600 },
   { name := "large", cpu := 8, ramGb := 16, diskGb := 125, milliCentsPerHour := 7200 },
   { name := "xlarge", cpu := 16, ramGb := 32, diskGb := 251, milliCentsPerHour := 20000 }

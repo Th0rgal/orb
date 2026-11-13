@@ -25,7 +25,8 @@ structure ColabProfile where
 def colabProfiles : Array ColabProfile := #[
   { size := { name := "colab-auto", cpu := 8, ramGb := 30, diskGb := 100, milliCentsPerHour := 22500 },
     accelerators := #["H100", "A100", "L4", "T4"] },
-  { size := { name := "t4", cpu := 2, ramGb := 12, diskGb := 80, milliCentsPerHour := 10000 }, accelerators := #["T4"] },
+  -- Measured on a fresh T4 runtime (2026-11-13, dev): 113 GB root, all free, Tesla T4.
+  { size := { name := "t4", cpu := 2, ramGb := 12, diskGb := 113, milliCentsPerHour := 10000 }, accelerators := #["T4"] },
   { size := { name := "l4", cpu := 8, ramGb := 30, diskGb := 100, milliCentsPerHour := 22500 }, accelerators := #["L4"] },
   { size := { name := "a100", cpu := 12, ramGb := 80, diskGb := 150, milliCentsPerHour := 67500 }, accelerators := #["A100"] },
   { size := { name := "h100", cpu := 12, ramGb := 80, diskGb := 150, milliCentsPerHour := 120000 }, accelerators := #["H100"] },

@@ -20,9 +20,13 @@ structure LeanciProfile where
   /-- Sent as `memory_mib` when the size differs from the label's default RAM. -/
   memoryMiB : Option UInt64 := none
 
-/-- Sizes and prices decided by Thomas (plan, lean.ci item 3). -/
+/-- Sizes and prices decided by Thomas (plan, lean.ci item 3). Disk is the root
+    filesystem a guest reports. Only `small` has been measured (2026-11-13, dev):
+    98 GB, of which about 14 GB is free on a fresh VM, the rest being the image
+    and toolchains; `/workspace` is on the same filesystem. The larger sizes still
+    carry the planned figures. -/
 def leanciProfiles : Array LeanciProfile := #[
-  { size := { name := "small", cpu := 2, ramGb := 8, diskGb := 50, milliCentsPerHour := 1800 },
+  { size := { name := "small", cpu := 2, ramGb := 8, diskGb := 98, milliCentsPerHour := 1800 },
     runnerLabel := "lean-2vcpu-ubuntu-2604" },
   { size := { name := "default", cpu := 4, ramGb := 16, diskGb := 75, milliCentsPerHour := 3600 },
     aliases := #["medium"], runnerLabel := "lean-4vcpu-ubuntu-2604" },
