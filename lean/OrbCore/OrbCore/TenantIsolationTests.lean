@@ -345,7 +345,7 @@ def run (root : String) : IO Unit := do
       id := "prov-anth-1", providerType := "anthropic", name := provNameMarker,
       enabled := true, baseUrl := provBaseUrlMarker, apiKey := "sk-ant-secret-key-marker-1",
       rpmLimit? := some 4321, maxConcurrency? := some 17,
-      customModels := #[{ id := "custom-claude", name? := some "Custom Claude" }],
+      customModels := #[{ id := "custom-claude", name? := some "Custom Claude", rpmLimit? := some 60, tpmLimit? := some 120000, maxConcurrency? := some 4 }],
       updatedAt := "2026-11-13T10:00:00Z" }
       | throw (IO.userError "isolation provider 1")
     let .ok () ← upsertAIProvider store {
@@ -416,13 +416,24 @@ def run (root : String) : IO Unit := do
         ("GET /api/ai/providers/:id", "/api/ai/providers/prov-anth-1"),
         ("GET /api/ai/providers/usage", "/api/ai/providers/usage"),
         ("GET /api/ai/providers/:id/usage", "/api/ai/providers/prov-anth-1/usage"),
-        ("GET /api/ai/providers/for-backend/claudecode", "/api/ai/providers/for-backend/claudecode")] do
+        ("GET /api/ai/providers/for-backend/claudecode", "/api/ai/providers/for-backend/claudecode"),
+        ("GET /api/ai/providers/cli-proxy-login", "/api/ai/providers/cli-proxy-login"),
+        ("GET /api/ai/providers/:id/auth/methods", "/api/ai/providers/prov-anth-1/auth/methods"),
+        ("GET /api/ai/providers/types", "/api/ai/providers/types")] do
       let (mStatus, mDoc) ← send "GET" target member (.obj #[]) stWithProviders
       let raw := renderCompact mDoc
       check (mStatus == 200) s!"member status 200 on {routeName}"
+      let routeMarkers :=
+        if target == "/api/ai/providers/types" ||
+           target == "/api/ai/providers/cli-proxy-login" ||
+           target == "/api/ai/providers/prov-anth-1/auth/methods" then
+          #[provNameMarker, "admin-provider-name-marker-beta", provEmailMarker, provBaseUrlMarker,
+            provGoogleProjMarker, provOrgMarker, provOrgIdMarker, "4321", "sk-ant-secret"]
+        else
+          #[provNameMarker, "admin-provider-name-marker-beta", provEmailMarker, provBaseUrlMarker,
+            provGoogleProjMarker, provOrgMarker, provOrgIdMarker, provEnvMarker, "4321", "sk-ant-secret"]
       let mut leakedOnRoute : Array String := #[]
-      for marker in #[provNameMarker, "admin-provider-name-marker-beta", provEmailMarker, provBaseUrlMarker,
-          provGoogleProjMarker, provOrgMarker, provOrgIdMarker, provEnvMarker, "4321", "sk-ant-secret"] do
+      for marker in routeMarkers do
         if (raw.splitOn marker).length > 1 then
           leakedOnRoute := leakedOnRoute.push marker
       if !leakedOnRoute.isEmpty then
@@ -430,6 +441,9 @@ def run (root : String) : IO Unit := do
         routeLeaks := routeLeaks.push s!"{routeName} -> [{joinedMarkers}]"
     let joinedLeaks := String.intercalate "; " routeLeaks.toList
     check routeLeaks.isEmpty s!"member provider routes leaked owner identity: {joinedLeaks}"
+    let (cliLoginPostSt, _) ← send "POST" "/api/ai/providers/cli-proxy-login" member
+      (.obj #[("provider", .str "anthropic")]) stWithProviders
+    check (cliLoginPostSt == 403) s!"member POST /api/ai/providers/cli-proxy-login returns 403 (got {cliLoginPostSt})"
     let (_, memberListDoc) ← send "GET" "/api/ai/providers" member (.obj #[]) stWithProviders
     let memberRows := match memberListDoc with | .arr xs => xs | _ => #[]
     let mRow1 := memberRows[0]?.getD .null
@@ -455,6 +469,65 @@ def run (root : String) : IO Unit := do
       (memberUsageDoc.field? "organization").isNone &&
       (memberUsageDoc.field? "organization_id").isNone)
       "member provider usage keeps quota windows without account identity"
+    -- Closed key allowlist on member provider row responses (GET list, GET detail, PUT preference)
+    -- and admin positive control.
+    let allowedRowKeys : Array String := #[
+      "id", "name", "provider_type", "provider_type_name",
+      "enabled", "globally_enabled", "user_enabled", "effective_enabled",
+      "has_credentials", "has_api_key", "has_oauth", "uses_oauth",
+      "status", "custom_models"
+    ]
+    let allowedStatusKeys : Array String := #["type", "message"]
+    let allowedModelKeys : Array String := #["id", "name", "context_limit", "output_limit"]
+    let objKeys (jv : JVal) : Array String :=
+      match jv with | .obj kvs => kvs.map Prod.fst | _ => #[]
+    let diffExactKeys (actual expected : Array String) : Option String :=
+      match actual.find? (fun k => !expected.contains k) with
+      | some extra => some s!"unexpected key `{extra}`"
+      | none =>
+        match expected.find? (fun k => !actual.contains k) with
+        | some missing => some s!"missing key `{missing}`"
+        | none => none
+    let diffSubsetKeys (actual allowed : Array String) : Option String :=
+      (actual.find? (fun k => !allowed.contains k)).map (fun extra => s!"unexpected key `{extra}`")
+    let checkHydratedMemberRowKeys (ctx : String) (row : JVal) : IO Unit := do
+      if let some bad := diffExactKeys (objKeys row) allowedRowKeys then
+        check false s!"{ctx} top-level key allowlist violation: {bad}"
+      if let some bad := diffExactKeys (objKeys (row.fieldOrNull "status")) allowedStatusKeys then
+        check false s!"{ctx} status key allowlist violation: {bad}"
+      for cm in (row.fieldArr? "custom_models").getD #[] do
+        if let some bad := diffSubsetKeys (objKeys cm) allowedModelKeys then
+          check false s!"{ctx} custom_models key allowlist violation: {bad}"
+    check (!memberRows.isEmpty) "member GET /api/ai/providers returned rows"
+    for idx in [0:memberRows.size] do
+      checkHydratedMemberRowKeys s!"member GET /api/ai/providers[{idx}]" memberRows[idx]!
+    checkHydratedMemberRowKeys "member GET /api/ai/providers/prov-anth-1" memberDetailDoc
+    let (prefOffSt, prefOffDoc) ← send "PUT" "/api/ai/providers/prov-anth-1/preference" member
+      (.obj #[("enabled", .bool false)]) stWithProviders
+    check (prefOffSt == 200) s!"member PUT /api/ai/providers/prov-anth-1/preference disable status 200 (got {prefOffSt})"
+    if let some bad := diffSubsetKeys (objKeys prefOffDoc) allowedRowKeys then
+      check false s!"member PUT /api/ai/providers/prov-anth-1/preference top-level key allowlist violation: {bad}"
+    if let some bad := diffSubsetKeys (objKeys (prefOffDoc.fieldOrNull "status")) allowedStatusKeys then
+      check false s!"member PUT /api/ai/providers/prov-anth-1/preference status key allowlist violation: {bad}"
+    for cm in (prefOffDoc.fieldArr? "custom_models").getD #[] do
+      if let some bad := diffSubsetKeys (objKeys cm) allowedModelKeys then
+        check false s!"member PUT /api/ai/providers/prov-anth-1/preference custom_models key allowlist violation: {bad}"
+    let prefOffRaw := renderCompact prefOffDoc
+    for marker in #[provNameMarker, "admin-provider-name-marker-beta", provEmailMarker, provBaseUrlMarker,
+        provGoogleProjMarker, provOrgMarker, provOrgIdMarker, provEnvMarker, "4321", "sk-ant-secret"] do
+      check ((prefOffRaw.splitOn marker).length == 1)
+        s!"member PUT /api/ai/providers/prov-anth-1/preference leaked marker {marker}"
+    check (prefOffDoc.fieldBool? "user_enabled" == some false)
+      "member PUT /api/ai/providers/prov-anth-1/preference sets user_enabled == false"
+    let (prefOnSt, prefOnDoc) ← send "PUT" "/api/ai/providers/prov-anth-1/preference" member
+      (.obj #[("enabled", .bool true)]) stWithProviders
+    check (prefOnSt == 200 && prefOnDoc.fieldBool? "user_enabled" == some true)
+      "member PUT /api/ai/providers/prov-anth-1/preference restores user_enabled == true"
+    let adminRows := match adminProvList with | .arr xs => xs | _ => #[]
+    let adminExtraKeys := adminRows.foldl (fun acc r =>
+      acc ++ (objKeys r).filter (fun k => !allowedRowKeys.contains k)) #[]
+    check (!adminExtraKeys.isEmpty && adminExtraKeys.contains "account_email" && adminExtraKeys.contains "base_url")
+      "admin GET /api/ai/providers positive control retains admin-only keys outside member allowlist"
     -- `/api/model-routing/health*` must never expose sidecar auth file names or emails to any role.
     let .ok () ← upsertAIProvider store {
       id := "iso-claude-oauth", providerType := "anthropic", name := "Owner Personal Claude",
