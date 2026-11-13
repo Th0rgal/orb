@@ -39,3 +39,11 @@ Create a test user on dev; as that user, try to read or act on admin's missions,
 ## Done when
 
 Both instances run from the base plus overlays; a settings round trip (export prod, import to dev, export dev) is byte-identical; a mission can deploy to dev and call dev's API with a grant and no password; master merges reach dev without a human; the isolation test passes on dev.
+
+## Implementation
+
+- Item 1: the repository units share a base and enforce overlay ownership with
+  `scripts/ops/orb-env`. The migration preserves both legacy env files as
+  private backups and does not change running services. See
+  [the operator migration procedure](../operations/core-environments.md).
+  Live application and dev verification are still required.
