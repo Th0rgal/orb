@@ -199,6 +199,21 @@ H account/classification sections preserved; H notified to avoid broad rewrites.
   `lifecycle_rejected/provider_http_error`. Resource cleanup is **open**, not
   silently treated as destroyed. Reconcile provider state before further action.
 
+### B public master-CI snapshot (worker observation)
+
+- New master `36b4205ab94bd8a97cb9a1b9058672640b2ee11b`: CI
+  `43424565802` and Kernel ABI `43424565364` pending, zero check-runs at read;
+  **not green**. Prior `afae6c68` CI `43424227886` running, kernel cancelled.
+- Historical master `a34d76da` CI `43422052000` failed Test
+  (12:06:42–12:19:04), browser 1/2 (through 12:19:53), browser 2/2
+  (through 12:16:28), and CI OK. Failure causes not yet traced; do not attribute
+  browser failures to A without logs/reproduction. Master red investigation has
+  priority over accepting more feature deliveries.
+- Worker confirms the 20-PR raw baseline is present in the harvested archive;
+  baseline is obtained, not pending. Independent recomputation still pending.
+  Authenticated logs/writes remain blocked until broker delivery; public reads
+  used no credential/config workaround. A notified; B.1 remains untouched.
+
 ## Waiting on Thomas
 
 These GitHub web approvals block only direct repo-level JIT runners, not the
@@ -302,3 +317,4 @@ classification before operator application. No hand-edited production env.
 | 13 Nov, operator B/G update | Accept operator REST checks as scoped evidence only; assign provider-account redaction to E+G coordinated with H | Member account-email/id leakage is live-reproduced; REST first pass does not certify MCP, execution, sharing or desktop isolation |
 | 13 Nov, operator B/G update | Record trusted-host-only lean.ci OIDC allowlisting through governed ops; no BOOST_CI_SSH_PRIVATE_KEY on managed guests | Operator authorizes lean.ci host administration, but broker delivery and verified target/host policy still required |
 | 13 Nov, B checkpoint | Harvest B archive immediately, preserve baseline/tests, reject direct-runner changes as completion, request VM destruction | SHA/size match; operator API bridge supersedes prepared label routing; no native/live parity; destruction failed provider_http_error so cleanup remains open |
+| 13 Nov, B public CI update | Record historical master red and current head pending separately; prioritize cause-specific CI repair, keep B.1 gated by A | Public API establishes failed Test/browser gates on a34d76da, not failure cause or current green status; baseline obtained in checkpoint, not yet independently recomputed |
