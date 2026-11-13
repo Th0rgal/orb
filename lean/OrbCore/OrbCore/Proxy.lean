@@ -200,12 +200,13 @@ structure RoutingChain where
   targets : Array ProviderTarget
   deriving Repr, DecidableEq
 
-/-- Hands decoded body bytes to the client; `false` means the client went away. -/
+/-- Hands decoded body bytes to the client; `false` means the client went away.
+    An empty piece is a liveness check and must not be written. -/
 abbrev BodyEmit := ByteArray → IO Bool
 
 /-- Relays an upstream body through `BodyEmit` and returns a bounded copy of it for
-    usage accounting once the stream ends. -/
-abbrev BodyPump := BodyEmit → IO ByteArray
+    usage accounting along with whether the body completed normally. -/
+abbrev BodyPump := BodyEmit → IO (ByteArray × Bool)
 
 /-- Upstream proxy attempt outcome. -/
 structure ProxyOutcome where
@@ -916,19 +917,24 @@ def requestWantsStream (relPath : String) (body : ByteArray) : Bool :=
 /-- Relay the body: `tail` first, then reads from `r`, until framing ends, the upstream
     closes, or `emit` reports the client gone. Always closes `r`. -/
 def pumpUpstreamBody (r : UpstreamReader) (framing0 : BodyFraming) (tail : ByteArray)
-    (emit : BodyEmit) : IO ByteArray := do
+    (emit : BodyEmit) : IO (ByteArray × Bool) := do
   let mut framing := framing0
   let mut copy := ByteArray.empty
   let mut pending : Option ByteArray := some tail
-  let mut done := match framing0 with | .length 0 => true | _ => false
+  let mut complete := match framing0 with | .length 0 => true | _ => false
+  let mut aborted := false
+  let mut done := complete
   try
     while !done do
+      let fromTail := pending.isSome
       let piece? ← match pending with
         | some p => pure (some p)
         | none => r.read
       pending := none
       match piece? with
-      | none => done := true
+      | none =>
+        if let .untilClose := framing then complete := true
+        done := true
       | some piece =>
         match stepBodyFraming framing piece with
         | .error _ => done := true
@@ -937,11 +943,19 @@ def pumpUpstreamBody (r : UpstreamReader) (framing0 : BodyFraming) (tail : ByteA
           if !out.isEmpty then
             if copy.size + out.size ≤ maxStreamCopyBytes then
               copy := copy ++ out
-            if !(← emit out) then done := true
-          if fin then done := true
+            if !(← emit out) then
+              aborted := true
+              done := true
+          else if fromTail && !fin then
+            if !(← emit ByteArray.empty) then
+              aborted := true
+              done := true
+          if fin && !aborted then
+            complete := true
+            done := true
   finally
     r.close
-  return copy
+  return (copy, complete && !aborted)
 
 /-- Read until the response head (after any `1xx`) is complete. -/
 def readUpstreamHead (r : UpstreamReader) :
@@ -963,11 +977,16 @@ private def openTlsUpstreamReader (method host : String) (port : UInt16) (path :
   match ← openHttps11Stream method host port path headers body true 15000 with
   | .error e => return .error e
   | .ok sess =>
+    let t0 ← IO.monoMsNow
     return .ok {
-      -- A model can think for minutes before its first byte: only `upstreamIdleLimitMs`
-      -- of silence ends the read.
+      -- A model can think for minutes before its first byte: `upstreamIdleLimitMs`
+      -- bounds silence between reads and `upstreamTotalLimitMs` bounds total wall time.
       read := do
-        match ← readTlsSessionChunk sess 16384 upstreamIdleLimitMs.toUInt32 with
+        let elapsed := (← IO.monoMsNow) - t0
+        if elapsed ≥ upstreamTotalLimitMs then
+          return none
+        let waitMs := Nat.min upstreamIdleLimitMs (upstreamTotalLimitMs - elapsed)
+        match ← readTlsSessionChunk sess 16384 waitMs.toUInt32 with
         | .chunk c => return if c.isEmpty then none else some c
         | _ => return none
       close := closeTlsSession sess
@@ -1026,7 +1045,7 @@ def streamingUpstreamRequest (isTls : Bool) (method host : String) (port : UInt1
         some (pumpUpstreamBody r framing tail))
     else
       let whole ← if isBodylessHttpResponse method status then do r.close; pure ByteArray.empty
-        else pumpUpstreamBody r framing tail (fun _ => pure true)
+        else (·.1) <$> pumpUpstreamBody r framing tail (fun _ => pure true)
       return .ok ({ status, headers := hdrs, body := whole }, none)
 
 /-- Execute a bounded `/v1/*` proxy forward across `chain.targets` with proactive pacing spillover,
@@ -1299,23 +1318,40 @@ def forwardProxyChain
         }
     else
       let (isTls, host, port, fullPath, reqHdrs, outBody) := upstreamRequest tgt relPath extraHeaders body
-      let respRes : Except String (HttpsResponse × Option BodyPump) ← try
-        match mockTransport? with
-        | some mockFn => pure ((← mockFn tgt).map (·, none))
-        | none =>
-          if port == 0 then
-            pure (.error "invalid_upstream_port")
-          else if !isTls && !isPrivatePlaintextHost host then
-            pure (.error "plaintext_upstream_disabled")
-          else if wantsStream then
-            streamingUpstreamRequest isTls method host port fullPath reqHdrs outBody
-          else if isTls then
-            pure ((← httpsRequest method host port fullPath reqHdrs outBody).map (·, none))
-          else
-            pure ((← loopbackHttpRequest method host port fullPath reqHdrs outBody).map (·, none))
-      finally
+      let respRes : Except String (HttpsResponse × Option BodyPump) ←
+        try
+          match mockTransport? with
+          | some mockFn => pure ((← mockFn tgt).map (·, none))
+          | none =>
+            if port == 0 then
+              pure (.error "invalid_upstream_port")
+            else if !isTls && !isPrivatePlaintextHost host then
+              pure (.error "plaintext_upstream_disabled")
+            else if wantsStream then
+              streamingUpstreamRequest isTls method host port fullPath reqHdrs outBody
+            else if isTls then
+              pure ((← httpsRequest method host port fullPath reqHdrs outBody).map (·, none))
+            else
+              pure ((← loopbackHttpRequest method host port fullPath reqHdrs outBody).map (·, none))
+        catch e =>
+          if let some tracker := effPacing? then
+            releaseTargetSlot tracker tgt
+          throw e
+      let releaseSlot : IO Unit := do
         if let some tracker := effPacing? then
           releaseTargetSlot tracker tgt
+      let respRes : Except String (HttpsResponse × Option BodyPump) := match respRes with
+        | .ok (resp, some rawPump) =>
+          .ok (resp, some fun emit => do
+            try
+              rawPump emit
+            finally
+              releaseSlot)
+        | other => other
+      if let .ok (_, some _) := respRes then
+        pure ()
+      else
+        releaseSlot
       match respRes with
       | .ok (resp, pump?) =>
         if let some tracker := effPacing? then
