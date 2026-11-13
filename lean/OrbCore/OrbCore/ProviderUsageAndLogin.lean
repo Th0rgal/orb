@@ -626,6 +626,103 @@ def projectCodexUsage (wham : JVal) : Array (String × JVal) × Array JVal × JV
       windows := windows.push (buildOptimizeWindow "7d" "7-day" "used_pct" "codex_wham" usedPct winSecs (some resetIso))
   return (fields, windows, primary)
 
+/-- A JSON fraction (`1`, `0.9972415`, `2.5e-05`) as millionths, clamped to `[0, 1_000_000]`. -/
+def antigravityFractionMicros? (raw : String) : Option Nat := do
+  let s := raw.trimAscii.toString
+  if s.startsWith "-" then return 0
+  let (mant, exp) ← match s.splitOn "e" with
+    | [m] => match m.splitOn "E" with
+      | [m'] => some (m', (0 : Int))
+      | [m', e] => (String.toInt? e).map (m', ·)
+      | _ => none
+    | [m, e] => (String.toInt? e).map (m, ·)
+    | _ => none
+  let (whole, frac) ← match mant.splitOn "." with
+    | [w] => some (w, "")
+    | [w, f] => some (w, f)
+    | _ => none
+  let digits ← (whole ++ frac).toNat?
+  let shift : Int := 6 + exp - frac.length
+  let micros := if shift ≥ 0 then digits * 10 ^ shift.toNat else digits / 10 ^ (-shift).toNat
+  return min micros 1000000
+
+/-- Used share of a remaining fraction, in tenths of a percent (`1000` = 100%). -/
+def antigravityUsedTenths (remainingMicros : Nat) : Nat :=
+  (1000000 - min remainingMicros 1000000 + 500) / 1000
+
+private def antigravityWindowJv (label : String) (usedTenths : Nat) (reset? : Option UInt64) : JVal :=
+  let base := #[("label", .str label), ("used_percent", .num s!"{usedTenths / 10}.{usedTenths % 10}")]
+  .obj (match reset? with | some r => base.push ("reset_at", .num (toString r)) | none => base)
+
+private def antigravityReset? (bucket : JVal) : Option UInt64 :=
+  (bucket.fieldStr? "resetTime").bind parseIso8601EpochU64?
+
+private def antigravityRemaining? (bucket : JVal) : Option Nat :=
+  match bucket.field? "remainingFraction" with
+  | some (.num raw) => antigravityFractionMicros? raw
+  | _ => none
+
+private def antigravityGroupLabel (group : JVal) : String :=
+  let ids := ((group.fieldArr? "buckets").getD #[]).filterMap (·.fieldStr? "bucketId")
+  if ids.any (·.startsWith "gemini-") then "Gemini"
+  else if ids.any (·.startsWith "3p-") then "Claude & GPT"
+  else
+    let n := (group.fieldStr? "displayName").getD ""
+    let n := if n.endsWith " models" || n.endsWith " Models" then (n.dropEnd 7).toString else n
+    if n.isEmpty then "Models" else n
+
+/-- `retrieveUserQuotaSummary`: one window per group and quota period (5h, daily, weekly). -/
+def parseAntigravitySummary (payload : JVal) : Array JVal := Id.run do
+  let rank (b : JVal) : Nat := match b.fieldStr? "window" with
+    | some "5h" => 0 | some "daily" => 1 | some "weekly" => 2 | _ => 3
+  let mut out : Array JVal := #[]
+  for group in (payload.fieldArr? "groups").getD #[] do
+    let name := antigravityGroupLabel group
+    let buckets := ((group.fieldArr? "buckets").getD #[]).toList.mergeSort (fun a b => rank a ≤ rank b)
+    for bucket in buckets do
+      let some remaining := antigravityRemaining? bucket | continue
+      let window := match (bucket.fieldStr? "window").getD "" with
+        | "weekly" => "Weekly"
+        | "daily" => "Daily"
+        | other => other
+      if window.isEmpty then continue
+      out := out.push (antigravityWindowJv s!"{name} · {window}" (antigravityUsedTenths remaining) (antigravityReset? bucket))
+  return out
+
+private def antigravityFamily? (model : String) : Option String :=
+  let m := model.toLower
+  if (m.splitOn "claude").length > 1 then some "Claude"
+  else if (m.splitOn "gpt").length > 1 then some "GPT-OSS"
+  else if (m.splitOn "image").length > 1 then some "Image"
+  else if (m.splitOn "gemini").length > 1 && (m.splitOn "pro").length > 1 then some "Gemini Pro"
+  else if (m.splitOn "gemini").length > 1 && (m.splitOn "flash").length > 1 then some "Gemini Flash"
+  else if m.startsWith "agy-" then some "Gemini Agent"
+  else none
+
+/-- `retrieveUserQuota` fallback: per-model buckets merged into one window per model family.
+    Google omits a zero remaining fraction, so a bucket with a reset but no figure is spent. -/
+def parseAntigravityQuota (payload : JVal) : Array JVal := Id.run do
+  let mut wins : Array (String × Nat × Option UInt64) := #[]
+  for bucket in (payload.fieldArr? "buckets").getD #[] do
+    let some label := (bucket.fieldStr? "modelId").bind antigravityFamily? | continue
+    let reset := antigravityReset? bucket
+    let remaining? : Option Nat := match bucket.field? "remainingFraction", reset with
+      | some (.num raw), _ => antigravityFractionMicros? raw
+      | _, some _ => some 0
+      | _, none => none
+    let some remaining := remaining? | continue
+    let used := antigravityUsedTenths remaining
+    if reset.isNone && used == 0 then continue
+    match wins.findIdx? (·.1 == label) with
+    | some i =>
+      let (_, u, r) := wins[i]!
+      let r' := match r, reset with
+        | some a, some b => some (min a b)
+        | a, b => a <|> b
+      wins := wins.set! i (label, max u used, r')
+    | none => wins := wins.push (label, used, reset)
+  return wins.map fun (l, u, r) => antigravityWindowJv l u r
+
 def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
   let nowSec ← nowEpoch
   let nowIso := formatEpochIso8601Utc nowSec
@@ -720,14 +817,32 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
         let subActive := (mJv.fieldBool? "subscription_active").getD true
         extraFields := extraFields.push ("muse_subscription_active", .bool subActive)
 
-  -- 6. Antigravity Cloud Code
+  -- 6. Antigravity Cloud Code: plan from `loadCodeAssist`, then the shared 5h/weekly
+  -- windows from `retrieveUserQuotaSummary`, falling back to per-model `retrieveUserQuota`.
   else if pType == "antigravity" && !hp.oauthToken.isEmpty then
-    if let .ok (code, _, some aJv) ← sendJsonRequest "POST" "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
-        (some hp.oauthToken) (some (.obj #[("metadata", .obj #[("ideType", .str "ANTIGRAVITY")])])) #[] 5000 262144 then
+    let base := "https://cloudcode-pa.googleapis.com/v1internal"
+    let ua := #[("User-Agent", "antigravity")]
+    let assistBody : JVal := .obj #[("metadata", .obj #[
+      ("ideType", .str "ANTIGRAVITY"), ("platform", .str "PLATFORM_UNSPECIFIED"), ("pluginType", .str "GEMINI")])]
+    if let .ok (code, _, some aJv) ← sendJsonRequest "POST" s!"{base}:loadCodeAssist" (some hp.oauthToken) (some assistBody) ua 10000 262144 then
       if 200 ≤ code && code < 300 then
-        let tier := ((aJv.field? "currentTier").bind (fun t => t.fieldStr? "name")).getD "Pro"
-        extraFields := extraFields.push ("antigravity_plan", .str tier)
-      else if code == 401 then
+        let tierName (k : String) := ((aJv.field? k).bind (·.fieldStr? "name")).filter (!·.trimAscii.isEmpty)
+        extraFields := extraFields.push ("antigravity_plan", .str ((tierName "paidTier" <|> tierName "currentTier").getD "Pro"))
+        let quotaBody : JVal := match aJv.fieldStr? "cloudaicompanionProject" with
+          | some project => .obj #[("project", .str project)]
+          | none => .obj #[]
+        let mut windows : Array JVal := #[]
+        let mut unauthorized := false
+        if let .ok (c2, _, some sJv) ← sendJsonRequest "POST" s!"{base}:retrieveUserQuotaSummary" (some hp.oauthToken) (some quotaBody) ua 10000 1048576 then
+          if 200 ≤ c2 && c2 < 300 then windows := parseAntigravitySummary sJv
+          else if c2 == 401 || c2 == 403 then unauthorized := true
+        if windows.isEmpty && !unauthorized then
+          if let .ok (c3, _, some qJv) ← sendJsonRequest "POST" s!"{base}:retrieveUserQuota" (some hp.oauthToken) (some quotaBody) ua 10000 1048576 then
+            if 200 ≤ c3 && c3 < 300 then windows := parseAntigravityQuota qJv
+            else if c3 == 401 || c3 == 403 then unauthorized := true
+        if unauthorized then statusStr := "needs_reauth"
+        else extraFields := extraFields.push ("antigravity_windows", .arr windows)
+      else if code == 401 || code == 403 then
         statusStr := "needs_reauth"
 
   let baseFields : Array (String × JVal) := #[
