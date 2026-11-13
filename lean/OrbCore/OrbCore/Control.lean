@@ -5239,6 +5239,27 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         let eventPayload := s!"\{\"type\":\"user_message\",\"id\":{jsonEscape messageId},\"content\":{jsonEscape content},\"queued\":true,\"mission_id\":{jsonEscape missionId},\"source\":{sourceJson},\"sender_user_id\":{jsonEscape caller.userId},\"sender_username\":{jsonEscape caller.username}}"
         let _ ← appendMissionEvent st.store missionId "user_message" eventPayload s!"{nowEpochSec}"
         return .ok (mkJson 200 s!"\{\"ok\":true,\"id\":{jsonEscape messageId},\"content\":{jsonEscape content}}")
+    else if req.method == "DELETE" then
+      let messageId := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      if !caller.isLegacyUnscoped then
+        let qRows ← execParamQuery st.store.missionsDb
+          "SELECT mission_id FROM remote_message_queue WHERE user_id='core' AND message_id=?1 LIMIT 1;" #[messageId]
+        let qMid? := match qRows with | .ok rs => (rs[1]?.bind (·[0]?)).filter (!·.isEmpty) | .error _ => none
+        match qMid? with
+        | none => return .ok (mkJson 404 "{\"error\":\"message not in queue\"}")
+        | some qMid =>
+          if let some (cCode, cBody) := (← authorizeMissionOp st caller qMid false) then
+            return .ok (mkJson cCode cBody)
+      -- Cancel through the same lifecycle step as `revokeContinuations` (`op = 5`, `SM-04`):
+      -- only a queued row (`phase = 0`) admits it; claimed/delivered/tombstone rows are 409 no-ops,
+      -- and an already-cancelled row (`phase = 4`, `queue_admit:4:5`) is a repeat delete (`404`).
+      match ← stepQueueItem st.store "core" messageId 5 "0" s!"{st.store.bootEpoch}" "0" s!"{nowEpochSec}" 0 0 "" with
+      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      | .ok .notFound | .ok (.rejected "queue_admit:4:5") =>
+        return .ok (mkJson 404 "{\"error\":\"message not in queue\"}")
+      | .ok (.rejected reason) => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape reason}}")
+      | .ok (.ok rec) =>
+        return .ok (mkJson 200 s!"\{\"ok\":true,\"id\":{jsonEscape rec.messageId},\"mission_id\":{jsonEscape rec.missionId},\"phase\":{rec.phase.toNat},\"phase_name\":{jsonEscape (queuePhaseName rec.phase)}}")
 
   -- Mission Cyber Access (`GET|PATCH /api/control/missions/:id/cyber`)
   if let some params := matchRoutePattern? "/api/control/missions/:id/cyber" rawTarget then

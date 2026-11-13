@@ -223,6 +223,18 @@ def run (root : String) : IO Unit := do
     check (memory.fieldBool? "ok" == some false &&
       (memory.fieldOrNull "error").fieldStr? "message" == some "Administrator required")
       "member is denied before the owner's personal memory broker"
+    -- A member who cannot see a mission cannot delete its queued follow-up (`404`, row unchanged).
+    let (enqAdminQueueStatus, _) ← send "POST" "/api/control/queue" admin
+      (.obj #[("id", .str "admin-queue-item"), ("mission_id", .str "admin-mission"),
+        ("content", .str "admin-queued-followup"), ("source", .str "desktop")])
+    check (enqAdminQueueStatus == 201) "admin queue enqueue positive control"
+    let (memberDelForeignQueueStatus, _) ← send "DELETE" "/api/control/queue/admin-queue-item" member
+    check (memberDelForeignQueueStatus == 404) "member cannot delete foreign mission queue item"
+    let .ok foreignQueueRows ← execParamQuery store.missionsDb
+      "SELECT state,COALESCE(phase,0),json_extract(payload,'$.message.content') FROM remote_message_queue WHERE user_id='core' AND message_id='admin-queue-item';" #[]
+      | throw (IO.userError "isolation foreign queue verification")
+    check (foreignQueueRows[1]? == some #["waiting", "0", "admin-queued-followup"])
+      "foreign mission queue row survives denied member DELETE"
     -- A role chosen for a shared admin mission must not adopt the admin's identity.
     sql store.missionsDb "INSERT INTO mission_shares(mission_id,user_id,granted_by) VALUES('admin-mission','member','admin');"
     let (sharedStatus, sharedDoc) ← send "POST" "/api/mcp/session" member
