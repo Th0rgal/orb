@@ -51,6 +51,39 @@ def run (root : String) : IO Unit := do
   check (!(← sealReserved dataRoot "colab" true false false (fun _ => pure (.ok "  "))).isOk)
     "empty vault values refused"
 
+  let batchRoot := root ++ "/provider-sealing-batch"
+  let inventories ← IO.mkRef (0 : Nat)
+  let discover : IO (Except String (Array String)) := do
+    inventories.modify (· + 1)
+    return .ok #["boat", "colab"]
+  calls.set #[]
+  for (admin, mission, managed) in #[(false, false, false), (true, true, false), (true, false, true)] do
+    check (!(← sealConfigured batchRoot admin mission managed discover resolve).isOk)
+      "batch authorization rejects untrusted callers"
+  check ((← inventories.get) == 0 && (← calls.get).isEmpty && !(← (managedSecretDir batchRoot).pathExists))
+    "batch rejection precedes inventory, key lookup and filesystem writes"
+  check ((← sealConfigured batchRoot true false false discover resolve).toOption == some #["boat", "colab"])
+    "one command seals every configured provider, including disabled providers"
+  check ((← calls.get) == #["BOAT_API_KEY", "COLAB_API_TOKEN"] &&
+    !(← (managedSecretPath batchRoot "leanci").pathExists)) "unconfigured providers are skipped without lookup"
+  for provider in #["boat", "colab"] do
+    let some name := reservedKey? provider | throw (IO.userError "batch reserved mapping missing")
+    check ((← openProviderSecret batchRoot provider false true).toOption == some ("synthetic-test-value-" ++ name))
+      "batch seal decrypts only inside Core"
+  calls.set #[]
+  check (!(← sealConfigured batchRoot true false false (pure (.ok #["boat", "boat"])) resolve).isOk &&
+    !(← sealConfigured batchRoot true false false (pure (.ok #["unknown"])) resolve).isOk &&
+    (← calls.get).isEmpty) "invalid inventories perform no key lookup"
+  let .error inventoryError ← sealConfigured batchRoot true false false (pure (.error "sensitive fixture")) resolve
+    | throw (IO.userError "failed batch inventory succeeded")
+  check (inventoryError == "managed_provider_inventory_failed" && (← calls.get).isEmpty)
+    "inventory failures disclose no upstream text and look up no values"
+  let .error batchError ← sealConfigured batchRoot true false false discover (fun _ => pure (.error "sensitive fixture"))
+    | throw (IO.userError "failed batch vault lookup succeeded")
+  check (batchError == "managed_provider_seal_failed:boat") "batch errors disclose no upstream text or key values"
+  check ((← sealConfigured batchRoot true false false discover resolve).isOk)
+    "rerunning batch sealing safely completes the configured inventory"
+
   -- One-time move of a key sealed under the provider's former name.
   let legacyRoot := root ++ "/provider-sealing-legacy"
   check ((← migrateLegacyLeanciSecret legacyRoot).toOption == some false) "nothing to migrate is not an error"
