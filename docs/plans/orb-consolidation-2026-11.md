@@ -555,6 +555,20 @@ environment differences can be judged.
 - Line "lean-ci App `5538046` is installed only on `lfglabs-dev`" further
   up is superseded by "CI: lean runners and docs-only pushes" below.
 
+**Dev grant for isolation checks, 23:13 UTC (operator action, no duplicate).**
+The isolation worker `6fa970f7` asked again for a `dev_operator` grant. The
+request already exists: `f0eadef4-2978-46c7-82ae-5a6a7dd40ec2` (operator-
+submitted, recorded further down as pending Thomas). Do not create a second
+one. The coordinator cannot submit, see or redeem it (`list_mission_access`
+for this mission: none), so its current state is not known here.
+One constraint is new: that worker runs on managed VM `a474d57a`, which
+reaches its 12-hour limit at 00:12 UTC and cannot be extended. A grant
+approved for `6fa970f7` is only usable until then. If approval comes later,
+the checks need a successor mission on another node and a request naming
+that mission; the coordinator will write its id here before asking. The
+operator running `scripts/dev_user_isolation.py` itself (operator request 1)
+needs no grant and stays the shortest path.
+
 **Still open, no owner.** Track A / #1708; lean.ci PR #34 fence review
 (interdiff unread, lean runners stay on hold); isolation acceptance and
 managed-lifecycle live validation (need the `dev_operator` grant
