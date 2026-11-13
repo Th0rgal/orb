@@ -26,6 +26,18 @@ class OrbManagedMachinesTest {
     private fun parsed() = OrbManagedMachines.parse(OrbJSON.dict(OrbJSON.parse(payload))!!)
 
     @Test
+    fun readyLifecycleCapabilities() {
+        val m = parsed().machines[0].copy(state = "ready", provider = "boat")
+        assertTrue(OrbManagedMachines.canStop(m))
+        assertTrue(OrbManagedMachines.canExtend(m))
+        assertFalse(OrbManagedMachines.canStop(m.copy(provider = "leanci")))
+        assertFalse(OrbManagedMachines.canExtend(m.copy(provider = "leanci")))
+        assertFalse(OrbManagedMachines.canStop(m.copy(provider = "colab")))
+        assertTrue(OrbManagedMachines.canExtend(m.copy(provider = "colab")))
+        assertFalse(OrbManagedMachines.canExtend(m.copy(state = "stopped")))
+    }
+
+    @Test
     fun parsesPayload() {
         val r = parsed()
         assertTrue(r.enabled)

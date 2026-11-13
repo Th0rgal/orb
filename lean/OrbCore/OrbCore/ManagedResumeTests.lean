@@ -23,6 +23,19 @@ private def runInventoryTests (root : String) : IO Unit := do
         ("mmhbh4dmg9", "pareto-worker"), ("mmkryf6rxn", "ldgr-worker"), ("mmambiguous", "ambiguous") ] do
       seedLegacy id label
     let fleet : ManagedFleetState := { enabled := true, boatEnabled := true }
+    for provider in #["leanci", "colab"] do
+      let id := s!"unsupported-{provider}"
+      let .ok _ ← provisionManagedMachine mc fleet {
+        id, sandboxName := s!"orb-managed-{id}", provider, size := "small", ttlMinutes := 60,
+        spentCents := 1, deletableAtSec := 0
+      } now | throw (IO.userError "unsupported provider fixture failed")
+      let ctx : OrbCore.RemoteFleetAndRelay.ManagedLifecycleContext := { store := core, fleet }
+      for action in #["stop", "resume"] do
+        let outcome ← OrbCore.RemoteFleetAndRelay.runConfiguredManagedLifecycle mc ctx id action now
+        check (outcome == .error "managed_provider_stop_resume_unsupported") "unsupported actions fail before provider resolution"
+      if provider == "leanci" then
+        let outcome ← OrbCore.RemoteFleetAndRelay.runConfiguredManagedLifecycle mc ctx id "extend" now
+        check (outcome == .error "managed_provider_extend_unsupported") "fixed lean.ci lease cannot be extended"
     let .ok _ ← provisionManagedMachine mc fleet {
       id := "orphan-reservation", sandboxName := "orb-managed-orphan-reservation", ttlMinutes := 60,
       spentCents := 1, deletableAtSec := 0

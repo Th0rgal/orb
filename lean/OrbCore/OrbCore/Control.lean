@@ -5003,8 +5003,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         return .ok (mkJson status (renderCompact (.obj #[("error", .str e)])))
       | .ok accepted => return .ok (actionReply accepted preview)
 
-  if let some params := (matchRoutePattern? "/api/managed-machines/:id/stop" rawTarget).orElse
-       (fun _ => matchRoutePattern? "/api/managed-machines/:id/resume" rawTarget) then
+  if let some params := ((matchRoutePattern? "/api/managed-machines/:id/stop" rawTarget).orElse
+       (fun _ => matchRoutePattern? "/api/managed-machines/:id/resume" rawTarget)).orElse
+       (fun _ => matchRoutePattern? "/api/managed-machines/:id/extend" rawTarget) then
     if req.method == "POST" then
       let vmId := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
       let some mst := st.managedStore?
@@ -5013,7 +5014,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | return .ok (mkJson 404 "{\"error\":\"managed_machine_not_found\"}")
       if !caller.isLegacyUnscoped && mRec.ownerUserId != caller.userId then
         return .ok (mkJson 404 "{\"error\":\"managed_machine_not_found\"}")
-      let action := if cleanPath.endsWith "/stop" then "stop" else "resume"
+      let action := if cleanPath.endsWith "/stop" then "stop"
+        else if cleanPath.endsWith "/extend" then "extend" else "resume"
       let body := req.bodySlice.toByteArray
       let .ok operationArgs := if body.isEmpty then Except.ok (.obj #[]) else OrbBin.Json.parseBytes body
         | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")

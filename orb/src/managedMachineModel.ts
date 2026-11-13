@@ -81,6 +81,7 @@ export interface ManagedProviderInfo {
   availability?: ManagedProviderAvailability | null;
   supports_snapshots: boolean;
   supports_free_stop: boolean;
+  supports_extend?: boolean;
   sizes: ManagedSize[];
 }
 
@@ -319,7 +320,7 @@ export function minutesLabel(minutes: number): string {
 
 /** Cost so far, extrapolated between polls so it ticks with the countdown. */
 export function liveCost(m: Pick<ManagedMachine, "cost_usd" | "usd_per_hour" | "state" | "expires_at">, fetchedAt: number, now = Date.now()): number {
-  if (m.state !== "online" && m.state !== "enrolling" && m.state !== "provisioning") return m.cost_usd;
+  if (m.state !== "online" && m.state !== "ready" && m.state !== "enrolling" && m.state !== "provisioning") return m.cost_usd;
   const expires = Date.parse(m.expires_at);
   if (!Number.isFinite(expires)) return m.cost_usd;
   const until = Math.min(now, expires);
@@ -329,7 +330,7 @@ export function liveCost(m: Pick<ManagedMachine, "cost_usd" | "usd_per_hour" | "
 export const estimateCost = (usdPerHourRate: number, ttlMinutes: number) => usdPerHourRate * ttlMinutes / 60;
 
 export const stateLabel = (s: string) =>
-  s === "provisioning" || s === "enrolling" ? "Starting…" : s === "online" ? "Online"
+  s === "provisioning" || s === "enrolling" ? "Starting…" : s === "online" || s === "ready" ? "Online"
   : s === "destroying" ? "Destroying…" : s === "destroyed" ? "Destroyed" : s === "failed" ? "Failed" : s === "stopped" ? "Stopped" : s;
 
 export const sizeSpec = (s: Pick<ManagedSize, "cpu" | "ram_gb"> & { disk_gb?: number; gpu?: string | null; arch?: string | null }) =>
@@ -406,7 +407,7 @@ export function groupMachinesByProvider<M extends Pick<ManagedMachine, "provider
 export function providerGroupSummary(machines: readonly Pick<ManagedMachine, "state" | "usd_per_hour">[]): string {
   const running = machines.filter(isLive);
   const rate = machines
-    .filter(m => m.state === "online" || m.state === "provisioning" || m.state === "enrolling")
+    .filter(m => m.state === "online" || m.state === "ready" || m.state === "provisioning" || m.state === "enrolling")
     .reduce((sum, m) => sum + m.usd_per_hour, 0);
   if (running.length > 0) {
     return `${running.length} running${rate > 0 ? ` · ${usdPerHour(rate)}` : ""}`;
@@ -425,10 +426,16 @@ export function managedSectionTitle(providers?: readonly ManagedProviderInfo[], 
 }
 
 export function canStopMachine(m: Pick<ManagedMachine, "state" | "provider">, providers?: readonly ManagedProviderInfo[]): boolean {
-  if (m.state !== "online") return false;
+  if (m.state !== "online" && m.state !== "ready") return false;
   const p = m.provider || "boat";
   const info = providers?.find(x => x.provider === p);
   return info ? info.supports_free_stop : p === "boat";
+}
+
+export function canExtendMachine(m: Pick<ManagedMachine, "state" | "provider">, providers?: readonly ManagedProviderInfo[]): boolean {
+  if (m.state !== "online" && m.state !== "ready") return false;
+  const p = m.provider || "boat";
+  return providers?.find(x => x.provider === p)?.supports_extend ?? (p === "boat" || p === "colab");
 }
 
 /** "$1.20 spent today of $20.00 · 1 of 3 running"; unlimited caps drop their "of …". */
