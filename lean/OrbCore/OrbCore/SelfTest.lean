@@ -3406,6 +3406,43 @@ private def runR4dProxyAuthTests (prodValid : CoreConfig) : IO UInt32 := do
   IO.FS.removeDirAll r4dRoot
   return 0
 
+private def runHttpResponseWireTests : IO UInt32 := do
+  let check := fun (ok : Bool) => unless ok do throw (IO.userError "fixed-length response wire regression")
+  let closeHead := "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toUTF8
+  check (encodeCoreHttpResponse { status := 200, body := ByteArray.empty } == closeHead)
+  let binary := ByteArray.mk #[0, 255, 13, 10]
+  let binaryHead := "HTTP/1.1 201 Created\r\nContent-Type: application/octet-stream\r\nContent-Length: 4\r\nConnection: keep-alive\r\nKeep-Alive: timeout=15, max=64\r\nX-Test: valid\r\n\r\n".toUTF8
+  let binaryResponse : CoreHttpResponse := {
+    status := 201, contentType := "application/octet-stream", body := binary
+    corsOrigin? := some "bad\r\norigin"
+    extraHdrs := #[("X-Test", "valid"), ("bad\nkey", "v"), ("bad", "v\r"), ("bad", "v\x00")]
+  }
+  check (encodeCoreHttpResponse binaryResponse true == binaryHead ++ binary)
+  check (encodeCoreHttpResponseHead binaryResponse true == binaryHead)
+  for failedAt in [0:3] do
+    let writes ← IO.mkRef (#[] : Array ByteArray)
+    let write := fun (bytes : ByteArray) => do
+      let n := (← writes.get).size + 1
+      writes.modify (·.push bytes)
+      return n != failedAt
+    let wrote ← writeCoreHttpResponse write binaryResponse true
+    check (wrote == (failedAt == 0))
+    check ((← writes.get) == if failedAt == 1 then #[binaryHead] else #[binaryHead, binary])
+  let emptyWrites ← IO.mkRef (0 : Nat)
+  check (← writeCoreHttpResponse (fun _ => do emptyWrites.modify (· + 1); return true)
+    { status := 200, body := ByteArray.empty })
+  check ((← emptyWrites.get) == 1)
+  let utf8Response : CoreHttpResponse := { status := 200, body := "é".toUTF8 }
+  let utf8Head := "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n".toUTF8
+  check (encodeCoreHttpResponse utf8Response == utf8Head ++ "é".toUTF8)
+  let corsHead := ("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 0\r\n" ++
+    "Access-Control-Allow-Origin: orb://localhost\r\nVary: Origin\r\n" ++
+    "Access-Control-Allow-Headers: Authorization, Content-Type, Idempotency-Key, X-Paloma-Approval, X-Orb-Token, X-Orb-Lease, X-Language, Last-Event-ID, Cache-Control, Accept\r\n" ++
+    "Access-Control-Expose-Headers: X-Orb-Events-Protocol, X-Has-More, X-Next-Cursor, X-Page-Max-Sequence, X-Max-Sequence, Content-Disposition, Retry-After, X-Request-Id\r\n" ++
+    "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\nConnection: close\r\n\r\n").toUTF8
+  check (encodeCoreHttpResponse { status := 200, body := ByteArray.empty, corsOrigin? := some "orb://localhost" } == corsHead)
+  return 0
+
 private def runOrbUriCorsTests : IO UInt32 := do
   if !OrbCore.Control.isAllowedCorsOrigin true "orb://localhost" ||
      !OrbCore.Control.isAllowedCorsOrigin false "orb://localhost" ||
@@ -5474,6 +5511,28 @@ private def runZeroWaitPerfAndSyncTests (prodValid : CoreConfig) : IO UInt32 := 
     return (← fail s!"events/snapshot/open/gzip check failed: ty={tyStr} vw={vwStr} trSize={trBytes.size} sn={snStr} hasGz={hasGzHdr} gz={opGzBytes.size}/{opPlainBytes.size} opTrunc={opTruncStr} bobOp={bobOpSt}")
 
   -- 3. Live loopback TCP test: HTTP/1.1 keep-alive (2 requests on 1 socket) + `/api/control/sync` WebSocket (`orb-sync.v1`, `since_seq` replay, live push, cross-user confinement, and `inbox_answer_push`)
+  for failedAt in [1:3] do
+    let .ok (failureFd, failurePort) ← tcpListen "127.0.0.1" 0 8
+      | return (← fail "response failure listener failed")
+    let writes ← IO.mkRef (0 : Nat)
+    let failureTask ← IO.asTask (prio := .dedicated) do
+      if let .ok sfd ← tcpAcceptPoll failureFd 5000 then
+        handleClientConn app sfd true (some fun _ => do
+          writes.modify (· + 1)
+          return (← writes.get) != failedAt)
+      discard <| closeFd failureFd
+    let .ok clientFd ← tcpConnect "127.0.0.1" failurePort
+      | return (← fail "response failure client failed")
+    let request := "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+    let nextRequest := "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    discard <| writeAll clientFd (request ++ nextRequest).toUTF8 false
+    let closed ← match ← pollReadable clientFd 5000 with
+      | .ok () => do pure (← readStreamChunk clientFd 4096).isEmpty
+      | .error _ => pure false
+    discard <| closeFd clientFd
+    let _ := failureTask.get
+    if !closed || (← writes.get) != failedAt then
+      return (← fail s!"response write failure reused connection: stage={failedAt} writes={← writes.get}")
   let .ok (lfd, lport) ← tcpListen "127.0.0.1" 0 8
     | return (← fail "tcpListen for keep-alive & sync WS failed")
   let srvTask ← IO.asTask (prio := .dedicated) do
@@ -5496,7 +5555,19 @@ private def runZeroWaitPerfAndSyncTests (prodValid : CoreConfig) : IO UInt32 := 
       else break
     discard <| closeFd kfd
     let rxStr := String.fromUTF8? rxAll |>.getD ""
+    let frameEnd? := fun (wire : ByteArray) => do
+      let headEnd ← LeanSys.Http.findHeaderEnd? wire
+      let head ← String.fromUTF8? (wire.extract 0 (headEnd - 4))
+      let (_, _, _, _, length?) ← (OrbNetLeaf.TlsHttp.parseHttpHeaderBlock head).toOption
+      let length ← length?
+      if headEnd + length > wire.size then none else some (headEnd, headEnd + length)
+    let exactFrames := Id.run do
+      let some (_, firstEnd) := frameEnd? rxAll | return false
+      let second := rxAll.extract firstEnd rxAll.size
+      let some (secondHeadEnd, secondEnd) := frameEnd? second | return false
+      return secondEnd == second.size && second.extract secondHeadEnd secondEnd == snBytes
     keepAliveOk :=
+      exactFrames &&
       (rxStr.splitOn "Connection: keep-alive").length == 2 &&
       (rxStr.splitOn "HTTP/1.1 200 OK").length == 3 &&
       (rxStr.splitOn "\"profile\":\"presentation\"").length == 2
@@ -6819,6 +6890,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     return 1
   -- Wire compatibility regressions run before the broader integration suite.
   try
+    discard <| runHttpResponseWireTests
     OrbCore.ProviderContractTests.run
     OrbCore.ProxyRoutingTests.run
   catch e =>
