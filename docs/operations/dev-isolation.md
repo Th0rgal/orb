@@ -69,6 +69,7 @@ It accepts only `https://agent-backend-dev.thomas.md` or the operator's local
 creates a zero-budget member and inert client-placed mission fixtures, and
 disables the temporary member during cleanup. It prints statuses and boolean
 results, never response bodies, passwords or bearers. Review cleanup results.
-Its report explicitly leaves project detail/mutations, external MCP, live
-machine lifecycle and desktop coverage pending; a passing probe alone is not
+It includes synthetic project reads/mutations, scoped and external MCP sessions,
+and shared-host scheduler denials. Its report explicitly leaves shared mission
+sessions, live machine lifecycle and desktop coverage pending; a passing probe alone is not
 completion of this acceptance procedure. It never rents a VM or starts a harness.

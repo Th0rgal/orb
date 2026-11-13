@@ -91,11 +91,13 @@ def run(api, admin, expected_sha):
     password = secrets.token_urlsafe(32)
     marker = "isolation-admin-" + suffix
     member_marker = "isolation-member-" + suffix
+    project_objective = "private-project-objective-" + suffix
     admin_mid, member_mid = str(uuid.uuid4()), str(uuid.uuid4())
     uid, member = "", ""
     created = []
+    projects = []
     results = []
-    cleanup = {"user_disabled": False, "missions_deleted": True}
+    cleanup = {"user_disabled": False, "missions_deleted": True, "projects_deleted": True}
 
     def expect(case, response, allowed, predicate=lambda _doc: True):
         code, doc = response
@@ -114,9 +116,15 @@ def run(api, admin, expected_sha):
         if status != 200 or not isinstance(login, dict) or not login.get("token"):
             raise IsolationError("temporary member login failed")
         member = login["token"]
+        for bearer, slug in [(admin, marker), (member, member_marker)]:
+            response = api.call("PUT", "/api/projects", bearer,
+                                {"slug": slug, "title": slug, "objective": project_objective})
+            if not expect("create_project_fixture", response, {200}):
+                raise IsolationError("could not create a synthetic project fixture")
+            projects.append((bearer, slug))
         for bearer, mid, title in [(admin, admin_mid, marker), (member, member_mid, member_marker)]:
             response = api.call("POST", "/api/control/missions", bearer,
-                                {"id": mid, "title": title, "placement": "client"})
+                                {"id": mid, "title": title, "project": title, "placement": "client"})
             if not expect("create_idle_client_fixture", response, {201},
                           lambda doc: isinstance(doc, dict) and doc.get("id") == mid):
                 raise IsolationError("could not create an inert mission fixture")
@@ -134,6 +142,18 @@ def run(api, admin, expected_sha):
             expect("owner_only_" + path, api.call("GET", path, member), {403})
         for path in ["/api/managed-machines/providers/boat", "/api/managed-machines/settings"]:
             expect("provider_mutation_" + path, api.call("PUT", path, member, {}), {403})
+        expect("own_project_positive_control", api.call("GET", "/api/projects/" + member_marker, member), {200},
+               lambda doc: isinstance(doc, dict) and isinstance(doc.get("project"), dict)
+               and doc["project"].get("objective") == project_objective)
+        expect("foreign_project_read", api.call("GET", "/api/projects/" + marker, member), {200, 404},
+               lambda doc: project_objective not in json.dumps(doc))
+        # A foreign raw slug may name the member's own empty namespace. Verify
+        # the owner's fixture afterwards instead of treating a 200 as authority.
+        expect("foreign_project_mutation", api.call("POST", "/api/projects/" + marker + "/status", member,
+                                                    {"status": "archived"}), {200, 403, 404})
+        projects.append((member, marker))  # Remove any harmless namespaced alias created by that probe.
+        for tail in ["controller", "crons", "crons/synthetic-absent-job"]:
+            expect("owner_scheduler_" + tail, api.call("GET", "/api/projects/" + marker + "/" + tail, member), {403})
         foreign = {"mission_id": admin_mid, "message": "isolation probe", "prompt": "isolation probe",
                    "delay_seconds": 60, "role": "operator", "owner_user_id": "admin"}
         for role in [None, "executor", "coordinator", "operator"]:
@@ -148,11 +168,31 @@ def run(api, admin, expected_sha):
                          "cancel_mission", "resume_mission", "schedule_wakeup"]:
                 expect("mcp_" + (role or "dashboard") + "_" + tool, api.mcp(bearer, tool, foreign), {200},
                        lambda doc: isinstance(doc, dict) and doc.get("ok") is False)
+            for tool in ["get_project", "update_project_status", "add_project_steer"]:
+                expect("mcp_" + (role or "dashboard") + "_" + tool,
+                       api.mcp(bearer, tool, {"project": marker, "status": "archived", "body": "isolation probe"}), {200},
+                       lambda doc: isinstance(doc, dict) and doc.get("ok") is False)
+        code, external = api.call("POST", "/api/mcp/external-sessions", member, {"role": "coordinator"})
+        if code != 200 or not isinstance(external, dict) or not external.get("token"):
+            raise IsolationError("member external-session mint failed")
+        external_bearer = external["token"]
+        expect("external_own_mission_positive_control",
+               api.mcp(external_bearer, "get_mission", {"mission_id": member_mid}), {200},
+               lambda doc: isinstance(doc, dict) and doc.get("ok") is True)
+        for tool in ["get_mission", "get_mission_events", "get_budget", "cancel_mission", "schedule_wakeup"]:
+            expect("mcp_external_" + tool, api.mcp(external_bearer, tool, foreign), {200},
+                   lambda doc: isinstance(doc, dict) and doc.get("ok") is False)
+        expect("member_usage_is_zero", api.mcp(member, "get_budget"), {200},
+               lambda doc: isinstance(doc, dict) and isinstance(doc.get("result"), dict)
+               and doc["result"].get("spent_today_cents") == 0)
         for tool in ["secret_list", "list_privileged_access", "memory_get_knowledge_tree"]:
             expect("mcp_owner_only_" + tool, api.mcp(member, tool), {200},
                    lambda doc: isinstance(doc, dict) and doc.get("ok") is False)
         expect("owner_fixture_unchanged", api.call("GET", "/api/control/missions/" + admin_mid, admin), {200},
                lambda doc: isinstance(doc, dict) and doc.get("title") == marker and doc.get("status") == "awaiting_user")
+        expect("owner_project_unchanged", api.call("GET", "/api/projects/" + marker, admin), {200},
+               lambda doc: isinstance(doc, dict) and isinstance(doc.get("project"), dict)
+               and doc["project"].get("objective") == project_objective and doc["project"].get("status") == "active")
     finally:
         for bearer, mid in reversed(created):
             try:
@@ -160,6 +200,12 @@ def run(api, admin, expected_sha):
                 cleanup["missions_deleted"] &= code in {200, 204, 404}
             except IsolationError:
                 cleanup["missions_deleted"] = False
+        for bearer, slug in reversed(projects):
+            try:
+                code, _ = api.call("DELETE", "/api/projects/" + slug, bearer)
+                cleanup["projects_deleted"] &= code in {200, 204, 404}
+            except IsolationError:
+                cleanup["projects_deleted"] = False
         if uid:
             try:
                 code, _ = api.call("PATCH", "/api/admin/users/" + uid, admin, {"disabled": True})
@@ -168,7 +214,7 @@ def run(api, admin, expected_sha):
                 pass
         # No response bodies, passwords, tokens, transcripts or provider values.
         print(json.dumps({"build": build, "results": results, "cleanup": cleanup,
-                          "coverage_pending": ["live machine lifecycle", "projects", "external MCP", "desktop"]}))
+                          "coverage_pending": ["live machine lifecycle", "desktop", "shared mission sessions"]}))
     return all(row["passed"] for row in results) and all(cleanup.values())
 
 
