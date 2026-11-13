@@ -1,4 +1,4 @@
-/* linux_shell/gtk_chrome.h — Hybrid Native Chrome (GTK3 sidebar + Ctrl+K palette). */
+/* linux_shell/gtk_chrome.h — Hybrid Native Chrome (GTK3 sidebar). */
 #ifndef ORB_GTK_CHROME_H
 #define ORB_GTK_CHROME_H
 

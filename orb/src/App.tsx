@@ -214,10 +214,6 @@ export default function App() {
   let searchInputEl: HTMLInputElement | undefined;
   const nativeChromeActive = isNativeChromeEnabled();
   const openSearch = () => {
-    if (nativeChromeActive) {
-      notifyNativeChromeShell("open_native_palette");
-      return;
-    }
     if (searchOpen()) {
       searchInputEl?.focus({ preventScroll: true });
       return;
