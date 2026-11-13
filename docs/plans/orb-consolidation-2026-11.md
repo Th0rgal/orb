@@ -623,6 +623,10 @@ if __name__ == "__main__":
 
 Run: `sudo python3 sidecar_schema.py` (reads `CLI_PROXY_MANAGEMENT_KEY` from `/etc/open_agent/open_agent.env`, like the guard script). Most useful while a login is parked; with no cooldown active the `cooldowns[]` lines will be missing and that is itself worth knowing.
 
+**Correction 23:33 UTC: dev access never goes to a managed VM.** The 23:13 note above said a grant approved for `6fa970f7` would be usable on its VM until 00:12Z. That was wrong: managed VMs must hold no credentials, and a dev admin bearer is one. `6fa970f7` ran on managed VM `a474d57a` (now stopped) and will not redeem anything. `f0eadef4-2978-46c7-82ae-5a6a7dd40ec2` is a request id, not a grant id, and names that mission, so approving it as it stands is of no use. Two valid paths remain: the operator runs `scripts/dev_user_isolation.py` on agent-core and pastes the sanitized JSON (operator request 1, no grant needed), or a new mission on a trusted static node is named in a new request; the coordinator starts that mission and writes its id here only when the operator asks for this path. No grant exists for the coordinator (`list_mission_access`: none at 23:31Z).
+
+Live builds at 23:31Z (health endpoints, 9-character `build` resolved in the repository): prod `e43a808d46d28543022f12705e5dbae14b72d59d` (on master, #1739); dev `0fc4d71af69bbb66225ef043eefcaafed4b5e3bf` (a `wip/e-member-sibling-routes` commit, not on master). The 13:16Z deploy of `9e33099d4cf5aabfffdc565aeb8dd3bcb103905e` that the worker's relay mentions is long superseded. Any deploy request written here will give the full 40-character SHA and ask for the finished deploy receipt plus the `build` value from the health endpoint.
+
 **Still open, no owner.** Track A / #1708; lean.ci PR #34 fence review
 (interdiff unread, lean runners stay on hold); isolation acceptance and
 managed-lifecycle live validation (need the `dev_operator` grant
