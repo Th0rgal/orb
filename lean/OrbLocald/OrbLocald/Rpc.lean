@@ -3367,9 +3367,12 @@ private def shouldSetExecutableSkillFile (cleanRel : String) (rfBytes : ByteArra
 private partial def collectInstalledRegularSkillRels
     (curDir : System.FilePath)
     (relPrefix : String)
-    (depth : Nat) : IO (Array String) := do
-  if depth > 16 then return #[]
-  let entries ← try curDir.readDir catch _ => pure #[]
+    (depth : Nat) : IO (Except String (Array String)) := do
+  if depth > 16 then
+    return .error s!"Installed skill directory exceeds maximum nesting depth (16): '{curDir}'"
+  let entries ← match ← curDir.readDir.toBaseIO with
+    | .ok xs => pure xs
+    | .error err => return .error s!"Failed to enumerate installed skill directory '{curDir}': {err}"
   let mut out : Array String := #[]
   for e in entries do
     let fn := e.fileName
@@ -3380,15 +3383,16 @@ private partial def collectInstalledRegularSkillRels
         if st.isSymlink then
           out := out.push rel
         else if st.isDir then
-          out := out ++ (← collectInstalledRegularSkillRels e.path rel (depth + 1))
+          match ← collectInstalledRegularSkillRels e.path rel (depth + 1) with
+          | .error err => return .error err
+          | .ok sub => out := out ++ sub
         else if st.isReg then
           out := out.push rel
-  return out
+  return .ok out
 
 private def isInstalledSkillBundleSynced
     (sdir : System.FilePath)
-    (entry : CanonicalSkillEntry)
-    (isManaged : Bool) : IO Bool := do
+    (entry : CanonicalSkillEntry) : IO Bool := do
   let md := sdir / "SKILL.md"
   let mst ← OrbBin.PosixExt.statPath md.toString
   if !mst.exists_ || !mst.isReg || mst.isSymlink then
@@ -3413,11 +3417,11 @@ private def isInstalledSkillBundleSynced
       | some dt, some wt =>
         if normalizeSkillBody dt != normalizeSkillBody wt then return false
       | _, _ => return false
-  if isManaged then
-    let installedRels ← collectInstalledRegularSkillRels sdir "" 0
-    for rel in installedRels do
-      if !(wantFiles.any (fun (wRel, _, _) => wRel == rel)) then
-        return false
+  let .ok installedRels ← collectInstalledRegularSkillRels sdir "" 0
+    | return false
+  for rel in installedRels do
+    if !(wantFiles.any (fun (wRel, _, _) => wRel == rel)) then
+      return false
   return true
 
 private def withSkillDirFlock {α : Type} (gdir : System.FilePath) (act : IO α) : IO (Option α) := do
@@ -4050,7 +4054,7 @@ private def buildLocalSkillsReport
             let mut removedHere := false
             match desiredEntries.find? (fun e => e.name == sname) with
             | some want =>
-              let bundleSynced ← isInstalledSkillBundleSynced ent.path want isManaged
+              let bundleSynced ← isInstalledSkillBundleSynced ent.path want
               if bundleSynced then
                 syncedCount := syncedCount + 1
               else
@@ -6551,7 +6555,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
                   if (← installSkillEntryAtomic gdir entry) then touchedHarness := true
               else if sdirSt.exists_ && sdirSt.isDir then
                 let isManaged ← isManagedSkillDir sdir
-                let bundleSame ← isInstalledSkillBundleSynced sdir entry isManaged
+                let bundleSame ← isInstalledSkillBundleSynced sdir entry
                 if !isManaged then
                   if bundleSame then
                     -- Adopt identical unmanaged copy without overwriting reference files.

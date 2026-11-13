@@ -1007,6 +1007,30 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
   ])
   let agyDemoPruned := !(← (invHome / ".gemini" / "config" / "skills" / "demo-skill").pathExists)
   let userEditedPreserved ← (invHome / ".claude" / "skills" / "user-edited" / "SKILL.md").pathExists
+  -- Unmanaged skill with matching `SKILL.md` + required companions PLUS an extra user-authored file MUST NOT be silently adopted and erased on subsequent syncs
+  let unmgExtraDir := invHome / ".claude" / "skills" / "demo-skill"
+  try IO.FS.removeDirAll unmgExtraDir catch _ => pure ()
+  IO.FS.createDirAll (unmgExtraDir / "notes")
+  IO.FS.writeFile (unmgExtraDir / "SKILL.md") "---\nname: demo-skill\ndescription: \"Demo\"\nmetadata:\n  sandboxed:\n    audience: [mission, coordinator, local]\n    scope: on-demand\n---\nUse demo.\n"
+  IO.FS.writeFile (unmgExtraDir / "notes" / "my-local-note.md") "keep me\n"
+  let unmgSync1 ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
+    ("request", .obj #[("library_skills", .arr libPayloads), ("library_loaded", .bool true)])
+  ])
+  let unmgSync2 ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
+    ("request", .obj #[("library_skills", .arr libPayloads), ("library_loaded", .bool true)])
+  ])
+  let unmgNoteKept ← (unmgExtraDir / "notes" / "my-local-note.md").pathExists
+  let unmgMarkerAbsent := !(← (unmgExtraDir / ".managed-by-orb-skills").pathExists)
+  let unmgSkippedOk :=
+    match unmgSync1, unmgSync2 with
+    | .ok u1, .ok u2 =>
+      let sk1 := ((u1.fieldArr? "skipped_unmanaged").getD #[]).filterMap (·.asStr?)
+      let sk2 := ((u2.fieldArr? "skipped_unmanaged").getD #[]).filterMap (·.asStr?)
+      sk1.contains "~/.claude/skills/demo-skill" &&
+      sk2.contains "~/.claude/skills/demo-skill" &&
+      unmgNoteKept && unmgMarkerAbsent
+    | _, _ => false
+  try IO.FS.removeDirAll unmgExtraDir catch _ => pure ()
   -- Restore `libPayloads` state before F2 (`prune_removed: true` cleans up `other-skill` from `partialSyncRes`)
   let _ ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
     ("request", .obj #[("library_skills", .arr libPayloads), ("library_loaded", .bool true), ("prune_removed", .bool true)])
@@ -1044,7 +1068,7 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
       retiredAgentsGone && activeAgentsKept &&
       pruned1.contains "~/.agents/skills/retired-agents-skill" &&
       agyDemoKeptOnPartial && partialNotRemovedOk &&
-      agyDemoPruned && userEditedPreserved &&
+      agyDemoPruned && userEditedPreserved && unmgSkippedOk &&
       pruned2.contains "~/.gemini/config/skills/demo-skill"
     | _, _ => false
   if (← assertTrue "skill_bundle_reference_drift_exec_mode_and_atomic_prune" bundleSyncOk) then passed := passed + 1
