@@ -118,6 +118,22 @@ def run : IO Unit := do
             failures := failures.push "a rejected login must show needs_reauth on its own row only"
           if (relisted.filter (fun v => statusOf v == some "connected")).size != 5 then
             failures := failures.push "other credentialed accounts must stay connected"
+          -- Evidence from real proxied requests: a login CLIProxyAPI could not use marks the
+          -- OAuth-only accounts of that type; a refused key marks that account. Clearing
+          -- the evidence (a request served, a completed login) restores `connected`.
+          let needsReauth := fun (rows : Array JVal) =>
+            (rows.filter (fun v => statusOf v == some "needs_reauth")).filterMap (·.fieldStr? "id")
+          let setEvidence := fun (sql : String) => discard <| execParamQuery store.missionsDb sql #[]
+          setEvidence "INSERT INTO provider_auth_health(account_key,code,observed_at) VALUES('cliproxyapi:anthropic','auth_unavailable','t0'),('10000000-0000-4000-8000-000000000005','invalid_api_key','t0');"
+          let observed := needsReauth ((← getJson app jwt "/api/ai/providers" now).asArr?.getD #[])
+          if observed.qsort (· < ·) != #["10000000-0000-4000-8000-000000000001", "10000000-0000-4000-8000-000000000002",
+              "10000000-0000-4000-8000-000000000005"] then
+            failures := failures.push s!"a login refused on a real request must show needs_reauth: {observed}"
+          if statusOf (← getJson app jwt "/api/ai/providers/10000000-0000-4000-8000-000000000001" now) != some "needs_reauth" then
+            failures := failures.push "provider detail must use the same request evidence"
+          setEvidence "DELETE FROM provider_auth_health;"
+          if needsReauth ((← getJson app jwt "/api/ai/providers" now).asArr?.getD #[]) != #["10000000-0000-4000-8000-000000000002"] then
+            failures := failures.push "cleared request evidence must restore connected"
           let cached ← getJson app jwt
             "/api/ai/providers/10000000-0000-4000-8000-000000000002/usage?cached_only=true" now
           if cached.fieldInt? "codex_primary_reset_at" != some 1740001800 ||

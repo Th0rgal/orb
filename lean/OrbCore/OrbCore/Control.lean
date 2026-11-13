@@ -1480,6 +1480,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   let skipAccountIds := if headersAlreadyCommitted then #[] else plan.cooling.map (fun c => c.accountId)
   let explicitPinned? : Option String :=
     if headersAlreadyCommitted then some pinnedAcctHdr else none
+  let authEvidence ← IO.mkRef (#[] : Array (String × String))
   let out ← forwardProxyChain dispatchChain req.method cleanPath #[] forwardBody
     st.proxyMockTransport? headersAlreadyCommitted st.pacingTracker?
     (skipAccountIds := skipAccountIds)
@@ -1487,6 +1488,17 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     (attemptGeneration? := attemptGen?)
     (nowEpoch? := some nowEpochSec)
     (pinnedAccount? := explicitPinned?)
+    (authEvidence? := some authEvidence)
+  -- Provider status follows what real requests saw: a refused login is recorded per
+  -- upstream account, and an account that just served a request is cleared.
+  for (accountKey, code) in (← authEvidence.get) do
+    discard <| execParamQuery st.store.missionsDb
+      ("INSERT INTO provider_auth_health(account_key,code,observed_at) VALUES(?1,?2,?3) " ++
+       "ON CONFLICT(account_key) DO UPDATE SET code=excluded.code,observed_at=excluded.observed_at;")
+      #[accountKey, code, formatEpochIso8601Utc nowEpochSec]
+  if out.status ≥ 200 && out.status < 300 && !out.selectedAccount.isEmpty then
+    discard <| execParamQuery st.store.missionsDb
+      "DELETE FROM provider_auth_health WHERE account_key=?1;" #[out.selectedAccount]
   match st.healthTracker? with
   | some htr =>
     let active ← snapshotActiveHealthCooldowns htr nowEpochSec

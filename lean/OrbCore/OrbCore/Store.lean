@@ -420,6 +420,9 @@ def missionsAdditiveAlters : Array String := #[
   "CREATE INDEX IF NOT EXISTS idx_proxy_usage_timestamp ON proxy_usage(timestamp);",
   "CREATE INDEX IF NOT EXISTS idx_proxy_usage_mission ON proxy_usage(mission_id);",
   "CREATE INDEX IF NOT EXISTS idx_proxy_outcomes_timestamp ON proxy_outcomes(timestamp);",
+  -- Last authentication verdict of real proxied requests, per upstream account
+  -- (`cliproxyapi:<type>` when CLIProxyAPI holds the login). A row means "rejected".
+  "CREATE TABLE IF NOT EXISTS provider_auth_health (account_key TEXT PRIMARY KEY, code TEXT NOT NULL DEFAULT '', observed_at TEXT NOT NULL DEFAULT '');",
   "CREATE INDEX IF NOT EXISTS idx_mission_search_docs_mission ON mission_search_docs(mission_id);",
   "CREATE UNIQUE INDEX IF NOT EXISTS deferred_message_batches_uuid ON deferred_message_batches(mission_id, message_id);"
 ]

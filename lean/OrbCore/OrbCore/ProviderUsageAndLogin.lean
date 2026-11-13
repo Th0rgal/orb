@@ -966,6 +966,19 @@ def loginRejected (hub : ProviderRuntimeHub) (providerId : String) : IO Bool := 
   return (entries.find? (fun e => e.providerId == providerId)).any
     (fun e => e.payload.fieldStr? "status" == some "needs_reauth")
 
+/-- The login of this provider is known to be refused: by its last usage probe, or by the
+    last real request the proxy sent with it. When CLIProxyAPI holds the login the proxy's
+    evidence is per provider type (`cliproxyapi:<type>`): it reports a refusal only when no
+    login of that type could serve, and one success clears it. -/
+def loginRejectedFor (hub : ProviderRuntimeHub) (store : CoreStore) (hp : HydratedProvider) : IO Bool := do
+  if ← loginRejected hub hp.id then return true
+  let viaCliProxy := hp.hasOAuth && !hp.hasApiKey
+  match ← execParamQuery store.missionsDb
+      "SELECT 1 FROM provider_auth_health WHERE account_key=?1 OR (?2<>'' AND account_key=?2) LIMIT 1;"
+      #[hp.id, if viaCliProxy then s!"cliproxyapi:{hp.providerType}" else ""] with
+  | .ok rows => return rows.size > 1
+  | .error _ => return false
+
 /-! ## Unified Dispatcher for AI Providers, Proxy Analytics, Model-Routing Health/Test & Catalog -/
 
 set_option maxHeartbeats 800000 in
@@ -1200,7 +1213,7 @@ def dispatchProviderAndAiRoute
             | some tr => lookupObservedKeyRpm? tr hp.id
             | none => pure none
           let uEn? := if isLegacyUnscoped then none else some (isUserProviderEnabled uPrefs hp.id)
-          arr := arr.push (renderHydratedProviderJv hp uEn? obs? (← loginRejected hub hp.id))
+          arr := arr.push (renderHydratedProviderJv hp uEn? obs? (← loginRejectedFor hub store hp))
       return some (jsonResp 200 (.arr arr))
 
     -- 5b. `GET /api/ai/providers/usage`
@@ -1402,6 +1415,10 @@ def dispatchProviderAndAiRoute
         ]
         match ← sendJsonRequest "POST" s!"{mgmtBase}/v0/management/oauth-callback" (some mgmtKey) (some cbPayload) #[] 15000 262144 with
         | .ok (c, _, _) =>
+          -- A completed login supersedes earlier refusals seen through CLIProxyAPI; a login
+          -- that is still dead is recorded again by the next request.
+          if 200 ≤ c && c < 300 then
+            discard <| execParamQuery store.missionsDb "DELETE FROM provider_auth_health WHERE account_key LIKE 'cliproxyapi:%';" #[]
           let okSt := if 200 ≤ c && c < 300 then "completing" else "failed"
           return some (jsonResp 200 (.obj #[("status", .str okSt), ("auth_url", .str sess.authUrl), ("message", .null)]))
         | .error e =>
@@ -1422,7 +1439,7 @@ def dispatchProviderAndAiRoute
         let obs? ← match pacingTracker? with
           | some tr => lookupObservedKeyRpm? tr hp.id
           | none => pure none
-        return some (jsonResp 200 (renderHydratedProviderJv hp none obs? (← loginRejected hub hp.id)))
+        return some (jsonResp 200 (renderHydratedProviderJv hp none obs? (← loginRejectedFor hub store hp)))
 
       -- `GET /api/ai/providers/:id/usage`
       if method == "GET" && segs.length == 5 && segs[4]? == some "usage" then

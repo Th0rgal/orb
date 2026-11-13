@@ -736,6 +736,14 @@ def upstreamErrorCode (body : String) : String :=
     if code.length ≤ 64 && code.all (fun c => c.isAlphanum || c == '_' || c == '-' || c == '.') then code else ""
   | .error _ => ""
 
+/-- An upstream answer that means "this account's login is no longer accepted": a 401, or
+    the auth error codes of CLIProxyAPI and the vendors' OAuth endpoints. A 403 alone is
+    not enough (it is also used for model or region permission). -/
+def isAuthRejection (status : Nat) (code body : String) : Bool :=
+  status == 401 || code == "auth_unavailable" || code == "invalid_grant" ||
+    code == "authentication_error" || code == "invalid_api_key" ||
+    (body.splitOn "invalid_grant").length > 1
+
 /-- Body returned when every target of a chain failed: the class, and each target's outcome. -/
 def chainExhaustedBody (errCode errMsg : String) (failures : Array (String × String × Nat × String)) : ByteArray :=
   (renderCompact (.obj #[("error", .str errCode), ("message", .str errMsg),
@@ -858,7 +866,8 @@ def forwardProxyChain
     (healthTracker? : Option ProviderHealthTracker := none)
     (attemptGeneration? : Option UInt64 := none)
     (nowEpoch? : Option UInt64 := none)
-    (pinnedAccount? : Option String := none) :
+    (pinnedAccount? : Option String := none)
+    (authEvidence? : Option (IO.Ref (Array (String × String))) := none) :
     IO ProxyOutcome := do
   let nowSec ← match nowEpoch? with
     | some ep => pure ep
@@ -1178,7 +1187,12 @@ def forwardProxyChain
             pinnedAccountId := nextSlice.pinnedAccountId
             verdictCode := vCode
           }
-        failures := failures.push (tgt.provider, tgt.modelId, resp.status, upstreamErrorCode respBodyStr)
+        let upstreamCode := upstreamErrorCode respBodyStr
+        failures := failures.push (tgt.provider, tgt.modelId, resp.status, upstreamCode)
+        -- The upstream refused this account's login: evidence for the provider's status.
+        if let some evidence := authEvidence? then
+          if isAuthRejection resp.status upstreamCode respBodyStr then
+            evidence.modify (·.push (tgt.accountId, if upstreamCode.isEmpty then s!"http_{resp.status}" else upstreamCode))
         if resp.status == 429 then
           rateLimitCount := rateLimitCount + 1
         else if resp.status == 402 then

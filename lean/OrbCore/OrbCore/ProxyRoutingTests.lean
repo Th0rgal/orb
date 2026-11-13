@@ -266,6 +266,17 @@ def run : IO Unit := do
           "{\"provider\":\"openai\",\"model\":\"fail401-c\",\"status\":401,\"code\":\"auth_unavailable\"}]")).length == 2)
       s!"an exhausted chain lists each target's failure: {dead.status} {deadText}"
     check ((deadText.splitOn "example.test").length == 1) "upstream messages are not relayed in the failure list"
+    -- The refused login is recorded for that upstream account only, and an account
+    -- that serves a request is cleared.
+    let evidence := fun (key : String) => do
+      let .ok rows ← execParamQuery store.missionsDb "SELECT code FROM provider_auth_health WHERE account_key=?1;" #[key]
+        | throw (IO.userError "auth health query failed")
+      return (rows[1]?.bind (·[0]?))
+    check ((← evidence "fo-dead-fail401-c") == some "auth_unavailable" && (← evidence "fo-dead-fail400-a").isNone)
+      s!"a refused login is recorded for its account: {← evidence "fo-dead-fail401-c"}"
+    discard <| execParamQuery store.missionsDb "INSERT INTO provider_auth_health(account_key,code,observed_at) VALUES('fo-recover-good-c','auth_unavailable','t0');" #[]
+    discard <| post "fo-recover"
+    check ((← evidence "fo-recover-good-c").isNone) "an account that served a request is no longer marked refused"
     attempts.set #[]
     let single ← post "fo-single"
     check (single.status == 400 && (((String.fromUTF8? single.body).getD "").splitOn "unknown provider for model k3").length == 2)
