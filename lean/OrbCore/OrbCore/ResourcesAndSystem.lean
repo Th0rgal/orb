@@ -1458,9 +1458,7 @@ def handleLibraryRoute
       if fetched != 0 then return some (jsonErr 502 "library_revision_unavailable")
       let (checkedOut, _) ← runGitCapture #["checkout", "--detach", revision] (some libDir)
       if checkedOut != 0 then return some (jsonErr 409 "library_revision_checkout_failed")
-      let st ← buildLibraryStatusJson libDir effRemote
-    -- Members see sync state only, not the host path or the remote URL.
-    return some (jsonResp 200 (if effAdmin then st else (st.setField "path" (.str "")).setField "remote" (.str "")))
+      return some (jsonResp 200 (← buildLibraryStatusJson libDir effRemote))
 
   if method == "GET" && segs == ["api", "library", "status"] then
     if !(← gitFp.pathExists) && !effRemote.isEmpty then
