@@ -101,6 +101,17 @@ def check(base, overlay):
         raise InvalidConfig("ORB_INSTANCE must be prod or dev")
 
 
+def classify(prod, dev):
+    common = (prod.keys() & dev.keys()) - INSTANCE_KEYS
+    return {
+        "shared": sorted(key for key in common if literal(prod[key]) == literal(dev[key])),
+        "different": sorted(key for key in common if literal(prod[key]) != literal(dev[key])),
+        "prod_only": sorted((prod.keys() - dev.keys()) - INSTANCE_KEYS),
+        "dev_only": sorted((dev.keys() - prod.keys()) - INSTANCE_KEYS),
+        "instance": sorted((prod.keys() | dev.keys()) & INSTANCE_KEYS),
+    }
+
+
 def split_envs(prod, dev):
     common = (prod.keys() | dev.keys()) - INSTANCE_KEYS
     conflicts = {key for key in common if key not in prod or key not in dev or literal(prod[key]) != literal(dev[key])}
@@ -167,8 +178,16 @@ def main():
     migration.add_argument("--dev", type=Path, required=True)
     migration.add_argument("--output", type=Path, required=True)
     migration.add_argument("--apply", action="store_true", help="write files; default only validates")
+    classification = commands.add_parser("classify")
+    classification.add_argument("--prod", type=Path, required=True)
+    classification.add_argument("--dev", type=Path, required=True)
     args = parser.parse_args()
     try:
+        if args.command == "classify":
+            groups = classify(parse_env(args.prod.read_bytes()), parse_env(args.dev.read_bytes()))
+            for group, keys in groups.items():
+                print(group + ": " + ", ".join(keys))
+            return 0
         if args.command == "check":
             check(parse_env(args.base.read_bytes()), parse_env(args.overlay.read_bytes()))
         else:
