@@ -1,5 +1,111 @@
 # Managed providers: lean.ci and Google Colab
 
+## Handoff 2026-11-13
+
+PR #1720 is merged at `6f1573fa8fb1799c5bc40c8269b5a1e7bb0e07f4`. This is a
+source-level handoff, not evidence that this revision is deployed or that every UI
+works against a live provider. The operator waived the final CI wait; do not infer
+that all final-head CI jobs passed. The merged feature branch passed the CI-parity
+Core build, full Core self-test (101 host tests) and spec fixtures (5 tests).
+
+### What is implemented, and what is actually proven
+
+| Surface | Active VM list | Spawn | Stop / extend / destroy | Cost display |
+| --- | --- | --- | --- | --- |
+| Core REST API | Authenticated, owner-filtered managed-machine list and provider catalog; this is Core's inventory, not an unrestricted upstream account inventory | Provider/size/TTL, async action receipt by default; `wait:true` for blocking use | Stop/resume and destroy routes exist. Stop/resume is Boat-only. No REST `/:id/extend` route was found on this master | Machine quote/rate and reserved spend fields; not audited provider invoices. Authenticated historical `daily_spend` is currently empty |
+| MCP | `list_managed_machines` includes providers/catalog; default hides destroyed rows | `spawn_managed_machine(provider: boat | leanci | colab)`; sizes resolved from catalog, including `leanci:2xlarge` (32 vCPU/96 GiB), `colab:t4`; `start_mission` accepts `auto-managed:<provider>:<size>` and old Boat shorthand | Destroy and extension use the shared lifecycle. lean.ci supports neither stop/resume nor extend. Colab supports neither stop/resume; its extension changes Core's TTL only, not Google's runtime lifetime | Machine rates, reservation estimates and budget receipts |
+| Established desktop (SolidJS) | Provider-grouped list is wired | Provider/size/TTL dialog is wired; personal opt-in switch separate from global enablement | Destroy wired; stop capability-gated. Extend UI exists but calls the missing REST route, so it is not working end to end | Rates, estimated spend/budgets and chart UI exist; live accounting/chart correctness not demonstrated |
+| iOS | Provider-grouped list is wired | Provider/size/TTL sheet and personal opt-in are wired | Destroy wired; stop capability-gated. Extend has the same missing REST route and is not working end to end | Rate/spend/budget views implemented; live correctness not demonstrated |
+| Android | Provider-grouped list is wired | Provider/size/TTL dialog and personal opt-in are wired | Destroy wired; stop capability-gated. Extend has the same missing REST route and is not working end to end | Rate/spend/budget views implemented; live correctness not demonstrated |
+
+Both non-Boat providers default to **off per user**. Explicit preferences are
+preserved; a one-time migration preserves prior provider usage. Thomas's existing
+opt-ins must remain on. MCP checks the owning user's preference for spawn and
+reuse, including operator sessions. Core's sealed keys are never delivered to a
+guest or mission. lean.ci uses `https://api.lean.ci/v1`; Colab uses the host's
+`colab-api` plus each runtime's tunneled worker. Availability observations do not
+mutate global toggles. lean.ci catalog filtering uses live capabilities with a
+20-second cache and conservative fallback, excludes 128-GiB profiles, and retains
+32-vCPU/96-GiB `2xlarge`. `small` measured only about 14 GB free: do not choose it
+for substantial Lean builds without checking disk requirements.
+
+**Live evidence inherited from the operator:** keys sealed, global providers
+enabled, Thomas opted in; a lean.ci small guest and a Colab T4 guest successfully
+provisioned/enrolled and were destroyed on production before this handoff. This
+is not a live test of the newly corrected MCP schemas or any client UI. Mock
+contracts now rent every implemented provider/catalog size through MCP, exercise
+qualified auto-managed placement/reuse, and reject fresh users until opt-in.
+
+### Not at Boat parity / client gaps
+
+- **Provider/API/MCP:** lean.ci has snapshot save/list/delete and snapshot-based
+  spawn implemented, but no stop/resume, lease extension or running-VM fork.
+  Colab has none of stop/resume, snapshots/restore or fork. Its quoted costs are
+  shadow prices (half corresponding Vast.ai rates), not Google billing. Colab
+  TTL extension cannot prevent Google reclaiming a runtime. No automatic busy
+  extension is promised; the Core lifetime ceiling is 720 minutes from boot.
+- **Desktop:** lean.ci/Colab do not acquire Boat-only operations merely because
+  controls are shared. Clients do not yet gate Extend using `supports_extend`.
+  Snapshot inventory/delete UI exists but the corresponding REST list/delete
+  routes were not found; there is no snapshot save, restore picker or fork UI.
+  Spawn action failure reasons now project into the desktop transcript.
+- **iOS:** same stop/extend limitations; no snapshot management, restore picker
+  or fork UI. Spawn action failure details are implemented. No installed-app or
+  live-provider settings/spawn/action smoke test was performed.
+- **Android:** same stop/extend limitations; no snapshot management, restore
+  picker or fork UI. No equivalent transcript action-polling projection was
+  found, so desktop/iOS spawn-failure detail parity is not established. No
+  installed-app or live-provider settings/spawn/action smoke test was performed.
+- **Cross-client wire contract still needs a live replay:** Core emits `ready`,
+  `created_at_sec` and `expires_at_sec`; client models also reference `online`
+  and ISO timestamp fields. Status/countdowns/action enablement must be verified
+  against real REST responses rather than inferred from fixture tests.
+- The newly merged **experimental LeanUI desktop is not the SolidJS client**:
+  its fleet view uses seeded data and a rendered spawn control without managed
+  lifecycle API wiring found in this audit. It is not provider UI parity evidence.
+
+### Never verified live by this mission
+
+No final-head live MCP rent/auto-managed/reuse test, fresh-user opt-in rejection,
+client list/spawn/destroy workflow, cost/countdown reconciliation, or provider
+saturation/fallback test was performed. lean.ci snapshots, warm-image restore,
+large profiles (including 32/96), custom memory, larger-profile free disk and
+capacity-race behavior were not live-verified. Colab accelerators other than T4,
+Core-only extension, runtime reclaim/reconnect and GPU workload execution were
+not established by this handoff. Do not mark the original snapshot/warm-build or
+`nvidia-smi` acceptance steps below complete without their own receipts.
+
+### Dev verification for the new owner
+
+1. Use the dev instance only (`sandboxed-sh-dev`, port 3002, data
+   `/var/lib/sandboxed-sh-dev`). Deploy an exact reviewed SHA through
+   `orb-deploy <sha> --dev-only`; never replace binaries or restart production.
+   Check `/api/health` reports that SHA. Dev credentials/settings are separate;
+   use the approved sealing/operator workflow, never copy secrets into prompts.
+2. Confirm global provider enablement and Thomas's personal opt-ins. With a
+   fresh test user, list the catalog and try explicit lean.ci/Colab rentals:
+   expect `provider_disabled_for_user` and no new upstream VM. Enable just one
+   personal switch and verify only that provider becomes rentable via REST/MCP.
+3. Read `list_managed_machines` and its live provider sizes. Rent lean.ci
+   `small` and Colab `t4` one at a time with a unique idempotency key and short
+   TTL. Poll `get_action` to terminal success/failure; retain the actual failure
+   reason. Verify relay enrolment, a trivial guest command, and Colab
+   `nvidia-smi`. Check the upstream provider also lists the resource.
+4. Point each established client at dev. Exercise list, personal switch,
+   UI spawn, action failure, cost/rate, timestamps/countdown and destroy. Record
+   platform/version and real response shapes. Verify unsupported stop is absent;
+   treat Extend as a known gap until its REST route/capability gating is fixed.
+5. Exercise qualified `auto-managed:leanci:<available-size>` and
+   `auto-managed:colab:t4`; verify the returned provider/size and reuse ownership.
+   Test 32/96 only with explicit budget approval and live capacity; inspect
+   `df -h` before any Lean build. Separately test lean.ci snapshots/restore.
+6. Destroy every test resource even after partial failure. Confirm provider-side
+   absence, terminal Core state, closed cost ledger and no lingering notebook.
+   Dev uses real shared provider accounts and incurs real costs. Save receipts
+   before calling any untested capability done.
+
+The original plan below is historical/task context, not a completed checklist.
+
 Goal: missions can rent machines on lean.ci and on Google Colab through Core, the same way they can on
 Boat since 2026-11-12. This plan is a child of `docs/plans/core-recovery-2026-11.md` (section 1, items 5
 and 6) and is owned by its own mission; the recovery mission keeps the Boat lifecycle (snapshots, fork,
