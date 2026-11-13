@@ -1196,10 +1196,12 @@ def runConfiguredManagedLifecycle (mc : ManagedComputeStore) (ctx : ManagedLifec
     | .error e => return .error e
     | .ok (some current) => return .ok (managedLifecycleResult current)
     | .ok none => pure ()
-  if let some entry := ManagedProvider.declaration? m.provider then
-    if action == "extend" && !entry.supportsExtend then return .error "managed_provider_extend_unsupported"
-    if (action == "stop" || action == "resume") && !entry.supportsStopResume then
-      return .error "managed_provider_stop_resume_unsupported"
+  -- An injected provider (tests) declares its own abilities; the registry gates real ones.
+  if ctx.override?.isNone then
+    if let some entry := ManagedProvider.declaration? m.provider then
+      if action == "extend" && !entry.supportsExtend then return .error "managed_provider_extend_unsupported"
+      if (action == "stop" || action == "resume") && !entry.supportsStopResume then
+        return .error "managed_provider_stop_resume_unsupported"
   let provider ← match ctx.override? with
     | some pair => pure pair.1
     | none => do
