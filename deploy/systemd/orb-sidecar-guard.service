@@ -1,0 +1,9 @@
+[Unit]
+Description=Release wrong long bans on Claude logins held by the CLIProxyAPI sidecar
+After=cli-proxy-api.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/orb-sidecar-guard
+StateDirectory=orb-sidecar-guard
+Nice=10

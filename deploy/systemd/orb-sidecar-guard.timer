@@ -1,0 +1,10 @@
+[Unit]
+Description=Run orb-sidecar-guard every 5 minutes
+
+[Timer]
+OnBootSec=4min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
