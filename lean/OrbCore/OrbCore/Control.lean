@@ -14,6 +14,7 @@ import OrbBin.GitWorkspace
 import OrbBin.ClaudeControl
 import OrbCore.Spec
 import OrbCore.Store
+import OrbCore.MissionSettings
 import OrbCore.Search
 import OrbCore.Harness
 import OrbCore.Proxy
@@ -532,17 +533,7 @@ def authenticateProxyRequest (st : CoreAppState) (hdrs : Array (String × String
     return false
   return (← resolveCallerPrincipal? st hdrs nowEpochSec).isSome
 
-/-- Normalize a requested model effort string for `backend?`, rejecting unsupported levels. -/
-def normalizeModelEffortForBackend (backend? : Option String) (raw : String) : Option String :=
-  let level := raw.trimAscii.toString.toLower
-  match backend? with
-  | some "antigravity" =>
-    if level == "low" || level == "medium" || level == "high" then some level else none
-  | some "claudecode" =>
-    if level == "low" || level == "medium" || level == "high" || level == "xhigh" || level == "max" then some level else none
-  | some "codex" =>
-    if level == "low" || level == "medium" || level == "high" || level == "xhigh" || level == "max" then some level else none
-  | _ => none
+abbrev normalizeModelEffortForBackend := MissionSettings.normalizeModelEffortForBackend
 
 /-- Statuses that hold an active campaign / project `parallel_missions` cap slot. -/
 def campaignSlotHeldBy (status : String) : Bool :=
@@ -4142,26 +4133,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
       let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
         | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
-      let nextTitle := (jv.fieldStr? "title").getD existing.title
-      let nextBackend := (jv.fieldStr? "backend").getD existing.backend
-      let nextModel :=
-        match jv.field? "model_override" with
-        | some .null => ""
-        | some (.str s) => s
-        | _ => existing.modelOverride
-      let nextEffort ← do
-        match jv.field? "model_effort" with
-        | none => pure existing.modelEffort
-        | some .null => pure ""
-        | some (.str s) =>
-          let t := s.trimAscii.toString
-          if t.isEmpty then pure ""
-          else match normalizeModelEffortForBackend (some nextBackend) t with
-            | some eff => pure eff
-            | none => pure "__INVALID__"
-        | _ => pure existing.modelEffort
-      if nextEffort == "__INVALID__" then
-        return .ok (mkJson 400 "{\"error\":\"unsupported_model_effort\"}")
+      let settings ← match MissionSettings.resolve existing jv with
+        | .ok settings => pure settings
+        | .error e => return .ok (mkJson 400 (renderCompact (.obj #[("error", .str e)])))
       let hasProjPatch := (jv.field? "project").isSome || (jv.field? "project_slug").isSome
       let nextProj ← do
         if !hasProjPatch then pure existing.project
@@ -4184,24 +4158,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       if nextFolder == "__INVALID_FOLDER__" then
         return .ok (mkJson 400 "{\"error\":\"invalid_folder\"}")
       let nowIso := formatEpochIso8601Utc nowEpochSec
-      let placementChanged := nextProj != existing.project || nextFolder != existing.folder
-      if placementChanged then
-        discard <| execParamQuery st.store.missionsDb
-          ("UPDATE missions SET title=?2, backend=?3, model_override=?4, model_effort=?5, " ++
-           "project=?6, folder=?7, placement_revision=COALESCE(placement_revision,0)+1, " ++
-           "metadata_updated_at=?8, state_revision=state_revision+1 WHERE id=?1;")
-          #[mid, nextTitle, nextBackend, nextModel, nextEffort, nextProj, nextFolder, nowIso]
-      else
-        discard <| execParamQuery st.store.missionsDb
-          ("UPDATE missions SET title=?2, backend=?3, model_override=?4, model_effort=?5, " ++
-           "metadata_updated_at=?6, state_revision=state_revision+1 WHERE id=?1;")
-          #[mid, nextTitle, nextBackend, nextModel, nextEffort, nowIso]
-      if let some desc := jv.fieldStr? "short_description" then
-        discard <| execParamQuery st.store.missionsDb
-          "UPDATE missions SET short_description=?2 WHERE id=?1;" #[mid, desc]
-      if let some pr := jv.fieldStr? "github_pr" then
-        discard <| execParamQuery st.store.missionsDb
-          "UPDATE missions SET github_pr=?2, repo=?2 WHERE id=?1;" #[mid, pr]
+      if let .error _ ← MissionSettings.persist st.store existing settings nowIso (some (nextProj, nextFolder)) then
+        return .ok (mkJson 500 "{\"error\":\"mission_settings_update_failed\"}")
       let callerOpt := if caller.isLegacyUnscoped then none else some caller.userId
       match ← missionDetailJson st.store mid callerOpt st.bootstrapAdminId with
       | .ok (some body) => return .ok (mkJson 200 body)
@@ -6820,6 +6778,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
           IO.sleep 2000
       discard <| IO.asTask (prio := .dedicated) do
         let mut lastInventory : UInt64 := 0
+        let mut checkedDestroyed : Array String := #[]
         let mut lastSampledMinute : UInt64 := 0
         while true do
           let cached ← managedRef.get
@@ -6836,11 +6795,16 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
               let reaped := ((report.fieldArr? "reaped").getD #[]).size
               if reaped > 0 then IO.eprintln s!"[orb-core] verified expiry cleanup for {reaped} managed lease(s)"
           if observedAt ≥ lastInventory + 120 &&
-              (cached.boatEnabled || cached.machines.any (fun m => canonicalizeProvider m.provider == "boat" && m.status != "destroyed")) then
+              boatInventoryNeeded cached checkedDestroyed then
             lastInventory := observedAt
             match ← reconcileConfiguredBoatInventory managedStore store.rootDir observedAt with
             | .error e => IO.eprintln s!"[orb-core] Boat inventory reconciliation deferred: {e}"
             | .ok report =>
+              let missing := (report.fieldArr? "missing").getD #[]
+              let closedRecords := (report.fieldArr? "closed").getD #[]
+              checkedDestroyed := cached.machines.filterMap (fun m =>
+                if canonicalizeProvider m.provider == "boat" && m.status == "destroyed" &&
+                    (missing.contains (.str m.id) || closedRecords.contains (.str m.id)) then some m.id else none)
               let bound := ((report.fieldArr? "backfilled").getD #[]).size
               let stopped := ((report.fieldArr? "stopped").getD #[]).size
               let closed := ((report.fieldArr? "closed").getD #[]).size

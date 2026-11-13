@@ -244,12 +244,26 @@ def spawnManagedWorker (mc : ManagedComputeStore) (fleet : ManagedFleetState)
   | .ok ready => return .ok { machine := ready, created := true }
   | .error reason => return ← destroyFailedProvision mc provider live runtime reason
 
+def replayManagedResume (mc : ManagedComputeStore) (machineId requestKey : String) (ttl : UInt64) :
+    IO (Except String (Option ManagedMachine)) := do
+  let .ok prior ← getManagedResumeIntent? mc requestKey
+    | return .error "managed_resume_intent_read_failed"
+  let some intent := prior | return .ok none
+  if intent.machineId != machineId || intent.newTtl != ttl then return .error "managed_idempotency_conflict"
+  if intent.state != "completed" then return .error ("managed_resume_" ++ intent.state ++ ":" ++ requestKey)
+  let some (current, _) ← getManagedMachine? mc machineId | return .error "managed_machine_missing"
+  return .ok (some current)
+
 /-- Resume retains the Core ID and the archived source, rents a successor via
     the provider interface, and commits the new boot only on its real relay poll. -/
 def resumeManagedWorker (mc : ManagedComputeStore) (fleet : ManagedFleetState)
     (machineId requestKey : String) (ttl : UInt64) (provider : ManagedProvider.Provider)
     (cfg : BootstrapConfig) (runtime : Runtime := {})
     (userAdmission? : Option ManagedUserAdmission := none) : IO (Except String ManagedMachine) := do
+  match ← replayManagedResume mc machineId requestKey ttl with
+  | .error e => return .error e
+  | .ok (some current) => return .ok current
+  | .ok none => pure ()
   let .ok () := validateBootstrap cfg | return .error "managed_bootstrap_configuration_invalid"
   let some (m, _) ← getManagedMachine? mc machineId | return .error "managed_machine_missing"
   if m.provider != provider.name then return .error "managed_provider_mismatch"

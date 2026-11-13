@@ -250,6 +250,7 @@ structure ProviderObservation where
   spentCents : UInt64 := 0
   spentObserved : Bool := false
   orphaned : Bool := false
+  retainedArchived : Bool := false
   expectedProviderId? : Option String := none
   expectedBootEpoch? : Option UInt64 := none
   deriving Repr, DecidableEq
@@ -995,7 +996,7 @@ def backfillManagedProviderIdentity (st : ManagedComputeStore) (machineId provid
   if providerId.isEmpty then return .error "provider_machine_id_missing"
   withImmediateTx st.db do
     let .ok (some (m, slice)) ← selectMachineTx st.db machineId | return .error "managed_machine_missing"
-    if canonicalizeProvider m.provider != provider || slice.phaseCode == 3 then return .error "managed_provider_mismatch"
+    if canonicalizeProvider m.provider != provider then return .error "managed_provider_mismatch"
     if !m.providerId.isEmpty then
       if m.providerId == providerId then return .ok () else return .error "managed_provider_identity_conflict"
     upsertMachineTx st.db { m with providerId } slice
@@ -1466,8 +1467,10 @@ def observeProviderPayload (provider machineId : String) (httpStatus : Nat) (pay
   let prov := canonicalizeProvider provider
   if !isKnownProvider prov then
     .error "unknown_provider"
-  else if httpStatus == 404 || httpStatus == 410 then
+  else if httpStatus == 404 || (prov != "boat" && httpStatus == 410) then
     .ok { provider := prov, machineId, observedStatus := "destroyed", orphaned := true }
+  else if httpStatus < 200 || httpStatus ≥ 300 then
+    .error "provider_observation_failed"
   else
     let rawState :=
       ((payload.fieldStr? "state").orElse (fun _ => payload.fieldStr? "status")).getD ""
@@ -1481,15 +1484,36 @@ def observeProviderPayload (provider machineId : String) (httpStatus : Nat) (pay
           rawState == "exited" || rawState == "stopped_in_place" || rawState == "disconnected" ||
           (prov == "boat" && (rawState == "archived" || rawState == "archiving" || rawState == "error")) then
         ("stopped", false)
-      else if rawState == "destroyed" || rawState == "deleted" || rawState == "terminated" ||
-          rawState == "missing" || rawState == "reaped" then
+      else if prov != "boat" && (rawState == "destroyed" || rawState == "deleted" || rawState == "terminated" ||
+          rawState == "missing" || rawState == "reaped") then
         ("destroyed", true)
       else
         ("provisioning", false)
     .ok {
       provider := prov, machineId, observedStatus := normStatus, spentCents,
-      spentObserved := (payload.fieldUInt64? "spent_cents").isSome, orphaned
+      spentObserved := (payload.fieldUInt64? "spent_cents").isSome, orphaned,
+      retainedArchived := prov == "boat" && rawState == "archived"
     }
+
+private def repairProviderStopped (st : ManagedComputeStore) (obs : ProviderObservation) :
+    IO (Except String (List VmEffect)) :=
+  withImmediateTx st.db do
+    let .ok (some (m, slice)) ← selectMachineTx st.db obs.machineId
+      | return .error "managed_machine_missing"
+    if canonicalizeProvider m.provider != canonicalizeProvider obs.provider ||
+        obs.observedStatus != "stopped" || obs.orphaned ||
+        (slice.phaseCode == 3 && (m.provider != "boat" || !obs.retainedArchived)) ||
+        obs.expectedProviderId? != some m.providerId || m.providerId.isEmpty then
+      return .error "stale_provider_identity"
+    if obs.expectedBootEpoch? != some slice.nodeBootEpoch then return .error "stale_boot_epoch"
+    let next := observeVmRetainedArchive slice true slice.nodeBootEpoch
+    if next == slice then return .error "vm_observation_rejected"
+    let .ok _ ← execParamQueryUnlocked st.db
+        "DELETE FROM managed_node_tokens WHERE machine_id=?1;" #[m.id]
+      | return .error "managed_archive_token_revoke_failed"
+    let .ok () ← upsertMachineTx st.db { m with lastPollSec := 0 } next
+      | return .error "managed_archive_repair_failed"
+    return .ok [.persistVmPhase next.phaseCode next.activeComputeEligible next.nodeBootEpoch]
 
 /-- Apply one pure observation. Orphans and ledger closure happen only when `stepVmSlice` admits
     `destroy` and emits `closeCostLedger`. -/
@@ -1499,12 +1523,17 @@ def applyProviderObservation (st : ManagedComputeStore) (obs : ProviderObservati
   if !isKnownProvider prov then
     return .error "unknown_provider"
   match ← execParamQuery st.db
-      "SELECT node_boot_epoch,phase_code FROM managed_machines WHERE id=?1 AND provider=?2;" #[obs.machineId, prov] with
+      "SELECT node_boot_epoch,phase_code,provider_id FROM managed_machines WHERE id=?1 AND provider=?2;" #[obs.machineId, prov] with
   | .error e => return .error e
   | .ok rows =>
     if rows.size ≤ 1 then return .error "managed_machine_missing"
     let boot := obs.expectedBootEpoch?.getD (cellU64 rows[1]! 0)
     let phase := cellU8 rows[1]! 1
+    if let some expected := obs.expectedProviderId? then
+      if expected != cell rows[1]! 2 then return .error "stale_provider_identity"
+    if boot != cellU64 rows[1]! 0 then return .error "stale_boot_epoch"
+    if obs.observedStatus == "stopped" && (phase == 0 || (obs.retainedArchived && phase == 3)) then
+      return ← repairProviderStopped st obs
     if (obs.orphaned && phase == 3) || (obs.observedStatus == "stopped" && phase == 2) then
       return .ok []
     if obs.orphaned then

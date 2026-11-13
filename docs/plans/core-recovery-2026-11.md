@@ -154,6 +154,81 @@ counterpart.
   file upload PUT (`f61f816e0`). Opening a mission no longer rewrites `updated_at`
   (`0ff162c2b`); verify any remaining legacy epoch-string data separately.
 
+### Recovery handoff (2026-11-13, OpenCode session)
+
+Operator priority: shared REST/MCP backend settings, build survival between turns, event cursors,
+REST snapshots/auto-managed creation, then queue delete/resume content/workspace jobs. Operator
+sessions act for Thomas as admin; mission authority stays lineage-only. Dev deploy only.
+
+- PR https://github.com/Th0rgal/orb/pull/1717 opened; branch `recovery/managed-provider`
+  rebased onto `bf3c7b527`. Commits `a0ee67bf4` (settings + event cursors), `07f91d130` (Boat archive
+  recovery). Not merged/deployed. Full CI-parity build and Core self-test passed BEFORE rebase;
+  rerun after rebase and await green GitHub checks before merging. `turbo-lean --json audit-spec
+  lean/Orb/Spec.lean` exited 0. OpenSSL headers missing on node: extracted libssl-dev under
+  `/tmp/opencode/boat-recovery`, build with CPATH pointing to its usr/include and
+  usr/include/x86_64-linux-gnu, LIBRARY_PATH to usr/lib/x86_64-linux-gnu. Run self-test without
+  LIBRARY_PATH (env -u LIBRARY_PATH), since runtime skill Library uses that same variable name.
+  Build/self-test logs and gate script under `/tmp/opencode/boat-recovery`. Initial settings
+  test mismatch fixed (self-edit intentionally increments revision; compare null-clear fields).
+  Post-rebase CI-parity build passed (299 jobs), and full self-test passed (11 spec gates,
+  10 harness contracts, 101 host tests). Log: /tmp/opencode/boat-recovery/post-rebase-selftest.log.
+  GitHub Core Test, Docker, harnesses, browsers, mobile and desktop passed; kernel-abi pending.
+  Orb unit failed because effort.test.ts scanned the old Control definition. Updated it to scan
+  shared MissionSettings and grouped Lean match arms. No node/npm/pnpm installed locally, so
+  focused Vitest could not run; await CI for this test-only correction before merge.
+  Current pushed head f27fdaed3: Orb unit now passes, Core Test/kernel-abi still pending at
+  last check. Independent source review found three gaps; UNCOMMITTED fixes/tests now in
+  Control, Managed, ManagedProvisioning, ManagedResumeTests, ManagedTtlTests,
+  RemoteFleetAndRelay: replay completed/pending resume intents before provider calls; normalize
+  confirmed stopped phase-zero machines; include all-destroyed Boat fleet in maintenance even
+  when disabled, remembering confirmed-missing destroyed records to avoid repeated scans.
+  Follow-up fixes now pass CI-parity build (299 jobs) and full Core self-test
+  (11 spec gates, 10 harness contracts, 101 host tests); log reviewfix-selftest.log under
+  /tmp/opencode/boat-recovery. Fixed missing sandboxName fields in the added test fixture.
+  Corrections pushed as 4c8744516. Master advanced to 3ff631a15, causing an overlapping
+  MCP cursor conflict with #1719. Merge retains cursor semantics plus trace filtering and payload
+  limits. CI-parity build (299 jobs) and full self-test (11/10/101) passed again after resolution.
+  Merge head was 184595520. New review identified provider-stopped failed/error/offline states:
+  normalize accepted stopped states before phase-zero cleanup and preserve failed/reaped/offline
+  in TTL's state allowlist (otherwise they became unknown and triggered deletion). Added provider
+  matrix regressions, reproduced the unintended deletion, then passed CI-parity 299-job build and
+  full self-test (11/10/101) with the correction. Await exact new-head CI before merge.
+  Background-build survival exploration found a wider ownership boundary: PrivdMain around862
+  also stops completed scopes and Runner cancel around2071 ignores terminal jobs. Safe fix needs
+  reparent-safe process ownership/supervision across both paths, not just skipping normal cleanup.
+  No node code edited yet.
+  Sections below describe the original handoff; implemented items are now in these commits.
+- Uncommitted `MissionSettings.lean` shares validation and persistence between REST settings and
+  MCP. Actual backend changes clear `session_id`/`resumable`; model-only and same-backend changes
+  retain them. MCP mutations require trusted operator identity or owner/project-matched lineage.
+  `MissionSettingsTests.lean` exercises both entry points, invalid effort, placement revisions,
+  null clears and authority denial. Registered in `SelfTest.lean`. NOT compiled yet.
+- Prior-session pagination edits in `McpGateway.lean` and `MissionEventsToolTests.lean` retained;
+  they implement newest-page default, since/before cursors and view filtering. NOT compiled yet.
+- Build gate: another mission's `lake build orb-core orb-core-test orb-spec-runner --
+  -DwarningAsError=true` was running on this host (PID 400688, checkout `68e2a387.../orb`).
+  Wait for it; do not terminate it. Run that same CI-parity command in `lean/OrbCore`, then run
+  `lean/OrbCore/.lake/build/bin/orb-core-test` from repo root before committing.
+- Operator escalation, next after settings validation: Core UUID
+  `a6fed7e9-950b-40e8-ad83-4c599ceee4b4`, Boat `bx_xcew9qru`, was falsely destroyed while
+  Boat retained an archived disk. `ManagedProviderBoat.boatDestroy` returns `boatStop` after
+  non-404 DELETE errors; remove that false-success fallback. Inventory reconciliation skips
+  destroyed rows (`RemoteFleetAndRelay` around 1021) and only applies archived observations to
+  ready rows; resume refresh around 1148 excludes destroyed bound rows. Add provider-confirmed
+  archived-to-stopped correction without reviving old credentials, and refresh before resume.
+  TTL phase-0 archived branch also marks destroyed without delete (`ManagedTtl` around 224–235).
+  Resume pipeline already uses `effectiveProviderId` through intent.oldProviderId; DB column 17
+  is zero-based index 16 (index 17 is created_at_sec). Regression must assert fork uses
+  `bx_xcew9qru`, never Core UUID. Old `mm5xvnw6ha`, `mm3dagt4ua`, `mmp2t4xd94` truly return
+  Boat 404 and must stay destroyed. Replace provider test blessing DELETE409→STOP success,
+  add destroyed/archived recovery and 404 tests to ManagedResumeTests/ManagedTtlTests, update
+  lifecycle spec which currently documents the bad fallback. No code changed for this yet.
+- Read-only build-lifetime investigation: `OrbNode/Runner.lean` normal harness-exit path around
+  lines 1906–1916 calls `terminateVerifiedPgrp` and `teardownJobResourcesAsync`, killing background
+  builds (143/137). Core messages queue rather than cancel. Fix must retain tracked mission-owned
+  processes/scopes across normal turn completion while keeping explicit cancellation/deadlines
+  effective; do not simply remove cleanup and leak resources. Node regression needed.
+
 ## 5. Main checkout clean-up
 
 The uncommitted work that sat in the main checkout is saved on the branch

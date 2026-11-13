@@ -437,9 +437,86 @@ private def warningTests (root : String) : IO Unit := do
     closeManagedComputeStore mc
     closeCoreStore core
 
-/-- Self-test entry point. All clocks, provider observations, usage and failures
-    are injected; only isolated SQLite fixtures under the supplied root are used. -/
+private def provisioningArchiveTests (root : String) : IO Unit := do
+  let mc ← requireOk (← openManagedComputeStore s!"{root}/ttl-provisioning-archive.db") "open archive"
+  let core ← requireOk (← openCoreStore s!"{root}/ttl-provisioning-archive-core") "open archive core"
+  try
+    for id in #["archived-provisioning", "stopped-provisioning", "missing-provisioning"] do
+      discard <| requireOk (← provisionManagedMachine mc fleet {
+        id, sandboxName := s!"orb-managed-{id}", ttlMinutes := 5, deletableAtSec := 1000
+      } 1000) "reserve provisioning"
+      discard <| requireOk (← bindManagedProviderId mc id ("bx-" ++ id) 1) "bind provisioning"
+      discard <| requireOk (← putEnrollmentToken mc id "old-enrollment") "enrollment fixture"
+    let .ok stoppedObservation := observeProviderPayload "boat" "stopped-provisioning" 200
+        (.obj #[("state", .str "stopped")])
+      | throw (IO.userError "stopped observation invalid")
+    check (!(← applyProviderObservation mc { stoppedObservation with
+        expectedProviderId? := some "wrong-provider", expectedBootEpoch? := some 1 } 1299 0 1).isOk &&
+      !(← applyProviderObservation mc { stoppedObservation with
+        expectedProviderId? := some "bx-stopped-provisioning", expectedBootEpoch? := some 2 } 1299 0 1).isOk)
+      "phase-zero stopped normalization requires matching provider and boot fences"
+    let destroys ← IO.mkRef (#[] : Array String)
+    let template := OrbCore.ManagedProvisioningTests.mockPolicyProvider mc "boat"
+    let provider := { template with
+      isStopped := fun state => state == "archived" || state == "stopped"
+      get := fun id => if id == "bx-missing-provisioning" then
+        pure (.error { code := "provider_http_404", status := 404 })
+        else pure (.ok { providerId := id, state := if id == "bx-stopped-provisioning" then "stopped" else "archived" })
+      destroy := fun id => do destroys.modify (·.push id); return .ok ()
+    }
+    let result ← requireOk (← tick mc core fleet (fun _ => pure (.ok provider)) 1300) "archive expiry"
+    let saved ← machine mc "archived-provisioning"
+    check (saved.status == "stopped" && saved.providerId == "bx-archived-provisioning" &&
+      saved.nodeBootEpoch == 1 && saved.expiryCleanupState == "completed" &&
+      (← machine mc "missing-provisioning").status == "destroyed" && (← destroys.get).isEmpty &&
+      ((result.fieldArr? "pending").getD #[]).isEmpty)
+      "phase-zero archived disk stays stopped; genuine 404 closes without delete"
+    check (!(← enrollManagedNode mc saved.id "old-enrollment" (some 1)).isOk)
+      "archive correction revokes provisioning credentials"
+    let stopped ← machine mc "stopped-provisioning"
+    let some (_, stoppedSlice) ← getManagedMachine? mc stopped.id
+      | throw (IO.userError "stopped provisioning missing")
+    check (stopped.status == "stopped" && stopped.expiryCleanupState == "completed" &&
+      stopped.providerId == "bx-stopped-provisioning" && stopped.nodeBootEpoch == 1 &&
+      stoppedSlice.phaseCode == 2 && stoppedSlice.activeComputeEligible == 0 &&
+      !(← enrollManagedNode mc stopped.id "old-enrollment" (some 1)).isOk)
+      "phase-zero stopped payload normalizes without deletion or credential revival"
+    for (providerName, states) in #[("leanci", #["stopped", "failed", "error", "reaped"]),
+        ("colab", #["stopped", "failed", "error", "offline"]),
+        ("boat", #["error", "archiving"])] do
+      for state in states do
+        let id := providerName ++ "-" ++ state
+        discard <| requireOk (← provisionManagedMachine mc fleet {
+          id, sandboxName := s!"orb-managed-{id}", ttlMinutes := 5, deletableAtSec := 1000
+        } 1000) "reserve provider-stopped fixture"
+        discard <| requireOk (← bindManagedProviderId mc id ("remote-" ++ id) 1) "bind provider-stopped fixture"
+        discard <| sql mc "UPDATE managed_machines SET provider=?2 WHERE id=?1;" #[id, providerName]
+        discard <| requireOk (← putEnrollmentToken mc id "old-enrollment") "provider-stopped enrollment"
+        let stoppedProvider := { provider with
+          name := providerName
+          isStopped := fun s => states.contains s
+          get := fun remoteId => pure (.ok { providerId := remoteId, state })
+        }
+        let cleaned ← requireOk (← tick mc core fleet (fun _ => pure (.ok stoppedProvider)) 1300)
+          "provider-stopped expiry"
+        let normalized ← machine mc id
+        let some (_, slice) ← getManagedMachine? mc id
+          | throw (IO.userError "provider-stopped fixture missing")
+        check (normalized.status == "stopped" && normalized.expiryCleanupState == "completed" &&
+          slice.phaseCode == 2 && slice.activeComputeEligible == 0 &&
+          !(← enrollManagedNode mc id "old-enrollment" (some 1)).isOk &&
+          ((cleaned.fieldArr? "pending").getD #[]).isEmpty && (← destroys.get).isEmpty)
+          s!"{providerName} {state} releases phase-zero capacity: status={normalized.status} cleanup={normalized.expiryCleanupState} phase={slice.phaseCode} active={slice.activeComputeEligible} result={renderCompact cleaned} destroys={repr (← destroys.get)}"
+    let repeated ← requireOk (← tick mc core fleet (fun _ => pure (.ok provider)) 1301) "repeat stopped expiry"
+    check (((repeated.fieldArr? "reaped").getD #[]).isEmpty &&
+      ((repeated.fieldArr? "pending").getD #[]).isEmpty && (← destroys.get).isEmpty)
+      "completed stopped cleanup is not repeated"
+  finally
+    closeManagedComputeStore mc
+    closeCoreStore core
+
 def run (root : String) : IO Unit := do
+  provisioningArchiveTests root
   warningTests root
   extensionTests root
   fencingTests root

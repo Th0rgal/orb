@@ -227,8 +227,9 @@ provider contract tests check both registry lookup and adapter requests.
   bootstrap and its first authenticated relay poll must complete within 360 s.
 - Resume uses Boat fork, not `/start`; the returned provider identity may change
   without changing Core's managed identity. Core must fence the new boot epoch.
-- Destroy is idempotent on 404, with stop fallback. `stop_failed` retries are
-  bounded (3, 6, 9, 12 seconds); other failures propagate. Extend PATCHes
+- Destroy succeeds only on DELETE 2xx or 404. Every other DELETE failure propagates;
+  STOP is never a fallback or evidence of destruction. Explicit stop's `stop_failed`
+  retries are bounded (3, 6, 9, 12 seconds). Extend PATCHes
   `ttlSeconds` at the provider, not just in SQLite.
 - Named snapshots use `/saved-snapshots` and encoded names. Saving is distinct
   from observing `ready`. Errors omit upstream bodies and credentials.
@@ -336,10 +337,20 @@ At startup and every 120 seconds, Core lists Boat inventory and reconciles only
 registered machines. Pre-cutover empty `provider_id` values are backfilled by
 exact sandbox name (`orb-managed-<Core id>` in prod). Ambiguous names are never
 guessed. `archived`/`archiving` observations move a previously ready record to
-stopped; provider-ready observations never manufacture relay readiness or erase
-an unreported cost. An unbound timed-out provisioning reservation can close only
-against a complete inventory with no matching sandbox. A legacy resume also runs
-this repair on demand before selecting its archived provider source.
+stopped. A confirmed Boat `archived` observation also corrects falsely destroyed
+or still-provisioning rows to stopped, under matching provider-ID and boot fences,
+revoking enrollment/node credentials and clearing the old poll without enabling
+compute or advancing the boot. This is an observation correction, not admission of
+a destroyed-to-resume command; ordinary resume still requires the stopped phase.
+Provider-ready observations never manufacture relay readiness or erase an
+unreported cost. An unbound timed-out provisioning reservation can close only
+against a complete inventory with no matching sandbox. Every Boat resume observes
+the bound provider ID (including locally destroyed rows); unbound legacy rows first
+repair identity through inventory. A genuine 404 remains destroyed and never forks.
+The recovery regression uses Core `a6fed7e9-950b-40e8-ad83-4c599ceee4b4` and Boat
+`bx_xcew9qru`: fork must use the Boat ID while retaining Core/node identity.
+`mm5xvnw6ha`, `mm3dagt4ua`, and `mmp2t4xd94` are genuine missing-source regressions.
+TTL likewise retains a phase-zero archived disk as stopped, never falsely destroyed.
 
 A resume reserves capacity/cost and revokes the old credential before provider
 I/O. A durable intent holds the source identity and successor boot. Only the

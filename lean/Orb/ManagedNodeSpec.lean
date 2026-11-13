@@ -39,6 +39,23 @@ open Orb.Kernel
 open Orb.Spec
 open Orb.ManagedNode
 
+theorem retainedArchive_unobserved (s : VmSliceState) (boot : UInt64) :
+    observeVmRetainedArchive s false boot = s := by
+  simp [observeVmRetainedArchive]
+
+theorem retainedArchive_preservesBoot (s : VmSliceState) (confirmed : Bool) (boot : UInt64) :
+    (observeVmRetainedArchive s confirmed boot).nodeBootEpoch = s.nodeBootEpoch := by
+  simp only [observeVmRetainedArchive]
+  split <;> rfl
+
+theorem retainedArchive_neverEnablesCompute (s : VmSliceState) (confirmed : Bool) (boot : UInt64)
+    (h : s.activeComputeEligible = 0) :
+    (observeVmRetainedArchive s confirmed boot).activeComputeEligible = 0 := by
+  simp only [observeVmRetainedArchive]
+  split
+  · rfl
+  · exact h
+
 private theorem u8_eq_of_toNat (a : UInt8) (n : Nat) (hn : n < 256) (h : a.toNat = n) :
     a = UInt8.ofNat n := by
   apply UInt8.eq_of_toBitVec_eq

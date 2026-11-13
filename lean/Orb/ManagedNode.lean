@@ -150,6 +150,13 @@ def stepVmSlice (s : VmSliceState) (ev : VmSliceEvent) :
   else
     (s, [])
 
+def observeVmRetainedArchive (s : VmSliceState) (confirmedArchive : Bool)
+    (presentedBootEpoch : UInt64) : VmSliceState :=
+  if confirmedArchive && s.nodeBootEpoch != 0 && presentedBootEpoch == s.nodeBootEpoch &&
+      (s.phaseCode == 0 || s.phaseCode == 3) then
+    { s with phaseCode := 2, activeComputeEligible := 0 }
+  else s
+
 def foldVmSlice (s : VmSliceState) : List VmSliceEvent → VmSliceState
   | [] => s
   | ev :: rest => foldVmSlice (stepVmSlice s ev).1 rest

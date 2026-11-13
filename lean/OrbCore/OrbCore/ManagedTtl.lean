@@ -47,7 +47,7 @@ def extendWorker (mc : ManagedComputeStore) (fleet : ManagedFleetState) (provide
   return .ok updated
 
 private def safeState (state : String) : String :=
-  if #["ready","running","idle","busy","starting","provisioning","archived","archiving","stopped","deleted","destroyed","error"].contains state
+  if #["ready","running","idle","busy","starting","provisioning","archived","archiving","stopped","deleted","destroyed","error","failed","reaped","offline"].contains state
     then state else "unknown"
 
 /-- Read-only operator probe: Core's row beside the provider's own view. It never
@@ -207,15 +207,21 @@ def tick (mc : ManagedComputeStore) (store : CoreStore) (defaults : ManagedFleet
       continue
     let observed ← provider.get claimed.providerId
     let state ← match observed with
-      | .ok remote => pure (safeState remote.state)
+      | .ok remote =>
+        if remote.providerId != claimed.providerId then do pending := pending.push (.str m.id); continue
+        pure (safeState remote.state)
       | .error e =>
-        if e.status == 404 || e.status == 410 then pure "deleted"
+        if e.status == 404 || (claimed.provider != "boat" && e.status == 410) then pure "deleted"
         else do pending := pending.push (.str m.id); continue
     let usage ← match ← provider.usageCents claimed.providerId with
       | .ok amount => pure amount
       | .error _ => pure none
     discard <| recordManagedExpiry mc claimed state false usage
-    if !provider.isStopped state && state != "deleted" && state != "destroyed" then
+    let confirmedMissing := match observed with
+      | .error e => e.status == 404 || (claimed.provider != "boat" && e.status == 410)
+      | .ok _ => false
+    if (claimed.provider == "boat" && !confirmedMissing && (state == "deleted" || state == "destroyed")) ||
+        (!provider.isStopped state && state != "deleted" && state != "destroyed") then
       if !(← provider.destroy claimed.providerId).isOk then
         pending := pending.push (.str m.id)
         continue
@@ -229,10 +235,11 @@ def tick (mc : ManagedComputeStore) (store : CoreStore) (defaults : ManagedFleet
           presentedBootEpoch := claimed.nodeBootEpoch, nowEpoch
         } (some claimed.providerId) | do pending := pending.push (.str m.id); continue
       else if vm.phaseCode == 0 then
-        let .ok _ ← applyVmLifecycle mc m.id {
-          opCode := Orb.ManagedNode.VmOp.encode .destroy, ownerLive := 0, idleElapsed := 1,
-          presentedBootEpoch := claimed.nodeBootEpoch, nowEpoch
-        } (some claimed.providerId) | do pending := pending.push (.str m.id); continue
+        let .ok observation := observeProviderPayload claimed.provider m.id 200 (.obj #[("state", .str "stopped")])
+          | do pending := pending.push (.str m.id); continue
+        let .ok _ ← applyProviderObservation mc { observation with
+            expectedProviderId? := some claimed.providerId, expectedBootEpoch? := some claimed.nodeBootEpoch
+          } nowEpoch 0 1 | do pending := pending.push (.str m.id); continue
     else
       let .ok _ ← applyVmLifecycle mc m.id {
         opCode := Orb.ManagedNode.VmOp.encode .destroy, ownerLive := 0, idleElapsed := 1,

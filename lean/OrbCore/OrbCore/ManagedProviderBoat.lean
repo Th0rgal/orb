@@ -77,12 +77,12 @@ private def boatStop (transport : Transport) (sleep : UInt32 → IO Unit) (id : 
       if e.code != "stop_failed" || attempt == 4 then return .error e
   return .error { code := "provider_stop_retry_exhausted" }
 
-private def boatDestroy (transport : Transport) (sleep : UInt32 → IO Unit) (id : String) : IO (Result Unit) := do
+private def boatDestroy (transport : Transport) (id : String) : IO (Result Unit) := do
   match ← callUnit transport { method := "DELETE", path := sandboxPath id } with
   | .ok _ => return .ok ()
   | .error e =>
     if e.status == 404 then return .ok ()
-    return ← boatStop transport sleep id
+    return .error e
 
 private def boatSnapshotList (transport : Transport) : IO (Result (Array Snapshot)) := do
   match ← call transport { method := "GET", path := "/saved-snapshots" } with
@@ -133,7 +133,7 @@ def boat (transport : Transport) (sleep : UInt32 → IO Unit := fun ms => do IO.
     | .error e => return .error e
     | .ok body => return machineFrom body
   list := boatList transport
-  destroy := boatDestroy transport sleep
+  destroy := boatDestroy transport
   stop := boatStop transport sleep
   resume := fun id spec => boatCreate transport (sandboxPath id ++ "/fork") { spec with fromSnapshot := "" }
   fork := fun id spec => boatCreate transport (sandboxPath id ++ "/fork") { spec with fromSnapshot := "" }

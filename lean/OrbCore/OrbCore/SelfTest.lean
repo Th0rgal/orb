@@ -20,6 +20,7 @@ import OrbCore.ManagedResumeTests
 import OrbCore.WakeupRestartTests
 import OrbCore.TurnOutcomeTests
 import OrbCore.ManagedAccessTests
+import OrbCore.MissionSettingsTests
 import OrbCore.ManagedTtlTests
 import OrbCore.ManagedHarvestTests
 import OrbCore.AutoPlacementTests
@@ -27,6 +28,7 @@ import OrbCore.ManagedReuseTests
 import OrbCore.ManagedSnapshotLifecycleTests
 import OrbCore.NodeLivenessTests
 import OrbCore.ComputeRollupTests
+import OrbCore.MissionEventsToolTests
 import OrbCore.ManagedSnapshotCatalogTests
 import OrbCore.ProviderContractTests
 import OrbCore.ProxyRoutingTests
@@ -6617,6 +6619,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     OrbCore.DevSpendingTests.run tmpRoot
     OrbCore.DevOperatorTests.run tmpRoot
     OrbCore.ManagedAccessTests.run tmpRoot
+    OrbCore.MissionSettingsTests.run tmpRoot
     OrbCore.ManagedTtlTests.run tmpRoot
     OrbCore.ManagedHarvestTests.run tmpRoot
     OrbCore.AutoPlacementTests.run tmpRoot
@@ -6624,6 +6627,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     OrbCore.ManagedSnapshotLifecycleTests.run tmpRoot
     OrbCore.NodeLivenessTests.run tmpRoot
     OrbCore.ComputeRollupTests.run tmpRoot
+    OrbCore.MissionEventsToolTests.run tmpRoot
     OrbCore.ManagedSnapshotCatalogTests.run tmpRoot
     OrbCore.ManagedProviderSealingTests.run tmpRoot
     OrbCore.ManagedProviderAvailabilityTests.run tmpRoot
