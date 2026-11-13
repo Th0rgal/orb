@@ -1161,8 +1161,9 @@ structure CoreHttpResponse where
   extraHdrs   : Array (String × String) := #[]
   body        : ByteArray
   /-- When set, `body` is ignored and the connection writer relays the body as
-      `Transfer-Encoding: chunked` pieces handed to the given emitter. -/
-  bodyStream? : Option ((ByteArray → IO Bool) → IO Unit) := none
+      `Transfer-Encoding: chunked` pieces handed to the given emitter, returning
+      whether the upstream body completed normally. -/
+  bodyStream? : Option ((ByteArray → IO Bool) → IO Bool) := none
   deriving Inhabited
 
 private def reasonPhrase : Nat → String
@@ -1600,7 +1601,10 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   match out.stream? with
   | some pump =>
     return { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := diagHdrs,
-             body := ByteArray.empty, bodyStream? := some fun emit => do accountBody (← pump emit) }
+             body := ByteArray.empty, bodyStream? := some fun emit => do
+               let (copy, complete) ← pump emit
+               accountBody copy
+               return complete }
   | none =>
     accountBody out.body
     return { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := diagHdrs, body := out.body }
@@ -6722,15 +6726,16 @@ def handleClientConn (st : CoreAppState) (cfd : Fd) (allowKeepAlive : Bool := fa
         | some pump =>
           -- A relayed stream ends the connection: its length is unknown up front and a
           -- client that stopped reading must not hold a keep-alive slot.
-          if ← writeCoreHttpResponse responseWrite httpResp false then
-            let alive ← IO.mkRef true
-            pump fun piece => do
-              if !(← alive.get) then return false
-              let ok ← responseWrite (encodeHttpChunk piece)
-              alive.set ok
-              return ok
-            if ← alive.get then
-              discard <| responseWrite (encodeHttpChunk ByteArray.empty)
+          let wroteHead ← writeCoreHttpResponse responseWrite httpResp false
+          let alive ← IO.mkRef wroteHead
+          let complete ← pump fun piece => do
+            if !(← alive.get) then return false
+            if piece.isEmpty then return true
+            let ok ← responseWrite (encodeHttpChunk piece)
+            alive.set ok
+            return ok
+          if complete && (← alive.get) then
+            discard <| responseWrite (encodeHttpChunk ByteArray.empty)
           keepGoing := false
       | .error rawUpgrade101 =>
         let wrote := (← writeAll cfd rawUpgrade101 false).isOk
