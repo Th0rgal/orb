@@ -1,5 +1,41 @@
 # Core recovery plan (November 2026)
 
+## Handoff 2026-11-13
+
+All remaining work transfers to the new orchestrator; this recovery mission is stopping.
+PR #1717 is merged as `857930af5a514337804338930b019ebdf6aae795` by the operator,
+who waived the CI wait. Latest local CI-parity build passed 299 jobs and full Core self-test
+passed 11 spec gates, 10 harness contracts and 101 host tests. No deployment was performed here.
+Earlier sections below include historical incident descriptions, not a fresh open-defect inventory.
+
+- **Node background-build ownership — investigated, not implemented.**
+  `lean/OrbNode/OrbNode/Runner.lean` normal-turn cleanup kills process groups/scopes;
+  `lean/OrbBin/OrbBin/PrivdMain.lean` independently stops completed units, while Runner's
+  cancellation path ignores terminal jobs. Implement durable, reparent-safe mission ownership
+  across all three paths, preserving explicit cancellation/deadlines; do not merely skip cleanup.
+- **Queue FUP-01/02 — open, no fix in this mission.** `lean/OrbCore/OrbCore/Control.lean`,
+  `QueueCont.lean` and `RemoteDispatch.lean`: restore item and mission-scoped collection DELETE
+  through fenced cancellation; send-now must perform admitted live delivery or durable
+  cancel-and-wake, not acknowledge reordering as delivery. Evidence: FUP-01/02 in
+  `rust-lean-parity-audit.md`; independent restart-safe followup pumping (RUN-10) remains separate.
+- **Secret-read audit — open, source-confirmed, not implemented.**
+  `lean/OrbCore/OrbCore/SecretAndApproval.lean` and `McpGateway.lean`: append serialized,
+  non-secret requester/key/project/via metadata before delivery, with explicit audit-write failure
+  behavior; coordinate requester identity (MCP-13). See the parity audit's secret-read evidence.
+- **Workspace-job stubs (MCP-04) — open, no execution implementation.**
+  `lean/OrbCore/OrbCore/McpGateway.lean` start/get/cancel workspace-job branches must use durable
+  execution, logs, deadlines and cancellation, or report unsupported rather than fabricated completion.
+- **Managed REST parity/live recovery — needs fresh verification.** `Control.lean`,
+  `RemoteFleetAndRelay.lean`, `AutoPlacement.lean`, `ManagedSnapshotCatalog.lean`: verify REST
+  snapshots and auto-managed creation against MCP, then operator-owned live archive resume and
+  provider smoke tests. #1717 fixed settings transitions, event cursors and Boat/TTL recovery;
+  merged code is not proof of deployed recovery. Preserve the existing resume content/title fix.
+- **Other unresolved inventory — not certified closed by this mission.** Receipt truthfulness,
+  health/diagnostics detail, legacy timestamps, nudge leakage, per-model pricing/caps, cost-history
+  sampling, TLS/retry behavior and failing maintenance units remain in sections 2/4 below and
+  `reliability-roadmap-2026-11.md`. Reconcile fresh master with `rust-lean-parity-audit.md` before
+  assigning work; audit findings and prior assignments are not implementation or live evidence.
+
 Prod switched from the Rust server to the Lean `orb-core` on 2026-11-12 at 07:14 UTC. This plan lists
 what that cutover left broken or missing, in priority order. Work top to bottom; each numbered item is
 one PR-sized change merged to `master` when its checks pass.
