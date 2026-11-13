@@ -21,6 +21,7 @@ paths = [
   "scripts/test_ci_plan.py",
   "lean/lean-toolchain",
   "lean/turbo-lean-revision",
+  "lean/turbo-lean.toml",
   "lean/lakefile.lean",
   "flake.nix",
   "flake.lock",
