@@ -6257,7 +6257,6 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   -- Wire compatibility regressions run before the broader integration suite.
   try
     OrbCore.ProviderContractTests.run
-  try
     OrbCore.ProxyRoutingTests.run
   catch e =>
     IO.eprintln s!"[orb-core-test] FAIL: {e}"
