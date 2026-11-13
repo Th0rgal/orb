@@ -673,6 +673,20 @@ In order, the script:
   checking that the recorded PID still is one. Output goes to
   `/var/log/orb-node.log`, which only root can create.
 
+A bootstrap that fails says where. Core logs one `[managed-bootstrap]` line per
+stage (provider ready, files delivered, script finished) with the machine ID and
+elapsed time, and the failure is one of:
+`managed_bootstrap_timeout_provider_not_ready` (the provider never reported the
+machine ready; the last state it gave is logged),
+`managed_bootstrap_timeout_during_delivery`, `managed_bootstrap_launch_failed`
+(the script exited with an error; its output is logged), or
+`managed_bootstrap_timeout_no_relay_poll`. In the last case Core asks the guest,
+before destroying it, for PID 1, the unit state, the node process count, whether
+it can reach Core's `/api/health`, and the tail of the node's log. Guest text is
+logged with the enrolment token removed, control characters dropped, bounded to
+4000 characters, and one prefixed line per guest line. None of it goes into the
+action receipt.
+
 Starting the node is not readiness: only the first authenticated relay poll,
 inside the provider's deadline (360 s Boat, 480 s lean.ci, 900 s Colab), marks
 the machine ready; otherwise Core destroys it.

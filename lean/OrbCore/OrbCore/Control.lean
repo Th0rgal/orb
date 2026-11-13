@@ -4821,11 +4821,24 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let userAdmission? : Option ManagedUserAdmission := caller.dailySpendCapCents?.map fun cap => {
         capCents := cap, inferenceCents := infS, computeCents := cmpS
       }
+      -- Name the real refusal: a disabled fleet or provider is not a spend cap.
+      if !live.enabled then
+        return .ok (mkJson 409 "{\"error\":\"managed_fleet_disabled\",\"message\":\"Managed machines are turned off for this Core.\"}")
+      let providerEnabled ← match ← ManagedProviderSettings.isEnabled mst prov with
+        | .ok value => pure value
+        | .error e => return .ok (mkJson 503 (renderCompact (.obj #[("error", .str e)])))
+      if !providerEnabled then
+        return .ok (mkJson 409 (renderCompact (.obj #[("error", .str "provider_disabled"), ("provider", .str prov)])))
       let denyCode :=
         admitManagedSpawnMultiUser live estCents (infS + cmpS) caller.dailySpendCapCents? ttlMins.toUInt32
+      if denyCode == 2 then
+        return .ok (mkJson 429 "{\"error\":\"daily_spend_cap_exceeded\",\"scope\":\"user\"}")
       if denyCode != 0 then
-        let scopeStr := if denyCode == 2 then "user" else "global"
-        return .ok (mkJson 429 s!"\{\"error\":\"daily_spend_cap_exceeded\",\"scope\":{jsonEscape scopeStr}}")
+        -- The shared gate also refuses a full fleet; only report a cap that is really exceeded.
+        if estCents > live.dailyCapCents || live.spentTodayCents > live.dailyCapCents - estCents then
+          return .ok (mkJson 429 "{\"error\":\"daily_spend_cap_exceeded\",\"scope\":\"global\"}")
+        return .ok (mkJson 429 (renderCompact (.obj #[("error", .str "managed_concurrency_limit_reached"),
+          ("max_concurrent", JVal.uint64 live.maxConcurrent)])))
       let defVmId ← nextUniqueId st "vm" nowEpochSec
       let vmId := (jv.fieldStr? "id").getD defVmId
       let sbName ← newManagedSandboxName ((jv.fieldStr? "name").orElse (fun _ => jv.fieldStr? "sandbox_name") |>.getD "")

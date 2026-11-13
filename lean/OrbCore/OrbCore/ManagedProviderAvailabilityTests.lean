@@ -26,6 +26,17 @@ private def checkNoReservations (mc : ManagedComputeStore) : IO Unit := do
     toggle. Boat's transport is a tripwire, never a network client. Importing the
     mutant suite also checks the two-sided admission proof in this test target. -/
 def run (root : String) : IO Unit := do
+  -- Guest text for Core's log: decoded from any provider's reply shape, token
+  -- removed, control characters dropped, bounded, one prefixed line each.
+  let reply := OrbBin.Json.JVal.obj #[("stdout_b64", .str "cGlkMT1zeXN0ZW1kCg=="), ("output", .str "token tok-secret here\u001b[31m\r\nlast")]
+  let lines := guestLogLines "vm-1" "tok-secret" (guestOutput reply)
+  check (lines == #["[managed-bootstrap] machine=vm-1 guest: pid1=systemd",
+      "[managed-bootstrap] machine=vm-1 guest: token [enrolment-token] here[31m",
+      "[managed-bootstrap] machine=vm-1 guest: last"]) "guest output is decoded, redacted and line-prefixed"
+  let flood := guestLogLines "vm-1" "" (String.ofList (List.replicate 9000 'x'))
+  check (flood.size == 1 && flood.all (·.length < 4100) && (guestLogLines "vm-1" "" "\n\n").isEmpty) "guest output is bounded"
+  check ((guestDiagnosticCommand "https://core.example").splitOn "'https://core.example/api/health'" |>.length |> (· == 2))
+    "diagnostics probe Core's health URL, quoted"
   let path := s!"{root}/provider-availability.db"
   let .ok mc ← openManagedComputeStore path
     | throw (IO.userError "availability store open failed")

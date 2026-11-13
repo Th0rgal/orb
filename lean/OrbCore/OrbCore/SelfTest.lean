@@ -4699,6 +4699,18 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
      admDelBobVmSt != 404 || bobDelBobVmSt != 200 then
     return (← fail s!"managed VM multi-user isolation/prefs/cap failed: alCap={alVmCapSt} bobVm={bobVmAutoSt}:{bobVmAutoBody} admVms={admVmsBody} admDel={admDelBobVmSt} bobDel={bobDelBobVmSt}")
 
+  -- A disabled fleet is reported as such, not as a spend cap.
+  let (fleetOffSt, _, _) ← sendReq "PUT" "/api/managed-machines/settings" adminTok "{\"enabled\":false}"
+  let (offCreateSt, offCreateBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"leanci\",\"name\":\"bob-off\"}"
+  let (fleetOnSt, _, _) ← sendReq "PUT" "/api/managed-machines/settings" adminTok "{\"enabled\":true}"
+  let (provOffSt, _, _) ← sendReq "PATCH" "/api/managed-machines/providers/leanci" adminTok "{\"enabled\":false}"
+  let (provOffCreateSt, provOffCreateBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"leanci\",\"name\":\"bob-off\"}"
+  let (provOnSt, _, _) ← sendReq "PATCH" "/api/managed-machines/providers/leanci" adminTok "{\"enabled\":true}"
+  if fleetOffSt != 200 || fleetOnSt != 200 || provOffSt != 200 || provOnSt != 200 || offCreateSt != 409 ||
+      (offCreateBody.splitOn "managed_fleet_disabled").length != 2 || provOffCreateSt != 409 ||
+      (provOffCreateBody.splitOn "provider_disabled").length != 2 then
+    return (← fail s!"disabled fleet or provider must be named: {offCreateSt}:{offCreateBody} / {provOffCreateSt}:{provOffCreateBody}")
+
   -- REST create without `wait` answers 202 at once with the provisioning machine
   -- and an action to poll; a retry with the same key returns the same machine.
   let (asyncSt, asyncBody, _) ← sendReq "POST" "/api/managed-machines" bobTok
