@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch Orb master for automatic dev deployment
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=1min
+RandomizedDelaySec=15
+Unit=orb-dev-autodeploy.service
+
+[Install]
+WantedBy=timers.target

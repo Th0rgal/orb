@@ -14,25 +14,39 @@ set -euo pipefail
 TREE="${ORB_DEPLOY_TREE:-/var/tmp/orbcore-lean-build}"
 LOG="${ORB_DEPLOY_LOG:-/var/log/orb-deploy.log}"
 
-if [[ "${1:-}" == "--detach" ]]; then
-  shift
+DETACH=0
+if [[ "${1:-}" == "--detach" ]]; then DETACH=1; shift; fi
+if [[ $# -lt 1 || $# -gt 2 || ! "$1" =~ ^(master|[0-9a-f]{7,40})$ ||
+      ( $# -eq 2 && "$2" != "--dev-only" ) ]]; then
+  echo "usage: orb-deploy [--detach] <sha|master> [--dev-only]" >&2
+  exit 64
+fi
+REF="$1"
+DEV_ONLY=0; [[ "${2:-}" == "--dev-only" ]] && DEV_ONLY=1
+
+if [[ $DETACH == 1 ]]; then
   systemctl reset-failed orb-deploy.service 2>/dev/null || true
   exec systemd-run --unit=orb-deploy --collect --quiet --no-block \
     --property=Description="Orb Core deploy $*" "$(readlink -f "$0")" "$@"
 fi
-
-REF="${1:?usage: orb-deploy [--detach] <sha|master> [--dev-only]}"
-DEV_ONLY=0; [[ "${2:-}" == "--dev-only" ]] && DEV_ONLY=1
 
 exec 9>/run/lock/orb-deploy.lock
 flock -n 9 || { echo "another orb-deploy is running" >&2; exit 2; }
 exec > >(tee -a "$LOG") 2>&1
 say() { echo "[$(date -u +%FT%TZ)] $*"; }
 
-healthy() { # port, tries
+healthy() { # port, tries, exact build SHA
   for _ in $(seq 1 "$2"); do
     sleep 2
-    curl -fsS -m 3 "http://127.0.0.1:$1/api/health" >/dev/null 2>&1 && return 0
+    if curl -fsS -m 3 "http://127.0.0.1:$1/api/health" | python3 -c '
+import json, sys
+try:
+    health = json.load(sys.stdin)
+    ok = isinstance(health, dict) and health.get("status") == "ok" and health.get("build") == sys.argv[1]
+except (ValueError, TypeError):
+    ok = False
+sys.exit(0 if ok else 1)
+' "$3"; then return 0; fi
   done
   return 1
 }
@@ -46,7 +60,7 @@ if pgrep -x lake >/dev/null; then say "a lake build is already running on this h
 cd "$TREE"
 git fetch --quiet origin master
 [[ "$REF" == "master" ]] && REF=origin/master
-SHA="$(git rev-parse --short=9 "$REF^{commit}")"
+SHA="$(git rev-parse --verify "$REF^{commit}")"
 say "deploy $SHA (dev${DEV_ONLY:+ only=$DEV_ONLY})"
 git checkout --quiet --force --detach "$SHA"
 git clean -fdq -- lean/OrbCore/OrbCore lean/OrbBin/OrbBin lean/Orb   # stale untracked sources only; build caches are ignored files
@@ -61,7 +75,7 @@ say "binary $(sha256sum "$BIN" | cut -c1-12)"
 set_build sandboxed-sh-dev "$SHA"; systemctl daemon-reload
 install -m 755 "$BIN" /usr/local/bin/orb-core-dev.new && mv /usr/local/bin/orb-core-dev.new /usr/local/bin/orb-core-dev
 systemctl restart sandboxed-sh-dev
-healthy 3002 30 || { say "dev unhealthy; prod untouched"; exit 1; }
+healthy 3002 30 "$SHA" || { say "dev unhealthy; prod untouched"; exit 1; }
 say "dev healthy on $SHA"
 [[ $DEV_ONLY == 1 ]] && { say "done (dev only)"; exit 0; }
 
@@ -71,7 +85,7 @@ cp -p /usr/local/bin/orb-core "$BACKUP"
 set_build sandboxed-sh-prod "$SHA"; systemctl daemon-reload
 install -m 755 "$BIN" /usr/local/bin/orb-core.new && mv /usr/local/bin/orb-core.new /usr/local/bin/orb-core
 systemctl restart sandboxed-sh-prod
-if ! healthy 3000 60; then
+if ! healthy 3000 60 "$SHA"; then
   say "prod unhealthy; rolling back to $BACKUP"
   cp -p "$BACKUP" /usr/local/bin/orb-core
   set_build sandboxed-sh-prod "${OLD_SHA:-unknown}"; systemctl daemon-reload

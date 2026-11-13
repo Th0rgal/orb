@@ -64,3 +64,8 @@ Both instances run from the base plus overlays; a settings round trip (export pr
   See [the dev pass contract](../operations/dev-operator.md). Cross-instance
   redemption requires the issuing Core to support verification; live acceptance
   remains pending operator installation.
+- Item 5: an operator-installed systemd timer follows master and submits exact
+  commits through `orb-deploy --dev-only`, which builds, self-tests and verifies
+  the exact healthy SHA. See [dev auto-deployment](../operations/dev-autodeploy.md).
+  The repository tests use fake systemd/network effects; live timer installation
+  and observing a merge reach dev are still pending.
