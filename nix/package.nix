@@ -107,7 +107,8 @@
   #   orb-lean-base   lean-sys, orb-spec (lean/Orb), LeanMesh, OrbNetLeaf, OrbBin
   #   orb-lean-node   OrbNode   (sandboxed-node)
   #   orb-lean-core   OrbCore   (orb-core)
-  #   orb-core        OrbLocald (orb-locald), then assembles every binary
+  #   orb-lean-locald OrbLocald (orb-locald)
+  #   orb-core        assembles every layer's binaries (no compilation)
   #
   # Each later layer copies the earlier layer's `.lake` build trees into place, so
   # Lake reuses them instead of rebuilding. Every source set below holds only the
@@ -298,30 +299,32 @@
     bins = ["orb-core"];
     deps = [leanBase];
   };
-in
-  # The top-level package builds OrbLocald itself, so downstream overrides of
-  # `postPatch` that patch `lean/OrbLocald` (as omarchnix does) still apply and
-  # rebuild only that layer.
-  stdenv.mkDerivation (commonAttrs
-    // {
-      pname = "orb-core";
-      src = leanSource [../lean/OrbLocald];
 
-      buildPhase = ''
-        runHook preBuild
-        ${buildEnv}
-        ${restoreLake [leanBase]}
-        mkdir -p "$TMPDIR/orb-bins"
-        ./scripts/build_orb_bins.sh --out-dir "$TMPDIR/orb-bins" --only orb-locald
-        cp -P ${leanBase}/bin/* ${leanNode}/bin/* ${leanCore}/bin/* "$TMPDIR/orb-bins/"
-        runHook postBuild
-      '';
+  leanLocald = mkLeanLayer {
+    pname = "orb-lean-locald";
+    src = leanSource [../lean/OrbLocald];
+    bins = ["orb-locald"];
+    deps = [leanBase];
+  };
+
+  layers = [leanBase leanNode leanCore leanLocald];
+in
+  # Node, Core and Locald build in parallel on top of the base layer; this
+  # derivation only gathers their binaries and fixes their runtime paths.
+  stdenv.mkDerivation {
+      pname = "orb-core";
+      inherit (orbPackageJson) version;
+      dontUnpack = true;
+      dontConfigure = true;
+      dontBuild = true;
+      nativeBuildInputs = lib.optionals stdenv.hostPlatform.isLinux [patchelf];
+      inherit (commonAttrs) buildInputs LD_LIBRARY_PATH;
 
       installPhase = ''
         runHook preInstall
 
         mkdir -p "$out/bin"
-        for f in "$TMPDIR/orb-bins"/*; do
+        for f in ${lib.concatMapStringsSep " " (l: "${l}/bin/*") layers}; do
           if [ -L "$f" ]; then
             cp -P "$f" "$out/bin/$(basename "$f")"
           else
@@ -335,7 +338,7 @@ in
         runHook postInstall
       '';
 
-      passthru = {inherit leanBase leanNode leanCore;};
+      passthru = {inherit leanBase leanNode leanCore leanLocald;};
 
       meta = {
         description = "Self-hosted orchestrator for AI coding agents";
@@ -343,4 +346,4 @@ in
         mainProgram = "orb-core";
         platforms = lib.platforms.linux ++ lib.platforms.darwin;
       };
-    })
+    }

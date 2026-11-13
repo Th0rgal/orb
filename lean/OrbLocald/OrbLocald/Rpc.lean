@@ -2961,6 +2961,12 @@ private def pinnedVoiceModelRepo : String :=
 private def pinnedVoiceModelRevision : String :=
   "553445e84959f9ec3fcd43443bce75ea05c400f3"
 
+private def pinnedLinuxVoiceModelRepo : String :=
+  "cstr/cohere-transcribe-03-2026-GGUF"
+
+private def pinnedLinuxVoiceModelRevision : String :=
+  "4e98a8c31c95a92d651e60e3bfae4fe29fc6e026"
+
 private structure VoiceWorkerProc where
   pythonBin : String
   scriptPath : String
@@ -3032,14 +3038,21 @@ private def resolveVoicePython? (st : LocaldState) (fakeMode : Bool) : IO (Optio
 private def resolveVoiceModelDir (st : LocaldState) : IO String := do
   if let some envDir ← OrbBin.PosixExt.getEnvNonEmpty "ORB_VOICE_MODEL_DIR" then
     return envDir
+  let repoSlug := if st.hostOs == "linux" then "models--cstr--cohere-transcribe-03-2026-GGUF" else "models--MarkChen1214--cohere-transcribe-03-2026-MLX-Mixed-2bit3bit4bit"
+  let rev := if st.hostOs == "linux" then pinnedLinuxVoiceModelRevision else pinnedVoiceModelRevision
   if let some hfCache ← OrbBin.PosixExt.getEnvNonEmpty "HF_HUB_CACHE" then
-    return (System.FilePath.mk hfCache / "models--MarkChen1214--cohere-transcribe-03-2026-MLX-Mixed-2bit3bit4bit" / "snapshots" / pinnedVoiceModelRevision).toString
+    return (System.FilePath.mk hfCache / repoSlug / "snapshots" / rev).toString
   let home := if st.homeDir.trimAscii.toString.isEmpty then "/tmp" else st.homeDir.trimAscii.toString
-  return (System.FilePath.mk home / ".cache" / "huggingface" / "hub" / "models--MarkChen1214--cohere-transcribe-03-2026-MLX-Mixed-2bit3bit4bit" / "snapshots" / pinnedVoiceModelRevision).toString
+  return (System.FilePath.mk home / ".cache" / "huggingface" / "hub" / repoSlug / "snapshots" / rev).toString
 
 private def isVoiceModelPresent (modelDir : String) : IO Bool := do
   let d := System.FilePath.mk modelDir
-  return (← (d / "config.json").pathExists) && (← (d / "model.safetensors").pathExists)
+  if (← (d / "config.json").pathExists) && (← (d / "model.safetensors").pathExists) then
+    return true
+  for fn in #["cohere-transcribe-q4_k.gguf", "cohere-transcribe-q5_0.gguf", "cohere-transcribe-q8_0.gguf", "cohere-transcribe-f16.gguf"] do
+    if (← (d / fn).pathExists) then
+      return true
+  return false
 
 private def detectHostArch : IO String := do
   match ← readSystemToolStdout? "uname" #["/usr/bin/uname", "/bin/uname", "/run/current-system/sw/bin/uname"] #["-m"] with
@@ -6110,11 +6123,13 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       let cur ← get
       return cur.isSome
     let hasLinuxCohere ← (OrbBin.PosixExt.getEnvNonEmpty "VOICED_COHERE_LIB").map Option.isSome
-    let supported := fakeMode || (st.hostOs == "macos" && arch == "aarch64") || (st.hostOs == "linux" && hasLinuxCohere)
+    let supported := fakeMode || (st.hostOs == "macos" && arch == "aarch64") || (st.hostOs == "linux" && (hasLinuxCohere || arch == "aarch64" || arch == "x86_64"))
     let reasonVal : JVal :=
-      if !supported then .str "Speech-to-text requires Orb Desktop on Apple Silicon (macOS arm64)."
+      if !supported then .str "Speech-to-text requires Orb Desktop on Apple Silicon or Linux (aarch64/x86_64)."
       else .null
     let pyReady := py?.isSome && script?.isSome
+    let effRepo := if st.hostOs == "linux" then pinnedLinuxVoiceModelRepo else pinnedVoiceModelRepo
+    let effRev := if st.hostOs == "linux" then pinnedLinuxVoiceModelRevision else pinnedVoiceModelRevision
     return .ok (.obj #[
       ("supported", .bool supported),
       ("reason", reasonVal),
@@ -6122,8 +6137,8 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       ("arch", .str arch),
       ("python", match py? with | some p => .str p | none => .null),
       ("python_ready", .bool pyReady),
-      ("model_repo", .str pinnedVoiceModelRepo),
-      ("model_revision", .str pinnedVoiceModelRevision),
+      ("model_repo", .str effRepo),
+      ("model_revision", .str effRev),
       ("model_dir", .str modelDir),
       ("model_ready", .bool modelReady),
       ("worker", .str (if workerWarm then "warm" else "off")),
