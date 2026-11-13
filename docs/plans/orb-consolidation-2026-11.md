@@ -324,7 +324,38 @@ No questions sent; implement/test generic support against an authorized
 
 ## Operator requests
 
-### Immediate A memory-cap intervention
+### Operator decisions: A replacement and H terminal-state replay
+
+Operator declines managed-VM hand cgroup retuning; the older intervention
+request below is **superseded, do not execute**. A successor launched with
+requested/effective `opencode` / `builtin/smart` on catalog-confirmed
+`leanci:2xlarge` (32 vCPU, 96 GiB RAM, 200 GB disk, $0.40/hour), initial TTL
+120 minutes. Mission `d76cd199-448d-44ad-ab2b-afff1011c0f1`, managed VM
+`f322ed0f-7ea3-4b5f-8cf2-154d17bc3622`. Preparation only: verify actual effective
+job/ancestor memory allowance >=12 GiB and free disk before one heavy build.
+Old A asked to freeze writes/export both patches immediately; no overlapping
+source changes or old-VM destruction before verified harvest/handoff. Node
+receipt did not provide expiry; verify provider state/TTL on next inspection.
+
+H owns new cross-client terminal-state bug, spec and replay first: mission
+`734c3bb7` completed on Core since 12:10, no remote_job, queue or continuation,
+but desktop retains sendable queued steer, optimistic stop bubble, launch line
+and Reconnecting chip (`missionLaunch.tsx:306`). Replay repeated steer at
+11:48/11:55/12:00 during 429 chain; job `36cf3c7d` cancelled 11:55, fork
+`b6934223`, prod restarts 12:07/12:19, other-session completion. Find canonical
+merge retaining stale remote job/status. Terminal authoritative state must clear
+stale launch/job/pending bubble; undelivered queued follow-up cannot remain
+silently sendable (mark not sent or reconcile with delivery evidence). Desktop,
+iOS and Android share semantics/fixtures; delayed terminal snapshots must not
+kill genuinely newer turns. H owns client mission-status merge/spec/test paths;
+C retains managed controls, D streaming, E principal/account security.
+
+E+G dev grant request submitted by operator:
+`f0eadef4-2978-46c7-82ae-5a6a7dd40ec2`, pending Thomas approval, not yet access.
+E+G notified. Operator dev deploy of `9e33099d4` started 13:16 UTC; no duplicate
+promotion or full deployed-SHA verification claimed.
+
+### Immediate A memory-cap intervention (superseded)
 
 A mission `35cd3390-5a58-4cd7-8444-172a84d5faa8`, VM
 `0f88c8f6-084e-46a3-89ad-29aa52d300de`: reported effective
