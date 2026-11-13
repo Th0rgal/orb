@@ -148,6 +148,64 @@ def runStreamingPumpContracts : IO Unit := do
   expect (badChunkCopy.isEmpty && !badChunkComplete)
     "chunk decoding error must not report normal stream completion"
 
+  let timeoutStep ← IO.mkRef (0 : Nat)
+  let timeoutCloses ← IO.mkRef (0 : Nat)
+  let timeoutEmitted ← IO.mkRef ByteArray.empty
+  let timeoutReader : UpstreamReader := {
+    read := do
+      let n ← timeoutStep.get
+      timeoutStep.set (n + 1)
+      return if n == 0 then some "event-1\n".toUTF8 else none
+    close := timeoutCloses.modify (· + 1)
+    eof := pure false
+  }
+  let (timeoutCopy, timeoutComplete) := PumpOutcome.unpack <|
+    ← pumpUpstreamBody timeoutReader .untilClose ByteArray.empty fun bytes => do
+      timeoutEmitted.modify (· ++ bytes)
+      return true
+  expect (timeoutCopy == "event-1\n".toUTF8 && (← timeoutEmitted.get) == "event-1\n".toUTF8 &&
+    !timeoutComplete && (← timeoutCloses.get) == 1)
+    "untilClose reader ending on timeout or failure must not report normal stream completion"
+
+  let eofStep ← IO.mkRef (0 : Nat)
+  let eofCloses ← IO.mkRef (0 : Nat)
+  let eofEmitted ← IO.mkRef ByteArray.empty
+  let eofReader : UpstreamReader := {
+    read := do
+      let n ← eofStep.get
+      eofStep.set (n + 1)
+      return if n == 0 then some "event-1\n".toUTF8 else none
+    close := eofCloses.modify (· + 1)
+    eof := pure true
+  }
+  let (eofCopy, eofComplete) := PumpOutcome.unpack <|
+    ← pumpUpstreamBody eofReader .untilClose ByteArray.empty fun bytes => do
+      eofEmitted.modify (· ++ bytes)
+      return true
+  expect (eofCopy == "event-1\n".toUTF8 && (← eofEmitted.get) == "event-1\n".toUTF8 &&
+    eofComplete && (← eofCloses.get) == 1)
+    "untilClose reader ending on clean EOF reports normal stream completion"
+
+  let .ok (ucLfd, ucPort) ← tcpListen "127.0.0.1" 0 4
+    | throw (IO.userError "proxy streaming untilClose: listen failed")
+  let ucTask ← IO.asTask (prio := .dedicated) do
+    if let .ok ufd ← tcpAcceptPoll ucLfd 5000 then
+      discard <| pollReadable ufd 2000
+      discard <| readStreamChunk ufd 65536
+      discard <| writeAll ufd ("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: clean\n\n").toUTF8 false
+      discard <| closeFd ufd
+    discard <| closeFd ucLfd
+  let mut ucCopy := ByteArray.empty
+  let mut ucComplete := false
+  if let .ok (_, some ucPump) ← streamingUpstreamRequest false "POST" "127.0.0.1" ucPort "/v1/chat/completions" #[]
+      "{\"model\":\"m\",\"stream\":true}".toUTF8 then
+    let (c, ok) ← ucPump (fun _ => pure true)
+    ucCopy := c
+    ucComplete := ok
+  let _ := ucTask.get
+  expect (ucCopy == "data: clean\n\n".toUTF8 && ucComplete)
+    "loopback untilClose socket closed cleanly reports normal stream completion"
+
   -- Defect 1 (downstream wire) & (b): a cut-off upstream stream must not get a closing chunk
   -- from Core, and its partial SSE copy must still be accounted in proxy_usage.
   -- Defect 2 & (e): a refused downstream head write must immediately close the upstream
