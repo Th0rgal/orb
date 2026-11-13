@@ -6133,7 +6133,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
      (jobJson.splitOn "\"node_id\":\"ashur\"").length != 2 ||
      (jobJson.splitOn "\"phase\":\"running\"").length != 2 ||
      (jobJson.splitOn "\"exit_code\":null").length != 2 ||
-     (remoteJobJson #["m", "j", "n", "failed", "2", "", "", "", "t"]).splitOn "\"phase\":\"finished\"" |>.length != 2 ||
+     ((remoteJobJson #["m", "j", "n", "failed", "2", "", "", "", "t"]).splitOn "\"phase\":\"finished\"").length != 2 ||
      (remoteJobsJsonMap (.error "no such table: remote_jobs")).size != 0 then
     IO.eprintln s!"[orb-core-test] FAIL: remote_job mission JSON: {jobJson}"
     return 1
