@@ -582,6 +582,47 @@ needs no grant and stays the shortest path.
 - Managed VM `a474d57a` stopped at 23:25Z (disk kept about 24 h). It reached its 12-hour limit at 00:12Z, so a later dev grant needs a successor mission on another node.
 - No deploy request yet: no master tip after `e43a808d` has both CI and Kernel ABI green.
 
+**Update 23:32 UTC.**
+
+- Merged: #1751 as `37541b466009a7b144d966bbb419b9cfa0654f58` (11 checks passed on base `b6afa205`; trial merge with `2b06d8a1` clean, no file changed on both sides, #1745 does not call the functions whose signature #1751 changes). Master CI on `37541b46` is the first combined build.
+- **Sidecar cooldown fields are not observed.** Core (`fetchSidecarAuthFiles`, merged in #1745) reads `cooldowns[].remaining_seconds`, `cooldowns[].retry_at` and `cooldowns[].reason` from CLIProxyAPI `GET /v0/management/auth-files`. Only `remaining_seconds` is also used by `scripts/ops/orb-sidecar-guard`. `retry_at` and `reason` rest on the worker's reading and on test fixtures, not on a live reply. If they are absent, Core falls back to `now + remaining_seconds` and `credential_quota`, so the card stays correct. If they are free text, Core passes them unchanged to members as `parked_until` / `parked_reason`. H-core (`21b1bfca`) has Task 4: accept `reason` only as a short lowercase slug and `retry_at` only as a timestamp-shaped string, branch `wip/h-parked-reason-closed-shape`. No client reads `parked_*` yet.
+- There is no field named `reset_duration_seconds` anywhere in the repository. The example relayed by the isolation worker was invented and nothing is coded against it.
+
+**Operator request 5: field names and types of the sidecar login list (read-only, on agent-core).** Prints one line per JSON path with its types. It prints no login name, email, token or key: object keys that do not look like field names are shown as `<key>`, strings are shown as `str` only, except `status`, `cooldowns[].scope` and `cooldowns[].reason` when they are a short lowercase slug, and `cooldowns[].retry_at` with every digit replaced by 9. It sends one GET, changes nothing and restarts nothing. Checked on two made-up replies on nimrud only. Paste the output as is.
+
+```python
+import json, re, sys, urllib.request
+def shape(v, path, out):
+    if isinstance(v, dict):
+        for k, x in v.items():
+            shape(x, path + "." + (k if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,39}", k) else "<key>"), out)
+    elif isinstance(v, list):
+        out.setdefault(path + "[]", set()).add("array")
+        for x in v:
+            shape(x, path + "[]", out)
+    else:
+        t = type(v).__name__
+        if path.endswith(("cooldowns[].reason", "cooldowns[].scope", ".status")) and isinstance(v, str):
+            t += ":" + (v if re.fullmatch(r"[a-z0-9_]{1,40}", v) else "<other,%d chars>" % len(v))
+        if path.endswith("cooldowns[].retry_at") and isinstance(v, str):
+            t += ":" + (re.sub(r"[0-9]", "9", v) if re.fullmatch(r"[0-9TZ:+.\-]{1,35}", v) else "<other,%d chars>" % len(v))
+        out.setdefault(path, set()).add(t)
+def main(doc):
+    out = {}
+    shape(doc, "$", out)
+    for p in sorted(out):
+        print(p, "|".join(sorted(out[p])))
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        main(json.load(open(sys.argv[1])))
+    else:
+        key = [l.split("=", 1)[1].strip().strip("\"'") for l in open("/etc/open_agent/open_agent.env") if l.startswith("CLI_PROXY_MANAGEMENT_KEY=")][0]
+        req = urllib.request.Request("http://127.0.0.1:8317/v0/management/auth-files", headers={"Authorization": "Bearer " + key})
+        main(json.load(urllib.request.urlopen(req, timeout=10)))
+```
+
+Run: `sudo python3 sidecar_schema.py` (reads `CLI_PROXY_MANAGEMENT_KEY` from `/etc/open_agent/open_agent.env`, like the guard script). Most useful while a login is parked; with no cooldown active the `cooldowns[]` lines will be missing and that is itself worth knowing.
+
 **Still open, no owner.** Track A / #1708; lean.ci PR #34 fence review
 (interdiff unread, lean runners stay on hold); isolation acceptance and
 managed-lifecycle live validation (need the `dev_operator` grant
