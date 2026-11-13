@@ -86,6 +86,135 @@ private def provisionReadyFixture (st : ManagedComputeStore) (fleet : ManagedFle
     | return .error "fixture_poll_failed"
   return .ok { m with status := "ready", lastPollSec := nowEpoch }
 
+private def runManagedMcpProviderContractTests (root : String) : IO Unit := do
+  let check (condition : Bool) (label : String) : IO Unit := do
+    unless condition do throw (IO.userError s!"managed MCP provider contract: {label}")
+  let .ok core ← openCoreStore s!"{root}/provider-contract-core"
+    | throw (IO.userError "managed MCP provider contract: core store open failed")
+  let .ok mc ← openManagedComputeStore s!"{root}/provider-contract-managed.db"
+    | do closeCoreStore core; throw (IO.userError "managed MCP provider contract: managed store open failed")
+  try
+    let .ok user ← createUserRecord core "provider-contract-user" "provider-contract-passphrase-1234" "member" none none "t"
+      | throw (IO.userError "managed MCP provider contract: user fixture failed")
+    let .ok () ← upsertMission core {
+        id := "provider-contract-parent", title := "Provider contract parent", status := "active",
+        backend := "opencode", modelOverride := "", workingDirectory := root, updatedAt := "t",
+        ownerUserId := user.id, project := "provider-contract"
+      } | throw (IO.userError "managed MCP provider contract: parent fixture failed")
+    let .ok () ← saveManagedFleetConfig mc true true 100000 0 100
+      | throw (IO.userError "managed MCP provider contract: fleet fixture failed")
+    let fleet : ManagedFleetState := { enabled := true, boatEnabled := true }
+    let cfg : ManagedProvisioning.BootstrapConfig := { coreUrl := "https://core.example", script := "#!/bin/sh\nexit 0\n" }
+    let now ← coreEpochSec
+    let claims : McpSessionClaims := {
+      sessionId := "provider-contract-session", missionId := "provider-contract-parent",
+      role := "executor", expiresAt := now + 3600
+    }
+    let rented ← IO.mkRef (#[] : Array (String × String))
+    let call (provider tool : String) (args : OrbBin.Json.JVal) : IO OrbBin.Json.JVal := do
+      let template := ManagedProvisioningTests.mockPolicyProvider mc provider
+      let mock := { template with spawn := fun spec => do
+        rented.modify (·.push (provider, spec.size))
+        template.spawn spec
+      }
+      let raw ← dispatchMcpToolCall core (some mc) none none fleet root claims tool args now none (some (mock, cfg))
+      let .ok reply := OrbBin.Json.parse raw
+        | throw (IO.userError s!"managed MCP provider contract: invalid response: {raw}")
+      return reply
+    let resultOf (reply : OrbBin.Json.JVal) := (reply.field? "result").getD .null
+    let denied (reply : OrbBin.Json.JVal) :=
+      ((OrbBin.Json.renderCompact reply).splitOn "provider_disabled_for_user").length == 2
+    let spawn (provider expected : String) (args : Array (String × OrbBin.Json.JVal)) : IO Unit := do
+      let before := (← rented.get).size
+      let reply ← call provider "spawn_managed_machine" (.obj (args ++ #[("ttl_minutes", .nat 60)]))
+      let result := resultOf reply
+      check (result.fieldStr? "provider" == some provider && result.fieldStr? "size" == some expected &&
+        (← rented.get).size == before + 1 && (← rented.get).back? == some (provider, expected))
+        s!"spawn must rent {provider}:{expected}: {OrbBin.Json.renderCompact reply}"
+      let some id := result.fieldStr? "id"
+        | throw (IO.userError "managed MCP provider contract: spawn returned no machine id")
+      let some (machine, _) ← getManagedMachine? mc id
+        | throw (IO.userError "managed MCP provider contract: spawned machine missing")
+      check (machine.provider == provider && machine.size == expected && machine.ownerUserId == user.id &&
+        machine.ownerMission == claims.missionId && machine.status == "ready")
+        s!"spawn must persist provider, size, owner and readiness for {provider}:{expected}"
+    spawn "boat" "small" #[]
+    for entry in ManagedProvider.registry do
+      let some firstSize := entry.sizes[0]? | continue
+      let provider := entry.name
+      let size := firstSize.name
+      let before ← rented.get
+      if provider != "boat" then
+        let freshSpawn ← call provider "spawn_managed_machine"
+          (.obj #[("provider", .str provider), ("size", .str size)])
+        let freshStart ← call provider "start_mission"
+          (.obj #[("title", .str "fresh provider child"), ("remote_node_id", .str s!"auto-managed:{provider}:{size}")])
+        check (denied freshSpawn && denied freshStart && (← rented.get) == before)
+          s!"fresh user must opt in before MCP spawn or start on {provider}"
+        let .ok () ← setUserManagedPref mc user.id provider true "contract-opt-in"
+          | throw (IO.userError "managed MCP provider contract: opt-in fixture failed")
+      let catalogReply ← call provider "list_managed_machines" (.obj #[])
+      let catalog := ((resultOf catalogReply).fieldArr? "providers").getD #[]
+      let some item := catalog.find? (·.fieldStr? "provider" == some provider)
+        | throw (IO.userError s!"managed MCP provider contract: {provider} absent from MCP catalog")
+      let sizes := (item.fieldArr? "sizes").getD #[]
+      check (item.fieldBool? "implemented" == some true && item.fieldBool? "user_enabled" == some true &&
+        sizes.size == entry.sizes.size && !sizes.isEmpty) s!"implemented {provider} must advertise its rentable sizes"
+      for shape in sizes do
+        let some advertised := shape.fieldStr? "size"
+          | throw (IO.userError "managed MCP provider contract: catalog size name missing")
+        spawn provider advertised #[("provider", .str provider), ("size", .str advertised)]
+    spawn "leanci" "2xlarge" #[("provider", .str "leanci"), ("cpu", .nat 32), ("ram_gb", .nat 96)]
+    spawn "leanci" "2xlarge" #[("provider", .str "leanci"), ("cpu", .nat 32)]
+    spawn "leanci" "lean-24vcpu" #[("provider", .str "leanci"), ("ram_gb", .nat 96)]
+    spawn "colab" "t4" #[("provider", .str "colab"), ("size", .str "t4")]
+    for (target, provider, size) in #[
+        ("auto-managed", "boat", "small"), ("auto-managed:large", "boat", "large"),
+        ("auto-managed:boat", "boat", "small"), ("auto-managed:boat:xlarge", "boat", "xlarge"),
+        ("auto-managed:leanci:2xlarge", "leanci", "2xlarge"), ("auto-managed:colab:t4", "colab", "t4")] do
+      let args : OrbBin.Json.JVal := .obj #[("title", .str "provider contract child"),
+        ("remote_node_id", .str target), ("managed_ttl_minutes", .nat 60)]
+      let before := (← rented.get).size
+      let reply ← call provider "start_mission" args
+      let result := resultOf reply
+      let some child := result.fieldStr? "mission_id"
+        | throw (IO.userError s!"managed MCP provider contract: start {target} failed: {OrbBin.Json.renderCompact reply}")
+      let machineId := (((result.fieldStr? "remote_node_id").getD "").drop 8).toString
+      let some (machine, _) ← getManagedMachine? mc machineId
+        | throw (IO.userError "managed MCP provider contract: child machine missing")
+      check (machine.provider == provider && machine.size == size && machine.ownerMission == child &&
+        machine.ownerUserId == user.id && machine.requestedByMissionId == claims.missionId &&
+        result.fieldBool? "managed_machine_reused" != some true && (← rented.get).size == before + 1 &&
+        (← rented.get).back? == some (provider, size)) s!"{target} must rent and assign the requested provider and size"
+      if provider != "boat" then
+        let .ok _ ← execParamQuery core.missionsDb "UPDATE missions SET status='completed' WHERE id=?1;" #[child]
+          | throw (IO.userError "managed MCP provider contract: completed child fixture failed")
+        let .ok _ ← execParamQuery mc.db
+            "UPDATE managed_machines SET expires_at_sec=?2,last_poll_sec=?3 WHERE id=?1;"
+            #[machineId, s!"{now + 3600}", s!"{now}"]
+          | throw (IO.userError "managed MCP provider contract: reusable machine fixture failed")
+        let .ok () ← setUserManagedPref mc user.id provider false "contract-opt-out"
+          | throw (IO.userError "managed MCP provider contract: opt-out fixture failed")
+        let blocked ← call provider "start_mission" args
+        let some (unchanged, _) ← getManagedMachine? mc machineId
+          | throw (IO.userError "managed MCP provider contract: reusable machine disappeared")
+        check (denied blocked && unchanged.ownerMission == child && (← rented.get).size == before + 1)
+          s!"{provider} opt-out must deny start before claiming an eligible reusable machine"
+        let .ok () ← setUserManagedPref mc user.id provider true "contract-re-opt-in"
+          | throw (IO.userError "managed MCP provider contract: re-opt-in fixture failed")
+        let reused ← call provider "start_mission" args
+        let reusedResult := resultOf reused
+        let some (reassigned, _) ← getManagedMachine? mc machineId
+          | throw (IO.userError "managed MCP provider contract: reused machine disappeared")
+        check (reusedResult.fieldBool? "managed_machine_reused" == some true &&
+          reusedResult.fieldStr? "remote_node_id" == some s!"managed-{machineId}" &&
+          reusedResult.fieldStr? "mission_id" == some reassigned.ownerMission &&
+          reassigned.ownerMission != child && reassigned.provider == provider && reassigned.size == size &&
+          (← rented.get).size == before + 1) s!"re-opted-in {provider} must reuse the same eligible provider and size without renting"
+  finally
+    closeManagedComputeStore mc
+    closeCoreStore core
+
 private def runR2bRound2Extras (store : CoreStore) (appSt : CoreAppState) (validJwt : String) (nowSec : UInt64) : IO UInt32 := do
   -- Same-boot orphan mission cleanup: if a mission row is deleted while an intent/lease exists at the current boot,
   -- `recoverDispatchLeases` rolls back the orphaned reservation so the track is never wedged.
@@ -1930,13 +2059,65 @@ private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
       o3.observedStatus == "stopped" &&
       o4.observedStatus == "stopped" && o5.observedStatus == "stopped" &&
       o6.orphaned && (observeProviderPayload "aws" "m7" 200 (.obj #[])).isOk == false &&
-      -- The former provider name is not an alias: only the one-time migration knows it.
-      (observeProviderPayload "boost" "m8" 200 (.obj #[])).isOk == false &&
-      canonicalizeProvider "boost" == "boost" && !isKnownProvider "boost" && canonicalizeProvider "lean.ci" == "leanci"
+      canonicalizeProvider "lean.ci" == "leanci"
     | _, _, _, _, _, _, _ => false
   if !adapterOk then
     closeManagedComputeStore mst
     IO.eprintln "[orb-core-test] FAIL: pure ProviderObservation adapter check failed"
+    return 1
+  let .ok optStore ← openManagedComputeStore s!"{r5Root}/managed_opt_in.db"
+    | do closeManagedComputeStore mst; IO.eprintln "[orb-core-test] FAIL: opt-in store open failed"; return 1
+  let insertRow (id provider owner : String) : IO Bool := do
+    return (← execParamQuery optStore.db
+      ("INSERT INTO managed_machines(id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents," ++
+       "cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,owner_user_id) " ++
+       "VALUES(?1,?1,?2,'small','destroyed','',60,0,0,1,0,'user','',0,0,?3);") #[id, provider, owner]).isOk
+  let seeded := (← insertRow "opt-1" "leanci" "u-used") && (← insertRow "opt-2" "colab" "") &&
+    (← insertRow "opt-3" "leanci" "u-off") && (← insertRow "opt-4" "boat" "u-boat")
+  let explicitOff := (← setUserManagedPref optStore "u-off" "leanci" false "t0").isOk
+  let explicitOn := (← setUserManagedPref optStore "u-thomas" "colab" true "t0").isOk
+  let firstRun := (← migrateManagedProviderOptIns optStore "u-admin" "t1").isOk
+  let laterOn := (← setUserManagedPref optStore "u-late" "leanci" false "t2").isOk
+  discard <| insertRow "opt-5" "leanci" "u-late"
+  let secondRun := (← migrateManagedProviderOptIns optStore "u-admin" "t3").isOk
+  let prefsOf (uid : String) := getUserManagedPrefs optStore uid
+  let used ← prefsOf "u-used"
+  let admin ← prefsOf "u-admin"
+  let off ← prefsOf "u-off"
+  let thomas ← prefsOf "u-thomas"
+  let late ← prefsOf "u-late"
+  let boatOnly ← prefsOf "u-boat"
+  let fresh ← prefsOf "u-fresh"
+  closeManagedComputeStore optStore
+  if !seeded || !explicitOff || !explicitOn || !firstRun || !laterOn || !secondRun ||
+      !isUserManagedProviderEnabled used "leanci" || isUserManagedProviderEnabled used "colab" ||
+      !isUserManagedProviderEnabled admin "colab" || isUserManagedProviderEnabled admin "leanci" ||
+      isUserManagedProviderEnabled off "leanci" || !isUserManagedProviderEnabled thomas "colab" ||
+      isUserManagedProviderEnabled late "leanci" || !boatOnly.isEmpty ||
+      !isUserManagedProviderEnabled boatOnly "boat" || isUserManagedProviderEnabled boatOnly "leanci" ||
+      !fresh.isEmpty || !isUserManagedProviderEnabled fresh "boat" ||
+      isUserManagedProviderEnabled fresh "leanci" || isUserManagedProviderEnabled fresh "colab" then
+    closeManagedComputeStore mst
+    IO.eprintln "[orb-core-test] FAIL: managed provider opt-in migration must be one-time, evidence-based and preserve explicit prefs"
+    return 1
+  let catalogCalls ← IO.mkRef (0 : Nat)
+  let catalogTransport : ManagedProvider.Transport := fun req => do
+    catalogCalls.modify (· + 1)
+    if req.path.startsWith "/vms/capabilities" then
+      return .ok (200, .obj #[("pool", .obj #[("online_engines", .nat 0)])])
+    return .ok (404, .null)
+  let baseCatalog := (OrbBin.Json.parse (renderManagedProvidersJson { enabled := true, boatEnabled := true })).toOption.getD .null
+  let observedCatalog ← observeManagedProviderCatalog r5Root baseCatalog (some catalogTransport) (← IO.mkRef #[])
+  let sizesOf (catalog : OrbBin.Json.JVal) (p : String) :=
+    ((catalog.asArr?.getD #[]).find? (·.fieldStr? "provider" == some p)).bind (·.fieldArr? "sizes") |>.map (·.size)
+  let boatOf (catalog : OrbBin.Json.JVal) := (catalog.asArr?.getD #[]).find? (·.fieldStr? "provider" == some "boat")
+  let callsAfterObserve ← catalogCalls.get
+  let noLeanci ← observeManagedProviderCatalog r5Root (.arr #[]) (some catalogTransport) (← IO.mkRef #[])
+  if sizesOf baseCatalog "leanci" != some 6 || sizesOf observedCatalog "leanci" != some 0 ||
+      boatOf observedCatalog != boatOf baseCatalog || callsAfterObserve != 1 ||
+      noLeanci != .arr #[] || (← catalogCalls.get) != 1 then
+    closeManagedComputeStore mst
+    IO.eprintln "[orb-core-test] FAIL: managed catalog must render observed lean.ci capacity through catalogFieldsObserved"
     return 1
   let fleet0 : ManagedFleetState := { enabled := true, boatEnabled := true }
   let vm0 : ManagedMachine := {
@@ -4667,6 +4848,108 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   -- Managed VMs: `alice` hitting daily spend cap gets `429` on `POST /api/managed-machines`, while `bob` (`no cap`, disables `boat`) spawns an auto VM (`leanci`) owned by `bob`, invisible to `admin` (`404` on `DELETE`)!
   let (alVmCapSt, _, _) ← sendReq "POST" "/api/managed-machines" aliceTok "{\"provider\":\"boat\",\"name\":\"alice-vm\"}"
   let (bobPrefBoatSt, _, _) ← sendReq "PUT" "/api/managed-machines/providers/boat/preference" bobTok "{\"enabled\":false}"
+  let .ok beforeOptIn ← execParamQuery mStore.db "SELECT COUNT(*) FROM managed_machines;" #[]
+    | return (← fail "managed opt-in count failed")
+  let (bobNoOptInSt, bobNoOptInBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"leanci\",\"name\":\"bob-no-opt-in\"}"
+  let (bobAutoNoOptInSt, _, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"auto\",\"name\":\"bob-no-opt-in\"}"
+  let (bobColabNoOptInSt, _, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"colab\",\"name\":\"bob-no-opt-in\"}"
+  let (_, bobCatalogBody, _) ← sendReq "GET" "/api/managed-machines" bobTok ""
+  let bobCatalog := ((OrbBin.Json.parse bobCatalogBody).toOption.getD .null).fieldArr? "providers" |>.getD #[]
+  let userEnabledFor (p : String) := (bobCatalog.find? (·.fieldStr? "provider" == some p)).bind (·.fieldBool? "user_enabled")
+  let .ok afterOptIn ← execParamQuery mStore.db "SELECT COUNT(*) FROM managed_machines;" #[]
+    | return (← fail "managed opt-in count failed")
+  if bobNoOptInSt != 403 || (bobNoOptInBody.splitOn "provider_disabled_for_user").length != 2 ||
+      bobAutoNoOptInSt != 403 || bobColabNoOptInSt != 403 || beforeOptIn != afterOptIn ||
+      userEnabledFor "leanci" != some false || userEnabledFor "colab" != some false then
+    return (← fail s!"non-boat managed providers must require an explicit user opt-in: {bobNoOptInSt}/{bobAutoNoOptInSt}/{bobColabNoOptInSt}")
+  let (bobOptInSt, _, _) ← sendReq "PUT" "/api/managed-machines/providers/leanci/preference" bobTok "{\"enabled\":true}"
+  if bobOptInSt != 200 then
+    return (← fail s!"bob leanci opt-in failed: {bobOptInSt}")
+  let operatorObservations ← IO.mkRef (0 : Nat)
+  let operatorProvider := { ManagedProvisioningTests.mockPolicyProvider mStore "leanci" with
+    availability := fun _ => do
+      operatorObservations.modify (· + 1)
+      return .ok { status := .saturated }
+  }
+  let operatorOverride : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) :=
+    some (operatorProvider, { coreUrl := "https://core.example", script := "#!/bin/sh\nexit 0\n" })
+  let storedOperator : McpSessionClaims := {
+    sessionId := "managed-pref-stored-operator", missionId := "", role := "operator", expiresAt := nowSec + 600
+  }
+  let singleOperator := { storedOperator with sessionId := "managed-pref-single-operator" }
+  let freshOperator := { storedOperator with sessionId := "managed-pref-fresh-operator" }
+  let directOperator := { storedOperator with sessionId := "00000000-0000-4000-8000-000000000000" }
+  for (sid, owner) in #[(storedOperator.sessionId, bobId), (singleOperator.sessionId, ""),
+      (freshOperator.sessionId, bootAdminId)] do
+    let .ok _ ← execParamQuery store.projectsDb
+        "INSERT INTO mcp_sessions_v1(id,owner,mission_id,expires_at,revoked,subject_kind) VALUES(?1,?2,'',?3,0,'mission');"
+        #[sid, owner, toString (nowSec + 600)]
+      | return (← fail "managed preference operator session fixture failed")
+  let operatorCall (claims : McpSessionClaims) (tool : String) (uid : String := "") (admin : Bool := false) := do
+    let raw ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot claims tool
+      (.obj #[("provider", .str "leanci"), ("size", .str "small"), ("ttl_minutes", .nat 5),
+        ("owner_user_id", .str bobId)]) nowSec none operatorOverride uid admin
+    return (OrbBin.Json.parse raw).toOption.getD .null
+  let catalogOptIn (response : OrbBin.Json.JVal) :=
+    ((((response.field? "result").getD .null).fieldArr? "providers").getD #[]).find?
+      (·.fieldStr? "provider" == some "leanci") |>.bind (·.fieldBool? "user_enabled")
+  let operatorErrorCode (response : OrbBin.Json.JVal) :=
+    ((response.field? "error").getD .null).fieldStr? "code"
+  let freshStored ← operatorCall freshOperator "spawn_managed_machine"
+  let freshDirect ← operatorCall directOperator "spawn_managed_machine" bootAdminId true
+  let forgedOperator ← operatorCall { storedOperator with sessionId := "managed-pref-unrecorded" } "spawn_managed_machine" bobId true
+  if operatorErrorCode freshStored != some "provider_disabled_for_user" then
+    return (← fail "fresh stored operator bypassed non-boat opt-in")
+  if operatorErrorCode freshDirect != some "provider_disabled_for_user" ||
+      operatorErrorCode forgedOperator != some "provider_disabled_for_user" ||
+      (← operatorObservations.get) != 0 then
+    return (← fail "fresh or unrecorded operator borrowed another user's managed preferences")
+  let .ok () ← setUserManagedPref mStore "managed-pref-missing-user" "leanci" true "operator-pref-test"
+    | return (← fail "missing-user preference fixture failed")
+  let missingUser ← operatorCall directOperator "spawn_managed_machine" "managed-pref-missing-user" true
+  if operatorErrorCode missingUser != some "user_unavailable" ||
+      (← operatorObservations.get) != 0 then
+    return (← fail "managed preference principal must not bypass the owning-user guard")
+  let storedCatalog ← operatorCall storedOperator "list_managed_machines"
+  let directCatalog ← operatorCall directOperator "list_managed_machines" bobId
+  operatorObservations.set 0
+  let storedSpawn ← operatorCall storedOperator "spawn_managed_machine"
+  let directSpawn ← operatorCall directOperator "spawn_managed_machine" bobId
+  if catalogOptIn storedCatalog != some true || catalogOptIn directCatalog != some true ||
+      operatorErrorCode storedSpawn != some "provider_at_capacity" ||
+      operatorErrorCode directSpawn != some "provider_at_capacity" ||
+      (← operatorObservations.get) != 2 then
+    return (← fail s!"stored/direct operator did not honor its authenticated owner's managed opt-in: stored_catalog={reprStr (catalogOptIn storedCatalog)} direct_catalog={reprStr (catalogOptIn directCatalog)} stored_spawn={OrbBin.Json.renderCompact storedSpawn} direct_spawn={OrbBin.Json.renderCompact directSpawn} observations={← operatorObservations.get}")
+  let priorSinglePrefs ← getUserManagedPrefs mStore "admin"
+  let .ok () ← setUserManagedPref mStore "admin" "leanci" false "operator-pref-test"
+    | return (← fail "single-tenant managed preference fixture failed")
+  operatorObservations.set 0
+  let singleStoredOff ← operatorCall singleOperator "spawn_managed_machine"
+  let singleDirectOff ← operatorCall directOperator "spawn_managed_machine" "" true
+  if operatorErrorCode singleStoredOff != some "provider_disabled_for_user" ||
+      operatorErrorCode singleDirectOff != some "provider_disabled_for_user" ||
+      (← operatorObservations.get) != 0 then
+    return (← fail "single-tenant operator bypassed admin's non-boat opt-out")
+  let .ok () ← setUserManagedPref mStore "admin" "leanci" true "operator-pref-test"
+    | return (← fail "single-tenant managed preference fixture failed")
+  let singleStoredCatalog ← operatorCall singleOperator "list_managed_machines"
+  let singleDirectCatalog ← operatorCall directOperator "list_managed_machines" "" true
+  operatorObservations.set 0
+  let singleStoredSpawn ← operatorCall singleOperator "spawn_managed_machine"
+  let singleDirectSpawn ← operatorCall directOperator "spawn_managed_machine" "" true
+  discard <| execParamQuery mStore.db
+    "DELETE FROM user_managed_provider_prefs WHERE user_id='admin' AND provider='leanci';" #[]
+  if let some (_, enabled) := priorSinglePrefs.find? (·.1 == "leanci") then
+    discard <| setUserManagedPref mStore "admin" "leanci" enabled "operator-pref-restored"
+  if catalogOptIn singleStoredCatalog != some true || catalogOptIn singleDirectCatalog != some true ||
+      operatorErrorCode singleStoredSpawn != some "provider_at_capacity" ||
+      operatorErrorCode singleDirectSpawn != some "provider_at_capacity" ||
+      (← operatorObservations.get) != 2 then
+    return (← fail s!"single-tenant operator must read admin preferences without changing ownership or user guards: stored_catalog={reprStr (catalogOptIn singleStoredCatalog)} direct_catalog={reprStr (catalogOptIn singleDirectCatalog)} stored_spawn={OrbBin.Json.renderCompact singleStoredSpawn} direct_spawn={OrbBin.Json.renderCompact singleDirectSpawn} observations={← operatorObservations.get}")
+  let .ok afterOperatorPrefs ← execParamQuery mStore.db "SELECT COUNT(*) FROM managed_machines;" #[]
+    | return (← fail "operator preference machine count failed")
+  if afterOperatorPrefs != afterOptIn then
+    return (← fail "operator preference rejection must rent nothing")
   let (bobVmAutoSt, bobVmAutoBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"auto\",\"name\":\"bob-vm\",\"wait\":true}" "bob-managed-create"
   let beforeRetrySpend ← getUserSpentTodayCents store bobId (formatEpochIso8601Utc nowSec |>.take 10 |>.toString)
   let (bobRetrySt, bobRetryBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"auto\",\"name\":\"bob-vm\",\"wait\":true}" "bob-managed-create"
@@ -6600,6 +6883,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     OrbCore.ManagedHarvestTests.run tmpRoot
     OrbCore.AutoPlacementTests.run tmpRoot
     OrbCore.ManagedReuseTests.run tmpRoot
+    runManagedMcpProviderContractTests tmpRoot
     OrbCore.ManagedSnapshotLifecycleTests.run tmpRoot
     OrbCore.NodeLivenessTests.run tmpRoot
     OrbCore.ComputeRollupTests.run tmpRoot

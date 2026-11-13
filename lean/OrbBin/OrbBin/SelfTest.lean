@@ -981,6 +981,38 @@ def runAllTests : IO UInt32 := do
       for memTool in ["memory_search_knowledge", "memory_get_knowledge_page", "memory_get_knowledge_tree", "memory_recall"] do
         assertTrue s!"Catalog {role} includes {memTool}"
           (tools.any (fun t => (t.fieldStr? "name") == some memTool))
+      let some spawn := tools.find? (·.fieldStr? "name" == some "spawn_managed_machine")
+        | throw <| IO.userError s!"Missing spawn_managed_machine for {role}"
+      let schema := spawn.fieldOrNull "inputSchema"
+      let props := schema.fieldOrNull "properties"
+      let provider := props.fieldOrNull "provider"
+      assertEq s!"Catalog {role} managed provider enum"
+        (provider.fieldArr? "enum") (some #[.str "boat", .str "leanci", .str "colab"])
+      assertEq s!"Catalog {role} managed provider default" (provider.fieldStr? "default") (some "boat")
+      assertTrue s!"Catalog {role} managed provider optional"
+        (!((schema.fieldArr? "required").getD #[]).contains (.str "provider"))
+      let size := props.fieldOrNull "size"
+      assertEq s!"Catalog {role} catalog profile is string" (size.fieldStr? "type") (some "string")
+      for restriction in ["enum", "const", "pattern", "anyOf", "oneOf"] do
+        assertTrue s!"Catalog {role} live profiles not restricted by {restriction}"
+          ((size.field? restriction).isNone)
+      for (resource, needed) in [("cpu", 32), ("ram_gb", 96)] do
+        let field := props.fieldOrNull resource
+        assertEq s!"Catalog {role} {resource} integer" (field.fieldStr? "type") (some "integer")
+        assertEq s!"Catalog {role} {resource} positive" (field.fieldNat? "minimum") (some 1)
+        assertTrue s!"Catalog {role} {resource} accepts leanci 2xlarge"
+          ((field.fieldNat? "maximum").getD needed ≥ needed)
+      let some listMachines := tools.find? (·.fieldStr? "name" == some "list_managed_machines")
+        | throw <| IO.userError s!"Missing list_managed_machines for {role}"
+      for tool in [spawn, listMachines] do
+        let desc := (tool.fieldStr? "description").getD ""
+        for term in ["boat", "leanci", "colab", "opt-in", "catalog", "2xlarge", "32 vCPU/96 GiB", "t4", "disk"] do
+          assertTrue s!"Catalog {role} managed description includes {term}" (desc.splitOn term |>.length > 1)
+      let some start := tools.find? (·.fieldStr? "name" == some "start_mission")
+        | throw <| IO.userError s!"Missing start_mission for {role}"
+      let remote := ((start.fieldOrNull "inputSchema").fieldOrNull "properties").fieldOrNull "remote_node_id"
+      assertTrue s!"Catalog {role} provider-qualified managed placement"
+        (((remote.fieldStr? "description").getD "").splitOn "auto-managed:<provider>:<size>" |>.length > 1)
     | _ => throw <| IO.userError s!"Failed parsing catalog JSON for {role}"
 
   -- 7b. `sandboxed-mcp` `--preflight-cache` zero-RTT hit & fail-closed rejection

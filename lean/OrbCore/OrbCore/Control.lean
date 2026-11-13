@@ -4817,7 +4817,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       | none =>
         return .ok (mkJson 200 (renderManagedBudgetJson mf callerUidOpt (infS + cmpS) caller.dailySpendCapCents?))
       | some mst =>
-        let uPrefs ← if caller.userId.isEmpty then pure #[] else getUserManagedPrefs mst caller.userId
+        let uPrefs ← getUserManagedPrefs mst (if caller.userId.isEmpty then "admin" else caller.userId)
         match ← loadManagedFleet mst mf.enabled mf.boatEnabled mf.dailyCapCents mf.spentTodayCents mf.maxConcurrent with
         | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
         | .ok live =>
@@ -4837,7 +4837,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
       let rawProv := ((jv.fieldStr? "provider").getD "boat").trimAscii.toString.toLower
       let canonProv := canonicalizeProvider rawProv
-      let uPrefs ← if caller.userId.isEmpty then pure #[] else getUserManagedPrefs mst caller.userId
+      let uPrefs ← getUserManagedPrefs mst (if caller.userId.isEmpty then "admin" else caller.userId)
       let prov ←
         if rawProv == "auto" then
           match knownProviders.find? (fun p => isUserManagedProviderEnabled uPrefs p) with
@@ -6672,13 +6672,11 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       | .error _ => pure ""
     discard <| backfillManagedMachineOwner managedStore bootAdminId
     hydrateLegacyDataDir cfg.workingDir dataRoot store managedStore bootAdminId cfg.devMode
-    match ← migrateLegacyLeanciSecret dataRoot with
-    | .ok true => IO.eprintln "[sandboxed-sh] sealed lean.ci key moved to its current name"
-    | .ok false => pure ()
-    | .error e => IO.eprintln s!"[sandboxed-sh] sealed lean.ci key migration failed: {e}"
     let repairedOwners ← repairManagedMachineOwners store managedStore
     if repairedOwners > 0 then
       IO.eprintln s!"[orb-core] repaired the owner of {repairedOwners} pre-cutover managed machine row(s)"
+    if let .error e ← migrateManagedProviderOptIns managedStore bootAdminId (formatEpochIso8601Utc nowBootSec) then
+      IO.eprintln s!"[orb-core] managed provider opt-in migration failed: {e}"
     let effAskTmpRoot : System.FilePath :=
       let fromCfg := cfg.askSandboxTmpRoot.trimAscii.toString
       if !fromCfg.isEmpty then System.FilePath.mk fromCfg else System.FilePath.mk "/tmp"

@@ -265,6 +265,13 @@ def dispatchMcpToolCall
     | some "" => pure true
     | some uid => do pure (((← getUserById? store uid).map (fun u => u.role == "admin" && !u.disabled)).getD false)
 
+  let managedPreferenceUserId :=
+    if !callerUserId.isEmpty then callerUserId
+    else if !callerMid.isEmpty || claims.isExternal then ""
+    else match operatorPrincipal? with
+      | some uid => if uid.isEmpty then "admin" else uid
+      | none => ""
+
   let canManageMachine (machine : ManagedMachine) : IO Bool := do
     if operatorIsAdmin then return true
     if let some uid := operatorPrincipal? then
@@ -295,6 +302,13 @@ def dispatchMcpToolCall
     | some pair => return .ok pair.1
     | none => resolveManagedProvider store.rootDir name
 
+  let resolveSpawnSize (spawnArgs : JVal) : IO (Except String String) := do
+    let prov := canonicalizeProvider ((spawnArgs.fieldStr? "provider").getD "boat")
+    let catalog := JVal.arr #[.obj (#[ ("provider", .str prov)] ++ ManagedProvider.catalogFields prov)]
+    let catalog ← if managedProvisioningOverride?.isSome then pure catalog
+      else observeManagedProviderCatalog store.rootDir catalog
+    return resolveManagedSpawnSize prov spawnArgs catalog
+
   -- One spawn path for `spawn_managed_machine` and `start_mission(auto-managed)`:
   -- same admission, pricing, project-scoped snapshot resolution and bootstrap.
   let spawnForCaller (spawnArgs : JVal) (forkOfProviderId : String) : IO (Except (String × String) ManagedMachine) := do
@@ -304,13 +318,15 @@ def dispatchMcpToolCall
       | .ok f => pure f
       | .error _ => pure defaultFleet
     let prov := canonicalizeProvider ((spawnArgs.fieldStr? "provider").getD "boat")
-    let sz := (spawnArgs.fieldStr? "size").getD "small"
+    let prefs ← if managedPreferenceUserId.isEmpty then pure #[] else getUserManagedPrefs mc managedPreferenceUserId
+    if !isUserManagedProviderEnabled prefs prov then
+      return .error ("provider_disabled_for_user", "This cloud provider is disabled in your preferences.")
+    let sz ← match ← resolveSpawnSize spawnArgs with
+      | .ok size => pure size
+      | .error e => return .error ("invalid_arguments", e)
     let ttl := (spawnArgs.fieldUInt64? "ttl_minutes").getD 60
     let sName ← newManagedSandboxName ((spawnArgs.fieldStr? "name").getD "")
     let mid ← newUuidV4
-    let prefs ← if callerUserId.isEmpty then pure #[] else getUserManagedPrefs mc callerUserId
-    if !isUserManagedProviderEnabled prefs prov then
-      return .error ("provider_disabled_for_user", "This cloud provider is disabled in your preferences.")
     let quote ← match quoteManagedSpawnCents prov sz ttl (managedProvisioningOverride?.map Prod.fst) with
       | .ok cents => pure cents
       | .error e => return .error ("invalid_arguments", e)
@@ -697,12 +713,22 @@ def dispatchMcpToolCall
     -- `auto-managed[:size]` rents one machine for this child through the shared spawn
     -- path. Nothing is rented when validation, admission or the snapshot lookup fails.
     let (explicitRn?, rentedMachineId, reused?) ← if !autoManaged then pure (requestedRn?, "", none) else do
-      let parts := (((requestedRn?.getD "").toLower.splitOn ":").drop 1).filter (fun part => part != "boat" && !part.isEmpty)
+      let (provider, size) ← match parseAutoManagedTarget (requestedRn?.getD "") with
+        | .ok target => pure target
+        | .error e => return mcpErr "invalid_arguments" e
+      let prefs ← match mc? with
+        | some mc => if managedPreferenceUserId.isEmpty then pure #[] else getUserManagedPrefs mc managedPreferenceUserId
+        | none => pure #[]
+      if !isUserManagedProviderEnabled prefs provider then
+        return mcpErr "provider_disabled_for_user" "This cloud provider is disabled in your preferences."
+      let size ← match resolveManagedSpawnSize provider (.obj #[("size", .str size)]) with
+        | .ok size => pure size
+        | .error e => return mcpErr "invalid_arguments" e
       -- An idle VM left by an ended child of this same caller is taken over instead
       -- of renting another. A snapshot request always gets a fresh machine.
       let reuseRequest : ManagedReuse.Request := {
-        provider := "boat"
-        size := parts.head?.getD "small"
+        provider := provider
+        size := size
         parentMission := callerMid
         userId := callerUserId
         project := effProj
@@ -720,7 +746,7 @@ def dispatchMcpToolCall
           | some key => pure key
           | none => newUuidV4
         let spawnArgs := JVal.obj #[
-          ("provider", .str "boat"), ("size", .str (parts.head?.getD "small")),
+          ("provider", .str provider), ("size", .str size),
           ("ttl_minutes", JVal.uint64 ((args.fieldUInt64? "managed_ttl_minutes").getD 60)),
           ("from_snapshot", .str ((args.fieldStr? "managed_from_snapshot").getD "")),
           ("idempotency_key", .str ("start-mission:" ++ retryKey))]
@@ -1041,7 +1067,7 @@ def dispatchMcpToolCall
         defaultFleet.dailyCapCents defaultFleet.spentTodayCents defaultFleet.maxConcurrent with
       | .ok f => pure f
       | .error _ => pure defaultFleet
-    let prefs ← if callerUserId.isEmpty then pure #[] else getUserManagedPrefs mc callerUserId
+    let prefs ← if managedPreferenceUserId.isEmpty then pure #[] else getUserManagedPrefs mc managedPreferenceUserId
     let .ok catalog ← loadManagedProviderCatalog mc store.rootDir fleet
         (normalizeMcpRole claims.role == "operator") prefs (managedProvisioningOverride?.map Prod.fst)
       | return mcpErr "unavailable" "managed_provider_catalog_unavailable"
@@ -1086,8 +1112,15 @@ def dispatchMcpToolCall
       | .ok saved => return .ok ((OrbBin.Json.parse (renderManagedMachineItemJson saved)).toOption.getD (.obj #[]))
     -- Arguments that can never be admitted are refused now, not in a receipt.
     let admit : IO (Except String Unit) := do
-      match quoteManagedSpawnCents (canonicalizeProvider ((args.fieldStr? "provider").getD "boat"))
-          ((args.fieldStr? "size").getD "small") ((args.fieldUInt64? "ttl_minutes").getD 60)
+      let provider := canonicalizeProvider ((args.fieldStr? "provider").getD "boat")
+      let prefs ← match mc? with
+        | some mc => if managedPreferenceUserId.isEmpty then pure #[] else getUserManagedPrefs mc managedPreferenceUserId
+        | none => pure #[]
+      if !isUserManagedProviderEnabled prefs provider then return .error "provider_disabled_for_user"
+      let size ← match ← resolveSpawnSize args with
+        | .ok size => pure size
+        | .error e => return .error e
+      match quoteManagedSpawnCents provider size ((args.fieldUInt64? "ttl_minutes").getD 60)
           (managedProvisioningOverride?.map Prod.fst) with
       | .ok _ => return .ok ()
       | .error e => return .error e
