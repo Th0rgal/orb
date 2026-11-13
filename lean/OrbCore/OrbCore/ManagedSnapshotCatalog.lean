@@ -128,6 +128,17 @@ def resolveForDelete (entries : Array Entry) (requested : String) : Except Strin
     throw ("managed_snapshot_ambiguous:" ++ String.intercalate "," (hits.map (·.name)).toList)
   return hits[0]!.name
 
+/-- Files Core's own bootstrap wrote that hold a credential of this one VM. They
+    must not travel in a snapshot; the next provisioning run rewrites them. On
+    lean.ci this is the copy of the VM-scoped build-cache token, which the
+    provider blanks in its own files but not in ours. -/
+def guestCredentialFiles : Array String :=
+  #["/etc/orb/leanci-env", "/etc/profile.d/zz-orb-leanci.sh"]
+
+/-- Run on the guest before the provider saves it: remove those files and flush. -/
+def preSaveCommand : String :=
+  "sudo -n rm -f -- " ++ String.intercalate " " guestCredentialFiles.toList ++ " && sync"
+
 def entryJson (e : Entry) : JVal :=
   .obj #[("name", .str e.name), ("label", .str e.label), ("project", .str e.project),
     ("status", .str e.status),

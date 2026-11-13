@@ -817,8 +817,13 @@ label for older names.
 
 - **Save** (`snapshot_managed_machine`): the caller must manage the machine, have
   a project, and the machine must be running. The label is slugged; a label is
-  taken until its snapshot is deleted or failed. The guest is `sync`ed, then the
-  provider saves it. Nothing is removed from the VM first.
+  taken until its snapshot is deleted or failed. Core first removes the
+  credential files its own bootstrap wrote for this VM (`/etc/orb/leanci-env`
+  and `/etc/profile.d/zz-orb-leanci.sh`, the copy of lean.ci's VM-scoped cache
+  token) and `sync`s; if that command fails the snapshot is not taken
+  (`managed_snapshot_scrub_failed`). The running VM loses those settings until
+  it is provisioned again. Nothing else is removed: mission files, checkouts and
+  any credential a mission placed on the VM are saved as they are.
 - **List** (`list_managed_snapshots`): the caller's project only.
 - **Delete** (`delete_managed_snapshot`): by label or provider name, resolved
   inside the caller's project; a name from another project is `not_found` and

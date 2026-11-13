@@ -898,8 +898,14 @@ def saveProjectSnapshot (store : CoreStore) (provider : ManagedProvider.Provider
     | .ok entries => pure entries
     | .error e => return .error e
   if ManagedSnapshotCatalog.labelTaken existing label then return .error "managed_snapshot_label_exists"
-  -- Flush what the guest has written; a failure here does not block the save.
-  discard <| provider.exec machine.effectiveProviderId "sync" 30
+  -- Remove this VM's own credential files and flush. A snapshot that might
+  -- still carry them is not taken.
+  match ← provider.exec machine.effectiveProviderId ManagedSnapshotCatalog.preSaveCommand 30 with
+  | .error _ => return .error "managed_snapshot_scrub_failed"
+  | .ok reply =>
+    let code := (reply.fieldInt? "exitCode").orElse (fun _ => reply.fieldInt? "exit_code")
+      |>.orElse (fun _ => reply.fieldInt? "code")
+    if code.any (· != 0) then return .error "managed_snapshot_scrub_failed"
   if let .error e ← provider.saveSnapshot machine.effectiveProviderId name then
     return .error s!"managed_snapshot_save_failed:{e.code}:{e.status}"
   let (status, sizeBytes) ← match ← provider.getSnapshot name with

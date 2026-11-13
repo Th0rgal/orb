@@ -63,6 +63,8 @@ private def gatewayTests (root : String) : IO Unit := do
     let saved ← IO.mkRef (#[] : Array (String × String))
     let forks ← IO.mkRef (#[] : Array String)
     let spawns ← IO.mkRef (0 : Nat)
+    let scrubs ← IO.mkRef (#[] : Array String)
+    let scrubFails ← IO.mkRef false
     let provider : Provider := { template with
       listSnapshots := do return .ok (← inventory.get)
       saveSnapshot := fun providerId name => do
@@ -76,6 +78,11 @@ private def gatewayTests (root : String) : IO Unit := do
       deleteSnapshot := fun name => do
         inventory.modify (·.filter (·.name != name))
         return .ok ()
+      exec := fun providerId command timeout => do
+        if command == preSaveCommand then
+          scrubs.modify (·.push providerId)
+          if ← scrubFails.get then return .ok (.obj #[("exitCode", .nat 1)])
+        template.exec providerId command timeout
       spawn := fun spec => do
         spawns.modify (· + 1)
         template.spawn spec
@@ -103,6 +110,14 @@ private def gatewayTests (root : String) : IO Unit := do
       (resultOf first).fieldStr? "label" == some "warm-build" && (resultOf first).fieldStr? "project" == some "alpha" &&
       (resultOf first).fieldStr? "status" == some "saving") s!"a snapshot is saved under the project: {renderCompact first}"
     check ((← saved.get) == #[("remote-alpha-vm", name)]) "the provider saves the machine's provider id under that name"
+    check ((← scrubs.get) == #["remote-alpha-vm"]) "the VM's own credential files are removed before the save"
+    check (preSaveCommand == "sudo -n rm -f -- /etc/orb/leanci-env /etc/profile.d/zz-orb-leanci.sh && sync")
+      "the scrub names the lean.ci cache-token copy and its profile hook"
+    scrubFails.set true
+    let unscrubbed ← call "alpha-lead" "snapshot_managed_machine" #[("machine_id", .str "alpha-vm"), ("name", .str "unscrubbed")]
+    check (errorOf unscrubbed == (some "snapshot_failed", some "managed_snapshot_scrub_failed") && (← saved.get).size == 1)
+      "a failed scrub saves nothing"
+    scrubFails.set false
     -- Refusals save nothing.
     let again ← call "alpha-lead" "snapshot_managed_machine" #[("machine_id", .str "alpha-vm"), ("name", .str "warm build")]
     check (errorOf again == (some "snapshot_failed", some "managed_snapshot_label_exists")) "a label in use is refused"
