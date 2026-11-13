@@ -1278,6 +1278,125 @@ private def loginSessionResponse (sess : CliLoginSession) : Nat × String × Byt
   jsonResp 200 (.obj #[("status", .str sess.status), ("auth_url", .str sess.authUrl),
     ("message", sess.message?.map JVal.str |>.getD .null)])
 
+/-- Parsed CLIProxyAPI `/v0/management/auth-files` entry used internally to join sidecar
+    parked credentials onto Core provider rows without exposing `name` or `email` on any
+    API response. -/
+private structure SidecarAuthFileEntry where
+  name : String
+  provider : String
+  email : String := ""
+  disabled : Bool := false
+  remainingSecs : UInt64 := 0
+  retryAt? : Option String := none
+  reason? : Option String := none
+  deriving Inhabited
+
+private def cooldownReasonSlug : CooldownReason → String
+  | .rateLimit   => "rate_limit"
+  | .usageLimit  => "usage_limit"
+  | .authFailure => "auth_failure"
+  | .overloaded  => "overloaded"
+  | .serverError => "server_error"
+
+/-- Read CLIProxyAPI `/v0/management/auth-files` with a strict 2-second timeout.
+    Any transport error, missing management key, or malformed payload degrades to `#[]`. -/
+private def fetchSidecarAuthFiles : IO (Array SidecarAuthFileEntry) := do
+  let mgmtBase ← resolveCliProxyBaseUrl
+  let some mgmtKey ← resolveCliProxyMgmtKey?
+    | return #[]
+  match ← sendJsonRequest "GET" s!"{mgmtBase}/v0/management/auth-files" (some mgmtKey) none #[] 2000 262144 with
+  | .ok (200, _, some jv) =>
+    let files := (jv.fieldArr? "files").getD #[]
+    let mut out : Array SidecarAuthFileEntry := #[]
+    for f in files do
+      let name := (f.fieldStr? "name").getD ""
+      let prov := ((f.fieldStr? "provider").orElse (fun _ => f.fieldStr? "type")).getD "" |>.trimAscii.toString.toLower
+      if !name.isEmpty && !prov.isEmpty then
+        let email := ((f.fieldStr? "email").getD "").trimAscii.toString
+        let disabled := (f.fieldBool? "disabled").getD false
+        let cds := (f.fieldArr? "cooldowns").getD #[]
+        let mut bestRem : UInt64 := 0
+        let mut bestRetry? : Option String := none
+        let mut bestReason? : Option String := none
+        for cd in cds do
+          let rem := (cd.fieldUInt64? "remaining_seconds").getD 0
+          if rem > bestRem then
+            bestRem := rem
+            bestRetry? := (cd.fieldStr? "retry_at").filter (!·.isEmpty)
+            bestReason? := (cd.fieldStr? "reason").filter (!·.isEmpty)
+        out := out.push {
+          name := name
+          provider := prov
+          email := email
+          disabled := disabled
+          remainingSecs := bestRem
+          retryAt? := bestRetry?
+          reason? := bestReason?
+        }
+    return out
+  | _ => return #[]
+
+/-- Match an OAuth-only Core provider row to a single enabled CLIProxyAPI auth file:
+    - (a) Row email set and 1 OAuth-only row + 1 enabled file of that type carry it: match.
+    - (b) Otherwise, 1 OAuth-only row and 1 enabled file of that type, and the file's email is empty or equal to the row's: match.
+    - (c) 1 row, 1 file, both emails set and different: no match.
+    - (d) Anything else: no match. -/
+private def matchSidecarFileForProvider?
+    (hps : Array HydratedProvider)
+    (files : Array SidecarAuthFileEntry)
+    (hp : HydratedProvider) : Option SidecarAuthFileEntry :=
+  if !(hp.hasOAuth && !hp.hasApiKey) then none
+  else
+    let enabledFiles := files.filter (fun (f : SidecarAuthFileEntry) =>
+      !f.disabled && providerTypeMatchesAuthType hp.providerType f.provider)
+    let oauthRows := hps.filter (fun (p : HydratedProvider) =>
+      p.hasOAuth && !p.hasApiKey && p.providerType == hp.providerType)
+    let rowEmail := hp.accountEmail.trimAscii.toString.toLower
+    let emailRows :=
+      if rowEmail.isEmpty then #[]
+      else oauthRows.filter (fun (p : HydratedProvider) => p.accountEmail.trimAscii.toString.toLower == rowEmail)
+    let emailFiles :=
+      if rowEmail.isEmpty then #[]
+      else enabledFiles.filter (fun (f : SidecarAuthFileEntry) => f.email.trimAscii.toString.toLower == rowEmail)
+    if !rowEmail.isEmpty && emailRows.size == 1 && emailFiles.size == 1 then
+      emailFiles[0]?
+    else if oauthRows.size == 1 && enabledFiles.size == 1 then
+      let f := enabledFiles[0]!
+      let fileEmail := f.email.trimAscii.toString.toLower
+      if fileEmail.isEmpty || fileEmail == rowEmail then some f else none
+    else
+      none
+
+/-- Clear a matched sidecar auth file's parked state by toggling `disabled: true` then `disabled: false`
+    via `PATCH /v0/management/auth-files/status` (2-second timeout per call).
+    - If `file.remainingSecs == 0`, returns `none` without making any sidecar PATCH calls.
+    - If the first PATCH (`disabled: true`) fails or the management key is missing, returns `some (502, ...)`
+      naming `providerId` and stating that the sidecar cooldown was not cleared and the login was not disabled.
+    - If the second PATCH (`disabled: false`) fails, retries once; if still failing, returns `some (502, ...)`
+      naming `providerId`, stating that the login was left disabled, and advising to re-enable it in CLIProxyAPI
+      (never exposing the file name or email). -/
+private def clearSidecarAuthFileCooldown (providerId : String) (file : SidecarAuthFileEntry) : IO (Option (Nat × String × ByteArray)) := do
+  if file.remainingSecs == 0 then return none
+  let mgmtBase ← resolveCliProxyBaseUrl
+  let some mgmtKey ← resolveCliProxyMgmtKey?
+    | return some (jsonErr 502 s!"Sidecar cooldown for provider {providerId} was not cleared and the login was not disabled")
+  let url := s!"{mgmtBase}/v0/management/auth-files/status"
+  let disableBody : JVal := .obj #[("name", .str file.name), ("disabled", .bool true)]
+  let enableBody : JVal := .obj #[("name", .str file.name), ("disabled", .bool false)]
+  match ← sendJsonRequest "PATCH" url (some mgmtKey) (some disableBody) #[] 2000 65536 with
+  | .ok (c, _, _) =>
+    if !(200 ≤ c && c < 300) then
+      return some (jsonErr 502 s!"Sidecar cooldown for provider {providerId} was not cleared and the login was not disabled")
+  | .error _ =>
+    return some (jsonErr 502 s!"Sidecar cooldown for provider {providerId} was not cleared and the login was not disabled")
+  let tryEnable : IO Bool := do
+    match ← sendJsonRequest "PATCH" url (some mgmtKey) (some enableBody) #[] 2000 65536 with
+    | .ok (c, _, _) => return (200 ≤ c && c < 300)
+    | .error _ => return false
+  if ← tryEnable then return none
+  if ← tryEnable then return none
+  return some (jsonErr 502 s!"CLIProxyAPI login for provider {providerId} was left disabled because re-enabling failed after retry; re-enable it in CLIProxyAPI")
+
 /-! ## Unified Dispatcher for AI Providers, Proxy Analytics, Model-Routing Health/Test & Catalog -/
 
 set_option maxHeartbeats 800000 in
@@ -1420,17 +1539,42 @@ def dispatchProviderAndAiRoute
   if method == "GET" && segs == ["api", "model-routing", "health"] then
     let nowSec ← nowEpoch
     let hps ← loadHydratedProviders store workingDir
-    -- Both owners of a cooldown: the legacy ref and the health tracker the proxy plans from.
+    -- Both Core owners of a cooldown (`proxyCooldownsRef` and `ProviderHealthTracker`),
+    -- plus CLIProxyAPI's `/v0/management/auth-files` cooldowns for matched OAuth-only rows.
     let tracked ← match healthTracker? with
       | some t => snapshotActiveHealthCooldowns t nowSec
       | none => pure #[]
     let cooldowns := (← proxyCooldownsRef.get) ++ tracked
+    let sidecarFiles ← fetchSidecarAuthFiles
     let usageCached ← hub.mu.atomically (do return (← get).usageEntries)
     let mut snaps : Array JVal := #[]
     for hp in hps do
       let keys := healthKeys hp
-      let cdRem : UInt64 :=
-        (cooldowns.filter (fun c => keys.contains c.accountId)).foldl (fun acc c => max acc (c.remainingSecs nowSec)) 0
+      let coreCooldowns := cooldowns.filter (fun c => keys.contains c.accountId)
+      let coreRem : UInt64 :=
+        coreCooldowns.foldl (fun acc c => max acc (c.remainingSecs nowSec)) 0
+      let coreReason? : Option String :=
+        (coreCooldowns.foldl (fun (best : UInt64 × Option String) c =>
+          let r := c.remainingSecs nowSec
+          if r > best.1 then (r, some (cooldownReasonSlug c.reason)) else best) (0, none)).2
+      let matchedSidecar? := matchSidecarFileForProvider? hps sidecarFiles hp
+      let sidecarRem : UInt64 := (matchedSidecar?.map (·.remainingSecs)).getD 0
+      let cdRem : UInt64 := max coreRem sidecarRem
+      let (parkedUntilJv, parkedReasonJv, parkedSourceJv) : JVal × JVal × JVal :=
+        if sidecarRem > 0 && sidecarRem >= coreRem then
+          let uJv := match matchedSidecar?.bind (·.retryAt?) with
+            | some iso => .str iso
+            | none => .str (formatEpochIso8601Utc (nowSec + sidecarRem))
+          let rJv := match matchedSidecar?.bind (·.reason?) with
+            | some r => .str r
+            | none => .str "credential_quota"
+          (uJv, rJv, .str "sidecar")
+        else if coreRem > 0 then
+          (.str (formatEpochIso8601Utc (nowSec + coreRem)),
+           .str (coreReason?.getD "rate_limit"),
+           .str "core")
+        else
+          (.null, .null, .null)
       let failCnt : Nat := if cdRem > 0 then 1 else 0
       let remQuota : JVal :=
         match usageCached.find? (fun u => u.providerId == hp.id) with
@@ -1447,6 +1591,9 @@ def dispatchProviderAndAiRoute
         ("remaining_quota_pct", remQuota),
         ("consecutive_failures", JVal.nat failCnt),
         ("cooldown_secs_remaining", JVal.uint64 cdRem),
+        ("parked_until", parkedUntilJv),
+        ("parked_reason", parkedReasonJv),
+        ("parked_source", parkedSourceJv),
         ("sample_count", JVal.nat 0),
         ("antigravity_refusal", .null)
       ])
@@ -1456,12 +1603,18 @@ def dispatchProviderAndAiRoute
     if !effAdmin then return some (jsonErr 403 "admin_required")
     let acctId := segs[3]!
     let hps ← loadHydratedProviders store workingDir
-    let keys := match hps.find? (fun hp => hp.id == acctId) with
+    let matchedProv? := hps.find? (fun hp => hp.id == acctId)
+    let keys := match matchedProv? with
       | some hp => healthKeys hp
       | none => #[acctId]
     let cur ← proxyCooldownsRef.get
     proxyCooldownsRef.set (cur.filter (fun c => !keys.contains c.accountId))
     if let some t := healthTracker? then clearAccountHealthWhere t keys.contains
+    if let some hp := matchedProv? then
+      let sidecarFiles ← fetchSidecarAuthFiles
+      if let some file := matchSidecarFileForProvider? hps sidecarFiles hp then
+        if let some errResp ← clearSidecarAuthFileCooldown hp.id file then
+          return some errResp
     return some (204, "text/plain", ByteArray.empty)
 
   if method == "POST" && segs.length == 5 && segs[0]? == some "api" && segs[1]? == some "model-routing" && segs[2]? == some "chains" && segs[4]? == some "test" then
