@@ -93,7 +93,7 @@ class PlanTest(unittest.TestCase):
 
     def test_ci_inputs_force_full(self):
         for p in (".github/workflows/ci.yml", "lean/lean-toolchain",
-                  "lean/turbo-lean-revision", "ci/domains.toml"):
+                  "lean/turbo-lean-revision", "lean/turbo-lean-hash", "ci/domains.toml"):
             r = ci_plan.plan([p], DOMAINS)
             self.assertTrue(r["full"], p)
             self.assertEqual(r["skipped"], [], p)
