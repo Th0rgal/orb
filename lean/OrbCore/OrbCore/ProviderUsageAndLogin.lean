@@ -499,6 +499,67 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
 
   return out.qsort (fun a b => a.priority < b.priority)
 
+def memberProviderDisplayName (hps : Array HydratedProvider) (hp : HydratedProvider) : String := Id.run do
+  let metaInfo := lookupProviderMeta hp.providerType
+  let sameType := hps.filter (fun p => p.enabled && (p.hasApiKey || p.hasOAuth) && p.providerType.toLower == hp.providerType.toLower)
+  if sameType.size ≤ 1 then
+    return metaInfo.name
+  let idx := (sameType.findIdx? (fun p => p.id == hp.id)).getD 0
+  return s!"{metaInfo.name} {idx + 1}"
+
+def renderMemberHydratedProviderJv (hp : HydratedProvider) (displayName : String)
+    (userEnabled? : Option Bool := none) (rejected : Bool := false) : JVal := Id.run do
+  let metaInfo := lookupProviderMeta hp.providerType
+  let hasCreds := hp.hasApiKey || hp.hasOAuth
+  let uEn := userEnabled?.getD true
+  let effEn := hp.enabled && uEn
+  let statusObj : JVal :=
+    if hasCreds && rejected then
+      .obj #[
+        ("type", .str "needs_reauth"),
+        ("message", .str "Sign in again: the provider rejected this login")
+      ]
+    else if hasCreds then
+      .obj #[
+        ("type", .str "connected"),
+        ("message", .str (if hp.hasOAuth then "Connected via OAuth" else "API key configured"))
+      ]
+    else
+      .obj #[
+        ("type", .str "needs_auth"),
+        ("message", .str "Credentials not configured")
+      ]
+  .obj #[
+    ("id", .str hp.id),
+    ("name", .str displayName),
+    ("provider_type", .str hp.providerType),
+    ("provider_type_name", .str metaInfo.name),
+    ("enabled", .bool hp.enabled),
+    ("globally_enabled", .bool hp.enabled),
+    ("user_enabled", .bool uEn),
+    ("effective_enabled", .bool effEn),
+    ("has_credentials", .bool hasCreds),
+    ("has_api_key", .bool hp.hasApiKey),
+    ("has_oauth", .bool hp.hasOAuth),
+    ("uses_oauth", .bool metaInfo.usesOAuth),
+    ("status", statusObj),
+    ("custom_models", .arr hp.customModels)
+  ]
+
+def projectMemberProviderUsageJv (jv : JVal) (displayName : String) : JVal :=
+  match jv with
+  | .obj fields =>
+    let scrubbed := fields.filterMap fun (k, v) =>
+      if k == "account_email" || k == "account_name" || k == "account" ||
+         k == "organization" || k == "organization_id" || k == "google_project_id" then
+        none
+      else if k == "provider_name" then
+        some ("provider_name", .str displayName)
+      else
+        some (k, v)
+    .obj scrubbed
+  | other => other
+
 def renderHydratedProviderJv (hp : HydratedProvider) (userEnabled? : Option Bool := none) (observedRpm? : Option UInt32 := none)
     (rejected : Bool := false) : JVal := Id.run do
   let metaInfo := lookupProviderMeta hp.providerType
@@ -1456,11 +1517,16 @@ def dispatchProviderAndAiRoute
       let mut arr : Array JVal := #[]
       for hp in hps do
         if effAdmin || (hp.enabled && (hp.hasApiKey || hp.hasOAuth)) then
-          let obs? ← match pacingTracker? with
-            | some tr => lookupObservedKeyRpm? tr hp.id
-            | none => pure none
           let uEn? := if isLegacyUnscoped then none else some (isUserProviderEnabled uPrefs hp.id)
-          arr := arr.push (renderHydratedProviderJv hp uEn? obs? (← loginRejectedFor hub store hp))
+          let rejected ← loginRejectedFor hub store hp
+          if effAdmin then
+            let obs? ← match pacingTracker? with
+              | some tr => lookupObservedKeyRpm? tr hp.id
+              | none => pure none
+            arr := arr.push (renderHydratedProviderJv hp uEn? obs? rejected)
+          else
+            let dispName := memberProviderDisplayName hps hp
+            arr := arr.push (renderMemberHydratedProviderJv hp dispName uEn? rejected)
       return some (jsonResp 200 (.arr arr))
 
     -- 5b. `GET /api/ai/providers/usage`
@@ -1473,7 +1539,11 @@ def dispatchProviderAndAiRoute
         if hp.enabled && (hp.hasApiKey || hp.hasOAuth) then
           match cached.find? (fun e => e.providerId == hp.id) with
           | some hit =>
-            entryPairs := entryPairs.push (hp.id, decorateCachedUsage hit nowSec)
+            let rawUsage := decorateCachedUsage hit nowSec
+            let projectedUsage :=
+              if effAdmin then rawUsage
+              else projectMemberProviderUsageJv rawUsage (memberProviderDisplayName hps hp)
+            entryPairs := entryPairs.push (hp.id, projectedUsage)
             -- Refresh in background if >= 120s old (skip OpenAI OAuth-only unless forced)
             let isCodexOAuthOnly := hp.providerType.toLower == "openai" && !hp.hasApiKey && hp.hasOAuth
             if nowSec >= hit.fetchedSec + 120 && !isCodexOAuthOnly then
@@ -1517,10 +1587,11 @@ def dispatchProviderAndAiRoute
         let hps ← loadHydratedProviders store workingDir
         match hps.find? (fun p => p.enabled && p.providerType.toLower == "anthropic" && (p.hasApiKey || p.hasOAuth)) with
         | some p =>
+          let pName := if effAdmin then p.name else memberProviderDisplayName hps p
           return some (jsonResp 200 (.obj #[
             ("configured", .bool true),
             ("provider_type", .str "anthropic"),
-            ("provider_name", .str p.name),
+            ("provider_name", .str pName),
             ("api_key", .null),
             ("oauth", .null),
             ("has_credentials", .bool true),
@@ -1690,18 +1761,31 @@ def dispatchProviderAndAiRoute
       if method == "GET" && segs.length == 4 then
         let some hp := matchedProv?
           | return some (jsonErr 404 "Provider not found")
-        let obs? ← match pacingTracker? with
-          | some tr => lookupObservedKeyRpm? tr hp.id
-          | none => pure none
-        return some (jsonResp 200 (renderHydratedProviderJv hp none obs? (← loginRejectedFor hub store hp)))
+        if !effAdmin && !(hp.enabled && (hp.hasApiKey || hp.hasOAuth)) then
+          return some (jsonErr 404 "Provider not found")
+        let rejected ← loginRejectedFor hub store hp
+        if effAdmin then
+          let obs? ← match pacingTracker? with
+            | some tr => lookupObservedKeyRpm? tr hp.id
+            | none => pure none
+          return some (jsonResp 200 (renderHydratedProviderJv hp none obs? rejected))
+        else
+          let uPrefs ← if isLegacyUnscoped then pure #[] else getUserProviderPrefs store callerUserId
+          let uEn? := if isLegacyUnscoped then none else some (isUserProviderEnabled uPrefs hp.id)
+          let dispName := memberProviderDisplayName hps hp
+          return some (jsonResp 200 (renderMemberHydratedProviderJv hp dispName uEn? rejected))
 
       -- `GET /api/ai/providers/:id/usage`
       if method == "GET" && segs.length == 5 && segs[4]? == some "usage" then
         let some hp := matchedProv?
           | return some (jsonErr 404 "Provider not found")
+        if !effAdmin && !(hp.enabled && (hp.hasApiKey || hp.hasOAuth)) then
+          return some (jsonErr 404 "Provider not found")
         let force := ((qParam? qMap "force").getD "false") == "true"
         let cachedOnly := ((qParam? qMap "cached_only").getD "false") == "true"
         let nowSec ← nowEpoch
+        let projectUsage (jv : JVal) : JVal :=
+          if effAdmin then jv else projectMemberProviderUsageJv jv (memberProviderDisplayName hps hp)
         if !force then
           let hit? ← hub.mu.atomically do
             let st ← get
@@ -1709,15 +1793,15 @@ def dispatchProviderAndAiRoute
           if let some hit := hit? then
             if nowSec >= hit.fetchedSec + 120 && !cachedOnly then
               refreshProviderUsageAsync hub hp
-            return some (jsonResp 200 (decorateCachedUsage hit nowSec))
+            return some (jsonResp 200 (projectUsage (decorateCachedUsage hit nowSec)))
         if cachedOnly then
-          return some (jsonResp 200 (.obj #[
+          return some (jsonResp 200 (projectUsage (.obj #[
             ("provider_type", .str hp.providerType),
             ("provider_name", .str hp.name),
             ("account_email", if hp.accountEmail.isEmpty then .null else .str hp.accountEmail),
             ("status", .str "pending"),
             ("cached", .bool false)
-          ]))
+          ])))
         let generation ← hub.mu.atomically (do return (← get).usageGeneration)
         let live ← probeProviderUsage hub hp
         let ts ← nowEpoch
@@ -1727,7 +1811,7 @@ def dispatchProviderAndAiRoute
           if st.usageGeneration == generation then
             let others := st.usageEntries.filter (fun e => e.providerId != hp.id)
             set { st with usageEntries := others.push { providerId := hp.id, fetchedSec := ts, fetchedIso := tsIso, payload := live, refreshing := false } }
-        return some (jsonResp 200 live)
+        return some (jsonResp 200 (projectUsage live))
 
       -- `POST /api/ai/providers/:id/default`
       if method == "POST" && segs.length == 5 && segs[4]? == some "default" then
