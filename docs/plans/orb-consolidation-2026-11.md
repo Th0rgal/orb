@@ -392,6 +392,34 @@ Actions and owners:
   every earlier master run since 12:04 was cancelled.
 - Live at 13:47: prod and dev both report build `7a9dfa936`.
 
+### A decision 13:47 UTC: IO-extern admission rejected as written
+
+Independent read-only review `41a10629-d3f7-4aa8-9158-894681f38399` returned
+**not acceptable as is**. Findings are source-derived; the reviewer executed
+no fixture.
+
+- Canonical-name forgery: the matcher checks the name `IO` inside the
+  inspected environment. A `prelude` module that defines
+  `def IO (α : Type) : Type := α` can make a pure extern pass as an IO extern.
+  This is a pure-extern policy bypass candidate, not a demonstrated false
+  theorem.
+- A terminal `IO` type does not show the foreign code stays out of the
+  verifier process: initializers and elaboration can run it.
+- `IO` is not a barrier to pure consumers: an action can be applied to a
+  world token and its result constructors inspected.
+- The existing fixtures test declarations next to an admitted opaque, not
+  axioms or `sorry` inside the admitted opaque itself.
+
+Conditions for approval: attest canonical `IO` with pinned import provenance;
+show dependency and replay coverage for admitted opaques; an explicit
+runtime-reachability contract or per-symbol trust approval; independent
+execution of the missing adversarial fixtures. Consequence: no upstream
+turbo-lean commit and no pin bump from this patch. OrbBin `PosixExt` (24
+externs) and Core `ConformanceRunner` (about 186) stay rejected by the audit,
+so the fail-closed build script cannot land on its own. Next step for A is a
+design choice between an explicit pinned per-symbol allowlist (the existing
+`--ffi-allow` mechanism) and the attested admission above; not yet assigned.
+
 ### A status 13:40 UTC: audit patch on security hold, lean.ci successor failed
 
 - **lean.ci successor failed.** Mission `d76cd199-448d-44ad-ab2b-afff1011c0f1`
