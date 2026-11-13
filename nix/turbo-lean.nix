@@ -16,11 +16,13 @@
   makeWrapper,
   procps,
   zstd,
+  # One pin for Nix and CI: `lean/turbo-lean-revision` (read by kernel-abi.yml)
+  # and its Nix source hash in `lean/turbo-lean-hash`.
   turboLeanSrc ? fetchFromGitHub {
     owner = "Th0rgal";
     repo = "turbo-lean";
-    rev = "aee2d179abf12aa2f9140cfec539f9465359d776";
-    hash = "sha256-V9Kq92gqnRe3zk3VaVyynZ25uABTn/U2qg+13nVfPoo=";
+    rev = lib.trim (builtins.readFile ../lean/turbo-lean-revision);
+    hash = lib.trim (builtins.readFile ../lean/turbo-lean-hash);
   },
   leanToolchain ? null,
 }:
