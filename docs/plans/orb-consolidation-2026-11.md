@@ -113,7 +113,7 @@ bounded artifacts and do not rewrite this board.
 
 | Track | Mission UUID | Managed machine UUID | Owned files/sections and dependency | State / evidence |
 | --- | --- | --- | --- | --- |
-| A | `35cd3390-5a58-4cd7-8444-172a84d5faa8` | `0f88c8f6-084e-46a3-89ad-29aa52d300de` | Build script, turbo-lean pin/upstream soundness fix | Public HTTPS source/build proceeding; SSH clone fails host-key verification and gh has no auth; push/PR/merge blocked; full build not yet demonstrated |
+| A | `35cd3390-5a58-4cd7-8444-172a84d5faa8` | `0f88c8f6-084e-46a3-89ad-29aa52d300de` | Build script, turbo-lean pin/upstream soundness fix | RED reported upstream `15676ea`: 24 safe extern IO opaques rejected, 40.69s/1.53GiB; pin `29d85f7` also Lake-config failure. Generic audit repair under investigation, security review required; no full build pass |
 | B | `36bddaa5-fcc4-4fbf-a78a-b717e1e198a7` | `f9444f29-2b15-49f4-ad81-37346c0844e5` | `.github/**`, `scripts/ci*`, `ci/**`, CI proposal; B.1 waits A | Checkpoint harvested/hash-verified; direct-runner routing superseded by API bridge, NOT merge-ready. Baseline/tests reported; full native/live/after checks absent. VM destroy failed provider_http_error; cleanup open. B.1 waits A |
 | C | `816f574f-6e85-4d3a-8123-8429f10e86b3` | `21fa6dec-b7d5-4b8a-9ab3-12f7a3218af4` | Managed REST/lifecycle sections and managed UI/models on desktop/iOS/Android | Active; regression-first REST extend, provider gating, ready/epoch contracts on three clients; live dev→prod and Mac validation depend on E+G; access/slot not established |
 | D | `95ad3d8d-5af8-4228-943d-509baa9394d8` | `6b6d2464-4997-42e1-b6d4-00b5fbb61264` | Proxy/Control downstream streaming sections, OrbNetLeaf TLS, streaming tests | Active RUN-07; public HTTPS clone succeeded, SSH host verification/gh auth block publication; bundle fallback; VM expires 15:12:52Z; no streaming acceptance claimed |
@@ -213,6 +213,18 @@ H account/classification sections preserved; H notified to avoid broad rewrites.
   baseline is obtained, not pending. Independent recomputation still pending.
   Authenticated logs/writes remain blocked until broker delivery; public reads
   used no credential/config workaround. A notified; B.1 remains untouched.
+
+### A reproduced audit rejection — worker evidence
+
+A reports upstream turbo-lean `15676ea` rejects all 24 safe `@[extern]`
+opaque IO syscall declarations in `OrbBin.PosixExt`: 40.69 seconds, peak
+1.53 GiB. Orb pin `29d85f7` additionally rejects current Lake configuration
+before audit. Proposed generic terminal-IO-codomain admission is under
+investigation, **not accepted or implemented evidence**. Preserve fail-closed
+pure extern, `implemented_by`, unsafe, forged IO names, axiom and replay checks;
+canonical type identity and proof dependencies need independent review.
+A reports workspace-job API returned completed without execution/logs; actual
+RED was timed bash. No build success inferred from the fabricated job receipt.
 
 ## Waiting on Thomas
 
@@ -318,3 +330,4 @@ classification before operator application. No hand-edited production env.
 | 13 Nov, operator B/G update | Record trusted-host-only lean.ci OIDC allowlisting through governed ops; no BOOST_CI_SSH_PRIVATE_KEY on managed guests | Operator authorizes lean.ci host administration, but broker delivery and verified target/host policy still required |
 | 13 Nov, B checkpoint | Harvest B archive immediately, preserve baseline/tests, reject direct-runner changes as completion, request VM destruction | SHA/size match; operator API bridge supersedes prepared label routing; no native/live parity; destruction failed provider_http_error so cleanup remains open |
 | 13 Nov, B public CI update | Record historical master red and current head pending separately; prioritize cause-specific CI repair, keep B.1 gated by A | Public API establishes failed Test/browser gates on a34d76da, not failure cause or current green status; baseline obtained in checkpoint, not yet independently recomputed |
+| 13 Nov, A RED update | Require narrow generic IO-extern audit fix with adversarial negatives and independent review before acceptance; retain timed execution as evidence, not empty workspace-job completion | A reproduced 24 rejected IO opaques on upstream15676ea; name-based blanket admission could weaken soundness and is not an acceptable speed workaround |
