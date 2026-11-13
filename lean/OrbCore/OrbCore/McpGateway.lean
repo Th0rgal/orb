@@ -203,10 +203,14 @@ def dispatchMcpToolCall
     (nowEpochSec : UInt64)
     (remoteSup? : Option RemoteJobSupervisor := none)
     (managedProvisioningOverride? : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) := none)
-    (authenticatedUserId : String := "") : IO String := do
+    (authenticatedUserId : String := "")
+    (authenticatedAdmin : Bool := false) : IO String := do
   let nowIso := formatEpochIso8601Utc nowEpochSec
   let callerMid := claims.missionId
-  let directOperator := !authenticatedUserId.isEmpty && !claims.isExternal &&
+  -- `authenticatedAdmin` is Core's own verdict on the caller of a direct (not
+  -- mission-scoped) call. Core's single-tenant administrator has no user id, so
+  -- the verdict, not the id, is what makes that caller an operator.
+  let directOperator := (!authenticatedUserId.isEmpty || authenticatedAdmin) && !claims.isExternal &&
     claims.sessionId == "00000000-0000-4000-8000-000000000000" &&
     callerMid.isEmpty && claims.project.isEmpty && claims.role == "operator"
   let mut callerWorkDir := workingDir
@@ -243,7 +247,7 @@ def dispatchMcpToolCall
            "AND (hard_expires_at=0 OR hard_expires_at>?2);") #[claims.sessionId, toString nowEpochSec] with
       | .ok rows => pure (if rows.size > 1 then some (cell rows[1]! 0) else none)
       | .error _ => pure none
-  let operatorIsAdmin ← match operatorPrincipal? with
+  let operatorIsAdmin ← if directOperator && authenticatedAdmin then pure true else match operatorPrincipal? with
     | none => pure false
     -- An empty recorded owner is the unscoped single-tenant principal.
     | some "" => pure true
@@ -1014,7 +1018,13 @@ def dispatchMcpToolCall
     let .ok catalog ← loadManagedProviderCatalog mc store.rootDir fleet
         (normalizeMcpRole claims.role == "operator") prefs (managedProvisioningOverride?.map Prod.fst)
       | return mcpErr "unavailable" "managed_provider_catalog_unavailable"
-    let raw := renderManagedMachinesJson fleet
+    -- Destroyed machines are history, and there are thousands of them: the
+    -- default list is the live ones; `verbose` adds the last 24 hours.
+    let verbose := (args.fieldBool? "verbose").getD false
+    let shown := fleet.machines.filter fun m =>
+      m.status != "destroyed" ||
+        (verbose && max m.createdAtSec m.expiresAtSec + 86400 ≥ nowEpochSec)
+    let raw := renderManagedMachinesJson { fleet with machines := shown }
     return mcpOk (((OrbBin.Json.parse raw).toOption.getD (.obj #[])).setField "providers" catalog)
 
   | "get_budget" =>
@@ -1117,19 +1127,40 @@ def dispatchMcpToolCall
       | .ok h => pure h
       | .error e => return mcpErr "harvest_rejected" e
     let name := ManagedHarvest.deliveryName harvested.sourcePath
-    let callerNode? ← if callerMid.isEmpty then pure none else resolveMissionRemoteNode? store mc? callerMid
+    -- Where the caller actually runs: the node of its latest job. A stored
+    -- target such as `auto` is a request, not a node, so it is resolved first.
+    let callerNode? ← if callerMid.isEmpty then pure none else do
+      let jobNode? ← match ← execParamQuery store.missionsDb
+          ("SELECT node_id FROM remote_node_jobs WHERE mission_id=?1 AND COALESCE(node_id,'') NOT IN ('','local') " ++
+           "ORDER BY updated_at DESC LIMIT 1;") #[callerMid] with
+        | .ok rows => pure ((rows[1]?.map (cell · 0)).filter (!·.isEmpty))
+        | .error _ => pure none
+      match jobNode? with
+      | some node => pure (some node)
+      | none =>
+        match ← resolveMissionRemoteNode? store mc? callerMid with
+        | none => pure none
+        | some target =>
+          match ← resolveConcreteRemoteTargetNode mc? target (some (store, callerMid)) with
+          | .ok node => pure (some node)
+          | .error _ => pure (some target)
     let delivered : Except String (String × String) ← match callerNode? with
       | some node => do
         let body := JVal.obj #[("name", .str name),
           ("data_base64", .str (OrbBin.PosixExt.base64Encode harvested.bytes))]
         match ← callRemoteNodeHttp relayHub? mc node "POST" "/uploads" (some body) #[] 180000 with
-        | .error _ => pure (.error "harvest_delivery_failed")
+        | .error _ => pure (.error s!"harvest_delivery_failed:unreachable:{node}")
         | .ok (status, _, receipt?, _, _) =>
-          match receipt?.bind (·.fieldStr? "path"), receipt?.bind (·.fieldStr? "sha256") with
-          | some path, some digest =>
-            if 200 ≤ status && status < 300 && digest == harvested.sha256 then pure (.ok (node, path))
-            else pure (.error "harvest_delivery_failed")
-          | _, _ => pure (.error "harvest_delivery_failed")
+          if status < 200 || status ≥ 300 then pure (.error s!"harvest_delivery_failed:http_{status}:{node}") else
+          match receipt?.bind (·.fieldStr? "path") with
+          | none => pure (.error s!"harvest_delivery_failed:no_receipt:{node}")
+          | some path =>
+            -- The node re-hashes what it stored; an older node reports only the size.
+            let digestOk := match receipt?.bind (·.fieldStr? "sha256") with
+              | some digest => digest == harvested.sha256
+              | none => (receipt?.bind (·.fieldNat? "size")) == some harvested.bytes.size
+            if digestOk then pure (.ok (node, path))
+            else pure (.error s!"harvest_delivery_failed:digest_mismatch:{node}")
       | none => do
         -- A mission on the Core host, or an operator session with no mission.
         let base := if callerMid.isEmpty then store.rootDir else callerWorkDir

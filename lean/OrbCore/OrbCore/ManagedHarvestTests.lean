@@ -194,6 +194,35 @@ private def gatewayTests (root : String) : IO Unit := do
       check ((← execIds.get).isEmpty) "refusals run nothing on the guest"
       let (_, absent) ← call "child" "harvest-vm" "out/absent"
       check (errorOf absent == (some "harvest_rejected", some "harvest_not_found")) "guest refusal is relayed"
+      -- A mission placed by `auto` is delivered to the node its job ran on, never
+      -- to a node literally called `auto`, and a failed delivery says where and why.
+      let .ok _ ← execParamQuery store.missionsDb
+          "UPDATE missions SET tags='[\"remote-node:auto\"]' WHERE id='child';" #[]
+        | throw (IO.userError "harvest tag fixture failed")
+      let .ok _ ← execParamQuery store.missionsDb
+          ("CREATE TABLE IF NOT EXISTS remote_node_jobs (job_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL DEFAULT '', " ++
+           "node_id TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'queued', payload_json TEXT NOT NULL DEFAULT '{}', " ++
+           "created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');") #[]
+        | throw (IO.userError "harvest job table fixture failed")
+      let .ok _ ← execParamQuery store.missionsDb
+          "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,updated_at) VALUES('j-child','child','ghost-node','running','2026-01-01T00:00:00Z');" #[]
+        | throw (IO.userError "harvest job fixture failed")
+      let (_, undelivered) ← call "child" "harvest-vm" "out/bundle.tar.zst"
+      check (errorOf undelivered == (some "harvest_rejected", some "harvest_delivery_failed:unreachable:ghost-node"))
+        s!"delivery targets the job's node and reports the failure: {(errorOf undelivered).2}"
+      -- The default machine list is the live machines only.
+      let .ok _ ← execParamQuery mc.db
+          "UPDATE managed_machines SET status='destroyed', phase_code=3, created_at_sec=1, expires_at_sec=1 WHERE id='booting-vm';" #[]
+        | throw (IO.userError "harvest destroyed fixture failed")
+      let listed (verbose : Bool) : IO (Array String) := do
+        let claims : McpSessionClaims := { sessionId := "mission-session", missionId := "child", role := "executor", expiresAt := 2000 }
+        let raw ← OrbCore.McpGateway.dispatchMcpToolCall store (some mc) none none fleet root claims
+          "list_managed_machines" (.obj #[("verbose", .bool verbose)]) now none
+          (some (provider, { coreUrl := "https://unused.invalid", script := "" }))
+        let reply := (OrbBin.Json.parse raw).toOption.getD .null
+        return ((((reply.field? "result").getD .null).fieldArr? "machines").getD #[]).filterMap (·.fieldStr? "id")
+      check ((← listed false) == #["harvest-vm"]) s!"destroyed machines are not listed by default: {← listed false}"
+      check ((← listed true).size == 2) "a machine destroyed within a day is shown in verbose"
     finally
       closeManagedComputeStore mc
   finally

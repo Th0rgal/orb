@@ -88,14 +88,14 @@ def run (root : String) : IO Unit := do
         name := "authorization-probe"
       }
       let probe (claims : McpSessionClaims) (tool idKey id : String) (allowed : Bool)
-          (authenticatedUserId : String := "") : IO Unit := do
+          (authenticatedUserId : String := "") (authenticatedAdmin : Bool := false) : IO Unit := do
         -- Every probe attempts a body identity spoof, including foreign-user
         -- and missing-principal cases. Only the trusted parameter may count.
         let args : JVal := .obj #[(idKey, .str id), ("ttl_minutes", .nat 5),
           ("role", .str "operator"), ("user_id", .str "alice"), ("owner_user_id", .str "alice"),
           ("authenticatedUserId", .str "alice"), ("authenticated_user_id", .str "alice")]
         let raw ← OrbCore.McpGateway.dispatchMcpToolCall store (some mc) none none fleet root claims
-          tool args now none (some (mock, { coreUrl := "https://unused.invalid", script := "" })) authenticatedUserId
+          tool args now none (some (mock, { coreUrl := "https://unused.invalid", script := "" })) authenticatedUserId authenticatedAdmin
         let .ok result := OrbBin.Json.parse raw | throw (IO.userError "invalid gateway JSON")
         let err := (result.field? "error").getD .null
         check (result.fieldBool? "ok" == some false && err.fieldStr? "code" ==
@@ -142,6 +142,18 @@ def run (root : String) : IO Unit := do
       probe external "extend_managed_machine" "machine_id" "user-core-id" false
       probe base "extend_managed_machine" "machine_id" "user-core-id" false
       probe base "extend_managed_machine" "machine_id" "managed-missing" false
+      -- Core's own administrator verdict on a direct call reaches every machine,
+      -- including for the single-tenant administrator, who has no user id. It
+      -- never lifts a mission-scoped, external or non-operator session.
+      for id in #["access-core-id", "managed-user-core-id", "legacy-core-id", "unowned-core-id"] do
+        for tool in #["extend_managed_machine", "resume_managed_machine"] do
+          probe operator tool "machine_id" id true "" true
+          probe operator tool "machine_id" id true "bob" true
+      probe operator "extend_managed_machine" "machine_id" "unowned-core-id" false "bob" false
+      probe { operator with missionId := "unrelated" } "extend_managed_machine" "machine_id" "access-core-id" false "" true
+      probe { operator with role := "executor" } "extend_managed_machine" "machine_id" "access-core-id" false "" true
+      probe { operator with sessionId := "arbitrary-scoped-session" } "extend_managed_machine" "machine_id" "access-core-id" false "" true
+      probe { external with role := "operator" } "extend_managed_machine" "machine_id" "unowned-core-id" false "" true
       -- Operator authority follows the user who minted the session, not the label.
       let admin ← match ← createUserRecord store "ops-admin" "ops-admin-passphrase-1234" "admin" none none "t" with
         | .ok user => pure user

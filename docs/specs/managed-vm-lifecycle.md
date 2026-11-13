@@ -290,8 +290,12 @@ tool text says so. A busy machine still stops at its TTL.
   Core-authenticated operator call whose verified user owns the machine. Role labels and
   request-body identities grant nothing. Both `<id>` and `managed-<id>` are accepted;
   anything else answers `not_found`.
-- **Expiry** (`ManagedTtl.tick`, every 30 s): within 2 minutes of the deadline the owner
-  mission gets one `managed_machine_expiring` event. At the deadline Core claims the expiry
+- **Expiry** (`ManagedTtl.tick`, every 30 s): the owner mission gets a
+  `managed_machine_expiring` event 20 minutes and again 5 minutes before the deadline
+  (`minutes_before` in the payload), once each per deadline, so an extension re-arms both.
+  The 20-minute event is skipped for a machine whose whole lifetime is shorter, and is not
+  sent late if Core was down across it. These are mission events: they appear in the
+  mission's event stream and are not injected into a running agent's context. At the deadline Core claims the expiry
   (which fences extensions, heartbeats and resume), emits `managed_machine_expired`, reads
   the provider's state and usage, destroys a still-billable guest, and only then closes the
   row and emits `managed_machine_expiry_cleaned`. An already archived, nonbilling disk is
@@ -309,6 +313,10 @@ tool text says so. A busy machine still stops at its TTL.
   authority of the user who minted it (`mcp_sessions_v1.owner`, or the Core-authenticated
   caller): an admin's operator session manages any machine, another user's only that
   user's. The role label alone grants nothing, and external sessions cannot hold it.
+  For a direct call (a Core login token, not a mission token) Core passes its own verdict
+  that the caller is an administrator; the single-tenant administrator has no user id, so
+  the verdict, not an id lookup, decides. A mission's own MCP token always carries the
+  role `executor`: a mission reaches only its lineage's machines, whoever owns the mission.
 - **Legacy owners:** pre-cutover rows may carry a tenant label (`prod`) in
   `owner_user_id`. At startup `repairManagedMachineOwners` replaces it with the owning
   mission's user when that user exists; other rows are left alone. For a mission-owned
@@ -815,7 +823,8 @@ same lineage rule as the lifecycle tools; a caller outside it gets `not_found`.
   what it received, and fails closed on any size, chunk or digest disagreement
   (`harvest_file_changed`, `harvest_checksum_mismatch`). The provider's own file
   API is not used: Boat's serves only `/home/user` and `/tmp` as UTF-8.
-- Delivery goes to the node the calling mission runs on, as an ordinary upload
+- Delivery goes to the node the calling mission's latest job ran on (a stored
+  target such as `auto` is resolved first, never used as a node name), as an ordinary upload
   (`uploads/<uuid>/<name>` under the node work directory), and the node's receipt
   digest must match. A mission on the Core host gets
   `<working_directory>/harvest/<uuid>/<name>`; an operator session with no mission

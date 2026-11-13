@@ -2388,6 +2388,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           st.store st.managedStore? st.relayHub? st.broadcastHub? (← st.managedRef.get)
           st.cfg.workingDir activeClaims toolName args nowEpochSec st.remoteSup? st.managedProvisioningOverride?
           (if scopedClaims?.isNone then (mcpCaller?.map (·.userId)).getD "" else "")
+          (scopedClaims?.isNone && (mcpCaller?.map (fun c => !c.disabled && (c.isLegacyUnscoped || c.role == "admin"))).getD false)
         return .ok (mkJson 200 outJson)
 
   -- 5c. Managed Node Dial-Out Enrollment & Leased Relay
