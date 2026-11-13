@@ -226,6 +226,25 @@ canonical type identity and proof dependencies need independent review.
 A reports workspace-job API returned completed without execution/logs; actual
 RED was timed bash. No build success inferred from the fabricated job receipt.
 
+### B API-bridge retask checkpoint
+
+B reports direct `lean-*` runner expressions removed from prepared workflows;
+heavy jobs remain `ubuntu-latest`, fallback/timeouts retained, B.1 untouched.
+Superseded label-routing v2 archive must **not** be published. New bridge work
+is only a transport-neutral skeleton/tests, not wired, executed live or accepted.
+It denies fork/unknown events, preserves exit status, rejects missing receipts or
+status/truncated logs, cleans up in `finally`, and uses a deadline before hard TTL.
+Require source-confirmed OIDC audience/exchange/claims and idempotent-create /
+ambiguous-result reconciliation; do not invent prebuild or authentication schema.
+
+Trusted-source bundle dependency: upstream default branch, exact SHA, AGENTS,
+manifests and tests; VM/prebuild handlers, OIDC auth policy, engine/base affinity
+and CAS, exec/file/log guest transport, Actions repo-JIT integration. Specifically
+`crates/leanci-ctrl/src/vms.rs` and related handlers. Need authoritative TTL,
+readiness, cursor/truncation/exit and immutable-base publication contracts before
+adapter wiring. Private clone is pending trusted nimrud secret delivery; no guest
+credential transfer. Generic JIT remains separate from the immediate bridge.
+
 ## Waiting on Thomas
 
 These GitHub web approvals block only direct repo-level JIT runners, not the
@@ -331,3 +350,4 @@ classification before operator application. No hand-edited production env.
 | 13 Nov, B checkpoint | Harvest B archive immediately, preserve baseline/tests, reject direct-runner changes as completion, request VM destruction | SHA/size match; operator API bridge supersedes prepared label routing; no native/live parity; destruction failed provider_http_error so cleanup remains open |
 | 13 Nov, B public CI update | Record historical master red and current head pending separately; prioritize cause-specific CI repair, keep B.1 gated by A | Public API establishes failed Test/browser gates on a34d76da, not failure cause or current green status; baseline obtained in checkpoint, not yet independently recomputed |
 | 13 Nov, A RED update | Require narrow generic IO-extern audit fix with adversarial negatives and independent review before acceptance; retain timed execution as evidence, not empty workspace-job completion | A reproduced 24 rejected IO opaques on upstream15676ea; name-based blanket admission could weaken soundness and is not an acceptable speed workaround |
+| 13 Nov, B API bridge checkpoint | Do not publish superseded label-routing v2; preserve new bridge skeleton separately and wait for authoritative upstream auth/transport/base contracts before wiring | B removed direct labels, keeps hosted Ubuntu fallback; transport-neutral tests are not a live adapter; prevent guessed OIDC/prebuild schemas or ambiguous-create leaks |
