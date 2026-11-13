@@ -78,6 +78,9 @@ Monitor thresholds live in a dedicated non-secret `core_monitor_settings` row
 in `managed_compute.db`. `orb-monitor` reads that row without opening the
 credentials-bearing settings file; older databases use its existing defaults.
 Installing the updated monitor script is an operator action.
+Exporting an older instance without the settings table uses those defaults and
+does not create a table. A confirmed import creates only that configuration
+table inside its transaction; it never runs Core's startup migrations.
 
 Export records the Library checkout's current commit when no revision was
 explicitly configured. An imported revision is a full lowercase Git SHA and

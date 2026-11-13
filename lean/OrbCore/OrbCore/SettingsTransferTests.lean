@@ -152,6 +152,25 @@ def run : IO Unit := do
         | none => unsetenvVar markers[i]!
     check (!(SettingsCli.parse ["promote-dev", "--data-root", devRoot, "--yes"] devRoot).isOk)
       "direction commands reject ignored target overrides"
+    sql prodMc.db "DROP TABLE core_monitor_settings;"
+    let legacy ← require (SettingsTransfer.exportDocument prodRoot)
+    check (renderCompact (SettingsDocument.canonical (legacy.fieldOrNull "monitor")) ==
+      renderCompact (SettingsDocument.canonical SettingsDocument.monitorDefaults))
+      "older source instances export the monitor's existing defaults"
+    let tableAfterExport ← require (execParamQuery prodMc.db
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='core_monitor_settings';" #[])
+    check (tableAfterExport.size == 1) "export and preview never migrate an older source database"
+    let legacyBefore ← invariant prod prodMc
+    let (legacyPreview, _) ← require (SettingsTransfer.preview prodRoot doc)
+    let deniedLegacy ← SettingsTransfer.importDocument prodRoot doc legacyPreview
+      (fun _ _ => pure (.error "fixture_write_failed"))
+    let tableAfterFailure ← require (execParamQuery prodMc.db
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='core_monitor_settings';" #[])
+    check (!deniedLegacy.isOk && tableAfterFailure.size == 1) "failed import rolls back creation of the settings table"
+    require <| SettingsTransfer.importDocument prodRoot doc legacyPreview
+    check (rendered == SettingsDocument.render (← require (SettingsTransfer.exportDocument prodRoot)) &&
+      legacyBefore == (← invariant prod prodMc))
+      "confirmed imports support older targets without startup migrations or protected-data changes"
     let lock ← flockExclusiveNb s!"{devRoot}/.settings.lock"
     check (lock < 0xFFFFFFFE) "fixture lock acquired"
     try check (!(← SettingsTransfer.exportDocument devRoot).isOk) "busy settings fail instead of returning an empty export"
