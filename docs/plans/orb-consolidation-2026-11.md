@@ -324,6 +324,90 @@ No questions sent; implement/test generic support against an authorized
 
 ## Operator requests
 
+### Coordinator status 16:40 UTC: member provider identity exposed, fixture fix held back
+
+**Master.** Tip is `313ec310` (#1734, OpenCode over ACP, merged by the
+operator at 16:33; not reviewed by the coordinator). CI run `43457328636`
+on `6bf88c30` completed green. Kernel ABI is green on `f1d2a61e`
+(`43452657455`) and was still running on `6bf88c30` at 16:35. CI
+`43463948426` on `313ec310` is in progress. The only open pull request is
+#1708.
+
+**New finding, by reading master, nothing run: a member can read the
+identity of the owner's provider accounts.** Prod is single-tenant, so
+nobody is exposed today; dev is multi-user and this blocks the isolation
+sign-off.
+
+- `GET /api/ai/providers` takes the hydrated branch
+  (`ProviderUsageAndLogin.lean` ~1389-1405) whenever `ai_providers.json` or
+  a CLIProxy auth file exists. A member then gets the full
+  `renderHydratedProviderJv` row for every enabled provider with
+  credentials: `account_email`, `status.account`, the stored name, base
+  URL, Google project id, rate limits. Only the fallback in `Control.lean`
+  ~4448-4466 uses the redacting renderer.
+- `GET /api/ai/providers/:id`, `/usage`, `/:id/usage` and
+  `/for-backend/:backend` have no role check and carry the email or the
+  stored name.
+- The existing test (`SelfTest.lean` ~4864-4870) only checks that the API
+  key and one base URL are absent from the member list.
+- A patch from the old E+G worker
+  (`g-provider-identity-only-0da01d9e.patch`) is rejected: it reduces the
+  member row to `provider_type` and `user_enabled`, which removes the `id`
+  the member's own preference toggle needs
+  (`orb/src/Providers.tsx:335`), and leaves the detail and usage routes
+  open.
+- H-core `21b1bfca` (nippur) owns that file and was asked at 16:40 for
+  failing tests through HTTP first, then one member projection for list,
+  detail and usage, as `wip/e-member-provider-projection`.
+
+**`code-block` fixture fix: not published.** The worker's one-line change
+to `testFixtureKernelBootstrap` (commit `edde09e8`) applies to `313ec310`,
+the served HTML now wraps the fixture entry instead of the Vite client,
+and the spec passed 20 of 20 on WebKit (log read) and on Chromium (worker
+report). But the worker's full shard 1 run with the fix, read while still
+running (172 of 266 results), shows nine tests failing on all three
+attempts, three timeouts and two flaky. Master CI passes that shard.
+Whether the fix or the worker's VM causes them is unknown; the worker was
+asked at 16:40 to run the same spec files on unmodified master and report
+test by test.
+
+**Managed extend route exists twice.** `Control.lean` ~5024-5050 serves
+`POST /api/managed-machines/:id/{stop,resume,extend}` for the owner only
+and reloads the fleet cache. `RemoteFleetAndRelay.lean` ~1605-1616 serves
+the same three for any admin, without the reload, but is only reached
+after the first, so it is dead for these calls. C successor `729e035b`
+had concluded the `Control.lean` arm was redundant and was about to remove
+it, which would have let an admin extend a member's machine. Told at 16:40
+to leave it, add a test that an admin gets 404 on a member's machine, and
+keep the red-then-green evidence for `deletable_at` only. Its branch is
+still not on origin and its tree was still on a pre-merge base.
+
+**Other tracks.**
+
+- Streaming (#1729): D successor pushed `wip/d-stream-contract-tests`
+  `237a46e6` (tests, then fixes for truncation, cleanup and pacing). Read
+  in full, not built by the coordinator. Five changes requested at 16:25:
+  keep the usage accounting when a stream is cut, keep the real status of
+  a cut 429 or 401, show that no stream can be dropped without its pump
+  running, do not wait for upstream data when aborting, state the missing
+  TLS total-time test. Not rebased on master yet.
+- E+G's late claim that MCP `secret_*` tools have no admin gate is stale:
+  master has the gate (`McpGateway.lean` ~437-441, error `forbidden`,
+  commits `d1965606` and `40e71c0b`); the worker's base predates it. One
+  gap remains and is with D successor as a tests-only branch
+  `wip/e-member-session-secret-tools`: no test uses a session the member
+  minted for its own mission.
+- Provider panel: H-core has the sidecar-error fix and both tests stacked
+  and rebased on `6bf88c30`, building at 16:19. Not pushed.
+- Lean runners: B successor is wiring the job-bound fence and the
+  immediate requeue of a displaced trusted job in `leanci-ctrl`. No branch
+  reported.
+- Mission view (`734c3bb7`): H `11a48ddf` is still reading desktop code,
+  no patch.
+
+No new `wip/` or `ready/` ref has appeared on origin since 16:10 other than
+`237a46e6`.
+
 ### Coordinator status 16:10 UTC: master CI green, #1732 and #1729 live with open defects
 
 **Master.** CI run `43452656987` on `f1d2a61e` completed green at about
