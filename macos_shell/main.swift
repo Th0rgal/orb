@@ -287,14 +287,14 @@ struct OrbSidebarRowItem: Equatable {
             attention == other.attention
     }
 
-    static func parse(_ d: [String: Any], isPalette: Bool = false) -> OrbSidebarRowItem? {
-        let rid = (d[isPalette ? "id" : "row_id"] as? String) ?? ""
+    static func parse(_ d: [String: Any]) -> OrbSidebarRowItem? {
+        let rid = (d["row_id"] as? String) ?? ""
         let title = (d["title"] as? String) ?? ""
         guard !rid.isEmpty, !title.isEmpty else { return nil }
         return OrbSidebarRowItem(
             rowId: rid,
             kind: (d["kind"] as? String) ?? "item",
-            depth: isPalette ? 0 : ((d["depth"] as? Int) ?? 0),
+            depth: ((d["depth"] as? Int) ?? 0),
             title: title,
             subtitle: (d["subtitle"] as? String) ?? "",
             status: (d["status"] as? String) ?? "",
@@ -302,24 +302,18 @@ struct OrbSidebarRowItem: Equatable {
             shortcut: (d["shortcut"] as? String) ?? "",
             icon: (d["icon"] as? String) ?? "",
             color: (d["color"] as? String) ?? "",
-            badge: isPalette ? 0 : ((d["badge"] as? Int) ?? 0),
-            childCount: isPalette ? 0 : ((d["child_count"] as? Int) ?? 0),
-            liveChildCount: isPalette ? 0 : ((d["live_child_count"] as? Int) ?? 0),
-            expandable: !isPalette && ((d["expandable"] as? Bool) ?? false),
-            expanded: !isPalette && ((d["expanded"] as? Bool) ?? false),
-            selected: !isPalette && ((d["selected"] as? Bool) ?? false),
-            attention: !isPalette && ((d["attention"] as? Bool) ?? false)
+            badge: ((d["badge"] as? Int) ?? 0),
+            childCount: ((d["child_count"] as? Int) ?? 0),
+            liveChildCount: ((d["live_child_count"] as? Int) ?? 0),
+            expandable: ((d["expandable"] as? Bool) ?? false),
+            expanded: ((d["expanded"] as? Bool) ?? false),
+            selected: ((d["selected"] as? Bool) ?? false),
+            attention: ((d["attention"] as? Bool) ?? false)
         )
     }
 }
 
-final class OrbNativePalettePanel: NSPanel {
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { false }
-    override func cancelOperation(_ sender: Any?) { orderOut(nil) }
-}
-
-final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, URLSessionDataDelegate {
+final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableViewDataSource, NSTableViewDelegate, URLSessionDataDelegate {
     let splitView = NSSplitView()
     let sidebarPane = NSView()
     let sidebarTable = NSTableView()
@@ -330,22 +324,17 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
     private let footerButton = NSButton()
     private let footerBadgeLabel = NSTextField(labelWithString: "")
     private var footerSelected = false
-    private let palettePanel: OrbNativePalettePanel
-    private let paletteSearch = NSSearchField()
-    private let paletteTable = NSTableView()
     private let port: Int
     private let token: String
     private weak var webView: OrbWebView?
     private weak var hostWindow: NSWindow?
     private(set) var rows: [OrbSidebarRowItem] = []
-    private(set) var paletteItems: [OrbSidebarRowItem] = []
     private var sseSession: URLSession?
     private var sseTask: URLSessionDataTask?
     private var sseBuffer = Data()
     private var sseRetryWork: DispatchWorkItem?
     private var isProgrammaticSelect = false
     private var lastSelectionDispatchedRowId: String?
-    private var paletteQueryGeneration: UInt64 = 0
     private var sidebarReqGeneration: UInt64 = 0
     private var minScopeSwitchGeneration: UInt64 = 0
     private var activeSidebarScope: String = ""
@@ -357,15 +346,8 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         self.token = token
         self.webView = webView
         self.hostWindow = hostWindow
-        self.palettePanel = OrbNativePalettePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 340),
-            styleMask: [.titled, .fullSizeContentView, .utilityWindow],
-            backing: .buffered,
-            defer: true
-        )
         super.init()
         setupSplitView(frame: frame, webView: webView)
-        setupPalettePanel()
     }
 
     private static func parseHexColor(_ hex: String) -> NSColor? {
@@ -448,9 +430,6 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         let sbToggleBtn = NSButton()
         configTopBtn(sbToggleBtn, "sidebar.left", "Toggle sidebar", #selector(onTopSidebarToggleClick(_:)), 82, [.maxXMargin])
         topBarPane.addSubview(sbToggleBtn)
-        let searchTopBtn = NSButton()
-        configTopBtn(searchTopBtn, "magnifyingglass", "Search conversations (⌘K)", #selector(openPalette), 108, [.maxXMargin])
-        topBarPane.addSubview(searchTopBtn)
         configTopBtn(backHistoryButton, "arrow.left", "Back", #selector(onTopBackClick(_:)), 162, [.minXMargin])
         backHistoryButton.isEnabled = false
         topBarPane.addSubview(backHistoryButton)
@@ -508,49 +487,6 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         splitView.addSubview(webView)
         splitView.adjustSubviews()
         splitView.setPosition(220, ofDividerAt: 0)
-    }
-
-    private func setupPalettePanel() {
-        palettePanel.isFloatingPanel = true
-        palettePanel.hidesOnDeactivate = true
-        palettePanel.isReleasedWhenClosed = false
-        palettePanel.titleVisibility = .hidden
-        palettePanel.titlebarAppearsTransparent = true
-        palettePanel.isMovableByWindowBackground = true
-
-        let root = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 480, height: 340))
-        root.material = .hudWindow
-        root.blendingMode = .behindWindow
-        root.state = .active
-        root.autoresizingMask = [.width, .height]
-
-        paletteSearch.frame = NSRect(x: 12, y: 298, width: 456, height: 28)
-        paletteSearch.placeholderString = "Jump to mission, project, or page…"
-        paletteSearch.focusRingType = .none
-        paletteSearch.autoresizingMask = [.width, .minYMargin]
-        paletteSearch.delegate = self
-        root.addSubview(paletteSearch)
-
-        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("orbPaletteCol"))
-        col.resizingMask = .autoresizingMask
-        paletteTable.addTableColumn(col)
-        paletteTable.headerView = nil
-        paletteTable.rowHeight = 30
-        paletteTable.backgroundColor = .clear
-        paletteTable.focusRingType = .none
-        paletteTable.dataSource = self
-        paletteTable.delegate = self
-        paletteTable.target = self
-        paletteTable.action = #selector(onPaletteTableClick(_:))
-
-        let scroll = NSScrollView(frame: NSRect(x: 8, y: 8, width: 464, height: 282))
-        scroll.drawsBackground = false
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.autoresizingMask = [.width, .height]
-        scroll.documentView = paletteTable
-        root.addSubview(scroll)
-        palettePanel.contentView = root
     }
 
     func startStreaming() {
@@ -619,18 +555,6 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         return nil
     }
 
-    @objc func openPalette() {
-        guard let win = hostWindow else { return }
-        paletteSearch.stringValue = ""
-        refreshPalette(query: "")
-        let wf = win.frame
-        let pf = palettePanel.frame
-        let origin = NSPoint(x: wf.midX - pf.width / 2.0, y: wf.maxY - pf.height - 90)
-        palettePanel.setFrameOrigin(origin)
-        palettePanel.makeKeyAndOrderFront(nil)
-        palettePanel.makeFirstResponder(paletteSearch)
-    }
-
     @objc private func onFooterSettingsClick(_ sender: Any?) {
         guard !footerSelected else { return }
         let lit = OrbAppDelegate.jsonStringLiteral("settings")
@@ -679,7 +603,7 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
     }
 
     func applyRowsPayload(_ rawRows: [[String: Any]]) {
-        let nextRows = rawRows.compactMap { OrbSidebarRowItem.parse($0, isPalette: false) }
+        let nextRows = rawRows.compactMap { OrbSidebarRowItem.parse($0) }
         let prevRows = rows
         rows = nextRows
         isProgrammaticSelect = true
@@ -766,19 +690,6 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         }
     }
 
-    private func refreshPalette(query: String) {
-        paletteQueryGeneration &+= 1
-        let gen = paletteQueryGeneration
-        callLocald(command: "native_chrome_palette_query", args: ["query": query, "limit": 24]) { [weak self] res in
-            guard let self, self.paletteQueryGeneration == gen, let raw = res?["items"] as? [[String: Any]] else { return }
-            self.paletteItems = raw.compactMap { OrbSidebarRowItem.parse($0, isPalette: true) }
-            self.paletteTable.reloadData()
-            if !self.paletteItems.isEmpty {
-                self.paletteTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-            }
-        }
-    }
-
     private func connectSse() {
         sseTask?.cancel()
         sseBuffer.removeAll(keepingCapacity: true)
@@ -825,9 +736,9 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
     }
 
-    private func dispatchItem(_ item: OrbSidebarRowItem, fromPalette: Bool = false) {
+    private func dispatchItem(_ item: OrbSidebarRowItem) {
         if item.kind == "section" || item.kind == "note" { return }
-        if !fromPalette && (item.kind == "project" || item.kind == "folder" || item.target.hasPrefix("folder:")) {
+        if (item.kind == "project" || item.kind == "folder" || item.target.hasPrefix("folder:")) {
             toggleExpand(rowId: item.rowId)
         } else if item.target.hasPrefix("folder:") {
             toggleExpand(rowId: item.target)
@@ -873,63 +784,17 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         dispatchItem(item)
     }
 
-    @objc private func onPaletteTableClick(_ sender: Any?) {
-        let idx = paletteTable.clickedRow >= 0 ? paletteTable.clickedRow : paletteTable.selectedRow
-        guard idx >= 0, idx < paletteItems.count else { return }
-        let chosen = paletteItems[idx]
-        paletteQueryGeneration &+= 1
-        palettePanel.orderOut(nil)
-        dispatchItem(chosen, fromPalette: true)
-    }
-
-    func controlTextDidChange(_ obj: Notification) {
-        guard (obj.object as? NSSearchField) === paletteSearch else { return }
-        refreshPalette(query: paletteSearch.stringValue)
-    }
-
-    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        guard control === paletteSearch else { return false }
-        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-            let idx = paletteTable.selectedRow >= 0 ? paletteTable.selectedRow : 0
-            if idx < paletteItems.count {
-                let chosen = paletteItems[idx]
-                paletteQueryGeneration &+= 1
-                palettePanel.orderOut(nil)
-                dispatchItem(chosen, fromPalette: true)
-            }
-            return true
-        }
-        if commandSelector == #selector(NSResponder.moveDown(_:)) {
-            let next = min(max(0, paletteItems.count - 1), paletteTable.selectedRow + 1)
-            if !paletteItems.isEmpty { paletteTable.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false) }
-            return true
-        }
-        if commandSelector == #selector(NSResponder.moveUp(_:)) {
-            let prev = max(0, paletteTable.selectedRow - 1)
-            if !paletteItems.isEmpty { paletteTable.selectRowIndexes(IndexSet(integer: prev), byExtendingSelection: false) }
-            return true
-        }
-        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
-            paletteQueryGeneration &+= 1
-            palettePanel.orderOut(nil)
-            return true
-        }
-        return false
-    }
-
     func numberOfRows(in tableView: NSTableView) -> Int {
-        return (tableView === paletteTable) ? paletteItems.count : rows.count
+        return rows.count
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let isPal = (tableView === paletteTable)
-        let list = isPal ? paletteItems : rows
-        guard row >= 0, row < list.count else { return nil }
-        let item = list[row]
+        guard row >= 0, row < rows.count else { return nil }
+        let item = rows[row]
 
         let cell = NSTableCellView()
-        let isSection = !isPal && item.kind == "section"
-        let isNote = !isPal && item.kind == "note"
+        let isSection = item.kind == "section"
+        let isNote = item.kind == "note"
         let indent = CGFloat(min(8, item.depth) * 12)
         var cursorX: CGFloat = (isSection || isNote) ? 10 : (8 + indent)
 
@@ -970,11 +835,10 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
             cursorX += 24
         }
 
-        let hasSubToggle = !isPal && item.kind == "mission" && item.expandable
+        let hasSubToggle = item.kind == "mission" && item.expandable
         let metaText: String = {
             if item.badge > 0 { return "\(item.badge)" }
             if !item.shortcut.isEmpty { return item.shortcut }
-            if isPal && !item.subtitle.isEmpty { return item.subtitle }
             if item.attention { return "•" }
             return ""
         }()
@@ -1040,7 +904,6 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
-        if tableView === paletteTable { return row >= 0 && row < paletteItems.count }
         guard row >= 0, row < rows.count else { return false }
         let item = rows[row]
         if item.kind == "section" || item.kind == "note" || item.kind == "project" || item.kind == "folder" {
@@ -1536,11 +1399,6 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
             return
         }
         let rawArgs = (dict["args"] as? [String: Any]) ?? [:]
-        if cmd == "open_native_palette" {
-            nativeChrome?.openPalette()
-            if let reqId = dict["id"] as? Int { replyToWebView(id: reqId, result: nil) }
-            return
-        }
         if cmd == "set_native_sidebar" {
             let open = (rawArgs["open"] as? Bool) ?? true
             nativeChrome?.setSidebarOpen(open)
@@ -2088,10 +1946,6 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
             let chrome = OrbNativeChromeController(port: port, token: token, webView: webView, hostWindow: window, frame: rect)
             self.nativeChrome = chrome
             container.addSubview(chrome.splitView, positioned: .above, relativeTo: vibrancy)
-            let quickSwitchItem = NSMenuItem(title: "Quick Switcher…", action: #selector(OrbNativeChromeController.openPalette), keyEquivalent: "k")
-            quickSwitchItem.target = chrome
-            NSApp.mainMenu?.item(withTitle: "View")?.submenu?.addItem(.separator())
-            NSApp.mainMenu?.item(withTitle: "View")?.submenu?.addItem(quickSwitchItem)
             chrome.startStreaming()
         } else {
             container.addSubview(webView, positioned: .above, relativeTo: vibrancy)

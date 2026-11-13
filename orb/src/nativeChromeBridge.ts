@@ -196,7 +196,7 @@ const NATIVE_MISSION_ACTIONS: readonly string[] = ["rename", "move", "archive", 
 
 /** Notify native macOS/Linux shell when the titlebar sidebar toggle, history state, or Cmd+K shortcut fires inside WebView. */
 export function notifyNativeChromeShell(
-  command: "set_native_sidebar" | "open_native_palette" | "set_native_history",
+  command: "set_native_sidebar" | "set_native_history",
   args: Record<string, unknown> = {},
 ): void {
   if (typeof window === "undefined") return;
