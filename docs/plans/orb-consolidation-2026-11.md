@@ -316,9 +316,13 @@ No questions sent; implement/test generic support against an authorized
   GET/events/cancel 404; admin-users/secrets/settings/system-deploy 403;
   projects/workspaces/nodes empty. Password retained privately on agent-core;
   never copied to a managed VM or printed.
-- **Live finding:** member provider list exposes owner account-display emails
-  and account IDs. E+G owns failing regression and member-safe type/toggle
-  projection; H retains admin health/cooldown ownership. Full G remains open:
+- **Live finding (found on `de3fd0fa1`):** member provider list exposes owner
+  account-display emails and account IDs. Names and emails fixed by #1742
+  (`e6e4541f`, live on dev and prod); the E+G worker that wrote it
+  (`6fa970f7`) ended at 14:04. **Owner of the member provider rows since
+  22:23: H-core `21b1bfca`** (closed key list, custom-model limits, id
+  minting), see the 22:15 section below. If `6fa970f7` is resumed it does not
+  edit `Store.lean` or `ProviderUsageAndLogin.lean`. Full G remains open:
   MCP, create/run with managed placement/spend/proxy tokens, sharing, search,
   Inbox, files and real Linux desktop member login still unverified.
 
