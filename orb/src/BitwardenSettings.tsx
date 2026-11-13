@@ -264,7 +264,7 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
   const currentProjectName = createMemo(
     () =>
       currentBwProject()?.name ??
-      (selectedProjectId() || bwProjects()[0]?.name || "paloma"),
+      (selectedProjectId() || bwProjects()[0]?.name || ""),
   );
 
   const filteredSecrets = createMemo(() => {
@@ -377,6 +377,10 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
     try {
       if (editorMode() === "create") {
         const targetProject = secretProjectDraft() || selectedProjectId();
+        if (!targetProject) {
+          setToastError("No Bitwarden project is available. Check the Bitwarden connection, then choose a project.");
+          return;
+        }
         const created = await createBitwardenSecret(targetProject, {
           key,
           value: secretValueDraft(),
@@ -899,7 +903,9 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
           title={editorMode() === "create" ? "New Secret" : `Edit ${editingSecret()?.key ?? "Secret"}`}
           description={
             editorMode() === "create"
-              ? `Create a secret in Bitwarden project "${currentProjectName()}".`
+              ? currentProjectName()
+                ? `Create a secret in Bitwarden project "${currentProjectName()}".`
+                : "No Bitwarden project is available yet. Check the connection above."
               : `Update secret in Bitwarden project "${currentProjectName()}".`
           }
           busy={savingSecret()}

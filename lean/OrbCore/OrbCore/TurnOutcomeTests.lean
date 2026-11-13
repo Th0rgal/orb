@@ -58,14 +58,22 @@ def run : IO Unit := do
       -- The durable scheduler relaunches it; each relaunch that is empty again counts.
       let sup ← newRemoteJobSupervisor "turn-outcome-fixture-secret" false
       let launches ← IO.mkRef (0 : Nat)
-      let launch : MissionRecord → String → Option String → IO Bool := fun mr _ _ => do
+      let prompts ← IO.mkRef (#[] : Array String)
+      let launch : MissionRecord → String → Option String → IO Bool := fun mr prompt _ => do
         launches.modify (· + 1)
+        prompts.modify (·.push prompt)
         discard <| execParamQuery db "UPDATE missions SET status='active' WHERE id=?1;" #[mr.id]
         return true
       let tick := fun (now : UInt64) =>
         discard <| tickContinuationScheduler store none none none sup none root (some launch) (some now)
       tick 4000000000
       check ((← launches.get) == 1 && (← statusOf "m-empty") == "active") "the retry relaunches the turn"
+      -- The retry is a NEW user turn for every backend: the conversation the harness
+      -- resumes never ends on the empty assistant message (vendors reject that).
+      check ((← prompts.get).all (fun p => (p.splitOn "ended without any output").length == 2))
+        s!"the retry delivers a continuation prompt: {← prompts.get}"
+      check ((← cellOf db "SELECT event_type || ':' || (instr(payload,'ended without any output')>0) FROM mission_events WHERE mission_id='m-empty' ORDER BY id DESC LIMIT 1;") == "user_message:1")
+        "the retry is recorded as a user message after the empty turn"
       finishEmpty "m-empty"
       check ((← retries "m-empty") == "empty_turn_retry:1/4,empty_turn_retry:2/1") s!"second empty turn, got '{← retries "m-empty"}'"
       tick 4000000100
@@ -119,6 +127,21 @@ def run : IO Unit := do
         "get_mission" (.obj #[("mission_id", .str "m-tools")]) 4000000000
       check (((flat served).splitOn "\"served_models\":[{\"requested_model\":\"smart\",\"effective_model\":\"glm-5.3\",\"provider\":\"zai\",\"requests\":1}]").length == 2)
         s!"the mission reports the model that served it: {served}"
+
+      -- `get_mission_events` pages from the newest event unless a cursor says otherwise.
+      for i in [0:5] do
+        discard <| appendMissionEvent store "m-tools" "assistant_message" s!"\{\"content\":\"reply-{i}\"}" "t2"
+      let evPage := fun (extra : Array (String × JVal)) =>
+        OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+          "get_mission_events" (.obj (#[("mission_id", .str "m-tools"), ("limit", JVal.uint64 2)] ++ extra)) 4000000000
+      let newest := flat (← evPage #[])
+      check ((newest.splitOn "reply-4").length == 2 && (newest.splitOn "reply-3").length == 2 &&
+             (newest.splitOn "reply-2").length == 1) s!"no cursor returns the newest page: {newest}"
+      let maxSeq := ((flat (← evPage #[])).splitOn "\"max_seq\":")[1]? |>.bind (fun s => (s.takeWhile Char.isDigit).toString.toNat?) |>.getD 0
+      let back := flat (← evPage #[("before_seq", JVal.uint64 (maxSeq - 1).toUInt64)])
+      check ((back.splitOn "reply-2").length == 2 && (back.splitOn "reply-4").length == 1) s!"before_seq pages backwards: {back}"
+      let fwd := flat (← evPage #[("since_seq", JVal.uint64 (maxSeq - 1).toUInt64)])
+      check ((fwd.splitOn "reply-4").length == 2 && (fwd.splitOn "reply-3").length == 1) s!"since_seq returns newer events: {fwd}"
 
       -- Library skills reach a node workspace in the directory each harness reads.
       IO.FS.createDirAll s!"{root}/library/skills/lean-audit"

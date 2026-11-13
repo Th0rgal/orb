@@ -21,6 +21,7 @@ import OrbCore.R7Core
 import OrbCore.LegacyHydrate
 import OrbCore.RemoteFleetAndRelay
 import OrbCore.Skills
+import OrbCore.SettingsDocument
 
 namespace OrbCore.ResourcesAndSystem
 
@@ -1397,8 +1398,8 @@ def handleUpdateLibraryRemote
   let curSettings ← readSettingsJson store.rootDir
   let nextVal : JVal := match nextRemote? with | some u => .str u | none => .null
   let updatedSettings := curSettings.setField "library_remote" nextVal
-  if let .error e ← writeSettingsJson store.rootDir updatedSettings then
-    return jsonErr 500 e
+  if let .error e ← writeSettingsJson store.rootDir updatedSettings (some curSettings) then
+    return jsonErr (OrbCore.SettingsFile.errorStatus e) e
   let libDir ← resolveLibraryDir workingDir store.rootDir
   match nextRemote? with
   | none =>
@@ -1438,6 +1439,26 @@ def handleLibraryRoute
   let effRemote ← resolveEffectiveLibraryRemote store.rootDir defaultLibraryRemote hdrsForRemote
   let libFp := System.FilePath.mk libDir
   let gitFp := libFp / ".git"
+
+  -- A transferred revision pins the next explicit synchronization. Importing
+  -- configuration never copies Library files or resets a working checkout.
+  if method == "POST" && (segs == ["api", "library", "sync"] || segs == ["api", "library", "force-sync"]) then
+    if !effAdmin then return some (jsonErr 403 "admin_required")
+    let settings ← readSettingsJson store.rootDir
+    if let some revision := settings.fieldStr? "library_revision" then
+      unless OrbCore.SettingsDocument.validLibraryRevision revision do
+        return some (jsonErr 400 "settings_invalid_library_revision")
+      if effRemote.isEmpty then return some (jsonErr 400 "Library remote is not configured")
+      if let .error _ ← ensureLibraryRepo libDir effRemote false then
+        return some (jsonErr 502 "library_revision_repository_unavailable")
+      let (status, changes) ← runGitCapture #["status", "--porcelain"] (some libDir)
+      if status != 0 || !changes.trimAscii.isEmpty then
+        return some (jsonErr 409 "library_revision_requires_clean_checkout")
+      let (fetched, _) ← runGitCapture #["fetch", "--no-tags", "origin", revision] (some libDir)
+      if fetched != 0 then return some (jsonErr 502 "library_revision_unavailable")
+      let (checkedOut, _) ← runGitCapture #["checkout", "--detach", revision] (some libDir)
+      if checkedOut != 0 then return some (jsonErr 409 "library_revision_checkout_failed")
+      return some (jsonResp 200 (← buildLibraryStatusJson libDir effRemote))
 
   if method == "GET" && segs == ["api", "library", "status"] then
     if !(← gitFp.pathExists) && !effRemote.isEmpty then

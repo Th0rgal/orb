@@ -155,16 +155,23 @@ private def runBwsJson (bwsToken : String) (args : Array String) : IO (Except St
   | .ok jv => return .ok jv
   | .error _ => return .error "bws returned invalid JSON"
 
+/-- `bws --version`, or none when the CLI is missing. -/
+private def bwsVersion? : IO (Option String) := do
+  let out ← (try some <$> IO.Process.output { cmd := "bws", args := #["--version"] } catch _ => pure none)
+  match out with
+  | some o => if o.exitCode == 0 then pure (some o.stdout.trimAscii.toString) else pure none
+  | none => pure none
+
 def listBitwardenProjectsAndSecrets (workingDir dataRoot : String) : IO (Except String (Array JVal × Array JVal)) := do
   let some tok ← resolveBwsToken? workingDir dataRoot
     | return .error "Bitwarden Secrets Manager is not configured"
   let projsJv ← match ← runBwsJson tok #["project", "list"] with
     | .ok (.arr ps) => pure ps
-    | .ok _ => pure #[]
+    | .ok _ => return .error "invalid_bws_projects_response"
     | .error e => return .error e
   let secsJv ← match ← runBwsJson tok #["secret", "list"] with
     | .ok (.arr ss) => pure ss
-    | .ok _ => pure #[]
+    | .ok _ => return .error "invalid_bws_secrets_response"
     | .error e => return .error e
   -- Redact `value` from metadata listing!
   let redactedSecs := secsJv.map (fun s => s.removeField "value")
@@ -273,11 +280,8 @@ def admitsSecretDelivery (key : String) (callerOnManagedNode : Bool) : Bool :=
 
 /-- Core-only resolution for the operator's reserved sealing path. This value
     must never be placed in an MCP response, file delivery, action receipt or log. -/
-def resolveReservedComputeSecret (workingDir dataRoot key : String) : IO (Except String String) := do
+def resolveReservedComputeVaultSecret (workingDir dataRoot key : String) : IO (Except String String) := do
   if !isCoreReservedComputeSecret key then return .error "not_core_reserved"
-  if let some value ← IO.getEnv key then
-    let clean := value.trimAscii.toString
-    if !clean.isEmpty then return .ok clean
   let some token ← resolveBwsToken? workingDir dataRoot
     | return .error "reserved_secret_vault_unconfigured"
   let .ok (_, secrets) ← listBitwardenProjectsAndSecrets workingDir dataRoot
@@ -291,6 +295,27 @@ def resolveReservedComputeSecret (workingDir dataRoot key : String) : IO (Except
   let value := (secret.fieldStr? "value").getD "" |>.trimAscii.toString
   if value.isEmpty then return .error "reserved_secret_empty"
   return .ok value
+
+/-- Compatibility for single-provider sealing; batch sealing deliberately uses
+    the vault-only resolver so both instances use the same Bitwarden entries. -/
+def resolveReservedComputeSecret (workingDir dataRoot key : String) : IO (Except String String) := do
+  if !isCoreReservedComputeSecret key then return .error "not_core_reserved"
+  if let some value ← IO.getEnv key then
+    let clean := value.trimAscii.toString
+    if !clean.isEmpty then return .ok clean
+  resolveReservedComputeVaultSecret workingDir dataRoot key
+
+/-- Names only. Disabled providers are included when their vault key exists;
+    duplicates are refused before any provider is resealed. -/
+def configuredReservedComputeProviders (workingDir dataRoot : String) : IO (Except String (Array String)) := do
+  let .ok (_, secrets) ← listBitwardenProjectsAndSecrets workingDir dataRoot
+    | return .error "reserved_secret_vault_unavailable"
+  let mut providers : Array String := #[]
+  for provider in OrbCore.ManagedProvider.registry do
+    let matching := secrets.filter (fun secret => secret.fieldStr? "key" == some provider.secretName)
+    if matching.size > 1 then return .error "reserved_secret_ambiguous"
+    if matching.size == 1 then providers := providers.push provider.name
+  return .ok providers
 
 private def defaultBwProjectsForSlug (broker : JVal) (projectSlug : String) : Array String :=
   if projectSlug.isEmpty then #[]
@@ -569,7 +594,7 @@ private def normalizeMissionAccessRequestJVal (r : JVal) (nowIso : String) : JVa
 private def riskOfApprovalKindTier (kind tier : String) (allProjects : Bool := false) : String :=
   if kind == "privilege" then
     if tier == "root_exec" || tier == "host_admin" then "critical"
-    else if tier == "service_deploy" then "elevated"
+    else if tier == "service_deploy" || tier == "dev_operator" then "elevated"
     else "routine"
   else if kind == "mission_access" then
     "elevated"
@@ -785,6 +810,8 @@ def mcpRequestPrivilegedAccess
   let cleanScope :=
     let sc := scope.trimAscii.toString
     if sc == "systemctl" || sc.isEmpty then "service_deploy" else sc
+  let cleanHost := if cleanScope == "dev_operator" then "dev" else cleanHost
+  let allowedUnits := if cleanScope == "dev_operator" then #[] else allowedUnits
   let cleanUnits := allowedUnits.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
   let allowedUnitField : JVal := match cleanUnits[0]? with | some u => .str u | none => .null
   let titleOpt ← match st? with
@@ -846,11 +873,11 @@ def mcpListPrivilegedAccess (st : CoreStore) (dataRoot missionId : String) (nowE
   let nowIso := formatEpochIso8601Utc nowEpochSec
   let doc ← readDataJsonObj dataRoot "privilege_access.json"
   let sql :=
-    if missionId.isEmpty then
+    if missionId.isEmpty && !includeLeaseTokensForOwner then
       "SELECT grant_id, mission_id, target_host, scope, allowed_units_json, revoked, expires_at_epoch, lease_token FROM privilege_leases ORDER BY expires_at_epoch DESC LIMIT 100;"
     else
       "SELECT grant_id, mission_id, target_host, scope, allowed_units_json, revoked, expires_at_epoch, lease_token FROM privilege_leases WHERE mission_id=?1 ORDER BY expires_at_epoch DESC LIMIT 100;"
-  let args := if missionId.isEmpty then #[] else #[missionId]
+  let args := if missionId.isEmpty && !includeLeaseTokensForOwner then #[] else #[missionId]
   let mut grants : Array JVal := #[]
   let mut leaseLookup : Array (String × Bool × UInt64) := #[]
   if let .ok rs ← execParamQuery st.missionsDb sql args then
@@ -858,6 +885,13 @@ def mcpListPrivilegedAccess (st : CoreStore) (dataRoot missionId : String) (nowE
       let r := rs[i]!
       let gid := (r[0]?).getD ""
       let mid := (r[1]?).getD ""
+      -- Empty-mission sessions are distinct external/operator identities, not
+      -- an invitation to enumerate or redeem every other mission's host lease.
+      if includeLeaseTokensForOwner && missionId.isEmpty then
+        let owned := !sessionId.isEmpty && ((doc.fieldArr? "requests").getD #[]).any (fun req =>
+          req.fieldStr? "grant_id" == some gid && req.fieldStr? "session_id" == some sessionId &&
+          ((req.fieldStr? "requester_mission_id").getD "").isEmpty)
+        unless owned do continue
       let th := (r[2]?).getD "self"
       let sc := (r[3]?).getD ""
       let units := (OrbBin.Json.parse ((r[4]?).getD "[]")).toOption.getD (.arr #[])
@@ -889,7 +923,7 @@ def mcpListPrivilegedAccess (st : CoreStore) (dataRoot missionId : String) (nowE
     else if includeLeaseTokensForOwner && !sessionId.isEmpty then
       let rMid := (r.fieldStr? "requester_mission_id").orElse (fun _ => r.fieldStr? "mission_id") |>.getD ""
       let rSid := (r.fieldStr? "session_id").getD ""
-      rMid.isEmpty && (rSid.isEmpty || rSid == sessionId)
+      rMid.isEmpty && rSid == sessionId
     else
       true)
   let normReqs := (rawReqs.map (fun r => normalizePrivilegeRequestJVal r leaseLookup nowEpochSec nowIso)).reverse
@@ -1120,10 +1154,38 @@ def dispatchSecretAndApprovalRoutes?
       return okJson 403 "{\"error\":\"admin_required\"}"
     if method == "GET" && cleanPath == "/api/bitwarden/status" then
       let tok? ← resolveBwsToken? workingDir dataRoot
+      let ver? ← bwsVersion?
+      let bwObj := ((← readSettingsJson dataRoot).field? "bitwarden").getD (.obj #[])
       return okJson 200 (renderCompact (.obj #[
         ("configured", .bool tok?.isSome),
-        ("connected", .bool tok?.isSome)
+        ("connected", .bool tok?.isSome),
+        ("bws_installed", .bool ver?.isSome),
+        ("bws_version", match ver? with | some v => .str v | none => .null),
+        ("token_source", if tok?.isSome then .str "settings" else .null),
+        ("token_hint", .null),
+        ("server_url", (bwObj.field? "server_url").getD .null),
+        ("default_project_id", .str ((bwObj.fieldStr? "default_project_id").getD "")),
+        ("project_bindings", (bwObj.field? "project_bindings").getD (.obj #[]))
       ]))
+    if method == "POST" && cleanPath.startsWith "/api/bitwarden/projects/" && cleanPath.endsWith "/secrets" then
+      let rawId := ((cleanPath.drop 24).dropEnd 8).toString
+      let some projectId := percentDecodeStrict rawId
+        | return okJson 400 "{\"error\":\"invalid_project\"}"
+      if projectId.trimAscii.isEmpty then
+        return okJson 400 "{\"error\":\"project_required\",\"message\":\"Choose a Bitwarden project for the new secret.\"}"
+      let .ok jv := OrbBin.Json.parseBytes bodyBytes
+        | return okJson 400 "{\"error\":\"invalid_json\"}"
+      let key := ((jv.fieldStr? "key").getD "").trimAscii.toString
+      let value := (jv.fieldStr? "value").getD ""
+      if key.isEmpty then
+        return okJson 400 "{\"error\":\"missing_key\"}"
+      let some tok ← resolveBwsToken? workingDir dataRoot
+        | return okJson 409 "{\"error\":\"bitwarden_not_configured\"}"
+      let note := ((jv.fieldStr? "note").getD "").trimAscii.toString
+      let args := #["secret", "create", key, value, projectId] ++ (if note.isEmpty then #[] else #["--note", note])
+      match ← runBwsJson tok args with
+      | .ok created => return okJson 201 (renderCompact (created.removeField "value"))
+      | .error e => return okJson 502 (renderCompact (.obj #[("error", .str "bws_create_failed"), ("message", .str e)]))
     if method == "PUT" && cleanPath == "/api/bitwarden/config" then
       let .ok jv := OrbBin.Json.parseBytes bodyBytes
         | return okJson 400 "{\"error\":\"invalid_json\"}"
@@ -1137,15 +1199,16 @@ def dispatchSecretAndApprovalRoutes?
       let settings ← readSettingsJson dataRoot
       let bwObj := (((settings.field? "bitwarden").getD (.obj #[])).removeField "access_token").setField
         "encrypted_access_token" (.str enc)
-      if let .error e ← writeSettingsJson dataRoot (settings.setField "bitwarden" bwObj) then
-        return okJson 500 s!"\{\"error\":{jsonEscape e}}"
+      if let .error e ← writeSettingsJson dataRoot (settings.setField "bitwarden" bwObj) (some settings) then
+        return okJson (OrbCore.SettingsFile.errorStatus e) s!"\{\"error\":{jsonEscape e}}"
       return okJson 200 "{\"ok\":true,\"configured\":true}"
     if method == "DELETE" && cleanPath == "/api/bitwarden/config" then
       -- Disconnecting removes the token only; default project access stays for the next token.
       let settings ← readSettingsJson dataRoot
       let bwObj := (((settings.field? "bitwarden").getD (.obj #[])).removeField "access_token").removeField
         "encrypted_access_token"
-      discard <| writeSettingsJson dataRoot ((settings.setField "bitwarden" bwObj).removeField "bws_access_token")
+      if let .error e ← writeSettingsJson dataRoot ((settings.setField "bitwarden" bwObj).removeField "bws_access_token") (some settings) then
+        return okJson (OrbCore.SettingsFile.errorStatus e) s!"\{\"error\":{jsonEscape e}}"
       return okJson 200 "{\"ok\":true,\"configured\":false}"
     if method == "GET" && cleanPath == "/api/bitwarden/projects" then
       match ← listBitwardenProjectsAndSecrets workingDir dataRoot with
@@ -1212,8 +1275,8 @@ def dispatchSecretAndApprovalRoutes?
       let settings ← readSettingsJson dataRoot
       let bwObj := (settings.field? "bitwarden").getD (.obj #[])
       let da := ((bwObj.field? "default_access").getD (.obj #[])).setField slug (.arr bwProjs)
-      if let .error e ← writeSettingsJson dataRoot (settings.setField "bitwarden" (bwObj.setField "default_access" da)) then
-        return okJson 500 s!"\{\"error\":{jsonEscape e}}"
+      if let .error e ← writeSettingsJson dataRoot (settings.setField "bitwarden" (bwObj.setField "default_access" da)) (some settings) then
+        return okJson (OrbCore.SettingsFile.errorStatus e) s!"\{\"error\":{jsonEscape e}}"
       return okJson 200 (renderCompact (.obj #[("ok", .bool true), ("project", .str slug), ("bitwarden_projects", .arr bwProjs)]))
 
   -- 3. Legacy `/api/secrets*`

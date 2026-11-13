@@ -36,6 +36,7 @@ import OrbCore.ProjectFilesAndController
 import OrbCore.CloudHttpAndWorker
 import OrbCore.ProviderUsageAndLogin
 import OrbCore.ResourcesAndSystem
+import OrbCore.DevOperator
 import OrbCore.McpGateway
 import OrbNetLeaf.TlsHttp
 import OrbNetLeaf.Gzip
@@ -78,6 +79,8 @@ open OrbNetLeaf.TlsHttp
 /-- Core runtime configuration parsed from environment variables (`HOST`, `PORT`, `WORKING_DIR`,
     `DEV_MODE`, `DASHBOARD_PASSWORD`, `JWT_SECRET`, `SANDBOXED_USERS`, `ALLOW_INSECURE_REMOTE_DEV_AUTH`). -/
 structure CoreConfig where
+  instanceName               : String := ""
+  devGrantIssuerHost         : String := "orbcore.thomas.md"
   host                       : String := "127.0.0.1"
   port                       : UInt16 := 3000
   workingDir                 : String := "."
@@ -136,6 +139,7 @@ structure CallerPrincipal where
   sessionEpoch        : UInt64 := 1
   disabled            : Bool := false
   dailySpendCapCents? : Option UInt64 := none
+  isDevOperator       : Bool := false
   isLegacyUnscoped    : Bool := false
   deriving Repr, DecidableEq, Inhabited
 
@@ -257,6 +261,8 @@ def loadConfigFromEnv : IO CoreConfig := do
     workingDir := workingDir
     devMode := devMode
     allowInsecureRemoteDevAuth := allowRemote
+    instanceName := (← IO.getEnv "ORB_INSTANCE").getD ""
+    devGrantIssuerHost := (← IO.getEnv "ORB_DEV_GRANT_ISSUER_HOST").getD "orbcore.thomas.md"
     dashboardPassword := pwd
     jwtSecret := jwt
     usersJson := users
@@ -434,6 +440,15 @@ def resolveCallerPrincipal?
     | some b => some b
     | none => if allowWsSubproto then extractWsJwtSubproto? hdrs else none
   if let some tok := rawTok? then
+    if tok.startsWith OrbCore.DevOperator.tokenPrefix then
+      let some _ ← OrbCore.DevOperator.tokenExpiry? st.store
+          (st.cfg.instanceName == "dev") tok nowEpochSec
+          (OrbCore.DevOperator.verifyIssuer st.cfg.devGrantIssuerHost) | return none
+      let bunker ← match st.bunkerStateRef? with | some ref => ref.get | none => pure 0
+      unless bunker == 0 do return none
+      let some admin ← getBootstrapAdmin? st.store | return none
+      if admin.disabled || admin.role != "admin" then return none
+      return some { CallerPrincipal.ofUserRecord admin false with isDevOperator := true }
     if tok.startsWith "orb-jwt-v2:" then
       let some (uid, _tokRole, tokEpoch, _exp) := verifySessionTokenV2 sec tok nowEpochSec
         | return none
@@ -2006,6 +2021,26 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       else (health.dropEnd 1).toString ++ s!",\"build\":{jsonEscape buildSha}}"
     return .ok (mkJsonHdr 200 body #[("Cache-Control", "private, max-age=5")])
 
+  -- This capability authenticates only a dev grant, never a production API
+  -- session. The response contains no JWT secret, user, mission, or lease token.
+  if req.method == "POST" && cleanPath == "/api/dev-operator/verify" then
+    let token := (extractBearerToken? req.headers nowEpochSec).getD ""
+    unless token.startsWith OrbCore.DevOperator.tokenPrefix do
+      return .ok (mkJson 401 "{\"error\":\"dev_grant_required\"}")
+    let raw := (token.drop OrbCore.DevOperator.tokenPrefix.length).toString
+    let some lease ← OrbCore.DevOperator.activeLease? st.store raw nowEpochSec
+      | return .ok (mkJson 401 "{\"error\":\"dev_grant_invalid\"}")
+    let bunker ← match st.bunkerStateRef? with | some ref => ref.get | none => pure 0
+    unless bunker == 0 do return .ok (mkJson 403 "{\"error\":\"bunker_active\"}")
+    return .ok (mkJson 200 (renderCompact (.obj #[("active", .bool true),
+      ("expires_at", JVal.uint64 lease.expiresAtEpoch)])))
+
+  -- Refuse host operations and independent credential minting before any early
+  -- dispatcher (including WebSocket upgrades and MCP session creation).
+  if (extractBearerToken? req.headers nowEpochSec).any (·.startsWith OrbCore.DevOperator.tokenPrefix) &&
+      OrbCore.DevOperator.restrictedPath cleanPath then
+    return .ok (mkJson 403 "{\"error\":\"dev_operator_scope_required\"}")
+
   -- 2. Public Auth Login (`POST /api/auth/login`)
   if req.method == "POST" && cleanPath == "/api/auth/login" then
     let tape := JsonTape.indexJsonObject req.bodySlice
@@ -2367,6 +2402,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | return .ok (mkJson 400 "{\"ok\":false,\"error\":{\"code\":\"invalid_json\",\"message\":\"Malformed JSON body\",\"accepted\":\"no\",\"retryable\":false}}")
       let toolName := (jv.fieldStr? "name").getD ""
       let args := (jv.field? "arguments").getD (.obj #[])
+      if (mcpCaller?.map (·.isDevOperator)).getD false &&
+          (toolName.startsWith "secret_" || #["request_privileged_access", "list_privileged_access",
+            "revoke_privileged_access", "execute_privileged_command", "deploy_sandboxed_sh"].contains toolName) then
+        return .ok (mkJson 403 "{\"error\":\"dev_operator_scope_required\"}")
       if isMemoryToolName toolName then
         let mut onManagedNode := false
         let mut hasProjSkill := !activeClaims.isExternal && !activeClaims.project.isEmpty
@@ -4644,25 +4683,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | none => t
     let loadChainRows : IO (Array JVal) := do
       let .ok rs ← execParamQuery st.store.missionsDb
-          "SELECT id,name,models_json,COALESCE(updated_at,''),COALESCE(created_at,''),COALESCE(is_default,-1),COALESCE(strip_thinking,-1) FROM model_routing_chains ORDER BY id ASC;" #[]
+          OrbCore.ProxyModelRouting.chainRowsSql #[]
         | throw (IO.userError "routing_chain_store_unavailable")
-      let rows := rs.extract 1 rs.size
-      let explicitDefault := rows.any (fun r => r[5]? == some "1")
-      let mut out : Array JVal := #[]
-      for r in rows do
-        let cid := (r[0]?).getD ""
-        let updated := isoOf ((r[3]?).getD "")
-        let created := if ((r[4]?).getD "").isEmpty then updated else isoOf ((r[4]?).getD "")
-        let isDef := if explicitDefault then r[5]? == some "1" else cid == "builtin/smart"
-        let strip := if r[6]? == some "-1" then cid == "builtin/assistant" else r[6]? == some "1"
-        out := out.push (OrbCore.ProxyModelRouting.chainResponse cid ((r[1]?).getD cid) ((r[2]?).getD "[]") isDef strip created updated)
-      -- Stock chains the proxy serves are listed even before anyone edits them.
-      for (sid, sname, entries) in OrbCore.ProxyModelRouting.stockChains do
-        if !out.any (fun c => c.fieldStr? "id" == some sid) then
-          let now := formatEpochIso8601Utc nowEpochSec
-          out := out.push (OrbCore.ProxyModelRouting.chainResponse sid sname
-            (OrbCore.ProxyModelRouting.entriesJson entries) (!explicitDefault && sid == "builtin/smart") (sid == "builtin/assistant") now now)
-      return out
+      return OrbCore.ProxyModelRouting.chainResponses (rs.extract 1 rs.size) isoOf (formatEpochIso8601Utc nowEpochSec)
     let chainId? := (matchRoutePattern? "/api/model-routing/chains/:id" rawTarget).bind fun ps =>
       (ps.find? (fun p => p.1 == "id")).map Prod.snd
     if req.method == "GET" && cleanPath == "/api/model-routing/chains" then
@@ -5966,8 +5989,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
                 acc := acc.setField k v
             return acc
         | _, _ => curSettings
-      if let .error e ← writeSettingsJson st.store.rootDir merged then
-        return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      if let .error e ← writeSettingsJson st.store.rootDir merged (some curSettings) then
+        return .ok (mkJson (OrbCore.SettingsFile.errorStatus e) s!"\{\"error\":{jsonEscape e}}")
       return .ok (mkJson 200 (renderCompact (redactSettingsSecrets merged)))
 
   if cleanPath == "/api/proxy-keys" || cleanPath.startsWith "/api/proxy-keys/" then

@@ -1,0 +1,11 @@
+[Unit]
+Description=Deploy Orb master to dev through the Core build and health gates
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/sbin/orb-dev-autodeploy
+TimeoutStartSec=2min
+UMask=0077

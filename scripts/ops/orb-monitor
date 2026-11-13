@@ -22,12 +22,42 @@ COMPUTE_DB = ENV("ORB_MONITOR_COMPUTE_DB", "/root/.sandboxed-sh/managed_compute.
 NGINX_LOG = ENV("ORB_MONITOR_NGINX_LOG", "/var/log/nginx/access.log")
 SERVICES = {"prod": 3000, "dev": 3002}
 UNIT_PATTERN = re.compile(r"orb|sandboxed|paloma|hermes|cli-proxy|lean-mesh")
-STALL_MINUTES = 30
 NOW = time.time()
+DEFAULT_THRESHOLDS = {
+    "stall_minutes": 30, "proxy_window_seconds": 600,
+    "proxy_5xx_count": 20, "proxy_4xx_count": 30,
+    "vm_expiry_grace_seconds": 0, "long_build_minutes": 90,
+}
+THRESHOLDS = DEFAULT_THRESHOLDS.copy()
 
 
 def ro(db):
     return sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=10)
+
+
+def load_thresholds():
+    """Read only the non-secret settings row; Core owns validation and writes.
+
+    Keep the original thresholds when upgrading an older Core or when no
+    operator has configured them. The monitor still works without a live API.
+    """
+    try:
+        with ro(COMPUTE_DB) as con:
+            row = con.execute("SELECT data FROM core_monitor_settings WHERE singleton_id=1").fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table: core_monitor_settings" in str(exc):
+            return DEFAULT_THRESHOLDS.copy()
+        raise
+    values = json.loads(row[0]) if row else {}
+    if not isinstance(values, dict) or values.keys() - DEFAULT_THRESHOLDS.keys():
+        raise ValueError("invalid monitor settings")
+    for key, value in values.items():
+        maximum = 1_000_000 if key in ("proxy_5xx_count", "proxy_4xx_count") else (
+            10080 if key in ("stall_minutes", "long_build_minutes") else 86400)
+        minimum = 0 if key == "vm_expiry_grace_seconds" else 1
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise ValueError("invalid monitor settings")
+    return DEFAULT_THRESHOLDS | values
 
 
 def check_health(problems, info):
@@ -51,7 +81,8 @@ def check_proxy(problems):
             lines = f.read().decode("utf-8", "replace").splitlines()[1:]
     except OSError:
         return
-    cutoff = NOW - 600
+    window = THRESHOLDS["proxy_window_seconds"]
+    cutoff = NOW - window
     total = bad5 = bad4 = 0
     for line in lines:
         m = re.search(r'\[([^\]]+)\] "\S+ (/v1/\S*) [^"]*" (\d{3}) ', line)
@@ -67,17 +98,18 @@ def check_proxy(problems):
         code = int(m.group(3))
         bad5 += code >= 500
         bad4 += code in (400, 404)
-    if bad5 >= 20:
-        problems["proxy:5xx"] = f"model proxy returned {bad5} 5xx in 10 min ({total} requests)"
-    if bad4 >= 30:
-        problems["proxy:4xx"] = f"model proxy rejected {bad4} requests (400/404) in 10 min; likely an unknown model alias"
+    if bad5 >= THRESHOLDS["proxy_5xx_count"]:
+        problems["proxy:5xx"] = f"model proxy returned {bad5} 5xx in {window}s ({total} requests)"
+    if bad4 >= THRESHOLDS["proxy_4xx_count"]:
+        problems["proxy:4xx"] = f"model proxy rejected {bad4} requests (400/404) in {window}s; likely an unknown model alias"
 
 
 def check_missions(problems):
-    """Missions marked active with no running job and no event for STALL_MINUTES."""
+    """Missions marked active with no running job past the configured threshold."""
     try:
         con = ro(MISSIONS_DB)
-        cutoff = datetime.datetime.fromtimestamp(NOW - STALL_MINUTES * 60, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+        stall_minutes = THRESHOLDS["stall_minutes"]
+        cutoff = datetime.datetime.fromtimestamp(NOW - stall_minutes * 60, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
         rows = con.execute(
             "SELECT m.id, m.title FROM missions m WHERE m.status='active' AND m.updated_at < ? "
             "AND m.updated_at LIKE '20%' "
@@ -89,7 +121,7 @@ def check_missions(problems):
         problems["db:missions"] = f"cannot read missions DB ({exc})"
         return
     for mid, title in rows:
-        problems[f"stalled:{mid[:8]}"] = f"mission '{(title or '')[:40]}' ({mid[:8]}) is marked active but has no running job for {STALL_MINUTES}+ min"
+        problems[f"stalled:{mid[:8]}"] = f"mission '{(title or '')[:40]}' ({mid[:8]}) is marked active but has no running job for {stall_minutes}+ min"
 
 
 def check_machines(problems):
@@ -113,11 +145,11 @@ def check_machines(problems):
     except sqlite3.Error:
         pass
     for mid, size, owner, exp in rows:
-        if exp and exp < NOW:
+        if exp and exp < NOW - THRESHOLDS["vm_expiry_grace_seconds"]:
             problems[f"vm-expired:{mid[:8]}"] = f"VM {mid[:8]} ({size}) expired {int((NOW - exp) / 60)} min ago and is still marked ready"
         elif owners.get(owner) in ("completed", "failed", "cancelled", "interrupted"):
             problems[f"vm-orphan:{mid[:8]}"] = f"VM {mid[:8]} ({size}) is alive but its mission {owner[:8]} is {owners[owner]}"
-        elif exp and exp - NOW < 20 * 60:
+        elif exp and 0 < exp - NOW < 20 * 60:
             problems[f"vm-expiring:{mid[:8]}"] = f"VM {mid[:8]} ({size}, mission {owner[:8]}) expires in {int((exp - NOW) / 60)} min"
 
 
@@ -132,7 +164,7 @@ def check_units(problems):
 def check_builds(problems):
     out = subprocess.run(["ps", "-eo", "etimes=,comm="], capture_output=True, text=True).stdout
     longest = max([int(l.split()[0]) for l in out.splitlines() if l.split()[1:] == ["lake"]] or [0])
-    if longest > 90 * 60:
+    if longest > THRESHOLDS["long_build_minutes"] * 60:
         problems["build:long"] = f"a lake build has been running for {longest // 60} min"
 
 
@@ -222,6 +254,11 @@ def notify(text, opened=(), cleared=()):
 
 def main():
     problems, info = {}, {}
+    try:
+        THRESHOLDS.update(load_thresholds())
+    except (OSError, sqlite3.Error, ValueError, TypeError):
+        THRESHOLDS.update(DEFAULT_THRESHOLDS)
+        problems["config:monitor"] = "cannot read valid monitor thresholds; using defaults"
     for check in (check_health, check_proxy, check_missions, check_machines, check_units, check_builds):
         try:
             check(problems, info) if check is check_health else check(problems)

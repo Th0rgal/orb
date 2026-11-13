@@ -254,7 +254,7 @@ def resumeManagedWorker (mc : ManagedComputeStore) (fleet : ManagedFleetState)
   let some (m, _) ← getManagedMachine? mc machineId | return .error "managed_machine_missing"
   if m.provider != provider.name then return .error "managed_provider_mismatch"
   let .ok cost := provider.quoteCents m.size ttl | return .error "managed_resume_quote_invalid"
-  let servicePrefix := sandboxNamePrefixFor (← IO.appPath).toString
+  let servicePrefix ← managedSandboxNamePrefix
   let providerName := if m.sandboxName.startsWith servicePrefix then m.sandboxName else servicePrefix ++ m.id
   let spec : ManagedProvider.SpawnSpec := {
     name := providerName, size := m.size, ttlSeconds := ttl * 60, idempotencyKey := requestKey

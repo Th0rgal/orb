@@ -87,6 +87,7 @@ enum OrbBtwThreads {
         "api:usage-limit-replay",
         "background-task",
         "scheduler",
+        "wakeup",
         "idle-worker-watchdog",
         "transport_auto_resume",
         "remote-build-terminal",

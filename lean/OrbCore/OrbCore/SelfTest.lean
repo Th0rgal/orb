@@ -30,6 +30,10 @@ import OrbCore.ComputeRollupTests
 import OrbCore.ManagedSnapshotCatalogTests
 import OrbCore.ProviderContractTests
 import OrbCore.ProxyRoutingTests
+import OrbCore.SettingsDocumentTests
+import OrbCore.DevSpendingTests
+import OrbCore.DevOperatorTests
+import OrbCore.SettingsTransferTests
 
 namespace OrbCore.SelfTest
 
@@ -6783,6 +6787,21 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
      fSyncSt != 200 || afterSt != 200 || (afterBody.splitOn "Peer remote line.").length < 2 then
     return (← fail s!"diverged history detection/force-sync failed: push=({divPushSt},{divPushBody}) sync=({divSyncSt},{divSyncBody}) fSync={fSyncSt} after={afterBody}")
 
+  -- A transferred Library pin selects that commit, never the moving branch.
+  let pinSettings ← readSettingsJson dataRoot
+  let .ok () ← writeSettingsJson dataRoot (pinSettings.setField "library_revision" (.str oldestRev))
+    | return (← fail "could not set Library revision fixture")
+  let (pinSyncSt, _, _) ← sendReq "POST" "/api/library/sync" hsJwt ""
+  let (pinReadSt, _, pinReadBody) ← sendReq "GET" "/api/library/skill/orb-basics" hsJwt ""
+  if pinSyncSt != 200 || pinReadSt != 200 || (pinReadBody.splitOn "Follow Core contracts.").length != 2 ||
+      (pinReadBody.splitOn "Peer remote line.").length != 1 then
+    return (← fail "Library synchronization did not honor the transferred revision")
+  let libraryDir ← resolveLibraryDir workRoot dataRoot
+  IO.FS.writeFile (System.FilePath.mk libraryDir / "keep-local.txt") "local draft"
+  let (dirtyPinSt, _, _) ← sendReq "POST" "/api/library/force-sync" hsJwt ""
+  if dirtyPinSt != 409 || (← IO.FS.readFile (System.FilePath.mk libraryDir / "keep-local.txt")) != "local draft" then
+    return (← fail "Library revision sync must preserve local drafts even on force-sync")
+
   closeCoreStore store
   discard <| (IO.FS.removeDirAll workRoot).toBaseIO
   return 0
@@ -6878,6 +6897,8 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   try
     OrbCore.ManagedProvisioningTests.run tmpRoot
     OrbCore.ManagedResumeTests.run tmpRoot
+    OrbCore.DevSpendingTests.run tmpRoot
+    OrbCore.DevOperatorTests.run tmpRoot
     OrbCore.ManagedAccessTests.run tmpRoot
     OrbCore.ManagedTtlTests.run tmpRoot
     OrbCore.ManagedHarvestTests.run tmpRoot
@@ -8050,4 +8071,6 @@ end OrbCore.SelfTest
 
 def main (args : List String) : IO UInt32 := do
   OrbBin.PosixExt.setenvVar "ORB_HERMETIC_TEST" "1"
+  OrbCore.SettingsDocumentTests.run
+  OrbCore.SettingsTransferTests.run
   OrbCore.SelfTest.runSuite (OrbCore.SelfTest.findFlag? args "--emit-evidence-log")

@@ -39,3 +39,38 @@ Create a test user on dev; as that user, try to read or act on admin's missions,
 ## Done when
 
 Both instances run from the base plus overlays; a settings round trip (export prod, import to dev, export dev) is byte-identical; a mission can deploy to dev and call dev's API with a grant and no password; master merges reach dev without a human; the isolation test passes on dev.
+
+## Implementation
+
+- Item 1: the repository units share a base and enforce overlay ownership with
+  `scripts/ops/orb-env`. The migration preserves both legacy env files as
+  private backups and does not change running services. See
+  [the operator migration procedure](../operations/core-environments.md).
+  Live application and dev verification are still required.
+- Item 2: `orb-core settings export|import|refresh-dev|promote-dev` uses a
+  strict non-secret document, a printed diff, explicit `--yes` confirmation and
+  stale-preview detection. Existing target users are matched by username;
+  target credentials and instance data stay local. Library revision and monitor
+  thresholds are included. See [the transfer contract](../operations/settings-document.md).
+  Temporary-store round trips and rollback tests pass; the live dev round trip
+  still requires operator application and verification.
+- Item 3: `seal-provider --all` discovers configured provider keys through
+  Bitwarden metadata and seals them inside Core for the current instance.
+  See [the operator procedure](../operations/provider-sealing.md). Live sealing
+  remains an operator step; no vault values are delivered to a mission.
+
+- Item 4: `dev_operator` reuses hardware-approved mission leases for an opaque
+  dev-only admin bearer, fixed dev deployment and bounded dev journal tools.
+  See [the dev pass contract](../operations/dev-operator.md). Cross-instance
+  redemption requires the issuing Core to support verification; live acceptance
+  remains pending operator installation.
+- Item 5: an operator-installed systemd timer follows master and submits exact
+  commits through `orb-deploy --dev-only`, which builds, self-tests and verifies
+  the exact healthy SHA. See [dev auto-deployment](../operations/dev-autodeploy.md).
+  The repository tests use fake systemd/network effects; live timer installation
+  and observing a merge reach dev are still pending.
+- Item 6: dev rentals carry the provider-visible dev name and usage attribution,
+  with a default $5 daily commitment ceiling checked transactionally across all
+  users, including resumes and extensions. Settings imports cannot override it.
+  See [dev spending](../operations/dev-spending.md). Live rental and cap
+  acceptance remains pending dev installation.

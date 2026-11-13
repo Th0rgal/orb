@@ -239,7 +239,7 @@ function MessageImage(p: {path:string; index:number; onUrl:(url:string|null)=>vo
   </>;
 }
 
-const AUTOMATIC_SOURCES = new Set(["background-task", "scheduler", "idle-worker-watchdog", "transport_auto_resume", "remote-build-terminal", "task-board"]);
+const AUTOMATIC_SOURCES = new Set(["background-task", "scheduler", "wakeup", "idle-worker-watchdog", "transport_auto_resume", "remote-build-terminal", "task-board"]);
 
 /** The coordinator resumed the agent after a background shell ended. It is
  * not something the user wrote, so it is not shown as their message. */

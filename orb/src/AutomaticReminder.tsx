@@ -3,6 +3,7 @@ import {createEffect, createMemo, createSignal, on, onCleanup, Show} from 'solid
 import {api, connectionVersion, isConnected} from './api';
 import {copyText} from './clipboard';
 import type {StreamItem} from './transcriptModel';
+import {isSchedulerSource} from './messagePresentation';
 
 export type Reminder = {origin: string; seconds?: number};
 /** Legacy wakeups have no source: attribute only an exact successful tool prompt. */
@@ -18,8 +19,8 @@ export function reminderMessages(items: StreamItem[]): Map<string, Reminder> {
       }
     }
     if (item.kind === 'user') {
-      const reminder = (!item.source || item.source === 'scheduler') ? scheduled.get(item.text) : undefined;
-      if (reminder || item.source === 'scheduler') result.set(item.key, reminder ?? {origin: 'Mission scheduler'});
+      const reminder = (!item.source || isSchedulerSource(item.source)) ? scheduled.get(item.text) : undefined;
+      if (reminder || isSchedulerSource(item.source)) result.set(item.key, reminder ?? {origin: 'Mission scheduler'});
       scheduled.delete(item.text);
     }
   }

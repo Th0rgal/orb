@@ -4,7 +4,7 @@
   - `orb-core` (default HTTP/WS Core server on `$HOST:$PORT`)
   - `orb-core deploy --service <unit>` (validated systemd unit deployment)
   - `orb-core managed-inspect <id>...` (read-only: Core row beside provider-side state)
-  - `orb-core seal-provider <boat|leanci|colab>` (operator vault-to-Core key sealing)
+  - `orb-core seal-provider <boat|leanci|colab|--all> [--data-root DIR]` (operator vault-to-Core key sealing)
   - `orb-core --harness-contract-tests` (9 CLI/SSE/ACP parser contract tests)
   - `orb-core --version` / `-V`
 -/
@@ -14,6 +14,7 @@ import OrbCore.Harness
 import OrbCore.Store
 import OrbCore.R7Core
 import OrbCore.ManagedProviderSealing
+import OrbCore.SettingsCli
 
 namespace OrbCore.CliMain
 
@@ -111,18 +112,26 @@ def runManagedInspectSubcommand (ids : List String) : IO UInt32 := do
     carrying a mission identity is refused. The key travels vault -> Core's
     sealed file only; nothing but the provider name is printed. -/
 def runSealProviderSubcommand (args : List String) : IO UInt32 := do
-  let some provider := args.head?
-    | do IO.eprintln "[orb-core seal-provider] usage: seal-provider <boat|leanci|colab>"; return 2
+  let some (provider, root?) := (match args with
+    | [provider] => some (provider, none)
+    | [provider, "--data-root", root] => if root.isEmpty || root.startsWith "-" then none else some (provider, some root)
+    | _ => none)
+    | do IO.eprintln "usage: orb-core seal-provider <boat|leanci|colab|--all> [--data-root DIR]"; return 2
   let cfg ← loadConfigFromEnv
   let normWork := cfg.workingDir.trimAscii.toString
-  let dataRoot :=
+  let dataRoot := root?.getD (
     if normWork.endsWith "/.sandboxed-sh" || normWork == ".sandboxed-sh" then normWork
-    else s!"{normWork}/.sandboxed-sh"
-  let st ← OrbBin.PosixExt.statPath dataRoot
-  let ownsDataRoot := st.exists_ && st.isDir && !st.isSymlink && st.ownedByEuid
-  let mut missionIdentity := false
-  for name in #["SANDBOXED_MISSION_ID", "SANDBOXED_SH_MISSION_ID", "SANDBOXED_JOB_ID"] do
-    if ((← IO.getEnv name).getD "").trimAscii.toString != "" then missionIdentity := true
+    else s!"{normWork}/.sandboxed-sh")
+  let ownsDataRoot ← OrbCore.LocalOperator.ownsRoot dataRoot
+  let missionIdentity ← OrbCore.LocalOperator.isMission
+  if provider == "--all" then
+    match ← OrbCore.ManagedProviderSealing.sealConfigured dataRoot ownsDataRoot missionIdentity false
+        (OrbCore.SecretAndApproval.configuredReservedComputeProviders cfg.workingDir dataRoot)
+        (OrbCore.SecretAndApproval.resolveReservedComputeVaultSecret cfg.workingDir dataRoot) with
+    | .ok providers =>
+      IO.println (OrbBin.Json.renderCompact (.obj #[("sealed", .arr (providers.map OrbBin.Json.JVal.str))]))
+      return 0
+    | .error e => IO.eprintln s!"[orb-core seal-provider] {e}"; return 1
   match ← OrbCore.ManagedProviderSealing.sealReserved dataRoot provider ownsDataRoot missionIdentity false
       (OrbCore.SecretAndApproval.resolveReservedComputeSecret cfg.workingDir dataRoot) with
   | .ok () =>
@@ -152,6 +161,11 @@ def main (args : List String) : IO UInt32 := do
     OrbCore.CliMain.runManagedInspectSubcommand rest
   | "seal-provider" :: rest =>
     OrbCore.CliMain.runSealProviderSubcommand rest
+  | "settings" :: rest =>
+    let cfg ← OrbCore.Control.loadConfigFromEnv
+    let work := cfg.workingDir.trimAscii.toString
+    let root := if work.endsWith "/.sandboxed-sh" || work == ".sandboxed-sh" then work else s!"{work}/.sandboxed-sh"
+    OrbCore.SettingsCli.run rest root
   | _ =>
     let cfg ← OrbCore.Control.loadConfigFromEnv
     OrbCore.Control.runCoreServer cfg none

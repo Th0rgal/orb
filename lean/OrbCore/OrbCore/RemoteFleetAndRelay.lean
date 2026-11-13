@@ -742,7 +742,7 @@ def buildComputeFleetJVal
         ("disk_available_bytes", .null),
         ("last_seen", lastSeenVal),
         ("error", .null),
-        ("labels", .arr #[.str "managed", .str s!"provider={m.provider}", .str s!"owner={ownerKind}"])
+        ("labels", .arr #[.str "managed", .str s!"provider={m.provider}", .str s!"owner={ownerKind}", .str s!"instance={managedMachineInstance m.sandboxName}"])
       ])
   let rawBudget :=
     (OrbBin.Json.parse (renderManagedBudgetJson fleet callerUserId? userSpentTodayCents userDailyCapCents?)).toOption.getD (.obj #[])
@@ -1125,7 +1125,7 @@ def reconcileConfiguredBoatInventory (mc : ManagedComputeStore) (dataRoot : Stri
       pure p
   if provider.name != "boat" then return .error "managed_provider_mismatch"
   let .ok inventory ← provider.list | return .error "boat_inventory_unavailable"
-  reconcileManagedProviderInventory mc "boat" (sandboxNamePrefixFor (← IO.appPath).toString) inventory nowEpoch
+  reconcileManagedProviderInventory mc "boat" (← managedSandboxNamePrefix) inventory nowEpoch
 
 structure ManagedLifecycleContext where
   store : CoreStore
