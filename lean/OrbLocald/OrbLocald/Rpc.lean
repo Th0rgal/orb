@@ -47,8 +47,6 @@ def candidateOriginsFor (raw : String) : Array String :=
       #[clean, "https://agent-backend.thomas.md", "https://orbcore.thomas.md"]
     else if low == "https://agent-backend.thomas.md" then
       #[clean, "https://orbcore.thomas.md", "https://agent-backend.nico-best-pc-ever.ovh"]
-    else if low.endsWith ".thomas.md" then
-      #[clean, "https://agent-backend.thomas.md", "https://orbcore.thomas.md"]
     else
       #[clean]
 

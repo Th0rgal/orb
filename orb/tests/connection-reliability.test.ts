@@ -57,6 +57,22 @@ afterEach(() => {
 });
 
 describe("connection reliability transport & prefetch bounds", () => {
+  it("keeps failed dev reads and confirmed writes on the configured instance", async () => {
+    const dev = "https://agent-backend-dev.thomas.md";
+    setConnection(dev, "synthetic-dev-bearer");
+    const seenUrls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      seenUrls.push(String(input));
+      throw new TypeError("Load failed");
+    }));
+    await expect(transportFetch("/api/control/missions")).rejects.toThrow();
+    await expect(transportFetch("/api/control/missions", withIdempotencyKey({
+      method: "POST", body: "{}",
+    }, "synthetic-dev-write"))).rejects.toThrow();
+    expect(seenUrls.length).toBeGreaterThanOrEqual(2);
+    expect(seenUrls.every(url => new URL(url).origin === dev)).toBe(true);
+  });
+
   it("fast-retries idempotent GET on single-origin Load failed while leaving caller-owned POST retry state machines intact", async () => {
     let getCalls = 0;
     let rawPostCalls = 0;

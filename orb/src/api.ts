@@ -85,9 +85,8 @@ export function candidateApiUrls(primary = getApiUrl()): string[] {
   if (lower === DEFAULT_URL) {
     return [clean, ORBCORE_URL, KNOWN_DIRECT_URL];
   }
-  if (lower.endsWith(".thomas.md")) {
-    return [clean, DEFAULT_URL, ORBCORE_URL];
-  }
+  // Only the aliases above identify the same instance. Dev and custom hosts
+  // must retain their own credentials and writes even when unreachable.
   return [clean];
 }
 

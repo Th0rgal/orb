@@ -141,6 +141,16 @@
   ],
   "candidate_origin_cases": [
     {
+      "name": "dev_never_fails_over_to_production",
+      "configured_url": "https://agent-backend-dev.thomas.md/",
+      "expected": ["https://agent-backend-dev.thomas.md"]
+    },
+    {
+      "name": "custom_subdomain_is_a_separate_instance",
+      "configured_url": "https://other-core.thomas.md/",
+      "expected": ["https://other-core.thomas.md"]
+    },
+    {
       "name": "orbcore_primary_prefers_cloudflare_edge_second",
       "configured_url": "https://orbcore.thomas.md",
       "expected": [

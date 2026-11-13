@@ -43,9 +43,7 @@ enum OrbConnection {
         if lower == defaultBaseURL {
             return [clean, orbcoreBaseURL, knownDirectBaseURL]
         }
-        if lower.hasSuffix(".thomas.md") {
-            return [clean, defaultBaseURL, orbcoreBaseURL]
-        }
+        // Dev and custom instances never share credentials or writes with prod.
         return [clean]
     }
 

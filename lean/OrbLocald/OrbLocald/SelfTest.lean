@@ -2488,10 +2488,7 @@ def main : IO UInt32 := do
     | .ok jv =>
       jv.fieldStr? "configured_target" == some "https://agent-backend-dev.thomas.md" &&
       (match jv.fieldArr? "failover_origins" with
-       | some #[.str o0, .str o1, .str o2] =>
-         o0 == "https://agent-backend-dev.thomas.md" &&
-         o1 == "https://agent-backend.thomas.md" &&
-         o2 == "https://orbcore.thomas.md"
+       | some #[.str o0] => o0 == "https://agent-backend-dev.thomas.md"
        | _ => false)
     | .error _ => false
   if (← assertTrue "transport_bridge_configure_updates_target_and_candidates" txCustomOk) then passed := passed + 1

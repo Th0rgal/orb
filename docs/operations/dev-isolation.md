@@ -46,6 +46,14 @@ must never retain the previous administrator's snapshot under the member's scope
 catalog reads in both HTML and native-bridge modes. This local browser regression
 does not substitute for the live desktop acceptance above.
 
+Transport failover is also an instance boundary. Only the three explicit
+production aliases may retry one another. Dev and custom hosts, including other
+`thomas.md` subdomains, keep every authenticated request on their configured
+origin after a network error. Desktop, its local daemon, iOS and Android share
+this policy; `client-link-governor.json` includes the dev and custom-host cases.
+The desktop transport regression fails both a read and an idempotent write and
+checks that no production request was attempted.
+
 Legacy rows without a recorded owner stay operator data. Members see only their
 own managed snapshot metadata; snapshot creation and deletion check the source
 machine before any provider or vault access. Provider inventory without a verified

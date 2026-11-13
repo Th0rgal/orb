@@ -50,9 +50,7 @@ object OrbConnection {
         if (lower == DEFAULT_BASE_URL) {
             return listOf(clean, ORBCORE_BASE_URL, KNOWN_DIRECT_BASE_URL)
         }
-        if (lower.endsWith(".thomas.md")) {
-            return listOf(clean, DEFAULT_BASE_URL, ORBCORE_BASE_URL)
-        }
+        // Dev and custom instances never share credentials or writes with prod.
         return listOf(clean)
     }
 
