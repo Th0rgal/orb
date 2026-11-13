@@ -660,6 +660,46 @@ private def emitMissionEventAndBroadcast
   discard <| appendMissionEvent store missionId evType payloadJson nowIso
   publishControlEvent broadcastHub? evType payloadJson (some missionId)
 
+/-- Retries a turn gets after ending with no output before the mission is `failed`. -/
+def maxEmptyTurnRetries : Nat := 2
+
+/-- Call when a turn ended "successfully" with no assistant text. If it also made no
+    tool call since the last user message, it did no work: that is a failure, never a
+    completion. Returns `none` when the turn did produce work (tool-only turns are
+    legitimate), otherwise the mission status to write: `awaiting_user` with a durable
+    one-shot retry armed (at most `maxEmptyTurnRetries` per user message), else `failed`.
+    The retry is a `mission_continuations` row, so it survives a Core restart. -/
+def settleEmptyTurn (store : CoreStore) (broadcastHub? : Option BroadcastHub)
+    (missionId nowIso : String) (nowSec : UInt64) (retryable : Bool := true) : IO (Option String) := do
+  let produced := match ← execParamQuery store.missionsDb
+      ("SELECT COUNT(*) FROM mission_events WHERE mission_id=?1 AND event_type IN ('tool_call','tool_result','assistant_message') " ++
+       "AND id > COALESCE((SELECT MAX(id) FROM mission_events WHERE mission_id=?1 AND event_type='user_message'),0);") #[missionId] with
+    | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 1
+    | .error _ => 1
+  if produced > 0 then return none
+  -- Attempts so far: set when the turn that just ended was itself launched by a retry.
+  let prior := match ← execParamQuery store.missionsDb
+      ("SELECT c.reason FROM mission_continuations c WHERE c.mission_id=?1 AND c.reason LIKE 'empty_turn_retry:%' AND instr(COALESCE(" ++
+       "(SELECT payload FROM mission_events WHERE mission_id=?1 AND event_type='user_message' ORDER BY id DESC LIMIT 1),''), c.id) > 0 LIMIT 1;") #[missionId] with
+    | .ok rs => ((rs[1]?.bind (·[0]?)).bind fun r => (r.drop 17).toString.toNat?).getD 0
+    | .error _ => maxEmptyTurnRetries
+  if retryable && prior < maxEmptyTurnRetries then
+    let cid ← newUuidV4
+    let armed ← execParamQuery store.missionsDb
+      ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,error,recurrence,stop_after_first,created_at,updated_at) " ++
+       "SELECT ?1,id,COALESCE(run_generation,1),1,CAST(?3 AS INTEGER),'time',?4,?5,?1,'','empty-turn-retry','','',1,?6,?6 FROM missions WHERE id=?2;")
+      #[cid, missionId, s!"{nowSec + 20 * (prior.toUInt64 + 1)}", s!"empty_turn_retry:{prior + 1}",
+        "Your previous turn ended without any output or tool call. Continue the task from where you left off.", nowIso]
+    if armed.isOk then
+      emitMissionEventAndBroadcast store broadcastHub? missionId "error"
+        (renderCompact (.obj #[("message", .str s!"The model returned no output. Retrying ({prior + 1} of {maxEmptyTurnRetries})."),
+          ("code", .str "empty_turn"), ("retryable", .bool true)])) nowIso
+      return some "awaiting_user"
+  emitMissionEventAndBroadcast store broadcastHub? missionId "error"
+    (renderCompact (.obj #[("message", .str s!"The model returned no output after {prior + 1} attempt(s). The turn failed."),
+      ("code", .str "empty_turn"), ("retryable", .bool false)])) nowIso
+  return some "failed"
+
 private def persistDiscoveredSessionId (store : CoreStore) (missionId sid : String) : IO Unit := do
   let clean := sid.trimAscii.toString
   if !clean.isEmpty then
@@ -1077,15 +1117,23 @@ partial def spawnRemoteJobPoller
                     "SELECT COUNT(*) FROM mission_continuations WHERE mission_id=?1 AND phase=1;" #[missionId] then
                   if cRows.size > 1 then
                     armedWakeups := cellNat cRows[1]! 0
+                -- A "succeeded" job with no text and no tool call did no work.
+                let emptyVerdict? ←
+                  if jState == "succeeded" && finalText.isEmpty then
+                    settleEmptyTurn store broadcastHub? missionId nowIso nowSec
+                  else pure none
                 let nextMissionStatus :=
-                  if jState == "succeeded" then
+                  if let some verdict := emptyVerdict? then verdict
+                  else if jState == "succeeded" then
                     if armedWakeups > 0 then "awaiting_user" else "completed"
                   else if jState == "cancelled" then "cancelled"
                   else "failed"
                 discard <| execParamQuery store.missionsDb
                   ("UPDATE missions SET status=?2, terminal_reason=?3, state_revision=state_revision+1, updated_at=?4 " ++
                    "WHERE id=?1 AND status NOT IN ('cancelled','interrupted');")
-                  #[missionId, nextMissionStatus, if nextMissionStatus == "awaiting_user" then "awaiting_wakeup" else termReason, nowIso]
+                  #[missionId, nextMissionStatus,
+                    if emptyVerdict?.isSome then (if nextMissionStatus == "failed" then "empty_turn" else "empty_turn_retry")
+                    else if nextMissionStatus == "awaiting_user" then "awaiting_wakeup" else termReason, nowIso]
                 emitMissionEventAndBroadcast store broadcastHub? missionId "mission_status_changed"
                   (renderCompact (.obj #[("status", .str nextMissionStatus), ("content", .str finalText)])) nowIso
           else

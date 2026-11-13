@@ -18,6 +18,7 @@ import OrbCore.ManagedSpawnActionsTests
 import OrbCore.ManagedProvisioningTests
 import OrbCore.ManagedResumeTests
 import OrbCore.WakeupRestartTests
+import OrbCore.TurnOutcomeTests
 import OrbCore.ManagedAccessTests
 import OrbCore.ManagedTtlTests
 import OrbCore.ManagedHarvestTests
@@ -6270,6 +6271,7 @@ set_option maxRecDepth 4000 in
 def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   try
     OrbCore.WakeupRestartTests.run
+    OrbCore.TurnOutcomeTests.run
   catch e =>
     IO.eprintln s!"[orb-core-test] FAIL: {e}"
     return 1

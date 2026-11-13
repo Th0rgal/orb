@@ -1540,7 +1540,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
 
 /-- Map structured `HarnessCallbacks` from `OrbBin.ClaudeControl` onto persisted `mission_events` rows
     and record pending `control_request` call IDs so `POST /api/control/tool_result` can route answers cleanly. -/
-private def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) : OrbBin.ClaudeControl.HarnessCallbacks := {
+def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) : OrbBin.ClaudeControl.HarnessCallbacks := {
   onStructuredEvent := fun evType payload => do
     let nowSec ← coreEpochSec
     let ts := formatEpochIso8601Utc nowSec
@@ -1574,8 +1574,14 @@ private def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) :
           "SELECT COALESCE(tags,'[]') FROM missions WHERE id=?1;" #[missionId] then
         let tRaw := (tRows[1]?.bind (·[0]?)).getD "[]"
         isSideQ := (tRaw.splitOn "\"side-question\"").length > 1
+    -- Exit 0 with no text and no tool call is not a finished turn: retry, then fail.
+    let emptyVerdict? ←
+      if !isErr && finalSnap.text.trimAscii.toString.isEmpty then
+        OrbCore.RemoteDispatch.settleEmptyTurn st.store st.broadcastHub? missionId ts nowSec (retryable := !isSideQ)
+      else pure none
     let nextStatus :=
-      if isErr then "failed"
+      if let some verdict := emptyVerdict? then verdict
+      else if isErr then "failed"
       else if armedWakeups > 0 then "awaiting_user"
       else if isSideQ then "completed"
       else "awaiting_user"
@@ -1647,6 +1653,11 @@ private def launchLocalCoreMissionTurn
         return .ok safeWt
     return .ok safeCwd
   | .error err =>
+    -- Nothing was started: the mission must not keep showing `active`.
+    discard <| execParamQuery st.store.missionsDb
+      ("UPDATE missions SET status='interrupted', terminal_reason='launch_failed', state_revision=state_revision+1, updated_at=?3 " ++
+       "WHERE id=?1 AND status='active' AND run_generation=CAST(?2 AS INTEGER);")
+      #[missionId, s!"{nextGen}", ts]
     return .error err
 
 /-- Launch a live warm harness turn when `spawn_harness: true` is supplied by an authorized admin/legacy caller on a managed mission. -/

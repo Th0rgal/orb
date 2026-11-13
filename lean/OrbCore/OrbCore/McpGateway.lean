@@ -774,6 +774,11 @@ def dispatchMcpToolCall
     -- A consultation with nowhere to run must fail, not sit at awaiting_user/active.
     if isConsult && (remoteSup?.isNone || inheritedRn?.isNone) then
       return mcpErr "no_execution_placement" s!"consult_model `{modelOv}` was not started: no execution node is available for this session. Pass remote_node_id or run from a placed mission." true
+    -- This gateway can only run a first turn on a node. With a prompt and nowhere to
+    -- run it, refuse: a mission that will never be dispatched must not be created `active`.
+    if !prompt.isEmpty && (remoteSup?.isNone || inheritedRn?.isNone) then
+      releaseRented
+      return mcpErr "no_execution_placement" "The mission was not started: no execution node is available for its first turn. Pass remote_node_id, or start it without a prompt." true
     let mid ← newUuidV4
     let initRev : UInt64 := if effProj.isEmpty && folder.isEmpty then 0 else 1
     let initStatus := if !prompt.isEmpty then "active" else "awaiting_user"
@@ -948,12 +953,8 @@ def dispatchMcpToolCall
           let settled ← recordSettledMcpAction store claims toolName args
             (.obj #[("ok", .bool true), ("mission_id", .str mid), ("status", .str "active")]) nowIso mid
           return mcpOk settled
-      discard <| execParamQuery store.missionsDb
-        "UPDATE missions SET status='active', updated_at=?2, state_revision=state_revision+1 WHERE id=?1;"
-        #[mid, nowIso]
-      let settled ← recordSettledMcpAction store claims toolName args
-        (.obj #[("ok", .bool true), ("mission_id", .str mid), ("status", .str "active")]) nowIso mid
-      return mcpOk settled
+      -- No node to run the turn on: say so; never mark the mission active.
+      return mcpErr "no_execution_placement" s!"Mission `{mid}` was not resumed: no execution node is available for it." true
     else
       let nextSt := if toolName == "adopt_mission" then "awaiting_user" else "completed"
       discard <| execParamQuery store.missionsDb
