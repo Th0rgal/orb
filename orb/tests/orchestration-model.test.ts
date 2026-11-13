@@ -40,6 +40,28 @@ describe("orchestration tool classification", () => {
   });
 });
 
+describe("failed spawn action polling", () => {
+  it.each([
+    [{ error: "provider_at_capacity" }, "provider_at_capacity"],
+    [{ error: "provider_at_capacity", message: "No engines available" }, "No engines available"],
+    [{ message: "Provider disabled" }, "Provider disabled"],
+    [{ reason: "quota_vcpus" }, "quota_vcpus"],
+    [{ error: { message: "Pool exhausted" } }, "Pool exhausted"],
+    [{}, "Outcome unconfirmed"],
+  ])("uses result failure details before the envelope fallback: %j", (result, expected) => {
+    const spawn: Tool = { kind: "tool", key: "spawn", name: "sandboxed_spawn_managed_machine", args: { size: "small" }, done: true, result: { action_id: "act" } };
+    const poll: Tool = { kind: "tool", key: "poll", name: "sandboxed_get_action", args: { action_id: "act" }, done: true, result: { state: "failed", result, error: "Outcome unconfirmed" } };
+    expect(machineRef(spawn, collectFollowUps([spawn, poll]))).toMatchObject({ state: "failed", error: expected });
+  });
+
+  it("settles failed actions without a supplied reason", () => {
+    const poll: Tool = { kind: "tool", key: "poll", name: "get_action", args: { action_id: "act" }, done: true, result: { state: "failed", result: {} } };
+    expect(collectFollowUps([poll]).actions.get("act")?.error).toBe("Failed");
+    const envelopeOnly = { ...poll, result: { state: "failed", error: "provider_disabled" } };
+    expect(collectFollowUps([envelopeOnly]).actions.get("act")?.error).toBe("provider_disabled");
+  });
+});
+
 describe("real transcript of mission 3a510e9b (subagent on a boat machine)", () => {
   const subagents = tools.filter(t => orchestrationKind(t.name) === "subagent").map(t => subagentRef(t, follow)!);
   it("links the successful start to child 26e6bbcd with machine, backend and result", () => {

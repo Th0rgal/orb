@@ -65,4 +65,73 @@ final class OrbOrchestrationTests: XCTestCase {
         XCTAssertEqual(child.nodeID, "managed-mmf4ywkaxw")
         XCTAssertEqual(OrbOrchestration.nodeLabel(child.nodeID, refs: refs, fallbackSize: child.nodeSize), "xlarge · mmf4ywkaxw")
     }
+
+    private func failedSpawn(_ action: String) -> OrbOrchestration.Machine? {
+        let events: [StoredEvent] = [
+            StoredEvent(id: 1, missionId: "p", sequence: 1, eventType: "tool_call", timestamp: "", eventId: nil,
+                        toolCallId: "c-spawn", toolName: "mcp__sandboxed__spawn_managed_machine",
+                        content: #"{"size":"large"}"#, metadata: [:]),
+            StoredEvent(id: 2, missionId: "p", sequence: 2, eventType: "tool_result", timestamp: "", eventId: nil,
+                        toolCallId: "c-spawn", toolName: "mcp__sandboxed__spawn_managed_machine",
+                        content: #"{"accepted":"yes","action_id":"act-spawn","state":"queued"}"#, metadata: [:]),
+            StoredEvent(id: 3, missionId: "p", sequence: 3, eventType: "tool_call", timestamp: "", eventId: nil,
+                        toolCallId: "c-poll", toolName: "mcp__sandboxed__get_action",
+                        content: #"{"action_id":"act-spawn"}"#, metadata: [:]),
+            StoredEvent(id: 4, missionId: "p", sequence: 4, eventType: "tool_result", timestamp: "", eventId: nil,
+                        toolCallId: "c-poll", toolName: "mcp__sandboxed__get_action",
+                        content: action, metadata: [:]),
+        ]
+        return OrbOrchestration.build(from: events).compactMap { if case .machine(let m) = $0 { return m } else { return nil } }.first
+    }
+
+    func testFailedSpawnGetActionPrefersResultErrorDetail() throws {
+        let nested = try XCTUnwrap(failedSpawn(#"{"action_id":"act-spawn","state":"failed","message":"Top-level fallback","result":{"error":{"message":"Provider quota exceeded","reason":"quota"}}}"#))
+        XCTAssertEqual(nested.state, "failed")
+        XCTAssertEqual(nested.error, "Provider quota exceeded")
+
+        let message = try XCTUnwrap(failedSpawn(#"{"action_id":"act-spawn","state":"failed","message":"Top-level fallback","result":{"message":"No capacity in fsn1"}}"#))
+        XCTAssertEqual(message.error, "No capacity in fsn1")
+
+        let reason = try XCTUnwrap(failedSpawn(#"{"action_id":"act-spawn","state":"failed","message":"Top-level fallback","result":{"reason":"provider_disabled"}}"#))
+        XCTAssertEqual(reason.error, "provider_disabled")
+
+        let errorReason = try XCTUnwrap(failedSpawn(#"{"action_id":"act-spawn","state":"failed","error":"top","result":{"error":{"reason":"quota_vcpus"}}}"#))
+        XCTAssertEqual(errorReason.error, "quota_vcpus")
+
+        let stringError = try XCTUnwrap(failedSpawn(#"{"action_id":"act-spawn","state":"failed","error":"top","result":{"error":"provider_at_capacity"}}"#))
+        XCTAssertEqual(stringError.error, "provider_at_capacity")
+
+        let topLevel = try XCTUnwrap(failedSpawn(#"{"action_id":"act-spawn","state":"failed","message":"Top-level fallback","result":{}}"#))
+        XCTAssertEqual(topLevel.error, "Top-level fallback")
+    }
+
+    func testActionWithTopLevelErrorAndNoResultPreservesState() throws {
+        let raw = #"{"action_id":"act-spawn","state":"failed","error":"Spawn rejected"}"#
+        let payload = OrbOrchestration.payload(raw)
+        XCTAssertEqual(payload.value["state"].text, "failed")
+        XCTAssertEqual(payload.value["action_id"].text, "act-spawn")
+        XCTAssertNil(payload.error)
+        let machine = try XCTUnwrap(failedSpawn(raw))
+        XCTAssertEqual(machine.state, "failed")
+        XCTAssertEqual(machine.error, "Spawn rejected")
+    }
+
+    func testEnvelopeOnlyErrorFallback() throws {
+        let payload = OrbOrchestration.payload(#"{"error":"Transport unavailable"}"#)
+        XCTAssertEqual(payload.error, "Transport unavailable")
+        let machine = try XCTUnwrap(failedSpawn(#"{"error":"Transport unavailable"}"#))
+        XCTAssertEqual(machine.state, "failed")
+        XCTAssertEqual(machine.error, "Transport unavailable")
+    }
+
+    func testFailedSpawnGetActionWithoutDetailReadsFailed() throws {
+        let noResult = try XCTUnwrap(failedSpawn(#"{"action_id":"act-spawn","state":"failed"}"#))
+        XCTAssertEqual(noResult.state, "failed")
+        XCTAssertEqual(noResult.error, "Failed")
+
+        let emptyResult = try XCTUnwrap(failedSpawn(#"{"action_id":"act-spawn","state":"failed","result":{}}"#))
+        XCTAssertEqual(emptyResult.state, "failed")
+        XCTAssertEqual(emptyResult.error, "Failed")
+        XCTAssertEqual(OrbOrchestration.statusLabel(emptyResult.state), "Failed")
+    }
 }
