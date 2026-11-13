@@ -176,7 +176,7 @@ for bin in "${BINS_TO_STAGE[@]}"; do
     ORB_CORE_TARGETS+=("$bin")
   elif [[ "$bin" == "orb-locald" || "$bin" == "orb-locald-test" ]]; then
     ORB_LOCALD_TARGETS+=("$bin")
-  elif [[ "$bin" == "orb-desktop" || "$bin" == "lean-ui-canary" ]]; then
+  elif [[ "$bin" == "orb-desktop-native" ]]; then
     ORB_DESKTOP_TARGETS+=("$bin")
   elif [[ "$bin" == "lean-mesh" ]]; then
     ORB_BIN_TARGETS+=("lean-mesh-cli")
@@ -271,7 +271,7 @@ fi
 
 if [[ ${#ORB_DESKTOP_TARGETS[@]} -gt 0 ]]; then
   (
-    cd "$ROOT_DIR/lean"
+    cd "$ROOT_DIR/lean/OrbDesktop"
     if [[ -z "${LEAN_CC:-}" && -x /usr/bin/clang ]]; then
       export LEAN_CC=/usr/bin/clang
     fi
@@ -281,11 +281,8 @@ if [[ ${#ORB_DESKTOP_TARGETS[@]} -gt 0 ]]; then
         export LIBRARY_PATH="$lean_prefix/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
       fi
     fi
-    if [[ "${ORB_SKIP_TURBO_LEAN:-0}" != "1" ]] && command -v turbo-lean >/dev/null 2>&1; then
-      RAYON_NUM_THREADS="${ORB_TURBO_LEAN_JOBS:-2}" TURBO_LEAN_EMIT_C=1 \
-        turbo-lean --no-telemetry --max-memory-mb "${ORB_TURBO_LEAN_MAX_MB:-6144}" build Orb LeanUI LeanUISpec || true
-    fi
-    SANDBOXED_ALLOW_RAW_LAKE=1 lake build "${ORB_DESKTOP_TARGETS[@]}" -- -DwarningAsError=true
+    RAYON_NUM_THREADS="${ORB_TURBO_LEAN_JOBS:-2}" TURBO_LEAN_EMIT_C=1 \
+      turbo-lean --max-memory-mb "${ORB_TURBO_LEAN_MAX_MB:-6144}" build "${ORB_DESKTOP_TARGETS[@]}"
   )
 fi
 
@@ -294,7 +291,7 @@ if [[ ${#OUT_DIRS[@]} -eq 0 ]]; then
   OUT_DIRS=("$target_base/debug" "$target_base/release")
 fi
 
-LAKE_ROOT_BIN_DIR="$ROOT_DIR/lean/.lake/build/bin"
+LAKE_DESKTOP_BIN_DIR="$ROOT_DIR/lean/OrbDesktop/.lake/build/bin"
 LAKE_BIN_DIR="$ROOT_DIR/lean/OrbBin/.lake/build/bin"
 LAKE_NODE_BIN_DIR="$ROOT_DIR/lean/OrbNode/.lake/build/bin"
 LAKE_CORE_BIN_DIR="$ROOT_DIR/lean/OrbCore/.lake/build/bin"
@@ -308,8 +305,8 @@ for out_dir in "${OUT_DIRS[@]}"; do
       src="$LAKE_CORE_BIN_DIR/$bin"
     elif [[ "$bin" == "orb-locald" || "$bin" == "orb-locald-test" ]]; then
       src="$LAKE_LOCALD_BIN_DIR/$bin"
-    elif [[ "$bin" == "orb-desktop" || "$bin" == "lean-ui-canary" ]]; then
-      src="$LAKE_ROOT_BIN_DIR/$bin"
+    elif [[ "$bin" == "orb-desktop-native" ]]; then
+      src="$LAKE_DESKTOP_BIN_DIR/$bin"
     else
       src="$LAKE_BIN_DIR/$bin"
     fi

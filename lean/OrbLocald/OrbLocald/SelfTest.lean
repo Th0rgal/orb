@@ -932,6 +932,164 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
     stagedRead.isOk
   if (← assertTrue "software_inventory_skills_sync_and_staged_upload_roundtrip" invAndSkillsOk) then passed := passed + 1
 
+  -- F1b. Bundled reference drift, `+x` tool script mode, `.orb-lib.lock` exclusion, `~/.agents/skills` pruning, and empty-library prune (`library_loaded: true`)
+  IO.FS.createDirAll (invHome / ".agents" / "skills" / "retired-agents-skill")
+  IO.FS.writeFile (invHome / ".agents" / "skills" / "retired-agents-skill" / "SKILL.md") "---\nname: retired-agents-skill\n---\nOld.\n"
+  IO.FS.writeFile (invHome / ".agents" / "skills" / "retired-agents-skill" / ".managed-by-orb-skills") "managed-by-orb-skills\n"
+  IO.FS.createDirAll (invHome / ".agents" / "skills" / "demo-skill")
+  IO.FS.writeFile (invHome / ".agents" / "skills" / "demo-skill" / "SKILL.md") "---\nname: demo-skill\n---\nKeep active.\n"
+  IO.FS.writeFile (invHome / ".agents" / "skills" / "demo-skill" / ".managed-by-orb-skills") "managed-by-orb-skills\n"
+  let binLogoExpected := ByteArray.mk #[0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF]
+  let libPayloadsWithBundle : Array JVal := #[
+    .obj #[
+      ("name", .str "demo-skill"),
+      ("content", .str "---\nname: demo-skill\ndescription: \"Demo\"\nmetadata:\n  sandboxed:\n    audience: [mission, coordinator, local]\n    scope: on-demand\n---\nUse demo.\n"),
+      ("audience", .arr #[.str "mission", .str "coordinator", .str "local"]),
+      ("scope", .str "on-demand"),
+      ("files", .arr #[
+        .obj #[("rel", .str "references/guide.md"), ("content", .str "# Guide\n")],
+        .obj #[("rel", .str "tools/helper.py"), ("content", .str "#!/usr/bin/env python3\nprint(1)\n")],
+        .obj #[("rel", .str "assets/logo.bin"), ("content", .str ""), ("content_base64", .str (OrbBin.PosixExt.base64Encode binLogoExpected))]
+      ])
+    ],
+    .obj #[
+      ("name", .str "user-edited"),
+      ("content", .str "---\nname: user-edited\ndescription: \"Lib version\"\n---\nLibrary body.\n")
+    ]
+  ]
+  let bundleDriftStatus ← dispatchRpcCommand stInv "local_skills_status" (.obj #[
+    ("request", .obj #[("library_skills", .arr libPayloadsWithBundle), ("library_loaded", .bool true)])
+  ])
+  let bundleSyncRes ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
+    ("request", .obj #[
+      ("library_skills", .arr libPayloadsWithBundle),
+      ("library_loaded", .bool true),
+      ("prune_removed", .bool true)
+    ])
+  ])
+  let agyGuideExists ← (invHome / ".gemini" / "config" / "skills" / "demo-skill" / "references" / "guide.md").pathExists
+  let ocGuideExists ← (invHome / ".config" / "opencode" / "skills" / "demo-skill" / "references" / "guide.md").pathExists
+  let agyLogoBytes ← try IO.FS.readBinFile (invHome / ".gemini" / "config" / "skills" / "demo-skill" / "assets" / "logo.bin") catch _ => pure ByteArray.empty
+  let claudeLogoBytes ← try IO.FS.readBinFile (invHome / ".claude" / "skills" / "demo-skill" / "assets" / "logo.bin") catch _ => pure ByteArray.empty
+  let claudeToolSt ← OrbBin.PosixExt.statPath (invHome / ".claude" / "skills" / "demo-skill" / "tools" / "helper.py").toString
+  -- Leading-whitespace change inside an executable text companion MUST be detected as drift and updated (never stripped by Markdown normalization)
+  IO.FS.writeFile (invHome / ".claude" / "skills" / "demo-skill" / "tools" / "helper.py") "    #!/usr/bin/env python3\nprint(1)\n"
+  let indentDriftStatus ← dispatchRpcCommand stInv "local_skills_status" (.obj #[
+    ("request", .obj #[("library_skills", .arr libPayloadsWithBundle), ("library_loaded", .bool true)])
+  ])
+  let _ ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
+    ("request", .obj #[("library_skills", .arr libPayloadsWithBundle), ("library_loaded", .bool true)])
+  ])
+  let repairedHelperTxt ← try IO.FS.readFile (invHome / ".claude" / "skills" / "demo-skill" / "tools" / "helper.py") catch _ => pure ""
+  let indentDriftOk :=
+    repairedHelperTxt == "#!/usr/bin/env python3\nprint(1)\n" &&
+    (match indentDriftStatus with
+     | .ok iRep =>
+       let hsI := (iRep.fieldArr? "harnesses").getD #[]
+       let clI? := hsI.find? (fun h => h.fieldStr? "id" == some "claudecode")
+       (((clI?.bind (·.fieldArr? "outdated_skills")).getD #[]).filterMap (·.asStr?)).contains "demo-skill"
+     | _ => false)
+  let retiredAgentsGone := !(← (invHome / ".agents" / "skills" / "retired-agents-skill").pathExists)
+  let activeAgentsKept ← (invHome / ".agents" / "skills" / "demo-skill").pathExists
+  -- Partial Library snapshot (`library_loaded: false`) must NEVER prune or flag missing managed skills even with non-empty `library_skills`
+  let partialSyncRes ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
+    ("request", .obj #[
+      ("library_skills", .arr #[
+        .obj #[
+          ("name", .str "other-skill"),
+          ("content", .str "---\nname: other-skill\ndescription: \"Other\"\n---\nOther.\n")
+        ]
+      ]),
+      ("library_loaded", .bool false),
+      ("prune_removed", .bool true)
+    ])
+  ])
+  let agyDemoKeptOnPartial ← (invHome / ".gemini" / "config" / "skills" / "demo-skill" / "SKILL.md").pathExists
+  let partialNotRemovedOk :=
+    match partialSyncRes with
+    | .ok pJv =>
+      let prunedPartial := ((pJv.fieldArr? "pruned").getD #[]).filterMap (·.asStr?)
+      let repP := (pJv.field? "report").getD (.obj #[])
+      let sksP := (repP.fieldArr? "skills").getD #[]
+      let demoP? := sksP.find? (fun s => s.fieldStr? "name" == some "demo-skill")
+      prunedPartial.isEmpty &&
+      demoP?.bind (·.fieldBool? "removed_from_library") != some true
+    | _ => false
+  let emptyPruneRes ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
+    ("request", .obj #[
+      ("library_skills", .arr #[]),
+      ("library_loaded", .bool true),
+      ("prune_removed", .bool true)
+    ])
+  ])
+  let agyDemoPruned := !(← (invHome / ".gemini" / "config" / "skills" / "demo-skill").pathExists)
+  let userEditedPreserved ← (invHome / ".claude" / "skills" / "user-edited" / "SKILL.md").pathExists
+  -- Unmanaged skill with matching `SKILL.md` + required companions PLUS an extra user-authored file MUST NOT be silently adopted and erased on subsequent syncs
+  let unmgExtraDir := invHome / ".claude" / "skills" / "demo-skill"
+  try IO.FS.removeDirAll unmgExtraDir catch _ => pure ()
+  IO.FS.createDirAll (unmgExtraDir / "notes")
+  IO.FS.writeFile (unmgExtraDir / "SKILL.md") "---\nname: demo-skill\ndescription: \"Demo\"\nmetadata:\n  sandboxed:\n    audience: [mission, coordinator, local]\n    scope: on-demand\n---\nUse demo.\n"
+  IO.FS.writeFile (unmgExtraDir / "notes" / "my-local-note.md") "keep me\n"
+  let unmgSync1 ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
+    ("request", .obj #[("library_skills", .arr libPayloads), ("library_loaded", .bool true)])
+  ])
+  let unmgSync2 ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
+    ("request", .obj #[("library_skills", .arr libPayloads), ("library_loaded", .bool true)])
+  ])
+  let unmgNoteKept ← (unmgExtraDir / "notes" / "my-local-note.md").pathExists
+  let unmgMarkerAbsent := !(← (unmgExtraDir / ".managed-by-orb-skills").pathExists)
+  let unmgSkippedOk :=
+    match unmgSync1, unmgSync2 with
+    | .ok u1, .ok u2 =>
+      let sk1 := ((u1.fieldArr? "skipped_unmanaged").getD #[]).filterMap (·.asStr?)
+      let sk2 := ((u2.fieldArr? "skipped_unmanaged").getD #[]).filterMap (·.asStr?)
+      sk1.contains "~/.claude/skills/demo-skill" &&
+      sk2.contains "~/.claude/skills/demo-skill" &&
+      unmgNoteKept && unmgMarkerAbsent
+    | _, _ => false
+  try IO.FS.removeDirAll unmgExtraDir catch _ => pure ()
+  -- Restore `libPayloads` state before F2 (`prune_removed: true` cleans up `other-skill` from `partialSyncRes`)
+  let _ ← dispatchRpcCommand stInv "local_skills_sync" (.obj #[
+    ("request", .obj #[("library_skills", .arr libPayloads), ("library_loaded", .bool true), ("prune_removed", .bool true)])
+  ])
+  total := total + 1
+  let bundleDriftDetected :=
+    match bundleDriftStatus with
+    | .ok rep =>
+      let hs := (rep.fieldArr? "harnesses").getD #[]
+      let agy? := hs.find? (fun h => h.fieldStr? "id" == some "antigravity")
+      let oc? := hs.find? (fun h => h.fieldStr? "id" == some "opencode")
+      let outdatedAgy := ((agy?.bind (·.fieldArr? "outdated_skills")).getD #[]).filterMap (·.asStr?)
+      let outdatedOc := ((oc?.bind (·.fieldArr? "outdated_skills")).getD #[]).filterMap (·.asStr?)
+      let staleAgy := ((agy?.bind (·.fieldArr? "stale_managed")).getD #[]).filterMap (·.asStr?)
+      let sks := (rep.fieldArr? "skills").getD #[]
+      let retiredDisc? := sks.find? (fun s => s.fieldStr? "name" == some "retired-agents-skill")
+      outdatedAgy.contains "demo-skill" && outdatedOc.contains "demo-skill" &&
+      staleAgy.contains "retired-agents-skill" &&
+      retiredDisc?.bind (·.fieldBool? "removed_from_library") == some true
+    | _ => false
+  let bundleSyncOk :=
+    match bundleSyncRes, emptyPruneRes with
+    | .ok sJv, .ok pJv =>
+      let pruned1 := ((sJv.fieldArr? "pruned").getD #[]).filterMap (·.asStr?)
+      let pruned2 := ((pJv.fieldArr? "pruned").getD #[]).filterMap (·.asStr?)
+      let rep1 := (sJv.field? "report").getD (.obj #[])
+      let hs1 := (rep1.fieldArr? "harnesses").getD #[]
+      let agy1? := hs1.find? (fun h => h.fieldStr? "id" == some "antigravity")
+      bundleDriftDetected &&
+      agyGuideExists && ocGuideExists &&
+      agyLogoBytes == binLogoExpected && claudeLogoBytes == binLogoExpected &&
+      claudeToolSt.exists_ && (claudeToolSt.mode &&& 0o111) != 0 &&
+      agy1?.bind (·.fieldNat? "synced_count") == some 2 &&
+      agy1?.bind (·.fieldNat? "skill_count") == some 2 &&
+      retiredAgentsGone && activeAgentsKept &&
+      pruned1.contains "~/.agents/skills/retired-agents-skill" &&
+      agyDemoKeptOnPartial && partialNotRemovedOk &&
+      agyDemoPruned && userEditedPreserved && unmgSkippedOk && indentDriftOk &&
+      pruned2.contains "~/.gemini/config/skills/demo-skill"
+    | _, _ => false
+  if (← assertTrue "skill_bundle_reference_drift_exec_mode_and_atomic_prune" bundleSyncOk) then passed := passed + 1
+
   -- F2. Local MCP auto-provisioning (`~/.orb/mcp/credential` `0600`, 0-byte Antigravity `mcp_config.json`, Claude/Codex/OpenCode preservation & endpoint fencing)
   IO.FS.createDirAll (invHome / ".local" / "bin")
   let fakeMcpBin := invHome / ".local" / "bin" / "sandboxed-mcp"
@@ -1923,6 +2081,32 @@ private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat ×
       if (← assertTrue "native_chrome_palette_query_ranking_fixtures" allPalOk) then
         ncPassed := ncPassed + 1
 
+      -- Project-less missions file under Default; archived ones only under the Archived section.
+      let daCase := (fixJv.field? "default_and_archive_case").getD (.obj #[])
+      try IO.FS.createDirAll (chromeDir ++ "/archive") catch _ => pure ()
+      let daRef ← IO.mkRef ({ launchToken := validTok, orbStateDir := chromeDir ++ "/archive" } : LocaldState)
+      let daSync ← dispatchRpcCommand daRef "native_chrome_sync_state" ((daCase.field? "sync").getD (.obj #[]))
+      let daRows ← dispatchRpcCommand daRef "native_chrome_get_rows" (.obj #[])
+      let daTog ← dispatchRpcCommand daRef "native_chrome_toggle_expand"
+        (.obj #[("row_id", .str ((daCase.fieldStr? "toggle_row_id").getD ""))])
+      ncTotal := ncTotal + 1
+      let daOk : Bool :=
+        match daSync, daRows, daTog with
+        | .ok sj, .ok rj, .ok tj =>
+          let rows := (rj.fieldArr? "rows").getD #[]
+          let ids := rows.filterMap (·.fieldStr? "row_id")
+          let tIds := ((tj.fieldArr? "rows").getD #[]).filterMap (·.fieldStr? "row_id")
+          let expIds := ((daCase.fieldArr? "expected_collapsed_row_ids").getD #[]).filterMap (·.asStr?)
+          let tail := ((daCase.fieldArr? "expected_expanded_tail").getD #[]).filterMap (·.asStr?)
+          let defRow? := rows.find? (fun r => r.fieldStr? "row_id" == some "proj:default")
+          (sj.fieldBool? "applied") == some true && ids == expIds &&
+          (defRow?.bind (·.fieldStr? "title")) == daCase.fieldStr? "expected_default_project_title" &&
+          (tj.fieldBool? "expanded") == some true &&
+          tIds.extract (tIds.size - tail.size) tIds.size == tail
+        | _, _, _ => false
+      if (← assertTrue "native_chrome_projectless_in_default_and_archived_section" daOk) then
+        ncPassed := ncPassed + 1
+
       -- Settings mode projection (at producer revision 11 right after 2 local expansion toggles,
       -- verifying `toggleExpand` advances `viewRevision` without blocking `syncRevision == 11`)
       let setMode := (fixJv.field? "settings_mode_case").getD (.obj #[])
@@ -2091,6 +2275,10 @@ private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat ×
         ])
       ]
       let _ ← dispatchRpcCommand ncRef "native_chrome_sync_state" moveRootSync
+      -- A cleared project files the mission under Default (a second project, so expand both).
+      for rid in #["proj:orb", "proj:default"] do
+        let _ ← dispatchRpcCommand ncRef "native_chrome_toggle_expand"
+          (.obj #[("scope", .str "scope:move-root:1"), ("row_id", .str rid), ("expanded", .bool true)])
       let mvRowsRes ← dispatchRpcCommand ncRef "native_chrome_get_rows" (.obj #[("scope", .str "scope:move-root:1")])
       ncTotal := ncTotal + 1
       let mvAndTsOk : Bool :=
@@ -2105,7 +2293,8 @@ private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat ×
           (mvRow?.bind (·.fieldStr? "folder")) == some "" &&
           (mvRow?.bind (·.fieldNat? "depth")) == some 1 &&
           (unprojRow?.bind (·.fieldStr? "title")) == some "Unassigned project" &&
-          (unprojRow?.bind (·.fieldStr? "project")) == some ""
+          (unprojRow?.bind (·.fieldStr? "project")) == some "default" &&
+          (unprojRow?.bind (·.fieldNat? "depth")) == some 1
         | .error _ => false
       if (← assertTrue "native_chrome_iso_epoch_ms_and_empty_placement_clear" mvAndTsOk) then
         ncPassed := ncPassed + 1

@@ -1,0 +1,325 @@
+/-
+  Rust proxy model admission regressions. No vendor calls: all transport is mocked.
+  Saved aliases are test-only configurations, not guessed production definitions.
+-/
+import OrbCore.Control
+
+namespace OrbCore.ProxyRoutingTests
+open LeanSys.Http OrbBin.Json OrbBin.PosixExt OrbBin.Sqlite
+open OrbCore.Control OrbCore.Store OrbCore.Proxy OrbCore.Managed
+
+private def check (ok : Bool) (label : String) : IO Unit := do
+  unless ok do throw (IO.userError s!"proxy routing contract: {label}")
+
+private def chain (id name model : String) : RoutingChain := {
+  id := id
+  name := name
+  targets := #[{ accountId := id, provider := "openai", baseUrl := "http://127.0.0.1:1", apiKey := "fixture-only", modelId := model }]
+}
+
+/-- Actual request routing, including unknown errors and no default/name/suffix aliasing. -/
+def run : IO Unit := do
+  let fixtureRaw ← IO.FS.readFile "shared/orb-spec/fixtures/proxy-model-aliases.json"
+  let .ok fixture := OrbBin.Json.parse fixtureRaw
+    | throw (IO.userError "proxy alias reference fixture failed to parse")
+  for pair in (fixture.fieldArr? "provider_prefixes").getD #[] do
+    let values := pair.asArr?.getD #[]
+    let providerPrefix := (values[0]?.bind JVal.asStr?).getD ""
+    let provider := (values[1]?.bind JVal.asStr?).getD ""
+    check (OrbCore.ProxyModelRouting.directEntry? s!"{providerPrefix}/org/model-x" "/v1/chat/completions" ==
+      some (provider, "org/model-x")) s!"direct prefix {providerPrefix}"
+  for c in (fixture.fieldArr? "bare_cases").getD #[] do
+    let model := (c.fieldStr? "model").getD ""
+    let path := (c.fieldStr? "path").getD ""
+    let expected := c.fieldOrNull "expected"
+    let actual := OrbCore.ProxyModelRouting.directEntry? model path
+    if expected.isNull then check actual.isNone s!"unexpected bare model {model}"
+    else
+      let pair := expected.asArr?.getD #[]
+      check (actual == some ((pair[0]?.bind JVal.asStr?).getD "", (pair[1]?.bind JVal.asStr?).getD "")) s!"bare model {model}"
+  for c in (fixture.fieldArr? "stock_entries").getD #[] do
+    let id := (c.fieldStr? "id").getD ""
+    let some (_, _, entries) := OrbCore.ProxyModelRouting.stockChains.find? (fun (i, _, _) => i == id)
+      | throw (IO.userError s!"missing stock reference {id}")
+    let encoded := JVal.arr (entries.map (fun (p, m) => .arr #[.str p, .str m]))
+    check (encoded == c.fieldOrNull "entries") s!"stock target order {id}"
+  for (alias, expected) in #[
+      ("fable-5.2", some "anthropic/claude-fable-5-2"), ("opus-5.5", some "anthropic/claude-opus-5-5"),
+      ("claude-fable-5-2", some "anthropic/claude-fable-5-2"), ("gpt-6-astra", some "openai/gpt-6-astra"),
+      ("anthropic/claude-fable-5-2", some "anthropic/claude-fable-5-2"),
+      ("github-copilot/claude-fable-5.2", some "github-copilot/claude-fable-5.2"),
+      ("builtin/smart", some "builtin/smart"), ("no-such-family", none), ("nowhere/model", none), ("", none)] do
+    check (OrbCore.ProxyModelRouting.consultModel? alias == expected) s!"consult alias {alias}"
+  let root := s!"/tmp/orb-proxy-routing-{← newUuidV4}"
+  let .ok store ← openCoreStore root
+    | throw (IO.userError "proxy routing fixture store failed")
+  try
+    let managedRef ← IO.mkRef ({} : ManagedFleetState)
+    let chainsRef ← IO.mkRef #[
+      chain "builtin/smart" "Smart (Default)" "stock-smart-model",
+      chain "smart" "Custom smart" "exact-smart-model",
+      chain "reviewer" "Reviewer" "review-model",
+      chain "MiniMax-M3" "Scout" "scout-model",
+      chain "user/review" "Friendly review display" "namespaced-review-model"]
+    let cooldowns ← IO.mkRef (#[] : Array AccountCooldown)
+    let seqRef ← IO.mkRef (1 : UInt64)
+    let attempts ← IO.mkRef (#[] : Array String)
+    let cfg : CoreConfig := {
+      workingDir := root
+      dashboardPassword := "proxy-routing-fixture-password"
+      proxySecret := "proxy-routing-fixture-secret-0123456789"
+      jwtSecret := "proxy-routing-fixture-jwt-secret-0123456789"
+    }
+    let app : CoreAppState := {
+      cfg, store, searchIdx? := none, managedRef, chainsRef,
+      proxyCooldownsRef := cooldowns, seqRef,
+      proxyMockTransport? := some (fun target => do
+        attempts.modify (·.push target.modelId)
+        if target.modelId.startsWith "fail400-" then
+          return .ok {
+            status := 400
+            headers := #[("content-type", "application/json")]
+            body := "{\"error\":{\"message\":\"unknown provider for model k3\",\"code\":\"model_not_found\"}}".toUTF8
+          }
+        if target.modelId.startsWith "fail404-" then
+          return .ok {
+            status := 404
+            headers := #[("content-type", "text/plain")]
+            body := "Not Found".toUTF8
+          }
+        if target.modelId.startsWith "fail401-" then
+          return .ok {
+            status := 401
+            headers := #[("content-type", "application/json")]
+            body := "{\"error\":{\"type\":\"auth_unavailable\",\"message\":\"account someone@example.test: invalid_grant\"}}".toUTF8
+          }
+        if target.modelId.startsWith "claude-" then
+          return .ok {
+            status := 503
+            headers := #[("content-type", "application/json")]
+            body := "{\"error\":{\"type\":\"auth_unavailable\",\"message\":\"no auth available\"}}".toUTF8
+          }
+        return .ok {
+          status := 200
+          headers := #[("content-type", "application/json")]
+          body := "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"fixture output\"},\"finish_reason\":\"stop\"}]}".toUTF8
+        })
+    }
+    let postAt := fun (path model : String) => do
+      let body := renderCompact (.obj #[("model", .str model), ("messages", .arr #[])])
+      let raw := s!"POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {cfg.proxySecret}\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+      let .ok req := parseRequest raw.toUTF8 none
+        | throw (IO.userError "proxy routing fixture request parse failed")
+      let .ok response ← dispatchCoreRequest app req 1700001000
+        | throw (IO.userError "unexpected proxy routing websocket upgrade")
+      return response
+    let post := postAt "/v1/chat/completions"
+    let mut failures : Array String := #[]
+    -- Exact id wins even when a builtin compatibility id occurs earlier.
+    for (model, expected) in #[
+        ("smart", "exact-smart-model"), ("builtin/smart", "stock-smart-model"),
+        ("reviewer", "review-model"), ("builtin/reviewer", "review-model"),
+        ("MiniMax-M3", "scout-model"), ("builtin/MiniMax-M3", "scout-model"),
+        ("user/review", "namespaced-review-model"),
+        ("builtin/user/review", "namespaced-review-model")] do
+      attempts.set #[]
+      let response ← post model
+      if response.status != 200 || (← attempts.get) != #[expected] then
+        failures := failures.push s!"{model}: wrong saved-chain target or status"
+    -- Neither display names, arbitrary namespace suffixes, case-folding nor an
+    -- unknown id may silently choose the default chain.
+    for model in #["Friendly review display", "Smart (Default)", "Smart", " smart ",
+        "BUILTIN/smart", "other/smart", "missing-model", "unknown\"quoted-model"] do
+      attempts.set #[]
+      let response ← post model
+      let body := (OrbBin.Json.parseBytes response.body).toOption.getD .null
+      let error := body.fieldOrNull "error"
+      if response.status != 400 || error.fieldStr? "code" != some "model_not_found" ||
+          (((error.fieldStr? "message").getD "").splitOn model).length ≤ 1 ||
+          !(← attempts.get).isEmpty then
+        failures := failures.push s!"{model}: expected named 400 before transport"
+    -- Exercise every saved id and its compatibility spelling, not an allowlist
+    -- containing only today's smart/reviewer incidents.
+    for c in (← chainsRef.get) do
+      for requested in #[c.id, s!"builtin/{c.id}"] do
+        let expected := if let some exactChain := (← chainsRef.get).find? (fun x => x.id == requested) then
+            exactChain.targets[0]!.modelId
+          else c.targets[0]!.modelId
+        attempts.set #[]
+        let response ← post requested
+        if response.status != 200 || (← attempts.get) != #[expected] then
+          failures := failures.push s!"configured alias {requested}: not resolved"
+    if !failures.isEmpty then
+      throw (IO.userError (String.intercalate "\n" failures.toList))
+    -- No silent substitution: a model owned by a provider whose login is dead
+    -- surfaces that provider's error. It never reaches the smart chain's model.
+    let .ok () ← upsertAIProvider store { id := "anth-fixture", providerType := "anthropic", name := "Anthropic fixture", apiKey := "fixture-only" }
+      | throw (IO.userError "anthropic fixture provider failed")
+    for (path, model, bare) in #[
+        ("/v1/messages", "claude-fable-5-2", "claude-fable-5-2"),
+        ("/v1/messages", "claude-sonnet-5-5", "claude-sonnet-5-5"),
+        ("/v1/chat/completions", "claude-fable-5-2", "claude-fable-5-2"),
+        ("/v1/chat/completions", "anthropic/claude-fable-5-2", "claude-fable-5-2")] do
+      attempts.set #[]
+      let response ← postAt path model
+      let text := (String.fromUTF8? response.body).getD ""
+      let hdr := fun (k : String) => ((response.extraHdrs.find? (fun h => h.1 == k)).map (·.2)).getD ""
+      check (response.status == 503 && (text.splitOn "auth_unavailable").length == 2)
+        s!"{model} on {path}: upstream error must be relayed, got {response.status} {text}"
+      check ((← attempts.get) == #[bare]) s!"{model} on {path}: served by another model {← attempts.get}"
+      check (hdr "X-Orb-Requested-Model" == model && hdr "X-Orb-Effective-Model" == bare && hdr "X-Orb-Route" == "direct")
+        s!"{model}: requested/effective headers"
+    let .ok recorded ← execParamQuery store.missionsDb
+        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN model IN ('claude-fable-5-2','claude-sonnet-5-5') THEN 1 ELSE 0 END),0) FROM proxy_outcomes WHERE chain_id='direct';" #[]
+      | throw (IO.userError "proxy_outcomes query failed")
+    check (recorded[1]? == some #["4", "4"]) s!"direct outcomes must record the unchanged effective model: {recorded}"
+    let .ok chainRows ← execParamQuery store.missionsDb
+        "SELECT COUNT(*) FROM proxy_outcomes WHERE requested_model='reviewer' AND chain_id='reviewer' AND model='review-model' AND status='ok';" #[]
+      | throw (IO.userError "proxy_outcomes chain query failed")
+    check ((((chainRows[1]?.bind (·[0]?)).bind String.toNat?).getD 0) > 0) "chain alias outcome records requested and effective model"
+    -- Fallback Chains contract: every row decodes as the clients' `ModelChain`.
+    let jwt := mintSessionToken cfg.jwtSecret (1700001000 + 3600)
+    let api := fun (method path body : String) => do
+      let raw := s!"{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+      let .ok req := parseRequest raw.toUTF8 none
+        | throw (IO.userError "chain contract request parse failed")
+      let .ok response ← dispatchCoreRequest app req 1700001000
+        | throw (IO.userError "chain contract unexpected upgrade")
+      return (response.status, (OrbBin.Json.parseBytes response.body).toOption.getD .null)
+    let .ok contract := OrbBin.Json.parse (← IO.FS.readFile "shared/orb-spec/fixtures/model-chains-response.json")
+      | throw (IO.userError "model-chains-response fixture failed to parse")
+    let typeOf := fun (v : JVal) => match v with
+      | .str _ => "string" | .bool _ => "boolean" | .arr _ => "array" | .num _ => "number" | .obj _ => "object" | .null => "null"
+    let conforms := fun (row : JVal) =>
+      ((contract.fieldOrNull "required").asObj?.getD #[]).all (fun (k, t) => (row.field? k).map typeOf == t.asStr?) &&
+      ((row.fieldArr? "entries").getD #[]).all (fun e =>
+        ((contract.fieldOrNull "entry_required").asObj?.getD #[]).all (fun (k, t) => (e.field? k).map typeOf == t.asStr?)) &&
+      ((contract.fieldArr? "forbidden").getD #[]).all (fun k => !((renderCompact row).splitOn s!"\"{k.asStr?.getD "?"}\"").length > 1)
+    let (createSt, created) ← api "POST" "/api/model-routing/chains"
+      "{\"id\":\"contract\",\"name\":\"Contract\",\"entries\":[{\"provider_id\":\"zai\",\"model_id\":\"glm-5.3\",\"api_key\":\"sk-inline-secret\"}]}"
+    check (createSt == 201 && conforms created) s!"create returns the chain row: {createSt} {renderCompact created}"
+    let (listSt, listed) ← api "GET" "/api/model-routing/chains" ""
+    let rows := listed.asArr?.getD #[]
+    check (listSt == 200 && rows.size ≥ 7 && rows.all conforms) s!"chain list rows must match the client type: {renderCompact listed}"
+    check ((rows.filter (fun r => r.fieldBool? "is_default" == some true)).map (·.fieldStr? "id") == #[some "builtin/smart"])
+      "exactly the stock default chain is default before anyone chooses one"
+    -- The desktop's "set default" sends only `is_default`; entries and name survive.
+    let (putSt, updated) ← api "PUT" "/api/model-routing/chains/contract" "{\"is_default\":true}"
+    check (putSt == 200 && conforms updated && updated.fieldBool? "is_default" == some true &&
+      updated.fieldStr? "name" == some "Contract" && ((updated.fieldArr? "entries").getD #[]).size == 1)
+      s!"partial update must keep entries and name: {putSt} {renderCompact updated}"
+    let (_, relisted) ← api "GET" "/api/model-routing/chains" ""
+    check (((relisted.asArr?.getD #[]).filter (fun r => r.fieldBool? "is_default" == some true)).map (·.fieldStr? "id") == #[some "contract"])
+      "setting a default leaves exactly one default chain"
+    let (getSt, got) ← api "GET" "/api/model-routing/chains/contract" ""
+    let (missSt, _) ← api "GET" "/api/model-routing/chains/absent-chain" ""
+    let (delBuiltinSt, _) ← api "DELETE" "/api/model-routing/chains/builtin/smart" ""
+    let (delSt, _) ← api "DELETE" "/api/model-routing/chains/contract" ""
+    let (delAgainSt, _) ← api "DELETE" "/api/model-routing/chains/contract" ""
+    let (emptySt, _) ← api "POST" "/api/model-routing/chains" "{\"id\":\"empty\",\"entries\":[]}"
+    let (unknownSt, _) ← api "GET" "/api/model-routing/no-such-route" ""
+    check (getSt == 200 && conforms got && missSt == 404 && delBuiltinSt != 200 && delSt == 200 && delAgainSt == 404 &&
+      emptySt == 400 && unknownSt == 404)
+      s!"chain get/delete/create must not fabricate success: get={getSt} miss={missSt} builtin={delBuiltinSt} del={delSt} again={delAgainSt} empty={emptySt} unknown={unknownSt}"
+    -- A client can only echo provider + model: saving must not erase a stored inline
+    -- setting for an entry it kept, and must drop the entries it removed.
+    check (OrbCore.ProxyModelRouting.keepStoredEntrySettings
+        "[{\"provider_id\":\"b\",\"model_id\":\"m2\"},{\"provider_id\":\"a\",\"model_id\":\"m1\"}]"
+        "[{\"provider_id\":\"a\",\"model_id\":\"m1\",\"base_url\":\"http://h\"},{\"provider_id\":\"c\",\"model_id\":\"m3\"}]"
+      == "[{\"provider_id\":\"b\",\"model_id\":\"m2\"},{\"provider_id\":\"a\",\"model_id\":\"m1\",\"base_url\":\"http://h\"}]")
+      "saving a chain keeps stored entry settings"
+    check (OrbCore.ProxyModelRouting.directEntry? "my_spark_42/org/model-x" "/v1/chat/completions"
+      #[("my_spark_42", "org/model-x")] == some ("my_spark_42", "org/model-x")) "advertised custom namespace"
+    check ((OrbCore.ProxyModelRouting.directEntry? "my_spark_42/typo" "/v1/chat/completions"
+      #[("my_spark_42", "org/model-x")]).isNone) "unadvertised custom model"
+    -- Fresh stores retain all six historical stock chain ids, without guessing
+    -- targets for arbitrary reviewer/scout aliases.
+    let stock ← loadRoutingChainsFromStore store root
+    for id in #["builtin/smart", "builtin/cheap", "builtin/fast", "builtin/assistant",
+        "google-opus", "google-sonnet"] do
+      check (stock.any (fun c => c.id == id)) s!"missing stock chain {id}"
+    chainsRef.set stock
+    -- A chain saved behind the running snapshot (import, another process) is found
+    -- in the store before its name is refused.
+    let .ok _ ← execParamQuery store.missionsDb
+        "INSERT INTO model_routing_chains(id,name,models_json,updated_at) VALUES('late-reviewer','Late','[{\"provider_id\":\"zai\",\"model_id\":\"glm-5.3\"}]','t0');" #[]
+      | throw (IO.userError "late chain insert failed")
+    attempts.set #[]
+    let late ← post "late-reviewer"
+    check (late.status == 200 && !(← attempts.get).isEmpty) s!"a chain saved behind the snapshot is served, got {late.status}"
+    -- A target that cannot serve the request (unknown model, wrong endpoint, dead login)
+    -- hands over to the next target of the SAME chain; nothing has reached the client yet.
+    let multi := fun (id : String) (models : Array String) =>
+      { chain id id "" with targets := models.map fun m => (chain s!"{id}-{m}" id m).targets[0]! }
+    chainsRef.modify fun cs => ((cs.push (multi "fo-recover" #["fail400-a", "fail404-b", "good-c"])).push
+      (multi "fo-dead" #["fail400-a", "fail404-b", "fail401-c"])).push (multi "fo-single" #["fail400-a"])
+    attempts.set #[]
+    let recovered ← post "fo-recover"
+    check (recovered.status == 200 && (← attempts.get) == #["fail400-a", "fail404-b", "good-c"])
+      s!"a chain fails over past unservable targets: {recovered.status} {← attempts.get}"
+    attempts.set #[]
+    let dead ← post "fo-dead"
+    let deadText := (String.fromUTF8? dead.body).getD ""
+    check (dead.status == 502 && (← attempts.get).size == 3 &&
+        (deadText.splitOn ("\"targets\":[{\"provider\":\"openai\",\"model\":\"fail400-a\",\"status\":400,\"code\":\"model_not_found\"}," ++
+          "{\"provider\":\"openai\",\"model\":\"fail404-b\",\"status\":404,\"code\":\"\"}," ++
+          "{\"provider\":\"openai\",\"model\":\"fail401-c\",\"status\":401,\"code\":\"auth_unavailable\"}]")).length == 2)
+      s!"an exhausted chain lists each target's failure: {dead.status} {deadText}"
+    check ((deadText.splitOn "example.test").length == 1) "upstream messages are not relayed in the failure list"
+    -- The refused login is recorded for that upstream account only, and an account
+    -- that serves a request is cleared.
+    let evidence := fun (key : String) => do
+      let .ok rows ← execParamQuery store.missionsDb "SELECT code FROM provider_auth_health WHERE account_key=?1;" #[key]
+        | throw (IO.userError "auth health query failed")
+      return (rows[1]?.bind (·[0]?))
+    check ((← evidence "fo-dead-fail401-c") == some "auth_unavailable" && (← evidence "fo-dead-fail400-a").isNone)
+      s!"a refused login is recorded for its account: {← evidence "fo-dead-fail401-c"}"
+    discard <| execParamQuery store.missionsDb "INSERT INTO provider_auth_health(account_key,code,observed_at) VALUES('fo-recover-good-c','auth_unavailable','t0');" #[]
+    discard <| post "fo-recover"
+    check ((← evidence "fo-recover-good-c").isNone) "an account that served a request is no longer marked refused"
+    attempts.set #[]
+    let single ← post "fo-single"
+    check (single.status == 400 && (((String.fromUTF8? single.body).getD "").splitOn "unknown provider for model k3").length == 2)
+      s!"a single target keeps the upstream's own answer: {single.status}"
+
+    -- Request each provider adapter sends, as the Rust proxy built it (base URL with its
+    -- API version + /chat/completions, JSON content type, bearer key, only `model` rewritten).
+    let sent := fun (provider base model : String) =>
+      let target := { (chain "a" "a" model).targets[0]! with provider := provider, baseUrl := base, apiKey := "k" }
+      let (tls, host, _, path, hdrs, body) := upstreamRequest target
+        "/v1/chat/completions" #[] "{\"model\":\"chain-name\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}".toUTF8
+      (s!"{if tls then "https" else "http"}://{host}{path}", hdrs, (OrbBin.Json.parse ((String.fromUTF8? body).getD "")).toOption.getD .null)
+    for (provider, model, url) in #[
+        ("minimax", "MiniMax-M3", "https://api.minimax.io/v1/chat/completions"),
+        ("zai", "glm-5.3", "https://api.z.ai/api/coding/paas/v4/chat/completions"),
+        ("kimi", "kimi-k3", "https://api.kimi.com/coding/v1/chat/completions"),
+        ("cerebras", "zai-glm-4.7", "https://api.cerebras.ai/v1/chat/completions"),
+        ("openai", "gpt-6-astra", "https://api.openai.com/v1/chat/completions"),
+        ("xai", "grok-4.6", "https://api.x.ai/v1/chat/completions"),
+        ("muse", "muse-spark-1.3", "https://api.meta.ai/v1/chat/completions"),
+        ("groq", "m", "https://api.groq.com/openai/v1/chat/completions"),
+        ("google", "gemini-4-argon", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")] do
+      let (gotUrl, hdrs, body) := sent provider (defaultProviderBaseUrl provider) model
+      check (gotUrl == url) s!"{provider} upstream URL: {gotUrl}"
+      check (hdrs.contains ("Content-Type", "application/json") && hdrs.contains ("Authorization", "Bearer k")) s!"{provider} headers"
+      check (body.fieldStr? "model" == some model && ((body.fieldArr? "messages").getD #[]).size == 1) s!"{provider} body keeps messages, names its model"
+      check (hdrs.any (fun h => h.1 == "User-Agent") == (provider == "kimi") &&
+          ((body.field? "temperature").isSome == (provider == "kimi"))) s!"{provider}: only Kimi's own endpoint gets its CLI agent and temperature"
+    check ((sent "custom:lab" "https://llm.example/v1" "m").1 == "https://llm.example/v1/chat/completions") "custom base ending in /v1"
+    check ((sent "kimi" "http://127.0.0.1:8317" "kimi-k3").1 == "http://127.0.0.1/v1/chat/completions") "CLIProxy base without a version"
+    check (((sent "zai" (defaultProviderBaseUrl "zai") "glm-5.3[1m]").2.2.fieldStr? "model") == some "glm-5.3") "z.ai has no [1m] suffix"
+    for (provider, entry, upstream) in #[("kimi", "k3", "kimi-k3"), ("kimi", "kimi-for-coding", "kimi-k3"),
+        ("kimi", "kimi-for-coding-highspeed", "kimi-k2.7-code-highspeed"), ("kimi", "kimi-k3.1-pro", "kimi-k3.1-pro"),
+        ("xai", "grok-4.6-latest", "grok-4.6"), ("minimax", "MiniMax-M3", "MiniMax-M3")] do
+      check (OrbCore.ProxyModelRouting.cliProxyModelId provider entry == upstream) s!"CLIProxy model id for {provider}/{entry}"
+    for c in stock do
+      let bare := if c.id.startsWith "builtin/" then (c.id.drop 8).toString else c.id
+      for alias in #[c.id, bare, s!"builtin/{bare}"] do
+        attempts.set #[]
+        let response ← post alias
+        check (response.status == 200 && !(← attempts.get).isEmpty) s!"stock alias {alias}"
+  finally
+    closeCoreStore store
+    IO.FS.removeDirAll root
+
+end OrbCore.ProxyRoutingTests

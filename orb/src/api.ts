@@ -872,6 +872,10 @@ export function apiText(path: string, init?: RequestInit): Promise<string> {
   }
   return apiRequest<string>(path, init, true);
 }
+/** Like `api`, returning raw response bytes without UTF-8 replacement decoding. */
+export function apiBytes(path: string, init?: RequestInit): Promise<Uint8Array> {
+  return apiRequest<Uint8Array>(path, init, "bytes");
+}
 function redactDiagnosticPath(path: string): string {
   return path.replace(/([?&](?:q|query)=)[^&]*/gi, "$1[redacted]");
 }
@@ -879,15 +883,15 @@ function redactDiagnosticPath(path: string): string {
 async function apiRequest<T>(
   path: string,
   init?: RequestInit,
-  text = false,
+  mode: boolean | "bytes" = false,
   explicitBase?: string,
   explicitPriority?: RequestPriority,
 ): Promise<T> {
   const from = performance.now(), label = `${init?.method?.toUpperCase() ?? "GET"} ${redactDiagnosticPath(path)}`;
   try {
-    const result = await sendRequest<T>(path, init, text, explicitBase, explicitPriority);
+    const result = await sendRequest<T>(path, init, mode, explicitBase, explicitPriority);
     requestDone(label, performance.now() - from, true);
-    return text ? result : stickMissionRows(path, result);
+    return mode ? result : stickMissionRows(path, result);
   } catch (error) {
     requestDone(label, performance.now() - from, false, error instanceof Error ? error.message : String(error));
     throw error;
@@ -914,25 +918,25 @@ function isFastRetryableError(error: unknown, init?: RequestInit): boolean {
 async function sendRequest<T>(
   path: string,
   init?: RequestInit,
-  text = false,
+  mode: boolean | "bytes" = false,
   explicitBase?: string,
   explicitPriority?: RequestPriority,
 ): Promise<T> {
   try {
-    return await sendRequestOnce<T>(path, init, text, explicitBase, explicitPriority);
+    return await sendRequestOnce<T>(path, init, mode, explicitBase, explicitPriority);
   } catch (error) {
     if (!isFastRetryableError(error, init)) throw error;
     const delayMs = 200 + Math.floor(Math.random() * 200);
     await new Promise((resolve) => setTimeout(resolve, delayMs));
     if (init?.signal?.aborted) throw error;
-    return sendRequestOnce<T>(path, init, text, explicitBase, explicitPriority);
+    return sendRequestOnce<T>(path, init, mode, explicitBase, explicitPriority);
   }
 }
 
 async function sendRequestOnce<T>(
   path: string,
   init?: RequestInit,
-  text = false,
+  mode: boolean | "bytes" = false,
   explicitBase?: string,
   explicitPriority?: RequestPriority,
 ): Promise<T> {
@@ -977,6 +981,26 @@ async function sendRequestOnce<T>(
     const text = (await res.text().catch(() => "")).trim();
     throw new ApiError(res.status, text);
   }
+  if (mode === "bytes") {
+    try {
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      if (connectionVersion() !== version) throw new Error("The backend changed. Try again; your draft is kept.");
+      return bytes as T;
+    } catch (cause) {
+      if (connectionVersion() !== version) throw new Error("The backend changed. Try again; your draft is kept.");
+      if (isAbortError(cause)) {
+        const reason = abortReason(init?.signal);
+        noteAbort(`${init?.method?.toUpperCase() ?? "GET"} ${redactDiagnosticPath(path)}`, reason, performance.now() - started);
+        if (reason !== "caller-abort") throw new RequestTimeoutError();
+        throw cause;
+      }
+      recordTransportFailure();
+      throw new InvalidApiResponseError(`${init?.method ?? "GET"} ${redactDiagnosticPath(path)}`, {
+        cause,
+        streamReadFailed: true,
+      });
+    }
+  }
   let body: string;
   try {
     body = await res.text();
@@ -995,7 +1019,7 @@ async function sendRequestOnce<T>(
     });
   }
   if (connectionVersion() !== version) throw new Error("The backend changed. Try again; your draft is kept.");
-  if (text) return body as T;
+  if (mode === true) return body as T;
   // Empty mutation receipts are valid for endpoints returning only a status.
   // A failed/invalid JSON read is not a successful response with no value.
   if (!body.trim() && init?.method && init.method.toUpperCase() !== "GET") return undefined as T;
@@ -1137,6 +1161,8 @@ export interface Mission {
   recovery?: { kind: "transient" | "background" | "quota" | "output_limit"; reason: string; resume_at: string; attempt: number; max_attempts: number } | null;
   scheduling?: { owner: "sandboxed"; durable: boolean; native_schedule_wakeup: boolean; native_cron: boolean; transport: "mcp" | "acp_mcp" | "local_command" | "unavailable" };
   continuation?: import("./continuations").ContinuationSummary | null;
+  /** Authoritative pending direct children, including those absent from the sidebar. */
+  live_children_count?: number;
   /** The mission that launched this one through the MCP, if any. */
   parent_mission_id?: string | null;
   /** Verified source of an isolated Hermes callback; presentation lineage only. */

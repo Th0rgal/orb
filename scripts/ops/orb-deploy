@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# orb-deploy: build one commit of Orb Core on this host and promote it.
+#
+#   orb-deploy <sha|master> [--dev-only]     run in the foreground
+#   orb-deploy --detach <sha|master> [...]   run as the transient unit orb-deploy.service
+#                                            (survives the SSH session; `journalctl -u orb-deploy`)
+#
+# Steps: fetch, check out exactly that commit, CI-parity build, Core self-test,
+# install to dev and health-check, then prod with a backup and automatic
+# rollback. A failed step stops the run and leaves prod untouched (or restored).
+# One run at a time; refuses to start while another lake build is running.
+set -euo pipefail
+
+TREE="${ORB_DEPLOY_TREE:-/var/tmp/orbcore-lean-build}"
+LOG="${ORB_DEPLOY_LOG:-/var/log/orb-deploy.log}"
+
+if [[ "${1:-}" == "--detach" ]]; then
+  shift
+  systemctl reset-failed orb-deploy.service 2>/dev/null || true
+  exec systemd-run --unit=orb-deploy --collect --quiet --no-block \
+    --property=Description="Orb Core deploy $*" "$(readlink -f "$0")" "$@"
+fi
+
+REF="${1:?usage: orb-deploy [--detach] <sha|master> [--dev-only]}"
+DEV_ONLY=0; [[ "${2:-}" == "--dev-only" ]] && DEV_ONLY=1
+
+exec 9>/run/lock/orb-deploy.lock
+flock -n 9 || { echo "another orb-deploy is running" >&2; exit 2; }
+exec > >(tee -a "$LOG") 2>&1
+say() { echo "[$(date -u +%FT%TZ)] $*"; }
+
+healthy() { # port, tries
+  for _ in $(seq 1 "$2"); do
+    sleep 2
+    curl -fsS -m 3 "http://127.0.0.1:$1/api/health" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+set_build() { # unit, sha
+  mkdir -p "/etc/systemd/system/$1.service.d"
+  printf '%s\n' "[Service]" "Environment=ORB_BUILD_SHA=$2" > "/etc/systemd/system/$1.service.d/30-build.conf"
+}
+
+if pgrep -x lake >/dev/null; then say "a lake build is already running on this host; not starting"; exit 3; fi
+
+cd "$TREE"
+git fetch --quiet origin master
+[[ "$REF" == "master" ]] && REF=origin/master
+SHA="$(git rev-parse --short=9 "$REF^{commit}")"
+say "deploy $SHA (dev${DEV_ONLY:+ only=$DEV_ONLY})"
+git checkout --quiet --force --detach "$SHA"
+git clean -fdq -- lean/OrbCore/OrbCore lean/OrbBin/OrbBin lean/Orb   # stale untracked sources only; build caches are ignored files
+
+say "build"
+(cd lean/OrbCore && lake build orb-core orb-core-test orb-spec-runner -- -DwarningAsError=true) | tail -4
+say "self-test"
+./lean/OrbCore/.lake/build/bin/orb-core-test | tail -1
+BIN="$TREE/lean/OrbCore/.lake/build/bin/orb-core"
+say "binary $(sha256sum "$BIN" | cut -c1-12)"
+
+set_build sandboxed-sh-dev "$SHA"; systemctl daemon-reload
+install -m 755 "$BIN" /usr/local/bin/orb-core-dev.new && mv /usr/local/bin/orb-core-dev.new /usr/local/bin/orb-core-dev
+systemctl restart sandboxed-sh-dev
+healthy 3002 30 || { say "dev unhealthy; prod untouched"; exit 1; }
+say "dev healthy on $SHA"
+[[ $DEV_ONLY == 1 ]] && { say "done (dev only)"; exit 0; }
+
+BACKUP="/usr/local/bin/orb-core.pre-deploy-$(date -u +%Y%m%dT%H%M%SZ)"
+OLD_SHA="$(sed -n 's/^Environment=ORB_BUILD_SHA=//p' /etc/systemd/system/sandboxed-sh-prod.service.d/30-build.conf 2>/dev/null || true)"
+cp -p /usr/local/bin/orb-core "$BACKUP"
+set_build sandboxed-sh-prod "$SHA"; systemctl daemon-reload
+install -m 755 "$BIN" /usr/local/bin/orb-core.new && mv /usr/local/bin/orb-core.new /usr/local/bin/orb-core
+systemctl restart sandboxed-sh-prod
+if ! healthy 3000 60; then
+  say "prod unhealthy; rolling back to $BACKUP"
+  cp -p "$BACKUP" /usr/local/bin/orb-core
+  set_build sandboxed-sh-prod "${OLD_SHA:-unknown}"; systemctl daemon-reload
+  systemctl restart sandboxed-sh-prod
+  exit 1
+fi
+say "prod healthy on $SHA (backup $BACKUP)"
+# keep the five most recent backups
+ls -1t /usr/local/bin/orb-core.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
+say "done"

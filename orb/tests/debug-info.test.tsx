@@ -34,6 +34,10 @@ it("diagnostics text lists versions, backend and recent log lines", async () => 
 it("Settings shows a Debug info panel with the recent log", async () => {
   log.warn("sidebar.load", "slow listing");
   const { container } = render(() => <Settings />);
+  // About is visible without opening Advanced; verbose diagnostics stay collapsed.
+  expect(screen.getByRole("heading", { name: "About" })).toBeTruthy();
+  expect(screen.getByText("Client build commit")).toBeTruthy();
+  expect(screen.getByText("Server build commit")).toBeTruthy();
   // Diagnostics live under the collapsed Advanced section of Account.
   const advanced = container.querySelector<HTMLDetailsElement>("details.settings-advanced")!;
   advanced.open = true;

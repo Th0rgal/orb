@@ -15,6 +15,7 @@ import OrbCore.R7Core
 import OrbCore.LegacyHydrate
 import OrbCore.ProviderUsageAndLogin
 import OrbCore.RemoteFleetAndRelay
+import OrbCore.Skills
 
 namespace OrbCore.RemoteDispatch
 
@@ -163,10 +164,45 @@ private def isLoopbackStaticNode (targetNodeId : String) : IO Bool := do
     let u := sn.baseUrl.toLower
     return u.startsWith "http://127.0.0.1" || u.startsWith "http://localhost" || u.startsWith "http://[::1]"
 
+/-- The ready managed machine an unnamed managed target (`auto-managed`, or `auto`
+    with no static fleet), or a sandbox name, may resolve to for `missionId`: one owned by that
+    mission or an ancestor, or a user-owned one of the mission's own user. Never
+    another mission's or another user's machine; with no mission, none. -/
+def scopedReadyManagedMachine?
+    (mc : ManagedComputeStore)
+    (scope? : Option (CoreStore × String))
+    (sandboxName : String := "") : IO (Option String) := do
+  let some (store, missionId) := scope? | return none
+  let mut lineage : Array String := #[]
+  let mut current := missionId.trimAscii.toString
+  let mut ownerUser := ""
+  for depth in [0:8] do
+    if current.isEmpty || lineage.contains current then break
+    let .ok rows ← execParamQuery store.missionsDb
+        "SELECT COALESCE(parent_mission_id,''), COALESCE(owner_user_id,'') FROM missions WHERE id=?1;" #[current]
+      | break
+    if rows.size < 2 then break
+    lineage := lineage.push current
+    if depth == 0 then ownerUser := (cell rows[1]! 1).trimAscii.toString
+    current := (cell rows[1]! 0).trimAscii.toString
+  if lineage.isEmpty then return none
+  let .ok rows ← execParamQuery mc.db
+      ("SELECT id, owner_mission, owner_kind, owner_user_id FROM managed_machines " ++
+       "WHERE phase_code=1 AND cordoned=0 AND (?1='' OR sandbox_name=?1) ORDER BY last_poll_sec DESC, id;") #[sandboxName]
+    | return none
+  for row in rows.extract 1 rows.size do
+    let ownerMission := cell row 1
+    let allowed :=
+      if ownerMission.isEmpty then cell row 2 != "mission" && cell row 3 == ownerUser
+      else lineage.contains ownerMission
+    if allowed && !(cell row 0).isEmpty then return some s!"managed-{cell row 0}"
+  return none
+
 /-- Resolve `"auto"`, `"auto-managed"`, or sandbox names into a concrete `targetNodeId` accepted by `callRemoteNodeHttpOpt`. -/
 def resolveConcreteRemoteTargetNode
     (mc? : Option ManagedComputeStore)
-    (rawTarget : String) : IO (Except String String) := do
+    (rawTarget : String)
+    (scope? : Option (CoreStore × String) := none) : IO (Except String String) := do
   let clean := rawTarget.trimAscii.toString
   if clean.isEmpty || clean == "local" || clean == "client" then
     return .error "not_a_remote_target"
@@ -177,30 +213,19 @@ def resolveConcreteRemoteTargetNode
     if let some sn := staticNodes[0]? then
       return .ok sn.id
     if let some mc := mc? then
-      if let .ok rows ← execParamQuery mc.db
-          "SELECT id FROM managed_machines WHERE status IN ('ready','running') ORDER BY updated_at DESC LIMIT 1;" #[] then
-        if rows.size > 1 then
-          let mid := cell rows[1]! 0
-          if !mid.isEmpty then return .ok s!"managed-{mid}"
+      if let some node ← scopedReadyManagedMachine? mc scope? then return .ok node
     return .error "no_remote_nodes_available"
   if clean == "auto-managed" || clean.startsWith "auto-managed:" then
     let some mc := mc?
       | return .error "no_managed_machines_available"
-    if let .ok rows ← execParamQuery mc.db
-        "SELECT id FROM managed_machines WHERE status IN ('ready','running') ORDER BY updated_at DESC LIMIT 1;" #[] then
-      if rows.size > 1 then
-        let mid := cell rows[1]! 0
-        if !mid.isEmpty then return .ok s!"managed-{mid}"
+    if let some node ← scopedReadyManagedMachine? mc scope? then return .ok node
     return .error "no_managed_machines_available"
   if let some mc := mc? then
     let cand := if clean.startsWith "managed-" then (clean.drop 8).toString else clean
     if let some _ ← getManagedMachine? mc cand then
       return .ok (if clean.startsWith "managed-" then clean else s!"managed-{cand}")
-    if let .ok rows ← execParamQuery mc.db
-        "SELECT id FROM managed_machines WHERE sandbox_name=?1 AND status<>'destroyed' ORDER BY updated_at DESC LIMIT 1;" #[clean] then
-      if rows.size > 1 then
-        let mid := cell rows[1]! 0
-        if !mid.isEmpty then return .ok s!"managed-{mid}"
+    -- A sandbox name is guessable, so it only names a machine the mission may use.
+    if let some node ← scopedReadyManagedMachine? mc scope? clean then return .ok node
   return .ok clean
 
 /-- Authoritatively resolve the remote node ID for an existing mission across `machine_transfers`,
@@ -274,7 +299,7 @@ def resolveMissionRemoteNode?
   if placeKind == "managed_vm" then
     if let some mc := mc? then
       if let .ok vmRows ← execParamQuery mc.db
-          "SELECT id FROM managed_machines WHERE owner_mission=?1 AND status NOT IN ('destroyed','failed') ORDER BY updated_at DESC LIMIT 1;"
+          "SELECT id FROM managed_machines WHERE owner_mission=?1 AND phase_code<>3 ORDER BY created_at_sec DESC, id LIMIT 1;"
           #[mid] then
         if vmRows.size > 1 then
           let vmid := (cell vmRows[1]! 0).trimAscii.toString
@@ -475,6 +500,10 @@ private def prepareRemoteHarnessCommand
       (trimmedPrompt.drop 5).trimAscii.toString
     else
       spec.prompt
+  -- The Library lives on Core: ship the delivered skills into the node workspace so every
+  -- harness finds them where it looks (`.opencode/skills`, `.claude/skills`, `.agents/skills`).
+  let wsPrefix := wsPrefix ++ (← OrbCore.Skills.remoteInstallPrelude coreWorkDir
+    (if spec.project.trimAscii.toString.isEmpty then none else some spec.project) spec.backend.trimAscii.toString.toLower store.rootDir)
   let (fd3Prelude, promptEnvs) := stagePromptOnFd3 deliveredPrompt
   let resumeSid? := spec.resumeSessionId?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
   let bLow := spec.backend.trimAscii.toString.toLower
@@ -635,6 +664,46 @@ private def emitMissionEventAndBroadcast
     (missionId evType payloadJson nowIso : String) : IO Unit := do
   discard <| appendMissionEvent store missionId evType payloadJson nowIso
   publishControlEvent broadcastHub? evType payloadJson (some missionId)
+
+/-- Retries a turn gets after ending with no output before the mission is `failed`. -/
+def maxEmptyTurnRetries : Nat := 2
+
+/-- Call when a turn ended "successfully" with no assistant text. If it also made no
+    tool call since the last user message, it did no work: that is a failure, never a
+    completion. Returns `none` when the turn did produce work (tool-only turns are
+    legitimate), otherwise the mission status to write: `awaiting_user` with a durable
+    one-shot retry armed (at most `maxEmptyTurnRetries` per user message), else `failed`.
+    The retry is a `mission_continuations` row, so it survives a Core restart. -/
+def settleEmptyTurn (store : CoreStore) (broadcastHub? : Option BroadcastHub)
+    (missionId nowIso : String) (nowSec : UInt64) (retryable : Bool := true) : IO (Option String) := do
+  let produced := match ← execParamQuery store.missionsDb
+      ("SELECT COUNT(*) FROM mission_events WHERE mission_id=?1 AND event_type IN ('tool_call','tool_result','assistant_message') " ++
+       "AND id > COALESCE((SELECT MAX(id) FROM mission_events WHERE mission_id=?1 AND event_type='user_message'),0);") #[missionId] with
+    | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 1
+    | .error _ => 1
+  if produced > 0 then return none
+  -- Attempts so far: set when the turn that just ended was itself launched by a retry.
+  let prior := match ← execParamQuery store.missionsDb
+      ("SELECT c.reason FROM mission_continuations c WHERE c.mission_id=?1 AND c.reason LIKE 'empty_turn_retry:%' AND instr(COALESCE(" ++
+       "(SELECT payload FROM mission_events WHERE mission_id=?1 AND event_type='user_message' ORDER BY id DESC LIMIT 1),''), c.id) > 0 LIMIT 1;") #[missionId] with
+    | .ok rs => ((rs[1]?.bind (·[0]?)).bind fun r => (r.drop 17).toString.toNat?).getD 0
+    | .error _ => maxEmptyTurnRetries
+  if retryable && prior < maxEmptyTurnRetries then
+    let cid ← newUuidV4
+    let armed ← execParamQuery store.missionsDb
+      ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,error,recurrence,stop_after_first,created_at,updated_at) " ++
+       "SELECT ?1,id,COALESCE(run_generation,1),1,CAST(?3 AS INTEGER),'time',?4,?5,?1,'','empty-turn-retry','','',1,?6,?6 FROM missions WHERE id=?2;")
+      #[cid, missionId, s!"{nowSec + 20 * (prior.toUInt64 + 1)}", s!"empty_turn_retry:{prior + 1}",
+        "Your previous turn ended without any output or tool call. Continue the task from where you left off.", nowIso]
+    if armed.isOk then
+      emitMissionEventAndBroadcast store broadcastHub? missionId "error"
+        (renderCompact (.obj #[("message", .str s!"The model returned no output. Retrying ({prior + 1} of {maxEmptyTurnRetries})."),
+          ("code", .str "empty_turn"), ("retryable", .bool true)])) nowIso
+      return some "awaiting_user"
+  emitMissionEventAndBroadcast store broadcastHub? missionId "error"
+    (renderCompact (.obj #[("message", .str s!"The model returned no output after {prior + 1} attempt(s). The turn failed."),
+      ("code", .str "empty_turn"), ("retryable", .bool false)])) nowIso
+  return some "failed"
 
 private def persistDiscoveredSessionId (store : CoreStore) (missionId sid : String) : IO Unit := do
   let clean := sid.trimAscii.toString
@@ -797,7 +866,7 @@ def cancelActiveRemoteJobForMission
       nodeId := rn
   if jobId.isEmpty || nodeId.isEmpty then
     return false
-  let effNode ← match ← resolveConcreteRemoteTargetNode mc? nodeId with
+  let effNode ← match ← resolveConcreteRemoteTargetNode mc? nodeId (some (store, missionId)) with
     | .ok n => pure n
     | .error _ => pure nodeId
   let hdrs := #[
@@ -1053,15 +1122,23 @@ partial def spawnRemoteJobPoller
                     "SELECT COUNT(*) FROM mission_continuations WHERE mission_id=?1 AND phase=1;" #[missionId] then
                   if cRows.size > 1 then
                     armedWakeups := cellNat cRows[1]! 0
+                -- A "succeeded" job with no text and no tool call did no work.
+                let emptyVerdict? ←
+                  if jState == "succeeded" && finalText.isEmpty then
+                    settleEmptyTurn store broadcastHub? missionId nowIso nowSec
+                  else pure none
                 let nextMissionStatus :=
-                  if jState == "succeeded" then
+                  if let some verdict := emptyVerdict? then verdict
+                  else if jState == "succeeded" then
                     if armedWakeups > 0 then "awaiting_user" else "completed"
                   else if jState == "cancelled" then "cancelled"
                   else "failed"
                 discard <| execParamQuery store.missionsDb
                   ("UPDATE missions SET status=?2, terminal_reason=?3, state_revision=state_revision+1, updated_at=?4 " ++
                    "WHERE id=?1 AND status NOT IN ('cancelled','interrupted');")
-                  #[missionId, nextMissionStatus, if nextMissionStatus == "awaiting_user" then "awaiting_wakeup" else termReason, nowIso]
+                  #[missionId, nextMissionStatus,
+                    if emptyVerdict?.isSome then (if nextMissionStatus == "failed" then "empty_turn" else "empty_turn_retry")
+                    else if nextMissionStatus == "awaiting_user" then "awaiting_wakeup" else termReason, nowIso]
                 emitMissionEventAndBroadcast store broadcastHub? missionId "mission_status_changed"
                   (renderCompact (.obj #[("status", .str nextMissionStatus), ("content", .str finalText)])) nowIso
           else
@@ -1080,7 +1157,7 @@ partial def submitRemoteMissionTurn
     (coreWorkDir : String)
     (spec : RemoteTurnSpec)
     (nowSec : UInt64) : IO (Except String String) := do
-  let effTarget ← match ← resolveConcreteRemoteTargetNode mc? spec.targetNodeId with
+  let effTarget ← match ← resolveConcreteRemoteTargetNode mc? spec.targetNodeId (some (store, spec.missionId)) with
     | .ok n => pure n
     | .error e => return .error e
 
@@ -1182,6 +1259,7 @@ partial def submitRemoteMissionTurn
         store.missionsDb runId spec.missionId s!"{nextGen}" "running" "" jobId nowIso true
         s!"remote-job:{jobId}" s!"remote-node:{effTarget}"
       if let .error e := insRun then return .error e
+      carryArmedWakeupsForward (execParamQueryUnlocked store.missionsDb) spec.missionId nextGen nowIso
       execParamQueryUnlocked store.missionsDb
         ("UPDATE missions SET status='active', terminal_reason='remote_node_job', placement_job_id=?2, " ++
          "run_generation=CAST(?3 AS INTEGER), state_revision=state_revision+1, updated_at=?4 WHERE id=?1;")
@@ -1235,7 +1313,7 @@ def reattachActiveRemoteJobsOnStartup
         | some n => pure (some n)
         | none => resolveMissionRemoteNode? store mc? mid
       if let some rawNode := resolvedNode? then
-        let effNode ← match ← resolveConcreteRemoteTargetNode mc? rawNode with
+        let effNode ← match ← resolveConcreteRemoteTargetNode mc? rawNode (some (store, mid)) with
           | .ok n => pure n
           | .error _ => pure rawNode
         -- Determine safe resume byte offset (`remote_log_offsets` first, then remote `log_len` fallback)
@@ -1372,6 +1450,9 @@ def migrateLegacyAutomations (store : CoreStore) (nowSec : UInt64) : IO Nat := d
       | .error _ => pure ()
   return migrated
 
+/-- Launch attempts a one-shot wake-up gets before it is retired as `launch_failed`. -/
+def maxWakeupLaunchTries : Nat := 10
+
 /-- Evaluate due `mission_continuations` (`time` and `durable_job_terminal`) and wake idle missions. -/
 def tickContinuationScheduler
     (store : CoreStore)
@@ -1389,12 +1470,12 @@ def tickContinuationScheduler
   ensureDurableJobsTableLocal store
   let dueRes ← execParamQuery store.missionsDb
     ("SELECT id, mission_id, COALESCE(run_generation,1), COALESCE(due_epoch,0), COALESCE(trigger_kind,'time'), " ++
-     "COALESCE(prompt,''), COALESCE(reason,''), COALESCE(job_id,''), COALESCE(recurrence,''), COALESCE(stop_after_first,1) " ++
+     "COALESCE(prompt,''), COALESCE(reason,''), COALESCE(job_id,''), COALESCE(recurrence,''), COALESCE(stop_after_first,1), COALESCE(error,'') " ++
      "FROM mission_continuations " ++
      "WHERE phase = 1 AND (" ++
      "  (trigger_kind = 'time' AND due_epoch <= CAST(?1 AS INTEGER)) OR " ++
      "  trigger_kind = 'durable_job_terminal'" ++
-     ") ORDER BY due_epoch ASC LIMIT 32;")
+     ") ORDER BY due_epoch ASC LIMIT 256;")
     #[s!"{nowSec}"]
   let .ok rows := dueRes | return 0
   if rows.size ≤ 1 then return 0
@@ -1411,8 +1492,12 @@ def tickContinuationScheduler
     let jobId := (cell r 7).trimAscii.toString
     let recurrence := (cell r 8).trimAscii.toString
     let stopFirst := cellNat r 9 != 0
+    -- Launch attempts already made for this wake-up (`launch_retry:N`).
+    let rowErr := (cell r 10).trimAscii.toString
+    let tries := if rowErr.startsWith "launch_retry:" then ((rowErr.drop 13).toString.toNat?).getD 0 else 0
     let mut jobDue := trigKind != "durable_job_terminal" || dueEp ≤ nowSec
-    if !jobDue && !jobId.isEmpty then
+    -- A wake-up waiting out its retry backoff is not due early, even if its job is terminal.
+    if !jobDue && !jobId.isEmpty && tries == 0 then
       if let .ok jr1 ← execParamQuery store.missionsDb
           "SELECT 1 FROM remote_node_jobs WHERE job_id=?1 AND state IN ('succeeded','failed','cancelled','lost') LIMIT 1;" #[jobId] then
         if jr1.size > 1 then jobDue := true
@@ -1439,6 +1524,10 @@ def tickContinuationScheduler
             discard <| execParamQuery store.missionsDb
               "UPDATE missions SET status='awaiting_user', terminal_reason='awaiting_wakeup', state_revision=state_revision+1, updated_at=?2 WHERE id=?1 AND status='completed';"
               #[mid, nowIso]
+          -- A job wake-up is armed with a far deadline; once its job is terminal it is due now.
+          if trigKind == "durable_job_terminal" && dueEp > nowSec then
+            discard <| execParamQuery store.missionsDb
+              "UPDATE mission_continuations SET due_epoch=CAST(?2 AS INTEGER) WHERE id=?1 AND phase=1;" #[cid, s!"{nowSec}"]
           match ← actOnContinuation store cid "resume" nowIso nowSec with
           | .ok (.ok _) =>
             let mut resumeSid? : Option String := none
@@ -1453,13 +1542,15 @@ def tickContinuationScheduler
                 s!"Durable job `{jobId}` has reached a terminal state. Inspect its result and continue."
               else "Scheduled wakeup triggered. Inspect current status and continue."
 
-            emitMissionEventAndBroadcast store broadcastHub? mid "user_message"
-              (renderCompact (.obj #[
-                ("type", .str "user_message"),
-                ("content", .str effPrompt),
-                ("source", .str "wakeup"),
-                ("continuation_id", .str cid)
-              ])) nowIso
+            -- One transcript entry per wake-up, not one per launch attempt.
+            if tries == 0 then
+              emitMissionEventAndBroadcast store broadcastHub? mid "user_message"
+                (renderCompact (.obj #[
+                  ("type", .str "user_message"),
+                  ("content", .str effPrompt),
+                  ("source", .str "wakeup"),
+                  ("continuation_id", .str cid)
+                ])) nowIso
 
             let mut launchedOk := false
             match ← resolveMissionRemoteNode? store mc? mid with
@@ -1493,13 +1584,43 @@ def tickContinuationScheduler
                 if ok then
                   launchedOk := true
                   fired := fired + 1
+                else
+                  -- The failed launch may have marked the mission active with no process.
+                  discard <| execParamQuery store.missionsDb
+                    "UPDATE missions SET status='interrupted',terminal_reason='wakeup_launch_failed',state_revision=state_revision+1,updated_at=?2 WHERE id=?1 AND status='active';"
+                    #[mid, nowIso]
+                  emitMissionEventAndBroadcast store broadcastHub? mid "error"
+                    (renderCompact (.obj #[("message", .str "Wakeup launch failed; it will be retried")])) nowIso
               else
                 let _ := warmMgr?
                 pure ()
 
+            let isRecurringInterval := !stopFirst && recurrence.startsWith "interval:"
+            if launchedOk || isRecurringInterval then
+              discard <| execParamQuery store.missionsDb
+                "UPDATE mission_continuations SET phase=4, updated_at=?2 WHERE id=?1 AND phase=2;"
+                #[cid, nowIso]
+
+            -- A one-shot wake-up that could not launch is not consumed: it fires late, not never.
+            -- Re-armed under the mission's current generation with a backoff of 1, 2, 4 ... 15 min;
+            -- after `maxWakeupLaunchTries` attempts (about two hours) it is retired with a visible error.
+            if !launchedOk && !isRecurringInterval then
+              if tries + 1 ≥ maxWakeupLaunchTries then
+                discard <| execParamQuery store.missionsDb
+                  "UPDATE mission_continuations SET phase=4, error='launch_failed', updated_at=?2 WHERE id=?1 AND phase=2;"
+                  #[cid, nowIso]
+                emitMissionEventAndBroadcast store broadcastHub? mid "error"
+                  (renderCompact (.obj #[("message", .str s!"Scheduled wake-up abandoned after {tries + 1} failed launch attempts")])) nowIso
+              else
+                let backoff := Nat.min 900 (60 * 2 ^ (Nat.min tries 4))
+                discard <| execParamQuery store.missionsDb
+                  ("UPDATE mission_continuations SET phase=1, due_epoch=CAST(?2 AS INTEGER), error=?3, updated_at=?4, " ++
+                   "run_generation=COALESCE((SELECT run_generation FROM missions WHERE id=mission_continuations.mission_id),run_generation) WHERE id=?1 AND phase=2;")
+                  #[cid, s!"{nowSec + backoff.toUInt64}", s!"launch_retry:{tries + 1}", nowIso]
+
             -- Re-arm next interval using the exact post-launch `missions.run_generation`
             -- (if `launchedOk == false` due to a transient remote/node hiccup, still re-arm in 60s so a recurring wakeup is never permanently dropped!)
-            if !stopFirst && recurrence.startsWith "interval:" then
+            if isRecurringInterval then
               let ivSecs :=
                 if launchedOk then Nat.max 60 (((recurrence.drop 9).trimAscii.toString.toNat?).getD 300)
                 else 60

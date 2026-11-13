@@ -11,7 +11,11 @@ Resume now / Cancel actions. Folder badges prefer running work over scheduled wo
 Mission list and detail responses add optional `continuation: {count, items}`.
 Each item has `id`, `state`, `next_at`, `trigger`, `reason` and optional `error`.
 States are `scheduled`, `queued`, `waiting_for_client`, `error`; local requests
-not yet acknowledged by Core use `pending_sync`. `scheduling` describes the
+not yet acknowledged by Core use `pending_sync`. Armed wake-ups superseded by a
+newer `run_generation` (`WakeupPhase.superseded`, `phase = 3`) and one-shot
+occurrences whose turn has already launched (`phase = 4` or `run_generation`
+behind `missions.run_generation`) are retired from `continuation.items` rather
+than projected as delivery errors or stale queued items. `scheduling` describes the
 integration's transport and native support; it is not a probe of the installed CLI.
 
 `POST /api/control/automations/:id/action` accepts `{"action":"resume"}` or

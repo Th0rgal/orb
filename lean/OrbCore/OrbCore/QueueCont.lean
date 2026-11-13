@@ -137,7 +137,7 @@ def wakeupPhaseName (phase : UInt8) : String :=
   if phase == 0 then "disarmed"
   else if phase == 1 then "scheduled"
   else if phase == 2 then "queued"
-  else if phase == 3 then "error"
+  else if phase == 3 then "superseded"
   else "cancelled"
 
 def continuationApiState (phase : UInt8) (triggerKind : String) : String :=
@@ -887,6 +887,23 @@ inductive ContinuationActOutcome where
   | superseded
   deriving Repr
 
+/-- A new turn is starting at `nextGen`. "An ordinary follow-up does not cancel the next
+    wake-up" (docs/SCHEDULED_CONTINUATIONS.md): wake-ups armed at the mission's current
+    generation move to the new one. Wake-ups from an older generation stay fenced and are
+    superseded, as is a pending empty-turn retry, which the new turn replaces.
+    `query` is the locked or in-transaction query function of the caller. -/
+def carryArmedWakeupsForward
+    (query : String → Array String → IO (Except String (Array (Array String))))
+    (missionId : String) (nextGen : Nat) (nowIso : String) : IO Unit := do
+  discard <| query
+    ("UPDATE mission_continuations SET run_generation=CAST(?2 AS INTEGER), updated_at=?3 WHERE mission_id=?1 AND phase=1 " ++
+     "AND COALESCE(source,'')<>'empty-turn-retry' AND run_generation<CAST(?2 AS INTEGER) " ++
+     "AND run_generation=(SELECT COALESCE(run_generation,1) FROM missions WHERE id=?1);")
+    #[missionId, s!"{nextGen}", nowIso]
+  discard <| query
+    "UPDATE mission_continuations SET phase=3, error='stale_run_generation', updated_at=?3 WHERE mission_id=?1 AND phase=1 AND run_generation<CAST(?2 AS INTEGER);"
+    #[missionId, s!"{nextGen}", nowIso]
+
 def actOnContinuation
     (st : CoreStore) (contId action nowAt : String) (nowEpoch : UInt64) : IO (Except String ContinuationActOutcome) :=
   withImmediateTx st.missionsDb do
@@ -941,8 +958,10 @@ def actOnContinuation
 
 def continuationJsonForMission (st : CoreStore) (missionId : String) : IO (Except String String) := do
   let rows ← execParamQuery st.missionsDb
-    ("SELECT id,phase,due_epoch,trigger_kind,reason,source,error,recurrence FROM mission_continuations " ++
-     "WHERE mission_id=?1 AND phase IN (1,2,3) ORDER BY due_epoch ASC, id ASC;")
+    ("SELECT c.id,c.phase,c.due_epoch,c.trigger_kind,c.reason,c.source,c.error,c.recurrence " ++
+     "FROM mission_continuations c JOIN missions m ON m.id=c.mission_id " ++
+     "WHERE c.mission_id=?1 AND (c.phase=1 OR (c.phase=2 AND c.run_generation>=COALESCE(m.run_generation,1))) " ++
+     "ORDER BY c.due_epoch ASC, c.id ASC;")
     #[missionId]
   match rows with
   | .error e => return .error e
@@ -1238,7 +1257,8 @@ def missionDetailJson
     "COALESCE(NULLIF(m.created_at,''),m.updated_at),COALESCE(m.metadata_updated_at,'')," ++
     "COALESCE(m.short_description,''),COALESCE(m.workspace_id,'00000000-0000-0000-0000-000000000000')," ++
     "COALESCE(m.workspace_name,''),COALESCE(m.agent,''),COALESCE(m.config_profile,''),COALESCE(m.resumable,0)," ++
-    "COALESCE(m.history_json,'[]') " ++
+    "COALESCE(m.history_json,'[]')," ++
+    liveChildrenCountSql ++ " AS live_children_count " ++
     "FROM missions m LEFT JOIN mission_terminal_evidence e ON e.mission_id=m.id WHERE m.id=?1;"
   let rows ← execParamQuery st.missionsDb sql #[missionId]
   match rows with
@@ -1300,6 +1320,7 @@ def missionDetailJson
     let cfgProfVal := cell r 45
     let cfgProfJson := if cfgProfVal.isEmpty then "null" else jsonEscape cfgProfVal
     let resumableBool := (cellNat r 46) != 0
+    let liveChildrenCount := cellNat r 48
     let rawHist := cell r 47
     let mut histOut := if rawHist.startsWith "[" then rawHist else "[]"
     if (cell r 3).startsWith "cloud_" && histOut == "[]" then
@@ -1344,7 +1365,7 @@ def missionDetailJson
       s!"\{\"id\":{jsonEscape (cell r 0)},\"title\":{jsonEscape (cell r 1)},\"status\":{jsonEscape status}," ++
       s!"\"backend\":{jsonEscape (cell r 3)},\"model_override\":{jsonEscape modelOverride},\"model_effort\":{jsonEscape modelEffort}," ++
       s!"\"project\":{projJson},\"folder\":{jsonEscape folderVal},\"placement_revision\":{placeRev}," ++
-      s!"\"parent_mission_id\":{parentJson},\"track\":{jsonEscape track},\"github_pr\":{jsonEscape githubPr}," ++
+      s!"\"parent_mission_id\":{parentJson},\"live_children_count\":{liveChildrenCount},\"track\":{jsonEscape track},\"github_pr\":{jsonEscape githubPr}," ++
       s!"\"working_directory\":{jsonEscape workDir},\"workspace_id\":{jsonEscape wsIdVal},\"workspace_name\":{wsNameJson}," ++
       s!"\"agent\":{agentJson},\"config_profile\":{cfgProfJson},\"resumable\":{if resumableBool then "true" else "false"}," ++
       s!"\"short_description\":{shortDescJson},\"created_at\":{jsonEscape createdAtVal}," ++

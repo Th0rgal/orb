@@ -1,5 +1,6 @@
 import { createSignal } from "solid-js";
 import { harnessName } from "./harnesses";
+import { continuationLabel, type ContinuationSummary } from "./continuations";
 /**
  * One vocabulary for Core mission statuses. Every check that used to carry
  * its own list of status strings asks one of these predicates instead, so a
@@ -85,7 +86,7 @@ export type StatusCategory = typeof STATUS_CATEGORIES[number] | "unknown";
 export function statusCategory(status: Status): StatusCategory {
   const s = (status ?? "").toLowerCase();
   if (ARCHIVED_STATUSES.has(s)) return "archived";
-  if (READY_STATUSES.has(s)) return "waiting";
+  if (READY_STATUSES.has(s) || s === "awaiting_wakeup") return "waiting";
   if (s === "blocked") return "blocked";
   if (FAILED_STATUSES.has(s)) return "failed";
   if (RUNNING_STATUSES.has(s) || s === "waiting_background") return "live";
@@ -104,6 +105,8 @@ export function statusSortRank(status: Status): number {
 
 /** The run ended for good: failed or completed (not paused, stopped or waiting). */
 export const isTerminalStatus = (status: Status) => ["failed", "done"].includes(statusCategory(status));
+/** A settled row may be dimmed; pending work and unknown evidence never mean done. */
+export const isSettledStatus = (status: Status) => ["failed", "done", "stopped", "archived"].includes(statusCategory(status));
 
 export type StatusTone = "running" | "quiet" | "attention" | "success";
 export type StatusIcon = "loader" | "clock" | "alert" | "pause" | "check" | null;
@@ -114,6 +117,7 @@ export function statusPresentation(status: string): { label: string; tone: Statu
   if (isQueued(status)) return { label: "Queued", tone: "quiet", icon: "clock" };
   if (isReady(status)) return { label: "Ready for a follow-up", tone: "quiet", icon: null };
   switch (status) {
+    case "awaiting_wakeup": return { label: "Waiting for wake-up", tone: "quiet", icon: "clock" };
     case "waiting_background": return { label: "Background work running", tone: "running", icon: "clock" };
     case "blocked": return { label: "Blocked", tone: "attention", icon: "alert" };
     case "paused": return { label: "Paused", tone: "quiet", icon: "pause" };
@@ -169,12 +173,24 @@ export function handoffPending(status: Status, handoff: Handoff | null | undefin
   return HANDOFF_STATUSES.has((status ?? "").toLowerCase());
 }
 
-export type ActivityReason = "running" | "queued" | "starting" | "stopping" | "handoff" | "idle" | "failed" | "needs_you";
+export type ActivityReason = "running" | "queued" | "starting" | "stopping" | "handoff" | "idle" | "failed" | "needs_you" | "awaiting_wakeup" | "background";
 export type MissionActivity = { working: boolean; reason: ActivityReason; label?: string };
 
 type ActivityJob = { phase?: string | null; node_state?: string | null; forced?: boolean; node_id?: string | null; lease_state?: string | null; terminal_reason?: string | null; finished_at?: string | null; exit_code?: number | null; error?: string | null } | null | undefined;
 type ActivityQueueWait = { reason?: string; slots_used?: number; slots_max?: number } | null | undefined;
-type ActivityMission = { id?: string; status?: string | null; remote_node_id?: string | null; remote_job?: ActivityJob; queue_wait?: ActivityQueueWait; execution?: { state?: string | null } | null } | null | undefined;
+type ActivityMission = { id?: string; status?: string | null; terminal_reason?: string | null; continuation?: ContinuationSummary | null; live_children_count?: number; remote_node_id?: string | null; remote_job?: ActivityJob; queue_wait?: ActivityQueueWait; execution?: { state?: string | null; terminal_reason?: string | null } | null } | null | undefined;
+
+/** Pending work survives a turn-end receipt. Never infer cancellation from time
+ * passing: only Core removing the continuation clears it. */
+function pendingActivity(mission: NonNullable<ActivityMission>): MissionActivity | undefined {
+  if ((mission.live_children_count ?? 0) > 0 || mission.status === "waiting_background") {
+    return { working: false, reason: "background", label: "Background work running" };
+  }
+  if (mission.status === "awaiting_wakeup" || (mission.continuation?.count ?? 0) > 0 || mission.continuation?.items.length ||
+      (mission.terminal_reason ?? mission.execution?.terminal_reason) === "awaiting_wakeup") {
+    return { working: false, reason: "awaiting_wakeup", label: mission.continuation ? continuationLabel(mission.continuation) : "Waiting for wake-up" };
+  }
+}
 type ActivityItem = { kind: string; queued?: boolean };
 
 /** "Waiting for a free slot (1/1 in use)" while Core has no parallel slot for a pending mission. */
@@ -203,6 +219,7 @@ const NON_FAILURE_JOB_TERMINAL_REASONS = new Set([
   "succeeded",
   "done",
   "awaiting_user",
+  "awaiting_wakeup",
   "client_runner",
 ]);
 
@@ -262,7 +279,7 @@ export function missionActivity(mission: ActivityMission, items: readonly Activi
   if (handoffPending(status, handoff, opts.now)) return { working: true, reason: "handoff", label: "Sending" };
   if (job && remoteJobEnded(job)) {
     const failed = remoteJobFailed(job) || isFailedStatus(status);
-    return { working: false, reason: failed ? "failed" : "idle" };
+    return failed ? { working: false, reason: "failed" } : pendingActivity(mission) ?? { working: false, reason: "idle" };
   }
   if (mission.execution?.state === "stopping") return { working: true, reason: "stopping" };
   const jobLive = !!job && (job.node_state === "running" || job.node_state === "queued");
@@ -279,6 +296,8 @@ export function missionActivity(mission: ActivityMission, items: readonly Activi
     return label ? { working: true, reason: "queued", label } : { working: true, reason: "queued" };
   }
   if (isFailedStatus(status)) return { working: false, reason: "failed" };
+  const pending = pendingActivity(mission);
+  if (pending) return pending;
   if (status === "blocked") return { working: false, reason: "needs_you" };
   return { working: false, reason: "idle" };
 }
@@ -287,13 +306,30 @@ export function missionActivity(mission: ActivityMission, items: readonly Activi
  * a stale live status whose run already ended reads as failed, completed, or interrupted. */
 export function presentedStatus(mission: ActivityMission & { status: string }, activity: MissionActivity = missionActivity(mission)): string {
   if (activity.working) return activity.reason === "queued" ? "queued" : activity.reason === "starting" ? "starting" : isLive(mission.status) ? mission.status : "running";
-  if (!isLive(mission.status)) return mission.status;
   if (activity.reason === "failed") return "failed";
+  if (activity.reason === "background") return "waiting_background";
+  if (activity.reason === "awaiting_wakeup") return "awaiting_wakeup";
+  if (!isLive(mission.status)) return mission.status;
   const job = mission.remote_job;
   if (job && remoteJobEnded(job) && !remoteJobFailed(job) && (job.node_state === "succeeded" || job.exit_code === 0)) {
     return "completed";
   }
   return "interrupted";
+}
+
+/** Shared row/header presentation. Components supply facts, never reinterpret
+ * completion or continuation precedence themselves. */
+export function missionPresentation(mission: NonNullable<ActivityMission> & { status: string }, request?: { method: string }) {
+  const activity = missionActivity(mission);
+  const status = presentedStatus(mission, activity);
+  if (request && !["completed", "failed", "not_feasible", "interrupted", "cancelled", "canceled", "acknowledged"].includes(status)) {
+    return { label: request.method === "permission" || request.method === "plan" ? "Approval requested" : "Waiting for your reply", tone: "attention" as const, icon: "reply" as const };
+  }
+  if (activity.reason === "awaiting_wakeup") {
+    const failed = mission.continuation?.items.some(item => item.state === "error");
+    return { label: activity.label ?? "Waiting for wake-up", tone: failed ? "attention" as const : "scheduled" as const, icon: failed ? "alert" as const : "wake" as const };
+  }
+  return statusPresentation(status);
 }
 
 /**

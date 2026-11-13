@@ -143,15 +143,15 @@ SHIM
             pkgs.openssl
             pkgs.pkg-config
             pkgs.pnpm_10
+            pkgs.bun
             pkgs.python3
           ]
           ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-            pkgs.fontconfig
-            pkgs.freetype
-            pkgs.harfbuzz
-            pkgs.libxkbcommon
-            pkgs.vulkan-loader
-            pkgs.wayland
+            pkgs.dconf
+            pkgs.glib-networking
+            pkgs.gsettings-desktop-schemas
+            pkgs.gtk3
+            pkgs.webkitgtk_4_1
           ];
         shellHook =
           ''
@@ -160,8 +160,9 @@ SHIM
             export LEAN_CC="${pkgs.clang}/bin/clang"
           ''
           + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+            export XDG_DATA_DIRS="${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:${pkgs.gtk3}/share/gsettings-schemas/${pkgs.gtk3.name}:''${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
             if [ -d /run/opengl-driver/share ]; then
-              export XDG_DATA_DIRS="/run/opengl-driver/share:''${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+              export XDG_DATA_DIRS="/run/opengl-driver/share:$XDG_DATA_DIRS"
             fi
             if [ -d /run/opengl-driver/lib ]; then
               export LD_LIBRARY_PATH="/run/opengl-driver/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -175,6 +176,7 @@ SHIM
             if [ -d /run/opengl-driver/share/glvnd/egl_vendor.d ]; then
               export __EGL_VENDOR_LIBRARY_DIRS="/run/opengl-driver/share/glvnd/egl_vendor.d"
             fi
+            export GIO_EXTRA_MODULES="${pkgs.glib-networking}/lib/gio/modules:${pkgs.dconf.lib}/lib/gio/modules''${GIO_EXTRA_MODULES:+:$GIO_EXTRA_MODULES}"
           '';
       };
     });

@@ -19,6 +19,20 @@ class IdentityTests(unittest.TestCase):
             secrets[key] = "ssh-ed25519 Zml4dHVyZQ=="
         return dict(secrets=secrets, known_hosts="github.com fixture", ssh_hosts=[], library_revision="test", skill="skill")
 
+    def test_host_key_change_must_match_live_host(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "root"; (root / "current" / "ssh").mkdir(parents=True)
+            (root / "current" / "ssh" / "known_hosts").write_text("babylon,10.88.0.12 ssh-ed25519 OLD\nashur ssh-ed25519 SAME\n")
+            config = {"targets": [{"name": "core", "root": str(root)}]}
+            stale = dict(self.bundle(), known_hosts="babylon,10.88.0.12 ssh-ed25519 STALE\nashur ssh-ed25519 SAME\n")
+            live = lambda host: f"{host} ssh-ed25519 LIVE\n"
+            with self.assertRaises(RuntimeError):
+                identity.check_host_key_changes(config, stale, scan=live)
+            rotated = dict(self.bundle(), known_hosts="babylon,10.88.0.12 ssh-ed25519 LIVE\nashur ssh-ed25519 SAME\n")
+            self.assertEqual(identity.check_host_key_changes(config, rotated, scan=live), ["10.88.0.12", "babylon"])
+            unchanged = dict(self.bundle(), known_hosts="babylon,10.88.0.12 ssh-ed25519 OLD\nashur ssh-ed25519 SAME\n")
+            self.assertEqual(identity.check_host_key_changes(config, unchanged, scan=lambda h: self.fail("no scan expected")), [])
+
     def test_full_vault_cannot_enter_bundle(self):
         b = self.bundle()
         b["secrets"]["BWS_ACCESS_TOKEN"] = "must-not-leave-core"

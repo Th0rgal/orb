@@ -1,6 +1,12 @@
 import * as drafts from "./composerDrafts";
 import * as apiModule from './api';
 import { doesTurnAnswerPending, type SideAttachment, type SideExchange } from './sideQuestionClient';
+import { isRecord, readJson } from "./storage";
+
+export type BtwConfig = { harness: string; model: string };
+export function btwConfig(): BtwConfig {
+  return { ...{ harness: 'opencode', model: 'builtin/smart' }, ...readJson<Partial<BtwConfig>>(sideQuestionKey('settings:btw'), {}, isRecord) };
+}
 
 export type SavedSideQuestion = {
   history: SideExchange[];

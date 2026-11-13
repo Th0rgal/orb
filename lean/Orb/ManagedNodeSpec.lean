@@ -106,7 +106,7 @@ def VmAdmitDomainSafe (c : VmAdmitCheck) : Prop :=
       | .resume => ph = .stopped ∧ c.boots.2.toNat = c.boots.1.toNat + 1
       | .replace => (ph = .running ∨ ph = .stopped) ∧ c.boots.2.toNat = c.boots.1.toNat + 1
       | .destroy =>
-          (ph = .running ∨ ph = .stopped) ∧
+          (ph = .absent ∨ ph = .running ∨ ph = .stopped) ∧
           c.boots.2.toNat = c.boots.1.toNat ∧
           c.guards.1.toNat = 0 ∧ c.guards.2.toNat = 1 ∧
           c.clocks.2.toNat ≤ c.clocks.1.toNat
@@ -170,9 +170,10 @@ def vmLifecycleMetaGate : MetaGateSpec VmAdmitCheck VmAdmitDomainSafe where
     · rcases h4 with ⟨⟨⟨⟨⟨hop, hph⟩, hbeq⟩, hown⟩, hidle⟩, hdel⟩
       subst hop hbeq hown hidle
       have hle := UInt64.le_iff_toNat_le.mp hdel
-      rcases hph with hph | hph <;> subst hph
-      · exact ⟨.running, rfl, by decide, .destroy, rfl, Or.inl rfl, rfl, rfl, rfl, hle⟩
-      · exact ⟨.stopped, rfl, by decide, .destroy, rfl, Or.inr rfl, rfl, rfl, rfl, hle⟩
+      rcases hph with (hph | hph) | hph <;> subst hph
+      · exact ⟨.absent, rfl, by decide, .destroy, rfl, Or.inl rfl, rfl, rfl, rfl, hle⟩
+      · exact ⟨.running, rfl, by decide, .destroy, rfl, Or.inr (Or.inl rfl), rfl, rfl, rfl, hle⟩
+      · exact ⟨.stopped, rfl, by decide, .destroy, rfl, Or.inr (Or.inr rfl), rfl, rfl, rfl, hle⟩
   complete c h := by
     rcases c with ⟨⟨phC, opC⟩, ⟨ownL, idleE⟩, ⟨lBoot, pBoot⟩, ⟨nowEp, delAt⟩⟩
     change (verifyVmLifecycleAdmit phC opC ownL idleE lBoot pBoot nowEp delAt == 1) = true
@@ -212,7 +213,7 @@ def vmLifecycleMetaGate : MetaGateSpec VmAdmitCheck VmAdmitDomainSafe where
       have hidle1 := u8_eq_of_toNat idleE 1 (by omega) hidle
       have hleB : delAt ≤ nowEp := UInt64.le_iff_toNat_le.mpr hle
       subst heq; subst hown0; subst hidle1
-      rcases hph with rfl | rfl <;> simp [VmPhase.encode, VmOp.encode, hbNe, hleB]
+      rcases hph with rfl | rfl | rfl <;> simp [VmPhase.encode, VmOp.encode, hbNe, hleB]
   posWitness := { codes := (1, 3), guards := (0, 0), boots := (4, 5), clocks := (10, 10) }
   negWitness := { codes := (1, 4), guards := (1, 1), boots := (4, 4), clocks := (5, 10) }
   nonVacuous := by decide
@@ -468,14 +469,15 @@ theorem vm_replace_and_compute_eligibility_separation
 /-- `deletable_at` retention vs reap eligibility:
     1. A VM inside its minimum lease (`nowEpoch < deletableAt`) or with a live owner (`ownerLive = 1`)
        is never destroyed.
-    2. A running or stopped VM whose owner has ended (`ownerLive = 0`), whose idle timer has elapsed
+    2. A phase 0 provisioning reservation or running or stopped VM whose owner has ended
+       (`ownerLive = 0`), whose idle timer has elapsed
        (`idleElapsed = 1`), and whose clock is past `deletableAt` is admitted for `destroy` (`phaseCode = 3`,
        `activeComputeEligible = 0`). -/
 theorem vm_deletable_at_protects_min_lease_and_admits_expired_idle
     (s : VmSliceState) (ev : VmSliceEvent) :
     ((ev.nowEpoch < s.deletableAt ∨ ev.ownerLive = 1) ∧ ev.opCode = 4 →
       stepVmSlice s ev = (s, [])) ∧
-    ((s.phaseCode = 1 ∨ s.phaseCode = 2) ∧ s.nodeBootEpoch ≠ 0 ∧
+    ((s.phaseCode = 0 ∨ s.phaseCode = 1 ∨ s.phaseCode = 2) ∧ s.nodeBootEpoch ≠ 0 ∧
      ev.opCode = 4 ∧ ev.presentedBootEpoch = s.nodeBootEpoch ∧
      ev.ownerLive = 0 ∧ ev.idleElapsed = 1 ∧ s.deletableAt ≤ ev.nowEpoch →
       (stepVmSlice s ev).1.phaseCode = 3 ∧
@@ -516,17 +518,34 @@ theorem vm_deletable_at_protects_min_lease_and_admits_expired_idle
           clocks := (ev.nowEpoch, s.deletableAt) } = true := by
       apply vmLifecycleMetaGate.complete
       refine ⟨hbPos, ?_⟩
-      rcases hph with h1 | h2
-      · refine ⟨.running, by rw [h1]; rfl, by decide, .destroy, by rw [hop4]; rfl,
+      rcases hph with h0 | h1 | h2
+      · refine ⟨.absent, by rw [h0]; rfl, by decide, .destroy, by rw [hop4]; rfl,
           Or.inl rfl, by rw [hboot], by rw [hown0]; rfl, by rw [hidle1]; rfl,
           UInt64.le_iff_toNat_le.mp hle⟩
+      · refine ⟨.running, by rw [h1]; rfl, by decide, .destroy, by rw [hop4]; rfl,
+          Or.inr (Or.inl rfl), by rw [hboot], by rw [hown0]; rfl, by rw [hidle1]; rfl,
+          UInt64.le_iff_toNat_le.mp hle⟩
       · refine ⟨.stopped, by rw [h2]; rfl, by decide, .destroy, by rw [hop4]; rfl,
-          Or.inr rfl, by rw [hboot], by rw [hown0]; rfl, by rw [hidle1]; rfl,
+          Or.inr (Or.inr rfl), by rw [hboot], by rw [hown0]; rfl, by rw [hidle1]; rfl,
           UInt64.le_iff_toNat_le.mp hle⟩
     unfold stepVmSlice vmLifecycleTargetPhase vmPhaseComputeEligible
     dsimp [vmLifecycleMetaGate] at hadm
     rw [ite_eq_left_iff.mpr (fun h => absurd hadm h)]
     simp [hop4]
+
+/-- A timed-out phase 0 provisioning reservation uses the ordinary destroy reducer: it keeps
+    its boot and lease, disables compute, persists destruction, and closes the cost ledger. -/
+theorem vm_phase0_bootstrap_timeout_destroy
+    (s : VmSliceState) (ev : VmSliceEvent)
+    (hph : s.phaseCode = 0) (hb0 : s.nodeBootEpoch ≠ 0)
+    (hop : ev.opCode = 4) (hboot : ev.presentedBootEpoch = s.nodeBootEpoch)
+    (howner : ev.ownerLive = 0) (hidle : ev.idleElapsed = 1)
+    (hlease : s.deletableAt ≤ ev.nowEpoch) :
+    stepVmSlice s ev =
+      ({ s with phaseCode := 3, activeComputeEligible := 0 },
+       [.persistVmPhase 3 0 s.nodeBootEpoch, .closeCostLedger s.nodeBootEpoch]) := by
+  simp [stepVmSlice, verifyVmLifecycleAdmit, vmLifecycleTargetPhase,
+    vmLifecycleNextBoot, vmPhaseComputeEligible, hph, hb0, hop, hboot, howner, hidle, hlease]
 
 /-! ## 2. `VmClaim` (`SM-19`) -/
 

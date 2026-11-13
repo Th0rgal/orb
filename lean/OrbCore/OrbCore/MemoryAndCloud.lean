@@ -206,19 +206,16 @@ def executeMemoryMcpTool
     | "memory_search_knowledge" =>
       let query ← requiredNonEmptyStr args "query" 1000
       let lim ← parseU32Budget args "limit" defaultSearchLimit
-      pure (0, "search_knowledge", lim, defaultRecallTokens,
+      pure (0, "search_knowledge_base", lim, defaultRecallTokens,
         .obj #[("query", .str query), ("limit", .nat lim.toNat)])
     | "memory_get_knowledge_page" =>
       let p ← requiredNonEmptyStr args "path" 500
+      -- Hindsight addresses a page by `page_id`; our tool keeps the argument name `path`.
       pure (1, "get_knowledge_page", defaultSearchLimit, defaultRecallTokens,
-        .obj #[("path", .str p)])
+        .obj #[("page_id", .str p)])
     | "memory_get_knowledge_tree" =>
-      let mut fields : Array (String × JVal) := #[]
-      if let some pv := args.field? "path" then
-        if pv != .null then
-          let p ← requiredNonEmptyStr args "path" 500
-          fields := fields.push ("path", .str p)
-      pure (2, "get_knowledge_tree", defaultSearchLimit, defaultRecallTokens, .obj fields)
+      -- The upstream tree tool takes no arguments and always returns the whole tree.
+      pure (2, "get_knowledge_base_tree", defaultSearchLimit, defaultRecallTokens, .obj #[])
     | "memory_recall" =>
       let query ← requiredNonEmptyStr args "query" 1000
       let maxTok ← parseU32Budget args "max_tokens" defaultRecallTokens

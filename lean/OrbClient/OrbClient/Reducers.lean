@@ -2,7 +2,6 @@
   OrbClient.Reducers: Pure State Reducers for Client Sync Cursors, Inbox Unread Counts & Stream Checkpoints (`0 import Lean`, `0 sorryAx`).
 -/
 import OrbClient.Spec
-import OrbDesktop.State
 
 namespace OrbClient.Reducers
 
@@ -12,16 +11,6 @@ structure SyncCursorState where
   epoch : UInt64 := 0
   seq   : UInt64 := 0
   deriving Repr, DecidableEq
-
-/-- Convert `OrbClient.Reducers.SyncCursorState` into `OrbDesktop.SyncCursorState`. -/
-@[inline]
-def SyncCursorState.toDesktopCursor (s : SyncCursorState) : OrbDesktop.SyncCursorState :=
-  { epoch := s.epoch, seq := s.seq }
-
-/-- Convert `OrbDesktop.SyncCursorState` into `OrbClient.Reducers.SyncCursorState`. -/
-@[inline]
-def SyncCursorState.ofDesktopCursor (s : OrbDesktop.SyncCursorState) : SyncCursorState :=
-  { epoch := s.epoch, seq := s.seq }
 
 /-- Advance `SyncCursorState` iff `verifyClientSyncCursor` admits `(incomingEpoch, incomingSeq)`. -/
 @[inline]
@@ -33,15 +22,6 @@ def stepSyncCursor
     (true, { epoch := incomingEpoch, seq := incomingSeq })
   else
     (false, cur)
-
-/-- Advance `OrbDesktop.DesktopState.syncCursor` through the verified `OrbClient.Reducers.stepSyncCursor` gate. -/
-@[inline]
-def stepDesktopSyncCursor
-    (st : OrbDesktop.DesktopState)
-    (incomingEpoch incomingSeq : UInt64)
-    (frameValid authOk : UInt8) : Bool × OrbDesktop.DesktopState :=
-  let (ok, nextCur) := stepSyncCursor (SyncCursorState.ofDesktopCursor st.syncCursor) incomingEpoch incomingSeq frameValid authOk
-  (ok, { st with syncCursor := nextCur.toDesktopCursor })
 
 /-- Encode an `OrbWire` client patch envelope (`"ORBP"`, schema `1..255`, payload `1..65535`). -/
 def encodeOrbClientPatch? (schema : UInt16) (payload : ByteArray) : Option ByteArray :=

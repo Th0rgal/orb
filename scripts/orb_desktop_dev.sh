@@ -13,6 +13,12 @@ set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 ORIG_ARGS=("$@")
+if [[ "${1:-}" == "--native" ]]; then
+  shift
+  [[ "$(uname -s)" == "Linux" ]] || { echo "error: --native requires Linux" >&2; exit 2; }
+  "$ROOT_DIR/scripts/build_orb_bins.sh" --only orb-desktop-native --out-dir "$ROOT_DIR/target/native"
+  exec "$ROOT_DIR/target/native/orb-desktop-native" "$@"
+fi
 MODE="dev"
 INSTALL_APP=0
 INSTALL_DESKTOP=0
@@ -127,7 +133,7 @@ if [[ "${ORB_DEV_LOGGED:-}" == "1" ]]; then
 fi
 
 # Ensure NixOS user/system profile directories are on PATH (GUI launchers may have a minimal PATH),
-# and transparently enter `nix develop` if pnpm, GTK/WebKitGTK dev headers, or GIO TLS modules are missing.
+# and transparently enter `nix develop` if bun, GTK/WebKitGTK dev headers, or GIO TLS modules are missing.
 if [[ "$OS_NAME" == "Linux" && -e /etc/NIXOS ]]; then
   for p in \
     "$HOME/.nix-profile/bin" \
@@ -148,7 +154,7 @@ if [[ "$OS_NAME" == "Linux" && -e /etc/NIXOS ]]; then
     done
     return 1
   }
-  if [[ -z "${ORB_IN_NIX_SHELL:-}" ]] && { ! command -v pnpm >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1 || ! command -v pkg-config >/dev/null 2>&1; }; then
+  if [[ -z "${ORB_IN_NIX_SHELL:-}" ]] && { ! command -v bun >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1 || ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists webkit2gtk-4.1 2>/dev/null || ! has_gio_tls_module; }; then
     echo "==> Entering nix develop environment for $ROOT_DIR..."
     exec nix develop "$ROOT_DIR" -c env ORB_IN_NIX_SHELL=1 "$ROOT_DIR/scripts/orb_desktop_dev.sh" "${ORIG_ARGS[@]}"
   fi
@@ -172,7 +178,7 @@ mkdir -p "$STAGE_BIN_DIR"
 
 if [[ "$UI_ONLY" == "1" ]]; then
   echo "==> Fast UI-only build (orb/dist)..."
-  (cd "$ROOT_DIR/orb" && pnpm build)
+  (cd "$ROOT_DIR/orb" && bun run build)
   GIT_SHA="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo dev)"
   if [[ "$OS_NAME" == "Darwin" ]]; then
     APP_BUNDLE="$STAGE_BIN_DIR/Orb.app"
@@ -280,9 +286,9 @@ if [[ "$OS_NAME" == "Darwin" ]]; then
     python3 "$ROOT_DIR/orb/scripts/build-signer.py"
   fi
 elif [[ "$OS_NAME" == "Linux" ]]; then
-  if [[ "$FORCE_REBUILD" == "1" || "$MODE" == "bundle" || ! -x "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/c/lean_ui_wayland.c" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/c/lean_ui_text.c" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/c/lean_ui_vulkan.c" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/c/lean_ui.h" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/linux_shell/Makefile" -nt "$STAGE_BIN_DIR/orb" ]]; then
+  if [[ "$FORCE_REBUILD" == "1" || "$MODE" == "bundle" || ! -x "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/linux_shell/main.c" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/linux_shell/gtk_chrome.c" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/linux_shell/gtk_chrome.h" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/linux_shell/Makefile" -nt "$STAGE_BIN_DIR/orb" ]]; then
     notify_gui_build
-    echo "==> Compiling native lean-ui orb-desktop..."
+    echo "==> Compiling native linux_shell..."
     make -C "$ROOT_DIR/linux_shell"
     install -m 0755 "$ROOT_DIR/linux_shell/orb-desktop" "$STAGE_BIN_DIR/orb"
   fi
@@ -295,13 +301,13 @@ else
 fi
 
 if [[ ! -d "$ROOT_DIR/orb/node_modules" ]]; then
-  echo "==> Installing frontend dependencies (pnpm install --frozen-lockfile)..."
-  (cd "$ROOT_DIR/orb" && CI=true pnpm install --frozen-lockfile)
+  echo "==> Installing frontend dependencies (bun install)..."
+  (cd "$ROOT_DIR/orb" && CI=true bun install)
 fi
 
 if [[ "$MODE" == "bundle" ]]; then
   echo "==> Building frontend dist/..."
-  (cd "$ROOT_DIR/orb" && pnpm build)
+  (cd "$ROOT_DIR/orb" && bun run build)
 
   if [[ "$OS_NAME" == "Darwin" ]]; then
     APP_BUNDLE="$STAGE_BIN_DIR/Orb.app"
@@ -716,7 +722,7 @@ fi
 if [[ "$MODE" == "static" ]]; then
   if [[ ! -f "$ROOT_DIR/orb/dist/index.html" || "$FORCE_REBUILD" == "1" ]]; then
     echo "==> Building frontend dist/ for static mode (zero vite/esbuild runtime overhead)..."
-    (cd "$ROOT_DIR/orb" && pnpm build)
+    (cd "$ROOT_DIR/orb" && bun run build)
   fi
   echo "==> Starting lightweight static asset server on http://127.0.0.1:${VITE_PORT}/..."
   python3 - "$ROOT_DIR/orb/dist" "$VITE_PORT" <<'PY' &
@@ -749,12 +755,12 @@ elif ! curl -fsS "http://127.0.0.1:${VITE_PORT}/" >/dev/null 2>&1; then
   if command -v setsid >/dev/null 2>&1; then
     (
       cd "$ROOT_DIR/orb"
-      exec setsid pnpm dev --host 127.0.0.1 --port "$VITE_PORT" --strictPort </dev/null
+      exec setsid bun run dev --host 127.0.0.1 --port "$VITE_PORT" --strictPort </dev/null
     ) &
   else
     (
       cd "$ROOT_DIR/orb"
-      exec pnpm dev --host 127.0.0.1 --port "$VITE_PORT" --strictPort </dev/null
+      exec bun run dev --host 127.0.0.1 --port "$VITE_PORT" --strictPort </dev/null
     ) &
   fi
   VITE_PID="$!"

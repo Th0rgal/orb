@@ -23,9 +23,21 @@ export function trackScrollbarHover() {
     const height = Math.min(track, Math.max(32, track * current.clientHeight / current.scrollHeight));
     return {rect, track, height, travel: track - height, range: current.scrollHeight - current.clientHeight};
   };
+  // The thumb lives on <body> above everything, so it must not be drawn for a scroller
+  // that another surface covers (the conversation under a full-width side panel): it
+  // would float over that surface. A scroller counts as covered when none of several
+  // points along its gutter belong to it. The composer dock only overlaps the bottom.
+  const covered = (el: HTMLElement) => {
+    if (typeof document.elementFromPoint !== 'function') return false;
+    const r = el.getBoundingClientRect();
+    const hits = [0.1, 0.3, 0.5]
+      .map(f => document.elementFromPoint(r.right - 6, r.top + r.height * f))
+      .filter((hit): hit is Element => !!hit && hit !== thumb);
+    return hits.length > 0 && hits.every(hit => !el.contains(hit));
+  };
   const draw = () => {
     const g = geometry();
-    if (!g) { clear(); return; }
+    if (!g || (!drag && covered(current!))) { clear(); return; }
     thumb.hidden = false;
     const left = g.rect.right - 11;
     const top = g.rect.top + 4 + g.travel * Math.max(0, Math.min(1, current!.scrollTop / g.range));
@@ -75,6 +87,13 @@ export function trackScrollbarHover() {
   const leave = (event: PointerEvent) => { if (!event.relatedTarget) clear(); };
   const blur = () => { pointer = null; drag = null; thumb.classList.remove('dragging'); clear(); };
   const redraw = () => { if (current) draw(); };
+  // A click or key can open a surface over the scroller without any pointer movement
+  // or scroll (the side-question button sits at the window's right edge, where the
+  // thumb is kept alive). Re-check once the resulting layout has settled.
+  const settle = () => {
+    if (!current || typeof requestAnimationFrame !== 'function') return;
+    requestAnimationFrame(() => requestAnimationFrame(redraw));
+  };
   const scrolling = (event: Event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement) || !target.matches(selector)) return;
@@ -93,9 +112,13 @@ export function trackScrollbarHover() {
   document.addEventListener('pointercancel', up, true);
   document.addEventListener('pointerout', leave, {passive: true});
   document.addEventListener('scroll', scrolling, {passive: true, capture: true});
+  document.addEventListener('click', settle, {passive: true, capture: true});
+  document.addEventListener('keyup', settle, {passive: true, capture: true});
   window.addEventListener('resize', redraw);
   window.addEventListener('blur', blur);
   return () => {
+    document.removeEventListener('click', settle, true);
+    document.removeEventListener('keyup', settle, true);
     clearTimeout(hideTimer);
     thumb.remove();
     document.removeEventListener('pointermove', move, true);

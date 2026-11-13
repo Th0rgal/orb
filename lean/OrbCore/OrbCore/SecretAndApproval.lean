@@ -129,7 +129,9 @@ private def resolveBwsToken? (workingDir dataRoot : String) : IO (Option String)
   let key32? ← loadPrivateKeyBytes? workingDir dataRoot
   let settings ← readSettingsJson dataRoot
   let bwObj := (settings.field? "bitwarden").getD (.obj #[])
-  if let some rawTok := (bwObj.fieldStr? "access_token").orElse (fun _ => settings.fieldStr? "bws_access_token") then
+  -- `encrypted_access_token` is the stored field; the other two names are read for older settings files.
+  if let some rawTok := ((bwObj.fieldStr? "encrypted_access_token").orElse (fun _ => bwObj.fieldStr? "access_token")).orElse
+      (fun _ => settings.fieldStr? "bws_access_token") then
     if let .ok dec ← decryptEnvValue key32? rawTok then
       let clean := dec.trimAscii.toString
       if !clean.isEmpty then return some clean
@@ -167,6 +169,18 @@ def listBitwardenProjectsAndSecrets (workingDir dataRoot : String) : IO (Except 
   -- Redact `value` from metadata listing!
   let redactedSecs := secsJv.map (fun s => s.removeField "value")
   return .ok (projsJv, redactedSecs)
+
+/-- The broker document with `default_access` taken from `settings.bitwarden.default_access`, where the
+    Bitwarden settings page stores it. Entries only present in `secret_broker.json` are kept. -/
+def readSecretBrokerWithDefaults (dataRoot : String) : IO JVal := do
+  let broker ← readDataJsonObj dataRoot "secret_broker.json"
+  let settings ← readSettingsJson dataRoot
+  match (settings.field? "bitwarden").bind (·.field? "default_access") with
+  | some (.obj pairs) =>
+    let merged := pairs.foldl (fun acc (slug, projs) => acc.setField slug projs)
+      ((broker.field? "default_access").getD (.obj #[]))
+    return broker.setField "default_access" merged
+  | _ => return broker
 
 /-! ## Cross-Mission Read Access Grants (`.sandboxed-sh/mission_access.json`) -/
 
@@ -236,6 +250,48 @@ def mcpListMissionAccess (dataRoot callerMissionId : String) (nowEpochSec : UInt
 
 /-! ## MCP Secret Broker Tools (`secret_list`, `secret_get`, `secret_request`, `secret_put`, `secret_delete`, `secret_move`) -/
 
+/-- Cloud-compute provider credentials reserved for Core's managed-machine control plane. A mission
+    holding one could rent machines outside Core's ownership tracking, spend caps and reaper. -/
+def isCoreReservedComputeSecret (key : String) : Bool :=
+  #["BOAT_API_KEY", "LEANCI_API_KEY", "LEANCI_TOKEN", "BOOST_API_KEY", "BOOST_TOKEN",
+    "HETZNER_CLOUD_APIKEY", "HCLOUD_TOKEN", "SCALEWAY_SECRET_KEY", "SCALEWAY_KEY_ID",
+    "SCW_SECRET_KEY", "SCW_ACCESS_KEY", "VASTAI_API_KEY", "VAST_API_KEY", "RUNPOD_API_KEY",
+    "COLAB_API_TOKEN", "COLAB_API_DOTENV_PRIVATE_KEY"].contains key.trimAscii.toString.toUpper
+
+/-- The only secrets an untrusted managed machine may receive. -/
+def isAllowlistedManagedSecret (key : String) : Bool :=
+  #["GITHUB_TOKEN", "GH_TOKEN"].contains key.trimAscii.toString.toUpper
+
+/-- `Orb.Kernel.computeSecretGate` applied to `secret_get`: reserved compute keys are never delivered,
+    and a caller on a managed machine receives allowlisted secrets only. -/
+def admitsSecretDelivery (key : String) (callerOnManagedNode : Bool) : Bool :=
+  Orb.Kernel.computeSecretGate
+    (if isCoreReservedComputeSecret key then 1 else 0)
+    (if callerOnManagedNode then 1 else 0)
+    (if isAllowlistedManagedSecret key then 1 else 0)
+    0 == 257
+
+/-- Core-only resolution for the operator's reserved sealing path. This value
+    must never be placed in an MCP response, file delivery, action receipt or log. -/
+def resolveReservedComputeSecret (workingDir dataRoot key : String) : IO (Except String String) := do
+  if !isCoreReservedComputeSecret key then return .error "not_core_reserved"
+  if let some value ← IO.getEnv key then
+    let clean := value.trimAscii.toString
+    if !clean.isEmpty then return .ok clean
+  let some token ← resolveBwsToken? workingDir dataRoot
+    | return .error "reserved_secret_vault_unconfigured"
+  let .ok (_, secrets) ← listBitwardenProjectsAndSecrets workingDir dataRoot
+    | return .error "reserved_secret_vault_unavailable"
+  let matchingSecrets := secrets.filter (fun secret => secret.fieldStr? "key" == some key)
+  if matchingSecrets.size != 1 then return .error "reserved_secret_missing_or_ambiguous"
+  let some id := matchingSecrets[0]!.fieldStr? "id"
+    | return .error "reserved_secret_missing_id"
+  let .ok secret ← runBwsJson token #["secret", "get", id]
+    | return .error "reserved_secret_vault_unavailable"
+  let value := (secret.fieldStr? "value").getD "" |>.trimAscii.toString
+  if value.isEmpty then return .error "reserved_secret_empty"
+  return .ok value
+
 private def defaultBwProjectsForSlug (broker : JVal) (projectSlug : String) : Array String :=
   if projectSlug.isEmpty then #[]
   else
@@ -264,7 +320,7 @@ private def missionHasBwProjectAccess
 def mcpSecretList
     (workingDir dataRoot missionId projectSlug : String) (nowEpochSec : UInt64) : IO JVal := do
   let nowIso := formatEpochIso8601Utc nowEpochSec
-  let broker ← readDataJsonObj dataRoot "secret_broker.json"
+  let broker ← readSecretBrokerWithDefaults dataRoot
   match ← listBitwardenProjectsAndSecrets workingDir dataRoot with
   | .error e =>
     return .obj #[("configured", .bool false), ("error", .str e), ("projects", .arr #[]), ("secrets", .arr #[])]
@@ -275,7 +331,8 @@ def mcpSecretList
       let key := (s.fieldStr? "key").getD ""
       let pid := (s.fieldStr? "projectId").getD ""
       let pname := ((projMap.find? (fun (k, _) => k == pid)).map Prod.snd).getD "unassigned"
-      let readable := missionHasBwProjectAccess broker missionId projectSlug pname pid nowEpochSec nowIso
+      let readable := !isCoreReservedComputeSecret key &&
+        missionHasBwProjectAccess broker missionId projectSlug pname pid nowEpochSec nowIso
       JVal.obj #[
         ("name", .str key),
         ("bitwarden_project", .str pname),
@@ -284,10 +341,16 @@ def mcpSecretList
     return .obj #[("configured", .bool true), ("secrets", .arr items)]
 
 def mcpSecretGet
-    (workingDir dataRoot missionId missionWorkDir projectSlug secretName reason : String)
+    (workingDir dataRoot missionId projectSlug secretName reason : String)
+    (callerOnManagedNode : Bool)
     (nowEpochSec : UInt64) : IO JVal := do
   let nowIso := formatEpochIso8601Utc nowEpochSec
-  let broker ← readDataJsonObj dataRoot "secret_broker.json"
+  if !admitsSecretDelivery secretName callerOnManagedNode then
+    return .obj #[("status", .str "refused"), ("name", .str secretName),
+      ("error", .str (if isCoreReservedComputeSecret secretName
+        then "This credential is reserved to Core's managed-machine control plane; rent machines through spawn_managed_machine or start_mission instead."
+        else "This secret is not delivered to managed machines."))]
+  let broker ← readSecretBrokerWithDefaults dataRoot
   let some bwsTok ← resolveBwsToken? workingDir dataRoot
     | return .obj #[("status", .str "error"), ("error", .str "Bitwarden Secrets Manager is not configured")]
   let (projs, secs) ← match ← listBitwardenProjectsAndSecrets workingDir dataRoot with
@@ -323,23 +386,15 @@ def mcpSecretGet
   | .error e => return .obj #[("status", .str "error"), ("error", .str e)]
   | .ok fullJv =>
     let val := (fullJv.fieldStr? "value").getD ""
-    let baseDir := if missionWorkDir.trimAscii.isEmpty then s!"{dataRoot}/mission-secrets/{missionId}" else s!"{missionWorkDir}/.paloma/secrets"
-    discard <| ensurePrivateDir0700 (System.FilePath.mk baseDir)
-    let safeFile := String.ofList (secretName.toList.filter (fun c => c.isAlphanum || c == '_' || c == '-'))
-    let fileLeaf := if safeFile.isEmpty then "secret" else safeFile
-    let secretFile := System.FilePath.mk s!"{baseDir}/{fileLeaf}"
-    if let .error e ← writeAtomicPrivate0600 secretFile val.toUTF8 then
-      return .obj #[("status", .str "error"), ("error", .str e)]
-    let exportLine :=
-      if isSafeEnvIdent secretName then
-        s!"export {secretName}=\"$(cat {shellSingleQuote secretFile.toString})\""
-      else
-        s!"cat {shellSingleQuote secretFile.toString}"
+    let safeName := String.ofList (secretName.toList.filter (fun c => c.isAlphanum || c == '_' || c == '-'))
+    -- The value travels to the caller's MCP companion, which writes it to a private `0600` file beside
+    -- the harness and replaces `secret_delivery` with `path` / `export` before the model sees the
+    -- result. Core must not write the file itself: a remote mission cannot read Core's disk.
     return .obj #[
-      ("status", .str "ready"),
+      ("status", .str "granted"),
       ("name", .str secretName),
-      ("path", .str secretFile.toString),
-      ("export", .str exportLine)
+      ("project", if projectSlug.isEmpty then .null else .str projectSlug),
+      ("secret_delivery", .obj #[("name", .str (if safeName.isEmpty then "secret" else safeName)), ("value", .str val)])
     ]
 
 def mcpSecretQueueAction
@@ -1080,13 +1135,17 @@ def dispatchSecretAndApprovalRoutes?
       let .ok enc ← encryptEnvValue k32 rawTok
         | return okJson 500 "{\"error\":\"encrypt_failed\"}"
       let settings ← readSettingsJson dataRoot
-      let bwObj := ((settings.field? "bitwarden").getD (.obj #[])).setField "access_token" (.str enc)
+      let bwObj := (((settings.field? "bitwarden").getD (.obj #[])).removeField "access_token").setField
+        "encrypted_access_token" (.str enc)
       if let .error e ← writeSettingsJson dataRoot (settings.setField "bitwarden" bwObj) then
         return okJson 500 s!"\{\"error\":{jsonEscape e}}"
       return okJson 200 "{\"ok\":true,\"configured\":true}"
     if method == "DELETE" && cleanPath == "/api/bitwarden/config" then
+      -- Disconnecting removes the token only; default project access stays for the next token.
       let settings ← readSettingsJson dataRoot
-      discard <| writeSettingsJson dataRoot (settings.removeField "bitwarden")
+      let bwObj := (((settings.field? "bitwarden").getD (.obj #[])).removeField "access_token").removeField
+        "encrypted_access_token"
+      discard <| writeSettingsJson dataRoot ((settings.setField "bitwarden" bwObj).removeField "bws_access_token")
       return okJson 200 "{\"ok\":true,\"configured\":false}"
     if method == "GET" && cleanPath == "/api/bitwarden/projects" then
       match ← listBitwardenProjectsAndSecrets workingDir dataRoot with
@@ -1150,9 +1209,11 @@ def dispatchSecretAndApprovalRoutes?
       let .ok jv := OrbBin.Json.parseBytes bodyBytes
         | return okJson 400 "{\"error\":\"invalid_json\"}"
       let bwProjs := ((jv.fieldArr? "bitwarden_projects").orElse (fun _ => jv.fieldArr? "projects")).getD #[]
-      let broker ← readDataJsonObj dataRoot "secret_broker.json"
-      let da := ((broker.field? "default_access").getD (.obj #[])).setField slug (.arr bwProjs)
-      discard <| writeDataJsonObj dataRoot "secret_broker.json" (broker.setField "default_access" da)
+      let settings ← readSettingsJson dataRoot
+      let bwObj := (settings.field? "bitwarden").getD (.obj #[])
+      let da := ((bwObj.field? "default_access").getD (.obj #[])).setField slug (.arr bwProjs)
+      if let .error e ← writeSettingsJson dataRoot (settings.setField "bitwarden" (bwObj.setField "default_access" da)) then
+        return okJson 500 s!"\{\"error\":{jsonEscape e}}"
       return okJson 200 (renderCompact (.obj #[("ok", .bool true), ("project", .str slug), ("bitwarden_projects", .arr bwProjs)]))
 
   -- 3. Legacy `/api/secrets*`

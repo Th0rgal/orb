@@ -1,0 +1,10 @@
+[Unit]
+Description=Orb Core host monitor (alerts only when a check changes state)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/orb/monitor.env
+ExecStart=/usr/local/sbin/orb-monitor
+StateDirectory=orb-monitor
+Nice=10

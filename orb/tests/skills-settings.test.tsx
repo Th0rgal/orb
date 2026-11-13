@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SkillsSettings, knownSkillNames } from "../src/SkillsSettings";
 import { clearConnection, setConnection } from "../src/api";
+import { syncConnectedLibraryToLocalHarnesses } from "../src/localLibrarySync";
 import type { LocalSkillsReport } from "../src/localAgents";
 
 function sampleLocalReport(syncedAntigravity = false): LocalSkillsReport {
@@ -599,5 +600,281 @@ describe("SkillsSettings", () => {
     allowMint = true;
     fireEvent.click(connectBtn);
     expect(await screen.findByText("Synced · 4 harnesses")).toBeTruthy();
+  });
+
+  it("background startup sync uses ?include=bundle in 1 request and syncs drifted harnesses without opening Settings", async () => {
+    setConnection("https://orbcore.thomas.md", "test-jwt");
+    let synced = false;
+    const syncCalls: any[] = [];
+    const fetchedUrls: string[] = [];
+
+    (window as unknown as { __TAURI__: { core: { invoke: (cmd: string, args?: any) => Promise<unknown> } } }).__TAURI__ = {
+      core: {
+        invoke: async (cmd: string, args?: any) => {
+          if (cmd === "local_skills_status") return sampleLocalReport(synced);
+          if (cmd === "local_skills_sync") {
+            synced = true;
+            syncCalls.push(args.request);
+            return {
+              synced_skills: 1,
+              harnesses_updated: 2,
+              skipped_unmanaged: [],
+              pruned: [],
+              report: sampleLocalReport(true),
+            };
+          }
+          return null;
+        },
+      },
+    };
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      fetchedUrls.push(url);
+      const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (url.endsWith("/api/library/skill?include=bundle")) {
+        return ok([
+          {
+            name: "orb-basics",
+            path: "skill/orb-basics",
+            audience: ["mission", "local"],
+            scope: "global",
+            content: "---\nname: orb-basics\n---\n# Basics\n",
+            files: [{ name: "guide.md", path: "references/guide.md", content: "# Guide\n" }],
+            references: [],
+          },
+        ]);
+      }
+      return ok({});
+    });
+
+    const res1 = await syncConnectedLibraryToLocalHarnesses({
+      onlyIfNeeded: true,
+      pruneRemoved: true,
+      skipMcpMint: true,
+    });
+    expect(res1?.harnesses_updated).toBe(2);
+    expect(fetchedUrls).toEqual(["https://orbcore.thomas.md/api/library/skill?include=bundle"]);
+    expect(syncCalls).toHaveLength(1);
+    expect(syncCalls[0]).toMatchObject({
+      library_loaded: true,
+      prune_removed: true,
+      library_skills: [
+        {
+          name: "orb-basics",
+          audience: ["mission", "local"],
+          scope: "global",
+          files: [{ rel: "references/guide.md", content: "# Guide\n" }],
+        },
+      ],
+    });
+
+    // Second check when already synced performs zero disk sync calls.
+    const res2 = await syncConnectedLibraryToLocalHarnesses({
+      onlyIfNeeded: true,
+      pruneRemoved: true,
+      skipMcpMint: true,
+    });
+    expect(res2).toBeNull();
+    expect(syncCalls).toHaveLength(1);
+  });
+
+  it("disables pruning and marks snapshot incomplete when any skill or companion file fetch fails", async () => {
+    setConnection("https://orbcore.thomas.md", "test-jwt");
+    const statusCalls: any[] = [];
+    const syncCalls: any[] = [];
+
+    (window as unknown as { __TAURI__: { core: { invoke: (cmd: string, args?: any) => Promise<unknown> } } }).__TAURI__ = {
+      core: {
+        invoke: async (cmd: string, args?: any) => {
+          if (cmd === "local_skills_status") {
+            statusCalls.push(args.request);
+            return sampleLocalReport(false);
+          }
+          if (cmd === "local_skills_sync") {
+            syncCalls.push(args.request);
+            return {
+              synced_skills: 1,
+              harnesses_updated: 2,
+              skipped_unmanaged: [],
+              pruned: [],
+              report: sampleLocalReport(true),
+            };
+          }
+          return null;
+        },
+      },
+    };
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (url.endsWith("/api/library/skill?include=bundle") || url.endsWith("/api/library/skill")) {
+        return ok([
+          { name: "orb-basics", path: "skill/orb-basics" },
+          { name: "ops", path: "skill/ops" },
+        ]);
+      }
+      if (url.endsWith("/api/library/skill/orb-basics")) {
+        return ok({
+          name: "orb-basics",
+          path: "skill/orb-basics",
+          audience: ["mission", "local"],
+          scope: "global",
+          content: "---\nname: orb-basics\n---\n# Basics\n",
+          files: [],
+          references: [],
+        });
+      }
+      if (url.endsWith("/api/library/skill/ops")) {
+        return new Response("upstream timeout", { status: 502 });
+      }
+      return ok({});
+    });
+
+    const res = await syncConnectedLibraryToLocalHarnesses({
+      onlyIfNeeded: true,
+      pruneRemoved: true,
+      skipMcpMint: true,
+    });
+    expect(res?.harnesses_updated).toBe(2);
+    expect(statusCalls).toHaveLength(1);
+    expect(statusCalls[0]).toMatchObject({
+      library_loaded: false,
+      library_skills: [{ name: "orb-basics" }],
+    });
+    expect(syncCalls).toHaveLength(1);
+    expect(syncCalls[0]).toMatchObject({
+      library_loaded: false,
+      prune_removed: false,
+      library_skills: [{ name: "orb-basics" }],
+    });
+  });
+
+  it("transfers binary companion files as base64 without UTF-8 corruption and keeps out-of-line references in status payloads", async () => {
+    setConnection("https://orbcore.thomas.md", "test-jwt");
+    const statusCalls: any[] = [];
+    const syncCalls: any[] = [];
+    const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff]);
+
+    (window as unknown as { __TAURI__: { core: { invoke: (cmd: string, args?: any) => Promise<unknown> } } }).__TAURI__ = {
+      core: {
+        invoke: async (cmd: string, args?: any) => {
+          if (cmd === "local_skills_status") {
+            statusCalls.push(args.request);
+            return sampleLocalReport(false);
+          }
+          if (cmd === "local_skills_sync") {
+            syncCalls.push(args.request);
+            return {
+              synced_skills: 1,
+              harnesses_updated: 2,
+              skipped_unmanaged: [],
+              pruned: [],
+              report: sampleLocalReport(true),
+            };
+          }
+          return null;
+        },
+      },
+    };
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (url.endsWith("/api/library/skill?include=bundle")) {
+        return ok([
+          {
+            name: "visual-skill",
+            path: "skill/visual-skill",
+            audience: ["mission", "local"],
+            scope: "on-demand",
+            content: "---\nname: visual-skill\n---\n# Visual\n",
+            files: [],
+            references: ["assets/logo.png", "references/large-guide.md"],
+          },
+        ]);
+      }
+      if (url.endsWith("/api/library/skill/visual-skill/files/assets/logo.png")) {
+        return new Response(pngBytes, { status: 200, headers: { "Content-Type": "application/octet-stream" } });
+      }
+      if (url.endsWith("/api/library/skill/visual-skill/files/references/large-guide.md")) {
+        return new Response("# Large Guide\n", { status: 200, headers: { "Content-Type": "text/plain" } });
+      }
+      return ok({});
+    });
+
+    const res = await syncConnectedLibraryToLocalHarnesses({
+      onlyIfNeeded: true,
+      pruneRemoved: true,
+      skipMcpMint: true,
+    });
+    expect(res?.harnesses_updated).toBe(2);
+    const expectedBase64 = btoa(String.fromCharCode(...pngBytes));
+    expect(statusCalls[0].library_skills[0].files).toEqual([
+      { rel: "assets/logo.png", content: "", content_base64: expectedBase64 },
+      { rel: "references/large-guide.md", content: "# Large Guide\n" },
+    ]);
+    expect(syncCalls[0].library_skills[0].files).toEqual([
+      { rel: "assets/logo.png", content: "", content_base64: expectedBase64 },
+      { rel: "references/large-guide.md", content: "# Large Guide\n" },
+    ]);
+  });
+
+  it("aborts in-flight local skill sync when backend connection switches mid-sync", async () => {
+    setConnection("https://old-core.example", "jwt-old");
+    const syncCalls: any[] = [];
+
+    (window as unknown as { __TAURI__: { core: { invoke: (cmd: string, args?: any) => Promise<unknown> } } }).__TAURI__ = {
+      core: {
+        invoke: async (cmd: string, args?: any) => {
+          if (cmd === "local_skills_status") {
+            // Simulate user switching to another backend while `local_skills_status` is pending.
+            setConnection("https://new-core.example", "jwt-new");
+            return sampleLocalReport(false);
+          }
+          if (cmd === "local_skills_sync") {
+            syncCalls.push(args.request);
+            return {
+              synced_skills: 1,
+              harnesses_updated: 1,
+              skipped_unmanaged: [],
+              pruned: [],
+              report: sampleLocalReport(true),
+            };
+          }
+          return null;
+        },
+      },
+    };
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/library/skill?include=bundle")) {
+        return new Response(
+          JSON.stringify([
+            {
+              name: "old-backend-skill",
+              path: "skill/old-backend-skill",
+              audience: ["mission", "local"],
+              scope: "on-demand",
+              content: "---\nname: old-backend-skill\n---\n# Old\n",
+              files: [],
+              references: [],
+            },
+          ]),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+
+    const res = await syncConnectedLibraryToLocalHarnesses({
+      onlyIfNeeded: true,
+      pruneRemoved: true,
+      skipMcpMint: true,
+    });
+    expect(res).toBeNull();
+    expect(syncCalls).toHaveLength(0);
   });
 });

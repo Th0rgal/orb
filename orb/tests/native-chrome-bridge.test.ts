@@ -5,6 +5,8 @@ import {
   installNativeChromeWindowHandlers,
   isNativeChromeEnabled,
   serializeNativeChromeMission,
+  withLiveExecution,
+  nativeActionTargets,
   type NativeChromeSyncSnapshot,
 } from "../src/nativeChromeBridge";
 import type { Mission, ProjectSummary } from "../src/api";
@@ -188,6 +190,55 @@ describe("nativeChromeBridge", () => {
     expect(fakeWin.__ORB_NATIVE_EXPAND__).toBeUndefined();
   });
 
+  it("keeps an optimistic live status when a stale project copy has the same updated_at", () => {
+    // Send on a stopped mission: the open view patches the live row to running without a newer updated_at.
+    const live = makeMission({ id: "m-1", status: "running", updated_at: "2026-11-11T10:05:00Z" });
+    const staleProjectCopy = makeMission({ id: "m-1", status: "interrupted", updated_at: "2026-11-11T10:05:00Z", folder: "lean" });
+    const other = makeMission({ id: "m-2", status: "completed" });
+    const [fixed, untouched] = withLiveExecution([staleProjectCopy, other], new Map([[live.id, live]]));
+    expect(fixed.status).toBe("running");
+    expect(fixed.folder).toBe("lean");
+    expect(untouched).toBe(other);
+  });
+
+  it("resolves bulk and keyboard native targets before any single-mission lookup", () => {
+    expect(nativeActionTargets("delete", "m-1", "m-1 m-2", "m-9")).toEqual(["m-1", "m-2"]);
+    expect(nativeActionTargets("delete", "current", "current", "m-9")).toEqual(["m-9"]);
+    expect(nativeActionTargets("delete", "current", "current", null)).toEqual([]);
+    expect(nativeActionTargets("move", "m-1 m-2", "default", null)).toEqual(["m-1", "m-2"]);
+    expect(nativeActionTargets("archive", "m-1", "", null)).toEqual(["m-1"]);
+  });
+
+  it("syncs archived conversations for the native Archived section", () => {
+    const snap: NativeChromeSyncSnapshot = {
+      scope: "s", selected: null, onSettings: false, isAdmin: false, inboxEnabled: false, inboxUnread: 0,
+      settingsBadge: 0, settingsDots: [], projects: [], missions: [], completedMissions: [], projectMissions: {},
+      archivedMissions: [makeMission({ id: "m-old", status: "acknowledged" })],
+    };
+    const args = buildNativeChromeSyncArgs(snap, 1) as { archived_missions: Array<{ id: string; acknowledged: boolean }> };
+    expect(args.archived_missions.map(m => [m.id, m.acknowledged])).toEqual([["m-old", true]]);
+    expect((buildNativeChromeSyncArgs({ ...snap, archivedMissions: undefined }, 2) as { archived_missions: unknown[] }).archived_missions).toEqual([]);
+  });
+
+  it("routes native context-menu actions through __ORB_NATIVE_MISSION_ACTION__", () => {
+    const calls: Array<[string, string, string]> = [];
+    const fakeWin = { dispatchEvent: () => true } as unknown as Window & {
+      __ORB_NATIVE_MISSION_ACTION__?: (a: string, id: string, arg?: string) => boolean;
+    };
+    const cleanup = installNativeChromeWindowHandlers({
+      open: () => true, leaveSettings: () => {}, getSidebarOpen: () => true, setSidebarOpen: () => {},
+      missionAction: (action, id, arg) => { calls.push([action, id, arg]); return true; },
+    }, fakeWin);
+    expect(fakeWin.__ORB_NATIVE_MISSION_ACTION__?.("rename", "m:m-1", "  New title ")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_MISSION_ACTION__?.("move", "m-1", "default")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_MISSION_ACTION__?.("purge", "m-1")).toBe(false);
+    expect(fakeWin.__ORB_NATIVE_MISSION_ACTION__?.("archive", "  ")).toBe(false);
+    expect(fakeWin.__ORB_NATIVE_MISSION_ACTION__?.("delete", "m-1", "m-1 m-2")).toBe(true);
+    expect(calls).toEqual([["rename", "m-1", "New title"], ["move", "m-1", "default"], ["delete", "m-1", "m-1 m-2"]]);
+    cleanup();
+    expect(fakeWin.__ORB_NATIVE_MISSION_ACTION__).toBeUndefined();
+  });
+
   it("coalesces rapid schedule calls with strictly monotonic revisions", async () => {
     vi.useFakeTimers();
     try {
@@ -246,4 +297,13 @@ describe("nativeChromeBridge", () => {
       vi.useRealTimers();
     }
   });
+});
+
+it("a narrow WebView collapses its sidebar only when it draws the sidebar itself", async () => {
+  const { shouldAutoCollapseSidebar } = await import("../src/nativeChromeBridge");
+  expect(shouldAutoCollapseSidebar(true, false)).toBe(true);
+  expect(shouldAutoCollapseSidebar(false, false)).toBe(false);
+  // Hybrid Native Chrome: the sidebar is a native pane beside the WebView.
+  expect(shouldAutoCollapseSidebar(true, true)).toBe(false);
+  expect(shouldAutoCollapseSidebar(false, true)).toBe(false);
 });

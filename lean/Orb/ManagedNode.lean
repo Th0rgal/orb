@@ -72,7 +72,8 @@ def VmOp.decode? : Nat → Option VmOp
     - `stop` keeps the epoch. `resume` (only from `stopped`) and `replace` (from `running` or
       `stopped`) are the only transitions that advance `node_boot_epoch`, and both must present
       `liveBootEpoch + 1` without wrapping.
-    - `destroy` is rejected inside the minimum lease (`nowEpoch < deletableAt`) and rejected even
+    - `destroy` admits phase 0 provisioning reservations as well as running or stopped VMs.
+      It is rejected inside the minimum lease (`nowEpoch < deletableAt`) and rejected even
       past `deletableAt` while a live owner exists (`ownerLive == 1`). An ended owner (`ownerLive == 0`)
       whose idle timer has elapsed (`idleElapsed == 1`) and whose clock is past `deletableAt` may destroy. -/
 @[inline]
@@ -88,7 +89,7 @@ def verifyVmLifecycleAdmit
        liveBootEpoch < presentedBootEpoch && presentedBootEpoch == liveBootEpoch + 1) ||
       (opCode == 3 && (phaseCode == 1 || phaseCode == 2) &&
        liveBootEpoch < presentedBootEpoch && presentedBootEpoch == liveBootEpoch + 1) ||
-      (opCode == 4 && (phaseCode == 1 || phaseCode == 2) &&
+      (opCode == 4 && (phaseCode == 0 || phaseCode == 1 || phaseCode == 2) &&
        presentedBootEpoch == liveBootEpoch &&
        ownerLive == 0 && idleElapsed == 1 && deletableAt ≤ nowEpoch))
   then 1 else 0

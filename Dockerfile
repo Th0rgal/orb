@@ -97,6 +97,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3-venv \
 
 # -- Copy native Lean 4 binaries from builder --------------------------------
 COPY --from=lean-builder /out/ /usr/local/bin/
+COPY --chmod=0644 scripts/orb-node-provision.sh /usr/local/lib/orb/orb-node-provision.sh
 
 # -- Caddy config + entrypoint -----------------------------------------------
 COPY docker/Caddyfile /etc/caddy/Caddyfile

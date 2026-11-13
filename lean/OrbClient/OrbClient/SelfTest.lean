@@ -61,13 +61,6 @@ def runTests : IO UInt32 := do
   check "stepSyncCursor advances monotonically and drops duplicate"
     (ok1 && !ok2 && ok3 && s3.epoch == 1 && s3.seq == 2)
 
-  -- 6. DesktopState integration with OrbClient.Reducers.stepDesktopSyncCursor
-  let ds0 := OrbDesktop.DesktopState.forScreen .missionTranscript true 120
-  let (dok1, ds1) := stepDesktopSyncCursor ds0 1 43 1 1
-  let (dok2, ds2) := stepDesktopSyncCursor ds1 1 43 1 1
-  check "stepDesktopSyncCursor advances DesktopState.syncCursor and drops duplicate"
-    (dok1 && !dok2 && ds2.syncCursor.epoch == 1 && ds2.syncCursor.seq == 43)
-
   let passed ← passedRef.get
   IO.println s!"OrbClient self-test: {passed}/{passed} assertions PASSED"
   return 0

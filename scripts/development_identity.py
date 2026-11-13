@@ -808,9 +808,61 @@ def validate_targets(config):
         raise ValueError("containers_coding_only must be boolean")
 
 
+def known_host_keys(text):
+    """Map each plain (unhashed) host name in a known_hosts text to its set of (type, key)."""
+    keys = {}
+    for line in text.splitlines():
+        cols = line.split()
+        if len(cols) < 3 or line.lstrip().startswith(("#", "|1|", "@")):
+            continue
+        for name in cols[0].split(","):
+            keys.setdefault(name, set()).add((cols[1], cols[2]))
+    return keys
+
+
+def published_known_hosts(config):
+    """known_hosts of the generation currently published to the first local target."""
+    for t in config.get("targets", []):
+        if not t.get("ssh"):
+            path = Path(t["root"]) / "current" / "ssh" / "known_hosts"
+            if path.is_file():
+                return path.read_text()
+    return None
+
+
+def check_host_key_changes(config, bundle, scan=None):
+    """Refuse to publish known_hosts entries that change an already-trusted host's keys
+    unless the live host presents exactly the new keys (a real rotation or reinstall).
+
+    A stale or wrong source file then fails loudly instead of being shipped to every
+    target; on 2026-11-12 a stale source re-pinned babylon and nippur to keys from
+    before their 2026-11-08 reinstall and broke SSH to both hosts.
+    """
+    previous = published_known_hosts(config)
+    if previous is None:
+        return []
+    old, new = known_host_keys(previous), known_host_keys(bundle["known_hosts"])
+    scan = scan or (lambda host: run(["ssh-keyscan", "-T", "6", "-t", "ed25519,ecdsa,rsa", host], timeout=30))
+    changed, live_cache = [], {}
+    for name in sorted(set(old) & set(new)):
+        if old[name] == new[name]:
+            continue
+        if name not in live_cache:
+            live_cache[name] = known_host_keys(scan(name)).get(name, set())
+        types = {t for t, _ in new[name]}
+        live = {k for k in live_cache[name] if k[0] in types}
+        if live != new[name]:
+            raise RuntimeError(f"known_hosts changes the keys of {name} but the live host does not present them; refusing to publish")
+        changed.append(name)
+    if changed:
+        print(json.dumps({"host_key_rotation_accepted": changed}), file=sys.stderr)
+    return changed
+
+
 def sync(config, apply):
     validate_targets(config)
     bundle = export_bundle(config)
+    check_host_key_changes(config, bundle)
     if not apply:
         return {"source": "Bitwarden", "login": "Th0rgal", "targets": [t["name"] for t in config["targets"]]}
     reports, failed = [], []

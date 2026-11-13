@@ -494,7 +494,8 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
 
   return out.qsort (fun a b => a.priority < b.priority)
 
-def renderHydratedProviderJv (hp : HydratedProvider) (userEnabled? : Option Bool := none) (observedRpm? : Option UInt32 := none) : JVal := Id.run do
+def renderHydratedProviderJv (hp : HydratedProvider) (userEnabled? : Option Bool := none) (observedRpm? : Option UInt32 := none)
+    (rejected : Bool := false) : JVal := Id.run do
   let metaInfo := lookupProviderMeta hp.providerType
   let hasCreds := hp.hasApiKey || hp.hasOAuth
   let authMethods : Array JVal :=
@@ -502,9 +503,16 @@ def renderHydratedProviderJv (hp : HydratedProvider) (userEnabled? : Option Bool
     else if metaInfo.usesOAuth then #[.str "oauth"]
     else #[.str "api_key"]
   let statusObj : JVal :=
-    if hasCreds then
+    if hasCreds && rejected then
+      -- The vendor refused this login on the last usage probe (dead refresh token).
       .obj #[
-        ("type", .str "ready"),
+        ("type", .str "needs_reauth"),
+        ("auth_methods", .arr authMethods),
+        ("message", .str "Sign in again: the provider rejected this login")
+      ]
+    else if hasCreds then
+      .obj #[
+        ("type", .str "connected"),
         ("auth_methods", .arr authMethods),
         ("auth_type", .str (if hp.hasOAuth then "oauth" else "api_key")),
         ("account", if hp.accountEmail.isEmpty then .null else .str hp.accountEmail),
@@ -576,6 +584,48 @@ private def buildOptimizeWindow
     ("reset_in_seconds", .null)
   ]
 
+/-- Match the historical serde `as_i64` reset contract: integer JSON only,
+    including zero/negative values, without wrapping values outside signed i64. -/
+private def codexResetEpoch? (window : JVal) : Option Int := do
+  let epoch ← window.fieldInt? "reset_at"
+  if epoch < (-9223372036854775808 : Int) then none
+  else if epoch > (9223372036854775807 : Int) then none
+  else some epoch
+
+/-- The production wham projection, kept pure so wire fixtures need no vendor calls.
+    Scalar Codex fields and optimize-window fields have separate client contracts. -/
+def projectCodexUsage (wham : JVal) : Array (String × JVal) × Array JVal × JVal := Id.run do
+  let mut fields : Array (String × JVal) := #[
+    ("codex_plan_type", .str ((wham.fieldStr? "plan_type").getD "pro")),
+    ("codex_source", .str "usage")]
+  let mut windows : Array JVal := #[]
+  let mut primary : JVal := .null
+  if let some rl := wham.field? "rate_limit" then
+    if let some pw := rl.field? "primary_window" then
+      let usedPct := match pw.field? "used_percent" with | some (.num n) => n | _ => "0"
+      let resetEpoch? := codexResetEpoch? pw
+      let resetSec := (resetEpoch?.map (fun epoch => epoch.toNat.toUInt64)).getD 0
+      let resetIso := if resetSec > 0 then formatEpochIso8601Utc resetSec else ""
+      let winSecs := (pw.fieldNat? "limit_window_seconds").getD 18000
+      fields := fields.push ("codex_primary_used_percent", .num usedPct)
+      fields := fields.push ("codex_primary_window_minutes", JVal.nat (winSecs / 60))
+      if let some epoch := resetEpoch? then
+        fields := fields.push ("codex_primary_reset_at", JVal.int epoch)
+      windows := windows.push (buildOptimizeWindow "5h" "5-hour" "used_pct" "codex_wham" usedPct winSecs (some resetIso))
+      primary := .str "5h"
+    if let some sw := rl.field? "secondary_window" then
+      let usedPct := match sw.field? "used_percent" with | some (.num n) => n | _ => "0"
+      let resetEpoch? := codexResetEpoch? sw
+      let resetSec := (resetEpoch?.map (fun epoch => epoch.toNat.toUInt64)).getD 0
+      let resetIso := if resetSec > 0 then formatEpochIso8601Utc resetSec else ""
+      let winSecs := (sw.fieldNat? "limit_window_seconds").getD 604800
+      fields := fields.push ("codex_secondary_used_percent", .num usedPct)
+      fields := fields.push ("codex_secondary_window_minutes", JVal.nat (winSecs / 60))
+      if let some epoch := resetEpoch? then
+        fields := fields.push ("codex_secondary_reset_at", JVal.int epoch)
+      windows := windows.push (buildOptimizeWindow "7d" "7-day" "used_pct" "codex_wham" usedPct winSecs (some resetIso))
+  return (fields, windows, primary)
+
 def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
   let nowSec ← nowEpoch
   let nowIso := formatEpochIso8601Utc nowSec
@@ -601,29 +651,10 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
   if pType == "openai" && hp.hasOAuth && !hp.oauthToken.isEmpty then
     if let .ok (code, _, some wham) ← sendJsonRequest "GET" "https://chatgpt.com/backend-api/wham/usage" (some hp.oauthToken) none #[] 6000 262144 then
       if 200 ≤ code && code < 300 then
-        let plan := (wham.fieldStr? "plan_type").getD "pro"
-        extraFields := extraFields.push ("codex_plan_type", .str plan)
-        extraFields := extraFields.push ("codex_source", .str "usage")
-        if let some rl := wham.field? "rate_limit" then
-          if let some pw := rl.field? "primary_window" then
-            let usedPct := match pw.field? "used_percent" with | some (.num n) => n | _ => "0"
-            let resetSec := (pw.fieldUInt64? "reset_at").getD 0
-            let resetIso := if resetSec > 0 then formatEpochIso8601Utc resetSec else ""
-            let winSecs := (pw.fieldNat? "limit_window_seconds").getD 18000
-            extraFields := extraFields.push ("codex_primary_used_percent", .num usedPct)
-            extraFields := extraFields.push ("codex_primary_window_minutes", JVal.nat (winSecs / 60))
-            if !resetIso.isEmpty then extraFields := extraFields.push ("codex_primary_reset_at", .str resetIso)
-            optWindows := optWindows.push (buildOptimizeWindow "5h" "5-hour" "used_pct" "codex_wham" usedPct winSecs (some resetIso))
-            primaryWin := .str "5h"
-          if let some sw := rl.field? "secondary_window" then
-            let usedPct2 := match sw.field? "used_percent" with | some (.num n) => n | _ => "0"
-            let resetSec2 := (sw.fieldUInt64? "reset_at").getD 0
-            let resetIso2 := if resetSec2 > 0 then formatEpochIso8601Utc resetSec2 else ""
-            let winSecs2 := (sw.fieldNat? "limit_window_seconds").getD 604800
-            extraFields := extraFields.push ("codex_secondary_used_percent", .num usedPct2)
-            extraFields := extraFields.push ("codex_secondary_window_minutes", JVal.nat (winSecs2 / 60))
-            if !resetIso2.isEmpty then extraFields := extraFields.push ("codex_secondary_reset_at", .str resetIso2)
-            optWindows := optWindows.push (buildOptimizeWindow "7d" "7-day" "used_pct" "codex_wham" usedPct2 winSecs2 (some resetIso2))
+        let (fields, windows, primary) := projectCodexUsage wham
+        extraFields := fields
+        optWindows := windows
+        primaryWin := primary
       else if code == 401 || code == 403 then
         statusStr := "needs_reauth"
 
@@ -929,6 +960,25 @@ private def mapLoginSlug (raw : String) : Option (String × String × String) :=
   | "muse-code" | "meta" => some ("meta", "meta", "redirect")
   | _ => none
 
+/-- The last usage probe of this account was refused for authentication. -/
+def loginRejected (hub : ProviderRuntimeHub) (providerId : String) : IO Bool := do
+  let entries ← hub.mu.atomically (do return (← get).usageEntries)
+  return (entries.find? (fun e => e.providerId == providerId)).any
+    (fun e => e.payload.fieldStr? "status" == some "needs_reauth")
+
+/-- The login of this provider is known to be refused: by its last usage probe, or by the
+    last real request the proxy sent with it. When CLIProxyAPI holds the login the proxy's
+    evidence is per provider type (`cliproxyapi:<type>`): it reports a refusal only when no
+    login of that type could serve, and one success clears it. -/
+def loginRejectedFor (hub : ProviderRuntimeHub) (store : CoreStore) (hp : HydratedProvider) : IO Bool := do
+  if ← loginRejected hub hp.id then return true
+  let viaCliProxy := hp.hasOAuth && !hp.hasApiKey
+  match ← execParamQuery store.missionsDb
+      "SELECT 1 FROM provider_auth_health WHERE account_key=?1 OR (?2<>'' AND account_key=?2) LIMIT 1;"
+      #[hp.id, if viaCliProxy then s!"cliproxyapi:{hp.providerType}" else ""] with
+  | .ok rows => return rows.size > 1
+  | .error _ => return false
+
 /-! ## Unified Dispatcher for AI Providers, Proxy Analytics, Model-Routing Health/Test & Catalog -/
 
 set_option maxHeartbeats 800000 in
@@ -1163,7 +1213,7 @@ def dispatchProviderAndAiRoute
             | some tr => lookupObservedKeyRpm? tr hp.id
             | none => pure none
           let uEn? := if isLegacyUnscoped then none else some (isUserProviderEnabled uPrefs hp.id)
-          arr := arr.push (renderHydratedProviderJv hp uEn? obs?)
+          arr := arr.push (renderHydratedProviderJv hp uEn? obs? (← loginRejectedFor hub store hp))
       return some (jsonResp 200 (.arr arr))
 
     -- 5b. `GET /api/ai/providers/usage`
@@ -1365,6 +1415,10 @@ def dispatchProviderAndAiRoute
         ]
         match ← sendJsonRequest "POST" s!"{mgmtBase}/v0/management/oauth-callback" (some mgmtKey) (some cbPayload) #[] 15000 262144 with
         | .ok (c, _, _) =>
+          -- A completed login supersedes earlier refusals seen through CLIProxyAPI; a login
+          -- that is still dead is recorded again by the next request.
+          if 200 ≤ c && c < 300 then
+            discard <| execParamQuery store.missionsDb "DELETE FROM provider_auth_health WHERE account_key LIKE 'cliproxyapi:%';" #[]
           let okSt := if 200 ≤ c && c < 300 then "completing" else "failed"
           return some (jsonResp 200 (.obj #[("status", .str okSt), ("auth_url", .str sess.authUrl), ("message", .null)]))
         | .error e =>
@@ -1385,7 +1439,7 @@ def dispatchProviderAndAiRoute
         let obs? ← match pacingTracker? with
           | some tr => lookupObservedKeyRpm? tr hp.id
           | none => pure none
-        return some (jsonResp 200 (renderHydratedProviderJv hp none obs?))
+        return some (jsonResp 200 (renderHydratedProviderJv hp none obs? (← loginRejectedFor hub store hp)))
 
       -- `GET /api/ai/providers/:id/usage`
       if method == "GET" && segs.length == 5 && segs[4]? == some "usage" then

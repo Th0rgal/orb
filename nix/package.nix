@@ -108,9 +108,7 @@ in
     src = lib.fileset.toSource {
       root = ../.;
       fileset = lib.fileset.unions [
-        ../c
         ../lean
-        ../shaders
         ../shared
         ../catalog
         ../scripts

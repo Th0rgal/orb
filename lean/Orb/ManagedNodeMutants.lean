@@ -34,12 +34,12 @@ def mutVmReplaceSameBoot
   else verifyVmLifecycleAdmit phaseCode opCode ownerLive idleElapsed liveBootEpoch
     presentedBootEpoch nowEpoch deletableAt
 
-/-- Drops the `deletableAt ≤ nowEpoch` retention fence: a running VM is destroyed inside its
-    minimum lease. -/
+/-- Drops the `deletableAt ≤ nowEpoch` retention fence: a provisioning reservation or running VM
+    is destroyed inside its minimum lease. -/
 def mutVmDestroyInsideLease
     (phaseCode opCode ownerLive idleElapsed : UInt8)
     (liveBootEpoch presentedBootEpoch nowEpoch deletableAt : UInt64) : UInt8 :=
-  if opCode == 4 && phaseCode == 1 && presentedBootEpoch == liveBootEpoch &&
+  if opCode == 4 && (phaseCode == 0 || phaseCode == 1) && presentedBootEpoch == liveBootEpoch &&
      liveBootEpoch != 0 && ownerLive == 0 && idleElapsed == 1 && nowEpoch < deletableAt
   then 1
   else verifyVmLifecycleAdmit phaseCode opCode ownerLive idleElapsed liveBootEpoch
@@ -73,6 +73,16 @@ theorem kill_mutVmDestroyInsideLease :
 theorem kill_mutVmDestroyLiveOwner :
     mutVmDestroyLiveOwner 1 4 1 1 4 4 20 10 ≠
     verifyVmLifecycleAdmit 1 4 1 1 4 4 20 10 := by
+  decide
+
+theorem kill_mutVmDestroyInsideLease_phase0 :
+    mutVmDestroyInsideLease 0 4 0 1 4 4 5 10 ≠
+    verifyVmLifecycleAdmit 0 4 0 1 4 4 5 10 := by
+  decide
+
+theorem kill_mutVmDestroyLiveOwner_phase0 :
+    mutVmDestroyLiveOwner 0 4 1 1 4 4 20 10 ≠
+    verifyVmLifecycleAdmit 0 4 1 1 4 4 20 10 := by
   decide
 
 /-! ## 2. `VmClaim` (`SM-19`) -/

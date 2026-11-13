@@ -1,4 +1,4 @@
-import { statusPresentation } from "./missionStatus";
+import { missionPresentation } from "./missionStatus";
 import { discardLocalWakeup, localContinuation } from "./localWakeups";
 import { Dynamic } from "solid-js/web";
 import { Show, For, createSignal, type JSX } from "solid-js";
@@ -10,17 +10,10 @@ import { pendingMissionInteraction, type PendingInteraction } from "./missionAtt
 
 /** Preserve the backend status: idle is not success, and blocked is not failure. */
 export function missionStatusPresentation(status: string, request?: PendingInteraction, continuation?: ContinuationSummary | null) {
-  if (request && !["completed", "failed", "not_feasible", "interrupted", "cancelled", "canceled", "acknowledged"].includes(status)) {
-    return { label: request.method === "permission" || request.method === "plan" ? "Approval requested" : "Waiting for your reply", tone: "attention", icon: Icon.MessageCircle };
-  }
-  if (continuation?.items.length && !["active", "running", "resuming", "starting", "waiting_background", "blocked", "failed", "not_feasible", "paused", "interrupted", "cancelled", "canceled"].includes(status)) {
-    const failed = continuation.items.some(item => item.state === "error");
-    return { label: continuationLabel(continuation), tone: failed ? "attention" : "scheduled", icon: failed ? Icon.CircleAlert : Icon.WakeClock };
-  }
-  const shown = statusPresentation(status);
+  const shown = missionPresentation({ status, continuation }, request);
   return { label: shown.label, tone: shown.tone, icon: shown.icon ? ICONS[shown.icon] : null };
 }
-const ICONS = { loader: Icon.LoaderCircle, clock: Icon.Clock, alert: Icon.CircleAlert, pause: Icon.Pause, check: Icon.CircleCheck };
+const ICONS = { loader: Icon.LoaderCircle, clock: Icon.Clock, alert: Icon.CircleAlert, pause: Icon.Pause, check: Icon.CircleCheck, wake: Icon.WakeClock, reply: Icon.MessageCircle };
 
 export function MissionGlyph(p: { status: string; missionId?: string; unread?: boolean; identity?: JSX.Element; continuation?: ContinuationSummary | null }) {
   const continuation = () => {

@@ -9,6 +9,28 @@
   7. All 85 `OrbCore.HostTests` & optional `--emit-evidence-log <path>` receipt generation.
 -/
 import OrbCore
+import OrbCore.ManagedProviderTests
+import OrbCore.ManagedProviderLeanciTests
+import OrbCore.ManagedProviderColabTests
+import OrbCore.ManagedProviderSealingTests
+import OrbCore.ManagedProviderAvailabilityTests
+import OrbCore.ManagedSpawnActionsTests
+import OrbCore.ManagedProvisioningTests
+import OrbCore.ManagedResumeTests
+import OrbCore.WakeupRestartTests
+import OrbCore.TurnOutcomeTests
+import OrbCore.ManagedAccessTests
+import OrbCore.ManagedTtlTests
+import OrbCore.ManagedHarvestTests
+import OrbCore.AutoPlacementTests
+import OrbCore.ManagedReuseTests
+import OrbCore.ManagedSnapshotLifecycleTests
+import OrbCore.NodeLivenessTests
+import OrbCore.ComputeRollupTests
+import OrbCore.ManagedSnapshotCatalogTests
+import OrbCore.ProviderContractTests
+import OrbCore.ProxyRoutingTests
+import OrbCore.SettingsDocumentTests
 
 namespace OrbCore.SelfTest
 
@@ -55,6 +77,15 @@ private def exceptStrEq (a b : Except String String) : Bool :=
   | .ok x, .ok y => x == y
   | .error x, .error y => x == y
   | _, _ => false
+
+/-- Fixtures which need a live VM must explicitly replay its first relay poll. -/
+private def provisionReadyFixture (st : ManagedComputeStore) (fleet : ManagedFleetState)
+    (machine : ManagedMachine) (nowEpoch : UInt64) : IO (Except String ManagedMachine) := do
+  let .ok m ← provisionManagedMachine st fleet machine nowEpoch
+    | return .error "fixture_reservation_failed"
+  let .ok _ ← recordAuthenticatedManagedPoll st m.id m.nodeBootEpoch nowEpoch
+    | return .error "fixture_poll_failed"
+  return .ok { m with status := "ready", lastPollSec := nowEpoch }
 
 private def runR2bRound2Extras (store : CoreStore) (appSt : CoreAppState) (validJwt : String) (nowSec : UInt64) : IO UInt32 := do
   -- Same-boot orphan mission cleanup: if a mission row is deleted while an intent/lease exists at the current boot,
@@ -1128,6 +1159,21 @@ private def runR3cdReviewFixTests
   let baPh := match beginAfter with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
   if beginOk.generation != 2 || baPh != "3" then
     return (← failWith s!"review beginMissionRun supersede: gen={beginOk.generation} phase={baPh}")
+  -- Superseded (`phase=3`) and prior-generation fired (`phase=2, run_generation < missions.run_generation`) rows
+  -- MUST NOT leak into `GET /missions/:id` or `GET /missions` `continuation.items` as `"error"` / `"queued"`!
+  let _ ← execParamQuery store.missionsDb
+    ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,created_at,updated_at) " ++
+     "VALUES('cont-r5-old-fired','m-r5-fix',1,2,1,'time','old-fired','stay','req-r5-old-fired','t','t');") #[]
+  let .ok (sSupDet, bSupDet) ← sendTestHttp appSt validJwt "GET" "/api/control/missions/m-r5-fix" "" nowSec
+    | return (← failWith "superseded continuation detail")
+  let .ok (sSupList, bSupList) ← sendTestHttp appSt validJwt "GET" "/api/control/missions?limit=50" "" nowSec
+    | return (← failWith "superseded continuation list")
+  if sSupDet != 200 || sSupList != 200 ||
+     (bSupDet.splitOn "\"state\":\"error\"").length != 1 ||
+     (bSupDet.splitOn "\"id\":\"cont-r5-old-fired\"").length != 1 ||
+     (bSupList.splitOn "stale_run_generation").length != 1 ||
+     (bSupList.splitOn "\"id\":\"cont-r5-old-fired\"").length != 1 then
+    return (← failWith s!"superseded/stale-fired continuation leaked into mission projection:\ndet={bSupDet}\nlist={bSupList}")
 
   let preAuto ← execParamQuery store.missionsDb
     "SELECT (SELECT COUNT(*) FROM mission_automations),(SELECT COUNT(*) FROM mission_continuations);" #[]
@@ -1873,7 +1919,7 @@ private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let adapterOk :=
     match observeProviderPayload "boat" "m1" 200 (.obj #[("state", .str "running"), ("spent_cents", .nat 12)]),
           observeProviderPayload "leanci" "m2" 200 (.obj #[("status", .str "halted")]),
-          observeProviderPayload "boost" "m2b" 200 (.obj #[("status", .str "reaped")]),
+          observeProviderPayload "leanci" "m2b" 200 (.obj #[("status", .str "reaped")]),
           observeProviderPayload "hetzner" "m3" 200 (.obj #[("status", .str "off")]),
           observeProviderPayload "vastai" "m4" 200 (.obj #[("state", .str "exited")]),
           observeProviderPayload "scaleway" "m5" 200 (.obj #[("state", .str "stopped_in_place")]),
@@ -1884,7 +1930,10 @@ private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
       o2b.provider == "leanci" && o2b.observedStatus == "destroyed" && o2b.orphaned &&
       o3.observedStatus == "stopped" &&
       o4.observedStatus == "stopped" && o5.observedStatus == "stopped" &&
-      o6.orphaned && (observeProviderPayload "aws" "m7" 200 (.obj #[])).isOk == false
+      o6.orphaned && (observeProviderPayload "aws" "m7" 200 (.obj #[])).isOk == false &&
+      -- The former provider name is not an alias: only the one-time migration knows it.
+      (observeProviderPayload "boost" "m8" 200 (.obj #[])).isOk == false &&
+      canonicalizeProvider "boost" == "boost" && !isKnownProvider "boost" && canonicalizeProvider "lean.ci" == "leanci"
     | _, _, _, _, _, _, _ => false
   if !adapterOk then
     closeManagedComputeStore mst
@@ -1895,8 +1944,20 @@ private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
     id := "mm-r5b-1", sandboxName := "orb-managed-mm-r5b-1", provider := "boat",
     size := "small", spentCents := 25, nodeBootEpoch := 1, deletableAtSec := 100
   }
-  let .ok _ ← provisionManagedMachine mst fleet0 vm0 50
+  let .ok reservedVm ← provisionManagedMachine mst fleet0 vm0 50
     | do closeManagedComputeStore mst; IO.eprintln "[orb-core-test] FAIL: provisionManagedMachine failed"; return 1
+  if reservedVm.status != "provisioning" || reservedVm.lastPollSec != 0 ||
+      reservedVm.createdAtSec != 50 || reservedVm.expiresAtSec != 3650 then
+    closeManagedComputeStore mst
+    IO.eprintln "[orb-core-test] FAIL: a reservation must not manufacture readiness"
+    return 1
+  let .ok () ← bindManagedProviderId mst vm0.id "boat-boot-1" 1
+    | do closeManagedComputeStore mst; return 1
+  let some (boundVm, _) ← getManagedMachine? mst vm0.id
+    | do closeManagedComputeStore mst; return 1
+  if boundVm.id != vm0.id || boundVm.providerId != "boat-boot-1" || boundVm.status != "provisioning" then
+    closeManagedComputeStore mst
+    return 1
   let .ok () ← putEnrollmentToken mst "mm-r5b-1" "enroll-boot-1"
     | do closeManagedComputeStore mst; return 1
   let .ok r5Store ← openCoreStore s!"{r5Root}/core"
@@ -1911,6 +1972,12 @@ private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
     proxyCooldownsRef := r5CooldownsRef, seqRef := r5SeqRef,
     managedStore? := some mst
   }
+  let .ok badPollReq := parseRequest "GET /api/managed-machines/relay/poll HTTP/1.1\r\nHost: 127.0.0.1\r\nx-orb-machine-id: mm-r5b-1\r\n\r\n".toUTF8 none
+    | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let .ok badPollResp ← dispatchCoreRequest r5App badPollReq 64
+    | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  if badPollResp.status != 401 then
+    closeCoreStore r5Store; closeManagedComputeStore mst; return 1
   let enrollBody := "{\"machine_id\":\"mm-r5b-1\",\"enroll_token\":\"enroll-boot-1\"}"
   let enrollRaw := s!"POST /api/managed-machines/enroll HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {enrollBody.utf8ByteSize}\r\n\r\n{enrollBody}".toUTF8
   let .ok enrollReq := parseRequest enrollRaw none | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
@@ -1922,6 +1989,24 @@ private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
     closeCoreStore r5Store
     closeManagedComputeStore mst
     IO.eprintln "[orb-core-test] FAIL: HTTP enroll or replay rejection failed"
+    return 1
+  let some (enrolledVm, _) ← getManagedMachine? mst vm0.id
+    | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  if enrolledVm.status != "provisioning" || enrolledVm.lastPollSec != 0 then
+    closeCoreStore r5Store; closeManagedComputeStore mst
+    IO.eprintln "[orb-core-test] FAIL: enrollment alone must not mark ready"
+    return 1
+  let readyPollRaw := s!"GET /api/managed-machines/relay/poll HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {nodeTok1}\r\nx-orb-machine-id: mm-r5b-1\r\nx-orb-boot-epoch: 1\r\n\r\n".toUTF8
+  let .ok readyPollReq := parseRequest readyPollRaw none
+    | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let .ok readyPollResp ← dispatchCoreRequest r5App readyPollReq 66
+    | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  let some (polledVm, polledSlice) ← getManagedMachine? mst vm0.id
+    | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
+  if readyPollResp.status != 200 || polledVm.status != "ready" || polledVm.lastPollSec != 66 ||
+      polledSlice.activeComputeEligible != 1 || polledVm.providerId != "boat-boot-1" then
+    closeCoreStore r5Store; closeManagedComputeStore mst
+    IO.eprintln "[orb-core-test] FAIL: authenticated poll must commit readiness and provider identity"
     return 1
   let .ok claim1 ← applyVmClaim mst "mm-r5b-1" "m-owner-1" {
     opCode := Orb.ManagedNode.ClaimOp.encode .claim, ownerInLineage := 1, ownerSuperseded := 0,
@@ -4149,7 +4234,7 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
 
   discard <| saveManagedFleetConfig mStore true true 50000 0 10
   let initFleet : ManagedFleetState := { enabled := true, boatEnabled := true, dailyCapCents := 50000, spentTodayCents := 0, maxConcurrent := 10 }
-  let .ok _ ← provisionManagedMachine mStore initFleet {
+  let .ok _ ← provisionReadyFixture mStore initFleet {
     id := "vm-legacy-1", sandboxName := "orb-managed-leg", provider := "boat", size := "small",
     status := "ready", nodeBootEpoch := store.bootEpoch, deletableAtSec := nowSec, ownerUserId := ""
   } nowSec | return (← fail "seed legacy managed VM failed")
@@ -4198,6 +4283,8 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
     seqRef := seqRef
     bunkerStateRef? := some bunkerRef
     managedStore? := some mStore
+    managedProvisioningOverride? := some (ManagedProvisioningTests.mockPolicyProvider mStore "leanci",
+      { coreUrl := "https://core.example", script := "#!/bin/sh\nexit 0\n" })
     bootstrapAdminId := bootAdminId
     telemetrySink? := some telSink
     voiceSlots? := some voiceSlots
@@ -4210,8 +4297,9 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
       })
   }
 
-  let sendReq (method target tok body : String) : IO (Nat × String × Array (String × String)) := do
-    let authHdr := if tok.isEmpty then "" else s!"Authorization: Bearer {tok}\r\n"
+  let sendReq (method target tok body : String) (retryKey : String := "") : IO (Nat × String × Array (String × String)) := do
+    let authHdr := (if tok.isEmpty then "" else s!"Authorization: Bearer {tok}\r\n") ++
+      (if retryKey.isEmpty then "" else s!"Idempotency-Key: {retryKey}\r\n")
     let raw :=
       if body.isEmpty then
         s!"{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authHdr}\r\n"
@@ -4262,6 +4350,76 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let bobTok := ((OrbBin.Json.parse boLogBody).toOption.getD (.obj #[]) |>.fieldStr? "token").getD ""
   if alLogSt != 200 || boLogSt != 200 || !aliceTok0.startsWith "orb-jwt-v2:" || !bobTok.startsWith "orb-jwt-v2:" then
     return (← fail "alice/bob login failed")
+
+  -- Reserved sealing authenticates an operator before any vault call. Unknown
+  -- provider + real admin tests dispatch without ever resolving a real key.
+  let (sealUnknown, _, _) ← sendReq "POST" "/api/managed-machines/providers/unknown/seal" adminTok ""
+  let (sealMember, _, _) ← sendReq "POST" "/api/managed-machines/providers/leanci/seal" aliceTok0 ""
+  let (sealAnon, _, _) ← sendReq "POST" "/api/managed-machines/providers/leanci/seal" "" ""
+  let (sealMission, _, _) ← sendReq "POST" "/api/managed-machines/providers/leanci/seal" "mcp1.invalid" ""
+  if sealUnknown != 400 || sealMember != 403 || sealAnon != 401 || sealMission != 401 then
+    return (← fail s!"reserved sealing route authority failed: {sealUnknown}/{sealMember}/{sealAnon}/{sealMission}")
+  let .ok openDevReq := parseRequest
+      "POST /api/managed-machines/providers/leanci/seal HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".toUTF8 none
+    | return (← fail "open dev seal request parse failed")
+  let .ok openDevSeal ← dispatchCoreRequest { app with cfg := { app.cfg with devMode := true } } openDevReq nowSec
+    | return (← fail "open dev seal dispatch failed")
+  if openDevSeal.status != 401 then return (← fail "dev-mode bypass granted vault sealing authority")
+  let sealWith (state : CoreAppState) (token : String) : IO Nat := do
+    let raw := s!"POST /api/managed-machines/providers/leanci/seal HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+    let .ok request := parseRequest raw.toUTF8 none | return 0
+    let .ok response ← dispatchCoreRequest state request nowSec | return 0
+    return response.status
+  let configuredMember := { app with cfg := { app.cfg with
+    usersJson := "[{\"username\":\"alice\",\"password\":\"alice-passphrase-1234\"}]" } }
+  if (← sealWith configuredMember "alice-passphrase-1234") != 401 then
+    return (← fail "configured member raw password granted sealing authority")
+  let openDev := { app with cfg := { app.cfg with devMode := true } }
+  let devLoginBody := "{\"username\":\"admin\",\"password\":\"wrong-password\"}"
+  let devLoginRaw := s!"POST /api/auth/login HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {devLoginBody.utf8ByteSize}\r\n\r\n{devLoginBody}"
+  let .ok devLoginReq := parseRequest devLoginRaw.toUTF8 none | return (← fail "dev login parse failed")
+  let .ok devLoginResp ← dispatchCoreRequest openDev devLoginReq nowSec | return (← fail "dev login dispatch failed")
+  let devToken := ((OrbBin.Json.parse ((String.fromUTF8? devLoginResp.body).getD "")).toOption.getD .null).fieldStr? "token" |>.getD ""
+  if devToken.isEmpty || (← sealWith openDev devToken) != 403 then
+    return (← fail "open dev login token granted sealing authority")
+  let fallbackState := { app with cfg := { app.cfg with jwtSecret := "" } }
+  let fallbackToken := mintSessionTokenV2 "dev-mode-ephemeral-jwt-secret-012345"
+    app.bootstrapAdminId "admin" 1 (nowSec + 3600)
+  if (← sealWith fallbackState fallbackToken) != 403 then
+    return (← fail "fallback signing key granted sealing authority")
+  let .ok () ← OrbBin.PosixExt.ensurePrivateDir0700 (managedSecretDir store.rootDir)
+    | return (← fail "seal contention directory fixture failed")
+  let sealLock ← OrbBin.PosixExt.flockExclusiveNb (managedSecretDir store.rootDir / "seal.lock").toString
+  if sealLock == 0xFFFFFFFF || sealLock == 0xFFFFFFFE then return (← fail "seal contention lock fixture failed")
+  let sealConflict ← try
+      let (status, _, _) ← sendReq "PUT" "/api/managed-machines/providers/leanci" adminTok
+        "{\"api_key\":\"synthetic-contention-key\"}"
+      pure status
+    finally OrbBin.PosixExt.closeFdRaw sealLock.toInt32
+  if sealConflict != 409 then return (← fail "provider update silently ignored seal lock contention")
+  -- A credential edit must not turn the global fleet back on merely because
+  -- Boat's independent switch was left on when the global switch was disabled.
+  let priorFleet ← app.managedRef.get
+  let (disableFleetStatus, _, _) ← sendReq "PUT" "/api/managed-machines/settings" adminTok
+    "{\"enabled\":false,\"boat_enabled\":true}"
+  let (credentialStatus, _, _) ← sendReq "PATCH" "/api/managed-machines/providers/leanci" adminTok
+    "{\"api_key\":\"synthetic-credential-only-fixture\"}"
+  let (readFleetStatus, readFleetBody, _) ← sendReq "GET" "/api/managed-machines/settings" adminTok ""
+  let observedFleet := (OrbBin.Json.parse readFleetBody).toOption.getD .null
+  let restoreBody := OrbBin.Json.renderCompact (.obj #[("enabled", .bool priorFleet.enabled), ("boat_enabled", .bool priorFleet.boatEnabled)])
+  let (restoreStatus, _, _) ← sendReq "PUT" "/api/managed-machines/budget" adminTok restoreBody
+  if disableFleetStatus != 200 || credentialStatus != 200 || readFleetStatus != 200 || restoreStatus != 200 ||
+      observedFleet.fieldBool? "enabled" != some false || observedFleet.fieldBool? "boat_enabled" != some true then
+    return (← fail s!"credential-only edit changed independent fleet enablement: {disableFleetStatus}/{credentialStatus}/{readFleetStatus}/{restoreStatus}: {readFleetBody}")
+  let (providersStatus, providersBody, _) ← sendReq "GET" "/api/managed-machines/providers" adminTok ""
+  let (machinesStatus, machinesBody, _) ← sendReq "GET" "/api/managed-machines" adminTok ""
+  let dedicatedProviders := (OrbBin.Json.parse providersBody).toOption.bind (·.asArr?) |>.getD #[]
+  let embeddedProviders := ((OrbBin.Json.parse machinesBody).toOption.getD .null).fieldArr? "providers" |>.getD #[]
+  let dedicatedLean := dedicatedProviders.find? (fun p => p.fieldStr? "provider" == some "leanci")
+  let embeddedLean := embeddedProviders.find? (fun p => p.fieldStr? "provider" == some "leanci")
+  if providersStatus != 200 || machinesStatus != 200 || dedicatedProviders.size != knownProviders.size ||
+      (dedicatedLean.bind (·.fieldBool? "configured")) != some true || dedicatedLean != embeddedLean then
+    return (← fail "reserved provider route or embedded catalog projection diverged")
 
   -- Session epoch revocation: password reset bumps `session_epoch`, immediately invalidating `aliceTok0`!
   let (rstSt, _, _) ← sendReq "POST" s!"/api/admin/users/{aliceId}/reset-password" adminTok "{\"password\":\"alice-newpass-123456\"}"
@@ -4345,7 +4503,8 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
      (alCatBody.splitOn "vllm-internal.corp.local").length != 1 ||
      (alCatDisabledBody.splitOn "qwen3-coder").length != 1 ||
      admChainsSt != 200 || (admChainsBody.splitOn "sk-inline-chain-secret").length != 1 ||
-     (admChainsBody.splitOn "vllm-internal.corp.local").length < 2 ||
+     (admChainsBody.splitOn "vllm-internal.corp.local").length != 1 ||
+     (admChainsBody.splitOn "\"entries\":[{\"provider_id\":\"custom:cust-vllm\",\"model_id\":\"qwen3-coder\"}]").length < 2 ||
      alChainsSt != 200 || (alChainsBody.splitOn "cust-chain").length < 2 ||
      (alChainsBody.splitOn "sk-inline-chain-secret").length != 1 ||
      (alChainsBody.splitOn "vllm-internal.corp.local").length != 1 ||
@@ -4486,16 +4645,20 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
      (admProvsBody.splitOn "internal-a.example").length < 2 then
     return (← fail s!"provider secret/baseUrl redaction mismatch: al={alProvsBody} adm={admProvsBody}")
 
-  -- `alice` disables `prov-a` for her missions; mints `mission_proxy_token`; `/v1/responses` routes `alice` to `prov-b` while `admin` still uses `prov-a`!
+  -- `alice` disables `prov-a` (OpenAI). A model is never served by another model family: her `gpt-5`
+  -- request is refused (403), it is NOT rerouted to the Anthropic account as the old expectation
+  -- encoded. Her Claude requests use `prov-b`; `admin` still reaches `prov-a` for `gpt-5`.
   let (alPrefSt, _, _) ← sendReq "PUT" "/api/ai/providers/prov-a/preference" aliceTok "{\"enabled\":false}"
   let (mptSt, mptBody, _) ← sendReq "POST" s!"/api/control/missions/{alMisId}/proxy-token" aliceTok "{}"
   let mptTok := ((OrbBin.Json.parse mptBody).toOption.getD (.obj #[]) |>.fieldStr? "token").getD ""
-  let (alProxy1St, alProxy1Body, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"gpt-5\",\"input\":\"hi\"}"
+  let (alGptSt, alGptBody, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"gpt-5\",\"input\":\"hi\"}"
+  let (alProxy1St, alProxy1Body, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"claude-fable-5-2\",\"input\":\"hi\"}"
   let (admProxy1St, admProxy1Body, _) ← sendReq "POST" "/v1/responses" adminTok "{\"model\":\"gpt-5\",\"input\":\"hi\"}"
   -- Second call (`30` cents each -> `30 < 50` admitted, becomes `60 >= 50`), third call hits `alice`'s 50-cent daily cap -> `429`!
-  let (alProxy2St, _, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"gpt-5\",\"input\":\"hi2\"}"
-  let (alProxy3St, alProxy3Body, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"gpt-5\",\"input\":\"hi3\"}"
+  let (alProxy2St, _, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"claude-fable-5-2\",\"input\":\"hi2\"}"
+  let (alProxy3St, alProxy3Body, _) ← sendReq "POST" "/v1/responses" mptTok "{\"model\":\"claude-fable-5-2\",\"input\":\"hi3\"}"
   if alPrefSt != 200 || (mptSt != 200 && mptSt != 201) || !mptTok.startsWith "orb-mpt-v1_" ||
+     alGptSt != 403 || (alGptBody.splitOn "no_user_enabled_providers").length < 2 ||
      alProxy1St != 200 || (alProxy1Body.splitOn "\"acct\":\"prov-b\"").length < 2 ||
      admProxy1St != 200 || (admProxy1Body.splitOn "\"acct\":\"prov-a\"").length < 2 ||
      alProxy2St != 200 || alProxy3St != 429 ||
@@ -4505,8 +4668,32 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   -- Managed VMs: `alice` hitting daily spend cap gets `429` on `POST /api/managed-machines`, while `bob` (`no cap`, disables `boat`) spawns an auto VM (`leanci`) owned by `bob`, invisible to `admin` (`404` on `DELETE`)!
   let (alVmCapSt, _, _) ← sendReq "POST" "/api/managed-machines" aliceTok "{\"provider\":\"boat\",\"name\":\"alice-vm\"}"
   let (bobPrefBoatSt, _, _) ← sendReq "PUT" "/api/managed-machines/providers/boat/preference" bobTok "{\"enabled\":false}"
-  let (bobVmAutoSt, bobVmAutoBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"auto\",\"name\":\"bob-vm\"}"
+  let (bobVmAutoSt, bobVmAutoBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"auto\",\"name\":\"bob-vm\",\"wait\":true}" "bob-managed-create"
+  let beforeRetrySpend ← getUserSpentTodayCents store bobId (formatEpochIso8601Utc nowSec |>.take 10 |>.toString)
+  let (bobRetrySt, bobRetryBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"auto\",\"name\":\"bob-vm\",\"wait\":true}" "bob-managed-create"
+  let afterRetrySpend ← getUserSpentTodayCents store bobId (formatEpochIso8601Utc nowSec |>.take 10 |>.toString)
+  if bobRetrySt != 201 || bobRetryBody != bobVmAutoBody || beforeRetrySpend != afterRetrySpend then
+    return (← fail "managed REST retry must not create another VM or charge spend twice")
+  let .ok beforeImageGuard ← execParamQuery mStore.db "SELECT COUNT(*) FROM managed_machines;" #[]
+    | return (← fail "managed image guard count failed")
+  let (privateImageSt, _, _) ← sendReq "POST" "/api/managed-machines" bobTok
+    "{\"provider\":\"leanci\",\"image\":\"unrelated-private-disk\"}"
+  let (privateSnapshotSt, _, _) ← sendReq "POST" "/api/managed-machines" bobTok
+    "{\"provider\":\"leanci\",\"from_snapshot\":\"unrelated-private-snapshot\"}"
+  let .ok afterImageGuard ← execParamQuery mStore.db "SELECT COUNT(*) FROM managed_machines;" #[]
+    | return (← fail "managed image guard count failed")
+  if privateImageSt != 409 || privateSnapshotSt != 409 || beforeImageGuard != afterImageGuard then
+    return (← fail "unscoped image/snapshot labels must rent nothing")
   let bobVmId := ((OrbBin.Json.parse bobVmAutoBody).toOption.getD (.obj #[]) |>.fieldStr? "id").getD ""
+  let (bobStopVmSt, _, _) ← sendReq "POST" s!"/api/managed-machines/{bobVmId}/stop" bobTok "{}"
+  let (bobResumeVmSt, bobResumeBody, _) ← sendReq "POST" s!"/api/managed-machines/{bobVmId}/resume" bobTok
+    "{\"ttl_minutes\":5}" "bob-rest-resume"
+  let (bobResumeRetrySt, bobResumeRetryBody, _) ← sendReq "POST" s!"/api/managed-machines/{bobVmId}/resume" bobTok
+    "{\"ttl_minutes\":5}" "bob-rest-resume"
+  let resumedRest := (OrbBin.Json.parse bobResumeBody).toOption.getD .null
+  if bobStopVmSt != 200 || bobResumeVmSt != 200 || bobResumeRetrySt != 200 || bobResumeRetryBody != bobResumeBody ||
+      ((resumedRest.field? "machine").getD .null).fieldUInt64? "node_boot_epoch" != some 2 then
+    return (← fail s!"REST resume must preserve identity and advance only on poll: {bobResumeVmSt}:{bobResumeBody}")
   let (_, admVmsBody, _) ← sendReq "GET" "/api/managed-machines" adminTok ""
   let (admDelBobVmSt, _, _) ← sendReq "DELETE" s!"/api/managed-machines/{bobVmId}" adminTok ""
   let (bobDelBobVmSt, _, _) ← sendReq "DELETE" s!"/api/managed-machines/{bobVmId}" bobTok ""
@@ -4515,6 +4702,129 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
      (admVmsBody.splitOn bobVmId).length != 1 ||
      admDelBobVmSt != 404 || bobDelBobVmSt != 200 then
     return (← fail s!"managed VM multi-user isolation/prefs/cap failed: alCap={alVmCapSt} bobVm={bobVmAutoSt}:{bobVmAutoBody} admVms={admVmsBody} admDel={admDelBobVmSt} bobDel={bobDelBobVmSt}")
+
+  -- A disabled fleet is reported as such, not as a spend cap.
+  let (fleetOffSt, _, _) ← sendReq "PUT" "/api/managed-machines/settings" adminTok "{\"enabled\":false}"
+  let (offCreateSt, offCreateBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"leanci\",\"name\":\"bob-off\"}"
+  let (fleetOnSt, _, _) ← sendReq "PUT" "/api/managed-machines/settings" adminTok "{\"enabled\":true}"
+  let (provOffSt, _, _) ← sendReq "PATCH" "/api/managed-machines/providers/leanci" adminTok "{\"enabled\":false}"
+  let (provOffCreateSt, provOffCreateBody, _) ← sendReq "POST" "/api/managed-machines" bobTok "{\"provider\":\"leanci\",\"name\":\"bob-off\"}"
+  let (provOnSt, _, _) ← sendReq "PATCH" "/api/managed-machines/providers/leanci" adminTok "{\"enabled\":true}"
+  if fleetOffSt != 200 || fleetOnSt != 200 || provOffSt != 200 || provOnSt != 200 || offCreateSt != 409 ||
+      (offCreateBody.splitOn "managed_fleet_disabled").length != 2 || provOffCreateSt != 409 ||
+      (provOffCreateBody.splitOn "provider_disabled").length != 2 then
+    return (← fail s!"disabled fleet or provider must be named: {offCreateSt}:{offCreateBody} / {provOffCreateSt}:{provOffCreateBody}")
+
+  -- REST create without `wait` answers 202 at once with the provisioning machine
+  -- and an action to poll; a retry with the same key returns the same machine.
+  let (asyncSt, asyncBody, _) ← sendReq "POST" "/api/managed-machines" bobTok
+    "{\"provider\":\"leanci\",\"name\":\"bob-async\",\"ttl_minutes\":5}" "bob-async-create"
+  let (asyncRetrySt, asyncRetryBody, _) ← sendReq "POST" "/api/managed-machines" bobTok
+    "{\"provider\":\"leanci\",\"name\":\"bob-async\",\"ttl_minutes\":5}" "bob-async-create"
+  let asyncJson := (OrbBin.Json.parse asyncBody).toOption.getD .null
+  let asyncRetry := (OrbBin.Json.parse asyncRetryBody).toOption.getD .null
+  let asyncAction := (asyncJson.fieldStr? "action_id").getD ""
+  let asyncId := (asyncJson.fieldStr? "id").getD ""
+  if asyncSt != 202 || asyncRetrySt != 202 || asyncAction.isEmpty || asyncId.isEmpty ||
+      asyncRetry.fieldStr? "action_id" != some asyncAction || asyncRetry.fieldStr? "id" != some asyncId then
+    return (← fail s!"managed REST create must return one prompt receipt: {asyncSt}:{asyncBody} / {asyncRetrySt}:{asyncRetryBody}")
+  let mut asyncState := ""
+  let mut asyncFinal := OrbBin.Json.JVal.null
+  for _ in [0:2000] do
+    let (_, pollBody, _) ← sendReq "GET" s!"/api/managed-machines/actions/{asyncAction}" bobTok ""
+    asyncFinal := (OrbBin.Json.parse pollBody).toOption.getD .null
+    asyncState := (asyncFinal.fieldStr? "state").getD ""
+    if asyncState != "accepted" && asyncState != "running" then break
+    IO.sleep 5
+  let (alicePollSt, _, _) ← sendReq "GET" s!"/api/managed-machines/actions/{asyncAction}" aliceTok ""
+  let (asyncDelSt, _, _) ← sendReq "DELETE" s!"/api/managed-machines/{asyncId}" bobTok ""
+  if asyncState != "succeeded" || ((asyncFinal.field? "result").getD .null).fieldStr? "state" != some "ready" ||
+      ((asyncFinal.field? "result").getD .null).fieldStr? "id" != some asyncId || alicePollSt != 404 || asyncDelSt != 200 then
+    return (← fail s!"managed REST action must settle on the real machine and stay owner-scoped: {OrbBin.Json.renderCompact asyncFinal} alice={alicePollSt} del={asyncDelSt}")
+
+  -- MCP uses exactly the same mock provider/bootstrap pipeline as REST, with
+  -- ownership derived from its authenticated mission rather than tool arguments.
+  let .ok () ← upsertMission store {
+    id := "m-managed-parity", title := "Managed entry-point parity", status := "awaiting_user",
+    backend := "opencode", modelOverride := "", updatedAt := formatEpochIso8601Utc nowSec,
+    workingDirectory := muRoot, ownerUserId := bobId
+  } | return (← fail "managed parity mission fixture failed")
+  let parityClaims : McpSessionClaims := {
+    sessionId := "managed-parity-session", missionId := "m-managed-parity",
+    role := "executor", expiresAt := nowSec + 600
+  }
+  let parityArgs := OrbBin.Json.JVal.obj #[("provider", .str "leanci"), ("size", .str "small"),
+    ("ttl_minutes", .nat 5), ("idempotency_key", .str "mcp-managed-parity")]
+  let mcpCreated ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
+    "spawn_managed_machine" parityArgs nowSec none app.managedProvisioningOverride?
+  let mcpReplay ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
+    "spawn_managed_machine" parityArgs nowSec none app.managedProvisioningOverride?
+  -- The spawn tool answers at once with an action; the machine arrives through get_action.
+  let acceptedJson := (OrbBin.Json.parse mcpCreated).toOption.getD .null
+  let acceptedAction := ((acceptedJson.field? "result").getD .null).fieldStr? "action_id" |>.getD ""
+  let replayAction := (((OrbBin.Json.parse mcpReplay).toOption.getD .null).field? "result").getD .null
+  if acceptedAction.isEmpty || replayAction.fieldStr? "action_id" != some acceptedAction then
+    return (← fail s!"managed MCP spawn must return one action receipt for a retried key: {mcpCreated} / {mcpReplay}")
+  let mut createdJson := OrbBin.Json.JVal.null
+  let mut actionState := ""
+  for _ in [0:2000] do
+    let polled ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
+      "get_action" (.obj #[("action_id", .str acceptedAction)]) nowSec none app.managedProvisioningOverride?
+    createdJson := (OrbBin.Json.parse polled).toOption.getD .null
+    actionState := (((createdJson.field? "result").getD .null).fieldStr? "state").getD ""
+    if actionState != "accepted" && actionState != "running" then break
+    IO.sleep 5
+  if actionState != "succeeded" then
+    return (← fail s!"managed MCP spawn action did not succeed: {OrbBin.Json.renderCompact createdJson}")
+  let foreignPoll ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot
+    { parityClaims with sessionId := "foreign-action-session", missionId := "m-not-the-owner" }
+    "get_action" (.obj #[("action_id", .str acceptedAction)]) nowSec none app.managedProvisioningOverride?
+  if (((OrbBin.Json.parse foreignPoll).toOption.getD .null).fieldBool? "ok") == some true then
+    return (← fail "another mission read a managed spawn receipt")
+  let createdItem := (((createdJson.field? "result").getD .null).field? "result").getD .null
+  let parityId := (createdItem.fieldStr? "id").getD ""
+  let some (parityVm, _) ← getManagedMachine? mStore parityId
+    | return (← fail "managed MCP parity VM missing")
+  if createdJson.fieldBool? "ok" != some true ||
+      parityVm.ownerUserId != bobId || parityVm.ownerMission != "m-managed-parity" ||
+      parityVm.status != "ready" || parityVm.lastPollSec == 0 || parityVm.providerId == parityVm.id then
+    return (← fail "REST/MCP provisioning parity or retry identity failed")
+  let .ok () ← upsertMission store {
+    id := "m-managed-foreign", title := "Foreign managed caller", status := "awaiting_user",
+    backend := "opencode", modelOverride := "", updatedAt := formatEpochIso8601Utc nowSec,
+    workingDirectory := muRoot, ownerUserId := aliceId
+  } | return (← fail "foreign managed caller fixture failed")
+  let foreignClaims := { parityClaims with sessionId := "foreign-managed-session", missionId := "m-managed-foreign" }
+  let foreignDestroy ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot foreignClaims
+    "destroy_managed_machine" (.obj #[("machine_id", .str parityId)]) nowSec none app.managedProvisioningOverride?
+  let foreignExec ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot foreignClaims
+    "exec_raw_managed_machine" (.obj #[("machine_id", .str parityId), ("command", .str "true")]) nowSec none app.managedProvisioningOverride?
+  let wrongProject ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot
+    { parityClaims with project := "another-project" }
+    "destroy_managed_machine" (.obj #[("machine_id", .str parityId)]) nowSec none app.managedProvisioningOverride?
+  for response in #[foreignDestroy, foreignExec, wrongProject] do
+    let parsed := (OrbBin.Json.parse response).toOption.getD .null
+    if ((parsed.field? "error").getD .null).fieldStr? "code" != some "not_found" then
+      return (← fail "managed mutations must not cross tenant/project boundaries")
+  let some (stillReady, _) ← getManagedMachine? mStore parityId
+    | return (← fail "foreign caller erased managed machine")
+  if stillReady.status != "ready" then return (← fail "foreign caller changed managed machine")
+  let mcpStopped ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
+    "stop_managed_machine" (.obj #[("machine_id", .str parityId)]) nowSec none app.managedProvisioningOverride?
+  let resumeArgs := OrbBin.Json.JVal.obj #[("machine_id", .str parityId), ("ttl_minutes", .nat 5),
+    ("idempotency_key", .str "mcp-managed-resume")]
+  let mcpResumed ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
+    "resume_managed_machine" resumeArgs nowSec none app.managedProvisioningOverride?
+  let mcpResumeReplay ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
+    "resume_managed_machine" resumeArgs nowSec none app.managedProvisioningOverride?
+  let resumedMcp := ((OrbBin.Json.parse mcpResumed).toOption.getD .null |>.field? "result").getD .null
+  if ((OrbBin.Json.parse mcpStopped).toOption.getD .null).fieldBool? "ok" != some true ||
+      mcpResumed != mcpResumeReplay || ((resumedMcp.field? "machine").getD .null).fieldUInt64? "node_boot_epoch" != some 2 then
+    return (← fail s!"MCP resume/poll/retry parity failed: {mcpResumed}")
+  let mcpDestroyed ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
+    "destroy_managed_machine" (.obj #[("machine_id", .str parityId)]) nowSec none app.managedProvisioningOverride?
+  if ((OrbBin.Json.parse mcpDestroyed).toOption.getD .null).fieldBool? "ok" != some true then
+    return (← fail "MCP provider-backed destroy failed")
 
   -- 7. Multi-user Opt-In Usage Telemetry & Speaker-Attributed Voice Relay (`/api/usage-telemetry/*`, `/api/voice/transcribe`)
   -- 7a. `scrubSecrets` covers API keys, hub tokens, GitHub tokens, Bearer headers, and password pairs without mangling prose
@@ -5299,11 +5609,13 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
     return (← fail s!"listProjectsJVal alias/override/phantom parity failed: {dedupedJson}")
 
   let fleetBoat : ManagedFleetState := { enabled := true, boatEnabled := true, dailyCapCents := 5000, maxConcurrent := 20 }
+  let .ok () ← saveManagedFleetConfig mStore true true 5000 0 20
+    | return (← fail "enable managed provider fixture failed")
   let vmBoat : ManagedMachine := {
     id := "vm-boat-1", sandboxName := "orb-managed-vm-boat-1", provider := "boat",
     size := "medium", status := "ready", spentCents := 0, nodeBootEpoch := 1, deletableAtSec := nowSec + 3600
   }
-  let .ok _ ← provisionManagedMachine mStore fleetBoat vmBoat nowSec
+  let .ok _ ← provisionReadyFixture mStore fleetBoat vmBoat nowSec
     | return (← fail "provisionManagedMachine vm-boat-1 failed")
   let .ok () ← putEnrollmentToken mStore "vm-boat-1" "enroll-secret-1"
     | return (← fail "putEnrollmentToken vm-boat-1 failed")
@@ -5362,6 +5674,47 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
      (roBody.splitOn "\"timestamps_ms\"").length < 2 || (roBody.splitOn "\"bucket_seconds\":300").length < 2 ||
      (roBody.splitOn "\"pools\"").length < 2 || (roBody.splitOn "\"links\"").length < 2 then
     return (← fail s!"GET /api/resources/overview failed: {roSt} {roBody}")
+
+  -- The Bitwarden token lives in `settings.bitwarden.encrypted_access_token`, is never returned by
+  -- `/api/settings`, and is not erased when a client writes its redacted settings copy back.
+  let (bwPutSt, _) ← sendJson "PUT" "/api/bitwarden/config" hsJwt "{\"access_token\":\"0.test-token\"}"
+  let (bwDaSt, _) ← sendJson "PUT" "/api/bitwarden/default-access/misc" hsJwt "{\"bitwarden_projects\":[\"proj-1\"]}"
+  let (setSt, setBody) ← sendJson "GET" "/api/settings" hsJwt ""
+  let (setPutSt, _) ← sendJson "PUT" "/api/settings" hsJwt "{\"bitwarden\":{},\"auto_cleanup_days\":7}"
+  let (bwStSt, bwStBody) ← sendJson "GET" "/api/bitwarden/status" hsJwt ""
+  if bwPutSt != 200 || bwDaSt != 200 || setSt != 200 || setPutSt != 200 || bwStSt != 200 ||
+     (setBody.splitOn "access_token").length != 1 || (setBody.splitOn "\"default_access\"").length < 2 ||
+     (bwStBody.splitOn "\"configured\":true").length < 2 then
+    return (← fail s!"Bitwarden settings contract failed: put={bwPutSt} da={bwDaSt} settings={setSt}:{setBody} status={bwStSt}:{bwStBody}")
+  let (bwDelSt, _) ← sendJson "DELETE" "/api/bitwarden/config" hsJwt ""
+  let (bwSt2St, bwSt2Body) ← sendJson "GET" "/api/bitwarden/status" hsJwt ""
+  let (_, setBody2) ← sendJson "GET" "/api/settings" hsJwt ""
+  if bwDelSt != 200 || bwSt2St != 200 || (bwSt2Body.splitOn "\"configured\":false").length < 2 ||
+     (setBody2.splitOn "\"proj-1\"").length < 2 then
+    return (← fail s!"Bitwarden disconnect should drop only the token: status={bwSt2Body} settings={setBody2}")
+
+  -- `POST /api/control/missions/:id/status`: archive and reopen a stopped mission; refuse unknown
+  -- statuses, unknown missions and missions with a live run.
+  discard <| execParamQuery store.missionsDb
+    "INSERT INTO missions(id,title,status,backend,working_directory,updated_at) VALUES('m-status-route','Status route','completed','opencode','/tmp','2026-11-12T00:00:00Z');" #[]
+  let (ackSt, ackBody) ← sendJson "POST" "/api/control/missions/m-status-route/status" hsJwt "{\"status\":\"acknowledged\"}"
+  let ackRows ← execParamQuery store.missionsDb "SELECT status FROM missions WHERE id='m-status-route';" #[]
+  let (reopenSt, _) ← sendJson "POST" "/api/control/missions/m-status-route/status" hsJwt "{\"status\":\"paused\"}"
+  let (badSt, _) ← sendJson "POST" "/api/control/missions/m-status-route/status" hsJwt "{\"status\":\"banana\"}"
+  let (missingSt, _) ← sendJson "POST" "/api/control/missions/m-no-such-mission/status" hsJwt "{\"status\":\"acknowledged\"}"
+  let ackStored := match ackRows with
+    | .ok rows => rows.size > 1 && rows[1]! == #["acknowledged"]
+    | .error _ => false
+  if ackSt != 200 || !ackStored || reopenSt != 200 || badSt != 400 || (missingSt != 404 && missingSt != 403) then
+    return (← fail s!"mission status route failed: ack={ackSt}:{ackBody} stored={ackStored} reopen={reopenSt} bad={badSt} missing={missingSt}")
+  -- This store may carry the current `mission_runs` shape or the legacy one; exactly one insert applies.
+  discard <| execParamQuery store.missionsDb
+    "INSERT INTO mission_runs(id,mission_id,generation,execution_state) VALUES('run-status-route','m-status-route',1,'running');" #[]
+  discard <| execParamQuery store.missionsDb
+    "INSERT INTO mission_runs(run_id,mission_id,generation,execution_state,started_at) VALUES('run-status-route','m-status-route',1,'running','2026-11-12T00:00:00Z');" #[]
+  let (liveSt, _) ← sendJson "POST" "/api/control/missions/m-status-route/status" hsJwt "{\"status\":\"acknowledged\"}"
+  if liveSt != 409 then
+    return (← fail s!"status change over a live run must be refused, got {liveSt}")
 
   let (puSt, puBody) ← sendJson "GET" "/api/ai/providers/usage" hsJwt ""
   if puSt != 200 || (puBody.splitOn "\"entries\"").length < 2 || (puBody.splitOn "\"refresh_after_seconds\"").length < 2 then
@@ -5833,6 +6186,15 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
         IO.sleep 30
   if !legParked then
     return (← fail "m-legacy-auto with armed recurring interval did not park in awaiting_user after turn completion")
+  let legFiredStuckRes ← execParamQuery store.missionsDb
+    "SELECT COUNT(*) FROM mission_continuations WHERE mission_id='m-legacy-auto' AND phase IN (2,3);" #[]
+  let legFiredStuck := match legFiredStuckRes with | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 99 | .error _ => 99
+  let (legDetSt, legDetBody) ← sendJson "GET" "/api/control/missions/m-legacy-auto" hsJwt ""
+  if legFiredStuck != 0 || legDetSt != 200 ||
+     (legDetBody.splitOn "\"state\":\"error\"").length != 1 ||
+     (legDetBody.splitOn "\"state\":\"queued\"").length != 1 ||
+     (legDetBody.splitOn "\"state\":\"scheduled\"").length != 2 then
+    return (← fail s!"recurring wakeup left ghost queued/error continuation on m-legacy-auto: stuck={legFiredStuck} st={legDetSt} body={legDetBody}")
 
   -- 5. Admin-owned mission (`owner_user_id` set, `role='admin'`, empty `unix_username`) signs `job:submit` lease with `caller_role='admin'`,
   --    and `"model":"smart"` resolves chain `"builtin/smart"` instead of forwarding `"smart"` raw!
@@ -5905,9 +6267,260 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
   stopEnvAndMock
   return 0
 
+set_option maxHeartbeats 400000 in
+private def runLibraryGitAndSkillParityTests : IO UInt32 := do
+  let ts ← IO.monoNanosNow
+  let workRoot := s!"/tmp/orb_library_parity_{ts}"
+  let dataRoot := s!"{workRoot}/.sandboxed-sh"
+  let bareRepo := s!"{workRoot}/remote-library.git"
+  let seedRepo := s!"{workRoot}/seed-library"
+  let peerRepo := s!"{workRoot}/peer-library"
+  discard <| (IO.FS.removeDirAll workRoot).toBaseIO
+  IO.FS.createDirAll (System.FilePath.mk s!"{dataRoot}/missions")
+  IO.FS.createDirAll (System.FilePath.mk bareRepo)
+  IO.FS.createDirAll (System.FilePath.mk s!"{seedRepo}/skill/orb-basics/references")
+  IO.FS.createDirAll (System.FilePath.mk s!"{seedRepo}/skill/orb-basics/tools")
+  IO.FS.createDirAll (System.FilePath.mk s!"{seedRepo}/skill/proton-mail")
+
+  let shRun (cmd : String) : IO Nat := do
+    let env ← OrbBin.PosixExt.environList
+    let sp ← OrbBin.PosixExt.spawnPgrp "/bin/sh" #["-c", cmd] env false false true
+    if sp.pid < 0 then return 127
+    if sp.stdoutFd >= 0 then
+      let mut eof := false
+      while !eof do
+        let chunk ← OrbBin.PosixExt.readFdChunk sp.stdoutFd 4096
+        if chunk.isEmpty then eof := true
+      OrbBin.PosixExt.closeFdRaw sp.stdoutFd
+    let st ← OrbBin.PosixExt.waitpidBlock sp.pid
+    return st.toNat
+
+  IO.FS.writeFile (System.FilePath.mk s!"{seedRepo}/skill/orb-basics/SKILL.md")
+    "---\nname: orb-basics\ndescription: \"Orient an Orb agent to its environment.\"\nmetadata:\n  sandboxed:\n    audience: [mission, local]\n    scope: global\n---\n\n# Orb Basics\n\nFollow Core contracts.\n"
+  IO.FS.writeFile (System.FilePath.mk s!"{seedRepo}/skill/orb-basics/references/guide.md") "# Guide\nRead carefully.\n"
+  let hugeMd := "# Huge\n" ++ String.ofList (List.replicate 270000 'a') ++ "\n"
+  IO.FS.writeFile (System.FilePath.mk s!"{seedRepo}/skill/orb-basics/references/huge.md") hugeMd
+  IO.FS.writeFile (System.FilePath.mk s!"{seedRepo}/skill/orb-basics/tools/helper.py") "#!/usr/bin/env python3\nprint('ok')\n"
+  IO.FS.writeFile (System.FilePath.mk s!"{seedRepo}/skill/proton-mail/SKILL.md")
+    "---\nname: proton-mail\ndescription: \"Coordinator mail helper.\"\nmetadata:\n  sandboxed:\n    audience: [coordinator]\n    scope: on-demand\n---\n\n# Proton Mail\n"
+
+  let initRc ← shRun
+    (s!"git init --bare '{bareRepo}' && " ++
+     s!"cd '{seedRepo}' && git init -b main && " ++
+     "git config user.name 'Seed' && git config user.email 'seed@example.com' && " ++
+     s!"git add -A && git commit -m 'initial library' && git remote add origin '{bareRepo}' && git push -u origin main")
+  if initRc != 0 then
+    discard <| (IO.FS.removeDirAll workRoot).toBaseIO
+    IO.eprintln s!"[orb-core-test] FAIL (library-parity): failed to seed bare git repo (rc={initRc})"
+    return 1
+
+  let store ← match ← openCoreStore dataRoot 0 "prod" with
+    | .ok s => pure s
+    | .error e =>
+      discard <| (IO.FS.removeDirAll workRoot).toBaseIO
+      IO.eprintln s!"[orb-core-test] FAIL (library-parity): openCoreStore failed: {e}"
+      return 1
+
+  let fail (msg : String) : IO UInt32 := do
+    closeCoreStore store
+    discard <| (IO.FS.removeDirAll workRoot).toBaseIO
+    IO.eprintln s!"[orb-core-test] FAIL (library-parity): {msg}"
+    return 1
+
+  let jwtSec := "library-parity-jwt-secret-0123456789abcdef"
+  let nowSec : UInt64 := 1794500000
+  let hsJwt := issueHs256Jwt jwtSec "prod" "admin" nowSec (nowSec + 86400) "admin"
+  let cfg : CoreConfig := {
+    host := "127.0.0.1"
+    port := 13001
+    workingDir := workRoot
+    devMode := false
+    dashboardPassword := "strong-prod-pass-1234"
+    jwtSecret := jwtSec
+  }
+  let _ ← bootstrapUsersAndBackfill store #[("admin", cfg.dashboardPassword)] (formatEpochIso8601Utc nowSec)
+  let managedRef ← IO.mkRef ({} : ManagedFleetState)
+  let chainsRef ← IO.mkRef (#[] : Array RoutingChain)
+  let cooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
+  let seqRef ← IO.mkRef (0 : UInt64)
+  let appSt : CoreAppState := {
+    cfg := cfg
+    store := store
+    searchIdx? := none
+    managedRef := managedRef
+    chainsRef := chainsRef
+    proxyCooldownsRef := cooldownsRef
+    seqRef := seqRef
+  }
+
+  let sendReq (method path tok body : String) : IO (Nat × String × String) := do
+    let bBytes := body.toUTF8
+    let authLine := if tok.isEmpty then "" else s!"Authorization: Bearer {tok}\r\n"
+    let rawWire :=
+      (s!"{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authLine}" ++
+       s!"Content-Type: application/json\r\nContent-Length: {bBytes.size}\r\n\r\n").toUTF8 ++ bBytes
+    match parseRequest rawWire none with
+    | .error _ => return (599, "", "parse_err")
+    | .ok req =>
+      match ← dispatchCoreRequest appSt req nowSec with
+      | .error _ => return (101, "", "")
+      | .ok resp => return (resp.status, resp.contentType, (String.fromUTF8? resp.body).getD "")
+
+  -- 1. Unreachable initial clone fails closed (`502`, never `200 []`), loopback host boundary rejects evil URLs,
+  --    existing non-git `library/` directory attaches remote cleanly BEFORE first `commit`, local no-op `push`,
+  --    and switching to `bareRepo` via `force_reinitialize: true`
+  let missingCloneRepo := s!"{workRoot}/nonexistent-remote.git"
+  let (setMissingSt, _, setMissingBody) ← sendReq "PUT" "/api/settings/library-remote" hsJwt
+    s!"\{\"library_remote\":{jsonEscape missingCloneRepo}}"
+  let (failListSt, _, _) ← sendReq "GET" "/api/library/skill" hsJwt ""
+  let (failStatSt, _, _) ← sendReq "GET" "/api/library/status" hsJwt ""
+  let (clrRemSt, _, _) ← sendReq "PUT" "/api/settings/library-remote" hsJwt "{\"library_remote\":null}"
+  let (evilAtSt, _, _) ← sendReq "PUT" "/api/settings/library-remote" hsJwt "{\"library_remote\":\"http://localhost@evil.com/repo.git\"}"
+  let (evilSubSt, _, _) ← sendReq "PUT" "/api/settings/library-remote" hsJwt "{\"library_remote\":\"http://localhost.evil.com/repo.git\"}"
+  let (evilIpSt, _, _) ← sendReq "PUT" "/api/settings/library-remote" hsJwt "{\"library_remote\":\"http://127.0.0.1.evil.com/repo.git\"}"
+  if setMissingSt != 200 || (setMissingBody.splitOn "\"library_error\"").length < 2 ||
+     failListSt != 502 || failStatSt != 502 || clrRemSt != 200 ||
+     evilAtSt != 400 || evilSubSt != 400 || evilIpSt != 400 then
+    return (← fail s!"fail-closed clone or loopback host-boundary check failed: setMissing=({setMissingSt},{setMissingBody}) failList={failListSt} failStat={failStatSt} evil=({evilAtSt},{evilSubSt},{evilIpSt})")
+
+  let freshBareRepo := s!"{workRoot}/fresh-bare.git"
+  IO.FS.createDirAll (System.FilePath.mk freshBareRepo)
+  let freshRc ← shRun s!"git init --bare '{freshBareRepo}'"
+  if freshRc != 0 then
+    return (← fail s!"failed to init freshBareRepo (rc={freshRc})")
+  let (putLocalSt, _, _) ← sendReq "PUT" "/api/library/skill/local-first" hsJwt
+    "{\"content\":\"---\\nname: local-first\\ndescription: \\\"Local first\\\"\\n---\\n# Local\\n\"}"
+  -- Attach `freshBareRepo` while `library/` already exists on disk WITHOUT `.git` (before first `commit`),
+  -- then disconnect via `library_remote: null` and verify `origin` is actually removed without manual `git remote remove`!
+  let (attachPreGitSt, _, attachPreGitBody) ← sendReq "PUT" "/api/settings/library-remote" hsJwt
+    s!"\{\"library_remote\":{jsonEscape freshBareRepo}}"
+  let (clrForNoopSt, _, _) ← sendReq "PUT" "/api/settings/library-remote" hsJwt "{\"library_remote\":null}"
+  let (discStatSt, _, discStatBody) ← sendReq "GET" "/api/library/status" hsJwt ""
+  let (cmtLocalSt, _, _) ← sendReq "POST" "/api/library/commit" hsJwt "{\"message\":\"skill: local-first\"}"
+  let (pushNoRemSt, _, pushNoRemBody) ← sendReq "POST" "/api/library/push" hsJwt ""
+  let (attachRemSt, _, attachRemBody) ← sendReq "PUT" "/api/settings/library-remote" hsJwt
+    s!"\{\"library_remote\":{jsonEscape freshBareRepo}}"
+  let (pushFreshSt, _, pushFreshBody) ← sendReq "POST" "/api/library/push" hsJwt ""
+  if putLocalSt != 200 ||
+     attachPreGitSt != 200 || (attachPreGitBody.splitOn "\"library_reinitialized\":true").length != 2 ||
+     (attachPreGitBody.splitOn "\"library_error\"").length != 1 || clrForNoopSt != 200 ||
+     discStatSt != 200 || (discStatBody.splitOn "\"remote\":null").length != 2 ||
+     cmtLocalSt != 200 ||
+     pushNoRemSt != 200 || (pushNoRemBody.splitOn "No remote configured").length != 2 ||
+     attachRemSt != 200 || (attachRemBody.splitOn "\"library_reinitialized\":true").length != 2 ||
+     (attachRemBody.splitOn "\"library_error\"").length != 1 ||
+     pushFreshSt != 200 || (pushFreshBody.splitOn "Pushed successfully").length != 2 then
+    return (← fail s!"local-first library -> attach remote -> push failed: put={putLocalSt} preGit=({attachPreGitSt},{attachPreGitBody}) disc=({discStatSt},{discStatBody}) cmt={cmtLocalSt} noRem=({pushNoRemSt},{pushNoRemBody}) attach=({attachRemSt},{attachRemBody}) pushFresh=({pushFreshSt},{pushFreshBody})")
+
+  let (badRemSt, _, _) ← sendReq "PUT" "/api/settings/library-remote" hsJwt "{\"library_remote\":\"--upload-pack=/bin/false\"}"
+  let (setRemSt, _, setRemBody) ← sendReq "PUT" "/api/settings/library-remote" hsJwt
+    s!"\{\"library_remote\":{jsonEscape bareRepo},\"force_reinitialize\":true}"
+  let (hlthSt, _, hlthBody) ← sendReq "GET" "/api/health" "" ""
+  let (stCode, _, stBody) ← sendReq "GET" "/api/library/status" hsJwt ""
+  if badRemSt != 400 || setRemSt != 200 ||
+     (setRemBody.splitOn "\"library_reinitialized\":true").length != 2 ||
+     hlthSt != 200 || (hlthBody.splitOn bareRepo).length < 2 ||
+     stCode != 200 || (stBody.splitOn "\"clean\":true").length != 2 then
+    return (← fail s!"library-remote init/health/status mismatch: bad={badRemSt} set={setRemSt}:{setRemBody} hlth={hlthBody} st={stBody}")
+
+  -- 2. Canonical `skill/` catalog listing (`?include=bundle`), single-skill bundle, oversized `.md` in `references`, raw text reference read, and `SKILL.md` delete guard
+  let (listSt, _, listBody) ← sendReq "GET" "/api/library/skill" hsJwt ""
+  let (bundleSt, _, bundleBody) ← sendReq "GET" "/api/library/skill?include=bundle" hsJwt ""
+  let (oneSt, _, oneBody) ← sendReq "GET" "/api/library/skill/orb-basics" hsJwt ""
+  let (refSt, refCtype, refBody) ← sendReq "GET" "/api/library/skill/orb-basics/files/references/guide.md" hsJwt ""
+  let (hugeRefSt, _, hugeRefBody) ← sendReq "GET" "/api/library/skill/orb-basics/files/references/huge.md" hsJwt ""
+  let (delMdSt, _, _) ← sendReq "DELETE" "/api/library/skill/orb-basics/files/SKILL.md" hsJwt ""
+  let (delivSt, _, delivBody) ← sendReq "GET" "/api/library/skill-delivery" hsJwt ""
+  -- Unreadable companion directory (`chmod 000`) MUST fail closed (`500`) on bundle reads instead of returning a truncated bundle
+  let euid ← OrbBin.PosixExt.geteuid
+  if euid != 0 then
+    discard <| OrbBin.PosixExt.chmod s!"{dataRoot}/library/skill/orb-basics/references" 0o000
+    let (unreadBundleSt, _, _) ← sendReq "GET" "/api/library/skill?include=bundle" hsJwt ""
+    let (unreadOneSt, _, _) ← sendReq "GET" "/api/library/skill/orb-basics" hsJwt ""
+    discard <| OrbBin.PosixExt.chmod s!"{dataRoot}/library/skill/orb-basics/references" 0o755
+    if unreadBundleSt != 500 || unreadOneSt != 500 then
+      return (← fail s!"unreadable companion directory did not fail closed: bundle={unreadBundleSt} one={unreadOneSt}")
+  -- Companion directory nested deeper than 16 levels MUST also fail closed (`500`) instead of omitting deep companions
+  let deepRoot := s!"{dataRoot}/library/skill/orb-basics/deep_test"
+  let deepLeaf := s!"{deepRoot}/d1/d2/d3/d4/d5/d6/d7/d8/d9/d10/d11/d12/d13/d14/d15/d16/d17"
+  IO.FS.createDirAll deepLeaf
+  IO.FS.writeFile s!"{deepLeaf}/leaf.txt" "deep"
+  let (deepBundleSt, _, _) ← sendReq "GET" "/api/library/skill?include=bundle" hsJwt ""
+  let (deepOneSt, _, _) ← sendReq "GET" "/api/library/skill/orb-basics" hsJwt ""
+  discard <| IO.Process.output { cmd := "rm", args := #["-rf", deepRoot] }
+  if deepBundleSt != 500 || deepOneSt != 500 then
+    return (← fail s!"over-nested companion directory did not fail closed: bundle={deepBundleSt} one={deepOneSt}")
+  if listSt != 200 ||
+     (listBody.splitOn "\"path\":\"skill/orb-basics\"").length != 2 ||
+     (listBody.splitOn "\"scope\":\"global\"").length != 2 ||
+     bundleSt != 200 ||
+     (bundleBody.splitOn "\"references/guide.md\"").length < 2 ||
+     (bundleBody.splitOn "\"references/huge.md\"").length < 2 ||
+     (bundleBody.splitOn "\"tools/helper.py\"").length < 2 ||
+     oneSt != 200 ||
+     (oneBody.splitOn "\"references\":[\"references/huge.md\",\"tools/helper.py\"]").length != 2 ||
+     refSt != 200 || !(refCtype.startsWith "text/plain") || refBody != "# Guide\nRead carefully.\n" ||
+     hugeRefSt != 200 || hugeRefBody.length != hugeMd.length ||
+     delMdSt != 400 ||
+     delivSt != 200 ||
+     (delivBody.splitOn "\"orb-basics\"").length != 2 ||
+     (delivBody.splitOn "\"proton-mail\"").length != 1 then
+    return (← fail s!"skill catalog/files/delivery mismatch: list={listBody} one={oneBody} ref=({refSt},{refCtype},{refBody}) huge={hugeRefSt} delMd={delMdSt} deliv={delivBody}")
+
+  -- 3. Update skill, commit, push, and inspect git history + revision content
+  let updatedContent := "---\nname: orb-basics\ndescription: \"Updated description.\"\nmetadata:\n  sandboxed:\n    audience: [mission, local]\n    scope: global\n---\n\n# Orb Basics v2\n"
+  let (putSkSt, _, _) ← sendReq "PUT" "/api/library/skill/orb-basics" hsJwt s!"\{\"content\":{jsonEscape updatedContent}}"
+  let (cmtSt, _, cmtBody) ← sendReq "POST" "/api/library/commit" hsJwt "{\"message\":\"skill: update orb-basics\"}"
+  let (pushSt, _, pushBody) ← sendReq "POST" "/api/library/push" hsJwt ""
+  let (histSt, _, histBody) ← sendReq "GET" "/api/library/skill/orb-basics/history" hsJwt ""
+  let histArr := ((OrbBin.Json.parse histBody).toOption >>= OrbBin.Json.JVal.asArr?).getD #[]
+  let oldestRev := (histArr.back?.bind (·.fieldStr? "rev")).getD ""
+  let (revSt, revCtype, revBody) ← sendReq "GET" s!"/api/library/skill/orb-basics/history/{oldestRev}" hsJwt ""
+  if putSkSt != 200 || cmtSt != 200 || pushSt != 200 || histSt != 200 || histArr.size < 2 ||
+     revSt != 200 || !(revCtype.startsWith "text/plain") || (revBody.splitOn "Follow Core contracts.").length != 2 then
+    return (← fail s!"commit/push/history roundtrip failed: put={putSkSt} cmt={cmtSt}:{cmtBody} push={pushSt}:{pushBody} hist={histBody} rev=({revSt},{revBody})")
+
+  -- 4. Diverged history (`409 DIVERGED_HISTORY`) on `sync`/`push` and recovery via `force-sync`
+  let divergeRc ← shRun
+    (s!"git clone -b main '{bareRepo}' '{peerRepo}' && cd '{peerRepo}' && " ++
+     "git config user.name 'Peer' && git config user.email 'peer@example.com' && " ++
+     "printf '\\nPeer remote line.\\n' >> skill/orb-basics/SKILL.md && " ++
+     "git commit -am 'peer update' && git push origin main")
+  if divergeRc != 0 then
+    return (← fail s!"peer clone/push failed (rc={divergeRc})")
+  let localDivContent := updatedContent ++ "\nLocal diverged line.\n"
+  let _ ← sendReq "PUT" "/api/library/skill/orb-basics" hsJwt s!"\{\"content\":{jsonEscape localDivContent}}"
+  let (divCmtSt, _, _) ← sendReq "POST" "/api/library/commit" hsJwt "{\"message\":\"local diverge\"}"
+  let (divPushSt, _, divPushBody) ← sendReq "POST" "/api/library/push" hsJwt ""
+  let (divSyncSt, _, divSyncBody) ← sendReq "POST" "/api/library/sync" hsJwt ""
+  let (fSyncSt, _, _) ← sendReq "POST" "/api/library/force-sync" hsJwt ""
+  let (afterSt, _, afterBody) ← sendReq "GET" "/api/library/skill/orb-basics" hsJwt ""
+  if divCmtSt != 200 ||
+     divPushSt != 409 || (divPushBody.splitOn "DIVERGED_HISTORY").length < 2 ||
+     divSyncSt != 409 || (divSyncBody.splitOn "DIVERGED_HISTORY").length < 2 ||
+     fSyncSt != 200 || afterSt != 200 || (afterBody.splitOn "Peer remote line.").length < 2 then
+    return (← fail s!"diverged history detection/force-sync failed: push=({divPushSt},{divPushBody}) sync=({divSyncSt},{divSyncBody}) fSync={fSyncSt} after={afterBody}")
+
+  closeCoreStore store
+  discard <| (IO.FS.removeDirAll workRoot).toBaseIO
+  return 0
+
 set_option maxHeartbeats 800000 in
 set_option maxRecDepth 4000 in
 def runSuite (emitLogPath? : Option String) : IO UInt32 := do
+  try
+    OrbCore.WakeupRestartTests.run
+    OrbCore.TurnOutcomeTests.run
+  catch e =>
+    IO.eprintln s!"[orb-core-test] FAIL: {e}"
+    return 1
+  -- Wire compatibility regressions run before the broader integration suite.
+  try
+    OrbCore.ProviderContractTests.run
+    OrbCore.ProxyRoutingTests.run
+  catch e =>
+    IO.eprintln s!"[orb-core-test] FAIL: {e}"
+    return 1
   -- 1. Startup security fail-closed gates (`validateRuntimeSecurity`) + conflicting WS credential rejection
   let prodNoSecrets : CoreConfig := { devMode := false, host := "127.0.0.1" }
   let prodPlaceholder : CoreConfig := {
@@ -5944,6 +6557,15 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     IO.eprintln "[orb-core-test] FAIL: validateRuntimeSecurity or verifyConsoleWsAuth checks failed"
     return 1
 
+  -- Provider contracts use a mock transport: no live machines or provider credentials.
+  try
+    OrbCore.ManagedProviderTests.run
+    OrbCore.ManagedProviderLeanciTests.run
+    OrbCore.ManagedProviderColabTests.run
+  catch e =>
+    IO.eprintln s!"[orb-core-test] FAIL: {e}"
+    return 1
+
   -- 2. Service-scoped VM prefix & deploy unit confinement (including path traversal rejection)
   if sandboxNamePrefixFor "/usr/local/bin/orb-core" != "orb-managed-" ||
      sandboxNamePrefixFor "/usr/local/bin/orb-core-prod" != "orb-managed-" ||
@@ -5971,6 +6593,25 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   let tmpRoot := s!"/tmp/orb-core-selftest-{ts}"
   let .ok store ← openCoreStore tmpRoot
     | do IO.eprintln "[orb-core-test] FAIL: openCoreStore failed"; return 1
+  try
+    OrbCore.ManagedProvisioningTests.run tmpRoot
+    OrbCore.ManagedResumeTests.run tmpRoot
+    OrbCore.ManagedAccessTests.run tmpRoot
+    OrbCore.ManagedTtlTests.run tmpRoot
+    OrbCore.ManagedHarvestTests.run tmpRoot
+    OrbCore.AutoPlacementTests.run tmpRoot
+    OrbCore.ManagedReuseTests.run tmpRoot
+    OrbCore.ManagedSnapshotLifecycleTests.run tmpRoot
+    OrbCore.NodeLivenessTests.run tmpRoot
+    OrbCore.ComputeRollupTests.run tmpRoot
+    OrbCore.ManagedSnapshotCatalogTests.run tmpRoot
+    OrbCore.ManagedProviderSealingTests.run tmpRoot
+    OrbCore.ManagedProviderAvailabilityTests.run tmpRoot
+    OrbCore.ManagedSpawnActionsTests.run store
+  catch e =>
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: {e}"
+    return 1
   let m1 : MissionRecord := {
     id := "m-alpha", title := "Verify Lean 4 Core", status := "awaiting_user",
     backend := "codex", modelOverride := "", modelEffort := "high", workingDirectory := tmpRoot,
@@ -5979,10 +6620,51 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   let .ok () ← upsertMission store m1 | do closeCoreStore store; return 1
   let .ok missionsJson ← listMissionsJson store | do closeCoreStore store; return 1
   if (missionsJson.splitOn "\"total_cost_cents\":42").length != 2 ||
-     (missionsJson.splitOn "\"model_effort\":\"high\"").length != 2 then
+     (missionsJson.splitOn "\"model_effort\":\"high\"").length != 2 ||
+     (missionsJson.splitOn "\"live_children_count\":0").length != 2 then
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: listMissionsJson mismatch: {missionsJson}"
     return 1
+  -- Child evidence must survive list filtering/pagination and agree with detail.
+  let childStatuses := #["active", "running", "starting", "resuming", "working", "in_progress",
+    "processing", "streaming", "pending", "queued", "waiting_background", "awaiting_user",
+    "interrupted", "completed", "failed", "cancelled", "archived"]
+  for idx in [0:childStatuses.size] do
+    let .ok () ← upsertMission store { m1 with
+        id := s!"count-child-{idx}", status := childStatuses[idx]!, parentMissionId := "m-alpha",
+        updatedAt := "2020-01-01T00:00:00Z" }
+      | do closeCoreStore store; return 1
+  let .ok () ← upsertMission store { m1 with
+      id := "count-grandchild", status := "active", parentMissionId := "count-child-0",
+      updatedAt := "2020-01-01T00:00:00Z" }
+    | do closeCoreStore store; return 1
+  let .ok _ ← execParamQuery store.missionsDb
+      ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,request_id) VALUES " ++
+       "('count-armed','count-child-11',1,1,'first'),('count-armed-again','count-child-11',1,1,'second')," ++
+       "('count-cancelled','count-child-12',1,4,'cancelled');") #[]
+    | do closeCoreStore store; return 1
+  let .ok childCountList ← listMissionsJson store none none { status? := some "awaiting_user", limit? := some 1 }
+    | do closeCoreStore store; return 1
+  let .ok (some childCountDetail) ← missionDetailJson store "m-alpha"
+    | do closeCoreStore store; return 1
+  let .ok childCountListJ := OrbBin.Json.parse childCountList
+    | do closeCoreStore store; return 1
+  let .ok childCountDetailJ := OrbBin.Json.parse childCountDetail
+    | do closeCoreStore store; return 1
+  let countListOk := match childCountListJ with
+    | .arr rows => rows.size == 1 && rows[0]!.fieldStr? "id" == some "m-alpha" &&
+        rows[0]!.fieldNat? "live_children_count" == some 12
+    | _ => false
+  if !countListOk || childCountDetailJ.fieldNat? "live_children_count" != some 12 then
+    closeCoreStore store
+    IO.eprintln "[orb-core-test] FAIL: authoritative live_children_count list/detail mismatch"
+    return 1
+  let .ok _ ← execParamQuery store.missionsDb
+      "DELETE FROM mission_continuations WHERE id LIKE 'count-%';" #[]
+    | do closeCoreStore store; return 1
+  let .ok _ ← execParamQuery store.missionsDb
+      "DELETE FROM missions WHERE id LIKE 'count-%';" #[]
+    | do closeCoreStore store; return 1
   let txReq : TransferRecord := {
     id := "tx-1", missionId := "m-alpha", requestKey := "rk-1", revision := 0,
     phase := "preparing", destination := "ashur",
@@ -7076,6 +7758,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   if (← runOrbUriCorsTests) != 0 then return 1
   if (← runProdParityAndMissionMoveTests prodValid) != 0 then return 1
   if (← runRemoteDispatchWakeupAndBtwTests prodValid) != 0 then return 1
+  if (← runLibraryGitAndSkillParityTests) != 0 then return 1
 
   IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":11,\"harness_contracts\":10,\"host_tests\":101}"
   return 0
@@ -7084,4 +7767,5 @@ end OrbCore.SelfTest
 
 def main (args : List String) : IO UInt32 := do
   OrbBin.PosixExt.setenvVar "ORB_HERMETIC_TEST" "1"
+  OrbCore.SettingsDocumentTests.run
   OrbCore.SelfTest.runSuite (OrbCore.SelfTest.findFlag? args "--emit-evidence-log")

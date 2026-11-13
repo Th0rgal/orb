@@ -181,6 +181,32 @@ missions.
 - For routine UI-only desktop updates, use `./scripts/orb_desktop_dev.sh` (HMR) or `./scripts/orb_desktop_dev.sh --ui-only --install` (`~10 s`) instead of rebuilding Lean binaries.
 - Reuse the checkout's existing `.lake/build` cache. Avoid deleting `.lake` or spawning parallel builds across worktrees on the same package. If memory pressure/swapping is high, defer new heavy builds and report which task is holding resources. Keep build ownership and command visible in updates.
 
+## Building for the aarch64 Linux desktop on dgx-spark
+
+The NixOS laptop (`m2air`, aarch64, 16 GB) is too small for a cold Lean build of Orb. `dgx-spark`
+(aarch64, 20 cores, 119 GB) is the same architecture and needs no emulation; a Boat or lean.ci VM is
+x86_64 and cannot produce these binaries. Build there instead of locally.
+
+- **Reach it over the personal mesh:** `ssh spark` (aliases `dgx-spark`, `spark-de79`; user `th0rgal`).
+  The SSH config generated from `nixos-config/inventory/fleet.nix` supplies the address and the
+  YubiKey-agent key. Do not add other keys to its `authorized_keys`.
+- **It is a shared inference host.** Check `free -g` and `pgrep -lx "lean|lake|turbo-lean"` first; it
+  often has under 10 GB free. One heavy build at a time, `--jobs 2` and a memory cap, as on any host.
+- **Lean binaries (tests, `orb-locald`, an aarch64 Ubuntu host):** work in the dedicated checkout
+  `~/work/orb` on spark and build with `turbo-lean` through `scripts/build_orb_bins.sh --only <bin>`.
+  These link against Ubuntu's loader and do not run on NixOS as they are.
+- **The NixOS desktop package (`orb-desktop` in `~/work/nixos/omarchnix`, what Alt+O launches):**
+  build it in spark's Nix store, which patches the binaries for NixOS:
+  ```bash
+  cd ~/work/nixos/omarchnix
+  nix build .#orb-desktop --eval-store auto --store ssh-ng://spark --no-link --print-out-paths
+  ```
+  Building this way was verified from the laptop on 2026-11-12. Copying the result back
+  (`nix copy --from ssh-ng://spark <path>`) is refused for an unprivileged user because the path is
+  unsigned: either run the copy as root, or add the laptop user to `nix.settings.trusted-users` in
+  `nixos-config`. `--builders ssh-ng://spark` is ignored for the same reason.
+- To pick up a new Orb commit, bump the `orb` input first: `nix flake update orb` in `omarchnix`.
+
 ## High-level flow
 
 1. User creates a mission with a workspace + agent (backend).
@@ -423,11 +449,27 @@ Orb follows the **"Lean Decides, Rust Does"** boundary across the control plane,
 See **[DEBUGGING.md](DEBUGGING.md)** for service management, logs and
 deployment procedures.
 
-Production deploys have one implementation (`run_deploy` in
-`src/api/system.rs`) and two entry points: the operator runs
-`ssh agent-core '/usr/local/bin/sandboxed-sh-prod deploy --service
-sandboxed-sh-prod.service'` (no grant needed; also the fallback when the
-approval UI or broker is down), and missions call `POST /api/system/deploy`
-with a session-scoped `service_deploy` grant. Both health-check the restart
-and roll back automatically. Do not deploy by copying binaries or with a bare
-`systemctl restart`.
+## Dev and prod instances
+
+Two Core instances run on `agent-core`: prod (`sandboxed-sh-prod`, `:3000`,
+data `/root/.sandboxed-sh`) and dev (`sandboxed-sh-dev`, `:3002`,
+`agent-backend-dev.thomas.md`, data `/var/lib/sandboxed-sh-dev`). Their users,
+missions, settings and sealed provider keys are separate; the host and the
+cloud provider accounts are shared, so dev machines cost real money. Test risky
+changes on dev first. The plan to put both on one base configuration, sync
+settings between them and give missions a dev pass is
+[docs/plans/dev-prod-environments.md](docs/plans/dev-prod-environments.md).
+
+Deploy with `orb-deploy [--detach] <sha|master> [--dev-only]` on agent-core
+(`scripts/ops/orb-deploy`): it builds that exact commit with the CI-parity
+command, runs the Core self-test, installs dev, health-checks, then prod with a
+backup and automatic rollback; `--detach` runs it as a transient unit
+(`journalctl -u orb-deploy`, log `/var/log/orb-deploy.log`). Missions use
+`--dev-only` only. Do not deploy by copying binaries or with a bare
+`systemctl restart`. The legacy Rust `deploy` subcommand described in
+DEBUGGING.md no longer applies to the Lean server.
+
+`orb-monitor` (`scripts/ops/orb-monitor`, every 5 min) checks Core health and
+build, proxy error rates, stalled missions, expiring or orphaned VMs, failed
+units and long builds, and reports only changes to Paloma's webhook and the
+"Orb monitor" mission in the Inbox.

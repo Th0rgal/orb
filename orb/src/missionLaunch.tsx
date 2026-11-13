@@ -2,7 +2,7 @@ import { isRecord, readJson, writeJson } from "./storage";
 import { isAutoManagedTarget, missionNode, nodeLabel } from "./machines/nodes";
 import { managedCatalog } from "./managedMachineModel";
 import { REMOTE_PROXY_HARNESSES } from "./harnesses";
-import { canForceSlot, hasFailureTerminalReason, isQueued, queueWaitLabel, remoteJobFailed } from "./missionStatus";
+import { canForceSlot, hasFailureTerminalReason, isQueued, missionActivity, missionPresentation, queueWaitLabel, remoteJobFailed } from "./missionStatus";
 import type { DraftImage } from "./imageAttachments";
 import { remoteContinuation } from "./remoteContinuation";
 import { ErrorNotice, isNonResumableError } from "./ErrorNotice";
@@ -287,6 +287,16 @@ export function missionPhase(mission: Mission | null, activity: boolean): {label
         : reason === "orphan_no_runner" ? "The backend could not find an active runner."
         : ["operator_cancelled_detached_run", "remote_job_cancelled"].includes(reason ?? "") ? "The run was stopped. Send a follow-up or click Resume to continue."
         : mission?.status_message ?? reason?.replaceAll("_", " ") ?? "The mission stopped before completion." };
+  }
+  const run = missionActivity(mission);
+  if (mission && (run.reason === "awaiting_wakeup" || run.reason === "background")) {
+    return {
+      label: missionPresentation(mission).label,
+      moving: false,
+      detail: run.reason === "background"
+        ? "Background work is still running. The foreground turn has stopped."
+        : "The foreground turn has stopped and will resume when its wake-up is delivered.",
+    };
   }
   if (["completed","done"].includes(status)) return { label:"Completed", moving:false, detail:activity ? "" : "The mission completed without transcript output." };
   if (["awaiting_user","waiting_user","acknowledged"].includes(status)) return {label:"Ready for a follow-up",moving:false,detail:activity ? "" : "Send a message to continue this conversation."};

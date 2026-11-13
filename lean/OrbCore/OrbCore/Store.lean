@@ -318,10 +318,17 @@ def idempotencySchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS idempotency_keys (scope TEXT NOT NULL, request_key TEXT NOT NULL, response_json TEXT NOT NULL, status_code INTEGER NOT NULL DEFAULT 200, committed_oversize INTEGER NOT NULL DEFAULT 0, body_bytes INTEGER NOT NULL DEFAULT 0, phase TEXT NOT NULL DEFAULT 'committed', created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(scope, request_key));"
 
 def missionsAdditiveAlters : Array String := #[
+  -- NULL means "never set": the stock default applies (see `chainResponse`).
+  "ALTER TABLE model_routing_chains ADD COLUMN is_default INTEGER;",
+  "ALTER TABLE model_routing_chains ADD COLUMN strip_thinking INTEGER;",
+  "ALTER TABLE model_routing_chains ADD COLUMN created_at TEXT;",
+  "ALTER TABLE proxy_usage ADD COLUMN requested_model TEXT;",
+  "ALTER TABLE proxy_outcomes ADD COLUMN requested_model TEXT;",
   "ALTER TABLE missions ADD COLUMN project TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE missions ADD COLUMN folder TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE missions ADD COLUMN placement_revision INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE missions ADD COLUMN parent_mission_id TEXT;",
+  "CREATE INDEX IF NOT EXISTS idx_missions_parent ON missions(parent_mission_id);",
   "ALTER TABLE missions ADD COLUMN created_at TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE missions ADD COLUMN metadata_updated_at TEXT;",
   "ALTER TABLE missions ADD COLUMN short_description TEXT;",
@@ -413,6 +420,9 @@ def missionsAdditiveAlters : Array String := #[
   "CREATE INDEX IF NOT EXISTS idx_proxy_usage_timestamp ON proxy_usage(timestamp);",
   "CREATE INDEX IF NOT EXISTS idx_proxy_usage_mission ON proxy_usage(mission_id);",
   "CREATE INDEX IF NOT EXISTS idx_proxy_outcomes_timestamp ON proxy_outcomes(timestamp);",
+  -- Last authentication verdict of real proxied requests, per upstream account
+  -- (`cliproxyapi:<type>` when CLIProxyAPI holds the login). A row means "rejected".
+  "CREATE TABLE IF NOT EXISTS provider_auth_health (account_key TEXT PRIMARY KEY, code TEXT NOT NULL DEFAULT '', observed_at TEXT NOT NULL DEFAULT '');",
   "CREATE INDEX IF NOT EXISTS idx_mission_search_docs_mission ON mission_search_docs(mission_id);",
   "CREATE UNIQUE INDEX IF NOT EXISTS deferred_message_batches_uuid ON deferred_message_batches(mission_id, message_id);"
 ]
@@ -1411,6 +1421,20 @@ def execParamQueryUnlocked (db : SqliteDb) (sql : String) (params : Array String
 def execParamQuery (db : SqliteDb) (sql : String) (params : Array String) : IO (Except String (Array (Array String))) :=
   db.mu.atomically (sqliteQueryRowsRaw db.handle sql params)
 
+/-- Server start only (after the listen socket is bound, before any turn is launched):
+    a mission still `active` with no surviving run belonged to a previous Core process.
+    Left `active` it would look busy forever and its armed wake-up would never be
+    admitted. `interrupted` is truthful and resumable. Never call this from a CLI or
+    a second process: there, `active` local turns are owned by the running server. -/
+def interruptTurnsLostToRestart (mDb : SqliteDb) : IO Nat := do
+  let res ← execParamQuery mDb
+    ("UPDATE missions SET status='interrupted',terminal_reason='core_restarted',state_revision=state_revision+1 " ++
+     "WHERE status='active' AND COALESCE(placement_kind,'')<>'client' AND NOT EXISTS " ++
+     "(SELECT 1 FROM mission_runs r WHERE r.mission_id=missions.id AND r.execution_state<>'terminal') RETURNING id;") #[]
+  match res with
+  | .ok rows => return rows.size - 1
+  | .error _ => return 0
+
 /-- Execute `act` inside an atomic, mutex-serialized `BEGIN IMMEDIATE ... COMMIT` SQLite write transaction. -/
 def withImmediateTx {α : Type} (db : SqliteDb) (act : IO (Except String α)) : IO (Except String α) :=
   db.mu.atomically do
@@ -1839,10 +1863,11 @@ def releaseDispatchTrackLease (st : CoreStore) (reservationId nowAt : String) : 
       if let .error e := u2 then return .error e
     return .ok ()
 
-/-- Record mission opened timestamp (`mark_mission_opened` capability parity). -/
+/-- Record mission opened timestamp (`mark_mission_opened` capability parity).
+Opening is a read: it must not move `updated_at`, which orders the mission list. -/
 def mark_mission_opened (st : CoreStore) (missionId openedAt : String) : IO (Except String Unit) := do
   let res ← execParamQuery st.missionsDb
-    "UPDATE missions SET opened_at=?2, updated_at=?2 WHERE id=?1;" #[missionId, openedAt]
+    "UPDATE missions SET opened_at=?2 WHERE id=?1;" #[missionId, openedAt]
   return res.map (fun _ => ())
 
 /-- Fetch one mission row, or `none` when it does not exist. -/
@@ -2048,6 +2073,13 @@ def renderContinuationNextAtJson (triggerKind : String) (dueEpoch : UInt64) : St
   if triggerKind == "job" || dueEpoch == 0 then "null"
   else jsonEscape (formatEpochIso8601Utc dueEpoch)
 
+/-- Direct children executing, queued, waiting for background work, or holding an armed
+    continuation, independent of the list response's filters and pagination. Uses parent alias `m`. -/
+def liveChildrenCountSql : String :=
+  "(SELECT COUNT(*) FROM missions child WHERE child.parent_mission_id=m.id AND (" ++
+  "child.status IN ('active','running','starting','resuming','working','in_progress','processing','streaming','pending','queued','waiting_background') " ++
+  "OR EXISTS (SELECT 1 FROM mission_continuations cc WHERE cc.mission_id=child.id AND cc.phase=1)))"
+
 /-- Query filter options for `GET /api/control/missions` (`listMissionsJson`). -/
 structure MissionListFilter where
   limit?           : Option Nat := none
@@ -2204,7 +2236,8 @@ def listMissionsJson
     "COALESCE(m.origin,'') AS origin," ++
     "COALESCE(m.origin_session_id,'') AS origin_session_id," ++
     "COALESCE(m.agent,'') AS agent," ++
-    "COALESCE(m.resumable,0) AS resumable " ++
+    "COALESCE(m.resumable,0) AS resumable," ++
+    liveChildrenCountSql ++ " AS live_children_count " ++
     "FROM missions m LEFT JOIN mission_terminal_evidence e ON e.mission_id = m.id " ++
     whereClause ++
     tailClause
@@ -2241,9 +2274,9 @@ def listMissionsJson
     return m
   let contSql :=
     if useScopedIn then
-      s!"SELECT mission_id,id,phase,due_epoch,trigger_kind,reason,source,error,recurrence FROM mission_continuations WHERE mission_id IN ({inPlaceholders}) AND phase IN (1,2,3) ORDER BY due_epoch ASC, id ASC;"
+      s!"SELECT c.mission_id,c.id,c.phase,c.due_epoch,c.trigger_kind,c.reason,c.source,c.error,c.recurrence FROM mission_continuations c JOIN missions m ON m.id=c.mission_id WHERE c.mission_id IN ({inPlaceholders}) AND (c.phase=1 OR (c.phase=2 AND c.run_generation>=COALESCE(m.run_generation,1))) ORDER BY c.due_epoch ASC, c.id ASC;"
     else
-      "SELECT mission_id,id,phase,due_epoch,trigger_kind,reason,source,error,recurrence FROM mission_continuations WHERE phase IN (1,2,3) ORDER BY due_epoch ASC, id ASC;"
+      "SELECT c.mission_id,c.id,c.phase,c.due_epoch,c.trigger_kind,c.reason,c.source,c.error,c.recurrence FROM mission_continuations c JOIN missions m ON m.id=c.mission_id WHERE (c.phase=1 OR (c.phase=2 AND c.run_generation>=COALESCE(m.run_generation,1))) ORDER BY c.due_epoch ASC, c.id ASC;"
   let contRows ← execParamQuery st.missionsDb contSql inParams
   let contMap : Std.HashMap String (Array String) := Id.run do
     let mut m : Std.HashMap String (Array String) := {}
@@ -2301,7 +2334,12 @@ def listMissionsJson
           let c4 := r[4]?.getD ""
           let c5 := r[5]?.getD ""
           let c6 := r[6]?.getD ""
-          let c7 := r[7]?.getD ""
+          -- Some writers store `updated_at` as epoch seconds; clients order rows by
+          -- parsing it as ISO-8601, so an epoch reads as the oldest copy and a stale
+          -- one (e.g. with the pre-rename title) wins. Always emit ISO-8601.
+          let c7 := match (r[7]?.getD "").trimAscii.toString.toNat? with
+            | some ep => formatEpochIso8601Utc ep.toUInt64
+            | none => r[7]?.getD ""
           let total_cost_cents := (r[8]?.bind String.toNat?).getD 0
           let authMode := r[9]?.getD "writer"
           let placeKind := r[10]?.getD "managed"
@@ -2348,6 +2386,7 @@ def listMissionsJson
           let originSessVal := r[40]?.getD ""
           let agentVal := r[41]?.getD ""
           let resumableBool := ((r[42]?.bind String.toNat?).getD 0) != 0
+          let liveChildrenCount := (r[43]?.bind String.toNat?).getD 0
           let projJson := if projSlug.isEmpty then "null" else jsonEscape projSlug
           let parentJson := if parentMid.isEmpty then "null" else jsonEscape parentMid
           let metaUpdJson := if metaUpdVal.isEmpty then "null" else jsonEscape metaUpdVal
@@ -2380,7 +2419,7 @@ def listMissionsJson
             s!"\{\"id\":{jsonEscape c0},\"title\":{jsonEscape c1},\"status\":{jsonEscape c2},\"backend\":{jsonEscape c3}," ++
             s!"\"model_override\":{jsonEscape c4},\"model_effort\":{jsonEscape c5},\"working_directory\":{jsonEscape c6}," ++
             s!"\"project\":{projJson},\"folder\":{jsonEscape folderVal},\"placement_revision\":{placeRev}," ++
-            s!"\"parent_mission_id\":{parentJson},\"created_at\":{jsonEscape createdAtVal},\"updated_at\":{jsonEscape c7}," ++
+            s!"\"parent_mission_id\":{parentJson},\"live_children_count\":{liveChildrenCount},\"created_at\":{jsonEscape createdAtVal},\"updated_at\":{jsonEscape c7}," ++
             s!"\"metadata_updated_at\":{metaUpdJson},\"short_description\":{shortDescJson},\"github_pr\":{jsonEscape ghPrVal}," ++
             s!"\"workspace_id\":{jsonEscape wsIdVal},\"workspace_name\":{wsNameJson},\"track\":{jsonEscape trackVal}," ++
             s!"\"origin\":{originJson},\"origin_session_id\":{originSessJson},\"agent\":{agentJson}," ++
@@ -3101,6 +3140,30 @@ def restoreMissionStatus
       match upd with
       | .error ue => return .error ue
       | .ok _ => return .ok true
+
+/-- Apply a status chosen by a client (archive, reopen, mark finished) to a mission that is not running.
+    Returns `false` when the mission already has that status. A mission with a live run is refused:
+    stopping it is the job of cancel/interrupt, and writing a status over a live run would leave the
+    run without an owner. -/
+def setMissionStatusFromClient
+    (st : CoreStore) (missionId nextStatus updatedAt : String) : IO (Except String Bool) :=
+  withImmediateTx st.missionsDb do
+    let q ← execParamQueryUnlocked st.missionsDb
+      ("SELECT m.status, (SELECT COUNT(*) FROM mission_runs r WHERE r.mission_id=m.id AND " ++
+       "r.execution_state NOT IN ('terminal','completed','failed','aborted')) FROM missions m WHERE m.id=?1;")
+      #[missionId]
+    match q with
+    | .error e => return .error e
+    | .ok rows =>
+      if rows.size ≤ 1 then return .error "mission_not_found"
+      let curStatus := (rows[1]?.bind (·[0]?)).getD ""
+      let liveRuns := ((rows[1]?.bind (·[1]?)).bind String.toNat?).getD 0
+      if liveRuns > 0 then return .error "mission_running"
+      if curStatus == nextStatus then return .ok false
+      let upd ← execParamQueryUnlocked st.missionsDb
+        "UPDATE missions SET status=?2,state_revision=state_revision+1,updated_at=?3 WHERE id=?1;"
+        #[missionId, nextStatus, updatedAt]
+      return upd.map (fun _ => true)
 
 /-- Arm a `RemoteWait` recovery record (`mission_remote_waits`) when a remote node pauses on
     `usage_limit_wait` or `node_maintenance_wait`, persisting the failed remote job ID and optional

@@ -1,0 +1,14 @@
+{"version": "1.3.0",
+ "packagesDir": ".lake/packages",
+ "packages":
+ [{"type": "path",
+   "scope": "",
+   "name": "«orb-spec»",
+   "manifestFile": "lake-manifest.json",
+   "inherited": false,
+   "dir": "..",
+   "copy": false,
+   "configFile": "lakefile.lean"}],
+ "name": "«orb-desktop-native»",
+ "lakeDir": ".lake",
+ "fixedToolchain": false}

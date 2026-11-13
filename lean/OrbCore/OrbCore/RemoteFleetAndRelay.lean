@@ -20,6 +20,10 @@ import OrbBin.PosixExt
 import OrbBin.HttpClient
 import OrbCore.Store
 import OrbCore.Managed
+import OrbCore.NodeLiveness
+import OrbCore.ManagedProvisioning
+import OrbCore.ManagedTtl
+import OrbCore.ManagedSnapshotCatalog
 import OrbCore.R7Core
 import OrbCore.LegacyHydrate
 
@@ -623,6 +627,38 @@ def probeAllStaticNodesParallel
       ])
   return out
 
+/-- Last successful heartbeat per static node (`<dataRoot>/node_heartbeats.json`). -/
+def loadNodeHeartbeatCache (dataRoot : String) : IO JVal := do
+  let trimmed := dataRoot.trimAscii.toString
+  if trimmed.isEmpty then return .obj #[]
+  match ← (IO.FS.readFile s!"{trimmed}/node_heartbeats.json").toBaseIO with
+  | .error _ => return .obj #[]
+  | .ok raw =>
+    match OrbBin.Json.parse raw with
+    | .ok (.obj fields) => return .obj fields
+    | _ => return .obj #[]
+
+/-- Written through a temporary file and a rename, so a concurrent reader never
+    sees a partial cache. Skipped when nothing changed. -/
+def saveNodeHeartbeatCache (dataRoot : String) (previous next : JVal) : IO Unit := do
+  let trimmed := dataRoot.trimAscii.toString
+  if trimmed.isEmpty || previous == next then return
+  let path := s!"{trimmed}/node_heartbeats.json"
+  let tmp := s!"{path}.{← newUuidV4}.tmp"
+  match ← (IO.FS.writeFile tmp (renderCompact next ++ "\n")).toBaseIO with
+  | .error _ => pure ()
+  | .ok () =>
+    if let .error _ ← (IO.FS.rename tmp path).toBaseIO then
+      discard <| (IO.FS.removeFile tmp).toBaseIO
+
+/-- Non-terminal jobs per node in Core's ledger. -/
+def activeJobsByNode (store : CoreStore) : IO (Array (String × Nat)) := do
+  match ← execParamQuery store.missionsDb
+      ("SELECT node_id, COUNT(*) FROM remote_node_jobs WHERE state NOT IN " ++
+       "('terminal','completed','succeeded','failed','aborted','cancelled','lost') GROUP BY node_id;") #[] with
+  | .ok rows => return (rows.extract 1 rows.size).map fun row => (cell row 0, ((cell row 1).toNat?).getD 0)
+  | .error _ => return #[]
+
 def buildComputeFleetJVal
     (hub? : Option RelayHub)
     (_mc? : Option ManagedComputeStore)
@@ -631,12 +667,20 @@ def buildComputeFleetJVal
     (userSpentTodayCents : UInt64 := 0)
     (userDailyCapCents? : Option UInt64 := none)
     (dataRoot : String := "")
-    (nowIso : String := "") : IO JVal := do
+    (nowIso : String := "")
+    (store? : Option CoreStore := none) : IO JVal := do
   let (rnEnabled, staticNodes) ← loadStaticRemoteNodes
   let nowSec ← nowEpoch
   let effIso := if nowIso.isEmpty then formatEpochIso8601Utc nowSec else nowIso
   let persistedCordons ← loadPersistedNodeCordons dataRoot
-  let staticItems ← probeAllStaticNodesParallel staticNodes persistedCordons effIso
+  let probed ← probeAllStaticNodesParallel staticNodes persistedCordons effIso
+  -- A node that did not answer keeps what its last heartbeat reported.
+  let heartbeatCache ← loadNodeHeartbeatCache dataRoot
+  let staticItems := probed.map (NodeLiveness.applyCache heartbeatCache)
+  saveNodeHeartbeatCache dataRoot heartbeatCache (NodeLiveness.updateCache heartbeatCache probed)
+  let jobLoad ← match store? with
+    | some store => activeJobsByNode store
+    | none => pure #[]
   let visibleMachines :=
     match callerUserId? with
     | none => fleet.machines
@@ -644,17 +688,15 @@ def buildComputeFleetJVal
   let mut managedItems : Array JVal := #[]
   for m in visibleMachines do
     if m.status != "destroyed" then
-      let seenSec? ← match hub? with
+      let hubSeen? ← match hub? with
         | some h => getMachineLastSeen? h m.id
         | none => pure none
-      let relayConnected :=
-        match seenSec? with
-        | some s => nowSec ≤ s + 90
-        | none => m.status == "ready"
-      let nodeStatus :=
-        if m.status == "ready" then (if relayConnected then "online" else "offline")
-        else if m.status == "provisioning" then "provisioning"
-        else "offline"
+      -- The persisted poll counts too, so a Core restart does not erase liveness.
+      let seenSec? := NodeLiveness.lastSeen hubSeen? m.lastPollSec
+      let relayConnected := NodeLiveness.relayConnected seenSec? nowSec
+      let nodeStatus := NodeLiveness.managedStatus m.status seenSec? nowSec
+      let sizeSpec? := managedSizeSpec? m.provider m.size
+      let activeJobs := ((jobLoad.find? (·.1 == s!"managed-{m.id}")).map (·.2)).getD 0
       let ownerKind :=
         if !m.ownerMission.isEmpty then "mission"
         else if m.ownerKind.isEmpty then "user"
@@ -662,7 +704,7 @@ def buildComputeFleetJVal
       let lastSeenVal :=
         match seenSec? with
         | some s => JVal.str (formatEpochIso8601Utc s)
-        | none => if nodeStatus == "online" then JVal.str effIso else .null
+        | none => .null
       managedItems := managedItems.push (.obj #[
         ("resource_history", .arr #[]),
         ("id", .str s!"managed-{m.id}"),
@@ -687,12 +729,16 @@ def buildComputeFleetJVal
         ("version", .null),
         ("capacity_total", JVal.nat 2),
         ("capacity_available", JVal.nat (if nodeStatus == "online" then 2 else 0)),
-        ("active_jobs", JVal.nat 0),
+        ("active_jobs", JVal.nat activeJobs),
         ("queued_jobs", JVal.nat 0),
-        ("cpu_total", JVal.nat 4),
-        ("mem_total_bytes", JVal.uint64 (8 * 1024 * 1024 * 1024)),
+        ("cpu_total", match sizeSpec? with | some spec => JVal.nat spec.cpu | none => .null),
+        ("mem_total_bytes", match sizeSpec? with
+          | some spec => JVal.uint64 (spec.ramGb.toUInt64 * 1024 * 1024 * 1024)
+          | none => .null),
         ("mem_available_bytes", .null),
-        ("disk_total_bytes", .null),
+        ("disk_total_bytes", match sizeSpec? with
+          | some spec => JVal.uint64 (spec.diskGb.toUInt64 * 1024 * 1024 * 1024)
+          | none => .null),
         ("disk_available_bytes", .null),
         ("last_seen", lastSeenVal),
         ("error", .null),
@@ -755,6 +801,394 @@ def getBoatApiKey? (workingDir dataRoot : String) : IO (Option String) := do
 def boatApiBaseUrl : IO String := do
   let raw := ((← IO.getEnv "BOAT_API_URL").getD "https://boat.dev/api/v1").trimAscii.toString
   return trimTrailingSlashes raw
+
+/-- Resolve credentials only inside Core; unsupported providers never create fake rows. -/
+def resolveManagedProvider (dataRoot provider : String) : IO (Except String ManagedProvider.Provider) := do
+  let prov := canonicalizeProvider provider
+  let some entry := ManagedProvider.declaration? prov
+    | return .error "managed_provider_not_implemented"
+  let key? ← if prov == "boat" then getBoatApiKey? dataRoot dataRoot
+    else do
+      match ← openProviderSecret dataRoot prov false true with
+      | .ok key => pure (some key)
+      | .error _ => pure none
+  let some key := key? | return .error (prov ++ "_api_key_not_configured")
+  let base := trimTrailingSlashes (((← IO.getEnv entry.apiBaseEnv).getD entry.defaultApiBase).trimAscii.toString)
+  return .ok (entry.create (ManagedProvider.httpTransport base key))
+
+/-- One live catalog projection for REST and MCP. Availability never writes a toggle. -/
+def loadManagedProviderCatalog (mc : ManagedComputeStore) (dataRoot : String)
+    (fleet : ManagedFleetState) (isAdmin : Bool) (prefs : Array (String × Bool))
+    (override? : Option ManagedProvider.Provider := none) : IO (Except String JVal) := do
+  let .ok disabled ← ManagedProviderSettings.disabled mc
+    | return .error "managed_provider_settings_unavailable"
+  let mut configured : Array String := #[]
+  let mut observations : Array (String × JVal) := #[]
+  for name in knownProviders do
+    if let .ok _ ← openProviderSecret dataRoot name false true then
+      configured := configured.push name
+    let resolved : Except String ManagedProvider.Provider ← match override? with
+      | some provider => pure (if provider.name == name then .ok provider else .error "mock_provider_unconfigured")
+      | none => resolveManagedProvider dataRoot name
+    let observed : ManagedProvider.Availability ← match resolved with
+      | .error _ => pure { status := .unknown, reason := "provider_unconfigured_or_unimplemented" }
+      | .ok provider => do
+        match ← provider.availability { name := "", size := "", ttlSeconds := 300, idempotencyKey := "" } with
+        | .ok value => pure value
+        | .error _ => pure { status := .unknown, reason := "provider_availability_unavailable" }
+    observations := observations.push (name, ManagedProvider.availabilityJson observed)
+  match OrbBin.Json.parse (renderManagedProvidersJson fleet isAdmin prefs configured disabled observations) with
+  | .ok value => return .ok value
+  | .error _ => return .error "managed_provider_catalog_invalid"
+
+def loadManagedBootstrapConfig : IO (Except String ManagedProvisioning.BootstrapConfig) := do
+  let coreUrl := (← IO.getEnv "SANDBOXED_MANAGED_CORE_URL").getD
+    ((← IO.getEnv "SANDBOXED_PUBLIC_URL").getD "")
+  let configuredPath := (← IO.getEnv "ORB_NODE_PROVISION_SCRIPT").getD "/usr/local/lib/orb/orb-node-provision.sh"
+  for path in #[configuredPath, "scripts/orb-node-provision.sh"] do
+    if let .ok script ← (IO.FS.readFile path).toBaseIO then
+      if !script.trimAscii.toString.isEmpty then
+        return .ok { coreUrl := coreUrl.trimAscii.toString, script }
+  return .error "managed_bootstrap_script_missing"
+
+def quoteManagedSpawnCents (provider size : String) (ttlMinutes : UInt64)
+    (override? : Option ManagedProvider.Provider := none) : Except String UInt64 := do
+  let quote := match ManagedProvider.declaration? provider with
+    | some entry => entry.quoteCents size ttlMinutes
+    | none => match override? with
+      | some p => if p.name == provider then p.quoteCents size ttlMinutes
+        else .error { code := "managed_provider_unavailable" }
+      | none => .error { code := "managed_provider_not_implemented" }
+  match quote with
+  | .ok cents => return cents
+  | .error e => throw e.code
+
+/-- Saved snapshots of one project, from the provider's own list. -/
+def projectSnapshotEntries (store : CoreStore) (provider : ManagedProvider.Provider) (project : String) :
+    IO (Except String (Array ManagedSnapshotCatalog.Entry)) := do
+  let inventory ← match ← provider.listSnapshots with
+    | .ok items => pure items
+    | .error e => return .error s!"managed_snapshot_list_failed:{e.code}:{e.status}"
+  let registry ← match ← (IO.FS.readFile s!"{store.rootDir}/managed_snapshots.json").toBaseIO with
+    | .ok raw => pure (ManagedSnapshotCatalog.parseLegacyRegistry raw)
+    | .error _ => pure #[]
+  let known ← match ← execParamQuery store.missionsDb
+      "SELECT DISTINCT project FROM missions WHERE COALESCE(project,'')<>'';" #[] with
+    | .ok rows => pure ((rows.extract 1 rows.size).map (cell · 0))
+    | .error _ => pure #[]
+  return .ok (ManagedSnapshotCatalog.visible inventory registry (known ++ registry.map (·.project)) project)
+
+def resolveProjectSnapshot (store : CoreStore) (provider : ManagedProvider.Provider)
+    (project requested : String) : IO (Except String String) := do
+  if project.trimAscii.toString.isEmpty then return .error "managed_snapshot_requires_project"
+  match ← projectSnapshotEntries store provider project with
+  | .error e => return .error e
+  | .ok entries => return ManagedSnapshotCatalog.resolve entries requested
+
+/-- Save a running machine as a snapshot of `project`. The provider name carries
+    the project, so the snapshot is listed, restored and deleted only inside it. -/
+def saveProjectSnapshot (store : CoreStore) (provider : ManagedProvider.Provider)
+    (project : String) (machine : ManagedMachine) (label : String) :
+    IO (Except String ManagedSnapshotCatalog.Entry) := do
+  let suffix := ((← newUuidV4).take 4).toString
+  let name ← match ManagedSnapshotCatalog.newName project label suffix with
+    | .ok n => pure n
+    | .error e => return .error e
+  let existing ← match ← projectSnapshotEntries store provider project with
+    | .ok entries => pure entries
+    | .error e => return .error e
+  if ManagedSnapshotCatalog.labelTaken existing label then return .error "managed_snapshot_label_exists"
+  -- Remove this VM's own credential files and flush. A snapshot that might
+  -- still carry them is not taken.
+  match ← provider.exec machine.effectiveProviderId ManagedSnapshotCatalog.preSaveCommand 30 with
+  | .error _ => return .error "managed_snapshot_scrub_failed"
+  | .ok reply =>
+    let code := (reply.fieldInt? "exitCode").orElse (fun _ => reply.fieldInt? "exit_code")
+      |>.orElse (fun _ => reply.fieldInt? "code")
+    if code.any (· != 0) then return .error "managed_snapshot_scrub_failed"
+  if let .error e ← provider.saveSnapshot machine.effectiveProviderId name then
+    return .error s!"managed_snapshot_save_failed:{e.code}:{e.status}"
+  let (status, sizeBytes) ← match ← provider.getSnapshot name with
+    | .ok snap => pure (snap.status, snap.sizeBytes)
+    | .error _ => pure ("saving", none)
+  return .ok {
+    name
+    label := ManagedSnapshotCatalog.slug label 32
+    project := ManagedSnapshotCatalog.slug project
+    status
+    sizeBytes
+  }
+
+/-- Delete one snapshot of `project`, named by provider name or label. A name
+    outside the project is not found, whatever the provider holds. -/
+def deleteProjectSnapshot (store : CoreStore) (provider : ManagedProvider.Provider)
+    (project requested : String) : IO (Except String String) := do
+  if project.trimAscii.toString.isEmpty then return .error "managed_snapshot_requires_project"
+  let entries ← match ← projectSnapshotEntries store provider project with
+    | .ok entries => pure entries
+    | .error e => return .error e
+  let name ← match ManagedSnapshotCatalog.resolveForDelete entries requested with
+    | .ok n => pure n
+    | .error e => return .error e
+  match ← provider.deleteSnapshot name with
+  | .ok () => return .ok name
+  | .error e => return .error s!"managed_snapshot_delete_failed:{e.code}:{e.status}"
+
+/-- Everything a configured spawn decides before it reserves or rents: the
+    provider and bootstrap configuration, the image or resolved snapshot, and the
+    provider request. Shared by the spawn itself and its synchronous preflight. -/
+def prepareConfiguredManagedSpawn (dataRoot : String) (machine : ManagedMachine) (args : JVal)
+    (idempotencyKey : String := "")
+    (override? : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) := none)
+    (resolvedSnapshot : String := "") :
+    IO (Except String (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig × ManagedProvider.SpawnSpec)) := do
+  let (provider, bootstrap) ← match override? with
+    | some pair => pure pair
+    | none => do
+      let .ok provider ← resolveManagedProvider dataRoot machine.provider
+        | return .error "managed_provider_unavailable"
+      let .ok bootstrap ← loadManagedBootstrapConfig
+        | return .error "managed_bootstrap_configuration_unavailable"
+      pure (provider, bootstrap)
+  let requestedSnapshot := (args.fieldStr? "from_snapshot").orElse (fun _ => args.fieldStr? "managed_from_snapshot")
+    |>.getD ""
+  -- A caller-supplied label never reaches the provider. Only a name the entry point
+  -- resolved inside the caller's own project (`resolveProjectSnapshot`) is restored.
+  if !requestedSnapshot.trimAscii.toString.isEmpty && resolvedSnapshot.isEmpty then
+    return .error "managed_snapshot_scope_unresolved"
+  let baseImage := (args.fieldStr? "image").getD "orb-node-base"
+  if resolvedSnapshot.isEmpty && baseImage != "orb-node-base" && baseImage != "provider-default" then
+    return .error "managed_image_not_allowlisted"
+  let fromImage := if resolvedSnapshot.isEmpty then baseImage else resolvedSnapshot
+  let key := if idempotencyKey.isEmpty then
+    ((args.fieldStr? "idempotency_key").filter (!·.isEmpty)).getD machine.id
+    else idempotencyKey
+  let scopedKey := bytesToHexLower (sha256Bytes (renderCompact (.arr #[
+    .str machine.ownerUserId, .str machine.ownerMission, .str key
+  ])).toUTF8)
+  let spec : ManagedProvider.SpawnSpec := {
+    name := machine.sandboxName
+    size := machine.size
+    ttlSeconds := machine.ttlMinutes * 60
+    idempotencyKey := scopedKey
+    fromSnapshot := fromImage
+    repo := (args.fieldStr? "repo").getD ""
+    memoryMiB := args.fieldUInt64? "memory_mib"
+  }
+  return .ok (provider, bootstrap, spec)
+
+/-- Refuse, before a receipt is accepted, what the spawn would refuse without
+    renting: bad configuration, an unlisted image, a disabled provider, no capacity. -/
+def preflightConfiguredManagedSpawn (mc : ManagedComputeStore) (dataRoot : String)
+    (fleet : ManagedFleetState) (machine : ManagedMachine) (args : JVal)
+    (override? : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) := none)
+    (resolvedSnapshot : String := "") : IO (Except String Unit) := do
+  match ← prepareConfiguredManagedSpawn dataRoot machine args "" override? resolvedSnapshot with
+  | .error e => return .error e
+  | .ok (provider, _, spec) => ManagedProvisioning.preflightAvailability mc fleet provider spec
+
+/-- REST, MCP and automatic placement share admission, provider create, guest
+    installation, enrollment, relay readiness, and failure cleanup. -/
+def spawnConfiguredManagedWorker (mc : ManagedComputeStore) (dataRoot : String)
+    (fleet : ManagedFleetState) (machine : ManagedMachine) (args : JVal)
+    (idempotencyKey : String := "")
+    (override? : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) := none)
+    (userAdmission? : Option ManagedUserAdmission := none)
+    (resolvedSnapshot : String := "")
+    (forkOfProviderId : String := "") :
+    IO (Except String ManagedProvisioning.SpawnResult) := do
+  match ← prepareConfiguredManagedSpawn dataRoot machine args idempotencyKey override? resolvedSnapshot with
+  | .error e => return .error e
+  | .ok (provider, bootstrap, spec) =>
+    -- A fork is a spawn whose disk comes from a running machine: the same
+    -- reservation, admission, bootstrap and readiness rules apply to it.
+    let provider := if forkOfProviderId.isEmpty then provider else
+      { provider with spawn := fun forkSpec => provider.fork forkOfProviderId forkSpec }
+    ManagedProvisioning.spawnManagedWorker mc fleet machine provider spec bootstrap {} userAdmission?
+
+/-- Reconcile only Core-owned records against a complete provider list. Exact
+    names repair pre-cutover bindings; known IDs and boot epochs fence stale lists.
+    Provider readiness never substitutes for an authenticated relay poll. -/
+def reconcileManagedProviderInventory (mc : ManagedComputeStore) (providerName servicePrefix : String)
+    (inventory : Array ManagedProvider.Machine) (nowEpoch : UInt64) : IO (Except String JVal) := do
+  let .ok fleet ← loadManagedFleet mc false false 0 0 100 | return .error "managed_inventory_read_failed"
+  let completeNames := inventory.all (fun remote => !remote.name.trimAscii.toString.isEmpty)
+  let mut backfilled : Array JVal := #[]
+  let mut stopped : Array JVal := #[]
+  let mut closed : Array JVal := #[]
+  let mut ambiguous : Array JVal := #[]
+  let mut missing : Array JVal := #[]
+  for m in fleet.machines do
+    if canonicalizeProvider m.provider != providerName || m.status == "destroyed" then continue
+    let canonicalName := servicePrefix ++ m.id
+    let ownRecordedName := !m.sandboxName.isEmpty && m.sandboxName.startsWith servicePrefix
+    let candidates := inventory.filter fun remote =>
+      if !m.providerId.isEmpty then remote.providerId == m.providerId
+      else remote.name == canonicalName || (ownRecordedName && remote.name == m.sandboxName)
+    let candidates := candidates.foldl (fun acc remote =>
+      if acc.any (fun other => other.providerId == remote.providerId) then acc else acc.push remote)
+      (#[] : Array ManagedProvider.Machine)
+    if candidates.size > 1 then
+      ambiguous := ambiguous.push (.str m.id)
+      continue
+    if let some remote := candidates[0]? then
+      if m.providerId.isEmpty then
+        if let .error _ ← backfillManagedProviderIdentity mc m.id providerName remote.providerId then
+          ambiguous := ambiguous.push (.str m.id)
+          continue
+        backfilled := backfilled.push (.str m.id)
+      let .ok observed := observeProviderPayload providerName m.id 200 (.obj #[("state", .str remote.state)])
+        | continue
+      let observed := { observed with expectedProviderId? := some remote.providerId, expectedBootEpoch? := some m.nodeBootEpoch }
+      if observed.observedStatus == "stopped" && m.status == "ready" then
+        if (← applyProviderObservation mc observed nowEpoch 0 1).isOk then stopped := stopped.push (.str m.id)
+      else if observed.orphaned then
+        if (← applyProviderObservation mc observed nowEpoch 0 1).isOk then closed := closed.push (.str m.id)
+    else
+      missing := missing.push (.str m.id)
+      -- A timed-out, unbound reservation with no matching sandbox can close
+      -- locally. Unknown legacy names remain visible for operator investigation.
+      if completeNames && m.providerId.isEmpty && m.status == "provisioning" && m.createdAtSec > 0 &&
+          !inventory.any (fun remote => remote.name == m.sandboxName) &&
+          nowEpoch ≥ m.createdAtSec + 360 then
+        let observed : ProviderObservation := {
+          provider := providerName, machineId := m.id, observedStatus := "destroyed", orphaned := true,
+          expectedProviderId? := some "", expectedBootEpoch? := some m.nodeBootEpoch
+        }
+        if (← applyProviderObservation mc observed nowEpoch 0 1).isOk then closed := closed.push (.str m.id)
+  return .ok (.obj #[("backfilled", .arr backfilled), ("stopped", .arr stopped),
+    ("closed", .arr closed), ("ambiguous", .arr ambiguous), ("missing", .arr missing)])
+
+def reconcileConfiguredBoatInventory (mc : ManagedComputeStore) (dataRoot : String)
+    (nowEpoch : UInt64) (override? : Option ManagedProvider.Provider := none) : IO (Except String JVal) := do
+  let provider ← match override? with
+    | some p => pure p
+    | none => do
+      let .ok p ← resolveManagedProvider dataRoot "boat" | return .error "boat_provider_unavailable"
+      pure p
+  if provider.name != "boat" then return .error "managed_provider_mismatch"
+  let .ok inventory ← provider.list | return .error "boat_inventory_unavailable"
+  reconcileManagedProviderInventory mc "boat" (sandboxNamePrefixFor (← IO.appPath).toString) inventory nowEpoch
+
+structure ManagedLifecycleContext where
+  store : CoreStore
+  fleet : ManagedFleetState := {}
+  override? : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) := none
+
+def loadManagedUserAdmission (store : CoreStore) (userId : String) (nowEpoch : UInt64) :
+    IO (Except String (Option ManagedUserAdmission)) := do
+  if userId.isEmpty then return .ok none
+  -- User ids are not secrets; naming the missing one makes a stale owner diagnosable.
+  let some user ← getUserById? store userId | return .error s!"managed_user_missing:{userId}"
+  if user.disabled then return .error s!"managed_user_disabled:{userId}"
+  let some cap := user.dailySpendCapCents? | return .ok none
+  let (inf, cmp) ← getUserSpentTodayCents store userId (formatEpochIso8601Utc nowEpoch |>.take 10 |>.toString)
+  return .ok (some { capCents := cap, inferenceCents := inf, computeCents := cmp })
+
+/-- Pre-cutover rows carry a tenant label (for example `prod`) instead of a user id.
+    Where the owning mission names a real user, adopt it. Rows whose mission has no
+    such owner are left as they are; nothing is guessed. Idempotent. -/
+def repairManagedMachineOwners (store : CoreStore) (mc : ManagedComputeStore) : IO Nat := do
+  let .ok owners ← execParamQuery mc.db
+      "SELECT DISTINCT owner_user_id FROM managed_machines WHERE owner_user_id<>'';" #[] | return 0
+  let mut repaired := 0
+  for i in [1:owners.size] do
+    let stale := cell owners[i]! 0
+    if (← getUserById? store stale).isSome then continue
+    let .ok machines ← execParamQuery mc.db
+        "SELECT id,owner_mission FROM managed_machines WHERE owner_user_id=?1 AND owner_mission<>'';" #[stale] | continue
+    for j in [1:machines.size] do
+      let machineId := cell machines[j]! 0
+      let .ok missionRows ← execParamQuery store.missionsDb
+          "SELECT COALESCE(owner_user_id,'') FROM missions WHERE id=?1;" #[cell machines[j]! 1] | continue
+      if missionRows.size < 2 then continue
+      let owner := cell missionRows[1]! 0
+      if owner.isEmpty || owner == stale || (← getUserById? store owner).isNone then continue
+      if let .ok _ ← execParamQuery mc.db
+          "UPDATE managed_machines SET owner_user_id=?2 WHERE id=?1 AND owner_user_id=?3;" #[machineId, owner, stale] then
+        discard <| execParamQuery mc.db
+          "UPDATE managed_cost_reservations SET owner_user_id=?2 WHERE machine_id=?1 AND owner_user_id=?3;" #[machineId, owner, stale]
+        repaired := repaired + 1
+  return repaired
+
+private def managedLifecycleResult (m : ManagedMachine) : JVal :=
+  .obj #[("ok", .bool true), ("id", .str m.id), ("state", .str m.status),
+    ("machine", (OrbBin.Json.parse (renderManagedMachineItemJson m)).toOption.getD .null)]
+
+/-- One lifecycle implementation for REST and MCP. A resume is not committed
+    until the successor's authenticated first poll; provider failures propagate. -/
+def runConfiguredManagedLifecycle (mc : ManagedComputeStore) (ctx : ManagedLifecycleContext)
+    (machineId action : String) (nowEpoch : UInt64) (args : JVal := .obj #[])
+    (retryKey : String := "") : IO (Except String JVal) := do
+  let some (m, slice) ← getManagedMachine? mc machineId | return .error "managed_machine_missing"
+  let provider ← match ctx.override? with
+    | some pair => pure pair.1
+    | none => do
+      let .ok p ← resolveManagedProvider ctx.store.rootDir m.provider | return .error "managed_provider_unavailable"
+      pure p
+  if provider.name != m.provider then return .error "managed_provider_mismatch"
+  if action == "extend" then
+    if ctx.override?.isNone then
+      let some entry := ManagedProvider.declaration? m.provider | return .error "managed_provider_unavailable"
+      if !entry.supportsExtend then return .error "managed_provider_extend_unsupported"
+    let budget ← match ← loadManagedUserAdmission ctx.store m.ownerUserId nowEpoch with
+      | .ok value => pure value
+      | .error e => return .error e
+    let .ok fleet ← loadManagedFleet mc ctx.fleet.enabled ctx.fleet.boatEnabled ctx.fleet.dailyCapCents
+        ctx.fleet.spentTodayCents ctx.fleet.maxConcurrent | return .error "managed_fleet_read_failed"
+    let rawKey ← if !retryKey.isEmpty then pure retryKey else
+      match (args.fieldStr? "idempotency_key").filter (!·.isEmpty) with
+      | some key => pure key
+      | none => newUuidV4
+    let key := bytesToHexLower (sha256Bytes (renderCompact (.arr #[.str "managed-extend",.str m.id,.str m.ownerUserId,.str rawKey])).toUTF8)
+    let .ok minutes := ManagedTtl.extensionMinutes args | return .error "managed_extension_invalid"
+    match ← ManagedTtl.extendWorker mc fleet provider m.id key minutes nowEpoch budget with
+    | .ok updated => return .ok (managedLifecycleResult updated)
+    | .error e => return .error e
+  if action == "resume" then
+    if provider.name == "boat" && (m.providerId.isEmpty || (m.status == "ready" && m.lastPollSec == 0)) then
+      let .ok _ ← reconcileConfiguredBoatInventory mc ctx.store.rootDir nowEpoch (some provider)
+        | return .error "boat_inventory_reconciliation_failed"
+    let some (m, _) ← getManagedMachine? mc machineId | return .error "managed_machine_missing"
+    let bootstrap ← match ctx.override? with
+      | some pair => pure pair.2
+      | none => do
+        let .ok cfg ← loadManagedBootstrapConfig | return .error "managed_bootstrap_configuration_unavailable"
+        pure cfg
+    let budget ← match ← loadManagedUserAdmission ctx.store m.ownerUserId nowEpoch with
+      | .ok value => pure value
+      | .error e => return .error e
+    let fleet ← match ← loadManagedFleet mc ctx.fleet.enabled ctx.fleet.boatEnabled
+        ctx.fleet.dailyCapCents ctx.fleet.spentTodayCents ctx.fleet.maxConcurrent with
+      | .ok f => pure f
+      | .error e => return .error e
+    let rawKey ← if !retryKey.isEmpty then pure retryKey else
+      match (args.fieldStr? "idempotency_key").filter (!·.isEmpty) with
+      | some key => pure key
+      | none => newUuidV4
+    let key := bytesToHexLower (sha256Bytes (renderCompact (.arr #[.str "managed-resume", .str m.id, .str m.ownerUserId, .str rawKey])).toUTF8)
+    let ttl := (args.fieldUInt64? "ttl_minutes").getD 60
+    match ← ManagedProvisioning.resumeManagedWorker mc fleet m.id key ttl provider bootstrap {} budget with
+    | .error e => return .error e
+    | .ok ready => return .ok (managedLifecycleResult ready)
+  let op ← if action == "stop" then pure (Orb.ManagedNode.VmOp.encode .stop)
+    else if action == "destroy" then pure (Orb.ManagedNode.VmOp.encode .destroy)
+    else return .error "managed_lifecycle_bootstrap_not_implemented"
+  if slice.phaseCode == 2 && m.status == "provisioning" then return .error "managed_resume_pending"
+  if Orb.ManagedNode.verifyVmLifecycleAdmit slice.phaseCode op 0 1
+      slice.nodeBootEpoch slice.nodeBootEpoch nowEpoch slice.deletableAt != 1 then
+    return .error "vm_lifecycle_rejected"
+  if slice.phaseCode == 0 && m.providerId.isEmpty then return .error "managed_provider_identity_pending"
+  let outcome ← if action == "stop" then provider.stop m.effectiveProviderId else provider.destroy m.effectiveProviderId
+  if let .error e := outcome then return .error e.code
+  let .ok _ ← applyVmLifecycle mc m.id {
+      opCode := op, ownerLive := 0, idleElapsed := 1,
+      presentedBootEpoch := m.nodeBootEpoch, nowEpoch
+    }
+    | return .error "managed_lifecycle_commit_failed"
+  let some (saved, _) ← getManagedMachine? mc m.id
+    | return .error "managed_machine_missing"
+  return .ok (managedLifecycleResult saved)
 
 def callBoatApi
     (dataRoot method relPath : String)
@@ -907,7 +1341,8 @@ def dispatchRemoteFleetAndRelayRoutes?
     (isAdmin : Bool)
     (isLegacyUnscoped : Bool)
     (nowEpochSec : UInt64)
-    (nowIso : String) : IO (Option (Nat × String × ByteArray)) := do
+    (nowIso : String) (providerOverride? : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) := none) :
+    IO (Option (Nat × String × ByteArray)) := do
   let segs := (cleanPath.splitOn "/").filter (!·.isEmpty)
   let scopedUid? : Option String := if isLegacyUnscoped then none else some callerUserId
 
@@ -959,7 +1394,7 @@ def dispatchRemoteFleetAndRelayRoutes?
         let (_, cmp) ← getUserSpentTodayCents store callerUserId (nowIso.take 10).toString
         pure cmp
       else pure 0
-    let fv ← buildComputeFleetJVal hub? (some mc) fleet scopedUid? uSpent none store.rootDir nowIso
+    let fv ← buildComputeFleetJVal hub? (some mc) fleet scopedUid? uSpent none store.rootDir nowIso (some store)
     return some (jsonResp 200 fv)
 
   -- 4. `/api/managed-machines/{settings,providers*,snapshots*,:id*}`
@@ -986,7 +1421,9 @@ def dispatchRemoteFleetAndRelayRoutes?
         let nextCap := (jv.fieldUInt64? "daily_cap_cents").getD fleet.dailyCapCents
         let nextMax := (jv.fieldUInt64? "max_concurrent").getD fleet.maxConcurrent
         if let some bKey := (jv.fieldStr? "boat_api_key").filter (!·.trimAscii.toString.isEmpty) then
-          discard <| sealProviderSecret store.rootDir "boat" bKey.trimAscii.toString
+          if let .error error ← sealProviderSecret store.rootDir "boat" bKey.trimAscii.toString then
+            return some (jsonErr (if error == "managed_secret_seal_busy" then 409 else 500)
+              "managed_provider_secret_seal_failed")
         discard <| saveManagedFleetConfig mc nextEn nextBoat nextCap fleet.spentTodayCents nextMax
         return some (jsonResp 200 (.obj #[
           ("ok", .bool true),
@@ -998,11 +1435,9 @@ def dispatchRemoteFleetAndRelayRoutes?
 
     if method == "GET" && segs == ["api", "managed-machines", "providers"] then
       let prefs ← getUserManagedPrefs mc callerUserId
-      let mut cfgProvs : Array String := #[]
-      for p in knownProviders do
-        if let .ok _ ← openProviderSecret store.rootDir p false true then
-          cfgProvs := cfgProvs.push p
-      return some (jsonRawResp 200 (renderManagedProvidersJson fleet isAdmin prefs cfgProvs))
+      match ← loadManagedProviderCatalog mc store.rootDir fleet isAdmin prefs (providerOverride?.map Prod.fst) with
+      | .error error => return some (jsonErr 503 error)
+      | .ok catalog => return some (jsonResp 200 catalog)
 
     if method == "PUT" && segs.length == 4 && segs[2]? == some "providers" then
       if !isAdmin then return some (jsonErr 403 "admin_required")
@@ -1011,9 +1446,14 @@ def dispatchRemoteFleetAndRelayRoutes?
       if let some apiKey := (jv.fieldStr? "api_key").filter (!·.trimAscii.toString.isEmpty) then
         if let .error e ← sealProviderSecret store.rootDir prov apiKey.trimAscii.toString then
           return some (jsonErr 400 e)
+      if let some enabled := (jv.fieldBool? "enabled").filter (fun _ => prov != "boat") then
+        if let .error error ← ManagedProviderSettings.setEnabled mc prov enabled nowIso then
+          return some (jsonErr 400 error)
       if prov == "boat" then
-        let nextBoat := (jv.fieldBool? "enabled").getD true
-        discard <| saveManagedFleetConfig mc (fleet.enabled || nextBoat) nextBoat fleet.dailyCapCents fleet.spentTodayCents fleet.maxConcurrent
+        let nextBoat := (jv.fieldBool? "enabled").getD fleet.boatEnabled
+        discard <| saveManagedFleetConfig mc
+          (Orb.ManagedProviderAvailability.fleetAfterProviderUpdate fleet.enabled (jv.fieldBool? "enabled"))
+          nextBoat fleet.dailyCapCents fleet.spentTodayCents fleet.maxConcurrent
       return some (jsonResp 200 (.obj #[("ok", .bool true), ("provider", .str prov)]))
 
     if method == "PUT" && segs.length == 4 && segs[2]? == some "user-providers" then
@@ -1059,12 +1499,10 @@ def dispatchRemoteFleetAndRelayRoutes?
           return some (jsonErr 404 "managed_machine_not_found")
         let jv := (OrbBin.Json.parse ((String.fromUTF8? bodyBytes).getD "{}")).toOption.getD (.obj #[])
         if action == "extend" then
-          let addMins := (jv.fieldUInt64? "minutes").orElse (fun _ => jv.fieldUInt64? "ttl_minutes") |>.getD 60
-          let newDel := (if m.deletableAtSec > nowEpochSec then m.deletableAtSec else nowEpochSec) + addMins * 60
-          discard <| execParamQuery mc.db
-            "UPDATE managed_machines SET ttl_minutes=ttl_minutes+?2,deletable_at_sec=?3 WHERE id=?1;"
-            #[m.id, s!"{addMins}", s!"{newDel}"]
-          return some (jsonResp 200 (.obj #[("ok", .bool true), ("id", .str m.id), ("deletable_at", JVal.uint64 newDel)]))
+          match ← runConfiguredManagedLifecycle mc { store, fleet := defaultFleet, override? := providerOverride? } m.id action nowEpochSec jv
+              (((headers.find? (fun h => h.1.toLower == "idempotency-key")).map Prod.snd).getD "") with
+          | .ok updated => return some (jsonResp 200 updated)
+          | .error e => return some (jsonErr 409 e)
         else if action == "snapshot" then
           let sName := (jv.fieldStr? "name").getD ""
           match ← createManagedSnapshot mc store.rootDir m.id sName nowIso with
@@ -1094,47 +1532,18 @@ def dispatchRemoteFleetAndRelayRoutes?
             let enrollTok ← newUuidV4
             discard <| putEnrollmentToken mc saved.id enrollTok
             return some (jsonRawResp 201 (renderManagedMachineItemJson saved))
-        else if action == "stop" then
-          if m.provider == "boat" then
-            discard <| callBoatApi store.rootDir "POST" s!"/sandboxes/{m.id}/stop" none 12000
-          match ← applyVmLifecycle mc m.id {
-            opCode := Orb.ManagedNode.VmOp.encode .stop, ownerLive := 0, idleElapsed := 0,
-            presentedBootEpoch := m.nodeBootEpoch, nowEpoch := nowEpochSec
-          } with
+        else if action == "stop" || action == "resume" || action == "destroy" then
+          match ← runConfiguredManagedLifecycle mc { store, fleet := defaultFleet, override? := providerOverride? } m.id action nowEpochSec jv with
           | .error e => return some (jsonErr 409 e)
-          | .ok _ => return some (jsonResp 200 (.obj #[("ok", .bool true), ("id", .str m.id), ("state", .str "stopped")]))
-        else if action == "resume" then
-          if m.provider == "boat" then
-            discard <| callBoatApi store.rootDir "POST" s!"/sandboxes/{m.id}/start" none 12000
-          match ← applyVmLifecycle mc m.id {
-            opCode := Orb.ManagedNode.VmOp.encode .resume, ownerLive := 0, idleElapsed := 0,
-            presentedBootEpoch := m.nodeBootEpoch, nowEpoch := nowEpochSec
-          } with
-          | .error e => return some (jsonErr 409 e)
-          | .ok (next, _) =>
-            return some (jsonResp 200 (.obj #[("ok", .bool true), ("id", .str m.id), ("state", .str "provisioning"), ("node_boot_epoch", JVal.uint64 next.nodeBootEpoch)]))
-        else if action == "destroy" then
-          if m.provider == "boat" then
-            discard <| callBoatApi store.rootDir "DELETE" s!"/sandboxes/{m.id}" none 12000
-          match ← applyVmLifecycle mc m.id {
-            opCode := Orb.ManagedNode.VmOp.encode .destroy, ownerLive := 0, idleElapsed := 1,
-            presentedBootEpoch := m.nodeBootEpoch, nowEpoch := nowEpochSec
-          } with
-          | .error e => return some (jsonErr 409 e)
-          | .ok _ => return some (jsonResp 200 (.obj #[("ok", .bool true), ("id", .str m.id), ("state", .str "destroyed")]))
+          | .ok result => return some (jsonResp 200 result)
       else if method == "DELETE" && segs.length == 3 then
         let some (m, _) ← getManagedMachine? mc sub2
           | return some (jsonErr 404 "managed_machine_not_found")
         if !isAdmin && !isLegacyUnscoped && !m.ownerUserId.isEmpty && m.ownerUserId != callerUserId then
           return some (jsonErr 404 "managed_machine_not_found")
-        if m.provider == "boat" then
-          discard <| callBoatApi store.rootDir "DELETE" s!"/sandboxes/{m.id}" none 12000
-        match ← applyVmLifecycle mc m.id {
-          opCode := Orb.ManagedNode.VmOp.encode .destroy, ownerLive := 0, idleElapsed := 1,
-          presentedBootEpoch := m.nodeBootEpoch, nowEpoch := nowEpochSec
-        } with
+        match ← runConfiguredManagedLifecycle mc { store, fleet := defaultFleet, override? := providerOverride? } m.id "destroy" nowEpochSec with
         | .error e => return some (jsonErr 409 e)
-        | .ok _ => return some (jsonResp 200 (.obj #[("ok", .bool true), ("id", .str m.id), ("state", .str "destroyed")]))
+        | .ok result => return some (jsonResp 200 result)
 
   -- 5. `/api/nodes/:name/{cordon,uncordon,capacity}`
   if method == "POST" && segs.length == 4 && segs[0]? == some "api" && segs[1]? == some "nodes" then

@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""Check Core's env ownership, or split legacy env files without evaluating them.
+
+Deliberately accepts only single-line systemd EnvironmentFile assignments.
+Unsupported syntax and ambiguous migrations fail before any output is written.
+Diagnostics contain names and line numbers, never environment values.
+"""
+
+import argparse
+import os
+from pathlib import Path
+import re
+import shutil
+import sys
+
+
+# These describe instance identity, storage and authentication. Everything else
+# belongs to the base, including provider setup and fleet configuration.
+INSTANCE_KEYS = frozenset({
+    "ORB_INSTANCE", "HOST", "PORT", "WORKING_DIR", "SANDBOXED_PUBLIC_URL",
+    "JWT_SECRET", "DASHBOARD_PASSWORD", "SANDBOXED_USERS", "SANDBOXED_SH_USERS",
+    "LIBRARY_PATH", "SANDBOXED_SH_ASK_TMP_ROOT", "TMPDIR",
+})
+REQUIRED = frozenset({"ORB_INSTANCE", "PORT", "WORKING_DIR", "JWT_SECRET"})
+
+
+class InvalidConfig(Exception):
+    pass
+
+
+def literal(value):
+    """Decode our single-line subset of systemd.syntax(7), without expansion."""
+    if value.endswith("\\"):
+        raise InvalidConfig("unsupported continuation")
+    if value.startswith("'"):
+        if len(value) < 2 or not value.endswith("'") or "'" in value[1:-1]:
+            raise InvalidConfig("unsupported single quoting")
+        return value[1:-1]
+    quoted = value.startswith('"')
+    if quoted:
+        if len(value) < 2 or not value.endswith('"'):
+            raise InvalidConfig("unsupported double quoting")
+        value = value[1:-1]
+    result = ""
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == '"' and quoted:
+            raise InvalidConfig("unsupported double quoting")
+        if char == "\\":
+            index += 1
+            if index == len(value):
+                raise InvalidConfig("unsupported escape")
+            char = value[index]
+            if quoted and char not in '\\"`$':
+                result += "\\"
+        result += char
+        index += 1
+    return result
+
+
+def parse_env(raw):
+    """Keep RHS text verbatim; never use shell evaluation or reconstruct values."""
+    try:
+        source = raw.decode("utf-8")
+    except UnicodeError:
+        raise InvalidConfig("env file must be UTF-8") from None
+    result = {}
+    for number, line in enumerate(source.split("\n"), 1):
+        line = line.rstrip("\r").strip(" \t")
+        if not line or line.startswith(("#", ";")):
+            continue
+        match = re.fullmatch(r"([A-Za-z_][A-Za-z_0-9]*)[ \t]*=(.*)", line)
+        if not match or any(ord(c) < 32 and c != "\t" for c in line):
+            raise InvalidConfig(f"unsupported assignment at line {number}")
+        key, value = match.groups()
+        value = value.strip(" \t")
+        if key in result:
+            raise InvalidConfig(f"duplicate key {key} at line {number}")
+        try:
+            literal(value)
+        except InvalidConfig:
+            raise InvalidConfig(f"unsupported quoting or continuation at line {number}") from None
+        result[key] = value
+    return result
+
+
+def check(base, overlay):
+    overlap = base.keys() & overlay.keys()
+    if overlap:
+        raise InvalidConfig("overlay redefines base keys: " + ", ".join(sorted(overlap)))
+    misplaced = (base.keys() & INSTANCE_KEYS) | (overlay.keys() - INSTANCE_KEYS)
+    if misplaced:
+        raise InvalidConfig("keys in the wrong layer: " + ", ".join(sorted(misplaced)))
+    missing = REQUIRED - overlay.keys()
+    if missing:
+        raise InvalidConfig("missing instance keys: " + ", ".join(sorted(missing)))
+    if any(not literal(overlay[key]) for key in REQUIRED):
+        raise InvalidConfig("required instance keys must not be empty")
+    if literal(overlay["ORB_INSTANCE"]) not in {"prod", "dev"}:
+        raise InvalidConfig("ORB_INSTANCE must be prod or dev")
+
+
+def split_envs(prod, dev):
+    common = (prod.keys() | dev.keys()) - INSTANCE_KEYS
+    conflicts = {key for key in common if key not in prod or key not in dev or literal(prod[key]) != literal(dev[key])}
+    if conflicts:
+        raise InvalidConfig("resolve shared setting differences before migration: " + ", ".join(sorted(conflicts)))
+    base = {key: prod[key] for key in common}
+    overlays = []
+    for name, source in (("prod", prod), ("dev", dev)):
+        overlay = {key: value for key, value in source.items() if key in INSTANCE_KEYS}
+        if "ORB_INSTANCE" in overlay and literal(overlay["ORB_INSTANCE"]) != name:
+            raise InvalidConfig("legacy ORB_INSTANCE disagrees with its instance")
+        overlay["ORB_INSTANCE"] = name
+        check(base, overlay)
+        overlays.append(overlay)
+    # Sharing these would silently defeat instance isolation. Do not mint or
+    # change credentials here: the operator resolves conflicts in the source.
+    for key in ("PORT", "WORKING_DIR", "JWT_SECRET", "DASHBOARD_PASSWORD"):
+        if key in prod and key in dev and literal(prod[key]) == literal(dev[key]):
+            raise InvalidConfig(f"instances must have distinct {key}")
+    return base, *overlays
+
+
+def write_private(path, raw):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(raw)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def render(settings):
+    return ("".join(f"{key}={settings[key]}\n" for key in sorted(settings))).encode("utf-8")
+
+
+def migrate(prod_path, dev_path, output, apply=False):
+    prod_raw, dev_raw = prod_path.read_bytes(), dev_path.read_bytes()
+    base, prod, dev = split_envs(parse_env(prod_raw), parse_env(dev_raw))
+    if output.exists():
+        raise InvalidConfig("output directory already exists; refusing to overwrite it")
+    if not apply:
+        return
+    # Exclusive mkdir means reruns never replace a previous configuration or
+    # its backups. No live input or service is modified, even on failure.
+    output.mkdir(mode=0o700)
+    try:
+        (output / "backups").mkdir(mode=0o700)
+        write_private(output / "backups/prod.env", prod_raw)
+        write_private(output / "backups/dev.env", dev_raw)
+        for name, settings in (("core", base), ("prod", prod), ("dev", dev)):
+            write_private(output / f"{name}.env", render(settings))
+    except BaseException:
+        shutil.rmtree(output)
+        raise
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    verify = commands.add_parser("check")
+    verify.add_argument("--base", type=Path, required=True)
+    verify.add_argument("--overlay", type=Path, required=True)
+    migration = commands.add_parser("migrate")
+    migration.add_argument("--prod", type=Path, required=True)
+    migration.add_argument("--dev", type=Path, required=True)
+    migration.add_argument("--output", type=Path, required=True)
+    migration.add_argument("--apply", action="store_true", help="write files; default only validates")
+    args = parser.parse_args()
+    try:
+        if args.command == "check":
+            check(parse_env(args.base.read_bytes()), parse_env(args.overlay.read_bytes()))
+        else:
+            migrate(args.prod, args.dev, args.output, args.apply)
+        print("Core env check passed" if args.command == "check" else
+              "Migration written with both backups" if args.apply else "Migration validated (no files written)")
+        return 0
+    except (InvalidConfig, OSError) as error:
+        # OSError paths can be operator supplied, but never contain file data.
+        print(f"orb-env: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
