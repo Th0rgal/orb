@@ -324,6 +324,78 @@ No questions sent; implement/test generic support against an authorized
 
 ## Operator requests
 
+### Coordinator status 14:40 UTC: red master reproduced, A extern findings
+
+**Red master.** Run `43438246411` on `8a0c7198` completed red, again only
+in `Orb browser (1/2)` and `(2/2)`. Worker `549c6b99` reports (its own
+runs, not yet reviewed by the coordinator):
+
+- All eight provider cases reproduce on `8a0c7198` and pass once the
+  account group is opened; no product change needed. The stale-spec
+  hypothesis for #1722 holds.
+- `code-block` is flaky: 17/20 passed alone. The failures are preceded by
+  `Shared kernel is not initialized`. `orb/tests/code-block.tsx` renders
+  `Transcript` without `initializeKernel()`, unlike `orb/src/index.tsx`
+  and `orb/tests/transcript.tsx:3-4`. The worker may fix that fixture
+  only, and must explain why the failure is intermittent.
+- No patch delivered yet. The provider fix ships first if it is ready
+  before the `code-block` work.
+
+**A: the `unsafe` proposal is declined.** Old A proposed marking the
+ConformanceRunner externs and their callers `unsafe`. Read against
+turbo-lean source, this makes things worse:
+
+- At the Orb pin `29d85f7d` every `unsafe` declaration is rejected
+  (`ZygoteWorker.lean:1395`); only the init-exec whitelist is exempt.
+- At `bca79f34` (the pin #1708 proposes) and at HEAD `15676ea2`,
+  `isPinnedFfiOpaque` requires `!cinfo.isUnsafe`, so an `unsafe` extern can
+  no longer be admitted by the per-symbol pin, and each `unsafe` caller
+  needs its own `[unsafe] allow` entry.
+- It would touch about 250 defs in `HostObservers`/`HostTests` and, by the
+  proposal's own account, still fail the extern gate.
+
+**A: what the existing admission mechanism requires** (source reading at
+turbo-lean HEAD, nothing executed):
+
+- `--ffi-allow` is not a user flag. It is generated from the compiled-in
+  table `PINNED_FFI_PACKAGES` (`crates/turbo-lean/src/zygote.rs:4000`):
+  a git dependency with pinned URL, revision and source SHA-256, plus a
+  `(declaration, C symbol)` list. Path dependencies and in-tree modules
+  are skipped.
+- Orb's 24 `OrbBin.PosixExt` externs are in-tree, so no configuration in
+  Orb can admit them. Orb also pins `lean-sys` at `bbe3183d`, while the
+  table pins `077775ba`.
+- ConformanceRunner has 192 externs (150 `orb_*`, 41 `leansys_*`, 1
+  `lp_*`); none of its `leansys_*` symbols is among the 8 pinned ones.
+- ConformanceRunner, HostObservers and HostTests are imported only by the
+  `OrbCore` umbrella, and the umbrella only by `SelfTest`. The `orb-core`
+  root `CliMain` does not import them. They affect `orb-core-test`,
+  `orb-spec-runner` and the `OrbCore` library target, not the server
+  binary. `PosixExt` is imported by 53 modules and blocks everything.
+
+**#1708 does not solve this.** Its `Test` job (`131367939609`) fails on
+the same 24 `PosixExt` rejections, and its kernel-ABI job (`131367817432`)
+fails on `turbo_spec_verify_audit_materialize_gate` for `Orb.Spec`
+(`skeleton_clean=false, all_shards_certified=false, is_stubbed=true`).
+`bca79f34` is an ancestor of turbo-lean HEAD and a descendant of the
+current pin.
+
+**A: decision needed, in turbo-lean, not in Orb.** Two ways to admit the
+OS bindings without weakening the gate:
+
+1. Move the `PosixExt` and `Sqlite` bindings into `Th0rgal/lean-sys` and
+   add them to `PINNED_FFI_PACKAGES` with revision and source hash. Uses
+   the mechanism that exists; costs a lean-sys change, a turbo-lean
+   release and two pin bumps.
+2. Add a project-level pinned FFI table to turbo-lean (module,
+   declaration, C symbol, source hash) for in-tree modules. Smaller for
+   Orb, but a new trust path in the gate that needs the same independent
+   review as the rejected IO admission.
+
+Until one lands, `wip/a-fail-closed-build-script` and #1708 both stay
+unmergeable, and Orb keeps building through raw Lake. Not assigned: red
+master and the three direct requests come first.
+
 ### Coordinator status 14:25 UTC: red master, overlaps, A measurement
 
 **Master CI is red since 12:19 UTC.** Last green run: `ce131e11` (11:44).
