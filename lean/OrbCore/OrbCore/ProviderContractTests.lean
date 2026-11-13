@@ -25,6 +25,65 @@ private def getJson (app : CoreAppState) (jwt target : String) (now : UInt64) : 
     | throw (IO.userError "provider contract response is not JSON")
   return value
 
+private def postJson (app : CoreAppState) (jwt target : String) (now : UInt64) : IO (Nat × JVal) := do
+  let raw := s!"POST {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: 0\r\n\r\n"
+  let .ok req := parseRequest raw.toUTF8 none
+    | throw (IO.userError "provider contract POST request parse failed")
+  let .ok resp ← dispatchCoreRequest app req now
+    | throw (IO.userError "provider contract POST dispatch failed")
+  return (resp.status, (parseBytes resp.body).toOption.getD .null)
+
+/-- The routing health view merges the two cooldown owners, and clearing a login resets
+    both: seed one cooldown under the legacy ref and one under the health tracker for a
+    CLIProxyAPI-held login, plus one legacy cooldown for an unrelated account, and check
+    `GET /api/model-routing/health` and `POST /api/model-routing/health/:id/clear`. -/
+private def healthCooldownOwners (app : CoreAppState) (jwt : String)
+    (cooldownsRef : IO.Ref (Array AccountCooldown)) : IO (Array String) := do
+  let oauthOnly := "10000000-0000-4000-8000-000000000001"
+  let keyOwned := "10000000-0000-4000-8000-000000000002"
+  let sidecarKey := "cliproxyapi:anthropic"
+  let tracker ← newProviderHealthTracker
+  let app := { app with healthTracker? := some tracker }
+  let wallNow ← nowEpoch
+  let legacyWindow : UInt64 := 2400
+  let trackerWindow : UInt64 := 1500
+  let otherWindow : UInt64 := 1200
+  cooldownsRef.set #[
+    { accountId := sidecarKey, untilEpoch := wallNow + legacyWindow, reason := .serverError },
+    { accountId := keyOwned, untilEpoch := wallNow + otherWindow, reason := .serverError }
+  ]
+  tracker.health.atomically do
+    modify fun s => { s with accounts := #[{
+      accountId := sidecarKey, slotId := accountSlotId sidecarKey, parkedQuota := true,
+      cooldown? := some { accountId := sidecarKey, untilEpoch := wallNow + trackerWindow, reason := .serverError }
+    }] }
+  let now : UInt64 := 0
+  let remainingOf (id : String) : IO UInt64 := do
+    let rows := (← getJson app jwt "/api/model-routing/health" now).asArr?.getD #[]
+    let row := (rows.find? (fun v => v.fieldStr? "account_id" == some id)).getD .null
+    return (row.fieldUInt64? "cooldown_secs_remaining").getD 0
+  let sidecarBefore ← remainingOf oauthOnly
+  let otherBefore ← remainingOf keyOwned
+  -- The endpoint measures against the wall clock, so assert the windows with slack:
+  -- the sidecar login's row must carry the legacy owner's longer window.
+  if sidecarBefore < legacyWindow - 2 || sidecarBefore > legacyWindow ||
+     otherBefore < otherWindow - 2 || otherBefore > otherWindow then
+    return #[s!"health GET windows are off: sidecar {sidecarBefore}, unrelated {otherBefore}"]
+  let (clearCode, _) ← postJson app jwt s!"/api/model-routing/health/{oauthOnly}/clear" now
+  if clearCode != 204 then
+    return #[s!"health clear must answer 204, got {clearCode}"]
+  let sidecarAfter ← remainingOf oauthOnly
+  let otherAfter ← remainingOf keyOwned
+  if sidecarAfter != 0 then
+    return #[s!"clearing the sidecar login's health must reset both owners, got {sidecarAfter}"]
+  let tracked ← lookupAccountHealthRecord tracker sidecarKey
+  if tracked.cooldown?.isSome || tracked.parkedQuota then
+    return #["clearing the sidecar login's health must clear its tracker record"]
+  if otherAfter < otherWindow - 2 || otherAfter > otherWindow then
+    return #[s!"clearing one login's health must keep an unrelated account's cooldown, got {otherAfter}"]
+  cooldownsRef.set #[]
+  return #[]
+
 /-- Replay the production renderers and HTTP dispatch, never a live usage fetch. -/
 def run : IO Unit := do
   let fixtureRaw ← IO.FS.readFile "shared/orb-spec/fixtures/provider-response-contract.json"
@@ -141,6 +200,7 @@ def run : IO Unit := do
             failures := failures.push "cached Codex HTTP reset fields must be numeric epochs"
           if cached.fieldStr? "status" != some "needs_reauth" then
             failures := failures.push "provider metadata must not clear a cached authentication rejection"
+      failures := failures ++ (← healthCooldownOwners app jwt cooldownsRef)
       if !failures.isEmpty then
         throw (IO.userError ("provider response contract failures:\n" ++ String.intercalate "\n" failures.toList))
     finally
