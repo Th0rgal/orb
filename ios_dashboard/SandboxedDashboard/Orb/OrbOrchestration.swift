@@ -72,7 +72,7 @@ enum OrbOrchestration {
                 let text = content.map { $0["text"].text }.joined()
                 if !text.isEmpty { value = parse(text); continue }
             }
-            if !value["error"].text.isEmpty && value["output"] == .null {
+            if !value["error"].text.isEmpty && value["output"] == .null && value["state"] == .null {
                 let inner = parse(value["error"].text)
                 return (inner, errorText(inner, fallback: value["error"].text))
             }
@@ -89,11 +89,13 @@ enum OrbOrchestration {
     }
 
     private static func errorText(_ v: OrbJSON, fallback: String = "Failed") -> String {
+        func clean(_ value: OrbJSON) -> String? {
+            let text = value.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? nil : text
+        }
         let e = v["error"]
-        if !e["message"].text.isEmpty { return e["message"].text }
-        if !v["message"].text.isEmpty { return v["message"].text }
-        if !e.text.isEmpty { return e.text }
-        return fallback
+        if case .object = e { return clean(e["message"]) ?? clean(e["reason"]) ?? fallback }
+        return clean(v["message"]) ?? clean(v["reason"]) ?? clean(e) ?? fallback
     }
 
     private static func status(_ m: OrbJSON) -> String? {
@@ -132,8 +134,12 @@ enum OrbOrchestration {
             if op == "get_action" {
                 let id = args["action_id"].text.isEmpty ? value["action_id"].text : args["action_id"].text
                 guard !id.isEmpty else { continue }
-                let actionError = error ?? (value["error"] != .null ? errorText(value) : nil)
-                actions[id] = (value["result"], actionError)
+                let result = value["result"]
+                let failed = ["failed", "cancelled"].contains(value["state"].text.lowercased())
+                let resultError = result["error"] != .null || (failed && (!result["message"].text.isEmpty || !result["reason"].text.isEmpty))
+                    ? errorText(result) : nil
+                let actionError = resultError ?? error ?? (value["error"] != .null || failed ? errorText(value) : nil)
+                actions[id] = (result, actionError)
                 let mission = value["result"]["mission"]
                 if !mission["id"].text.isEmpty { missions[mission["id"].text] = mission }
                 if value["result"]["machine"] != .null { note(machine: value["result"]["machine"]) }

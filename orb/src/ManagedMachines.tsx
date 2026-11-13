@@ -10,7 +10,7 @@ import { pollWhileVisible } from "./poll";
 import { useNow } from "./time";
 import * as Ic from "./icons";
 import {
-  MANAGED_GROUP_PREVIEW_LIMIT, allowedSizes, budgetFull, budgetLeft, budgetLine, canStopMachine, costLine, credentialSourceLabel, groupMachinesByProvider, isProviderEnabled, isProviderUsable, listManagedProviders, managedSectionTitle, providerGroupSummary, providerLabel, providerStatusLine, sizeLabel, specLine, stopManagedMachine, ttlFraction, ttlShort, createManagedMachine, destroyManagedMachine, estimateCost, extendManagedMachine, isLive,
+  MANAGED_GROUP_PREVIEW_LIMIT, allowedSizes, budgetFull, budgetLeft, budgetLine, canStopMachine, costLine, credentialSourceLabel, groupMachinesByProvider, isProviderPersonallyEnabled, isProviderGloballyEnabled, isProviderUsable, listManagedProviders, managedSectionTitle, providerGroupSummary, providerLabel, providerStatusLine, sizeLabel, specLine, stopManagedMachine, ttlFraction, ttlShort, createManagedMachine, destroyManagedMachine, estimateCost, extendManagedMachine, isLive,
   isStarting, listManagedMachines, liveCost, machineName, managedNodeIds, managedError, minutesLabel, recentMachines, setManagedProviderPreference, sizeSpec, stateLabel, ttlLeft, ttlUrgent, updateManagedProvider,
   spendDayDetail, spendFraction, spendSummary, spendWeekday,
   machineOwner, reapLine, usd, usdPerHour, isStopped, resumeManagedMachine, listManagedSnapshots, deleteManagedSnapshot, snapshotLine, type ManagedSnapshot, type CreateManagedMachine, type DailySpend, type ManagedBudget, type ManagedMachine, type ManagedMachinesResponse, type ManagedProviderInfo, type ManagedProviderPatch, type ManagedSize,
@@ -202,7 +202,7 @@ function ConfigureMachineProviderDialog(p: { provider: ManagedProviderInfo; onCl
       const patch: ManagedProviderPatch = patchOverride ?? {
         ...(apiKey().trim() ? { api_key: apiKey().trim(), enabled: true } : {}),
         ...(p.provider.provider === "hetzner" || p.provider.provider === "scaleway" || p.provider.provider === "colab" ? { region: region().trim() } : {}),
-        ...(p.provider.provider === "scaleway" || p.provider.provider === "leanci" || p.provider.provider === "boost" ? { project_id: projectId().trim() } : {}),
+        ...(p.provider.provider === "scaleway" || p.provider.provider === "leanci" ? { project_id: projectId().trim() } : {}),
         ...maxPatch,
       };
       const updated = await updateManagedProvider(p.provider.provider, patch);
@@ -231,7 +231,7 @@ function ConfigureMachineProviderDialog(p: { provider: ManagedProviderInfo; onCl
       <Field label="Max concurrent VMs" description="Global ceiling on simultaneous live VMs for this provider. Leave blank for unlimited.">
         <input type="text" inputmode="numeric" class="s-input" aria-label="Max concurrent VMs" placeholder="Unlimited" value={maxConcurrent()} onInput={e => setMaxConcurrent(e.currentTarget.value)} />
       </Field>
-      <Show when={p.provider.provider === "leanci" || p.provider.provider === "boost"}>
+      <Show when={p.provider.provider === "leanci"}>
         <Field label="Workspace ID" description="Optional lean.ci workspace UUID override when the API token has access to multiple workspaces.">
           <input type="text" class="s-input" aria-label="Workspace ID" placeholder="Optional" value={projectId()} onInput={e => setProjectId(e.currentTarget.value)} />
         </Field>
@@ -305,17 +305,16 @@ export function MachineProvidersCard(p: { providers?: readonly ManagedProviderIn
     p.onUpdated?.(updated);
   };
 
-  const toggle = async (pr: ManagedProviderInfo, targetEnabled = !isProviderEnabled(pr)) => {
+  const toggle = async (pr: ManagedProviderInfo, global = false, targetEnabled = !(global ? isProviderGloballyEnabled(pr) : isProviderPersonallyEnabled(pr))) => {
     const previous = pr;
-    const admin = isAdminUser();
-    const optimistic: ManagedProviderInfo = admin
-      ? { ...pr, enabled: targetEnabled, globally_enabled: targetEnabled, effective_enabled: targetEnabled && pr.user_enabled !== false }
-      : { ...pr, user_enabled: targetEnabled, effective_enabled: pr.globally_enabled !== false && targetEnabled };
+    const optimistic: ManagedProviderInfo = global
+      ? { ...pr, enabled: targetEnabled, globally_enabled: targetEnabled, effective_enabled: targetEnabled && isProviderPersonallyEnabled(pr) }
+      : { ...pr, user_enabled: targetEnabled, effective_enabled: isProviderGloballyEnabled(pr) && targetEnabled };
     setErr(null);
     setBusyProvider(pr.provider);
     setLocalOverrides(m => new Map(m).set(pr.provider, optimistic));
     try {
-      if (admin) {
+      if (global) {
         const saved = await updateManagedProvider(pr.provider, { enabled: targetEnabled });
         window.dispatchEvent(new CustomEvent("orb:managed-providers-changed", { detail: saved }));
         applyUpdate(saved);
@@ -332,7 +331,7 @@ export function MachineProvidersCard(p: { providers?: readonly ManagedProviderIn
       });
       setErr({
         message: `Couldn’t update ${pr.display_name || providerLabel(pr.provider)}: ${managedError(e)}`,
-        retry: () => void toggle(previous, targetEnabled),
+        retry: () => void toggle(previous, global, targetEnabled),
       });
     } finally {
       setBusyProvider(null);
@@ -360,16 +359,29 @@ export function MachineProvidersCard(p: { providers?: readonly ManagedProviderIn
                 <div class="s-row-desc">{providerStatusLine(pr())}</div>
               </div>
               <div class="managed-provider-actions">
+                <span class="s-row-desc">My missions</span>
                 <button
                   type="button"
-                  class={`toggle ${isProviderEnabled(pr()) ? "on" : ""}`}
+                  class={`toggle ${isProviderPersonallyEnabled(pr()) ? "on" : ""}`}
                   role="switch"
-                  aria-checked={isProviderEnabled(pr())}
-                  aria-label={isAdminUser() ? `Enable ${label()}` : `Use ${label()} for my missions`}
-                  disabled={busyProvider() === id || (!isAdminUser() && (pr().globally_enabled === false || !pr().configured))}
+                  aria-checked={isProviderPersonallyEnabled(pr())}
+                  aria-label={`Use ${label()} for my missions`}
+                  title="Use for my missions"
+                  disabled={busyProvider() === id || !isProviderGloballyEnabled(pr()) || !pr().configured}
                   onClick={() => void toggle(pr())}
                 />
                 <Show when={isAdminUser()}>
+                  <span class="s-row-desc">Global</span>
+                  <button
+                    type="button"
+                    class={`toggle ${isProviderGloballyEnabled(pr()) ? "on" : ""}`}
+                    role="switch"
+                    aria-checked={isProviderGloballyEnabled(pr())}
+                    aria-label={`Enable ${label()} globally`}
+                    title="Enable globally"
+                    disabled={busyProvider() === id}
+                    onClick={() => void toggle(pr(), true)}
+                  />
                   <button
                     type="button"
                     class="s-btn sm quiet"

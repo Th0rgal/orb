@@ -12,7 +12,7 @@ export const missionAssignedNode = (m: Placed): string | undefined => m?.remote_
 import { createSignal } from "solid-js";
 
 type Named = { id: string; display_name?: string | null; owner_kind?: string | null; labels?: string[] | null; cpu_total?: number | null; mem_total_bytes?: number | null };
-const KNOWN_PROVIDERS = new Set(["boat", "leanci", "boost", "hetzner", "vastai", "scaleway", "colab"]);
+const KNOWN_PROVIDERS = new Set(["boat", "leanci", "hetzner", "vastai", "scaleway", "colab"]);
 const [names, setNames] = createSignal<ReadonlyMap<string, string>>(new Map());
 const [providers, setProviders] = createSignal<ReadonlyMap<string, string>>(new Map());
 const [owners, setOwners] = createSignal<ReadonlyMap<string, string>>(new Map());
@@ -94,7 +94,7 @@ export const isUserManagedNode = (
 export function managedProviderShortLabel(provider?: string | null): string {
   const key = (provider ?? "").trim().toLowerCase();
   if (key === "boat") return "boat.dev";
-  if (key === "leanci" || key === "lean.ci" || key === "boost" || key === "boost.ci") return "lean.ci";
+  if (key === "leanci") return "lean.ci";
   if (key === "hetzner") return "Hetzner";
   if (key === "vastai") return "Vast.ai";
   if (key === "scaleway") return "Scaleway";
@@ -128,7 +128,7 @@ export const MANAGED_FLEET_COLLAPSE_AFTER = 3;
 export function managedProviderFleetLabel(provider?: string | null): string {
   const key = (provider ?? "boat").trim().toLowerCase() || "boat";
   if (key === "boat") return "Managed (boat.dev)";
-  if (key === "leanci" || key === "lean.ci" || key === "boost" || key === "boost.ci") return "Managed (lean.ci)";
+  if (key === "leanci") return "Managed (lean.ci)";
   if (key === "hetzner") return "Managed (Hetzner)";
   if (key === "vastai") return "Managed (Vast.ai)";
   if (key === "scaleway") return "Managed (Scaleway)";
@@ -149,8 +149,7 @@ export function groupManagedNodesByProvider<N extends { id?: string; labels?: re
   const buckets = new Map<string, N[]>();
   for (const n of nodes) {
     if (!isManagedNode(n)) continue;
-    const rawKey = (nodeProvider(n) ?? "boat").trim().toLowerCase() || "boat";
-    const key = rawKey === "boost" || rawKey === "boost.ci" || rawKey === "lean.ci" ? "leanci" : rawKey;
+    const key = (nodeProvider(n) ?? "boat").trim().toLowerCase() || "boat";
     const list = buckets.get(key);
     if (list) list.push(n);
     else buckets.set(key, [n]);

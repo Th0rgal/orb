@@ -64,10 +64,15 @@ async function mock(page: Page, opts: Opts = {}) {
     }
     if (path.startsWith("/api/managed-machines/providers/") && method === "PUT") {
       state.calls.push(`${method} ${path} ${req.postData() ?? ""}`);
-      const id = decodeURIComponent(path.split("/").pop()!);
+      const personal = path.endsWith("/preference");
+      const id = decodeURIComponent(path.split("/")[4]!);
       const pr = providers?.find(p => p.provider === id);
       if (!pr) return route.fulfill({ status: 404, json: { error: "unknown_provider", message: "not found" } });
       const body = JSON.parse(req.postData() ?? "{}");
+      if (personal) {
+        pr.user_enabled = body.enabled;
+        return route.fulfill({ json: { ok: true, provider: id, enabled: body.enabled } });
+      }
       if (typeof body.enabled === "boolean") pr.enabled = body.enabled;
       if (typeof body.api_key === "string") {
         if (body.api_key.trim()) {
@@ -433,7 +438,13 @@ test("machine providers can be configured and toggled in Machines and Settings",
   await cfg.getByLabel("Default location").fill("hel1");
   await cfg.getByRole("button", { name: "Save" }).click();
   await expect(cfg).toHaveCount(0);
+  await expect(card.locator(".managed-provider-row[data-provider=hetzner]")).toContainText("Skipped for your missions");
+  const personalSwitch = card.getByRole("switch", { name: "Use Hetzner Cloud for my missions" });
+  await expect(personalSwitch).toHaveAttribute("aria-checked", "false");
+  await expect(card.getByRole("switch", { name: "Enable Hetzner Cloud globally" })).toHaveAttribute("aria-checked", "true");
+  await personalSwitch.click();
   await expect(card.locator(".managed-provider-row[data-provider=hetzner]")).toContainText("Configured · Settings ••••9876 · hel1 · up to 25 VMs");
+  expect(state.calls).toContain('PUT /api/managed-machines/providers/hetzner/preference {"enabled":true}');
   await expect(page.getByRole("heading", { name: "Managed cloud" })).toBeVisible();
 
   // New managed machine dialog now offers both boat.dev and Hetzner Cloud.
@@ -443,12 +454,13 @@ test("machine providers can be configured and toggled in Machines and Settings",
   await page.keyboard.press("Escape");
 
   // Disable Hetzner Cloud via switch -> hides from New managed machine provider picker.
-  const hzSwitch = card.getByRole("switch", { name: "Enable Hetzner Cloud" });
+  const hzSwitch = card.getByRole("switch", { name: "Enable Hetzner Cloud globally" });
   await expect(hzSwitch).toHaveAttribute("aria-checked", "true");
   await hzSwitch.click();
   await expect(hzSwitch).toHaveAttribute("aria-checked", "false");
   expect(state.calls).toContain('PUT /api/managed-machines/providers/hetzner {"enabled":false}');
-  await expect(card.locator(".managed-provider-row[data-provider=hetzner]")).toContainText("Disabled · Settings ••••9876 · hel1");
+  await expect(card.locator(".managed-provider-row[data-provider=hetzner]")).toContainText("Disabled by admin");
+  await expect(personalSwitch).toHaveAttribute("aria-checked", "true");
 
   // Also visible in Settings → Agents → Local agents.
   await page.getByRole("button", { name: "Settings", exact: true }).click();
@@ -456,7 +468,7 @@ test("machine providers can be configured and toggled in Machines and Settings",
   await page.getByRole("tab", { name: "Local agents" }).click();
   const settingsCard = page.getByRole("region", { name: "Machine providers" });
   await expect(settingsCard.locator(".managed-provider-row")).toHaveCount(4);
-  await expect(settingsCard.getByRole("switch", { name: "Enable Hetzner Cloud" })).toHaveAttribute("aria-checked", "false");
+  await expect(settingsCard.getByRole("switch", { name: "Enable Hetzner Cloud globally" })).toHaveAttribute("aria-checked", "false");
 });
 
 test("large multi-provider fleets group per provider with collapsible headers and bounded scroll", async ({ page }) => {

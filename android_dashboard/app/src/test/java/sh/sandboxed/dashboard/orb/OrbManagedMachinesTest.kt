@@ -258,12 +258,31 @@ class OrbManagedMachinesTest {
         assertTrue(OrbManagedMachines.canResume(base.copy(state = "stopped"), false))
         assertFalse(OrbManagedMachines.canResume(base.copy(state = "stopped"), true))
         assertEquals("lean.ci", OrbManagedMachines.providerLabel("leanci"))
-        assertEquals("lean.ci", OrbManagedMachines.providerLabel("boost"))
+        assertEquals("leanci", OrbManagedMachines.machineProviderKey("leanci"))
+        assertEquals("leanci", OrbManagedMachines.nodeProvider(listOf("leanci")))
         assertEquals("Hetzner", OrbManagedMachines.providerLabel("hetzner"))
         assertEquals("Vast.ai", OrbManagedMachines.providerLabel("vastai"))
         assertEquals("Scaleway", OrbManagedMachines.providerLabel("scaleway"))
         assertEquals("Google Colab", OrbManagedMachines.providerLabel("colab"))
         assertNull(OrbManagedMachines.reapLine(base.copy(state = "destroyed", reapAt = "2026-10-23T12:04:00Z"), now))
+    }
+
+    @Test
+    fun syntheticProviderDefaultsAndStaleEffectiveFlagsRespectAllGates() {
+        for (id in listOf("boat", "leanci", "hetzner")) {
+            val provider = ManagedProviderInfo(id, id, true, false, false, emptyList())
+            assertTrue(provider.enabled)
+            assertTrue(provider.globallyEnabled)
+            assertEquals(id == "boat", OrbManagedMachines.isProviderEnabled(provider))
+            val disabled = ManagedProviderInfo(id, id, true, false, false, emptyList(), enabled = false, userEnabled = true, effectiveEnabled = true)
+            assertFalse(disabled.globallyEnabled)
+            assertFalse(OrbManagedMachines.isProviderEnabled(disabled))
+            assertFalse(OrbManagedMachines.isProviderUsable(disabled))
+            assertFalse(OrbManagedMachines.isProviderEnabled(provider.copy(userEnabled = false, effectiveEnabled = true)))
+            assertFalse(OrbManagedMachines.isProviderEnabled(provider.copy(globallyEnabled = false, userEnabled = true, effectiveEnabled = true)))
+            assertFalse(OrbManagedMachines.isProviderEnabled(provider.copy(userEnabled = true, effectiveEnabled = false)))
+            assertTrue(OrbManagedMachines.isProviderEnabled(provider.copy(userEnabled = true, effectiveEnabled = true)))
+        }
     }
 
     @Test
@@ -274,21 +293,21 @@ class OrbManagedMachinesTest {
         assertEquals(listOf("boat", "leanci", "hetzner", "vastai", "scaleway", "colab"), r.providers.map { it.provider })
         assertEquals(listOf("boat.dev", "lean.ci", "Hetzner Cloud", "Vast.ai", "Scaleway", "Google Colab"), r.providers.map { it.displayName })
         assertEquals(listOf(true, true, true, false, false, false), r.providers.map { it.configured })
-        assertEquals(listOf(true, true, true, true, false, true), r.providers.map { OrbManagedMachines.isProviderEnabled(it) })
-        assertEquals(listOf(true, true, true, false, false, false), r.providers.map { OrbManagedMachines.isProviderUsable(it) })
+        assertEquals(listOf(true, false, false, false, false, false), r.providers.map { OrbManagedMachines.isProviderEnabled(it) })
+        assertEquals(listOf(true, false, false, false, false, false), r.providers.map { OrbManagedMachines.isProviderUsable(it) })
         assertEquals(100, r.providers[0].maxConcurrent)
         assertEquals("degraded", r.providers[1].availability?.status)
         assertEquals("pool_memory", r.providers[1].availability?.reason)
         assertEquals("Configured · Bitwarden ••••1234 · up to 100 VMs", OrbManagedMachines.providerStatusLine(r.providers[0]))
-        assertEquals("Configured · Limited capacity · Settings ••••9012 · proj ws-evm-fast", OrbManagedMachines.providerStatusLine(r.providers[1]))
+        assertEquals("Skipped for your missions · Settings ••••9012 · proj ws-evm-fast", OrbManagedMachines.providerStatusLine(r.providers[1]))
         assertEquals(
             "Configured · At capacity · Settings ••••9012 · proj ws-evm-fast",
-            OrbManagedMachines.providerStatusLine(r.providers[1].copy(availability = r.providers[1].availability?.copy(status = "saturated")))
+            OrbManagedMachines.providerStatusLine(r.providers[1].copy(userEnabled = true, effectiveEnabled = true, availability = r.providers[1].availability?.copy(status = "saturated")))
         )
-        assertEquals("Configured · Settings ••••5678 · fsn1", OrbManagedMachines.providerStatusLine(r.providers[2]))
-        assertEquals("Not configured", OrbManagedMachines.providerStatusLine(r.providers[3]))
+        assertEquals("Skipped for your missions · Settings ••••5678 · fsn1", OrbManagedMachines.providerStatusLine(r.providers[2]))
+        assertEquals("Disabled · Not configured", OrbManagedMachines.providerStatusLine(r.providers[3]))
         assertEquals("Disabled · Not configured", OrbManagedMachines.providerStatusLine(r.providers[4]))
-        assertEquals("Not configured", OrbManagedMachines.providerStatusLine(r.providers[5]))
+        assertEquals("Disabled · Not configured", OrbManagedMachines.providerStatusLine(r.providers[5]))
         assertEquals("Managed cloud", OrbManagedMachines.sectionTitle(r.providers, r.machines))
         assertEquals(listOf(true, false, false, false, false, false), r.providers.map { it.supportsFreeStop })
         assertEquals(listOf(true, true, false, false, false, false), r.providers.map { it.supportsSnapshots })
@@ -360,7 +379,9 @@ class OrbManagedMachinesTest {
         assertEquals("Hetzner · medium", OrbManagedMachines.autoManagedLabel("auto-managed:hetzner:default"))
 
         val r = OrbManagedMachines.parse(OrbSpec.dict("fixtures/managed-machines-response.json"))
-        assertEquals(listOf("boat", "leanci", "hetzner"), OrbManagedMachines.usableProviders(r).map { it.provider })
+        assertEquals(listOf("boat"), OrbManagedMachines.usableProviders(r).map { it.provider })
+        val optedIn = r.copy(providers = r.providers.map { if (it.provider == "boat") it else it.copy(userEnabled = true, effectiveEnabled = it.globallyEnabled) })
+        assertEquals(listOf("boat", "leanci", "hetzner"), OrbManagedMachines.usableProviders(optedIn).map { it.provider })
 
         val missionNode = OrbRow(mapOf("id" to "managed-m1", "labels" to listOf("managed"), "owner_kind" to "mission"))
         val userNode = OrbRow(mapOf("id" to "managed-u1", "labels" to listOf("managed"), "owner_kind" to "user"))

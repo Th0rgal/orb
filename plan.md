@@ -318,7 +318,7 @@ All 10 shards below touch **disjoint file footprints** and can run concurrently 
     - Replace multi-file JSON desync across `managed_machines.json` + `managed_dispatch_reservations.json` + leaked static `NODES`/`TOKENS` maps with one transactional SQLite authority (`managed_compute.db` or `missions.db` tables) while keeping encrypted provider credentials confined in `0600` AES-256-GCM storage (`CoreReserved`).
     - Increment `node_boot_epoch` on every `stop -> resume` cycle so delayed frames or zombie jobs from a pre-stop boot cannot mutate current runs.
     - Replace destructive pop-before-ack in `managed/relay.rs:36-140` with leased delivery + explicit guest ack (`raw_operations.rs` `Pending -> Accepted | Uncertain`).
-    - Restrict provider adapters (`boat`, `boost`, `hetzner`, `vastai`, `scaleway`, `colab`) to emitting pure `ProviderObservation` records; only the R5-A reducer closes cost ledgers or marks orphans.
+    - Restrict provider adapters (`boat`, `leanci`, `hetzner`, `vastai`, `scaleway`, `colab`) to emitting pure `ProviderObservation` records; only the R5-A reducer closes cost ledgers or marks orphans.
   - **R5-C (Remote Node Durable Claims, Scratch Retirement & `nspawn` Leader Registry — `SM-20`, depends on R5-A):**
     - Unify `remote_node/job_ledger.rs`, `node/runner.rs`, and `durable_jobs_remote.rs` around durable pre-launch claims keyed by `(operation_id, node_boot_epoch)` and `(pid, start_ticks)` verification before ` SIGTERM/SIGKILL`.
     - Persist container leader `(workspace_id, machine_name, leader_pid, start_ticks)` in a local runtime ledger (`workspace_exec.rs`) verified via `orb_proc_liveness_step` instead of discovering leaders solely by scanning `/proc/*/environ`.

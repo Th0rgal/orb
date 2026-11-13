@@ -325,6 +325,7 @@ def managedComputeDdl : String :=
   "CREATE TABLE IF NOT EXISTS user_managed_provider_prefs(" ++
   "user_id TEXT NOT NULL,provider TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1," ++
   "updated_at TEXT NOT NULL DEFAULT '',PRIMARY KEY(user_id,provider));" ++
+  "CREATE TABLE IF NOT EXISTS managed_preference_migrations(name TEXT PRIMARY KEY);" ++
   "CREATE TABLE IF NOT EXISTS managed_vm_claims(" ++
   "machine_id TEXT PRIMARY KEY,reservation_id INTEGER NOT NULL,phase_code INTEGER NOT NULL," ++
   "claim_boot INTEGER NOT NULL,owner_mission TEXT NOT NULL);" ++
@@ -358,10 +359,6 @@ def managedComputeDdl : String :=
   "CREATE TABLE IF NOT EXISTS managed_expirations(machine_id TEXT NOT NULL,boot_epoch INTEGER NOT NULL,provider_id TEXT NOT NULL,expires_at_sec INTEGER NOT NULL,observed_state TEXT NOT NULL DEFAULT 'unknown',spend_cents INTEGER NOT NULL DEFAULT 0,spend_source TEXT NOT NULL DEFAULT 'lease_reservation_estimate',state TEXT NOT NULL DEFAULT 'pending',PRIMARY KEY(machine_id,boot_epoch));"
 
 def managedAdditiveAlters : Array String := #[
-  -- One-time rename of rows written under lean.ci's former provider name
-  -- (`boost`). Idempotent; nothing else in Core accepts that name any more.
-  "UPDATE managed_machines SET provider='leanci' WHERE provider='boost';",
-  "UPDATE OR IGNORE user_managed_provider_prefs SET provider='leanci' WHERE provider='boost';",
   "ALTER TABLE managed_machines ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT '';",
   "CREATE INDEX IF NOT EXISTS idx_managed_machines_owner ON managed_machines(owner_user_id);",
   "ALTER TABLE managed_node_tokens ADD COLUMN readiness_deadline_sec INTEGER NOT NULL DEFAULT 0;",
@@ -465,6 +462,27 @@ def backfillManagedMachineOwner (st : ManagedComputeStore) (bootstrapAdminId : S
     | .error e => return .error e
     | .ok _ => return .ok ()
 
+def migrateManagedProviderOptIns (st : ManagedComputeStore) (bootstrapAdminId nowAt : String) :
+    IO (Except String Unit) := do
+  if bootstrapAdminId.isEmpty then return .error "managed_preference_migration_admin_unknown"
+  withImmediateTx st.db do
+    let .ok rows ← execParamQueryUnlocked st.db
+        "SELECT name FROM managed_preference_migrations WHERE name='provider_opt_in_v1';" #[]
+      | return .error "managed_preference_migration_failed"
+    if rows.size > 1 then return .ok ()
+    for provider in knownProviders do
+      if provider == "boat" then continue
+      let .ok _ ← execParamQueryUnlocked st.db
+          ("INSERT OR IGNORE INTO user_managed_provider_prefs(user_id,provider,enabled,updated_at) " ++
+           "SELECT DISTINCT CASE WHEN owner_user_id='' THEN ?1 ELSE owner_user_id END,?2,1,?3 " ++
+           "FROM managed_machines WHERE provider=?2 AND (owner_user_id<>'' OR ?1<>'');")
+          #[bootstrapAdminId, provider, nowAt]
+        | return .error "managed_preference_migration_failed"
+    let .ok _ ← execParamQueryUnlocked st.db
+        "INSERT INTO managed_preference_migrations(name) VALUES('provider_opt_in_v1');" #[]
+      | return .error "managed_preference_migration_failed"
+    return .ok ()
+
 def getUserManagedPrefs (st : ManagedComputeStore) (userId : String) : IO (Array (String × Bool)) := do
   match ← execParamQuery st.db
       "SELECT provider,enabled FROM user_managed_provider_prefs WHERE user_id=?1;" #[userId] with
@@ -480,7 +498,7 @@ def isUserManagedProviderEnabled (prefs : Array (String × Bool)) (provider : St
   let c := canonicalizeProvider provider
   match prefs.find? (fun (p, _) => canonicalizeProvider p == c) with
   | some (_, en) => en
-  | none => true
+  | none => c == "boat"
 
 def setUserManagedPref (st : ManagedComputeStore) (userId provider : String) (enabled : Bool) (nowAt : String) :
     IO (Except String Unit) := do
@@ -630,29 +648,23 @@ def openProviderSecret (rootDir provider : String)
   | .error e => return .error e
   | .ok pt => return .ok (String.fromUTF8? pt |>.getD "")
 
-/-- One-time rename of the sealed lean.ci key from its pre-rename file. The
-    provider name is bound into the AEAD, so the old file is opened under its old
-    name and sealed again under `leanci`; the old file is removed only after the
-    new one is written. Safe to run on every start: it does nothing once done. -/
-def migrateLegacyLeanciSecret (rootDir : String) : IO (Except String Bool) := do
-  let legacyName := "boost"
-  let legacyPath := managedSecretPath rootDir legacyName
-  if !(← statPath legacyPath.toString).exists_ then return .ok false
-  if (← statPath (managedSecretPath rootDir "leanci").toString).exists_ then
-    -- A current key already exists; the old file is only a stale copy.
-    IO.FS.removeFile legacyPath
-    return .ok true
-  let .ok key ← readPrivate0600 (managedMasterKeyPath rootDir) | return .error "master_key_unavailable"
-  let .ok raw ← readPrivate0600 legacyPath | return .error "legacy_sealed_secret_unreadable"
-  if key.size != 32 || raw.size < 28 then return .error "legacy_sealed_secret_invalid"
-  let .ok plain ← aeadOpen .aes256Gcm key (raw.extract 0 12) s!"orb-core-reserved:{legacyName}".toUTF8 (raw.extract 12 raw.size)
-    | return .error "legacy_sealed_secret_invalid"
-  let some text := String.fromUTF8? plain | return .error "legacy_sealed_secret_invalid"
-  match ← sealProviderSecret rootDir "leanci" text with
-  | .error e => return .error e
-  | .ok () =>
-    IO.FS.removeFile legacyPath
-    return .ok true
+def observeManagedProviderCatalog (dataRoot : String) (catalog : JVal)
+    (transport? : Option ManagedProvider.Transport := none)
+    (cache : ManagedProvider.LeanciCapabilityCache := ManagedProvider.leanciCapabilityCache) : IO JVal := do
+  let some items := catalog.asArr? | return catalog
+  if !items.any (·.fieldStr? "provider" == some "leanci") then return catalog
+  let mut chosen := transport?
+  if chosen.isNone then
+    let some entry := ManagedProvider.declaration? "leanci" | return catalog
+    let .ok key ← openProviderSecret dataRoot "leanci" false true | return catalog
+    let raw := ((← IO.getEnv entry.apiBaseEnv).getD entry.defaultApiBase).trimAscii.toString
+    let base := String.intercalate "/" ((raw.splitOn "/").reverse.dropWhile (·.isEmpty)).reverse
+    chosen := some (ManagedProvider.httpTransport base key)
+  let some transport := chosen | return catalog
+  let fields ← ManagedProvider.catalogFieldsObserved "leanci" transport cache
+  return .arr (items.map fun item =>
+    if item.fieldStr? "provider" != some "leanci" then item
+    else fields.foldl (fun value field => value.setField field.1 field.2) item)
 
 private def machineParams (m : ManagedMachine) (slice : VmSliceState) : Array String :=
   #[

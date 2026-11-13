@@ -100,11 +100,16 @@ fun OrbManagedMachinesBlock(
     var collapsedProviders by remember { mutableStateOf<Set<String>>(emptySet()) }
     var stoppedOpenOverride by remember { mutableStateOf<Boolean?>(null) }
     var busyProvider by remember { mutableStateOf<String?>(null) }
+    var providerRevision by remember { mutableLongStateOf(0L) }
     var editingProvider by remember { mutableStateOf<ManagedProviderInfo?>(null) }
 
-    suspend fun refresh() {
+    suspend fun refresh(reconcileProviders: Boolean = false) {
+        val revision = providerRevision
         try {
-            data = OrbManagedMachines.parse(core.fetchDict(OrbManagedMachines.PATH))
+            val fetched = OrbManagedMachines.parse(core.fetchDict(OrbManagedMachines.PATH))
+            data = if ((!reconcileProviders && busyProvider != null) || revision != providerRevision) {
+                data?.let { fetched.copy(providers = it.providers) } ?: fetched
+            } else fetched
             fetchedAt = System.currentTimeMillis()
             loadError = null
         } catch (e: OrbError) {
@@ -181,29 +186,32 @@ fun OrbManagedMachinesBlock(
     val d = data ?: return
     if (!d.enabled && d.providers.isEmpty()) return
 
-    fun toggleProvider(pr: ManagedProviderInfo, targetEnabled: Boolean) {
-        if (busyProvider != null) return
-        val before = d
+    fun toggleProvider(pr: ManagedProviderInfo, targetEnabled: Boolean, global: Boolean = false) {
+        if (busyProvider != null || (global && !isAdmin)) return
+        val before = data?.providers?.firstOrNull { it.provider == pr.provider } ?: return
+        providerRevision++
         busyProvider = pr.provider
         actionError = null
-        data = d.copy(
-            providers = d.providers.map {
-                if (it.provider == pr.provider) {
-                    val nextGlobal = if (isAdmin) targetEnabled else it.globallyEnabled
-                    val nextUser = if (isAdmin) it.userEnabled else targetEnabled
-                    val nextEff = nextGlobal && nextUser
-                    it.copy(
-                        enabled = nextEff,
-                        globallyEnabled = nextGlobal,
-                        userEnabled = nextUser,
-                        effectiveEnabled = nextEff
-                    )
-                } else it
-            }
-        )
+        data = data?.let { cur ->
+            cur.copy(
+                providers = cur.providers.map {
+                    if (it.provider == pr.provider) {
+                        val nextGlobal = if (global) targetEnabled else it.globallyEnabled
+                        val nextUser = if (global) it.userEnabled else targetEnabled
+                        val nextEff = nextGlobal && nextUser
+                        it.copy(
+                            enabled = nextGlobal,
+                            globallyEnabled = nextGlobal,
+                            userEnabled = nextUser,
+                            effectiveEnabled = nextEff
+                        )
+                    } else it
+                }
+            )
+        }
         scope.launch {
             try {
-                val path = if (isAdmin) {
+                val path = if (global) {
                     "${OrbManagedMachines.PATH}/providers/${core.encodeComponent(pr.provider)}"
                 } else {
                     "${OrbManagedMachines.PATH}/providers/${core.encodeComponent(pr.provider)}/preference"
@@ -218,11 +226,16 @@ fun OrbManagedMachinesBlock(
                 if (updated != null) {
                     data = data?.let { cur -> cur.copy(providers = cur.providers.map { if (it.provider == updated.provider) updated else it }) }
                 }
-                refresh()
+                refresh(reconcileProviders = true)
             } catch (e: Throwable) {
-                data = before
-                actionError = "Couldn’t update ${pr.displayName}. ${OrbManagedMachines.errorMessage(e)}"
+                data = data?.let { cur ->
+                    cur.copy(providers = cur.providers.map { if (it.provider == before.provider) before else it })
+                }
+                if (e is CancellationException) throw e
+                val setting = if (global) "global availability" else "your preference"
+                actionError = "Couldn’t update $setting for ${pr.displayName}. ${OrbManagedMachines.errorMessage(e)}"
             } finally {
+                providerRevision++
                 busyProvider = null
             }
         }
@@ -332,11 +345,6 @@ fun OrbManagedMachinesBlock(
                             Text(pr.displayName, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(OrbManagedMachines.providerStatusLine(pr), color = OrbStyle.textSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        Switch(
-                            checked = OrbManagedMachines.isProviderEnabled(pr),
-                            enabled = busyProvider != pr.provider && (isAdmin || pr.globallyEnabled),
-                            onCheckedChange = { next -> toggleProvider(pr, next) }
-                        )
                         if (isAdmin) {
                             ManagedPill(
                                 label = if (pr.configured) "Configure" else "Set up",
@@ -344,6 +352,39 @@ fun OrbManagedMachinesBlock(
                                 busy = busyProvider == pr.provider,
                                 quiet = true,
                                 onClick = { editingProvider = pr }
+                            )
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Use for my machines", color = OrbStyle.textPrimary, fontSize = 13.sp)
+                            if (!pr.globallyEnabled) {
+                                Text("Unavailable globally; your preference is saved.", color = OrbStyle.textSecondary, fontSize = 12.sp)
+                            }
+                        }
+                        Switch(
+                            modifier = Modifier.testTag("managed.provider.${pr.provider}.preference"),
+                            checked = pr.userEnabled,
+                            enabled = busyProvider == null,
+                            onCheckedChange = { next -> toggleProvider(pr, next) }
+                        )
+                    }
+                    if (isAdmin) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text("Available globally (all users)", color = OrbStyle.textPrimary, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                            Switch(
+                                modifier = Modifier.testTag("managed.provider.${pr.provider}.global"),
+                                checked = pr.globallyEnabled,
+                                enabled = busyProvider == null,
+                                onCheckedChange = { next -> toggleProvider(pr, next, global = true) }
                             )
                         }
                     }
@@ -942,7 +983,7 @@ private fun ManagedConfigureProviderDialog(
                     if (provider.provider == "hetzner" || provider.provider == "scaleway" || provider.provider == "colab") {
                         put("region", region.trim())
                     }
-                    if (provider.provider == "scaleway" || provider.provider == "leanci" || provider.provider == "boost") {
+                    if (provider.provider == "scaleway" || provider.provider == "leanci") {
                         put("project_id", projectId.trim())
                     }
                     if (includeMax) {
@@ -992,7 +1033,7 @@ private fun ManagedConfigureProviderDialog(
                         onValueChange = { region = it }
                     )
                 }
-                if (provider.provider == "leanci" || provider.provider == "boost") {
+                if (provider.provider == "leanci") {
                     OrbMiniField(
                         label = "Workspace ID (optional)",
                         value = projectId,

@@ -833,13 +833,70 @@ def loadManagedProviderCatalog (mc : ManagedComputeStore) (dataRoot : String)
     let observed : ManagedProvider.Availability ← match resolved with
       | .error _ => pure { status := .unknown, reason := "provider_unconfigured_or_unimplemented" }
       | .ok provider => do
-        match ← provider.availability { name := "", size := "", ttlSeconds := 300, idempotencyKey := "" } with
+        let size := ((ManagedProvider.declaration? name).bind (·.sizes[0]?)).map (·.name) |>.getD "small"
+        match ← provider.availability { name := "", size, ttlSeconds := 300, idempotencyKey := "" } with
         | .ok value => pure value
         | .error _ => pure { status := .unknown, reason := "provider_availability_unavailable" }
     observations := observations.push (name, ManagedProvider.availabilityJson observed)
   match OrbBin.Json.parse (renderManagedProvidersJson fleet isAdmin prefs configured disabled observations) with
-  | .ok value => return .ok value
+  | .ok value =>
+    if override?.isSome then return .ok value
+    return .ok (← observeManagedProviderCatalog dataRoot value)
   | .error _ => return .error "managed_provider_catalog_invalid"
+
+def resolveManagedSpawnSize (provider : String) (args : JVal)
+    (catalog : JVal := .null) : Except String String := do
+  let prov := canonicalizeProvider provider
+  if (ManagedProvider.declaration? prov).isNone then throw "managed_provider_not_implemented"
+  let item := ((catalog.asArr?).getD #[]).find? (·.fieldStr? "provider" == some prov)
+  let sizes := ((item.getD (.obj (ManagedProvider.catalogFields prov))).fieldArr? "sizes").getD #[]
+  let mut cpu := 0
+  let mut ram := 0
+  for field in #["cpu", "ram_gb"] do
+    if (args.field? field).isSome then
+      let some value := args.fieldNat? field | throw ("invalid_" ++ field)
+      if value == 0 then throw ("invalid_" ++ field)
+      if field == "cpu" then cpu := value else ram := value
+  let fits : JVal → Bool := fun size =>
+    (size.fieldNat? "cpu").getD 0 ≥ cpu && (size.fieldNat? "ram_gb").getD 0 ≥ ram
+  if let some requested := args.fieldStr? "size" then
+    let size := requested.trimAscii.toString.toLower
+    let some shape := sizes.find? (·.fieldStr? "size" == some size)
+      | throw "provider_invalid_size"
+    if !fits shape then throw "managed_size_below_requirements"
+    return size
+  if (args.field? "size").isSome then throw "provider_invalid_size"
+  if cpu == 0 && ram == 0 then
+    let some size := (sizes[0]?).bind (·.fieldStr? "size") | throw "provider_invalid_size"
+    return size
+  let candidates := sizes.filter fits
+  let selected := candidates.foldl (fun best shape => match best with
+    | none => some shape
+    | some current =>
+      let cpu := (shape.fieldNat? "cpu").getD 0
+      let currentCpu := (current.fieldNat? "cpu").getD 0
+      if cpu < currentCpu || (cpu == currentCpu &&
+          (shape.fieldNat? "ram_gb").getD 0 < (current.fieldNat? "ram_gb").getD 0) then some shape
+      else best) (none : Option JVal)
+  let some size := selected.bind (·.fieldStr? "size") | throw "managed_size_unavailable"
+  return size
+
+def parseAutoManagedTarget (target : String) : Except String (String × String) := do
+  let parts := target.trimAscii.toString.toLower.splitOn ":"
+  let (provider, size?) ← match parts with
+    | ["auto-managed"] => pure ("boat", none)
+    | ["auto-managed", value] =>
+      if value.isEmpty then throw "invalid_managed_target"
+      if isKnownProvider value then pure (canonicalizeProvider value, none)
+      else pure ("boat", some value)
+    | ["auto-managed", provider, size] =>
+      if !isKnownProvider provider || size.isEmpty then throw "invalid_managed_target"
+      pure (canonicalizeProvider provider, some size)
+    | _ => throw "invalid_managed_target"
+  let some entry := ManagedProvider.declaration? provider
+    | throw "managed_provider_not_implemented"
+  let some defaultSize := entry.sizes[0]? | throw "provider_invalid_size"
+  return (provider, size?.getD defaultSize.name)
 
 def loadManagedBootstrapConfig : IO (Except String ManagedProvisioning.BootstrapConfig) := do
   let coreUrl := (← IO.getEnv "SANDBOXED_MANAGED_CORE_URL").getD

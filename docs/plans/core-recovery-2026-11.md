@@ -8,7 +8,7 @@ References:
 
 - Managed VM behaviour: `docs/specs/managed-vm-lifecycle.md`.
 - The retired Rust implementation is in git history at `4199fc06e^` (`git show 4199fc06e^:src/managed/mod.rs`).
-  Provider clients: `src/managed/boat.rs`, `src/managed/boost.rs` (this is lean.ci), `snapshots.rs`,
+  Provider clients: Boat and lean.ci adapters, `snapshots.rs`,
   `lifecycle.rs`, `raw_operations.rs`, `budget.rs`; REST surface `src/api/managed_machines.rs`.
 - Build and test on the server: see "Build and test before pushing" in `AGENTS.md`. The Core self-test
   must be run from the repository root.
@@ -56,11 +56,11 @@ writes a database row. `auto-managed:*` placement, fork and snapshots cannot wor
    (extend must extend at the provider too), `start_mission` with `remote_node_id: auto-managed[:size]`
    and `managed_from_snapshot`, and the REST routes `/api/managed-machines/{settings,providers,snapshots}`
    that currently return 404.
-5. **lean.ci client.** Port `boost.rs` under the name `leanci` only: sizes
+5. **lean.ci client.** Use the name `leanci` only: sizes
    (`lean-2vcpu-ubuntu-2604` ...), `GET /v1/vms/capabilities`, reverse-relay bootstrap with the 480 s
-   deadline, guest `LEANCI_*` variables including the VM-scoped cache token. Drop the `boost` /
-   `boost.ci` names everywhere: provider aliases, `BOOST_*` environment variables, sealed-secret file
-   name and AAD, UI labels, docs. Migrate existing rows (`provider='boost'`) and the sealed secret once.
+   deadline, guest `LEANCI_*` variables including the VM-scoped cache token. Remove retired provider
+   aliases and credential prefixes from environment variables, sealed-secret names and AAD, UI labels
+   and docs. Migrate historical provider rows and the sealed secret once.
 6. **Tests.** Mock provider transport in the Core self-test for each provider: spawn, bootstrap timeout,
    destroy, snapshot round trip. Then a live smoke per provider: spawn the smallest size, run a command
    through the relay, snapshot, fork, destroy, and confirm the provider no longer lists the machine.

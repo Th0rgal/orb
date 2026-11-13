@@ -28,7 +28,7 @@ Paths below are repository-relative for portability; all Rust references mean th
 | Recovery §1.1–4: Boat lifecycle, restore/fork/snapshots/extend, REST managed settings/providers/snapshots | `Control.lean:4714–4724` treats `settings`, `providers`, `snapshots` (and `reap-plan`) as machine IDs on GET **before** `RemoteFleetAndRelay.lean:1071–1139` can handle reserved names. Thus adding the delegated implementation alone did not restore the GET routes. Without such named machine rows the early branch returns 404, or 503 without the managed store. This is code-confirmed dispatch shadowing, not a live probe result. Keep under the existing managed REST recovery PR; reserve static names before `:id` and cover ordering. `extend` still returns 409 at `RemoteFleetAndRelay.lean:1160`; fork at 1174 constructs a provisioning row rather than proving provider fork/readiness. Do not interpret the old plan's start-state statements as current runtime proof. |
 | Recovery §2: fleet reality/reaper/history | `Control.lean:4733–4748` now calls `buildComputeFleetJVal`; do not repeat the plan's old assertion that every node is always online without tracing that newer builder. Reaper/reconciliation/history remain owned there. |
 | Recovery §4: event pagination, health/diagnostics digest, resume content, action receipts, epoch timestamps, blended pricing, upstream retry and TLS | Keep the existing owner. HTTP event/snapshot/health/resume rows remain U or D-owned as appropriate; MCP and HTTP are not automatically identical entry points. No new finding here merely restates the plan. |
-| Managed-provider child plan Step 0 and provider sections | Boat-only provider registry, reserved-key broker policy, synchronous spawn/readiness timeout, provider transport diagnostics, lean.ci/Colab support, availability-vs-enabled and legacy boost naming are already assigned. `Control.lean:4685–4693` still waits for `spawnConfiguredManagedWorker` and returns 201; cross-reference Step 0.4 rather than duplicate an async-spawn finding. |
+| Managed-provider child plan Step 0 and provider sections | Boat-only provider registry, reserved-key broker policy, synchronous spawn/readiness timeout, provider transport diagnostics, lean.ci/Colab support, availability-vs-enabled and canonical provider naming are already assigned. `Control.lean:4685–4693` still waits for `spawnConfiguredManagedWorker` and returns 201; cross-reference Step 0.4 rather than duplicate an async-spawn finding. |
 | Recovery §4 deploy procedure | `Control.lean:5525` / `R7Core.lean:967` need the owned real build/install/health/rollback path. Route presence and a deploy receipt do not certify deployment. |
 
 ## New concrete findings
@@ -875,14 +875,14 @@ Named DTOs referenced by handler return signatures are expanded recursively thro
 | `Cancel` (struct) | src/api/agent_software.rs:29 | `pub id: String,` |
 | `CancelMissionOutcome` (enum) | src/api/control/events.rs:641 | `Cancelled, SkippedRecentlyActive, NoRunner,` |
 | `Capabilities` (struct) | src/api/cloud_agents/mod.rs:62 | `pub models: bool, pub attachments: bool, pub repository: bool, pub follow_up: bool, pub cancel: bool, pub detailed_events: bool, pub artifacts: bool,` |
-| `CapabilitiesEffective` (struct) | src/managed/boost.rs:167 | `schedulable_vcpus: u32, schedulable_memory_mib: u32, largest_bootable_vm: CapabilitiesVmSlot, #[serde(default)] queued_spawns: u32,` |
-| `CapabilitiesPool` (struct) | src/managed/boost.rs:162 | `online_engines: u32,` |
-| `CapabilitiesProfile` (struct) | src/managed/boost.rs:182 | `runner_label: String, vcpus: u32, default_memory_mib: u32, max_launchable_now: u32, #[serde(default)] blocking_reason: Option<String>,` |
-| `CapabilitiesQuota` (struct) | src/managed/boost.rs:156 | `#[serde(default)] active_vms: Option<u32>,` |
+| `CapabilitiesEffective` (struct) | Retired lean.ci adapter, baseline line 167 | `schedulable_vcpus: u32, schedulable_memory_mib: u32, largest_bootable_vm: CapabilitiesVmSlot, #[serde(default)] queued_spawns: u32,` |
+| `CapabilitiesPool` (struct) | Retired lean.ci adapter, baseline line 162 | `online_engines: u32,` |
+| `CapabilitiesProfile` (struct) | Retired lean.ci adapter, baseline line 182 | `runner_label: String, vcpus: u32, default_memory_mib: u32, max_launchable_now: u32, #[serde(default)] blocking_reason: Option<String>,` |
+| `CapabilitiesQuota` (struct) | Retired lean.ci adapter, baseline line 156 | `#[serde(default)] active_vms: Option<u32>,` |
 | `CapabilitiesResponse` (struct) | src/api/capabilities.rs:63 | `pub capabilities: BTreeMap<String, Capability>,` |
 | `CapabilitiesResponse` (struct) | src/api/proxy.rs:1080 | `object: &'static str, data: Vec<ModelProtocolCapabilities>,` |
-| `CapabilitiesResponse` (struct) | src/managed/boost.rs:146 | `#[serde(default)] quota: Option<CapabilitiesQuota>, pool: CapabilitiesPool, effective: CapabilitiesEffective, #[serde(default)] profiles: Vec<CapabilitiesProfile>,` |
-| `CapabilitiesVmSlot` (struct) | src/managed/boost.rs:176 | `vcpus: u32, memory_mib: u32,` |
+| `CapabilitiesResponse` (struct) | Retired lean.ci adapter, baseline line 146 | `#[serde(default)] quota: Option<CapabilitiesQuota>, pool: CapabilitiesPool, effective: CapabilitiesEffective, #[serde(default)] profiles: Vec<CapabilitiesProfile>,` |
+| `CapabilitiesVmSlot` (struct) | Retired lean.ci adapter, baseline line 176 | `vcpus: u32, memory_mib: u32,` |
 | `Capability` (struct) | src/api/capabilities.rs:32 | `pub available: bool, pub detail: String, #[serde(skip_serializing_if = "Option::is_none")] pub remedy: Option<String>,` |
 | `Capability` (struct) | src/api/grok_tool_bridge/capability.rs:103 | `pub advertise: bool, pub reason: &'static str,` |
 | `CatalogModelOption` (struct) | src/api/providers.rs:270 | `pub provider_id: String, pub provider_name: String, pub id: String, pub value: String, pub name: String, #[serde(default, skip_serializing_if = "Option::is_none")] pub description: Option<String>, pub configured: bool,` |
@@ -1398,7 +1398,7 @@ Read **545 TypeScript/TSX/Swift/Kotlin source files** as data. The following reg
 | android_dashboard/app/src/main/java/sh/sandboxed/dashboard/orb/OrbUsersSettings.kt | 38:`OrbUsersModel`, 109:`OrbAdminUser` |
 | android_dashboard/app/src/main/java/sh/sandboxed/dashboard/orb/UsageTelemetry.kt | 28:`UsageTelemetry`, 29:`Action`, 36:`ApprovalKind`, 37:`Decision`, 38:`Method`, 39:`Surface`, 50:`Transport`, 57:`Queue`, 144:`CoreTransport`, 202:`PageHandle`, 232:`Approval` |
 | android_dashboard/app/src/main/java/sh/sandboxed/dashboard/util/GitHubAuth.kt | 25:`GitHubAuth`, 51:`CallbackResult` |
-| android_dashboard/app/src/test/java/sh/sandboxed/dashboard/orb/BoostCiTranscriptTest.kt | 9:`BoostCiTranscriptTest` |
+| Historical lean.ci Android transcript replay test | Baseline transcript replay coverage |
 | android_dashboard/app/src/test/java/sh/sandboxed/dashboard/orb/OrbActivityCompactionTest.kt | 6:`OrbActivityCompactionTest` |
 | android_dashboard/app/src/test/java/sh/sandboxed/dashboard/orb/OrbAgentSoftwareTest.kt | 8:`OrbAgentSoftwareTest` |
 | android_dashboard/app/src/test/java/sh/sandboxed/dashboard/orb/OrbAntigravityVerificationTest.kt | 6:`OrbAntigravityVerificationTest` |
@@ -1662,7 +1662,7 @@ Generic dictionary APIs require field-by-field feature-call-site tracing. Swift 
 | shared/orb-spec/fixtures/stream-cost.json | `description, streams, cache, renders` |
 | shared/orb-spec/fixtures/subscription-resets.json | `supports_cases, summary_cases` |
 | shared/orb-spec/fixtures/transcript-gates.json | `description, cases` |
-| shared/orb-spec/fixtures/transcripts/boost_ci.json | `mission, children, events` |
+| Historical lean.ci transcript fixture | `mission, children, events` |
 | shared/orb-spec/fixtures/usage-limit-status.json | `description, cases` |
 | shared/orb-spec/fixtures/usage-telemetry.json | `description, version, quick_close_ms, clients, client_schemas, schemas, common, ident_pattern, sanitize, rejected, scrub` |
 | shared/orb-spec/kernel_abi.json | `version, header, jni, swift, kotlin, functions` |

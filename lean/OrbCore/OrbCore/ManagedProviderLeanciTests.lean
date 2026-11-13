@@ -8,17 +8,20 @@ private def check (condition : Bool) (label : String) : IO Unit := do
   unless condition do throw (IO.userError s!"lean.ci provider contract: {label}")
 
 private def capabilities (engines vcpus bootVcpus bootMemory launchable : Nat) (reason : JVal := .null) : JVal := .obj #[
+  ("largest_bootable_memory_mib", .nat bootMemory),
   ("pool", .obj #[("online_engines", .nat engines)]),
   ("effective", .obj #[("schedulable_vcpus", .nat vcpus),
+    ("schedulable_memory_mib", .nat 323796),
     ("largest_bootable_vm", .obj #[("vcpus", .nat bootVcpus), ("memory_mib", .nat bootMemory)])]),
-  ("profiles", .arr #[.obj #[("runner_label", .str "lean-2vcpu-ubuntu-2604"),
-    ("max_launchable_now", .nat launchable), ("blocking_reason", reason)]])]
+  ("profiles", .arr (leanciProfiles.map fun profile => .obj #[("runner_label", .str profile.runnerLabel),
+    ("default_memory_mib", .nat (profile.size.ramGb * 1024)),
+    ("max_launchable_now", .nat launchable), ("blocking_reason", reason)]))]
 
 /-- Mock transport that rejects what the real API rejects: POST file uploads,
     string exec commands, unknown labels and non-`lean-*` names. No sockets. -/
 def run : IO Unit := do
   let requests ← IO.mkRef (#[] : Array Request)
-  let caps ← IO.mkRef (capabilities 3 64 32 131072 4)
+  let caps ← IO.mkRef (capabilities 3 96 32 107520 4)
   let clock ← IO.mkRef (0 : Nat)
   let cache ← IO.mkRef #[]
   let transport : Transport := fun req => do
@@ -63,11 +66,11 @@ def run : IO Unit := do
   let some entry := declaration? "leanci" | throw (IO.userError "leanci missing from registry")
   check (entry.secretName == "LEANCI_API_KEY" && entry.defaultApiBase == "https://api.lean.ci/v1" &&
     entry.readinessDeadlineSecs == 480 && !entry.supportsStopResume && entry.supportsSnapshots &&
-    !entry.supportsExtend && entry.sizes.size == 7) "declaration"
-  check ((declaration? "boost").isNone && (leanciProfile? "boost-2vcpu-ubuntu-2604").isNone) "no legacy name"
+    !entry.supportsExtend && entry.sizes.size == 6) "declaration"
+  check ((declaration? "retired-provider").isNone && (leanciProfile? "retired-profile").isNone) "unknown names rejected"
   check ((quote "leanci" "small" 60).toOption == some 2 && (quote "leanci" "medium" 60).toOption == some 4 &&
     (quote "leanci" "xlarge" 60).toOption == some 20 && (quote "leanci" "2xlarge" 60).toOption == some 40 &&
-    (quote "leanci" "3xlarge" 720).toOption == some 540 && !(quote "leanci" "small" 721).isOk &&
+    !(quote "leanci" "3xlarge" 720).isOk && !(quote "leanci" "small" 721).isOk &&
     !(quote "leanci" "huge" 60).isOk) "decided prices and the 720-minute cap"
 
   let spec : SpawnSpec := { name := "orb-managed-dev-t", size := "small", ttlSeconds := 300, idempotencyKey := "k1" }
@@ -78,11 +81,55 @@ def run : IO Unit := do
     body.fieldStr? "runner_label" == some "lean-2vcpu-ubuntu-2604" && body.fieldUInt64? "ttl_secs" == some 300 &&
     (body.field? "memory_mib").isNone && (body.field? "snapshot_id").isNone) "create wire contract; queued is not ready"
   let .ok wide := leanciSpawnBody { spec with size := "2xlarge" } | throw (IO.userError "2xlarge body")
-  let .ok widest := leanciSpawnBody { spec with size := "3xlarge" } | throw (IO.userError "3xlarge body")
   check (wide.fieldStr? "runner_label" == some "lean-32vcpu-ubuntu-2604" && wide.fieldUInt64? "memory_mib" == some 98304 &&
-    widest.fieldUInt64? "memory_mib" == some 131072) "both 32-vCPU sizes send explicit memory"
+    (leanciProfile? "lean-32vcpu-ubuntu-2604").map (·.size.name) == some "2xlarge" &&
+    !(leanciSpawnBody { spec with size := "3xlarge" }).isOk) "32-vCPU profile is 96 GiB; impossible size rejected"
+  let live := capabilities 3 96 32 107520 4
+  check ((leanciCatalogProfiles live).size == 6 && entry.sizes.all (fun size => size.ramGb * 1024 ≤ 107520) &&
+    ((.obj (catalogFields "leanci" (some live)) : JVal).fieldArr? "sizes").map (·.size) == some 6 &&
+    (leanciCatalogProfiles (capabilities 3 96 32 65536 4)).size == 4 &&
+    (leanciCatalogProfiles (capabilities 3 8 32 107520 4)).size == 3 &&
+    (leanciCatalogProfiles (capabilities 3 96 32 107520 0)).isEmpty &&
+    (leanciCatalogProfiles (capabilities 0 96 32 107520 4)).isEmpty &&
+    (leanciCatalogProfiles (.obj #[])).isEmpty) "catalog uses live bootable capacity, not aggregate pool memory"
+  let heterogeneous (ceiling : Option Nat) (slot : JVal) : JVal := .obj (
+    (ceiling.map (fun value => #[("largest_bootable_memory_mib", JVal.nat value)])).getD #[] ++ #[
+    ("pool", .obj #[("online_engines", .nat 2)]),
+    ("effective", .obj #[("schedulable_vcpus", .nat 48), ("schedulable_memory_mib", .nat 98304),
+      ("largest_bootable_vm", slot)]),
+    ("profiles", .arr #[.obj #[("runner_label", .str "lean-16vcpu-ubuntu-2604"),
+      ("default_memory_mib", .nat 65536), ("max_launchable_now", .nat 1)]])])
+  let mixed := heterogeneous (some 65536) (.obj #[("vcpus", .nat 32), ("memory_mib", .nat 32768)])
+  check ((leanciCatalogProfiles mixed).map (·.size.name) == #["xlarge"] &&
+    (leanciAvailabilityOf { spec with size := "xlarge" } mixed).status == .available)
+    "heterogeneous pool uses profile launchability, not the CPU-first selected engine"
+  let withoutSlotMemory := heterogeneous (some 107520) (.obj #[("vcpus", .nat 32)])
+  check ((leanciAvailabilityOf { spec with size := "xlarge" } withoutSlotMemory).status == .available &&
+    (leanciAvailabilityOf { spec with size := "xlarge" }
+      (heterogeneous (some 32768) .null)).status == .saturated &&
+    (leanciAvailabilityOf { spec with size := "xlarge" }
+      (heterogeneous none .null)).status == .available &&
+    (leanciAvailabilityOf { spec with size := "xlarge", memoryMiB := some 108544 }
+      (heterogeneous none .null)).status == .saturated)
+    "top-level memory ceiling works without slot memory; absent ceiling uses global bound"
+  check ((leanciAvailabilityOf { spec with size := "xlarge", memoryMiB := some 98304 } mixed).status == .saturated &&
+    (leanciAvailabilityOf { spec with size := "xlarge", memoryMiB := some 98304 }
+      withoutSlotMemory).status == .unknown)
+    "custom memory cannot infer a fitting engine from default-profile launchability"
+  let incomplete := .obj #[("pool", .obj #[("online_engines", .nat 3)]),
+    ("effective", .obj #[("schedulable_vcpus", .nat 96), ("schedulable_memory_mib", .nat 323796),
+      ("largest_bootable_vm", .obj #[("vcpus", .nat 32), ("memory_mib", .nat 107520)])]),
+    ("profiles", .arr #[.obj #[("runner_label", .str "lean-2vcpu-ubuntu-2604")]])]
+  check ((leanciAvailabilityOf spec incomplete).status == .unknown &&
+    (leanciCatalogProfiles incomplete).isEmpty) "missing launchability is not available"
+  check ((leanciAvailabilityOf { spec with size := "2xlarge" } live).status == .available &&
+    (leanciAvailabilityOf { spec with memoryMiB := some 108544 } live).status == .saturated &&
+    (leanciAvailabilityOf { spec with size := "3xlarge" } live).status == .unknown)
+    "live service retains 32 vCPU/96 GiB and rejects oversized or unknown requests"
   check (!(leanciSpawnBody { spec with memoryMiB := some 5000 }).isOk &&
-    !(leanciSpawnBody { spec with memoryMiB := some 132096 }).isOk &&
+    !(leanciSpawnBody { spec with memoryMiB := some 108544 }).isOk &&
+    !(leanciSpawnBody { spec with memoryMiB := some 131072 }).isOk &&
+    (leanciSpawnBody { spec with memoryMiB := some 107520 }).isOk &&
     (leanciSpawnBody { spec with memoryMiB := some 4096 }).isOk &&
     !(leanciSpawnBody { spec with ttlSeconds := 30 }).isOk &&
     ((leanciSpawnBody { spec with fromSnapshot := "orb-node-base" }).toOption.bind (·.field? "snapshot_id")).isNone &&
@@ -136,6 +183,13 @@ def run : IO Unit := do
     return value
   check ((← observe spec).status == .available) "capacity available"
   check ((← observe spec).status == .available && (← requests.get).size == 1) "cached within 20 s"
+  let observedFields ← catalogFieldsObserved "leanci" transport cache clock.get
+  check (((.obj observedFields : JVal).fieldArr? "sizes").map (·.size) == some 6 &&
+    (← requests.get).size == 1) "catalog shares the capability cache"
+  let failedCatalog ← catalogFieldsObserved "leanci" (fun _ => pure (.error { code := "provider_http_error" }))
+    (← IO.mkRef #[]) clock.get
+  check (((.obj failedCatalog : JVal).fieldArr? "sizes").map (·.size) == some 6)
+    "catalog lookup failure retains only conservative declarations"
   clock.set 20001
   caps.set (capabilities 0 64 32 131072 4)
   check ((← observe spec).status == .saturated && (← requests.get).size == 2) "no engines; cache expired"
@@ -144,7 +198,7 @@ def run : IO Unit := do
   check ((← observe spec).status == .saturated) "no schedulable vCPUs"
   clock.set 80000
   caps.set (capabilities 3 64 1 131072 4)
-  check ((← observe spec).status == .saturated) "profile exceeds largest bootable VM"
+  check ((← observe spec).status == .available) "CPU-first slot does not override launchable default profile"
   clock.set 110000
   caps.set (capabilities 3 64 32 131072 0 (.str "quota_vcpus"))
   let quota ← observe spec

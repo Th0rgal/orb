@@ -226,16 +226,19 @@ export const setManagedProviderPreference = (provider: string, enabled: boolean)
     },
   );
 
+export const isProviderPersonallyEnabled = (
+  p: Pick<ManagedProviderInfo, "provider" | "user_enabled">,
+): boolean => p.user_enabled ?? p.provider === "boat";
+
+export const isProviderGloballyEnabled = (
+  p: Pick<ManagedProviderInfo, "enabled" | "globally_enabled">,
+): boolean => p.globally_enabled ?? p.enabled !== false;
+
 export const isProviderEnabled = (
-  p: Pick<ManagedProviderInfo, "enabled" | "globally_enabled" | "user_enabled" | "effective_enabled">,
-): boolean => {
-  if (p.effective_enabled !== undefined) return p.effective_enabled !== false;
-  if (p.globally_enabled === false) return false;
-  if (p.user_enabled === false) return false;
-  return p.enabled !== false;
-};
+  p: Pick<ManagedProviderInfo, "provider" | "enabled" | "globally_enabled" | "user_enabled" | "effective_enabled">,
+): boolean => isProviderGloballyEnabled(p) && isProviderPersonallyEnabled(p) && p.effective_enabled !== false;
 export const isProviderUsable = (
-  p: Pick<ManagedProviderInfo, "configured" | "enabled" | "globally_enabled" | "user_enabled" | "effective_enabled">,
+  p: Pick<ManagedProviderInfo, "provider" | "configured" | "enabled" | "globally_enabled" | "user_enabled" | "effective_enabled">,
 ): boolean => p.configured && isProviderEnabled(p);
 
 export const credentialSourceLabel = (source?: string | null): string =>
@@ -244,6 +247,7 @@ export const credentialSourceLabel = (source?: string | null): string =>
 export function providerStatusLine(
   p: Pick<
     ManagedProviderInfo,
+    | "provider"
     | "configured"
     | "enabled"
     | "globally_enabled"
@@ -257,8 +261,8 @@ export function providerStatusLine(
     | "availability"
   >,
 ): string {
-  if (p.globally_enabled === false) return p.configured ? "Disabled by admin" : "Disabled · Not configured";
-  if (p.user_enabled === false) return p.configured ? "Skipped for your missions" : "Not configured";
+  if (!isProviderGloballyEnabled(p)) return p.configured ? "Disabled by admin" : "Disabled · Not configured";
+  if (!isProviderPersonallyEnabled(p)) return p.configured ? "Skipped for your missions" : "Not configured";
   const enabled = isProviderEnabled(p);
   if (!p.configured) return enabled ? "Not configured" : "Disabled · Not configured";
   const cred = [credentialSourceLabel(p.credential_source), p.key_hint ?? ""].filter(Boolean).join(" ");
@@ -339,7 +343,7 @@ export const sizeSpec = (s: Pick<ManagedSize, "cpu" | "ram_gb"> & { disk_gb?: nu
 export const providerLabel = (provider?: string | null): string => {
   const key = (provider ?? "boat").toLowerCase();
   if (key === "boat") return "boat.dev";
-  if (key === "leanci" || key === "lean.ci" || key === "boost" || key === "boost.ci") return "lean.ci";
+  if (key === "leanci") return "lean.ci";
   if (key === "hetzner") return "Hetzner";
   if (key === "vastai") return "Vast.ai";
   if (key === "scaleway") return "Scaleway";
@@ -357,7 +361,6 @@ export interface ManagedProviderGroup<M = ManagedMachine> {
 
 export const machineProviderKey = (provider?: string | null): string => {
   const key = (provider ?? "").trim().toLowerCase();
-  if (key === "boost" || key === "boost.ci" || key === "lean.ci") return "leanci";
   return key || "boat";
 };
 

@@ -14,7 +14,7 @@ Code: `src/managed/lifecycle.rs` (pure decision backed by
 | Provider (`provider`) | Workloads | Bootstrap | `supports_free_stop` | `supports_snapshots` | Minimum lease |
 | --- | --- | --- | --- | --- | --- |
 | `boat` (default) | Fast ephemeral Linux x86\_64 workers (`small`..`xlarge`) & raw sandboxes | Provider file/exec API | Yes (14d disk retention, \$0) | Yes (named + fork) | Per-second |
-| `leanci` (`lean.ci`) | Warm Cloud Hypervisor Linux x86\_64 microVMs (`lean-2vcpu-ubuntu-2604`..`lean-32vcpu`, `lean-32vcpu-96gb`) with optional CoW `.olean` overlays (`repo`/`base_key`/`lean_mode`) & `turbo-lean` | Provider file/exec API -> reverse relay | No | Yes (named + fork, engine-pinned CoW) | Per-second (60s..24h fixed TTL; no live extend) |
+| `leanci` (`lean.ci`) | Warm Cloud Hypervisor Linux x86\_64 microVMs (`lean-2vcpu-ubuntu-2604`..`lean-32vcpu-ubuntu-2604`, up to 96 GiB) with optional CoW `.olean` overlays (`repo`/`base_key`/`lean_mode`) & `turbo-lean` | Provider file/exec API -> reverse relay | No | Yes (named + fork, engine-pinned CoW) | Per-second (60s..24h fixed TTL; no live extend) |
 | `hetzner` | Larger x86\_64 / ARM64 CPU & RAM instances (`cpx22`..`ccx43`, `cax31`; legacy `cpx21`..`cpx51` aliases map to `cpx22`..`cpx62` with EU location fallback `fsn1` -> `hel1` -> `nbg1`) | Cloud-init `user_data` -> reverse relay | No (stopped servers still bill) | No | Hourly / per-minute |
 | `vastai` | Ephemeral CUDA GPUs (`rtx4090`, `a100`, `h100`, or explicit `gpu` filter) | Offer `onstart` -> reverse relay | No (stopped instances bill storage/GPU) | No | On-demand |
 | `scaleway` | EU Linux/GPU Instances (`DEV1-*`, `PRO2-*`, `L4-*`, `H100-*`) & Apple Silicon Mac minis (`M1-M`, `M2-M`, `M2-PRO`, `M4-M`) | Cloud-init / SSH -> reverse relay | No | No | Instances: per-minute; Apple Silicon: **24h (`deletable_at`)** |
@@ -155,14 +155,11 @@ isolation, uncertain replay), not by the theorem.
 
 ### lean.ci adapter
 
-The provider's former name `boost` is not accepted anywhere: not as a provider
-alias, not as a sealed-key file, not as a credential name Core reads. Two
-one-time migrations run at start and are no-ops afterwards: rows with
-`provider='boost'` are renamed to `leanci`, and a key sealed as `boost.aead` is
-opened under its old name and sealed again as `leanci.aead` (the name is bound
-into the AEAD, so the file cannot simply be renamed). An unreadable old file is
-kept and reported, never deleted. The secret broker still refuses `BOOST_*`
-names to missions; refusing a name is not an alias.
+The only accepted provider name is `leanci`. Retired aliases and credential
+prefixes are not accepted. One-time startup migrations rename historical rows
+and reseal the historical key as `leanci.aead` (the name is bound into the AEAD,
+so the file cannot simply be renamed). An unreadable historical file is kept
+and reported, never deleted. Credential denial is not a provider alias.
 
 `ManagedProviderLeanci.lean` is the `leanci` client for `https://api.lean.ci/v1`
 (`LEANCI_API_URL` overrides the base, `LEANCI_API_KEY` is sealed in Core). Its wire
@@ -171,8 +168,9 @@ contract was read from the server source (`lfglabs-dev/lean.ci`,
 
 - Create is `POST /vms` (202, `{vm}`) with `name`, `runner_label`, `ttl_secs` and
   optional `memory_mib`, `repo`, `snapshot_id`. Sizes map to
-  `lean-<n>vcpu-ubuntu-2604`; both 32-vCPU sizes send explicit memory because the
-  label's default is 96 GiB. Orb caps the lease at 720 minutes.
+   `lean-<n>vcpu-ubuntu-2604`; the 32-vCPU size sends explicit 98304 MiB memory,
+   matching the label's 96 GiB default. No 128 GiB size is advertised or accepted.
+   Orb caps the lease at 720 minutes.
 - Only `running` is ready. `stopped`, `failed` and `reaped` are terminal. There is
   no stop/resume and no live TTL extension; those calls fail, they are not faked.
 - Guest commands are `POST /vms/:id/exec` with an argv array, run as root; files
@@ -184,17 +182,24 @@ contract was read from the server source (`lfglabs-dev/lean.ci`,
   with the label, and a spawn from a label resolves it to a ready snapshot's ID
   or rents nothing.
 - Availability is `GET /vms/capabilities` (`?repo=` / `?snapshot_id=`), cached
-  20 s. No online engine, no schedulable vCPU, a profile above
+  20 s. No online engine, insufficient schedulable CPU/memory, a profile above
   `largest_bootable_vm` or `max_launchable_now == 0` is `saturated`; a reply the
   client cannot interpret is `unknown`. Both reject before any reservation.
+  The observed service has 3 online engines, 96 schedulable vCPUs, 323796 MiB
+  schedulable memory and 107520 MiB largest bootable memory. Pool totals must
+  never be used as single-VM capacity. Catalog filtering uses the same profile
+  check when capabilities are available; failed lookups retain the conservative
+  six-size declaration. Explicit memory is aligned to 1024 MiB and bounded by
+  4096..=107520 MiB and live capacity. `2xlarge` remains 32 vCPU/96 GiB.
 
 Its mock transport uses UUID identifiers and the server's status codes, and
 rejects what the server rejects (POST uploads, string commands, unknown labels).
 Verified on the dev deployment on 2026-11-13: a `small` VM is created, enrols
 about 26 s after the request, and is destroyed and gone at the provider. It has
 2 vCPU, 8 GiB and a 98 GB root filesystem of which only about 14 GB is free on a
-fresh VM (`/workspace` is on the same filesystem), so `small` is tight for Lean
-builds. Not yet verified: the disk of the larger sizes, a mission on the VM,
+fresh VM (`/workspace` is on the same filesystem). Do not select `small` for
+Lean builds: choose a larger capacity-checked profile and inspect actual free
+disk before building. Not yet verified: the disk of the larger sizes, a mission on the VM,
 snapshots, a warm image, and the guest's `LEANCI_*` cache variables.
 
 ## Lean provider transport contract
@@ -682,7 +687,7 @@ In order, the script:
 - on a lean.ci guest, copies the provider's `LEANCI_*` settings, including the
   VM-scoped cache token, to `/etc/orb/leanci-env` (root:orbnode, 0640), sourced by
   `orbnode` login shells. lean.ci writes them only for its own `runner` user, in
-  `/etc/profile.d/boost-vm.sh` and `/home/runner/.boost-env` (its file names).
+  provider-owned profile and environment files.
   The token exists only when the VM was created with a `repo`, and expires an
   hour after the VM's TTL. lean.ci blanks its own files before a snapshot but not
   this copy, so a snapshot taken through Core must remove `/etc/orb/leanci-env`

@@ -17,7 +17,7 @@ Classification follows the parent audit: **E** specific behavior traced equivale
 | Already owned | Treatment here |
 | --- | --- |
 | Recovery plan §0: Hindsight credentials; §1–2: Boat lifecycle/readiness, reconciliation/reaper/liveness; §4: blended cost/stream accounting, TLS quiet sockets, deployment/retry flow | Reference, not new findings. A memory denial caused by absent environment credentials is not a new authorization defect. |
-| Managed-provider plan step 0: registry, reserved provider keys, availability versus persisted enablement, async receipts, transport errors; lean.ci/Colab and boost-name migration | Reference, not a competing provider implementation or newly counted credential finding. |
+| Managed-provider plan step 0: registry, reserved provider keys, availability versus persisted enablement, async receipts, transport errors; lean.ci/Colab and canonical provider naming | Reference, not a competing provider implementation or newly counted credential finding. |
 | HTTP-01: static password fallback after rotation | Remains owned there. SEC-02/03 distinguish additional bearer identity and historical field-name failures; do not count HTTP-01 again. |
 | MCP-01: registry role/schema/target admission missing; MCP-05: ungoverned construction/owner attribution | Direct mutation and generic Core-token→operator observations support that owner, not a separate counted bypass. |
 | MCP-13: external requester collapse for mission-access and privilege grant/token queries | SEC-04 is **supporting extension to that owner**, not a new independent identity-fix task. |

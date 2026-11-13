@@ -1,8 +1,36 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
-import { afterEach, expect, it } from "vitest";
-import { ManagedSnapshots } from "../src/ManagedMachines";
+import { afterEach, expect, it, vi } from "vitest";
+import { applyAuthMeResponse, setConnection } from "../src/api";
+import { MachineProvidersCard, ManagedSnapshots } from "../src/ManagedMachines";
 import { isLive, isStopped, recentMachines, snapshotLine, stateLabel, type ManagedMachine, type ManagedSnapshot } from "../src/managedMachineModel";
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+it("keeps admin personal opt-in separate from the global provider switch", async () => {
+  setConnection("https://orb.example", "test");
+  applyAuthMeResponse({ auth_mode: "multi_user", user: { id: "admin", username: "admin", role: "admin" } });
+  const provider = { provider: "leanci", display_name: "lean.ci", configured: true, enabled: true, supports_snapshots: true, supports_free_stop: false, sizes: [] };
+  const calls: { path: string; enabled: boolean }[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (init?.method === "PUT") calls.push({ path, enabled: JSON.parse(String(init.body)).enabled });
+    const body = path.endsWith("/preference") ? { ok: true } : path.endsWith("/providers/leanci") ? { ...provider, enabled: false, user_enabled: true } : {};
+    return new Response(JSON.stringify(body), { status: 200 });
+  }));
+  render(() => <MachineProvidersCard providers={[provider]} inSettings />);
+  const personal = screen.getByRole("switch", { name: "Use lean.ci for my missions" });
+  const global = screen.getByRole("switch", { name: "Enable lean.ci globally" });
+  expect(personal.getAttribute("aria-checked")).toBe("false");
+  expect(global.getAttribute("aria-checked")).toBe("true");
+  fireEvent.click(personal);
+  await waitFor(() => expect(calls).toHaveLength(1));
+  expect(calls[0]).toMatchObject({ path: "https://orb.example/api/managed-machines/providers/leanci/preference", enabled: true });
+  await waitFor(() => expect(personal.getAttribute("aria-checked")).toBe("true"));
+  await waitFor(() => expect(global.hasAttribute("disabled")).toBe(false));
+  fireEvent.click(global);
+  await waitFor(() => expect(calls).toHaveLength(2));
+  expect(calls[1]).toMatchObject({ path: "https://orb.example/api/managed-machines/providers/leanci", enabled: false });
+  expect(personal.getAttribute("aria-checked")).toBe("true");
+});
 
 const snap = (over: Partial<ManagedSnapshot> = {}): ManagedSnapshot => ({
   name: "orb-snap-lean-warm-ab12", label: "warm", project: "lean", source_machine_id: "mm1", source_size: "large",

@@ -77,9 +77,9 @@ data class ManagedProviderInfo(
     val supportsFreeStop: Boolean,
     val sizes: List<ManagedSize>,
     val enabled: Boolean = true,
-    val globallyEnabled: Boolean = true,
-    val userEnabled: Boolean = true,
-    val effectiveEnabled: Boolean = true,
+    val globallyEnabled: Boolean = enabled,
+    val userEnabled: Boolean = provider == "boat",
+    val effectiveEnabled: Boolean = globallyEnabled && userEnabled,
     val credentialSource: String? = null,
     val keyHint: String? = null,
     val region: String? = null,
@@ -168,8 +168,8 @@ object OrbManagedMachines {
     fun parseProvider(d: OrbDict): ManagedProviderInfo? {
         val p = OrbJSON.str(d, "provider") ?: return null
         val globallyEnabled = OrbJSON.bool(d, "globally_enabled") ?: (OrbJSON.bool(d, "enabled") ?: true)
-        val userEnabled = OrbJSON.bool(d, "user_enabled") ?: true
-        val effectiveEnabled = OrbJSON.bool(d, "effective_enabled") ?: (globallyEnabled && userEnabled)
+        val userEnabled = OrbJSON.bool(d, "user_enabled") ?: (p == "boat")
+        val effectiveEnabled = globallyEnabled && userEnabled && OrbJSON.bool(d, "effective_enabled") != false
         return ManagedProviderInfo(
             provider = p,
             displayName = OrbJSON.str(d, "display_name") ?: providerLabel(p),
@@ -177,7 +177,7 @@ object OrbManagedMachines {
             supportsSnapshots = OrbJSON.bool(d, "supports_snapshots") ?: false,
             supportsFreeStop = OrbJSON.bool(d, "supports_free_stop") ?: false,
             sizes = OrbJSON.dictList(d["sizes"]).mapNotNull { parseSize(it) },
-            enabled = effectiveEnabled,
+            enabled = globallyEnabled,
             globallyEnabled = globallyEnabled,
             userEnabled = userEnabled,
             effectiveEnabled = effectiveEnabled,
@@ -428,7 +428,7 @@ object OrbManagedMachines {
     }
 
     fun nodeProvider(labels: List<String>?): String? {
-        val known = setOf("boat", "leanci", "boost", "hetzner", "vastai", "scaleway", "colab")
+        val known = setOf("boat", "leanci", "hetzner", "vastai", "scaleway", "colab")
         for (raw in labels.orEmpty()) {
             val l = raw.trim().lowercase(Locale.US)
             if (l.startsWith("provider=")) return l.removePrefix("provider=")
@@ -437,9 +437,9 @@ object OrbManagedMachines {
         return null
     }
 
-    fun isProviderEnabled(p: ManagedProviderInfo): Boolean = p.effectiveEnabled
+    fun isProviderEnabled(p: ManagedProviderInfo): Boolean = p.globallyEnabled && p.userEnabled && p.effectiveEnabled
 
-    fun isProviderUsable(p: ManagedProviderInfo): Boolean = p.configured && p.effectiveEnabled
+    fun isProviderUsable(p: ManagedProviderInfo): Boolean = p.configured && isProviderEnabled(p)
 
     fun credentialSourceLabel(source: String?): String = when (source) {
         "settings" -> "Settings"
@@ -449,17 +449,17 @@ object OrbManagedMachines {
     }
 
     fun providerStatusLine(p: ManagedProviderInfo): String {
-        if (!p.configured) return if (p.effectiveEnabled) "Not configured" else "Disabled · Not configured"
+        if (!p.configured) return if (isProviderEnabled(p)) "Not configured" else "Disabled · Not configured"
         val cred = listOf(credentialSourceLabel(p.credentialSource), p.keyHint.orEmpty())
             .filter { it.isNotEmpty() }
             .joinToString(" ")
-        val avail = if (p.effectiveEnabled) when (p.availability?.status) {
+        val avail = if (isProviderEnabled(p)) when (p.availability?.status) {
             "saturated" -> "At capacity"
             "degraded" -> "Limited capacity"
             else -> ""
         } else ""
         val statusLabel = when {
-            p.effectiveEnabled -> "Configured"
+            isProviderEnabled(p) -> "Configured"
             !p.globallyEnabled -> "Disabled by admin"
             !p.userEnabled -> "Skipped for your missions"
             else -> "Disabled"
@@ -519,7 +519,7 @@ object OrbManagedMachines {
 
     fun providerLabel(provider: String?): String = when ((provider ?: "boat").lowercase(Locale.US)) {
         "boat" -> "boat.dev"
-        "leanci", "lean.ci", "boost", "boost.ci" -> "lean.ci"
+        "leanci" -> "lean.ci"
         "hetzner" -> "Hetzner"
         "vastai" -> "Vast.ai"
         "scaleway" -> "Scaleway"
@@ -531,7 +531,6 @@ object OrbManagedMachines {
 
     fun machineProviderKey(provider: String?): String {
         val key = (provider ?: "").trim().lowercase(Locale.US)
-        if (key == "boost" || key == "boost.ci" || key == "lean.ci") return "leanci"
         return key.ifEmpty { "boat" }
     }
 

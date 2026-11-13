@@ -84,30 +84,4 @@ def run (root : String) : IO Unit := do
   check ((← sealConfigured batchRoot true false false discover resolve).isOk)
     "rerunning batch sealing safely completes the configured inventory"
 
-  -- One-time move of a key sealed under the provider's former name.
-  let legacyRoot := root ++ "/provider-sealing-legacy"
-  check ((← migrateLegacyLeanciSecret legacyRoot).toOption == some false) "nothing to migrate is not an error"
-  let .ok () ← sealProviderSecret legacyRoot "boat" "synthetic-boat" | throw (IO.userError "legacy fixture master key")
-  let masterKey ← IO.FS.readBinFile (managedMasterKeyPath legacyRoot)
-  let .ok nonce ← OrbNetLeaf.Crypto.randBytes 12 | throw (IO.userError "legacy fixture nonce")
-  let .ok legacySealed ← OrbNetLeaf.Crypto.aeadSeal .aes256Gcm masterKey nonce "orb-core-reserved:boost".toUTF8
-      "synthetic-legacy-key".toUTF8
-    | throw (IO.userError "legacy fixture seal")
-  let legacyPath := managedSecretPath legacyRoot "boost"
-  let .ok () ← writeAtomicPrivate0600 legacyPath (nonce ++ legacySealed) | throw (IO.userError "legacy fixture write")
-  check (!(← openProviderSecret legacyRoot "leanci" false true).isOk) "the old file is not read as an alias"
-  check ((← migrateLegacyLeanciSecret legacyRoot).toOption == some true) "legacy key migrated"
-  let .ok moved ← openProviderSecret legacyRoot "leanci" false true | throw (IO.userError "migrated key unreadable")
-  check (moved == "synthetic-legacy-key" && !(← legacyPath.pathExists) &&
-    (← migrateLegacyLeanciSecret legacyRoot).toOption == some false) "key readable under leanci, old file gone, rerun is a no-op"
-  let .ok () ← writeAtomicPrivate0600 legacyPath (nonce ++ legacySealed) | throw (IO.userError "stale fixture write")
-  let .ok () ← sealProviderSecret legacyRoot "leanci" "synthetic-current-key" | throw (IO.userError "current key seal")
-  check ((← migrateLegacyLeanciSecret legacyRoot).toOption == some true && !(← legacyPath.pathExists) &&
-    (← openProviderSecret legacyRoot "leanci" false true).toOption == some "synthetic-current-key")
-    "a stale old file never replaces the current key"
-  let .ok () ← writeAtomicPrivate0600 legacyPath "not a sealed value at all, far too short?".toUTF8
-    | throw (IO.userError "corrupt fixture write")
-  IO.FS.removeFile (managedSecretPath legacyRoot "leanci")
-  check (!(← migrateLegacyLeanciSecret legacyRoot).isOk && (← legacyPath.pathExists)) "an unreadable old file is kept, not deleted"
-
 end OrbCore.ManagedProviderSealingTests

@@ -84,7 +84,7 @@ export function toolPayload(result: unknown): { value: Record<string, unknown> |
       const text = o.content.map(c => typeof (c as { text?: unknown }).text === "string" ? (c as { text: string }).text : "").join("");
       if (text) { r = parseJson(text); if (o.isError === true || o.is_error === true) return { value: toolArgs(r), error: errorText(r) }; continue; }
     }
-    if (typeof o.error === "string" && o.error.trim() && o.output == null) {
+    if (typeof o.error === "string" && o.error.trim() && o.output == null && !("state" in o)) {
       const inner = parseJson(o.error);
       return { value: toolArgs(inner), error: errorText(inner) };
     }
@@ -99,7 +99,7 @@ function errorText(v: unknown): string {
   const o = toolArgs(v);
   if (!o) return "Failed";
   const e = toolArgs(o.error) ?? o;
-  return typeof e.message === "string" ? e.message : typeof o.error === "string" ? o.error : "Failed";
+  return s(e.message) ?? s(e.reason) ?? s(o.error) ?? "Failed";
 }
 
 const s = (v: unknown) => typeof v === "string" && v.trim() ? v.trim() : undefined;
@@ -161,7 +161,10 @@ export function collectFollowUps(items: readonly StreamItem[]): FollowUps {
       const id = s(toolArgs(item.args)?.action_id) ?? s(value?.action_id);
       if (!id) continue;
       const res = toolArgs(value?.result);
-      out.actions.set(id, { value: res, error: error ?? (value?.error ? errorText(value) : undefined), state: s(value?.state) });
+      const state = s(value?.state);
+      const failed = state === "failed" || state === "cancelled";
+      const resultError = res && (res.error || (failed && (s(res.message) || s(res.reason)))) ? errorText(res) : undefined;
+      out.actions.set(id, { value: res, error: resultError ?? error ?? (value?.error || failed ? errorText(value) : undefined), state });
       noteMission(toolArgs(res?.mission));
       noteMachine(toolArgs(res?.machine) ?? toolArgs(res?.managed_machine) ?? (s(res?.node_id) && s(res?.state) ? res : null));
     } else if (op === "start_mission" || op === "create_mission" || op === "spawn_worker") {

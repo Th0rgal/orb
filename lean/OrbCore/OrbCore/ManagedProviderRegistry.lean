@@ -36,7 +36,7 @@ def sizeJson (size : Size) : JVal := .obj #[
     toString (size.milliCentsPerHour.toNat % 100000)))
 ]
 
-def catalogFields (provider : String) : Array (String × JVal) :=
+def catalogFields (provider : String) (capabilities : Option JVal := none) : Array (String × JVal) :=
   match declaration? provider with
   | none => #[
       ("implemented", .bool false), ("supports_snapshots", .bool false),
@@ -49,6 +49,17 @@ def catalogFields (provider : String) : Array (String × JVal) :=
       ("readiness_deadline_secs", JVal.uint64 entry.readinessDeadlineSecs),
       ("bootstrap_mode", .str (match entry.bootstrapMode with
         | .execSystemd => "exec_systemd" | .execSupervised => "exec_supervised")),
-      ("sizes", .arr (entry.sizes.map sizeJson))]
+      ("sizes", .arr ((if provider == "leanci" then
+        (capabilities.map (fun body => (leanciCatalogProfiles body).map (·.size))).getD entry.sizes
+        else entry.sizes).map sizeJson))]
+
+def catalogFieldsObserved (provider : String) (transport : Transport)
+    (cache : LeanciCapabilityCache := leanciCapabilityCache) (nowMs : IO Nat := IO.monoMsNow)
+    : IO (Array (String × JVal)) := do
+  if provider != "leanci" then return catalogFields provider
+  match ← leanciCapabilities transport cache nowMs
+      { name := "", size := "small", ttlSeconds := 300, idempotencyKey := "" } with
+  | .ok body => return catalogFields provider (some body)
+  | .error _ => return catalogFields provider
 
 end OrbCore.ManagedProvider

@@ -36,16 +36,12 @@ def leanciProfiles : Array LeanciProfile := #[
     runnerLabel := "lean-16vcpu-ubuntu-2604" },
   { size := { name := "lean-24vcpu", cpu := 24, ramGb := 96, diskGb := 175, milliCentsPerHour := 30000 },
     runnerLabel := "lean-24vcpu-ubuntu-2604" },
-  -- One 32-vCPU label serves both sizes; its default is 96 GiB, so memory is
-  -- always explicit and 3xlarge really gets 128 GiB.
   { size := { name := "2xlarge", cpu := 32, ramGb := 96, diskGb := 200, milliCentsPerHour := 40000 },
-    runnerLabel := "lean-32vcpu-ubuntu-2604", memoryMiB := some 98304 },
-  { size := { name := "3xlarge", cpu := 32, ramGb := 128, diskGb := 200, milliCentsPerHour := 45000 },
-    runnerLabel := "lean-32vcpu-ubuntu-2604", memoryMiB := some 131072 }
+    runnerLabel := "lean-32vcpu-ubuntu-2604", memoryMiB := some 98304 }
 ]
 
 def leanciProfile? (size : String) : Option LeanciProfile :=
-  leanciProfiles.find? (fun p => p.size.name == size || p.aliases.contains size || p.runnerLabel == size && p.size.name != "2xlarge")
+  leanciProfiles.find? (fun p => p.size.name == size || p.aliases.contains size || p.runnerLabel == size)
 
 /-- Orb caps leases at 720 minutes although lean.ci accepts up to 86,400 s. -/
 def leanciQuoteCents (size : String) (ttlMinutes : UInt64) : Result UInt64 := do
@@ -53,8 +49,10 @@ def leanciQuoteCents (size : String) (ttlMinutes : UInt64) : Result UInt64 := do
   let some profile := leanciProfile? size | throw { code := "provider_invalid_size" }
   return (profile.size.milliCentsPerHour * ttlMinutes + 59999) / 60000
 
+def leanciMaxBootableMemoryMiB : UInt64 := 107520
+
 def leanciValidMemoryMiB (value : UInt64) : Bool :=
-  4096 ≤ value && value ≤ 131072 && value % 1024 == 0
+  4096 ≤ value && value ≤ leanciMaxBootableMemoryMiB && value % 1024 == 0
 
 private def isUuid (s : String) : Bool :=
   s.length == 36 && s.toList.all (fun c => c == '-' || c.isDigit || ('a' ≤ c && c ≤ 'f'))
@@ -111,20 +109,40 @@ def leanciAvailabilityOf (spec : SpawnSpec) (body : JVal) : Availability :=
     if engines == 0 then { status := .saturated, reason := "no_online_engines" }
     else if vcpus == 0 then { status := .saturated, reason := "no_schedulable_vcpus" }
     else match leanciProfile? spec.size with
-      | none => { status := .available }
+      | none => { status := .unknown, reason := "provider_invalid_size" }
       | some profile =>
         let bootable := (effective.field? "largest_bootable_vm").getD .null
         let memory := (spec.memoryMiB.orElse (fun _ => profile.memoryMiB)).getD (profile.size.ramGb.toUInt64 * 1024)
         let entry := ((body.fieldArr? "profiles").getD #[]).find? (·.fieldStr? "runner_label" == some profile.runnerLabel)
-        match bootable.fieldUInt64? "vcpus", bootable.fieldUInt64? "memory_mib", entry with
-        | some bootVcpus, some bootMemory, some item =>
+        let memoryCeiling := min leanciMaxBootableMemoryMiB
+          (((body.fieldUInt64? "largest_bootable_memory_mib").orElse
+            (fun _ => effective.fieldUInt64? "largest_bootable_memory_mib")).getD leanciMaxBootableMemoryMiB)
+        match entry with
+        | some item =>
           let raw := (item.fieldStr? "blocking_reason").getD ""
           let reason := if #["no_online_engines", "quota_vcpus", "pool_vcpus", "pool_memory"].contains raw then raw else "profile_not_bootable"
-          if profile.size.cpu.toUInt64 > bootVcpus || memory > bootMemory then { status := .saturated, reason := "largest_bootable_vm" }
-          else if item.fieldUInt64? "max_launchable_now" == some 0 then { status := .saturated, reason }
-          else { status := .available }
-        | _, _, _ => { status := .unknown, reason := "capabilities_incomplete" }
+          if memory > memoryCeiling then { status := .saturated, reason := "largest_bootable_memory_mib" }
+          else if profile.size.cpu.toUInt64 > vcpus then { status := .saturated, reason := "pool_vcpus" }
+          else if let some poolMemory := effective.fieldUInt64? "schedulable_memory_mib" then
+            if memory > poolMemory then { status := .saturated, reason := "pool_memory" }
+            else match item.fieldUInt64? "max_launchable_now" with
+              | some 0 => { status := .saturated, reason }
+              | some _ =>
+                let defaultMemory := (item.fieldUInt64? "default_memory_mib").getD (profile.size.ramGb.toUInt64 * 1024)
+                if memory ≤ defaultMemory then { status := .available }
+                else match bootable.fieldUInt64? "vcpus", bootable.fieldUInt64? "memory_mib" with
+                  | some cpu, some ram =>
+                    if profile.size.cpu.toUInt64 ≤ cpu && memory ≤ ram then { status := .available }
+                    else { status := .unknown, reason := "custom_memory_capacity_unknown" }
+                  | _, _ => { status := .unknown, reason := "custom_memory_capacity_unknown" }
+              | none => { status := .unknown, reason := "capabilities_incomplete" }
+          else { status := .unknown, reason := "capabilities_incomplete" }
+        | none => { status := .unknown, reason := "capabilities_incomplete" }
   | _, _ => { status := .unknown, reason := "capabilities_incomplete" }
+
+def leanciCatalogProfiles (body : JVal) : Array LeanciProfile :=
+  leanciProfiles.filter fun profile =>
+    (leanciAvailabilityOf { name := "", size := profile.size.name, ttlSeconds := 300, idempotencyKey := "" } body).status == .available
 
 abbrev LeanciCapabilityCache := IO.Ref (Array (String × Nat × JVal))
 
@@ -136,7 +154,7 @@ private def capabilitiesQuery (spec : SpawnSpec) : String :=
   else ""
 
 /-- 20 s cache keyed by the warm-image query. Only successful replies are cached. -/
-private def leanciCapabilities (transport : Transport) (cache : LeanciCapabilityCache)
+def leanciCapabilities (transport : Transport) (cache : LeanciCapabilityCache)
     (nowMs : IO Nat) (spec : SpawnSpec) : IO (Result JVal) := do
   let query := capabilitiesQuery spec
   let now ← nowMs
