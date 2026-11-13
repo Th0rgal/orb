@@ -598,11 +598,24 @@ def run (root : String) : IO Unit := do
     let joinedSiblingLeaks := String.intercalate "; " siblingLeaks.toList
     check siblingLeaks.isEmpty s!"member sibling provider/ai routes leaked owner identity: {joinedSiblingLeaks}"
     -- Host-level views: members get their own missions only and no host paths.
+    sql store.missionsDb
+      "INSERT INTO proxy_usage(timestamp,model,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,cost_cents,provider,account_id,api_key_id,api_key_name,mission_id,caller_kind,purpose,reasoning_tokens,account_bound) VALUES(?1,'claude-sonnet-4-5',80,40,0,0,5,'anthropic','member-acct','','','member-mission','mission','turn',0,1);"
+      #[nowIsoReal]
+    let (ovAdminSt, ovAdminDoc) ← send "GET" "/api/resources/overview" admin (.obj #[]) stWithProviders
     let (ovSt, ovDoc) ← send "GET" "/api/resources/overview" member (.obj #[]) stWithProviders
+    let ovComp := ovDoc.fieldOrNull "compute"
+    let ovMissions := (ovDoc.fieldArr? "missions").getD #[]
     check (ovSt == 200 && ((renderCompact ovDoc).splitOn "admin-mission").length == 1 &&
         ((ovDoc.field? "compute").bind (·.fieldArr? "sources")) == some #[] &&
-        ((ovDoc.field? "inference").bind (·.fieldArr? "pools")) == some #[])
-      "member resources overview hides other users' missions, fleet sources and inference pools"
+        ((ovDoc.field? "inference").bind (·.fieldArr? "pools")) == some #[] &&
+        ovDoc.fieldArr? "links" == some #[] &&
+        ovComp.field? "total_vcpu" == some (.num "0.000") &&
+        ovComp.field? "active_vcpu" == some (.num "0.000") &&
+        ovMissions.any (fun m => m.fieldStr? "id" == some "member-mission") &&
+        ovAdminSt == 200 &&
+        ((renderCompact ovAdminDoc).splitOn "admin-mission").length > 1 &&
+        !((ovAdminDoc.fieldArr? "links").getD #[]).isEmpty)
+      s!"member resources overview hides other users' missions, fleet sources and inference pools (member={renderCompact ovDoc})"
     let (lsSt, lsDoc) ← send "GET" "/api/library/status" member (.obj #[]) stWithProviders
     check (lsSt != 200 || (lsDoc.fieldStr? "path" == some "" && lsDoc.fieldStr? "remote" == some ""))
       "member library status hides host path and remote"
