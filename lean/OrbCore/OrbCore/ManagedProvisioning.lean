@@ -79,7 +79,10 @@ def guestLogLines (machineId token text : String) : Array String :=
 
 /-- What to ask a guest whose node never reached Core. Read-only. -/
 def guestDiagnosticCommand (coreUrl : String) : String :=
-  "echo \"pid1=$(cat /proc/1/comm 2>/dev/null)\"; " ++
+  "echo \"pid1=$(cat /proc/1/comm 2>/dev/null) arch=$(uname -m)\"; " ++
+  "ls -ld /opt /opt/orb /opt/orb/bin /opt/orb/bin/sandboxed-node 2>&1; " ++
+  "echo \"mount=$(findmnt -T /opt/orb/bin -no TARGET,OPTIONS 2>&1 | head -n 1)\"; " ++
+  "systemctl cat orb-node.service 2>/dev/null | grep -E '^(User|ExecStart)=' ; " ++
   "echo \"systemd=$([ -d /run/systemd/system ] && echo yes || echo no)\"; " ++
   "echo \"unit=$(systemctl is-active orb-node.service 2>&1 | head -n 1)\"; " ++
   "echo \"node_processes=$(pgrep -u orbnode -x sandboxed-node 2>/dev/null | wc -l)\"; " ++

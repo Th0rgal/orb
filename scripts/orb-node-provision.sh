@@ -19,7 +19,11 @@ machine_id=${2:?managed machine id required}
 systemctl stop orb-node.service 2>/dev/null || true
 id orbnode >/dev/null 2>&1 || useradd --system --create-home --home-dir /var/lib/orb-node --shell /bin/bash orbnode
 install -d -m 0750 -o orbnode -g orbnode /var/lib/orb-node /var/lib/orb-node/work
-install -d -m 0755 /opt/orb/bin
+# Name every directory on the node's path: this script runs with umask 077, and
+# some coreutils builds create missing parents with the umask instead of 0755,
+# which leaves /opt/orb closed to orbnode (systemd then fails with 203/EXEC).
+install -d -m 0755 /opt/orb /opt/orb/bin
+chmod 0755 /opt/orb /opt/orb/bin
 install -d -m 0700 /etc/orb
 install -m 0600 -o root -g root /home/user/.orb/enroll.env /etc/orb/enroll.env
 
@@ -48,6 +52,19 @@ elf_header=$(od -An -tx1 -N20 "$node_tmp" | tr -d ' \n')
 chmod 0755 "$node_tmp"
 mv -f "$node_tmp" /opt/orb/bin/sandboxed-node
 trap - EXIT
+# Fail now, with the reason, rather than leave a unit that restarts until Core's
+# deadline: the unprivileged node user must be able to execute the binary.
+as_node() {
+  if command -v setpriv >/dev/null; then setpriv --reuid=orbnode --regid=orbnode --init-groups "$@"
+  else runuser -u orbnode -- "$@"; fi
+}
+if command -v setpriv >/dev/null || command -v runuser >/dev/null; then
+  as_node test -x /opt/orb/bin/sandboxed-node || {
+    printf '%s\n' 'node binary is not executable by orbnode' >&2
+    { namei -l /opt/orb/bin/sandboxed-node; findmnt -T /opt/orb/bin -no TARGET,OPTIONS; } >&2 2>&1 || true
+    exit 1
+  }
+fi
 
 install -d -m 1777 -o orbnode -g orbnode /tmp/opencode
 mkdir -p /etc/tmpfiles.d

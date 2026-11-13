@@ -650,7 +650,12 @@ In order, the script:
   restored snapshot never reuses its parent's;
 - downloads the node from `GET /api/managed-machines/bootstrap-binary/:id` and
   refuses anything that is not an x86_64 ELF (checked with `od`, so a minimal
-  image without Python can still enrol);
+  image without Python can still enrol). It sets the mode of every directory on
+  the binary's path explicitly, because the script runs with umask 077 and some
+  coreutils builds create missing parents with the umask; then it checks, as
+  `orbnode`, that the binary is executable and fails with the path's
+  permissions and mount options if it is not (first seen on lean.ci, where the
+  unit restarted with 203/EXEC "Permission denied" until the deadline);
 - on a lean.ci guest, copies the provider's `LEANCI_*` settings, including the
   VM-scoped cache token, to `/etc/orb/leanci-env` (root:orbnode, 0640), sourced by
   `orbnode` login shells. lean.ci writes them only for its own `runner` user, in
@@ -681,7 +686,8 @@ machine ready; the last state it gave is logged),
 `managed_bootstrap_timeout_during_delivery`, `managed_bootstrap_launch_failed`
 (the script exited with an error; its output is logged), or
 `managed_bootstrap_timeout_no_relay_poll`. In the last case Core asks the guest,
-before destroying it, for PID 1, the unit state, the node process count, whether
+before destroying it, for PID 1 and architecture, the permissions and mount of the
+node binary's path, the unit's user and command, the unit state, the node process count, whether
 it can reach Core's `/api/health`, and the tail of the node's log. Guest text is
 logged with the enrolment token removed, control characters dropped, bounded to
 4000 characters, and one prefixed line per guest line. None of it goes into the
