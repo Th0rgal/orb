@@ -102,6 +102,47 @@ def run (root : String) : IO Unit := do
     for method in #["GET", "PATCH", "DELETE"] do
       let (status, _) ← send method "/api/control/missions/admin-mission" member
       check (status == 404) s!"REST guessed foreign mission {method}"
+    -- Conversation search (`/api/control/missions/search/messages`) vs per-mission `/api/control/missions/:id/messages`.
+    for (mid, txt) in #[("admin-mission", "shared-search-token admin-private-search-body"),
+        ("member-mission", "shared-search-token member-own-search-body")] do
+      let .ok _ ← appendMissionEvent store mid "user_message"
+        (renderCompact (.obj #[("content", .str txt)])) "2026-11-13T10:01:00Z"
+        | throw (IO.userError "isolation search message fixture")
+      sql store.missionsDb "UPDATE mission_events SET content=?2 WHERE mission_id=?1;" #[mid, txt]
+    let (ownMsgSt, ownMsgDoc) ← send "GET" "/api/control/missions/member-mission/messages" member
+    let ownMsgs := ownMsgDoc.asArr?.getD #[]
+    let cOk := ownMsgSt == 200 && ownMsgs.size == 1 &&
+      ((renderCompact ownMsgDoc).splitOn "member-own-search-body").length > 1
+    let (mSearchSt, mSearchDoc) ← send "GET" "/api/control/missions/search/messages?q=shared-search-token" member
+    let mSearchHits := (mSearchDoc.fieldArr? "hits").getD #[]
+    let aOk := mSearchSt == 200 &&
+      (mSearchDoc.fieldArr? "hits").isSome &&
+      mSearchDoc.field? "next_cursor" == some .null &&
+      ((mSearchDoc.field? "coverage").bind JVal.asObj?).isSome
+    let dOk := mSearchHits.size == 1 &&
+      (mSearchHits[0]?.bind (·.fieldStr? "mission_id")) == some "member-mission" &&
+      ((renderCompact mSearchDoc).splitOn "admin-mission").length == 1 &&
+      ((renderCompact mSearchDoc).splitOn "admin-private-search-body").length == 1 &&
+      ((renderCompact mSearchDoc).splitOn "admin-private-marker").length == 1
+    let legacyUnscopedApp := { st with bootstrapAdminId := "", cfg := { st.cfg with devMode := true } }
+    let (admSearchSt, admSearchDoc) ← send "GET" "/api/control/missions/search/messages?q=shared-search-token" admin (.obj #[]) st
+    let (legSearchSt, legSearchDoc) ← send "GET" "/api/control/missions/search/messages?q=shared-search-token" "" (.obj #[]) legacyUnscopedApp
+    let bAdminOk := admSearchSt == 200 &&
+      admSearchDoc.asArr?.isNone &&
+      (admSearchDoc.fieldArr? "hits").isSome &&
+      admSearchDoc.field? "next_cursor" == some .null &&
+      ((admSearchDoc.field? "coverage").bind JVal.asObj?).isSome
+    let bLegacyOk := legSearchSt == 200 &&
+      legSearchDoc.asArr?.isNone &&
+      (legSearchDoc.fieldArr? "hits").isSome &&
+      legSearchDoc.field? "next_cursor" == some .null &&
+      ((legSearchDoc.field? "coverage").bind JVal.asObj?).isSome
+    check (aOk && bAdminOk && bLegacyOk && cOk && dOk)
+      (s!"search/messages contract: " ++
+       s!"(a) member={aOk} (st={mSearchSt}, body={renderCompact mSearchDoc}); " ++
+       s!"(b) admin={bAdminOk} (st={admSearchSt}, body={renderCompact admSearchDoc}), legacy={bLegacyOk} (st={legSearchSt}, body={renderCompact legSearchDoc}); " ++
+       s!"(c) ownMessages={cOk} (st={ownMsgSt}, count={ownMsgs.size}); " ++
+       s!"(d) memberIsolated={dOk} (hits={renderCompact (.arr mSearchHits)})")
     for target in #["/api/bitwarden/status", "/api/secrets", "/api/admin/users"] do
       check ((← send "GET" target member).1 == 403) s!"REST admin boundary {target}"
     for method in #["GET", "POST"] do
