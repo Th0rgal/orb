@@ -1923,6 +1923,13 @@ private def launchLocalCoreMissionTurn
   let safeRoot ← match ← confineWorkingDirectory st.cfg.workingDir st.cfg.workingDir with
     | .ok d => pure d
     | .error e => return .error s!"invalid_working_directory:{e}"
+  let some mission ← getMission? st.store missionId | return .error "mission_not_found"
+  let prelude ← remoteInstallPrelude st.cfg.workingDir
+    (if mission.project.isEmpty then none else some mission.project) harness st.store.rootDir
+    mission.ownerUserId st.bootstrapAdminId
+  if !prelude.isEmpty then
+    let installed ← IO.Process.output { cmd := "/bin/sh", args := #["-c", prelude], cwd := some (System.FilePath.mk safeCwd) }
+    if installed.exitCode != 0 then return .error "library_install_failed"
   let binOverride := st.warmHarnessBinOverride?.getD ""
   let nowSec ← coreEpochSec
   let ts := formatEpochIso8601Utc nowSec
@@ -2418,8 +2425,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let multiDb ← hasMultipleActiveUsers st.store
     -- `ORB_BUILD_SHA` is set by the deploy step, so a caller can tell which commit a service runs.
     let buildSha := ((← IO.getEnv "ORB_BUILD_SHA").getD "").trimAscii.toString
-    let effLibRem ← resolveEffectiveLibraryRemote st.store.rootDir st.cfg.libraryRemote
-    let health := renderHealthJson { st.cfg with libraryRemote := effLibRem } multiDb
+    -- Public health has no principal: never disclose the owner-only Library remote.
+    let health := renderHealthJson { st.cfg with libraryRemote := "" } multiDb
     let body :=
       if buildSha.isEmpty || !health.endsWith "}" then health
       else (health.dropEnd 1).toString ++ s!",\"build\":{jsonEscape buildSha}}"
@@ -4119,7 +4126,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let mut selectedSkills : Array SelectedSkill := #[]
       if !clientPlaced then
         if let some prompt := prompt? then
-          match ← selectDelivered st.cfg.workingDir (if rawProjSlug.isEmpty then none else some rawProjSlug) backend prompt st.store.rootDir with
+          match ← selectDelivered st.cfg.workingDir (if rawProjSlug.isEmpty then none else some rawProjSlug) backend prompt st.store.rootDir caller.userId st.bootstrapAdminId with
           | .error e =>
             abortIdem
             return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
@@ -5705,7 +5712,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         else if caller.isLegacyUnscoped then some m.project
         else some ((unscopeProjectSlugForOwner m.ownerUserId st.bootstrapAdminId m.project).getD m.project))
       let harness := (mission?.map (·.backend)).getD "opencode"
-      match ← selectDelivered st.cfg.workingDir proj? harness content st.store.rootDir with
+      match ← selectDelivered st.cfg.workingDir proj? harness content st.store.rootDir (mission?.map (·.ownerUserId) |>.getD caller.userId) st.bootstrapAdminId with
       | .error e => return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
       | .ok sel => selectedSkills := sel
     if let some (mid, saved, effectiveModel) := promoteCyber? then
@@ -5832,7 +5839,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             if m.project.isEmpty then none
             else if caller.isLegacyUnscoped then some m.project
             else some ((unscopeProjectSlugForOwner m.ownerUserId st.bootstrapAdminId m.project).getD m.project)
-          match ← selectDelivered st.cfg.workingDir proj? m.backend content st.store.rootDir with
+          match ← selectDelivered st.cfg.workingDir proj? m.backend content st.store.rootDir m.ownerUserId st.bootstrapAdminId with
           | .error e => return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
           | .ok sel => selectedSkills := sel
       if let some (saved, effectiveModel) := promoteCyber? then
@@ -5890,7 +5897,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   if req.method == "GET" && cleanPath == "/api/library/skill-delivery" then
     let q := parseQueryParams rawTarget
     let proj? := (q.find? (fun p => p.1 == "project")).map Prod.snd
-    match ← buildDeliveryPlan st.cfg.workingDir proj? st.store.rootDir with
+    match ← buildDeliveryPlan st.cfg.workingDir proj? st.store.rootDir caller.userId st.bootstrapAdminId with
     | .error e => return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
     | .ok plan => return .ok (mkJson 200 (planToJson plan))
 
@@ -6358,6 +6365,17 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   -- Settings, Proxy API Keys, Capabilities & Stats Parity Endpoints
   if cleanPath == "/api/settings" && (req.method == "GET" || req.method == "PUT" || req.method == "PATCH") then
     let isAdm := caller.isLegacyUnscoped || caller.role == "admin"
+    let ownsHostLibrary := OrbCore.Skills.isLibraryOwner caller.userId st.bootstrapAdminId
+    if !ownsHostLibrary && (req.method == "PUT" || req.method == "PATCH") then
+      let .ok patch := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      let keys := (patch.asObj?.getD #[]).map Prod.fst
+      if !keys.isEmpty && keys.all (fun k => k == "library_remote" || k == "library_revision") then
+        let (code, _, bytes) ← handleUpdateLibraryRemote st.store st.cfg.workingDir isAdm
+          req.bodySlice.toByteArray caller.userId st.bootstrapAdminId
+        return .ok (mkJson code (String.fromUTF8? bytes |>.getD "{}"))
+      if keys.any (fun k => k == "library_remote" || k == "library_revision") then
+        return .ok (mkJson 400 "{\"error\":\"library_settings_require_scoped_update\"}")
     if !isAdm then
       return .ok (mkJson 403 "{\"error\":\"admin_required\"}")
     if req.method == "GET" then
@@ -6367,7 +6385,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           rawSettings
         else
           rawSettings.setField "library_remote" (.str st.cfg.libraryRemote)
-      return .ok (mkJson 200 (renderCompact (redactSettingsSecrets withLib)))
+      let scopedSettings ← scopeLibrarySettingsResponse st.store.rootDir st.cfg.workingDir caller.userId st.bootstrapAdminId withLib
+      return .ok (mkJson 200 (renderCompact (redactSettingsSecrets scopedSettings)))
     else
       let .ok patchJv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
         | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
@@ -6385,7 +6404,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | _, _ => curSettings
       if let .error e ← writeSettingsJson st.store.rootDir merged (some curSettings) then
         return .ok (mkJson (OrbCore.SettingsFile.errorStatus e) s!"\{\"error\":{jsonEscape e}}")
-      return .ok (mkJson 200 (renderCompact (redactSettingsSecrets merged)))
+      let scopedSettings ← scopeLibrarySettingsResponse st.store.rootDir st.cfg.workingDir caller.userId st.bootstrapAdminId merged
+      return .ok (mkJson 200 (renderCompact (redactSettingsSecrets scopedSettings)))
 
   if cleanPath == "/api/proxy-keys" || cleanPath.startsWith "/api/proxy-keys/" then
     let isAdm := caller.isLegacyUnscoped || caller.role == "admin"

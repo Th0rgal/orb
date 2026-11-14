@@ -1108,6 +1108,30 @@ def isValidGitRemote (raw : String) : Bool := Id.run do
          u.startsWith "file://" ||
          u.startsWith "/"
 
+/-- A local Git URL must not turn the host's other private checkouts into a remote.
+    Remote network repository authorization remains with the Git server. -/
+private def foreignLocalLibraryRemote (workingDir storeRoot ownRoot remote : String) : IO Bool := do
+  let raw := if remote.startsWith "file://" then
+      let path := (remote.drop 7).toString
+      if path.startsWith "/" then path
+      else "/" ++ String.intercalate "/" ((path.splitOn "/").drop 1)
+    else remote
+  if !raw.startsWith "/" then return false
+  let decoded := (percentDecodeStrict raw).getD raw
+  let canonical (path : String) : IO String := do
+    let fp := System.FilePath.mk path
+    try return (← IO.FS.realPath fp).toString catch _ => return fp.normalize.toString
+  let target ← canonical decoded
+  let own ← canonical ownRoot
+  let within (child parent : String) := child == parent || child.startsWith (parent ++ "/")
+  if within target own then return false
+  let mut protectedRoots := #[s!"{workingDir}/.sandboxed-sh/library", s!"{storeRoot}/library", s!"{workingDir}/library"]
+  if let some overridePath ← IO.getEnv "LIBRARY_PATH" then
+    unless overridePath.trimAscii.isEmpty do protectedRoots := protectedRoots.push overridePath.trimAscii.toString
+  for path in protectedRoots do
+    if within target (← canonical path) then return true
+  return false
+
 private def findHeaderCI? (hdrs : Array (String × String)) (target : String) : Option String :=
   let t := target.toLower
   (hdrs.find? (fun (k, _) => k.toLower == t)).map Prod.snd
@@ -1123,6 +1147,35 @@ def resolveEffectiveLibraryRemote
   | some .null => return ""
   | some (.str r) => return r.trimAscii.toString
   | _ => return defaultRemote.trimAscii.toString
+
+/-- Owner settings stay global; every other principal owns a private library.json. -/
+def readLibrarySettings (storeRoot libDir : String) (isOwner : Bool) : IO JVal := do
+  if isOwner then return ← readSettingsJson storeRoot
+  if (← statPath s!"{libDir}/library.json").isSymlink then
+    throw (IO.userError "library_invalid_user_scope")
+  let .ok snapshot ← OrbCore.SettingsFile.read libDir "library.json"
+    | throw (IO.userError "library_settings_unavailable")
+  return .obj #[("library_remote", snapshot.value.fieldOrNull "remote"),
+    ("library_revision", snapshot.value.fieldOrNull "revision")]
+
+/-- Keep Library fields caller-scoped even in an administrator's global settings response. -/
+def scopeLibrarySettingsResponse (storeRoot workingDir callerUserId bootstrapAdminId : String) (value : JVal) : IO JVal := do
+  if OrbCore.Skills.isLibraryOwner callerUserId bootstrapAdminId then return value
+  let libDir ← OrbCore.Skills.resolveLibraryRootFor callerUserId workingDir storeRoot bootstrapAdminId
+  let own ← readLibrarySettings storeRoot libDir false
+  return (value.setField "library_remote" (own.fieldOrNull "library_remote")).setField
+    "library_revision" (own.fieldOrNull "library_revision")
+
+def writeLibrarySettings (storeRoot libDir : String) (isOwner : Bool) (value expected : JVal) : IO (Except String Unit) := do
+  if isOwner then return ← writeSettingsJson storeRoot value (some expected)
+  IO.FS.createDirAll (System.FilePath.mk libDir)
+  let metadata (v : JVal) := JVal.obj #[("remote", v.fieldOrNull "library_remote"),
+    ("revision", v.fieldOrNull "library_revision")]
+  -- An absent document is equivalent to two null fields on first write.
+  let .ok before ← OrbCore.SettingsFile.read libDir "library.json" | return .error "library_settings_unavailable"
+  if before.raw.isSome && renderCompact before.value != renderCompact (metadata expected) then
+    return .error "settings_changed"
+  OrbCore.SettingsFile.write libDir (metadata value) (some before.value) "library.json"
 
 private def isDivergedGitOutput (out : String) : Bool :=
   let low := out.toLower
@@ -1151,6 +1204,22 @@ private def gitCurrentBranch (libDir : String) : IO String := do
   let b := out.trimAscii.toString
   if rc == 0 && !b.isEmpty && b != "HEAD" then return b else return "main"
 
+/-- Host/user state is never part of a Library commit or a destructive clean.
+    In particular the owner's legacy storeRoot/library may contain member checkouts. -/
+private def protectLibraryLocalState (libDir : String) : IO Unit := do
+  let info := System.FilePath.mk libDir / ".git" / "info"
+  let gitDir := System.FilePath.mk libDir / ".git"
+  if !(← gitDir.pathExists) || !(← gitDir.isDir) then return
+  IO.FS.createDirAll info
+  let file := info / "exclude"
+  let before ← try IO.FS.readFile file catch _ => pure ""
+  let rules := "\n/users/\n/library.json\n/.settings.lock\n"
+  unless (before.splitOn rules).length > 1 do IO.FS.writeFile file (before ++ rules)
+
+private def libraryTreeHasLocalState (libDir tree : String) : IO Bool := do
+  let (rc, files) ← runGitCapture #["ls-tree", "--name-only", tree, "--", "library.json", "users", ".settings.lock"] (some libDir)
+  return rc == 0 && !files.trimAscii.isEmpty
+
 /-- Ensure `libDir` is initialized/updated for `effRemote` (`clone` when absent, `remote add`/`set-url` + `fetch` when changed). -/
 def ensureLibraryRepo (libDir effRemote : String) (forceReinit : Bool := false) : IO (Except String Bool) := do
   let rem := effRemote.trimAscii.toString
@@ -1160,7 +1229,8 @@ def ensureLibraryRepo (libDir effRemote : String) (forceReinit : Bool := false) 
   let gitFp := fp / ".git"
   if (← fp.pathExists) && !(← gitFp.pathExists) then
     let entries ← try fp.readDir catch _ => pure #[]
-    if forceReinit || entries.isEmpty then
+    let hasLocalState := (← (fp / "library.json").pathExists) || (← (fp / "users").pathExists)
+    if (forceReinit || entries.isEmpty) && !hasLocalState then
       let _ ← runCmdCapture "rm" #["-rf", "--", libDir]
     else
       let (rcInit, outInit) ← runGitCapture #["init", "-b", "main"] (some libDir)
@@ -1183,9 +1253,11 @@ def ensureLibraryRepo (libDir effRemote : String) (forceReinit : Bool := false) 
       if let some ref ← resolveRemoteTrackingRef libDir "main" then
         let targetBr := if ref.startsWith "origin/" then (ref.drop 7).toString else "main"
         let _ ← runGitCapture #["checkout", "-B", targetBr, "--track", ref] (some libDir)
+    protectLibraryLocalState libDir
     return .ok true
   if !(← gitFp.pathExists) then
     return .error "Library directory exists without a Git repository"
+  protectLibraryLocalState libDir
   let curRem? ← gitOriginUrl? libDir
   if !forceReinit && curRem? == some rem then
     return .ok false
@@ -1200,6 +1272,8 @@ def ensureLibraryRepo (libDir effRemote : String) (forceReinit : Bool := false) 
   if rcFetch != 0 then
     let msg := outFetch.trimAscii.toString
     return .error (if msg.isEmpty then "git fetch failed" else msg)
+  if ← libraryTreeHasLocalState libDir "FETCH_HEAD" then
+    return .error "library_remote_contains_private_state"
   let (rcHead, _) ← runGitCapture #["rev-parse", "--verify", "--quiet", "HEAD"] (some libDir)
   if rcHead != 0 then
     if let some ref ← resolveRemoteTrackingRef libDir "main" then
@@ -1212,7 +1286,7 @@ def ensureLibraryRepo (libDir effRemote : String) (forceReinit : Bool := false) 
         let msg := outCo.trimAscii.toString
         return .error (if msg.isEmpty then "git checkout failed" else msg)
   else if forceReinit then
-    let (rcSt, stOut) ← runGitCapture #["status", "--porcelain"] (some libDir)
+    let (rcSt, stOut) ← runGitCapture #["status", "--porcelain", "--", ".", ":(exclude)users", ":(exclude)library.json", ":(exclude).settings.lock"] (some libDir)
     if rcSt == 0 && stOut.trimAscii.isEmpty then
       let br ← gitCurrentBranch libDir
       if let some ref ← resolveRemoteTrackingRef libDir br then
@@ -1220,9 +1294,10 @@ def ensureLibraryRepo (libDir effRemote : String) (forceReinit : Bool := false) 
         let _ ← runGitCapture #["checkout", "-B", targetBr, "--track", ref] (some libDir)
   return .ok true
 
-def buildLibraryStatusJson (libDir : String) (defaultRemote : String) : IO JVal := do
+def buildLibraryStatusJson (libDir : String) (defaultRemote : String) (requireOwnRepo : Bool := false) : IO JVal := do
+  protectLibraryLocalState libDir
   let fp := System.FilePath.mk libDir
-  if !(← fp.pathExists) then
+  if !(← fp.pathExists) || (requireOwnRepo && !(← (fp / ".git").pathExists)) then
     return .obj #[
       ("path", .str libDir),
       ("remote", if defaultRemote.isEmpty then .null else .str defaultRemote),
@@ -1234,7 +1309,7 @@ def buildLibraryStatusJson (libDir : String) (defaultRemote : String) : IO JVal 
     ]
   let branch ← gitCurrentBranch libDir
   let rem ← if defaultRemote.isEmpty then pure "" else pure ((← gitOriginUrl? libDir).getD defaultRemote)
-  let (rcSt, stOut) ← runGitCapture #["status", "--porcelain"] (some libDir)
+  let (rcSt, stOut) ← runGitCapture #["status", "--porcelain", "--", ".", ":(exclude)users", ":(exclude)library.json", ":(exclude).settings.lock"] (some libDir)
   let modLines :=
     if rcSt == 0 then
       (stOut.splitOn "\n").map (fun l => (l.drop 3).toString.trimAscii.toString) |>.filter (!·.isEmpty)
@@ -1380,8 +1455,12 @@ def handleUpdateLibraryRemote
     (store : CoreStore)
     (workingDir : String)
     (effAdmin : Bool)
-    (bodyBytes : ByteArray) : IO (Nat × String × ByteArray) := do
-  if !effAdmin then return jsonErr 403 "admin_required"
+    (bodyBytes : ByteArray) (callerUserId bootstrapAdminId : String) : IO (Nat × String × ByteArray) := do
+  let _ := effAdmin
+  unless OrbCore.Skills.validLibraryScope callerUserId bootstrapAdminId do
+    return jsonErr 400 "library_invalid_user_scope"
+  let isOwner := OrbCore.Skills.isLibraryOwner callerUserId bootstrapAdminId
+  let libDir ← OrbCore.Skills.resolveLibraryRootFor callerUserId workingDir store.rootDir bootstrapAdminId
   let .ok reqJv := OrbBin.Json.parseBytes bodyBytes
     | return jsonErr 400 "Invalid JSON"
   let nextRemote? : Option String ←
@@ -1390,17 +1469,31 @@ def handleUpdateLibraryRemote
     | some (.str s) =>
       let t := s.trimAscii.toString
       pure (if t.isEmpty then none else some t)
-    | none => return jsonErr 400 "Missing library_remote field"
+    | none =>
+      if (reqJv.field? "library_revision").isSome then
+        pure ((← readLibrarySettings store.rootDir libDir isOwner).fieldStr? "library_remote")
+      else return jsonErr 400 "Missing library_remote field"
     | _ => return jsonErr 400 "Invalid library_remote field"
   if let some u := nextRemote? then
+    if OrbCore.SettingsDocument.libraryRemoteContainsCredentials u then
+      return jsonErr 400 "settings_library_remote_contains_credentials"
     if !isValidGitRemote u then
       return jsonErr 400 "Invalid Library repository URL"
-  let curSettings ← readSettingsJson store.rootDir
+    if !isOwner && (← foreignLocalLibraryRemote workingDir store.rootDir libDir u) then
+      return jsonErr 400 "library_remote_scope_forbidden"
+  let curSettings ← readLibrarySettings store.rootDir libDir isOwner
   let nextVal : JVal := match nextRemote? with | some u => .str u | none => .null
-  let updatedSettings := curSettings.setField "library_remote" nextVal
-  if let .error e ← writeSettingsJson store.rootDir updatedSettings (some curSettings) then
+  let mut updatedSettings := curSettings.setField "library_remote" nextVal
+  if let some pin := reqJv.field? "library_revision" then
+    match pin with
+    | .null => pure ()
+    | .str revision =>
+      unless OrbCore.SettingsDocument.validLibraryRevision revision do
+        return jsonErr 400 "settings_invalid_library_revision"
+    | _ => return jsonErr 400 "settings_invalid_library_revision"
+    updatedSettings := updatedSettings.setField "library_revision" pin
+  if let .error e ← writeLibrarySettings store.rootDir libDir isOwner updatedSettings curSettings then
     return jsonErr (OrbCore.SettingsFile.errorStatus e) e
-  let libDir ← resolveLibraryDir workingDir store.rootDir
   match nextRemote? with
   | none =>
     let gitFp := System.FilePath.mk libDir / ".git"
@@ -1433,43 +1526,60 @@ def handleLibraryRoute
     (method : String)
     (segs : List String)
     (qMap headers : Array (String × String))
-    (bodyBytes : ByteArray) : IO (Option (Nat × String × ByteArray)) := do
-  let libDir ← resolveLibraryDir workingDir store.rootDir
-  let hdrsForRemote := if effAdmin then headers else #[]
-  let effRemote ← resolveEffectiveLibraryRemote store.rootDir defaultLibraryRemote hdrsForRemote
+    (bodyBytes : ByteArray) (callerUserId bootstrapAdminId : String) : IO (Option (Nat × String × ByteArray)) := do
+  unless OrbCore.Skills.validLibraryScope callerUserId bootstrapAdminId do
+    return some (jsonErr 400 "library_invalid_user_scope")
+  let isOwner := OrbCore.Skills.isLibraryOwner callerUserId bootstrapAdminId
+  let libDir ← OrbCore.Skills.resolveLibraryRootFor callerUserId workingDir store.rootDir bootstrapAdminId
+  for sub in #["skill", "skills"] do
+    if (← statPath s!"{libDir}/{sub}").isSymlink then
+      return some (jsonErr 400 "library_symlinked_skill_root")
+  let settings ← readLibrarySettings store.rootDir libDir isOwner
+  if !isOwner && method != "GET" && !(← (System.FilePath.mk libDir / "library.json").pathExists) then
+    if let .error e ← writeLibrarySettings store.rootDir libDir false settings settings then
+      return some (jsonErr (OrbCore.SettingsFile.errorStatus e) e)
+  let effRemote ← if isOwner then resolveEffectiveLibraryRemote store.rootDir defaultLibraryRemote headers
+    else pure ((settings.fieldStr? "library_remote").getD "")
+  let _ := effAdmin
+  -- Accept the plural spelling in the contract alongside existing client URLs.
+  let segs := match segs with
+    | "api" :: "library" :: "skills" :: rest => "api" :: "library" :: "skill" :: rest
+    | _ => segs
+  let ownStatus : IO JVal := do
+    let status ← buildLibraryStatusJson libDir effRemote (!isOwner)
+    let status := status.setField "revision" (settings.fieldOrNull "library_revision")
+    return if isOwner then status else status.setField "path" (.str "")
   let libFp := System.FilePath.mk libDir
   let gitFp := libFp / ".git"
 
   -- A transferred revision pins the next explicit synchronization. Importing
   -- configuration never copies Library files or resets a working checkout.
   if method == "POST" && (segs == ["api", "library", "sync"] || segs == ["api", "library", "force-sync"]) then
-    if !effAdmin then return some (jsonErr 403 "admin_required")
-    let settings ← readSettingsJson store.rootDir
     if let some revision := settings.fieldStr? "library_revision" then
       unless OrbCore.SettingsDocument.validLibraryRevision revision do
         return some (jsonErr 400 "settings_invalid_library_revision")
       if effRemote.isEmpty then return some (jsonErr 400 "Library remote is not configured")
       if let .error _ ← ensureLibraryRepo libDir effRemote false then
         return some (jsonErr 502 "library_revision_repository_unavailable")
-      let (status, changes) ← runGitCapture #["status", "--porcelain"] (some libDir)
+      let (status, changes) ← runGitCapture #["status", "--porcelain", "--", ".", ":(exclude)users", ":(exclude)library.json", ":(exclude).settings.lock"] (some libDir)
       if status != 0 || !changes.trimAscii.isEmpty then
         return some (jsonErr 409 "library_revision_requires_clean_checkout")
       let (fetched, _) ← runGitCapture #["fetch", "--no-tags", "origin", revision] (some libDir)
       if fetched != 0 then return some (jsonErr 502 "library_revision_unavailable")
+      if ← libraryTreeHasLocalState libDir revision then
+        return some (jsonErr 400 "library_remote_contains_private_state")
       let (checkedOut, _) ← runGitCapture #["checkout", "--detach", revision] (some libDir)
       if checkedOut != 0 then return some (jsonErr 409 "library_revision_checkout_failed")
-      return some (jsonResp 200 (← buildLibraryStatusJson libDir effRemote))
+      return some (jsonResp 200 (← ownStatus))
 
   if method == "GET" && segs == ["api", "library", "status"] then
     if !(← gitFp.pathExists) && !effRemote.isEmpty then
       if let .error e ← ensureLibraryRepo libDir effRemote false then
         return some (jsonErr 502 s!"Failed to initialize Library repository: {e}")
-    let libSt ← buildLibraryStatusJson libDir effRemote
-    -- Members see sync state only, not the host path or the remote URL.
-    return some (jsonResp 200 (if effAdmin then libSt else (libSt.setField "path" (.str "")).setField "remote" (.str "")))
+    return some (jsonResp 200 (← ownStatus))
 
   if method == "POST" && segs == ["api", "library", "sync"] then
-    if !effAdmin then return some (jsonErr 403 "admin_required")
+    if !isOwner then IO.FS.createDirAll libFp
     if !effRemote.isEmpty then
       if !(← gitFp.pathExists) then
         if let .error e ← ensureLibraryRepo libDir effRemote false then
@@ -1487,6 +1597,8 @@ def handleLibraryRoute
             return some (500, "text/plain; charset=utf-8", outF.trimAscii.toString.toUTF8)
           let branch ← gitCurrentBranch libDir
           if let some upRef ← resolveRemoteTrackingRef libDir branch then
+            if ← libraryTreeHasLocalState libDir upRef then
+              return some (jsonErr 400 "library_remote_contains_private_state")
             let (rcM, outM) ← runGitCapture #["merge", "--ff-only", upRef] (some libDir)
             if rcM != 0 then
               let cleanErr := outM.trimAscii.toString
@@ -1498,10 +1610,9 @@ def handleLibraryRoute
                 if nums.size ≥ 2 && nums[0]! > 0 && nums[1]! > 0 then
                   return some (409, "text/plain; charset=utf-8", s!"DIVERGED_HISTORY: {cleanErr}".toUTF8)
               return some (500, "text/plain; charset=utf-8", cleanErr.toUTF8)
-    return some (jsonResp 200 (← buildLibraryStatusJson libDir effRemote))
+    return some (jsonResp 200 (← ownStatus))
 
   if method == "POST" && segs == ["api", "library", "force-sync"] then
-    if !effAdmin then return some (jsonErr 403 "admin_required")
     if effRemote.isEmpty then
       return some (jsonErr 400 "Library remote is not configured")
     if !(← gitFp.pathExists) then
@@ -1521,14 +1632,15 @@ def handleLibraryRoute
         return some (500, "text/plain; charset=utf-8", outF.trimAscii.toString.toUTF8)
       let branch ← gitCurrentBranch libDir
       let targetRef := (← resolveRemoteTrackingRef libDir branch).getD "FETCH_HEAD"
+      if ← libraryTreeHasLocalState libDir targetRef then
+        return some (jsonErr 400 "library_remote_contains_private_state")
       let (rcR, outR) ← runGitCapture #["reset", "--hard", targetRef] (some libDir)
       if rcR != 0 then
         return some (500, "text/plain; charset=utf-8", outR.trimAscii.toString.toUTF8)
-      let _ ← runGitCapture #["clean", "-fd"] (some libDir)
-    return some (jsonResp 200 (← buildLibraryStatusJson libDir effRemote))
+      let _ ← runGitCapture #["clean", "-fd", "-e", "/users/", "-e", "/library.json", "-e", "/.settings.lock"] (some libDir)
+    return some (jsonResp 200 (← ownStatus))
 
   if method == "POST" && segs == ["api", "library", "commit"] then
-    if !effAdmin then return some (jsonErr 403 "admin_required")
     let .ok reqJv := OrbBin.Json.parseBytes bodyBytes
       | return some (jsonErr 400 "Invalid JSON")
     let message := ((reqJv.fieldStr? "message").getD "").trimAscii.toString
@@ -1540,10 +1652,11 @@ def handleLibraryRoute
       if rcInit != 0 then
         let _ ← runGitCapture #["init"] (some libDir)
         let _ := outInit
-    let (rcAdd, outAdd) ← runGitCapture #["add", "-A"] (some libDir)
+    protectLibraryLocalState libDir
+    let (rcAdd, outAdd) ← runGitCapture #["add", "-A", "--", ".", ":(exclude)users", ":(exclude)library.json", ":(exclude).settings.lock"] (some libDir)
     if rcAdd != 0 then
       return some (500, "text/plain; charset=utf-8", s!"git add failed: {outAdd.trimAscii.toString}".toUTF8)
-    let (rcSt, stOut) ← runGitCapture #["status", "--porcelain"] (some libDir)
+    let (rcSt, stOut) ← runGitCapture #["status", "--porcelain", "--", ".", ":(exclude)users", ":(exclude)library.json", ":(exclude).settings.lock"] (some libDir)
     if rcSt != 0 then
       return some (500, "text/plain; charset=utf-8", s!"git status failed: {stOut.trimAscii.toString}".toUTF8)
     if stOut.trimAscii.isEmpty then
@@ -1568,7 +1681,6 @@ def handleLibraryRoute
     return some (200, "text/plain; charset=utf-8", "Committed successfully".toUTF8)
 
   if method == "POST" && (segs == ["api", "library", "push"] || segs == ["api", "library", "force-push"]) then
-    if !effAdmin then return some (jsonErr 403 "admin_required")
     let isForce := segs == ["api", "library", "force-push"]
     if !(← gitFp.pathExists) then
       return some (400, "text/plain; charset=utf-8", "Library repository is not initialized".toUTF8)
@@ -1593,11 +1705,6 @@ def handleLibraryRoute
         return some (409, "text/plain; charset=utf-8", s!"DIVERGED_HISTORY: {cleanErr}".toUTF8)
       return some (500, "text/plain; charset=utf-8", s!"git push failed: {cleanErr}".toUTF8)
     return some (200, "text/plain; charset=utf-8", "Pushed successfully".toUTF8)
-
-  -- Skill sources can describe the owner's infrastructure: members get no Library skill bodies.
-  if !effAdmin && segs.length >= 3 && segs[2]? == some "skill" then
-    if method == "GET" && segs.length == 3 then return some (jsonResp 200 (.arr #[]))
-    return some (jsonErr (if method == "GET" then 404 else 403) (if method == "GET" then "Skill not found" else "admin_required"))
 
   if method == "GET" && segs == ["api", "library", "skill"] then
     if !(← gitFp.pathExists) && !effRemote.isEmpty then
@@ -1654,8 +1761,7 @@ def handleLibraryRoute
         | .error err => return some (jsonErr 500 err)
         | .ok jv => return some (jsonResp 200 jv)
 
-      if method == "PUT" then
-        if !effAdmin then return some (jsonErr 403 "admin_required")
+      if method == "PUT" || method == "POST" then
         let .ok reqJv := OrbBin.Json.parseBytes bodyBytes
           | return some (jsonErr 400 "Invalid JSON")
         let content := (reqJv.fieldStr? "content").getD ""
@@ -1674,7 +1780,6 @@ def handleLibraryRoute
         | .ok jv => return some (jsonResp 200 jv)
 
       if method == "DELETE" then
-        if !effAdmin then return some (jsonErr 403 "admin_required")
         let canonDir := System.FilePath.mk s!"{libDir}/skill/{cleanSkill}"
         let legacyDir := System.FilePath.mk s!"{libDir}/skills/{cleanSkill}"
         let cExists ← canonDir.pathExists
@@ -1745,14 +1850,12 @@ def handleLibraryRoute
         | .ok bytes => return some (200, "text/plain; charset=utf-8", bytes)
         | .error _ => return some (jsonErr 404 "File not readable")
       if method == "PUT" then
-        if !effAdmin then return some (jsonErr 403 "admin_required")
         let .ok reqJv := OrbBin.Json.parseBytes bodyBytes
           | return some (jsonErr 400 "Invalid JSON")
         if let some parent := fullFile.parent then IO.FS.createDirAll parent
         IO.FS.writeFile fullFile ((reqJv.fieldStr? "content").getD "")
         return some (jsonResp 200 (.obj #[("ok", .bool true), ("path", .str cleanRel)]))
       if method == "DELETE" then
-        if !effAdmin then return some (jsonErr 403 "admin_required")
         if cleanRel == "SKILL.md" then
           return some (jsonErr 400 "Cannot delete SKILL.md")
         if !(← fullFile.pathExists) || (← fullFile.isDir) then
@@ -2203,11 +2306,15 @@ def dispatchResourcesAndSystemRoute
       ])]))
 
   -- 5. Library (`/api/library/*` & `PUT /api/settings/library-remote`)
-  if method == "PUT" && segs == ["api", "settings", "library-remote"] then
-    return some (← handleUpdateLibraryRemote store workingDir effAdmin bodyBytes)
+  if !isLegacyUnscoped && callerUserId.isEmpty &&
+      ((segs.take 2 == ["api", "library"]) ||
+       segs == ["api", "settings", "library-remote"] || segs == ["api", "settings", "library-revision"]) then
+    return some (jsonErr 403 "principal_required")
+  if method == "PUT" && (segs == ["api", "settings", "library-remote"] || segs == ["api", "settings", "library-revision"]) then
+    return some (← handleUpdateLibraryRemote store workingDir effAdmin bodyBytes callerUserId bootstrapAdminId)
 
   if segs.length >= 2 && segs[0]? == some "api" && segs[1]? == some "library" then
-    if let some res ← handleLibraryRoute store workingDir libraryRemote effAdmin method segs qMap headers bodyBytes then
+    if let some res ← handleLibraryRoute store workingDir libraryRemote effAdmin method segs qMap headers bodyBytes callerUserId bootstrapAdminId then
       return some res
 
   -- 6. System, Mesh, FIDO & GitHub Integration (`/api/system/*`, `/api/mesh/status`, `/api/fido/*`, `/api/integrations/github*`)

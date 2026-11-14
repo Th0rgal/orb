@@ -148,11 +148,11 @@ def run : IO Unit := do
       IO.FS.writeFile s!"{root}/library/skills/lean-audit/SKILL.md" "---\nname: lean-audit\n---\nAudit it's \"proofs\".\n"
       IO.FS.createDirAll s!"{root}/library/skills/Bad Name"
       IO.FS.writeFile s!"{root}/library/skills/Bad Name/SKILL.md" "x"
-      let prelude ← OrbCore.Skills.remoteInstallPrelude root none "opencode"
+      let prelude ← OrbCore.Skills.remoteInstallPrelude root none "opencode" "" "" ""
       check ((prelude.splitOn "'.opencode/skills/lean-audit/SKILL.md'").length > 1) s!"opencode skill path: {prelude}"
       check ((prelude.splitOn "Bad Name").length == 1 && (prelude.splitOn "Audit it").length == 1)
         "unsafe names are skipped and content is never inlined as shell text"
-      check (((← OrbCore.Skills.remoteInstallPrelude root none "claude").splitOn "'.claude/skills/lean-audit/SKILL.md'").length > 1)
+      check (((← OrbCore.Skills.remoteInstallPrelude root none "claude" "" "" "").splitOn "'.claude/skills/lean-audit/SKILL.md'").length > 1)
         "claude skill path"
       -- The script really installs the file, and leaves an existing one alone.
       let ws := s!"{root}/node-workspace"

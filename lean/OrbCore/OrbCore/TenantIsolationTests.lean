@@ -70,6 +70,155 @@ def run (root : String) : IO Unit := do
       let .ok request := parseRequest wire.toUTF8 none | throw (IO.userError "isolation request")
       let .ok response ← dispatchCoreRequest app request now | throw (IO.userError "isolation dispatch")
       return (response.status, (parseBytes response.body).toOption.getD .null)
+    -- Per-user Library contract: real HTTP dispatch and local fixture git only.
+    let previousLibraryPath ← IO.getEnv "LIBRARY_PATH"
+    let ownerLibrary := path ++ "/owner-library"
+    OrbBin.PosixExt.setenvVar "LIBRARY_PATH" ownerLibrary
+    try
+      let putSkill (dir name : String) : IO Unit := do
+        let dest := System.FilePath.mk dir / "skill" / name
+        IO.FS.createDirAll dest
+        IO.FS.writeFile (dest / "SKILL.md") s!"---\nname: {name}\ndescription: {name} private body\n---\n{name} instructions\n"
+      let memberLibrary := path ++ "/library/users/member"
+      putSkill ownerLibrary "owner-only-skill"
+      putSkill memberLibrary "member-only-skill"
+      -- 1. Catalogs, including descriptions, are disjoint and owner-independent.
+      let (_, ownerPlan) ← send "GET" "/api/library/skill-delivery" admin
+      let (_, memberPlan) ← send "GET" "/api/library/skill-delivery" member
+      check (((renderCompact ownerPlan).splitOn "owner-only-skill").length > 1 &&
+        ((renderCompact ownerPlan).splitOn "member-only-skill").length == 1 &&
+        ((renderCompact memberPlan).splitOn "owner-only-skill").length == 1 &&
+        ((renderCompact memberPlan).splitOn "member-only-skill").length > 1) "library 1: disjoint catalogs"
+      putSkill ownerLibrary "owner-added-later"
+      check ((← send "GET" "/api/library/skill-delivery" member).2 == memberPlan) "library 1: byte-stable member plan"
+      let putContext (slug name : String) : IO Unit := do
+        let dir := System.FilePath.mk path / "project-files" / slug / "skills" / name
+        IO.FS.createDirAll dir
+        IO.FS.writeFile (dir / "SKILL.md") name
+      putContext "same-project" "owner-context-only"
+      putContext "member:same-project" "member-context-only"
+      let (contextCode, contextPlan) ← send "GET" "/api/library/skill-delivery?project=same-project" member
+      check (contextCode == 200 && ((renderCompact contextPlan).splitOn "owner-context-only").length == 1 &&
+        ((renderCompact contextPlan).splitOn "member-context-only").length > 1) "member project context stays scoped"
+      let .ok () ← writeSettingsJson path (.obj #[("library_remote", .str "/owner-private-remote")])
+        | throw (IO.userError "library settings fixture")
+      let globalBefore ← IO.FS.readFile (System.FilePath.mk path / "settings.json")
+      check ((← send "PUT" "/api/settings/library-remote" member
+        (.obj #[("library_remote", .str ownerLibrary)])).1 == 400)
+        "member cannot clone the host owner's private checkout as a local remote"
+      sql store.missionsDb "INSERT INTO users(id,username,password_hash,role,unix_username) VALUES('library-admin','library-admin','synthetic-hash','admin','orb-library-admin');"
+      let anotherAdmin := token "library-admin" "admin"
+      let (_, anotherPlan) ← send "GET" "/api/library/skill-delivery" anotherAdmin
+      check (anotherPlan.fieldArr? "skills" == some #[]) "non-bootstrap admin has own empty Library"
+      let (_, anotherSettings) ← send "GET" "/api/settings" anotherAdmin
+      check (anotherSettings.fieldOrNull "library_remote" == .null &&
+        anotherSettings.fieldOrNull "library_revision" == .null) "non-bootstrap admin cannot read owner Library settings"
+      sql store.missionsDb "DELETE FROM users WHERE id='library-admin';"
+      -- 4. Connect a private fixture remote; only library.json may change.
+      let fixture := path ++ "/fixture-library"
+      putSkill fixture "fixture-member-skill"
+      let git (args : Array String) : IO Unit := do
+        let output ← IO.Process.output { cmd := "git", args := args, cwd := some (System.FilePath.mk fixture) }
+        check (output.exitCode == 0) "library fixture git"
+      git #["init", "-b", "main"]
+      git #["add", "skill"]
+      git #["-c", "user.name=Fixture", "-c", "user.email=fixture@invalid", "commit", "-m", "fixture"]
+      let (remoteStatus, _) ← send "PUT" "/api/settings/library-remote" member
+        (.obj #[("library_remote", .str fixture)])
+      check (remoteStatus == 200 && (← IO.FS.readFile (System.FilePath.mk path / "settings.json")) == globalBefore)
+        "library 4: member remote leaves global settings byte-identical"
+      let .ok memberSettings := parse (← IO.FS.readFile (System.FilePath.mk memberLibrary / "library.json"))
+        | throw (IO.userError "library member metadata")
+      check (memberSettings.fieldStr? "remote" == some fixture) "library 4: private remote persisted"
+      let (_, fixtureRevision) ← do
+        let output ← IO.Process.output { cmd := "git", args := #["rev-parse", "HEAD"], cwd := some (System.FilePath.mk fixture) }
+        pure (output.exitCode, output.stdout.trimAscii.toString)
+      check ((← send "PUT" "/api/settings/library-revision" member
+        (.obj #[("library_revision", .str fixtureRevision)])).1 == 200) "member revision pin"
+      -- 2. Status returns own remote and revision, and hides the member path.
+      let (statusCode, status) ← send "GET" "/api/library/status" member
+      check (statusCode == 200 && status.fieldStr? "path" == some "" && status.fieldStr? "remote" == some fixture && status.fieldStr? "revision" == some fixtureRevision)
+        "library 2: scoped member status"
+      check ((← send "PUT" "/api/settings/library-revision" member
+        (.obj #[("library_revision", .null)])).1 == 200) "member clears revision pin"
+      -- 3. Sync writes only the member checkout, retaining its local settings.
+      let ownerBefore ← IO.FS.readFile (System.FilePath.mk ownerLibrary / "skill/owner-only-skill/SKILL.md")
+      IO.FS.removeDirAll (System.FilePath.mk memberLibrary / ".git")
+      IO.FS.removeDirAll (System.FilePath.mk memberLibrary / "skill/fixture-member-skill")
+      let (syncCode, syncStatus) ← send "POST" "/api/library/sync" member
+      check (syncCode == 200 && syncStatus.fieldStr? "path" == some "" &&
+        (← (System.FilePath.mk memberLibrary / "skill/fixture-member-skill/SKILL.md").pathExists) &&
+        (← IO.FS.readFile (System.FilePath.mk ownerLibrary / "skill/owner-only-skill/SKILL.md")) == ownerBefore)
+        "library 3: member sync isolated"
+      -- 5. Remote delivery reads the mission owner, never LIBRARY_PATH for a member.
+      let prelude ← OrbCore.Skills.remoteInstallPrelude path none "codex" path "member" "admin"
+      check ((prelude.splitOn "owner-only-skill").length == 1 && (prelude.splitOn "member-only-skill").length > 1)
+        "library 5: member remote install"
+      let .ok () ← upsertMission store {
+        id := "library-mission", ownerUserId := "member",
+        title := "library fixture", status := "awaiting_user", backend := "opencode", modelOverride := "",
+        workingDirectory := path, updatedAt := "2026-11-14T00:00:00Z" }
+        | throw (IO.userError "library mission fixture")
+      let installWorkspace := System.FilePath.mk path / "member-installed-workspace"
+      IO.FS.createDirAll installWorkspace
+      let installed ← IO.Process.output { cmd := "/bin/sh", args := #["-c", prelude], cwd := some installWorkspace }
+      check (installed.exitCode == 0 &&
+        (← (installWorkspace / ".agents/skills/member-only-skill/SKILL.md").pathExists) &&
+        !(← (installWorkspace / ".agents/skills/owner-only-skill/SKILL.md").pathExists))
+        "library 5: actual member workspace contains only member skills"
+      -- 6. Coordinator steers another owner's mission; selection follows the mission.
+      sql store.missionsDb "INSERT INTO mission_shares(mission_id,user_id,granted_by) VALUES('library-mission','admin','member');"
+      let (steerCode, _) ← send "POST" "/api/control/message" admin
+        (.obj #[("mission_id", .str "library-mission"), ("content", .str "/skill:member-only-skill continue")])
+      check (steerCode == 200) "library 6: coordinator selects member mission skills"
+      let .ok turn ← OrbCore.RemoteDispatch.bindRemoteTurnOwner store (some mc)
+        { missionId := "library-mission", targetNodeId := "dedicated", backend := "codex", prompt := "coordinator turn" }
+        "dedicated" #[{ id := "dedicated", baseUrl := "https://unused.invalid", tokenEnv := "SYNTHETIC_UNUSED_NODE_TOKEN" }]
+        | throw (IO.userError "library 6: dispatch ownership")
+      let coordinatedPrelude ← OrbCore.Skills.remoteInstallPrelude path none turn.backend path turn.ownerUserId "admin"
+      check (turn.ownerUserId == "member" && coordinatedPrelude == prelude)
+        "library 6: coordinator installs byte-identical member prelude"
+      let coordinatedWorkspace := System.FilePath.mk path / "coordinated-member-workspace"
+      IO.FS.createDirAll coordinatedWorkspace
+      let coordinatedInstall ← IO.Process.output { cmd := "/bin/sh", args := #["-c", coordinatedPrelude], cwd := some coordinatedWorkspace }
+      check (coordinatedInstall.exitCode == 0 &&
+        (← (coordinatedWorkspace / ".agents/skills/member-only-skill/SKILL.md").pathExists) &&
+        !(← (coordinatedWorkspace / ".agents/skills/owner-only-skill/SKILL.md").pathExists))
+        "library 6: coordinated workspace contains member skills only"
+      let (foreignCode, _) ← send "POST" "/api/control/message" admin
+        (.obj #[("mission_id", .str "library-mission"), ("content", .str "/skill:owner-only-skill continue")])
+      check (foreignCode == 400) "library 6: coordinator cannot select owner skill for member"
+      sql store.missionsDb "DELETE FROM mission_shares WHERE mission_id='library-mission' AND user_id='admin';"
+      sql store.missionsDb "DELETE FROM mission_events WHERE mission_id='library-mission';"
+      sql store.missionsDb "DELETE FROM remote_message_queue WHERE mission_id='library-mission';"
+      sql store.missionsDb "DELETE FROM missions WHERE id='library-mission';"
+      -- 7. The legacy owner resolver and global remote remain authoritative.
+      check ((← OrbCore.Skills.resolveLibraryRootFor "admin" path path "admin") == ownerLibrary &&
+        (← OrbCore.Skills.resolveLibraryRoot path path) == ownerLibrary &&
+        (← OrbCore.ResourcesAndSystem.resolveEffectiveLibraryRemote path "") == "/owner-private-remote")
+        "library 7: owner path and settings unchanged"
+      -- 8. Invalid IDs are explicit errors, even without /skill: references.
+      let invalid ← OrbCore.Skills.buildDeliveryPlan path none path "../admin" "admin"
+      check (match invalid with | .error e => e == "library_invalid_user_scope" | _ => false)
+        "library 8: reject invalid user scope"
+      let invalidRoute ← OrbCore.ResourcesAndSystem.handleLibraryRoute store path "" false "GET"
+        ["api", "library", "status"] #[] #[] ByteArray.empty "../admin" "admin"
+      check (match invalidRoute with
+        | some (code, _, body) => code == 400 && ((String.fromUTF8? body |>.getD "").splitOn "library_invalid_user_scope").length > 1
+        | none => false) "library 8: route rejects invalid ID before resolution"
+      for bad in #["..", ".", "a/b", "a:b", "user..other", String.ofList (List.replicate 65 'a')] do
+        check (!(OrbCore.Skills.validLibraryScope bad "admin")) "library 8: unsafe scope"
+      -- Members can create, edit, read and delete their own skill via plural alias.
+      for method in #["POST", "PUT"] do
+        check ((← send method "/api/library/skills/member-created" member
+          (.obj #[("content", .str "member created content")])).1 == 200) "member Library create/edit"
+      check ((← send "GET" "/api/library/skills/member-created" member).1 == 200) "member Library read"
+      check ((← send "GET" "/api/library/skills/member-created" admin).1 == 404) "owner cannot read member skill"
+      check ((← send "DELETE" "/api/library/skills/member-created" member).1 == 200) "member Library delete"
+    finally
+      match previousLibraryPath with
+      | some value => OrbBin.PosixExt.setenvVar "LIBRARY_PATH" value
+      | none => OrbBin.PosixExt.unsetenvVar "LIBRARY_PATH"
     let call (bearer tool : String) (args : JVal := .obj #[]) : IO JVal := do
       let (status, doc) ← send "POST" "/api/mcp/call" bearer (.obj #[("name", .str tool), ("arguments", args)])
       check (status == 200) s!"MCP transport {tool}"
@@ -781,13 +930,14 @@ def run (root : String) : IO Unit := do
         !((ovAdminDoc.fieldArr? "links").getD #[]).isEmpty)
       s!"member resources overview hides other users' missions, fleet sources and inference pools (member={renderCompact ovDoc})"
     let (lsSt, lsDoc) ← send "GET" "/api/library/status" member (.obj #[]) stWithProviders
-    check (lsSt != 200 || (lsDoc.fieldStr? "path" == some "" && lsDoc.fieldStr? "remote" == some ""))
-      "member library status hides host path and remote"
+    check (lsSt != 200 || (lsDoc.fieldStr? "path" == some "" && lsDoc.fieldStr? "remote" == some (path ++ "/fixture-library")))
+      "member library status hides host path and returns only own remote"
     let (siSt, siDoc) ← send "GET" "/api/system/info" member (.obj #[]) stWithProviders
     check (siSt == 200 && ((siDoc.fieldArr? "components").getD #[]).all (fun c => (c.field? "path").getD .null == .null))
       "member system info hides binary paths"
     let (skSt, skDoc) ← send "GET" "/api/library/skill" member (.obj #[]) stWithProviders
-    check (skSt == 200 && skDoc.asArr? == some #[]) "member Library skill list is empty"
+    check (skSt == 200 && ((renderCompact skDoc).splitOn "owner-only-skill").length == 1 &&
+      ((renderCompact skDoc).splitOn "member-only-skill").length > 1) "member Library skill list is own"
     check ((← send "GET" "/api/library/skill/paloma-infra" member (.obj #[]) stWithProviders).1 == 404)
       "member cannot read a Library skill body"
     let (swSt, swDoc) ← send "GET" "/api/software" member (.obj #[]) stWithProviders

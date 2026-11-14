@@ -435,7 +435,7 @@ private fun pageSubtitle(route: OrbSettingsRoute, baseURL: String, providers: In
     OrbSettingsRoute.FallbackChains -> "Ordered fallback chains and provider health"
     OrbSettingsRoute.Providers -> "$providers configured"
     OrbSettingsRoute.ProxyKeys -> "OpenAI-compatible router keys"
-    OrbSettingsRoute.Skills -> "Shared Library skills"
+    OrbSettingsRoute.Skills -> "Your private Library skills"
     OrbSettingsRoute.Assistant -> "Hermes coordinator model, memory & persona"
     OrbSettingsRoute.Machines -> "$nodes nodes"
     OrbSettingsRoute.Resources -> "Compute & inference flow, subagent Fast-DAG"
