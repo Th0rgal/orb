@@ -327,6 +327,7 @@ structure SseSubscriber where
   id             : UInt64
   missionFilter? : Option String
   queueRef       : IO.Ref (Array String)
+  droppedRef     : IO.Ref Nat
 
 structure BroadcastHub where
   mu : Std.Mutex (UInt64 × Array SseSubscriber)
@@ -359,18 +360,27 @@ def publishControlEvent
       | some want, some got => want == got
       | some _, none => false
     if matchesMission then
-      sub.queueRef.modify fun q =>
-        let base := if q.size ≥ 256 then q.extract 1 q.size else q
-        base.push frame
+      let overflow ← sub.queueRef.modifyGet fun q =>
+        if q.size ≥ 256 then
+          (true, (q.extract 1 q.size).push frame)
+        else
+          (false, q.push frame)
+      if overflow then
+        sub.droppedRef.modify (· + 1)
 
-def registerSseSubscriber (hub : BroadcastHub) (missionFilter? : Option String) : IO (UInt64 × IO.Ref (Array String)) := do
+def registerSseSubscriberFull (hub : BroadcastHub) (missionFilter? : Option String) : IO SseSubscriber := do
   let qRef ← IO.mkRef (#[] : Array String)
-  let subId ← hub.mu.atomically do
+  let dRef ← IO.mkRef (0 : Nat)
+  hub.mu.atomically do
     let (seq, xs) ← get
     let sid := seq + 1
-    set (sid, xs.push { id := sid, missionFilter? := missionFilter?, queueRef := qRef })
-    return sid
-  return (subId, qRef)
+    let sub : SseSubscriber := { id := sid, missionFilter? := missionFilter?, queueRef := qRef, droppedRef := dRef }
+    set (sid, xs.push sub)
+    return sub
+
+def registerSseSubscriber (hub : BroadcastHub) (missionFilter? : Option String) : IO (UInt64 × IO.Ref (Array String)) := do
+  let sub ← registerSseSubscriberFull hub missionFilter?
+  return (sub.id, sub.queueRef)
 
 def unregisterSseSubscriber (hub : BroadcastHub) (subId : UInt64) : IO Unit := do
   hub.mu.atomically do
