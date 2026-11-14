@@ -701,6 +701,13 @@ Live builds at 23:31Z (health endpoints, 9-character `build` resolved in the rep
 - **#1759** stays a draft. The `mission_orchestration_meta` defect is fixed on the branch (roll-up now walks `missions.parent_mission_id`, tip `17ddf619`). Review found two smaller defects in the new roll-up, both back with H-core, tests first: the sort uses a non-strict comparator (`>=`), which `Array.qsort` gets wrong (checked with Lean v4.35.0 on the coordinator node: `[1, 2, 2, 1]` comes out `[2, 1, 2, 1]`), and a root bucket can carry a subagent's id as its label. Nothing on this branch has been built in CI yet (draft).
 - D2's held-open SSE stream (`wip/d-control-stream-sse`) was read in full and is **not published**. Main finding: members would receive almost no live events, even for their own missions, because the stream reads the mission id from the event payload and most real payloads do not carry one (the tests' payloads do). Also sent back: about 50 `users` queries per second per idle stream; a disconnect probe added to `handleClientConn` that also changes the model proxy stream; the snapshot rule for admins changed; a new production environment variable for the keep-alive interval.
 
+**Update 04:37 (coordinator).**
+
+- Merged: **#1761** (plain-HTTP requests give up on the TCP connect after `min(timeoutMs, 10000)` ms, `72679fb7`, 04:35Z). Before merging: all 16 checks passed on the PR head, including `kernel-abi` (C shim line limit, warnings as errors) and `Test` (`orb-core-test` ok, 101 host tests; spec runner 5 passed); the only change on master since the PR base was this board. Not verified: a real unreachable node, a slow upload, macOS. Behaviour changes are listed in the PR (host names and IPv6 literals now connect over plain HTTP, name resolution is outside the timeout, writes are bounded).
+- Master CI: `a8d8df6b` (#1760) is fully green (CI and Kernel ABI). Runs for `72679fb7` had just started at 04:36Z.
+- Live build at 04:30Z: prod and dev both `6ed240898`, so #1757, #1758, #1760 and #1761 are merged but not deployed. Until a deploy, `/api/remote-nodes` can still hang on an unreachable static node.
+- In progress, nothing delivered yet: H-core on the two roll-up defects of #1759 (still a draft), D2 on the five SSE review points.
+
 **Still open, no owner.** Track A / #1708; lean.ci PR #34 fence review
 (interdiff unread, lean runners stay on hold); isolation acceptance and
 managed-lifecycle live validation (need the `dev_operator` grant
