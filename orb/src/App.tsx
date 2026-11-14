@@ -101,6 +101,7 @@ import {
   parseAutoManagedTarget,
 } from "./machines/nodes";
 import type { ActiveProviderSubmenu, Pending24hLeasePrompt } from "./MachineCloudMenu";
+import { managedCatalog, refreshManagedCatalog, resolveDefaultComposerMachine } from "./managedMachineModel";
 const NewAgentCloudVmSection = lazy(() => import("./MachineCloudMenu").then(module => ({ default: module.NewAgentCloudVmSection })));
 const AgentSpawnedVmsToggle = lazy(() => import("./MachineCloudMenu").then(module => ({ default: module.AgentSpawnedVmsToggle })));
 const Lazy24hConfirmDialog = lazy(() => import("./MachineCloudMenu").then(module => ({ default: module.Lazy24hConfirmDialog })));
@@ -338,9 +339,8 @@ export default function App() {
   const [managedAntigravityAllowed, setManagedAntigravityAllowed] = createSignal(true);
   const warmManagedCatalog = (force = false) => {
     void import("./MachineCloudMenu");
-    void import("./managedMachineModel").then(async m => {
-      await m.refreshManagedCatalog(force);
-      setManagedAntigravityAllowed(m.managedCatalog().settings?.antigravity_on_managed !== false);
+    void refreshManagedCatalog(force).then(() => {
+      setManagedAntigravityAllowed(managedCatalog().settings?.antigravity_on_managed !== false);
     });
   };
   const chooseMachine = (id: string) => {
@@ -838,22 +838,16 @@ export default function App() {
   const firstNodeId = createMemo(() => (canAutoSelectRemote() ? firstAvailableNodeId(sortedNodes(), currentAutoBackend()) : null));
   createEffect(() => {
     if (!isConnected() || creating() || launchPreview()) return;
-    if (!isAdminUser()) {
-      const cur = newMachine();
-      const forbiddenNode = fleetNodes().find(n => n.id === cur && isAdminOnlyNode(n));
-      if (cur === "core" || cur === "dgx-spark-admin" || Boolean(forbiddenNode)) {
-        const first = firstNodeId();
-        setNewMachine(first ?? "local");
-        return;
-      }
-    }
-    if (explicitMachine()) return;
-    const first = firstNodeId();
-    if (first) {
-      if (newMachine() !== first) setNewMachine(first);
-    } else if (remoteLaunch().state === "ready" && newMachine() !== "core" && newMachine() !== "local") {
-      setNewMachine(isAdminUser() ? "core" : "local");
-    }
+    const next = resolveDefaultComposerMachine({
+      isAdmin: isAdminUser(),
+      current: newMachine(),
+      explicit: explicitMachine(),
+      firstNodeId: firstNodeId(),
+      remoteReady: remoteLaunch().state === "ready",
+      fleetNodes: fleetNodes(),
+      catalog: managedCatalog(),
+    });
+    if (next !== newMachine()) setNewMachine(next);
   });
   const machineLabel = () => {
     if (isConnected()) {

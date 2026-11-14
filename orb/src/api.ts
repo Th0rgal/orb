@@ -431,6 +431,21 @@ export function getJwt(): string | null {
   return localStorage.getItem(JWT_KEY);
 }
 
+/** Encode a session token for RFC 6455 `tchar` WebSocket subprotocol headers (`:` -> `~`). */
+export function encodeWsJwtSubprotocol(token?: string | null): string | null {
+  const clean = (token ?? "").trim();
+  if (!clean) return null;
+  return `jwt.${clean.replaceAll(":", "~")}`;
+}
+
+/** Redact any `jwt.` or `orb-jwt-` token fragment from WebSocket/connection error text. */
+export function sanitizeWsErrorText(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error ?? "");
+  return raw
+    .replace(/jwt\.[^ "']*/g, "jwt.<redacted>")
+    .replace(/orb-jwt-[A-Za-z0-9:._~-]+/g, "jwt.<redacted>");
+}
+
 const [connected, setConnected] = createSignal(!!getJwt());
 export const isConnected = connected;
 export const [connectionVersion, bumpConnectionVersion] = createSignal(0);

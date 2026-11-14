@@ -1,7 +1,7 @@
 /** Managed (boat.dev) machines: API client and presentation logic. */
 import { createSignal } from "solid-js";
 import { api, ApiError, connectionVersion, MANAGED_PROVISION_TIMEOUT_MS } from "./api";
-import { rememberManagedMachines } from "./machines/nodes";
+import { formatAutoManagedTarget, isAdminOnlyNode, isAutoManagedTarget, rememberManagedMachines } from "./machines/nodes";
 
 export type ManagedState = "provisioning" | "enrolling" | "online" | "destroying" | "destroyed" | "failed" | "stopped";
 
@@ -671,6 +671,48 @@ export function providerAllowedSizes(
   cat: ManagedCatalogState = managedCatalog(),
 ): ManagedSize[] {
   return allowedSizes(provider.sizes ?? [], cat.budget?.max_size);
+}
+
+/** First usable `auto-managed:<provider>:<size>` target in the catalog, if any. */
+export function firstUsableAutoManagedTarget(
+  cat: ManagedCatalogState = managedCatalog(),
+): string | null {
+  for (const prov of usableManagedProviders(cat)) {
+    const firstSize = providerAllowedSizes(prov, cat)[0];
+    if (firstSize) return formatAutoManagedTarget(prov.provider, firstSize.size);
+  }
+  return null;
+}
+
+/** Select the default composer machine across admin/member roles, fleet availability, and usable cloud VMs. */
+export function resolveDefaultComposerMachine(opts: {
+  isAdmin: boolean;
+  current: string;
+  explicit: boolean;
+  firstNodeId: string | null | undefined;
+  remoteReady: boolean;
+  fleetNodes?: readonly { id: string; admin_only?: boolean | null; core_colocated?: boolean | null; labels?: readonly string[] | null }[];
+  catalog?: ManagedCatalogState;
+}): string {
+  const { isAdmin, current, explicit, firstNodeId, remoteReady, fleetNodes = [], catalog = managedCatalog() } = opts;
+  const first = firstNodeId ?? null;
+  const autoTarget = firstUsableAutoManagedTarget(catalog);
+  if (!isAdmin) {
+    const forbiddenNode = fleetNodes.find(n => n.id === current && isAdminOnlyNode(n));
+    if (current === "core" || current === "dgx-spark-admin" || Boolean(forbiddenNode)) {
+      return first ?? autoTarget ?? "local";
+    }
+  }
+  if (explicit) return current;
+  if (first) return first;
+  if (!isAdmin && isAutoManagedTarget(current)) return current;
+  if (remoteReady && current !== "core" && current !== "local" && (isAdmin || !isAutoManagedTarget(current))) {
+    return isAdmin ? "core" : (autoTarget ?? "local");
+  }
+  if (!isAdmin && current === "local" && autoTarget) {
+    return autoTarget;
+  }
+  return current;
 }
 
 export function findManagedSize(
