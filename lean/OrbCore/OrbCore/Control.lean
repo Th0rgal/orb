@@ -1683,14 +1683,12 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   | some pump =>
     return { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := diagHdrs,
              body := ByteArray.empty, bodyStream? := some fun emit => do
-               let mut complete := false
                try
                  let (copy, ok) ← pump emit
-                 complete := ok
                  accountBody copy
                  return ok
                finally
-                 if !complete && (← bodyTimedOutRef.get) then
+                 if (← bodyTimedOutRef.get) then
                    if let some oid := outcomeId? then
                      discard <| execParamQuery st.store.missionsDb
                        "UPDATE proxy_outcomes SET status='upstream_idle_timeout' WHERE id=?1;" #[oid] }
