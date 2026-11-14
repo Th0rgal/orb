@@ -18,11 +18,6 @@ import sys
 # Explicit per-key policy. New live names require a reviewed repository change;
 # a migration manifest cannot reclassify host authority or admit an unknown key.
 SHARED_KEYS = frozenset({
-    "BOAT_API_KEY",
-    "CLI_PROXY_API_BASE_URL",
-    "CLI_PROXY_API_KEY",
-    "CLI_PROXY_AUTH_DIR",
-    "CLI_PROXY_MANAGEMENT_KEY",
     "DEPLOY_BACKUP_KEEP",
     "DESKTOP_DISPLAY",
     "DESKTOP_ENABLED",
@@ -33,15 +28,12 @@ SHARED_KEYS = frozenset({
     "DISK_CRITICAL_PCT",
     "DISK_WARN_PCT",
     "GITHUB_OAUTH_ALLOWLIST",
-    "GITHUB_OAUTH_CLIENT_ID",
-    "GITHUB_OAUTH_REDIRECT_ALLOWLIST",
     "GIT_AUTHOR_EMAIL",
     "GIT_AUTHOR_NAME",
     "JWT_TTL_DAYS",
     "LIBRARY_REMOTE",
     "MAX_ITERATIONS",
     "MAX_PARALLEL_MISSIONS",
-    "META_MODEL_API_KEY",
     "MISSION_CPU_QUOTA",
     "MISSION_CPU_WEIGHT",
     "MISSION_DISK_DEFAULT_ESTIMATE_GIB",
@@ -49,11 +41,7 @@ SHARED_KEYS = frozenset({
     "MISSION_MEMORY_HIGH",
     "MISSION_MEMORY_MAX",
     "MISSION_MEMORY_SWAP_MAX",
-    "OPENCODE_BASE_URL",
     "OPENCODE_PERMISSIVE",
-    "ORB_NODE_PROVISION_SCRIPT",
-    "PALOMA_WEBHOOK_FORWARD_URL",
-    "PALOMA_WEBHOOK_SECRET",
     "REMOTE_BUILD_ESTIMATED_DISK_GB",
     "REMOTE_BUILD_MAX_ESTIMATED_DISK_GB",
     "REMOTE_BUILD_TOKEN_TTL_SECS",
@@ -67,29 +55,41 @@ SHARED_KEYS = frozenset({
     "SANDBOXED_MANAGED_DEFAULT_SIZE",
     "SANDBOXED_MANAGED_DEFAULT_TTL_MINUTES",
     "SANDBOXED_MANAGED_IDLE_MINUTES",
-    "SANDBOXED_MANAGED_IMAGE",
     "SANDBOXED_MANAGED_MAX_CONCURRENT",
     "SANDBOXED_MANAGED_MAX_SIZE",
     "SANDBOXED_MANAGED_MAX_TTL_MINUTES",
-    "SANDBOXED_MANAGED_RAW_IMAGES",
-    "SANDBOXED_OAUTH_OWNER",
     "SANDBOXED_REMOTE_NODES_ENABLED",
     "SANDBOXED_SH_CONTAINER_TMP_RETENTION_HOURS",
     "SANDBOXED_SH_IDLE_WORKER_NOTIFY_SECS",
     "SANDBOXED_SH_OPENCODE_BASH_TIMEOUT_MS",
-    "SCOPE_REAPER_ENABLED",
     "SCOPE_REAPER_INTERVAL_MINUTES",
     "SCOPE_STOP_ON_AWAITING_USER",
     "SCOPE_STOP_ON_PAUSE",
     "SCOPE_TEARDOWN_GRACE_SECS",
     "SCOPE_ZOMBIE_MAX_AGE_HOURS",
     "STALE_MISSION_HOURS",
-    "TAVILY_API_KEY",
     "TOOL_STUCK_ABORT_TIMEOUT_SECS",
     "WORKSPACE_GC_EXECUTE",
     "WORKSPACE_GC_INTERVAL_MINUTES",
 })
 INSTANCE_KEYS = frozenset({
+    "SCOPE_REAPER_ENABLED",
+    "BOAT_API_KEY",
+    "CLI_PROXY_API_KEY",
+    "CLI_PROXY_AUTH_DIR",
+    "CLI_PROXY_MANAGEMENT_KEY",
+    "META_MODEL_API_KEY",
+    "PALOMA_WEBHOOK_SECRET",
+    "TAVILY_API_KEY",
+    "CLI_PROXY_API_BASE_URL",
+    "OPENCODE_BASE_URL",
+    "PALOMA_WEBHOOK_FORWARD_URL",
+    "ORB_NODE_PROVISION_SCRIPT",
+    "SANDBOXED_MANAGED_IMAGE",
+    "SANDBOXED_MANAGED_RAW_IMAGES",
+    "GITHUB_OAUTH_CLIENT_ID",
+    "GITHUB_OAUTH_REDIRECT_ALLOWLIST",
+    "SANDBOXED_OAUTH_OWNER",
     "SANDBOXED_SH_CONTAINER_TMP_ROOT",
     "SANDBOXED_PROXY_PUBLIC_URL",
     "SANDBOXED_MANAGED_CORE_URL",
@@ -266,6 +266,22 @@ def read_ownership(path):
         raise InvalidConfig("invalid ownership document") from None
 
 
+def migration_policy(path, prod, dev):
+    """Load the complete checked-in names-only policy, scoped to live inputs."""
+    policy = read_ownership(path)
+    classified = set(policy["instance_keys"]) | policy["shared_from"].keys()
+    if classified != KNOWN_KEYS:
+        raise InvalidConfig("migration classification must cover every known key exactly once")
+    live = prod.keys() | dev.keys()
+    unknown = live - classified
+    if unknown:
+        raise InvalidConfig("unclassified environment keys: " + ", ".join(sorted(unknown)))
+    return ownership({"schema_version": 1,
+                      "instance_keys": sorted(set(policy["instance_keys"]) & live),
+                      "shared_from": {key: source for key, source in policy["shared_from"].items()
+                                      if key in live}})
+
+
 def differences(prod, dev):
     return {key: ("dev_only" if key not in prod else "prod_only" if key not in dev else "different")
             for key in sorted((prod.keys() | dev.keys()) - INSTANCE_KEYS)
@@ -363,10 +379,12 @@ def render(settings):
     return ("".join(f"{key}={settings[key]}\n" for key in sorted(settings))).encode("utf-8")
 
 
-def migrate(prod_path, dev_path, output, apply=False, policy=None):
+def migrate(prod_path, dev_path, output, apply=False, policy=None, classification=None):
     prod_raw, dev_raw = prod_path.read_bytes(), dev_path.read_bytes()
-    policy = ownership(policy)
-    base, prod, dev = split_envs(parse_env(prod_raw), parse_env(dev_raw), policy)
+    prod_input, dev_input = parse_env(prod_raw), parse_env(dev_raw)
+    policy = (migration_policy(classification, prod_input, dev_input)
+              if classification is not None else ownership(policy))
+    base, prod, dev = split_envs(prod_input, dev_input, policy)
     if output.exists():
         raise InvalidConfig("output directory already exists; refusing to overwrite it")
     if not apply:
@@ -396,11 +414,15 @@ def main():
     migration.add_argument("--prod", type=Path, required=True)
     migration.add_argument("--dev", type=Path, required=True)
     migration.add_argument("--output", type=Path, required=True)
+    migration.add_argument("--classification", type=Path, default=Path(__file__).with_name("env-migration.json"),
+                           help="complete checked-in migration classification")
     migration.add_argument("--ownership", type=Path, help="reviewed names-only ownership JSON from inventory")
     report = commands.add_parser("inventory", help="print names and a conservative ownership template, never values")
     report.add_argument("--prod", type=Path, required=True)
     report.add_argument("--dev", type=Path, required=True)
-    migration.add_argument("--apply", action="store_true", help="write files; default only validates")
+    mode = migration.add_mutually_exclusive_group()
+    mode.add_argument("--apply", action="store_true", help="write files; default only validates")
+    mode.add_argument("--dry-run", action="store_true", help="validate without writing (default)")
     classification = commands.add_parser("classify")
     classification.add_argument("--prod", type=Path, required=True)
     classification.add_argument("--dev", type=Path, required=True)
@@ -420,7 +442,8 @@ def main():
             return 0
         else:
             policy = read_ownership(args.ownership) if args.ownership else None
-            migrate(args.prod, args.dev, args.output, args.apply, policy)
+            migrate(args.prod, args.dev, args.output, args.apply, policy,
+                    None if args.ownership else args.classification)
         print("Core env check passed" if args.command == "check" else
               "Migration written with both backups" if args.apply else "Migration validated (no files written)")
         return 0
