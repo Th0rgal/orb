@@ -6,6 +6,7 @@
 # Usage:
 #   ./scripts/build_orb_bins.sh [--target-arch <native|aarch64|x86_64>] [--no-telemetry] [--ensure-lean] [--with-tests] [--out-dir <dir>]... [--only <bin>]...
 set -euo pipefail
+export TURBO_LEAN_TELEMETRY=off LEAN_NATIVE_TELEMETRY=off
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 ENSURE_LEAN=0
@@ -290,22 +291,27 @@ run_lean_pkg_build() {
   (
     cd "$pkg_dir"
     if [[ "${ORB_SKIP_TURBO_LEAN:-0}" != "1" ]] && command -v turbo-lean >/dev/null 2>&1; then
-      local -a tl_flags=(--no-telemetry --max-memory-mb "${ORB_TURBO_LEAN_MAX_MB:-6144}")
-      if [[ "${TURBO_LEAN_NO_DAEMON:-0}" == "1" ]]; then
-        tl_flags+=(--no-daemon)
-      fi
+      local -a tl_flags=(--max-memory-mb "${ORB_TURBO_LEAN_MAX_MB:-6144}")
       if [[ -n "${TURBO_LEAN_HOME:-}" ]]; then
         tl_flags+=(--cache-dir "${TURBO_LEAN_HOME}")
       fi
-      if ! RAYON_NUM_THREADS="${ORB_TURBO_LEAN_JOBS:-2}" TURBO_LEAN_EMIT_C=1 \
-        turbo-lean "${tl_flags[@]}" build "$@"; then
-        # The raw Lake fallback rebuilds the package without the turbo-lean
-        # cache, so a silent fallback hides a large slowdown.
-        echo "WARNING: turbo-lean build failed in ${pkg_dir##*/}; falling back to uncached raw lake build" >&2
-        SANDBOXED_ALLOW_RAW_LAKE=1 lake build "$@" -- -DwarningAsError=true
+      local status=0
+      RAYON_NUM_THREADS="${ORB_TURBO_LEAN_JOBS:-2}" TURBO_LEAN_EMIT_C=1 \
+        "$ROOT_DIR/scripts/turbo_lean.sh" "${tl_flags[@]}" build "$@" || status=$?
+      if [[ "$status" -ne 0 ]]; then
+        if [[ "${ORB_ALLOW_RAW_LAKE_FALLBACK:-0}" != "1" ]]; then
+          echo "error: turbo-lean build failed in ${pkg_dir##*/} (exit $status); raw Lake fallback requires ORB_ALLOW_RAW_LAKE_FALLBACK=1" >&2
+          exit "$status"
+        fi
+        echo "WARNING: turbo-lean build failed in ${pkg_dir##*/}; explicitly allowed uncached raw lake build" >&2
+        LEAN_NUM_THREADS=1 SANDBOXED_ALLOW_RAW_LAKE=1 lake build "$@" -- -DwarningAsError=true
       fi
     else
-      SANDBOXED_ALLOW_RAW_LAKE=1 lake build "$@" -- -DwarningAsError=true
+      if command -v turbo-lean >/dev/null 2>&1 && [[ "${ORB_ALLOW_RAW_LAKE_FALLBACK:-0}" != "1" ]]; then
+        echo "error: ORB_SKIP_TURBO_LEAN requires ORB_ALLOW_RAW_LAKE_FALLBACK=1 when turbo-lean is installed" >&2
+        exit 1
+      fi
+      LEAN_NUM_THREADS=1 SANDBOXED_ALLOW_RAW_LAKE=1 lake build "$@" -- -DwarningAsError=true
     fi
   )
 }
@@ -338,8 +344,7 @@ if [[ ${#ORB_DESKTOP_TARGETS[@]} -gt 0 ]]; then
         export LIBRARY_PATH="$lean_prefix/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
       fi
     fi
-    RAYON_NUM_THREADS="${ORB_TURBO_LEAN_JOBS:-2}" TURBO_LEAN_EMIT_C=1 \
-      turbo-lean --no-telemetry --max-memory-mb "${ORB_TURBO_LEAN_MAX_MB:-6144}" build "${ORB_DESKTOP_TARGETS[@]}"
+    run_lean_pkg_build "$ROOT_DIR/lean/OrbDesktop" "${ORB_DESKTOP_TARGETS[@]}"
   )
 fi
 
