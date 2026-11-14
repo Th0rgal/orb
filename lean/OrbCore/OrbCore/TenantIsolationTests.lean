@@ -797,6 +797,19 @@ def run (root : String) : IO Unit := do
       (mProxyTot.field? "fell_back").isNone &&
       mProxyTot.field? "errors" == some (.obj #[]))
       "member /api/ai/proxy/health returns empty groups, chains, and zeroed totals"
+    let (_, mUsageDoc) ← send "GET" "/api/ai/usage/summary" member (.obj #[]) stWithProviders
+    let mUsageTot := mUsageDoc.fieldOrNull "totals"
+    check (mUsageDoc.field? "since" == mUsageDoc.field? "window_start" &&
+      mUsageTot.fieldNat? "requests" == some 0 &&
+      mUsageTot.fieldNat? "events" == some 0 &&
+      (mUsageTot.field? "cost_cents").isNone &&
+      (mUsageTot.field? "unknown_cost_requests").isNone &&
+      mUsageDoc.fieldArr? "by_route" == some #[] &&
+      mUsageDoc.fieldArr? "by_root_mission" == some #[] &&
+      mUsageDoc.fieldArr? "by_hour" == some #[] &&
+      mUsageDoc.fieldArr? "by_day" == some #[] &&
+      mUsageDoc.fieldArr? "by_mission" == some #[])
+      "member /api/ai/usage/summary returns zeroed totals and empty breakdown arrays"
     -- Disabling/deleting an issuer must stop every previously minted session,
     -- including an external session with no mission id and a shared mission.
     for update in #["UPDATE users SET disabled=1 WHERE id='member';", "DELETE FROM users WHERE id='member';"] do
