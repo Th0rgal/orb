@@ -3692,8 +3692,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
 
   -- Mission Messages & Files (`GET /api/control/missions/:id/messages`, `/files`; `/events` handled by cursor-paginated `X-Orb-Events-Protocol: 1` below)
   if let some params := matchRoutePattern? "/api/control/missions/:id/messages" rawTarget then
-    if req.method == "GET" then
-      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+    let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+    if mid != "search" && req.method == "GET" then
       if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
         return .ok (mkJson cCode cBody)
       let effSeqExpr := "(CASE WHEN COALESCE(seq,0)>0 THEN seq ELSE COALESCE(sequence,0) END)"
@@ -4440,27 +4440,28 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   -- Mission Detail & Delete (`GET|DELETE /api/control/missions/:id`, `SM-01`, `SM-07`)
   if let some params := matchRoutePattern? "/api/control/missions/:id" rawTarget then
     let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
-    if req.method == "GET" then
-      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
-        return .ok (mkJson cCode cBody)
-      let callerOpt := if caller.isLegacyUnscoped then none else some caller.userId
-      match ← missionDetailJson st.store mid callerOpt st.bootstrapAdminId with
-      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
-      | .ok none => return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
-      | .ok (some body) => return .ok (mkJson 200 body)
-    else if req.method == "DELETE" then
-      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid true) then
-        return .ok (mkJson cCode cBody)
-      revokeMissionProxyTokensForMission st.store mid
-      let delRes ← withImmediateTx st.store.missionsDb do
-        discard <| execParamQueryUnlocked st.store.missionsDb "DELETE FROM mission_shares WHERE mission_id=?1;" #[mid]
-        discard <| execParamQueryUnlocked st.store.missionsDb "DELETE FROM mission_events WHERE mission_id=?1;" #[mid]
-        discard <| execParamQueryUnlocked st.store.missionsDb "DELETE FROM mission_runs WHERE mission_id=?1;" #[mid]
-        discard <| execParamQueryUnlocked st.store.missionsDb "DELETE FROM mission_continuations WHERE mission_id=?1;" #[mid]
-        execParamQueryUnlocked st.store.missionsDb "DELETE FROM missions WHERE id=?1;" #[mid]
-      match delRes with
-      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
-      | .ok _ => return .ok (mkJson 200 "{\"ok\":true}")
+    if mid != "search" then
+      if req.method == "GET" then
+        if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
+          return .ok (mkJson cCode cBody)
+        let callerOpt := if caller.isLegacyUnscoped then none else some caller.userId
+        match ← missionDetailJson st.store mid callerOpt st.bootstrapAdminId with
+        | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+        | .ok none => return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+        | .ok (some body) => return .ok (mkJson 200 body)
+      else if req.method == "DELETE" then
+        if let some (cCode, cBody) := (← authorizeMissionOp st caller mid true) then
+          return .ok (mkJson cCode cBody)
+        revokeMissionProxyTokensForMission st.store mid
+        let delRes ← withImmediateTx st.store.missionsDb do
+          discard <| execParamQueryUnlocked st.store.missionsDb "DELETE FROM mission_shares WHERE mission_id=?1;" #[mid]
+          discard <| execParamQueryUnlocked st.store.missionsDb "DELETE FROM mission_events WHERE mission_id=?1;" #[mid]
+          discard <| execParamQueryUnlocked st.store.missionsDb "DELETE FROM mission_runs WHERE mission_id=?1;" #[mid]
+          discard <| execParamQueryUnlocked st.store.missionsDb "DELETE FROM mission_continuations WHERE mission_id=?1;" #[mid]
+          execParamQueryUnlocked st.store.missionsDb "DELETE FROM missions WHERE id=?1;" #[mid]
+        match delRes with
+        | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+        | .ok _ => return .ok (mkJson 200 "{\"ok\":true}")
 
   -- Project Decisions (`GET|POST /api/control/projects/:slug/decisions`, `SM-13`)
   if let some params := matchRoutePattern? "/api/control/projects/:slug/decisions" rawTarget then
@@ -6213,7 +6214,7 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
     if let some params := matchRoutePattern? "/api/control/missions/:id" req.path then
       let rawMid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
       let mid := (percentDecodeStrict rawMid).getD rawMid
-      if !mid.isEmpty then
+      if !mid.isEmpty && mid != "search" then
         let mut ownerUid := ""
         let mut btwParent? : Option String := none
         if let .ok mRs ← execParamQuery st.store.missionsDb
@@ -6251,7 +6252,7 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
           let mid := (percentDecodeStrict rawMid).getD rawMid
           let sub := segs.drop 4
           let isCollectionAction :=
-            segs.length == 4 && (mid == "reconcile" || mid == "reconcile-pending" || mid == "search")
+            mid == "search" || (segs.length == 4 && (mid == "reconcile" || mid == "reconcile-pending"))
           let isBtwContextOnly := sub == ["btw", "context"]
           if !mid.isEmpty && !isCollectionAction && !isBtwContextOnly then
             let kind :=
