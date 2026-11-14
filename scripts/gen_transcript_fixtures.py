@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import sys
 
+os.environ.update(TURBO_LEAN_TELEMETRY="off", LEAN_NATIVE_TELEMETRY="off")
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUT = ROOT / "shared/orb-spec/fixtures/transcript-gates.json"
 
@@ -104,7 +106,7 @@ def _render_python_reference() -> str:
 def _render_lean() -> str:
     lean_dir = ROOT / "lean"
     if shutil.which("turbo-lean"):
-        subprocess.run(["turbo-lean", "build", "--project-dir", str(lean_dir)], check=True, stdout=subprocess.DEVNULL)
+        subprocess.run([str(ROOT / "scripts/turbo_lean.sh"), "build", "--project-dir", str(lean_dir)], check=True, stdout=subprocess.DEVNULL)
     else:
         subprocess.run(["lake", "build"], cwd=lean_dir, check=True)
     lib = lean_dir / ".lake/build/lib/lean"

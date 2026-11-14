@@ -81,20 +81,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - name: Install pinned Lean 4.35.0 toolchain (direct SHA-256 verified release, no elan)
-        run: |
-          set -euo pipefail
-          LEAN_ARCHIVE="/tmp/lean-4.35.0-linux.tar.zst"
-          LEAN_SHA256="7289597a44543246c9227b8cae501767e095ce17f6d448b95fc4a8dc97268f6d"
-          curl --retry 5 --retry-all-errors -fsSL \
-            "https://github.com/leanprover/lean4/releases/download/v4.35.0/lean-4.35.0-linux.tar.zst" \
-            -o "$LEAN_ARCHIVE"
-          echo "${LEAN_SHA256}  ${LEAN_ARCHIVE}" | sha256sum -c -
-          mkdir -p "$HOME/.local/lean-4.35.0"
-          tar --zstd -xf "$LEAN_ARCHIVE" --strip-components=1 -C "$HOME/.local/lean-4.35.0"
-          rm -f "$LEAN_ARCHIVE"
-          echo "$HOME/.local/lean-4.35.0/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/lean-4.35.0/bin/lean" --version
+      - uses: ./.github/actions/setup-turbo-lean
       - name: Lean build (direct compiler, sorry is an error) and axiom / vacuity audit
         working-directory: lean
         run: |
@@ -233,44 +220,6 @@ jobs:
       - name: Android JNI libraries rebuild with the NDK and match sources / ABI
         run: scripts/build_android_kernel_so.sh --check
 
-      - name: Read reviewed turbo-lean source revision
-        id: turbo-pin
-        run: |
-          revision=$(cat lean/turbo-lean-revision)
-          [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
-          echo "revision=$revision" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v4
-        with:
-          repository: Th0rgal/turbo-lean
-          ref: ${{ steps.turbo-pin.outputs.revision }}
-          path: .tools/turbo-lean
-          persist-credentials: false
-      - name: Build reviewed turbo-lean and record binary provenance
-        env:
-          CARGO_PROFILE_DEV_DEBUG: "0"
-        run: |
-          set -euo pipefail
-          source_dir="$PWD/.tools/turbo-lean"
-          expected=$(cat lean/turbo-lean-revision)
-          test "$(git -C "$source_dir" rev-parse HEAD)" = "$expected"
-          test -z "$(git -C "$source_dir" status --porcelain)"
-          test "$(cat "$source_dir/lean/lean-toolchain")" = "$(cat lean/lean-toolchain)"
-          (cd "$source_dir/lean" && lake build LeanSys LeanNative.Spec)
-          cargo build --locked -j 1 --manifest-path "$source_dir/Cargo.toml" -p turbo-lean
-          git -C "$source_dir" diff --exit-code
-          mkdir -p audit-results
-          python3 - <<'PYCODE'
-          import hashlib, json, pathlib, subprocess
-          binary = pathlib.Path(".tools/turbo-lean/target/debug/turbo-lean")
-          receipt = {
-              "repository": "https://github.com/Th0rgal/turbo-lean",
-              "revision": pathlib.Path("lean/turbo-lean-revision").read_text().strip(),
-              "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
-              "version": subprocess.check_output([str(binary), "--version"], text=True).strip(),
-          }
-          pathlib.Path("audit-results/turbo-lean-provenance.json").write_text(json.dumps(receipt, indent=2) + "\n")
-          print(json.dumps(receipt, indent=2))
-          PYCODE
       - name: Build and self-test OrbNetLeaf foundation (<= 220 C LOC, zero lean_elab)
         run: |
           set -euo pipefail
@@ -279,7 +228,7 @@ jobs:
           c_lines=$(wc -l < lean/OrbNetLeaf/c/orb_net_leaf.c)
           echo "orb_net_leaf.c LOC: $c_lines"
           test "$c_lines" -le 220
-          (cd lean/OrbNetLeaf && lake build -- -DwarningAsError=true && ./.lake/build/bin/orb-net-leaf-test)
+          (cd lean/OrbNetLeaf && "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" build && ./.lake/build/bin/orb-net-leaf-test)
           elab_syms=$(nm -u lean/OrbNetLeaf/.lake/build/bin/orb-net-leaf-test | grep -c lean_elab || true)
           test "$elab_syms" -eq 0
       - name: Build and self-test Wave 1 OrbBin + Wave 2 OrbNode + Wave 3 OrbClient + Wave 4 OrbCore & OrbLocald (<= 220 C LOC, zero lean_elab)
@@ -313,13 +262,13 @@ jobs:
           echo "linux_shell/gtk_menu.c LOC: $gtk_menu_lines"
           test "$gtk_menu_lines" -le 220
           ./scripts/build_orb_bins.sh --out-dir target/debug
-          (cd lean/OrbBin && lake build orb-bin-test -- -DwarningAsError=true && ./.lake/build/bin/orb-bin-test)
-          (cd lean/OrbNode && lake build orb-node-test -- -DwarningAsError=true && ./.lake/build/bin/orb-node-test)
-          (cd lean/OrbClient && lake build -- -DwarningAsError=true && ./.lake/build/bin/orb-client-test)
-          (cd lean/OrbCore && lake build orb-core-test orb-spec-runner -- -DwarningAsError=true)
+          (cd lean/OrbBin && "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" build orb-bin-test && ./.lake/build/bin/orb-bin-test)
+          (cd lean/OrbNode && "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" build orb-node-test && ./.lake/build/bin/orb-node-test)
+          (cd lean/OrbClient && "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" build orb-client-test && ./.lake/build/bin/orb-client-test)
+          (cd lean/OrbCore && "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" build orb-core-test orb-spec-runner)
           ./lean/OrbCore/.lake/build/bin/orb-core-test
           ./lean/OrbCore/.lake/build/bin/orb-spec-runner --fixtures shared/orb-spec/fixtures
-          (cd lean/OrbLocald && lake build orb-locald-test -- -DwarningAsError=true && ./.lake/build/bin/orb-locald-test)
+          (cd lean/OrbLocald && "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" build orb-locald-test && ./.lake/build/bin/orb-locald-test)
           for test_bin in lean/OrbBin/.lake/build/bin/orb-bin-test lean/OrbNode/.lake/build/bin/orb-node-test lean/OrbClient/.lake/build/bin/orb-client-test lean/OrbCore/.lake/build/bin/orb-core-test lean/OrbCore/.lake/build/bin/orb-spec-runner lean/OrbLocald/.lake/build/bin/orb-locald-test; do
             elab_syms=$(nm -u "$test_bin" | grep -c lean_elab || true)
             test "$elab_syms" -eq 0
@@ -341,53 +290,53 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v scripts/test_spec_audit.py
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/Spec.lean > audit-results/spec-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/Orb/Spec.lean > audit-results/spec-audit.json
           python3 scripts/check_spec_audit.py audit-results/spec-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/MutantSuite.lean > audit-results/mutant-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/Orb/MutantSuite.lean > audit-results/mutant-audit.json
           python3 scripts/check_spec_audit.py audit-results/mutant-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/StatefulMutantSuite.lean > audit-results/stateful-mutant-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/Orb/StatefulMutantSuite.lean > audit-results/stateful-mutant-audit.json
           python3 scripts/check_spec_audit.py audit-results/stateful-mutant-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/LifecycleSpec.lean > audit-results/lifecycle-spec-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/Orb/LifecycleSpec.lean > audit-results/lifecycle-spec-audit.json
           python3 scripts/check_spec_audit.py audit-results/lifecycle-spec-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/LifecycleMutants.lean > audit-results/lifecycle-mutant-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/Orb/LifecycleMutants.lean > audit-results/lifecycle-mutant-audit.json
           python3 scripts/check_spec_audit.py audit-results/lifecycle-mutant-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/HarnessCloudSpec.lean > audit-results/harness-cloud-spec-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/Orb/HarnessCloudSpec.lean > audit-results/harness-cloud-spec-audit.json
           python3 scripts/check_spec_audit.py audit-results/harness-cloud-spec-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/HarnessCloudMutants.lean > audit-results/harness-cloud-mutant-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/Orb/HarnessCloudMutants.lean > audit-results/harness-cloud-mutant-audit.json
           python3 scripts/check_spec_audit.py audit-results/harness-cloud-mutant-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/ManagedNodeSpec.lean > audit-results/managed-node-spec-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/Orb/ManagedNodeSpec.lean > audit-results/managed-node-spec-audit.json
           python3 scripts/check_spec_audit.py audit-results/managed-node-spec-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/ManagedNodeMutants.lean > audit-results/managed-node-mutant-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/Orb/ManagedNodeMutants.lean > audit-results/managed-node-mutant-audit.json
           python3 scripts/check_spec_audit.py audit-results/managed-node-mutant-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/Stream.lean > audit-results/stream-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/Orb/Stream.lean > audit-results/stream-audit.json
           python3 scripts/check_spec_audit.py audit-results/stream-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/Transcript.lean > audit-results/transcript-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/Orb/Transcript.lean > audit-results/transcript-audit.json
           python3 scripts/check_spec_audit.py audit-results/transcript-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbNetLeaf/OrbNetLeaf/Spec.lean > audit-results/orb-net-leaf-spec-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/OrbNetLeaf/OrbNetLeaf/Spec.lean > audit-results/orb-net-leaf-spec-audit.json
           python3 scripts/check_spec_audit.py audit-results/orb-net-leaf-spec-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbNetLeaf/OrbNetLeaf/MutantSuite.lean > audit-results/orb-net-leaf-mutant-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/OrbNetLeaf/OrbNetLeaf/MutantSuite.lean > audit-results/orb-net-leaf-mutant-audit.json
           python3 scripts/check_spec_audit.py audit-results/orb-net-leaf-mutant-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbBin/OrbBin/Spec.lean > audit-results/orb-bin-spec-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/OrbBin/OrbBin/Spec.lean > audit-results/orb-bin-spec-audit.json
           python3 scripts/check_spec_audit.py audit-results/orb-bin-spec-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbBin/OrbBin/MutantSuite.lean > audit-results/orb-bin-mutant-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/OrbBin/OrbBin/MutantSuite.lean > audit-results/orb-bin-mutant-audit.json
           python3 scripts/check_spec_audit.py audit-results/orb-bin-mutant-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbNode/OrbNode/Spec.lean > audit-results/orb-node-spec-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/OrbNode/OrbNode/Spec.lean > audit-results/orb-node-spec-audit.json
           python3 scripts/check_spec_audit.py audit-results/orb-node-spec-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbNode/OrbNode/MutantSuite.lean > audit-results/orb-node-mutant-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/OrbNode/OrbNode/MutantSuite.lean > audit-results/orb-node-mutant-audit.json
           python3 scripts/check_spec_audit.py audit-results/orb-node-mutant-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbClient/OrbClient/Spec.lean > audit-results/orb-client-spec-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/OrbClient/OrbClient/Spec.lean > audit-results/orb-client-spec-audit.json
           python3 scripts/check_spec_audit.py audit-results/orb-client-spec-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbClient/OrbClient/MutantSuite.lean > audit-results/orb-client-mutant-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/OrbClient/OrbClient/MutantSuite.lean > audit-results/orb-client-mutant-audit.json
           python3 scripts/check_spec_audit.py audit-results/orb-client-mutant-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbClient/OrbClient/Reducers.lean > audit-results/orb-client-reducers-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/OrbClient/OrbClient/Reducers.lean > audit-results/orb-client-reducers-audit.json
           python3 scripts/check_spec_audit.py audit-results/orb-client-reducers-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbCore/OrbCore/Spec.lean > audit-results/orb-core-spec-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/OrbCore/OrbCore/Spec.lean > audit-results/orb-core-spec-audit.json
           python3 scripts/check_spec_audit.py audit-results/orb-core-spec-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbCore/OrbCore/MutantSuite.lean > audit-results/orb-core-mutant-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/OrbCore/OrbCore/MutantSuite.lean > audit-results/orb-core-mutant-audit.json
           python3 scripts/check_spec_audit.py audit-results/orb-core-mutant-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbLocald/OrbLocald/Spec.lean > audit-results/orb-locald-spec-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/OrbLocald/OrbLocald/Spec.lean > audit-results/orb-locald-spec-audit.json
           python3 scripts/check_spec_audit.py audit-results/orb-locald-spec-audit.json
-          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/OrbLocald/OrbLocald/MutantSuite.lean > audit-results/orb-locald-mutant-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/OrbLocald/OrbLocald/MutantSuite.lean > audit-results/orb-locald-mutant-audit.json
           python3 scripts/check_spec_audit.py audit-results/orb-locald-mutant-audit.json
       - uses: actions/upload-artifact@v4
         if: always()

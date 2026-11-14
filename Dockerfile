@@ -11,10 +11,12 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Lean 4 builder (zero Rust / Cargo)
 # ---------------------------------------------------------------------------
-FROM debian:bookworm-slim AS lean-builder
+ARG LEAN_BUILDER=lean-source-builder
+FROM ubuntu:24.04 AS lean-source-builder
+ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential git libssl-dev libsqlite3-dev zstd ca-certificates curl \
+    build-essential git libssl-dev libsqlite3-dev zstd ca-certificates curl python3 \
     && rm -rf /var/lib/apt/lists/* \
     && LEAN_ARCHIVE="/tmp/lean-4.35.0-linux.tar.zst" \
     && LEAN_SHA256="7289597a44543246c9227b8cae501767e095ce17f6d448b95fc4a8dc97268f6d" \
@@ -37,6 +39,17 @@ COPY scripts/ scripts/
 ARG LEAN_BINARIES="orb-core desktop-mcp workspace-mcp automation-manager-mcp sandboxed-mcp"
 RUN mkdir -p /out \
     && ./scripts/build_orb_bins.sh --out-dir /out $(printf -- '--only %s ' $LEAN_BINARIES)
+
+# CI builds on Ubuntu 24.04 (the runtime ABI) with cached turbo-lean. Local
+# docker builds keep the source builder; --build-arg LEAN_BUILDER=lean-prebuilt
+# selects the prebuilt stage in CI without executing the source builder.
+FROM ubuntu:24.04 AS lean-prebuilt
+COPY docker/prebuilt/ /out/
+RUN test -x /out/orb-core && test -x /out/desktop-mcp \
+    && test -x /out/workspace-mcp && test -x /out/automation-manager-mcp \
+    && test -x /out/sandboxed-mcp && ln -sfn orb-core /out/sandboxed-sh
+
+FROM ${LEAN_BUILDER} AS lean-builder
 
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime (Ubuntu 24.04 for native debootstrap support)

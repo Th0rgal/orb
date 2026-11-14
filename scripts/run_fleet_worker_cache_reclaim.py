@@ -174,7 +174,7 @@ def main() -> int:
                         "TL_BIN=$(command -v turbo-lean || echo /opt/orb/bin/turbo-lean); "
                         "if [ -d \"$TL_CACHE\" ] && [ -x \"$TL_BIN\" ]; then "
                         "TL_OWNER=$(stat -c '%U' \"$TL_CACHE\" 2>/dev/null || echo root); "
-                        "sudo -n -u \"$TL_OWNER\" \"$TL_BIN\" --cache-dir \"$TL_CACHE\" gc "
+                        "sudo -n -u \"$TL_OWNER\" env TURBO_LEAN_TELEMETRY=off LEAN_NATIVE_TELEMETRY=off \"$TL_BIN\" --cache-dir \"$TL_CACHE\" gc "
                         "--max-reclaimable-bytes 5368709120 --prune-worktrees-older-than-secs 86400 --json >/dev/null 2>&1 || true; "
                         "fi; "
                     )
