@@ -697,7 +697,7 @@ def run (root : String) : IO Unit := do
     ]
     let stripGeneratedAt (jv : JVal) : JVal :=
       match jv with
-      | .obj kvs => .obj (kvs.filter (fun (k, _) => k != "generated_at" && k != "window_start"))
+      | .obj kvs => .obj (kvs.filter (fun (k, _) => k != "generated_at" && k != "window_start" && k != "since"))
       | other => other
     let mut adminSiblingDocs : Array JVal := #[]
     for (routeName, target) in siblingRoutes do
@@ -786,6 +786,17 @@ def run (root : String) : IO Unit := do
         r.fieldBool? "is_healthy" == some true &&
         r.fieldBool? "is_degraded" == some false))
       "member /api/model-routing/health keeps only enabled configured providers"
+    let (_, mProxyHealthDoc) ← send "GET" "/api/ai/proxy/health" member (.obj #[]) stWithProviders
+    let mProxyTot := mProxyHealthDoc.fieldOrNull "totals"
+    check (mProxyHealthDoc.field? "since" == mProxyHealthDoc.field? "window_start" &&
+      mProxyHealthDoc.fieldArr? "groups" == some #[] &&
+      mProxyHealthDoc.fieldArr? "chains" == some #[] &&
+      mProxyTot.fieldNat? "requests" == some 0 &&
+      mProxyTot.fieldNat? "ok" == some 0 &&
+      mProxyTot.fieldNat? "retried" == some 0 &&
+      mProxyTot.fieldNat? "fell_back" == some 0 &&
+      mProxyTot.field? "errors" == some (.obj #[]))
+      "member /api/ai/proxy/health returns empty groups, chains, and zeroed totals"
     -- Disabling/deleting an issuer must stop every previously minted session,
     -- including an external session with no mission id and a shared mission.
     for update in #["UPDATE users SET disabled=1 WHERE id='member';", "DELETE FROM users WHERE id='member';"] do

@@ -660,6 +660,78 @@ private def sidecarParkedHealthContract
     | none => unsetenvVar "CLI_PROXY_MANAGEMENT_KEY"
   return failures
 
+/-- Contract test for `GET /api/ai/proxy/health`: verifies the additive client-read
+    fields (`since`, `groups`, `chains`, and `totals.{ok,retried,fell_back,errors,ttft_p50_ms,ttft_p95_ms,latency_p50_ms,latency_p95_ms}`)
+    alongside existing keys. -/
+private def proxyHealthClientShapeContract (app : CoreAppState) (store : CoreStore) (jwt : String)
+    (now : UInt64) : IO (Array String) := do
+  let mut failures : Array String := #[]
+  let wallNow ← nowEpoch
+  let tsRecent := formatEpochIso8601Utc (wallNow - 60)
+  discard <| execParamQuery store.missionsDb "DELETE FROM proxy_outcomes;" #[]
+  discard <| execParamQuery store.missionsDb
+    ("INSERT INTO proxy_outcomes(timestamp,chain_id,provider,account_id,model,status,http_status,retries,ttft_ms,total_ms,fallback_depth,stream,superseded) VALUES" ++
+     "(?1,'builtin/smart','anthropic','10000000-0000-4000-8000-000000000001','claude-sonnet-4-5','ok',200,0,110,450,0,1,0)," ++
+     "(?1,'builtin/smart','anthropic','10000000-0000-4000-8000-000000000001','claude-sonnet-4-5','error',502,2,0,900,1,1,0);")
+    #[tsRecent]
+  try
+    let h24 ← getJson app jwt "/api/ai/proxy/health?window=24h" now
+    if h24.field? "since" != h24.field? "window_start" || (h24.fieldStr? "since").isNone then
+      failures := failures.push s!"proxy/health: expected since == window_start (non-null for 24h), got {renderCompact h24}"
+    let hAll ← getJson app jwt "/api/ai/proxy/health?window=all" now
+    if hAll.field? "since" != some .null || hAll.field? "window_start" != some .null then
+      failures := failures.push s!"proxy/health: expected since == null for window=all, got {renderCompact hAll}"
+    let tot := h24.fieldOrNull "totals"
+    let byStatusOk := (tot.fieldOrNull "by_status").fieldNat? "ok"
+    if tot.fieldNat? "requests" != some 2 ||
+       tot.fieldNat? "succeeded" != some 1 ||
+       tot.fieldNat? "failed" != some 1 ||
+       tot.fieldNat? "ok" != byStatusOk ||
+       tot.fieldNat? "ok" != some 1 then
+      failures := failures.push s!"proxy/health: totals.ok must equal by_status.ok (1) and requests=2, got {renderCompact tot}"
+    if tot.fieldNat? "retried" != tot.fieldNat? "total_retries" ||
+       tot.fieldNat? "fell_back" != tot.fieldNat? "fallback_requests" then
+      failures := failures.push s!"proxy/health: totals.retried/fell_back must equal total_retries/fallback_requests, got {renderCompact tot}"
+    let ttftP50 := (tot.fieldOrNull "ttft_ms").field? "p50"
+    let ttftP95 := (tot.fieldOrNull "ttft_ms").field? "p95"
+    let totalP50 := (tot.fieldOrNull "total_ms").field? "p50"
+    let totalP95 := (tot.fieldOrNull "total_ms").field? "p95"
+    if tot.field? "ttft_p50_ms" != ttftP50 ||
+       tot.field? "ttft_p95_ms" != ttftP95 ||
+       tot.field? "latency_p50_ms" != totalP50 ||
+       tot.field? "latency_p95_ms" != totalP95 then
+      failures := failures.push s!"proxy/health: totals ttft/latency p50/p95 must match ttft_ms/total_ms p50/p95, got {renderCompact tot}"
+    if (tot.fieldOrNull "errors").asObj?.isNone then
+      failures := failures.push s!"proxy/health: totals.errors must be an object (Record<string, number>), got {renderCompact tot}"
+    let some groups := h24.fieldArr? "groups"
+      | failures := failures.push s!"proxy/health: expected groups array, got {renderCompact h24}"; return failures
+    let some chains := h24.fieldArr? "chains"
+      | failures := failures.push s!"proxy/health: expected chains array, got {renderCompact h24}"; return failures
+    if groups.size != 1 then
+      failures := failures.push s!"proxy/health: expected 1 group row from proxy_outcomes, got {groups.size}: {renderCompact (.arr groups)}"
+    else
+      let g := groups[0]!
+      if g.fieldStr? "provider" != some "anthropic" ||
+         g.fieldStr? "model" != some "claude-sonnet-4-5" ||
+         g.fieldStr? "account_id" != some "10000000-0000-4000-8000-000000000001" ||
+         g.fieldNat? "requests" != some 2 ||
+         g.fieldNat? "ok" != some 1 ||
+         (g.fieldArr? "flags").isNone ||
+         (g.fieldOrNull "errors").asObj?.isNone then
+        failures := failures.push s!"proxy/health: group row missing client ReliabilityGroup fields, got {renderCompact g}"
+    if chains.size != 1 then
+      failures := failures.push s!"proxy/health: expected 1 chain row from proxy_outcomes, got {chains.size}: {renderCompact (.arr chains)}"
+    else
+      let c := chains[0]!
+      if c.fieldStr? "chain_id" != some "builtin/smart" ||
+         c.fieldNat? "requests" != some 2 ||
+         c.fieldNat? "ok" != some 1 ||
+         (c.fieldOrNull "errors").asObj?.isNone then
+        failures := failures.push s!"proxy/health: chain row missing client ChainReliability fields, got {renderCompact c}"
+  finally
+    discard <| execParamQuery store.missionsDb "DELETE FROM proxy_outcomes;" #[]
+  return failures
+
 /-- Replay the production renderers and HTTP dispatch, never a live usage fetch. -/
 def run : IO Unit := do
   let fixtureRaw ← IO.FS.readFile "shared/orb-spec/fixtures/provider-response-contract.json"
@@ -782,6 +854,7 @@ def run : IO Unit := do
       failures := failures ++ (← antigravityReconnectClearsPerModelKeys hub store root cooldownsRef)
       failures := failures ++ (← healthCooldownOwners app jwt cooldownsRef)
       failures := failures ++ (← sidecarParkedHealthContract app root jwt cooldownsRef)
+      failures := failures ++ (← proxyHealthClientShapeContract app store jwt now)
       if !failures.isEmpty then
         throw (IO.userError ("provider response contract failures:\n" ++ String.intercalate "\n" failures.toList))
     finally
