@@ -63,6 +63,14 @@ routes through the verified unboxed kernel functions in `Orb.Kernel`:
   API calls (`renameOptimistically`, `moveMission`, `archiveMission`, `reopenMission`), so
   optimistic updates and error toasts have one implementation. macOS (`NSTableView`) does
   not have this menu yet.
+- "+" buttons (`linux_shell/gtk_chrome.c`, `row_add_target`), matching the HTML sidebar: the
+  `section:projects` row always shows "+" (New project); `project` and `folder` rows show "+"
+  (New agent in that project or folder) on row hover or keyboard focus. They occupy space the row
+  already reserves, so nothing moves when they appear. A click calls
+  `window.__ORB_NATIVE_NAV__("new-project")` or `("new-agent:<slug>[:<folder path>]")`; `App.tsx`
+  runs the same `startNewProject` / `newAgentIn` as the HTML rows. The target is derived from
+  `row_id` / `target`, so the `OrbLocald` row model is unchanged. macOS (`NSTableView`) does not
+  have these buttons yet; there the native sidebar still needs Cmd+N.
 - Multi-selection: Ctrl/Super-click toggles a mission, project, folder or file row, Shift-click
   extends from the anchor, a plain click or Escape clears it. Right-click inside a selection of
   more than one shows only bulk actions: for missions Move N to ▸, Archive/Restore N and Delete N…

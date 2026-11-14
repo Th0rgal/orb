@@ -78,3 +78,31 @@ for (const width of [700, 1100]) {
     expect((await sidebarCalls(page)).at(-1)).toBe(true);
   });
 }
+
+// The native sidebar has no HTML rows, so its "+" buttons (Projects section, project and folder
+// rows) reach the WebView only through `__ORB_NATIVE_NAV__`. Without these targets the native
+// sidebar had no way to start a project, or an agent inside a project or folder.
+test("native sidebar + buttons open New project and New agent in a project or folder", async ({ page }) => {
+  await openHybridApp(page);
+  const nav = (target: string) =>
+    page.evaluate((t) => (window as unknown as { __ORB_NATIVE_NAV__: (target: string) => boolean }).__ORB_NATIVE_NAV__(t), target);
+
+  expect(await nav("new-project")).toBe(true);
+  const dialog = page.getByRole("dialog").filter({ hasText: "Create project" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByPlaceholder("Project name")).toBeFocused();
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toBeHidden();
+
+  expect(await nav("new-agent:verity:docs/specs")).toBe(true);
+  const composer = page.locator(".composer").first();
+  await expect(composer).toBeVisible();
+  const folder = page.locator(".new-agent-folder");
+  await expect(folder).toHaveText("/ docs/specs");
+  // The target is an action, never a page id: the app stays on the New Agent page.
+  await expect(page.locator(".titlebar")).toContainText("New Agent");
+
+  expect(await nav("new-agent:verity")).toBe(true);
+  await expect(folder).toHaveCount(0);
+  await expect(composer).toBeVisible();
+});

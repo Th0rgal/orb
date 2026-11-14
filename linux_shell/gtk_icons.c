@@ -66,6 +66,7 @@ static gboolean on_draw_icon(GtkWidget *w, cairo_t *cr, gpointer ud) {
     cairo_set_line_width(cr, 1.15); cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND); cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
     if (strcmp(ic, "sidebar") == 0) { rounded_rect(cr, 2.0, 3.0, 12.0, 10.0, 2.0); cairo_move_to(cr, 6.0, 3.0); cairo_line_to(cr, 6.0, 13.0); }
     else if (strcmp(ic, "search") == 0) { cairo_arc(cr, 7.2, 7.2, 4.2, 0, 6.2832); cairo_move_to(cr, 10.4, 10.4); cairo_line_to(cr, 13.5, 13.5); }
+    else if (strcmp(ic, "plus") == 0) { cairo_move_to(cr, 8.0, 3.5); cairo_line_to(cr, 8.0, 12.5); cairo_move_to(cr, 3.5, 8.0); cairo_line_to(cr, 12.5, 8.0); }
     else if (strcmp(ic, "arrow-left") == 0) { cairo_move_to(cr, 13.0, 8.0); cairo_line_to(cr, 3.0, 8.0); cairo_move_to(cr, 7.0, 4.0); cairo_line_to(cr, 3.0, 8.0); cairo_line_to(cr, 7.0, 12.0); }
     else if (strcmp(ic, "arrow-right") == 0) { cairo_move_to(cr, 3.0, 8.0); cairo_line_to(cr, 13.0, 8.0); cairo_move_to(cr, 9.0, 4.0); cairo_line_to(cr, 13.0, 8.0); cairo_line_to(cr, 9.0, 12.0); }
     else if (strcmp(ic, "new-agent") == 0) { cairo_move_to(cr, 2.5, 3.0); cairo_line_to(cr, 13.5, 3.0); cairo_line_to(cr, 9.5, 8.2); cairo_line_to(cr, 9.5, 13.0); cairo_line_to(cr, 6.5, 11.4); cairo_line_to(cr, 6.5, 8.2); cairo_close_path(cr); }
