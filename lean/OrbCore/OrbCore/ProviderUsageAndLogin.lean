@@ -1084,29 +1084,36 @@ private def queryTotalsSince (store : CoreStore) (sinceIso? : Option String) : I
   | .error _ => return mkTotalsJv 0 0 0 0 0 0 0
 
 private def queryGroupedUsageBuckets (store : CoreStore) (colExpr : String) (sinceIso? : Option String) (limit : Nat)
-    (labelExpr? : Option String := none) : IO (Array JVal) := do
+    (labelExpr? : Option String := none) (fromClause : String := "proxy_usage")
+    (nullKeyVal : Option String := some "unknown") (nullLabelVal : Option String := none) : IO (Array JVal) := do
   let (whereSql, args) :=
     match sinceIso? with
-    | some s => ("WHERE timestamp >= ?1", #[s, toString limit])
+    | some s => ("WHERE proxy_usage.timestamp >= ?1", #[s, toString limit])
     | none => ("", #[toString limit])
   let limParam := if sinceIso?.isSome then "?2" else "?1"
   let lblCol := labelExpr?.getD colExpr
   let sql :=
-    s!"SELECT {colExpr} AS k, {lblCol} AS lbl, COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), " ++
-    s!"COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cost_cents),0) " ++
-    s!"FROM proxy_usage {whereSql} GROUP BY k ORDER BY SUM(input_tokens + output_tokens) DESC LIMIT {limParam};"
+    s!"SELECT {colExpr} AS k, {lblCol} AS lbl, COUNT(*), COALESCE(SUM(proxy_usage.input_tokens),0), COALESCE(SUM(proxy_usage.output_tokens),0), " ++
+    s!"COALESCE(SUM(proxy_usage.cache_read_tokens),0), COALESCE(SUM(proxy_usage.cache_creation_tokens),0), COALESCE(SUM(proxy_usage.reasoning_tokens),0), COALESCE(SUM(proxy_usage.cost_cents),0) " ++
+    s!"FROM {fromClause} {whereSql} GROUP BY k ORDER BY SUM(proxy_usage.input_tokens + proxy_usage.output_tokens) DESC LIMIT {limParam};"
   let mut out : Array JVal := #[]
   if let .ok rs ← execParamQuery store.missionsDb sql args then
     for i in [1:rs.size] do
       let r := rs[i]!
-      let key := ((r[0]?).getD "unknown").trimAscii.toString
-      let effKey := if key.isEmpty then "unknown" else key
-      let lblRaw := ((r[1]?).getD effKey).trimAscii.toString
-      let effLbl := if lblRaw.isEmpty then effKey else lblRaw
+      let key := ((r[0]?).getD "").trimAscii.toString
+      let lblRaw := ((r[1]?).getD "").trimAscii.toString
+      let (keyJv, lblJv) : JVal × JVal :=
+        if key.isEmpty then
+          let kJv := match nullKeyVal with | some d => .str d | none => .null
+          let lJv := match nullLabelVal.orElse (fun _ => nullKeyVal) with | some d => .str d | none => .null
+          (kJv, lJv)
+        else
+          let effLbl := if lblRaw.isEmpty then key else lblRaw
+          (.str key, .str effLbl)
       let n (idx : Nat) := ((r[idx]?).bind String.toNat?).getD 0
       let totObj := mkTotalsJv (n 2) (n 3) (n 4) (n 5) (n 6) (n 7) (n 8)
       let totPairs := totObj.asObj?.getD #[]
-      out := out.push (.obj (#[("key", .str effKey), ("label", .str effLbl)] ++ totPairs))
+      out := out.push (.obj (#[("key", keyJv), ("label", lblJv)] ++ totPairs))
   return out
 
 private def queryModelUsageBuckets (store : CoreStore) (sinceIso? : Option String) (limit : Nat) : IO (Array JVal) := do
@@ -1192,13 +1199,19 @@ def buildAiUsageSummaryJson (store : CoreStore) (qMap : Array (String × String)
   let byAccount ← queryGroupedUsageBuckets store "COALESCE(NULLIF(account_id,''),'unattributed')" winStartIso? topLimit
   let byCaller ← queryGroupedUsageBuckets store "COALESCE(NULLIF(caller_kind,''),'mission')" winStartIso? topLimit
   let byPurpose ← queryGroupedUsageBuckets store "COALESCE(NULLIF(purpose,''),'turn')" winStartIso? topLimit
-  let byMission ← queryGroupedUsageBuckets store "COALESCE(NULLIF(mission_id,''),'none')" winStartIso? topLimit
-    (some "CASE WHEN COALESCE(mission_id,'')='' THEN 'No mission' ELSE mission_id END")
-  let byApiKey ← queryGroupedUsageBuckets store "COALESCE(NULLIF(api_key_id,''),'internal')" winStartIso? topLimit
-    (some "COALESCE(MAX(NULLIF(api_key_name,'')), CASE WHEN COALESCE(api_key_id,'')='' THEN 'Internal proxy secret' ELSE api_key_id END)")
+  let byMission ← queryGroupedUsageBuckets store "COALESCE(NULLIF(mission_id,''),'')" winStartIso? topLimit
+    (nullKeyVal := none) (nullLabelVal := none)
+  let byRootMission ← queryGroupedUsageBuckets store
+    "COALESCE(NULLIF(m.root_mission_id,''), NULLIF(proxy_usage.mission_id,''), '')" winStartIso? topLimit
+    (fromClause := "proxy_usage LEFT JOIN mission_orchestration_meta m ON m.mission_id = proxy_usage.mission_id")
+    (nullKeyVal := none) (nullLabelVal := none)
 
   let (wSql, dArgs) := match winStartIso? with | some s => ("WHERE timestamp >= ?1", #[s]) | none => ("", #[weekIso])
   let effWhere := if winStartIso?.isSome then wSql else "WHERE timestamp >= ?1"
+  let dayLimit : Nat :=
+    match winSecs? with
+    | some s => Nat.min 366 (Nat.max 1 ((s.toNat + 86399) / 86400 + 1))
+    | none => 14
   let mut dayCallers : Array (String × Array (String × JVal)) := #[]
   if let .ok dcrs ← execParamQuery store.missionsDb
       s!"SELECT substr(timestamp,1,10) AS d, COALESCE(NULLIF(caller_kind,''),'mission') AS ck, COUNT(*) FROM proxy_usage {effWhere} GROUP BY d, ck;"
@@ -1218,7 +1231,7 @@ def buildAiUsageSummaryJson (store : CoreStore) (qMap : Array (String × String)
 
   let mut byDay : Array JVal := #[]
   if let .ok drs ← execParamQuery store.missionsDb
-      s!"SELECT substr(timestamp,1,10) AS d, COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cost_cents),0) FROM proxy_usage {effWhere} GROUP BY d ORDER BY d DESC LIMIT 14;"
+      s!"SELECT substr(timestamp,1,10) AS d, COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cost_cents),0) FROM proxy_usage {effWhere} GROUP BY d ORDER BY d DESC LIMIT {dayLimit};"
       dArgs then
     for i in [1:drs.size] do
       let r := drs[i]!
@@ -1304,11 +1317,8 @@ def buildAiUsageSummaryJson (store : CoreStore) (qMap : Array (String × String)
 
   let totPairs := totals.asObj?.getD #[]
   let bySource : Array JVal :=
-    if totals.fieldNat? "events" == some 0 then
-      #[.obj (#[("key", .str "proxy"), ("label", .str "Proxy")] ++ totPairs)]
-    else
-      #[.obj (#[("key", .str "router"), ("label", .str "Router")] ++ totPairs),
-        .obj (#[("key", .str "proxy"), ("label", .str "Proxy")] ++ totPairs)]
+    if totals.fieldNat? "events" == some 0 then #[]
+    else #[.obj (#[("key", .str "router"), ("label", .str "Router")] ++ totPairs)]
   let byRoute : Array JVal :=
     if totals.fieldNat? "events" == some 0 then #[]
     else #[.obj (#[("key", .str "proxy"), ("label", .str "Proxy")] ++ totPairs)]
@@ -1327,11 +1337,11 @@ def buildAiUsageSummaryJson (store : CoreStore) (qMap : Array (String × String)
     ("by_provider", .arr byProvider),
     ("by_account", .arr byAccount),
     ("by_model", .arr byModel),
-    ("by_api_key", .arr byApiKey),
+    ("by_api_key", .arr #[]),
     ("by_caller_kind", .arr byCaller),
     ("by_purpose", .arr byPurpose),
     ("by_mission", .arr byMission),
-    ("by_root_mission", .arr byMission),
+    ("by_root_mission", .arr byRootMission),
     ("by_day", .arr byDay),
     ("by_hour", .arr byHour),
     ("recent", .arr recent),
@@ -1340,7 +1350,7 @@ def buildAiUsageSummaryJson (store : CoreStore) (qMap : Array (String × String)
       ("providers", .arr (byProvider.filterMap (fun b => b.field? "key"))),
       ("models", .arr (byModel.filterMap (fun b => b.field? "key"))),
       ("caller_kinds", .arr (byCaller.filterMap (fun b => b.field? "key"))),
-      ("api_keys", .arr (byApiKey.filterMap (fun b => b.field? "key")))
+      ("api_keys", .arr #[])
     ])
   ]
 
