@@ -311,6 +311,21 @@ def resolveStaticNodeToken? (node : StaticRemoteNode) : IO (Option String) := do
     if !t.isEmpty then return some t
   return none
 
+/-- Identify the static fleet node (`SANDBOXED_REMOTE_NODES`) whose shared node token is `presented`.
+    This is the token Core already holds to call that node (`resolveStaticNodeToken?`), compared in
+    constant time against every configured node. A token shared by two node ids names nobody.
+    Managed machines are deliberately not consulted: their tokens never authenticate here. -/
+def authenticateStaticNodeToken? (presented : String) : IO (Option String) := do
+  let cand := presented.trimAscii.toString
+  if cand.isEmpty then return none
+  let (_, nodes) ← loadStaticRemoteNodes
+  let mut matched : Array String := #[]
+  for sn in nodes do
+    if let some tok ← resolveStaticNodeToken? sn then
+      if ctEqString cand tok && !matched.contains sn.id then
+        matched := matched.push sn.id
+  if matched.size == 1 then return matched[0]? else return none
+
 /-- Extract `machineId` if `nodeOrMachineId` refers to a managed machine (`"managed-<id>"` or `<id>`). -/
 def resolveManagedMachineId? (mc : ManagedComputeStore) (nodeOrMachineId : String) : IO (Option String) := do
   let clean := nodeOrMachineId.trimAscii.toString

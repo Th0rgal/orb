@@ -28,6 +28,14 @@ When a mission requires root execution on a worker node, a fleet harness update,
 4. **Local Execution (`orb-privd` + `orb-sudo`)**:
    - `orb-privd` listens on `/run/orb-privd.sock` (`0660 root:sandboxed-node`), verifies `SO_PEERCRED` caller UID, re-hashes the requested `argv`, verifies the signed grant against `orb_priv_step`, executes the binary directly via `Command::new(&argv[0]).args(&argv[1..])` (never `sh -c`), and logs an immutable receipt.
 
+5. **Who may ask Core to verify a lease (`POST /api/privilege-access/verify-and-log`)**:
+   - An **admin (or legacy unscoped) bearer**, as before. Core takes the `executing_host` it states.
+   - **`orb-privd` on a static fleet node**, with that node's own token: the value of `SANDBOXED_NODE_TOKEN` on the node, which Core already holds as `SANDBOXED_REMOTE_NODE_<ID>_TOKEN` to call the node (`authenticateStaticNodeToken?` in `lean/OrbCore/OrbCore/RemoteFleetAndRelay.lean`, constant-time, one unambiguous match). No admin token lives on a worker. The two factors are the node token (which node asks) and the lease (what was approved).
+   - For a node caller the authenticated node id is the executing host; the body's `executing_host` is ignored. The request must target `self` or that node, and the lease must name that node, be an `all` lease, or be a `self` lease whose mission Core places on that node (`resolveMissionRemoteNode?`). Scope rank, allowed units, force-command, expiry, revocation and bunker state are checked as for an admin. A lease requested without `target_host` is a `self` lease: request it with the node id when the command runs on a node other than the mission's own.
+   - Managed machines are not accepted: their node tokens do not authenticate this route (401).
+   - Every decision past authentication is written to `privilege_audit_log`; a node caller is recorded as `executing_host = node:<id>`.
+   - `orb-privd` sends the first of `ORB_CORE_API_TOKEN`, `ORB_PRIVD_CORE_TOKEN`, `ORB_API_TOKEN`, `SANDBOXED_SH_TOKEN`, `ORB_NODE_TOKEN`, `SANDBOXED_NODE_TOKEN` it finds; on a worker only the last is set (from `/etc/sandboxed-node.env`). Leave the others unset there.
+
 ---
 
 ## 2. Cryptographic Production Deploy Gate (`orb_deploy_gate_step`)
