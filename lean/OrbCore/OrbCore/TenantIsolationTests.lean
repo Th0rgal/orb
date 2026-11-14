@@ -650,7 +650,7 @@ def run (root : String) : IO Unit := do
       "id", "name", "provider_type", "provider_type_name",
       "enabled", "globally_enabled", "user_enabled", "effective_enabled",
       "has_credentials", "has_api_key", "has_oauth", "uses_oauth",
-      "status", "custom_models"
+      "status", "custom_models", "added_by_me"
     ]
     let allowedStatusKeys : Array String := #["type", "message"]
     let allowedModelKeys : Array String := #["id", "name", "context_limit", "output_limit"]
