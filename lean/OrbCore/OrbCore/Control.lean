@@ -109,6 +109,7 @@ structure CoreAppState where
   pacingTracker?  : Option ProxyPacingTracker := none
   healthTracker?  : Option ProviderHealthTracker := none
   proxyMockTransport? : Option (ProviderTarget → IO (Except String HttpsResponse)) := none
+  proxyStreamLimits?  : Option StreamLimits := none
   authRoot        : String := ""
   authRotation?   : Option AuthRotationHandle := none
   cliProxySessionsRef? : Option (IO.Ref (Array CliProxyLoginSession)) := none
@@ -1591,6 +1592,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   let explicitPinned? : Option String :=
     if headersAlreadyCommitted then some pinnedAcctHdr else none
   let authEvidence ← IO.mkRef (#[] : Array (String × String))
+  let bodyTimedOutRef ← IO.mkRef false
   let out ← forwardProxyChain dispatchChain req.method cleanPath #[] forwardBody
     st.proxyMockTransport? headersAlreadyCommitted st.pacingTracker?
     (skipAccountIds := skipAccountIds)
@@ -1599,6 +1601,8 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     (nowEpoch? := some nowEpochSec)
     (pinnedAccount? := explicitPinned?)
     (authEvidence? := some authEvidence)
+    (streamLimits? := st.proxyStreamLimits?)
+    (bodyTimedOutRef? := some bodyTimedOutRef)
   -- Provider status follows what real requests saw: a refused login is recorded per
   -- upstream account, and an account that just served a request is cleared.
   for (accountKey, code) in (← authEvidence.get) do
@@ -1653,13 +1657,19 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
             }
   let servedTarget? := dispatchChain.targets.find? (fun t => t.accountId == out.selectedAccount)
   let effectiveModel := (servedTarget?.map (·.modelId)).filter (!·.isEmpty) |>.getD rawRequestedModel
-  discard <| execParamQuery st.store.missionsDb
-    ("INSERT INTO proxy_outcomes(timestamp,chain_id,provider,account_id,model,requested_model,status,http_status,retries) " ++
-     "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9);")
-    #[formatEpochIso8601Utc nowEpochSec, (if routeKind == "chain" then dispatchChain.id else routeKind),
-      (servedTarget?.map (·.provider)).getD "", out.selectedAccount, effectiveModel, rawRequestedModel,
-      (if out.status ≥ 200 && out.status < 300 then "ok" else "error"), toString out.status,
-      toString (out.attemptsUsed - 1)]
+  let initOutcomeStatus :=
+    if out.status ≥ 200 && out.status < 300 then "ok"
+    else if out.exhaustionClass == "upstream_idle_timeout" then "upstream_idle_timeout"
+    else "error"
+  let outcomeId? ← match ← execParamQuery st.store.missionsDb
+      ("INSERT INTO proxy_outcomes(timestamp,chain_id,provider,account_id,model,requested_model,status,http_status,retries) " ++
+       "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) RETURNING id;")
+      #[formatEpochIso8601Utc nowEpochSec, (if routeKind == "chain" then dispatchChain.id else routeKind),
+        (servedTarget?.map (·.provider)).getD "", out.selectedAccount, effectiveModel, rawRequestedModel,
+        initOutcomeStatus, toString out.status,
+        toString (out.attemptsUsed - 1)] with
+    | .ok rows => pure ((rows[1]?.bind (·[0]?)).filter (!·.isEmpty))
+    | .error _ => pure none
   let diagHdrs := out.headers ++ #[
     ("X-Orb-Requested-Model", rawRequestedModel),
     ("X-Orb-Effective-Model", effectiveModel),
@@ -1673,9 +1683,15 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   | some pump =>
     return { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := diagHdrs,
              body := ByteArray.empty, bodyStream? := some fun emit => do
-               let (copy, complete) ← pump emit
-               accountBody copy
-               return complete }
+               try
+                 let (copy, ok) ← pump emit
+                 accountBody copy
+                 return ok
+               finally
+                 if (← bodyTimedOutRef.get) then
+                   if let some oid := outcomeId? then
+                     discard <| execParamQuery st.store.missionsDb
+                       "UPDATE proxy_outcomes SET status='upstream_idle_timeout' WHERE id=?1;" #[oid] }
   | none =>
     accountBody out.body
     return { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := diagHdrs, body := out.body }

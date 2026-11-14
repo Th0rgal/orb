@@ -346,6 +346,295 @@ def runStreamingPumpContracts : IO Unit := do
   let admittedAfter ← tryAcquireTargetSlot tracker pTgt (← IO.monoMsNow).toUInt64
   if admittedAfter then releaseTargetSlot tracker pTgt
   expect admittedAfter "pacing concurrency slot is released once the stream body is relayed"
+
+  -- Streamed idle-timeout budget across attempts and post-head stream idle behavior:
+  -- (a) Fake upstream accepts and never answers, two targets in the chain: client gets
+  --     504 {"error":"upstream_idle_timeout"} with X-Orb-Exhaustion-Class: upstream_idle_timeout
+  --     within the cross-attempt budget plus a small margin, and the attempt count is reported.
+  let .ok (hangLfd, hangPort) ← tcpListen "127.0.0.1" 0 8
+    | throw (IO.userError "proxy streaming idle-budget: listen failed")
+  let hangAccepted ← IO.mkRef (0 : Nat)
+  let hangTask ← IO.asTask (prio := .dedicated) do
+    for _ in [0:2] do
+      if let .ok ufd ← tcpAcceptPoll hangLfd 10000 then
+        hangAccepted.modify (· + 1)
+        discard <| IO.asTask (prio := .dedicated) do
+          discard <| pollReadable ufd 2000
+          discard <| readStreamChunk ufd 65536
+          IO.sleep 3000
+          discard <| closeFd ufd
+    discard <| closeFd hangLfd
+  let hangChain : RoutingChain := {
+    id := "hang-chain", name := "hang-chain",
+    targets := #[
+      { accountId := "h1", provider := "openai", baseUrl := s!"http://127.0.0.1:{hangPort}", apiKey := "k1", modelId := "m1" },
+      { accountId := "h2", provider := "anthropic", baseUrl := s!"http://127.0.0.1:{hangPort}", apiKey := "k2", modelId := "m2" }
+    ]
+  }
+  let idleRoot := s!"/tmp/orb-stream-idle-{← newUuidV4}"
+  let .ok idleStore ← openCoreStore idleRoot
+    | throw (IO.userError "proxy streaming idle-budget: store failed")
+  try
+    let idleManaged ← IO.mkRef ({} : ManagedFleetState)
+    let idleChains ← IO.mkRef #[hangChain]
+    let idleCooldowns ← IO.mkRef (#[] : Array AccountCooldown)
+    let idleSeq ← IO.mkRef (1 : UInt64)
+    let idleCfg : CoreConfig := {
+      workingDir := idleRoot
+      dashboardPassword := "proxy-idle-password"
+      proxySecret := "proxy-idle-secret-0123456789"
+      jwtSecret := "proxy-idle-jwt-secret-0123456789"
+    }
+    let idleApp : CoreAppState := {
+      cfg := idleCfg, store := idleStore, searchIdx? := none,
+      managedRef := idleManaged, chainsRef := idleChains,
+      proxyCooldownsRef := idleCooldowns, seqRef := idleSeq,
+      proxyStreamLimits? := some { idleMs := 200, totalMs := 10000, preHeadBudgetMs := 350 }
+    }
+    let .ok (cHangLfd, cHangPort) ← tcpListen "127.0.0.1" 0 4
+      | throw (IO.userError "proxy streaming idle-budget: client listen failed")
+    let cHangSrv ← IO.asTask (prio := .dedicated) do
+      if let .ok sfd ← tcpAcceptPoll cHangLfd 10000 then
+        handleClientConn idleApp sfd false
+      discard <| closeFd cHangLfd
+    let hangReqBody := "{\"model\":\"hang-chain\",\"stream\":true}"
+    let hangReqWire := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {idleCfg.proxySecret}\r\nContent-Length: {hangReqBody.utf8ByteSize}\r\n\r\n{hangReqBody}"
+    let tHang0 ← IO.monoMsNow
+    let mut hangClientWire := ByteArray.empty
+    if let .ok cfd ← tcpConnect "127.0.0.1" cHangPort then
+      discard <| writeAll cfd hangReqWire.toUTF8 false
+      let mut doneH := false
+      while !doneH do
+        match ← pollReadable cfd 10000 with
+        | .ok () =>
+          let part ← readStreamChunk cfd 65536
+          if part.isEmpty then doneH := true else hangClientWire := hangClientWire ++ part
+        | .error _ => doneH := true
+      discard <| closeFd cfd
+    let hangElapsed := (← IO.monoMsNow) - tHang0
+    let _ := cHangSrv.get
+    let _ := hangTask.get
+    let .ok hangParsed := OrbNetLeaf.TlsHttp.parseHttpResponseWire hangClientWire 65536 true "POST"
+      | throw (IO.userError s!"proxy streaming idle-budget: client wire parse failed: {String.fromUTF8? hangClientWire}")
+    let hangBodyStr := (String.fromUTF8? hangParsed.body).getD ""
+    let exhHdr := lookupHeader? hangParsed.headers "x-orb-exhaustion-class"
+    let attHdr := lookupHeader? hangParsed.headers "x-orb-attempts-used"
+    expect (hangParsed.status == 504) s!"(a) expected 504 on pre-head idle budget exhaustion, got {hangParsed.status}"
+    expect (hangBodyStr == "{\"error\":\"upstream_idle_timeout\"}")
+      s!"(a) expected exact upstream_idle_timeout body, got {hangBodyStr}"
+    expect (exhHdr == some "upstream_idle_timeout")
+      s!"(a) expected X-Orb-Exhaustion-Class: upstream_idle_timeout, got {exhHdr}"
+    expect (attHdr == some "2" && (← hangAccepted.get) == 2)
+      s!"(a) expected 2 attempts reported across chain within budget, got header={attHdr} accepted={← hangAccepted.get}"
+    expect (hangElapsed ≥ 300 && hangElapsed < 10000)
+      s!"(a) expected completion within 350ms budget .. 10000ms bound, took {hangElapsed}ms"
+    if let .ok rows ← execParamQuery idleStore.missionsDb
+        "SELECT status, http_status, retries FROM proxy_outcomes ORDER BY id DESC LIMIT 1;" #[] then
+      expect (rows.size > 1 && rows[1]! == #["upstream_idle_timeout", "504", "1"])
+        s!"(a) proxy_outcomes records upstream_idle_timeout and retries: {rows}"
+
+    -- Distinct pre-head idle timeout reason on a single attempt within a larger budget:
+    -- attempt 1 idles out at 150ms (recorded as upstream_idle_timeout), attempt 2 returns 503,
+    -- chain exhaustion body names upstream_idle_timeout for attempt 1 (not generic transport_error).
+    let .ok (mixLfd, mixPort) ← tcpListen "127.0.0.1" 0 4
+      | throw (IO.userError "proxy streaming distinct-idle: listen failed")
+    let mixTask ← IO.asTask (prio := .dedicated) do
+      if let .ok ufd1 ← tcpAcceptPoll mixLfd 10000 then
+        discard <| IO.asTask (prio := .dedicated) do
+          discard <| pollReadable ufd1 2000
+          discard <| readStreamChunk ufd1 65536
+          IO.sleep 3000
+          discard <| closeFd ufd1
+      if let .ok ufd2 ← tcpAcceptPoll mixLfd 10000 then
+        discard <| pollReadable ufd2 2000
+        discard <| readStreamChunk ufd2 65536
+        let b2 := "{\"error\":{\"code\":\"overloaded\"}}"
+        discard <| writeAll ufd2 (s!"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {b2.utf8ByteSize}\r\n\r\n{b2}").toUTF8 false
+        discard <| closeFd ufd2
+      discard <| closeFd mixLfd
+    let mixChain : RoutingChain := {
+      id := "mix", name := "mix",
+      targets := #[
+        { accountId := "m1", provider := "openai", baseUrl := s!"http://127.0.0.1:{mixPort}", apiKey := "k1", modelId := "m1" },
+        { accountId := "m2", provider := "anthropic", baseUrl := s!"http://127.0.0.1:{mixPort}", apiKey := "k2", modelId := "m2" }
+      ]
+    }
+    let mixOut ← forwardProxyChain mixChain "POST" "/v1/chat/completions" #[]
+      "{\"model\":\"mix\",\"stream\":true}".toUTF8
+      (streamLimits? := some { idleMs := 150, totalMs := 10000, preHeadBudgetMs := 5000 })
+    let _ := mixTask.get
+    let mixBodyStr := (String.fromUTF8? mixOut.body).getD ""
+    expect (mixOut.attemptsUsed == 2 && (mixBodyStr.splitOn "\"code\":\"upstream_idle_timeout\"").length > 1)
+      s!"(c-distinct) pre-head idle attempt recorded as upstream_idle_timeout before failover: {mixBodyStr}"
+
+    -- Non-2xx upstream answer finishing after preHeadBudgetMs is not relabelled 504:
+    -- target 1 sends 429 headers before the 150ms pre-head budget, then sends the 429 body
+    -- at 200ms (after the budget is spent). Failover stops at attempt 1 and returns the real 429.
+    let .ok (rlLfd, rlPort) ← tcpListen "127.0.0.1" 0 4
+      | throw (IO.userError "proxy streaming non2xx-after-budget: listen failed")
+    let rlTask ← IO.asTask (prio := .dedicated) do
+      if let .ok ufd ← tcpAcceptPoll rlLfd 10000 then
+        discard <| pollReadable ufd 2000
+        discard <| readStreamChunk ufd 65536
+        let b429 := "{\"error\":{\"code\":\"rate_limit_exceeded\"}}"
+        discard <| writeAll ufd (s!"HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {b429.utf8ByteSize}\r\n\r\n").toUTF8 false
+        IO.sleep 200
+        discard <| writeAll ufd b429.toUTF8 false
+        discard <| closeFd ufd
+      discard <| closeFd rlLfd
+    let rlChain : RoutingChain := {
+      id := "rl-budget", name := "rl-budget",
+      targets := #[
+        { accountId := "r1", provider := "openai", baseUrl := s!"http://127.0.0.1:{rlPort}", apiKey := "k1", modelId := "m1" },
+        { accountId := "r2", provider := "anthropic", baseUrl := s!"http://127.0.0.1:{rlPort}", apiKey := "k2", modelId := "m2" }
+      ]
+    }
+    let rlOut ← forwardProxyChain rlChain "POST" "/v1/chat/completions" #[]
+      "{\"model\":\"rl-budget\",\"stream\":true}".toUTF8
+      (streamLimits? := some { idleMs := 2000, totalMs := 10000, preHeadBudgetMs := 150 })
+    let _ := rlTask.get
+    expect (rlOut.status == 429 && rlOut.attemptsUsed == 1 && rlOut.exhaustionClass != "upstream_idle_timeout")
+      s!"(a-non2xx) real 429 after pre-head budget stops failover and keeps 429: status={rlOut.status} attempts={rlOut.attemptsUsed} class={rlOut.exhaustionClass}"
+
+    -- (b) Upstream sends a head and one chunk, then nothing: client receives the chunk,
+    --     then the connection is closed without the zero chunk within idle plus margin,
+    --     and proxy_outcomes records upstream_idle_timeout.
+    let postIdleApp : CoreAppState := {
+      idleApp with
+      proxyStreamLimits? := some { idleMs := 200, totalMs := 10000, preHeadBudgetMs := 5000 }
+    }
+    let .ok (postIdleLfd, postIdlePort) ← tcpListen "127.0.0.1" 0 4
+      | throw (IO.userError "proxy streaming post-head-idle: listen failed")
+    let oneChunk := "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}\n\n"
+    let postIdleTask ← IO.asTask (prio := .dedicated) do
+      if let .ok ufd ← tcpAcceptPoll postIdleLfd 10000 then
+        discard <| pollReadable ufd 2000
+        discard <| readStreamChunk ufd 65536
+        discard <| writeAll ufd (("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n" ++
+          "Transfer-Encoding: chunked\r\n\r\n").toUTF8 ++ encodeHttpChunk oneChunk.toUTF8) false
+        discard <| IO.asTask (prio := .dedicated) do
+          IO.sleep 3000
+          discard <| closeFd ufd
+      discard <| closeFd postIdleLfd
+    idleChains.set #[{
+      id := "post-idle", name := "post-idle",
+      targets := #[{ accountId := "p1", provider := "openai", baseUrl := s!"http://127.0.0.1:{postIdlePort}", apiKey := "k", modelId := "m" }]
+    }]
+    let .ok (cPostLfd, cPostPort) ← tcpListen "127.0.0.1" 0 4
+      | throw (IO.userError "proxy streaming post-head-idle: client listen failed")
+    let cPostSrv ← IO.asTask (prio := .dedicated) do
+      if let .ok sfd ← tcpAcceptPoll cPostLfd 10000 then
+        handleClientConn postIdleApp sfd false
+      discard <| closeFd cPostLfd
+    let postReqBody := "{\"model\":\"post-idle\",\"stream\":true}"
+    let postReqWire := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {idleCfg.proxySecret}\r\nContent-Length: {postReqBody.utf8ByteSize}\r\n\r\n{postReqBody}"
+    let tPost0 ← IO.monoMsNow
+    let mut postClientWire := ByteArray.empty
+    if let .ok cfd ← tcpConnect "127.0.0.1" cPostPort then
+      discard <| writeAll cfd postReqWire.toUTF8 false
+      let mut doneP := false
+      while !doneP do
+        match ← pollReadable cfd 10000 with
+        | .ok () =>
+          let part ← readStreamChunk cfd 65536
+          if part.isEmpty then doneP := true else postClientWire := postClientWire ++ part
+        | .error _ => doneP := true
+      discard <| closeFd cfd
+    let postElapsed := (← IO.monoMsNow) - tPost0
+    let _ := cPostSrv.get
+    let _ := postIdleTask.get
+    let postWireStr := (String.fromUTF8? postClientWire).getD ""
+    expect ((postWireStr.splitOn oneChunk).length > 1 && !postWireStr.endsWith "0\r\n\r\n")
+      s!"(b) client receives chunk and closes without terminating 0 chunk: {postWireStr}"
+    expect (postElapsed ≥ 180 && postElapsed < 10000)
+      s!"(b) post-head idle closes within 200ms idle .. 10000ms bound, took {postElapsed}ms"
+    if let .ok rows ← execParamQuery idleStore.missionsDb
+        "SELECT status, http_status FROM proxy_outcomes ORDER BY id DESC LIMIT 1;" #[] then
+      expect (rows.size > 1 && rows[1]! == #["upstream_idle_timeout", "200"])
+        s!"(b) post-head idle timeout recorded in proxy_outcomes.status: {rows}"
+
+    -- (c) Normal stream is unchanged under injected limits.
+    let .ok (normLfd, normPort) ← tcpListen "127.0.0.1" 0 4
+      | throw (IO.userError "proxy streaming normal: listen failed")
+    let normTask ← IO.asTask (prio := .dedicated) do
+      if let .ok ufd ← tcpAcceptPoll normLfd 10000 then
+        discard <| pollReadable ufd 2000
+        discard <| readStreamChunk ufd 65536
+        discard <| writeAll ufd (("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n" ++
+          "Transfer-Encoding: chunked\r\n\r\n").toUTF8 ++
+          encodeHttpChunk "data: {\"n\":1}\n\n".toUTF8 ++
+          encodeHttpChunk ByteArray.empty) false
+        discard <| closeFd ufd
+      discard <| closeFd normLfd
+    idleChains.set #[{
+      id := "norm", name := "norm",
+      targets := #[{ accountId := "n1", provider := "openai", baseUrl := s!"http://127.0.0.1:{normPort}", apiKey := "k", modelId := "m" }]
+    }]
+    let .ok (cNormLfd, cNormPort) ← tcpListen "127.0.0.1" 0 4
+      | throw (IO.userError "proxy streaming normal: client listen failed")
+    let cNormSrv ← IO.asTask (prio := .dedicated) do
+      if let .ok sfd ← tcpAcceptPoll cNormLfd 10000 then
+        handleClientConn postIdleApp sfd false
+      discard <| closeFd cNormLfd
+    let normReqBody := "{\"model\":\"norm\",\"stream\":true}"
+    let normReqWire := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {idleCfg.proxySecret}\r\nContent-Length: {normReqBody.utf8ByteSize}\r\n\r\n{normReqBody}"
+    let mut normClientWire := ByteArray.empty
+    if let .ok cfd ← tcpConnect "127.0.0.1" cNormPort then
+      discard <| writeAll cfd normReqWire.toUTF8 false
+      let mut doneN := false
+      while !doneN do
+        match ← pollReadable cfd 10000 with
+        | .ok () =>
+          let part ← readStreamChunk cfd 65536
+          if part.isEmpty then doneN := true else normClientWire := normClientWire ++ part
+        | .error _ => doneN := true
+      discard <| closeFd cfd
+    let _ := cNormSrv.get
+    let _ := normTask.get
+    let normWireStr := (String.fromUTF8? normClientWire).getD ""
+    expect ((normWireStr.splitOn "data: {\"n\":1}\n\n").length > 1 && normWireStr.endsWith "0\r\n\r\n")
+      s!"(c) normal stream completes with terminating 0 chunk: {normWireStr}"
+    if let .ok rows ← execParamQuery idleStore.missionsDb
+        "SELECT status, http_status FROM proxy_outcomes ORDER BY id DESC LIMIT 1;" #[] then
+      expect (rows.size > 1 && rows[1]! == #["ok", "200"])
+        s!"(c) normal stream records ok in proxy_outcomes.status: {rows}"
+
+    -- (d) Upstream sends only a keep-alive line every 80ms while idleMs is 200ms:
+    --     any upstream byte resets the idle clock, so the stream stays open across 350ms
+    --     (> idleMs) until the total limit (450ms) cuts it off.
+    let .ok (kaLfd, kaPort) ← tcpListen "127.0.0.1" 0 4
+      | throw (IO.userError "proxy streaming keepalive: listen failed")
+    let kaTask ← IO.asTask (prio := .dedicated) do
+      if let .ok ufd ← tcpAcceptPoll kaLfd 10000 then
+        discard <| pollReadable ufd 2000
+        discard <| readStreamChunk ufd 65536
+        discard <| writeAll ufd ("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n" ++
+          "Transfer-Encoding: chunked\r\n\r\n").toUTF8 false
+        for _ in [0:10] do
+          IO.sleep 80
+          discard <| writeAll ufd (encodeHttpChunk ": keepalive\n\n".toUTF8) false
+        discard <| closeFd ufd
+      discard <| closeFd kaLfd
+    let kaChain : RoutingChain := {
+      id := "ka", name := "ka",
+      targets := #[{ accountId := "ka1", provider := "openai", baseUrl := s!"http://127.0.0.1:{kaPort}", apiKey := "k", modelId := "m" }]
+    }
+    let tKa0 ← IO.monoMsNow
+    let kaOut ← forwardProxyChain kaChain "POST" "/v1/chat/completions" #[]
+      "{\"model\":\"ka\",\"stream\":true}".toUTF8
+      (streamLimits? := some { idleMs := 200, totalMs := 450, preHeadBudgetMs := 5000 })
+    let some kaPump := kaOut.stream?
+      | throw (IO.userError "proxy streaming keepalive: expected stream pump")
+    let (kaCopy, kaComplete) := PumpOutcome.unpack <| ← kaPump (fun _ => pure true)
+    let kaElapsed := (← IO.monoMsNow) - tKa0
+    let _ := kaTask.get
+    let kaText := (String.fromUTF8? kaCopy).getD ""
+    expect (!kaComplete && kaElapsed ≥ 350 && kaElapsed < 10000 && (kaText.splitOn ": keepalive").length ≥ 3)
+      s!"(d) keep-alive lines every 80ms reset the 200ms idle timer until the 450ms total limit fires: elapsed={kaElapsed}ms complete={kaComplete}"
+  finally
+    closeCoreStore idleStore
+    discard <| (IO.FS.removeDirAll idleRoot).toBaseIO
+
   let bad ← failures.get
   check bad.isEmpty (String.intercalate "; " bad.toList)
 
