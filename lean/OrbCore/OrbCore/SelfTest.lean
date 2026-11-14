@@ -4792,12 +4792,17 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   if chgSt != 200 || staleAfterChgSt != 401 || aliceTok.isEmpty then
     return (← fail s!"change-password failed: chg={chgSt} stale={staleAfterChgSt}")
 
-  -- Member gets `403` on `/api/admin/users`, `/api/system/deploy`, global provider mutations
+  -- Member gets `403` on `/api/admin/users`, `/api/system/deploy` and instance-level provider
+  -- settings; adding a shared account is allowed (docs/MULTI_USER.md §5) and they delete their own.
   let (memUsersSt, _, _) ← sendReq "GET" "/api/admin/users" aliceTok ""
   let (memDeploySt, _, _) ← sendReq "POST" "/api/system/deploy" aliceTok "{\"unit\":\"sandboxed-sh\"}"
-  let (memAddProvSt, _, _) ← sendReq "POST" "/api/ai/providers" aliceTok "{\"name\":\"Evil\",\"provider_type\":\"openai\",\"api_key\":\"sk-1\"}"
-  if memUsersSt != 403 || memDeploySt != 403 || memAddProvSt != 403 then
-    return (← fail s!"member admin-route confinement failed: users={memUsersSt} deploy={memDeploySt} prov={memAddProvSt}")
+  let (memAddProvSt, memAddProvBody, _) ← sendReq "POST" "/api/ai/providers" aliceTok "{\"name\":\"Shared\",\"provider_type\":\"openai\",\"api_key\":\"sk-1\"}"
+  let memProvId := ((OrbBin.Json.parse memAddProvBody).toOption.getD (.obj #[]) |>.fieldStr? "id").getD ""
+  let (memDefaultSt, _, _) ← sendReq "POST" s!"/api/ai/providers/{memProvId}/default" aliceTok ""
+  let (memDelProvSt, _, _) ← sendReq "DELETE" s!"/api/ai/providers/{memProvId}" aliceTok ""
+  if memUsersSt != 403 || memDeploySt != 403 || memAddProvSt != 201 || memProvId.isEmpty ||
+      memDefaultSt != 403 || memDelProvSt != 200 then
+    return (← fail s!"member admin-route confinement failed: users={memUsersSt} deploy={memDeploySt} prov={memAddProvSt} default={memDefaultSt} delete={memDelProvSt}")
 
   -- Backend model catalog & routing catalog: Opus 5.5 is default (index 0), Fable 5.2 + Mythos 5.2 + Meta Muse Wonder/Ember present, Fable 5.1 absent from picker,
   -- and non-admin `member` callers never receive internal custom-provider `base_url` hostnames or inline chain secrets on `/api/providers*` or `/api/model-routing/chains`.

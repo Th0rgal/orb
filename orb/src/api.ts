@@ -1126,6 +1126,11 @@ export interface AIProvider {
   priority?: number;
   /** Automatically redeem a banked subscription reset when all accounts hit a usage limit. */
   auto_reset_on_limit?: boolean;
+  /** True when the caller added this shared account (members get its full credential-free view). */
+  added_by_me?: boolean;
+  /** Who added the account; shown to admins and to the member who added it. */
+  created_by_user_id?: string | null;
+  created_by_username?: string | null;
   status: { type: string; reason?: string; message?: string };
 }
 
