@@ -110,6 +110,15 @@ private def gatewayTests (root : String) : IO Unit := do
     closeCoreStore store
 
 def run (root : String) : IO Unit := do
+  -- The instance default provider applies only when the request names none.
+  check (defaultManagedProviderOf none == "boat" && defaultManagedProviderOf (some "lean.ci") == "leanci" &&
+    defaultManagedProviderOf (some " LeanCI ") == "leanci" && defaultManagedProviderOf (some "nope") == "boat")
+    "default managed provider: unset or unknown keeps boat, lean.ci is canonicalized"
+  check ((parseAutoManagedTarget "auto-managed" "leanci").toOption.map (·.1) == some "leanci" &&
+    (parseAutoManagedTarget "auto-managed:large" "leanci").toOption == some ("leanci", "large") &&
+    (parseAutoManagedTarget "auto-managed:boat:large" "leanci").toOption == some ("boat", "large") &&
+    (parseAutoManagedTarget "auto-managed:large").toOption == some ("boat", "large"))
+    "auto-managed uses the default provider unless one is named"
   chooserTests
   gatewayTests root
 

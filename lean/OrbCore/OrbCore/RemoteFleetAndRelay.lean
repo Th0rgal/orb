@@ -902,14 +902,14 @@ def resolveManagedSpawnSize (provider : String) (args : JVal)
   let some size := selected.bind (·.fieldStr? "size") | throw "managed_size_unavailable"
   return size
 
-def parseAutoManagedTarget (target : String) : Except String (String × String) := do
+def parseAutoManagedTarget (target : String) (defaultProvider : String := "boat") : Except String (String × String) := do
   let parts := target.trimAscii.toString.toLower.splitOn ":"
   let (provider, size?) ← match parts with
-    | ["auto-managed"] => pure ("boat", none)
+    | ["auto-managed"] => pure (defaultProvider, none)
     | ["auto-managed", value] =>
       if value.isEmpty then throw "invalid_managed_target"
       if isKnownProvider value then pure (canonicalizeProvider value, none)
-      else pure ("boat", some value)
+      else pure (defaultProvider, some value)
     | ["auto-managed", provider, size] =>
       if !isKnownProvider provider || size.isEmpty then throw "invalid_managed_target"
       pure (canonicalizeProvider provider, some size)

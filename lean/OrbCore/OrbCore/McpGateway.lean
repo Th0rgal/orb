@@ -328,7 +328,7 @@ def dispatchMcpToolCall
     | none => resolveManagedProvider store.rootDir name
 
   let resolveSpawnSize (spawnArgs : JVal) : IO (Except String String) := do
-    let prov := canonicalizeProvider ((spawnArgs.fieldStr? "provider").getD "boat")
+    let prov := canonicalizeProvider ((spawnArgs.fieldStr? "provider").getD (← defaultManagedProvider))
     let catalog := JVal.arr #[.obj (#[ ("provider", .str prov)] ++ ManagedProvider.catalogFields prov)]
     let catalog ← if managedProvisioningOverride?.isSome then pure catalog
       else observeManagedProviderCatalog store.rootDir catalog
@@ -342,7 +342,7 @@ def dispatchMcpToolCall
         defaultFleet.dailyCapCents defaultFleet.spentTodayCents defaultFleet.maxConcurrent with
       | .ok f => pure f
       | .error _ => pure defaultFleet
-    let prov := canonicalizeProvider ((spawnArgs.fieldStr? "provider").getD "boat")
+    let prov := canonicalizeProvider ((spawnArgs.fieldStr? "provider").getD (← defaultManagedProvider))
     let prefs ← if managedPreferenceUserId.isEmpty then pure #[] else getUserManagedPrefs mc managedPreferenceUserId
     if !isUserManagedProviderEnabled prefs prov then
       return .error ("provider_disabled_for_user", "This cloud provider is disabled in your preferences.")
@@ -830,7 +830,7 @@ def dispatchMcpToolCall
     -- `auto-managed[:size]` rents one machine for this child through the shared spawn
     -- path. Nothing is rented when validation, admission or the snapshot lookup fails.
     let (explicitRn?, rentedMachineId, reused?) ← if !autoManaged then pure (requestedRn?, "", none) else do
-      let (provider, size) ← match parseAutoManagedTarget (requestedRn?.getD "") with
+      let (provider, size) ← match parseAutoManagedTarget (requestedRn?.getD "") (← defaultManagedProvider) with
         | .ok target => pure target
         | .error e => return mcpErr "invalid_arguments" e
       let prefs ← match mc? with
@@ -1268,7 +1268,7 @@ def dispatchMcpToolCall
       | .ok saved => return .ok ((OrbBin.Json.parse (renderManagedMachineItemJson saved)).toOption.getD (.obj #[]))
     -- Arguments that can never be admitted are refused now, not in a receipt.
     let admit : IO (Except String Unit) := do
-      let provider := canonicalizeProvider ((args.fieldStr? "provider").getD "boat")
+      let provider := canonicalizeProvider ((args.fieldStr? "provider").getD (← defaultManagedProvider))
       let prefs ← match mc? with
         | some mc => if managedPreferenceUserId.isEmpty then pure #[] else getUserManagedPrefs mc managedPreferenceUserId
         | none => pure #[]
@@ -1415,7 +1415,7 @@ def dispatchMcpToolCall
     let project ← snapshotProject
     if project.isEmpty then
       return mcpOk (.obj #[("snapshots", .arr #[]), ("note", .str "This mission has no project; snapshots are project-scoped.")])
-    let provider ← match ← snapshotProvider (canonicalizeProvider ((args.fieldStr? "provider").getD "boat")) with
+    let provider ← match ← snapshotProvider (canonicalizeProvider ((args.fieldStr? "provider").getD (← defaultManagedProvider))) with
       | .ok p => pure p
       | .error e => return mcpErr "unavailable" e true
     match ← projectSnapshotEntries store provider project with
@@ -1428,7 +1428,7 @@ def dispatchMcpToolCall
     if mc?.isNone then return mcpErr "unavailable" "managed compute store not configured"
     let requested := (args.fieldStr? "name").orElse (fun _ => args.fieldStr? "snapshot_id")
       |>.orElse (fun _ => args.fieldStr? "id") |>.getD ""
-    let provider ← match ← snapshotProvider (canonicalizeProvider ((args.fieldStr? "provider").getD "boat")) with
+    let provider ← match ← snapshotProvider (canonicalizeProvider ((args.fieldStr? "provider").getD (← defaultManagedProvider))) with
       | .ok p => pure p
       | .error e => return mcpErr "unavailable" e true
     match ← deleteProjectSnapshot store provider (← snapshotProject) requested with
