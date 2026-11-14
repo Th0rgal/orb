@@ -145,8 +145,14 @@ export interface ManagedFleetGroup<N> {
 /** Group managed fleet nodes by provider in canonical order. */
 export function groupManagedNodesByProvider<N extends { id?: string; labels?: readonly string[] | null }>(
   nodes: readonly N[],
+  /** Providers that are configured and enabled: each gets a group even with no machine yet. */
+  enabledProviders: readonly string[] = [],
 ): ManagedFleetGroup<N>[] {
   const buckets = new Map<string, N[]>();
+  for (const p of enabledProviders) {
+    const key = p.trim().toLowerCase();
+    if (key) buckets.set(key, []);
+  }
   for (const n of nodes) {
     if (!isManagedNode(n)) continue;
     const key = (nodeProvider(n) ?? "boat").trim().toLowerCase() || "boat";
@@ -159,12 +165,13 @@ export function groupManagedNodesByProvider<N extends { id?: string; labels?: re
     if (!order.includes(key)) order.push(key);
   }
   return order
-    .filter(key => (buckets.get(key)?.length ?? 0) > 0)
+    .filter(key => buckets.has(key))
     .map(key => ({ provider: key, label: managedProviderFleetLabel(key), nodes: buckets.get(key)! }));
 }
 
 /** Compact summary for a managed fleet provider header: "16 online · 15 active" or "1 online". */
 export function managedFleetGroupSummary(nodes: readonly { status?: string | null; active_jobs?: number | null }[]): string {
+  if (nodes.length === 0) return "No machines";
   const online = nodes.filter(n => n.status === "online").length;
   const active = nodes.reduce((sum, n) => sum + (n.active_jobs ?? 0), 0);
   const head = online === nodes.length ? `${online} online` : `${online}/${nodes.length} online`;

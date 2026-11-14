@@ -226,6 +226,17 @@ describe("ownership and reaping", () => {
     const cax = resp.providers?.find(p => p.provider === "hetzner")?.sizes.find(s => s.size === "cax31");
     expect(cax?.arch).toBe("arm64");
   });
+  it("gives every enabled provider a fleet group, even with no machine yet", () => {
+    const groups = groupManagedNodesByProvider(
+      [{ id: "managed-a", labels: ["managed", "provider=boat"] }],
+      ["boat", "leanci", "colab"],
+    );
+    expect(groups.map(g => g.provider)).toEqual(["boat", "leanci", "colab"]);
+    expect(groups.map(g => g.nodes.length)).toEqual([1, 0, 0]);
+    expect(managedFleetGroupSummary(groups[1].nodes)).toBe("No machines");
+    expect(groupManagedNodesByProvider([], []).length).toBe(0);
+  });
+
   it("groups machines and fleet nodes per provider with compact summaries", () => {
     const providers = [
       { provider: "boat", display_name: "boat.dev" },
