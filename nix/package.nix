@@ -336,13 +336,33 @@ in
             cp -P "$f" "$out/bin/$(basename "$f")"
           else
             install -m 0755 "$f" "$out/bin/"
-            ${lib.optionalString stdenv.hostPlatform.isLinux ''
-          patchelf --add-rpath "${lib.makeLibraryPath [openssl sqlite]}" "$out/bin/$(basename "$f")"
-        ''}
           fi
         done
 
         runHook postInstall
+      '';
+
+      # `libsqlite3` and `libcrypto` are loaded with dlopen(), not DT_NEEDED, so the
+      # fixup phase's `patchelf --shrink-rpath` removes them from DT_RUNPATH when they
+      # are added during install: `orb-locald` then fails every `sqlite3_open`
+      # ("sqlite_open_failed", drafts and UI cache unavailable). Add them after fixup.
+      postFixup = lib.optionalString stdenv.hostPlatform.isLinux ''
+        for f in "$out/bin"/*; do
+          if [ ! -L "$f" ] && [ -f "$f" ]; then
+            patchelf --add-rpath "${lib.makeLibraryPath [openssl sqlite]}" "$f"
+          fi
+        done
+      '';
+
+      # Fail the build if a binary cannot resolve the libraries it dlopen()s.
+      doInstallCheck = stdenv.hostPlatform.isLinux;
+      installCheckPhase = ''
+        for b in orb-locald orb-core; do
+          if [ -f "$out/bin/$b" ]; then
+            patchelf --print-rpath "$out/bin/$b" | grep -q "${lib.getLib sqlite}/lib" \
+              || { echo "$b: sqlite missing from DT_RUNPATH" >&2; exit 1; }
+          fi
+        done
       '';
 
       passthru = {inherit leanBase leanNode leanCore leanLocald;};
