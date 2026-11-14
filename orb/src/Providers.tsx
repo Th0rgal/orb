@@ -15,11 +15,12 @@ import { ErrorNotice } from "./ErrorNotice";
 import { SubscriptionResetDialog } from "./SubscriptionResetDialog";
 import { SettingsCard, SettingsRow } from "./SettingsCard";
 import { Toggle } from "./Toggle";
-import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
+import { For, Show, type JSX, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import * as Ic from "./icons";
 import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
 import {
   api,
+  getApiUrl,
   connectionVersion,
   currentUser,
   getAllProviderUsage,
@@ -49,6 +50,7 @@ import { formatUsdFromCents } from "./missionSharesApi";
 import { nativeInvoke } from "./clientRuns";
 import { listHealth, type AccountHealthSnapshot } from "./routingApi";
 import { applyOrder, moveAccount, orderAccounts } from "./accountOrder";
+import { groupProviderAccounts, isGroupOpen, loadGroupPrefs, saveGroupPrefs, summarizeProviderGroup, toggleGroupPref, type GroupPrefs } from "./providerGroups";
 
 type AuthKind = "oauth" | "api";
 
@@ -251,6 +253,64 @@ const SUBSCRIPTION_META: Record<string, { vendor: string; desc: string }> = {
   "muse-code": { vendor: "Meta", desc: "Muse Code subscription · No paid API fallback" },
 };
 
+const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((t, i) => t === b[i]);
+
+/**
+ * Subscription account rows by provider type: a provider with one account
+ * is its plain row, several collapse under an expandable header that counts
+ * statuses and quota (`summarizeProviderGroup`). Keyed by type, so a usage
+ * refresh updates the header text and leaves the rows mounted.
+ */
+function AccountGroups(p: { accounts: AIProvider[]; usage: Record<string, ProviderUsage>; health?: Record<string, AccountHealthSnapshot>; isOpen: (type: string, attention: boolean) => boolean; onToggle: (type: string, attention: boolean) => void; row: (a: AIProvider) => JSX.Element }) {
+  const groups = createMemo(() => groupProviderAccounts(p.accounts));
+  const types = createMemo(() => groups().map(g => g.type), undefined, { equals: sameList });
+  return (
+    <For each={types()}>
+      {(type) => {
+        const group = () => groups().find(g => g.type === type);
+        const accounts = () => group()?.accounts ?? [];
+        const summary = createMemo(() => summarizeProviderGroup(accounts(), p.usage, p.health));
+        const bodyId = `p-group-${type.replace(/[^a-z0-9_-]/gi, "-")}`;
+        const open = () => p.isOpen(type, summary().attention);
+        const toggle = () => p.onToggle(type, summary().attention);
+        return (
+          <Show when={accounts().length > 1} fallback={<For each={accounts()}>{p.row}</For>}>
+            <div class="p-group">
+              <div class="p-account-header p-group-header">
+                <button type="button" class="s-row p-acc p-acc-btn p-group-head" aria-expanded={open()} aria-controls={open() ? bodyId : undefined} onClick={toggle}
+                  onKeyDown={e => { if ((e.key === "ArrowRight" && !open()) || (e.key === "ArrowLeft" && open())) { e.preventDefault(); toggle(); } }}>
+                  <ProviderLogo type={type} name={group()?.name} />
+                  <div class="s-row-text">
+                    <div class="s-row-title"><span class="p-account-name">{group()?.name}</span></div>
+                    <div class="s-row-desc">
+                      <span class="p-group-count">{summary().count} accounts</span>
+                      <For each={summary().parts}>{part => <><span class="p-dot" aria-hidden="true">·</span><span class={`p-st p-group-st ${part.tone}`}>{part.text}</span></>}</For>
+                    </div>
+                  </div>
+                  <Show when={summary().chips.length > 0}>
+                    <div class="p-usage compact">
+                      <For each={summary().chips}>
+                        {c => (
+                          <span class={`p-usage-chip ${c.level}`} title={c.detail}>
+                            <span class="p-usage-label">{c.label}</span>
+                            <span class="p-usage-pct">{c.available} of {c.total}<span class="p-group-left"> left</span></span>
+                          </span>
+                        )}
+                      </For>
+                    </div>
+                  </Show>
+                  <span class={`chev p-acc-chev ${open() ? "open" : ""}`} aria-hidden="true"><Ic.ChevronRight size={14} /></span>
+                </button>
+              </div>
+              <Show when={open()}><div class="p-group-body" id={bodyId} role="group" aria-label={`${group()?.name} accounts`}><For each={accounts()}>{p.row}</For></div></Show>
+            </div>
+          </Show>
+        );
+      }}
+    </For>
+  );
+}
+
 function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountHealthSnapshot>; onRefresh: () => void; loading?: boolean; loadError?: string | null }) {
   const [usage, setUsage] = createSignal<Record<string, ProviderUsage>>(
     cachePeek<Record<string, ProviderUsage>>("providers:usage") ?? {},
@@ -305,10 +365,14 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
   createEffect(on(() => p.list, () => setOrdered(null), { defer: true }));
   const list = () => ordered() ?? p.list;
   const oauth = () => orderAccounts(list().filter(a => !isKey(a) && a.provider_type !== "google"));
-  /** Provider types in list order: several accounts of one provider collapse into one row. */
-  const oauthTypes = createMemo(() => [...new Set(oauth().map(a => a.provider_type))], undefined, { equals: (a, b) => a.length === b.length && a.every((t, i) => t === b[i]) });
-  const [openGroups, setOpenGroups] = createSignal<Set<string>>(new Set());
-  const toggleGroup = (type: string) => setOpenGroups(prev => { const next = new Set(prev); if (next.has(type)) next.delete(type); else next.add(type); return next; });
+  const [groupPrefs, setGroupPrefs] = createSignal<GroupPrefs>(loadGroupPrefs(getApiUrl()));
+  createEffect(on(connectionVersion, () => setGroupPrefs(loadGroupPrefs(getApiUrl())), { defer: true }));
+  const groupOpen = (key: string, attention: boolean) => isGroupOpen(groupPrefs(), key, attention);
+  const toggleGroup = (key: string, attention: boolean) => {
+    const next = toggleGroupPref(groupPrefs(), key, attention);
+    setGroupPrefs(next);
+    saveGroupPrefs(getApiUrl(), next);
+  };
   const modelConnections = () => list().filter(a => !isKey(a) && a.provider_type === "google");
   const keys = () => orderAccounts(list().filter(isKey));
   const [toggleError, setToggleError] = createSignal<string | null>(null);
@@ -460,29 +524,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
         </div>
         <Show when={isAdminUser() && loginOptions()?.reason}><p class="s-row-desc">{loginOptions()?.reason}</p></Show>
         <div class="s-card">
-          <For each={oauthTypes()}>
-            {(type) => {
-              const accounts = () => oauth().filter(a => a.provider_type === type);
-              const row = (a: AIProvider) => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} rank={rankIn(oauth, a)} usage={usage()[a.id]} sharedOrgs={sharedOrgs()} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={isAdminUser() ? () => setReauth(a) : undefined} onRemove={isAdminUser() ? () => { setRemoveError(null); setRemoving(a); } : undefined} onToggle={enabled => toggle(a, enabled)} onToggleUserPref={enabled => toggleUserPref(a, enabled)} onUseReset={isAdminUser() ? () => setResetting(a) : undefined} onToggleAutoReset={isAdminUser() ? autoReset => toggleAutoReset(a, autoReset) : undefined} />;
-              const open = () => openGroups().has(type);
-              const summary = () => {
-                const st = accounts().map(a => effectiveProviderStatus(a, usage()[a.id], p.health?.[a.id]));
-                const limited = st.filter(s => s === "quota_exhausted" || s === "pool_exhausted").length;
-                const near = st.filter(s => s === "quota_warning").length;
-                return [`${accounts().length} accounts`, limited ? `${limited} limited` : "", near ? `${near} near limit` : ""].filter(Boolean).join(" · ");
-              };
-              return (
-                <Show when={accounts().length > 1} fallback={<For each={accounts()}>{row}</For>}>
-                  <button type="button" class="s-row p-acc-btn p-group-head" aria-expanded={open()} onClick={() => toggleGroup(type)}>
-                    <span class={`chev p-acc-chev ${open() ? "open" : ""}`} aria-hidden="true"><Ic.ChevronRight size={14} /></span>
-                    <span class="s-row-title">{accounts()[0].provider_type_name || type}</span>
-                    <span class="s-row-desc">{summary()}</span>
-                  </button>
-                  <Show when={open()}><div class="p-group-body"><For each={accounts()}>{row}</For></div></Show>
-                </Show>
-              );
-            }}
-          </For>
+          <AccountGroups accounts={oauth()} usage={usage()} health={p.health} isOpen={groupOpen} onToggle={toggleGroup} row={(a: AIProvider) => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} rank={rankIn(oauth, a)} usage={usage()[a.id]} sharedOrgs={sharedOrgs()} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={isAdminUser() ? () => setReauth(a) : undefined} onRemove={isAdminUser() ? () => { setRemoveError(null); setRemoving(a); } : undefined} onToggle={enabled => toggle(a, enabled)} onToggleUserPref={enabled => toggleUserPref(a, enabled)} onUseReset={isAdminUser() ? () => setResetting(a) : undefined} onToggleAutoReset={isAdminUser() ? autoReset => toggleAutoReset(a, autoReset) : undefined} />} />
           <Show when={oauth().length === 0}>
             <div class="s-row"><div class="s-row-desc">No subscription accounts connected.</div></div>
           </Show>
