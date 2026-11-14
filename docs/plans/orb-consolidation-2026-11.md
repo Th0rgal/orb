@@ -643,6 +643,14 @@ Live builds at 23:31Z (health endpoints, 9-character `build` resolved in the rep
 - Lean runners (lean.ci PR #34, head `90ae6f2d6de17d6d235b903f4296ea59c249bf39`): my review of the previous head found that a fenced job at the head of the queue blocked every older-engine poll and caused a claim/release/audit loop, and that the heartbeat overwrote `worker_nodes.metadata`. Both are addressed in the new head (read, not built; worker reports 227 tests pass, four new ones failed before). Remaining points are in the PR comment. **The security hold is unchanged**: no deploy, variable, label, merge or Supabase change.
 - The operator brief "sent to the coordinator at 23:40" did not arrive as a turn; the findings above are taken from the night log.
 
+**Update 00:46 UTC, 14 Nov (coordinator): silent model stream.**
+
+- Operator observation: the coordinator's own turn received no events from Core's model proxy from 23:48:56 to about 00:08 UTC (at least 19 minutes) until the operator stopped the process. Requirement: a proxied stream with no bytes for 20 minutes must end with an error.
+- Read on master `b2c1eab2` (nothing run): the idle limit is 600 s per read (`Proxy.lean` 824), but each failover attempt before the response head gets a fresh 600 s and nothing is sent to the client meanwhile, so the wait grows with the number of targets; a timeout is not distinguishable from a closed connection; any upstream byte, keep-alive lines included, resets the clock, leaving only the 60-minute total limit; no test exercises a real deadline.
+- Which of these happened in the incident is not established. To tell them apart someone with access to agent-core would need the proxy records of the call that started at 23:48:56 UTC (attempt count, bytes relayed).
+- Owner: D2 (`4549d257`, uruk), branch `wip/d-stream-idle-budget`, tests first: one 20-minute budget across attempts, a distinct `upstream_idle_timeout` outcome (504 before the head), wire tests with injected limits. Keep-alive-only streams are recorded as a known limit, not changed.
+- The relay of the lean.ci worker report received at 00:38 UTC describes commit `50771e0f` (13 Nov 16:33 UTC). The PR branch has three later commits; head `90ae6f2d` is the one reviewed above. Nothing in that relay changes the hold. The coordinator deploys nothing on lean.ci.
+
 **Still open, no owner.** Track A / #1708; lean.ci PR #34 fence review
 (interdiff unread, lean runners stay on hold); isolation acceptance and
 managed-lifecycle live validation (need the `dev_operator` grant
