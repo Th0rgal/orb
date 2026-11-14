@@ -164,6 +164,8 @@ paths = [
   "tests/*",
   "plan.md",
   "docs/specs/state-machine-inventory.md",
+  "docs/ui/leanui-parity.md",
+  "docs/ui/crops/*",
   "skills/*",
   "capabilities/*",
   "catalog/*",

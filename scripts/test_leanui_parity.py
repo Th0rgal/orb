@@ -2,14 +2,22 @@
 import contextlib
 import io
 from pathlib import Path
+import re
+import struct
 import tempfile
 import unittest
-import numpy as np
-from PIL import Image
-from scripts import leanui_parity as parity
+try:
+    import numpy as np
+    from PIL import Image
+    from scripts import leanui_parity as parity
+    HAS_IMAGE_DEPS = True
+except ModuleNotFoundError:
+    np = Image = parity = None
+    HAS_IMAGE_DEPS = False
 
 
 class ParityTests(unittest.TestCase):
+    @unittest.skipUnless(HAS_IMAGE_DEPS, 'requires numpy and Pillow')
     def test_metrics_and_strict_tolerance(self):
         a = np.zeros((10, 10, 3), dtype=np.uint8)
         b = a.copy()
@@ -24,11 +32,13 @@ class ParityTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parity.metrics(a, b[:2])
 
+    @unittest.skipUnless(HAS_IMAGE_DEPS, 'requires numpy and Pillow')
     def test_ssim_constant_images(self):
         a = np.full((9, 9, 3), 20, dtype=np.uint8)
         b = np.full_like(a, 40)
         self.assertAlmostEqual(parity.ssim(a, b), (2*20*40+6.5025)/(20**2+40**2+6.5025))
 
+    @unittest.skipUnless(HAS_IMAGE_DEPS, 'requires numpy and Pillow')
     def test_end_to_end(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -49,6 +59,7 @@ class ParityTests(unittest.TestCase):
             (native/'01_control_empty_dark_1x.png').unlink()
             self.assertTrue(parity.compare(ref, native, require=1)['errors'])
 
+    @unittest.skipUnless(HAS_IMAGE_DEPS, 'requires numpy and Pillow')
     def test_unreadable_images_and_dimensions(self):
         with tempfile.TemporaryDirectory() as tmp:
             ref, native = Path(tmp)/'ref', Path(tmp)/'native'
@@ -65,20 +76,25 @@ class ParityTests(unittest.TestCase):
 
     def test_documented_crops_budget(self):
         root = Path(__file__).resolve().parents[1]
-        doc = (root/'docs/ui/leanui-parity.md').read_text()
+        doc_path = root/'docs/ui/leanui-parity.md'
+        doc = doc_path.read_text()
         self.assertEqual(doc.count('<!-- parity:begin -->'), 1)
         self.assertEqual(doc.count('<!-- parity:end -->'), 1)
-        declarations = parity.re.findall(r'<!-- parity:crop ([\w]+) (\d+) (\d+) (\d+) (\d+) -->', doc)
+        declarations = re.findall(r'<!-- parity:crop ([\w]+) (\d+) (\d+) (\d+) (\d+) -->', doc)
         self.assertEqual(len(declarations), 36)
+        name_re = re.compile(r'(.+)_(dark|light)_([12])x$')
         for stem, _, _, width, height in declarations:
-            scale = int(parity.NAME.fullmatch(stem)[3])
+            scale = int(name_re.fullmatch(stem)[3])
             for renderer in ('ref', 'leanui'):
-                path = root/'docs/ui/crops'/f'{stem}_{renderer}_crop.png'
+                path = doc_path.parent/'crops'/f'{stem}_{renderer}_crop.png'
                 with self.subTest(path=path.name):
                     self.assertLessEqual(path.stat().st_size, 5*1024)
-                    with Image.open(path) as im:
-                        self.assertEqual(im.size, (int(width)*scale, int(height)*scale))
+                    data = path.read_bytes()
+                    self.assertEqual(data[:8], b'\x89PNG\r\n\x1a\n')
+                    self.assertEqual(data[12:16], b'IHDR')
+                    self.assertEqual(struct.unpack('>II', data[16:24]), (int(width)*scale, int(height)*scale))
 
+    @unittest.skipUnless(HAS_IMAGE_DEPS, 'requires numpy and Pillow')
     def test_bad_markers_and_empty_input(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)/'doc.md'
