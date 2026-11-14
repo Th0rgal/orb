@@ -201,6 +201,15 @@ def _load_unit_env_files(unit_name, env_file=None):
     return values
 
 
+def _is_zombie(pid):
+    """True when /proc/<pid>/stat reports state Z (exited, not yet reaped)."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return True  # already gone
+    return stat[stat.rfind(")") + 2:].startswith("Z")
+
+
 def default_runtime_busy_probe(unit_name="sandboxed-node", env_file=None):
     """Count live transient scopes, child processes, or in-memory leases/jobs."""
     busy = 0
@@ -225,7 +234,9 @@ def default_runtime_busy_probe(unit_name="sandboxed-node", env_file=None):
         proc_env = _read_proc_environ(main_pid)
         child_res = subprocess.run(["pgrep", "-P", main_pid], capture_output=True, text=True, check=False)
         if child_res.returncode == 0 and child_res.stdout.strip():
-            busy += len([ln for ln in child_res.stdout.splitlines() if ln.strip()])
+            # A defunct (zombie) child has finished; it only waits to be reaped and would
+            # otherwise hold the drain open until the worker restarts.
+            busy += len([ln for ln in child_res.stdout.split() if ln.strip() and not _is_zombie(ln.strip())])
 
     active_res = subprocess.run(["systemctl", "is-active", "--quiet", unit_name], check=False)
     env_vars = _load_unit_env_files(unit_name, env_file=env_file)
@@ -670,6 +681,7 @@ def _remote_worker_prelude():
         inspect.getsource(_normalize_service_unit_name),
         inspect.getsource(_discover_unit_env_files),
         inspect.getsource(_load_unit_env_files),
+        inspect.getsource(_is_zombie),
         inspect.getsource(default_runtime_busy_probe),
         inspect.getsource(_discover_live_work_dir),
         inspect.getsource(_discover_sibling_units),
