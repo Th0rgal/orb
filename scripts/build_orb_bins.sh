@@ -4,7 +4,7 @@
 # `target/debug` and `target/release` directories.
 #
 # Usage:
-#   ./scripts/build_orb_bins.sh [--ensure-lean] [--with-tests] [--out-dir <dir>]... [--only <bin>]...
+#   ./scripts/build_orb_bins.sh [--target-arch <native|aarch64|x86_64>] [--no-telemetry] [--ensure-lean] [--with-tests] [--out-dir <dir>]... [--only <bin>]...
 set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -12,9 +12,19 @@ ENSURE_LEAN=0
 WITH_TESTS=0
 OUT_DIRS=()
 ONLY_BINS=()
+TARGET_ARCH="${ORB_TARGET_ARCH-native}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --target-arch)
+      [[ $# -ge 2 && "$2" != --* ]] || { echo "error: --target-arch requires an architecture" >&2; exit 2; }
+      TARGET_ARCH="$2"
+      shift 2
+      ;;
+    --no-telemetry)
+      # turbo-lean telemetry is already disabled for every build.
+      shift
+      ;;
     --ensure-lean)
       ENSURE_LEAN=1
       shift
@@ -39,6 +49,45 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# Lean's runtime, package C shims and cached objects must all match the host.
+# A C compiler with an aarch64 backend alone is not a Lean cross toolchain.
+normalize_arch() {
+  case "$1" in
+    aarch64|arm64) echo aarch64 ;;
+    x86_64|amd64) echo x86_64 ;;
+    *) echo "error: unsupported architecture: $1 (use native, aarch64 or x86_64)" >&2; return 2 ;;
+  esac
+}
+HOST_ARCH="$(normalize_arch "$(uname -m)")"
+if [[ "$TARGET_ARCH" == native ]]; then
+  TARGET_ARCH="$HOST_ARCH"
+else
+  TARGET_ARCH="$(normalize_arch "$TARGET_ARCH")"
+fi
+if [[ "$TARGET_ARCH" != "$HOST_ARCH" ]]; then
+  echo "error: cannot build $TARGET_ARCH on $HOST_ARCH: cross compilation is unsupported; run this script natively on a host with architecture $TARGET_ARCH (dgx-spark for aarch64 Linux). No host binaries were built or staged." >&2
+  exit 2
+fi
+export ORB_TARGET_ARCH="$TARGET_ARCH"
+echo "Building for $(uname -s)/$TARGET_ARCH (native toolchain)" >&2
+
+# Check actual artifacts as well as the requested host, including cached builds
+# and LEAN_CC overrides. Reject foreign binaries before copying them to output.
+verify_binary_arch() {
+  [[ "$(uname -s)" == Linux ]] || return 0
+  local path="$1" expected header
+  case "$TARGET_ARCH" in
+    aarch64) expected="b700" ;;
+    x86_64)  expected="3e00" ;;
+    *) echo "error: $path: unsupported Linux target arch $TARGET_ARCH" >&2; return 1 ;;
+  esac
+  header="$(od -An -tx1 -N20 "$path" 2>/dev/null | tr -d ' \t\n')"
+  if [[ ${#header} -ne 40 || "${header:0:12}" != "7f454c460201" || "${header:36:4}" != "$expected" ]]; then
+    echo "error: $path: expected 64-bit little-endian Linux $TARGET_ARCH ELF; refusing to stage" >&2
+    return 1
+  fi
+}
 
 if [[ -z "${LEAN_CC:-}" && ( -n "${NIX_CC:-}" || -e /etc/NIXOS ) ]]; then
   if command -v clang >/dev/null 2>&1; then
@@ -94,6 +143,10 @@ if ! command -v lake >/dev/null 2>&1; then
       if [[ "$os_name" == "Linux" && "$arch_name" == "x86_64" ]]; then
         lean_url="https://github.com/leanprover/lean4/releases/download/v4.35.0/lean-4.35.0-linux.tar.zst"
         lean_sha256="7289597a44543246c9227b8cae501767e095ce17f6d448b95fc4a8dc97268f6d"
+        lean_ext=".tar.zst"
+      elif [[ "$os_name" == "Linux" && "$HOST_ARCH" == "aarch64" ]]; then
+        lean_url="https://github.com/leanprover/lean4/releases/download/v4.35.0/lean-4.35.0-linux_aarch64.tar.zst"
+        lean_sha256="c8f0f8a3920e839718b1343e6781fd80a3e9b1024fbcd7078eb30f54e806b028"
         lean_ext=".tar.zst"
       elif [[ "$os_name" == "Darwin" && "$arch_name" == "arm64" ]]; then
         lean_url="https://github.com/leanprover/lean4/releases/download/v4.35.0/lean-4.35.0-darwin_aarch64.tar.zst"
@@ -286,7 +339,7 @@ if [[ ${#ORB_DESKTOP_TARGETS[@]} -gt 0 ]]; then
       fi
     fi
     RAYON_NUM_THREADS="${ORB_TURBO_LEAN_JOBS:-2}" TURBO_LEAN_EMIT_C=1 \
-      turbo-lean --max-memory-mb "${ORB_TURBO_LEAN_MAX_MB:-6144}" build "${ORB_DESKTOP_TARGETS[@]}"
+      turbo-lean --no-telemetry --max-memory-mb "${ORB_TURBO_LEAN_MAX_MB:-6144}" build "${ORB_DESKTOP_TARGETS[@]}"
   )
 fi
 
@@ -318,6 +371,7 @@ for out_dir in "${OUT_DIRS[@]}"; do
       echo "error: expected built binary missing at $src" >&2
       exit 1
     fi
+    verify_binary_arch "$src"
     elab_syms="$(nm -u "$src" 2>/dev/null | grep -c lean_elab || true)"
     if [[ "$elab_syms" -ne 0 ]]; then
       echo "error: production binary $src links lean_elab ($elab_syms symbols)" >&2

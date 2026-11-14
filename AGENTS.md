@@ -185,7 +185,10 @@ missions.
 
 The NixOS laptop (`m2air`, aarch64, 16 GB) is too small for a cold Lean build of Orb. `dgx-spark`
 (aarch64, 20 cores, 119 GB) is the same architecture and needs no emulation; a Boat or lean.ci VM is
-x86_64 and cannot produce these binaries. Build there instead of locally.
+x86_64; the build script rejects cross-architecture requests. Use the native
+aarch64 path documented in [docs/AARCH64_BUILDS.md](docs/AARCH64_BUILDS.md),
+including `--target-arch aarch64`, Lean bootstrap and first-time orb-privd install.
+Build on spark instead of locally.
 
 - **Reach it over the personal mesh:** `ssh spark` (aliases `dgx-spark`, `spark-de79`; user `th0rgal`).
   The SSH config generated from `nixos-config/inventory/fleet.nix` supplies the address and the
