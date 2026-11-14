@@ -4,7 +4,7 @@ import OrbCore.ProviderUsageAndLogin
 
 namespace OrbCore.TenantIsolationTests
 
-open OrbCore.Control OrbCore.Store OrbCore.Managed OrbCore.ProviderUsageAndLogin OrbCore.LegacyHydrate OrbBin.Json LeanSys.Http LeanSys.Posix
+open OrbCore.Control OrbCore.MemoryAndCloud OrbCore.Store OrbCore.Managed OrbCore.ProviderUsageAndLogin OrbCore.LegacyHydrate OrbBin.Json LeanSys.Http LeanSys.Posix
 
 private def check (condition : Bool) (label : String) : IO Unit := do
   unless condition do throw (IO.userError s!"tenant isolation: {label}")
@@ -300,6 +300,25 @@ def run (root : String) : IO Unit := do
     let sharedMemory ← call sharedToken "memory_get_knowledge_tree"
     check ((sharedMemory.fieldOrNull "error").fieldStr? "message" == some "Administrator required")
       "shared admin mission does not grant its owner's personal memory"
+    -- A missionless coordinator session is its stored issuer: the administrator's is admin,
+    -- a member's is not, and a token with no stored row stays anonymous.
+    let missionless (sid : String) : String :=
+      let claims : McpSessionClaims :=
+        { sessionId := sid, missionId := "", role := "coordinator", project := "",
+          isExternal := false, expiresAt := 9999999999, hardExpiresAt := 9999999999 }
+      mintScopedMcpToken st.cfg.jwtSecret claims
+    sql store.projectsDb "INSERT INTO mcp_sessions_v1(id,owner,mission_id,expires_at,revoked,subject_kind) VALUES('missionless-admin','admin','',9999999999,0,'mission');"
+    sql store.projectsDb "INSERT INTO mcp_sessions_v1(id,owner,mission_id,expires_at,revoked,subject_kind) VALUES('missionless-member','member','',9999999999,0,'mission');"
+    let adminOk ← call (missionless "missionless-admin") "list_cloud_accounts"
+    let memberDenied ← call (missionless "missionless-member") "list_cloud_accounts"
+    let rowlessDenied ← call (missionless "missionless-rowless") "list_cloud_accounts"
+    check ((adminOk.fieldOrNull "error").fieldStr? "message" != some "Administrator required")
+      s!"the administrator's missionless session keeps owner tools: {renderCompact adminOk}"
+    check ((memberDenied.fieldOrNull "error").fieldStr? "message" == some "Administrator required")
+      "a member's missionless session gets no owner tools"
+    check ((rowlessDenied.fieldOrNull "error").fieldStr? "message" == some "Administrator required")
+      "a missionless token with no stored session stays anonymous"
+    sql store.projectsDb "DELETE FROM mcp_sessions_v1 WHERE id IN ('missionless-admin','missionless-member');"
     -- Rows the owner stored under a legacy token subject move to the administrator once that
     -- token is verified; a subject that names a real user is never adopted.
     sql store.projectsDb "INSERT INTO mcp_sessions_v1(id,owner,mission_id,expires_at,revoked,subject_kind) VALUES('legacy-alias-session','legacy-prod','',9999999999,0,'external_session');"

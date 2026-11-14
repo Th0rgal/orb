@@ -271,6 +271,14 @@ def dispatchMcpToolCall
   -- session. The persisted issuer remains authoritative for every tool/role.
   if !claims.isExternal && !directOperator && !claims.missionId.isEmpty then
     if let some uid ← scopedCallerUserId? store claims nowEpochSec then callerUserId := uid
+  -- A missionless coordinator session (an owner's local harness) has no mission to resolve:
+  -- its identity is the live stored issuer. A rowless or revoked token stays anonymous.
+  if !claims.isExternal && !directOperator && claims.missionId.isEmpty then
+    if let .ok rows ← execParamQuery store.projectsDb
+        ("SELECT owner FROM mcp_sessions_v1 WHERE id=?1 AND revoked=0 AND COALESCE(owner,'')<>'' " ++
+         "AND COALESCE(mission_id,'')='' AND (hard_expires_at=0 OR hard_expires_at>?2);")
+        #[claims.sessionId, toString nowEpochSec] then
+      if rows.size > 1 then callerUserId := cell rows[1]! 0
 
   -- Operator authority comes from who minted the session, never from the role label
   -- alone: `/api/mcp/session` requires a Core-authenticated user and records it. An
