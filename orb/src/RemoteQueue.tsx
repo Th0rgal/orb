@@ -1,5 +1,5 @@
 import { pollWhileVisible } from "./poll";
-import { swallow } from "./log";
+import { log, swallow } from "./log";
 import { For, Show, batch, createEffect, createMemo, createSignal, onCleanup, untrack } from "solid-js";
 import { ErrorToast } from "./toast";
 import { isBtwWrappedPrompt, messagePresentation, replaceMessageUserText } from "./messagePresentation";
@@ -64,6 +64,8 @@ export function RemoteQueue(p: {
   let revision = 0, destroyed = false, inboxClock = 0, serverQueueRev = 1;
   let hasExplicitServerRev = false;
   const deletedIds = new Set<string>();
+  /** Inbox poll clock when each transcript receipt was first seen. */
+  const confirmedSeenAt = new Map<string, number>();
   const [liveEdits, setLiveEdits] = createSignal<ReadonlyMap<string, { content: string; at: number; epoch: number }>>(new Map());
   const [settledPollEpoch, setSettledPollEpoch] = createSignal(0);
   onCleanup(() => { destroyed = true; });
@@ -101,8 +103,16 @@ export function RemoteQueue(p: {
       if (current) known.set(id, { ...current, content: edit.content });
       else known.set(id, { id, mission_id: p.mission, content: edit.content, source: "remote-queue" });
     }
+    // A transcript receipt (`confirmed`) bridges only the gap until Core's
+    // live queue answers. Once a poll that started after the receipt was seen
+    // has settled without the row, Core no longer queues it (delivered,
+    // consumed or cancelled): a stale receipt never resurrects a card.
+    const settled = settledPollEpoch();
     for (const row of p.confirmed ?? []) {
       if (deletedIds.has(row.id) || isRowRetiredByTurn(row.id, sent) || known.has(row.id)) continue;
+      let seenAt = confirmedSeenAt.get(row.id);
+      if (seenAt === undefined) { seenAt = inboxClock; confirmedSeenAt.set(row.id, seenAt); }
+      if (settled > seenAt) continue;
       known.set(row.id, row);
     }
     return [...known.values()];
@@ -146,6 +156,7 @@ export function RemoteQueue(p: {
     const mission = p.mission, version = connectionVersion();
     const scopeKey = `${version}:${mission}`;
     deletedIds.clear();
+    confirmedSeenAt.clear();
     inboxClock = 0;
     serverQueueRev = 1;
     hasExplicitServerRev = false;
@@ -223,6 +234,13 @@ export function RemoteQueue(p: {
     const status404 = e instanceof ApiError ? e.status === 404 : /\b404\b/.test(detail);
     return status404 && /message not in queue/i.test(detail);
   };
+  /** Core already delivered (or is delivering) this message: the card is stale. */
+  const isQueueMessageConsumed = (e: unknown): boolean => {
+    const detail = e instanceof ApiError ? e.detail : (e instanceof Error ? e.message : String(e));
+    const status409 = e instanceof ApiError ? e.status === 409 : /\b409\b/.test(detail);
+    // `queue_admit:2:5` / `:3:5` is the pre-`already_delivered` Core answer for the same state.
+    return status409 && /already_delivered|already_claimed|queue_admit:[123]:5/.test(detail);
+  };
   const cancel = async (id: string) => {
     setError("");
     const version = connectionVersion(), mission = p.mission;
@@ -248,7 +266,13 @@ export function RemoteQueue(p: {
         }
         return;
       }
-      const msg = e instanceof Error ? e.message : String(e);
+      if (isQueueMessageConsumed(e)) {
+        // Already sent to the agent: drop the card silently (the transcript owns it now).
+        if (!destroyed && version === connectionVersion() && mission === p.mission) p.onRows(rows().map(row => row.id));
+        return;
+      }
+      const msg = "Couldn't remove the queued message. Try again.";
+      log.warn("remoteQueue.cancel", e instanceof Error ? e.message : String(e), { mission });
       // Roll back optimistic delete if the network request failed
       deletedIds.delete(id);
       if (!destroyed && version === connectionVersion() && mission === p.mission) {

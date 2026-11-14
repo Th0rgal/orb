@@ -589,12 +589,12 @@ private def runR3cdQueueAndContinuationTests
   let .ok (sEditClaimed, _) ← sendTestHttp appSt validJwt "PATCH" "/api/control/queue/q-r3c-1" "{\"content\":\"late edit\"}" nowSec
     | return (← failWith "PATCH claimed transport")
   if sEditClaimed != 409 then return (← failWith s!"PATCH claimed expected 409, got {sEditClaimed}")
-  let .ok (sDelClaimed, _) ← sendTestHttp appSt validJwt "DELETE" "/api/control/queue/q-r3c-1" "" nowSec
+  let .ok (sDelClaimed, bDelClaimed) ← sendTestHttp appSt validJwt "DELETE" "/api/control/queue/q-r3c-1" "" nowSec
     | return (← failWith "DELETE claimed transport")
   let claimedAfterDelRows ← execParamQuery store.missionsDb
     "SELECT state,phase,json_extract(payload,'$.message.content') FROM remote_message_queue WHERE user_id='core' AND message_id='q-r3c-1';" #[]
   let claimedAfterDel := match claimedAfterDelRows with | .ok rs => rs[1]?.getD #[] | .error _ => #[]
-  if sDelClaimed != 409 || claimedAfterDel != #["claimed", "1", "first step"] then
+  if sDelClaimed != 409 || bDelClaimed != "{\"error\":\"already_claimed\"}" || claimedAfterDel != #["claimed", "1", "first step"] then
     return (← failWith s!"DELETE claimed expected 409 with row unchanged, got {sDelClaimed} {repr claimedAfterDel}")
 
   -- Confirm delivered (`op=1`, `delivery_seq=77`)
@@ -613,14 +613,15 @@ private def runR3cdQueueAndContinuationTests
   let .ok (sCancelDeliv, _) ← sendTestHttp appSt validJwt "POST" "/api/control/queue/q-r3c-1/step"
     s!"\{\"op\":5,\"run_generation\":2,\"node_boot_epoch\":{store.bootEpoch}}" nowSec
     | return (← failWith "cancel delivered transport")
-  let .ok (sDelDeliv, _) ← sendTestHttp appSt validJwt "DELETE" "/api/control/queue/q-r3c-1" "" nowSec
+  let .ok (sDelDeliv, bDelDeliv) ← sendTestHttp appSt validJwt "DELETE" "/api/control/queue/q-r3c-1" "" nowSec
     | return (← failWith "DELETE delivered transport")
   let delivAfterDelRows ← execParamQuery store.missionsDb
     "SELECT state,phase,delivered_seq,json_extract(payload,'$.message.content') FROM remote_message_queue WHERE user_id='core' AND message_id='q-r3c-1';" #[]
   let delivAfterDel := match delivAfterDelRows with | .ok rs => rs[1]?.getD #[] | .error _ => #[]
   if sReplayDeliv != 409 || sEditDeliv != 409 || sCancelDeliv != 409 || sDelDeliv != 409 ||
+     bDelDeliv != "{\"error\":\"already_delivered\"}" ||
      delivAfterDel != #["delivered", "2", "77", "first step"] then
-    return (← failWith s!"delivered queue fence violated: replay={sReplayDeliv} edit={sEditDeliv} cancel={sCancelDeliv} delete={sDelDeliv} row={repr delivAfterDel}")
+    return (← failWith s!"delivered queue fence violated: replay={sReplayDeliv} edit={sEditDeliv} cancel={sCancelDeliv} delete={sDelDeliv} {bDelDeliv} row={repr delivAfterDel}")
 
   -- `DELETE /api/control/queue/:id` on a waiting, unclaimed row cancels it cleanly (`200`),
   -- removes it from `GET /api/control/queue?mission_id=...` and the `popNextQueuedFollowup?` query filter,

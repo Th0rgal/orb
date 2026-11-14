@@ -71,6 +71,19 @@ reconciliation:
   as not delivered (`Not delivered`) and Send uses delete-then-send (sending
   only after `DELETE /api/control/queue/:id` returns `200` or `404` with
   `"message not in queue"`).
+- A queued card comes only from Core's live queue (`GET /api/control/queue`) or
+  from this client's own not-yet-acknowledged send. A transcript receipt
+  (`user_message` with `queued: true`) only bridges the gap until a queue poll
+  that started after the receipt was seen settles; if that poll does not list
+  the id, the card is gone (`RemoteQueue.tsx`, `confirmedSeenAt`). Core's
+  delivered `user_message` for a queue follow-up carries the queue message `id`,
+  so the receipt also retires by id.
+- `DELETE /api/control/queue/:id` answers `200` (cancelled), `404 "message not in
+  queue"` (unknown or already cancelled), `409 {"error":"already_claimed"}` (being
+  sent) or `409 {"error":"already_delivered"}` (delivered / crash tombstone). Clients
+  drop the card silently on `already_*` and never show a raw JSON body.
+- A terminal mission shows no pending-turn row ("Starting <Harness> on <node>…")
+  unless this client has its own send in flight (`pendingTurnAllowed`).
 
 Required replay (`shared/orb-spec/fixtures/mission-terminal-reconcile.json`):
 the 734c3bb7 order from Core-emitted fields (`status`, `terminal_reason`,

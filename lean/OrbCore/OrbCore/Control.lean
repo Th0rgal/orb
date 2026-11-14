@@ -5493,7 +5493,13 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       match ← stepQueueItem st.store "core" messageId op runGen bootEp delivSeq s!"{nowEpochSec}" uncertain opConfirm nextContent with
       | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       | .ok .notFound => return .ok (mkJson 404 "{\"error\":\"message not in queue\"}")
-      | .ok (.rejected reason) => return .ok (mkJson 409 s!"\{\"error\":{jsonEscape reason}}")
+      -- Claimed rows are mid-send and delivered/tombstoned rows are consumed: answer a stable,
+      -- client-understood code (clients drop the card), never the raw `queue_admit:x:y` reason.
+      | .ok (.rejected "queue_admit:1:5") =>
+        return .ok (mkJson 409 "{\"error\":\"already_claimed\"}")
+      | .ok (.rejected "queue_admit:2:5") | .ok (.rejected "queue_admit:3:5") =>
+        return .ok (mkJson 409 "{\"error\":\"already_delivered\"}")
+      | .ok (.rejected _) => return .ok (mkJson 409 "{\"error\":\"not_cancellable\"}")
       | .ok (.ok rec) =>
         return .ok (mkJson 200 s!"\{\"ok\":true,\"id\":{jsonEscape rec.messageId},\"mission_id\":{jsonEscape rec.missionId},\"phase\":{rec.phase.toNat},\"phase_name\":{jsonEscape (queuePhaseName rec.phase)},\"delivered_seq\":{rec.deliveredSeq}}")
 

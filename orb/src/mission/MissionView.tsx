@@ -1,6 +1,6 @@
 import { missionAssignedNode, missionNode, nodeLabel } from "../machines/nodes";
 import { followProjectFolder, seedDelivered, seededPrompt } from "../localFolder";
-import { canForceSlot, executionPhaseLabel, isArchived, isFailedStatus, isLive, isReopenable, isRunning, isSettingsIdle, isWorking, remoteJobEnded } from "../missionStatus";
+import { canForceSlot, executionPhaseLabel, pendingTurnAllowed, isArchived, isFailedStatus, isLive, isReopenable, isRunning, isSettingsIdle, isWorking, remoteJobEnded } from "../missionStatus";
 import { errorText, log, swallow } from "../log";
 import { flushClientLink } from "../clientLink";
 import {CodexSpeedPicker, missionSpeed} from '../CodexSpeedPicker';
@@ -1189,8 +1189,11 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
   });
   const working = () => {
     if(sendError())return false;
-    if(queueHandoverState())return true;
     if(!p.id)return !p.launchError;
+    // A terminal mission shows no pending turn unless this client is sending.
+    const ownSend = Boolean(handoff()) || sendingImmediate() || localRunActive(p.id) || optimisticList().some(item => !item.waiting && !item.failed) || localQueueActive();
+    if(!pendingTurnAllowed(mission()?.status, { sendInFlight: ownSend }))return false;
+    if(queueHandoverState())return true;
     if(sendingImmediate()&&!handoff())return false;
     if(clientPlaced() && !localRunActive(p.id) && (localFailure(p.id) || queuedLocalMessages(p.id).some(row=>row.interrupted)))return false;
     return busy() || optimisticList().some(item => !item.waiting && !item.failed) || queuedLocalMessages(p.id).some(row=>!row.error && (!row.waiting || row.state==='dispatching' || row.state==='accepted'));

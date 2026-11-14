@@ -1755,13 +1755,18 @@ fun OrbConversationPage(
                 core.request("/api/control/queue/${core.encodeComponent(queueId)}", method = "DELETE")
                 refreshFollowUps(id)
             } catch (e: OrbError) {
-                if (e.status != 404) {
+                // 404: already removed; 409 already_delivered/claimed: Core already sent it.
+                // Either way the row is gone from the queue: refresh, never show the raw body.
+                val consumed = e.status == 409 && Regex("already_delivered|already_claimed|queue_admit:[123]:5").containsMatchIn(e.body ?: e.message)
+                if (e.status == 404 || consumed) {
+                    refreshFollowUps(id)
+                } else {
                     followUps = followUps.unhide(queueId)
-                    errorMessage = e.message
+                    errorMessage = "Couldn't remove the queued message. Try again."
                 }
             } catch (e: Throwable) {
                 followUps = followUps.unhide(queueId)
-                errorMessage = e.message
+                errorMessage = "Couldn't remove the queued message. Try again."
             }
         }
     }

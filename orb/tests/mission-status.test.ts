@@ -56,3 +56,15 @@ it("canForceSlot only offers Run now while waiting on a node slot or Core parall
   expect(canForceSlot({ status: "active", remote_job: { phase: "observed", node_state: "running", node_id: "nippur" } })).toBe(false);
   expect(canForceSlot({ status: "active", remote_job: { phase: "finished", node_state: "queued", finished_at: "2026-10-31T00:00:00Z" } })).toBe(false);
 });
+
+import { pendingTurnAllowed } from "../src/missionStatus";
+// Mission 734c3bb7: completed with an old queue receipt still around; "Starting
+// OpenCode on ashur… 27 h 50" must not show for a terminal mission.
+it("a terminal mission has no pending turn unless this client is sending", () => {
+  for (const status of ["completed", "failed", "cancelled", "interrupted"]) {
+    expect(pendingTurnAllowed(status, { sendInFlight: false })).toBe(false);
+    expect(pendingTurnAllowed(status, { sendInFlight: true })).toBe(true);
+  }
+  expect(pendingTurnAllowed("running", { sendInFlight: false })).toBe(true);
+  expect(pendingTurnAllowed("pending", { sendInFlight: false })).toBe(true);
+});
