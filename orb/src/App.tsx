@@ -1132,6 +1132,16 @@ export default function App() {
         return open(`ms:${id}`);
     }
   };
+  // One owner for the sidebar "+" actions: the HTML rows and the native chrome rows both call these.
+  const newAgentIn = (slug: string, path?: string) => {
+    setNewFolder(path ? { project: slug, path } : null);
+    setNewProject(slug);
+    open(null);
+  };
+  const startNewProject = (anchor?: HTMLElement) => {
+    setProjectCreationAnchor(anchor);
+    setNewProjectDraft(true);
+  };
   onMount(() => {
     const disposeHandlers = installNativeChromeWindowHandlers({
       open: (target) => open(target),
@@ -1143,6 +1153,8 @@ export default function App() {
         setNewFolder(null);
         setNewProject(slug);
       },
+      newAgent: newAgentIn,
+      newProject: () => startNewProject(),
       getScope: historyScope,
       missionAction: nativeMissionAction,
     });
@@ -1732,15 +1744,8 @@ export default function App() {
       }}
       open={open}
       onNewCloudAgent={(project, path) => { setNewProject(project); setNewFolder(path ? {project, path} : null); open("cloud-agent"); }}
-      onNewAgent={(slug, path) => {
-        setNewFolder(path ? { project: slug, path } : null);
-        setNewProject(slug);
-        open(null);
-      }}
-      onNewProject={anchor => {
-        setProjectCreationAnchor(anchor);
-        setNewProjectDraft(true);
-      }}
+      onNewAgent={newAgentIn}
+      onNewProject={startNewProject}
     />
   );
 

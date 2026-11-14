@@ -12,6 +12,7 @@
  * - Sync canonical sidebar inputs (`native_chrome_sync_state`) fenced by a monotonic `revision`.
  * - Expose `window.__ORB_SELECT_MISSION__(id)` (`~0.2 ms` `keepAlivePool` slot switch),
  *   `window.__ORB_NATIVE_NAV__(target)`, and `window.__ORB_TOGGLE_NATIVE_SIDEBAR__(open?)`.
+ *   The native "+" buttons call `__ORB_NATIVE_NAV__("new-project" | "new-agent:<slug>[:<path>]")`.
  */
 
 import type { Mission, ProjectSummary } from "./api";
@@ -176,6 +177,10 @@ export type NativeChromeBridgeHandlers = {
   getSidebarOpen: () => boolean;
   setSidebarOpen: (open: boolean) => void;
   selectProject?: (slug: string) => void;
+  /** Native "+" on a project or folder row (`new-agent:<slug>[:<folder path>]`): the HTML row's "New agent". */
+  newAgent?: (slug: string, path: string) => void;
+  /** Native "+" on the Projects section row (`new-project`): the HTML header's "New project". */
+  newProject?: () => void;
   getScope?: () => string;
   toggleFolderExpand?: (rowId: string) => void;
   /** Native sidebar context menu: `rename` (arg = new title), `move` (arg = project slug),
@@ -238,6 +243,18 @@ export function installNativeChromeWindowHandlers(
     }
     if (clean === "history-forward") {
       handlers.navHistory?.(1);
+      return true;
+    }
+    if (clean === "new-project") {
+      handlers.newProject?.();
+      return Boolean(handlers.newProject);
+    }
+    if (clean.startsWith("new-agent:")) {
+      // Slugs never contain ":", so the first one separates the slug from the folder path.
+      const rest = clean.slice("new-agent:".length), cut = rest.indexOf(":");
+      const slug = (cut < 0 ? rest : rest.slice(0, cut)).trim(), path = cut < 0 ? "" : rest.slice(cut + 1).trim();
+      if (!slug || !handlers.newAgent) return false;
+      handlers.newAgent(slug, path);
       return true;
     }
     if (clean.startsWith("m:")) return handlers.open(clean);

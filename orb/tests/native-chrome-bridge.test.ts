@@ -121,6 +121,33 @@ describe("nativeChromeBridge", () => {
     expect((args.projects as Array<{ name: string; color?: string; folders?: string[]; files?: string[] }>)[0]?.files).toEqual(["audits/report.md", "README.md"]);
   });
 
+  it("routes the native sidebar \"+\" buttons to New project and New agent in a project or folder", () => {
+    const opened: Array<string | null> = [];
+    const agents: Array<[string, string]> = [];
+    let newProjects = 0;
+    const fakeWin = { dispatchEvent: () => true } as unknown as Window & { __ORB_NATIVE_NAV__?: (t: string) => boolean };
+    const base = { open: (id: string | null) => { opened.push(id); return true; }, leaveSettings: () => {}, getSidebarOpen: () => true, setSidebarOpen: () => {} };
+    const cleanup = installNativeChromeWindowHandlers(
+      { ...base, newAgent: (slug, path) => agents.push([slug, path]), newProject: () => { newProjects += 1; } },
+      fakeWin,
+    );
+    expect(fakeWin.__ORB_NATIVE_NAV__?.("new-project")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_NAV__?.("new-agent:orb")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_NAV__?.("new-agent:orb:audits/2026: q4")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_NAV__?.("new-agent:")).toBe(false);
+    expect(newProjects).toBe(1);
+    expect(agents).toEqual([["orb", ""], ["orb", "audits/2026: q4"]]);
+    // The handlers own navigation; the bridge must not also open a page named after the target.
+    expect(opened).toEqual([]);
+    cleanup();
+    // A WebView that predates the handlers reports failure instead of navigating somewhere else.
+    const cleanupOld = installNativeChromeWindowHandlers(base, fakeWin);
+    expect(fakeWin.__ORB_NATIVE_NAV__?.("new-project")).toBe(false);
+    expect(fakeWin.__ORB_NATIVE_NAV__?.("new-agent:orb")).toBe(false);
+    expect(opened).toEqual([]);
+    cleanupOld();
+  });
+
   it("installs window.__ORB_SELECT_MISSION__, __ORB_NATIVE_NAV__, __ORB_NATIVE_EXPAND__, and __ORB_TOGGLE_NATIVE_SIDEBAR__", () => {
     const opened: Array<string | null> = [];
     const projects: string[] = [];
