@@ -803,6 +803,19 @@ an owner and a dated status line here when dispatched.
     - *Orb side (instant, zero deploy):* `gh variable set ORB_LEAN_RUNNERS --repo Th0rgal/orb --body false` (or delete the variable) — every workflow job immediately evaluates back to `ubuntu-latest` / `ubuntu-24.04`.
     - *`lean.ci` ctrl side:* remove `Th0rgal/orb` from `LEANCI_USER_RUNNER_REPOSITORIES` in `/etc/leanci/leanci-ctrl.env` and `sudo systemctl restart leanci-ctrl.service` (or restore `/usr/local/bin/leanci-ctrl.rollback`). No database schema migration is involved.
 
+### Status update — 2026-11-14 ~11:57 UTC (MacBook tether live E2E test on `nimrud`)
+- **Requested & approved:** `request_macbook_tether(scope="host_ssh", ttl_minutes=120)` created lease `ae4981a6-4ae1-43f9-ad74-881678d2bcfe`; Thomas approved with Touch ID (`state: "approved"`, `effective_scope: "host_ssh"`, `effective_target: "thomas"`, `overlay_ip: "10.88.200.10"`, `mac_overlay_ip: "10.88.200.1"`, `mac_ssh_port: 2224`, `mac_wg_pubkey: "rgY2mepUA4Hgse4bbYOKUDE1pJQrPeb+URmtdxrzEjM="`, `mac_direct_endpoint: "192.168.1.126:51889"`, `relay_endpoint: "65.109.98.246:51890"`, `expires_at: 1794664476`).
+- **Step-by-step outcome:**
+  1. **Client key provisioning + KEM PSK derivation (`sandboxed-mcp`):** SUCCEEDED — `/dev/shm/orb-mac-tether-ae4981a6-4ae1-43f9-ad74-881678d2bcfe` (`0700`) populated with `id_ed25519`, `id_ed25519.pub`, `kem.key`, `peer.psk`, `wg.key`, `wg-macmesh0.conf`, `ssh_config`.
+  2. **Core lease verification (`/api/mac-tether/verify-lease` from `orb-privd-lean`):** SUCCEEDED — `orb-privd-lean` verified the `tether1.*` lease against Core and created `/run/orb-mac-tether/<reqId>` (`0700 root:root`).
+  3. **`mac_tether_up` (`orb-privd-lean` -> `wg set wg-macmesh0 ...`):** FAILED (`tunnel_active: false`) with exact error:
+     `keys ready in /dev/shm/orb-mac-tether-ae4981a6-4ae1-43f9-ad74-881678d2bcfe; orb-privd activation skipped (wg set wg-macmesh0 failed: fopen: Permission denied)`
+     and `tearDownMacTetherState` deleted `wg-macmesh0`.
+  4. **Root cause on `nimrud`:** Ubuntu 24.04's AppArmor profile `/etc/apparmor.d/wg` for `/usr/bin/wg` only allows reading `/etc/wireguard/{,**}` and `/etc/lean-mesh/{,**}` (from `/etc/apparmor.d/local/wg`). When `orb-privd-lean` runs `wg set wg-macmesh0 private-key /run/orb-mac-tether/<reqId>/wg.key peer <pub> preshared-key /run/orb-mac-tether/<reqId>/peer.psk ...`, AppArmor denies `/usr/bin/wg` opening `/run/orb-mac-tether/<reqId>/*` (`fopen: Permission denied`).
+  5. **Minimal fix (one-line host config or code):**
+     - *Host config on `nimrud` (instant, no rebuild, reuses existing approved lease `ae4981a6-4ae1-43f9-ad74-881678d2bcfe` via `list_macbook_tethers`):* append `/run/orb-mac-tether/{,**} r,` to `/etc/apparmor.d/local/wg` and reload with `apparmor_parser -r /etc/apparmor.d/wg`.
+     - *Code fix in `OrbBin/PrivdMain.lean`:* either default `ORB_MAC_TETHER_RUN_DIR` to `/etc/wireguard/orb-mac-tether` (already allowed by `/etc/apparmor.d/wg`'s `file rw @{etc_rw}/wireguard/{,**},`) or pass `/dev/stdin` / `wg setconf` via stdin.
+
 
 
 **Update 10:10 UTC, 14 Nov (coordinator `2bcfd62a`).**
