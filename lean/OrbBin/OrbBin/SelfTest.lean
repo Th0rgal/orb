@@ -1053,7 +1053,8 @@ def runAllTests : IO UInt32 := do
     match Json.parse catTxt with
     | .ok (.arr tools) =>
       assertTrue s!"Catalog {role} count ({tools.size} >= {expectedMin})" (tools.size ≥ expectedMin)
-      for memTool in ["memory_search_knowledge", "memory_get_knowledge_page", "memory_get_knowledge_tree", "memory_recall"] do
+      for memTool in ["memory_search_knowledge", "memory_get_knowledge_page", "memory_get_knowledge_tree", "memory_recall",
+                      "request_macbook_tether", "list_macbook_tethers", "revoke_macbook_tether"] do
         assertTrue s!"Catalog {role} includes {memTool}"
           (tools.any (fun t => (t.fieldStr? "name") == some memTool))
       let some spawn := tools.find? (·.fieldStr? "name" == some "spawn_managed_machine")
@@ -1552,6 +1553,33 @@ def runAllTests : IO UInt32 := do
   let coordSeed ← OrbBin.MeshCli.generateCsprngSeed32
   let initFleetRes ← OrbBin.MeshCli.initPalomaFleet 1700000000 coordSeed
   assertTrue "initPalomaFleet signs and verifies Ed25519 manifest" initFleetRes.toOption.isSome
+
+  -- 10. MacBook tether helpers: loopback UDP, WireGuard mac1, X25519/ChaCha20-Poly1305 PSK seal, OpenSSH Ed25519 keygen
+  let (.ok (ufdA, uportA)) ← udpBind "127.0.0.1" 0 | throw <| IO.userError "udpBind A failed"
+  let (.ok (ufdB, uportB)) ← udpBind "127.0.0.1" 0 | throw <| IO.userError "udpBind B failed"
+  let loIp := (parseIpv4U32? "127.0.0.1").get!
+  let sendRc ← udpSendTo ufdA loIp uportB "ping-lean-udp".toUTF8
+  assertEq "udpSendTo loopback succeeds" sendRc 0
+  let rxOpt ← udpRecvFromPoll ufdB 500 256
+  closeFdRaw ufdA
+  closeFdRaw ufdB
+  let (some rxPkt) := rxOpt | throw <| IO.userError "udpRecvFromPoll timed out"
+  assertEq "udpRecvFromPoll payload matches" (String.fromUTF8! rxPkt.payload) "ping-lean-udp"
+  assertEq "udpRecvFromPoll srcPort matches" rxPkt.srcPort uportA
+
+  let (.ok (kemPrivA, kemPubA, _)) ← generateWireguardKeypair | throw <| IO.userError "WG keygen A failed"
+  let (.ok (kemPrivB, kemPubB, _)) ← generateWireguardKeypair | throw <| IO.userError "WG keygen B failed"
+  let (.ok (_, pskSampleB64, _)) ← generateWireguardKeypair | throw <| IO.userError "PSK sample gen failed"
+  let mac1Val ← wgMac1 (ByteArray.mk ((Array.range 32).map (·.toUInt8))) (ByteArray.mk (Array.replicate 116 0x42))
+  assertEq "wgMac1 matches the BLAKE2s reference" (LeanSys.Auth.bytesToHexLower mac1Val) "fe7603c3fa9d38645bc6b67fd06b6f78"
+  let (.ok sealedPsk) ← sealTetherPsk kemPrivA kemPubB "req-uuid-1" pskSampleB64 | throw <| IO.userError "sealTetherPsk failed"
+  let (.ok openedPsk) ← openTetherPsk kemPrivB kemPubA "req-uuid-1" sealedPsk | throw <| IO.userError "openTetherPsk failed"
+  assertEq "E2EE X25519+ChaCha20-Poly1305 PSK round-trip matches" openedPsk pskSampleB64
+  let wrongReqOpen ← openTetherPsk kemPrivB kemPubA "req-uuid-2" sealedPsk
+  assertTrue "openTetherPsk rejects mismatched requestId AAD" wrongReqOpen.isOk.not
+  let (.ok (sshPem, sshPub)) ← generateOpenSshEd25519Keypair "orb-tether-test" | throw <| IO.userError "SSH keygen failed"
+  assertTrue "OpenSSH PEM header present" (sshPem.startsWith "-----BEGIN OPENSSH PRIVATE KEY-----")
+  assertTrue "OpenSSH authorized_keys line valid" (sshPub.startsWith "ssh-ed25519 ")
 
   try IO.FS.removeDirAll tmpDir catch _ => pure ()
   IO.println "=== ALL ORB-BIN WAVE 1 SELF-TESTS PASSED ==="

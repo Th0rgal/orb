@@ -272,6 +272,9 @@ jobs:
           sq_c_lines=$(wc -l < lean/OrbBin/c/orb_bin_sqlite.c)
           echo "orb_bin_sqlite.c LOC: $sq_c_lines"
           test "$sq_c_lines" -le 220
+          udp_c_lines=$(wc -l < lean/OrbBin/c/orb_bin_udp.c)
+          echo "orb_bin_udp.c LOC: $udp_c_lines"
+          test "$udp_c_lines" -le 220
           node_c_lines=$(wc -l < lean/OrbNode/c/orb_node_posix.c)
           echo "orb_node_posix.c LOC: $node_c_lines"
           test "$node_c_lines" -le 220

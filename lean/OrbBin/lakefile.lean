@@ -35,6 +35,17 @@ extern_lib liborb_bin_sqlite pkg := do
   let name := nameToStaticLib "orb_bin_sqlite"
   buildStaticLib (pkg.staticLibDir / name) #[shimO]
 
+target orb_bin_udp_o pkg : FilePath := do
+  let oFile := pkg.buildDir / "c" / "orb_bin_udp.o"
+  let srcJob ← inputTextFile <| pkg.dir / "c" / "orb_bin_udp.c"
+  let leanIncludeDir ← getLeanIncludeDir
+  buildO oFile srcJob #["-I", leanIncludeDir.toString] #["-std=gnu11", "-O3", "-fPIC", "-Wall", "-Wextra", "-Werror"] ((← IO.getEnv "LEAN_CC").getD "cc")
+
+extern_lib liborb_bin_udp pkg := do
+  let shimO ← orb_bin_udp_o.fetch
+  let name := nameToStaticLib "orb_bin_udp"
+  buildStaticLib (pkg.staticLibDir / name) #[shimO]
+
 @[default_target]
 lean_lib «OrbBin» where
   roots := #[`OrbBin]

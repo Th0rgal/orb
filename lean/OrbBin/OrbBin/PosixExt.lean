@@ -82,6 +82,25 @@ opaque unsetenvVar (key : @& String) : IO Unit
 @[extern "orb_bin_statvfs_bytes"]
 private opaque rawStatvfsBytes (path : @& String) : IO ByteArray
 
+@[extern "orb_bin_udp_bind"]
+private opaque rawUdpBind (host : @& String) (port : UInt16) : IO ByteArray
+
+@[extern "orb_bin_udp_recvfrom_poll"]
+private opaque rawUdpRecvFromPoll (fd : Int32) (timeoutMs : UInt32) (maxBytes : USize) : IO ByteArray
+
+@[extern "orb_bin_udp_sendto"]
+opaque udpSendTo (fd : Int32) (dstIpHostOrder : UInt32) (dstPort : UInt16) (payload : @& ByteArray) : IO UInt32
+
+/-- Keyed BLAKE2s (RFC 7693), `key.size ≤ 32`, `1 ≤ outLen ≤ 32`; empty on invalid sizes. -/
+@[extern "orb_bin_blake2s"]
+opaque blake2s (key msg : @& ByteArray) (outLen : USize) : IO ByteArray
+
+/-- WireGuard `mac1` = BLAKE2s-128(key = BLAKE2s-256("mac1----" ‖ pub32), pktPrefix); empty unless `pub32` is 32 bytes. -/
+def wgMac1 (pub32 pktPrefix : ByteArray) : IO ByteArray := do
+  if pub32.size != 32 then return ByteArray.empty
+  let key ← blake2s ByteArray.empty ("mac1----".toUTF8 ++ pub32) 32
+  blake2s key pktPrefix 16
+
 structure SpawnedPgrp where
   pid       : Int64
   stdinFd   : Int32
@@ -375,7 +394,8 @@ def shellSingleQuote (s : String) : String :=
 def ensurePrivateDir0700 (dir : System.FilePath) : IO (Except String Unit) := do
   if let some parent := dir.parent then
     let ps := parent.toString
-    if !ps.isEmpty && ps != "/" && ps != "." && ps != "/tmp" && ps != "/var/tmp" && ps != "/private/tmp" then
+    if !ps.isEmpty && ps != "/" && ps != "." && ps != "/tmp" && ps != "/var/tmp" &&
+       ps != "/private/tmp" && ps != "/dev/shm" && ps != "/run/shm" then
       let pst ← statPath ps
       if !pst.exists_ then
         IO.FS.createDirAll parent
@@ -430,5 +450,178 @@ def writeAtomicPrivate0600 (path : System.FilePath) (content : ByteArray) : IO (
   catch e =>
     try IO.FS.removeFile tmp catch _ => pure ()
     return .error s!"Failed atomic rename to `{path}`: {e}"
+
+/-! ### Non-Blocking IPv4 UDP Socket & Ephemeral WireGuard / OpenSSH Keypair Helpers -/
+
+structure UdpPacket where
+  srcIpHostOrder : UInt32
+  srcPort        : UInt16
+  payload        : ByteArray
+  deriving BEq
+
+private def readU16LE (b : ByteArray) (off : Nat) : UInt16 :=
+  if off + 2 > b.size then 0
+  else (b.get! off).toUInt16 ||| ((b.get! (off + 1)).toUInt16 <<< 8)
+
+/-- Bind a non-blocking IPv4 UDP socket on `host:port` (`port = 0` picks an ephemeral port), returning `(fd, boundPort)`. -/
+def udpBind (host : String) (port : UInt16) : IO (Except String (Int32 × UInt16)) := do
+  let raw ← rawUdpBind host port
+  if raw.size < 8 then
+    return .error "orb_bin_udp_bind returned truncated buffer"
+  let fdU32 := readU32LE raw 0
+  let fd : Int32 := Int32.ofBitVec (BitVec.ofNat 32 fdU32.toNat)
+  let boundPort := readU16LE raw 4
+  if fd < 0 then
+    return .error s!"UDP bind on {host}:{port} failed (errno={-fd.toInt})"
+  return .ok (fd, boundPort)
+
+/-- Poll `fd` up to `timeoutMs` and read at most one UDP datagram (`maxBytes` cap). -/
+def udpRecvFromPoll (fd : Int32) (timeoutMs : UInt32) (maxBytes : USize := 2048) : IO (Option UdpPacket) := do
+  let raw ← rawUdpRecvFromPoll fd timeoutMs maxBytes
+  if raw.size < 8 then
+    return none
+  let tag := readU16LE raw 6
+  if tag != 1 then
+    return none
+  let srcIp := readU32LE raw 0
+  let srcPort := readU16LE raw 4
+  return some {
+    srcIpHostOrder := srcIp
+    srcPort        := srcPort
+    payload        := raw.extract 8 raw.size
+  }
+
+/-- Parse dotted-quad IPv4 (`a.b.c.d`) into host-byte-order `UInt32`. -/
+def parseIpv4U32? (s : String) : Option UInt32 :=
+  match s.trimAscii.toString.splitOn "." with
+  | [a, b, c, d] => do
+    let na ← a.toNat?
+    let nb ← b.toNat?
+    let nc ← c.toNat?
+    let nd ← d.toNat?
+    if na > 255 || nb > 255 || nc > 255 || nd > 255 then none
+    else
+      some <| (na.toUInt32 <<< 24) ||| (nb.toUInt32 <<< 16) ||| (nc.toUInt32 <<< 8) ||| nd.toUInt32
+  | _ => none
+
+/-- Format host-byte-order `UInt32` IPv4 as dotted-quad `a.b.c.d`. -/
+def formatIpv4U32 (ip : UInt32) : String :=
+  let a := (ip >>> 24) &&& 0xFF
+  let b := (ip >>> 16) &&& 0xFF
+  let c := (ip >>> 8) &&& 0xFF
+  let d := ip &&& 0xFF
+  s!"{a}.{b}.{c}.{d}"
+
+/-- Generate a clamped Curve25519 WireGuard `(privKeyBase64, pubKeyBase64, pub32)` tuple via OpenSSL CSPRNG + X25519. -/
+def generateWireguardKeypair : IO (Except String (String × String × ByteArray)) := do
+  let raw ← match (← OrbNetLeaf.Crypto.randBytes 32) with
+    | .ok b => pure b
+    | .error e => return .error e
+  let mut clamped := ByteArray.emptyWithCapacity 32
+  for i in [0:32] do
+    let b := raw.get! i
+    if i == 0 then clamped := clamped.push (b &&& 248)
+    else if i == 31 then clamped := clamped.push ((b &&& 127) ||| 64)
+    else clamped := clamped.push b
+  match (← OrbNetLeaf.Crypto.x25519PublicKey clamped) with
+  | .error e => return .error e
+  | .ok pub32 =>
+    return .ok (base64Encode clamped, base64Encode pub32, pub32)
+
+private def pushU32BE (ba : ByteArray) (v : UInt32) : ByteArray :=
+  ba.push ((v >>> 24) &&& 0xFF).toUInt8
+    |>.push ((v >>> 16) &&& 0xFF).toUInt8
+    |>.push ((v >>> 8) &&& 0xFF).toUInt8
+    |>.push (v &&& 0xFF).toUInt8
+
+private def pushSshBytes (ba : ByteArray) (b : ByteArray) : ByteArray :=
+  (pushU32BE ba b.size.toUInt32) ++ b
+
+private def pushSshStr (ba : ByteArray) (s : String) : ByteArray :=
+  pushSshBytes ba s.toUTF8
+
+private def wrapPem70 (b64 : String) : String := Id.run do
+  let cs := b64.toList.toArray
+  let mut lines : Array String := #[]
+  let mut i : Nat := 0
+  while i < cs.size do
+    let j := Nat.min (i + 70) cs.size
+    lines := lines.push (String.ofList (cs.extract i j).toList)
+    i := j
+  return String.intercalate "\n" lines.toList
+
+/-- Generate an ephemeral unencrypted `openssh-key-v1` Ed25519 `(privateKeyPem, authorizedKeyLine)` pair. -/
+def generateOpenSshEd25519Keypair (comment : String) : IO (Except String (String × String)) := do
+  let seed32 ← match (← OrbNetLeaf.Crypto.randBytes 32) with
+    | .ok b => pure b
+    | .error e => return .error e
+  let chkBytes ← match (← OrbNetLeaf.Crypto.randBytes 4) with
+    | .ok b => pure b
+    | .error e => return .error e
+  let pub32 ← match (← OrbNetLeaf.Crypto.ed25519PublicKey seed32) with
+    | .ok b => pure b
+    | .error e => return .error e
+  let pubBlob := pushSshBytes (pushSshStr ByteArray.empty "ssh-ed25519") pub32
+  let chk := readU32LE chkBytes 0
+  let mut privSection := ByteArray.empty
+  privSection := pushU32BE privSection chk
+  privSection := pushU32BE privSection chk
+  privSection := pushSshStr privSection "ssh-ed25519"
+  privSection := pushSshBytes privSection pub32
+  privSection := pushSshBytes privSection (seed32 ++ pub32)
+  privSection := pushSshStr privSection comment
+  let mut padByte : UInt8 := 1
+  while privSection.size % 8 != 0 do
+    privSection := privSection.push padByte
+    padByte := padByte + 1
+  let mut wire := "openssh-key-v1".toUTF8.push 0
+  wire := pushSshStr wire "none"
+  wire := pushSshStr wire "none"
+  wire := pushSshStr wire ""
+  wire := pushU32BE wire 1
+  wire := pushSshBytes wire pubBlob
+  wire := pushSshBytes wire privSection
+  let pem :=
+    "-----BEGIN OPENSSH PRIVATE KEY-----\n" ++
+    wrapPem70 (base64Encode wire) ++
+    "\n-----END OPENSSH PRIVATE KEY-----\n"
+  let cleanComment := String.ofList (comment.toList.filter (fun c => c != '\n' && c != '\r'))
+  let pubLine := s!"ssh-ed25519 {base64Encode pubBlob} {cleanComment}"
+  return .ok (pem, pubLine)
+
+/-- Seal a 32-byte WireGuard PSK (`pskB64`) end-to-end via `X25519 + ChaCha20-Poly1305` bound to `requestId` AAD
+    so `orb-core` relays only ciphertext and never sees plaintext PSKs. -/
+def sealTetherPsk (senderKemPrivB64 recipientKemPubB64 requestId pskB64 : String) : IO (Except String String) := do
+  let some priv32 := base64Decode? senderKemPrivB64 | return .error "invalid sender KEM private key base64"
+  let some pub32  := base64Decode? recipientKemPubB64 | return .error "invalid recipient KEM public key base64"
+  let some psk32  := base64Decode? pskB64 | return .error "invalid 32-byte WireGuard PSK base64"
+  if priv32.size != 32 || pub32.size != 32 || psk32.size != 32 then
+    return .error "KEM keys and WireGuard PSK must each be 32 bytes"
+  let shared32 ← match (← OrbNetLeaf.Crypto.x25519SharedSecret priv32 pub32) with
+    | .ok s => pure s
+    | .error e => return .error e
+  let key32 := LeanSys.Auth.sha256Bytes ("orb-mac-tether-psk-v1:".toUTF8 ++ shared32)
+  let nonce12 := ByteArray.mk #[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  match (← OrbNetLeaf.Crypto.aeadSeal .chacha20Poly1305 key32 nonce12 requestId.toUTF8 psk32) with
+  | .ok ct48 => return .ok (base64Encode ct48)
+  | .error e => return .error e
+
+/-- Open an `X25519 + ChaCha20-Poly1305` sealed WireGuard PSK (`sealedPskB64`) bound to `requestId` AAD. -/
+def openTetherPsk (recipientKemPrivB64 senderKemPubB64 requestId sealedPskB64 : String) : IO (Except String String) := do
+  let some priv32 := base64Decode? recipientKemPrivB64 | return .error "invalid recipient KEM private key base64"
+  let some pub32  := base64Decode? senderKemPubB64 | return .error "invalid sender KEM public key base64"
+  let some ct48   := base64Decode? sealedPskB64 | return .error "invalid sealed PSK base64"
+  if priv32.size != 32 || pub32.size != 32 || ct48.size != 48 then
+    return .error "KEM keys must be 32 bytes and sealed PSK must be 48 bytes"
+  let shared32 ← match (← OrbNetLeaf.Crypto.x25519SharedSecret priv32 pub32) with
+    | .ok s => pure s
+    | .error e => return .error e
+  let key32 := LeanSys.Auth.sha256Bytes ("orb-mac-tether-psk-v1:".toUTF8 ++ shared32)
+  let nonce12 := ByteArray.mk #[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  match (← OrbNetLeaf.Crypto.aeadOpen .chacha20Poly1305 key32 nonce12 requestId.toUTF8 ct48) with
+  | .ok pt32 =>
+    if pt32.size != 32 then return .error "opened PSK is not 32 bytes"
+    return .ok (base64Encode pt32)
+  | .error e => return .error e
 
 end OrbBin.PosixExt
