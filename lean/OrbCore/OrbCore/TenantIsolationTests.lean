@@ -845,8 +845,9 @@ def run (root : String) : IO Unit := do
       check ((foreignWire.splitOn "HTTP/1.1 404").length > 1)
         s!"SSE (f) member opening foreign /api/control/missions/admin-mission/stream must return 404, got: {foreignWire}"
 
-      -- (a) & (b) Live control stream stays open past initial `missions_snapshot`, scopes snapshot + live events
-      -- per caller (member sees own mission only; admin sees all), and delivers subsequent live frames on the same socket.
+      -- (a), (b) & (c) Live control stream stays open past initial `missions_snapshot`, scopes snapshot + live events
+      -- strictly by mission ownership/share (admin does NOT receive unshared member-mission events), delivers
+      -- member-mission events to admin within 2.5 s after sharing, and delivers missionId=none frames to admin only.
       let adminStreamFd ← openSseSocket "/api/control/stream" (some adminLiveTok)
       let memberStreamFd ← openSseSocket "/api/control/stream" (some memberLiveTok)
       let (adminInitWire, adminInitEof) ← drainSseUntil adminStreamFd 1000
@@ -858,26 +859,63 @@ def run (root : String) : IO Unit := do
           (adminInitWire.splitOn "Transfer-Encoding: chunked").length > 1 &&
           (adminInitWire.splitOn "event: missions_snapshot").length > 1 &&
           (adminInitWire.splitOn "admin-mission").length > 1 &&
+          (adminInitWire.splitOn "member-mission").length == 1 &&
           (memberInitWire.splitOn "event: missions_snapshot").length > 1 &&
           (memberInitWire.splitOn "member-mission").length > 1 &&
           (memberInitWire.splitOn "admin-mission").length == 1)
         s!"SSE (a)/(b) initial missions_snapshot chunked stream or tenant scoping failed (adminEof={adminInitEof}, memberEof={memberInitEof})"
       publishControlEvent (some sseHub) "text_delta"
-        "{\"content\":\"admin-only-sse-live\"}"
-        (some "admin-mission")
-      publishControlEvent (some sseHub) "text_delta"
         "{\"content\":\"member-visible-sse-live\"}"
         (some "member-mission")
+      publishControlEvent (some sseHub) "text_delta"
+        "{\"content\":\"admin-only-sse-live\"}"
+        (some "admin-mission")
       let (adminLiveWire, adminLiveEof) ← drainSseUntil adminStreamFd 1000
-        (fun s => (s.splitOn "admin-only-sse-live").length > 1 && (s.splitOn "member-visible-sse-live").length > 1)
+        (fun s => (s.splitOn "admin-only-sse-live").length > 1)
       let (memberLiveWire, memberLiveEof) ← drainSseUntil memberStreamFd 400
         (fun s => (s.splitOn "member-visible-sse-live").length > 1)
       check (!adminLiveEof && !memberLiveEof &&
           (adminLiveWire.splitOn "admin-only-sse-live").length > 1 &&
-          (adminLiveWire.splitOn "member-visible-sse-live").length > 1 &&
+          (adminLiveWire.splitOn "member-visible-sse-live").length == 1 &&
           (memberLiveWire.splitOn "member-visible-sse-live").length > 1 &&
           (memberLiveWire.splitOn "admin-only-sse-live").length == 1)
-        s!"SSE (a)/(b) live event delivery or tenant isolation failed (adminLive={adminLiveWire}, memberLive={memberLiveWire})"
+        s!"SSE (a) live event delivery or strict non-owner admin isolation failed (adminLive={adminLiveWire}, memberLive={memberLiveWire})"
+      sql store.missionsDb "INSERT INTO mission_shares(mission_id,user_id,granted_by) VALUES('member-mission','admin','member');"
+      let mut adminShareWire := ""
+      let mut adminShareEof := false
+      let shareStartMs ← IO.monoMsNow
+      while (← IO.monoMsNow) - shareStartMs < 2500 &&
+            (adminShareWire.splitOn "member-shared-to-admin-sse").length == 1 &&
+            !adminShareEof do
+        publishControlEvent (some sseHub) "text_delta"
+          "{\"content\":\"member-shared-to-admin-sse\"}"
+          (some "member-mission")
+        let (piece, eof) ← drainSseUntil adminStreamFd 250
+          (fun s => (s.splitOn "member-shared-to-admin-sse").length > 1)
+        adminShareWire := adminShareWire ++ piece
+        adminShareEof := eof
+      sql store.missionsDb "DELETE FROM mission_shares WHERE mission_id='member-mission' AND user_id='admin';"
+      check (!adminShareEof && (adminShareWire.splitOn "member-shared-to-admin-sse").length > 1)
+        s!"SSE (b) admin did not receive shared member-mission frame within 2.5s: {adminShareWire}"
+      let (_, _) ← drainSseUntil memberStreamFd 200 (fun _ => false)
+      publishControlEvent (some sseHub) "system_notice"
+        "{\"message\":\"missionless-admin-only-notice\"}"
+        none
+      publishControlEvent (some sseHub) "text_delta"
+        "{\"content\":\"member-post-notice-fence\"}"
+        (some "member-mission")
+      publishControlEvent (some sseHub) "text_delta"
+        "{\"content\":\"admin-post-notice-fence\"}"
+        (some "admin-mission")
+      let (adminNoticeWire, adminNoticeEof) ← drainSseUntil adminStreamFd 1000
+        (fun s => (s.splitOn "missionless-admin-only-notice").length > 1 && (s.splitOn "admin-post-notice-fence").length > 1)
+      let (memberNoticeWire, memberNoticeEof) ← drainSseUntil memberStreamFd 1000
+        (fun s => (s.splitOn "member-post-notice-fence").length > 1)
+      check (!adminNoticeEof && !memberNoticeEof &&
+          (adminNoticeWire.splitOn "missionless-admin-only-notice").length > 1 &&
+          (memberNoticeWire.splitOn "member-post-notice-fence").length > 1 &&
+          (memberNoticeWire.splitOn "missionless-admin-only-notice").length == 1)
+        s!"SSE (c) missionId=none frame visibility failed (adminNotice={adminNoticeWire}, memberNotice={memberNoticeWire})"
       let memberMissionStreamFd ← openSseSocket "/api/control/missions/member-mission/stream" (some memberLiveTok)
       let (_, memberMissionInitEof) ← drainSseUntil memberMissionStreamFd 1000
         (fun s => (s.splitOn "event: snapshot").length > 1 && (s.splitOn "\n\n").length > 1)
@@ -903,6 +941,29 @@ def run (root : String) : IO Unit := do
         s!"SSE (d) expected ': keep-alive' frame on open stream, got eof={keepAliveEof} wire={keepAliveWire}"
       discard <| closeFd adminStreamFd
       discard <| closeFd memberStreamFd
+
+      -- Token expiry: a stream opened with exp = now + 2 reaches EOF within 5 s, while a stream
+      -- opened at the same time with exp = now + 3600 remains open.
+      let nowForExp ← coreEpochSec
+      let shortExpTok := mintSessionTokenV2 stWithProviders.cfg.jwtSecret "admin" "admin" 1 (nowForExp + 2)
+      let longExpTok := mintSessionTokenV2 stWithProviders.cfg.jwtSecret "admin" "admin" 1 (nowForExp + 3600)
+      let shortExpFd ← openSseSocket "/api/control/stream" (some shortExpTok)
+      let longExpFd ← openSseSocket "/api/control/stream" (some longExpTok)
+      let (_, shortInitEof) ← drainSseUntil shortExpFd 1000
+        (fun s => (s.splitOn "event: missions_snapshot").length > 1 && (s.splitOn "\n\n").length > 1)
+      let (_, longInitEof) ← drainSseUntil longExpFd 1000
+        (fun s => (s.splitOn "event: missions_snapshot").length > 1 && (s.splitOn "\n\n").length > 1)
+      check (!shortInitEof && !longInitEof) "SSE token expiry streams closed prematurely on init"
+      let (_, shortExpEof) ← drainSseUntil shortExpFd 5000 (fun _ => false)
+      publishControlEvent (some sseHub) "text_delta"
+        "{\"content\":\"long-token-still-alive\"}"
+        (some "admin-mission")
+      let (longAliveWire, longExpEof) ← drainSseUntil longExpFd 500
+        (fun s => (s.splitOn "long-token-still-alive").length > 1)
+      discard <| closeFd shortExpFd
+      discard <| closeFd longExpFd
+      check (shortExpEof && !longExpEof && (longAliveWire.splitOn "long-token-still-alive").length > 1)
+        s!"SSE token expiry check failed (shortExpEof={shortExpEof}, longExpEof={longExpEof}, longWire={longAliveWire})"
 
       -- (c) Mission-scoped stream (`/api/control/missions/:id/stream` and `/api/control/stream?mission=:id`)
       -- delivers only that mission's events and drops other visible missions' events.
@@ -946,22 +1007,41 @@ def run (root : String) : IO Unit := do
       check (subsAfterClose == 0)
         s!"SSE (e) closed client socket did not unregister SSE subscriber within keep-alive bound (remaining={subsAfterClose})"
 
-      let lagFd ← openSseSocket "/api/control/missions/member-mission/stream" (some memberLiveTok)
-      let (_, lagInitEof) ← drainSseUntil lagFd 1000
-        (fun s => (s.splitOn "event: snapshot").length > 1 && (s.splitOn "\n\n").length > 1)
-      check (!lagInitEof) "SSE (e) lag test stream closed prematurely"
-      -- Wait for the server loop to enter sleep so all 270 frames accumulate in the subscriber queue at once.
-      IO.sleep 15
+      -- (e)(i) Hub-level overflow check (deterministic, no stream loop):
+      let directSub ← registerSseSubscriberFull sseHub (some "member-mission")
       for idx in [0:270] do
         publishControlEvent (some sseHub) "mission_status_changed"
           s!"\{\"status\":\"running\",\"seq_idx\":{idx}}"
           (some "member-mission")
-      let (lagWire, _) ← drainSseUntil lagFd 1500
-        (fun s => (s.splitOn "event: stream_lagged").length > 1 && (s.splitOn "\"seq_idx\":269").length > 1)
+      let directDropped ← directSub.droppedRef.get
+      let directEvents ← directSub.eventsRef.get
+      unregisterSseSubscriber sseHub directSub.id
+      let oldestFrame := match directEvents[0]? with | some ev => ev.frame | none => ""
+      check (directDropped == 14 &&
+          directEvents.size == 256 &&
+          (oldestFrame.splitOn "\"seq_idx\":14").length > 1)
+        s!"SSE (e)(i) hub-level 256-frame overflow mismatch (dropped={directDropped}, size={directEvents.size}, oldest={oldestFrame})"
+
+      -- (e)(ii) Socket-level `stream_lagged` check (repeat 270-frame burst up to 5 times):
+      let lagFd ← openSseSocket "/api/control/missions/member-mission/stream" (some memberLiveTok)
+      let (_, lagInitEof) ← drainSseUntil lagFd 1000
+        (fun s => (s.splitOn "event: snapshot").length > 1 && (s.splitOn "\n\n").length > 1)
+      check (!lagInitEof) "SSE (e)(ii) lag test stream closed prematurely"
+      let mut lagWire := ""
+      for _ in [0:5] do
+        if (lagWire.splitOn "event: stream_lagged").length == 1 ||
+           (lagWire.splitOn "\"dropped\":").length == 1 then
+          for idx in [0:270] do
+            publishControlEvent (some sseHub) "mission_status_changed"
+              s!"\{\"status\":\"running\",\"seq_idx\":{idx}}"
+              (some "member-mission")
+          let (piece, _) ← drainSseUntil lagFd 600
+            (fun s => (s.splitOn "event: stream_lagged").length > 1 && (s.splitOn "\"dropped\":").length > 1)
+          lagWire := lagWire ++ piece
       discard <| closeFd lagFd
       check ((lagWire.splitOn "event: stream_lagged").length > 1 &&
           (lagWire.splitOn "\"dropped\":").length > 1)
-        s!"SSE (e) overflowing 256-frame subscriber queue did not emit stream_lagged: {lagWire}"
+        s!"SSE (e)(ii) overflowing 256-frame subscriber queue did not emit stream_lagged: {lagWire}"
     finally
       sseAcceptDone.set true
       let _ := sseServerTask.get
