@@ -26,6 +26,7 @@ export interface ModelUsage extends UsageTotals {
 export interface UsageGroup extends UsageTotals {
   key: string | null;
   label: string | null;
+  requests: number;
   cost_status?: CostStatus;
 }
 
@@ -44,7 +45,7 @@ export interface UsageSummary {
   cost_status?: CostStatus;
   totals: UsageTotals;
   by_model?: ModelUsage[];
-  by_provider?: UsageGroup[];
+  by_provider: UsageGroup[];
   by_source?: UsageGroup[];
   by_route?: UsageGroup[];
   by_caller_kind?: UsageGroup[];
