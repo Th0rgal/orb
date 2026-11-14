@@ -122,3 +122,22 @@ Cloudflare cliff (90s, when applicable)
 
 Core — never an uncoordinated client fetch timer — is the single authority for
 pre-commitment timeouts, retries, and provider failover.
+
+## 5. Native Lean streamed proxy idle-timeout budget & post-head keep-alive limit
+
+In `lean/OrbCore/OrbCore/Proxy.lean` (`StreamLimits`), streamed `/v1/*` calls
+enforce three injectable millisecond limits (`upstreamIdleLimitMs = 600000`,
+`upstreamTotalLimitMs = 3600000`, `upstreamStreamPreHeadBudgetMs = 1200000`):
+before the upstream response head arrives, each attempt gets
+`min(idleMs, remaining preHeadBudgetMs)` and a single idle-out attempt is
+recorded as `"upstream_idle_timeout"` rather than `"transport_error"`; once the
+20-minute cross-attempt pre-head budget is spent, failover stops and Core
+replies `504` (`{"error":"upstream_idle_timeout"}`,
+`X-Orb-Exhaustion-Class: upstream_idle_timeout`). After the upstream `2xx` head
+is committed, an idle/total timeout closes the downstream chunked stream without
+the terminating `0\r\n\r\n` chunk and records `status = "upstream_idle_timeout"`
+in `proxy_outcomes` (`proxy_usage` has no failure-reason column). Known limit:
+`openTlsUpstreamReader` and `openLoopbackUpstreamReader` do not parse stream
+dialects, so any post-head upstream byte (including SSE `: keepalive\n\n`
+lines) resets the per-read `idleMs` timer and only `totalMs` (60 minutes in
+production) bounds a keep-alive-only stream.
