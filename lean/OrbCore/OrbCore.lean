@@ -25,6 +25,7 @@ import OrbCore.MemoryAndCloud
 import OrbCore.QueueCont
 import OrbCore.R7Core
 import OrbCore.TelemetryAndVoice
+import OrbCore.MacTether
 import OrbCore.LegacyHydrate
 import OrbCore.SecretAndApproval
 import OrbCore.RemoteFleetAndRelay

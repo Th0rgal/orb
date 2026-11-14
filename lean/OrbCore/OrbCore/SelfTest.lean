@@ -37,6 +37,7 @@ import OrbCore.TenantIsolationTests
 import OrbCore.DevSpendingTests
 import OrbCore.DevOperatorTests
 import OrbCore.SettingsTransferTests
+import OrbCore.MacTetherTests
 
 namespace OrbCore.SelfTest
 
@@ -7326,6 +7327,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     OrbCore.NodeLivenessTests.run tmpRoot
     OrbCore.ComputeRollupTests.run tmpRoot
     OrbCore.MissionEventsToolTests.run tmpRoot
+    OrbCore.MacTetherTests.run tmpRoot
     OrbCore.ManagedSnapshotCatalogTests.run tmpRoot
     OrbCore.ManagedProviderSealingTests.run tmpRoot
     OrbCore.ManagedProviderAvailabilityTests.run tmpRoot

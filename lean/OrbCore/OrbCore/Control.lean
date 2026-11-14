@@ -28,6 +28,7 @@ import OrbCore.HarnessSessionRegistry
 import OrbCore.QueueCont
 import OrbCore.R7Core
 import OrbCore.TelemetryAndVoice
+import OrbCore.MacTether
 import OrbCore.LegacyHydrate
 import OrbCore.SecretAndApproval
 import OrbCore.RemoteFleetAndRelay
@@ -66,6 +67,7 @@ open OrbCore.HarnessSessionRegistry
 open OrbCore.QueueCont
 open OrbCore.R7Core
 open OrbCore.TelemetryAndVoice
+open OrbCore.MacTether
 open OrbCore.LegacyHydrate
 open OrbCore.SecretAndApproval
 open OrbCore.RemoteFleetAndRelay
@@ -132,6 +134,7 @@ structure CoreAppState where
   providerHub?    : Option ProviderRuntimeHub := none
   systemHub?      : Option SystemRuntimeHub := none
   remoteSup?      : Option RemoteJobSupervisor := none
+  macTether?      : Option MacTetherRuntime := none
 
 /-- Authenticated multi-user request principal resolved by `resolveCallerPrincipal?`. -/
 structure CallerPrincipal where
@@ -2772,19 +2775,29 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let toolName := (jv.fieldStr? "name").getD ""
       let args := (jv.field? "arguments").getD (.obj #[])
       if (mcpCaller?.map (·.isDevOperator)).getD false &&
-          (isMemoryToolName toolName || toolName.startsWith "secret_" || #["request_privileged_access", "list_privileged_access",
+          (isMemoryToolName toolName || isMacTetherToolName toolName || toolName.startsWith "secret_" || #["request_privileged_access", "list_privileged_access",
             "revoke_privileged_access", "execute_privileged_command", "deploy_sandboxed_sh"].contains toolName) then
         return .ok (mkJson 403 "{\"error\":\"dev_operator_scope_required\"}")
+      -- Personal memory and the owner's laptop belong to the server owner, not to shared tenant state.
+      -- Reuse the persisted MCP issuer identity, including shared missions.
+      let ownerAllowed : IO Bool := match scopedClaims? with
+        | none => pure ((mcpCaller?.map (fun c => !c.disabled && (c.role == "admin" || c.isLegacyUnscoped))).getD false)
+        | some claims => do
+          let some uid ← OrbCore.McpGateway.scopedCallerUserId? st.store claims nowEpochSec | pure false
+          userIsServerOwner st.store uid
+      if isMacTetherToolName toolName then
+        let denied (code message : String) : CoreHttpResponse :=
+          mkJson 200 (renderCompact (.obj #[("ok", .bool false), ("error", .obj #[
+            ("code", .str code), ("message", .str message), ("accepted", .str "no"), ("retryable", .bool false)])]))
+        unless ← ownerAllowed do
+          return .ok (denied "mac_tether_denied" "Administrator required")
+        let bunkerSt ← match st.bunkerStateRef? with | some r => r.get | none => pure (0 : UInt8)
+        match ← executeMacTetherMcpTool st.store st.macTether? (st.managedStore?.map (·.db)) bunkerSt
+            (normalizeMcpRole activeClaims.role == "operator") activeClaims.missionId toolName args nowEpochSec with
+        | .ok resVal => return .ok (mkJson 200 (renderCompact (.obj #[("ok", .bool true), ("result", resVal)])))
+        | .error errMsg => return .ok (denied "mac_tether_rejected" errMsg)
       if isMemoryToolName toolName then
-        -- Personal memory is the server owner's data, not shared tenant state.
-        -- Reuse the persisted MCP issuer identity, including shared missions.
-        let ownerAllowed ← match scopedClaims? with
-          | none => pure ((mcpCaller?.map (fun c => !c.disabled && (c.role == "admin" || c.isLegacyUnscoped))).getD false)
-          | some claims => do
-            let some uid ← OrbCore.McpGateway.scopedCallerUserId? st.store claims nowEpochSec | pure false
-            if uid.isEmpty then pure (← getBootstrapAdmin? st.store).isNone
-            else pure (((← getUserById? st.store uid).map (fun u => !u.disabled && u.role == "admin")).getD false)
-        unless ownerAllowed do
+        unless ← ownerAllowed do
           return .ok (mkJson 200 "{\"ok\":false,\"error\":{\"code\":\"memory_tool_denied\",\"message\":\"Administrator required\"}}")
         let mut onManagedNode := false
         let mut hasProjSkill := !activeClaims.isExternal && !activeClaims.project.isEmpty
@@ -3289,6 +3302,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         return .ok (mkJson cCode cBody)
       let nowIso := formatEpochIso8601Utc nowEpochSec
       discard <| cancelActiveRemoteJobForMission st.store st.managedStore? st.relayHub? mid "Mission stopped on Core"
+      -- A stop request ends the session for its tethers even when no run is active.
+      revokeSessionScopedMacTethersForMission st.store st.macTether? mid nowEpochSec
       match ← hostedStop st.store mid nowIso with
       | .ok gen => return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"run_generation\":{gen}}")
       | .error "mission_not_found" => return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
@@ -4598,6 +4613,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         if let some (cCode, cBody) := (← authorizeMissionOp st caller mid true) then
           return .ok (mkJson cCode cBody)
         revokeMissionProxyTokensForMission st.store mid
+        revokeSessionScopedMacTethersForMission st.store st.macTether? mid nowEpochSec
         let delRes ← withImmediateTx st.store.missionsDb do
           discard <| execParamQueryUnlocked st.store.missionsDb "DELETE FROM mission_shares WHERE mission_id=?1;" #[mid]
           discard <| execParamQueryUnlocked st.store.missionsDb "DELETE FROM mission_events WHERE mission_id=?1;" #[mid]
@@ -6311,6 +6327,12 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   let isAdmCaller := caller.isLegacyUnscoped || caller.role == "admin"
   let nowIsoDisp := formatEpochIso8601Utc nowEpochSec
 
+  -- MacBook tether broker (`/api/mac-tether/*`): laptop daemon, `orb-privd` and operator; never a dev pass.
+  let tetherBunker ← match st.bunkerStateRef? with | some r => r.get | none => pure (0 : UInt8)
+  if let some (tCode, tBody) ← dispatchMacTetherRoutes? st.store st.macTether? (st.managedStore?.map (·.db))
+      tetherBunker (isAdmCaller && !caller.isDevOperator) req.method rawTarget cleanPath req.bodySlice.toByteArray nowEpochSec then
+    return .ok (mkJson tCode tBody)
+
   if let some (sCode, sCtype, sBody) ← dispatchSecretAndApprovalRoutes?
       st.store st.cfg.workingDir st.store.rootDir st.bunkerStateRef? isAdmCaller
       req.method rawTarget cleanPath req.bodySlice.toByteArray nowEpochSec then
@@ -7055,6 +7077,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let providerHub ← newProviderRuntimeHub
     let systemHub ← newSystemRuntimeHub
     let remoteSup ← newRemoteJobSupervisor (effectiveJwtSecret cfg) cfg.devMode
+    let macTetherRt ← startMacTetherRuntime store
     let appState : CoreAppState := {
       cfg := cfg
       store := store
@@ -7077,6 +7100,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       voiceSlots? := some voiceSlots
       warmMgr? := some warmMgr
       pendingControlCallsRef? := some pendingControlCallsRef
+      macTether? := some macTetherRt
       broadcastHub? := some broadcastHub
       relayHub? := some relayHub
       cloudHub? := some cloudHub
@@ -7089,6 +7113,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let bindHost := if cfg.host == "localhost" then "127.0.0.1" else cfg.host
     let .ok (listenFd, boundPort) ← tcpListen bindHost cfg.port 128
       | do
+        stopMacTetherRuntime macTetherRt
         closeManagedComputeStore managedStore
         closeCoreStore store
         IO.eprintln s!"[sandboxed-sh] FATAL: failed to bind {bindHost}:{cfg.port}"
@@ -7198,6 +7223,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     if !notifySock.isEmpty then
       discard <| sdNotifyRaw notifySock "STOPPING=1\n"
     discard <| closeFd listenFd
+    stopMacTetherRuntime macTetherRt
     closeManagedComputeStore managedStore
     closeCoreStore store
     return 0

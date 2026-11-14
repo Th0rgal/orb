@@ -684,6 +684,253 @@ private def parseNamespacedStdioTool? (toolName : String) : Option (String × St
 def McpClient.shutdown (c : McpClient) : IO Unit :=
   OrbBin.McpRegistry.shutdownAll c.stdioRegistry
 
+/-! ### Client-Side Ephemeral `/dev/shm/orb-mac-tether-<id>` Provisioner -/
+
+private structure PendingMacTetherKeys where
+  wgPrivB64  : String
+  wgPubB64   : String
+  kemPrivB64 : String
+  kemPubB64  : String
+  sshPrivPem : String
+  sshPubLine : String
+
+private def macTetherBaseDir : IO System.FilePath := do
+  if let some ov ← getEnvNonEmpty "ORB_MAC_TETHER_SHM_ROOT" then
+    return System.FilePath.mk ov
+  let shmSt ← statPath "/dev/shm"
+  if shmSt.exists_ && shmSt.isDir then
+    return System.FilePath.mk "/dev/shm"
+  return System.FilePath.mk "/tmp"
+
+private def callPrivdJson (payload : JVal) : IO (Except String JVal) := do
+  let sockPath := (← getEnvNonEmpty "ORB_PRIVD_SOCKET").getD "/run/orb-privd.sock"
+  let fd ← match (← LeanSys.Posix.unixConnect sockPath) with
+    | .ok f => pure f
+    | .error e => return .error s!"unixConnect({sockPath}): {e}"
+  let wire := ((renderCompact payload) ++ "\n").toUTF8
+  match (← LeanSys.Posix.writeAll fd wire) with
+  | .error e =>
+    let _ ← LeanSys.Posix.closeFd fd
+    return .error s!"writeAll({sockPath}): {e}"
+  | .ok _ => pure ()
+  let _ ← shutdownWr (Int32.ofBitVec (BitVec.ofNat 32 fd.raw.toNat))
+  let mut respBytes := ByteArray.emptyWithCapacity 2048
+  while respBytes.size < 65536 do
+    match (← readSocketTimed fd 16384 15000) with
+    | .eof | .timeout | .fatal _ => break
+    | .bytes chunk => respBytes := respBytes ++ chunk
+  let _ ← LeanSys.Posix.closeFd fd
+  match Json.parseBytes respBytes with
+  | .error err => return .error s!"Invalid orb-privd JSON: {err}"
+  | .ok j =>
+    if (j.fieldBool? "ok") == some true then return .ok j
+    else return .error ((j.fieldStr? "stderr").getD "orb-privd rejected request")
+
+private def stripSensitiveTetherFields (t : JVal) : JVal :=
+  ((t.removeField "lease_token").removeField "sealed_psk_b64").removeField "mac_kem_pubkey"
+
+private def renderTetherSshConfig (dir : System.FilePath) (sshUser : String) (macPorts : Array Nat) : String := Id.run do
+  let idPath := (dir / "id_ed25519").toString
+  let khPath := (dir / "known_hosts").toString
+  let mut lines : Array String := #[
+    "Host m2air-tether",
+    "  HostName 10.88.200.1",
+    "  Port 2224",
+    s!"  User {sshUser}",
+    s!"  IdentityFile \"{idPath}\"",
+    "  IdentitiesOnly yes",
+    "  StrictHostKeyChecking accept-new",
+    s!"  UserKnownHostsFile \"{khPath}\"",
+    "  ServerAliveInterval 15",
+    "  ServerAliveCountMax 3"
+  ]
+  for p in macPorts do
+    lines := lines.push s!"  LocalForward 127.0.0.1:{p} 127.0.0.1:{p}"
+  return String.intercalate "\n" lines.toList ++ "\n"
+
+private def finalizeApprovedMacTether
+    (reqId : String)
+    (missionId? : Option String)
+    (tether : JVal) : IO JVal := do
+  let base ← macTetherBaseDir
+  let dir := base / s!"orb-mac-tether-{reqId}"
+  let stDir ← statPath dir.toString
+  if !stDir.exists_ || !stDir.isDir then
+    return stripSensitiveTetherFields tether
+  let wgPriv ← try IO.FS.readFile (dir / "wg.key") catch _ => pure ""
+  let kemPriv ← try IO.FS.readFile (dir / "kem.key") catch _ => pure ""
+  let wgPrivClean := wgPriv.trimAscii.toString
+  let kemPrivClean := kemPriv.trimAscii.toString
+  let macKemPub := ((tether.fieldStr? "mac_kem_pubkey").getD "").trimAscii.toString
+  let sealedPsk := ((tether.fieldStr? "sealed_psk_b64").getD "").trimAscii.toString
+  let leaseTok := ((tether.fieldStr? "lease_token").getD "").trimAscii.toString
+  let overlayIp := ((tether.fieldStr? "overlay_ip").getD "").trimAscii.toString
+  let macWgPub := ((tether.fieldStr? "mac_wg_pubkey").getD "").trimAscii.toString
+  let isManaged := (tether.fieldBool? "is_managed_vm").getD false
+  let macDirect := ((tether.fieldStr? "mac_direct_endpoint").getD "").trimAscii.toString
+  let relayEp := ((tether.fieldStr? "relay_endpoint").getD "").trimAscii.toString
+  let effScope := ((tether.fieldStr? "effective_scope").orElse (fun _ => tether.fieldStr? "requested_scope")).getD "sandbox_ssh"
+  let effTarget := ((tether.fieldStr? "effective_target").filter (!·.isEmpty)).getD "sandbox"
+  let macPorts := ((tether.fieldArr? "mac_ports").getD #[]).filterMap JVal.asNat?
+  let peerEp :=
+    if !isManaged && !macDirect.isEmpty then macDirect
+    else if !relayEp.isEmpty then relayEp
+    else macDirect
+  let mut pskB64 := (← try IO.FS.readFile (dir / "peer.psk") catch _ => pure "").trimAscii.toString
+  if pskB64.isEmpty && !kemPrivClean.isEmpty && !macKemPub.isEmpty && !sealedPsk.isEmpty then
+    if let .ok opened ← openTetherPsk kemPrivClean macKemPub reqId sealedPsk then
+      pskB64 := opened
+      let _ ← writeAtomicPrivate0600 (dir / "peer.psk") (opened ++ "\n").toUTF8
+  let sshUser := "orb-tether"
+  let sshCfgPath := dir / "ssh_config"
+  if effScope != "preview" then
+    let _ ← writeAtomicPrivate0600 sshCfgPath (renderTetherSshConfig dir sshUser macPorts).toUTF8
+  if !wgPrivClean.isEmpty && !pskB64.isEmpty && !overlayIp.isEmpty && !macWgPub.isEmpty then
+    let epLine := if peerEp.isEmpty then "" else s!"Endpoint = {peerEp}\n"
+    let wgConf :=
+      s!"[Interface]\nPrivateKey = {wgPrivClean}\nAddress = {overlayIp}/32\n\n" ++
+      s!"[Peer]\nPublicKey = {macWgPub}\nPresharedKey = {pskB64}\nAllowedIPs = 10.88.200.1/32\n" ++
+      epLine ++ "PersistentKeepalive = 25\n"
+    let _ ← writeAtomicPrivate0600 (dir / "wg-macmesh0.conf") wgConf.toUTF8
+  let mut tunnelUp := false
+  let mut activationNote := ""
+  if !wgPrivClean.isEmpty && !pskB64.isEmpty && !leaseTok.isEmpty then
+    let privReq := JVal.obj #[
+      ("action", .str "mac_tether_up"),
+      ("request_id", .str reqId),
+      ("lease_token", .str leaseTok),
+      ("mission_id", .str (missionId?.getD "")),
+      ("wg_private_key", .str wgPrivClean),
+      ("psk_b64", .str pskB64)
+    ]
+    match ← callPrivdJson privReq with
+    | .ok _ =>
+      tunnelUp := true
+      activationNote := "wg-macmesh0 activated via orb-privd"
+    | .error privErr =>
+      if (← geteuid) == 0 && (← getEnvNonEmpty "ORB_PRIVD_MAC_TETHER_DRY_RUN") != some "1" then
+        let iface := (← getEnvNonEmpty "ORB_MAC_TETHER_IFACE").getD "wg-macmesh0"
+        let env := #[("PATH", some "/run/current-system/sw/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")]
+        let _ ← try IO.Process.output { cmd := "ip", args := #["link", "del", "dev", iface], env := env } catch _ => pure { exitCode := 1, stdout := "", stderr := "" }
+        let addR ← try IO.Process.output { cmd := "ip", args := #["link", "add", "dev", iface, "type", "wireguard"], env := env } catch _ => pure { exitCode := 1, stdout := "", stderr := "" }
+        let ipR ← try IO.Process.output { cmd := "ip", args := #["address", "replace", s!"{overlayIp}/32", "dev", iface], env := env } catch _ => pure { exitCode := 1, stdout := "", stderr := "" }
+        let mut wgArgs := #["set", iface, "private-key", (dir / "wg.key").toString, "peer", macWgPub, "preshared-key", (dir / "peer.psk").toString, "allowed-ips", "10.88.200.1/32", "persistent-keepalive", "25"]
+        if !peerEp.isEmpty then wgArgs := wgArgs ++ #["endpoint", peerEp]
+        let wgR ← try IO.Process.output { cmd := "wg", args := wgArgs, env := env } catch _ => pure { exitCode := 1, stdout := "", stderr := "" }
+        let upR ← try IO.Process.output { cmd := "ip", args := #["link", "set", "mtu", "1420", "up", "dev", iface], env := env } catch _ => pure { exitCode := 1, stdout := "", stderr := "" }
+        if addR.exitCode == 0 && ipR.exitCode == 0 && wgR.exitCode == 0 && upR.exitCode == 0 then
+          tunnelUp := true
+          activationNote := "wg-macmesh0 activated directly (root)"
+        else
+          activationNote := s!"orb-privd unavailable ({privErr}); direct root wg setup failed"
+      else
+        activationNote := s!"keys ready in {dir}; orb-privd activation skipped ({privErr})"
+  let cleanTether := stripSensitiveTetherFields tether
+  let mut localFields : Array (String × JVal) := #[
+    ("tether_dir", .str dir.toString),
+    ("wg_config", .str (dir / "wg-macmesh0.conf").toString),
+    ("tunnel_active", .bool tunnelUp),
+    ("note", .str activationNote)
+  ]
+  if effScope != "preview" then
+    let qCfg := shellSingleQuote sshCfgPath.toString
+    localFields := localFields ++ #[
+      ("effective_target", .str effTarget),
+      ("ssh_config", .str sshCfgPath.toString),
+      ("ssh_command", .str s!"ssh -F {qCfg} m2air-tether")
+    ]
+  return cleanTether.setField "local_tether" (.obj localFields)
+
+private def cleanupMacTetherLocal (reqId : String) : IO Unit := do
+  let _ ← callPrivdJson (JVal.obj #[("action", .str "mac_tether_down"), ("request_id", .str reqId)])
+  let base ← macTetherBaseDir
+  let dir := base / s!"orb-mac-tether-{reqId}"
+  for f in ["wg.key", "kem.key", "peer.psk", "id_ed25519", "id_ed25519.pub", "ssh_config", "known_hosts", "wg-macmesh0.conf"] do
+    try IO.FS.removeFile (dir / f) catch _ => pure ()
+  try IO.FS.removeDir dir catch _ => pure ()
+
+private def prepareMacTetherCallArgs
+    (c : McpClient)
+    (toolName : String)
+    (args : JVal) : IO (Except String (JVal × Option PendingMacTetherKeys)) := do
+  if toolName != "request_macbook_tether" then
+    return .ok (args, none)
+  if ((args.fieldStr? "request_id").filter (!·.trimAscii.isEmpty)).isSome then
+    return .ok (args, none)
+  if ((args.fieldStr? "agent_wg_pubkey").filter (!·.trimAscii.isEmpty)).isSome then
+    return .ok (args, none)
+  let (wgPriv, wgPub, _) ← match ← generateWireguardKeypair with
+    | .ok t => pure t
+    | .error e => return .error e
+  let (kemPriv, kemPub, _) ← match ← generateWireguardKeypair with
+    | .ok t => pure t
+    | .error e => return .error e
+  let comment := s!"orb-tether-{c.missionId?.getD "session"}"
+  let (sshPriv, sshPub) ← match ← generateOpenSshEd25519Keypair comment with
+    | .ok p => pure p
+    | .error e => return .error e
+  let hostVal ← match c.hostHint? with
+    | some h => pure h
+    | none => getHostname
+  let a1 := args.setField "agent_wg_pubkey" (.str wgPub)
+  let a2 := a1.setField "agent_kem_pubkey" (.str kemPub)
+  let a3 := a2.setField "agent_ssh_pubkey" (.str sshPub)
+  let a4 := if (a3.fieldStr? "host_id").isSome then a3 else a3.setField "host_id" (.str hostVal)
+  return .ok (a4, some {
+    wgPrivB64 := wgPriv, wgPubB64 := wgPub,
+    kemPrivB64 := kemPriv, kemPubB64 := kemPub,
+    sshPrivPem := sshPriv, sshPubLine := sshPub
+  })
+
+private def postProcessMacTetherPayload
+    (c : McpClient)
+    (toolName : String)
+    (pendingKeys? : Option PendingMacTetherKeys)
+    (payload : JVal) : IO JVal := do
+  if toolName == "request_macbook_tether" then
+    let some reqId := (payload.fieldStr? "request_id").bind parseUuidCanonical?
+      | return payload
+    if let some pk := pendingKeys? then
+      let base ← macTetherBaseDir
+      let dir := base / s!"orb-mac-tether-{reqId}"
+      if (← ensurePrivateDir0700 dir).isOk then
+        let _ ← writeAtomicPrivate0600 (dir / "wg.key") (pk.wgPrivB64 ++ "\n").toUTF8
+        let _ ← writeAtomicPrivate0600 (dir / "kem.key") (pk.kemPrivB64 ++ "\n").toUTF8
+        let _ ← writeAtomicPrivate0600 (dir / "id_ed25519") pk.sshPrivPem.toUTF8
+        let _ ← writeAtomicPrivate0600 (dir / "id_ed25519.pub") (pk.sshPubLine ++ "\n").toUTF8
+    let tetherObj := payload.fieldOrNull "tether"
+    let updatedTether ←
+      if (payload.fieldStr? "status") == some "approved" then
+        finalizeApprovedMacTether reqId c.missionId? tetherObj
+      else
+        pure (stripSensitiveTetherFields tetherObj)
+    return payload.setField "tether" updatedTether
+  else if toolName == "list_macbook_tethers" then
+    let some xs := payload.fieldArr? "tethers" | return payload
+    let mut out : Array JVal := Array.mkEmpty xs.size
+    for item in xs do
+      let rid? := (item.fieldStr? "id").bind parseUuidCanonical?
+      let stStr := (item.fieldStr? "state").getD ""
+      match rid? with
+      | some rid =>
+        if stStr == "approved" then
+          out := out.push (← finalizeApprovedMacTether rid c.missionId? item)
+        else
+          if stStr == "revoked" || stStr == "expired" || stStr == "denied" then
+            cleanupMacTetherLocal rid
+          out := out.push (stripSensitiveTetherFields item)
+      | none =>
+        out := out.push (stripSensitiveTetherFields item)
+    return payload.setField "tethers" (.arr out)
+  else if toolName == "revoke_macbook_tether" then
+    if let some rid := (payload.fieldStr? "request_id").bind parseUuidCanonical? then
+      cleanupMacTetherLocal rid
+    if let some t := payload.field? "tether" then
+      return payload.setField "tether" (stripSensitiveTetherFields t)
+    return payload
+  else
+    return payload
+
 def McpClient.handleRpc (c : McpClient) (req : JVal) (cancelled : IO.Ref Bool) : IO JVal := do
   let idVal := req.fieldOrNull "id"
   let method := (req.fieldStr? "method").getD ""
@@ -756,10 +1003,20 @@ def McpClient.handleRpc (c : McpClient) (req : JVal) (cancelled : IO.Ref Bool) :
               ("content", .arr #[.obj #[("type", .str "text"), ("text", .str (renderCompact errPayload))]])
             ]
             return jsonRpcSuccess idVal res
+      let (enrichedArgs, pendingTetherKeys?) ← match ← prepareMacTetherCallArgs c toolName arguments with
+        | .ok pair => pure pair
+        | .error keyErr =>
+          let errPayload := JVal.obj #[("error", .obj #[("code", .str "local_keygen_failed"), ("message", .str keyErr), ("retryable", .bool false)])]
+          let res := JVal.obj #[
+            ("isError", .bool true),
+            ("structuredContent", errPayload),
+            ("content", .arr #[.obj #[("type", .str "text"), ("text", .str (renderCompact errPayload))]])
+          ]
+          return jsonRpcSuccess idVal res
       let isMutating :=
         OrbBin.McpCatalog.isMutatingControlTool toolName ||
-        (arguments.field? "idempotency_key").isSome
-      let callBody := JVal.obj #[("name", .str toolName), ("arguments", arguments)]
+        (enrichedArgs.field? "idempotency_key").isSome
+      let callBody := JVal.obj #[("name", .str toolName), ("arguments", enrichedArgs)]
       let (transportDropped, reply) ← match (← c.requestDetailed "/api/mcp/call" (some callBody) (some cancelled)) with
         | .ok r => pure (false, r)
         | .preflightFailed message =>
@@ -827,7 +1084,8 @@ def McpClient.handleRpc (c : McpClient) (req : JVal) (cancelled : IO.Ref Bool) :
           pure <| JVal.obj #[("error", reply.fieldOrNull "error")]
         else
           let dir ← c.secretsDir
-          deliverSecretIn dir (reply.fieldOrNull "result")
+          let secDelivered ← deliverSecretIn dir (reply.fieldOrNull "result")
+          postProcessMacTetherPayload c toolName pendingTetherKeys? secDelivered
       let normalized :=
         if toolName == "get_action" || toolName == "wait_actions" || toolName == "get_fleet_sweep" ||
            isActionReceiptLike rawPayload || (transportDropped && isMutating) then
