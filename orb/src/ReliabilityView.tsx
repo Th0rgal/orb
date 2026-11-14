@@ -4,7 +4,7 @@ import { ProviderLogo } from "./ProviderLogo";
 import { formatMs, formatRate, type ProxyHealth } from "./proxyHealthApi";
 import { OUTCOMES, OUTCOME_LABEL, errorLabel, isProblem, outcomeMix, reliabilityRows, type Row } from "./reliability";
 
-const rate = (ok: number, n: number) => (n ? ok / n : null);
+const rate = (ok: number | undefined, n: number | undefined) => (n && ok != null ? ok / n : null);
 const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 
 /**
@@ -15,9 +15,9 @@ const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-di
 export function ReliabilityView(p: { health: ProxyHealth | null }) {
   const h = () => p.health;
   const rows = createMemo(() => (h() ? reliabilityRows(h()!.groups) : undefined));
-  const series = () => h()?.series ?? [];
-  const maxTtft = createMemo(() => Math.max(1000, ...(h()?.groups ?? []).map(g => g.ttft_p95_ms ?? 0)));
-  const totalRate = () => h()?.totals.success_rate ?? null;
+  const series = () => (Array.isArray(h()?.series) ? h()!.series! : []);
+  const maxTtft = createMemo(() => Math.max(1000, ...(Array.isArray(h()?.groups) ? h()!.groups! : []).map(g => g.ttft_p95_ms ?? 0)));
+  const totalRate = () => h()?.totals?.success_rate ?? null;
   const columns: Column<Row>[] = [
     { header: "Provider · model", width: "minmax(180px, 1fr)", narrowWidth: "minmax(0, 1fr)", cell: r => <span class="st-cell-provider">
       <ProviderLogo type={r.group.provider ?? ""} name={r.account} />
@@ -31,10 +31,10 @@ export function ReliabilityView(p: { health: ProxyHealth | null }) {
       return <OutcomeBar label={r.name} segments={OUTCOMES.map(k => ({ key: k, label: OUTCOME_LABEL[k], value: mix[k] }))} />;
     } },
     { header: "Success", width: "48px", align: "end", cell: r => formatRate(r.group.success_rate) },
-    { header: "Attempts", width: "60px", align: "end", hideNarrow: true, cell: r => r.group.requests.toLocaleString() },
+    { header: "Attempts", width: "60px", align: "end", hideNarrow: true, cell: r => r.group.requests != null ? r.group.requests.toLocaleString() : "—" },
     { header: "First token", width: "88px", hideNarrow: true, cell: r =>
-      <RangeBar low={r.group.ttft_p50_ms} high={r.group.ttft_p95_ms} max={maxTtft()}
-        tone={r.group.flags.includes("slow_first_token") ? "warning" : "neutral"}
+      <RangeBar low={r.group.ttft_p50_ms ?? null} high={r.group.ttft_p95_ms ?? null} max={maxTtft()}
+        tone={r.group.flags?.includes("slow_first_token") ? "warning" : "neutral"}
         title={`p50 ${formatMs(r.group.ttft_p50_ms)} · p95 ${formatMs(r.group.ttft_p95_ms)}`} /> },
     { header: "Status", width: "140px", narrowWidth: "96px", align: "end", cell: r => <StatusPill tone={r.status.tone} label={r.status.label} short={r.status.short} /> },
   ];
@@ -42,13 +42,13 @@ export function ReliabilityView(p: { health: ProxyHealth | null }) {
     <div class="st-tiles">
       <StatTile label="Router success" value={h() ? formatRate(totalRate()) : undefined}
         tone={totalRate() != null && totalRate()! < 0.9 ? "danger" : totalRate() != null && totalRate()! < 0.99 ? "warning" : "neutral"}
-        title={h() ? `${h()!.totals.ok.toLocaleString()} of ${h()!.totals.requests.toLocaleString()} requests` : undefined}
+        title={h() ? (h()!.totals?.ok != null && h()!.totals?.requests != null ? `${h()!.totals.ok!.toLocaleString()} of ${h()!.totals.requests!.toLocaleString()} requests` : h()!.totals?.requests != null ? `${h()!.totals.requests!.toLocaleString()} requests` : undefined) : undefined}
         series={series().map(b => rate(b.ok, b.requests))} />
-      <StatTile label="First token p50" value={h() ? formatMs(h()!.totals.ttft_p50_ms) : undefined} series={series().map(b => b.ttft_p50_ms)} seriesMin={0} />
-      <StatTile label="First token p95" value={h() ? formatMs(h()!.totals.ttft_p95_ms) : undefined} series={series().map(b => b.ttft_p95_ms)} seriesMin={0} />
-      <StatTile label="Retried · fell back" value={h() ? `${h()!.totals.retried.toLocaleString()} · ${h()!.totals.fell_back.toLocaleString()}` : undefined}
+      <StatTile label="First token p50" value={h() ? formatMs(h()!.totals?.ttft_p50_ms) : undefined} series={series().map(b => b.ttft_p50_ms ?? null)} seriesMin={0} />
+      <StatTile label="First token p95" value={h() ? formatMs(h()!.totals?.ttft_p95_ms) : undefined} series={series().map(b => b.ttft_p95_ms ?? null)} seriesMin={0} />
+      <StatTile label="Retried · fell back" value={h() ? (h()!.totals?.retried != null || h()!.totals?.fell_back != null ? `${h()!.totals?.retried != null ? h()!.totals.retried!.toLocaleString() : "—"} · ${h()!.totals?.fell_back != null ? h()!.totals.fell_back!.toLocaleString() : "—"}` : "—") : undefined}
         title="Requests retried on the same entry before the first byte · answered by a later chain entry"
-        series={series().map(b => b.retried + b.fell_back)} seriesMin={0} />
+        series={series().map(b => b.retried != null && b.fell_back != null ? b.retried + b.fell_back : null)} seriesMin={0} />
     </div>
     <BreakdownTable label="Reliability by provider" columns={columns} rows={rows()} rowKey={r => r.key}
       collapse={r => !isProblem(r)} collapsedLabel="healthy" skeletonRows={4} limit={10}
@@ -60,11 +60,11 @@ export function ReliabilityView(p: { health: ProxyHealth | null }) {
 
 function ReliabilityDetail(p: { row: Row }) {
   const g = () => p.row.group;
-  const errors = () => Object.entries(g().errors).sort((a, b) => b[1] - a[1]);
+  const errors = () => Object.entries(g().errors ?? {}).sort((a, b) => b[1] - a[1]);
   return <div class="rel-detail">
     <p>
-      {g().ok.toLocaleString()} ok of {g().requests.toLocaleString()} attempts · first token {formatMs(g().ttft_p50_ms)} p50, {formatMs(g().ttft_p95_ms)} p95
-      {g().retried ? ` · ${g().retried.toLocaleString()} retried` : ""}
+      {g().ok != null ? g().ok!.toLocaleString() : "—"} ok of {g().requests != null ? g().requests!.toLocaleString() : "—"} attempts · first token {formatMs(g().ttft_p50_ms)} p50, {formatMs(g().ttft_p95_ms)} p95
+      {g().retried ? ` · ${g().retried!.toLocaleString()} retried` : ""}
       <Show when={p.row.status.until}> · quota resets {time(p.row.status.until!)}. 429s here are expected waiting, not failures.</Show>
     </p>
     <Show when={errors().length}>

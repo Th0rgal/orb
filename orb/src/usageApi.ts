@@ -4,31 +4,34 @@ export type UsageSource = "harness" | "router";
 export type CostStatus = "known" | "partial" | "unknown";
 
 export interface UsageTotals {
-  requests: number;
+  requests?: number;
   input_tokens: number;
   output_tokens: number;
   cache_creation_tokens: number;
   cache_read_tokens: number;
   reasoning_tokens?: number;
-  cost_cents: number;
-  unknown_cost_requests: number;
+  cost_cents?: number;
+  unknown_cost_requests?: number;
 }
 
 export interface ModelUsage extends UsageTotals {
-  model: string;
-  provider: string | null;
-  source: UsageSource;
-  cost_status: CostStatus;
+  model?: string;
+  key?: string | null;
+  label?: string | null;
+  provider?: string | null;
+  source?: UsageSource;
+  cost_status?: CostStatus;
 }
 
 export interface UsageGroup extends UsageTotals {
   key: string | null;
   label: string | null;
-  cost_status: CostStatus;
+  requests: number;
+  cost_status?: CostStatus;
 }
 
-export interface DayUsage extends UsageTotals { day: string; router_requests: number; by_caller_kind?: Record<string, number> }
-export interface HourUsage extends UsageTotals { hour: string; router_requests: number; by_caller_kind?: Record<string, number> }
+export interface DayUsage extends Partial<UsageTotals> { day: string; router_requests?: number; by_caller_kind?: Record<string, number>; totals?: UsageTotals }
+export interface HourUsage extends Partial<UsageTotals> { hour: string; router_requests?: number; by_caller_kind?: Record<string, number>; totals?: UsageTotals }
 
 /** Closed caller-kind enum from Core (`docs/specs/usage-attribution.md`). */
 export const CALLER_KINDS = ["mission", "subagent", "hermes", "orb_ui", "core", "script", "unknown"] as const;
@@ -38,22 +41,22 @@ export const CALLER_KIND_LABEL: Record<string, string> = {
 
 export interface UsageSummary {
   window: string;
-  since: string | null;
-  cost_status: CostStatus;
+  since?: string | null;
+  cost_status?: CostStatus;
   totals: UsageTotals;
-  by_model: ModelUsage[];
+  by_model?: ModelUsage[];
   by_provider: UsageGroup[];
-  by_source: UsageGroup[];
+  by_source?: UsageGroup[];
   by_route?: UsageGroup[];
   by_caller_kind?: UsageGroup[];
   by_purpose?: UsageGroup[];
-  by_backend: UsageGroup[];
-  by_mission: UsageGroup[];
+  by_backend?: UsageGroup[];
+  by_mission?: UsageGroup[];
   by_root_mission?: UsageGroup[];
-  by_api_key: UsageGroup[];
-  by_account: UsageGroup[];
-  by_day: DayUsage[];
-  by_hour: HourUsage[];
+  by_api_key?: UsageGroup[];
+  by_account?: UsageGroup[];
+  by_day?: DayUsage[];
+  by_hour?: HourUsage[];
 }
 
 export interface UsageFilters {
@@ -85,8 +88,8 @@ export function usageQuery(window: string, filters: UsageFilters = {}) {
 export const getUsageSummary = (window: string, filters: UsageFilters = {}) =>
   api<UsageSummary>(usageQuery(window, filters));
 
-export const totalTokens = (t: UsageTotals) =>
-  t.input_tokens + t.output_tokens + t.cache_creation_tokens + t.cache_read_tokens;
+export const totalTokens = (t: Partial<UsageTotals> | undefined) =>
+  (t?.input_tokens ?? 0) + (t?.output_tokens ?? 0) + (t?.cache_creation_tokens ?? 0) + (t?.cache_read_tokens ?? 0);
 
 export function formatTokens(n: number) {
   if (n >= 1e9) return `${(n / 1e9).toFixed(n >= 1e10 ? 0 : 1)}B`;
@@ -97,15 +100,18 @@ export function formatTokens(n: number) {
 
 /** Cost is never shown as $0 when part of it is unpriced. */
 export function formatCost(t: Pick<UsageTotals, "cost_cents" | "unknown_cost_requests" | "requests">) {
-  if (t.requests > 0 && t.unknown_cost_requests === t.requests) return "Unknown";
+  const requests = t.requests ?? 0;
+  const unknown = t.unknown_cost_requests ?? 0;
+  if (requests > 0 && unknown === requests) return "Unknown";
+  if (t.cost_cents == null) return "—";
   const dollars = t.cost_cents / 100;
   const text = dollars >= 100 ? `$${Math.round(dollars).toLocaleString()}` : `$${dollars.toFixed(2)}`;
-  return t.unknown_cost_requests > 0 ? `${text}+` : text;
+  return unknown > 0 ? `${text}+` : text;
 }
 
 export function costTitle(t: UsageTotals) {
   if (!t.unknown_cost_requests) return undefined;
-  return `${t.unknown_cost_requests.toLocaleString()} of ${t.requests.toLocaleString()} requests use a model without a list price; their cost is not included.`;
+  return `${t.unknown_cost_requests.toLocaleString()} of ${(t.requests ?? t.unknown_cost_requests).toLocaleString()} requests use a model without a list price; their cost is not included.`;
 }
 
 export interface ChartBucket { key: string; label: string; tokens: number; cost_cents: number; requests: number; router_requests: number }
@@ -136,22 +142,25 @@ export function hourlyAvailable(window: string) {
 export function chartBuckets(s: UsageSummary, now = new Date(), prefer: "hour" | "day" = "hour"): { granularity: "hour" | "day"; buckets: ChartBucket[] } {
   const hours = windowHours(s.window);
   const hourly = prefer === "hour" && hourlyAvailable(s.window);
-  const rows = new Map<string, UsageTotals & { router_requests: number }>();
-  for (const r of hourly ? s.by_hour : s.by_day) rows.set("hour" in r ? r.hour : r.day, r);
+  const byHour = Array.isArray(s.by_hour) ? s.by_hour : [];
+  const byDay = Array.isArray(s.by_day) ? s.by_day : [];
+  const rows = new Map<string, Partial<UsageTotals> & { router_requests?: number; totals?: UsageTotals }>();
+  for (const r of hourly ? byHour : byDay) rows.set("hour" in r ? r.hour : r.day, r);
   const keys: string[] = [];
   if (hourly) {
     const end = new Date(now); end.setUTCMinutes(0, 0, 0);
     for (let i = hours! - 1; i >= 0; i--) keys.push(hourKey(new Date(end.getTime() - i * 3_600_000)));
   } else {
-    const first = s.by_day[0]?.day;
+    const first = byDay[0]?.day;
     const days = hours !== null ? Math.max(1, Math.ceil(hours / 24)) : first ? Math.max(1, Math.round((Date.parse(dayKey(now)) - Date.parse(first)) / 86_400_000) + 1) : 0;
     const end = Date.parse(dayKey(now));
     for (let i = days - 1; i >= 0; i--) keys.push(dayKey(new Date(end - i * 86_400_000)));
   }
   const buckets = keys.map(key => {
     const r = rows.get(key);
+    const t = r?.totals ?? r;
     const label = hourly ? `${key.slice(11)}:00` : key.slice(5);
-    return { key, label, tokens: r ? totalTokens(r) : 0, cost_cents: r?.cost_cents ?? 0, requests: r?.requests ?? 0, router_requests: r?.router_requests ?? 0 };
+    return { key, label, tokens: t ? totalTokens(t) : 0, cost_cents: t?.cost_cents ?? 0, requests: t?.requests ?? 0, router_requests: r?.router_requests ?? 0 };
   });
   return { granularity: hourly ? "hour" : "day", buckets };
 }

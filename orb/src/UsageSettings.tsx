@@ -31,15 +31,20 @@ const SOURCE_LABEL: Record<string, string> = { harness: "Harness", router: "Rout
 interface Row extends UsageTotals { id: string; name: string; detail?: string; filter?: Partial<UsageFilters> }
 
 function rowsFor(s: UsageSummary, by: GroupBy): Row[] {
-  if (by === "model") return s.by_model.map(m => ({
-    ...m, id: `${m.source}:${m.model}`, name: m.model || "Unrecorded model",
-    detail: [SOURCE_LABEL[m.source], m.provider].filter(Boolean).join(" · "),
-    filter: m.model ? { model: m.model, source: m.source } : undefined,
-  }));
-  const groups = {
+  if (by === "model") return (Array.isArray(s.by_model) ? s.by_model : []).map(m => {
+    const model = m.model ?? m.key ?? m.label ?? "";
+    const src = m.source ?? "";
+    return {
+      ...m, id: `${src}:${model}`, name: model || "Unrecorded model",
+      detail: [SOURCE_LABEL[src], m.provider].filter(Boolean).join(" · ") || undefined,
+      filter: model ? { model, ...(m.source ? { source: m.source } : {}) } : undefined,
+    };
+  });
+  const raw = {
     caller_kind: s.by_caller_kind, provider: s.by_provider, source: s.by_source, mission: s.by_mission,
     root_mission: s.by_root_mission, api_key: s.by_api_key, backend: s.by_backend, purpose: s.by_purpose,
-  }[by] ?? [];
+  }[by];
+  const groups = Array.isArray(raw) ? raw : [];
   const empty = {
     caller_kind: "Unknown", provider: "Unknown provider", source: "", mission: "No mission", root_mission: "No mission",
     api_key: "Internal proxy secret", backend: "No harness", purpose: "Unspecified",
@@ -148,17 +153,20 @@ export function UsageSettings() {
 
   const setFilter = (key: keyof UsageFilters, value: string) => setFilters(f => ({ ...f, [key]: value || undefined }));
   // Top missions and callers by cost first.
-  const rows = createMemo(() => summary() ? rowsFor(summary()!, groupBy()).sort((a, b) => b.cost_cents - a.cost_cents) : []);
+  const rows = createMemo(() => summary() ? rowsFor(summary()!, groupBy()).sort((a, b) => (b.cost_cents ?? 0) - (a.cost_cents ?? 0) || totalTokens(b) - totalTokens(a)) : []);
   const maxRow = createMemo(() => Math.max(1, ...rows().map(r => totalTokens(r))));
   const routerShare = () => {
-    const s = summary(); if (!s?.totals.requests) return "—";
-    const router = s.by_source.find(g => g.key === "router")?.requests ?? 0;
+    const s = summary(); if (!s?.totals?.requests) return "—";
+    const sources = Array.isArray(s.by_source) ? s.by_source : [];
+    const router = sources.find(g => g.key === "router")?.requests;
+    if (router == null) return "—";
     return `${Math.round((router / s.totals.requests) * 100)}%`;
   };
   const activeFilters = () => Object.entries(filters()).filter(([, v]) => v) as [keyof UsageFilters, string][];
   const filterLabel = (key: keyof UsageFilters, value: string) => {
     const o = options();
-    const group = key === "mission" ? o?.by_mission : key === "api_key" ? o?.by_api_key : undefined;
+    const rawGroup = key === "mission" ? o?.by_mission : key === "api_key" ? o?.by_api_key : undefined;
+    const group = Array.isArray(rawGroup) ? rawGroup : undefined;
     const name = key === "api_key" ? "key" : key === "caller_kind" ? "caller" : key;
     return `${name}: ${group?.find(g => g.key === value)?.label ?? SOURCE_LABEL[value] ?? CALLER_KIND_LABEL[value] ?? value}`;
   };
@@ -187,11 +195,11 @@ export function UsageSettings() {
         </Select>
         <Select aria-label="Provider" value={filters().provider ?? ""} onChange={e => setFilter("provider", e.currentTarget.value)}>
           <option value="">All providers</option>
-          <For each={(options()?.by_provider ?? []).filter(g => g.key)}>{g => <option value={g.key!}>{g.key}</option>}</For>
+          <For each={(Array.isArray(options()?.by_provider) ? options()!.by_provider! : []).filter(g => g.key)}>{g => <option value={g.key!}>{g.key}</option>}</For>
         </Select>
         <Select aria-label="Harness" value={filters().backend ?? ""} onChange={e => setFilter("backend", e.currentTarget.value)}>
           <option value="">All harnesses</option>
-          <For each={(options()?.by_backend ?? []).filter(g => g.key)}>{g => <option value={g.key!}>{g.key}</option>}</For>
+          <For each={(Array.isArray(options()?.by_backend) ? options()!.by_backend! : []).filter(g => g.key)}>{g => <option value={g.key!}>{g.key}</option>}</For>
         </Select>
         <For each={activeFilters().filter(([k]) => k === "mission" || k === "api_key" || k === "model")}>{([key, value]) =>
           <button class="usage-chip" aria-label={`Clear ${key} filter`} onClick={() => setFilter(key, "")}>{filterLabel(key, value)} ×</button>
@@ -200,9 +208,9 @@ export function UsageSettings() {
 
       <Show when={summary()}>{s => <>
         <div class="usage-tiles">
-          <Tile label="Requests" value={s().totals.requests.toLocaleString()} />
-          <Tile label="Tokens" value={formatTokens(totalTokens(s().totals))} title={`${s().totals.input_tokens.toLocaleString()} input · ${s().totals.output_tokens.toLocaleString()} output · ${s().totals.cache_read_tokens.toLocaleString()} cache read · ${s().totals.cache_creation_tokens.toLocaleString()} cache write`} />
-          <Tile label="Cost" value={formatCost(s().totals)} title={`${costTitle(s().totals)}\nEstimated list price from mission harnesses and the /v1 router. + or Unknown: models without a published price.`} />
+          <Tile label="Requests" value={s().totals?.requests != null ? s().totals.requests!.toLocaleString() : "—"} />
+          <Tile label="Tokens" value={formatTokens(totalTokens(s().totals))} title={`${(s().totals?.input_tokens ?? 0).toLocaleString()} input · ${(s().totals?.output_tokens ?? 0).toLocaleString()} output · ${(s().totals?.cache_read_tokens ?? 0).toLocaleString()} cache read · ${(s().totals?.cache_creation_tokens ?? 0).toLocaleString()} cache write`} />
+          <Tile label="Cost" value={formatCost(s().totals ?? { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0 })} title={`${costTitle(s().totals ?? { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0 }) ?? ""}\nEstimated list price from mission harnesses and the /v1 router. + or Unknown: models without a published price.`.trim()} />
           <Tile label="Via router" value={routerShare()} />
         </div>
 
@@ -224,7 +232,7 @@ export function UsageSettings() {
               }</For>
             </div>
           </div>
-          <div class="s-card usage-chart-card"><ProviderStackedChart summary={s()} filters={filters()} metric={metric()} granularity={hourlyAvailable(window()) ? granularity() : "day"} /></div>
+          <div class="s-card usage-chart-card"><ProviderStackedChart summary={{ ...s(), by_provider: Array.isArray(s().by_provider) ? s().by_provider : [] }} filters={filters()} metric={metric()} granularity={hourlyAvailable(window()) ? granularity() : "day"} /></div>
         </section>
 
         <section class="s-sec">
@@ -253,9 +261,9 @@ export function UsageSettings() {
                   <Show when={r.detail}><span>{r.detail}</span></Show>
                   <i class="usage-meter" style={{ width: `${(totalTokens(r) / maxRow()) * 100}%` }} />
                 </span>
-                <span role="cell">{r.requests.toLocaleString()}</span>
-                <span role="cell" title={`${r.input_tokens.toLocaleString()} in · ${r.output_tokens.toLocaleString()} out · ${r.cache_read_tokens.toLocaleString()} cached`}>{formatTokens(totalTokens(r))}</span>
-                <span role="cell" title={costTitle(r)} classList={{ "usage-unknown": r.unknown_cost_requests > 0 }}>{formatCost(r)}</span>
+                <span role="cell">{r.requests != null ? r.requests.toLocaleString() : "—"}</span>
+                <span role="cell" title={`${(r.input_tokens ?? 0).toLocaleString()} in · ${(r.output_tokens ?? 0).toLocaleString()} out · ${(r.cache_read_tokens ?? 0).toLocaleString()} cached`}>{formatTokens(totalTokens(r))}</span>
+                <span role="cell" title={costTitle(r)} classList={{ "usage-unknown": (r.unknown_cost_requests ?? 0) > 0 }}>{formatCost(r)}</span>
               </div>}</For>
               <Show when={rows().length > 10}>
                 <button class="st-more" onClick={() => setAllSpenders(v => !v)} aria-expanded={allSpenders()}>

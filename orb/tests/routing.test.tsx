@@ -2,6 +2,7 @@ import { render, screen, fireEvent, waitFor } from "@solidjs/testing-library";
 import { beforeEach, afterEach, describe, it, expect, vi } from "vitest";
 import { RoutingSettings, confirmLeaveRouting } from "../src/RoutingSettings";
 import { setConnection, clearConnection } from "../src/api";
+import { cachePut, cacheReset } from "../src/pageCache";
 import { listChains, routingCatalog } from "../src/routingApi";
 import type { ModelChain } from "../src/routingApi";
 let chains: ModelChain[];
@@ -337,6 +338,76 @@ describe("Routing settings", () => {
     await screen.findByText("Connect to a backend to configure routing.");
     expect(screen.queryByText("First account")).toBeNull();
     expect(confirmLeaveRouting()).toBe(true);
+  });
+  it("renders Core's present routing health shape with dashes, cooldown_secs_remaining and survives a cached reply at mount", async () => {
+    const coreRows = [
+      {
+        account_id: "account-one",
+        ewma_ttft_ms: null,
+        ewma_tps: null,
+        remaining_quota_pct: 100.0,
+        consecutive_failures: 1,
+        cooldown_secs_remaining: 45,
+        parked_until: "2026-10-20T12:00:45Z",
+        parked_reason: "rate_limit",
+        parked_source: "core",
+        sample_count: 0,
+        antigravity_refusal: null,
+      },
+      {
+        account_id: "account-two",
+        ewma_ttft_ms: null,
+        ewma_tps: null,
+        remaining_quota_pct: 100.0,
+        consecutive_failures: 0,
+        cooldown_secs_remaining: 0,
+        parked_until: null,
+        parked_reason: null,
+        parked_source: null,
+        sample_count: 0,
+        antigravity_refusal: null,
+      },
+    ];
+    cacheReset();
+    cachePut("routing:health", coreRows);
+    const orig = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/health")) return new Response(JSON.stringify(coreRows), { status: 200 });
+      return orig(input, init);
+    });
+    const view = render(() => <RoutingSettings onOpenClient={() => {}} tab="health" />);
+    await screen.findByText("First account");
+    const cards = Array.from(view.container.querySelectorAll(".routing-health"));
+    expect(cards).toHaveLength(2);
+    expect(cards[0].querySelector(".routing-status")?.textContent).toBe("Cooldown · 45s");
+    expect(cards[0].querySelector(".routing-order")?.textContent).toBe("— requests · — · — errors · — rate limits · —");
+    expect(cards[0].textContent).toContain("1 consecutive failures · — input tokens · — output tokens");
+    expect(cards[0].textContent).not.toContain("0 input tokens");
+    expect(cards[1].querySelector(".routing-status")?.textContent).toBe("No data");
+    fireEvent.click(
+      screen.getAllByRole("button", {
+        name: "Clear cooldown",
+        hidden: true,
+      })[0],
+    );
+    await waitFor(() =>
+      expect(
+        writes.some((w) => w.path === "/api/model-routing/health/account-one/clear"),
+      ).toBe(true),
+    );
+  });
+  it("renders a full routing health reply in the client's shape unchanged", async () => {
+    cacheReset();
+    const view = render(() => <RoutingSettings onOpenClient={() => {}} tab="health" />);
+    await screen.findByText("First account");
+    const cards = Array.from(view.container.querySelectorAll(".routing-health"));
+    expect(cards).toHaveLength(2);
+    expect(cards[0].querySelector(".routing-status")?.textContent).toBe("Cooldown · 30s");
+    expect(cards[0].querySelector(".routing-order")?.textContent).toBe(
+      "10 requests · 90% success · 0 errors · 1 rate limits · 120 ms",
+    );
+    expect(cards[0].textContent).toContain("1 consecutive failures · 100 input tokens · 20 output tokens");
   });
 });
 
