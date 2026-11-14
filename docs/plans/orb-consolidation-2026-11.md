@@ -743,6 +743,10 @@ nothing was done on it.
   2. **OrbNode single-tenant managed VM (`28a75b5a` on `managed-f82ce6eb`):**
      - On a managed VM, `sandboxed-node` runs as `orbnode` via dial-out enrollment without `orb-privd` (`/run/orb-privd.sock` absent). `OrbNode/Server.lean:616` (`admitNodeLeaseRole`) currently uses `targetKind := 2` and sets `execUnixUser := claims.unixUsername.getD ""`, causing `Runner.lean:1316-1333` (`ensureMissionUser`) to fail on member jobs. Fix: add `managedSandbox : Bool := false` to `NodeConfig` (enabled on dial-out / `SANDBOXED_NODE_MANAGED_SANDBOX=1`), pass `targetKind := 3` to `Orb.Kernel.placementRoleAdmit`, set `execUnixUser := ""` when `managedSandbox` is true while keeping `callerRole := "member"` when `!rec.ownerUserId.isEmpty` so `managed_auth` host credentials are never copied for member jobs.
 - **LeanUI Wave 2 (`ea916daa` on `managed-d8103971`):** healthy and active on `lean/OrbDesktop/Screens.lean` and `orb/tests/leanui-reference.capture.ts` (36 reference captures and per-screen pixel-diff table).
+- **Operator correction (08:50 UTC relay, recorded 09:44 UTC): laptop is NOT reachable from workers.** `~/.ssh/orb_m2air_temp` has no network path (`lean-mesh` denies worker -> laptop `:22` by manifest, and the fleet key forbids port forwarding); do not attempt workarounds. All desktop/LeanUI builds, reference captures, and pixel-diff runs proceed on managed VMs (headless Wayland + lavapipe, e.g. `ea916daa` on `managed-d8103971`), while items that remain strictly laptop-only until Thomas approves a mesh route or tether are:
+  1. Native macOS shell & signer (`Orb macOS Shell & Signer (Swift)`) runtime and Touch ID / Keychain verification.
+  2. Native iOS (`OrbApp` / Simulator) and Android (`android-orb`) interactive device/emulator walk as member `ben`.
+  3. Live authenticated browser/desktop walk as `ben` against dev Core (`agent-backend-dev.thomas.md`), because managed VMs must never receive `ben`'s session token or credentials.
 
 ### Operator night log, 13 Nov 21:15 to 23:45 UTC (Claude, for Thomas)
 
@@ -1577,3 +1581,4 @@ verification command. The operator session runs them and records the result.
 | 13 Nov 12:19 | Deployed `de3fd0fa1` to dev, then prod | Thomas approved prod deploys; dev build + self-test were green |
 | 13 Nov 12:20 | Orchestrator is the git integrator with `GITHUB_TOKEN` from the broker; worker VMs stay credential-free | Managed VMs have no GitHub identity, and workers refused to improvise one |
 | 14 Nov 09:40 | Split member mission-on-managed-VM + WebSocket tchar fix across two disjoint `boat:large` workers (`8f53412f` for `OrbCore`+`orb/src`, `28a75b5a` for `OrbNode`), avoiding `Managed.lean` (#1766) | Each Lean build runs in its own isolated VM without touching files owned by open PR #1766 |
+| 14 Nov 09:44 | Run all desktop/LeanUI rendering and pixel-diff work on managed VMs (headless Wayland + lavapipe); do not probe or tunnel to `m2air` | `lean-mesh` denies worker->laptop `:22` and fleet keys forbid forwarding by design; macOS shell, iOS/Android interactive walks, and credentialed `ben` desktop walks remain laptop-only until Thomas approves a route |
