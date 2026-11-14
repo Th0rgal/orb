@@ -5194,9 +5194,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | .ok cents => pure cents
         | .error e => return .ok (mkJson 400 (renderCompact (.obj #[("error", .str e)])))
       let (infS, cmpS) ← if caller.userId.isEmpty then pure (0, 0) else getUserSpentTodayCents st.store caller.userId utcDay
-      let userAdmission? : Option ManagedUserAdmission := caller.dailySpendCapCents?.map fun cap => {
-        capCents := cap, inferenceCents := infS, computeCents := cmpS
-      }
+      let userAdmission? := managedUserAdmissionOf caller.role caller.dailySpendCapCents?
+        infS cmpS (← memberMaxMachines)
       -- Name the real refusal: a disabled fleet or provider is not a spend cap.
       if !live.enabled then
         return .ok (mkJson 409 "{\"error\":\"managed_fleet_disabled\",\"message\":\"Managed machines are turned off for this Core.\"}")

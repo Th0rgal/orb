@@ -111,6 +111,9 @@ private def runManagedMcpProviderContractTests (root : String) : IO Unit := do
       } | throw (IO.userError "managed MCP provider contract: parent fixture failed")
     let .ok () ← saveManagedFleetConfig mc true true 100000 0 100
       | throw (IO.userError "managed MCP provider contract: fleet fixture failed")
+    -- This contract rents every size of every provider for one member: lift both holding limits.
+    OrbBin.PosixExt.setenvVar "SANDBOXED_MANAGED_LEANCI_MAX_CONCURRENT" "1000"
+    OrbBin.PosixExt.setenvVar "SANDBOXED_MANAGED_MEMBER_MAX_MACHINES" "1000"
     let fleet : ManagedFleetState := { enabled := true, boatEnabled := true }
     let cfg : ManagedProvisioning.BootstrapConfig := { coreUrl := "https://core.example", script := "#!/bin/sh\nexit 0\n" }
     let now ← coreEpochSec
@@ -258,9 +261,30 @@ private def runManagedMcpProviderContractTests (root : String) : IO Unit := do
         (fallbackOf optedOut).fieldStr? "reason" == some "provider_disabled_for_user" &&
         (← rented.get).size == beforeDefault + 4)
         s!"a default the user has not enabled falls back to boat: {OrbBin.Json.renderCompact optedOut}"
+      -- The instance cap on lean.ci machines: unnamed moves to boat, named is refused.
+      let .ok () ← setUserManagedPref mc user.id "leanci" true "cap-opt-in"
+        | throw (IO.userError "managed MCP provider contract: cap opt-in fixture failed")
+      OrbBin.PosixExt.setenvVar "SANDBOXED_MANAGED_LEANCI_MAX_CONCURRENT" "1"
+      let capped ← call "boat" "spawn_managed_machine" (.obj lease)
+      let cappedNamed ← call "leanci" "spawn_managed_machine" (.obj (#[("provider", OrbBin.Json.JVal.str "leanci")] ++ lease))
+      let cappedOnly ← call "leanci" "spawn_managed_machine" (.obj lease)
+      let refusedBy (reply : OrbBin.Json.JVal) (code : String) :=
+        ((resultOf reply).fieldStr? "id").isNone && ((OrbBin.Json.renderCompact reply).splitOn code).length > 1
+      check ((resultOf capped).fieldStr? "provider" == some "boat" &&
+        (fallbackOf capped).fieldStr? "reason" == some "default_provider_at_capacity" &&
+        refusedBy cappedNamed "provider_concurrency_limit_reached" &&
+        refusedBy cappedOnly "provider_concurrency_limit_reached" && (← rented.get).size == beforeDefault + 5)
+        s!"at the lean.ci cap an unnamed spawn moves to boat and a named one is refused: {OrbBin.Json.renderCompact capped} {OrbBin.Json.renderCompact cappedNamed} {OrbBin.Json.renderCompact cappedOnly}"
+      -- A member holds at most the configured number of machines, whatever the provider.
+      OrbBin.PosixExt.setenvVar "SANDBOXED_MANAGED_MEMBER_MAX_MACHINES" "2"
+      let overLimit ← call "boat" "spawn_managed_machine" (.obj (#[("provider", OrbBin.Json.JVal.str "boat")] ++ lease))
+      check (refusedBy overLimit "managed_user_machine_limit_reached" && (← rented.get).size == beforeDefault + 5)
+        s!"a member over the machine limit is refused: {OrbBin.Json.renderCompact overLimit}"
     finally
       OrbBin.PosixExt.unsetenvVar "SANDBOXED_MANAGED_DEFAULT_PROVIDER"
   finally
+    OrbBin.PosixExt.unsetenvVar "SANDBOXED_MANAGED_LEANCI_MAX_CONCURRENT"
+    OrbBin.PosixExt.unsetenvVar "SANDBOXED_MANAGED_MEMBER_MAX_MACHINES"
     closeManagedComputeStore mc
     closeCoreStore core
 

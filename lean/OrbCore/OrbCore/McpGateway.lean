@@ -385,9 +385,8 @@ def dispatchMcpToolCall
     let (infSpent, cmpSpent) ← if callerUserId.isEmpty then pure (0, 0)
       else getUserSpentTodayCents store callerUserId (nowIso.take 10).toString
     let userCap? := callerUser?.bind (·.dailySpendCapCents?)
-    let userAdmission? : Option ManagedUserAdmission := userCap?.map fun cap => {
-      capCents := cap, inferenceCents := infSpent, computeCents := cmpSpent
-    }
+    let userAdmission? := managedUserAdmissionOf ((callerUser?.map (·.role)).getD "") userCap?
+      infSpent cmpSpent (← memberMaxMachines)
     let m : ManagedMachine := {
       id := mid
       sandboxName := sName

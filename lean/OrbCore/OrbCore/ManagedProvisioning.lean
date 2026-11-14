@@ -219,10 +219,13 @@ def spawnManagedWorker (mc : ManagedComputeStore) (fleet : ManagedFleetState)
     | return .error "managed_spawn_quote_invalid"
   if let .error error ← preflightAvailability mc fleet provider spec then return .error error
   let now ← runtime.nowEpoch
-  let .ok reserved ← provisionManagedMachine mc fleet {
+  let reserved ← match ← provisionManagedMachine mc fleet {
       machine with requestKey := spec.idempotencyKey, image := spec.fromSnapshot, spentCents := quote
-    } now userAdmission?
-    | return .error "managed_spawn_rejected"
+    } now userAdmission? with
+    | .ok reserved => pure reserved
+    -- The two holding limits are named, so a refused caller knows which one it met.
+    | .error e => return .error (if e == "provider_concurrency_limit_reached" ||
+        e == "managed_user_machine_limit_reached" then e else "managed_spawn_rejected")
   let started ← runtime.monotonicMs
   let created ← match ← provider.spawn spec with
     | .ok m => pure m

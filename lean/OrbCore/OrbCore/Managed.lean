@@ -114,6 +114,31 @@ structure ManagedUserAdmission where
   capCents : UInt64
   inferenceCents : UInt64
   computeCents : UInt64
+  /-- False when the user has no daily spend cap and only `maxMachines?` applies. -/
+  spendCapped : Bool := true
+  /-- Most machines (provisioning or ready, any provider) this user may hold at once. -/
+  maxMachines? : Option UInt64 := none
+
+/-- A count setting from the environment; unset or not a number keeps `default`. -/
+def managedCountSetting (name : String) (default : UInt64) : IO UInt64 := do
+  return (((← IO.getEnv name).bind (·.trimAscii.toString.toNat?)).map (·.toUInt64)).getD default
+
+/-- Most lean.ci machines (provisioning or ready) this instance holds at once, so
+    Orb never starves the lean.ci engines. `SANDBOXED_MANAGED_LEANCI_MAX_CONCURRENT`, default 6. -/
+def leanciMaxConcurrent : IO UInt64 := managedCountSetting "SANDBOXED_MANAGED_LEANCI_MAX_CONCURRENT" 6
+
+/-- Most machines a `member` holds at once, across providers.
+    `SANDBOXED_MANAGED_MEMBER_MAX_MACHINES`, default 2. Admins are not limited. -/
+def memberMaxMachines : IO UInt64 := managedCountSetting "SANDBOXED_MANAGED_MEMBER_MAX_MACHINES" 2
+
+/-- The one place a user's admission limits are assembled: the daily spend cap when
+    one is set, and the machine limit for a member. `none` when neither applies. -/
+def managedUserAdmissionOf (role : String) (capCents? : Option UInt64)
+    (inferenceCents computeCents memberLimit : UInt64) : Option ManagedUserAdmission :=
+  let maxMachines? := if role == "member" then some memberLimit else none
+  if capCents?.isNone && maxMachines?.isNone then none
+  else some { capCents := capCents?.getD 0, inferenceCents, computeCents,
+              spendCapped := capCents?.isSome, maxMachines? }
 
 /-- Overflow-safe managed VM spawn admission through `Orb.Kernel.vmStep` (`orb_vm_step`). -/
 def admitManagedSpawnCount (st : ManagedFleetState) (activeNat : Nat)
@@ -822,13 +847,29 @@ private def admitManagedCostTx (st : ManagedComputeStore) (fleet : ManagedFleetS
   if !admitManagedSpawnCount current chargedActive cost ttlMinutes.toUInt32 then
     return .error "managed_spawn_rejected"
   if provider == "boat" && !current.boatEnabled then return .error "provider_disabled"
+  -- Instance cap on lean.ci machines. An explicit request beyond it is refused here;
+  -- an unnamed one was already moved to the fallback by `chooseManagedProvider`.
+  if newSlot && provider == "leanci" then
+    let .ok held ← execParamQueryUnlocked st.db
+        "SELECT COUNT(*) FROM managed_machines WHERE provider='leanci' AND phase_code IN (0,1);" #[]
+      | return .error "managed_admission_read_failed"
+    if held.size < 2 then return .error "managed_admission_read_failed"
+    if cellU64 held[1]! 0 ≥ (← leanciMaxConcurrent) then return .error "provider_concurrency_limit_reached"
+  if let (some limit, true) := (userAdmission?.bind (·.maxMachines?), newSlot) then
+    if ownerUserId.isEmpty then return .error "managed_user_missing"
+    let .ok held ← execParamQueryUnlocked st.db
+        "SELECT COUNT(*) FROM managed_machines m WHERE m.owner_user_id=?1 AND (phase_code IN (0,1) OR EXISTS(SELECT 1 FROM managed_resume_intents r WHERE r.machine_id=m.id AND r.state IN ('pending','aborting')));"
+        #[ownerUserId]
+      | return .error "managed_user_admission_read_failed"
+    if held.size < 2 then return .error "managed_user_admission_read_failed"
+    if cellU64 held[1]! 0 ≥ limit then return .error "managed_user_machine_limit_reached"
   if provider != "boat" then
     let .ok providerRows ← execParamQueryUnlocked st.db
         "SELECT enabled FROM managed_provider_settings WHERE provider=?1;" #[provider]
       | return .error "managed_provider_settings_unavailable"
     if providerRows.size > 1 && cell providerRows[1]! 0 != "1" then return .error "provider_disabled"
   -- A zero-cost reservation cannot exceed a user's spend cap, even an exhausted one.
-  if let (some budget, true) := (userAdmission?, cost != 0) then
+  if let (some budget, true) := (userAdmission?.filter (·.spendCapped), cost != 0) then
     if ownerUserId.isEmpty then return .error "managed_user_missing"
     let dayStart := (nowEpoch / 86400) * 86400
     let .ok reservedRows ← execParamQueryUnlocked st.db

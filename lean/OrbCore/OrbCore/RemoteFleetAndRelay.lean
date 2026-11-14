@@ -1099,6 +1099,10 @@ def managedSpawnRefusal (mc : ManagedComputeStore) (dataRoot : String) (fleet : 
     (override? : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) := none) :
     IO (Option String) := do
   if !isUserManagedProviderEnabled prefs provider then return some "provider_disabled_for_user"
+  -- lean.ci holds at most `leanciMaxConcurrent` machines of this instance.
+  if provider == "leanci" && (fleet.machines.filter (fun m => m.provider == "leanci" &&
+      (m.status == "ready" || m.status == "provisioning"))).size.toUInt64 ≥ (← leanciMaxConcurrent) then
+    return some "default_provider_at_capacity"
   -- A test provider stands for exactly one provider; any other is not configured.
   if let some pair := override? then
     if pair.1.name != provider then return some "managed_provider_unavailable"
@@ -1218,9 +1222,8 @@ def loadManagedUserAdmission (store : CoreStore) (userId : String) (nowEpoch : U
   -- User ids are not secrets; naming the missing one makes a stale owner diagnosable.
   let some user ← getUserById? store userId | return .error s!"managed_user_missing:{userId}"
   if user.disabled then return .error s!"managed_user_disabled:{userId}"
-  let some cap := user.dailySpendCapCents? | return .ok none
   let (inf, cmp) ← getUserSpentTodayCents store userId (formatEpochIso8601Utc nowEpoch |>.take 10 |>.toString)
-  return .ok (some { capCents := cap, inferenceCents := inf, computeCents := cmp })
+  return .ok (managedUserAdmissionOf user.role user.dailySpendCapCents? inf cmp (← memberMaxMachines))
 
 /-- Pre-cutover rows carry a tenant label (for example `prod`) instead of a user id.
     Where the owning mission names a real user, adopt it. Rows whose mission has no

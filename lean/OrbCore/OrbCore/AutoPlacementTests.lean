@@ -129,7 +129,7 @@ private def providerChoiceTests : IO Unit := do
   let onDefault ← chooseWith none "leanci" false #[("boat", "provider_disabled")]
   check (onDefault == only "leanci" && (← asked.get) == #["leanci"]) "the default is used when it can take the request"
   -- Default cannot, fallback can: every refusal reason moves the request and is recorded.
-  for reason in #["provider_at_capacity", "managed_provider_availability_unavailable", "provider_disabled",
+  for reason in #["default_provider_at_capacity", "provider_at_capacity", "managed_provider_availability_unavailable", "provider_disabled",
       "provider_disabled_for_user", "provider_invalid_size", "managed_provider_unavailable"] do
     let moved ← chooseWith none "leanci" false #[("leanci", reason)]
     check (moved == ({ provider := "boat", fallbackFrom := "leanci", fallbackReason := reason } : ManagedProviderChoice) &&
@@ -161,7 +161,19 @@ private def providerChoiceTests : IO Unit := do
     admitManagedSpawnMultiUser { exhausted with spentTodayCents := 0 } 1 100 (some 100) == 2)
     "a zero-cost machine passes the global and the user spend cap; a paid one is still capped"
 
+/-- Who gets which admission limits. -/
+private def userAdmissionTests : IO Unit := do
+  let shape (a : Option ManagedUserAdmission) := a.map fun x => (x.capCents, x.spendCapped, x.maxMachines?, x.inferenceCents, x.computeCents)
+  check (shape (managedUserAdmissionOf "member" none 3 4 2) == some (0, false, some 2, 3, 4))
+    "a member without a spend cap still has the machine limit"
+  check (shape (managedUserAdmissionOf "member" (some 500) 3 4 2) == some (500, true, some 2, 3, 4))
+    "a capped member has both limits"
+  check (shape (managedUserAdmissionOf "admin" (some 500) 3 4 2) == some (500, true, none, 3, 4) &&
+    (managedUserAdmissionOf "admin" none 3 4 2).isNone && (managedUserAdmissionOf "" none 0 0 2).isNone)
+    "an admin and the single-tenant owner have no machine limit"
+
 def run (root : String) : IO Unit := do
+  userAdmissionTests
   -- The instance default provider applies only when the request names none.
   check (defaultManagedProviderOf none == "boat" && defaultManagedProviderOf (some "lean.ci") == "leanci" &&
     defaultManagedProviderOf (some " LeanCI ") == "leanci" && defaultManagedProviderOf (some "nope") == "boat")
