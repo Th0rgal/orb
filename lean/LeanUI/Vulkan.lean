@@ -260,6 +260,40 @@ private def drawRoundedBox (vw vh : Nat) (fb : ByteArray) (curClip r : Rect)
             out := out.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
   return out
 
+/-- Sliding-window box blur with edge replication, O(width * height), independent of radius.
+The framebuffer is opaque; each pass preserves alpha and constant-color surfaces. -/
+def blurAxis (fb : ByteArray) (vw vh radius : Nat) (horizontal : Bool) : ByteArray := Id.run do
+  if vw == 0 || vh == 0 || radius == 0 then return fb
+  let mut out := ByteArray.mk (Array.replicate fb.size 0)
+  let len := if horizontal then vw else vh
+  let count := if horizontal then vh else vw
+  let index (line pos channel : Nat) :=
+    ((if horizontal then line * vw + pos else pos * vw + line) * 4) + channel
+  let width := radius * 2 + 1
+  for line in [0:count] do
+    for channel in [0:4] do
+      let mut sum : Nat := 0
+      for k in [0:width] do
+        let pos := min (len - 1) (k - radius)
+        sum := sum + (fb.get! (index line pos channel)).toNat
+      for pos in [0:len] do
+        out := out.set! (index line pos channel) ((sum + width / 2) / width).toUInt8
+        let oldPos := pos - radius
+        let newPos := min (len - 1) (pos + radius + 1)
+        sum := sum - (fb.get! (index line oldPos channel)).toNat +
+          (fb.get! (index line newPos channel)).toNat
+  return out
+
+/-- Three separable box passes approximate a Gaussian of standard deviation `sigma`.
+Keep this explicit: native blur is deterministic, but is not Skia's filter pipeline. -/
+def blurBackdrop (fb : ByteArray) (vw vh sigma : Nat) : ByteArray := Id.run do
+  if sigma == 0 then return fb
+  let mut out := fb
+  for radius in [sigma - 1, sigma - 1, sigma] do
+    out := blurAxis out vw vh radius true
+    out := blurAxis out vw vh radius false
+  return out
+
 /-- Render a `Scene` (`Array Prim`) onto an RGBA8 buffer `(vw × vh)` using the unified SDF
 rounded-rect / border / drop-shadow / glyph-atlas / clip / layer pipeline. -/
 def rasterizeScene (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtlasCache)
@@ -277,6 +311,8 @@ def rasterizeScene (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtlasCa
   for prim in scene do
     let curClip := clipStack.head?.getD fullClip
     match prim with
+    | .backdropBlur sigma =>
+      fb := blurBackdrop fb vw vh sigma
     | .clipPush r =>
       clipStack := intersectRect curClip r :: clipStack
     | .clipPushRounded r _radii =>
@@ -367,24 +403,21 @@ def rasterizeScene (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtlasCa
         radii, colorRGBA := col, kind := 2, aux0 := blur.toUInt32, aux1 := 255
       }
       let (sr, sg, sb, sa) := unpackColor col
+      -- CSS blur-radius is twice Gaussian sigma. Blur coverage, not the distance
+      -- field: the old polynomial falloff made broad dark wedges beside dialogs.
+      let empty := ByteArray.mk (Array.replicate totalBytes 0)
+      let mask := drawRoundedBox vw vh empty fullClip r radii 0xFFFFFFFF (0, 0, 0, 0) 0
+      let blurred := blurBackdrop mask vw vh (blur / 2)
       let (x0, y0, x1, y1) := clampBounds vw vh curClip expanded
-      let maxDist16 : Int := (max 1 (blur * 2) : Int) * 16
       if x1 > x0 && y1 > y0 && sa > 0 then
         for py in [y0.toNat : y1.toNat] do
           for px in [x0.toNat : x1.toNat] do
-            let d16 := sdfRoundedRect16 r radii (px : Int) (py : Int)
-            if d16 < maxDist16 then
-              let falloff : Nat :=
-                if d16 ≤ 0 then 255
-                else
-                  let rem := (maxDist16 - d16).toNat
-                  (rem * rem * 255) / (maxDist16.toNat * maxDist16.toNat)
-              let effA : UInt8 := ((sa.toNat * falloff + 127) / 255).toUInt8
-              let idx := (py * vw + px) * 4
-              let (nr, ng, nb, na) :=
-                blendOver (fb.get! idx) (fb.get! (idx + 1)) (fb.get! (idx + 2)) (fb.get! (idx + 3))
-                  sr sg sb effA
-              fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
+            let idx := (py * vw + px) * 4
+            let effA := ((sa.toNat * (blurred.get! (idx + 3)).toNat + 127) / 255).toUInt8
+            let (nr, ng, nb, na) :=
+              blendOver (fb.get! idx) (fb.get! (idx + 1)) (fb.get! (idx + 2)) (fb.get! (idx + 3))
+                sr sg sb effA
+            fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
     | .glyph src dst col isColor =>
       instances := instances.push {
         dst, uv := src, clip := curClip,
