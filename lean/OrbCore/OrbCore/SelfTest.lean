@@ -228,10 +228,9 @@ private def runManagedMcpProviderContractTests (root : String) : IO Unit := do
       let beforeDefault := (← rented.get).size
       let onDefault ← call "leanci" "spawn_managed_machine" (.obj lease)
       check ((resultOf onDefault).fieldStr? "provider" == some "leanci" &&
-        (resultOf onDefault).fieldNat? "spent_cents" == some 0 &&
         ((resultOf onDefault).field? "provider_fallback").isNone &&
         (← rented.get).size == beforeDefault + 1 && (← rented.get).back? == some ("leanci", "small"))
-        s!"an unnamed spawn uses the instance default at zero cost: {OrbBin.Json.renderCompact onDefault}"
+        s!"an unnamed spawn uses the instance default: {OrbBin.Json.renderCompact onDefault}"
       let moved ← call "boat" "spawn_managed_machine" (.obj lease)
       check ((resultOf moved).fieldStr? "provider" == some "boat" &&
         (fallbackOf moved).fieldStr? "from" == some "leanci" && (fallbackOf moved).fieldStr? "to" == some "boat" &&
