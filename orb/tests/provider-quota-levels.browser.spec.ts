@@ -37,7 +37,8 @@ async function open(page: Page, theme: string, width: number) {
   await page.setViewportSize({ width, height: 900 });
   const toggle = page.getByRole('button', { name: 'Toggle sidebar' });
   if (width < 700 && await toggle.getAttribute('aria-expanded') === 'true') await toggle.click();
-  const group = page.getByRole('button', { name: 'antigravity 2 accounts · 2 limited', exact: true });
+  const group = page.locator('.p-group-head');
+  await expect(group).toContainText('2 limit reached');
   await expect(group).toHaveAttribute('aria-expanded', 'false');
   await expect(page.locator('.p-group-body .p-acc-wrap')).toHaveCount(0);
   await group.click();

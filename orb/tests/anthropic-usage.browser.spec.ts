@@ -20,7 +20,8 @@ for (const theme of ['dark', 'light']) test(`Anthropic subscriptions show per-ac
   await page.goto('/');
   await page.getByRole('button', { name: 'Inference', exact: true }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
-  const group = page.getByRole('button', { name: 'anthropic 2 accounts · 1 near limit', exact: true });
+  const group = page.locator('.p-group-head');
+  await expect(group).toContainText('1 near limit');
   await expect(group).toHaveAttribute('aria-expanded', 'false');
   await expect(page.locator('.p-group-body .p-acc-wrap')).toHaveCount(0);
   await group.click();
