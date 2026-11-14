@@ -40,6 +40,7 @@ structure NodeConfig where
   labels              : Array String := #[]
   allowRoot           : Bool := false
   adminOnly           : Bool := false
+  managedSandbox      : Bool := false
   privdSocket         : String := "/run/orb-privd.sock"
   capacityTotal       : UInt32 := 1
   sideCapacity        : UInt32 := 2
@@ -102,6 +103,8 @@ def loadConfigFromEnv : IO NodeConfig := do
   let adminOnly :=
     isTruthyEnv (← IO.getEnv "ORB_NODE_ADMIN_ONLY") ||
     isTruthyEnv (← IO.getEnv "SANDBOXED_NODE_ADMIN_ONLY")
+  let managedSandbox :=
+    isTruthyEnv (← IO.getEnv "SANDBOXED_NODE_MANAGED_SANDBOX")
   let privdSocket :=
     ((← IO.getEnv "ORB_PRIVD_SOCKET").map (·.trimAscii.toString)
       |>.filter (!·.isEmpty)).getD "/run/orb-privd.sock"
@@ -127,6 +130,7 @@ def loadConfigFromEnv : IO NodeConfig := do
     labels := labels
     allowRoot := allowRoot
     adminOnly := adminOnly
+    managedSandbox := managedSandbox
     privdSocket := privdSocket
     capacityTotal := capClamped
     sideCapacity := (max 1 (min 16 sideCap)).toUInt32
@@ -2046,7 +2050,7 @@ def tickRuntimeReserve
               sideLane := sideLane
               coordLane := coordLane
               execUnixUser := rec.execUnixUser
-              callerRole := if rec.execUnixUser.isEmpty then "admin" else "member"
+              callerRole := if !rec.execUnixUser.isEmpty || !rec.ownerUserId.isEmpty then "member" else "admin"
             }
           | none =>
             remQueue := remQueue.push jid
@@ -2201,7 +2205,7 @@ def reserveForceJob (rt : NodeRuntime) (jid : String) :
     sideLane := false
     coordLane := false
     execUnixUser := cur.execUnixUser
-    callerRole := if cur.execUnixUser.isEmpty then "admin" else "member"
+    callerRole := if !cur.execUnixUser.isEmpty || !cur.ownerUserId.isEmpty then "member" else "admin"
   }
   return (rt', launch, cur)
 
