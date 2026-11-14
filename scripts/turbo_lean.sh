@@ -4,6 +4,16 @@ set -euo pipefail
 export TURBO_LEAN_TELEMETRY=off LEAN_NATIVE_TELEMETRY=off
 export LEAN_NUM_THREADS="${LEAN_NUM_THREADS:-1}"
 export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-2}"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# turbo-lean validates packages in a sandbox without network transport, so Lake
+# can never fetch `lean-sys` there. Seed the pinned package from a local checkout
+# (or one pinned clone) before the build starts; raw Lake builds would do this
+# fetch themselves.
+if [[ -f "$PWD/lake-manifest.json" && -f "$script_dir/ensure_lean_sys.sh" ]]; then
+  # shellcheck source=ensure_lean_sys.sh
+  source "$script_dir/ensure_lean_sys.sh"
+  ensure_lean_sys_pkg "$PWD" "$script_dir/.."
+fi
 cli="${TURBO_LEAN_CLI:-turbo-lean}"
 help="$("$cli" --help)"
 flags=()
