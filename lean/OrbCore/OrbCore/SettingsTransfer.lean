@@ -47,6 +47,7 @@ private def toggles (rows : Array (Array String)) : JVal :=
 private def readDocument (db : SqliteDb) (settings : JVal) (root : String) : Action JVal := do
   let mut global := project settings SettingsDocument.globalFields
   if (global.field? "library_revision").isNone then
+    -- Environment transfer is an owner-only global settings operation.
     let library ← ExceptT.lift (Skills.resolveLibraryRoot root root)
     let revision ← ExceptT.lift do
       try

@@ -13,7 +13,6 @@ import { PopupMenu, type MenuEntry } from "./Menu";
 import {
   connectionVersion,
   getApiUrl,
-  getGlobalSettings,
   getRemoteNodes,
   isConnected,
   listLibrarySkills,
@@ -252,8 +251,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     try {
       const side: Promise<unknown>[] = [refreshLocalAgents(force).catch(() => []), refreshSoftware(force).catch(swallow("skills.refreshSoftware"))];
       if (isConnected()) {
-        void getLibraryStatus().then((st) => { if (connectionVersion() === version) { setRepo(st); if (st.remote) setConfiguredRemote(st.remote); } }).catch(() => { if (connectionVersion() === version) setRepo(null); });
-        void getGlobalSettings().then((s) => { if (connectionVersion() === version && s.library_remote != null) setConfiguredRemote(s.library_remote); }).catch(() => {});
+        void getLibraryStatus().then((st) => { if (connectionVersion() === version) { setRepo(st); setConfiguredRemote(st.remote ?? ""); } }).catch(() => { if (connectionVersion() === version) setRepo(null); });
         side.push(getRemoteNodes().then((res) => { if (connectionVersion() === version) setRemoteNodes(res.nodes ?? []); }).catch(swallow("skills.remoteNodes")));
         side.push(loadProjectSkills());
         const { bodies } = await loadLibrary(version).catch((e) => {
@@ -284,7 +282,9 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
 
   const loadProjectSkills = async () => {
     if (!isConnected()) return;
+    const version = connectionVersion();
     const projs: ProjectSummary[] = await listProjects().catch(() => []);
+    if (connectionVersion() !== version) return;
     setProjects(projs);
     const resolved = await Promise.all(
       projs.map(async (proj) => {
@@ -309,6 +309,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
       }),
     );
     const flat = resolved.flat();
+    if (connectionVersion() !== version) return;
     rememberKnownSkillNames(flat.map((s) => s.name));
     setProjectSkills(flat);
   };
@@ -322,6 +323,26 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   // The one load on open (and on reconnect); online it also reads the Library.
   createEffect(on(connectionVersion, () => {
     setFailedRemoteInit(null);
+    setLibrarySkills([]);
+    setLibraryFull({});
+    setLibraryBundles({});
+    setLibraryLoaded(false);
+    setLocalReport(cachedSkillsReport());
+    setRepo(null);
+    setConfiguredRemote("");
+    setEditingRemote(false);
+    setRemoteDraft("");
+    setRemoteError(null);
+    setDivergedDetail(null);
+    setConfirmRowDelete(null);
+    setRowMenu(null);
+    setResolving(null);
+    setCreating(false);
+    setNewName("");
+    setNewDesc("");
+    setSyncNotice(null);
+    setProjects([]);
+    setProjectSkills([]);
     void loadAll(false);
   }));
 
@@ -437,7 +458,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
         installed,
         version,
         binPath,
-        globalRel: isCore ? "~/.sandboxed-sh/library/skill" : meta.globalRel,
+        globalRel: isCore ? (repo()?.path ? `${repo()!.path}/skill` : "Your Library") : meta.globalRel,
         projectRel: meta.projectRel,
         skillCount: isCore ? libCount : 1,
         syncedCount: isCore ? libCount : 1,
@@ -771,7 +792,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
 
         <ErrorToast error={syncError()} title="Couldn’t sync Library skills" onDismiss={() => setSyncError(null)} />
 
-        <section class="s-sec" aria-label="Library skills">
+        <section class="s-sec" aria-label="Your Library skills">
           <div class="skills-toolbar">
             <Show when={isConnected()} fallback={<span class="skills-repo dim">Connect to Core to load the Library.</span>}>
               <span class="skills-repo" title={repo()?.remote ?? ""}>
@@ -1073,7 +1094,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
       <Show when={editingRemote()}>
         <NameDialog
           title="Library repository"
-          description="Git remote URL cloned by Core to sync shared skills across machines."
+          description="Optional Git repository for your private Library."
           label="Git remote URL"
           placeholder="git@github.com:your-org/agent-library.git"
           value={remoteDraft()}

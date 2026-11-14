@@ -110,6 +110,8 @@ export async function getSkillDelivery(project: string, workspaceId?: string): P
 
 /** Library repo state for the Skills header ("Th0rgal/sandboxed-library · synced 2 min ago"). */
 export interface LibraryStatus {
+  path?: string;
+  revision?: string | null;
   remote?: string;
   branch: string;
   clean: boolean;
@@ -204,22 +206,25 @@ export async function getSkillHistory(name: string): Promise<SkillVersion[]> {
 }
 export const getSkillAt = (name: string, rev: string) => apiText(`${skillPath(name)}/history/${enc(rev)}`);
 
-let cachedSkillNames: string[] = [
-  "controllers-policy",
-  "project-manager",
-  "sandboxed-sh-missions",
-  "development-identity",
-  "paloma-backends",
-  "paloma-ssh-servers",
-];
+let cachedSkillNames: string[] = [];
+let skillNamesVersion = -1;
 
-/** Reactive list of known skill names for autocomplete in ControllerSettings. */
-export function knownSkillNames(): string[] {
+function currentSkillNames(): string[] {
+  const version = connectionVersion();
+  if (version !== skillNamesVersion) {
+    skillNamesVersion = version;
+    cachedSkillNames = [];
+  }
   return cachedSkillNames;
 }
 
+/** Reactive list of known skill names for autocomplete in ControllerSettings. */
+export function knownSkillNames(): string[] {
+  return currentSkillNames();
+}
+
 export function rememberKnownSkillNames(names: Iterable<string>) {
-  const merged = new Set(cachedSkillNames);
+  const merged = new Set(currentSkillNames());
   for (const name of names) {
     const trimmed = name.trim();
     if (trimmed) merged.add(trimmed);

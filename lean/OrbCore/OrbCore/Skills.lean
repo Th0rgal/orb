@@ -5,11 +5,13 @@
 import Orb.Kernel
 import OrbBin.Json
 import OrbBin.PosixExt
+import OrbCore.Spec
 
 namespace OrbCore.Skills
 
 open OrbBin.Json
 open OrbBin.PosixExt
+open OrbCore.Spec
 
 def maxNameLen : UInt32 := 64
 def maxSelected : UInt32 := 8
@@ -294,6 +296,8 @@ def isPlainProjectKey (slug : String) : Bool :=
 /-- Scan `<dir>/<name>/SKILL.md` entries sorted by skill name. -/
 def scanSkillDir (dir : System.FilePath) (requireMissionAudience : Bool := false) :
     IO (Array (String × Option String × String)) := do
+  let dirSt ← statPath dir.toString
+  if dirSt.isSymlink then return #[]
   let entries ← try dir.readDir catch _ => pure #[]
   let sorted := entries.qsort (fun a b => a.fileName < b.fileName)
   let mut out : Array (String × Option String × String) := #[]
@@ -302,7 +306,8 @@ def scanSkillDir (dir : System.FilePath) (requireMissionAudience : Bool := false
     if nameCharsValid name && !name.startsWith "." then
       let md := entry.path / "SKILL.md"
       let st ← statPath md.toString
-      if st.exists_ && st.isReg && !st.isSymlink then
+      let entrySt ← statPath entry.path.toString
+      if !entrySt.isSymlink && st.exists_ && st.isReg && !st.isSymlink then
         let raw ← try IO.FS.readFile md catch _ => pure ""
         if !requireMissionAudience || (effectiveAudience raw).contains "mission" then
           out := out.push (name, extractDescription raw, md.toString)
@@ -322,11 +327,51 @@ def resolveLibraryRoot (workingDir : String) (storeRoot : String := "") : IO Str
     if (← (System.FilePath.mk c).pathExists) then return c
   return s!"{workingDir}/.sandboxed-sh/library"
 
+/-- Only the bootstrap principal (or legacy empty scope) uses host Library settings. -/
+def isLibraryOwner (ownerUserId bootstrapAdminId : String) : Bool :=
+  ownerUserId.isEmpty || orbLibraryScopeGate (if ownerUserId == bootstrapAdminId then 1 else 0) 0 == 1
+
+/-- Owner-only fallback candidate; members never consult host overrides or legacy paths.
+    Callers must reject invalid IDs before using this pure path constructor. -/
+def libraryRootCandidate (ownerUserId bootstrapAdminId workingDir storeRoot : String) : String :=
+  if isLibraryOwner ownerUserId bootstrapAdminId then
+    s!"{workingDir}/.sandboxed-sh/library"
+  else s!"{storeRoot}/library/users/{ownerUserId}"
+
+def validLibraryScope (ownerUserId _bootstrapAdminId : String) : Bool :=
+  ownerUserId.isEmpty || (nameCharsValid ownerUserId && ownerUserId != ".")
+
+def resolveLibraryRootFor (ownerUserId : String) (workingDir storeRoot bootstrapAdminId : String) : IO String := do
+  unless validLibraryScope ownerUserId bootstrapAdminId do
+    throw (IO.userError "library_invalid_user_scope")
+  if isLibraryOwner ownerUserId bootstrapAdminId then
+    resolveLibraryRoot workingDir storeRoot
+  else
+    for candidate in #[s!"{storeRoot}/library", s!"{storeRoot}/library/users",
+        libraryRootCandidate ownerUserId bootstrapAdminId workingDir storeRoot] do
+      if (← statPath candidate).isSymlink then throw (IO.userError "library_invalid_user_scope")
+    pure (libraryRootCandidate ownerUserId bootstrapAdminId workingDir storeRoot)
+
+/-- Project context uses the same stored, tenant-prefixed slug as ProjectFilesAndController.
+    Public callers pass unscoped slugs; remote mission records already hold scoped slugs. -/
+def contextProjectKey (ownerUserId bootstrapAdminId slug : String) : Option String := do
+  if isLibraryOwner ownerUserId bootstrapAdminId then
+    if isPlainProjectKey slug then some slug else none
+  else
+    let userPrefix := ownerUserId ++ ":"
+    let raw := if slug.startsWith userPrefix then (slug.drop userPrefix.length).toString else slug
+    if isPlainProjectKey raw then some (userPrefix ++ raw) else none
+
+private def projectSkillDirectory (workingDir storeRoot ownerUserId bootstrapAdminId slug : String) : System.FilePath :=
+  let root := if !isLibraryOwner ownerUserId bootstrapAdminId && !storeRoot.isEmpty then storeRoot else workingDir
+  System.FilePath.mk root / "project-files" / slug / "skills"
+
 /-- Build the delivered skill plan for `(workingDir, project?)` from Library + project context. -/
-def buildDeliveryPlan (workingDir : String) (project? : Option String) (storeRoot : String := "") :
+def buildDeliveryPlan (workingDir : String) (project? : Option String) (storeRoot ownerUserId bootstrapAdminId : String) :
     IO (Except String SkillDeliveryPlan) := do
+  unless validLibraryScope ownerUserId bootstrapAdminId do return .error "library_invalid_user_scope"
   let mut plan := SkillDeliveryPlan.empty
-  let libRoot := System.FilePath.mk (← resolveLibraryRoot workingDir storeRoot)
+  let libRoot := System.FilePath.mk (← resolveLibraryRootFor ownerUserId workingDir storeRoot bootstrapAdminId)
   for sub in #["skill", "skills"] do
     let sdir := libRoot / sub
     if (← sdir.pathExists) && (← sdir.isDir) then
@@ -335,9 +380,9 @@ def buildDeliveryPlan (workingDir : String) (project? : Option String) (storeRoo
   if let some rawProj := project? then
     let slug := rawProj.trimAscii.toString
     if !slug.isEmpty then
-      if !isPlainProjectKey slug then
-        return .error "Invalid context project"
-      let ctxDir := System.FilePath.mk workingDir / "project-files" / slug / "skills"
+      let some slug := contextProjectKey ownerUserId bootstrapAdminId slug
+        | return .error "Invalid context project"
+      let ctxDir := projectSkillDirectory workingDir storeRoot ownerUserId bootstrapAdminId slug
       for (name, desc, _) in (← scanSkillDir ctxDir false) do
         plan := extendContext plan name desc
   return .ok plan
@@ -359,8 +404,8 @@ def installScript (harness : String) (files : Array (String × String)) : String
     as an install prelude for a turn that runs on a node, where the Library is not mounted.
     Skills whose names the installer cannot quote safely, or that exceed the size caps, are skipped. -/
 def remoteInstallPrelude (workingDir : String) (project? : Option String) (harness : String)
-    (storeRoot : String := "") : IO String := do
-  let libRoot := System.FilePath.mk (← resolveLibraryRoot workingDir storeRoot)
+    (storeRoot ownerUserId bootstrapAdminId : String) : IO String := do
+  let libRoot := System.FilePath.mk (← resolveLibraryRootFor ownerUserId workingDir storeRoot bootstrapAdminId)
   let mut found : Array (String × String) := #[]
   for sub in #["skill", "skills"] do
     let sdir := libRoot / sub
@@ -368,8 +413,8 @@ def remoteInstallPrelude (workingDir : String) (project? : Option String) (harne
       for (name, _, path) in (← scanSkillDir sdir true) do
         if !(found.any (·.1 == name)) then
           found := found.push (name, path)
-  if let some slug := project?.map (·.trimAscii.toString) |>.filter (fun s => !s.isEmpty && isPlainProjectKey s) then
-    for (name, _, path) in (← scanSkillDir (System.FilePath.mk workingDir / "project-files" / slug / "skills") false) do
+  if let some slug := project?.bind (fun s => contextProjectKey ownerUserId bootstrapAdminId s.trimAscii.toString) then
+    for (name, _, path) in (← scanSkillDir (projectSkillDirectory workingDir storeRoot ownerUserId bootstrapAdminId slug) false) do
       found := (found.filter (·.1 != name)).push (name, path)
   let mut files : Array (String × String) := #[]
   let mut total : Nat := 0
@@ -383,9 +428,10 @@ def remoteInstallPrelude (workingDir : String) (project? : Option String) (harne
   return installScript (if harness == "claude" then "claudecode" else harness) files
 
 def selectDelivered (workingDir : String) (project? : Option String) (harness prompt : String)
-    (storeRoot : String := "") : IO (Except String (Array SelectedSkill)) := do
+    (storeRoot ownerUserId bootstrapAdminId : String) : IO (Except String (Array SelectedSkill)) := do
+  unless validLibraryScope ownerUserId bootstrapAdminId do return .error "library_invalid_user_scope"
   if (references prompt).isEmpty then return .ok #[]
-  match ← buildDeliveryPlan workingDir project? storeRoot with
+  match ← buildDeliveryPlan workingDir project? storeRoot ownerUserId bootstrapAdminId with
   | .error e => return .error e
   | .ok plan =>
     let available := plan.skills.map fun s =>

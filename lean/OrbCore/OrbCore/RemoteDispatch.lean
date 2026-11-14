@@ -537,8 +537,9 @@ private def prepareRemoteHarnessCommand
       spec.prompt
   -- The Library lives on Core: ship the delivered skills into the node workspace so every
   -- harness finds them where it looks (`.opencode/skills`, `.claude/skills`, `.agents/skills`).
+  let bootstrapAdminId := (← getBootstrapAdmin? store).map (·.id) |>.getD ""
   let wsPrefix := wsPrefix ++ (← OrbCore.Skills.remoteInstallPrelude coreWorkDir
-    (if spec.project.trimAscii.toString.isEmpty then none else some spec.project) spec.backend.trimAscii.toString.toLower store.rootDir)
+    (if spec.project.trimAscii.toString.isEmpty then none else some spec.project) spec.backend.trimAscii.toString.toLower store.rootDir spec.ownerUserId bootstrapAdminId)
   let (fd3Prelude, promptEnvs) := stagePromptOnFd3 deliveredPrompt
   let resumeSid? := spec.resumeSessionId?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
   let bLow := spec.backend.trimAscii.toString.toLower

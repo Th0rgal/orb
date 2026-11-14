@@ -590,7 +590,7 @@ struct OrbSkillsSettings: View {
             OrbSettingsError(message: error)
             if unconfigured {
                 Section("Library repository") {
-                    Text("Connect a Git repository to sync shared skills across missions and workspaces.")
+                    Text("Connect your own Git repository to save your private skills across missions and workspaces.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     Button("Configure repository…") {

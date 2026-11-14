@@ -2,6 +2,8 @@ import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SkillsSettings, knownSkillNames } from "../src/SkillsSettings";
 import { clearConnection, setConnection } from "../src/api";
+import { rememberKnownSkillNames } from "../src/skillsApi";
+import { cachedSkillsReport, rememberSkillsReport } from "../src/skillCache";
 import { syncConnectedLibraryToLocalHarnesses } from "../src/localLibrarySync";
 import type { LocalSkillsReport } from "../src/localAgents";
 
@@ -876,5 +878,22 @@ describe("SkillsSettings", () => {
     });
     expect(res).toBeNull();
     expect(syncCalls).toHaveLength(0);
+  });
+});
+
+
+describe("Library account isolation", () => {
+  it("drops skill names and report bodies when the signed-in account changes", () => {
+    setConnection("https://library.invalid", "fixture-owner-session");
+    rememberKnownSkillNames(["owner-private-skill"]);
+    rememberSkillsReport(sampleLocalReport());
+    expect(knownSkillNames()).toContain("owner-private-skill");
+    expect(cachedSkillsReport()).not.toBeNull();
+    setConnection("https://library.invalid", "fixture-member-session");
+    expect(knownSkillNames()).toEqual([]);
+    expect(cachedSkillsReport()).toBeNull();
+    rememberKnownSkillNames(["member-private-skill"]);
+    expect(knownSkillNames()).toEqual(["member-private-skill"]);
+    clearConnection();
   });
 });
