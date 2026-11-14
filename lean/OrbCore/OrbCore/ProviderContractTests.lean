@@ -759,16 +759,21 @@ private def usageSummaryClientShapeContract (app : CoreAppState) (store : CoreSt
   let hourPrefix := (tsRecent.take 13).toString
   discard <| execParamQuery store.missionsDb "DELETE FROM proxy_usage;" #[]
   discard <| execParamQuery store.missionsDb
-    "DELETE FROM missions WHERE id IN ('m-usage-1','m-usage-sub-1','m-usage-sub-2');" #[]
+    "DELETE FROM missions WHERE id IN ('m-usage-1','m-usage-sub-1','m-usage-sub-2','m-usage-2','m-usage-2-sub','m-usage-3');" #[]
   discard <| execParamQuery store.missionsDb
     ("INSERT INTO missions(id,parent_mission_id) VALUES" ++
-     "('m-usage-1',NULL),('m-usage-sub-1','m-usage-1'),('m-usage-sub-2','m-usage-sub-1');") #[]
+     "('m-usage-1',NULL),('m-usage-sub-1','m-usage-1'),('m-usage-sub-2','m-usage-sub-1')," ++
+     "('m-usage-2',NULL),('m-usage-2-sub','m-usage-2')," ++
+     "('m-usage-3',NULL);") #[]
   discard <| execParamQuery store.missionsDb
     ("INSERT INTO proxy_usage(timestamp,model,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,cost_cents,provider,account_id,api_key_id,api_key_name,mission_id,caller_kind,purpose,reasoning_tokens,account_bound) VALUES" ++
-     "(?1,'claude-sonnet-4-5',120,80,10,20,15,'anthropic','10000000-0000-4000-8000-000000000001',NULL,'remote-launch:m-usage-1','m-usage-1','mission','turn',5,1)," ++
-     "(?1,'claude-sonnet-4-5',60,40,0,10,8,'anthropic','10000000-0000-4000-8000-000000000001',NULL,'remote-launch:m-usage-sub-1','m-usage-sub-1','subagent','turn',0,1)," ++
-     "(?1,'claude-sonnet-4-5',25,15,0,5,3,'anthropic','10000000-0000-4000-8000-000000000001',NULL,'remote-launch:m-usage-sub-2','m-usage-sub-2','subagent','turn',0,1)," ++
-     "(?1,'claude-sonnet-4-5',30,20,0,0,4,'anthropic','10000000-0000-4000-8000-000000000001',NULL,'',NULL,'api','turn',0,1);")
+     "(?1,'claude-sonnet-4-5',25,15,10,20,15,'anthropic','10000000-0000-4000-8000-000000000001',NULL,'remote-launch:m-usage-1','m-usage-1','mission','turn',5,1)," ++
+     "(?1,'claude-sonnet-4-5',95,65,0,10,8,'anthropic','10000000-0000-4000-8000-000000000001',NULL,'remote-launch:m-usage-sub-1','m-usage-sub-1','subagent','turn',0,1)," ++
+     "(?1,'claude-sonnet-4-5',85,55,0,5,3,'anthropic','10000000-0000-4000-8000-000000000001',NULL,'remote-launch:m-usage-sub-2','m-usage-sub-2','subagent','turn',0,1)," ++
+     "(?1,'claude-sonnet-4-5',100,65,0,0,10,'anthropic','10000000-0000-4000-8000-000000000001',NULL,'remote-launch:m-usage-2','m-usage-2','mission','turn',0,1)," ++
+     "(?1,'claude-sonnet-4-5',100,75,0,0,6,'anthropic','10000000-0000-4000-8000-000000000001',NULL,'remote-launch:m-usage-2-sub','m-usage-2-sub','subagent','turn',0,1)," ++
+     "(?1,'claude-sonnet-4-5',130,50,0,0,9,'anthropic','10000000-0000-4000-8000-000000000001',NULL,'remote-launch:m-usage-3','m-usage-3','mission','turn',0,1)," ++
+     "(?1,'claude-sonnet-4-5',100,80,0,0,4,'anthropic','10000000-0000-4000-8000-000000000001',NULL,'',NULL,'api','turn',0,1);")
     #[tsRecent]
   try
     let s24 ← getJson app jwt "/api/ai/usage/summary?window=24h" now
@@ -788,18 +793,18 @@ private def usageSummaryClientShapeContract (app : CoreAppState) (store : CoreSt
     for tKey in #["totals", "today", "this_week"] do
       let t := s24.fieldOrNull tKey
       if t.fieldNat? "requests" != t.fieldNat? "events" ||
-         t.fieldNat? "requests" != some 4 ||
-         t.fieldNat? "recorded_cost_cents" != some 30 ||
+         t.fieldNat? "requests" != some 7 ||
+         t.fieldNat? "recorded_cost_cents" != some 55 ||
          (t.field? "cost_cents").isSome ||
          (t.field? "unknown_cost_requests").isSome then
-        failures := failures.push s!"usage/summary: {tKey} expected requests==events==4 and absent cost_cents/unknown_cost_requests, got {renderCompact t}"
+        failures := failures.push s!"usage/summary: {tKey} expected requests==events==7 and absent cost_cents/unknown_cost_requests, got {renderCompact t}"
     let some bySource := s24.fieldArr? "by_source"
       | failures := failures.push s!"usage/summary: expected by_source array, got {rendered24}"; return failures
     if bySource.size != 1 ||
        bySource[0]!.fieldStr? "key" != some "router" ||
        bySource[0]!.fieldStr? "label" != some "Router" ||
-       bySource[0]!.fieldNat? "requests" != some 4 then
-      failures := failures.push s!"usage/summary: expected single by_source row (router, requests=4), got {renderCompact (.arr bySource)}"
+       bySource[0]!.fieldNat? "requests" != some 7 then
+      failures := failures.push s!"usage/summary: expected single by_source row (router, requests=7), got {renderCompact (.arr bySource)}"
     let some byModel := s24.fieldArr? "by_model"
       | failures := failures.push s!"usage/summary: expected by_model array, got {rendered24}"; return failures
     if byModel.size != 1 then
@@ -809,7 +814,7 @@ private def usageSummaryClientShapeContract (app : CoreAppState) (store : CoreSt
       if m.fieldStr? "model" != some "claude-sonnet-4-5" ||
          m.fieldStr? "provider" != some "anthropic" ||
          m.fieldStr? "source" != some "router" ||
-         m.fieldNat? "requests" != some 4 ||
+         m.fieldNat? "requests" != some 7 ||
          (m.field? "cost_cents").isSome ||
          (m.field? "unknown_cost_requests").isSome ||
          (m.field? "cost_status").isSome then
@@ -828,18 +833,31 @@ private def usageSummaryClientShapeContract (app : CoreAppState) (store : CoreSt
             failures := failures.push s!"usage/summary: {gKey} row unexpected UsageTotals fields, got {renderCompact g}"
     let some byMission := s24.fieldArr? "by_mission"
       | failures := failures.push s!"usage/summary: expected by_mission array, got {rendered24}"; return failures
-    if byMission.size != 4 ||
+    if byMission.size != 7 ||
        !(byMission.any (fun g => g.field? "key" == some .null && g.field? "label" == some .null && g.fieldNat? "requests" == some 1)) ||
        !(byMission.any (fun g => g.fieldStr? "key" == some "m-usage-1" && g.fieldNat? "requests" == some 1)) ||
        !(byMission.any (fun g => g.fieldStr? "key" == some "m-usage-sub-1" && g.fieldNat? "requests" == some 1)) ||
        !(byMission.any (fun g => g.fieldStr? "key" == some "m-usage-sub-2" && g.fieldNat? "requests" == some 1)) then
-      failures := failures.push s!"usage/summary: by_mission expected m-usage-1, m-usage-sub-1, m-usage-sub-2, and null bucket, got {renderCompact (.arr byMission)}"
+      failures := failures.push s!"usage/summary: by_mission expected 7 buckets including m-usage-1, m-usage-sub-1, m-usage-sub-2, and null, got {renderCompact (.arr byMission)}"
     let some byRootMission := s24.fieldArr? "by_root_mission"
       | failures := failures.push s!"usage/summary: expected by_root_mission array, got {rendered24}"; return failures
-    if byRootMission.size != 2 ||
-       !(byRootMission.any (fun g => g.fieldStr? "key" == some "m-usage-1" && g.fieldNat? "requests" == some 3 && g.fieldNat? "input_tokens" == some 205)) ||
+    let rootM1 := (byRootMission.find? (fun g => g.fieldStr? "key" == some "m-usage-1")).getD .null
+    if rootM1.fieldStr? "key" != some "m-usage-1" ||
+       rootM1.fieldStr? "label" != some "m-usage-1" ||
+       rootM1.fieldNat? "requests" != some 3 ||
+       rootM1.fieldNat? "input_tokens" != some 205 then
+      failures := failures.push s!"usage/summary (a): root row m-usage-1 must have key == label == m-usage-1 (requests=3, input=205) even when child bucket is larger than parent, got {renderCompact rootM1}"
+    let rootTotals : Array Nat := byRootMission.map (fun g => (g.fieldNat? "input_tokens").getD 0 + (g.fieldNat? "output_tokens").getD 0)
+    let mut nonIncreasing := true
+    for idx in [1:rootTotals.size] do
+      if rootTotals[idx]! > rootTotals[idx - 1]! then
+        nonIncreasing := false
+    let sTop2 ← getJson app jwt "/api/ai/usage/summary?window=24h&top_limit=2" now
+    let rootTop2 := (sTop2.fieldArr? "by_root_mission").getD #[]
+    let top2Totals : Array Nat := rootTop2.map (fun g => (g.fieldNat? "input_tokens").getD 0 + (g.fieldNat? "output_tokens").getD 0)
+    if byRootMission.size != 4 || !nonIncreasing || top2Totals != #[340, 340] ||
        !(byRootMission.any (fun g => g.field? "key" == some .null && g.fieldNat? "requests" == some 1)) then
-      failures := failures.push s!"usage/summary: by_root_mission expected parent+child+grandchild rolled into m-usage-1 (requests=3, input=205) plus null bucket, got {renderCompact (.arr byRootMission)}"
+      failures := failures.push s!"usage/summary (b): by_root_mission must be in non-increasing input+output order (got totals={rootTotals}) and top_limit=2 must return the two largest [340, 340] (got {top2Totals}): {renderCompact (.arr byRootMission)}"
     let some byDay := s24.fieldArr? "by_day"
       | failures := failures.push s!"usage/summary: expected by_day array, got {rendered24}"; return failures
     if byDay.size != 1 then
@@ -847,14 +865,14 @@ private def usageSummaryClientShapeContract (app : CoreAppState) (store : CoreSt
     else
       let d := byDay[0]!
       if d.fieldStr? "day" != some dayPrefix ||
-         d.fieldNat? "requests" != some 4 ||
-         d.fieldNat? "router_requests" != some 4 ||
+         d.fieldNat? "requests" != some 7 ||
+         d.fieldNat? "router_requests" != some 7 ||
          (d.field? "cost_cents").isSome ||
          (d.field? "unknown_cost_requests").isSome ||
-         (d.fieldOrNull "by_caller_kind").fieldNat? "mission" != some 1 ||
-         (d.fieldOrNull "by_caller_kind").fieldNat? "subagent" != some 2 ||
+         (d.fieldOrNull "by_caller_kind").fieldNat? "mission" != some 3 ||
+         (d.fieldOrNull "by_caller_kind").fieldNat? "subagent" != some 3 ||
          (d.fieldOrNull "by_caller_kind").fieldNat? "api" != some 1 ||
-         (d.fieldOrNull "totals").fieldNat? "requests" != some 4 then
+         (d.fieldOrNull "totals").fieldNat? "requests" != some 7 then
         failures := failures.push s!"usage/summary: by_day[0] unexpected DayUsage fields, got {renderCompact d}"
     let some byHour := s24.fieldArr? "by_hour"
       | failures := failures.push s!"usage/summary: expected by_hour array, got {rendered24}"; return failures
@@ -863,11 +881,11 @@ private def usageSummaryClientShapeContract (app : CoreAppState) (store : CoreSt
     else
       let h := byHour[0]!
       if h.fieldStr? "hour" != some hourPrefix ||
-         h.fieldNat? "requests" != some 4 ||
-         h.fieldNat? "router_requests" != some 4 ||
+         h.fieldNat? "requests" != some 7 ||
+         h.fieldNat? "router_requests" != some 7 ||
          (h.field? "cost_cents").isSome ||
          (h.field? "unknown_cost_requests").isSome ||
-         (h.fieldOrNull "by_caller_kind").fieldNat? "mission" != some 1 then
+         (h.fieldOrNull "by_caller_kind").fieldNat? "mission" != some 3 then
         failures := failures.push s!"usage/summary: by_hour[0] unexpected HourUsage fields, got {renderCompact h}"
     -- Mobile compact query (`compact=true&top_limit=5`) reads `by_day` and `by_mission[].requests`
     let sCompact ← getJson app jwt "/api/ai/usage/summary?window=7d&compact=true&top_limit=5" now
@@ -875,8 +893,8 @@ private def usageSummaryClientShapeContract (app : CoreAppState) (store : CoreSt
       | failures := failures.push s!"usage/summary compact: expected by_day array, got {renderCompact sCompact}"; return failures
     let some cMissions := sCompact.fieldArr? "by_mission"
       | failures := failures.push s!"usage/summary compact: expected by_mission array, got {renderCompact sCompact}"; return failures
-    if cDays.size != 1 || cDays[0]!.fieldNat? "requests" != some 4 ||
-       cMissions.size != 4 then
+    if cDays.size != 1 || cDays[0]!.fieldNat? "requests" != some 7 ||
+       cMissions.size != 5 then
       failures := failures.push s!"usage/summary compact: expected populated by_day and by_mission with requests, got {renderCompact sCompact}"
     -- Window > 14 days (`window=30d`) must include days older than 14 days even when 15 newer days exist
     for dIdx in [1:16] do
@@ -896,7 +914,7 @@ private def usageSummaryClientShapeContract (app : CoreAppState) (store : CoreSt
   finally
     discard <| execParamQuery store.missionsDb "DELETE FROM proxy_usage;" #[]
     discard <| execParamQuery store.missionsDb
-      "DELETE FROM missions WHERE id IN ('m-usage-1','m-usage-sub-1','m-usage-sub-2');" #[]
+      "DELETE FROM missions WHERE id IN ('m-usage-1','m-usage-sub-1','m-usage-sub-2','m-usage-2','m-usage-2-sub','m-usage-3','m-usage-4');" #[]
   return failures
 
 /-- Replay the production renderers and HTTP dispatch, never a live usage fetch. -/
