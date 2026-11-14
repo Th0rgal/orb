@@ -82,15 +82,61 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: ./.github/actions/setup-turbo-lean
-      - name: Cached Lean build (sorry is an error) and axiom / vacuity audit
+      - name: Lean build (direct compiler, sorry is an error) and axiom / vacuity audit
+        working-directory: lean
         run: |
           set -euo pipefail
-          TURBO_LEAN_EMIT_C=1 ./scripts/turbo_lean.sh build --project-dir lean \
-            Orb.Scroll Orb.Stream Orb.Kernel Orb.Spec Orb.MutantSuite \
-            Orb.StatefulMutantSuite Orb.Lifecycle Orb.LifecycleSpec Orb.LifecycleMutants \
-            Orb.HarnessCloud Orb.HarnessCloudSpec Orb.HarnessCloudMutants \
-            Orb.ManagedNode Orb.ManagedNodeSpec Orb.ManagedNodeMutants Orb.Transcript
-          LEAN_PATH=lean/.lake/build/lib/lean lean -DwarningAsError=true lean/audit/AuditSpec.lean
+          mkdir -p .lake/build/lib/lean/Orb .lake/build/ir/Orb
+          lean -DwarningAsError=true -DautoImplicit=false Orb/Scroll.lean \
+            -o .lake/build/lib/lean/Orb/Scroll.olean \
+            -i .lake/build/lib/lean/Orb/Scroll.ilean
+          lean -DwarningAsError=true -DautoImplicit=false Orb/Stream.lean \
+            -o .lake/build/lib/lean/Orb/Stream.olean \
+            -i .lake/build/lib/lean/Orb/Stream.ilean
+          lean -DwarningAsError=true -DautoImplicit=false Orb/Kernel.lean \
+            -o .lake/build/lib/lean/Orb/Kernel.olean \
+            -i .lake/build/lib/lean/Orb/Kernel.ilean \
+            -c .lake/build/ir/Orb/Kernel.c
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/Spec.lean \
+            -o .lake/build/lib/lean/Orb/Spec.olean \
+            -i .lake/build/lib/lean/Orb/Spec.ilean
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/MutantSuite.lean \
+            -o .lake/build/lib/lean/Orb/MutantSuite.olean \
+            -i .lake/build/lib/lean/Orb/MutantSuite.ilean
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/StatefulMutantSuite.lean \
+            -o .lake/build/lib/lean/Orb/StatefulMutantSuite.olean \
+            -i .lake/build/lib/lean/Orb/StatefulMutantSuite.ilean
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/Lifecycle.lean \
+            -o .lake/build/lib/lean/Orb/Lifecycle.olean \
+            -i .lake/build/lib/lean/Orb/Lifecycle.ilean
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/LifecycleSpec.lean \
+            -o .lake/build/lib/lean/Orb/LifecycleSpec.olean \
+            -i .lake/build/lib/lean/Orb/LifecycleSpec.ilean
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/LifecycleMutants.lean \
+            -o .lake/build/lib/lean/Orb/LifecycleMutants.olean \
+            -i .lake/build/lib/lean/Orb/LifecycleMutants.ilean
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/HarnessCloud.lean \
+            -o .lake/build/lib/lean/Orb/HarnessCloud.olean \
+            -i .lake/build/lib/lean/Orb/HarnessCloud.ilean
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/HarnessCloudSpec.lean \
+            -o .lake/build/lib/lean/Orb/HarnessCloudSpec.olean \
+            -i .lake/build/lib/lean/Orb/HarnessCloudSpec.ilean
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/HarnessCloudMutants.lean \
+            -o .lake/build/lib/lean/Orb/HarnessCloudMutants.olean \
+            -i .lake/build/lib/lean/Orb/HarnessCloudMutants.ilean
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/ManagedNode.lean \
+            -o .lake/build/lib/lean/Orb/ManagedNode.olean \
+            -i .lake/build/lib/lean/Orb/ManagedNode.ilean
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/ManagedNodeSpec.lean \
+            -o .lake/build/lib/lean/Orb/ManagedNodeSpec.olean \
+            -i .lake/build/lib/lean/Orb/ManagedNodeSpec.ilean
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/ManagedNodeMutants.lean \
+            -o .lake/build/lib/lean/Orb/ManagedNodeMutants.olean \
+            -i .lake/build/lib/lean/Orb/ManagedNodeMutants.ilean
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true audit/AuditSpec.lean
+          lean -DwarningAsError=true -DautoImplicit=false Orb/Transcript.lean \
+            -o .lake/build/lib/lean/Orb/Transcript.olean \
+            -i .lake/build/lib/lean/Orb/Transcript.ilean
       - name: Scroll policy fixtures match Lean (Orb.Scroll)
         run: |
           set -euo pipefail

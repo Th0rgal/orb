@@ -8,9 +8,10 @@ binaries while retaining the source builder for local image builds.
 
 `kernel-abi.yml` stays a separate workflow: the shared planner selects it
 through `ci/domains.toml` (`wf:kernel-abi`) and it keeps its own verification
-receipt, so `CI OK` never certifies the kernel audit. Only its Lean build
-steps change here, from a direct compiler invocation to the same cached
-`turbo_lean.sh` path used by `ci.yml`.
+receipt, so `CI OK` never certifies the kernel audit. Its initial `Orb.*`
+kernel modules still compile directly with `lean` before `AuditSpec.lean`
+runs, while native package self-tests and `audit-spec` checks use the cached
+`turbo_lean.sh` path shared with `ci.yml`.
 
 ## Measurements
 
