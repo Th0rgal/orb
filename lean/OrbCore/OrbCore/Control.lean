@@ -110,6 +110,7 @@ structure CoreAppState where
   healthTracker?  : Option ProviderHealthTracker := none
   proxyMockTransport? : Option (ProviderTarget → IO (Except String HttpsResponse)) := none
   proxyStreamLimits?  : Option StreamLimits := none
+  sseKeepAliveMs?     : Option Nat := none
   authRoot        : String := ""
   authRotation?   : Option AuthRotationHandle := none
   cliProxySessionsRef? : Option (IO.Ref (Array CliProxyLoginSession)) := none
@@ -1166,6 +1167,119 @@ structure CoreHttpResponse where
       whether the upstream body completed normally. -/
   bodyStream? : Option ((ByteArray → IO Bool) → IO Bool) := none
   deriving Inhabited
+
+/-- Build a held-open `text/event-stream` response for the control SSE routes.
+    `initialFrame` is emitted as the first chunk, then queued `BroadcastHub` frames are relayed
+    (filtered to this caller's visible missions and `kindsFilter`), with `: keep-alive` comments
+    between idle periods and a `stream_lagged` notice when the 256-frame subscriber queue overflows.
+    The stream ends when the client disconnects or the caller's session is no longer valid. -/
+def sseStreamResponse (st : CoreAppState) (caller : CallerPrincipal) (reqOrigin? : Option String)
+    (missionFilter? : Option String) (kindsFilter : Array String) (initialFrame : String)
+    (preRegisteredSub? : Option SseSubscriber := none)
+    (reqHdrs : Array (String × String) := #[]) : CoreHttpResponse :=
+  let visibleMissionUncached (liveCaller : CallerPrincipal) (mid? : Option String) : IO Bool := do
+    match mid? with
+    | none =>
+      if missionFilter?.isSome then return false
+      return liveCaller.isLegacyUnscoped || liveCaller.role == "admin"
+    | some mid =>
+      if mid.isEmpty then
+        if missionFilter?.isSome then return false
+        return liveCaller.isLegacyUnscoped || liveCaller.role == "admin"
+      if let some want := missionFilter? then
+        if want != mid then return false
+      if liveCaller.isLegacyUnscoped then
+        return true
+      return (← authorizeMissionOp st liveCaller mid false).isNone
+  let kindsAllows (evType : String) : Bool :=
+    if kindsFilter.isEmpty then true
+    else if evType == "mission_presentation" || evType == "stream_lagged" ||
+            evType == "missions_snapshot" || evType == "snapshot" then true
+    else kindsFilter.contains evType
+  let resolveLiveCaller? : IO (Option CallerPrincipal) := do
+    if !reqHdrs.isEmpty then
+      resolveCallerPrincipal? st reqHdrs (← coreEpochSec) (allowWsSubproto := true)
+    else if caller.isLegacyUnscoped then
+      return some caller
+    else
+      match ← getUserById? st.store caller.userId with
+      | none => return none
+      | some u =>
+        if u.disabled || u.sessionEpoch != caller.sessionEpoch then return none
+        return some (CallerPrincipal.ofUserRecord u false)
+  {
+    status := 200
+    contentType := "text/event-stream"
+    corsOrigin? := reqOrigin?
+    extraHdrs := #[("Cache-Control", "no-cache")]
+    body := ByteArray.empty
+    bodyStream? := some fun emit => do
+      let some hub := st.broadcastHub?
+        | do discard <| emit initialFrame.toUTF8; return true
+      let sub ← match preRegisteredSub? with
+        | some s => pure s
+        | none => registerSseSubscriberFull hub missionFilter?
+      try
+        if !(← emit initialFrame.toUTF8) then return false
+        let keepAliveMs : Nat := max 20 (st.sseKeepAliveMs?.getD 15000)
+        let callerRevalidateMs : Nat := 1000
+        let missionVisTtlMs : Nat := 1000
+        let startMs ← IO.monoMsNow
+        let mut lastActivityMs := startMs
+        let mut lastCallerCheckMs := startMs
+        let mut cachedCaller? : Option CallerPrincipal := some caller
+        let mut missionVisCache : Array (String × Nat × Bool) := #[]
+        let mut running := true
+        while running do
+          let nowCheckMs ← IO.monoMsNow
+          if nowCheckMs - lastCallerCheckMs ≥ callerRevalidateMs then
+            cachedCaller? ← resolveLiveCaller?
+            lastCallerCheckMs := nowCheckMs
+          let some liveCaller := cachedCaller?
+            | do running := false; break
+          let dropped ← sub.droppedRef.swap 0
+          if dropped > 0 then
+            let lagFrame := formatSseFrame "stream_lagged" s!"\{\"dropped\":{dropped}}" none
+            if !(← emit lagFrame.toUTF8) then
+              running := false
+              break
+            lastActivityMs ← IO.monoMsNow
+          let _ ← sub.queueRef.swap #[]
+          let events ← sub.eventsRef.swap #[]
+          if !events.isEmpty then
+            for ev in events do
+              if running then
+                let allowed ← match ev.missionId? with
+                  | none => visibleMissionUncached liveCaller none
+                  | some mid =>
+                    if liveCaller.isLegacyUnscoped then
+                      visibleMissionUncached liveCaller (some mid)
+                    else
+                      let evNowMs ← IO.monoMsNow
+                      match missionVisCache.find? (fun (m, ts, _) => m == mid && evNowMs - ts < missionVisTtlMs) with
+                      | some (_, _, ok) => pure ok
+                      | none =>
+                        let ok ← visibleMissionUncached liveCaller (some mid)
+                        missionVisCache := (missionVisCache.filter (fun (m, ts, _) => m != mid && evNowMs - ts < missionVisTtlMs)).push (mid, evNowMs, ok)
+                        pure ok
+                if allowed && kindsAllows ev.eventType then
+                  if !(← emit ev.frame.toUTF8) then
+                    running := false
+                  else
+                    lastActivityMs ← IO.monoMsNow
+          else
+            let nowMs ← IO.monoMsNow
+            if nowMs - lastActivityMs ≥ keepAliveMs then
+              if !(← emit ": keep-alive\n\n".toUTF8) then
+                running := false
+              else
+                lastActivityMs ← IO.monoMsNow
+            else
+              IO.sleep 20
+        return false
+      finally
+        unregisterSseSubscriber hub sub.id
+  }
 
 private def reasonPhrase : Nat → String
   | 101 => "Switching Protocols"
@@ -4259,35 +4373,50 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
 
   -- Mission Control SSE Streams & Sync (`GET /api/control/stream`, `GET /api/control/missions/:id/stream`, `GET /api/control/sync`)
   if req.method == "GET" && cleanPath == "/api/control/stream" then
+    let qParams := parseQueryParams rawTarget
+    let missionFilter? := ((qParams.find? (fun p => p.1 == "mission")).bind (fun p => percentDecodeStrict p.2)).filter (!·.isEmpty)
+    let kindsRaw := ((qParams.find? (fun p => p.1 == "kinds")).bind (fun p => percentDecodeStrict p.2)).getD ""
+    let kindsFilter : Array String := ((kindsRaw.splitOn ",").map (·.trimAscii.toString)).toArray.filter (!·.isEmpty)
+    let profileRaw := ((qParams.find? (fun p => p.1 == "profile")).bind (fun p => percentDecodeStrict p.2)).getD ""
+    let effKinds := if !kindsFilter.isEmpty then kindsFilter
+      else if profileRaw == "presentation" then #["mission_presentation"] else #[]
+    let sinceSeq? := (((qParams.find? (fun p => p.1 == "since_seq" || p.1 == "since")).bind (fun p => percentDecodeStrict p.2)).bind String.toNat?).map UInt64.ofNat
+    if let some mid := missionFilter? then
+      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
+        return .ok (mkJson cCode cBody)
+      let preSub? ← match st.broadcastHub? with
+        | some hub => some <$> registerSseSubscriberFull hub (some mid)
+        | none => pure none
+      let evJson ← match ← queryMissionEventsPage st.store mid sinceSeq? none 100 #[] none with
+        | .ok pg => pure pg.eventsJson
+        | .error _ => pure "[]"
+      let initFrame := formatSseFrame "snapshot" s!"\{\"mission_id\":{jsonEscape mid},\"events\":{evJson}}" (some 1)
+      return .ok (sseStreamResponse st caller reqOrigin? (some mid) effKinds initFrame preSub? req.headers)
+    let preSub? ← match st.broadcastHub? with
+      | some hub => some <$> registerSseSubscriberFull hub none
+      | none => pure none
     let callerOpt := if caller.isLegacyUnscoped then none else some caller.userId
     let listBody ← match ← listMissionsJson st.store none callerOpt { limit? := some 200 } with
       | .ok j => pure j
       | .error _ => pure "[]"
-    let sseBody := formatSseFrame "missions_snapshot" s!"\{\"missions\":{listBody}}" (some 1)
-    return .ok {
-      status := 200
-      contentType := "text/event-stream"
-      corsOrigin? := reqOrigin?
-      extraHdrs := #[("Cache-Control", "no-cache")]
-      body := sseBody.toUTF8
-    }
+    let initFrame := formatSseFrame "missions_snapshot" s!"\{\"missions\":{listBody}}" (some 1)
+    return .ok (sseStreamResponse st caller reqOrigin? none effKinds initFrame preSub? req.headers)
 
   if let some params := matchRoutePattern? "/api/control/missions/:id/stream" rawTarget then
     if req.method == "GET" then
       let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
       if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
         return .ok (mkJson cCode cBody)
-      let evJson ← match ← queryMissionEventsPage st.store mid none none 100 #[] none with
+      let qParams := parseQueryParams rawTarget
+      let sinceSeq? := (((qParams.find? (fun p => p.1 == "since_seq" || p.1 == "since")).bind (fun p => percentDecodeStrict p.2)).bind String.toNat?).map UInt64.ofNat
+      let preSub? ← match st.broadcastHub? with
+        | some hub => some <$> registerSseSubscriberFull hub (some mid)
+        | none => pure none
+      let evJson ← match ← queryMissionEventsPage st.store mid sinceSeq? none 100 #[] none with
         | .ok pg => pure pg.eventsJson
         | .error _ => pure "[]"
-      let sseBody := formatSseFrame "snapshot" s!"\{\"mission_id\":{jsonEscape mid},\"events\":{evJson}}" (some 1)
-      return .ok {
-        status := 200
-        contentType := "text/event-stream"
-        corsOrigin? := reqOrigin?
-        extraHdrs := #[("Cache-Control", "no-cache")]
-        body := sseBody.toUTF8
-      }
+      let initFrame := formatSseFrame "snapshot" s!"\{\"mission_id\":{jsonEscape mid},\"events\":{evJson}}" (some 1)
+      return .ok (sseStreamResponse st caller reqOrigin? (some mid) #[] initFrame preSub? req.headers)
 
   if req.method == "GET" && cleanPath == "/api/control/sync" then
     let callerOpt := if caller.isLegacyUnscoped then none else some caller.userId
