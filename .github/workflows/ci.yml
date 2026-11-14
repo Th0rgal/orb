@@ -1,6 +1,12 @@
 name: CI
 
 on:
+  workflow_dispatch:
+    inputs:
+      use_lean_runners:
+        description: Use lean.ci runners (also requires ORB_LEAN_RUNNERS=true)
+        type: boolean
+        default: false
   push:
     branches: [master, main, "release/*"]
     # Roadmap/docs pushes must not queue behind (and so cancel) pending master runs.
@@ -47,8 +53,8 @@ jobs:
   # CI changes, unverified master pushes and the nightly select everything.
   plan:
     name: Plan
-    runs-on: ubuntu-latest
-    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
+    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && (github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.repository == 'Th0rgal/orb' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'lean-16vcpu-ubuntu-2604' || 'ubuntu-latest' }}
+    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     outputs:
       tree_hash: ${{ steps.plan.outputs.tree_hash }}
       orb_build_hash: ${{ steps.plan.outputs.orb_build_hash }}
@@ -89,10 +95,10 @@ jobs:
 
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && (github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.repository == 'Th0rgal/orb' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'lean-32vcpu-ubuntu-2604' || 'ubuntu-latest' }}
     # Skip CI on draft PRs unless explicitly requested
     needs: plan
-    if: (needs.plan.outputs.run_test == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
+    if: (needs.plan.outputs.run_test == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     steps:
       - uses: actions/checkout@v6
 
@@ -122,9 +128,9 @@ jobs:
 
   fmt:
     name: Format & Hygiene
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && (github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.repository == 'Th0rgal/orb' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'lean-16vcpu-ubuntu-2604' || 'ubuntu-latest' }}
     # Skip CI on draft PRs unless explicitly requested
-    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
+    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v6
 
@@ -143,10 +149,10 @@ jobs:
 
   harness-contract:
     name: Harness Contract Tests
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && (github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.repository == 'Th0rgal/orb' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'lean-16vcpu-ubuntu-2604' || 'ubuntu-latest' }}
     # Skip CI on draft PRs unless explicitly requested
     needs: plan
-    if: (needs.plan.outputs.run_harness_contract == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
+    if: (needs.plan.outputs.run_harness_contract == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     steps:
       - uses: actions/checkout@v6
 
@@ -160,10 +166,10 @@ jobs:
 
   capability-matrix:
     name: Capability Matrix Contract Check
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && (github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.repository == 'Th0rgal/orb' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'lean-16vcpu-ubuntu-2604' || 'ubuntu-latest' }}
     # Skip CI on draft PRs unless explicitly requested
     needs: plan
-    if: (needs.plan.outputs.run_capability_matrix == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
+    if: (needs.plan.outputs.run_capability_matrix == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     steps:
       - uses: actions/checkout@v6
 
@@ -172,10 +178,10 @@ jobs:
 
   policy-lint:
     name: Policy Lint
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && (github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.repository == 'Th0rgal/orb' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'lean-16vcpu-ubuntu-2604' || 'ubuntu-latest' }}
     # Skip CI on draft PRs unless explicitly requested
     needs: plan
-    if: (needs.plan.outputs.run_policy_lint == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
+    if: (needs.plan.outputs.run_policy_lint == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     steps:
       - uses: actions/checkout@v6
 
@@ -200,9 +206,9 @@ jobs:
 
   orb-build:
     name: Orb build
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && (github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.repository == 'Th0rgal/orb' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'lean-16vcpu-ubuntu-2604' || 'ubuntu-24.04' }}
     needs: plan
-    if: (needs.plan.outputs.run_orb_unit == 'true' || needs.plan.outputs.run_orb_browser == 'true' || needs.plan.outputs.run_orb_performance == 'true' || needs.plan.outputs.dist_run_id != '') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
+    if: (needs.plan.outputs.run_orb_unit == 'true' || needs.plan.outputs.run_orb_browser == 'true' || needs.plan.outputs.run_orb_performance == 'true' || needs.plan.outputs.dist_run_id != '') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     defaults:
       run:
         working-directory: orb
@@ -254,9 +260,9 @@ jobs:
 
   orb-unit:
     name: Orb unit
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && (github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.repository == 'Th0rgal/orb' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'lean-16vcpu-ubuntu-2604' || 'ubuntu-24.04' }}
     needs: [plan, orb-build]
-    if: (needs.plan.outputs.run_orb_unit == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
+    if: (needs.plan.outputs.run_orb_unit == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     defaults:
       run:
         working-directory: orb
@@ -287,12 +293,12 @@ jobs:
 
   orb-browser:
     name: Orb browser (${{ matrix.shard }}/8)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && (github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.repository == 'Th0rgal/orb' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'lean-16vcpu-ubuntu-2604' || 'ubuntu-24.04' }}
     # Version matches @playwright/test in orb/pnpm-lock.yaml. Contains browser
     # binaries, OS libraries and fonts; no per-shard apt update/install.
     container: mcr.microsoft.com/playwright:v1.55.0-noble
     needs: [plan, orb-build]
-    if: (needs.plan.outputs.run_orb_browser == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
+    if: (needs.plan.outputs.run_orb_browser == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
       matrix:
@@ -342,12 +348,12 @@ jobs:
   # Timing-sensitive specs: report-only on PRs, blocking on master.
   orb-performance:
     name: Orb performance
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && (github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.repository == 'Th0rgal/orb' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'lean-16vcpu-ubuntu-2604' || 'ubuntu-24.04' }}
     # Version matches @playwright/test in orb/pnpm-lock.yaml. Contains browser
     # binaries, OS libraries and fonts; no per-shard apt update/install.
     container: mcr.microsoft.com/playwright:v1.55.0-noble
     needs: [plan, orb-build]
-    if: (needs.plan.outputs.run_orb_performance == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
+    if: (needs.plan.outputs.run_orb_performance == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     continue-on-error: ${{ github.event_name == 'pull_request' }}
     outputs:
       verified: ${{ steps.performance.outcome == 'success' }}
@@ -388,9 +394,9 @@ jobs:
 
   orb-desktop-shell:
     name: Orb Desktop Shell (Lean + C)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && (github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.repository == 'Th0rgal/orb' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'lean-16vcpu-ubuntu-2604' || 'ubuntu-24.04' }}
     needs: plan
-    if: (needs.plan.outputs.run_orb_desktop_shell == 'true' || needs.plan.outputs.desktop_run_id != '') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
+    if: (needs.plan.outputs.run_orb_desktop_shell == 'true' || needs.plan.outputs.desktop_run_id != '') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     steps:
       - uses: actions/checkout@v6
       # Shell-only edits do not change these two Lean binaries. Reuse their
@@ -450,7 +456,7 @@ jobs:
     name: Orb macOS Shell & Signer (Swift)
     runs-on: macos-26
     needs: plan
-    if: (needs.plan.outputs.run_orb_macos_shell == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
+    if: (needs.plan.outputs.run_orb_macos_shell == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v4
@@ -471,9 +477,9 @@ jobs:
 
   docker:
     name: Docker image
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && (github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.repository == 'Th0rgal/orb' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'lean-16vcpu-ubuntu-2604' || 'ubuntu-latest' }}
     needs: plan
-    if: (needs.plan.outputs.run_docker == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
+    if: (needs.plan.outputs.run_docker == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     steps:
       - uses: actions/checkout@v6
       - name: Verify Docker entrypoint with Windows line-ending settings
@@ -547,8 +553,8 @@ jobs:
   # so those keep their own required checks until they move into this file.
   ci-ok:
     name: CI OK
-    runs-on: ubuntu-latest
-    if: always() && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
+    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && (github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.repository == 'Th0rgal/orb' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'lean-16vcpu-ubuntu-2604' || 'ubuntu-latest' }}
+    if: always() && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     needs: [plan, test, fmt, harness-contract, capability-matrix, policy-lint, orb-build, orb-unit, orb-browser, orb-performance, orb-desktop-shell, orb-macos-shell, docker]
     steps:
       - env:

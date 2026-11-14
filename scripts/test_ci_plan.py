@@ -1,5 +1,7 @@
 """Replays real change shapes through scripts/ci_plan.py (stdlib unittest)."""
+import ast
 import fnmatch
+import itertools
 import io
 import json
 import os
@@ -64,6 +66,40 @@ def matches_push_paths(path: str, patterns: list[str]) -> bool:
     return matched
 
 
+def workflow_runners(name: str) -> dict[str, str]:
+    text = (ROOT / ".github/workflows" / name).read_text().split("\njobs:\n", 1)[1]
+    blocks = re.split(r"(?m)^  ([a-z0-9-]+):\n", text)
+    return {
+        job: re.search(r"(?m)^    runs-on: (.+)$", body).group(1)
+        for job, body in zip(blocks[1::2], blocks[2::2])
+    }
+
+
+def runner_for(expression: str, context: dict) -> str:
+    """Evaluate the string/boolean subset used by actual runs-on expressions.
+
+    These operands have the same truthiness and short-circuit return values in
+    Python and Actions. Reject syntax outside that subset instead of silently
+    treating an untested workflow expression as supported.
+    """
+    if not expression.startswith("${{"):
+        return expression
+    source = expression[3:-2].strip()
+    source = re.sub(r"\b(?:vars|github|inputs)\.[\w.]+",
+                    lambda m: repr(context[m.group()]), source)
+    source = source.replace("&&", " and ").replace("||", " or ")
+    tree = ast.parse(source, mode="eval")
+    allowed = (ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.Compare,
+               ast.Eq, ast.NotEq, ast.Constant, ast.Call, ast.Name, ast.Load)
+    for node in ast.walk(tree):
+        if not isinstance(node, allowed):
+            raise AssertionError(f"unsupported runner syntax: {ast.dump(node)}")
+        if isinstance(node, ast.Name) and node.id != "format":
+            raise AssertionError(f"unsupported runner name: {node.id}")
+    return eval(compile(tree, "<runs-on>", "eval"), {"__builtins__": {}},
+                {"format": lambda pattern, value: pattern.format(value)})
+
+
 def script_docs_inputs() -> dict[str, list[str]]:
     """docs/ files the scripts themselves read: {script: [rel paths]}.
 
@@ -77,6 +113,79 @@ def script_docs_inputs() -> dict[str, list[str]]:
         if refs:
             out[script.name] = sorted(set(refs))
     return out
+
+
+class RunnerSelectionTest(unittest.TestCase):
+    # Original labels on origin/master: keep this inventory explicit so a new
+    # Linux job or an accidental ubuntu-24.04 -> ubuntu-latest change fails.
+    FALLBACKS = {
+        "ci.yml": {
+            "plan": "ubuntu-latest", "test": "ubuntu-latest",
+            "fmt": "ubuntu-latest", "harness-contract": "ubuntu-latest",
+            "capability-matrix": "ubuntu-latest", "policy-lint": "ubuntu-latest",
+            "orb-build": "ubuntu-24.04", "orb-unit": "ubuntu-24.04", "orb-browser": "ubuntu-24.04",
+            "orb-performance": "ubuntu-24.04", "orb-desktop-shell": "ubuntu-24.04",
+            "docker": "ubuntu-latest", "ci-ok": "ubuntu-latest",
+        },
+        "kernel-abi.yml": {"plan": "ubuntu-latest", "kernel-abi": "ubuntu-latest"},
+    }
+
+    def test_every_linux_job_preserves_fallback_and_trust_boundary(self):
+        for workflow, fallbacks in self.FALLBACKS.items():
+            runners = workflow_runners(workflow)
+            extra = {"orb-macos-shell", "ci-ok"} if workflow == "ci.yml" else {"kernel-ok"}
+            self.assertEqual(set(runners), set(fallbacks) | extra)
+            if workflow == "ci.yml":
+                self.assertEqual(runners["orb-macos-shell"], "macos-26")
+            else:
+                self.assertEqual(runners["kernel-ok"], "ubuntu-latest")
+            for variable, repo, branch, event, manual in itertools.product(
+                ("", "false", "true", "typo"),
+                ("Th0rgal/orb", "someone/orb"),
+                ("refs/heads/master", "refs/heads/feature", "refs/tags/v1", "refs/pull/1/merge"),
+                ("push", "schedule", "workflow_dispatch", "pull_request", "pull_request_target"),
+                (False, True),
+            ):
+                context = {
+                    "vars.ORB_LEAN_RUNNERS": variable, "github.repository": repo,
+                    "github.ref": branch, "github.event.repository.default_branch": "master",
+                    "github.event_name": event, "inputs.use_lean_runners": manual,
+                }
+                enabled = (variable == "true" and repo == "Th0rgal/orb"
+                           and branch == "refs/heads/master"
+                           and event in {"push", "schedule", "workflow_dispatch"}
+                           and (event != "workflow_dispatch" or manual))
+                for job, fallback in fallbacks.items():
+                    size = 32 if job in {"test", "kernel-abi"} else 16
+                    expected = f"lean-{size}vcpu-ubuntu-2604" if enabled else fallback
+                    with self.subTest(workflow=workflow, job=job, **context):
+                        self.assertEqual(runner_for(runners[job], context), expected)
+
+    def test_default_branch_is_read_from_event(self):
+        for workflow, fallbacks in self.FALLBACKS.items():
+            runners = workflow_runners(workflow)
+            for branch, enabled in (("main", True), ("master", False)):
+                context = {
+                    "vars.ORB_LEAN_RUNNERS": "true", "github.repository": "Th0rgal/orb",
+                    "github.ref": f"refs/heads/{branch}",
+                    "github.event.repository.default_branch": "main",
+                    "github.event_name": "push", "inputs.use_lean_runners": False,
+                }
+                for job, fallback in fallbacks.items():
+                    selected = runner_for(runners[job], context)
+                    self.assertEqual(selected.startswith("lean-"), enabled)
+                    if not enabled:
+                        self.assertEqual(selected, fallback)
+
+    def test_manual_opt_in_is_boolean_and_defaults_to_hosted(self):
+        for workflow in self.FALLBACKS:
+            text = (ROOT / ".github/workflows" / workflow).read_text()
+            self.assertRegex(text, r"(?s)workflow_dispatch:\n    inputs:\n      use_lean_runners:\n"
+                             r"        description: [^\n]+\n        type: boolean\n        default: false\n")
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        for condition in re.findall(r"(?m)^    if: (.+)$", ci):
+            if "github.event_name == 'push'" in condition:
+                self.assertIn("github.event_name == 'workflow_dispatch'", condition)
 
 
 class PlanTest(unittest.TestCase):
