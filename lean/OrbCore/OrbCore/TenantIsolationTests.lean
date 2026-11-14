@@ -863,15 +863,15 @@ def run (root : String) : IO Unit := do
           (memberInitWire.splitOn "member-mission").length > 1 &&
           (memberInitWire.splitOn "admin-mission").length == 1)
         s!"SSE (a)/(b) initial missions_snapshot chunked stream or tenant scoping failed (adminEof={adminInitEof}, memberEof={memberInitEof})"
-      publishControlEvent (some sseHub) "mission_status_changed"
-        "{\"mission_id\":\"admin-mission\",\"status\":\"running\",\"marker\":\"admin-only-sse-live\"}"
+      publishControlEvent (some sseHub) "text_delta"
+        "{\"content\":\"admin-only-sse-live\"}"
         (some "admin-mission")
-      publishControlEvent (some sseHub) "mission_status_changed"
-        "{\"mission_id\":\"member-mission\",\"status\":\"running\",\"marker\":\"member-visible-sse-live\"}"
+      publishControlEvent (some sseHub) "text_delta"
+        "{\"content\":\"member-visible-sse-live\"}"
         (some "member-mission")
       let (adminLiveWire, adminLiveEof) ← drainSseUntil adminStreamFd 1000
         (fun s => (s.splitOn "admin-only-sse-live").length > 1 && (s.splitOn "member-visible-sse-live").length > 1)
-      let (memberLiveWire, memberLiveEof) ← drainSseUntil memberStreamFd 1000
+      let (memberLiveWire, memberLiveEof) ← drainSseUntil memberStreamFd 400
         (fun s => (s.splitOn "member-visible-sse-live").length > 1)
       check (!adminLiveEof && !memberLiveEof &&
           (adminLiveWire.splitOn "admin-only-sse-live").length > 1 &&
@@ -879,6 +879,23 @@ def run (root : String) : IO Unit := do
           (memberLiveWire.splitOn "member-visible-sse-live").length > 1 &&
           (memberLiveWire.splitOn "admin-only-sse-live").length == 1)
         s!"SSE (a)/(b) live event delivery or tenant isolation failed (adminLive={adminLiveWire}, memberLive={memberLiveWire})"
+      let memberMissionStreamFd ← openSseSocket "/api/control/missions/member-mission/stream" (some memberLiveTok)
+      let (_, memberMissionInitEof) ← drainSseUntil memberMissionStreamFd 1000
+        (fun s => (s.splitOn "event: snapshot").length > 1 && (s.splitOn "\n\n").length > 1)
+      check (!memberMissionInitEof) "SSE (a)/(b) member mission stream closed prematurely"
+      publishControlEvent (some sseHub) "text_delta"
+        "{\"content\":\"admin-only-mission-delta\"}"
+        (some "admin-mission")
+      publishControlEvent (some sseHub) "text_delta"
+        "{\"content\":\"member-mission-delta\"}"
+        (some "member-mission")
+      let (memberMissionLiveWire, memberMissionLiveEof) ← drainSseUntil memberMissionStreamFd 400
+        (fun s => (s.splitOn "member-mission-delta").length > 1)
+      discard <| closeFd memberMissionStreamFd
+      check (!memberMissionLiveEof &&
+          (memberMissionLiveWire.splitOn "member-mission-delta").length > 1 &&
+          (memberMissionLiveWire.splitOn "admin-only-mission-delta").length == 1)
+        s!"SSE (a)/(b) member mission stream payload-less text_delta failed: {memberMissionLiveWire}"
 
       -- (d) Keep-alive comment `: keep-alive\n\n` arrives on an idle open stream within the configured short interval.
       let (keepAliveWire, keepAliveEof) ← drainSseUntil memberStreamFd 600
@@ -903,10 +920,10 @@ def run (root : String) : IO Unit := do
           (mInitWire.splitOn "hist-seq-1").length == 1)
         s!"SSE (c) mission stream since_seq replay mismatch: {mInitWire}"
       publishControlEvent (some sseHub) "mission_status_changed"
-        "{\"mission_id\":\"member-mission\",\"status\":\"awaiting_user\",\"marker\":\"other-mission-noise\"}"
+        "{\"status\":\"awaiting_user\",\"marker\":\"other-mission-noise\"}"
         (some "member-mission")
       publishControlEvent (some sseHub) "mission_status_changed"
-        "{\"mission_id\":\"admin-mission\",\"status\":\"awaiting_user\",\"marker\":\"target-mission-signal\"}"
+        "{\"status\":\"awaiting_user\",\"marker\":\"target-mission-signal\"}"
         (some "admin-mission")
       let (mFilterWire, mFilterEof) ← drainSseUntil missionStreamFd 1000
         (fun s => (s.splitOn "target-mission-signal").length > 1)
@@ -916,30 +933,29 @@ def run (root : String) : IO Unit := do
         s!"SSE (c) mission stream failed to filter out other mission's event: {mFilterWire}"
 
       -- (e) Disconnect cleanup and `stream_lagged` overflow notice:
-      -- Closing the client socket must unregister its subscriber from `BroadcastHub`, and overflowing
-      -- a live subscriber queue (> 256 frames) must emit `event: stream_lagged` with `dropped > 0`.
+      -- Closing the client socket is detected by the failed write within two keep-alive intervals
+      -- and unregisters its subscriber from `BroadcastHub`; overflowing a live subscriber queue
+      -- (> 256 frames) emits `event: stream_lagged` with `dropped > 0`.
       let subsBeforeClose ← sseHub.mu.atomically do return (← get).2.size
       check (subsBeforeClose ≥ 1) s!"SSE (e) expected active subscriber before close, got {subsBeforeClose}"
       discard <| closeFd missionStreamFd
       let mut subsAfterClose := subsBeforeClose
       for _ in [0:20] do
-        publishControlEvent (some sseHub) "mission_status_changed"
-          "{\"mission_id\":\"admin-mission\",\"status\":\"running\"}" (some "admin-mission")
-        IO.sleep 25
+        IO.sleep 20
         subsAfterClose ← sseHub.mu.atomically do return (← get).2.size
         if subsAfterClose == 0 then break
       check (subsAfterClose == 0)
-        s!"SSE (e) closed client socket did not unregister SSE subscriber (remaining={subsAfterClose})"
+        s!"SSE (e) closed client socket did not unregister SSE subscriber within keep-alive bound (remaining={subsAfterClose})"
 
       let lagFd ← openSseSocket "/api/control/missions/member-mission/stream" (some memberLiveTok)
       let (_, lagInitEof) ← drainSseUntil lagFd 1000
         (fun s => (s.splitOn "event: snapshot").length > 1 && (s.splitOn "\n\n").length > 1)
       check (!lagInitEof) "SSE (e) lag test stream closed prematurely"
-      -- Wait for the server loop to enter `pollReadable` sleep so all 270 frames accumulate in the subscriber queue at once.
+      -- Wait for the server loop to enter sleep so all 270 frames accumulate in the subscriber queue at once.
       IO.sleep 15
       for idx in [0:270] do
         publishControlEvent (some sseHub) "mission_status_changed"
-          s!"\{\"mission_id\":\"member-mission\",\"status\":\"running\",\"seq_idx\":{idx}}"
+          s!"\{\"status\":\"running\",\"seq_idx\":{idx}}"
           (some "member-mission")
       let (lagWire, _) ← drainSseUntil lagFd 1500
         (fun s => (s.splitOn "event: stream_lagged").length > 1 && (s.splitOn "\"seq_idx\":269").length > 1)
