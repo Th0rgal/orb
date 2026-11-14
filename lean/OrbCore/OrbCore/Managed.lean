@@ -178,7 +178,11 @@ private def renderManagedBudgetBaseJson
     let active := (st.machines.filter (fun m => m.status == "ready" || m.status == "provisioning")).size
     let enStr := if st.enabled then "true" else "false"
     let boatStr := if st.boatEnabled then "true" else "false"
-    s!"\{\"enabled\":{enStr},\"boat_enabled\":{boatStr},\"active_machines\":{active},\"max_concurrent\":{st.maxConcurrent},\"spent_today_cents\":{st.spentTodayCents},\"daily_cap_cents\":{st.dailyCapCents}}"
+    -- The desktop, iOS and Android `ManagedBudget` contract reads the `_usd`, `active`, TTL and size
+    -- keys; the single-tenant reply carries them too, next to the original cent fields.
+    s!"\{\"enabled\":{enStr},\"boat_enabled\":{boatStr},\"active\":{active},\"active_machines\":{active},\"max_concurrent\":{st.maxConcurrent},\"spent_today_cents\":{st.spentTodayCents},\"daily_cap_cents\":{st.dailyCapCents}," ++
+    s!"\"spent_today_usd\":{formatCentsUsd2 st.spentTodayCents},\"daily_cap_usd\":{formatCentsUsd2 st.dailyCapCents}," ++
+    s!"\"default_ttl_minutes\":60,\"max_ttl_minutes\":720,\"default_size\":\"small\",\"max_size\":\"xlarge\"}"
   | some uid =>
     let ownMachines := st.machines.filter (fun m => m.ownerUserId == uid)
     let active := (ownMachines.filter (fun m => m.status == "ready" || m.status == "provisioning")).size
