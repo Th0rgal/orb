@@ -441,8 +441,13 @@ private def sidecarParkedHealthContract
        row1a.fieldStr? "parked_reason" != some "credential_quota" ||
        row1a.fieldStr? "parked_source" != some "sidecar" then
       failures := failures.push s!"sidecar parked (a): expected parked_until/parked_reason/parked_source on {oauthOnly}, got {renderCompact row1a}"
-    if (row1a.field? "cooldown_remaining_secs").isSome then
-      failures := failures.push "sidecar parked (a): must keep cooldown_secs_remaining as the only cooldown field"
+    if row1a.fieldUInt64? "cooldown_remaining_secs" != some 471600 ||
+       row1a.fieldUInt64? "cooldown_remaining_secs" != row1a.fieldUInt64? "cooldown_secs_remaining" then
+      failures := failures.push s!"sidecar parked (a): expected cooldown_remaining_secs equal to cooldown_secs_remaining=471600, got {renderCompact row1a}"
+    if row1a.fieldStr? "provider_id" != some "anthropic" ||
+       row1a.fieldBool? "is_healthy" != some false ||
+       row1a.fieldBool? "is_degraded" != some true then
+      failures := failures.push s!"sidecar parked (a): expected provider_id=anthropic, is_healthy=false, is_degraded=true on parked row, got {renderCompact row1a}"
     if (raw1a.splitOn "claude-secret-file.json").length > 1 ||
        (raw1a.splitOn "owner-secret@fixture.invalid").length > 1 ||
        (raw1a.splitOn "ag-secret@fixture.invalid").length > 1 then
@@ -469,6 +474,10 @@ private def sidecarParkedHealthContract
     let rows1c := (← getJson app jwt "/api/model-routing/health" now).asArr?.getD #[]
     let row1c := (rows1c.find? (fun v => v.fieldStr? "account_id" == some oauthOnly)).getD .null
     if (row1c.fieldUInt64? "cooldown_secs_remaining").getD 0 != 0 ||
+       row1c.fieldUInt64? "cooldown_remaining_secs" != some 0 ||
+       row1c.fieldStr? "provider_id" != some "anthropic" ||
+       row1c.fieldBool? "is_healthy" != some true ||
+       row1c.fieldBool? "is_degraded" != some false ||
        (row1c.field? "parked_until") != some .null ||
        (row1c.field? "parked_reason") != some .null ||
        (row1c.field? "parked_source") != some .null then

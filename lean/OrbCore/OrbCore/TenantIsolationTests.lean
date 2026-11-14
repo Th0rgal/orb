@@ -779,7 +779,12 @@ def run (root : String) : IO Unit := do
     let mHealthRows := mHealthDoc.asArr?.getD #[]
     check (mHealthRows.size == 2 &&
       (mHealthRows[0]?.bind (·.fieldStr? "account_id")) == some "prov-anth-1" &&
-      (mHealthRows[1]?.bind (·.fieldStr? "account_id")) == some "prov-anth-2")
+      (mHealthRows[1]?.bind (·.fieldStr? "account_id")) == some "prov-anth-2" &&
+      mHealthRows.all (fun r =>
+        r.fieldStr? "provider_id" == some "anthropic" &&
+        r.fieldUInt64? "cooldown_remaining_secs" == r.fieldUInt64? "cooldown_secs_remaining" &&
+        r.fieldBool? "is_healthy" == some true &&
+        r.fieldBool? "is_degraded" == some false))
       "member /api/model-routing/health keeps only enabled configured providers"
     -- Disabling/deleting an issuer must stop every previously minted session,
     -- including an external session with no mission id and a shared mission.
