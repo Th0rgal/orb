@@ -6277,6 +6277,153 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
      !afterCordons.contains "ashur" || afterCordons.contains "sepolia" then
     return (← fail s!"GET /api/remote-nodes or static cordon persistence failed: rn={rnSt}:{rnBody} cordon={cordonSt}:{cordonBody} after={afterCordons}")
 
+  -- Static node connect-hang bounded wait & heartbeat cache preservation (`buildComputeFleetJVal` / `GET /api/remote-nodes`):
+  -- (a) Two static nodes, one answering on loopback and one at a local listener whose accept queue is full
+  --     (so `connect()` never completes while the listener stays open): `buildComputeFleetJVal` returns within
+  --     3500 ms (2500 ms probe deadline + scheduling margin), the answering node is reported online as today,
+  --     and the unfinished node is reported as an offline static row with `available_slots = 0` and non-empty `error`.
+  -- (b) All static nodes answering: reply is unchanged from today (`rnBody` above + both online below).
+  -- (c) When `node_heartbeats.json` holds a cached entry for the unfinished node, `NodeLiveness.applyCache`
+  --     populates `last_seen`, `cpu_total`, `mem_total_bytes`, `disk_total_bytes`, `capacity_total`, and `version`
+  --     from the cache, sets `capacity_cached = true`, and keeps live fields (`capacity_available`, `mem_available_bytes`,
+  --     `disk_available_bytes`, `active_jobs`, `active_leases`, `queued_jobs`) `null` and `available_slots = 0`.
+  let .ok (ansFd, ansPort) ← tcpListen "127.0.0.1" 0 8
+    | return (← fail "tcpListen ansFd failed")
+  let ansTask ← IO.asTask (prio := .dedicated) do
+    for _ in [0:3] do
+      if let .ok cfd ← tcpAcceptPoll ansFd 5000 then
+        discard <| readCoreHttpRequestFromFd cfd 1000
+        let hbJson :=
+          "{\"version\":\"1.3.0-lean4\",\"protocol_version\":2,\"capacity_total\":10,\"capacity_available\":9," ++
+          "\"active_leases\":1,\"active_jobs\":1,\"queued_jobs\":0,\"cpu_total\":8," ++
+          "\"mem_total_bytes\":68719476736,\"mem_available_bytes\":51539607552," ++
+          "\"disk_total_bytes\":500000000000,\"disk_available_bytes\":400000000000," ++
+          "\"lean_runtime_ready\":true,\"labels\":[\"lean\",\"docker\",\"high-memory\"],\"cordoned\":false}"
+        let respBytes := encodeCoreHttpResponse (jsonResponse 200 hbJson)
+        discard <| writeAll cfd respBytes false
+        discard <| closeFd cfd
+    discard <| closeFd ansFd
+  let .ok (stallListenFd, stallPort) ← tcpListen "127.0.0.1" 0 1
+    | do discard <| closeFd ansFd; return (← fail "tcpListen stallListenFd failed")
+  let .ok stallFill1 ← tcpConnect "127.0.0.1" stallPort
+    | do discard <| closeFd ansFd; discard <| closeFd stallListenFd; return (← fail "tcpConnect stallFill1 failed")
+  let .ok stallFill2 ← tcpConnect "127.0.0.1" stallPort
+    | do discard <| closeFd ansFd; discard <| closeFd stallFill1; discard <| closeFd stallListenFd; return (← fail "tcpConnect stallFill2 failed")
+  let fleetSubRoot := s!"{dataRoot}/fleet-hang-test"
+  IO.FS.createDirAll (System.FilePath.mk fleetSubRoot)
+  IO.FS.writeFile (System.FilePath.mk s!"{fleetSubRoot}/node_state.json") "{\"cordoned\":[\"ashur\"]}\n"
+  let testFleet : ManagedFleetState := { enabled := true, boatEnabled := false, dailyCapCents := 100000, maxConcurrent := 10 }
+  OrbBin.PosixExt.setenvVar "SANDBOXED_REMOTE_NODES_ENABLED" "true"
+  OrbBin.PosixExt.setenvVar "ORB_TEST_ASHUR_TOK" "tok-ashur-1"
+  OrbBin.PosixExt.setenvVar "ORB_TEST_NIPPUR_TOK" "tok-nippur-1"
+  -- Case (b): all nodes answering -> both online, reply unchanged from today.
+  OrbBin.PosixExt.setenvVar "SANDBOXED_REMOTE_NODES"
+    s!"ashur=http://127.0.0.1:{ansPort}|ORB_TEST_ASHUR_TOK,nippur=http://127.0.0.1:{ansPort}|ORB_TEST_NIPPUR_TOK"
+  let allAnsFv ← OrbCore.RemoteFleetAndRelay.buildComputeFleetJVal none none testFleet none 0 none fleetSubRoot "2026-11-14T01:30:00Z" none
+  let allAnsStatic := (allAnsFv.fieldArr? "static_nodes").getD #[]
+  let bAllAnsOk :=
+    allAnsStatic.size == 2 &&
+    (allAnsStatic.find? (·.fieldStr? "id" == some "ashur")).bind (·.fieldStr? "status") == some "online" &&
+    (allAnsStatic.find? (·.fieldStr? "id" == some "nippur")).bind (·.fieldStr? "status") == some "online" &&
+    (allAnsStatic.find? (·.fieldStr? "id" == some "nippur")).bind (·.fieldNat? "capacity_available") == some 9 &&
+    (allAnsStatic.find? (·.fieldStr? "id" == some "nippur")).bind (·.field? "capacity_cached") == none
+  -- Reset cache file before (a) so `nippur` has no cached heartbeat entry in (a).
+  discard <| (IO.FS.removeFile (System.FilePath.mk s!"{fleetSubRoot}/node_heartbeats.json")).toBaseIO
+  -- Case (a): `ashur` answering on loopback, `nippur` at `stallPort` whose connect never completes while `stallListenFd` stays open.
+  -- Close `stallListenFd` from a background timer at 4500 ms so on unmodified master the blocking connect unblocks at ~4500 ms
+  -- (proving it exceeded the 3500 ms bound without hanging the test binary for 2 minutes).
+  let releaseStallTask ← IO.asTask (prio := .dedicated) do
+    IO.sleep 4500
+    discard <| closeFd stallListenFd
+    discard <| closeFd stallFill1
+    discard <| closeFd stallFill2
+  OrbBin.PosixExt.setenvVar "SANDBOXED_REMOTE_NODES"
+    s!"ashur=http://127.0.0.1:{ansPort}|ORB_TEST_ASHUR_TOK,nippur=http://127.0.0.1:{stallPort}|ORB_TEST_NIPPUR_TOK"
+  let t0MonoNs ← IO.monoNanosNow
+  let hangFv ← OrbCore.RemoteFleetAndRelay.buildComputeFleetJVal none none testFleet none 0 none fleetSubRoot "2026-11-14T01:31:00Z" none
+  let elapsedMsA := ((← IO.monoNanosNow) - t0MonoNs) / 1000000
+  let hangStatic := (hangFv.fieldArr? "static_nodes").getD #[]
+  let ashurA? := hangStatic.find? (·.fieldStr? "id" == some "ashur")
+  let nippurA? := hangStatic.find? (·.fieldStr? "id" == some "nippur")
+  let aBoundedOk :=
+    elapsedMsA ≤ 3500 &&
+    hangStatic.size == 2 &&
+    ashurA?.bind (·.fieldStr? "status") == some "online" &&
+    ashurA?.bind (·.fieldNat? "cpu_total") == some 8 &&
+    ashurA?.bind (·.fieldNat? "capacity_available") == some 9 &&
+    ashurA?.bind (·.fieldBool? "cordoned") == some true &&
+    nippurA?.bind (·.fieldStr? "status") == some "offline" &&
+    nippurA?.bind (·.fieldStr? "kind") == some "static" &&
+    nippurA?.bind (·.fieldNat? "available_slots") == some 0 &&
+    nippurA?.bind (·.field? "capacity_total") == some .null &&
+    nippurA?.bind (·.field? "capacity_available") == some .null &&
+    nippurA?.bind (·.field? "cpu_total") == some .null &&
+    nippurA?.bind (·.field? "last_seen") == some .null &&
+    nippurA?.bind (·.field? "capacity_cached") == none &&
+    ((nippurA?.bind (·.fieldStr? "error")).getD "").length > 0
+  -- Case (c): heartbeat cache holds an entry for the unfinished node `nippur`.
+  let seededCache : OrbBin.Json.JVal := .obj #[
+    ("nippur", .obj #[
+      ("last_seen", .str "2026-11-14T01:00:00Z"),
+      ("cpu_total", OrbBin.Json.JVal.nat 20),
+      ("mem_total_bytes", OrbBin.Json.JVal.uint64 128849018880),
+      ("disk_total_bytes", OrbBin.Json.JVal.uint64 1000000000000),
+      ("capacity_total", OrbBin.Json.JVal.nat 6),
+      ("version", .str "1.3.0-lean4")
+    ])
+  ]
+  OrbCore.RemoteFleetAndRelay.saveNodeHeartbeatCache fleetSubRoot (.obj #[]) seededCache
+  let .ok (stallListenFdC, stallPortC) ← tcpListen "127.0.0.1" 0 1
+    | return (← fail "tcpListen stallListenFdC failed")
+  let .ok stallFill1C ← tcpConnect "127.0.0.1" stallPortC
+    | do discard <| closeFd stallListenFdC; return (← fail "tcpConnect stallFill1C failed")
+  let .ok stallFill2C ← tcpConnect "127.0.0.1" stallPortC
+    | do discard <| closeFd stallFill1C; discard <| closeFd stallListenFdC; return (← fail "tcpConnect stallFill2C failed")
+  let releaseStallTaskC ← IO.asTask (prio := .dedicated) do
+    IO.sleep 4500
+    discard <| closeFd stallListenFdC
+    discard <| closeFd stallFill1C
+    discard <| closeFd stallFill2C
+  OrbBin.PosixExt.setenvVar "SANDBOXED_REMOTE_NODES"
+    s!"ashur=http://127.0.0.1:{ansPort}|ORB_TEST_ASHUR_TOK,nippur=http://127.0.0.1:{stallPortC}|ORB_TEST_NIPPUR_TOK"
+  let t0MonoNsC ← IO.monoNanosNow
+  let cachedFv ← OrbCore.RemoteFleetAndRelay.buildComputeFleetJVal none none testFleet none 0 none fleetSubRoot "2026-11-14T01:32:00Z" none
+  let elapsedMsC := ((← IO.monoNanosNow) - t0MonoNsC) / 1000000
+  OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODES_ENABLED"
+  OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODES"
+  OrbBin.PosixExt.unsetenvVar "ORB_TEST_ASHUR_TOK"
+  OrbBin.PosixExt.unsetenvVar "ORB_TEST_NIPPUR_TOK"
+  let _ := ansTask.get
+  let _ := releaseStallTask.get
+  let _ := releaseStallTaskC.get
+  let cachedStatic := (cachedFv.fieldArr? "static_nodes").getD #[]
+  let nippurC? := cachedStatic.find? (·.fieldStr? "id" == some "nippur")
+  let persistedAfterC ← OrbCore.RemoteFleetAndRelay.loadNodeHeartbeatCache fleetSubRoot
+  let cCachedOk :=
+    elapsedMsC ≤ 3500 &&
+    nippurC?.bind (·.fieldStr? "status") == some "offline" &&
+    nippurC?.bind (·.fieldStr? "last_seen") == some "2026-11-14T01:00:00Z" &&
+    nippurC?.bind (·.fieldNat? "cpu_total") == some 20 &&
+    nippurC?.bind (·.fieldUInt64? "mem_total_bytes") == some 128849018880 &&
+    nippurC?.bind (·.fieldUInt64? "disk_total_bytes") == some 1000000000000 &&
+    nippurC?.bind (·.fieldNat? "capacity_total") == some 6 &&
+    nippurC?.bind (·.fieldStr? "version") == some "1.3.0-lean4" &&
+    nippurC?.bind (·.fieldBool? "capacity_cached") == some true &&
+    nippurC?.bind (·.field? "capacity_available") == some .null &&
+    nippurC?.bind (·.field? "mem_available_bytes") == some .null &&
+    nippurC?.bind (·.field? "disk_available_bytes") == some .null &&
+    nippurC?.bind (·.field? "active_jobs") == some .null &&
+    nippurC?.bind (·.field? "active_leases") == some .null &&
+    nippurC?.bind (·.field? "queued_jobs") == some .null &&
+    nippurC?.bind (·.fieldNat? "available_slots") == some 0 &&
+    ((nippurC?.bind (·.fieldStr? "error")).getD "").length > 0 &&
+    (persistedAfterC.field? "nippur").bind (·.fieldNat? "cpu_total") == some 20
+  if !aBoundedOk || !bAllAnsOk || !cCachedOk then
+    return (← fail (s!"static node connect-hang fleet test failed: " ++
+      s!"(a) aBoundedOk={aBoundedOk} (elapsedMsA={elapsedMsA}, nippurA={nippurA?.map OrbBin.Json.renderCompact}); " ++
+      s!"(b) bAllAnsOk={bAllAnsOk}; " ++
+      s!"(c) cCachedOk={cCachedOk} (elapsedMsC={elapsedMsC}, nippurC={nippurC?.map OrbBin.Json.renderCompact})"))
+
   -- 6. Privilege Access & Unified Approval Queue Cross-Client Parity (`shared/orb-spec/fixtures/{privilege-access,approvals}.json`)
   let d1 := computeApprovalDigest "privilege" "a1b2c3d4-0000-4000-8000-000000000010"
     (.obj #[("kind", .str "mission"), ("mission_id", .str "7c1d2e3f-0000-4000-8000-000000000001")])
