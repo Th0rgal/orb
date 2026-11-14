@@ -1274,15 +1274,19 @@ def runConfiguredManagedLifecycle (mc : ManagedComputeStore) (ctx : ManagedLifec
   -- An injected provider (tests) declares its own abilities; the registry gates real ones.
   if ctx.override?.isNone then
     if let some entry := ManagedProvider.declaration? m.provider then
-      if action == "extend" && !entry.supportsExtend then return .error "managed_provider_extend_unsupported"
       if (action == "stop" || action == "resume") && !entry.supportsStopResume then
         return .error "managed_provider_stop_resume_unsupported"
   let provider ← match ctx.override? with
     | some pair => pure pair.1
     | none => do
-      let .ok p ← resolveManagedProvider ctx.store.rootDir m.provider | return .error "managed_provider_unavailable"
+      -- An unconfigured provider that declares no extension cannot discover one either.
+      let .ok p ← resolveManagedProvider ctx.store.rootDir m.provider
+        | return .error (if action == "extend" && (ManagedProvider.declaration? m.provider).any (!·.supportsExtend)
+            then "managed_provider_extend_unsupported" else "managed_provider_unavailable")
       pure p
   if provider.name != m.provider then return .error "managed_provider_mismatch"
+  -- The provider itself says whether it extends now: declared for most, discovered for lean.ci.
+  if action == "extend" && !(← provider.supportsExtend) then return .error "managed_provider_extend_unsupported"
   if action == "extend" then
     let budget ← match ← loadManagedUserAdmission ctx.store m.ownerUserId nowEpoch with
       | .ok value => pure value

@@ -84,6 +84,9 @@ structure Provider where
   /-- Read-only observation; never changes a persisted operator enable toggle. -/
   availability : SpawnSpec → IO (Result Availability) := fun _ => pure (.ok { status := .unknown })
   usageCents : String → IO (Result (Option UInt64)) := fun _ => pure (.ok none)
+  /-- Whether `extend` can be called now. A provider that discovers it from its API
+      (lean.ci `lifecycle.extend`) answers from there; an unreadable answer is `false`. -/
+  supportsExtend : IO Bool := pure true
 
 /-- Parse nonnegative provider USD decimals (including bounded exponent form)
     and round half-up to cents without binary floating-point arithmetic. -/

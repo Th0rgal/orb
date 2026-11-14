@@ -4,8 +4,10 @@
   `POST /vms` (202, `{vm}`), `GET /vms`, `GET|DELETE /vms/:id`, `POST /vms/:id/exec`
   (argv array, `as_root`), `PUT /vms/:id/files` (`content_b64`), `POST /vms/:id/snapshots`,
   `GET /vms/snapshots`, `DELETE /vms/snapshots/:id`, `GET /vms/capabilities`.
-  No stop/resume exists at the provider. Live TTL extension is not shipped upstream yet:
-  `leanciDeclaration.supportsExtend` is the one switch (see `leanciExtendRequest`).
+  No stop/resume exists at the provider. Live TTL extension (`POST /vms/:id/extend`,
+  lfglabs-dev/lean.ci#35) is discovered: it is used only when `GET /vms/capabilities`
+  carries `lifecycle.extend: true` (`leanciSupportsExtend`). A deployment without the
+  `lifecycle` block behaves as before: no extension.
 -/
 import OrbCore.ManagedProvider
 import OrbBin.PosixExt
@@ -170,10 +172,14 @@ def leanciCapabilities (transport : Transport) (cache : LeanciCapabilityCache)
     cache.modify fun entries => (entries.filter (fun (key, stamp, _) => key != query && now < stamp + 20000)).push (query, now, body)
     return .ok body
 
-/-- The live TTL extension call. Provisional wire shape (the endpoint is not shipped at
-    lean.ci yet): `POST /vms/:id/extend` with the remaining lifetime from now in
-    `ttl_secs`. Never sent while `leanciDeclaration.supportsExtend` is false: the
-    lifecycle refuses the extension before it reserves anything. -/
+/-- Whether this lean.ci deployment extends a running VM: `lifecycle.extend` of
+    `GET /vms/capabilities`. Absent block (a deployment before lean.ci#35) = no. -/
+def leanciSupportsExtend (capabilities : JVal) : Bool :=
+  ((capabilities.field? "lifecycle").bind (·.fieldBool? "extend")) == some true
+
+/-- `POST /vms/:id/extend {"ttl_secs": N}`, N seconds from now (60..=86400). The
+    provider never shortens (`extended: false` with 200 when already covered) and
+    caps total lifetime itself. No `Idempotency-Key`: a retry carries a new body. -/
 def leanciExtendRequest (id : String) (ttlSeconds : UInt64) : Request := {
   method := "POST"
   path := vmPath id ++ "/extend"
@@ -190,6 +196,11 @@ def leanci (transport : Transport) (cache : LeanciCapabilityCache := leanciCapab
   isReady := fun s => s == "running"
   isStopped := fun s => #["stopped", "failed", "reaped", "deleted", "error"].contains s
   quoteCents := leanciQuoteCents
+  supportsExtend := do
+    match ← leanciCapabilities transport cache nowMs
+        { name := "", size := "small", ttlSeconds := 300, idempotencyKey := "" } with
+    | .ok body => return leanciSupportsExtend body
+    | .error _ => return false
   availability := fun spec => do
     match ← leanciCapabilities transport cache nowMs spec with
     | .error e => return .error e
@@ -316,9 +327,8 @@ def leanciDeclaration : Declaration := {
   bootstrapMode := .execSystemd
   supportsStopResume := false
   supportsSnapshots := true
-  -- The single extend switch. Set to `true` once lean.ci ships live TTL extension (and
-  -- confirm `leanciExtendRequest` against its route): the lifecycle gate, the catalog's
-  -- `supports_extend` and every client's Extend control follow this flag.
+  -- What is known without asking the provider. The live answer is discovered
+  -- (`leanciSupportsExtend`): the lifecycle gate and the observed catalog use it.
   supportsExtend := false
   quoteCents := leanciQuoteCents
   create := fun transport => leanci transport
