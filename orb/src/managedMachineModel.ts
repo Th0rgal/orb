@@ -1,7 +1,12 @@
 /** Managed (boat.dev) machines: API client and presentation logic. */
 import { createSignal } from "solid-js";
 import { api, ApiError, connectionVersion, MANAGED_PROVISION_TIMEOUT_MS } from "./api";
-import { formatAutoManagedTarget, isAdminOnlyNode, isAutoManagedTarget, rememberManagedMachines } from "./machines/nodes";
+import {
+  formatAutoManagedTarget,
+  rememberManagedMachines,
+  resolveDefaultComposerMachine as resolveDefaultComposerMachineBase,
+  setDefaultAutoManagedTarget,
+} from "./machines/nodes";
 
 export type ManagedState = "provisioning" | "enrolling" | "online" | "destroying" | "destroyed" | "failed" | "stopped";
 
@@ -603,6 +608,7 @@ export function resetManagedCatalog(): void {
   catalogInFlight = null;
   catalogVersion = -1;
   setManagedCatalog(EMPTY_CATALOG);
+  setDefaultAutoManagedTarget(null);
 }
 
 export async function refreshManagedCatalog(force = false): Promise<void> {
@@ -619,6 +625,7 @@ export async function refreshManagedCatalog(force = false): Promise<void> {
       if (version !== connectionVersion()) return;
       if (!res) {
         setManagedCatalog({ loaded: true, enabled: false, providers: [], budget: null, settings });
+        setDefaultAutoManagedTarget(null);
         return;
       }
       rememberManagedMachines(res.machines ?? []);
@@ -640,13 +647,15 @@ export async function refreshManagedCatalog(force = false): Promise<void> {
           }];
         }
       }
-      setManagedCatalog({
+      const nextCat: ManagedCatalogState = {
         loaded: true,
         enabled: Boolean(res.enabled) || providers.some(isProviderUsable),
         providers,
         budget: res.budget ?? null,
         settings,
-      });
+      };
+      setManagedCatalog(nextCat);
+      setDefaultAutoManagedTarget(firstUsableAutoManagedTarget(nextCat));
     } finally {
       if (catalogInFlight === run) catalogInFlight = null;
     }
@@ -693,26 +702,12 @@ export function resolveDefaultComposerMachine(opts: {
   remoteReady: boolean;
   fleetNodes?: readonly { id: string; admin_only?: boolean | null; core_colocated?: boolean | null; labels?: readonly string[] | null }[];
   catalog?: ManagedCatalogState;
+  autoManagedTarget?: string | null;
 }): string {
-  const { isAdmin, current, explicit, firstNodeId, remoteReady, fleetNodes = [], catalog = managedCatalog() } = opts;
-  const first = firstNodeId ?? null;
-  const autoTarget = firstUsableAutoManagedTarget(catalog);
-  if (!isAdmin) {
-    const forbiddenNode = fleetNodes.find(n => n.id === current && isAdminOnlyNode(n));
-    if (current === "core" || current === "dgx-spark-admin" || Boolean(forbiddenNode)) {
-      return first ?? autoTarget ?? "local";
-    }
-  }
-  if (explicit) return current;
-  if (first) return first;
-  if (!isAdmin && isAutoManagedTarget(current)) return current;
-  if (remoteReady && current !== "core" && current !== "local" && (isAdmin || !isAutoManagedTarget(current))) {
-    return isAdmin ? "core" : (autoTarget ?? "local");
-  }
-  if (!isAdmin && current === "local" && autoTarget) {
-    return autoTarget;
-  }
-  return current;
+  const autoTarget = opts.autoManagedTarget !== undefined
+    ? opts.autoManagedTarget
+    : firstUsableAutoManagedTarget(opts.catalog ?? managedCatalog());
+  return resolveDefaultComposerMachineBase({ ...opts, autoManagedTarget: autoTarget });
 }
 
 export function findManagedSize(

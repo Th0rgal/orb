@@ -16,6 +16,8 @@ const KNOWN_PROVIDERS = new Set(["boat", "leanci", "hetzner", "vastai", "scalewa
 const [names, setNames] = createSignal<ReadonlyMap<string, string>>(new Map());
 const [providers, setProviders] = createSignal<ReadonlyMap<string, string>>(new Map());
 const [owners, setOwners] = createSignal<ReadonlyMap<string, string>>(new Map());
+const [defaultAutoManagedTarget, setDefaultAutoManagedTarget] = createSignal<string | null>(null);
+export { defaultAutoManagedTarget, setDefaultAutoManagedTarget };
 
 function parseLabelsProvider(labels?: readonly string[] | null): string | undefined {
   for (const raw of labels ?? []) {
@@ -256,4 +258,35 @@ export const isAdminOnlyNode = (
   if (node.admin_only === true || node.core_colocated === true) return true;
   return Boolean(node.labels?.some(l => l.trim().toLowerCase() === "admin-only"));
 };
+
+/** Select the default composer machine across admin/member roles, fleet availability, and usable cloud VMs. */
+export function resolveDefaultComposerMachine(opts: {
+  isAdmin: boolean;
+  current: string;
+  explicit: boolean;
+  firstNodeId: string | null | undefined;
+  remoteReady: boolean;
+  fleetNodes?: readonly { id: string; admin_only?: boolean | null; core_colocated?: boolean | null; labels?: readonly string[] | null }[];
+  autoManagedTarget?: string | null;
+}): string {
+  const { isAdmin, current, explicit, firstNodeId, remoteReady, fleetNodes = [], autoManagedTarget = defaultAutoManagedTarget() } = opts;
+  const first = firstNodeId ?? null;
+  const autoTarget = autoManagedTarget ?? null;
+  if (!isAdmin) {
+    const forbiddenNode = fleetNodes.find(n => n.id === current && isAdminOnlyNode(n));
+    if (current === "core" || current === "dgx-spark-admin" || Boolean(forbiddenNode)) {
+      return first ?? autoTarget ?? "local";
+    }
+  }
+  if (explicit) return current;
+  if (first) return first;
+  if (!isAdmin && isAutoManagedTarget(current)) return current;
+  if (remoteReady && current !== "core" && current !== "local" && (isAdmin || !isAutoManagedTarget(current))) {
+    return isAdmin ? "core" : (autoTarget ?? "local");
+  }
+  if (!isAdmin && current === "local" && autoTarget) {
+    return autoTarget;
+  }
+  return current;
+}
 

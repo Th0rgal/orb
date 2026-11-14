@@ -99,9 +99,9 @@ import {
   isUserManagedNode,
   nodeSize,
   parseAutoManagedTarget,
+  resolveDefaultComposerMachine,
 } from "./machines/nodes";
 import type { ActiveProviderSubmenu, Pending24hLeasePrompt } from "./MachineCloudMenu";
-import { managedCatalog, refreshManagedCatalog, resolveDefaultComposerMachine } from "./managedMachineModel";
 const NewAgentCloudVmSection = lazy(() => import("./MachineCloudMenu").then(module => ({ default: module.NewAgentCloudVmSection })));
 const AgentSpawnedVmsToggle = lazy(() => import("./MachineCloudMenu").then(module => ({ default: module.AgentSpawnedVmsToggle })));
 const Lazy24hConfirmDialog = lazy(() => import("./MachineCloudMenu").then(module => ({ default: module.Lazy24hConfirmDialog })));
@@ -339,8 +339,9 @@ export default function App() {
   const [managedAntigravityAllowed, setManagedAntigravityAllowed] = createSignal(true);
   const warmManagedCatalog = (force = false) => {
     void import("./MachineCloudMenu");
-    void refreshManagedCatalog(force).then(() => {
-      setManagedAntigravityAllowed(managedCatalog().settings?.antigravity_on_managed !== false);
+    void import("./managedMachineModel").then(async m => {
+      await m.refreshManagedCatalog(force);
+      setManagedAntigravityAllowed(m.managedCatalog().settings?.antigravity_on_managed !== false);
     });
   };
   const chooseMachine = (id: string) => {
@@ -845,7 +846,6 @@ export default function App() {
       firstNodeId: firstNodeId(),
       remoteReady: remoteLaunch().state === "ready",
       fleetNodes: fleetNodes(),
-      catalog: managedCatalog(),
     });
     if (next !== newMachine()) setNewMachine(next);
   });
