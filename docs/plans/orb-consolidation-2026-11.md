@@ -761,6 +761,20 @@ an owner and a dated status line here when dispatched.
 | U4 | Tether lease revoke on every terminal transition | `request_macbook_tether` leases are revoked only on stop, cancel and DELETE routes. The MCP `cancel_mission` tool and provider-failure stops leave the lease alive until its TTL (up to 4 h). Revoke on every terminal transition; tests first. |
 | U5 | Tether decision (recorded, closed) | The confined host shell keeps `~/.ssh`, `~/.orb` and Bitwarden hidden. Do not ask Thomas for more access. |
 
+**Update 10:28 UTC, 14 Nov (coordinator `2bcfd62a`).**
+
+- **CI speed track staffed in parallel now** (not queued behind multi-user or LeanUI; `$200/day` VM cap):
+  - **W-CI-1 (`b3b4bc79-e2cc-4793-aed3-902641105fe1` on `managed-f824120f-72c8-413d-9f63-7f75caab9c31` / `orb-managed-bb0ba6fa-796`, `boat:large`)**:
+    - Root cause identified for `--no-telemetry` fallback on nodes/CI: pre-installed `/usr/local/bin/turbo-lean` on fleet/managed nodes is an Oct 31 binary that lacks `--no-telemetry`, `--no-daemon`, and `--no-auto-worktree-link`, while `scripts/build_orb_bins.sh` unconditionally passed `--no-telemetry` and fell back to uncached raw `lake build` on exit code 2.
+    - W-CI-1 fixes `scripts/build_orb_bins.sh` to probe `turbo-lean --help` before passing optional global flags (while setting `TURBO_LEAN_TELEMETRY=off LEAN_NATIVE_TELEMETRY=off`) and fail closed instead of silently falling back to raw Lake; ports `.github/actions/setup-turbo-lean/action.yml` (#1708) with cached release `turbo-lean` binary + persisted CAS/`.lake` cache keyed on toolchain + lakefile + source hashes (restore on PR, save on `master`); and folds `kernel-abi.yml` into `ci.yml` so it shares the planner and cached Lean artifacts without weakening any test or audit.
+  - **W-CI-2 (`2c14ec06-c5f4-4d92-9bc3-b7057b9a6608` on `managed-98ceb168-e4f4-46cc-afd2-6a7d644b307c` / `orb-managed-fce8fadb-9d0`, `boat:large`)**:
+    - Root cause identified for 11 min desktop-only PRs and redundant `master` push rebuilds: `orb-browser` Shard 1 ran `pnpm build` from scratch + two `playwright.kernel.config.ts` suites on top of `test:browser --shard=1/2`, both shards ran `ci_harden_ubuntu_apt.sh` + `playwright install --with-deps` even on cache hits, and `master` push rebuilt trees identical to green PR runs.
+    - W-CI-2 adds tree-hash verification reuse / cache promotion when a `master` push tree matches a green PR run, shares the built `orb/dist` artifact from `orb-unit` across `orb-browser` shards and `orb-performance`, rebalances browser shards, and scopes `desktop_native` domain triggers so desktop-only PRs finish in `< 5 min`.
+  - **W-CI-3 (`57fec405-a612-40e2-8673-1c885505f63e` on `managed-e8cc032a-dc5f-4d41-b39e-5db796d270a5` / `orb-managed-282e51a4-40b`, `boat:large`)**:
+    - Completed and harvested Deliverable 2 (`w-ci-3-orb.bundle`, commit `a95efef4` on `ci/w-ci-3-lean-runners-opt-in`): gates Linux CI jobs behind `vars.ORB_LEAN_RUNNERS == 'true'` (and `workflow_dispatch` input `use_lean_runners`) on trusted default-branch events with exact fallback to `ubuntu-latest` / `ubuntu-24.04` (verified by 28 unit + mutation tests in `scripts/test_ci_plan.py`), and writes Thomas's exact approval & rollout checklist in `docs/ci-lean-runners.md`.
+    - Deliverable 1 (`lfglabs-dev/lean.ci` PR #34 runner fence): delivering the private `lean.ci` crate archive to `57fec405` so it can fix the remaining review items (`routing.rs` `runner_fence_capable` strip, `github.rs` rerun `run_attempt` from verified `WorkflowRun` provenance, `store.rs` `RefusedNotAllowed` queue ordering, and live shell execution tests of the `ACTIONS_RUNNER_HOOK_JOB_STARTED` fence script) and run `cargo test` across all crates.
+- **#1766 and #1767**: merged to `master` (`a64471d2`, `1f1e1ab3`).
+
 **Update 10:10 UTC, 14 Nov (coordinator `2bcfd62a`).**
 
 - Filed U1 to U5 on this board with no owner; U5 is a closed decision, not work.
@@ -1619,3 +1633,4 @@ verification command. The operator session runs them and records the result.
 | 14 Nov 10:05 | Per-user library design: owner checkout and `LIBRARY_PATH` unchanged; members get `{storeRoot}/library/users/<userId>` and their own `library.json`; admin steering a member mission installs the member's skills | Thomas's decision; keeps existing installs working while removing the owner-library leak |
 | 14 Nov 10:10 | Filed operator items U1-U5 with no owner; U5 recorded as a closed access decision | Staff after multi-user and LeanUI; the node binary rollout stays with the deploy tool, not a per-mission script |
 | 14 Nov 10:10 | Do not deploy #1766/#1767 or install node binaries on nimrud; the operator owns that rollout and will pause this mission | Duplicated deploys and a hand-installed `sandboxed-mcp` are exactly the U1 defect |
+| 14 Nov 10:20 | Staffed CI speed track in parallel on 3 dedicated `boat:large` VMs: W-CI-1 (`b3b4bc79`), W-CI-2 (`2c14ec06`), W-CI-3 (`57fec405`) | Thomas directive: run CI speed in parallel with multi-user and LeanUI now (`$200/day` VM cap); report before/after timings from real runs |
