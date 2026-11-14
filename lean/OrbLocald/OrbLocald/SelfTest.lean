@@ -1728,7 +1728,15 @@ private def runLocalOpenCodeE2eChecks (validTok tmpStateDir : String) : IO (Nat 
     | _ => false
   let ocResolveOk :=
     OrbBin.ClaudeControl.resolveOpenCodeModelForLocal (some "builtin/fast") (some "orbrouter/builtin/smart") #["orbrouter"] #["orbrouter/builtin/smart", "orbrouter/builtin/fast"] == some "orbrouter/builtin/fast" &&
-    OrbBin.ClaudeControl.resolveOpenCodeModelForLocal (some "sandboxed-sh/builtin/smart") (some "orbrouter/builtin/smart") #["orbrouter"] #["orbrouter/builtin/smart"] == some "orbrouter/builtin/smart"
+    OrbBin.ClaudeControl.resolveOpenCodeModelForLocal (some "sandboxed-sh/builtin/smart") (some "orbrouter/builtin/smart") #["orbrouter"] #["orbrouter/builtin/smart"] == some "orbrouter/builtin/smart" &&
+    -- A chain mislabelled with OpenCode's own provider, or resolved with no default model and
+    -- `opencode` listed first, must still land on the provider that serves it.
+    OrbBin.ClaudeControl.resolveOpenCodeModelForLocal (some "opencode/builtin/smart") none #["opencode", "orbrouter"] #["opencode/glm-5.3-flash-free", "orbrouter/builtin/smart"] == some "orbrouter/builtin/smart" &&
+    OrbBin.ClaudeControl.resolveOpenCodeModelForLocal (some "builtin/smart") none #["opencode", "orbrouter"] #["opencode/glm-5.3-flash-free", "orbrouter/builtin/smart"] == some "orbrouter/builtin/smart" &&
+    OrbBin.ClaudeControl.resolveOpenCodeModelForLocal (some "builtin/smart") none #["opencode", "orbrouter"] #[] == some "orbrouter/builtin/smart" &&
+    OrbBin.ClaudeControl.resolveOpenCodeModelForLocal (some "opencode/glm-5.3-flash-free") none #["opencode", "orbrouter"] #["opencode/glm-5.3-flash-free"] == some "opencode/glm-5.3-flash-free" &&
+    -- Probe fallback: the first probed model belongs to `opencode`, the chain to `orbrouter`.
+    OrbBin.ClaudeControl.resolveOpenCodeModelForLocal (some "builtin/smart") (some "opencode/glm-5.3-flash-free") #[] #["opencode/glm-5.3-flash-free", "orbrouter/builtin/smart"] == some "orbrouter/builtin/smart"
   let ocArgs := OrbBin.ClaudeControl.buildOneShotHarnessArgs "opencode" "/plan - check flags" (some "orbrouter/builtin/fast") none (some "ses_prev") .bypassPermissions #["/tmp/a.png"]
   let ocArgsOk :=
     ocArgs == #["run", "--format", "json", "--auto", "--agent", "plan", "--model", "orbrouter/builtin/fast", "--session", "ses_prev", "--file", "/tmp/a.png", "--", "- check flags"]
