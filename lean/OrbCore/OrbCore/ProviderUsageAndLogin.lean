@@ -1624,7 +1624,16 @@ def dispatchProviderAndAiRoute
            .str "core")
         else
           (.null, .null, .null)
-      let failCnt : Nat := if cdRem > 0 then 1 else 0
+      let trackerRecs ← match healthTracker? with
+        | some t => keys.mapM (lookupAccountHealthRecord t)
+        | none => pure #[]
+      let trackerFails : Nat :=
+        trackerRecs.foldl (fun acc r => max acc (max r.transientStreak.toNat r.consecutiveTrips.toNat)) 0
+      let parkedOrPoisoned : Bool :=
+        cdRem > 0 || trackerRecs.any (fun r => r.parkedQuota || r.poisonedSub)
+      let failCnt : Nat := max trackerFails (if parkedOrPoisoned then 1 else 0)
+      let isDegraded : Bool := parkedOrPoisoned || failCnt > 0
+      let isHealthy : Bool := !isDegraded
       let remQuota : JVal :=
         match usageCached.find? (fun u => u.providerId == hp.id) with
         | some u =>
@@ -1635,11 +1644,15 @@ def dispatchProviderAndAiRoute
         | none => .num "100.0"
       snaps := snaps.push (.obj #[
         ("account_id", .str hp.id),
+        ("provider_id", .str hp.providerType),
+        ("is_healthy", .bool isHealthy),
+        ("is_degraded", .bool isDegraded),
         ("ewma_ttft_ms", .null),
         ("ewma_tps", .null),
         ("remaining_quota_pct", remQuota),
         ("consecutive_failures", JVal.nat failCnt),
         ("cooldown_secs_remaining", JVal.uint64 cdRem),
+        ("cooldown_remaining_secs", JVal.uint64 cdRem),
         ("parked_until", parkedUntilJv),
         ("parked_reason", parkedReasonJv),
         ("parked_source", parkedSourceJv),
