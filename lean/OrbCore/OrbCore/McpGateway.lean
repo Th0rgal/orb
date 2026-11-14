@@ -327,26 +327,50 @@ def dispatchMcpToolCall
     | some pair => return .ok pair.1
     | none => resolveManagedProvider store.rootDir name
 
-  let resolveSpawnSize (spawnArgs : JVal) : IO (Except String String) := do
-    let prov := canonicalizeProvider ((spawnArgs.fieldStr? "provider").getD (← defaultManagedProvider))
-    let catalog := JVal.arr #[.obj (#[ ("provider", .str prov)] ++ ManagedProvider.catalogFields prov)]
-    let catalog ← if managedProvisioningOverride?.isSome then pure catalog
-      else observeManagedProviderCatalog store.rootDir catalog
-    return resolveManagedSpawnSize prov spawnArgs catalog
+  -- The provider of a spawn that may omit it: the one named, else the instance default,
+  -- else its fallback when the default cannot take the request now. A snapshot or a
+  -- fork (`pinned`) lives at one provider and is never moved.
+  let chooseSpawnProvider (spawnArgs : JVal) (pinned : Bool) : IO ManagedProviderChoice := do
+    let named? := ((spawnArgs.fieldStr? "provider").map canonicalizeProvider).filter (!·.isEmpty)
+    let instanceDefault ← defaultManagedProvider
+    let some mc := mc? | return { provider := named?.getD instanceDefault }
+    let snapshot := ((spawnArgs.fieldStr? "from_snapshot").orElse
+      (fun _ => spawnArgs.fieldStr? "managed_from_snapshot") |>.getD "").trimAscii.toString
+    -- A retry stays with the provider its first attempt reserved on, so one key rents once.
+    if let (none, some key) := (named?, (spawnArgs.fieldStr? "idempotency_key").filter (!·.isEmpty)) then
+      let scoped := scopedManagedRequestKey callerUserId callerMid key
+      for candidate in #[instanceDefault, managedFallbackProvider] do
+        if (← getManagedMachineByRequestKey? mc candidate scoped).isSome then return { provider := candidate }
+    chooseManagedProvider named? instanceDefault (pinned || !snapshot.isEmpty) fun candidate => do
+      let fleet ← match ← loadManagedFleet mc defaultFleet.enabled defaultFleet.boatEnabled
+          defaultFleet.dailyCapCents defaultFleet.spentTodayCents defaultFleet.maxConcurrent with
+        | .ok f => pure f
+        | .error _ => pure defaultFleet
+      let prefs ← if managedPreferenceUserId.isEmpty then pure #[] else getUserManagedPrefs mc managedPreferenceUserId
+      let user? ← getUserById? store callerUserId
+      let (inferenceSpent, computeSpent) ← if callerUserId.isEmpty then pure (0, 0)
+        else getUserSpentTodayCents store callerUserId (nowIso.take 10).toString
+      managedSpawnRefusal mc store.rootDir fleet prefs callerUserId candidate spawnArgs
+        (inferenceSpent + computeSpent) (user?.bind (·.dailySpendCapCents?)) managedProvisioningOverride?
+
+  let resolveSpawnSize (provider : String) (spawnArgs : JVal) : IO (Except String String) :=
+    resolveObservedSpawnSize store.rootDir provider spawnArgs managedProvisioningOverride?.isNone
 
   -- One spawn path for `spawn_managed_machine` and `start_mission(auto-managed)`:
-  -- same admission, pricing, project-scoped snapshot resolution and bootstrap.
-  let spawnForCaller (spawnArgs : JVal) (forkOfProviderId : String) : IO (Except (String × String) ManagedMachine) := do
+  -- same provider decision, admission, pricing, project-scoped snapshot resolution and bootstrap.
+  let spawnForCaller (spawnArgs : JVal) (forkOfProviderId : String) :
+      IO (Except (String × String) (ManagedMachine × ManagedProviderChoice)) := do
     let some mc := mc? | return .error ("unavailable", "managed compute store not configured")
     let fleet ← match ← loadManagedFleet mc defaultFleet.enabled defaultFleet.boatEnabled
         defaultFleet.dailyCapCents defaultFleet.spentTodayCents defaultFleet.maxConcurrent with
       | .ok f => pure f
       | .error _ => pure defaultFleet
-    let prov := canonicalizeProvider ((spawnArgs.fieldStr? "provider").getD (← defaultManagedProvider))
+    let choice ← chooseSpawnProvider spawnArgs (!forkOfProviderId.isEmpty)
+    let prov := choice.provider
     let prefs ← if managedPreferenceUserId.isEmpty then pure #[] else getUserManagedPrefs mc managedPreferenceUserId
     if !isUserManagedProviderEnabled prefs prov then
       return .error ("provider_disabled_for_user", "This cloud provider is disabled in your preferences.")
-    let sz ← match ← resolveSpawnSize spawnArgs with
+    let sz ← match ← resolveSpawnSize prov spawnArgs with
       | .ok size => pure size
       | .error e => return .error ("invalid_arguments", e)
     let ttl := (spawnArgs.fieldUInt64? "ttl_minutes").getD 60
@@ -391,7 +415,7 @@ def dispatchMcpToolCall
       | .error e => return .error ("spawn_rejected", e)
     match ← spawnConfiguredManagedWorker mc store.rootDir fleet m spawnArgs "" managedProvisioningOverride? userAdmission? resolvedSnapshot forkOfProviderId with
     | .error e => return .error (if e == "provider_at_capacity" then e else "spawn_rejected", e)
-    | .ok spawned => return .ok spawned.machine
+    | .ok spawned => return .ok (spawned.machine, choice)
 
   -- Enforce tenant ownership BEFORE dispatch and idempotent replay. An MCP role
   -- describes mission delegation, never authority over another user's objects.
@@ -829,16 +853,29 @@ def dispatchMcpToolCall
       return mcpErr "invalid_arguments" "managed_from_snapshot requires remote_node_id auto-managed[:size]"
     -- `auto-managed[:size]` rents one machine for this child through the shared spawn
     -- path. Nothing is rented when validation, admission or the snapshot lookup fails.
-    let (explicitRn?, rentedMachineId, reused?) ← if !autoManaged then pure (requestedRn?, "", none) else do
-      let (provider, size) ← match parseAutoManagedTarget (requestedRn?.getD "") (← defaultManagedProvider) with
+    let (explicitRn?, rentedMachineId, reused?, providerChoice) ← if !autoManaged
+        then pure (requestedRn?, "", none, ({ provider := "" } : ManagedProviderChoice)) else do
+      let (namedProvider?, namedSize?) ← match parseAutoManagedTarget (requestedRn?.getD "") with
         | .ok target => pure target
         | .error e => return mcpErr "invalid_arguments" e
+      let sizeFields : Array (String × JVal) := match namedSize? with
+        | some size => #[("size", .str size)]
+        | none => #[]
+      let rentFields : Array (String × JVal) := #[
+        ("ttl_minutes", JVal.uint64 ((args.fieldUInt64? "managed_ttl_minutes").getD 60)),
+        ("from_snapshot", .str ((args.fieldStr? "managed_from_snapshot").getD ""))]
+      let namedFields : Array (String × JVal) := match namedProvider? with
+        | some provider => #[("provider", .str provider)]
+        | none => #[]
+      let choice ← chooseSpawnProvider (.obj (namedFields ++ sizeFields ++ rentFields ++ #[
+        ("idempotency_key", .str (((args.fieldStr? "idempotency_key").filter (!·.isEmpty)).map ("start-mission:" ++ ·) |>.getD ""))])) false
+      let provider := choice.provider
       let prefs ← match mc? with
         | some mc => if managedPreferenceUserId.isEmpty then pure #[] else getUserManagedPrefs mc managedPreferenceUserId
         | none => pure #[]
       if !isUserManagedProviderEnabled prefs provider then
         return mcpErr "provider_disabled_for_user" "This cloud provider is disabled in your preferences."
-      let size ← match resolveManagedSpawnSize provider (.obj #[("size", .str size)]) with
+      let size ← match resolveManagedSpawnSize provider (.obj sizeFields) with
         | .ok size => pure size
         | .error e => return mcpErr "invalid_arguments" e
       -- An idle VM left by an ended child of this same caller is taken over instead
@@ -857,19 +894,17 @@ def dispatchMcpToolCall
           else ManagedReuse.claim store mc reuseRequest callerMid
         | none => pure none
       if let some claimed := reused? then
-        pure (some s!"managed-{claimed.machine.id}", claimed.machine.id, reused?)
+        pure (some s!"managed-{claimed.machine.id}", claimed.machine.id, reused?, choice)
       else
         let retryKey ← match (args.fieldStr? "idempotency_key").filter (!·.isEmpty) with
           | some key => pure key
           | none => newUuidV4
-        let spawnArgs := JVal.obj #[
-          ("provider", .str provider), ("size", .str size),
-          ("ttl_minutes", JVal.uint64 ((args.fieldUInt64? "managed_ttl_minutes").getD 60)),
-          ("from_snapshot", .str ((args.fieldStr? "managed_from_snapshot").getD "")),
-          ("idempotency_key", .str ("start-mission:" ++ retryKey))]
+        -- The provider is decided above and named here, so the spawn does not decide again.
+        let spawnArgs := JVal.obj (#[("provider", JVal.str provider)] ++ rentFields ++ #[
+          ("size", .str size), ("idempotency_key", .str ("start-mission:" ++ retryKey))])
         match ← spawnForCaller spawnArgs "" with
         | .error (_, message) => return mcpErr "managed_placement_failed" message
-        | .ok rented => pure (some s!"managed-{rented.id}", rented.id, none)
+        | .ok (rented, _) => pure (some s!"managed-{rented.id}", rented.id, none, choice)
     -- A failed start destroys what it rented, and hands back what it took over.
     let releaseRented : IO Unit := do
       if let (some mc, false) := (mc?, rentedMachineId.isEmpty) then
@@ -1006,6 +1041,8 @@ def dispatchMcpToolCall
       ("placement_revision", JVal.uint64 initRev),
       -- A reused machine keeps its remaining lifetime: the child extends it if it needs more.
       ("managed_machine_reused", .bool reused?.isSome),
+      -- Set when the instance default provider could not take the rental and another did.
+      ("provider_fallback", ((providerChoice.annotate (.obj #[])).field? "provider_fallback").getD .null),
       ("managed_machine_expires_at_sec",
         match reused? with | some claimed => JVal.uint64 claimed.machine.expiresAtSec | none => .null)
     ]
@@ -1234,7 +1271,8 @@ def dispatchMcpToolCall
       (!tenantScoped || m.ownerUserId == callerUserId) &&
         (m.status != "destroyed" || (verbose && max m.createdAtSec m.expiresAtSec + 86400 ≥ nowEpochSec))
     let raw := renderManagedMachinesJson { fleet with machines := shown } scopedUid? userIsAdmin prefs userComputeSpent userCap?
-    return mcpOk (((OrbBin.Json.parse raw).toOption.getD (.obj #[])).setField "providers" catalog)
+    return mcpOk ((((OrbBin.Json.parse raw).toOption.getD (.obj #[])).setField "providers" catalog).setField
+      "default_provider" (.str (← defaultManagedProvider)))
 
   | "get_budget" =>
     let some mc := mc?
@@ -1260,20 +1298,21 @@ def dispatchMcpToolCall
     if idemKeyTop.isEmpty || (callerUserId.isEmpty && callerMid.isEmpty) then
       match ← spawnForCaller args "" with
       | .error (code, message) => return mcpErr code message
-      | .ok saved =>
-        return mcpOk ((OrbBin.Json.parse (renderManagedMachineItemJson saved)).toOption.getD (.obj #[]))
+      | .ok (saved, choice) =>
+        return mcpOk (choice.annotate ((OrbBin.Json.parse (renderManagedMachineItemJson saved)).toOption.getD (.obj #[])))
     let work : IO (Except String JVal) := do
       match ← spawnForCaller args "" with
       | .error (_, message) => return .error message
-      | .ok saved => return .ok ((OrbBin.Json.parse (renderManagedMachineItemJson saved)).toOption.getD (.obj #[]))
+      | .ok (saved, choice) =>
+        return .ok (choice.annotate ((OrbBin.Json.parse (renderManagedMachineItemJson saved)).toOption.getD (.obj #[])))
     -- Arguments that can never be admitted are refused now, not in a receipt.
     let admit : IO (Except String Unit) := do
-      let provider := canonicalizeProvider ((args.fieldStr? "provider").getD (← defaultManagedProvider))
+      let provider := (← chooseSpawnProvider args false).provider
       let prefs ← match mc? with
         | some mc => if managedPreferenceUserId.isEmpty then pure #[] else getUserManagedPrefs mc managedPreferenceUserId
         | none => pure #[]
       if !isUserManagedProviderEnabled prefs provider then return .error "provider_disabled_for_user"
-      let size ← match ← resolveSpawnSize args with
+      let size ← match ← resolveSpawnSize provider args with
         | .ok size => pure size
         | .error e => return .error e
       match quoteManagedSpawnCents provider size ((args.fieldUInt64? "ttl_minutes").getD 60)
@@ -1454,7 +1493,7 @@ def dispatchMcpToolCall
       ("idempotency_key", .str idemKeyTop)]
     match ← spawnForCaller spawnArgs source.effectiveProviderId with
     | .error (code, message) => return mcpErr (if code == "spawn_rejected" then "fork_rejected" else code) message
-    | .ok forked =>
+    | .ok (forked, _) =>
       let item := (OrbBin.Json.parse (renderManagedMachineItemJson forked)).toOption.getD (.obj #[])
       return mcpOk (match item with
         | .obj fields => .obj (fields.push ("forked_from", .str source.id))

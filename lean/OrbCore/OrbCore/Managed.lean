@@ -119,12 +119,14 @@ structure ManagedUserAdmission where
 def admitManagedSpawnCount (st : ManagedFleetState) (activeNat : Nat)
     (reqCents : UInt64) (ttlMins : UInt32 := 60) : Bool :=
   if !st.enabled then false
-  else if reqCents > st.dailyCapCents || st.spentTodayCents > st.dailyCapCents - reqCents then
+  -- A zero-cost machine (lean.ci) spends nothing: an exhausted or lowered daily cap
+  -- never refuses it. Concurrency, TTL and the fleet switch still apply.
+  else if reqCents != 0 && (reqCents > st.dailyCapCents || st.spentTodayCents > st.dailyCapCents - reqCents) then
     false
   else
     let active : UInt32 := (Nat.min activeNat 0xFFFFFFFF).toUInt32
     let cap : UInt32 := (Nat.min st.maxConcurrent.toNat 0xFFFFFFFF).toUInt32
-    let totalSpent : UInt64 := st.spentTodayCents + reqCents
+    let totalSpent : UInt64 := if reqCents == 0 then 0 else st.spentTodayCents + reqCents
     vmStep 0 1 3 0 0 0 0 0 active cap ttlMins 720 20 totalSpent st.dailyCapCents == 1
 
 def admitManagedSpawn (st : ManagedFleetState) (reqCents : UInt64) (ttlMins : UInt32 := 60) : Bool :=
@@ -151,7 +153,8 @@ def admitManagedSpawnMultiUser
       globalActive (clampSpendU32 st.spentTodayCents) (clampSpendU32 st.dailyCapCents)
       userActive (clampSpendU32 userSpentTodayCents) userCapU32
       (clampSpendU32 reqCents)
-  let capAdmit := (capWord &&& 1) == 1
+  -- Zero cost passes both spend caps whatever has been spent already.
+  let capAdmit := reqCents == 0 || (capWord &&& 1) == 1
   let denyReason := ((capWord >>> 1) &&& 0x7).toUInt8
   if !capAdmit then
     if denyReason == 2 then 2 else 1
@@ -400,6 +403,38 @@ def defaultManagedProviderOf (raw? : Option String) : String :=
 
 def defaultManagedProvider : IO String := do
   return defaultManagedProviderOf (← IO.getEnv "SANDBOXED_MANAGED_DEFAULT_PROVIDER")
+
+/-- The provider an unnamed request falls back to when the instance default cannot take it. -/
+def managedFallbackProvider : String := "boat"
+
+/-- The provider a spawn uses. `fallbackFrom` is empty unless the instance default was
+    replaced, and `fallbackReason` is then the default provider's refusal. -/
+structure ManagedProviderChoice where
+  provider : String
+  fallbackFrom : String := ""
+  fallbackReason : String := ""
+  deriving Repr, BEq
+
+/-- The one provider decision of every spawn path that may omit the provider.
+    `refusal p` says why `p` cannot take the request now (`none` = it can).
+    - A provider the caller named is used as given and never replaced.
+    - Otherwise the instance default is used when it can take the request.
+    - When it cannot, `managedFallbackProvider` is used if it can; the result records why.
+    - When neither can, or the request is `pinned` to one provider (a snapshot or a fork
+      lives at one provider), the default stays, so the caller gets the default's own error. -/
+def chooseManagedProvider {m : Type → Type} [Monad m] (named? : Option String) (defaultProvider : String)
+    (pinned : Bool) (refusal : String → m (Option String)) : m ManagedProviderChoice := do
+  if let some provider := named? then return { provider := provider }
+  if pinned || defaultProvider == managedFallbackProvider then return { provider := defaultProvider }
+  let some reason ← refusal defaultProvider | return { provider := defaultProvider }
+  if (← refusal managedFallbackProvider).isSome then return { provider := defaultProvider }
+  return { provider := managedFallbackProvider, fallbackFrom := defaultProvider, fallbackReason := reason }
+
+/-- `provider_fallback: {from, to, reason}` on a spawn result; absent when the first choice was used. -/
+def ManagedProviderChoice.annotate (choice : ManagedProviderChoice) (item : JVal) : JVal :=
+  if choice.fallbackFrom.isEmpty then item
+  else item.setField "provider_fallback" (.obj #[("from", .str choice.fallbackFrom),
+    ("to", .str choice.provider), ("reason", .str choice.fallbackReason)])
 
 def statusOfPhase (phaseCode : UInt8) : String :=
   if phaseCode == 0 then "provisioning"
@@ -792,7 +827,8 @@ private def admitManagedCostTx (st : ManagedComputeStore) (fleet : ManagedFleetS
         "SELECT enabled FROM managed_provider_settings WHERE provider=?1;" #[provider]
       | return .error "managed_provider_settings_unavailable"
     if providerRows.size > 1 && cell providerRows[1]! 0 != "1" then return .error "provider_disabled"
-  if let some budget := userAdmission? then
+  -- A zero-cost reservation cannot exceed a user's spend cap, even an exhausted one.
+  if let (some budget, true) := (userAdmission?, cost != 0) then
     if ownerUserId.isEmpty then return .error "managed_user_missing"
     let dayStart := (nowEpoch / 86400) * 86400
     let .ok reservedRows ← execParamQueryUnlocked st.db

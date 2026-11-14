@@ -768,16 +768,25 @@ def buildComputeFleetJVal
   let rawBudget :=
     (OrbBin.Json.parse (renderManagedBudgetJson fleet callerUserId? userSpentTodayCents userDailyCapCents?)).toOption.getD (.obj #[])
   let activeManagedCount := (visibleMachines.filter (fun m => m.status == "ready" || m.status == "provisioning")).size
-  let defaultSubTarget := if fleet.boatEnabled then "auto-managed:boat" else "auto"
+  -- Unnamed on purpose: Core applies the instance default provider and its fallback
+  -- (`chooseManagedProvider`) to `auto-managed`, so this never pins a provider.
+  let defaultProvider ← defaultManagedProvider
+  let defaultConfigured ← if defaultProvider == managedFallbackProvider then pure false else do
+    match ← openProviderSecret dataRoot defaultProvider false true with
+    | .ok _ => pure true
+    | .error _ => pure false
+  let defaultSubTarget := if fleet.boatEnabled || defaultConfigured then "auto-managed" else "auto"
   let budgetFields :=
     match rawBudget with
     | .obj fs =>
       let filtered := fs.filter (fun (k, _) => k != "default_subagent_target" && k != "active_machines")
-      filtered ++ #[("default_subagent_target", .str defaultSubTarget), ("active_machines", JVal.nat activeManagedCount)]
+      filtered ++ #[("default_subagent_target", .str defaultSubTarget), ("default_provider", .str defaultProvider),
+        ("active_machines", JVal.nat activeManagedCount)]
     | _ => #[
         ("enabled", .bool fleet.enabled),
         ("boat_enabled", .bool fleet.boatEnabled),
         ("default_subagent_target", .str defaultSubTarget),
+        ("default_provider", .str defaultProvider),
         ("active_machines", JVal.nat activeManagedCount),
         ("max_concurrent", JVal.uint64 fleet.maxConcurrent)
       ]
@@ -861,6 +870,12 @@ def loadManagedProviderCatalog (mc : ManagedComputeStore) (dataRoot : String)
     observations := observations.push (name, ManagedProvider.availabilityJson observed)
   match OrbBin.Json.parse (renderManagedProvidersJson fleet isAdmin prefs configured disabled observations) with
   | .ok value =>
+    -- Clients read the instance default here instead of assuming one provider.
+    let instanceDefault ← defaultManagedProvider
+    let value := match value with
+      | .arr items => JVal.arr (items.map fun item =>
+          item.setField "is_default" (.bool (item.fieldStr? "provider" == some instanceDefault)))
+      | other => other
     if override?.isSome then return .ok value
     return .ok (← observeManagedProviderCatalog dataRoot value)
   | .error _ => return .error "managed_provider_catalog_invalid"
@@ -902,22 +917,20 @@ def resolveManagedSpawnSize (provider : String) (args : JVal)
   let some size := selected.bind (·.fieldStr? "size") | throw "managed_size_unavailable"
   return size
 
-def parseAutoManagedTarget (target : String) (defaultProvider : String := "boat") : Except String (String × String) := do
-  let parts := target.trimAscii.toString.toLower.splitOn ":"
-  let (provider, size?) ← match parts with
-    | ["auto-managed"] => pure (defaultProvider, none)
-    | ["auto-managed", value] =>
-      if value.isEmpty then throw "invalid_managed_target"
-      if isKnownProvider value then pure (canonicalizeProvider value, none)
-      else pure (defaultProvider, some value)
-    | ["auto-managed", provider, size] =>
-      if !isKnownProvider provider || size.isEmpty then throw "invalid_managed_target"
-      pure (canonicalizeProvider provider, some size)
-    | _ => throw "invalid_managed_target"
-  let some entry := ManagedProvider.declaration? provider
-    | throw "managed_provider_not_implemented"
-  let some defaultSize := entry.sizes[0]? | throw "provider_invalid_size"
-  return (provider, size?.getD defaultSize.name)
+/-- `auto-managed[:provider][:size]` as written: the provider and the size the caller
+    named, if any. An unnamed provider is decided by `chooseManagedProvider`, an unnamed
+    size by the chosen provider's catalog. -/
+def parseAutoManagedTarget (target : String) : Except String (Option String × Option String) := do
+  match target.trimAscii.toString.toLower.splitOn ":" with
+  | ["auto-managed"] => pure (none, none)
+  | ["auto-managed", value] =>
+    if value.isEmpty then throw "invalid_managed_target"
+    if isKnownProvider value then pure (some (canonicalizeProvider value), none)
+    else pure (none, some value)
+  | ["auto-managed", provider, size] =>
+    if !isKnownProvider provider || size.isEmpty then throw "invalid_managed_target"
+    pure (some (canonicalizeProvider provider), some size)
+  | _ => throw "invalid_managed_target"
 
 def loadManagedBootstrapConfig : IO (Except String ManagedProvisioning.BootstrapConfig) := do
   let coreUrl := (← IO.getEnv "SANDBOXED_MANAGED_CORE_URL").getD
@@ -1012,6 +1025,10 @@ def deleteProjectSnapshot (store : CoreStore) (provider : ManagedProvider.Provid
   | .ok () => return .ok name
   | .error e => return .error s!"managed_snapshot_delete_failed:{e.code}:{e.status}"
 
+/-- The provider idempotency key of a spawn: the caller's key scoped to its owner. -/
+def scopedManagedRequestKey (ownerUserId ownerMission key : String) : String :=
+  bytesToHexLower (sha256Bytes (renderCompact (.arr #[.str ownerUserId, .str ownerMission, .str key])).toUTF8)
+
 /-- Everything a configured spawn decides before it reserves or rents: the
     provider and bootstrap configuration, the image or resolved snapshot, and the
     provider request. Shared by the spawn itself and its synchronous preflight. -/
@@ -1041,9 +1058,7 @@ def prepareConfiguredManagedSpawn (dataRoot : String) (machine : ManagedMachine)
   let key := if idempotencyKey.isEmpty then
     ((args.fieldStr? "idempotency_key").filter (!·.isEmpty)).getD machine.id
     else idempotencyKey
-  let scopedKey := bytesToHexLower (sha256Bytes (renderCompact (.arr #[
-    .str machine.ownerUserId, .str machine.ownerMission, .str key
-  ])).toUTF8)
+  let scopedKey := scopedManagedRequestKey machine.ownerUserId machine.ownerMission key
   let spec : ManagedProvider.SpawnSpec := {
     name := machine.sandboxName
     size := machine.size
@@ -1064,6 +1079,45 @@ def preflightConfiguredManagedSpawn (mc : ManagedComputeStore) (dataRoot : Strin
   match ← prepareConfiguredManagedSpawn dataRoot machine args "" override? resolvedSnapshot with
   | .error e => return .error e
   | .ok (provider, _, spec) => ManagedProvisioning.preflightAvailability mc fleet provider spec
+
+/-- A spawn request's size against the provider's live catalog (the declared one
+    when `observe` is off, as under a test provider). -/
+def resolveObservedSpawnSize (dataRoot provider : String) (args : JVal) (observe : Bool := true) :
+    IO (Except String String) := do
+  let prov := canonicalizeProvider provider
+  let declared := JVal.arr #[.obj (#[("provider", .str prov)] ++ ManagedProvider.catalogFields prov)]
+  let catalog ← if observe then observeManagedProviderCatalog dataRoot declared else pure declared
+  return resolveManagedSpawnSize prov args catalog
+
+/-- Why `provider` cannot take this spawn now, or `none` when it can: the refusal
+    `chooseManagedProvider` asks for. Read-only: nothing is reserved or rented. Covers
+    the user's opt-in, the size and quote, spend and concurrency admission, the
+    provider's configuration and operator toggle, and its live capacity. -/
+def managedSpawnRefusal (mc : ManagedComputeStore) (dataRoot : String) (fleet : ManagedFleetState)
+    (prefs : Array (String × Bool)) (ownerUserId provider : String) (args : JVal)
+    (userSpentTodayCents : UInt64 := 0) (userDailyCapCents? : Option UInt64 := none)
+    (override? : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) := none) :
+    IO (Option String) := do
+  if !isUserManagedProviderEnabled prefs provider then return some "provider_disabled_for_user"
+  -- A test provider stands for exactly one provider; any other is not configured.
+  if let some pair := override? then
+    if pair.1.name != provider then return some "managed_provider_unavailable"
+  let size ← match ← resolveObservedSpawnSize dataRoot provider args override?.isNone with
+    | .ok size => pure size
+    | .error e => return some e
+  let ttl := (args.fieldUInt64? "ttl_minutes").getD 60
+  let quote ← match quoteManagedSpawnCents provider size ttl (override?.map Prod.fst) with
+    | .ok cents => pure cents
+    | .error e => return some e
+  let denied := admitManagedSpawnMultiUser fleet quote userSpentTodayCents userDailyCapCents? ttl.toUInt32
+  if denied == 2 then return some "managed_user_spend_cap_exceeded"
+  if denied != 0 then return some "managed_spawn_rejected"
+  let probe : ManagedMachine := {
+    id := "provider-probe", sandboxName := "provider-probe", provider, size, ttlMinutes := ttl, ownerUserId
+  }
+  match ← preflightConfiguredManagedSpawn mc dataRoot fleet probe args override? with
+  | .ok () => return none
+  | .error e => return some e
 
 /-- REST, MCP and automatic placement share admission, provider create, guest
     installation, enrollment, relay readiness, and failure cleanup. -/

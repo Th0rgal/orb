@@ -158,8 +158,11 @@ def tick (mc : ManagedComputeStore) (store : CoreStore) (defaults : ManagedFleet
     if let some minutes := warningDue m nowEpoch then
       discard <| eventOnce store m "managed_machine_expiring"
         (s!"Managed VM {m.sandboxName} (managed-{m.id}) expires in at most {minutes} minutes, at " ++
-         s!"{formatEpochIso8601Utc m.expiresAtSec}. Busy VMs are not auto-extended: call extend_managed_machine " ++
-         "to keep it, or bring results back with harvest_managed_file and push work before the deadline.")
+         s!"{formatEpochIso8601Utc m.expiresAtSec}. Busy VMs are not auto-extended: " ++
+         -- Only advise a call the machine's provider declares.
+         (if (OrbCore.ManagedProvider.declaration? m.provider).any (!·.supportsExtend)
+          then "this provider cannot extend a VM, so bring results back with harvest_managed_file and push work before the deadline."
+          else "call extend_managed_machine to keep it, or bring results back with harvest_managed_file and push work before the deadline."))
         nowEpoch "unknown" none (toString minutes)
     if nowEpoch < m.expiresAtSec then continue
     -- Retry an owner notification after a crash even if cleanup already completed.

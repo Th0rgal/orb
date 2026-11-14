@@ -10,7 +10,7 @@ import { pollWhileVisible } from "./poll";
 import { useNow } from "./time";
 import * as Ic from "./icons";
 import {
-  MANAGED_GROUP_PREVIEW_LIMIT, allowedSizes, budgetFull, budgetLeft, budgetLine, canExtendMachine, canStopMachine, costLine, credentialSourceLabel, groupMachinesByProvider, isProviderPersonallyEnabled, isProviderGloballyEnabled, isProviderUsable, listManagedProviders, managedSectionTitle, providerGroupSummary, providerLabel, providerStatusLine, sizeLabel, specLine, stopManagedMachine, ttlFraction, ttlShort, createManagedMachine, destroyManagedMachine, estimateCost, extendManagedMachine, isLive,
+  MANAGED_GROUP_PREVIEW_LIMIT, allowedSizes, budgetFull, budgetLeft, exceedsBudget, initialManagedProvider, budgetLine, canExtendMachine, canStopMachine, costLine, credentialSourceLabel, groupMachinesByProvider, isProviderPersonallyEnabled, isProviderGloballyEnabled, isProviderUsable, listManagedProviders, managedSectionTitle, providerGroupSummary, providerLabel, providerStatusLine, sizeLabel, specLine, stopManagedMachine, ttlFraction, ttlShort, createManagedMachine, destroyManagedMachine, estimateCost, extendManagedMachine, isLive,
   isStarting, listManagedMachines, liveCost, machineName, managedNodeIds, managedError, minutesLabel, recentMachines, setManagedProviderPreference, sizeSpec, stateLabel, ttlLeft, ttlUrgent, updateManagedProvider,
   spendDayDetail, spendFraction, spendSummary, spendWeekday,
   machineOwner, reapLine, usd, usdPerHour, isStopped, resumeManagedMachine, listManagedSnapshots, deleteManagedSnapshot, snapshotLine, type ManagedSnapshot, type CreateManagedMachine, type DailySpend, type ManagedBudget, type ManagedMachine, type ManagedMachinesResponse, type ManagedProviderInfo, type ManagedProviderPatch, type ManagedSize,
@@ -403,11 +403,7 @@ export function MachineProvidersCard(p: { providers?: readonly ManagedProviderIn
 
 function NewManagedMachine(p: { data: ManagedMachinesResponse; onClose: () => void; onCreate: (request: CreateManagedMachine, size: ManagedSize) => void }) {
   const usableProviders = () => (p.data.providers ?? []).filter(isProviderUsable);
-  const initialProvider = usableProviders().find(pr => pr.provider === "boat" && pr.availability?.status !== "saturated")?.provider
-    ?? usableProviders().find(pr => pr.availability?.status !== "saturated")?.provider
-    ?? usableProviders()[0]?.provider
-    ?? "boat";
-  const [provider, setProvider] = createSignal(initialProvider);
+  const [provider, setProvider] = createSignal(initialManagedProvider(usableProviders()));
   const sizes = createMemo(() => {
     const pr = usableProviders().find(x => x.provider === provider());
     if (pr && pr.provider !== "boat") return pr.sizes;
@@ -473,7 +469,7 @@ function NewManagedMachine(p: { data: ManagedMachinesResponse; onClose: () => vo
         </label>
       </Show>
       <div class="managed-estimate" aria-live="polite"><span>Estimated cost · {sizeLabel(chosen()?.size ?? "")} for {minutesLabel(effectiveMinutes())}</span><strong>{usd(estimate())}</strong></div>
-      <Show when={remaining() != null && estimate() > remaining()!}><div class="m-note managed-urgent">Exceeds today’s remaining budget of {usd(Math.max(0, remaining()!))}.</div></Show>
+      <Show when={exceedsBudget(estimate(), remaining())}><div class="m-note managed-urgent">Exceeds today’s remaining budget of {usd(Math.max(0, remaining()!))}.</div></Show>
     </div>
   </Dialog>;
 }
@@ -575,7 +571,7 @@ export function ManagedMachines(p: { nodes?: readonly RemoteNodeView[] | null; o
   const liveGroups = createMemo(() => groupMachinesByProvider(live(), data()?.providers));
   const isStoppedOpen = () => stoppedOpen() ?? (stopped().length <= MANAGED_GROUP_PREVIEW_LIMIT);
   const recent = createMemo(() => recentMachines(machines()).filter(m => !failedHere().includes(m)));
-  const full = () => { const b = data()?.budget; return !!b && budgetFull(b); };
+  const full = () => { const b = data()?.budget; return !!b && budgetFull(b, data()?.providers); };
   const noUsableProvider = () => (data()?.providers?.length ?? 0) > 0 && !(data()!.providers!.some(isProviderUsable));
   const diskOf = (m: Pick<ManagedMachine, "size" | "provider">) => {
     const pr = data()?.providers?.find(x => x.provider === (m.provider || "boat"));

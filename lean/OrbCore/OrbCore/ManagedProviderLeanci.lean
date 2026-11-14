@@ -4,7 +4,8 @@
   `POST /vms` (202, `{vm}`), `GET /vms`, `GET|DELETE /vms/:id`, `POST /vms/:id/exec`
   (argv array, `as_root`), `PUT /vms/:id/files` (`content_b64`), `POST /vms/:id/snapshots`,
   `GET /vms/snapshots`, `DELETE /vms/snapshots/:id`, `GET /vms/capabilities`.
-  No stop/resume and no live TTL extension exist at the provider.
+  No stop/resume exists at the provider. Live TTL extension is not shipped upstream yet:
+  `leanciDeclaration.supportsExtend` is the one switch (see `leanciExtendRequest`).
 -/
 import OrbCore.ManagedProvider
 import OrbBin.PosixExt
@@ -20,30 +21,33 @@ structure LeanciProfile where
   /-- Sent as `memory_mib` when the size differs from the label's default RAM. -/
   memoryMiB : Option UInt64 := none
 
-/-- Sizes and prices decided by Thomas (plan, lean.ci item 3). Disk is the root
+/-- Sizes decided by Thomas (plan, lean.ci item 3). lean.ci is the owner's own
+    infrastructure, so every size is priced at zero: a lean.ci machine adds nothing to
+    a quote, to its recorded cost or to the daily spend. Disk is the root
     filesystem a guest reports. Only `small` has been measured (2026-11-13, dev):
     98 GB, of which about 14 GB is free on a fresh VM, the rest being the image
     and toolchains; `/workspace` is on the same filesystem. The larger sizes still
     carry the planned figures. -/
 def leanciProfiles : Array LeanciProfile := #[
-  { size := { name := "small", cpu := 2, ramGb := 8, diskGb := 98, milliCentsPerHour := 1800 },
+  { size := { name := "small", cpu := 2, ramGb := 8, diskGb := 98, milliCentsPerHour := 0 },
     runnerLabel := "lean-2vcpu-ubuntu-2604" },
-  { size := { name := "default", cpu := 4, ramGb := 16, diskGb := 75, milliCentsPerHour := 3600 },
+  { size := { name := "default", cpu := 4, ramGb := 16, diskGb := 75, milliCentsPerHour := 0 },
     aliases := #["medium"], runnerLabel := "lean-4vcpu-ubuntu-2604" },
-  { size := { name := "large", cpu := 8, ramGb := 32, diskGb := 100, milliCentsPerHour := 7200 },
+  { size := { name := "large", cpu := 8, ramGb := 32, diskGb := 100, milliCentsPerHour := 0 },
     runnerLabel := "lean-8vcpu-ubuntu-2604" },
-  { size := { name := "xlarge", cpu := 16, ramGb := 64, diskGb := 150, milliCentsPerHour := 20000 },
+  { size := { name := "xlarge", cpu := 16, ramGb := 64, diskGb := 150, milliCentsPerHour := 0 },
     runnerLabel := "lean-16vcpu-ubuntu-2604" },
-  { size := { name := "lean-24vcpu", cpu := 24, ramGb := 96, diskGb := 175, milliCentsPerHour := 30000 },
+  { size := { name := "lean-24vcpu", cpu := 24, ramGb := 96, diskGb := 175, milliCentsPerHour := 0 },
     runnerLabel := "lean-24vcpu-ubuntu-2604" },
-  { size := { name := "2xlarge", cpu := 32, ramGb := 96, diskGb := 200, milliCentsPerHour := 40000 },
+  { size := { name := "2xlarge", cpu := 32, ramGb := 96, diskGb := 200, milliCentsPerHour := 0 },
     runnerLabel := "lean-32vcpu-ubuntu-2604", memoryMiB := some 98304 }
 ]
 
 def leanciProfile? (size : String) : Option LeanciProfile :=
   leanciProfiles.find? (fun p => p.size.name == size || p.aliases.contains size || p.runnerLabel == size)
 
-/-- Orb caps leases at 720 minutes although lean.ci accepts up to 86,400 s. -/
+/-- Orb caps leases at 720 minutes although lean.ci accepts up to 86,400 s.
+    The quote is zero for every size while the rates above are zero. -/
 def leanciQuoteCents (size : String) (ttlMinutes : UInt64) : Result UInt64 := do
   if ttlMinutes < 5 || ttlMinutes > 720 then throw { code := "provider_invalid_ttl" }
   let some profile := leanciProfile? size | throw { code := "provider_invalid_size" }
@@ -166,6 +170,16 @@ def leanciCapabilities (transport : Transport) (cache : LeanciCapabilityCache)
     cache.modify fun entries => (entries.filter (fun (key, stamp, _) => key != query && now < stamp + 20000)).push (query, now, body)
     return .ok body
 
+/-- The live TTL extension call. Provisional wire shape (the endpoint is not shipped at
+    lean.ci yet): `POST /vms/:id/extend` with the remaining lifetime from now in
+    `ttl_secs`. Never sent while `leanciDeclaration.supportsExtend` is false: the
+    lifecycle refuses the extension before it reserves anything. -/
+def leanciExtendRequest (id : String) (ttlSeconds : UInt64) : Request := {
+  method := "POST"
+  path := vmPath id ++ "/extend"
+  body := some (.obj #[("ttl_secs", JVal.uint64 ttlSeconds)])
+}
+
 private def unsupported {α : Type} : IO (Result α) :=
   pure (.error { code := "provider_operation_unsupported" })
 
@@ -227,7 +241,7 @@ def leanci (transport : Transport) (cache : LeanciCapabilityCache := leanciCapab
   stop := fun _ => unsupported
   resume := fun _ _ => unsupported
   fork := fun _ _ => unsupported
-  extend := fun _ _ => unsupported
+  extend := fun id ttlSeconds => callUnit transport (leanciExtendRequest id ttlSeconds)
   saveSnapshot := fun id name => do
     -- The server rejects other labels with 400; refuse before the 10-minute call.
     if name.isEmpty || name.length > 63 || !name.toList.all (fun c => c.isAlphanum || c == '-' || c == '_' || c == '.') then
@@ -302,6 +316,9 @@ def leanciDeclaration : Declaration := {
   bootstrapMode := .execSystemd
   supportsStopResume := false
   supportsSnapshots := true
+  -- The single extend switch. Set to `true` once lean.ci ships live TTL extension (and
+  -- confirm `leanciExtendRequest` against its route): the lifecycle gate, the catalog's
+  -- `supports_extend` and every client's Extend control follow this flag.
   supportsExtend := false
   quoteCents := leanciQuoteCents
   create := fun transport => leanci transport

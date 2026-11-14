@@ -68,10 +68,23 @@ def run : IO Unit := do
     entry.readinessDeadlineSecs == 480 && !entry.supportsStopResume && entry.supportsSnapshots &&
     !entry.supportsExtend && entry.sizes.size == 6) "declaration"
   check ((declaration? "retired-provider").isNone && (leanciProfile? "retired-profile").isNone) "unknown names rejected"
-  check ((quote "leanci" "small" 60).toOption == some 2 && (quote "leanci" "medium" 60).toOption == some 4 &&
-    (quote "leanci" "xlarge" 60).toOption == some 20 && (quote "leanci" "2xlarge" 60).toOption == some 40 &&
+  -- lean.ci is the owner's own infrastructure: every size is free, for any lease.
+  check (entry.sizes.all (·.milliCentsPerHour == 0) &&
+    leanciProfiles.all (fun p => (quote "leanci" p.size.name 720).toOption == some 0) &&
+    (quote "leanci" "small" 60).toOption == some 0 && (quote "leanci" "medium" 5).toOption == some 0 &&
     !(quote "leanci" "3xlarge" 720).isOk && !(quote "leanci" "small" 721).isOk &&
-    !(quote "leanci" "huge" 60).isOk) "decided prices and the 720-minute cap"
+    !(quote "leanci" "huge" 60).isOk) "zero price for every size and the 720-minute cap"
+  let leanciCatalog := JVal.obj (catalogFields "leanci")
+  let catalogSizes := (leanciCatalog.fieldArr? "sizes").getD #[]
+  check (catalogSizes.size == 6 &&
+    catalogSizes.all (fun size => (size.field? "usd_per_hour").map renderCompact == some "0.00000"))
+    "the catalog prices every lean.ci size at 0.00000 USD per hour"
+  -- The extend call is ready for the day `supportsExtend` is switched on.
+  let extendRequest := leanciExtendRequest "aaaaaaaa-0000-4000-8000-000000000001" 600
+  check (extendRequest.method == "POST" && extendRequest.path == "/vms/aaaaaaaa-0000-4000-8000-000000000001/extend" &&
+    (extendRequest.body.map renderCompact) == some "{\"ttl_secs\":600}" &&
+    leanciCatalog.fieldBool? "supports_extend" == some false)
+    "extend request shape, and the declaration keeps extend off until lean.ci ships it"
 
   let spec : SpawnSpec := { name := "orb-managed-dev-t", size := "small", ttlSeconds := 300, idempotencyKey := "k1" }
   let .ok created ← provider.spawn spec | throw (IO.userError "spawn failed")
@@ -151,7 +164,7 @@ def run : IO Unit := do
     !provider.isStopped "snapshotting") "list and state mapping"
   check ((← provider.destroy "aaaaaaaa-0000-4000-8000-000000000001").isOk && (← provider.destroy "bbbbbbbb-0000-4000-8000-000000000001").isOk) "destroy; 404 is idempotent"
   check (!(← provider.stop "aaaaaaaa-0000-4000-8000-000000000001").isOk && !(← provider.extend "aaaaaaaa-0000-4000-8000-000000000001" 600).isOk &&
-    !(← provider.resume "aaaaaaaa-0000-4000-8000-000000000001" spec).isOk) "stop, resume and extend are unsupported, not faked"
+    !(← provider.resume "aaaaaaaa-0000-4000-8000-000000000001" spec).isOk) "stop and resume are unsupported, and an extend the provider does not serve fails, not faked"
 
   check (← provider.writeFile "aaaaaaaa-0000-4000-8000-000000000001" "/home/user/.orb/enroll.env" "A=1\n").isOk "file upload"
   let file := (← requests.get).back!

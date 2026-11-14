@@ -82,6 +82,8 @@ export interface ManagedProviderInfo {
   supports_snapshots: boolean;
   supports_free_stop: boolean;
   supports_extend?: boolean;
+  /** The instance default: used by Core when a request names no provider. */
+  is_default?: boolean;
   sizes: ManagedSize[];
 }
 
@@ -444,9 +446,27 @@ export const budgetLine = (b: ManagedBudget) =>
 
 /** Budget still available today; null when there is no daily cap. */
 export const budgetLeft = (b: ManagedBudget) => b.daily_cap_usd == null ? null : b.daily_cap_usd - b.spent_today_usd;
-/** True when a set cap stops new machines. Null caps never block. */
-export const budgetFull = (b: ManagedBudget) =>
-  (b.max_concurrent != null && b.active >= b.max_concurrent) || (b.daily_cap_usd != null && b.spent_today_usd >= b.daily_cap_usd);
+/** A usable provider with a size that costs nothing (lean.ci): the daily spend cap never stops it. */
+export const hasFreeMachines = (providers?: readonly ManagedProviderInfo[] | null) =>
+  (providers ?? []).some(p => isProviderUsable(p) && p.sizes.some(s => s.usd_per_hour === 0));
+/** True when a set cap stops new machines. Null caps never block, and a spent
+ *  daily budget does not block while a free machine can still be created. */
+export const budgetFull = (b: ManagedBudget, providers?: readonly ManagedProviderInfo[] | null) =>
+  (b.max_concurrent != null && b.active >= b.max_concurrent) ||
+  (b.daily_cap_usd != null && b.spent_today_usd >= b.daily_cap_usd && !hasFreeMachines(providers));
+/** True when a machine's estimate does not fit what is left today. A free machine always fits. */
+export const exceedsBudget = (estimate: number, remaining: number | null) =>
+  remaining != null && estimate > Math.max(0, remaining);
+/** Provider preselected for a new machine: the instance default when it has
+ *  capacity, then boat, then any provider with capacity. */
+export function initialManagedProvider(providers: readonly ManagedProviderInfo[]): string {
+  const free = (p: ManagedProviderInfo) => p.availability?.status !== "saturated";
+  return providers.find(p => p.is_default && free(p))?.provider
+    ?? providers.find(p => p.provider === "boat" && free(p))?.provider
+    ?? providers.find(free)?.provider
+    ?? providers[0]?.provider
+    ?? "boat";
+}
 
 /** Display name of a size: the provider's "default" size is medium. */
 export const sizeLabel = (size: string) => size === "default" ? "medium" : size;

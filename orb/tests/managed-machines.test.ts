@@ -337,3 +337,40 @@ describe("cloud VM submenus, on-demand targets, and agent-spawned VM collapsing"
     ).toContain("managed cloud VMs are disabled");
   });
 });
+
+import { exceedsBudget, hasFreeMachines, initialManagedProvider, providerGroupSummary, type ManagedProviderInfo } from "../src/managedMachineModel";
+
+describe("zero-price provider (lean.ci)", () => {
+  const size = (usd_per_hour: number) => ({ size: "small", cpu: 2, ram_gb: 8, disk_gb: 98, usd_per_hour });
+  const prov = (over: Partial<ManagedProviderInfo>): ManagedProviderInfo => ({ provider: "boat", display_name: "boat.dev", configured: true,
+    enabled: true, globally_enabled: true, user_enabled: true, effective_enabled: true, supports_snapshots: true, supports_free_stop: true, sizes: [size(0.018)], ...over });
+  const leanci = prov({ provider: "leanci", display_name: "lean.ci", is_default: true, supports_free_stop: false, supports_extend: false, sizes: [size(0)] });
+  const b = { spent_today_usd: 20, daily_cap_usd: 20, active: 1, max_concurrent: 3, default_ttl_minutes: 60, max_ttl_minutes: 720, default_size: "small", max_size: "xlarge" };
+
+  it("shows a zero price as $0.00, never blank", () => {
+    expect(usdPerHour(0)).toBe("$0.00/h");
+    expect(costLine(0, 0)).toBe("$0.00 so far · $0.00/h");
+    expect(usd(estimateCost(0, 720))).toBe("$0.00");
+    expect(liveCost(machine({ provider: "leanci", cost_usd: 0, usd_per_hour: 0 }), now - 3_600_000, now)).toBe(0);
+    expect(providerGroupSummary([machine({ provider: "leanci", usd_per_hour: 0 })])).toBe("1 running");
+  });
+  it("does not let a spent daily budget block a free machine", () => {
+    expect(budgetFull(b)).toBe(true);
+    expect(budgetFull(b, [prov({})])).toBe(true);
+    expect(hasFreeMachines([prov({}), leanci])).toBe(true);
+    expect(budgetFull(b, [prov({}), leanci])).toBe(false);
+    expect(budgetFull(b, [prov({}), { ...leanci, user_enabled: false }])).toBe(true);
+    expect(budgetFull({ ...b, active: 3 }, [leanci])).toBe(true);
+    expect(exceedsBudget(0, 0)).toBe(false);
+    expect(exceedsBudget(0, -1)).toBe(false);
+    expect(exceedsBudget(0.02, 0.01)).toBe(true);
+    expect(exceedsBudget(5, null)).toBe(false);
+  });
+  it("preselects the instance default provider, then boat", () => {
+    expect(initialManagedProvider([prov({}), leanci])).toBe("leanci");
+    expect(initialManagedProvider([prov({}), { ...leanci, availability: { status: "saturated" } }])).toBe("boat");
+    expect(initialManagedProvider([prov({}), { ...leanci, is_default: false }])).toBe("boat");
+    expect(initialManagedProvider([{ ...leanci, is_default: false }])).toBe("leanci");
+    expect(initialManagedProvider([])).toBe("boat");
+  });
+});

@@ -219,6 +219,48 @@ private def runManagedMcpProviderContractTests (root : String) : IO Unit := do
           reusedResult.fieldStr? "mission_id" == some reassigned.ownerMission &&
           reassigned.ownerMission != child && reassigned.provider == provider && reassigned.size == size &&
           (← rented.get).size == before + 1) s!"re-opted-in {provider} must reuse the same eligible provider and size without renting"
+    -- Instance default lean.ci with fallback to boat. Each call below has exactly one
+    -- configured provider (the mock), so the other one "cannot take it".
+    OrbBin.PosixExt.setenvVar "SANDBOXED_MANAGED_DEFAULT_PROVIDER" "leanci"
+    try
+      let fallbackOf (reply : OrbBin.Json.JVal) := ((resultOf reply).field? "provider_fallback").getD .null
+      let lease : Array (String × OrbBin.Json.JVal) := #[("ttl_minutes", .nat 60)]
+      let beforeDefault := (← rented.get).size
+      let onDefault ← call "leanci" "spawn_managed_machine" (.obj lease)
+      check ((resultOf onDefault).fieldStr? "provider" == some "leanci" &&
+        (resultOf onDefault).fieldNat? "spent_cents" == some 0 &&
+        ((resultOf onDefault).field? "provider_fallback").isNone &&
+        (← rented.get).size == beforeDefault + 1 && (← rented.get).back? == some ("leanci", "small"))
+        s!"an unnamed spawn uses the instance default at zero cost: {OrbBin.Json.renderCompact onDefault}"
+      let moved ← call "boat" "spawn_managed_machine" (.obj lease)
+      check ((resultOf moved).fieldStr? "provider" == some "boat" &&
+        (fallbackOf moved).fieldStr? "from" == some "leanci" && (fallbackOf moved).fieldStr? "to" == some "boat" &&
+        (fallbackOf moved).fieldStr? "reason" == some "managed_provider_unavailable" &&
+        (← rented.get).size == beforeDefault + 2 && (← rented.get).back? == some ("boat", "small"))
+        s!"an unnamed spawn falls back to boat and says why: {OrbBin.Json.renderCompact moved}"
+      let started ← call "boat" "start_mission" (.obj #[("title", .str "fallback child"),
+        ("remote_node_id", .str "auto-managed:large"), ("managed_ttl_minutes", .nat 60)])
+      check ((fallbackOf started).fieldStr? "from" == some "leanci" && (fallbackOf started).fieldStr? "to" == some "boat" &&
+        (← rented.get).size == beforeDefault + 3 && (← rented.get).back? == some ("boat", "large"))
+        s!"auto-managed:<size> falls back with the same size name: {OrbBin.Json.renderCompact started}"
+      let named ← call "boat" "spawn_managed_machine" (.obj (#[("provider", OrbBin.Json.JVal.str "leanci")] ++ lease))
+      let namedStart ← call "boat" "start_mission" (.obj #[("title", .str "named child"),
+        ("remote_node_id", .str "auto-managed:leanci:small"), ("managed_ttl_minutes", .nat 60)])
+      check (((resultOf named).fieldStr? "id").isNone && ((resultOf namedStart).fieldStr? "mission_id").isNone &&
+        (← rented.get).size == beforeDefault + 3)
+        s!"a named provider is never replaced: {OrbBin.Json.renderCompact named} {OrbBin.Json.renderCompact namedStart}"
+      let unsized ← call "boat" "spawn_managed_machine" (.obj (#[("size", OrbBin.Json.JVal.str "2xlarge")] ++ lease))
+      check (((resultOf unsized).fieldStr? "id").isNone && (← rented.get).size == beforeDefault + 3)
+        s!"a size the fallback does not offer is not moved: {OrbBin.Json.renderCompact unsized}"
+      let .ok () ← setUserManagedPref mc user.id "leanci" false "fallback-opt-out"
+        | throw (IO.userError "managed MCP provider contract: fallback opt-out fixture failed")
+      let optedOut ← call "boat" "spawn_managed_machine" (.obj lease)
+      check ((resultOf optedOut).fieldStr? "provider" == some "boat" &&
+        (fallbackOf optedOut).fieldStr? "reason" == some "provider_disabled_for_user" &&
+        (← rented.get).size == beforeDefault + 4)
+        s!"a default the user has not enabled falls back to boat: {OrbBin.Json.renderCompact optedOut}"
+    finally
+      OrbBin.PosixExt.unsetenvVar "SANDBOXED_MANAGED_DEFAULT_PROVIDER"
   finally
     closeManagedComputeStore mc
     closeCoreStore core
