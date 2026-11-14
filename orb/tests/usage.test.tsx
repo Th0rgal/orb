@@ -1,8 +1,10 @@
 import { render, screen, fireEvent, waitFor, within } from "@solidjs/testing-library";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UsageSettings } from "../src/UsageSettings";
+import { ReliabilityView } from "../src/ReliabilityView";
 import { BreakdownTable } from "../src/components/stats";
 import { setConnection } from "../src/api";
+import { cachePut, cacheReset } from "../src/pageCache";
 import { chartBuckets, formatCost, usageQuery, windowHours, type UsageSummary, type UsageTotals } from "../src/usageApi";
 import { formatMs, formatRate, type ProxyHealth, type ReliabilityStats } from "../src/proxyHealthApi";
 
@@ -189,6 +191,131 @@ describe("Usage page", () => {
     render(() => <UsageSettings />);
     await showByModel();
     await waitFor(() => expect(screen.getByRole("region", { name: "Reliability" }).textContent).toContain("unavailable"));
+  });
+
+  it("renders Core's present usage summary shape with dashes for absent numbers, no data for absent arrays, and survives a cached reply at mount", async () => {
+    const coreBucket = {
+      events: 5, input_tokens: 1200, output_tokens: 300, cache_read_tokens: 100, cache_creation_tokens: 50,
+      reasoning_tokens: 25, total_tokens: 1675, billable_tokens: 1575, recorded_cost_cents: 42, estimated_cost_cents: 42,
+    };
+    const coreSummary = {
+      window: "24h", window_start: "2026-10-19T12:00:00Z", generated_at: "2026-10-20T12:00:00Z",
+      totals: coreBucket, today: coreBucket, this_week: coreBucket,
+      by_source: [{ key: "proxy", label: "Proxy", ...coreBucket }],
+      by_backend: [],
+      by_provider: [{ key: "anthropic", label: "anthropic", ...coreBucket }],
+      by_account: [{ key: "acc-1", label: "acc-1", ...coreBucket }],
+      by_model: [{ key: "claude-opus-5-5", label: "claude-opus-5-5", ...coreBucket }],
+      by_api_key: [],
+      by_caller_kind: [{ key: "mission", label: "mission", ...coreBucket }],
+      by_purpose: [{ key: "turn", label: "turn", ...coreBucket }],
+      by_mission: [{ key: "m-core", label: "Core mission", ...coreBucket }],
+      by_day: [{ day: "2026-10-20", totals: coreBucket }],
+      recent: [],
+      filters_available: { backends: ["claudecode"], providers: ["anthropic"], models: ["claude-opus-5-5"], caller_kinds: ["mission"], api_keys: [] },
+    };
+    cacheReset();
+    cachePut("usage:summary:24h:{}", coreSummary);
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => {
+      const url = new URL(input);
+      if (url.pathname === "/api/ai/usage/summary") return new Response(JSON.stringify(coreSummary));
+      if (url.pathname === "/api/ai/proxy/health") return new Response(JSON.stringify(proxyHealth()));
+      return new Response("[]");
+    }));
+    const view = render(() => <UsageSettings />);
+    await screen.findByText("Core mission");
+    const tiles = Array.from(view.container.querySelectorAll(".usage-tile")).map(el => [
+      el.querySelector("span")?.textContent,
+      el.querySelector("strong")?.textContent,
+    ]);
+    expect(tiles).toEqual([
+      ["Requests", "—"],
+      ["Tokens", "1.6K"],
+      ["Cost", "—"],
+      ["Via router", "—"],
+    ]);
+    const spenders = screen.getByRole("table", { name: "Usage by mission" });
+    const cells = Array.from(spenders.querySelectorAll(".usage-tr:not(.usage-th) [role='cell']")).map(c => c.textContent?.trim());
+    expect(cells).toEqual(["Core missionm-core", "—", "1.6K", "—"]);
+    expect(spenders.textContent).not.toContain("$0.00");
+    await waitFor(() => expect(view.container.querySelector(".usage-chart")).toBeTruthy());
+  });
+
+  it("renders a full usage summary in the client's shape unchanged", async () => {
+    cacheReset();
+    const view = render(() => <UsageSettings />);
+    await screen.findByText("Fix login");
+    const tiles = Array.from(view.container.querySelectorAll(".usage-tile")).map(el => [
+      el.querySelector("span")?.textContent,
+      el.querySelector("strong")?.textContent,
+    ]);
+    expect(tiles).toEqual([
+      ["Requests", "264"],
+      ["Tokens", "2.4M"],
+      ["Cost", "$6.10+"],
+      ["Via router", "96%"],
+    ]);
+    const spenders = screen.getByRole("table", { name: "Usage by mission" });
+    const cells = Array.from(spenders.querySelectorAll(".usage-tr:not(.usage-th) [role='cell']")).map(c => c.textContent?.trim());
+    expect(cells).toEqual(["Fix loginm-1", "10", "255K", "$0.90"]);
+  });
+
+  it("renders Core's present proxy health shape with dashes and no-data state, and survives a cached reply at mount", async () => {
+    const emptyPct = { samples: 0, p50: null, p95: null, max: null };
+    const coreHealth = {
+      window: "24h", window_start: "2026-10-19T12:00:00Z", generated_at: "2026-10-20T12:00:00Z",
+      totals: {
+        requests: 12, succeeded: 11, failed: 1, superseded: 0,
+        retried_requests: 0, total_retries: 0, fallback_requests: 0,
+        success_rate: 0.99, by_status: { ok: 11 }, ttft_ms: emptyPct, total_ms: emptyPct,
+      },
+      by_chain: [],
+      by_provider: [],
+      recent_failures: [{
+        timestamp: "2026-10-20T11:59:00Z", chain_id: "builtin/smart", provider: "anthropic",
+        account_id: "acc-1", model: "claude-opus-5-5", status: "error", http_status: 502,
+        retries: 0, total_ms: 420, fallback_depth: 0,
+      }],
+    };
+    cacheReset();
+    cachePut("usage:proxy-health:24h", coreHealth);
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => {
+      const url = new URL(input);
+      if (url.pathname === "/api/ai/usage/summary") return new Response(JSON.stringify(summary()));
+      if (url.pathname === "/api/ai/proxy/health") return new Response(JSON.stringify(coreHealth));
+      return new Response("[]");
+    }));
+    render(() => <UsageSettings />);
+    const section = await screen.findByRole("region", { name: "Reliability" });
+    await waitFor(() => expect(within(section).getByText("No router traffic in this window.")).toBeTruthy());
+    const tileValues = Array.from(section.querySelectorAll(".st-tile")).map(el => [
+      el.querySelector(".st-tile-label")?.textContent,
+      el.querySelector(".st-tile-value")?.textContent,
+    ]);
+    expect(tileValues).toEqual([
+      ["Router success", "99.0%"],
+      ["First token p50", "—"],
+      ["First token p95", "—"],
+      ["Retried · fell back", "—"],
+    ]);
+    expect(section.textContent).not.toContain("0 · 0");
+  });
+
+  it("renders a full proxy health reply in the client's shape unchanged", () => {
+    const view = render(() => <ReliabilityView health={proxyHealth()} />);
+    const tileValues = Array.from(view.container.querySelectorAll(".st-tile")).map(el => [
+      el.querySelector(".st-tile-label")?.textContent,
+      el.querySelector(".st-tile-value")?.textContent,
+    ]);
+    expect(tileValues).toEqual([
+      ["Router success", "95.0%"],
+      ["First token p50", "1.2 s"],
+      ["First token p95", "8.4 s"],
+      ["Retried · fell back", "12 · 30"],
+    ]);
+    const table = screen.getByRole("table", { name: "Reliability by provider" });
+    expect(table.textContent).toContain("MiniMax-M3");
+    expect(table.textContent).toContain("Down");
   });
 });
 
