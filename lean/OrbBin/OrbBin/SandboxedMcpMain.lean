@@ -835,7 +835,8 @@ private def finalizeApprovedMacTether
   if effScope != "preview" then
     let qCfg := shellSingleQuote sshCfgPath.toString
     localFields := localFields ++ #[
-      ("effective_target", .str effTarget),
+      ("run_as", .str effTarget),
+      ("ssh_user", .str sshUser),
       ("ssh_config", .str sshCfgPath.toString),
       ("ssh_command", .str s!"ssh -F {qCfg} m2air-tether")
     ]
