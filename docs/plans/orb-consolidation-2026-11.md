@@ -729,6 +729,21 @@ managed-lifecycle live validation (need the `dev_operator` grant
 validation request received for 816f574f" was read as a delayed message;
 nothing was done on it.
 
+**Update 09:42 UTC, 14 Nov (coordinator `2bcfd62a`).**
+
+- **Master and live builds.** Master tip is `3226e954c` (#1765, MacBook tether broker and MCP tools, merged 09:21Z after #1759 settings reply keys, #1762 held-open SSE streams, #1763 locald router provider, and #1764 desktop `+` action buttons). Both prod and dev `/api/health` report `build: "3226e954c"` (`single_tenant` on prod, `multi_user` on dev), so the `/api/remote-nodes` probe deadline (#1758) and HTTP connect timeout (#1761) are now live on dev.
+- **Open PRs:**
+  - **#1766** (`8363f23d`, single-tenant managed budget carries client-read `_usd`, `active`, TTL and size keys): CI running (`Orb Desktop Shell`, `Harness Contract Tests`, `Docker image`, `Policy Lint` passed; waiting on `Test` and `kernel-abi`).
+  - **#1708** (`ci/cached-turbo-lean`): remains open for Track A/B.
+- **Multi-user member (`ben`) execution & WebSocket gaps identified on `3226e954c` and dispatched to two isolated `boat:large` workers:**
+  1. **Core + Web (`8f53412f` on `managed-3800f797`):**
+     - `orb-jwt-v2:<userId>:<role>:<sessionEpoch>:<exp>.<hmac>` (`Control.lean:305`) contains colons, violating RFC 6455 `tchar` when passed as `jwt.<token>` in `Sec-WebSocket-Protocol` (`orb/src/stream.ts:695`, `orb/src/Machines.tsx:266`), throwing a `DOMException` that embeds the raw token. Fix: encode `:` as `~` in the WebSocket subprotocol, normalize `~` -> `:` in `verifySessionTokenV2` / `extractWsJwtSubproto?`, echo the client subprotocol verbatim in `negotiateWsSubprotocol?`, wrap `Machines.tsx` `new WebSocket` in `try/catch`, and redact any `jwt.`/`orb-jwt-` token in WebSocket error strings.
+     - `POST /api/control/missions` (`Control.lean:4152`) with `"remote_node_id": "auto-managed:<provider>:<size>"` and a non-empty prompt calls `submitRemoteMissionTurn` without provisioning a VM first, failing with `502 no_managed_machines_available` when the user has no ready VM. Fix: provision through the shared managed-machine admission path when a prompt is present (matching `McpGateway.lean` and `POST /api/managed-machines`), bind `owner_mission := mid`, roll back on refusal, and cover `resume`/`steer` on unresolved `auto-managed` targets while preserving `SelfTest.lean:1752`.
+     - `classifyMissionPlacementTarget` (`Control.lean:1112`) now classifies `OrbCore.AutoPlacement.reserved` targets (`dgx-spark-admin`) as `(1, 1)` so members receive `core_target_forbidden_for_member` at admission, and `orb/src/App.tsx:839-857` defaults non-admins without static nodes to the first usable `auto-managed:<provider>:<size>` instead of `"local"`.
+  2. **OrbNode single-tenant managed VM (`28a75b5a` on `managed-f82ce6eb`):**
+     - On a managed VM, `sandboxed-node` runs as `orbnode` via dial-out enrollment without `orb-privd` (`/run/orb-privd.sock` absent). `OrbNode/Server.lean:616` (`admitNodeLeaseRole`) currently uses `targetKind := 2` and sets `execUnixUser := claims.unixUsername.getD ""`, causing `Runner.lean:1316-1333` (`ensureMissionUser`) to fail on member jobs. Fix: add `managedSandbox : Bool := false` to `NodeConfig` (enabled on dial-out / `SANDBOXED_NODE_MANAGED_SANDBOX=1`), pass `targetKind := 3` to `Orb.Kernel.placementRoleAdmit`, set `execUnixUser := ""` when `managedSandbox` is true while keeping `callerRole := "member"` when `!rec.ownerUserId.isEmpty` so `managed_auth` host credentials are never copied for member jobs.
+- **LeanUI Wave 2 (`ea916daa` on `managed-d8103971`):** healthy and active on `lean/OrbDesktop/Screens.lean` and `orb/tests/leanui-reference.capture.ts` (36 reference captures and per-screen pixel-diff table).
+
 ### Operator night log, 13 Nov 21:15 to 23:45 UTC (Claude, for Thomas)
 
 Thomas approved a night plan at about 21:15 UTC and is away. Facts and decisions:
@@ -1561,3 +1576,4 @@ verification command. The operator session runs them and records the result.
 | 13 Nov 12:12 | Env migration (dev/prod item 1) not applied | 86 key conflicts; hand-editing prod env under time pressure is the wrong risk. Fix the tool first |
 | 13 Nov 12:19 | Deployed `de3fd0fa1` to dev, then prod | Thomas approved prod deploys; dev build + self-test were green |
 | 13 Nov 12:20 | Orchestrator is the git integrator with `GITHUB_TOKEN` from the broker; worker VMs stay credential-free | Managed VMs have no GitHub identity, and workers refused to improvise one |
+| 14 Nov 09:40 | Split member mission-on-managed-VM + WebSocket tchar fix across two disjoint `boat:large` workers (`8f53412f` for `OrbCore`+`orb/src`, `28a75b5a` for `OrbNode`), avoiding `Managed.lean` (#1766) | Each Lean build runs in its own isolated VM without touching files owned by open PR #1766 |
