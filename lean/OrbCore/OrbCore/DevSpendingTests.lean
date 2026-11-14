@@ -49,6 +49,11 @@ def run (root : String) : IO Unit := do
       | throw (IO.userError "dev usage JSON")
     check (usage.fieldStr? "instance" == some "dev" && usage.fieldUInt64? "instance_daily_cap_cents" == some 5 &&
       usage.fieldStr? "cost_basis" == some "rental_commitments") "usage carries explicit instance and accounting basis"
+    check ((usage.field? "spent_today_usd").isSome && (usage.field? "daily_cap_usd").isSome &&
+      (usage.field? "active").isSome && usage.fieldUInt64? "default_ttl_minutes" == some 60 &&
+      usage.fieldUInt64? "max_ttl_minutes" == some 720 && usage.fieldStr? "default_size" == some "small" &&
+      usage.fieldStr? "max_size" == some "xlarge")
+      "single-tenant usage carries the client budget contract (usd, active, TTL and size keys)"
     let .ok ownUsage := OrbBin.Json.parse (renderManagedBudgetJson live (some "alice") 3)
       | throw (IO.userError "own usage JSON")
     check (ownUsage.fieldUInt64? "spent_today_cents" == some 3 && ownUsage.fieldStr? "instance" == some "dev")
