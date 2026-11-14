@@ -787,8 +787,7 @@ def run (root : String) : IO Unit := do
     let adminLiveTok := mintSessionTokenV2 stWithProviders.cfg.jwtSecret "admin" "admin" 1 (nowReal + 3600)
     let memberLiveTok := mintSessionTokenV2 stWithProviders.cfg.jwtSecret "member" "member" 1 (nowReal + 3600)
     let sseHub ← newBroadcastHub
-    let stSse : CoreAppState := { stWithProviders with broadcastHub? := some sseHub }
-    OrbBin.PosixExt.setenvVar "ORB_SSE_KEEPALIVE_MS" "60"
+    let stSse : CoreAppState := { stWithProviders with broadcastHub? := some sseHub, sseKeepAliveMs? := some 60 }
     let .ok (sseListenFd, ssePort) ← tcpListen "127.0.0.1" 0 32
       | throw (IO.userError "SSE loopback tcpListen failed")
     let sseAcceptDone ← IO.mkRef false
@@ -964,7 +963,6 @@ def run (root : String) : IO Unit := do
           (lagWire.splitOn "\"dropped\":").length > 1)
         s!"SSE (e) overflowing 256-frame subscriber queue did not emit stream_lagged: {lagWire}"
     finally
-      OrbBin.PosixExt.unsetenvVar "ORB_SSE_KEEPALIVE_MS"
       sseAcceptDone.set true
       let _ := sseServerTask.get
     -- Disabling/deleting an issuer must stop every previously minted session,

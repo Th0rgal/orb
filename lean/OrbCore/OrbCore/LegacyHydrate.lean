@@ -323,10 +323,17 @@ def deleteProxyApiKey (dataRoot keyId : String) : IO Bool := do
 
 /-! ## SSE Broadcast Hub (`GET /api/control/stream`, `GET /api/control/missions/:id/stream`) -/
 
+structure SseQueuedEvent where
+  eventType  : String
+  missionId? : Option String
+  frame      : String
+  deriving Repr, DecidableEq, Inhabited
+
 structure SseSubscriber where
   id             : UInt64
   missionFilter? : Option String
   queueRef       : IO.Ref (Array String)
+  eventsRef      : IO.Ref (Array SseQueuedEvent)
   droppedRef     : IO.Ref Nat
 
 structure BroadcastHub where
@@ -352,29 +359,42 @@ def publishControlEvent
     let nextSeq := seq + 1
     set (nextSeq, xs)
     return (nextSeq, xs)
-  let frame := formatSseFrame eventType payloadJson (some subs.1)
+  let safeType := ((eventType.splitOn "\n").headD "message").trimAscii.toString
+  let cleanMid? := missionId?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+  let frame := formatSseFrame safeType payloadJson (some subs.1)
+  let item : SseQueuedEvent := { eventType := safeType, missionId? := cleanMid?, frame := frame }
   for sub in subs.2 do
     let matchesMission :=
-      match sub.missionFilter?, missionId? with
+      match sub.missionFilter?, cleanMid? with
       | none, _ => true
       | some want, some got => want == got
       | some _, none => false
     if matchesMission then
-      let overflow ← sub.queueRef.modifyGet fun q =>
+      sub.queueRef.modify fun q =>
+        let base := if q.size ≥ 256 then q.extract 1 q.size else q
+        base.push frame
+      let overflow ← sub.eventsRef.modifyGet fun q =>
         if q.size ≥ 256 then
-          (true, (q.extract 1 q.size).push frame)
+          (true, (q.extract 1 q.size).push item)
         else
-          (false, q.push frame)
+          (false, q.push item)
       if overflow then
         sub.droppedRef.modify (· + 1)
 
 def registerSseSubscriberFull (hub : BroadcastHub) (missionFilter? : Option String) : IO SseSubscriber := do
   let qRef ← IO.mkRef (#[] : Array String)
+  let evRef ← IO.mkRef (#[] : Array SseQueuedEvent)
   let dRef ← IO.mkRef (0 : Nat)
   hub.mu.atomically do
     let (seq, xs) ← get
     let sid := seq + 1
-    let sub : SseSubscriber := { id := sid, missionFilter? := missionFilter?, queueRef := qRef, droppedRef := dRef }
+    let sub : SseSubscriber := {
+      id := sid
+      missionFilter? := missionFilter?
+      queueRef := qRef
+      eventsRef := evRef
+      droppedRef := dRef
+    }
     set (sid, xs.push sub)
     return sub
 
