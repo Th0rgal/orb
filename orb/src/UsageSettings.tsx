@@ -232,7 +232,7 @@ export function UsageSettings() {
               }</For>
             </div>
           </div>
-          <div class="s-card usage-chart-card"><ProviderStackedChart summary={s()} filters={filters()} metric={metric()} granularity={hourlyAvailable(window()) ? granularity() : "day"} /></div>
+          <div class="s-card usage-chart-card"><ProviderStackedChart summary={{ ...s(), by_provider: Array.isArray(s().by_provider) ? s().by_provider : [] }} filters={filters()} metric={metric()} granularity={hourlyAvailable(window()) ? granularity() : "day"} /></div>
         </section>
 
         <section class="s-sec">
