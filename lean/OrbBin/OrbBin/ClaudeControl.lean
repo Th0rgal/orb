@@ -744,10 +744,20 @@ def resolveOpenCodeModelForLocal
     (knownModels : Array String) : Option String := Id.run do
   let some raw := requestedModel?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
     | return defaultModel?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
-  let clean :=
+  let unprefixed :=
     if raw.startsWith "sandboxed-sh/" then (raw.drop 13).toString else raw
+  -- Routing chains (`builtin/*`) are served by the Orb router provider, never by OpenCode's own
+  -- `opencode` provider: drop that prefix so the chain is resolved like a bare ID.
+  let clean :=
+    if unprefixed.startsWith "opencode/builtin/" && !knownModels.contains unprefixed then (unprefixed.drop 9).toString
+    else unprefixed
   if knownModels.contains clean then
     return some clean
+  if clean.startsWith "builtin/" then
+    -- Prefer the provider that actually lists this chain over a guessed default provider.
+    let chainSuffix := s!"/{clean}"
+    if let some matched := knownModels.find? (fun km => km.endsWith chainSuffix) then
+      return some matched
   let firstSeg := (clean.splitOn "/").headD ""
   if firstSeg == "opencode" || knownProviders.contains firstSeg then
     return some clean
@@ -756,7 +766,7 @@ def resolveOpenCodeModelForLocal
     | some dm =>
       let segs := dm.trimAscii.toString.splitOn "/"
       if segs.length >= 2 && !segs[0]!.isEmpty then some segs[0]! else none
-    | none => knownProviders[0]?
+    | none => (knownProviders.find? (· != "opencode")).orElse (fun _ => knownProviders[0]?)
   if let some dp := defProv? then
     let cand := s!"{dp}/{clean}"
     if knownModels.contains cand || clean.startsWith "builtin/" then
