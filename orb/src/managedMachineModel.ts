@@ -1,7 +1,12 @@
 /** Managed (boat.dev) machines: API client and presentation logic. */
 import { createSignal } from "solid-js";
 import { api, ApiError, connectionVersion, MANAGED_PROVISION_TIMEOUT_MS } from "./api";
-import { rememberManagedMachines } from "./machines/nodes";
+import {
+  formatAutoManagedTarget,
+  rememberManagedMachines,
+  resolveDefaultComposerMachine as resolveDefaultComposerMachineBase,
+  setDefaultAutoManagedTarget,
+} from "./machines/nodes";
 
 export type ManagedState = "provisioning" | "enrolling" | "online" | "destroying" | "destroyed" | "failed" | "stopped";
 
@@ -603,6 +608,7 @@ export function resetManagedCatalog(): void {
   catalogInFlight = null;
   catalogVersion = -1;
   setManagedCatalog(EMPTY_CATALOG);
+  setDefaultAutoManagedTarget(null);
 }
 
 export async function refreshManagedCatalog(force = false): Promise<void> {
@@ -619,6 +625,7 @@ export async function refreshManagedCatalog(force = false): Promise<void> {
       if (version !== connectionVersion()) return;
       if (!res) {
         setManagedCatalog({ loaded: true, enabled: false, providers: [], budget: null, settings });
+        setDefaultAutoManagedTarget(null);
         return;
       }
       rememberManagedMachines(res.machines ?? []);
@@ -640,13 +647,15 @@ export async function refreshManagedCatalog(force = false): Promise<void> {
           }];
         }
       }
-      setManagedCatalog({
+      const nextCat: ManagedCatalogState = {
         loaded: true,
         enabled: Boolean(res.enabled) || providers.some(isProviderUsable),
         providers,
         budget: res.budget ?? null,
         settings,
-      });
+      };
+      setManagedCatalog(nextCat);
+      setDefaultAutoManagedTarget(firstUsableAutoManagedTarget(nextCat));
     } finally {
       if (catalogInFlight === run) catalogInFlight = null;
     }
@@ -671,6 +680,34 @@ export function providerAllowedSizes(
   cat: ManagedCatalogState = managedCatalog(),
 ): ManagedSize[] {
   return allowedSizes(provider.sizes ?? [], cat.budget?.max_size);
+}
+
+/** First usable `auto-managed:<provider>:<size>` target in the catalog, if any. */
+export function firstUsableAutoManagedTarget(
+  cat: ManagedCatalogState = managedCatalog(),
+): string | null {
+  for (const prov of usableManagedProviders(cat)) {
+    const firstSize = providerAllowedSizes(prov, cat)[0];
+    if (firstSize) return formatAutoManagedTarget(prov.provider, firstSize.size);
+  }
+  return null;
+}
+
+/** Select the default composer machine across admin/member roles, fleet availability, and usable cloud VMs. */
+export function resolveDefaultComposerMachine(opts: {
+  isAdmin: boolean;
+  current: string;
+  explicit: boolean;
+  firstNodeId: string | null | undefined;
+  remoteReady: boolean;
+  fleetNodes?: readonly { id: string; admin_only?: boolean | null; core_colocated?: boolean | null; labels?: readonly string[] | null }[];
+  catalog?: ManagedCatalogState;
+  autoManagedTarget?: string | null;
+}): string {
+  const autoTarget = opts.autoManagedTarget !== undefined
+    ? opts.autoManagedTarget
+    : firstUsableAutoManagedTarget(opts.catalog ?? managedCatalog());
+  return resolveDefaultComposerMachineBase({ ...opts, autoManagedTarget: autoTarget });
 }
 
 export function findManagedSize(

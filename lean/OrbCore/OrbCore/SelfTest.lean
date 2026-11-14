@@ -4544,7 +4544,7 @@ private def runR4cHarnessSessionTests (store : CoreStore) (tmpRoot : String) : I
     return 1
   return 0
 
-set_option maxHeartbeats 1000000 in
+set_option maxHeartbeats 1400000 in
 set_option maxRecDepth 8000 in
 private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let muTs ← IO.monoNanosNow
@@ -4880,17 +4880,36 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
     return (← fail s!"last-active-admin invariant violated: demote={selfDemoteSt} disable={selfDisableSt} del={selfDelSt}")
 
   -- 3. Placement confinement (`member` blocked from Core & colocated/admin-only nodes; allowed on `ashur`, `auto-managed`, and staged `/api/uploads`)
+  let aliceTildeTok := String.intercalate "~" (aliceTok.splitOn ":")
+  let wsTildeHdrs := #[("Sec-WebSocket-Protocol", s!"orb-sync.v1, jwt.{aliceTildeTok}")]
+  let wsExtractedTok := extractWsJwtSubproto? wsTildeHdrs
+  let wsEchoProto := negotiateWsSubprotocol? wsTildeHdrs
+  let v2TildeClaims := verifySessionTokenV2 app.cfg.jwtSecret aliceTildeTok nowSec
+  let v2TamperedClaims := verifySessionTokenV2 app.cfg.jwtSecret (aliceTildeTok ++ "x") nowSec
+  let (meTildeSt, meTildeBody, _) ← sendReq "GET" "/api/auth/me" aliceTildeTok ""
+  if wsExtractedTok != some aliceTok || wsEchoProto != some "orb-sync.v1" ||
+     v2TildeClaims.map (·.1) != some aliceId || v2TamperedClaims.isSome ||
+     meTildeSt != 200 || (meTildeBody.splitOn "\"username\":\"alice\"").length < 2 then
+    return (← fail s!"tilde-delimited orb-jwt-v2 normalization failed: ws={reprStr wsExtractedTok} echo={reprStr wsEchoProto} claims={reprStr v2TildeClaims} tampered={reprStr v2TamperedClaims} me={meTildeSt}:{meTildeBody}")
+
   let (alCoreMisSt, _, _) ← sendReq "POST" "/api/control/missions" aliceTok
     s!"\{\"title\":\"Escape to Core\",\"backend\":\"opencode\",\"working_directory\":{jsonEscape muRoot}}"
   let (alColocMisSt, _, _) ← sendReq "POST" "/api/control/missions" aliceTok
     "{\"title\":\"Escape to Colocated\",\"backend\":\"opencode\",\"remote_node_id\":\"agent-core\",\"working_directory\":\"/tmp\"}"
+  let (alDgxMisSt, alDgxMisBody, _) ← sendReq "POST" "/api/control/missions" aliceTok
+    "{\"title\":\"Escape to Reserved DGX\",\"backend\":\"opencode\",\"remote_node_id\":\"dgx-spark-admin\",\"working_directory\":\"/tmp\"}"
+  let (alSepMisSt, alSepMisBody, _) ← sendReq "POST" "/api/control/missions" aliceTok
+    "{\"title\":\"Escape to Reserved Sepolia\",\"backend\":\"opencode\",\"remote_node_id\":\"sepolia\",\"working_directory\":\"/tmp\"}"
   let (alWsSt, _, _) ← sendReq "POST" "/api/workspaces" aliceTok "{\"name\":\"core-ws\"}"
   let (alNodesSt, alNodesBody, _) ← sendReq "GET" "/api/nodes" aliceTok ""
   let (admNodesSt, admNodesBody, _) ← sendReq "GET" "/api/nodes" adminTok ""
-  if alCoreMisSt != 403 || alColocMisSt != 403 || alWsSt != 403 || alNodesSt != 200 || admNodesSt != 200 ||
+  if alCoreMisSt != 403 || alColocMisSt != 403 || alDgxMisSt != 403 || alSepMisSt != 403 ||
+     (alDgxMisBody.splitOn "core_target_forbidden_for_member").length < 2 ||
+     (alSepMisBody.splitOn "core_target_forbidden_for_member").length < 2 ||
+     alWsSt != 403 || alNodesSt != 200 || admNodesSt != 200 ||
      (alNodesBody.splitOn "\"id\":\"core\"").length != 1 ||
      (admNodesBody.splitOn "\"id\":\"core\"").length < 2 then
-    return (← fail s!"member placement confinement failed: core={alCoreMisSt} coloc={alColocMisSt} ws={alWsSt} alNodes={alNodesBody} admNodes={admNodesBody}")
+    return (← fail s!"member placement confinement failed: core={alCoreMisSt} coloc={alColocMisSt} dgx={alDgxMisSt}:{alDgxMisBody} sep={alSepMisSt}:{alSepMisBody} ws={alWsSt} alNodes={alNodesBody} admNodes={admNodesBody}")
 
   let (alUploadSt, alUploadBody, _) ← sendReq "POST" "/api/uploads?name=spec.md" aliceTok "hello-staged-attachment"
   if alUploadSt != 201 || (alUploadBody.splitOn s!"\"owner_user_id\":{jsonEscape aliceId}").length < 2 then
@@ -5349,6 +5368,69 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
     "destroy_managed_machine" (.obj #[("machine_id", .str parityId)]) nowSec none app.managedProvisioningOverride?
   if ((OrbBin.Json.parse mcpDestroyed).toOption.getD .null).fieldBool? "ok" != some true then
     return (← fail "MCP provider-backed destroy failed")
+
+  -- Auto-managed mission launch (`remote_node_id: "auto-managed:leanci:small"`):
+  -- provisions a VM via `resolveOrProvisionAutoManagedTarget`, binds `managed-<id>` into `missions.tags`
+  -- (`placement_kind = 'managed_vm'`), and reuses that bound ready VM on subsequent turns.
+  let (_, _) ← sendReq "DELETE" "/api/managed-machines/bob-boat-ext" bobTok ""
+  let .ok () ← upsertMission store {
+    id := "m-bob-automanaged-1", title := "Bob Auto-Managed Turn", status := "awaiting_user",
+    backend := "opencode", modelOverride := "", updatedAt := formatEpochIso8601Utc nowSec,
+    workingDirectory := "", ownerUserId := bobId, placementKind := "managed_vm",
+    tagsJson := "[\"remote-node:auto-managed:leanci:small\"]"
+  } | return (← fail "seed m-bob-automanaged-1 failed")
+  let autoRes ← resolveOrProvisionAutoManagedTarget app
+    { userId := bobId, username := "bob", role := "member" }
+    "m-bob-automanaged-1" bobId "" "auto-managed:leanci:small"
+    (.obj #[("managed_ttl_minutes", .nat 10)]) nowSec
+  let (resolvedTarget1, rentedVmId1) ← match autoRes with
+    | .ok pair => pure pair
+    | .error (stCode, errBody) => return (← fail s!"resolveOrProvisionAutoManagedTarget failed: {stCode}:{errBody}")
+  if rentedVmId1.isEmpty || !resolvedTarget1.startsWith "managed-" then
+    return (← fail s!"expected freshly rented managed-<id>, got target={resolvedTarget1} vm={rentedVmId1}")
+  let provisionedVmId := rentedVmId1
+  discard <| updateMissionBoundManagedNode store "m-bob-automanaged-1" resolvedTarget1 (formatEpochIso8601Utc nowSec)
+  let resolvedAfterBind ← resolveMissionRemoteNode? store (some mStore) "m-bob-automanaged-1"
+  let some (provVmRow, _) ← getManagedMachine? mStore provisionedVmId
+    | return (← fail s!"provisioned VM {provisionedVmId} missing from managed_machines")
+  -- Second call on the same mission with `"auto-managed:leanci:small"` reuses the ready VM (`rentedVmId2 = ""`)!
+  let autoResReuse ← resolveOrProvisionAutoManagedTarget app
+    { userId := bobId, username := "bob", role := "member" }
+    "m-bob-automanaged-1" bobId "" "auto-managed:leanci:small"
+    (.obj #[("managed_ttl_minutes", .nat 10)]) nowSec
+  let (reusedTarget, rentedVmId2) ← match autoResReuse with
+    | .ok pair => pure pair
+    | .error (stCode, errBody) => return (← fail s!"resolveOrProvisionAutoManagedTarget reuse failed: {stCode}:{errBody}")
+  if resolvedAfterBind != some resolvedTarget1 ||
+     provVmRow.ownerUserId != bobId || provVmRow.ownerMission != "m-bob-automanaged-1" ||
+     provVmRow.provider != "leanci" || provVmRow.size != "small" || provVmRow.status != "ready" ||
+     reusedTarget != resolvedTarget1 || !rentedVmId2.isEmpty then
+    return (← fail s!"auto-managed provision/bind/reuse mismatch: bound={reprStr resolvedAfterBind} target={resolvedTarget1} reused={reusedTarget}:{rentedVmId2}")
+  let (delAutoVmSt, _, _) ← sendReq "DELETE" s!"/api/managed-machines/{provisionedVmId}" bobTok ""
+  if delAutoVmSt != 200 then
+    return (← fail s!"cleanup provisioned auto-managed VM failed: {delAutoVmSt}")
+  -- HTTP `POST /api/control/missions` with `remoteSup?` set, `remote_node_id: "auto-managed:leanci:small"` and a prompt:
+  -- when the dial-out relay is not connected (`502`), Core rolls back the unborn mission AND destroys the freshly rented VM!
+  let .ok beforeAutoRollbackRows ← execParamQuery mStore.db
+      "SELECT COUNT(*) FROM managed_machines WHERE owner_user_id=?1 AND phase_code<>3;" #[bobId]
+    | return (← fail "query beforeAutoRollbackRows failed")
+  let beforeAutoRollbackCnt := ((beforeAutoRollbackRows[1]?.bind (·[0]?)).bind String.toNat?).getD 99
+  let remSupMu ← newRemoteJobSupervisor app.cfg.jwtSecret false
+  let appWithSup : CoreAppState := { app with remoteSup? := some remSupMu }
+  let rawAutoCreate :=
+    (s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bobTok}\r\n" ++
+     "Content-Type: application/json\r\nContent-Length: 109\r\n\r\n" ++
+     "{\"title\":\"Bob Auto Rollback\",\"backend\":\"opencode\",\"remote_node_id\":\"auto-managed:leanci:small\",\"prompt\":\"hi\"}").toUTF8
+  let .ok autoCreateReq := parseRequest rawAutoCreate none
+    | return (← fail "parse autoCreateReq failed")
+  let .ok autoCreateResp ← dispatchCoreRequest appWithSup autoCreateReq nowSec
+    | return (← fail "dispatch autoCreateReq failed")
+  let .ok leakedAutoRows ← execParamQuery mStore.db
+      "SELECT COUNT(*) FROM managed_machines WHERE owner_user_id=?1 AND phase_code<>3;" #[bobId]
+    | return (← fail "query leakedAutoRows failed")
+  let leakedAutoCnt := ((leakedAutoRows[1]?.bind (·[0]?)).bind String.toNat?).getD 99
+  if autoCreateResp.status != 502 || leakedAutoCnt != beforeAutoRollbackCnt then
+    return (← fail s!"auto-managed HTTP create rollback leaked VM or wrong status: st={autoCreateResp.status} before={beforeAutoRollbackCnt} after={leakedAutoCnt}")
 
   -- 7. Multi-user Opt-In Usage Telemetry & Speaker-Attributed Voice Relay (`/api/usage-telemetry/*`, `/api/voice/transcribe`)
   -- 7a. `scrubSecrets` covers API keys, hub tokens, GitHub tokens, Bearer headers, and password pairs without mangling prose

@@ -33,6 +33,7 @@ import OrbCore.LegacyHydrate
 import OrbCore.SecretAndApproval
 import OrbCore.RemoteFleetAndRelay
 import OrbCore.ManagedProviderSealing
+import OrbCore.AutoPlacement
 import OrbCore.RemoteDispatch
 import OrbCore.ProjectFilesAndController
 import OrbCore.CloudHttpAndWorker
@@ -313,14 +314,23 @@ def mintSessionTokenV2
   let hex := hmacSha256Hex secret payload
   s!"{payload}.{hex}"
 
+/-- Normalise RFC 6455 `tchar`-safe `~` delimiters in `orb-jwt-v2` tokens back to `:`. -/
+def normalizeSessionTokenV2 (token : String) : String :=
+  if token.startsWith "orb-jwt-v2:" || token.startsWith "orb-jwt-v2~" then
+    String.ofList (token.toList.map (fun c => if c == '~' then ':' else c))
+  else
+    token
+
 /-- Verify an `orb-jwt-v2` session token against `secret` and `nowEpochSec`,
-    returning `(userId, role, sessionEpoch, expEpochSec)`. -/
+    returning `(userId, role, sessionEpoch, expEpochSec)`.
+    Accepts `~` as an RFC 6455 `tchar`-safe delimiter in place of `:`. -/
 def verifySessionTokenV2
     (secret token : String)
     (nowEpochSec : UInt64) : Option (String × String × UInt64 × UInt64) :=
-  if secret.isEmpty || !token.startsWith "orb-jwt-v2:" then none
+  let normToken := normalizeSessionTokenV2 token
+  if secret.isEmpty || !normToken.startsWith "orb-jwt-v2:" then none
   else
-    match token.splitOn "." with
+    match normToken.splitOn "." with
     | [payload, sigHex] =>
       match payload.splitOn ":" with
       | ["orb-jwt-v2", userId, role, epochStr, expStr] =>
@@ -344,25 +354,27 @@ private def effectiveJwtSecret (cfg : CoreConfig) : String :=
   if cfg.jwtSecret.isEmpty then "dev-mode-ephemeral-jwt-secret-012345" else cfg.jwtSecret
 
 private def verifyAnySessionTokenExp? (secret token : String) (nowEpochSec : UInt64) : Option UInt64 :=
-  if token.startsWith "orb-jwt-v2:" then
-    (verifySessionTokenV2 secret token nowEpochSec).map (fun (_, _, _, exp) => exp)
-  else if token.startsWith "eyJ" then
-    (verifyHs256Jwt? secret token nowEpochSec).map (fun (_, _, exp) => exp)
+  let normToken := normalizeSessionTokenV2 token
+  if normToken.startsWith "orb-jwt-v2:" then
+    (verifySessionTokenV2 secret normToken nowEpochSec).map (fun (_, _, _, exp) => exp)
+  else if normToken.startsWith "eyJ" then
+    (verifyHs256Jwt? secret normToken nowEpochSec).map (fun (_, _, exp) => exp)
   else
-    verifySessionToken secret token nowEpochSec
+    verifySessionToken secret normToken nowEpochSec
 
 private def lookupHeaderCI (hdrs : Array (String × String)) (target : String) : Option String :=
   let low := target.toLower
   (hdrs.find? (fun (k, _) => k.toLower == low)).map Prod.snd
 
-/-- Extract `jwt.<token>` across all `Sec-WebSocket-Protocol` header lines. -/
+/-- Extract `jwt.<token>` across all `Sec-WebSocket-Protocol` header lines,
+    normalising RFC 6455 `tchar`-safe `~` delimiters back to `:`. -/
 def extractWsJwtSubproto? (hdrs : Array (String × String)) : Option String := Id.run do
   for (hk, hv) in hdrs do
     if hk.toLower == "sec-websocket-protocol" then
       for part in hv.splitOn "," do
         let p := part.trimAscii.toString
         if p.startsWith "jwt." then
-          return some (p.drop 4).toString
+          return some (normalizeSessionTokenV2 (p.drop 4).toString)
   return none
 
 /-- Extract `Bearer <token>` from `Authorization` header. -/
@@ -371,7 +383,7 @@ def extractBearerToken? (hdrs : Array (String × String)) (nowEpochSec : UInt64 
   let raw ← lookupHeaderCI hdrs "authorization"
   let t := raw.trimAscii.toString
   if t.startsWith "Bearer " || t.startsWith "bearer " then
-    some (t.drop 7).trimAscii.toString
+    some (normalizeSessionTokenV2 (t.drop 7).trimAscii.toString)
   else
     none
 
@@ -383,7 +395,7 @@ def extractProxyToken? (hdrs : Array (String × String)) (nowEpochSec : UInt64 :
     match lookupHeaderCI hdrs "x-api-key" with
     | some k =>
       let clean := k.trimAscii.toString
-      if clean.isEmpty then none else some clean
+      if clean.isEmpty then none else some (normalizeSessionTokenV2 clean)
     | none => none
 
 /-- Authenticate `:80/api/console/ws`, `/api/monitoring/ws`, `/api/desktop/stream`, and `/api/workspaces/:id/shell`
@@ -1157,26 +1169,32 @@ private def authorizeMissionOp
     return some (404, "{\"error\":\"mission_not_found\"}")
 
 /-- Classify placement `(targetKind, nodeAdminOnly)` for `Orb.Kernel.placementRoleAdmit`:
-    `0` = Core host/container, `1` = colocated Core node (`sepolia` / `agent-core`),
+    `0` = Core host/container, `1` = colocated Core node (`sepolia` / `agent-core` / `dgx-spark-admin`),
     `2` = dedicated fleet node, `3` = managed ephemeral VM (`auto-managed*` / `managed-*` / `managed_vm`),
     `4` = client-local (`orb-locald`). -/
 private def classifyMissionPlacementTarget
     (clientPlaced : Bool)
     (placeKind : String)
     (remoteNodeId? : Option String)
-    (tags : Array String := #[]) : UInt8 × UInt8 :=
+    (tags : Array String := #[])
+    (staticNodes : Array StaticRemoteNode := #[]) : UInt8 × UInt8 :=
   if clientPlaced || placeKind == "client" then
     (4, 0)
   else
     let tagNode? := (tags.find? (fun t => t.startsWith "remote-node:")).map (fun t => (t.drop 12).toString)
     let effNode := (remoteNodeId?.orElse (fun _ => tagNode?) |>.getD "").trimAscii.toString.toLower
+    let matchedNode? := staticNodes.find? (fun n => n.id.trimAscii.toString.toLower == effNode)
+    let isReservedNode :=
+      match matchedNode? with
+      | some n => OrbCore.AutoPlacement.reserved n
+      | none => OrbCore.AutoPlacement.reserved { id := effNode, baseUrl := "", tokenEnv := "" }
     if placeKind == "managed_vm" || placeKind.startsWith "managed-" ||
        effNode == "auto-managed" || effNode.startsWith "auto-managed:" || effNode.startsWith "managed-" then
       (3, 0)
     else if effNode.isEmpty || effNode == "local" || effNode == "core" || effNode == "self" then
       (0, 1)
-    else if effNode == "orb-core" || effNode == "agent-core" || effNode == "sepolia" || effNode.endsWith "-core" ||
-            tags.any (fun t => t == "admin_only") then
+    else if isReservedNode || effNode.endsWith "-core" ||
+            tags.any (fun t => t == "admin_only" || t == "admin-only") then
       (1, 1)
     else
       (2, 0)
@@ -1449,7 +1467,7 @@ private def isWsUpgradePath (cleanPath rawTarget : String) : Bool :=
   cleanPath == "/api/desktop/stream" ||
   (matchRoutePattern? "/api/workspaces/:id/shell" rawTarget).isSome
 
-private def negotiateWsSubprotocol? (hdrs : Array (String × String)) : Option String :=
+def negotiateWsSubprotocol? (hdrs : Array (String × String)) : Option String :=
   match lookupHeaderCI hdrs "sec-websocket-protocol" with
   | none => none
   | some raw =>
@@ -1988,6 +2006,147 @@ private def launchLocalCoreMissionTurn
       #[missionId, s!"{nextGen}", ts]
     return .error err
 
+/-- Resolve or provision a concrete remote node when a control-plane mission turn targets
+    `auto-managed[:provider][:size]`. Reuses any existing scoped ready machine for the mission/user;
+    otherwise provisions a managed VM for the mission owner through the shared admission, provider
+    choice, pricing, and project-scoped snapshot path, and binds `owner_mission := missionId`. -/
+def resolveOrProvisionAutoManagedTarget
+    (st : CoreAppState)
+    (caller : CallerPrincipal)
+    (missionId : String)
+    (missionOwnerUserId : String)
+    (missionProject : String)
+    (rawTarget : String)
+    (reqBodyJv : JVal)
+    (nowEpochSec : UInt64) : IO (Except (Nat × String) (String × String)) := do
+  let clean := rawTarget.trimAscii.toString
+  let lower := clean.toLower
+  if lower != "auto-managed" && !lower.startsWith "auto-managed:" then
+    return .ok (clean, "")
+  let some mst := st.managedStore?
+    | return .error (409, "{\"error\":\"managed_compute_unavailable\"}")
+  if let some existingNode ← scopedReadyManagedMachine? mst (some (st.store, missionId)) then
+    return .ok (existingNode, "")
+  let (namedProvider?, namedSize?) ← match parseAutoManagedTarget clean with
+    | .ok target => pure target
+    | .error e => return .error (400, renderCompact (.obj #[("error", .str e)]))
+  let ownerUid := if !missionOwnerUserId.isEmpty then missionOwnerUserId else caller.userId
+  let prefUid := if ownerUid.isEmpty then "admin" else ownerUid
+  let nowIso := formatEpochIso8601Utc nowEpochSec
+  let utcDay := (nowIso.take 10).toString
+  let mf0 ← st.managedRef.get
+  let live ← match ← loadManagedFleet mst mf0.enabled mf0.boatEnabled mf0.dailyCapCents mf0.spentTodayCents mf0.maxConcurrent with
+    | .ok l => pure l
+    | .error _ => pure mf0
+  if !live.enabled then
+    return .error (409, "{\"error\":\"managed_fleet_disabled\",\"message\":\"Managed machines are turned off for this Core.\"}")
+  let uPrefs ← getUserManagedPrefs mst prefUid
+  let ownerUser? ← if ownerUid.isEmpty then pure none else getUserById? st.store ownerUid
+  if !ownerUid.isEmpty && !caller.isLegacyUnscoped && (ownerUser?.isNone || (ownerUser?.map (·.disabled)).getD true) then
+    return .error (403, "{\"error\":\"user_unavailable\"}")
+  let effRole := (ownerUser?.map (·.role)).getD caller.role
+  let effCap? := if ownerUser?.isSome then ownerUser?.bind (·.dailySpendCapCents?) else caller.dailySpendCapCents?
+  let (infS, cmpS) ← if ownerUid.isEmpty then pure (0, 0) else getUserSpentTodayCents st.store ownerUid utcDay
+  let ttlMins := ((reqBodyJv.fieldUInt64? "managed_ttl_minutes").orElse (fun _ => reqBodyJv.fieldUInt64? "ttl_minutes")).getD 60
+  let requestedSnapshot := ((reqBodyJv.fieldStr? "from_snapshot").orElse
+    (fun _ => reqBodyJv.fieldStr? "managed_from_snapshot") |>.getD "").trimAscii.toString
+  let sizeFields : Array (String × JVal) := match namedSize? with
+    | some sz => #[("size", .str sz)]
+    | none => #[]
+  let rentFields : Array (String × JVal) := #[
+    ("ttl_minutes", JVal.uint64 ttlMins),
+    ("from_snapshot", .str requestedSnapshot)]
+  let namedFields : Array (String × JVal) := match namedProvider? with
+    | some prov => #[("provider", .str prov)]
+    | none => #[]
+  let choiceArgs := JVal.obj (namedFields ++ sizeFields ++ rentFields)
+  let instanceDefault ← defaultManagedProvider
+  let choice ← chooseManagedProvider namedProvider? instanceDefault (!requestedSnapshot.isEmpty) fun candidate =>
+    managedSpawnRefusal mst st.store.rootDir live uPrefs ownerUid candidate choiceArgs
+      (infS + cmpS) effCap? st.managedProvisioningOverride?
+  let prov := choice.provider
+  if !isKnownProvider prov then
+    return .error (400, "{\"error\":\"unknown_provider\"}")
+  if !isUserManagedProviderEnabled uPrefs prov then
+    return .error (403, "{\"error\":\"provider_disabled_for_user\",\"message\":\"This cloud provider is disabled in your preferences.\"}")
+  let providerEnabled ← match ← ManagedProviderSettings.isEnabled mst prov with
+    | .ok value => pure value
+    | .error e => return .error (503, renderCompact (.obj #[("error", .str e)]))
+  if !providerEnabled then
+    return .error (409, renderCompact (.obj #[("error", .str "provider_disabled"), ("provider", .str prov)]))
+  let sz ← match ← resolveObservedSpawnSize st.store.rootDir prov (.obj sizeFields) st.managedProvisioningOverride?.isNone with
+    | .ok s => pure s
+    | .error e => return .error (400, renderCompact (.obj #[("error", .str e)]))
+  let estCents ← match quoteManagedSpawnCents prov sz ttlMins (st.managedProvisioningOverride?.map Prod.fst) with
+    | .ok cents => pure cents
+    | .error e => return .error (400, renderCompact (.obj #[("error", .str e)]))
+  let denyCode := admitManagedSpawnMultiUser live estCents (infS + cmpS) effCap? ttlMins.toUInt32
+  if denyCode == 2 then
+    return .error (429, "{\"error\":\"daily_spend_cap_exceeded\",\"scope\":\"user\"}")
+  if denyCode != 0 then
+    if estCents > live.dailyCapCents || live.spentTodayCents > live.dailyCapCents - estCents then
+      return .error (429, "{\"error\":\"daily_spend_cap_exceeded\",\"scope\":\"global\"}")
+    return .error (429, renderCompact (.obj #[("error", .str "managed_concurrency_limit_reached"),
+      ("max_concurrent", JVal.uint64 live.maxConcurrent)]))
+  let userAdmission? := managedUserAdmissionOf effRole effCap? infS cmpS (← memberMaxMachines)
+  let vmId ← nextUniqueId st "vm" nowEpochSec
+  let sbName ← newManagedSandboxName ""
+  let vmRec : ManagedMachine := {
+    id := vmId
+    sandboxName := sbName
+    provider := prov
+    size := sz
+    status := "provisioning"
+    ownerMission := missionId
+    ttlMinutes := ttlMins
+    spentCents := estCents
+    cordoned := false
+    nodeBootEpoch := 1
+    deletableAtSec := nowEpochSec
+    expiresAtSec := nowEpochSec + ttlMins * 60
+    ownerKind := if missionId.isEmpty then "user" else "mission"
+    requestedByMissionId := missionId
+    ownerUserId := ownerUid
+  }
+  let resolvedSnapshot ← if requestedSnapshot.isEmpty then pure "" else do
+    let snapshotProvider ← match st.managedProvisioningOverride? with
+      | some pair => pure pair.1
+      | none => match ← resolveManagedProvider st.store.rootDir prov with
+        | .ok p => pure p
+        | .error e => return .error (409, renderCompact (.obj #[("error", .str e)]))
+    let unscopeProj := (unscopeProjectSlugForOwner ownerUid st.bootstrapAdminId missionProject).getD missionProject
+    match ← resolveProjectSnapshot st.store snapshotProvider unscopeProj requestedSnapshot with
+    | .ok name => pure name
+    | .error e => return .error (409, renderCompact (.obj #[("error", .str e)]))
+  let spawnArgs := JVal.obj (#[("provider", .str prov), ("size", .str sz)] ++ rentFields)
+  match ← spawnConfiguredManagedWorker mst st.store.rootDir live vmRec spawnArgs "" st.managedProvisioningOverride? userAdmission? resolvedSnapshot with
+  | .error e =>
+    let status :=
+      if e == "provider_at_capacity" || e == "managed_provider_availability_unavailable" then 503
+      else if e == "managed_user_spend_cap_exceeded" || e == "managed_user_machine_limit_reached" then 429
+      else 409
+    return .error (status, renderCompact (.obj #[("error", .str e)]))
+  | .ok spawned =>
+    if spawned.created && !ownerUid.isEmpty && estCents > 0 then
+      discard <| addUserSpendCents st.store ownerUid utcDay 0 estCents s!"{nowEpochSec}"
+    if let .ok refreshed ← loadManagedFleet mst live.enabled live.boatEnabled live.dailyCapCents (live.spentTodayCents + estCents) live.maxConcurrent then
+      st.managedRef.set refreshed
+    let concreteNode := s!"managed-{spawned.machine.id}"
+    return .ok (concreteNode, spawned.machine.id)
+
+def updateMissionBoundManagedNode (store : CoreStore) (missionId concreteNode nowIso : String) : IO String := do
+  let mut tags : Array String := #[]
+  if let .ok rows ← execParamQuery store.missionsDb "SELECT COALESCE(tags,'[]') FROM missions WHERE id=?1;" #[missionId] then
+    if rows.size > 1 then
+      tags := parseStringJsonArray (cell rows[1]! 0)
+  let filtered := tags.filter (fun t => !(t.startsWith "remote-node:") && !(t.startsWith "remote_node:"))
+  let updated := filtered.push s!"remote-node:{concreteNode}"
+  let newTagsJson := renderCompact (.arr (updated.map JVal.str))
+  discard <| execParamQuery store.missionsDb
+    "UPDATE missions SET tags=?2, placement_kind='managed_vm', updated_at=?3, metadata_updated_at=?3 WHERE id=?1;"
+    #[missionId, newTagsJson, nowIso]
+  return newTagsJson
+
 /-- Launch a read-only `/btw` side mission that answers `jv.side_question` about `srcMid`.
     Shared by `POST /api/control/missions/:id/btw/agent` and the `ask_mission` MCP tool.
     The caller has already been authorized for `srcMid`. Returns (HTTP status, JSON body). -/
@@ -2056,6 +2215,8 @@ private def launchBtwSideAgent (st : CoreAppState) (caller : CallerPrincipal) (s
       abortBtwIdem
     let sideQuestionText := (sidePrompt?.getD "").trimAscii.toString
     let mut effStatus := "awaiting_user"
+    let mut effRemoteNodeId? := out.remoteNodeId?
+    let mut effTagsJson := out.tagsJson
     if !sideQuestionText.isEmpty && out.placementKind != "client" then
       -- When full transcript turns were copied (`turnsCopied > 1`), include parent history in initial turn prompt
       let mut turnPrompt := sideQuestionText
@@ -2071,12 +2232,20 @@ private def launchBtwSideAgent (st : CoreAppState) (caller : CallerPrincipal) (s
       match out.remoteNodeId? with
       | some targetNode =>
         if let some sup := st.remoteSup? then
+          let (resolvedNode, rentedVmId) ← match ← resolveOrProvisionAutoManagedTarget st caller out.missionId caller.userId out.project targetNode jv nowEpochSec with
+            | .ok pair => pure pair
+            | .error (errCode, errBody) =>
+              cleanupUnbornBtw
+              return (errCode, errBody)
+          if !rentedVmId.isEmpty then
+            effRemoteNodeId? := some resolvedNode
+            effTagsJson ← updateMissionBoundManagedNode st.store out.missionId resolvedNode nowIso
           let effModel :=
             if out.backend == "opencode" && out.modelOverride.trimAscii.toString.isEmpty then "builtin/smart"
             else out.modelOverride
           let spec : RemoteTurnSpec := {
             missionId        := out.missionId
-            targetNodeId     := targetNode
+            targetNodeId     := resolvedNode
             backend          := out.backend
             modelOverride    := effModel
             modelEffort      := out.modelEffort
@@ -2085,7 +2254,7 @@ private def launchBtwSideAgent (st : CoreAppState) (caller : CallerPrincipal) (s
             ownerUserId      := caller.userId
             authorityMode    := "readonly"
             placementKind    := out.placementKind
-            tagsJson         := out.tagsJson
+            tagsJson         := effTagsJson
             prompt           := turnPrompt
             sideQuestion     := true
             companionOf?     := some srcMid
@@ -2093,6 +2262,11 @@ private def launchBtwSideAgent (st : CoreAppState) (caller : CallerPrincipal) (s
           match ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec with
           | .ok _ => effStatus := "active"
           | .error dispErr =>
+            if !rentedVmId.isEmpty then
+              if let some mst := st.managedStore? then
+                let mf0 ← st.managedRef.get
+                discard <| runConfiguredManagedLifecycle mst
+                  { store := st.store, fleet := mf0, override? := st.managedProvisioningOverride? } rentedVmId "destroy" nowEpochSec
             cleanupUnbornBtw
             return (502, s!"\{\"error\":{jsonEscape dispErr}}")
       | none =>
@@ -2105,7 +2279,7 @@ private def launchBtwSideAgent (st : CoreAppState) (caller : CallerPrincipal) (s
           | .error launchErr =>
             cleanupUnbornBtw
             return (502, s!"\{\"error\":{jsonEscape launchErr}}")
-    let rnJson := match out.remoteNodeId? with | some rn => jsonEscape rn | none => "null"
+    let rnJson := match effRemoteNodeId? with | some rn => jsonEscape rn | none => "null"
     let modOvJson := if out.modelOverride.isEmpty then "null" else jsonEscape out.modelOverride
     let effJson := if out.modelEffort.isEmpty then "null" else jsonEscape out.modelEffort
     let projField := if out.project.isEmpty then "" else s!",\"project\":{jsonEscape out.project}"
@@ -2113,7 +2287,7 @@ private def launchBtwSideAgent (st : CoreAppState) (caller : CallerPrincipal) (s
       s!"\{\"id\":{jsonEscape out.missionId},\"title\":{jsonEscape out.title},\"status\":{jsonEscape effStatus}," ++
       s!"\"backend\":{jsonEscape out.backend},\"model_override\":{modOvJson},\"model_effort\":{effJson}," ++
       s!"\"authority_mode\":\"readonly\",\"working_directory\":{jsonEscape out.workingDirectory},\"remote_node_id\":{rnJson}," ++
-      s!"\"placement_kind\":{jsonEscape out.placementKind}{projField},\"created_at\":{jsonEscape nowIso},\"updated_at\":{jsonEscape nowIso},\"state_revision\":1,\"tags\":{out.tagsJson}}"
+      s!"\"placement_kind\":{jsonEscape out.placementKind}{projField},\"created_at\":{jsonEscape nowIso},\"updated_at\":{jsonEscape nowIso},\"state_revision\":1,\"tags\":{effTagsJson}}"
     match ← recordOrReplayIdempotency st.store idemScope idemKey 201 body nowIso with
     | .ok rec => return (rec.statusCode, rec.bodyJson)
     | .error e =>
@@ -3750,8 +3924,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           let t := rn.trimAscii.toString
           !t.isEmpty && t != "local"
         | none => false
+      let (_, staticNodes) ← loadStaticRemoteNodes
       let (forkTKind, forkNAdmin) :=
-        classifyMissionPlacementTarget false (if isRemoteTarget then "remote" else "local") remoteNodeId?
+        classifyMissionPlacementTarget false (if isRemoteTarget then "remote" else "local") remoteNodeId? #[] staticNodes
       if let some (cCode, cBody) := checkPlacementForCaller caller forkTKind forkNAdmin then
         return .ok (mkJson cCode cBody)
       let confinedWdRes : Except String (Option String) ← do
@@ -3831,7 +4006,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     else if req.method == "POST" then
       let tape := JsonTape.indexJsonObject req.bodySlice
       let dest := (JsonTape.lookupString? tape "destination").getD "local"
-      let (txTKind, txNAdmin) := classifyMissionPlacementTarget (dest == "client") "remote" (some dest)
+      let (_, staticNodes) ← loadStaticRemoteNodes
+      let (txTKind, txNAdmin) := classifyMissionPlacementTarget (dest == "client") "remote" (some dest) #[] staticNodes
       if let some (cCode, cBody) := checkPlacementForCaller caller txTKind txNAdmin then
         return .ok (mkJson cCode cBody)
       let defRk ← nextUniqueId st "rk" nowEpochSec
@@ -4110,7 +4286,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
            prelimPlaceKind != "client" && prelimPlaceKind != "local" && prelimPlaceKind != "remote" && prelimPlaceKind != "remote_node" then
           abortIdem
           return .ok (mkJson 400 s!"\{\"error\":{jsonEscape s!"invalid_placement_kind:{prelimPlaceKind}"}}")
-      let (tKind, nAdmin) := classifyMissionPlacementTarget clientPlaced prelimPlaceKind remoteNodeId? reqTags
+      let (_, staticNodes) ← loadStaticRemoteNodes
+      let (tKind, nAdmin) := classifyMissionPlacementTarget clientPlaced prelimPlaceKind remoteNodeId? reqTags staticNodes
       if let some (cCode, cBody) := checkPlacementForCaller caller tKind nAdmin then
         abortIdem
         return .ok (mkJson cCode cBody)
@@ -4232,15 +4409,32 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             abortIdem
             return .ok (mkJson 409 s!"\{\"error\":{jsonEscape leaseErr}}")
         let mut initStatus := "awaiting_user"
+        let mut effRemoteNodeId? := remoteNodeId?
+        let mut effTagsJson := initTagsJson
         if !clientPlaced && !isCloudBackendName backend then
           if let (some sup, some targetNode, some rawPrompt) := (st.remoteSup?, remoteNodeId?, prompt?) then
             if !rawPrompt.trimAscii.toString.isEmpty then
+              let rollbackUnbornCreate : IO Unit := do
+                if !leaseReservationId.isEmpty then
+                  discard <| releaseDispatchTrackLease st.store leaseReservationId nowIso
+                discard <| execParamQuery st.store.missionsDb "DELETE FROM mission_events WHERE mission_id=?1;" #[mid]
+                discard <| execParamQuery st.store.missionsDb "DELETE FROM missions WHERE id=?1;" #[mid]
+                discard <| recoverDispatchLeases st.store.missionsDb st.store.projectsDb st.store.bootEpoch
+                abortIdem
+              let (resolvedNode, rentedVmId) ← match ← resolveOrProvisionAutoManagedTarget st caller mid caller.userId projSlug targetNode bodyJv nowEpochSec with
+                | .ok pair => pure pair
+                | .error (errCode, errBody) =>
+                  rollbackUnbornCreate
+                  return .ok (mkJson errCode errBody)
+              if !rentedVmId.isEmpty then
+                effRemoteNodeId? := some resolvedNode
+                effTagsJson ← updateMissionBoundManagedNode st.store mid resolvedNode nowIso
               let deliv := if selectedSkills.isEmpty then rawPrompt else withDirective rawPrompt selectedSkills
               discard <| appendMissionEvent st.store mid "user_message"
                 (renderCompact (.obj #[("type", .str "user_message"), ("content", .str deliv), ("mission_id", .str mid)])) nowIso
               let spec : RemoteTurnSpec := {
                 missionId        := mid
-                targetNodeId     := targetNode
+                targetNodeId     := resolvedNode
                 backend          := backend
                 modelOverride    := if backend == "opencode" && modelOverride.isEmpty then "builtin/smart" else modelOverride
                 modelEffort      := normEffort
@@ -4250,19 +4444,19 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
                 authorityMode    := authMode
                 placementKind    := placeKind
                 reservedDiskGib  := diskGib
-                tagsJson         := initTagsJson
+                tagsJson         := effTagsJson
                 prompt           := deliv
                 sideQuestion     := isBtwReq
               }
               match ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec with
               | .ok _ => initStatus := "active"
               | .error dispErr =>
-                if !leaseReservationId.isEmpty then
-                  discard <| releaseDispatchTrackLease st.store leaseReservationId nowIso
-                discard <| execParamQuery st.store.missionsDb "DELETE FROM mission_events WHERE mission_id=?1;" #[mid]
-                discard <| execParamQuery st.store.missionsDb "DELETE FROM missions WHERE id=?1;" #[mid]
-                discard <| recoverDispatchLeases st.store.missionsDb st.store.projectsDb st.store.bootEpoch
-                abortIdem
+                if !rentedVmId.isEmpty then
+                  if let some mst := st.managedStore? then
+                    let mf0 ← st.managedRef.get
+                    discard <| runConfiguredManagedLifecycle mst
+                      { store := st.store, fleet := mf0, override? := st.managedProvisioningOverride? } rentedVmId "destroy" nowEpochSec
+                rollbackUnbornCreate
                 return .ok (mkJson 502 s!"\{\"error\":{jsonEscape dispErr}}")
         let deliveredPromptField :=
           match prompt? with
@@ -4271,7 +4465,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             else s!",\"delivered_prompt\":{jsonEscape (withDirective p selectedSkills)}"
           | none => ""
         let projField := if rawProjSlug.isEmpty then "" else s!",\"project\":{jsonEscape rawProjSlug}"
-        let rnField := match remoteNodeId? with | some rn => s!",\"remote_node_id\":{jsonEscape rn}" | none => ""
+        let rnField := match effRemoteNodeId? with | some rn => s!",\"remote_node_id\":{jsonEscape rn}" | none => ""
         let respBody :=
           s!"\{\"id\":{jsonEscape mid},\"status\":{jsonEscape initStatus},\"backend\":{jsonEscape backend}," ++
           s!"\"model_override\":{jsonEscape modelOverride},\"model_effort\":{jsonEscape normEffort}," ++
@@ -4623,16 +4817,22 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             discard <| enqueueStructuredFollowup st.store "core" msgId mid content "control" nowIso
             queued := true
           else
+            let (resolvedNode, rentedVmId) ← match ← resolveOrProvisionAutoManagedTarget st caller mid mRec.ownerUserId mRec.project targetNode jv nowEpochSec with
+              | .ok pair => pure pair
+              | .error (errCode, errBody) => return .ok (mkJson errCode errBody)
+            let effTagsJson ← if !rentedVmId.isEmpty then
+              updateMissionBoundManagedNode st.store mid resolvedNode nowIso
+            else pure mRec.tagsJson
             discard <| appendMissionEvent st.store mid "user_message" pl nowIso
             let mut resumeSid? : Option String := none
             if let .ok sRows ← execParamQuery st.store.missionsDb "SELECT COALESCE(session_id,'') FROM missions WHERE id=?1;" #[mid] then
               if sRows.size > 1 then
                 let s := (cell sRows[1]! 0).trimAscii.toString
                 if !s.isEmpty then resumeSid? := some s
-            let isSide := (OrbBin.Json.parse mRec.tagsJson).toOption.bind JVal.asArr? |>.getD #[] |>.any (fun v => v.asStr? == some "side-question")
+            let isSide := (OrbBin.Json.parse effTagsJson).toOption.bind JVal.asArr? |>.getD #[] |>.any (fun v => v.asStr? == some "side-question")
             let spec : RemoteTurnSpec := {
               missionId        := mid
-              targetNodeId     := targetNode
+              targetNodeId     := resolvedNode
               backend          := mRec.backend
               modelOverride    := if mRec.backend == "opencode" && mRec.modelOverride.isEmpty then "builtin/smart" else mRec.modelOverride
               modelEffort      := mRec.modelEffort
@@ -4642,7 +4842,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               authorityMode    := mRec.authorityMode
               placementKind    := mRec.placementKind
               reservedDiskGib  := mRec.reservedDiskGib
-              tagsJson         := mRec.tagsJson
+              tagsJson         := effTagsJson
               prompt           := content
               resumeSessionId? := resumeSid?
               sideQuestion     := isSide
@@ -5803,16 +6003,22 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           discard <| enqueueStructuredFollowup st.store "core" msgId mid delivContent "control" nowIso
           queued := true
         else
+          let (resolvedNode, rentedVmId) ← match ← resolveOrProvisionAutoManagedTarget st caller mid m.ownerUserId m.project targetNode bodyJv nowEpochSec with
+            | .ok pair => pure pair
+            | .error (errCode, errBody) => return .ok (mkJson errCode errBody)
+          let effTagsJson ← if !rentedVmId.isEmpty then
+            updateMissionBoundManagedNode st.store mid resolvedNode nowIso
+          else pure m.tagsJson
           let _ ← appendMissionEvent st.store mid "user_message" evPayload nowIso
           let mut resumeSid? : Option String := none
           if let .ok sRows ← execParamQuery st.store.missionsDb "SELECT COALESCE(session_id,'') FROM missions WHERE id=?1;" #[mid] then
             if sRows.size > 1 then
               let s := (cell sRows[1]! 0).trimAscii.toString
               if !s.isEmpty then resumeSid? := some s
-          let isSide := (OrbBin.Json.parse m.tagsJson).toOption.bind JVal.asArr? |>.getD #[] |>.any (fun v => v.asStr? == some "side-question")
+          let isSide := (OrbBin.Json.parse effTagsJson).toOption.bind JVal.asArr? |>.getD #[] |>.any (fun v => v.asStr? == some "side-question")
           let spec : RemoteTurnSpec := {
             missionId        := mid
-            targetNodeId     := targetNode
+            targetNodeId     := resolvedNode
             backend          := m.backend
             modelOverride    := if m.backend == "opencode" && m.modelOverride.isEmpty then "builtin/smart" else m.modelOverride
             modelEffort      := m.modelEffort
@@ -5822,7 +6028,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             authorityMode    := m.authorityMode
             placementKind    := m.placementKind
             reservedDiskGib  := m.reservedDiskGib
-            tagsJson         := m.tagsJson
+            tagsJson         := effTagsJson
             prompt           := delivContent
             resumeSessionId? := resumeSid?
             sideQuestion     := isSide
@@ -5874,7 +6080,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           match OrbBin.Json.parse m.tagsJson with
           | .ok (.arr xs) => xs.filterMap JVal.asStr?
           | _ => #[]
-        let (resTKind, resNAdmin) := classifyMissionPlacementTarget (m.placementKind == "client") m.placementKind none mTags
+        let (_, staticNodes) ← loadStaticRemoteNodes
+        let (resTKind, resNAdmin) := classifyMissionPlacementTarget (m.placementKind == "client") m.placementKind none mTags staticNodes
         if let some (cCode, cBody) := checkPlacementForCaller caller resTKind resNAdmin then
           return .ok (mkJson cCode cBody)
       let rawBody := String.fromUTF8? req.bodySlice.toByteArray |>.getD "{}"
@@ -5927,6 +6134,12 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let nowIso := formatEpochIso8601Utc nowEpochSec
       if let (some sup, some targetNode) := (st.remoteSup?, ← resolveMissionRemoteNode? st.store st.managedStore? mid) then
         if m.status != "active" && m.status != "pending" then
+          let (resolvedNode, rentedVmId) ← match ← resolveOrProvisionAutoManagedTarget st caller mid m.ownerUserId m.project targetNode bodyJv nowEpochSec with
+            | .ok pair => pure pair
+            | .error (errCode, errBody) => return .ok (mkJson errCode errBody)
+          let effTagsJson ← if !rentedVmId.isEmpty then
+            updateMissionBoundManagedNode st.store mid resolvedNode nowIso
+          else pure m.tagsJson
           discard <| appendMissionEvent st.store mid "user_message"
             (renderCompact (.obj #[("type", .str "user_message"), ("content", .str rawPrompt), ("mission_id", .str mid)])) nowIso
           let mut resumeSid? : Option String := none
@@ -5936,7 +6149,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               if !s.isEmpty then resumeSid? := some s
           let spec : RemoteTurnSpec := {
             missionId        := mid
-            targetNodeId     := targetNode
+            targetNodeId     := resolvedNode
             backend          := m.backend
             modelOverride    := if m.backend == "opencode" && m.modelOverride.isEmpty then "builtin/smart" else m.modelOverride
             modelEffort      := m.modelEffort
@@ -5946,7 +6159,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             authorityMode    := m.authorityMode
             placementKind    := m.placementKind
             reservedDiskGib  := m.reservedDiskGib
-            tagsJson         := m.tagsJson
+            tagsJson         := effTagsJson
             prompt           := deliv
             resumeSessionId? := resumeSid?
           }

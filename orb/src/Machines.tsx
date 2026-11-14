@@ -26,7 +26,8 @@ import { cachePeek, cachePeekArray, cachePut } from "./pageCache";
 import * as Ic from "./icons";
 import { readPalomaPub } from "./pubKey";
 import { recordFleet } from "./machineLoad";
-import { connectionVersion, getRemoteNodes, getApiUrl, getJwt, isAdminUser, isConnected, setRemoteNodeCordoned, updateRemoteNodeCapacity, type RemoteNodeView } from "./api";
+import { connectionVersion, encodeWsJwtSubprotocol, getRemoteNodes, getApiUrl, getJwt, isAdminUser, isConnected, sanitizeWsErrorText, setRemoteNodeCordoned, updateRemoteNodeCapacity, type RemoteNodeView } from "./api";
+import { log } from "./log";
 
 export { MACHINES, type Machine };
 
@@ -267,7 +268,17 @@ function MachinesPage() {
       const url = new URL(getApiUrl());
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       url.pathname = `${url.pathname.replace(/\/$/, "")}/api/monitoring/ws`;
-      socket = new WebSocket(url, ["sandboxed", `jwt.${getJwt()}`]);
+      // RFC 6455 `tchar`: encode `:` as `~` in the `jwt.<token>` subprotocol and catch synchronous DOMExceptions.
+      const jwtSubproto = encodeWsJwtSubprotocol(getJwt());
+      const protocols = jwtSubproto ? ["sandboxed", jwtSubproto] : ["sandboxed"];
+      try {
+        socket = new WebSocket(url, protocols);
+      } catch (error) {
+        log.warn("machines.ws", sanitizeWsErrorText(error));
+        setLive(false);
+        if (!stopped && !document.hidden) retry = setTimeout(connect, 5000);
+        return;
+      }
       socket.onmessage = event => {
         try {
           const data = JSON.parse(event.data);

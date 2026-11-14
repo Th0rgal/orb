@@ -1,5 +1,6 @@
 import {batch} from "solid-js";
-import { ApiError, InvalidApiResponseError, api, clearConnection, getApiUrl, getJwt, getServerBuildHash, hashStringU64, connectionVersion, isAbortError, isTransientNetworkError, noteAbort, orderedApiCandidates, recordServerBuild, REQUEST_TIMEOUT_MS, RequestTimeoutError, transportFetch } from "./api";
+import { ApiError, InvalidApiResponseError, api, clearConnection, encodeWsJwtSubprotocol, getApiUrl, getJwt, getServerBuildHash, hashStringU64, connectionVersion, isAbortError, isTransientNetworkError, noteAbort, orderedApiCandidates, recordServerBuild, REQUEST_TIMEOUT_MS, RequestTimeoutError, sanitizeWsErrorText, transportFetch } from "./api";
+import { log } from "./log";
 import { nativeInvoke } from "./native";
 import { requestDone, streamLoad, timed } from "./diagnostics";
 import {
@@ -691,12 +692,14 @@ function getOrCreateSyncHub(): MultiplexSyncHub | null {
       enterSseFallback(candidates.length);
       return;
     }
-    const token = getJwt();
-    const protocols = token ? ["orb-sync.v1", `jwt.${token}`] : ["orb-sync.v1"];
+    // RFC 6455 `tchar`: encode `:` as `~` in the `jwt.<token>` subprotocol so browsers accept `orb-jwt-v2` tokens.
+    const jwtSubproto = encodeWsJwtSubprotocol(getJwt());
+    const protocols = jwtSubproto ? ["orb-sync.v1", jwtSubproto] : ["orb-sync.v1"];
     let ws: WebSocket;
     try {
       ws = new WebSocket(toWsUrl(base, "/api/control/sync"), protocols);
-    } catch {
+    } catch (error) {
+      log.warn("stream.syncWs", sanitizeWsErrorText(error));
       if (fallbackConnectedListeners.size === 0) {
         recordSyncWsState(false);
       }

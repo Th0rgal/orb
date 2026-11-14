@@ -9,9 +9,16 @@ import {
   resetCurrentUserState,
   validUnixUsername,
 } from "../src/accountAdmin";
-import { isMissionParticipant } from "../src/api";
+import { encodeWsJwtSubprotocol, isMissionParticipant, sanitizeWsErrorText } from "../src/api";
 import { isAdminOnlyNode } from "../src/machines/nodes";
-import { isProviderEnabled, isProviderUsable, providerStatusLine } from "../src/managedMachineModel";
+import {
+  firstUsableAutoManagedTarget,
+  isProviderEnabled,
+  isProviderUsable,
+  providerStatusLine,
+  resolveDefaultComposerMachine,
+  type ManagedCatalogState,
+} from "../src/managedMachineModel";
 import { formatUsdFromCents, parseUsdToCents } from "../src/missionSharesApi";
 import { TranscriptReducer } from "../src/transcriptModel";
 
@@ -183,5 +190,138 @@ describe("multi-user RBAC, confinement, and sharing models", () => {
     expect(fallback.username).toBe("admin");
     expect(fallback.role).toBe("admin");
     expect(fallback.disabled).toBe(false);
+  });
+
+  it("encodes orb-jwt-v2 colons to RFC 6455 tchar tildes and redacts leaked tokens in WebSocket errors", () => {
+    const rawV2 = "orb-jwt-v2:u-alice:member:3:1893456000.deadbeefcafebabe";
+    expect(encodeWsJwtSubprotocol(rawV2)).toBe(
+      "jwt.orb-jwt-v2~u-alice~member~3~1893456000.deadbeefcafebabe",
+    );
+    expect(encodeWsJwtSubprotocol("eyJhbGciOiJIUzI1NiJ9.payload.sig")).toBe(
+      "jwt.eyJhbGciOiJIUzI1NiJ9.payload.sig",
+    );
+    expect(encodeWsJwtSubprotocol("")).toBeNull();
+    expect(encodeWsJwtSubprotocol(null)).toBeNull();
+
+    const domException = new Error(
+      `Failed to construct 'WebSocket': The subprotocol 'jwt.${rawV2}' is invalid.`,
+    );
+    const sanitized = sanitizeWsErrorText(domException);
+    expect(sanitized).toBe(
+      "Failed to construct 'WebSocket': The subprotocol 'jwt.<redacted>' is invalid.",
+    );
+    expect(sanitized).not.toContain("u-alice");
+    expect(sanitized).not.toContain("deadbeefcafebabe");
+
+    const bareLeak = sanitizeWsErrorText(
+      `Handshake rejected token ${rawV2.replaceAll(":", "~")} on /api/monitoring/ws`,
+    );
+    expect(bareLeak).toBe("Handshake rejected token jwt.<redacted> on /api/monitoring/ws");
+    expect(bareLeak).not.toContain("u-alice");
+  });
+
+  it("prefers the first usable auto-managed target over local for non-admins when no static fleet node is available", () => {
+    const usableCatalog: ManagedCatalogState = {
+      loaded: true,
+      enabled: true,
+      providers: [
+        {
+          provider: "boat",
+          display_name: "boat.dev",
+          configured: true,
+          enabled: true,
+          globally_enabled: true,
+          user_enabled: true,
+          effective_enabled: true,
+          supports_snapshots: true,
+          supports_free_stop: true,
+          sizes: [
+            { size: "small", cpu: 2, ram_gb: 4, disk_gb: 20, usd_per_hour: 0.018 },
+            { size: "large", cpu: 8, ram_gb: 16, disk_gb: 80, usd_per_hour: 0.1 },
+          ],
+        },
+      ],
+      budget: {
+        spent_today_usd: 0,
+        daily_cap_usd: 25,
+        active: 0,
+        max_concurrent: 2,
+        default_ttl_minutes: 60,
+        max_ttl_minutes: 720,
+        default_size: "small",
+        max_size: "large",
+      },
+      settings: { antigravity_on_managed: true },
+    };
+    const emptyCatalog: ManagedCatalogState = {
+      loaded: true,
+      enabled: false,
+      providers: [],
+      budget: null,
+      settings: null,
+    };
+
+    expect(firstUsableAutoManagedTarget(usableCatalog)).toBe("auto-managed:boat:small");
+    expect(firstUsableAutoManagedTarget(emptyCatalog)).toBeNull();
+
+    // Non-admin moving off forbidden "core" with no static node gets usable auto-managed VM
+    expect(
+      resolveDefaultComposerMachine({
+        isAdmin: false,
+        current: "core",
+        explicit: false,
+        firstNodeId: null,
+        remoteReady: true,
+        catalog: usableCatalog,
+      }),
+    ).toBe("auto-managed:boat:small");
+
+    // Non-admin with no usable cloud providers falls back to "local"
+    expect(
+      resolveDefaultComposerMachine({
+        isAdmin: false,
+        current: "core",
+        explicit: false,
+        firstNodeId: null,
+        remoteReady: true,
+        catalog: emptyCatalog,
+      }),
+    ).toBe("local");
+
+    // Existing auto-managed selection is not clobbered when remoteReady settles
+    expect(
+      resolveDefaultComposerMachine({
+        isAdmin: false,
+        current: "auto-managed:boat:large",
+        explicit: false,
+        firstNodeId: null,
+        remoteReady: true,
+        catalog: usableCatalog,
+      }),
+    ).toBe("auto-managed:boat:large");
+
+    // Non-admin on "local" (before catalog arrived) upgrades to auto-managed once catalog loads
+    expect(
+      resolveDefaultComposerMachine({
+        isAdmin: false,
+        current: "local",
+        explicit: false,
+        firstNodeId: null,
+        remoteReady: true,
+        catalog: usableCatalog,
+      }),
+    ).toBe("auto-managed:boat:small");
+
+    // Admin behavior remains identical ("core" when no static node is available)
+    expect(
+      resolveDefaultComposerMachine({
+        isAdmin: true,
+        current: "ashur",
+        explicit: false,
+        firstNodeId: null,
+        remoteReady: true,
+        catalog: usableCatalog,
+      }),
+    ).toBe("core");
   });
 });

@@ -46,7 +46,6 @@ import {
 import {preferSparkAdministration} from "./machineDestinations";
 import { LazyCloudAgentPage as CloudAgentPage } from "./cloudAgentsLoader";
 import { orbComposerDefaultStep } from "./orbKernel";
-import { monitorSoftware } from "./softwareInventory";
 import {startLocalQueueWorker} from "./localMessageQueue";
 const BtwSettings = lazy(() => import("./btwSettings").then(module => ({ default: module.BtwSettings })));
 import { screenName, startUsageTelemetry, usageTelemetry } from "./usageTelemetry";
@@ -99,6 +98,7 @@ import {
   isUserManagedNode,
   nodeSize,
   parseAutoManagedTarget,
+  resolveDefaultComposerMachine,
 } from "./machines/nodes";
 import type { ActiveProviderSubmenu, Pending24hLeasePrompt } from "./MachineCloudMenu";
 const NewAgentCloudVmSection = lazy(() => import("./MachineCloudMenu").then(module => ({ default: module.NewAgentCloudVmSection })));
@@ -228,7 +228,12 @@ export default function App() {
   });
   const settingsDots = createMemo(() => settingsAttention({ bunkerActive: bunkerActive(), deviceEnrolled: !deviceUnenrolled() }));
   onMount(() => onCleanup(trackScrollbarHover()));
-  onMount(() => { const stop = monitorSoftware(); onCleanup(stop); });
+  onMount(() => {
+    let stop: (() => void) | undefined;
+    let disposed = false;
+    void import("./softwareInventory").then(m => { if (!disposed) stop = m.monitorSoftware(); });
+    onCleanup(() => { disposed = true; stop?.(); });
+  });
   createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);const stopDelegations=startClientDelegations(missions);onCleanup(stopDelegations);onCleanup(startLocalWakeups());});
   const [selected, setSelected] = createSignal<string | null>((() => { const saved = readString("orb.selectedConversation"); return saved && (PAGES.has(saved) || /^(m|pf|c|pc|ps|sk|rm):/.test(saved)) ? settingsPageId(saved) : null; })());
   createEffect(() => {
@@ -838,22 +843,15 @@ export default function App() {
   const firstNodeId = createMemo(() => (canAutoSelectRemote() ? firstAvailableNodeId(sortedNodes(), currentAutoBackend()) : null));
   createEffect(() => {
     if (!isConnected() || creating() || launchPreview()) return;
-    if (!isAdminUser()) {
-      const cur = newMachine();
-      const forbiddenNode = fleetNodes().find(n => n.id === cur && isAdminOnlyNode(n));
-      if (cur === "core" || cur === "dgx-spark-admin" || Boolean(forbiddenNode)) {
-        const first = firstNodeId();
-        setNewMachine(first ?? "local");
-        return;
-      }
-    }
-    if (explicitMachine()) return;
-    const first = firstNodeId();
-    if (first) {
-      if (newMachine() !== first) setNewMachine(first);
-    } else if (remoteLaunch().state === "ready" && newMachine() !== "core" && newMachine() !== "local") {
-      setNewMachine(isAdminUser() ? "core" : "local");
-    }
+    const next = resolveDefaultComposerMachine({
+      isAdmin: isAdminUser(),
+      current: newMachine(),
+      explicit: explicitMachine(),
+      firstNodeId: firstNodeId(),
+      remoteReady: remoteLaunch().state === "ready",
+      fleetNodes: fleetNodes(),
+    });
+    if (next !== newMachine()) setNewMachine(next);
   });
   const machineLabel = () => {
     if (isConnected()) {
