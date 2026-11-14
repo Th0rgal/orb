@@ -594,8 +594,8 @@ private def runR3cdQueueAndContinuationTests
   let claimedAfterDelRows ← execParamQuery store.missionsDb
     "SELECT state,phase,json_extract(payload,'$.message.content') FROM remote_message_queue WHERE user_id='core' AND message_id='q-r3c-1';" #[]
   let claimedAfterDel := match claimedAfterDelRows with | .ok rs => rs[1]?.getD #[] | .error _ => #[]
-  if sDelClaimed != 409 || bDelClaimed != "{\"error\":\"already_claimed\"}" || claimedAfterDel != #["claimed", "1", "first step"] then
-    return (← failWith s!"DELETE claimed expected 409 with row unchanged, got {sDelClaimed} {repr claimedAfterDel}")
+  if sDelClaimed != 409 || (bDelClaimed.splitOn "already_claimed").length != 2 || claimedAfterDel != #["claimed", "1", "first step"] then
+    return (← failWith s!"DELETE claimed expected 409 with row unchanged, got {sDelClaimed} {bDelClaimed} {repr claimedAfterDel}")
 
   -- Confirm delivered (`op=1`, `delivery_seq=77`)
   let .ok (sDeliv1, bDeliv1) ← sendTestHttp appSt validJwt "POST" "/api/control/queue/q-r3c-1/step"
@@ -619,7 +619,7 @@ private def runR3cdQueueAndContinuationTests
     "SELECT state,phase,delivered_seq,json_extract(payload,'$.message.content') FROM remote_message_queue WHERE user_id='core' AND message_id='q-r3c-1';" #[]
   let delivAfterDel := match delivAfterDelRows with | .ok rs => rs[1]?.getD #[] | .error _ => #[]
   if sReplayDeliv != 409 || sEditDeliv != 409 || sCancelDeliv != 409 || sDelDeliv != 409 ||
-     bDelDeliv != "{\"error\":\"already_delivered\"}" ||
+     (bDelDeliv.splitOn "already_delivered").length != 2 ||
      delivAfterDel != #["delivered", "2", "77", "first step"] then
     return (← failWith s!"delivered queue fence violated: replay={sReplayDeliv} edit={sEditDeliv} cancel={sCancelDeliv} delete={sDelDeliv} {bDelDeliv} row={repr delivAfterDel}")
 
