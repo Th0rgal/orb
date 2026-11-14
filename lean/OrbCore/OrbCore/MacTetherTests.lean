@@ -212,6 +212,10 @@ def run (root : String) : IO Unit := do
     check (!(← openTetherPsk agentKemPriv macKemPub "another-request" sealed).isOk) "the sealed PSK is bound to its request"
     let polled ← call adminMission "request_macbook_tether" (.obj #[("request_id", .str reqId), ("wait_secs", .nat 0)])
     check ((polled.fieldOrNull "result").fieldStr? "status" == some "approved" && has polled leaseToken) "polling returns the approved lease"
+    check (!(← executeMacTetherMcpTool store (some rt) none 0 false "" "list_macbook_tethers" (.obj #[]) now).isOk)
+      "an executor session without a mission is refused"
+    let direct ← call admin "list_macbook_tethers"
+    check (direct.fieldBool? "ok" == some true && has direct reqId) "the administrator acting directly lists every request"
     let theirs ← call otherMission "list_macbook_tethers"
     check (theirs.fieldBool? "ok" == some true && !has theirs reqId) "another mission does not list the request"
     for (tool, args) in #[("request_macbook_tether", JVal.obj #[("request_id", .str reqId), ("wait_secs", .nat 0)]),

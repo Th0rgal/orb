@@ -2789,7 +2789,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         let denied (code message : String) : CoreHttpResponse :=
           mkJson 200 (renderCompact (.obj #[("ok", .bool false), ("error", .obj #[
             ("code", .str code), ("message", .str message), ("accepted", .str "no"), ("retryable", .bool false)])]))
-        unless ← ownerAllowed do
+        unless (← ownerAllowed) do
           return .ok (denied "mac_tether_denied" "Administrator required")
         let bunkerSt ← match st.bunkerStateRef? with | some r => r.get | none => pure (0 : UInt8)
         match ← executeMacTetherMcpTool st.store st.macTether? (st.managedStore?.map (·.db)) bunkerSt
@@ -2797,7 +2797,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | .ok resVal => return .ok (mkJson 200 (renderCompact (.obj #[("ok", .bool true), ("result", resVal)])))
         | .error errMsg => return .ok (denied "mac_tether_rejected" errMsg)
       if isMemoryToolName toolName then
-        unless ← ownerAllowed do
+        unless (← ownerAllowed) do
           return .ok (mkJson 200 "{\"ok\":false,\"error\":{\"code\":\"memory_tool_denied\",\"message\":\"Administrator required\"}}")
         let mut onManagedNode := false
         let mut hasProjSkill := !activeClaims.isExternal && !activeClaims.project.isEmpty

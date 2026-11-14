@@ -588,11 +588,13 @@ def allocateMacMeshOverlayIp? (st : CoreStore) (nowSec : UInt64) : IO (Option St
   return none
 
 /-- Only the server owner's missions may ask for the laptop: the mission must exist and be owned by an enabled
-    administrator. An empty `missionId` is the administrator acting directly (callers authenticate that). -/
+    administrator (an empty owner is pre-multi-user operator data, which no member can own).
+    An empty `missionId` is the administrator acting directly (callers authenticate that). -/
 def missionMayRequestMacTether (st : CoreStore) (missionId : String) : IO Bool := do
   if missionId.isEmpty then return true
   let some m ← getMission? st missionId | return false
-  userIsServerOwner st m.ownerUserId
+  if m.ownerUserId.isEmpty then return true
+  return ((← getUserById? st m.ownerUserId).map (fun u => !u.disabled && u.role == "admin")).getD false
 
 def createMacTetherRequest
     (st : CoreStore)
@@ -935,9 +937,10 @@ private def waitTetherDecision
         | none => IO.sleep 200
   return result
 
-/-- Run one tether tool for an already authorized caller. `callerMissionId` comes from the session token;
-    only an operator session without a mission may name a mission in the arguments. A mission sees and
-    revokes only its own requests, and only the owning caller receives the lease token. -/
+/-- Run one tether tool for an already authorized caller. `callerMissionId` comes from the session token,
+    never from the arguments. A mission sees, polls and revokes only its own requests and is the only
+    one to receive their lease token. An operator session without a mission is the administrator acting
+    directly: it may name a mission and sees every request. Other sessions without a mission are refused. -/
 def executeMacTetherMcpTool
     (st : CoreStore)
     (rt? : Option MacTetherRuntime)
@@ -948,10 +951,11 @@ def executeMacTetherMcpTool
     (toolName : String)
     (args : JVal)
     (nowEpochSec : UInt64) : IO (Except String JVal) := do
-  let effMid :=
-    if isOperator && callerMissionId.isEmpty then ((args.fieldStr? "mission_id").getD "").trimAscii.toString
-    else callerMissionId
-  let owns (r : MacTetherRequestRecord) : Bool := isOperator || (!effMid.isEmpty && r.missionId == effMid)
+  let direct := isOperator && callerMissionId.isEmpty
+  if callerMissionId.isEmpty && !direct then
+    return .error "MacBook tether tools need a mission session"
+  let effMid := if direct then ((args.fieldStr? "mission_id").getD "").trimAscii.toString else callerMissionId
+  let owns (r : MacTetherRequestRecord) : Bool := direct || r.missionId == effMid
   let reply (r : MacTetherRequestRecord) : JVal := .obj #[
     ("status", .str r.state),
     ("request_id", .str r.id),
@@ -976,16 +980,13 @@ def executeMacTetherMcpTool
   else if toolName == "list_macbook_tethers" then
     let stateFilter? := ((args.fieldStr? "state").map (·.trimAscii.toString)).filter (!·.isEmpty)
     let midFilter? : Option String := if effMid.isEmpty then none else some effMid
-    if midFilter?.isNone && !isOperator then
-      return .ok (.obj #[("tethers", .arr #[])])
     let rows ← listMacTetherRequests st midFilter? stateFilter? nowEpochSec
     return .ok (.obj #[("tethers", .arr (rows.map fun r => renderMacTetherRequestJson r (r.state == "approved" && owns r)))])
   else if toolName == "revoke_macbook_tether" then
     let reqId := (((args.fieldStr? "request_id").orElse (fun _ => args.fieldStr? "id")).getD "").trimAscii.toString
     if reqId.isEmpty then
       return .error "request_id is required"
-    let callerMid? := if effMid.isEmpty then none else some effMid
-    match ← revokeMacTetherRequest st rt? reqId callerMid? isOperator nowEpochSec with
+    match ← revokeMacTetherRequest st rt? reqId (some callerMissionId) direct nowEpochSec with
     | .ok r =>
       return .ok (.obj #[
         ("status", .str r.state),
