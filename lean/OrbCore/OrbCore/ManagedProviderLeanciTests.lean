@@ -68,10 +68,50 @@ def run : IO Unit := do
     entry.readinessDeadlineSecs == 480 && !entry.supportsStopResume && entry.supportsSnapshots &&
     !entry.supportsExtend && entry.sizes.size == 6) "declaration"
   check ((declaration? "retired-provider").isNone && (leanciProfile? "retired-profile").isNone) "unknown names rejected"
-  check ((quote "leanci" "small" 60).toOption == some 2 && (quote "leanci" "medium" 60).toOption == some 4 &&
-    (quote "leanci" "xlarge" 60).toOption == some 20 && (quote "leanci" "2xlarge" 60).toOption == some 40 &&
+  -- lean.ci is the owner's own infrastructure: every size is free, for any lease.
+  check (entry.sizes.all (·.milliCentsPerHour == 0) &&
+    leanciProfiles.all (fun p => (quote "leanci" p.size.name 720).toOption == some 0) &&
+    (quote "leanci" "small" 60).toOption == some 0 && (quote "leanci" "medium" 5).toOption == some 0 &&
     !(quote "leanci" "3xlarge" 720).isOk && !(quote "leanci" "small" 721).isOk &&
-    !(quote "leanci" "huge" 60).isOk) "decided prices and the 720-minute cap"
+    !(quote "leanci" "huge" 60).isOk) "zero price for every size and the 720-minute cap"
+  let leanciCatalog := JVal.obj (catalogFields "leanci")
+  let catalogSizes := (leanciCatalog.fieldArr? "sizes").getD #[]
+  check (catalogSizes.size == 6 &&
+    catalogSizes.all (fun size => (size.field? "usd_per_hour").map renderCompact == some "0.00000"))
+    "the catalog prices every lean.ci size at 0.00000 USD per hour"
+  -- The extend call is ready for the day `supportsExtend` is switched on.
+  let extendRequest := leanciExtendRequest "aaaaaaaa-0000-4000-8000-000000000001" 600
+  check (extendRequest.method == "POST" && extendRequest.path == "/vms/aaaaaaaa-0000-4000-8000-000000000001/extend" &&
+    (extendRequest.body.map renderCompact) == some "{\"ttl_secs\":600}" &&
+    leanciCatalog.fieldBool? "supports_extend" == some false)
+    "extend request shape; without discovery the catalog keeps extend off"
+  -- Discovery, both shapes: today's capabilities (no `lifecycle` block) and lean.ci#35's.
+  let today := capabilities 3 96 32 107520 4
+  let lifecycle (extend : Bool) : JVal := today.setField "lifecycle" (.obj #[
+    ("extend", .bool extend), ("snapshots", .bool true), ("restore_from_snapshot", .bool true),
+    ("stop_keeps_disk", .bool false), ("resume", .bool false), ("fork", .bool false), ("usage", .bool false)])
+  let catalogExtend (body : Option JVal) := (JVal.obj (catalogFields "leanci" body)).fieldBool? "supports_extend"
+  check (!leanciSupportsExtend today && !leanciSupportsExtend (.obj #[]) && !leanciSupportsExtend (lifecycle false) &&
+    leanciSupportsExtend (lifecycle true)) "extend is supported only when lifecycle.extend is true"
+  check (catalogExtend none == some false && catalogExtend (some today) == some false &&
+    catalogExtend (some (lifecycle false)) == some false && catalogExtend (some (lifecycle true)) == some true &&
+    (JVal.obj (catalogFields "leanci" (some (lifecycle true)))).fieldBool? "supports_free_stop" == some false &&
+    ((JVal.obj (catalogFields "leanci" (some (lifecycle true)))).fieldArr? "sizes").map (·.size) == some 6)
+    "the observed catalog follows lifecycle.extend and never advertises stop/resume"
+  let extendCalls ← IO.mkRef (#[] : Array Request)
+  let discovered (body : JVal) (fails : Bool := false) : IO Provider := do
+    return leanci (fun req => do
+      if req.method == "GET" then return (if fails then .ok (503, .null) else .ok (200, body))
+      extendCalls.modify (·.push req)
+      return .ok (200, .obj #[("extended", .bool false)])) (← IO.mkRef #[]) (pure 0)
+  check (!(← (← discovered today).supportsExtend) && !(← (← discovered (lifecycle false)).supportsExtend) &&
+    !(← (← discovered (lifecycle true) true).supportsExtend) && (← (← discovered (lifecycle true)).supportsExtend))
+    "the provider answers extend support from discovery, and no when it cannot read it"
+  check ((← (← discovered (lifecycle true)).extend "aaaaaaaa-0000-4000-8000-000000000001" 900).isOk &&
+    (← extendCalls.get).size == 1 && (← extendCalls.get).back!.idempotencyKey.isEmpty &&
+    (← extendCalls.get).back!.path == "/vms/aaaaaaaa-0000-4000-8000-000000000001/extend" &&
+    ((← extendCalls.get).back!.body.map renderCompact) == some "{\"ttl_secs\":900}")
+    "extend posts the remaining seconds without an idempotency key; an already-covered 200 is success"
 
   let spec : SpawnSpec := { name := "orb-managed-dev-t", size := "small", ttlSeconds := 300, idempotencyKey := "k1" }
   let .ok created ← provider.spawn spec | throw (IO.userError "spawn failed")
@@ -151,7 +191,7 @@ def run : IO Unit := do
     !provider.isStopped "snapshotting") "list and state mapping"
   check ((← provider.destroy "aaaaaaaa-0000-4000-8000-000000000001").isOk && (← provider.destroy "bbbbbbbb-0000-4000-8000-000000000001").isOk) "destroy; 404 is idempotent"
   check (!(← provider.stop "aaaaaaaa-0000-4000-8000-000000000001").isOk && !(← provider.extend "aaaaaaaa-0000-4000-8000-000000000001" 600).isOk &&
-    !(← provider.resume "aaaaaaaa-0000-4000-8000-000000000001" spec).isOk) "stop, resume and extend are unsupported, not faked"
+    !(← provider.resume "aaaaaaaa-0000-4000-8000-000000000001" spec).isOk) "stop and resume are unsupported, and an extend the provider does not serve fails, not faked"
 
   check (← provider.writeFile "aaaaaaaa-0000-4000-8000-000000000001" "/home/user/.orb/enroll.env" "A=1\n").isOk "file upload"
   let file := (← requests.get).back!

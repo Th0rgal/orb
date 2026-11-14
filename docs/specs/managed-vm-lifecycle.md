@@ -426,6 +426,30 @@ uncertain creation, retry conflicts, and admission before provider I/O.
 | `owner_kind` | `mission` or `user` (created from Orb/API without a mission). Absent = legacy row, shown as "No owner". |
 | `owner_user_id` | Tenant whose mission store holds the owner. Set from the authenticated caller, never from a body. |
 
+Provider choice (`chooseManagedProvider`, one function for every MCP spawn path):
+
+| Request | Provider used |
+| --- | --- |
+| Names a provider (`provider=`, `auto-managed:<provider>[:<size>]`) | That provider, never replaced; its refusal is the caller's error. |
+| Names none, instance default can take it | The instance default (`SANDBOXED_MANAGED_DEFAULT_PROVIDER`, else `boat`). |
+| Names none, default cannot take it now, `boat` can | `boat`; the result carries `provider_fallback: {from, to, reason}`. |
+| Names none, neither can | The default; the caller gets the default's own error. Nothing is rented. |
+| Names none, with a snapshot, or a fork | The default (a snapshot or a source disk lives at one provider). |
+
+"Cannot take it" is `managedSpawnRefusal`: the user has not enabled the provider, it is
+not configured, the operator disabled it, the size (same name) is not offered now, spend
+or concurrency admission refuses, or the availability preflight reports no capacity. A
+retry with the same idempotency key stays on the provider its first attempt reserved on.
+`POST /api/managed-machines` is an explicit choice from a client and keeps its own rule:
+no `provider` means `boat`, `auto` means the instance default if the user enabled it,
+else the first provider they enabled.
+
+lean.ci sizes are priced at zero: quote, recorded cost and daily spend add nothing, and
+neither the global nor a user's daily cap refuses a zero-cost machine (concurrency, TTL
+and the fleet switch still apply). Extension is per provider (`Provider.supportsExtend`,
+`supports_extend` in the catalog): declared for boat and colab, discovered for lean.ci
+from `lifecycle.extend` of `GET /vms/capabilities` (absent block = not supported).
+
 Creation paths:
 
 - `spawn_managed_machine` (gateway): owner = calling mission.

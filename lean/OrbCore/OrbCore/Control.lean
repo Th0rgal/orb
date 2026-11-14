@@ -5177,9 +5177,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let rawProv := ((jv.fieldStr? "provider").getD "boat").trimAscii.toString.toLower
       let canonProv := canonicalizeProvider rawProv
       let uPrefs ← getUserManagedPrefs mst (if caller.userId.isEmpty then "admin" else caller.userId)
+      let instanceDefault ← defaultManagedProvider
       let prov ←
         if rawProv == "auto" then
-          match knownProviders.find? (fun p => isUserManagedProviderEnabled uPrefs p) with
+          -- The instance default first, then the first provider this user enabled.
+          match (#[instanceDefault] ++ knownProviders).find? (fun p => isUserManagedProviderEnabled uPrefs p) with
           | some p => pure p
           | none => return .ok (mkJson 403 "{\"error\":\"provider_disabled_for_user\",\"message\":\"No cloud providers are enabled in your preferences.\"}")
         else if !isKnownProvider canonProv then
@@ -5221,9 +5223,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | .ok cents => pure cents
         | .error e => return .ok (mkJson 400 (renderCompact (.obj #[("error", .str e)])))
       let (infS, cmpS) ← if caller.userId.isEmpty then pure (0, 0) else getUserSpentTodayCents st.store caller.userId utcDay
-      let userAdmission? : Option ManagedUserAdmission := caller.dailySpendCapCents?.map fun cap => {
-        capCents := cap, inferenceCents := infS, computeCents := cmpS
-      }
+      let userAdmission? := managedUserAdmissionOf caller.role caller.dailySpendCapCents?
+        infS cmpS (← memberMaxMachines)
       -- Name the real refusal: a disabled fleet or provider is not a spend cap.
       if !live.enabled then
         return .ok (mkJson 409 "{\"error\":\"managed_fleet_disabled\",\"message\":\"Managed machines are turned off for this Core.\"}")

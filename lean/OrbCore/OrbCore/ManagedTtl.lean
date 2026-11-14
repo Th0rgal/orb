@@ -31,7 +31,9 @@ def applyExtension (mc : ManagedComputeStore) (provider : Provider)
   match ← provider.extend intent.providerId (intent.newExpiry - nowEpoch) with
   | .ok () => finishManagedExtension mc intent.id true
   | .error e =>
-    if #[400,401,403,404,405,422].contains e.status then discard <| finishManagedExtension mc intent.id false true
+    -- lean.ci answers 409 for a VM that can no longer be extended: final there.
+    if #[400,401,403,404,405,422].contains e.status || (provider.name == "leanci" && e.status == 409) then
+      discard <| finishManagedExtension mc intent.id false true
     return .error (if e.status == 0 || e.status ≥ 500 then "managed_extension_outcome_uncertain" else "managed_provider_extension_failed")
 
 def extendWorker (mc : ManagedComputeStore) (fleet : ManagedFleetState) (provider : Provider)
@@ -158,8 +160,11 @@ def tick (mc : ManagedComputeStore) (store : CoreStore) (defaults : ManagedFleet
     if let some minutes := warningDue m nowEpoch then
       discard <| eventOnce store m "managed_machine_expiring"
         (s!"Managed VM {m.sandboxName} (managed-{m.id}) expires in at most {minutes} minutes, at " ++
-         s!"{formatEpochIso8601Utc m.expiresAtSec}. Busy VMs are not auto-extended: call extend_managed_machine " ++
-         "to keep it, or bring results back with harvest_managed_file and push work before the deadline.")
+         s!"{formatEpochIso8601Utc m.expiresAtSec}. Busy VMs are not auto-extended: " ++
+         -- Only advise a call the machine's provider declares.
+         (if (OrbCore.ManagedProvider.declaration? m.provider).any (!·.supportsExtend)
+          then "call extend_managed_machine if this provider supports it now (supports_extend in list_managed_machines), or bring results back with harvest_managed_file and push work before the deadline."
+          else "call extend_managed_machine to keep it, or bring results back with harvest_managed_file and push work before the deadline."))
         nowEpoch "unknown" none (toString minutes)
     if nowEpoch < m.expiresAtSec then continue
     -- Retry an owner notification after a crash even if cleanup already completed.

@@ -1064,7 +1064,17 @@ def runAllTests : IO UInt32 := do
       let provider := props.fieldOrNull "provider"
       assertEq s!"Catalog {role} managed provider enum"
         (provider.fieldArr? "enum") (some #[.str "boat", .str "leanci", .str "colab"])
-      assertEq s!"Catalog {role} managed provider default" (provider.fieldStr? "default") (some "boat")
+      -- The default is the instance's (`SANDBOXED_MANAGED_DEFAULT_PROVIDER`), never a schema constant.
+      assertTrue s!"Catalog {role} managed provider has no fixed default" ((provider.field? "default").isNone)
+      let spawnDesc := (spawn.fieldStr? "description").getD ""
+      for term in ["instance's default provider", "provider_fallback", "supports_extend=false", "covers the whole task"] do
+        assertTrue s!"Catalog {role} spawn description includes {term}" ((spawnDesc.splitOn term).length > 1)
+      assertTrue s!"Catalog {role} spawn description names no fixed default provider"
+        ((spawnDesc.splitOn "boat.dev, default").length == 1)
+      let some extendTool := tools.find? (·.fieldStr? "name" == some "extend_managed_machine")
+        | throw <| IO.userError s!"Missing extend_managed_machine for {role}"
+      assertTrue s!"Catalog {role} extend says some providers cannot be extended"
+        ((((extendTool.fieldStr? "description").getD "").splitOn "supports_extend=true").length > 1)
       assertTrue s!"Catalog {role} managed provider optional"
         (!((schema.fieldArr? "required").getD #[]).contains (.str "provider"))
       let size := props.fieldOrNull "size"

@@ -45,7 +45,8 @@ def catalogFields (provider : String) (capabilities : Option JVal := none) : Arr
   | some entry => #[
       ("implemented", .bool true), ("supports_snapshots", .bool entry.supportsSnapshots),
       ("supports_free_stop", .bool entry.supportsStopResume),
-      ("supports_extend", .bool entry.supportsExtend),
+      ("supports_extend", .bool (entry.supportsExtend ||
+        (provider == "leanci" && (capabilities.map leanciSupportsExtend).getD false))),
       ("readiness_deadline_secs", JVal.uint64 entry.readinessDeadlineSecs),
       ("bootstrap_mode", .str (match entry.bootstrapMode with
         | .execSystemd => "exec_systemd" | .execSupervised => "exec_supervised")),

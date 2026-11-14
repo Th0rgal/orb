@@ -109,7 +109,84 @@ private def gatewayTests (root : String) : IO Unit := do
     OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODES"
     closeCoreStore store
 
+/-- Every branch of the one provider decision, with fixed refusals. -/
+private def providerChoiceTests : IO Unit := do
+  let asked ← IO.mkRef (#[] : Array String)
+  let chooseWith (named? : Option String) (defaultProvider : String) (pinned : Bool)
+      (refusals : Array (String × String)) : IO ManagedProviderChoice := do
+    asked.set #[]
+    chooseManagedProvider named? defaultProvider pinned fun candidate => do
+      asked.modify (·.push candidate)
+      return (refusals.find? (·.1 == candidate)).map (·.2)
+  let only (provider : String) : ManagedProviderChoice := { provider := provider }
+  let full := #[("leanci", "provider_at_capacity"), ("boat", "provider_disabled")]
+  -- Named: used as given, nothing is even asked.
+  let named ← chooseWith (some "leanci") "leanci" false full
+  check (named == only "leanci" && (← asked.get).isEmpty) "a named provider is never replaced or probed"
+  let namedOther ← chooseWith (some "colab") "leanci" false #[("colab", "provider_at_capacity")]
+  check (namedOther == only "colab" && (← asked.get).isEmpty) "a named non-default provider is used as given"
+  -- Default can take it: the fallback is not consulted.
+  let onDefault ← chooseWith none "leanci" false #[("boat", "provider_disabled")]
+  check (onDefault == only "leanci" && (← asked.get) == #["leanci"]) "the default is used when it can take the request"
+  -- Default cannot, fallback can: every refusal reason moves the request and is recorded.
+  for reason in #["default_provider_at_capacity", "provider_at_capacity", "managed_provider_availability_unavailable", "provider_disabled",
+      "provider_disabled_for_user", "provider_invalid_size", "managed_provider_unavailable"] do
+    let moved ← chooseWith none "leanci" false #[("leanci", reason)]
+    check (moved == ({ provider := "boat", fallbackFrom := "leanci", fallbackReason := reason } : ManagedProviderChoice) &&
+      (← asked.get) == #["leanci", "boat"]) s!"the default's refusal {reason} falls back to boat"
+  -- Neither can: the default stays, so the caller sees the default's own error.
+  let neither ← chooseWith none "leanci" false full
+  check (neither == only "leanci" && (← asked.get) == #["leanci", "boat"]) "no fallback when boat cannot take it either"
+  -- Pinned (snapshot, fork): never moved, never probed.
+  let pinned ← chooseWith none "leanci" true #[("leanci", "provider_at_capacity")]
+  check (pinned == only "leanci" && (← asked.get).isEmpty) "a pinned request stays on the default"
+  -- Default boat: there is nothing to fall back to.
+  let boat ← chooseWith none "boat" false #[("boat", "provider_at_capacity")]
+  check (boat == only "boat" && (← asked.get).isEmpty) "a boat default has no fallback"
+  -- The result annotation exists only for a fallback.
+  let moved : ManagedProviderChoice := { provider := "boat", fallbackFrom := "leanci", fallbackReason := "provider_at_capacity" }
+  check (renderCompact (moved.annotate (.obj #[("id", .str "m")])) ==
+      "{\"id\":\"m\",\"provider_fallback\":{\"from\":\"leanci\",\"to\":\"boat\",\"reason\":\"provider_at_capacity\"}}" &&
+    renderCompact (onDefault.annotate (.obj #[("id", .str "m")])) == "{\"id\":\"m\"}")
+    "provider_fallback names from, to and reason, and is absent otherwise"
+  -- Zero-cost admission: an exhausted or lowered cap never refuses a free machine, a paid one still is.
+  let exhausted : ManagedFleetState := { enabled := true, dailyCapCents := 100, spentTodayCents := 100 }
+  let lowered : ManagedFleetState := { enabled := true, dailyCapCents := 50, spentTodayCents := 100 }
+  check (admitManagedSpawn exhausted 0 && admitManagedSpawn lowered 0 && !admitManagedSpawn exhausted 1 &&
+    !admitManagedSpawn { exhausted with enabled := false } 0 &&
+    !admitManagedSpawn { exhausted with maxConcurrent := 0 } 0 && !admitManagedSpawn exhausted 0 721)
+    "a zero-cost machine passes the daily cap but not the fleet switch, concurrency or TTL"
+  check (admitManagedSpawnMultiUser exhausted 0 500 (some 100) == 0 && admitManagedSpawnMultiUser lowered 0 0 none == 0 &&
+    admitManagedSpawnMultiUser exhausted 1 0 none == 1 &&
+    admitManagedSpawnMultiUser { exhausted with spentTodayCents := 0 } 1 100 (some 100) == 2)
+    "a zero-cost machine passes the global and the user spend cap; a paid one is still capped"
+
+/-- Who gets which admission limits. -/
+private def userAdmissionTests : IO Unit := do
+  let shape (a : Option ManagedUserAdmission) := a.map fun x => (x.capCents, x.spendCapped, x.maxMachines?, x.inferenceCents, x.computeCents)
+  check (shape (managedUserAdmissionOf "member" none 3 4 2) == some (0, false, some 2, 3, 4))
+    "a member without a spend cap still has the machine limit"
+  check (shape (managedUserAdmissionOf "member" (some 500) 3 4 2) == some (500, true, some 2, 3, 4))
+    "a capped member has both limits"
+  check (shape (managedUserAdmissionOf "admin" (some 500) 3 4 2) == some (500, true, none, 3, 4) &&
+    (managedUserAdmissionOf "admin" none 3 4 2).isNone && (managedUserAdmissionOf "" none 0 0 2).isNone)
+    "an admin and the single-tenant owner have no machine limit"
+
 def run (root : String) : IO Unit := do
+  userAdmissionTests
+  -- The instance default provider applies only when the request names none.
+  check (defaultManagedProviderOf none == "boat" && defaultManagedProviderOf (some "lean.ci") == "leanci" &&
+    defaultManagedProviderOf (some " LeanCI ") == "leanci" && defaultManagedProviderOf (some "nope") == "boat")
+    "default managed provider: unset or unknown keeps boat, lean.ci is canonicalized"
+  check ((parseAutoManagedTarget "auto-managed").toOption == some (none, none) &&
+    (parseAutoManagedTarget "auto-managed:large").toOption == some (none, some "large") &&
+    (parseAutoManagedTarget " Auto-Managed:Lean.CI ").toOption == some (some "leanci", none) &&
+    (parseAutoManagedTarget "auto-managed:boat:large").toOption == some (some "boat", some "large") &&
+    (parseAutoManagedTarget "auto-managed:").toOption.isNone &&
+    (parseAutoManagedTarget "auto-managed:nope:large").toOption.isNone &&
+    (parseAutoManagedTarget "auto-managed:boat:large:x").toOption.isNone)
+    "auto-managed keeps what the caller named: provider and size are optional"
+  providerChoiceTests
   chooserTests
   gatewayTests root
 

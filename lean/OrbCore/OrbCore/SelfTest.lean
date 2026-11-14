@@ -112,6 +112,9 @@ private def runManagedMcpProviderContractTests (root : String) : IO Unit := do
       } | throw (IO.userError "managed MCP provider contract: parent fixture failed")
     let .ok () ← saveManagedFleetConfig mc true true 100000 0 100
       | throw (IO.userError "managed MCP provider contract: fleet fixture failed")
+    -- This contract rents every size of every provider for one member: lift both holding limits.
+    OrbBin.PosixExt.setenvVar "SANDBOXED_MANAGED_LEANCI_MAX_CONCURRENT" "1000"
+    OrbBin.PosixExt.setenvVar "SANDBOXED_MANAGED_MEMBER_MAX_MACHINES" "1000"
     let fleet : ManagedFleetState := { enabled := true, boatEnabled := true }
     let cfg : ManagedProvisioning.BootstrapConfig := { coreUrl := "https://core.example", script := "#!/bin/sh\nexit 0\n" }
     let now ← coreEpochSec
@@ -220,7 +223,69 @@ private def runManagedMcpProviderContractTests (root : String) : IO Unit := do
           reusedResult.fieldStr? "mission_id" == some reassigned.ownerMission &&
           reassigned.ownerMission != child && reassigned.provider == provider && reassigned.size == size &&
           (← rented.get).size == before + 1) s!"re-opted-in {provider} must reuse the same eligible provider and size without renting"
+    -- Instance default lean.ci with fallback to boat. Each call below has exactly one
+    -- configured provider (the mock), so the other one "cannot take it".
+    OrbBin.PosixExt.setenvVar "SANDBOXED_MANAGED_DEFAULT_PROVIDER" "leanci"
+    try
+      let fallbackOf (reply : OrbBin.Json.JVal) := ((resultOf reply).field? "provider_fallback").getD .null
+      let lease : Array (String × OrbBin.Json.JVal) := #[("ttl_minutes", .nat 60)]
+      let beforeDefault := (← rented.get).size
+      let onDefault ← call "leanci" "spawn_managed_machine" (.obj lease)
+      check ((resultOf onDefault).fieldStr? "provider" == some "leanci" &&
+        ((resultOf onDefault).field? "provider_fallback").isNone &&
+        (← rented.get).size == beforeDefault + 1 && (← rented.get).back? == some ("leanci", "small"))
+        s!"an unnamed spawn uses the instance default: {OrbBin.Json.renderCompact onDefault}"
+      let moved ← call "boat" "spawn_managed_machine" (.obj lease)
+      check ((resultOf moved).fieldStr? "provider" == some "boat" &&
+        (fallbackOf moved).fieldStr? "from" == some "leanci" && (fallbackOf moved).fieldStr? "to" == some "boat" &&
+        (fallbackOf moved).fieldStr? "reason" == some "managed_provider_unavailable" &&
+        (← rented.get).size == beforeDefault + 2 && (← rented.get).back? == some ("boat", "small"))
+        s!"an unnamed spawn falls back to boat and says why: {OrbBin.Json.renderCompact moved}"
+      let started ← call "boat" "start_mission" (.obj #[("title", .str "fallback child"),
+        ("remote_node_id", .str "auto-managed:large"), ("managed_ttl_minutes", .nat 60)])
+      check ((fallbackOf started).fieldStr? "from" == some "leanci" && (fallbackOf started).fieldStr? "to" == some "boat" &&
+        (← rented.get).size == beforeDefault + 3 && (← rented.get).back? == some ("boat", "large"))
+        s!"auto-managed:<size> falls back with the same size name: {OrbBin.Json.renderCompact started}"
+      let named ← call "boat" "spawn_managed_machine" (.obj (#[("provider", OrbBin.Json.JVal.str "leanci")] ++ lease))
+      let namedStart ← call "boat" "start_mission" (.obj #[("title", .str "named child"),
+        ("remote_node_id", .str "auto-managed:leanci:small"), ("managed_ttl_minutes", .nat 60)])
+      check (((resultOf named).fieldStr? "id").isNone && ((resultOf namedStart).fieldStr? "mission_id").isNone &&
+        (← rented.get).size == beforeDefault + 3)
+        s!"a named provider is never replaced: {OrbBin.Json.renderCompact named} {OrbBin.Json.renderCompact namedStart}"
+      let unsized ← call "boat" "spawn_managed_machine" (.obj (#[("size", OrbBin.Json.JVal.str "2xlarge")] ++ lease))
+      check (((resultOf unsized).fieldStr? "id").isNone && (← rented.get).size == beforeDefault + 3)
+        s!"a size the fallback does not offer is not moved: {OrbBin.Json.renderCompact unsized}"
+      let .ok () ← setUserManagedPref mc user.id "leanci" false "fallback-opt-out"
+        | throw (IO.userError "managed MCP provider contract: fallback opt-out fixture failed")
+      let optedOut ← call "boat" "spawn_managed_machine" (.obj lease)
+      check ((resultOf optedOut).fieldStr? "provider" == some "boat" &&
+        (fallbackOf optedOut).fieldStr? "reason" == some "provider_disabled_for_user" &&
+        (← rented.get).size == beforeDefault + 4)
+        s!"a default the user has not enabled falls back to boat: {OrbBin.Json.renderCompact optedOut}"
+      -- The instance cap on lean.ci machines: unnamed moves to boat, named is refused.
+      let .ok () ← setUserManagedPref mc user.id "leanci" true "cap-opt-in"
+        | throw (IO.userError "managed MCP provider contract: cap opt-in fixture failed")
+      OrbBin.PosixExt.setenvVar "SANDBOXED_MANAGED_LEANCI_MAX_CONCURRENT" "1"
+      let capped ← call "boat" "spawn_managed_machine" (.obj lease)
+      let cappedNamed ← call "leanci" "spawn_managed_machine" (.obj (#[("provider", OrbBin.Json.JVal.str "leanci")] ++ lease))
+      let cappedOnly ← call "leanci" "spawn_managed_machine" (.obj lease)
+      let refusedBy (reply : OrbBin.Json.JVal) (code : String) :=
+        ((resultOf reply).fieldStr? "id").isNone && ((OrbBin.Json.renderCompact reply).splitOn code).length > 1
+      check ((resultOf capped).fieldStr? "provider" == some "boat" &&
+        (fallbackOf capped).fieldStr? "reason" == some "default_provider_at_capacity" &&
+        refusedBy cappedNamed "provider_concurrency_limit_reached" &&
+        refusedBy cappedOnly "provider_concurrency_limit_reached" && (← rented.get).size == beforeDefault + 5)
+        s!"at the lean.ci cap an unnamed spawn moves to boat and a named one is refused: {OrbBin.Json.renderCompact capped} {OrbBin.Json.renderCompact cappedNamed} {OrbBin.Json.renderCompact cappedOnly}"
+      -- A member holds at most the configured number of machines, whatever the provider.
+      OrbBin.PosixExt.setenvVar "SANDBOXED_MANAGED_MEMBER_MAX_MACHINES" "2"
+      let overLimit ← call "boat" "spawn_managed_machine" (.obj (#[("provider", OrbBin.Json.JVal.str "boat")] ++ lease))
+      check (refusedBy overLimit "managed_user_machine_limit_reached" && (← rented.get).size == beforeDefault + 5)
+        s!"a member over the machine limit is refused: {OrbBin.Json.renderCompact overLimit}"
+    finally
+      OrbBin.PosixExt.unsetenvVar "SANDBOXED_MANAGED_DEFAULT_PROVIDER"
   finally
+    OrbBin.PosixExt.unsetenvVar "SANDBOXED_MANAGED_LEANCI_MAX_CONCURRENT"
+    OrbBin.PosixExt.unsetenvVar "SANDBOXED_MANAGED_MEMBER_MAX_MACHINES"
     closeManagedComputeStore mc
     closeCoreStore core
 
