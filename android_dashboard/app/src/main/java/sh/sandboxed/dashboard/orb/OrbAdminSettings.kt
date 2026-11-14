@@ -52,6 +52,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -1091,6 +1092,12 @@ fun OrbProxyKeysSettingsPage(core: OrbCore, onBack: () -> Unit) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun OrbSkillsSettingsPage(core: OrbCore, onBack: () -> Unit) {
+    key(core.baseURL, core.token) { OrbSkillsSettingsContent(core, onBack) }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun OrbSkillsSettingsContent(core: OrbCore, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     var skills by remember { mutableStateOf<List<OrbRow>>(emptyList()) }
     var repoStatus by remember { mutableStateOf<OrbDict?>(null) }
@@ -1307,7 +1314,7 @@ fun OrbSkillsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                         ) {
                             Text("No Library repository configured", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                             Text(
-                                "Connect a Git repository to sync shared skills across missions and agents.",
+                                "Connect your own Git repository to save your private skills across missions and agents.",
                                 color = OrbStyle.textMuted,
                                 fontSize = 13.sp
                             )

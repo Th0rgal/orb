@@ -128,6 +128,11 @@ private def userPreferences (value : JVal) : Except String Unit := do
   rows (value.fieldOrNull "inference") "id" provider
   rows (value.fieldOrNull "managed") "id" provider
 
+/-- Shared by global and per-user Library settings; never serialize credential URLs. -/
+def libraryRemoteContainsCredentials (remote : String) : Bool :=
+  remote.contains '?' || remote.contains '#' ||
+    ((remote.splitOn "://").drop 1).any (fun rest => ((rest.splitOn "/").head!).contains '@')
+
 /-- Reject unknown fields at every depth, including future fields. Extending this
     allowlist requires deciding explicitly whether the new field is secret. -/
 def validate (value : JVal) : Except String Unit := do
@@ -140,8 +145,7 @@ def validate (value : JVal) : Except String Unit := do
     unless validLibraryRevision revision do throw "settings_invalid_library_revision"
   -- URLs with embedded credentials must never be serialized as settings.
   if let some remote := (value.fieldOrNull "global").fieldStr? "library_remote" then
-    if remote.contains '?' || remote.contains '#' ||
-        ((remote.splitOn "://").drop 1).any (fun rest => ((rest.splitOn "/").head!).contains '@') then
+    if libraryRemoteContainsCredentials remote then
       throw "settings_library_remote_contains_credentials"
   rows (value.fieldOrNull "routing_chains") "id" routingChain
   let chains := (value.fieldArr? "routing_chains").getD #[]

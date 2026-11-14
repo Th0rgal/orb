@@ -1384,4 +1384,53 @@ theorem deploy_recheck_rejects_lease_drift
     exact hne heql
   exact deployRecheckMetaGate.rejects_unsafe ⟨(g, pk, bk), (ot, et), (ol, ll), ((nw, ex), (od, ed))⟩ hbad
 
+/-! ### 12. Per-User Skill Library Scope Gate (`docs/specs/per-user-skill-library.md`) -/
+
+/-- Library reads require the same owner, or a separately verified explicit admin grant.
+    Core catalogs always select the requester; mission delivery uses the stored owner. -/
+@[inline, export orb_core_library_scope_gate]
+def orbLibraryScopeGate (sameOwner isAdminWithExplicitAccess : UInt8) : UInt8 :=
+  if sameOwner == 1 || isAdminWithExplicitAccess == 1 then 1 else 0
+
+/-- Library access is ownership or an explicit grant, never an implicit admin role.
+    ID comparison and grant verification remain in Core's trusted extraction boundary. -/
+def libraryScopeMetaGate : MetaGateSpec (UInt8 × UInt8)
+    (fun claim => claim.1 = 1 ∨ claim.2 = 1) where
+  gate claim := orbLibraryScopeGate claim.1 claim.2 == 1
+  sound claim h := by
+    by_cases same : claim.1 = 1
+    · exact Or.inl same
+    · right
+      by_cases grant : claim.2 = 1
+      · exact grant
+      · simp [orbLibraryScopeGate, same, grant] at h
+  complete claim h := by
+    rcases h with same | grant
+    · simp [orbLibraryScopeGate, same]
+    · simp [orbLibraryScopeGate, grant]
+  posWitness := (1, 0)
+  negWitness := (0, 0)
+  nonVacuous := by decide
+  tight := by decide
+
+theorem library_scope_ordinary (requester owner : String) :
+    orbLibraryScopeGate (if requester == owner then 1 else 0) 0 = 1 ↔ requester = owner := by
+  by_cases same : requester = owner
+  · simp [orbLibraryScopeGate, same]
+  · simp [orbLibraryScopeGate, same]
+
+theorem library_scope_stable (sameOwner grant : UInt8) :
+    orbLibraryScopeGate (orbLibraryScopeGate sameOwner grant) 0 =
+      orbLibraryScopeGate sameOwner grant := by
+  by_cases authorized : sameOwner == 1 || grant == 1 <;>
+    simp [orbLibraryScopeGate, authorized]
+
+theorem library_scope_no_owner_substitution (member owner : String) (different : member ≠ owner) :
+    orbLibraryScopeGate (if member == owner then 1 else 0) 0 = 0 := by
+  simp [orbLibraryScopeGate, different]
+
+theorem library_scope_explicit (sameOwner : UInt8) :
+    orbLibraryScopeGate sameOwner 1 = 1 := by
+  simp [orbLibraryScopeGate]
+
 end OrbCore.Spec
