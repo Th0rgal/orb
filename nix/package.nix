@@ -326,6 +326,13 @@ in
       dontBuild = true;
       nativeBuildInputs = lib.optionals stdenv.hostPlatform.isLinux [patchelf];
       inherit (commonAttrs) buildInputs LD_LIBRARY_PATH;
+      # Downstream overrides add `autoPatchelfHook` (omarchnix's orb-desktop does), which
+      # rewrites DT_RUNPATH after `postFixup` and drops the dlopen()ed libraries again.
+      # `runtimeDependencies` is what autoPatchelf keeps in every binary's RUNPATH.
+      runtimeDependencies = lib.optionals stdenv.hostPlatform.isLinux [
+        (lib.getLib openssl)
+        (lib.getLib sqlite)
+      ];
 
       installPhase = ''
         runHook preInstall
