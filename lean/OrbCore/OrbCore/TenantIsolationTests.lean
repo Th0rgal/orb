@@ -300,6 +300,20 @@ def run (root : String) : IO Unit := do
     let sharedMemory ← call sharedToken "memory_get_knowledge_tree"
     check ((sharedMemory.fieldOrNull "error").fieldStr? "message" == some "Administrator required")
       "shared admin mission does not grant its owner's personal memory"
+    -- Rows the owner stored under a legacy token subject move to the administrator once that
+    -- token is verified; a subject that names a real user is never adopted.
+    sql store.projectsDb "INSERT INTO mcp_sessions_v1(id,owner,mission_id,expires_at,revoked,subject_kind) VALUES('legacy-alias-session','legacy-prod','',9999999999,0,'external_session');"
+    sql store.projectsDb "INSERT INTO mcp_sessions_v1(id,owner,mission_id,expires_at,revoked,subject_kind) VALUES('member-owned-session','member','',9999999999,0,'external_session');"
+    adoptLegacyOwnerAlias store "legacy-prod" "admin"
+    adoptLegacyOwnerAlias store "member" "admin"
+    adoptLegacyOwnerAlias store "" "admin"
+    let ownerOf (sid : String) : IO String := do
+      let .ok rows ← execParamQuery store.projectsDb "SELECT owner FROM mcp_sessions_v1 WHERE id=?1;" #[sid]
+        | throw (IO.userError "legacy alias lookup")
+      pure ((rows[1]?.bind (·[0]?)).getD "?")
+    check ((← ownerOf "legacy-alias-session") == "admin") "a verified legacy subject's sessions become the administrator's"
+    check ((← ownerOf "member-owned-session") == "member") "a real user's sessions are never adopted"
+    sql store.projectsDb "DELETE FROM mcp_sessions_v1 WHERE id IN ('legacy-alias-session','member-owned-session');"
     let ownProject ← call member "get_project" (.obj #[("project", .str "member-project")])
     check (ownProject.fieldBool? "ok" == some true) "member retains own project access"
     sql store.projectsDb "INSERT INTO project_bindings(slug,control_session_id) VALUES('admin-project','admin-session');"

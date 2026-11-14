@@ -3683,6 +3683,31 @@ def userIsServerOwner (st : CoreStore) (userId : String) : IO Bool := do
   if userId.isEmpty then return (← getBootstrapAdmin? st).isNone
   return ((← getUserById? st userId).map (fun u => !u.disabled && u.role == "admin")).getD false
 
+/-- The single-tenant owner used to authenticate with a signed legacy token whose subject
+    (for example `prod`) was stored as the owner of the sessions, missions and workspaces it
+    created. Once an administrator record exists that same token resolves to the administrator, but
+    the stored rows still name the old subject, so the owner's own sessions stopped being the
+    owner's (vault and personal memory answered "Administrator required"). Called only after such
+    a token has been verified: rows stored under its subject move to the administrator. A subject
+    that is, or ever names, a real user is never touched. -/
+def adoptLegacyOwnerAlias (st : CoreStore) (legacySubject adminId : String) : IO Unit := do
+  let subj := legacySubject.trimAscii.toString
+  if subj.isEmpty || adminId.isEmpty || subj == adminId then return
+  if (← getUserById? st subj).isSome then return
+  discard <| execParamQuery st.projectsDb
+    "CREATE INDEX IF NOT EXISTS idx_mcp_sessions_v1_owner ON mcp_sessions_v1(owner);" #[]
+  match ← execParamQuery st.projectsDb "SELECT 1 FROM mcp_sessions_v1 WHERE owner=?1 LIMIT 1;" #[subj] with
+  | .ok rows =>
+    if rows.size > 1 then
+      discard <| execParamQuery st.projectsDb "UPDATE mcp_sessions_v1 SET owner=?2 WHERE owner=?1;" #[subj, adminId]
+  | .error _ => pure ()
+  match ← execParamQuery st.missionsDb "SELECT 1 FROM missions WHERE owner_user_id=?1 LIMIT 1;" #[subj] with
+  | .ok rows =>
+    if rows.size > 1 then
+      discard <| execParamQuery st.missionsDb "UPDATE missions SET owner_user_id=?2 WHERE owner_user_id=?1;" #[subj, adminId]
+      discard <| execParamQuery st.missionsDb "UPDATE workspaces SET owner_user_id=?2 WHERE owner_user_id=?1;" #[subj, adminId]
+  | .error _ => pure ()
+
 def getUserSpentTodayCents (st : CoreStore) (userId utcDay : String) : IO (UInt64 × UInt64) := do
   if userId.isEmpty then return (0, 0)
   match ← execParamQuery st.missionsDb
