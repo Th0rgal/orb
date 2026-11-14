@@ -366,3 +366,19 @@ export function executionPhaseLabel(
   }
   return "Working";
 }
+
+const SETTLED_TURN_STATUSES = new Set(["completed", "failed", "not_feasible", "cancelled", "canceled", "interrupted", "acknowledged"]);
+
+/**
+ * Whether a pending turn row ("Starting <Harness> on <node>…" / Working) may
+ * still show. A terminal mission has no pending turn unless this client has a
+ * send of its own still in flight (handoff, optimistic draft, local outbox):
+ * a stale queue receipt, a cached snapshot or an old handover never keeps it.
+ * (A newer assistant message already turns the row into "Working" via
+ * `executionPhaseLabel`'s `activity`.)
+ */
+export function pendingTurnAllowed(status: string | null | undefined, opts: { sendInFlight: boolean }): boolean {
+  if (opts.sendInFlight) return true;
+  if (SETTLED_TURN_STATUSES.has((status ?? "").toLowerCase())) return false;
+  return true;
+}

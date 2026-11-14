@@ -932,7 +932,7 @@ private def popNextQueuedFollowup?
     (store : CoreStore)
     (missionId : String)
     (runGen : UInt64)
-    (nowIso : String) : IO (Option String) := do
+    (nowIso : String) : IO (Option (String × String)) := do
   let qRows ← execParamQuery store.missionsDb
     ("SELECT user_id, message_id, COALESCE(payload,'') FROM remote_message_queue " ++
      "WHERE mission_id=?1 AND state='waiting' AND COALESCE(phase,0)=0 ORDER BY rowid ASC LIMIT 1;")
@@ -947,11 +947,11 @@ private def popNextQueuedFollowup?
   | .ok (.ok item) =>
     discard <| stepQueueItem store uid msgId 1 s!"{runGen}" s!"{store.bootEpoch}" "1" nowIso
     if !item.content.trimAscii.toString.isEmpty then
-      return some item.content
+      return some (msgId, item.content)
     match OrbBin.Json.parse rawPl with
     | .ok jv =>
       let c := ((jv.field? "message").bind (·.fieldStr? "content")).orElse (fun _ => jv.fieldStr? "content") |>.getD ""
-      return (if c.trimAscii.toString.isEmpty then none else some c)
+      return (if c.trimAscii.toString.isEmpty then none else some (msgId, c))
     | .error _ => return none
   | _ => return none
 
@@ -1162,10 +1162,12 @@ partial def spawnRemoteJobPoller
                 if jState == "cancelled" then pure none
                 else popNextQueuedFollowup? store missionId curRunGen nowIso
               match nextQueued?, mRec? with
-              | some nextPrompt, some mr =>
+              | some (nextMsgId, nextPrompt), some mr =>
                 releasePolledJob sup jobId
+                -- Carry the queue message id: clients retire the queued card of this exact
+                -- message when its delivered `user_message` (same `id`) lands in the transcript.
                 emitMissionEventAndBroadcast store broadcastHub? missionId "user_message"
-                  (renderCompact (.obj #[("type", .str "user_message"), ("content", .str nextPrompt), ("source", .str "queue")])) nowIso
+                  (renderCompact (.obj #[("type", .str "user_message"), ("id", .str nextMsgId), ("content", .str nextPrompt), ("source", .str "queue")])) nowIso
                 let followSpec : RemoteTurnSpec := {
                   missionId        := missionId
                   targetNodeId     := effNodeId

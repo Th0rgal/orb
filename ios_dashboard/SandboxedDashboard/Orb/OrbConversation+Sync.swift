@@ -827,9 +827,13 @@ extension OrbConversation {
         withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) { followUps = followUps.hide(message) }
         do { _ = try await api.call("/api/control/queue/\(OrbCore.escape(message))", method: "DELETE"); await refresh(force: true) }
         catch let e as OrbHTTPError where e.status == 404 { await refresh(force: true) }
+        // Core already sent it (`already_delivered` / `already_claimed`): the row is gone; refresh silently.
+        catch let e as OrbHTTPError where e.status == 409 && e.detail.range(of: "already_delivered|already_claimed|queue_admit:[123]:5", options: .regularExpression) != nil {
+            await refresh(force: true)
+        }
         catch {
             followUps = followUps.unhide(message)
-            self.error = error.localizedDescription
+            self.error = "Couldn't remove the queued message. Try again."
         }
     }
 

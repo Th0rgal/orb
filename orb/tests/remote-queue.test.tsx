@@ -450,7 +450,7 @@ it('treats DELETE 404 as gone only when the body says "message not in queue" and
   await screen.findByText('2 Queued');
 
   await fireEvent.click(screen.getByRole('button', { name: 'Remove queued message: Route missing' }));
-  expect((await screen.findByRole('alert')).textContent).toContain('not_found');
+  expect((await screen.findByRole('alert')).textContent).toContain("Couldn't remove the queued message");
   expect(screen.getByText('Route missing')).toBeTruthy();
   expect(cancel).not.toHaveBeenCalledWith('route-404');
   expect(remove).not.toHaveBeenCalledWith('route-404');
@@ -503,4 +503,50 @@ it('on a terminal mission labels listed rows as not delivered and sends via dele
   ]));
   expect(cancel).toHaveBeenCalledWith('q1');
   expect(cancel).toHaveBeenCalledWith('q2');
+});
+
+// Mission 734c3bb7 (prod, 2026-11-14): a follow-up was queued (transcript receipt
+// `queued: true`, id f2723171), Core delivered it (phase 2) but the delivered
+// `user_message` carried no id, so the receipt never retired. The card stayed for
+// 27 h and Remove answered `409 queue_admit:2:5`.
+it('drops a transcript receipt once Core\'s live queue no longer lists it, and drops a delivered card silently', async () => {
+  let inbox: { id: string; mission_id: string; content: string; source: string }[] = [];
+  let release: (() => void) | undefined;
+  backend.list.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve([]); }))
+    .mockImplementation(async () => inbox.map(row => ({ ...row })));
+  const rows = vi.fn();
+  render(() => <RemoteQueue mission="remote" confirmed={[{ id: 'f2723171', content: 'Operator (Thomas): verify' }]} onRows={rows} onCancel={() => {}}/>);
+  // Receipt bridges the gap while the first poll is in flight…
+  expect(screen.getByText('Operator (Thomas): verify')).toBeTruthy();
+  release?.();
+  // …and a poll started after the receipt was seen, settling without it, retires it.
+  await waitFor(() => expect(screen.queryByText('Operator (Thomas): verify')).toBeNull(), { timeout: 4000 });
+  expect(screen.queryByRole('alert')).toBeNull();
+});
+
+it('removing an already delivered message drops the card without an error or raw JSON', async () => {
+  const { ApiError } = await import('../src/api');
+  backend.list.mockResolvedValue([{ id: 'done', mission_id: 'remote', content: 'Delivered already', source: 'remote-queue' }]);
+  backend.api.mockRejectedValue(new (ApiError as unknown as new (s: number, d: string) => Error)(409, '{"error":"already_delivered"}'));
+  const cancel = vi.fn();
+  render(() => <RemoteQueue mission="remote" onRows={() => {}} onCancel={cancel}/>);
+  await screen.findByText('Delivered already');
+  backend.list.mockResolvedValue([]);
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove queued message: Delivered already' }));
+  await waitFor(() => expect(backend.api).toHaveBeenCalledWith('/api/control/queue/done', { method: 'DELETE' }));
+  await new Promise(r => setTimeout(r, 20));
+  expect(screen.queryByText('Delivered already')).toBeNull();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(document.body.textContent).not.toMatch(/already_delivered|queue_admit/);
+});
+
+it('a failed remove shows a plain message, never the raw JSON body', async () => {
+  const { ApiError } = await import('../src/api');
+  backend.list.mockResolvedValue([{ id: 'x', mission_id: 'remote', content: 'Keep me', source: 'remote-queue' }]);
+  backend.api.mockRejectedValue(new (ApiError as unknown as new (s: number, d: string) => Error)(500, '{"error":"queue_step_failed"}'));
+  render(() => <RemoteQueue mission="remote" onRows={() => {}} onCancel={() => {}}/>);
+  await screen.findByText('Keep me');
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove queued message: Keep me' }));
+  await screen.findByRole('alert');
+  expect(document.body.textContent).not.toMatch(/queue_step_failed|\{"error"/);
 });
