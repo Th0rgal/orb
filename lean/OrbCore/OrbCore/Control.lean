@@ -654,6 +654,32 @@ def confineWorkingDirectory (baseDir rawDir : String) : IO (Except String String
 private def providerSlugOf (s : String) : String :=
   String.ofList (s.toLower.toList.filter (·.isAlphanum))
 
+/-- Canonical spelling of a chain entry's provider: a custom provider is named by the slug of its
+    name (`surplusintelligence`), whatever the editor sent (`custom:<id>`, its id, another casing);
+    a built-in provider type is lower-cased. Unknown providers are kept as written. -/
+private def canonicalChainProviderId (providers : Array AIProviderRecord) (provId : String) : String :=
+  let raw := provId.trimAscii.toString
+  let stripped := if raw.startsWith "custom:" then (raw.drop 7).toString else raw
+  let slug := providerSlugOf stripped
+  match providers.find? (fun p => p.providerType == "custom" &&
+      (p.id == stripped || (!slug.isEmpty && providerSlugOf p.name == slug))) with
+  | some p => let s := providerSlugOf p.name; if s.isEmpty then s!"custom:{p.id}" else s
+  | none =>
+    if raw.startsWith "custom:" then raw
+    else match providers.find? (fun p => p.providerType != "custom" && p.providerType.toLower == raw.toLower) with
+      | some p => p.providerType
+      | none => raw
+
+/-- Rewrite every entry's `provider_id` to its canonical spelling before a chain is stored. -/
+private def canonicalizeChainEntriesJson (providers : Array AIProviderRecord) (entriesJson : String) : String :=
+  match OrbBin.Json.parse entriesJson with
+  | .ok (.arr es) =>
+    renderCompact (.arr (es.map fun e =>
+      match e.fieldStr? "provider_id" with
+      | some pid => e.setField "provider_id" (.str (canonicalChainProviderId providers pid))
+      | none => e))
+  | _ => entriesJson
+
 private def matchProviderForChainTarget? (providers : Array AIProviderRecord) (acctId provId : String) : Option AIProviderRecord :=
   let stripped := if provId.startsWith "custom:" then (provId.drop 7).toString else provId
   let slug := providerSlugOf stripped
@@ -5048,10 +5074,13 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let existing? := (← loadChainRows).find? (fun c => c.fieldStr? "id" == some cid)
       let .ok storedRows ← execParamQuery st.store.missionsDb "SELECT models_json FROM model_routing_chains WHERE id=?1;" #[cid]
         | return .ok (mkJson 500 "{\"error\":\"routing_chain_store_unavailable\"}")
+      -- Entries are stored under one spelling per provider, whatever the editor sent.
+      let chainProviders ← listAIProviders st.store
       -- A partial update keeps every field it does not name (the desktop's
       -- "set default" sends only `is_default`).
       let modelsJson? := match (jv.field? "entries").orElse (fun _ => jv.field? "models") with
-        | some arr@(.arr _) => some (OrbCore.ProxyModelRouting.keepStoredEntrySettings (renderCompact arr)
+        | some arr@(.arr _) => some (OrbCore.ProxyModelRouting.keepStoredEntrySettings
+            (canonicalizeChainEntriesJson chainProviders (renderCompact arr))
             ((storedRows[1]?.bind (·[0]?)).getD "[]"))
         | _ => (jv.fieldStr? "models_json").orElse fun _ =>
             (storedRows[1]?.bind (·[0]?)).orElse fun _ =>

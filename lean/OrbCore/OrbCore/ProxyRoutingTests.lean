@@ -864,6 +864,19 @@ def run : IO Unit := do
         r.fieldStr? "id" != some "smart" && r.fieldStr? "id" != some "builtin%2Fsmart") &&
       (afterBuiltin.asArr?.getD #[]).size == rows.size)
       "saving a built-in chain creates no stray chain"
+    -- Saved entries use one spelling per provider: a custom provider by the slug of its name,
+    -- a built-in type in lower case; unknown ids are kept.
+    let .ok () ← upsertAIProvider store {
+      id := "prov-canon-1", providerType := "custom", name := "Surplus Intelligence",
+      enabled := true, apiKey := "sk-canon-fixture"
+    } | throw (IO.userError "canonical provider fixture")
+    let (canonSt, canon) ← api "POST" "/api/model-routing/chains"
+      "{\"id\":\"canon\",\"name\":\"Canon\",\"entries\":[{\"provider_id\":\"custom:prov-canon-1\",\"model_id\":\"m1\"},{\"provider_id\":\"prov-canon-1\",\"model_id\":\"m2\"},{\"provider_id\":\"Surplus-Intelligence\",\"model_id\":\"m3\"},{\"provider_id\":\"no-such-provider\",\"model_id\":\"m4\"}]}"
+    check (canonSt == 201 && ((canon.fieldArr? "entries").getD #[]).map (·.fieldStr? "provider_id") ==
+        #[some "surplusintelligence", some "surplusintelligence", some "surplusintelligence", some "no-such-provider"])
+      s!"saved entries carry the canonical provider id: {canonSt} {renderCompact canon}"
+    discard <| api "DELETE" "/api/model-routing/chains/canon" ""
+    discard <| execParamQuery store.missionsDb "DELETE FROM ai_providers WHERE id='prov-canon-1';" #[]
     -- The desktop's "set default" sends only `is_default`; entries and name survive.
     let (putSt, updated) ← api "PUT" "/api/model-routing/chains/contract" "{\"is_default\":true}"
     check (putSt == 200 && conforms updated && updated.fieldBool? "is_default" == some true &&
