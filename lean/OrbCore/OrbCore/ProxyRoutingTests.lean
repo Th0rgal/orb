@@ -348,27 +348,36 @@ def runStreamingPumpContracts : IO Unit := do
   expect admittedAfter "pacing concurrency slot is released once the stream body is relayed"
 
   -- Streamed idle-timeout budget across attempts and post-head stream idle behavior:
-  -- (a) Fake upstream accepts and never answers, two targets in the chain: client gets
-  --     504 {"error":"upstream_idle_timeout"} with X-Orb-Exhaustion-Class: upstream_idle_timeout
-  --     within the cross-attempt budget plus a small margin, and the attempt count is reported.
+  -- (a) Fake upstream accepts and never answers, three targets in the chain (idleMs 200,
+  --     preHeadBudgetMs 350): client gets 504 {"error":"upstream_idle_timeout"} with
+  --     X-Orb-Exhaustion-Class: upstream_idle_timeout, attemptsUsed == 2, and the fake
+  --     upstream accepted exactly 2 connections (the third target is never tried).
   let .ok (hangLfd, hangPort) ← tcpListen "127.0.0.1" 0 8
     | throw (IO.userError "proxy streaming idle-budget: listen failed")
   let hangAccepted ← IO.mkRef (0 : Nat)
+  let hangRunning ← IO.mkRef true
   let hangTask ← IO.asTask (prio := .dedicated) do
-    for _ in [0:2] do
-      if let .ok ufd ← tcpAcceptPoll hangLfd 10000 then
+    while (← hangRunning.get) && (← hangAccepted.get) < 3 do
+      if let .ok ufd ← tcpAcceptPoll hangLfd 50 then
         hangAccepted.modify (· + 1)
         discard <| IO.asTask (prio := .dedicated) do
           discard <| pollReadable ufd 2000
           discard <| readStreamChunk ufd 65536
           IO.sleep 3000
           discard <| closeFd ufd
+    while (← hangAccepted.get) < 3 do
+      match ← tcpAcceptPoll hangLfd 20 with
+      | .ok ufd =>
+        hangAccepted.modify (· + 1)
+        discard <| closeFd ufd
+      | .error _ => break
     discard <| closeFd hangLfd
   let hangChain : RoutingChain := {
     id := "hang-chain", name := "hang-chain",
     targets := #[
       { accountId := "h1", provider := "openai", baseUrl := s!"http://127.0.0.1:{hangPort}", apiKey := "k1", modelId := "m1" },
-      { accountId := "h2", provider := "anthropic", baseUrl := s!"http://127.0.0.1:{hangPort}", apiKey := "k2", modelId := "m2" }
+      { accountId := "h2", provider := "anthropic", baseUrl := s!"http://127.0.0.1:{hangPort}", apiKey := "k2", modelId := "m2" },
+      { accountId := "h3", provider := "google", baseUrl := s!"http://127.0.0.1:{hangPort}", apiKey := "k3", modelId := "m3" }
     ]
   }
   let idleRoot := s!"/tmp/orb-stream-idle-{← newUuidV4}"
@@ -413,19 +422,21 @@ def runStreamingPumpContracts : IO Unit := do
       discard <| closeFd cfd
     let hangElapsed := (← IO.monoMsNow) - tHang0
     let _ := cHangSrv.get
+    hangRunning.set false
     let _ := hangTask.get
     let .ok hangParsed := OrbNetLeaf.TlsHttp.parseHttpResponseWire hangClientWire 65536 true "POST"
       | throw (IO.userError s!"proxy streaming idle-budget: client wire parse failed: {String.fromUTF8? hangClientWire}")
     let hangBodyStr := (String.fromUTF8? hangParsed.body).getD ""
     let exhHdr := lookupHeader? hangParsed.headers "x-orb-exhaustion-class"
     let attHdr := lookupHeader? hangParsed.headers "x-orb-attempts-used"
+    let acceptedCount ← hangAccepted.get
     expect (hangParsed.status == 504) s!"(a) expected 504 on pre-head idle budget exhaustion, got {hangParsed.status}"
     expect (hangBodyStr == "{\"error\":\"upstream_idle_timeout\"}")
       s!"(a) expected exact upstream_idle_timeout body, got {hangBodyStr}"
     expect (exhHdr == some "upstream_idle_timeout")
       s!"(a) expected X-Orb-Exhaustion-Class: upstream_idle_timeout, got {exhHdr}"
-    expect (attHdr == some "2" && (← hangAccepted.get) == 2)
-      s!"(a) expected 2 attempts reported across chain within budget, got header={attHdr} accepted={← hangAccepted.get}"
+    expect (attHdr == some "2" && acceptedCount == 2)
+      s!"(a) expected 2 attempts (third target never tried) across 3-target chain within budget, got header={attHdr} accepted={acceptedCount}"
     expect (hangElapsed ≥ 300 && hangElapsed < 10000)
       s!"(a) expected completion within 350ms budget .. 10000ms bound, took {hangElapsed}ms"
     if let .ok rows ← execParamQuery idleStore.missionsDb
