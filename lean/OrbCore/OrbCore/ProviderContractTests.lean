@@ -441,8 +441,13 @@ private def sidecarParkedHealthContract
        row1a.fieldStr? "parked_reason" != some "credential_quota" ||
        row1a.fieldStr? "parked_source" != some "sidecar" then
       failures := failures.push s!"sidecar parked (a): expected parked_until/parked_reason/parked_source on {oauthOnly}, got {renderCompact row1a}"
-    if (row1a.field? "cooldown_remaining_secs").isSome then
-      failures := failures.push "sidecar parked (a): must keep cooldown_secs_remaining as the only cooldown field"
+    if row1a.fieldUInt64? "cooldown_remaining_secs" != some 471600 ||
+       row1a.fieldUInt64? "cooldown_remaining_secs" != row1a.fieldUInt64? "cooldown_secs_remaining" then
+      failures := failures.push s!"sidecar parked (a): expected cooldown_remaining_secs equal to cooldown_secs_remaining=471600, got {renderCompact row1a}"
+    if row1a.fieldStr? "provider_id" != some "anthropic" ||
+       row1a.fieldBool? "is_healthy" != some false ||
+       row1a.fieldBool? "is_degraded" != some true then
+      failures := failures.push s!"sidecar parked (a): expected provider_id=anthropic, is_healthy=false, is_degraded=true on parked row, got {renderCompact row1a}"
     if (raw1a.splitOn "claude-secret-file.json").length > 1 ||
        (raw1a.splitOn "owner-secret@fixture.invalid").length > 1 ||
        (raw1a.splitOn "ag-secret@fixture.invalid").length > 1 then
@@ -469,6 +474,10 @@ private def sidecarParkedHealthContract
     let rows1c := (← getJson app jwt "/api/model-routing/health" now).asArr?.getD #[]
     let row1c := (rows1c.find? (fun v => v.fieldStr? "account_id" == some oauthOnly)).getD .null
     if (row1c.fieldUInt64? "cooldown_secs_remaining").getD 0 != 0 ||
+       row1c.fieldUInt64? "cooldown_remaining_secs" != some 0 ||
+       row1c.fieldStr? "provider_id" != some "anthropic" ||
+       row1c.fieldBool? "is_healthy" != some true ||
+       row1c.fieldBool? "is_degraded" != some false ||
        (row1c.field? "parked_until") != some .null ||
        (row1c.field? "parked_reason") != some .null ||
        (row1c.field? "parked_source") != some .null then
@@ -651,6 +660,263 @@ private def sidecarParkedHealthContract
     | none => unsetenvVar "CLI_PROXY_MANAGEMENT_KEY"
   return failures
 
+/-- Contract test for `GET /api/ai/proxy/health`: verifies the additive client-read
+    fields (`since`, `groups`, `chains`, and `totals.{ok,retried,errors,ttft_p50_ms,ttft_p95_ms,latency_p50_ms,latency_p95_ms}`,
+    with `fell_back` omitted because Core never writes `fallback_depth`) alongside existing keys. -/
+private def proxyHealthClientShapeContract (app : CoreAppState) (store : CoreStore) (jwt : String)
+    (now : UInt64) : IO (Array String) := do
+  let mut failures : Array String := #[]
+  let wallNow ← nowEpoch
+  let tsRecent := formatEpochIso8601Utc (wallNow - 60)
+  discard <| execParamQuery store.missionsDb "DELETE FROM proxy_outcomes;" #[]
+  discard <| execParamQuery store.missionsDb
+    ("INSERT INTO proxy_outcomes(timestamp,chain_id,provider,account_id,model,status,http_status,retries,ttft_ms,total_ms,fallback_depth,stream,superseded) VALUES" ++
+     "(?1,'builtin/smart','anthropic','10000000-0000-4000-8000-000000000001','claude-sonnet-4-5','ok',200,0,110,450,0,1,0)," ++
+     "(?1,'builtin/smart','anthropic','10000000-0000-4000-8000-000000000001','claude-sonnet-4-5','error',502,2,0,900,1,1,0);")
+    #[tsRecent]
+  try
+    let h24 ← getJson app jwt "/api/ai/proxy/health?window=24h" now
+    if h24.field? "since" != h24.field? "window_start" || (h24.fieldStr? "since").isNone then
+      failures := failures.push s!"proxy/health: expected since == window_start (non-null for 24h), got {renderCompact h24}"
+    let hAll ← getJson app jwt "/api/ai/proxy/health?window=all" now
+    if hAll.field? "since" != some .null || hAll.field? "window_start" != some .null then
+      failures := failures.push s!"proxy/health: expected since == null for window=all, got {renderCompact hAll}"
+    let tot := h24.fieldOrNull "totals"
+    let byStatusOk := (tot.fieldOrNull "by_status").fieldNat? "ok"
+    if tot.fieldNat? "requests" != some 2 ||
+       tot.fieldNat? "succeeded" != some 1 ||
+       tot.fieldNat? "failed" != some 1 ||
+       tot.fieldNat? "ok" != byStatusOk ||
+       tot.fieldNat? "ok" != some 1 then
+      failures := failures.push s!"proxy/health: totals.ok must equal by_status.ok (1) and requests=2, got {renderCompact tot}"
+    if tot.fieldNat? "retried" != some 1 ||
+       tot.fieldNat? "retried_requests" != some 1 ||
+       tot.fieldNat? "total_retries" != some 2 ||
+       (tot.field? "fell_back").isSome then
+      failures := failures.push s!"proxy/health: totals.retried must be 1 (retried_requests=1, total_retries=2) and fell_back omitted, got {renderCompact tot}"
+    if tot.field? "success_rate" != some (.num "0.500000") && tot.field? "success_rate" != some (.num "0.5") then
+      failures := failures.push s!"proxy/health: totals.success_rate must be 0.5 for 1 ok of 2 requests, got {renderCompact tot}"
+    let ttftP50 := (tot.fieldOrNull "ttft_ms").field? "p50"
+    let ttftP95 := (tot.fieldOrNull "ttft_ms").field? "p95"
+    let totalP50 := (tot.fieldOrNull "total_ms").field? "p50"
+    let totalP95 := (tot.fieldOrNull "total_ms").field? "p95"
+    if tot.field? "ttft_p50_ms" != ttftP50 ||
+       tot.field? "ttft_p95_ms" != ttftP95 ||
+       tot.field? "latency_p50_ms" != totalP50 ||
+       tot.field? "latency_p95_ms" != totalP95 then
+      failures := failures.push s!"proxy/health: totals ttft/latency p50/p95 must match ttft_ms/total_ms p50/p95, got {renderCompact tot}"
+    if (tot.fieldOrNull "errors").asObj?.isNone ||
+       (tot.fieldOrNull "errors").fieldNat? "server_error:502" != some 1 then
+      failures := failures.push s!"proxy/health: totals.errors must map server_error:502 -> 1, got {renderCompact tot}"
+    let some groups := h24.fieldArr? "groups"
+      | failures := failures.push s!"proxy/health: expected groups array, got {renderCompact h24}"; return failures
+    let some chains := h24.fieldArr? "chains"
+      | failures := failures.push s!"proxy/health: expected chains array, got {renderCompact h24}"; return failures
+    if groups.size != 1 then
+      failures := failures.push s!"proxy/health: expected 1 group row from proxy_outcomes, got {groups.size}: {renderCompact (.arr groups)}"
+    else
+      let g := groups[0]!
+      if g.fieldStr? "provider" != some "anthropic" ||
+         g.fieldStr? "model" != some "claude-sonnet-4-5" ||
+         g.fieldStr? "account_id" != some "10000000-0000-4000-8000-000000000001" ||
+         g.fieldNat? "requests" != some 2 ||
+         g.fieldNat? "ok" != some 1 ||
+         g.fieldNat? "retried" != some 1 ||
+         (g.field? "fell_back").isSome ||
+         (g.fieldArr? "flags").isNone ||
+         (g.fieldOrNull "errors").fieldNat? "server_error:502" != some 1 then
+        failures := failures.push s!"proxy/health: group row missing client ReliabilityGroup fields or wrong retried/errors, got {renderCompact g}"
+    if chains.size != 1 then
+      failures := failures.push s!"proxy/health: expected 1 chain row from proxy_outcomes, got {chains.size}: {renderCompact (.arr chains)}"
+    else
+      let c := chains[0]!
+      if c.fieldStr? "chain_id" != some "builtin/smart" ||
+         c.fieldNat? "requests" != some 2 ||
+         c.fieldNat? "ok" != some 1 ||
+         c.fieldNat? "retried" != some 1 ||
+         (c.field? "fell_back").isSome ||
+         (c.fieldOrNull "errors").fieldNat? "server_error:502" != some 1 then
+        failures := failures.push s!"proxy/health: chain row missing client ChainReliability fields or wrong retried/errors, got {renderCompact c}"
+  finally
+    discard <| execParamQuery store.missionsDb "DELETE FROM proxy_outcomes;" #[]
+  return failures
+
+/-- Contract test for `GET /api/ai/usage/summary`: verifies additive client-read fields
+    (`since`, `by_route`, `by_root_mission`, `by_hour`, `by_mission`, flattened `UsageTotals`
+    field `requests` on `totals`/`today`/`this_week` and every group/day/hour row,
+    `model`/`provider`/`source` on `by_model`, and `by_day` populated even when `compact=true`,
+    while unsettled pricing fields `cost_cents`, `unknown_cost_requests`, and `cost_status`
+    remain absent). -/
+private def usageSummaryClientShapeContract (app : CoreAppState) (store : CoreStore) (jwt : String)
+    (now : UInt64) : IO (Array String) := do
+  let mut failures : Array String := #[]
+  let wallNow ← nowEpoch
+  let tsRecentSec := if wallNow % 86400 == 0 then wallNow else wallNow - 1
+  let tsRecent := formatEpochIso8601Utc tsRecentSec
+  let ts20d := formatEpochIso8601Utc (wallNow - 20 * 86400)
+  let dayPrefix := (tsRecent.take 10).toString
+  let day20dPrefix := (ts20d.take 10).toString
+  let hourPrefix := (tsRecent.take 13).toString
+  discard <| execParamQuery store.missionsDb "DELETE FROM proxy_usage;" #[]
+  discard <| execParamQuery store.missionsDb
+    "DELETE FROM missions WHERE id IN ('m-usage-1','m-usage-sub-1','m-usage-sub-2','m-usage-2','m-usage-2-sub','m-usage-3');" #[]
+  discard <| execParamQuery store.missionsDb
+    ("INSERT INTO missions(id,parent_mission_id) VALUES" ++
+     "('m-usage-1',NULL),('m-usage-sub-1','m-usage-1'),('m-usage-sub-2','m-usage-sub-1')," ++
+     "('m-usage-2',NULL),('m-usage-2-sub','m-usage-2')," ++
+     "('m-usage-3',NULL);") #[]
+  discard <| execParamQuery store.missionsDb
+    ("INSERT INTO proxy_usage(timestamp,model,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,cost_cents,provider,account_id,api_key_id,api_key_name,mission_id,caller_kind,purpose,reasoning_tokens,account_bound) VALUES" ++
+     "(?1,'claude-sonnet-4-5',25,15,10,20,15,'anthropic','10000000-0000-4000-8000-000000000001',NULL,'remote-launch:m-usage-1','m-usage-1','mission','turn',5,1)," ++
+     "(?1,'claude-sonnet-4-5',95,65,0,10,8,'anthropic','10000000-0000-4000-8000-000000000001',NULL,'remote-launch:m-usage-sub-1','m-usage-sub-1','subagent','turn',0,1)," ++
+     "(?1,'claude-sonnet-4-5',85,55,0,5,3,'anthropic','10000000-0000-4000-8000-000000000001',NULL,'remote-launch:m-usage-sub-2','m-usage-sub-2','subagent','turn',0,1)," ++
+     "(?1,'claude-sonnet-4-5',100,65,0,0,10,'anthropic','10000000-0000-4000-8000-000000000001',NULL,'remote-launch:m-usage-2','m-usage-2','mission','turn',0,1)," ++
+     "(?1,'claude-sonnet-4-5',100,75,0,0,6,'anthropic','10000000-0000-4000-8000-000000000001',NULL,'remote-launch:m-usage-2-sub','m-usage-2-sub','subagent','turn',0,1)," ++
+     "(?1,'claude-sonnet-4-5',130,50,0,0,9,'anthropic','10000000-0000-4000-8000-000000000001',NULL,'remote-launch:m-usage-3','m-usage-3','mission','turn',0,1)," ++
+     "(?1,'claude-sonnet-4-5',100,80,0,0,4,'anthropic','10000000-0000-4000-8000-000000000001',NULL,'',NULL,'api','turn',0,1);")
+    #[tsRecent]
+  try
+    let s24 ← getJson app jwt "/api/ai/usage/summary?window=24h" now
+    let rendered24 := renderCompact s24
+    if (rendered24.splitOn "remote-launch:").length > 1 then
+      failures := failures.push s!"usage/summary: reply leaked execution key remote-launch:, got {rendered24}"
+    if s24.field? "since" != s24.field? "window_start" || (s24.fieldStr? "since").isNone then
+      failures := failures.push s!"usage/summary: expected since == window_start (non-null for 24h), got {rendered24}"
+    if (s24.field? "cost_status").isSome then
+      failures := failures.push s!"usage/summary: cost_status must remain absent, got {rendered24}"
+    if s24.fieldArr? "by_api_key" != some #[] ||
+       (s24.fieldOrNull "filters_available").fieldArr? "api_keys" != some #[] then
+      failures := failures.push s!"usage/summary: by_api_key and filters_available.api_keys must be empty, got {rendered24}"
+    let sAll ← getJson app jwt "/api/ai/usage/summary?window=all" now
+    if sAll.field? "since" != some .null || sAll.field? "window_start" != some .null then
+      failures := failures.push s!"usage/summary: expected since == null for window=all, got {renderCompact sAll}"
+    for tKey in #["totals", "today", "this_week"] do
+      let t := s24.fieldOrNull tKey
+      if t.fieldNat? "requests" != t.fieldNat? "events" ||
+         t.fieldNat? "requests" != some 7 ||
+         t.fieldNat? "recorded_cost_cents" != some 55 ||
+         (t.field? "cost_cents").isSome ||
+         (t.field? "unknown_cost_requests").isSome then
+        failures := failures.push s!"usage/summary: {tKey} expected requests==events==7 and absent cost_cents/unknown_cost_requests, got {renderCompact t}"
+    let some bySource := s24.fieldArr? "by_source"
+      | failures := failures.push s!"usage/summary: expected by_source array, got {rendered24}"; return failures
+    if bySource.size != 1 ||
+       bySource[0]!.fieldStr? "key" != some "router" ||
+       bySource[0]!.fieldStr? "label" != some "Router" ||
+       bySource[0]!.fieldNat? "requests" != some 7 then
+      failures := failures.push s!"usage/summary: expected single by_source row (router, requests=7), got {renderCompact (.arr bySource)}"
+    let some byModel := s24.fieldArr? "by_model"
+      | failures := failures.push s!"usage/summary: expected by_model array, got {rendered24}"; return failures
+    if byModel.size != 1 then
+      failures := failures.push s!"usage/summary: expected 1 by_model row, got {renderCompact (.arr byModel)}"
+    else
+      let m := byModel[0]!
+      if m.fieldStr? "model" != some "claude-sonnet-4-5" ||
+         m.fieldStr? "provider" != some "anthropic" ||
+         m.fieldStr? "source" != some "router" ||
+         m.fieldNat? "requests" != some 7 ||
+         (m.field? "cost_cents").isSome ||
+         (m.field? "unknown_cost_requests").isSome ||
+         (m.field? "cost_status").isSome then
+        failures := failures.push s!"usage/summary: by_model[0] unexpected ModelUsage fields, got {renderCompact m}"
+    for gKey in #["by_provider", "by_source", "by_route", "by_caller_kind", "by_purpose", "by_mission", "by_root_mission", "by_account"] do
+      let some arr := s24.fieldArr? gKey
+        | failures := failures.push s!"usage/summary: expected {gKey} array, got {rendered24}"
+      if arr.isEmpty then
+        failures := failures.push s!"usage/summary: expected non-empty {gKey} for seeded proxy_usage row"
+      else
+        for g in arr do
+          if g.fieldNat? "requests" != g.fieldNat? "events" ||
+             (g.field? "cost_cents").isSome ||
+             (g.field? "unknown_cost_requests").isSome ||
+             (g.field? "cost_status").isSome then
+            failures := failures.push s!"usage/summary: {gKey} row unexpected UsageTotals fields, got {renderCompact g}"
+    let some byMission := s24.fieldArr? "by_mission"
+      | failures := failures.push s!"usage/summary: expected by_mission array, got {rendered24}"; return failures
+    if byMission.size != 7 ||
+       !(byMission.any (fun g => g.field? "key" == some .null && g.field? "label" == some .null && g.fieldNat? "requests" == some 1)) ||
+       !(byMission.any (fun g => g.fieldStr? "key" == some "m-usage-1" && g.fieldNat? "requests" == some 1)) ||
+       !(byMission.any (fun g => g.fieldStr? "key" == some "m-usage-sub-1" && g.fieldNat? "requests" == some 1)) ||
+       !(byMission.any (fun g => g.fieldStr? "key" == some "m-usage-sub-2" && g.fieldNat? "requests" == some 1)) then
+      failures := failures.push s!"usage/summary: by_mission expected 7 buckets including m-usage-1, m-usage-sub-1, m-usage-sub-2, and null, got {renderCompact (.arr byMission)}"
+    let some byRootMission := s24.fieldArr? "by_root_mission"
+      | failures := failures.push s!"usage/summary: expected by_root_mission array, got {rendered24}"; return failures
+    let rootM1 := (byRootMission.find? (fun g => g.fieldStr? "key" == some "m-usage-1")).getD .null
+    if rootM1.fieldStr? "key" != some "m-usage-1" ||
+       rootM1.fieldStr? "label" != some "m-usage-1" ||
+       rootM1.fieldNat? "requests" != some 3 ||
+       rootM1.fieldNat? "input_tokens" != some 205 then
+      failures := failures.push s!"usage/summary (a): root row m-usage-1 must have key == label == m-usage-1 (requests=3, input=205) even when child bucket is larger than parent, got {renderCompact rootM1}"
+    let rootTotals : Array Nat := byRootMission.map (fun g => (g.fieldNat? "input_tokens").getD 0 + (g.fieldNat? "output_tokens").getD 0)
+    let mut nonIncreasing := true
+    for idx in [1:rootTotals.size] do
+      if rootTotals[idx]! > rootTotals[idx - 1]! then
+        nonIncreasing := false
+    let sTop2 ← getJson app jwt "/api/ai/usage/summary?window=24h&top_limit=2" now
+    let rootTop2 := (sTop2.fieldArr? "by_root_mission").getD #[]
+    let top2Totals : Array Nat := rootTop2.map (fun g => (g.fieldNat? "input_tokens").getD 0 + (g.fieldNat? "output_tokens").getD 0)
+    if byRootMission.size != 4 || !nonIncreasing || top2Totals != #[340, 340] ||
+       !(byRootMission.any (fun g => g.field? "key" == some .null && g.fieldNat? "requests" == some 1)) then
+      failures := failures.push s!"usage/summary (b): by_root_mission must be in non-increasing input+output order (got totals={rootTotals}) and top_limit=2 must return the two largest [340, 340] (got {top2Totals}): {renderCompact (.arr byRootMission)}"
+    let some byDay := s24.fieldArr? "by_day"
+      | failures := failures.push s!"usage/summary: expected by_day array, got {rendered24}"; return failures
+    if byDay.size != 1 then
+      failures := failures.push s!"usage/summary: expected 1 by_day row, got {renderCompact (.arr byDay)}"
+    else
+      let d := byDay[0]!
+      if d.fieldStr? "day" != some dayPrefix ||
+         d.fieldNat? "requests" != some 7 ||
+         d.fieldNat? "router_requests" != some 7 ||
+         (d.field? "cost_cents").isSome ||
+         (d.field? "unknown_cost_requests").isSome ||
+         (d.fieldOrNull "by_caller_kind").fieldNat? "mission" != some 3 ||
+         (d.fieldOrNull "by_caller_kind").fieldNat? "subagent" != some 3 ||
+         (d.fieldOrNull "by_caller_kind").fieldNat? "api" != some 1 ||
+         (d.fieldOrNull "totals").fieldNat? "requests" != some 7 then
+        failures := failures.push s!"usage/summary: by_day[0] unexpected DayUsage fields, got {renderCompact d}"
+    let some byHour := s24.fieldArr? "by_hour"
+      | failures := failures.push s!"usage/summary: expected by_hour array, got {rendered24}"; return failures
+    if byHour.size != 1 then
+      failures := failures.push s!"usage/summary: expected 1 by_hour row, got {renderCompact (.arr byHour)}"
+    else
+      let h := byHour[0]!
+      if h.fieldStr? "hour" != some hourPrefix ||
+         h.fieldNat? "requests" != some 7 ||
+         h.fieldNat? "router_requests" != some 7 ||
+         (h.field? "cost_cents").isSome ||
+         (h.field? "unknown_cost_requests").isSome ||
+         (h.fieldOrNull "by_caller_kind").fieldNat? "mission" != some 3 then
+        failures := failures.push s!"usage/summary: by_hour[0] unexpected HourUsage fields, got {renderCompact h}"
+    -- Mobile compact query (`compact=true&top_limit=5`) reads `by_day` and `by_mission[].requests`
+    let sCompact ← getJson app jwt "/api/ai/usage/summary?window=7d&compact=true&top_limit=5" now
+    let some cDays := sCompact.fieldArr? "by_day"
+      | failures := failures.push s!"usage/summary compact: expected by_day array, got {renderCompact sCompact}"; return failures
+    let some cMissions := sCompact.fieldArr? "by_mission"
+      | failures := failures.push s!"usage/summary compact: expected by_mission array, got {renderCompact sCompact}"; return failures
+    if cDays.size != 1 || cDays[0]!.fieldNat? "requests" != some 7 ||
+       cMissions.size != 5 then
+      failures := failures.push s!"usage/summary compact: expected populated by_day and by_mission with requests, got {renderCompact sCompact}"
+    -- Window > 14 days (`window=30d`) must include days older than 14 days even when 15 newer days exist
+    for dIdx in [1:16] do
+      let tsMid := formatEpochIso8601Utc (wallNow - dIdx.toUInt64 * 86400)
+      discard <| execParamQuery store.missionsDb
+        ("INSERT INTO proxy_usage(timestamp,model,input_tokens,output_tokens,cost_cents,provider,account_id,mission_id,caller_kind,purpose) " ++
+         "VALUES(?1,'claude-sonnet-4-5',10,10,1,'anthropic','10000000-0000-4000-8000-000000000001','m-usage-1','mission','turn');")
+        #[tsMid]
+    discard <| execParamQuery store.missionsDb
+      ("INSERT INTO proxy_usage(timestamp,model,input_tokens,output_tokens,cost_cents,provider,account_id,mission_id,caller_kind,purpose) " ++
+       "VALUES(?1,'claude-sonnet-4-5',10,10,1,'anthropic','10000000-0000-4000-8000-000000000001','m-usage-1','mission','turn');")
+      #[ts20d]
+    let s30d ← getJson app jwt "/api/ai/usage/summary?window=30d" now
+    let days30 := (s30d.fieldArr? "by_day").getD #[]
+    if !(days30.any (fun d => d.fieldStr? "day" == some day20dPrefix)) then
+      failures := failures.push s!"usage/summary: window=30d by_day missing 20-day-old row ({day20dPrefix}), got {days30.size} days: {renderCompact (.arr days30)}"
+  finally
+    discard <| execParamQuery store.missionsDb "DELETE FROM proxy_usage;" #[]
+    discard <| execParamQuery store.missionsDb
+      "DELETE FROM missions WHERE id IN ('m-usage-1','m-usage-sub-1','m-usage-sub-2','m-usage-2','m-usage-2-sub','m-usage-3','m-usage-4');" #[]
+  return failures
+
 /-- Replay the production renderers and HTTP dispatch, never a live usage fetch. -/
 def run : IO Unit := do
   let fixtureRaw ← IO.FS.readFile "shared/orb-spec/fixtures/provider-response-contract.json"
@@ -773,6 +1039,8 @@ def run : IO Unit := do
       failures := failures ++ (← antigravityReconnectClearsPerModelKeys hub store root cooldownsRef)
       failures := failures ++ (← healthCooldownOwners app jwt cooldownsRef)
       failures := failures ++ (← sidecarParkedHealthContract app root jwt cooldownsRef)
+      failures := failures ++ (← proxyHealthClientShapeContract app store jwt now)
+      failures := failures ++ (← usageSummaryClientShapeContract app store jwt now)
       if !failures.isEmpty then
         throw (IO.userError ("provider response contract failures:\n" ++ String.intercalate "\n" failures.toList))
     finally
