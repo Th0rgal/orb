@@ -761,7 +761,7 @@ def run (root : String) : IO Unit := do
       | none => OrbBin.PosixExt.unsetenvVar "CLI_PROXY_MANAGEMENT_KEY"
     -- Delete `iso-claude-oauth` from SQLite so subsequent checks see the two baseline active providers.
     sql store.missionsDb "DELETE FROM ai_providers WHERE id='iso-claude-oauth';" #[]
-    memberSharedProviderRules send member admin stWithProviders store provNameMarker
+    memberSharedProviderRules (fun m t b body app => send m t b body app) member admin stWithProviders store provNameMarker
     -- Sibling provider/AI/model-routing GET routes must not leak admin provider names,
     -- disabled admin provider rows, discovery labels, or global proxy usage/outcome rows to members,
     -- while returning 200 reduced views to members and leaving admin/legacy-unscoped responses unchanged.
