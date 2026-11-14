@@ -118,9 +118,13 @@ def sendRequest
     let reqWire ← match buildOutboundHttp11Request method parsed.hostHeader parsed.pathQuery headers body with
       | .ok w => pure w
       | .error e => return .error e
-    let fd ← match (← LeanSys.Posix.tcpConnect parsed.connectHost parsed.port) with
+    let connectTimeoutMs : UInt32 := if timeoutMs > 0 && timeoutMs < 10000 then timeoutMs else 10000
+    let fd ← match (← OrbNetLeaf.TlsHttp.tcpConnectTimed parsed.connectHost parsed.port connectTimeoutMs) with
       | .ok f => pure f
-      | .error e => return .error s!"HTTP connect failed to {parsed.connectHost}:{parsed.port}: {e}"
+      | .error .eagain =>
+        return .error s!"HTTP connect timed out after {connectTimeoutMs}ms to {parsed.connectHost}:{parsed.port}"
+      | .error e =>
+        return .error s!"HTTP connect failed to {parsed.connectHost}:{parsed.port}: {e}"
     try
       match (← LeanSys.Posix.writeAll fd reqWire) with
       | .error e =>

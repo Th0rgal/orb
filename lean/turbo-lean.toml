@@ -260,6 +260,7 @@ allow = [
   "OrbNetLeaf.TlsHttp=OrbNetLeaf.TlsHttp.rawTlsClose=orb_net_leaf_tls_close",
   "OrbNetLeaf.TlsHttp=OrbNetLeaf.TlsHttp.rawUdpRoundtrip=orb_net_leaf_udp_roundtrip",
   "OrbNetLeaf.TlsHttp=OrbNetLeaf.TlsHttp.rawTouchExcl0600=orb_net_leaf_touch_excl_0600",
+  "OrbNetLeaf.TlsHttp=OrbNetLeaf.TlsHttp.rawTcpConnect=orb_net_leaf_tcp_connect",
   "OrbNode.Posix=OrbNode.Posix.installSignals=orb_node_install_signals",
   "OrbNode.Posix=OrbNode.Posix.pollSignals=orb_node_poll_signals",
   "OrbNode.Posix=OrbNode.Posix.geteuid=orb_node_geteuid",
