@@ -25,6 +25,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -36,17 +37,29 @@ jobs:
     name: Plan
     runs-on: ubuntu-latest
     outputs:
+      tree_hash: ${{ steps.plan.outputs.tree_hash }}
+      verification: ${{ steps.plan.outputs.verification }}
       run: ${{ steps.plan.outputs.run_wf_kernel_abi }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - id: hashes
+        run: python3 scripts/ci_plan.py --hashes-only --github-output "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v5
+        if: github.event_name == 'push'
+        with:
+          path: .ci/verified.json
+          key: kernel-abi-verified-tree-${{ steps.hashes.outputs.tree_hash }}
       - id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 scripts/ci_plan.py \
             --event "${{ github.event_name }}" --ref "${{ github.ref }}" \
             --base "${{ github.event.pull_request.base.sha || github.event.before }}" \
-            --head "${{ github.sha }}" --github-output "$GITHUB_OUTPUT"
+            --head "${{ github.sha }}" --workflow kernel-abi --receipt .ci/verified.json \
+            --github-output "$GITHUB_OUTPUT"
 
   kernel-abi:
     needs: plan
@@ -376,3 +389,33 @@ jobs:
           name: kernel-spec-audit
           path: audit-results/
           if-no-files-found: ignore
+
+  kernel-ok:
+    name: Kernel ABI OK
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [plan, kernel-abi]
+    steps:
+      - env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          test "${{ needs.plan.result }}" = success
+          if echo "$RESULTS" | grep -qE '"(failure|cancelled)"'; then exit 1; fi
+      - uses: actions/checkout@v6
+      - name: Record Kernel ABI verification separately from CI OK
+        env:
+          CI_PLAN: ${{ needs.plan.outputs.verification }}
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_plan.py --workflow kernel-abi --write-receipt .ci/verified.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-abi-verification
+          overwrite: true
+          path: .ci/verified.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/cache/save@v5
+        with:
+          path: .ci/verified.json
+          key: kernel-abi-verified-tree-${{ needs.plan.outputs.tree_hash }}

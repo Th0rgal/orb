@@ -28,6 +28,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 # Cancel in-progress runs only on PR pushes — pushes to master and the
 # scheduled cron share the same `ref` group, so blanket
@@ -43,12 +44,18 @@ env:
 
 jobs:
   # Selects the jobs this change needs from ci/domains.toml. Unknown paths,
-  # CI changes, master pushes and the nightly select everything.
+  # CI changes, unverified master pushes and the nightly select everything.
   plan:
     name: Plan
     runs-on: ubuntu-latest
     if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
     outputs:
+      tree_hash: ${{ steps.plan.outputs.tree_hash }}
+      orb_build_hash: ${{ steps.plan.outputs.orb_build_hash }}
+      dist_run_id: ${{ steps.plan.outputs.dist_run_id }}
+      desktop_build_hash: ${{ steps.plan.outputs.desktop_build_hash }}
+      desktop_run_id: ${{ steps.plan.outputs.desktop_run_id }}
+      verification: ${{ steps.plan.outputs.verification }}
       run_test: ${{ steps.plan.outputs.run_test }}
       run_harness_contract: ${{ steps.plan.outputs.run_harness_contract }}
       run_capability_matrix: ${{ steps.plan.outputs.run_capability_matrix }}
@@ -63,12 +70,21 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - id: hashes
+        run: python3 scripts/ci_plan.py --hashes-only --github-output "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v5
+        if: github.event_name == 'push'
+        with:
+          path: .ci/verified.json
+          key: ci-verified-tree-${{ steps.hashes.outputs.tree_hash }}
       - id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 scripts/ci_plan.py \
             --event "${{ github.event_name }}" --ref "${{ github.ref }}" \
             --base "${{ github.event.pull_request.base.sha || github.event.before }}" \
-            --head "${{ github.sha }}" \
+            --head "${{ github.sha }}" --receipt .ci/verified.json \
             --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
 
   test:
@@ -182,10 +198,64 @@ jobs:
         run: |
           python3 -m unittest discover -v -s scripts -p 'test_*.py'
 
+  orb-build:
+    name: Orb build
+    runs-on: ubuntu-24.04
+    needs: plan
+    if: (needs.plan.outputs.run_orb_unit == 'true' || needs.plan.outputs.run_orb_browser == 'true' || needs.plan.outputs.run_orb_performance == 'true' || needs.plan.outputs.dist_run_id != '') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
+    defaults:
+      run:
+        working-directory: orb
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: orb/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: orb/pnpm-lock.yaml
+      - uses: actions/cache@v5
+        id: modules
+        with:
+          path: orb/node_modules
+          key: orb-modules-v1-${{ runner.os }}-${{ runner.arch }}-ubuntu24-node22-${{ hashFiles('orb/package.json', 'orb/pnpm-lock.yaml') }}
+      - if: steps.modules.outputs.cache-hit != 'true'
+        run: pnpm install --frozen-lockfile
+      - uses: actions/cache@v5
+        id: dist
+        with:
+          path: orb/dist
+          key: orb-dist-v1-${{ runner.os }}-${{ runner.arch }}-node22-${{ needs.plan.outputs.orb_build_hash }}
+      # PR cache scopes are invisible to master. Promote the proven build via
+      # its run artifact, then actions/cache saves it in the master scope.
+      - uses: actions/download-artifact@v4
+        id: promoted-dist
+        continue-on-error: true
+        if: steps.dist.outputs.cache-hit != 'true' && needs.plan.outputs.dist_run_id != ''
+        with:
+          name: orb-dist
+          path: orb/dist
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.plan.outputs.dist_run_id }}
+      - if: steps.dist.outputs.cache-hit != 'true' && (needs.plan.outputs.dist_run_id == '' || steps.promoted-dist.outcome == 'failure')
+        env:
+          ORB_BUILD_ID: ${{ needs.plan.outputs.orb_build_hash }}
+        run: pnpm build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orb-dist
+          overwrite: true
+          path: orb/dist
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
   orb-unit:
     name: Orb unit
-    runs-on: ubuntu-latest
-    needs: plan
+    runs-on: ubuntu-24.04
+    needs: [plan, orb-build]
     if: (needs.plan.outputs.run_orb_unit == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
     defaults:
       run:
@@ -200,21 +270,33 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: orb/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
+      - uses: actions/cache@v5
+        id: modules
+        with:
+          path: orb/node_modules
+          key: orb-modules-v1-${{ runner.os }}-${{ runner.arch }}-ubuntu24-node22-${{ hashFiles('orb/package.json', 'orb/pnpm-lock.yaml') }}
+      - if: steps.modules.outputs.cache-hit != 'true'
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: orb-dist
+          path: orb/dist
       - run: node --test scripts/check-bundle.test.mjs
       - run: pnpm check:bundle
       - run: pnpm test
 
   orb-browser:
-    name: Orb browser (${{ matrix.shard }}/2)
+    name: Orb browser (${{ matrix.shard }}/8)
     runs-on: ubuntu-24.04
-    needs: plan
+    # Version matches @playwright/test in orb/pnpm-lock.yaml. Contains browser
+    # binaries, OS libraries and fonts; no per-shard apt update/install.
+    container: mcr.microsoft.com/playwright:v1.55.0-noble
+    needs: [plan, orb-build]
     if: (needs.plan.outputs.run_orb_browser == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     defaults:
       run:
         working-directory: orb
@@ -228,29 +310,28 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: orb/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
-      - name: Cache Playwright browsers
-        uses: actions/cache@v5
+      - uses: actions/cache@v5
+        id: modules
         with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-orb-playwright-${{ hashFiles('orb/pnpm-lock.yaml') }}
-      # Downloads only on a cache miss; always installs the apt deps.
-      - run: |
-          ../scripts/ci_harden_ubuntu_apt.sh
-          pnpm exec playwright install --with-deps chromium webkit
-      - run: pnpm test:browser --shard=${{ matrix.shard }}/2
+          path: orb/node_modules
+          key: orb-modules-v1-${{ runner.os }}-${{ runner.arch }}-ubuntu24-node22-${{ hashFiles('orb/package.json', 'orb/pnpm-lock.yaml') }}
+      - if: steps.modules.outputs.cache-hit != 'true'
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: orb-dist
+          path: orb/dist
+      - run: pnpm test:browser --shard=${{ matrix.shard }}/8
       - name: Shared kernel startup and browser adapters
         if: matrix.shard == 1
         env:
           ORB_KERNEL_BROWSERS: chromium,webkit
         run: pnpm exec playwright test --config=playwright.kernel.config.ts
       - name: Shared kernel production startup and bundle projections
-        if: matrix.shard == 1
+        if: matrix.shard == 2
         env:
           ORB_KERNEL_BROWSERS: chromium,webkit
-        run: |
-          pnpm build
-          ORB_KERNEL_PREVIEW=1 pnpm exec playwright test --config=playwright.kernel.config.ts
+        run: ORB_KERNEL_PREVIEW=1 pnpm exec playwright test --config=playwright.kernel.config.ts
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -262,9 +343,14 @@ jobs:
   orb-performance:
     name: Orb performance
     runs-on: ubuntu-24.04
-    needs: plan
+    # Version matches @playwright/test in orb/pnpm-lock.yaml. Contains browser
+    # binaries, OS libraries and fonts; no per-shard apt update/install.
+    container: mcr.microsoft.com/playwright:v1.55.0-noble
+    needs: [plan, orb-build]
     if: (needs.plan.outputs.run_orb_performance == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
     continue-on-error: ${{ github.event_name == 'pull_request' }}
+    outputs:
+      verified: ${{ steps.performance.outcome == 'success' }}
     defaults:
       run:
         working-directory: orb
@@ -278,17 +364,21 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: orb/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
-      - name: Cache Playwright browsers
-        uses: actions/cache@v5
+      - uses: actions/cache@v5
+        id: modules
         with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-orb-playwright-${{ hashFiles('orb/pnpm-lock.yaml') }}
-      # Downloads only on a cache miss; always installs the apt deps.
-      - run: |
-          ../scripts/ci_harden_ubuntu_apt.sh
-          pnpm exec playwright install --with-deps chromium webkit
-      - run: pnpm exec playwright test -c playwright.performance.config.ts
+          path: orb/node_modules
+          key: orb-modules-v1-${{ runner.os }}-${{ runner.arch }}-ubuntu24-node22-${{ hashFiles('orb/package.json', 'orb/pnpm-lock.yaml') }}
+      - if: steps.modules.outputs.cache-hit != 'true'
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: orb-dist
+          path: orb/dist
+      - id: performance
+        env:
+          ORB_PERF_PREVIEW: "1"
+        run: pnpm exec playwright test -c playwright.performance.config.ts
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -300,22 +390,61 @@ jobs:
     name: Orb Desktop Shell (Lean + C)
     runs-on: ubuntu-24.04
     needs: plan
-    if: (needs.plan.outputs.run_orb_desktop_shell == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
+    if: (needs.plan.outputs.run_orb_desktop_shell == 'true' || needs.plan.outputs.desktop_run_id != '') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
     steps:
       - uses: actions/checkout@v6
+      # Shell-only edits do not change these two Lean binaries. Reuse their
+      # exact inputs, but always compile/test the shell and replay wakeup tests.
+      - uses: actions/cache@v5
+        id: desktop-bins
+        with:
+          path: |
+            target/debug/orb-locald
+            target/debug/sandboxed-mcp
+          key: desktop-bins-v1-${{ runner.os }}-${{ runner.arch }}-ubuntu24-${{ needs.plan.outputs.desktop_build_hash }}
+      - uses: actions/download-artifact@v4
+        id: promoted-desktop
+        continue-on-error: true
+        if: steps.desktop-bins.outputs.cache-hit != 'true' && needs.plan.outputs.desktop_run_id != ''
+        with:
+          name: desktop-bins
+          path: .ci/desktop
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.plan.outputs.desktop_run_id }}
+      - if: steps.promoted-desktop.outcome == 'success'
+        run: tar -xf .ci/desktop/bins.tar
       - name: Install WebKitGTK and Lean build deps
+        if: needs.plan.outputs.run_orb_desktop_shell == 'true' || (steps.desktop-bins.outputs.cache-hit != 'true' && steps.promoted-desktop.outcome != 'success')
         run: |
           ./scripts/ci_harden_ubuntu_apt.sh
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
             libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libssl-dev libsqlite3-dev zstd
-      - name: Build orb-locald + sandboxed-mcp and run Linux shell & wakeup MCP tests
+      - name: Build orb-locald + sandboxed-mcp
+        if: steps.desktop-bins.outputs.cache-hit != 'true' && steps.promoted-desktop.outcome != 'success'
+        run: ./scripts/build_orb_bins.sh --ensure-lean --out-dir target/debug --only orb-locald --only sandboxed-mcp
+      - name: Run Linux shell & wakeup MCP tests
+        if: needs.plan.outputs.run_orb_desktop_shell == 'true'
         run: |
           set -euo pipefail
-          ./scripts/build_orb_bins.sh --ensure-lean --out-dir target/debug --only orb-locald --only sandboxed-mcp
+          test -x target/debug/orb-locald
+          test -x target/debug/sandboxed-mcp
           make -C linux_shell clean
           make -C linux_shell test
           python3 -m unittest -v orb/tests/wakeup_mcp_test.py
+
+      # Tar preserves executable modes when promoted across run artifacts.
+      - run: |
+          mkdir -p .ci/desktop
+          tar -cf .ci/desktop/bins.tar target/debug/orb-locald target/debug/sandboxed-mcp
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-bins
+          overwrite: true
+          path: .ci/desktop/bins.tar
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
 
   orb-macos-shell:
     name: Orb macOS Shell & Signer (Swift)
@@ -419,11 +548,31 @@ jobs:
   ci-ok:
     name: CI OK
     runs-on: ubuntu-latest
-    if: always()
-    needs: [plan, test, fmt, harness-contract, capability-matrix, policy-lint, orb-unit, orb-browser, orb-performance, orb-desktop-shell, orb-macos-shell, docker]
+    if: always() && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule')
+    needs: [plan, test, fmt, harness-contract, capability-matrix, policy-lint, orb-build, orb-unit, orb-browser, orb-performance, orb-desktop-shell, orb-macos-shell, docker]
     steps:
       - env:
           RESULTS: ${{ toJSON(needs.*.result) }}
         run: |
           echo "$RESULTS"
+          test "${{ needs.plan.result }}" = success
           if echo "$RESULTS" | grep -qE '"(failure|cancelled)"'; then exit 1; fi
+      - uses: actions/checkout@v6
+      - name: Record checks verified on the actual checkout tree
+        env:
+          CI_PLAN: ${{ needs.plan.outputs.verification }}
+          CI_NEEDS: ${{ toJSON(needs) }}
+          PERFORMANCE_VERIFIED: ${{ needs.orb-performance.outputs.verified }}
+        run: python3 scripts/ci_plan.py --write-receipt .ci/verified.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-verification
+          overwrite: true
+          path: .ci/verified.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/cache/save@v5
+        with:
+          path: .ci/verified.json
+          key: ci-verified-tree-${{ needs.plan.outputs.tree_hash }}
