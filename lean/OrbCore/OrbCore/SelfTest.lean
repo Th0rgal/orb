@@ -4881,13 +4881,13 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
 
   -- 3. Placement confinement (`member` blocked from Core & colocated/admin-only nodes; allowed on `ashur`, `auto-managed`, and staged `/api/uploads`)
   let aliceTildeTok := String.intercalate "~" (aliceTok.splitOn ":")
-  let wsTildeHdrs := #[("Sec-WebSocket-Protocol", s!"orb-sync-v1, jwt.{aliceTildeTok}")]
+  let wsTildeHdrs := #[("Sec-WebSocket-Protocol", s!"orb-sync.v1, jwt.{aliceTildeTok}")]
   let wsExtractedTok := extractWsJwtSubproto? wsTildeHdrs
   let wsEchoProto := negotiateWsSubprotocol? wsTildeHdrs
   let v2TildeClaims := verifySessionTokenV2 app.cfg.jwtSecret aliceTildeTok nowSec
   let v2TamperedClaims := verifySessionTokenV2 app.cfg.jwtSecret (aliceTildeTok ++ "x") nowSec
   let (meTildeSt, meTildeBody, _) ← sendReq "GET" "/api/auth/me" aliceTildeTok ""
-  if wsExtractedTok != some aliceTok || wsEchoProto != some "orb-sync-v1" ||
+  if wsExtractedTok != some aliceTok || wsEchoProto != some "orb-sync.v1" ||
      v2TildeClaims.map (·.1) != some aliceId || v2TamperedClaims.isSome ||
      meTildeSt != 200 || (meTildeBody.splitOn "\"username\":\"alice\"").length < 2 then
     return (← fail s!"tilde-delimited orb-jwt-v2 normalization failed: ws={reprStr wsExtractedTok} echo={reprStr wsEchoProto} claims={reprStr v2TildeClaims} tampered={reprStr v2TamperedClaims} me={meTildeSt}:{meTildeBody}")

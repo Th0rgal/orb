@@ -1467,7 +1467,7 @@ private def isWsUpgradePath (cleanPath rawTarget : String) : Bool :=
   cleanPath == "/api/desktop/stream" ||
   (matchRoutePattern? "/api/workspaces/:id/shell" rawTarget).isSome
 
-private def negotiateWsSubprotocol? (hdrs : Array (String × String)) : Option String :=
+def negotiateWsSubprotocol? (hdrs : Array (String × String)) : Option String :=
   match lookupHeaderCI hdrs "sec-websocket-protocol" with
   | none => none
   | some raw =>
