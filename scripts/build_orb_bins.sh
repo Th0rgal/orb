@@ -286,7 +286,7 @@ if [[ ${#ORB_DESKTOP_TARGETS[@]} -gt 0 ]]; then
       fi
     fi
     RAYON_NUM_THREADS="${ORB_TURBO_LEAN_JOBS:-2}" TURBO_LEAN_EMIT_C=1 \
-      turbo-lean --max-memory-mb "${ORB_TURBO_LEAN_MAX_MB:-6144}" build "${ORB_DESKTOP_TARGETS[@]}"
+      turbo-lean --max-memory-mb "${ORB_TURBO_LEAN_MAX_MB:-6144}" build "${ORB_DESKTOP_TARGETS[@]}" LeanUISpec
   )
 fi
 

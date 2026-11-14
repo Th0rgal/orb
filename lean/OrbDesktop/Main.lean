@@ -27,9 +27,9 @@ Wayland + Vulkan 1.3 + HarfBuzz/FreeType runtime (`LeanUI.Runtime`) to support:
   for every single screen variant.
 - `--headless-golden <out_path_or_dir>` with optional `--screen <id>`, `--dark`/`--light`, `--scale120 <120|240>`:
   renders a single screen PNG (or all 36 if `<out_path_or_dir>` has no `.png` suffix and `--screen` is omitted).
-- `--bench <iterations>`: executes a deterministic layout + scene + rasterize + quiescent-skip
-  benchmark loop and prints JSON metrics (`cold_ms`, `frame_p50_ms`, `frame_p99_ms`,
-  `quiescent_skips`, `work_units`, `error_count`).
+- `--bench <iterations>`: renders full frames at `--width`/`--height` through `Runtime.stepFrame`
+  and prints JSON metrics (`cold_ms`, `frame_p50_ms`, `frame_p99_ms`, `frames_rendered`,
+  `quiescent_skips`, `work_units`, `error_count`, `width`, `height`, `first_frame_crc32`).
 -/
 namespace OrbDesktop
 
@@ -120,6 +120,37 @@ def shapeDesktopRuns (ac : Text.GlyphAtlasCache) (font : Text.FontHandle)
   else
     return (ac, [overlaySynthRun style text])
 
+/-- Recursively shape any synthetic `.text` runs in `WidgetNode` into real HarfBuzz/FreeType
+glyph runs so every label, badge, table cell, composer text, modal, and toast renders with `Inter`. -/
+partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font : Text.FontHandle) (scale120 : Nat)
+    (node : WidgetNode) : IO (Text.GlyphAtlasCache × WidgetNode) := do
+  match node with
+  | .mk wid focusable hitTestable style payload children =>
+    let mut curAc := ac
+    let newPayload ←
+      match payload with
+      | .text lineHeightSub runs =>
+        let mut shapedRuns : List InlineRun := []
+        for r in runs do
+          let isSynth := !r.glyphs.isEmpty && r.glyphs.all (fun g => g.sizePx.1 == 0 && g.sizePx.2 == 0)
+          if isSynth then
+            let txt := String.ofList (r.glyphs.map (fun g => Char.ofNat g.glyphId))
+            let (ac', rs) ← shapeDesktopRuns curAc font scale120 r.style txt
+            curAc := ac'
+            let rsAdjusted := rs.map (fun sr =>
+              { sr with allowBreakAfter := r.allowBreakAfter, hardBreakAfter := r.hardBreakAfter })
+            shapedRuns := shapedRuns ++ rsAdjusted
+          else
+            shapedRuns := shapedRuns ++ [r]
+        pure (WidgetPayload.text lineHeightSub shapedRuns)
+      | other => pure other
+    let mut shapedChildren : List WidgetNode := []
+    for c in children do
+      let (ac', c') ← shapeWidgetTree curAc font scale120 c
+      curAc := ac'
+      shapedChildren := shapedChildren ++ [c']
+    return (curAc, .mk wid focusable hitTestable style newPayload shapedChildren)
+
 /-- Render one frame of `DesktopState` via `OrbDesktop.buildDesktopScreen`, `Layout.layoutNode`,
 `Scene.buildSceneFromLayout`, and HarfBuzz/FreeType glyph shaping (`shapeDesktopRuns` + `Text.layoutTextRun`). -/
 def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) :
@@ -131,7 +162,7 @@ def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) :
   let (availW, availH) := rt.wayland.logicalSubSize
 
   let (ac1, hdrRuns) ←
-    shapeDesktopRuns rt.atlas rt.primaryFont sc (Theme.headingText theme)
+    shapeDesktopRuns rt.atlas rt.primaryFont sc (chromeTitleStyle theme)
       st.screen.headerTitle
   let (ac2, codeRuns) ←
     shapeDesktopRuns ac1 rt.primaryFont sc (Theme.bodyText theme)
@@ -152,42 +183,24 @@ def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) :
     diffAddRuns := addRuns
   }
 
-  let widgetRoot := buildDesktopScreen st availW availH shapedRuns
+  let widgetRootRaw := buildDesktopScreen st availW availH shapedRuns
+  let (ac5, widgetRoot) ← shapeWidgetTree ac4 rt.primaryFont sc widgetRootRaw
   let layoutRoot := widgetRoot.toLayoutNode
   let rootBox := layoutNode sc rt.focus.owner pal.focusRing 0 0 availW availH layoutRoot
   let sceneOut := buildSceneFromLayout sc rt.focus theme widgetRoot rootBox
-  let _tabOrder := sceneOut.focusableOrder
+  if st.screen == .searchDialog then
+    let overRaw := buildSearchModalOverlay theme availW availH
+    let (ac6, overWidget) ← shapeWidgetTree ac5 rt.primaryFont sc overRaw
+    let overBox := layoutNode sc none pal.focusRing 0 0 availW availH overWidget.toLayoutNode
+    let overScene := buildSceneFromLayout sc rt.focus theme overWidget overBox
+    return (ac6, pal.canvas, sceneOut.prims ++ overScene.prims, sceneOut.hitRegionsSub ++ overScene.hitRegionsSub)
+  else
+    return (ac5, pal.canvas, sceneOut.prims, sceneOut.hitRegionsSub)
 
-  let mut ac := ac4
-  let mut prims := sceneOut.prims
-
-  -- Exercise HarfBuzz/FreeType direct glyph emission for sidebar title & screen badge
-  if rt.primaryFont.facePtr != 0 then
-    let scaleLabel := if sc >= 240 then "2.0x HiDPI" else "1.0x"
-    let themeLabel := if theme.isDark then "Dark" else "Light"
-    let (ac5, _, sbGlyphs) ←
-      Text.layoutTextRun ac rt.primaryFont (14 * subPerPx) sc
-        (Int.ofNat (pxToSub 24)) (Int.ofNat (pxToSub 34))
-        pal.textPrimary "Orb Desktop"
-    let (ac6, _, hdrBadgeGlyphs) ←
-      Text.layoutTextRun ac5 rt.primaryFont (12 * subPerPx) sc
-        (Int.ofNat (availW - pxToSub 130)) (Int.ofNat (pxToSub 30))
-        pal.textPrimary s!"{themeLabel} @ {scaleLabel}"
-    ac := ac6
-    prims := prims ++ sbGlyphs ++ hdrBadgeGlyphs
-
-  -- Ensure focus ring primitive is emitted for the active focus owner
-  if let some focusId := rt.focus.owner then
-    let focusRectSub : Rect :=
-      (sceneOut.hitRegionsSub.find? (·.1 == focusId)).map (·.2) |>.getD
-        { x := Int.ofNat (pxToSub 280),
-          y := Int.ofNat (availH - pxToSub 54),
-          w := Int.ofNat (availW - pxToSub 300),
-          h := Int.ofNat (pxToSub 44) }
-    let focusRectDev := roundRect sc focusRectSub
-    prims := prims.push (focusBorder true focusRectDev pal.focusRing)
-
-  return (ac, pal.canvas, prims, sceneOut.hitRegionsSub)
+/-- `stepDesktopEvent` for the window `rt` currently has. -/
+def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
+    DesktopState → Event → DesktopState × Damage :=
+  stepDesktopEvent rt.wayland.scale120 rt.viewportDeviceRect
 
 /-- Render one `(ScreenId, isDark, scale120)` configuration to `outFile`, verifying that
 Frame 1 renders (`framesRendered == 1`) and Frame 2 skips redraw when quiescent (`quiescentSkips >= 1`). -/
@@ -204,8 +217,8 @@ def renderSingleGoldenToFile (width height : Nat) (scr : ScreenId) (isDark : Boo
   let initSt := DesktopState.forScreen scr isDark scale120
   let rt0Raw ← Runtime.initRuntime cfg initSt
   let rt0 := { rt0Raw with focus := initSt.initialFocusState }
-  let mut rt ← Runtime.stepFrame rt0 stepDesktopEvent renderDesktopFrame
-  rt ← Runtime.stepFrame rt stepDesktopEvent renderDesktopFrame
+  let mut rt ← Runtime.stepFrame rt0 (desktopReducer rt0) renderDesktopFrame
+  rt ← Runtime.stepFrame rt (desktopReducer rt) renderDesktopFrame
   if rt.framesRendered != 1 || rt.quiescentSkips < 1 then
     IO.eprintln s!"Quiescence check failed for {scr.goldenFileName isDark scale120}: frames={rt.framesRendered}, skips={rt.quiescentSkips}"
     Runtime.shutdownRuntime rt
@@ -234,139 +247,56 @@ def renderAll36Goldens (width height : Nat) (outDir : System.FilePath) : IO UInt
   IO.println s!"Rendered {count}/36 golden PNGs to {outDir}"
   return 0
 
-/-- Pack a `Scene` into `Array Vulkan.GpuPrimInstance` and stage the SSBO instance buffer
-into native scratch memory (`Vulkan.stageInstances`) during GPU benchmark frames. -/
-def packAndStageDesktopScene (ctx : Vulkan.VulkanContext) (vw vh : Nat) (scene : Scene) :
-    IO (Array Vulkan.GpuPrimInstance) := do
-  let fullClip : Rect := { x := 0, y := 0, w := (vw : Int), h := (vh : Int) }
-  let mut clipStack : List Rect := [fullClip]
-  let mut instances : Array Vulkan.GpuPrimInstance := Array.mkEmpty scene.size
-  for prim in scene do
-    let curClip := clipStack.head?.getD fullClip
-    match prim with
-    | .clipPush r =>
-      clipStack := Vulkan.intersectRect curClip r :: clipStack
-    | .clipPushRounded r _ =>
-      clipStack := Vulkan.intersectRect curClip r :: clipStack
-    | .clipPop =>
-      if let _ :: tail := clipStack then
-        clipStack := if tail.isEmpty then [fullClip] else tail
-    | .quad r fill rad bw border =>
-      let radii : Vulkan.CornerRadii := (rad, rad, rad, rad)
-      instances := instances.push {
-        dst := r, uv := { x := 0, y := 0, w := 0, h := 0 }, clip := curClip,
-        radii, colorRGBA := fill, kind := 0, aux0 := bw.toUInt32, aux1 := 255
-      }
-      if bw > 0 then
-        instances := instances.push {
-          dst := r, uv := { x := 0, y := 0, w := 0, h := 0 }, clip := curClip,
-          radii, colorRGBA := border, kind := 1, aux0 := bw.toUInt32, aux1 := 255
-        }
-    | .rrect r fill radii borders _ =>
-      let (bt, _, _, _) := borders
-      instances := instances.push {
-        dst := r, uv := { x := 0, y := 0, w := 0, h := 0 }, clip := curClip,
-        radii, colorRGBA := fill, kind := 0, aux0 := bt.toUInt32, aux1 := 255
-      }
-    | .linear r c0 c1 _ rad =>
-      instances := instances.push {
-        dst := r, uv := { x := 0, y := 0, w := 0, h := 0 }, clip := curClip,
-        radii := (rad, rad, rad, rad), colorRGBA := c0, kind := 0, aux0 := c1, aux1 := 255
-      }
-    | .shadow r col rad blur =>
-      let pad : Int := (blur * 2 : Int)
-      let expanded : Rect := { x := r.x - pad, y := r.y - pad, w := r.w + 2 * pad, h := r.h + 2 * pad }
-      instances := instances.push {
-        dst := expanded, uv := { x := 0, y := 0, w := 0, h := 0 }, clip := curClip,
-        radii := (rad, rad, rad, rad), colorRGBA := col, kind := 2, aux0 := blur.toUInt32, aux1 := 255
-      }
-    | .glyph src dst col isColor =>
-      instances := instances.push {
-        dst, uv := src, clip := curClip,
-        radii := (0, 0, 0, 0), colorRGBA := col,
-        kind := if isColor then 4 else 3, aux0 := 0, aux1 := 255
-      }
-    | .mask pageIdx src dst col =>
-      instances := instances.push {
-        dst, uv := src, clip := curClip,
-        radii := (0, 0, 0, 0), colorRGBA := col,
-        kind := 3, aux0 := pageIdx.toUInt32, aux1 := 255
-      }
-    | .image _ src dst rad =>
-      instances := instances.push {
-        dst, uv := src, clip := curClip,
-        radii := (rad, rad, rad, rad), colorRGBA := 0xC8D2E6FF,
-        kind := 5, aux0 := 0, aux1 := 255
-      }
-    | _ => pure ()
-  let _ ← Vulkan.stageInstances ctx instances
-  return instances
+/-- Format microseconds as milliseconds with two zero-padded decimals (`10050` -> `10.05`). -/
+def fmtMs (us : Nat) : String :=
+  let frac := (us % 1000) / 10
+  s!"{us / 1000}.{if frac < 10 then "0" else ""}{frac}"
 
-/-- Execute `--bench <iterations>` measuring cold init + frame layout/shaping/SSBO-staging + quiescent skip times. -/
-def runDesktopBench (width height : Nat) (iterations : Nat) : IO UInt32 := do
+/-- Execute `--bench <iterations>`. Every iteration lays out, shapes and rasterises one full
+frame at the requested size through `Runtime.stepFrame`, the path the window uses, then checks
+that the next quiescent frame is skipped. `first_frame_crc32` is the CRC-32 of the first RGBA
+framebuffer (`03_mission_transcript`), so a run can be tied to the golden of the same size. -/
+def runDesktopBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) : IO UInt32 := do
   let iters := max 1 iterations
   let tStartNs ← IO.monoNanosNow
-  let wl ← Wayland.connectOrHeadless true width height 120
-  let (bw, bh) := wl.deviceBufferSize
-  let vk ← Vulkan.initVulkan 1 1
-  let font ← Text.openFont 1 "sans-serif"
-  let initSt := DesktopState.forScreen .missionTranscript true 120
-  let initDmg : Damage := some { x := 0, y := 0, w := (bw : Int), h := (bh : Int) }
-  let mut rt : Runtime.RuntimeState DesktopState := {
-    app := initSt
-    wayland := wl
-    vulkan := { vk with width := bw, height := bh }
-    atlas := { pageWidth := 512, pageHeight := 512, pad := 1 }
-    primaryFont := font
-    focus := initSt.initialFocusState
-    windowFocused := true
-    damage := initDmg
-  }
-  -- Frame 0 cold start: pump Wayland, build layout/scene/shaping, and stage Vulkan SSBO instances
-  let (ac0, _, scene0, regions0) ← renderDesktopFrame rt
-  let _ ← packAndStageDesktopScene rt.vulkan width height scene0
-  rt := { rt with atlas := ac0, hitRegions := regions0, damage := none, framesRendered := 1 }
-  let tFirstFrameNs ← IO.monoNanosNow
-  let coldUs : Nat := (tFirstFrameNs - tStartNs) / 1000
-
+  let firstSt := DesktopState.forScreen .missionTranscript cfg.darkTheme cfg.scale120
+  let rt0Raw ← Runtime.initRuntime { cfg with headless := true } firstSt
+  let rt0 := { rt0Raw with focus := firstSt.initialFocusState }
+  let mut rt ← Runtime.stepFrame rt0 (desktopReducer rt0) renderDesktopFrame
+  let coldUs : Nat := ((← IO.monoNanosNow) - tStartNs) / 1000
+  let firstCrc := Vulkan.crc32 rt.vulkan.framebuffer
   let mut frameTimesUs : Array Nat := #[]
   for idx in [0:iters] do
     let scr := ScreenId.all[idx % ScreenId.all.length]?.getD .missionTranscript
-    let nextSt := DesktopState.forScreen scr (idx % 2 == 0) 120
-    rt := (rt.markFullDamage)
-    rt := { rt with app := nextSt, focus := nextSt.initialFocusState }
+    let nextSt := DesktopState.forScreen scr (idx % 2 == 0) cfg.scale120
+    rt := { rt.markFullDamage with app := nextSt, focus := nextSt.initialFocusState }
     let f0 ← IO.monoNanosNow
-    let (wl1, evs) ← Wayland.pumpEvents rt.wayland
-    rt := { rt with wayland := wl1 }
-    for ev in evs do
-      rt := rt.stepEvent stepDesktopEvent ev
-    if needsRedraw rt.damage then
-      let (ac', _, scene', regions') ← renderDesktopFrame rt
-      let _ ← packAndStageDesktopScene rt.vulkan width height scene'
-      rt := {
-        rt with
-        atlas := ac'
-        hitRegions := regions'
-        damage := none
-        framesRendered := rt.framesRendered + 1
-      }
+    rt ← Runtime.stepFrame rt (desktopReducer rt) renderDesktopFrame
     let f1 ← IO.monoNanosNow
     frameTimesUs := frameTimesUs.push ((f1 - f0) / 1000)
-    -- Verify quiescent frame skip immediately after each rendered frame
-    rt ← Runtime.stepFrame rt stepDesktopEvent renderDesktopFrame
-
+    rt ← Runtime.stepFrame rt (desktopReducer rt) renderDesktopFrame
+  let (bw, bh) := (rt.vulkan.width, rt.vulkan.height)
+  let fbBytes := rt.vulkan.framebuffer.size
   Runtime.shutdownRuntime rt
   let sorted := frameTimesUs.qsort (· < ·)
   let p50Us := sorted[sorted.size / 2]?.getD 0
-  let p99Idx := ((sorted.size * 99) / 100)
-  let p99Us := sorted[min p99Idx (sorted.size - 1)]?.getD 0
-  let coldMsWhole := coldUs / 1000
-  let coldMsFrac := (coldUs % 1000) / 10
-  let p50MsWhole := p50Us / 1000
-  let p50MsFrac := (p50Us % 1000) / 10
-  let p99MsWhole := p99Us / 1000
-  let p99MsFrac := (p99Us % 1000) / 10
-  IO.println s!"\{\"cold_ms\": {coldMsWhole}.{coldMsFrac}, \"frame_p50_ms\": {p50MsWhole}.{p50MsFrac}, \"frame_p99_ms\": {p99MsWhole}.{p99MsFrac}, \"frames_rendered\": {rt.framesRendered}, \"quiescent_skips\": {rt.quiescentSkips}, \"work_units\": {iters}, \"error_count\": 0}"
+  let p99Us := sorted[min ((sorted.size * 99) / 100) (sorted.size - 1)]?.getD 0
+  let errors : Nat :=
+    if rt.framesRendered == iters + 1 && rt.quiescentSkips == iters && fbBytes == bw * bh * 4 then 0 else 1
+  IO.println s!"\{\"cold_ms\": {fmtMs coldUs}, \"frame_p50_ms\": {fmtMs p50Us}, \"frame_p99_ms\": {fmtMs p99Us}, \"frames_rendered\": {rt.framesRendered}, \"quiescent_skips\": {rt.quiescentSkips}, \"work_units\": {iters}, \"error_count\": {errors}, \"width\": {bw}, \"height\": {bh}, \"scale120\": {cfg.scale120}, \"first_frame_crc32\": {firstCrc.toNat}}"
+  return (if errors == 0 then 0 else 1)
+
+/-- `--self-test`: render one frame offscreen and check that the next, quiescent one is skipped. -/
+def runSelfTest (cfg : Runtime.RuntimeConfig) (initSt : DesktopState) : IO UInt32 := do
+  let rt0Raw ← Runtime.initRuntime { cfg with headless := true } initSt
+  let rt0 := { rt0Raw with focus := initSt.initialFocusState }
+  let mut rt ← Runtime.stepFrame rt0 (desktopReducer rt0) renderDesktopFrame
+  rt ← Runtime.stepFrame rt (desktopReducer rt) renderDesktopFrame
+  Runtime.shutdownRuntime rt
+  if rt.framesRendered != 1 || rt.quiescentSkips < 1 then
+    IO.eprintln s!"orb-desktop self-test: frames={rt.framesRendered}, skips={rt.quiescentSkips}"
+    return 1
+  IO.println "orb-desktop self-test: ok"
   return 0
 
 /-- Main entry point for `OrbDesktop`. -/
@@ -374,7 +304,7 @@ def main (args : List String) : IO UInt32 := do
   let dcfg := parseDesktopArgs args
   let rcfg := dcfg.runtimeCfg
   if let some iters := dcfg.benchIterations then
-    return (← runDesktopBench rcfg.width rcfg.height iters)
+    return (← runDesktopBench rcfg iters)
   if let some allDir := dcfg.headlessGoldenAllDir then
     return (← renderAll36Goldens rcfg.width rcfg.height allDir)
   if let some outPath := rcfg.headlessGolden then
@@ -384,23 +314,18 @@ def main (args : List String) : IO UInt32 := do
     let scr := dcfg.screenOpt.getD .missionTranscript
     let ok ← renderSingleGoldenToFile rcfg.width rcfg.height scr rcfg.darkTheme rcfg.scale120 outPath
     return (if ok then 0 else 1)
-  -- Default interactive / headless 2-frame verification pass
   let scr := dcfg.screenOpt.getD .missionTranscript
   let initSt := DesktopState.forScreen scr rcfg.darkTheme rcfg.scale120
-  let rt0Raw ← Runtime.initRuntime { rcfg with headlessGolden := some (System.FilePath.mk "/tmp/opencode/orb_default.png") } initSt
-  let rt0 := { rt0Raw with focus := initSt.initialFocusState }
-  let mut rt ← Runtime.stepFrame rt0 stepDesktopEvent renderDesktopFrame
-  let extraFrames := max 1 (if rcfg.maxFrames > 1 then rcfg.maxFrames - 1 else 1)
-  for _ in [0:extraFrames] do
-    if rt.running then
-      rt ← Runtime.stepFrame rt stepDesktopEvent renderDesktopFrame
-  if rt.framesRendered != 1 || rt.quiescentSkips < 1 then
-    Runtime.shutdownRuntime rt
-    return 1
-  Runtime.shutdownRuntime rt
   if dcfg.selfTest then
-    IO.println "orb-desktop self-test: ok"
-  return 0
+    return (← runSelfTest rcfg initSt)
+  try
+    let rt0 ← Runtime.openWindowRuntime rcfg "orb-desktop" initSt
+    let rt ← Runtime.runWindow { rt0 with focus := initSt.initialFocusState } desktopReducer renderDesktopFrame
+    Runtime.shutdownRuntime rt
+    return 0
+  catch e =>
+    IO.eprintln s!"orb-desktop-native: cannot run the window: {e}"
+    return 1
 
 end OrbDesktop
 

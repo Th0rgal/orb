@@ -92,15 +92,15 @@ def routeQuery : ScreenId → String
 
 /-- Human-readable header breadcrumb title for each screen. -/
 def headerTitle : ScreenId → String
-  | .controlEmpty       => "Control Center — Empty Workspace"
-  | .controlPopulated   => "Control Center — Active Missions & Approvals"
-  | .missionTranscript  => "Mission m-active — Wave 3 OrbDesktop Replacement"
-  | .missionSplitDiff   => "Mission m-diff — Split Side-by-Side Diff Review"
-  | .machinesFleet      => "Compute Fleet — Managed VMs & Static Nodes"
-  | .settingsGeneral    => "Settings — General & Appearance"
-  | .searchDialog       => "Control Center — Command Palette (Cmd+K)"
-  | .newMissionDialog   => "Control Center — Launch New Mission"
-  | .toastNotifications => "Control Center — Live Telemetry & Notifications"
+  | .controlEmpty       => "New Agent"
+  | .controlPopulated   => "New Agent"
+  | .missionTranscript  => "Long mission"
+  | .missionSplitDiff   => "Long mission"
+  | .machinesFleet      => "Machines"
+  | .settingsGeneral    => "Settings"
+  | .searchDialog       => "New Agent"
+  | .newMissionDialog   => "New Agent"
+  | .toastNotifications => "New Agent"
 
 /-- Parse a screen identifier or route query into a `ScreenId`. -/
 def parse? (s : String) : Option ScreenId :=
@@ -209,7 +209,7 @@ end SyncCursorState
 structure ChromeSidebarRow where
   widgetId : WidgetId
   rowId : String
-  kind : String         -- `"nav"`, `"section"`, `"project"`, `"mission"`
+  kind : String         -- `"nav"`, `"section"`, `"project"`, `"mission"`, `"footer"`
   depth : Nat := 0
   title : String
   subtitle : String := ""
@@ -283,7 +283,8 @@ def defaultSidebarRows (scr : ScreenId) : List ChromeSidebarRow :=
   let isSettings := scr == .settingsGeneral
   [ { widgetId := 101, rowId := "nav:control", kind := "nav", title := "Control Center", shortcut := "⌘1", badge := if scr == .controlPopulated then 3 else 0, selected := isControl }
   , { widgetId := 102, rowId := "nav:machines", kind := "nav", title := "Compute Fleet", shortcut := "⌘2", badge := 4, selected := isMachines }
-  , { widgetId := 103, rowId := "nav:settings", kind := "nav", title := "Settings", shortcut := "⌘,", badge := 0, selected := isSettings }
+  , { widgetId := 103, rowId := "nav:settings", kind := "footer", title := "Settings", selected := isSettings }
+  , { widgetId := 108, rowId := "section:projects", kind := "section", title := "Projects" }
   , { widgetId := 104, rowId := "proj:lean-ui", kind := "project", depth := 0, title := "lean-ui (Native Shell)", subtitle := "v4.35.0" }
   , { widgetId := 105, rowId := "m:m-active", kind := "mission", depth := 1, title := "W3: OrbDesktop Shell", status := "running", shortcut := "m-active", selected := isTranscript }
   , { widgetId := 106, rowId := "m:m-diff", kind := "mission", depth := 1, title := "W2B: Split Diff Viewer", status := "completed", shortcut := "m-diff", selected := isDiff }
@@ -438,14 +439,13 @@ def DesktopState.forScreen (scr : ScreenId) (isDark : Bool := true) (scale120 : 
     | _             => defaultMissionCards
   let composerText : String :=
     match scr with
-    | .missionTranscript => "turbo-lean build LeanUI LeanUISpec --project-dir lean"
-    | .missionSplitDiff  => "Review split side-by-side diff for OrbDesktop/Screens.lean"
+    | .newMissionDialog  => "Verify Wave 3 OrbDesktop 36-golden suite"
     | _                  => ""
   let comp0 : ComposerBuffer := {
     composerWidgetId := 1
     sendButtonId := some 2
     attachButtonId := some 3
-    placeholder := "Reply to mission or press Cmd+K to open command palette..."
+    placeholder := "Describe a task, / for commands, @ for context"
   }
   let comp1 := if composerText.isEmpty then comp0 else comp0.insertText composerText
   { screen := scr
@@ -465,7 +465,7 @@ def DesktopState.forScreen (scr : ScreenId) (isDark : Bool := true) (scale120 : 
 def DesktopState.initialFocusState (st : DesktopState) : FocusState :=
   match st.modal with
   | .none =>
-    { owner := some 1, traps := [] }
+    { owner := none, traps := [] }
   | .searchPalette spec =>
     let trap := searchDialogTrapIds spec
     { owner := some spec.inputWidgetId, traps := [trap] }
@@ -473,15 +473,34 @@ def DesktopState.initialFocusState (st : DesktopState) : FocusState :=
     let trap := [titleF.id, repoF.id, modelSel.triggerId] ++ dialogTrapIds dlg
     { owner := some titleF.id, traps := [trap] }
 
-/-- Pure event reducer for `DesktopState` (updates scroll, composer IME/text edits, and focus). -/
-def stepDesktopEvent (st : DesktopState) (ev : Event) : DesktopState × Damage :=
-  match ev with
-  | .text utf8 =>
-    ({ st with composer := st.composer.insertText utf8 }, none)
-  | .preedit utf8 _ _ =>
-    ({ st with composer := st.composer.setPreedit utf8 }, none)
-  | .imeBatch db da commit preedit _ _ =>
-    ({ st with composer := st.composer.applyImeBatch db da commit preedit }, none)
-  | _ => (st, none)
+/-- Sidebar width in logical `SubPx`: `--sb-w` of the SolidJS desktop (`220 px`). -/
+@[inline] def chromeSidebarWidthSub : SubPx := pxToSub 220
+
+/-- Title row height in logical `SubPx`: `--tb-h` (`35 px`). -/
+@[inline] def chromeHeaderHeightSub : SubPx := pxToSub 35
+
+/-- Composer dock height in logical `SubPx` (`104 px`): `10 px` above the `42 px` composer, the
+`36 px` row under it and `16 px` below. -/
+@[inline] def chromeComposerHeightSub : SubPx := pxToSub 104
+
+/-- Device-pixel band the composer paints into: right of the sidebar, the composer dock at the
+bottom of `viewport` (device pixels), rounded outward. -/
+def composerDamageRect (scale120 : Nat) (viewport : Rect) : Rect :=
+  let x0 := floorDev scale120 (Int.ofNat chromeSidebarWidthSub)
+  let h := ceilDev scale120 (Int.ofNat chromeComposerHeightSub)
+  { x := viewport.x + x0, y := viewport.bottom - h, w := viewport.w - x0, h := h }
+
+/-- Pure event reducer for `DesktopState`. A text, preedit or IME edit damages the composer
+band exactly when it changed the composer buffer; `viewport` is the window in device pixels. -/
+def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev : Event) :
+    DesktopState × Damage :=
+  let composer :=
+    match ev with
+    | .text utf8 => st.composer.insertText utf8
+    | .preedit utf8 _ _ => st.composer.setPreedit utf8
+    | .imeBatch db da commit preedit _ _ => st.composer.applyImeBatch db da commit preedit
+    | _ => st.composer
+  if composer == st.composer then (st, none)
+  else ({ st with composer }, Damage.add none (composerDamageRect scale120 viewport))
 
 end OrbDesktop
