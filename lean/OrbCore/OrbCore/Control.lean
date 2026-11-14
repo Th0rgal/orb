@@ -2482,17 +2482,35 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
 
   -- 5. Privilege Broker Verification & Audit Log (`POST /api/privilege-access/verify-and-log`)
   if req.method == "POST" && cleanPath == "/api/privilege-access/verify-and-log" then
-    let some privCaller ← resolveCallerPrincipal? st req.headers nowEpochSec
-      | return .ok (mkJson 401 "{\"allow_exec\":false,\"allowed\":false,\"error\":\"unauthorized\"}")
-    if !privCaller.isLegacyUnscoped && privCaller.role != "admin" then
-      return .ok (mkJson 403 "{\"allow_exec\":false,\"allowed\":false,\"error\":\"admin_required\"}")
+    -- Two callers: an admin (or legacy unscoped) principal, or `orb-privd` on a static fleet node
+    -- presenting that node's own token. A node holds no admin bearer; its token proves which node
+    -- asks, the lease proves what was approved. Managed machines never authenticate here.
+    let privCaller? ← resolveCallerPrincipal? st req.headers nowEpochSec
+    let privNode? : Option String ← match privCaller? with
+      | some _ => pure none
+      | none =>
+        match extractBearerToken? req.headers nowEpochSec with
+        | none => pure none
+        | some tok =>
+          -- An id that reads as a wildcard or as "self" could match leases it does not own.
+          let node? ← authenticateStaticNodeToken? tok
+          pure (node?.filter fun n => n == normalizeTargetHost n && n != "self" && n != "all")
+    match privCaller?, privNode? with
+    | none, none =>
+      return .ok (mkJson 401 "{\"allow_exec\":false,\"allowed\":false,\"error\":\"unauthorized\"}")
+    | some privCaller, _ =>
+      if !privCaller.isLegacyUnscoped && privCaller.role != "admin" then
+        return .ok (mkJson 403 "{\"allow_exec\":false,\"allowed\":false,\"error\":\"admin_required\"}")
+    | none, some _ => pure ()
     let bodyStr := String.fromUTF8? req.bodySlice.toByteArray |>.getD ""
     let .ok jv := OrbBin.Json.parse bodyStr
       | return .ok (mkJson 400 "{\"allow_exec\":false,\"allowed\":false,\"error\":\"invalid_json\"}")
     let missionId := (jv.fieldStr? "mission_id").getD ""
     let leaseTok := (jv.fieldStr? "lease_token").getD ""
     let targetHost := (jv.fieldStr? "target_host").getD ""
-    let execHost := (jv.fieldStr? "executing_host").getD ""
+    -- For a node caller the authenticated node id is the executing host; the body's claim is ignored.
+    let execHost := privNode?.getD ((jv.fieldStr? "executing_host").getD "")
+    let auditExecHost := match privNode? with | some n => "node:" ++ n | none => execHost
     let cmdText := (jv.fieldStr? "command").getD ""
     let argv : Array String :=
       match jv.fieldArr? "argv" with
@@ -2505,11 +2523,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       return .ok (mkJson 403 "{\"allow_exec\":false,\"allowed\":false,\"error\":\"missing_lease_fields\"}")
     let some lease ← lookupPrivilegeLease? st.store leaseTok
       | do
-        discard <| appendPrivilegeAuditLog st.store "" missionId targetHost execHost cmdText false s!"{nowEpochSec}"
+        discard <| appendPrivilegeAuditLog st.store "" missionId targetHost auditExecHost cmdText false s!"{nowEpochSec}"
         return .ok (mkJson 403 "{\"allow_exec\":false,\"allowed\":false,\"error\":\"unknown_lease\"}")
     let some sRank := scopeRankOf? lease.scope
       | do
-        discard <| appendPrivilegeAuditLog st.store lease.grantId missionId targetHost execHost cmdText false s!"{nowEpochSec}"
+        discard <| appendPrivilegeAuditLog st.store lease.grantId missionId targetHost auditExecHost cmdText false s!"{nowEpochSec}"
         return .ok (mkJson 403 "{\"allow_exec\":false,\"allowed\":false,\"error\":\"unknown_privilege_scope\"}")
     let allowedUnits : Array String :=
       match OrbBin.Json.parse lease.allowedUnitsJson with
@@ -2539,10 +2557,21 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         match ← OrbBin.PrivdShared.checkScopeRestrictions lease.scope allowedUnits argv (jv.fieldStr? "cwd") #[] lease.requireForceCmd with
         | .ok _ => pure true
         | .error _ => pure false
+    -- A node verifies leases for itself only: the request names it (or "self"), and the lease names
+    -- it, is an all-hosts lease, or is a "self" lease whose mission Core places on this node.
+    let nodeBound : Bool ← match privNode? with
+      | none => pure true
+      | some n =>
+        if normReqTarget != "self" && normReqTarget != n then pure false
+        else if normLeaseHost == "all" || normLeaseHost == n then pure true
+        else if normLeaseHost == "self" then
+          let placedOn? ← resolveMissionRemoteNode? st.store st.managedStore? lease.missionId
+          pure (placedOn? == some n)
+        else pure false
     let liveBunker ← match st.bunkerStateRef? with | some r => r.get | none => pure (0 : UInt8)
     let bunkerWord := bunkerStep liveBunker 0 0 0 0
     let bunkerState : UInt8 := (bunkerWord &&& 0xFF).toUInt8
-    let sameOwner : UInt8 := if lease.missionId == missionId && targetMatches && execMatches then 1 else 0
+    let sameOwner : UInt8 := if lease.missionId == missionId && targetMatches && execMatches && nodeBound then 1 else 0
     let privWord := privilegeStep
       sameOwner 1
       (if lease.biometricSigned then 1 else 0)
@@ -2564,7 +2593,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       liveLeaseEp (if lease.revoked then 0 else liveLeaseEp) nowEpochSec lease.expiresAtEpoch
       cmdDigest cmdDigest
     let allowExec := cmdScopeOk && (privWord &&& 1) == 1 && toctouWord == 257
-    if let .error e ← appendPrivilegeAuditLog st.store lease.grantId missionId targetHost execHost cmdText allowExec s!"{nowEpochSec}" then
+    if let .error e ← appendPrivilegeAuditLog st.store lease.grantId missionId targetHost auditExecHost cmdText allowExec s!"{nowEpochSec}" then
       return .ok (mkJson 500 s!"\{\"allow_exec\":false,\"allowed\":false,\"bunker_state\":{bunkerState.toNat},\"expires_at\":{lease.expiresAtEpoch},\"lease_epoch\":{if lease.revoked then 0 else liveLeaseEp},\"error\":{jsonEscape e}}")
     if !allowExec then
       let denyReason := if bunkerState != 0 then "bunker_active" else "lease_denied"
