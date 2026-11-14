@@ -338,9 +338,9 @@ def dispatchMcpToolCall
       (fun _ => spawnArgs.fieldStr? "managed_from_snapshot") |>.getD "").trimAscii.toString
     -- A retry stays with the provider its first attempt reserved on, so one key rents once.
     if let (none, some key) := (named?, (spawnArgs.fieldStr? "idempotency_key").filter (!·.isEmpty)) then
-      let scoped := scopedManagedRequestKey callerUserId callerMid key
+      let requestKey := scopedManagedRequestKey callerUserId callerMid key
       for candidate in #[instanceDefault, managedFallbackProvider] do
-        if (← getManagedMachineByRequestKey? mc candidate scoped).isSome then return { provider := candidate }
+        if (← getManagedMachineByRequestKey? mc candidate requestKey).isSome then return { provider := candidate }
     chooseManagedProvider named? instanceDefault (pinned || !snapshot.isEmpty) fun candidate => do
       let fleet ← match ← loadManagedFleet mc defaultFleet.enabled defaultFleet.boatEnabled
           defaultFleet.dailyCapCents defaultFleet.spentTodayCents defaultFleet.maxConcurrent with

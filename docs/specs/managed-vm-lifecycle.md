@@ -446,8 +446,9 @@ else the first provider they enabled.
 
 lean.ci sizes are priced at zero: quote, recorded cost and daily spend add nothing, and
 neither the global nor a user's daily cap refuses a zero-cost machine (concurrency, TTL
-and the fleet switch still apply). Extension is per provider (`supports_extend`); the
-lean.ci switch is `leanciDeclaration.supportsExtend`.
+and the fleet switch still apply). Extension is per provider (`Provider.supportsExtend`,
+`supports_extend` in the catalog): declared for boat and colab, discovered for lean.ci
+from `lifecycle.extend` of `GET /vms/capabilities` (absent block = not supported).
 
 Creation paths:
 
