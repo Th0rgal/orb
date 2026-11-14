@@ -40,8 +40,9 @@ function testFixtureKernelBootstrap(): Plugin {
   };
 }
 
-/** Short commit of the checkout being built, or "dev" outside git. */
+/** Reproducible CI input identity, otherwise the short checkout commit or "dev". */
 function buildId(): string {
+  if (process.env.ORB_BUILD_ID) return process.env.ORB_BUILD_ID;
   try { return execSync("git rev-parse --short HEAD", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim() || "dev"; } catch { return "dev"; }
 }
 const pkg = JSON.parse(fs.readFileSync(new URL("./package.json", import.meta.url), "utf8")) as { version: string };
