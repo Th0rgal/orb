@@ -826,6 +826,16 @@ def upstreamIdleLimitMs : Nat := 600000
 /-- Longest total duration of one plaintext upstream call. -/
 def upstreamTotalLimitMs : Nat := 3600000
 
+/-- Longest total pre-header wait across all attempts of one streamed proxy call (`1200000` ms = 20 min). -/
+def upstreamStreamPreHeadBudgetMs : Nat := 1200000
+
+/-- Injectable per-read idle, per-call total, and cross-attempt pre-head budget limits for streamed proxy calls. -/
+structure StreamLimits where
+  idleMs          : Nat := upstreamIdleLimitMs
+  totalMs         : Nat := upstreamTotalLimitMs
+  preHeadBudgetMs : Nat := upstreamStreamPreHeadBudgetMs
+  deriving Repr, DecidableEq, Inhabited
+
 private def loopbackHttpRequest
     (method host : String) (port : UInt16) (path : String)
     (headers : Array (String × String)) (body : ByteArray) :
@@ -877,11 +887,13 @@ def maxStreamCopyBytes : Nat := 16777216
 /-- Raw response bytes from one upstream connection; `none` ends the read
     (EOF, socket error, or an idle/total limit). `eof` reports whether the
     read ended cleanly: TLS `close_notify` only over TLS, or an orderly close
-    (`read == 0`) over plain TCP. -/
+    (`read == 0`) over plain TCP. `timedOut` reports whether the read ended on
+    an idle or total timeout rather than a peer close or socket error. -/
 structure UpstreamReader where
-  read  : IO (Option ByteArray)
-  close : IO Unit
-  eof   : IO Bool := pure true
+  read     : IO (Option ByteArray)
+  close    : IO Unit
+  eof      : IO Bool := pure true
+  timedOut : IO Bool := pure false
 
 /-- How the response body is delimited on the wire. -/
 inductive BodyFraming where
@@ -966,7 +978,10 @@ def readUpstreamHead (r : UpstreamReader) :
   let mut acc := ByteArray.empty
   while true do
     match ← r.read with
-    | none => return .error "upstream_closed_before_headers"
+    | none =>
+      if ← r.timedOut then
+        return .error "upstream_idle_timeout"
+      return .error "upstream_closed_before_headers"
     | some c =>
       acc := acc ++ c
       match extractStreamingResponseHeadEx? acc with
@@ -976,32 +991,70 @@ def readUpstreamHead (r : UpstreamReader) :
   return .error "upstream_head_unreachable"
 
 private def openTlsUpstreamReader (method host : String) (port : UInt16) (path : String)
-    (headers : Array (String × String)) (body : ByteArray) : IO (Except String UpstreamReader) := do
-  match ← openHttps11Stream method host port path headers body true 15000 with
+    (headers : Array (String × String)) (body : ByteArray)
+    (idleLimitMs : Nat := upstreamIdleLimitMs)
+    (totalLimitMs : Nat := upstreamTotalLimitMs)
+    (headDeadlineMs? : Option Nat := none)
+    (headCommittedRef? : Option (IO.Ref Bool) := none) : IO (Except String UpstreamReader) := do
+  let connWaitMs : Nat ←
+    match headDeadlineMs? with
+    | some dl => do
+      let now0 ← IO.monoMsNow
+      pure (if now0 ≥ dl then 0 else Nat.min 15000 (dl - now0))
+    | none => pure (Nat.min 15000 idleLimitMs)
+  if connWaitMs == 0 then
+    return .error "upstream_idle_timeout"
+  match ← openHttps11Stream method host port path headers body true connWaitMs.toUInt32 with
   | .error e => return .error e
   | .ok sess =>
     let t0 ← IO.monoMsNow
     let sawEof ← IO.mkRef false
+    let sawTimeout ← IO.mkRef false
     return .ok {
-      -- A model can think for minutes before its first byte: `upstreamIdleLimitMs`
-      -- bounds silence between reads and `upstreamTotalLimitMs` bounds total wall time.
+      -- A model can think for minutes before its first byte: `idleLimitMs`
+      -- bounds silence between reads and `totalLimitMs` bounds total wall time.
       read := do
-        let elapsed := (← IO.monoMsNow) - t0
-        if elapsed ≥ upstreamTotalLimitMs then
+        let nowMs ← IO.monoMsNow
+        let elapsed := nowMs - t0
+        let headDone ← match headCommittedRef? with
+          | some ref => ref.get
+          | none => pure false
+        let budgetExpired :=
+          match headDeadlineMs? with
+          | some dl => !headDone && nowMs ≥ dl
+          | none => false
+        if elapsed ≥ totalLimitMs || budgetExpired then
+          sawTimeout.set true
           return none
-        let waitMs := Nat.min upstreamIdleLimitMs (upstreamTotalLimitMs - elapsed)
+        let remTotal := totalLimitMs - elapsed
+        let remBudget :=
+          match headDeadlineMs? with
+          | some dl => if headDone then remTotal else dl - nowMs
+          | none => remTotal
+        let waitMs := Nat.max 1 (Nat.min idleLimitMs (Nat.min remTotal remBudget))
         match ← readTlsSessionChunk sess 16384 waitMs.toUInt32 with
         | .chunk c => return if c.isEmpty then none else some c
         | .closeNotify =>
           sawEof.set true
           return none
-        | .tcpEof | .timeout | .transportError => return none
+        | .timeout =>
+          sawTimeout.set true
+          return none
+        | .tcpEof | .transportError => return none
       close := closeTlsSession sess
       eof := sawEof.get
+      timedOut := sawTimeout.get
     }
 
 private def openLoopbackUpstreamReader (method host : String) (port : UInt16) (path : String)
-    (headers : Array (String × String)) (body : ByteArray) : IO (Except String UpstreamReader) := do
+    (headers : Array (String × String)) (body : ByteArray)
+    (idleLimitMs : Nat := upstreamIdleLimitMs)
+    (totalLimitMs : Nat := upstreamTotalLimitMs)
+    (headDeadlineMs? : Option Nat := none)
+    (headCommittedRef? : Option (IO.Ref Bool) := none) : IO (Except String UpstreamReader) := do
+  if let some dl := headDeadlineMs? then
+    if (← IO.monoMsNow) ≥ dl then
+      return .error "upstream_idle_timeout"
   let connectHost := if host == "localhost" then "127.0.0.1" else host
   let hostAuth := formatHostAuthority host port 80
   let reqWire ← match buildOutboundHttp11Request method hostAuth path headers body with
@@ -1015,13 +1068,30 @@ private def openLoopbackUpstreamReader (method host : String) (port : UInt16) (p
   let t0 ← IO.monoMsNow
   let lastByte ← IO.mkRef t0
   let sawEof ← IO.mkRef false
+  let sawTimeout ← IO.mkRef false
   return .ok {
     read := do
       while true do
         let nowMs ← IO.monoMsNow
-        if nowMs - t0 > upstreamTotalLimitMs || nowMs - (← lastByte.get) > upstreamIdleLimitMs then
+        let lastMs ← lastByte.get
+        let headDone ← match headCommittedRef? with
+          | some ref => ref.get
+          | none => pure false
+        let budgetExpired :=
+          match headDeadlineMs? with
+          | some dl => !headDone && nowMs ≥ dl
+          | none => false
+        if nowMs - t0 ≥ totalLimitMs || nowMs - lastMs ≥ idleLimitMs || budgetExpired then
+          sawTimeout.set true
           return none
-        match ← pollReadable fd 5000 with
+        let remTotal := totalLimitMs - (nowMs - t0)
+        let remIdle := idleLimitMs - (nowMs - lastMs)
+        let remBudget :=
+          match headDeadlineMs? with
+          | some dl => if headDone then remTotal else dl - nowMs
+          | none => remTotal
+        let waitMs := Nat.max 1 (Nat.min 5000 (Nat.min remIdle (Nat.min remTotal remBudget)))
+        match ← pollReadable fd waitMs.toUInt32 with
         | .error .eagain => pure ()
         | .error _ => return none
         | .ok () =>
@@ -1034,15 +1104,23 @@ private def openLoopbackUpstreamReader (method host : String) (port : UInt16) (p
       return none
     close := discard <| closeFd fd
     eof := sawEof.get
+    timedOut := sawTimeout.get
   }
 
 /-- One upstream call that relays a 2xx body as it arrives. A non-2xx (or bodyless)
     reply is read whole so the failover logic sees the same `HttpsResponse` as before. -/
 def streamingUpstreamRequest (isTls : Bool) (method host : String) (port : UInt16) (path : String)
-    (headers : Array (String × String)) (body : ByteArray) :
+    (headers : Array (String × String)) (body : ByteArray)
+    (idleLimitMs : Nat := upstreamIdleLimitMs)
+    (totalLimitMs : Nat := upstreamTotalLimitMs)
+    (headDeadlineMs? : Option Nat := none)
+    (bodyTimedOutRef? : Option (IO.Ref Bool) := none) :
     IO (Except String (HttpsResponse × Option BodyPump)) := do
-  let opened ← if isTls then openTlsUpstreamReader method host port path headers body
-    else openLoopbackUpstreamReader method host port path headers body
+  let headCommitted ← IO.mkRef false
+  let opened ← if isTls then
+      openTlsUpstreamReader method host port path headers body idleLimitMs totalLimitMs headDeadlineMs? (some headCommitted)
+    else
+      openLoopbackUpstreamReader method host port path headers body idleLimitMs totalLimitMs headDeadlineMs? (some headCommitted)
   let r ← match opened with
     | .ok r => pure r
     | .error e => return .error e
@@ -1051,10 +1129,17 @@ def streamingUpstreamRequest (isTls : Bool) (method host : String) (port : UInt1
     r.close
     return .error e
   | .ok (status, hdrs, isChunked, contentLen?, tail) =>
+    headCommitted.set true
     let framing := bodyFramingFor isChunked contentLen?
     if status ≥ 200 && status < 300 && !isBodylessHttpResponse method status then
       return .ok ({ status, headers := hdrs, body := ByteArray.empty },
-        some (pumpUpstreamBody r framing tail))
+        some fun emit => do
+          let (copy, complete) ← pumpUpstreamBody r framing tail emit
+          if !complete then
+            if let some ref := bodyTimedOutRef? then
+              if ← r.timedOut then
+                ref.set true
+          return (copy, complete))
     else
       let whole ← if isBodylessHttpResponse method status then do r.close; pure ByteArray.empty
         else (·.1) <$> pumpUpstreamBody r framing tail (fun _ => pure true)
@@ -1079,9 +1164,15 @@ def forwardProxyChain
     (attemptGeneration? : Option UInt64 := none)
     (nowEpoch? : Option UInt64 := none)
     (pinnedAccount? : Option String := none)
-    (authEvidence? : Option (IO.Ref (Array (String × String))) := none) :
+    (authEvidence? : Option (IO.Ref (Array (String × String))) := none)
+    (streamLimits? : Option StreamLimits := none)
+    (bodyTimedOutRef? : Option (IO.Ref Bool) := none) :
     IO ProxyOutcome := do
   let wantsStream := requestWantsStream relPath body
+  let effStreamLimits := streamLimits?.getD {}
+  let callStartMs ← IO.monoMsNow
+  let streamHeadDeadlineMs? : Option Nat :=
+    if wantsStream then some (callStartMs + effStreamLimits.preHeadBudgetMs) else none
   let nowSec ← match nowEpoch? with
     | some ep => pure ep
     | none => coreEpochSec
@@ -1341,6 +1432,7 @@ def forwardProxyChain
               pure (.error "plaintext_upstream_disabled")
             else if wantsStream then
               streamingUpstreamRequest isTls method host port fullPath reqHdrs outBody
+                effStreamLimits.idleMs effStreamLimits.totalMs streamHeadDeadlineMs? bodyTimedOutRef?
             else if isTls then
               pure ((← httpsRequest method host port fullPath reqHdrs outBody).map (·, none))
             else
@@ -1471,6 +1563,11 @@ def forwardProxyChain
             let (s', effs) := stepProviderAttemptSlice attemptSlice ev
             pure (s', v, effs)
         attemptSlice := nextSlice
+        let budgetSpent1 : Bool ← match streamHeadDeadlineMs? with
+          | some dl => do
+            let nowMs ← IO.monoMsNow
+            pure (decide (nowMs ≥ dl))
+          | none => pure false
         if vCode == ProviderAttemptVerdict.encode .abortCommittedLock || isCommitted then
           return {
             status := if resp.status ≥ 400 then resp.status else 502
@@ -1497,7 +1594,7 @@ def forwardProxyChain
             pinnedAccountId := attemptSlice.pinnedAccountId
             verdictCode := vCode
           }
-        else if canFailoverUpstream idx n resp.status false then
+        else if !budgetSpent1 && canFailoverUpstream idx n resp.status false then
           attemptSlice := { attemptSlice with cooldownUntilEpoch := 0 }
           idx := idx + 1
         else if paymentRequiredCount > 0 || failures.size > 1 ||
@@ -1533,7 +1630,8 @@ def forwardProxyChain
             verdictCode := vCode
           }
       | .error errMsg =>
-        failures := failures.push (tgt.provider, tgt.modelId, 0, "transport_error")
+        let failLabel := if errMsg == "upstream_idle_timeout" then "upstream_idle_timeout" else "transport_error"
+        failures := failures.push (tgt.provider, tgt.modelId, 0, failLabel)
         serverErrorCount := serverErrorCount + 1
         if errMsg == "invalid_upstream_port" || errMsg == "plaintext_upstream_disabled" then
           transportValidationCount := transportValidationCount + 1
@@ -1562,6 +1660,11 @@ def forwardProxyChain
             let (s', effs) := stepProviderAttemptSlice attemptSlice ev
             pure (s', v, effs)
         attemptSlice := nextSlice
+        let budgetSpent2 : Bool ← match streamHeadDeadlineMs? with
+          | some dl => do
+            let nowMs ← IO.monoMsNow
+            pure (decide (nowMs ≥ dl))
+          | none => pure false
         if vCode == ProviderAttemptVerdict.encode .abortCommittedLock || isCommitted then
           return {
             status := 502
@@ -1588,9 +1691,35 @@ def forwardProxyChain
             pinnedAccountId := attemptSlice.pinnedAccountId
             verdictCode := vCode
           }
+        else if budgetSpent2 then
+          return {
+            status := 504
+            contentType := "application/json"
+            headers := #[("X-Orb-Exhaustion-Class", "upstream_idle_timeout")]
+            body := "{\"error\":\"upstream_idle_timeout\"}".toUTF8
+            selectedAccount := tgt.accountId
+            attemptsUsed := idx + 1
+            exhaustionClass := "upstream_idle_timeout"
+            firstByteCommitted := false
+            pinnedAccountId := attemptSlice.pinnedAccountId
+            verdictCode := vCode
+          }
         else if canFailoverUpstream idx n 503 false then
           attemptSlice := { attemptSlice with cooldownUntilEpoch := 0 }
           idx := idx + 1
+        else if errMsg == "upstream_idle_timeout" then
+          return {
+            status := 504
+            contentType := "application/json"
+            headers := #[("X-Orb-Exhaustion-Class", "upstream_idle_timeout")]
+            body := "{\"error\":\"upstream_idle_timeout\"}".toUTF8
+            selectedAccount := tgt.accountId
+            attemptsUsed := idx + 1
+            exhaustionClass := "upstream_idle_timeout"
+            firstByteCommitted := false
+            pinnedAccountId := attemptSlice.pinnedAccountId
+            verdictCode := vCode
+          }
         else
           let (st, errCode, _) :=
             classifyExhaustionOutcome rateLimitCount paymentRequiredCount clientAuthErrorCount
