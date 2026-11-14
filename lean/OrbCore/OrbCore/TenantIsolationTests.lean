@@ -300,6 +300,13 @@ def run (root : String) : IO Unit := do
     let sharedMemory ← call sharedToken "memory_get_knowledge_tree"
     check ((sharedMemory.fieldOrNull "error").fieldStr? "message" == some "Administrator required")
       "shared admin mission does not grant its owner's personal memory"
+    -- Sessions and missions the owner created before the administrator record existed carry no
+    -- user id. They remain the owner's while that administrator is enabled, and stop with it.
+    check (← userIsServerOwner store "") "the legacy owner is the stored administrator"
+    check (!(← userIsServerOwner store "member")) "a member is never the server owner"
+    sql store.missionsDb "UPDATE users SET disabled=1 WHERE role='admin';"
+    check (!(← userIsServerOwner store "")) "a disabled administrator ends the legacy owner's authority"
+    sql store.missionsDb "UPDATE users SET disabled=0 WHERE role='admin';"
     let ownProject ← call member "get_project" (.obj #[("project", .str "member-project")])
     check (ownProject.fieldBool? "ok" == some true) "member retains own project access"
     sql store.projectsDb "INSERT INTO project_bindings(slug,control_session_id) VALUES('admin-project','admin-session');"

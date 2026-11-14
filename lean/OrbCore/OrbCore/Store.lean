@@ -3678,9 +3678,22 @@ def getBootstrapAdmin? (st : CoreStore) : IO (Option UserRecord) := do
     return some (rowToUserRecord rows[1]!)
 
 /-- Whether `userId` (a stored session issuer or a mission owner) is the server owner: an enabled
-    administrator, or the empty legacy owner on an instance that has no stored administrator. -/
+    administrator, or the empty legacy owner. A session or mission stored without a user id can only
+    have been created by the single-tenant owner (members always carry their id), and that owner is
+    the bootstrap administrator once one is stored, so it stays the owner while that administrator
+    is enabled. Without this, creating the administrator record locked the owner's existing
+    sessions out of the vault and personal memory. -/
 def userIsServerOwner (st : CoreStore) (userId : String) : IO Bool := do
-  if userId.isEmpty then return (← getBootstrapAdmin? st).isNone
+  if userId.isEmpty then
+    -- No administrator stored at all: the instance is purely single-tenant. Otherwise at least
+    -- one administrator must be enabled; a store error fails closed.
+    match ← execParamQuery st.missionsDb
+        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN disabled=0 THEN 1 ELSE 0 END),0) FROM users WHERE role='admin';" #[] with
+    | .error _ => return false
+    | .ok rows =>
+      let total := ((rows[1]?.bind (·[0]?)).bind String.toNat?).getD 1
+      let enabled := ((rows[1]?.bind (·[1]?)).bind String.toNat?).getD 0
+      return total == 0 || enabled > 0
   return ((← getUserById? st userId).map (fun u => !u.disabled && u.role == "admin")).getD false
 
 def getUserSpentTodayCents (st : CoreStore) (userId utcDay : String) : IO (UInt64 × UInt64) := do
