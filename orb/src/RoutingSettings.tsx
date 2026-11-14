@@ -759,7 +759,9 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
               }
             >
               <For each={health()}>
-                {(h) => (
+                {(h) => {
+                  const cooldown = () => h.cooldown_remaining_secs ?? h.cooldown_secs_remaining;
+                  return (
                   <details
                     class="s-card routing-health"
                     open={expandedHealth().has(h.account_id)}
@@ -777,10 +779,10 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
                       <strong>{accountName(h.account_id)}</strong>
                       <span>{h.provider_id || h.account_id.slice(0, 8)}</span>
                       <span
-                        class={`routing-status ${h.cooldown_remaining_secs ? "bad" : h.is_degraded ? "warn" : h.total_requests && h.is_healthy ? "good" : ""}`}
+                        class={`routing-status ${cooldown() ? "bad" : h.is_degraded ? "warn" : h.total_requests && h.is_healthy ? "good" : ""}`}
                       >
-                        {h.cooldown_remaining_secs
-                          ? `Cooldown · ${Math.ceil(h.cooldown_remaining_secs)}s`
+                        {cooldown()
+                          ? `Cooldown · ${Math.ceil(cooldown()!)}s`
                           : h.is_degraded
                             ? "Degraded"
                             : !h.total_requests
@@ -790,11 +792,11 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
                                 : "Unavailable"}
                       </span>
                       <span class="routing-order">
-                        {h.total_requests} requests ·{" "}
-                        {h.total_requests
+                        {h.total_requests != null ? h.total_requests : "—"} requests ·{" "}
+                        {h.total_requests && h.total_successes != null
                           ? `${Math.round((h.total_successes / h.total_requests) * 100)}% success`
                           : "—"}{" "}
-                        · {h.total_errors} errors · {h.total_rate_limits} rate
+                        · {h.total_errors != null ? h.total_errors : "—"} errors · {h.total_rate_limits != null ? h.total_rate_limits : "—"} rate
                         limits ·{" "}
                         {h.avg_latency_ms == null
                           ? "—"
@@ -805,12 +807,12 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
                       <p>Account: {h.account_id}</p>
                       <p>
                         Last failure: {h.last_failure_reason || "None"} ·{" "}
-                        {time(h.last_failure_at)}
+                        {time(h.last_failure_at ?? null)}
                       </p>
                       <p>
-                        {h.consecutive_failures} consecutive failures ·{" "}
-                        {h.total_input_tokens.toLocaleString()} input tokens ·{" "}
-                        {h.total_output_tokens.toLocaleString()} output tokens
+                        {h.consecutive_failures != null ? h.consecutive_failures : "—"} consecutive failures ·{" "}
+                        {h.total_input_tokens != null ? h.total_input_tokens.toLocaleString() : "—"} input tokens ·{" "}
+                        {h.total_output_tokens != null ? h.total_output_tokens.toLocaleString() : "—"} output tokens
                       </p>
                       <Show when={h.rate_limit_snapshot}>
                         {(s) => (
@@ -840,8 +842,8 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
                       </Show>
                       <Show
                         when={
-                          h.cooldown_remaining_secs != null &&
-                          h.cooldown_remaining_secs! > 0
+                          cooldown() != null &&
+                          cooldown()! > 0
                         }
                       >
                         <button
@@ -856,7 +858,8 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
                       </Show>
                     </div>
                   </details>
-                )}
+                  );
+                }}
               </For>
             </Show>
           </section>
