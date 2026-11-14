@@ -21,6 +21,7 @@ The operator migrates the two legacy files with:
 ```bash
 install -d -m 755 /etc/orb /usr/local/libexec
 install -m 755 scripts/ops/orb-env /usr/local/libexec/orb-env
+install -m 644 scripts/ops/env-migration.json /usr/local/libexec/env-migration.json
 /usr/local/libexec/orb-env migrate \
   --prod /etc/open_agent/open_agent.env \
   --dev /etc/open_agent/open_agent_dev.env \
@@ -32,58 +33,36 @@ install -m 755 scripts/ops/orb-env /usr/local/libexec/orb-env
   --output /etc/orb/environments --apply
 ```
 
-Shared settings must agree in both inputs unless the operator explicitly chooses
-one source. A one-sided setting is also a conflict: migration cannot infer whether
-enabling it on the other instance is safe. Generate the names-only inventory and
-conservative ownership template without editing the legacy files:
+The checked-in [env-migration.json](../../scripts/ops/env-migration.json) is a
+complete names-only policy over the script's known keys. Install it beside the
+executable (mode 644), or pass its path with `--classification`. Migration loads
+it by default, validates completeness with the existing strict ownership parser,
+and scopes decisions to keys present in the inputs. `--dry-run` is explicit but
+optional; it is mutually exclusive with `--apply`.
 
-```bash
-umask 077
-/usr/local/libexec/orb-env inventory \
-  --prod /etc/open_agent/open_agent.env \
-  --dev /etc/open_agent/open_agent_dev.env > /etc/orb/env-inventory.json
-python3 - <<'PY'
-import json
-from pathlib import Path
-report = json.loads(Path('/etc/orb/env-inventory.json').read_text())
-Path('/etc/orb/env-ownership.json').write_text(json.dumps(report['ownership'], indent=2) + '\n')
-PY
-```
+Shared operational settings select prod. Secrets, endpoints, paths, dev feature
+switches, models and tenant identity retain their original per-instance values
+and absence. Hermes and console authority remain forbidden on dev. In particular,
+`SCOPE_REAPER_ENABLED` stays local because the observed setting is dev-only.
+Missing selected source assignments fail rather than silently selecting dev.
+Unknown live keys fail with names only before creating any output. The optional
+`--ownership` override retains the previous strict parser and cannot change a
+key's allowed layer or admit unknown names.
 
-Review these two files locally. The inventory reports names and classifications
-only, never values. The script has a checked-in per-key policy: `shared`,
-`instance-owned` and `prod-only-allowed`. Instance-owned assignments always stay
-in their own overlay, even if equal, and an absent key stays absent. Hermes and
-console SSH authority cannot appear on dev. Instance-specific fleet tokens,
-authentication, storage paths and security switches cannot be made shared by a
-manifest. Unknown live names appear in `unknown_keys` and migration refuses them;
-add a reviewed repository classification rather than bypassing the check.
-
-For each differing or one-sided shared key, the ownership template places
-`"review"` in `shared_from`. Replace that marker locally with `"prod"` or `"dev"`
-to select an existing assignment for the common base. For example:
-
-```json
-{"schema_version": 1, "instance_keys": [], "shared_from": {"LIBRARY_REMOTE": "prod"}}
-```
-
-This illustrates the shape, not a policy for the live inventory. Selecting a
-source deliberately changes the other instance's next-start configuration.
-The manifest cannot reclassify a key: `instance_keys` accepts only names already
-classified instance-owned/prod-only and is unnecessary in new manifests. Unknown
-names, duplicate decisions, missing source assignments, `"review"` markers and
-unresolved shared differences fail before any write.
-Run both migration commands above with the additional argument
-`--ownership /etc/orb/env-ownership.json`, first validating, then `--apply`.
-The resulting private `ownership.json` is automatically loaded by the existing
-startup check. Overlay/base overlap remains forbidden, including instance-owned
-keys. A missing manifest still uses the checked-in ownership policy; malformed
-manifests fail. Adding a shared key to an overlay cannot bypass the policy.
+Historical inventory: **65 prod-only, 10 dev-only, 11 differing**. The report in
+`docs/plans/orb-consolidation-2026-11.md` names all dev-only/differing keys but
+summarizes the prod-only group by families. All ten named dev-only keys and all
+eleven named differing keys are instance-owned in the checked-in policy. Prod-only
+shared tuning selects prod; secrets/paths stay local; Hermes/console stay prod-only.
+The exact 65-name historical group cannot be reconstructed from that report;
+this change does not invent names for Supabase or Spark arbiter. Any live name
+outside the explicit policy requires a names-only repository update and is
+refused. Do not interpret the historical count as a verified live inventory.
 
 Migration preserves existing paths, adds only `ORB_INSTANCE`, and requires
 distinct ports, working directories, JWT secrets and dashboard passwords when
 present. It does not mint credentials or touch users, missions, transcripts or
-provider keys. Instance-owned differences stay local; shared differences require a deliberate
+provider keys. Instance-owned differences stay local; shared differences use the checked-in
 source choice. Migration does not certify identical setup.
 
 The output directory must not already exist. It is mode 700, with mode 600

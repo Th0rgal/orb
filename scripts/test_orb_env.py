@@ -24,8 +24,73 @@ class OrbEnvTest(unittest.TestCase):
         self.dev = self.root / "legacy-dev.env"
         self.output = self.root / "environments"
         self.shared = b'CLI_PROXY_API_BASE_URL="http://localhost:8317"\nCLI_PROXY_API_KEY=\'$(must-not-run)\'\n'
-        self.prod.write_bytes(self.shared + b"PORT=3000\nWORKING_DIR=/root\nJWT_SECRET=prod-secret\n")
-        self.dev.write_bytes(self.shared + b"PORT=3002\nWORKING_DIR=/var/lib/dev\nJWT_SECRET=dev-secret\n")
+        self.prod.write_bytes(self.shared + b"LIBRARY_REMOTE=repo\nPORT=3000\nWORKING_DIR=/root\nJWT_SECRET=prod-secret\n")
+        self.dev.write_bytes(self.shared + b"LIBRARY_REMOTE=repo\nPORT=3002\nWORKING_DIR=/var/lib/dev\nJWT_SECRET=dev-secret\n")
+
+    def cli(self, *flags):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch("sys.argv", [str(SCRIPT), "migrate", "--prod", str(self.prod),
+                                "--dev", str(self.dev), "--output", str(self.output), *flags]), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            result = env.main()
+        return result, stdout.getvalue(), stderr.getvalue()
+
+    def test_checked_in_classification_parsing_and_completeness(self):
+        path = SCRIPT.with_name("env-migration.json")
+        policy = env.read_ownership(path)
+        self.assertEqual(set(policy["instance_keys"]) | policy["shared_from"].keys(), env.KNOWN_KEYS)
+        self.assertTrue(all(source == "prod" for source in policy["shared_from"].values()))
+        self.assertIn("CLI_PROXY_API_KEY", policy["instance_keys"])
+        bad = self.root / "classification.json"
+        bad.write_text('{"schema_version":1,"instance_keys":[],"shared_from":{}}')
+        with self.assertRaisesRegex(env.InvalidConfig, "cover every known key"):
+            env.migration_policy(bad, {}, {})
+        bad.write_text('{"schema_version":1,"schema_version":1}')
+        with self.assertRaisesRegex(env.InvalidConfig, "duplicate ownership"):
+            env.migration_policy(bad, {}, {})
+
+    def test_observed_named_groups_stay_instance_owned(self):
+        dev_only = "AUTOMATION_MANAGER_MCP_BIN CODEX_APP_SERVER_MODE LIBRARY_PATH OPENAGENT_DATA_DIR RUST_MIN_STACK SANDBOXED_MANAGED_ENABLED SANDBOXED_PROXY_SECRET SANDBOXED_SH_RTK_ENABLED SCOPE_REAPER_ENABLED WORKING_DIR".split()
+        different = "BROWSER_ENABLED DASHBOARD_PASSWORD DEFAULT_MODEL JWT_SECRET PORT SANDBOXED_MANAGED_REAPER_DRY_RUN SANDBOXED_PUBLIC_URL SANDBOXED_REMOTE_NODES SANDBOXED_REMOTE_NODE_SEPOLIA_TOKEN SANDBOXED_SH_OPENCODE_DEFAULT_MODEL SANDBOXED_SINGLE_TENANT_USER_ID".split()
+        self.assertEqual((len(dev_only), len(different)), (10, 11))
+        self.assertTrue(set(dev_only + different) <= env.INSTANCE_KEYS)
+
+    def test_cli_default_and_explicit_dry_run(self):
+        self.prod.write_bytes(self.prod.read_bytes() + b"MAX_ITERATIONS=prod-marker\n")
+        for flags in ((), ("--dry-run",)):
+            result, stdout, stderr = self.cli(*flags)
+            self.assertEqual(result, 0, stderr)
+            self.assertIn("no files written", stdout)
+            self.assertNotIn("prod-marker", stdout + stderr)
+            self.assertFalse(self.output.exists())
+        result, _, stderr = self.cli("--apply")
+        self.assertEqual(result, 0, stderr)
+        base = env.parse_env((self.output / "core.env").read_bytes())
+        self.assertEqual(base["MAX_ITERATIONS"], "prod-marker")
+        self.assertNotIn("CLI_PROXY_API_KEY", base)
+
+    def test_cli_unknown_refused_before_writes(self):
+        self.dev.write_bytes(self.dev.read_bytes() + b"UNREVIEWED_KEY=secret-marker\n")
+        for flags in ((), ("--apply",)):
+            result, stdout, stderr = self.cli(*flags)
+            self.assertEqual(result, 1)
+            self.assertIn("unclassified environment keys: UNREVIEWED_KEY", stderr)
+            self.assertNotIn("secret-marker", stdout + stderr)
+            self.assertFalse(self.output.exists())
+
+    def test_apply_validates_then_backs_up_both_before_configuration(self):
+        writes = []
+        real_write = env.write_private
+        def record(path, raw):
+            writes.append(str(path.relative_to(self.output)))
+            real_write(path, raw)
+        with patch.object(env, "write_private", side_effect=record):
+            result, _, stderr = self.cli("--apply")
+        self.assertEqual(result, 0, stderr)
+        self.assertEqual(writes, ["backups/prod.env", "backups/dev.env", "ownership.json",
+                                  "core.env", "prod.env", "dev.env"])
+        self.assertEqual((self.output / "backups/prod.env").read_bytes(), self.prod.read_bytes())
+        self.assertEqual((self.output / "backups/dev.env").read_bytes(), self.dev.read_bytes())
 
     def test_migration_preserves_effective_envs_and_exact_backups(self):
         originals = [path.read_bytes() for path in (self.prod, self.dev)]
@@ -51,10 +116,10 @@ class OrbEnvTest(unittest.TestCase):
             env.migrate(self.prod, self.dev, self.output, apply=True)
 
     def test_conflicting_and_one_sided_base_values_fail_before_writes(self):
-        for extra in (b"ONLY_IN_DEV=value\n", b"CLI_PROXY_API_BASE_URL=different\n"):
+        for extra in (b"ONLY_IN_DEV=value\n", b"LIBRARY_REMOTE=different\n"):
             with self.subTest(extra=extra):
-                # Replace, not duplicate, the existing proxy assignment.
-                self.dev.write_bytes(self.dev.read_bytes().replace(b'CLI_PROXY_API_BASE_URL="http://localhost:8317"\n', b"") + extra)
+                # Replace, not duplicate, the existing shared assignment.
+                self.dev.write_bytes(self.dev.read_bytes().replace(b"LIBRARY_REMOTE=repo\n", b"") + extra)
                 with self.assertRaises(env.InvalidConfig):
                     env.migrate(self.prod, self.dev, self.output, apply=True)
                 self.assertFalse(self.output.exists())
@@ -80,7 +145,7 @@ class OrbEnvTest(unittest.TestCase):
             self.assertEqual((self.output / ("backups/" + name + ".env")).read_bytes(), raw)
         self.assertNotIn("HERMES_TOKEN", base)
         with self.assertRaisesRegex(env.InvalidConfig, "redefines base"):
-            env.check(base, overlay | {"CLI_PROXY_API_KEY": base["CLI_PROXY_API_KEY"]}, policy)
+            env.check(base, overlay | {"LIBRARY_REMOTE": base["LIBRARY_REMOTE"]}, policy)
         # The unchanged service check loads the manifest beside the shared base.
         with patch("sys.argv", [str(SCRIPT), "check", "--base", str(self.output / "core.env"),
                                 "--overlay", str(self.output / "dev.env")]), contextlib.redirect_stdout(io.StringIO()):
@@ -103,12 +168,12 @@ class OrbEnvTest(unittest.TestCase):
 
     def test_operator_selects_shared_source_without_exposing_values(self):
         self.prod.write_bytes(self.prod.read_bytes() + b'MAX_ITERATIONS=private-prod-value\n')
-        self.dev.write_bytes(self.dev.read_bytes().replace(b'http://localhost:8317', b'http://localhost:8318'))
+        self.dev.write_bytes(self.dev.read_bytes().replace(b'LIBRARY_REMOTE=repo', b'LIBRARY_REMOTE=dev-repo'))
         policy = {"schema_version": 1, "instance_keys": [],
-                  "shared_from": {"MAX_ITERATIONS": "prod", "CLI_PROXY_API_BASE_URL": "dev"}}
+                  "shared_from": {"MAX_ITERATIONS": "prod", "LIBRARY_REMOTE": "dev"}}
         base, prod, dev = env.split_envs(env.parse_env(self.prod.read_bytes()), env.parse_env(self.dev.read_bytes()), policy)
         self.assertEqual(base["MAX_ITERATIONS"], "private-prod-value")
-        self.assertEqual(env.literal(base["CLI_PROXY_API_BASE_URL"]), "http://localhost:8318")
+        self.assertEqual(env.literal(base["LIBRARY_REMOTE"]), "dev-repo")
         for overlay in (prod, dev):
             self.assertFalse(base.keys() & overlay.keys())
             env.check(base, overlay, policy)
@@ -138,12 +203,12 @@ class OrbEnvTest(unittest.TestCase):
 
     def test_classification_reports_names_not_values(self):
         prod = env.parse_env(self.prod.read_bytes()) | {"PROD_ONLY": "private-prod"}
-        dev = env.parse_env(self.dev.read_bytes()) | {"DEV_ONLY": "private-dev", "CLI_PROXY_API_KEY": "private-different"}
+        dev = env.parse_env(self.dev.read_bytes()) | {"DEV_ONLY": "private-dev", "LIBRARY_REMOTE": "private-different"}
         result = env.classify(prod, dev)
         self.assertEqual(result["prod_only"], ["PROD_ONLY"])
         self.assertEqual(result["dev_only"], ["DEV_ONLY"])
-        self.assertEqual(result["different"], ["CLI_PROXY_API_KEY"])
-        self.assertEqual(result["shared"], ["CLI_PROXY_API_BASE_URL"])
+        self.assertEqual(result["different"], ["LIBRARY_REMOTE"])
+        self.assertEqual(result["shared"], [])
         self.assertNotIn("private", str(result))
 
     def test_classify_cli_never_writes_or_discloses_values(self):
@@ -163,8 +228,8 @@ class OrbEnvTest(unittest.TestCase):
 
     def test_startup_refuses_duplicate_even_when_equal_and_unknown_overlay(self):
         base, prod, _ = env.split_envs(env.parse_env(self.prod.read_bytes()), env.parse_env(self.dev.read_bytes()))
-        with self.assertRaisesRegex(env.InvalidConfig, "redefines base keys: CLI_PROXY_API_BASE_URL"):
-            env.check(base, prod | {"CLI_PROXY_API_BASE_URL": base["CLI_PROXY_API_BASE_URL"]})
+        with self.assertRaisesRegex(env.InvalidConfig, "redefines base keys: LIBRARY_REMOTE"):
+            env.check(base, prod | {"LIBRARY_REMOTE": base["LIBRARY_REMOTE"]})
         with self.assertRaisesRegex(env.InvalidConfig, "unclassified environment keys: UNKNOWN"):
             env.check(base, prod | {"UNKNOWN": "hidden"})
         with self.assertRaisesRegex(env.InvalidConfig, "wrong layer: JWT_SECRET"):
