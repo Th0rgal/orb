@@ -46,7 +46,6 @@ import {
 import {preferSparkAdministration} from "./machineDestinations";
 import { LazyCloudAgentPage as CloudAgentPage } from "./cloudAgentsLoader";
 import { orbComposerDefaultStep } from "./orbKernel";
-import { monitorSoftware } from "./softwareInventory";
 import {startLocalQueueWorker} from "./localMessageQueue";
 const BtwSettings = lazy(() => import("./btwSettings").then(module => ({ default: module.BtwSettings })));
 import { screenName, startUsageTelemetry, usageTelemetry } from "./usageTelemetry";
@@ -229,7 +228,12 @@ export default function App() {
   });
   const settingsDots = createMemo(() => settingsAttention({ bunkerActive: bunkerActive(), deviceEnrolled: !deviceUnenrolled() }));
   onMount(() => onCleanup(trackScrollbarHover()));
-  onMount(() => { const stop = monitorSoftware(); onCleanup(stop); });
+  onMount(() => {
+    let stop: (() => void) | undefined;
+    let disposed = false;
+    void import("./softwareInventory").then(m => { if (!disposed) stop = m.monitorSoftware(); });
+    onCleanup(() => { disposed = true; stop?.(); });
+  });
   createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);const stopDelegations=startClientDelegations(missions);onCleanup(stopDelegations);onCleanup(startLocalWakeups());});
   const [selected, setSelected] = createSignal<string | null>((() => { const saved = readString("orb.selectedConversation"); return saved && (PAGES.has(saved) || /^(m|pf|c|pc|ps|sk|rm):/.test(saved)) ? settingsPageId(saved) : null; })());
   createEffect(() => {
