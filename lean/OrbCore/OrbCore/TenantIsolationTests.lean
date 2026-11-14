@@ -4,7 +4,7 @@ import OrbCore.ProviderUsageAndLogin
 
 namespace OrbCore.TenantIsolationTests
 
-open OrbCore.Control OrbCore.Store OrbCore.Managed OrbCore.ProviderUsageAndLogin OrbBin.Json LeanSys.Http
+open OrbCore.Control OrbCore.Store OrbCore.Managed OrbCore.ProviderUsageAndLogin OrbCore.LegacyHydrate OrbBin.Json LeanSys.Http LeanSys.Posix
 
 private def check (condition : Bool) (label : String) : IO Unit := do
   unless condition do throw (IO.userError s!"tenant isolation: {label}")
@@ -781,6 +781,176 @@ def run (root : String) : IO Unit := do
       (mHealthRows[0]?.bind (·.fieldStr? "account_id")) == some "prov-anth-1" &&
       (mHealthRows[1]?.bind (·.fieldStr? "account_id")) == some "prov-anth-2")
       "member /api/model-routing/health keeps only enabled configured providers"
+    -- Held-open SSE streams (`GET /api/control/stream` and `GET /api/control/missions/:id/stream`)
+    -- over real loopback TCP sockets before disabling/deleting the member principal.
+    sql store.missionsDb "DELETE FROM mission_shares WHERE mission_id='admin-mission' AND user_id='member';"
+    let adminLiveTok := mintSessionTokenV2 stWithProviders.cfg.jwtSecret "admin" "admin" 1 (nowReal + 3600)
+    let memberLiveTok := mintSessionTokenV2 stWithProviders.cfg.jwtSecret "member" "member" 1 (nowReal + 3600)
+    let sseHub ← newBroadcastHub
+    let stSse : CoreAppState := { stWithProviders with broadcastHub? := some sseHub }
+    OrbBin.PosixExt.setenvVar "ORB_SSE_KEEPALIVE_MS" "60"
+    let .ok (sseListenFd, ssePort) ← tcpListen "127.0.0.1" 0 32
+      | throw (IO.userError "SSE loopback tcpListen failed")
+    let sseAcceptDone ← IO.mkRef false
+    let sseServerTask ← IO.asTask (prio := .dedicated) do
+      while !(← sseAcceptDone.get) do
+        if let .ok sfd ← tcpAcceptPoll sseListenFd 100 then
+          discard <| IO.asTask (prio := .dedicated) (handleClientConn stSse sfd false)
+      discard <| closeFd sseListenFd
+    let openSseSocket (target : String) (bearer? : Option String) : IO Fd := do
+      let .ok fd ← tcpConnect "127.0.0.1" ssePort
+        | throw (IO.userError s!"SSE tcpConnect failed for {target}")
+      let authHdr := match bearer? with
+        | some b => s!"Authorization: Bearer {b}\r\n"
+        | none => ""
+      let reqWire :=
+        s!"GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\n{authHdr}\r\n".toUTF8
+      let .ok _ ← writeAll fd reqWire false
+        | do discard <| closeFd fd; throw (IO.userError s!"SSE writeAll failed for {target}")
+      return fd
+    let drainSseUntil (fd : Fd) (timeoutMs : Nat) (pred : String → Bool) : IO (String × Bool) := do
+      let startMs ← IO.monoMsNow
+      let mut acc := ByteArray.empty
+      let mut hitEof := false
+      while (← IO.monoMsNow) - startMs < timeoutMs do
+        let decoded := String.fromUTF8? acc |>.getD ""
+        if pred decoded then
+          return (decoded, hitEof)
+        let elapsed := (← IO.monoMsNow) - startMs
+        let rem := if timeoutMs > elapsed then timeoutMs - elapsed else 1
+        let stepMs : UInt32 := (min 50 (max 1 rem)).toUInt32
+        match ← pollReadable fd stepMs with
+        | .ok () =>
+          let ch ← readStreamChunk fd 16384
+          if ch.isEmpty then
+            hitEof := true
+            break
+          acc := acc ++ ch
+        | .error _ => pure ()
+      return (String.fromUTF8? acc |>.getD "", hitEof)
+    try
+      -- (f) Auth enforcement on both SSE routes before any stream opens (`401` unauthenticated, `404` foreign mission).
+      let unauthFd1 ← openSseSocket "/api/control/stream" none
+      let (unauthWire1, _) ← drainSseUntil unauthFd1 800 (fun s => (s.splitOn "\r\n\r\n").length > 1)
+      discard <| closeFd unauthFd1
+      check ((unauthWire1.splitOn "HTTP/1.1 401").length > 1)
+        s!"SSE (f) unauthenticated /api/control/stream must return 401, got: {unauthWire1}"
+      let unauthFd2 ← openSseSocket "/api/control/missions/member-mission/stream" none
+      let (unauthWire2, _) ← drainSseUntil unauthFd2 800 (fun s => (s.splitOn "\r\n\r\n").length > 1)
+      discard <| closeFd unauthFd2
+      check ((unauthWire2.splitOn "HTTP/1.1 401").length > 1)
+        s!"SSE (f) unauthenticated /api/control/missions/:id/stream must return 401, got: {unauthWire2}"
+      let foreignFd ← openSseSocket "/api/control/missions/admin-mission/stream" (some memberLiveTok)
+      let (foreignWire, _) ← drainSseUntil foreignFd 800 (fun s => (s.splitOn "\r\n\r\n").length > 1)
+      discard <| closeFd foreignFd
+      check ((foreignWire.splitOn "HTTP/1.1 404").length > 1)
+        s!"SSE (f) member opening foreign /api/control/missions/admin-mission/stream must return 404, got: {foreignWire}"
+
+      -- (a) & (b) Live control stream stays open past initial `missions_snapshot`, scopes snapshot + live events
+      -- per caller (member sees own mission only; admin sees all), and delivers subsequent live frames on the same socket.
+      let adminStreamFd ← openSseSocket "/api/control/stream" (some adminLiveTok)
+      let memberStreamFd ← openSseSocket "/api/control/stream" (some memberLiveTok)
+      let (adminInitWire, adminInitEof) ← drainSseUntil adminStreamFd 1000
+        (fun s => (s.splitOn "event: missions_snapshot").length > 1 && (s.splitOn "\n\n").length > 1)
+      let (memberInitWire, memberInitEof) ← drainSseUntil memberStreamFd 1000
+        (fun s => (s.splitOn "event: missions_snapshot").length > 1 && (s.splitOn "\n\n").length > 1)
+      check (!adminInitEof && !memberInitEof &&
+          (adminInitWire.splitOn "HTTP/1.1 200 OK").length > 1 &&
+          (adminInitWire.splitOn "Transfer-Encoding: chunked").length > 1 &&
+          (adminInitWire.splitOn "event: missions_snapshot").length > 1 &&
+          (adminInitWire.splitOn "admin-mission").length > 1 &&
+          (memberInitWire.splitOn "event: missions_snapshot").length > 1 &&
+          (memberInitWire.splitOn "member-mission").length > 1 &&
+          (memberInitWire.splitOn "admin-mission").length == 1)
+        s!"SSE (a)/(b) initial missions_snapshot chunked stream or tenant scoping failed (adminEof={adminInitEof}, memberEof={memberInitEof})"
+      publishControlEvent (some sseHub) "mission_status_changed"
+        "{\"mission_id\":\"admin-mission\",\"status\":\"running\",\"marker\":\"admin-only-sse-live\"}"
+        (some "admin-mission")
+      publishControlEvent (some sseHub) "mission_status_changed"
+        "{\"mission_id\":\"member-mission\",\"status\":\"running\",\"marker\":\"member-visible-sse-live\"}"
+        (some "member-mission")
+      let (adminLiveWire, adminLiveEof) ← drainSseUntil adminStreamFd 1000
+        (fun s => (s.splitOn "admin-only-sse-live").length > 1 && (s.splitOn "member-visible-sse-live").length > 1)
+      let (memberLiveWire, memberLiveEof) ← drainSseUntil memberStreamFd 1000
+        (fun s => (s.splitOn "member-visible-sse-live").length > 1)
+      check (!adminLiveEof && !memberLiveEof &&
+          (adminLiveWire.splitOn "admin-only-sse-live").length > 1 &&
+          (adminLiveWire.splitOn "member-visible-sse-live").length > 1 &&
+          (memberLiveWire.splitOn "member-visible-sse-live").length > 1 &&
+          (memberLiveWire.splitOn "admin-only-sse-live").length == 1)
+        s!"SSE (a)/(b) live event delivery or tenant isolation failed (adminLive={adminLiveWire}, memberLive={memberLiveWire})"
+
+      -- (d) Keep-alive comment `: keep-alive\n\n` arrives on an idle open stream within the configured short interval.
+      let (keepAliveWire, keepAliveEof) ← drainSseUntil memberStreamFd 600
+        (fun s => (s.splitOn ": keep-alive\n\n").length > 1)
+      check (!keepAliveEof && (keepAliveWire.splitOn ": keep-alive\n\n").length > 1)
+        s!"SSE (d) expected ': keep-alive' frame on open stream, got eof={keepAliveEof} wire={keepAliveWire}"
+      discard <| closeFd adminStreamFd
+      discard <| closeFd memberStreamFd
+
+      -- (c) Mission-scoped stream (`/api/control/missions/:id/stream` and `/api/control/stream?mission=:id`)
+      -- delivers only that mission's events and drops other visible missions' events.
+      let _ ← appendMissionEvent store "admin-mission" "user_message"
+        "{\"id\":\"u-hist-1\",\"content\":\"hist-seq-1\"}" "2026-11-13T10:01:00Z"
+      let (seqHist2Res) ← appendMissionEvent store "admin-mission" "assistant_message"
+        "{\"id\":\"a-hist-2\",\"content\":\"hist-seq-2\"}" "2026-11-13T10:01:01Z"
+      let seqHist1 : UInt64 := match seqHist2Res with | .ok s => if s > 1 then s - 1 else 1 | .error _ => 1
+      let missionStreamFd ← openSseSocket s!"/api/control/missions/admin-mission/stream?since_seq={seqHist1}" (some adminLiveTok)
+      let (mInitWire, mInitEof) ← drainSseUntil missionStreamFd 1000
+        (fun s => (s.splitOn "hist-seq-2").length > 1)
+      check (!mInitEof &&
+          (mInitWire.splitOn "hist-seq-2").length > 1 &&
+          (mInitWire.splitOn "hist-seq-1").length == 1)
+        s!"SSE (c) mission stream since_seq replay mismatch: {mInitWire}"
+      publishControlEvent (some sseHub) "mission_status_changed"
+        "{\"mission_id\":\"member-mission\",\"status\":\"awaiting_user\",\"marker\":\"other-mission-noise\"}"
+        (some "member-mission")
+      publishControlEvent (some sseHub) "mission_status_changed"
+        "{\"mission_id\":\"admin-mission\",\"status\":\"awaiting_user\",\"marker\":\"target-mission-signal\"}"
+        (some "admin-mission")
+      let (mFilterWire, mFilterEof) ← drainSseUntil missionStreamFd 1000
+        (fun s => (s.splitOn "target-mission-signal").length > 1)
+      check (!mFilterEof &&
+          (mFilterWire.splitOn "target-mission-signal").length > 1 &&
+          (mFilterWire.splitOn "other-mission-noise").length == 1)
+        s!"SSE (c) mission stream failed to filter out other mission's event: {mFilterWire}"
+
+      -- (e) Disconnect cleanup and `stream_lagged` overflow notice:
+      -- Closing the client socket must unregister its subscriber from `BroadcastHub`, and overflowing
+      -- a live subscriber queue (> 256 frames) must emit `event: stream_lagged` with `dropped > 0`.
+      let subsBeforeClose ← sseHub.mu.atomically do return (← get).2.size
+      check (subsBeforeClose ≥ 1) s!"SSE (e) expected active subscriber before close, got {subsBeforeClose}"
+      discard <| closeFd missionStreamFd
+      let mut subsAfterClose := subsBeforeClose
+      for _ in [0:20] do
+        publishControlEvent (some sseHub) "mission_status_changed"
+          "{\"mission_id\":\"admin-mission\",\"status\":\"running\"}" (some "admin-mission")
+        IO.sleep 25
+        subsAfterClose ← sseHub.mu.atomically do return (← get).2.size
+        if subsAfterClose == 0 then break
+      check (subsAfterClose == 0)
+        s!"SSE (e) closed client socket did not unregister SSE subscriber (remaining={subsAfterClose})"
+
+      let lagFd ← openSseSocket "/api/control/missions/member-mission/stream" (some memberLiveTok)
+      let (_, lagInitEof) ← drainSseUntil lagFd 1000
+        (fun s => (s.splitOn "event: snapshot").length > 1 && (s.splitOn "\n\n").length > 1)
+      check (!lagInitEof) "SSE (e) lag test stream closed prematurely"
+      -- Wait for the server loop to enter `pollReadable` sleep so all 270 frames accumulate in the subscriber queue at once.
+      IO.sleep 15
+      for idx in [0:270] do
+        publishControlEvent (some sseHub) "mission_status_changed"
+          s!"\{\"mission_id\":\"member-mission\",\"status\":\"running\",\"seq_idx\":{idx}}"
+          (some "member-mission")
+      let (lagWire, _) ← drainSseUntil lagFd 1500
+        (fun s => (s.splitOn "event: stream_lagged").length > 1 && (s.splitOn "\"seq_idx\":269").length > 1)
+      discard <| closeFd lagFd
+      check ((lagWire.splitOn "event: stream_lagged").length > 1 &&
+          (lagWire.splitOn "\"dropped\":").length > 1)
+        s!"SSE (e) overflowing 256-frame subscriber queue did not emit stream_lagged: {lagWire}"
+    finally
+      OrbBin.PosixExt.unsetenvVar "ORB_SSE_KEEPALIVE_MS"
+      sseAcceptDone.set true
+      let _ := sseServerTask.get
     -- Disabling/deleting an issuer must stop every previously minted session,
     -- including an external session with no mission id and a shared mission.
     for update in #["UPDATE users SET disabled=1 WHERE id='member';", "DELETE FROM users WHERE id='member';"] do
