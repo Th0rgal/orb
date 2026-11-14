@@ -449,7 +449,7 @@ def dispatchMcpToolCall
       unless ← checkTenantMission parent false do return mcpErr "not_found" "Mission not found"
   -- Vault and host-approval state belong to the server owner. Members cannot
   -- inspect or enqueue owner actions, even with a self-selected operator role.
-  let legacyOwner := !tenantScoped && (← userIsServerOwner store "")
+  let legacyOwner := !tenantScoped && (← getBootstrapAdmin? store).isNone
   let devTool := #["get_dev_access", "deploy_dev", "read_dev_logs", "list_privileged_access"].contains toolName ||
     (toolName == "request_privileged_access" && (args.fieldStr? "scope").getD "" == "dev_operator")
   let ownsDevMission ← if devTool && !claims.isExternal && !callerMid.isEmpty then

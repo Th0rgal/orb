@@ -3678,23 +3678,35 @@ def getBootstrapAdmin? (st : CoreStore) : IO (Option UserRecord) := do
     return some (rowToUserRecord rows[1]!)
 
 /-- Whether `userId` (a stored session issuer or a mission owner) is the server owner: an enabled
-    administrator, or the empty legacy owner. A session or mission stored without a user id can only
-    have been created by the single-tenant owner (members always carry their id), and that owner is
-    the bootstrap administrator once one is stored, so it stays the owner while that administrator
-    is enabled. Without this, creating the administrator record locked the owner's existing
-    sessions out of the vault and personal memory. -/
+    administrator, or the empty legacy owner on an instance that has no stored administrator. -/
 def userIsServerOwner (st : CoreStore) (userId : String) : IO Bool := do
-  if userId.isEmpty then
-    -- No administrator stored at all: the instance is purely single-tenant. Otherwise at least
-    -- one administrator must be enabled; a store error fails closed.
-    match ← execParamQuery st.missionsDb
-        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN disabled=0 THEN 1 ELSE 0 END),0) FROM users WHERE role='admin';" #[] with
-    | .error _ => return false
-    | .ok rows =>
-      let total := ((rows[1]?.bind (·[0]?)).bind String.toNat?).getD 1
-      let enabled := ((rows[1]?.bind (·[1]?)).bind String.toNat?).getD 0
-      return total == 0 || enabled > 0
+  if userId.isEmpty then return (← getBootstrapAdmin? st).isNone
   return ((← getUserById? st userId).map (fun u => !u.disabled && u.role == "admin")).getD false
+
+/-- The single-tenant owner used to authenticate with a signed legacy token whose subject
+    (for example `prod`) was stored as the owner of the sessions, missions and workspaces it
+    created. Once an administrator record exists that same token resolves to the administrator, but
+    the stored rows still name the old subject, so the owner's own sessions stopped being the
+    owner's (vault and personal memory answered "Administrator required"). Called only after such
+    a token has been verified: rows stored under its subject move to the administrator. A subject
+    that is, or ever names, a real user is never touched. -/
+def adoptLegacyOwnerAlias (st : CoreStore) (legacySubject adminId : String) : IO Unit := do
+  let subj := legacySubject.trimAscii.toString
+  if subj.isEmpty || adminId.isEmpty || subj == adminId then return
+  if (← getUserById? st subj).isSome then return
+  discard <| execParamQuery st.projectsDb
+    "CREATE INDEX IF NOT EXISTS idx_mcp_sessions_v1_owner ON mcp_sessions_v1(owner);" #[]
+  match ← execParamQuery st.projectsDb "SELECT 1 FROM mcp_sessions_v1 WHERE owner=?1 LIMIT 1;" #[subj] with
+  | .ok rows =>
+    if rows.size > 1 then
+      discard <| execParamQuery st.projectsDb "UPDATE mcp_sessions_v1 SET owner=?2 WHERE owner=?1;" #[subj, adminId]
+  | .error _ => pure ()
+  match ← execParamQuery st.missionsDb "SELECT 1 FROM missions WHERE owner_user_id=?1 LIMIT 1;" #[subj] with
+  | .ok rows =>
+    if rows.size > 1 then
+      discard <| execParamQuery st.missionsDb "UPDATE missions SET owner_user_id=?2 WHERE owner_user_id=?1;" #[subj, adminId]
+      discard <| execParamQuery st.missionsDb "UPDATE workspaces SET owner_user_id=?2 WHERE owner_user_id=?1;" #[subj, adminId]
+  | .error _ => pure ()
 
 def getUserSpentTodayCents (st : CoreStore) (userId utcDay : String) : IO (UInt64 × UInt64) := do
   if userId.isEmpty then return (0, 0)

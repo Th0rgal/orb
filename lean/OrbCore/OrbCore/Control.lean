@@ -480,6 +480,9 @@ def resolveCallerPrincipal?
         return some (CallerPrincipal.ofUserRecord u singleTenantUnscoped)
       if let some adm ← getBootstrapAdmin? st.store then
         if adm.disabled then return none
+        -- This verified legacy token is the administrator: rows it stored under its old subject
+        -- become the administrator's, so the owner's existing sessions stay the owner's.
+        adoptLegacyOwnerAlias st.store jwtSub adm.id
         return some (CallerPrincipal.ofUserRecord adm singleTenantUnscoped)
       return some {
         userId           := jwtSub
