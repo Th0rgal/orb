@@ -6424,6 +6424,69 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
       s!"(b) bAllAnsOk={bAllAnsOk}; " ++
       s!"(c) cCachedOk={cCachedOk} (elapsedMsC={elapsedMsC}, nippurC={nippurC?.map OrbBin.Json.renderCompact})"))
 
+  -- Plain-HTTP connect timeout (`OrbBin.HttpClient.sendRequest`):
+  -- (a) Listener with backlog 1 + 2 fillers so `connect()` never completes: `sendRequest` with `timeoutMs = 500`
+  --     returns an error within < 3000 ms and the error names a connect timeout (`timed out`).
+  -- (b) Normal loopback `http://` request succeeds with the expected status and body.
+  -- (c) Connection refused (closed port) returns promptly with a connect error.
+  -- (d) No socket fd is leaked on the connect-timeout path (next allocated `openFd` raw descriptor is unchanged).
+  let .ok (httpOkFd, httpOkPort) ← tcpListen "127.0.0.1" 0 4
+    | return (← fail "tcpListen httpOkFd failed")
+  let httpOkTask ← IO.asTask (prio := .dedicated) do
+    if let .ok cfd ← tcpAcceptPoll httpOkFd 5000 then
+      discard <| readCoreHttpRequestFromFd cfd 1000
+      let respBytes := encodeCoreHttpResponse (jsonResponse 200 "{\"hello\":\"world\"}")
+      discard <| writeAll cfd respBytes false
+      discard <| closeFd cfd
+    discard <| closeFd httpOkFd
+  let httpNormalRes ← OrbBin.HttpClient.sendRequest "GET" s!"http://127.0.0.1:{httpOkPort}/ok" #[] ByteArray.empty 2000
+  let _ := httpOkTask.get
+  let gNormalOk := match httpNormalRes with
+    | .ok r => r.status == 200 && String.fromUTF8? r.body == some "{\"hello\":\"world\"}"
+    | .error _ => false
+  let .ok (closedProbeFd, closedPort) ← tcpListen "127.0.0.1" 0 1
+    | return (← fail "tcpListen closedProbeFd failed")
+  discard <| closeFd closedProbeFd
+  let tRefused0 ← IO.monoNanosNow
+  let httpRefusedRes ← OrbBin.HttpClient.sendRequest "GET" s!"http://127.0.0.1:{closedPort}/refused" #[] ByteArray.empty 2000
+  let elapsedRefusedMs := ((← IO.monoNanosNow) - tRefused0) / 1000000
+  let gRefusedOk := match httpRefusedRes with
+    | .ok _ => false
+    | .error e => elapsedRefusedMs < 1500 && (e.splitOn "HTTP connect").length ≥ 2
+  let .ok (gStallListenFd, gStallPort) ← tcpListen "127.0.0.1" 0 1
+    | return (← fail "tcpListen gStallListenFd failed")
+  let .ok gStallFill1 ← tcpConnect "127.0.0.1" gStallPort
+    | do discard <| closeFd gStallListenFd; return (← fail "tcpConnect gStallFill1 failed")
+  let .ok gStallFill2 ← tcpConnect "127.0.0.1" gStallPort
+    | do discard <| closeFd gStallFill1; discard <| closeFd gStallListenFd; return (← fail "tcpConnect gStallFill2 failed")
+  let .ok probeFdBefore ← openFd "/dev/null" 0
+    | return (← fail "openFd /dev/null before connect-timeout test failed")
+  discard <| closeFd probeFdBefore
+  let gReleaseTask ← IO.asTask (prio := .dedicated) do
+    IO.sleep 3500
+    discard <| closeFd gStallListenFd
+    discard <| closeFd gStallFill1
+    discard <| closeFd gStallFill2
+  let tTimeout0 ← IO.monoNanosNow
+  let httpTimeoutRes ← OrbBin.HttpClient.sendRequest "GET" s!"http://127.0.0.1:{gStallPort}/hang" #[] ByteArray.empty 500
+  let elapsedTimeoutMs := ((← IO.monoNanosNow) - tTimeout0) / 1000000
+  let .ok probeFdAfter ← openFd "/dev/null" 0
+    | return (← fail "openFd /dev/null after connect-timeout test failed")
+  discard <| closeFd probeFdAfter
+  let _ := gReleaseTask.get
+  let gTimeoutErr := match httpTimeoutRes with | .error e => e | .ok _ => "unexpected_ok"
+  let gTimeoutOk :=
+    elapsedTimeoutMs < 3000 &&
+    (gTimeoutErr.splitOn "timed out").length ≥ 2 &&
+    (gTimeoutErr.splitOn "HTTP connect").length ≥ 2
+  let gNoFdLeakOk := probeFdAfter.raw == probeFdBefore.raw
+  if !gTimeoutOk || !gNormalOk || !gRefusedOk || !gNoFdLeakOk then
+    return (← fail (s!"plain-HTTP connect-timeout test failed: " ++
+      s!"(a) gTimeoutOk={gTimeoutOk} (elapsedTimeoutMs={elapsedTimeoutMs}, err={gTimeoutErr}); " ++
+      s!"(b) gNormalOk={gNormalOk}; " ++
+      s!"(c) gRefusedOk={gRefusedOk} (elapsedRefusedMs={elapsedRefusedMs}, res={httpRefusedRes.map (·.status)}); " ++
+      s!"(d) gNoFdLeakOk={gNoFdLeakOk} (fdBefore={probeFdBefore.raw}, fdAfter={probeFdAfter.raw})"))
+
   -- 6. Privilege Access & Unified Approval Queue Cross-Client Parity (`shared/orb-spec/fixtures/{privilege-access,approvals}.json`)
   let d1 := computeApprovalDigest "privilege" "a1b2c3d4-0000-4000-8000-000000000010"
     (.obj #[("kind", .str "mission"), ("mission_id", .str "7c1d2e3f-0000-4000-8000-000000000001")])

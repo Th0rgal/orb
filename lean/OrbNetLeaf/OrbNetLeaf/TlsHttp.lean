@@ -68,6 +68,19 @@ private opaque rawUdpRoundtrip
 @[extern "orb_net_leaf_touch_excl_0600"]
 private opaque rawTouchExcl0600 (path : @& String) : IO UInt64
 
+@[extern "orb_net_leaf_tcp_connect"]
+private opaque rawTcpConnect (host : @& String) (port : UInt16) (timeoutMs : UInt32) : IO UInt64
+
+/-- Connect a TCP client socket to `host:port` with a bounded `poll(POLLOUT)` connect timeout (`timeoutMs`),
+    rejecting embedded NUL bytes and returning a typed `LeanSys.Posix.Fd` (or `Errno.eagain` on connect timeout). -/
+def tcpConnectTimed (host : String) (port : UInt16) (timeoutMs : UInt32 := 10000) : IO (SysResult Fd) := do
+  if host.isEmpty || host.toUTF8.toList.any (· == 0) then
+    return .error .einval
+  let w ← rawTcpConnect host port timeoutMs
+  match decodePackedWord w with
+  | .error e => return .error e
+  | .ok fdWord => return decodeFdWord fdWord
+
 /-- Create an exclusive owner-only (`0600`) regular file (`O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC`),
     rejecting embedded NUL bytes and symlink hijacking. -/
 def createExclFile0600 (path : System.FilePath) : IO (Except String Unit) := do

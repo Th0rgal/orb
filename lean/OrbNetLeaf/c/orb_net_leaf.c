@@ -45,27 +45,26 @@ static inline const char *onl_cstr(b_lean_obj_arg s) { const char *p = lean_stri
 static inline lean_obj_res onl_pack(int64_t rc) { return lean_io_result_mk_ok(lean_box_uint64(rc < 0 ? ((1ULL << 63) | ((uint64_t)(uint32_t)errno << 32)) : ((uint64_t)rc & 0x7FFFFFFFFFFFFFFFULL))); }
 static int onl_try_sock(struct addrinfo *ai, int pms, struct timeval *tv, int socktype) {
     int fd = socket(ai->ai_family, ai->ai_socktype | SOCK_CLOEXEC, ai->ai_protocol), fl = fd >= 0 ? fcntl(fd, F_GETFL, 0) : -1, one = 1;
-    int rc = (fd >= 0 && fl >= 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 && fcntl(fd, F_SETFL, fl | O_NONBLOCK) == 0) ? connect(fd, ai->ai_addr, ai->ai_addrlen) : -1;
-    if (rc < 0 && errno == EINPROGRESS && poll(&(struct pollfd){ .fd = fd, .events = POLLOUT }, 1, pms) == 1) {
-        int se = -1; socklen_t sl = sizeof(se); rc = (getsockopt(fd, SOL_SOCKET, SO_ERROR, &se, &sl) == 0 && se == 0) ? 0 : -1;
-    }
+    int rc = (fd >= 0 && fl >= 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 && fcntl(fd, F_SETFL, fl | O_NONBLOCK) == 0) ? connect(fd, ai->ai_addr, ai->ai_addrlen) : -1, p = rc < 0 && errno == EINPROGRESS ? poll(&(struct pollfd){ .fd = fd, .events = POLLOUT }, 1, pms) : 0;
+    if (p == 1) { int se = -1; socklen_t sl = sizeof(se); rc = (getsockopt(fd, SOL_SOCKET, SO_ERROR, &se, &sl) == 0 && se == 0) ? 0 : (errno = se ? se : EIO, -1); } else if (rc < 0 && errno == EINPROGRESS && p == 0) errno = EAGAIN;
     if (rc == 0 && fcntl(fd, F_SETFL, fl) == 0 && setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, tv, sizeof(*tv)) == 0 && setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, tv, sizeof(*tv)) == 0) {
         if (socktype == SOCK_STREAM) { (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)); (void)setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one)); }
         return fd;
     }
-    return fd >= 0 ? (close(fd), -1) : -1;
+    int saved = errno ? errno : EIO; return fd >= 0 ? (close(fd), errno = saved, -1) : (errno = saved, -1);
 }
 static int onl_connect_sock(const char *h, uint16_t port, int socktype, uint32_t timeout_ms) {
-    if (!h || !*h) return -1;
+    if (!h || !*h) return errno = EINVAL, -1;
     char pstr[8]; snprintf(pstr, sizeof(pstr), "%u", (unsigned)port); struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = socktype }, *res = NULL;
-    if (getaddrinfo(h, pstr, &hints, &res) != 0 || !res) return -1;
-    int fd = -1; uint32_t ms = timeout_ms ? timeout_ms : 30000U; int pms = ms > 0x7FFFFFFFU ? 0x7FFFFFFF : (int)ms;
+    if (getaddrinfo(h, pstr, &hints, &res) != 0 || !res) return errno = EINVAL, -1;
+    int fd = -1, saved = EIO; uint32_t ms = timeout_ms ? timeout_ms : 30000U; int pms = ms > 0x7FFFFFFFU ? 0x7FFFFFFF : (int)ms;
     struct timeval tv = { .tv_sec = (time_t)(ms / 1000U), .tv_usec = (suseconds_t)((ms % 1000U) * 1000U) };
     for (int pass = 0; pass < 2 && fd < 0; ++pass)
         for (struct addrinfo *ai = res; ai && fd < 0; ai = ai->ai_next)
-            if ((ai->ai_family == AF_INET) == (pass == 0)) fd = onl_try_sock(ai, ai->ai_next && pms > 2000 ? 2000 : pms, &tv, socktype);
-    return freeaddrinfo(res), fd;
+            if ((ai->ai_family == AF_INET) == (pass == 0)) { fd = onl_try_sock(ai, ai->ai_next && pms > 2000 ? 2000 : pms, &tv, socktype); if (fd < 0) saved = errno; }
+    return freeaddrinfo(res), errno = saved, fd;
 }
+LEAN_EXPORT lean_obj_res orb_net_leaf_tcp_connect(b_lean_obj_arg host, uint16_t port, uint32_t timeout_ms) { const char *h = onl_cstr(host); return onl_pack(h ? onl_connect_sock(h, port, SOCK_STREAM, timeout_ms) : (errno = EINVAL, -1)); }
 LEAN_EXPORT lean_obj_res orb_net_leaf_rand_bytes(size_t n) {
     if (n > 0x40000000ULL) return lean_io_result_mk_ok(lean_alloc_sarray(1, 0, 0));
     lean_object *out = lean_alloc_sarray(1, 0, n);
