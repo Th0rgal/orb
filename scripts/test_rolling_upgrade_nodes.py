@@ -119,6 +119,22 @@ def _start_core_api_server(cordoned):
 
 
 class RollingUpgradeNodesTest(unittest.TestCase):
+    def test_zombie_children_do_not_hold_the_drain(self):
+        # A finished child the worker never reaped must not count as running work.
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        deadline = time.time() + 5
+        while time.time() < deadline and not roll._is_zombie(str(child.pid)):
+            time.sleep(0.05)
+        self.assertTrue(roll._is_zombie(str(child.pid)))
+        live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
+        try:
+            self.assertFalse(roll._is_zombie(str(live.pid)))
+        finally:
+            live.kill()
+            live.wait()
+        child.wait()
+        self.assertTrue(roll._is_zombie("999999999"))
+
     def test_wave_cordon_cap_probe_error_fail_closed_and_completion(self):
         cordoned = {"ashur": True, "nippur": True, "babylon": True, "old-agent": True}
         server = _start_core_api_server(cordoned)

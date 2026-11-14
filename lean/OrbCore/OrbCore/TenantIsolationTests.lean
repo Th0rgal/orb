@@ -697,7 +697,7 @@ def run (root : String) : IO Unit := do
     ]
     let stripGeneratedAt (jv : JVal) : JVal :=
       match jv with
-      | .obj kvs => .obj (kvs.filter (fun (k, _) => k != "generated_at" && k != "window_start"))
+      | .obj kvs => .obj (kvs.filter (fun (k, _) => k != "generated_at" && k != "window_start" && k != "since"))
       | other => other
     let mut adminSiblingDocs : Array JVal := #[]
     for (routeName, target) in siblingRoutes do
@@ -779,8 +779,37 @@ def run (root : String) : IO Unit := do
     let mHealthRows := mHealthDoc.asArr?.getD #[]
     check (mHealthRows.size == 2 &&
       (mHealthRows[0]?.bind (·.fieldStr? "account_id")) == some "prov-anth-1" &&
-      (mHealthRows[1]?.bind (·.fieldStr? "account_id")) == some "prov-anth-2")
+      (mHealthRows[1]?.bind (·.fieldStr? "account_id")) == some "prov-anth-2" &&
+      mHealthRows.all (fun r =>
+        r.fieldStr? "provider_id" == some "anthropic" &&
+        r.fieldUInt64? "cooldown_remaining_secs" == r.fieldUInt64? "cooldown_secs_remaining" &&
+        r.fieldBool? "is_healthy" == some true &&
+        r.fieldBool? "is_degraded" == some false))
       "member /api/model-routing/health keeps only enabled configured providers"
+    let (_, mProxyHealthDoc) ← send "GET" "/api/ai/proxy/health" member (.obj #[]) stWithProviders
+    let mProxyTot := mProxyHealthDoc.fieldOrNull "totals"
+    check (mProxyHealthDoc.field? "since" == mProxyHealthDoc.field? "window_start" &&
+      mProxyHealthDoc.fieldArr? "groups" == some #[] &&
+      mProxyHealthDoc.fieldArr? "chains" == some #[] &&
+      mProxyTot.fieldNat? "requests" == some 0 &&
+      mProxyTot.fieldNat? "ok" == some 0 &&
+      mProxyTot.fieldNat? "retried" == some 0 &&
+      (mProxyTot.field? "fell_back").isNone &&
+      mProxyTot.field? "errors" == some (.obj #[]))
+      "member /api/ai/proxy/health returns empty groups, chains, and zeroed totals"
+    let (_, mUsageDoc) ← send "GET" "/api/ai/usage/summary" member (.obj #[]) stWithProviders
+    let mUsageTot := mUsageDoc.fieldOrNull "totals"
+    check (mUsageDoc.field? "since" == mUsageDoc.field? "window_start" &&
+      mUsageTot.fieldNat? "requests" == some 0 &&
+      mUsageTot.fieldNat? "events" == some 0 &&
+      (mUsageTot.field? "cost_cents").isNone &&
+      (mUsageTot.field? "unknown_cost_requests").isNone &&
+      mUsageDoc.fieldArr? "by_route" == some #[] &&
+      mUsageDoc.fieldArr? "by_root_mission" == some #[] &&
+      mUsageDoc.fieldArr? "by_hour" == some #[] &&
+      mUsageDoc.fieldArr? "by_day" == some #[] &&
+      mUsageDoc.fieldArr? "by_mission" == some #[])
+      "member /api/ai/usage/summary returns zeroed totals and empty breakdown arrays"
     -- Held-open SSE streams (`GET /api/control/stream` and `GET /api/control/missions/:id/stream`)
     -- over real loopback TCP sockets before disabling/deleting the member principal.
     sql store.missionsDb "DELETE FROM mission_shares WHERE mission_id='admin-mission' AND user_id='member';"
