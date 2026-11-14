@@ -1175,20 +1175,21 @@ structure CoreHttpResponse where
     The stream ends when the client disconnects or the caller's session is no longer valid. -/
 def sseStreamResponse (st : CoreAppState) (caller : CallerPrincipal) (reqOrigin? : Option String)
     (missionFilter? : Option String) (kindsFilter : Array String) (initialFrame : String)
-    (preRegisteredSub? : Option SseSubscriber := none) : CoreHttpResponse :=
+    (preRegisteredSub? : Option SseSubscriber := none)
+    (reqHdrs : Array (String × String) := #[]) : CoreHttpResponse :=
   let visibleMissionUncached (liveCaller : CallerPrincipal) (mid? : Option String) : IO Bool := do
     match mid? with
     | none =>
+      if missionFilter?.isSome then return false
       return liveCaller.isLegacyUnscoped || liveCaller.role == "admin"
     | some mid =>
       if mid.isEmpty then
+        if missionFilter?.isSome then return false
         return liveCaller.isLegacyUnscoped || liveCaller.role == "admin"
-      if liveCaller.isLegacyUnscoped || liveCaller.role == "admin" then
-        if let some want := missionFilter? then
-          return want == mid
-        return true
       if let some want := missionFilter? then
         if want != mid then return false
+      if liveCaller.isLegacyUnscoped then
+        return true
       return (← authorizeMissionOp st liveCaller mid false).isNone
   let kindsAllows (evType : String) : Bool :=
     if kindsFilter.isEmpty then true
@@ -1196,12 +1197,16 @@ def sseStreamResponse (st : CoreAppState) (caller : CallerPrincipal) (reqOrigin?
             evType == "missions_snapshot" || evType == "snapshot" then true
     else kindsFilter.contains evType
   let resolveLiveCaller? : IO (Option CallerPrincipal) := do
-    if caller.isLegacyUnscoped then return some caller
-    match ← getUserById? st.store caller.userId with
-    | none => return none
-    | some u =>
-      if u.disabled || u.sessionEpoch != caller.sessionEpoch then return none
-      return some (CallerPrincipal.ofUserRecord u false)
+    if !reqHdrs.isEmpty then
+      resolveCallerPrincipal? st reqHdrs (← coreEpochSec) (allowWsSubproto := true)
+    else if caller.isLegacyUnscoped then
+      return some caller
+    else
+      match ← getUserById? st.store caller.userId with
+      | none => return none
+      | some u =>
+        if u.disabled || u.sessionEpoch != caller.sessionEpoch then return none
+        return some (CallerPrincipal.ofUserRecord u false)
   {
     status := 200
     contentType := "text/event-stream"
@@ -1247,7 +1252,7 @@ def sseStreamResponse (st : CoreAppState) (caller : CallerPrincipal) (reqOrigin?
                 let allowed ← match ev.missionId? with
                   | none => visibleMissionUncached liveCaller none
                   | some mid =>
-                    if liveCaller.isLegacyUnscoped || liveCaller.role == "admin" then
+                    if liveCaller.isLegacyUnscoped then
                       visibleMissionUncached liveCaller (some mid)
                     else
                       let evNowMs ← IO.monoMsNow
@@ -1255,7 +1260,7 @@ def sseStreamResponse (st : CoreAppState) (caller : CallerPrincipal) (reqOrigin?
                       | some (_, _, ok) => pure ok
                       | none =>
                         let ok ← visibleMissionUncached liveCaller (some mid)
-                        missionVisCache := (missionVisCache.filter (fun (m, _, _) => m != mid)).push (mid, evNowMs, ok)
+                        missionVisCache := (missionVisCache.filter (fun (m, ts, _) => m != mid && evNowMs - ts < missionVisTtlMs)).push (mid, evNowMs, ok)
                         pure ok
                 if allowed && kindsAllows ev.eventType then
                   if !(← emit ev.frame.toUTF8) then
@@ -4386,7 +4391,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | .ok pg => pure pg.eventsJson
         | .error _ => pure "[]"
       let initFrame := formatSseFrame "snapshot" s!"\{\"mission_id\":{jsonEscape mid},\"events\":{evJson}}" (some 1)
-      return .ok (sseStreamResponse st caller reqOrigin? (some mid) effKinds initFrame preSub?)
+      return .ok (sseStreamResponse st caller reqOrigin? (some mid) effKinds initFrame preSub? req.headers)
     let preSub? ← match st.broadcastHub? with
       | some hub => some <$> registerSseSubscriberFull hub none
       | none => pure none
@@ -4395,7 +4400,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       | .ok j => pure j
       | .error _ => pure "[]"
     let initFrame := formatSseFrame "missions_snapshot" s!"\{\"missions\":{listBody}}" (some 1)
-    return .ok (sseStreamResponse st caller reqOrigin? none effKinds initFrame preSub?)
+    return .ok (sseStreamResponse st caller reqOrigin? none effKinds initFrame preSub? req.headers)
 
   if let some params := matchRoutePattern? "/api/control/missions/:id/stream" rawTarget then
     if req.method == "GET" then
@@ -4411,7 +4416,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | .ok pg => pure pg.eventsJson
         | .error _ => pure "[]"
       let initFrame := formatSseFrame "snapshot" s!"\{\"mission_id\":{jsonEscape mid},\"events\":{evJson}}" (some 1)
-      return .ok (sseStreamResponse st caller reqOrigin? (some mid) #[] initFrame preSub?)
+      return .ok (sseStreamResponse st caller reqOrigin? (some mid) #[] initFrame preSub? req.headers)
 
   if req.method == "GET" && cleanPath == "/api/control/sync" then
     let callerOpt := if caller.isLegacyUnscoped then none else some caller.userId
