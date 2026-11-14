@@ -677,6 +677,14 @@ Live builds at 23:31Z (health endpoints, 9-character `build` resolved in the rep
 - **H-core Task 5**: Part A (routing health keys) pushed at `3e133534`, not reviewed yet; branch conflicts with master in `docs/model-routing-health-cooldowns.md` (based on the pre-squash #1754 commits); rebase requested.
 - Real SSE for `GET /api/control/stream`: still not dispatched (D2 after the idle budget).
 
+**Update 02:30 (coordinator).**
+
+- Merged: #1756 (settings pages tolerate Core reply shapes, `ce029bec`) and #1755 (mission search route no longer shadowed, `6ed24089`). Master CI is green on both; Kernel ABI on `6ed24089` was still running at 02:31Z. Live build on prod and dev at 02:31Z: `c5d2f78e9` (does not contain #1754, #1755, #1756).
+- Open, waiting for CI: **#1757** (one idle budget before the stream head; a timeout is told apart from a closed connection). Its first CI run failed three jobs on one lint finding (`lean-finally-let-mut` in `Control.lean`): the `finally` block read a `let mut` set inside the `try`, which is always the old value. The coordinator missed it in review (the diff was read, the lint was not run) and fixed it in `cbff919e`. From now on `python3 scripts/lint_kernel_calls.py` is run on the agent node before any publish.
+- Open, waiting for CI: **#1758** (`/api/remote-nodes` waits at most 2500 ms for static-node probes). Limits written in the PR: the stuck probe thread is not stopped (one thread and one socket per unreachable node per request, for about 130 s); `POST /api/nodes/:name/capacity` is still unbounded; a connect timeout in the plain-HTTP client is the complete fix and has no owner.
+- D2 (uruk) is on two tasks, both based on the #1757 branch: a test that fails if the shared pre-head budget is removed, then a real held-open SSE stream for `/api/control/stream` and `/api/control/missions/:id/stream` with per-caller scoping.
+- H-core Task 5 (additive Core keys for the three settings pages): routing health accepted; proxy health sent back with four points (01:58Z); usage summary sent back with five points (02:22Z). The main one: `by_api_key` would have shown one mission's execution key (`remote-launch:<mission id>`) as a label, because that is what the only writer stores in `api_key_name`. Nothing of Task 5 is published.
+
 **Still open, no owner.** Track A / #1708; lean.ci PR #34 fence review
 (interdiff unread, lean runners stay on hold); isolation acceptance and
 managed-lifecycle live validation (need the `dev_operator` grant
