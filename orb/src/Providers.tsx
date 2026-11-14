@@ -18,6 +18,7 @@ import { Toggle } from "./Toggle";
 import { For, Show, type JSX, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import * as Ic from "./icons";
 import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
+import { canManageProvider, providerWriteError } from "./providerPermissions";
 import {
   api,
   getApiUrl,
@@ -337,7 +338,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
     const account = removing(); if (!account || removeBusy()) return;
     setRemoveBusy(true);
     try { await api(`/api/ai/providers/${encodeURIComponent(account.id)}`, {method: "DELETE"}); setRowOpen(account.id, false); setRemoving(null); p.onRefresh(); }
-    catch (error) { setRemoveError(String(error)); }
+    catch (error) { setRemoveError(providerWriteError(error, "Couldn’t remove the account. Check the connection and try again.")); }
     finally { setRemoveBusy(false); }
   };
   onMount(() => {
@@ -389,15 +390,14 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
   };
   /** Position of `a` among its provider's accounts in `group`, when there are several. */
   const rankIn = (group: () => AIProvider[], a: AIProvider): AccountRank | undefined => {
-    if (!isAdminUser()) return undefined;
     const peers = group().filter(x => x.provider_type === a.provider_type);
     if (peers.length < 2) return undefined;
     return { index: peers.findIndex(x => x.id === a.id), count: peers.length, move: to => reorder(group(), a, to) };
   };
   const toggle = (a: AIProvider, enabled: boolean) => {
     setToggleError(null);
-    const req = isAdminUser() ? setProviderEnabled(a.id, enabled) : setProviderUserPreference(a.id, enabled);
-    void req.then(p.onRefresh, () => setToggleError(`Could not ${enabled ? "enable" : "disable"} ${a.name}. Nothing changed.`));
+    const req = canManageProvider(a) ? setProviderEnabled(a.id, enabled) : setProviderUserPreference(a.id, enabled);
+    void req.then(p.onRefresh, (e) => setToggleError(providerWriteError(e, `Could not ${enabled ? "enable" : "disable"} ${a.name}. Nothing changed.`)));
   };
   const toggleUserPref = (a: AIProvider, enabled: boolean) => {
     setToggleError(null);
@@ -507,7 +507,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
       <p class="s-lead">
         {isAdminUser()
           ? "Subscriptions, cloud connectors, and API keys on the connected Core backend."
-          : "Shared inference accounts on Core. Toggle which accounts your missions may use."}
+          : "Shared inference accounts on Core. Add accounts to the shared pool and choose which ones your missions may use."}
         <Show when={currentUser()?.daily_spend_cap_cents ?? undefined}>
           {(cap) => ` · Daily cap ${formatUsdFromCents(currentUser()?.spent_today_cents ?? 0)} / ${formatUsdFromCents(cap())}`}
         </Show>
@@ -518,13 +518,11 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
       <section class="s-sec">
         <div class="section-row">
           <h3>Subscriptions</h3>
-          <Show when={isAdminUser()}>
-            <button class="s-btn sm quiet" disabled={!loginOptions()?.available} onClick={() => { setAddType(loginOptions()?.providers[0]?.id ?? ""); setAdding(true); }}><Ic.PlusIcon size={12}/> Add subscription account</button>
-          </Show>
+          <button class="s-btn sm quiet" disabled={!loginOptions()?.available} onClick={() => { setAddType(loginOptions()?.providers[0]?.id ?? ""); setAdding(true); }}><Ic.PlusIcon size={12}/> Add subscription account</button>
         </div>
-        <Show when={isAdminUser() && loginOptions()?.reason}><p class="s-row-desc">{loginOptions()?.reason}</p></Show>
+        <Show when={loginOptions()?.reason}><p class="s-row-desc">{loginOptions()?.reason}</p></Show>
         <div class="s-card">
-          <AccountGroups accounts={oauth()} usage={usage()} health={p.health} isOpen={groupOpen} onToggle={toggleGroup} row={(a: AIProvider) => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} rank={rankIn(oauth, a)} usage={usage()[a.id]} sharedOrgs={sharedOrgs()} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={isAdminUser() ? () => setReauth(a) : undefined} onRemove={isAdminUser() ? () => { setRemoveError(null); setRemoving(a); } : undefined} onToggle={enabled => toggle(a, enabled)} onToggleUserPref={enabled => toggleUserPref(a, enabled)} onUseReset={isAdminUser() ? () => setResetting(a) : undefined} onToggleAutoReset={isAdminUser() ? autoReset => toggleAutoReset(a, autoReset) : undefined} />} />
+          <AccountGroups accounts={oauth()} usage={usage()} health={p.health} isOpen={groupOpen} onToggle={toggleGroup} row={(a: AIProvider) => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} rank={rankIn(oauth, a)} usage={usage()[a.id]} sharedOrgs={sharedOrgs()} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={canManageProvider(a) ? () => setReauth(a) : undefined} onRemove={canManageProvider(a) ? () => { setRemoveError(null); setRemoving(a); } : undefined} onToggle={enabled => toggle(a, enabled)} onToggleUserPref={enabled => toggleUserPref(a, enabled)} onUseReset={isAdminUser() ? () => setResetting(a) : undefined} onToggleAutoReset={isAdminUser() ? autoReset => toggleAutoReset(a, autoReset) : undefined} />} />
           <Show when={oauth().length === 0}>
             <div class="s-row"><div class="s-row-desc">No subscription accounts connected.</div></div>
           </Show>
@@ -536,7 +534,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
           <h3>Model connections</h3>
           <p class="s-row-desc p-section-description">Model access through connected credentials, separate from subscription accounts.</p>
           <div class="s-card">
-            <For each={modelConnections()}>{a => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} usage={usage()[a.id]} health={p.health?.[a.id]} onReconnect={isAdminUser() ? () => setReauth(a) : undefined} onToggle={enabled => toggle(a, enabled)} onToggleUserPref={enabled => toggleUserPref(a, enabled)} />}</For>
+            <For each={modelConnections()}>{a => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} usage={usage()[a.id]} health={p.health?.[a.id]} onReconnect={canManageProvider(a) ? () => setReauth(a) : undefined} onToggle={enabled => toggle(a, enabled)} onToggleUserPref={enabled => toggleUserPref(a, enabled)} />}</For>
           </div>
         </section>
       </Show>
@@ -548,13 +546,11 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
       <section class="s-sec">
         <div class="section-row">
           <h3>API keys</h3>
-          <Show when={isAdminUser()}>
-            <button class="s-btn sm quiet" onClick={() => setKeyEditor("new")}><Ic.PlusIcon size={12}/> Add API key</button>
-          </Show>
+          <button class="s-btn sm quiet" onClick={() => setKeyEditor("new")}><Ic.PlusIcon size={12}/> Add API key</button>
         </div>
         <div class="s-card">
           <For each={keys()}>
-            {(a) => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} rank={rankIn(keys, a)} usage={usage()[a.id]} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={isAdminUser() ? () => setReauth(a) : undefined} onEditKey={isAdminUser() ? () => setKeyEditor(a) : undefined} onRemove={isAdminUser() ? () => { setRemoveError(null); setRemoving(a); } : undefined} onToggle={enabled => toggle(a, enabled)} onToggleUserPref={enabled => toggleUserPref(a, enabled)} />}
+            {(a) => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} rank={rankIn(keys, a)} usage={usage()[a.id]} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={canManageProvider(a) ? () => setReauth(a) : undefined} onEditKey={canManageProvider(a) ? () => setKeyEditor(a) : undefined} onRemove={canManageProvider(a) ? () => { setRemoveError(null); setRemoving(a); } : undefined} onToggle={enabled => toggle(a, enabled)} onToggleUserPref={enabled => toggleUserPref(a, enabled)} />}
           </For>
           <Show when={keys().length === 0}>
             <div class="s-row"><div class="s-row-desc">No API keys configured.</div></div>
@@ -758,7 +754,7 @@ function ApiKeyDialog(p: {provider?: AIProvider; onClose: () => void; onDone: ()
         body: JSON.stringify(payload),
       });
       setSecret(""); if (version === connectionVersion()) p.onDone();
-    } catch { setError("Couldn’t save the provider settings. Check the connection and try again."); }
+    } catch (e) { setError(providerWriteError(e, "Couldn’t save the provider settings. Check the connection and try again.")); }
     finally { setBusy(false); }
   };
   return <Dialog title={p.provider ? "Edit API key" : "Add API key"} dirty={dirty()} description={p.provider ? `Update the key or router pacing limits stored for ${p.provider.name}.` : "Choose a provider and enter an API key to store on the connected backend."} busy={busy()} onClose={p.onClose}
@@ -897,7 +893,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
         .catch((e: Error) => {
           if (disposed || generation !== pollGeneration) return;
           stopPolling();
-          setError(e.message);
+          setError(providerWriteError(e, e.message));
           setPhase("failed");
         });
     }, 2000);
@@ -917,7 +913,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
         void openExternalUrl(s.url).catch(e => setError(String(e)));
       })
       .catch((e: Error) => {
-        setError(e.message);
+        setError(providerWriteError(e, e.message));
         setPhase("failed");
       });
   };
@@ -960,7 +956,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
         }
       })
       .catch((e: Error) => {
-        setError(e.message);
+        setError(providerWriteError(e, e.message));
         setPhase("failed");
       });
   };
@@ -1247,10 +1243,12 @@ function RankControls(p: { rank: AccountRank; name: string; title: string }) {
 
 const RANK_DRAG_TYPE = "application/x-orb-account-rank";
 
+
 function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boolean) => void; rank?: AccountRank; usage?: ProviderUsage; sharedOrgs?: Set<string>; health?: AccountHealthSnapshot; onUsage?: (usage: ProviderUsage) => void; onReconnect?: () => void; onEditKey?: () => void; onRemove?: () => void; onToggle: (enabled: boolean) => void; onToggleUserPref?: (enabled: boolean) => void; onUseReset?: () => void; onToggleAutoReset?: (autoReset: boolean) => Promise<boolean> }) {
   const a = p.a;
   const globallyDisabled = () => a.globally_enabled === false || (a.globally_enabled === undefined && a.enabled === false);
   const userSkipped = () => a.user_enabled === false;
+  const manages = () => canManageProvider(a);
   const rowDisabled = () => globallyDisabled() || (!isAdminUser() && userSkipped());
   const status = () => effectiveProviderStatus(a, p.usage, p.health);
   const quota = () => p.usage ? quotaStatus(usageWindows(p.usage)) : null;
@@ -1275,7 +1273,7 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
   // Quota severity uses the shared level colors (warning 80-99%, danger exhausted).
   const stClass = () => status() === "connected" ? "connected" : ["quota_exhausted", "pool_exhausted", "out_of_credit"].includes(status()) ? "exhausted" : status() === "quota_warning" ? "warning" : ["needs_reauth", "needs_verification", "error", "auth_failed"].includes(status()) ? "needs_reauth" : "not_configured";
   // Core's `ready` means credentials are saved, not that a live authentication probe succeeded.
-  const stLabel = () => (!isAdminUser() && globallyDisabled() ? "Disabled by admin" : !isAdminUser() && userSkipped() ? "Skipped for your missions" : ({ connected: "Connected", ready: "Configured", disabled: "Disabled", needs_reauth: "Reconnect", needs_verification: "Verification required", quota_exhausted: quota()?.level === "exhausted" ? quota()!.label : "Quota exhausted", pool_exhausted: quota()?.label || "Quota exhausted", quota_warning: quota()?.label || "Connected", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown"));
+  const stLabel = () => (!manages() && globallyDisabled() ? "Disabled by admin" : !isAdminUser() && userSkipped() ? "Skipped for your missions" : ({ connected: "Connected", ready: "Configured", disabled: "Disabled", needs_reauth: "Reconnect", needs_verification: "Verification required", quota_exhausted: quota()?.level === "exhausted" ? quota()!.label : "Quota exhausted", pool_exhausted: quota()?.label || "Quota exhausted", quota_warning: quota()?.label || "Connected", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown"));
   // Pool names and percentages already live in the quota summary.
   const statusText = () => a.provider_type === "antigravity" && quota()
     ? ["quota_exhausted", "pool_exhausted"].includes(status()) ? "Limit reached"
@@ -1309,8 +1307,14 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
     : p.usage?.muse_plan || p.usage?.mistral_plan || undefined;
   const title = () => a.provider_type === "antigravity" ? "Google Antigravity" : a.provider_type === "google" ? (a.has_api_key && !a.has_oauth ? "Gemini API" : "Gemini model access") : email() ? a.name.replace(`(${email()})`, "").trim() : a.name;
   const menuItems = (): MenuEntry[] => {
-    if (!isAdminUser()) {
+    if (!manages()) {
+      const memberRank: MenuEntry[] = [
+        ...(p.rank && p.rank.index > 0 ? [{ kind: "item" as const, label: "Try earlier", icon: Ic.FindPrevIcon, onClick: () => p.rank!.move(p.rank!.index - 1) }] : []),
+        ...(p.rank && p.rank.index < p.rank.count - 1 ? [{ kind: "item" as const, label: "Try later", icon: Ic.FindNextIcon, onClick: () => p.rank!.move(p.rank!.index + 1) }] : []),
+      ];
       return [
+        ...memberRank,
+        ...(memberRank.length > 0 ? [{ kind: "sep" as const }] : []),
         {
           kind: "item",
           label: userSkipped() ? "Use for my missions" : "Skip for my missions",
@@ -1370,6 +1374,9 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
                 <Show when={status() !== "connected" || !!plan()}><span class="p-dot">·</span></Show>
                 {[a.rpm_limit != null ? `${a.rpm_limit} RPM` : null, a.max_concurrency != null ? `${a.max_concurrency} concurrent` : null].filter(Boolean).join(" · ")}
               </span>
+            </Show>
+            <Show when={a.created_by_username && (isAdminUser() || a.added_by_me)}>
+              <span class="p-plan" data-testid="provider-added-by"><span class="p-dot">·</span>{a.added_by_me ? "Added by you" : `Added by ${a.created_by_username}`}</span>
             </Show>
             <Show when={["quota_exhausted", "pool_exhausted", "quota_warning"].includes(status()) && resetInfo()}>
               {r => <span class="p-plan" data-testid="subscription-reset-hint"><span class="p-dot">·</span>{r().badge}</span>}

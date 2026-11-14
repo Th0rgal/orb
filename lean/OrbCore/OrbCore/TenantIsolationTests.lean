@@ -12,6 +12,107 @@ private def check (condition : Bool) (label : String) : IO Unit := do
 set_option maxHeartbeats 800000
 set_option maxRecDepth 200000
 
+/-- Owner decision 2026-11-14 (docs/MULTI_USER.md "Shared inference providers"): members add
+    and edit shared accounts, never read credentials, delete only what they added, and every
+    member write is audited by field name only. -/
+def memberSharedProviderRules
+    (send : String → String → String → JVal → CoreAppState → IO (Nat × JVal))
+    (member admin : String) (app : CoreAppState) (store : CoreStore) (ownerName : String) : IO Unit := do
+  let secret := "sk-member-probe-secret-marker"
+  let has (doc : JVal) (m : String) := ((renderCompact doc).splitOn m).length > 1
+  -- member_add_api_key_account_is_write_only_and_server_ids
+  let (addSt, added) ← send "POST" "/api/ai/providers" member (.obj #[("id", .str "prov-anth-1"),
+    ("provider_type", .str "openai"), ("name", .str "ben-probe"), ("api_key", .str secret)]) app
+  let probeId := (added.fieldStr? "id").getD ""
+  check (addSt == 201 && !probeId.isEmpty && probeId != "prov-anth-1" &&
+    added.fieldStr? "created_by_user_id" == some "member" && !has added secret)
+    s!"member_add_api_key_account_is_write_only_and_server_ids (got {addSt})"
+  let some ownerRow ← getAIProvider? store "prov-anth-1" | check false "owner row survives member add"
+  check (ownerRow.apiKey == "sk-ant-secret-key-marker-1" && ownerRow.createdByUserId.isEmpty)
+    "member_add_cannot_overwrite_owner_account"
+  -- member_sees_full_own_account_and_reduced_others
+  let (_, mList) ← send "GET" "/api/ai/providers" member (.obj #[]) app
+  let rows := mList.asArr?.getD #[]
+  let own := (rows.find? (·.fieldStr? "id" == some probeId)).getD .null
+  check (own.fieldStr? "name" == some "ben-probe" && own.fieldBool? "added_by_me" == some true &&
+    own.fieldStr? "created_by_username" == some "member" && !has mList secret && !has mList ownerName &&
+    !has mList "sk-ant-secret" && !has mList "admin-provider-name-marker-beta")
+    "member_sees_full_own_account_and_reduced_others"
+  let (_, mDetail) ← send "GET" s!"/api/ai/providers/{probeId}" member (.obj #[]) app
+  check (mDetail.fieldStr? "name" == some "ben-probe" && !has mDetail secret) "member_get_own_account_detail_without_key"
+  -- member_edit_own_account_settings_and_rotate_key
+  let (editSt, edited) ← send "PUT" s!"/api/ai/providers/{probeId}" member (.obj #[("name", .str "ben-probe-2"),
+    ("rpm_limit", .nat 30), ("enabled", .bool false), ("api_key", .str (secret ++ "-rotated"))]) app
+  let some stored ← getAIProvider? store probeId | check false "probe row stored"
+  check (editSt == 200 && edited.fieldStr? "name" == some "ben-probe-2" && !has edited secret &&
+    stored.apiKey == secret ++ "-rotated" && stored.rpmLimit? == some 30 && !stored.enabled &&
+    stored.createdByUserId == "member")
+    s!"member_edit_own_account_settings_and_rotate_key (got {editSt})"
+  -- member_edit_shared_owner_account_settings_reduced_response
+  let (shSt, shDoc) ← send "PUT" "/api/ai/providers/prov-anth-1" member (.obj #[("name", .str "member-renamed"),
+    ("rpm_limit", .nat 99)]) app
+  let some ownerAfter ← getAIProvider? store "prov-anth-1" | check false "owner row after member edit"
+  check (shSt == 200 && ownerAfter.name == "member-renamed" && ownerAfter.rpmLimit? == some 99 &&
+    ownerAfter.apiKey == "sk-ant-secret-key-marker-1" && !has shDoc "sk-ant-secret" && (shDoc.field? "base_url").isNone)
+    s!"member_edit_shared_owner_account_settings_reduced_response (got {shSt})"
+  -- member_cannot_replace_owner_credentials_or_endpoint
+  let (keySt, _) ← send "PUT" "/api/ai/providers/prov-anth-1" member (.obj #[("api_key", .str "sk-hijack")]) app
+  let (urlSt, _) ← send "PUT" "/api/ai/providers/prov-anth-1" member (.obj #[("base_url", .str "https://evil.example")]) app
+  let some ownerKept ← getAIProvider? store "prov-anth-1" | check false "owner row kept"
+  check (keySt == 403 && urlSt == 403 && ownerKept.apiKey == "sk-ant-secret-key-marker-1")
+    s!"member_cannot_replace_owner_credentials_or_endpoint (key {keySt}, url {urlSt})"
+  let (restoreSt, _) ← send "PUT" "/api/ai/providers/prov-anth-1" admin (.obj #[("name", .str ownerName), ("rpm_limit", .nat 4321)]) app
+  check (restoreSt == 200) "admin restores owner fixture"
+  -- member_base_url_only_public_https_on_custom
+  let (bu1, _) ← send "POST" "/api/ai/providers" member (.obj #[("provider_type", .str "anthropic"),
+    ("name", .str "x"), ("base_url", .str "https://api.example.com")]) app
+  let (bu2, _) ← send "POST" "/api/ai/providers" member (.obj #[("provider_type", .str "custom"),
+    ("name", .str "x"), ("base_url", .str "http://127.0.0.1:3002")]) app
+  let (bu3, _) ← send "POST" "/api/ai/providers" member (.obj #[("provider_type", .str "custom"),
+    ("name", .str "x"), ("base_url", .str "https://10.0.0.5/v1")]) app
+  let (bu4, c4) ← send "POST" "/api/ai/providers" member (.obj #[("provider_type", .str "custom"),
+    ("name", .str "ben-custom"), ("base_url", .str "https://api.example.com/v1"), ("api_key", .str secret)]) app
+  check (bu1 == 403 && bu2 == 403 && bu3 == 403 && bu4 == 201) s!"member_base_url_only_public_https_on_custom ({bu1},{bu2},{bu3},{bu4})"
+  -- member_added_account_never_inherits_instance_env_key
+  let priorEnv ← IO.getEnv "ANTHROPIC_API_KEY"
+  OrbBin.PosixExt.setenvVar "ANTHROPIC_API_KEY" "sk-ant-instance-env-marker"
+  let (_, noKey) ← send "POST" "/api/ai/providers" member (.obj #[("provider_type", .str "anthropic"), ("name", .str "ben-nokey")]) app
+  let noKeyId := (noKey.fieldStr? "id").getD ""
+  let (_, noKeyDoc) ← send "GET" s!"/api/ai/providers/{noKeyId}" member (.obj #[]) app
+  match priorEnv with
+  | some v => OrbBin.PosixExt.setenvVar "ANTHROPIC_API_KEY" v
+  | none => OrbBin.PosixExt.unsetenvVar "ANTHROPIC_API_KEY"
+  check (noKeyDoc.fieldBool? "has_api_key" == some false && noKeyDoc.fieldBool? "has_credentials" == some false &&
+    !has noKeyDoc "sk-ant-instance-env-marker" && (noKeyDoc.fieldStr? "account_email").isNone)
+    "member_added_account_never_inherits_instance_env_key"
+  -- admin_sees_added_by_username
+  let (_, aList) ← send "GET" "/api/ai/providers" admin (.obj #[]) app
+  let aRow := ((aList.asArr?.getD #[]).find? (·.fieldStr? "id" == some probeId)).getD .null
+  check (aRow.fieldStr? "created_by_username" == some "member" && !has aList secret) "admin_sees_added_by_username"
+  -- member_reorder_shared_pool
+  let (roSt, roDoc) ← send "POST" "/api/ai/providers/reorder" member (.obj #[("ids", .arr #[.str probeId, .str "prov-anth-1", .str "prov-anth-2"])]) app
+  check (roSt == 200 && !has roDoc ownerName && !has roDoc secret) s!"member_reorder_shared_pool (got {roSt})"
+  -- member_cannot_delete_owner_account
+  let (delOwner, _) ← send "DELETE" "/api/ai/providers/prov-anth-1" member (.obj #[]) app
+  check (delOwner == 403 && (← getAIProvider? store "prov-anth-1").isSome) s!"member_cannot_delete_owner_account (got {delOwner})"
+  -- member_deletes_own_account
+  let mut delOk := true
+  for pid in #[probeId, (c4.fieldStr? "id").getD "", noKeyId] do
+    let (dSt, _) ← send "DELETE" s!"/api/ai/providers/{pid}" member (.obj #[]) app
+    delOk := delOk && dSt == 200 && (← getAIProvider? store pid).isNone
+  check delOk "member_deletes_own_account"
+  -- provider_audit_log_records_member_writes_without_values
+  let (mAud, _) ← send "GET" "/api/ai/providers/audit" member (.obj #[]) app
+  let (aAudSt, aud) ← send "GET" "/api/ai/providers/audit" admin (.obj #[]) app
+  let entries := aud.asArr?.getD #[]
+  let byMember (act : String) := entries.any (fun e => e.fieldStr? "user_id" == some "member" &&
+    e.fieldStr? "username" == some "member" && e.fieldStr? "action" == some act)
+  check (mAud == 403 && aAudSt == 200 && byMember "add" && byMember "edit" && byMember "delete" && byMember "reorder" &&
+    entries.any (fun e => e.fieldStr? "provider_id" == some "prov-anth-1" && e.fieldStr? "action" == some "edit" &&
+      (e.fieldArr? "fields").getD #[] == #[.str "name", .str "rpm_limit"]) &&
+    !has aud secret && !has aud "ben-probe" && !has aud "member-renamed" && !has aud "api.example.com")
+    s!"provider_audit_log_records_member_writes_without_values ({mAud},{aAudSt})"
+
 /-- Two real stored principals through the REST/desktop and MCP HTTP boundary.
     All records, credentials and provider state are synthetic; no host effects. -/
 def run (root : String) : IO Unit := do
@@ -517,7 +618,7 @@ def run (root : String) : IO Unit := do
     check routeLeaks.isEmpty s!"member provider routes leaked owner identity: {joinedLeaks}"
     let (cliLoginPostSt, _) ← send "POST" "/api/ai/providers/cli-proxy-login" member
       (.obj #[("provider", .str "anthropic")]) stWithProviders
-    check (cliLoginPostSt == 403) s!"member POST /api/ai/providers/cli-proxy-login returns 403 (got {cliLoginPostSt})"
+    check (cliLoginPostSt != 403) s!"member may start a subscription login (POST /api/ai/providers/cli-proxy-login got {cliLoginPostSt})"
     let (_, memberListDoc) ← send "GET" "/api/ai/providers" member (.obj #[]) stWithProviders
     let memberRows := match memberListDoc with | .arr xs => xs | _ => #[]
     let mRow1 := memberRows[0]?.getD .null
@@ -549,7 +650,7 @@ def run (root : String) : IO Unit := do
       "id", "name", "provider_type", "provider_type_name",
       "enabled", "globally_enabled", "user_enabled", "effective_enabled",
       "has_credentials", "has_api_key", "has_oauth", "uses_oauth",
-      "status", "custom_models"
+      "status", "custom_models", "added_by_me"
     ]
     let allowedStatusKeys : Array String := #["type", "message"]
     let allowedModelKeys : Array String := #["id", "name", "context_limit", "output_limit"]
@@ -660,6 +761,7 @@ def run (root : String) : IO Unit := do
       | none => OrbBin.PosixExt.unsetenvVar "CLI_PROXY_MANAGEMENT_KEY"
     -- Delete `iso-claude-oauth` from SQLite so subsequent checks see the two baseline active providers.
     sql store.missionsDb "DELETE FROM ai_providers WHERE id='iso-claude-oauth';" #[]
+    memberSharedProviderRules (fun m t b body app => send m t b body app) member admin stWithProviders store provNameMarker
     -- Sibling provider/AI/model-routing GET routes must not leak admin provider names,
     -- disabled admin provider rows, discovery labels, or global proxy usage/outcome rows to members,
     -- while returning 200 reduced views to members and leaving admin/legacy-unscoped responses unchanged.
