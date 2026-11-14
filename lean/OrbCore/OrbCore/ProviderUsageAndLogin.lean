@@ -1137,7 +1137,7 @@ private def resolveRootMissionId (store : CoreStore) (mid : String) : IO String 
 /-- Rolls `by_mission` buckets up to their root mission (`missions.parent_mission_id`) and applies
     `limit` after the merge, so a parent never loses a child to a pre-merge top cut. -/
 private def rollupByRootMission (store : CoreStore) (byMission : Array JVal) (limit : Nat) : IO (Array JVal) := do
-  let mut roots : Array (String × String × Nat × Nat × Nat × Nat × Nat × Nat × Nat) := #[]
+  let mut roots : Array (String × Nat × Nat × Nat × Nat × Nat × Nat × Nat) := #[]
   let mut anyNull := false
   let mut nullAcc : Nat × Nat × Nat × Nat × Nat × Nat × Nat := (0, 0, 0, 0, 0, 0, 0)
   for b in byMission do
@@ -1154,24 +1154,29 @@ private def rollupByRootMission (store : CoreStore) (byMission : Array JVal) (li
       let root ← resolveRootMissionId store key
       match roots.findIdx? (fun (k, _, _, _, _, _, _, _) => k == root) with
       | some idx =>
-        let (k, l, e0, e1, e2, e3, e4, e5, e6) := roots[idx]!
-        roots := roots.set! idx (k, l, e0 + ev, e1 + inp, e2 + outTok, e3 + cRead, e4 + cCreate, e5 + reas, e6 + costCents)
+        let (k, e0, e1, e2, e3, e4, e5, e6) := roots[idx]!
+        roots := roots.set! idx (k, e0 + ev, e1 + inp, e2 + outTok, e3 + cRead, e4 + cCreate, e5 + reas, e6 + costCents)
       | none =>
-        roots := roots.push (root, (b.fieldStr? "label").getD root, ev, inp, outTok, cRead, cCreate, reas, costCents)
+        roots := roots.push (root, ev, inp, outTok, cRead, cCreate, reas, costCents)
     | _ =>
       anyNull := true
       let (n0, n1, n2, n3, n4, n5, n6) := nullAcc
       nullAcc := (n0 + ev, n1 + inp, n2 + outTok, n3 + cRead, n4 + cCreate, n5 + reas, n6 + costCents)
-  let mut out : Array (Nat × JVal) := #[]
-  for (root, lbl, ev, inp, outTok, cRead, cCreate, reas, costCents) in roots do
+  let mut out : Array (Nat × Option String × JVal) := #[]
+  for (root, ev, inp, outTok, cRead, cCreate, reas, costCents) in roots do
     let totPairs := (mkTotalsJv ev inp outTok cRead cCreate reas costCents).asObj?.getD #[]
-    out := out.push (inp + outTok, .obj (#[("key", .str root), ("label", .str lbl)] ++ totPairs))
+    out := out.push (inp + outTok, some root, .obj (#[("key", .str root), ("label", .str root)] ++ totPairs))
   if anyNull then
     let (ev, inp, outTok, cRead, cCreate, reas, costCents) := nullAcc
     let totPairs := (mkTotalsJv ev inp outTok cRead cCreate reas costCents).asObj?.getD #[]
-    out := out.push (inp + outTok, .obj (#[("key", .null), ("label", .null)] ++ totPairs))
-  let sorted := out.qsort (fun a b => a.1 >= b.1)
-  return sorted.toList.take (Nat.min limit sorted.size) |>.toArray |>.map (·.2)
+    out := out.push (inp + outTok, none, .obj (#[("key", .null), ("label", .null)] ++ totPairs))
+  let sorted := out.qsort fun (tA, kA, _) (tB, kB, _) =>
+    if tA != tB then tA > tB
+    else match kA, kB with
+      | some a, some b => a < b
+      | some _, none => true
+      | none, _ => false
+  return sorted.toList.take (Nat.min limit sorted.size) |>.toArray |>.map (fun (_, _, jv) => jv)
 
 private def queryModelUsageBuckets (store : CoreStore) (sinceIso? : Option String) (limit : Nat) : IO (Array JVal) := do
   let (whereSql, args) :=
