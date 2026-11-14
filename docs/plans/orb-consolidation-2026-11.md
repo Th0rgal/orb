@@ -708,6 +708,18 @@ Live builds at 23:31Z (health endpoints, 9-character `build` resolved in the rep
 - Live build at 04:30Z: prod and dev both `6ed240898`, so #1757, #1758, #1760 and #1761 are merged but not deployed. Until a deploy, `/api/remote-nodes` can still hang on an unreachable static node.
 - In progress, nothing delivered yet: H-core on the two roll-up defects of #1759 (still a draft), D2 on the five SSE review points.
 
+**Update 05:25 (coordinator).**
+
+- Master: CI and Kernel ABI both passed on `72679fb7` (#1761). Prod and dev still report build `6ed240898` (read 05:24Z), so #1757, #1758, #1760 and #1761 are merged but not live.
+- Held-open SSE stream (D2, `wip/d-control-stream-sse` at `68d8e52f`): round 2 read in full, **not published**. Accepted by reading the code: the hub now carries event type and mission id (no payload parsing), the client-socket peek in `handleClientConn` is gone, the snapshot uses the same caller scope as `GET /api/control/missions`, the keep-alive interval is a `CoreAppState` field (15 s default, no env var), caller re-check once per second. Sent back at 05:25Z:
+  1. **Privacy defect**: `sseStreamResponse` delivers every mission's live frames to any admin user (`Control.lean:1179-1190`, `1247-1249` on that tip). The kernel rule (`multiuserRbacStep`, read class) and the sync WebSocket refuse a mission to an admin who is neither owner nor participant; the stream's own snapshot lists only the admin's missions. The branch test asserts the wrong behaviour. Asked: no admin bypass for frames with a mission id; frames without one stay admin and legacy-unscoped only.
+  2. The stream does not end when the bearer token expires (the sync WebSocket does). Asked: re-check with `resolveCallerPrincipal?` on the request headers.
+  3. The lag test depends on the stream loop being asleep during a 270-frame burst: would be flaky on master. Asked for a hub-level assertion plus a retried socket check.
+  4. Per-stream visibility cache grows by one entry per mission id seen.
+  - Worker-reported only, not verified: `orb-core-test` ok with `"host_tests":101`, spec runner `5 passed` on `68d8e52f`.
+  - Finding for the clients, no owner: the desktop fallback opens `/api/control/stream?profile=presentation&kinds=mission_presentation`; nothing in `lean/` publishes a `mission_presentation` event on the hub, so that stream would carry only the snapshot, keep-alives and `stream_lagged`. D2's reading and mine agree; not tested against a client.
+- #1759 (draft): H-core has run seven builds on showing the new tests fail before the fix and has not yet changed `ProviderUsageAndLogin.lean`; nothing pushed. Sent a note at 05:25Z: commit the tests, make the two fixes (strict comparator with tie-break, root label = root id), one build, push.
+
 **Still open, no owner.** Track A / #1708; lean.ci PR #34 fence review
 (interdiff unread, lean runners stay on hold); isolation acceptance and
 managed-lifecycle live validation (need the `dev_operator` grant
