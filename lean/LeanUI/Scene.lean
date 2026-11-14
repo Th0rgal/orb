@@ -169,15 +169,16 @@ def emitWrappedLineGlyphs (scale120 : Nat) (originXSub originYSub : Int) :
     List WrappedLine → List Prim
   | [] => []
   | line :: rest =>
-    emitLineGlyphs scale120 originXSub originYSub line.glyphs ++
+    emitLineGlyphs scale120 originXSub originYSub line.heightSub line.glyphs ++
       emitWrappedLineGlyphs scale120 originXSub originYSub rest
 where
-  emitLineGlyphs (scale120 : Nat) (originXSub originYSub : Int) :
+  emitLineGlyphs (scale120 : Nat) (originXSub originYSub : Int) (lineHSub : SubPx) :
       List PositionedGlyph → List Prim
     | [] => []
     | pg :: pgs =>
+      let baselineOffSub : Int := (Int.ofNat lineHSub * 7 + 4) / 9
       let gxSub := originXSub + Int.ofNat pg.relX + pg.glyph.xOffset
-      let gySub := originYSub + Int.ofNat pg.relY + pg.glyph.yOffset
+      let gySub := originYSub + Int.ofNat pg.relY + baselineOffSub + pg.glyph.yOffset
       let devX := roundDev scale120 gxSub + pg.glyph.bearingPx.1
       let devY := roundDev scale120 gySub - pg.glyph.bearingPx.2
       let (gw, gh) := pg.glyph.sizePx
@@ -186,11 +187,11 @@ where
           { x := devX, y := devY, w := Int.ofNat gw, h := Int.ofNat gh }
         else
           roundRect scale120
-            { x := gxSub, y := gySub,
+            { x := gxSub, y := originYSub + Int.ofNat pg.relY + pg.glyph.yOffset,
               w := Int.ofNat (max 1 pg.glyph.xAdvance),
               h := Int.ofNat (max 1 subPerPx) }
-      Prim.glyph pg.glyph.atlasSrc dst pg.color pg.glyph.isColor ::
-        emitLineGlyphs scale120 originXSub originYSub pgs
+      (if gw > 0 && gh > 0 then [Prim.glyph pg.glyph.atlasSrc dst pg.color pg.glyph.isColor] else []) ++
+        emitLineGlyphs scale120 originXSub originYSub lineHSub pgs
 
 /-- Emit payload-specific primitives for a single laid-out node. -/
 def emitPayloadPrims (scale120 : Nat) (box : ComputedBox) : WidgetPayload → List Prim
@@ -282,9 +283,17 @@ def lowerWidgetPair (scale120 : Nat) (focusState : FocusState) (theme : Theme)
     let isFocused := match id, focusState.owner with
       | some wid, some owner => wid == owner
       | _, _ => false
+    let focusRadius : SubPx :=
+      match payload with
+      | .rrect _ radii _ => radii.topLeft
+      | .roundedClip radii => radii.topLeft
+      | _ => style.radii.topLeft
+    -- `Kernel.focusBorder`, following the corner radius of the widget it outlines.
     let focusPrim : List Prim :=
       if focusable || isFocused then
-        [focusBorder isFocused box.rectDev theme.palette.focusRing]
+        [match focusBorder isFocused box.rectDev theme.palette.focusRing with
+          | .quad r fill _ bw col => .quad r fill (scaleSubPx scale120 focusRadius) bw col
+          | p => p]
       else []
     let selfFocusOrder : List WidgetId :=
       match id with

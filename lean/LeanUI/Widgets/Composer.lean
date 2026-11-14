@@ -46,6 +46,8 @@ structure ComposerBuffer where
   composerWidgetId : WidgetId := 1
   sendButtonId : Option WidgetId := some 2
   attachButtonId : Option WidgetId := some 3
+  /-- A running turn exposes Stop even with an empty follow-up draft. -/
+  isRunning : Bool := false
   placeholder : String := "Reply to mission or press Tab to cycle focus..."
   deriving DecidableEq, Repr, Inhabited
 
@@ -223,79 +225,83 @@ def buildAttachmentChipWidget (theme : Theme) (att : ComposerAttachment) : Widge
   | some wid => WidgetNode.focusable wid rawChip
   | none => rawChip
 
-/-- Build the multi-line focusable `Composer` widget (with attachment chip bar, drag-drop border
-highlight, IME preedit underline runs, and focusable `composerWidgetId` with `Kernel.focusBorder`). -/
+/-- Build the composer dock (`availW x composerH`): optional attachment chips above a pill-shaped
+editor centred in a column of at most `748 px`, as `.dock > .col > .composer` in the SolidJS
+desktop. The pill holds the round attach button, the text and the send button. -/
 def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
     (buf : ComposerBuffer) (overrideRuns : List InlineRun := []) : WidgetNode :=
   let pal := theme.palette
-  let innerW : SubPx := availW - pxToSub 40
+  let colW : SubPx := min (pxToSub 748) (availW - pxToSub 68)
+  let isRunning := buf.isRunning
   let hasChips := !buf.attachments.isEmpty
-  let chipRowH : SubPx := if hasChips then pxToSub 28 else 0
-  let inputBoxH : SubPx := composerH - pxToSub 20 - chipRowH
-  let borderCol :=
-    if buf.dragHoverActive then pal.accent
-    else pal.border
-  let inputBg :=
-    if buf.dragHoverActive then pal.accentMuted
-    else pal.elevatedSurface
-  let runs := buildComposerInlineRuns theme buf overrideRuns
-  let textW : SubPx := innerW - pxToSub 96
+  let chipRowH : SubPx := pxToSub 28
+  let borderCol := if buf.dragHoverActive then pal.accent else pal.border
+  let pillBg := if buf.dragHoverActive then pal.accentMuted else pal.elevatedSurface
+  let buttonStyle : BoxStyle :=
+    BoxStyle.row 0 |>.withAlign .center |>.withJustify .center
+      |>.withFixedSize (pxToSub 24) (pxToSub 24)
+  let withId (id : Option WidgetId) (node : WidgetNode) : WidgetNode :=
+    match id with
+    | some wid => WidgetNode.focusable wid node
+    | none => node
+  let attachBtn : WidgetNode :=
+    withId buf.attachButtonId <|
+      WidgetNode.box
+        (buttonStyle
+          |>.withBg pal.plusBg
+          |>.withRadius (pxToSub 12))
+        [WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 10) (pxToSub 2)) pal.textMuted CornerRadii.zero]
+        buf.attachButtonId
   let textNode : WidgetNode :=
     WidgetNode.text
-      (BoxStyle.row 0 |>.withFixedSize textW (pxToSub 20))
-      theme.typo.lineBase
-      runs
-  let sendBtnRaw : WidgetNode :=
-    WidgetNode.rrect
-      (BoxStyle.row 0
-        |>.withAlign .center
-        |>.withJustify .center
-        |>.withPadding (Edges.xy (pxToSub 10) (pxToSub 4))
-        |>.withFixedSize (pxToSub 64) (pxToSub 26))
-      pal.accent
-      (CornerRadii.uniform theme.radiusSm)
-      BorderStyle.none
-      [WidgetNode.text
-        (BoxStyle.row 0 |>.withFixedSize (pxToSub 44) (pxToSub 16))
-        theme.typo.lineTight
-        [composerSynthRun { (Theme.secondaryText theme) with weight := 600, color := pal.textPrimary } "Send"]]
-      buf.sendButtonId
+      { BoxStyle.row 0 with grow := 1, minHeight := pxToSub 18, maxHeight := pxToSub 18 }
+      (pxToSub 18)
+      (buildComposerInlineRuns theme buf overrideRuns)
+  let hasText := !buf.text.isEmpty || !buf.imePreeditText.isEmpty
+  let sendBgCol := if hasText || isRunning then pal.sendBg else ((pal.sendBg &&& 0xFFFFFF00) ||| 0x47)
   let sendBtn : WidgetNode :=
-    match buf.sendButtonId with
-    | some wid => WidgetNode.focusable wid sendBtnRaw
-    | none => sendBtnRaw
-
-  let focusableEditorBox : WidgetNode :=
+    withId buf.sendButtonId <|
+      WidgetNode.box
+        (buttonStyle
+          |>.withBg sendBgCol
+          |>.withRadius (pxToSub 12))
+        [WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 6) (pxToSub 6)) pal.sendFg
+          (CornerRadii.uniform (pxToSub 1))]
+        buf.sendButtonId
+  let pill : WidgetNode :=
     WidgetNode.focusable buf.composerWidgetId <|
-      WidgetNode.rrect
+      WidgetNode.box
         (BoxStyle.row (pxToSub 8)
           |>.withAlign .center
-          |>.withJustify .spaceBetween
-          |>.withPadding (Edges.xy (pxToSub 16) (pxToSub 8))
-          |>.withFixedSize innerW inputBoxH)
-        inputBg
-        (CornerRadii.uniform theme.radiusMd)
-        (BorderStyle.uniform theme.borderWidth borderCol)
-        [textNode, sendBtn]
-
-  let containerChildren : List WidgetNode :=
-    if !hasChips then
-      [focusableEditorBox]
-    else
-      let chips := buf.attachments.map (buildAttachmentChipWidget theme)
-      let chipBar : WidgetNode :=
-        WidgetNode.box
-          (BoxStyle.row (pxToSub 6) |>.withAlign .center |>.withFixedSize innerW chipRowH)
-          chips
-      [chipBar, focusableEditorBox]
-
+          |>.withPadding (Edges.trbl (pxToSub 9) (pxToSub 10) (pxToSub 9) (pxToSub 12))
+          |>.withFixedSize colW (pxToSub 42)
+          |>.withBg pillBg
+          |>.withRadius (pxToSub 21)
+          |>.withBorder theme.borderWidth borderCol)
+        [attachBtn, textNode, sendBtn]
+  let metaStyle : TextStyle :=
+    { (Theme.mutedText theme) with sizeSub := pxToSub 13, lineHeightSub := pxToSub 18, color := pal.textMuted }
+  let underRow : WidgetNode :=
+    WidgetNode.box
+      (BoxStyle.row (pxToSub 12)
+        |>.withAlign .center
+        |>.withPadding (Edges.trbl 0 (pxToSub 4) 0 (pxToSub 4))
+        |>.withFixedSize colW (pxToSub 36))
+      [ WidgetNode.text
+          (BoxStyle.row 0 |>.withFixedSize (colW - pxToSub 8) (pxToSub 18))
+          (pxToSub 18)
+          [composerSynthRun metaStyle "selected machine  ·  claudecode  ·  Default  ·  Default  ·  Supervised"] ]
+  let chipBar : List WidgetNode :=
+    if hasChips then
+      [WidgetNode.box
+        (BoxStyle.row (pxToSub 6) |>.withAlign .center |>.withFixedSize colW chipRowH)
+        (buf.attachments.map (buildAttachmentChipWidget theme))]
+    else []
   WidgetNode.box
-    (BoxStyle.col (pxToSub 4)
+    (BoxStyle.col 0
       |>.withAlign .center
-      |>.withPadding (Edges.xy (pxToSub 20) (pxToSub 10))
-      |>.withFixedSize availW composerH
-      |>.withBg pal.surface
-      |>.withBorder theme.borderWidth pal.borderSubtle)
-    containerChildren
+      |>.withPadding (Edges.trbl (pxToSub 10) (pxToSub 34) 0 (pxToSub 34))
+      |>.withFixedSize availW composerH)
+    (chipBar ++ [pill, underRow])
 
 end LeanUI.Widgets

@@ -55,7 +55,7 @@ function shorten(e: Record<string, unknown>, max: number) {
 type Stream = {res: http.ServerResponse};
 export type Core = {url: string; counts: Map<string, number>; unknown: Set<string>; push: (event: string, data: unknown) => void; close: () => Promise<void>};
 
-export async function startCore(events = longEvents()): Promise<Core> {
+export async function startCore(events = longEvents(), port = 0): Promise<Core> {
  const counts = new Map<string, number>(), unknown = new Set<string>(), streams: Stream[] = [];
  const ms = missions(), ps = projects();
  const json = (res: http.ServerResponse, body: unknown, headers: Record<string, string> = {}) => {
@@ -106,7 +106,7 @@ export async function startCore(events = longEvents()): Promise<Core> {
   unknown.add(key);
   return json(res, {});
  });
- await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
+ await new Promise<void>(r => server.listen(port, '127.0.0.1', r));
  return {
   url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, counts, unknown,
   push: (event, data) => { for (const s of streams) s.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); },

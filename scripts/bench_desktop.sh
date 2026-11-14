@@ -4,6 +4,9 @@
 # Supports:
 #   scripts/bench_desktop.sh [--bin <path>] [--cmd '<cmd>'] [--label <name>] [--runs N] [--out <file.json>]
 #
+# Each run renders 21 full frames at the golden viewport (1470x923, 1x) through the same
+# layout, shaping and rasterisation path as the window. Numbers recorded before the bench
+# rendered real frames (1x1 framebuffer, no rasterisation) are invalid.
 # Measures N cold runs (default 20) plus internal frame p50/p99 latency and RSS/PSS memory,
 # verifying all 5 hard benchmark targets against the GTK + WebKitGTK baseline:
 #   - cold_ms <= 60 ms
@@ -60,7 +63,7 @@ if [[ -z "$CMD_STR" ]]; then
     echo "error: OrbDesktop binary not found at $BIN_PATH" >&2
     exit 1
   fi
-  CMD_STR="$BIN_PATH --bench 20"
+  CMD_STR="$BIN_PATH --bench 20 --width 1470 --height 923"
 fi
 
 python3 - "$CMD_STR" "$LABEL" "$RUNS" "$OUT_JSON" <<'PY'

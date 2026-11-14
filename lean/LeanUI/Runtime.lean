@@ -18,12 +18,14 @@ namespace LeanUI.Runtime
 /-- CLI options parsed by `parseRuntimeArgs`. -/
 structure RuntimeConfig where
   headlessGolden : Option System.FilePath := none
+  /-- Render offscreen without connecting to a compositor. -/
+  headless : Bool := false
   width : Nat := 1280
   height : Nat := 800
   scale120 : Nat := 120
   darkTheme : Bool := true
   maxFrames : Nat := 1
-  fontPattern : String := "sans-serif"
+  fontPattern : String := "Inter"
   title : String := "Orb Desktop"
   deriving Repr, Inhabited
 
@@ -58,6 +60,10 @@ structure RuntimeState (σ : Type) where
   vulkan : Vulkan.VulkanContext := {}
   atlas : Text.GlyphAtlasCache := {}
   primaryFont : Text.FontHandle := { fontId := 1, facePtr := 0, pattern := "sans-serif" }
+  monoFont : Text.FontHandle := { fontId := 2, facePtr := 0, pattern := "DejaVu Sans Mono" }
+  boldFont : Text.FontHandle := { fontId := 3, facePtr := 0, pattern := "Inter:weight=bold" }
+  mediumFont : Text.FontHandle := { fontId := 4, facePtr := 0, pattern := "Inter:weight=medium" }
+  semiboldFont : Text.FontHandle := { fontId := 5, facePtr := 0, pattern := "Inter:weight=demibold" }
   focus : FocusState := {}
   windowFocused : Bool := true
   hoveredEntity : Option EntityId := none
@@ -264,12 +270,16 @@ def buildCanaryScene (rt : RuntimeState Unit) :
       w := subScale compRect.w, h := subScale compRect.h }
   return (ac, bgClear, prims, [(1, compSubRect)])
 
-/-- Initialize `RuntimeState` from `RuntimeConfig`. -/
-def initRuntime {σ : Type} (cfg : RuntimeConfig) (initialApp : σ) : IO (RuntimeState σ) := do
-  let wl ← Wayland.connectOrHeadless cfg.headlessGolden.isSome cfg.width cfg.height cfg.scale120
+/-- `RuntimeState` for the Wayland session `wl`, with the whole viewport damaged. -/
+def initRuntimeOn {σ : Type} (cfg : RuntimeConfig) (wl : Wayland.WaylandClient) (initialApp : σ) :
+    IO (RuntimeState σ) := do
   let (bw, bh) := wl.deviceBufferSize
   let vk ← Vulkan.initVulkan bw bh
   let font ← Text.openFont 1 cfg.fontPattern
+  let mono ← Text.openFont 2 "DejaVu Sans Mono"
+  let bold ← Text.openFont 3 "Inter:weight=bold"
+  let medium ← Text.openFont 4 "Inter:weight=medium"
+  let semibold ← Text.openFont 5 "Inter:weight=demibold"
   let focus0 : FocusState := { owner := some 1, traps := [] }
   let initDmg : Damage := some { x := 0, y := 0, w := (bw : Int), h := (bh : Int) }
   return {
@@ -278,17 +288,61 @@ def initRuntime {σ : Type} (cfg : RuntimeConfig) (initialApp : σ) : IO (Runtim
     vulkan := vk
     atlas := { pageWidth := 1024, pageHeight := 1024, pad := 1 }
     primaryFont := font
+    monoFont := mono
+    boldFont := bold
+    mediumFont := medium
+    semiboldFont := semibold
     focus := focus0
     windowFocused := true
     damage := initDmg
   }
+
+/-- Initialize `RuntimeState` from `RuntimeConfig`. -/
+def initRuntime {σ : Type} (cfg : RuntimeConfig) (initialApp : σ) : IO (RuntimeState σ) := do
+  let wl ← Wayland.connectOrHeadless (cfg.headless || cfg.headlessGolden.isSome) cfg.width cfg.height cfg.scale120
+  initRuntimeOn cfg wl initialApp
+
+/-- Open the application window. Fails when no Wayland compositor can show it. -/
+def openWindowRuntime {σ : Type} (cfg : RuntimeConfig) (appId : String) (initialApp : σ) :
+    IO (RuntimeState σ) := do
+  let wl ← Wayland.openWindow cfg.title appId cfg.width cfg.height cfg.scale120
+  initRuntimeOn cfg wl initialApp
+
+/-- Run the window until it is closed: render and present when there is damage, otherwise
+block on the compositor. Nothing is drawn before the first `xdg_surface.configure`. -/
+def runWindow {σ : Type} (rt0 : RuntimeState σ)
+    (onEvent : RuntimeState σ → σ → Event → σ × Damage)
+    (view : RuntimeState σ → IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect))) :
+    IO (RuntimeState σ) := do
+  let mut rt := rt0
+  while rt.running do
+    if !rt.wayland.configured then
+      Wayland.waitEvents rt.wayland
+      let (wl, evs) ← Wayland.pumpEvents rt.wayland
+      rt := { rt with wayland := wl }
+      for ev in evs do
+        rt := rt.stepEvent (onEvent rt) ev
+    else
+      let rendered := rt.framesRendered
+      rt ← stepFrame rt (onEvent rt) view
+      if rt.framesRendered != rendered then
+        let wl ← Wayland.present rt.wayland rt.vulkan.framebuffer
+        rt := { rt with wayland := wl }
+      else if rt.running then
+        Wayland.waitEvents rt.wayland
+  return rt
 
 /-- Cleanly release font and Vulkan scratch resources owned by `RuntimeState`. -/
 def shutdownRuntime {σ : Type} (rt : RuntimeState σ) : IO Unit := do
   if rt.wayland.xkbState != 0 then
     FFI.xkbFree rt.wayland.xkbState
   Text.closeFont rt.primaryFont
+  Text.closeFont rt.monoFont
+  Text.closeFont rt.boldFont
+  Text.closeFont rt.mediumFont
+  Text.closeFont rt.semiboldFont
   Vulkan.shutdownVulkan rt.vulkan
+  Wayland.closeWindow rt.wayland
 
 /-- Run the canonical Orb Desktop runtime or `--headless-golden <output.png>` verification pass. -/
 def runMain (args : List String) : IO UInt32 := do

@@ -265,14 +265,14 @@ def toFlexItem (axis : Axis) (s : BoxStyle) (measuredW measuredH : SubPx) : Flex
   match axis with
   | .row =>
     let marW := s.margin.horizontal
-    let base := max (s.basis + marW) measuredW
+    let base := clampNat s.minWidth s.maxWidth (max s.basis (measuredW - marW)) + marW
     { basis := base,
       grow := s.grow,
       minMain := s.minWidth + marW,
       maxMain := s.maxWidth + marW }
   | .column =>
     let marH := s.margin.vertical
-    let base := max (s.basis + marH) measuredH
+    let base := clampNat s.minHeight s.maxHeight (max s.basis (measuredH - marH)) + marH
     { basis := base,
       grow := s.grow,
       minMain := s.minHeight + marH,
