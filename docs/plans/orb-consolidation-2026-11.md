@@ -108,6 +108,13 @@ test, a fix, a deploy, and a re-test. This extends track E's isolation test.
 - Restore live usage/status fetchers for xAI, Muse, Kimi, and other providers
   from the historical Rust implementation where parity is still incomplete.
 
+### I. Project controller missions, legacy-token project ownership & skill bundle delivery (14 Nov 19:15 UTC, lower priority than lean.ci harness fix)
+- **Project-scoped controller role for missions:** Mission MCP sessions always receive the `executor` catalog (51 tools), omitting `get_situation`, `get_project_grant`, `update_project_status`, `set_project_track`, `accept_project_track_evidence`, `record_project_decision`, `plan_tasks`, and `board_status` (only coordinator sessions like Hermes and local clients get them). Controller mission `1b11f930-ace9-45f5-adb1-45dfe32daf8c` reported its role as `executor` and could not read or write project `evm-fast` (keeping a board file on `ashur` as a workaround). Add a governed mechanism so one mission per project can hold project-scoped board tools (e.g. an operator-set `controller` flag on `start_mission` scoped exclusively to that project).
+- **Hermes cron scheduler diagnosis on `agent-core`:** `hermes cron status` (`HERMES_HOME=/var/lib/hermes-assistant`) reports `"No scheduler is serving profile 'default'"` (last tick ~06:35 CET on 14 Nov; `disk-sentinel` and other jobs have not fired since). Diagnose why the Hermes scheduler stopped and restore service supervision.
+- **REST project creation with legacy admin token (`project_owners` row):** Creating a project via REST using the legacy admin token inserts no `project_owners` row, causing every MCP project tool to fail with `"Project not found"` (`evm-fast` had to be inserted into `project_owners` manually on prod). Ensure REST project creation always populates `project_owners` (defaulting to the admin owner when authenticated via the legacy admin token).
+- **Skill reference bundle delivery to nodes:** On `ashur`, the `maxwell` skill arrived as `SKILL.md` only; `references/long-running.md` and `references/proof.md` (`orb-library` `95fead6`) were omitted, leaving dead links in `SKILL.md` for missions. Deliver the complete skill bundle (including `references/**` and companion files) to nodes during workspace skill sync, or make the reference path explicit and accessible.
+- **Operator record (`agent-core` library GitHub token):** Core's `/api/library/sync` currently fails on `agent-core` because root's GitHub token (`gh auth status`) is invalid. `/root/.sandboxed-sh/library` was fast-forwarded to `95fead6` over SSH; the GitHub token on `agent-core` still needs replacement by Thomas.
+
 ## Status update — 14 Nov 15:40 UTC
 
 - **Merged to `master` on 14 Nov:**
@@ -123,7 +130,7 @@ test, a fix, a deploy, and a re-test. This extends track E's isolation test.
   - `#1787` (`8f75e614`): per-user skill libraries (`{storeRoot}/library/users/<userId>`) and member git sync isolation.
 - **In-flight PRs (14 Nov):**
   - `#1786` (`ci/w-ci-1-turbo-lean-cache`, HEAD `e856c7fb`): pre-built `turbo-lean` release binary + `.turbo-lean` artifact cache in CI (`ci.yml` all green; `kernel-abi` rerun attempt 5 in progress after attempt 4 hit the 45m cold-cache timeout). **Supersedes `#1708`.**
-  - `#1790` (`fix/multiuser-member-vm-ws`, HEAD `ff36e020`): WebSocket RFC 6455 `tchar` token encoding (`:` -> `~`) and error log redaction, control-plane `auto-managed` VM provisioning/binding/rollback for member missions, reserved node (`dgx-spark-admin`, `sepolia`, `agent-core`, `orb-core`) member placement refusal, and member default composer machine (`auto-managed:<provider>:<size>`).
+  - `#1790` (`fix/multiuser-member-vm-ws`, HEAD `71ff4367`): WebSocket RFC 6455 `tchar` token encoding (`:` -> `~`) and error log redaction, control-plane `auto-managed` VM provisioning/binding/rollback for member missions, reserved node (`dgx-spark-admin`, `sepolia`, `agent-core`, `orb-core`) member placement refusal, and member default composer machine (`auto-managed:<provider>:<size>`).
 - **Managed provider default:** `lean.ci` default is **paused** (`boat` remains the default provider) until `lean.ci` VM images ship pre-installed agent harnesses (`opencode`, `codex`, `claude`).
 - **MacBook tether (`wg-macmesh0`) finding & status:**
   - `SandboxedMcpMain.lean:776` and `PrivdMain.lean:1307` select `mac_direct_endpoint` (LAN `192.168.1.165:51889`) whenever `!isManaged`, which fails from remote fleet hosts (`nimrud`) that must reach `m2air` via `mac_wan_endpoint` (`65.109.98.246:51890`).
