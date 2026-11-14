@@ -476,6 +476,52 @@ private def optBoolJVal (v? : Option Bool) : JVal :=
   | some b => .bool b
   | none => .null
 
+private def mkStaticNodeOfflineOrDegraded
+    (sn : StaticRemoteNode)
+    (persistedCordons : Array String)
+    (statusStr errMsg : String) : JVal :=
+  let persistedCordoned := persistedCordons.contains sn.id
+  let baseColocated :=
+    sn.id == "sepolia" || sn.id == "agent-core" || sn.id == "orb-core" ||
+    sn.baseUrl.contains "10.88.0.1:" || sn.baseUrl.endsWith "10.88.0.1" ||
+    sn.baseUrl.contains "127.0.0.1" || sn.labels.contains "control-plane"
+  let baseAdminOnly :=
+    baseColocated || sn.id == "dgx-spark-admin" ||
+    sn.labels.contains "administration" || sn.labels.contains "admin-only"
+  .obj #[
+    ("resource_history", .arr #[]),
+    ("id", .str sn.id),
+    ("name", .str sn.id),
+    ("kind", .str "static"),
+    ("base_url", .str sn.baseUrl),
+    ("token_env", .str sn.tokenEnv),
+    ("status", .str statusStr),
+    ("labels", .arr (sn.labels.map .str)),
+    ("version", .null),
+    ("protocol_version", .null),
+    ("capacity_total", .null),
+    ("capacity_available", .null),
+    ("active_leases", .null),
+    ("active_jobs", .null),
+    ("queued_jobs", .null),
+    ("available_slots", JVal.nat 0),
+    ("cpu_total", .null),
+    ("mem_total_bytes", .null),
+    ("mem_available_bytes", .null),
+    ("disk_total_bytes", .null),
+    ("disk_available_bytes", .null),
+    ("disk_pressure_pinned", .bool false),
+    ("cached_toolchains", .arr #[]),
+    ("lean_runtime_ready", .null),
+    ("source_bundle_capacity", .null),
+    ("last_seen", .null),
+    ("error", .str errMsg),
+    ("cordoned", .bool persistedCordoned),
+    ("quarantined_harnesses", .arr #[]),
+    ("admin_only", .bool baseAdminOnly),
+    ("core_colocated", .bool baseColocated)
+  ]
+
 def probeStaticNodeHeartbeat
     (sn : StaticRemoteNode)
     (persistedCordons : Array String := #[])
@@ -488,40 +534,7 @@ def probeStaticNodeHeartbeat
   let baseAdminOnly :=
     baseColocated || sn.id == "dgx-spark-admin" ||
     sn.labels.contains "administration" || sn.labels.contains "admin-only"
-  let mkOfflineOrDegraded (statusStr errMsg : String) : JVal :=
-    .obj #[
-      ("resource_history", .arr #[]),
-      ("id", .str sn.id),
-      ("name", .str sn.id),
-      ("kind", .str "static"),
-      ("base_url", .str sn.baseUrl),
-      ("token_env", .str sn.tokenEnv),
-      ("status", .str statusStr),
-      ("labels", .arr (sn.labels.map .str)),
-      ("version", .null),
-      ("protocol_version", .null),
-      ("capacity_total", .null),
-      ("capacity_available", .null),
-      ("active_leases", .null),
-      ("active_jobs", .null),
-      ("queued_jobs", .null),
-      ("available_slots", JVal.nat 0),
-      ("cpu_total", .null),
-      ("mem_total_bytes", .null),
-      ("mem_available_bytes", .null),
-      ("disk_total_bytes", .null),
-      ("disk_available_bytes", .null),
-      ("disk_pressure_pinned", .bool false),
-      ("cached_toolchains", .arr #[]),
-      ("lean_runtime_ready", .null),
-      ("source_bundle_capacity", .null),
-      ("last_seen", .null),
-      ("error", .str errMsg),
-      ("cordoned", .bool persistedCordoned),
-      ("quarantined_harnesses", .arr #[]),
-      ("admin_only", .bool baseAdminOnly),
-      ("core_colocated", .bool baseColocated)
-    ]
+  let mkOfflineOrDegraded := mkStaticNodeOfflineOrDegraded sn persistedCordons
   match ← resolveStaticNodeToken? sn with
   | none =>
     return mkOfflineOrDegraded "degraded" s!"missing token env {sn.tokenEnv}"
@@ -602,29 +615,36 @@ def probeStaticNodeHeartbeat
 def probeAllStaticNodesParallel
     (staticNodes : Array StaticRemoteNode)
     (persistedCordons : Array String)
-    (nowIso : String) : IO (Array JVal) := do
+    (nowIso : String)
+    (deadlineMs : Nat := 2500) : IO (Array JVal) := do
   if staticNodes.isEmpty then return #[]
   let mut tasks : Array (Task (Except IO.Error JVal)) := Array.mkEmpty staticNodes.size
   for sn in staticNodes do
     let t ← IO.asTask (prio := .dedicated) (probeStaticNodeHeartbeat sn persistedCordons nowIso)
     tasks := tasks.push t
+  let mut waitedMs : Nat := 0
+  let stepMs : Nat := 25
+  while waitedMs < deadlineMs do
+    let mut allDone := true
+    for t in tasks do
+      if !(← IO.hasFinished t) then
+        allDone := false
+        break
+    if allDone then break
+    let sleepMs := Nat.min stepMs (deadlineMs - waitedMs)
+    IO.sleep sleepMs.toUInt32
+    waitedMs := waitedMs + sleepMs
   let mut out : Array JVal := Array.mkEmpty tasks.size
   for i in [0:tasks.size] do
-    match tasks[i]!.get with
-    | .ok jv => out := out.push jv
-    | .error e =>
-      let sn := staticNodes[i]!
-      out := out.push (.obj #[
-        ("id", .str sn.id),
-        ("name", .str sn.id),
-        ("kind", .str "static"),
-        ("base_url", .str sn.baseUrl),
-        ("token_env", .str sn.tokenEnv),
-        ("status", .str "offline"),
-        ("labels", .arr (sn.labels.map .str)),
-        ("cordoned", .bool (persistedCordons.contains sn.id)),
-        ("error", .str (toString e))
-      ])
+    let sn := staticNodes[i]!
+    if ← IO.hasFinished tasks[i]! then
+      match tasks[i]!.get with
+      | .ok jv => out := out.push jv
+      | .error e =>
+        out := out.push (mkStaticNodeOfflineOrDegraded sn persistedCordons "offline" (toString e))
+    else
+      out := out.push (mkStaticNodeOfflineOrDegraded sn persistedCordons "offline"
+        s!"heartbeat probe timed out after {deadlineMs}ms")
   return out
 
 /-- Last successful heartbeat per static node (`<dataRoot>/node_heartbeats.json`). -/
@@ -668,12 +688,13 @@ def buildComputeFleetJVal
     (userDailyCapCents? : Option UInt64 := none)
     (dataRoot : String := "")
     (nowIso : String := "")
-    (store? : Option CoreStore := none) : IO JVal := do
+    (store? : Option CoreStore := none)
+    (probeDeadlineMs : Nat := 2500) : IO JVal := do
   let (rnEnabled, staticNodes) ← loadStaticRemoteNodes
   let nowSec ← nowEpoch
   let effIso := if nowIso.isEmpty then formatEpochIso8601Utc nowSec else nowIso
   let persistedCordons ← loadPersistedNodeCordons dataRoot
-  let probed ← probeAllStaticNodesParallel staticNodes persistedCordons effIso
+  let probed ← probeAllStaticNodesParallel staticNodes persistedCordons effIso probeDeadlineMs
   -- A node that did not answer keeps what its last heartbeat reported.
   let heartbeatCache ← loadNodeHeartbeatCache dataRoot
   let staticItems := probed.map (NodeLiveness.applyCache heartbeatCache)
