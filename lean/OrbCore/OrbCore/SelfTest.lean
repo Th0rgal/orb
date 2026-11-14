@@ -7189,8 +7189,9 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
   let (stCode, _, stBody) ← sendReq "GET" "/api/library/status" hsJwt ""
   if badRemSt != 400 || setRemSt != 200 ||
      (setRemBody.splitOn "\"library_reinitialized\":true").length != 2 ||
-     hlthSt != 200 || (hlthBody.splitOn bareRepo).length < 2 ||
-     stCode != 200 || (stBody.splitOn "\"clean\":true").length != 2 then
+     hlthSt != 200 || (hlthBody.splitOn "\"library_remote\":null").length != 2 ||
+     stCode != 200 || (stBody.splitOn bareRepo).length < 2 ||
+     (stBody.splitOn "\"clean\":true").length != 2 then
     return (← fail s!"library-remote init/health/status mismatch: bad={badRemSt} set={setRemSt}:{setRemBody} hlth={hlthBody} st={stBody}")
 
   -- 2. Canonical `skill/` catalog listing (`?include=bundle`), single-skill bundle, oversized `.md` in `references`, raw text reference read, and `SKILL.md` delete guard
