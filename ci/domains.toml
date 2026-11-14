@@ -79,6 +79,7 @@ paths = [
   "c/lean_ui*",
   "shaders/scene_sdf.glsl",
   "scripts/build_orb_bins.sh",
+  "scripts/turbo_lean.sh",
   "scripts/ci_harden_ubuntu_apt.sh",
   "lean/.gitignore",
 ]

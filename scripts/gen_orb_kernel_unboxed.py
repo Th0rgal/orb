@@ -29,6 +29,8 @@ import subprocess
 import sys
 import tempfile
 
+os.environ.update(TURBO_LEAN_TELEMETRY="off", LEAN_NATIVE_TELEMETRY="off")
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUT = ROOT / "shared/orb-spec/cabi/orb_kernel_unboxed.c"
 LEANSYS_REPO = "https://github.com/Th0rgal/lean-sys.git"
@@ -70,8 +72,8 @@ def macro(width, op):
 def orb_c(out_dir):
     turbo_bin = os.environ.get("TURBO_LEAN_CLI") or shutil.which("turbo-lean")
     if turbo_bin and pathlib.Path(turbo_bin).is_file():
-        res = subprocess.run([turbo_bin, "build", "--project-dir", str(ROOT / "lean"), "Orb.Kernel"],
-                             cwd=ROOT, env={**os.environ, "TURBO_LEAN_EMIT_C": "1"}, capture_output=True, text=True)
+        res = subprocess.run([str(ROOT / "scripts/turbo_lean.sh"), "build", "--project-dir", str(ROOT / "lean"), "Orb.Kernel"],
+                             cwd=ROOT, env={**os.environ, "TURBO_LEAN_EMIT_C": "1", "TURBO_LEAN_CLI": turbo_bin}, capture_output=True, text=True)
         ir_c = ROOT / "lean/.lake/build/ir/Orb/Kernel.c"
         if res.returncode == 0 and ir_c.is_file():
             return ir_c
