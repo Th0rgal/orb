@@ -748,6 +748,26 @@ nothing was done on it.
   2. Native iOS (`OrbApp` / Simulator) and Android (`android-orb`) interactive device/emulator walk as member `ben`.
   3. Live authenticated browser/desktop walk as `ben` against dev Core (`agent-backend-dev.thomas.md`), because managed VMs must never receive `ben`'s session token or credentials.
 
+### Open items with no owner yet (filed 10:10 UTC, 14 Nov, from the operator)
+
+Staff these after the multi-user and LeanUI priorities are satisfied. Each gets
+an owner and a dated status line here when dispatched.
+
+| # | Item | Detail |
+| --- | --- | --- |
+| U1 | Governed node binary rollout | `sandboxed-mcp`, `sandboxed-node` and `orb-privd` are copied to fleet nodes by hand (nimrud ran a 30 Oct `sandboxed-mcp` until 14 Nov). Wanted: one governed, checksummed rollout path with cordon/drain and rollback, driven from the deploy tool. Interim operator script to study, not to depend on: `/root/orb-node-mcp-update.sh` on agent-core. |
+| U2 | Native Linux row menu | `linux_shell/gtk_chrome.c` still lacks New cron, New folder, Rename and Archive; #1764 added only the "+" buttons. |
+| U3 | macOS native sidebar "+" buttons | The macOS native sidebar does not have the "+" (New project, New agent in a project or folder) buttons added for Linux in #1764. |
+| U4 | Tether lease revoke on every terminal transition | `request_macbook_tether` leases are revoked only on stop, cancel and DELETE routes. The MCP `cancel_mission` tool and provider-failure stops leave the lease alive until its TTL (up to 4 h). Revoke on every terminal transition; tests first. |
+| U5 | Tether decision (recorded, closed) | The confined host shell keeps `~/.ssh`, `~/.orb` and Bitwarden hidden. Do not ask Thomas for more access. |
+
+**Update 10:10 UTC, 14 Nov (coordinator `2bcfd62a`).**
+
+- Filed U1 to U5 on this board with no owner; U5 is a closed decision, not work.
+- **#1767** (operator's, waiting on CI): `Test` and `kernel-abi` pending at 10:10Z, everything else passed. The operator merges and deploys #1766 and #1767, then installs the Lean `orb-privd` on nimrud; this mission will be paused briefly during that rollout. I do not deploy or touch nimrud's node binaries.
+- Tether: call `request_macbook_tether` with target host only after the operator confirms; until then no laptop path is used.
+- Active workers unchanged at 10:10Z: `18ab4b08` (Core member `auto-managed` + WS token), `d9a273d2` (OrbNode `managedSandbox`), `242ef3da` (per-user libraries), `ea916daa` (LeanUI Wave 2 bundle parts).
+
 **Update 10:05 UTC, 14 Nov (coordinator `2bcfd62a`).**
 
 - **Live builds.** Operator confirms prod and dev run `e263b6bd4`; my own read of both health endpoints at 09:48Z still showed prod `3226e954c` and dev `432f3fef4`, so a deploy landed after that read. #1757, #1758, #1760 and #1761 are live.
@@ -1597,3 +1617,5 @@ verification command. The operator session runs them and records the result.
 | 14 Nov 09:48 | Deleted dead `~/.ssh/orb_m2air_temp` and `.pub` on `nimrud`; wait for operator go-ahead before calling `request_macbook_tether` (`sandbox_ssh` default) | Operator directive: temporary SSH key is dead and laptop access will go exclusively through the MacBook tether broker |
 | 14 Nov 10:05 | Respawned the two lost `boat:large` workers and relaunched Core (`18ab4b08`) and OrbNode (`d9a273d2`); published the per-user library spec and started a third worker | Both 09:40 workers vanished with their receipts; spec-first is required before the per-user library code |
 | 14 Nov 10:05 | Per-user library design: owner checkout and `LIBRARY_PATH` unchanged; members get `{storeRoot}/library/users/<userId>` and their own `library.json`; admin steering a member mission installs the member's skills | Thomas's decision; keeps existing installs working while removing the owner-library leak |
+| 14 Nov 10:10 | Filed operator items U1-U5 with no owner; U5 recorded as a closed access decision | Staff after multi-user and LeanUI; the node binary rollout stays with the deploy tool, not a per-mission script |
+| 14 Nov 10:10 | Do not deploy #1766/#1767 or install node binaries on nimrud; the operator owns that rollout and will pause this mission | Duplicated deploys and a hand-installed `sandboxed-mcp` are exactly the U1 defect |
