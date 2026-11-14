@@ -1534,6 +1534,20 @@ def dispatchProviderAndAiRoute
       else if httpStatus >= 500 then s!"server_error:{httpStatus}"
       else if s.isEmpty || s == "error" then "server_error:502"
       else s
+    let rateOf (okCnt reqCnt : Nat) (zeroJv : JVal) : JVal :=
+      if reqCnt == 0 then zeroJv
+      else if okCnt == reqCnt then .num "1.0"
+      else if okCnt == 0 then .num "0.0"
+      else .num (toString (Float.ofNat okCnt / Float.ofNat reqCnt))
+    let addErrCount (m : Array (String × Nat)) (k : String) (c : Nat) : Array (String × Nat) :=
+      if c == 0 then m
+      else
+        match m.findIdx? (fun (ek, _) => ek == k) with
+        | some idx =>
+          let (_, prev) := m[idx]!
+          m.set! idx (k, prev + c)
+        | none =>
+          m.push (k, c)
     if effAdmin then
       if let .ok ors ← execParamQuery store.missionsDb
           s!"SELECT COUNT(*), COALESCE(SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN status<>'ok' THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN retries>0 THEN 1 ELSE 0 END),0), COALESCE(SUM(retries),0), COALESCE(SUM(CASE WHEN fallback_depth>0 THEN 1 ELSE 0 END),0) FROM proxy_outcomes {wSql};"
@@ -1554,16 +1568,26 @@ def dispatchProviderAndAiRoute
           let r := ers[i]!
           let k := errorKeyFor ((r[0]?).getD "error") (((r[1]?).bind String.toNat?).getD 0)
           let c := ((r[2]?).bind String.toNat?).getD 0
-          if c > 0 then
-            match errMap.findIdx? (fun (ek, _) => ek == k) with
-            | some idx =>
-              let (_, prev) := errMap[idx]!
-              errMap := errMap.set! idx (k, prev + c)
-            | none =>
-              errMap := errMap.push (k, c)
+          errMap := addErrCount errMap k c
         totErrors := errMap.map (fun (k, c) => (k, JVal.nat c))
+      let mut grpErrByKey : Array ((String × String × String) × Array (String × Nat)) := #[]
+      if let .ok gers ← execParamQuery store.missionsDb
+          s!"SELECT COALESCE(provider,''), COALESCE(model,''), COALESCE(account_id,''), status, COALESCE(http_status,0), COUNT(*) FROM proxy_outcomes {errWhere} GROUP BY COALESCE(provider,''), COALESCE(model,''), COALESCE(account_id,''), status, COALESCE(http_status,0);"
+          wArgs then
+        for i in [1:gers.size] do
+          let r := gers[i]!
+          let gKey := (((r[0]?).getD "").trimAscii.toString, ((r[1]?).getD "").trimAscii.toString, ((r[2]?).getD "").trimAscii.toString)
+          let k := errorKeyFor ((r[3]?).getD "error") (((r[4]?).bind String.toNat?).getD 0)
+          let c := ((r[5]?).bind String.toNat?).getD 0
+          if c > 0 then
+            match grpErrByKey.findIdx? (fun (gk, _) => gk == gKey) with
+            | some idx =>
+              let (_, prevMap) := grpErrByKey[idx]!
+              grpErrByKey := grpErrByKey.set! idx (gKey, addErrCount prevMap k c)
+            | none =>
+              grpErrByKey := grpErrByKey.push (gKey, #[(k, c)])
       if let .ok grs ← execParamQuery store.missionsDb
-          s!"SELECT COALESCE(provider,''), COALESCE(model,''), COALESCE(account_id,''), COUNT(*), COALESCE(SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END),0), COALESCE(SUM(retries),0), COALESCE(SUM(CASE WHEN fallback_depth>0 THEN 1 ELSE 0 END),0) FROM proxy_outcomes {wSql} GROUP BY COALESCE(provider,''), COALESCE(model,''), COALESCE(account_id,'') ORDER BY COUNT(*) DESC;"
+          s!"SELECT COALESCE(provider,''), COALESCE(model,''), COALESCE(account_id,''), COUNT(*), COALESCE(SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN retries>0 THEN 1 ELSE 0 END),0) FROM proxy_outcomes {wSql} GROUP BY COALESCE(provider,''), COALESCE(model,''), COALESCE(account_id,'') ORDER BY COUNT(*) DESC;"
           wArgs then
         for i in [1:grs.size] do
           let r := grs[i]!
@@ -1573,49 +1597,43 @@ def dispatchProviderAndAiRoute
           let gReqs := ((r[3]?).bind String.toNat?).getD 0
           let gOk := ((r[4]?).bind String.toNat?).getD 0
           let gRet := ((r[5]?).bind String.toNat?).getD 0
-          let gFb := ((r[6]?).bind String.toNat?).getD 0
-          let mut gErrMap : Array (String × Nat) := #[]
-          let (gErrWhere, gErrArgs) :=
-            match winStart? with
-            | some s => ("WHERE timestamp >= ?1 AND COALESCE(provider,'')=?2 AND COALESCE(model,'')=?3 AND COALESCE(account_id,'')=?4 AND status<>'ok'", #[s, prov, mdl, acct])
-            | none => ("WHERE COALESCE(provider,'')=?1 AND COALESCE(model,'')=?2 AND COALESCE(account_id,'')=?3 AND status<>'ok'", #[prov, mdl, acct])
-          if let .ok gers ← execParamQuery store.missionsDb
-              s!"SELECT status, COALESCE(http_status,0), COUNT(*) FROM proxy_outcomes {gErrWhere} GROUP BY status, COALESCE(http_status,0);"
-              gErrArgs then
-            for j in [1:gers.size] do
-              let er := gers[j]!
-              let k := errorKeyFor ((er[0]?).getD "error") (((er[1]?).bind String.toNat?).getD 0)
-              let c := ((er[2]?).bind String.toNat?).getD 0
-              if c > 0 then
-                match gErrMap.findIdx? (fun (ek, _) => ek == k) with
-                | some idx =>
-                  let (_, prev) := gErrMap[idx]!
-                  gErrMap := gErrMap.set! idx (k, prev + c)
-                | none =>
-                  gErrMap := gErrMap.push (k, c)
-          let gRate : JVal :=
-            if gReqs == 0 then .num "1.0"
-            else if gOk == gReqs then .num "1.0"
-            else if gOk == 0 then .num "0.0"
-            else .num (toString (Float.ofNat gOk / Float.ofNat gReqs))
+          let gErrMap :=
+            match grpErrByKey.find? (fun (gk, _) => gk == (prov, mdl, acct)) with
+            | some (_, em) => em
+            | none => #[]
           groups := groups.push (.obj #[
             ("provider", if prov.isEmpty then .null else .str prov),
             ("model", if mdl.isEmpty then .null else .str mdl),
             ("account_id", if acct.isEmpty then .null else .str acct),
             ("requests", JVal.nat gReqs),
             ("ok", JVal.nat gOk),
-            ("success_rate", gRate),
+            ("success_rate", rateOf gOk gReqs (.num "1.0")),
             ("ttft_p50_ms", .null),
             ("ttft_p95_ms", .null),
             ("latency_p50_ms", .null),
             ("latency_p95_ms", .null),
             ("retried", JVal.nat gRet),
-            ("fell_back", JVal.nat gFb),
             ("errors", .obj (gErrMap.map (fun (k, c) => (k, JVal.nat c)))),
             ("flags", .arr #[])
           ])
+      let mut chnErrByKey : Array (String × Array (String × Nat)) := #[]
+      if let .ok cers ← execParamQuery store.missionsDb
+          s!"SELECT COALESCE(chain_id,''), status, COALESCE(http_status,0), COUNT(*) FROM proxy_outcomes {errWhere} GROUP BY COALESCE(chain_id,''), status, COALESCE(http_status,0);"
+          wArgs then
+        for i in [1:cers.size] do
+          let r := cers[i]!
+          let cidKey := ((r[0]?).getD "").trimAscii.toString
+          let k := errorKeyFor ((r[1]?).getD "error") (((r[2]?).bind String.toNat?).getD 0)
+          let c := ((r[3]?).bind String.toNat?).getD 0
+          if c > 0 then
+            match chnErrByKey.findIdx? (fun (ck, _) => ck == cidKey) with
+            | some idx =>
+              let (_, prevMap) := chnErrByKey[idx]!
+              chnErrByKey := chnErrByKey.set! idx (cidKey, addErrCount prevMap k c)
+            | none =>
+              chnErrByKey := chnErrByKey.push (cidKey, #[(k, c)])
       if let .ok crs ← execParamQuery store.missionsDb
-          s!"SELECT COALESCE(chain_id,''), COUNT(*), COALESCE(SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END),0), COALESCE(SUM(retries),0), COALESCE(SUM(CASE WHEN fallback_depth>0 THEN 1 ELSE 0 END),0) FROM proxy_outcomes {wSql} GROUP BY COALESCE(chain_id,'') ORDER BY COUNT(*) DESC;"
+          s!"SELECT COALESCE(chain_id,''), COUNT(*), COALESCE(SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN retries>0 THEN 1 ELSE 0 END),0) FROM proxy_outcomes {wSql} GROUP BY COALESCE(chain_id,'') ORDER BY COUNT(*) DESC;"
           wArgs then
         for i in [1:crs.size] do
           let r := crs[i]!
@@ -1623,42 +1641,20 @@ def dispatchProviderAndAiRoute
           let cReqs := ((r[1]?).bind String.toNat?).getD 0
           let cOk := ((r[2]?).bind String.toNat?).getD 0
           let cRet := ((r[3]?).bind String.toNat?).getD 0
-          let cFb := ((r[4]?).bind String.toNat?).getD 0
-          let mut cErrMap : Array (String × Nat) := #[]
-          let (cErrWhere, cErrArgs) :=
-            match winStart? with
-            | some s => ("WHERE timestamp >= ?1 AND COALESCE(chain_id,'')=?2 AND status<>'ok'", #[s, cid])
-            | none => ("WHERE COALESCE(chain_id,'')=?1 AND status<>'ok'", #[cid])
-          if let .ok cers ← execParamQuery store.missionsDb
-              s!"SELECT status, COALESCE(http_status,0), COUNT(*) FROM proxy_outcomes {cErrWhere} GROUP BY status, COALESCE(http_status,0);"
-              cErrArgs then
-            for j in [1:cers.size] do
-              let er := cers[j]!
-              let k := errorKeyFor ((er[0]?).getD "error") (((er[1]?).bind String.toNat?).getD 0)
-              let c := ((er[2]?).bind String.toNat?).getD 0
-              if c > 0 then
-                match cErrMap.findIdx? (fun (ek, _) => ek == k) with
-                | some idx =>
-                  let (_, prev) := cErrMap[idx]!
-                  cErrMap := cErrMap.set! idx (k, prev + c)
-                | none =>
-                  cErrMap := cErrMap.push (k, c)
-          let cRate : JVal :=
-            if cReqs == 0 then .num "1.0"
-            else if cOk == cReqs then .num "1.0"
-            else if cOk == 0 then .num "0.0"
-            else .num (toString (Float.ofNat cOk / Float.ofNat cReqs))
+          let cErrMap :=
+            match chnErrByKey.find? (fun (ck, _) => ck == cid) with
+            | some (_, em) => em
+            | none => #[]
           chains := chains.push (.obj #[
             ("chain_id", .str cid),
             ("requests", JVal.nat cReqs),
             ("ok", JVal.nat cOk),
-            ("success_rate", cRate),
+            ("success_rate", rateOf cOk cReqs (.num "1.0")),
             ("ttft_p50_ms", .null),
             ("ttft_p95_ms", .null),
             ("latency_p50_ms", .null),
             ("latency_p95_ms", .null),
             ("retried", JVal.nat cRet),
-            ("fell_back", JVal.nat cFb),
             ("errors", .obj (cErrMap.map (fun (k, c) => (k, JVal.nat c))))
           ])
       if let .ok frs ← execParamQuery store.missionsDb
@@ -1692,10 +1688,9 @@ def dispatchProviderAndAiRoute
         ("superseded", JVal.nat 0),
         ("retried_requests", JVal.nat retriedReqs),
         ("total_retries", JVal.nat totalRetries),
-        ("retried", JVal.nat totalRetries),
+        ("retried", JVal.nat retriedReqs),
         ("fallback_requests", JVal.nat fallbackReqs),
-        ("fell_back", JVal.nat fallbackReqs),
-        ("success_rate", .num (if totalReqs == 0 then "1.0" else "0.99")),
+        ("success_rate", rateOf okReqs totalReqs (.num "1.0")),
         ("by_status", .obj #[("ok", JVal.nat okReqs)]),
         ("errors", .obj totErrors),
         ("ttft_ms", emptyPct),

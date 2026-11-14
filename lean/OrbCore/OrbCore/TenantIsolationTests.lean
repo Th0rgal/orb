@@ -794,7 +794,7 @@ def run (root : String) : IO Unit := do
       mProxyTot.fieldNat? "requests" == some 0 &&
       mProxyTot.fieldNat? "ok" == some 0 &&
       mProxyTot.fieldNat? "retried" == some 0 &&
-      mProxyTot.fieldNat? "fell_back" == some 0 &&
+      (mProxyTot.field? "fell_back").isNone &&
       mProxyTot.field? "errors" == some (.obj #[]))
       "member /api/ai/proxy/health returns empty groups, chains, and zeroed totals"
     -- Disabling/deleting an issuer must stop every previously minted session,

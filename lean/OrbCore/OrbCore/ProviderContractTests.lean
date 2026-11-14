@@ -661,8 +661,8 @@ private def sidecarParkedHealthContract
   return failures
 
 /-- Contract test for `GET /api/ai/proxy/health`: verifies the additive client-read
-    fields (`since`, `groups`, `chains`, and `totals.{ok,retried,fell_back,errors,ttft_p50_ms,ttft_p95_ms,latency_p50_ms,latency_p95_ms}`)
-    alongside existing keys. -/
+    fields (`since`, `groups`, `chains`, and `totals.{ok,retried,errors,ttft_p50_ms,ttft_p95_ms,latency_p50_ms,latency_p95_ms}`,
+    with `fell_back` omitted because Core never writes `fallback_depth`) alongside existing keys. -/
 private def proxyHealthClientShapeContract (app : CoreAppState) (store : CoreStore) (jwt : String)
     (now : UInt64) : IO (Array String) := do
   let mut failures : Array String := #[]
@@ -689,9 +689,13 @@ private def proxyHealthClientShapeContract (app : CoreAppState) (store : CoreSto
        tot.fieldNat? "ok" != byStatusOk ||
        tot.fieldNat? "ok" != some 1 then
       failures := failures.push s!"proxy/health: totals.ok must equal by_status.ok (1) and requests=2, got {renderCompact tot}"
-    if tot.fieldNat? "retried" != tot.fieldNat? "total_retries" ||
-       tot.fieldNat? "fell_back" != tot.fieldNat? "fallback_requests" then
-      failures := failures.push s!"proxy/health: totals.retried/fell_back must equal total_retries/fallback_requests, got {renderCompact tot}"
+    if tot.fieldNat? "retried" != some 1 ||
+       tot.fieldNat? "retried_requests" != some 1 ||
+       tot.fieldNat? "total_retries" != some 2 ||
+       (tot.field? "fell_back").isSome then
+      failures := failures.push s!"proxy/health: totals.retried must be 1 (retried_requests=1, total_retries=2) and fell_back omitted, got {renderCompact tot}"
+    if tot.field? "success_rate" != some (.num "0.500000") && tot.field? "success_rate" != some (.num "0.5") then
+      failures := failures.push s!"proxy/health: totals.success_rate must be 0.5 for 1 ok of 2 requests, got {renderCompact tot}"
     let ttftP50 := (tot.fieldOrNull "ttft_ms").field? "p50"
     let ttftP95 := (tot.fieldOrNull "ttft_ms").field? "p95"
     let totalP50 := (tot.fieldOrNull "total_ms").field? "p50"
@@ -701,8 +705,9 @@ private def proxyHealthClientShapeContract (app : CoreAppState) (store : CoreSto
        tot.field? "latency_p50_ms" != totalP50 ||
        tot.field? "latency_p95_ms" != totalP95 then
       failures := failures.push s!"proxy/health: totals ttft/latency p50/p95 must match ttft_ms/total_ms p50/p95, got {renderCompact tot}"
-    if (tot.fieldOrNull "errors").asObj?.isNone then
-      failures := failures.push s!"proxy/health: totals.errors must be an object (Record<string, number>), got {renderCompact tot}"
+    if (tot.fieldOrNull "errors").asObj?.isNone ||
+       (tot.fieldOrNull "errors").fieldNat? "server_error:502" != some 1 then
+      failures := failures.push s!"proxy/health: totals.errors must map server_error:502 -> 1, got {renderCompact tot}"
     let some groups := h24.fieldArr? "groups"
       | failures := failures.push s!"proxy/health: expected groups array, got {renderCompact h24}"; return failures
     let some chains := h24.fieldArr? "chains"
@@ -716,9 +721,11 @@ private def proxyHealthClientShapeContract (app : CoreAppState) (store : CoreSto
          g.fieldStr? "account_id" != some "10000000-0000-4000-8000-000000000001" ||
          g.fieldNat? "requests" != some 2 ||
          g.fieldNat? "ok" != some 1 ||
+         g.fieldNat? "retried" != some 1 ||
+         (g.field? "fell_back").isSome ||
          (g.fieldArr? "flags").isNone ||
-         (g.fieldOrNull "errors").asObj?.isNone then
-        failures := failures.push s!"proxy/health: group row missing client ReliabilityGroup fields, got {renderCompact g}"
+         (g.fieldOrNull "errors").fieldNat? "server_error:502" != some 1 then
+        failures := failures.push s!"proxy/health: group row missing client ReliabilityGroup fields or wrong retried/errors, got {renderCompact g}"
     if chains.size != 1 then
       failures := failures.push s!"proxy/health: expected 1 chain row from proxy_outcomes, got {chains.size}: {renderCompact (.arr chains)}"
     else
@@ -726,8 +733,10 @@ private def proxyHealthClientShapeContract (app : CoreAppState) (store : CoreSto
       if c.fieldStr? "chain_id" != some "builtin/smart" ||
          c.fieldNat? "requests" != some 2 ||
          c.fieldNat? "ok" != some 1 ||
-         (c.fieldOrNull "errors").asObj?.isNone then
-        failures := failures.push s!"proxy/health: chain row missing client ChainReliability fields, got {renderCompact c}"
+         c.fieldNat? "retried" != some 1 ||
+         (c.field? "fell_back").isSome ||
+         (c.fieldOrNull "errors").fieldNat? "server_error:502" != some 1 then
+        failures := failures.push s!"proxy/health: chain row missing client ChainReliability fields or wrong retried/errors, got {renderCompact c}"
   finally
     discard <| execParamQuery store.missionsDb "DELETE FROM proxy_outcomes;" #[]
   return failures
