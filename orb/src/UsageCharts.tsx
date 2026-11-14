@@ -20,7 +20,8 @@ type Series = { key: string; slot: number; buckets: ChartBucket[] };
 async function providerSeries(summary: UsageSummary, filters: UsageFilters, granularity: Granularity, metric: Metric): Promise<Series[]> {
   const total = chartBuckets(summary, new Date(), granularity).buckets;
   if (filters.provider) return [{ key: filters.provider, slot: providerSlot(filters.provider), buckets: total }];
-  const top = summary.by_provider.filter(g => g.key).sort((a, b) => metricValue({ tokens: a.input_tokens + a.output_tokens, cost_cents: a.cost_cents ?? 0, requests: a.requests }, metric) < metricValue({ tokens: b.input_tokens + b.output_tokens, cost_cents: b.cost_cents ?? 0, requests: b.requests }, metric) ? 1 : -1).slice(0, MAX_SERIES);
+  const byProvider = Array.isArray(summary.by_provider) ? summary.by_provider : [];
+  const top = byProvider.filter(g => g.key).sort((a, b) => metricValue({ tokens: (a.input_tokens ?? 0) + (a.output_tokens ?? 0), cost_cents: a.cost_cents ?? 0, requests: a.requests ?? 0 }, metric) < metricValue({ tokens: (b.input_tokens ?? 0) + (b.output_tokens ?? 0), cost_cents: b.cost_cents ?? 0, requests: b.requests ?? 0 }, metric) ? 1 : -1).slice(0, MAX_SERIES);
   const series = await Promise.all(top.map(async g => ({
     key: g.key!, slot: providerSlot(g.key!),
     buckets: chartBuckets(await getUsageSummary(summary.window, { ...filters, provider: g.key! }), new Date(), granularity).buckets,

@@ -77,21 +77,22 @@ export interface RateLimitSnapshot {
 
 export interface AccountHealthSnapshot {
   account_id: string;
-  provider_id: string | null;
-  is_healthy: boolean;
-  cooldown_remaining_secs: number | null;
-  consecutive_failures: number;
-  last_failure_reason: string | null;
-  last_failure_at: string | null;
-  total_requests: number;
-  total_successes: number;
-  total_rate_limits: number;
-  total_errors: number;
-  avg_latency_ms: number | null;
-  total_input_tokens: number;
-  total_output_tokens: number;
-  is_degraded: boolean;
-  rate_limit_snapshot: RateLimitSnapshot | null;
+  provider_id?: string | null;
+  is_healthy?: boolean;
+  cooldown_remaining_secs?: number | null;
+  cooldown_secs_remaining?: number | null;
+  consecutive_failures?: number;
+  last_failure_reason?: string | null;
+  last_failure_at?: string | null;
+  total_requests?: number;
+  total_successes?: number;
+  total_rate_limits?: number;
+  total_errors?: number;
+  avg_latency_ms?: number | null;
+  total_input_tokens?: number;
+  total_output_tokens?: number;
+  is_degraded?: boolean;
+  rate_limit_snapshot?: RateLimitSnapshot | null;
   /** available, out_of_credit, auth_failed, quota_exhausted, rate_limited or cooldown (older cores omit it). */
   account_state?: "available" | "out_of_credit" | "auth_failed" | "quota_exhausted" | "rate_limited" | "cooldown";
   /** When the circuit breaker lets the next probe request through. */

@@ -23,8 +23,8 @@ export function outcomeOf(key: string): Exclude<Outcome, "ok"> {
 }
 
 export function outcomeMix(g: Pick<ReliabilityGroup, "ok" | "errors">): Record<Outcome, number> {
-  const mix: Record<Outcome, number> = { ok: g.ok, limited: 0, client: 0, server: 0, timeout: 0 };
-  for (const [key, n] of Object.entries(g.errors)) mix[outcomeOf(key)] += n;
+  const mix: Record<Outcome, number> = { ok: g.ok ?? 0, limited: 0, client: 0, server: 0, timeout: 0 };
+  for (const [key, n] of Object.entries(g.errors ?? {})) mix[outcomeOf(key)] += n;
   return mix;
 }
 
@@ -50,18 +50,19 @@ const hhmm = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-di
 export function classify(g: ReliabilityGroup, now = Date.now()): Status {
   const mix = outcomeMix(g);
   const hard = mix.client + mix.server + mix.timeout;
+  const flags = Array.isArray(g.flags) ? g.flags : [];
   const cooldown = g.cooldown && Date.parse(g.cooldown.until) > now ? g.cooldown : null;
   if (cooldown?.state === "out_of_credit") return { health: "down", label: "Out of credit", tone: "danger" };
   if (cooldown?.state === "auth_failed") return { health: "down", label: "Auth failed", tone: "danger" };
   const hardRate = g.requests ? hard / g.requests : 0;
-  if (hard >= MIN_ATTEMPTS && hardRate >= DOWN_FAILURE_RATE && g.ok === 0)
+  if (hard >= MIN_ATTEMPTS && hardRate >= DOWN_FAILURE_RATE && (g.ok ?? 0) === 0)
     return { health: "down", label: "Down", tone: "danger" };
   if (cooldown && (cooldown.state === "quota_exhausted" || cooldown.state === "rate_limited" || mix.limited > 0))
     return { health: "quota", label: `${cooldown.state === "rate_limited" ? "Rate limited" : "Quota cooldown"} until ${hhmm(cooldown.until)}`, short: `Until ${hhmm(cooldown.until)}`, tone: "warning", until: cooldown.until };
   if (hard >= MIN_ATTEMPTS && hardRate >= DOWN_FAILURE_RATE) return { health: "down", label: "Down", tone: "danger" };
-  if (hard > 0 && (hardRate >= DEGRADED_FAILURE_RATE || g.flags.includes("auth_failed") || g.flags.includes("out_of_credit") || g.flags.includes("stalls")))
+  if (hard > 0 && (hardRate >= DEGRADED_FAILURE_RATE || flags.includes("auth_failed") || flags.includes("out_of_credit") || flags.includes("stalls")))
     return { health: "degraded", label: "Degraded", tone: "danger" };
-  if (g.flags.includes("slow_first_token")) return { health: "degraded", label: "Slow", tone: "warning" };
+  if (flags.includes("slow_first_token")) return { health: "degraded", label: "Slow", tone: "warning" };
   if (g.requests && mix.limited / g.requests >= DEGRADED_FAILURE_RATE) return { health: "limited", label: "Rate limited", tone: "warning" };
   return { health: "healthy", label: "Healthy", tone: "neutral" };
 }
@@ -78,16 +79,17 @@ export interface Row { key: string; group: ReliabilityGroup; status: Status; imp
  * Rows sorted by impact (desc), then attempts. Rows sharing provider·model get
  * their account label (or short id) so duplicates are told apart.
  */
-export function reliabilityRows(groups: ReliabilityGroup[], now = Date.now()): Row[] {
+export function reliabilityRows(groups: ReliabilityGroup[] | undefined, now = Date.now()): Row[] {
+  const list = Array.isArray(groups) ? groups : [];
   const name = (g: ReliabilityGroup) => `${g.provider ?? "Unknown provider"}${g.model ? ` · ${g.model}` : ""}`;
   const count = new Map<string, number>();
-  for (const g of groups) count.set(name(g), (count.get(name(g)) ?? 0) + 1);
-  return groups
+  for (const g of list) count.set(name(g), (count.get(name(g)) ?? 0) + 1);
+  return list
     .map(g => ({
       key: `${g.provider}|${g.model}|${g.account_id}`, group: g, status: classify(g, now), impact: impact(g), name: name(g),
       account: (count.get(name(g)) ?? 0) > 1 ? g.account_label || g.account_id?.slice(0, 8) || "No account" : undefined,
     }))
-    .sort((a, b) => b.impact - a.impact || b.group.requests - a.group.requests || a.name.localeCompare(b.name));
+    .sort((a, b) => b.impact - a.impact || (b.group.requests ?? 0) - (a.group.requests ?? 0) || a.name.localeCompare(b.name));
 }
 
 export const isProblem = (r: Row) => r.status.health !== "healthy";
