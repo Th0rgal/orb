@@ -1,0 +1,952 @@
+{
+  "pairs": [
+    {
+      "name": "01_control_empty_dark_1x.png",
+      "screen": "01_control_empty",
+      "theme": "dark",
+      "scale": 1,
+      "mismatch": 1.231638917755618,
+      "above_tolerance": 1.0477517117356152,
+      "ssim": 0.9820361825847076,
+      "regions": {
+        "sidebar": {
+          "mismatch": 3.417216586230671,
+          "above_tolerance": 3.15473259135231,
+          "ssim": 0.9503875661983514
+        },
+        "transcript": {
+          "mismatch": 0.9364285714285714,
+          "above_tolerance": 0.7383673469387755,
+          "ssim": 0.9861851075852409
+        },
+        "composer": {
+          "mismatch": 0.0,
+          "above_tolerance": 0.0,
+          "ssim": 1.0
+        }
+      }
+    },
+    {
+      "name": "01_control_empty_dark_2x.png",
+      "screen": "01_control_empty",
+      "theme": "dark",
+      "scale": 2,
+      "mismatch": 0.9335868692005512,
+      "above_tolerance": 0.8682866429345303,
+      "ssim": 0.9853929060926286,
+      "regions": {
+        "sidebar": {
+          "mismatch": 2.656973308381759,
+          "above_tolerance": 2.457401753176401,
+          "ssim": 0.9577574567118394
+        },
+        "transcript": {
+          "mismatch": 0.6982397959183674,
+          "above_tolerance": 0.6514795918367347,
+          "ssim": 0.9890857844960249
+        },
+        "composer": {
+          "mismatch": 0.0,
+          "above_tolerance": 0.0,
+          "ssim": 1.0
+        }
+      }
+    },
+    {
+      "name": "01_control_empty_light_1x.png",
+      "screen": "01_control_empty",
+      "theme": "light",
+      "scale": 1,
+      "mismatch": 1.2289856354242672,
+      "above_tolerance": 1.1008910606496118,
+      "ssim": 0.9816747424230585,
+      "regions": {
+        "sidebar": {
+          "mismatch": 3.4034275583571363,
+          "above_tolerance": 3.15473259135231,
+          "ssim": 0.9501066566696544
+        },
+        "transcript": {
+          "mismatch": 0.9361224489795918,
+          "above_tolerance": 0.8120408163265307,
+          "ssim": 0.9857417652982792
+        },
+        "composer": {
+          "mismatch": 0.0,
+          "above_tolerance": 0.0,
+          "ssim": 1.0
+        }
+      }
+    },
+    {
+      "name": "01_control_empty_light_2x.png",
+      "screen": "01_control_empty",
+      "theme": "light",
+      "scale": 2,
+      "mismatch": 0.9312283960171284,
+      "above_tolerance": 0.8760806597828731,
+      "ssim": 0.9852933903132884,
+      "regions": {
+        "sidebar": {
+          "mismatch": 2.6458928395548114,
+          "above_tolerance": 2.47242194425293,
+          "ssim": 0.9578808557492091
+        },
+        "transcript": {
+          "mismatch": 0.6978061224489795,
+          "above_tolerance": 0.6591071428571429,
+          "ssim": 0.9889160073960943
+        },
+        "composer": {
+          "mismatch": 0.0,
+          "above_tolerance": 0.0,
+          "ssim": 1.0
+        }
+      }
+    },
+    {
+      "name": "02_control_populated_dark_1x.png",
+      "screen": "02_control_populated",
+      "theme": "dark",
+      "scale": 1,
+      "mismatch": 1.7737929407949529,
+      "above_tolerance": 1.3650400571929746,
+      "ssim": 0.9771285992752748,
+      "regions": {
+        "sidebar": {
+          "mismatch": 7.039791194720772,
+          "above_tolerance": 5.274795626908303,
+          "ssim": 0.9168141925300827
+        },
+        "transcript": {
+          "mismatch": 0.9364285714285714,
+          "above_tolerance": 0.7383673469387755,
+          "ssim": 0.9861851075852409
+        },
+        "composer": {
+          "mismatch": 0.0,
+          "above_tolerance": 0.0,
+          "ssim": 1.0
+        }
+      }
+    },
+    {
+      "name": "02_control_populated_dark_2x.png",
+      "screen": "02_control_populated",
+      "theme": "dark",
+      "scale": 2,
+      "mismatch": 1.4233754173392,
+      "above_tolerance": 1.2694297654056206,
+      "ssim": 0.9757156007115491,
+      "regions": {
+        "sidebar": {
+          "mismatch": 5.929651334580912,
+          "above_tolerance": 5.13776716241505,
+          "ssim": 0.8923353046655551
+        },
+        "transcript": {
+          "mismatch": 0.6982397959183674,
+          "above_tolerance": 0.6514795918367347,
+          "ssim": 0.9890857844960249
+        },
+        "composer": {
+          "mismatch": 0.0,
+          "above_tolerance": 0.0,
+          "ssim": 1.0
+        }
+      }
+    },
+    {
+      "name": "02_control_populated_light_1x.png",
+      "screen": "02_control_populated",
+      "theme": "light",
+      "scale": 1,
+      "mismatch": 1.7775517574310329,
+      "above_tolerance": 1.4137572688880535,
+      "ssim": 0.9768645208323223,
+      "regions": {
+        "sidebar": {
+          "mismatch": 7.068846646311434,
+          "above_tolerance": 5.245247710036442,
+          "ssim": 0.9171993463479817
+        },
+        "transcript": {
+          "mismatch": 0.9361224489795918,
+          "above_tolerance": 0.8120408163265307,
+          "ssim": 0.9857417652982792
+        },
+        "composer": {
+          "mismatch": 0.0,
+          "above_tolerance": 0.0,
+          "ssim": 1.0
+        }
+      }
+    },
+    {
+      "name": "02_control_populated_light_2x.png",
+      "screen": "02_control_populated",
+      "theme": "light",
+      "scale": 2,
+      "mismatch": 1.4274658942666991,
+      "above_tolerance": 1.2731148797547187,
+      "ssim": 0.975705878451827,
+      "regions": {
+        "sidebar": {
+          "mismatch": 5.961661577858761,
+          "above_tolerance": 5.125332414064808,
+          "ssim": 0.8930657409991436
+        },
+        "transcript": {
+          "mismatch": 0.6978061224489795,
+          "above_tolerance": 0.6591071428571429,
+          "ssim": 0.9889160073960943
+        },
+        "composer": {
+          "mismatch": 0.0,
+          "above_tolerance": 0.0,
+          "ssim": 1.0
+        }
+      }
+    },
+    {
+      "name": "03_mission_transcript_dark_1x.png",
+      "screen": "03_mission_transcript",
+      "theme": "dark",
+      "scale": 1,
+      "mismatch": 7.51181079148886,
+      "above_tolerance": 4.432381836808396,
+      "ssim": 0.9099412613517412,
+      "regions": {
+        "sidebar": {
+          "mismatch": 8.874224367182114,
+          "above_tolerance": 7.052595292031912,
+          "ssim": 0.8864238688917339
+        },
+        "transcript": {
+          "mismatch": 5.751530612244897,
+          "above_tolerance": 4.112755102040817,
+          "ssim": 0.9117758022079188
+        },
+        "composer": {
+          "mismatch": 19.905384615384616,
+          "above_tolerance": 3.1,
+          "ssim": 0.9273148329816427
+        }
+      }
+    },
+    {
+      "name": "03_mission_transcript_dark_2x.png",
+      "screen": "03_mission_transcript",
+      "theme": "dark",
+      "scale": 2,
+      "mismatch": 6.726457646980785,
+      "above_tolerance": 3.8476647430369764,
+      "ssim": 0.9234530230200042,
+      "regions": {
+        "sidebar": {
+          "mismatch": 7.264109130306314,
+          "above_tolerance": 6.305525460455037,
+          "ssim": 0.8724511590922533
+        },
+        "transcript": {
+          "mismatch": 5.071352040816326,
+          "above_tolerance": 3.5548469387755106,
+          "ssim": 0.9298596302767037
+        },
+        "composer": {
+          "mismatch": 19.636346153846155,
+          "above_tolerance": 2.582692307692308,
+          "ssim": 0.9453883199837873
+        }
+      }
+    },
+    {
+      "name": "03_mission_transcript_light_1x.png",
+      "screen": "03_mission_transcript",
+      "theme": "light",
+      "scale": 1,
+      "mismatch": 7.40192068159875,
+      "above_tolerance": 5.100345663725945,
+      "ssim": 0.9068485202183436,
+      "regions": {
+        "sidebar": {
+          "mismatch": 8.926918152270265,
+          "above_tolerance": 6.994484388850585,
+          "ssim": 0.8863271513296607
+        },
+        "transcript": {
+          "mismatch": 5.580612244897959,
+          "above_tolerance": 4.655,
+          "ssim": 0.9088197048218821
+        },
+        "composer": {
+          "mismatch": 19.96,
+          "above_tolerance": 6.050769230769231,
+          "ssim": 0.9173181597893703
+        }
+      }
+    },
+    {
+      "name": "03_mission_transcript_light_2x.png",
+      "screen": "03_mission_transcript",
+      "theme": "light",
+      "scale": 2,
+      "mismatch": 6.596428387172853,
+      "above_tolerance": 4.5172868714116206,
+      "ssim": 0.9220297961578743,
+      "regions": {
+        "sidebar": {
+          "mismatch": 7.295996257263863,
+          "above_tolerance": 6.272037821333595,
+          "ssim": 0.8731179684263959
+        },
+        "transcript": {
+          "mismatch": 4.877857142857143,
+          "above_tolerance": 4.096224489795918,
+          "ssim": 0.9283037255277328
+        },
+        "composer": {
+          "mismatch": 19.68307692307692,
+          "above_tolerance": 5.535384615384616,
+          "ssim": 0.9414273624262951
+        }
+      }
+    },
+    {
+      "name": "04_mission_split_diff_dark_1x.png",
+      "screen": "04_mission_split_diff",
+      "theme": "dark",
+      "scale": 1,
+      "mismatch": 9.493149372425027,
+      "above_tolerance": 6.45521480531541,
+      "ssim": 0.8620090051125225,
+      "regions": {
+        "sidebar": {
+          "mismatch": 8.874224367182114,
+          "above_tolerance": 7.052595292031912,
+          "ssim": 0.8864238688917339
+        },
+        "transcript": {
+          "mismatch": 8.441632653061225,
+          "above_tolerance": 6.502142857142858,
+          "ssim": 0.853189503218214
+        },
+        "composer": {
+          "mismatch": 17.231538461538463,
+          "above_tolerance": 3.166923076923077,
+          "ssim": 0.9252455674662797
+        }
+      }
+    },
+    {
+      "name": "04_mission_split_diff_dark_2x.png",
+      "screen": "04_mission_split_diff",
+      "theme": "dark",
+      "scale": 2,
+      "mismatch": 8.22329581886926,
+      "above_tolerance": 5.395154811653806,
+      "ssim": 0.8902447765031296,
+      "regions": {
+        "sidebar": {
+          "mismatch": 7.264109130306314,
+          "above_tolerance": 6.305525460455037,
+          "ssim": 0.8724511590922533
+        },
+        "transcript": {
+          "mismatch": 7.116147959183674,
+          "above_tolerance": 5.304285714285714,
+          "ssim": 0.8891829452529567
+        },
+        "composer": {
+          "mismatch": 16.92942307692308,
+          "above_tolerance": 2.665,
+          "ssim": 0.9437368226006908
+        }
+      }
+    },
+    {
+      "name": "04_mission_split_diff_light_1x.png",
+      "screen": "04_mission_split_diff",
+      "theme": "light",
+      "scale": 1,
+      "mismatch": 10.155290718671,
+      "above_tolerance": 7.3363256461848,
+      "ssim": 0.857201728417223,
+      "regions": {
+        "sidebar": {
+          "mismatch": 8.926918152270265,
+          "above_tolerance": 6.994484388850585,
+          "ssim": 0.8863271513296607
+        },
+        "transcript": {
+          "mismatch": 9.339183673469389,
+          "above_tolerance": 7.392142857142857,
+          "ssim": 0.84827815123286
+        },
+        "composer": {
+          "mismatch": 17.283846153846156,
+          "above_tolerance": 5.704615384615384,
+          "ssim": 0.9164295979391786
+        }
+      }
+    },
+    {
+      "name": "04_mission_split_diff_light_2x.png",
+      "screen": "04_mission_split_diff",
+      "theme": "light",
+      "scale": 2,
+      "mismatch": 8.920832688438322,
+      "above_tolerance": 6.281295833609716,
+      "ssim": 0.8877834557505817,
+      "regions": {
+        "sidebar": {
+          "mismatch": 7.295996257263863,
+          "above_tolerance": 6.272037821333595,
+          "ssim": 0.8731179684263959
+        },
+        "transcript": {
+          "mismatch": 8.068469387755101,
+          "above_tolerance": 6.1992346938775515,
+          "ssim": 0.8862676294883066
+        },
+        "composer": {
+          "mismatch": 16.973076923076924,
+          "above_tolerance": 5.202115384615385,
+          "ssim": 0.9401618041375275
+        }
+      }
+    },
+    {
+      "name": "05_machines_fleet_dark_1x.png",
+      "screen": "05_machines_fleet",
+      "theme": "dark",
+      "scale": 1,
+      "mismatch": 5.031212918536862,
+      "above_tolerance": 3.2835842896205074,
+      "ssim": 0.9485868791851616,
+      "regions": {
+        "sidebar": {
+          "mismatch": 7.040776125283167,
+          "above_tolerance": 5.276273022751896,
+          "ssim": 0.9165808415275483
+        },
+        "transcript": {
+          "mismatch": 5.454285714285715,
+          "above_tolerance": 3.4033673469387757,
+          "ssim": 0.9462255588710572
+        },
+        "composer": {
+          "mismatch": 0.0,
+          "above_tolerance": 0.0,
+          "ssim": 1.0
+        }
+      }
+    },
+    {
+      "name": "05_machines_fleet_dark_2x.png",
+      "screen": "05_machines_fleet",
+      "theme": "dark",
+      "scale": 2,
+      "mismatch": 4.318954017143152,
+      "above_tolerance": 2.7226546089725168,
+      "ssim": 0.9570228124445309,
+      "regions": {
+        "sidebar": {
+          "mismatch": 5.929651334580912,
+          "above_tolerance": 5.136166650251157,
+          "ssim": 0.8922664341836208
+        },
+        "transcript": {
+          "mismatch": 4.7111989795918365,
+          "above_tolerance": 2.6676785714285716,
+          "ssim": 0.9631375934300127
+        },
+        "composer": {
+          "mismatch": 0.0,
+          "above_tolerance": 0.0,
+          "ssim": 1.0
+        }
+      }
+    },
+    {
+      "name": "05_machines_fleet_light_1x.png",
+      "screen": "05_machines_fleet",
+      "theme": "light",
+      "scale": 1,
+      "mismatch": 5.030181086519115,
+      "above_tolerance": 3.28410020562938,
+      "ssim": 0.9486399081764677,
+      "regions": {
+        "sidebar": {
+          "mismatch": 7.068846646311434,
+          "above_tolerance": 5.244262779474047,
+          "ssim": 0.9170011374059851
+        },
+        "transcript": {
+          "mismatch": 5.447040816326531,
+          "above_tolerance": 3.410510204081633,
+          "ssim": 0.9462127927964714
+        },
+        "composer": {
+          "mismatch": 0.0,
+          "above_tolerance": 0.0,
+          "ssim": 1.0
+        }
+      }
+    },
+    {
+      "name": "05_machines_fleet_light_2x.png",
+      "screen": "05_machines_fleet",
+      "theme": "light",
+      "scale": 2,
+      "mismatch": 4.3220495131963945,
+      "above_tolerance": 2.7255289981648128,
+      "ssim": 0.95756634567321,
+      "regions": {
+        "sidebar": {
+          "mismatch": 5.961907810499359,
+          "above_tolerance": 5.125701763025706,
+          "ssim": 0.8930045958810771
+        },
+        "transcript": {
+          "mismatch": 4.70890306122449,
+          "above_tolerance": 2.67375,
+          "ssim": 0.9637352418848802
+        },
+        "composer": {
+          "mismatch": 0.0,
+          "above_tolerance": 0.0,
+          "ssim": 1.0
+        }
+      }
+    },
+    {
+      "name": "06_settings_general_dark_1x.png",
+      "screen": "06_settings_general",
+      "theme": "dark",
+      "scale": 1,
+      "mismatch": 4.767800944863319,
+      "above_tolerance": 3.646641755293667,
+      "ssim": 0.9299195615960979,
+      "regions": {
+        "sidebar": {
+          "mismatch": 2.204274598640796,
+          "above_tolerance": 2.0772185560917955,
+          "ssim": 0.9523545593554651
+        },
+        "transcript": {
+          "mismatch": 5.308571428571429,
+          "above_tolerance": 3.92295918367347,
+          "ssim": 0.9256270179217315
+        },
+        "composer": {
+          "mismatch": 6.066923076923077,
+          "above_tolerance": 5.027692307692308,
+          "ssim": 0.9032482108843819
+        }
+      }
+    },
+    {
+      "name": "06_settings_general_dark_2x.png",
+      "screen": "06_settings_general",
+      "theme": "dark",
+      "scale": 2,
+      "mismatch": 3.7538970084241714,
+      "above_tolerance": 2.6698100692064473,
+      "ssim": 0.9478289577074676,
+      "regions": {
+        "sidebar": {
+          "mismatch": 1.7376637447059984,
+          "above_tolerance": 1.6496355756919137,
+          "ssim": 0.9657925842184529
+        },
+        "transcript": {
+          "mismatch": 4.20780612244898,
+          "above_tolerance": 2.852321428571429,
+          "ssim": 0.9446810741505797
+        },
+        "composer": {
+          "mismatch": 4.572884615384615,
+          "above_tolerance": 3.6228846153846153,
+          "ssim": 0.9276100975158527
+        }
+      }
+    },
+    {
+      "name": "06_settings_general_light_1x.png",
+      "screen": "06_settings_general",
+      "theme": "light",
+      "scale": 1,
+      "mismatch": 4.758588158990573,
+      "above_tolerance": 4.478593170746088,
+      "ssim": 0.9271371014473809,
+      "regions": {
+        "sidebar": {
+          "mismatch": 2.210184182015168,
+          "above_tolerance": 2.0698315768738302,
+          "ssim": 0.9534077286492408
+        },
+        "transcript": {
+          "mismatch": 5.299183673469388,
+          "above_tolerance": 5.071020408163266,
+          "ssim": 0.9213399676972371
+        },
+        "composer": {
+          "mismatch": 6.032307692307692,
+          "above_tolerance": 5.066923076923077,
+          "ssim": 0.9049437331001029
+        }
+      }
+    },
+    {
+      "name": "06_settings_general_light_2x.png",
+      "screen": "06_settings_general",
+      "theme": "light",
+      "scale": 2,
+      "mismatch": 3.762428048142334,
+      "above_tolerance": 3.525125109632152,
+      "ssim": 0.9463402269278516,
+      "regions": {
+        "sidebar": {
+          "mismatch": 1.7265832758790505,
+          "above_tolerance": 1.6475425982468237,
+          "ssim": 0.9665383002604085
+        },
+        "transcript": {
+          "mismatch": 4.219872448979592,
+          "above_tolerance": 4.03344387755102,
+          "ssim": 0.9422808530336797
+        },
+        "composer": {
+          "mismatch": 4.588269230769231,
+          "above_tolerance": 3.6484615384615386,
+          "ssim": 0.9290308019360546
+        }
+      }
+    },
+    {
+      "name": "07_search_dialog_dark_1x.png",
+      "screen": "07_search_dialog",
+      "theme": "dark",
+      "scale": 1,
+      "mismatch": 19.445463992747694,
+      "above_tolerance": 2.1641939549384217,
+      "ssim": 0.9620774451900289,
+      "regions": {
+        "sidebar": {
+          "mismatch": 90.23933812666208,
+          "above_tolerance": 1.473948586624643,
+          "ssim": 0.985459077889522
+        },
+        "transcript": {
+          "mismatch": 7.867551020408163,
+          "above_tolerance": 2.6909183673469386,
+          "ssim": 0.9504033209064525
+        },
+        "composer": {
+          "mismatch": 0.6346153846153846,
+          "above_tolerance": 0.0,
+          "ssim": 0.999973970619557
+        }
+      }
+    },
+    {
+      "name": "07_search_dialog_dark_2x.png",
+      "screen": "07_search_dialog",
+      "theme": "dark",
+      "scale": 2,
+      "mismatch": 19.399455340099202,
+      "above_tolerance": 1.9191522762951334,
+      "ssim": 0.9689356087994437,
+      "regions": {
+        "sidebar": {
+          "mismatch": 90.28858465478183,
+          "above_tolerance": 1.4840441248891953,
+          "ssim": 0.9886199131416208
+        },
+        "transcript": {
+          "mismatch": 7.813341836734694,
+          "above_tolerance": 2.349566326530612,
+          "ssim": 0.959320181541077
+        },
+        "composer": {
+          "mismatch": 0.5971153846153846,
+          "above_tolerance": 0.0,
+          "ssim": 0.9999759739260421
+        }
+      }
+    },
+    {
+      "name": "07_search_dialog_light_1x.png",
+      "screen": "07_search_dialog",
+      "theme": "light",
+      "scale": 1,
+      "mismatch": 15.030549597954025,
+      "above_tolerance": 2.5296835960819863,
+      "ssim": 0.9624910251555794,
+      "regions": {
+        "sidebar": {
+          "mismatch": 47.8819068255688,
+          "above_tolerance": 3.3985029055451585,
+          "ssim": 0.9903770826959182
+        },
+        "transcript": {
+          "mismatch": 10.54,
+          "above_tolerance": 2.7981632653061226,
+          "ssim": 0.9499778301729308
+        },
+        "composer": {
+          "mismatch": 0.40846153846153843,
+          "above_tolerance": 0.0,
+          "ssim": 0.9999831305949586
+        }
+      }
+    },
+    {
+      "name": "07_search_dialog_light_2x.png",
+      "screen": "07_search_dialog",
+      "theme": "light",
+      "scale": 2,
+      "mismatch": 15.336506216787907,
+      "above_tolerance": 2.261388845895888,
+      "ssim": 0.9697077369249446,
+      "regions": {
+        "sidebar": {
+          "mismatch": 50.28538363045405,
+          "above_tolerance": 3.402073278833842,
+          "ssim": 0.9960950315137473
+        },
+        "transcript": {
+          "mismatch": 10.463775510204082,
+          "above_tolerance": 2.425969387755102,
+          "ssim": 0.9588488664642152
+        },
+        "composer": {
+          "mismatch": 0.4273076923076923,
+          "above_tolerance": 0.0,
+          "ssim": 0.9999821347567384
+        }
+      }
+    },
+    {
+      "name": "08_new_mission_dialog_dark_1x.png",
+      "screen": "08_new_mission_dialog",
+      "theme": "dark",
+      "scale": 1,
+      "mismatch": 1.7296452708927559,
+      "above_tolerance": 1.4268762759708433,
+      "ssim": 0.977025807897297,
+      "regions": {
+        "sidebar": {
+          "mismatch": 7.039791194720772,
+          "above_tolerance": 5.274795626908303,
+          "ssim": 0.9168141925300827
+        },
+        "transcript": {
+          "mismatch": 0.8753061224489797,
+          "above_tolerance": 0.8239795918367346,
+          "ssim": 0.9860425247904596
+        },
+        "composer": {
+          "mismatch": 0.0,
+          "above_tolerance": 0.0,
+          "ssim": 1.0
+        }
+      }
+    },
+    {
+      "name": "08_new_mission_dialog_dark_2x.png",
+      "screen": "08_new_mission_dialog",
+      "theme": "dark",
+      "scale": 2,
+      "mismatch": 1.3418422623654012,
+      "above_tolerance": 1.1972383753067857,
+      "ssim": 0.9755605642033899,
+      "regions": {
+        "sidebar": {
+          "mismatch": 5.929651334580912,
+          "above_tolerance": 5.13776716241505,
+          "ssim": 0.8923353046655551
+        },
+        "transcript": {
+          "mismatch": 0.5853571428571428,
+          "above_tolerance": 0.551530612244898,
+          "ssim": 0.9888709349540543
+        },
+        "composer": {
+          "mismatch": 0.0,
+          "above_tolerance": 0.0,
+          "ssim": 1.0
+        }
+      }
+    },
+    {
+      "name": "08_new_mission_dialog_light_1x.png",
+      "screen": "08_new_mission_dialog",
+      "theme": "light",
+      "scale": 1,
+      "mismatch": 1.7320774463631605,
+      "above_tolerance": 1.4228226501868353,
+      "ssim": 0.9768550886845746,
+      "regions": {
+        "sidebar": {
+          "mismatch": 7.068846646311434,
+          "above_tolerance": 5.245247710036442,
+          "ssim": 0.9171993463479817
+        },
+        "transcript": {
+          "mismatch": 0.8731632653061224,
+          "above_tolerance": 0.8245918367346939,
+          "ssim": 0.9857286818859043
+        },
+        "composer": {
+          "mismatch": 0.0,
+          "above_tolerance": 0.0,
+          "ssim": 1.0
+        }
+      }
+    },
+    {
+      "name": "08_new_mission_dialog_light_2x.png",
+      "screen": "08_new_mission_dialog",
+      "theme": "light",
+      "scale": 2,
+      "mismatch": 1.3446245236989702,
+      "above_tolerance": 1.1962986711477657,
+      "ssim": 0.9755339720994062,
+      "regions": {
+        "sidebar": {
+          "mismatch": 5.961661577858761,
+          "above_tolerance": 5.125332414064808,
+          "ssim": 0.8930657409991436
+        },
+        "transcript": {
+          "mismatch": 0.5831122448979592,
+          "above_tolerance": 0.5527551020408163,
+          "ssim": 0.9886777796294992
+        },
+        "composer": {
+          "mismatch": 0.0,
+          "above_tolerance": 0.0,
+          "ssim": 1.0
+        }
+      }
+    },
+    {
+      "name": "09_toast_notifications_dark_1x.png",
+      "screen": "09_toast_notifications",
+      "theme": "dark",
+      "scale": 1,
+      "mismatch": 6.139105696449761,
+      "above_tolerance": 2.4514117673071394,
+      "ssim": 0.9520951341951177,
+      "regions": {
+        "sidebar": {
+          "mismatch": 7.039791194720772,
+          "above_tolerance": 5.274795626908303,
+          "ssim": 0.9168141925300827
+        },
+        "transcript": {
+          "mismatch": 4.306020408163265,
+          "above_tolerance": 1.4340816326530612,
+          "ssim": 0.9730797272002424
+        },
+        "composer": {
+          "mismatch": 20.159230769230767,
+          "above_tolerance": 6.093846153846154,
+          "ssim": 0.8419572350811841
+        }
+      }
+    },
+    {
+      "name": "09_toast_notifications_dark_2x.png",
+      "screen": "09_toast_notifications",
+      "theme": "dark",
+      "scale": 2,
+      "mismatch": 5.577862781082097,
+      "above_tolerance": 2.1911505664020754,
+      "ssim": 0.9560253956299615,
+      "regions": {
+        "sidebar": {
+          "mismatch": 5.929651334580912,
+          "above_tolerance": 5.13776716241505,
+          "ssim": 0.8923353046655551
+        },
+        "transcript": {
+          "mismatch": 3.911658163265306,
+          "above_tolerance": 1.215561224489796,
+          "ssim": 0.9779765918659771
+        },
+        "composer": {
+          "mismatch": 19.136153846153846,
+          "above_tolerance": 5.367692307692307,
+          "ssim": 0.8815861136907621
+        }
+      }
+    },
+    {
+      "name": "09_toast_notifications_light_1x.png",
+      "screen": "09_toast_notifications",
+      "theme": "light",
+      "scale": 1,
+      "mismatch": 6.4458546148687,
+      "above_tolerance": 2.425468562289488,
+      "ssim": 0.9546213190658817,
+      "regions": {
+        "sidebar": {
+          "mismatch": 7.068846646311434,
+          "above_tolerance": 5.245247710036442,
+          "ssim": 0.9171993463479817
+        },
+        "transcript": {
+          "mismatch": 4.30530612244898,
+          "above_tolerance": 1.5155102040816326,
+          "ssim": 0.9724535895691842
+        },
+        "composer": {
+          "mismatch": 23.324615384615385,
+          "above_tolerance": 5.256153846153846,
+          "ssim": 0.874096656807376
+        }
+      }
+    },
+    {
+      "name": "09_toast_notifications_light_2x.png",
+      "screen": "09_toast_notifications",
+      "theme": "light",
+      "scale": 2,
+      "mismatch": 5.933623720344042,
+      "above_tolerance": 2.1168586611242546,
+      "ssim": 0.9576529609283673,
+      "regions": {
+        "sidebar": {
+          "mismatch": 5.961661577858761,
+          "above_tolerance": 5.125332414064808,
+          "ssim": 0.8930657409991436
+        },
+        "transcript": {
+          "mismatch": 3.878112244897959,
+          "above_tolerance": 1.2295663265306123,
+          "ssim": 0.9776493133181136
+        },
+        "composer": {
+          "mismatch": 23.056153846153844,
+          "above_tolerance": 4.50576923076923,
+          "ssim": 0.9003715837048368
+        }
+      }
+    }
+  ],
+  "errors": [],
+  "tolerance": 8,
+  "determinism": {
+    "SolidJS reference": {
+      "identical": 36,
+      "total": 36
+    },
+    "LeanUI": {
+      "identical": 36,
+      "total": 36
+    }
+  }
+}

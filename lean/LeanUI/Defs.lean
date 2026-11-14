@@ -76,6 +76,8 @@ inductive Prim where
   /-- Group opacity (0..255) for everything until the matching `layerPop`. -/
   | layerPush (opacity : Nat)
   | layerPop
+  /-- Blur the accumulated backdrop, sigma in device pixels (three separable box passes). -/
+  | backdropBlur (sigma : Nat)
   deriving DecidableEq, Repr
 
 abbrev Scene := Array Prim

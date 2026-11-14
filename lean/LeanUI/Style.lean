@@ -265,6 +265,18 @@ structure Palette where
   warning : Color
   success : Color
   shadowColor : Color
+  /-- Selected sidebar row: `--bg-active` of `.sidebar` composited over `sidebar`. -/
+  rowActive : Color
+  /-- `--fg-strong`: label of the selected row. -/
+  textStrong : Color
+  /-- `--fg-4`: shortcut hints. -/
+  textFaint : Color
+  /-- `--stroke-strong`: composer border while it has focus. -/
+  borderStrong : Color
+  /-- `--plus-bg`, `--send-bg`, `--send-fg`: the round composer buttons. -/
+  plusBg : Color
+  sendBg : Color
+  sendFg : Color
   deriving DecidableEq, Repr, Inhabited
 
 /-- Typography scale in `SubPx` (`1/64` logical pixel units). -/
@@ -295,60 +307,76 @@ structure Theme where
   borderWidth : SubPx := 1 * subPerPx
   deriving DecidableEq, Repr, Inhabited
 
-/-- Canonical Orb Dark palette (`0xRRGGBBAA`). -/
+/-- Orb Dark palette (`0xRRGGBBAA`): the dark design tokens of `orb/src/styles.css`, with the
+translucent sidebar and main surfaces composited over the dark canvas. Checked by
+`scripts/test_leanui_tokens.py`. -/
 def orbDarkPalette : Palette := {
-  canvas          := 0x0B0D12FF
-  surface         := 0x11141CFF
-  elevatedSurface := 0x181C27FF
-  sidebar         := 0x0E1117FF
-  header          := 0x11141CFF
-  border          := 0x262B38FF
-  borderSubtle    := 0x1B1F2AFF
-  focusRing       := 0x5E81ACFF
-  textPrimary     := 0xECEFF4FF
-  textSecondary   := 0xAEB5C4FF
-  textMuted       := 0x6E7688FF
-  accent          := 0x6C8EF2FF
-  accentMuted     := 0x6C8EF233
-  codeBg          := 0x090B10FF
-  diffAddBg       := 0x163322FF
-  diffAddText     := 0x7EE787FF
-  diffDelBg       := 0x3A1A1EFF
-  diffDelText     := 0xFF7B72FF
-  diffHunkBg      := 0x17243AFF
-  diffHunkText    := 0x79C0FFFF
-  danger          := 0xF85149FF
-  warning         := 0xD29922FF
-  success         := 0x3FB950FF
-  shadowColor     := 0x00000080
+  canvas          := 0x141414FF
+  surface         := 0x1C1C1CFF
+  elevatedSurface := 0x212121FF
+  sidebar         := 0x121313FF
+  header          := 0x141414FF
+  border          := 0x2F2F2FFF
+  borderSubtle    := 0x2C2C2CFF
+  focusRing       := 0x5B5B5BFF
+  textPrimary     := 0xD8D8D7FF
+  textSecondary   := 0xB1B1B1FF
+  textMuted       := 0x8A8A8AFF
+  accent          := 0x86AEE4FF
+  accentMuted     := 0x86AEE433
+  codeBg          := 0x282828FF
+  diffAddBg       := 0x2DA44E21
+  diffAddText     := 0x2DA44EFF
+  diffDelBg       := 0xEF7F8B21
+  diffDelText     := 0xEF7F8BFF
+  diffHunkBg      := 0x2F2F2F59
+  diffHunkText    := 0xD8D8D7FF
+  danger          := 0xEF7F8BFF
+  warning         := 0xD9B23AFF
+  success         := 0x80B28DFF
+  shadowColor     := 0x0000007F
+  rowActive       := 0x202121FF
+  textStrong      := 0xE6E6E5FF
+  textFaint       := 0x5C5C5CFF
+  borderStrong    := 0x3A3A3AFF
+  plusBg          := 0x2C2C2CFF
+  sendBg          := 0xD8D8D7FF
+  sendFg          := 0x191919FF
 }
 
-/-- Canonical Orb Light palette (`0xRRGGBBAA`). -/
+/-- Orb Light palette (`0xRRGGBBAA`): the light design tokens of `orb/src/styles.css`. -/
 def orbLightPalette : Palette := {
-  canvas          := 0xF8FAFCFF
-  surface         := 0xFFFFFFFF
-  elevatedSurface := 0xF1F5F9FF
-  sidebar         := 0xF1F5F9FF
+  canvas          := 0xFFFFFFFF
+  surface         := 0xF6F5F2FF
+  elevatedSurface := 0xF1F0EDFF
+  sidebar         := 0xF9F9F7FF
   header          := 0xFFFFFFFF
-  border          := 0xE2E8F0FF
-  borderSubtle    := 0xEDF2F7FF
-  focusRing       := 0x3B82F6FF
-  textPrimary     := 0x0F172AFF
-  textSecondary   := 0x475569FF
-  textMuted       := 0x94A3B8FF
-  accent          := 0x2563EBFF
-  accentMuted     := 0x2563EB26
-  codeBg          := 0xF1F5F9FF
-  diffAddBg       := 0xDCFCE7FF
-  diffAddText     := 0x166534FF
-  diffDelBg       := 0xFEE2E2FF
-  diffDelText     := 0x991B1BFF
-  diffHunkBg      := 0xDBEAFEFF
-  diffHunkText    := 0x1E40AFFF
-  danger          := 0xDC2626FF
-  warning         := 0xD97706FF
-  success         := 0x16A34AFF
-  shadowColor     := 0x0F172A22
+  border          := 0xE0DFD9FF
+  borderSubtle    := 0xE8E7E2FF
+  focusRing       := 0xABABA6FF
+  textPrimary     := 0x242423FF
+  textSecondary   := 0x535250FF
+  textMuted       := 0x7B7A76FF
+  accent          := 0x2F6BD8FF
+  accentMuted     := 0x2F6BD826
+  codeBg          := 0xEAE9E5FF
+  diffAddBg       := 0x2DA44E21
+  diffAddText     := 0x2DA44EFF
+  diffDelBg       := 0xC0283A21
+  diffDelText     := 0xC0283AFF
+  diffHunkBg      := 0xE0DFD959
+  diffHunkText    := 0x242423FF
+  danger          := 0xC0283AFF
+  warning         := 0x876A0AFF
+  success         := 0x1E7A45FF
+  shadowColor     := 0x1E1E1C2D
+  rowActive       := 0xEAEAE8FF
+  textStrong      := 0x101010FF
+  textFaint       := 0xA9A8A2FF
+  borderStrong    := 0xD4D3CDFF
+  plusBg          := 0xE8E7E3FF
+  sendBg          := 0x242423FF
+  sendFg          := 0xFFFFFFFF
 }
 
 /-- Canonical Orb Dark theme. -/
