@@ -7105,7 +7105,9 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
     dashboardPassword := "strong-prod-pass-1234"
     jwtSecret := jwtSec
   }
-  let _ ← bootstrapUsersAndBackfill store #[("admin", cfg.dashboardPassword)] (formatEpochIso8601Utc nowSec)
+  let bootAdminId ← match ← bootstrapUsersAndBackfill store #[("admin", cfg.dashboardPassword)] (formatEpochIso8601Utc nowSec) with
+    | .ok aid => pure aid
+    | .error _ => pure ""
   let managedRef ← IO.mkRef ({} : ManagedFleetState)
   let chainsRef ← IO.mkRef (#[] : Array RoutingChain)
   let cooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
@@ -7118,6 +7120,7 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
     chainsRef := chainsRef
     proxyCooldownsRef := cooldownsRef
     seqRef := seqRef
+    bootstrapAdminId := bootAdminId
   }
 
   let sendReq (method path tok body : String) : IO (Nat × String × String) := do

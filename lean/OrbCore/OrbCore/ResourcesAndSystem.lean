@@ -1220,6 +1220,13 @@ private def libraryTreeHasLocalState (libDir tree : String) : IO Bool := do
   let (rc, files) ← runGitCapture #["ls-tree", "--name-only", tree, "--", "library.json", "users", ".settings.lock"] (some libDir)
   return rc == 0 && !files.trimAscii.isEmpty
 
+/-- A configured remote requires a usable checkout: `.git` alone (from a failed
+    clone or a bare `git init`) must not make Library reads look successful. -/
+private def libraryRepoHeadReady (libDir : String) (gitDir : System.FilePath) : IO Bool := do
+  if !(← gitDir.pathExists) then return false
+  let (rc, _) ← runGitCapture #["rev-parse", "--verify", "--quiet", "HEAD"] (some libDir)
+  return rc == 0
+
 /-- Ensure `libDir` is initialized/updated for `effRemote` (`clone` when absent, `remote add`/`set-url` + `fetch` when changed). -/
 def ensureLibraryRepo (libDir effRemote : String) (forceReinit : Bool := false) : IO (Except String Bool) := do
   let rem := effRemote.trimAscii.toString
@@ -1260,7 +1267,10 @@ def ensureLibraryRepo (libDir effRemote : String) (forceReinit : Bool := false) 
   protectLibraryLocalState libDir
   let curRem? ← gitOriginUrl? libDir
   if !forceReinit && curRem? == some rem then
-    return .ok false
+    -- A previous clone/fetch may have failed after configuring `origin`; without
+    -- a commit the repository is not usable, so retry the fetch and fail closed.
+    let (rcHead, _) ← runGitCapture #["rev-parse", "--verify", "--quiet", "HEAD"] (some libDir)
+    if rcHead == 0 then return .ok false
   let (rcRem, outRem) ←
     match curRem? with
     | none => runGitCapture #["remote", "add", "origin", "--", rem] (some libDir)
@@ -1573,7 +1583,7 @@ def handleLibraryRoute
       return some (jsonResp 200 (← ownStatus))
 
   if method == "GET" && segs == ["api", "library", "status"] then
-    if !(← gitFp.pathExists) && !effRemote.isEmpty then
+    if !effRemote.isEmpty && !(← libraryRepoHeadReady libDir gitFp) then
       if let .error e ← ensureLibraryRepo libDir effRemote false then
         return some (jsonErr 502 s!"Failed to initialize Library repository: {e}")
     return some (jsonResp 200 (← ownStatus))
@@ -1707,7 +1717,7 @@ def handleLibraryRoute
     return some (200, "text/plain; charset=utf-8", "Pushed successfully".toUTF8)
 
   if method == "GET" && segs == ["api", "library", "skill"] then
-    if !(← gitFp.pathExists) && !effRemote.isEmpty then
+    if !effRemote.isEmpty && !(← libraryRepoHeadReady libDir gitFp) then
       if let .error e ← ensureLibraryRepo libDir effRemote false then
         return some (jsonErr 502 s!"Failed to initialize Library repository: {e}")
     let includeBundle :=
