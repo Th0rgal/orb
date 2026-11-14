@@ -102,6 +102,33 @@ test, a fix, a deploy, and a re-test. This extends track E's isolation test.
   unused since #1721: remove it with its self-test cases.
 - `orb-env migrate` reports ~80 "shared setting differences" between prod and
   dev env files; it needs a way to classify one-sided keys instead of failing.
+- Inference provider rows with no expandable details (no status message, usage
+  breakdown, or credentials list) must not render an expand chevron or open an
+  empty drawer.
+- Restore live usage/status fetchers for xAI, Muse, Kimi, and other providers
+  from the historical Rust implementation where parity is still incomplete.
+
+## Status update — 14 Nov 15:40 UTC
+
+- **Merged to `master` on 14 Nov:**
+  - `#1771` (`cb4887d3`): CI path-gated planner (`orb-build`, 8 browser shards, desktop path filters).
+  - `#1778` (`a5709c51`): managed VM guest unix user creation, ownership chown, and `su -` execution in `OrbNode`.
+  - `#1781` (`643a3d70`): `lean.ci` Mode 2 runner routing (`ORB_LEAN_RUNNERS`) with hosted Ubuntu fallback.
+  - `#1779` (`9f0230ac`): `orb-env` checked-in key classification (`shared` / `instance-owned` / `prod-only-allowed`).
+  - `#1784` (`b1166b8e`): inference provider secret redaction for non-admin callers.
+  - `#1776` (`3b4fa37f`): canonical provider IDs stored on saved routing chains.
+  - `#1782` (`24d06a9f`): native target architecture selection (`x86_64`/`aarch64`) in `scripts/build_orb_bins.sh` and `aarch64` operator runbook.
+  - `#1785` (`f9836726`): LeanUI Wave 2/3 parity suite recovery, native text metrics, and compositing fixes.
+  - `#1788` (`4ecb4196`): members can add and edit shared inference provider accounts.
+  - `#1787` (`8f75e614`): per-user skill libraries (`{storeRoot}/library/users/<userId>`) and member git sync isolation.
+- **In-flight PRs (14 Nov):**
+  - `#1786` (`ci/w-ci-1-turbo-lean-cache`, HEAD `e856c7fb`): pre-built `turbo-lean` release binary + `.turbo-lean` artifact cache in CI (`ci.yml` all green; `kernel-abi` rerun attempt 5 in progress after attempt 4 hit the 45m cold-cache timeout). **Supersedes `#1708`.**
+  - `#1790` (`fix/multiuser-member-vm-ws`, HEAD `ff36e020`): WebSocket RFC 6455 `tchar` token encoding (`:` -> `~`) and error log redaction, control-plane `auto-managed` VM provisioning/binding/rollback for member missions, reserved node (`dgx-spark-admin`, `sepolia`, `agent-core`, `orb-core`) member placement refusal, and member default composer machine (`auto-managed:<provider>:<size>`).
+- **Managed provider default:** `lean.ci` default is **paused** (`boat` remains the default provider) until `lean.ci` VM images ship pre-installed agent harnesses (`opencode`, `codex`, `claude`).
+- **MacBook tether (`wg-macmesh0`) finding & status:**
+  - `SandboxedMcpMain.lean:776` and `PrivdMain.lean:1307` select `mac_direct_endpoint` (LAN `192.168.1.165:51889`) whenever `!isManaged`, which fails from remote fleet hosts (`nimrud`) that must reach `m2air` via `mac_wan_endpoint` (`65.109.98.246:51890`).
+  - AppArmor (`/etc/apparmor.d/local/wg`) required `/run/orb-mac-tether/{,**} r,` so `/usr/bin/wg` can read the PSK file.
+  - With the WAN endpoint applied via `wg set`, the WireGuard handshake and TCP connection to `10.88.200.1:2224` succeed, but SSH authentication still fails (`Permission denied (publickey)` for `thomas` and `orb-tether`) because the ephemeral tether public key is not yet installed into the container's `authorized_keys` on `m2air`.
 
 ## Task board — 13 Nov 12:14 UTC
 
@@ -1717,3 +1744,5 @@ verification command. The operator session runs them and records the result.
 | 14 Nov ~11:20 | `dgx-spark` gets `aarch64` `sandboxed-mcp` and Lean `orb-privd` via a worker-made `scripts/build_orb_bins.sh` aarch64 path; operator does host steps; `lagash` SSH route and `agent-core` privd move are operator-owned | Thomas split binary production from host installation |
 | 14 Nov ~11:20 | Leave the ~100 interrupted non-Orb missions alone; Hindsight outcome pages and tether standing permissions are operator-owned | Thomas's explicit scope boundary |
 | 14 Nov 12:15 | Rebased PR #1771 onto `master` `52fbec92` (`99340d30`), preserving W-CI-2's `orb-build`, 8 browser shards and desktop path filters; 58/58 `scripts/test_ci_plan.py` green; merge when checks land | Keeps one CI change set instead of two competing workflow edits |
+| 14 Nov 14:30 | Pause `lean.ci` as default managed provider (`boat` stays default); supersede PR #1708 with PR #1786 | `lean.ci` images do not yet bundle agent harnesses; #1786 lands pre-built `turbo-lean` + `.turbo-lean` cache cleanly on current `master` |
+| 14 Nov 15:40 | Merged #1771, #1778, #1781, #1779, #1784, #1776, #1782, #1785, #1787; opened #1790 for member `auto-managed` VM provisioning, reserved placement guard, and WebSocket `tchar` subprotocol | Completes multi-user library isolation, guest VM unix account isolation, LeanUI Wave 2/3 parity, and member `auto-managed` mission launch |
