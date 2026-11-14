@@ -93,3 +93,6 @@ __pycache__/
 *.pyc
 .env*.local
 /ios_dashboard/OrbModelPackage/.build/
+
+# CI-staged native Lean binaries for Docker's prebuilt builder.
+/docker/prebuilt/

@@ -5,6 +5,8 @@ Builds the Lean project with turbo-lean (falls back to lake), then runs
 scripts/gen_stream_fixtures.lean against the built Orb.Stream olean."""
 import os, pathlib, shutil, subprocess, sys
 
+os.environ.update(TURBO_LEAN_TELEMETRY="off", LEAN_NATIVE_TELEMETRY="off")
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUT = ROOT / "shared/orb-spec/fixtures/stream-commit.json"
 
@@ -12,7 +14,7 @@ OUT = ROOT / "shared/orb-spec/fixtures/stream-commit.json"
 def main() -> int:
     lean_dir = ROOT / "lean"
     if shutil.which("turbo-lean"):
-        subprocess.run(["turbo-lean", "build", "--project-dir", str(lean_dir)], check=True, stdout=subprocess.DEVNULL)
+        subprocess.run([str(ROOT / "scripts/turbo_lean.sh"), "build", "--project-dir", str(lean_dir)], check=True, stdout=subprocess.DEVNULL)
     else:
         subprocess.run(["lake", "build"], cwd=lean_dir, check=True)
     lib = lean_dir / ".lake/build/lib/lean"
