@@ -107,10 +107,14 @@ def runCli (args : List String) : IO UInt32 := do
         IO.eprintln s!"dial-out enrollment failed: {err}"
         return 1
     if let some cred := dialCred? then
+      -- Dial-out enrollment (`SANDBOXED_NODE_DIAL_CORE_URL` + `SANDBOXED_NODE_MANAGED_ID`) always
+      -- enrolls an ephemeral single-tenant managed guest (`orbnode` with `NoNewPrivileges=true`
+      -- and no `orb-privd` socket); static/colocated multi-tenant workers never use dial-out.
       cfg := {
         cfg with
         token := cred.nodeToken
         nodeId := if cred.nodeId.isEmpty then cfg.nodeId else cred.nodeId
+        managedSandbox := true
       }
     if cfg.token.isEmpty then
       IO.eprintln "SANDBOXED_NODE_TOKEN is required"

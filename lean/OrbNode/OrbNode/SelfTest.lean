@@ -1358,6 +1358,309 @@ private def runOpenLedgerDeltaPerfTests
      (lHugeReopen.jobs.get? "job-perf-17mb-bundle").map (·.state) == some .succeeded &&
      (lHugeReopen.jobs.get? "job-perf-17mb-bundle").map (·.payloadJson) == some "{}")
 
+/-- Single-tenant managed sandbox member execution tests (Tests 1-5) with recording fake for `ensureMissionUser`. -/
+private def runManagedSandboxMemberExecTests
+    (check : String → Bool → IO Unit)
+    (rt : NodeRuntime)
+    (authHdrs : Array (String × String))
+    (memberClaims noUnixClaims : LeaseClaims)
+    (memberTok noUnixTok : String)
+    (nowMu : UInt64)
+    (pidNodeTest : UInt32)
+    (fakeAgHome : System.FilePath) : IO Unit := do
+  let recSock := s!"/tmp/on-rec-privd-{pidNodeTest}.sock"
+  try IO.FS.removeFile recSock catch _ => pure ()
+  let stopRecRef ← IO.mkRef false
+  let recEnsureCountRef ← IO.mkRef (0 : Nat)
+  let recLfd ← match ← LeanSys.Posix.unixListen recSock 32 with
+    | .ok f => pure f
+    | .error e => throw (IO.userError s!"unixListen {recSock} failed: {e}")
+  let recLoopTask ← IO.asTask do
+    while !(← stopRecRef.get) do
+      match ← LeanSys.Posix.tcpAcceptPoll recLfd 50 with
+      | .ok cfd =>
+        recEnsureCountRef.modify (· + 1)
+        let _ ← LeanSys.Posix.writeAll cfd ("{\"ok\":false,\"error\":\"recording_fake_ensure_mission_user_called\"}\n".toUTF8)
+        let _ ← LeanSys.Posix.closeFd cfd
+      | .error _ => pure ()
+    return true
+  let cleanupRecPrivd : IO Unit := do
+    stopRecRef.set true
+    let _ ← LeanSys.Posix.closeFd recLfd
+    let _ := recLoopTask.get
+    try IO.FS.removeFile recSock catch _ => pure ()
+  let runManagedSandboxSuite : IO Unit := do
+    -- Test 5: NodeConfig default (`managedSandbox == false`) leaves `admitNodeLeaseRole` and `execUnixUser`
+    -- unchanged for admin and member leases.
+    let defCfg : NodeConfig := {}
+    let adminDefaultClaims : LeaseClaims := {
+      missionId := "ffffffff-ffff-4fff-8fff-fffffffffff0"
+      nodeId := rt.cfg.nodeId
+      scope := .jobSubmit
+      expiresAt := nowMu + 600
+      ownerUserId := ""
+      callerRole := "admin"
+      unixUsername := none
+    }
+    let adminDefaultTok := signLeaseToken rt.cfg.token adminDefaultClaims
+    let defJobAdminId := "eeeeeeee-eeee-4eee-8eee-eeeeeeeeee10"
+    let (rtDef1, rDefAdmin) ← handleRequest rt {
+      method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs,
+      body := (renderCompact (.obj #[
+        ("job_id", .str defJobAdminId),
+        ("mission_id", .str adminDefaultClaims.missionId),
+        ("lease_token", .str adminDefaultTok),
+        ("payload", .obj #[("kind", .str "raw_command"), ("command", .str "true")])
+      ])).toUTF8
+    }
+    let defAdminRec? := rtDef1.ledger.jobs.get? defJobAdminId
+    let _ ← cancelJob rtDef1 defJobAdminId "core" "test cleanup"
+    check "NodeConfig default (managedSandbox=false) leaves admitNodeLeaseRole and execUnixUser unchanged for admin and member leases"
+      (defCfg.managedSandbox == false &&
+       rt.cfg.managedSandbox == false &&
+       (admitNodeLeaseRole defCfg adminDefaultClaims false).isOk &&
+       (admitNodeLeaseRole defCfg memberClaims false).isOk &&
+       !(admitNodeLeaseRole defCfg noUnixClaims false).isOk &&
+       rDefAdmin.status == 202 &&
+       defAdminRec?.map (·.execUnixUser) == some "")
+
+    -- Test 2: `managedSandbox=false` is byte-identical to master (confinement happens; absent privd socket is an error, not a hang).
+    let absentSock := s!"/tmp/on-absent-privd-{pidNodeTest}.sock"
+    try IO.FS.removeFile absentSock catch _ => pure ()
+    let mut rtAbsent : NodeRuntime := {
+      rt with
+      cfg := {
+        rt.cfg with
+        managedSandbox := false
+        privdSocket := absentSock
+        managedAuth := { rt.cfg.managedAuth with antigravityHome? := some fakeAgHome.toString }
+      }
+    }
+    let absentJobId := "eeeeeeee-eeee-4eee-8eee-eeeeeeeeee11"
+    let (rtAbsSub, rAbsSub) ← handleRequest rtAbsent {
+      method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs,
+      body := (renderCompact (.obj #[
+        ("job_id", .str absentJobId),
+        ("mission_id", .str memberClaims.missionId),
+        ("lease_token", .str memberTok),
+        ("payload", .obj #[("kind", .str "raw_command"), ("command", .str "echo should-fail-without-privd")])
+      ])).toUTF8
+    }
+    rtAbsent := rtAbsSub
+    rtAbsent ← tickRuntime rtAbsent
+    let absRec? := rtAbsent.ledger.jobs.get? absentJobId
+    let absErr := (absRec?.bind (·.error?)).getD ""
+    let muExecClaims2 : LeaseClaims := { memberClaims with scope := .missionExecute }
+    let muExecTok2 := signLeaseToken rt.cfg.token muExecClaims2
+    let (_, rAbsExec) ← handleRequest rtAbsent {
+      method := "POST", rawPath := "/execute", path := "/execute", query := #[], headers := authHdrs,
+      body := (renderCompact (.obj #[
+        ("mission_id", .str memberClaims.missionId),
+        ("lease_token", .str muExecTok2),
+        ("command", .str "pwd")
+      ])).toUTF8
+    }
+    let absExecBody := String.fromUTF8? rAbsExec.body |>.getD ""
+    check "managedSandbox=false confines member lease via orb-privd and fails immediately when privd socket is absent"
+      (rAbsSub.status == 202 &&
+       absRec?.map (·.execUnixUser) == some "orb-alice" &&
+       absRec?.map (·.state) == some .failed &&
+       (absErr.splitOn "ensure_mission_user failed: orb-privd connect failed").length > 1 &&
+       rAbsExec.status == 503 &&
+       (absExecBody.splitOn "ensure_mission_user failed: orb-privd connect failed").length > 1)
+
+    -- Test 1: `managedSandbox=true`, `callerRole="member"`, valid `unix_username`:
+    -- `/jobs` is admitted, preparation does not call `ensureMissionUser`, `managed_auth` is refused/never written.
+    let msMissionId := "dddddddd-dddd-4ddd-8ddd-ddddddddddde"
+    let msMemberClaims : LeaseClaims := {
+      memberClaims with
+      missionId := msMissionId
+    }
+    let msMemberTok := signLeaseToken rt.cfg.token msMemberClaims
+    let mut rtManaged : NodeRuntime := {
+      rt with
+      cfg := {
+        rt.cfg with
+        managedSandbox := true
+        privdSocket := recSock
+        managedAuth := { rt.cfg.managedAuth with antigravityHome? := some fakeAgHome.toString }
+      }
+    }
+    let msJobId := "eeeeeeee-eeee-4eee-8eee-eeeeeeeeee12"
+    let (rtMsSub, rMsSub) ← handleRequest rtManaged {
+      method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs,
+      body := (renderCompact (.obj #[
+        ("job_id", .str msJobId),
+        ("mission_id", .str msMissionId),
+        ("lease_token", .str msMemberTok),
+        ("payload", .obj #[
+          ("kind", .str "raw_command"),
+          ("managed_auth", .arr #[.str "antigravity"]),
+          ("env", .obj #[
+            ("ANTHROPIC_API_KEY", .str "orb-mpt-v1_scoped_alice_vm")
+          ]),
+          ("artifacts", .arr #[.str "vm-out.txt"]),
+          ("command", .str "printf 'KEY=%s|CRED=%d|GROK=%s\\n' \"$ANTHROPIC_API_KEY\" \"$(test -e .gemini/antigravity-cli && echo 1 || echo 0)\" \"${GROK_HOME:-}\" > vm-out.txt")
+        ])
+      ])).toUTF8
+    }
+    rtManaged := rtMsSub
+    let mut msFinished := false
+    for _ in [0:40] do
+      IO.sleep 50
+      rtManaged ← tickRuntime rtManaged
+      if let some jr := rtManaged.ledger.jobs.get? msJobId then
+        if jr.state.isTerminal then
+          msFinished := true
+          break
+    let msRec? := rtManaged.ledger.jobs.get? msJobId
+    let (_, rMsFiles) ← handleRequest rtManaged {
+      method := "POST", rawPath := s!"/jobs/{msJobId}/files", path := s!"/jobs/{msJobId}/files",
+      query := #[], headers := authHdrs,
+      body := (renderCompact (.obj #[("action", .str "read"), ("path", .str "vm-out.txt")])).toUTF8
+    }
+    let msOutTxt :=
+      match OrbBin.Json.parse (String.fromUTF8? rMsFiles.body |>.getD "{}") with
+      | .ok jv => ((jv.fieldStr? "content").getD "").trimAscii.toString
+      | .error _ => ""
+    let msMissionDir := System.FilePath.mk rtManaged.cfg.workDir / msMissionId
+    let geminiExists ← (msMissionDir / ".gemini" / "antigravity-cli").pathExists
+
+    -- Also check `reserveForceJob` on a queued member job with `managedSandbox=true` keeps `callerRole == "member"`
+    let msForceJobId := "eeeeeeee-eeee-4eee-8eee-eeeeeeeeee13"
+    let msForceRec : JobRecord := {
+      jobId := msForceJobId
+      missionId := msMissionId
+      payloadJson := "{\"kind\":\"raw_command\",\"managed_auth\":[\"antigravity\"],\"command\":\"true\"}"
+      state := .queued
+      createdAt := "2026-11-06T00:00:00Z"
+      ownerUserId := "usr_alice"
+      execUnixUser := ""
+    }
+    let .ok lForce ← rtManaged.ledger.insertQueued msForceRec
+      | throw (IO.userError "insertQueued msForceRec failed")
+    let rtWithForceQ := { rtManaged with ledger := lForce, queueOrder := rtManaged.queueOrder.push msForceJobId }
+    let forceRoleOk :=
+      match reserveForceJob rtWithForceQ msForceJobId with
+      | .ok (_, fLaunch, _) => fLaunch.callerRole == "member" && fLaunch.execUnixUser == ""
+      | .error _ => false
+
+    let msExecClaims : LeaseClaims := { msMemberClaims with scope := .missionExecute }
+    let msExecTok := signLeaseToken rt.cfg.token msExecClaims
+    let (_, rMsExec) ← handleRequest rtManaged {
+      method := "POST", rawPath := "/execute", path := "/execute", query := #[], headers := authHdrs,
+      body := (renderCompact (.obj #[
+        ("mission_id", .str msMissionId),
+        ("lease_token", .str msExecTok),
+        ("command", .str "pwd")
+      ])).toUTF8
+    }
+    let msExecOut :=
+      match OrbBin.Json.parse (String.fromUTF8? rMsExec.body |>.getD "{}") with
+      | .ok jv => ((jv.fieldStr? "stdout").getD "").trimAscii.toString
+      | .error _ => ""
+    let ensureCalls ← recEnsureCountRef.get
+
+    check "managedSandbox=true admits member lease with valid unix_username, skips ensureMissionUser, and never writes managed_auth"
+      (rMsSub.status == 202 &&
+       msFinished &&
+       ensureCalls == 0 &&
+       msRec?.map (·.state) == some .succeeded &&
+       msRec?.map (·.ownerUserId) == some "usr_alice" &&
+       msRec?.map (·.execUnixUser) == some "" &&
+       rMsFiles.status == 200 &&
+       msOutTxt == "KEY=orb-mpt-v1_scoped_alice_vm|CRED=0|GROK=" &&
+       !geminiExists &&
+       forceRoleOk &&
+       rMsExec.status == 200 &&
+       msExecOut == msMissionDir.toString)
+
+    -- Test 3: `managedSandbox=true`, `callerRole="member"`, no `unix_username` (and valid `unix_username`):
+    -- assert exact `Orb.Kernel.placementRoleAdmit` result for `(member, targetKind=3)` and verify `admitNodeLeaseRole`.
+    let (_, rMsNoUnix) ← handleRequest rtManaged {
+      method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs,
+      body := (renderCompact (.obj #[
+        ("job_id", .str "eeeeeeee-eeee-4eee-8eee-eeeeeeeeee14"),
+        ("mission_id", .str noUnixClaims.missionId),
+        ("lease_token", .str noUnixTok),
+        ("payload", .obj #[("kind", .str "raw_command"), ("command", .str "echo should-reject-no-unix")])
+      ])).toUTF8
+    }
+    let msNoUnixBody := String.fromUTF8? rMsNoUnix.body |>.getD ""
+    let rtManagedAdminOnly : NodeRuntime := { rtManaged with cfg := { rtManaged.cfg with adminOnly := true } }
+    let (_, rMsAdminOnly) ← handleRequest rtManagedAdminOnly {
+      method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs,
+      body := (renderCompact (.obj #[
+        ("job_id", .str "eeeeeeee-eeee-4eee-8eee-eeeeeeeeee15"),
+        ("mission_id", .str msMissionId),
+        ("lease_token", .str msMemberTok),
+        ("payload", .obj #[("kind", .str "raw_command"), ("command", .str "echo should-reject-admin-only")])
+      ])).toUTF8
+    }
+    check "managedSandbox=true uses targetKind=3 in Orb.Kernel.placementRoleAdmit and rejects member lease without valid unix_username"
+      (Orb.Kernel.placementRoleAdmit 0 3 0 0 == 0 &&
+       Orb.Kernel.placementRoleAdmit 0 3 0 1 == 1 &&
+       Orb.Kernel.placementRoleAdmit 0 3 1 1 == 0 &&
+       Orb.Kernel.placementRoleAdmit 1 3 0 0 == 1 &&
+       rMsNoUnix.status == 403 &&
+       msNoUnixBody == "member node execution requires a valid confined unix_username" &&
+       rMsAdminOnly.status == 403 &&
+       (String.fromUTF8? rMsAdminOnly.body |>.getD "") == "member leases are forbidden on admin-only colocated nodes")
+
+    -- Test 4: `lean_build` payload from a member lease is still refused with the same status and body as master.
+    let leanBuildPayload : JVal := .obj #[
+      ("kind", .str "lean_build"),
+      ("source", .obj #[
+        ("repo", .str "https://github.com/Th0rgal/orb.git"),
+        ("commit", .str "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+      ]),
+      ("command", .arr #[.str "lake", .str "build"])
+    ]
+    let (_, rLbDefaultMember) ← handleRequest rt {
+      method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs,
+      body := (renderCompact (.obj #[
+        ("job_id", .str "eeeeeeee-eeee-4eee-8eee-eeeeeeeeee16"),
+        ("mission_id", .str memberClaims.missionId),
+        ("lease_token", .str memberTok),
+        ("payload", leanBuildPayload)
+      ])).toUTF8
+    }
+    let (_, rLbManagedMember) ← handleRequest rtManaged {
+      method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs,
+      body := (renderCompact (.obj #[
+        ("job_id", .str "eeeeeeee-eeee-4eee-8eee-eeeeeeeeee17"),
+        ("mission_id", .str msMissionId),
+        ("lease_token", .str msMemberTok),
+        ("payload", leanBuildPayload)
+      ])).toUTF8
+    }
+    let adminWithUnixTok := signLeaseToken rt.cfg.token {
+      msMemberClaims with callerRole := "admin", unixUsername := some "orb-alice"
+    }
+    let (_, rLbManagedAdminWithUnix) ← handleRequest rtManaged {
+      method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs,
+      body := (renderCompact (.obj #[
+        ("job_id", .str "eeeeeeee-eeee-4eee-8eee-eeeeeeeeee18"),
+        ("mission_id", .str msMissionId),
+        ("lease_token", .str adminWithUnixTok),
+        ("payload", leanBuildPayload)
+      ])).toUTF8
+    }
+    let expectedLbRefusal := "lean_build jobs are reserved for shared admin builder lanes"
+    check "lean_build payload from a member lease or lease with unix_username is refused with HTTP 403 and identical body on default and managedSandbox nodes"
+      (rLbDefaultMember.status == 403 &&
+       (String.fromUTF8? rLbDefaultMember.body |>.getD "") == expectedLbRefusal &&
+       rLbManagedMember.status == 403 &&
+       (String.fromUTF8? rLbManagedMember.body |>.getD "") == expectedLbRefusal &&
+       rLbManagedAdminWithUnix.status == 403 &&
+       (String.fromUTF8? rLbManagedAdminWithUnix.body |>.getD "") == expectedLbRefusal)
+  try
+    runManagedSandboxSuite
+    cleanupRecPrivd
+  catch e =>
+    cleanupRecPrivd
+    throw e
+
 set_option maxRecDepth 2048 in
 def runTests : IO UInt32 := do
   let passedRef ← IO.mkRef (0 : Nat)
@@ -1719,6 +2022,8 @@ def runTests : IO UInt32 := do
   catch e =>
     cleanupMuPrivd
     throw e
+
+  runManagedSandboxMemberExecTests check rt authHdrs memberClaims noUnixClaims memberTok noUnixTok nowMu pidNodeTest fakeAgHome
 
   -- Linux `/proc` + `setsid` runtime integration checks (runs in full on Linux; skips cleanly on macOS hosts without `/proc`)
   if !(← (System.FilePath.mk "/proc/sys/kernel/random/boot_id").pathExists) then

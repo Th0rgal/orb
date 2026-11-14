@@ -621,7 +621,7 @@ def admitNodeLeaseRole (cfg : NodeConfig) (claims : LeaseClaims) (requireAdmin :
     if !Orb.Kernel.validUnixUsername u then
       throw (textResp 403 s!"invalid or reserved unix_username '{u}'")
   let roleBit : UInt8 := if claims.callerRole == "admin" then 1 else 0
-  let targetKind : UInt8 := if cfg.adminOnly then 1 else 2
+  let targetKind : UInt8 := if cfg.adminOnly then 1 else if cfg.managedSandbox then 3 else 2
   let nodeAdminBit : UInt8 := if cfg.adminOnly then 1 else 0
   let hasValidUnix : UInt8 :=
     match claims.unixUsername with
@@ -778,7 +778,7 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
         startTicks := rawLeaderTicks
         phaseCode := 1
         ownerUserId := claims.ownerUserId
-        execUnixUser := claims.unixUsername.getD ""
+        execUnixUser := if rt.cfg.managedSandbox then "" else claims.unixUsername.getD ""
       }
       match ← rt.ledger.insertQueued jobRec (some scratchReceipt) claimLeader? with
       | .error "duplicate_job_id" =>
@@ -1325,8 +1325,9 @@ def handleRequest (rt0 : NodeRuntime) (req : HttpRequest) : IO (NodeRuntime × H
       if claims.missionId != missionId then
         return (rt, textResp 400 "lease mission_id mismatch")
       let sideLane := (jv.fieldBool? "side_lane").getD false
+      let execUnixUser := if rt.cfg.managedSandbox then "" else claims.unixUsername.getD ""
       let (stCode, outVal) ← runSyncExecute rt missionId command sideLane none
-        (claims.unixUsername.getD "") claims.callerRole
+        execUnixUser claims.callerRole
       if stCode == 200 then return (rt, jsonResp 200 outVal)
       else return (rt, textResp stCode (outVal.asStr?.getD "execution rejected"))
   else
@@ -1372,7 +1373,7 @@ def handleRequestConcurrent
             return (Except.error (textResp 429 "node capacity exhausted"), preL)
           set { rt with activeExecMain := rt.activeExecMain + 1 }
         return (Except.ok (rt.cfg, rt.ledger.sqliteBackend, rt.ledger.nodeBootEpoch, missionId, command, sideLane,
-          claims.unixUsername.getD "", claims.callerRole), preL)
+          if rt.cfg.managedSandbox then "" else claims.unixUsername.getD "", claims.callerRole), preL)
     if !preLaunches.isEmpty then
       spawnAsyncLaunches mtx preLaunches
     match prep with
