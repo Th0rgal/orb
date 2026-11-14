@@ -2004,9 +2004,10 @@ def dispatchProviderAndAiRoute
           return some errResp
     return some (204, "text/plain", ByteArray.empty)
 
-  if method == "POST" && segs.length == 5 && segs[0]? == some "api" && segs[1]? == some "model-routing" && segs[2]? == some "chains" && segs[4]? == some "test" then
+  -- The chain id may contain a slash (`builtin/smart`), so it is every segment between `chains` and `test`.
+  if method == "POST" && segs.length >= 5 && segs[0]? == some "api" && segs[1]? == some "model-routing" && segs[2]? == some "chains" && segs.getLast? == some "test" then
     if !effAdmin then return some (jsonErr 403 "admin_required")
-    let cid := segs[3]!
+    let cid := String.intercalate "/" ((segs.drop 3).take (segs.length - 4))
     let testAll := ((qParam? qMap "all").getD "false") == "true"
     let probeModel := if cid.startsWith "builtin/" then cid else s!"builtin/{cid}"
     let proxyKey := (← lookupEnvWithFiles? "SANDBOXED_PROXY_SECRET").getD ""

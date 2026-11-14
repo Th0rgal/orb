@@ -852,6 +852,18 @@ def run : IO Unit := do
     check (listSt == 200 && rows.size ≥ 7 && rows.all conforms) s!"chain list rows must match the client type: {renderCompact listed}"
     check ((rows.filter (fun r => r.fieldBool? "is_default" == some true)).map (·.fieldStr? "id") == #[some "builtin/smart"])
       "exactly the stock default chain is default before anyone chooses one"
+    -- Built-in ids contain a slash; the desktop saves them as `builtin%2Fsmart` and a proxy may
+    -- decode that before Core sees it. Both spellings update the same row and create no stray chain.
+    for target in #["/api/model-routing/chains/builtin/smart", "/api/model-routing/chains/builtin%2Fsmart"] do
+      let (bSt, bRow) ← api "PUT" target "{\"strip_thinking\":false}"
+      check (bSt == 200 && conforms bRow && bRow.fieldStr? "id" == some "builtin/smart" &&
+        bRow.fieldBool? "is_default" == some true && ((bRow.fieldArr? "entries").getD #[]).size ≥ 1)
+        s!"a built-in chain is saved under its own id via {target}: {bSt} {renderCompact bRow}"
+    let (_, afterBuiltin) ← api "GET" "/api/model-routing/chains" ""
+    check ((afterBuiltin.asArr?.getD #[]).all (fun r =>
+        r.fieldStr? "id" != some "smart" && r.fieldStr? "id" != some "builtin%2Fsmart") &&
+      (afterBuiltin.asArr?.getD #[]).size == rows.size)
+      "saving a built-in chain creates no stray chain"
     -- The desktop's "set default" sends only `is_default`; entries and name survive.
     let (putSt, updated) ← api "PUT" "/api/model-routing/chains/contract" "{\"is_default\":true}"
     check (putSt == 200 && conforms updated && updated.fieldBool? "is_default" == some true &&

@@ -745,8 +745,11 @@ private def renderProviderCatalogJson (st : CoreStore) (caller : CallerPrincipal
     let effEn := if caller.isLegacyUnscoped then p.enabled else (p.enabled && (isAdm || !p.apiKey.isEmpty) && isUserProviderEnabled uPrefs p.id)
     if effEn then
       let cid := if p.providerType == "custom" then s!"custom:{p.id}" else p.providerType
-      if !cid.isEmpty && !configuredIds.contains cid then
-        configuredIds := configuredIds.push cid
+      -- Chains name a provider by type, by id, or by the slug of its name (`surplusintelligence`,
+      -- `ethereumfoundation`): the proxy resolves all three, so all three count as connected.
+      for key in #[cid, p.id, providerSlugOf p.name] do
+        if !key.isEmpty && !configuredIds.contains key then
+          configuredIds := configuredIds.push key
   let providersFile : System.FilePath := "catalog/providers.json"
   let mut catalogEntries : Array (String × String × String × String × Array (String × String × String)) := #[]
   if (← providersFile.pathExists) then
@@ -4976,12 +4979,18 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     if req.method != "GET" && !caller.isLegacyUnscoped then
       if let some (cCode, cBody) := requireAdminPrincipal caller then
         return .ok (mkJson cCode cBody)
-    if let some params := matchRoutePattern? "/api/model-routing/chains/:id/resolve" rawTarget then
+    let resolveId? : Option String :=
+      if cleanPath.startsWith "/api/model-routing/chains/" && cleanPath.endsWith "/resolve" then
+        let mid := ((cleanPath.drop "/api/model-routing/chains/".length).toString.dropEnd "/resolve".length).toString
+        let d := (percentDecodeStrict mid).getD mid
+        if d.isEmpty then none else some d
+      else none
+    if let some resolveId := resolveId? then
       if req.method == "GET" then
         if !caller.isLegacyUnscoped then
           if let some (cCode, cBody) := requireAdminPrincipal caller then
             return .ok (mkJson cCode cBody)
-        let cid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+        let cid := resolveId
         let chains ← loadRoutingChainsFromStore st.store st.cfg.workingDir
         discard <| publishRoutingChainsUpdate st chains (forceBump := false)
         match chains.find? (fun c => c.id == cid) with
@@ -5002,8 +5011,15 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           OrbCore.ProxyModelRouting.chainRowsSql #[]
         | throw (IO.userError "routing_chain_store_unavailable")
       return OrbCore.ProxyModelRouting.chainResponses (rs.extract 1 rs.size) isoOf (formatEpochIso8601Utc nowEpochSec)
-    let chainId? := (matchRoutePattern? "/api/model-routing/chains/:id" rawTarget).bind fun ps =>
-      (ps.find? (fun p => p.1 == "id")).map Prod.snd
+    -- Built-in chain ids contain a slash (`builtin/smart`), and proxies may decode `%2F` before
+    -- the request reaches Core: the id is everything after `/chains/`, decoded.
+    let chainsPrefix := "/api/model-routing/chains/"
+    let chainId? : Option String :=
+      if cleanPath.startsWith chainsPrefix then
+        let rest := (cleanPath.drop chainsPrefix.length).toString
+        let decoded := (percentDecodeStrict rest).getD rest
+        if decoded.isEmpty || decoded.endsWith "/resolve" || decoded.endsWith "/test" then none else some decoded
+      else none
     if req.method == "GET" && cleanPath == "/api/model-routing/chains" then
       return .ok (mkJson 200 (renderCompact (.arr (← loadChainRows))))
     else if req.method == "GET" && chainId?.isSome then
