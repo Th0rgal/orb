@@ -1101,6 +1101,22 @@ private def hasMultipleActiveUsers (st : CoreStore) : IO Bool := do
 private def clampControlSpendU32 (v : UInt64) : UInt32 :=
   if v > 0xFFFFFFFF then 0xFFFFFFFF else v.toUInt32
 
+/-- A member-supplied provider `base_url` must be public `https://` (no loopback, link-local,
+    private or `.internal`/`.local` hosts), so a shared account cannot point Core's proxy at
+    an internal service. -/
+private def memberProviderBaseUrlAllowed (url : String) : Bool :=
+  let u := url.trimAscii.toString.toLower
+  if !u.startsWith "https://" then false else
+  let rest := ((u.splitOn "://")[1]?).getD ""
+  let hostPort := ((rest.splitOn "/").headD "")
+  let host := if hostPort.startsWith "[" then hostPort else ((hostPort.splitOn ":").headD "")
+  !(host.isEmpty || host.startsWith "[" || host == "localhost" || host.endsWith ".localhost" ||
+    host.endsWith ".internal" || host.endsWith ".local" || host.startsWith "127." ||
+    host.startsWith "10." || host.startsWith "192.168." || host.startsWith "169.254." ||
+    host.startsWith "0." || (host.startsWith "172." &&
+      (((host.splitOn ".")[1]?).bind String.toNat? |>.map (fun n => 16 ≤ n && n ≤ 31) |>.getD false)) ||
+    (host.all (fun c => c.isDigit || c == '.') && host.startsWith "100."))
+
 /-- Authorize an `admin`-only operation (`opClass = 1`) via `Orb.Kernel.multiuserRbacStep`. -/
 private def requireAdminPrincipal (caller : CallerPrincipal) : Option (Nat × String) :=
   let disFlag : UInt8 := if caller.disabled then 1 else 0
@@ -4761,6 +4777,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             | some tr => lookupObservedKeyRpm? tr existing.id
             | none => pure none
           return .ok (mkJson 200 (renderAIProviderForCallerJson existing (caller.role == "admin") userEn obs?))
+    if req.method == "GET" && cleanPath == "/api/ai/providers/audit" then
+      if !caller.isLegacyUnscoped then
+        if let some (cCode, cBody) := requireAdminPrincipal caller then
+          return .ok (mkJson cCode cBody)
+      return .ok (mkJson 200 (← listProviderAuditLogJson st.store))
     -- Delegate rich GET list/detail, `/usage`, `/types`, `/reorder`, `/for-backend/*`, `/cli-proxy-login*`, `/:id/{usage,default,health,reset-usage,antigravity/recheck,auth/methods}` BEFORE `:id` PUT/DELETE
     let pHub ← match st.providerHub? with | some h => pure h | none => newProviderRuntimeHub
     if let some (pCode, pCtype, pBody) ← dispatchProviderAndAiRoute
@@ -4783,27 +4804,34 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         let uPrefs ← getUserProviderPrefs st.store caller.userId
         let mut items : Array String := Array.mkEmpty providers.size
         for p in providers do
-          if isAdm || (!p.apiKey.isEmpty && p.enabled) then
+          let own := !p.createdByUserId.isEmpty && p.createdByUserId == caller.userId
+          if isAdm || own || (!p.apiKey.isEmpty && p.enabled) then
             let obs? ← match st.pacingTracker? with
-              | some tr => lookupObservedKeyRpm? tr p.id
+              | some tr => if isAdm then lookupObservedKeyRpm? tr p.id else pure none
               | none => pure none
             let uEn := isUserProviderEnabled uPrefs p.id
-            items := items.push (renderAIProviderForCallerJson p isAdm uEn obs?)
+            items := items.push (renderAIProviderForCallerJson p (isAdm || own) uEn obs?)
         return .ok (mkJson 200 ("[" ++ String.intercalate "," items.toList ++ "]"))
     else if req.method == "POST" && cleanPath == "/api/ai/providers" then
-      if !caller.isLegacyUnscoped then
-        if let some (cCode, cBody) := requireAdminPrincipal caller then
-          return .ok (mkJson cCode cBody)
+      -- Members may add accounts to the shared pool (docs/MULTI_USER.md "Shared inference
+      -- providers"): Core picks the id, the key is write-only, `created_by_user_id` records them.
+      let isAdm := caller.isLegacyUnscoped || caller.role == "admin"
+      if caller.disabled then
+        return .ok (mkJson 403 "{\"error\":\"account_disabled\"}")
       let rawBody := String.fromUTF8? req.bodySlice.toByteArray |>.getD ""
       let .ok jv := OrbBin.Json.parse rawBody
         | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
       let defPid ← nextUniqueId st "prov" nowEpochSec
-      let pid := ((jv.fieldStr? "id").getD defPid).trimAscii.toString
+      let pid := if isAdm then ((jv.fieldStr? "id").getD defPid).trimAscii.toString else defPid
       let pType := ((jv.fieldStr? "provider_type").getD "custom").trimAscii.toString
       let nm := ((jv.fieldStr? "name").getD pType).trimAscii.toString
       let enabled := (jv.fieldBool? "enabled").getD true
       let baseUrl := ((jv.fieldStr? "base_url").getD "").trimAscii.toString
       let apiKey := ((jv.fieldStr? "api_key").getD "").trimAscii.toString
+      if !isAdm && !baseUrl.isEmpty && (pType != "custom" || !memberProviderBaseUrlAllowed baseUrl) then
+        return .ok (mkJson 403 "{\"error\":\"base_url_not_allowed\",\"field\":\"base_url\"}")
+      if !isAdm && apiKey == "cli-proxy-managed" then
+        return .ok (mkJson 400 "{\"error\":\"invalid_api_key\",\"field\":\"api_key\"}")
       let .ok rpm? := parseOptionalBoundedU32 jv "rpm_limit" 1 100000
         | return .ok (mkJson 400 "{\"error\":\"invalid_provider_limits\",\"field\":\"rpm_limit\"}")
       let .ok conc? := parseOptionalBoundedU32 jv "max_concurrency" 1 1024
@@ -4818,18 +4846,23 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let provRec : AIProviderRecord := {
         id := pid, providerType := pType, name := nm, enabled := enabled,
         baseUrl := baseUrl, apiKey := apiKey, rpmLimit? := rpm?, maxConcurrency? := conc?,
-        customModels := cModels, updatedAt := s!"{nowEpochSec}"
+        customModels := cModels, updatedAt := s!"{nowEpochSec}",
+        createdByUserId := caller.userId
       }
       match ← upsertAIProvider st.store provRec with
       | .error e => return .ok (mkJson 400 s!"\{\"error\":\"invalid_provider_limits\",\"detail\":{jsonEscape e}}")
       | .ok () =>
+        let fields := #["provider_type", "name", "enabled"] ++ (if baseUrl.isEmpty then #[] else #["base_url"]) ++
+          (if apiKey.isEmpty then #[] else #["api_key"]) ++ (if rpm?.isSome then #["rpm_limit"] else #[]) ++
+          (if conc?.isSome then #["max_concurrency"] else #[]) ++ (if cModels.isEmpty then #[] else #["custom_models"])
+        appendProviderAuditLog st.store caller.userId (if isAdm then "admin" else "member") "add" pid fields s!"{nowEpochSec}"
         let refreshed ← loadRoutingChainsFromStore st.store st.cfg.workingDir
         discard <| publishRoutingChainsUpdate st refreshed
         return .ok (mkJson 201 (renderAIProviderJson provRec none))
     else if let some params := matchRoutePattern? "/api/ai/providers/:id" rawTarget then
-      if !caller.isLegacyUnscoped then
-        if let some (cCode, cBody) := requireAdminPrincipal caller then
-          return .ok (mkJson cCode cBody)
+      let isAdm := caller.isLegacyUnscoped || caller.role == "admin"
+      if caller.disabled then
+        return .ok (mkJson 403 "{\"error\":\"account_disabled\"}")
       let pid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
       if req.method == "PUT" || req.method == "PATCH" then
         let some existing ← getAIProvider? st.store pid
@@ -4837,6 +4870,19 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         let rawBody := String.fromUTF8? req.bodySlice.toByteArray |>.getD ""
         let .ok jv := OrbBin.Json.parse rawBody
           | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+        let own := !existing.createdByUserId.isEmpty && existing.createdByUserId == caller.userId
+        -- Members edit settings of any shared account; credentials and endpoint only on their own.
+        if !isAdm then
+          let newKey := ((jv.fieldStr? "api_key").getD "").trimAscii.toString
+          if !newKey.isEmpty && (!own || newKey == "cli-proxy-managed") then
+            return .ok (mkJson 403 "{\"error\":\"not_account_owner\",\"field\":\"api_key\"}")
+          match jv.field? "base_url" with
+          | none => pure ()
+          | some v =>
+            let nb := (v.asStr?.getD "").trimAscii.toString
+            if nb != existing.baseUrl then
+              if !own || existing.providerType != "custom" || (!nb.isEmpty && !memberProviderBaseUrlAllowed nb) then
+                return .ok (mkJson 403 "{\"error\":\"base_url_not_allowed\",\"field\":\"base_url\"}")
         let nm := match jv.fieldStr? "name" with
           | some s => let t := s.trimAscii.toString; if t.isEmpty then existing.name else t
           | none => existing.name
@@ -4880,16 +4926,36 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         match ← upsertAIProvider st.store updated with
         | .error e => return .ok (mkJson 400 s!"\{\"error\":\"invalid_provider_limits\",\"detail\":{jsonEscape e}}")
         | .ok () =>
+          let changed := #[("name", existing.name != updated.name), ("enabled", existing.enabled != updated.enabled),
+            ("base_url", existing.baseUrl != updated.baseUrl), ("api_key", existing.apiKey != updated.apiKey),
+            ("rpm_limit", existing.rpmLimit? != updated.rpmLimit?),
+            ("max_concurrency", existing.maxConcurrency? != updated.maxConcurrency?),
+            ("custom_models", existing.customModels != updated.customModels)].filterMap
+            (fun (k, c) => if c then some k else none)
+          appendProviderAuditLog st.store caller.userId (if isAdm then "admin" else "member") "edit" pid changed s!"{nowEpochSec}"
           let refreshed ← loadRoutingChainsFromStore st.store st.cfg.workingDir
           discard <| publishRoutingChainsUpdate st refreshed
+          if !isAdm && !own then
+            let uPrefs ← getUserProviderPrefs st.store caller.userId
+            return .ok (mkJson 200 (renderAIProviderForCallerJson updated false (isUserProviderEnabled uPrefs updated.id)))
           let obs? ← match st.pacingTracker? with
-            | some tr => lookupObservedKeyRpm? tr updated.id
+            | some tr => if isAdm then lookupObservedKeyRpm? tr updated.id else pure none
             | none => pure none
           return .ok (mkJson 200 (renderAIProviderJson updated obs?))
       else if req.method == "DELETE" then
+        let existing? ← getAIProvider? st.store pid
+        -- Members delete only accounts they added; operator/legacy rows stay admin-only.
+        if !isAdm then
+          match existing? with
+          | none => return .ok (mkJson 404 "{\"error\":\"provider_not_found\"}")
+          | some e =>
+            if e.createdByUserId.isEmpty || e.createdByUserId != caller.userId then
+              return .ok (mkJson 403 "{\"error\":\"not_account_owner\"}")
         match ← deleteAIProvider st.store pid with
         | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
         | .ok () =>
+          if existing?.isSome then
+            appendProviderAuditLog st.store caller.userId (if isAdm then "admin" else "member") "delete" pid #[] s!"{nowEpochSec}"
           let refreshed ← loadRoutingChainsFromStore st.store st.cfg.workingDir
           discard <| publishRoutingChainsUpdate st refreshed
           return .ok (mkJson 200 "{\"ok\":true}")

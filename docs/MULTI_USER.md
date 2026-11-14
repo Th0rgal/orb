@@ -6,8 +6,8 @@ Orb supports first-class multi-user operation on a single Core + fleet deploymen
 
 Every account in `users` (`missions.db`) has one of two roles:
 
-- **`admin`**: Manages user accounts (`/api/admin/users/*`), global inference providers and API keys, global cloud-compute provider keys and fleet routing, node administration, backups, and deploys. May launch missions on any target (`core`, colocated nodes, dedicated fleet nodes, managed VMs, or local desktop).
-- **`member`**: Launches and collaborates on missions using dedicated fleet nodes, ephemeral managed VMs (`boat.dev`, Hetzner, `lean.ci`, Vast.ai, Scaleway, Colab), or their own desktop (`orb-locald`), with personal enable/disable toggles over globally configured providers and an optional daily spend cap.
+- **`admin`**: Manages user accounts (`/api/admin/users/*`), instance-level inference settings (routing chains, default provider, usage resets, `/api/settings`), any inference provider account, global cloud-compute provider keys and fleet routing, node administration, backups, and deploys. May launch missions on any target (`core`, colocated nodes, dedicated fleet nodes, managed VMs, or local desktop).
+- **`member`**: Launches and collaborates on missions using dedicated fleet nodes, ephemeral managed VMs (`boat.dev`, Hetzner, `lean.ci`, Vast.ai, Scaleway, Colab), or their own desktop (`orb-locald`), with personal enable/disable toggles over globally configured providers, the right to add and edit shared inference accounts (§5), and an optional daily spend cap.
 
 Passwords are stored solely as salted `PBKDF2-HMAC-SHA256` (`210,000` iterations, 16-byte CSPRNG salt, constant-time verification). Sessions use HMAC-SHA256 signed `orb-jwt-v2` tokens:
 
@@ -54,3 +54,39 @@ On worker nodes and ephemeral VMs, `orb-node.service` runs as unprivileged `sand
 ## 4. Credential Non-Leakage (`mission_proxy_token`)
 
 When executing a `member` job (`unixUsername.isSome`), `OrbNode/Runner.lean` never copies host/admin OAuth files (`.claude/.credentials.json`, `~/.codex/auth.json`, Antigravity login, or fleet SSH keys) into `/home/<unix_username>`. Instead, Core mints a short-lived `mission_proxy_token` (`orb-mpt-v1_<random>`, stored as SHA-256 in `mission_proxy_tokens` bound to `(mission_id, owner_user_id)`) and points harnesses at `<core_url>/v1`. `OrbCore/Proxy.lean` resolves `owner_user_id` from the proxy token, filters candidate providers by `user_provider_prefs`, checks and meters `user_daily_spend` via `orb_user_spend_cap_step`, and attaches upstream credentials solely inside Core. Across `/api/ai/providers*`, a `member` sees only each active provider's `id`, type, indexed type display name (e.g. `Anthropic` or `Anthropic 1`), credential/OAuth flags, personal preference toggle, connection status without account identity, custom models, and anonymous quota windows—never the owner's stored provider name, account email, organization, base URL, Google project ID, or rate limits.
+
+## 5. Shared Inference Providers (owner decision 2026-11-14)
+
+Members contribute accounts to the shared inference pool. A member-added account is shared:
+it serves every user's missions through routing exactly like the operator's accounts.
+
+| Action | Admin | Member |
+| --- | --- | --- |
+| Add an API-key account (`POST /api/ai/providers`) | yes | yes; Core picks the id (a client `id` is ignored, so an existing account is never overwritten) |
+| Start / poll / complete / cancel a subscription login (`/api/ai/providers/cli-proxy-login*`) | yes | yes; a login session is visible only to the user who started it (`404` otherwise); re-login with `provider_id` only for accounts they added (`403 not_account_owner`) |
+| Edit name, models, limits, global `enabled` (`PUT /api/ai/providers/:id`) | any account | any account |
+| Replace the API key | any account | only accounts they added (`403 not_account_owner`) |
+| Set `base_url` | any account | only on `custom` accounts they added, public `https://` hosts only (no loopback, private, link-local, `.local`, `.internal`; `403 base_url_not_allowed`) |
+| Reorder (`POST /api/ai/providers/reorder`) | yes | yes |
+| Delete (`DELETE /api/ai/providers/:id`) | any account | only accounts they added (`403 not_account_owner`) |
+| Read an API key, OAuth access or refresh token | never | never (write-only for everyone) |
+| Default provider, usage reset, Antigravity recheck, health clear, chain tests, routing chains, `/api/settings` | yes | no (`403 admin_required`) |
+| Read the audit log (`GET /api/ai/providers/audit`) | yes | no |
+
+Rules:
+
+- `ai_providers.created_by_user_id` records who added an account (set on insert, never
+  changed by edits; empty for operator and legacy rows). Admins see `created_by_user_id` and
+  `created_by_username` ("added by …") on every account.
+- A member sees the full credential-free view (`added_by_me: true`, stored name, email,
+  limits, usage) of accounts they added, even when disabled or not yet connected, and the
+  reduced view (§4) of everyone else's. Editing someone else's account returns the reduced view.
+- A member-added account never inherits the operator's credentials: no instance env-key
+  fallback (`ANTHROPIC_API_KEY`, …) and no CLIProxy login joined by provider type or email,
+  only a login file whose prefix is the account's own id.
+- `provider_audit_log` records every add, edit, delete, reorder, login start and login
+  completion: user, role, action, account id, the *names* of changed fields, and time. Values
+  (keys, names, URLs) are never recorded.
+
+Tests: `memberSharedProviderRules` in `lean/OrbCore/OrbCore/TenantIsolationTests.lean`
+(check labels are the rule names, e.g. `member_cannot_delete_owner_account`).

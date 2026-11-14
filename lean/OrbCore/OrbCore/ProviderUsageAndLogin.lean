@@ -68,6 +68,8 @@ structure CliLoginSession where
   completionStartedSec? : Option UInt64 := none
   status        : String := "pending"
   message?      : Option String := none
+  /-- Caller who started the login; only they (or an admin) may poll, call back or cancel it. -/
+  userId        : String := ""
   deriving Repr, Inhabited
 
 structure ProviderHubState where
@@ -357,6 +359,8 @@ structure HydratedProvider where
   maxConcurrency? : Option UInt32
   createdAt       : String
   updatedAt       : String
+  /-- User who added the account (`''` for operator/legacy rows). -/
+  createdByUserId : String := ""
   deriving Repr, Inhabited
 
 def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array HydratedProvider) := do
@@ -374,6 +378,11 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
   let backendsJv ← readDataJsonFile workingDir store.rootDir "provider_backends.json"
   let authFiles ← scanCliProxyAuthFiles
   let nowIso := formatEpochIso8601Utc (← nowEpoch)
+  -- Accounts added by a member never inherit the operator's credentials: no instance env-key
+  -- fallback and no CLIProxy auth file joined by provider type or email, only by exact row id.
+  let memberIds : Array String ← match ← execParamQuery store.missionsDb "SELECT id FROM users WHERE role='member';" #[] with
+    | .ok rows => pure ((rows.extract 1 rows.size).filterMap (·[0]?))
+    | .error _ => pure #[]
 
   let mut out : Array HydratedProvider := #[]
   let mut seenIds : Array String := #[]
@@ -381,7 +390,8 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
   for idx in [0:dbProvs.size] do
     let p := dbProvs[idx]!
     seenIds := seenIds.push p.id
-    let leg? := legacyArr.find? (fun j => (j.fieldStr? "id") == some p.id)
+    let memberAdded := !p.createdByUserId.isEmpty && memberIds.contains p.createdByUserId
+    let leg? := if memberAdded then none else legacyArr.find? (fun j => (j.fieldStr? "id") == some p.id)
     let plainKey ← match ← decryptEnvValue key32? p.apiKey with | .ok s => pure s.trimAscii.toString | .error _ => pure p.apiKey.trimAscii.toString
     let legEmail := (leg?.bind (fun j => j.fieldStr? "account_email")).getD ""
     let legGoogleProj := (leg?.bind (fun j => j.fieldStr? "google_project_id")).getD ""
@@ -391,6 +401,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
 
     -- Match CLIProxy auth file by prefix == p.id, refresh_token filename, email, or provider type
     let matchedAuth? :=
+      if memberAdded then authFiles.find? (fun af => !af.disabled && af.prefixId == p.id) else
       (authFiles.find? (fun af => !af.disabled && af.prefixId == p.id)).orElse fun _ =>
       (authFiles.find? (fun af => !af.disabled && !legRefreshFile.isEmpty && af.fileName == legRefreshFile)).orElse fun _ =>
       (authFiles.find? (fun af => !af.disabled && !legEmail.isEmpty && af.email.toLower == legEmail.toLower && providerTypeMatchesAuthType p.providerType af.authType)).orElse fun _ =>
@@ -398,7 +409,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
 
     let metaInfo := lookupProviderMeta p.providerType
     let envKeyVal ← match metaInfo.envVar? with
-      | some ev => pure ((← lookupEnvWithFiles? ev).getD "")
+      | some ev => if memberAdded then pure "" else pure ((← lookupEnvWithFiles? ev).getD "")
       | none => pure ""
     let effApiKey := if !plainKey.isEmpty && plainKey != "cli-proxy-managed" then plainKey else envKeyVal
     let hasApiKey := !effApiKey.isEmpty
@@ -452,6 +463,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
       maxConcurrency? := p.maxConcurrency?
       createdAt := createdStr
       updatedAt := updatedStr
+      createdByUserId := p.createdByUserId
     }
 
   -- Include any entries present in `.sandboxed-sh/ai_providers.json` not yet in SQLite
@@ -622,6 +634,27 @@ def renderHydratedProviderJv (hp : HydratedProvider) (userEnabled? : Option Bool
   if let some obs := observedRpm? then
     fields := fields.push ("observed_rpm", JVal.uint64 obs.toUInt64)
   .obj fields
+
+/-- Whether `callerUserId` added `hp` (never true for operator/legacy rows with no creator). -/
+def providerAddedBy (hp : HydratedProvider) (callerUserId : String) : Bool :=
+  !hp.createdByUserId.isEmpty && hp.createdByUserId == callerUserId
+
+/-- Render one provider for the caller: admins and the member who added the account get the
+    full (credential-free) view plus who added it; other members get the reduced view. -/
+def renderHydratedProviderForCaller (hps : Array HydratedProvider) (hp : HydratedProvider)
+    (effAdmin : Bool) (callerUserId : String) (usernames : Array (String × String))
+    (userEnabled? : Option Bool := none) (observedRpm? : Option UInt32 := none)
+    (rejected : Bool := false) : JVal :=
+  if effAdmin || providerAddedBy hp callerUserId then
+    let base := renderHydratedProviderJv hp userEnabled? (if effAdmin then observedRpm? else none) rejected
+    let uname := (usernames.find? (·.1 == hp.createdByUserId)).map Prod.snd
+    let base := base.setField "added_by_me" (.bool (providerAddedBy hp callerUserId))
+    if hp.createdByUserId.isEmpty then base
+    else (base.setField "created_by_user_id" (.str hp.createdByUserId)).setField "created_by_username"
+      (match uname with | some u => .str u | none => .null)
+  else
+    (renderMemberHydratedProviderJv hp (memberProviderDisplayName hps hp) userEnabled? rejected).setField
+      "added_by_me" (.bool false)
 
 /-! ## Provider Subscription & Rate-Limit Usage (`GET /api/ai/providers/usage` & `/:id/usage`) -/
 
@@ -1482,6 +1515,8 @@ def reconcileCliLoginCompletion
     for hp in affected do
       refreshProviderUsageAsync hub hp
     result := { result with status := "completed", message? := some "Connected" }
+    appendProviderAuditLog store sess.userId "" "login_complete" (sess.targetProvId?.getD "")
+      #[s!"provider_type:{sess.providerSlug}"] (formatEpochIso8601Utc now)
   else if now >= started + 60 then
     result := { result with status := "failed", message? := some "Authentication completed but the new auth file was not visible within 60 seconds. Try reconnecting again." }
   hub.mu.atomically do
@@ -2055,19 +2090,16 @@ def dispatchProviderAndAiRoute
         return none
       let hps ← loadHydratedProviders store workingDir
       let uPrefs ← if isLegacyUnscoped then pure #[] else getUserProviderPrefs store callerUserId
+      let usernames ← listUsernamesById store
       let mut arr : Array JVal := #[]
       for hp in hps do
-        if effAdmin || (hp.enabled && (hp.hasApiKey || hp.hasOAuth)) then
+        if effAdmin || providerAddedBy hp callerUserId || (hp.enabled && (hp.hasApiKey || hp.hasOAuth)) then
           let uEn? := if isLegacyUnscoped then none else some (isUserProviderEnabled uPrefs hp.id)
           let rejected ← loginRejectedFor hub store hp
-          if effAdmin then
-            let obs? ← match pacingTracker? with
-              | some tr => lookupObservedKeyRpm? tr hp.id
-              | none => pure none
-            arr := arr.push (renderHydratedProviderJv hp uEn? obs? rejected)
-          else
-            let dispName := memberProviderDisplayName hps hp
-            arr := arr.push (renderMemberHydratedProviderJv hp dispName uEn? rejected)
+          let obs? ← match pacingTracker? with
+            | some tr => if effAdmin then lookupObservedKeyRpm? tr hp.id else pure none
+            | none => pure none
+          arr := arr.push (renderHydratedProviderForCaller hps hp effAdmin callerUserId usernames uEn? obs? rejected)
       return some (jsonResp 200 (.arr arr))
 
     -- 5b. `GET /api/ai/providers/usage`
@@ -2082,7 +2114,7 @@ def dispatchProviderAndAiRoute
           | some hit =>
             let rawUsage := decorateCachedUsage hit nowSec
             let projectedUsage :=
-              if effAdmin then rawUsage
+              if effAdmin || providerAddedBy hp callerUserId then rawUsage
               else projectMemberProviderUsageJv rawUsage (memberProviderDisplayName hps hp)
             entryPairs := entryPairs.push (hp.id, projectedUsage)
             -- Refresh in background if >= 120s old (skip OpenAI OAuth-only unless forced)
@@ -2111,15 +2143,18 @@ def dispatchProviderAndAiRoute
 
     -- 5d. `POST /api/ai/providers/reorder`
     if method == "POST" && segs == ["api", "ai", "providers", "reorder"] then
-      if !effAdmin then return some (jsonErr 403 "admin_required")
       let .ok reqJv := OrbBin.Json.parseBytes bodyBytes
         | return some (jsonErr 400 "Invalid JSON")
       let ids := ((reqJv.fieldArr? "ids").getD #[]).filterMap JVal.asStr?
       for idx in [0:ids.size] do
         let _ ← execParamStmt store.missionsDb
           "UPDATE ai_providers SET sort_order=?2 WHERE id=?1;" #[ids[idx]!, toString idx]
+      appendProviderAuditLog store callerUserId (if effAdmin then "admin" else "member") "reorder" "" #["sort_order"]
+        (formatEpochIso8601Utc (← nowEpoch))
       let hps ← loadHydratedProviders store workingDir
-      return some (jsonResp 200 (.arr (hps.map (fun hp => renderHydratedProviderJv hp))))
+      let usernames ← listUsernamesById store
+      let visible := hps.filter (fun hp => effAdmin || providerAddedBy hp callerUserId || (hp.enabled && (hp.hasApiKey || hp.hasOAuth)))
+      return some (jsonResp 200 (.arr (visible.map (fun hp => renderHydratedProviderForCaller hps hp effAdmin callerUserId usernames))))
 
     -- 5e. `GET /api/ai/providers/for-backend/:backend_id`
     if method == "GET" && segs.length == 5 && segs[3]? == some "for-backend" then
@@ -2170,7 +2205,8 @@ def dispatchProviderAndAiRoute
               provList := provList.push (.obj #[("id", .str "muse-code"), ("name", .str "Muse Code")])
         return some (jsonResp 200 (.obj #[("available", .bool avail), ("providers", .arr provList)]))
 
-      if !effAdmin then return some (jsonErr 403 "admin_required")
+      -- Members may start and complete subscription logins for the shared pool (owner decision
+      -- 2026-11-14); re-login of an existing account is limited to accounts they added.
       let some mgmtKey := mgmtKey?
         | return some (jsonErr 503 "CLIProxy management key is not configured on Core")
 
@@ -2181,6 +2217,11 @@ def dispatchProviderAndAiRoute
         let some (slug, authType, flow) := mapLoginSlug rawProv
           | return some (jsonErr 400 s!"Unsupported CLIProxy login provider `{rawProv}`")
         let targetProvId? := reqJv.fieldStr? "provider_id"
+        if !effAdmin then
+          if let some tid := targetProvId? then
+            if let some trow ← getAIProvider? store tid then
+              if !(trow.createdByUserId == callerUserId && !callerUserId.isEmpty) then
+                return some (jsonErr 403 "not_account_owner")
         let beforeFiles := (← scanCliProxyAuthFiles).map (fun af => (af.fileName, af.fingerprint))
         match ← sendJsonRequest "GET" s!"{mgmtBase}/v0/management/{slug}-auth-url" (some mgmtKey) none #[] 15000 262144 with
         | .ok (code, rawTxt, some uJv) =>
@@ -2194,8 +2235,11 @@ def dispatchProviderAndAiRoute
             let sess : CliLoginSession := {
               sessionId := sid, providerSlug := slug, authFileType := authType,
               targetProvId? := targetProvId?, stateToken := stTok, authUrl := authUrl,
-              flow := flow, createdSec := nowSec, beforeFiles := beforeFiles
+              flow := flow, createdSec := nowSec, beforeFiles := beforeFiles,
+              userId := callerUserId
             }
+            appendProviderAuditLog store callerUserId (if effAdmin then "admin" else "member") "login_start"
+              (targetProvId?.getD "") #[s!"provider_type:{slug}"] (formatEpochIso8601Utc nowSec)
             hub.mu.atomically do
               let st ← get
               let kept := st.loginSessions.filter (fun s => nowSec ≤ s.createdSec + 900)
@@ -2221,6 +2265,8 @@ def dispatchProviderAndAiRoute
           return st.loginSessions.find? (fun s => s.sessionId == sid && nowSec ≤ s.createdSec + 900)
         let some sess := sess?
           | return some (jsonErr 404 "Login session not found or expired")
+        if !effAdmin && sess.userId != callerUserId then
+          return some (jsonErr 404 "Login session not found or expired")
 
         if method == "DELETE" then
           let _ ← sendJsonRequest "DELETE" s!"{mgmtBase}/v0/management/oauth-session?state={urlEncodeComponent sess.stateToken}" (some mgmtKey) none #[] 5000 65536
@@ -2261,6 +2307,8 @@ def dispatchProviderAndAiRoute
           return st.loginSessions.find? (fun s => s.sessionId == sid && nowSec ≤ s.createdSec + 900)
         let some sess := sess?
           | return some (jsonErr 404 "Login session not found or expired")
+        if !effAdmin && sess.userId != callerUserId then
+          return some (jsonErr 404 "Login session not found or expired")
         let .ok reqJv := OrbBin.Json.parseBytes bodyBytes
           | return some (jsonErr 400 "Invalid JSON")
         let rawCb := ((reqJv.fieldStr? "url").getD "").trimAscii.toString
@@ -2302,31 +2350,31 @@ def dispatchProviderAndAiRoute
       if method == "GET" && segs.length == 4 then
         let some hp := matchedProv?
           | return some (jsonErr 404 "Provider not found")
-        if !effAdmin && !(hp.enabled && (hp.hasApiKey || hp.hasOAuth)) then
+        if !effAdmin && !providerAddedBy hp callerUserId && !(hp.enabled && (hp.hasApiKey || hp.hasOAuth)) then
           return some (jsonErr 404 "Provider not found")
         let rejected ← loginRejectedFor hub store hp
+        let usernames ← listUsernamesById store
         if effAdmin then
           let obs? ← match pacingTracker? with
             | some tr => lookupObservedKeyRpm? tr hp.id
             | none => pure none
-          return some (jsonResp 200 (renderHydratedProviderJv hp none obs? rejected))
+          return some (jsonResp 200 (renderHydratedProviderForCaller hps hp true callerUserId usernames none obs? rejected))
         else
           let uPrefs ← if isLegacyUnscoped then pure #[] else getUserProviderPrefs store callerUserId
           let uEn? := if isLegacyUnscoped then none else some (isUserProviderEnabled uPrefs hp.id)
-          let dispName := memberProviderDisplayName hps hp
-          return some (jsonResp 200 (renderMemberHydratedProviderJv hp dispName uEn? rejected))
+          return some (jsonResp 200 (renderHydratedProviderForCaller hps hp false callerUserId usernames uEn? none rejected))
 
       -- `GET /api/ai/providers/:id/usage`
       if method == "GET" && segs.length == 5 && segs[4]? == some "usage" then
         let some hp := matchedProv?
           | return some (jsonErr 404 "Provider not found")
-        if !effAdmin && !(hp.enabled && (hp.hasApiKey || hp.hasOAuth)) then
+        if !effAdmin && !providerAddedBy hp callerUserId && !(hp.enabled && (hp.hasApiKey || hp.hasOAuth)) then
           return some (jsonErr 404 "Provider not found")
         let force := ((qParam? qMap "force").getD "false") == "true"
         let cachedOnly := ((qParam? qMap "cached_only").getD "false") == "true"
         let nowSec ← nowEpoch
         let projectUsage (jv : JVal) : JVal :=
-          if effAdmin then jv else projectMemberProviderUsageJv jv (memberProviderDisplayName hps hp)
+          if effAdmin || providerAddedBy hp callerUserId then jv else projectMemberProviderUsageJv jv (memberProviderDisplayName hps hp)
         if !force then
           let hit? ← hub.mu.atomically do
             let st ← get

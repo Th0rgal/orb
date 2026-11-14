@@ -223,7 +223,8 @@ def missionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS core_boot_state (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1), boot_epoch INTEGER NOT NULL DEFAULT 0, bunker_state INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE TABLE IF NOT EXISTS remote_message_queue (sequence INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, message_id TEXT NOT NULL, mission_id TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'waiting', UNIQUE(user_id,message_id));" ++
   "CREATE INDEX IF NOT EXISTS remote_message_pending ON remote_message_queue(state,sequence);" ++
-  "CREATE TABLE IF NOT EXISTS ai_providers (id TEXT PRIMARY KEY, provider_type TEXT NOT NULL, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, base_url TEXT NOT NULL DEFAULT '', api_key TEXT NOT NULL DEFAULT '', rpm_limit INTEGER, max_concurrency INTEGER, custom_models_json TEXT NOT NULL DEFAULT '[]', sort_order INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT '');" ++
+  "CREATE TABLE IF NOT EXISTS ai_providers (id TEXT PRIMARY KEY, provider_type TEXT NOT NULL, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, base_url TEXT NOT NULL DEFAULT '', api_key TEXT NOT NULL DEFAULT '', rpm_limit INTEGER, max_concurrency INTEGER, custom_models_json TEXT NOT NULL DEFAULT '[]', sort_order INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT '', created_by_user_id TEXT NOT NULL DEFAULT '');" ++
+  "CREATE TABLE IF NOT EXISTS provider_audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, role TEXT NOT NULL, action TEXT NOT NULL, provider_id TEXT NOT NULL, fields TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);" ++
   "CREATE TABLE IF NOT EXISTS deferred_message_batches (mission_id TEXT NOT NULL, batch_seq INTEGER NOT NULL, message_id TEXT NOT NULL, content TEXT NOT NULL, source TEXT NOT NULL DEFAULT '', unpacked INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(mission_id, batch_seq, message_id));" ++
   "CREATE UNIQUE INDEX IF NOT EXISTS deferred_message_batches_uuid ON deferred_message_batches(mission_id, message_id);" ++
   "CREATE TABLE IF NOT EXISTS queue_item_receipts (message_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, phase INTEGER NOT NULL DEFAULT 0, claimed_generation INTEGER NOT NULL DEFAULT 0, claim_boot_epoch INTEGER NOT NULL DEFAULT 0, delivered_seq INTEGER NOT NULL DEFAULT 0, edit_revision INTEGER NOT NULL DEFAULT 0, content TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
@@ -403,6 +404,7 @@ def missionsAdditiveAlters : Array String := #[
   "ALTER TABLE cloud_executions ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE cloud_executions ADD COLUMN data TEXT NOT NULL DEFAULT '{}';",
   "ALTER TABLE ai_providers ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE ai_providers ADD COLUMN created_by_user_id TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE remote_message_queue ADD COLUMN phase INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE remote_message_queue ADD COLUMN claimed_generation INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE remote_message_queue ADD COLUMN claim_boot_epoch INTEGER NOT NULL DEFAULT 0;",
@@ -2896,6 +2898,8 @@ structure AIProviderRecord where
   maxConcurrency? : Option UInt32 := none
   customModels    : Array CustomModelConfig := #[]
   updatedAt       : String := ""
+  /-- User who added the account (`''` for operator/legacy rows). Set once on insert, never updated. -/
+  createdByUserId : String := ""
   deriving Repr, DecidableEq, Inhabited
 
 /-- Validate account-level and per-model RPM (`1..=100000`), concurrency (`1..=1024`),
@@ -3026,6 +3030,8 @@ def renderAIProviderJson (p : AIProviderRecord) (observedKeyRpm? : Option UInt32
     kvs := kvs.push s!"\"custom_models\":{renderCustomModelsJson p.customModels}"
   if !p.updatedAt.isEmpty then
     kvs := kvs.push s!"\"updated_at\":{jsonEscape p.updatedAt}"
+  if !p.createdByUserId.isEmpty then
+    kvs := kvs.push s!"\"created_by_user_id\":{jsonEscape p.createdByUserId}"
   return "{" ++ String.intercalate "," kvs.toList ++ "}"
 
 private def rowToAIProviderRecord (r : Array String) : AIProviderRecord :=
@@ -3042,12 +3048,13 @@ private def rowToAIProviderRecord (r : Array String) : AIProviderRecord :=
     maxConcurrency? := conc?
     customModels    := parseCustomModelsStored ((r[8]?).getD "[]")
     updatedAt       := (r[9]?).getD ""
+    createdByUserId := (r[10]?).getD ""
   }
 
 /-- List all persisted `AIProviderRecord` rows ordered by `updated_at ASC, id ASC`. -/
 def listAIProviders (st : CoreStore) : IO (Array AIProviderRecord) := do
   match ← execParamQuery st.missionsDb
-    "SELECT id,provider_type,name,enabled,base_url,api_key,COALESCE(CAST(rpm_limit AS TEXT),''),COALESCE(CAST(max_concurrency AS TEXT),''),custom_models_json,updated_at FROM ai_providers ORDER BY id ASC;" #[] with
+    "SELECT id,provider_type,name,enabled,base_url,api_key,COALESCE(CAST(rpm_limit AS TEXT),''),COALESCE(CAST(max_concurrency AS TEXT),''),custom_models_json,updated_at,created_by_user_id FROM ai_providers ORDER BY id ASC;" #[] with
   | .error _ => return #[]
   | .ok rows =>
     if rows.size ≤ 1 then return #[]
@@ -3060,7 +3067,7 @@ def listAIProviders (st : CoreStore) : IO (Array AIProviderRecord) := do
 def getAIProvider? (st : CoreStore) (pid : String) : IO (Option AIProviderRecord) := do
   if pid.isEmpty then return none
   match ← execParamQuery st.missionsDb
-    "SELECT id,provider_type,name,enabled,base_url,api_key,COALESCE(CAST(rpm_limit AS TEXT),''),COALESCE(CAST(max_concurrency AS TEXT),''),custom_models_json,updated_at FROM ai_providers WHERE id=?1;" #[pid] with
+    "SELECT id,provider_type,name,enabled,base_url,api_key,COALESCE(CAST(rpm_limit AS TEXT),''),COALESCE(CAST(max_concurrency AS TEXT),''),custom_models_json,updated_at,created_by_user_id FROM ai_providers WHERE id=?1;" #[pid] with
   | .error _ => return none
   | .ok rows =>
     if rows.size ≤ 1 then return none
@@ -3074,10 +3081,43 @@ def upsertAIProvider (st : CoreStore) (p : AIProviderRecord) : IO (Except String
     let rpmParam := match p.rpmLimit? with | some v => s!"{v}" | none => ""
     let concParam := match p.maxConcurrency? with | some v => s!"{v}" | none => ""
     let res ← execParamQuery st.missionsDb
-      "INSERT INTO ai_providers(id,provider_type,name,enabled,base_url,api_key,rpm_limit,max_concurrency,custom_models_json,updated_at) VALUES(?1,?2,?3,?4,?5,?6,NULLIF(?7,''),NULLIF(?8,''),?9,?10) ON CONFLICT(id) DO UPDATE SET provider_type=excluded.provider_type,name=excluded.name,enabled=excluded.enabled,base_url=excluded.base_url,api_key=excluded.api_key,rpm_limit=excluded.rpm_limit,max_concurrency=excluded.max_concurrency,custom_models_json=excluded.custom_models_json,updated_at=excluded.updated_at;"
+      "INSERT INTO ai_providers(id,provider_type,name,enabled,base_url,api_key,rpm_limit,max_concurrency,custom_models_json,updated_at,created_by_user_id) VALUES(?1,?2,?3,?4,?5,?6,NULLIF(?7,''),NULLIF(?8,''),?9,?10,?11) ON CONFLICT(id) DO UPDATE SET provider_type=excluded.provider_type,name=excluded.name,enabled=excluded.enabled,base_url=excluded.base_url,api_key=excluded.api_key,rpm_limit=excluded.rpm_limit,max_concurrency=excluded.max_concurrency,custom_models_json=excluded.custom_models_json,updated_at=excluded.updated_at;"
       #[p.id, p.providerType, p.name, if p.enabled then "1" else "0", p.baseUrl, p.apiKey,
-        rpmParam, concParam, renderCustomModelsJson p.customModels, p.updatedAt]
+        rpmParam, concParam, renderCustomModelsJson p.customModels, p.updatedAt, p.createdByUserId]
     return res.map (fun _ => ())
+
+/-- Append a provider-account audit entry. `fields` names the changed fields only; values
+    (keys, URLs, names) are never recorded. -/
+def appendProviderAuditLog (st : CoreStore) (userId role action providerId : String)
+    (fields : Array String) (createdAt : String) : IO Unit := do
+  discard <| execParamQuery st.missionsDb
+    "INSERT INTO provider_audit_log(user_id,role,action,provider_id,fields,created_at) VALUES(?1,?2,?3,?4,?5,?6);"
+    #[userId, role, action, providerId, String.intercalate "," fields.toList, createdAt]
+
+/-- Most recent provider-account audit entries (newest first) as a JSON array string. -/
+def listProviderAuditLogJson (st : CoreStore) (limit : Nat := 200) : IO String := do
+  match ← execParamQuery st.missionsDb
+    "SELECT a.id,a.user_id,COALESCE(u.username,''),a.role,a.action,a.provider_id,a.fields,a.created_at FROM provider_audit_log a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.id DESC LIMIT ?1;"
+    #[toString limit] with
+  | .error _ => return "[]"
+  | .ok rows =>
+    let mut items : Array String := #[]
+    for i in [1:rows.size] do
+      let r := rows[i]!
+      let g (k : Nat) := (r[k]?).getD ""
+      let fieldsArr := ((g 6).splitOn ",").filter (!·.isEmpty) |>.map jsonEscape
+      items := items.push s!"\{\"id\":{(g 0).toNat?.getD 0},\"user_id\":{jsonEscape (g 1)},\"username\":{jsonEscape (g 2)},\"role\":{jsonEscape (g 3)},\"action\":{jsonEscape (g 4)},\"provider_id\":{jsonEscape (g 5)},\"fields\":[{String.intercalate "," fieldsArr}],\"created_at\":{jsonEscape (g 7)}}"
+    return "[" ++ String.intercalate "," items.toList ++ "]"
+
+/-- `(user_id, username)` pairs, used to label who added a provider account. -/
+def listUsernamesById (st : CoreStore) : IO (Array (String × String)) := do
+  match ← execParamQuery st.missionsDb "SELECT id,username FROM users;" #[] with
+  | .error _ => return #[]
+  | .ok rows =>
+    let mut out : Array (String × String) := #[]
+    for i in [1:rows.size] do
+      out := out.push (((rows[i]!)[0]?).getD "", ((rows[i]!)[1]?).getD "")
+    return out
 
 /-- Delete an `AIProviderRecord` by `id`. -/
 def deleteAIProvider (st : CoreStore) (pid : String) : IO (Except String Unit) := do
