@@ -155,7 +155,7 @@ def run (root : String) : IO Unit := do
     let approvePath := s!"/api/mac-tether/requests/{reqId}/approve"
     for (method, target) in #[("GET", "/api/mac-tether/events?since_gen=0&wait_secs=0"), ("GET", "/api/mac-tether/requests"),
         ("POST", approvePath), ("POST", s!"/api/mac-tether/requests/{reqId}/deny"),
-        ("POST", s!"/api/mac-tether/requests/{reqId}/revoke"), ("POST", "/api/mac-tether/verify-lease")] do
+        ("POST", s!"/api/mac-tether/requests/{reqId}/revoke")] do
       check ((← send method target member).1 == 403) s!"member bearer is refused on {method} {target}"
       check ((← send method target adminMission).1 == 401) s!"a mission token is not a bearer for {method} {target}"
       check ((← send method target "not-a-token").1 == 401) s!"no bearer is refused on {method} {target}"
@@ -230,6 +230,14 @@ def run (root : String) : IO Unit := do
     check (verifyStatus == 200 && verified.fieldBool? "allowed" == some true && verified.fieldNat? "bunker_state" == some 0 &&
       (verified.fieldOrNull "tether").fieldStr? "overlay_ip" == some "10.88.200.10" && !has verified leaseToken) "a live lease verifies"
     check ((← send "POST" "/api/mac-tether/verify-lease" admin (verifyBody "admin-other")).1 == 403) "a lease is bound to its mission"
+    -- `orb-privd` holds no admin bearer: the lease token and its mission are the proof.
+    let (nodeStatus, nodeVerified) ← send "POST" "/api/mac-tether/verify-lease" "not-a-token" (verifyBody "admin-mission")
+    check (nodeStatus == 200 && nodeVerified.fieldBool? "allowed" == some true) "a node without a bearer verifies a live lease"
+    check ((← send "POST" "/api/mac-tether/verify-lease" "not-a-token" (verifyBody "")).1 == 403) "verify-lease needs the mission id"
+    check ((← send "POST" "/api/mac-tether/verify-lease" "not-a-token"
+      (.obj #[("request_id", .str reqId), ("lease_token", .str "tether1.00"), ("mission_id", .str "admin-mission")])).1 == 403)
+      "a wrong lease token is refused without a bearer"
+    check ((← send "POST" "/api/mac-tether/verify-lease" member (verifyBody "admin-other")).1 == 403) "a member cannot verify another mission's lease"
     bunkerRef.set 1
     let bunkered ← send "POST" "/api/mac-tether/verify-lease" admin (verifyBody "admin-mission")
     let bunkerRequest ← call adminMission "request_macbook_tether" requestArgs

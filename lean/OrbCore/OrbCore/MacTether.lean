@@ -818,6 +818,24 @@ def verifyMacTetherLease
     return .error "mission_mismatch"
   return .ok rec
 
+/-- `POST /api/mac-tether/verify-lease`, called by `orb-privd` on a node before it brings the
+    interface up. A node holds no admin bearer, so the caller is authenticated by the lease itself:
+    the 256-bit lease token is handed only to the owning mission, and the mission id must match. -/
+def verifyLeaseHttp (st : CoreStore) (bunkerState : UInt8) (bodyBytes : ByteArray)
+    (nowEpochSec : UInt64) : IO (Nat × String) := do
+  let refuse (e : String) : Nat × String :=
+    (403, renderCompact (.obj #[("allowed", .bool false), ("bunker_state", .nat bunkerState.toNat), ("error", .str e)]))
+  let some body := (OrbBin.Json.parseBytes bodyBytes).toOption
+    | return (400, "{\"allowed\":false,\"error\":\"invalid_json\"}")
+  let mission := ((body.fieldStr? "mission_id").getD "").trimAscii.toString
+  if mission.isEmpty then return refuse "mission_required"
+  match ← verifyMacTetherLease st bunkerState ((body.fieldStr? "request_id").getD "")
+      ((body.fieldStr? "lease_token").getD "") mission nowEpochSec with
+  | .error e => return refuse e
+  | .ok r =>
+    return (200, renderCompact (.obj #[("allowed", .bool true), ("bunker_state", .nat bunkerState.toNat),
+      ("tether", renderMacTetherRequestJson r)]))
+
 def upsertWgRelayPair
     (st : CoreStore)
     (rt? : Option MacTetherRuntime)
@@ -1082,16 +1100,6 @@ def dispatchMacTetherRoutes?
     | .ok r => return tetherOk 200 r
     | .error "not_found" => return err 404 "not_found"
     | .error e => return err 400 e
-  -- `orb-privd` checks a lease before bringing the interface up.
-  | "POST", ["verify-lease"] =>
-    if body?.isNone then return some (400, "{\"allowed\":false,\"error\":\"invalid_json\"}")
-    match ← verifyMacTetherLease st bunkerState ((body.fieldStr? "request_id").getD "")
-        ((body.fieldStr? "lease_token").getD "") ((body.fieldStr? "mission_id").getD "") nowEpochSec with
-    | .error e =>
-      return some (403, renderCompact (.obj #[("allowed", .bool false), ("bunker_state", .nat bunkerState.toNat), ("error", .str e)]))
-    | .ok r =>
-      return some (200, renderCompact (.obj #[("allowed", .bool true), ("bunker_state", .nat bunkerState.toNat),
-        ("tether", renderMacTetherRequestJson r)]))
   | "GET", ["relay-pairs"] =>
     return some (200, renderCompact (.obj #[("pairs", .arr ((← listWgRelayPairs st).map renderWgRelayPairJson))]))
   | "POST", ["relay-pairs"] =>

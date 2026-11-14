@@ -2413,7 +2413,13 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       OrbCore.DevOperator.restrictedPath cleanPath then
     return .ok (mkJson 403 "{\"error\":\"dev_operator_scope_required\"}")
 
-  -- 2. Public Auth Login (`POST /api/auth/login`)
+  -- `orb-privd` on a node checks a MacBook tether lease. It has no admin bearer: the lease token
+  -- and its mission id are the proof (see `OrbCore.MacTether.verifyLeaseHttp`).
+  if req.method == "POST" && cleanPath == "/api/mac-tether/verify-lease" then
+    let leaseBunker ← match st.bunkerStateRef? with | some r => r.get | none => pure (0 : UInt8)
+    let (vCode, vBody) ← verifyLeaseHttp st.store leaseBunker req.bodySlice.toByteArray nowEpochSec
+    return .ok (mkJson vCode vBody)
+
   if req.method == "POST" && cleanPath == "/api/auth/login" then
     let tape := JsonTape.indexJsonObject req.bodySlice
     let user? := JsonTape.lookupString? tape "username"
