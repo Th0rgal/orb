@@ -383,7 +383,7 @@ def extractBearerToken? (hdrs : Array (String × String)) (nowEpochSec : UInt64 
   let raw ← lookupHeaderCI hdrs "authorization"
   let t := raw.trimAscii.toString
   if t.startsWith "Bearer " || t.startsWith "bearer " then
-    some (t.drop 7).trimAscii.toString
+    some (normalizeSessionTokenV2 (t.drop 7).trimAscii.toString)
   else
     none
 
@@ -395,7 +395,7 @@ def extractProxyToken? (hdrs : Array (String × String)) (nowEpochSec : UInt64 :
     match lookupHeaderCI hdrs "x-api-key" with
     | some k =>
       let clean := k.trimAscii.toString
-      if clean.isEmpty then none else some clean
+      if clean.isEmpty then none else some (normalizeSessionTokenV2 clean)
     | none => none
 
 /-- Authenticate `:80/api/console/ws`, `/api/monitoring/ws`, `/api/desktop/stream`, and `/api/workspaces/:id/shell`
