@@ -774,6 +774,11 @@ an owner and a dated status line here when dispatched.
     - Completed and harvested Deliverable 2 (`w-ci-3-orb.bundle`, commit `a95efef4` on `ci/w-ci-3-lean-runners-opt-in`): gates Linux CI jobs behind `vars.ORB_LEAN_RUNNERS == 'true'` (and `workflow_dispatch` input `use_lean_runners`) on trusted default-branch events with exact fallback to `ubuntu-latest` / `ubuntu-24.04` (verified by 28 unit + mutation tests in `scripts/test_ci_plan.py`), and writes Thomas's exact approval & rollout checklist in `docs/ci-lean-runners.md`.
     - Deliverable 1 (`lfglabs-dev/lean.ci` PR #34 runner fence): delivering the private `lean.ci` crate archive to `57fec405` so it can fix the remaining review items (`routing.rs` `runner_fence_capable` strip, `github.rs` rerun `run_attempt` from verified `WorkflowRun` provenance, `store.rs` `RefusedNotAllowed` queue ordering, and live shell execution tests of the `ACTIONS_RUNNER_HOOK_JOB_STARTED` fence script) and run `cargo test` across all crates.
 - **#1766 and #1767**: merged to `master` (`a64471d2`, `1f1e1ab3`).
+- **PRs opened for CI speed (real-run timings still to fill in):**
+  - **#1771** (W-CI-3, `ci/w-ci-3-lean-runners-opt-in`, `a95efef4`): lean.ci opt-in behind `ORB_LEAN_RUNNERS` with exact `ubuntu-latest`/`ubuntu-24.04` fallbacks, 28 planner tests plus mutation checks, and `docs/ci-lean-runners.md` spelling out what Thomas must approve. Not enabled by this PR.
+  - **#1772** (W-CI-2, `ci/w-ci-2-tree-reuse-and-fast-desktop`, `9d096be1`, rebased on today's `master`): verified-tree receipts and artifacts so a master push matching a green tree reuses its routing; one `orb-build` job publishes `orb/dist` for unit, browser and performance; eight whole-file browser shards; pinned Playwright image; `lean/OrbDesktop/**` moved to `desktop_native`. Worker evidence: 348 script tests, 2225 unit tests, 55 planner tests at 100% branch coverage, shards 181 s / 148 s locally, all 517 browser and 10 performance tests retained.
+  - Cold vs warm wall clock on GitHub Actions is the remaining measurement; both PRs must produce their own before/after numbers before this track can close.
+
 
 **Update 10:10 UTC, 14 Nov (coordinator `2bcfd62a`).**
 
