@@ -1116,6 +1116,63 @@ private def queryGroupedUsageBuckets (store : CoreStore) (colExpr : String) (sin
       out := out.push (.obj (#[("key", keyJv), ("label", lblJv)] ++ totPairs))
   return out
 
+/-- Walks `missions.parent_mission_id` to the root mission id, mirroring the bounded walk in
+    `ResourcesAndSystem.resolveRootMission`: a depth cap of 8 plus a visited set means a parent
+    cycle terminates, and a mission id with no `missions` row is its own root. -/
+private def resolveRootMissionId (store : CoreStore) (mid : String) : IO String := do
+  let mut cur := mid
+  let mut visited : Array String := #[cur]
+  for _hop in [0:8] do
+    match ← execParamQuery store.missionsDb
+        "SELECT COALESCE(parent_mission_id,'') FROM missions WHERE id=?1 LIMIT 1;" #[cur] with
+    | .ok rs =>
+      if rs.size ≤ 1 then return cur
+      let parent := (rs[1]![0]?).getD ""
+      if parent.isEmpty || parent == cur || visited.contains parent then return cur
+      cur := parent
+      visited := visited.push cur
+    | .error _ => return cur
+  return cur
+
+/-- Rolls `by_mission` buckets up to their root mission (`missions.parent_mission_id`) and applies
+    `limit` after the merge, so a parent never loses a child to a pre-merge top cut. -/
+private def rollupByRootMission (store : CoreStore) (byMission : Array JVal) (limit : Nat) : IO (Array JVal) := do
+  let mut roots : Array (String × String × Nat × Nat × Nat × Nat × Nat × Nat × Nat) := #[]
+  let mut anyNull := false
+  let mut nullAcc : Nat × Nat × Nat × Nat × Nat × Nat × Nat := (0, 0, 0, 0, 0, 0, 0)
+  for b in byMission do
+    let g (field : String) : Nat := (b.fieldNat? field).getD 0
+    let ev := g "events"
+    let inp := g "input_tokens"
+    let outTok := g "output_tokens"
+    let cRead := g "cache_read_tokens"
+    let cCreate := g "cache_creation_tokens"
+    let reas := g "reasoning_tokens"
+    let costCents := g "recorded_cost_cents"
+    match b.field? "key" with
+    | some (.str key) =>
+      let root ← resolveRootMissionId store key
+      match roots.findIdx? (fun (k, _, _, _, _, _, _, _) => k == root) with
+      | some idx =>
+        let (k, l, e0, e1, e2, e3, e4, e5, e6) := roots[idx]!
+        roots := roots.set! idx (k, l, e0 + ev, e1 + inp, e2 + outTok, e3 + cRead, e4 + cCreate, e5 + reas, e6 + costCents)
+      | none =>
+        roots := roots.push (root, (b.fieldStr? "label").getD root, ev, inp, outTok, cRead, cCreate, reas, costCents)
+    | _ =>
+      anyNull := true
+      let (n0, n1, n2, n3, n4, n5, n6) := nullAcc
+      nullAcc := (n0 + ev, n1 + inp, n2 + outTok, n3 + cRead, n4 + cCreate, n5 + reas, n6 + costCents)
+  let mut out : Array (Nat × JVal) := #[]
+  for (root, lbl, ev, inp, outTok, cRead, cCreate, reas, costCents) in roots do
+    let totPairs := (mkTotalsJv ev inp outTok cRead cCreate reas costCents).asObj?.getD #[]
+    out := out.push (inp + outTok, .obj (#[("key", .str root), ("label", .str lbl)] ++ totPairs))
+  if anyNull then
+    let (ev, inp, outTok, cRead, cCreate, reas, costCents) := nullAcc
+    let totPairs := (mkTotalsJv ev inp outTok cRead cCreate reas costCents).asObj?.getD #[]
+    out := out.push (inp + outTok, .obj (#[("key", .null), ("label", .null)] ++ totPairs))
+  let sorted := out.qsort (fun a b => a.1 >= b.1)
+  return sorted.toList.take (Nat.min limit sorted.size) |>.toArray |>.map (·.2)
+
 private def queryModelUsageBuckets (store : CoreStore) (sinceIso? : Option String) (limit : Nat) : IO (Array JVal) := do
   let (whereSql, args) :=
     match sinceIso? with
@@ -1199,12 +1256,10 @@ def buildAiUsageSummaryJson (store : CoreStore) (qMap : Array (String × String)
   let byAccount ← queryGroupedUsageBuckets store "COALESCE(NULLIF(account_id,''),'unattributed')" winStartIso? topLimit
   let byCaller ← queryGroupedUsageBuckets store "COALESCE(NULLIF(caller_kind,''),'mission')" winStartIso? topLimit
   let byPurpose ← queryGroupedUsageBuckets store "COALESCE(NULLIF(purpose,''),'turn')" winStartIso? topLimit
-  let byMission ← queryGroupedUsageBuckets store "COALESCE(NULLIF(mission_id,''),'')" winStartIso? topLimit
+  let byMissionAll ← queryGroupedUsageBuckets store "COALESCE(NULLIF(mission_id,''),'')" winStartIso? 1000
     (nullKeyVal := none) (nullLabelVal := none)
-  let byRootMission ← queryGroupedUsageBuckets store
-    "COALESCE(NULLIF(m.root_mission_id,''), NULLIF(proxy_usage.mission_id,''), '')" winStartIso? topLimit
-    (fromClause := "proxy_usage LEFT JOIN mission_orchestration_meta m ON m.mission_id = proxy_usage.mission_id")
-    (nullKeyVal := none) (nullLabelVal := none)
+  let byMission := byMissionAll.toList.take topLimit |>.toArray
+  let byRootMission ← rollupByRootMission store byMissionAll topLimit
 
   let (wSql, dArgs) := match winStartIso? with | some s => ("WHERE timestamp >= ?1", #[s]) | none => ("", #[weekIso])
   let effWhere := if winStartIso?.isSome then wSql else "WHERE timestamp >= ?1"
