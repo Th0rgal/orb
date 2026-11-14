@@ -570,6 +570,59 @@ private def sidecarParkedHealthContract
       failures := failures.push s!"sidecar parked: failed enable error leaked file name or email: {failClearRaw}"
     enableFailRemaining.set 0
 
+    -- Case 4c: Closed shape on sidecar `reason` and `retry_at`:
+    -- (a) free-string `reason` with marker -> defaults to `"credential_quota"` and marker never appears in reply;
+    -- (b) free-string `retry_at` with marker -> falls back to computed UTC timestamp and marker never appears in reply;
+    -- (c) valid slugs (`credential_quota`, `model_quota`) and valid `retry_at` (`2026-11-14T00:00:00Z`) pass through;
+    -- (d) `reason` longer than 40 characters -> defaults to `"credential_quota"`.
+    sidecarFilesJsonRef.set
+      ("{\"files\":[" ++
+        "{\"name\":\"claude-secret-file.json\",\"provider\":\"claude\",\"email\":\"owner-secret@fixture.invalid\",\"disabled\":false,\"status\":\"error\",\"cooldowns\":[{\"scope\":\"credential\",\"reason\":\"owner-secret@fixture.invalid quota exceeded\",\"retry_at\":\"2026-11-14T00:00:00Z\",\"remaining_seconds\":471600}]}" ++
+      "]}")
+    let healthShapeA ← getJson app jwt "/api/model-routing/health" now
+    let rawShapeA := renderCompact healthShapeA
+    let rowShapeA := ((healthShapeA.asArr?.getD #[]).find? (fun v => v.fieldStr? "account_id" == some oauthOnly)).getD .null
+    if rowShapeA.fieldStr? "parked_reason" != some "credential_quota" ||
+       (rawShapeA.splitOn "owner-secret@fixture.invalid").length > 1 then
+      failures := failures.push s!"sidecar shape (a): free-string reason must fall back to credential_quota and omit marker, got {rawShapeA}"
+
+    let wallBeforeB ← nowEpoch
+    sidecarFilesJsonRef.set
+      ("{\"files\":[" ++
+        "{\"name\":\"claude-secret-file.json\",\"provider\":\"claude\",\"email\":\"owner-secret@fixture.invalid\",\"disabled\":false,\"status\":\"error\",\"cooldowns\":[{\"scope\":\"credential\",\"reason\":\"credential_quota\",\"retry_at\":\"ask owner-secret@fixture.invalid\",\"remaining_seconds\":3600}]}" ++
+      "]}")
+    let healthShapeB ← getJson app jwt "/api/model-routing/health" now
+    let wallAfterB ← nowEpoch
+    let rawShapeB := renderCompact healthShapeB
+    let rowShapeB := ((healthShapeB.asArr?.getD #[]).find? (fun v => v.fieldStr? "account_id" == some oauthOnly)).getD .null
+    let expectedB1 := formatEpochIso8601Utc (wallBeforeB + 3600)
+    let expectedB2 := formatEpochIso8601Utc (wallAfterB + 3600)
+    let actualUntilB := (rowShapeB.fieldStr? "parked_until").getD ""
+    if (actualUntilB != expectedB1 && actualUntilB != expectedB2) ||
+       (rawShapeB.splitOn "owner-secret@fixture.invalid").length > 1 then
+      failures := failures.push s!"sidecar shape (b): invalid retry_at must use computed UTC timestamp ({expectedB1}..{expectedB2}) and omit marker, got {rawShapeB}"
+
+    for validReason in #["credential_quota", "model_quota"] do
+      sidecarFilesJsonRef.set
+        ("{\"files\":[" ++
+          s!"\{\"name\":\"claude-secret-file.json\",\"provider\":\"claude\",\"email\":\"owner-secret@fixture.invalid\",\"disabled\":false,\"status\":\"error\",\"cooldowns\":[\{\"scope\":\"credential\",\"reason\":\"{validReason}\",\"retry_at\":\"2026-11-14T00:00:00Z\",\"remaining_seconds\":471600}]}" ++
+        "]}")
+      let healthShapeC ← getJson app jwt "/api/model-routing/health" now
+      let rowShapeC := ((healthShapeC.asArr?.getD #[]).find? (fun v => v.fieldStr? "account_id" == some oauthOnly)).getD .null
+      if rowShapeC.fieldStr? "parked_reason" != some validReason ||
+         rowShapeC.fieldStr? "parked_until" != some "2026-11-14T00:00:00Z" then
+        failures := failures.push s!"sidecar shape (c): valid slug {validReason} and retry_at 2026-11-14T00:00:00Z must pass through unchanged, got {renderCompact rowShapeC}"
+
+    let longReason := String.ofList (List.replicate 41 'a')
+    sidecarFilesJsonRef.set
+      ("{\"files\":[" ++
+        s!"\{\"name\":\"claude-secret-file.json\",\"provider\":\"claude\",\"email\":\"owner-secret@fixture.invalid\",\"disabled\":false,\"status\":\"error\",\"cooldowns\":[\{\"scope\":\"credential\",\"reason\":\"{longReason}\",\"retry_at\":\"2026-11-14T00:00:00Z\",\"remaining_seconds\":471600}]}" ++
+      "]}")
+    let healthShapeD ← getJson app jwt "/api/model-routing/health" now
+    let rowShapeD := ((healthShapeD.asArr?.getD #[]).find? (fun v => v.fieldStr? "account_id" == some oauthOnly)).getD .null
+    if rowShapeD.fieldStr? "parked_reason" != some "credential_quota" then
+      failures := failures.push s!"sidecar shape (d): reason > 40 chars must fall back to credential_quota, got {renderCompact rowShapeD}"
+
     -- Case 5: Slow sidecar (> 2s) times out within 2s and leaves Core's own cooldowns intact.
     let wallNow ← nowEpoch
     cooldownsRef.set #[{ accountId := keyOwned, untilEpoch := wallNow + 900, reason := .serverError }]
