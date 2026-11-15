@@ -471,6 +471,9 @@ def dispatchMcpToolCall
         "execute_privileged_command", "get_dev_access", "deploy_dev", "read_dev_logs",
         "get_fleet_sweep", "reconcile_action", "list_cloud_accounts"].contains toolName) then
     return mcpErr "forbidden" "Administrator required"
+  if toolName == "read_project_board" || toolName == "write_project_board" then
+    let some mission ← getMission? store callerMid | return mcpErr "no_project" "Mission has no project"
+    callerProj := mission.project
   if (toolName == "read_project_board" || toolName == "write_project_board") && (callerMid.isEmpty || callerProj.isEmpty) then
     return mcpErr "no_project" "Mission has no project"
   let projectTools := #["read_project_board", "write_project_board", "get_project", "get_situation", "update_project_status", "set_project_track",
@@ -821,7 +824,7 @@ def dispatchMcpToolCall
       return mcpErr "forbidden" "not_project_controller"
     let some text := args.fieldStr? "text" | return mcpErr "invalid_arguments" "text required"
     match ← writeProjectBoard store slug text nowIso callerMid with
-    | .error e => return mcpErr e e
+    | .error e => return mcpErr (if e == "not_project_controller" then "forbidden" else e) e
     | .ok () => return mcpOk (← readProjectBoard store slug)
 
   | "start_mission" | "consult_model" =>

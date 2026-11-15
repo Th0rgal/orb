@@ -477,10 +477,10 @@ def readProjectBoard (store : CoreStore) (slug : String) : IO JVal := do
 def writeProjectBoard (store : CoreStore) (slug text nowIso missionId : String) : IO (Except String Unit) := do
   if text.toUTF8.size > 16384 then return .error "board_too_large"
   match ← execParamQuery store.projectsDb
-      "INSERT INTO project_board(slug,text,updated_at,updated_by_mission_id) VALUES(?1,?2,?3,NULLIF(?4,'')) ON CONFLICT(slug) DO UPDATE SET text=excluded.text,updated_at=excluded.updated_at,updated_by_mission_id=excluded.updated_by_mission_id;"
+      "INSERT INTO project_board(slug,text,updated_at,updated_by_mission_id) SELECT ?1,?2,?3,NULLIF(?4,'') FROM projects WHERE slug=?1 AND (?4='' OR controller_mission_id=?4) ON CONFLICT(slug) DO UPDATE SET text=excluded.text,updated_at=excluded.updated_at,updated_by_mission_id=excluded.updated_by_mission_id RETURNING slug;"
       #[slug, text, nowIso, missionId] with
   | .error e => return .error e
-  | .ok _ => return .ok ()
+  | .ok rows => if rows.size > 1 then return .ok () else return .error "not_project_controller"
 
 def buildProjectSituationJVal (store : CoreStore) (scopedSlug clientSlug : String) : IO JVal := do
   let mut pObj := JVal.obj #[("slug", .str clientSlug), ("title", .str clientSlug), ("status", .str "active")]
