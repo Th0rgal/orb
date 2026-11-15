@@ -16,9 +16,9 @@ const SCALES = [1, 2] as const;
 test.setTimeout(120_000);
 
 const DIFF = [
- 'diff --git a/lean/OrbDesktop/Main.lean b/lean/OrbDesktop/Main.lean',
- '--- a/lean/OrbDesktop/Main.lean',
- '+++ b/lean/OrbDesktop/Main.lean',
+ 'diff --git a/lean/OrbDesktop/OrbDesktop/Main.lean b/lean/OrbDesktop/OrbDesktop/Main.lean',
+ '--- a/lean/OrbDesktop/OrbDesktop/Main.lean',
+ '+++ b/lean/OrbDesktop/OrbDesktop/Main.lean',
  '@@ -120,3 +120,3 @@ def renderDesktopFrame',
  '   let availW := viewport.w',
  '-  webkit_web_view_load_uri(wv, orb_dev_url);',
@@ -102,7 +102,7 @@ async function routes(page: Page, empty: boolean) {
  await page.route('**/api/remote-nodes', r => r.fulfill({json: {nodes: NODES}}));
  await page.route('**/api/control/missions/*/checkpoints', r => r.fulfill({json: {checkpoints: []}}));
  await page.route('**/api/control/missions/*/checkpoints/diff**', r => r.fulfill({json: {
-  from_ref: 'HEAD', to_ref: '', files: [{status: 'M', path: 'lean/OrbDesktop/Main.lean', additions: 1, deletions: 1}],
+  from_ref: 'HEAD', to_ref: '', files: [{status: 'M', path: 'lean/OrbDesktop/OrbDesktop/Main.lean', additions: 1, deletions: 1}],
   total_additions: 1, total_deletions: 1, raw_diff: DIFF, budget_exceeded: false, filtered_by_author: false,
  }}));
  await page.route('**/api/control/missions/search/messages**', r => r.fulfill({json: {
