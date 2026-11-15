@@ -6,7 +6,7 @@
 
 - Reference **R**: `4199fc06e^`, resolved to `b22ed3181df64cf9681e887381ede7ed15fe96aa`.
 - Audited **L**: `5383bf27b8f8e664b654339cf88e14c90dba665c` (HEAD when inspected).
-- Date: 2026-11-12. Read `AGENTS.md`, `docs/plans/core-recovery-2026-11.md`, and `docs/plans/managed-providers-leanci-colab.md`. Also checked the existing HTTP/MCP/fleet/operations audit ownership to avoid counting their findings again.
+- Date: 2026-11-12. Read `AGENTS.md`, `docs/archive/plans/core-recovery-2026-11.md`, and `docs/archive/plans/managed-providers-leanci-colab.md`. Also checked the existing HTTP/MCP/fleet/operations audit ownership to avoid counting their findings again.
 - **Read-only, source-derived audit.** No build, test, exploit, authenticated request, service operation, provider operation, code edit, or git mutation was performed. Only this document is written. No subagents were used by this reader. The coordinator's independent second reader completed SEC-01–SEC-12: **8 CONFIRMED, 4 NARROW**, with the narrowed claims incorporated below. All verdicts are source-derived; no execution is established. Observations made by other audit participants are not reproductions by this reader.
 - Citations are snapshot-relative: `R src/...:line` means historical source obtained with `git show '4199fc06e^:src/...'`. `L Core/...` expands to `lean/OrbCore/OrbCore/...`; `L Bin/...` to `lean/OrbBin/OrbBin/...`; `L Node/...` to `lean/OrbNode/OrbNode/...`. All line numbers refer to the pinned snapshots.
 

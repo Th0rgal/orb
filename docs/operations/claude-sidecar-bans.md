@@ -28,7 +28,7 @@ that state.
   within five minutes.
 - Chains meant for unattended work need more than one target.
 
-Still open in Core (tracked in `docs/plans/orb-consolidation-2026-11.md`,
+Still open in Core (tracked in `docs/archive/plans/orb-consolidation-2026-11.md`,
 track H): the provider card does not show sidecar bans, the health "clear"
 route does not clear Core's own cooldown, and a completed login does not
 refresh the cached "rejected" state.

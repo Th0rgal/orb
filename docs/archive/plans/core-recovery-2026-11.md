@@ -1,5 +1,9 @@
 # Core recovery plan (November 2026)
 
+> Archived 2026-11-15. Superseded by the live plan,
+> [the Orb roadmap](../../plans/orb-roadmap.md); current state lives on the
+> board of project `orb`. Kept as written for history and no longer edited.
+
 ## Handoff 2026-11-13
 
 All remaining work transfers to the new orchestrator; this recovery mission is stopping.
@@ -58,7 +62,7 @@ References:
   placement through `start_mission` follow.
 - Mission `2bf5e847` owns the provider registry, key sealing, availability, prompt spawn
   receipts, transport error retention, lean.ci and Colab. Its plan is
-  `docs/plans/managed-providers-leanci-colab.md`; do not duplicate that work here.
+  `managed-providers-leanci-colab.md`; do not duplicate that work here.
 - Mission `68e2a387` owns the Rust/Lean documentation audit. All three missions are
   in Refinery. Pull/rebase before every push because shared Lean files overlap.
 - The operator deploys master to dev/prod and verifies live results. Recovery does

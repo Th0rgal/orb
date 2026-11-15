@@ -6,7 +6,7 @@
 
 - **Rust/Core baseline R:** `4199fc06e^` = `b22ed3181df64cf9681e887381ede7ed15fe96aa`.
 - **Lean HEAD H:** `5383bf27b8f8e664b654339cf88e14c90dba665c`.
-- **Read first:** `AGENTS.md`, `docs/plans/core-recovery-2026-11.md`, and `docs/plans/managed-providers-leanci-colab.md`.
+- **Read first:** `AGENTS.md`, `docs/archive/plans/core-recovery-2026-11.md`, and `docs/archive/plans/managed-providers-leanci-colab.md`.
 - Static, read-only source audit. No builds, tests, running services, live provider calls, commits, or subagents by this auditor. Only this document is written. Scenarios below are **proposed reproductions**, not executed results. The coordinator subsequently reported the independent static second-reader verdicts; those qualifications are recorded below and do not constitute live verification.
 - Citations are `R path:line` or `H path:line`; ranges include the relevant body. R files are read with `git show 4199fc06e^:<path>`, not from the working tree. Paths are relative to repository root `/var/lib/sandboxed-node/68e2a387-6c45-400d-a88a-7f0c6c2e37b3/orb`.
 - **E** = equivalent for the stated bounded behavior; **D** = divergent behavior/contract; **S** = stub/placeholder success or projection; **M** = missing effective implementation/wiring; **U** = unresolved or not established by this static audit. A family can have multiple classes. E does not imply exhaustive equivalence or deployed validation.

@@ -1,5 +1,9 @@
 # Orb reliability roadmap (2026-11-12)
 
+> Archived 2026-11-15. Superseded by the live plan,
+> [the Orb roadmap](../../plans/orb-roadmap.md); current state lives on the
+> board of project `orb`. Kept as written for history and no longer edited.
+
 One list for everything that came out of the first day on the Lean Core
 server. It merges the reliability fixes, the client work, clean redeploys and
 host monitoring. Each row has one owner and a test that says it is done.
