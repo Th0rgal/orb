@@ -1133,7 +1133,7 @@ def resolveCoreStoreDbPaths (trimmedRoot : String) (singleTenantUserId : String 
   return (missionsPath, askPath)
 
 /-- One-shot legacy project-board archive. Tables remain for a later removal PR.
-    A failed export never records completion; startup retries before serving requests.
+    A failed export never records completion; startup continues and retries next start.
     SQLite builds JSON so NULL, numbers, and strings retain their types. -/
 def exportLegacyProjectBoard (rootDir : String) (projectsDb missionsDb : SqliteDb) : IO (Except String Nat) := do
   let archive := System.FilePath.mk rootDir / "archive"
@@ -1374,8 +1374,7 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) (singleTenantUser
         sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; sqliteCloseRaw aDb.handle; sqliteCloseRaw iDb.handle
         return .error s!"core_store_r7_schema_failed:{r7Err}"
       if let .error e ← exportLegacyProjectBoard trimmedRoot pDb mDb then
-        sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; sqliteCloseRaw aDb.handle; sqliteCloseRaw iDb.handle
-        return .error e
+        IO.eprintln s!"[orb-core] legacy project-board archive failed: {e}"
       let closedRef ← IO.mkRef false
       let evListenersRef ← IO.mkRef (#[] : Array (UInt64 × (String → UInt64 → String → String → String → IO Unit)))
       let evDispatchState ← Std.Mutex.new ({} : MissionEventDispatchState)

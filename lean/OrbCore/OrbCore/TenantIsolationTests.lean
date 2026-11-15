@@ -165,6 +165,23 @@ private def legacyBoardArchive (root : String) : IO Unit := do
     IO.FS.removeFile (retryRoot / "archive")
     check (!(← (retryRoot / "archive" / "project-board-legacy.done").pathExists)) "failed export has no marker"
     check ((← exportLegacyProjectBoard retryRoot.toString upgraded.projectsDb upgraded.missionsDb).toOption == some 8) "failed export retries all rows"
+    -- Startup remains usable when the non-essential archive cannot be written.
+    let startupRoot := System.FilePath.mk path / "archive-failure-startup"
+    IO.FS.createDirAll startupRoot
+    IO.FS.writeFile (startupRoot / "archive") "blocked directory"
+    let .ok running ← openCoreStore startupRoot.toString
+      | throw (IO.userError "archive failure must not abort startup")
+    try
+      let result ← execParamQuery running.projectsDb "SELECT 1;" #[]
+      check result.isOk "archive failure leaves startup database handles usable"
+    finally closeCoreStore running
+    IO.FS.removeFile (startupRoot / "archive")
+    check (!(← (startupRoot / "archive" / "project-board-legacy.done").pathExists)) "startup archive failure has no marker"
+    let .ok retried ← openCoreStore startupRoot.toString
+      | throw (IO.userError "archive retry startup")
+    try
+      check (← (startupRoot / "archive" / "project-board-legacy.done").pathExists) "next startup retries the failed archive"
+    finally closeCoreStore retried
   finally closeCoreStore upgraded
 
 /-- Two real stored principals through the REST/desktop and MCP HTTP boundary.
