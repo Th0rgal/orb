@@ -5,6 +5,43 @@ export function canManageProvider(a: AIProvider): boolean {
   return isAdminUser() || a.added_by_me === true;
 }
 
+/** Matches Core's `memberProviderBaseUrlAllowed` (`lean/OrbCore/OrbCore/Control.lean`). */
+export function isMemberCustomBaseUrlAllowed(url: string): boolean {
+  const u = url.trim().toLowerCase();
+  if (!u.startsWith("https://")) return false;
+  const rest = u.slice("https://".length);
+  const hostPort = rest.split("/")[0] ?? "";
+  const host = hostPort.startsWith("[") ? hostPort : (hostPort.split(":")[0] ?? "");
+  if (
+    !host ||
+    host.startsWith("[") ||
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host.endsWith(".internal") ||
+    host.endsWith(".local") ||
+    host.startsWith("127.") ||
+    host.startsWith("10.") ||
+    host.startsWith("192.168.") ||
+    host.startsWith("169.254.") ||
+    host.startsWith("0.")
+  ) {
+    return false;
+  }
+  if (host.startsWith("172.")) {
+    const second = host.split(".")[1] ?? "";
+    if (/^\d+$/.test(second)) {
+      const n = Number(second);
+      if (n >= 16 && n <= 31) return false;
+    }
+  }
+  if (/^[0-9.]+$/.test(host) && host.startsWith("100.")) return false;
+  return true;
+}
+
+export function isCustomBaseUrlAllowed(url: string, admin = isAdminUser()): boolean {
+  return admin ? /^https?:\/\//i.test(url.trim()) : isMemberCustomBaseUrlAllowed(url);
+}
+
 /** A readable sentence for a refused provider write; never the raw `403 {json}` body. */
 export function providerWriteError(error: unknown, fallback: string): string {
   const raw = error instanceof ApiError ? error.detail : "";

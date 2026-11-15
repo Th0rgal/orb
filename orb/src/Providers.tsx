@@ -18,7 +18,7 @@ import { Toggle } from "./Toggle";
 import { For, Show, type JSX, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import * as Ic from "./icons";
 import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
-import { canManageProvider, providerWriteError } from "./providerPermissions";
+import { canManageProvider, isCustomBaseUrlAllowed, providerWriteError } from "./providerPermissions";
 import {
   api,
   getApiUrl,
@@ -383,9 +383,9 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
     const previous = ordered();
     setToggleError(null);
     setOrdered(applyOrder(list(), ids));
-    void reorderProviders(ids).then(p.onRefresh, () => {
+    void reorderProviders(ids).then(p.onRefresh, (e) => {
       setOrdered(previous);
-      setToggleError(`Could not change the order of ${a.provider_type_name || a.provider_type} accounts. The previous order is kept.`);
+      setToggleError(providerWriteError(e, `Could not change the order of ${a.provider_type_name || a.provider_type} accounts. The previous order is kept.`));
     });
   };
   /** Position of `a` among its provider's accounts in `group`, when there are several. */
@@ -396,14 +396,16 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
   };
   const toggle = (a: AIProvider, enabled: boolean) => {
     setToggleError(null);
-    const req = canManageProvider(a) ? setProviderEnabled(a.id, enabled) : setProviderUserPreference(a.id, enabled);
-    void req.then(p.onRefresh, (e) => setToggleError(providerWriteError(e, `Could not ${enabled ? "enable" : "disable"} ${a.name}. Nothing changed.`)));
+    void setProviderEnabled(a.id, enabled).then(
+      p.onRefresh,
+      (e) => setToggleError(providerWriteError(e, `Could not ${enabled ? "enable" : "disable"} ${a.name}. Nothing changed.`)),
+    );
   };
   const toggleUserPref = (a: AIProvider, enabled: boolean) => {
     setToggleError(null);
     void setProviderUserPreference(a.id, enabled).then(
       p.onRefresh,
-      () => setToggleError(`Could not update your preference for ${a.name}. Nothing changed.`),
+      (e) => setToggleError(providerWriteError(e, `Could not update your preference for ${a.name}. Nothing changed.`)),
     );
   };
   const toggleAutoReset = async (a: AIProvider, autoReset: boolean) => {
@@ -412,8 +414,8 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
       await setProviderAutoResetOnLimit(a.id, autoReset);
       p.onRefresh();
       return true;
-    } catch {
-      setToggleError(`Could not update auto-reset on ${a.name}. Nothing changed.`);
+    } catch (e) {
+      setToggleError(providerWriteError(e, `Could not update auto-reset on ${a.name}. Nothing changed.`));
       return false;
     }
   };
@@ -477,8 +479,10 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
     onCleanup(() => { disposed = true; stop(); });
   });
 
+  const availableLoginProviders = () =>
+    (loginOptions()?.providers ?? []).filter(x => isAdminUser() || x.id !== "mistral");
   const confirmAddSubscription = () => {
-    const kind = loginOptions()?.providers.find(x => x.id === addType());
+    const kind = availableLoginProviders().find(x => x.id === addType());
     if (!kind) return;
     setAdding(false);
     setReauth({
@@ -518,11 +522,11 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
       <section class="s-sec">
         <div class="section-row">
           <h3>Subscriptions</h3>
-          <button class="s-btn sm quiet" disabled={!loginOptions()?.available} onClick={() => { setAddType(loginOptions()?.providers[0]?.id ?? ""); setAdding(true); }}><Ic.PlusIcon size={12}/> Add subscription account</button>
+          <button class="s-btn sm quiet" disabled={!loginOptions()?.available || availableLoginProviders().length === 0} onClick={() => { setAddType(availableLoginProviders()[0]?.id ?? ""); setAdding(true); }}><Ic.PlusIcon size={12}/> Add subscription account</button>
         </div>
         <Show when={loginOptions()?.reason}><p class="s-row-desc">{loginOptions()?.reason}</p></Show>
         <div class="s-card">
-          <AccountGroups accounts={oauth()} usage={usage()} health={p.health} isOpen={groupOpen} onToggle={toggleGroup} row={(a: AIProvider) => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} rank={rankIn(oauth, a)} usage={usage()[a.id]} sharedOrgs={sharedOrgs()} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={canManageProvider(a) ? () => setReauth(a) : undefined} onRemove={canManageProvider(a) ? () => { setRemoveError(null); setRemoving(a); } : undefined} onToggle={enabled => toggle(a, enabled)} onToggleUserPref={enabled => toggleUserPref(a, enabled)} onUseReset={isAdminUser() ? () => setResetting(a) : undefined} onToggleAutoReset={isAdminUser() ? autoReset => toggleAutoReset(a, autoReset) : undefined} />} />
+          <AccountGroups accounts={oauth()} usage={usage()} health={p.health} isOpen={groupOpen} onToggle={toggleGroup} row={(a: AIProvider) => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} rank={rankIn(oauth, a)} usage={usage()[a.id]} sharedOrgs={sharedOrgs()} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={canManageProvider(a) ? () => setReauth(a) : undefined} onEditKey={() => setKeyEditor(a)} onRemove={canManageProvider(a) ? () => { setRemoveError(null); setRemoving(a); } : undefined} onToggle={enabled => toggle(a, enabled)} onToggleUserPref={enabled => toggleUserPref(a, enabled)} onUseReset={isAdminUser() ? () => setResetting(a) : undefined} onToggleAutoReset={autoReset => toggleAutoReset(a, autoReset)} />} />
           <Show when={oauth().length === 0}>
             <div class="s-row"><div class="s-row-desc">No subscription accounts connected.</div></div>
           </Show>
@@ -534,7 +538,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
           <h3>Model connections</h3>
           <p class="s-row-desc p-section-description">Model access through connected credentials, separate from subscription accounts.</p>
           <div class="s-card">
-            <For each={modelConnections()}>{a => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} usage={usage()[a.id]} health={p.health?.[a.id]} onReconnect={canManageProvider(a) ? () => setReauth(a) : undefined} onToggle={enabled => toggle(a, enabled)} onToggleUserPref={enabled => toggleUserPref(a, enabled)} />}</For>
+            <For each={modelConnections()}>{a => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} usage={usage()[a.id]} health={p.health?.[a.id]} onReconnect={canManageProvider(a) ? () => setReauth(a) : undefined} onEditKey={() => setKeyEditor(a)} onToggle={enabled => toggle(a, enabled)} onToggleUserPref={enabled => toggleUserPref(a, enabled)} />}</For>
           </div>
         </section>
       </Show>
@@ -550,7 +554,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
         </div>
         <div class="s-card">
           <For each={keys()}>
-            {(a) => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} rank={rankIn(keys, a)} usage={usage()[a.id]} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={canManageProvider(a) ? () => setReauth(a) : undefined} onEditKey={canManageProvider(a) ? () => setKeyEditor(a) : undefined} onRemove={canManageProvider(a) ? () => { setRemoveError(null); setRemoving(a); } : undefined} onToggle={enabled => toggle(a, enabled)} onToggleUserPref={enabled => toggleUserPref(a, enabled)} />}
+            {(a) => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} rank={rankIn(keys, a)} usage={usage()[a.id]} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={canManageProvider(a) ? () => setReauth(a) : undefined} onEditKey={() => setKeyEditor(a)} onRemove={canManageProvider(a) ? () => { setRemoveError(null); setRemoving(a); } : undefined} onToggle={enabled => toggle(a, enabled)} onToggleUserPref={enabled => toggleUserPref(a, enabled)} />}
           </For>
           <Show when={keys().length === 0}>
             <div class="s-row"><div class="s-row-desc">No API keys configured.</div></div>
@@ -573,7 +577,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
           }
         >
           <div class="p-sub-picker" role="radiogroup" aria-label="Subscription">
-            <For each={loginOptions()?.providers ?? []}>
+            <For each={availableLoginProviders()}>
               {(kind, idx) => {
                 const selected = () => addType() === kind.id;
                 const meta = () => SUBSCRIPTION_META[kind.id];
@@ -590,7 +594,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
                       confirmAddSubscription();
                     }}
                     onKeyDown={(e) => {
-                      const list = loginOptions()?.providers ?? [];
+                      const list = availableLoginProviders();
                       if (!list.length) return;
                       if (e.key === "ArrowDown" || e.key === "ArrowRight") {
                         e.preventDefault();
@@ -694,6 +698,8 @@ function parseOptionalCap(raw: string, min: number, max: number): number | null 
 
 function ApiKeyDialog(p: {provider?: AIProvider; onClose: () => void; onDone: () => void}) {
   const apiKinds = KINDS.filter(k => k.methods.some(m => m.kind === "api"));
+  const canEditCredentials = () => !p.provider || (canManageProvider(p.provider) && (!p.provider.uses_oauth || p.provider.has_api_key === true));
+  const canEditBaseUrl = () => type() === "custom" && (!p.provider || canManageProvider(p.provider));
   const [type, setType] = createSignal(p.provider?.provider_type ?? "openai");
   const [name, setName] = createSignal(p.provider?.name ?? "");
   const [secret, setSecret] = createSignal("");
@@ -710,10 +716,11 @@ function ApiKeyDialog(p: {provider?: AIProvider; onClose: () => void; onDone: ()
   const parsedRpm = createMemo(() => parseOptionalCap(rpmLimit(), 1, 100000));
   const parsedConcurrency = createMemo(() => parseOptionalCap(maxConcurrency(), 1, 1024));
   const capsValid = createMemo(() => parsedRpm() !== "invalid" && parsedConcurrency() !== "invalid");
+  const urlValid = createMemo(() => !canEditBaseUrl() || isCustomBaseUrlAllowed(url().trim(), isAdminUser()));
   const dirty = createMemo(() =>
-    !!secret()
+    (canEditCredentials() && !!secret())
     || name() !== (p.provider?.name ?? "")
-    || url().trim() !== (p.provider?.base_url ?? "")
+    || (canEditBaseUrl() && url().trim() !== (p.provider?.base_url ?? ""))
     || rpmLimit().trim() !== (p.provider?.rpm_limit != null ? String(p.provider.rpm_limit) : "")
     || maxConcurrency().trim() !== (p.provider?.max_concurrency != null ? String(p.provider.max_concurrency) : "")
   );
@@ -722,7 +729,7 @@ function ApiKeyDialog(p: {provider?: AIProvider; onClose: () => void; onDone: ()
     && !!effectiveName()
     && capsValid()
     && (p.provider ? dirty() : !!secret().trim())
-    && (type() !== "custom" || /^https?:\/\//.test(url().trim()))
+    && urlValid()
   );
   onCleanup(() => setSecret(""));
   const save = async () => {
@@ -736,8 +743,8 @@ function ApiKeyDialog(p: {provider?: AIProvider; onClose: () => void; onDone: ()
       const payload = p.provider
         ? {
             name: effectiveName(),
-            ...(secret().trim() ? { api_key: secret().trim() } : {}),
-            ...(type() === "custom" ? { base_url: url().trim() || null } : {}),
+            ...(canEditCredentials() && secret().trim() ? { api_key: secret().trim() } : {}),
+            ...(canEditBaseUrl() ? { base_url: url().trim() || null } : {}),
             ...(rpm != null || p.provider.rpm_limit != null ? { rpm_limit: rpm } : {}),
             ...(conc != null || p.provider.max_concurrency != null ? { max_concurrency: conc } : {}),
           }
@@ -757,7 +764,7 @@ function ApiKeyDialog(p: {provider?: AIProvider; onClose: () => void; onDone: ()
     } catch (e) { setError(providerWriteError(e, "Couldn’t save the provider settings. Check the connection and try again.")); }
     finally { setBusy(false); }
   };
-  return <Dialog title={p.provider ? "Edit API key" : "Add API key"} dirty={dirty()} description={p.provider ? `Update the key or router pacing limits stored for ${p.provider.name}.` : "Choose a provider and enter an API key to store on the connected backend."} busy={busy()} onClose={p.onClose}
+  return <Dialog title={p.provider ? (canEditCredentials() ? "Edit API key" : "Edit provider settings") : "Add API key"} dirty={dirty()} description={p.provider ? (canEditCredentials() ? `Update the key or router pacing limits stored for ${p.provider.name}.` : `Update the label or router pacing limits stored for ${p.provider.name}.`) : "Choose a provider and enter an API key to store on the connected backend."} busy={busy()} onClose={p.onClose}
     footer={requestClose => <><DialogButton disabled={busy()} onClick={requestClose}>Cancel</DialogButton><DialogButton variant="primary" disabled={!canSave()} onClick={() => void save()}>{busy() ? "Saving…" : "Save"}</DialogButton></>}>
     <Show when={!p.provider}>
       <div class="field">
@@ -792,18 +799,20 @@ function ApiKeyDialog(p: {provider?: AIProvider; onClose: () => void; onDone: ()
       <Field label="Account label">
         <input class="s-input" value={name()} onInput={e=>setName(e.currentTarget.value)} placeholder={defaultName()} />
       </Field>
-      <Show when={type()==="custom"}>
+      <Show when={canEditBaseUrl()}>
         <Field label="Base URL">
           <input class="s-input" type="url" value={url()} onInput={e=>setUrl(e.currentTarget.value)} placeholder="https://api.example.com/v1" />
         </Field>
       </Show>
-      <div class="field">
-        <div class="p-key-field-head">
-          <span>{p.provider ? "New API key (optional)" : "API key"}</span>
-          <Show when={hint()?.env}><code class="p-key-env">{hint()!.env}</code></Show>
+      <Show when={canEditCredentials()}>
+        <div class="field">
+          <div class="p-key-field-head">
+            <span>{p.provider ? "New API key (optional)" : "API key"}</span>
+            <Show when={hint()?.env}><code class="p-key-env">{hint()!.env}</code></Show>
+          </div>
+          <input class="s-input p-key-secret" type="password" autocomplete="new-password" autocapitalize="off" autocorrect="off" spellcheck={false} placeholder={p.provider ? "Leave blank to keep existing key" : (hint()?.placeholder ?? "Enter API key…")} value={secret()} onInput={e=>setSecret(e.currentTarget.value)} onKeyDown={e => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); void save(); } }} />
         </div>
-        <input class="s-input p-key-secret" type="password" autocomplete="new-password" autocapitalize="off" autocorrect="off" spellcheck={false} placeholder={p.provider ? "Leave blank to keep existing key" : (hint()?.placeholder ?? "Enter API key…")} value={secret()} onInput={e=>setSecret(e.currentTarget.value)} onKeyDown={e => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); void save(); } }} />
-      </div>
+      </Show>
       <Field label="Requests / min limit (optional)">
         <input class="s-input" inputMode="numeric" value={rpmLimit()} onInput={e=>setRpmLimit(e.currentTarget.value)} placeholder="e.g. 300" />
       </Field>
@@ -811,14 +820,15 @@ function ApiKeyDialog(p: {provider?: AIProvider; onClose: () => void; onDone: ()
         <input class="s-input" inputMode="numeric" value={maxConcurrency()} onInput={e=>setMaxConcurrency(e.currentTarget.value)} placeholder="e.g. 10" />
       </Field>
     </div>
-    <p class="s-row-desc p-key-foot-note">{p.provider ? "Leave the key blank to update limits or label without rotating credentials. Saved keys are never displayed." : "Encrypted at rest on the connected backend and never shown again."}</p>
+    <p class="s-row-desc p-key-foot-note">{p.provider ? (canEditCredentials() ? "Leave the key blank to update limits or label without rotating credentials. Saved keys are never displayed." : "Update the label or router pacing limits for this shared account.") : "Encrypted at rest on the connected backend and never shown again."}</p>
+    <Show when={canEditBaseUrl() && url().trim() && !urlValid()}><p role="alert" class="inline-error">{isAdminUser() ? "Base URL must start with http:// or https://." : "Members can set a base URL only to a public https:// address."}</p></Show>
     <Show when={!capsValid()}><p role="alert" class="inline-error">RPM limit (1–100000) and max concurrency (1–1024) must be whole numbers when set.</p></Show>
     <Show when={error()}><p role="alert" class="inline-error">{error()}</p></Show>
   </Dialog>;
 }
 
 const LEGACY_OAUTH_TYPES = new Set(["anthropic", "openai", "google"]);
-const reconnectable = (a: AIProvider) => (a.provider_type === "mistral" && a.uses_oauth) || cliProxyReconnectable(a) || (a.uses_oauth && a.credential_owner === "sandboxed_sh" && LEGACY_OAUTH_TYPES.has(a.provider_type));
+const reconnectable = (a: AIProvider) => cliProxyReconnectable(a) || (isAdminUser() && ((a.provider_type === "mistral" && a.uses_oauth) || (a.uses_oauth && a.credential_owner === "sandboxed_sh" && LEGACY_OAUTH_TYPES.has(a.provider_type))));
 
 const CLIPROXY_LOGIN_TYPES = new Set(["anthropic", "openai", "xai", "kimi", "antigravity", "muse-code"]);
 
@@ -1283,6 +1293,8 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
   const mistralSubscription = () => isAdminUser() && a.provider_type === "mistral" && a.uses_oauth;
   // Core sends an informational message ("Connected via OAuth") for healthy accounts; only a problem is worth showing.
   const problem = () => status() === "connected" ? undefined : (a.status.reason || a.status.message);
+  const isKeyRow = () => !(a.provider_type === "mistral" && a.uses_oauth) && ((a.has_api_key === true && a.has_oauth === false) || !a.uses_oauth);
+  const editLabel = () => manages() && isKeyRow() ? "Edit API key" : "Edit settings";
   const [localOpen, setLocalOpen] = createSignal(false);
   const open = () => p.open ?? localOpen();
   const setOpen = (nextOpen: boolean) => p.onOpenChange ? p.onOpenChange(nextOpen) : setLocalOpen(nextOpen);
@@ -1301,37 +1313,27 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
   };
   const email = () => a.account_email || p.usage?.account_email || a.name.match(/\(([^()]+@[^()]+)\)/)?.[1];
   const hasUsageDetails = () => hasProviderUsageDetails(p.usage, email());
-  const expandable = () => !!p.rank || resetSupported() || !!resetInfo() || status() === "out_of_credit" || status() === "auth_failed" || status() === "needs_verification" || a.provider_type === "antigravity" || !!p.onEditKey || (canReconnect() && needsAuth()) || mistralSubscription() || hasUsageDetails() || !!problem();
+  const expandable = () => !!p.rank || resetSupported() || !!resetInfo() || status() === "out_of_credit" || status() === "auth_failed" || status() === "needs_verification" || a.provider_type === "antigravity" || (!!p.onEditKey && isKeyRow()) || (canReconnect() && needsAuth()) || mistralSubscription() || hasUsageDetails() || !!problem();
   const plan = () => a.provider_type === "antigravity" ? p.usage?.antigravity_plan || "Subscription account"
     : a.provider_type === "google" ? (a.has_api_key && !a.has_oauth ? "API key" : "Model routing")
     : p.usage?.codex_plan_type || p.usage?.xai_plan || p.usage?.kimi_plan || p.usage?.zai_plan ? `${p.usage!.codex_plan_type || p.usage!.xai_plan || p.usage!.kimi_plan || p.usage!.zai_plan}`
     : p.usage?.muse_plan || p.usage?.mistral_plan || undefined;
   const title = () => a.provider_type === "antigravity" ? "Google Antigravity" : a.provider_type === "google" ? (a.has_api_key && !a.has_oauth ? "Gemini API" : "Gemini model access") : email() ? a.name.replace(`(${email()})`, "").trim() : a.name;
   const menuItems = (): MenuEntry[] => {
-    if (!manages()) {
-      const memberRank: MenuEntry[] = [
-        ...(p.rank && p.rank.index > 0 ? [{ kind: "item" as const, label: "Try earlier", icon: Ic.FindPrevIcon, onClick: () => p.rank!.move(p.rank!.index - 1) }] : []),
-        ...(p.rank && p.rank.index < p.rank.count - 1 ? [{ kind: "item" as const, label: "Try later", icon: Ic.FindNextIcon, onClick: () => p.rank!.move(p.rank!.index + 1) }] : []),
-      ];
-      return [
-        ...memberRank,
-        ...(memberRank.length > 0 ? [{ kind: "sep" as const }] : []),
-        {
-          kind: "item",
-          label: userSkipped() ? "Use for my missions" : "Skip for my missions",
-          icon: userSkipped() ? Ic.CheckIcon : Ic.BanIcon,
-          disabled: globallyDisabled(),
-          onClick: () => p.onToggle(userSkipped()),
-        },
-      ];
-    }
-    const authItems: MenuEntry[] = status() === "needs_verification"
-      ? [{ kind: "item", label: "Verify account", icon: Ic.ExternalIcon, onClick: verify }, { kind: "item", label: "Check again", icon: Ic.RefreshIcon, onClick: () => void checkAgain() }]
-      : p.onEditKey
-      ? [{ kind: "item", label: "Edit API key", icon: Ic.PencilIcon, onClick: p.onEditKey }]
-      : canReconnect()
-      ? [{ kind: "item", label: needsAuth() ? "Reconnect" : "Re-authenticate", icon: Ic.RefreshIcon, onClick: p.onReconnect! }]
-      : [];
+    const authItems: MenuEntry[] = [
+      ...(manages() && status() === "needs_verification"
+        ? [
+            { kind: "item" as const, label: "Verify account", icon: Ic.ExternalIcon, onClick: verify },
+            ...(isAdminUser() ? [{ kind: "item" as const, label: "Check again", icon: Ic.RefreshIcon, onClick: () => void checkAgain() }] : []),
+          ]
+        : []),
+      ...(manages() && status() !== "needs_verification" && canReconnect()
+        ? [{ kind: "item" as const, label: needsAuth() ? "Reconnect" : "Re-authenticate", icon: Ic.RefreshIcon, onClick: p.onReconnect! }]
+        : []),
+      ...(p.onEditKey
+        ? [{ kind: "item" as const, label: editLabel(), icon: Ic.PencilIcon, onClick: p.onEditKey }]
+        : []),
+    ];
     const rankItems: MenuEntry[] = [
       ...(p.rank && p.rank.index > 0 ? [{ kind: "item" as const, label: "Try earlier", icon: Ic.FindPrevIcon, onClick: () => p.rank!.move(p.rank!.index - 1) }] : []),
       ...(p.rank && p.rank.index < p.rank.count - 1 ? [{ kind: "item" as const, label: "Try later", icon: Ic.FindNextIcon, onClick: () => p.rank!.move(p.rank!.index + 1) }] : []),
@@ -1341,12 +1343,13 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
       ...(authItems.length > 0 ? [{ kind: "sep" as const }] : []),
       ...rankItems,
       ...(rankItems.length > 0 ? [{ kind: "sep" as const }] : []),
-      { kind: "item", label: a.enabled === false ? "Enable" : "Disable", icon: a.enabled === false ? Ic.CheckIcon : Ic.BanIcon, onClick: () => p.onToggle(a.enabled === false) },
+      { kind: "item", label: globallyDisabled() ? "Enable" : "Disable", icon: globallyDisabled() ? Ic.CheckIcon : Ic.BanIcon, onClick: () => p.onToggle(globallyDisabled()) },
       ...(p.onToggleUserPref && currentUser()
         ? [{
             kind: "item" as const,
             label: userSkipped() ? "Use for my missions" : "Skip for my missions",
             icon: userSkipped() ? Ic.CheckIcon : Ic.BanIcon,
+            disabled: globallyDisabled(),
             onClick: () => p.onToggleUserPref!(userSkipped()),
           }]
         : []),
@@ -1408,7 +1411,9 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
             <p class="s-row-desc inline-error">Google requires you to verify this account.</p>
             <div class="p-acc-actions">
               <button class="s-btn" onClick={verify}>Verify account ↗</button>
-              <button class="s-btn quiet" disabled={checking()} onClick={() => void checkAgain()}>{checking() ? "Checking…" : "Check again"}</button>
+              <Show when={isAdminUser()}>
+                <button class="s-btn quiet" disabled={checking()} onClick={() => void checkAgain()}>{checking() ? "Checking…" : "Check again"}</button>
+              </Show>
             </div>
             <Show when={checkError()}><p class="s-row-desc inline-error">{checkError()}</p></Show>
           </Show>
@@ -1418,7 +1423,7 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
               : "The router got 401 / 403 from this account and skips it."}{p.health?.next_probe_at ? ` Next probe ${new Date(p.health.next_probe_at).toLocaleTimeString()}.` : ""}</p>
           </Show>
           <Show when={!p.usage?.error && problem()}><p class="s-row-desc inline-error">{problem()?.replace(/\s*—\s*/g, ". ")}</p></Show>
-          <Show when={p.onEditKey}><div class="p-acc-actions"><button class="s-btn" onClick={p.onEditKey}>Edit API key</button></div></Show>
+          <Show when={p.onEditKey && isKeyRow()}><div class="p-acc-actions"><button class="s-btn" onClick={p.onEditKey}>{editLabel()}</button></div></Show>
           <Show when={canReconnect() && needsAuth()}>
             <div class="p-acc-actions">
               <button class="s-btn" onClick={p.onReconnect}>

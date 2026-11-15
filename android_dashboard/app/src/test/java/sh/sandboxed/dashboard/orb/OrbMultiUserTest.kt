@@ -199,4 +199,79 @@ class OrbMultiUserTest {
         assertEquals("admin", synth.role)
         assertFalse(synth.disabled)
     }
+
+    @Test
+    fun memberProviderPermissionsBaseUrlAndFriendlyWriteErrors() {
+        val ownKey = OrbRow("p-own", mapOf("id" to "p-own", "provider_type" to "custom", "added_by_me" to true, "has_api_key" to true, "uses_oauth" to false))
+        val sharedKey = OrbRow("p-shared", mapOf("id" to "p-shared", "provider_type" to "custom", "added_by_me" to false, "has_api_key" to true, "uses_oauth" to false))
+        val ownProxyOauth = OrbRow("p-proxy", mapOf("id" to "p-proxy", "provider_type" to "anthropic", "added_by_me" to true, "uses_oauth" to true, "has_oauth" to true, "credential_owner" to "cli_proxy"))
+        val sharedProxyOauth = OrbRow("p-proxy-shared", mapOf("id" to "p-proxy-shared", "provider_type" to "anthropic", "added_by_me" to false, "uses_oauth" to true, "has_oauth" to true, "credential_owner" to "cli_proxy"))
+        val ownGoogleOauth = OrbRow("p-google", mapOf("id" to "p-google", "provider_type" to "google", "added_by_me" to true, "uses_oauth" to true, "has_oauth" to true))
+
+        assertTrue(canManageProvider(ownKey, isAdmin = false))
+        assertFalse(canManageProvider(sharedKey, isAdmin = false))
+        assertTrue(canManageProvider(sharedKey, isAdmin = true))
+
+        assertTrue(canEditProviderCredentials(ownKey, isAdmin = false))
+        assertFalse(canEditProviderCredentials(sharedKey, isAdmin = false))
+        assertTrue(canEditProviderCredentials(sharedKey, isAdmin = true))
+        assertFalse(canEditProviderCredentials(ownProxyOauth, isAdmin = true))
+
+        assertTrue(canEditProviderBaseUrl(null, "custom", isAdmin = false))
+        assertTrue(canEditProviderBaseUrl(ownKey, "custom", isAdmin = false))
+        assertFalse(canEditProviderBaseUrl(sharedKey, "custom", isAdmin = false))
+        assertTrue(canEditProviderBaseUrl(sharedKey, "custom", isAdmin = true))
+        assertFalse(canEditProviderBaseUrl(ownKey, "openai", isAdmin = true))
+
+        assertTrue(canReconnectProviderOAuth(ownProxyOauth, isAdmin = false))
+        assertFalse(canReconnectProviderOAuth(sharedProxyOauth, isAdmin = false))
+        assertTrue(canReconnectProviderOAuth(sharedProxyOauth, isAdmin = true))
+        assertFalse(canReconnectProviderOAuth(ownGoogleOauth, isAdmin = false))
+        assertTrue(canReconnectProviderOAuth(ownGoogleOauth, isAdmin = true))
+
+        assertEquals(setOf("anthropic", "openai", "xai", "kimi"), availableOAuthPresetTypes(isAdmin = false))
+        assertEquals(setOf("anthropic", "openai", "google", "xai", "kimi"), availableOAuthPresetTypes(isAdmin = true))
+
+        assertTrue(isMemberCustomBaseUrlAllowed("https://api.example.com/v1"))
+        assertTrue(isMemberCustomBaseUrlAllowed("https://100.example.com/v1"))
+        assertFalse(isMemberCustomBaseUrlAllowed("http://api.example.com/v1"))
+        assertFalse(isMemberCustomBaseUrlAllowed("https://localhost:8080/v1"))
+        assertFalse(isMemberCustomBaseUrlAllowed("https://api.localhost/v1"))
+        assertFalse(isMemberCustomBaseUrlAllowed("https://svc.internal/v1"))
+        assertFalse(isMemberCustomBaseUrlAllowed("https://host.local/v1"))
+        assertFalse(isMemberCustomBaseUrlAllowed("https://127.0.0.1/v1"))
+        assertFalse(isMemberCustomBaseUrlAllowed("https://10.0.0.1/v1"))
+        assertFalse(isMemberCustomBaseUrlAllowed("https://192.168.1.1/v1"))
+        assertFalse(isMemberCustomBaseUrlAllowed("https://169.254.169.254/v1"))
+        assertFalse(isMemberCustomBaseUrlAllowed("https://172.16.0.1/v1"))
+        assertFalse(isMemberCustomBaseUrlAllowed("https://172.31.255.1/v1"))
+        assertTrue(isMemberCustomBaseUrlAllowed("https://172.32.0.1/v1"))
+        assertFalse(isMemberCustomBaseUrlAllowed("https://100.64.0.1/v1"))
+        assertFalse(isMemberCustomBaseUrlAllowed("https://[::1]/v1"))
+        assertTrue(isCustomBaseUrlAllowed("http://localhost:8080/v1", isAdmin = true))
+        assertFalse(isCustomBaseUrlAllowed("http://localhost:8080/v1", isAdmin = false))
+
+        val ownerErr = OrbError(message = "HTTP 403", status = 403, body = """{"error":"not_account_owner"}""")
+        val baseUrlErr = OrbError(message = "HTTP 403", status = 403, body = """{"error":"base_url_not_allowed"}""")
+        val adminErr = OrbError(message = "HTTP 403", status = 403, body = """{"error":"admin_required"}""")
+        val disabledErr = OrbError(message = "HTTP 403", status = 403, body = """{"error":"account_disabled"}""")
+        val unknown403 = OrbError(message = "HTTP 403", status = 403, body = """{"error":"something_else"}""")
+
+        assertEquals(
+            "Only the person who added this account, or an admin, can change its credentials or remove it.",
+            providerWriteError(ownerErr, "Fallback")
+        )
+        assertEquals(
+            "Members can set a base URL only on custom accounts they added, and only to a public https:// address.",
+            providerWriteError(baseUrlErr, "Fallback")
+        )
+        assertEquals("Only an admin can change this setting.", providerWriteError(adminErr, "Fallback"))
+        assertEquals("Your account is disabled.", providerWriteError(disabledErr, "Fallback"))
+        assertEquals("Fallback", providerWriteError(unknown403, "Fallback"))
+        for (err in listOf(ownerErr, baseUrlErr, adminErr, disabledErr, unknown403)) {
+            val msg = providerWriteError(err, "Fallback")
+            assertFalse(msg.contains("{"))
+            assertFalse(msg.contains("403"))
+        }
+    }
 }
