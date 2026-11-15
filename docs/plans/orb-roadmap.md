@@ -34,7 +34,10 @@ receipt (PR, deployed SHA, and the check that was run):
    turns (section 4, group R).
 6. **Operations are governed**: one deploy path for Core and node binaries, env
    migration applied on dev and prod, monitoring quiet.
-7. Every node in section 4 is `done` or `dropped` with a reason.
+7. **One mission per roadmap.** Each roadmap (Orb, turbo-lean, evm.fast,
+   Pareto) is one master mission with its own board; projects are only shelves
+   (`Now`, `Later`, `Misc`), and the stale missions are archived.
+8. Every node in section 4 is `done` or `dropped` with a reason.
 
 ## 2. How the master mission works
 
@@ -72,10 +75,16 @@ worker's receipt; when it needs something read, it sends a worker. Workers are
 spawned sparingly: one per ready node, none for work a node already has.
 
 **Workers.** One worker per node, one branch, one PR.
-- Model: `builtin/smart` on opencode. For a node that has failed twice on
-  `builtin/smart`, one attempt on `openai/gpt-6-astra` (fallback
-  `openai/gpt-6.1-sol`). Do not use `ethereumfoundation/glm-5.3` until node X4
-  is done. Record requested and effective model.
+- Model, cheapest that can do the node:
+  - read-only checks, inventories, `verify` nodes, docs, small mechanical
+    edits: `ethereumfoundation/deepseek-v4.1-flash`,
+    `ethereumfoundation/glm-5.3-flash-uncensored`,
+    `ethereumfoundation/qwen3.8-27b` or Grok 4.7;
+  - implementation: `builtin/smart`;
+  - a node that failed twice, or a milestone review: `openai/gpt-6-astra`,
+    then `openai/gpt-6.1-sol`.
+  The plain `ethereumfoundation/glm-5.3` is rejected for our key (node X4).
+  Record requested and effective model.
 - At most 6 writers at once. Never two writers on the same files.
 - Placement: spread them. No more than 2 Lean-building workers on one static
   node (8 cores each); use `auto-managed:<provider>:large` for the rest. Never
@@ -205,6 +214,36 @@ Not on this roadmap: a macOS backend for LeanUI.
 | R9 | Controller closes out instead of dispatching: `start_mission` and the board make "ready node without worker" visible to the controller | — | ready | A controller tick lists ready nodes from the board |
 | R10 | Rust → Lean parity queue (`rust-lean-parity-audit.md`), RUN-07 first; no new audit documents | — | verify | Ranked queue with each item `done` or a node here |
 
+### S. One mission per roadmap, three projects
+
+Today a board belongs to a project, so each roadmap needs its own project:
+nine projects, 3,000 missions, and the four live roadmaps are hard to see.
+Target: the roadmap **is** its master mission; a project is a shelf.
+
+| Project | Holds |
+| --- | --- |
+| `Now` | master missions of the roadmaps being pushed (Orb, turbo-lean, evm.fast, Pareto) |
+| `Later` | master missions of parked roadmaps; moved to `Now` when they matter again |
+| `Misc` | one-off missions (today's `default`, `assistant`, `health-manager`, `minecraft`) |
+
+| Id | Node | Needs | State | Done when |
+| --- | --- | --- | --- | --- |
+| S1 | Spec `docs/specs/mission-board.md`: the board belongs to a mission (one text, 16 KB, written only by that mission, read by its owner and the missions it started); a project page lists the boards of its missions; a mission keeps its board and its children when it changes project; existing project boards migrate to their controller mission | — | ready | Spec merged, with the event orders that must not lose a board |
+| S2 | Core: mission board storage, `read_mission_board` / `write_mission_board` (the project tools stay as aliases onto the controller's board for one release), REST route, migration, tenant isolation tests | S1 | blocked | A member cannot read another user's board; migration keeps every existing board |
+| S3 | Desktop: the mission page shows its board; the project page shows the boards of its missions in order; moving a master between projects keeps its workers nested under it | S2 | blocked | Browser test replays a move while a worker is running |
+| S4 | iOS and Android: same as S3, shipped together with version bumps | S2 | blocked | Unit tests on both; same fixtures in `shared/orb-spec/` |
+| S5 | Archive in bulk: REST and MCP call that archives missions by filter (project, status, older than), dry-run first, reversible | — | ready | Dry run prints the count; unarchive restores |
+| S6 | Cost per mission is recorded (`total_cost_cents` is 0 on every mission today), so the model tiers above can be measured | — | ready | A turn on a priced model shows a non-zero cost; per-project total on the project page |
+| S7 | Create `Now`, `Later`, `Misc`; move the Orb master into `Now`, its workers nested under it; fold `refining-loops` and `orb` away | S2, S3 | blocked | The Orb master writes its own board from `Now` |
+| S8 | Archive stale missions: `interrupted`, `failed` or `awaiting_user`, untouched for 7 days, with no live child, in `default`, `verity-core`, `refining-loops` and unlabelled (about 700 on 15 Nov). Never an `active` mission, a master, or anything in `evm-fast`, `turbo-lean` or Pareto | S5 | blocked (Thomas, 5.8: confirm the dry-run count) | Count before and after on the board |
+| S9 | Fold `default`, `assistant`, `health-manager`, `minecraft` into `Misc`; parked roadmaps (Verity, LeanVM, ldgr) get one mission each in `Later` | S7, S8 | blocked | Three projects left besides the ones in S10 |
+| S10 | turbo-lean, evm.fast and Pareto move to the same shape: one master mission in `Now`, its own board, a guideline file in its repo, the model tiers above; Pareto goes from two controllers, a watchdog and a steward to one master. The Orb master writes the proposal for each; it does not touch their missions | S7 | blocked (Thomas, 5.9, per campaign) | Each campaign's session has the proposal; moved only on Thomas's word |
+| S11 | One supervision check for all roadmaps: twice a day, reads the boards in `Now`, reports only changes; replaces the hourly Pareto check and the evm.fast check | S10 | blocked | One scheduled task left |
+| S12 | Skills `controllers-policy` and `project-manager` and `docs/AGENT_CONTROL_PLANE.md` describe the mission board and the three projects | S2 | blocked | No mention of a project-owned board |
+
+S2 is a milestone (authorization): it gets the independent review. Until S7,
+the Orb master stays in project `orb`, which gives it a writable board.
+
 ### O. Operations
 
 | Id | Node | Needs | State | Done when |
@@ -228,7 +267,7 @@ Not on this roadmap: a macOS backend for LeanUI.
 | X1 | Native Linux row menu: New cron, New folder, Rename, Archive | U4 decision may drop it | ready | — |
 | X2 | macOS native sidebar "+" buttons | — | ready | — |
 | X3 | Tether: lease revoked on every terminal transition; WAN endpoint chosen for remote fleet hosts | — | ready | Tests first |
-| X4 | `ethereumfoundation/*` models rejected for our key: fix the provider entry or remove them from the catalog | — | ready | A turn on an EF model replies, or the models are gone from the list |
+| X4 | Plain `ethereumfoundation/glm-5.3` is rejected for our key (the flash variants work): fix the entry or remove it from the catalog | — | ready | A turn on it replies, or it is gone from the list |
 | X5 | Tether end-to-end retest from a fleet node | 5.3 | blocked (Thomas) | SSH as `orb-tether` succeeds |
 | X6 | Routing checks from 15 Nov still hold on prod: provider catalog complete, chain test endpoint authenticated, one "Weekly" row for ChatGPT | — | verify | Three checks against prod |
 
@@ -246,6 +285,10 @@ Only these. Each one names what it unblocks.
    it (library is updated by hand until then).
 7. **A `service_deploy` grant for the master mission**, if the master is to
    deploy on its own; otherwise deploys wait for the operator session.
+8. **Confirm the archive count** from the S8 dry run before anything is
+   archived.
+9. **Per campaign, say when** turbo-lean, evm.fast and Pareto may move to the
+   one-master shape (S10).
 
 ## 6. Decisions in force
 
@@ -259,6 +302,7 @@ Only these. Each one names what it unblocks.
 | Mobile ships on CI alone, iOS and Android together, with version bumps | Thomas, 14 Nov |
 | Antigravity always uses `gemini-4-carbon`; `argon` only through Surplus Intelligence | Thomas, 15 Nov |
 | Canonical Core URL is `https://orbcore.thomas.md` | Thomas, 15 Nov |
+| A roadmap is one master mission with its own board; projects are shelves: `Now`, `Later`, `Misc` | Thomas, 15 Nov |
 | Master on `builtin/genius`, workers on `builtin/smart`, spawned sparingly; Astra then `gpt-6.1-sol` only after two failures | Thomas, 15 Nov |
 | Workers push often; milestone PRs get an independent review; merges need no approval | Thomas, 15 Nov |
 | Green before merge again (CI is fast enough since #1786) | this file |
