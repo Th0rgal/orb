@@ -143,22 +143,42 @@ def run : IO Unit := do
       let fwd := flat (← evPage #[("since_seq", JVal.uint64 (maxSeq - 1).toUInt64)])
       check ((fwd.splitOn "reply-4").length == 2 && (fwd.splitOn "reply-3").length == 1) s!"since_seq returns newer events: {fwd}"
 
-      -- Library skills reach a node workspace in the directory each harness reads.
-      IO.FS.createDirAll s!"{root}/library/skills/lean-audit"
+      -- Library skills reach a node workspace in the directory each harness reads,
+      -- including companion `references/**` files (even when `SKILL.md` already exists).
+      IO.FS.createDirAll s!"{root}/library/skills/lean-audit/references"
       IO.FS.writeFile s!"{root}/library/skills/lean-audit/SKILL.md" "---\nname: lean-audit\n---\nAudit it's \"proofs\".\n"
+      IO.FS.writeFile s!"{root}/library/skills/lean-audit/references/long-running.md" "# Long-running\nKeep checkpoints.\n"
+      IO.FS.writeFile s!"{root}/library/skills/lean-audit/references/proof.md" "# Proof\nCheck kernel.\n"
+      IO.FS.writeFile s!"{root}/library/skills/lean-audit/references/.hidden.md" "hidden"
+      IO.FS.writeFile s!"{root}/library/skills/lean-audit/references/bad name.md" "unsafe"
+      IO.FS.writeFile s!"{root}/library/skills/lean-audit/references/id_ed25519" "secret"
       IO.FS.createDirAll s!"{root}/library/skills/Bad Name"
       IO.FS.writeFile s!"{root}/library/skills/Bad Name/SKILL.md" "x"
       let prelude ← OrbCore.Skills.remoteInstallPrelude root none "opencode" "" "" ""
       check ((prelude.splitOn "'.opencode/skills/lean-audit/SKILL.md'").length > 1) s!"opencode skill path: {prelude}"
-      check ((prelude.splitOn "Bad Name").length == 1 && (prelude.splitOn "Audit it").length == 1)
-        "unsafe names are skipped and content is never inlined as shell text"
-      check (((← OrbCore.Skills.remoteInstallPrelude root none "claude" "" "" "").splitOn "'.claude/skills/lean-audit/SKILL.md'").length > 1)
-        "claude skill path"
-      -- The script really installs the file, and leaves an existing one alone.
+      check ((prelude.splitOn "'.opencode/skills/lean-audit/references/long-running.md'").length > 1 &&
+             (prelude.splitOn "'.opencode/skills/lean-audit/references/proof.md'").length > 1)
+        s!"opencode skill companion reference paths: {prelude}"
+      check ((prelude.splitOn "Bad Name").length == 1 && (prelude.splitOn "Audit it").length == 1 &&
+             (prelude.splitOn ".hidden.md").length == 1 && (prelude.splitOn "bad name.md").length == 1 &&
+             (prelude.splitOn "id_ed25519").length == 1)
+        "unsafe names, hidden files, and secret filenames are skipped and content is never inlined as shell text"
+      let claudePrelude ← OrbCore.Skills.remoteInstallPrelude root none "claude" "" "" ""
+      check ((claudePrelude.splitOn "'.claude/skills/lean-audit/SKILL.md'").length > 1 &&
+             (claudePrelude.splitOn "'.claude/skills/lean-audit/references/proof.md'").length > 1)
+        "claude skill and reference paths"
+      -- The script really installs SKILL.md and references/**, and populates missing references even if SKILL.md already exists.
       let ws := s!"{root}/node-workspace"
-      IO.FS.createDirAll ws
-      let sh ← IO.Process.output { cmd := "/bin/sh", args := #["-c", prelude ++ prelude ++ "cat .opencode/skills/lean-audit/SKILL.md"], cwd := some ws }
-      check (sh.exitCode == 0 && sh.stdout == "---\nname: lean-audit\n---\nAudit it's \"proofs\".\n") s!"installed skill content: {sh.stdout} {sh.stderr}"
+      IO.FS.createDirAll s!"{ws}/.opencode/skills/lean-audit"
+      IO.FS.writeFile s!"{ws}/.opencode/skills/lean-audit/SKILL.md" "---\nname: lean-audit\n---\nAudit it's \"proofs\".\n"
+      let sh ← IO.Process.output {
+        cmd := "/bin/sh",
+        args := #["-c", prelude ++ prelude ++ "cat .opencode/skills/lean-audit/SKILL.md .opencode/skills/lean-audit/references/long-running.md .opencode/skills/lean-audit/references/proof.md"],
+        cwd := some ws
+      }
+      check (sh.exitCode == 0 &&
+             sh.stdout == "---\nname: lean-audit\n---\nAudit it's \"proofs\".\n# Long-running\nKeep checkpoints.\n# Proof\nCheck kernel.\n")
+        s!"installed skill and references content: {sh.stdout} {sh.stderr}"
     finally
       closeCoreStore store
   finally

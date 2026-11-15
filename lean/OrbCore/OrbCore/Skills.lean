@@ -387,22 +387,101 @@ def buildDeliveryPlan (workingDir : String) (project? : Option String) (storeRoo
         plan := extendContext plan name desc
   return .ok plan
 
-/-- Largest SKILL.md shipped to a node, and the cap on all of them together. -/
+/-- Largest single skill file shipped to a node, and the cap on all shipped files together. -/
 def remoteSkillMaxBytes : Nat := 64 * 1024
-def remoteSkillTotalBytes : Nat := 256 * 1024
+def remoteSkillTotalBytes : Nat := 1024 * 1024
+def remoteSkillMaxCompanionDepth : Nat := 8
+
+/-- Relative path under `<skillDir>/<relPath>` safe for single-quoted POSIX shell expansion:
+    each `/` segment is non-empty, not `.` or `..`, does not start with `.` or `-`, and uses only
+    `[A-Za-z0-9._-]`. -/
+def remoteCompanionRelValid (relPath : String) : Bool :=
+  let segs := relPath.splitOn "/"
+  !relPath.isEmpty && !relPath.startsWith "/" && !relPath.endsWith "/" &&
+    segs.length ≤ remoteSkillMaxCompanionDepth &&
+    segs.all fun seg =>
+      !seg.isEmpty && seg != "." && seg != ".." &&
+        !seg.startsWith "." && !seg.startsWith "-" &&
+        nameCharsValid seg
+
+/-- Reject credential-like filenames from ever shipping inside a skill bundle. -/
+def isSecretSkillRelPath (relPath : String) : Bool := Id.run do
+  let norm := relPath.toLower
+  let parts := (norm.splitOn "/").filter (!·.isEmpty)
+  let name := parts.getLast?.getD norm
+  if parts.any (fun p => p == ".git" || p == ".ssh" || p == ".aws" || p == ".codex" || p == ".claude" || p == ".env" || p.startsWith ".env.") then
+    return true
+  return name == ".env" || name.startsWith ".env." || name.endsWith ".pem" || name.endsWith ".key" ||
+    name == "id_rsa" || name.startsWith "id_rsa." || name.startsWith "id_ed25519" ||
+    ((name.splitOn "credentials").length > 1) || name == "auth.json" || name == "secrets" ||
+    name == "secrets.yaml" || name == "secrets.yml" || name == "secrets.json" ||
+    name.endsWith ".p12" || name.endsWith ".pfx"
+
+/-- Recursively collect safe regular UTF-8 companion files (`references/**`, etc.) under `curDir`,
+    sorted deterministically by relative path and skipping hidden entries, symlinks, binaries, and
+    files larger than `remoteSkillMaxBytes`. -/
+partial def collectRemoteCompanionFiles
+    (curDir : System.FilePath)
+    (relPrefix : String := "")
+    (depth : Nat := 0) : IO (Array (String × String)) := do
+  if depth ≥ remoteSkillMaxCompanionDepth then
+    return #[]
+  let dirSt ← statPath curDir.toString
+  if !dirSt.exists_ || !dirSt.isDir || dirSt.isSymlink then
+    return #[]
+  let entries ← try curDir.readDir catch _ => pure #[]
+  let sorted := entries.qsort (fun a b => a.fileName < b.fileName)
+  let mut out : Array (String × String) := #[]
+  for e in sorted do
+    let fname := e.fileName
+    if !fname.isEmpty && !fname.startsWith "." && !fname.startsWith "-" && nameCharsValid fname then
+      let rel := if relPrefix.isEmpty then fname else s!"{relPrefix}/{fname}"
+      if rel != "SKILL.md" && remoteCompanionRelValid rel && !isSecretSkillRelPath rel then
+        let st ← statPath e.path.toString
+        if st.exists_ && !st.isSymlink then
+          if st.isDir then
+            let sub ← collectRemoteCompanionFiles e.path rel (depth + 1)
+            out := out ++ sub
+          else if st.isReg then
+            let idSt ← statIdentity e.path.toString
+            if idSt.exists_ && idSt.size.toNat > 0 && idSt.size.toNat ≤ remoteSkillMaxBytes then
+              if let .ok bytes ← (IO.FS.readBinFile e.path).toBaseIO then
+                if bytes.size > 0 && bytes.size ≤ remoteSkillMaxBytes && !(bytes.toList.any (· == 0)) then
+                  if let some txt := String.fromUTF8? bytes then
+                    out := out.push (rel, txt)
+  return out
+
+private def parentRelDir (target relPath : String) : String :=
+  let segs := (relPath.splitOn "/").dropLast
+  if segs.isEmpty then target
+  else s!"{target}/{String.intercalate "/" segs}"
+
+/-- Shell that writes each `(name, relPath, content)` into the harness's native skill directory of
+    the current directory. Each file is checked independently so missing `references/**` files are
+    populated even when `SKILL.md` already exists, and a failure never stops the turn.
+    `name` must satisfy `remoteInstallable` and `relPath` must satisfy `remoteCompanionRelValid`;
+    content travels as base64. -/
+def installBundleScript (harness : String) (files : Array (String × String × String)) : String :=
+  let dir := nativeDirectory harness
+  String.join (files.toList.filterMap fun (name, relPath, content) =>
+    if !remoteInstallable name || !remoteCompanionRelValid relPath then none
+    else
+      let target := s!"{dir}/{name}"
+      let dst := s!"{target}/{relPath}"
+      let parentDir := parentRelDir target relPath
+      some s!"[ -e '{dst}' ] || \{ mkdir -p '{parentDir}' && printf %s '{base64Encode content.toUTF8}' | base64 -d > '{dst}'; } 2>/dev/null || true; ")
 
 /-- Shell that writes each `(name, SKILL.md)` into the harness's native skill directory of
     the current directory. An existing file is left alone, and a failure never stops the
     turn. Names must already satisfy `remoteInstallable`; content travels as base64. -/
 def installScript (harness : String) (files : Array (String × String)) : String :=
-  let dir := nativeDirectory harness
-  String.join (files.toList.map fun (name, content) =>
-    let target := s!"{dir}/{name}"
-    s!"[ -e '{target}/SKILL.md' ] || \{ mkdir -p '{target}' && printf %s '{base64Encode content.toUTF8}' | base64 -d > '{target}/SKILL.md'; } 2>/dev/null || true; ")
+  installBundleScript harness (files.map fun (name, content) => (name, "SKILL.md", content))
 
 /-- The delivered skills (`buildDeliveryPlan`: Library plus project context, context wins)
     as an install prelude for a turn that runs on a node, where the Library is not mounted.
-    Skills whose names the installer cannot quote safely, or that exceed the size caps, are skipped. -/
+    Ships `SKILL.md` plus companion files (`references/**`, etc.) inside each skill directory.
+    Skills or companion files whose paths the installer cannot quote safely, or that exceed the
+    size caps, are skipped. -/
 def remoteInstallPrelude (workingDir : String) (project? : Option String) (harness : String)
     (storeRoot ownerUserId bootstrapAdminId : String) : IO String := do
   let libRoot := System.FilePath.mk (← resolveLibraryRootFor ownerUserId workingDir storeRoot bootstrapAdminId)
@@ -416,16 +495,23 @@ def remoteInstallPrelude (workingDir : String) (project? : Option String) (harne
   if let some slug := project?.bind (fun s => contextProjectKey ownerUserId bootstrapAdminId s.trimAscii.toString) then
     for (name, _, path) in (← scanSkillDir (projectSkillDirectory workingDir storeRoot ownerUserId bootstrapAdminId slug) false) do
       found := (found.filter (·.1 != name)).push (name, path)
-  let mut files : Array (String × String) := #[]
+  let mut bundleFiles : Array (String × String × String) := #[]
   let mut total : Nat := 0
   for (name, path) in found do
     if remoteInstallable name then
       let content ← try IO.FS.readFile path catch _ => pure ""
       let size := content.utf8ByteSize
       if size > 0 && size ≤ remoteSkillMaxBytes && total + size ≤ remoteSkillTotalBytes then
-        files := files.push (name, content)
+        bundleFiles := bundleFiles.push (name, "SKILL.md", content)
         total := total + size
-  return installScript (if harness == "claude" then "claudecode" else harness) files
+        if let some skillDir := (System.FilePath.mk path).parent then
+          let companions ← collectRemoteCompanionFiles skillDir
+          for (relPath, compContent) in companions do
+            let compSize := compContent.utf8ByteSize
+            if compSize > 0 && compSize ≤ remoteSkillMaxBytes && total + compSize ≤ remoteSkillTotalBytes then
+              bundleFiles := bundleFiles.push (name, relPath, compContent)
+              total := total + compSize
+  return installBundleScript (if harness == "claude" then "claudecode" else harness) bundleFiles
 
 def selectDelivered (workingDir : String) (project? : Option String) (harness prompt : String)
     (storeRoot ownerUserId bootstrapAdminId : String) : IO (Except String (Array SelectedSkill)) := do
