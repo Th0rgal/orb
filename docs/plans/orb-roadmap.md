@@ -211,6 +211,27 @@ Not on this roadmap: a macOS backend for LeanUI.
 | R9 | Controller closes out instead of dispatching: `start_mission` and the board make "ready node without worker" visible to the controller | — | ready | A controller tick lists ready nodes from the board |
 | R10 | Rust → Lean parity queue (`rust-lean-parity-audit.md`), RUN-07 first; no new audit documents | — | verify | Ranked queue with each item `done` or a node here |
 
+### B. A board per mission
+
+Today a board belongs to a project, so two roadmaps that keep a board cannot
+share a project. The board moves to the mission: one text, written only by
+that mission, travelling with it when it changes project. Creating projects,
+moving missions and archiving stay with the operator; this group is only the
+code.
+
+| Id | Node | Needs | State | Done when |
+| --- | --- | --- | --- | --- |
+| B1 | Spec `docs/specs/mission-board.md`: one text per mission, 16 KB, written only by that mission, readable by its owner and by the missions it started; a project page lists the boards of its missions; a mission keeps its board when it changes project; the existing project boards (`orb`, `evm-fast`) migrate to their controller mission; event orders that must never lose a board | — | ready | Spec merged |
+| B2 | Core: storage, `read_mission_board` / `write_mission_board`, REST route, migration; the project board tools keep working for one release as aliases onto the controller mission's board; tenant isolation tests | B1 | blocked | A member cannot read another user's board; both existing boards survive the migration byte for byte |
+| B3 | Desktop: the mission page shows its board; the project page shows the boards of its missions | B2 | blocked | Browser test: write, move the mission to another project, board still there |
+| B4 | iOS and Android, shipped together with version bumps | B2 | blocked | Unit tests on both, same fixtures in `shared/orb-spec/` |
+| B5 | Moving a mission moves its whole family: `POST /api/control/missions/:id/project` relabels only the mission on prod, against `docs/ui/mission-moves.md` (found 15 Nov: Pareto's 154 workers stayed behind) | — | ready | Moving a root with running workers moves every descendant in one call; test replays it |
+| B6 | Skills `controllers-policy`, `project-manager` and `docs/AGENT_CONTROL_PLANE.md` describe the mission board | B2 | blocked | No mention of a project-owned board |
+
+B2 is a milestone (authorization and a data migration): independent review
+before merge. Do not move the Orb master or change any project; the operator
+does that once B2 and B3 are deployed.
+
 ### O. Operations
 
 | Id | Node | Needs | State | Done when |
