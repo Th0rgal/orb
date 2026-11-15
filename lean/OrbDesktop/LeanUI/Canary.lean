@@ -230,7 +230,7 @@ def buildCanaryWidgetTree (theme : Theme) (availW availH : SubPx) (scrollOffsetS
 
   -- 3b. DiffViewer: Unified diff viewer with line-number gutters and `+add`/`-del` badges
   let diffSpec : Widgets.DiffFileSpec := {
-    filePath := "lean/LeanUI/Scene.lean"
+    filePath := "lean/OrbDesktop/LeanUI/Scene.lean"
     mode := .unified
     collapsed := false
     additions := 1
