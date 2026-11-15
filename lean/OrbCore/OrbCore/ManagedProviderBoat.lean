@@ -127,6 +127,7 @@ def boat (transport : Transport) (sleep : UInt32 → IO Unit := fun ms => do IO.
   isReady := fun s => #["ready", "idle", "running", "busy"].contains s
   isStopped := fun s => #["archived", "stopped", "deleted", "error", "archiving"].contains s
   quoteCents := boatQuoteCents
+  supportsStopResume := pure true
   spawn := boatCreate transport "/sandboxes"
   get := fun id => do
     match ← call transport { method := "GET", path := sandboxPath id } with

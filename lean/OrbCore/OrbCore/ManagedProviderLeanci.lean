@@ -4,10 +4,10 @@
   `POST /vms` (202, `{vm}`), `GET /vms`, `GET|DELETE /vms/:id`, `POST /vms/:id/exec`
   (argv array, `as_root`), `PUT /vms/:id/files` (`content_b64`), `POST /vms/:id/snapshots`,
   `GET /vms/snapshots`, `DELETE /vms/snapshots/:id`, `GET /vms/capabilities`.
-  No stop/resume exists at the provider. Live TTL extension (`POST /vms/:id/extend`,
-  lfglabs-dev/lean.ci#35) is discovered: it is used only when `GET /vms/capabilities`
-  carries `lifecycle.extend: true` (`leanciSupportsExtend`). A deployment without the
-  `lifecycle` block behaves as before: no extension.
+  Live TTL extension (`POST /vms/:id/extend`, lfglabs-dev/lean.ci#35) and park/resume
+  (`POST /vms/:id/stop`, `POST /vms/:id/resume`, lfglabs-dev/lean.ci#38) are
+  discovered from `GET /vms/capabilities` `lifecycle` (`leanciSupportsExtend`,
+  `leanciSupportsStopResume`). A deployment without those flags behaves as before.
 -/
 import OrbCore.ManagedProvider
 import OrbBin.PosixExt
@@ -177,6 +177,35 @@ def leanciCapabilities (transport : Transport) (cache : LeanciCapabilityCache)
 def leanciSupportsExtend (capabilities : JVal) : Bool :=
   ((capabilities.field? "lifecycle").bind (·.fieldBool? "extend")) == some true
 
+/-- Whether this lean.ci deployment parks a VM with its rootfs kept and resumes it
+    in place: `lifecycle.stop_keeps_disk` and `lifecycle.resume` of
+    `GET /vms/capabilities`. Absent block (a deployment before lean.ci#38) = no. -/
+def leanciSupportsStopResume (capabilities : JVal) : Bool :=
+  let lifecycle := capabilities.field? "lifecycle"
+  lifecycle.bind (·.fieldBool? "stop_keeps_disk") == some true &&
+    lifecycle.bind (·.fieldBool? "resume") == some true
+
+/-- `POST /vms/:id/stop {"keep_disk": true}` transitions a VM to `parked`. -/
+def leanciStopRequest (id : String) : Request := {
+  method := "POST"
+  path := vmPath id ++ "/stop"
+  body := some (.obj #[("keep_disk", .bool true)])
+}
+
+/-- `POST /vms/:id/resume {"ttl_secs": N}` boots a parked VM in place under the same ID. -/
+def leanciResumeRequest (id : String) (spec : SpawnSpec) : Request := {
+  method := "POST"
+  path := vmPath id ++ "/resume"
+  body := some (.obj #[("ttl_secs", .nat spec.ttlSeconds.toNat)])
+  idempotencyKey := spec.idempotencyKey
+  timeoutMs := 120000
+}
+
+private def leanciResumeFailed (body : JVal) : Bool :=
+  let vm := (body.field? "vm").getD body
+  (vm.fieldStr? "status").getD "" == "parked" &&
+    ((vm.fieldStr? "error").getD "").startsWith "resume failed:"
+
 /-- `POST /vms/:id/extend {"ttl_secs": N}`, N seconds from now (60..=86400). The
     provider never shortens (`extended: false` with 200 when already covered) and
     caps total lifetime itself. No `Idempotency-Key`: a retry carries a new body. -/
@@ -194,13 +223,19 @@ def leanci (transport : Transport) (cache : LeanciCapabilityCache := leanciCapab
   name := "leanci"
   readinessDeadlineSecs := 480
   isReady := fun s => s == "running"
-  isStopped := fun s => #["stopped", "failed", "reaped", "deleted", "error"].contains s
+  isStopped := fun s => #["stopped", "parked", "failed", "reaped", "deleted", "error"].contains s
   quoteCents := leanciQuoteCents
   supportsExtend := do
     match ← leanciCapabilities transport cache nowMs
         { name := "", size := "small", ttlSeconds := 300, idempotencyKey := "" } with
     | .ok body => return leanciSupportsExtend body
     | .error _ => return false
+  supportsStopResume := do
+    match ← leanciCapabilities transport cache nowMs
+        { name := "", size := "small", ttlSeconds := 300, idempotencyKey := "" } with
+    | .ok body => return leanciSupportsStopResume body
+    | .error _ => return false
+  resumeInPlace := true
   availability := fun spec => do
     match ← leanciCapabilities transport cache nowMs spec with
     | .error e => return .error e
@@ -249,8 +284,18 @@ def leanci (transport : Transport) (cache : LeanciCapabilityCache := leanciCapab
     match ← callUnit transport { method := "DELETE", path := vmPath id } with
     | .error e => if e.status == 404 then return .ok () else return .error e
     | .ok () => return .ok ()
-  stop := fun _ => unsupported
-  resume := fun _ _ => unsupported
+  stop := fun id => do
+    match ← callUnit transport (leanciStopRequest id) with
+    | .error e => if e.status == 404 || e.status == 409 then return .ok () else return .error e
+    | .ok () => return .ok ()
+  resume := fun id spec => do
+    if spec.idempotencyKey.isEmpty then return .error { code := "provider_idempotency_key_required" }
+    if spec.ttlSeconds < 60 || spec.ttlSeconds > 86400 then return .error { code := "provider_invalid_ttl" }
+    match ← call transport (leanciResumeRequest id spec) with
+    | .error e => return .error e
+    | .ok reply =>
+      if leanciResumeFailed reply then return .error { code := "provider_resume_failed" }
+      return leanciMachine reply
   fork := fun _ _ => unsupported
   extend := fun id ttlSeconds => callUnit transport (leanciExtendRequest id ttlSeconds)
   saveSnapshot := fun id name => do

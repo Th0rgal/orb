@@ -322,6 +322,82 @@ def run (root : String) : IO Unit := do
     let .ok charges ← execParamQuery mc.db "SELECT COUNT(*) FROM managed_cost_reservations;" #[]
       | throw (IO.userError "charges query failed")
     check (charges.size > 1 && cell charges[1]! 0 == "3") "replays reserve no duplicate cost"
+
+    -- In-place resume (lean.ci): retains the same provider ID, advances boot epoch on
+    -- authenticated poll, and on bootstrap timeout re-parks (stops) instead of destroying
+    -- the parked rootfs disk.
+    let .ok () ← ManagedProviderSettings.setEnabled mc "leanci" true "2026-11-15T00:00:00Z"
+      | throw (IO.userError "enable leanci failed")
+    let leanciId := "leanci-park-resume-id"
+    let leanciRemoteId := "aaaaaaaa-0000-4000-8000-000000000099"
+    let .ok _ ← provisionManagedMachine mc fleet {
+      id := leanciId, sandboxName := "orb-managed-leanci-park", provider := "leanci",
+      size := "small", ttlMinutes := 5, spentCents := 0, deletableAtSec := 1000
+    } 1000 | throw (IO.userError "leanci reserve failed")
+    let .ok () ← bindManagedProviderId mc leanciId leanciRemoteId 1 | throw (IO.userError "leanci bind failed")
+    let .ok _ ← recordAuthenticatedManagedPoll mc leanciId 1 1001 | throw (IO.userError "leanci initial poll failed")
+    let leanciStops ← IO.mkRef (#[] : Array String)
+    let leanciDestroys ← IO.mkRef (#[] : Array String)
+    let leanciResumes ← IO.mkRef (#[] : Array (String × UInt64 × String))
+    let leanciShouldPoll ← IO.mkRef true
+    let leanciClock ← IO.mkRef (0 : UInt64)
+    let leanciBaseNow ← coreEpochSec
+    let leanciRuntime : OrbCore.ManagedProvisioning.Runtime := {
+      nowEpoch := do return leanciBaseNow + (← leanciClock.get) / 1000
+      monotonicMs := leanciClock.get
+      sleepMs := fun ms => leanciClock.modify (· + ms.toUInt64)
+    }
+    let leanciTemplate := OrbCore.ManagedProvisioningTests.mockPolicyProvider mc "leanci"
+    let leanciProvider : OrbCore.ManagedProvider.Provider := { leanciTemplate with
+      readinessDeadlineSecs := 60
+      isReady := fun s => s == "running"
+      isStopped := fun s => s == "parked" || s == "stopped"
+      quoteCents := OrbCore.ManagedProvider.leanciQuoteCents
+      supportsStopResume := pure true
+      resumeInPlace := true
+      stop := fun id => do leanciStops.modify (·.push id); return .ok ()
+      destroy := fun id => do leanciDestroys.modify (·.push id); return .ok ()
+      resume := fun id spec => do
+        leanciResumes.modify (·.push (id, spec.ttlSeconds, spec.idempotencyKey))
+        return .ok { providerId := id, name := spec.name, state := "running" }
+      get := fun id => pure (.ok { providerId := id, state := "running" })
+      exec := fun providerId command timeout => do
+        if !(← leanciShouldPoll.get) then return .ok (.obj #[("exitCode", .nat 0)])
+        leanciTemplate.exec providerId command timeout
+    }
+    let .ok _ ← applyVmLifecycle mc leanciId {
+      opCode := VmOp.encode .stop, ownerLive := 0, idleElapsed := 0,
+      presentedBootEpoch := 1, nowEpoch := 1500
+    } | throw (IO.userError "leanci stop failed")
+    let cfg : OrbCore.ManagedProvisioning.BootstrapConfig := {
+      coreUrl := "https://core.example", script := "#!/bin/sh\nexit 0\n"
+    }
+    let .ok leanciResumed ← OrbCore.ManagedProvisioning.resumeManagedWorker mc fleet leanciId
+        "leanci-resume-ok" 10 leanciProvider cfg leanciRuntime
+      | throw (IO.userError "leanci in-place resume failed")
+    check (leanciResumed.id == leanciId && leanciResumed.providerId == leanciRemoteId &&
+      leanciResumed.nodeBootEpoch == 2 && leanciResumed.status == "ready" &&
+      (← leanciResumes.get) == #[(leanciRemoteId, 600, "leanci-resume-ok")] &&
+      (← leanciDestroys.get).isEmpty)
+      "in-place resume accepts unchanged provider ID and commits boot epoch 2"
+    -- Now stop again and simulate bootstrap timeout on resume: must call stop, NOT destroy.
+    let .ok _ ← applyVmLifecycle mc leanciId {
+      opCode := VmOp.encode .stop, ownerLive := 0, idleElapsed := 0,
+      presentedBootEpoch := 2, nowEpoch := 2100
+    } | throw (IO.userError "leanci second stop failed")
+    leanciShouldPoll.set false
+    leanciClock.set 0
+    let timedOut ← OrbCore.ManagedProvisioning.resumeManagedWorker mc fleet leanciId
+      "leanci-resume-timeout" 10 leanciProvider cfg leanciRuntime
+    check (!timedOut.isOk && (← leanciDestroys.get).isEmpty &&
+      (← leanciStops.get) == #[leanciRemoteId])
+      "in-place resume timeout re-parks the VM via stop and never destroys the parked disk"
+    let some (afterTimeout, afterTimeoutSlice) ← getManagedMachine? mc leanciId
+      | throw (IO.userError "leanci after timeout missing")
+    check (afterTimeout.status == "stopped" && afterTimeout.providerId == leanciRemoteId &&
+      afterTimeout.nodeBootEpoch == 2 && afterTimeoutSlice.phaseCode == 2 &&
+      afterTimeoutSlice.activeComputeEligible == 0)
+      "in-place resume rollback preserves parked machine state and provider ID for a later resume"
   finally
     closeManagedComputeStore mc
 

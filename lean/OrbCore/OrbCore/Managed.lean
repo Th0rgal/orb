@@ -1584,7 +1584,7 @@ def observeProviderPayload (provider machineId : String) (httpStatus : Nat) (pay
       if rawState == "running" || rawState == "ready" || rawState == "online" || rawState == "connected" ||
           (prov == "boat" && (rawState == "idle" || rawState == "busy")) then
         ("ready", false)
-      else if rawState == "stopped" || rawState == "halted" || rawState == "off" ||
+      else if rawState == "stopped" || rawState == "parked" || rawState == "halted" || rawState == "off" ||
           rawState == "exited" || rawState == "stopped_in_place" || rawState == "disconnected" ||
           (prov == "boat" && (rawState == "archived" || rawState == "archiving" || rawState == "error")) then
         ("stopped", false)
