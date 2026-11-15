@@ -77,8 +77,13 @@ private def boatStop (transport : Transport) (sleep : UInt32 → IO Unit) (id : 
       if e.code != "stop_failed" || attempt == 4 then return .error e
   return .error { code := "provider_stop_retry_exhausted" }
 
+/-- Boat refuses a sandbox DELETE (409 `delete_confirmation_required`) unless
+    this header repeats the exact sandbox ID, including for one already gone. -/
+def boatDeleteConfirmHeader : String := "X-Ascii-Confirm-Delete"
+
 private def boatDestroy (transport : Transport) (id : String) : IO (Result Unit) := do
-  match ← callUnit transport { method := "DELETE", path := sandboxPath id } with
+  match ← callUnit transport {
+      method := "DELETE", path := sandboxPath id, headers := #[(boatDeleteConfirmHeader, id)] } with
   | .ok _ => return .ok ()
   | .error e =>
     if e.status == 404 then return .ok ()

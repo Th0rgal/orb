@@ -44,6 +44,8 @@ structure Request where
   path : String
   body : Option JVal := none
   idempotencyKey : String := ""
+  /-- Extra request headers. Never put a credential here. -/
+  headers : Array (String × String) := #[]
   timeoutMs : UInt32 := 25000
   deriving Inhabited
 
@@ -158,8 +160,8 @@ def transportDiagnostic (apiKey cause : String) : String :=
 
 def httpTransport (baseUrl apiKey : String) : Transport := fun req => do
   if apiKey.trimAscii.toString.isEmpty then return .error { code := "provider_credential_missing" }
-  let headers := if req.idempotencyKey.isEmpty then #[]
-    else #[("Idempotency-Key", req.idempotencyKey)]
+  let headers := req.headers ++ (if req.idempotencyKey.isEmpty then #[]
+    else #[("Idempotency-Key", req.idempotencyKey)])
   match ← sendJsonRequest req.method (baseUrl ++ req.path) (some apiKey) req.body headers req.timeoutMs with
   | .error cause =>
     IO.eprintln ("[managed-provider] transport failed: " ++ transportDiagnostic apiKey cause)
