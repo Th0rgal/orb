@@ -15,9 +15,9 @@ export function ProjectBoardSection(p: { slug: string; selectedMission?: Mission
   const [busy, setBusy] = createSignal(false);
   let attemptedController: string | null = null;
   const [error, setError] = createSignal<string | null>(null);
-  let generation = 0, boardRequest = 0, missionRequest = 0;
+  let generation = 0, boardRequest = 0, missionRequest = 0, disposed = false;
   const valid = (gen: number) => gen === generation;
-  onCleanup(() => { generation++; });
+  onCleanup(() => { disposed = true; generation++; });
 
   const refreshBoard = async (gen: number) => {
     const request = ++boardRequest;
@@ -64,9 +64,8 @@ export function ProjectBoardSection(p: { slug: string; selectedMission?: Mission
     } else if (id && hint?.id === id) void refreshController(id, generation, true);
   }, { defer: true }));
   const candidate = () => p.selectedMission?.project === p.slug ? p.selectedMission : null;
-  const assign = async (id: string | null, replacing?: string) => {
-    if (busy() || (sending() && replacing !== controllerId())) return;
-    if (replacing && replacing !== controllerId()) return;
+  const assign = async (id: string | null) => {
+    if (busy() || sending()) return;
     const gen = generation;
     attemptedController = id;
     // A board read started before this write cannot restore the previous controller.
@@ -92,7 +91,16 @@ export function ProjectBoardSection(p: { slug: string; selectedMission?: Mission
       <Show when={error()}><p class="project-board-error" role="alert">{error()} <button class="s-btn" disabled={busy()} onClick={() => void assign(attemptedController)}>Retry</button></p></Show>
       <SteerComposer missionId={controllerId()} disabled={busy() || isClientPlacement(controller())}
         hint={isClientPlacement(controller()) ? "Open this mission on the computer that started it to send a message." : undefined}
-        onBusyChange={setSending} onReplacement={(id, previousId) => assign(id, previousId)} />
+        onBusyChange={setSending} onReplacement={((slug, version) => async (id: string, previousId: string) => {
+          // Complete a successful remote handoff even after settings unmounts.
+          const current = await getProject(slug);
+          if (version !== connectionVersion() || current?.controller_mission_id !== previousId) return;
+          if (!await setProjectControllerMission(slug, id)) return;
+          if (!disposed && slug === p.slug && version === connectionVersion()) {
+            setControllerId(id); setController(null);
+            await Promise.all([refreshController(id, generation), refreshBoard(generation)]);
+          }
+        })(p.slug, connectionVersion())} />
     </SettingsCard>
     <Show when={loading() || board()}><SettingsCard title="Board">
       <div class="project-board" aria-busy={loading()}>

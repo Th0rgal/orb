@@ -140,3 +140,32 @@ it("adopts a controller changed by another client on recovery and respects a lat
   setHint({ id: null }); await ui.findByText("No controller");
   expect((ui.getByRole("textbox", { name: "Message controller" }) as HTMLTextAreaElement).disabled).toBe(true);
 });
+
+it("completes remote replacement handoff after the composer unmounts", async () => {
+  let finish!: (receipt: api.MessageReceipt) => void;
+  const send = vi.spyOn(api, "sendMissionMessage").mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  const replace = vi.fn().mockResolvedValue(undefined);
+  const ui = render(() => <SteerComposer missionId="m1" onReplacement={replace} />);
+  fireEvent.input(ui.getByRole("textbox", { name: "Message controller" }), { target: { value: "Continue" } });
+  fireEvent.click(ui.getByRole("button", { name: "Send message" }));
+  await waitFor(() => expect(send).toHaveBeenCalledOnce());
+  ui.unmount();
+  finish({ id: "receipt", queued: false, replacement: { ...mission, id: "replacement" } });
+  await waitFor(() => expect(replace).toHaveBeenCalledWith("replacement", "m1"));
+});
+it.each(["m1", "new-controller"])("fences an unmounted controller handoff against %s", async currentId => {
+  vi.mocked(api.getProject).mockResolvedValue({ ...project, controller_mission_id: "m1" });
+  let finish!: (receipt: api.MessageReceipt) => void;
+  const send = vi.spyOn(api, "sendMissionMessage").mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  const ui = render(() => <ProjectBoardSection slug="notes" onOpenMission={() => {}} />);
+  await ui.findByText("running");
+  fireEvent.input(ui.getByRole("textbox", { name: "Message controller" }), { target: { value: "Continue" } });
+  fireEvent.click(ui.getByRole("button", { name: "Send message" }));
+  await waitFor(() => expect(send).toHaveBeenCalledOnce());
+  ui.unmount();
+  vi.mocked(api.getProject).mockResolvedValue({ ...project, controller_mission_id: currentId });
+  finish({ id: "receipt", queued: false, replacement: { ...mission, id: "replacement" } });
+  await waitFor(() => expect(api.getProject).toHaveBeenCalledTimes(2));
+  if (currentId === "m1") await waitFor(() => expect(api.setProjectControllerMission).toHaveBeenCalledWith("notes", "replacement"));
+  else expect(api.setProjectControllerMission).not.toHaveBeenCalled();
+});

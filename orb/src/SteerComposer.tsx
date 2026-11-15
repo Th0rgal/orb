@@ -14,16 +14,16 @@ export function SteerComposer(p: { missionId: string | null; disabled?: boolean;
     const missionId = p.missionId, body = text().trim();
     if (!missionId || !body || busy() || p.disabled) return;
     if (attempt?.missionId !== missionId || attempt.text !== body) attempt = { missionId, text: body, id: crypto.randomUUID() };
-    const version = connectionVersion();
+    const version = connectionVersion(), onReplacement = p.onReplacement;
     setBusy(true); p.onBusyChange?.(true); setError(null);
     try {
       const mission = await getMission(missionId, { fresh: true, includeHistory: false });
       if (disposed || version !== connectionVersion() || p.missionId !== missionId) throw new Error("Controller changed. Your draft is kept.");
       if (isClientPlacement(mission)) throw new Error("Open this mission on the computer that started it to send your message. Your draft is kept.");
       const receipt = await sendMissionMessage(missionId, body, undefined, attempt.id, mission);
+      if (receipt.replacement && version === connectionVersion()) await onReplacement(receipt.replacement.id, missionId);
       if (disposed) return;
       setText(""); attempt = undefined;
-      if (receipt.replacement) await p.onReplacement(receipt.replacement.id, missionId);
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
     finally { setBusy(false); if (!disposed) p.onBusyChange?.(false); }
   };
