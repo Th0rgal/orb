@@ -2,20 +2,21 @@ import { Popover } from "./Popover";
 import { ChevronDown } from "./icons";
 import { For, Show, createMemo, createSignal, createUniqueId } from "solid-js";
 
-export function RoutingPicker(p: { label: string; value: string; options: { id: string; name: string; detail?: string }[]; onInput: (value: string) => void }) {
+export function RoutingPicker(p: { label: string; value: string; displayValue?: string; options: { id: string; name: string; detail?: string }[]; onInput: (value: string) => void }) {
   const id = createUniqueId();
   let host!: HTMLDivElement;
   const show = () => setOpen(true);
   const [open, setOpen] = createSignal(false);
   const [active, setActive] = createSignal(-1);
   const uniqueOptions = createMemo(() => [...new Map(p.options.map(o => [o.id, o])).values()]);
-  const matches = createMemo(() => uniqueOptions().filter(o => `${o.name} ${o.id}`.toLowerCase().includes(p.value.toLowerCase())).slice(0, 30));
-  const choose = (value: string) => { p.onInput(value); setOpen(false); setActive(-1); };
+  const [editing, setEditing] = createSignal(false);
+  const matches = createMemo(() => uniqueOptions().filter(o => !editing() || `${o.name} ${o.id}`.toLowerCase().includes(p.value.toLowerCase())).slice(0, 30));
+  const choose = (value: string) => { p.onInput(value); setEditing(false); setOpen(false); setActive(-1); };
   return <div class="routing-picker" ref={host}>
     <input class="s-input" role="combobox" autocapitalize="off" autocorrect="off" spellcheck={false} aria-label={p.label} aria-autocomplete="list" aria-expanded={open()} aria-controls={id}
-      aria-activedescendant={open() && active() >= 0 ? `${id}-${active()}` : undefined} value={p.value}
-      onFocus={() => { show(); setActive(-1); }} onBlur={() => setOpen(false)}
-      onInput={e => { p.onInput(e.currentTarget.value); show(); setActive(-1); }}
+      aria-activedescendant={open() && active() >= 0 ? `${id}-${active()}` : undefined} value={editing() ? p.value : (p.displayValue ?? p.value)}
+      onFocus={() => { show(); setActive(-1); }} onBlur={() => { setOpen(false); setEditing(false); }}
+      onInput={e => { const value = e.currentTarget.value; setEditing(true); p.onInput(value); show(); setActive(-1); }}
       onKeyDown={e => {
         if (e.isComposing) return;
         if (e.key === "Escape" && open()) { e.preventDefault(); e.stopPropagation(); setOpen(false); }

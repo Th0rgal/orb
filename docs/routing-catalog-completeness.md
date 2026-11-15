@@ -25,6 +25,28 @@ response should expose Carbon without a separate client model list.
 
 ## Certification
 
+### Custom-provider extension
+
+* Desktop, iOS and Android resolve an exact catalog id first. Otherwise a custom
+  provider accepts its raw id or its lowercase ASCII-alphanumeric name slug.
+  `custom:surplus`, `surplus` and `surplusintelligence` therefore resolve to the
+  same fixture named `Surplus Intelligence`. Unknown ids remain editable and
+  visible; display labels never replace persisted ids merely by rendering them.
+* Model pickers use that resolved provider's models, including `gpt-6-astra`.
+  Argon remains a Surplus model, not a replacement for Antigravity Carbon.
+* Admin catalog refresh performs authenticated server-side model discovery for
+  enabled custom providers with stored credentials. Append `/models` to the
+  configured base URL, preserving API prefixes and avoiding duplicate `/models`.
+* Persist only nonempty, deduplicated model ids and allowlisted metadata. Never
+  return the stored credential or upstream response diagnostics. Failed discovery
+  retains the last successful models; configured manual models remain available.
+
+The extension's HTTP contract checks the request path and bearer, discovery
+deduplication, manual-model preservation and secret exclusion. Desktop tests
+exercise all three aliases through the routing editor. These extension checks
+have green results; unlike the original regressions, a pre-fix red run has not
+yet been recorded. Native build acceptance remains separate from desktop checks.
+
 Regression oracle: `orb-core-test` (provider HTTP contracts, hermetic proxy
 transport), plus `python3 scripts/lint_kernel_calls.py` and shell syntax checks.
 Write regressions before implementation; retain red/green receipts in the PR.

@@ -111,6 +111,9 @@ beforeEach(() => {
       if (path === "/api/providers")
         return response({
           providers: [
+            { id: "custom:prov-1794582338-1", name: "Surplus Intelligence", models: [
+              { id: "gemini-4-argon", name: "Argon" }, { id: "gpt-6-astra", name: "gpt-6-astra" },
+            ] },
             {
               id: "anthropic",
               name: "Anthropic",
@@ -133,6 +136,16 @@ async function mount() {
   await screen.findByRole("button", { name: "Refresh", exact: true });
 }
 describe("Routing settings", () => {
+  it.each(["custom:prov-1794582338-1", "prov-1794582338-1", "surplusintelligence"])("labels and resolves custom alias %s", async alias => {
+    chains[0].entries = [{ provider_id: alias, model_id: "gemini-4-argon" }];
+    await mount();
+    fireEvent.click(screen.getByRole("button", { name: /Test chain/ }));
+    await waitFor(() => expect(screen.getByLabelText("Provider 1")).toHaveProperty("value", "Surplus Intelligence"));
+    fireEvent.focus(screen.getByLabelText("Model 1"));
+    expect(screen.getByRole("option", { name: /gpt-6-astra/ })).toBeTruthy();
+    fireEvent.pointerDown(screen.getByRole("option", { name: /gpt-6-astra/ }));
+    expect(screen.getByLabelText("Model 1")).toHaveProperty("value", "gpt-6-astra");
+  });
   it("keeps unknown IDs, input focus and edited order on save", async () => {
     await mount();
     fireEvent.click(

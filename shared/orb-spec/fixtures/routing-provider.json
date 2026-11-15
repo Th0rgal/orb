@@ -1,0 +1,14 @@
+{
+  "catalog": [
+    {"id":"custom:surplus","name":"Surplus Intelligence","models":[{"id":"gpt-6-astra","name":"gpt-6-astra"}]},
+    {"id":"custom:other","name":"Surplus","models":[]},
+    {"id":"openai","name":"OpenAI","models":[]}
+  ],
+  "cases": [
+    {"id":"custom:surplus","canonical":"custom:surplus","label":"Surplus Intelligence"},
+    {"id":"surplusintelligence","canonical":"custom:surplus","label":"Surplus Intelligence"},
+    {"id":"surplus","canonical":"custom:surplus","label":"Surplus Intelligence"},
+    {"id":"openai","canonical":"openai","label":"OpenAI"},
+    {"id":"missing","canonical":null,"label":"missing"}
+  ]
+}

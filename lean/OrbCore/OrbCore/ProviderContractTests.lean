@@ -1096,6 +1096,49 @@ private def providerUsageFetchersContract : IO (Array String) := do
     s!"antigravity tierless assist with project expected (none, false), got ({agyPlan2}, {agyNeedsVer2})"
 
   return (← failuresRef.get)
+private def customDiscoveryContract (app : CoreAppState) (jwt : String) (now : UInt64) : IO (Array String) := do
+  let mut failures := #[]
+  if customModelsUrl "https://custom.invalid/" != "https://custom.invalid/models" ||
+      customModelsUrl "https://custom.invalid/api/v1/" != "https://custom.invalid/api/v1/models" ||
+      customModelsUrl "https://custom.invalid/models/" != "https://custom.invalid/models" then
+    failures := failures.push "custom discovery must append models to the configured API base without inserting a version prefix"
+  let (fd, port) ← IO.ofExcept (← LeanSys.Posix.tcpListen "127.0.0.1" 0 8)
+  let stop ← IO.mkRef false
+  let authorized ← IO.mkRef false
+  let server ← IO.asTask (prio := .dedicated) do
+    while !(← stop.get) do
+      match ← LeanSys.Posix.tcpAcceptPoll fd 100 with
+      | .error _ => pure ()
+      | .ok client =>
+        let raw := String.fromUTF8! (← LeanSys.Posix.readStreamChunk client 8192)
+        authorized.set (raw.startsWith "GET /v1/models " && (raw.splitOn "Bearer discovery-fixture-key").length == 2)
+        let body := "{\"data\":[{\"id\":\"gpt-6-astra\"},{\"id\":\"gemini-4-argon\"},{\"id\":\"gpt-6-astra\"}]}"
+        discard <| LeanSys.Posix.writeAll client s!"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\nConnection: close\r\n\r\n{body}".toUTF8
+        discard <| LeanSys.Posix.closeFd client
+  try
+    let (_, created) ← postJson app jwt "/api/ai/providers"
+      (renderCompact (.obj #[("id", .str "prov-discovery"), ("name", .str "Surplus Intelligence"),
+        ("provider_type", .str "custom"), ("base_url", .str s!"http://127.0.0.1:{port}/v1/"),
+        ("api_key", .str "discovery-fixture-key"), ("enabled", .bool true),
+        ("custom_models", .arr #[.obj #[("id", .str "gemini-4-argon")], .obj #[("id", .str "manual-only")]])])) now
+    let _ := created
+    discard <| postJson app jwt "/api/providers/catalog/refresh" "{}" now
+    let disc ← getJson app jwt "/api/providers/discovery" now
+    let cat ← getJson app jwt "/api/providers?include_all=true&include_unverified=true" now
+    let p := (((cat.fieldArr? "providers").getD #[]).find? (fun p => p.fieldStr? "name" == some "Surplus Intelligence")).getD .null
+    let ids := ((p.fieldArr? "models").getD #[]).filterMap (·.fieldStr? "id")
+    if !(← authorized.get) || !(ids.contains "gpt-6-astra") || !(ids.contains "manual-only") || (ids.filter (· == "gemini-4-argon")).size != 1 then
+      failures := failures.push "custom discovery must authenticate GET /v1/models and merge/deduplicate manual and discovered models"
+    if ((renderCompact disc).splitOn "gpt-6-astra").length < 2 then
+      failures := failures.push "custom discovery must be present on discovery endpoint"
+    if ((renderCompact cat ++ renderCompact disc).splitOn "discovery-fixture-key").length != 1 then
+      failures := failures.push "custom discovery must never return API key"
+  finally
+    stop.set true
+    discard <| IO.wait server
+    discard <| LeanSys.Posix.closeFd fd
+  return failures
+
 private def routingCatalogContract (app : CoreAppState) (root jwt : String) (now : UInt64) : IO (Array String) := do
   let mut failures := #[]
   let previousCatalog ← IO.getEnv "SANDBOXED_CATALOG_DIR"
@@ -1310,6 +1353,7 @@ def run : IO Unit := do
       failures := failures ++ (← providerUsageFetchersContract)
       failures := failures ++ (← routingCatalogContract app root jwt now)
       failures := failures ++ (← routingChainProbeContract app jwt now)
+      failures := failures ++ (← customDiscoveryContract app jwt now)
       if !failures.isEmpty then
         throw (IO.userError ("provider response contract failures:\n" ++ String.intercalate "\n" failures.toList))
     finally

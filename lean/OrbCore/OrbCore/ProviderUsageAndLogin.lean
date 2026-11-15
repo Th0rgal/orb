@@ -2250,6 +2250,46 @@ private def clearSidecarAuthFileCooldown (providerId : String) (file : SidecarAu
   if ← tryEnable then return none
   return some (jsonErr 502 s!"CLIProxyAPI login for provider {providerId} was left disabled because re-enabling failed after retry; re-enable it in CLIProxyAPI")
 
+/-- OpenAI-compatible model-list URL; preserve explicit API prefixes. -/
+def customModelsUrl (baseUrl : String) : String := Id.run do
+  let mut base := baseUrl.trimAscii.toString
+  while base.endsWith "/" do base := (base.dropEnd 1).toString
+  if base.endsWith "/models" then return base
+  return base ++ "/models"
+
+/-- Refresh only server-owned custom credentials. Persist allowlisted model metadata,
+    retaining the last successful observation when an upstream is unavailable. -/
+def refreshCustomModelDiscovery (store : CoreStore) (workingDir : String) : IO Unit := do
+  let old ← readDataJsonFile workingDir store.rootDir "model-discovery.json"
+  let mut connections := (old.fieldArr? "connections").getD #[]
+  let stamp := formatEpochIso8601Utc (← nowEpoch)
+  for hp in (← loadHydratedProviders store workingDir) do
+    if hp.providerType == "custom" && hp.enabled && hp.hasApiKey && !hp.baseUrl.isEmpty then
+      let pid := s!"custom:{hp.id}"
+      let previous := (connections.find? (fun c => c.fieldStr? "provider_id" == some pid)).getD (.obj #[])
+      let mut observation := previous.setField "provider_id" (.str pid)
+        |>.setField "access_profile" (.str "api")
+        |>.setField "checked_at" (.str stamp)
+        |>.setField "status" (.str "failed")
+        |>.setField "source" (.str "stale_discovery")
+      match ← sendJsonRequest "GET" (customModelsUrl hp.baseUrl) (some hp.apiKey) none #[] 5000 1048576 with
+      | .ok (code, _, some doc) =>
+        if 200 ≤ code && code < 300 then
+          if let some rows := doc.fieldArr? "data" then
+            let mut models : Array JVal := #[]
+            for row in rows do
+              let id := ((row.fieldStr? "id").getD "").trimAscii.toString
+              if !id.isEmpty && !models.any (fun m => m.fieldStr? "id" == some id) then
+                models := models.push (.obj #[("id", .str id), ("name", .str id)])
+            observation := observation.setField "status" (.str "discovered")
+              |>.setField "source" (.str "discovery")
+              |>.setField "last_success" (.obj #[("observed_at", .str stamp),
+                ("completeness", .str "complete"), ("models", .arr models)])
+      | _ => pure ()
+      connections := (connections.filter (fun c => c.fieldStr? "provider_id" != some pid)).push observation
+  writeDataJsonFile workingDir store.rootDir "model-discovery.json"
+    (.obj #[("schema_version", JVal.nat 1), ("connections", .arr connections)])
+
 /-! ## Unified Dispatcher for AI Providers, Proxy Analytics, Model-Routing Health/Test & Catalog -/
 
 set_option maxHeartbeats 800000 in
@@ -2313,6 +2353,8 @@ def dispatchProviderAndAiRoute
     return some (jsonResp 200 (.obj #[("snapshots", .arr #[])]))
 
   if segs == ["api", "providers", "catalog", "refresh"] && method == "POST" then
+    if !effAdmin then return some (jsonErr 403 "admin_required")
+    refreshCustomModelDiscovery store workingDir
     let _ ← getCachedAntigravityModels hub true
     let nowSec ← nowEpoch
     hub.mu.atomically do

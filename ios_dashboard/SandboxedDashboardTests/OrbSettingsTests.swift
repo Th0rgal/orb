@@ -3,6 +3,16 @@ import XCTest
 
 @MainActor
 final class OrbSettingsTests: XCTestCase {
+    func testRoutingProviderAliasesMatchSharedFixture() throws {
+        let spec = try OrbSpec.json("fixtures/routing-provider.json")
+        let data = try JSONSerialization.data(withJSONObject: spec["catalog"] as Any)
+        let catalog = try JSONDecoder().decode([OrbJSON].self, from: data)
+        for c in try XCTUnwrap(spec["cases"] as? [[String: Any]]) {
+            let id = try XCTUnwrap(c["id"] as? String)
+            XCTAssertEqual(OrbRoutingProvider.find(catalog, id)?.selfID, c["canonical"] as? String)
+            XCTAssertEqual(OrbRoutingProvider.label(catalog, id), c["label"] as? String)
+        }
+    }
     func testInboxSummaryChoiceMatchesSharedSpec() throws {
         let spec = try OrbSpec.json("fixtures/inbox-summary-choice.json")
         for c in try XCTUnwrap(spec["cases"] as? [[String: Any]]) {
