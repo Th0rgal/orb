@@ -444,6 +444,44 @@ def answerProjectDecisionJVal (store : CoreStore) (scopedSlug decisionId answer 
     ("answered_at", .str nowIso)
   ])
 
+/-- Mission creation may introduce a project; nomination preserves existing project metadata. -/
+def nominateCreatedProjectController (store : CoreStore) (slug title missionId nowIso ownerId : String) : IO (Except String Unit) := do
+  if let .error e ← execParamQuery store.projectsDb
+      "INSERT OR IGNORE INTO projects(slug,id,name,title,created_at,updated_at) VALUES(?1,?1,?2,?2,?3,?3);" #[slug, title, nowIso] then
+    return .error e
+  if !ownerId.isEmpty then
+    if let .error e ← execParamQuery store.projectsDb
+        "INSERT OR IGNORE INTO project_owners(slug,owner_user_id,created_at) VALUES(?1,?2,?3);" #[slug, ownerId, nowIso] then
+      return .error e
+  match ← execParamQuery store.projectsDb
+      "UPDATE projects SET controller_mission_id=?2 WHERE slug=?1;" #[slug, missionId] with
+  | .error e => return .error e
+  | .ok _ => return .ok ()
+
+/-- Shared REST/MCP project board representation. -/
+def readProjectBoard (store : CoreStore) (slug : String) : IO JVal := do
+  let mut text := ""
+  let mut updated := ""
+  let mut author := ""
+  let mut controller := ""
+  if let .ok rows ← execParamQuery store.projectsDb
+      "SELECT COALESCE(b.text,''),COALESCE(b.updated_at,''),COALESCE(b.updated_by_mission_id,''),COALESCE(p.controller_mission_id,'') FROM projects p LEFT JOIN project_board b ON b.slug=p.slug WHERE p.slug=?1;" #[slug] then
+    if rows.size > 1 then
+      text := cell rows[1]! 0
+      updated := cell rows[1]! 1
+      author := cell rows[1]! 2
+      controller := cell rows[1]! 3
+  return .obj #[("text", .str text), ("updated_at", optStrJVal updated),
+    ("updated_by_mission_id", optStrJVal author), ("controller_mission_id", optStrJVal controller)]
+
+def writeProjectBoard (store : CoreStore) (slug text nowIso missionId : String) : IO (Except String Unit) := do
+  if text.toUTF8.size > 16384 then return .error "board_too_large"
+  match ← execParamQuery store.projectsDb
+      "INSERT INTO project_board(slug,text,updated_at,updated_by_mission_id) VALUES(?1,?2,?3,NULLIF(?4,'')) ON CONFLICT(slug) DO UPDATE SET text=excluded.text,updated_at=excluded.updated_at,updated_by_mission_id=excluded.updated_by_mission_id;"
+      #[slug, text, nowIso, missionId] with
+  | .error e => return .error e
+  | .ok _ => return .ok ()
+
 def buildProjectSituationJVal (store : CoreStore) (scopedSlug clientSlug : String) : IO JVal := do
   let mut pObj := JVal.obj #[("slug", .str clientSlug), ("title", .str clientSlug), ("status", .str "active")]
   if let .ok rows ← execParamQuery store.projectsDb
@@ -462,6 +500,9 @@ def buildProjectSituationJVal (store : CoreStore) (scopedSlug clientSlug : Strin
         ("updated_at", .str (cell r 6)),
         ("color", optStrJVal (cell r 7))
       ]
+  let board ← readProjectBoard store scopedSlug
+  pObj := pObj.setField "controller_mission_id" ((board.field? "controller_mission_id").getD .null)
+    |>.setField "board_updated_at" ((board.field? "updated_at").getD .null)
   let grant ← getProjectGrantJVal store scopedSlug clientSlug
   let steers ← listProjectSteersJVal store scopedSlug
   let decisions ← listProjectDecisionsJVal store scopedSlug
@@ -496,6 +537,8 @@ def buildProjectSituationJVal (store : CoreStore) (scopedSlug clientSlug : Strin
   return .obj #[
     ("slug", .str clientSlug),
     ("project", pObj),
+    ("controller_mission_id", (board.field? "controller_mission_id").getD .null),
+    ("board_updated_at", (board.field? "updated_at").getD .null),
     ("grant", grant),
     ("tracks", .arr tracks),
     ("tasks", .arr tasks),
@@ -1161,7 +1204,7 @@ def dispatchProjectAndControllerRoutes?
       let obj := (jv.fieldStr? "objective").getD ""
       let status := (jv.fieldStr? "status").getD "active"
       let color := (jv.fieldStr? "color").getD ""
-      let owner? := if isLegacyUnscoped then none else some callerUserId
+      let owner? := some (if isLegacyUnscoped then bootstrapAdminId else callerUserId)
       match ← upsertProjectRecord store scopedSlug rawSlug title obj status color nowIso owner? with
       | .ok rec => return some (jsonResp 200 rec)
       | .error e => return some (jsonErr 500 e)
@@ -1188,18 +1231,56 @@ def dispatchProjectAndControllerRoutes?
       | return some (jsonErr 400 "invalid_project")
     if !validProjectSlug clientSlug then
       return some (jsonErr 400 "invalid_project")
-    let scopedSlug :=
+    let mut scopedSlug :=
       if isLegacyUnscoped then clientSlug
       else (scopeProjectSlug callerUserId bootstrapAdminId clientSlug).getD clientSlug
     let tail := segs.drop 3
+    if tail == ["board"] || tail == ["controller-mission"] || (tail.isEmpty && method == "GET") then
+      if let .ok rows ← execParamQuery store.projectsDb
+          "SELECT p.slug FROM projects p LEFT JOIN project_owners o ON o.slug=p.slug WHERE (p.slug=?1 OR p.slug=?2) AND (?3='1' OR o.owner_user_id=?4) ORDER BY (p.slug=?1) DESC LIMIT 1;"
+          #[scopedSlug, clientSlug, if isAdmin then "1" else "0", callerUserId] then
+        if rows.size > 1 then scopedSlug := cell rows[1]! 0
     -- These endpoints read/write the shared host Hermes scheduler. Core-native
     -- tenant projects and missions do not delegate that operator authority.
     if !isAdmin && (tail[0]? == some "controller" || tail[0]? == some "crons") then
       return some (jsonErr 403 "admin_required")
 
+    if tail == ["board"] || tail == ["controller-mission"] then
+      let .ok rows ← execParamQuery store.projectsDb
+          "SELECT p.slug FROM projects p LEFT JOIN project_owners o ON o.slug=p.slug WHERE p.slug=?1 AND (?2='1' OR o.owner_user_id=?3);"
+          #[scopedSlug, if isAdmin then "1" else "0", callerUserId]
+        | return some (jsonErr 500 "db_error")
+      if rows.size ≤ 1 then return some (jsonErr 404 "not_found")
+      if method == "GET" && tail == ["board"] then
+        return some (jsonResp 200 (← readProjectBoard store scopedSlug))
+      if method == "PUT" then
+        let .ok jv := OrbBin.Json.parseBytes bodyBytes
+          | return some (jsonErr 400 "invalid_json")
+        if tail == ["board"] then
+          let some text := jv.fieldStr? "text" | return some (jsonErr 400 "invalid_text")
+          match ← writeProjectBoard store scopedSlug text nowIso "" with
+          | .error e => return some (jsonErr (if e == "board_too_large" then 400 else 500) e)
+          | .ok () => return some (jsonResp 200 (← readProjectBoard store scopedSlug))
+        let mid ← match jv.field? "mission_id" with
+          | some .null => pure ""
+          | some (.str mid) =>
+            let some mission ← getMission? store mid | return some (jsonErr 404 "not_found")
+            if mission.project != scopedSlug then return some (jsonErr 404 "not_found")
+            pure mid
+          | _ => return some (jsonErr 400 "invalid_mission_id")
+        if let .error e ← execParamQuery store.projectsDb
+            "UPDATE projects SET controller_mission_id=NULLIF(?2,'') WHERE slug=?1;" #[scopedSlug, mid] then
+          return some (jsonErr 500 e)
+        return some (jsonResp 200 (← readProjectBoard store scopedSlug))
+
     -- `GET|DELETE /api/projects/:slug`
     if tail.isEmpty then
       if method == "GET" then
+        let .ok rows ← execParamQuery store.projectsDb
+            "SELECT p.slug FROM projects p LEFT JOIN project_owners o ON o.slug=p.slug WHERE p.slug=?1 AND (?2='1' OR o.owner_user_id=?3);"
+            #[scopedSlug, if isAdmin then "1" else "0", callerUserId]
+          | return some (jsonErr 500 "db_error")
+        if rows.size ≤ 1 then return some (jsonErr 404 "not_found")
         let sit ← buildProjectSituationJVal store scopedSlug clientSlug
         return some (jsonResp 200 sit)
       else if method == "DELETE" then

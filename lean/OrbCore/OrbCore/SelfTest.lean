@@ -4949,12 +4949,15 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   -- Isolated per-user project namespace (`lean-campaign` for `alice` vs `admin`) & isolated inbox state
   let (alBoardPutSt, _, _) ← sendReq "POST" "/api/projects/lean-campaign/tracks" aliceTok
     "{\"track\":\"proof-track\",\"desired_condition\":\"Alice Secret Track\"}"
+  let (alProjectSt, _, _) ← sendReq "POST" "/api/projects" aliceTok "{\"slug\":\"lean-campaign\"}"
+  let (alTextSt, _, _) ← sendReq "PUT" "/api/projects/lean-campaign/board" aliceTok
+    "{\"text\":\"proof-track private board\"}"
   let (_, admBoardBody, _) ← sendReq "GET" "/api/projects/lean-campaign/board" adminTok ""
   let (_, alBoardBody, _) ← sendReq "GET" "/api/projects/lean-campaign/board" aliceTok ""
   let (alInbPutSt, _, _) ← sendReq "PUT" "/api/control/inbox-state/seen/m-secret" aliceTok
     "{\"clientId\":\"c-al\",\"mutationSeq\":1,\"expectedVersion\":0,\"stamp\":42}"
   let (_, admInbBody, _) ← sendReq "GET" "/api/control/inbox-state" adminTok ""
-  if alBoardPutSt != 200 || (alBoardBody.splitOn "proof-track").length < 2 ||
+  if alBoardPutSt != 200 || alProjectSt != 200 || alTextSt != 200 || (alBoardBody.splitOn "proof-track").length < 2 ||
      (admBoardBody.splitOn "proof-track").length != 1 ||
      alInbPutSt != 200 || (admInbBody.splitOn "m-secret").length != 1 then
     return (← fail s!"project/inbox namespace isolation failed: alBoard={alBoardBody} admBoard={admBoardBody} admInb={admInbBody}")

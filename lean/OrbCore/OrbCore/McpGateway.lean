@@ -255,7 +255,7 @@ def dispatchMcpToolCall
         let wd := cell mRows[1]! 0
         let pj := cell mRows[1]! 1
         if !wd.isEmpty then callerWorkDir := wd
-        if callerProj.isEmpty && !pj.isEmpty then callerProj := pj
+        if callerProj.isEmpty || toolName == "read_project_board" || toolName == "write_project_board" then callerProj := pj
         callerUserId := cell mRows[1]! 2
 
   if claims.isExternal then
@@ -471,14 +471,17 @@ def dispatchMcpToolCall
         "execute_privileged_command", "get_dev_access", "deploy_dev", "read_dev_logs",
         "get_fleet_sweep", "reconcile_action", "list_cloud_accounts"].contains toolName) then
     return mcpErr "forbidden" "Administrator required"
-  let projectTools := #["get_project", "get_situation", "update_project_status", "set_project_track",
+  if (toolName == "read_project_board" || toolName == "write_project_board") && (callerMid.isEmpty || callerProj.isEmpty) then
+    return mcpErr "no_project" "Mission has no project"
+  let projectTools := #["read_project_board", "write_project_board", "get_project", "get_situation", "update_project_status", "set_project_track",
     "accept_project_track_evidence", "reopen_project_track", "accept_project_track", "invalidate_project_track_evidence",
     "get_project_grant", "add_project_steer", "record_project_decision", "answer_project_decision",
     "get_project_tasks", "board_status", "plan_project_tasks", "plan_tasks", "update_project_task",
     "cancel_project_task", "review_task", "accept_task", "reject_task", "link_mission_to_project"]
   let mut args := args
   if tenantScoped && projectTools.contains toolName then
-    let raw := (args.fieldStr? "project").orElse (fun _ => args.fieldStr? "slug") |>.getD callerProj
+    let raw := if toolName == "read_project_board" || toolName == "write_project_board" then callerProj
+      else (args.fieldStr? "project").orElse (fun _ => args.fieldStr? "slug") |>.getD callerProj
     let bootstrap := ((← getBootstrapAdmin? store).map (·.id)).getD ""
     let scopedSlug := (scopeProjectSlug callerUserId bootstrap raw).getD raw
     let .ok rows ← execParamQuery store.projectsDb
@@ -809,6 +812,16 @@ def dispatchMcpToolCall
       return mcpErr "forbidden" e
     return mcpOk (.obj #[("mission_id", .str mid), ("files", .arr #[])])
 
+  | "read_project_board" | "write_project_board" =>
+    let board ← readProjectBoard store callerProj
+    if toolName == "read_project_board" then return mcpOk board
+    if callerMid.isEmpty || board.fieldStr? "controller_mission_id" != some callerMid then
+      return mcpErr "forbidden" "not_project_controller"
+    let some text := args.fieldStr? "text" | return mcpErr "invalid_arguments" "text required"
+    match ← writeProjectBoard store callerProj text nowIso callerMid with
+    | .error e => return mcpErr e e
+    | .ok () => return mcpOk (← readProjectBoard store callerProj)
+
   | "start_mission" | "consult_model" =>
     let title := ((args.fieldStr? "title").orElse (fun _ => args.fieldStr? "summary") |>.getD "Delegated Mission").trimAscii.toString
     let isConsult := toolName == "consult_model"
@@ -837,6 +850,16 @@ def dispatchMcpToolCall
           (((← getBootstrapAdmin? store).map (·.id)).getD "") checkedProj
           | return mcpErr "invalid_arguments" "Invalid project"
         pure scopedSlug
+    let controller := toolName == "start_mission" && (args.fieldBool? "controller").getD false
+    if controller then
+      if effProj.isEmpty then return mcpErr "no_project" "Controller requires a project"
+      let board ← readProjectBoard store effProj
+      let owns ← execParamQuery store.projectsDb
+        "SELECT slug FROM project_owners WHERE slug=?1 AND owner_user_id=?2;" #[effProj, callerUserId]
+      let isOwner := match owns with | .ok rows => rows.size > 1 | _ => false
+      unless userIsAdmin || isOwner || claims.role == "coordinator" ||
+          (!callerMid.isEmpty && board.fieldStr? "controller_mission_id" == some callerMid) do
+        return mcpErr "forbidden" "not_project_controller"
     let folder := normalizeMissionFolder ((args.fieldStr? "folder").getD "")
     let rawBackend :=
       if toolName == "consult_model" then ((args.fieldStr? "backend").getD "opencode")
@@ -1027,6 +1050,9 @@ def dispatchMcpToolCall
           discard <| execParamQuery store.missionsDb "DELETE FROM missions WHERE id=?1;" #[mid]
           releaseRented
           return mcpErr "remote_dispatch_failed" dispErr true
+    if controller then
+      if let .error e ← nominateCreatedProjectController store effProj effProj mid nowIso callerUserId then
+        return mcpErr "db_error" e
     publishControlEvent broadcastHub? "mission_created" (renderCompact (.obj #[
       ("mission_id", .str mid),
       ("project", if effProj.isEmpty then .null else .str effProj),

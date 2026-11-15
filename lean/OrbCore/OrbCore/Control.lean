@@ -4255,6 +4255,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           | none => .error "invalid_project"
       let .ok projSlug := projSlugRes
         | do abortIdem; return .ok (mkJson 400 "{\"error\":\"invalid_project\"}")
+      let controller := (bodyVal?.bind (·.fieldBool? "controller")).getD false
+      if controller && projSlug.isEmpty then
+        abortIdem
+        return .ok (mkJson 400 "{\"error\":\"no_project\"}")
       let track := (JsonTape.lookupString? tape "track").getD ""
       let repo := ((JsonTape.lookupString? tape "github_pr").orElse (fun _ => JsonTape.lookupString? tape "repo")).getD ""
       let rawDiskNat := (JsonTape.lookupNat? tape "estimated_disk_gib").getD 0
@@ -4458,6 +4462,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
                       { store := st.store, fleet := mf0, override? := st.managedProvisioningOverride? } rentedVmId "destroy" nowEpochSec
                 rollbackUnbornCreate
                 return .ok (mkJson 502 s!"\{\"error\":{jsonEscape dispErr}}")
+        if controller then
+          let ownerId := if caller.isLegacyUnscoped then st.bootstrapAdminId else caller.userId
+          if let .error e ← nominateCreatedProjectController st.store projSlug rawProjSlug mid nowIso ownerId then
+            abortIdem
+            return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
         let deliveredPromptField :=
           match prompt? with
           | some p =>
@@ -6454,13 +6463,12 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         let expRev? := jv.fieldNat? "expected_revision"
         let (code, body) ← putProjectTrack st.store proj track desired status s!"{nowEpochSec}" expRev?
         return .ok (mkJson code body)
-    | [rawProj, "board"] =>
-      if req.method == "GET" then
-        let some proj := resolveCallerProj rawProj
-          | return .ok (mkJson 400 "{\"error\":\"invalid_project\"}")
-        match ← projectBoardJson st.store proj with
-        | .ok body => return .ok (mkJson 200 body)
-        | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+    | [_, "board"] =>
+      if let some (code, ctype, body) ← dispatchProjectAndControllerRoutes?
+          st.store st.broadcastHub? st.cfg.workingDir req.method cleanPath rawTarget req.bodySlice.toByteArray
+          caller.userId st.bootstrapAdminId ((caller.isLegacyUnscoped || caller.role == "admin") && !caller.isDevOperator)
+          caller.isLegacyUnscoped (formatEpochIso8601Utc nowEpochSec) then
+        return .ok { status := code, contentType := ctype, corsOrigin? := reqOrigin?, body := body }
     | rawProj :: "context" :: restSegs =>
       let some proj := resolveCallerProj rawProj
         | return .ok (mkJson 400 "{\"error\":\"invalid_project\"}")
