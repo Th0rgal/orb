@@ -1236,10 +1236,12 @@ def dispatchProjectAndControllerRoutes?
       else (scopeProjectSlug callerUserId bootstrapAdminId clientSlug).getD clientSlug
     let tail := segs.drop 3
     if tail == ["board"] || tail == ["controller-mission"] || (tail.isEmpty && method == "GET") then
-      if let .ok rows ← execParamQuery store.projectsDb
+      let .ok rows ← execParamQuery store.projectsDb
           "SELECT p.slug FROM projects p LEFT JOIN project_owners o ON o.slug=p.slug WHERE (p.slug=?1 OR p.slug=?2) AND (?3='1' OR o.owner_user_id=?4) ORDER BY (p.slug=?1) DESC LIMIT 1;"
-          #[scopedSlug, clientSlug, if isAdmin then "1" else "0", callerUserId] then
-        if rows.size > 1 then scopedSlug := cell rows[1]! 0
+          #[scopedSlug, clientSlug, if isAdmin then "1" else "0", callerUserId]
+        | return some (jsonErr 500 "db_error")
+      if rows.size ≤ 1 then return some (jsonErr 404 "not_found")
+      scopedSlug := cell rows[1]! 0
     -- These endpoints read/write the shared host Hermes scheduler. Core-native
     -- tenant projects and missions do not delegate that operator authority.
     if !isAdmin && (tail[0]? == some "controller" || tail[0]? == some "crons") then
@@ -1276,11 +1278,6 @@ def dispatchProjectAndControllerRoutes?
     -- `GET|DELETE /api/projects/:slug`
     if tail.isEmpty then
       if method == "GET" then
-        let .ok rows ← execParamQuery store.projectsDb
-            "SELECT p.slug FROM projects p LEFT JOIN project_owners o ON o.slug=p.slug WHERE p.slug=?1 AND (?2='1' OR o.owner_user_id=?3);"
-            #[scopedSlug, if isAdmin then "1" else "0", callerUserId]
-          | return some (jsonErr 500 "db_error")
-        if rows.size ≤ 1 then return some (jsonErr 404 "not_found")
         let sit ← buildProjectSituationJVal store scopedSlug clientSlug
         return some (jsonResp 200 sit)
       else if method == "DELETE" then
