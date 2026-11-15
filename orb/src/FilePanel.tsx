@@ -291,7 +291,7 @@ export function FilePanelProvider(p: {
     }
     return rootPromise;
   }
-  // What the side pane belongs to: the mission (or project/controller), not
+  // What the side pane belongs to: the mission (or project), not
   // its machine or connection details. Refreshing the same mission must not
   // close an open side question.
   let shownFor: string | undefined;
@@ -310,7 +310,7 @@ export function FilePanelProvider(p: {
       setTabs(saved.tabs);
       setActive(saved.active);
       setExpanded(saved.expanded);
-      const owner = untrack(() => p.missionOpen ?? p.scope.mission?.id ?? `project:${p.scope.project ?? ""}:${p.scope.controller ?? ""}`);
+      const owner = untrack(() => p.missionOpen ?? p.scope.mission?.id ?? `project:${p.scope.project ?? ""}`);
       setFilesOpened(saved.open);
       if (owner !== shownFor) {
         setPanelTab("files");
@@ -1237,7 +1237,7 @@ export function FilePanelProvider(p: {
                           ) : (
                             <Ic.ChevronRight size={12} />
                           )}
-                          <span class="file-root-icon">{root.id==='controller'?<TreeIcon.Clock size={16}/>:root.id==='context'?<TreeIcon.FolderOpen size={16}/>:root.local?<Ic.LaptopIcon size={16}/>:<TreeIcon.Server size={16}/>}</span>
+                          <span class="file-root-icon">{root.id==='context'?<TreeIcon.FolderOpen size={16}/>:root.local?<Ic.LaptopIcon size={16}/>:<TreeIcon.Server size={16}/>}</span>
                           <span class="file-root-text"><span class="file-source-label">{root.group ? root.label : root.label.split(" · ")[0]}</span>
                           </span>
                         </button>

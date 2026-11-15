@@ -22,12 +22,12 @@ export function dialogCases(browserName: "chromium" | "webkit") {
         await expect(page.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
         await page.screenshot({ path: `test-results/modal-confirm-${browserName}-${theme}.png` });
         await page.keyboard.press("Escape");
-        await page.getByRole("button", { name: "New cron", exact: true }).click();
+        await page.getByRole("button", { name: "Edit draft", exact: true }).click();
         await page.getByRole("textbox", { name: "Name", exact: true }).fill("Changed draft");
-        await page.getByRole("button", { name: "Schedule", exact: true }).click();
+        await page.getByRole("button", { name: "Editor", exact: true }).click();
         await page.keyboard.press("Escape");
-        await expect(page.getByRole("dialog", { name: "New cron", exact: true })).toBeVisible();
-        await page.screenshot({ path: `test-results/modal-cron-${browserName}-${theme}.png` });
+        await expect(page.getByRole("dialog", { name: "Edit draft", exact: true })).toBeVisible();
+        await page.screenshot({ path: `test-results/modal-draft-${browserName}-${theme}.png` });
         await page.getByRole("button", { name: "Cancel", exact: true }).focus();
         await page.getByRole("button", { name: "Cancel", exact: true }).click();
         await expect(page.getByRole("button", { name: "Keep editing" })).toBeFocused();
@@ -38,7 +38,7 @@ export function dialogCases(browserName: "chromium" | "webkit") {
         await expect(page.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
         await expect(page.getByRole("textbox", { name: "Name", exact: true })).toHaveValue("Changed draft");
         await page.setViewportSize({ width: 390, height: 500 });
-        const panel = page.getByRole("dialog", { name: "New cron", exact: true });
+        const panel = page.getByRole("dialog", { name: "Edit draft", exact: true });
         const small = (await panel.boundingBox())!;
         expect(small.x).toBeGreaterThanOrEqual(16); expect(small.y).toBeGreaterThanOrEqual(16);
         expect(small.y + small.height).toBeLessThanOrEqual(484);
@@ -46,7 +46,7 @@ export function dialogCases(browserName: "chromium" | "webkit") {
         await page.screenshot({ path: `test-results/modal-narrow-${browserName}-${theme}.png` });
         await panel.getByRole("button", { name: "Close", exact: true }).click();
         await expect(page.getByRole("button", {name:"Keep editing"})).toBeFocused();
-        await page.getByRole("button", {name:"Discard draft"}).click();
+        await page.getByRole("button", {name:"Discard changes"}).click();
         await expect(page.getByRole("dialog")).toHaveCount(0);
         expect(errors).toEqual([]);
       });

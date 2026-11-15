@@ -405,7 +405,7 @@ test('deleting a parent with unloaded server-side descendants or paused child re
   await expect(tree.getByRole('button',{name:'Fredrik',exact:true})).toHaveCount(0);
 });
 
-test('long-press lifts row, spring-loads collapsed project on 450ms dwell, opens Move to picker on hold-release without stealing selection, and moves folders with missions and crons across projects', async ({page}) => {
+test('long-press lifts row, spring-loads collapsed project on 450ms dwell, opens Move to picker on hold-release without stealing selection, and moves folders with missions across projects', async ({page}) => {
   await page.addInitScript(() => {localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
   let missions:M[]=[
     {id:P,title:'Pareto',status:'completed',project:'verity',folder:'',placement_revision:1,tags:[],history:[],updated_at:'2026-10-20T09:00:00Z'},
@@ -417,10 +417,6 @@ test('long-press lifts row, spring-loads collapsed project on 450ms dwell, opens
     'verity:Specs':[{name:'plan.md',kind:'file'}],
     'other:':[{name:'Archive',kind:'dir'}],
     'other:Archive':[],
-  };
-  let crons:Record<string,Array<{id:string;name:string;schedule:string;enabled:boolean;failure_streak:number;folder?:string}>>={
-    verity:[{id:'cron-1',name:'Nightly Spec Check',schedule:'every 1h',enabled:true,failure_streak:0,folder:'Specs'}],
-    other:[],
   };
   await page.route('**/api/**',async route=>{
     const req=route.request(),url=new URL(req.url()),path=url.pathname;
@@ -455,19 +451,6 @@ test('long-press lifts row, spring-loads collapsed project on 450ms dwell, opens
       }
       return route.fulfill({json:{path:body.destination}});
     }
-    if(req.method()==='PATCH' && path.includes('/crons/')) {
-      const parts=path.split('/'),from=parts[3],cronId=parts[5],body=req.postDataJSON();
-      const target=body.project??from;
-      const existing=(crons[from]??[]).find(j=>j.id===cronId)??{id:cronId,name:'Nightly Spec Check',schedule:'every 1h',enabled:true,failure_streak:0};
-      const updated={...existing,folder:body.folder??existing.folder};
-      if(target!==from) {
-        crons[from]=(crons[from]??[]).filter(j=>j.id!==cronId);
-        crons[target]=[...(crons[target]??[]),updated];
-      } else {
-        crons[from]=(crons[from]??[]).map(j=>j.id===cronId?updated:j);
-      }
-      return route.fulfill({json:{slug:target,job:updated,runs:[]}});
-    }
     if(path==='/api/projects') return route.fulfill({json:{projects:[{slug:'verity',title:'Verity'},{slug:'other',title:'Other'}]}});
     if(path==='/api/control/missions') {
       const proj=url.searchParams.get('project');
@@ -479,7 +462,6 @@ test('long-press lifts row, spring-loads collapsed project on 450ms dwell, opens
     }
     const slug=path.split('/')[3];
     if(path.endsWith('/files')) return route.fulfill({json:{entries:dirs[`${slug}:${url.searchParams.get('path')??''}`]??[]}});
-    if(path.endsWith('/crons')) return route.fulfill({json:{jobs:crons[slug]??[]}});
     if(path.endsWith('/controller')) return route.fulfill({json:{job:null,runs:[]}});
     return route.fulfill({json:[]});
   });
@@ -529,9 +511,9 @@ test('long-press lifts row, spring-loads collapsed project on 450ms dwell, opens
   await page.mouse.up();
   expect(dirs['verity:']?.map(e=>e.name)).toEqual(['Specs']);
 
-  // 3. Dragging folder "Specs" (containing mission "Nested Agent" and cron "Nightly Spec Check")
+  // 3. Dragging folder "Specs" (containing mission "Nested Agent")
   //    onto collapsed project "Other", dwelling >= 450ms to spring-load expand "Other", and dropping
-  //    moves the folder, nested mission, and nested cron across projects together!
+  //    moves the folder and nested mission across projects together!
   await page.mouse.move(sBox.x+24,sBox.y+10);
   await page.mouse.down();
   await page.mouse.move(oBox.x+24,oBox.y+10,{steps:6});
@@ -545,8 +527,6 @@ test('long-press lifts row, spring-loads collapsed project on 450ms dwell, opens
 
   await expect.poll(()=>dirs['other:']?.some(e=>e.name==='Specs')).toBe(true);
   await expect.poll(()=>missions.find(m=>m.id===C)).toMatchObject({project:'other',folder:'Specs'});
-  await expect.poll(()=>crons.other.some(j=>j.id==='cron-1' && j.folder==='Specs')).toBe(true);
-  expect(crons.verity).toEqual([]);
 });
 
 test('selecting transcript text while Composer textarea is focused blurs empty Composer selection so Cmd+C copies transcript text', async ({page}) => {

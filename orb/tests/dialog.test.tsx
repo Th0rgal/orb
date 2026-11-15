@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { createSignal, Show } from "solid-js";
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { ConfirmDialog, Dialog, Field, NameDialog } from "../src/Dialog";
-import { SchedulePicker } from "../src/SchedulePicker";
+import { NestedEditor } from "./NestedEditor";
 import { hasFocusScope } from "../src/focusScope";
 import { hasOverlay, SlotActiveContext } from "../src/overlayLayer";
 import { Popover } from "../src/Popover";
@@ -12,9 +12,9 @@ function NestedSchedule() {
   const [open, setOpen] = createSignal(false);
   return <>
     <button onClick={() => setOpen(true)}>Open creation</button>
-    <Show when={open()}><Dialog title="Create cron" onClose={() => setOpen(false)} footer={<button>Save cron</button>}>
+    <Show when={open()}><Dialog title="Create item" onClose={() => setOpen(false)} footer={<button>Save item</button>}>
       <input aria-label="Name" />
-      <SchedulePicker value="every 1h" onChange={() => {}} />
+      <NestedEditor />
       <button disabled>Disabled action</button>
       <button hidden>Hidden action</button>
     </Dialog></Show>
@@ -25,17 +25,17 @@ describe("dialog focus ownership", () => {
   it("first Escape closes only the schedule; second closes its modal and restores the opener", () => {
     render(() => <NestedSchedule />);
     const opener = screen.getByText("Open creation"); opener.focus(); fireEvent.click(opener);
-    expect(screen.getByRole("dialog", { name: "Create cron" }).getAttribute("aria-modal")).toBe("true");
-    const trigger = screen.getByRole("button", { name: "Schedule" }); trigger.focus(); fireEvent.click(trigger);
+    expect(screen.getByRole("dialog", { name: "Create item" }).getAttribute("aria-modal")).toBe("true");
+    const trigger = screen.getByRole("button", { name: "Editor" }); trigger.focus(); fireEvent.click(trigger);
     const globalEscape = vi.fn(); window.addEventListener("keydown", globalEscape);
     try {
-      fireEvent.keyDown(screen.getByLabelText("Schedule type"), { key: "Escape" });
-      expect(screen.queryByRole("dialog", { name: "Schedule editor" })).toBeNull();
-      expect(screen.getByRole("dialog", { name: "Create cron" })).toBeTruthy();
+      fireEvent.keyDown(screen.getByLabelText("Editor value"), { key: "Escape" });
+      expect(screen.queryByRole("dialog", { name: "Nested editor" })).toBeNull();
+      expect(screen.getByRole("dialog", { name: "Create item" })).toBeTruthy();
       expect(document.activeElement).toBe(trigger);
       expect(globalEscape).not.toHaveBeenCalled();
       fireEvent.keyDown(trigger, { key: "Escape" });
-      expect(screen.queryByRole("dialog", { name: "Create cron" })).toBeNull();
+      expect(screen.queryByRole("dialog", { name: "Create item" })).toBeNull();
       expect(document.activeElement).toBe(opener);
       expect(globalEscape).not.toHaveBeenCalled();
       expect(hasFocusScope()).toBe(false);
@@ -47,13 +47,13 @@ describe("dialog focus ownership", () => {
     expect(document.activeElement).toBe(first);
     const close = screen.getByRole("button", { name: "Close" }); close.focus();
     fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
-    expect(document.activeElement).toBe(screen.getByText("Save cron"));
+    expect(document.activeElement).toBe(screen.getByText("Save item"));
     fireEvent.keyDown(document.activeElement!, { key: "Tab" });
     expect(document.activeElement).toBe(close);
     screen.getByText("Open creation").focus(); // Programmatic focus escape is contained too.
     expect(document.activeElement).toBe(close);
-    fireEvent.click(screen.getByRole("button", { name: "Schedule" }));
-    const mode = screen.getByLabelText("Schedule type");
+    fireEvent.click(screen.getByRole("button", { name: "Editor" }));
+    const mode = screen.getByLabelText("Editor value");
     fireEvent.keyDown(mode, { key: "Tab", shiftKey: true });
     expect(document.activeElement).toBe(screen.getByText("Done"));
     fireEvent.keyDown(document.activeElement!, { key: "Tab" });
@@ -183,9 +183,9 @@ it("associates field errors, disables auto-capitalization/autocorrect on naming 
 
 it("preserves the body's existing scroll style when a non-modal layer closes", () => {
   document.body.style.overflow = "auto";
-  render(() => <SchedulePicker value="every 1h" onChange={() => {}}/>);
-  fireEvent.click(screen.getByRole("button", {name:"Schedule"}));
-  fireEvent.keyDown(screen.getByLabelText("Schedule type"), {key:"Escape"});
+  render(() => <NestedEditor/>);
+  fireEvent.click(screen.getByRole("button", {name:"Editor"}));
+  fireEvent.keyDown(screen.getByLabelText("Editor value"), {key:"Escape"});
   expect(document.body.style.overflow).toBe("auto");
   document.body.style.overflow = "";
 });

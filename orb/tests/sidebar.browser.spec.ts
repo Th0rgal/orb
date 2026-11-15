@@ -183,7 +183,7 @@ test("project action menu is compact, pointer hover has no focus ring, keyboard 
   expect(await menu.evaluate((el) => getComputedStyle(el).backdropFilter === "none" || !getComputedStyle(el).backdropFilter)).toBeTruthy();
   const box = await menu.boundingBox();
   expect(box!.width).toBeLessThanOrEqual(220);
-  // Agent and cron creation lead the project menu; files require a folder.
+  // Agent creation lead the project menu; files require a folder.
   const first = page.getByRole("menuitem", { name: "New agent" });
   await expect(page.getByRole("menuitem", { name: "New file" })).toHaveCount(0);
   await expect(page.getByRole("menuitem", { name: "Rename" })).toBeVisible();
@@ -205,7 +205,7 @@ test("project action menu is compact, pointer hover has no focus ring, keyboard 
   await page.screenshot({ path: "test-results/orb-project-menu-light.png" });
 });
 
-test("project folders contain agents and crons and offer scoped creation", async ({page}) => {
+test("project folders contain agents and offer scoped creation", async ({page}) => {
   await page.addInitScript(() => { localStorage.setItem("orb.apiUrl", location.origin); localStorage.setItem("orb.jwt", "test"); });
   await page.route("**/api/**", async route => {
     const url=new URL(route.request().url()), path=url.pathname;
@@ -220,10 +220,9 @@ test("project folders contain agents and crons and offer scoped creation", async
   await expect(page.getByRole("button",{name:"Audit agent",exact:true})).toHaveCount(0);
   await page.getByRole("button",{name:"audit",exact:true}).click();
   await expect(page.getByRole("button",{name:"Audit agent",exact:true})).toBeVisible();
-  await expect(page.getByRole("button",{name:/Audit cron/})).toBeVisible();
   await page.getByRole("button",{name:"Folder actions for audit"}).click();
   const labels=await page.getByRole("menuitem").allTextContents();
-  expect(labels.slice(0,3)).toEqual(["New agent","Cloud agent","New cron"]);
+  expect(labels.slice(0,2)).toEqual(["New agent","Cloud agent"]);
   await expect(page.getByRole("menuitem",{name:"New file",exact:true})).toBeVisible();
   await page.getByRole("menuitem",{name:"New agent",exact:true}).click();
   await expect(page.getByRole("button",{name:"Choose project"})).toContainText("/ audit");

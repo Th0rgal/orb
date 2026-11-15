@@ -1,5 +1,5 @@
 import { createMemo, createSelector, mapArray } from "solid-js";
-import type { ControllerJob, ControllerView, Mission, ProjectFileEntry, ProjectSummary } from "../api";
+import type { Mission, ProjectFileEntry, ProjectSummary } from "../api";
 import { folderLabel } from "../folderLabels";
 import { displayTitle } from "../goal";
 import { localRunActive } from "../localAgents";
@@ -11,9 +11,8 @@ import { renamedTitle } from "../renames";
 import type { TreeNode } from "../treeModel";
 
 export type RowData = {
-  kind: "archive-project" | "project" | "folder" | "file" | "mission" | "cron" | "cron-error" | "note";
+  kind: "archive-project" | "project" | "folder" | "file" | "mission" | "note";
   slug: string; label: string; path?: string; mission?: Mission;
-  job?: ControllerJob; controller?: boolean;
   /** Missions launched by this one, at any depth, and how many still run. */
   launched?: number; launchedLive?: number;
   /** Earlier versions of this conversation (forks), listed inside it; `version` marks one of them. */
@@ -74,26 +73,18 @@ export function createProjectTree(deps: {
   missions: Record<string, Mission[]>;
   dirs: Record<string, ProjectFileEntry[]>;
   dirErrors: Record<string, string | null>;
-  crons: Record<string, ControllerJob[]>;
-  controllers: Record<string, ControllerView>;
-  cronUnsupported: () => boolean;
-  cronErrors: Record<string, string | null>;
   archiveExpanded: Record<string, boolean>;
   visibleMissions: (slug: string) => Mission[];
   archivedMissionRows: () => Mission[];
   selected: () => string | null;
 }) {
-  const { expanded, missions, dirs, dirErrors, crons, controllers, cronErrors } = deps;
+  const { expanded, missions, dirs, dirErrors } = deps;
   const isSelectedMission = createSelector(() => {
     const s = deps.selected();
     return s?.startsWith("m:") ? s.slice(2) : null;
   });
   const holdsSelected = (nested: NestedMission<Mission>): boolean =>
     nested.children.some(child => isSelectedMission(child.mission.id) || holdsSelected(child));
-  // A mission the project's controller created (a Hermes session, no parent
-  // mission) is listed under the controller, like a child under its parent.
-  const controllerLaunched = (mission: Mission) => !missionParent(mission) && mission.origin === "hermes" && !!mission.origin_session_id;
-  const controllerRow = (slug: string) => { const job = controllers[slug]?.job; return !!job && !job.archived; };
   const isMissionWorking = (m: Mission) =>
     isWorking(presentedStatus(m, missionActivity(m, [], { localRun: localRunActive(m.id) })));
   const missionNode = (slug: string, nested: NestedMission<Mission>, archive = false): Node => {
@@ -115,11 +106,11 @@ export function createProjectTree(deps: {
     const children: Node[] = [];
     if (open) {
       const workNodes = (path: string): Node[] => {
-        const out: Node[] = (crons[slug] ?? []).filter(job => (job.folder ?? "") === path).map(job => ({ id: `pc:${slug}:${job.id}`, data: { kind: "cron", slug, label: job.name, job } }));
-        out.push(...rootsForProject().filter(root => missionFolder(root.mission) === path && !(controllerRow(slug) && controllerLaunched(root.mission))).map(root => missionNode(slug, root)));
+        const out: Node[] = [];
+        out.push(...rootsForProject().filter(root => missionFolder(root.mission) === path).map(root => missionNode(slug, root)));
         return out;
       };
-      /** Folder names implied by missions and crons already in memory, one level under `path`. */
+      /** Folder names implied by missions already in memory, one level under `path`. */
       const folderHints = (path: string): ProjectFileEntry[] => {
         const names = new Set<string>();
         const consider = (folder: string) => {
@@ -128,7 +119,6 @@ export function createProjectTree(deps: {
           if (name) names.add(name);
         };
         for (const mission of visibleForProject()) consider(missionFolder(mission));
-        for (const job of crons[slug] ?? []) consider(job.folder ?? "");
         return [...names].map(name => ({ name, kind: "dir" as const }));
       };
       const dirNode = (path: string, entry: ProjectFileEntry, reveal = false): Node => {
@@ -160,20 +150,6 @@ export function createProjectTree(deps: {
         if (!entries.length && !work.length && !dirErrors[key]) return path ? [{ id: `empty:${key}`, data: { kind: "note", slug, path, label: "Empty folder" } }] : [];
         return [...work, ...(dirErrors[key] ? [{ id: `error:${key}`, data: { kind: "note" as const, slug, path, label: "Couldn’t refresh files. Showing saved list." } }] : []), ...entries.map(entry => dirNode(path, entry, false))];
       };
-      const job = controllers[slug]?.job;
-      if (job && !job.archived) {
-        const launched = rootsForProject().filter(root => controllerLaunched(root.mission));
-        const id = `c:${slug}`;
-        const ctrlOpen = launched.length
-          ? (expanded[id] ?? launched.some(root => isSelectedMission(root.mission.id) || holdsSelected(root)))
-          : undefined;
-        const count = launched.reduce((sum, root) => sum + 1 + countNested(root), 0);
-        const live = launched.reduce((sum, root) => sum + Number(isMissionWorking(root.mission)) + countNested(root, isMissionWorking), 0);
-        children.push({ id, data: { kind: "cron", slug, label: job.name, job, controller: true, ...(launched.length ? { launched: count, launchedLive: live } : {}) },
-          ...(launched.length ? { expanded: ctrlOpen, children: ctrlOpen ? launched.map(root => missionNode(slug, root)) : [] } : {}) });
-      }
-      if (deps.cronUnsupported() || cronErrors[slug]) children.push({ id: `crons-error:${slug}`, data: { kind: "cron-error", slug, label: "Crons unavailable" } });
-
       if (missions[slug] === undefined && !rootsForProject().length) children.push({ id: `loading-missions:${slug}`, data: { kind: "note", slug, label: "Loading missions…" } });
       children.push(...workNodes(""));
       children.push(...fileNodes(""));
@@ -205,18 +181,11 @@ export function createProjectTree(deps: {
     for (const [slug, rows] of byProject) {
       groups.set(slug, nestMissions(rows, { placeholder: placeholderParent(slug) }).map(root => missionNode(slug, root, true)));
     }
-    for (const project of deps.projects()) {
-      const job = controllers[project.slug]?.job;
-      if (job?.archived) {
-        const node: Node = {id:`c:${project.slug}`,data:{kind:"cron",slug:project.slug,label:job.name,job,controller:true}};
-        groups.set(project.slug, [...(groups.get(project.slug) ?? []), node]);
-      }
-    }
     return [...groups].map(([slug, children]) => ({
       id: `archive-project:${slug}`,
       data: {kind: "archive-project" as const, slug, label: deps.projects().find(project => project.slug === slug)?.title || slug || "No project"},
       expanded: !!deps.archiveExpanded[slug], children,
     })).sort((a,b) => a.data.label.localeCompare(b.data.label));
   };
-  return { tree, archiveNodes, controllerRow, controllerLaunched };
+  return { tree, archiveNodes };
 }

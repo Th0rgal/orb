@@ -8,7 +8,7 @@ import { ErrorDialog } from "../src/ErrorNotice";
 import { Menu, MenuList } from "../src/Menu";
 import { Picker } from "../src/Picker";
 import { Select } from "../src/Select";
-import { SchedulePicker } from "../src/SchedulePicker";
+
 import { ProjectCreation } from "../src/ProjectPicker";
 import { Lightbox } from "../src/Lightbox";
 import { UserTurn } from "../src/Transcript";
@@ -28,7 +28,6 @@ function Gallery() {
   const [selected,setSelected] = createSignal("one"), [searchOpen,setSearchOpen] = createSignal(false);
   const [anchor,setAnchor] = createSignal<HTMLElement>(), [sub,setSub] = createSignal<HTMLElement>();
   const [speed,setSpeed] = createSignal<CodexServiceTier>('standard');
-  const [schedule,setSchedule] = createSignal("every 1h");
   const [nestedConfirm,setNestedConfirm] = createSignal(false);
   const close = () => {setNestedConfirm(false); setOpen("");};
   const show = (kind:string,button:HTMLButtonElement) => {setAnchor(button); setError(null); setOpen(kind);};
@@ -63,7 +62,6 @@ function Gallery() {
       <Field label="Account name" description="This name is shown on all devices."><input class="s-input" value={name()} onInput={e=>setName(e.currentTarget.value)}/></Field>
       <Field label="API key"><input class="s-input" type="password" autocomplete="off" placeholder="Enter API key"/></Field>
       <Field label="Notes"><textarea class="s-input" aria-label="Notes" rows="3"/></Field>
-      <SchedulePicker value={schedule()} onChange={setSchedule}/>
       <DialogButton onClick={()=>setSearchOpen(true)}>Pick a model</DialogButton>
       <Show when={new URLSearchParams(location.search).has("nested-modal")}><DialogButton onClick={()=>setNestedConfirm(true)}>Reset credentials</DialogButton></Show>
       <Show when={searchOpen()}><Picker label="Models" items={Array.from({length:80},(_,i)=>({id:`model-${i}`,label:`Model ${i}`,group:i<4?"Recent":"All models",disabled:i===1}))} selected={selected()} onSelect={id=>{setSelected(id);setSearchOpen(false);}} onClose={()=>setSearchOpen(false)}/></Show>

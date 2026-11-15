@@ -35,20 +35,18 @@ it("blocks folder deletion when a nested agent exists in folder_prefix", async (
   await expect(assertFolderHasNoWork('test','notes')).rejects.toThrow('Move the agents');
   expect(String(fetch.mock.calls[0][0])).toContain('folder_prefix=notes');
 });
-it("allows a document folder but blocks a nested cron", async () => {
+it("allows a document folder without requesting the retired cron API", async () => {
   const { assertFolderHasNoWork } = await import('../src/fileActions');
-  const fetch = vi.spyOn(globalThis,'fetch').mockResolvedValueOnce(new Response('[]')).mockResolvedValueOnce(new Response('{"jobs":[]}'));
+  const fetch = vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response('[]'));
   await expect(assertFolderHasNoWork('test','notes')).resolves.toBeUndefined();
-  fetch.mockResolvedValueOnce(new Response('[]')).mockResolvedValueOnce(new Response(JSON.stringify({jobs:[{id:'job',name:'Cron',folder:'notes/deep',enabled:true}]})));
-  await expect(assertFolderHasNoWork('test','notes')).rejects.toThrow('crons');
+  expect(fetch.mock.calls.some(call => String(call[0]).includes('/crons'))).toBe(false);
 });
 
-it("synchronously flags loaded missions and crons inside a folder", () => {
-  expect(folderWorkError("test", "Audits", [], [])).toBeNull();
-  expect(folderWorkError("test", "Audits", [{ id: "m1", title: null, status: "completed", project: "test", folder: "Audits/sub", history: [] }], [])).toContain("Move the agents");
-  expect(folderWorkError("test", "Audits", [], [{ folder: "Audits" }])).toContain("crons");
-  expect(folderWorkError("test", "Audits", [{ id: "m2", title: null, status: "completed", project: "other", folder: "Audits", history: [] }], [{ folder: "Audits-other" }])).toBeNull();
-  expect(folderWorkError("test", "Audits", [{ id: "m3", title: null, status: "completed", project: "test", folder: "", tags: ["orb-folder:Audits"], history: [] }], [])).toBeNull();
+it("synchronously flags loaded missions inside a folder", () => {
+  expect(folderWorkError("test", "Audits", [])).toBeNull();
+  expect(folderWorkError("test", "Audits", [{ id: "m1", title: null, status: "completed", project: "test", folder: "Audits/sub", history: [] }])).toContain("Move the agents");
+  expect(folderWorkError("test", "Audits", [{ id: "m2", title: null, status: "completed", project: "other", folder: "Audits", history: [] }])).toBeNull();
+  expect(folderWorkError("test", "Audits", [{ id: "m3", title: null, status: "completed", project: "test", folder: "", tags: ["orb-folder:Audits"], history: [] }])).toBeNull();
 });
 
 it("moves a file to another project through its own route", async () => {
@@ -68,7 +66,7 @@ it("keeps the folder flag on the clipboard and rejects a malformed one", async (
   expect(readFileReference("orb:file:" + JSON.stringify(payload))?.directory).toBe(true);
   expect(readFileReference("orb:file:" + JSON.stringify({...payload, directory: "yes"}))).toBeNull();
 });
-it("moves nested agents and crons with moveFolderWork fallback and reports failures", async () => {
+it("moves nested agents with moveFolderWork fallback and reports failures", async () => {
   const { moveFolderWork } = await import('../src/fileActions');
   const missions = [
     {id:'inside',project:'test',folder:'notes/deep',tags:['pinned']},
@@ -90,7 +88,6 @@ it("moves nested agents and crons with moveFolderWork fallback and reports failu
       }
       return new Response('{}');
     }
-    if (url.includes('/crons')) return new Response(JSON.stringify({jobs:[{id:'job',name:'Cron',folder:'notes',enabled:true},{id:'far',name:'Far',folder:'other',enabled:true}]}));
     return new Response(JSON.stringify(missions));
   });
   await expect(moveFolderWork('test','notes','archive/renamed')).rejects.toThrow(/stuck.*could not follow/);
@@ -104,7 +101,6 @@ it("moves nested agents and crons with moveFolderWork fallback and reports failu
     project:'test',
     folder:'archive/renamed',
   });
-  expect(sent.find(call => call.url.includes('/crons/job'))?.body).toMatchObject({folder:'archive/renamed'});
   expect(sent.some(call => call.url.includes('/crons/far'))).toBe(false);
 });
 

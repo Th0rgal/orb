@@ -218,7 +218,7 @@ function currentSkillNames(): string[] {
   return cachedSkillNames;
 }
 
-/** Reactive list of known skill names for autocomplete in ControllerSettings. */
+/** Reactive list of known skill names for skill autocomplete. */
 export function knownSkillNames(): string[] {
   return currentSkillNames();
 }

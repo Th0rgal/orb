@@ -89,7 +89,7 @@ for (const missingAt of ['GET', 'DELETE', 'cascade'] as const) test(`deletion cl
   await expect.poll(()=>page.evaluate(()=>localStorage.getItem('orb.selectedConversation'))).not.toBe(`m:${id}`);
 });
 
-test('cron and mixed file/folder/cron selection supports Cmd/Shift click, Cmd+X/V and right-click Move/Paste with careful context menu options', async ({page}) => {
+test('file and folder selection supports keyboard cut and paste with context menu options', async ({page}) => {
   await page.addInitScript(() => {localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
   await page.evaluate(() => {
     let text = '';
@@ -97,50 +97,17 @@ test('cron and mixed file/folder/cron selection supports Cmd/Shift click, Cmd+X/
       writeText: async (value: string) => { text = value; }, readText: async () => text,
     } });
   });
-  let crons: Record<string, any[]> = {
-    one: [
-      {id:'cron-1',name:'Nightly Sweep',schedule:'every 1h',enabled:true,failure_streak:0,folder:''},
-      {id:'cron-2',name:'Hourly Audit',schedule:'every 1h',enabled:true,failure_streak:0,folder:''},
-    ],
-    two: [],
-  };
   const files = new Map<string, {kind: 'file'|'dir'; content?: string}>([
     ['one:notes.md', {kind:'file', content:'hello'}],
     ['one:docs', {kind:'dir'}],
     ['two:archive', {kind:'dir'}],
   ]);
-  const cronUpdates: any[] = [];
   const fileTransfers: any[] = [];
   await page.route('**/api/**', async route => {
     const req = route.request(), url = new URL(req.url()), path = url.pathname;
     if (path === '/api/projects') return route.fulfill({json:{projects:[{slug:'one',title:'One'},{slug:'two',title:'Two'}]}});
     if (path === '/api/control/missions') return route.fulfill({json:[]});
     if (path.endsWith('/controller')) return route.fulfill({json:{job:null,runs:[]}});
-    const cronMatch = path.match(/^\/api\/projects\/([^/]+)\/crons(?:\/([^/]+))?$/);
-    if (cronMatch) {
-      const [, slug, id] = cronMatch;
-      if (req.method() === 'GET' && !id) return route.fulfill({json:{jobs: crons[slug] ?? []}});
-      if (req.method() === 'DELETE' && id) {
-        crons[slug] = (crons[slug] ?? []).filter(j => j.id !== id);
-        return route.fulfill({json:{ok:true}});
-      }
-      if (req.method() === 'PATCH' && id) {
-        const body = req.postDataJSON();
-        cronUpdates.push({slug, id, body});
-        const job = (crons[slug] ?? []).find(j => j.id === id);
-        if (job) {
-          const targetSlug = body.project || slug;
-          const updated = {...job, folder: body.folder ?? job.folder};
-          if (targetSlug !== slug) {
-            crons[slug] = (crons[slug] ?? []).filter(j => j.id !== id);
-            crons[targetSlug] = [...(crons[targetSlug] ?? []), updated];
-          } else {
-            crons[slug] = (crons[slug] ?? []).map(j => j.id === id ? updated : j);
-          }
-          return route.fulfill({json:{slug:targetSlug,job:updated,runs:[]}});
-        }
-      }
-    }
     const filesMatch = path.match(/^\/api\/projects\/([^/]+)\/files$/);
     if (filesMatch) {
       const [, slug] = filesMatch;
@@ -186,20 +153,7 @@ test('cron and mixed file/folder/cron selection supports Cmd/Shift click, Cmd+X/
   const tree = page.getByRole('tree',{name:'Projects',exact:true});
   const shortcut = process.platform === 'darwin' ? 'Meta' : 'Control';
 
-  // 1. Single cron right-click Move + right-click Paste into folder
-  const cron1 = tree.getByRole('button',{name:'Nightly Sweep',exact:true});
-  await cron1.click({button:'right'});
-  await expect(page.getByRole('menuitem')).toHaveText(['Move', 'Delete…']);
-  await page.getByRole('menuitem',{name:'Move',exact:true}).click();
-  await expect(cron1).toHaveClass(/mission-cut/);
-
   const docsFolder = tree.locator('.row.folder').filter({hasText:'docs'});
-  await docsFolder.click({button:'right'});
-  await page.getByRole('menuitem',{name:'Paste',exact:true}).click();
-  await expect.poll(() => cronUpdates.length).toBe(1);
-  expect(cronUpdates[0]).toEqual({slug:'one', id:'cron-1', body:{folder:'docs'}});
-
-  // 2. Multi-select files + folders (without crons): right-click shows Move N items and Copy N items (no Rename/Delete)
   const notesFile = tree.locator('.row.file').filter({hasText:'notes.md'});
   await notesFile.click();
   await docsFolder.locator('.row-main').click({modifiers:[shortcut]});
@@ -207,49 +161,15 @@ test('cron and mixed file/folder/cron selection supports Cmd/Shift click, Cmd+X/
   await notesFile.click({button:'right'});
   await expect(page.getByRole('menuitem')).toHaveText(['Move 2 items', 'Copy 2 items']);
 
-  // 3. Add a cron to the selection (mixed file + folder + cron): Copy is hidden, only Move 3 items is shown!
-  const cron2 = tree.getByRole('button',{name:'Hourly Audit',exact:true});
-  await cron2.click({modifiers:[shortcut]});
-  await expect(tree.locator('[aria-selected="true"]')).toHaveCount(3);
-  await cron2.click({button:'right'});
-  await expect(page.getByRole('menuitem')).toHaveText(['Move 3 items']);
-
-  // 4. Use Cmd+X on the 3 selected items (file + folder + cron) and Cmd+V on Project Two's archive folder
   await page.keyboard.press('Escape');
-  await cron2.click();
-  await docsFolder.locator('.row-main').click({modifiers:['Shift']});
-  await expect(tree.locator('[aria-selected="true"]')).toHaveCount(3);
-  await cron2.focus();
+  await notesFile.focus();
   await page.keyboard.press(`${shortcut}+x`);
-  await expect(cron2).toHaveClass(/mission-cut/);
   await expect(notesFile).toHaveClass(/mission-cut/);
-
-  // Right-click Paste into One/docs for cron2 + notesFile
-  await page.keyboard.press('Escape');
-  await cron2.click();
-  await notesFile.click({modifiers:[shortcut]});
-  await expect(tree.locator('[aria-selected="true"]')).toHaveCount(2);
-  await cron2.click({button:'right'});
-  await page.getByRole('menuitem',{name:'Move 2 items',exact:true}).click();
-  await docsFolder.click({button:'right'});
+  const destination = tree.locator('.row.folder').filter({hasText:'archive'});
+  await destination.click({button:'right'});
   await page.getByRole('menuitem',{name:'Paste',exact:true}).click();
-  await expect.poll(() => cronUpdates.length).toBe(2);
-  await expect.poll(() => fileTransfers.length).toBe(1);
-  expect(cronUpdates[1]).toEqual({slug:'one', id:'cron-2', body:{folder:'docs'}});
-  expect(fileTransfers[0]).toEqual({fromSlug:'one', toSlug:'one', path:'notes.md', destination:'docs/notes.md', copy:false});
-
-  // 5. Multi-select crons: right-click shows both Move N crons and Delete N crons…
-  await expect(cron1).toBeVisible();
-  await cron1.click();
-  await cron2.click({modifiers:[shortcut]});
-  await expect(tree.locator('[aria-selected="true"]')).toHaveCount(2);
-  await cron2.click({button:'right'});
-  await expect(page.getByRole('menuitem')).toHaveText(['Move 2 crons', 'Delete 2 crons…']);
-  await page.getByRole('menuitem',{name:'Delete 2 crons…',exact:true}).click();
-  await expect(page.getByRole('dialog',{name:'Delete 2 crons?'})).toBeVisible();
-  await page.getByRole('dialog').getByRole('button',{name:'Delete',exact:true}).click();
-  await expect(cron1).toHaveCount(0);
-  await expect(cron2).toHaveCount(0);
+  await expect.poll(() => fileTransfers.length).toBe(2);
+  expect(fileTransfers.map(transfer => transfer.path).sort()).toEqual(['docs', 'notes.md']);
 });
 
 test('right-clicking mission B to copy its ID while in mission A restores mission A as selected after the menu closes', async ({page}) => {

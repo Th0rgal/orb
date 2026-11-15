@@ -12,7 +12,7 @@ import { rememberClientRunReceipt, type ClientRunReceipt } from "./clientRuns";
 import { bufferedOutput, type OutputEvent } from "./localStream";
 import { createSignal } from "solid-js";
 import { scanMentions, type AttachChip } from "./attach";
-import { api, getApiUrl, getJwt, isConnected, listProjectFiles, readProjectFile, getProjectController } from "./api";
+import { api, getApiUrl, getJwt, isConnected, listProjectFiles, readProjectFile } from "./api";
 import { classifyConflictError } from "./conflictClassification";
 
 function savedLocalFailures(): Record<string,string> {
@@ -373,19 +373,6 @@ export async function materializeMentions(
       return item.path?.replace(/\/$/, "") === bare;
     });
     if (!chip) continue;
-    if (chip.kind === "controller") {
-      let body = "# Controller\n\nNo controller snapshot was available.\n";
-      try {
-        const view = await getProjectController(slug, 1);
-        body = `# Controller\n\n${view.job?.name || slug}\n`;
-      } catch {
-        /* snapshot stays the fallback line */
-      }
-      const rel = ".paloma/controller.md";
-      files.push({ rel, content: body });
-      replacements.push({ raw: mention.raw, absolute: rel });
-      continue;
-    }
     const path = chip.path ?? "";
     if (isSecretPath(path)) throw new Error(`${path} is not copied. Your draft is kept.`);
     if (chip.kind === "file") {

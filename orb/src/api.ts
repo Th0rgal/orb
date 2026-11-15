@@ -7,7 +7,6 @@ import { sharedRead, invalidateReads } from "./sharedReads";
 import { cacheReset } from "./pageCache";
 import type { ClientRunReceipt } from "./clientRuns";
 import { createSignal } from "solid-js";
-import { getProjectCronFromJob, hermesPatch, normalizeControllerView, type HermesControllerView, type HermesJob } from "./cronSchema";
 import { applyProjectRoster } from "./projectAppearance";
 import { note, requestDone } from "./diagnostics";
 import { noteObservedMissionQueueRevision, peekObservedMissionQueueRevision } from "./followupQueueState";
@@ -1721,6 +1720,8 @@ export async function openExternalUrl(url: string): Promise<void> {
 }
 
 export interface ProjectSummary {
+  controller_mission_id?: string | null;
+  board_updated_at?: string | null;
   slug: string;
   title?: string | null;
   objective?: string | null;
@@ -1824,169 +1825,35 @@ export async function listProjects(force = false): Promise<ProjectSummary[]> {
   );
 }
 
-/** A project's controller: the Hermes cron job that drives it. */
-export interface ControllerJob {
-  archived?: boolean;
-  folder?: string;
-  id: string;
-  name: string;
-  schedule?: string | null;
-  enabled: boolean;
-  state?: string | null;
-  paused_reason?: string | null;
-  next_run_at?: string | null;
-  last_run_at?: string | null;
-  last_status?: string | null;
-  last_error?: string | null;
-  failure_streak: number;
-  deliver?: string | null;
+/** Optional project board contract; older Core versions return 404 or omit fields. */
+export interface ProjectBoard {
+  text: string;
+  updated_at: string | null;
+  updated_by_mission_id: string | null;
+  controller_mission_id: string | null;
 }
 
-export interface ControllerRun {
-  id: string;
-  at?: string | null;
-  started_at?: string | null;
-  finished_at?: string | null;
-  duration_secs?: number | null;
-  status?: string | null;
-  source?: string | null;
-  delivery_outcome?: string | null;
-  silent: boolean;
-  report: string;
-  ctrl?: string | null;
-  signature?: string | null;
-  error?: string | null;
+async function optionalProjectApi<T>(path: string, init?: RequestInit): Promise<T | null> {
+  try { return await api<T>(path, init); }
+  catch (error) { if (error instanceof ApiError && error.status === 404) return null; throw error; }
 }
 
-/** What the cron does: a prompt run on a schedule by a fresh agent. */
-export interface ControllerSettings {
-  prompt: string;
-  prompt_chars: number;
-  skills: string[];
-  deliver?: string | null;
-  failure_deliver?: string | null;
-  repeat_times?: number | null;
-  repeat_completed: number;
-  model?: string | null;
-  provider?: string | null;
-  /** Creation-time defaults, kept separate from explicit overrides. */
-  model_snapshot?: string | null;
-  provider_snapshot?: string | null;
-  reasoning_effort?: string | null;
-  workdir?: string | null;
-  script?: string | null;
-  script_path?: string | null;
-  script_content?: string | null;
-  no_agent: boolean;
-  continuity: boolean;
-  monitor_url?: string | null;
-  monitor_script?: string | null;
-  enabled_toolsets: string[];
-  created_at?: string | null;
-  binding?: Record<string, unknown> | null;
-  /** Cap on prompt + preloaded skills for scope-bound controllers. */
-  prompt_budget?: number | null;
+export async function getProject(slug: string): Promise<ProjectSummary | null> {
+  const project = await optionalProjectApi<ProjectSummary>(`/api/projects/${encodeURIComponent(slug)}`);
+  return project && Object.prototype.hasOwnProperty.call(project, "controller_mission_id") ? project : null;
 }
 
-export interface ControllerView {
-  slug: string;
-  job: ControllerJob | null;
-  settings?: ControllerSettings | null;
-  runs: ControllerRun[];
+export async function getProjectBoard(slug: string): Promise<ProjectBoard | null> {
+  const board = await optionalProjectApi<ProjectBoard>(`/api/projects/${encodeURIComponent(slug)}/board`);
+  return board && typeof board.text === "string" ? board : null;
 }
 
-/** Only the fields that changed; "" clears an optional pin. */
-export interface ControllerPatch {
-  project?: string;
-  folder?: string;
-  name?: string;
-  schedule?: string;
-  prompt?: string;
-  script_content?: string;
-  skills?: string[];
-  deliver?: string;
-  failure_deliver?: string;
-  repeat?: number;
-  workdir?: string;
-  model?: string;
-  provider?: string;
-  reasoning_effort?: string;
-  continuity?: boolean;
-}
-
-export async function updateController(slug: string, patch: ControllerPatch): Promise<ControllerView> {
-  return normalizeControllerView(await api<HermesControllerView>(`/api/projects/${encodeURIComponent(slug)}/controller`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(patch),
-  }));
-}
-
-export async function getProjectController(slug: string, limit = 40, priority?: RequestPriority): Promise<ControllerView> {
-  return normalizeControllerView(
-    await api<HermesControllerView>(`/api/projects/${encodeURIComponent(slug)}/controller?limit=${limit}`, undefined, undefined, priority),
-  );
-}
-
-export async function controllerAction(slug: string, action: "pause" | "resume" | "run" | "archive" | "restore" | "delete"): Promise<ControllerView> {
-  const view = normalizeControllerView(await api<HermesControllerView>(`/api/projects/${encodeURIComponent(slug)}/controller/action`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action }),
-  }));
-  if (action === "run" && (!view.job || !view.job.enabled || view.job.state === "paused")) {
-    throw new Error("The scheduler did not wake the paused controller. Your steer is still saved.");
-  }
-  return view;
-}
-
-export async function deleteProjectController(slug: string): Promise<ControllerView> {
-  return normalizeControllerView(await api<HermesControllerView>(`/api/projects/${encodeURIComponent(slug)}/controller`, {
-    method: "DELETE",
-  }));
-}
-
-/** Additional Hermes jobs explicitly bound to this project by the core. */
-export async function listProjectCrons(slug: string, priority?: RequestPriority): Promise<ControllerJob[]> {
-  const data = await api<{ jobs?: HermesJob[] }>(`/api/projects/${encodeURIComponent(slug)}/crons`, undefined, undefined, priority);
-  return (data.jobs ?? []).map((job) => getProjectCronFromJob(slug, job).job!);
-}
-
-export interface ProjectCronDefaults { deliver: string; route_ready: boolean; folders_supported?: boolean }
-export async function getProjectCronDefaults(slug: string): Promise<ProjectCronDefaults> {
-  return api(`/api/projects/${encodeURIComponent(slug)}/crons/defaults`);
-}
-
-export type ProjectCronDraft = ControllerPatch;
-
-export async function createProjectCron(slug: string, draft: ProjectCronDraft): Promise<HermesJob> {
-  const data = await api<{ job: HermesJob }>(`/api/projects/${encodeURIComponent(slug)}/crons`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(hermesPatch(draft)),
+export async function setProjectControllerMission(slug: string, missionId: string | null): Promise<boolean> {
+  // The write contract does not require a response body (Core may return 204).
+  const result = await optionalProjectApi<unknown>(`/api/projects/${encodeURIComponent(slug)}/controller-mission`, {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mission_id: missionId }),
   });
-  return data.job;
-}
-
-export async function getProjectCron(slug: string, id: string): Promise<ControllerView> {
-  const data = await api<{ job: HermesJob; runs?: ControllerRun[] }>(`/api/projects/${encodeURIComponent(slug)}/crons/${encodeURIComponent(id)}`);
-  return getProjectCronFromJob(slug, data.job, data.runs ?? []);
-}
-
-export async function updateProjectCron(slug: string, id: string, patch: ControllerPatch): Promise<ControllerView> {
-  const current = patch.continuity === undefined ? undefined : await api<{ job: HermesJob }>(`/api/projects/${encodeURIComponent(slug)}/crons/${encodeURIComponent(id)}`);
-  const data = await api<{ job: HermesJob & { project?: string }; runs?: ControllerRun[] }>(`/api/projects/${encodeURIComponent(slug)}/crons/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(hermesPatch(patch, current?.job)) });
-  return getProjectCronFromJob(data.job?.project || patch.project || slug, data.job, data.runs ?? []);
-}
-
-export async function deleteProjectCron(slug: string, id: string): Promise<void> {
-  await api<unknown>(`/api/projects/${encodeURIComponent(slug)}/crons/${encodeURIComponent(id)}`, { method: "DELETE" });
-}
-
-export async function projectCronAction(slug: string, id: string, action: "pause" | "resume" | "run"): Promise<ControllerView> {
-  await api<unknown>(`/api/projects/${encodeURIComponent(slug)}/crons/${encodeURIComponent(id)}/action`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }) });
-  // trigger_job may return an execution receipt or boolean, not a job record.
-  return getProjectCron(slug, id);
+  return result !== null;
 }
 
 /** Bumped after a project is created so every list re-fetches. */
@@ -2652,34 +2519,6 @@ export async function sendMissionMessage(
   if (receipt?.message_accepted === false) throw new MessageRejectedError("Message was not accepted. Your draft is kept.");
   if (!receipt || typeof receipt.id !== "string" || !receipt.id || typeof receipt.queued !== "boolean") throw new Error("Invalid message receipt. Your draft is kept.");
   return receipt;
-}
-
-export interface ProjectSteer {
-  id: string;
-  body: string;
-  created_at: string;
-  consumed_at?: string | null;
-  origin: string;
-}
-
-export interface ProjectSteers {
-  slug?: string;
-  pending: ProjectSteer[];
-  recent: ProjectSteer[];
-}
-
-export async function getProjectSteers(slug: string): Promise<ProjectSteers> {
-  const result = await api<ProjectSteers>(`/api/projects/${encodeURIComponent(slug)}/steers`);
-  if (!Array.isArray(result.pending) || !Array.isArray(result.recent)) throw new Error("Steer inbox unavailable");
-  return result;
-}
-
-export async function addProjectSteer(slug: string, body: string, origin = "orb"): Promise<ProjectSteers> {
-  return api(`/api/projects/${encodeURIComponent(slug)}/steers`, withIdempotencyKey({
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ body, origin }),
-  }));
 }
 
 export async function appendClientTranscript(id: string, role: "user" | "assistant", content: string, eventId: string = crypto.randomUUID(), receipt?: ClientRunReceipt): Promise<void> {

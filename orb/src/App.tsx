@@ -134,7 +134,6 @@ import {
   refreshLocalAgents,
   writeLocalFiles,
 } from "./localAgents";
-const ControllerView = lazy(() => import("./Controller").then(module => ({ default: module.ControllerView })));
 import {
   createMission,
   getMission,
@@ -235,7 +234,7 @@ export default function App() {
     onCleanup(() => { disposed = true; stop?.(); });
   });
   createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);const stopDelegations=startClientDelegations(missions);onCleanup(stopDelegations);onCleanup(startLocalWakeups());});
-  const [selected, setSelected] = createSignal<string | null>((() => { const saved = readString("orb.selectedConversation"); return saved && (PAGES.has(saved) || /^(m|pf|c|pc|ps|sk|rm):/.test(saved)) ? settingsPageId(saved) : null; })());
+  const [selected, setSelected] = createSignal<string | null>((() => { const saved = readString("orb.selectedConversation"); return saved && (PAGES.has(saved) || /^(m|pf|ps|sk|rm):/.test(saved)) ? settingsPageId(saved) : null; })());
   createEffect(() => {
     const next = selected() ?? "";
     if (readString("orb.selectedConversation") !== next) {
@@ -783,16 +782,10 @@ export default function App() {
     const m = openMission()?.id === mid ? openMission()! : inboxMissions().find((row) => row.id === mid);
     if (m) markMissionRead(m, true, Boolean(pendingMissionInteraction(mid)));
   });
-  // Project controller (Hermes cron): `c:<slug>`.
-  const currentController = createMemo(() => {
-    const id = selected();
-    if (id?.startsWith("c:")) return { slug: id.slice(2) };
-    if (id?.startsWith("pc:")) {
-      const [, slug, cronId] = id.split(":");
-      return slug && cronId ? { slug, id: cronId } : null;
-    }
-    return null;
-  });
+  const [lastProjectMission, setLastProjectMission] = createSignal<Mission | null>(null);
+  createEffect(on(connectionVersion, () => setLastProjectMission(null)));
+  createEffect(() => { const mission = openMission(); if (mission) setLastProjectMission(mission); });
+  const [projectMissionHint, setProjectMissionHint] = createSignal<{ id: string | null }>();
   // Project settings page: `ps:<slug>`.
   const currentProjectSettings = createMemo(() => {
     const id = selected();
@@ -935,7 +928,7 @@ export default function App() {
       // Backend views (missions, hosted files) can't render offline — e.g.
       // after a 401 cleared the token mid-session.
       const sel = selected();
-      if (sel && (sel.startsWith("m:") || sel.startsWith("ms:") || sel.startsWith("pf:") || sel.startsWith("c:") || sel.startsWith("pc:") || sel.startsWith("ps:") || sel.startsWith("rm:") || sel === "execution")) open(null);
+      if (sel && (sel.startsWith("m:") || sel.startsWith("ms:") || sel.startsWith("pf:") || sel.startsWith("ps:") || sel.startsWith("rm:") || sel === "execution")) open(null);
       // Keep an explicit machine selection across reconnects.
     }
   }));
@@ -1471,14 +1464,6 @@ export default function App() {
       const target = (ev as CustomEvent<string>).detail;
       if (target) open(target);
     };
-    const onDebugCron = (ev: Event) => {
-      const detail = (ev as CustomEvent<{ slug?: string; prompt?: string }>).detail;
-      if (!detail?.prompt) return;
-      setNewFolder(null);
-      if (detail.slug) setNewProject(detail.slug);
-      open(null);
-      setNewAgentRevision({ text: detail.prompt });
-    };
     window.addEventListener("orb:open-page", onOpenPage);
     const onPlacementChanged = (e: Event) => {
       const { moves } = (e as CustomEvent<{ moves?: PlacementCommitItem[] }>).detail ?? {};
@@ -1517,10 +1502,8 @@ export default function App() {
     window.addEventListener("orb:mission-archived", onArchived);
     window.addEventListener("orb:mission-archive-failed", onArchiveFailed);
     onCleanup(() => { window.removeEventListener("orb:mission-archived", onArchived); window.removeEventListener("orb:mission-archive-failed", onArchiveFailed); });
-    window.addEventListener("orb:debug-cron", onDebugCron);
     onCleanup(() => {
       window.removeEventListener("orb:open-page", onOpenPage);
-      window.removeEventListener("orb:debug-cron", onDebugCron);
     });
     // One foreground compact stream. Hints invalidate authoritative reads;
     // they never overwrite mission status or transcript revisions directly.
@@ -1561,6 +1544,7 @@ export default function App() {
           }
           if (typeof id === "string") {
             noteMissionPresentationHint(id, event.data.kind);
+            if (event.data.kind !== "mission_activity") setProjectMissionHint({ id });
           }
           if (event.data.kind === "mission_activity") {
             if (typeof id === "string") recordPresentationActivity(id, event.data.label);
@@ -1571,7 +1555,7 @@ export default function App() {
           presentationTimer ??= setTimeout(flushPresentation, needsList ? 150 : 1000);
         },
         () => { markUnfocusedMissionsDirty(); markUnfocusedBtwDirty(); void refreshMissions(); },
-        () => { presentationConnected = true; },
+        () => { presentationConnected = true; setProjectMissionHint({ id: null }); },
         "presentation",
         undefined,
         () => { presentationConnected = false; markUnfocusedMissionsDirty(); markUnfocusedBtwDirty(); },
@@ -1748,9 +1732,9 @@ export default function App() {
   );
 
   return (
-    <div class={`app ${onSettings() ? "settings-view" : ""} ${(nativeChromeActive || !sidebar()) ? "sb-hidden" : ""}`} data-native-chrome={nativeChromeActive ? "true" : undefined} data-native-sb-open={nativeChromeActive ? (sidebar() ? "true" : "false") : undefined} data-pane={currentMissionId() ? "mission" : (currentController() || currentProjectFile() || currentProjectSettings()) ? "project" : "page"} style={{ "--sb-w": `${onSettings() ? 220 : sbWidth()}px` }}>
-      <MentionProjectContext.Provider value={()=>openMission()?.project??currentController()?.slug??effectiveNewProject()}>
-      <FilePanelProvider missionOpen={currentMissionId()} scope={{ mission: fileScopeMission() ?? undefined, project: currentController()?.slug, controller: currentController()?.id }} sidebar={sidebar} onSetSidebar={setSidebarWithNative}>
+    <div class={`app ${onSettings() ? "settings-view" : ""} ${(nativeChromeActive || !sidebar()) ? "sb-hidden" : ""}`} data-native-chrome={nativeChromeActive ? "true" : undefined} data-native-sb-open={nativeChromeActive ? (sidebar() ? "true" : "false") : undefined} data-pane={currentMissionId() ? "mission" : (currentProjectFile() || currentProjectSettings()) ? "project" : "page"} style={{ "--sb-w": `${onSettings() ? 220 : sbWidth()}px` }}>
+      <MentionProjectContext.Provider value={()=>openMission()?.project??currentProjectSettings()??effectiveNewProject()}>
+      <FilePanelProvider missionOpen={currentMissionId()} scope={{ mission: fileScopeMission() ?? undefined, project: currentProjectSettings() ?? undefined }} sidebar={sidebar} onSetSidebar={setSidebarWithNative}>
       <Show when={!nativeChromeActive}>
       <button class="sidebar-backdrop" aria-label="Close sidebar" onClick={() => setSidebar(false)} tabIndex={-1} />
       <aside id="orb-sidebar" class="sidebar">
@@ -2428,17 +2412,10 @@ export default function App() {
               <Resources missionId={currentResourcesMissionId()} onOpen={open} />
             </Suspense>
           </Match>
-          <Match when={currentController()}>
-            {(slug) => (
-              <Show when={slug()} keyed>
-                {(s) => <ControllerView slug={s.slug} id={s.id} />}
-              </Show>
-            )}
-          </Match>
           <Match when={currentProjectSettings()}>
             {(slug) => (
               <Show when={slug()} keyed>
-                {(s) => <ProjectSettings slug={s} onOpenPage={open} onOpenMission={(id) => open(`m:${id}`)} />}
+                {(s) => <ProjectSettings slug={s} selectedMission={lastProjectMission()} missionHint={projectMissionHint()} onOpenPage={open} onOpenMission={(id) => open(`m:${id}`)} />}
               </Show>
             )}
           </Match>

@@ -59,7 +59,6 @@ export function classifyClientRequestPriority(
     cleanPath.startsWith("/api/stats") ||
     cleanPath.startsWith("/api/providers/antigravity-models") ||
     cleanPath.startsWith("/api/antigravity-models") ||
-    cleanPath.startsWith("/api/crons") ||
     cleanPath.startsWith("/api/library/skill-delivery") ||
     cleanPath.startsWith("/api/ai/providers/usage") ||
     cleanPath === "/api/privilege-access" ||

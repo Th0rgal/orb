@@ -11,18 +11,17 @@ export const isMissionDeleting = (id: string): boolean => deletingIds().has(id);
 export function isSelectableRow(row: TreeRow<RowData>, deleting: ReadonlySet<string> = deletingIds()): boolean {
   const d = row.data;
   if (d.kind === "mission") return !!d.mission && !deleting.has(d.mission.id);
-  if (d.kind === "cron") return !d.controller && !!d.job?.id;
   return d.kind === "file" || d.kind === "folder";
 }
 
 export function isSelectableAnchorId(id: string | null | undefined): id is string {
-  return !!id && (id.startsWith("m:") || id.startsWith("mp:") || id.startsWith("pc:") || id.startsWith("pf:"));
+  return !!id && (id.startsWith("m:") || id.startsWith("mp:") || id.startsWith("pf:"));
 }
 
 /**
  * Multi-selection state of the projects sidebar tree. Tree ids are `m:<id>`
  * (missions), `mp:<slug>:<id>` (cross-project placeholder parents),
- * `pf:<slug>:<path>` (files/folders) and `pc:<slug>:<id>` (crons).
+ * `pf:<slug>:<path>` (files/folders).
  * `visibleNodes` returns the nodes currently rendered, in order, for range selection.
  */
 export function createTreeSelection(deps: {

@@ -22,11 +22,12 @@ test('sidebar joins preload and click, reopens from cache, and keeps files on re
  const firstFrameMs=await frame();
  await expect(page.getByRole('button',{name:'Agent 99',exact:true})).toBeVisible();
  await page.waitForTimeout(250);
- for(const key of ['missions','open-missions','files','controller','crons'])expect(counts[key]).toBe(1);
+ for(const key of ['missions','open-missions','files'])expect(counts[key]).toBe(1);
  await project.click();const warmFrameMs=await frame();
  await expect(page.getByRole('button',{name:'Agent 99',exact:true})).toBeVisible();
  await page.waitForTimeout(250);
- for(const key of ['missions','open-missions','files','controller','crons'])expect(counts[key]).toBe(1);
+ for(const key of ['missions','open-missions','files'])expect(counts[key]).toBe(1);
+ for(const key of ['controller','crons'])expect(counts[key]??0).toBe(0);
  await info.attach('sidebar-timing.json',{body:JSON.stringify({firstFrameMs,warmFrameMs,requests:counts,apiDelayMs:180,conversations:100}),contentType:'application/json'});
  failFiles=true;
  await expect(page.getByText('Couldn’t refresh files. Showing saved list.')).toBeVisible({timeout:13000});

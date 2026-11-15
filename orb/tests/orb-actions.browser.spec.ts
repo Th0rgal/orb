@@ -181,7 +181,7 @@ test("a refused clipboard write is reported, not swallowed", async ({ page }) =>
 
 // ---------------------------------------------------------------- feature 2
 
-test("reference subfolder: hover reveals +, whose menu creates agents, crons and files", async ({ page }) => {
+test("reference subfolder: hover reveals +, whose menu creates agents and files", async ({ page }) => {
   const { writes, posts } = await setup(page);
   await expandProject(page);
 
@@ -196,7 +196,7 @@ test("reference subfolder: hover reveals +, whose menu creates agents, crons and
 
   await plus.click();
   const menu = page.getByRole("menu");
-  await expect(menu.getByRole("menuitem")).toHaveText(["New agent", "Cloud agent", "New cron", "New file", "New folder", "Rename", "Move…", "Cut", "Copy", "Delete…"]);
+  await expect(menu.getByRole("menuitem")).toHaveText(["New agent", "Cloud agent", "New file", "New folder", "Rename", "Move…", "Cut", "Copy", "Delete…"]);
 
   await menu.getByRole("menuitem", { name: "New file" }).click();
   await page.getByLabel("File name").fill("spec");
@@ -205,7 +205,7 @@ test("reference subfolder: hover reveals +, whose menu creates agents, crons and
   // Written through the core's project-file API, under the folder, with .md.
   await expect.poll(() => writes.length).toBe(1);
   expect(writes[0]).toEqual({ path: "reference/spec.md", content: "" });
-  // No mission and no cron was needed to create a file.
+  // No mission was needed to create a file.
   expect(posts).toEqual([]);
 
   // The parent is expanded and the new file is opened in the Markdown view.
@@ -242,12 +242,12 @@ test("a created reference file opens in Markdown, autosaves, and toggles with Cm
   await expect(toggle).toHaveText("Edit");
 });
 
-test("the project root offers agents and crons first and never file creation", async ({ page }) => {
+test("the project root offers agents first and never file creation", async ({ page }) => {
   const { writes } = await setup(page);
   await page.getByRole("button", { name: "Project actions for Test" }).click();
   const menu = page.getByRole("menu");
   await expect(menu.getByRole("menuitem")).toHaveText([
-    "New agent", "Cloud agent", "New cron", "New folder", "Project settings", "Rename", "Archive",
+    "New agent", "Cloud agent", "New folder", "Project settings", "Rename", "Archive",
   ]);
   await expect(menu.getByRole("menuitem", { name: "New file" })).toHaveCount(0);
   expect(writes).toEqual([]);
@@ -337,7 +337,7 @@ test("right-click a project: Project settings opens a page in the main panel", a
   await page.getByRole("button", { name: "Test", exact: true }).click({ button: "right" });
   await page.getByRole("menuitem", { name: "Project settings" }).click();
 
-  // A page, not a dialog — same navigation a cron uses.
+  // A page, not a dialog.
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(page.locator(".tb-title")).toHaveText("Test · Settings");
   await expect(page.getByRole("heading", { name: "Test" })).toBeVisible();

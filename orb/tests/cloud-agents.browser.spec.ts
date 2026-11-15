@@ -290,10 +290,10 @@ test('Hermes cloud agent supports custom router model selection and image attach
  expect(followups[0].content).toContain('[Uploaded: /var/lib/sandboxed-sh/context/image-2.png]');
 });
 
-test('Hermes supports router catalog models, effort switching mid-mission without fork, thoughts and tool steps, arbitrary file uploads, Default crons, and Hermes settings',async({page})=>{
+test('Hermes supports router catalog models, effort switching mid-mission without fork, thoughts and tool steps, arbitrary file uploads, and Hermes settings',async({page})=>{
  const id='dddddddd-dddd-4ddd-dddd-dddddddddddd';
  const mission={id,title:'Hermes full flow',backend:'cloud_hermes',project:'default',workspace_id:'00000000-0000-0000-0000-000000000000',status:'awaiting_user',history:[],created_at:'',updated_at:''};
- const launches:any[]=[],followups:any[]=[],settingsPuts:any[]=[],deletedCrons:string[]=[];
+ const launches:any[]=[],followups:any[]=[],settingsPuts:any[]=[];
  let currentModel='builtin/private';
  let currentParams=[{id:'effort',value:'high'}];
  await page.addInitScript(()=>{localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
@@ -349,10 +349,6 @@ test('Hermes supports router catalog models, effort switching mid-mission withou
     models:[{id:'builtin/smart',name:'Smart (Default) · builtin/smart'},{id:'builtin/private',name:'Private · builtin/private'}],
     efforts:[{id:'',name:'Default'},{id:'high',name:'High'}]
    }});
-  }
-  if(path==='/api/projects/default/crons/cron_digest'&&request.method()==='DELETE'){
-   deletedCrons.push('cron_digest');
-   return route.fulfill({json:{deleted:true,id:'cron_digest'}});
   }
   let json:unknown={};
   if(path==='/api/projects')json={projects:[{slug:'default',title:'Default'}]};
@@ -416,11 +412,6 @@ test('Hermes supports router catalog models, effort switching mid-mission withou
    }]
   };
   else if(path.endsWith('/cloud/children'))json={missions:[]};
-  else if(path==='/api/projects/default/crons')json={jobs:deletedCrons.length?[]:[{id:'cron_digest',name:'Daily Hermes Digest',schedule:'0 9 * * *',enabled:true,state:'scheduled',next_run_at:'2026-10-07T09:00:00Z',last_status:'ok',failure_streak:0,prompt:'Summarize daily progress'}]};
-  else if(path==='/api/projects/default/crons/cron_digest')json={
-   job:{id:'cron_digest',name:'Daily Hermes Digest',schedule:'0 9 * * *',enabled:true,state:'scheduled',next_run_at:'2026-10-07T09:00:00Z',last_status:'ok',failure_streak:0,prompt:'Summarize daily progress'},
-   runs:[{id:'run_cron_1',at:'2026-10-06T09:00:00Z',duration_secs:14,status:'completed',silent:false,report:'Digest delivered.'}]
-  };
   else if(path.endsWith('/files'))json={entries:[]};
   else if(path.includes('/controller'))json={job:null,runs:[]};
   else if(path==='/api/control/queue'||path==='/api/backends')json=[];
@@ -469,17 +460,7 @@ test('Hermes supports router catalog models, effort switching mid-mission withou
  expect(followups[0].cloud_model).toBe('anthropic/claude-opus-4-6');
  expect(followups[0].cloud_model_params).toEqual([{id:'effort',value:'xhigh'}]);
 
- // 4. Verify Hermes cron under Default project in sidebar, view run history, and delete
- const defaultBtn=page.getByRole('button',{name:'Default',exact:true});
- if(await defaultBtn.getAttribute('aria-expanded')!=='true')await defaultBtn.click();
- await page.locator('button.row.agent.cron').filter({hasText:'Daily Hermes Digest'}).click();
- await expect(page.getByText('Digest delivered.')).toBeVisible();
- await page.getByRole('button',{name:'Delete',exact:true}).click();
- await expect.poll(()=>deletedCrons.length).toBe(1);
- await expect(page.locator('button.row.agent.cron').filter({hasText:'Daily Hermes Digest'})).toHaveCount(0);
- await expect(page.getByRole('dialog')).toHaveCount(0);
-
- // 5. Open Hermes Settings page and save updated configuration
+ // 4. Open Hermes Settings page and save updated configuration
  await page.getByRole('button',{name:'Settings',exact:true}).click();
  await page.getByRole('button',{name:'Agents',exact:true}).click();
  await page.getByRole('tab',{name:'Assistant',exact:true}).click();

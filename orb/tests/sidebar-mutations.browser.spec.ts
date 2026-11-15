@@ -41,7 +41,7 @@ for (const action of ['rename', 'delete'] as const) test(`sidebar preserves view
 test('folder rename retains expanded descendants and surfaces work migration errors', async ({page}) => {
   await page.addInitScript(() => {localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
   let root='reference';
-  let failCronMove=false;
+  let failMissionMove=false;
   let holdNextTransfer=false;
   let pendingTransfer: (() => void) | null = null;
   await page.route('**/api/**',async route=>{
@@ -60,14 +60,11 @@ test('folder rename retains expanded descendants and surfaces work migration err
       if(requested===`${root}/nested/notes.md`) return route.fulfill({json:{content:'# Audit notes',revision:1}});
       return route.fulfill({status:404,body:'file not found'});
     }
-    if(req.method()==='PATCH' && path.includes('/crons/')) {
-      if(failCronMove) return route.fulfill({status:500,body:'scheduler busy'});
-      return route.fulfill({json:{slug:'one',job:{id:'job-1',name:'Nightly audit',schedule:'every 1h',enabled:true,failure_streak:0,folder:root},runs:[]}});
-    }
+    if(req.method()==='POST' && path==='/api/control/missions/move') return route.fulfill({status:500,body:'mission move unavailable'});
     const folder=url.searchParams.get('path')??'';
     const entries=folder===''?[{name:root,kind:'dir'}]:folder===root?[{name:'nested',kind:'dir'}]:folder===`${root}/nested`?[{name:'notes.md',kind:'file'}]:[];
-    const jobs=failCronMove?[{id:'job-1',name:'Nightly audit',schedule:'every 1h',enabled:true,failure_streak:0,folder:'Research'}]:[];
-    const json=path==='/api/projects'?{projects:[{slug:'one',title:'One'}]}:path.endsWith('/files')?{entries}:path.endsWith('/crons')?{jobs}:path.endsWith('/controller')?{job:null,runs:[]}:[];
+    const missions=failMissionMove?[{id:'migration-agent',title:'Audit agent',status:'completed',project:'one',folder:'Research',tags:[],history:[]}]:[];
+    const json=path==='/api/projects'?{projects:[{slug:'one',title:'One'}]}:path==='/api/control/missions'?missions:path.startsWith('/api/control/missions/')?missions[0]??{}:path.endsWith('/files')?{entries}:[];
     await route.fulfill({json});
   });
   await page.goto('/');await page.getByRole('button',{name:'One',exact:true}).click();
@@ -97,13 +94,12 @@ test('folder rename retains expanded descendants and surfaces work migration err
   await expect(page.getByRole('button',{name:'nested',exact:true})).toHaveAttribute('aria-expanded','true');
   await expect(page.getByRole('button',{name:'reference',exact:true})).toHaveCount(0);
 
-  failCronMove=true;
+  failMissionMove=true;
   await page.getByRole('button',{name:'Research',exact:true}).click({button:'right'});
   await page.getByRole('menuitem',{name:'Rename',exact:true}).click();
   await page.getByLabel('Folder name',{exact:true}).fill('Archive');
   await page.getByRole('dialog').getByRole('button',{name:'Rename',exact:true}).click();
-  await expect(page.getByRole('alert')).toContainText('Nightly audit');
-  await expect(page.getByRole('alert')).toContainText('could not follow');
+  await expect(page.getByRole('alert').filter({hasText:'could not follow'})).toContainText('migratio');
 });
 
 test('folder delete dismisses dialog immediately and rolls back cleanly on failure', async ({page}) => {

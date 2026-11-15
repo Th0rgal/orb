@@ -5,7 +5,7 @@ import { mountOverlay, OverlayContext, overlayFirstModal, overlayZIndex, overlay
 import { CloseIcon } from "./icons";
 import "./Dialog.css";
 
-// Embedded editors (such as persisted cron drafts) own the discard operation.
+// Embedded editors (such as persisted drafts) own the discard operation.
 // Registering their guard keeps X, Escape, outside clicks and Cancel identical.
 export const DialogCloseContext = createContext<(guard: () => void) => () => void>();
 
