@@ -299,13 +299,13 @@ internal fun providerWriteError(error: Throwable, fallback: String): String {
     val rawCode = when (error) {
         is OrbError -> {
             if (error.status != 403 && error.status != 0) return fallback
-            val parsed = OrbJSON.parse(error.body)
+            val parsed = error.body?.let { OrbJSON.dict(OrbJSON.parse(it)) }
             OrbJSON.str(parsed, "error", "message", "detail") ?: error.message
         }
         else -> error.message.orEmpty()
     }.trim()
     val code = if (rawCode.startsWith("{")) {
-        val parsed = OrbJSON.parse(rawCode)
+        val parsed = OrbJSON.dict(OrbJSON.parse(rawCode))
         OrbJSON.str(parsed, "error", "message", "detail") ?: rawCode
     } else rawCode
     return when (code) {
