@@ -6725,6 +6725,91 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
   cleanup
   return 0
 
+private def checkSurvivingRemoteTurnRedeploy
+    (ts : Nat) (jwtSec dashboardPassword : String) (nowSec : UInt64) (legPastIso : String)
+    (jobSeqRef : IO.Ref Nat) (rHub : RelayHub) (bHub : BroadcastHub) : IO (Option String) := do
+  let redeployRoot := s!"/tmp/orb_remote_redeploy_{ts}"
+  let redeployData := s!"{redeployRoot}/.sandboxed-sh"
+  discard <| (IO.FS.removeDirAll redeployRoot).toBaseIO
+  IO.FS.createDirAll (System.FilePath.mk s!"{redeployData}/missions")
+  IO.FS.writeFile (System.FilePath.mk s!"{redeployData}/missions.db") ""
+  let legRedeployMissionsPath := s!"{redeployData}/missions/missions-prod.db"
+  let legRedeploySeed :=
+    "CREATE TABLE IF NOT EXISTS missions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'awaiting_user', backend TEXT NOT NULL DEFAULT 'opencode', working_directory TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
+    "CREATE TABLE IF NOT EXISTS mission_runs (run_id TEXT PRIMARY KEY NOT NULL, mission_id TEXT NOT NULL, generation INTEGER NOT NULL, execution_state TEXT NOT NULL, owner_actor_id TEXT NOT NULL DEFAULT '', started_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL DEFAULT '');"
+  let .ok preRedM ← openSqliteDb legRedeployMissionsPath legRedeploySeed #[]
+    | return some "open legacy redeploy missions-prod.db failed"
+  sqliteCloseRaw preRedM.handle
+  let .ok redStore1 ← openCoreStore redeployData 0 "prod"
+    | return some "openCoreStore redeploy 1 failed"
+  let .ok () ← ensureQueueContSchema redStore1
+    | do closeCoreStore redStore1; return some "ensureQueueContSchema redeploy 1 failed"
+  let .ok redMStore1 ← openManagedComputeStore s!"{redeployData}/managed_compute.db"
+    | do closeCoreStore redStore1; return some "openManagedComputeStore redeploy 1 failed"
+  let .ok redAdminId ← bootstrapUsersAndBackfill redStore1 #[("admin", dashboardPassword)] (formatEpochIso8601Utc nowSec)
+    | do closeManagedComputeStore redMStore1; closeCoreStore redStore1; return some "redeploy bootstrap failed"
+  let _ ← execParamQuery redStore1.missionsDb
+    ("INSERT INTO missions(id,title,status,backend,model_override,working_directory,project,placement_kind,owner_user_id,tags,run_generation,created_at,updated_at) " ++
+     "VALUES('m-survive-redeploy','survive redeploy','awaiting_user','opencode','builtin/smart','','leanvm','remote',?1,'[\"remote-node:mocknode\"]',1,?2,?2);")
+    #[redAdminId, legPastIso]
+  let redSup1 ← newRemoteJobSupervisor jwtSec false
+  redSup1.boundPortRef.set 13000
+  let nextSeq ← jobSeqRef.get
+  let expectedJobId := s!"job-mock-{nextSeq + 1}"
+  redSup1.mu.atomically (modify (·.push expectedJobId))
+  let surviveSpec : RemoteTurnSpec := {
+    missionId        := "m-survive-redeploy"
+    targetNodeId     := "mocknode"
+    backend          := "opencode"
+    modelOverride    := "builtin/smart"
+    workingDirectory := ""
+    project          := "leanvm"
+    ownerUserId      := redAdminId
+    authorityMode    := "writer"
+    placementKind    := "remote"
+    tagsJson         := "[\"remote-node:mocknode\"]"
+    prompt           := "Continue across Core redeploy"
+  }
+  let subSurviveRes ← submitRemoteMissionTurn redStore1 (some redMStore1) (some rHub) (some bHub) redSup1 redeployRoot surviveSpec nowSec
+  closeManagedComputeStore redMStore1
+  closeCoreStore redStore1
+  let .ok submittedJobId := subSurviveRes
+    | do discard <| (IO.FS.removeDirAll redeployRoot).toBaseIO; return some s!"submitRemoteMissionTurn for m-survive-redeploy failed: {subSurviveRes}"
+  let .ok redStore2 ← openCoreStore redeployData 0 "prod"
+    | do discard <| (IO.FS.removeDirAll redeployRoot).toBaseIO; return some "openCoreStore redeploy 2 failed"
+  let .ok () ← ensureQueueContSchema redStore2
+    | do closeCoreStore redStore2; discard <| (IO.FS.removeDirAll redeployRoot).toBaseIO; return some "ensureQueueContSchema redeploy 2 failed"
+  let .ok redMStore2 ← openManagedComputeStore s!"{redeployData}/managed_compute.db"
+    | do closeCoreStore redStore2; discard <| (IO.FS.removeDirAll redeployRoot).toBaseIO; return some "openManagedComputeStore redeploy 2 failed"
+  let lostCount ← interruptTurnsLostToRestart redStore2.missionsDb
+  let redSup2 ← newRemoteJobSupervisor jwtSec false
+  redSup2.boundPortRef.set 13000
+  let redBHub2 ← newBroadcastHub
+  let reattachedCount ← reattachActiveRemoteJobsOnStartup redStore2 (some redMStore2) (some rHub) (some redBHub2) redSup2 redeployRoot
+  let mut surviveDone := false
+  for _ in [0:80] do
+    if !surviveDone then
+      if let .ok rs ← execParamQuery redStore2.missionsDb "SELECT status FROM missions WHERE id='m-survive-redeploy';" #[] then
+        if ((rs[1]?.bind (·[0]?)).getD "") == "completed" then
+          surviveDone := true
+      if !surviveDone then
+        IO.sleep 30
+  let surviveEvRes ← execParamQuery redStore2.missionsDb
+    "SELECT event_type, COALESCE(content, payload, '') FROM mission_events WHERE mission_id='m-survive-redeploy' ORDER BY id ASC;" #[]
+  let surviveEvStr := match surviveEvRes with | .ok rs => rowsToJsonArray rs | .error _ => ""
+  let surviveStRes ← execParamQuery redStore2.missionsDb
+    "SELECT status, COALESCE(session_id,'') FROM missions WHERE id='m-survive-redeploy';" #[]
+  let surviveSt := match surviveStRes with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  let surviveSid := match surviveStRes with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
+  closeManagedComputeStore redMStore2
+  closeCoreStore redStore2
+  discard <| (IO.FS.removeDirAll redeployRoot).toBaseIO
+  if lostCount != 0 || reattachedCount != 1 || !surviveDone || surviveSt != "completed" || surviveSid != "ses_mock1" ||
+     (surviveEvStr.splitOn "tool_result").length < 2 ||
+     (surviveEvStr.splitOn "Babylon progress is 94%.").length < 2 then
+    return some s!"surviving remote turn lost events across Core restart: job={submittedJobId} lost={lostCount} reattached={reattachedCount} done={surviveDone} st={surviveSt} sid={surviveSid} evs={surviveEvStr}"
+  return none
+
 set_option maxHeartbeats 1200000 in
 private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt32 := do
   let ts ← IO.monoNanosNow
@@ -7116,6 +7201,10 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
      "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":25}}\n\ndata: [DONE]\n").toUTF8
   if sseUsage != { input := 40, output := 25, cacheCreate := 60, cacheRead := 900 } then
     return (← fail s!"SSE usage was not merged across events: {repr sseUsage}")
+
+  -- 6. Surviving remote turn across Core restart/redeploy (including legacy `mission_runs` without `UNIQUE(mission_id, generation)`):
+  if let some redeployErr ← checkSurvivingRemoteTurnRedeploy ts jwtSec cfg.dashboardPassword nowSec legPastIso jobSeqRef rHub bHub then
+    return (← fail redeployErr)
 
   closeManagedComputeStore mStore
   closeCoreStore store
