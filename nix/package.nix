@@ -218,6 +218,10 @@
     # 7m22s with turbo-lean vs 4m45s with Lake on DGX Spark). Nix caches the
     # layers instead; turbo-lean stays the default for warm local and CI builds.
     ORB_SKIP_TURBO_LEAN = "1";
+    # The Nix build deliberately uses raw Lake (turbo-lean is in the sandbox only
+    # as a runtime dependency), and `build_orb_bins.sh` fails closed unless this
+    # is stated explicitly.
+    ORB_ALLOW_RAW_LAKE_FALLBACK = "1";
 
     dontConfigure = true;
 
