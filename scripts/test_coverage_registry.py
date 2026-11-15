@@ -17,7 +17,7 @@ class CoverageRegistryTests(unittest.TestCase):
         registry.validate_registry(self.value)
         self.assertEqual(self.value["acceptance"], "INCOMPLETE")
         self.assertEqual(self.value["total_exports"], 190)
-        self.assertEqual(self.value["counts_by_status"], {"partial": 129, "unconnected": 63})
+        self.assertEqual(self.value["counts_by_status"], {"partial": 127, "unconnected": 63})
         self.assertTrue(all(e["blockers"] for e in self.value["entries"]))
 
     def test_reject_unsupported_links_and_claims(self):
