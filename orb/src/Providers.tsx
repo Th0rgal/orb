@@ -1283,7 +1283,6 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
   const mistralSubscription = () => isAdminUser() && a.provider_type === "mistral" && a.uses_oauth;
   // Core sends an informational message ("Connected via OAuth") for healthy accounts; only a problem is worth showing.
   const problem = () => status() === "connected" ? undefined : (a.status.reason || a.status.message);
-  const expandable = () => !!p.rank || resetSupported() || !!resetInfo() || status() === "out_of_credit" || status() === "auth_failed" || status() === "needs_verification" || a.provider_type === "antigravity" || !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!problem();
   const [localOpen, setLocalOpen] = createSignal(false);
   const open = () => p.open ?? localOpen();
   const setOpen = (nextOpen: boolean) => p.onOpenChange ? p.onOpenChange(nextOpen) : setLocalOpen(nextOpen);
@@ -1301,6 +1300,8 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
     finally { setChecking(false); }
   };
   const email = () => a.account_email || p.usage?.account_email || a.name.match(/\(([^()]+@[^()]+)\)/)?.[1];
+  const hasUsageDetails = () => hasProviderUsageDetails(p.usage, email());
+  const expandable = () => !!p.rank || resetSupported() || !!resetInfo() || status() === "out_of_credit" || status() === "auth_failed" || status() === "needs_verification" || a.provider_type === "antigravity" || !!p.onEditKey || (canReconnect() && needsAuth()) || mistralSubscription() || hasUsageDetails() || !!problem();
   const plan = () => a.provider_type === "antigravity" ? p.usage?.antigravity_plan || "Subscription account"
     : a.provider_type === "google" ? (a.has_api_key && !a.has_oauth ? "API key" : "Model routing")
     : p.usage?.codex_plan_type || p.usage?.xai_plan || p.usage?.kimi_plan || p.usage?.zai_plan ? `${p.usage!.codex_plan_type || p.usage!.xai_plan || p.usage!.kimi_plan || p.usage!.zai_plan}`
@@ -1400,8 +1401,8 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
           <Show when={mistralSubscription()}>
             <MistralUsageConnect a={a} usage={p.usage} onUsage={p.onUsage} />
           </Show>
-          <Show when={hasProviderUsageDetails(p.usage)}>
-            <UsageDetail usage={p.usage!} sharedOrg={!!p.usage?.organization_id && !!p.sharedOrgs?.has(p.usage.organization_id)} headerEmail={a.account_email ?? (p.usage?.account_email && a.name.includes(p.usage.account_email) ? p.usage.account_email : undefined)} planInHeader />
+          <Show when={hasUsageDetails()}>
+            <UsageDetail usage={p.usage!} sharedOrg={!!p.usage?.organization_id && !!p.sharedOrgs?.has(p.usage.organization_id)} headerEmail={email()} planInHeader />
           </Show>
           <Show when={status() === "needs_verification"}>
             <p class="s-row-desc inline-error">Google requires you to verify this account.</p>
