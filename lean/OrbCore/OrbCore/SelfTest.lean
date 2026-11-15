@@ -232,10 +232,38 @@ private def runManagedMcpProviderContractTests (root : String) : IO Unit := do
       let lease : Array (String × OrbBin.Json.JVal) := #[("ttl_minutes", .nat 60)]
       let beforeDefault := (← rented.get).size
       let onDefault ← call "leanci" "spawn_managed_machine" (.obj lease)
+      let defaultId := ((resultOf onDefault).fieldStr? "id").getD ""
       check ((resultOf onDefault).fieldStr? "provider" == some "leanci" &&
         ((resultOf onDefault).field? "provider_fallback").isNone &&
         (← rented.get).size == beforeDefault + 1 && (← rented.get).back? == some ("leanci", "small"))
         s!"an unnamed spawn uses the instance default: {OrbBin.Json.renderCompact onDefault}"
+      -- When lean.ci's supportsExtend flips true (via lifecycle.extend discovery),
+      -- list_managed_machines and extend_managed_machine reflect it immediately.
+      let extCalls ← IO.mkRef (0 : Nat)
+      let extEnabled ← IO.mkRef false
+      let extProvider : ManagedProvider.Provider := { ManagedProvisioningTests.mockPolicyProvider mc "leanci" with
+        supportsExtend := extEnabled.get
+        quoteCents := fun _ _ => .ok 0
+        extend := fun _ _ => do extCalls.modify (· + 1); return .ok ()
+      }
+      let extCall (tool : String) (args : OrbBin.Json.JVal) : IO OrbBin.Json.JVal := do
+        let raw ← dispatchMcpToolCall core (some mc) none none fleet root claims tool args now none (some (extProvider, cfg))
+        return (OrbBin.Json.parse raw).toOption.getD .null
+      let leanciSupportsExtendOf (reply : OrbBin.Json.JVal) : Option Bool :=
+        (((resultOf reply).fieldArr? "providers").getD #[]).find?
+          (·.fieldStr? "provider" == some "leanci") |>.bind (·.fieldBool? "supports_extend")
+      let catOff ← extCall "list_managed_machines" (.obj #[])
+      let extOff ← extCall "extend_managed_machine"
+        (.obj #[("machine_id", .str defaultId), ("ttl_minutes", .nat 5), ("idempotency_key", .str "leanci-ext-off")])
+      extEnabled.set true
+      let catOn ← extCall "list_managed_machines" (.obj #[])
+      let extOn ← extCall "extend_managed_machine"
+        (.obj #[("machine_id", .str defaultId), ("ttl_minutes", .nat 5), ("idempotency_key", .str "leanci-ext-on")])
+      check (leanciSupportsExtendOf catOff == some false &&
+        ((OrbBin.Json.renderCompact extOff).splitOn "managed_provider_extend_unsupported").length == 2 &&
+        leanciSupportsExtendOf catOn == some true &&
+        extOn.fieldBool? "ok" == some true && (← extCalls.get) == 1)
+        s!"lean.ci supports_extend and extend_managed_machine follow provider.supportsExtend: off={OrbBin.Json.renderCompact extOff} on={OrbBin.Json.renderCompact extOn}"
       let moved ← call "boat" "spawn_managed_machine" (.obj lease)
       check ((resultOf moved).fieldStr? "provider" == some "boat" &&
         (fallbackOf moved).fieldStr? "from" == some "leanci" && (fallbackOf moved).fieldStr? "to" == some "boat" &&
@@ -5193,6 +5221,71 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   if aliceExtBobVmSt != 404 || admExtBobVmSt != 404 || bobExtendLeanciSt != 409 ||
       (bobExtendLeanciBody.splitOn "managed_provider_extend_unsupported").length != 2 then
     return (← fail s!"REST extend must stay owner-scoped and reject unsupported providers: alice={aliceExtBobVmSt} adm={admExtBobVmSt} leanci={bobExtendLeanciSt}:{bobExtendLeanciBody}")
+  -- Mock-transport test for lean.ci `GET /v1/vms/capabilities` (`lifecycle.extend`),
+  -- `POST /v1/vms/:id/extend`, and REST `POST /api/managed-machines/:id/extend`:
+  let leanciCapExtend ← IO.mkRef false
+  let leanciExtendStatus ← IO.mkRef (200 : Nat)
+  let leanciHttpRequests ← IO.mkRef (#[] : Array ManagedProvider.Request)
+  let leanciCapCache ← IO.mkRef #[]
+  let leanciMockTransport : ManagedProvider.Transport := fun req => do
+    leanciHttpRequests.modify (·.push req)
+    if req.method == "GET" && req.path.startsWith "/vms/capabilities" then
+      let ext ← leanciCapExtend.get
+      return .ok (200, .obj #[
+        ("largest_bootable_memory_mib", .nat 107520),
+        ("pool", .obj #[("online_engines", .nat 3)]),
+        ("effective", .obj #[("schedulable_vcpus", .nat 96), ("schedulable_memory_mib", .nat 323796),
+          ("largest_bootable_vm", .obj #[("vcpus", .nat 32), ("memory_mib", .nat 107520)])]),
+        ("profiles", .arr (ManagedProvider.leanciProfiles.map fun p => .obj #[
+          ("runner_label", .str p.runnerLabel), ("default_memory_mib", .nat (p.size.ramGb * 1024)),
+          ("max_launchable_now", .nat 4), ("blocking_reason", .null)])),
+        ("lifecycle", .obj #[("extend", .bool ext), ("snapshots", .bool true),
+          ("restore_from_snapshot", .bool true), ("stop_keeps_disk", .bool false),
+          ("resume", .bool false), ("fork", .bool false), ("usage", .bool false)])])
+    if req.method == "POST" && req.path.endsWith "/extend" then
+      let st ← leanciExtendStatus.get
+      if st != 200 then return .ok (st, .obj #[("error", .str "unavailable")])
+      return .ok (200, .obj #[("extended", .bool true), ("expires_at", .str "2026-11-15T12:00:00Z"),
+        ("max_expires_at", .str "2026-11-22T11:00:00Z")])
+    return .ok (404, .null)
+  let leanciTransportProvider := ManagedProvider.leanci leanciMockTransport leanciCapCache (pure 0)
+  let leanciExtApp := { app with
+    managedProvisioningOverride? := some (
+      leanciTransportProvider,
+      { coreUrl := "https://core.example", script := "#!/bin/sh\nexit 0\n" })
+  }
+  let sendLeanciExtReq (method target tok body : String) (retryKey : String := "") : IO (Nat × String) := do
+    let authHdr := (if tok.isEmpty then "" else s!"Authorization: Bearer {tok}\r\n") ++
+      (if retryKey.isEmpty then "" else s!"Idempotency-Key: {retryKey}\r\n")
+    let raw := if body.isEmpty then
+        s!"{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authHdr}\r\n"
+      else
+        s!"{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authHdr}Content-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+    match parseRequest raw.toUTF8 none with
+    | .error e => return (0, s!"parse_err:{e}")
+    | .ok req =>
+      match ← dispatchCoreRequest leanciExtApp req nowSec with
+      | .error _ => return (0, "dispatch_err")
+      | .ok resp => return (resp.status, (String.fromUTF8? resp.body).getD "")
+  let (leanciRestOffSt, leanciRestOffBody) ← sendLeanciExtReq "POST"
+    s!"/api/managed-machines/{bobVmId}/extend" bobTok "{\"ttl_minutes\":5}" "bob-leanci-rest-ext-off"
+  leanciCapExtend.set true
+  leanciCapCache.set #[]
+  leanciExtendStatus.set 503
+  let (leanciRest503St, leanciRest503Body) ← sendLeanciExtReq "POST"
+    s!"/api/managed-machines/{bobVmId}/extend" bobTok "{\"ttl_minutes\":5}" "bob-leanci-rest-ext-503"
+  leanciExtendStatus.set 200
+  let (leanciRestOkSt, leanciRestOkBody) ← sendLeanciExtReq "POST"
+    s!"/api/managed-machines/{bobVmId}/extend" bobTok "{\"ttl_minutes\":5}" "bob-leanci-rest-ext-503"
+  let (leanciRestRetrySt, leanciRestRetryBody) ← sendLeanciExtReq "POST"
+    s!"/api/managed-machines/{bobVmId}/extend" bobTok "{\"ttl_minutes\":5}" "bob-leanci-rest-ext-503"
+  let postExtendReqs := (← leanciHttpRequests.get).filter (fun r => r.method == "POST" && r.path.endsWith "/extend")
+  if leanciRestOffSt != 409 || (leanciRestOffBody.splitOn "managed_provider_extend_unsupported").length != 2 ||
+      leanciRest503St != 409 || (leanciRest503Body.splitOn "managed_extension_outcome_uncertain").length != 2 ||
+      leanciRestOkSt != 200 || leanciRestRetrySt != 200 || leanciRestOkBody != leanciRestRetryBody ||
+      postExtendReqs.size != 2 || postExtendReqs.back!.idempotencyKey != "" ||
+      ((postExtendReqs.back!.body.getD .null).fieldUInt64? "ttl_secs").isNone then
+    return (← fail s!"lean.ci REST extend transport contract failed: off={leanciRestOffSt}:{leanciRestOffBody} 503={leanciRest503St}:{leanciRest503Body} ok={leanciRestOkSt}:{leanciRestOkBody} reqs={postExtendReqs.size}")
   let boatExtCalls ← IO.mkRef (0 : Nat)
   let boatExtApp := { app with
     managedProvisioningOverride? := some (
