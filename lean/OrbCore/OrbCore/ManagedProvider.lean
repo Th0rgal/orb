@@ -87,6 +87,13 @@ structure Provider where
   /-- Whether `extend` can be called now. A provider that discovers it from its API
       (lean.ci `lifecycle.extend`) answers from there; an unreadable answer is `false`. -/
   supportsExtend : IO Bool := pure true
+  /-- Whether `stop` and `resume` can be called now. A provider that discovers it from
+      its API (lean.ci `lifecycle.stop_keeps_disk` and `lifecycle.resume`) answers from
+      there; an unreadable answer is `false`. -/
+  supportsStopResume : IO Bool := pure false
+  /-- Whether `resume` boots the same provider machine ID in place instead of forking
+      a new provider ID. -/
+  resumeInPlace : Bool := false
 
 /-- Parse nonnegative provider USD decimals (including bounded exponent form)
     and round half-up to cents without binary floating-point arithmetic. -/

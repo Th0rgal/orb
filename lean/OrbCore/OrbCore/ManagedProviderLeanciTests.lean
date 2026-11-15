@@ -85,19 +85,29 @@ def run : IO Unit := do
     (extendRequest.body.map renderCompact) == some "{\"ttl_secs\":600}" &&
     leanciCatalog.fieldBool? "supports_extend" == some false)
     "extend request shape; without discovery the catalog keeps extend off"
-  -- Discovery, both shapes: today's capabilities (no `lifecycle` block) and lean.ci#35's.
+  -- Discovery, both shapes: today's capabilities (no `lifecycle` block) and lean.ci#35/#38's.
   let today := capabilities 3 96 32 107520 4
-  let lifecycle (extend : Bool) : JVal := today.setField "lifecycle" (.obj #[
+  let lifecycle (extend : Bool) (parkResume : Bool := false) : JVal := today.setField "lifecycle" (.obj #[
     ("extend", .bool extend), ("snapshots", .bool true), ("restore_from_snapshot", .bool true),
-    ("stop_keeps_disk", .bool false), ("resume", .bool false), ("fork", .bool false), ("usage", .bool false)])
+    ("stop_keeps_disk", .bool parkResume), ("resume", .bool parkResume), ("parked_retention_secs", .nat 86400),
+    ("fork", .bool false), ("usage", .bool false)])
   let catalogExtend (body : Option JVal) := (JVal.obj (catalogFields "leanci" body)).fieldBool? "supports_extend"
+  let catalogStopResume (body : Option JVal) := (JVal.obj (catalogFields "leanci" body)).fieldBool? "supports_free_stop"
   check (!leanciSupportsExtend today && !leanciSupportsExtend (.obj #[]) && !leanciSupportsExtend (lifecycle false) &&
     leanciSupportsExtend (lifecycle true)) "extend is supported only when lifecycle.extend is true"
+  check (!leanciSupportsStopResume today && !leanciSupportsStopResume (.obj #[]) &&
+    !leanciSupportsStopResume (lifecycle true false) &&
+    !leanciSupportsStopResume (today.setField "lifecycle" (.obj #[("stop_keeps_disk", .bool true), ("resume", .bool false)])) &&
+    !leanciSupportsStopResume (today.setField "lifecycle" (.obj #[("stop_keeps_disk", .bool false), ("resume", .bool true)])) &&
+    leanciSupportsStopResume (lifecycle true true))
+    "stop/resume is supported only when both lifecycle.stop_keeps_disk and lifecycle.resume are true"
   check (catalogExtend none == some false && catalogExtend (some today) == some false &&
     catalogExtend (some (lifecycle false)) == some false && catalogExtend (some (lifecycle true)) == some true &&
-    (JVal.obj (catalogFields "leanci" (some (lifecycle true)))).fieldBool? "supports_free_stop" == some false &&
-    ((JVal.obj (catalogFields "leanci" (some (lifecycle true)))).fieldArr? "sizes").map (·.size) == some 6)
-    "the observed catalog follows lifecycle.extend and never advertises stop/resume"
+    catalogStopResume none == some false && catalogStopResume (some today) == some false &&
+    catalogStopResume (some (lifecycle true false)) == some false &&
+    catalogStopResume (some (lifecycle true true)) == some true &&
+    ((JVal.obj (catalogFields "leanci" (some (lifecycle true true)))).fieldArr? "sizes").map (·.size) == some 6)
+    "the observed catalog follows lifecycle.extend and lifecycle.stop_keeps_disk/resume"
   let extendCalls ← IO.mkRef (#[] : Array Request)
   let discovered (body : JVal) (fails : Bool := false) : IO Provider := do
     return leanci (fun req => do
@@ -107,11 +117,52 @@ def run : IO Unit := do
   check (!(← (← discovered today).supportsExtend) && !(← (← discovered (lifecycle false)).supportsExtend) &&
     !(← (← discovered (lifecycle true) true).supportsExtend) && (← (← discovered (lifecycle true)).supportsExtend))
     "the provider answers extend support from discovery, and no when it cannot read it"
+  check (!(← (← discovered today).supportsStopResume) && !(← (← discovered (lifecycle true false)).supportsStopResume) &&
+    !(← (← discovered (lifecycle true true) true).supportsStopResume) &&
+    (← (← discovered (lifecycle true true)).supportsStopResume) && provider.resumeInPlace)
+    "the provider answers stop/resume support from discovery and marks resumeInPlace"
   check ((← (← discovered (lifecycle true)).extend "aaaaaaaa-0000-4000-8000-000000000001" 900).isOk &&
     (← extendCalls.get).size == 1 && (← extendCalls.get).back!.idempotencyKey.isEmpty &&
     (← extendCalls.get).back!.path == "/vms/aaaaaaaa-0000-4000-8000-000000000001/extend" &&
     ((← extendCalls.get).back!.body.map renderCompact) == some "{\"ttl_secs\":900}")
     "extend posts the remaining seconds without an idempotency key; an already-covered 200 is success"
+  let stopRequest := leanciStopRequest "aaaaaaaa-0000-4000-8000-000000000001"
+  let resumeRequest := leanciResumeRequest "aaaaaaaa-0000-4000-8000-000000000001"
+    { name := "orb-managed-dev-t", size := "small", ttlSeconds := 300, idempotencyKey := "rk1" }
+  check (stopRequest.method == "POST" && stopRequest.path == "/vms/aaaaaaaa-0000-4000-8000-000000000001/stop" &&
+    stopRequest.timeoutMs == 330000 &&
+    (stopRequest.body.map renderCompact) == some "{\"keep_disk\":true}" &&
+    resumeRequest.method == "POST" && resumeRequest.path == "/vms/aaaaaaaa-0000-4000-8000-000000000001/resume" &&
+    resumeRequest.timeoutMs == 120000 &&
+    resumeRequest.idempotencyKey == "rk1" &&
+    (resumeRequest.body.map renderCompact) == some "{\"ttl_secs\":300}")
+    "stop and resume request shapes match lean.ci#38"
+  let lifecycleCalls ← IO.mkRef (#[] : Array Request)
+  let resumeReply ← IO.mkRef (.obj #[("vm", .obj #[("id", .str "aaaaaaaa-0000-4000-8000-000000000001"),
+    ("name", .str "orb-managed-a"), ("status", .str "queued")])])
+  let parkProvider := leanci (fun req => do
+    lifecycleCalls.modify (·.push req)
+    if req.method == "POST" && req.path == "/vms/aaaaaaaa-0000-4000-8000-000000000001/stop" then
+      return .ok (200, .obj #[("vm", .obj #[("id", .str "aaaaaaaa-0000-4000-8000-000000000001"), ("status", .str "parked")])])
+    if req.method == "POST" && req.path == "/vms/aaaaaaaa-0000-4000-8000-000000000001/resume" then
+      return .ok (202, ← resumeReply.get)
+    return .ok (404, .null)) (← IO.mkRef #[]) (pure 0)
+  check ((← parkProvider.stop "aaaaaaaa-0000-4000-8000-000000000001").isOk &&
+    ((← lifecycleCalls.get).back!.body.map renderCompact) == some "{\"keep_disk\":true}")
+    "stop sends keep_disk: true"
+  let .ok resumedVm ← parkProvider.resume "aaaaaaaa-0000-4000-8000-000000000001"
+      { name := "orb-managed-a", size := "small", ttlSeconds := 300, idempotencyKey := "rk1" }
+    | throw (IO.userError "leanci resume failed")
+  check (resumedVm.providerId == "aaaaaaaa-0000-4000-8000-000000000001" && resumedVm.state == "queued" &&
+    (← lifecycleCalls.get).back!.idempotencyKey == "rk1" &&
+    ((← lifecycleCalls.get).back!.body.map renderCompact) == some "{\"ttl_secs\":300}")
+    "resume returns the same provider ID in place and forwards idempotency key and ttl_secs"
+  resumeReply.set (.obj #[("vm", .obj #[("id", .str "aaaaaaaa-0000-4000-8000-000000000001"),
+    ("status", .str "parked"), ("error", .str "resume failed: engine out of disk")])])
+  let failedResume ← parkProvider.resume "aaaaaaaa-0000-4000-8000-000000000001"
+    { name := "orb-managed-a", size := "small", ttlSeconds := 300, idempotencyKey := "rk2" }
+  check (match failedResume with | .error e => e.code == "provider_resume_failed" | .ok _ => false)
+    "parked reply with resume failed error is reported as provider_resume_failed"
 
   let spec : SpawnSpec := { name := "orb-managed-dev-t", size := "small", ttlSeconds := 300, idempotencyKey := "k1" }
   let .ok created ← provider.spawn spec | throw (IO.userError "spawn failed")
@@ -188,10 +239,10 @@ def run : IO Unit := do
 
   let .ok machines ← provider.list | throw (IO.userError "list failed")
   check (machines.size == 1 && machines.all (fun m => provider.isReady m.state) && provider.isStopped "reaped" &&
-    !provider.isStopped "snapshotting") "list and state mapping"
+    provider.isStopped "parked" && !provider.isStopped "snapshotting") "list and state mapping"
   check ((← provider.destroy "aaaaaaaa-0000-4000-8000-000000000001").isOk && (← provider.destroy "bbbbbbbb-0000-4000-8000-000000000001").isOk) "destroy; 404 is idempotent"
-  check (!(← provider.stop "aaaaaaaa-0000-4000-8000-000000000001").isOk && !(← provider.extend "aaaaaaaa-0000-4000-8000-000000000001" 600).isOk &&
-    !(← provider.resume "aaaaaaaa-0000-4000-8000-000000000001" spec).isOk) "stop and resume are unsupported, and an extend the provider does not serve fails, not faked"
+  check ((← provider.stop "aaaaaaaa-0000-4000-8000-000000000001").isOk && !(← provider.extend "aaaaaaaa-0000-4000-8000-000000000001" 600).isOk &&
+    !(← provider.resume "aaaaaaaa-0000-4000-8000-000000000001" spec).isOk) "stop treats 404 as already gone, and an extend/resume the mock server does not serve fails, not faked"
 
   check (← provider.writeFile "aaaaaaaa-0000-4000-8000-000000000001" "/home/user/.orb/enroll.env" "A=1\n").isOk "file upload"
   let file := (← requests.get).back!

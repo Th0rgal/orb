@@ -298,8 +298,12 @@ def resumeManagedWorker (mc : ManagedComputeStore) (fleet : ManagedFleetState)
     | .error e =>
       if #[400, 401, 403, 404, 422].contains e.status then discard <| abortManagedResume mc intent.id
       return .error (e.code ++ ":" ++ requestKey)
-  if child.providerId == intent.oldProviderId then
-    return .error ("managed_resume_identity_uncertain:" ++ requestKey)
+  if provider.resumeInPlace then
+    if child.providerId != intent.oldProviderId then
+      return .error ("managed_resume_identity_uncertain:" ++ requestKey)
+  else
+    if child.providerId == intent.oldProviderId then
+      return .error ("managed_resume_identity_uncertain:" ++ requestKey)
   let .ok () ← bindManagedResumeProvider mc intent.id child.providerId
     | return .error ("managed_resume_binding_uncertain:" ++ requestKey)
   let some (bound, _) ← getManagedMachine? mc machineId | return .error "managed_machine_missing"
@@ -315,6 +319,15 @@ def resumeManagedWorker (mc : ManagedComputeStore) (fleet : ManagedFleetState)
       return .ok ready
     | .error _ => return .error (reason ++ ":resume_cleanup_pending:" ++ requestKey)
     | .ok fenced =>
+      if provider.resumeInPlace then
+        if fenced.newProviderId.isEmpty || fenced.newProviderId != fenced.oldProviderId then
+          return .error (reason ++ ":resume_identity_uncertain:" ++ requestKey)
+        -- In-place resume shares the parked rootfs disk: re-park instead of destroying it.
+        let .ok () ← provider.stop fenced.newProviderId
+          | return .error (reason ++ ":provider_cleanup_pending:" ++ requestKey)
+        let .ok () ← abortManagedResume mc intent.id
+          | return .error (reason ++ ":resume_rollback_pending:" ++ requestKey)
+        return .error reason
       if fenced.newProviderId.isEmpty || fenced.newProviderId == fenced.oldProviderId then
         return .error (reason ++ ":resume_identity_uncertain:" ++ requestKey)
       let .ok () ← provider.destroy fenced.newProviderId
