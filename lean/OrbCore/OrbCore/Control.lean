@@ -2027,7 +2027,11 @@ private def launchLocalCoreMissionTurn
     (if mission.project.isEmpty then none else some mission.project) harness st.store.rootDir
     mission.ownerUserId st.bootstrapAdminId
   if !prelude.isEmpty then
-    let installed ← IO.Process.output { cmd := "/bin/sh", args := #["-c", prelude], cwd := some (System.FilePath.mk safeCwd) }
+    let (staged, envs) := stageSkillBundle prelude
+    let installed ← IO.Process.output {
+      cmd := "/bin/sh", args := #["-c", staged], cwd := some (System.FilePath.mk safeCwd)
+      env := envs.map fun (k, v) => (k, some v)
+    }
     if installed.exitCode != 0 then return .error "library_install_failed"
   let binOverride := st.warmHarnessBinOverride?.getD ""
   let nowSec ← coreEpochSec

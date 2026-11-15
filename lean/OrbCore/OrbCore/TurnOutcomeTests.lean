@@ -180,21 +180,29 @@ def run : IO Unit := do
              sh.stdout == "---\nname: lean-audit\n---\nAudit it's \"proofs\".\n# Long-running\nKeep checkpoints.\n# Proof\nCheck kernel.\n")
         s!"installed skill and references content: {sh.stdout} {sh.stderr}"
       -- A Library whose references exceed the exec argument limit (the 2026-11-15 outage:
-      -- every node turn exited 127) still ships every SKILL.md, drops references that do not
-      -- fit, and keeps the prelude under the budget so `bash -lc` can exec.
+      -- every node turn exited 127) ships every SKILL.md and reference via a staged file.
       for i in [0:12] do
         IO.FS.createDirAll s!"{root}/library/skills/big-{i}/references"
         IO.FS.writeFile s!"{root}/library/skills/big-{i}/SKILL.md" s!"---\nname: big-{i}\n---\n{String.ofList (List.replicate 2000 'a')}\n"
         IO.FS.writeFile s!"{root}/library/skills/big-{i}/references/ref.md" (String.ofList (List.replicate 20000 'r'))
       let bigPrelude ← OrbCore.Skills.remoteInstallPrelude root none "opencode" "" "" ""
-      check (bigPrelude.utf8ByteSize ≤ OrbCore.Skills.remoteSkillTotalBytes)
-        s!"skill prelude fits the exec argument budget: {bigPrelude.utf8ByteSize} bytes"
+      check (bigPrelude.utf8ByteSize > 128 * 1024 && bigPrelude.utf8ByteSize ≤ OrbCore.Skills.remoteSkillTotalBytes)
+        s!"regression bundle exceeds the exec argument limit: {bigPrelude.utf8ByteSize} bytes"
       check ((List.range 12).all fun i => (bigPrelude.splitOn s!"'.opencode/skills/big-{i}/SKILL.md'").length > 1)
         "every SKILL.md ships before any reference file"
-      check ((bigPrelude.splitOn "references/ref.md").length - 1 < 12)
-        "references that do not fit are dropped"
-      let bigSh ← IO.Process.output { cmd := "/bin/bash", args := #["-lc", bigPrelude ++ "true"], cwd := some ws }
-      check (bigSh.exitCode == 0) s!"bash -lc runs the bounded prelude: {bigSh.exitCode} {bigSh.stderr}"
+      let (staged, skillEnvs) := OrbCore.RemoteDispatch.stageSkillBundle bigPrelude
+      let (promptStage, promptEnvs) := OrbCore.RemoteDispatch.stagePromptOnFd3 "prompt survives skill staging"
+      check (staged.utf8ByteSize < 4096 && skillEnvs.all (fun (k, v) => k.utf8ByteSize + 1 + v.utf8ByteSize < 128 * 1024))
+        "bundle bytes never enter argv and every environment entry stays below MAX_ARG_STRLEN"
+      let bigSh ← IO.Process.output {
+        cmd := "/bin/bash", args := #["-lc", staged ++ promptStage ++ "cat <&3; test -z \"${SANDBOXED_SKILL_PART_0+x}\""], cwd := some ws
+        env := (skillEnvs ++ promptEnvs).map fun (k, v) => (k, some v)
+      }
+      check (bigSh.exitCode == 0 && bigSh.stdout == "prompt survives skill staging")
+        s!"bash -lc runs the staged bundle and preserves prompt stdin: {bigSh.exitCode} {bigSh.stderr}"
+      for i in [0:12] do
+        let ref ← IO.FS.readFile s!"{ws}/.opencode/skills/big-{i}/references/ref.md"
+        check (ref == String.ofList (List.replicate 20000 'r')) s!"complete reference {i} arrives"
     finally
       closeCoreStore store
   finally

@@ -389,11 +389,9 @@ def buildDeliveryPlan (workingDir : String) (project? : Option String) (storeRoo
 
 /-- Largest single skill file shipped to a node. -/
 def remoteSkillMaxBytes : Nat := 64 * 1024
-/-- Cap on the install script all shipped files add to the turn command. The node runs the
-    command as one `bash -lc` argument, and Linux refuses to exec a single argument longer than
-    `MAX_ARG_STRLEN` (128 KiB): the turn then dies with exit 127 and an empty log. 96 KiB leaves
-    room for the rest of the command. -/
-def remoteSkillTotalBytes : Nat := 96 * 1024
+/-- Bundle resource budget, including base64 and installer overhead. Callers must stage the
+    script outside argv; this budget is deliberately larger than Linux's 128 KiB argument cap. -/
+def remoteSkillTotalBytes : Nat := 1024 * 1024
 
 /-- Bytes one file adds to the install script: base64 content plus the quoted paths around it. -/
 def remoteSkillScriptCost (relPath content : String) : Nat :=
