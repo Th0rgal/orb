@@ -502,9 +502,10 @@ def run (root : String) : IO Unit := do
     check ((← send "PUT" "/api/projects/member-project/controller-mission" member
       (.obj #[("mission_id", .null)])).1 == 200) "owner clears controller"
     let createdController ← call memberSession "start_mission"
-      (.obj #[("title", .str "successor controller"), ("controller", .bool true)])
+      (.obj #[("title", .str "successor controller"), ("controller", .bool true),
+        ("remote_node_id", .str "managed-member-machine")])
     let successorId := (createdController.fieldOrNull "result").fieldStr? "mission_id" |>.getD ""
-    check (createdController.fieldBool? "ok" == some true && !successorId.isEmpty) "MCP start_mission accepts controller"
+    check (createdController.fieldBool? "ok" == some true && !successorId.isEmpty) s!"MCP start_mission accepts controller: {renderCompact createdController}"
     let (_, successorBoard) ← send "GET" "/api/projects/member-project/board" member
     check (successorBoard.fieldStr? "controller_mission_id" == some successorId) "MCP creation nominates controller"
     let (restControllerStatus, restController) ← send "POST" "/api/control/missions" member
