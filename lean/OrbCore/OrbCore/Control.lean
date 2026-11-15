@@ -1972,6 +1972,28 @@ def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) : OrbBin.
     discard <| execParamQuery st.store.missionsDb
       "UPDATE missions SET status=?2,state_revision=state_revision+1,updated_at=?3 WHERE id=?1 AND status IN ('active','pending');"
       #[missionId, nextStatus, ts]
+    if let some tSink := st.telemetrySink? then
+      let mRec? ← getMission? st.store missionId
+      let bLow := finalSnap.harness.trimAscii.toString.toLower
+      let normHarness := if bLow == "claude" then "claudecode" else bLow
+      let effModel? :=
+        finalSnap.model?.orElse fun _ =>
+          (mRec?.map (·.modelOverride.trimAscii.toString)).filter (!·.isEmpty)
+      let ownerUid? := (mRec?.map (·.ownerUserId.trimAscii.toString)).filter (!·.isEmpty)
+      let ownerUser? ← match ownerUid? with
+        | some uid => getUserById? st.store uid
+        | none => pure none
+      let ownerUname? := (ownerUser?.map (·.username.trimAscii.toString)).filter (!·.isEmpty)
+      let turnUsage : TurnUsageTelemetry := {
+        harness          := normHarness
+        model?           := effModel?
+        inputTokens?     := finalSnap.inputTokens?
+        outputTokens?    := finalSnap.outputTokens?
+        cacheReadTokens? := finalSnap.cacheReadTokens?
+        costCents        := finalSnap.costCents
+        interrupted      := isErr || emptyVerdict?.isSome
+      }
+      observeControlTurnFinished tSink missionId turnUsage ownerUid? ownerUname? nowSec
     let stPl := renderCompact (.obj #[("status", .str nextStatus), ("content", .str finalSnap.text)])
     discard <| appendMissionEvent st.store missionId "mission_status_changed" stPl ts
     publishControlEvent st.broadcastHub? "mission_status_changed" stPl (some missionId)
@@ -2032,6 +2054,13 @@ private def launchLocalCoreMissionTurn
   let wtArg := if worktreeMode.trimAscii.toString.isEmpty then "local" else worktreeMode.trimAscii.toString
   let cbs := buildCoreHarnessCallbacks st missionId
   let normHarness := if harness.trimAscii.toString.toLower == "claude" then "claudecode" else harness.trimAscii.toString
+  if let some tSink := st.telemetrySink? then
+    let ownerUid? := if mission.ownerUserId.trimAscii.toString.isEmpty then none else some mission.ownerUserId.trimAscii.toString
+    let ownerUser? ← match ownerUid? with
+      | some uid => getUserById? st.store uid
+      | none => pure none
+    let ownerUname? := (ownerUser?.map (·.username.trimAscii.toString)).filter (!·.isEmpty)
+    ensureTurnTelemetryStarted tSink missionId prompt ownerUid? ownerUname?
   match ← OrbBin.ClaudeControl.startHarnessTurn
       mgr missionId normHarness binOverride safeCwd prompt nextGen model? effort? sessionId? parsedPerm wtArg #[] cbs (some safeRoot) with
   | .ok runSt =>
@@ -4491,6 +4520,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               let deliv := if selectedSkills.isEmpty then rawPrompt else withDirective rawPrompt selectedSkills
               discard <| appendMissionEvent st.store mid "user_message"
                 (renderCompact (.obj #[("type", .str "user_message"), ("content", .str deliv), ("mission_id", .str mid)])) nowIso
+              if let some tSink := st.telemetrySink? then
+                let actorUid? := if caller.isLegacyUnscoped || caller.userId.isEmpty then none else some caller.userId
+                let actorUname? := if caller.isLegacyUnscoped || caller.username.isEmpty then none else some caller.username
+                observeControlUserPrompt tSink (caller.isLegacyUnscoped || caller.role == "admin") actorUid? actorUname? mid rawPrompt nowEpochSec
               let spec : RemoteTurnSpec := {
                 missionId        := mid
                 targetNodeId     := resolvedNode
@@ -4572,6 +4605,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           if let some p := prompt? then
             if !p.trimAscii.toString.isEmpty then
               let deliv := if selectedSkills.isEmpty then p else withDirective p selectedSkills
+              if let some tSink := st.telemetrySink? then
+                let actorUid? := if caller.isLegacyUnscoped || caller.userId.isEmpty then none else some caller.userId
+                let actorUname? := if caller.isLegacyUnscoped || caller.username.isEmpty then none else some caller.username
+                observeControlUserPrompt tSink (caller.isLegacyUnscoped || caller.role == "admin") actorUid? actorUname? mid p nowEpochSec
               let permMode := (bodyJv.fieldStr? "permission_mode").getD "supervised"
               let wtMode := (bodyJv.fieldStr? "worktree_mode").getD ""
               discard <| maybeSpawnWarmHarnessTurn st caller placeKind mid backend safeWorkDir deliv modelOverride normEffort permMode wtMode true
@@ -4888,6 +4925,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               updateMissionBoundManagedNode st.store mid resolvedNode nowIso
             else pure mRec.tagsJson
             discard <| appendMissionEvent st.store mid "user_message" pl nowIso
+            if let some tSink := st.telemetrySink? then
+              let actorUid? := if caller.isLegacyUnscoped || caller.userId.isEmpty then none else some caller.userId
+              let actorUname? := if caller.isLegacyUnscoped || caller.username.isEmpty then none else some caller.username
+              observeControlUserPrompt tSink (caller.isLegacyUnscoped || caller.role == "admin") actorUid? actorUname? mid content nowEpochSec
             let mut resumeSid? : Option String := none
             if let .ok sRows ← execParamQuery st.store.missionsDb "SELECT COALESCE(session_id,'') FROM missions WHERE id=?1;" #[mid] then
               if sRows.size > 1 then
@@ -4915,6 +4956,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               return .ok (mkJson 502 s!"\{\"error\":{jsonEscape dispErr}}")
         | _, _ =>
           discard <| appendMissionEvent st.store mid "user_message" pl nowIso
+          if let some tSink := st.telemetrySink? then
+            let actorUid? := if caller.isLegacyUnscoped || caller.userId.isEmpty then none else some caller.userId
+            let actorUname? := if caller.isLegacyUnscoped || caller.username.isEmpty then none else some caller.username
+            observeControlUserPrompt tSink (caller.isLegacyUnscoped || caller.role == "admin") actorUid? actorUname? mid content nowEpochSec
           discard <| maybeSpawnWarmHarnessTurn
             st caller mRec.placementKind mid mRec.backend mRec.workingDirectory
             content mRec.modelOverride mRec.modelEffort "supervised" "" false
@@ -6105,10 +6150,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             return .ok (mkJson 502 s!"\{\"error\":{jsonEscape dispErr}}")
       else
         let _ ← appendMissionEvent st.store mid "user_message" evPayload nowIso
-      if let some tSink := st.telemetrySink? then
-        let actorUid? := if caller.isLegacyUnscoped || caller.userId.isEmpty then none else some caller.userId
-        let actorUname? := if caller.isLegacyUnscoped || caller.username.isEmpty then none else some caller.username
-        observeControlUserPrompt tSink (caller.role == "admin") actorUid? actorUname? mid content nowEpochSec
+      if !queued then
+        if let some tSink := st.telemetrySink? then
+          let actorUid? := if caller.isLegacyUnscoped || caller.userId.isEmpty then none else some caller.userId
+          let actorUname? := if caller.isLegacyUnscoped || caller.username.isEmpty then none else some caller.username
+          observeControlUserPrompt tSink (caller.isLegacyUnscoped || caller.role == "admin") actorUid? actorUname? mid content nowEpochSec
     let deliveredField :=
       if selectedSkills.isEmpty then ""
       else s!",\"delivered_prompt\":{jsonEscape delivContent}"
@@ -6210,6 +6256,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           else pure m.tagsJson
           discard <| appendMissionEvent st.store mid "user_message"
             (renderCompact (.obj #[("type", .str "user_message"), ("content", .str rawPrompt), ("mission_id", .str mid)])) nowIso
+          if let some tSink := st.telemetrySink? then
+            let actorUid? := if caller.isLegacyUnscoped || caller.userId.isEmpty then none else some caller.userId
+            let actorUname? := if caller.isLegacyUnscoped || caller.username.isEmpty then none else some caller.username
+            observeControlUserPrompt tSink (caller.isLegacyUnscoped || caller.role == "admin") actorUid? actorUname? mid rawPrompt nowEpochSec
           let mut resumeSid? : Option String := none
           if let .ok sRows ← execParamQuery st.store.missionsDb "SELECT COALESCE(session_id,'') FROM missions WHERE id=?1;" #[mid] then
             if sRows.size > 1 then
@@ -6236,6 +6286,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       else
         let spawnWanted := (bodyJv.fieldBool? "spawn_harness").getD false
         if spawnWanted then
+          if let some tSink := st.telemetrySink? then
+            let actorUid? := if caller.isLegacyUnscoped || caller.userId.isEmpty then none else some caller.userId
+            let actorUname? := if caller.isLegacyUnscoped || caller.username.isEmpty then none else some caller.username
+            observeControlUserPrompt tSink (caller.isLegacyUnscoped || caller.role == "admin") actorUid? actorUname? mid rawPrompt nowEpochSec
           let permMode := (bodyJv.fieldStr? "permission_mode").getD "supervised"
           discard <| maybeSpawnWarmHarnessTurn st caller m.placementKind mid m.backend m.workingDirectory deliv m.modelOverride m.modelEffort permMode "" true
       return .ok (mkJson 200 s!"\{\"id\":{jsonEscape mid},\"status\":\"active\"{deliveredField}}")
@@ -7540,7 +7594,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let cloudHub ← newCloudRuntimeHub
     let providerHub ← newProviderRuntimeHub
     let systemHub ← newSystemRuntimeHub
-    let remoteSup ← newRemoteJobSupervisor (effectiveJwtSecret cfg) cfg.devMode
+    let remoteSup ← newRemoteJobSupervisor (effectiveJwtSecret cfg) cfg.devMode (some telemetrySink)
     let macTetherRt ← startMacTetherRuntime store
     let appState : CoreAppState := {
       cfg := cfg

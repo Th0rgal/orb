@@ -440,10 +440,32 @@ structure HubTarget where
   prompts   : Bool
   deriving BEq
 
+structure TurnTelemetryState where
+  missionId          : String
+  startedMs?         : Option UInt64 := none
+  lastPromptDigest   : Option String := none
+  lastScrubbedDigest : Option String := none
+  resent             : Bool := false
+  actorUserId?       : Option String := none
+  actorUsername?     : Option String := none
+  deriving Repr, BEq
+
+structure TurnUsageTelemetry where
+  harness          : String
+  model?           : Option String := none
+  inputTokens?     : Option UInt64 := none
+  outputTokens?    : Option UInt64 := none
+  cacheReadTokens? : Option UInt64 := none
+  costCents        : UInt64 := 0
+  interrupted      : Bool := false
+  latencyMs?       : Option UInt64 := none
+  deriving Repr, BEq
+
 structure TelemetryQueueState where
   target?    : Option HubTarget := none
   events     : Array JVal := #[]
   blobs      : Array (String × String) := #[]
+  turns      : Array TurnTelemetryState := #[]
   failures   : UInt32 := 0
   retryAtSec : UInt64 := 0
   lastError? : Option String := none
@@ -597,20 +619,46 @@ def acceptClientTelemetryBatch
         accepted := accepted + 1
   return (true, accepted)
 
-/-- Record an admin-opted-in scrubbed `orb.prompt.v1` event on `POST /api/control/message`.
-    Strictly skipped for non-admin (`member`) callers so another user's prompt text is never
-    exported into the instance owner's telemetry blobs. -/
+/-- Record a user turn start in `sink.turns` (tracking `startedMs?` and `resent` on identical
+    consecutive prompt digests) and, when `isCallerAdmin && target.prompts`, emit a scrubbed
+    `orb.prompt.v1` event + blob. Strictly skips `orb.prompt.v1` for non-admin (`member`) callers
+    so another user's prompt text is never exported into the instance owner's telemetry blobs. -/
 def observeControlUserPrompt
     (sink : TelemetrySink)
     (isCallerAdmin : Bool)
     (actorUserId? actorUsername? : Option String)
     (missionId content : String)
     (nowEpochSec : UInt64) : IO Unit := do
-  if !isCallerAdmin || content.trimAscii.toString.isEmpty then
+  if missionId.trimAscii.toString.isEmpty || content.trimAscii.toString.isEmpty then
     return
-  let promptsOn ← sink.mu.atomically do
-    return match (← get).target? with | some t => t.prompts | none => false
-  if !promptsOn then
+  let nowMs := (← IO.monoNanosNow).toUInt64 / 1000000
+  let rawDigest := bytesToHexLower (sha256Bytes content.toUTF8)
+  let (enabled, promptsOn) ← sink.mu.atomically do
+    let q ← get
+    match q.target? with
+    | none => return (false, false)
+    | some t =>
+      let prev? := q.turns.find? (fun ts => ts.missionId == missionId)
+      let isResent := prev?.bind (·.lastPromptDigest) == some rawDigest
+      let nextTurn : TurnTelemetryState := {
+        missionId := missionId
+        startedMs? := some nowMs
+        lastPromptDigest := some rawDigest
+        lastScrubbedDigest := prev?.bind (·.lastScrubbedDigest)
+        resent := isResent
+        actorUserId? := actorUserId?.orElse (fun _ => prev?.bind (·.actorUserId?))
+        actorUsername? := actorUsername?.orElse (fun _ => prev?.bind (·.actorUsername?))
+      }
+      let filtered := q.turns.filter (fun ts => ts.missionId != missionId)
+      let nextTurns :=
+        let pushed := filtered.push nextTurn
+        if pushed.size > telemetryQueueCap then
+          pushed.extract (pushed.size - telemetryQueueCap) pushed.size
+        else
+          pushed
+      set { q with turns := nextTurns }
+      return (true, t.prompts)
+  if !enabled || !isCallerAdmin || !promptsOn then
     return
   let scrubbed := scrubSecrets content
   let digest := bytesToHexLower (sha256Bytes scrubbed.toUTF8)
@@ -623,6 +671,104 @@ def observeControlUserPrompt
   ]
   if let .ok cleanEv := sanitizeTelemetryEvent rawEv false actorUserId? actorUsername? then
     discard <| enqueueSanitizedEvent sink cleanEv (some (digest, scrubbed)) nowEpochSec
+
+/-- Record a turn start for `missionId` when one has not already been recorded by `observeControlUserPrompt`
+    (or refresh `startedMs?` if the previous turn already finished). -/
+def ensureTurnTelemetryStarted
+    (sink : TelemetrySink)
+    (missionId : String)
+    (prompt : String := "")
+    (actorUserId? : Option String := none)
+    (actorUsername? : Option String := none) : IO Unit := do
+  if missionId.trimAscii.toString.isEmpty then
+    return
+  let nowMs := (← IO.monoNanosNow).toUInt64 / 1000000
+  let rawDigest? :=
+    if prompt.trimAscii.toString.isEmpty then none
+    else some (bytesToHexLower (sha256Bytes prompt.toUTF8))
+  sink.mu.atomically do
+    let q ← get
+    if q.target?.isNone then
+      return
+    let prev? := q.turns.find? (fun ts => ts.missionId == missionId)
+    if let some prev := prev? then
+      if prev.startedMs?.isSome then
+        return
+    let isResent :=
+      match prev?.bind (·.lastPromptDigest), rawDigest? with
+      | some p, some r => p == r
+      | _, _ => false
+    let nextTurn : TurnTelemetryState := {
+      missionId := missionId
+      startedMs? := some nowMs
+      lastPromptDigest := rawDigest?.orElse (fun _ => prev?.bind (·.lastPromptDigest))
+      lastScrubbedDigest := prev?.bind (·.lastScrubbedDigest)
+      resent := isResent
+      actorUserId? := actorUserId?.orElse (fun _ => prev?.bind (·.actorUserId?))
+      actorUsername? := actorUsername?.orElse (fun _ => prev?.bind (·.actorUsername?))
+    }
+    let filtered := q.turns.filter (fun ts => ts.missionId != missionId)
+    set { q with turns := filtered.push nextTurn }
+
+/-- Emit an `orb.turn.v1` event on turn completion, computing `latency_ms` and `resent` from the
+    tracked `TurnTelemetryState` for `missionId` and preserving `lastPromptDigest` so a subsequent
+    resend of the same prompt is still detected. -/
+def observeControlTurnFinished
+    (sink : TelemetrySink)
+    (missionId : String)
+    (usage : TurnUsageTelemetry)
+    (actorUserId? : Option String := none)
+    (actorUsername? : Option String := none)
+    (nowEpochSec : UInt64 := 0) : IO Unit := do
+  if missionId.trimAscii.toString.isEmpty then
+    return
+  let nowMs := (← IO.monoNanosNow).toUInt64 / 1000000
+  let turn? ← sink.mu.atomically do
+    let q ← get
+    if q.target?.isNone then
+      return none
+    let found? := q.turns.find? (fun ts => ts.missionId == missionId)
+    let nextTurns := q.turns.map fun ts =>
+      if ts.missionId == missionId then
+        { ts with startedMs? := none, resent := false }
+      else
+        ts
+    set { q with turns := nextTurns }
+    return some found?
+  let some prevTurn? := turn?
+    | return
+  let resent := (prevTurn?.map (·.resent)).getD false
+  let computedLatency? :=
+    usage.latencyMs?.orElse fun _ =>
+      (prevTurn?.bind (·.startedMs?)).map fun stMs =>
+        if nowMs ≥ stMs then nowMs - stMs else 0
+  let effUid? := actorUserId?.orElse (fun _ => prevTurn?.bind (·.actorUserId?))
+  let effUname? := actorUsername?.orElse (fun _ => prevTurn?.bind (·.actorUsername?))
+  let mut fields : Array (String × JVal) := #[
+    ("schema", .str "orb.turn.v1"),
+    ("client", .str "core"),
+    ("session_id", .str missionId),
+    ("cost_cents", .uint64 usage.costCents),
+    ("interrupted", .bool usage.interrupted),
+    ("resent", .bool resent)
+  ]
+  let hClean := usage.harness.trimAscii.toString
+  if !hClean.isEmpty then
+    fields := fields.push ("harness", .str hClean)
+  if let some m := usage.model?.map (·.trimAscii.toString) |>.filter (!·.isEmpty) then
+    fields := fields.push ("model", .str m)
+  if let some inTok := usage.inputTokens? then
+    fields := fields.push ("input_tokens", .uint64 inTok)
+  if let some outTok := usage.outputTokens? then
+    fields := fields.push ("output_tokens", .uint64 outTok)
+  if let some crTok := usage.cacheReadTokens? then
+    fields := fields.push ("cache_read_tokens", .uint64 crTok)
+  if let some lat := computedLatency? then
+    fields := fields.push ("latency_ms", .uint64 lat)
+  let rawEv := JVal.obj fields
+  let tsSec ← if nowEpochSec > 0 then pure nowEpochSec else nowEpoch
+  if let .ok cleanEv := sanitizeTelemetryEvent rawEv false effUid? effUname? then
+    discard <| enqueueSanitizedEvent sink cleanEv none tsSec
 
 /-- Flush up to one batch (`200` events) from `sink` to `<hub_url>/v2/ns/<namespace>/ingest`. -/
 def flushTelemetryOnce (sink : TelemetrySink) (nowEpochSec : UInt64) : IO (Except String Nat) := do

@@ -17,6 +17,7 @@ import OrbCore.ProviderUsageAndLogin
 import OrbCore.RemoteFleetAndRelay
 import OrbCore.Skills
 import OrbCore.AutoPlacement
+import OrbCore.TelemetryAndVoice
 
 namespace OrbCore.RemoteDispatch
 
@@ -31,19 +32,21 @@ open OrbCore.R7Core
 open OrbCore.LegacyHydrate
 open OrbCore.ProviderUsageAndLogin
 open OrbCore.RemoteFleetAndRelay
+open OrbCore.TelemetryAndVoice
 
 /-! ## Remote Job Supervisor Handle -/
 
 structure RemoteJobSupervisor where
-  mu           : Std.Mutex (Array String)
-  boundPortRef : IO.Ref UInt16
-  jwtSecret    : String
-  devMode      : Bool
+  mu             : Std.Mutex (Array String)
+  boundPortRef   : IO.Ref UInt16
+  jwtSecret      : String
+  devMode        : Bool
+  telemetrySink? : Option TelemetrySink := none
 
-def newRemoteJobSupervisor (jwtSecret : String := "") (devMode : Bool := false) : IO RemoteJobSupervisor := do
+def newRemoteJobSupervisor (jwtSecret : String := "") (devMode : Bool := false) (telemetrySink? : Option TelemetrySink := none) : IO RemoteJobSupervisor := do
   let mu ← Std.Mutex.new (#[] : Array String)
   let portRef ← IO.mkRef (0 : UInt16)
-  return { mu := mu, boundPortRef := portRef, jwtSecret := jwtSecret, devMode := devMode }
+  return { mu := mu, boundPortRef := portRef, jwtSecret := jwtSecret, devMode := devMode, telemetrySink? := telemetrySink? }
 
 private def claimPolledJob (sup : RemoteJobSupervisor) (jobId : String) : IO Bool :=
   sup.mu.atomically do
@@ -701,6 +704,10 @@ private structure RemoteStreamAcc where
   lastMessageId?   : Option String := none
   /-- The harness has produced thinking, a tool call or text this turn. -/
   sawActivity      : Bool := false
+  model?           : Option String := none
+  inputTokens?     : Option UInt64 := none
+  outputTokens?    : Option UInt64 := none
+  cacheReadTokens? : Option UInt64 := none
 
 private def emitMissionEventAndBroadcast
     (store : CoreStore)
@@ -823,6 +830,19 @@ private def ingestClaudeStreamLine
   else if ty == "result" then
     let isErr := (jv.fieldBool? "is_error").getD false
     let resTxt := (jv.fieldStr? "result").getD ""
+    let usageObj := jv.fieldOrNull "usage"
+    let inTok? := (usageObj.fieldUInt64? "input_tokens").orElse (fun _ => jv.fieldUInt64? "input_tokens")
+    let outTok? := (usageObj.fieldUInt64? "output_tokens").orElse (fun _ => jv.fieldUInt64? "output_tokens")
+    let crTok? := (usageObj.fieldUInt64? "cache_read_input_tokens").orElse (fun _ => usageObj.fieldUInt64? "cache_read_tokens")
+    let mdl? := ((jv.fieldStr? "model").orElse (fun _ => (jv.fieldOrNull "message").fieldStr? "model")).filter (!·.trimAscii.toString.isEmpty)
+    if inTok?.isSome || outTok?.isSome || crTok?.isSome || mdl?.isSome then
+      next := {
+        next with
+        model? := mdl?.orElse (fun _ => next.model?)
+        inputTokens? := inTok?.orElse (fun _ => next.inputTokens?)
+        outputTokens? := outTok?.orElse (fun _ => next.outputTokens?)
+        cacheReadTokens? := crTok?.orElse (fun _ => next.cacheReadTokens?)
+      }
     if isErr && !resTxt.isEmpty then
       next := { next with lastError? := some resTxt }
     else if !isErr && next.text.isEmpty && !resTxt.isEmpty then
@@ -849,6 +869,26 @@ private def ingestRemoteHarnessLine
       if next.sessionId? != some sid then
         next := { next with sessionId? := some sid }
         persistDiscoveredSessionId store missionId sid
+    if parsed.model?.isSome || parsed.inputTokens?.isSome || parsed.outputTokens?.isSome || parsed.cacheReadTokens?.isSome then
+      next := {
+        next with
+        model? := parsed.model?.orElse (fun _ => next.model?)
+        inputTokens? := match next.inputTokens?, parsed.inputTokens? with
+          | some a, some b => some (a + b)
+          | none, some b => some b
+          | some a, none => some a
+          | none, none => none
+        outputTokens? := match next.outputTokens?, parsed.outputTokens? with
+          | some a, some b => some (a + b)
+          | none, some b => some b
+          | some a, none => some a
+          | none, none => none
+        cacheReadTokens? := match next.cacheReadTokens?, parsed.cacheReadTokens? with
+          | some a, some b => some (a + b)
+          | none, some b => some b
+          | some a, none => some a
+          | none, none => none
+      }
     if let some em := parsed.errorMsg? then
       next := { next with lastError? := some em }
     if parsed.thinking?.isSome || parsed.activity?.isSome || !parsed.textDelta.isEmpty then
@@ -1219,6 +1259,28 @@ partial def spawnRemoteJobPoller
                     let s := (cell sRows[1]! 0).trimAscii.toString
                     if !s.isEmpty then curSid? := some s
 
+              if let some tSink := sup.telemetrySink? then
+                let bLow := backend.trimAscii.toString.toLower
+                let normHarness := if bLow == "claude" then "claudecode" else bLow
+                let effModel? :=
+                  acc.model?.orElse fun _ =>
+                    (mRec?.map (·.modelOverride.trimAscii.toString)).filter (!·.isEmpty)
+                let ownerUid? := (mRec?.map (·.ownerUserId.trimAscii.toString)).filter (!·.isEmpty)
+                let ownerUser? ← match ownerUid? with
+                  | some uid => getUserById? store uid
+                  | none => pure none
+                let ownerUname? := (ownerUser?.map (·.username.trimAscii.toString)).filter (!·.isEmpty)
+                let turnUsage : TurnUsageTelemetry := {
+                  harness          := normHarness
+                  model?           := effModel?
+                  inputTokens?     := acc.inputTokens?
+                  outputTokens?    := acc.outputTokens?
+                  cacheReadTokens? := acc.cacheReadTokens?
+                  costCents        := 0
+                  interrupted      := jState != "succeeded"
+                }
+                observeControlTurnFinished tSink missionId turnUsage ownerUid? ownerUname? nowSec
+
               let nextQueued? ←
                 if jState == "cancelled" then pure none
                 else popNextQueuedFollowup? store missionId curRunGen nowIso
@@ -1415,6 +1477,10 @@ partial def submitRemoteMissionTurn
       pure ()
     emitMissionEventAndBroadcast store broadcastHub? spec.missionId "mission_status_changed"
       (renderCompact (.obj #[("status", .str "active"), ("job_id", .str jobId), ("remote_node_id", .str effTarget)])) nowIso
+    if let some tSink := sup.telemetrySink? then
+      let ownerUid? := if spec.ownerUserId.trimAscii.toString.isEmpty then none else some spec.ownerUserId.trimAscii.toString
+      let ownerUname? := (ownerUser?.map (·.username.trimAscii.toString)).filter (!·.isEmpty)
+      ensureTurnTelemetryStarted tSink spec.missionId spec.prompt ownerUid? ownerUname?
     spawnRemoteJobPoller store mc? relayHub? broadcastHub? sup coreWorkDir spec.missionId spec.backend effTarget jobId prep.proxyToken 0
     return .ok jobId
 
