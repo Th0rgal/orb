@@ -17,7 +17,7 @@ def main():
     source = ROOT / "lean/OrbDesktop/LeanUI/Style.lean"
     original = source.read_bytes()
     try:
-        source.write_bytes(original + b'\n#error "native_desktop_cache_probe"\n')
+        source.write_bytes(original + b'\n#check native_desktop_cache_probe\n')
         result = subprocess.run(command, cwd=ROOT, env=env, text=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if result.returncode == 0 or "native_desktop_cache_probe" not in result.stdout:
