@@ -891,7 +891,14 @@ def loadManagedProviderCatalog (mc : ManagedComputeStore) (dataRoot : String)
       | .arr items => JVal.arr (items.map fun item =>
           item.setField "is_default" (.bool (item.fieldStr? "provider" == some instanceDefault)))
       | other => other
-    if override?.isSome then return .ok value
+    if let some provider := override? then
+      let supports ← provider.supportsExtend
+      return .ok <| match value with
+        | .arr items => JVal.arr (items.map fun item =>
+            if item.fieldStr? "provider" == some provider.name then
+              item.setField "supports_extend" (.bool supports)
+            else item)
+        | other => other
     return .ok (← observeManagedProviderCatalog dataRoot value)
   | .error _ => return .error "managed_provider_catalog_invalid"
 

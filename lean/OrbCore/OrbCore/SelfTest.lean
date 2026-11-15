@@ -231,10 +231,38 @@ private def runManagedMcpProviderContractTests (root : String) : IO Unit := do
       let lease : Array (String × OrbBin.Json.JVal) := #[("ttl_minutes", .nat 60)]
       let beforeDefault := (← rented.get).size
       let onDefault ← call "leanci" "spawn_managed_machine" (.obj lease)
+      let defaultId := ((resultOf onDefault).fieldStr? "id").getD ""
       check ((resultOf onDefault).fieldStr? "provider" == some "leanci" &&
         ((resultOf onDefault).field? "provider_fallback").isNone &&
         (← rented.get).size == beforeDefault + 1 && (← rented.get).back? == some ("leanci", "small"))
         s!"an unnamed spawn uses the instance default: {OrbBin.Json.renderCompact onDefault}"
+      -- When lean.ci's supportsExtend flips true (via lifecycle.extend discovery),
+      -- list_managed_machines and extend_managed_machine reflect it immediately.
+      let extCalls ← IO.mkRef (0 : Nat)
+      let extEnabled ← IO.mkRef false
+      let extProvider : ManagedProvider.Provider := { ManagedProvisioningTests.mockPolicyProvider mc "leanci" with
+        supportsExtend := extEnabled.get
+        quoteCents := fun _ _ => .ok 0
+        extend := fun _ _ => do extCalls.modify (· + 1); return .ok ()
+      }
+      let extCall (tool : String) (args : OrbBin.Json.JVal) : IO OrbBin.Json.JVal := do
+        let raw ← dispatchMcpToolCall core (some mc) none none fleet root claims tool args now none (some (extProvider, cfg))
+        return (OrbBin.Json.parse raw).toOption.getD .null
+      let leanciSupportsExtendOf (reply : OrbBin.Json.JVal) : Option Bool :=
+        (((resultOf reply).fieldArr? "providers").getD #[]).find?
+          (·.fieldStr? "provider" == some "leanci") |>.bind (·.fieldBool? "supports_extend")
+      let catOff ← extCall "list_managed_machines" (.obj #[])
+      let extOff ← extCall "extend_managed_machine"
+        (.obj #[("machine_id", .str defaultId), ("ttl_minutes", .nat 5), ("idempotency_key", .str "leanci-ext-off")])
+      extEnabled.set true
+      let catOn ← extCall "list_managed_machines" (.obj #[])
+      let extOn ← extCall "extend_managed_machine"
+        (.obj #[("machine_id", .str defaultId), ("ttl_minutes", .nat 5), ("idempotency_key", .str "leanci-ext-on")])
+      check (leanciSupportsExtendOf catOff == some false &&
+        ((OrbBin.Json.renderCompact extOff).splitOn "managed_provider_extend_unsupported").length == 2 &&
+        leanciSupportsExtendOf catOn == some true &&
+        extOn.fieldBool? "ok" == some true && (← extCalls.get) == 1)
+        s!"lean.ci supports_extend and extend_managed_machine follow provider.supportsExtend: off={OrbBin.Json.renderCompact extOff} on={OrbBin.Json.renderCompact extOn}"
       let moved ← call "boat" "spawn_managed_machine" (.obj lease)
       check ((resultOf moved).fieldStr? "provider" == some "boat" &&
         (fallbackOf moved).fieldStr? "from" == some "leanci" && (fallbackOf moved).fieldStr? "to" == some "boat" &&

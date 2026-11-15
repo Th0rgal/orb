@@ -36,6 +36,37 @@ private def runInventoryTests (root : String) : IO Unit := do
       if provider == "leanci" then
         let outcome ← OrbCore.RemoteFleetAndRelay.runConfiguredManagedLifecycle mc ctx id "extend" now
         check (match outcome with | .error e => e == "managed_provider_extend_unsupported" | .ok _ => false) "fixed lean.ci lease cannot be extended"
+        let .ok _ ← backfillManagedProviderIdentity mc id "leanci" "lci-ext-vm-1"
+          | throw (IO.userError "leanci provider identity fixture failed")
+        let .ok _ ← recordAuthenticatedManagedPoll mc id 1 now
+          | throw (IO.userError "leanci ready poll fixture failed")
+        let leanciExtCalls ← IO.mkRef (0 : Nat)
+        let leanciExtSupported ← IO.mkRef false
+        let leanciProvider : OrbCore.ManagedProvider.Provider := {
+          OrbCore.ManagedProvisioningTests.mockPolicyProvider mc "leanci" with
+          supportsExtend := leanciExtSupported.get
+          quoteCents := fun _ _ => .ok 0
+          extend := fun _ _ => do leanciExtCalls.modify (· + 1); return .ok ()
+        }
+        let leanciCtx : OrbCore.RemoteFleetAndRelay.ManagedLifecycleContext := {
+          store := core, fleet,
+          override? := some (leanciProvider, { coreUrl := "https://core.example", script := "#!/bin/sh\nexit 0\n" })
+        }
+        let .ok catOff ← OrbCore.RemoteFleetAndRelay.loadManagedProviderCatalog mc core.rootDir fleet true #[] (some leanciProvider)
+          | throw (IO.userError "leanci catalog off failed")
+        let offOutcome ← OrbCore.RemoteFleetAndRelay.runConfiguredManagedLifecycle mc leanciCtx id "extend" now
+          (.obj #[("ttl_minutes", .nat 5)]) "leanci-ext-off"
+        leanciExtSupported.set true
+        let .ok catOn ← OrbCore.RemoteFleetAndRelay.loadManagedProviderCatalog mc core.rootDir fleet true #[] (some leanciProvider)
+          | throw (IO.userError "leanci catalog on failed")
+        let onOutcome ← OrbCore.RemoteFleetAndRelay.runConfiguredManagedLifecycle mc leanciCtx id "extend" now
+          (.obj #[("ttl_minutes", .nat 5)]) "leanci-ext-on"
+        let leanciSupports (cat : OrbBin.Json.JVal) :=
+          ((cat.asArr?).getD #[]).find? (·.fieldStr? "provider" == some "leanci") |>.bind (·.fieldBool? "supports_extend")
+        check (leanciSupports catOff == some false &&
+          (match offOutcome with | .error e => e == "managed_provider_extend_unsupported" | .ok _ => false) &&
+          leanciSupports catOn == some true && onOutcome.isOk && (← leanciExtCalls.get) == 1)
+          "lean.ci catalog and extend lifecycle follow provider.supportsExtend"
     let .ok _ ← provisionManagedMachine mc fleet {
       id := "orphan-reservation", sandboxName := "orb-managed-orphan-reservation", ttlMinutes := 60,
       spentCents := 1, deletableAtSec := 0
