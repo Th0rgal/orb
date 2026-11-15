@@ -94,11 +94,93 @@ struct OrbProvidersSettings: View {
     @State private var keySheet = false
     @State private var login: OrbProviderLogin?
     @State private var resetTarget: OrbResetPrompt?
+    @State private var removeTarget: OrbJSON?
     @State private var pendingResetKeys: [String: String] = [:]
     static let subscriptionTypes = ["anthropic", "openai", "google", "xai", "kimi"]
+    static func availableSubscriptionTypes(isAdmin: Bool = OrbCore.shared.isAdminUser) -> [String] {
+        isAdmin ? subscriptionTypes : subscriptionTypes.filter { subscriptionLogin($0).proxy }
+    }
+    static func canManageProvider(_ provider: OrbJSON, isAdmin: Bool = OrbCore.shared.isAdminUser) -> Bool {
+        isAdmin || provider["added_by_me"] == .bool(true)
+    }
+    static func isGloballyEnabled(_ p: OrbJSON) -> Bool {
+        if case .bool(let g) = p["globally_enabled"] { return g }
+        return p["enabled"] != .bool(false)
+    }
+    static func isUserSkipped(_ p: OrbJSON) -> Bool {
+        p["user_enabled"] == .bool(false)
+    }
     static func isEffectiveEnabled(_ p: OrbJSON) -> Bool {
         if case .bool(let eff) = p["effective_enabled"] { return eff }
         return p["enabled"] != .bool(false)
+    }
+    static func isMemberCustomBaseUrlAllowed(_ raw: String) -> Bool {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.lowercased().hasPrefix("https://"),
+              let url = URL(string: trimmed),
+              url.host != nil else { return false }
+        let rest = String(trimmed.dropFirst("https://".count))
+        let hostPort = String(rest.prefix { $0 != "/" && $0 != "?" && $0 != "#" })
+        if hostPort.isEmpty || hostPort.contains("[") || hostPort.contains("]") { return false }
+        let host = String(hostPort.prefix { $0 != ":" }).lowercased()
+        if host.isEmpty
+            || host == "localhost"
+            || host.hasSuffix(".localhost")
+            || host.hasSuffix(".internal")
+            || host.hasSuffix(".local")
+            || host.hasPrefix("127.")
+            || host.hasPrefix("10.")
+            || host.hasPrefix("192.168.")
+            || host.hasPrefix("169.254.")
+            || host.hasPrefix("0.") {
+            return false
+        }
+        if host.hasPrefix("172.") {
+            let after = host.dropFirst(4)
+            let second = String(after.prefix { $0 != "." })
+            if let n = Int(second), (16...31).contains(n) { return false }
+        }
+        if host.hasPrefix("100.") {
+            let after = host.dropFirst(4)
+            if !after.isEmpty && after.allSatisfy({ $0.isNumber || $0 == "." }) { return false }
+        }
+        return true
+    }
+    static func isCustomBaseUrlAllowed(_ raw: String, isAdmin: Bool = OrbCore.shared.isAdminUser) -> Bool {
+        if isAdmin {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let url = URL(string: trimmed), let host = url.host, !host.isEmpty else { return false }
+            return ["http", "https"].contains(url.scheme?.lowercased() ?? "")
+        }
+        return isMemberCustomBaseUrlAllowed(raw)
+    }
+    static func providerWriteError(_ error: Error, fallback: String) -> String {
+        let detail: String
+        if let httpErr = error as? OrbHTTPError {
+            detail = httpErr.detail
+        } else {
+            detail = error.localizedDescription
+        }
+        var code = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let data = code.data(using: .utf8),
+           let parsed = try? JSONDecoder().decode(OrbJSON.self, from: data) {
+            let extracted = !parsed["error"].text.isEmpty ? parsed["error"].text
+                : !parsed["message"].text.isEmpty ? parsed["message"].text
+                : parsed["detail"].text
+            if !extracted.isEmpty { code = extracted }
+        }
+        switch code {
+        case "not_account_owner":
+            return "Only the person who added this account, or an admin, can change its credentials or remove it."
+        case "base_url_not_allowed":
+            return "Members can set a base URL only on custom accounts they added, and only to a public https:// address."
+        case "admin_required":
+            return "Only an admin can change this setting."
+        case "account_disabled":
+            return "Your account is disabled."
+        default:
+            return fallback
+        }
     }
     var body: some View {
         let isAdmin = OrbCore.shared.isAdminUser
@@ -162,7 +244,7 @@ struct OrbProvidersSettings: View {
                                 .disabled(!ready || busy || !reset.usableNow)
                             }
                         }
-                        if isAdmin && Self.supportsSubscriptionReset(provider) {
+                        if Self.supportsSubscriptionReset(provider) {
                             Toggle(
                                 "Auto-use reset on limit",
                                 isOn: Binding(
@@ -173,25 +255,48 @@ struct OrbProvidersSettings: View {
                             .disabled(!ready || busy)
                         }
                         if !detail["error"].text.isEmpty { Text(detail["error"].text).font(.caption).foregroundStyle(.orange) }
+                        let manages = Self.canManageProvider(provider, isAdmin: isAdmin)
                         let unverified = detail["status"].text == "needs_verification"
-                        if unverified && isAdmin {
+                        if unverified && manages {
                             // Google refuses this login until its owner verifies it; the
                             // OAuth sign-in itself is fine, so no Reconnect here.
                             Text("Google requires you to verify this account.").font(.caption).foregroundStyle(.orange)
                             Button("Verify account") { openURL(Self.verificationURL(detail, email: provider["account_email"].text)) }
-                            Button("Check again") { Task { await recheck(provider) } }.disabled(!ready || busy)
+                            if isAdmin {
+                                Button("Check again") { Task { await recheck(provider) } }.disabled(!ready || busy)
+                            }
                         }
                         if !detail["usage_note"].text.isEmpty { Text(detail["usage_note"].text).font(.caption).foregroundStyle(.secondary) }
-                        if isAdmin && Self.canEditKey(provider) { Button("Edit API key") { editKey = provider; keySheet = true }.disabled(!ready || busy) }
-                        if isAdmin && Self.canConnectOAuth(provider) && !unverified {
-                            if let spec = Self.loginSpec(provider) { Button("Connect / Reconnect") { login = spec }.disabled(!ready || busy) }
-                            else { Text("This account must be connected on its credential owner.").font(.caption).foregroundStyle(.secondary) }
+                        Button(Self.canEditCredentials(provider, isAdmin: isAdmin) ? "Edit API key" : "Edit settings") {
+                            editKey = provider; keySheet = true
+                        }.disabled(!ready || busy)
+                        if manages && Self.canConnectOAuth(provider) && !unverified {
+                            if let spec = Self.loginSpec(provider, isAdmin: isAdmin) { Button("Connect / Reconnect") { login = spec }.disabled(!ready || busy) }
+                            else if isAdmin { Text("This account must be connected on its credential owner.").font(.caption).foregroundStyle(.secondary) }
                         }
-                        let globallyDisabled = provider["globally_enabled"] == .bool(false) || (!isAdmin && provider["enabled"] == .bool(false) && provider["effective_enabled"] == .null)
-                        Button(Self.isEffectiveEnabled(provider) ? (isAdmin ? "Disable" : "Skip for my missions") : (isAdmin ? "Enable" : "Use for my missions")) {
-                            Task { await toggle(provider) }
+                        if let index = providers.firstIndex(where: { $0["id"].text == provider["id"].text }), providers.count > 1 {
+                            if index > 0 {
+                                Button("Try earlier") { Task { await moveProvider(from: index, to: index - 1) } }.disabled(!ready || busy)
+                            }
+                            if index < providers.count - 1 {
+                                Button("Try later") { Task { await moveProvider(from: index, to: index + 1) } }.disabled(!ready || busy)
+                            }
                         }
-                        .disabled(!ready || busy || (!isAdmin && globallyDisabled))
+                        let globallyDisabled = !Self.isGloballyEnabled(provider)
+                        Button(globallyDisabled ? "Enable" : "Disable") {
+                            Task { await toggleGlobal(provider) }
+                        }
+                        .disabled(!ready || busy)
+                        if OrbCore.shared.currentUser != nil {
+                            let userSkipped = Self.isUserSkipped(provider)
+                            Button(userSkipped ? "Use for my missions" : "Skip for my missions") {
+                                Task { await toggleUserPreference(provider) }
+                            }
+                            .disabled(!ready || busy || globallyDisabled)
+                        }
+                        if manages {
+                            Button("Remove provider…", role: .destructive) { removeTarget = provider }.disabled(!ready || busy)
+                        }
                     } label: {
                         let parsed = Self.splitDisplayName(provider)
                         HStack(spacing: 12) {
@@ -210,26 +315,26 @@ struct OrbProvidersSettings: View {
                     }
                 }
             }
-            OrbCloudAccountsSettings(client: client)
             if isAdmin {
-                Section {
-                    Button("Add API key", systemImage: "plus") { editKey = nil; keySheet = true }.disabled(!ready)
-                    Menu("Connect subscription") {
-                        ForEach(Self.subscriptionTypes, id: \.self) { type in
-                            Button {
-                                login = Self.subscriptionLogin(type)
-                            } label: {
-                                Label {
-                                    Text(type.capitalized)
-                                } icon: {
-                                    if let asset = OrbProviderLogo.assetName(type: type) {
-                                        Image(asset)
-                                    }
+                OrbCloudAccountsSettings(client: client)
+            }
+            Section {
+                Button("Add API key", systemImage: "plus") { editKey = nil; keySheet = true }.disabled(!ready)
+                Menu("Connect subscription") {
+                    ForEach(Self.availableSubscriptionTypes(isAdmin: isAdmin), id: \.self) { type in
+                        Button {
+                            login = Self.subscriptionLogin(type)
+                        } label: {
+                            Label {
+                                Text(type.capitalized)
+                            } icon: {
+                                if let asset = OrbProviderLogo.assetName(type: type) {
+                                    Image(asset)
                                 }
                             }
                         }
-                    }.disabled(!ready)
-                }
+                    }
+                }.disabled(!ready)
             }
         }
         .scrollContentBackground(.hidden).background(OrbStyle.background)
@@ -261,6 +366,16 @@ struct OrbProvidersSettings: View {
             let detail = prompt.summary.detail.isEmpty ? "" : "\(prompt.summary.detail). "
             Text("Redeem 1 banked subscription reset on \(label)? \(detail)This immediately consumes a reset on your subscription and cannot be undone.")
         }
+        .alert(
+            "Remove provider?",
+            isPresented: Binding(get: { removeTarget != nil }, set: { if !$0 { removeTarget = nil } }),
+            presenting: removeTarget
+        ) { target in
+            Button("Cancel", role: .cancel) { removeTarget = nil }
+            Button("Remove", role: .destructive) { Task { await removeProvider(target) } }
+        } message: { target in
+            Text("Remove \(target["name"].text)? Any stored credentials for this account will be deleted.")
+        }
     }
     /// Where the owner verifies an Antigravity account Google refuses: Google's
     /// validation page when the refusal carried one, else signing in to
@@ -276,6 +391,12 @@ struct OrbProvidersSettings: View {
     static func canEditKey(_ provider: OrbJSON) -> Bool {
         provider["has_api_key"].flag || !provider["uses_oauth"].flag
     }
+    static func canEditCredentials(_ provider: OrbJSON, isAdmin: Bool = OrbCore.shared.isAdminUser) -> Bool {
+        canManageProvider(provider, isAdmin: isAdmin) && canEditKey(provider)
+    }
+    static func canEditBaseUrl(_ provider: OrbJSON?, type: String, isAdmin: Bool = OrbCore.shared.isAdminUser) -> Bool {
+        type == "custom" && (provider == nil || canManageProvider(provider!, isAdmin: isAdmin))
+    }
     static func canConnectOAuth(_ provider: OrbJSON) -> Bool {
         provider["uses_oauth"].flag && (provider["has_oauth"].flag || !provider["has_api_key"].flag)
     }
@@ -289,10 +410,11 @@ struct OrbProvidersSettings: View {
     static func subscriptionLogin(_ type: String) -> OrbProviderLogin {
         OrbProviderLogin(id: type, name: type.capitalized, type: type, proxy: type != "google")
     }
-    static func loginSpec(_ provider: OrbJSON) -> OrbProviderLogin? {
-        guard provider["uses_oauth"].flag else { return nil }
+    static func loginSpec(_ provider: OrbJSON, isAdmin: Bool = OrbCore.shared.isAdminUser) -> OrbProviderLogin? {
+        guard canManageProvider(provider, isAdmin: isAdmin), provider["uses_oauth"].flag else { return nil }
         let owner = provider["credential_owner"].text, type = provider["provider_type"].text
         let proxy = type != "google" && (owner == "cli_proxy" || (owner.isEmpty && subscriptionTypes.contains(type)))
+        guard isAdmin || proxy else { return nil }
         guard type == "kimi" || proxy || (owner == "sandboxed_sh" && ["anthropic", "openai", "google"].contains(type)) else { return nil }
         return OrbProviderLogin(id: provider["id"].text, name: provider["name"].text, type: type, proxy: proxy)
     }
@@ -439,26 +561,49 @@ struct OrbProvidersSettings: View {
             var entries: [String: OrbJSON] = { if case .object(let existing) = usage { return existing }; return [:] }()
             entries[id] = value
             usage = .object(entries)
-        } catch is CancellationError {} catch { usageError = error.localizedDescription }
+        } catch is CancellationError {} catch { usageError = Self.providerWriteError(error, fallback: error.localizedDescription) }
     }
-    private func toggle(_ provider: OrbJSON) async {
+    private func toggleGlobal(_ provider: OrbJSON) async {
         guard !busy else { return }; busy = true; defer { busy = false }
-        let isAdmin = OrbCore.shared.isAdminUser
-        let next = !Self.isEffectiveEnabled(provider)
+        let next = !Self.isGloballyEnabled(provider)
         do {
-            let endpoint = isAdmin
-                ? "/api/ai/providers/\(OrbCore.escape(provider["id"].text))"
-                : "/api/ai/providers/\(OrbCore.escape(provider["id"].text))/preference"
-            _ = try await client.call(endpoint, method: "PUT", body: .object(["enabled": .bool(next)]))
+            _ = try await client.call("/api/ai/providers/\(OrbCore.escape(provider["id"].text))", method: "PUT", body: .object(["enabled": .bool(next)]))
             await load()
-        } catch is CancellationError {} catch { self.error = error.localizedDescription }
+        } catch is CancellationError {} catch { self.error = Self.providerWriteError(error, fallback: "Could not update provider.") }
+    }
+    private func toggleUserPreference(_ provider: OrbJSON) async {
+        guard !busy else { return }; busy = true; defer { busy = false }
+        let next = Self.isUserSkipped(provider)
+        do {
+            _ = try await client.call("/api/ai/providers/\(OrbCore.escape(provider["id"].text))/preference", method: "PUT", body: .object(["enabled": .bool(next)]))
+            await load()
+        } catch is CancellationError {} catch { self.error = Self.providerWriteError(error, fallback: "Could not update provider preference.") }
+    }
+    private func moveProvider(from: Int, to: Int) async {
+        guard !busy, from != to, providers.indices.contains(from), providers.indices.contains(to) else { return }
+        busy = true; defer { busy = false }
+        var ids = providers.map { $0["id"].text }
+        let moved = ids.remove(at: from)
+        ids.insert(moved, at: to)
+        do {
+            _ = try await client.call("/api/ai/providers/reorder", method: "POST", body: .object(["ids": .array(ids.map { .string($0) })]))
+            await load()
+        } catch is CancellationError {} catch { self.error = Self.providerWriteError(error, fallback: "Could not reorder providers.") }
+    }
+    private func removeProvider(_ provider: OrbJSON) async {
+        guard !busy else { return }; busy = true; defer { busy = false }
+        removeTarget = nil
+        do {
+            _ = try await client.call("/api/ai/providers/\(OrbCore.escape(provider["id"].text))", method: "DELETE")
+            await load()
+        } catch is CancellationError {} catch { self.error = Self.providerWriteError(error, fallback: "Could not remove provider.") }
     }
     private func setAutoReset(_ provider: OrbJSON, enabled: Bool) async {
         guard !busy else { return }; busy = true; defer { busy = false }
         do {
             _ = try await client.call("/api/ai/providers/\(OrbCore.escape(provider["id"].text))", method: "PUT", body: .object(["auto_reset_on_limit": .bool(enabled)]))
             await load()
-        } catch is CancellationError {} catch { self.error = error.localizedDescription }
+        } catch is CancellationError {} catch { self.error = Self.providerWriteError(error, fallback: "Could not update auto-reset setting.") }
     }
     private func redeemReset(_ prompt: OrbResetPrompt) async {
         guard !busy else { return }; busy = true; defer { busy = false }
@@ -474,7 +619,7 @@ struct OrbProvidersSettings: View {
             entries[prompt.id] = updated
             usage = .object(entries)
             await load()
-        } catch is CancellationError {} catch { self.error = error.localizedDescription }
+        } catch is CancellationError {} catch { self.error = Self.providerWriteError(error, fallback: error.localizedDescription) }
     }
 }
 
@@ -710,6 +855,14 @@ struct OrbProviderKeyEditor: View {
         guard let n = Int(trimmed), n >= min, n <= max else { return .invalid }
         return .ok(n)
     }
+    private var isAdmin: Bool { OrbCore.shared.isAdminUser }
+    private var canEditCredentials: Bool {
+        guard let provider else { return true }
+        return OrbProvidersSettings.canEditCredentials(provider, isAdmin: isAdmin)
+    }
+    private var canEditBaseUrl: Bool {
+        OrbProvidersSettings.canEditBaseUrl(provider, type: type, isAdmin: isAdmin)
+    }
     private var capsValid: Bool {
         Self.parseOptionalCap(rpmLimit, min: 1, max: 100_000) != .invalid
         && Self.parseOptionalCap(maxConcurrency, min: 1, max: 1024) != .invalid
@@ -718,7 +871,7 @@ struct OrbProviderKeyEditor: View {
         !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         && (provider != nil || !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         && capsValid
-        && (type != "custom" || (URL(string: baseURL)?.host != nil && ["http", "https"].contains(URL(string: baseURL)?.scheme ?? "")))
+        && (!canEditBaseUrl || OrbProvidersSettings.isCustomBaseUrlAllowed(baseURL, isAdmin: isAdmin))
     }
     var body: some View {
         NavigationStack {
@@ -726,14 +879,18 @@ struct OrbProviderKeyEditor: View {
                 OrbSettingsError(message: error)
                 if provider == nil { Picker("Provider", selection: $type) { ForEach(Self.apiKeyTypes, id: \.self) { Text($0).tag($0) } } }
                 TextField("Name", text: $name).textInputAutocapitalization(.never).autocorrectionDisabled()
-                SecureField(provider == nil ? "API key" : "New API key (optional)", text: $key).textInputAutocapitalization(.never).autocorrectionDisabled()
-                if type == "custom" { TextField("Base URL", text: $baseURL).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled() }
+                if canEditCredentials {
+                    SecureField(provider == nil ? "API key" : "New API key (optional)", text: $key).textInputAutocapitalization(.never).autocorrectionDisabled()
+                }
+                if canEditBaseUrl {
+                    TextField(isAdmin ? "Base URL" : "Base URL (public https://)", text: $baseURL).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+                }
                 Section("Router pacing (optional)") {
                     TextField("Requests / min limit (e.g. 300)", text: $rpmLimit).keyboardType(.numberPad)
                     TextField("Max concurrent requests (e.g. 10)", text: $maxConcurrency).keyboardType(.numberPad)
                 }
             }.disabled(busy)
-            .navigationTitle(provider == nil ? "Add API key" : "Edit API key").navigationBarTitleDisplayMode(.inline)
+            .navigationTitle(provider == nil ? "Add API key" : (canEditCredentials ? "Edit API key" : "Edit provider settings")).navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(busy) }
                 ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.disabled(!valid || busy) }
@@ -756,14 +913,14 @@ struct OrbProviderKeyEditor: View {
               case .ok(let conc) = Self.parseOptionalCap(maxConcurrency, min: 1, max: 1024) else { return }
         var body: [String: OrbJSON] = ["name": .string(name.trimmingCharacters(in: .whitespacesAndNewlines))]
         let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedKey.isEmpty { body["api_key"] = .string(trimmedKey) }
+        if canEditCredentials && !trimmedKey.isEmpty { body["api_key"] = .string(trimmedKey) }
         if provider == nil {
             body["provider_type"] = .string(type)
-            if type == "custom" { body["base_url"] = .string(baseURL.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            if canEditBaseUrl { body["base_url"] = .string(baseURL.trimmingCharacters(in: .whitespacesAndNewlines)) }
             if let rpm { body["rpm_limit"] = .number(Double(rpm)) }
             if let conc { body["max_concurrency"] = .number(Double(conc)) }
         } else if let provider {
-            if type == "custom" { body["base_url"] = .string(baseURL.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            if canEditBaseUrl { body["base_url"] = .string(baseURL.trimmingCharacters(in: .whitespacesAndNewlines)) }
             if let rpm { body["rpm_limit"] = .number(Double(rpm)) }
             else if provider["rpm_limit"].number != nil { body["rpm_limit"] = .null }
             if let conc { body["max_concurrency"] = .number(Double(conc)) }
@@ -773,7 +930,7 @@ struct OrbProviderKeyEditor: View {
             _ = try await client.call("/api/ai/providers" + (provider.map { "/" + OrbCore.escape($0["id"].text) } ?? ""), method: provider == nil ? "POST" : "PUT", body: .object(body))
             key = ""; onSaved(); dismiss()
         } catch is CancellationError { key = ""; error = "Backend changed. Close and reopen this page." }
-        catch { self.error = "Could not save the provider settings. Check the connection and try again." }
+        catch { self.error = OrbProvidersSettings.providerWriteError(error, fallback: "Could not save the provider settings. Check the connection and try again.") }
     }
 }
 
@@ -848,7 +1005,7 @@ struct OrbProviderLoginView: View {
                     }
                 }
             }
-        } catch is CancellationError {} catch { self.error = "Could not start sign-in. \(error.localizedDescription)" }
+        } catch is CancellationError {} catch { self.error = OrbProvidersSettings.providerWriteError(error, fallback: "Could not start sign-in. \(error.localizedDescription)") }
         starting = false
     }
     private func submit() async {
@@ -858,7 +1015,7 @@ struct OrbProviderLoginView: View {
             let state = try await client.call(path, method: "POST", body: .object(spec.proxy ? ["url": .string(callback.trimmingCharacters(in: .whitespacesAndNewlines))] : ["method_index": .number(0), "code": .string(callback.trimmingCharacters(in: .whitespacesAndNewlines))]))
             if spec.proxy { accept(state) } else { finished = true; callback = ""; onSaved(); dismiss() }
         } catch is CancellationError { error = "Backend changed. Close and reopen this page." }
-        catch { self.error = "Could not complete sign-in. Check the pasted URL or code and try again." }
+        catch { self.error = OrbProvidersSettings.providerWriteError(error, fallback: "Could not complete sign-in. Check the pasted URL or code and try again.") }
     }
 }
 

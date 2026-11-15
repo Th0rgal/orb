@@ -333,4 +333,78 @@ final class OrbSettingsTests: XCTestCase {
         XCTAssertEqual(model.senderByItemID["turn-0-user"], "bob")
     }
 
+    func testMemberProviderPermissionsBaseUrlAndFriendlyWriteErrors() {
+        let sharedAcct: OrbJSON = .object([
+            "id": .string("p1"),
+            "provider_type": .string("custom"),
+            "name": .string("Shared Custom"),
+            "has_api_key": .bool(true),
+            "uses_oauth": .bool(false),
+            "added_by_me": .bool(false),
+        ])
+        let ownAcct: OrbJSON = .object([
+            "id": .string("p2"),
+            "provider_type": .string("custom"),
+            "name": .string("My Custom"),
+            "has_api_key": .bool(true),
+            "uses_oauth": .bool(false),
+            "added_by_me": .bool(true),
+        ])
+        let legacyOAuth: OrbJSON = .object([
+            "id": .string("p3"),
+            "provider_type": .string("openai"),
+            "name": .string("OpenAI Legacy"),
+            "uses_oauth": .bool(true),
+            "credential_owner": .string("sandboxed_sh"),
+            "added_by_me": .bool(true),
+        ])
+        let proxyOAuth: OrbJSON = .object([
+            "id": .string("p4"),
+            "provider_type": .string("openai"),
+            "name": .string("OpenAI Proxy"),
+            "uses_oauth": .bool(true),
+            "credential_owner": .string("cli_proxy"),
+            "added_by_me": .bool(true),
+        ])
+
+        XCTAssertFalse(OrbProvidersSettings.canManageProvider(sharedAcct, isAdmin: false))
+        XCTAssertTrue(OrbProvidersSettings.canManageProvider(ownAcct, isAdmin: false))
+        XCTAssertTrue(OrbProvidersSettings.canManageProvider(sharedAcct, isAdmin: true))
+        XCTAssertFalse(OrbProvidersSettings.canEditCredentials(sharedAcct, isAdmin: false))
+        XCTAssertTrue(OrbProvidersSettings.canEditCredentials(ownAcct, isAdmin: false))
+        XCTAssertFalse(OrbProvidersSettings.canEditBaseUrl(sharedAcct, type: "custom", isAdmin: false))
+        XCTAssertTrue(OrbProvidersSettings.canEditBaseUrl(ownAcct, type: "custom", isAdmin: false))
+        XCTAssertTrue(OrbProvidersSettings.canEditBaseUrl(nil, type: "custom", isAdmin: false))
+
+        XCTAssertNil(OrbProvidersSettings.loginSpec(sharedAcct, isAdmin: false))
+        XCTAssertNil(OrbProvidersSettings.loginSpec(legacyOAuth, isAdmin: false))
+        XCTAssertNotNil(OrbProvidersSettings.loginSpec(legacyOAuth, isAdmin: true))
+        XCTAssertEqual(OrbProvidersSettings.loginSpec(proxyOAuth, isAdmin: false)?.proxy, true)
+        XCTAssertFalse(OrbProvidersSettings.availableSubscriptionTypes(isAdmin: false).contains("google"))
+        XCTAssertTrue(OrbProvidersSettings.availableSubscriptionTypes(isAdmin: true).contains("google"))
+
+        XCTAssertTrue(OrbProvidersSettings.isMemberCustomBaseUrlAllowed("https://api.example.com/v1"))
+        XCTAssertTrue(OrbProvidersSettings.isMemberCustomBaseUrlAllowed("https://100.example.com/v1"))
+        XCTAssertFalse(OrbProvidersSettings.isMemberCustomBaseUrlAllowed("http://api.example.com/v1"))
+        XCTAssertFalse(OrbProvidersSettings.isMemberCustomBaseUrlAllowed("https://localhost:8080/v1"))
+        XCTAssertFalse(OrbProvidersSettings.isMemberCustomBaseUrlAllowed("https://svc.internal/v1"))
+        XCTAssertFalse(OrbProvidersSettings.isMemberCustomBaseUrlAllowed("https://printer.local/v1"))
+        XCTAssertFalse(OrbProvidersSettings.isMemberCustomBaseUrlAllowed("https://127.0.0.1/v1"))
+        XCTAssertFalse(OrbProvidersSettings.isMemberCustomBaseUrlAllowed("https://10.0.0.1/v1"))
+        XCTAssertFalse(OrbProvidersSettings.isMemberCustomBaseUrlAllowed("https://192.168.1.1/v1"))
+        XCTAssertFalse(OrbProvidersSettings.isMemberCustomBaseUrlAllowed("https://172.16.0.1/v1"))
+        XCTAssertFalse(OrbProvidersSettings.isMemberCustomBaseUrlAllowed("https://100.64.0.1/v1"))
+        XCTAssertTrue(OrbProvidersSettings.isCustomBaseUrlAllowed("http://localhost:11434/v1", isAdmin: true))
+        XCTAssertFalse(OrbProvidersSettings.isCustomBaseUrlAllowed("http://localhost:11434/v1", isAdmin: false))
+
+        for code in ["not_account_owner", "base_url_not_allowed", "admin_required", "account_disabled"] {
+            let err = OrbHTTPError(status: 403, detail: "{\"error\":\"\(code)\"}")
+            let msg = OrbProvidersSettings.providerWriteError(err, fallback: "fallback")
+            XCTAssertFalse(msg.contains("{"))
+            XCTAssertFalse(msg.contains("403"))
+            XCTAssertNotEqual(msg, "fallback")
+        }
+        XCTAssertEqual(OrbProvidersSettings.providerWriteError(OrbHTTPError(status: 500, detail: "boom"), fallback: "fallback"), "fallback")
+    }
+
 }
