@@ -311,6 +311,24 @@ def readJobLogTailBounded (logPath? : Option String) (tailMax : Nat := 65536) : 
 
 /-! ### Live Process-Group Job State, Linux `/proc` Child-Tool Inspection, & Reconciler -/
 
+/-- Format a non-zero job exit error, surfacing any `execvp`/`chdir` diagnostic (`E2BIG`, `ENOENT`,
+    `EACCES`, `ENOEXEC`) from `logPath?` (or synthesizing an `E2BIG` reason if `pipe_stdin`
+    `/bin/sh` exited before opening `logPath?` due to `MAX_ARG_STRLEN`) when exit code is `126`/`127`. -/
+def formatJobExitError (codeInt : Int) (logPath? : Option String) : IO (Option String) := do
+  if codeInt == 0 then
+    return none
+  let base := s!"command exited with Some({codeInt})"
+  if codeInt == 126 || codeInt == 127 then
+    if let some raw ← readJobLogTailBounded logPath? 4096 then
+      let lines := (raw.splitOn "\n").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+      if let some lastLine := lines.getLast? then
+        return some s!"{base}: {lastLine}"
+    let reason :=
+      if codeInt == 127 then "failed to exec command: No such file or directory (os error 2)"
+      else "failed to exec command: Permission denied or Argument list too long (os error 7)"
+    return some s!"{base}: {reason}"
+  return some base
+
 /-- Compute deadline (`Option UInt64` seconds) for a job payload (`src/node/runner.rs:1312-1316`):
     non-side `raw_command` jobs with `long_running == true` have NO deadline when `timeout_secs` is
     absent, and honor an explicit `timeout_secs` without clamping to `maxJobSecs`. -/
@@ -1521,12 +1539,17 @@ def prepareJobOutsideLock
     cleanupPartialJobCheckout cfg.workDir jid payload
     return .error s!"job preparation I/O error: {ioErr}"
 
+private def maxArgStrlenBytes : Nat := 131072
+
 /-- Spawn a `-pgid` job with an open writable `stdin` pipe (`OrbBin.PosixExt.spawnPgrp`), redirecting
     `stdout` and `stderr` to `logPath` without touching `orb_node_posix.c`. -/
 private def spawnJobPgrpPipedStdin
     (prog : String) (args : Array String) (envKv : Array String) (cwd logPath : String) : IO (UInt64 × Int32) := do
   if let some parent := (System.FilePath.mk logPath).parent then
     IO.FS.createDirAll parent
+  if prog.utf8ByteSize >= maxArgStrlenBytes || args.any (fun a => a.utf8ByteSize >= maxArgStrlenBytes) then
+    let diag := s!"failed to exec {prog}: Argument list too long (os error 7)\n"
+    IO.FS.writeFile logPath diag
   let mut envStrs : Array String := Array.mkEmpty (envKv.size / 2)
   let mut idx := 0
   while idx + 1 < envKv.size do
@@ -1743,8 +1766,7 @@ def commitPreparedJob
           teardownJobResourcesAsync spec.systemdScope? spec.isolatedCheckout
             (scratchFinOf cur.nodeBootEpoch curClaimSeq spec.scratchDir?)
           let nextState : JobState := if codeInt == 0 then .succeeded else .failed
-          let failErr? : Option String :=
-            if codeInt == 0 then none else some s!"command exited with Some({codeInt})"
+          let failErr? ← formatJobExitError codeInt (some spec.logPath)
           if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
             r with
             state := if r.state == .cancelled then .cancelled else nextState
@@ -1922,8 +1944,7 @@ def tickRuntimeReserve
       teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout scratchFin
       let nowTs ← nowRfc3339
       let nextState : JobState := if codeInt == 0 then .succeeded else .failed
-      let failErr? : Option String :=
-        if codeInt == 0 then none else some s!"command exited with Some({codeInt})"
+      let failErr? ← formatJobExitError codeInt (recJob?.bind (·.logPath?))
       if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
         r with
         state := if r.state == .cancelled then .cancelled else nextState
@@ -2336,12 +2357,16 @@ def runBoundedOutput
     (killChildPgrp : Bool := false)
     (capBytes : Nat := syncExecOutputCapBytes)
     (postWaitSampleOverride? : Option ProcLivenessSample := none) : IO IO.Process.Output := do
-  let child ← IO.Process.spawn {
+  let child ← match ← (IO.Process.spawn {
     sa with
     stdin := .null
     stdout := .piped
     stderr := .piped
-  }
+  }).toBaseIO with
+  | .ok c => pure c
+  | .error e =>
+    stopSystemdScope activeScope?
+    return { exitCode := 127, stdout := "", stderr := s!"failed to exec {sa.cmd}: {e}\n" }
   let childPid := child.pid.toUInt64
   let initSample ← sampleProcLiveness childPid
   let childTicks := initSample.actualTicks

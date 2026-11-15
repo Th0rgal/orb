@@ -90,12 +90,9 @@ LEAN_EXPORT lean_obj_res orb_node_host_stats(b_lean_obj_arg work_dir, lean_obj_a
     }
     lean_object *ba = lean_alloc_sarray(1, 40, 40);
     uint8_t *p = lean_sarray_cptr(ba);
-    memcpy(p + 0, &cpus, 4);
-    memcpy(p + 4, &pad, 4);
-    memcpy(p + 8, &mem_tot, 8);
-    memcpy(p + 16, &mem_avail, 8);
-    memcpy(p + 24, &disk_tot, 8);
-    memcpy(p + 32, &disk_avail, 8);
+    memcpy(p + 0, &cpus, 4); memcpy(p + 4, &pad, 4);
+    memcpy(p + 8, &mem_tot, 8); memcpy(p + 16, &mem_avail, 8);
+    memcpy(p + 24, &disk_tot, 8); memcpy(p + 32, &disk_avail, 8);
     return lean_io_result_mk_ok(ba);
 }
 
@@ -108,18 +105,14 @@ LEAN_EXPORT lean_obj_res orb_node_tcp_listen(b_lean_obj_arg host, uint16_t port,
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
+    addr.sin_family = AF_INET; addr.sin_port = htons(port);
     const char *h = lean_string_cstr(host);
-    if (strcmp(h, "0.0.0.0") == 0 || strcmp(h, "*") == 0) {
-        addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    } else if (inet_pton(AF_INET, h, &addr.sin_addr) != 1) {
-        close(fd);
-        return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string("invalid IPv4 bind host")));
+    if (strcmp(h, "0.0.0.0") == 0 || strcmp(h, "*") == 0) addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    else if (inet_pton(AF_INET, h, &addr.sin_addr) != 1) {
+        close(fd); return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string("invalid IPv4 bind host")));
     }
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0 || listen(fd, 128) != 0) {
-        close(fd);
-        return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string("bind/listen failed")));
+        close(fd); return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string("bind/listen failed")));
     }
     return lean_io_result_mk_ok(lean_box_uint32((uint32_t)fd));
 }
@@ -179,7 +172,9 @@ LEAN_EXPORT lean_obj_res orb_node_spawn_job_pgrp(
         int null_fd = open("/dev/null", O_RDONLY);
         if (null_fd >= 0) { dup2(null_fd, STDIN_FILENO); close(null_fd); }
         dup2(log_fd, STDOUT_FILENO); dup2(log_fd, STDERR_FILENO); close(log_fd);
-        if (lean_string_size(cwd) > 1 && chdir(lean_string_cstr(cwd)) != 0) _exit(126);
+        if (lean_string_size(cwd) > 1 && chdir(lean_string_cstr(cwd)) != 0) {
+            dprintf(STDERR_FILENO, "failed to chdir %s: %s (os error %d)\n", lean_string_cstr(cwd), strerror(errno), errno); _exit(126);
+        }
 #ifdef __APPLE__
         *_NSGetEnviron() = NULL;
 #else
@@ -192,7 +187,10 @@ LEAN_EXPORT lean_obj_res orb_node_spawn_job_pgrp(
         if (!argv) _exit(126);
         argv[0] = (char *)lean_string_cstr(prog);
         for (size_t i = 0; i < argc; i++) argv[i + 1] = (char *)lean_string_cstr(lean_array_get_core(args_arr, i));
-        execvp(argv[0], argv); _exit(127);
+        execvp(argv[0], argv);
+        int err = errno;
+        dprintf(STDERR_FILENO, "failed to exec %s: %s (os error %d)\n", argv[0], strerror(err), err);
+        _exit(err == ENOENT ? 127 : 126);
     }
     close(log_fd);
     return lean_io_result_mk_ok(lean_box_uint64((uint64_t)pid));

@@ -39,6 +39,71 @@ private def assertTrue (label : String) (cond : Bool) : IO Unit := do
   if !cond then
     throw (IO.userError s!"FAIL: {label}")
 
+/-- Roadmap R2 regression tests: oversized command (`E2BIG`) and missing binary (`ENOENT`)
+    report their cause in both the job `error` field and the job log, not bare exit 127 + empty log. -/
+private def runR2ExecFailureTests
+    (check : String → Bool → IO Unit) (tmpRoot btwMissionId : String)
+    (mtxFork : Std.Mutex NodeRuntime) (xferFork : Std.Mutex Unit)
+    (authHdrs : Array (String × String)) (nowForkEp : UInt64) : IO Unit := do
+  let rt0 ← mtxFork.atomically get
+  let e2bigJobId := "ef7e8c9a-3cdb-4f80-9233-01162184602a"
+  let e2bigLease := signLeaseToken rt0.cfg.token {
+    missionId := btwMissionId, nodeId := rt0.cfg.nodeId, scope := .jobSubmit,
+    expiresAt := nowForkEp + 600, jobId? := some e2bigJobId
+  }
+  let oversizedCmd := "echo " ++ String.ofList (List.replicate 140000 'x')
+  let _ ← handleRequestConcurrent mtxFork xferFork {
+    method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs,
+    body := (renderCompact (.obj #[
+      ("job_id", .str e2bigJobId),
+      ("mission_id", .str btwMissionId),
+      ("lease_token", .str e2bigLease),
+      ("payload", .obj #[
+        ("kind", .str "raw_command"),
+        ("side_question", .bool true),
+        ("command", .str oversizedCmd)
+      ])
+    ])).toUTF8
+  }
+  let mut e2bigRec? : Option JobRecord := none
+  let mut e2bigLogTail : String := ""
+  for _ in [0:60] do
+    IO.sleep 50
+    let getResp ← handleRequestConcurrent mtxFork xferFork {
+      method := "GET", rawPath := s!"/jobs/{e2bigJobId}", path := s!"/jobs/{e2bigJobId}",
+      query := #[], headers := authHdrs, body := ByteArray.empty
+    }
+    let curRt ← mtxFork.atomically get
+    let r? := curRt.ledger.jobs.get? e2bigJobId
+    if r?.any (fun jr => jr.state.isTerminal) then
+      e2bigRec? := r?
+      if let .ok jv := OrbBin.Json.parse (String.fromUTF8? getResp.body |>.getD "{}") then
+        e2bigLogTail := (jv.fieldStr? "log_tail").getD ""
+      break
+  let e2bigErr := (e2bigRec?.bind (·.error?)).getD ""
+  check "R2: oversized command (> MAX_ARG_STRLEN 128 KiB) fails with E2BIG reason in both error and job log"
+    (e2bigRec?.map (·.state) == some .failed &&
+     e2bigRec?.bind (·.exitCode?) == some 126 &&
+     (e2bigErr.splitOn "Argument list too long").length > 1 &&
+     (e2bigLogTail.splitOn "Argument list too long").length > 1)
+
+  let enoentLogPath := s!"{tmpRoot}/enoent-direct.log"
+  let enoentPid ← OrbNode.Posix.spawnJobPgrp "/nonexistent-orb-r2-binary" #[] #[] tmpRoot enoentLogPath
+  let mut enoentCode? : Option Int := none
+  for _ in [0:40] do
+    let w ← OrbNode.Posix.pollPid enoentPid
+    if (w &&& 1) == 1 then
+      enoentCode? := some (Int.ofNat ((w >>> 32).toUInt32.toNat))
+      break
+    IO.sleep 20
+  let enoentErr? ← formatJobExitError (enoentCode?.getD 127) (some enoentLogPath)
+  let enoentLog ← (IO.FS.readFile enoentLogPath).toBaseIO
+  let enoentLogStr := match enoentLog with | .ok s => s | .error _ => ""
+  check "R2: ENOENT exec failure reports No such file or directory in both error and job log"
+    (enoentCode? == some 127 &&
+     ((enoentErr?.getD "").splitOn "No such file or directory").length > 1 &&
+     (enoentLogStr.splitOn "No such file or directory").length > 1)
+
 /-- Regression check for `SM-20` anchored child-tool `SIGINT` admission (`verifyChildToolSignalAdmit`,
     `sigintAnchoredChildTool`, and `sigintInflightChildTools`):
     (a) PID reuse between enumeration and signal (re-sampled `start_ticks` differs) is NOT signalled;
@@ -3127,6 +3192,8 @@ def runTests : IO UInt32 := do
     (missJobRec?.map (·.state) == some .failed &&
      missJobRec?.bind (·.exitCode?) == some 78 &&
      missJobRec?.bind (·.error?) == some "command exited with Some(78)")
+
+  runR2ExecFailureTests check tmpRoot btwMissionId mtxFork xferFork authHdrs nowForkEp
 
   -- Regression test for 1-2 vCPU worker nodes (`LEAN_NUM_THREADS=1`, e.g. `nimrud`):
   -- `startProjectContextDaemon` and per-connection HTTP tasks must run with `Task.Priority.dedicated`

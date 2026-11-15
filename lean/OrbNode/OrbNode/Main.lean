@@ -49,11 +49,14 @@ private def runClearedEnvTrampoline (rest : List String) : IO UInt32 := do
   envArgs := envArgs.push prog
   for a in progArgs do
     envArgs := envArgs.push a
-  let child ← IO.Process.spawn {
+  match ← (IO.Process.spawn {
     cmd := "env"
     args := envArgs
-  }
-  child.wait
+  }).toBaseIO with
+  | .ok child => child.wait
+  | .error e =>
+    IO.eprintln s!"failed to exec {prog}: {e}"
+    return 127
 
 /-- Parse `opencode-acp` flags into a turn (prompt filled in later). -/
 def parseOpenCodeAcpArgs (cwd : String) : List String → Option OrbBin.ClaudeControl.OpenCodeAcpTurn
