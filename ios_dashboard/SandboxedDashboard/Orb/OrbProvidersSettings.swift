@@ -786,11 +786,11 @@ struct OrbProviderQuota: View {
         let primaryMins = value["codex_primary_window_minutes"].number
         let secondaryMins = value["codex_secondary_window_minutes"].number
         if primaryMins != 0 {
-            add(codexWindowLabel(primaryMins, fallback: "Primary", explicitLabel: value["codex_primary_window_label"].string), "codex_primary_used_percent")
+            add(codexWindowLabel(primaryMins, fallback: "Primary", explicitLabel: value["codex_primary_window_label"].text), "codex_primary_used_percent")
         }
         if secondaryMins != 0 {
             let otherMins = value["codex_primary_used_percent"].number != nil ? primaryMins : nil
-            add(codexWindowLabel(secondaryMins, fallback: "Secondary", otherMinutes: otherMins, explicitLabel: value["codex_secondary_window_label"].string), "codex_secondary_used_percent")
+            add(codexWindowLabel(secondaryMins, fallback: "Secondary", otherMinutes: otherMins, explicitLabel: value["codex_secondary_window_label"].text), "codex_secondary_used_percent")
         }
         add("Credits", "xai_credit_used_percent")
         if value["kimi_windows"].items.isEmpty { add("5h", "kimi_5h_used_percent"); add("Weekly", "kimi_weekly_used_percent") }
