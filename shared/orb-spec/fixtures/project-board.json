@@ -1,0 +1,22 @@
+{
+  "cases": [
+    {
+      "name": "no board",
+      "project": {"controller_mission_id": null, "board_updated_at": null},
+      "board": {"text": "", "updated_at": null, "updated_by_mission_id": null, "controller_mission_id": null},
+      "controller_update": {"mission_id": null}
+    },
+    {
+      "name": "board",
+      "project": {"controller_mission_id": "controller-1", "board_updated_at": "2026-11-15T10:00:00Z"},
+      "board": {"text": "# Project board\nShip iOS and Android together.\n", "updated_at": "2026-11-15T10:00:00Z", "updated_by_mission_id": "writer-2", "controller_mission_id": "controller-1"},
+      "controller_update": {"mission_id": "controller-1"}
+    },
+    {
+      "name": "missing fields",
+      "project": {},
+      "board": {},
+      "controller_update": {"mission_id": null}
+    }
+  ]
+}

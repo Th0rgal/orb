@@ -781,3 +781,20 @@ enum OrbSkillSlash {
         }
     }
 }
+
+
+extension OrbCore {
+    /// The same normal follow-up path used by notification replies and project steering.
+    func sendMissionMessage(missionID: String, content: String) async throws {
+        let cyber = try await OrbCyberAccess.requireFollowUp(content, missionID: missionID)
+        var body: [String: OrbJSON] = [
+            "mission_id": .string(missionID), "content": .string(content),
+            "queue_followup": .bool(true), "client_message_id": .string(UUID().uuidString.lowercased())
+        ]
+        if let cyber {
+            body["cyber_access"] = .string(cyber.mode)
+            if !cyber.revision.isEmpty { body["cyber_revision"] = .string(cyber.revision) }
+        }
+        _ = try await call("/api/control/message", method: "POST", body: .object(body))
+    }
+}

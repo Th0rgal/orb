@@ -1466,6 +1466,7 @@ struct OrbHome: View {
 struct OrbProjectPage: View {
     let project: OrbRow
     @State private var missions: [OrbRow] = []
+    @State private var boardRefreshID = 0
     @State private var loading = true
     @State private var folders: [String] = []
     @State private var collapsed: Set<String> = []
@@ -1559,6 +1560,7 @@ struct OrbProjectPage: View {
     private var scrollContent: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
+                OrbProjectBoardSection(project: project, missions: missions, refreshID: boardRefreshID)
                 if filter != "All" {
                     HStack {
                         Text(filter)
@@ -1601,7 +1603,7 @@ struct OrbProjectPage: View {
             }
             Button { newFolderParent = ""; folderName = ""; newFolder = true } label: { Label("New folder", systemImage: "folder.badge.plus") }
             OrbProjectColorMenu(project: project.id)
-            NavigationLink { OrbProjectAutomationView(project: project) } label: { Label("Controller & crons", systemImage: "clock.arrow.2.circlepath") }
+            NavigationLink { OrbProjectConcurrencyView(project: project) } label: { Label("Project concurrency", systemImage: "slider.horizontal.3") }
             NavigationLink { OrbDocuments(project: project.id, path: "") } label: { Label("Project context", systemImage: "doc.text") }
             NavigationLink { OrbProjectSecretAccess(slug: project.id) } label: { Label("Secret access", systemImage: "lock.shield") }
         } label: {
@@ -1612,7 +1614,7 @@ struct OrbProjectPage: View {
     var body: some View {
         projectScaffold
             .task { await load() }
-            .refreshable { await load(force: true) }
+            .refreshable { boardRefreshID += 1; await load(force: true) }
             .onChange(of: filter) { _, newValue in
                 if newValue == "Archived" && !loadedArchived {
                     Task { await load(force: true) }

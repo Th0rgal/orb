@@ -109,155 +109,40 @@ final class OrbClientParityTests: XCTestCase {
         XCTAssertTrue(OrbSkillsSettings.needsLibraryRemoteInit(nextRemote: "git@github.com:org/new.git", activeRepoRemote: "git@github.com:org/new.git", failedInitRemote: "git@github.com:org/new.git"))
     }
 
-    func testControllerModelScheduleTimelineAndGrantNormalization() {
-        XCTAssertEqual(OrbControllerModel.scheduleExpression(.string("0 9 * * *")), "0 9 * * *")
-        XCTAssertEqual(
-            OrbControllerModel.scheduleExpression(.object(["kind": .string("interval"), "minutes": .number(120)])),
-            "every 2h"
-        )
-        XCTAssertEqual(
-            OrbControllerModel.scheduleExpression(.object(["kind": .string("cron"), "expr": .string("*/15 * * * *")])),
-            "*/15 * * * *"
-        )
-
-        let patched = OrbControllerModel.hermesPatch(
-            ["name": .string("nightly"), "continuity": .bool(true)],
-            existingJob: .object(["context_from": .array([.string("other-job"), .string("self")])])
-        )
-        XCTAssertEqual(patched["context_from"].items.map(\.text), ["other-job", "self"])
-
-        let now = Date(timeIntervalSince1970: 1_762_000_000)
-        let iso = ISO8601DateFormatter()
-        let runs: [OrbJSON] = [
-            .object(["id": .string("r4"), "at": .string(iso.string(from: now.addingTimeInterval(-60))), "silent": .bool(true)]),
-            .object(["id": .string("r3"), "at": .string(iso.string(from: now.addingTimeInterval(-120))), "silent": .bool(true)]),
-            .object(["id": .string("r2"), "at": .string(iso.string(from: now.addingTimeInterval(-180))), "status": .string("failed"), "error": .string("boom")]),
-            .object(["id": .string("r1"), "at": .string(iso.string(from: now.addingTimeInterval(-240))), "status": .string("failed"), "error": .string("boom")])
-        ]
-        let entries = OrbControllerModel.buildEntries(runs: runs, now: now)
-        XCTAssertEqual(entries.count, 3) // Today header + 2 folded silent + 2 folded failed
-        if case .silent(_, let silentRuns) = entries[1] {
-            XCTAssertEqual(silentRuns.count, 2)
-        } else {
-            XCTFail("Expected folded silent entry")
+    func testProjectBoardSharedFixture() throws {
+        let raw = try JSONDecoder().decode(OrbJSON.self, from: Data(contentsOf: OrbSpec.url("fixtures/project-board.json")))
+        let cases = raw["cases"].items
+        XCTAssertEqual(cases.map { $0["name"].text }, ["no board", "board", "missing fields"])
+        for item in cases {
+            let project = OrbProjectBoard(item["project"])
+            let board = OrbProjectBoard(item["board"])
+            XCTAssertEqual(project.controllerMissionID, board.controllerMissionID)
+            XCTAssertEqual(project.boardUpdatedAt, board.updatedAt)
+            XCTAssertEqual(project.controllerMissionID.map(OrbJSON.string) ?? .null, item["controller_update"]["mission_id"])
+            switch item["name"].text {
+            case "no board":
+                XCTAssertEqual(board.text, "")
+                XCTAssertNil(board.updatedByMissionID)
+                XCTAssertNil(board.controllerMissionID)
+            case "board":
+                XCTAssertEqual(board.text, "# Project board\nShip iOS and Android together.\n")
+                XCTAssertEqual(board.updatedAt, "2026-11-15T10:00:00Z")
+                XCTAssertEqual(board.updatedByMissionID, "writer-2")
+                XCTAssertEqual(board.controllerMissionID, "controller-1")
+            case "missing fields":
+                XCTAssertNil(board.text)
+                XCTAssertNil(board.updatedAt)
+                XCTAssertNil(board.updatedByMissionID)
+                XCTAssertNil(project.controllerMissionID)
+            default: XCTFail("Unknown fixture case")
+            }
         }
-        if case .failed(_, let failedRuns, let err) = entries[2] {
-            XCTAssertEqual(failedRuns.count, 2)
-            XCTAssertEqual(err, "boom")
-        } else {
-            XCTFail("Expected folded failed entry")
-        }
+    }
 
-        XCTAssertEqual(OrbControllerModel.parseProjectLimit(""), .success(0))
-        XCTAssertEqual(OrbControllerModel.parseProjectLimit("4"), .success(4))
-        XCTAssertNil(OrbControllerModel.projectLimitOf(.object(["parallel_missions": .number(0)])))
-        XCTAssertEqual(OrbControllerModel.projectLimitOf(.object(["parallel_missions": .number(3)])), 3)
-
-        // Legacy singular `skill` fallback vs explicit `skills` array.
-        XCTAssertEqual(
-            OrbControllerModel.skillsOf(
-                settings: .object(["skill": .string("project-notes")]),
-                job: .null
-            ),
-            ["project-notes"]
-        )
-        XCTAssertEqual(
-            OrbControllerModel.skillsOf(
-                settings: .object(["skills": .array([]), "skill": .string("stale-skill")]),
-                job: .null
-            ),
-            []
-        )
-
-        // Script-only controller edits omit unchanged empty `prompt` so Core's `edit_args` does not reject `prompt: ""`.
-        let scriptView: OrbJSON = .object([
-            "job": .object([
-                "id": .string("job-1"),
-                "name": .string("script controller"),
-                "schedule": .string("every 30m")
-            ]),
-            "settings": .object([
-                "script": .string("scripts/check.py"),
-                "prompt": .string(""),
-                "skills": .array([.string("ops")]),
-                "deliver": .string("project:demo"),
-                "model": .string(""),
-                "reasoning_effort": .string(""),
-                "continuity": .bool(false)
-            ])
-        ])
-        let scheduleOnlyPatch = OrbControllerModel.buildCronPatch(
-            existingView: scriptView,
-            defaultDeliver: "project:demo",
-            name: "script controller",
-            schedule: "every 15m",
-            prompt: "",
-            skills: ["ops"],
-            deliver: "project:demo",
-            model: "",
-            reasoningEffort: "",
-            continuity: false
-        )
-        XCTAssertEqual(scheduleOnlyPatch, ["schedule": .string("every 15m")])
-        XCTAssertNil(scheduleOnlyPatch["prompt"])
-
-        let unchangedPatch = OrbControllerModel.buildCronPatch(
-            existingView: scriptView,
-            defaultDeliver: "project:demo",
-            name: "script controller",
-            schedule: "every 30m",
-            prompt: "",
-            skills: ["ops"],
-            deliver: "project:demo",
-            model: "",
-            reasoningEffort: "",
-            continuity: false
-        )
-        XCTAssertTrue(unchangedPatch.isEmpty)
-        XCTAssertEqual(
-            OrbControllerModel.steerRunFailureMessage("scheduler offline"),
-            "Steer saved, but the controller could not start: scheduler offline. Use Run now to retry."
-        )
-
-        // Older Hermes REST APIs filter execution overrides; detect unretained fields and format warning.
-        let overridePatch: [String: OrbJSON] = [
-            "model": .string("gpt-5"),
-            "reasoning_effort": .string("high"),
-            "continuity": .bool(true)
-        ]
-        let filteredSavedView: OrbJSON = .object([
-            "job": .object(["id": .string("job-2"), "name": .string("nightly")]),
-            "settings": .object(["id": .string("job-2"), "name": .string("nightly")])
-        ])
-        XCTAssertEqual(
-            OrbControllerModel.ignoredCronFields(patch: overridePatch, savedView: filteredSavedView),
-            ["model", "reasoning_effort", "continuity"]
-        )
-        XCTAssertEqual(
-            OrbControllerModel.ignoredCronWarning(patch: overridePatch, savedView: filteredSavedView),
-            "Hermes did not retain: model, reasoning_effort, continuity. Its cron API needs support for these settings."
-        )
-
-        let retainedSavedView: OrbJSON = .object([
-            "job": .object([
-                "id": .string("job-2"),
-                "name": .string("nightly"),
-                "model": .string("gpt-5"),
-                "reasoning_effort": .string("high"),
-                "context_from": .array([.string("self")])
-            ]),
-            "settings": .object([
-                "id": .string("job-2"),
-                "name": .string("nightly"),
-                "model": .string("gpt-5"),
-                "reasoning_effort": .string("high"),
-                "context_from": .array([.string("self")])
-            ])
-        ])
-        XCTAssertEqual(
-            OrbControllerModel.ignoredCronFields(patch: overridePatch, savedView: retainedSavedView),
-            []
-        )
-        XCTAssertNil(OrbControllerModel.ignoredCronWarning(patch: overridePatch, savedView: retainedSavedView))
+    func testProjectLimitNormalization() {
+        XCTAssertEqual(OrbProjectGrant.parseProjectLimit(""), .success(0))
+        XCTAssertEqual(OrbProjectGrant.parseProjectLimit("4"), .success(4))
+        XCTAssertNil(OrbProjectGrant.projectLimitOf(.object(["parallel_missions": .number(0)])))
+        XCTAssertEqual(OrbProjectGrant.projectLimitOf(.object(["parallel_missions": .number(3)])), 3)
     }
 }
