@@ -183,6 +183,27 @@ def run (root : String) : IO Unit := do
         { baseMachine with id := "second-stale-reservation" } 1000).isOk) "transaction rejects stale concurrency snapshot"
     finally
       closeManagedComputeStore admissionStore
+
+    -- Provisioning script contract for bare provider guests (lean.ci Ubuntu 26.04 rootfs):
+    -- installs pinned CLI harnesses (opencode/claude/codex) into /opt/orb/bin when absent,
+    -- exposes /opt/elan at /opt/orb/elan and on PATH, and passes bash -n syntax check.
+    let mut scriptText := ""
+    for cand in #["scripts/orb-node-provision.sh", "../scripts/orb-node-provision.sh", "../../scripts/orb-node-provision.sh"] do
+      if scriptText.isEmpty then
+        if let .ok s ← (IO.FS.readFile cand).toBaseIO then
+          if !s.trimAscii.toString.isEmpty then scriptText := s
+    if !scriptText.isEmpty then
+      let tmpScript := s!"{root}/orb-node-provision-syntax.sh"
+      IO.FS.writeFile tmpScript scriptText
+      let bashSyntax ← IO.Process.output { cmd := "bash", args := #["-n", tmpScript] }
+      check (bashSyntax.exitCode == 0) "orb-node-provision.sh passes bash -n syntax check"
+      check ((scriptText.splitOn "OPENCODE_VERSION=").length > 1 &&
+        (scriptText.splitOn "/opt/orb/bin/opencode").length > 1 &&
+        (scriptText.splitOn "/opt/orb/bin/claude").length > 1 &&
+        (scriptText.splitOn "/opt/orb/bin/codex").length > 1 &&
+        (scriptText.splitOn "/opt/elan/toolchains").length > 1 &&
+        (scriptText.splitOn "PATH=/opt/orb/bin:/opt/elan/bin:").length > 1)
+        "orb-node-provision.sh provisions pinned harnesses and /opt/elan for bare lean.ci/Colab guests"
   finally
     closeManagedComputeStore mc
 

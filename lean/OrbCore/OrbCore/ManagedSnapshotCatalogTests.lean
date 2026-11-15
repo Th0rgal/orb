@@ -109,14 +109,14 @@ def run (root : String) : IO Unit := do
       let .ok rows ← execParamQuery mc.db "SELECT COUNT(*) FROM managed_machines;" #[] | throw (IO.userError "count failed")
       return cell rows[1]! 0
     let before ← countMachines
-    let foreign ← call (.obj #[("title", .str "t"), ("remote_node_id", .str "auto-managed:small"),
+    let foreign ← call (.obj #[("title", .str "t"), ("remote_node_id", .str "auto-managed:boat:small"),
       ("managed_from_snapshot", .str "wave8-r32-chainc-warm"), ("managed_ttl_minutes", .nat 5), ("idempotency_key", .str "sm-foreign")])
     let misplaced ← call (.obj #[("title", .str "t"), ("remote_node_id", .str "auto"),
       ("managed_from_snapshot", .str "ledger-hub-warm-v1"), ("idempotency_key", .str "sm-misplaced")])
     check (foreign.fieldBool? "ok" == some false && misplaced.fieldBool? "ok" == some false && (← countMachines) == before)
       "another project's snapshot, or a snapshot without auto-managed, rents nothing"
     spawnedFrom.set ""
-    let started ← call (.obj #[("title", .str "warm child"), ("remote_node_id", .str "auto-managed:small"),
+    let started ← call (.obj #[("title", .str "warm child"), ("remote_node_id", .str "auto-managed:boat:small"),
       ("managed_from_snapshot", .str "ledger-hub-warm-v1"), ("managed_ttl_minutes", .nat 5), ("idempotency_key", .str "sm-warm")])
     let result := (started.field? "result").getD .null
     let child := (result.fieldStr? "mission_id").getD ""

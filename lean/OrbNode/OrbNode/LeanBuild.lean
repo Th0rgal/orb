@@ -70,6 +70,8 @@ def prepareSharedMissionEnv (workDir cwd : String) : IO (Array (String × String
       if ← (p / "toolchains").isDir then pure p else pure wElan
     else if ← (System.FilePath.mk "/opt/orb/elan/toolchains").isDir then
       pure (System.FilePath.mk "/opt/orb/elan")
+    else if ← (System.FilePath.mk "/opt/elan/toolchains").isDir then
+      pure (System.FilePath.mk "/opt/elan")
     else if let some h ← getEnvNonEmpty "HOME" then
       let p := System.FilePath.mk h / ".elan"
       if ← (p / "toolchains").isDir then pure p else pure wElan
@@ -710,6 +712,8 @@ def buildLeanJobEnv
       if ← (p / "toolchains").isDir then pure p else pure wElan
     else if ← (System.FilePath.mk "/opt/orb/elan/toolchains").isDir then
       pure (System.FilePath.mk "/opt/orb/elan")
+    else if ← (System.FilePath.mk "/opt/elan/toolchains").isDir then
+      pure (System.FilePath.mk "/opt/elan")
     else if let some h ← getEnvNonEmpty "HOME" then
       let p := System.FilePath.mk h / ".elan"
       if ← (p / "toolchains").isDir then pure p else pure wElan
@@ -847,13 +851,17 @@ def collectArtifactsConfined (rootDir : String) (patterns : Array String) : IO (
   return out
 
 def listCachedToolchains (workDir : String) : IO (Array String) := do
-  let dir := System.FilePath.mk workDir / "caches" / "elan" / "toolchains"
-  if !(← dir.isDir) then return #[]
-  let .ok entries ← dir.readDir |>.toBaseIO | return #[]
   let mut names : Array String := #[]
-  for e in entries do
-    if ← e.path.isDir then
-      names := names.push e.fileName
+  for dir in #[
+    System.FilePath.mk workDir / "caches" / "elan" / "toolchains",
+    System.FilePath.mk "/opt/orb/elan/toolchains",
+    System.FilePath.mk "/opt/elan/toolchains"
+  ] do
+    if ← dir.isDir then
+      if let .ok entries ← dir.readDir |>.toBaseIO then
+        for e in entries do
+          if (← e.path.isDir) && !names.contains e.fileName then
+            names := names.push e.fileName
   return names.qsort (· < ·)
 
 end OrbNode.LeanBuild
