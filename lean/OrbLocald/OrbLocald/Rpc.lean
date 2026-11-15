@@ -803,6 +803,7 @@ structure LocaldState where
   lastMetricsSnap      : JVal := .null
   metricsHistory       : Array (Nat × JVal) := #[]
   connectionJson       : JVal := .null
+  connectionGeneration : Nat := 0
   hostOs               : String := "linux"
   signerBin?           : Option String := none
   originHealth         : Array OriginHealthEntry := #[]
@@ -985,6 +986,7 @@ def supportedDesktopCommands : Array String := #[
   "reveal_logs", "local_machine_metrics", "paloma_ssh_pubkey",
   "open_url", "reveal_download", "save_file_as", "set_window_theme", "mistral_usage_sign_in",
   "approval_key_status", "approval_key_create", "approval_sign",
+  "pending_requests_list", "pending_requests_approve",
   "approval_grace_until", "set_approval_grace", "biometric_status", "biometric_authenticate",
   "client_link_active", "client_link_flush", "client_link_connect",
   "client_link_set_capabilities", "client_link_start_result",
@@ -4813,8 +4815,136 @@ private def handleLocalMachineTransfer (stRef : IO.Ref LocaldState) (args : JVal
   | _ =>
     return .error s!"Unsupported machine transfer operation: {op}"
 
-/-- Pure/IO dispatcher for all desktop IPC commands plus internal `__orb_poll_events`. -/
-def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal) : IO (Except String JVal) := do
+/-- Injectable effects; production always uses the saved origin and native lock/signer. -/
+structure PendingRequestIO where
+  unlocked : IO Bool
+  request : String → String → String → Array (String × String) → IO (Except String JVal)
+  publicKey : IO (Except String String)
+  sign : String → IO (Except String String)
+
+def pendingLockOutputUnlocked (code : UInt32) (out : String) : Bool :=
+  code == 0 && out.trimAscii.toString == "false"
+
+private def pendingNativeIO (st : LocaldState) : PendingRequestIO where
+  unlocked := do
+    if st.hostOs != "linux" then return false
+    try
+      let out ← IO.Process.output { cmd := "omarchy-shell", args := #["lock", "isLocked"] }
+      return pendingLockOutputUnlocked out.exitCode out.stdout
+    catch _ => return false
+  request := fun method path body extra => do
+    let base := (st.connectionJson.fieldStr? "api_url").getD ""
+    let token := (st.connectionJson.fieldStr? "token").getD ""
+    let some (true, host, port, pfx) := parseOriginHostPort base
+      | return .error "Pending requests require a saved HTTPS connection"
+    if token.isEmpty then return .error "Pending requests require a saved token"
+    let headers := #[("Authorization", s!"Bearer {token}"), ("Content-Type", "application/json")] ++ extra
+    -- One origin, one attempt, including the mutation. No transport failover.
+    match ← OrbNetLeaf.TlsHttp.httpsRequest method host port (pfx ++ path) headers body.toUTF8 (2 * 1024 * 1024) true 15000 with
+    | .error e => return .error e
+    | .ok response =>
+      if response.status < 200 || response.status >= 300 then
+        return .error s!"Pending requests HTTP {response.status}"
+      return OrbBin.Json.parse (String.fromUTF8! response.body)
+  publicKey := do
+    let some bin := st.signerBin? | return .error "Approval signer unavailable"
+    match ← runOrbSigner bin (resolveApprovalKeyArgs st "public") with
+    | .error (_, e) => return .error e
+    | .ok j => return .ok ((j.fieldStr? "public_key").getD "")
+  sign := fun payload => do
+    let some bin := st.signerBin? | return .error "Approval signer unavailable"
+    match ← signViaOrbSignerServer bin (resolveApprovalKeyPath st) 0 payload with
+    | .error (2, _) => return .error "cancelled"
+    | .error (_, e) => return .error e
+    | .ok j => return .ok ((j.fieldStr? "signature").getD "")
+
+private def pendingRequests (stRef : IO.Ref LocaldState) (approve : Bool) (args : JVal)
+    (effects? : Option PendingRequestIO) : IO (Except String JVal) := do
+  let origin ← stRef.get
+  let fx := effects?.getD (pendingNativeIO origin)
+  let unchanged : IO Bool := do
+    let now ← stRef.get
+    return now.connectionGeneration == origin.connectionGeneration &&
+      renderCompact now.connectionJson == renderCompact origin.connectionJson
+  let run : ExceptT String IO JVal := do
+    unless ← fx.unlocked do throw "Session locked or lock state unavailable"
+    let kind := (args.fieldStr? "kind").getD ""
+    let id := (args.fieldStr? "id").getD ""
+    let digest := (args.fieldStr? "expected_digest").getD ""
+    if approve then
+      unless #["secret", "privilege", "mission_access"].contains kind do throw "Invalid pending request kind"
+      unless isCanonicalUuid id do throw "Invalid pending request id"
+      unless digest.length == 64 && digest.toList.all (fun c => c.isDigit || (c >= 'a' && c <= 'f')) do
+        throw "Invalid expected_digest"
+    unless ← unchanged do throw "Connection changed during approval"
+    let queue ← ExceptT.mk (fx.request "GET" "/api/approvals/queue" "" #[])
+    unless ← unchanged do throw "Connection changed during approval"
+    let some items := queue.fieldArr? "items" | throw "Malformed approval queue"
+    unless approve do
+      unless ← fx.unlocked do throw "Session locked or lock state unavailable"
+      unless ← unchanged do throw "Connection changed during approval"
+      return queue
+    let selected := items.filter (fun i => i.fieldStr? "kind" == some kind && i.fieldStr? "id" == some id)
+    unless selected.size == 1 do throw "Pending request missing or ambiguous"
+    let item := selected[0]!
+    unless item.fieldStr? "digest" == some digest do throw "Pending request changed; refresh before approving"
+    let tier := (item.fieldStr? "tier").getD ""
+    -- Temporary local restrictions: Core's batch secret handler only grants read,
+    -- and its privilege digest does not bind a multi-unit grant completely.
+    if kind == "secret" && tier != "read" then
+      throw "Secret approvals other than read are unavailable until Core batch approval is fixed"
+    if kind == "privilege" then
+      let some request := item.field? "request" | throw "Malformed privilege request"
+      match request.field? "allowed_units" with
+      | none | some .null => pure ()
+      | some (.arr units) =>
+        if units.size > 1 then throw "Multi-unit privilege approval is unavailable until Core digest binding is fixed"
+      | _ => throw "Malformed privilege allowed_units"
+    let cleanSummaryField := fun (s : String) => (s.replace "\n" " " |>.replace "\r" " ").trimAscii.toString
+    let target := cleanSummaryField ((item.fieldStr? "target").getD "")
+    let reason := cleanSummaryField ((item.fieldStr? "reason").getD "")
+    let summary := s!"Approve {kind}: tier={cleanSummaryField tier}; target={target}; reason={reason} ({id})"
+    let some risk := item.fieldStr? "risk" | throw "Malformed approval risk"
+    unless #["routine", "elevated", "critical"].contains risk do throw "Malformed approval risk"
+    let body := renderCompact (.obj #[("items", .arr #[.obj #[("kind", .str kind), ("id", .str id), ("digest", .str digest)]]),
+      ("confirm_critical", .bool (risk == "critical"))])
+    let pk ← ExceptT.mk fx.publicKey
+    unless !pk.isEmpty do throw "Approval key unavailable"
+    unless ← unchanged do throw "Connection changed during approval"
+    let devices ← ExceptT.mk (fx.request "GET" "/api/approvals/devices" "" #[])
+    let matching := ((devices.fieldArr? "devices").getD #[]).filter (fun d => d.fieldStr? "public_key" == some pk)
+    unless matching.size == 1 do throw "Approval key is not uniquely enrolled"
+    let device := (matching[0]!.fieldStr? "id").getD ""
+    unless isCanonicalUuid device do throw "Invalid approval device"
+    unless ← unchanged do throw "Connection changed during approval"
+    let path := "/api/approvals/approve-all"
+    let challenge ← ExceptT.mk (fx.request "POST" "/api/approvals/challenge"
+      (renderCompact (.obj #[("method", .str "POST"), ("path", .str path), ("body", .str body),
+         ("summary", .str summary)])) #[])
+    unless ← unchanged do throw "Connection changed during approval"
+    let cid := (challenge.fieldStr? "challenge_id").getD ""
+    let payload := (challenge.fieldStr? "payload").getD ""
+    let lines := payload.splitOn "\n" |>.toArray
+    let hash := LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes body.toUTF8)
+    unless !cid.isEmpty && cid.toList.all (fun c => c.isAlphanum || c == '-') && lines.size == 6 &&
+        lines[0]! == "paloma-approval-v1" && lines[1]! == cid && lines[2]! == "POST " ++ path &&
+        lines[3]! == hash && lines[4]!.toNat?.isSome && lines[5]! == summary do
+      throw "Malformed or mismatched approval challenge"
+    unless ← fx.unlocked do throw "Session locked or lock state unavailable"
+    unless ← unchanged do throw "Connection changed during approval"
+    let signature ← ExceptT.mk (fx.sign payload)
+    stRef.modify fun s => { s with approvalGraceUntil := 0 }
+    unless ← fx.unlocked do throw "Session locked or lock state unavailable"
+    unless ← unchanged do throw "Connection changed during approval"
+    unless !signature.isEmpty && signature.toList.all (fun c => c.isAlphanum || c == '+' || c == '/' || c == '=' || c == '-' || c == '_') do
+      throw "Invalid approval signature"
+    let result ← ExceptT.mk (fx.request "POST" path body #[("X-Paloma-Approval", s!"{cid}.{device}.{signature}")])
+    unless ← unchanged do throw "Connection changed during approval"
+    return result
+  try run.run catch _ => return .error "Pending request operation failed"
+
+def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
+    (pendingIO? : Option PendingRequestIO := none) : IO (Except String JVal) := do
   let st ← stRef.get
   match cmd with
   | "plugin:app|version" =>
@@ -4835,7 +4965,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
             let raw ← IO.FS.readFile path
             match OrbBin.Json.parse raw.trimAscii.toString with
             | .ok jv =>
-              stRef.modify fun s => { s with connectionJson := jv }
+              stRef.modify fun s => { s with connectionJson := jv, connectionGeneration := s.connectionGeneration + (if renderCompact s.connectionJson == renderCompact jv then 0 else 1) }
               pure jv
             | .error _ => pure st.connectionJson
           catch _ => pure st.connectionJson
@@ -4912,7 +5042,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         let raw ← IO.FS.readFile path
         match OrbBin.Json.parse raw.trimAscii.toString with
         | .ok jv =>
-          stRef.modify fun s => { s with connectionJson := jv }
+          stRef.modify fun s => { s with connectionJson := jv, connectionGeneration := s.connectionGeneration + (if renderCompact s.connectionJson == renderCompact jv then 0 else 1) }
           return .ok jv
         | .error _ => return .error "Invalid saved connection"
       catch _ =>
@@ -4927,7 +5057,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         let tok := (rawConn.fieldStr? "token").getD ""
         if url.isEmpty && tok.isEmpty then .null
         else .obj #[("api_url", .str url), ("token", .str tok)]
-    stRef.modify fun s => { s with connectionJson := connVal }
+    stRef.modify fun s => { s with connectionJson := connVal, connectionGeneration := s.connectionGeneration + 1 }
     if let some path := connectionFilePath? st then
       let payload := (renderCompact connVal ++ "\n").toUTF8
       if let .error e ← OrbBin.PosixExt.writeAtomicPrivate0600 path payload then
@@ -5504,6 +5634,8 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       return .ok (if txt.isEmpty then .null else .str txt)
     catch _ =>
       return .ok .null
+  | "pending_requests_list" => pendingRequests stRef false args pendingIO?
+  | "pending_requests_approve" => pendingRequests stRef true args pendingIO?
   | "approval_key_status" =>
     match st.signerBin? with
     | some bin =>

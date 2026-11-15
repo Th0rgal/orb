@@ -2471,9 +2471,101 @@ def main : IO UInt32 := do
   let mut passed := 0
   let mut total := 0
 
-  -- 1. Command table size (107 desktop commands + plugin:app|version = 108)
+  -- Pending requests must reach a real fail-closed handler, not unknown-command.
+  let pendingState ← IO.mkRef ({ launchToken := "test", hostOs := "unsupported-test" } : LocaldState)
+  for cmd in #["pending_requests_list", "pending_requests_approve"] do
+    let result ← dispatchRpcCommand pendingState cmd (.obj #[])
+    total := total + 1
+    if (← assertTrue s!"{cmd}_registered_fail_closed" (supportedDesktopCommands.contains cmd &&
+        match result with | .error e => !(e.startsWith "Unknown") | _ => false)) then passed := passed + 1
+
+  -- 1. Command table size (109 desktop commands + plugin:app|version = 110)
   total := total + 1
-  if (← assertEq "desktop_command_count" supportedDesktopCommands.size 108) then passed := passed + 1
+  if (← assertEq "desktop_command_count" supportedDesktopCommands.size 110) then passed := passed + 1
+
+  -- Replay the entire dispatcher flow with effects recorded at the I/O boundary.
+  let requestId := "550e8400-e29b-41d4-a716-446655440000"
+  let deviceId := "550e8400-e29b-41d4-a716-446655440001"
+  let digest := String.ofList (List.replicate 64 'a')
+  for scenario in #["list", "success", "privilege", "mission_access", "critical", "locked", "relocked", "changed", "switch_back",
+      "challenge_changed", "malformed_queue", "missing_item", "stale", "cancelled", "unenrolled", "bad_challenge", "http_error", "bad_kind", "bad_id", "bad_digest", "missing_digest",
+      "write", "delete", "move", "unknown_tier", "multi_units", "malformed_units", "wrong_summary"] do
+    let requestKind := if #["privilege", "multi_units", "malformed_units"].contains scenario then "privilege" else if scenario == "mission_access" then scenario else "secret"
+    let tier := if #["write", "delete", "move", "unknown_tier"].contains scenario then scenario else if requestKind == "privilege" then "service_deploy" else "read"
+    let expectedSummary := s!"Approve {requestKind}: tier={tier}; target=production; reason=deploy requested service ({requestId})"
+    let blockedScope := #["write", "delete", "move", "unknown_tier", "multi_units", "malformed_units"].contains scenario
+    let state ← IO.mkRef ({ launchToken := "test", connectionJson := .obj #[("api_url", .str "https://core.example"), ("token", .str "token")] } : LocaldState)
+    let calls ← IO.mkRef (#[] : Array String)
+    let signed ← IO.mkRef false
+    let boundBody ← IO.mkRef ""
+    let posted ← IO.mkRef false
+    let fx : PendingRequestIO := {
+      unlocked := return scenario != "locked" && !(scenario == "relocked" && (← signed.get))
+      publicKey := return .ok "key"
+      sign := fun payload => do
+        calls.modify (·.push "sign")
+        signed.set true
+        if scenario == "changed" then
+          state.modify fun s => { s with connectionJson := .null }
+        if scenario == "switch_back" then
+          discard <| dispatchRpcCommand state "desktop_connection_save" (.obj #[("connection", .null)])
+          discard <| dispatchRpcCommand state "desktop_connection_save" (.obj #[("api_url", .str "https://core.example"), ("token", .str "token")])
+        if scenario == "cancelled" then return .error "cancelled"
+        if !(payload.startsWith "paloma-approval-v1\nchallenge\nPOST /api/approvals/approve-all\n") then return .error "wrong payload"
+        if (payload.splitOn "\n").getLast! != expectedSummary then return .error "unscoped signer prompt"
+        return .ok "signature"
+      request := fun method path body headers => do
+        calls.modify (·.push (method ++ " " ++ path))
+        if path == "/api/approvals/queue" then
+          if scenario == "malformed_queue" then return .ok (.obj #[])
+          if scenario == "missing_item" then return .ok (.obj #[("items", .arr #[])])
+          return .ok (.obj #[("items", .arr #[.obj #[("kind", .str requestKind), ("id", .str requestId),
+            ("digest", .str (if scenario == "stale" then "changed" else digest)),
+            ("tier", .str tier), ("target", .str "production"), ("reason", .str "deploy requested\nservice"),
+            ("request", .obj #[("allowed_units", if scenario == "malformed_units" then .str "bad" else
+              .arr (if scenario == "multi_units" then #[.str "a.service", .str "b.service"] else #[.str "a.service"]))]),
+            ("risk", .str (if scenario == "critical" then "critical" else "routine"))]])])
+        if path == "/api/approvals/devices" then
+          return .ok (.obj #[("devices", .arr (if scenario == "unenrolled" then #[] else
+            #[.obj #[("public_key", .str "key"), ("id", .str deviceId)]]))])
+        if path == "/api/approvals/challenge" then
+          if scenario == "challenge_changed" then state.modify fun s => { s with connectionJson := .null }
+          let .ok req := OrbBin.Json.parse body | return .error "invalid challenge request"
+          let text := (req.fieldStr? "body").getD ""
+          if req.fieldStr? "summary" != some expectedSummary then return .error "unscoped challenge summary"
+          boundBody.set text
+          let hash := LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes text.toUTF8)
+          return .ok (.obj #[("challenge_id", .str "challenge"), ("payload", .str
+            s!"paloma-approval-v1\nchallenge\nPOST /api/approvals/approve-all\n{if scenario == "bad_challenge" then "wrong" else hash}\n9999999999\n{if scenario == "wrong_summary" then "Approve" else expectedSummary}")])
+        if path == "/api/approvals/approve-all" then
+          posted.set true
+          let .ok req := OrbBin.Json.parse body | return .error "invalid approval body"
+          if body != (← boundBody.get) || headers != #[("X-Paloma-Approval", s!"challenge.{deviceId}.signature")] ||
+              req.fieldBool? "confirm_critical" != some (scenario == "critical") then return .error "binding mismatch"
+          if scenario == "http_error" then return .error "HTTP 403"
+          return .ok (.obj #[("approved", .bool true)])
+        return .error "unexpected route"
+    }
+    let args := JVal.obj (#[("kind", .str (if scenario == "bad_kind" then "tether" else requestKind)),
+      ("id", .str (if scenario == "bad_id" then "../../evil" else requestId))] ++
+      (if scenario == "missing_digest" then #[] else #[("expected_digest", if scenario == "bad_digest" then .bool true else .str digest)]))
+    let result ← dispatchRpcCommand state (if scenario == "list" then "pending_requests_list" else "pending_requests_approve") args (some fx)
+    let log ← calls.get
+    let success := #["list", "success", "critical", "privilege", "mission_access"].contains scenario
+    let correctResult := match result with
+      | .ok j => success && (if scenario == "list" then j.fieldArr? "items" |>.isSome else j.fieldBool? "approved" == some true)
+      | .error _ => !success
+    let shouldPost := #["success", "critical", "privilege", "mission_access", "http_error"].contains scenario
+    let noEarlyEffects := if #["locked", "bad_kind", "bad_id", "bad_digest", "missing_digest"].contains scenario then log.isEmpty else true
+    let didSign ← signed.get
+    let scopeGuardOk := !blockedScope || (log == #["GET /api/approvals/queue"] && !didSign)
+    total := total + 1
+    if (← assertTrue s!"pending_dispatch_{scenario}" (correctResult && (← posted.get) == shouldPost && noEarlyEffects && scopeGuardOk &&
+        (log.filter (· == "POST /api/approvals/approve-all")).size == (if shouldPost then 1 else 0) &&
+        (if #["stale", "unenrolled", "bad_challenge", "challenge_changed", "missing_item", "malformed_queue", "wrong_summary"].contains scenario then !didSign else true))) then passed := passed + 1
+  for (code, output, expected) in #[(0, "false\n", true), (0, "true\n", false), (1, "false", false), (0, "", false), (0, "unlocked", false)] do
+    total := total + 1
+    if (← assertTrue "pending_lock_fail_closed" (pendingLockOutputUnlocked code output == expected)) then passed := passed + 1
 
   -- 2. Loopback RPC auth gate (>= 32-byte non-placeholder secret + local Origin confinement)
   let validTok := "0123456789abcdef0123456789abcdef"
