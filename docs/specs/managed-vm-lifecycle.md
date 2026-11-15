@@ -30,8 +30,8 @@ and supported actions; extending then refreshing must preserve those contracts.
 
 | Provider (`provider`) | Workloads | Bootstrap | `supports_free_stop` | `supports_snapshots` | Minimum lease |
 | --- | --- | --- | --- | --- | --- |
-| `boat` (default) | Fast ephemeral Linux x86\_64 workers (`small`..`xlarge`) & raw sandboxes | Provider file/exec API | Yes (14d disk retention, \$0) | Yes (named + fork) | Per-second |
-| `leanci` (`lean.ci`) | Warm Cloud Hypervisor Linux x86\_64 microVMs (`lean-2vcpu-ubuntu-2604`..`lean-32vcpu-ubuntu-2604`, up to 96 GiB) with optional CoW `.olean` overlays (`repo`/`base_key`/`lean_mode`) & `turbo-lean` | Provider file/exec API -> reverse relay | No | Yes (named + fork, engine-pinned CoW) | Per-second (60s..24h fixed TTL; no live extend) |
+| `boat` | Fast ephemeral Linux x86\_64 workers (`small`..`xlarge`) & raw sandboxes | Provider file/exec API | Yes (14d disk retention, \$0) | Yes (named + fork) | Per-second |
+| `leanci` (`lean.ci`, default) | Warm Cloud Hypervisor Linux x86\_64 microVMs (`lean-2vcpu-ubuntu-2604`..`lean-32vcpu-ubuntu-2604`, up to 96 GiB) with optional CoW `.olean` overlays (`repo`/`base_key`/`lean_mode`) & `turbo-lean` | Provider file/exec API -> reverse relay | No | Yes (named + fork, engine-pinned CoW) | Per-second (60s..24h fixed TTL; no live extend) |
 | `hetzner` | Larger x86\_64 / ARM64 CPU & RAM instances (`cpx22`..`ccx43`, `cax31`; legacy `cpx21`..`cpx51` aliases map to `cpx22`..`cpx62` with EU location fallback `fsn1` -> `hel1` -> `nbg1`) | Cloud-init `user_data` -> reverse relay | No (stopped servers still bill) | No | Hourly / per-minute |
 | `vastai` | Ephemeral CUDA GPUs (`rtx4090`, `a100`, `h100`, or explicit `gpu` filter) | Offer `onstart` -> reverse relay | No (stopped instances bill storage/GPU) | No | On-demand |
 | `scaleway` | EU Linux/GPU Instances (`DEV1-*`, `PRO2-*`, `L4-*`, `H100-*`) & Apple Silicon Mac minis (`M1-M`, `M2-M`, `M2-PRO`, `M4-M`) | Cloud-init / SSH -> reverse relay | No | No | Instances: per-minute; Apple Silicon: **24h (`deletable_at`)** |
@@ -431,7 +431,7 @@ Provider choice (`chooseManagedProvider`, one function for every MCP spawn path)
 | Request | Provider used |
 | --- | --- |
 | Names a provider (`provider=`, `auto-managed:<provider>[:<size>]`) | That provider, never replaced; its refusal is the caller's error. |
-| Names none, instance default can take it | The instance default (`SANDBOXED_MANAGED_DEFAULT_PROVIDER`, else `boat`). |
+| Names none, instance default can take it | The instance default (`SANDBOXED_MANAGED_DEFAULT_PROVIDER`, else `leanci`). |
 | Names none, default cannot take it now, `boat` can | `boat`; the result carries `provider_fallback: {from, to, reason}`. |
 | Names none, neither can | The default; the caller gets the default's own error. Nothing is rented. |
 | Names none, with a snapshot, or a fork | The default (a snapshot or a source disk lives at one provider). |

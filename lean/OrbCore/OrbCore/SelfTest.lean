@@ -181,7 +181,7 @@ private def runManagedMcpProviderContractTests (root : String) : IO Unit := do
     spawn "leanci" "lean-24vcpu" #[("provider", .str "leanci"), ("ram_gb", .nat 96)]
     spawn "colab" "t4" #[("provider", .str "colab"), ("size", .str "t4")]
     for (target, provider, size) in #[
-        ("auto-managed", "boat", "small"), ("auto-managed:large", "boat", "large"),
+        ("auto-managed", "leanci", "small"), ("auto-managed:large", "leanci", "large"),
         ("auto-managed:boat", "boat", "small"), ("auto-managed:boat:xlarge", "boat", "xlarge"),
         ("auto-managed:leanci:2xlarge", "leanci", "2xlarge"), ("auto-managed:colab:t4", "colab", "t4")] do
       let args : OrbBin.Json.JVal := .obj #[("title", .str "provider contract child"),
@@ -198,7 +198,8 @@ private def runManagedMcpProviderContractTests (root : String) : IO Unit := do
         machine.ownerUserId == user.id && machine.requestedByMissionId == claims.missionId &&
         result.fieldBool? "managed_machine_reused" != some true && (← rented.get).size == before + 1 &&
         (← rented.get).back? == some (provider, size)) s!"{target} must rent and assign the requested provider and size"
-      if provider != "boat" then
+      if target.startsWith "auto-managed:" && provider != "boat" &&
+          (target.startsWith "auto-managed:leanci" || target.startsWith "auto-managed:colab") then
         let .ok _ ← execParamQuery core.missionsDb "UPDATE missions SET status='completed' WHERE id=?1;" #[child]
           | throw (IO.userError "managed MCP provider contract: completed child fixture failed")
         let .ok _ ← execParamQuery mc.db
@@ -223,9 +224,9 @@ private def runManagedMcpProviderContractTests (root : String) : IO Unit := do
           reusedResult.fieldStr? "mission_id" == some reassigned.ownerMission &&
           reassigned.ownerMission != child && reassigned.provider == provider && reassigned.size == size &&
           (← rented.get).size == before + 1) s!"re-opted-in {provider} must reuse the same eligible provider and size without renting"
-    -- Instance default lean.ci with fallback to boat. Each call below has exactly one
-    -- configured provider (the mock), so the other one "cannot take it".
-    OrbBin.PosixExt.setenvVar "SANDBOXED_MANAGED_DEFAULT_PROVIDER" "leanci"
+    -- Instance default lean.ci (with SANDBOXED_MANAGED_DEFAULT_PROVIDER unset) and fallback to boat.
+    -- Each call below has exactly one configured provider (the mock), so the other one "cannot take it".
+    OrbBin.PosixExt.unsetenvVar "SANDBOXED_MANAGED_DEFAULT_PROVIDER"
     try
       let fallbackOf (reply : OrbBin.Json.JVal) := ((resultOf reply).field? "provider_fallback").getD .null
       let lease : Array (String × OrbBin.Json.JVal) := #[("ttl_minutes", .nat 60)]
@@ -2664,7 +2665,7 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let fullResp ← dispatch s!"POST /api/control/missions/m4/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {task4Body.utf8ByteSize}\r\n\r\n{task4Body}"
   let missBody := "{\"project_slug\":\"orb\",\"track\":\"missing\",\"task_key\":\"t-miss\",\"attempt_seq\":0}"
   let missing ← dispatch s!"POST /api/control/missions/m1/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {missBody.utf8ByteSize}\r\n\r\n{missBody}"
-   let board ← dispatch s!"GET /api/projects/orb/board HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
+   let board ← dispatch s!"GET /api/projects/orb/task-board HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
    let badProj ← dispatch s!"GET /api/projects/%ZZ/board HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
    let _ ← execParamQuery store.missionsDb "UPDATE mission_board_tasks SET status='failed' WHERE task_key='t1';" #[]
    let reopen ← dispatch s!"POST /api/control/missions/m1/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {taskBody.utf8ByteSize}\r\n\r\n{taskBody}"
@@ -4949,12 +4950,15 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   -- Isolated per-user project namespace (`lean-campaign` for `alice` vs `admin`) & isolated inbox state
   let (alBoardPutSt, _, _) ← sendReq "POST" "/api/projects/lean-campaign/tracks" aliceTok
     "{\"track\":\"proof-track\",\"desired_condition\":\"Alice Secret Track\"}"
+  let (alProjectSt, _, _) ← sendReq "POST" "/api/projects" aliceTok "{\"slug\":\"lean-campaign\"}"
+  let (alTextSt, _, _) ← sendReq "PUT" "/api/projects/lean-campaign/board" aliceTok
+    "{\"text\":\"proof-track private board\"}"
   let (_, admBoardBody, _) ← sendReq "GET" "/api/projects/lean-campaign/board" adminTok ""
   let (_, alBoardBody, _) ← sendReq "GET" "/api/projects/lean-campaign/board" aliceTok ""
   let (alInbPutSt, _, _) ← sendReq "PUT" "/api/control/inbox-state/seen/m-secret" aliceTok
     "{\"clientId\":\"c-al\",\"mutationSeq\":1,\"expectedVersion\":0,\"stamp\":42}"
   let (_, admInbBody, _) ← sendReq "GET" "/api/control/inbox-state" adminTok ""
-  if alBoardPutSt != 200 || (alBoardBody.splitOn "proof-track").length < 2 ||
+  if alBoardPutSt != 200 || alProjectSt != 200 || alTextSt != 200 || (alBoardBody.splitOn "proof-track").length < 2 ||
      (admBoardBody.splitOn "proof-track").length != 1 ||
      alInbPutSt != 200 || (admInbBody.splitOn "m-secret").length != 1 then
     return (← fail s!"project/inbox namespace isolation failed: alBoard={alBoardBody} admBoard={admBoardBody} admInb={admInbBody}")
@@ -6824,6 +6828,7 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
   let stopMockRef ← IO.mkRef false
   let submittedJobsRef ← IO.mkRef (#[] : Array OrbBin.Json.JVal)
   let cancelledJobsRef ← IO.mkRef (#[] : Array String)
+  let jobStatesRef ← IO.mkRef (#[] : Array (String × String))
   let jobSeqRef ← IO.mkRef (0 : Nat)
   let ndjsonLines :=
     "{\"type\":\"tool_use\",\"sessionID\":\"ses_mock1\",\"part\":{\"id\":\"call_1\",\"tool\":\"bash\",\"state\":{\"status\":\"completed\",\"input\":{\"command\":\"ls\"}}}}\n" ++
@@ -6855,7 +6860,8 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
                 pure ("503 Service Unavailable", "{\"error\":\"node_overloaded\"}")
               else do
                 let n ← jobSeqRef.modifyGet (fun c => (c + 1, c + 1))
-                let jid := s!"job-mock-{n}"
+                let reqJid := (jv.fieldStr? "job_id").getD ""
+                let jid := if !reqJid.isEmpty then reqJid else s!"job-mock-{n}"
                 pure ("200 OK", s!"\{\"job_id\":{jsonEscape jid},\"state\":\"running\"}")
             else if req.method == "GET" && req.path.startsWith "/jobs/" && (req.path.splitOn "/log").length > 1 then do
               let qParts := req.path.splitOn "offset="
@@ -6876,10 +6882,18 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
               let p0 := (req.path.drop 6).toString
               let jid := (p0.splitOn "/cancel")[0]?.getD ""
               cancelledJobsRef.modify (·.push jid)
+              jobStatesRef.modify (fun xs => (xs.filter (·.1 != jid)).push (jid, "cancelled"))
               pure ("200 OK", s!"\{\"job_id\":{jsonEscape jid},\"state\":\"cancelled\",\"cancel_requested\":true}")
             else if req.method == "GET" && req.path.startsWith "/jobs/" then do
               let jid := ((req.path.drop 6).toString.splitOn "?")[0]?.getD ""
-              pure ("200 OK", s!"\{\"job_id\":{jsonEscape jid},\"state\":\"succeeded\",\"exit_code\":0}")
+              let overrides ← jobStatesRef.get
+              let st := ((overrides.find? (·.1 == jid)).map (·.2)).getD "succeeded"
+              if st == "cancelled" || st == "canceled" then
+                pure ("200 OK", s!"\{\"job_id\":{jsonEscape jid},\"state\":{jsonEscape st},\"error\":\"Cancelled on node\"}")
+              else if st == "running" then
+                pure ("200 OK", s!"\{\"job_id\":{jsonEscape jid},\"state\":\"running\"}")
+              else
+                pure ("200 OK", s!"\{\"job_id\":{jsonEscape jid},\"state\":{jsonEscape st},\"exit_code\":0}")
             else
               pure ("404 Not Found", "{\"error\":\"not_found\"}")
           let bBytes := respBody.toUTF8
@@ -7202,7 +7216,86 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
   if sseUsage != { input := 40, output := 25, cacheCreate := 60, cacheRead := 900 } then
     return (← fail s!"SSE usage was not merged across events: {repr sseUsage}")
 
-  -- 6. Surviving remote turn across Core restart/redeploy (including legacy `mission_runs` without `UNIQUE(mission_id, generation)`):
+  -- 6. Remote node job cancellation reconciliation:
+  --    (a) Core-initiated stop (`POST /api/control/missions/:id/stop`) cancels the node job and reconciles
+  --        both `remote_node_jobs` and `projects.remote_jobs` to `'cancelled'` (so `activeJobsByNode` drops to 0).
+  --    (b) `/api/durable-jobs/:id/cancel` forwards `POST /jobs/:id/cancel` to the remote node and reconciles
+  --        both ledgers.
+  --    (c) Node-reported `canceled` (single-l) or `cancelled` in `spawnRemoteJobPoller` normalizes to `'cancelled'`
+  --        and settles the mission/run + ledgers cleanly.
+  let _ ← execParamQuery store.missionsDb
+    ("INSERT INTO missions(id,title,status,backend,working_directory,project,placement_kind,placement_job_id,owner_user_id,tags,run_generation,created_at,updated_at) " ++
+     "VALUES('m-cancel-stop','cancel stop test','active','opencode','','leanvm','managed','job-cancel-stop-1',?1,'[\"remote-node:mocknode\"]',1,?2,?2);")
+    #[admUid, legPastIso]
+  let _ ← store.missionsDb.mu.atomically do
+    insertMissionRunUnlocked store.missionsDb
+      "r-cancel-stop-1" "m-cancel-stop" "1" "running" "" "job-cancel-stop-1" legPastIso true "remote-job:job-cancel-stop-1" "remote-node:mocknode"
+  let _ ← execParamQuery store.missionsDb
+    ("INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,payload_json,created_at,updated_at) " ++
+     "VALUES('job-cancel-stop-1','m-cancel-stop','mocknode','running','{}',?1,?1);") #[legPastIso]
+  let _ ← execParamQuery store.projectsDb
+    ("INSERT INTO remote_jobs(job_id,mission_id,node_id,kind,state,started_at,accepted_at,heartbeat_at,updated_at) " ++
+     "VALUES('job-cancel-stop-1','m-cancel-stop','mocknode','mission','running',?1,?1,?1,?1);") #[legPastIso]
+  let (stopSt, stopBody) ← sendJson "POST" "/api/control/missions/m-cancel-stop/stop" hsJwt "{}"
+  let stopRnjRes ← execParamQuery store.missionsDb "SELECT state FROM remote_node_jobs WHERE job_id='job-cancel-stop-1';" #[]
+  let stopRnjSt := match stopRnjRes with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  let stopPrjRes ← execParamQuery store.projectsDb "SELECT state, COALESCE(finished_at,'') FROM remote_jobs WHERE job_id='job-cancel-stop-1';" #[]
+  let stopPrjSt := match stopPrjRes with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  let stopPrjFin := match stopPrjRes with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
+  let cJobsAfterStop ← cancelledJobsRef.get
+  if stopSt != 200 || !cJobsAfterStop.contains "job-cancel-stop-1" ||
+     stopRnjSt != "cancelled" || stopPrjSt != "cancelled" || stopPrjFin.isEmpty then
+    return (← fail s!"POST /stop did not reconcile remote job cancellation: st={stopSt} body={stopBody} cancelled={cJobsAfterStop} rnj={stopRnjSt} prj=({stopPrjSt},{stopPrjFin})")
+
+  -- (b) `/api/durable-jobs/:id/cancel` forwards `POST /jobs/:id/cancel` to `mocknode` and reconciles `remote_jobs`
+  let _ ← execParamQuery store.missionsDb
+    ("INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,payload_json,created_at,updated_at) " ++
+     "VALUES('job-durable-cancel-1','m-cancel-stop','mocknode','running','{}',?1,?1);") #[legPastIso]
+  let _ ← execParamQuery store.projectsDb
+    ("INSERT INTO remote_jobs(job_id,mission_id,node_id,kind,state,started_at,accepted_at,heartbeat_at,updated_at) " ++
+     "VALUES('job-durable-cancel-1','m-cancel-stop','mocknode','mission','running',?1,?1,?1,?1);") #[legPastIso]
+  let (djCancelSt, djCancelBody) ← sendJson "POST" "/api/durable-jobs/job-durable-cancel-1/cancel" hsJwt "{}"
+  let cJobsAfterDj ← cancelledJobsRef.get
+  let djPrjRes ← execParamQuery store.projectsDb "SELECT state, COALESCE(finished_at,'') FROM remote_jobs WHERE job_id='job-durable-cancel-1';" #[]
+  let djPrjSt := match djPrjRes with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  let djPrjFin := match djPrjRes with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
+  if djCancelSt != 200 || !cJobsAfterDj.contains "job-durable-cancel-1" || djPrjSt != "cancelled" || djPrjFin.isEmpty then
+    return (← fail s!"POST /api/durable-jobs/:id/cancel did not cancel on node or update remote_jobs: st={djCancelSt} body={djCancelBody} cancelled={cJobsAfterDj} prj=({djPrjSt},{djPrjFin})")
+
+  -- (c) Node-side cancellation (`state: "canceled"` on node) observed by `spawnRemoteJobPoller`
+  let _ ← execParamQuery store.missionsDb
+    ("INSERT INTO missions(id,title,status,backend,model_override,working_directory,project,placement_kind,owner_user_id,tags,run_generation,created_at,updated_at) " ++
+     "VALUES('m-node-canceled','node canceled turn','active','opencode','builtin/smart','','leanvm','managed',?1,'[\"remote-node:mocknode\"]',1,?2,?2);")
+    #[admUid, legPastIso]
+  let _ ← store.missionsDb.mu.atomically do
+    insertMissionRunUnlocked store.missionsDb
+      "r-node-canceled-1" "m-node-canceled" "1" "running" "" "job-node-canceled-1" legPastIso true "remote-job:job-node-canceled-1" "remote-node:mocknode"
+  let _ ← execParamQuery store.missionsDb
+    ("INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,payload_json,created_at,updated_at) " ++
+     "VALUES('job-node-canceled-1','m-node-canceled','mocknode','running','{}',?1,?1);") #[legPastIso]
+  let _ ← execParamQuery store.projectsDb
+    ("INSERT INTO remote_jobs(job_id,mission_id,node_id,kind,state,started_at,accepted_at,heartbeat_at,updated_at) " ++
+     "VALUES('job-node-canceled-1','m-node-canceled','mocknode','mission','running',?1,?1,?1,?1);") #[legPastIso]
+  jobStatesRef.modify (fun xs => xs.push ("job-node-canceled-1", "canceled"))
+  spawnRemoteJobPoller store (some mStore) (some rHub) (some bHub) remSup workRoot
+    "m-node-canceled" "opencode" "mocknode" "job-node-canceled-1" "" 0
+  let mut nodeCanceledSettled := false
+  for _ in [0:60] do
+    if !nodeCanceledSettled then
+      if let .ok rs ← execParamQuery store.missionsDb "SELECT status FROM missions WHERE id='m-node-canceled';" #[] then
+        if ((rs[1]?.bind (·[0]?)).getD "") == "cancelled" then
+          nodeCanceledSettled := true
+      if !nodeCanceledSettled then
+        IO.sleep 30
+  let ncRnjRes ← execParamQuery store.missionsDb "SELECT state FROM remote_node_jobs WHERE job_id='job-node-canceled-1';" #[]
+  let ncRnjSt := match ncRnjRes with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  let ncPrjRes ← execParamQuery store.projectsDb "SELECT state, COALESCE(finished_at,'') FROM remote_jobs WHERE job_id='job-node-canceled-1';" #[]
+  let ncPrjSt := match ncPrjRes with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
+  let ncPrjFin := match ncPrjRes with | .ok rs => (rs[1]?.bind (·[1]?)).getD "" | .error _ => ""
+  if !nodeCanceledSettled || ncRnjSt != "cancelled" || ncPrjSt != "cancelled" || ncPrjFin.isEmpty then
+    return (← fail s!"node-side canceled job did not settle cleanly: settled={nodeCanceledSettled} rnj={ncRnjSt} prj=({ncPrjSt},{ncPrjFin})")
+
+  -- 7. Surviving remote turn across Core restart/redeploy (including legacy `mission_runs` without `UNIQUE(mission_id, generation)`):
   if let some redeployErr ← checkSurvivingRemoteTurnRedeploy ts jwtSec cfg.dashboardPassword nowSec legPastIso jobSeqRef rHub bHub then
     return (← fail redeployErr)
 

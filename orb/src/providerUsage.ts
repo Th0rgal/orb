@@ -178,16 +178,16 @@ export function usageChips(u: ProviderUsage): UsageChip[] {
 }
 
 /** Match the data actually rendered in UsageDetail, not an empty cache object. */
-export function hasProviderUsageDetails(u?: ProviderUsage): boolean {
+export function hasProviderUsageDetails(u?: ProviderUsage, headerEmail?: string): boolean {
   if (!u) return false;
-  return !!(codingPlanWindows(u).length || u.usage_note || u.error || u.status === "needs_reauth" || u.account_email || u.account_name || u.organization || u.unified_status
-    || (u.subscription_resets && u.subscription_resets.available_count > 0)
+  const codingWindows = codingPlanWindows(u);
+  const hasDetailEmail = Boolean(u.account_email && u.account_email !== headerEmail);
+  return !!(codingWindows.length || u.usage_note || u.error || u.status === "needs_reauth" || hasDetailEmail || u.account_name || u.organization || usageLimitStatus(u)
     || (u.provider_type === "anthropic" && (u.unified_5h_utilization != null || u.unified_7d_utilization != null))
     || (u.provider_type === "openai" && ((u.codex_primary_used_percent != null && u.codex_primary_window_minutes !== 0) || u.requests_limit != null))
-    || (u.provider_type === "minimax" && u.model_usage?.length)
-    || (u.provider_type === "xai" && (u.xai_plan != null || u.xai_credit_used_percent != null || u.xai_prepaid_usd != null || u.xai_on_demand_used != null))
-    || (u.provider_type === "kimi" && (u.kimi_plan != null || kimiWindows(u).length > 0))
-    || (u.provider_type === "zai" && u.zai_tokens_percentage != null));
+    || (u.provider_type === "minimax" && !codingWindows.length && (u.model_usage?.length ?? 0) > 0)
+    || (u.provider_type === "xai" && (u.xai_credit_used_percent != null || (Number.isFinite(u.xai_prepaid_usd) && u.xai_prepaid_usd! > 0) || (Number.isFinite(u.xai_on_demand_cap) && u.xai_on_demand_cap! > 0) || (Number.isFinite(u.xai_on_demand_used) && u.xai_on_demand_used! > 0)))
+    || (u.provider_type === "kimi" && kimiWindows(u).length > 0));
 }
 
 export type SubscriptionResetSummary = {

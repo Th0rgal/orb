@@ -225,11 +225,100 @@ internal fun quotaStatus(windows: List<Pair<String, Double>>): OrbQuotaStatus? {
 internal fun quotaExhaustedLabel(windows: List<Pair<String, Double>>): String? =
     quotaStatus(windows)?.takeIf { it.level == OrbQuotaLevel.Exhausted }?.label
 
+internal fun globallyProviderEnabled(provider: OrbRow): Boolean =
+    provider.bool("globally_enabled") ?: (provider.bool("enabled") != false)
+
+internal fun isProviderUserSkipped(provider: OrbRow): Boolean =
+    provider.bool("user_enabled") == false
+
 internal fun effectiveProviderEnabled(provider: OrbRow): Boolean =
     provider.bool("effective_enabled") ?: (
-        (provider.bool("globally_enabled") ?: (provider.bool("enabled") != false)) &&
-            (provider.bool("user_enabled") != false)
+        globallyProviderEnabled(provider) && !isProviderUserSkipped(provider)
         )
+
+internal fun canManageProvider(provider: OrbRow, isAdmin: Boolean): Boolean =
+    isAdmin || provider.bool("added_by_me") == true
+
+internal fun canEditProviderCredentials(provider: OrbRow, isAdmin: Boolean): Boolean =
+    canManageProvider(provider, isAdmin) && (provider.bool("has_api_key") == true || provider.bool("uses_oauth") != true)
+
+internal fun canEditProviderBaseUrl(provider: OrbRow?, providerType: String, isAdmin: Boolean): Boolean =
+    providerType.trim() == "custom" && (provider == null || canManageProvider(provider, isAdmin))
+
+internal fun canReconnectProviderOAuth(provider: OrbRow, isAdmin: Boolean): Boolean {
+    if (!canManageProvider(provider, isAdmin)) return false
+    if (provider.bool("uses_oauth") != true) return false
+    if (provider.bool("has_oauth") != true && provider.bool("has_api_key") == true) return false
+    val pType = provider.str("provider_type", "type") ?: ""
+    val owner = provider.str("credential_owner") ?: ""
+    val proxy = pType != "google" && (owner == "cli_proxy" || (owner.isEmpty() && pType in OrbProviderLoginFlow.subscriptionTypes))
+    if (!isAdmin && !proxy) return false
+    return pType == "kimi"
+        || proxy
+        || (owner.isEmpty() && pType == "google")
+        || (owner == "sandboxed_sh" && pType in setOf("anthropic", "openai", "google"))
+}
+
+internal fun availableOAuthPresetTypes(isAdmin: Boolean): Set<String> =
+    if (isAdmin) OrbProviderLoginFlow.subscriptionTypes else OrbProviderLoginFlow.subscriptionTypes - "google"
+
+internal fun isMemberCustomBaseUrlAllowed(raw: String): Boolean {
+    val trimmed = raw.trim()
+    if (!trimmed.lowercase().startsWith("https://")) return false
+    if (!isValidHttpUrl(trimmed)) return false
+    val rest = trimmed.substring("https://".length)
+    val hostPort = rest.takeWhile { it != '/' && it != '?' && it != '#' }
+    if (hostPort.isEmpty() || hostPort.contains('[') || hostPort.contains(']')) return false
+    val host = hostPort.takeWhile { it != ':' }.lowercase()
+    if (host.isEmpty()
+        || host == "localhost"
+        || host.endsWith(".localhost")
+        || host.endsWith(".internal")
+        || host.endsWith(".local")
+        || host.startsWith("127.")
+        || host.startsWith("10.")
+        || host.startsWith("192.168.")
+        || host.startsWith("169.254.")
+        || host.startsWith("0.")
+    ) {
+        return false
+    }
+    if (host.startsWith("172.")) {
+        val after = host.substring(4)
+        val second = after.takeWhile { it != '.' }.toIntOrNull()
+        if (second != null && second in 16..31) return false
+    }
+    if (host.startsWith("100.")) {
+        val after = host.substring(4)
+        if (after.isNotEmpty() && after.all { it.isDigit() || it == '.' }) return false
+    }
+    return true
+}
+
+internal fun isCustomBaseUrlAllowed(raw: String, isAdmin: Boolean): Boolean =
+    if (isAdmin) isValidHttpUrl(raw) else isMemberCustomBaseUrlAllowed(raw)
+
+internal fun providerWriteError(error: Throwable, fallback: String): String {
+    val rawCode = when (error) {
+        is OrbError -> {
+            if (error.status != 403 && error.status != 0) return fallback
+            val parsed = error.body?.let { OrbJSON.dict(OrbJSON.parse(it)) }
+            OrbJSON.str(parsed, "error", "message", "detail") ?: error.message
+        }
+        else -> error.message.orEmpty()
+    }.trim()
+    val code = if (rawCode.startsWith("{")) {
+        val parsed = OrbJSON.dict(OrbJSON.parse(rawCode))
+        OrbJSON.str(parsed, "error", "message", "detail") ?: rawCode
+    } else rawCode
+    return when (code) {
+        "not_account_owner" -> "Only the person who added this account, or an admin, can change its credentials or remove it."
+        "base_url_not_allowed" -> "Members can set a base URL only on custom accounts they added, and only to a public https:// address."
+        "admin_required" -> "Only an admin can change this setting."
+        "account_disabled" -> "Your account is disabled."
+        else -> fallback
+    }
+}
 
 /** Quota severity of a provider row; null when another state (disabled, reconnect, error) wins or all is below 80%. */
 internal fun providerQuotaStatus(provider: OrbRow, detail: OrbDict?): OrbQuotaStatus? {
@@ -331,7 +420,11 @@ internal fun providerStatusSubtitle(provider: OrbRow, detail: OrbDict?): String 
     val detailError = OrbJSON.str(detail, "error") ?: ""
     var showResetBadge = false
     val state = when {
-        !effectiveProviderEnabled(provider) -> if (provider.bool("globally_enabled") == false) "Disabled by admin" else "Disabled"
+        !effectiveProviderEnabled(provider) -> when {
+            provider.bool("globally_enabled") == false -> "Disabled by admin"
+            provider.bool("user_enabled") == false -> "Skipped for your missions"
+            else -> "Disabled"
+        }
         detailStatus == "needs_verification" -> "Verification required"
         statusType == "needs_reauth" || detailStatus == "needs_reauth" -> "Reconnect"
         detailError.isNotEmpty() -> "Usage unavailable"
@@ -403,7 +496,7 @@ private fun OrbProviderPill(text: String, onClick: () -> Unit) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun OrbProvidersSettingsPage(
     core: OrbCore,
@@ -435,6 +528,7 @@ fun OrbProvidersSettingsPage(
     var statusBanner by remember { mutableStateOf<String?>(null) }
     var errorBanner by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
+    var removePrompt by remember { mutableStateOf<OrbRow?>(null) }
     var resetPrompt by remember { mutableStateOf<Triple<OrbRow, OrbSubscriptionResetSummary, String>?>(null) }
     var resetBusy by remember { mutableStateOf(false) }
     var resetDialogError by remember { mutableStateOf<String?>(null) }
@@ -451,14 +545,15 @@ fun OrbProvidersSettingsPage(
     var oauthSessionId by remember { mutableStateOf<String?>(null) }
     var oauthUsesProxy by remember { mutableStateOf(false) }
 
-    val oauthPresets = remember {
+    val oauthPresets = remember(isAdmin) {
+        val allowed = availableOAuthPresetTypes(isAdmin)
         listOf(
             "anthropic" to "Anthropic (Claude Max / Pro)",
             "openai" to "OpenAI (ChatGPT Plus / Pro)",
             "google" to "Google (Gemini / Antigravity)",
             "xai" to "xAI (Grok)",
             "kimi" to "Kimi"
-        )
+        ).filter { (type, _) -> type in allowed }
     }
 
     var usageRefreshJob by remember { mutableStateOf<Job?>(null) }
@@ -467,8 +562,8 @@ fun OrbProvidersSettingsPage(
         var loadedProviders = providers
         val providersTask = async { runCatching { core.fetchRows("/api/ai/providers", "providers") } }
         val usageTask = async { runCatching { core.fetchDict("/api/ai/providers/usage") } }
-        val cloudAccountsTask = async { runCatching { core.fetchRows("/api/cloud/accounts", "items") } }
-        val cloudUsageTask = async { runCatching { core.fetchDict("/api/cloud/usage") } }
+        val cloudAccountsTask = if (isAdmin) async { runCatching { core.fetchRows("/api/cloud/accounts", "items") } } else null
+        val cloudUsageTask = if (isAdmin) async { runCatching { core.fetchDict("/api/cloud/usage") } } else null
 
         providersTask.await()
             .onSuccess { loaded ->
@@ -541,13 +636,13 @@ fun OrbProvidersSettingsPage(
                 }
             }
 
-        cloudAccountsTask.await()
-            .onFailure { if (it is CancellationException) throw it }
-            .onSuccess { cloudAccounts = it }
+        cloudAccountsTask?.await()
+            ?.onFailure { if (it is CancellationException) throw it }
+            ?.onSuccess { cloudAccounts = it }
 
-        cloudUsageTask.await()
-            .onFailure { if (it is CancellationException) throw it }
-            .onSuccess { cUsage ->
+        cloudUsageTask?.await()
+            ?.onFailure { if (it is CancellationException) throw it }
+            ?.onSuccess { cUsage ->
                 val accountsDict = OrbJSON.dict(cUsage["accounts"]) ?: emptyMap()
                 val mapped = mutableMapOf<String, OrbDict>()
                 for ((k, v) in accountsDict) {
@@ -645,7 +740,7 @@ fun OrbProvidersSettingsPage(
                     }
                 }
             } catch (e: Throwable) {
-                oauthStatusMessage = e.message ?: "Failed to start OAuth flow"
+                oauthStatusMessage = providerWriteError(e, "Failed to start OAuth flow")
             } finally {
                 oauthLoading = false
             }
@@ -694,7 +789,7 @@ fun OrbProvidersSettingsPage(
                     finishOauth(pType)
                 }
             } catch (e: Throwable) {
-                oauthStatusMessage = e.message ?: "Callback failed"
+                oauthStatusMessage = providerWriteError(e, "Callback failed")
             } finally {
                 oauthLoading = false
             }
@@ -719,27 +814,93 @@ fun OrbProvidersSettingsPage(
         }
     }
 
-    fun toggleProvider(provider: OrbRow) {
+    fun toggleGlobalProvider(provider: OrbRow) {
         if (busy) return
-        if (!isAdmin && provider.bool("globally_enabled") == false) return
         busy = true
-        val currentlyEnabled = effectiveProviderEnabled(provider)
+        val currentlyEnabled = globallyProviderEnabled(provider)
         scope.launch {
             try {
-                val path = if (isAdmin) {
-                    "/api/ai/providers/${core.encodeComponent(provider.id)}"
-                } else {
-                    "/api/ai/providers/${core.encodeComponent(provider.id)}/preference"
-                }
                 core.request(
-                    path = path,
+                    path = "/api/ai/providers/${core.encodeComponent(provider.id)}",
                     method = "PUT",
                     body = mapOf("enabled" to !currentlyEnabled)
                 )
                 loadProvidersAndUsage()
                 core.refreshAll()
             } catch (e: Throwable) {
-                errorBanner = e.message
+                errorBanner = providerWriteError(e, "Could not update provider.")
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    fun toggleUserProviderPreference(provider: OrbRow) {
+        if (busy) return
+        if (!globallyProviderEnabled(provider)) return
+        busy = true
+        val enable = isProviderUserSkipped(provider)
+        scope.launch {
+            try {
+                core.request(
+                    path = "/api/ai/providers/${core.encodeComponent(provider.id)}/preference",
+                    method = "PUT",
+                    body = mapOf("enabled" to enable)
+                )
+                loadProvidersAndUsage()
+                core.refreshAll()
+            } catch (e: Throwable) {
+                errorBanner = providerWriteError(e, "Could not update provider preference.")
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    fun moveProvider(fromIndex: Int, toIndex: Int) {
+        if (busy) return
+        if (fromIndex !in providers.indices || toIndex !in providers.indices || fromIndex == toIndex) return
+        busy = true
+        val reordered = providers.toMutableList().apply {
+            val item = removeAt(fromIndex)
+            add(toIndex, item)
+        }
+        providers = reordered
+        scope.launch {
+            try {
+                core.request(
+                    path = "/api/ai/providers/reorder",
+                    method = "POST",
+                    body = mapOf("ids" to reordered.map { it.id })
+                )
+                loadProvidersAndUsage()
+                core.refreshAll()
+            } catch (e: Throwable) {
+                errorBanner = providerWriteError(e, "Could not reorder providers.")
+                loadProvidersAndUsage()
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    fun removeProvider(provider: OrbRow) {
+        if (busy) return
+        busy = true
+        scope.launch {
+            try {
+                core.request(
+                    path = "/api/ai/providers/${core.encodeComponent(provider.id)}",
+                    method = "DELETE"
+                )
+                removePrompt = null
+                editingProvider = editingProvider?.takeIf { it.id != provider.id }
+                expandedIds = expandedIds - provider.id
+                statusBanner = "Removed ${provider.str("name", "label", "id") ?: provider.id}"
+                loadProvidersAndUsage()
+                core.refreshAll()
+            } catch (e: Throwable) {
+                errorBanner = providerWriteError(e, "Could not remove provider.")
             } finally {
                 busy = false
             }
@@ -759,7 +920,7 @@ fun OrbProvidersSettingsPage(
                 loadProvidersAndUsage()
                 core.refreshAll()
             } catch (e: Throwable) {
-                errorBanner = e.message
+                errorBanner = providerWriteError(e, "Could not update auto-reset setting.")
             } finally {
                 busy = false
             }
@@ -772,7 +933,7 @@ fun OrbProvidersSettingsPage(
         val (concOk, _) = parseOptionalProviderCap(maxConcurrencyDraft, 1, 1024)
         if (!rpmOk || !concOk) return false
         if (provider == null && apiKeyDraft.trim().isEmpty()) return false
-        if (pType == "custom" && !isValidHttpUrl(baseUrlDraft)) return false
+        if (canEditProviderBaseUrl(provider, pType, isAdmin) && !isCustomBaseUrlAllowed(baseUrlDraft, isAdmin)) return false
         return true
     }
 
@@ -789,8 +950,14 @@ fun OrbProvidersSettingsPage(
             return
         }
         val pType = provider?.str("provider_type", "type") ?: addKeyProviderType.trim()
-        if (pType == "custom" && !isValidHttpUrl(baseUrlDraft)) {
-            errorBanner = "Custom providers require an http:// or https:// base URL."
+        val canEditBase = canEditProviderBaseUrl(provider, pType, isAdmin)
+        val canEditCreds = provider == null || canEditProviderCredentials(provider, isAdmin)
+        if (canEditBase && !isCustomBaseUrlAllowed(baseUrlDraft, isAdmin)) {
+            errorBanner = if (isAdmin) {
+                "Custom providers require an http:// or https:// base URL."
+            } else {
+                "Members must use a public https:// base URL."
+            }
             return
         }
         savingKey = true
@@ -800,18 +967,18 @@ fun OrbProvidersSettingsPage(
                     "name" to nameDraft.trim().ifEmpty { provider?.str("name") ?: pType }
                 )
                 val trimmedKey = apiKeyDraft.trim()
-                if (trimmedKey.isNotEmpty()) {
+                if (canEditCreds && trimmedKey.isNotEmpty()) {
                     body["api_key"] = trimmedKey
                 }
                 if (pid == null) {
                     body["provider_type"] = pType
-                    if (pType == "custom") {
+                    if (canEditBase) {
                         body["base_url"] = baseUrlDraft.trim()
                     }
                     if (rpmVal != null) body["rpm_limit"] = rpmVal
                     if (concVal != null) body["max_concurrency"] = concVal
                 } else {
-                    if (pType == "custom") {
+                    if (canEditBase) {
                         body["base_url"] = baseUrlDraft.trim()
                     }
                     if (rpmVal != null || provider.int("rpm_limit") != null) {
@@ -833,11 +1000,11 @@ fun OrbProvidersSettingsPage(
                 baseUrlDraft = ""
                 rpmLimitDraft = ""
                 maxConcurrencyDraft = ""
-                statusBanner = if (pid == null || trimmedKey.isNotEmpty()) "Saved API key" else "Saved provider settings"
+                statusBanner = if (pid == null || (canEditCreds && trimmedKey.isNotEmpty())) "Saved API key" else "Saved provider settings"
                 loadProvidersAndUsage()
                 core.refreshAll()
             } catch (e: Throwable) {
-                errorBanner = e.message
+                errorBanner = providerWriteError(e, "Could not save the provider settings. Check the connection and try again.")
             } finally {
                 savingKey = false
             }
@@ -1052,10 +1219,12 @@ fun OrbProvidersSettingsPage(
                                 val quotaLevel = providerQuotaStatus(provider, detail)?.level ?: OrbQuotaLevel.Normal
                                 val expanded = expandedIds.contains(pid)
                                 val windows = providerQuotaWindows(detail)
-                                val usesOauth = provider.bool("uses_oauth") == true
-                                val canEditKey = isAdmin && (provider.bool("has_api_key") == true || !usesOauth)
-                                val enabled = effectiveProviderEnabled(provider)
-                                val globallyDisabled = !isAdmin && provider.bool("globally_enabled") == false
+                                val manages = canManageProvider(provider, isAdmin)
+                                val canEditCreds = canEditProviderCredentials(provider, isAdmin)
+                                val canEditBase = canEditProviderBaseUrl(provider, providerType, isAdmin)
+                                val canReconnect = canReconnectProviderOAuth(provider, isAdmin)
+                                val globallyEnabled = globallyProviderEnabled(provider)
+                                val userSkipped = isProviderUserSkipped(provider)
 
                                 Column(
                                     modifier = Modifier
@@ -1135,7 +1304,7 @@ fun OrbProvidersSettingsPage(
                                                 Text(text = errText, color = OrbStyle.warning, fontSize = 12.sp)
                                             }
                                             val unverified = OrbJSON.str(detail, "status") == "needs_verification"
-                                            if (unverified) {
+                                            if (unverified && manages) {
                                                 // Google refuses this login until its owner verifies it; the
                                                 // OAuth sign-in itself is fine, so no Reconnect here.
                                                 Text(text = "Google requires you to verify this account.", color = OrbStyle.warning, fontSize = 12.sp)
@@ -1144,11 +1313,13 @@ fun OrbProvidersSettingsPage(
                                                         val url = antigravityVerificationUrl(detail, provider.str("account_email"))
                                                         runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
                                                     }
-                                                    OrbProviderPill("Check again") {
-                                                        scope.launch {
-                                                            runCatching {
-                                                                OrbJSON.dict(core.request("/api/ai/providers/${core.encodeComponent(pid)}/antigravity/recheck", method = "POST"))
-                                                            }.getOrNull()?.let { usageEntries = usageEntries + (pid to it) }
+                                                    if (isAdmin) {
+                                                        OrbProviderPill("Check again") {
+                                                            scope.launch {
+                                                                runCatching {
+                                                                    OrbJSON.dict(core.request("/api/ai/providers/${core.encodeComponent(pid)}/antigravity/recheck", method = "POST"))
+                                                                }.getOrNull()?.let { usageEntries = usageEntries + (pid to it) }
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -1158,10 +1329,10 @@ fun OrbProvidersSettingsPage(
                                             }
 
                                             val resetSummary = subscriptionResetSummary(detail)
-                                            val canResetSub = isAdmin && supportsSubscriptionReset(provider)
-                                            if (isAdmin && (resetSummary != null || canResetSub)) {
+                                            val canAutoResetSub = supportsSubscriptionReset(provider)
+                                            if ((isAdmin && resetSummary != null) || canAutoResetSub) {
                                                 HorizontalDivider(color = OrbStyle.border)
-                                                if (resetSummary != null) {
+                                                if (isAdmin && resetSummary != null) {
                                                     Row(
                                                         modifier = Modifier.fillMaxWidth(),
                                                         verticalAlignment = Alignment.CenterVertically,
@@ -1199,7 +1370,7 @@ fun OrbProvidersSettingsPage(
                                                         }
                                                     }
                                                 }
-                                                if (canResetSub) {
+                                                if (canAutoResetSub) {
                                                     Row(
                                                         modifier = Modifier.fillMaxWidth(),
                                                         verticalAlignment = Alignment.CenterVertically,
@@ -1222,8 +1393,11 @@ fun OrbProvidersSettingsPage(
                                                 }
                                             }
 
-                                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                                if (isAdmin && usesOauth && !unverified) {
+                                            androidx.compose.foundation.layout.FlowRow(
+                                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                if (canReconnect && !unverified) {
                                                     Box(
                                                         modifier = Modifier
                                                             .clip(CircleShape)
@@ -1244,34 +1418,42 @@ fun OrbProvidersSettingsPage(
                                                         )
                                                     }
                                                 }
-                                                if (canEditKey) {
-                                                    Box(
-                                                        modifier = Modifier
-                                                            .clip(CircleShape)
-                                                            .background(OrbStyle.card)
-                                                            .border(1.dp, OrbStyle.border, CircleShape)
-                                                            .orbPressClickable {
-                                                                if (editingProvider?.id == pid) {
-                                                                    editingProvider = null
-                                                                } else {
-                                                                    editingProvider = provider
-                                                                    nameDraft = name
-                                                                    apiKeyDraft = ""
-                                                                    baseUrlDraft = provider.str("base_url").orEmpty()
-                                                                    rpmLimitDraft = provider.int("rpm_limit")?.toString().orEmpty()
-                                                                    maxConcurrencyDraft = provider.int("max_concurrency")?.toString().orEmpty()
-                                                                }
+                                                Box(
+                                                    modifier = Modifier
+                                                        .clip(CircleShape)
+                                                        .background(OrbStyle.card)
+                                                        .border(1.dp, OrbStyle.border, CircleShape)
+                                                        .orbPressClickable {
+                                                            if (editingProvider?.id == pid) {
+                                                                editingProvider = null
+                                                            } else {
+                                                                editingProvider = provider
+                                                                nameDraft = name
+                                                                apiKeyDraft = ""
+                                                                baseUrlDraft = provider.str("base_url").orEmpty()
+                                                                rpmLimitDraft = provider.int("rpm_limit")?.toString().orEmpty()
+                                                                maxConcurrencyDraft = provider.int("max_concurrency")?.toString().orEmpty()
                                                             }
-                                                            .padding(horizontal = 12.dp, vertical = 6.dp)
-                                                    ) {
-                                                        Text(
-                                                            text = "Edit API key",
-                                                            color = Color.White,
-                                                            fontSize = 12.sp,
-                                                            fontWeight = FontWeight.Medium,
-                                                            maxLines = 1,
-                                                            softWrap = false
-                                                        )
+                                                        }
+                                                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                                                ) {
+                                                    Text(
+                                                        text = if (canEditCreds) "Edit API key" else "Edit settings",
+                                                        color = Color.White,
+                                                        fontSize = 12.sp,
+                                                        fontWeight = FontWeight.Medium,
+                                                        maxLines = 1,
+                                                        softWrap = false
+                                                    )
+                                                }
+                                                if (idx > 0) {
+                                                    OrbProviderPill("Try earlier") {
+                                                        moveProvider(idx, idx - 1)
+                                                    }
+                                                }
+                                                if (idx < providers.lastIndex) {
+                                                    OrbProviderPill("Try later") {
+                                                        moveProvider(idx, idx + 1)
                                                     }
                                                 }
                                                 Box(
@@ -1279,30 +1461,65 @@ fun OrbProvidersSettingsPage(
                                                         .clip(CircleShape)
                                                         .background(OrbStyle.card)
                                                         .border(1.dp, OrbStyle.border, CircleShape)
-                                                        .orbPressClickable(enabled = !globallyDisabled) { toggleProvider(provider) }
+                                                        .orbPressClickable(enabled = !busy) { toggleGlobalProvider(provider) }
                                                         .padding(horizontal = 12.dp, vertical = 6.dp)
                                                 ) {
                                                     Text(
-                                                        text = when {
-                                                            globallyDisabled -> "Disabled by admin"
-                                                            enabled -> "Disable"
-                                                            else -> "Enable"
-                                                        },
-                                                        color = when {
-                                                            globallyDisabled -> OrbStyle.textMuted
-                                                            enabled -> OrbStyle.textSecondary
-                                                            else -> OrbStyle.success
-                                                        },
+                                                        text = if (globallyEnabled) "Disable" else "Enable",
+                                                        color = if (globallyEnabled) OrbStyle.textSecondary else OrbStyle.success,
                                                         fontSize = 12.sp,
                                                         fontWeight = FontWeight.Medium,
                                                         maxLines = 1,
                                                         softWrap = false
                                                     )
                                                 }
+                                                if (currentUser != null) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .clip(CircleShape)
+                                                            .background(OrbStyle.card)
+                                                            .border(1.dp, OrbStyle.border, CircleShape)
+                                                            .orbPressClickable(enabled = globallyEnabled && !busy) {
+                                                                toggleUserProviderPreference(provider)
+                                                            }
+                                                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = if (userSkipped) "Use for my missions" else "Skip for my missions",
+                                                            color = when {
+                                                                !globallyEnabled -> OrbStyle.textMuted
+                                                                userSkipped -> OrbStyle.success
+                                                                else -> OrbStyle.textSecondary
+                                                            },
+                                                            fontSize = 12.sp,
+                                                            fontWeight = FontWeight.Medium,
+                                                            maxLines = 1,
+                                                            softWrap = false
+                                                        )
+                                                    }
+                                                }
+                                                if (manages) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .clip(CircleShape)
+                                                            .background(OrbStyle.card)
+                                                            .border(1.dp, OrbStyle.border, CircleShape)
+                                                            .orbPressClickable(enabled = !busy) { removePrompt = provider }
+                                                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = "Remove…",
+                                                            color = OrbStyle.error,
+                                                            fontSize = 12.sp,
+                                                            fontWeight = FontWeight.Medium,
+                                                            maxLines = 1,
+                                                            softWrap = false
+                                                        )
+                                                    }
+                                                }
                                             }
 
                                             if (editingProvider?.id == pid) {
-                                                val isCustomProvider = (provider.str("provider_type", "type") ?: "") == "custom"
                                                 val saveReady = !savingKey && canSaveProvider(provider)
                                                 Column(
                                                     modifier = Modifier
@@ -1314,9 +1531,15 @@ fun OrbProvidersSettingsPage(
                                                     verticalArrangement = Arrangement.spacedBy(8.dp)
                                                 ) {
                                                     OrbMiniField("Name", nameDraft, enabled = !savingKey) { nameDraft = it }
-                                                    OrbMiniField("New API key (optional)", apiKeyDraft, secret = true, enabled = !savingKey) { apiKeyDraft = it }
-                                                    if (isCustomProvider) {
-                                                        OrbMiniField("Base URL", baseUrlDraft, enabled = !savingKey) { baseUrlDraft = it }
+                                                    if (canEditCreds) {
+                                                        OrbMiniField("New API key (optional)", apiKeyDraft, secret = true, enabled = !savingKey) { apiKeyDraft = it }
+                                                    }
+                                                    if (canEditBase) {
+                                                        OrbMiniField(
+                                                            if (isAdmin) "Base URL" else "Base URL (public https://)",
+                                                            baseUrlDraft,
+                                                            enabled = !savingKey
+                                                        ) { baseUrlDraft = it }
                                                     }
                                                     OrbMiniField("Requests / min limit (optional, e.g. 300)", rpmLimitDraft, enabled = !savingKey) { rpmLimitDraft = it }
                                                     OrbMiniField("Max concurrent requests (optional, e.g. 10)", maxConcurrencyDraft, enabled = !savingKey) { maxConcurrencyDraft = it }
@@ -1354,166 +1577,168 @@ fun OrbProvidersSettingsPage(
                     }
                 }
 
-                // Section("Cloud agents") matching OrbCloudAccountsSettings
-                item {
-                    Text(
-                        text = "CLOUD AGENTS",
-                        color = OrbStyle.textMuted,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.7.sp
-                    )
-                }
+                // Section("Cloud agents") matching OrbCloudAccountsSettings (admin-only on backend)
+                if (isAdmin) {
+                    item {
+                        Text(
+                            text = "CLOUD AGENTS",
+                            color = OrbStyle.textMuted,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.7.sp
+                        )
+                    }
 
-                item {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(OrbStyle.surface)
-                            .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
-                    ) {
-                        if (cloudAccounts.isEmpty()) {
-                            Text(
-                                text = "No cloud accounts configured.",
-                                color = OrbStyle.textMuted,
-                                fontSize = 14.sp,
-                                modifier = Modifier.padding(16.dp)
-                            )
-                        } else {
-                            cloudAccounts.forEachIndexed { idx, account ->
-                                val cid = account.id
-                                val label = account.str("label", "name", "provider", "id") ?: cid
-                                val cloudProvider = account.str("provider") ?: ""
-                                val available = account.bool("available") == true
-                                val expanded = expandedCloudIds.contains(cid)
-                                val reason = account.str("reason") ?: ""
-                                val windows = OrbJSON.dictList(cloudUsage[cid]?.get("windows"))
+                    item {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(OrbStyle.surface)
+                                .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
+                        ) {
+                            if (cloudAccounts.isEmpty()) {
+                                Text(
+                                    text = "No cloud accounts configured.",
+                                    color = OrbStyle.textMuted,
+                                    fontSize = 14.sp,
+                                    modifier = Modifier.padding(16.dp)
+                                )
+                            } else {
+                                cloudAccounts.forEachIndexed { idx, account ->
+                                    val cid = account.id
+                                    val label = account.str("label", "name", "provider", "id") ?: cid
+                                    val cloudProvider = account.str("provider") ?: ""
+                                    val available = account.bool("available") == true
+                                    val expanded = expandedCloudIds.contains(cid)
+                                    val reason = account.str("reason") ?: ""
+                                    val windows = OrbJSON.dictList(cloudUsage[cid]?.get("windows"))
 
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .orbPressClickable {
-                                            expandedCloudIds = if (expanded) expandedCloudIds - cid else expandedCloudIds + cid
-                                        }
-                                        .padding(horizontal = 16.dp, vertical = 13.dp),
-                                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .orbPressClickable {
+                                                expandedCloudIds = if (expanded) expandedCloudIds - cid else expandedCloudIds + cid
+                                            }
+                                            .padding(horizontal = 16.dp, vertical = 13.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
-                                        OrbProviderLogo(
-                                            type = cloudProvider,
-                                            name = label,
-                                            size = 18.dp
-                                        )
-                                        Column(
-                                            modifier = Modifier.weight(1f),
-                                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(12.dp)
                                         ) {
-                                            Text(
-                                                text = label,
-                                                color = Color.White,
-                                                fontSize = 15.sp,
-                                                fontWeight = FontWeight.Medium
+                                            OrbProviderLogo(
+                                                type = cloudProvider,
+                                                name = label,
+                                                size = 18.dp
                                             )
-                                            Text(
-                                                text = if (available) "Available" else "Unavailable",
-                                                color = OrbStyle.textSecondary,
-                                                fontSize = 12.sp
+                                            Column(
+                                                modifier = Modifier.weight(1f),
+                                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                                            ) {
+                                                Text(
+                                                    text = label,
+                                                    color = Color.White,
+                                                    fontSize = 15.sp,
+                                                    fontWeight = FontWeight.Medium
+                                                )
+                                                Text(
+                                                    text = if (available) "Available" else "Unavailable",
+                                                    color = OrbStyle.textSecondary,
+                                                    fontSize = 12.sp
+                                                )
+                                            }
+                                            Icon(
+                                                imageVector = Icons.Default.ChevronRight,
+                                                contentDescription = null,
+                                                tint = OrbStyle.textMuted,
+                                                modifier = Modifier.size(16.dp)
                                             )
                                         }
-                                        Icon(
-                                            imageVector = Icons.Default.ChevronRight,
-                                            contentDescription = null,
-                                            tint = OrbStyle.textMuted,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                    }
 
-                                    if (expanded) {
-                                        if (reason.isNotEmpty()) {
-                                            Text(text = reason, color = OrbStyle.textSecondary, fontSize = 12.sp)
-                                        }
-                                        windows.forEach { w ->
-                                            val wLabel = OrbJSON.str(w, "label") ?: "Usage"
-                                            val pct = OrbJSON.double(w, "used_percent") ?: 0.0
-                                            val ratio = (pct / 100.0).coerceIn(0.0, 1.0)
-                                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                                Row(
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    Text(
-                                                        text = wLabel,
-                                                        color = Color.White,
-                                                        fontSize = 12.sp,
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis,
-                                                        modifier = Modifier.weight(1f)
-                                                    )
-                                                    Text(
-                                                        text = "${pct.roundToInt()}% used",
-                                                        color = OrbQuotaLevel.of(pct / 100.0).color(OrbStyle.textSecondary),
-                                                        fontSize = 12.sp,
-                                                        maxLines = 1,
-                                                        softWrap = false
-                                                    )
-                                                }
-                                                Box(
-                                                    modifier = Modifier
-                                                        .fillMaxWidth()
-                                                        .height(4.dp)
-                                                        .clip(CircleShape)
-                                                        .background(OrbStyle.card)
-                                                ) {
+                                        if (expanded) {
+                                            if (reason.isNotEmpty()) {
+                                                Text(text = reason, color = OrbStyle.textSecondary, fontSize = 12.sp)
+                                            }
+                                            windows.forEach { w ->
+                                                val wLabel = OrbJSON.str(w, "label") ?: "Usage"
+                                                val pct = OrbJSON.double(w, "used_percent") ?: 0.0
+                                                val ratio = (pct / 100.0).coerceIn(0.0, 1.0)
+                                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                    Row(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                        verticalAlignment = Alignment.CenterVertically
+                                                    ) {
+                                                        Text(
+                                                            text = wLabel,
+                                                            color = Color.White,
+                                                            fontSize = 12.sp,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis,
+                                                            modifier = Modifier.weight(1f)
+                                                        )
+                                                        Text(
+                                                            text = "${pct.roundToInt()}% used",
+                                                            color = OrbQuotaLevel.of(pct / 100.0).color(OrbStyle.textSecondary),
+                                                            fontSize = 12.sp,
+                                                            maxLines = 1,
+                                                            softWrap = false
+                                                        )
+                                                    }
                                                     Box(
                                                         modifier = Modifier
-                                                            .fillMaxWidth(ratio.toFloat())
+                                                            .fillMaxWidth()
                                                             .height(4.dp)
                                                             .clip(CircleShape)
-                                                            .background(OrbQuotaLevel.of(ratio.toDouble()).color(OrbStyle.inboxBlue))
-                                                    )
+                                                            .background(OrbStyle.card)
+                                                    ) {
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .fillMaxWidth(ratio.toFloat())
+                                                                .height(4.dp)
+                                                                .clip(CircleShape)
+                                                                .background(OrbQuotaLevel.of(ratio.toDouble()).color(OrbStyle.inboxBlue))
+                                                        )
+                                                    }
                                                 }
                                             }
                                         }
                                     }
+                                    HorizontalDivider(
+                                        color = OrbStyle.border,
+                                        modifier = Modifier.padding(start = 58.dp)
+                                    )
                                 }
-                                HorizontalDivider(
-                                    color = OrbStyle.border,
-                                    modifier = Modifier.padding(start = 58.dp)
+                            }
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .orbPressClickable {
+                                        scope.launch {
+                                            isRefreshing = true
+                                            loadProvidersAndUsage()
+                                            isRefreshing = false
+                                        }
+                                    }
+                                    .padding(horizontal = 16.dp, vertical = 13.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Refresh cloud accounts",
+                                    color = OrbStyle.inboxBlue,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Medium
                                 )
                             }
-                        }
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .orbPressClickable {
-                                    scope.launch {
-                                        isRefreshing = true
-                                        loadProvidersAndUsage()
-                                        isRefreshing = false
-                                    }
-                                }
-                                .padding(horizontal = 16.dp, vertical = 13.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "Refresh cloud accounts",
-                                color = OrbStyle.inboxBlue,
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.Medium
-                            )
                         }
                     }
                 }
 
                 // Bottom action section ("Connect subscription", "Add API key")
-                if (isAdmin) item {
+                item {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1707,7 +1932,11 @@ fun OrbProvidersSettingsPage(
                                 OrbMiniField("Name", nameDraft, enabled = !savingKey) { nameDraft = it }
                                 OrbMiniField("API key", apiKeyDraft, secret = true, enabled = !savingKey) { apiKeyDraft = it }
                                 if (addKeyProviderType.trim() == "custom") {
-                                    OrbMiniField("Base URL", baseUrlDraft, enabled = !savingKey) { baseUrlDraft = it }
+                                    OrbMiniField(
+                                        if (isAdmin) "Base URL" else "Base URL (public https://)",
+                                        baseUrlDraft,
+                                        enabled = !savingKey
+                                    ) { baseUrlDraft = it }
                                 }
                                 OrbMiniField("Requests / min limit (optional, e.g. 300)", rpmLimitDraft, enabled = !savingKey) { rpmLimitDraft = it }
                                 OrbMiniField("Max concurrent requests (optional, e.g. 10)", maxConcurrencyDraft, enabled = !savingKey) { maxConcurrencyDraft = it }
@@ -1737,6 +1966,39 @@ fun OrbProvidersSettingsPage(
                 }
             }
         }
+    }
+
+    removePrompt?.let { targetProvider ->
+        val split = splitProviderDisplayName(targetProvider)
+        val label = split.account.ifEmpty { split.title }
+        AlertDialog(
+            onDismissRequest = {
+                if (!busy) removePrompt = null
+            },
+            containerColor = OrbStyle.elevated,
+            titleContentColor = Color.White,
+            textContentColor = OrbStyle.textSecondary,
+            title = { Text("Remove provider?", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Text("Remove $label from shared inference accounts? Missions will no longer use its credentials.")
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !busy,
+                    onClick = { removeProvider(targetProvider) }
+                ) {
+                    Text(if (busy) "Removing…" else "Remove", color = OrbStyle.error, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !busy,
+                    onClick = { removePrompt = null }
+                ) {
+                    Text("Cancel", color = OrbStyle.textSecondary)
+                }
+            }
+        )
     }
 
     resetPrompt?.let { (targetProvider, summary, idemKey) ->

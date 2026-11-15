@@ -907,10 +907,37 @@ def cancelActiveRemoteJobForMission
         "SELECT COALESCE(placement_job_id,'') FROM missions WHERE id=?1;" #[missionId] then
       if mRows.size > 1 then
         jobId := (cell mRows[1]! 0).trimAscii.toString
+  if jobId.isEmpty then
+    if let .ok jRows ← execParamQuery store.missionsDb
+        ("SELECT COALESCE(job_id,''), COALESCE(node_id,'') FROM remote_node_jobs WHERE mission_id=?1 " ++
+         "AND state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost') ORDER BY updated_at DESC LIMIT 1;")
+        #[missionId] then
+      if jRows.size > 1 then
+        jobId := (cell jRows[1]! 0).trimAscii.toString
+        if nodeId.isEmpty then
+          nodeId := (cell jRows[1]! 1).trimAscii.toString
   if nodeId.isEmpty then
     if let some rn ← resolveMissionRemoteNode? store mc? missionId then
       nodeId := rn
+  let nowIso := formatEpochIso8601Utc (← nowEpoch)
+  let reconcileCancelLedgers (jid : String) : IO Unit := do
+    if !jid.isEmpty then
+      discard <| execParamQuery store.missionsDb
+        "UPDATE remote_node_jobs SET state='cancelled', updated_at=?2 WHERE job_id=?1;"
+        #[jid, nowIso]
+      discard <| execParamQuery store.projectsDb
+        "UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1;"
+        #[jid, nowIso]
+    discard <| execParamQuery store.missionsDb
+      ("UPDATE remote_node_jobs SET state='cancelled', updated_at=?2 WHERE mission_id=?1 " ++
+       "AND state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost');")
+      #[missionId, nowIso]
+    discard <| execParamQuery store.projectsDb
+      ("UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE mission_id=?1 " ++
+       "AND state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost');")
+      #[missionId, nowIso]
   if jobId.isEmpty || nodeId.isEmpty then
+    reconcileCancelLedgers jobId
     return false
   let effNode ← match ← resolveConcreteRemoteTargetNode mc? nodeId (some (store, missionId)) with
     | .ok n => pure n
@@ -921,12 +948,10 @@ def cancelActiveRemoteJobForMission
   ]
   match ← callRemoteNodeHttpOpt relayHub? mc? effNode "POST" s!"/jobs/{jobId}/cancel" (some (.obj #[])) hdrs 10000 with
   | .ok (st, _, _, _, _) =>
-    let nowIso := formatEpochIso8601Utc (← nowEpoch)
-    discard <| execParamQuery store.missionsDb
-      "UPDATE remote_node_jobs SET state='cancelled', updated_at=?2 WHERE job_id=?1;"
-      #[jobId, nowIso]
+    reconcileCancelLedgers jobId
     return (200 ≤ st && st < 300)
   | .error _ =>
+    reconcileCancelLedgers jobId
     return false
 
 private def popNextQueuedFollowup?
@@ -1013,6 +1038,12 @@ partial def spawnRemoteJobPoller
                 ("x-sandboxed-cancel-reason", s!"Mission {mst} on Core")
               ]
               discard <| callRemoteNodeHttpOpt relayHub? mc? effNodeId "POST" s!"/jobs/{jobId}/cancel" (some (.obj #[])) hdrs 8000
+              discard <| execParamQuery store.missionsDb
+                "UPDATE remote_node_jobs SET state='cancelled', updated_at=?2 WHERE job_id=?1;"
+                #[jobId, nowIso]
+              discard <| execParamQuery store.projectsDb
+                "UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1;"
+                #[jobId, nowIso]
           else
             keepRunning := false
       if keepRunning then
@@ -1060,6 +1091,8 @@ partial def spawnRemoteJobPoller
               #[missionId, reason, nowIso]
             discard <| execParamQuery store.missionsDb
               "UPDATE remote_node_jobs SET state='lost', updated_at=?2 WHERE job_id=?1;" #[jobId, nowIso]
+            discard <| execParamQuery store.projectsDb
+              "UPDATE remote_jobs SET state='lost', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1;" #[jobId, nowIso]
             discard <| execParamQuery store.missionsDb
               "UPDATE missions SET status='failed', terminal_reason=?2, state_revision=state_revision+1, updated_at=?3 WHERE id=?1 AND status IN ('active','pending');"
               #[missionId, reason, nowIso]
@@ -1077,6 +1110,8 @@ partial def spawnRemoteJobPoller
               #[missionId, reason, nowIso]
             discard <| execParamQuery store.missionsDb
               "UPDATE remote_node_jobs SET state='lost', updated_at=?2 WHERE job_id=?1;" #[jobId, nowIso]
+            discard <| execParamQuery store.projectsDb
+              "UPDATE remote_jobs SET state='lost', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1;" #[jobId, nowIso]
             discard <| execParamQuery store.missionsDb
               "UPDATE missions SET status='interrupted', terminal_reason=?2, state_revision=state_revision+1, updated_at=?3 WHERE id=?1 AND status IN ('active','pending');"
               #[missionId, reason, nowIso]
@@ -1085,7 +1120,11 @@ partial def spawnRemoteJobPoller
           else if 200 ≤ jStatus && jStatus < 300 then
             consecNetErrors := 0
             let jv := jJv?.getD (.obj #[])
-            let jState := (jv.fieldStr? "state").getD "running"
+            let rawJState := ((jv.fieldStr? "state").getD "running").trimAscii.toString.toLower
+            let jState :=
+              if rawJState == "canceled" || rawJState == "aborted" then "cancelled"
+              else if rawJState == "completed" || rawJState == "terminal" then "succeeded"
+              else rawJState
             discard <| execParamQuery store.missionsDb
               "UPDATE mission_runs SET updated_at=?2 WHERE mission_id=?1 AND remote_job_id=?3 AND execution_state NOT IN ('terminal','completed','failed','aborted');"
               #[missionId, nowIso, jobId]
@@ -1104,6 +1143,12 @@ partial def spawnRemoteJobPoller
               let reason := "harness_no_output"
               let logTail := ((jv.fieldStr? "log_tail").getD "").trimAscii.toString
               let detail := acc.lastError?.getD (if logTail.isEmpty then "" else (logTail.takeEnd 600).toString)
+              discard <| execParamQuery store.missionsDb
+                "UPDATE remote_node_jobs SET state='cancelled', updated_at=?2 WHERE job_id=?1;"
+                #[jobId, nowIso]
+              discard <| execParamQuery store.projectsDb
+                "UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1;"
+                #[jobId, nowIso]
               discard <| execParamQuery store.missionsDb
                 "UPDATE mission_runs SET execution_state='terminal', terminal_reason=?2, updated_at=?3 WHERE mission_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted');"
                 #[missionId, reason, nowIso]
@@ -1215,18 +1260,27 @@ partial def spawnRemoteJobPoller
                   if jState == "succeeded" && finalText.isEmpty then
                     settleEmptyTurn store broadcastHub? missionId nowIso nowSec
                   else pure none
+                let mut curTermReason := ""
+                if let .ok trRows ← execParamQuery store.missionsDb
+                    "SELECT COALESCE(terminal_reason,'') FROM missions WHERE id=?1 LIMIT 1;" #[missionId] then
+                  if trRows.size > 1 then
+                    curTermReason := (cell trRows[1]! 0).trimAscii.toString
+                let isProvErr := curTermReason == "provider_error" || (nodeErr?.map (· == "provider_error")).getD false
                 let nextMissionStatus :=
                   if let some verdict := emptyVerdict? then verdict
                   else if jState == "succeeded" then
                     if armedWakeups > 0 then "awaiting_user" else "completed"
-                  else if jState == "cancelled" then "cancelled"
+                  else if jState == "cancelled" then
+                    if isProvErr then "interrupted" else "cancelled"
                   else "failed"
                 discard <| execParamQuery store.missionsDb
                   ("UPDATE missions SET status=?2, terminal_reason=?3, state_revision=state_revision+1, updated_at=?4 " ++
                    "WHERE id=?1 AND status NOT IN ('cancelled','interrupted');")
                   #[missionId, nextMissionStatus,
                     if emptyVerdict?.isSome then (if nextMissionStatus == "failed" then "empty_turn" else "empty_turn_retry")
-                    else if nextMissionStatus == "awaiting_user" then "awaiting_wakeup" else termReason, nowIso]
+                    else if nextMissionStatus == "awaiting_user" then "awaiting_wakeup"
+                    else if jState == "cancelled" && isProvErr then "provider_error"
+                    else termReason, nowIso]
                 emitMissionEventAndBroadcast store broadcastHub? missionId "mission_status_changed"
                   (renderCompact (.obj #[("status", .str nextMissionStatus), ("content", .str finalText)])) nowIso
           else
@@ -1377,6 +1431,29 @@ def reattachActiveRemoteJobsOnStartup
     (sup : RemoteJobSupervisor)
     (coreWorkDir : String) : IO Nat := do
   ensureDurableJobsTableLocal store
+  let nowIso := formatEpochIso8601Utc (← nowEpoch)
+  if let .ok staleRows ← execParamQuery store.missionsDb
+      ("SELECT j.job_id, COALESCE(j.node_id,''), COALESCE(j.mission_id,'') " ++
+       "FROM remote_node_jobs j LEFT JOIN missions m ON m.id = j.mission_id " ++
+       "WHERE j.state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost') " ++
+       "AND (m.id IS NULL OR m.status NOT IN ('active','pending'));")
+      #[] then
+    for i in [1:staleRows.size] do
+      let srow := staleRows[i]!
+      let sjid := (cell srow 0).trimAscii.toString
+      let snid := (cell srow 1).trimAscii.toString
+      let smid := (cell srow 2).trimAscii.toString
+      if !sjid.isEmpty then
+        if !snid.isEmpty then
+          let effNode ← match ← resolveConcreteRemoteTargetNode mc? snid (if smid.isEmpty then none else some (store, smid)) with
+            | .ok n => pure n
+            | .error _ => pure snid
+          let hdrs := #[("x-sandboxed-cancel-actor", "core"), ("x-sandboxed-cancel-reason", "Mission inactive on Core startup")]
+          discard <| callRemoteNodeHttpOpt relayHub? mc? effNode "POST" s!"/jobs/{sjid}/cancel" (some (.obj #[])) hdrs 6000
+        discard <| execParamQuery store.missionsDb
+          "UPDATE remote_node_jobs SET state='cancelled', updated_at=?2 WHERE job_id=?1;" #[sjid, nowIso]
+        discard <| execParamQuery store.projectsDb
+          "UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1;" #[sjid, nowIso]
   let qRes ← execParamQuery store.missionsDb
     ("SELECT r.mission_id, COALESCE(NULLIF(r.remote_job_id,''), NULLIF(m.placement_job_id,''), ''), COALESCE(r.owner_actor_id,''), COALESCE(r.scope_unit,''), " ++
      "COALESCE(m.backend,'codex'), COALESCE(r.updated_at,'') " ++

@@ -463,6 +463,57 @@ def run (root : String) : IO Unit := do
         check (doc.fieldBool? "ok" == some false &&
           (doc.fieldOrNull "error").fieldStr? "code" == some "forbidden")
           s!"scoped role cannot use owner secret broker {role}/{tool}"
+    -- Project board contract: owner nomination, controller-only mutation, shared reads.
+    let emptyBoard ← call memberSession "read_project_board"
+    check (emptyBoard.fieldBool? "ok" == some true &&
+      (emptyBoard.fieldOrNull "result").fieldStr? "text" == some "") "board starts empty"
+    let boardText : JVal := .obj #[("text", .str "controller plan")]
+    let deniedBoard ← call memberSession "write_project_board" boardText
+    check (deniedBoard.fieldBool? "ok" == some false &&
+      (deniedBoard.fieldOrNull "error").fieldStr? "message" == some "not_project_controller") "non-controller cannot write board"
+    let (nominateStatus, _) ← send "PUT" "/api/projects/member-project/controller-mission" member
+      (.obj #[("mission_id", .str "member-mission")])
+    check (nominateStatus == 200) "owner sets project controller"
+    let writtenBoard ← call memberSession "write_project_board" boardText
+    check (writtenBoard.fieldBool? "ok" == some true &&
+      (writtenBoard.fieldOrNull "result").fieldStr? "updated_by_mission_id" == some "member-mission") "controller writes board"
+    let .ok () ← upsertMission store {
+      id := "board-reader", ownerUserId := "member", title := "board reader",
+      status := "awaiting_user", backend := "codex", modelOverride := "", workingDirectory := path,
+      project := "member-project", updatedAt := "2026-11-13T10:00:00Z" }
+      | throw (IO.userError "board reader fixture")
+    let (_, readerSession) ← send "POST" "/api/mcp/session" member
+      (.obj #[("mission_id", .str "board-reader"), ("role", .str "executor")])
+    let readerToken := (readerSession.fieldStr? "token").getD ""
+    let readBoard ← call readerToken "read_project_board"
+    check ((readBoard.fieldOrNull "result").fieldStr? "text" == some "controller plan") "second project mission reads board"
+    check ((← call readerToken "write_project_board" boardText).fieldBool? "ok" == some false) "reader cannot overwrite board"
+    let oversized : JVal := .obj #[("text", .str (String.ofList (List.replicate 8193 'é')))]
+    let tooLarge ← call memberSession "write_project_board" oversized
+    check ((tooLarge.fieldOrNull "error").fieldStr? "code" == some "board_too_large") "MCP board byte cap"
+    check ((← send "PUT" "/api/projects/member-project/board" member oversized).1 == 400) "REST board byte cap"
+    for method in #["GET", "PUT"] do
+      check ((← send method "/api/projects/admin-project/board" member boardText).1 == 404) "foreign board is not found"
+    check ((← send "PUT" "/api/projects/member-project/controller-mission" member
+      (.obj #[("mission_id", .str "admin-mission")])).1 == 404) "controller must belong to project"
+    let (_, projectBoardDetail) ← send "GET" "/api/projects/member-project" member
+    check (projectBoardDetail.fieldStr? "controller_mission_id" == some "member-mission" &&
+      (projectBoardDetail.fieldStr? "board_updated_at").isSome) "project detail includes board metadata"
+    check ((← send "PUT" "/api/projects/member-project/controller-mission" member
+      (.obj #[("mission_id", .null)])).1 == 200) "owner clears controller"
+    let createdController ← call memberSession "start_mission"
+      (.obj #[("title", .str "successor controller"), ("controller", .bool true),
+        ("remote_node_id", .str "managed-member-machine")])
+    let successorId := (createdController.fieldOrNull "result").fieldStr? "mission_id" |>.getD ""
+    check (createdController.fieldBool? "ok" == some true && !successorId.isEmpty) s!"MCP start_mission accepts controller: {renderCompact createdController}"
+    let (_, successorBoard) ← send "GET" "/api/projects/member-project/board" member
+    check (successorBoard.fieldStr? "controller_mission_id" == some successorId) "MCP creation nominates controller"
+    let (restControllerStatus, restController) ← send "POST" "/api/control/missions" member
+      (.obj #[("title", .str "REST controller"), ("backend", .str "codex"),
+        ("project", .str "member-project"), ("placement", .str "client"), ("controller", .bool true)])
+    check (restControllerStatus == 201) s!"REST creation accepts controller: {restControllerStatus} {renderCompact restController}"
+    let (_, restBoard) ← send "GET" "/api/projects/member-project/board" member
+    check (restBoard.fieldStr? "controller_mission_id" == restController.fieldStr? "id") "REST creation nominates controller"
     -- Members can request the plan's dev-only pass for their OWN mission. It
     -- still requires a separately approved live lease and never exposes host
     -- audit or generic privilege tokens. Dashboard role labels cannot redeem it.
@@ -540,6 +591,20 @@ def run (root : String) : IO Unit := do
       (.obj #[("mission_id", .str "admin-mission"), ("role", .str "operator")])
     let sharedToken := (sharedDoc.fieldStr? "token").getD ""
     check (sharedStatus == 200 && !sharedToken.isEmpty) "shared session minted"
+    -- A same-name owned project must not authorize access to a shared mission's foreign board.
+    sql store.projectsDb "INSERT INTO projects(slug,name) VALUES('member:admin-project','shadow');"
+    sql store.projectsDb "INSERT INTO project_owners(slug,owner_user_id) VALUES('member:admin-project','member');"
+    sql store.projectsDb "UPDATE projects SET controller_mission_id='admin-mission' WHERE slug='admin-project';"
+    sql store.projectsDb "INSERT INTO project_board(slug,text,updated_at) VALUES('admin-project','private-admin-board','now');"
+    for tool in #["read_project_board", "write_project_board"] do
+      let collision ← call sharedToken tool (.obj #[("text", .str "unauthorized")])
+      check ((collision.fieldOrNull "error").fieldStr? "code" == some "not_found" &&
+        ((renderCompact collision).splitOn "private-admin-board").length == 1) "same-name project cannot authorize foreign board"
+    let .ok boardRows ← execParamQuery store.projectsDb "SELECT text FROM project_board WHERE slug='admin-project';" #[]
+      | throw (IO.userError "board collision verification")
+    check (boardRows[1]? == some #["private-admin-board"]) "foreign board survives same-name project write"
+    sql store.projectsDb "DELETE FROM project_owners WHERE slug='member:admin-project';"
+    sql store.projectsDb "DELETE FROM projects WHERE slug='member:admin-project';"
     check ((← call sharedToken "get_mission" foreign).fieldBool? "ok" == some true) "participant may read shared mission"
     check ((← call sharedToken "resume_mission" foreign).fieldBool? "ok" == some false)
       "shared session cannot acquire owner mutation rights"

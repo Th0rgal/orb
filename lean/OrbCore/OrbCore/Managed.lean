@@ -419,12 +419,12 @@ def isKnownProvider (provider : String) : Bool :=
   knownProviders.any (· == c)
 
 /-- Provider used when a caller names none (`auto-managed[:size]`, `spawn_managed_machine` without
-    `provider`). `SANDBOXED_MANAGED_DEFAULT_PROVIDER` selects it (for example `leanci`); unset or
-    unknown values keep `boat`. An explicit provider in the request always wins. -/
+    `provider`). `SANDBOXED_MANAGED_DEFAULT_PROVIDER` selects it (for example `boat`); unset or
+    unknown values keep `leanci`. An explicit provider in the request always wins. -/
 def defaultManagedProviderOf (raw? : Option String) : String :=
   match (raw?.map canonicalizeProvider).filter (!·.isEmpty) with
-  | some p => if isKnownProvider p then p else "boat"
-  | none => "boat"
+  | some p => if isKnownProvider p then p else "leanci"
+  | none => "leanci"
 
 def defaultManagedProvider : IO String := do
   return defaultManagedProviderOf (← IO.getEnv "SANDBOXED_MANAGED_DEFAULT_PROVIDER")

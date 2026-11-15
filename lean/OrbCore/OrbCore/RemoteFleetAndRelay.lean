@@ -1841,8 +1841,33 @@ def dispatchRemoteFleetAndRelayRoutes?
       let jid := segs[2]!
       let act := segs[3]!
       let nextState := if act == "cancel" then "cancelled" else "running"
+      if act == "cancel" then
+        let mut targetNode := ""
+        if let .ok rows ← execParamQuery store.missionsDb
+            "SELECT COALESCE(node_id,'') FROM remote_node_jobs WHERE job_id=?1 LIMIT 1;" #[jid] then
+          if rows.size > 1 then
+            targetNode := (cell rows[1]! 0).trimAscii.toString
+        if targetNode.isEmpty then
+          if let .ok pRows ← execParamQuery store.projectsDb
+              "SELECT COALESCE(node_id,'') FROM remote_jobs WHERE job_id=?1 LIMIT 1;" #[jid] then
+            if pRows.size > 1 then
+              targetNode := (cell pRows[1]! 0).trimAscii.toString
+        if !targetNode.isEmpty && targetNode != "local" && targetNode != "client" then
+          let hdrs := #[
+            ("x-sandboxed-cancel-actor", "core"),
+            ("x-sandboxed-cancel-reason", "Durable job cancelled via API")
+          ]
+          let (_, staticNodes) ← loadStaticRemoteNodes
+          if let some sn := staticNodes.find? (fun n => n.id == targetNode) then
+            if let some tok ← resolveStaticNodeToken? sn then
+              discard <| sendJsonRequest "POST" s!"{sn.baseUrl}/jobs/{jid}/cancel" (some tok) (some (.obj #[])) hdrs 10000
+          else
+            discard <| callRemoteNodeHttp hub? mc targetNode "POST" s!"/jobs/{jid}/cancel" (some (.obj #[])) hdrs 10000
       discard <| execParamQuery store.missionsDb
         "UPDATE remote_node_jobs SET state=?2,updated_at=?3 WHERE job_id=?1;"
+        #[jid, nextState, nowIso]
+      discard <| execParamQuery store.projectsDb
+        "UPDATE remote_jobs SET state=?2, heartbeat_at=?3, finished_at=CASE WHEN ?2 IN ('succeeded','failed','cancelled','lost') THEN COALESCE(finished_at,?3) ELSE finished_at END, updated_at=?3 WHERE job_id=?1;"
         #[jid, nextState, nowIso]
       return some (jsonResp 200 (.obj #[("ok", .bool true), ("job_id", .str jid), ("state", .str nextState)]))
 

@@ -434,6 +434,8 @@ def missionsAdditiveAlters : Array String := #[
 ]
 
 def projectsAdditiveAlters : Array String := #[
+  "CREATE TABLE IF NOT EXISTS project_board(slug TEXT PRIMARY KEY, text TEXT NOT NULL, updated_at TEXT NOT NULL, updated_by_mission_id TEXT);",
+  "ALTER TABLE projects ADD COLUMN controller_mission_id TEXT;",
   "ALTER TABLE projects ADD COLUMN slug TEXT;",
   "ALTER TABLE projects ADD COLUMN id TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE projects ADD COLUMN name TEXT NOT NULL DEFAULT '';",

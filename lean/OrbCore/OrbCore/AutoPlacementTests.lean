@@ -175,9 +175,10 @@ private def userAdmissionTests : IO Unit := do
 def run (root : String) : IO Unit := do
   userAdmissionTests
   -- The instance default provider applies only when the request names none.
-  check (defaultManagedProviderOf none == "boat" && defaultManagedProviderOf (some "lean.ci") == "leanci" &&
-    defaultManagedProviderOf (some " LeanCI ") == "leanci" && defaultManagedProviderOf (some "nope") == "boat")
-    "default managed provider: unset or unknown keeps boat, lean.ci is canonicalized"
+  check (defaultManagedProviderOf none == "leanci" && defaultManagedProviderOf (some "lean.ci") == "leanci" &&
+    defaultManagedProviderOf (some " LeanCI ") == "leanci" && defaultManagedProviderOf (some "boat") == "boat" &&
+    defaultManagedProviderOf (some "nope") == "leanci")
+    "default managed provider: unset or unknown keeps leanci, lean.ci is canonicalized"
   check ((parseAutoManagedTarget "auto-managed").toOption == some (none, none) &&
     (parseAutoManagedTarget "auto-managed:large").toOption == some (none, some "large") &&
     (parseAutoManagedTarget " Auto-Managed:Lean.CI ").toOption == some (some "leanci", none) &&

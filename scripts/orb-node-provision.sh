@@ -70,6 +70,91 @@ install -d -m 1777 -o orbnode -g orbnode /tmp/opencode
 mkdir -p /etc/tmpfiles.d
 printf '%s\n' 'd /tmp/opencode 1777 orbnode orbnode -' > /etc/tmpfiles.d/orb-opencode.conf
 
+# Bare provider guests (lean.ci Ubuntu 26.04 rootfs, Colab runtimes) do not use
+# Boat's pre-baked orb-node-base image: install pinned CLI harnesses and expose
+# /opt/elan at /opt/orb/elan when absent so remote opencode/claude/codex turns
+# and Lean builds succeed without exit 127. On Boat's orb-node-base image these
+# paths already exist and this block is a fast no-op.
+TOOLS_DIR=/opt/sandboxed-tools
+OPENCODE_VERSION=1.19.3
+OPENCODE_URL=https://github.com/anomalyco/opencode/releases/download/v$OPENCODE_VERSION/opencode-linux-x64-baseline.tar.gz
+OPENCODE_SHA256=531cff2441129c30f0edd5878af494108ad07f5feb46d7ee29a2a5b830a5765d
+CLAUDE_VERSION=2.1.322
+CLAUDE_URL=https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-$CLAUDE_VERSION.tgz
+CLAUDE_SHA256=3cc175d82980c20ab66057d345bd2d913244f8cf1791d10722a1225214b57219
+CODEX_VERSION=0.166.0
+CODEX_URL=https://registry.npmjs.org/@openai/codex/-/codex-$CODEX_VERSION-linux-x64.tgz
+CODEX_SHA256=cbc00a26d3d0e2ceefc4be8891f8a81ef1e349b3b175bc0ae308762bc001fd93
+
+verify_sha256() {
+  local got
+  got=$(sha256sum "$1" | cut -d' ' -f1)
+  [[ $got == "$2" ]] || { printf 'sha256 mismatch for %s: expected %s, got %s\n' "$1" "$2" "$got" >&2; exit 1; }
+}
+
+fetch_pinned() {
+  curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 --max-time 60 "$1" -o "$3"
+  verify_sha256 "$3" "$2"
+}
+
+if [[ ! -x /opt/orb/bin/opencode || ! -x /opt/orb/bin/claude || ! -x /opt/orb/bin/codex ]]; then
+  dl_dir=$(mktemp -d /tmp/.orb-tools.XXXXXX)
+  trap 'rm -rf "$dl_dir"' EXIT
+  install -d -m 0755 "$TOOLS_DIR"
+  if [[ ! -x /opt/orb/bin/opencode ]]; then
+    oc_dir=$TOOLS_DIR/opencode/$OPENCODE_VERSION
+    if [[ ! -x $oc_dir/opencode ]]; then
+      fetch_pinned "$OPENCODE_URL" "$OPENCODE_SHA256" "$dl_dir/opencode.tgz"
+      install -d -m 0755 "$oc_dir"
+      tar -xzf "$dl_dir/opencode.tgz" -C "$oc_dir" --no-same-owner opencode
+      chmod 0755 "$oc_dir/opencode"
+    fi
+    ln -sfn "$oc_dir/opencode" /opt/orb/bin/opencode
+  fi
+  if [[ ! -x /opt/orb/bin/claude ]]; then
+    cl_dir=$TOOLS_DIR/claude/$CLAUDE_VERSION
+    if [[ ! -x $cl_dir/claude ]]; then
+      fetch_pinned "$CLAUDE_URL" "$CLAUDE_SHA256" "$dl_dir/claude.tgz"
+      install -d -m 0755 "$cl_dir"
+      tar -xzf "$dl_dir/claude.tgz" -C "$cl_dir" --strip-components=1 --no-same-owner package/claude
+      chmod 0755 "$cl_dir/claude"
+    fi
+    ln -sfn "$cl_dir/claude" /opt/orb/bin/claude
+  fi
+  if [[ ! -x /opt/orb/bin/codex ]]; then
+    cx_dir=$TOOLS_DIR/codex/$CODEX_VERSION
+    if [[ ! -x $cx_dir/vendor/x86_64-unknown-linux-musl/bin/codex ]]; then
+      fetch_pinned "$CODEX_URL" "$CODEX_SHA256" "$dl_dir/codex.tgz"
+      install -d -m 0755 "$cx_dir"
+      tar -xzf "$dl_dir/codex.tgz" -C "$cx_dir" --strip-components=1 --no-same-owner
+      chmod -R a+rX,go-w "$cx_dir"
+    fi
+    cat > /opt/orb/bin/codex <<EOF
+#!/bin/sh
+V=$cx_dir/vendor/x86_64-unknown-linux-musl
+PATH="\$V/codex-path:\$PATH" CODEX_MANAGED_BY_NPM=1 exec "\$V/bin/codex" "\$@"
+EOF
+    chmod 0755 /opt/orb/bin/codex
+  fi
+  rm -rf "$dl_dir"
+  trap - EXIT
+fi
+
+# lean.ci pre-installs elan at /opt/elan instead of /opt/orb/elan. Link it into
+# /opt/orb/elan and /opt/orb/bin when /opt/orb/elan/toolchains is absent.
+if [[ ! -d /opt/orb/elan/toolchains && -d /opt/elan/toolchains ]]; then
+  ln -sfn /opt/elan /opt/orb/elan
+  for b in /opt/elan/bin/*; do
+    [[ -x $b ]] || continue
+    n=$(basename "$b")
+    [[ -e /opt/orb/bin/$n ]] || ln -sfn "$b" "/opt/orb/bin/$n"
+  done
+fi
+
+if [[ -x /opt/orb/bin/sandboxed-mcp && ! -e /usr/local/bin/sandboxed-mcp ]]; then
+  ln -sfn /opt/orb/bin/sandboxed-mcp /usr/local/bin/sandboxed-mcp
+fi
+
 # lean.ci guests: the provider writes its cache settings for its own `runner`
 # user (public values in /etc/profile.d/boost-vm.sh, the VM-scoped cache token in
 # /home/runner/.boost-env; both are the provider's file names). Jobs run as
@@ -100,10 +185,11 @@ if [[ ! -d /run/systemd/system ]]; then
 #!/usr/bin/env bash
 set -u
 umask 022
-node_env=(HOME=/var/lib/orb-node "PATH=/opt/orb/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
-  SANDBOXED_NODE_WORK_DIR=/var/lib/orb-node/work SANDBOXED_NODE_CREDENTIAL_FILE=/var/lib/orb-node/node.cred
-  SANDBOXED_NODE_BIND=127.0.0.1:3088 OPENCODE_TMPDIR=/tmp/opencode GIT_TERMINAL_PROMPT=0
-  SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt SSL_CERT_DIR=/etc/ssl/certs)
+  node_env=(HOME=/var/lib/orb-node "PATH=/opt/orb/bin:/opt/elan/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+    SANDBOXED_NODE_WORK_DIR=/var/lib/orb-node/work SANDBOXED_NODE_CREDENTIAL_FILE=/var/lib/orb-node/node.cred
+    SANDBOXED_NODE_BIND=127.0.0.1:3088 OPENCODE_TMPDIR=/tmp/opencode GIT_TERMINAL_PROMPT=0
+    DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_AUTOUPDATE=1 CODEX_DISABLE_UPDATE_CHECK=1 NO_UPDATE_NOTIFIER=1
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt SSL_CERT_DIR=/etc/ssl/certs)
 while IFS= read -r line; do
   [[ $line =~ ^([A-Z0-9_]+)=\"([^\"\\]*)\"$ ]] && node_env+=("${BASH_REMATCH[1]}=${BASH_REMATCH[2]}")
 done < /etc/orb/enroll.env
@@ -157,7 +243,7 @@ User=orbnode
 Group=orbnode
 WorkingDirectory=/var/lib/orb-node
 Environment=HOME=/var/lib/orb-node
-Environment=PATH=/opt/orb/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/opt/orb/bin:/opt/elan/bin:/usr/local/bin:/usr/bin:/bin
 NoNewPrivileges=true
 Restart=on-failure
 RestartSec=2
@@ -175,6 +261,10 @@ Environment=SANDBOXED_NODE_CREDENTIAL_FILE=/var/lib/orb-node/node.cred
 Environment=SANDBOXED_NODE_BIND=127.0.0.1:3088
 Environment=OPENCODE_TMPDIR=/tmp/opencode
 Environment=GIT_TERMINAL_PROMPT=0
+Environment=DISABLE_AUTOUPDATER=1
+Environment=CLAUDE_CODE_DISABLE_AUTOUPDATE=1
+Environment=CODEX_DISABLE_UPDATE_CHECK=1
+Environment=NO_UPDATE_NOTIFIER=1
 # The node links a static OpenSSL whose built-in CA directory does not exist in the
 # guest; without the system bundle it cannot verify Core and never enrols.
 Environment=SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt

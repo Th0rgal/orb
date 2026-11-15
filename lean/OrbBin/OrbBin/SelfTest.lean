@@ -1096,6 +1096,11 @@ def runAllTests : IO UInt32 := do
           assertTrue s!"Catalog {role} managed description includes {term}" ((desc.splitOn term).length > 1)
       let some start := tools.find? (·.fieldStr? "name" == some "start_mission")
         | throw <| IO.userError s!"Missing start_mission for {role}"
+      assertEq s!"Catalog {role} controller is optional boolean"
+        ((((start.fieldOrNull "inputSchema").fieldOrNull "properties").fieldOrNull "controller").fieldStr? "type") (some "boolean")
+      for name in ["read_project_board", "write_project_board"] do
+        assertTrue s!"Catalog {role} includes {name}" (tools.any (·.fieldStr? "name" == some name))
+      assertTrue "Project board writes are mutating" (OrbBin.McpCatalog.isMutatingControlTool "write_project_board")
       let remote := ((start.fieldOrNull "inputSchema").fieldOrNull "properties").fieldOrNull "remote_node_id"
       assertTrue s!"Catalog {role} provider-qualified managed placement"
         ((((remote.fieldStr? "description").getD "").splitOn "auto-managed:<provider>:<size>").length > 1)
