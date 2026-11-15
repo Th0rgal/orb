@@ -154,8 +154,11 @@ def run(api, admin, expected_sha):
         expect("foreign_project_mutation", api.call("POST", "/api/projects/" + marker + "/status", member,
                                                     {"status": "archived"}), {200, 403, 404})
         projects.append((member, marker))  # Remove any harmless namespaced alias created by that probe.
-        for tail in ["controller", "crons", "crons/synthetic-absent-job"]:
-            expect("owner_scheduler_" + tail, api.call("GET", "/api/projects/" + marker + "/" + tail, member), {403})
+        for tail, body in [("controller", {"job": None}), ("crons", {"jobs": []})]:
+            expect("empty_scheduler_" + tail, api.call("GET", "/api/projects/" + marker + "/" + tail, member), {200},
+                   lambda doc, body=body: doc == body)
+        expect("removed_scheduler", api.call("GET", "/api/projects/" + marker + "/crons/synthetic-absent-job", member),
+               {410}, lambda doc: doc == {"error": "removed"})
         foreign = {"mission_id": admin_mid, "message": "isolation probe", "prompt": "isolation probe",
                    "delay_seconds": 60, "role": "operator", "owner_user_id": "admin"}
         for role in [None, "executor", "coordinator", "operator"]:
@@ -171,7 +174,7 @@ def run(api, admin, expected_sha):
                          "cancel_mission", "resume_mission", "schedule_wakeup"]:
                 expect("mcp_" + (role or "dashboard") + "_" + tool, api.mcp(bearer, tool, foreign), {200},
                        lambda doc: isinstance(doc, dict) and doc.get("ok") is False)
-            for tool in ["get_project", "update_project_status", "add_project_steer"]:
+            for tool in ["get_project", "update_project_status"]:
                 expect("mcp_" + (role or "dashboard") + "_" + tool,
                        api.mcp(bearer, tool, {"project": marker, "status": "archived", "body": "isolation probe"}), {200},
                        lambda doc: isinstance(doc, dict) and doc.get("ok") is False)

@@ -362,18 +362,6 @@ theorem kill_m15_verifyApproval_criticalUnconfirmed :
 -- Family 6: Scheduling / resources (reservation capacity, TTL/boot epochs)
 -- ===========================================================================
 
-/-- Mutant 6.1 (`orb_verify_board_slots`): Off-by-one `≤` steals the boss's reserved slot. -/
-@[inline, export orb_mut_m16]
-def m16_verifyBoardSlots_stealsBossSlot
-    (maxParallel reservedBossSlots totalRunning : UInt32) : UInt8 :=
-  if reservedBossSlots ≥ 1 && reservedBossSlots < maxParallel &&
-     totalRunning ≤ maxParallel - reservedBossSlots then 1 else 0
-
-theorem kill_m16_verifyBoardSlots_stealsBossSlot :
-    m16_verifyBoardSlots_stealsBossSlot 4 1 3 ≠
-      verifyBoardSlots 4 1 3 := by
-  decide
-
 /-- Mutant 6.2 (`orb_schedule_step`): Fires cron tick while mission is mid-turn (`busy == 1` ignored). -/
 @[inline, export orb_mut_m17]
 def m17_scheduleStep_fireWhileBusy

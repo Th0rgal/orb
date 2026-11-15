@@ -93,11 +93,6 @@ def verifyContextOpCasMutantIgnoreBase
      ((basePresent == 0 && entryPresent ≤ 1) ||
       (basePresent == 1 && entryPresent == 1 && (entryRev == baseRev || entryRev + 1 == baseRev))) then 1 else 0
 
-/-- Mutant 10: Admits a board task even when an open task with the same key already exists! -/
-def verifyBoardTrackMutantDuplicate
-    (trackExists statusOk slotsOk retryOk duplicateOpen : UInt8) : UInt8 :=
-  if trackExists == 1 && statusOk == 1 && slotsOk == 1 && retryOk == 1 && duplicateOpen ≤ 1 then 1 else 0
-
 /-- Mutant 11: Executes a deploy after the live lease epoch diverges from the observed epoch! -/
 def verifyDeployRecheckMutantStaleLease
     (gateOk principalKind bunkerState : UInt8)
@@ -187,13 +182,6 @@ theorem context_op_kills_stale_base_mutant :
       verifyContextOpCasMutantIgnoreBase 1 1 1 1 1 7 8 1 1 ∧
     verifyContextOpCas 1 1 1 1 1 7 7 1 1 =
       verifyContextOpCasMutantIgnoreBase 1 1 1 1 1 7 7 1 1 := by
-  decide
-
-theorem board_track_kills_duplicate_mutant :
-    verifyBoardTrack 1 1 1 1 1 ≠
-      verifyBoardTrackMutantDuplicate 1 1 1 1 1 ∧
-    verifyBoardTrack 1 1 1 1 0 =
-      verifyBoardTrackMutantDuplicate 1 1 1 1 0 := by
   decide
 
 theorem deploy_recheck_kills_stale_lease_mutant :

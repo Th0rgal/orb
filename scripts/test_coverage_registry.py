@@ -16,7 +16,7 @@ class CoverageRegistryTests(unittest.TestCase):
     def test_inventory_roundtrip(self):
         registry.validate_registry(self.value)
         self.assertEqual(self.value["acceptance"], "INCOMPLETE")
-        self.assertEqual(self.value["total_exports"], 192)
+        self.assertEqual(self.value["total_exports"], 190)
         self.assertEqual(self.value["counts_by_status"], {"partial": 129, "unconnected": 63})
         self.assertTrue(all(e["blockers"] for e in self.value["entries"]))
 
@@ -103,8 +103,6 @@ class CoverageRegistryTests(unittest.TestCase):
                 "orb_verify_track_hold",
                 "orb_verify_repo_disjoint",
                 "orb_verify_remote_outbox",
-                "orb_verify_board_slots",
-                "orb_verify_board_retry",
                 "orb_verify_job_transition",
                 "orb_wire_verify_slice_io",
                 "orb_wire_encode_slice_step",

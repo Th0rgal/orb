@@ -148,50 +148,6 @@
       ]
     },
     {
-      "name": "orb_verify_board_slots",
-      "ret": "uint8_t",
-      "params": [
-        {
-          "name": "maxParallel",
-          "type": "uint32_t"
-        },
-        {
-          "name": "reservedBossSlots",
-          "type": "uint32_t"
-        },
-        {
-          "name": "totalRunning",
-          "type": "uint32_t"
-        }
-      ]
-    },
-    {
-      "name": "orb_verify_board_retry",
-      "ret": "uint8_t",
-      "params": [
-        {
-          "name": "attempts",
-          "type": "uint32_t"
-        },
-        {
-          "name": "maxAttempts",
-          "type": "uint32_t"
-        },
-        {
-          "name": "requiresExternalRecovery",
-          "type": "uint8_t"
-        },
-        {
-          "name": "preflightMerged",
-          "type": "uint8_t"
-        },
-        {
-          "name": "retrySuppressed",
-          "type": "uint8_t"
-        }
-      ]
-    },
-    {
       "name": "orb_verify_job_transition",
       "ret": "uint8_t",
       "params": [

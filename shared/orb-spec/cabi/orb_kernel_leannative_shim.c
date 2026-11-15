@@ -20,8 +20,6 @@ extern uint64_t probe_orb_verify_lease_mode(uint64_t, uint64_t, uint64_t, uint64
 extern uint64_t probe_orb_verify_track_hold(uint64_t, uint64_t, uint64_t, uint64_t);
 extern uint64_t probe_orb_verify_repo_disjoint(uint64_t, uint64_t, uint64_t);
 extern uint64_t probe_orb_verify_remote_outbox(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-extern uint64_t probe_orb_verify_board_slots(uint64_t, uint64_t, uint64_t);
-extern uint64_t probe_orb_verify_board_retry(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 extern uint64_t probe_orb_verify_job_transition(uint64_t, uint64_t);
 extern uint64_t probe_orb_verify_bundle_budget(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 extern uint64_t probe_orb_verify_token_rotation(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -212,8 +210,6 @@ uint8_t orb_verify_lease_mode(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3) { 
 uint8_t orb_verify_track_hold(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3) { return (uint8_t)probe_orb_verify_track_hold((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3); }
 uint8_t orb_verify_repo_disjoint(uint8_t a0, uint8_t a1, uint8_t a2) { return (uint8_t)probe_orb_verify_repo_disjoint((uint64_t)a0, (uint64_t)a1, (uint64_t)a2); }
 uint8_t orb_verify_remote_outbox(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, uint8_t a5, uint8_t a6, uint8_t a7, uint8_t a8) { return (uint8_t)probe_orb_verify_remote_outbox((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5, (uint64_t)a6, (uint64_t)a7, (uint64_t)a8); }
-uint8_t orb_verify_board_slots(uint32_t a0, uint32_t a1, uint32_t a2) { return (uint8_t)probe_orb_verify_board_slots((uint64_t)a0, (uint64_t)a1, (uint64_t)a2); }
-uint8_t orb_verify_board_retry(uint32_t a0, uint32_t a1, uint8_t a2, uint8_t a3, uint8_t a4) { return (uint8_t)probe_orb_verify_board_retry((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4); }
 uint8_t orb_verify_job_transition(uint8_t a0, uint8_t a1) { return (uint8_t)probe_orb_verify_job_transition((uint64_t)a0, (uint64_t)a1); }
 uint8_t orb_verify_bundle_budget(uint8_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) { return (uint8_t)probe_orb_verify_bundle_budget((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4); }
 uint8_t orb_verify_token_rotation(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4) { return (uint8_t)probe_orb_verify_token_rotation((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4); }

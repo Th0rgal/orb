@@ -1,4 +1,4 @@
-running 101 tests
+running 99 tests
 test OrbCore.HostTests::shadow_state_observation_detects_independent_host_poststate_and_effect_divergences ... ok
 test OrbCore.HostTests::production_mission_control_gate_enforces_archive_lease_dedupe_and_codex_rollout ... ok
 test OrbCore.HostTests::mission_control_rejects_store_supersession_with_stale_caller_snapshot ... ok
@@ -52,8 +52,6 @@ test OrbCore.HostTests::lease_mode_precedence_table ... ok
 test OrbCore.HostTests::queued_followup_protects_assignment_without_claiming_execution ... ok
 test OrbCore.HostTests::unrecognised_repositories_prove_nothing ... ok
 test OrbCore.HostTests::remote_queue_reopen_fifo_cancel_and_receipts ... ok
-test OrbCore.HostTests::upsert_and_dep_flow_in_memory_store ... ok
-test OrbCore.HostTests::boss_terminal_status_classification ... ok
 test OrbCore.HostTests::terminal_outcome_is_first_wins ... ok
 test OrbCore.HostTests::orb_wire_zero_copy_slice_abi_alias_null_wasm32_and_no_partial_mutation ... ok
 test OrbCore.HostTests::subscription_cooldown_classifies_empty_chain_as_retryable ... ok
@@ -101,4 +99,4 @@ test OrbCore.HostTests::r8_stream_open_tail_cap_step_bounds_unclosed_fence_tail_
 test OrbCore.HostTests::r8_rtt_ewma_step_initializes_cold_start_and_smooths_samples ... ok
 test OrbCore.HostTests::r8_client_link_budget_step_preempts_p2_under_p0_or_degraded_rtt ... ok
 
-test result: ok. 101 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 99 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out

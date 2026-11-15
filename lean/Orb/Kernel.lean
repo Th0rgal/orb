@@ -72,28 +72,6 @@ def verifyRemoteOutbox
      (opKind != 0 && (hasJobId == 0 || deliveryAbandonable == 1)) then 1 else 0
 
 /--
-  Unboxed C-ABI Task Board Slot Reservation Gate (`orb_verify_board_slots`):
-  Verifies that `reservedBossSlots ≥ 1`, `reservedBossSlots < maxParallel`,
-  and `totalRunning < maxParallel - reservedBossSlots` so the boss always retains a reserved slot.
--/
-@[inline, export orb_verify_board_slots]
-def verifyBoardSlots (maxParallel reservedBossSlots totalRunning : UInt32) : UInt8 :=
-  if reservedBossSlots ≥ 1 && reservedBossSlots < maxParallel &&
-     totalRunning < maxParallel - reservedBossSlots then 1 else 0
-
-/--
-  Unboxed C-ABI Task Board Automatic Retry Gate (`orb_verify_board_retry`):
-  Verifies that `maxAttempts ≥ 1`, `attempts < maxAttempts`, `requiresExternalRecovery == 0`,
-  `preflightMerged == 0` (already-merged PRs park for boss review), and `retrySuppressed == 0`.
--/
-@[inline, export orb_verify_board_retry]
-def verifyBoardRetry
-    (attempts maxAttempts : UInt32)
-    (requiresExternalRecovery preflightMerged retrySuppressed : UInt8) : UInt8 :=
-  if maxAttempts ≥ 1 && attempts < maxAttempts &&
-     requiresExternalRecovery == 0 && preflightMerged == 0 && retrySuppressed == 0 then 1 else 0
-
-/--
   Unboxed C-ABI Node Job Lifecycle State Machine Gate (`orb_verify_job_transition`):
   State encoding: `0 = queued`, `1 = running`, `2 = succeeded`, `3 = failed`, `4 = cancelled`, `5 = lost`.
   - Terminal states (`2, 3, 4`) are absorbing.

@@ -38,6 +38,10 @@ MUTATION_FAMILIES = (
 )
 
 
+# Retiring the structured-board gate removes its dedicated scheduling mutant.
+MUTATION_MINIMUMS = {fam: 2 if fam == "scheduling_resources" else 3 for fam in MUTATION_FAMILIES}
+
+
 def canonical_hash(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -142,7 +146,7 @@ def qualifications_complete(report):
         return False
     families = report.get("mutation_families")
     if not isinstance(families, dict) or any(
-        families.get(fam, {}).get("killed", 0) < 3 or families.get(fam, {}).get("status") != "PASS"
+        families.get(fam, {}).get("killed", 0) < MUTATION_MINIMUMS[fam] or families.get(fam, {}).get("status") != "PASS"
         for fam in MUTATION_FAMILIES
     ):
         return False
@@ -349,8 +353,6 @@ DOMAIN_MUTANTS = (
      "Orb.MutantSuite.kill_m14_privdCommand_metacharBypass", [1, 0, 1, 0, 1, 0, 0, 0]),
     ("m15", "orb_mut_m15", "authorization", "orb_verify_approval",
      "Orb.MutantSuite.kill_m15_verifyApproval_criticalUnconfirmed", [1, 1, 1, 1, 1, 2, 0]),
-    ("m16", "orb_mut_m16", "scheduling_resources", "orb_verify_board_slots",
-     "Orb.MutantSuite.kill_m16_verifyBoardSlots_stealsBossSlot", [4, 1, 3]),
     ("m17", "orb_mut_m17", "scheduling_resources", "orb_schedule_step",
      "Orb.MutantSuite.kill_m17_scheduleStep_fireWhileBusy", [1, 1, 0, 0, 1, 1, 10, 20, 30]),
     ("m18", "orb_mut_m18", "scheduling_resources", "orb_route_argmin_step",
@@ -424,7 +426,7 @@ def public_export_functions(manifest):
     # `internal` also marks public-prefix steppers not exposed to mobile.
     # The roadmap includes those steppers; exclude only the compiler helper.
     functions = [f for f in manifest["functions"] if f["name"].startswith(("orb_", "leansys_"))]
-    if len(functions) != 191 or len(manifest["functions"]) != 192:
+    if len(functions) != 189 or len(manifest["functions"]) != 190:
         raise ValueError("public export inventory changed; qualify the new surface explicitly")
     return functions
 
@@ -879,7 +881,7 @@ for c in json.loads(Path(sys.argv[3]).read_text()):
         report["loop_alias_rc"] = {"status": "BLOCKED", "reason": str(error)}
         qualification_failed |= isinstance(error, (RowFailure, ValueError))
 
-    # 3. Scalar bit-flip & 39 Lean-witnessed domain mutants across all 13 roadmap families.
+    # 3. Scalar bit-flip & 38 Lean-witnessed domain mutants across all 13 roadmap families.
     report["mutation_checks"] = {}
     try:
         # Rename the real target, then interpose a bit-flipping forwarding shim.
@@ -951,7 +953,7 @@ for c in json.loads(Path(sys.argv[3]).read_text()):
                 family_counts[family]["mutants"].append(mut_id)
                 total_domain_killed += 1
         for fam, info in family_counts.items():
-            info["status"] = "PASS" if info["killed"] >= 3 and info["killed"] == info["total"] else "FAIL"
+            info["status"] = "PASS" if info["killed"] >= MUTATION_MINIMUMS[fam] and info["killed"] == info["total"] else "FAIL"
         report["mutation_families"] = family_counts
         report["total_domain_mutants_killed"] = total_domain_killed
     except Exception as e:

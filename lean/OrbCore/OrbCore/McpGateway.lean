@@ -476,11 +476,7 @@ def dispatchMcpToolCall
     callerProj := mission.project
   if (toolName == "read_project_board" || toolName == "write_project_board") && (callerMid.isEmpty || callerProj.isEmpty) then
     return mcpErr "no_project" "Mission has no project"
-  let projectTools := #["read_project_board", "write_project_board", "get_project", "get_situation", "update_project_status", "set_project_track",
-    "accept_project_track_evidence", "reopen_project_track", "accept_project_track", "invalidate_project_track_evidence",
-    "get_project_grant", "add_project_steer", "record_project_decision", "answer_project_decision",
-    "get_project_tasks", "board_status", "plan_project_tasks", "plan_tasks", "update_project_task",
-    "cancel_project_task", "review_task", "accept_task", "reject_task", "link_mission_to_project"]
+  let projectTools := #["read_project_board", "write_project_board", "get_project", "update_project_status", "get_project_grant", "link_mission_to_project"]
   let mut args := args
   if tenantScoped && projectTools.contains toolName then
     let raw := if toolName == "read_project_board" || toolName == "write_project_board" then callerProj
@@ -513,7 +509,7 @@ def dispatchMcpToolCall
 
   -- Idempotent replay for retried mutating MCP calls carrying `idempotency_key`
   let idemKeyTop := ((args.fieldStr? "idempotency_key").getD "").trimAscii.toString
-  if !idemKeyTop.isEmpty && toolName != "get_action" && toolName != "wait_actions" &&
+  if OrbBin.McpCatalog.isMutatingControlTool toolName && !idemKeyTop.isEmpty && toolName != "get_action" && toolName != "wait_actions" &&
      toolName != "reconcile_action" && toolName != "cancel_action" then
     let scope := actionScope claims callerUserId toolName
     if let some prevRes ← lookupMcpActionByRetryKey? store scope idemKeyTop then
@@ -1546,13 +1542,13 @@ def dispatchMcpToolCall
       else allProjs.filter (fun p => (p.fieldStr? "slug") == some claims.project)
     return mcpOk (.obj #[("projects", .arr filtered)])
 
-  | "get_project" | "get_situation" =>
+  | "get_project" =>
     let rawSlug := (args.fieldStr? "project").orElse (fun _ => args.fieldStr? "slug") |>.getD callerProj
     let slug ← match checkProjectScope claims rawSlug with
       | .ok s => pure s
       | .error e => return mcpErr "project_scope_violation" e
     if slug.isEmpty then return mcpErr "invalid_arguments" "missing project slug"
-    return mcpOk (← buildProjectSituationJVal store slug slug)
+    return mcpOk (← getProjectJVal store slug slug)
 
   | "update_project_status" =>
     let rawSlug := (args.fieldStr? "project").orElse (fun _ => args.fieldStr? "slug") |>.getD callerProj
@@ -1560,42 +1556,11 @@ def dispatchMcpToolCall
       | .ok s => pure s
       | .error e => return mcpErr "project_scope_violation" e
     let stVal := (args.fieldStr? "status").getD "active"
-    let modeVal := (args.fieldStr? "mode").getD ""
-    let nextAct := (args.fieldStr? "next_action").getD ""
-    let blk := (args.fieldStr? "blocker").getD ""
     discard <| upsertProjectRecord store slug slug slug "" stVal "" nowIso none
     discard <| execParamQuery store.projectsDb
-      "UPDATE projects SET status=?2, mode=COALESCE(NULLIF(?3,''),mode), next_action=COALESCE(NULLIF(?4,''),next_action), blocker=?5, updated_at=?6 WHERE slug=?1;"
-      #[slug, stVal, modeVal, nextAct, blk, nowIso]
-    return mcpOk (← buildProjectSituationJVal store slug slug)
-
-  | "set_project_track" =>
-    let rawSlug := (args.fieldStr? "project").orElse (fun _ => args.fieldStr? "slug") |>.getD callerProj
-    let slug ← match checkProjectScope claims rawSlug with
-      | .ok s => pure s
-      | .error e => return mcpErr "project_scope_violation" e
-    let trk := (args.fieldStr? "track").getD ""
-    let des := ((args.fieldStr? "desired_condition").orElse (fun _ => args.fieldStr? "desired_state")).getD ""
-    let stVal := (args.fieldStr? "status").getD "open"
-    let (code, raw) ← putProjectTrack store slug trk des stVal nowIso (args.fieldNat? "expected_revision")
-    if 200 ≤ code && code < 300 then
-      return mcpOk ((OrbBin.Json.parse raw).toOption.getD (.obj #[("ok", .bool true)]))
-    else
-      return mcpErr "track_error" raw
-
-  | "accept_project_track_evidence" | "reopen_project_track" | "accept_project_track" | "invalidate_project_track_evidence" =>
-    let rawSlug := (args.fieldStr? "project").orElse (fun _ => args.fieldStr? "slug") |>.getD callerProj
-    let slug ← match checkProjectScope claims rawSlug with
-      | .ok s => pure s
-      | .error e => return mcpErr "project_scope_violation" e
-    let trk := (args.fieldStr? "track").getD ""
-    let nextSt :=
-      if toolName == "accept_project_track" || toolName == "accept_project_track_evidence" then "accepted"
-      else "open"
-    discard <| execParamQuery store.projectsDb
-      "UPDATE project_tracks SET status=?3, state_revision=state_revision+1, updated_at=?4 WHERE (project_slug=?1 OR slug=?1) AND track=?2;"
-      #[slug, trk, nextSt, nowIso]
-    return mcpOk (.obj #[("ok", .bool true), ("project", .str slug), ("track", .str trk), ("status", .str nextSt)])
+      "UPDATE projects SET status=?2, updated_at=?3 WHERE slug=?1;"
+      #[slug, stVal, nowIso]
+    return mcpOk (← getProjectJVal store slug slug)
 
   | "get_project_grant" =>
     let rawSlug := (args.fieldStr? "project").orElse (fun _ => args.fieldStr? "slug") |>.getD callerProj
@@ -1603,83 +1568,6 @@ def dispatchMcpToolCall
       | .ok s => pure s
       | .error e => return mcpErr "project_scope_violation" e
     return mcpOk (← getProjectGrantJVal store slug slug)
-
-  | "add_project_steer" =>
-    let rawSlug := (args.fieldStr? "project").orElse (fun _ => args.fieldStr? "slug") |>.getD callerProj
-    let slug ← match checkProjectScope claims rawSlug with
-      | .ok s => pure s
-      | .error e => return mcpErr "project_scope_violation" e
-    let body := ((args.fieldStr? "body").orElse (fun _ => args.fieldStr? "message") |>.getD "")
-    match ← addProjectSteerJVal store slug body "mcp" nowIso with
-    | .ok sv => return mcpOk sv
-    | .error e => return mcpErr "invalid_arguments" e
-
-  | "record_project_decision" =>
-    let rawSlug := (args.fieldStr? "project").orElse (fun _ => args.fieldStr? "slug") |>.getD callerProj
-    let slug ← match checkProjectScope claims rawSlug with
-      | .ok s => pure s
-      | .error e => return mcpErr "project_scope_violation" e
-    match ← recordProjectDecisionJVal store slug args nowIso with
-    | .ok dv => return mcpOk dv
-    | .error e => return mcpErr "invalid_arguments" e
-
-  | "answer_project_decision" =>
-    let rawSlug := (args.fieldStr? "project").orElse (fun _ => args.fieldStr? "slug") |>.getD callerProj
-    let slug ← match checkProjectScope claims rawSlug with
-      | .ok s => pure s
-      | .error e => return mcpErr "project_scope_violation" e
-    let did := (args.fieldStr? "id").orElse (fun _ => args.fieldStr? "decision_id") |>.getD ""
-    let ans := (args.fieldStr? "answer").getD ""
-    match ← answerProjectDecisionJVal store slug did ans nowIso with
-    | .ok dv => return mcpOk dv
-    | .error e => return mcpErr "invalid_arguments" e
-
-  | "get_project_tasks" | "board_status" =>
-    let rawSlug := (args.fieldStr? "project").orElse (fun _ => args.fieldStr? "slug") |>.getD callerProj
-    let slug ← match checkProjectScope claims rawSlug with
-      | .ok s => pure s
-      | .error e => return mcpErr "project_scope_violation" e
-    let sit ← buildProjectSituationJVal store slug slug
-    return mcpOk (.obj #[("project", .str slug), ("tasks", (sit.field? "tasks").getD (.arr #[]))])
-
-  | "plan_project_tasks" | "plan_tasks" =>
-    let rawSlug := (args.fieldStr? "project").orElse (fun _ => args.fieldStr? "slug") |>.getD callerProj
-    let slug ← match checkProjectScope claims rawSlug with
-      | .ok s => pure s
-      | .error e => return mcpErr "project_scope_violation" e
-    let tasksArr := (args.fieldArr? "tasks").getD #[]
-    -- Validate the complete batch before writing. Task keys are global in the
-    -- old schema; an upsert must not overwrite another project's task.
-    for t in tasksArr do
-      let mid := (t.fieldStr? "mission_id").getD ""
-      let key := (t.fieldStr? "task_key").orElse (fun _ => t.fieldStr? "key") |>.getD ""
-      if let .error error ← validateProjectBoardTask store slug key mid callerUserId (!tenantScoped) then
-        return mcpErr error "Task unavailable"
-    for t in tasksArr do
-      let tKey ← match (t.fieldStr? "task_key").orElse (fun _ => t.fieldStr? "key") with | some k => pure k | none => newUuidV4
-      let trk := (t.fieldStr? "track").getD "default"
-      let mid := (t.fieldStr? "mission_id").getD ""
-      let stVal := (t.fieldStr? "status").getD "open"
-      if let .error error ← putProjectBoardTask store slug tKey trk mid stVal callerUserId (!tenantScoped) then
-        return mcpErr error "Task unavailable"
-    let sit ← buildProjectSituationJVal store slug slug
-    return mcpOk (.obj #[("ok", .bool true), ("tasks", (sit.field? "tasks").getD (.arr #[]))])
-
-  | "update_project_task" | "cancel_project_task" | "review_task" | "accept_task" | "reject_task" =>
-    let rawSlug := (args.fieldStr? "project").orElse (fun _ => args.fieldStr? "slug") |>.getD callerProj
-    let slug ← match checkProjectScope claims rawSlug with
-      | .ok s => pure s
-      | .error e => return mcpErr "project_scope_violation" e
-    let tKey := (args.fieldStr? "task_key").orElse (fun _ => args.fieldStr? "key") |>.getD ""
-    let nextSt :=
-      if toolName == "cancel_project_task" then "cancelled"
-      else if toolName == "accept_task" then "accepted"
-      else if toolName == "reject_task" then "open"
-      else if toolName == "review_task" then "in_review"
-      else ((args.fieldStr? "status").getD "done")
-    discard <| execParamQuery store.missionsDb
-      "UPDATE mission_board_tasks SET status=?3 WHERE project_slug=?1 AND task_key=?2;" #[slug, tKey, nextSt]
-    return mcpOk (.obj #[("ok", .bool true), ("task_key", .str tKey), ("status", .str nextSt)])
 
   -- Workspaces & Jobs
   | "list_workspaces" =>

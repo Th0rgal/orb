@@ -17,12 +17,6 @@ internal func orb_verify_repo_disjoint(_ handleRepoKnown: UInt8, _ targetRepoKno
 @_silgen_name("orb_verify_remote_outbox")
 internal func orb_verify_remote_outbox(_ opKind: UInt8, _ alreadyExists: UInt8, _ sameMission: UInt8, _ isCancelled: UInt8, _ isSuperseded: UInt8, _ sessionReady: UInt8, _ prUnsupported: UInt8, _ hasJobId: UInt8, _ deliveryAbandonable: UInt8) -> UInt8
 
-@_silgen_name("orb_verify_board_slots")
-internal func orb_verify_board_slots(_ maxParallel: UInt32, _ reservedBossSlots: UInt32, _ totalRunning: UInt32) -> UInt8
-
-@_silgen_name("orb_verify_board_retry")
-internal func orb_verify_board_retry(_ attempts: UInt32, _ maxAttempts: UInt32, _ requiresExternalRecovery: UInt8, _ preflightMerged: UInt8, _ retrySuppressed: UInt8) -> UInt8
-
 @_silgen_name("orb_verify_job_transition")
 internal func orb_verify_job_transition(_ fromState: UInt8, _ toState: UInt8) -> UInt8
 
