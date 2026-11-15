@@ -234,7 +234,7 @@ export default function App() {
     onCleanup(() => { disposed = true; stop?.(); });
   });
   createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);const stopDelegations=startClientDelegations(missions);onCleanup(stopDelegations);onCleanup(startLocalWakeups());});
-  const [selected, setSelected] = createSignal<string | null>((() => { const saved = readString("orb.selectedConversation"); return saved && (PAGES.has(saved) || /^(m|pf|c|pc|ps|sk|rm):/.test(saved)) ? settingsPageId(saved) : null; })());
+  const [selected, setSelected] = createSignal<string | null>((() => { const saved = readString("orb.selectedConversation"); return saved && (PAGES.has(saved) || /^(m|pf|ps|sk|rm):/.test(saved)) ? settingsPageId(saved) : null; })());
   createEffect(() => {
     const next = selected() ?? "";
     if (readString("orb.selectedConversation") !== next) {
