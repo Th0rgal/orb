@@ -6,6 +6,7 @@ import io
 import json
 from pathlib import Path
 import stat
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -276,6 +277,45 @@ class OrbEnvTest(unittest.TestCase):
             unit = (SCRIPT.parents[2] / f"deploy/systemd/{name}.service").read_text()
             self.assertIn("EnvironmentFile=/etc/orb/environments/core.env\n", unit)
             self.assertIn("ExecStartPre=/usr/local/libexec/orb-env check --base /etc/orb/environments/core.env --overlay /etc/orb/environments/", unit)
+
+    def test_installed_tool_loads_checked_in_policy_by_default(self):
+        installed = self.root / "usr/local/libexec"
+        installed.mkdir(parents=True)
+        tool = installed / "orb-env"
+        tool.write_bytes(SCRIPT.read_bytes())
+        tool.chmod(0o755)
+        classification = installed / "env-migration.json"
+        classification.write_bytes((SCRIPT.parent / "env-migration.json").read_bytes())
+        self.prod.write_bytes(self.prod.read_bytes() + b"MISSION_CPU_WEIGHT=80\nHERMES_TOKEN=private-prod-marker\n")
+        self.dev.write_bytes(self.dev.read_bytes() + b"CODEX_APP_SERVER_MODE=false\n")
+        command = [str(tool), "migrate", "--prod", str(self.prod), "--dev", str(self.dev),
+                   "--output", str(self.output)]
+        result = subprocess.run(command + ["--dry-run"], capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Migration validated (no files written)", result.stdout)
+        self.assertFalse(self.output.exists())
+        result = subprocess.run(command + ["--apply"], capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("private-prod-marker", result.stdout + result.stderr)
+        base = env.parse_env((self.output / "core.env").read_bytes())
+        self.assertEqual(base, {"LIBRARY_REMOTE": "repo", "MISSION_CPU_WEIGHT": "80"})
+        for name, source in (("prod", self.prod), ("dev", self.dev)):
+            overlay = env.parse_env((self.output / f"{name}.env").read_bytes())
+            expected = env.parse_env(source.read_bytes())
+            expected.update(ORB_INSTANCE=name, MISSION_CPU_WEIGHT="80")
+            self.assertEqual(base | overlay, expected)
+            self.assertEqual((self.output / f"backups/{name}.env").read_bytes(), source.read_bytes())
+            result = subprocess.run(
+                [str(tool), "check", "--base", str(self.output / "core.env"),
+                 "--overlay", str(self.output / f"{name}.env")],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        before = {path: path.read_bytes() for path in self.output.rglob("*") if path.is_file()}
+        result = subprocess.run(command + ["--apply"], capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("refusing to overwrite", result.stderr)
+        self.assertEqual(before, {path: path.read_bytes() for path in before})
 
 
 if __name__ == "__main__":

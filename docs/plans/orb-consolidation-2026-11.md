@@ -27,6 +27,19 @@ dev/prod), whose handoffs are at the top of their plan documents in this folder.
 
 ## Tracks
 
+### env-migration — repository handoff (15 Nov)
+
+The one-sided-key tooling is implemented on master (`b1166b8e`, #1784):
+`scripts/ops/env-migration.json` classifies 144 names, preserves instance-local
+authority and rejects unknown names before writes. The installed-tool regression
+in `scripts/test_orb_env.py` exercises default policy discovery, dry-run, apply,
+both startup checks, exact backups and overwrite refusal using synthetic inputs.
+See [the handoff](../operations/env-migrate-report.md), including **Deploy/apply
+on prod** commands. Repository delivery is complete; live inventory reconciliation,
+dev activation/verification and production activation remain operator-owned.
+The historical 65-name prod-only inventory is incomplete, so no claim of live
+86-key coverage or live migration success is made.
+
 ### A. turbo-lean builds all of Orb (blocks B)
 `turbo-lean` rejects `OrbBin.PosixExt` and `OrbCore.Store` in its in-kernel
 `.olean` soundness audit (PR #1708 CI), and missions report a "known
