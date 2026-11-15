@@ -1,12 +1,26 @@
 import type { AIProvider, ProviderUsage, SubscriptionResetGrant } from "./api";
 import type { AccountHealthSnapshot } from "./routingApi";
 
-export function codexWindowLabel(minutes: number | undefined, fallback: string) {
+export function codexWindowLabel(
+  minutes: number | undefined,
+  fallback: string,
+  otherMinutes?: number,
+  explicitLabel?: string,
+) {
+  const trimmed = explicitLabel?.trim();
+  if (trimmed) return trimmed;
   if (minutes == null) return fallback;
-  if (minutes === 10080) return "Weekly";
-  if (minutes >= 1440 && minutes % 1440 === 0) return `${minutes / 1440}d`;
-  if (minutes >= 60 && minutes % 60 === 0) return `${minutes / 60}h`;
-  return `${minutes}m`;
+  const base =
+    minutes === 10080
+      ? "Weekly"
+      : minutes >= 1440 && minutes % 1440 === 0
+        ? `${minutes / 1440}d`
+        : minutes >= 60 && minutes % 60 === 0
+          ? `${minutes / 60}h`
+          : `${minutes}m`;
+  return otherMinutes != null && otherMinutes > 0 && otherMinutes === minutes
+    ? `${base} (secondary)`
+    : base;
 }
 
 /** The array preserves provider-defined windows; scalar fields support older responses. */
@@ -50,9 +64,17 @@ export function usageWindows(u: ProviderUsage) {
   if (u.unified_5h_utilization != null) windows.push({ label: "5h", used: u.unified_5h_utilization });
   if (u.unified_7d_utilization != null) windows.push({ label: "7d", used: u.unified_7d_utilization });
   if (u.codex_primary_used_percent != null && u.codex_primary_window_minutes !== 0)
-    windows.push({ label: codexWindowLabel(u.codex_primary_window_minutes, "Primary"), used: u.codex_primary_used_percent / 100 });
+    windows.push({ label: codexWindowLabel(u.codex_primary_window_minutes, "Primary", undefined, u.codex_primary_window_label), used: u.codex_primary_used_percent / 100 });
   if (u.codex_secondary_used_percent != null && u.codex_secondary_window_minutes !== 0)
-    windows.push({ label: codexWindowLabel(u.codex_secondary_window_minutes, "Secondary"), used: u.codex_secondary_used_percent / 100 });
+    windows.push({
+      label: codexWindowLabel(
+        u.codex_secondary_window_minutes,
+        "Secondary",
+        u.codex_primary_used_percent != null ? u.codex_primary_window_minutes : undefined,
+        u.codex_secondary_window_label,
+      ),
+      used: u.codex_secondary_used_percent / 100,
+    });
   if (u.provider_type === "xai" && u.xai_credit_used_percent != null)
     windows.push({ label: u.xai_credit_label || "Credits", used: u.xai_credit_used_percent / 100 });
   if (u.provider_type === "kimi") windows.push(...kimiWindows(u).map(w => ({label: w.label, used: w.used_percent! / 100})));

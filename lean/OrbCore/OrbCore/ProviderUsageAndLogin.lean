@@ -709,6 +709,20 @@ private def buildOptimizeWindow
     ("reset_in_seconds", .null)
   ]
 
+/-- Pick the optimize window key with the lowest `pct_remaining` (matching `usage_optimize.rs`). -/
+def selectPrimaryOptimizeWindow (windows : Array JVal) : JVal := Id.run do
+  let mut bestKey? : Option String := none
+  let mut bestRem : Nat := 1000000
+  for w in windows do
+    let some k := w.fieldStr? "key" | continue
+    let rem := (w.fieldNat? "pct_remaining").getD 100
+    if bestKey?.isNone || rem < bestRem then
+      bestKey? := some k
+      bestRem := rem
+  match bestKey? with
+  | some k => .str k
+  | none => .null
+
 /-- Match the historical serde `as_i64` reset contract: integer JSON only,
     including zero/negative values, without wrapping values outside signed i64. -/
 private def codexResetEpoch? (window : JVal) : Option Int := do
@@ -717,6 +731,27 @@ private def codexResetEpoch? (window : JVal) : Option Int := do
   else if epoch > (9223372036854775807 : Int) then none
   else some epoch
 
+/-- Derive the `(key, label)` for a Codex optimize window from its reported duration in seconds,
+    matching the actual window length rather than assuming `primary = 5h`. -/
+private def codexOptimizeWindowKeyLabel (winSecs : Nat) (fallbackKey fallbackLabel : String) : String × String :=
+  let mins := winSecs / 60
+  if mins == 0 then (fallbackKey, fallbackLabel)
+  else if mins == 10080 then ("7d", "7-day")
+  else if mins >= 1440 && mins % 1440 == 0 then
+    let d := mins / 1440
+    (s!"{d}d", s!"{d}-day")
+  else if mins >= 60 && mins % 60 == 0 then
+    let h := mins / 60
+    (s!"{h}h", s!"{h}-hour")
+  else
+    (s!"{mins}m", s!"{mins}-minute")
+
+/-- Extract an optional human-readable window/limit name when upstream `wham/usage` provides one. -/
+private def codexWindowUpstreamLabel? (w : JVal) : Option String :=
+  let tryKey (k : String) : Option String :=
+    (w.fieldStr? k).map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+  tryKey "limit_name" <|> tryKey "label" <|> tryKey "name" <|> tryKey "title" <|> tryKey "window_name"
+
 /-- The production wham projection, kept pure so wire fixtures need no vendor calls.
     Scalar Codex fields and optimize-window fields have separate client contracts. -/
 def projectCodexUsage (wham : JVal) : Array (String × JVal) × Array JVal × JVal := Id.run do
@@ -724,8 +759,9 @@ def projectCodexUsage (wham : JVal) : Array (String × JVal) × Array JVal × JV
     ("codex_plan_type", .str ((wham.fieldStr? "plan_type").getD "pro")),
     ("codex_source", .str "usage")]
   let mut windows : Array JVal := #[]
-  let mut primary : JVal := .null
   if let some rl := wham.field? "rate_limit" then
+    let mut primaryBaseKey? : Option String := none
+    let mut primaryBaseLabel? : Option String := none
     if let some pw := rl.field? "primary_window" then
       let usedPct := match pw.field? "used_percent" with | some (.num n) => n | _ => "0"
       let resetEpoch? := codexResetEpoch? pw
@@ -736,8 +772,14 @@ def projectCodexUsage (wham : JVal) : Array (String × JVal) × Array JVal × JV
       fields := fields.push ("codex_primary_window_minutes", JVal.nat (winSecs / 60))
       if let some epoch := resetEpoch? then
         fields := fields.push ("codex_primary_reset_at", JVal.int epoch)
-      windows := windows.push (buildOptimizeWindow "5h" "5-hour" "used_pct" "codex_wham" usedPct winSecs (some resetIso))
-      primary := .str "5h"
+      let upstreamLbl? := codexWindowUpstreamLabel? pw
+      if let some lbl := upstreamLbl? then
+        fields := fields.push ("codex_primary_window_label", .str lbl)
+      let (baseKey, baseLabel) := codexOptimizeWindowKeyLabel winSecs "primary" "Primary"
+      primaryBaseKey? := some baseKey
+      primaryBaseLabel? := some baseLabel
+      let optLabel := upstreamLbl?.getD baseLabel
+      windows := windows.push (buildOptimizeWindow baseKey optLabel "used_pct" "codex_wham" usedPct winSecs (some resetIso))
     if let some sw := rl.field? "secondary_window" then
       let usedPct := match sw.field? "used_percent" with | some (.num n) => n | _ => "0"
       let resetEpoch? := codexResetEpoch? sw
@@ -748,8 +790,18 @@ def projectCodexUsage (wham : JVal) : Array (String × JVal) × Array JVal × JV
       fields := fields.push ("codex_secondary_window_minutes", JVal.nat (winSecs / 60))
       if let some epoch := resetEpoch? then
         fields := fields.push ("codex_secondary_reset_at", JVal.int epoch)
-      windows := windows.push (buildOptimizeWindow "7d" "7-day" "used_pct" "codex_wham" usedPct winSecs (some resetIso))
-  return (fields, windows, primary)
+      let upstreamLbl? := codexWindowUpstreamLabel? sw
+      if let some lbl := upstreamLbl? then
+        fields := fields.push ("codex_secondary_window_label", .str lbl)
+      let (baseKey, baseLabel) := codexOptimizeWindowKeyLabel winSecs "secondary" "Secondary"
+      let sameKey := primaryBaseKey? == some baseKey
+      let sameLabel := primaryBaseLabel? == some baseLabel
+      let optKey := if sameKey then s!"{baseKey}_secondary" else baseKey
+      let optLabel := match upstreamLbl? with
+        | some lbl => lbl
+        | none => if sameLabel then s!"{baseLabel} (secondary)" else baseLabel
+      windows := windows.push (buildOptimizeWindow optKey optLabel "used_pct" "codex_wham" usedPct winSecs (some resetIso))
+  return (fields, windows, selectPrimaryOptimizeWindow windows)
 
 /-- A JSON fraction (`1`, `0.9972415`, `2.5e-05`) as millionths, clamped to `[0, 1_000_000]`. -/
 def antigravityFractionMicros? (raw : String) : Option Nat := do
@@ -900,20 +952,6 @@ def anthropicModelWindows (usage : JVal) : Array JVal := Id.run do
       | some r => base.push ("reset_at", JVal.num (toString r))
       | none => base))
   return out
-
-/-- Pick the optimize window key with the lowest `pct_remaining` (matching `usage_optimize.rs`). -/
-def selectPrimaryOptimizeWindow (windows : Array JVal) : JVal := Id.run do
-  let mut bestKey? : Option String := none
-  let mut bestRem : Nat := 1000000
-  for w in windows do
-    let some k := w.fieldStr? "key" | continue
-    let rem := (w.fieldNat? "pct_remaining").getD 100
-    if bestKey?.isNone || rem < bestRem then
-      bestKey? := some k
-      bestRem := rem
-  match bestKey? with
-  | some k => .str k
-  | none => .null
 
 /-- Parse numeric or numeric-string JSON value into raw number string. -/
 private def jvalNumRaw? (v : JVal) : Option String :=

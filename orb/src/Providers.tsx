@@ -1099,9 +1099,9 @@ function UsageDetail(p: { usage: ProviderUsage; headerEmail?: string; planInHead
           <div class="p-detail-meta"><span>plan: {u().codex_plan_type}</span></div>
         </Show>
         <div class="provider-usage-row">
-          <Chip label={codexWindowLabel(u().codex_primary_window_minutes, "Primary window")} usedPct={u().codex_primary_used_percent ?? 0} reset={u().codex_primary_reset_at ? `reset ${fmtResetEpoch(u().codex_primary_reset_at!)}` : undefined} />
+          <Chip label={codexWindowLabel(u().codex_primary_window_minutes, "Primary window", undefined, u().codex_primary_window_label)} usedPct={u().codex_primary_used_percent ?? 0} reset={u().codex_primary_reset_at ? `reset ${fmtResetEpoch(u().codex_primary_reset_at!)}` : undefined} />
           <Show when={u().codex_secondary_used_percent != null && u().codex_secondary_window_minutes !== 0}>
-            <Chip label={codexWindowLabel(u().codex_secondary_window_minutes, "Secondary window")} usedPct={u().codex_secondary_used_percent ?? 0} reset={u().codex_secondary_reset_at ? `reset ${fmtResetEpoch(u().codex_secondary_reset_at!)}` : undefined} />
+            <Chip label={codexWindowLabel(u().codex_secondary_window_minutes, "Secondary window", u().codex_primary_window_minutes, u().codex_secondary_window_label)} usedPct={u().codex_secondary_used_percent ?? 0} reset={u().codex_secondary_reset_at ? `reset ${fmtResetEpoch(u().codex_secondary_reset_at!)}` : undefined} />
           </Show>
         </div>
       </Show>

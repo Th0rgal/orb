@@ -120,6 +120,29 @@ internal fun usageLimitStatus(detail: OrbDict?, nowSec: Double = System.currentT
     )
 }
 
+internal fun codexWindowLabel(
+    minutes: Double?,
+    fallback: String,
+    otherMinutes: Double? = null,
+    explicitLabel: String? = null
+): String {
+    val trimmed = explicitLabel?.trim()
+    if (!trimmed.isNullOrEmpty()) return trimmed
+    if (minutes == null || !minutes.isFinite() || minutes <= 0.0) return fallback
+    val mins = minutes.roundToInt()
+    val base = when {
+        mins == 10080 -> "Weekly"
+        mins >= 1440 && mins % 1440 == 0 -> "${mins / 1440}d"
+        mins >= 60 && mins % 60 == 0 -> "${mins / 60}h"
+        else -> "${mins}m"
+    }
+    return if (otherMinutes != null && otherMinutes.isFinite() && otherMinutes > 0.0 && otherMinutes.roundToInt() == mins) {
+        "$base (secondary)"
+    } else {
+        base
+    }
+}
+
 internal fun providerQuotaWindows(detail: OrbDict?): List<Pair<String, Double>> {
     if (detail == null) return emptyList()
     val result = mutableListOf<Pair<String, Double>>()
@@ -131,11 +154,25 @@ internal fun providerQuotaWindows(detail: OrbDict?): List<Pair<String, Double>> 
     }
     add("5h", "unified_5h_utilization", scale = 1.0)
     add("Weekly", "unified_7d_utilization", scale = 1.0)
-    if ((OrbJSON.double(detail, "codex_primary_window_minutes") ?: 0.0) != 0.0) {
-        add("Primary", "codex_primary_used_percent")
+    val primaryMins = OrbJSON.double(detail, "codex_primary_window_minutes")
+    val secondaryMins = OrbJSON.double(detail, "codex_secondary_window_minutes")
+    if ((primaryMins ?: 1.0) != 0.0) {
+        add(
+            codexWindowLabel(primaryMins, "Primary", explicitLabel = OrbJSON.str(detail, "codex_primary_window_label")),
+            "codex_primary_used_percent"
+        )
     }
-    if ((OrbJSON.double(detail, "codex_secondary_window_minutes") ?: 0.0) != 0.0) {
-        add("Secondary", "codex_secondary_used_percent")
+    if ((secondaryMins ?: 1.0) != 0.0) {
+        val otherMins = if (OrbJSON.double(detail, "codex_primary_used_percent") != null) primaryMins else null
+        add(
+            codexWindowLabel(
+                secondaryMins,
+                "Secondary",
+                otherMinutes = otherMins,
+                explicitLabel = OrbJSON.str(detail, "codex_secondary_window_label")
+            ),
+            "codex_secondary_used_percent"
+        )
     }
     add("Credits", "xai_credit_used_percent")
     val kimiWindows = OrbJSON.dictList(detail["kimi_windows"])
