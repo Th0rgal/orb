@@ -37,7 +37,7 @@ private def testDualStackConnectAndTls : IO Unit := do
   -- 9. Dual-stack address fallback with unroutable AAAA first -> routable A second:
   --    Wait on a local IPv4 listener while `LD_PRELOAD` resolves `dualstack-unroutable.test`
   --    to `[AF_INET6("2001:db8::1"), AF_INET("127.0.0.1")]`.
-  --    Even when `2001:db8::1` blackholes TCP SYNs (or an earlier address fails TCP/TLS handshake),
+  --    Even when the first IPv6 address has no route (or an earlier address fails TCP/TLS handshake),
   --    `tcpConnectTimed` and `httpsRequest` must try every resolved address with a short per-address
   --    connect timeout and fall back to IPv4 `127.0.0.1`.
   let .ok (dsListenFd, dsPort) ← tcpListen "127.0.0.1" 0 4
@@ -73,7 +73,7 @@ private def testDualStackConnectAndTls : IO Unit := do
   -- 10. Dual-stack TLS roundtrip (`httpsRequest`) with unroutable AAAA first -> routable A second:
   let certOut ← IO.Process.output {
     cmd := "openssl",
-    args := #["req", "-x509", "-newkey", "rsa:2048", "-keyout", s!"{preloadDir}/key.pem", "-out", s!"{preloadDir}/cert.pem", "-days", "1", "-nodes", "-subj", "/CN=dualstack-unroutable.test"]
+    args := #["req", "-x509", "-newkey", "rsa:2048", "-keyout", s!"{preloadDir}/key.pem", "-out", s!"{preloadDir}/cert.pem", "-days", "1", "-nodes", "-subj", "/CN=dualstack-unroutable.test", "-addext", "subjectAltName=DNS:dualstack-unroutable.test"]
   }
   assertTrue "generate self-signed TLS cert for dualstack-unroutable.test" (certOut.exitCode == 0)
   let tlsSrvPy := s!"{preloadDir}/tls_srv.py"
@@ -91,7 +91,7 @@ private def testDualStackConnectAndTls : IO Unit := do
   let tlsProbeOut ← IO.Process.output {
     cmd := selfExe.toString,
     args := #["--probe-dualstack-tls", tlsPort],
-    env := #[("LD_PRELOAD", some preloadSo)]
+    env := #[("LD_PRELOAD", some preloadSo), ("SSL_CERT_FILE", some s!"{preloadDir}/cert.pem")]
   }
   let tTls1 ← IO.monoMsNow
   let _ ← tlsChild.wait
@@ -113,7 +113,7 @@ def main (args : List String) : IO Unit := do
       throw (IO.userError s!"tcpConnectTimed failed: {e}")
   if let ["--probe-dualstack-tls", portStr] := args then
     let some portNat := portStr.toNat? | throw (IO.userError "bad port")
-    match ← httpsRequest "POST" "dualstack-unroutable.test" portNat.toUInt16 "/api/managed-machines/enroll" #[] ("{\"machine_id\":\"m1\"}".toUTF8) 4096 false 15000 with
+    match ← httpsRequest "POST" "dualstack-unroutable.test" portNat.toUInt16 "/api/managed-machines/enroll" #[] ("{\"machine_id\":\"m1\"}".toUTF8) 4096 true 15000 with
     | .ok resp =>
       let bodyStr := String.fromUTF8? resp.body |>.getD ""
       IO.println s!"{resp.status}:{bodyStr}"
