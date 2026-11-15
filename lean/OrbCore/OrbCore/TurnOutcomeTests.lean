@@ -179,6 +179,22 @@ def run : IO Unit := do
       check (sh.exitCode == 0 &&
              sh.stdout == "---\nname: lean-audit\n---\nAudit it's \"proofs\".\n# Long-running\nKeep checkpoints.\n# Proof\nCheck kernel.\n")
         s!"installed skill and references content: {sh.stdout} {sh.stderr}"
+      -- A Library whose references exceed the exec argument limit (the 2026-11-15 outage:
+      -- every node turn exited 127) still ships every SKILL.md, drops references that do not
+      -- fit, and keeps the prelude under the budget so `bash -lc` can exec.
+      for i in [0:12] do
+        IO.FS.createDirAll s!"{root}/library/skills/big-{i}/references"
+        IO.FS.writeFile s!"{root}/library/skills/big-{i}/SKILL.md" s!"---\nname: big-{i}\n---\n{String.mk (List.replicate 2000 'a')}\n"
+        IO.FS.writeFile s!"{root}/library/skills/big-{i}/references/ref.md" (String.mk (List.replicate 20000 'r'))
+      let bigPrelude ← OrbCore.Skills.remoteInstallPrelude root none "opencode" "" "" ""
+      check (bigPrelude.utf8ByteSize ≤ OrbCore.Skills.remoteSkillTotalBytes)
+        s!"skill prelude fits the exec argument budget: {bigPrelude.utf8ByteSize} bytes"
+      check ((List.range 12).all fun i => (bigPrelude.splitOn s!"'.opencode/skills/big-{i}/SKILL.md'").length > 1)
+        "every SKILL.md ships before any reference file"
+      check ((bigPrelude.splitOn "references/ref.md").length - 1 < 12)
+        "references that do not fit are dropped"
+      let bigSh ← IO.Process.output { cmd := "/bin/bash", args := #["-lc", bigPrelude ++ "true"], cwd := some ws }
+      check (bigSh.exitCode == 0) s!"bash -lc runs the bounded prelude: {bigSh.exitCode} {bigSh.stderr}"
     finally
       closeCoreStore store
   finally
