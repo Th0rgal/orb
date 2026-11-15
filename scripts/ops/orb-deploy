@@ -67,14 +67,17 @@ git fetch --quiet origin master
 SHA="$(git rev-parse --verify "$REF^{commit}")"
 say "deploy $SHA (dev${DEV_ONLY:+ only=$DEV_ONLY})"
 git checkout --quiet --force --detach "$SHA"
-git clean -fdq -- lean/OrbCore/OrbCore lean/OrbBin/OrbBin lean/Orb   # stale untracked sources only; build caches are ignored files
+git clean -fdq -- lean/OrbCore/OrbCore lean/OrbNode/OrbNode lean/OrbBin/OrbBin lean/Orb   # stale untracked sources only; build caches are ignored files
 
 say "build"
 (cd lean/OrbCore && lake build orb-core orb-core-test orb-spec-runner -- -DwarningAsError=true) | tail -4
+(cd lean/OrbNode && lake build orb-node orb-node-test -- -DwarningAsError=true) | tail -4
 say "self-test"
 ./lean/OrbCore/.lake/build/bin/orb-core-test | tail -1
+./lean/OrbNode/.lake/build/bin/orb-node-test | tail -1
 BIN="$TREE/lean/OrbCore/.lake/build/bin/orb-core"
-say "binary $(sha256sum "$BIN" | cut -c1-12)"
+NODE_BIN="$TREE/lean/OrbNode/.lake/build/bin/orb-node"
+say "binary $(sha256sum "$BIN" | cut -c1-12) node $(sha256sum "$NODE_BIN" | cut -c1-12)"
 
 # Pin resources to the deployed revision. Dev-only promotion must not change
 # prod's catalog; rollback restores its resource pointer alongside its binary.
@@ -89,9 +92,27 @@ fi
 
 set_catalog sandboxed-sh-dev "$CATALOG"
 set_build sandboxed-sh-dev "$SHA"; systemctl daemon-reload
+install -d -m 755 /usr/local/lib/orb
+PROVISION_BACKUP=""
+if [[ -f /usr/local/lib/orb/orb-node-provision.sh ]]; then
+  PROVISION_BACKUP="/usr/local/lib/orb/orb-node-provision.sh.pre-deploy-$(date -u +%Y%m%dT%H%M%SZ)"
+  cp -p /usr/local/lib/orb/orb-node-provision.sh "$PROVISION_BACKUP"
+fi
+NODE_BACKUP=""
+if [[ -f /usr/local/bin/sandboxed-node ]]; then
+  NODE_BACKUP="/usr/local/bin/sandboxed-node.pre-deploy-$(date -u +%Y%m%dT%H%M%SZ)"
+  cp -p /usr/local/bin/sandboxed-node "$NODE_BACKUP"
+fi
+install -m 644 "$TREE/scripts/orb-node-provision.sh" /usr/local/lib/orb/orb-node-provision.sh.new && mv /usr/local/lib/orb/orb-node-provision.sh.new /usr/local/lib/orb/orb-node-provision.sh
+install -m 755 "$NODE_BIN" /usr/local/bin/sandboxed-node.new && mv /usr/local/bin/sandboxed-node.new /usr/local/bin/sandboxed-node
 install -m 755 "$BIN" /usr/local/bin/orb-core-dev.new && mv /usr/local/bin/orb-core-dev.new /usr/local/bin/orb-core-dev
 systemctl restart sandboxed-sh-dev
-healthy 3002 30 "$SHA" || { say "dev unhealthy; prod untouched"; exit 1; }
+if ! healthy 3002 30 "$SHA"; then
+  [[ -n "$PROVISION_BACKUP" && -f "$PROVISION_BACKUP" ]] && cp -p "$PROVISION_BACKUP" /usr/local/lib/orb/orb-node-provision.sh
+  [[ -n "$NODE_BACKUP" && -f "$NODE_BACKUP" ]] && cp -p "$NODE_BACKUP" /usr/local/bin/sandboxed-node
+  say "dev unhealthy; prod untouched"
+  exit 1
+fi
 say "dev healthy on $SHA"
 [[ $DEV_ONLY == 1 ]] && { say "done (dev only)"; exit 0; }
 
@@ -108,6 +129,8 @@ if ! healthy 3000 60 "$SHA"; then
   say "prod unhealthy; rolling back to $BACKUP"
   cp -p "$BACKUP" /usr/local/bin/orb-core
   if [[ -n "$OLD_CATALOG" ]]; then set_catalog sandboxed-sh-prod "$OLD_CATALOG"; else rm -f "$CATALOG_CONF"; fi
+  [[ -n "$PROVISION_BACKUP" && -f "$PROVISION_BACKUP" ]] && cp -p "$PROVISION_BACKUP" /usr/local/lib/orb/orb-node-provision.sh
+  [[ -n "$NODE_BACKUP" && -f "$NODE_BACKUP" ]] && cp -p "$NODE_BACKUP" /usr/local/bin/sandboxed-node
   set_build sandboxed-sh-prod "${OLD_SHA:-unknown}"; systemctl daemon-reload
   systemctl restart sandboxed-sh-prod
   exit 1
@@ -115,4 +138,6 @@ fi
 say "prod healthy on $SHA (backup $BACKUP)"
 # keep the five most recent backups
 ls -1t /usr/local/bin/orb-core.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
+ls -1t /usr/local/bin/sandboxed-node.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
+ls -1t /usr/local/lib/orb/orb-node-provision.sh.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
 say "done"

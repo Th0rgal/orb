@@ -156,7 +156,7 @@ def bootstrapAndWait (mc : ManagedComputeStore) (provider : ManagedProvider.Prov
   stage "enrolment file and provisioning script delivered"
   let command := "chmod 600 /home/user/.orb/enroll.env && sudo bash /home/user/.orb/orb-node-provision.sh " ++
     shellSingleQuote cfg.coreUrl ++ " " ++ shellSingleQuote machine.id ++ " && " ++ guestFactsCommand
-  let .ok launched ← provider.exec machine.effectiveProviderId command 90
+  let .ok launched ← provider.exec machine.effectiveProviderId command 240
     | do stage "guest command call failed (provisioning script)"; return .error "managed_bootstrap_launch_failed"
   if execFailed launched then
     stage "provisioning script exited with an error"

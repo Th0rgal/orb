@@ -328,22 +328,27 @@ def LocalActivityItem.toJVal (a : LocalActivityItem) : JVal := Id.run do
 
 /-- Snapshot of a local or Core-managed CLI run matching `PollLocal` in `orb/src/localAgents.ts`. -/
 structure LocalRunState where
-  runId          : String
-  generation     : UInt64
-  harness        : String
-  cwd            : String
-  worktreePath?  : Option String := none
-  permissionMode : ClaudePermissionMode := .bypassPermissions
-  text           : String := ""
-  done           : Bool := false
-  resumed        : Bool := false
-  stopping       : Bool := false
-  exitCode?      : Option Int := none
-  sessionId?     : Option String := none
-  error?         : Option String := none
-  retryable      : Bool := false
-  activities     : Array LocalActivityItem := #[]
-  turnCount      : Nat := 0
+  runId            : String
+  generation       : UInt64
+  harness          : String
+  cwd              : String
+  worktreePath?    : Option String := none
+  permissionMode   : ClaudePermissionMode := .bypassPermissions
+  text             : String := ""
+  done             : Bool := false
+  resumed          : Bool := false
+  stopping         : Bool := false
+  exitCode?        : Option Int := none
+  sessionId?       : Option String := none
+  error?           : Option String := none
+  retryable        : Bool := false
+  activities       : Array LocalActivityItem := #[]
+  turnCount        : Nat := 0
+  model?           : Option String := none
+  inputTokens?     : Option UInt64 := none
+  outputTokens?    : Option UInt64 := none
+  cacheReadTokens? : Option UInt64 := none
+  costCents        : UInt64 := 0
   deriving Repr, BEq, Inhabited
 
 def LocalRunState.toPollJVal (s : LocalRunState) : JVal := Id.run do
@@ -1158,6 +1163,19 @@ private def ingestClaudeStdoutEvent
       return ("", false, none)
     if let some sid := (ev.fieldStr? "session_id").filter (!·.isEmpty) then
       stRef.modify fun s => { s with sessionId? := some sid }
+    let usageObj := ev.fieldOrNull "usage"
+    let inTok? := (usageObj.fieldUInt64? "input_tokens").orElse (fun _ => ev.fieldUInt64? "input_tokens")
+    let outTok? := (usageObj.fieldUInt64? "output_tokens").orElse (fun _ => ev.fieldUInt64? "output_tokens")
+    let crTok? := (usageObj.fieldUInt64? "cache_read_input_tokens").orElse (fun _ => usageObj.fieldUInt64? "cache_read_tokens")
+    let mdl? := ((ev.fieldStr? "model").orElse (fun _ => (ev.fieldOrNull "message").fieldStr? "model")).filter (!·.trimAscii.toString.isEmpty)
+    if inTok?.isSome || outTok?.isSome || crTok?.isSome || mdl?.isSome then
+      stRef.modify fun s => {
+        s with
+        model? := mdl?.orElse (fun _ => s.model?)
+        inputTokens? := inTok?.orElse (fun _ => s.inputTokens?)
+        outputTokens? := outTok?.orElse (fun _ => s.outputTokens?)
+        cacheReadTokens? := crTok?.orElse (fun _ => s.cacheReadTokens?)
+      }
     let mut delta := ""
     let stNow ← stRef.get
     if !resTxt.isEmpty && stNow.text.isEmpty then
@@ -1414,15 +1432,19 @@ def isOpenCodeCompactionSummary (text : String) : Bool :=
 
 /-- Structured result extracted from a single stdout line of a one-shot CLI harness (`opencode`, `codex`, `grok`, etc.). -/
 structure OneShotLineParsed where
-  sessionId? : Option String := none
-  textDelta  : String := ""
-  errorMsg?  : Option String := none
-  activity?  : Option LocalActivityItem := none
-  thinking?  : Option String := none
+  sessionId?       : Option String := none
+  textDelta        : String := ""
+  errorMsg?        : Option String := none
+  activity?        : Option LocalActivityItem := none
+  thinking?        : Option String := none
   /-- Set for a streamed piece of an assistant message (OpenCode ACP `agent_message_chunk`):
       pieces of one message are joined as-is, a new message starts a new paragraph. -/
-  messageId? : Option String := none
-  isChunk    : Bool := false
+  messageId?       : Option String := none
+  isChunk          : Bool := false
+  model?           : Option String := none
+  inputTokens?     : Option UInt64 := none
+  outputTokens?    : Option UInt64 := none
+  cacheReadTokens? : Option UInt64 := none
   deriving Repr, BEq, Inhabited
 
 /-- Append `parsed.textDelta` to `prevText`: returns `(piece, nextLastMessageId?)`.
@@ -1658,7 +1680,39 @@ def parseOneShotHarnessEvent (harness : String) (rawLine : String) : OneShotLine
     else if ty == "assistant" || ty == "message" then
       return { sessionId? := sid?, textDelta := (jv.fieldStr? "content").orElse (fun _ => jv.fieldStr? "text") |>.getD "" }
     else
-      return { sessionId? := sid? }
+      let usageObj :=
+        match jv.field? "usage" with
+        | some u@(.obj _) => u
+        | _ =>
+          match part.field? "tokens" with
+          | some t@(.obj _) => t
+          | _ => part.fieldOrNull "usage"
+      let inTok? :=
+        (usageObj.fieldUInt64? "input_tokens")
+          |>.orElse (fun _ => usageObj.fieldUInt64? "input")
+          |>.orElse (fun _ => usageObj.fieldUInt64? "prompt_tokens")
+      let outTok? :=
+        (usageObj.fieldUInt64? "output_tokens")
+          |>.orElse (fun _ => usageObj.fieldUInt64? "output")
+          |>.orElse (fun _ => usageObj.fieldUInt64? "completion_tokens")
+      let crTok? :=
+        (usageObj.fieldUInt64? "cache_read_input_tokens")
+          |>.orElse (fun _ => usageObj.fieldUInt64? "cache_read_tokens")
+          |>.orElse (fun _ => usageObj.fieldUInt64? "cached_input_tokens")
+          |>.orElse (fun _ => (usageObj.fieldOrNull "cache").fieldUInt64? "read")
+          |>.orElse (fun _ => (usageObj.fieldOrNull "input_tokens_details").fieldUInt64? "cached_tokens")
+          |>.orElse (fun _ => (usageObj.fieldOrNull "prompt_tokens_details").fieldUInt64? "cached_tokens")
+      let mdl? :=
+        (jv.fieldStr? "model")
+          |>.orElse (fun _ => part.fieldStr? "model")
+          |>.filter (!·.trimAscii.toString.isEmpty)
+      return {
+        sessionId? := sid?
+        model? := mdl?
+        inputTokens? := inTok?
+        outputTokens? := outTok?
+        cacheReadTokens? := crTok?
+      }
   else
     return { textDelta := rawLine ++ "\n" }
 
@@ -1888,6 +1942,7 @@ def startHarnessTurn
     sessionId? := effSid?
     activities := #[]
     turnCount := prevTurns
+    model? := model?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
   }
   let stRef ← upsertRunStateRef mgr id initState
   callbacks.onOutputEvent (.obj #[("text", .str ""), ("reset", .bool true), ("activities", .arr #[])])
@@ -1936,6 +1991,26 @@ def startHarnessTurn
       let parsed := parseOneShotHarnessEvent harness ln
       if let some sid := parsed.sessionId? then
         stRef.modify fun s => { s with sessionId? := some sid }
+      if parsed.model?.isSome || parsed.inputTokens?.isSome || parsed.outputTokens?.isSome || parsed.cacheReadTokens?.isSome then
+        stRef.modify fun s => {
+          s with
+          model? := parsed.model?.orElse (fun _ => s.model?)
+          inputTokens? := match s.inputTokens?, parsed.inputTokens? with
+            | some a, some b => some (a + b)
+            | none, some b => some b
+            | some a, none => some a
+            | none, none => none
+          outputTokens? := match s.outputTokens?, parsed.outputTokens? with
+            | some a, some b => some (a + b)
+            | none, some b => some b
+            | some a, none => some a
+            | none, none => none
+          cacheReadTokens? := match s.cacheReadTokens?, parsed.cacheReadTokens? with
+            | some a, some b => some (a + b)
+            | none, some b => some b
+            | some a, none => some a
+            | none, none => none
+        }
       if let some errMsg := parsed.errorMsg? then
         stRef.modify fun s => { s with error? := some errMsg }
       if let some th := parsed.thinking? then

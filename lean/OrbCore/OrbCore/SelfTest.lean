@@ -5613,6 +5613,52 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
      (hubWire.splitOn "Admin prompt with token [REDACTED]").length < 2 then
     return (← fail s!"telemetry hub flush attribution/privacy mismatch: res={reprStr flushRes} wire={hubWire}")
 
+  -- 7d.2. `observeControlTurnFinished` emits `orb.turn.v1` with `resent=false` on the first turn,
+  --       and `resent=true` when the identical prompt is sent again on the same mission!
+  observeControlTurnFinished telSink "m-legacy-boot" {
+    harness := "claudecode"
+    model? := some "claude-opus-5-5"
+    inputTokens? := some 1200
+    outputTokens? := some 300
+    cacheReadTokens? := some 800
+    costCents := 7
+    interrupted := false
+  } none none nowSec
+  -- Resend the exact same prompt on `m-legacy-boot` and finish with `interrupted=true`
+  let _ ← sendReq "POST" "/api/control/message" adminTok
+    "{\"mission_id\":\"m-legacy-boot\",\"content\":\"Admin prompt with token tl_live_9999888877776666\"}"
+  observeControlTurnFinished telSink "m-legacy-boot" {
+    harness := "claudecode"
+    model? := some "claude-opus-5-5"
+    costCents := 3
+    interrupted := true
+  } none none nowSec
+  let turnEvents ← telSink.mu.atomically do
+    let q ← get
+    set { q with events := #[], blobs := #[] }
+    return q.events
+  if turnEvents.size != 3 then
+    return (← fail s!"expected 3 telemetry events (turn1, prompt2, turn2), got {turnEvents.size}: {reprStr turnEvents}")
+  let turn1 := turnEvents[0]!
+  let turn2 := turnEvents[2]!
+  if turn1.fieldStr? "schema" != some "orb.turn.v1" ||
+     turn1.fieldStr? "client" != some "core" ||
+     turn1.fieldStr? "harness" != some "claudecode" ||
+     turn1.fieldStr? "model" != some "claude-opus-5-5" ||
+     turn1.fieldStr? "session_id" != some "m-legacy-boot" ||
+     turn1.fieldUInt64? "input_tokens" != some 1200 ||
+     turn1.fieldUInt64? "output_tokens" != some 300 ||
+     turn1.fieldUInt64? "cache_read_tokens" != some 800 ||
+     turn1.fieldUInt64? "cost_cents" != some 7 ||
+     turn1.fieldBool? "interrupted" != some false ||
+     turn1.fieldBool? "resent" != some false ||
+     (turn1.fieldUInt64? "latency_ms").isNone ||
+     turn2.fieldStr? "schema" != some "orb.turn.v1" ||
+     turn2.fieldBool? "interrupted" != some true ||
+     turn2.fieldBool? "resent" != some true ||
+     (turn2.fieldUInt64? "latency_ms").isNone then
+    return (← fail s!"orb.turn.v1 emission/resent mismatch: turn1={OrbBin.Json.renderCompact turn1} turn2={OrbBin.Json.renderCompact turn2}")
+
   -- 7e. `POST /api/voice/transcribe?language=fr` validates WAV and stamps `X-Spark-Speaker-Id: bob` + `X-Orb-Username: bob` + `X-Orb-User-Id`
   let .ok (mockAsrFd, mockAsrPort) ← tcpListen "127.0.0.1" 0 8
     | return (← fail "tcpListen mock ASR failed")

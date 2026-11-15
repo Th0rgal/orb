@@ -57,11 +57,10 @@ static int onl_connect_sock(const char *h, uint16_t port, int socktype, uint32_t
     if (!h || !*h) return errno = EINVAL, -1;
     char pstr[8]; snprintf(pstr, sizeof(pstr), "%u", (unsigned)port); struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = socktype }, *res = NULL;
     if (getaddrinfo(h, pstr, &hints, &res) != 0 || !res) return errno = EINVAL, -1;
-    int fd = -1, saved = EIO; uint32_t ms = timeout_ms ? timeout_ms : 30000U; int pms = ms > 0x7FFFFFFFU ? 0x7FFFFFFF : (int)ms;
+    int fd = -1, saved = EIO; uint32_t ms = timeout_ms ? timeout_ms : 30000U; int pms = ms > 0x7FFFFFFFU ? 0x7FFFFFFF : (int)ms, cms = pms > 2000 ? 2000 : pms;
     struct timeval tv = { .tv_sec = (time_t)(ms / 1000U), .tv_usec = (suseconds_t)((ms % 1000U) * 1000U) };
-    for (int pass = 0; pass < 2 && fd < 0; ++pass)
-        for (struct addrinfo *ai = res; ai && fd < 0; ai = ai->ai_next)
-            if ((ai->ai_family == AF_INET) == (pass == 0)) { fd = onl_try_sock(ai, ai->ai_next && pms > 2000 ? 2000 : pms, &tv, socktype); if (fd < 0) saved = errno; }
+    for (int pass = 0; pass < 2 && fd < 0; ++pass) for (struct addrinfo *ai = res; ai && fd < 0; ai = ai->ai_next)
+        if ((ai->ai_family != AF_INET) == (pass == 0)) { fd = onl_try_sock(ai, (ai->ai_next || pass == 0) ? cms : pms, &tv, socktype); if (fd < 0) saved = errno; }
     return freeaddrinfo(res), errno = saved, fd;
 }
 LEAN_EXPORT lean_obj_res orb_net_leaf_tcp_connect(b_lean_obj_arg host, uint16_t port, uint32_t timeout_ms) { const char *h = onl_cstr(host); return onl_pack(h ? onl_connect_sock(h, port, SOCK_STREAM, timeout_ms) : (errno = EINVAL, -1)); }
@@ -159,24 +158,23 @@ static int onl_ssl_write_all(SSL *ssl, b_lean_obj_arg buf) {
 }
 LEAN_EXPORT lean_obj_res orb_net_leaf_tls_open(b_lean_obj_arg host, uint16_t port, b_lean_obj_arg req, uint8_t verify_peer, uint8_t alpn_mode, uint32_t timeout_ms) {
     pthread_once(&g_onl_tls_once, onl_tls_reg);
-    const char *h = onl_cstr(host); if (!h) return lean_io_result_mk_ok(lean_box(0));
-    onl_tls_t *s = (onl_tls_t *)calloc(1, sizeof(onl_tls_t));
-    if (!s || pthread_mutex_init(&s->mu, NULL) != 0) return free(s), lean_io_result_mk_ok(lean_box(0));
-    int ok = (s->fd = onl_connect_sock(h, port, SOCK_STREAM, timeout_ms)) >= 0 && (s->ctx = SSL_CTX_new(TLS_client_method())) != NULL;
-    if (ok && verify_peer) { SSL_CTX_set_verify(s->ctx, SSL_VERIFY_PEER, NULL); ok = SSL_CTX_set_default_verify_paths(s->ctx) == 1; /* static OpenSSL may carry a build-host CA dir: add the system bundle */ if (ok && access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0) SSL_CTX_load_verify_locations(s->ctx, "/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/certs"); }
+    const char *h = onl_cstr(host); char pstr[8]; snprintf(pstr, sizeof(pstr), "%u", (unsigned)port); struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_STREAM }, *res = NULL;
+    if (!h || !*h || getaddrinfo(h, pstr, &hints, &res) != 0 || !res) return lean_io_result_mk_ok(lean_box(0));
+    onl_tls_t *s = (onl_tls_t *)calloc(1, sizeof(onl_tls_t)); if (!s || pthread_mutex_init(&s->mu, NULL) != 0) return freeaddrinfo(res), free(s), lean_io_result_mk_ok(lean_box(0));
+    s->fd = -1; int ok = (s->ctx = SSL_CTX_new(TLS_client_method())) != NULL, no_h2 = 0, conn = 0;
+    if (ok && verify_peer) { SSL_CTX_set_verify(s->ctx, SSL_VERIFY_PEER, NULL); ok = SSL_CTX_set_default_verify_paths(s->ctx) == 1; if (ok && access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0) SSL_CTX_load_verify_locations(s->ctx, "/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/certs"); }
     static const unsigned char h2_alpn[] = { 2, 'h', '2' }, h1_alpn[] = { 8, 'h', 't', 't', 'p', '/', '1', '.', '1' };
     if (ok) ok = SSL_CTX_set_alpn_protos(s->ctx, alpn_mode == 1 ? h2_alpn : h1_alpn, alpn_mode == 1 ? 3 : 9) == 0;
-    if (ok && (s->ssl = SSL_new(s->ctx)) != NULL) {
-        unsigned char ipb[16]; int is_ip = inet_pton(AF_INET, h, ipb) == 1 || inet_pton(AF_INET6, h, ipb) == 1;
-        ok = (is_ip ? (!verify_peer || X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(s->ssl), h) == 1)
-                    : (SSL_set_tlsext_host_name(s->ssl, h) == 1 && (!verify_peer || SSL_set1_host(s->ssl, h) == 1))) &&
-             SSL_set_fd(s->ssl, s->fd) == 1 && SSL_connect(s->ssl) == 1;
-        if (ok && alpn_mode == 1) {
-            const unsigned char *sel = NULL; unsigned int slen = 0; SSL_get0_alpn_selected(s->ssl, &sel, &slen);
-            ok = (slen == 2 && sel && sel[0] == 'h' && sel[1] == '2');
-            if (!ok) return onl_tls_fin(s), lean_io_result_mk_ok(lean_box(1));
+    uint32_t ms = timeout_ms ? timeout_ms : 30000U; int pms = ms > 0x7FFFFFFFU ? 0x7FFFFFFF : (int)ms, cms = pms > 2000 ? 2000 : pms;
+    struct timeval tv = { .tv_sec = (time_t)(ms / 1000U), .tv_usec = (suseconds_t)((ms % 1000U) * 1000U) }; unsigned char ipb[16]; int is_ip = inet_pton(AF_INET, h, ipb) == 1 || inet_pton(AF_INET6, h, ipb) == 1;
+    for (int pass = 0; ok && pass < 2 && !conn && !no_h2; ++pass) for (struct addrinfo *ai = res; ai && !conn && !no_h2; ai = ai->ai_next)
+        if ((ai->ai_family != AF_INET) == (pass == 0) && (s->fd = onl_try_sock(ai, (ai->ai_next || pass == 0) ? cms : pms, &tv, SOCK_STREAM)) >= 0) {
+            if ((s->ssl = SSL_new(s->ctx)) != NULL && (is_ip ? (!verify_peer || X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(s->ssl), h) == 1) : (SSL_set_tlsext_host_name(s->ssl, h) == 1 && (!verify_peer || SSL_set1_host(s->ssl, h) == 1))) && SSL_set_fd(s->ssl, s->fd) == 1 && SSL_connect(s->ssl) == 1) {
+                const unsigned char *sel = NULL; unsigned int slen = 0; if (alpn_mode == 1) SSL_get0_alpn_selected(s->ssl, &sel, &slen);
+                if (alpn_mode == 1 && !(slen == 2 && sel && sel[0] == 'h' && sel[1] == '2')) no_h2 = 1; else conn = 1;
+            } else { if (s->ssl) { SSL_free(s->ssl); s->ssl = NULL; } close(s->fd); s->fd = -1; }
         }
-    } else ok = 0;
+    freeaddrinfo(res); if (no_h2) return onl_tls_fin(s), lean_io_result_mk_ok(lean_box(1)); else ok = conn;
     if (ok) ok = onl_ssl_write_all(s->ssl, req);
     if (!ok) return onl_tls_fin(s), lean_io_result_mk_ok(lean_box(0));
     lean_object *some = lean_alloc_ctor(2, 1, 0); return lean_ctor_set(some, 0, lean_alloc_external(g_onl_tls_cls, s)), lean_io_result_mk_ok(some);

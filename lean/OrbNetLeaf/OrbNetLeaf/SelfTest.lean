@@ -33,7 +33,93 @@ private def assertTrue (label : String) (cond : Bool) : IO Unit := do
     throw <| IO.userError s!"[FAIL] {label}"
   IO.println s!"[PASS] {label}"
 
-def main : IO Unit := do
+private def testDualStackConnectAndTls : IO Unit := do
+  -- 9. Dual-stack address fallback with unroutable AAAA first -> routable A second:
+  --    Wait on a local IPv4 listener while `LD_PRELOAD` resolves `dualstack-unroutable.test`
+  --    to `[AF_INET6("2001:db8::1"), AF_INET("127.0.0.1")]`.
+  --    Even when `2001:db8::1` blackholes TCP SYNs (or an earlier address fails TCP/TLS handshake),
+  --    `tcpConnectTimed` and `httpsRequest` must try every resolved address with a short per-address
+  --    connect timeout and fall back to IPv4 `127.0.0.1`.
+  let .ok (dsListenFd, dsPort) ← tcpListen "127.0.0.1" 0 4
+    | throw (IO.userError "tcpListen dsListenFd failed")
+  let dsServerTask ← IO.asTask (prio := .dedicated) do
+    if let .ok cfd ← tcpAcceptPoll dsListenFd 6000 then
+      discard <| writeAll cfd ("dualstack-ack".toUTF8) false
+      discard <| closeFd cfd
+    discard <| closeFd dsListenFd
+  let preloadDir := "/tmp/opencode-onl-dualstack-test"
+  IO.FS.createDirAll preloadDir
+  let preloadC := s!"{preloadDir}/gai_preload.c"
+  let preloadSo := s!"{preloadDir}/gai_preload.so"
+  IO.FS.writeFile preloadC
+    "#define _GNU_SOURCE\n#include <dlfcn.h>\n#include <netdb.h>\n#include <string.h>\n#include <sys/socket.h>\nint getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res) {\n  int (*real_gai)(const char *, const char *, const struct addrinfo *, struct addrinfo **) = dlsym(RTLD_NEXT, \"getaddrinfo\");\n  if (node && strcmp(node, \"dualstack-unroutable.test\") == 0) {\n    struct addrinfo h6 = { .ai_family = AF_INET6, .ai_socktype = hints ? hints->ai_socktype : SOCK_STREAM, .ai_flags = AI_NUMERICHOST };\n    struct addrinfo h4 = { .ai_family = AF_INET, .ai_socktype = hints ? hints->ai_socktype : SOCK_STREAM, .ai_flags = AI_NUMERICHOST };\n    struct addrinfo *r6 = NULL, *r4 = NULL;\n    if (real_gai(\"2001:db8::1\", service, &h6, &r6) == 0 && real_gai(\"127.0.0.1\", service, &h4, &r4) == 0 && r6 && r4) {\n      struct addrinfo *t = r6; while (t->ai_next) t = t->ai_next; t->ai_next = r4; *res = r6; return 0;\n    }\n  }\n  return real_gai(node, service, hints, res);\n}\n"
+  let ccOut ← IO.Process.output {
+    cmd := "cc",
+    args := #["-shared", "-fPIC", "-O2", preloadC, "-o", preloadSo, "-ldl"]
+  }
+  assertTrue "compile dualstack getaddrinfo preload helper" (ccOut.exitCode == 0)
+  let selfExe ← IO.appPath
+  let tDs0 ← IO.monoMsNow
+  let probeOut ← IO.Process.output {
+    cmd := selfExe.toString,
+    args := #["--probe-dualstack-connect", toString dsPort],
+    env := #[("LD_PRELOAD", some preloadSo)]
+  }
+  let tDs1 ← IO.monoMsNow
+  let _ := dsServerTask.get
+  assertTrue s!"dual-stack connect with unroutable AAAA first falls back to IPv4 within short timeout (exit={probeOut.exitCode}, elapsed={tDs1 - tDs0}ms, out={probeOut.stdout.trimAscii.toString})"
+    (probeOut.exitCode == 0 && (tDs1 - tDs0) < 4000 && probeOut.stdout.trimAscii.toString == "dualstack-ack")
+
+  -- 10. Dual-stack TLS roundtrip (`httpsRequest`) with unroutable AAAA first -> routable A second:
+  let certOut ← IO.Process.output {
+    cmd := "openssl",
+    args := #["req", "-x509", "-newkey", "rsa:2048", "-keyout", s!"{preloadDir}/key.pem", "-out", s!"{preloadDir}/cert.pem", "-days", "1", "-nodes", "-subj", "/CN=dualstack-unroutable.test"]
+  }
+  assertTrue "generate self-signed TLS cert for dualstack-unroutable.test" (certOut.exitCode == 0)
+  let tlsSrvPy := s!"{preloadDir}/tls_srv.py"
+  IO.FS.writeFile tlsSrvPy
+    "import socket, ssl, sys\nctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)\nctx.load_cert_chain(sys.argv[1], sys.argv[2])\ns = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\ns.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\ns.bind(('127.0.0.1', 0))\ns.listen(1)\nprint(s.getsockname()[1], flush=True)\nconn, _ = s.accept()\ntls = ctx.wrap_socket(conn, server_side=True)\n_ = tls.recv(4096)\ntls.sendall(b'HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: 19\\r\\nConnection: close\\r\\n\\r\\n{\"node_token\":\"ok\"}')\ntls.close()\ns.close()\n"
+  let tlsChild ← IO.Process.spawn {
+    cmd := "python3",
+    args := #[tlsSrvPy, s!"{preloadDir}/cert.pem", s!"{preloadDir}/key.pem"],
+    stdout := .piped,
+    stderr := .null
+  }
+  let tlsPortLine ← tlsChild.stdout.getLine
+  let tlsPort := tlsPortLine.trimAscii.toString
+  let tTls0 ← IO.monoMsNow
+  let tlsProbeOut ← IO.Process.output {
+    cmd := selfExe.toString,
+    args := #["--probe-dualstack-tls", tlsPort],
+    env := #[("LD_PRELOAD", some preloadSo)]
+  }
+  let tTls1 ← IO.monoMsNow
+  let _ ← tlsChild.wait
+  let _ ← IO.Process.output { cmd := "rm", args := #["-rf", preloadDir] }
+  assertTrue s!"dual-stack TLS httpsRequest with unroutable AAAA first falls back to IPv4 within short timeout (exit={tlsProbeOut.exitCode}, elapsed={tTls1 - tTls0}ms, out={tlsProbeOut.stdout.trimAscii.toString})"
+    (tlsProbeOut.exitCode == 0 && (tTls1 - tTls0) < 5000 && tlsProbeOut.stdout.trimAscii.toString == "200:{\"node_token\":\"ok\"}")
+
+def main (args : List String) : IO Unit := do
+  if let ["--probe-dualstack-connect", portStr] := args then
+    let some portNat := portStr.toNat? | throw (IO.userError "bad port")
+    match ← tcpConnectTimed "dualstack-unroutable.test" portNat.toUInt16 15000 with
+    | .ok fd =>
+      let bs ← readStreamChunk fd 64
+      let msg := String.fromUTF8? bs |>.getD ""
+      discard <| closeFd fd
+      IO.println msg
+      return
+    | .error e =>
+      throw (IO.userError s!"tcpConnectTimed failed: {e}")
+  if let ["--probe-dualstack-tls", portStr] := args then
+    let some portNat := portStr.toNat? | throw (IO.userError "bad port")
+    match ← httpsRequest "POST" "dualstack-unroutable.test" portNat.toUInt16 "/api/managed-machines/enroll" #[] ("{\"machine_id\":\"m1\"}".toUTF8) 4096 false 15000 with
+    | .ok resp =>
+      let bodyStr := String.fromUTF8? resp.body |>.getD ""
+      IO.println s!"{resp.status}:{bodyStr}"
+      return
+    | .error e =>
+      throw (IO.userError s!"httpsRequest failed: {e}")
   -- 1. Spec gate sanity & fail-closed checks
   assertTrue "verifyAeadEnvelope accepts 32B AES-256-GCM & 16B AES-128-GCM"
     (verifyAeadEnvelope 0 1 32 12 16 128 == 1 && verifyAeadEnvelope 2 1 16 12 16 128 == 1)
@@ -592,5 +678,7 @@ def main : IO Unit := do
 
   assertTrue "H2ClientPool worker teardown drains active & queued streams without promise deadlock"
     (← H2ClientPool.testTeardownDrainsActiveAndQueuedWaiters)
+
+  testDualStackConnectAndTls
 
   IO.println "[OrbNetLeaf] ALL SELF-TESTS PASSED"
