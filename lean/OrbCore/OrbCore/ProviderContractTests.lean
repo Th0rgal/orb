@@ -1096,6 +1096,135 @@ private def providerUsageFetchersContract : IO (Array String) := do
     s!"antigravity tierless assist with project expected (none, false), got ({agyPlan2}, {agyNeedsVer2})"
 
   return (← failuresRef.get)
+private def customDiscoveryContract (app : CoreAppState) (jwt : String) (now : UInt64) : IO (Array String) := do
+  let mut failures := #[]
+  if customModelsUrl "https://custom.invalid/" != "https://custom.invalid/models" ||
+      customModelsUrl "https://custom.invalid/api/v1/" != "https://custom.invalid/api/v1/models" ||
+      customModelsUrl "https://custom.invalid/models/" != "https://custom.invalid/models" then
+    failures := failures.push "custom discovery must append models to the configured API base without inserting a version prefix"
+  let (fd, port) ← IO.ofExcept (← LeanSys.Posix.tcpListen "127.0.0.1" 0 8)
+  let stop ← IO.mkRef false
+  let authorized ← IO.mkRef false
+  let server ← IO.asTask (prio := .dedicated) do
+    while !(← stop.get) do
+      match ← LeanSys.Posix.tcpAcceptPoll fd 100 with
+      | .error _ => pure ()
+      | .ok client =>
+        let raw := String.fromUTF8! (← LeanSys.Posix.readStreamChunk client 8192)
+        authorized.set (raw.startsWith "GET /v1/models " && (raw.splitOn "Bearer discovery-fixture-key").length == 2)
+        let body := "{\"data\":[{\"id\":\"gpt-6-astra\"},{\"id\":\"gemini-4-argon\"},{\"id\":\"gpt-6-astra\"}]}"
+        discard <| LeanSys.Posix.writeAll client s!"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\nConnection: close\r\n\r\n{body}".toUTF8
+        discard <| LeanSys.Posix.closeFd client
+  try
+    let (_, created) ← postJson app jwt "/api/ai/providers"
+      (renderCompact (.obj #[("id", .str "prov-discovery"), ("name", .str "Surplus Intelligence"),
+        ("provider_type", .str "custom"), ("base_url", .str s!"http://127.0.0.1:{port}/v1/"),
+        ("api_key", .str "discovery-fixture-key"), ("enabled", .bool true),
+        ("custom_models", .arr #[.obj #[("id", .str "gemini-4-argon")], .obj #[("id", .str "manual-only")]])])) now
+    let _ := created
+    discard <| postJson app jwt "/api/providers/catalog/refresh" "{}" now
+    let disc ← getJson app jwt "/api/providers/discovery" now
+    let cat ← getJson app jwt "/api/providers?include_all=true&include_unverified=true" now
+    let p := (((cat.fieldArr? "providers").getD #[]).find? (fun p => p.fieldStr? "name" == some "Surplus Intelligence")).getD .null
+    let ids := ((p.fieldArr? "models").getD #[]).filterMap (·.fieldStr? "id")
+    if !(← authorized.get) || !(ids.contains "gpt-6-astra") || !(ids.contains "manual-only") || (ids.filter (· == "gemini-4-argon")).size != 1 then
+      failures := failures.push "custom discovery must authenticate GET /v1/models and merge/deduplicate manual and discovered models"
+    if ((renderCompact disc).splitOn "gpt-6-astra").length < 2 then
+      failures := failures.push "custom discovery must be present on discovery endpoint"
+    if ((renderCompact cat ++ renderCompact disc).splitOn "discovery-fixture-key").length != 1 then
+      failures := failures.push "custom discovery must never return API key"
+  finally
+    stop.set true
+    discard <| IO.wait server
+    discard <| LeanSys.Posix.closeFd fd
+  return failures
+
+private def routingCatalogContract (app : CoreAppState) (root jwt : String) (now : UInt64) : IO (Array String) := do
+  let mut failures := #[]
+  let previousCatalog ← IO.getEnv "SANDBOXED_CATALOG_DIR"
+  let cwd ← IO.currentDir
+  let catalog := s!"{root}/installed/share/orb/catalog"
+  IO.FS.createDirAll s!"{catalog}/snapshots"
+  IO.FS.writeFile s!"{catalog}/providers.json"
+    "{\"providers\":[{\"id\":\"google\",\"name\":\"Installed Google\"}]}"
+  IO.FS.writeFile s!"{catalog}/snapshots/google-api.json"
+    "{\"models\":[{\"id\":\"installed-google-model\"}]}"
+  let discoveryPath := s!"{app.store.rootDir}/model-discovery.json"
+  IO.FS.writeFile discoveryPath
+    "{\"schema_version\":1,\"connections\":[{\"provider_id\":\"antigravity\",\"last_success\":{\"completeness\":\"complete\",\"models\":[{\"id\":\"gemini-4-carbon-low\"},{\"id\":\"gemini-4-carbon-medium\"},{\"id\":\"gemini-4-carbon-high\"},{\"id\":\"gemini-4-carbon-high\"}]}}]}"
+  -- Sidecar-only OAuth connection: deliberately absent from SQLite and static catalog.
+  IO.FS.writeFile s!"{root}/auth-empty/antigravity-catalog.json"
+    "{\"type\":\"antigravity\",\"access_token\":\"fixture-only-no-live-access\",\"email\":\"catalog@example.invalid\"}"
+  try
+    setenvVar "SANDBOXED_CATALOG_DIR" catalog
+    IO.Process.setCurrentDir root
+    let doc ← getJson app jwt "/api/providers?include_all=true&include_unverified=true" now
+    let providers := (doc.fieldArr? "providers").getD #[]
+    let google := (providers.find? (fun p => p.fieldStr? "id" == some "google")).getD .null
+    if google.fieldStr? "name" != some "Installed Google" ||
+        ((google.fieldArr? "models").getD #[]).filterMap (·.fieldStr? "id") != #["installed-google-model"] then
+      failures := failures.push "catalog must load env-selected providers AND snapshots outside repository cwd, not emergency fallback"
+    let ag := providers.filter (fun p => p.fieldStr? "id" == some "antigravity")
+    let models := (((ag[0]?).getD JVal.null).fieldArr? "models").getD #[]
+    if ag.size != 1 || models.filterMap (·.fieldStr? "id") !=
+        #["gemini-4-carbon-low", "gemini-4-carbon-medium", "gemini-4-carbon-high"] then
+      failures := failures.push "OAuth-only Antigravity must appear once with deduplicated discovered Carbon ids"
+    if !((doc.fieldArr? "configured_ids").getD #[]).contains (.str "antigravity") then
+      failures := failures.push "OAuth-only Antigravity must be marked connected"
+    if ((renderCompact doc).splitOn "fixture-only-no-live-access").length != 1 then
+      failures := failures.push "catalog leaked credentials"
+  finally
+    IO.Process.setCurrentDir cwd
+    match previousCatalog with
+    | some v => setenvVar "SANDBOXED_CATALOG_DIR" v
+    | none => unsetenvVar "SANDBOXED_CATALOG_DIR"
+    IO.FS.removeFile discoveryPath
+    IO.FS.removeFile s!"{root}/auth-empty/antigravity-catalog.json"
+  return failures
+
+/-- Real loopback HTTP and real proxy auth; only the vendor transport is replaced. -/
+private def routingChainProbeContract (app : CoreAppState) (jwt : String) (now : UInt64) : IO (Array String) := do
+  let mut failures := #[]
+  let (fd, port) ← IO.ofExcept (← LeanSys.Posix.tcpListen "127.0.0.1" 0 8)
+  let stop ← IO.mkRef false
+  let reached ← IO.mkRef false
+  let chains ← IO.mkRef #[{ id := "smart", name := "Smart", targets := #[{
+    accountId := "probe-fixture", provider := "openai", modelId := "fixture-model",
+    baseUrl := "https://fixture.invalid", apiKey := "fixture-key"
+  }] : RoutingChain }]
+  let app := { app with
+    cfg := { app.cfg with port := port, proxySecret := "configured-secret-not-in-env" }
+    chainsRef := chains
+    proxyMockTransport? := some (fun _ => do
+      reached.set true
+      return .ok { status := 200, headers := #[], body := "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"pong\"}}]}".toUTF8 }) }
+  let server ← IO.asTask (prio := .dedicated) do
+    while !(← stop.get) do
+      match ← LeanSys.Posix.tcpAcceptPoll fd 100 with
+      | .error _ => pure ()
+      | .ok client =>
+        let bytes ← LeanSys.Posix.readStreamChunk client 65536
+        let response ← match parseRequest bytes none with
+          | .error _ => pure (401, "{}")
+          | .ok req => do
+            match ← dispatchCoreRequest app req now with
+            | .error _ => pure (500, "{}")
+            | .ok resp => pure (resp.status, String.fromUTF8! resp.body)
+        let (code, body) := response
+        discard <| LeanSys.Posix.writeAll client
+          s!"HTTP/1.1 {code} Result\r\nContent-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\nConnection: close\r\n\r\n{body}".toUTF8
+        discard <| LeanSys.Posix.closeFd client
+  try
+    let (_, doc) ← postJson app jwt "/api/model-routing/chains/builtin/smart/test" "{}" now
+    if doc.fieldBool? "ok" != some true || !(← reached.get) then
+      failures := failures.push s!"authenticated builtin/smart test must reach upstream: {renderCompact doc}"
+    if ← authenticateProxyRequest app #[] now then
+      failures := failures.push "proxy must still reject missing credentials"
+  finally
+    stop.set true
+    discard <| IO.wait server
+    discard <| LeanSys.Posix.closeFd fd
+  return failures
 
 /-- Replay the production renderers and HTTP dispatch, never a live usage fetch. -/
 def run : IO Unit := do
@@ -1222,6 +1351,9 @@ def run : IO Unit := do
       failures := failures ++ (← proxyHealthClientShapeContract app store jwt now)
       failures := failures ++ (← usageSummaryClientShapeContract app store jwt now)
       failures := failures ++ (← providerUsageFetchersContract)
+      failures := failures ++ (← routingCatalogContract app root jwt now)
+      failures := failures ++ (← routingChainProbeContract app jwt now)
+      failures := failures ++ (← customDiscoveryContract app jwt now)
       if !failures.isEmpty then
         throw (IO.userError ("provider response contract failures:\n" ++ String.intercalate "\n" failures.toList))
     finally

@@ -720,10 +720,22 @@ def defaultProviderBaseUrl (provType : String) : String :=
   -- Unsupported/explicit-only providers must never leak their key to OpenAI.
   | _             => ""
 
-private def loadSnapshotModelsForProvider (pid : String) : IO (Array (String × String × String)) := do
+/-- Resolve both providers and snapshots against one resource root, independently of service cwd. -/
+def resolveCatalogDir : IO System.FilePath := do
+  let mut candidates : Array System.FilePath := #[]
+  if let some dir ← IO.getEnv "SANDBOXED_CATALOG_DIR" then
+    if !dir.trimAscii.isEmpty then candidates := candidates.push dir
+  if let some installRoot := (← IO.appPath).parent.bind (·.parent) then
+    candidates := candidates ++ #[installRoot / "share/orb/catalog", installRoot / "lib/orb/catalog"]
+  candidates := candidates ++ (#["/usr/local/share/orb/catalog", "/usr/local/lib/orb/catalog", "catalog"].map System.FilePath.mk)
+  for dir in candidates do
+    if ← (dir / "providers.json").pathExists then return dir
+  return "catalog"
+
+private def loadSnapshotModelsForProvider (catalogDir : System.FilePath) (pid : String) : IO (Array (String × String × String)) := do
   let mut out : Array (String × String × String) := #[]
   for prof in #["oauth", "api"] do
-    let fp : System.FilePath := s!"catalog/snapshots/{pid}-{prof}.json"
+    let fp := catalogDir / "snapshots" / s!"{pid}-{prof}.json"
     if (← fp.pathExists) then
       if let some raw ← (try some <$> IO.FS.readFile fp catch _ => pure none) then
         if let .ok jv := OrbBin.Json.parse raw then
@@ -777,7 +789,7 @@ private def fallbackCatalogProviders : Array (String × String × String × Stri
   ])
 ]
 
-private def renderProviderCatalogJson (st : CoreStore) (caller : CallerPrincipal) : IO String := do
+private def renderProviderCatalogJson (st : CoreStore) (workingDir : String) (caller : CallerPrincipal) : IO String := do
   let isAdm := caller.isLegacyUnscoped || caller.role == "admin"
   let uPrefs ← if caller.isLegacyUnscoped then pure #[] else getUserProviderPrefs st caller.userId
   let dbProviders ← listAIProviders st
@@ -791,7 +803,8 @@ private def renderProviderCatalogJson (st : CoreStore) (caller : CallerPrincipal
       for key in #[cid, p.id, providerSlugOf p.name] do
         if !key.isEmpty && !configuredIds.contains key then
           configuredIds := configuredIds.push key
-  let providersFile : System.FilePath := "catalog/providers.json"
+  let catalogDir ← resolveCatalogDir
+  let providersFile := catalogDir / "providers.json"
   let mut catalogEntries : Array (String × String × String × String × Array (String × String × String)) := #[]
   if (← providersFile.pathExists) then
     if let some raw ← (try some <$> IO.FS.readFile providersFile catch _ => pure none) then
@@ -803,7 +816,7 @@ private def renderProviderCatalogJson (st : CoreStore) (caller : CallerPrincipal
               let pname := (pr.fieldStr? "name").getD pid
               let pbilling := (pr.fieldStr? "billing").getD ""
               let pdesc := (pr.fieldStr? "description").getD ""
-              let snapModels ← loadSnapshotModelsForProvider pid
+              let snapModels ← loadSnapshotModelsForProvider catalogDir pid
               catalogEntries := catalogEntries.push (pid, pname, pbilling, pdesc, snapModels)
   if catalogEntries.isEmpty then
     catalogEntries := fallbackCatalogProviders
@@ -815,6 +828,36 @@ private def renderProviderCatalogJson (st : CoreStore) (caller : CallerPrincipal
         if mid.isEmpty then none else some (mid, (cm.name?.getD mid).trimAscii.toString, "")
       let cDesc := if isAdm then p.baseUrl else ""
       catalogEntries := catalogEntries.push (s!"custom:{p.id}", p.name, "api_key", cDesc, cModels)
+  let hydrated ← loadHydratedProviders st workingDir
+  let discovery ← readDataJsonFile workingDir st.rootDir "model-discovery.json"
+  for hp in hydrated do
+    if hp.enabled && (hp.hasApiKey || hp.hasOAuth) &&
+        (caller.isLegacyUnscoped || isUserProviderEnabled uPrefs hp.id) then
+      let pid := if hp.providerType == "custom" then s!"custom:{hp.id}" else hp.providerType
+      let aliases := #[pid, hp.id, providerSlugOf hp.name]
+      for key in aliases do
+        if !key.isEmpty && !configuredIds.contains key then configuredIds := configuredIds.push key
+      let mut models : Array (String × String × String) := #[]
+      let mut discovered := hp.customModels
+      for connection in (discovery.fieldArr? "connections").getD #[] do
+        if aliases.contains ((connection.fieldStr? "provider_id").getD "") then
+          let success := connection.fieldOrNull "last_success"
+          discovered := discovered ++ (success.fieldArr? "models").getD #[]
+          if success.isNull || success.fieldStr? "completeness" == some "partial" then
+            discovered := discovered ++ (connection.fieldArr? "fallback_models").getD #[]
+      for model in discovered do
+        let mid := ((model.fieldStr? "id").getD "").trimAscii.toString
+        if !mid.isEmpty && !models.any (fun (id, _, _) => id == mid) then
+          models := models.push (mid, (model.fieldStr? "name").getD mid, "")
+      match catalogEntries.findIdx? (fun (id, _, _, _, _) => id == pid) with
+      | some idx =>
+        let (id, name, billing, desc, oldModels) := catalogEntries[idx]!
+        for m in oldModels do
+          if !models.any (fun (mid, _, _) => mid == m.1) then models := models.push m
+        catalogEntries := catalogEntries.set! idx (id, name, billing, desc, models)
+      | none =>
+        catalogEntries := catalogEntries.push (pid, (lookupProviderMeta hp.providerType).name,
+          (if hp.hasOAuth then "subscription" else "api_key"), "", models)
   let provJsons : Array JVal := catalogEntries.map fun (pid, pname, pbilling, pdesc, models) =>
     let mJsons : Array JVal := models.map fun (mid, mname, mdesc) =>
       if mdesc.isEmpty then
@@ -5202,7 +5245,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     return .ok (mkJson 200 backendsJson)
 
   if req.method == "GET" && cleanPath == "/api/providers" then
-    return .ok (mkJson 200 (← renderProviderCatalogJson st.store caller))
+    return .ok (mkJson 200 (← renderProviderCatalogJson st.store st.cfg.workingDir caller))
 
   if cleanPath.startsWith "/api/providers/" || cleanPath == "/api/antigravity-models" then
     if cleanPath != "/api/providers/backend-models" then
@@ -5294,10 +5337,14 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   -- Model Routing Controls (`"/api/model-routing"` / `/api/model-routing/chains`)
   if cleanPath.startsWith "/api/model-routing" then
     let pHub ← match st.providerHub? with | some h => pure h | none => newProviderRuntimeHub
+    let probeBearer? ← if ← authenticateProxyRequest st req.headers nowEpochSec then
+        pure (extractProxyToken? req.headers nowEpochSec)
+      else pure (if st.cfg.proxySecret.isEmpty then none else some st.cfg.proxySecret)
     if let some (mCode, mCtype, mBody) ← dispatchProviderAndAiRoute
         pHub st.store st.cfg.workingDir st.cfg.port st.pacingTracker? st.proxyCooldownsRef
         req.method cleanPath rawTarget req.bodySlice.toByteArray
-        caller.userId (caller.role == "admin") caller.isLegacyUnscoped (healthTracker? := st.healthTracker?) then
+        caller.userId (caller.role == "admin") caller.isLegacyUnscoped (healthTracker? := st.healthTracker?)
+        (probeBearer? := probeBearer?) then
       return .ok { status := mCode, contentType := mCtype, corsOrigin? := reqOrigin?, body := mBody }
     if req.method != "GET" && !caller.isLegacyUnscoped then
       if let some (cCode, cBody) := requireAdminPrincipal caller then

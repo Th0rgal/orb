@@ -3,6 +3,19 @@ import UIKit
 
 // MARK: - Models & Routing (Orb: RoutingSettings.tsx, /api/model-routing)
 
+enum OrbRoutingProvider {
+    static func find(_ catalog: [OrbJSON], _ id: String) -> OrbJSON? {
+        catalog.first { $0.selfID == id } ?? catalog.first {
+            $0.selfID.hasPrefix("custom:") && (String($0.selfID.dropFirst(7)) == id ||
+                $0["name"].text.lowercased().filter { $0.isASCII && ($0.isLetter || $0.isNumber) } == id)
+        }
+    }
+    static func label(_ catalog: [OrbJSON], _ id: String) -> String {
+        guard let provider = find(catalog, id), !provider["name"].text.isEmpty else { return id }
+        return provider["name"].text
+    }
+}
+
 struct OrbRoutingSettings: View {
     @State private var client = OrbSettingsClient()
     @State private var chains: [OrbJSON] = []
@@ -58,7 +71,7 @@ struct OrbRoutingSettings: View {
                         if chain["is_default"].flag { Text("Default").font(.caption2.weight(.bold)).foregroundStyle(OrbStyle.success) }
                     }
                     Text(chain.selfID).font(.caption.monospaced()).foregroundStyle(.secondary)
-                    Text(chain["entries"].items.map { "\($0["provider_id"].text)/\($0["model_id"].text)" }.joined(separator: " → "))
+                    Text(chain["entries"].items.map { "\(OrbRoutingProvider.label(catalog, $0["provider_id"].text))/\($0["model_id"].text)" }.joined(separator: " → "))
                         .font(.caption).foregroundStyle(OrbStyle.textSecondary)
                 }
                 .contextMenu { chainMenu(chain) }
@@ -342,12 +355,14 @@ private struct OrbChainEditor: View {
     }
 
     private func entryRow(_ entry: Binding<OrbChainDraft.Entry>) -> some View {
-        let models = catalog.first { $0.selfID == entry.wrappedValue.provider }?["models"].items ?? []
+        let provider = OrbRoutingProvider.find(catalog, entry.wrappedValue.provider)
+        let models = provider?["models"].items ?? []
+        let selection = Binding(get: { provider?.selfID ?? entry.wrappedValue.provider }, set: { entry.wrappedValue.provider = $0 })
         return VStack(alignment: .leading) {
-            Picker("Provider", selection: entry.provider) {
+            Picker("Provider", selection: selection) {
                 Text("Choose provider").tag("")
-                ForEach(catalog, id: \.selfID) { Text($0["name"].text.isEmpty ? $0.selfID : $0["name"].text).tag($0.selfID) }
-                if !entry.wrappedValue.provider.isEmpty && !catalog.contains(where: { $0.selfID == entry.wrappedValue.provider }) {
+                ForEach(catalog, id: \.selfID) { Text(OrbRoutingProvider.label(catalog, $0.selfID)).tag($0.selfID) }
+                if !entry.wrappedValue.provider.isEmpty && provider == nil {
                     Text(entry.wrappedValue.provider).tag(entry.wrappedValue.provider)
                 }
             }

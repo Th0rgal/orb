@@ -507,10 +507,10 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
               }}
             >
               <span class="routing-grip" draggable title="Drag to reorder" onDragStart={e => { dragged = index; e.dataTransfer?.setData("text/plain", String(index)); if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; }}>⠿</span>
-              <RoutingPicker label={`Provider ${index + 1}`} value={e().provider_id} options={catalog().providers}
+              <RoutingPicker label={`Provider ${index + 1}`} value={e().provider_id} displayValue={routingProviderLabel(catalog().providers, e().provider_id)} options={catalog().providers}
                 onInput={value => entry(index, { provider_id: value })} />
               <RoutingPicker label={`Model ${index + 1}`} value={e().model_id}
-                options={(catalog().providers.find(p => p.id === e().provider_id)?.models ?? []).map(m => ({ ...m, detail: R.modelEvidence(discovery(), e().provider_id, m.id) }))}
+                options={(routingProvider(catalog().providers, e().provider_id)?.models ?? []).map(m => ({ ...m, detail: R.modelEvidence(discovery(), routingProvider(catalog().providers, e().provider_id)?.id ?? e().provider_id, m.id) }))}
                 onInput={value => entry(index, { model_id: value })} />
               <div class="routing-actions">
                 <button
@@ -889,3 +889,4 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
     </div>
   );
 }
+import { routingProvider, routingProviderLabel } from "./routingProvider";

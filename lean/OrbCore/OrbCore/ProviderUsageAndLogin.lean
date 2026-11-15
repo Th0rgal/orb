@@ -318,7 +318,7 @@ def lookupProviderMeta (pType : String) : ProviderTypeMeta :=
   (allProviderTypes.find? (fun m => m.id == low)).getD
     { id := low, name := pType, usesOAuth := false, envVar? := none }
 
-private def readDataJsonFile (workingDir storeRoot relName : String) : IO JVal := do
+def readDataJsonFile (workingDir storeRoot relName : String) : IO JVal := do
   let cands := #[
     s!"{workingDir}/.sandboxed-sh/{relName}",
     s!"{storeRoot}/{relName}"
@@ -516,6 +516,23 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
         updatedAt := (leg.fieldStr? "updated_at").getD nowIso
       }
 
+  -- A connected sidecar login may precede creation of a Core provider row.
+  -- Do not resurrect a stored disabled account or duplicate an existing login.
+  for af in authFiles do
+    let pType := if af.authType == "codex" then "openai" else if af.authType == "claude" then "anthropic" else af.authType
+    if !af.disabled && !out.any (fun hp => hp.oauthFile == af.fileName ||
+        hp.id == af.prefixId || hp.providerType == pType) then
+      out := out.push { (default : HydratedProvider) with
+        id := if af.prefixId.isEmpty then s!"cliproxyapi:{pType}" else af.prefixId
+        name := (lookupProviderMeta pType).name
+        providerType := pType
+        hasOAuth := true
+        oauthToken := af.accessToken
+        oauthFile := af.fileName
+        accountEmail := af.email
+        enabled := true
+        priority := out.size
+      }
   return out.qsort (fun a b => a.priority < b.priority)
 
 def memberProviderDisplayName (hps : Array HydratedProvider) (hp : HydratedProvider) : String := Id.run do
@@ -2233,6 +2250,46 @@ private def clearSidecarAuthFileCooldown (providerId : String) (file : SidecarAu
   if ← tryEnable then return none
   return some (jsonErr 502 s!"CLIProxyAPI login for provider {providerId} was left disabled because re-enabling failed after retry; re-enable it in CLIProxyAPI")
 
+/-- OpenAI-compatible model-list URL; preserve explicit API prefixes. -/
+def customModelsUrl (baseUrl : String) : String := Id.run do
+  let mut base := baseUrl.trimAscii.toString
+  while base.endsWith "/" do base := (base.dropEnd 1).toString
+  if base.endsWith "/models" then return base
+  return base ++ "/models"
+
+/-- Refresh only server-owned custom credentials. Persist allowlisted model metadata,
+    retaining the last successful observation when an upstream is unavailable. -/
+def refreshCustomModelDiscovery (store : CoreStore) (workingDir : String) : IO Unit := do
+  let old ← readDataJsonFile workingDir store.rootDir "model-discovery.json"
+  let mut connections := (old.fieldArr? "connections").getD #[]
+  let stamp := formatEpochIso8601Utc (← nowEpoch)
+  for hp in (← loadHydratedProviders store workingDir) do
+    if hp.providerType == "custom" && hp.enabled && hp.hasApiKey && !hp.baseUrl.isEmpty then
+      let pid := s!"custom:{hp.id}"
+      let previous := (connections.find? (fun c => c.fieldStr? "provider_id" == some pid)).getD (.obj #[])
+      let mut observation := previous.setField "provider_id" (.str pid)
+        |>.setField "access_profile" (.str "api")
+        |>.setField "checked_at" (.str stamp)
+        |>.setField "status" (.str "failed")
+        |>.setField "source" (.str "stale_discovery")
+      match ← sendJsonRequest "GET" (customModelsUrl hp.baseUrl) (some hp.apiKey) none #[] 5000 1048576 with
+      | .ok (code, _, some doc) =>
+        if 200 ≤ code && code < 300 then
+          if let some rows := doc.fieldArr? "data" then
+            let mut models : Array JVal := #[]
+            for row in rows do
+              let id := ((row.fieldStr? "id").getD "").trimAscii.toString
+              if !id.isEmpty && !models.any (fun m => m.fieldStr? "id" == some id) then
+                models := models.push (.obj #[("id", .str id), ("name", .str id)])
+            observation := observation.setField "status" (.str "discovered")
+              |>.setField "source" (.str "discovery")
+              |>.setField "last_success" (.obj #[("observed_at", .str stamp),
+                ("completeness", .str "complete"), ("models", .arr models)])
+      | _ => pure ()
+      connections := (connections.filter (fun c => c.fieldStr? "provider_id" != some pid)).push observation
+  writeDataJsonFile workingDir store.rootDir "model-discovery.json"
+    (.obj #[("schema_version", JVal.nat 1), ("connections", .arr connections)])
+
 /-! ## Unified Dispatcher for AI Providers, Proxy Analytics, Model-Routing Health/Test & Catalog -/
 
 set_option maxHeartbeats 800000 in
@@ -2247,7 +2304,8 @@ def dispatchProviderAndAiRoute
     (bodyBytes : ByteArray)
     (callerUserId : String)
     (isAdmin isLegacyUnscoped : Bool)
-    (healthTracker? : Option ProviderHealthTracker := none) : IO (Option (Nat × String × ByteArray)) := do
+    (healthTracker? : Option ProviderHealthTracker := none)
+    (probeBearer? : Option String := none) : IO (Option (Nat × String × ByteArray)) := do
   let segs := (cleanPath.splitOn "/").filter (!·.isEmpty)
   let qMap := parseQueryMap rawTarget
   let effAdmin := isLegacyUnscoped || isAdmin
@@ -2295,6 +2353,8 @@ def dispatchProviderAndAiRoute
     return some (jsonResp 200 (.obj #[("snapshots", .arr #[])]))
 
   if segs == ["api", "providers", "catalog", "refresh"] && method == "POST" then
+    if !effAdmin then return some (jsonErr 403 "admin_required")
+    refreshCustomModelDiscovery store workingDir
     let _ ← getCachedAntigravityModels hub true
     let nowSec ← nowEpoch
     hub.mu.atomically do
@@ -2624,7 +2684,6 @@ def dispatchProviderAndAiRoute
     let cid := String.intercalate "/" ((segs.drop 3).take (segs.length - 4))
     let testAll := ((qParam? qMap "all").getD "false") == "true"
     let probeModel := if cid.startsWith "builtin/" then cid else s!"builtin/{cid}"
-    let proxyKey := (← lookupEnvWithFiles? "SANDBOXED_PROXY_SECRET").getD ""
     let probeBody : JVal := .obj #[
       ("model", .str probeModel),
       ("max_tokens", JVal.nat 4),
@@ -2632,7 +2691,7 @@ def dispatchProviderAndAiRoute
     ]
     let t0 ← IO.monoMsNow
     match ← sendJsonRequest "POST" s!"http://127.0.0.1:{serverPort}/v1/chat/completions"
-        (if proxyKey.isEmpty then none else some proxyKey) (some probeBody) #[] 15000 262144 with
+        probeBearer? (some probeBody) #[] 15000 262144 with
     | .ok (code, _, jv?) =>
       let dt := (← IO.monoMsNow) - t0
       let okBool := 200 ≤ code && code < 300

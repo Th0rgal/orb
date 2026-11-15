@@ -243,6 +243,7 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
     var chains by remember { mutableStateOf<List<OrbRow>>(emptyList()) }
     var health by remember { mutableStateOf<List<OrbRow>>(emptyList()) }
     var events by remember { mutableStateOf<List<OrbRow>>(emptyList()) }
+    var catalog by remember { mutableStateOf<List<OrbRow>>(emptyList()) }
     var providerLabels by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var showHealthyAccounts by remember { mutableStateOf(false) }
     var showEvents by remember { mutableStateOf(false) }
@@ -265,6 +266,8 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
                 val eTask = async { runCatching { OrbJSON.dictList(core.request("/api/model-routing/events")).mapIndexed { i, d -> OrbRow(d, "ev-$i") } } }
                 val sTask = async { runCatching { OrbJSON.dict(core.request("/api/settings")) } }
                 val pTask = async { runCatching { core.fetchRows("/api/ai/providers", "providers") } }
+                val catalogTask = async { runCatching { core.fetchRows("/api/providers?include_all=true&include_unverified=true", "providers") } }
+                catalogTask.await().onSuccess { catalog = it }.onFailure { if (it is CancellationException) throw it }
 
                 chains = cTask.await().getOrThrow()
                 health = hTask.await().onFailure { if (it is CancellationException) throw it }.getOrDefault(emptyList())
@@ -413,7 +416,7 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
                         chains.forEachIndexed { idx, chain ->
                             var menuOpen by remember(chain.id) { mutableStateOf(false) }
                             val entriesStr = chain.rows("entries").joinToString(" → ") {
-                                "${it.str("provider_id").orEmpty()}/${it.str("model_id").orEmpty()}"
+                                "${OrbRoutingProvider.label(catalog, it.str("provider_id").orEmpty())}/${it.str("model_id").orEmpty()}"
                             }
                             Box {
                                 Column(
@@ -731,16 +734,37 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
                         label = { Text("Name") },
                         modifier = Modifier.fillMaxWidth()
                     )
-                    OutlinedTextField(
-                        value = entriesText.value,
-                        onValueChange = {
-                            entriesText.value = it
+                    parsedEntries.forEachIndexed { index, (providerId, modelId) ->
+                        var providerOpen by remember(index) { mutableStateOf(false) }
+                        var modelOpen by remember(index) { mutableStateOf(false) }
+                        fun update(provider: String, model: String) {
+                            if (busy) return
                             editorError = null
-                        },
-                        enabled = !busy,
-                        label = { Text("Entries (provider/model per line)") },
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 100.dp)
-                    )
+                            entriesText.value = parsedEntries.mapIndexed { i, pair ->
+                                if (i == index) "$provider/$model" else "${pair.first}/${pair.second}"
+                            }.joinToString("\n")
+                        }
+                        Box {
+                            TextButton(enabled = !busy, onClick = { providerOpen = true }) { Text(OrbRoutingProvider.label(catalog, providerId)) }
+                            DropdownMenu(expanded = providerOpen, onDismissRequest = { providerOpen = false }) {
+                                catalog.forEach { provider -> DropdownMenuItem(
+                                    text = { Text(OrbRoutingProvider.label(catalog, provider.id)) },
+                                    onClick = { update(provider.id, modelId); providerOpen = false }) }
+                            }
+                        }
+                        Box {
+                            TextButton(enabled = !busy, onClick = { modelOpen = true }) { Text(modelId) }
+                            DropdownMenu(expanded = modelOpen, onDismissRequest = { modelOpen = false }) {
+                                OrbRoutingProvider.find(catalog, providerId)?.rows("models").orEmpty().forEach { model ->
+                                    DropdownMenuItem(text = { Text(model.str("name") ?: model.id) },
+                                        onClick = { update(providerId, model.id); modelOpen = false })
+                                }
+                            }
+                        }
+                    }
+                    OutlinedTextField(value = entriesText.value, onValueChange = { entriesText.value = it; editorError = null },
+                        enabled = !busy, label = { Text("Entries (provider/model per line)") },
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 100.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("Strip <think> blocks", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
                         Switch(checked = stripThinking, onCheckedChange = { stripThinking = it }, enabled = !busy)
