@@ -1,3 +1,4 @@
+import { ProjectBoardSection } from "./ProjectBoard";
 import { movingOutOf } from "./moves";
 import { renamedTitle } from "./renames";
 import { swallow } from "./log";
@@ -44,7 +45,7 @@ const READ_ONLY_FIELDS: Array<{ key: keyof ProjectGrant; label: string }> = [
 
 /**
  * A project's own settings, opened in the main panel from the sidebar's
- * right-click menu — the same navigation a cron uses, not a modal.
+ * right-click menu.
  *
  * The server-backed writable field is this project's limit on unfinished agents, which
  * `create_mission` enforces by counting the project's own unfinished missions
@@ -52,7 +53,7 @@ const READ_ONLY_FIELDS: Array<{ key: keyof ProjectGrant; label: string }> = [
  * limit from the backend-wide one in Execution settings, which this page only
  * links to.
  */
-export function ProjectSettings(p: { slug: string; onOpenPage: (id: string) => void; onOpenMission: (id: string) => void }) {
+export function ProjectSettings(p: { slug: string; selectedMission?: Mission | null; missionHint?: { id: string }; onOpenPage: (id: string) => void; onOpenMission: (id: string) => void }) {
   const [grant, setGrant] = createSignal<ProjectGrant | null>(null);
   const [title, setTitle] = createSignal<string | null>(null);
   const [missions, setMissions] = createSignal<Mission[]>([]);
@@ -187,6 +188,7 @@ export function ProjectSettings(p: { slug: string; onOpenPage: (id: string) => v
         <p class="s-lead">
           Project settings
         </p>
+        <ProjectBoardSection slug={p.slug} selectedMission={p.selectedMission} missionHint={p.missionHint} onOpenMission={p.onOpenMission} />
         <ErrorToast error={error()} title="Couldn’t load project settings" background />
         <Show when={loaded()} fallback={<ControllerSkeleton />}>
           <section class="s-sec">

@@ -106,8 +106,8 @@ const HARNESS_META: Record<
   hermes: {
     name: "Hermes Coordinator",
     globalRel: "/var/lib/hermes-assistant/skills",
-    projectRel: "Cron skills[]",
-    mechanism: "Preloads skills attached to each project controller cron on Core",
+    projectRel: "Mission skills",
+    mechanism: "Preloads skills attached to missions on Core",
   },
 };
 

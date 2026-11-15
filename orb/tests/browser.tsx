@@ -1,6 +1,6 @@
 import { render } from "solid-js/web";
 import { createSignal, Show } from "solid-js";
-import { ControllerView } from "../src/Controller";
+import { ProjectBoardSection } from "../src/ProjectBoard";
 import { LiveProjectsSection } from "../src/ProjectFiles";
 import "../src/styles.css";
 localStorage.setItem("orb.apiUrl", window.location.origin);
@@ -19,7 +19,7 @@ function Harness() {
       <a href="#notes">Project link</a><input disabled aria-label="Disabled field" /></div>
     </aside>
     <main style={{ flex: 1, "min-width": 0, overflow: "auto" }}>
-      <Show when={selected() && visible()}><ControllerView slug="notes" id={selected()!.split(":")[2]} /></Show>
+      <Show when={selected() && visible()}><ProjectBoardSection slug="notes" onOpenMission={id => setSelected(`m:${id}`)} /></Show>
     </main>
   </div>;
 }

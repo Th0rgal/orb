@@ -4,9 +4,7 @@ import {
   connectionVersion,
   getApiUrl,
   getJwt,
-  listProjectCrons,
   normalizeMissionFolder,
-  updateProjectCron,
   type Mission,
   type MissionPlacementItem,
 } from "./api";
@@ -15,14 +13,11 @@ import { localContextFile } from "./projectContext";
 import { applyServerPlacementEvent, moveMission, moveMissions, planMissionMoves } from "./missionMove";
 
 export interface FileClipboard { slug: string; path: string; copy: boolean; directory?: boolean; backend: string; account: string; nonce: string }
-export interface CronClipboard { slug: string; id: string; name: string; folder?: string; backend: string; account: string; nonce: string }
 export type ClipboardItem =
   | { kind: "file"; slug: string; path: string; directory?: boolean }
-  | { kind: "cron"; slug: string; id: string; name: string; folder?: string }
   | { kind: "mission"; id: string };
 export interface ItemsClipboard { items: ClipboardItem[]; copy: boolean; backend: string; account: string; nonce: string }
 const prefix = "orb:file:";
-const cronPrefix = "orb:cron:";
 const itemsPrefix = "orb:items:";
 function clipboardAccount(): string {
   try {
@@ -93,19 +88,6 @@ export function readFileReference(text: string): FileClipboard | null {
     return value.backend === getApiUrl() && value.account === clipboardAccount() && typeof value.slug === "string" && typeof value.path === "string" && typeof value.copy === "boolean" && ["undefined", "boolean"].includes(typeof value.directory) && typeof value.nonce === "string" ? value : null;
   } catch { return null; }
 }
-export function makeCronReference(slug: string, id: string, name: string, folder?: string): string {
-  return cronPrefix + JSON.stringify({ slug, id, name, ...(folder ? { folder } : {}), backend: getApiUrl(), account: clipboardAccount(), nonce: crypto.randomUUID() });
-}
-export async function copyCronReference(slug: string, id: string, name: string, folder?: string, clipboardData?: DataTransfer | null): Promise<string> {
-  return writeClipboardReference(makeCronReference(slug, id, name, folder), clipboardData);
-}
-export function readCronReference(text: string): CronClipboard | null {
-  if (!text.startsWith(cronPrefix)) return null;
-  try {
-    const value = JSON.parse(text.slice(cronPrefix.length));
-    return value.backend === getApiUrl() && value.account === clipboardAccount() && typeof value.slug === "string" && typeof value.id === "string" && typeof value.name === "string" && typeof value.nonce === "string" ? value : null;
-  } catch { return null; }
-}
 export function makeItemsReference(items: ClipboardItem[], copy: boolean): string {
   return itemsPrefix + JSON.stringify({ items, copy, backend: getApiUrl(), account: clipboardAccount(), nonce: crypto.randomUUID() });
 }
@@ -131,24 +113,20 @@ const missionFolderIn = (slug: string, path: string, mission: Mission) => {
   return norm && containsFolder(path, norm) ? norm : undefined;
 };
 
-/** Synchronous check against missions and crons already loaded in memory. */
+/** Synchronous check against missions already loaded in memory. */
 export function folderWorkError(
   slug: string,
   path: string,
   knownMissions: readonly Mission[],
-  knownCrons: readonly { folder?: string | null }[] = [],
   action = "deleting",
 ): string | null {
   if (knownMissions.some(mission => missionFolderIn(slug, path, mission) !== undefined)) {
     return `Move the agents out of this folder before ${action} it.`;
   }
-  if (knownCrons.some(job => containsFolder(path, job.folder ?? ""))) {
-    return `Move or delete the crons in this folder before ${action} it.`;
-  }
   return null;
 }
 
-/** Agents and crons filed in a folder or below it. */
+/** Agents filed in a folder or below it. */
 async function folderWork(slug: string, path: string, first = false) {
   const normPrefix = normalizeMissionFolder(path);
   const version = connectionVersion();
@@ -163,7 +141,7 @@ async function folderWork(slug: string, path: string, first = false) {
     }
   };
   if (!first) {
-    const [, , rawCrons] = await Promise.all([
+    await Promise.all([
       import("./localOrigins").then(m => m.localOrigins()).then(local => { checkConnection(); collect(local); }),
       (async () => {
         for (let offset = 0; ; offset += 200) {
@@ -173,40 +151,35 @@ async function folderWork(slug: string, path: string, first = false) {
           if (page.length < 200) break;
         }
       })(),
-      listProjectCrons(slug),
     ]);
     checkConnection();
-    return { missions, allMissions: [...allById.values()], crons: rawCrons.filter(job => containsFolder(path, job.folder ?? "")) };
+    return { missions, allMissions: [...allById.values()] };
   }
   collect(await import("./localOrigins").then(m => m.localOrigins()));
   checkConnection();
-  if (missions.size) return { missions, allMissions: [] as Mission[], crons: [] };
+  if (missions.size) return { missions, allMissions: [] as Mission[] };
   for (let offset = 0; ; offset += 200) {
     const page = await api<Mission[]>(
       `/api/control/missions?project=${encodeURIComponent(slug)}&folder_prefix=${encodeURIComponent(normPrefix)}&limit=${first ? 1 : 200}&offset=${offset}&all=true`,
     );
     checkConnection();
     collect(page);
-    if (first && missions.size) return { missions, allMissions: [] as Mission[], crons: [] };
+    if (first && missions.size) return { missions, allMissions: [] as Mission[] };
     if (page.length < (first ? 1 : 200)) break;
   }
-  const crons = (await listProjectCrons(slug)).filter(job => containsFolder(path, job.folder ?? ""));
-  checkConnection();
-  return { missions, allMissions: [] as Mission[], crons };
+  return { missions, allMissions: [] as Mission[] };
 }
 
 /** Keep executable work visible: removing documents must not orphan its folder. */
 export async function assertFolderHasNoWork(slug: string, path: string, action = "deleting"): Promise<void> {
   const work = await folderWork(slug, path, true);
   if (work.missions.size) throw new Error(`Move the agents out of this folder before ${action} it.`);
-  if (work.crons.length) throw new Error(`Move or delete the crons in this folder before ${action} it.`);
 }
 
 /** Fallback helper for local-context or cross-project folder moves; server-side `transfer_file` cascades same-project moves automatically. */
 export async function moveFolderWork(slug: string, path: string, destination: string, targetSlug = slug): Promise<void> {
   const normPath = normalizeMissionFolder(path);
   const normDest = normalizeMissionFolder(destination);
-  const cross = targetSlug !== slug;
   const work = await folderWork(slug, normPath);
   const failed: string[] = [];
   const target = (folder: string) => normalizeMissionFolder(normDest + folder.slice(normPath.length));
@@ -229,20 +202,5 @@ export async function moveFolderWork(slug: string, path: string, destination: st
     }
     for (const f of missionFailures) failed.push(f.id.slice(0, 8));
   }
-  await Promise.all(
-    work.crons.map(job => {
-      const nextFolder = target(job.folder ?? "");
-      return updateProjectCron(slug, job.id, {
-        ...(cross ? { project: targetSlug } : {}),
-        folder: nextFolder,
-      }).then(() => {
-        if (cross) {
-          window.dispatchEvent(new CustomEvent("orb:cron-changed", {
-            detail: { slug, id: job.id, targetSlug, folder: nextFolder },
-          }));
-        }
-      }).catch(() => { failed.push(job.name); });
-    }),
-  );
   if (failed.length) throw new Error(`The folder moved, but ${failed.join(", ")} could not follow. They remain visible under the previous path; move them to ${normDest}.`);
 }

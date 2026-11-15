@@ -1,0 +1,84 @@
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { createSignal } from "solid-js";
+import { fireEvent, render, waitFor } from "@solidjs/testing-library";
+import * as api from "../src/api";
+import { ProjectBoardSection } from "../src/ProjectBoard";
+import { SteerComposer } from "../src/SteerComposer";
+const project = { slug: "notes", status: "active", updated_at: "", controller_mission_id: null } as api.ProjectSummary;
+const mission = { id: "m1", title: "Plan next release", project: "notes", status: "running", history: [], created_at: "", updated_at: "" } as api.Mission;
+const board = { text: "# Plan\n<script>alert(1)</script>", updated_at: "2026-11-15T10:00:00Z", updated_by_mission_id: "m1", controller_mission_id: "m1" };
+beforeEach(() => {
+  vi.spyOn(api, "isConnected").mockReturnValue(true);
+  vi.spyOn(api, "getProject").mockResolvedValue(project);
+  vi.spyOn(api, "getProjectBoard").mockResolvedValue(null);
+  vi.spyOn(api, "getMission").mockResolvedValue(mission);
+  vi.spyOn(api, "setProjectControllerMission").mockResolvedValue(true);
+});
+afterEach(() => vi.restoreAllMocks());
+it("shows a reserved board skeleton while loading", async () => {
+  let resolve!: (p: api.ProjectSummary) => void;
+  vi.mocked(api.getProject).mockImplementation(() => new Promise(r => { resolve = r; }));
+  const ui = render(() => <ProjectBoardSection slug="notes" onOpenMission={() => {}} />);
+  expect(ui.getByRole("status", { name: "Loading board" })).toBeTruthy();
+  resolve(project); await waitFor(() => expect(ui.queryByRole("status", { name: "Loading board" })).toBeNull());
+});
+it("renders nothing on a Core without the contract", async () => {
+  vi.mocked(api.getProject).mockResolvedValue(null);
+  const ui = render(() => <ProjectBoardSection slug="notes" onOpenMission={() => {}} />);
+  await waitFor(() => expect(ui.container.textContent).toBe(""));
+  expect(api.getProjectBoard).not.toHaveBeenCalled();
+});
+it("shows No controller and disables the composer with a hint", async () => {
+  const ui = render(() => <ProjectBoardSection slug="notes" onOpenMission={() => {}} />);
+  await ui.findByText("No controller");
+  expect((ui.getByRole("textbox", { name: "Message controller" }) as HTMLTextAreaElement).disabled).toBe(true);
+  expect(ui.getByText("Set a controller mission to send it a message.")).toBeTruthy();
+  expect((ui.getByRole("button", { name: "Clear" }) as HTMLButtonElement).disabled).toBe(true);
+});
+it("renders board content as safe preformatted text with its time and opens the mission", async () => {
+  vi.mocked(api.getProject).mockResolvedValue({ ...project, controller_mission_id: "m1" });
+  vi.mocked(api.getProjectBoard).mockResolvedValue(board);
+  const open = vi.fn();
+  const ui = render(() => <ProjectBoardSection slug="notes" onOpenMission={open} />);
+  await waitFor(() => expect(ui.container.querySelector("pre")?.textContent).toBe(board.text));
+  expect(ui.container.querySelector("script")).toBeNull();
+  expect(ui.container.querySelector("time")?.dateTime).toBe(board.updated_at);
+  expect(ui.getByText("running")).toBeTruthy();
+  fireEvent.click(ui.getByRole("button", { name: mission.title! })); expect(open).toHaveBeenCalledWith("m1");
+});
+it("only offers the selected mission of this project, saves, and clears", async () => {
+  const [selected, setSelected] = createSignal<api.Mission>( { ...mission, project: "other" });
+  const ui = render(() => <ProjectBoardSection slug="notes" selectedMission={selected()} onOpenMission={() => {}} />);
+  await ui.findByText("No controller");
+  const button = ui.getByRole("button", { name: "Use selected mission" }) as HTMLButtonElement;
+  expect(button.disabled).toBe(true); setSelected(mission); expect(button.disabled).toBe(false);
+  fireEvent.click(button); await waitFor(() => expect(api.setProjectControllerMission).toHaveBeenCalledWith("notes", "m1"));
+  await ui.findByRole("button", { name: mission.title! });
+  await waitFor(() => expect((ui.getByRole("button", { name: "Clear" }) as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(ui.getByRole("button", { name: "Clear" }));
+  await waitFor(() => expect(api.setProjectControllerMission).toHaveBeenCalledWith("notes", null));
+  await ui.findByText("No controller");
+});
+it("refetches the board on a controller status change using presentation hints", async () => {
+  vi.mocked(api.getProject).mockResolvedValue({ ...project, controller_mission_id: "m1" });
+  const [hint, setHint] = createSignal<{ id: string }>();
+  const ui = render(() => <ProjectBoardSection slug="notes" missionHint={hint()} onOpenMission={() => {}} />);
+  await ui.findByText("running"); await waitFor(() => expect(api.getProjectBoard).toHaveBeenCalledTimes(1));
+  setHint({ id: "other" }); expect(api.getMission).toHaveBeenCalledTimes(1);
+  setHint({ id: "m1" }); await waitFor(() => expect(api.getMission).toHaveBeenCalledTimes(2));
+  expect(api.getProjectBoard).toHaveBeenCalledTimes(1);
+  vi.mocked(api.getMission).mockResolvedValue({ ...mission, status: "completed" });
+  setHint({ id: "m1" }); await ui.findByText("completed");
+  await waitFor(() => expect(api.getProjectBoard).toHaveBeenCalledTimes(2));
+});
+it("keeps failed steering drafts and retries through the ordinary message API", async () => {
+  const send = vi.spyOn(api, "sendMissionMessage").mockRejectedValueOnce(new Error("Offline")).mockResolvedValue({ id: "receipt", queued: true });
+  const ui = render(() => <SteerComposer missionId="m1" onReplacement={async () => {}} />);
+  const input = ui.getByRole("textbox", { name: "Message controller" }) as HTMLTextAreaElement;
+  fireEvent.input(input, { target: { value: "Check the release" } }); fireEvent.click(ui.getByRole("button", { name: "Send message" }));
+  await ui.findByText("Offline"); expect(input.value).toBe("Check the release");
+  fireEvent.click(ui.getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(input.value).toBe(""));
+  expect(send).toHaveBeenCalledTimes(2); expect(send.mock.calls[0].slice(0, 2)).toEqual(["m1", "Check the release"]);
+  expect(send.mock.calls[0][3]).toBe(send.mock.calls[1][3]);
+});

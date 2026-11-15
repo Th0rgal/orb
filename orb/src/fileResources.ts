@@ -6,8 +6,6 @@ import {
   getApiUrl,
   listProjectFiles,
   readProjectFile,
-  getProjectController,
-  getProjectCron,
   getJwt,
   connectionVersion,
   isClientPlacement,
@@ -18,7 +16,6 @@ import { imageByteLimit, imageMime } from "./imageTypes";
 export interface FileScope {
   mission?: Mission | null;
   project?: string;
-  controller?: string;
 }
 export interface FileSource {
   id: string;
@@ -69,7 +66,7 @@ export interface FileOp {
   offset?: number;
 }
 export const fileScopeKey = (s: FileScope) =>
-  `${getApiUrl()}:${s.mission?.id ?? `project:${s.project ?? ""}:controller:${s.controller ?? ""}`}${s.mission?.machine_transfer ? `:transfer:${s.mission.machine_transfer.id}` : ""}`;
+  `${getApiUrl()}:${s.mission?.id ?? `project:${s.project ?? ""}`}${s.mission?.machine_transfer ? `:transfer:${s.mission.machine_transfer.id}` : ""}`;
 export function createFileClient(scope: FileScope) {
   const project = scope.mission?.project ?? scope.project;
   const endpoint = getApiUrl(), version = connectionVersion(), token = getJwt();
@@ -92,16 +89,9 @@ export function createFileClient(scope: FileScope) {
       }),
     });
   let sources: FileSource[] = [];
-  let controllerText: string | undefined;
   const artifacts = new Map<string, string>();
 
   async function roots() {
-    const controllerPromise = project
-      ? (scope.controller
-          ? getProjectCron(project, scope.controller)
-          : getProjectController(project, 1)
-        ).catch(() => null)
-      : Promise.resolve(null);
     const eventsPromise = scope.mission
       ? api<unknown>(
           `/api/control/missions/${scope.mission.id}/events?limit=4000&types=assistant_message&include_counts=false&exclude_content=true`,
@@ -110,7 +100,7 @@ export function createFileClient(scope: FileScope) {
         ).catch(() => null)
       : Promise.resolve(null);
     try {
-      sources = (await server("", { action: "roots" })).sources ?? [];
+      sources = ((await server("", { action: "roots" })).sources ?? []).filter(source => source.id !== "controller");
     } catch (e) {
       // Only a missing route enables compatibility. Auth/network errors remain errors.
       if (!(e instanceof Error) || !/404|405/.test(e.message)) throw e;
@@ -139,15 +129,7 @@ export function createFileClient(scope: FileScope) {
         available: true,
         local: true,
       });
-    const [c, rows] = await Promise.all([controllerPromise, eventsPromise]);
-    if (c?.settings?.prompt) {
-      controllerText = c.settings.prompt;
-      sources.push({
-        id: "controller",
-        label: "Controller · current",
-        available: true,
-      });
-    }
+    const rows = await eventsPromise;
     if (rows) {
       try {
         const events = Array.isArray(rows)
@@ -187,15 +169,10 @@ export function createFileClient(scope: FileScope) {
   async function call(source: string, op: FileOp): Promise<FileReply> {
     const root = sources.find((s) => s.id === source);
     if (!root?.available) throw new Error(unavailableReason(source, root));
-    if (source === "controller" || source === "artifacts") {
-      const entries: FileEntry[] =
-        source === "controller"
-          ? [{ name: "controller.md", path: "controller.md", kind: "file" }]
-          : [...artifacts.keys()].map((name) => ({
-              name,
-              path: name,
-              kind: "file",
-            }));
+    if (source === "artifacts") {
+      const entries: FileEntry[] = [...artifacts.keys()].map((name) => ({
+        name, path: name, kind: "file",
+      }));
       if (op.action === "list") return { entries };
       if (op.action === "search")
         return {
@@ -212,16 +189,11 @@ export function createFileClient(scope: FileScope) {
         };
       if (!entries.some((e) => e.path === op.path))
         throw new Error("File unavailable");
-      let bytes: Uint8Array;
-      if (source === "controller")
-        bytes = new TextEncoder().encode(controllerText ?? "");
-      else {
-        const response = await fetch(artifacts.get(op.path!)!, {
-          headers: { Authorization: `Bearer ${getJwt() ?? ""}` },
-        });
-        if (!response.ok) throw new Error("Artifact unavailable");
-        bytes = new Uint8Array(await response.arrayBuffer());
-      }
+      const response = await fetch(artifacts.get(op.path!)!, {
+        headers: { Authorization: `Bearer ${getJwt() ?? ""}` },
+      });
+      if (!response.ok) throw new Error("Artifact unavailable");
+      const bytes = new Uint8Array(await response.arrayBuffer());
       const offset = op.offset ?? 0,
         part = bytes.slice(offset, offset + 1024 * 1024);
       if (op.action === "download")

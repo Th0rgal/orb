@@ -51,7 +51,7 @@ const IDENT = /^[A-Za-z0-9_.:/+@-]{1,120}$/;
 export function screenName(page: string | null): string {
   if (page == null) return "home";
   const kind = /^(m|ms|pf|c|pc|ps|rm):/.exec(page)?.[1];
-  return kind ? ({ m: "mission", ms: "mission_settings", pf: "project_file", c: "conversation", pc: "project_cron", ps: "project_settings", rm: "resources_mission" } as Record<string, string>)[kind] : page;
+  return kind ? ({ m: "mission", ms: "mission_settings", pf: "project_file", c: "conversation", ps: "project_settings", rm: "resources_mission" } as Record<string, string>)[kind] : page;
 }
 
 export function createUsageTelemetry(o: { transport: Transport; client?: string; appVersion?: string; now?: () => number }) {

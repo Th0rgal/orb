@@ -1,0 +1,17 @@
+.project-board { height: 240px; overflow: auto; padding: 14px; }
+.project-board pre { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.5; }
+.project-board time, .project-board-hint { color: var(--fg-3); font-size: 12px; }
+.project-board-hint { min-height: 36px; }
+.project-board-hint, .project-board-error { margin: 0; padding: 10px 14px; }
+.project-board-error { color: var(--red); }
+.project-board-skeleton { min-height: 130px; display: flex; flex-direction: column; gap: 12px; padding-top: 8px; }
+.project-board-skeleton span { display: block; height: 12px; background: var(--bg-active); border-radius: 3px; width: 90%; }
+.project-board-skeleton span:nth-child(2) { width: 75%; }
+.project-board-skeleton span:nth-child(3) { width: 55%; }
+.project-steer { padding: 14px; border-top: 1px solid var(--stroke); }
+.project-steer textarea { width: 100%; min-height: 78px; resize: vertical; }
+.project-steer > button { margin-top: 10px; margin-right: 8px; }
+
+.project-controller .s-row-text { flex: none; }
+.project-controller .s-row-ctrl { flex-wrap: wrap; min-height: 32px; }
+.project-controller .s-row-ctrl .s-btn { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
