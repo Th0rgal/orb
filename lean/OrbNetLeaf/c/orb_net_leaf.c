@@ -59,8 +59,10 @@ static int onl_connect_sock(const char *h, uint16_t port, int socktype, uint32_t
     if (getaddrinfo(h, pstr, &hints, &res) != 0 || !res) return errno = EINVAL, -1;
     int fd = -1, saved = EIO; uint32_t ms = timeout_ms ? timeout_ms : 30000U; int pms = ms > 0x7FFFFFFFU ? 0x7FFFFFFF : (int)ms, cms = pms > 2000 ? 2000 : pms;
     struct timeval tv = { .tv_sec = (time_t)(ms / 1000U), .tv_usec = (suseconds_t)((ms % 1000U) * 1000U) };
-    for (int pass = 0; pass < 2 && fd < 0; ++pass) for (struct addrinfo *ai = res; ai && fd < 0; ai = ai->ai_next)
-        if ((ai->ai_family != AF_INET) == (pass == 0)) { fd = onl_try_sock(ai, (ai->ai_next || pass == 0) ? cms : pms, &tv, socktype); if (fd < 0) saved = errno; }
+    for (struct addrinfo *ai = res; ai && fd < 0; ai = ai->ai_next) {
+        fd = onl_try_sock(ai, ai->ai_next ? cms : pms, &tv, socktype);
+        if (fd < 0) saved = errno;
+    }
     return freeaddrinfo(res), errno = saved, fd;
 }
 LEAN_EXPORT lean_obj_res orb_net_leaf_tcp_connect(b_lean_obj_arg host, uint16_t port, uint32_t timeout_ms) { const char *h = onl_cstr(host); return onl_pack(h ? onl_connect_sock(h, port, SOCK_STREAM, timeout_ms) : (errno = EINVAL, -1)); }
@@ -167,8 +169,8 @@ LEAN_EXPORT lean_obj_res orb_net_leaf_tls_open(b_lean_obj_arg host, uint16_t por
     if (ok) ok = SSL_CTX_set_alpn_protos(s->ctx, alpn_mode == 1 ? h2_alpn : h1_alpn, alpn_mode == 1 ? 3 : 9) == 0;
     uint32_t ms = timeout_ms ? timeout_ms : 30000U; int pms = ms > 0x7FFFFFFFU ? 0x7FFFFFFF : (int)ms, cms = pms > 2000 ? 2000 : pms;
     struct timeval tv = { .tv_sec = (time_t)(ms / 1000U), .tv_usec = (suseconds_t)((ms % 1000U) * 1000U) }; unsigned char ipb[16]; int is_ip = inet_pton(AF_INET, h, ipb) == 1 || inet_pton(AF_INET6, h, ipb) == 1;
-    for (int pass = 0; ok && pass < 2 && !conn && !no_h2; ++pass) for (struct addrinfo *ai = res; ai && !conn && !no_h2; ai = ai->ai_next)
-        if ((ai->ai_family != AF_INET) == (pass == 0) && (s->fd = onl_try_sock(ai, (ai->ai_next || pass == 0) ? cms : pms, &tv, SOCK_STREAM)) >= 0) {
+    for (struct addrinfo *ai = res; ok && !conn && !no_h2 && ai; ai = ai->ai_next)
+        if ((s->fd = onl_try_sock(ai, ai->ai_next ? cms : pms, &tv, SOCK_STREAM)) >= 0) {
             if ((s->ssl = SSL_new(s->ctx)) != NULL && (is_ip ? (!verify_peer || X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(s->ssl), h) == 1) : (SSL_set_tlsext_host_name(s->ssl, h) == 1 && (!verify_peer || SSL_set1_host(s->ssl, h) == 1))) && SSL_set_fd(s->ssl, s->fd) == 1 && SSL_connect(s->ssl) == 1) {
                 const unsigned char *sel = NULL; unsigned int slen = 0; if (alpn_mode == 1) SSL_get0_alpn_selected(s->ssl, &sel, &slen);
                 if (alpn_mode == 1 && !(slen == 2 && sel && sel[0] == 'h' && sel[1] == '2')) no_h2 = 1; else conn = 1;
