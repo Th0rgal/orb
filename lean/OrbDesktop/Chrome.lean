@@ -22,6 +22,34 @@ namespace OrbDesktop
 open LeanUI
 open LeanUI.Widgets
 
+/-- Chrome SVG strokes from `orb/src/icons.tsx`, in tenths of a 16px view box. -/
+def chromeIconPaths (name : String) : List (List (Int × Int)) :=
+  match name with
+  | "nav:new" => [[(25,30),(135,30),(95,82),(95,130),(65,114),(65,82),(25,30)]]
+  | "nav:inbox" => [[(22,92),(37,35),(49,26),(111,26),(123,35),(138,92),(138,123),(126,135),(34,135),(22,123),(22,92)],[(23,93),(57,93),(66,108),(94,108),(103,93),(137,93)]]
+  | "nav:machines" => [[(35,24),(125,24),(140,39),(140,91),(125,106),(35,106),(20,91),(20,39),(35,24)],[(80,106),(80,128)],[(52,136),(108,136)]]
+  | "nav:inference" | "s:models" => [[(80,24),(134,54),(134,106),(80,136),(26,106),(26,54),(80,24)],[(26,54),(80,84),(134,54)],[(80,84),(80,136)]]
+  | "nav:resources" => [[(24,42),(48,42),(62,48),(80,70),(100,80),(136,80)],[(24,118),(48,118),(62,112),(80,90),(100,80)],[(116,58),(138,80),(116,102)]]
+  | "nav:cloud" => [[(42,125),(25,121),(16,108),(17,92),(26,79),(43,73),(51,53),(68,44),(87,45),(104,56),(111,73),(126,74),(140,86),(143,103),(135,119),(122,125),(42,125)]]
+  | "nav:settings" | "s:account" => [[(100,80),(94,94),(80,100),(66,94),(60,80),(66,66),(80,60),(94,66),(100,80)],[(80,18),(92,36),(113,32),(120,52),(139,62),(130,80),(139,98),(120,108),(113,128),(92,124),(80,142),(68,124),(47,128),(40,108),(21,98),(30,80),(21,62),(40,52),(47,32),(68,36),(80,18)]]
+  | "s:back" | "back" => [[(130,80),(30,80)],[(70,40),(30,80),(70,120)]]
+  | "forward" => [[(30,80),(130,80)],[(90,40),(130,80),(90,120)]]
+  | "sidebar" => [[(40,30),(120,30),(140,40),(140,120),(120,130),(40,130),(20,120),(20,40),(40,30)],[(60,30),(60,130)]]
+  | "search" => [[(114,72),(108,93),(93,108),(72,114),(51,108),(36,93),(30,72),(36,51),(51,36),(72,30),(93,36),(108,51),(114,72)],[(104,104),(135,135)]]
+  | "s:security" => [[(84,80),(77,97),(60,104),(43,97),(36,80),(43,63),(60,56),(77,63),(84,80)],[(82,80),(134,80),(121,94)],[(112,80),(112,96)]]
+  | "s:notifs" => [[(80,26),(60,32),(48,58),(48,79),(32,104),(128,104),(112,79),(112,58),(100,32),(80,26)],[(64,124),(70,135),(90,135),(96,124)]]
+  | "s:agents" => [[(80,20),(140,50),(80,80),(20,50),(80,20)],[(20,80),(80,110),(140,80)],[(20,110),(80,140),(140,110)]]
+  | "mission" => [[(40,55),(120,55),(130,65),(130,115),(30,115),(30,65),(40,55)],[(80,55),(80,30),(60,30)],[(55,75),(55,90)],[(105,75),(105,90)],[(10,75),(10,95)],[(150,75),(150,95)]]
+  | "plus" => [[(40,80),(120,80)],[(80,40),(80,120)]]
+  | "file" => [[(42,24),(94,24),(120,52),(120,136),(108,148),(42,148),(30,136),(30,36),(42,24)],[(92,25),(92,53),(120,53)]]
+  | "chat" => [[(30,110),(20,140),(60,120),(100,120),(130,100),(140,70),(130,40),(100,20),(60,20),(30,40),(20,70),(30,110)],[(50,60),(110,60)],[(50,85),(90,85)]]
+  | "list" => [[(30,40),(130,40)],[(30,80),(100,80)],[(30,120),(130,120)]]
+  | _ => [[(20,48),(20,38),(28,30),(61,30),(76,46),(122,46),(140,64),(140,114),(132,132),(38,132),(20,114),(20,48)]]
+
+def chromeIcon (name : String) (color : Color) (size : Nat := 16) : WidgetNode :=
+  .mk none false false (BoxStyle.row 0 |>.withFixedSize (pxToSub size) (pxToSub size))
+    (.vectorIcon (chromeIconPaths name) color) []
+
 /-- Semantic status indicator color for a sidebar row or mission status string. -/
 @[inline] def statusBadgeColor (pal : Palette) (status : String) : Color :=
   match status with
@@ -49,7 +77,7 @@ def chromeLabel (lineH : SubPx) (runs : List InlineRun) (grow : Nat := 0) : Widg
 
 /-- Build one sidebar row (`.row`, `.section` or `.gear-btn` of the SolidJS desktop): `30 px`
 tall with `6 px` corners, a `16 px` icon slot (`18 px` for a mission, holding its status dot),
-the label, and an optional count pill and shortcut hint. Icons are not drawn yet. -/
+ the label, and an optional count pill and shortcut hint. -/
 def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarRow)
     (margin : Edges := {}) : WidgetNode :=
   let pal := theme.palette
@@ -61,25 +89,25 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
         |>.withPadding (Edges.trbl 0 (pxToSub 8) 0 (pxToSub 10))
         |>.withMargin margin
         |>.withFixedSize innerW (pxToSub 18))
-      [chromeLabel small.lineHeightSub [overlaySynthRun small row.title]]
+       [chromeLabel small.lineHeightSub [overlaySynthRun small row.title] 1,
+        chromeIcon "plus" pal.textFaint 14]
   else
     let isFooter := row.kind == "footer"
     let isMission := row.kind == "mission"
     let padLeft : SubPx :=
       if isFooter then pxToSub 8
-      else if row.kind == "nav" then pxToSub 6
+      else if row.kind == "nav" then (if row.rowId.startsWith "s:" then pxToSub 11 else pxToSub 6)
       else pxToSub 10 + row.depth * pxToSub 16
     let padRight : SubPx := if isFooter then pxToSub 8 else pxToSub 6
     let leadSize : SubPx := if isMission then pxToSub 18 else pxToSub 16
+    let projectRunning := row.kind == "project" && ((row.rowId.drop 5).toString.toNat?.getD 99) < 8
     let lead : WidgetNode :=
-      WidgetNode.box
-        (BoxStyle.row 0 |>.withAlign .«end» |>.withJustify .end_ |>.withFixedSize leadSize leadSize)
-        (if row.status.isEmpty || row.status == "muted" then []
-         else
-          [WidgetNode.rrect
-            (BoxStyle.row 0 |>.withFixedSize (pxToSub 8) (pxToSub 8))
-            (statusBadgeColor pal row.status)
-            (CornerRadii.uniform (pxToSub 4))])
+      .mk none false false
+        (BoxStyle.row 0 |>.withAlign .center |>.withFixedSize leadSize leadSize)
+        (.treeDecoration isMission row.selected pal.borderSubtle
+          (if isMission then statusBadgeColor pal row.status else if projectRunning then pal.accent else 0)
+          (if row.selected then pal.rowActive else pal.sidebar))
+        [chromeIcon (if isMission then "mission" else row.rowId) pal.textMuted]
     let labelColor : Color :=
       if isFooter then (if row.selected then pal.textPrimary else pal.textSecondary)
       else if row.selected then pal.textStrong
@@ -113,7 +141,11 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
         (if row.selected && !isFooter then pal.rowActive else 0x00000000)
         (CornerRadii.uniform (if isFooter then pxToSub 8 else pxToSub 6))
         BorderStyle.none
-        ([lead, chromeLabel labelStyle.lineHeightSub [overlaySynthRun labelStyle row.title] 1]
+        ([lead, if isMission then
+            WidgetNode.text
+              { (BoxStyle.row 0 |>.withFixedSize (innerW - padLeft - padRight - leadSize - pxToSub 8) labelStyle.lineHeightSub) with clip := true }
+              labelStyle.lineHeightSub [overlaySynthRun labelStyle row.title]
+          else chromeLabel labelStyle.lineHeightSub [overlaySynthRun labelStyle row.title] 1]
           ++ badge ++ shortcut)
         (some row.widgetId)
 
@@ -125,7 +157,8 @@ def referenceSidebarRows (scr : ScreenId) : List ChromeSidebarRow :=
     , { widgetId := 111, rowId := "s:models", kind := "nav", title := "Models" }
     , { widgetId := 112, rowId := "s:agents", kind := "nav", title := "Agents" }
     , { widgetId := 113, rowId := "s:security", kind := "nav", title := "Security" }
-    , { widgetId := 114, rowId := "s:notifs", kind := "nav", title := "Notifications" }
+     , { widgetId := 114, rowId := "s:notifs", kind := "nav", title := "Notifications" }
+     , { widgetId := 103, rowId := "nav:settings", kind := "footer", title := "Settings", selected := true }
     ]
   else
     let isNewAgent :=
@@ -137,7 +170,7 @@ def referenceSidebarRows (scr : ScreenId) : List ChromeSidebarRow :=
     let isExpanded := scr == .missionTranscript || scr == .missionSplitDiff
     let navs : List ChromeSidebarRow :=
       [ { widgetId := 101, rowId := "nav:new", kind := "nav", title := "New Agent", shortcut := "⌘N", selected := isNewAgent }
-      , { widgetId := 102, rowId := "nav:inbox", kind := "nav", title := "Inbox", shortcut := "⌘I" }
+      , { widgetId := 102, rowId := "nav:inbox", kind := "nav", title := "Inbox", shortcut := "⌘I", badge := if isEmptyProjects then 0 else 92 }
       , { widgetId := 111, rowId := "nav:cloud", kind := "nav", title := "Cloud agent", shortcut := "⌘2" }
       , { widgetId := 112, rowId := "nav:machines", kind := "nav", title := "Machines", shortcut := "⌘3", selected := isMachines }
       , { widgetId := 113, rowId := "nav:inference", kind := "nav", title := "Inference", shortcut := "⌘4" }
@@ -160,7 +193,7 @@ def referenceSidebarRows (scr : ScreenId) : List ChromeSidebarRow :=
           let idx := k + 1
           { widgetId := 130 + idx, rowId := s!"proj:{idx}", kind := "project", depth := 0, title := s!"Project {idx}" })
       else
-        (List.range 19).map (fun idx =>
+        (List.range 20).map (fun idx =>
           { widgetId := 130 + idx, rowId := s!"proj:{idx}", kind := "project", depth := 0, title := s!"Project {idx}" })
     navs ++ tree ++ [{ widgetId := 103, rowId := "nav:settings", kind := "footer", title := "Settings" }]
 
@@ -180,8 +213,8 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
   let navRows : List WidgetNode :=
     (rowsSource.filter isNav).mapIdx fun i r =>
       let topM :=
-        if i == 0 then 0
-        else if st.screen == .settingsGeneral && i == 1 then pxToSub 14
+        if i == 0 then (if st.screen == .settingsGeneral then pxToSub 4 else 0)
+        else if st.screen == .settingsGeneral && i == 1 then pxToSub 10
         else pxToSub 1
       buildSidebarRowWidget theme rowW r (Edges.trbl topM 0 0 0)
   let treeRows : List WidgetNode :=
@@ -207,7 +240,13 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
     pal.sidebar
     CornerRadii.zero
     { widths := Edges.trbl 0 border 0 0, color := pal.borderSubtle }
-    [ WidgetNode.box (BoxStyle.row 0 |>.withFixedSize innerW chromeHeaderHeightSub) []
+    [ WidgetNode.box (BoxStyle.row 10 |>.withAlign .center
+        |>.withPadding (Edges.xy (pxToSub 12) 0) |>.withFixedSize innerW chromeHeaderHeightSub)
+        [chromeIcon "sidebar" pal.textMuted 14,
+         WidgetNode.box (BoxStyle.row 0 |>.withMargin (Edges.trbl 0 0 0 (pxToSub 12))) [chromeIcon "search" pal.textMuted 14],
+         WidgetNode.box { BoxStyle.row 0 with grow := 1 } [],
+         chromeIcon "back" pal.textMuted 14,
+         WidgetNode.box (BoxStyle.row 0 |>.withMargin (Edges.trbl 0 0 0 (pxToSub 12))) [chromeIcon "forward" pal.textFaint 14]]
     , WidgetNode.box
         (BoxStyle.col 0
           |>.withPadding (Edges.trbl 0 (pxToSub 6) (pxToSub 12) (pxToSub 6))
@@ -241,18 +280,15 @@ def buildHeaderChrome (st : DesktopState) (mainW : SubPx)
   let rightButtons : List WidgetNode :=
     match st.screen with
     | .missionTranscript | .missionSplitDiff =>
-      let bdr := theme.borderWidth
       let mutedSt : TextStyle := { (Theme.mutedText theme) with sizeSub := pxToSub 12, lineHeightSub := pxToSub 16 }
-      let secSt : TextStyle := { (Theme.secondaryText theme) with sizeSub := pxToSub 12, lineHeightSub := pxToSub 16 }
       [ WidgetNode.box
-          (BoxStyle.row (pxToSub 8) |>.withAlign .center |>.withFixedSize (pxToSub 136) (pxToSub 26))
-          [ chromeLabel (pxToSub 16) [overlaySynthRun mutedSt "selected machine"]
-          , WidgetNode.rrect
-              (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 24) (pxToSub 24))
-              (if st.screen == .missionSplitDiff then pal.rowActive else 0x00000000)
-              (CornerRadii.uniform (pxToSub 6))
-              (if st.screen == .missionSplitDiff then BorderStyle.uniform bdr pal.border else BorderStyle.none)
-              [chromeLabel (pxToSub 16) [overlaySynthRun secSt "⇄"]]
+          (BoxStyle.row (pxToSub 14) |>.withAlign .center |>.withFixedSize (pxToSub 122) (pxToSub 26))
+          [ WidgetNode.rrect
+              (BoxStyle.row (pxToSub 5) |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 54) (pxToSub 26))
+              0 (CornerRadii.uniform (pxToSub 13)) (BorderStyle.uniform theme.borderWidth pal.borderSubtle)
+              [chromeIcon "list" pal.textMuted 12, chromeLabel (pxToSub 16) [overlaySynthRun mutedSt "20"]]
+          , chromeIcon "file" pal.textSecondary 14
+          , chromeIcon "chat" pal.textSecondary 14
           ]
       ]
     | _ => []
@@ -265,7 +301,9 @@ def buildHeaderChrome (st : DesktopState) (mainW : SubPx)
     pal.header
     CornerRadii.zero
     BorderStyle.none
-    ([chromeLabel titleStyle.lineHeightSub titleRuns 1] ++ rightButtons)
+    ([WidgetNode.box { BoxStyle.row (pxToSub 8) with grow := 1, align := .center }
+       ([chromeLabel titleStyle.lineHeightSub titleRuns] ++
+         (if inset > 0 then [chromeIcon "nav:cloud" pal.textMuted 14] else []))] ++ rightButtons)
 
 /-- Build the toast notification stack widget for `st.toasts`. -/
 def buildToastStackChrome (theme : Theme) (availW : SubPx) (toasts : List ToastSpec) : List WidgetNode :=

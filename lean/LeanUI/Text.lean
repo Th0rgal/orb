@@ -186,6 +186,33 @@ def blitGlyph (page : AtlasPageBuffer) (dstRect : Rect) (rg : RasterizedGlyph) :
 
 end AtlasPageBuffer
 
+/-- Supersampled round-cap/round-join SVG strokes, shared by desktop chrome icons.
+The source view box is 16px; path coordinates are tenths of a logical pixel. -/
+def rasterizeIcon (paths : List (List (Int × Int))) (size : Nat) : RasterizedGlyph := Id.run do
+  let segments := paths.flatMap fun ps => ps.zip (ps.drop 1)
+  let mut pixels := ByteArray.empty
+  for y in [0:size] do
+    for x in [0:size] do
+      let mut coverage := 0
+      for sy in [0:4] do
+        for sx in [0:4] do
+          let px := (x.toFloat + (sx.toFloat + 0.5) / 4) * 160 / size.toFloat
+          let py := (y.toFloat + (sy.toFloat + 0.5) / 4) * 160 / size.toFloat
+          let hit := segments.any fun ((ax, ay), (bx, by_)) =>
+            let dx := (bx - ax).toFloat
+            let dy := (by_ - ay).toFloat
+            let vx := px - ax.toFloat
+            let vy := py - ay.toFloat
+            let len := dx * dx + dy * dy
+            let t := if len == 0 then 0 else max 0 (min 1 ((vx * dx + vy * dy) / len))
+            let ex := vx - t * dx
+            let ey := vy - t * dy
+            ex * ex + ey * ey <= 30.25
+          if hit then coverage := coverage + 1
+      pixels := pixels.push ((coverage * 255 + 8) / 16).toUInt8
+  return { width := size, height := size, bearingX := 0, bearingY := 0,
+           format := 1, isColor := false, pixels := pixels }
+
 /-- Multi-page shelf-packed glyph atlas + `HashCache AtlasGlyphEntry` with hit/miss counters. -/
 structure GlyphAtlasCache where
   pageWidth : Nat := 1024

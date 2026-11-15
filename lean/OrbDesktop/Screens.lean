@@ -62,10 +62,11 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
   let pal := theme.palette
   let colW : SubPx := pxToSub 608
   let hasText := !st.composer.text.isEmpty
-  let bdrCol := if hasText then pal.borderStrong else pal.border
-  let txtCol := if hasText then pal.textPrimary else pal.textMuted
+  let bdrCol := pal.borderStrong
+  let placeholderCol : Color := if theme.isDark then 0x676767FF else 0xA3A29CFF
+  let txtCol := if hasText then pal.textPrimary else placeholderCol
   let dispText := if hasText then st.composer.text else st.composer.placeholder
-  let sendBgCol := if hasText then pal.sendBg else ((pal.sendBg &&& 0xFFFFFF00) ||| 0x47)
+  let sendBgCol := pal.sendBg
 
   let dropBar : WidgetNode :=
     WidgetNode.box
@@ -85,8 +86,11 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
     WidgetNode.rrect buttonStyle pal.plusBg (CornerRadii.uniform (pxToSub 12)) BorderStyle.none
       [WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 10) (pxToSub 2)) pal.textMuted CornerRadii.zero]
   let sendBtn : WidgetNode :=
-    WidgetNode.rrect buttonStyle sendBgCol (CornerRadii.uniform (pxToSub 12)) BorderStyle.none
-      [WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 6) (pxToSub 6)) pal.sendFg (CornerRadii.uniform (pxToSub 1))]
+    if hasText then
+      WidgetNode.rrect buttonStyle sendBgCol (CornerRadii.uniform (pxToSub 12)) BorderStyle.none
+        [WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 6) (pxToSub 6)) pal.sendFg (CornerRadii.uniform (pxToSub 1))]
+    else
+      WidgetNode.box buttonStyle []
 
   let bottomRow : WidgetNode :=
     WidgetNode.box
@@ -450,6 +454,7 @@ def buildMachinesFleetBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNod
       (BorderStyle.uniform bdr pal.borderSubtle)
       [buildMachineRow theme rowW (pxToSub 60) "This Mac" "Available in the Orb desktop app" "" false]
 
+  let groupBg : Color := if theme.isDark then 0x242424FF else 0xEDECE9FF
   let groupBar : WidgetNode :=
     WidgetNode.rrect
       (BoxStyle.row 0
@@ -457,7 +462,7 @@ def buildMachinesFleetBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNod
         |>.withJustify .spaceBetween
         |>.withPadding (Edges.xy (pxToSub 14) 0)
         |>.withFixedSize rowW (pxToSub 34))
-      0x00000000
+      groupBg
       CornerRadii.zero
       { widths := Edges.trbl 0 0 bdr 0, color := pal.borderSubtle }
       [ screenTextLine theme (pxToSub 160) (pxToSub 16) (pxToSub 11) (pxToSub 16) pal.textMuted "Managed (boat.dev)" 500
@@ -543,11 +548,28 @@ def buildMachinesFleetBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNod
 
 /-- Build one `.s-row` inside a Settings `.s-card`. -/
 def buildSettingsRow (theme : Theme) (rowW h : SubPx) (title desc rightLabel : String)
-    (isButton : Bool := false) (isCode : Bool := false) (hasBottomBorder : Bool := false) : WidgetNode :=
+    (isButton : Bool := false) (isCode : Bool := false) (hasBottomBorder : Bool := false)
+    (isInput : Bool := false) (isSelect : Bool := false) : WidgetNode :=
   let pal := theme.palette
   let bdr := theme.borderWidth
+  let inputBg : Color := if theme.isDark then 0x202020FF else 0xFFFFFFFF
+  let inputBdr : Color := if theme.isDark then 0x333333FF else 0xD8D8D8FF
   let rightNode : WidgetNode :=
-    if rightLabel.isEmpty then
+    if isInput then
+      WidgetNode.rrect
+        (BoxStyle.row 0 |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 10) 0) |>.withFixedSize (pxToSub 260) (pxToSub 32))
+        inputBg
+        (CornerRadii.uniform (pxToSub 6))
+        (BorderStyle.uniform bdr inputBdr)
+        [screenTextLine theme (pxToSub 240) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textPrimary rightLabel]
+    else if isSelect then
+      WidgetNode.rrect
+        (BoxStyle.row 0 |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 10) 0) |>.withFixedSize (pxToSub 80) (pxToSub 32))
+        inputBg
+        (CornerRadii.uniform (pxToSub 6))
+        (BorderStyle.uniform bdr inputBdr)
+        [screenTextLine theme (pxToSub 60) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textPrimary rightLabel]
+    else if rightLabel.isEmpty then
       WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (pxToSub 10) (pxToSub 16)) []
     else if isButton then
       let bw := pxToSub (max 88 (rightLabel.length * 8 + 20))
@@ -555,7 +577,7 @@ def buildSettingsRow (theme : Theme) (rowW h : SubPx) (title desc rightLabel : S
         (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize bw (pxToSub 28))
         0x00000000
         (CornerRadii.uniform (pxToSub 6))
-        (BorderStyle.uniform bdr pal.border)
+        BorderStyle.none
         [screenTextLine theme (bw - pxToSub 16) (pxToSub 16) (pxToSub 13) (pxToSub 16) pal.textSecondary rightLabel 500]
     else if isCode then
       let cw := pxToSub (max 60 (rightLabel.length * 8 + 12))
@@ -611,7 +633,10 @@ def buildSettingsGeneralBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetN
       0x00000000
       CornerRadii.zero
       { widths := Edges.trbl 0 0 bdr 0, color := pal.borderSubtle }
-      [ screenTextLine theme (pxToSub 64) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textPrimary "Account"
+      [ WidgetNode.rrect
+          (BoxStyle.row 0 |>.withAlign .center |>.withFixedSize (pxToSub 64) (pxToSub 30))
+          0x00000000 CornerRadii.zero { widths := Edges.trbl 0 0 bdr 0, color := pal.textPrimary }
+          [screenTextLine theme (pxToSub 64) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textPrimary "Account"]
       , screenTextLine theme (pxToSub 48) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textMuted "Users"
       , screenTextLine theme (pxToSub 116) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textMuted "Usage telemetry"
       ]
@@ -633,7 +658,7 @@ def buildSettingsGeneralBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetN
       [screenTextLine theme (pxToSub 584) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textSecondary txt]
 
   let backendCard := sCard (pxToSub 125)
-    [ buildSettingsRow theme rowW (pxToSub 63) "API URL" "Base URL of the Core backend." "" false false true
+    [ buildSettingsRow theme rowW (pxToSub 63) "API URL" "Base URL of the Core backend." "http://127.0.0.1:14470" false false true true false
     , buildSettingsRow theme rowW (pxToSub 62) "Connected" "Signed in to http://127.0.0.1:14470." "Disconnect" true false false
     ]
 
@@ -646,8 +671,8 @@ def buildSettingsGeneralBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetN
         "Cloud agents use accounts connected to Core." "Refresh accounts" true false false ]
 
   let appearCard := sCard (pxToSub 125)
-    [ buildSettingsRow theme rowW (pxToSub 63) "Theme" "Auto follows your desktop appearance." themeLabel false false true
-    , buildSettingsRow theme rowW (pxToSub 62) "Background sync" "Active — keeping recent conversations live." "Auto" false false false
+    [ buildSettingsRow theme rowW (pxToSub 63) "Theme" "Auto follows your desktop appearance." themeLabel false false true false true
+    , buildSettingsRow theme rowW (pxToSub 62) "Background sync" "Active — keeping recent conversations live." "Auto" false false false false true
     ]
 
   let aboutCard := sCard (pxToSub 116)
@@ -687,7 +712,7 @@ def buildSettingsGeneralBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetN
 def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode :=
   let pal := theme.palette
   let bdr := theme.borderWidth
-  let scrimCol : Color := if theme.isDark then 0x00000063 else 0x1E1E1C40
+  let scrimCol : Color := if theme.isDark then 0x0000006B else 0x1E1E1C40
   let dlgBg : Color := if theme.isDark then 0x191919FF else 0xFAFAFAFF
   let previewBg : Color := if theme.isDark then 0x161616FF else 0xFDFDFDFF
   let selBg : Color := if theme.isDark then 0x292929FF else 0xE6E6E6FF

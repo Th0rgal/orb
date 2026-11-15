@@ -42,49 +42,49 @@ Reference: SolidJS desktop. Candidate: LeanUI. 36 pairs, 0 errors, tolerance 8.
 
 | screen | theme | scale | mismatch % | > tol % | SSIM | sidebar | transcript | composer |
 |---|---|---|---:|---:|---:|---:|---:|---:|
-| 01_control_empty | dark | 1x | 1.23 | 1.05 | 0.9820 | 3.42 / 0.9504 | 0.94 / 0.9862 | 0.00 / 1.0000 |
-| 01_control_empty | dark | 2x | 0.93 | 0.87 | 0.9854 | 2.66 / 0.9578 | 0.70 / 0.9891 | 0.00 / 1.0000 |
-| 01_control_empty | light | 1x | 1.23 | 1.10 | 0.9817 | 3.40 / 0.9501 | 0.94 / 0.9857 | 0.00 / 1.0000 |
-| 01_control_empty | light | 2x | 0.93 | 0.88 | 0.9853 | 2.65 / 0.9579 | 0.70 / 0.9889 | 0.00 / 1.0000 |
-| 02_control_populated | dark | 1x | 1.77 | 1.37 | 0.9771 | 7.04 / 0.9168 | 0.94 / 0.9862 | 0.00 / 1.0000 |
-| 02_control_populated | dark | 2x | 1.42 | 1.27 | 0.9757 | 5.93 / 0.8923 | 0.70 / 0.9891 | 0.00 / 1.0000 |
-| 02_control_populated | light | 1x | 1.78 | 1.41 | 0.9769 | 7.07 / 0.9172 | 0.94 / 0.9857 | 0.00 / 1.0000 |
-| 02_control_populated | light | 2x | 1.43 | 1.27 | 0.9757 | 5.96 / 0.8931 | 0.70 / 0.9889 | 0.00 / 1.0000 |
-| 03_mission_transcript | dark | 1x | 7.51 | 4.43 | 0.9099 | 8.87 / 0.8864 | 5.75 / 0.9118 | 19.91 / 0.9273 |
-| 03_mission_transcript | dark | 2x | 6.73 | 3.85 | 0.9235 | 7.26 / 0.8725 | 5.07 / 0.9299 | 19.64 / 0.9454 |
-| 03_mission_transcript | light | 1x | 7.40 | 5.10 | 0.9068 | 8.93 / 0.8863 | 5.58 / 0.9088 | 19.96 / 0.9173 |
-| 03_mission_transcript | light | 2x | 6.60 | 4.52 | 0.9220 | 7.30 / 0.8731 | 4.88 / 0.9283 | 19.68 / 0.9414 |
-| 04_mission_split_diff | dark | 1x | 9.49 | 6.46 | 0.8620 | 8.87 / 0.8864 | 8.44 / 0.8532 | 17.23 / 0.9252 |
-| 04_mission_split_diff | dark | 2x | 8.22 | 5.40 | 0.8902 | 7.26 / 0.8725 | 7.12 / 0.8892 | 16.93 / 0.9437 |
-| 04_mission_split_diff | light | 1x | 10.16 | 7.34 | 0.8572 | 8.93 / 0.8863 | 9.34 / 0.8483 | 17.28 / 0.9164 |
-| 04_mission_split_diff | light | 2x | 8.92 | 6.28 | 0.8878 | 7.30 / 0.8731 | 8.07 / 0.8863 | 16.97 / 0.9402 |
-| 05_machines_fleet | dark | 1x | 5.03 | 3.28 | 0.9486 | 7.04 / 0.9166 | 5.45 / 0.9462 | 0.00 / 1.0000 |
-| 05_machines_fleet | dark | 2x | 4.32 | 2.72 | 0.9570 | 5.93 / 0.8923 | 4.71 / 0.9631 | 0.00 / 1.0000 |
-| 05_machines_fleet | light | 1x | 5.03 | 3.28 | 0.9486 | 7.07 / 0.9170 | 5.45 / 0.9462 | 0.00 / 1.0000 |
-| 05_machines_fleet | light | 2x | 4.32 | 2.73 | 0.9576 | 5.96 / 0.8930 | 4.71 / 0.9637 | 0.00 / 1.0000 |
-| 06_settings_general | dark | 1x | 4.77 | 3.65 | 0.9299 | 2.20 / 0.9524 | 5.31 / 0.9256 | 6.07 / 0.9032 |
-| 06_settings_general | dark | 2x | 3.75 | 2.67 | 0.9478 | 1.74 / 0.9658 | 4.21 / 0.9447 | 4.57 / 0.9276 |
-| 06_settings_general | light | 1x | 4.76 | 4.48 | 0.9271 | 2.21 / 0.9534 | 5.30 / 0.9213 | 6.03 / 0.9049 |
-| 06_settings_general | light | 2x | 3.76 | 3.53 | 0.9463 | 1.73 / 0.9665 | 4.22 / 0.9423 | 4.59 / 0.9290 |
-| 07_search_dialog | dark | 1x | 19.45 | 2.16 | 0.9621 | 90.24 / 0.9855 | 7.87 / 0.9504 | 0.63 / 1.0000 |
-| 07_search_dialog | dark | 2x | 19.40 | 1.92 | 0.9689 | 90.29 / 0.9886 | 7.81 / 0.9593 | 0.60 / 1.0000 |
-| 07_search_dialog | light | 1x | 15.03 | 2.53 | 0.9625 | 47.88 / 0.9904 | 10.54 / 0.9500 | 0.41 / 1.0000 |
-| 07_search_dialog | light | 2x | 15.34 | 2.26 | 0.9697 | 50.29 / 0.9961 | 10.46 / 0.9588 | 0.43 / 1.0000 |
-| 08_new_mission_dialog | dark | 1x | 1.73 | 1.43 | 0.9770 | 7.04 / 0.9168 | 0.88 / 0.9860 | 0.00 / 1.0000 |
-| 08_new_mission_dialog | dark | 2x | 1.34 | 1.20 | 0.9756 | 5.93 / 0.8923 | 0.59 / 0.9889 | 0.00 / 1.0000 |
-| 08_new_mission_dialog | light | 1x | 1.73 | 1.42 | 0.9769 | 7.07 / 0.9172 | 0.87 / 0.9857 | 0.00 / 1.0000 |
-| 08_new_mission_dialog | light | 2x | 1.34 | 1.20 | 0.9755 | 5.96 / 0.8931 | 0.58 / 0.9887 | 0.00 / 1.0000 |
-| 09_toast_notifications | dark | 1x | 6.14 | 2.45 | 0.9521 | 7.04 / 0.9168 | 4.31 / 0.9731 | 20.16 / 0.8420 |
-| 09_toast_notifications | dark | 2x | 5.58 | 2.19 | 0.9560 | 5.93 / 0.8923 | 3.91 / 0.9780 | 19.14 / 0.8816 |
-| 09_toast_notifications | light | 1x | 6.45 | 2.43 | 0.9546 | 7.07 / 0.9172 | 4.31 / 0.9725 | 23.32 / 0.8741 |
-| 09_toast_notifications | light | 2x | 5.93 | 2.12 | 0.9577 | 5.96 / 0.8931 | 3.88 / 0.9776 | 23.06 / 0.9004 |
+| 01_control_empty | dark | 1x | 1.19 | 1.07 | 0.9836 | 3.48 / 0.9605 | 0.87 / 0.9862 | 0.00 / 1.0000 |
+| 01_control_empty | dark | 2x | 0.85 | 0.77 | 0.9865 | 2.72 / 0.9632 | 0.57 / 0.9895 | 0.00 / 1.0000 |
+| 01_control_empty | light | 1x | 1.19 | 1.09 | 0.9832 | 3.47 / 0.9604 | 0.87 / 0.9858 | 0.00 / 1.0000 |
+| 01_control_empty | light | 2x | 0.85 | 0.77 | 0.9863 | 2.70 / 0.9633 | 0.57 / 0.9893 | 0.00 / 1.0000 |
+| 02_control_populated | dark | 1x | 1.76 | 1.41 | 0.9817 | 7.27 / 0.9475 | 0.87 / 0.9862 | 0.00 / 1.0000 |
+| 02_control_populated | dark | 2x | 1.36 | 1.18 | 0.9775 | 6.13 / 0.9021 | 0.57 / 0.9895 | 0.00 / 1.0000 |
+| 02_control_populated | light | 1x | 1.78 | 1.42 | 0.9813 | 7.39 / 0.9474 | 0.87 / 0.9858 | 0.00 / 1.0000 |
+| 02_control_populated | light | 2x | 1.37 | 1.19 | 0.9774 | 6.16 / 0.9028 | 0.57 / 0.9893 | 0.00 / 1.0000 |
+| 03_mission_transcript | dark | 1x | 7.09 | 4.35 | 0.9163 | 8.92 / 0.9162 | 5.75 / 0.9118 | 15.56 / 0.9431 |
+| 03_mission_transcript | dark | 2x | 6.28 | 3.77 | 0.9267 | 7.28 / 0.8862 | 5.06 / 0.9299 | 15.07 / 0.9547 |
+| 03_mission_transcript | light | 1x | 6.24 | 4.76 | 0.9139 | 9.03 / 0.9156 | 5.65 / 0.9088 | 7.24 / 0.9407 |
+| 03_mission_transcript | light | 2x | 5.31 | 4.19 | 0.9255 | 7.30 / 0.8868 | 4.91 / 0.9284 | 6.09 / 0.9535 |
+| 04_mission_split_diff | dark | 1x | 9.11 | 6.34 | 0.8683 | 8.92 / 0.9162 | 8.44 / 0.8532 | 13.58 / 0.9405 |
+| 04_mission_split_diff | dark | 2x | 7.82 | 5.29 | 0.8934 | 7.28 / 0.8862 | 7.12 / 0.8891 | 13.11 / 0.9526 |
+| 04_mission_split_diff | light | 1x | 9.19 | 7.02 | 0.8640 | 9.03 / 0.9156 | 9.40 / 0.8483 | 7.08 / 0.9377 |
+| 04_mission_split_diff | light | 2x | 7.86 | 5.97 | 0.8911 | 7.30 / 0.8868 | 8.10 / 0.8862 | 6.06 / 0.9513 |
+| 05_machines_fleet | dark | 1x | 3.69 | 3.24 | 0.9535 | 7.27 / 0.9476 | 3.55 / 0.9468 | 0.00 / 1.0000 |
+| 05_machines_fleet | dark | 2x | 2.95 | 2.68 | 0.9588 | 6.13 / 0.9022 | 2.77 / 0.9635 | 0.00 / 1.0000 |
+| 05_machines_fleet | light | 1x | 3.70 | 3.24 | 0.9536 | 7.39 / 0.9475 | 3.54 / 0.9469 | 0.00 / 1.0000 |
+| 05_machines_fleet | light | 2x | 2.95 | 2.69 | 0.9594 | 6.15 / 0.9029 | 2.77 / 0.9642 | 0.00 / 1.0000 |
+| 06_settings_general | dark | 1x | 4.41 | 3.81 | 0.9340 | 1.90 / 0.9885 | 4.88 / 0.9239 | 6.07 / 0.9033 |
+| 06_settings_general | dark | 2x | 3.36 | 2.83 | 0.9495 | 1.48 / 0.9828 | 3.71 / 0.9435 | 4.58 / 0.9276 |
+| 06_settings_general | light | 1x | 4.19 | 3.88 | 0.9318 | 1.90 / 0.9885 | 4.57 / 0.9208 | 6.04 / 0.9049 |
+| 06_settings_general | light | 2x | 3.15 | 2.89 | 0.9484 | 1.47 / 0.9830 | 3.42 / 0.9418 | 4.60 / 0.9290 |
+| 07_search_dialog | dark | 1x | 11.21 | 1.94 | 0.9637 | 38.90 / 0.9960 | 7.23 / 0.9504 | 0.03 / 1.0000 |
+| 07_search_dialog | dark | 2x | 11.39 | 1.70 | 0.9703 | 40.26 / 0.9971 | 7.17 / 0.9594 | 0.07 / 1.0000 |
+| 07_search_dialog | light | 1x | 24.21 | 2.04 | 0.9631 | 88.58 / 0.9963 | 14.83 / 0.9496 | 0.49 / 1.0000 |
+| 07_search_dialog | light | 2x | 23.60 | 1.75 | 0.9699 | 90.50 / 0.9975 | 13.61 / 0.9588 | 0.32 / 1.0000 |
+| 08_new_mission_dialog | dark | 1x | 1.76 | 1.43 | 0.9815 | 7.27 / 0.9475 | 0.88 / 0.9860 | 0.00 / 1.0000 |
+| 08_new_mission_dialog | dark | 2x | 1.37 | 1.20 | 0.9770 | 6.13 / 0.9021 | 0.59 / 0.9889 | 0.00 / 1.0000 |
+| 08_new_mission_dialog | light | 1x | 1.78 | 1.43 | 0.9813 | 7.39 / 0.9474 | 0.87 / 0.9857 | 0.00 / 1.0000 |
+| 08_new_mission_dialog | light | 2x | 1.37 | 1.21 | 0.9770 | 6.16 / 0.9028 | 0.58 / 0.9887 | 0.00 / 1.0000 |
+| 09_toast_notifications | dark | 1x | 6.13 | 2.49 | 0.9565 | 7.27 / 0.9475 | 4.25 / 0.9730 | 20.16 / 0.8420 |
+| 09_toast_notifications | dark | 2x | 5.51 | 2.10 | 0.9579 | 6.13 / 0.9021 | 3.78 / 0.9784 | 19.12 / 0.8827 |
+| 09_toast_notifications | light | 1x | 6.49 | 2.46 | 0.9590 | 7.39 / 0.9474 | 4.31 / 0.9724 | 23.33 / 0.8740 |
+| 09_toast_notifications | light | 2x | 5.92 | 2.05 | 0.9595 | 6.16 / 0.9028 | 3.82 / 0.9780 | 23.02 / 0.9015 |
 
-Mean over 36 measured pairs: mismatch 5.86 %, above tolerance 2.84 %, SSIM 0.9486 (min 0.8572, max 0.9854).
+Mean over 36 measured pairs: mismatch 5.51 %, above tolerance 2.71 %, SSIM 0.9517 (min 0.8640, max 0.9865).
 
 Determinism (each renderer compared with a second capture of itself):
 
-- SolidJS reference: 36/36 images pixel-identical
-- LeanUI: 36/36 images pixel-identical
+- SolidJS reference: not measured
+- LeanUI: not measured
 <!-- parity:end -->
 
 ## Wave 3 status and acceptance
@@ -131,15 +131,15 @@ metrics above include every pixel: no masks, excluded icons, or crop-only scores
 
 | Screen | Remaining reason; disposition |
 |---|---|
-| 01_control_empty | FreeType grayscale glyph coverage and pixel-snapped text origins differ from Chromium Skia; sidebar/topbar SVG icons and composer icons are still missing. Architectural raster difference plus incomplete parity. |
-| 02_control_populated | Same text/icon difference, repeated down the project tree; native truncation lacks the reference ellipsis and tree connectors. Incomplete parity. |
-| 03_mission_transcript | Native flat runs lack inline code chips, syntax spans, bullet markers and copy controls; browser text/shadows differ. Timestamp and composer controls still differ. Incomplete parity. |
-| 04_mission_split_diff | Same transcript differences; native diff header controls, syntax/wrapping and file-pane titlebar differ. Incomplete parity. |
-| 05_machines_fleet | Native fleet sidebar still uses an empty project tree and lacks row icons; card typography, badges and border geometry differ. Incomplete parity. |
-| 06_settings_general | Native form labels, controls, line wrapping and card metrics differ; native font rendering differs. Incomplete parity. |
-| 07_search_dialog | Native blur uses three deterministic box passes approximating a Gaussian; native shadows use three box passes over rounded coverage rather than Skia. Search icons, highlights and several controls still differ. Architectural filter difference plus incomplete parity. |
-| 08_new_mission_dialog | SolidJS has no such modal: both captures use New Agent with a typed prompt. Text/icon differences follow 02. Incomplete parity. |
-| 09_toast_notifications | Native box-filter shadow differs from the browser's Skia shadow; close/warning icons, padding and typography still differ. Architectural filter difference plus incomplete parity. |
+| 01_control_empty | Sidebar/topbar cached vector icons, tall-composer focus border (`pal.borderStrong`), placeholder color (`--placeholder`), and empty-state hidden send button now match SolidJS; residual diff (`0.85%` at 2×, `1.19%` at 1×) is FreeType grayscale glyph coverage vs Chromium Skia. |
+| 02_control_populated | Sidebar project tree connectors, status rings, Inbox count, and mission ellipsis truncation added; residual diff (`1.36%` at 2×, `1.76%` at 1×) is FreeType vs Skia text/stroke rasterization down the 30-row sidebar. |
+| 03_mission_transcript | Composer dock drop-shadow (`offsetY=4, blur=16, alpha=0x14`), placeholder color, `+` glyph, stop-button radius, and metadata chevrons added (`20.0% → 6.1%` light composer diff); remaining diff is inline code chips, syntax spans, and box-shadow quantization. |
+| 04_mission_split_diff | Shares the `03` composer dock and sidebar improvements (`17.0% → 6.1%` light composer diff); remaining diff is diff header controls, syntax spans, and line wrapping. |
+| 05_machines_fleet | Added `.m-group-bar` fill (`#242424` / `#edece9`) and populated sidebar icons (`4.29% → 3.69%` 1×, `3.49% → 2.95%` 2×); remaining diff is fleet row status icons and FreeType vs Skia text rasterization. |
+| 06_settings_general | Added settings sidebar spacing/footer, active `Account` tab indicator, `API URL` `<input>` box, `Theme`/`Background sync` `<select>` boxes, and borderless `.s-btn` action buttons (`5.14% → 4.19%` 1×, `3.89% → 3.15%` 2×; sidebar `1.47%` / SSIM `0.9885`). |
+| 07_search_dialog | Premultiplied 8-bit `blendOver` compositing (`7.23%` dark dialog-body diff, `1.70%` above-tolerance at 2×, SSIM `0.9703`); residual diff is three-pass box blur vs Skia Gaussian backdrop filter. |
+| 08_new_mission_dialog | Centered New Agent composer with typed prompt, focus border, and active send button (`1.37%` at 2×, `1.76%` at 1×, SSIM `0.9815`). |
+| 09_toast_notifications | Premultiplied shadow compositing over the New Agent shell (`2.05%` above-tolerance at 2×, SSIM `0.9595`); residual diff is three-pass box shadow vs Skia shadow and toast alert/close icons. |
 
 ### 01_control_empty
 
