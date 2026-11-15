@@ -724,9 +724,13 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
     WidgetNode.box
       (BoxStyle.row (pxToSub 10)
         |>.withAlign .center
-        |>.withPadding (Edges.xy (pxToSub 16) 0)
+        |>.withPadding (Edges.trbl 0 (pxToSub 14) 0 (pxToSub 16))
         |>.withFixedSize innerW (pxToSub 46))
-      [ screenTextLine theme (pxToSub 780) (pxToSub 20) (pxToSub 14) (pxToSub 20) pal.textStrong "mission"
+      [ chromeIcon "search" pal.textSecondary 16
+      , screenTextLine theme (pxToSub 748) (pxToSub 22) (pxToSub 15) (pxToSub 22) pal.textStrong "mission"
+      , WidgetNode.box
+          (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 22) (pxToSub 22))
+          [chromeIcon "close" pal.textMuted 14]
       , WidgetNode.rrect
           (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 32) (pxToSub 20))
           0x00000000 (CornerRadii.uniform (pxToSub 4)) (BorderStyle.uniform bdr pal.borderSubtle)
@@ -738,7 +742,7 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
       (BoxStyle.row (pxToSub 8)
         |>.withAlign .center
         |>.withJustify .spaceBetween
-        |>.withPadding (Edges.xy (pxToSub 10) 0)
+        |>.withPadding (Edges.trbl 0 (pxToSub 12) (pxToSub 9) (pxToSub 10))
         |>.withFixedSize innerW (pxToSub 34))
       [ WidgetNode.box
           (BoxStyle.row (pxToSub 6) |>.withAlign .center |>.withFixedSize (pxToSub 260) (pxToSub 24))
@@ -751,8 +755,12 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
           , screenTextLine theme (pxToSub 42) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textMuted "Titles"
           , screenTextLine theme (pxToSub 42) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textMuted "Tools"
           ]
-      , screenTextLine theme (pxToSub 250) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textMuted
-          "All projects   Any time   Relevance"
+      , WidgetNode.box (BoxStyle.row (pxToSub 2) |>.withAlign .center |>.withFixedSize (pxToSub 250) (pxToSub 24))
+          ([ ("All projects", 90), ("Any time", 76), ("Relevance", 80) ].map fun (label, width) =>
+            WidgetNode.box
+              (BoxStyle.row (pxToSub 4) |>.withAlign .center |>.withFixedSize (pxToSub width) (pxToSub 24))
+              [screenTextLine theme (pxToSub (width - 20)) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textMuted label,
+               chromeIcon "chevron-down" pal.textMuted 12])
       ]
 
   let headerNode : WidgetNode :=
@@ -763,7 +771,7 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
       { widths := Edges.trbl 0 0 bdr 0, color := pal.borderSubtle }
       [searchBar, toolBar]
 
-  let resultRow (selected : Bool) (title excerpt : String) : WidgetNode :=
+  let resultRow (selected : Bool) (title suffix : String) : WidgetNode :=
     WidgetNode.rrect
       (BoxStyle.col (pxToSub 3)
         |>.withPadding (Edges.xy (pxToSub 10) (pxToSub 7))
@@ -776,7 +784,15 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
           [ screenTextLine theme (pxToSub 210) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textStrong title 550
           , screenTextLine theme (pxToSub 104) (pxToSub 15) (pxToSub 11) (pxToSub 15) pal.textMuted "Project 1 · 15m ago"
           ]
-      , screenTextLine theme (pxToSub 327) (pxToSub 18) (pxToSub 12) (pxToSub 18) pal.textSecondary excerpt
+      , WidgetNode.box (BoxStyle.row 0 |>.withAlign .center |>.withFixedSize (pxToSub 327) (pxToSub 18))
+          [ screenTextLine theme (pxToSub 29) (pxToSub 18) (pxToSub 11) (pxToSub 18) pal.textMuted "Title"
+          , WidgetNode.rrect
+              (BoxStyle.row 0 |>.withFixedSize (pxToSub 48) (pxToSub 15))
+              (if theme.isDark then 0x635A35FF else 0xDCD5BFFF)
+              (CornerRadii.uniform (pxToSub 2)) BorderStyle.none
+              [screenTextLine theme (pxToSub 48) (pxToSub 15) (pxToSub 12) (pxToSub 15) pal.textStrong "Mission"]
+          , screenTextLine theme (pxToSub 250) (pxToSub 18) (pxToSub 12) (pxToSub 18) pal.textSecondary suffix
+          ]
       ]
 
   let leftPane : WidgetNode :=
@@ -787,9 +803,9 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
       0x00000000
       CornerRadii.zero
       { widths := Edges.trbl 0 bdr 0 0, color := pal.borderSubtle }
-      [ resultRow true "Mission 1 doing some work" "Title  Mission 1 doing some work"
-      , resultRow false "Mission 2 doing some work" "Title  Mission 2 doing some work"
-      , resultRow false "Mission 21 doing some work" "Title  Mission 21 doing some work"
+      [ resultRow true "Mission 1 doing some work" " 1 doing some work"
+      , resultRow false "Mission 2 doing some work" " 2 doing some work"
+      , resultRow false "Mission 21 doing some work" " 21 doing some work"
       ]
 
   let previewTurn (isTarget : Bool) (role body : String) : WidgetNode :=
@@ -805,7 +821,7 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
           [ screenTextLine theme (pxToSub 80) (pxToSub 16) (pxToSub 11) (pxToSub 16) pal.textSecondary role 550
           , screenTextLine theme (pxToSub 56) (pxToSub 16) (pxToSub 11) (pxToSub 16) pal.textMuted (if isTarget then "16m ago" else "15m ago")
           ]
-      , screenTextLine theme (pxToSub 456) (pxToSub 20) (pxToSub 13) (pxToSub 20)
+      , screenTextLine theme (pxToSub 456) (pxToSub 20) (pxToSub 12 + subPerPx / 2) (pxToSub 20)
           (if isTarget then pal.textPrimary else pal.textSecondary) body
       ]
 
@@ -817,7 +833,7 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
       BorderStyle.none
       [ WidgetNode.rrect
           (BoxStyle.row 0
-            |>.withAlign .center
+            |>.withAlign .start
             |>.withJustify .spaceBetween
             |>.withPadding (Edges.xy (pxToSub 18) (pxToSub 14))
             |>.withFixedSize (pxToSub 518) (pxToSub 64))
@@ -830,8 +846,8 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
               , screenTextLine theme (pxToSub 300) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textMuted "Project 1 · 15m ago"
               ]
           , WidgetNode.rrect
-              (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 67) (pxToSub 26))
-              selBg (CornerRadii.uniform (pxToSub 6)) (BorderStyle.uniform bdr pal.border)
+              (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withMargin (Edges.trbl (pxToSub 1) 0 0 0) |>.withFixedSize (pxToSub 67) (pxToSub 26))
+              (if theme.isDark then 0x222222FF else 0xF2F2F2FF) (CornerRadii.uniform (pxToSub 6)) (BorderStyle.uniform bdr pal.border)
               [screenTextLine theme (pxToSub 48) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textStrong "Open ↵" 500]
           ]
       , WidgetNode.box

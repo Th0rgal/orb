@@ -191,12 +191,9 @@ matching Skia 8-bit premultiplied compositing. -/
   else
     let a := sa.toNat
     let inv := 255 - a
-    let pmR := (sr.toNat * a + 127) / 255
-    let pmG := (sg.toNat * a + 127) / 255
-    let pmB := (sb.toNat * a + 127) / 255
-    let r := min 255 (pmR + (dr.toNat * inv + 127) / 255)
-    let g := min 255 (pmG + (dg.toNat * inv + 127) / 255)
-    let b := min 255 (pmB + (db.toNat * inv + 127) / 255)
+    let r := (sr.toNat * a + dr.toNat * inv + 127) / 255
+    let g := (sg.toNat * a + dg.toNat * inv + 127) / 255
+    let b := (sb.toNat * a + db.toNat * inv + 127) / 255
     let outA := min 255 (a + (da.toNat * inv + 127) / 255)
     (r.toUInt8, g.toUInt8, b.toUInt8, outA.toUInt8)
 
