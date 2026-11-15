@@ -2004,22 +2004,7 @@ fun OrbInboxView(
                     )
                     answeredCallIds[pending.callId] = true
                 } else {
-                    val cyber = OrbCyberAccess.requireFollowUp(core, item.id, trimmed)
-                    val msgBody = mutableMapOf<String, Any?>(
-                        "mission_id" to item.id,
-                        "content" to trimmed,
-                        "queue_followup" to true,
-                        "client_message_id" to UUID.randomUUID().toString()
-                    )
-                    if (cyber != null) {
-                        msgBody["cyber_access"] = cyber.mode.wire
-                        if (!cyber.revision.isNullOrEmpty()) msgBody["cyber_revision"] = cyber.revision
-                    }
-                    core.request(
-                        path = "/api/control/message",
-                        method = "POST",
-                        body = msgBody
-                    )
+                    core.sendMissionMessage(item.id, trimmed)
                 }
                 markItemAndChildrenRead(item)
                 replyingItemId = null

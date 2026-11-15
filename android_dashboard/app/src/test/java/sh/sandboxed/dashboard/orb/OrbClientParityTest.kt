@@ -6,8 +6,6 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.security.MessageDigest
-import java.time.Instant
-import java.time.ZoneOffset
 
 class OrbClientParityTest {
     @Test
@@ -58,146 +56,45 @@ class OrbClientParityTest {
     }
 
     @Test
-    fun controllerModelScheduleTimelineAndGrantNormalization() {
-        assertEquals("0 9 * * *", OrbControllerModel.scheduleExpression("0 9 * * *"))
-        assertEquals(
-            "every 2h",
-            OrbControllerModel.scheduleExpression(mapOf("kind" to "interval", "minutes" to 120))
-        )
-        assertEquals(
-            "*/15 * * * *",
-            OrbControllerModel.scheduleExpression(mapOf("kind" to "cron", "expr" to "*/15 * * * *"))
-        )
+    fun projectBoardSharedFixture() {
+        val cases = OrbJSON.dictList(OrbSpec.dict("fixtures/project-board.json")["cases"])
+        assertEquals(listOf("no board", "board", "missing fields"), cases.map { it["name"] })
+        for (item in cases) {
+            val project = OrbProjectBoard.decode(OrbJSON.dict(item["project"]))
+            val board = OrbProjectBoard.decode(OrbJSON.dict(item["board"]))
+            assertEquals(project.controllerMissionID, board.controllerMissionID)
+            assertEquals(project.boardUpdatedAt, board.updatedAt)
+            assertEquals(project.controllerMissionID, OrbJSON.dict(item["controller_update"])?.get("mission_id"))
+            when (item["name"]) {
+                "no board" -> {
+                    assertEquals("", board.text)
+                    assertNull(board.updatedByMissionID)
+                    assertNull(board.controllerMissionID)
+                }
+                "board" -> {
+                    assertEquals("# Project board\nShip iOS and Android together.\n", board.text)
+                    assertEquals("2026-11-15T10:00:00Z", board.updatedAt)
+                    assertEquals("writer-2", board.updatedByMissionID)
+                    assertEquals("controller-1", board.controllerMissionID)
+                }
+                "missing fields" -> {
+                    assertNull(board.text)
+                    assertNull(board.updatedAt)
+                    assertNull(board.updatedByMissionID)
+                    assertNull(project.controllerMissionID)
+                }
+                else -> error("Unknown fixture case")
+            }
+        }
+    }
 
-        val patched = OrbControllerModel.hermesPatch(
-            patch = mapOf("name" to "nightly", "continuity" to true),
-            existingJob = mapOf("context_from" to listOf("other-job", "self"))
-        )
-        assertEquals(listOf("other-job", "self"), patched["context_from"])
-
-        val disabledPatch = OrbControllerModel.hermesPatch(
-            patch = mapOf("name" to "nightly", "continuity" to false),
-            existingJob = mapOf("context_from" to listOf("other-job", "self"))
-        )
-        assertEquals(listOf("other-job"), disabledPatch["context_from"])
-
-        val nowMs = 1_762_000_000_000L
-        fun isoAt(offsetSecs: Long) = Instant.ofEpochMilli(nowMs + offsetSecs * 1_000L).toString()
-        val runs = listOf(
-            mapOf("id" to "r4", "at" to isoAt(-60), "silent" to true),
-            mapOf("id" to "r3", "at" to isoAt(-120), "silent" to true),
-            mapOf("id" to "r2", "at" to isoAt(-180), "status" to "failed", "error" to "boom"),
-            mapOf("id" to "r1", "at" to isoAt(-240), "status" to "failed", "error" to "boom")
-        )
-        val entries = OrbControllerModel.buildEntries(runs = runs, nowMs = nowMs, zone = ZoneOffset.UTC)
-        assertEquals(3, entries.size)
-        assertTrue(entries[0] is OrbControllerModel.TimelineEntry.Day)
-        val silent = entries[1] as OrbControllerModel.TimelineEntry.Silent
-        assertEquals(2, silent.runs.size)
-        val failed = entries[2] as OrbControllerModel.TimelineEntry.Failed
-        assertEquals(2, failed.runs.size)
-        assertEquals("boom", failed.error)
-
-        assertEquals(0, OrbControllerModel.parseProjectLimit("").getOrNull())
-        assertEquals(4, OrbControllerModel.parseProjectLimit(" 4 ").getOrNull())
-        assertTrue(OrbControllerModel.parseProjectLimit("-1").isFailure)
-        assertNull(OrbControllerModel.projectLimitOf(mapOf("parallel_missions" to 0)))
-        assertEquals(3, OrbControllerModel.projectLimitOf(mapOf("parallel_missions" to 3)))
-
-        assertEquals(
-            listOf("project-notes"),
-            OrbControllerModel.skillsOf(mapOf("skill" to "project-notes"), null)
-        )
-        assertEquals(
-            emptyList<String>(),
-            OrbControllerModel.skillsOf(mapOf("skills" to emptyList<String>(), "skill" to "stale-skill"), null)
-        )
-
-        val scriptView: OrbDict = mapOf(
-            "job" to mapOf(
-                "id" to "job-1",
-                "name" to "script controller",
-                "schedule" to "every 30m"
-            ),
-            "settings" to mapOf(
-                "script" to "scripts/check.py",
-                "prompt" to "",
-                "skills" to listOf("ops"),
-                "deliver" to "project:demo",
-                "model" to "",
-                "reasoning_effort" to "",
-                "continuity" to false
-            )
-        )
-        val scheduleOnlyPatch = OrbControllerModel.buildCronPatch(
-            existingView = scriptView,
-            defaultDeliver = "project:demo",
-            name = "script controller",
-            schedule = "every 15m",
-            prompt = "",
-            skills = listOf("ops"),
-            deliver = "project:demo",
-            model = "",
-            reasoningEffort = "",
-            continuity = false
-        )
-        assertEquals(mapOf<String, Any?>("schedule" to "every 15m"), scheduleOnlyPatch)
-        assertFalse(scheduleOnlyPatch.containsKey("prompt"))
-
-        val unchangedPatch = OrbControllerModel.buildCronPatch(
-            existingView = scriptView,
-            defaultDeliver = "project:demo",
-            name = "script controller",
-            schedule = "every 30m",
-            prompt = "",
-            skills = listOf("ops"),
-            deliver = "project:demo",
-            model = "",
-            reasoningEffort = "",
-            continuity = false
-        )
-        assertTrue(unchangedPatch.isEmpty())
-        assertEquals(
-            "Steer saved, but the controller could not start: scheduler offline. Use Run now to retry.",
-            OrbControllerModel.steerRunFailureMessage("scheduler offline")
-        )
-
-        val overridePatch: Map<String, Any?> = mapOf(
-            "model" to "gpt-5",
-            "reasoning_effort" to "high",
-            "continuity" to true
-        )
-        val filteredSavedView: OrbDict = mapOf(
-            "job" to mapOf("id" to "job-2", "name" to "nightly"),
-            "settings" to mapOf("id" to "job-2", "name" to "nightly")
-        )
-        assertEquals(
-            listOf("model", "reasoning_effort", "continuity"),
-            OrbControllerModel.ignoredCronFields(overridePatch, filteredSavedView)
-        )
-        assertEquals(
-            "Hermes did not retain: model, reasoning_effort, continuity. Its cron API needs support for these settings.",
-            OrbControllerModel.ignoredCronWarning(overridePatch, filteredSavedView)
-        )
-
-        val retainedSavedView: OrbDict = mapOf(
-            "job" to mapOf(
-                "id" to "job-2",
-                "name" to "nightly",
-                "model" to "gpt-5",
-                "reasoning_effort" to "high",
-                "context_from" to listOf("self")
-            ),
-            "settings" to mapOf(
-                "id" to "job-2",
-                "name" to "nightly",
-                "model" to "gpt-5",
-                "reasoning_effort" to "high",
-                "context_from" to listOf("self")
-            )
-        )
-        assertEquals(emptyList<String>(), OrbControllerModel.ignoredCronFields(overridePatch, retainedSavedView))
-        assertNull(OrbControllerModel.ignoredCronWarning(overridePatch, retainedSavedView))
+    @Test
+    fun projectLimitNormalization() {
+        assertEquals(0, OrbProjectGrant.parseProjectLimit("").getOrNull())
+        assertEquals(4, OrbProjectGrant.parseProjectLimit(" 4 ").getOrNull())
+        assertTrue(OrbProjectGrant.parseProjectLimit("-1").isFailure)
+        assertNull(OrbProjectGrant.projectLimitOf(mapOf("parallel_missions" to 0)))
+        assertEquals(3, OrbProjectGrant.projectLimitOf(mapOf("parallel_missions" to 3)))
     }
 
     @Test

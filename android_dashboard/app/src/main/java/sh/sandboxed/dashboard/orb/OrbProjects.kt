@@ -117,7 +117,7 @@ sealed class OrbNavScreen {
         val project: OrbRow,
         val entry: OrbRow
     ) : OrbNavScreen()
-    data class Controller(
+    data class Concurrency(
         val project: OrbRow
     ) : OrbNavScreen()
 }
@@ -333,7 +333,7 @@ fun OrbAppRoot(
             is OrbNavScreen.Conversation -> "conversation"
             is OrbNavScreen.Documents -> "documents"
             is OrbNavScreen.DocumentViewer -> "document_viewer"
-            is OrbNavScreen.Controller -> "controller"
+            is OrbNavScreen.Concurrency -> "concurrency"
         },
         surface = UsageTelemetry.Surface.Screen
     )
@@ -509,8 +509,8 @@ fun OrbAppRoot(
                             onOpenDocuments = { dirPath ->
                                 push(OrbNavScreen.Documents(currentScreen.project, dirPath))
                             },
-                            onOpenController = {
-                                push(OrbNavScreen.Controller(currentScreen.project))
+                            onOpenConcurrency = {
+                                push(OrbNavScreen.Concurrency(currentScreen.project))
                             }
                         )
                     }
@@ -548,8 +548,8 @@ fun OrbAppRoot(
                             onBack = { pop() }
                         )
                     }
-                    is OrbNavScreen.Controller -> {
-                        OrbProjectAutomationPage(
+                    is OrbNavScreen.Concurrency -> {
+                        OrbProjectConcurrencyPage(
                             core = core,
                             project = currentScreen.project,
                             onBack = { pop() }
@@ -1376,7 +1376,7 @@ fun OrbProjectPage(
     onOpenMission: (OrbRow) -> Unit,
     onNewAgent: (folder: String?) -> Unit,
     onOpenDocuments: (directoryPath: String) -> Unit,
-    onOpenController: () -> Unit = {}
+    onOpenConcurrency: () -> Unit = {}
 ) {
     val scope = rememberCoroutineScope()
     val missions by core.missions.collectAsState()
@@ -1398,6 +1398,7 @@ fun OrbProjectPage(
     var showNewFolderDialog by remember { mutableStateOf(false) }
     var newFolderParent by remember { mutableStateOf("") }
     var newFolderDraft by remember { mutableStateOf("") }
+    var boardRefreshID by remember(project) { mutableStateOf(0) }
     var isRefreshing by remember { mutableStateOf(false) }
     var folderActionError by remember { mutableStateOf<String?>(null) }
 
@@ -1997,13 +1998,13 @@ fun OrbProjectPage(
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text("Controller & crons", color = Color.White) },
+                                text = { Text("Project concurrency", color = Color.White) },
                                 leadingIcon = {
-                                    Icon(Icons.Default.Schedule, contentDescription = null, tint = Color.White)
+                                    Icon(Icons.Default.Tune, contentDescription = null, tint = Color.White)
                                 },
                                 onClick = {
                                     showMenu = false
-                                    onOpenController()
+                                    onOpenConcurrency()
                                 }
                             )
                         }
@@ -2016,6 +2017,7 @@ fun OrbProjectPage(
                 onRefresh = {
                     scope.launch {
                         isRefreshing = true
+                        boardRefreshID += 1
                         loadProjectData()
                         core.refreshAll()
                         isRefreshing = false
@@ -2034,6 +2036,9 @@ fun OrbProjectPage(
                         bottom = 96.dp
                     )
                 ) {
+                    item(key = "project_board") {
+                        OrbProjectBoardSection(core, liveProject, projectMissions, boardRefreshID, onOpenMission)
+                    }
                     if (filter != OrbProjectFilter.All) {
                         item(key = "active_filter_bar") {
                             Row(

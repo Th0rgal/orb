@@ -665,22 +665,7 @@ extension OrbNotificationCenter {
     static let categoryActionFailed = "ORB_ACTION_FAILED"
 
     fileprivate func sendMessage(missionID: String, content: String) async throws {
-        let cyber = try await OrbCyberAccess.requireFollowUp(content, missionID: missionID)
-        var body: [String: OrbJSON] = [
-            "mission_id": .string(missionID),
-            "content": .string(content),
-            "queue_followup": .bool(true),
-            "client_message_id": .string(UUID().uuidString.lowercased()),
-        ]
-        if let cyber {
-            body["cyber_access"] = .string(cyber.mode)
-            if !cyber.revision.isEmpty { body["cyber_revision"] = .string(cyber.revision) }
-        }
-        _ = try await OrbCore.shared.call(
-            "/api/control/message",
-            method: "POST",
-            body: .object(body)
-        )
+        try await OrbCore.shared.sendMissionMessage(missionID: missionID, content: content)
     }
 
     /// Runs a notification quick action. On failure the error is logged and a

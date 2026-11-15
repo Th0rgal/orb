@@ -1,5 +1,7 @@
 package sh.sandboxed.dashboard.orb
 
+import java.util.UUID
+
 enum class OrbCyberMode(val wire: String, val label: String) {
     Automatic("automatic", "Automatic"), Standard("standard", "Standard"), Daybreak("daybreak", "Daybreak")
 }
@@ -793,4 +795,17 @@ object OrbSkillSlash {
             emptyList<OrbSkillChoice>() to (e.message ?: "Couldn't load delivered skills")
         }
     }
+}
+
+
+/** The same normal follow-up path used by Inbox replies and project steering. */
+suspend fun OrbCore.sendMissionMessage(missionID: String, content: String) {
+    val cyber = OrbCyberAccess.requireFollowUp(this, missionID, content)
+    val body = mutableMapOf<String, Any?>("mission_id" to missionID, "content" to content, "queue_followup" to true,
+        "client_message_id" to UUID.randomUUID().toString())
+    if (cyber != null) {
+        body["cyber_access"] = cyber.mode.wire
+        if (!cyber.revision.isNullOrEmpty()) body["cyber_revision"] = cyber.revision
+    }
+    request("/api/control/message", "POST", body = body)
 }
