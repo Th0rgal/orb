@@ -253,7 +253,7 @@ def scanCliProxyAuthFiles : IO (Array CliAuthFileInfo) := do
                   else if e.fileName.startsWith "xai-" then "xai"
                   else ""
                 let email := ((jv.fieldStr? "email").orElse (fun _ => jv.fieldStr? "account_email") |>.getD "").trimAscii.toString
-                let tok := ((jv.fieldStr? "access_token").orElse (fun _ => jv.fieldStr? "token") |>.getD "").trimAscii.toString
+                let tok := ((jv.fieldStr? "access_token").orElse (fun _ => (jv.fieldStr? "token").orElse (fun _ => jv.fieldStr? "refresh_token")) |>.getD "").trimAscii.toString
                 let acctId := ((jv.fieldStr? "account_id").getD "").trimAscii.toString
                 let pfx := ((jv.fieldStr? "prefix").getD "").trimAscii.toString
                 let dis := (jv.fieldBool? "disabled").getD false
@@ -413,14 +413,17 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
       | none => pure ""
     let effApiKey := if !plainKey.isEmpty && plainKey != "cli-proxy-managed" then plainKey else envKeyVal
     let hasApiKey := !effApiKey.isEmpty
-    let hasOAuth := matchedAuth?.isSome || (!legAccessTok.isEmpty) || plainKey == "cli-proxy-managed"
+    let hasOAuth := matchedAuth?.isSome || (!legAccessTok.isEmpty) || (p.providerType.toLower == "muse-code" && !legRefreshFile.isEmpty && !legRefreshFile.endsWith ".json") || plainKey == "cli-proxy-managed"
     let effEmail :=
       if !legEmail.isEmpty then legEmail
       else (matchedAuth?.map (·.email)).getD ""
     let effOauthTok :=
       match matchedAuth? with
       | some af => af.accessToken
-      | none => if legAccessTok != "cli-proxy-managed" then legAccessTok else ""
+      | none =>
+        if !legAccessTok.isEmpty && legAccessTok != "cli-proxy-managed" then legAccessTok
+        else if p.providerType.toLower == "muse-code" && !legRefreshFile.isEmpty && !legRefreshFile.endsWith ".json" then legRefreshFile
+        else ""
     let effOauthFile := (matchedAuth?.map (·.fileName)).getD legRefreshFile
 
     let bksFromFile : Array String :=
@@ -485,7 +488,11 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
         (authFiles.find? (fun af => !af.disabled && (af.prefixId == lid || (!refFile.isEmpty && af.fileName == refFile)))).orElse fun _ =>
         (authFiles.find? (fun af => !af.disabled && !email.isEmpty && af.email.toLower == email.toLower && providerTypeMatchesAuthType pType af.authType))
       let hasApi := !aKey.isEmpty && aKey != "cli-proxy-managed"
-      let hasOa := matchedAuth?.isSome || !accTok.isEmpty
+      let hasOa := matchedAuth?.isSome || !accTok.isEmpty || (pType.toLower == "muse-code" && !refFile.isEmpty && !refFile.endsWith ".json")
+      let effLegTok :=
+        if !accTok.isEmpty then accTok
+        else if pType.toLower == "muse-code" && !refFile.isEmpty && !refFile.endsWith ".json" then refFile
+        else ""
       out := out.push {
         id := lid
         name := nm
@@ -495,7 +502,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
         apiKey := if hasApi then aKey else ""
         hasApiKey := hasApi
         hasOAuth := hasOa
-        oauthToken := (matchedAuth?.map (·.accessToken)).getD accTok
+        oauthToken := (matchedAuth?.map (·.accessToken)).getD effLegTok
         oauthFile := (matchedAuth?.map (·.fileName)).getD refFile
         accountEmail := if !email.isEmpty then email else (matchedAuth?.map (·.email)).getD ""
         enabled := en
@@ -564,6 +571,7 @@ def projectMemberProviderUsageJv (jv : JVal) (displayName : String) : JVal :=
     let scrubbed := fields.filterMap fun (k, v) =>
       if k == "account_email" || k == "account_name" || k == "account" ||
          k == "organization" || k == "organization_id" || k == "google_project_id" ||
+         k == "xai_key_name" || k == "xai_team_id" ||
          k == "label" || k == "diagnostic" then
         none
       else if k == "provider_name" || k == "access_profile" then
@@ -876,6 +884,423 @@ def anthropicModelWindows (usage : JVal) : Array JVal := Id.run do
       | none => base))
   return out
 
+/-- Pick the optimize window key with the lowest `pct_remaining` (matching `usage_optimize.rs`). -/
+def selectPrimaryOptimizeWindow (windows : Array JVal) : JVal := Id.run do
+  let mut bestKey? : Option String := none
+  let mut bestRem : Nat := 1000000
+  for w in windows do
+    let some k := w.fieldStr? "key" | continue
+    let rem := (w.fieldNat? "pct_remaining").getD 100
+    if bestKey?.isNone || rem < bestRem then
+      bestKey? := some k
+      bestRem := rem
+  match bestKey? with
+  | some k => .str k
+  | none => .null
+
+/-- Parse numeric or numeric-string JSON value into raw number string. -/
+private def jvalNumRaw? (v : JVal) : Option String :=
+  match v with
+  | .num raw =>
+    let t := raw.trimAscii.toString
+    if t.isEmpty then none else some t
+  | .str s =>
+    let t := s.trimAscii.toString
+    if t.isEmpty then none
+    else if t.toInt?.isSome || (t.splitOn ".").length == 2 then some t
+    else none
+  | _ => none
+
+/-- Parse numeric, numeric-string, or `{val: ...}` JSON value into Nat. -/
+private def jvalNatFlex? (v : JVal) : Option Nat :=
+  match v with
+  | .num raw => ((raw.trimAscii.toString.splitOn ".").headD "").toNat?
+  | .str s => ((s.trimAscii.toString.splitOn ".").headD "").toNat?
+  | .obj _ => (v.field? "val").bind fun inner =>
+    match inner with
+    | .num r => ((r.trimAscii.toString.splitOn ".").headD "").toNat?
+    | .str r => ((r.trimAscii.toString.splitOn ".").headD "").toNat?
+    | _ => none
+  | _ => none
+
+/-- Parse epoch seconds from integer/float (seconds or ms if > 10^11), numeric string, or RFC3339 string. -/
+private def jvalEpochSec? (v : JVal) : Option UInt64 :=
+  match v with
+  | .num raw =>
+    let n? := ((raw.trimAscii.toString.splitOn ".").headD "").toNat?
+    n?.bind fun n =>
+      if n == 0 then none
+      else if n > 100000000000 then some (n / 1000).toUInt64
+      else some n.toUInt64
+  | .str s =>
+    let t := s.trimAscii.toString
+    if let some n := t.toNat? then
+      if n == 0 then none
+      else if n > 100000000000 then some (n / 1000).toUInt64
+      else some n.toUInt64
+    else
+      parseIso8601EpochU64? t
+  | _ => none
+
+/-- Format tenths of a percent (`375` -> `"37.5"`, `750` -> `"75"`). -/
+private def formatTenthsPct (tenths : Nat) : String :=
+  let clamped := min tenths 1000
+  if clamped % 10 == 0 then toString (clamped / 10)
+  else s!"{clamped / 10}.{clamped % 10}"
+
+/-- Parse a number string (`"37.5"`, `"75"`, `"0.42"`) into tenths (`375`, `750`, `4`). -/
+private def parseNumTenths? (raw : String) : Option Nat := do
+  let s := raw.trimAscii.toString
+  if s.startsWith "-" then return 0
+  match s.splitOn "." with
+  | [w] =>
+    let wn ← w.toNat?
+    return wn * 10
+  | [w, f] =>
+    let wn ← (if w.isEmpty then some 0 else w.toNat?)
+    let f1 := (f.take 1).toString
+    let fn ← (if f1.isEmpty then some 0 else f1.toNat?)
+    return wn * 10 + fn
+  | _ => none
+
+/-- Pure Muse Code usage projector (`POST https://api.meta.ai/muse-code/key`).
+    Never fabricates `muse_subscription_active = true` or 0% windows when idle. -/
+def projectMuseCodeUsage (body : JVal) : Array (String × JVal) × Array JVal × JVal := Id.run do
+  let mut fields : Array (String × JVal) := #[]
+  let mut windows : Array JVal := #[]
+  if let some tier := (body.fieldStr? "subs_tier_name").map (·.trimAscii.toString) then
+    if !tier.isEmpty then
+      fields := fields.push ("muse_plan", .str tier)
+  if let some active := (body.fieldBool? "is_subs_active").orElse (fun _ => body.fieldBool? "subscription_active") then
+    fields := fields.push ("muse_subscription_active", .bool active)
+  let usage := body.fieldOrNull "subs_usage"
+  let mut hasAnyWindow := false
+  if let some w5 := usage.field? "window" then
+    if let some pctRaw := (w5.field? "used_percent").bind jvalNumRaw? then
+      hasAnyWindow := true
+      fields := fields.push ("muse_5h_used_percent", .num pctRaw)
+      let resetSec? := (w5.field? "resets_at").bind jvalEpochSec?
+      if let some r := resetSec? then
+        fields := fields.push ("muse_5h_reset", JVal.uint64 r)
+      let resetIso? := resetSec?.map formatEpochIso8601Utc
+      windows := windows.push (buildOptimizeWindow "muse_5h" "5-hour" "tokens" "muse_code" pctRaw 18000 resetIso?)
+  if let some ww := usage.field? "weekly" then
+    if let some pctRaw := (ww.field? "used_percent").bind jvalNumRaw? then
+      hasAnyWindow := true
+      fields := fields.push ("muse_weekly_used_percent", .num pctRaw)
+      let resetSec? := (ww.field? "resets_at").bind jvalEpochSec?
+      if let some r := resetSec? then
+        fields := fields.push ("muse_weekly_reset", JVal.uint64 r)
+      let resetIso? := resetSec?.map formatEpochIso8601Utc
+      windows := windows.push (buildOptimizeWindow "muse_weekly" "weekly" "tokens" "muse_code" pctRaw 604800 resetIso?)
+  if !hasAnyWindow then
+    fields := fields.push ("usage_note", .str "No Muse Code usage in the current window.")
+  return (fields, windows, selectPrimaryOptimizeWindow windows)
+
+private def formatKimiMembershipLevel (raw : String) : Option String :=
+  let t := raw.trimAscii.toString
+  if t.isEmpty then none
+  else
+    let stripped := if t.toUpper.startsWith "LEVEL_" then (t.drop 6).toString else t
+    let words := (stripped.replace "_" " ").splitOn " " |>.filter (!·.isEmpty)
+    if words.isEmpty then none
+    else some (String.intercalate " " (words.map fun w => w.toLower.capitalize))
+
+private def classifyKimiWindowKind (entry : JVal) : String := Id.run do
+  if let some win := entry.field? "window" then
+    let dur := (win.fieldNat? "duration").getD 0
+    let unit := ((win.fieldStr? "timeUnit").orElse (fun _ => win.fieldStr? "time_unit") |>.getD "").toUpper
+    if (unit.endsWith "MINUTE" || unit.endsWith "MINUTES") && dur == 300 then return "5h"
+    if (unit.endsWith "HOUR" || unit.endsWith "HOURS") && dur == 5 then return "5h"
+    if (unit.endsWith "DAY" || unit.endsWith "DAYS") && dur == 7 then return "weekly"
+    if (unit.endsWith "WEEK" || unit.endsWith "WEEKS") && dur == 1 then return "weekly"
+  let name := ((entry.fieldStr? "name").orElse (fun _ => (entry.fieldStr? "type").orElse (fun _ => entry.fieldStr? "model_name")) |>.getD "").toLower
+  if name == "all" || (name.splitOn "week").length > 1 || (name.splitOn "7d").length > 1 then return "weekly"
+  if (name.splitOn "5h").length > 1 || (name.splitOn "300m").length > 1 || (name.splitOn "five").length > 1 then return "5h"
+  return ""
+
+private def parseKimiDetailTenthsAndReset (entry : JVal) (nowSec : UInt64) : Option (Nat × Option UInt64) := Id.run do
+  let detail := (entry.field? "detail").getD entry
+  let resetSec? : Option UInt64 :=
+    ((detail.field? "resetTime").orElse fun _ =>
+     (detail.field? "reset_at").orElse fun _ =>
+     (detail.field? "reset_time").orElse fun _ =>
+     (detail.field? "nextResetTime").orElse fun _ =>
+     (entry.field? "resetTime").orElse fun _ =>
+     (entry.field? "reset_at").orElse fun _ =>
+     entry.field? "reset_time").bind jvalEpochSec?
+    <|> ((detail.fieldNat? "reset_in").orElse (fun _ => entry.fieldNat? "reset_in")).map (fun s => nowSec + s.toUInt64)
+  for k in #["used_percent", "usedPercent", "percentage", "percent"] do
+    if let some raw := (detail.field? k).bind jvalNumRaw? then
+      if let some t := parseNumTenths? raw then
+        return some (min t 1000, resetSec?)
+  let limit? := (detail.field? "limit").orElse (fun _ => detail.field? "total") |>.bind jvalNatFlex?
+  let used? := (detail.field? "used").orElse (fun _ => detail.field? "current") |>.bind jvalNatFlex?
+  let rem? := (detail.field? "remaining").orElse (fun _ => detail.field? "remain") |>.bind jvalNatFlex?
+  if let some lim := limit? then
+    if lim > 0 then
+      let effUsed? := used?.orElse fun _ => rem?.map (fun r => if lim >= r then lim - r else 0)
+      if let some u := effUsed? then
+        let tenths := min ((u * 1000 + lim / 2) / lim) 1000
+        return some (tenths, resetSec?)
+  return none
+
+/-- Pure Kimi Coding usage projector (`GET https://api.kimi.com/coding/v1/usages`). -/
+def projectKimiUsage (body : JVal) (nowSec : UInt64 := 0) : Array (String × JVal) × Array JVal × JVal := Id.run do
+  let mut fields : Array (String × JVal) := #[]
+  let mut optWins : Array JVal := #[]
+  let mut kimiWins : Array JVal := #[]
+  let plan? : Option String :=
+    (((body.field? "user").bind (·.field? "membership")).bind (·.fieldStr? "level")).bind formatKimiMembershipLevel
+    <|> (body.fieldStr? "plan").orElse (fun _ => (body.fieldStr? "tier").orElse (fun _ => body.fieldStr? "plan_type"))
+  if let some p := plan? then
+    if !p.trimAscii.isEmpty then
+      fields := fields.push ("kimi_plan", .str p.trimAscii.toString)
+
+  let mut win5h? : Option (Nat × Option UInt64) := none
+  let mut winWeekly? : Option (Nat × Option UInt64) := none
+
+  for item in (body.fieldArr? "limits").getD #[] do
+    let kind := classifyKimiWindowKind item
+    if let some parsed := parseKimiDetailTenthsAndReset item nowSec then
+      if kind == "5h" && win5h?.isNone then win5h? := some parsed
+      else if kind == "weekly" && winWeekly?.isNone then winWeekly? := some parsed
+      else if win5h?.isNone then win5h? := some parsed
+
+  for item in (body.fieldArr? "data").getD #[] do
+    let kind := classifyKimiWindowKind item
+    if let some parsed := parseKimiDetailTenthsAndReset item nowSec then
+      if kind == "5h" && win5h?.isNone then win5h? := some parsed
+      else if kind == "weekly" && winWeekly?.isNone then winWeekly? := some parsed
+
+  if let some uObj := body.field? "usage" then
+    let kind := classifyKimiWindowKind uObj
+    if let some parsed := parseKimiDetailTenthsAndReset uObj nowSec then
+      if kind == "5h" && win5h?.isNone then win5h? := some parsed
+      else if winWeekly?.isNone then winWeekly? := some parsed
+      else if win5h?.isNone then win5h? := some parsed
+
+  if let some (tenths, reset?) := win5h? then
+    let usedStr := formatTenthsPct tenths
+    let remStr := formatTenthsPct (1000 - min tenths 1000)
+    fields := fields.push ("kimi_5h_used_percent", .num usedStr)
+    fields := fields.push ("kimi_5h_remaining_percent", .num remStr)
+    if let some r := reset? then
+      fields := fields.push ("kimi_5h_reset", JVal.uint64 r)
+    let mut wFields : Array (String × JVal) := #[
+      ("label", .str "5h"),
+      ("used_percent", .num usedStr),
+      ("remaining_percent", .num remStr)
+    ]
+    if let some r := reset? then wFields := wFields.push ("reset_at", JVal.uint64 r)
+    kimiWins := kimiWins.push (.obj wFields)
+    optWins := optWins.push (buildOptimizeWindow "kimi_5h" "5-hour" "requests" "kimi_usage" usedStr 18000 (reset?.map formatEpochIso8601Utc))
+
+  if let some (tenths, reset?) := winWeekly? then
+    let usedStr := formatTenthsPct tenths
+    let remStr := formatTenthsPct (1000 - min tenths 1000)
+    fields := fields.push ("kimi_weekly_used_percent", .num usedStr)
+    fields := fields.push ("kimi_weekly_remaining_percent", .num remStr)
+    if let some r := reset? then
+      fields := fields.push ("kimi_weekly_reset", JVal.uint64 r)
+    let mut wFields : Array (String × JVal) := #[
+      ("label", .str "Weekly"),
+      ("used_percent", .num usedStr),
+      ("remaining_percent", .num remStr)
+    ]
+    if let some r := reset? then wFields := wFields.push ("reset_at", JVal.uint64 r)
+    kimiWins := kimiWins.push (.obj wFields)
+    optWins := optWins.push (buildOptimizeWindow "kimi_weekly" "weekly" "requests" "kimi_usage" usedStr 604800 (reset?.map formatEpochIso8601Utc))
+
+  if !kimiWins.isEmpty then
+    fields := fields.push ("kimi_windows", .arr kimiWins)
+  return (fields, optWins, selectPrimaryOptimizeWindow optWins)
+
+/-- Pure xAI / Grok billing + settings projector. -/
+def projectXaiBillingUsage (billing : JVal) (settings? : Option JVal := none) : Array (String × JVal) × Array JVal × JVal := Id.run do
+  let mut fields : Array (String × JVal) := #[]
+  let mut optWins : Array JVal := #[]
+  let cfg := (billing.field? "config").getD billing
+  let plan? : Option String :=
+    (settings?.bind (fun s => (s.fieldStr? "subscription_tier_display").orElse (fun _ => (s.fieldStr? "plan").orElse (fun _ => s.fieldStr? "tier"))))
+    <|> (billing.fieldStr? "subscription_tier_display").orElse (fun _ => (billing.fieldStr? "plan").orElse (fun _ => billing.fieldStr? "tier"))
+    <|> (cfg.fieldStr? "subscription_tier_display")
+  if let some p := plan? then
+    if !p.trimAscii.isEmpty then
+      fields := fields.push ("xai_plan", .str p.trimAscii.toString)
+
+  let period := (cfg.field? "currentPeriod").orElse (fun _ => (billing.field? "currentPeriod").orElse (fun _ => billing.field? "billingCycle")) |>.getD cfg
+  let startSec? := ((period.field? "start").orElse (fun _ => period.field? "billingPeriodStart")).bind jvalEpochSec?
+  let endSec? := ((period.field? "end").orElse (fun _ => (period.field? "billingPeriodEnd").orElse (fun _ => cfg.field? "billingPeriodEnd"))).bind jvalEpochSec?
+
+  let spanSecs? : Option UInt64 :=
+    match startSec?, endSec? with
+    | some s, some e => if e > s then some (e - s) else none
+    | _, _ => none
+
+  let creditLabel : String :=
+    match spanSecs? with
+    | some span =>
+      if span >= 5 * 86400 && span <= 9 * 86400 then "Weekly"
+      else if span >= 20 * 86400 && span <= 35 * 86400 then "Monthly"
+      else "Credits"
+    | none => "Credits"
+
+  let onDemandUsed? := ((cfg.field? "onDemandUsed").orElse (fun _ => billing.field? "onDemandUsed")).bind jvalNumRaw?
+  let onDemandCap? := ((cfg.field? "onDemandCap").orElse (fun _ => billing.field? "onDemandCap")).bind jvalNumRaw?
+  if let some u := onDemandUsed? then fields := fields.push ("xai_on_demand_used", .num u)
+  if let some c := onDemandCap? then fields := fields.push ("xai_on_demand_cap", .num c)
+
+  let explicitPct? : Option String :=
+    ((cfg.field? "creditUsagePercent").orElse fun _ =>
+     (billing.field? "creditUsagePercent").orElse fun _ =>
+     (cfg.field? "used_percent").orElse fun _ =>
+     billing.field? "used_percent").bind jvalNumRaw?
+
+  let computedPct? : Option String := Id.run do
+    if let (some u, some c) := ((cfg.field? "onDemandUsed").bind jvalNatFlex?, (cfg.field? "onDemandCap").bind jvalNatFlex?) then
+      if c > 0 && explicitPct?.isNone then
+        return some (formatTenthsPct ((u * 1000 + c / 2) / c))
+    if let (some u, some lim) := (((billing.field? "usage").bind (·.field? "totalUsed")).bind jvalNatFlex?, (billing.field? "monthlyLimit").bind jvalNatFlex?) then
+      if lim > 0 then
+        return some (formatTenthsPct ((u * 1000 + lim / 2) / lim))
+    if endSec?.isSome then
+      return some "0"
+    return none
+
+  if let some pctRaw := explicitPct? <|> computedPct? then
+    let tenths := (parseNumTenths? pctRaw).getD 0
+    let remStr := formatTenthsPct (1000 - min tenths 1000)
+    let winSecs := (spanSecs?.map (·.toNat)).getD 2592000
+    fields := fields.push ("xai_credit_label", .str creditLabel)
+    fields := fields.push ("xai_credit_used_percent", .num pctRaw)
+    fields := fields.push ("xai_credit_remaining_percent", .num remStr)
+    if let some r := endSec? then
+      fields := fields.push ("xai_credit_reset", JVal.uint64 r)
+    if let some sp := spanSecs? then
+      fields := fields.push ("xai_credit_window_seconds", JVal.uint64 sp)
+    optWins := optWins.push (buildOptimizeWindow "xai_credits" creditLabel.toLower "credits" "xai" pctRaw winSecs (endSec?.map formatEpochIso8601Utc))
+
+  return (fields, optWins, selectPrimaryOptimizeWindow optWins)
+
+/-- Pure MiniMax Coding Plan / Token Plan usage projector (`GET https://www.minimax.io/v1/api/openplatform/coding_plan/remains`).
+    Note: MiniMax API's `current_interval_usage_count` and `current_weekly_usage_count` are REMAINING counts! -/
+def projectMinimaxUsage (body : JVal) : Array (String × JVal) × Array JVal × JVal := Id.run do
+  let baseResp := body.fieldOrNull "base_resp"
+  let statusCode := (baseResp.fieldInt? "status_code").getD 0
+  if statusCode == 2062 then
+    return (#[("usage_note", .str "No active Token Plan subscription for this API key.")], #[], .null)
+  if statusCode != 0 then
+    return (#[("usage_note", .str "Token Plan usage unavailable for this API key.")], #[], .null)
+
+  let remains := (body.fieldArr? "model_remains").getD #[]
+  if remains.isEmpty then
+    return (#[("usage_note", .str "No active Token Plan subscription for this API key.")], #[], .null)
+
+  let mut modelUsage : Array JVal := #[]
+  let mut primaryEntry? : Option JVal := none
+  for item in remains do
+    let mName := (item.fieldStr? "model_name").getD "unknown"
+    if primaryEntry?.isNone || mName == "general" then
+      primaryEntry? := some item
+    let intRemPct : Nat :=
+      if let some p := item.fieldNat? "current_interval_remaining_percent" then min p 100
+      else
+        let tot := (item.fieldNat? "current_interval_total_count").getD 0
+        let remCnt := (item.fieldNat? "current_interval_usage_count").getD 0
+        if tot > 0 then min ((remCnt * 100 + tot / 2) / tot) 100 else 100
+    let wkRemPct : Nat :=
+      if let some p := item.fieldNat? "current_weekly_remaining_percent" then min p 100
+      else
+        let tot := (item.fieldNat? "current_weekly_total_count").getD 0
+        let remCnt := (item.fieldNat? "current_weekly_usage_count").getD 0
+        if tot > 0 then min ((remCnt * 100 + tot / 2) / tot) 100 else 100
+    let intResetSec : UInt64 := ((item.field? "end_time").bind jvalEpochSec?).getD 0
+    let wkResetSec : UInt64 := ((item.field? "weekly_end_time").bind jvalEpochSec?).getD 0
+    modelUsage := modelUsage.push (.obj #[
+      ("model", .str mName),
+      ("interval_remaining_percent", JVal.nat intRemPct),
+      ("weekly_remaining_percent", JVal.nat wkRemPct),
+      ("interval_reset", JVal.uint64 intResetSec),
+      ("weekly_reset", JVal.uint64 wkResetSec)
+    ])
+
+  let mut fields : Array (String × JVal) := #[]
+  let mut optWins : Array JVal := #[]
+  let primary? :=
+    (modelUsage.find? (fun m => (m.fieldStr? "model").getD "" == "general")).orElse (fun _ => modelUsage[0]?)
+  if let some first := primary? then
+    let intRem := (first.fieldNat? "interval_remaining_percent").getD 100
+    let wkRem := (first.fieldNat? "weekly_remaining_percent").getD 100
+    let intRst := (first.fieldUInt64? "interval_reset").getD 0
+    let wkRst := (first.fieldUInt64? "weekly_reset").getD 0
+    fields := fields.push ("minimax_interval_remaining_percent", JVal.nat intRem)
+    if intRst > 0 then fields := fields.push ("minimax_interval_reset", JVal.uint64 intRst)
+    fields := fields.push ("minimax_weekly_remaining_percent", JVal.nat wkRem)
+    if wkRst > 0 then fields := fields.push ("minimax_weekly_reset", JVal.uint64 wkRst)
+    fields := fields.push ("model_usage", .arr modelUsage)
+    let used5h := toString (100 - min intRem 100)
+    let usedWk := toString (100 - min wkRem 100)
+    optWins := optWins.push (buildOptimizeWindow "minimax_5h" "5-hour" "prompts" "minimax_coding_plan" used5h 18000 (if intRst > 0 then some (formatEpochIso8601Utc intRst) else none))
+    optWins := optWins.push (buildOptimizeWindow "minimax_weekly" "weekly" "prompts" "minimax_coding_plan" usedWk 604800 (if wkRst > 0 then some (formatEpochIso8601Utc wkRst) else none))
+
+  return (fields, optWins, selectPrimaryOptimizeWindow optWins)
+
+/-- Pure Z.ai quota monitor projector (`GET https://api.z.ai/api/monitor/usage/quota/limit`). -/
+def projectZaiUsage (body : JVal) : Array (String × JVal) × Array JVal × JVal := Id.run do
+  let mut fields : Array (String × JVal) := #[]
+  let mut optWins : Array JVal := #[]
+  let dObj := (body.field? "data").getD body
+  if let some lvl := (dObj.fieldStr? "level").map (·.trimAscii.toString) then
+    if !lvl.isEmpty then
+      fields := fields.push ("zai_plan", .str lvl)
+  let mut has5h := false
+  let mut hasWeekly := false
+  for lim in (dObj.fieldArr? "limits").getD #[] do
+    let lType := (lim.fieldStr? "type").getD ""
+    let pct? := (lim.field? "percentage").bind jvalNumRaw?
+    let resetSec? := (lim.field? "nextResetTime").bind jvalEpochSec?
+    let unit := (lim.fieldNat? "unit").getD 0
+    let num := (lim.fieldNat? "number").getD 0
+    if lType == "TOKENS_LIMIT" || lType.isEmpty then
+      if let some pct := pct? then
+        if (unit == 3 && num == 5) || (unit == 0 && num == 0 && !has5h) then
+          has5h := true
+          fields := fields.push ("zai_5h_used_percent", .num pct)
+          if let some r := resetSec? then fields := fields.push ("zai_5h_reset", JVal.uint64 r)
+          optWins := optWins.push (buildOptimizeWindow "zai_5h" "5-hour" "tokens" "zai_quota_limit" pct 18000 (resetSec?.map formatEpochIso8601Utc))
+        else if unit == 6 && num == 1 then
+          hasWeekly := true
+          fields := fields.push ("zai_weekly_used_percent", .num pct)
+          if let some r := resetSec? then fields := fields.push ("zai_weekly_reset", JVal.uint64 r)
+          optWins := optWins.push (buildOptimizeWindow "zai_weekly" "weekly" "tokens" "zai_quota_limit" pct 604800 (resetSec?.map formatEpochIso8601Utc))
+        else if !has5h && !hasWeekly then
+          fields := fields.push ("zai_tokens_percentage", .num pct)
+          if let some r := resetSec? then fields := fields.push ("zai_tokens_reset", JVal.uint64 r)
+          optWins := optWins.push (buildOptimizeWindow "zai_tokens" "tokens" "tokens" "zai_quota_limit" pct 18000 (resetSec?.map formatEpochIso8601Utc))
+    else if lType == "TIME_LIMIT" then
+      if let some pct := pct? then
+        fields := fields.push ("zai_mcp_percentage", .num pct)
+        if let some r := resetSec? then fields := fields.push ("zai_mcp_reset", JVal.uint64 r)
+  return (fields, optWins, selectPrimaryOptimizeWindow optWins)
+
+/-- Pure Antigravity `loadCodeAssist` plan & verification projector.
+    Never fabricates `"Pro"` when `paidTier.name` and `currentTier.name` are absent. -/
+def projectAntigravityAssist (aJv : JVal) : Option String × Bool := Id.run do
+  let tierName (k : String) : Option String :=
+    ((aJv.field? k).bind (·.fieldStr? "name")).map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+  let plan? := tierName "paidTier" <|> tierName "currentTier"
+  let projStr :=
+    ((aJv.fieldStr? "cloudaicompanionProject").orElse fun _ =>
+      (aJv.field? "cloudaicompanionProject").bind (·.fieldStr? "id")).getD ""
+  let hasProject := !projStr.trimAscii.isEmpty
+  let ineligible := ((aJv.fieldArr? "ineligibleTiers").getD #[]).size > 0
+  let hasTierObj :=
+    (match aJv.field? "currentTier" with | some (.obj _) => true | _ => false) ||
+    (match aJv.field? "paidTier" with | some (.obj _) => true | _ => false)
+  let needsVerification := !hasProject && ineligible && !hasTierObj
+  return (plan?, needsVerification)
+
 def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
   let nowSec ← nowEpoch
   let nowIso := formatEpochIso8601Utc nowSec
@@ -897,16 +1322,40 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
   let mut primaryWin : JVal := .null
   let mut statusStr := "connected"
 
-  -- 1. OpenAI Codex OAuth (`wham/usage`)
-  if pType == "openai" && hp.hasOAuth && !hp.oauthToken.isEmpty then
-    if let .ok (code, _, some wham) ← sendJsonRequest "GET" "https://chatgpt.com/backend-api/wham/usage" (some hp.oauthToken) none #[] 6000 262144 then
-      if 200 ≤ code && code < 300 then
-        let (fields, windows, primary) := projectCodexUsage wham
-        extraFields := fields
-        optWindows := windows
-        primaryWin := primary
-      else if code == 401 || code == 403 then
-        statusStr := "needs_reauth"
+  -- 1. OpenAI Codex OAuth (`wham/usage`) or OpenAI API Key rate-limit probe
+  if pType == "openai" then
+    if hp.hasOAuth && !hp.oauthToken.isEmpty then
+      if let .ok (code, _, some wham) ← sendJsonRequest "GET" "https://chatgpt.com/backend-api/wham/usage" (some hp.oauthToken) none #[] 6000 262144 then
+        if 200 ≤ code && code < 300 then
+          let (fields, windows, primary) := projectCodexUsage wham
+          extraFields := fields
+          optWindows := windows
+          primaryWin := primary
+        else if code == 401 || code == 403 then
+          statusStr := "needs_reauth"
+    else if !hp.apiKey.isEmpty then
+      let hdrs := #[("Authorization", s!"Bearer {hp.apiKey}"), ("Content-Type", "application/json")]
+      let probeBody := (renderCompact (.obj #[
+        ("model", .str "gpt-4.1-nano"),
+        ("max_tokens", JVal.nat 1),
+        ("messages", .arr #[.obj #[("role", .str "user"), ("content", .str "hi")]])
+      ])).toUTF8
+      if let .ok resp ← sendRequest "POST" "https://api.openai.com/v1/chat/completions" hdrs probeBody 6000 65536 then
+        extraFields := extraFields.push ("status_code", JVal.nat resp.status)
+        if resp.status == 401 || resp.status == 403 then
+          statusStr := "needs_reauth"
+        if let some org := findHeaderCI? resp.headers "openai-organization" then
+          extraFields := extraFields.push ("organization", .str org.trimAscii.toString)
+        for (hName, fName) in #[
+          ("x-ratelimit-limit-requests", "requests_limit"),
+          ("x-ratelimit-remaining-requests", "requests_remaining"),
+          ("x-ratelimit-reset-requests", "requests_reset"),
+          ("x-ratelimit-limit-tokens", "tokens_limit"),
+          ("x-ratelimit-remaining-tokens", "tokens_remaining"),
+          ("x-ratelimit-reset-tokens", "tokens_reset")
+        ] do
+          if let some v := findHeaderCI? resp.headers hName then
+            extraFields := extraFields.push (fName, .str v.trimAscii.toString)
 
   -- 2. Anthropic OAuth or API Key
   else if pType == "anthropic" then
@@ -917,27 +1366,55 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
           #[("Authorization", s!"Bearer {tok}"), ("anthropic-beta", "oauth-2025-04-20"), ("anthropic-version", "2023-06-01"), ("Content-Type", "application/json")]
         else
           #[("x-api-key", tok), ("anthropic-version", "2023-06-01"), ("Content-Type", "application/json")]
-      let probeBody := (renderCompact (.obj #[
-        ("model", .str "claude-haiku-4-5-20251001"),
-        ("max_tokens", JVal.nat 1),
-        ("messages", .arr #[.obj #[("role", .str "user"), ("content", .str "hi")]])
-      ])).toUTF8
+      let probeObj : Array (String × JVal) :=
+        (if !hp.oauthToken.isEmpty then #[("system", .str "You are Claude Code, Anthropic's official CLI for Claude.")] else #[]) ++
+        #[
+          ("model", .str "claude-haiku-4-5-20251001"),
+          ("max_tokens", JVal.nat 1),
+          ("messages", .arr #[.obj #[("role", .str "user"), ("content", .str "hi")]])
+        ]
+      let probeBody := (renderCompact (.obj probeObj)).toUTF8
       if let .ok resp ← sendRequest "POST" "https://api.anthropic.com/v1/messages" hdrs probeBody 6000 65536 then
-        if resp.status == 401 then
+        extraFields := extraFields.push ("status_code", JVal.nat resp.status)
+        if resp.status == 401 || resp.status == 403 then
           statusStr := "needs_reauth"
+        if let some orgId := findHeaderCI? resp.headers "anthropic-organization-id" then
+          extraFields := extraFields.push ("organization_id", .str orgId.trimAscii.toString)
+        for (hName, fName) in #[
+          ("anthropic-ratelimit-unified-status", "unified_status"),
+          ("anthropic-ratelimit-unified-reset", "unified_reset"),
+          ("anthropic-ratelimit-unified-5h-status", "unified_5h_status"),
+          ("anthropic-ratelimit-unified-7d-status", "unified_7d_status"),
+          ("anthropic-ratelimit-unified-representative-claim", "unified_representative_claim"),
+          ("anthropic-ratelimit-unified-fallback-percentage", "unified_fallback_pct"),
+          ("anthropic-ratelimit-unified-overage-status", "unified_overage_status"),
+          ("anthropic-ratelimit-unified-overage-disabled-reason", "unified_overage_disabled_reason"),
+          ("anthropic-ratelimit-requests-limit", "requests_limit"),
+          ("anthropic-ratelimit-requests-remaining", "requests_remaining"),
+          ("anthropic-ratelimit-requests-reset", "requests_reset"),
+          ("anthropic-ratelimit-tokens-limit", "tokens_limit"),
+          ("anthropic-ratelimit-tokens-remaining", "tokens_remaining"),
+          ("anthropic-ratelimit-tokens-reset", "tokens_reset"),
+          ("anthropic-ratelimit-input-tokens-limit", "input_tokens_limit"),
+          ("anthropic-ratelimit-input-tokens-remaining", "input_tokens_remaining"),
+          ("anthropic-ratelimit-output-tokens-limit", "output_tokens_limit"),
+          ("anthropic-ratelimit-output-tokens-remaining", "output_tokens_remaining")
+        ] do
+          if let some v := findHeaderCI? resp.headers hName then
+            extraFields := extraFields.push (fName, .str v.trimAscii.toString)
         if let some u5 := findHeaderCI? resp.headers "anthropic-ratelimit-unified-5h-utilization" then
           let pct5 := match u5.trimAscii.toString.toNat? with | some n => toString n | none => u5.trimAscii.toString
           let r5 := findHeaderCI? resp.headers "anthropic-ratelimit-unified-5h-reset"
           extraFields := extraFields.push ("unified_5h_utilization", .num u5.trimAscii.toString)
           if let some rv := r5 then extraFields := extraFields.push ("unified_5h_reset", .str rv)
           optWindows := optWindows.push (buildOptimizeWindow "5h" "5-hour" "utilization_pct" "anthropic_unified_headers" pct5 18000 r5)
-          primaryWin := .str "5h"
         if let some u7 := findHeaderCI? resp.headers "anthropic-ratelimit-unified-7d-utilization" then
           let pct7 := match u7.trimAscii.toString.toNat? with | some n => toString n | none => u7.trimAscii.toString
           let r7 := findHeaderCI? resp.headers "anthropic-ratelimit-unified-7d-reset"
           extraFields := extraFields.push ("unified_7d_utilization", .num u7.trimAscii.toString)
           if let some rv := r7 then extraFields := extraFields.push ("unified_7d_reset", .str rv)
           optWindows := optWindows.push (buildOptimizeWindow "7d" "7-day" "utilization_pct" "anthropic_unified_headers" pct7 604800 r7)
+        primaryWin := selectPrimaryOptimizeWindow optWindows
       -- Model-specific weekly limits (Opus, Sonnet, Fable, ...) are metered apart from the
       -- overall weekly limit and only reported by the OAuth usage endpoint.
       if !hp.oauthToken.isEmpty then
@@ -947,38 +1424,134 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
             let wins := anthropicModelWindows uJv
             if !wins.isEmpty then extraFields := extraFields.push ("anthropic_model_windows", .arr wins)
 
-  -- 3. Kimi Coding Usage
+  -- 3. Kimi Coding Usage + Moonshot Cash Balance
   else if pType == "kimi" then
     let tok := if !hp.oauthToken.isEmpty then hp.oauthToken else hp.apiKey
     if !tok.isEmpty then
-      if let .ok (code, _, some kJv) ← sendJsonRequest "GET" "https://api.kimi.com/coding/v1/usages" (some tok) none #[("User-Agent", "KimiCLI/1.5")] 5000 262144 then
+      if let .ok (code, _, body?) ← sendJsonRequest "GET" "https://api.kimi.com/coding/v1/usages" (some tok) none #[("User-Agent", "KimiCLI/1.5")] 5000 262144 then
         if 200 ≤ code && code < 300 then
-          if let some uObj := kJv.field? "usage" then
-            if let some (.num usedPct) := uObj.field? "used_percent" then
-              extraFields := extraFields.push ("kimi_weekly_used_percent", .num usedPct)
-              optWindows := optWindows.push (buildOptimizeWindow "weekly" "Weekly" "used_pct" "kimi_coding_usages" usedPct 604800 (uObj.fieldStr? "reset_time"))
-              primaryWin := .str "weekly"
+          if let some kJv := body? then
+            let (fields, windows, primary) := projectKimiUsage kJv nowSec
+            extraFields := extraFields ++ fields
+            optWindows := windows
+            primaryWin := primary
+        else if code == 401 || code == 403 then
+          statusStr := "needs_reauth"
+    if !hp.apiKey.isEmpty then
+      if let .ok (bCode, _, some bJv) ← sendJsonRequest "GET" "https://api.moonshot.ai/v1/users/me/balance" (some hp.apiKey) none #[] 5000 65536 then
+        if 200 ≤ bCode && bCode < 300 then
+          let dObj := (bJv.field? "data").getD bJv
+          if let some avail := (dObj.field? "available_balance").bind jvalNumRaw? then
+            extraFields := extraFields.push ("kimi_available_balance", .num avail)
+          if let some cash := (dObj.field? "cash_balance").bind jvalNumRaw? then
+            extraFields := extraFields.push ("kimi_cash_balance", .num cash)
+          if let some voucher := (dObj.field? "voucher_balance").bind jvalNumRaw? then
+            extraFields := extraFields.push ("kimi_voucher_balance", .num voucher)
 
   -- 4. Z.ai Quota Monitor
   else if pType == "zai" && !hp.apiKey.isEmpty then
-    if let .ok (code, _, some zJv) ← sendJsonRequest "GET" "https://api.z.ai/api/monitor/usage/quota/limit" none none #[("Authorization", hp.apiKey)] 5000 262144 then
+    if let .ok (code, _, body?) ← sendJsonRequest "GET" "https://api.z.ai/api/monitor/usage/quota/limit" none none #[("Authorization", hp.apiKey)] 5000 262144 then
       if 200 ≤ code && code < 300 then
-        if let some dObj := zJv.field? "data" then
-          if let some limits := dObj.fieldArr? "limits" then
-            for lim in limits do
-              if let some (.num pct) := lim.field? "percentage" then
-                extraFields := extraFields.push ("zai_5h_used_percent", .num pct)
-                optWindows := optWindows.push (buildOptimizeWindow "5h" "5-hour" "used_pct" "zai_quota_monitor" pct 18000 none)
-                primaryWin := .str "5h"
+        if let some zJv := body? then
+          let (fields, windows, primary) := projectZaiUsage zJv
+          extraFields := fields
+          optWindows := windows
+          primaryWin := primary
+      else if code == 401 || code == 403 then
+        statusStr := "needs_reauth"
 
-  -- 5. Muse Code
-  else if pType == "muse-code" && !hp.oauthToken.isEmpty then
-    if let .ok (code, _, some mJv) ← sendJsonRequest "POST" "https://api.meta.ai/muse-code/key" (some hp.oauthToken) (some (.obj #[])) #[] 5000 262144 then
-      if 200 ≤ code && code < 300 then
-        let subActive := (mJv.fieldBool? "subscription_active").getD true
-        extraFields := extraFields.push ("muse_subscription_active", .bool subActive)
+  -- 5. Muse Code subscription quota & Muse pay-as-you-go note
+  else if pType == "muse-code" then
+    let tok := if !hp.oauthToken.isEmpty then hp.oauthToken else hp.apiKey
+    if !tok.isEmpty then
+      match ← sendJsonRequest "POST" "https://api.meta.ai/muse-code/key" (some tok) (some (.obj #[])) #[] 5000 262144 with
+      | .ok (code, _, body?) =>
+        if 200 ≤ code && code < 300 then
+          if let some mJv := body? then
+            let (fields, windows, primary) := projectMuseCodeUsage mJv
+            extraFields := fields
+            optWindows := windows
+            primaryWin := primary
+        else if code == 401 || code == 403 then
+          statusStr := "needs_reauth"
+          extraFields := extraFields.push ("error", .str "Muse Code rejected the saved login")
+        else
+          extraFields := extraFields.push ("usage_note", .str s!"Muse Code usage endpoint returned HTTP {code}.")
+      | .error _ =>
+        extraFields := extraFields.push ("usage_note", .str "Muse Code usage endpoint is temporarily unreachable.")
 
-  -- 6. Antigravity Cloud Code: plan from `loadCodeAssist`, then the shared 5h/weekly
+  else if pType == "muse" then
+    extraFields := extraFields.push ("usage_note", .str "This API key uses pay-as-you-go billing. Muse Code subscription quota requires a separate Muse Code account connection.")
+
+  -- 6. xAI / Grok OAuth CLI billing & API key introspection
+  else if pType == "xai" then
+    if !hp.oauthToken.isEmpty then
+      let xHdrs := #[("x-xai-token-auth", "xai-grok-cli"), ("User-Agent", "grok-cli/0.1.0")]
+      let mut settingsJv? : Option JVal := none
+      if let .ok (sCode, _, some sJv) ← sendJsonRequest "GET" "https://cli-chat-proxy.grok.com/v1/settings" (some hp.oauthToken) none xHdrs 5000 65536 then
+        if 200 ≤ sCode && sCode < 300 then settingsJv? := some sJv
+        else if sCode == 401 || sCode == 403 then statusStr := "needs_reauth"
+      if let .ok (bCode, _, body?) ← sendJsonRequest "GET" "https://cli-chat-proxy.grok.com/v1/billing?format=credits" (some hp.oauthToken) none xHdrs 5000 262144 then
+        if 200 ≤ bCode && bCode < 300 then
+          if let some bJv := body? then
+            let (fields, windows, primary) := projectXaiBillingUsage bJv settingsJv?
+            extraFields := extraFields ++ fields
+            optWindows := windows
+            primaryWin := primary
+        else if bCode == 401 || bCode == 403 then
+          statusStr := "needs_reauth"
+    if !hp.apiKey.isEmpty then
+      if let .ok (kCode, _, body?) ← sendJsonRequest "GET" "https://api.x.ai/v1/api-key" (some hp.apiKey) none #[] 5000 65536 then
+        extraFields := extraFields.push ("status_code", JVal.nat kCode)
+        if 200 ≤ kCode && kCode < 300 then
+          if let some kJv := body? then
+            if let some kn := (kJv.fieldStr? "name").orElse (fun _ => kJv.fieldStr? "apiKeyName") then
+              if !kn.trimAscii.isEmpty then extraFields := extraFields.push ("xai_key_name", .str kn.trimAscii.toString)
+            if let some tid := (kJv.fieldStr? "teamId").orElse (fun _ => (kJv.fieldStr? "team_id").orElse (fun _ => kJv.fieldStr? "teamID")) then
+              if !tid.trimAscii.isEmpty then extraFields := extraFields.push ("xai_team_id", .str tid.trimAscii.toString)
+            if let some rem := (kJv.field? "remainingCredits").bind jvalNumRaw? then
+              extraFields := extraFields.push ("xai_prepaid_usd", .num rem)
+        else if kCode == 401 || kCode == 403 then
+          statusStr := "needs_reauth"
+
+  -- 7. MiniMax Coding Plan / Token Plan remains
+  else if pType == "minimax" then
+    let tok := if !hp.apiKey.isEmpty then hp.apiKey else hp.oauthToken
+    if !tok.isEmpty then
+      if let .ok (code, _, body?) ← sendJsonRequest "GET" "https://www.minimax.io/v1/api/openplatform/coding_plan/remains" (some tok) none #[] 6000 262144 then
+        if 200 ≤ code && code < 300 then
+          if let some mJv := body? then
+            let (fields, windows, primary) := projectMinimaxUsage mJv
+            extraFields := fields
+            optWindows := windows
+            primaryWin := primary
+        else if code == 401 || code == 403 then
+          statusStr := "needs_reauth"
+
+  -- 8. Cerebras rate-limit headers probe
+  else if pType == "cerebras" && !hp.apiKey.isEmpty then
+    let hdrs := #[("Authorization", s!"Bearer {hp.apiKey}"), ("Content-Type", "application/json")]
+    let probeBody := (renderCompact (.obj #[
+      ("model", .str "llama3.1-8b"),
+      ("max_tokens", JVal.nat 1),
+      ("messages", .arr #[.obj #[("role", .str "user"), ("content", .str "hi")]])
+    ])).toUTF8
+    if let .ok resp ← sendRequest "POST" "https://api.cerebras.ai/v1/chat/completions" hdrs probeBody 6000 65536 then
+      extraFields := extraFields.push ("status_code", JVal.nat resp.status)
+      if resp.status == 401 || resp.status == 403 then
+        statusStr := "needs_reauth"
+      for (hName, fName) in #[
+        ("x-ratelimit-limit-requests-day", "requests_limit_day"),
+        ("x-ratelimit-remaining-requests-day", "requests_remaining_day"),
+        ("x-ratelimit-reset-requests-day", "requests_reset_day"),
+        ("x-ratelimit-limit-tokens-minute", "tokens_limit_minute"),
+        ("x-ratelimit-remaining-tokens-minute", "tokens_remaining_minute"),
+        ("x-ratelimit-reset-tokens-minute", "tokens_reset_minute")
+      ] do
+        if let some v := findHeaderCI? resp.headers hName then
+          extraFields := extraFields.push (fName, .str v.trimAscii.toString)
+
+  -- 9. Antigravity Cloud Code: plan from `loadCodeAssist`, then the shared 5h/weekly
   -- windows from `retrieveUserQuotaSummary`, falling back to per-model `retrieveUserQuota`.
   else if pType == "antigravity" && !hp.oauthToken.isEmpty then
     let base := "https://cloudcode-pa.googleapis.com/v1internal"
@@ -987,11 +1560,17 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
       ("ideType", .str "ANTIGRAVITY"), ("platform", .str "PLATFORM_UNSPECIFIED"), ("pluginType", .str "GEMINI")])]
     if let .ok (code, _, some aJv) ← sendJsonRequest "POST" s!"{base}:loadCodeAssist" (some hp.oauthToken) (some assistBody) ua 10000 262144 then
       if 200 ≤ code && code < 300 then
-        let tierName (k : String) := ((aJv.field? k).bind (·.fieldStr? "name")).filter (!·.trimAscii.isEmpty)
-        extraFields := extraFields.push ("antigravity_plan", .str ((tierName "paidTier" <|> tierName "currentTier").getD "Pro"))
-        let quotaBody : JVal := match aJv.fieldStr? "cloudaicompanionProject" with
-          | some project => .obj #[("project", .str project)]
-          | none => .obj #[]
+        let (plan?, needsVerif) := projectAntigravityAssist aJv
+        if let some plan := plan? then
+          extraFields := extraFields.push ("antigravity_plan", .str plan)
+        if needsVerif then
+          statusStr := "needs_verification"
+          extraFields := extraFields.push ("antigravity_eligibility", .str "needs_verification")
+          extraFields := extraFields.push ("usage_note", .str "Google Cloud Code requires account verification before Antigravity quota can be used.")
+        let projStr :=
+          ((aJv.fieldStr? "cloudaicompanionProject").orElse fun _ =>
+            (aJv.field? "cloudaicompanionProject").bind (·.fieldStr? "id")).getD ""
+        let quotaBody : JVal := if projStr.trimAscii.isEmpty then .obj #[] else .obj #[("project", .str projStr.trimAscii.toString)]
         let mut windows : Array JVal := #[]
         let mut unauthorized := false
         if let .ok (c2, _, some sJv) ← sendJsonRequest "POST" s!"{base}:retrieveUserQuotaSummary" (some hp.oauthToken) (some quotaBody) ua 10000 1048576 then

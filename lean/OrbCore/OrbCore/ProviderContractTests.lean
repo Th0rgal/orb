@@ -917,6 +917,186 @@ private def usageSummaryClientShapeContract (app : CoreAppState) (store : CoreSt
       "DELETE FROM missions WHERE id IN ('m-usage-1','m-usage-sub-1','m-usage-sub-2','m-usage-2','m-usage-2-sub','m-usage-3','m-usage-4');" #[]
   return failures
 
+/-- PROV06/PROV07/PROV08/PROV09/PROV10/PROV11: pure provider usage projections and live
+    usage fetcher contracts against a local loopback server (zero external vendor probes). -/
+private def providerUsageFetchersContract : IO (Array String) := do
+  let failuresRef ← IO.mkRef (#[] : Array String)
+  let must (cond : Bool) (msg : String) : IO Unit := do
+    if !cond then failuresRef.modify (·.push s!"usage-fetchers: {msg}")
+
+  -- 1. Muse Code projection (`projectMuseCodeUsage`):
+  --    - `subs_tier_name` -> `muse_plan`
+  --    - `is_subs_active` -> `muse_subscription_active` (never default true when absent!)
+  --    - `subs_usage.window` -> `muse_5h_used_percent`, `muse_5h_reset`
+  --    - `subs_usage.weekly` -> `muse_weekly_used_percent`, `muse_weekly_reset`
+  --    - Idle response (no windows) -> `usage_note`, no fake `muse_subscription_active`
+  let .ok museActiveRaw := OrbBin.Json.parse
+      "{\"subs_tier_name\":\"Muse Pro\",\"is_subs_active\":true,\"subs_usage\":{\"window\":{\"used_percent\":42.5,\"resets_at\":1780003600},\"weekly\":{\"used_percent\":85,\"resets_at\":1780500000}}}"
+    | throw (IO.userError "museActiveRaw parse failed")
+  let (museFields, museWins, musePrimary) := projectMuseCodeUsage museActiveRaw
+  let museObj := JVal.obj museFields
+  must (museObj.fieldStr? "muse_plan" == some "Muse Pro")
+    s!"muse_plan expected 'Muse Pro', got {museObj.fieldStr? "muse_plan"}"
+  must (museObj.fieldBool? "muse_subscription_active" == some true)
+    s!"muse_subscription_active expected true, got {museObj.fieldBool? "muse_subscription_active"}"
+  must (museObj.field? "muse_5h_used_percent" == some (.num "42.5"))
+    s!"muse_5h_used_percent expected 42.5, got {renderCompact (museObj.fieldOrNull "muse_5h_used_percent")}"
+  must (museObj.fieldInt? "muse_5h_reset" == some 1780003600)
+    s!"muse_5h_reset expected 1780003600, got {museObj.fieldInt? "muse_5h_reset"}"
+  must (museObj.field? "muse_weekly_used_percent" == some (.num "85"))
+    s!"muse_weekly_used_percent expected 85, got {renderCompact (museObj.fieldOrNull "muse_weekly_used_percent")}"
+  must (museObj.fieldInt? "muse_weekly_reset" == some 1780500000)
+    s!"muse_weekly_reset expected 1780500000, got {museObj.fieldInt? "muse_weekly_reset"}"
+  must ((museObj.field? "usage_note").isNone)
+    "muse active windows must not emit idle usage_note"
+  must (museWins.size == 2 && musePrimary == .str "muse_weekly")
+    s!"muse optimize windows expected 2 with primary muse_weekly (tighter 15% rem vs 58% rem), got size={museWins.size} primary={renderCompact musePrimary}"
+
+  let (museIdleFields, museIdleWins, _) := projectMuseCodeUsage (.obj #[("subs_tier_name", .str "Muse Team")])
+  let museIdleObj := JVal.obj museIdleFields
+  must (museIdleObj.fieldStr? "muse_plan" == some "Muse Team")
+    "muse idle must preserve muse_plan"
+  must ((museIdleObj.field? "muse_subscription_active").isNone)
+    "muse idle without is_subs_active must NOT fabricate muse_subscription_active=true"
+  must (museIdleObj.fieldStr? "usage_note" == some "No Muse Code usage in the current window.")
+    s!"muse idle expected usage_note, got {museIdleObj.fieldStr? "usage_note"}"
+  must (museIdleWins.isEmpty)
+    "muse idle must not emit fake 0% optimize windows"
+
+  -- 2. Kimi Coding usage projection (`projectKimiUsage`):
+  --    - `usage` + `limits` shape with `detail` (`limit`/`remaining`/`resetTime`) and `window` (`duration`/`timeUnit`)
+  --    - `user.membership.level` (`LEVEL_INTERMEDIATE` -> `Intermediate`)
+  --    - `kimi_5h_used_percent`, `kimi_5h_reset`, `kimi_weekly_used_percent`, `kimi_weekly_reset`, `kimi_windows`
+  let .ok kimiLimitsRaw := OrbBin.Json.parse
+      ("{\"user\":{\"membership\":{\"level\":\"LEVEL_INTERMEDIATE\"}}," ++
+       "\"usage\":{\"limit\":\"2000\",\"used\":\"500\",\"remaining\":\"1500\",\"resetTime\":\"2026-06-05T10:00:00Z\"}," ++
+       "\"limits\":[{\"window\":{\"duration\":300,\"timeUnit\":\"TIME_UNIT_MINUTE\"}," ++
+       "\"detail\":{\"limit\":\"200\",\"remaining\":\"50\",\"resetTime\":\"1780003600000\"}}]}")
+    | throw (IO.userError "kimiLimitsRaw parse failed")
+  let (kimiFields, kimiWins, kimiPrimary) := projectKimiUsage kimiLimitsRaw 1780000000
+  let kimiObj := JVal.obj kimiFields
+  must (kimiObj.fieldStr? "kimi_plan" == some "Intermediate")
+    s!"kimi_plan expected 'Intermediate', got {kimiObj.fieldStr? "kimi_plan"}"
+  must (kimiObj.field? "kimi_5h_used_percent" == some (.num "75") || kimiObj.field? "kimi_5h_used_percent" == some (.num "75.0"))
+    s!"kimi_5h_used_percent expected 75, got {renderCompact (kimiObj.fieldOrNull "kimi_5h_used_percent")}"
+  must (kimiObj.fieldInt? "kimi_5h_reset" == some 1780003600)
+    s!"kimi_5h_reset expected 1780003600 (ms converted to s), got {kimiObj.fieldInt? "kimi_5h_reset"}"
+  must (kimiObj.field? "kimi_weekly_used_percent" == some (.num "25") || kimiObj.field? "kimi_weekly_used_percent" == some (.num "25.0"))
+    s!"kimi_weekly_used_percent expected 25, got {renderCompact (kimiObj.fieldOrNull "kimi_weekly_used_percent")}"
+  must (kimiObj.fieldInt? "kimi_weekly_reset" == some 1780653600)
+    s!"kimi_weekly_reset expected 1780653600, got {kimiObj.fieldInt? "kimi_weekly_reset"}"
+  let kwArr := (kimiObj.fieldArr? "kimi_windows").getD #[]
+  must (kwArr.size == 2 && kwArr[0]!.fieldStr? "label" == some "5h" && kwArr[1]!.fieldStr? "label" == some "Weekly")
+    s!"kimi_windows expected [5h, Weekly], got {renderCompact (.arr kwArr)}"
+  must (kimiWins.size == 2 && kimiPrimary == .str "kimi_5h")
+    s!"kimi optimize expected primary kimi_5h, got {renderCompact kimiPrimary}"
+
+  -- 3. xAI / Grok billing + settings projection (`projectXaiBillingUsage`):
+  --    - `config.creditUsagePercent`, `config.currentPeriod.{start, end}` -> Weekly/Monthly label, reset epoch, window seconds
+  --    - `config.onDemandUsed`, `config.onDemandCap`
+  --    - `settings.subscription_tier_display` -> `xai_plan`
+  let .ok xaiBillingRaw := OrbBin.Json.parse
+      ("{\"config\":{\"creditUsagePercent\":37.5,\"onDemandUsed\":12.5,\"onDemandCap\":50," ++
+       "\"currentPeriod\":{\"start\":\"2026-08-10T00:00:00Z\",\"end\":\"2026-08-17T00:00:00Z\"}}}")
+    | throw (IO.userError "xaiBillingRaw parse failed")
+  let .ok xaiSettingsRaw := OrbBin.Json.parse "{\"subscription_tier_display\":\"SuperGrok Heavy\"}"
+    | throw (IO.userError "xaiSettingsRaw parse failed")
+  let (xaiFields, xaiWins, xaiPrimary) := projectXaiBillingUsage xaiBillingRaw (some xaiSettingsRaw)
+  let xaiObj := JVal.obj xaiFields
+  must (xaiObj.fieldStr? "xai_plan" == some "SuperGrok Heavy")
+    s!"xai_plan expected 'SuperGrok Heavy', got {xaiObj.fieldStr? "xai_plan"}"
+  must (xaiObj.fieldStr? "xai_credit_label" == some "Weekly")
+    s!"xai_credit_label expected 'Weekly', got {xaiObj.fieldStr? "xai_credit_label"}"
+  must (xaiObj.field? "xai_credit_used_percent" == some (.num "37.5"))
+    s!"xai_credit_used_percent expected 37.5, got {renderCompact (xaiObj.fieldOrNull "xai_credit_used_percent")}"
+  must (xaiObj.fieldInt? "xai_credit_reset" == some 1786924800)
+    s!"xai_credit_reset expected 1786924800, got {xaiObj.fieldInt? "xai_credit_reset"}"
+  must (xaiObj.fieldNat? "xai_credit_window_seconds" == some 604800)
+    s!"xai_credit_window_seconds expected 604800, got {xaiObj.fieldNat? "xai_credit_window_seconds"}"
+  must (xaiObj.field? "xai_on_demand_used" == some (.num "12.5") && (xaiObj.field? "xai_on_demand_cap" == some (.num "50") || xaiObj.field? "xai_on_demand_cap" == some (.num "50.0")))
+    s!"xai on_demand expected 12.5/50, got {renderCompact (xaiObj.fieldOrNull "xai_on_demand_used")} / {renderCompact (xaiObj.fieldOrNull "xai_on_demand_cap")}"
+  must (xaiWins.size == 1 && xaiPrimary == .str "xai_credits")
+    s!"xai optimize expected xai_credits, got {renderCompact xaiPrimary}"
+
+  -- 4. MiniMax Coding Plan projection (`projectMinimaxUsage`):
+  --    - `base_resp.status_code == 0` with `model_remains` (`current_interval_total_count`, `current_interval_usage_count`, `end_time`, `current_weekly_total_count`, `current_weekly_usage_count`, `weekly_end_time`, `model_name`)
+  --    - Note: MiniMax API's `current_interval_usage_count` is REMAINING count (per minimax_usage.rs)! Also support direct `current_interval_remaining_percent` if present.
+  --    - `base_resp.status_code == 2062` -> `usage_note` ("No active Coding Plan..." / "No active Token Plan...")
+  let .ok mmActiveRaw := OrbBin.Json.parse
+      ("{\"base_resp\":{\"status_code\":0,\"status_msg\":\"success\"}," ++
+       "\"model_remains\":[{\"model_name\":\"MiniMax-M2.7\",\"start_time\":1776186000000,\"end_time\":1776204000000," ++
+       "\"remains_time\":205320,\"current_interval_total_count\":1500,\"current_interval_usage_count\":1200," ++
+       "\"current_weekly_total_count\":15000,\"current_weekly_usage_count\":9000," ++
+       "\"weekly_start_time\":1775952000000,\"weekly_end_time\":1776556800000,\"weekly_remains_time\":353005320}]}")
+    | throw (IO.userError "mmActiveRaw parse failed")
+  let (mmFields, mmWins, mmPrimary) := projectMinimaxUsage mmActiveRaw
+  let mmObj := JVal.obj mmFields
+  must (mmObj.fieldNat? "minimax_interval_remaining_percent" == some 80)
+    s!"minimax_interval_remaining_percent expected 80, got {renderCompact (mmObj.fieldOrNull "minimax_interval_remaining_percent")}"
+  must (mmObj.fieldInt? "minimax_interval_reset" == some 1776204000)
+    s!"minimax_interval_reset expected 1776204000, got {mmObj.fieldInt? "minimax_interval_reset"}"
+  must (mmObj.fieldNat? "minimax_weekly_remaining_percent" == some 60)
+    s!"minimax_weekly_remaining_percent expected 60, got {renderCompact (mmObj.fieldOrNull "minimax_weekly_remaining_percent")}"
+  must (mmObj.fieldInt? "minimax_weekly_reset" == some 1776556800)
+    s!"minimax_weekly_reset expected 1776556800, got {mmObj.fieldInt? "minimax_weekly_reset"}"
+  must (((mmObj.fieldArr? "model_usage").getD #[]).size == 1)
+    s!"minimax model_usage expected 1 entry, got {renderCompact (mmObj.fieldOrNull "model_usage")}"
+  must (mmWins.size == 2 && mmPrimary == .str "minimax_weekly")
+    s!"minimax optimize expected 2 windows with primary minimax_weekly (60% rem < 80% rem), got {renderCompact mmPrimary}"
+
+  let .ok mmNoSubRaw := OrbBin.Json.parse "{\"base_resp\":{\"status_code\":2062,\"status_msg\":\"no plan\"},\"model_remains\":[]}"
+    | throw (IO.userError "mmNoSubRaw parse failed")
+  let (mmNoSubFields, mmNoSubWins, _) := projectMinimaxUsage mmNoSubRaw
+  let mmNoSubObj := JVal.obj mmNoSubFields
+  must ((mmNoSubObj.fieldStr? "usage_note").isSome && mmNoSubWins.isEmpty)
+    s!"minimax status_code 2062 expected usage_note and empty windows, got {renderCompact mmNoSubObj}"
+
+  -- 5. Z.ai quota monitor projection (`projectZaiUsage`):
+  --    - `data.level` -> `zai_plan`
+  --    - `TOKENS_LIMIT` `(unit=3, number=5)` -> `zai_5h_used_percent`, `zai_5h_reset` (`nextResetTime / 1000`)
+  --    - `TOKENS_LIMIT` `(unit=6, number=1)` -> `zai_weekly_used_percent`, `zai_weekly_reset` (`nextResetTime / 1000`)
+  --    - `TIME_LIMIT` -> `zai_mcp_percentage`, `zai_mcp_reset`
+  let .ok zaiRaw := OrbBin.Json.parse
+      ("{\"data\":{\"level\":\"Pro\",\"limits\":[" ++
+       "{\"type\":\"TOKENS_LIMIT\",\"unit\":3,\"number\":5,\"percentage\":30,\"nextResetTime\":1780003600000}," ++
+       "{\"type\":\"TOKENS_LIMIT\",\"unit\":6,\"number\":1,\"percentage\":70,\"nextResetTime\":1780608400000}," ++
+       "{\"type\":\"TIME_LIMIT\",\"percentage\":15,\"nextResetTime\":1780900000000}]}}")
+    | throw (IO.userError "zaiRaw parse failed")
+  let (zaiFields, zaiWins, zaiPrimary) := projectZaiUsage zaiRaw
+  let zaiObj := JVal.obj zaiFields
+  must (zaiObj.fieldStr? "zai_plan" == some "Pro")
+    s!"zai_plan expected 'Pro', got {zaiObj.fieldStr? "zai_plan"}"
+  must (zaiObj.field? "zai_5h_used_percent" == some (.num "30"))
+    s!"zai_5h_used_percent expected 30, got {renderCompact (zaiObj.fieldOrNull "zai_5h_used_percent")}"
+  must (zaiObj.fieldInt? "zai_5h_reset" == some 1780003600)
+    s!"zai_5h_reset expected 1780003600, got {zaiObj.fieldInt? "zai_5h_reset"}"
+  must (zaiObj.field? "zai_weekly_used_percent" == some (.num "70"))
+    s!"zai_weekly_used_percent expected 70, got {renderCompact (zaiObj.fieldOrNull "zai_weekly_used_percent")}"
+  must (zaiObj.fieldInt? "zai_weekly_reset" == some 1780608400)
+    s!"zai_weekly_reset expected 1780608400, got {zaiObj.fieldInt? "zai_weekly_reset"}"
+  must (zaiObj.field? "zai_mcp_percentage" == some (.num "15") && zaiObj.fieldInt? "zai_mcp_reset" == some 1780900000)
+    s!"zai_mcp expected 15 @ 1780900000, got {renderCompact (zaiObj.fieldOrNull "zai_mcp_percentage")} @ {zaiObj.fieldInt? "zai_mcp_reset"}"
+  must (zaiWins.size == 2 && zaiPrimary == .str "zai_weekly")
+    s!"zai optimize expected 2 windows with primary zai_weekly (30% rem < 70% rem), got {renderCompact zaiPrimary}"
+
+  -- 6. Antigravity `loadCodeAssist` projection (`projectAntigravityAssist`):
+  --    - Plan omitted when `paidTier.name` and `currentTier.name` are absent (never fabricate "Pro")
+  --    - `antigravityNeedsVerification` true when no project, `ineligibleTiers` non-empty, and no `currentTier`/`paidTier`
+  let .ok agyUnverifiedRaw := OrbBin.Json.parse
+      "{\"ineligibleTiers\":[{\"reasonCode\":\"VALIDATION_REQUIRED\",\"validationUrl\":\"https://accounts.google.com/verify-me\"}]}"
+    | throw (IO.userError "agyUnverifiedRaw parse failed")
+  let (agyPlan1, agyNeedsVer1) := projectAntigravityAssist agyUnverifiedRaw
+  must (agyPlan1 == none && agyNeedsVer1 == true)
+    s!"antigravity unverified assist expected (none, true), got ({agyPlan1}, {agyNeedsVer1})"
+
+  let .ok agyTierlessRaw := OrbBin.Json.parse "{\"cloudaicompanionProject\":\"proj-123\"}"
+    | throw (IO.userError "agyTierlessRaw parse failed")
+  let (agyPlan2, agyNeedsVer2) := projectAntigravityAssist agyTierlessRaw
+  must (agyPlan2 == none && agyNeedsVer2 == false)
+    s!"antigravity tierless assist with project expected (none, false), got ({agyPlan2}, {agyNeedsVer2})"
+
+  return (← failuresRef.get)
+
 /-- Replay the production renderers and HTTP dispatch, never a live usage fetch. -/
 def run : IO Unit := do
   let fixtureRaw ← IO.FS.readFile "shared/orb-spec/fixtures/provider-response-contract.json"
@@ -1041,6 +1221,7 @@ def run : IO Unit := do
       failures := failures ++ (← sidecarParkedHealthContract app root jwt cooldownsRef)
       failures := failures ++ (← proxyHealthClientShapeContract app store jwt now)
       failures := failures ++ (← usageSummaryClientShapeContract app store jwt now)
+      failures := failures ++ (← providerUsageFetchersContract)
       if !failures.isEmpty then
         throw (IO.userError ("provider response contract failures:\n" ++ String.intercalate "\n" failures.toList))
     finally
