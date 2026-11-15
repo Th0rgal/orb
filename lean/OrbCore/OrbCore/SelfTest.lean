@@ -2665,7 +2665,7 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let fullResp ← dispatch s!"POST /api/control/missions/m4/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {task4Body.utf8ByteSize}\r\n\r\n{task4Body}"
   let missBody := "{\"project_slug\":\"orb\",\"track\":\"missing\",\"task_key\":\"t-miss\",\"attempt_seq\":0}"
   let missing ← dispatch s!"POST /api/control/missions/m1/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {missBody.utf8ByteSize}\r\n\r\n{missBody}"
-   let board ← dispatch s!"GET /api/projects/orb/board HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
+   let board ← dispatch s!"GET /api/projects/orb/task-board HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
    let badProj ← dispatch s!"GET /api/projects/%ZZ/board HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
    let _ ← execParamQuery store.missionsDb "UPDATE mission_board_tasks SET status='failed' WHERE task_key='t1';" #[]
    let reopen ← dispatch s!"POST /api/control/missions/m1/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {taskBody.utf8ByteSize}\r\n\r\n{taskBody}"
@@ -4950,12 +4950,15 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   -- Isolated per-user project namespace (`lean-campaign` for `alice` vs `admin`) & isolated inbox state
   let (alBoardPutSt, _, _) ← sendReq "POST" "/api/projects/lean-campaign/tracks" aliceTok
     "{\"track\":\"proof-track\",\"desired_condition\":\"Alice Secret Track\"}"
+  let (alProjectSt, _, _) ← sendReq "POST" "/api/projects" aliceTok "{\"slug\":\"lean-campaign\"}"
+  let (alTextSt, _, _) ← sendReq "PUT" "/api/projects/lean-campaign/board" aliceTok
+    "{\"text\":\"proof-track private board\"}"
   let (_, admBoardBody, _) ← sendReq "GET" "/api/projects/lean-campaign/board" adminTok ""
   let (_, alBoardBody, _) ← sendReq "GET" "/api/projects/lean-campaign/board" aliceTok ""
   let (alInbPutSt, _, _) ← sendReq "PUT" "/api/control/inbox-state/seen/m-secret" aliceTok
     "{\"clientId\":\"c-al\",\"mutationSeq\":1,\"expectedVersion\":0,\"stamp\":42}"
   let (_, admInbBody, _) ← sendReq "GET" "/api/control/inbox-state" adminTok ""
-  if alBoardPutSt != 200 || (alBoardBody.splitOn "proof-track").length < 2 ||
+  if alBoardPutSt != 200 || alProjectSt != 200 || alTextSt != 200 || (alBoardBody.splitOn "proof-track").length < 2 ||
      (admBoardBody.splitOn "proof-track").length != 1 ||
      alInbPutSt != 200 || (admInbBody.splitOn "m-secret").length != 1 then
     return (← fail s!"project/inbox namespace isolation failed: alBoard={alBoardBody} admBoard={admBoardBody} admInb={admInbBody}")
