@@ -387,9 +387,17 @@ def buildDeliveryPlan (workingDir : String) (project? : Option String) (storeRoo
         plan := extendContext plan name desc
   return .ok plan
 
-/-- Largest single skill file shipped to a node, and the cap on all shipped files together. -/
+/-- Largest single skill file shipped to a node. -/
 def remoteSkillMaxBytes : Nat := 64 * 1024
-def remoteSkillTotalBytes : Nat := 1024 * 1024
+/-- Cap on the install script all shipped files add to the turn command. The node runs the
+    command as one `bash -lc` argument, and Linux refuses to exec a single argument longer than
+    `MAX_ARG_STRLEN` (128 KiB): the turn then dies with exit 127 and an empty log. 96 KiB leaves
+    room for the rest of the command. -/
+def remoteSkillTotalBytes : Nat := 96 * 1024
+
+/-- Bytes one file adds to the install script: base64 content plus the quoted paths around it. -/
+def remoteSkillScriptCost (relPath content : String) : Nat :=
+  (content.utf8ByteSize + 2) / 3 * 4 + 3 * relPath.utf8ByteSize + 192
 def remoteSkillMaxCompanionDepth : Nat := 8
 
 /-- Relative path under `<skillDir>/<relPath>` safe for single-quoted POSIX shell expansion:
@@ -495,22 +503,26 @@ def remoteInstallPrelude (workingDir : String) (project? : Option String) (harne
   if let some slug := project?.bind (fun s => contextProjectKey ownerUserId bootstrapAdminId s.trimAscii.toString) then
     for (name, _, path) in (← scanSkillDir (projectSkillDirectory workingDir storeRoot ownerUserId bootstrapAdminId slug) false) do
       found := (found.filter (·.1 != name)).push (name, path)
+  -- Every SKILL.md first, then companion files in the space left, all within the budget.
+  let mut skills : Array (String × String × System.FilePath) := #[]
   let mut bundleFiles : Array (String × String × String) := #[]
   let mut total : Nat := 0
   for (name, path) in found do
     if remoteInstallable name then
       let content ← try IO.FS.readFile path catch _ => pure ""
       let size := content.utf8ByteSize
-      if size > 0 && size ≤ remoteSkillMaxBytes && total + size ≤ remoteSkillTotalBytes then
+      let cost := remoteSkillScriptCost s!"{name}/SKILL.md" content
+      if size > 0 && size ≤ remoteSkillMaxBytes && total + cost ≤ remoteSkillTotalBytes then
         bundleFiles := bundleFiles.push (name, "SKILL.md", content)
-        total := total + size
+        total := total + cost
         if let some skillDir := (System.FilePath.mk path).parent then
-          let companions ← collectRemoteCompanionFiles skillDir
-          for (relPath, compContent) in companions do
-            let compSize := compContent.utf8ByteSize
-            if compSize > 0 && compSize ≤ remoteSkillMaxBytes && total + compSize ≤ remoteSkillTotalBytes then
-              bundleFiles := bundleFiles.push (name, relPath, compContent)
-              total := total + compSize
+          skills := skills.push (name, path, skillDir)
+  for (name, _, skillDir) in skills do
+    for (relPath, compContent) in (← collectRemoteCompanionFiles skillDir) do
+      let cost := remoteSkillScriptCost s!"{name}/{relPath}" compContent
+      if compContent.utf8ByteSize > 0 && compContent.utf8ByteSize ≤ remoteSkillMaxBytes && total + cost ≤ remoteSkillTotalBytes then
+        bundleFiles := bundleFiles.push (name, relPath, compContent)
+        total := total + cost
   return installBundleScript (if harness == "claude" then "claudecode" else harness) bundleFiles
 
 def selectDelivered (workingDir : String) (project? : Option String) (harness prompt : String)
