@@ -130,8 +130,10 @@ def run : IO Unit := do
   let resumeRequest := leanciResumeRequest "aaaaaaaa-0000-4000-8000-000000000001"
     { name := "orb-managed-dev-t", size := "small", ttlSeconds := 300, idempotencyKey := "rk1" }
   check (stopRequest.method == "POST" && stopRequest.path == "/vms/aaaaaaaa-0000-4000-8000-000000000001/stop" &&
+    stopRequest.timeoutMs == 330000 &&
     (stopRequest.body.map renderCompact) == some "{\"keep_disk\":true}" &&
     resumeRequest.method == "POST" && resumeRequest.path == "/vms/aaaaaaaa-0000-4000-8000-000000000001/resume" &&
+    resumeRequest.timeoutMs == 120000 &&
     resumeRequest.idempotencyKey == "rk1" &&
     (resumeRequest.body.map renderCompact) == some "{\"ttl_secs\":300}")
     "stop and resume request shapes match lean.ci#38"

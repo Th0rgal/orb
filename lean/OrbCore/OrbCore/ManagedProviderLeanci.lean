@@ -190,6 +190,7 @@ def leanciStopRequest (id : String) : Request := {
   method := "POST"
   path := vmPath id ++ "/stop"
   body := some (.obj #[("keep_disk", .bool true)])
+  timeoutMs := 330000
 }
 
 /-- `POST /vms/:id/resume {"ttl_secs": N}` boots a parked VM in place under the same ID. -/
