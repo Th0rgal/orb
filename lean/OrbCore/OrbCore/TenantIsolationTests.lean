@@ -514,6 +514,29 @@ def run (root : String) : IO Unit := do
     check (restControllerStatus == 201) s!"REST creation accepts controller: {restControllerStatus} {renderCompact restController}"
     let (_, restBoard) ← send "GET" "/api/projects/member-project/board" member
     check (restBoard.fieldStr? "controller_mission_id" == restController.fieldStr? "id") "REST creation nominates controller"
+    -- Existing project ownership is authoritative even if its slug uses the caller's namespace.
+    sql store.missionsDb "INSERT INTO users(id,username,password_hash,role,unix_username) VALUES('other-member','other-member','synthetic-hash','member','orb-other-member');"
+    for slug in #["member:controller-owned-by-a", "other-member:controller-owned-by-a"] do
+      sql store.projectsDb "INSERT INTO projects(slug,name,controller_mission_id) VALUES(?1,'owned by A','a-controller');" #[slug]
+      sql store.projectsDb "INSERT INTO project_owners(slug,owner_user_id) VALUES(?1,'other-member');" #[slug]
+    for slug in #["controller-owned-by-a", "member:controller-owned-by-a", "other-member:controller-owned-by-a"] do
+      let (status, rejected) ← send "POST" "/api/control/missions" member
+        (.obj #[("title", .str "forbidden controller nomination"), ("backend", .str "codex"),
+          ("project", .str slug), ("placement", .str "client"), ("controller", .bool true)])
+      check (status == 404 && rejected.fieldStr? "error" == some "not_found")
+        s!"REST controller creation requires existing project owner: {slug} {status} {renderCompact rejected}"
+    let .ok unchangedControllers ← execParamQuery store.projectsDb
+      "SELECT controller_mission_id FROM projects WHERE slug IN ('member:controller-owned-by-a','other-member:controller-owned-by-a');" #[]
+      | throw (IO.userError "REST controller ownership verification")
+    check (unchangedControllers.size == 3 && (unchangedControllers.extract 1 3).all (· == #["a-controller"]))
+      "member B cannot replace member A's controller using raw or scoped slugs"
+    let .ok deniedMissions ← execParamQuery store.missionsDb
+      "SELECT COUNT(*) FROM missions WHERE title='forbidden controller nomination';" #[]
+      | throw (IO.userError "REST controller rejected mission verification")
+    check (deniedMissions[1]? == some #["0"]) "controller ownership denial precedes mission creation"
+    sql store.projectsDb "DELETE FROM project_owners WHERE slug IN ('member:controller-owned-by-a','other-member:controller-owned-by-a');"
+    sql store.projectsDb "DELETE FROM projects WHERE slug IN ('member:controller-owned-by-a','other-member:controller-owned-by-a');"
+    sql store.missionsDb "DELETE FROM users WHERE id='other-member';"
     -- Members can request the plan's dev-only pass for their OWN mission. It
     -- still requires a separately approved live lease and never exposes host
     -- audit or generic privilege tokens. Dashboard role labels cannot redeem it.

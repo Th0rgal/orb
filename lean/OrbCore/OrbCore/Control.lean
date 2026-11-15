@@ -4247,6 +4247,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       if normEffort == "__REJECT_EFFORT__" then
         abortIdem
         return .ok (mkJson 400 s!"\{\"error\":\"unsupported_model_effort\",\"backend\":{jsonEscape backend},\"effort\":{jsonEscape rawEffort}}")
+      let controller := (bodyVal?.bind (·.fieldBool? "controller")).getD false
       let rawProjSlug := ((JsonTape.lookupString? tape "project_slug").orElse (fun _ => JsonTape.lookupString? tape "project")).getD ""
       let projSlugRes : Except String String :=
         if rawProjSlug.isEmpty || caller.isLegacyUnscoped then .ok rawProjSlug
@@ -4254,11 +4255,22 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           | some sp => .ok sp
           | none => .error "invalid_project"
       let .ok projSlug := projSlugRes
-        | do abortIdem; return .ok (mkJson 400 "{\"error\":\"invalid_project\"}")
-      let controller := (bodyVal?.bind (·.fieldBool? "controller")).getD false
+        | do
+          abortIdem
+          if controller && validProjectSlug rawProjSlug && rawProjSlug.contains ':' then
+            return .ok (mkJson 404 "{\"error\":\"not_found\"}")
+          return .ok (mkJson 400 "{\"error\":\"invalid_project\"}")
       if controller && projSlug.isEmpty then
         abortIdem
         return .ok (mkJson 400 "{\"error\":\"no_project\"}")
+      -- Nomination must not adopt a project whose ownership predates this request.
+      if controller && !caller.isLegacyUnscoped && caller.role != "admin" then
+        let .ok rows ← execParamQuery st.store.projectsDb
+            "SELECT COALESCE(o.owner_user_id,'') FROM projects p LEFT JOIN project_owners o ON o.slug=p.slug WHERE p.slug=?1;" #[projSlug]
+          | do abortIdem; return .ok (mkJson 500 "{\"error\":\"db_error\"}")
+        if rows.size > 1 && cell rows[1]! 0 != caller.userId then
+          abortIdem
+          return .ok (mkJson 404 "{\"error\":\"not_found\"}")
       let track := (JsonTape.lookupString? tape "track").getD ""
       let repo := ((JsonTape.lookupString? tape "github_pr").orElse (fun _ => JsonTape.lookupString? tape "repo")).getD ""
       let rawDiskNat := (JsonTape.lookupNat? tape "estimated_disk_gib").getD 0
