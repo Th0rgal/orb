@@ -21,7 +21,16 @@ export function ProjectBoardSection(p: { slug: string; selectedMission?: Mission
 
   const refreshBoard = async (gen: number) => {
     const request = ++boardRequest;
-    try { const next = await getProjectBoard(p.slug); if (valid(gen) && request === boardRequest) setBoard(next); }
+    try {
+      const next = await getProjectBoard(p.slug);
+      if (!valid(gen) || request !== boardRequest) return;
+      setBoard(next);
+      const id = next?.controller_mission_id;
+      if ((id === null || typeof id === "string") && id !== controllerId()) {
+        setControllerId(id); setController(null);
+        if (id) await refreshController(id, gen);
+      }
+    }
     catch { /* Background refresh preserves the last board without a toast. */ }
   };
   const refreshController = async (id: string, gen: number, refreshOnChange = false) => {
@@ -60,6 +69,8 @@ export function ProjectBoardSection(p: { slug: string; selectedMission?: Mission
     if (replacing && replacing !== controllerId()) return;
     const gen = generation;
     attemptedController = id;
+    // A board read started before this write cannot restore the previous controller.
+    boardRequest++;
     setBusy(true); setError(null);
     try {
       if (!await setProjectControllerMission(p.slug, id)) { if (valid(gen)) setSupported(false); return; }

@@ -124,3 +124,19 @@ it("refreshes after stream recovery even when no controller event was replayed",
   await waitFor(() => expect(ui.container.querySelector("pre")?.textContent).toBe(board.text));
   expect(api.getProjectBoard).toHaveBeenCalledTimes(2);
 });
+it("adopts a controller changed by another client on recovery and respects a later clear", async () => {
+  vi.mocked(api.getProject).mockResolvedValue({ ...project, controller_mission_id: "m1" });
+  const [hint, setHint] = createSignal<{ id: string | null }>();
+  const ui = render(() => <ProjectBoardSection slug="notes" missionHint={hint()} onOpenMission={() => {}} />);
+  await ui.findByText("running");
+  vi.mocked(api.getMission).mockImplementation(async id => ({ ...mission, id, title: id === "other" ? "New controller" : mission.title }));
+  vi.mocked(api.getProjectBoard).mockResolvedValue({ ...board, controller_mission_id: "other" });
+  setHint({ id: null }); await ui.findByRole("button", { name: "New controller" });
+  const send = vi.spyOn(api, "sendMissionMessage").mockResolvedValue({ id: "receipt", queued: true });
+  fireEvent.input(ui.getByRole("textbox", { name: "Message controller" }), { target: { value: "New plan" } });
+  fireEvent.click(ui.getByRole("button", { name: "Send message" }));
+  await waitFor(() => expect(send.mock.calls[0][0]).toBe("other"));
+  vi.mocked(api.getProjectBoard).mockResolvedValue({ ...board, controller_mission_id: null });
+  setHint({ id: null }); await ui.findByText("No controller");
+  expect((ui.getByRole("textbox", { name: "Message controller" }) as HTMLTextAreaElement).disabled).toBe(true);
+});
