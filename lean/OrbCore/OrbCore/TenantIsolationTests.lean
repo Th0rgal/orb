@@ -477,7 +477,8 @@ def run (root : String) : IO Unit := do
     let writtenBoard ← call memberSession "write_project_board" boardText
     check (writtenBoard.fieldBool? "ok" == some true &&
       (writtenBoard.fieldOrNull "result").fieldStr? "updated_by_mission_id" == some "member-mission") "controller writes board"
-    let .ok () ← upsertMission store { id := "board-reader", ownerUserId := "member", title := "board reader",
+    let .ok () ← upsertMission store {
+      id := "board-reader", ownerUserId := "member", title := "board reader",
       status := "awaiting_user", backend := "codex", modelOverride := "", workingDirectory := path,
       project := "member-project", updatedAt := "2026-11-13T10:00:00Z" }
       | throw (IO.userError "board reader fixture")
