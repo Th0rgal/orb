@@ -181,7 +181,8 @@ def buildComposerInlineRuns (theme : Theme) (buf : ComposerBuffer)
   else
     let pal := theme.palette
     if buf.text.isEmpty && buf.imePreeditText.isEmpty then
-      let phStyle : TextStyle := { (Theme.bodyText theme) with color := pal.textMuted }
+      let phStyle : TextStyle := { (Theme.bodyText theme) with
+        color := if theme.isDark then 0x676767FF else 0xA3A29CFF }
       [composerSynthRun phStyle buf.placeholder]
     else
       let chars := buf.text.toList
@@ -250,11 +251,19 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
         (buttonStyle
           |>.withBg pal.plusBg
           |>.withRadius (pxToSub 12))
-        [WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 10) (pxToSub 2)) pal.textMuted CornerRadii.zero]
+        [WidgetNode.box
+          (BoxStyle.col 0 |>.withAlign .center |>.withFixedSize (pxToSub 10) (pxToSub 10))
+          [ WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 2) (pxToSub 4)) pal.textMuted CornerRadii.zero
+          , WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 10) (pxToSub 2)) pal.textMuted CornerRadii.zero
+          , WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 2) (pxToSub 4)) pal.textMuted CornerRadii.zero ]]
         buf.attachButtonId
   let textNode : WidgetNode :=
     WidgetNode.text
-      { BoxStyle.row 0 with grow := 1, minHeight := pxToSub 18, maxHeight := pxToSub 18 }
+      { BoxStyle.row 0 with
+        grow := 1
+        minHeight := pxToSub 18
+        maxHeight := pxToSub 18
+        padding := Edges.trbl 0 0 0 (pxToSub 2) }
       (pxToSub 18)
       (buildComposerInlineRuns theme buf overrideRuns)
   let hasText := !buf.text.isEmpty || !buf.imePreeditText.isEmpty
@@ -264,10 +273,12 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
       WidgetNode.box
         (buttonStyle
           |>.withBg sendBgCol
-          |>.withRadius (pxToSub 12))
+          |>.withRadius (if isRunning then theme.radiusMd else pxToSub 12))
         [WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 6) (pxToSub 6)) pal.sendFg
           (CornerRadii.uniform (pxToSub 1))]
         buf.sendButtonId
+  -- The native three-box blur at 16 px matches the falloff of the browser's
+  -- `.dock .composer` 18 px CSS shadow; retain its 4 px offset and 8% opacity.
   let pill : WidgetNode :=
     WidgetNode.focusable buf.composerWidgetId <|
       WidgetNode.box
@@ -277,20 +288,29 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
           |>.withFixedSize colW (pxToSub 42)
           |>.withBg pillBg
           |>.withRadius (pxToSub 21)
-          |>.withBorder theme.borderWidth borderCol)
+          |>.withBorder theme.borderWidth borderCol
+          |>.withShadow { offsetY := pxToSub 4, blur := pxToSub 16, color := 0x00000014 })
         [attachBtn, textNode, sendBtn]
   let metaStyle : TextStyle :=
-    { (Theme.mutedText theme) with sizeSub := pxToSub 13, lineHeightSub := pxToSub 18, color := pal.textMuted }
+    { (Theme.mutedText theme) with sizeSub := pxToSub 12, lineHeightSub := pxToSub 18, color := pal.textMuted }
+  let metaText (text : String) (width : SubPx) : WidgetNode :=
+    WidgetNode.text (BoxStyle.row 0 |>.withFixedSize width (pxToSub 18))
+      (pxToSub 18) [composerSynthRun metaStyle text]
+  let selector (text : String) (width : Nat) : WidgetNode :=
+    WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center
+      |>.withFixedSize (pxToSub (width + 14)) (pxToSub 18))
+      [metaText text (pxToSub width), metaText "⌄" (pxToSub 10)]
+  let sep := metaText "·" (pxToSub 3)
   let underRow : WidgetNode :=
     WidgetNode.box
-      (BoxStyle.row (pxToSub 12)
+      (BoxStyle.row (pxToSub 6)
         |>.withAlign .center
-        |>.withPadding (Edges.trbl 0 (pxToSub 4) 0 (pxToSub 4))
+        |>.withPadding (Edges.trbl 0 (pxToSub 12) (pxToSub 2) (pxToSub 12))
         |>.withFixedSize colW (pxToSub 36))
-      [ WidgetNode.text
-          (BoxStyle.row 0 |>.withFixedSize (colW - pxToSub 8) (pxToSub 18))
-          (pxToSub 18)
-          [composerSynthRun metaStyle "selected machine  ·  claudecode  ·  Default  ·  Default  ·  Supervised"] ]
+      [ WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (pxToSub 11) (pxToSub 13)) []
+      , selector "selected machine" 99, sep
+      , selector "claudecode" 66, sep, metaText "Default" (pxToSub 40), sep
+      , selector "Default" 40, sep, selector "Supervised" 65 ]
   let chipBar : List WidgetNode :=
     if hasChips then
       [WidgetNode.box

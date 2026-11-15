@@ -183,18 +183,22 @@ def sdfRoundedRect16 (r : Rect) (radii : CornerRadii) (px py : Int) : Int :=
   let inMax16 : Int := min (max qx16 qy16) 0
   inMax16 + outLen16 - rad16
 
-/-- Alpha-over blend of `src = (sr, sg, sb, sa)` onto `(dr, dg, db, da)` in `[0..255]`. -/
+/-- Alpha-over blend of `src = (sr, sg, sb, sa)` onto `(dr, dg, db, da)` in `[0..255]`,
+matching Skia 8-bit premultiplied compositing. -/
 @[inline] private def blendOver (dr dg db da sr sg sb sa : UInt8) : UInt8 × UInt8 × UInt8 × UInt8 :=
   if sa == 0 then (dr, dg, db, da)
   else if sa == 255 then (sr, sg, sb, 255)
   else
     let a := sa.toNat
     let inv := 255 - a
-    let r := (sr.toNat * a + dr.toNat * inv + 127) / 255
-    let g := (sg.toNat * a + dg.toNat * inv + 127) / 255
-    let b := (sb.toNat * a + db.toNat * inv + 127) / 255
-    let outA := a + (da.toNat * inv + 127) / 255
-    (r.toUInt8, g.toUInt8, b.toUInt8, (min outA 255).toUInt8)
+    let pmR := (sr.toNat * a + 127) / 255
+    let pmG := (sg.toNat * a + 127) / 255
+    let pmB := (sb.toNat * a + 127) / 255
+    let r := min 255 (pmR + (dr.toNat * inv + 127) / 255)
+    let g := min 255 (pmG + (dg.toNat * inv + 127) / 255)
+    let b := min 255 (pmB + (db.toNat * inv + 127) / 255)
+    let outA := min 255 (a + (da.toNat * inv + 127) / 255)
+    (r.toUInt8, g.toUInt8, b.toUInt8, outA.toUInt8)
 
 @[inline] private def unpackColor (c : Color) : UInt8 × UInt8 × UInt8 × UInt8 :=
   (((c >>> 24) &&& 0xFF).toUInt8,

@@ -129,6 +129,15 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
     let mut curAc := ac
     let newPayload ←
       match payload with
+      | .vectorIcon paths color =>
+        let size := scaleSubPx scale120 style.minWidth
+        let key : GlyphKey := { font := 0xFFFF, glyph := hash paths |>.toNat, sizeSub := size, subpx := 0 }
+        let (ac', entry) :=
+          match curAc.cache.lookup Text.hashGlyphKey key with
+          | some entry => ({ curAc with hits := curAc.hits + 1 }, entry)
+          | none => curAc.insertRasterized key (Text.rasterizeIcon paths size)
+        curAc := ac'
+        pure (WidgetPayload.iconMask entry.page entry.uv color)
       | .text lineHeightSub runs =>
         let mut shapedRuns : List InlineRun := []
         for r in runs do
@@ -142,6 +151,21 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
             shapedRuns := shapedRuns ++ rsAdjusted
           else
             shapedRuns := shapedRuns ++ [r]
+        -- A fixed-width clipped label is a CSS single-line ellipsis label.
+        if style.clip && style.maxWidth > 0 then
+          let total := shapedRuns.foldl (fun n r => n + r.glyphs.foldl (fun n g => n + g.xAdvance) 0) 0
+          if total > style.maxWidth then
+            if let some r := shapedRuns.head? then
+              let (ac', dots) ← shapeDesktopRuns curAc font scale120 r.style "…"
+              curAc := ac'
+              let dotW := dots.foldl (fun n r => n + r.glyphs.foldl (fun n g => n + g.xAdvance) 0) 0
+              let mut used := 0
+              let mut glyphs := []
+              for g in r.glyphs do
+                if used + g.xAdvance + dotW > style.maxWidth then break
+                used := used + g.xAdvance
+                glyphs := glyphs ++ [g]
+              shapedRuns := [{ r with glyphs := glyphs, allowBreakAfter := false }] ++ dots
         pure (WidgetPayload.text lineHeightSub shapedRuns)
       | other => pure other
     let mut shapedChildren : List WidgetNode := []

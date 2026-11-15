@@ -18,6 +18,10 @@ inductive WidgetPayload where
   | linearGradient (c0 c1 : Color) (angleDeg : Nat) (radius : SubPx)
   | text (lineHeightSub : SubPx) (runs : List InlineRun)
   | iconMask (page : Nat) (src : Rect) (color : Color)
+  /-- Round-capped polylines in a 16px view box, coordinates in tenths of a pixel. -/
+  | vectorIcon (paths : List (List (Int × Int))) (color : Color)
+  /-- Tree branch behind an icon, with its small bottom-right status ring. -/
+  | treeDecoration (branch : Bool) (last : Bool) (stroke status background : Color)
   | image (tex : Nat) (src : Rect) (radius : SubPx)
   | scrollClip (scroll : ScrollSpec)
   | roundedClip (radii : CornerRadii)
@@ -214,6 +218,19 @@ def emitPayloadPrims (scale120 : Nat) (box : ComputedBox) : WidgetPayload → Li
     emitWrappedLineGlyphs scale120 box.contentRectSub.x box.contentRectSub.y box.lines
   | .iconMask page src color =>
     [.mask page src box.contentRectDev color]
+  | .vectorIcon _ _ => [] -- Rasterized into the shared atlas before layout.
+  | .treeDecoration branch last stroke status background =>
+    let r := box.rectDev
+    let p (n : Nat) := Int.ofNat (scaleSubPx scale120 (pxToSub n))
+    let x := r.x - p 8
+    let y := r.y + p 8
+    (if branch then
+       [Prim.quad { x := x, y := r.y - p 7, w := p 1, h := if last then p 15 else p 31 } stroke 0 0 0,
+        Prim.quad { x := x, y := y, w := p 9, h := p 1 } stroke 0 0 0]
+     else []) ++
+    (if status == 0 then [] else
+       [Prim.quad { x := r.x + p 10, y := r.y + p 10, w := p 8, h := p 8 }
+         background (scaleSubPx scale120 (pxToSub 4)) (scaleSubPx scale120 (pxToSub 1)) status])
   | .image tex src radius =>
     [.image tex src box.contentRectDev (scaleSubPx scale120 radius)]
   | .scrollClip _ => []
