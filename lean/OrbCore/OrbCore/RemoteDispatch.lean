@@ -135,6 +135,30 @@ def stagePromptOnFd3 (prompt : String) : String × Array (String × String) := I
     s!"unset {unsetVars}; "
   return (prelude, envs)
 
+/-- Stage the install script on an unlinked temporary file, using bounded environment entries.
+    Neither the script nor its base64 contents become an exec argument (including the `sh` exec).
+    Close fd 4 before launching the harness; prompt staging owns fd 3 independently. -/
+def stageSkillBundle (script : String) : String × Array (String × String) := Id.run do
+  if script.isEmpty then return ("", #[])
+  else
+    let chunks := splitUtf8Chunks script (96 * 1024)
+    let mut envs : Array (String × String) := Array.mkEmpty chunks.size
+    let mut refs : Array String := Array.mkEmpty chunks.size
+    let mut unsetVars := "sandboxed_skill_bundle"
+    for i in [0:chunks.size] do
+      let k := s!"SANDBOXED_SKILL_PART_{i}"
+      envs := envs.push (k, chunks[i]!)
+      refs := refs.push s!"\"${k}\""
+      unsetVars := unsetVars ++ " " ++ k
+    let printfArgs := String.intercalate " " refs.toList
+    let prelude :=
+      "sandboxed_skill_bundle=\"$(mktemp)\" || exit 1; " ++
+      s!"printf %s {printfArgs} > \"$sandboxed_skill_bundle\" || exit 1; " ++
+      "exec 4< \"$sandboxed_skill_bundle\"; " ++
+      "rm -f -- \"$sandboxed_skill_bundle\"; " ++
+      s!"unset {unsetVars}; sh <&4 || exit 1; exec 4<&-; "
+    return (prelude, envs)
+
 /-! ## Remote Node Placement Resolution & Unified Transport Wrapper -/
 
 /-- Call a static remote node or dial-out managed VM (`OrbNode`), supporting `mc? = none` for static nodes. -/
@@ -541,8 +565,9 @@ private def prepareRemoteHarnessCommand
   -- The Library lives on Core: ship the delivered skills into the node workspace so every
   -- harness finds them where it looks (`.opencode/skills`, `.claude/skills`, `.agents/skills`).
   let bootstrapAdminId := (← getBootstrapAdmin? store).map (·.id) |>.getD ""
-  let wsPrefix := wsPrefix ++ (← OrbCore.Skills.remoteInstallPrelude coreWorkDir
+  let skillBundle := (← OrbCore.Skills.remoteInstallPrelude coreWorkDir
     (if spec.project.trimAscii.toString.isEmpty then none else some spec.project) spec.backend.trimAscii.toString.toLower store.rootDir spec.ownerUserId bootstrapAdminId)
+  let (skillPrelude, skillEnvs) := stageSkillBundle skillBundle
   let (fd3Prelude, promptEnvs) := stagePromptOnFd3 deliveredPrompt
   let resumeSid? := spec.resumeSessionId?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
   let bLow := spec.backend.trimAscii.toString.toLower
@@ -572,12 +597,12 @@ private def prepareRemoteHarnessCommand
     let acpPlan := if planArg.isEmpty then "" else " --plan"
     let acpInner := s!"sandboxed-node opencode-acp{acpPlan}{sessArg} --model {shellSingleQuote s!"builtin/{modelKey}"}"
     let cmd :=
-      wsPrefix ++ fd3Prelude ++
+      wsPrefix ++ skillPrelude ++ fd3Prelude ++
       "command -v opencode >/dev/null 2>&1 || { echo 'opencode is not installed on this node' >&2; exit 127; }; " ++
       "if sandboxed-node opencode-acp --probe </dev/null >/dev/null 2>&1; then " ++
       wrapWithRemoteMcp "opencode" acpInner ++ "; else " ++ wrapWithRemoteMcp "opencode" inner ++ "; fi <&3"
     let envs :=
-      promptEnvs ++ mcpEnvs ++ #[
+      skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[
         ("SANDBOXED_PROXY_API_KEY", pTok),
         ("NO_COLOR", "1"),
         ("OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS", "600000"),
@@ -603,11 +628,11 @@ private def prepareRemoteHarnessCommand
       "claude -p --dangerously-skip-permissions --output-format stream-json --verbose --include-partial-messages" ++
       permArg ++ modelArg ++ effArg ++ resArg
     let cmd :=
-      wsPrefix ++ fd3Prelude ++
+      wsPrefix ++ skillPrelude ++ fd3Prelude ++
       "command -v claude >/dev/null 2>&1 || { echo 'claude is not installed on this node' >&2; exit 127; }; " ++
       wrapWithRemoteMcp "claudecode" inner ++ " <&3"
     let envs :=
-      promptEnvs ++ mcpEnvs ++ #[
+      skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[
         ("ANTHROPIC_BASE_URL", proxyBase),
         ("ANTHROPIC_AUTH_TOKEN", pTok),
         ("NO_COLOR", "1"),
@@ -644,11 +669,11 @@ private def prepareRemoteHarnessCommand
       "codex exec --json --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check" ++
       provArgs ++ modelArg ++ effArg ++ tailArgs
     let cmd :=
-      wsPrefix ++ fd3Prelude ++
+      wsPrefix ++ skillPrelude ++ fd3Prelude ++
       "command -v codex >/dev/null 2>&1 || { echo 'codex is not installed on this node' >&2; exit 127; }; " ++
       wrapWithRemoteMcp "codex" inner ++ " <&3"
     let envs :=
-      promptEnvs ++ mcpEnvs ++ #[
+      skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[
         ("SANDBOXED_PROXY_API_KEY", pTok),
         ("NO_COLOR", "1")
       ]
@@ -665,10 +690,10 @@ private def prepareRemoteHarnessCommand
       | none => s!" --session-id {shellSingleQuote freshSid}"
     let inner := s!"grok --output-format streaming-json --always-approve --no-plan{modelArg}{sessArg} --cwd \"$PWD\" -p \"$(cat <&3)\""
     let cmd :=
-      wsPrefix ++ fd3Prelude ++
+      wsPrefix ++ skillPrelude ++ fd3Prelude ++
       "command -v grok >/dev/null 2>&1 || { echo 'grok is not installed on this node' >&2; exit 127; }; " ++
       wrapWithRemoteMcp "grok" inner
-    let envs := promptEnvs ++ mcpEnvs ++ #[("NO_COLOR", "1")]
+    let envs := skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[("NO_COLOR", "1")]
     return .ok { command := cmd, envPairs := envs, managedAuth := #["grok"], proxyToken := "" }
 
   else if harness == "antigravity" then
@@ -685,10 +710,10 @@ private def prepareRemoteHarnessCommand
     let resArg := match resumeSid? with | some sid => s!" --resume {shellSingleQuote sid}" | none => ""
     let inner := s!"agy --print{modelArg}{effArg}{resArg} \"$(cat <&3)\""
     let cmd :=
-      wsPrefix ++ fd3Prelude ++
+      wsPrefix ++ skillPrelude ++ fd3Prelude ++
       "command -v agy >/dev/null 2>&1 || { echo 'agy is not installed on this node' >&2; exit 127; }; " ++
       wrapWithRemoteMcp "antigravity" inner
-    let envs := promptEnvs ++ mcpEnvs ++ #[("NO_COLOR", "1")]
+    let envs := skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[("NO_COLOR", "1")]
     return .ok { command := cmd, envPairs := envs, managedAuth := #["antigravity"], proxyToken := "" }
 
   else
