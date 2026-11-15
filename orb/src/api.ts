@@ -1597,9 +1597,11 @@ export interface ProviderUsage {
   codex_primary_used_percent?: number;
   codex_primary_reset_at?: number;
   codex_primary_window_minutes?: number;
+  codex_primary_window_label?: string;
   codex_secondary_used_percent?: number;
   codex_secondary_reset_at?: number;
   codex_secondary_window_minutes?: number;
+  codex_secondary_window_label?: string;
   minimax_interval_remaining_percent?: number;
   minimax_interval_reset?: number;
   minimax_weekly_remaining_percent?: number;

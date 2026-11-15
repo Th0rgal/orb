@@ -38,6 +38,37 @@ class OrbQuotaExhaustedTest {
     }
 
     @Test
+    fun codexWindowLabelsUseDurationAndDisambiguateEqualWindows() {
+        val standard: OrbDict = mapOf(
+            "codex_primary_used_percent" to 25.0,
+            "codex_primary_window_minutes" to 300.0,
+            "codex_secondary_used_percent" to 50.0,
+            "codex_secondary_window_minutes" to 10080.0
+        )
+        assertEquals(listOf("5h" to 0.25, "Weekly" to 0.50), providerQuotaWindows(standard))
+
+        val promax: OrbDict = mapOf(
+            "codex_plan_type" to "promax",
+            "codex_primary_used_percent" to 12.0,
+            "codex_primary_window_minutes" to 10080.0,
+            "codex_secondary_used_percent" to 68.0,
+            "codex_secondary_window_minutes" to 10080.0
+        )
+        assertEquals(listOf("Weekly" to 0.12, "Weekly (secondary)" to 0.68), providerQuotaWindows(promax))
+
+        val named: OrbDict = mapOf(
+            "codex_plan_type" to "promax",
+            "codex_primary_used_percent" to 12.0,
+            "codex_primary_window_minutes" to 10080.0,
+            "codex_primary_window_label" to "General",
+            "codex_secondary_used_percent" to 68.0,
+            "codex_secondary_window_minutes" to 10080.0,
+            "codex_secondary_window_label" to "Codex"
+        )
+        assertEquals(listOf("General" to 0.12, "Codex" to 0.68), providerQuotaWindows(named))
+    }
+
+    @Test
     fun subscriptionResetsMatchSharedFixture() {
         val spec = OrbSpec.dict("fixtures/subscription-resets.json")
         val supportsCases = OrbJSON.dictList(spec["supports_cases"])

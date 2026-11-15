@@ -144,6 +144,29 @@ final class OrbSettingsTests: XCTestCase {
         XCTAssertEqual(windows[1].1, 0.2, accuracy: 0.0001)
         XCTAssertEqual(windows[2].1, 0.3, accuracy: 0.0001)
         XCTAssertTrue(OrbProviderQuota.windows(.null).isEmpty)
+
+        let promax: OrbJSON = .object([
+            "codex_plan_type": .string("promax"),
+            "codex_primary_used_percent": .number(12),
+            "codex_primary_window_minutes": .number(10080),
+            "codex_secondary_used_percent": .number(68),
+            "codex_secondary_window_minutes": .number(10080),
+        ])
+        let promaxWindows = OrbProviderQuota.windows(promax)
+        XCTAssertEqual(promaxWindows.map(\.0), ["Weekly", "Weekly (secondary)"])
+        XCTAssertEqual(promaxWindows[0].1, 0.12, accuracy: 0.0001)
+        XCTAssertEqual(promaxWindows[1].1, 0.68, accuracy: 0.0001)
+
+        let named: OrbJSON = .object([
+            "codex_plan_type": .string("promax"),
+            "codex_primary_used_percent": .number(12),
+            "codex_primary_window_minutes": .number(10080),
+            "codex_primary_window_label": .string("General"),
+            "codex_secondary_used_percent": .number(68),
+            "codex_secondary_window_minutes": .number(10080),
+            "codex_secondary_window_label": .string("Codex"),
+        ])
+        XCTAssertEqual(OrbProviderQuota.windows(named).map(\.0), ["General", "Codex"])
     }
     func testUnverifiedAntigravityAccountOpensGoogleVerification() {
         let refused: OrbJSON = .object(["status": .string("needs_verification"), "verification_url": .string("https://accounts.google.com/signin/continue?sarp=1")])

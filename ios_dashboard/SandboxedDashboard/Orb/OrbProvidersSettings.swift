@@ -763,14 +763,35 @@ struct OrbProviderQuota: View {
     static func joinNames(_ names: [String]) -> String {
         names.count < 2 ? names.joined() : names.dropLast().joined(separator: ", ") + " and " + names.last!
     }
+    static func codexWindowLabel(_ minutes: Double?, fallback: String, otherMinutes: Double? = nil, explicitLabel: String? = nil) -> String {
+        if let trimmed = explicitLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty { return trimmed }
+        guard let raw = minutes, raw.isFinite, raw > 0 else { return fallback }
+        let mins = Int(raw.rounded())
+        let base: String
+        if mins == 10080 { base = "Weekly" }
+        else if mins >= 1440 && mins % 1440 == 0 { base = "\(mins / 1440)d" }
+        else if mins >= 60 && mins % 60 == 0 { base = "\(mins / 60)h" }
+        else { base = "\(mins)m" }
+        if let other = otherMinutes, other.isFinite, other > 0, Int(other.rounded()) == mins {
+            return "\(base) (secondary)"
+        }
+        return base
+    }
     static func windows(_ value: OrbJSON) -> [(String, Double)] {
         var result: [(String, Double)] = []
         func add(_ label: String, _ key: String, scale: Double = 100, remaining: Bool = false) {
             if let raw = value[key].number, raw.isFinite { result.append((label, min(1, max(0, remaining ? 1 - raw / scale : raw / scale)))) }
         }
         add("5h", "unified_5h_utilization", scale: 1); add("Weekly", "unified_7d_utilization", scale: 1)
-        if value["codex_primary_window_minutes"].number != 0 { add("Primary", "codex_primary_used_percent") }
-        if value["codex_secondary_window_minutes"].number != 0 { add("Secondary", "codex_secondary_used_percent") }
+        let primaryMins = value["codex_primary_window_minutes"].number
+        let secondaryMins = value["codex_secondary_window_minutes"].number
+        if primaryMins != 0 {
+            add(codexWindowLabel(primaryMins, fallback: "Primary", explicitLabel: value["codex_primary_window_label"].string), "codex_primary_used_percent")
+        }
+        if secondaryMins != 0 {
+            let otherMins = value["codex_primary_used_percent"].number != nil ? primaryMins : nil
+            add(codexWindowLabel(secondaryMins, fallback: "Secondary", otherMinutes: otherMins, explicitLabel: value["codex_secondary_window_label"].string), "codex_secondary_used_percent")
+        }
         add("Credits", "xai_credit_used_percent")
         if value["kimi_windows"].items.isEmpty { add("5h", "kimi_5h_used_percent"); add("Weekly", "kimi_weekly_used_percent") }
         else { for window in value["kimi_windows"].items { if let percent = window["used_percent"].number, percent.isFinite { result.append((window["label"].text, min(1, max(0, percent / 100)))) } } }

@@ -36,6 +36,30 @@ it("renders Core's ready subscription status as configured, not unknown or verif
 it("uses actual window lengths and excludes absent zero-duration windows", () => {
   expect(usageWindows(usage(45))).toEqual([{ label: "Weekly", used: .45 }]);
   expect(usageWindows({ ...usage(45), codex_primary_window_minutes: 300 })).toEqual([{ label: "5h", used: .45 }]);
+  expect(usageWindows({
+    provider_type: "openai",
+    codex_plan_type: "promax",
+    codex_primary_used_percent: 12,
+    codex_primary_window_minutes: 10080,
+    codex_secondary_used_percent: 68,
+    codex_secondary_window_minutes: 10080,
+  })).toEqual([
+    { label: "Weekly", used: .12 },
+    { label: "Weekly (secondary)", used: .68 },
+  ]);
+  expect(usageWindows({
+    provider_type: "openai",
+    codex_plan_type: "promax",
+    codex_primary_used_percent: 12,
+    codex_primary_window_minutes: 10080,
+    codex_primary_window_label: "General",
+    codex_secondary_used_percent: 68,
+    codex_secondary_window_minutes: 10080,
+    codex_secondary_window_label: "Codex",
+  })).toEqual([
+    { label: "General", used: .12 },
+    { label: "Codex", used: .68 },
+  ]);
 });
 it("does not equate saved credentials with usable quota or a working login", () => {
   expect(effectiveProviderStatus(account("ben"), usage(45))).toBe("connected");

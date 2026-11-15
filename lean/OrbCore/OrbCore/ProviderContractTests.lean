@@ -1095,6 +1095,41 @@ private def providerUsageFetchersContract : IO (Array String) := do
   must (agyPlan2 == none && agyNeedsVer2 == false)
     s!"antigravity tierless assist with project expected (none, false), got ({agyPlan2}, {agyNeedsVer2})"
 
+  -- 7. Codex `wham/usage` two-weekly-windows ("promax") projection (`projectCodexUsage`):
+  --    - When both `primary_window` and `secondary_window` report `limit_window_seconds = 604800` (10080 minutes),
+  --      the optimize windows must NOT assume `primary = 5h`: they must derive keys/labels from actual window length
+  --      and disambiguate identical durations (`7d` / `7-day` and `7d_secondary` / `7-day (secondary)`).
+  let .ok codexPromaxRaw := OrbBin.Json.parse
+      ("{\"plan_type\":\"promax\",\"rate_limit\":{" ++
+       "\"primary_window\":{\"used_percent\":12,\"reset_at\":1740604800,\"limit_window_seconds\":604800}," ++
+       "\"secondary_window\":{\"used_percent\":68,\"reset_at\":1740604800,\"limit_window_seconds\":604800}}}")
+    | throw (IO.userError "codexPromaxRaw parse failed")
+  let (promaxFields, promaxWins, promaxPrimary) := projectCodexUsage codexPromaxRaw
+  let promaxObj := JVal.obj promaxFields
+  must (promaxObj.fieldStr? "codex_plan_type" == some "promax")
+    s!"codex_plan_type expected 'promax', got {promaxObj.fieldStr? "codex_plan_type"}"
+  must (promaxObj.fieldNat? "codex_primary_window_minutes" == some 10080 &&
+        promaxObj.fieldNat? "codex_secondary_window_minutes" == some 10080)
+    s!"codex promax window minutes expected (10080, 10080), got ({promaxObj.fieldNat? "codex_primary_window_minutes"}, {promaxObj.fieldNat? "codex_secondary_window_minutes"})"
+  must (promaxWins.size == 2 &&
+        promaxWins[0]!.fieldStr? "key" == some "7d" &&
+        promaxWins[0]!.fieldStr? "label" == some "7-day" &&
+        promaxWins[1]!.fieldStr? "key" == some "7d_secondary" &&
+        promaxWins[1]!.fieldStr? "label" == some "7-day (secondary)" &&
+        promaxPrimary == .str "7d_secondary")
+    s!"codex promax optimize windows expected [7d/7-day, 7d_secondary/7-day (secondary)] with primary 7d_secondary, got {renderCompact (.arr promaxWins)} primary={renderCompact promaxPrimary}"
+
+  let .ok codexNamedRaw := OrbBin.Json.parse
+      ("{\"plan_type\":\"promax\",\"rate_limit\":{" ++
+       "\"primary_window\":{\"used_percent\":12,\"reset_at\":1740604800,\"limit_window_seconds\":604800,\"limit_name\":\"General\"}," ++
+       "\"secondary_window\":{\"used_percent\":68,\"reset_at\":1740604800,\"limit_window_seconds\":604800,\"limit_name\":\"Codex\"}}}")
+    | throw (IO.userError "codexNamedRaw parse failed")
+  let (namedFields, _, _) := projectCodexUsage codexNamedRaw
+  let namedObj := JVal.obj namedFields
+  must (namedObj.fieldStr? "codex_primary_window_label" == some "General" &&
+        namedObj.fieldStr? "codex_secondary_window_label" == some "Codex")
+    s!"codex named window labels expected ('General', 'Codex'), got ({namedObj.fieldStr? "codex_primary_window_label"}, {namedObj.fieldStr? "codex_secondary_window_label"})"
+
   return (← failuresRef.get)
 private def customDiscoveryContract (app : CoreAppState) (jwt : String) (now : UInt64) : IO (Array String) := do
   let mut failures := #[]
