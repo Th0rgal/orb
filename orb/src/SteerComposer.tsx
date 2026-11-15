@@ -1,4 +1,4 @@
-import { Show, createSignal } from "solid-js";
+import { Show, createSignal, onCleanup } from "solid-js";
 import { Field } from "./Dialog";
 import { connectionVersion, getMission, isClientPlacement, sendMissionMessage } from "./api";
 
@@ -7,6 +7,8 @@ export function SteerComposer(p: { missionId: string | null; disabled?: boolean;
   const [text, setText] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  let disposed = false;
+  onCleanup(() => { disposed = true; p.onBusyChange?.(false); });
   let attempt: { missionId: string; text: string; id: string } | undefined;
   const send = async () => {
     const missionId = p.missionId, body = text().trim();
@@ -16,13 +18,14 @@ export function SteerComposer(p: { missionId: string | null; disabled?: boolean;
     setBusy(true); p.onBusyChange?.(true); setError(null);
     try {
       const mission = await getMission(missionId, { fresh: true, includeHistory: false });
-      if (version !== connectionVersion() || p.missionId !== missionId) throw new Error("Controller changed. Your draft is kept.");
+      if (disposed || version !== connectionVersion() || p.missionId !== missionId) throw new Error("Controller changed. Your draft is kept.");
       if (isClientPlacement(mission)) throw new Error("Open this mission on the computer that started it to send your message. Your draft is kept.");
       const receipt = await sendMissionMessage(missionId, body, undefined, attempt.id, mission);
+      if (disposed) return;
       setText(""); attempt = undefined;
       if (receipt.replacement) await p.onReplacement(receipt.replacement.id, missionId);
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
-    finally { setBusy(false); p.onBusyChange?.(false); }
+    finally { setBusy(false); if (!disposed) p.onBusyChange?.(false); }
   };
   return <form class="project-steer" onSubmit={e => { e.preventDefault(); void send(); }}>
     <Field label="Message controller" description={p.hint ?? (p.missionId ? "Send a normal message to the controller mission." : "Set a controller mission to send it a message.")} error={error()}>
