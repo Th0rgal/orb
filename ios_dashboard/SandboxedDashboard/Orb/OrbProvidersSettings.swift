@@ -415,7 +415,7 @@ struct OrbProvidersSettings: View {
         let owner = provider["credential_owner"].text, type = provider["provider_type"].text
         let proxy = type != "google" && (owner == "cli_proxy" || (owner.isEmpty && subscriptionTypes.contains(type)))
         guard isAdmin || proxy else { return nil }
-        guard type == "kimi" || proxy || (owner == "sandboxed_sh" && ["anthropic", "openai", "google"].contains(type)) else { return nil }
+        guard type == "kimi" || proxy || (owner.isEmpty && type == "google") || (owner == "sandboxed_sh" && ["anthropic", "openai", "google"].contains(type)) else { return nil }
         return OrbProviderLogin(id: provider["id"].text, name: provider["name"].text, type: type, proxy: proxy)
     }
     static func splitDisplayName(_ p: OrbJSON) -> (title: String, account: String) {

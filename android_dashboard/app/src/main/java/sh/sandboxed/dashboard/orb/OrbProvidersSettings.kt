@@ -253,7 +253,10 @@ internal fun canReconnectProviderOAuth(provider: OrbRow, isAdmin: Boolean): Bool
     val owner = provider.str("credential_owner") ?: ""
     val proxy = pType != "google" && (owner == "cli_proxy" || (owner.isEmpty() && pType in OrbProviderLoginFlow.subscriptionTypes))
     if (!isAdmin && !proxy) return false
-    return pType == "kimi" || proxy || (owner == "sandboxed_sh" && pType in setOf("anthropic", "openai", "google"))
+    return pType == "kimi"
+        || proxy
+        || (owner.isEmpty() && pType == "google")
+        || (owner == "sandboxed_sh" && pType in setOf("anthropic", "openai", "google"))
 }
 
 internal fun availableOAuthPresetTypes(isAdmin: Boolean): Set<String> =
