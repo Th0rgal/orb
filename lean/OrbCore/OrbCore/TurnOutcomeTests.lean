@@ -184,8 +184,8 @@ def run : IO Unit := do
       -- fit, and keeps the prelude under the budget so `bash -lc` can exec.
       for i in [0:12] do
         IO.FS.createDirAll s!"{root}/library/skills/big-{i}/references"
-        IO.FS.writeFile s!"{root}/library/skills/big-{i}/SKILL.md" s!"---\nname: big-{i}\n---\n{String.mk (List.replicate 2000 'a')}\n"
-        IO.FS.writeFile s!"{root}/library/skills/big-{i}/references/ref.md" (String.mk (List.replicate 20000 'r'))
+        IO.FS.writeFile s!"{root}/library/skills/big-{i}/SKILL.md" s!"---\nname: big-{i}\n---\n{String.ofList (List.replicate 2000 'a')}\n"
+        IO.FS.writeFile s!"{root}/library/skills/big-{i}/references/ref.md" (String.ofList (List.replicate 20000 'r'))
       let bigPrelude ← OrbCore.Skills.remoteInstallPrelude root none "opencode" "" "" ""
       check (bigPrelude.utf8ByteSize ≤ OrbCore.Skills.remoteSkillTotalBytes)
         s!"skill prelude fits the exec argument budget: {bigPrelude.utf8ByteSize} bytes"
