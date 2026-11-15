@@ -1122,13 +1122,13 @@ private def routingCatalogContract (app : CoreAppState) (root jwt : String) (now
         ((google.fieldArr? "models").getD #[]).filterMap (·.fieldStr? "id") != #["installed-google-model"] then
       failures := failures.push "catalog must load env-selected providers AND snapshots outside repository cwd, not emergency fallback"
     let ag := providers.filter (fun p => p.fieldStr? "id" == some "antigravity")
-    let models := (((ag[0]?).getD .null).fieldArr? "models").getD #[]
+    let models := (((ag[0]?).getD JVal.null).fieldArr? "models").getD #[]
     if ag.size != 1 || models.filterMap (·.fieldStr? "id") !=
         #["gemini-4-carbon-low", "gemini-4-carbon-medium", "gemini-4-carbon-high"] then
       failures := failures.push "OAuth-only Antigravity must appear once with deduplicated discovered Carbon ids"
     if !((doc.fieldArr? "configured_ids").getD #[]).contains (.str "antigravity") then
       failures := failures.push "OAuth-only Antigravity must be marked connected"
-    if (renderCompact doc).splitOn "fixture-only-no-live-access" |>.length != 1 then
+    if ((renderCompact doc).splitOn "fixture-only-no-live-access").length != 1 then
       failures := failures.push "catalog leaked credentials"
   finally
     IO.Process.setCurrentDir cwd
@@ -1149,8 +1149,10 @@ private def routingChainProbeContract (app : CoreAppState) (jwt : String) (now :
     accountId := "probe-fixture", provider := "openai", modelId := "fixture-model",
     baseUrl := "https://fixture.invalid", apiKey := "fixture-key"
   }] : RoutingChain }]
-  let app := { app with cfg := { app.cfg with port := port, proxySecret := "configured-secret-not-in-env" },
-    chainsRef := chains, proxyMockTransport? := some (fun _ => do
+  let app := { app with
+    cfg := { app.cfg with port := port, proxySecret := "configured-secret-not-in-env" }
+    chainsRef := chains
+    proxyMockTransport? := some (fun _ => do
       reached.set true
       return .ok { status := 200, headers := #[], body := "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"pong\"}}]}".toUTF8 }) }
   let server ← IO.asTask (prio := .dedicated) do

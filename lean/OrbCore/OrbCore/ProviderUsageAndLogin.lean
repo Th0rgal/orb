@@ -318,7 +318,7 @@ def lookupProviderMeta (pType : String) : ProviderTypeMeta :=
   (allProviderTypes.find? (fun m => m.id == low)).getD
     { id := low, name := pType, usesOAuth := false, envVar? := none }
 
-private def readDataJsonFile (workingDir storeRoot relName : String) : IO JVal := do
+def readDataJsonFile (workingDir storeRoot relName : String) : IO JVal := do
   let cands := #[
     s!"{workingDir}/.sandboxed-sh/{relName}",
     s!"{storeRoot}/{relName}"
@@ -516,6 +516,23 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
         updatedAt := (leg.fieldStr? "updated_at").getD nowIso
       }
 
+  -- A connected sidecar login may precede creation of a Core provider row.
+  -- Do not resurrect a stored disabled account or duplicate an existing login.
+  for af in authFiles do
+    let pType := if af.authType == "codex" then "openai" else if af.authType == "claude" then "anthropic" else af.authType
+    if !af.disabled && !out.any (fun hp => hp.oauthFile == af.fileName ||
+        hp.id == af.prefixId || hp.providerType == pType) then
+      out := out.push { (default : HydratedProvider) with
+        id := if af.prefixId.isEmpty then s!"cliproxyapi:{pType}" else af.prefixId
+        name := (lookupProviderMeta pType).name
+        providerType := pType
+        hasOAuth := true
+        oauthToken := af.accessToken
+        oauthFile := af.fileName
+        accountEmail := af.email
+        enabled := true
+        priority := out.size
+      }
   return out.qsort (fun a b => a.priority < b.priority)
 
 def memberProviderDisplayName (hps : Array HydratedProvider) (hp : HydratedProvider) : String := Id.run do
@@ -2247,7 +2264,8 @@ def dispatchProviderAndAiRoute
     (bodyBytes : ByteArray)
     (callerUserId : String)
     (isAdmin isLegacyUnscoped : Bool)
-    (healthTracker? : Option ProviderHealthTracker := none) : IO (Option (Nat × String × ByteArray)) := do
+    (healthTracker? : Option ProviderHealthTracker := none)
+    (probeBearer? : Option String := none) : IO (Option (Nat × String × ByteArray)) := do
   let segs := (cleanPath.splitOn "/").filter (!·.isEmpty)
   let qMap := parseQueryMap rawTarget
   let effAdmin := isLegacyUnscoped || isAdmin
@@ -2624,7 +2642,6 @@ def dispatchProviderAndAiRoute
     let cid := String.intercalate "/" ((segs.drop 3).take (segs.length - 4))
     let testAll := ((qParam? qMap "all").getD "false") == "true"
     let probeModel := if cid.startsWith "builtin/" then cid else s!"builtin/{cid}"
-    let proxyKey := (← lookupEnvWithFiles? "SANDBOXED_PROXY_SECRET").getD ""
     let probeBody : JVal := .obj #[
       ("model", .str probeModel),
       ("max_tokens", JVal.nat 4),
@@ -2632,7 +2649,7 @@ def dispatchProviderAndAiRoute
     ]
     let t0 ← IO.monoMsNow
     match ← sendJsonRequest "POST" s!"http://127.0.0.1:{serverPort}/v1/chat/completions"
-        (if proxyKey.isEmpty then none else some proxyKey) (some probeBody) #[] 15000 262144 with
+        probeBearer? (some probeBody) #[] 15000 262144 with
     | .ok (code, _, jv?) =>
       let dt := (← IO.monoMsNow) - t0
       let okBool := 200 ≤ code && code < 300
