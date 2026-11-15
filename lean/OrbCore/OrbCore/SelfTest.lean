@@ -181,7 +181,7 @@ private def runManagedMcpProviderContractTests (root : String) : IO Unit := do
     spawn "leanci" "lean-24vcpu" #[("provider", .str "leanci"), ("ram_gb", .nat 96)]
     spawn "colab" "t4" #[("provider", .str "colab"), ("size", .str "t4")]
     for (target, provider, size) in #[
-        ("auto-managed", "boat", "small"), ("auto-managed:large", "boat", "large"),
+        ("auto-managed", "leanci", "small"), ("auto-managed:large", "leanci", "large"),
         ("auto-managed:boat", "boat", "small"), ("auto-managed:boat:xlarge", "boat", "xlarge"),
         ("auto-managed:leanci:2xlarge", "leanci", "2xlarge"), ("auto-managed:colab:t4", "colab", "t4")] do
       let args : OrbBin.Json.JVal := .obj #[("title", .str "provider contract child"),
@@ -198,7 +198,8 @@ private def runManagedMcpProviderContractTests (root : String) : IO Unit := do
         machine.ownerUserId == user.id && machine.requestedByMissionId == claims.missionId &&
         result.fieldBool? "managed_machine_reused" != some true && (← rented.get).size == before + 1 &&
         (← rented.get).back? == some (provider, size)) s!"{target} must rent and assign the requested provider and size"
-      if provider != "boat" then
+      if target.startsWith "auto-managed:" && provider != "boat" &&
+          (target.startsWith "auto-managed:leanci" || target.startsWith "auto-managed:colab") then
         let .ok _ ← execParamQuery core.missionsDb "UPDATE missions SET status='completed' WHERE id=?1;" #[child]
           | throw (IO.userError "managed MCP provider contract: completed child fixture failed")
         let .ok _ ← execParamQuery mc.db
@@ -223,9 +224,9 @@ private def runManagedMcpProviderContractTests (root : String) : IO Unit := do
           reusedResult.fieldStr? "mission_id" == some reassigned.ownerMission &&
           reassigned.ownerMission != child && reassigned.provider == provider && reassigned.size == size &&
           (← rented.get).size == before + 1) s!"re-opted-in {provider} must reuse the same eligible provider and size without renting"
-    -- Instance default lean.ci with fallback to boat. Each call below has exactly one
-    -- configured provider (the mock), so the other one "cannot take it".
-    OrbBin.PosixExt.setenvVar "SANDBOXED_MANAGED_DEFAULT_PROVIDER" "leanci"
+    -- Instance default lean.ci (with SANDBOXED_MANAGED_DEFAULT_PROVIDER unset) and fallback to boat.
+    -- Each call below has exactly one configured provider (the mock), so the other one "cannot take it".
+    OrbBin.PosixExt.unsetenvVar "SANDBOXED_MANAGED_DEFAULT_PROVIDER"
     try
       let fallbackOf (reply : OrbBin.Json.JVal) := ((resultOf reply).field? "provider_fallback").getD .null
       let lease : Array (String × OrbBin.Json.JVal) := #[("ttl_minutes", .nat 60)]
