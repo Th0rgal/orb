@@ -54,6 +54,126 @@ with no raw-Lake fallback, locally and in CI.
 Targets, measured and written here: web-only PR < 5 min, warm Lean PR < 10 min,
 cold full run < 20 min.
 
+#### B.2 Mode 2 activation handoff — 15 Nov 2026
+
+**Repo preparation is complete; activation is still operator-owned.** This
+section supersedes the earlier API-bridge proposal and installation assumptions
+for B.2. No Mode 1 prebuild or Orb deployment is needed. Do not touch `evm.fast`.
+
+Evidence collected against fresh Orb `master`
+`c893714862c08eaa940d2e54c94f382525ff381d`:
+
+| Layer | Verified state | Missing / operator verification |
+| --- | --- | --- |
+| Orb workflows | Routing landed in **#1771**, merge `cb4887d3e652a108f032b3bba7edcc9589202408`; #1781 / `643a3d70` was the mobile version bump, despite the older status line below. | No additional label-routing change needed. |
+| GitHub repository | Actions enabled; public user-owned repo; default branch `master`. `GET /repos/Th0rgal/orb/actions/runners` returned `200`, `total_count: 0`; `GET /repos/Th0rgal/orb/actions/variables` returned `200`, `total_count: 0`. | `ORB_LEAN_RUNNERS` is absent and **was not set**. There is no currently registered runner or runner-label evidence. |
+| Labels | Both exact labels exist in lean.ci's source profile inventory (`crates/leanci-types/src/lib.rs`, upstream `7f41198db3ae64c8465c46cba44fb97cebadbde2`). Orb Test and kernel-abi select `lean-32vcpu-ubuntu-2604`; other routed Linux jobs select `lean-16vcpu-ubuntu-2604`. | Verify deployed profiles, capacity and per-job JIT labels. Source support is not live registration evidence. |
+| User-repo registration and fence | lean.ci **#33 and #34 are still OPEN**, heads `e8ed949211d002bc22d402aeb99c3ca8c888748d` and `90ae6f2d6de17d6d235b903f4296ea59c249bf39`. | Review/fix/merge and deploy the public-user-repo admission/fence implementation before enablement. Merely having a repo-JIT endpoint in upstream master is insufficient. |
+| App/controller/engines | This session's GitHub credential cannot inspect App installations (`GET /repos/Th0rgal/orb/installation` requires App JWT; `GET /user/installations` returned 403). No live controller, database or engine inspection was performed. | Operator must establish active Th0rgal installation, Administration write, Orb selection and enabled row, controller allowlist, signed webhook delivery, and deployed fence-capable engines/rootfs. Their current state is **unverified**, not proven absent. |
+
+Mode 2 registers **ephemeral, single-job JIT runners on demand**, after a
+matching job queues. Zero idle runners is normal and does not by itself identify
+a registration failure. Do not install a persistent runner, manually mint a
+registration token, add labels to an unrelated runner, or configure an org runner
+group for the user account. The controller must call
+`POST /repos/Th0rgal/orb/actions/runners/generate-jitconfig` with
+`runner_group_id: 1`, `labels: [<the exact queued job label>]`, a unique runner
+name and `work_folder: "_work"`; its encoded config stays private in the
+controller/guest path. A custom VM rental through Orb does not register an
+Actions runner.
+
+**Operator sequence (in order; do not enable the variable first):**
+
+1. Review the final #33/#34 diff and test results, including the outstanding
+   four fixes recorded in the 14 Nov 10:28 checkpoint below. Merge the reviewed
+   upstream changes; record exact resulting controller, engine and shim SHAs.
+   Run `cargo test -p leanci-types -p leanci-shim -p leanci-engine -p leanci-ctrl`
+   on that integrated tree. An open PR or the old worker test report is not a
+   deployable completion receipt.
+2. In GitHub's lean-ci App settings, request/approve repository
+   **Administration: Read and write** (retain Actions read access and existing
+   permissions). In **Th0rgal → Settings → Applications → Installed GitHub Apps
+   → lean-ci → Configure**, install/authorize it for **Th0rgal/orb**. Accept any
+   pending permission update. Use the operator's App-authenticated tooling to
+   confirm the Orb installation is active, account type `User`, repository
+   selected, and `permissions.administration == "write"`. Never paste the App
+   JWT, installation token, private key, webhook secret or JIT config into logs.
+3. Operator-deploy the integrated engine and rebuilt Ubuntu 26.04 rootfs with
+   the matching shim, then the controller. On ctrl (`ubuntu@5.39.72.91`), preserve
+   existing explicitly approved entries while adding `Th0rgal/orb` to
+   `LEANCI_USER_RUNNER_REPOSITORIES` in `/etc/leanci/leanci-ctrl.env`; apply via
+   `sudo systemctl restart leanci-ctrl.service`. Verify fresh engine heartbeats
+   advertise wire capability `runner_fence: true`, and fresh guests use the new
+   rootfs identity. Controller-only deployment is insufficient. Preserve all
+   other repository configuration and active workloads.
+4. In the owning lean.ci workspace, sync the Th0rgal installation and enable
+   **only Orb**. The authenticated controller API operations are below
+   (`WS` = lean.ci workspace UUID/slug; `INST` = its internal installation UUID,
+   **not** the numeric GitHub installation id; `REPO` = Orb's internal repo UUID).
+   Use the operator dashboard/API client with `repos:read` / `repos:write`;
+   obtain the IDs from GET responses, never guess them:
+
+   ```text
+   GET   /api/v1/workspaces/WS/installations
+   GET   /api/v1/workspaces/WS/repositories
+   PATCH /api/v1/repositories/REPO
+         {"enabled":true,"default_branch":"master"}
+   POST  /api/v1/installations/INST/sync-runner-group
+   GET   /api/v1/repositories/REPO
+   GET   /api/v1/runner-profiles
+   ```
+
+   Confirm the saved row is `Th0rgal/orb`, linked to the active User installation,
+   enabled, and on `master`. If missing, connect/sync the actual installation
+   through the dashboard first; do not fabricate a repository/installation row
+   or set `runner_group_synced` by hand. Confirm the App's signed `workflow_job`,
+   `workflow_run`, `installation` and `installation_repositories` deliveries reach
+   the controller. Confirm both exact 16/32-vCPU profiles and available fenced
+   engine capacity. The sync route's name does not imply an org group is needed.
+5. Verify admission rejects PR/fork/non-default-branch jobs and that the guest
+   hook fails closed before checkout, cache restore or container execution on
+   mismatched run ID, SHA, attempt or missing fence. Verify the queued-event
+   attempt-2 regression and real hook execution, not just metadata. Record the
+   integrated test evidence and deployed revisions in this plan.
+6. **Only Thomas/operator now flips the repository variable**:
+
+   ```sh
+   gh variable set ORB_LEAN_RUNNERS --repo Th0rgal/orb --body true
+   gh workflow run ci.yml --repo Th0rgal/orb --ref master -f use_lean_runners=true
+   gh workflow run kernel-abi.yml --repo Th0rgal/orb --ref master -f use_lean_runners=true
+   ```
+
+   The variable gates push/schedule too; both plan jobs use the 16-vCPU label,
+   so registration must already work before this step. A dispatch with the
+   checkbox false stays hosted even with the variable true. PRs stay hosted.
+7. Follow each new run's jobs while queued/running:
+
+   ```sh
+   gh run list --repo Th0rgal/orb --workflow ci.yml --event workflow_dispatch --limit 5
+   gh run list --repo Th0rgal/orb --workflow kernel-abi.yml --event workflow_dispatch --limit 5
+   gh api repos/Th0rgal/orb/actions/runners --jq '{total_count,runners:[.runners[]|{name,status,labels:[.labels[].name]}]}'
+   gh api repos/Th0rgal/orb/actions/runs/RUN_ID/jobs --paginate --jq '.jobs[]|{name,status,conclusion,labels,runner_name,runner_group_name}'
+   ```
+
+   Correlate GitHub run/job/attempt/SHA with controller admission, repo-scoped
+   JIT creation, engine assignment and guest fence acceptance. Each runner must
+   carry its exact requested lean label; expect it to disappear after its job.
+   Record both run URLs, all check results, queue/wall/heavy-job timings,
+   rootfs/tool versions (apt, Docker, Node, Playwright and Lean), and cold/warm
+   cache restore/save evidence. Compare hosted and lean runs on the same SHA and
+   scope; no lean.ci speedup or live acceptance is claimed by this handoff.
+8. If jobs remain queued or any admission/fence/image/cache check fails, set
+   `ORB_LEAN_RUNNERS=false` (or delete it), cancel the affected runs and dispatch
+   **new** runs with `use_lean_runners=false`. Already evaluated jobs do not
+   automatically change runners. There is no automatic capacity fallback after
+   a lean label is selected. See [the rollback commands](../ci-lean-runners.md#immediate-rollback).
+
+Repo-side acceptance: preserve the existing expressions and hosted defaults;
+run `python3 -m unittest -v scripts/test_ci_plan.py`, then merge this handoff
+only after every applicable PR check is green. Remaining live acceptance belongs
+to the operator sequence above. No production deploy or variable mutation is
+part of this repo change.
+
 ### C. lean.ci and Colab at Boat parity in the product
 After #1720: on desktop, iOS and Android a user can see active VMs per
 provider, start one from the UI (size, TTL), stop/extend/destroy it, and see
