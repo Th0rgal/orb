@@ -1244,6 +1244,8 @@ private def detectLeanRuntimeReady (workDir : String) : IO Bool := do
   if (← cachedLake.pathExists) && !(← cachedLake.isDir) then return true
   let optLake := System.FilePath.mk "/opt/orb/elan/bin/lake"
   if (← optLake.pathExists) && !(← optLake.isDir) then return true
+  let leanciLake := System.FilePath.mk "/opt/elan/bin/lake"
+  if (← leanciLake.pathExists) && !(← leanciLake.isDir) then return true
   let pathStr := (← IO.getEnv "PATH").getD "/usr/local/bin:/usr/bin:/bin"
   for d in (pathStr.splitOn ":").filter (·.startsWith "/") do
     let cand := System.FilePath.mk d / "lake"
