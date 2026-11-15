@@ -198,9 +198,10 @@ def check_sidecar(problems):
             banned[entry.get("email") or entry.get("name") or "?"] = seconds
     for who, seconds in banned.items():
         if seconds > 5 * 3600:
-            problems[f"claude-banned:{who}"] = f"the sidecar has banned Claude login {who} for {seconds // 3600} h; orb-sidecar-guard releases it unless the limit is real"
+            until = time.strftime("%a %d %b %H:%M UTC", time.gmtime(time.time() + seconds))
+            problems[f"claude-banned:{who}"] = f"Claude login {who} is rate-limited until {until} ({seconds // 3600} h left)"
     if claude and len(banned) == len(claude):
-        problems["claude:none"] = "no Claude login can serve requests: every one is banned by the sidecar"
+        problems["claude:none"] = "no Claude login can serve requests: every one is rate-limited"
 
 
 def warn_paloma(text, opened, cleared):

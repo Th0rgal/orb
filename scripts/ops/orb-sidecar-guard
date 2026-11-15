@@ -83,8 +83,10 @@ def main():
             time.sleep(1)
         kept.setdefault(name, []).append(now)
         print(f"orb-sidecar-guard: released {name} (ban longer than {MAX_BAN}s)")
+    ends = {e.get("name"): now + longest_ban(e) for e in files}
     for name in real:
-        print(f"orb-sidecar-guard: left {name} banned; released {MAX_LIFTS} times already, the limit looks real")
+        until = time.strftime("%a %d %b %H:%M UTC", time.gmtime(ends.get(name, now)))
+        print(f"orb-sidecar-guard: {name} is rate-limited until {until}; still limited after {MAX_LIFTS} releases, left out of rotation")
     os.makedirs(os.path.dirname(STATE), exist_ok=True)
     json.dump({"lifts": kept, "left_banned": real, "at": now}, open(STATE + ".tmp", "w"))
     os.replace(STATE + ".tmp", STATE)
