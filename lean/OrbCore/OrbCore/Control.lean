@@ -1990,7 +1990,7 @@ def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) : OrbBin.
         inputTokens?     := finalSnap.inputTokens?
         outputTokens?    := finalSnap.outputTokens?
         cacheReadTokens? := finalSnap.cacheReadTokens?
-        costCents        := finalSnap.costCents
+        costCents        := (mRec?.map (·.totalCostCents)).getD finalSnap.costCents
         interrupted      := isErr || emptyVerdict?.isSome
       }
       observeControlTurnFinished tSink missionId turnUsage ownerUid? ownerUname? nowSec
@@ -6129,6 +6129,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               let s := (cell sRows[1]! 0).trimAscii.toString
               if !s.isEmpty then resumeSid? := some s
           let isSide := (OrbBin.Json.parse effTagsJson).toOption.bind JVal.asArr? |>.getD #[] |>.any (fun v => v.asStr? == some "side-question")
+          if let some tSink := st.telemetrySink? then
+            let actorUid? := if caller.isLegacyUnscoped || caller.userId.isEmpty then none else some caller.userId
+            let actorUname? := if caller.isLegacyUnscoped || caller.username.isEmpty then none else some caller.username
+            observeControlUserPrompt tSink (caller.isLegacyUnscoped || caller.role == "admin") actorUid? actorUname? mid content nowEpochSec
           let spec : RemoteTurnSpec := {
             missionId        := mid
             targetNodeId     := resolvedNode
@@ -6150,7 +6154,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             return .ok (mkJson 502 s!"\{\"error\":{jsonEscape dispErr}}")
       else
         let _ ← appendMissionEvent st.store mid "user_message" evPayload nowIso
-      if !queued then
+      if !queued && !dispatchedRemote then
         if let some tSink := st.telemetrySink? then
           let actorUid? := if caller.isLegacyUnscoped || caller.userId.isEmpty then none else some caller.userId
           let actorUname? := if caller.isLegacyUnscoped || caller.username.isEmpty then none else some caller.username

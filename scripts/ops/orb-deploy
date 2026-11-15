@@ -90,10 +90,19 @@ fi
 set_catalog sandboxed-sh-dev "$CATALOG"
 set_build sandboxed-sh-dev "$SHA"; systemctl daemon-reload
 install -d -m 755 /usr/local/lib/orb
+PROVISION_BACKUP=""
+if [[ -f /usr/local/lib/orb/orb-node-provision.sh ]]; then
+  PROVISION_BACKUP="/usr/local/lib/orb/orb-node-provision.sh.pre-deploy-$(date -u +%Y%m%dT%H%M%SZ)"
+  cp -p /usr/local/lib/orb/orb-node-provision.sh "$PROVISION_BACKUP"
+fi
 install -m 644 "$TREE/scripts/orb-node-provision.sh" /usr/local/lib/orb/orb-node-provision.sh.new && mv /usr/local/lib/orb/orb-node-provision.sh.new /usr/local/lib/orb/orb-node-provision.sh
 install -m 755 "$BIN" /usr/local/bin/orb-core-dev.new && mv /usr/local/bin/orb-core-dev.new /usr/local/bin/orb-core-dev
 systemctl restart sandboxed-sh-dev
-healthy 3002 30 "$SHA" || { say "dev unhealthy; prod untouched"; exit 1; }
+if ! healthy 3002 30 "$SHA"; then
+  [[ -n "$PROVISION_BACKUP" && -f "$PROVISION_BACKUP" ]] && cp -p "$PROVISION_BACKUP" /usr/local/lib/orb/orb-node-provision.sh
+  say "dev unhealthy; prod untouched"
+  exit 1
+fi
 say "dev healthy on $SHA"
 [[ $DEV_ONLY == 1 ]] && { say "done (dev only)"; exit 0; }
 
@@ -110,6 +119,7 @@ if ! healthy 3000 60 "$SHA"; then
   say "prod unhealthy; rolling back to $BACKUP"
   cp -p "$BACKUP" /usr/local/bin/orb-core
   if [[ -n "$OLD_CATALOG" ]]; then set_catalog sandboxed-sh-prod "$OLD_CATALOG"; else rm -f "$CATALOG_CONF"; fi
+  [[ -n "$PROVISION_BACKUP" && -f "$PROVISION_BACKUP" ]] && cp -p "$PROVISION_BACKUP" /usr/local/lib/orb/orb-node-provision.sh
   set_build sandboxed-sh-prod "${OLD_SHA:-unknown}"; systemctl daemon-reload
   systemctl restart sandboxed-sh-prod
   exit 1
@@ -117,4 +127,5 @@ fi
 say "prod healthy on $SHA (backup $BACKUP)"
 # keep the five most recent backups
 ls -1t /usr/local/bin/orb-core.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
+ls -1t /usr/local/lib/orb/orb-node-provision.sh.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
 say "done"

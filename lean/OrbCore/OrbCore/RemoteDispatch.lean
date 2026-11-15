@@ -1276,7 +1276,7 @@ partial def spawnRemoteJobPoller
                   inputTokens?     := acc.inputTokens?
                   outputTokens?    := acc.outputTokens?
                   cacheReadTokens? := acc.cacheReadTokens?
-                  costCents        := 0
+                  costCents        := (mRec?.map (·.totalCostCents)).getD 0
                   interrupted      := jState != "succeeded"
                 }
                 observeControlTurnFinished tSink missionId turnUsage ownerUid? ownerUname? nowSec
