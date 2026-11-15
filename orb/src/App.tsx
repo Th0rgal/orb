@@ -785,7 +785,7 @@ export default function App() {
   const [lastProjectMission, setLastProjectMission] = createSignal<Mission | null>(null);
   createEffect(on(connectionVersion, () => setLastProjectMission(null)));
   createEffect(() => { const mission = openMission(); if (mission) setLastProjectMission(mission); });
-  const [projectMissionHint, setProjectMissionHint] = createSignal<{ id: string }>();
+  const [projectMissionHint, setProjectMissionHint] = createSignal<{ id: string | null }>();
   // Project settings page: `ps:<slug>`.
   const currentProjectSettings = createMemo(() => {
     const id = selected();
@@ -1555,7 +1555,7 @@ export default function App() {
           presentationTimer ??= setTimeout(flushPresentation, needsList ? 150 : 1000);
         },
         () => { markUnfocusedMissionsDirty(); markUnfocusedBtwDirty(); void refreshMissions(); },
-        () => { presentationConnected = true; },
+        () => { presentationConnected = true; setProjectMissionHint({ id: null }); },
         "presentation",
         undefined,
         () => { presentationConnected = false; markUnfocusedMissionsDirty(); markUnfocusedBtwDirty(); },

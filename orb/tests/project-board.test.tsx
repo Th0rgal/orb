@@ -82,3 +82,45 @@ it("keeps failed steering drafts and retries through the ordinary message API", 
   expect(send).toHaveBeenCalledTimes(2); expect(send.mock.calls[0].slice(0, 2)).toEqual(["m1", "Check the release"]);
   expect(send.mock.calls[0][3]).toBe(send.mock.calls[1][3]);
 });
+it("prevents selecting a client-placed controller and explains the limitation", async () => {
+  const local = { ...mission, placement_kind: "client" } as api.Mission;
+  const ui = render(() => <ProjectBoardSection slug="notes" selectedMission={local} onOpenMission={() => {}} />);
+  await ui.findByText("No controller");
+  expect((ui.getByRole("button", { name: "Use selected mission" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(ui.getByText(/Choose a Core or remote mission/)).toBeTruthy();
+});
+it("keeps a steering draft if its mission has moved to client execution", async () => {
+  vi.mocked(api.getMission).mockResolvedValue({ ...mission, placement_kind: "client" });
+  const send = vi.spyOn(api, "sendMissionMessage");
+  const ui = render(() => <SteerComposer missionId="m1" onReplacement={async () => {}} />);
+  const input = ui.getByRole("textbox", { name: "Message controller" }) as HTMLTextAreaElement;
+  fireEvent.input(input, { target: { value: "Check the release" } }); fireEvent.click(ui.getByRole("button", { name: "Send message" }));
+  await ui.findByText(/Open this mission on the computer/);
+  expect(input.value).toBe("Check the release"); expect(send).not.toHaveBeenCalled();
+});
+it("locks assignment during steering and adopts a replacement before unlocking", async () => {
+  vi.mocked(api.getProject).mockResolvedValue({ ...project, controller_mission_id: "m1" });
+  let finish!: (receipt: api.MessageReceipt) => void;
+  const send = vi.spyOn(api, "sendMissionMessage").mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  const ui = render(() => <ProjectBoardSection slug="notes" selectedMission={{ ...mission, id: "other" }} onOpenMission={() => {}} />);
+  await ui.findByText("running");
+  fireEvent.input(ui.getByRole("textbox", { name: "Message controller" }), { target: { value: "Check the release" } });
+  fireEvent.click(ui.getByRole("button", { name: "Send message" }));
+  await waitFor(() => expect(send).toHaveBeenCalledOnce());
+  expect((ui.getByRole("button", { name: "Clear" }) as HTMLButtonElement).disabled).toBe(true);
+  expect((ui.getByRole("button", { name: "Use selected mission" }) as HTMLButtonElement).disabled).toBe(true);
+  finish({ id: "receipt", queued: false, replacement: { ...mission, id: "replacement" } });
+  await waitFor(() => expect(api.setProjectControllerMission).toHaveBeenCalledWith("notes", "replacement"));
+  await waitFor(() => expect((ui.getByRole("button", { name: "Clear" }) as HTMLButtonElement).disabled).toBe(false));
+});
+it("refreshes after stream recovery even when no controller event was replayed", async () => {
+  vi.mocked(api.getProject).mockResolvedValue({ ...project, controller_mission_id: "m1" });
+  const [hint, setHint] = createSignal<{ id: string | null }>();
+  const ui = render(() => <ProjectBoardSection slug="notes" missionHint={hint()} onOpenMission={() => {}} />);
+  await ui.findByText("running");
+  vi.mocked(api.getMission).mockResolvedValue({ ...mission, status: "completed" });
+  vi.mocked(api.getProjectBoard).mockResolvedValue(board);
+  setHint({ id: null }); await ui.findByText("completed");
+  await waitFor(() => expect(ui.container.querySelector("pre")?.textContent).toBe(board.text));
+  expect(api.getProjectBoard).toHaveBeenCalledTimes(2);
+});

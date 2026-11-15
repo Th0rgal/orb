@@ -1,16 +1,17 @@
 import { Show, createEffect, createSignal, on, onCleanup } from "solid-js";
-import { connectionVersion, getMission, getProject, getProjectBoard, isConnected, setProjectControllerMission, type Mission, type ProjectBoard } from "./api";
+import { connectionVersion, getMission, getProject, getProjectBoard, isClientPlacement, isConnected, setProjectControllerMission, type Mission, type ProjectBoard } from "./api";
 import { displayTitle } from "./goal";
 import { SettingsCard, SettingsRow } from "./SettingsCard";
 import { SteerComposer } from "./SteerComposer";
 import "./ProjectBoard.css";
 
-export function ProjectBoardSection(p: { slug: string; selectedMission?: Mission | null; missionHint?: { id: string }; onOpenMission: (id: string) => void }) {
+export function ProjectBoardSection(p: { slug: string; selectedMission?: Mission | null; missionHint?: { id: string | null }; onOpenMission: (id: string) => void }) {
   const [supported, setSupported] = createSignal(false);
   const [loading, setLoading] = createSignal(true);
   const [board, setBoard] = createSignal<ProjectBoard | null>(null);
   const [controllerId, setControllerId] = createSignal<string | null>(null);
   const [controller, setController] = createSignal<Mission | null>(null);
+  const [sending, setSending] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   let attemptedController: string | null = null;
   const [error, setError] = createSignal<string | null>(null);
@@ -48,11 +49,15 @@ export function ProjectBoardSection(p: { slug: string; selectedMission?: Mission
   // Reuse the app's foreground presentation stream; only a status transition refetches the board.
   createEffect(on(() => p.missionHint, hint => {
     const id = controllerId();
-    if (id && hint?.id === id) void refreshController(id, generation, true);
+    if (hint?.id === null) {
+      void refreshBoard(generation);
+      if (id) void refreshController(id, generation);
+    } else if (id && hint?.id === id) void refreshController(id, generation, true);
   }, { defer: true }));
   const candidate = () => p.selectedMission?.project === p.slug ? p.selectedMission : null;
-  const assign = async (id: string | null) => {
-    if (busy()) return;
+  const assign = async (id: string | null, replacing?: string) => {
+    if (busy() || (sending() && replacing !== controllerId())) return;
+    if (replacing && replacing !== controllerId()) return;
     const gen = generation;
     attemptedController = id;
     setBusy(true); setError(null);
@@ -69,12 +74,14 @@ export function ProjectBoardSection(p: { slug: string; selectedMission?: Mission
     <SettingsCard title="Controller" class="project-controller">
       <SettingsRow stack title="Controller" desc={loading() ? "Loading controller…" : controllerId() ? controller()?.status.replaceAll("_", " ") : "No controller"}>
         <Show when={controllerId()}>{id => <button class="s-btn" onClick={() => p.onOpenMission(id())}>{displayTitle(controller()?.title) || id()}</button>}</Show>
-        <button class="s-btn" disabled={loading() || busy() || !candidate() || candidate()?.id === controllerId()} onClick={() => void assign(candidate()!.id)}>Use selected mission</button>
-        <button class="s-btn" disabled={loading() || busy() || !controllerId()} onClick={() => void assign(null)}>Clear</button>
+        <button class="s-btn" disabled={loading() || busy() || sending() || isClientPlacement(candidate()) || !candidate() || candidate()?.id === controllerId()} onClick={() => void assign(candidate()!.id)}>Use selected mission</button>
+        <button class="s-btn" disabled={loading() || busy() || sending() || !controllerId()} onClick={() => void assign(null)}>Clear</button>
       </SettingsRow>
-      <p class="project-board-hint">{!candidate() && !loading() ? "Open a mission in this project, then return here to set it as controller." : "\u00a0"}</p>
+      <p class="project-board-hint">{isClientPlacement(candidate()) ? "Choose a Core or remote mission as controller. Local missions run on their originating computer." : !candidate() && !loading() ? "Open a mission in this project, then return here to set it as controller." : "\u00a0"}</p>
       <Show when={error()}><p class="project-board-error" role="alert">{error()} <button class="s-btn" disabled={busy()} onClick={() => void assign(attemptedController)}>Retry</button></p></Show>
-      <SteerComposer missionId={controllerId()} onReplacement={assign} />
+      <SteerComposer missionId={controllerId()} disabled={busy() || isClientPlacement(controller())}
+        hint={isClientPlacement(controller()) ? "Open this mission on the computer that started it to send a message." : undefined}
+        onBusyChange={setSending} onReplacement={(id, previousId) => assign(id, previousId)} />
     </SettingsCard>
     <Show when={loading() || board()}><SettingsCard title="Board">
       <div class="project-board" aria-busy={loading()}>

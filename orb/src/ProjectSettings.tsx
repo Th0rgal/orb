@@ -53,7 +53,7 @@ const READ_ONLY_FIELDS: Array<{ key: keyof ProjectGrant; label: string }> = [
  * limit from the backend-wide one in Execution settings, which this page only
  * links to.
  */
-export function ProjectSettings(p: { slug: string; selectedMission?: Mission | null; missionHint?: { id: string }; onOpenPage: (id: string) => void; onOpenMission: (id: string) => void }) {
+export function ProjectSettings(p: { slug: string; selectedMission?: Mission | null; missionHint?: { id: string | null }; onOpenPage: (id: string) => void; onOpenMission: (id: string) => void }) {
   const [grant, setGrant] = createSignal<ProjectGrant | null>(null);
   const [title, setTitle] = createSignal<string | null>(null);
   const [missions, setMissions] = createSignal<Mission[]>([]);
