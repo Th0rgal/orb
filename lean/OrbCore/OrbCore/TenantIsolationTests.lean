@@ -589,6 +589,20 @@ def run (root : String) : IO Unit := do
       (.obj #[("mission_id", .str "admin-mission"), ("role", .str "operator")])
     let sharedToken := (sharedDoc.fieldStr? "token").getD ""
     check (sharedStatus == 200 && !sharedToken.isEmpty) "shared session minted"
+    -- A same-name owned project must not authorize access to a shared mission's foreign board.
+    sql store.projectsDb "INSERT INTO projects(slug,name) VALUES('member:admin-project','shadow');"
+    sql store.projectsDb "INSERT INTO project_owners(slug,owner_user_id) VALUES('member:admin-project','member');"
+    sql store.projectsDb "UPDATE projects SET controller_mission_id='admin-mission' WHERE slug='admin-project';"
+    sql store.projectsDb "INSERT INTO project_board(slug,text,updated_at) VALUES('admin-project','private-admin-board','now');"
+    for tool in #["read_project_board", "write_project_board"] do
+      let collision ← call sharedToken tool (.obj #[("text", .str "unauthorized")])
+      check ((collision.fieldOrNull "error").fieldStr? "code" == some "not_found" &&
+        ((renderCompact collision).splitOn "private-admin-board").length == 1) "same-name project cannot authorize foreign board"
+    let .ok boardRows ← execParamQuery store.projectsDb "SELECT text FROM project_board WHERE slug='admin-project';" #[]
+      | throw (IO.userError "board collision verification")
+    check (boardRows[1]? == some #["private-admin-board"]) "foreign board survives same-name project write"
+    sql store.projectsDb "DELETE FROM project_owners WHERE slug='member:admin-project';"
+    sql store.projectsDb "DELETE FROM projects WHERE slug='member:admin-project';"
     check ((← call sharedToken "get_mission" foreign).fieldBool? "ok" == some true) "participant may read shared mission"
     check ((← call sharedToken "resume_mission" foreign).fieldBool? "ok" == some false)
       "shared session cannot acquire owner mutation rights"

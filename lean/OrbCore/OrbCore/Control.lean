@@ -6463,6 +6463,14 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         let expRev? := jv.fieldNat? "expected_revision"
         let (code, body) ← putProjectTrack st.store proj track desired status s!"{nowEpochSec}" expRev?
         return .ok (mkJson code body)
+    -- The structured task/track board remains available alongside contract v1's text board.
+    | [rawProj, "task-board"] =>
+      if req.method == "GET" then
+        let some proj := resolveCallerProj rawProj
+          | return .ok (mkJson 400 "{\"error\":\"invalid_project\"}")
+        match ← projectBoardJson st.store proj with
+        | .ok body => return .ok (mkJson 200 body)
+        | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
     | [_, "board"] =>
       if let some (code, ctype, body) ← dispatchProjectAndControllerRoutes?
           st.store st.broadcastHub? st.cfg.workingDir req.method cleanPath rawTarget req.bodySlice.toByteArray

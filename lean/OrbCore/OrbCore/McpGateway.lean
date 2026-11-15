@@ -813,14 +813,16 @@ def dispatchMcpToolCall
     return mcpOk (.obj #[("mission_id", .str mid), ("files", .arr #[])])
 
   | "read_project_board" | "write_project_board" =>
-    let board ← readProjectBoard store callerProj
+    let slug := (args.fieldStr? "project").getD callerProj
+    if slug != callerProj then return mcpErr "not_found" "Project not found"
+    let board ← readProjectBoard store slug
     if toolName == "read_project_board" then return mcpOk board
     if callerMid.isEmpty || board.fieldStr? "controller_mission_id" != some callerMid then
       return mcpErr "forbidden" "not_project_controller"
     let some text := args.fieldStr? "text" | return mcpErr "invalid_arguments" "text required"
-    match ← writeProjectBoard store callerProj text nowIso callerMid with
+    match ← writeProjectBoard store slug text nowIso callerMid with
     | .error e => return mcpErr e e
-    | .ok () => return mcpOk (← readProjectBoard store callerProj)
+    | .ok () => return mcpOk (← readProjectBoard store slug)
 
   | "start_mission" | "consult_model" =>
     let title := ((args.fieldStr? "title").orElse (fun _ => args.fieldStr? "summary") |>.getD "Delegated Mission").trimAscii.toString
