@@ -928,7 +928,7 @@ export default function App() {
       // Backend views (missions, hosted files) can't render offline — e.g.
       // after a 401 cleared the token mid-session.
       const sel = selected();
-      if (sel && (sel.startsWith("m:") || sel.startsWith("ms:") || sel.startsWith("pf:") || sel.startsWith("c:") || sel.startsWith("pc:") || sel.startsWith("ps:") || sel.startsWith("rm:") || sel === "execution")) open(null);
+      if (sel && (sel.startsWith("m:") || sel.startsWith("ms:") || sel.startsWith("pf:") || sel.startsWith("ps:") || sel.startsWith("rm:") || sel === "execution")) open(null);
       // Keep an explicit machine selection across reconnects.
     }
   }));
