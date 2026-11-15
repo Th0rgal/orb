@@ -956,17 +956,37 @@ def insertMissionRunUnlocked
       "UPDATE mission_runs SET execution_state='terminal', updated_at=?2 WHERE mission_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted');"
       #[missionId, effTs]
   if hasRunId && hasOwnerActorId && hasHeartbeatAt && hasScopeUnit then
-    sqliteQueryRowsRaw db.handle
+    let r ← sqliteQueryRowsRaw db.handle
       ("INSERT INTO mission_runs(run_id,id,mission_id,generation,execution_state,owner_actor_id,scope_unit,terminal_reason,remote_job_id,started_at,heartbeat_at,updated_at) " ++
        "VALUES(?1,?1,?2,CAST(?3 AS INTEGER),?4,?8,NULLIF(?9,''),?5,?6,?7,?7,?7) " ++
        "ON CONFLICT(mission_id,generation) DO UPDATE SET execution_state=excluded.execution_state,owner_actor_id=excluded.owner_actor_id,scope_unit=COALESCE(excluded.scope_unit,mission_runs.scope_unit),terminal_reason=excluded.terminal_reason,remote_job_id=excluded.remote_job_id,heartbeat_at=excluded.heartbeat_at,updated_at=excluded.updated_at;")
       #[runId, missionId, generation, executionState, terminalReason, remoteJobId, effTs, effActor, scopeUnit]
+    match r with
+    | .ok rows => return .ok rows
+    | .error _ =>
+      discard <| sqliteQueryRowsRaw db.handle
+        "DELETE FROM mission_runs WHERE mission_id=?1 AND generation=CAST(?2 AS INTEGER);"
+        #[missionId, generation]
+      sqliteQueryRowsRaw db.handle
+        ("INSERT OR REPLACE INTO mission_runs(run_id,id,mission_id,generation,execution_state,owner_actor_id,scope_unit,terminal_reason,remote_job_id,started_at,heartbeat_at,updated_at) " ++
+         "VALUES(?1,?1,?2,CAST(?3 AS INTEGER),?4,?8,NULLIF(?9,''),?5,?6,?7,?7,?7);")
+        #[runId, missionId, generation, executionState, terminalReason, remoteJobId, effTs, effActor, scopeUnit]
   else if hasRunId && hasOwnerActorId && hasHeartbeatAt then
-    sqliteQueryRowsRaw db.handle
+    let r ← sqliteQueryRowsRaw db.handle
       ("INSERT INTO mission_runs(run_id,id,mission_id,generation,execution_state,owner_actor_id,terminal_reason,remote_job_id,started_at,heartbeat_at,updated_at) " ++
        "VALUES(?1,?1,?2,CAST(?3 AS INTEGER),?4,?8,?5,?6,?7,?7,?7) " ++
        "ON CONFLICT(mission_id,generation) DO UPDATE SET execution_state=excluded.execution_state,owner_actor_id=excluded.owner_actor_id,terminal_reason=excluded.terminal_reason,remote_job_id=excluded.remote_job_id,heartbeat_at=excluded.heartbeat_at,updated_at=excluded.updated_at;")
       #[runId, missionId, generation, executionState, terminalReason, remoteJobId, effTs, effActor]
+    match r with
+    | .ok rows => return .ok rows
+    | .error _ =>
+      discard <| sqliteQueryRowsRaw db.handle
+        "DELETE FROM mission_runs WHERE mission_id=?1 AND generation=CAST(?2 AS INTEGER);"
+        #[missionId, generation]
+      sqliteQueryRowsRaw db.handle
+        ("INSERT OR REPLACE INTO mission_runs(run_id,id,mission_id,generation,execution_state,owner_actor_id,terminal_reason,remote_job_id,started_at,heartbeat_at,updated_at) " ++
+         "VALUES(?1,?1,?2,CAST(?3 AS INTEGER),?4,?8,?5,?6,?7,?7,?7);")
+        #[runId, missionId, generation, executionState, terminalReason, remoteJobId, effTs, effActor]
   else
     let verb := if orReplace then "INSERT OR REPLACE" else "INSERT"
     if hasRunId && hasStartedAt then
@@ -1006,7 +1026,9 @@ private def migrateLegacyMissionRunsUnlocked (h : UInt64) : IO (Except String Un
       "UPDATE mission_runs SET id = COALESCE(NULLIF(id,''), run_id) WHERE COALESCE(id,'') = '';"
   let ddl :=
     backfillUpd ++
+    "DELETE FROM mission_runs WHERE rowid NOT IN (SELECT MAX(rowid) FROM mission_runs GROUP BY mission_id, generation);" ++
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_mission_runs_id_compat ON mission_runs(id) WHERE id IS NOT NULL AND id <> '';" ++
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_mission_runs_mission_gen_compat ON mission_runs(mission_id, generation);" ++
     "DROP TRIGGER IF EXISTS orb_mission_runs_legacy_fill_run_id;" ++
     "DROP TRIGGER IF EXISTS orb_mission_runs_legacy_fill_id;"
   sqliteExecRaw h ddl
@@ -1435,10 +1457,17 @@ def execParamQuery (db : SqliteDb) (sql : String) (params : Array String) : IO (
     admitted. `interrupted` is truthful and resumable. Never call this from a CLI or
     a second process: there, `active` local turns are owned by the running server. -/
 def interruptTurnsLostToRestart (mDb : SqliteDb) : IO Nat := do
+  discard <| execParamQuery mDb
+    ("CREATE TABLE IF NOT EXISTS remote_node_jobs (" ++
+     "job_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL DEFAULT '', node_id TEXT NOT NULL DEFAULT '', " ++
+     "state TEXT NOT NULL DEFAULT 'queued', payload_json TEXT NOT NULL DEFAULT '{}', " ++
+     "created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');") #[]
   let res ← execParamQuery mDb
     ("UPDATE missions SET status='interrupted',terminal_reason='core_restarted',state_revision=state_revision+1 " ++
-     "WHERE status='active' AND COALESCE(placement_kind,'')<>'client' AND NOT EXISTS " ++
-     "(SELECT 1 FROM mission_runs r WHERE r.mission_id=missions.id AND r.execution_state<>'terminal') RETURNING id;") #[]
+     "WHERE status='active' AND COALESCE(placement_kind,'')<>'client' " ++
+     "AND NOT EXISTS (SELECT 1 FROM mission_runs r WHERE r.mission_id=missions.id AND r.execution_state NOT IN ('terminal','completed','failed','aborted')) " ++
+     "AND NOT EXISTS (SELECT 1 FROM remote_node_jobs j WHERE j.mission_id=missions.id AND j.state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted')) " ++
+     "RETURNING id;") #[]
   match res with
   | .ok rows => return rows.size - 1
   | .error _ => return 0

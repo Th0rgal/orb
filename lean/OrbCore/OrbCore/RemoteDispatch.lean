@@ -998,6 +998,21 @@ partial def spawnRemoteJobPoller
     let mut offset : Nat := initialOffset
     let mut lineRem : String := ""
     let mut acc : RemoteStreamAcc := {}
+    if initialOffset > 0 then
+      if let .ok tdRows ← execParamQuery store.missionsDb
+          ("SELECT COALESCE(payload,''), COALESCE(content,'') FROM mission_events " ++
+           "WHERE mission_id=?1 AND event_type='text_delta' " ++
+           "AND id > COALESCE((SELECT MAX(id) FROM mission_events WHERE mission_id=?1 AND event_type='user_message'),0) " ++
+           "ORDER BY id DESC LIMIT 1;") #[missionId] then
+        if tdRows.size > 1 then
+          let rawPl := cell tdRows[1]! 0
+          let rawCnt := cell tdRows[1]! 1
+          let prevTxt :=
+            match OrbBin.Json.parse rawPl with
+            | .ok jv => (jv.fieldStr? "content").getD rawCnt
+            | .error _ => rawCnt
+          if !prevTxt.isEmpty then
+            acc := { acc with text := prevTxt, sawActivity := true }
     let mut cancelSent : Bool := false
     let mut keepRunning : Bool := true
     let mut consecNetErrors : Nat := 0
@@ -1387,10 +1402,9 @@ partial def submitRemoteMissionTurn
           let mg := cellNat grs[1]! 0
           let rg := cellNat grs[1]! 1
           nextGen := if rg == 0 then Nat.max 1 mg else Nat.max mg (rg + 1)
-      let insRun ← insertMissionRunUnlocked
+      discard <| insertMissionRunUnlocked
         store.missionsDb runId spec.missionId s!"{nextGen}" "running" "" jobId nowIso true
         s!"remote-job:{jobId}" s!"remote-node:{effTarget}"
-      if let .error e := insRun then return .error e
       carryArmedWakeupsForward (execParamQueryUnlocked store.missionsDb) spec.missionId nextGen nowIso
       execParamQueryUnlocked store.missionsDb
         ("UPDATE missions SET status='active', terminal_reason='remote_node_job', placement_job_id=?2, " ++
@@ -1441,14 +1455,21 @@ def reattachActiveRemoteJobsOnStartup
         discard <| execParamQuery store.projectsDb
           "UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1;" #[sjid, nowIso]
   let qRes ← execParamQuery store.missionsDb
-    ("SELECT r.mission_id, COALESCE(r.remote_job_id,''), COALESCE(r.owner_actor_id,''), COALESCE(r.scope_unit,''), " ++
+    ("SELECT r.mission_id, COALESCE(NULLIF(r.remote_job_id,''), NULLIF(m.placement_job_id,''), ''), COALESCE(r.owner_actor_id,''), COALESCE(r.scope_unit,''), " ++
      "COALESCE(m.backend,'codex'), COALESCE(r.updated_at,'') " ++
      "FROM mission_runs r JOIN missions m ON m.id = r.mission_id " ++
      "WHERE r.execution_state NOT IN ('terminal','completed','failed','aborted') " ++
+     "AND m.status IN ('active','pending') " ++
+     "UNION " ++
+     "SELECT j.mission_id, j.job_id, 'remote-job:' || j.job_id, 'remote-node:' || j.node_id, " ++
+     "COALESCE(m.backend,'codex'), COALESCE(j.updated_at,'') " ++
+     "FROM remote_node_jobs j JOIN missions m ON m.id = j.mission_id " ++
+     "WHERE j.state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted') " ++
      "AND m.status IN ('active','pending');")
     #[]
   let .ok rows := qRes | return 0
   let mut count : Nat := 0
+  let mut seenJobs : Array String := #[]
   for i in [1:rows.size] do
     let row := rows[i]!
     let mid := (cell row 0).trimAscii.toString
@@ -1456,12 +1477,13 @@ def reattachActiveRemoteJobsOnStartup
     let actor := (cell row 2).trimAscii.toString
     let scope := (cell row 3).trimAscii.toString
     let backend := (cell row 4).trimAscii.toString
-    let runUpdated := (cell row 5).trimAscii.toString
+    let _runUpdated := (cell row 5).trimAscii.toString
     let jobId :=
       if !rjid.isEmpty then rjid
       else if actor.startsWith "remote-job:" then (actor.drop 11).trimAscii.toString
       else ""
-    if !mid.isEmpty && !jobId.isEmpty then
+    if !mid.isEmpty && !jobId.isEmpty && !seenJobs.contains jobId then
+      seenJobs := seenJobs.push jobId
       let nodeFromScope :=
         if scope.startsWith "remote-node:" then some ((scope.drop 12).trimAscii.toString) else none
       let resolvedNode? ← match nodeFromScope.filter (!·.isEmpty) with
@@ -1471,20 +1493,12 @@ def reattachActiveRemoteJobsOnStartup
         let effNode ← match ← resolveConcreteRemoteTargetNode mc? rawNode (some (store, mid)) with
           | .ok n => pure n
           | .error _ => pure rawNode
-        -- Determine safe resume byte offset (`remote_log_offsets` first, then remote `log_len` fallback)
+        -- Resume from `remote_log_offsets.published_offset` (0 if no chunk was ingested before restart)
         let mut startOff : Nat := 0
         if let .ok offRows ← execParamQuery store.missionsDb
             "SELECT COALESCE(published_offset,0) FROM remote_log_offsets WHERE job_id=?1 LIMIT 1;" #[jobId] then
           if offRows.size > 1 then
             startOff := cellNat offRows[1]! 0
-        if startOff == 0 && !runUpdated.isEmpty then
-          if let .ok evCntRows ← execParamQuery store.missionsDb
-              "SELECT COUNT(*) FROM mission_events WHERE mission_id=?1 AND COALESCE(created_at,timestamp,'') >= ?2;"
-              #[mid, runUpdated] then
-            if evCntRows.size > 1 && cellNat evCntRows[1]! 0 > 0 then
-              if let .ok (stCode, _, ljv?, _, _) ← callRemoteNodeHttpOpt relayHub? mc? effNode "GET" s!"/jobs/{jobId}/log?offset=0&max_bytes=1" none #[] 6000 then
-                if 200 ≤ stCode && stCode < 300 then
-                  startOff := (ljv?.bind (·.fieldNat? "log_len")).getD 0
         spawnRemoteJobPoller store mc? relayHub? broadcastHub? sup coreWorkDir mid backend effNode jobId "" startOff
         count := count + 1
   return count
