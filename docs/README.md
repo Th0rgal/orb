@@ -57,7 +57,7 @@
 ## 5. Control Plane, Cloud Agents & Hermes
 
 - **[Agent Control Plane Constitution](AGENT_CONTROL_PLANE.md)** & **[Roadmap](AGENT_NATIVE_ROADMAP.md)** — The canonical abstraction tower: portfolio → project → track → attempt → action → receipt → evidence.
-- **[Hermes Orchestration](HERMES_ORCHESTRATION.md)** & **[Autonomous Controllers](CONTROLLERS.md)** — How Hermes crons drive projects through control conversations and MCP.
+- **[Project control plane](AGENT_CONTROL_PLANE.md)** — Project labels, controller missions, and text boards.
 - **[Hermes Cloud Conversations in Orb](ORB_HERMES.md)** — Launching durable Hermes conversations directly from **Orb → Cloud agent**.
 - **[Cloud Agents (`cloud-agents/STATUS.md`)](cloud-agents/STATUS.md)**** — Cursor Cloud and Grok Bot hosted sessions.
 - **[Unified MCP (`sandboxed-mcp`)](MCP_UNIFICATION.md)** — Scoped `mcp1.` sessions, executor/coordinator/operator profiles, and idempotent action receipts.

@@ -7,7 +7,7 @@
   - Layer II: Declarative Corollaries (≤ 3 lines each, Mathlib4 algebraic proof style)
   - Direct Unboxed C-ABI (`@[inline, export]` in `Orb.Kernel`, 36 exports):
     `orb_verify_writer_reuse`, `orb_verify_lease_mode`, `orb_verify_track_hold`, `orb_verify_repo_disjoint`,
-    `orb_verify_remote_outbox`, `orb_verify_board_slots`, `orb_verify_board_retry`, `orb_verify_job_transition`,
+    `orb_verify_remote_outbox`, `orb_verify_job_transition`,
     `orb_verify_bundle_budget`, `orb_verify_token_rotation`, `orb_verify_log_window`, `orb_mix64_word`,
     `orb_proxy_step`, `orb_stream_deadlines`, `orb_breaker_step`, `orb_mission_step`, `orb_reconcile_step`,
     `orb_queue_step`, `orb_vm_step`, `orb_access_step`, `orb_workfold_step`, `orb_taskcard_step`,
@@ -430,57 +430,6 @@ theorem remote_outbox_rejects_unsafe_op (q : RemoteOutboxCheck)
     (verifyRemoteOutbox q.opKind q.alreadyExists q.sameMission q.isCancelled
       q.isSuperseded q.sessionReady q.prUnsupported q.hasJobId q.deliveryAbandonable == 1) = false :=
   remoteOutboxMetaGate.rejects_unsafe q (by simp [h_bad])
-
-structure BoardSlotCheck where
-  maxParallel       : UInt32
-  reservedBossSlots : UInt32
-  totalRunning      : UInt32
-  deriving Repr, DecidableEq
-
-def boardSlotMetaGate : MetaGateSpec BoardSlotCheck
-    (fun b => (b.reservedBossSlots ≥ 1 && b.reservedBossSlots < b.maxParallel &&
-      b.totalRunning < b.maxParallel - b.reservedBossSlots) = true) where
-  gate b := verifyBoardSlots b.maxParallel b.reservedBossSlots b.totalRunning == 1
-  sound _ h := by unfold verifyBoardSlots at h; repeat (first | split at h | simp_all)
-  complete _ h := by unfold verifyBoardSlots; repeat (first | split | simp_all)
-  posWitness := ⟨4, 1, 2⟩
-  negWitness := ⟨4, 1, 3⟩
-  nonVacuous := rfl
-  tight      := rfl
-
-/-- Corollary 6: `verifyBoardSlots` refuses worker spawns that would consume the reserved boss slot. -/
-theorem board_slots_prevent_boss_starvation (b : BoardSlotCheck)
-    (h_full : (b.reservedBossSlots ≥ 1 && b.reservedBossSlots < b.maxParallel &&
-      b.totalRunning < b.maxParallel - b.reservedBossSlots) = false) :
-    (verifyBoardSlots b.maxParallel b.reservedBossSlots b.totalRunning == 1) = false :=
-  boardSlotMetaGate.rejects_unsafe b (by simp [h_full])
-
-structure BoardRetryCheck where
-  attempts                 : UInt32
-  maxAttempts              : UInt32
-  requiresExternalRecovery : UInt8
-  preflightMerged          : UInt8
-  retrySuppressed          : UInt8
-  deriving Repr, DecidableEq
-
-def boardRetryMetaGate : MetaGateSpec BoardRetryCheck
-    (fun r => (r.maxAttempts ≥ 1 && r.attempts < r.maxAttempts &&
-      r.requiresExternalRecovery == 0 && r.preflightMerged == 0 && r.retrySuppressed == 0) = true) where
-  gate r := verifyBoardRetry r.attempts r.maxAttempts r.requiresExternalRecovery r.preflightMerged r.retrySuppressed == 1
-  sound _ h := by unfold verifyBoardRetry at h; repeat (first | split at h | simp_all)
-  complete _ h := by unfold verifyBoardRetry; repeat (first | split | simp_all)
-  posWitness := ⟨1, 3, 0, 0, 0⟩
-  negWitness := ⟨1, 3, 0, 1, 0⟩
-  nonVacuous := rfl
-  tight      := rfl
-
-/-- Corollary 7: `verifyBoardRetry` suppresses retries after `maxAttempts`, on merged PRs, or when external recovery is required. -/
-theorem board_retry_rejects_exhausted_or_merged (r : BoardRetryCheck)
-    (h_stop : (r.maxAttempts ≥ 1 && r.attempts < r.maxAttempts &&
-      r.requiresExternalRecovery == 0 && r.preflightMerged == 0 && r.retrySuppressed == 0) = false) :
-    (verifyBoardRetry r.attempts r.maxAttempts
-      r.requiresExternalRecovery r.preflightMerged r.retrySuppressed == 1) = false :=
-  boardRetryMetaGate.rejects_unsafe r (by simp [h_stop])
 
 structure JobTransitionCheck where
   fromState : UInt8

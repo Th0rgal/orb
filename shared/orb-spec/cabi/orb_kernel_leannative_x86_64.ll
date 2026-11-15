@@ -87,33 +87,6 @@ entry:
 }
 
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
-define dso_local zeroext i8 @orb_verify_board_slots(i32 %a0, i32 %a1, i32 %a2) local_unnamed_addr #0 {
-entry:
-  %cmp_le_5.not.not.i = icmp ne i32 %a1, 0
-  %cmp_lt_18.not.i = icmp ult i32 %a1, %a0
-  %alu_30.i.narrow = sub i32 %a0, %a1
-  %cmp_lt_37.not.i = icmp ult i32 %a2, %alu_30.i.narrow
-  %0 = select i1 %cmp_le_5.not.not.i, i1 %cmp_lt_18.not.i, i1 false
-  %narrow4.i = select i1 %0, i1 %cmp_lt_37.not.i, i1 false
-  %res = zext i1 %narrow4.i to i8
-  ret i8 %res
-}
-
-; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
-define dso_local zeroext i8 @orb_verify_board_retry(i32 %a0, i32 %a1, i8 zeroext %a2, i8 zeroext %a3, i8 zeroext %a4) local_unnamed_addr #0 {
-entry:
-  %cmp_le_5.not.not.i = icmp ne i32 %a1, 0
-  %cmp_lt_18.not.i = icmp ult i32 %a0, %a1
-  %0 = or i8 %a3, %a2
-  %1 = or i8 %0, %a4
-  %narrow2.i = icmp eq i8 %1, 0
-  %narrow.i = and i1 %cmp_lt_18.not.i, %narrow2.i
-  %narrow3.i = select i1 %cmp_le_5.not.not.i, i1 %narrow.i, i1 false
-  %res = zext i1 %narrow3.i to i8
-  ret i8 %res
-}
-
-; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
 define dso_local zeroext i8 @orb_verify_job_transition(i8 zeroext %a0, i8 zeroext %a1) local_unnamed_addr #0 {
 entry:
   %cmp_eq_7.not.i = icmp eq i8 %a0, 0

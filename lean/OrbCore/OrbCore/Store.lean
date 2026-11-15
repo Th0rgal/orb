@@ -1132,6 +1132,59 @@ def resolveCoreStoreDbPaths (trimmedRoot : String) (singleTenantUserId : String 
       defaultAsk
   return (missionsPath, askPath)
 
+/-- One-shot legacy project-board archive. Tables remain for a later removal PR.
+    A failed export never records completion; startup continues and retries next start.
+    SQLite builds JSON so NULL, numbers, and strings retain their types. -/
+def exportLegacyProjectBoard (rootDir : String) (projectsDb missionsDb : SqliteDb) : IO (Except String Nat) := do
+  let archive := System.FilePath.mk rootDir / "archive"
+  let marker := archive / "project-board-legacy.done"
+  if ← marker.pathExists then return .ok 0
+  try
+    IO.FS.createDirAll archive
+    let .ok dateRows ← projectsDb.mu.atomically
+        (sqliteQueryRowsRaw projectsDb.handle "SELECT strftime('%Y-%m-%d','now');" #[])
+      | return .error "legacy_archive_date_failed"
+    let date := ((dateRows[1]?).bind (·[0]?)).getD "unknown"
+    let mut lines : Array String := #[]
+    for (dbName, db) in #[("projects.db", projectsDb), ("missions.db", missionsDb)] do
+      let result ← db.mu.atomically do
+        -- Include historical evidence/task tables when present, even if this
+        -- version no longer creates them. Track leases still serve dispatch.
+        let .ok tables ← sqliteQueryRowsRaw db.handle
+            ("SELECT name FROM sqlite_master WHERE type='table' AND (" ++
+             "name IN ('project_tracks','project_tasks','project_decisions','project_steers','project_crons','controller_archives','mission_board_tasks') " ++
+             "OR name LIKE 'project_track_%' AND name <> 'project_track_leases' " ++
+             "OR name LIKE 'project%_evidence') ORDER BY name;") #[]
+          | return Except.error "legacy_archive_tables_failed"
+        let mut out : Array String := #[]
+        for row in tables.extract 1 tables.size do
+          let table := row[0]?.getD ""
+          let ident := "\"" ++ table.replace "\"" "\"\"" ++ "\""
+          let .ok columns ← sqliteQueryRowsRaw db.handle s!"PRAGMA table_info({ident});" #[]
+            | return Except.error "legacy_archive_columns_failed"
+          let mut fields : Array String := #[]
+          for col in columns.extract 1 columns.size do
+            let name := col[1]?.getD ""
+            let quoted := "\"" ++ name.replace "\"" "\"\"" ++ "\""
+            let key := "'" ++ name.replace "'" "''" ++ "'"
+            fields := fields.push (key ++ ",CASE WHEN typeof(" ++ quoted ++ ")='blob' THEN json_object('$blob_hex',hex(" ++ quoted ++ ")) ELSE " ++ quoted ++ " END")
+          let sql := "SELECT json_object(" ++ String.intercalate "," fields.toList ++ ") FROM " ++ ident ++ ";"
+          let .ok rows ← sqliteQueryRowsRaw db.handle sql #[]
+            | return Except.error s!"legacy_archive_rows_failed:{table}"
+          for r in rows.extract 1 rows.size do
+            out := out.push ("{\"database\":" ++ jsonEscape dbName ++ ",\"table\":" ++ jsonEscape table ++ ",\"row\":" ++ r[0]?.getD "{}" ++ "}")
+        return Except.ok out
+      match result with
+      | .error e => return .error e
+      | .ok out => lines := lines ++ out
+    let path := archive / s!"project-board-legacy-{date}.jsonl"
+    let bytes := (String.intercalate "\n" lines.toList ++ (if lines.isEmpty then "" else "\n")).toUTF8
+    if let .error e ← writeAtomicPrivate0600 path bytes then return .error e
+    if let .error e ← writeAtomicPrivate0600 marker s!"{path}\nrows={lines.size}\n".toUTF8 then return .error e
+    IO.eprintln s!"[orb-core] archived {lines.size} legacy project-board rows to {path}"
+    return .ok lines.size
+  catch e => return .error s!"legacy_archive_failed:{e}"
+
 /-- Open or initialize the full `CoreStore` SQLite bundle in `rootDir` (preserving existing DB files in-place
     and failing closed on any persistent open/schema/recovery failure without in-memory fallback).
     When `bootEpoch == 0` (the default), atomically increments and persists `boot_epoch` in `core_boot_state`. -/
@@ -1320,6 +1373,8 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) (singleTenantUser
       if let .error r7Err := r7MissRes then
         sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; sqliteCloseRaw aDb.handle; sqliteCloseRaw iDb.handle
         return .error s!"core_store_r7_schema_failed:{r7Err}"
+      if let .error e ← exportLegacyProjectBoard trimmedRoot pDb mDb then
+        IO.eprintln s!"[orb-core] legacy project-board archive failed: {e}"
       let closedRef ← IO.mkRef false
       let evListenersRef ← IO.mkRef (#[] : Array (UInt64 × (String → UInt64 → String → String → String → IO Unit)))
       let evDispatchState ← Std.Mutex.new ({} : MissionEventDispatchState)
@@ -3843,7 +3898,6 @@ def bootstrapUsersAndBackfill
     ("SELECT DISTINCT slug FROM (" ++
      "SELECT COALESCE(NULLIF(slug,''), id) AS slug FROM projects UNION " ++
      "SELECT slug FROM project_grant UNION " ++
-     "SELECT project_slug AS slug FROM project_tracks UNION " ++
      "SELECT project_slug AS slug FROM context_heads) WHERE slug<>'';") #[]
   if let .ok prs := pSlugs then
     for i in [1:prs.size] do
@@ -5169,48 +5223,5 @@ def cascadeRenameMissionFolder
             placementRevision := nextRev
           }
     return .ok changed
-
-/-- Cascade a project directory rename/move (`fromPrefix -> toPrefix`) across `project_crons.folder`,
-    returning `(job_id, previous_folder)` snapshots of ONLY mutated rows for rollback safety. -/
-def cascadeRenameCronFolder
-    (st : CoreStore) (projectSlug fromPrefix toPrefix : String) : IO (Except String (Array (String × String))) := do
-  let normFrom := normalizeMissionFolder fromPrefix
-  let normTo := normalizeMissionFolder toPrefix
-  if projectSlug.isEmpty || normFrom.isEmpty || normFrom == normTo then
-    return .ok #[]
-  withImmediateTx st.projectsDb do
-    let q ← execParamQueryUnlocked st.projectsDb
-      ("SELECT job_id, COALESCE(folder,'') FROM project_crons " ++
-       "WHERE slug=?1 AND (COALESCE(folder,'')=?2 OR COALESCE(folder,'') LIKE (?2 || '/%'));")
-      #[projectSlug, normFrom]
-    let .ok rs := q | return .error "cascade_cron_select_failed"
-    if rs.size ≤ 1 then return .ok #[]
-    let mut mutated : Array (String × String) := #[]
-    for i in [1:rs.size] do
-      let r := rs[i]!
-      let jid := (r[0]?).getD ""
-      let curFolder := normalizeMissionFolder ((r[1]?).getD "")
-      if folderMatchesPrefix curFolder normFrom then
-        let suffix := (curFolder.drop normFrom.length).toString
-        let nextFolder :=
-          if normTo.isEmpty then normalizeMissionFolder suffix
-          else normalizeMissionFolder (normTo ++ suffix)
-        if nextFolder != curFolder then
-          let u ← execParamQueryUnlocked st.projectsDb
-            "UPDATE project_crons SET folder=?3 WHERE slug=?1 AND job_id=?2;"
-            #[projectSlug, jid, nextFolder]
-          if let .error e := u then return .error e
-          mutated := mutated.push (jid, curFolder)
-    return .ok mutated
-
-/-- Restore mutated `project_crons.folder` rows if a subsequent filesystem or mission cascade step fails. -/
-def restoreCronFolders (st : CoreStore) (projectSlug : String) (snap : Array (String × String)) : IO Unit := do
-  if snap.isEmpty then return ()
-  discard <| withImmediateTx st.projectsDb do
-    for (jid, prevFolder) in snap do
-      discard <| execParamQueryUnlocked st.projectsDb
-        "UPDATE project_crons SET folder=?3 WHERE slug=?1 AND job_id=?2;"
-        #[projectSlug, jid, prevFolder]
-    return .ok ()
 
 end OrbCore.Store

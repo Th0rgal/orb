@@ -415,16 +415,6 @@ def remote_queue_reopen_fifo_cancel_and_receipts (_ : Unit := ()) : Bool :=
   (callExportU64? "orb_verify_remote_outbox" #[1, 1, 1, 1, 1, 1, 1, 1, 1] == some 1) &&
   (enqueue 0 != enqueue 1)
 
-def upsert_and_dep_flow_in_memory_store (_ : Unit := ()) : Bool :=
-  (callExportU64? "orb_verify_board_slots" #[0, 0, 0] == some 0) &&
-  (callExportU64? "orb_verify_board_slots" #[369, 240, 111] == some 1) &&
-  (scheduler_pass 0 != scheduler_pass 1)
-
-def boss_terminal_status_classification (_ : Unit := ()) : Bool :=
-  (callExportU64? "orb_verify_board_retry" #[0, 3, 0, 0, 0] == some 1) &&
-  (callExportU64? "orb_verify_board_retry" #[3, 3, 0, 0, 0] == some 0) &&
-  (retry_disposition 0 != retry_disposition 1)
-
 def terminal_outcome_is_first_wins (_ : Unit := ()) : Bool :=
   (callExportU64? "orb_verify_job_transition" #[0, 0] == some 0) &&
   (callExportU64? "orb_verify_job_transition" #[0, 1] == some 1) &&
@@ -839,8 +829,6 @@ def runAllHostTests (emitLogPath? : Option String := none) : IO Bool := do
     ("queued_followup_protects_assignment_without_claiming_execution", queued_followup_protects_assignment_without_claiming_execution ()),
     ("unrecognised_repositories_prove_nothing", unrecognised_repositories_prove_nothing ()),
     ("remote_queue_reopen_fifo_cancel_and_receipts", remote_queue_reopen_fifo_cancel_and_receipts ()),
-    ("upsert_and_dep_flow_in_memory_store", upsert_and_dep_flow_in_memory_store ()),
-    ("boss_terminal_status_classification", boss_terminal_status_classification ()),
     ("terminal_outcome_is_first_wins", terminal_outcome_is_first_wins ()),
     ("orb_wire_zero_copy_slice_abi_alias_null_wasm32_and_no_partial_mutation", orb_wire_zero_copy_slice_abi_alias_null_wasm32_and_no_partial_mutation ()),
     ("subscription_cooldown_classifies_empty_chain_as_retryable", subscription_cooldown_classifies_empty_chain_as_retryable ()),

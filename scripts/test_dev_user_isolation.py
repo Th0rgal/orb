@@ -50,6 +50,12 @@ class DevProbeSafetyTests(unittest.TestCase):
                     slug = path.split("/")[3]
                     if path.endswith("/status"):
                         return 404, {}
+                    if path.endswith("/controller") and method == "GET":
+                        return 200, {"job": None}
+                    if path.endswith("/crons") and method == "GET":
+                        return 200, {"jobs": []}
+                    if "/crons/" in path:
+                        return 410, {"error": "removed"}
                     if len(path.split("/")) > 4:
                         return 403, {}
                     return 200, {"project": self.projects.get((token, slug), {})}

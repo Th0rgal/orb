@@ -9,8 +9,6 @@ uint8_t orb_verify_lease_mode(uint8_t, uint8_t, uint8_t, uint8_t);
 uint8_t orb_verify_track_hold(uint8_t, uint8_t, uint8_t, uint8_t);
 uint8_t orb_verify_repo_disjoint(uint8_t, uint8_t, uint8_t);
 uint8_t orb_verify_remote_outbox(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
-uint8_t orb_verify_board_slots(uint32_t, uint32_t, uint32_t);
-uint8_t orb_verify_board_retry(uint32_t, uint32_t, uint8_t, uint8_t, uint8_t);
 uint8_t orb_verify_job_transition(uint8_t, uint8_t);
 uint8_t orb_verify_bundle_budget(uint8_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint8_t orb_verify_token_rotation(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);

@@ -2,8 +2,7 @@
   OrbCore.QueueCont: R3-C / R3-D persistence for row-level control queues (`SM-04`),
   structured deferred batches (`SM-05`), unified `waiting_rate_limit` (`SM-06`),
   generation-fenced `mission_continuations` (`SM-07`), shared reconcile + supervision
-  counters (`SM-09`, `SM-01`), typed-placement `beginMissionRun` (`SM-10`), and
-  canonical `project_decisions.status` (`SM-13`).
+  counters (`SM-09`, `SM-01`), typed-placement `beginMissionRun` (`SM-10`).
   `0 import Lean`, `0 sorryAx`.
 -/
 import Orb.Lifecycle
@@ -50,19 +49,8 @@ def supervisionSchemaSql : String :=
   "mission_id TEXT PRIMARY KEY, bg_wait_arms INTEGER NOT NULL DEFAULT 0, " ++
   "stall_consecutive_arms INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT '');"
 
-def projectDecisionsSchemaSql : String :=
-  "CREATE TABLE IF NOT EXISTS project_decisions (" ++
-  "id TEXT PRIMARY KEY, slug TEXT NOT NULL DEFAULT '', at TEXT NOT NULL DEFAULT '', " ++
-  "project_slug TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', " ++
-  "question TEXT NOT NULL DEFAULT '', rationale TEXT, answered INTEGER NOT NULL DEFAULT 0, " ++
-  "kind TEXT, authority TEXT NOT NULL DEFAULT 'escalation', answer TEXT, answered_at TEXT, " ++
-  "evidence TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');"
-
 def queueContSchemaSql : String :=
   deferredBatchSchemaSql ++ queueReceiptsSchemaSql ++ continuationsSchemaSql ++ supervisionSchemaSql
-
-def projectsDecisionsSchemaSql : String :=
-  projectDecisionsSchemaSql
 
 def queueContAdditiveAlters : Array String := #[
   "ALTER TABLE missions ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0;",
@@ -73,23 +61,6 @@ def queueContAdditiveAlters : Array String := #[
   "ALTER TABLE remote_message_queue ADD COLUMN delivered_seq INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE remote_message_queue ADD COLUMN edit_revision INTEGER NOT NULL DEFAULT 0;",
   "CREATE UNIQUE INDEX IF NOT EXISTS deferred_message_batches_uuid ON deferred_message_batches(mission_id, message_id);"
-]
-
-def projectsDecisionsAdditiveAlters : Array String := #[
-  "ALTER TABLE project_decisions ADD COLUMN slug TEXT NOT NULL DEFAULT '';",
-  "ALTER TABLE project_decisions ADD COLUMN at TEXT NOT NULL DEFAULT '';",
-  "ALTER TABLE project_decisions ADD COLUMN project_slug TEXT NOT NULL DEFAULT '';",
-  "ALTER TABLE project_decisions ADD COLUMN status TEXT NOT NULL DEFAULT 'pending';",
-  "ALTER TABLE project_decisions ADD COLUMN question TEXT NOT NULL DEFAULT '';",
-  "ALTER TABLE project_decisions ADD COLUMN rationale TEXT;",
-  "ALTER TABLE project_decisions ADD COLUMN answered INTEGER NOT NULL DEFAULT 0;",
-  "ALTER TABLE project_decisions ADD COLUMN kind TEXT;",
-  "ALTER TABLE project_decisions ADD COLUMN authority TEXT NOT NULL DEFAULT 'escalation';",
-  "ALTER TABLE project_decisions ADD COLUMN answer TEXT;",
-  "ALTER TABLE project_decisions ADD COLUMN answered_at TEXT;",
-  "ALTER TABLE project_decisions ADD COLUMN evidence TEXT NOT NULL DEFAULT '';",
-  "ALTER TABLE project_decisions ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';",
-  "CREATE UNIQUE INDEX IF NOT EXISTS idx_project_decisions_id ON project_decisions(id);"
 ]
 
 def isQueueContIntegerCol (col : String) : Bool :=
@@ -1105,77 +1076,6 @@ def beginMissionRun
     if changesOf crs == 0 then return .error "begin_run_cas_lost"
     return .ok { runId := runId, generation := proposed, placementKind := placement }
 
-structure ProjectDecision where
-  id          : String
-  projectSlug : String
-  status      : String
-  question    : String := ""
-  evidence    : String := ""
-  updatedAt   : String := ""
-  deriving Repr
-
-def answeredOfStatus (status : String) : Bool :=
-  status == "answered"
-
-def putProjectDecision (st : CoreStore) (d : ProjectDecision) (answered? : Option Bool) :
-    IO (Except String ProjectDecision) := do
-  if d.status != "pending" && d.status != "answered" && d.status != "dismissed" then
-    return .error "invalid_decision_status"
-  if let some flag := answered? then
-    if flag != answeredOfStatus d.status then
-      return .error "contradictory_answered"
-  let ansFlag := if answeredOfStatus d.status then "1" else "0"
-  let effAt := if d.updatedAt.isEmpty then "1970-01-01T00:00:00Z" else d.updatedAt
-  if !d.projectSlug.isEmpty then
-    discard <| execParamQuery st.projectsDb
-      ("INSERT OR IGNORE INTO projects(slug, id, name, title, root_path, status, created_at, updated_at) " ++
-       "VALUES(?1, ?1, ?1, ?1, '', 'active', ?2, ?2);")
-      #[d.projectSlug, effAt]
-  let txRes ← withImmediateTx st.projectsDb do
-    let existing ← execParamQueryUnlocked st.projectsDb
-      "SELECT id FROM project_decisions WHERE id=?1;" #[d.id]
-    let .ok ers := existing | return .error "decision_select_failed"
-    if ers.size > 1 then
-      let upd ← execParamQueryUnlocked st.projectsDb
-        ("UPDATE project_decisions SET slug=?2, project_slug=?2, status=?3, answered=?4, question=?5, evidence=?6, updated_at=?7 " ++
-         "WHERE id=?1;")
-        #[d.id, d.projectSlug, d.status, ansFlag, d.question, d.evidence, effAt]
-      return upd.map (fun _ => d)
-    else
-      let ins ← execParamQueryUnlocked st.projectsDb
-        ("INSERT INTO project_decisions(id,slug,at,project_slug,status,answered,question,evidence,updated_at) " ++
-         "VALUES(?1,?2,?3,?2,?4,?5,?6,?7,?3);")
-        #[d.id, d.projectSlug, effAt, d.status, ansFlag, d.question, d.evidence]
-      return ins.map (fun _ => d)
-  return txRes
-
-def listProjectDecisionsJson (st : CoreStore) (slug : String) : IO (Except String String) := do
-  let rows ← execParamQuery st.projectsDb
-    ("SELECT id,COALESCE(NULLIF(project_slug,''),slug,''),status,question,COALESCE(evidence,'')," ++
-     "COALESCE(NULLIF(updated_at,''),at,''),COALESCE(rationale,''),COALESCE(kind,''),COALESCE(authority,'escalation')," ++
-     "COALESCE(answer,''),COALESCE(answered_at,'') " ++
-     "FROM project_decisions WHERE COALESCE(NULLIF(project_slug,''),slug,'')=?1 OR ?1='' ORDER BY COALESCE(NULLIF(updated_at,''),at,'') DESC, id ASC;")
-    #[slug]
-  match rows with
-  | .error e => return .error e
-  | .ok rs =>
-    if rs.size ≤ 1 then return .ok "[]"
-    let mut items : Array String := #[]
-    for i in [1:rs.size] do
-      let r := rs[i]!
-      let status := cell r 2
-      let answered := if answeredOfStatus status then "true" else "false"
-      let ratJson := let v := cell r 6; if v.isEmpty then "null" else jsonEscape v
-      let kindJson := let v := cell r 7; if v.isEmpty then "null" else jsonEscape v
-      let ansJson := let v := cell r 9; if v.isEmpty then "null" else jsonEscape v
-      let ansAtJson := let v := cell r 10; if v.isEmpty then "null" else jsonEscape v
-      items := items.push (
-        s!"\{\"id\":{jsonEscape (cell r 0)},\"project_slug\":{jsonEscape (cell r 1)},\"slug\":{jsonEscape (cell r 1)},\"status\":{jsonEscape status}," ++
-        s!"\"answered\":{answered},\"question\":{jsonEscape (cell r 3)},\"rationale\":{ratJson},\"kind\":{kindJson}," ++
-        s!"\"authority\":{jsonEscape (cell r 8)},\"answer\":{ansJson},\"answered_at\":{ansAtJson}," ++
-        s!"\"evidence\":{jsonEscape (cell r 4)},\"at\":{jsonEscape (cell r 5)},\"updated_at\":{jsonEscape (cell r 5)}}")
-    return .ok ("[" ++ String.intercalate "," items.toList ++ "]")
-
 def isMcpWakeupPayload (jv : JVal) : Bool :=
   let vars? := jv.field? "variables"
   let reqId? := vars?.bind (·.fieldStr? "__wakeup_request_id")
@@ -1396,17 +1296,6 @@ def ensureQueueContSchema (st : CoreStore) : IO (Except String Unit) := do
       return Except.ok ())
     match r1 with
     | .error e => return .error e
-    | .ok () =>
-      match ← st.projectsDb.mu.atomically (sqliteExecRaw st.projectsDb.handle projectsDecisionsSchemaSql) with
-      | .error e => return .error e
-      | .ok () =>
-        st.projectsDb.mu.atomically (do
-          for stmt in projectsDecisionsAdditiveAlters do
-            match ← sqliteExecRaw st.projectsDb.handle stmt with
-            | .ok () => pure ()
-            | .error e =>
-              if (e.toLower.splitOn "duplicate column name").length ≤ 1 then
-                return Except.error e
-          return Except.ok ())
+    | .ok () => return .ok ()
 
 end OrbCore.QueueCont

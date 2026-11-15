@@ -287,12 +287,13 @@ class Harness(unittest.TestCase):
             self.assertEqual(records[-1]["exit_code"], -9)
 
     def test_domain_mutant_inventory_and_witness_qualification(self):
-        self.assertEqual(len(conformance.DOMAIN_MUTANTS), 39)
+        self.assertEqual(len(conformance.DOMAIN_MUTANTS), 38)
+        self.assertEqual(conformance.MUTATION_MINIMUMS["scheduling_resources"], 2)
         by_family = {}
         for _, _, fam, _, _, _ in conformance.DOMAIN_MUTANTS:
             by_family[fam] = by_family.get(fam, 0) + 1
         self.assertEqual(set(by_family), set(conformance.MUTATION_FAMILIES))
-        self.assertTrue(all(v >= 3 for v in by_family.values()))
+        self.assertTrue(all(v >= conformance.MUTATION_MINIMUMS[fam] for fam, v in by_family.items()))
         cases = [{"id": 0, "symbol": "target", "args": [0]},
                  {"id": 1, "symbol": "target", "args": [1]},
                  {"id": 2, "symbol": "other", "args": [0]}]
@@ -312,11 +313,17 @@ class Harness(unittest.TestCase):
             "loop_alias_rc": {"status": "PASS", "live_objects": 0},
             "mutation_families": {f: {"status": "PASS", "killed": 3, "total": 3} for f in conformance.MUTATION_FAMILIES},
             "mutation_checks": {"m01_native": {"status": "KILLED"}},
-            "total_domain_mutants_killed": 39,
+            "total_domain_mutants_killed": 38,
         }
         report = copy.deepcopy(base_report)
         self.assertEqual(conformance.summarize(report, values, {}, self.cases), 0)
         self.assertEqual(report["status"], "PASS")
+        # The board gate is retired; both remaining scheduling mutants must die.
+        r_scheduling = copy.deepcopy(base_report)
+        r_scheduling["mutation_families"]["scheduling_resources"].update(killed=2, total=2)
+        self.assertEqual(conformance.summarize(r_scheduling, values, {}, self.cases), 0)
+        r_scheduling["mutation_families"]["scheduling_resources"]["killed"] = 1
+        self.assertEqual(conformance.summarize(r_scheduling, values, {}, self.cases), 2)
         # Missing any engine -> INCOMPLETE (2)
         incomplete_values = {k: v for k, v in values.items() if k != "lnir"}
         r_missing = copy.deepcopy(base_report)
@@ -337,8 +344,8 @@ class Harness(unittest.TestCase):
     def test_public_export_inventory_matches_current_manifest_and_rejects_drift(self):
         manifest = conformance.load_manifest(conformance.ORB / "shared/orb-spec/kernel_abi.json")
         functions = conformance.public_export_functions(manifest)
-        self.assertEqual(len(manifest["functions"]), 192)
-        self.assertEqual(len(functions), 191)
+        self.assertEqual(len(manifest["functions"]), 190)
+        self.assertEqual(len(functions), 189)
         self.assertIn("orb_slot_bypass_step", {f["name"] for f in functions})
         self.assertIn("orb_node_resize_step", {f["name"] for f in functions})
         self.assertIn("orb_node_lane_step", {f["name"] for f in functions})
@@ -391,9 +398,9 @@ class Harness(unittest.TestCase):
         with self.assertRaises(ValueError):
             conformance.public_export_functions(shrunk)
         cases, witness_cases = conformance.build_corpus(functions)
-        self.assertEqual(len(functions) * 8, 1528)
-        self.assertEqual(len(cases), 1564)
-        self.assertEqual(len(witness_cases), 39)
+        self.assertEqual(len(functions) * 8, 1512)
+        self.assertEqual(len(cases), 1547)
+        self.assertEqual(len(witness_cases), 38)
 
 
 if __name__ == "__main__":

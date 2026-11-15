@@ -4639,20 +4639,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   if let some res ← dispatchMissionControlAndGitRoutes? st req rawTarget cleanPath caller reqOrigin? nowEpochSec then
     return res
 
-  -- Mission Board Task Admission (`POST /api/control/missions/:id/board-task`, `SM-13`)
-  if let some params := matchRoutePattern? "/api/control/missions/:id/board-task" rawTarget then
-    if req.method == "POST" then
-      let rawMid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
-      let some mid := percentDecodeStrict rawMid
-        | return .ok (mkJson 400 "{\"error\":\"invalid_mission_id\"}")
-      if mid.isEmpty then
-        return .ok (mkJson 400 "{\"error\":\"invalid_mission_id\"}")
-      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid true) then
-        return .ok (mkJson cCode cBody)
-      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
-        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
-      let (code, body) ← postBoardTask st.store mid jv
-      return .ok (mkJson code body)
+  if (matchRoutePattern? "/api/control/missions/:id/board-task" rawTarget).isSome then
+    return .ok (mkJson 410 "{\"error\":\"removed\"}")
 
   -- Revisioned Mission Move (`POST /api/control/missions/move`, `#1545`)
   if cleanPath == "/api/control/missions/move" then
@@ -5023,48 +5011,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
         | .ok _ => return .ok (mkJson 200 "{\"ok\":true}")
 
-  -- Project Decisions (`GET|POST /api/control/projects/:slug/decisions`, `SM-13`)
-  if let some params := matchRoutePattern? "/api/control/projects/:slug/decisions" rawTarget then
-    let rawSlug := (params.find? (fun p => p.1 == "slug")).map Prod.snd |>.getD ""
-    let some decSlug := percentDecodeStrict rawSlug
-      | return .ok (mkJson 400 "{\"error\":\"invalid_project\"}")
-    let slugOpt : Option String :=
-      if caller.isLegacyUnscoped then
-        if validProjectSlug decSlug then some decSlug else none
-      else
-        scopeProjectSlug caller.userId st.bootstrapAdminId decSlug
-    let some slug := slugOpt
-      | return .ok (mkJson 400 "{\"error\":\"invalid_project\"}")
-    if req.method == "GET" then
-      match ← listProjectDecisionsJson st.store slug with
-      | .ok body => return .ok (mkJson 200 body)
-      | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
-    else if req.method == "POST" || req.method == "PUT" || req.method == "PATCH" then
-      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
-        | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
-      if !caller.isLegacyUnscoped && !caller.userId.isEmpty then
-        discard <| execParamQuery st.store.projectsDb
-          "INSERT OR IGNORE INTO project_owners(slug,owner_user_id,created_at) VALUES(?1,?2,?3);"
-          #[slug, caller.userId, s!"{nowEpochSec}"]
-      let defDid ← nextUniqueId st "dec" nowEpochSec
-      let did := (jv.fieldStr? "id").getD defDid
-      let status := (jv.fieldStr? "status").getD "pending"
-      let question := (jv.fieldStr? "question").getD ""
-      let evidence := (jv.fieldStr? "evidence").getD ""
-      let answered? := jv.fieldBool? "answered"
-      let drec : ProjectDecision := {
-        id := did, projectSlug := slug, status := status,
-        question := question, evidence := evidence, updatedAt := s!"{nowEpochSec}"
-      }
-      match ← putProjectDecision st.store drec answered? with
-      | .ok out =>
-        let ansStr := if answeredOfStatus out.status then "true" else "false"
-        let dispProj := if caller.isLegacyUnscoped then out.projectSlug else decSlug
-        return .ok (mkJson 200 s!"\{\"id\":{jsonEscape out.id},\"project_slug\":{jsonEscape dispProj},\"status\":{jsonEscape out.status},\"answered\":{ansStr}}")
-      | .error "invalid_decision_status" | .error "contradictory_answered" =>
-        return .ok (mkJson 400 "{\"error\":\"invalid_or_contradictory_decision_status\"}")
-      | .error e =>
-        return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+  if cleanPath == "/api/control/repair/borrowed-tracks" ||
+      (matchRoutePattern? "/api/control/projects/:slug/decisions" rawTarget).isSome then
+    return .ok (mkJson 410 "{\"error\":\"removed\"}")
 
   -- AI Providers CRUD, Usage, CLIProxy Login, Summary & Rate-Limit Metadata (`/api/ai/providers*`, `/api/ai/usage/*`, `/api/ai/proxy/*`)
   if cleanPath.startsWith "/api/ai/usage/" || cleanPath.startsWith "/api/ai/proxy/" then
@@ -6567,27 +6516,6 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           "INSERT OR IGNORE INTO project_owners(slug,owner_user_id,created_at) VALUES(?1,?2,?3);"
           #[scopedProj, caller.userId, s!"{nowEpochSec}"]
     match segs with
-    | [rawProj, "tracks"] =>
-      if req.method == "POST" then
-        let some proj := resolveCallerProj rawProj
-          | return .ok (mkJson 400 "{\"error\":\"invalid_project\"}")
-        let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
-          | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
-        recordCallerProj proj
-        let track := (jv.fieldStr? "track").getD ""
-        let desired := (jv.fieldStr? "desired_condition").getD ""
-        let status := (jv.fieldStr? "status").getD "open"
-        let expRev? := jv.fieldNat? "expected_revision"
-        let (code, body) ← putProjectTrack st.store proj track desired status s!"{nowEpochSec}" expRev?
-        return .ok (mkJson code body)
-    -- The structured task/track board remains available alongside contract v1's text board.
-    | [rawProj, "task-board"] =>
-      if req.method == "GET" then
-        let some proj := resolveCallerProj rawProj
-          | return .ok (mkJson 400 "{\"error\":\"invalid_project\"}")
-        match ← projectBoardJson st.store proj with
-        | .ok body => return .ok (mkJson 200 body)
-        | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
     | [_, "board"] =>
       if let some (code, ctype, body) ← dispatchProjectAndControllerRoutes?
           st.store st.broadcastHub? st.cfg.workingDir req.method cleanPath rawTarget req.bodySlice.toByteArray

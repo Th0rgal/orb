@@ -243,14 +243,6 @@ def promote (seed : UInt64 := 0) : UInt64 :=
   if (seed &&& 1) == 0 then (callExportU64? "orb_verify_remote_outbox" #[0, 0, 0, 0, 0, 0, 0, 0, 0]).getD 0
   else (callExportU64? "orb_verify_remote_outbox" #[1, 1, 1, 1, 1, 1, 1, 1, 1]).getD 0
 
-def scheduler_pass (seed : UInt64 := 0) : UInt64 :=
-  if (seed &&& 1) == 0 then (callExportU64? "orb_verify_board_slots" #[0, 0, 0]).getD 0
-  else (callExportU64? "orb_verify_board_slots" #[369, 240, 111]).getD 0
-
-def retry_disposition (seed : UInt64 := 0) : UInt64 :=
-  if (seed &&& 1) == 0 then (callExportU64? "orb_verify_board_retry" #[0, 3, 0, 0, 0]).getD 0
-  else (callExportU64? "orb_verify_board_retry" #[3, 3, 0, 0, 0]).getD 0
-
 def can_transition_to (seed : UInt64 := 0) : UInt64 :=
   if (seed &&& 1) == 0 then (callExportU64? "orb_verify_job_transition" #[0, 0]).getD 0
   else (callExportU64? "orb_verify_job_transition" #[0, 1]).getD 0

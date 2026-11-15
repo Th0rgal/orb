@@ -6,7 +6,7 @@
   4. All 9 `OrbCore.Harness` contract tests.
   5. `/v1/*` `OrbCore.Proxy` pre-first-byte `429`/`503` failover + hop-by-hop header sanitization.
   6. Live HTTP/1.1 + WebSocket dispatch (`/api/health`, `/api/auth/login` with `SANDBOXED_USERS`, `/v1/*` auth, `/api/privilege-access/verify-and-log` fail-closed vs valid lease, `/api/console/ws` `401` without JWT and `101` echoing `Sec-WebSocket-Protocol: jwt.<token>`).
-  7. All 85 `OrbCore.HostTests` & optional `--emit-evidence-log <path>` receipt generation.
+  7. All `OrbCore.HostTests` & optional `--emit-evidence-log <path>` receipt generation.
 -/
 import OrbCore
 import OrbCore.ManagedProviderTests
@@ -980,23 +980,6 @@ private def runR3cdQueueAndContinuationTests
      (bEvHealth.splitOn "\"artifact_ref\":\"sha256:r3de0001\"").length != 2 ||
      (bEvGet.splitOn "\"verified\":true").length != 2 then
     return (← failWith s!"SM-01 list/get/health terminal_evidence mismatch: get={bEvGet} health={bEvHealth}")
-
-  -- 7. SM-13: `project_decisions.status` canonical (`pending | answered | dismissed`), `answered` derived, contradictory rejected with 400
-  let .ok (sDecOk, bDecOk) ← sendTestHttp appSt validJwt "POST" "/api/control/projects/orb/decisions"
-    "{\"id\":\"dec-1\",\"status\":\"answered\",\"question\":\"Ship R3?\",\"evidence\":\"green\"}" nowSec
-    | return (← failWith "put decision ok")
-  let .ok (sDecBad1, _) ← sendTestHttp appSt validJwt "POST" "/api/control/projects/orb/decisions"
-    "{\"id\":\"dec-2\",\"status\":\"pending\",\"answered\":true,\"question\":\"Contradiction\"}" nowSec
-    | return (← failWith "put decision bad 1")
-  let .ok (sDecBad2, _) ← sendTestHttp appSt validJwt "POST" "/api/control/projects/orb/decisions"
-    "{\"id\":\"dec-3\",\"status\":\"answered\",\"answered\":false,\"question\":\"Contradiction 2\"}" nowSec
-    | return (← failWith "put decision bad 2")
-  let .ok (sDecList, bDecList) ← sendTestHttp appSt validJwt "GET" "/api/control/projects/orb/decisions" "" nowSec
-    | return (← failWith "list decisions")
-  if sDecOk != 200 || (bDecOk.splitOn "\"answered\":true").length != 2 ||
-     sDecBad1 != 400 || sDecBad2 != 400 ||
-     sDecList != 200 || (bDecList.splitOn "\"status\":\"answered\"").length != 2 then
-    return (← failWith s!"SM-13 decision invariant failed: ok={sDecOk} ({bDecOk}) bad1={sDecBad1} bad2={sDecBad2} list={bDecList}")
 
   return 0
 
@@ -2506,14 +2489,10 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
      verifyContextOpCas 1 1 1 1 1 7 3 1 1 != 0 ||
      verifyContextOpCas 1 1 1 1 1 0 0 0 1 != 0 ||
      verifyContextOpCas 1 1 1 1 1 0 0 0 0 != 1 ||
-     verifyBoardTrack 1 1 1 1 0 != 1 ||
-     verifyBoardTrack 1 1 1 1 1 != 0 ||
      verifyDeployRecheck 1 2 0 9 9 4 4 10 20 8 8 != 257 ||
      verifyDeployRecheck 1 2 0 9 9 4 5 10 20 8 8 == 257 ||
      Orb.Kernel.deployGateStep 1 1 0 1 0 1 0 0 != 1 ||
-     Orb.Kernel.authToctouExecuteStep 2 0 9 9 4 4 10 20 8 8 != 257 ||
-     Orb.Kernel.verifyBoardSlots 4 1 0 != 1 ||
-     Orb.Kernel.verifyBoardRetry 0 3 0 0 0 != 1 then
+     Orb.Kernel.authToctouExecuteStep 2 0 9 9 4 4 10 20 8 8 != 257 then
     IO.eprintln "[orb-core-test] FAIL: R7 kernel gates rejected their own witnesses"
     return 1
   let r7Ts ← IO.monoNanosNow
@@ -2671,79 +2650,16 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: project context wire contract mismatch: {manifestText}"
     return 1
-   let trackBody := "{\"track\":\"core\",\"desired_condition\":\"ship\",\"status\":\"open\"}"
-   let trackResp ← dispatch s!"POST /api/projects/orb/tracks HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {trackBody.utf8ByteSize}\r\n\r\n{trackBody}"
-   for mid in ["m1", "m2", "m3", "m4"] do
-     let .ok () ← insertNewMission store {
-       id := mid, title := mid, status := "running", backend := "opencode",
-       modelOverride := "", workingDirectory := r7Root, project := "orb", updatedAt := s!"{nowSec}"
-     } | do closeCoreStore store; return 1
-   let staleTrackBody := "{\"track\":\"core\",\"desired_condition\":\"stale\",\"status\":\"open\",\"expected_revision\":99}"
-  let staleTrack ← dispatch s!"POST /api/projects/orb/tracks HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {staleTrackBody.utf8ByteSize}\r\n\r\n{staleTrackBody}"
-  let taskBody := "{\"project_slug\":\"orb\",\"track\":\"core\",\"task_key\":\"t1\",\"attempt_seq\":0,\"max_attempts\":3}"
-  let taskResp ← dispatch s!"POST /api/control/missions/m1/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {taskBody.utf8ByteSize}\r\n\r\n{taskBody}"
-  let dupTask ← dispatch s!"POST /api/control/missions/m1/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {taskBody.utf8ByteSize}\r\n\r\n{taskBody}"
-  let retryBody := "{\"project_slug\":\"orb\",\"track\":\"core\",\"task_key\":\"t-retry\",\"attempt_seq\":3,\"max_attempts\":3}"
-  let retryRej ← dispatch s!"POST /api/control/missions/m1/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {retryBody.utf8ByteSize}\r\n\r\n{retryBody}"
-  let task2Body := "{\"project_slug\":\"orb\",\"track\":\"core\",\"task_key\":\"t2\",\"attempt_seq\":0,\"max_attempts\":3}"
-  let task3Body := "{\"project_slug\":\"orb\",\"track\":\"core\",\"task_key\":\"t3\",\"attempt_seq\":0,\"max_attempts\":3}"
-  let task4Body := "{\"project_slug\":\"orb\",\"track\":\"core\",\"task_key\":\"t4\",\"attempt_seq\":0,\"max_attempts\":3}"
-  let t2Resp ← dispatch s!"POST /api/control/missions/m2/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {task2Body.utf8ByteSize}\r\n\r\n{task2Body}"
-  let t3Resp ← dispatch s!"POST /api/control/missions/m3/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {task3Body.utf8ByteSize}\r\n\r\n{task3Body}"
-  let fullResp ← dispatch s!"POST /api/control/missions/m4/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {task4Body.utf8ByteSize}\r\n\r\n{task4Body}"
-  let missBody := "{\"project_slug\":\"orb\",\"track\":\"missing\",\"task_key\":\"t-miss\",\"attempt_seq\":0}"
-  let missing ← dispatch s!"POST /api/control/missions/m1/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {missBody.utf8ByteSize}\r\n\r\n{missBody}"
-   let board ← dispatch s!"GET /api/projects/orb/task-board HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
-   let badProj ← dispatch s!"GET /api/projects/%ZZ/board HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
-   let _ ← execParamQuery store.missionsDb "UPDATE mission_board_tasks SET status='failed' WHERE task_key='t1';" #[]
-   let reopen ← dispatch s!"POST /api/control/missions/m1/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {taskBody.utf8ByteSize}\r\n\r\n{taskBody}"
-   let ghost ← dispatch s!"POST /api/control/missions/missing-mission/board-task HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {taskBody.utf8ByteSize}\r\n\r\n{taskBody}"
-  let boardText := (board.map (·.body)).bind String.fromUTF8? |>.getD ""
-  let dupText := (dupTask.map (·.body)).bind String.fromUTF8? |>.getD ""
-  let missText := (missing.map (·.body)).bind String.fromUTF8? |>.getD ""
-  let retryText := (retryRej.map (·.body)).bind String.fromUTF8? |>.getD ""
-  let fullText := (fullResp.map (·.body)).bind String.fromUTF8? |>.getD ""
-  if trackResp.map (·.status) != some 200 || staleTrack.map (·.status) != some 409 ||
-     taskResp.map (·.status) != some 200 || t2Resp.map (·.status) != some 200 ||
-     t3Resp.map (·.status) != some 200 ||
-     dupTask.map (·.status) != some 409 || (dupText.splitOn "duplicate_task").length < 2 ||
-     retryRej.map (·.status) != some 409 || (retryText.splitOn "board_retry_suppressed").length < 2 ||
-     fullResp.map (·.status) != some 409 || (fullText.splitOn "board_slots_full").length < 2 ||
-      missing.map (·.status) != some 409 || (missText.splitOn "unknown_track").length < 2 ||
-      badProj.map (·.status) != some 400 ||
-      reopen.map (·.status) != some 200 || ghost.map (·.status) != some 404 ||
-      (boardText.splitOn "\"task_key\":\"t1\"").length < 2 then
-    closeCoreStore store
-    IO.eprintln s!"[orb-core-test] FAIL: project board wire contract mismatch: {boardText}"
-    return 1
-   let cap1TrackBody := "{\"track\":\"cap1\",\"desired_condition\":\"one-slot\",\"status\":\"open\"}"
-   let cap1Track ← dispatch s!"POST /api/projects/orbcap/tracks HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {cap1TrackBody.utf8ByteSize}\r\n\r\n{cap1TrackBody}"
-   let _ ← execParamQuery store.projectsDb
-     "INSERT OR REPLACE INTO project_grant(slug,parallel_missions,updated_at) VALUES('orbcap',2,?1);" #[s!"{nowSec}"]
-   let .ok cap1TaskA := OrbBin.Json.parse "{\"project_slug\":\"orbcap\",\"track\":\"cap1\",\"task_key\":\"cap-a\",\"attempt_seq\":0,\"max_attempts\":3}"
-     | do closeCoreStore store; return 1
-   let .ok cap1TaskB := OrbBin.Json.parse "{\"project_slug\":\"orbcap\",\"track\":\"cap1\",\"task_key\":\"cap-b\",\"attempt_seq\":0,\"max_attempts\":3}"
-     | do closeCoreStore store; return 1
-   let taskFiberA ← IO.asTask (prio := .dedicated) (postBoardTask store "m1" cap1TaskA)
-   let taskFiberB ← IO.asTask (prio := .dedicated) (postBoardTask store "m2" cap1TaskB)
-   let .ok (capCodeA, _) ← IO.wait taskFiberA | do closeCoreStore store; return 1
-   let .ok (capCodeB, _) ← IO.wait taskFiberB | do closeCoreStore store; return 1
-   let capOpenRes ← countOpenBoardSlots store "orbcap"
-   let capOpenCount := match capOpenRes with | .ok n => n | .error _ => 99
-   let cancelTrackBody := "{\"track\":\"cap1\",\"desired_condition\":\"cancelled\",\"status\":\"cancelled\"}"
-   let cancelTrack ← dispatch s!"POST /api/projects/orbcap/tracks HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {cancelTrackBody.utf8ByteSize}\r\n\r\n{cancelTrackBody}"
-   let _ ← execParamQuery store.missionsDb "UPDATE mission_board_tasks SET status='failed' WHERE project_slug='orbcap';" #[]
-   let .ok cap1TaskC := OrbBin.Json.parse "{\"project_slug\":\"orbcap\",\"track\":\"cap1\",\"task_key\":\"cap-c\",\"attempt_seq\":0,\"max_attempts\":3}"
-     | do closeCoreStore store; return 1
-   let (capCancelCode, capCancelBody) ← postBoardTask store "m3" cap1TaskC
-   if cap1Track.map (·.status) != some 200 ||
-      !((capCodeA == 200 && capCodeB == 409) || (capCodeA == 409 && capCodeB == 200)) ||
-      capOpenCount != 1 ||
-      cancelTrack.map (·.status) != some 200 ||
-      capCancelCode != 409 || (capCancelBody.splitOn "board_rejected").length < 2 then
-    closeCoreStore store
-    IO.eprintln s!"[orb-core-test] FAIL: concurrent 1-slot board cap / track cancel mismatch: a={capCodeA} b={capCodeB} open={capOpenCount} cancel={capCancelCode}"
-    return 1
+   for (path, expectedStatus, expectedBody) in [
+       ("controller", 200, "{\"job\":null}"),
+       ("crons", 200, "{\"jobs\":[]}"),
+       ("task-board", 410, "{\"error\":\"removed\"}")] do
+     let response ← dispatch s!"GET /api/projects/orb/{path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
+     if response.map (·.status) != some expectedStatus ||
+         (response.map (·.body)).bind String.fromUTF8? != some expectedBody then
+       closeCoreStore store
+       IO.eprintln s!"[orb-core-test] FAIL: removed project route {path}"
+       return 1
    let dryBody := "{\"service\":\"sandboxed-sh-dev\",\"dry_run\":true}"
    let noLease ← dispatch s!"POST /api/system/deploy HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nX-Paloma-Approval: approved\r\nContent-Length: {dryBody.utf8ByteSize}\r\n\r\n{dryBody}"
    let privExp := nowSec + 240
@@ -4986,7 +4902,7 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let (alInbPutSt, _, _) ← sendReq "PUT" "/api/control/inbox-state/seen/m-secret" aliceTok
     "{\"clientId\":\"c-al\",\"mutationSeq\":1,\"expectedVersion\":0,\"stamp\":42}"
   let (_, admInbBody, _) ← sendReq "GET" "/api/control/inbox-state" adminTok ""
-  if alBoardPutSt != 200 || alProjectSt != 200 || alTextSt != 200 || (alBoardBody.splitOn "proof-track").length < 2 ||
+  if alBoardPutSt != 410 || alProjectSt != 200 || alTextSt != 200 || (alBoardBody.splitOn "proof-track").length < 2 ||
      (admBoardBody.splitOn "proof-track").length != 1 ||
      alInbPutSt != 200 || (admInbBody.splitOn "m-secret").length != 1 then
     return (← fail s!"project/inbox namespace isolation failed: alBoard={alBoardBody} admBoard={admBoardBody} admInb={admInbBody}")
@@ -8964,7 +8880,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   if (← runRemoteDispatchWakeupAndBtwTests prodValid) != 0 then return 1
   if (← runLibraryGitAndSkillParityTests) != 0 then return 1
 
-  IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":11,\"harness_contracts\":10,\"host_tests\":101}"
+  IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":11,\"harness_contracts\":10,\"host_tests\":99}"
   return 0
 
 end OrbCore.SelfTest

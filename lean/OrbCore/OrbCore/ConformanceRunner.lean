@@ -1,6 +1,6 @@
 /-
   OrbCore.ConformanceRunner: Pure-Lean Shared Kernel Conformance & Fixture Runner (`orb-spec-runner`)
-   covering all 186 C-ABI exports in `shared/orb-spec/kernel_abi.json` and shared projection fixtures.
+   covering all manifest C-ABI exports in `shared/orb-spec/kernel_abi.json` and shared projection fixtures.
 -/
 import Orb.Kernel
 import LeanSys.Spec
@@ -10,7 +10,7 @@ namespace OrbCore.ConformanceRunner
 
 open OrbBin.Json
 
--- Direct `@[extern]` imports to all 186 exported C-ABI symbols of `Orb.Kernel` and `LeanSys.Spec`.
+-- Direct `@[extern]` imports to all manifest C-ABI symbols of `Orb.Kernel` and `LeanSys.Spec`.
 @[extern "orb_verify_writer_reuse"]
 private opaque c_fn_0 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) (a4 : UInt8) (a5 : UInt8) : UInt8
 @[extern "orb_verify_lease_mode"]
@@ -21,10 +21,6 @@ private opaque c_fn_2 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) : UInt
 private opaque c_fn_3 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) : UInt8
 @[extern "orb_verify_remote_outbox"]
 private opaque c_fn_4 (a0 : UInt8) (a1 : UInt8) (a2 : UInt8) (a3 : UInt8) (a4 : UInt8) (a5 : UInt8) (a6 : UInt8) (a7 : UInt8) (a8 : UInt8) : UInt8
-@[extern "orb_verify_board_slots"]
-private opaque c_fn_5 (a0 : UInt32) (a1 : UInt32) (a2 : UInt32) : UInt8
-@[extern "orb_verify_board_retry"]
-private opaque c_fn_6 (a0 : UInt32) (a1 : UInt32) (a2 : UInt8) (a3 : UInt8) (a4 : UInt8) : UInt8
 @[extern "orb_verify_job_transition"]
 private opaque c_fn_7 (a0 : UInt8) (a1 : UInt8) : UInt8
 @[extern "orb_verify_bundle_budget"]
@@ -402,8 +398,6 @@ private def callExportChunk0? (sym : String) (args : Array UInt64) : Option UInt
   else if sym == "orb_verify_track_hold" && args.size == 4 then some ((c_fn_2 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8).toUInt64)
   else if sym == "orb_verify_repo_disjoint" && args.size == 3 then some ((c_fn_3 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8).toUInt64)
   else if sym == "orb_verify_remote_outbox" && args.size == 9 then some ((c_fn_4 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!).toUInt8 (args[5]!).toUInt8 (args[6]!).toUInt8 (args[7]!).toUInt8 (args[8]!).toUInt8).toUInt64)
-  else if sym == "orb_verify_board_slots" && args.size == 3 then some ((c_fn_5 (args[0]!).toUInt32 (args[1]!).toUInt32 (args[2]!).toUInt32).toUInt64)
-  else if sym == "orb_verify_board_retry" && args.size == 5 then some ((c_fn_6 (args[0]!).toUInt32 (args[1]!).toUInt32 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!).toUInt8).toUInt64)
   else if sym == "orb_verify_job_transition" && args.size == 2 then some ((c_fn_7 (args[0]!).toUInt8 (args[1]!).toUInt8).toUInt64)
   else if sym == "orb_verify_bundle_budget" && args.size == 5 then some ((c_fn_8 (args[0]!).toUInt8 (args[1]!) (args[2]!) (args[3]!) (args[4]!)).toUInt64)
   else if sym == "orb_verify_token_rotation" && args.size == 5 then some ((c_fn_9 (args[0]!).toUInt8 (args[1]!).toUInt8 (args[2]!).toUInt8 (args[3]!).toUInt8 (args[4]!).toUInt8).toUInt64)

@@ -2,7 +2,7 @@
   OrbBin.PalomaCtlMain: Native Lean `palomactl` Control-Plane CLI (`0 import Lean`),
   implementing `models` (`discover`, `export`, `validate`, `diff`, `snapshot update`),
   `status`, `reconcile`, `import-trackers`, `pr-gates` (backed directly by `Orb.Kernel.prGateStep`),
-  `set-mode`, `dispatch-plan`, `repair-borrowed-tracks`, `validation-matrix`, and `cluster-lean-errors`.
+  `set-mode`, `dispatch-plan`, `validation-matrix`, and `cluster-lean-errors`.
 -/
 import Orb.Kernel
 import LeanSys.Auth
@@ -27,7 +27,6 @@ def printUsage : IO Unit :=
     "  palomactl pr-gates <owner/repo> <number> [--worker-head <sha>]\n" ++
     "  palomactl set-mode <project> <mode> --until <iso>\n" ++
     "  palomactl dispatch-plan --project <slug>\n" ++
-    "  palomactl repair-borrowed-tracks --api <url> [--token <jwt>] [--apply]\n" ++
     "  palomactl validation-matrix [path]\n" ++
     "  palomactl cluster-lean-errors <log-path>"
 
@@ -1055,7 +1054,7 @@ def runModelsCmd (root : System.FilePath) (args : List String) : IO (Except Stri
   | _ =>
     return .error "models: discover --connected [--api URL] | export --source last-success --output DIR | validate DIR | diff --snapshot-dir DIR --from DIR | snapshot update --from DIR [--snapshot-dir DIR]"
 
-/-! ### `status`, `reconcile`, `set-mode`, `dispatch-plan`, `import-trackers`, `repair-borrowed-tracks` -/
+/-! ### `status`, `reconcile`, `set-mode`, `dispatch-plan`, `import-trackers` -/
 
 def loadFixtureMissions (root : System.FilePath) : IO (Array JVal) := do
   let p := root / ".paloma" / "fixtures" / "missions.json"
@@ -1624,84 +1623,6 @@ def parseTrackerMarkdown (content : String) : Array ParsedTrackerItem := Id.run 
                 items := items.push { key, checked, line := idx + 1 }
   return items
 
-def runReconcileLive (root : System.FilePath) (api : String) (rest : List String) : IO (Except String Unit) := do
-  let tok? ← match valueAfterFlag? rest "--token" with
-    | some t => pure (some t)
-    | none => firstEnvNonEmpty ["SANDBOXED_API_TOKEN", "HERMES_SANDBOXED_API_TOKEN", "API_TOKEN"]
-  let dir ← match (← resolveTrackersDir root rest) with
-    | .ok d => pure d
-    | .error e => return .error e
-  let only := positionalSlugs rest
-  let files ← match (← listTrackerFiles dir only) with
-    | .ok f => pure f
-    | .error e => return .error e
-  let base := stripTrailingSlash api
-  let mut projects : Array JVal := #[]
-  for (slug, path) in files do
-    let content ← try IO.FS.readFile path catch e => return .error s!"read {path}: {e}"
-    match (← sendJsonRequest "GET" s!"{base}/api/projects/{slug}/situation" tok? none #[] 60000) with
-    | .error e => return .error e
-    | .ok (404, _, _) => pure ()
-    | .ok (status, rawBody, sit?) =>
-      if status != 200 then
-        projects := projects.push <| JVal.obj #[
-          ("slug", .str slug),
-          ("error", .str s!"HTTP {status}: {rawBody}")
-        ]
-      else
-        let situation := sit?.getD (.obj #[])
-        let sitItems := (situation.fieldArr? "items").getD #[]
-        let mut plan : Array (String × String) := #[]
-        for it in sitItems do
-          if let (some k, some ds) := (it.fieldStr? "key", it.fieldStr? "derived_state") then
-            plan := (plan.filter (fun (ek, _) => ek != k)).push (k, ds)
-        let sortedPlan := plan.qsort (fun a b => a.1 < b.1)
-        let mut drift : Array JVal := #[]
-        let mut mdKeys : Array String := #[]
-        for item in parseTrackerMarkdown content do
-          if !mdKeys.contains item.key then
-            mdKeys := mdKeys.push item.key
-          match sortedPlan.find? (fun (pk, _) => pk == item.key) with
-          | none =>
-            drift := drift.push <| .obj #[
-              ("kind", .str "markdown_item_missing_in_plan"),
-              ("key", .str item.key),
-              ("line", .nat item.line)
-            ]
-          | some (_, st) =>
-            let planDone := st == "satisfied" || st == "claim_only"
-            if item.checked && !planDone then
-              drift := drift.push <| .obj #[
-                ("kind", .str "markdown_checked_but_track_open"),
-                ("key", .str item.key),
-                ("line", .nat item.line),
-                ("derived_state", .str st)
-              ]
-            else if !item.checked && planDone then
-              drift := drift.push <| .obj #[
-                ("kind", .str "markdown_open_but_track_done"),
-                ("key", .str item.key),
-                ("line", .nat item.line),
-                ("derived_state", .str st)
-              ]
-        for (pk, st) in sortedPlan do
-          if st != "cancelled" && !mdKeys.contains pk then
-            drift := drift.push <| .obj #[
-              ("kind", .str "plan_track_missing_in_markdown"),
-              ("key", .str pk),
-              ("derived_state", .str st)
-            ]
-        projects := projects.push <| .obj #[
-          ("slug", .str slug),
-          ("summary", (situation.field? "summary").getD .null),
-          ("drift", .arr drift)
-        ]
-  IO.println <| renderPretty <| JVal.obj #[
-    ("projects", .arr projects),
-    ("note", .str "read-only; the plan (project_tracks) is the truth, Markdown is narrative")
-  ]
-  return .ok ()
-
 private def explorationLimitForMode (mode : String) : Option Nat :=
   match mode with
   | "conservative" => some 0
@@ -1818,8 +1739,8 @@ def runPalomaCtl (args : List String) : IO (Except String Unit) := do
     IO.print (renderStatusText st)
     return .ok ()
   | "reconcile" :: rest =>
-    if let some api := valueAfterFlag? rest "--api" then
-      runReconcileLive root api rest
+    if (valueAfterFlag? rest "--api").isSome then
+      return .error "live situation reconciliation was removed; read the project text board"
     else
       let st ← buildLocalState root
       let cdir := root / ".paloma"
@@ -1877,24 +1798,6 @@ def runPalomaCtl (args : List String) : IO (Except String Unit) := do
     | .ok plan =>
       IO.println (renderPretty plan)
       return .ok ()
-    | .error e => return .error e
-  | "repair-borrowed-tracks" :: rest =>
-    let api? ← match valueAfterFlag? rest "--api" with
-      | some u => pure (some u)
-      | none => firstEnvNonEmpty ["SANDBOXED_API_URL", "HERMES_SANDBOXED_API_URL", "API_URL"]
-    let some api := api? | return .error "missing --api <url> (or SANDBOXED_API_URL)"
-    let tok? ← match valueAfterFlag? rest "--token" with
-      | some t => pure (some t)
-      | none => firstEnvNonEmpty ["SANDBOXED_API_TOKEN", "HERMES_SANDBOXED_API_TOKEN", "API_TOKEN"]
-    let apply := rest.contains "--apply"
-    let dryStr := if apply then "false" else "true"
-    let url := stripTrailingSlash api ++
-      s!"/api/control/repair/borrowed-tracks?dry_run={dryStr}"
-    match (← sendJsonRequest "POST" url tok?) with
-    | .ok (200, _, some j) =>
-      IO.println (renderPretty j)
-      return .ok ()
-    | .ok (st, body, _) => return .error s!"HTTP {st}: {body}"
     | .error e => return .error e
   | "validation-matrix" :: rest =>
     let mPath := match rest.head? with

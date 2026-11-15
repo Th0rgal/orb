@@ -1047,7 +1047,7 @@ def runAllTests : IO UInt32 := do
   assertEq "prGateRecommendation 8" (prGateRecommendation 8) "ready_for_review_or_merge"
 
   -- 7. `sandboxed-mcp` catalogue, overlays, ACP injection & Antigravity lock
-  for (role, expectedMin) in [("executor", 44), ("coordinator", 74), ("operator", 89)] do
+  for (role, expectedMin) in [("executor", 44), ("coordinator", 56), ("operator", 71)] do
     let some catTxt := OrbBin.McpCatalog.catalogPrettyJsonForRole role
       | throw <| IO.userError s!"Missing catalog for {role}"
     match Json.parse catTxt with
@@ -1057,6 +1057,9 @@ def runAllTests : IO UInt32 := do
                       "request_macbook_tether", "list_macbook_tethers", "revoke_macbook_tether"] do
         assertTrue s!"Catalog {role} includes {memTool}"
           (tools.any (fun t => (t.fieldStr? "name") == some memTool))
+      for removed in ["accept_project_track", "accept_project_track_evidence", "accept_task", "add_project_steer", "answer_project_decision", "board_status", "cancel_project_task", "get_project_tasks", "get_situation", "invalidate_project_track_evidence", "plan_project_tasks", "plan_tasks", "record_project_decision", "reject_task", "reopen_project_track", "review_task", "set_project_track", "update_project_task"] do
+        assertTrue s!"Catalog {role} omits retired {removed}" (!(tools.any (·.fieldStr? "name" == some removed)))
+        assertTrue s!"Retired {removed} is not mutating" (!OrbBin.McpCatalog.isMutatingControlTool removed)
       let some spawn := tools.find? (·.fieldStr? "name" == some "spawn_managed_machine")
         | throw <| IO.userError s!"Missing spawn_managed_machine for {role}"
       let schema := spawn.fieldOrNull "inputSchema"

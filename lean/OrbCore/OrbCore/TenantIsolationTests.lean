@@ -113,9 +113,81 @@ def memberSharedProviderRules
     !has aud secret && !has aud "ben-probe" && !has aud "member-renamed" && !has aud "api.example.com")
     s!"provider_audit_log_records_member_writes_without_values ({mAud},{aAudSt})"
 
+/-- Replay an upgraded store: startup archives both databases, preserves typed
+    evidence and all columns, leaves rows intact, and never rewrites the archive. -/
+private def legacyBoardArchive (root : String) : IO Unit := do
+  let path := root ++ "/legacy-board-export"
+  let .ok old ← openCoreStore path | throw (IO.userError "archive fixture store")
+  let sql (db : SqliteDb) (q : String) : IO Unit := do
+    let .ok _ ← execParamQuery db q #[] | throw (IO.userError "archive fixture SQL")
+  sql old.projectsDb "INSERT INTO project_tracks(project_slug,track,title) VALUES('legacy','track','retained title');"
+  sql old.projectsDb "INSERT INTO project_decisions(id,slug,question,rationale) VALUES('d','legacy','question',NULL);"
+  sql old.projectsDb "INSERT INTO project_steers(id,slug,body) VALUES('s','legacy','line one' || char(10) || 'line two');"
+  sql old.projectsDb "INSERT INTO project_crons(slug,job_id) VALUES('legacy','job');"
+  sql old.projectsDb "INSERT INTO controller_archives(slug,job_id) VALUES('legacy','job');"
+  sql old.projectsDb "CREATE TABLE project_track_evidence(id TEXT, payload BLOB, weight INTEGER, note TEXT);"
+  sql old.projectsDb "INSERT INTO project_track_evidence VALUES('e',x'00ff',7,NULL);"
+  sql old.missionsDb "INSERT INTO mission_board_tasks(task_key,project_slug,track,mission_id) VALUES('task','legacy','track','mission');"
+  let archive := System.FilePath.mk path / "archive"
+  let marker := archive / "project-board-legacy.done"
+  IO.FS.removeFile marker
+  closeCoreStore old
+  let .ok upgraded ← openCoreStore path | throw (IO.userError "archive upgrade startup")
+  try
+    let entries ← archive.readDir
+    let some entry := entries.find? (fun e => e.fileName.endsWith ".jsonl")
+      | throw (IO.userError "missing legacy archive")
+    let bytes ← IO.FS.readFile entry.path
+    let lines := (bytes.splitOn "\n").filter (!·.isEmpty)
+    check (lines.length == 7) "archive includes every legacy row across both databases"
+    let mut foundEvidence := false
+    for line in lines do
+      let .ok row := OrbBin.Json.parse line | throw (IO.userError "invalid archive JSONL")
+      if row.fieldStr? "table" == some "project_track_evidence" then
+        let payload := row.fieldOrNull "row"
+        check (payload.fieldNat? "weight" == some 7 && payload.field? "note" == some .null &&
+          (payload.fieldOrNull "payload").fieldStr? "$blob_hex" == some "00FF") "archive preserves numeric, null and blob evidence"
+        foundEvidence := true
+    check foundEvidence "archive discovers historical evidence tables"
+    let fileStat ← OrbBin.PosixExt.statPath entry.path.toString
+    check ((fileStat.mode &&& 0o777) == 0o600) "legacy archive is private"
+    let .ok rows ← execParamQuery upgraded.projectsDb "SELECT title FROM project_tracks;" #[]
+      | throw (IO.userError "legacy table disappeared")
+    check (rows[1]? == some #["retained title"]) "archive never drops or changes old rows"
+    sql upgraded.projectsDb "INSERT INTO project_steers(id,slug,body) VALUES('late','legacy','must not overwrite archive');"
+    check ((← exportLegacyProjectBoard path upgraded.projectsDb upgraded.missionsDb).toOption == some 0) "archive marker prevents repeat export"
+    check ((← IO.FS.readFile entry.path) == bytes) "one-shot archive stays unchanged"
+    -- A failed filesystem write must not mark completion, and retry succeeds.
+    let retryRoot := System.FilePath.mk path / "retry"
+    IO.FS.createDirAll retryRoot
+    IO.FS.writeFile (retryRoot / "archive") "blocked directory"
+    check (!(← exportLegacyProjectBoard retryRoot.toString upgraded.projectsDb upgraded.missionsDb).isOk) "archive failure is reported"
+    IO.FS.removeFile (retryRoot / "archive")
+    check (!(← (retryRoot / "archive" / "project-board-legacy.done").pathExists)) "failed export has no marker"
+    check ((← exportLegacyProjectBoard retryRoot.toString upgraded.projectsDb upgraded.missionsDb).toOption == some 8) "failed export retries all rows"
+    -- Startup remains usable when the non-essential archive cannot be written.
+    let startupRoot := System.FilePath.mk path / "archive-failure-startup"
+    IO.FS.createDirAll startupRoot
+    IO.FS.writeFile (startupRoot / "archive") "blocked directory"
+    let .ok running ← openCoreStore startupRoot.toString
+      | throw (IO.userError "archive failure must not abort startup")
+    try
+      let result ← execParamQuery running.projectsDb "SELECT 1;" #[]
+      check result.isOk "archive failure leaves startup database handles usable"
+    finally closeCoreStore running
+    IO.FS.removeFile (startupRoot / "archive")
+    check (!(← (startupRoot / "archive" / "project-board-legacy.done").pathExists)) "startup archive failure has no marker"
+    let .ok retried ← openCoreStore startupRoot.toString
+      | throw (IO.userError "archive retry startup")
+    try
+      check (← (startupRoot / "archive" / "project-board-legacy.done").pathExists) "next startup retries the failed archive"
+    finally closeCoreStore retried
+  finally closeCoreStore upgraded
+
 /-- Two real stored principals through the REST/desktop and MCP HTTP boundary.
     All records, credentials and provider state are synthetic; no host effects. -/
 def run (root : String) : IO Unit := do
+  legacyBoardArchive root
   let path := root ++ "/tenant-isolation"
   let .ok store ← openCoreStore path | throw (IO.userError "isolation store")
   let .ok mc ← openManagedComputeStore (path ++ "/managed_compute.db")
@@ -441,7 +513,7 @@ def run (root : String) : IO Unit := do
     let budget ← call member "get_budget"
     check ((budget.fieldOrNull "result").fieldNat? "spent_today_cents" == some 2) "MCP budget excludes admin spend"
     let projectArgs : JVal := .obj #[("project", .str "admin-project"), ("status", .str "archived")]
-    for tool in #["get_project", "get_situation", "get_project_tasks", "get_project_grant", "update_project_status", "add_project_steer"] do
+    for tool in #["get_project", "get_project_grant", "update_project_status"] do
       let doc ← call member tool projectArgs
       check (doc.fieldBool? "ok" == some false) s!"MCP foreign project {tool}"
     for tool in #["secret_list", "secret_get", "secret_request", "secret_put", "secret_delete", "secret_move", "list_privileged_access"] do
@@ -678,41 +750,21 @@ def run (root : String) : IO Unit := do
     check ((hiddenBinding.field? "slug").getD .null == .null) "project session binding cannot disclose another user's project"
     let (_, ownBinding) ← send "GET" "/api/projects/by-session/admin-session" admin
     check (ownBinding.fieldStr? "slug" == some "admin-project") "owner retains project session binding"
-    for suffix in #["controller", "controller/action", "crons", "crons/defaults", "crons/admin-job", "crons/admin-job/action"] do
+    for suffix in #["controller", "controller/action", "crons", "crons/defaults", "crons/admin-job", "crons/admin-job/action", "tasks", "decision", "tracks", "task-board"] do
       for method in #["GET", "POST", "PATCH", "DELETE"] do
-        check ((← send method ("/api/projects/admin-project/" ++ suffix) member).1 == 403)
-          "member cannot read or change the shared host scheduler through project routes"
-    -- A global task-key collision must not overwrite the admin's board row,
-    -- even though the member legitimately owns the project named in the call.
-    sql store.missionsDb "INSERT INTO mission_board_tasks(task_key,project_slug,track,mission_id,attempt_seq,status) VALUES('admin-task','admin-project','private','admin-mission',0,'open');"
-    for task in #[.obj #[("task_key", .str "admin-task"), ("status", .str "done")],
-        .obj #[("task_key", .str "new-rest-task"), ("mission_id", .str "admin-mission")]] do
-      check ((← send "POST" "/api/projects/member-project/tasks" member task).1 == 404)
-        "REST task upserts cannot overwrite admin tasks or link admin missions"
-    for tool in #["plan_tasks", "plan_project_tasks"] do
-      let task : JVal := .obj #[("task_key", .str "admin-task"), ("status", .str "done")]
-      let collision ← call member tool (.obj #[("project", .str "member-project"), ("tasks", .arr #[task])])
-      check (collision.fieldBool? "ok" == some false) "task-key collision cannot mutate a foreign project"
-      let foreignLink ← call member tool (.obj #[("project", .str "member-project"),
-        ("tasks", .arr #[task.setField "task_key" (.str "member-new-task") |>.setField "mission_id" (.str "admin-mission")])])
-      check (foreignLink.fieldBool? "ok" == some false) "member board cannot disclose a foreign mission through a link"
-    let .ok taskRows ← execParamQuery store.missionsDb
-      "SELECT mission_id,status FROM mission_board_tasks WHERE task_key='admin-task';" #[]
-      | throw (IO.userError "isolation task verification")
-    check (taskRows[1]? == some #["admin-mission", "open"]) "admin board survives denied task upserts"
-    let decision : JVal := .obj #[("id", .str "admin-decision"), ("project", .str "admin-project"),
-      ("question", .str "admin-private-decision")]
-    check ((← call admin "record_project_decision" decision).fieldBool? "ok" == some true)
-      "admin decision positive control"
-    let attemptedDecision := decision.setField "project" (.str "member-project") |>.setField "question" (.str "unauthorized change")
-    check ((← call member "record_project_decision" attemptedDecision).fieldBool? "ok" == some false)
-      "MCP global decision id cannot overwrite another project"
-    check ((← send "POST" "/api/projects/member-project/decision" member attemptedDecision).1 == 400)
-      "REST global decision id cannot overwrite another project"
-    let .ok decisionRows ← execParamQuery store.projectsDb
-      "SELECT question FROM project_decisions WHERE id='admin-decision';" #[]
-      | throw (IO.userError "isolation decision verification")
-    check (decisionRows[1]? == some #["admin-private-decision"]) "admin decision survives rejected cross-project writes"
+        let (code, body) ← send method ("/api/projects/admin-project/" ++ suffix) member
+        if method == "GET" && suffix == "controller" then
+          check (code == 200 && body == .obj #[("job", .null)]) "empty controller compatibility response"
+        else if method == "GET" && suffix == "crons" then
+          check (code == 200 && body == .obj #[("jobs", .arr #[])]) "empty crons compatibility response"
+        else
+          check (code == 410 && body.fieldStr? "error" == some "removed") "removed routes disclose no tenant data"
+    sql store.projectsDb "INSERT INTO mcp_actions_v1(id,scope,retry_key,tool,state,result) VALUES('retired-action','00000000-0000-4000-8000-000000000000::user:admin:plan_tasks','old-key','plan_tasks','succeeded','{\"old\":true}');"
+    let retiredReplay ← call admin "plan_tasks" (.obj #[("idempotency_key", .str "old-key")])
+    check ((retiredReplay.fieldOrNull "error").fieldStr? "code" == some "unknown_tool") "retired tools cannot replay an old success receipt"
+    for tool in #["get_situation", "set_project_track", "add_project_steer", "record_project_decision", "plan_tasks", "board_status"] do
+      let response ← call admin tool (.obj #[])
+      check ((response.fieldOrNull "error").fieldStr? "code" == some "unknown_tool") "removed MCP tools return tool-not-found"
     -- No prompt is supplied: a bad placement must fail even for an inert MCP
     -- create, before any machine rental, credential minting or job submission.
     for node in #["agent-core", "sepolia", "managed-admin-machine", "managed-legacy-machine"] do

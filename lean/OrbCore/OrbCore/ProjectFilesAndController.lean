@@ -1,16 +1,4 @@
-/-
-  OrbCore.ProjectFilesAndController:
-  1. Project Roster, Overview, Appearance, Skills, Grants, Steers, Decisions, Situation, Tracks & Tasks
-     backed by `projects.db` (`projects`, `project_grant`, `project_steers`, `project_decisions`,
-     `project_tracks`, `project_crons`, `controller_archives`, `project_bindings`) + `missions.db`.
-  2. Confined Project Filesystem (`/api/projects/:slug/{files,file,file/mkdir,file/transfer,file/transfer/:dest}`)
-     backed by `{dataRoot}/project-files/<slug>/` + `context_entries`, including `#1545` atomic folder
-     rename/move cascades across `missions.folder` (`placement_revision` bump) and `project_crons.folder`
-     with rollback safety (`restoreCronFolders`) and SSE `mission_placement_changed` broadcast.
-  3. Hermes Project Controller & Crons (`/api/projects/:slug/controller*`, `/api/projects/:slug/crons*`).
-  4. Admin-confined `/api/file-resources` & `/api/fs/{list,read,download}`.
-  (`0 import Lean`, `0 sorryAx`).
--/
+/- Project metadata, controller mission, text board, and confined project files. -/
 import LeanSys.Http
 import OrbBin.Json
 import OrbBin.PosixExt
@@ -91,7 +79,7 @@ private def jsonErr (status : Nat) (code : String) : Nat × String × ByteArray 
 private def optStrJVal (s : String) : JVal :=
   if s.isEmpty then .null else .str s
 
-/-! ## Project Roster, Grants, Steers, Decisions, Situation & Tasks Helpers -/
+/-! ## Project metadata helpers -/
 
 private structure RosterEntry where
   slug      : String
@@ -337,114 +325,6 @@ def upsertProjectGrantJVal (store : CoreStore) (scopedSlug clientSlug : String) 
     return .error e
   return .ok (← getProjectGrantJVal store scopedSlug clientSlug)
 
-def listProjectSteersJVal (store : CoreStore) (scopedSlug : String) : IO JVal := do
-  let mut items : Array JVal := #[]
-  if let .ok rows ← execParamQuery store.projectsDb
-      "SELECT id,body,created_at,COALESCE(consumed_at,''),COALESCE(origin,'orb') FROM project_steers WHERE slug=?1 ORDER BY created_at DESC LIMIT 100;"
-      #[scopedSlug] then
-    for i in [1:rows.size] do
-      let r := rows[i]!
-      items := items.push (.obj #[
-        ("id", .str (cell r 0)),
-        ("body", .str (cell r 1)),
-        ("created_at", .str (cell r 2)),
-        ("consumed_at", optStrJVal (cell r 3)),
-        ("origin", .str (cell r 4))
-      ])
-  let pending := items.filter (fun it => (it.field? "consumed_at").map JVal.isNull |>.getD true)
-  return .obj #[("steers", .arr items), ("pending", .arr pending)]
-
-def addProjectSteerJVal (store : CoreStore) (scopedSlug body origin nowIso : String) : IO (Except String JVal) := do
-  let cleanBody := body.trimAscii.toString
-  if cleanBody.isEmpty then return .error "missing_steer_body"
-  let sid ← newUuidV4
-  let rawOrigin := origin.trimAscii.toString.toLower
-  let effOrigin :=
-    if rawOrigin == "mcp" || rawOrigin == "api" || rawOrigin == "orb" then rawOrigin
-    else "orb"
-  if let .error e ← execParamQuery store.projectsDb
-      "INSERT INTO project_steers(id,slug,body,created_at,origin) VALUES(?1,?2,?3,?4,?5);"
-      #[sid, scopedSlug, cleanBody, nowIso, effOrigin] then
-    return .error e
-  return .ok (.obj #[
-    ("id", .str sid),
-    ("slug", .str scopedSlug),
-    ("body", .str cleanBody),
-    ("created_at", .str nowIso),
-    ("consumed_at", .null),
-    ("origin", .str effOrigin)
-  ])
-
-def listProjectDecisionsJVal (store : CoreStore) (scopedSlug : String) : IO (Array JVal) := do
-  let mut out : Array JVal := #[]
-  if let .ok rows ← execParamQuery store.projectsDb
-      "SELECT id,question,COALESCE(rationale,''),COALESCE(status,'pending'),COALESCE(answered,0),COALESCE(answer,''),COALESCE(answered_at,''),COALESCE(authority,'escalation'),COALESCE(evidence,''),COALESCE(updated_at,at,'') FROM project_decisions WHERE slug=?1 OR project_slug=?1 ORDER BY COALESCE(updated_at,at,'') DESC LIMIT 100;"
-      #[scopedSlug] then
-    for i in [1:rows.size] do
-      let r := rows[i]!
-      out := out.push (.obj #[
-        ("id", .str (cell r 0)),
-        ("question", .str (cell r 1)),
-        ("rationale", optStrJVal (cell r 2)),
-        ("status", .str (cell r 3)),
-        ("answered", .bool (cell r 4 != "0")),
-        ("answer", optStrJVal (cell r 5)),
-        ("answered_at", optStrJVal (cell r 6)),
-        ("authority", .str (cell r 7)),
-        ("evidence", optStrJVal (cell r 8)),
-        ("updated_at", .str (cell r 9))
-      ])
-  return out
-
-def recordProjectDecisionJVal (store : CoreStore) (scopedSlug : String) (jv : JVal) (nowIso : String) : IO (Except String JVal) := do
-  let q := ((jv.fieldStr? "question").orElse (fun _ => jv.fieldStr? "summary") |>.getD "").trimAscii.toString
-  if q.isEmpty then return .error "missing_question"
-  let did ← match (jv.fieldStr? "id").filter (!·.isEmpty) with | some x => pure x | none => newUuidV4
-  let .ok existing ← execParamQuery store.projectsDb
-      "SELECT slug,project_slug FROM project_decisions WHERE id=?1;" #[did]
-    | return .error "decision_lookup_failed"
-  if existing.size > 1 && cell existing[1]! 0 != scopedSlug && cell existing[1]! 1 != scopedSlug then
-    return .error "not_found"
-  let rat := (jv.fieldStr? "rationale").getD ""
-  let auth := (jv.fieldStr? "authority").getD "escalation"
-  let evid := (jv.fieldStr? "evidence").getD ""
-  let ans := (jv.fieldStr? "answer").getD ""
-  let answered := if ans.isEmpty then "0" else "1"
-  let status := if ans.isEmpty then ((jv.fieldStr? "status").getD "pending") else "answered"
-  let ansAt := if ans.isEmpty then "" else nowIso
-  if let .error e ← execParamQuery store.projectsDb
-      ("INSERT INTO project_decisions(id,slug,project_slug,at,status,question,rationale,answered,authority,answer,answered_at,evidence,updated_at) " ++
-       "VALUES(?1,?2,?2,?3,?4,?5,?6,CAST(?7 AS INTEGER),?8,NULLIF(?9,''),NULLIF(?10,''),?11,?3) " ++
-       "ON CONFLICT(id) DO UPDATE SET status=excluded.status,question=excluded.question,rationale=excluded.rationale,answered=excluded.answered,answer=excluded.answer,answered_at=excluded.answered_at,evidence=excluded.evidence,updated_at=excluded.updated_at WHERE project_decisions.slug=excluded.slug OR project_decisions.project_slug=excluded.project_slug;")
-      #[did, scopedSlug, nowIso, status, q, rat, answered, auth, ans, ansAt, evid] then
-    return .error e
-  return .ok (.obj #[
-    ("id", .str did),
-    ("slug", .str scopedSlug),
-    ("question", .str q),
-    ("status", .str status),
-    ("answered", .bool (answered == "1")),
-    ("answer", optStrJVal ans),
-    ("updated_at", .str nowIso)
-  ])
-
-def answerProjectDecisionJVal (store : CoreStore) (scopedSlug decisionId answer nowIso : String) : IO (Except String JVal) := do
-  let cleanAns := answer.trimAscii.toString
-  if decisionId.isEmpty || cleanAns.isEmpty then return .error "missing_decision_id_or_answer"
-  if let .error e ← execParamQuery store.projectsDb
-      "UPDATE project_decisions SET answered=1,status='answered',answer=?3,answered_at=?4,updated_at=?4 WHERE id=?1 AND (slug=?2 OR project_slug=?2);"
-      #[decisionId, scopedSlug, cleanAns, nowIso] then
-    return .error e
-  return .ok (.obj #[
-    ("id", .str decisionId),
-    ("slug", .str scopedSlug),
-    ("status", .str "answered"),
-    ("answered", .bool true),
-    ("answer", .str cleanAns),
-    ("answered_at", .str nowIso)
-  ])
-
-/-- Mission creation may introduce a project; nomination preserves existing project metadata. -/
 def nominateCreatedProjectController (store : CoreStore) (slug title missionId nowIso ownerId : String) : IO (Except String Unit) := do
   if let .error e ← execParamQuery store.projectsDb
       "INSERT OR IGNORE INTO projects(slug,id,name,title,created_at,updated_at) VALUES(?1,?1,?2,?2,?3,?3);" #[slug, title, nowIso] then
@@ -482,10 +362,10 @@ def writeProjectBoard (store : CoreStore) (slug text nowIso missionId : String) 
   | .error e => return .error e
   | .ok rows => if rows.size > 1 then return .ok () else return .error "not_project_controller"
 
-def buildProjectSituationJVal (store : CoreStore) (scopedSlug clientSlug : String) : IO JVal := do
+def getProjectJVal (store : CoreStore) (scopedSlug clientSlug : String) : IO JVal := do
   let mut pObj := JVal.obj #[("slug", .str clientSlug), ("title", .str clientSlug), ("status", .str "active")]
   if let .ok rows ← execParamQuery store.projectsDb
-      "SELECT COALESCE(NULLIF(title,''),NULLIF(name,''),slug), COALESCE(objective,''), COALESCE(status,'active'), COALESCE(mode,''), COALESCE(next_action,''), COALESCE(blocker,''), COALESCE(updated_at,''), COALESCE(color,'') FROM projects WHERE slug=?1;"
+      "SELECT COALESCE(NULLIF(title,''),NULLIF(name,''),slug), COALESCE(objective,''), COALESCE(status,'active'), COALESCE(updated_at,''), COALESCE(color,''), COALESCE(skills,'[]') FROM projects WHERE slug=?1;"
       #[scopedSlug] then
     if rows.size > 1 then
       let r := rows[1]!
@@ -494,56 +374,18 @@ def buildProjectSituationJVal (store : CoreStore) (scopedSlug clientSlug : Strin
         ("title", .str (cell r 0)),
         ("objective", optStrJVal (cell r 1)),
         ("status", .str (cell r 2)),
-        ("mode", optStrJVal (cell r 3)),
-        ("next_action", optStrJVal (cell r 4)),
-        ("blocker", optStrJVal (cell r 5)),
-        ("updated_at", .str (cell r 6)),
-        ("color", optStrJVal (cell r 7))
+        ("updated_at", .str (cell r 3)),
+        ("color", optStrJVal (cell r 4)),
+        ("skills", (OrbBin.Json.parse (cell r 5)).toOption.getD (.arr #[]))
       ]
   let board ← readProjectBoard store scopedSlug
   pObj := pObj.setField "controller_mission_id" ((board.field? "controller_mission_id").getD .null)
     |>.setField "board_updated_at" ((board.field? "updated_at").getD .null)
-  let grant ← getProjectGrantJVal store scopedSlug clientSlug
-  let steers ← listProjectSteersJVal store scopedSlug
-  let decisions ← listProjectDecisionsJVal store scopedSlug
-  let mut tracks : Array JVal := #[]
-  if let .ok tRows ← execParamQuery store.projectsDb
-      "SELECT track, COALESCE(title,track), COALESCE(desired_condition,desired_state,''), COALESCE(status,'open'), COALESCE(lifecycle,'active'), COALESCE(updated_at,''), COALESCE(state_revision,1) FROM project_tracks WHERE project_slug=?1 OR slug=?1 ORDER BY track ASC;"
-      #[scopedSlug] then
-    for i in [1:tRows.size] do
-      let tr := tRows[i]!
-      tracks := tracks.push (.obj #[
-        ("track", .str (cell tr 0)),
-        ("title", .str (cell tr 1)),
-        ("desired_condition", .str (cell tr 2)),
-        ("status", .str (cell tr 3)),
-        ("lifecycle", .str (cell tr 4)),
-        ("updated_at", .str (cell tr 5)),
-        ("state_revision", JVal.uint64 (cellU64 tr 6))
-      ])
-  let mut tasks : Array JVal := #[]
-  if let .ok tkRows ← execParamQuery store.missionsDb
-      "SELECT task_key, track, mission_id, attempt_seq, status FROM mission_board_tasks WHERE project_slug=?1 ORDER BY task_key ASC;"
-      #[scopedSlug] then
-    for i in [1:tkRows.size] do
-      let r := tkRows[i]!
-      tasks := tasks.push (.obj #[
-        ("task_key", .str (cell r 0)),
-        ("track", .str (cell r 1)),
-        ("mission_id", .str (cell r 2)),
-        ("attempt_seq", JVal.uint64 (cellU64 r 3)),
-        ("status", .str (cell r 4))
-      ])
   return .obj #[
-    ("slug", .str clientSlug),
-    ("project", pObj),
+    ("slug", .str clientSlug), ("project", pObj),
     ("controller_mission_id", (board.field? "controller_mission_id").getD .null),
-    ("board_updated_at", (board.field? "updated_at").getD .null),
-    ("grant", grant),
-    ("tracks", .arr tracks),
-    ("tasks", .arr tasks),
-    ("decisions", .arr decisions),
-    ("steers", (steers.field? "steers").getD (.arr #[]))
+    ("board", (board.field? "text").getD (.str "")),
+    ("board_updated_at", (board.field? "updated_at").getD .null)
   ]
 
 /-! ## Confined Project Files & `#1545` Folder Rename/Move Cascade -/
@@ -684,19 +526,10 @@ def transferProjectFileOrFolder
   let isDirTransfer := srcIsDirOnDisk || srcIsVirtualFolder
   let sameProjectDirMove := (srcScopedSlug == dstScopedSlug) && !isCopy && isDirTransfer
 
-  -- Step 1 (`#1545`): Cascade cron folders first (capturing rollback snapshot of mutated rows)
-  let cronSnap ←
-    if sameProjectDirMove then
-      match ← cascadeRenameCronFolder store srcScopedSlug srcRel dstRel with
-      | .ok snap => pure snap
-      | .error e => return .error (500, e)
-    else pure #[]
-
   -- Step 2: Perform filesystem copy/move when present on disk
   if srcExistsOnDisk then
     if let some parentDir := dstAbs.parent then
       if let .error e ← (IO.FS.createDirAll parentDir).toBaseIO then
-        if sameProjectDirMove then restoreCronFolders store srcScopedSlug cronSnap
         return .error (500, s!"mkdir_parent_failed:{e}")
     if isCopy then
       if srcIsDirOnDisk then
@@ -714,17 +547,14 @@ def transferProjectFileOrFolder
       | .error _ =>
         if srcIsDirOnDisk then
           if let .error e ← copyDirTree srcAbs dstAbs then
-            if sameProjectDirMove then restoreCronFolders store srcScopedSlug cronSnap
             return .error (500, e)
           removeDirTree srcAbs
         else
           match ← (IO.FS.readBinFile srcAbs).toBaseIO with
           | .error e =>
-            if sameProjectDirMove then restoreCronFolders store srcScopedSlug cronSnap
             return .error (500, s!"read_failed:{e}")
           | .ok bytes =>
             if let .error e ← (IO.FS.writeBinFile dstAbs bytes).toBaseIO then
-              if sameProjectDirMove then restoreCronFolders store srcScopedSlug cronSnap
               return .error (500, s!"write_failed:{e}")
             try IO.FS.removeFile srcAbs catch _ => pure ()
   else if isDirTransfer then
@@ -742,10 +572,9 @@ def transferProjectFileOrFolder
       match ← cascadeRenameMissionFolder store srcScopedSlug srcRel dstRel nowIso with
       | .ok items => pure items
       | .error e =>
-        -- Roll back filesystem move and cron folder mutations!
+        -- Roll back filesystem move!
         if ← dstAbs.pathExists then
           discard <| (IO.FS.rename dstAbs srcAbs).toBaseIO
-        restoreCronFolders store srcScopedSlug cronSnap
         return .error (500, e)
     else pure #[]
 
@@ -767,141 +596,15 @@ def transferProjectFileOrFolder
   return .ok (.obj #[
     ("ok", .bool true),
     ("path", .str dstRel),
-    ("moved_missions", .arr movedMissionJVals),
-    ("moved_crons", JVal.nat cronSnap.size)
+    ("moved_missions", .arr movedMissionJVals)
   ])
-
-/-! ## Hermes Controller & Project Crons (`/api/projects/:slug/controller*`, `/api/projects/:slug/crons*`) -/
-
-private def resolveHermesHome (workingDir : String) : IO System.FilePath := do
-  if let some h ← IO.getEnv "HERMES_HOME" then
-    let clean := h.trimAscii.toString
-    if !clean.isEmpty then return System.FilePath.mk clean
-  for cand in #["/root/.hermes", "/var/lib/hermes/.hermes", s!"{workingDir}/.hermes"] do
-    let p := System.FilePath.mk cand
-    if ← p.pathExists then return p
-  return System.FilePath.mk s!"{workingDir}/.hermes"
-
-private def readHermesJobsArray (hermesHome : System.FilePath) : IO (Array JVal) := do
-  let jobsFile := hermesHome / "cron" / "jobs.json"
-  if !(← jobsFile.pathExists) then return #[]
-  match ← (try some <$> IO.FS.readFile jobsFile catch _ => pure none) with
-  | none => return #[]
-  | some raw =>
-    match OrbBin.Json.parse raw with
-    | .ok (.arr xs) => return xs
-    | .ok (.obj kvs) =>
-      match (kvs.find? (fun (k, _) => k == "jobs")).map Prod.snd with
-      | some (.arr xs) => return xs
-      | _ => return #[]
-    | _ => return #[]
-
-private def writeHermesJobsArray (hermesHome : System.FilePath) (jobs : Array JVal) : IO (Except String Unit) := do
-  let cronDir := hermesHome / "cron"
-  discard <| (IO.FS.createDirAll cronDir).toBaseIO
-  let wrapper := JVal.obj #[("jobs", .arr jobs), ("version", JVal.nat 1)]
-  writeAtomicPrivate0600 (cronDir / "jobs.json") ((renderPretty wrapper) ++ "\n").toUTF8
-
-private def normalizeHermesControllerJob (job : JVal) (folder : String) (archived : Bool) : JVal :=
-  let id := (job.fieldStr? "id").getD ""
-  let name := (job.fieldStr? "name").getD id
-  let enabled := (job.fieldBool? "enabled").getD true
-  let stateStr := (job.fieldStr? "state").getD (if enabled then "active" else "paused")
-  .obj #[
-    ("id", .str id),
-    ("name", .str name),
-    ("folder", .str folder),
-    ("archived", .bool archived),
-    ("schedule", job.fieldOrNull "schedule"),
-    ("enabled", .bool enabled),
-    ("state", .str stateStr),
-    ("paused_reason", job.fieldOrNull "paused_reason"),
-    ("next_run_at", job.fieldOrNull "next_run_at"),
-    ("last_run_at", job.fieldOrNull "last_run_at"),
-    ("last_status", job.fieldOrNull "last_status"),
-    ("last_error", job.fieldOrNull "last_error"),
-    ("failure_streak", JVal.nat ((job.fieldNat? "failure_streak").getD 0)),
-    ("deliver", job.fieldOrNull "deliver")
-  ]
-
-private def normalizeHermesControllerSettings (job : JVal) : JVal :=
-  let prompt := (job.fieldStr? "prompt").getD ""
-  let skills := (job.fieldArr? "skills").getD #[]
-  let toolsets := (job.fieldArr? "enabled_toolsets").getD #[]
-  .obj #[
-    ("prompt", .str prompt),
-    ("prompt_chars", JVal.nat prompt.length),
-    ("skills", .arr skills),
-    ("deliver", job.fieldOrNull "deliver"),
-    ("failure_deliver", job.fieldOrNull "failure_deliver"),
-    ("repeat_times", job.fieldOrNull "repeat_times"),
-    ("repeat_completed", JVal.nat ((job.fieldNat? "repeat_completed").getD 0)),
-    ("model", job.fieldOrNull "model"),
-    ("provider", job.fieldOrNull "provider"),
-    ("reasoning_effort", job.fieldOrNull "reasoning_effort"),
-    ("workdir", job.fieldOrNull "workdir"),
-    ("no_agent", .bool ((job.fieldBool? "no_agent").getD false)),
-    ("continuity", .bool ((job.fieldBool? "continuity").getD false)),
-    ("enabled_toolsets", .arr toolsets),
-    ("created_at", job.fieldOrNull "created_at")
-  ]
-
-def buildControllerViewJVal (store : CoreStore) (workingDir scopedSlug clientSlug : String) : IO JVal := do
-  let hermesHome ← resolveHermesHome workingDir
-  let jobs ← readHermesJobsArray hermesHome
-  let mut pinnedId := ""
-  if let .ok pRows ← execParamQuery store.projectsDb
-      "SELECT COALESCE(controller_cron_id,'') FROM projects WHERE slug=?1;" #[scopedSlug] then
-    if pRows.size > 1 then pinnedId := cell pRows[1]! 0
-  let expectedDeliver := s!"project:{clientSlug}"
-  let found? :=
-    if !pinnedId.isEmpty then
-      jobs.find? (fun j => (j.fieldStr? "id").getD "" == pinnedId)
-    else
-      jobs.find? (fun j =>
-        (j.fieldStr? "deliver").getD "" == expectedDeliver ||
-        (j.fieldStr? "project").getD "" == clientSlug)
-  match found? with
-  | none =>
-    return .obj #[("slug", .str clientSlug), ("job", .null), ("settings", .null), ("runs", .arr #[])]
-  | some j =>
-    let jid := (j.fieldStr? "id").getD ""
-    let mut archived := false
-    if let .ok aRows ← execParamQuery store.projectsDb
-        "SELECT COUNT(*) FROM controller_archives WHERE slug=?1 AND job_id=?2;" #[scopedSlug, jid] then
-      if aRows.size > 1 && cellU64 aRows[1]! 0 > 0 then archived := true
-    let mut folder := (j.fieldStr? "folder").getD ""
-    if let .ok cRows ← execParamQuery store.projectsDb
-        "SELECT COALESCE(folder,'') FROM project_crons WHERE slug=?1 AND job_id=?2;" #[scopedSlug, jid] then
-      if cRows.size > 1 then folder := normalizeMissionFolder (cell cRows[1]! 0)
-    return .obj #[
-      ("slug", .str clientSlug),
-      ("job", normalizeHermesControllerJob j folder archived),
-      ("settings", normalizeHermesControllerSettings j),
-      ("runs", .arr #[])
-    ]
-
-def listProjectCronsJVal (store : CoreStore) (workingDir scopedSlug clientSlug : String) : IO JVal := do
-  let hermesHome ← resolveHermesHome workingDir
-  let allJobs ← readHermesJobsArray hermesHome
-  let mut boundMap : Array (String × String) := #[]
-  if let .ok rows ← execParamQuery store.projectsDb
-      "SELECT job_id, COALESCE(folder,'') FROM project_crons WHERE slug=?1 ORDER BY created_at ASC;" #[scopedSlug] then
-    for i in [1:rows.size] do
-      boundMap := boundMap.push (cell rows[1 * i]! 0, normalizeMissionFolder (cell rows[1 * i]! 1))
-  let mut out : Array JVal := #[]
-  for (jid, folder) in boundMap do
-    if let some rawJob := allJobs.find? (fun j => (j.fieldStr? "id").getD "" == jid) then
-      let enriched := ((rawJob.setField "folder" (.str folder)).setField "project" (.str clientSlug))
-      out := out.push enriched
-  return .obj #[("jobs", .arr out)]
 
 /-! ## Main HTTP Route Dispatcher (`dispatchProjectAndControllerRoutes?`) -/
 
-private def dispatchProjectFilesAndCronsTail?
+private def dispatchProjectFilesTail?
     (store : CoreStore)
     (broadcastHub? : Option BroadcastHub)
-    (workingDir clientSlug scopedSlug : String)
+    (clientSlug scopedSlug : String)
     (tail : List String)
     (qMap : Array (String × String))
     (method : String)
@@ -997,186 +700,12 @@ private def dispatchProjectFilesAndCronsTail?
       | .ok res => return some (jsonResp 200 res)
       | .error (code, msg) => return some (jsonErr code msg)
 
-    -- `/api/projects/:slug/controller*` & `/api/projects/:slug/crons*`
-    if tail == ["controller"] then
-      if method == "GET" then
-        return some (jsonResp 200 (← buildControllerViewJVal store workingDir scopedSlug clientSlug))
-      else if method == "PUT" then
-        let jv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
-        let hermesHome ← resolveHermesHome workingDir
-        let jobs ← readHermesJobsArray hermesHome
-        let expectedDeliver := s!"project:{clientSlug}"
-        let existing? := jobs.find? (fun j => (j.fieldStr? "deliver").getD "" == expectedDeliver)
-        let jid ← match existing?.bind (fun j => j.fieldStr? "id") with
-          | some id => pure id
-          | none => newUuidV4
-        let baseJob := existing?.getD (.obj #[
-          ("id", .str jid),
-          ("name", .str s!"{clientSlug} controller"),
-          ("enabled", .bool true),
-          ("deliver", .str expectedDeliver),
-          ("created_at", .str nowIso)
-        ])
-        let mut updated := baseJob
-        for k in #["name", "schedule", "prompt", "deliver", "failure_deliver", "workdir", "model", "provider", "reasoning_effort", "skills", "continuity"] do
-          if let some v := jv.field? k then
-            updated := updated.setField k v
-        let nextJobs :=
-          if existing?.isSome then jobs.map (fun j => if (j.fieldStr? "id").getD "" == jid then updated else j)
-          else jobs.push updated
-        discard <| writeHermesJobsArray hermesHome nextJobs
-        discard <| upsertProjectRecord store scopedSlug clientSlug clientSlug "" "active" "" nowIso
-          (if isLegacyUnscoped then none else some callerUserId)
-        discard <| execParamQuery store.projectsDb
-          "UPDATE projects SET controller_cron_id=?2, updated_at=?3 WHERE slug=?1;" #[scopedSlug, jid, nowIso]
-        if let some fld := jv.fieldStr? "folder" then
-          discard <| execParamQuery store.projectsDb
-            "INSERT INTO project_crons(slug,job_id,created_at,folder) VALUES(?1,?2,?3,?4) ON CONFLICT(job_id) DO UPDATE SET slug=excluded.slug,folder=excluded.folder;"
-            #[scopedSlug, jid, nowIso, normalizeMissionFolder fld]
-        return some (jsonResp 200 (← buildControllerViewJVal store workingDir scopedSlug clientSlug))
-      else if method == "DELETE" then
-        discard <| execParamQuery store.projectsDb
-          "UPDATE projects SET controller_cron_id=NULL, updated_at=?2 WHERE slug=?1;" #[scopedSlug, nowIso]
-        return some (jsonResp 200 (← buildControllerViewJVal store workingDir scopedSlug clientSlug))
-
-    if method == "POST" && tail == ["controller", "action"] then
-      let jv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
-      let act := ((jv.fieldStr? "action").getD "").trimAscii.toString.toLower
-      let hermesHome ← resolveHermesHome workingDir
-      let jobs ← readHermesJobsArray hermesHome
-      let viewBefore ← buildControllerViewJVal store workingDir scopedSlug clientSlug
-      if let some jid := (viewBefore.field? "job") >>= (fun j => j.fieldStr? "id") then
-        if act == "archive" then
-          discard <| execParamQuery store.projectsDb
-            "INSERT OR IGNORE INTO controller_archives(slug,job_id) VALUES(?1,?2);" #[scopedSlug, jid]
-        else if act == "restore" then
-          discard <| execParamQuery store.projectsDb
-            "DELETE FROM controller_archives WHERE slug=?1 AND job_id=?2;" #[scopedSlug, jid]
-        else if act == "pause" || act == "resume" || act == "run" then
-          let en := act != "pause"
-          let stStr := if en then "active" else "paused"
-          let nextJobs := jobs.map fun j =>
-            if (j.fieldStr? "id").getD "" == jid then
-              ((j.setField "enabled" (.bool en)).setField "state" (.str stStr))
-            else j
-          discard <| writeHermesJobsArray hermesHome nextJobs
-      return some (jsonResp 200 (← buildControllerViewJVal store workingDir scopedSlug clientSlug))
-
-    if method == "GET" && tail == ["crons", "defaults"] then
-      return some (jsonResp 200 (.obj #[
-        ("deliver", .str s!"project:{clientSlug}"),
-        ("route_ready", .bool true),
-        ("folders_supported", .bool true)
-      ]))
-
-    if tail == ["crons"] then
-      if method == "GET" then
-        return some (jsonResp 200 (← listProjectCronsJVal store workingDir scopedSlug clientSlug))
-      else if method == "POST" then
-        let jv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
-        let jid ← newUuidV4
-        let folder := normalizeMissionFolder ((jv.fieldStr? "folder").getD "")
-        let newJob := JVal.obj #[
-          ("id", .str jid),
-          ("name", .str ((jv.fieldStr? "name").getD "Scheduled job")),
-          ("schedule", jv.fieldOrNull "schedule"),
-          ("prompt", .str ((jv.fieldStr? "prompt").getD "")),
-          ("enabled", .bool true),
-          ("state", .str "active"),
-          ("deliver", .str ((jv.fieldStr? "deliver").getD s!"project:{clientSlug}")),
-          ("folder", .str folder),
-          ("project", .str clientSlug),
-          ("created_at", .str nowIso)
-        ]
-        let hermesHome ← resolveHermesHome workingDir
-        let jobs ← readHermesJobsArray hermesHome
-        discard <| writeHermesJobsArray hermesHome (jobs.push newJob)
-        discard <| execParamQuery store.projectsDb
-          "INSERT INTO project_crons(slug,job_id,created_at,folder) VALUES(?1,?2,?3,?4) ON CONFLICT(job_id) DO UPDATE SET slug=excluded.slug,folder=excluded.folder;"
-          #[scopedSlug, jid, nowIso, folder]
-        return some (jsonResp 201 (.obj #[("job", newJob)]))
-
-    if tail.length ≥ 2 && tail[0]? == some "crons" && tail[1]? != some "defaults" then
-      let jid := (percentDecodeStrict tail[1]!).getD tail[1]!
-      let hermesHome ← resolveHermesHome workingDir
-      let jobs ← readHermesJobsArray hermesHome
-      if tail.length == 2 && method == "GET" then
-        let mut folder := ""
-        if let .ok r ← execParamQuery store.projectsDb
-            "SELECT COALESCE(folder,'') FROM project_crons WHERE slug=?1 AND job_id=?2;" #[scopedSlug, jid] then
-          if r.size > 1 then folder := normalizeMissionFolder (cell r[1]! 0)
-        let job := (jobs.find? (fun j => (j.fieldStr? "id").getD "" == jid)).getD (.obj #[("id", .str jid), ("name", .str jid), ("enabled", .bool true)])
-        return some (jsonResp 200 (.obj #[("job", (job.setField "folder" (.str folder)).setField "project" (.str clientSlug)), ("runs", .arr #[])]))
-      else if tail.length == 2 && method == "PATCH" then
-        let jv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
-        let nextSlugClient := ((jv.fieldStr? "project").filter (!·.isEmpty)).getD clientSlug
-        let nextScoped :=
-          if isLegacyUnscoped then nextSlugClient
-          else (scopeProjectSlug callerUserId bootstrapAdminId nextSlugClient).getD nextSlugClient
-        let mut nextFolder := ""
-        if let .ok r ← execParamQuery store.projectsDb
-            "SELECT COALESCE(folder,'') FROM project_crons WHERE job_id=?1;" #[jid] then
-          if r.size > 1 then nextFolder := normalizeMissionFolder (cell r[1]! 0)
-        if let some f := jv.fieldStr? "folder" then
-          nextFolder := normalizeMissionFolder f
-        discard <| execParamQuery store.projectsDb
-          "INSERT INTO project_crons(slug,job_id,created_at,folder) VALUES(?1,?2,?3,?4) ON CONFLICT(job_id) DO UPDATE SET slug=excluded.slug,folder=excluded.folder;"
-          #[nextScoped, jid, nowIso, nextFolder]
-        let mut updatedJob := (jobs.find? (fun j => (j.fieldStr? "id").getD "" == jid)).getD (.obj #[("id", .str jid), ("enabled", .bool true)])
-        for k in #["name", "schedule", "prompt", "deliver", "failure_deliver", "workdir", "model", "provider", "reasoning_effort", "skills", "continuity"] do
-          if let some v := jv.field? k then
-            updatedJob := updatedJob.setField k v
-        updatedJob := (updatedJob.setField "folder" (.str nextFolder)).setField "project" (.str nextSlugClient)
-        let nextJobs := jobs.map (fun j => if (j.fieldStr? "id").getD "" == jid then updatedJob else j)
-        discard <| writeHermesJobsArray hermesHome nextJobs
-        return some (jsonResp 200 (.obj #[("job", updatedJob), ("runs", .arr #[])]))
-      else if tail.length == 2 && method == "DELETE" then
-        discard <| execParamQuery store.projectsDb "DELETE FROM project_crons WHERE job_id=?1;" #[jid]
-        let nextJobs := jobs.filter (fun j => (j.fieldStr? "id").getD "" != jid)
-        discard <| writeHermesJobsArray hermesHome nextJobs
-        return some (jsonResp 200 (.obj #[("ok", .bool true)]))
-      else if tail == ["crons", tail[1]!, "action"] && method == "POST" then
-        let jv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
-        let act := ((jv.fieldStr? "action").getD "").trimAscii.toString.toLower
-        let en := act != "pause"
-        let stStr := if en then "active" else "paused"
-        let nextJobs := jobs.map fun j =>
-          if (j.fieldStr? "id").getD "" == jid then
-            ((j.setField "enabled" (.bool en)).setField "state" (.str stStr))
-          else j
-        discard <| writeHermesJobsArray hermesHome nextJobs
-        return some (jsonResp 200 (.obj #[("ok", .bool true)]))
     return none
 
-/-- Board keys are globally unique in the legacy schema. Validate both the
-    existing task's project and any linked mission before a REST/MCP write. -/
-def validateProjectBoardTask (store : CoreStore) (project key mission userId : String)
-    (isLegacyUnscoped : Bool) : IO (Except String Unit) := do
-  if !isLegacyUnscoped && !mission.isEmpty then
-    let (exists_, owns, _) ← getMissionRelationship store mission userId
-    unless exists_ && owns do return .error "not_found"
-  let .ok rows ← execParamQuery store.missionsDb
-      "SELECT project_slug FROM mission_board_tasks WHERE task_key=?1;" #[key]
-    | return .error "db_error"
-  if rows.size > 1 && cell rows[1]! 0 != project then return .error "not_found"
-  return .ok ()
-
-def putProjectBoardTask (store : CoreStore) (project key track mission status userId : String)
-    (isLegacyUnscoped : Bool) : IO (Except String Unit) := do
-  if let .error error ← validateProjectBoardTask store project key mission userId isLegacyUnscoped then
-    return .error error
-  let .ok _ ← execParamQuery store.missionsDb
-    ("INSERT INTO mission_board_tasks(task_key,project_slug,track,mission_id,attempt_seq,status) VALUES(?1,?2,?3,?4,0,?5) " ++
-     "ON CONFLICT(task_key) DO UPDATE SET track=excluded.track,mission_id=excluded.mission_id,status=excluded.status " ++
-     "WHERE mission_board_tasks.project_slug=excluded.project_slug;") #[key, project, track, mission, status]
-    | return .error "db_error"
-  return .ok ()
-
-set_option maxHeartbeats 800000 in
 def dispatchProjectAndControllerRoutes?
     (store : CoreStore)
     (broadcastHub? : Option BroadcastHub)
-    (workingDir : String)
+    (_workingDir : String)
     (method cleanPath rawTarget : String)
     (bodyBytes : ByteArray)
     (callerUserId bootstrapAdminId : String)
@@ -1235,6 +764,14 @@ def dispatchProjectAndControllerRoutes?
       if isLegacyUnscoped then clientSlug
       else (scopeProjectSlug callerUserId bootstrapAdminId clientSlug).getD clientSlug
     let tail := segs.drop 3
+    -- Remove these two compatibility GETs once iOS/Android < 1.77.0 are retired.
+    if method == "GET" && tail == ["controller"] then
+      return some (jsonResp 200 (.obj #[("job", .null)]))
+    if method == "GET" && tail == ["crons"] then
+      return some (jsonResp 200 (.obj #[("jobs", .arr #[])]))
+    if ["controller", "crons", "track", "tracks", "tasks", "task-board",
+        "decision", "decisions", "steers", "state", "situation"].contains (tail.headD "") then
+      return some (jsonErr 410 "removed")
     if tail == ["board"] || tail == ["controller-mission"] || (tail.isEmpty && method == "GET") then
       let .ok rows ← execParamQuery store.projectsDb
           "SELECT p.slug FROM projects p LEFT JOIN project_owners o ON o.slug=p.slug WHERE (p.slug=?1 OR p.slug=?2) AND (?3='1' OR o.owner_user_id=?4) ORDER BY (p.slug=?1) DESC LIMIT 1;"
@@ -1242,11 +779,6 @@ def dispatchProjectAndControllerRoutes?
         | return some (jsonErr 500 "db_error")
       if rows.size ≤ 1 then return some (jsonErr 404 "not_found")
       scopedSlug := cell rows[1]! 0
-    -- These endpoints read/write the shared host Hermes scheduler. Core-native
-    -- tenant projects and missions do not delegate that operator authority.
-    if !isAdmin && (tail[0]? == some "controller" || tail[0]? == some "crons") then
-      return some (jsonErr 403 "admin_required")
-
     if tail == ["board"] || tail == ["controller-mission"] then
       let .ok rows ← execParamQuery store.projectsDb
           "SELECT p.slug FROM projects p LEFT JOIN project_owners o ON o.slug=p.slug WHERE p.slug=?1 AND (?2='1' OR o.owner_user_id=?3);"
@@ -1278,16 +810,13 @@ def dispatchProjectAndControllerRoutes?
     -- `GET|DELETE /api/projects/:slug`
     if tail.isEmpty then
       if method == "GET" then
-        let sit ← buildProjectSituationJVal store scopedSlug clientSlug
+        let sit ← getProjectJVal store scopedSlug clientSlug
         return some (jsonResp 200 sit)
       else if method == "DELETE" then
         discard <| execParamQuery store.projectsDb
           "UPDATE projects SET status='deleted', updated_at=?2 WHERE slug=?1;" #[scopedSlug, nowIso]
         return some (jsonResp 200 (.obj #[("ok", .bool true), ("slug", .str clientSlug)]))
 
-    -- `GET /api/projects/:slug/{state,situation,updates,conversation}`
-    if method == "GET" && (tail == ["state"] || tail == ["situation"]) then
-      return some (jsonResp 200 (← buildProjectSituationJVal store scopedSlug clientSlug))
     if method == "GET" && tail == ["updates"] then
       return some (jsonResp 200 (.obj #[("updates", .arr #[])]))
     if method == "GET" && tail == ["conversation"] then
@@ -1355,42 +884,16 @@ def dispatchProjectAndControllerRoutes?
           "UPDATE projects SET skills=?2, updated_at=?3 WHERE slug=?1;" #[scopedSlug, skJson, nowIso]
         return some (jsonResp 200 (.obj #[("skills", .arr skArr)]))
 
-    -- `POST /api/projects/:slug/status` & `POST /api/projects/:slug/track`
+    -- `POST /api/projects/:slug/status`
     if method == "POST" && tail == ["status"] then
       let jv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
       let stVal := (jv.fieldStr? "status").getD "active"
-      let modeVal := (jv.fieldStr? "mode").getD ""
-      let nextAct := (jv.fieldStr? "next_action").getD ""
-      let blk := (jv.fieldStr? "blocker").getD ""
       discard <| upsertProjectRecord store scopedSlug clientSlug clientSlug "" stVal "" nowIso
         (if isLegacyUnscoped then none else some callerUserId)
       discard <| execParamQuery store.projectsDb
-        "UPDATE projects SET status=?2, mode=COALESCE(NULLIF(?3,''),mode), next_action=COALESCE(NULLIF(?4,''),next_action), blocker=?5, updated_at=?6 WHERE slug=?1;"
-        #[scopedSlug, stVal, modeVal, nextAct, blk, nowIso]
-      return some (jsonResp 200 (← buildProjectSituationJVal store scopedSlug clientSlug))
-
-    if method == "POST" && tail == ["track"] then
-      let jv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
-      let trk := (jv.fieldStr? "track").getD ""
-      let des := ((jv.fieldStr? "desired_condition").orElse (fun _ => jv.fieldStr? "desired_state")).getD ""
-      let stVal := (jv.fieldStr? "status").getD "open"
-      let (code, bodyStr) ← putProjectTrack store scopedSlug trk des stVal nowIso (jv.fieldNat? "expected_revision")
-      return some (code, "application/json", bodyStr.toUTF8)
-
-    if tail.length == 3 && tail[0]? == some "tracks" then
-      let trk := (percentDecodeStrict tail[1]!).getD tail[1]!
-      let subAct := tail[2]!
-      if method == "GET" && subAct == "receipts" then
-        return some (jsonResp 200 (.obj #[("track", .str trk), ("receipts", .arr #[])]))
-      else if method == "POST" && (subAct == "accept" || subAct == "invalidate" || subAct == "evidence" || subAct == "reopen") then
-        let nextSt :=
-          if subAct == "accept" then "accepted"
-          else if subAct == "reopen" || subAct == "invalidate" then "open"
-          else "evidence_submitted"
-        discard <| execParamQuery store.projectsDb
-          "UPDATE project_tracks SET status=?3, state_revision=state_revision+1, updated_at=?4 WHERE (project_slug=?1 OR slug=?1) AND track=?2;"
-          #[scopedSlug, trk, nextSt, nowIso]
-        return some (jsonResp 200 (.obj #[("ok", .bool true), ("track", .str trk), ("status", .str nextSt)]))
+        "UPDATE projects SET status=?2, updated_at=?3 WHERE slug=?1;"
+        #[scopedSlug, stVal, nowIso]
+      return some (jsonResp 200 (← getProjectJVal store scopedSlug clientSlug))
 
     -- `GET|POST /api/projects/:slug/grant`
     if tail == ["grant"] then
@@ -1402,64 +905,7 @@ def dispatchProjectAndControllerRoutes?
         | .ok gv => return some (jsonResp 200 gv)
         | .error e => return some (jsonErr 500 e)
 
-    -- `GET|POST /api/projects/:slug/steers`
-    if tail == ["steers"] then
-      if method == "GET" then
-        return some (jsonResp 200 (← listProjectSteersJVal store scopedSlug))
-      else if method == "POST" then
-        let jv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
-        let body := ((jv.fieldStr? "body").orElse (fun _ => jv.fieldStr? "message") |>.getD "")
-        let orig := (jv.fieldStr? "origin").getD "orb"
-        match ← addProjectSteerJVal store scopedSlug body orig nowIso with
-        | .ok sv => return some (jsonResp 201 sv)
-        | .error e => return some (jsonErr 400 e)
-
-    -- `/api/projects/:slug/decision` & `/api/projects/:slug/decision/answer`
-    if tail == ["decision"] then
-      if method == "GET" then
-        return some (jsonResp 200 (.obj #[("decisions", .arr (← listProjectDecisionsJVal store scopedSlug))]))
-      else if method == "POST" then
-        let jv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
-        match ← recordProjectDecisionJVal store scopedSlug jv nowIso with
-        | .ok dv => return some (jsonResp 200 dv)
-        | .error e => return some (jsonErr 400 e)
-    if method == "POST" && tail == ["decision", "answer"] then
-      let jv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
-      let did := (jv.fieldStr? "id").orElse (fun _ => jv.fieldStr? "decision_id") |>.getD ""
-      let ans := (jv.fieldStr? "answer").getD ""
-      match ← answerProjectDecisionJVal store scopedSlug did ans nowIso with
-      | .ok dv => return some (jsonResp 200 dv)
-      | .error e => return some (jsonErr 400 e)
-
-    -- `/api/projects/:slug/tasks*`
-    if tail == ["tasks"] then
-      if method == "GET" then
-        let sit ← buildProjectSituationJVal store scopedSlug clientSlug
-        return some (jsonResp 200 (.obj #[("tasks", (sit.field? "tasks").getD (.arr #[]))]))
-      else if method == "POST" then
-        let jv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
-        let tKey ← match (jv.fieldStr? "task_key").filter (!·.isEmpty) with | some k => pure k | none => newUuidV4
-        let trk := (jv.fieldStr? "track").getD "default"
-        let mid := (jv.fieldStr? "mission_id").getD ""
-        let stVal := (jv.fieldStr? "status").getD "open"
-        if let .error error ← putProjectBoardTask store scopedSlug tKey trk mid stVal callerUserId isLegacyUnscoped then
-          return some (jsonErr (if error == "not_found" then 404 else 500) error)
-        return some (jsonResp 200 (.obj #[("ok", .bool true), ("task_key", .str tKey), ("status", .str stVal)]))
-    if tail.length == 2 && tail[0]? == some "tasks" then
-      let tKey := (percentDecodeStrict tail[1]!).getD tail[1]!
-      if method == "PATCH" || method == "POST" then
-        let jv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
-        let stVal := (jv.fieldStr? "status").getD "done"
-        discard <| execParamQuery store.missionsDb
-          "UPDATE mission_board_tasks SET status=?3 WHERE project_slug=?1 AND task_key=?2;"
-          #[scopedSlug, tKey, stVal]
-        return some (jsonResp 200 (.obj #[("ok", .bool true), ("task_key", .str tKey), ("status", .str stVal)]))
-      else if method == "DELETE" then
-        discard <| execParamQuery store.missionsDb
-          "DELETE FROM mission_board_tasks WHERE project_slug=?1 AND task_key=?2;" #[scopedSlug, tKey]
-        return some (jsonResp 200 (.obj #[("ok", .bool true)]))
-
-    if let some r ← dispatchProjectFilesAndCronsTail? store broadcastHub? workingDir clientSlug scopedSlug tail qMap method bodyBytes callerUserId bootstrapAdminId isLegacyUnscoped nowIso then
+    if let some r ← dispatchProjectFilesTail? store broadcastHub? clientSlug scopedSlug tail qMap method bodyBytes callerUserId bootstrapAdminId isLegacyUnscoped nowIso then
       return some r
 
   return none

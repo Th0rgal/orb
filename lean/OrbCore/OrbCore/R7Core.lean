@@ -1,6 +1,6 @@
 /-
   OrbCore.R7Core: Phase R7-Core obligations for SM-18 (inbox CAS + project context),
-  SM-13 (project tracks + board attempts), and SM-22 / G-ORB-7 (deploy observe -> gate -> execute).
+  and SM-22 / G-ORB-7 (deploy observe -> gate -> execute).
 -/
 import LeanSys
 import Orb.Kernel
@@ -26,8 +26,6 @@ def contextFileLimit : Nat := 10 * 1024 * 1024
 def contextConfirmedFileLimit : UInt64 := 2 * 1024 * 1024 * 1024
 def contextProjectLimit : UInt64 := 100 * 1024 * 1024
 def contextEntryLimit : Nat := 5000
-def defaultParallelMissions : Nat := 4
-def reservedBossSlots : Nat := 1
 
 private def cell (row : Array String) (i : Nat) : String :=
   (row[i]?).getD ""
@@ -142,17 +140,6 @@ structure ContextOpInput where
 def contextOpAdmitted (c : ContextOpInput) : Bool :=
   verifyContextOpCas c.pathOk c.sizeOk c.countOk c.projectOk c.blobOk
     c.entryRev c.baseRev c.basePresent c.entryPresent == 1
-
-structure BoardTrackInput where
-  trackExists   : UInt8
-  statusOk      : UInt8
-  slotsOk       : UInt8
-  retryOk       : UInt8
-  duplicateOpen : UInt8
-  deriving Repr, DecidableEq
-
-def boardTrackAdmitted (c : BoardTrackInput) : Bool :=
-  verifyBoardTrack c.trackExists c.statusOk c.slotsOk c.retryOk c.duplicateOpen == 1
 
 structure DeployRecheckInput where
   gateOk         : UInt8
@@ -713,170 +700,6 @@ def applyContextOperation (st : CoreStore) (root project : String) (jv : JVal) (
       #[opId, project, s!"{nextRev}"]
     if let .error e := rw then return .error e
     return .ok (200, s!"\{\"conflict\":false,\"revision\":{nextRev}}")
-
-def trackStatusOk (s : String) : Bool :=
-  s == "open" || s == "satisfied" || s == "blocked" || s == "cancelled"
-
-def putProjectTrack (st : CoreStore) (slug track desired status nowAt : String) (expectedRev? : Option Nat) :
-    IO (Nat × String) := do
-  if !validProjectSlug slug || track.isEmpty || !trackStatusOk status then
-    return (400, "{\"error\":\"invalid_track\"}")
-  if let .error e := validContextPath track then
-    return (400, s!"\{\"error\":{jsonEscape e}}")
-  let effNow := if nowAt.isEmpty then "1970-01-01T00:00:00Z" else nowAt
-  st.projectsDb.mu.atomically do
-    if let .error e ← sqliteExecRaw st.projectsDb.handle "BEGIN IMMEDIATE;" then
-      return (500, s!"\{\"error\":{jsonEscape e}}")
-    discard <| sqliteQueryRowsRaw st.projectsDb.handle
-      ("INSERT OR IGNORE INTO projects(slug, id, name, title, root_path, status, created_at, updated_at) " ++
-       "VALUES(?1, ?1, ?1, ?1, '', 'active', ?2, ?2);")
-      #[slug, effNow]
-    let q ← sqliteQueryRowsRaw st.projectsDb.handle
-      "SELECT COALESCE(state_revision,0),status FROM project_tracks WHERE project_slug=?1 AND track=?2;" #[slug, track]
-    match q with
-    | .error e =>
-      discard <| sqliteExecRaw st.projectsDb.handle "ROLLBACK;"
-      return (500, s!"\{\"error\":{jsonEscape e}}")
-    | .ok rs =>
-      let cur := if rs.size > 1 then cellNat rs[1]! 0 else 0
-      if let some exp := expectedRev? then
-        if exp != cur then
-          discard <| sqliteExecRaw st.projectsDb.handle "ROLLBACK;"
-          return (409, s!"\{\"error\":\"stale_track\",\"state_revision\":{cur}}")
-      let next := if cur == 0 then 1 else cur + 1
-      let wr ←
-        if rs.size > 1 then
-          sqliteQueryRowsRaw st.projectsDb.handle
-            ("UPDATE project_tracks SET desired_condition=?3,status=?4,updated_at=?5,state_revision=CAST(?6 AS INTEGER) " ++
-             "WHERE project_slug=?1 AND track=?2 AND COALESCE(state_revision,0)=CAST(?7 AS INTEGER);")
-            #[slug, track, desired, status, effNow, s!"{next}", s!"{cur}"]
-        else
-          sqliteQueryRowsRaw st.projectsDb.handle
-            ("INSERT INTO project_tracks(id,slug,project_slug,track,title,desired_condition,status,created_at,updated_at,state_revision) " ++
-             "VALUES(?1,?2,?2,?3,?3,?4,?5,?6,?6,CAST(?7 AS INTEGER));")
-            #[s!"{slug}:{track}", slug, track, desired, status, effNow, s!"{next}"]
-      match wr with
-      | .error e =>
-        discard <| sqliteExecRaw st.projectsDb.handle "ROLLBACK;"
-        return (500, s!"\{\"error\":{jsonEscape e}}")
-      | .ok _ =>
-        let ch ← sqliteQueryRowsRaw st.projectsDb.handle "SELECT changes();" #[]
-        let n := match ch with | .ok crs => cellNat (crs[1]?.getD #[]) 0 | .error _ => 0
-        if n == 0 then
-          discard <| sqliteExecRaw st.projectsDb.handle "ROLLBACK;"
-          return (409, s!"\{\"error\":\"stale_track\",\"state_revision\":{cur}}")
-        if let .error e ← sqliteExecRaw st.projectsDb.handle "COMMIT;" then
-          return (500, s!"\{\"error\":{jsonEscape e}}")
-        return (200, s!"\{\"project_slug\":{jsonEscape slug},\"track\":{jsonEscape track},\"status\":{jsonEscape status},\"state_revision\":{next}}")
-
-def countOpenBoardSlots (st : CoreStore) (slug : String) : IO (Except String Nat) := do
-  let rows ← execParamQuery st.missionsDb
-    "SELECT COUNT(*) FROM mission_board_tasks WHERE project_slug=?1 AND status='open';" #[slug]
-  match rows with
-  | .error e => return .error e
-  | .ok rs => return .ok (if rs.size > 1 then cellNat rs[1]! 0 else 0)
-
-def parallelCap (st : CoreStore) (slug : String) : IO Nat := do
-  let rows ← st.projectsDb.mu.atomically <|
-    sqliteQueryRowsRaw st.projectsDb.handle
-      "SELECT parallel_missions FROM project_grant WHERE slug=?1;" #[slug]
-  match rows with
-  | .ok rs =>
-    if rs.size > 1 then
-      let n := cellNat rs[1]! 0
-      if n > 0 then return n else return defaultParallelMissions
-    else return defaultParallelMissions
-  | .error _ => return defaultParallelMissions
-
-private def insertBoardTaskTx (st : CoreStore) (missionId slug track taskKey : String)
-    (attempt maxAttempts : Nat) (ext merged suppressed : UInt8) :
-    IO (Except String (Prod Nat String)) := do
-  match ← execParamQueryUnlocked st.missionsDb "SELECT id FROM missions WHERE id=?1;" #[missionId] with
-  | .error _ => return .error "board_mission_query_failed"
-  | .ok ers =>
-    if ers.size <= 1 then return .ok (404, "{\"error\":\"mission_not_found\"}")
-    match ← execParamQueryUnlocked st.missionsDb "SELECT COUNT(*) FROM mission_board_tasks WHERE project_slug=?1 AND status='open';" #[slug] with
-    | .error _ => return .error "board_slots_query_failed"
-    | .ok rrs =>
-      match ← execParamQueryUnlocked st.projectsDb "SELECT parallel_missions FROM project_grant WHERE slug=?1;" #[slug] with
-      | .error _ => return .error "board_cap_query_failed"
-      | .ok capRows =>
-        let cap :=
-          if capRows.size > 1 then
-            let n := cellNat capRows[1]! 0
-            if n > 0 then n else defaultParallelMissions
-          else defaultParallelMissions
-        match ← execParamQueryUnlocked st.projectsDb "SELECT status FROM project_tracks WHERE project_slug=?1 AND track=?2;" #[slug, track] with
-        | .error _ => return .error "board_track_query_failed"
-        | .ok trackRows =>
-          if trackRows.size <= 1 then return .ok (409, "{\"error\":\"unknown_track\"}")
-          let trackSt := cell trackRows[1]! 0
-          let statusOkBit : UInt8 := if trackStatusOk trackSt && trackSt != "cancelled" then 1 else 0
-          let running := if rrs.size > 1 then cellNat rrs[1]! 0 else 0
-          let slots := verifyBoardSlots cap.toUInt32 reservedBossSlots.toUInt32 running.toUInt32
-          let retry := verifyBoardRetry attempt.toUInt32 maxAttempts.toUInt32 ext merged suppressed
-          match ← execParamQueryUnlocked st.missionsDb "SELECT status FROM mission_board_tasks WHERE task_key=?1;" #[taskKey] with
-          | .error _ => return .error "board_dup_query_failed"
-          | .ok drs =>
-            let duplicate : UInt8 := if drs.size > 1 && cell drs[1]! 0 == "open" then 1 else 0
-            let gate := verifyBoardTrack 1 statusOkBit slots retry duplicate
-            if duplicate == 1 then return .ok (409, "{\"error\":\"duplicate_task\"}")
-            if slots != 1 then return .ok (409, "{\"error\":\"board_slots_full\"}")
-            if retry != 1 then return .ok (409, "{\"error\":\"board_retry_suppressed\"}")
-            if statusOkBit != 1 || gate != 1 then return .ok (409, "{\"error\":\"board_rejected\"}")
-            let sql := "INSERT INTO mission_board_tasks(task_key,project_slug,track,mission_id,attempt_seq,status) VALUES(?1,?2,?3,?4,?5,'open') ON CONFLICT(task_key) DO UPDATE SET project_slug=excluded.project_slug,track=excluded.track,mission_id=excluded.mission_id,attempt_seq=excluded.attempt_seq,status='open' WHERE mission_board_tasks.status!='open';"
-            match ← execParamQueryUnlocked st.missionsDb sql #[taskKey, slug, track, missionId, s!"{attempt}"] with
-            | .error e => return .error e
-            | .ok _ =>
-              match ← execParamQueryUnlocked st.missionsDb "SELECT changes();" #[] with
-              | .error _ => return .error "board_changes_query_failed"
-              | .ok crs =>
-                let n := cellNat (crs[1]?.getD #[]) 0
-                if n != 1 then return .ok (409, "{\"error\":\"duplicate_task\"}")
-                return .ok (200, s!"\{\"task_key\":{jsonEscape taskKey},\"project_slug\":{jsonEscape slug},\"track\":{jsonEscape track},\"mission_id\":{jsonEscape missionId},\"attempt_seq\":{attempt},\"status\":\"open\"}")
-
-def postBoardTask (st : CoreStore) (missionId : String) (jv : JVal) : IO (Nat × String) := do
-  let slug := (jv.fieldStr? "project_slug").getD ""
-  let track := (jv.fieldStr? "track").getD ""
-  let taskKey := (jv.fieldStr? "task_key").getD ""
-  let attempt := (jv.fieldNat? "attempt_seq").getD 0
-  let maxAttempts := (jv.fieldNat? "max_attempts").getD 3
-  let ext : UInt8 := if (jv.fieldBool? "requires_external_recovery").getD false then 1 else 0
-  let merged : UInt8 := if (jv.fieldBool? "preflight_merged").getD false then 1 else 0
-  let suppressed : UInt8 := if (jv.fieldBool? "retry_suppressed").getD false then 1 else 0
-  if !validProjectSlug slug || track.isEmpty || taskKey.isEmpty then
-    return (400, "{\"error\":\"invalid_board_task\"}")
-  let tx ← withImmediateTx st.projectsDb do
-    withImmediateTx st.missionsDb
-      (insertBoardTaskTx st missionId slug track taskKey attempt maxAttempts ext merged suppressed)
-  match tx with
-  | .error e => return (500, s!"\{\"error\":{jsonEscape e}}")
-  | .ok pair => return pair
-
-def projectBoardJson (st : CoreStore) (slug : String) : IO (Except String String) := do
-  let tracks ← st.projectsDb.mu.atomically <|
-    sqliteQueryRowsRaw st.projectsDb.handle
-      "SELECT track,desired_condition,status,state_revision FROM project_tracks WHERE project_slug=?1 ORDER BY track;" #[slug]
-  let tasks ← st.missionsDb.mu.atomically <|
-    sqliteQueryRowsRaw st.missionsDb.handle
-      "SELECT task_key,track,mission_id,attempt_seq,status FROM mission_board_tasks WHERE project_slug=?1 ORDER BY task_key;" #[slug]
-  match tracks, tasks with
-  | .error e, _ => return .error e
-  | _, .error e => return .error e
-  | .ok trs, .ok krs =>
-    let mut titems : Array String := #[]
-    for i in [1:trs.size] do
-      let r := trs[i]!
-      let track := cell r 0
-      let mut attempts : Array String := #[]
-      for j in [1:krs.size] do
-        let k := krs[j]!
-        if cell k 1 == track then
-          attempts := attempts.push s!"\{\"task_key\":{jsonEscape (cell k 0)},\"mission_id\":{jsonEscape (cell k 2)},\"attempt_seq\":{cell k 3},\"status\":{jsonEscape (cell k 4)}}"
-      titems := titems.push (
-        s!"\{\"track\":{jsonEscape track},\"desired_condition\":{jsonEscape (cell r 1)},\"status\":{jsonEscape (cell r 2)}," ++
-        s!"\"state_revision\":{cell r 3},\"attempts\":[{String.intercalate "," attempts.toList}]}")
-    return .ok ("[" ++ String.intercalate "," titems.toList ++ "]")
 
 def fnv64 (s : String) : UInt64 := Id.run do
   let mut h : UInt64 := 14695981039346656037
