@@ -1325,7 +1325,12 @@ def run : IO Unit := do
         proxyCooldownsRef := cooldownsRef, seqRef := seqRef, providerHub? := some hub
       }
       let now : UInt64 := 1700001000
-      let jwt := mintSessionToken cfg.jwtSecret (now + 3600)
+      -- Protected provider routes require a live named user, not a subjectless
+      -- legacy token whose authority was supplied by the bootstrap fallback.
+      let .ok admin ← createUserRecord store "provider-admin" cfg.dashboardPassword "admin"
+          none none "2026-11-16T00:00:00Z"
+        | throw (IO.userError "provider contract admin creation failed")
+      let jwt := mintSessionTokenV2 cfg.jwtSecret admin.id admin.role admin.sessionEpoch (now + 3600)
       let mut failures : Array String := #[]
       let listed ← getJson app jwt "/api/ai/providers" now
       let items := listed.asArr?.getD #[]
