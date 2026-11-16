@@ -1652,6 +1652,22 @@ def run (root : String) : IO Unit := do
       check (envLoginSt == 401 && savedLoginSt == 200 && setSt == 200 &&
           (setRaw.splitOn "password_hash").length == 1 && (setRaw.splitOn rustSavedHash).length == 1)
         s!"r12_http01_sec03_nested_auth_password_hash_precedence_and_redaction (env={envLoginSt}, saved={savedLoginSt}, set={setSt})"
+      -- r12_stored_non_placeholder_hash_survives_hydration
+      let explicitEpoch1Hash ← hashPasswordPbkdf2 "explicit-epoch1-admin-pass-888"
+      sql r12Store.missionsDb "UPDATE users SET password_hash=?1, session_epoch=1, password_seeded=0 WHERE id=?2;"
+        #[explicitEpoch1Hash, bootId]
+      hydrateLegacyDataDir r12Dir r12Dir r12Store r12Mc bootId false
+      let (legacyOverwriteSt, _) ← send "POST" "/api/auth/login" ""
+        (.obj #[("password", .str "rust-saved-admin-pass-777")]) r12St
+      let (explicitSurvivesSt, _) ← send "POST" "/api/auth/login" ""
+        (.obj #[("password", .str "explicit-epoch1-admin-pass-888")]) r12St
+      sql r12Store.missionsDb "UPDATE users SET password_hash='dev-mode-placeholder', session_epoch=1, password_seeded=0 WHERE id=?1;"
+        #[bootId]
+      hydrateLegacyDataDir r12Dir r12Dir r12Store r12Mc bootId false
+      let (placeholderReplacedSt, _) ← send "POST" "/api/auth/login" ""
+        (.obj #[("password", .str "rust-saved-admin-pass-777")]) r12St
+      check (legacyOverwriteSt == 401 && explicitSurvivesSt == 200 && placeholderReplacedSt == 200)
+        s!"r12_stored_non_placeholder_hash_survives_hydration (legacy={legacyOverwriteSt}, explicit={explicitSurvivesSt}, placeholder={placeholderReplacedSt})"
     finally
       closeManagedComputeStore r12Mc
       closeCoreStore r12Store
