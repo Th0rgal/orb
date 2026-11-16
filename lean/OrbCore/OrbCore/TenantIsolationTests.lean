@@ -1612,13 +1612,12 @@ def run (root : String) : IO Unit := do
       let _ := sseServerTask.get
     -- R12 named failing regression tests:
     -- 1. r12_legacy_token_unknown_subject_never_yields_session (SEC-02)
-    let unknownLegacyJwt := issueHs256Jwt (effectiveJwtSecret st.cfg) "unknown-subject" "ghost" now (now + 3600) "admin"
+    let unknownLegacyJwt := issueHs256Jwt st.cfg.jwtSecret "unknown-subject" "ghost" now (now + 3600) "admin"
     let (unkJwtSt, _) ← send "GET" "/api/auth/me" unknownLegacyJwt
     check (unkJwtSt == 401)
       s!"r12_legacy_token_unknown_subject_never_yields_session (got {unkJwtSt})"
     -- 2. r12_database_rejected_password_never_yields_session (HTTP-01 / SEC-02)
-    let .ok rotatedHash ← hashPasswordPbkdf2 "rotated-db-password-999"
-      | throw (IO.userError "r12 pbkdf2 hash")
+    let rotatedHash ← hashPasswordPbkdf2 "rotated-db-password-999"
     sql store.missionsDb "UPDATE users SET password_hash=?1 WHERE id='member';" #[rotatedHash]
     let (rawBearerSt, _) ← send "GET" "/api/auth/me" "configured-member-password-123" (.obj #[]) configured
     let (staleLoginSt, _) ← send "POST" "/api/auth/login" ""
@@ -1626,8 +1625,7 @@ def run (root : String) : IO Unit := do
     check (rawBearerSt == 401 && staleLoginSt == 401)
       s!"r12_database_rejected_password_never_yields_session (bearer={rawBearerSt}, login={staleLoginSt})"
     -- 3. r12_http01_sec03_nested_auth_password_hash_precedence_and_redaction (SEC-03 / HTTP-01)
-    let .ok rustSavedHash ← hashPasswordPbkdf2 "rust-saved-admin-pass-777"
-      | throw (IO.userError "r12 rust saved hash")
+    let rustSavedHash ← hashPasswordPbkdf2 "rust-saved-admin-pass-777"
     let r12Dir := root ++ "/r12-sec03-hydrate"
     IO.FS.createDirAll (System.FilePath.mk r12Dir)
     IO.FS.writeFile (System.FilePath.mk (r12Dir ++ "/settings.json"))
@@ -1635,7 +1633,8 @@ def run (root : String) : IO Unit := do
     let .ok r12Store ← openCoreStore r12Dir | throw (IO.userError "r12 store")
     let .ok r12Mc ← openManagedComputeStore (r12Dir ++ "/managed_compute.db") | throw (IO.userError "r12 mc")
     try
-      let bootId ← bootstrapUsersAndBackfill r12Store "env-bootstrap-pass-111" "" false
+      let .ok bootId ← bootstrapUsersAndBackfill r12Store #[("admin", "env-bootstrap-pass-111")] s!"{now}"
+        | throw (IO.userError "r12 bootstrap")
       hydrateLegacyDataDir r12Dir r12Dir r12Store r12Mc bootId false
       let r12St : CoreAppState := {
         st with
