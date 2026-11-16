@@ -120,7 +120,9 @@ def _default_health_check_probe(
         env_vars.update(_read_proc_environ(main_pid))
     token = env_vars.get("SANDBOXED_NODE_TOKEN")
     if not token:
-        return {"ok": True, "build_sha": _read_build_conf_sha(build_conf_path)}
+        raise RuntimeError(
+            f"post-start /heartbeat health check failed: SANDBOXED_NODE_TOKEN missing for {unit_name}"
+        )
     bind = env_vars.get("SANDBOXED_NODE_BIND", "127.0.0.1:3088").strip()
     host, sep, port = bind.rpartition(":")
     if not sep:
@@ -141,16 +143,24 @@ def _default_health_check_probe(
         raise RuntimeError(f"post-start /heartbeat health check failed: {exc}") from exc
     if not hb.get("online", False):
         raise RuntimeError("post-start /heartbeat reported online=false")
-    reported_build = hb.get("build_sha") or hb.get("build") or _read_build_conf_sha(build_conf_path)
+    reported_build = hb.get("build_sha") or hb.get("build")
     if expected_build_sha and reported_build != expected_build_sha:
         raise RuntimeError(
             f"node reported build {reported_build!r} != expected {expected_build_sha!r}"
         )
     reported_bins = hb.get("binary_sha256")
-    if expected_sha256 and isinstance(reported_bins, dict):
+    if expected_sha256:
+        if not isinstance(reported_bins, dict):
+            raise RuntimeError("post-start /heartbeat missing binary_sha256 map")
         for comp, exp_hash in expected_sha256.items():
+            if not exp_hash:
+                continue
             rep_hash = reported_bins.get(comp)
-            if exp_hash and rep_hash and rep_hash.lower() != exp_hash.lower():
+            if not rep_hash or not isinstance(rep_hash, str):
+                raise RuntimeError(
+                    f"node reported missing {comp} sha256 in binary_sha256 (expected {exp_hash})"
+                )
+            if rep_hash.lower() != exp_hash.lower():
                 raise RuntimeError(
                     f"node reported {comp} sha256 {rep_hash} != expected {exp_hash}"
                 )
@@ -956,13 +966,23 @@ def perform_fenced_upgrade(
                         f"post-start build mismatch: reported {rep_sha!r} != expected {expected_build_sha!r}"
                     )
                 rep_bins = hc_res.get("binary_sha256")
-                if expected_sha256 and isinstance(rep_bins, dict):
+                if expected_sha256:
+                    if not isinstance(rep_bins, dict):
+                        raise RuntimeError("post-start health check missing binary_sha256 map")
                     for c_name, exp_h in expected_sha256.items():
+                        if not exp_h:
+                            continue
                         got_h = rep_bins.get(c_name)
-                        if exp_h and got_h and got_h.lower() != exp_h.lower():
+                        if not got_h or not isinstance(got_h, str):
+                            raise RuntimeError(
+                                f"post-start {c_name} sha256 missing in binary_sha256 (expected {exp_h})"
+                            )
+                        if got_h.lower() != exp_h.lower():
                             raise RuntimeError(
                                 f"post-start {c_name} sha256 mismatch: reported {got_h} != expected {exp_h}"
                             )
+            elif expected_build_sha is not None or expected_sha256:
+                raise RuntimeError("post-start health check returned no build_sha/binary_sha256 metadata")
     except Exception as act_err:
         _restore_components(active_components, quarantine=True)
         if privd_was_active:
