@@ -134,19 +134,51 @@ if [[ ! -d "$CATALOG" ]]; then
   cp -a "$TREE/catalog" "$CATALOG.new"
   mv "$CATALOG.new" "$CATALOG"
 fi
+STAGE_COMMITTED=0
+RELEASE_BIN_PREV=""
+RELEASE_BIN_STAGING=""
+rollback_release_bin_dir() {
+  rm -rf "${RELEASE_BIN_STAGING:-}"
+  if [[ -n "${RELEASE_BIN_PREV:-}" && -d "$RELEASE_BIN_PREV" && ! -e "$RELEASE_BIN_DIR" ]]; then
+    mv "$RELEASE_BIN_PREV" "$RELEASE_BIN_DIR"
+  fi
+}
+on_deploy_exit() {
+  local exit_code=$?
+  if [[ $STAGE_COMMITTED == 0 ]]; then
+    rollback_release_bin_dir || true
+  fi
+  return "$exit_code"
+}
+trap on_deploy_exit EXIT
 if [[ $ROLLOUT_NODES == 1 ]]; then
-  RELEASE_BIN_STAGING="$RELEASE_BIN_DIR.new.$$"
-  rm -rf "$RELEASE_BIN_STAGING"
+  RELEASE_BIN_TS="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  RELEASE_BIN_TARGET="/usr/local/share/orb/releases/$SHA/bin.$RELEASE_BIN_TS"
+  RELEASE_BIN_STAGING="$RELEASE_BIN_TARGET.new"
+  rm -rf "$RELEASE_BIN_STAGING" "$RELEASE_BIN_TARGET"
   mkdir -p "$RELEASE_BIN_STAGING"
   install -m 755 "$NODE_BIN" "$RELEASE_BIN_STAGING/sandboxed-node"
   install -m 755 "$MCP_BIN" "$RELEASE_BIN_STAGING/sandboxed-mcp"
   install -m 755 "$PRIVD_BIN" "$RELEASE_BIN_STAGING/orb-privd"
-  rm -rf "$RELEASE_BIN_DIR.prev.$$"
-  if [[ -d "$RELEASE_BIN_DIR" ]]; then
-    mv "$RELEASE_BIN_DIR" "$RELEASE_BIN_DIR.prev.$$"
+  mv "$RELEASE_BIN_STAGING" "$RELEASE_BIN_TARGET"
+  RELEASE_BIN_STAGING=""
+  OLD_RELEASE_BIN_TARGET=""
+  if [[ -L "$RELEASE_BIN_DIR" ]]; then
+    OLD_RELEASE_BIN_TARGET="$(readlink -f "$RELEASE_BIN_DIR" || true)"
+  elif [[ -d "$RELEASE_BIN_DIR" ]]; then
+    RELEASE_BIN_PREV="$RELEASE_BIN_DIR.prev.$RELEASE_BIN_TS"
+    rm -rf "$RELEASE_BIN_PREV"
+    mv "$RELEASE_BIN_DIR" "$RELEASE_BIN_PREV"
   fi
-  mv "$RELEASE_BIN_STAGING" "$RELEASE_BIN_DIR"
-  rm -rf "$RELEASE_BIN_DIR.prev.$$"
+  ln -sfn "bin.$RELEASE_BIN_TS" "$RELEASE_BIN_DIR.link.$RELEASE_BIN_TS"
+  mv -T "$RELEASE_BIN_DIR.link.$RELEASE_BIN_TS" "$RELEASE_BIN_DIR"
+  if [[ -n "$RELEASE_BIN_PREV" && -d "$RELEASE_BIN_PREV" ]]; then
+    rm -rf "$RELEASE_BIN_PREV"
+    RELEASE_BIN_PREV=""
+  fi
+  if [[ -n "$OLD_RELEASE_BIN_TARGET" && "$OLD_RELEASE_BIN_TARGET" != "$RELEASE_BIN_TARGET" && -d "$OLD_RELEASE_BIN_TARGET" ]]; then
+    rm -rf "$OLD_RELEASE_BIN_TARGET"
+  fi
 fi
 
 set_catalog sandboxed-sh-dev "$CATALOG"
@@ -214,6 +246,7 @@ rollback_staged_files() {
 on_deploy_exit() {
   local exit_code=$?
   if [[ $STAGE_COMMITTED == 0 ]]; then
+    rollback_release_bin_dir || true
     rollback_staged_files || true
   fi
   return "$exit_code"
@@ -238,6 +271,7 @@ install -m 755 "$BIN" /usr/local/bin/orb-core-dev.new
 mv /usr/local/bin/orb-core-dev.new /usr/local/bin/orb-core-dev
 systemctl restart sandboxed-sh-dev
 if ! healthy 3002 30 "$SHA"; then
+  rollback_release_bin_dir || true
   rollback_staged_files
   STAGE_COMMITTED=1
   say "dev unhealthy; prod untouched"
@@ -259,6 +293,7 @@ on_deploy_exit() {
       if [[ -n "$OLD_CATALOG" ]]; then set_catalog sandboxed-sh-prod "$OLD_CATALOG"; else rm -f "$CATALOG_CONF"; fi
       set_build sandboxed-sh-prod "${OLD_SHA:-unknown}"; systemctl daemon-reload || true
     fi
+    rollback_release_bin_dir || true
     rollback_staged_files || true
   fi
   return "$exit_code"
