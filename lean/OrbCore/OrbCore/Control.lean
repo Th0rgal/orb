@@ -1588,9 +1588,10 @@ private def targetSupportsExplicitCyber (tgt : ProviderTarget) (requestedModel c
   let preservesModel := tgt.modelId.isEmpty || bareModel tgt.modelId == requestedModel
   preservesModel && cyberEntrySupported tgt.provider requestedModel fullUrl tgt.apiKey false false
 
-/-- Settings as returned to clients: no password hash and no Bitwarden token in any of its spellings. -/
+/-- Settings as returned to clients: no password hash (`auth`, `password_hash`, `dashboard_password_hash`)
+    and no Bitwarden token in any of its spellings. -/
 private def redactSettingsSecrets (settings : JVal) : JVal :=
-  let base := (settings.removeField "password_hash").removeField "bws_access_token"
+  let base := (((settings.removeField "password_hash").removeField "dashboard_password_hash").removeField "auth").removeField "bws_access_token"
   match base.field? "bitwarden" with
   | some bw => base.setField "bitwarden" ((bw.removeField "encrypted_access_token").removeField "access_token")
   | none => base
@@ -6762,8 +6763,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           Id.run do
             let mut acc := JVal.obj basePairs
             for (k, v) in patchPairs do
-              -- `bitwarden` is owned by `/api/bitwarden/*`; a redacted copy sent back here must not erase the token.
-              if k != "password_hash" && k != "bitwarden" && k != "bws_access_token" then
+              -- `bitwarden` is owned by `/api/bitwarden/*` and auth hashes are owned by `/api/auth/*`.
+              if k != "password_hash" && k != "dashboard_password_hash" && k != "auth" && k != "bitwarden" && k != "bws_access_token" then
                 acc := acc.setField k v
             return acc
         | _, _ => curSettings

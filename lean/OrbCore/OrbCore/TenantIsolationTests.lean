@@ -1655,6 +1655,34 @@ def run (root : String) : IO Unit := do
     finally
       closeManagedComputeStore r12Mc
       closeCoreStore r12Store
+    -- 4. r12_valid_v2_session_credentials_resolve_principal
+    let (v2AdmSt, v2AdmDoc) ← send "GET" "/api/auth/me" admin
+    let (v2MemSt, v2MemDoc) ← send "GET" "/api/auth/me" member
+    check (v2AdmSt == 200 && (v2AdmDoc.fieldOrNull "user").fieldStr? "id" == some "admin" &&
+        v2MemSt == 200 && (v2MemDoc.fieldOrNull "user").fieldStr? "id" == some "member")
+      s!"r12_valid_v2_session_credentials_resolve_principal (adm={v2AdmSt}, mem={v2MemSt})"
+    -- 5. r12_mission_mcp_and_proxy_credentials_resolve_principal
+    let mcpCapDoc ← call memberSession "get_capabilities"
+    let mptTok := "orb-mpt-v1_r12_valid_mission_proxy_token_0001"
+    let mptHash := sha256HexLower mptTok
+    sql store.missionsDb
+      "INSERT INTO mission_proxy_tokens(token_hash,mission_id,owner_user_id,expires_at,revoked,created_at) VALUES(?1,'member-mission','member',?2,0,?3);"
+      #[mptHash, s!"{now + 3600}", s!"{now}"]
+    let mptAuth ← authenticateProxyRequest st #[("authorization", s!"Bearer {mptTok}")] now
+    let mptOk := match mptAuth with
+      | .ok (.some caller, some mid, _) => caller.userId == "member" && mid == "member-mission"
+      | _ => false
+    check (mcpCapDoc.fieldBool? "ok" == some true && mptOk)
+      s!"r12_mission_mcp_and_proxy_credentials_resolve_principal (mcpOk={mcpCapDoc.fieldBool? "ok"}, mptOk={mptOk})"
+    -- 6. r12_node_token_credentials_resolve_principal
+    let r12NodeTok := "orb-node-v1_r12_valid_node_secret_0001"
+    let r12NodeHash := sha256HexLower r12NodeTok
+    sql store.missionsDb
+      "INSERT INTO remote_nodes(id,name,owner_user_id,token_hash,status,created_at,updated_at) VALUES('r12-node-1','r12-node','member',?1,'online',?2,?2);"
+      #[r12NodeHash, s!"{now}"]
+    let (nodePollSt, _) ← send "GET" "/api/remote-nodes/me/jobs/poll" r12NodeTok
+    check (nodePollSt == 200)
+      s!"r12_node_token_credentials_resolve_principal (got {nodePollSt})"
     -- Disabling/deleting an issuer must stop every previously minted session,
     -- including an external session with no mission id and a shared mission.
     for update in #["UPDATE users SET disabled=1 WHERE id='member';", "DELETE FROM users WHERE id='member';"] do

@@ -212,7 +212,7 @@ Not on this roadmap: a macOS backend for LeanUI.
 | R9 | Controller closes out instead of dispatching: `start_mission` and the board make "ready node without worker" visible to the controller | — | ready | A controller tick lists ready nodes from the board |
 | R10 | Rust → Lean parity queue (`rust-lean-parity-audit.md`), RUN-07 first; no new audit documents. Already done: RUN-07, RUN-08, RUN-09, MCP-02, MCP-06, MCP-08, MCP-09, MCP-11, MCP-12, HTTP-06, HTTP-07, FLT-01, FLT-02, PROV01 to PROV05, SEC-05 | — | wip | Every audit item is done or covered by a node below |
 | R11 | SEC-01: an approval lease is marked biometric-signed without a verified enrolled-device signature | — | ready | A lease needs a valid request-bound P-256 signature; replay, bad-signature, wrong-body and expired cases are refused |
-| R12 | SEC-02, HTTP-01, SEC-03: one principal resolver | — | ready | A legacy token with an unknown subject and a password the database rejected never yield a session |
+| R12 | SEC-02, HTTP-01, SEC-03: one principal resolver | #1839 | verify | A legacy token with an unknown subject and a password the database rejected never yield a session |
 | R13 | SEC-08: leases bound to a live mission and session at command time (X3 waits for it) | — | ready | A lease whose mission or session ended before its TTL is refused at verification and reaping |
 | R14 | FLT-13: raw exec on a managed machine never runs with a defaulted admin identity | — | ready | Raw exec on a worker is refused or runs as its own Unix identity, never admin |
 | R15 | MCP-05: a launch with `writer:false` runs read-only | — | ready | `start_mission(writer:false)` yields a read-only launch or an explicit refusal |

@@ -224,15 +224,20 @@ def readSettingsJson (dataRoot : String) : IO JVal := do
 def writeSettingsJson (dataRoot : String) (jv : JVal) (expected? : Option JVal := none) : IO (Except String Unit) :=
   OrbCore.SettingsFile.write dataRoot jv expected?
 
-/-- Check `dashboard_password_hash` inside `.sandboxed-sh/settings.json` (`pbkdf2:...` or `pbkdf2-sha256$...`). -/
+/-- Extract historical saved dashboard password hash from `settings.json`, checking
+    nested `auth.password_hash` (`src/settings.rs`) first and then top-level `dashboard_password_hash`. -/
+def settingsPasswordHash? (settings : JVal) : Option String :=
+  let nested? := (settings.field? "auth").bind (fun a => a.fieldStr? "password_hash")
+  let raw? := nested?.orElse (fun _ => settings.fieldStr? "dashboard_password_hash")
+  raw?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+
+/-- Check `auth.password_hash` or `dashboard_password_hash` inside `.sandboxed-sh/settings.json` (`pbkdf2:...` or `pbkdf2-sha256$...`). -/
 def verifySettingsPasswordHash (dataRoot suppliedPassword : String) : IO Bool := do
   if suppliedPassword.isEmpty then return false
   let settings ← readSettingsJson dataRoot
-  match settings.fieldStr? "dashboard_password_hash" with
+  match settingsPasswordHash? settings with
   | none => return false
-  | some h =>
-    if h.trimAscii.isEmpty then return false
-    verifyPasswordPbkdf2 suppliedPassword h.trimAscii.toString
+  | some h => verifyPasswordPbkdf2 suppliedPassword h
 
 /-! ## `.sandboxed-sh/proxy_api_keys.json` -/
 
@@ -455,12 +460,17 @@ def hydrateLegacyDataDir
   let key32? ← loadPrivateKeyBytes? workingDir dataRoot
   let settings ← readSettingsJson dataRoot
 
-  -- 1. Single-tenant `settings.json` password hash continuity (legacy JWT `sub` maps via `getBootstrapAdmin?`)
-  if let some settingsHash := (settings.fieldStr? "dashboard_password_hash").filter (!·.trimAscii.isEmpty) then
-    if !bootAdminId.isEmpty then
+  -- 1. Single-tenant `settings.json` password hash continuity (`auth.password_hash` / `dashboard_password_hash`)
+  --    Takes precedence over environment-seeded bootstrap password on cutover (`SEC-03`), while never
+  --    overwriting an account whose `session_epoch > 1` (already rotated in Lean SQLite).
+  if let some settingsHash := settingsPasswordHash? settings then
+    let targetId ←
+      if !bootAdminId.isEmpty then pure bootAdminId
+      else pure ((← getBootstrapAdmin? st).map (·.id) |>.getD "")
+    if !targetId.isEmpty then
       discard <| execParamQuery st.missionsDb
-        "UPDATE users SET password_hash=?2 WHERE id=?1 AND (password_hash='' OR password_hash LIKE '%placeholder%');"
-        #[bootAdminId, settingsHash.trimAscii.toString]
+        "UPDATE users SET password_hash=?2 WHERE id=?1 AND session_epoch<=1;"
+        #[targetId, settingsHash]
 
   -- 2. Hydrate `ai_providers.json` -> `ai_providers`
   let aiProvPath := System.FilePath.mk s!"{dataRoot}/ai_providers.json"
