@@ -95,5 +95,7 @@ reference set:
 | new mission dark 2x | 1.345% | 1.287% |
 | new mission light 2x | 1.347% | 1.290% |
 
-No variant regressed; the full local mean is 4.96%, SSIM 0.9534, and the
-control empty 2x variants are now under 1%.
+No variant regressed; the full local mean is 4.96%, SSIM 0.9534, and
+**2/36** variants are under 1%. The control empty 2x variants were already
+under 1%; no new variant crossed the threshold. The `049b3c8a` commit body
+incorrectly reports 4/36; the generated table and this correction supersede it.
