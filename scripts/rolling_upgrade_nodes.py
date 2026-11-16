@@ -2405,6 +2405,9 @@ def main(argv=None):
                 if n.get("id") and not n.get("ephemeral", False)
             ]
             remote_nodes = discovered
+            colocated = [n.get("id") for n in core_api.list_nodes() if n.get("id") and n.get("core_colocated")]
+            if colocated:
+                raise RuntimeError(", ".join(colocated) + ": refusing core_colocated node(s)")
             if not remote_nodes and not args.status:
                 parser.error("provide at least one --node or --local-jobs-db (no static nodes discovered)")
 

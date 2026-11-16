@@ -120,6 +120,17 @@ def _start_core_api_server(cordoned):
 
 
 class RollingUpgradeNodesTest(unittest.TestCase):
+    def test_auto_discovery_refuses_core_colocated_host(self):
+        from unittest.mock import Mock
+        api = Mock()
+        api.list_nodes.return_value = [{"id": "core-host", "core_colocated": True}]
+        with patch.object(roll, "discover_local_core_auth", return_value=("http://fake", "token")), \
+             patch.object(roll, "HttpCoreApi", return_value=api), \
+             patch.object(roll, "SshNodeOps") as ssh:
+            with self.assertRaisesRegex(RuntimeError, "core-host.*core_colocated"):
+                roll.main(["--dry-run"])
+            ssh.assert_not_called()
+
     def test_apply_requires_expected_digests_before_auth(self):
         with patch.object(roll, "discover_local_core_auth", side_effect=AssertionError("auth reached")):
             with self.assertRaises(SystemExit) as raised:
