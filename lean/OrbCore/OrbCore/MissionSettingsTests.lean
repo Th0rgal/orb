@@ -3,7 +3,7 @@ import OrbCore.Control
 namespace OrbCore.MissionSettingsTests
 
 open LeanSys.Http OrbBin.Json OrbBin.PosixExt
-open OrbCore.Store OrbCore.Control OrbCore.Managed OrbCore.Proxy OrbCore.R7Core OrbCore.MemoryAndCloud
+open OrbCore.Store OrbCore.Control OrbCore.Managed OrbCore.Proxy OrbCore.R7Core OrbCore.MemoryAndCloud OrbCore.LegacyHydrate
 
 private def check (ok : Bool) (label : String) : IO Unit := do
   unless ok do throw (IO.userError s!"mission settings: {label}")
@@ -17,12 +17,14 @@ def run (root : String) : IO Unit := do
       workingDir := root, dashboardPassword := "settings-test-password",
       jwtSecret := "settings-test-jwt-secret-0123456789"
     }
+    let bHub ← newBroadcastHub
     let app : CoreAppState := {
       cfg := cfg, store := store, searchIdx? := none,
       managedRef := (← IO.mkRef ({} : ManagedFleetState)),
       chainsRef := (← IO.mkRef (#[] : Array RoutingChain)),
       proxyCooldownsRef := (← IO.mkRef (#[] : Array AccountCooldown)),
-      seqRef := (← IO.mkRef (1 : UInt64))
+      seqRef := (← IO.mkRef (1 : UInt64)),
+      broadcastHub? := some bHub
     }
     let sql (q : String) (params : Array String := #[]) := do
       let .ok rows ← execParamQuery store.missionsDb q params
@@ -48,13 +50,16 @@ def run (root : String) : IO Unit := do
         "update_mission_settings" (patch.setField "mission_id" (.str mid)) now
       let .ok value := OrbBin.Json.parse raw | throw (IO.userError "settings MCP JSON")
       return value
-    let rest (patch : JVal) := do
+    let restAt (method path : String) (patch : JVal) := do
       let body := renderCompact patch
       let jwt := mintSessionToken cfg.jwtSecret (now + 3600)
-      let raw := s!"PATCH /api/control/missions/rest/settings HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Type: application/json\r\nContent-Length: {body.toUTF8.size}\r\n\r\n{body}"
+      let raw := s!"{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Type: application/json\r\nContent-Length: {body.toUTF8.size}\r\n\r\n{body}"
       let .ok req := parseRequest raw.toUTF8 none | throw (IO.userError "settings REST parse")
       let .ok response ← dispatchCoreRequest app req now | throw (IO.userError "settings REST dispatch")
-      return response.status
+      return (response.status, (String.fromUTF8? response.body).getD "")
+    let rest (patch : JVal) := do
+      let (st, _) ← restAt "PATCH" "/api/control/missions/rest/settings" patch
+      return st
     let snapshot (mid : String) := do
       let rows ← sql
         ("SELECT title,backend,COALESCE(model_override,''),COALESCE(model_effort,''),COALESCE(session_id,'')," ++
@@ -114,6 +119,75 @@ def run (root : String) : IO Unit := do
     let moved ← snapshot "rest"
     check (moved[6]! == "q" && moved[7]! == "moved" && moved[8]! == "8" && moved[4]! == "codex-session")
       "REST placement revision changes once and preserves session"
+    -- B5 replay regression: `POST /api/control/missions/:id/project` moves root, co-located forks,
+    -- running workers, nested grandchildren, `/btw` side sessions, and `descendant_ids` atomically.
+    discard <| sql
+      ("UPDATE missions SET created_at='2026-11-15T10:00:00Z', updated_at='2026-11-15T10:10:00Z' WHERE id='parent';")
+    discard <| sql
+      ("INSERT INTO missions(id,title,status,backend,model_override,model_effort,session_id,resumable," ++
+       "project,folder,placement_revision,parent_mission_id,owner_user_id,tags,created_at,updated_at) VALUES" ++
+       "('running-worker','Worker 1','active','codex','gpt-model','high','w1-sess',1,'p','folder',7,'parent','alice','[]','2026-11-15T10:02:00Z','2026-11-15T10:09:00Z')," ++
+       "('deep-worker','Worker 2','active','codex','gpt-model','high','w2-sess',1,'p','folder',7,'running-worker','alice','[]','2026-11-15T10:03:00Z','2026-11-15T10:08:00Z')," ++
+       "('fork-v1','Fork v1','awaiting_user','claudecode','claude-model','high','f1-sess',1,'p','folder',7,'parent','alice','[\"fork-of:parent\"]','2026-11-15T10:01:00Z','2026-11-15T10:01:00Z')," ++
+       "('btw-child','Side Question','awaiting_user','claudecode','claude-model','high','btw-sess',1,'p','',7,'','alice','[\"btw-parent:parent\"]','2026-11-15T10:04:00Z','2026-11-15T10:04:00Z')," ++
+       "('callback-child','Callback Worker','active','codex','gpt-model','high','cb-sess',1,'p','folder',7,'','alice','[]','2026-11-15T10:05:00Z','2026-11-15T10:05:00Z');")
+    let .ok _ ← execParamQuery store.projectsDb
+      ("INSERT INTO mcp_sessions_v1(id,owner,mission_id,project_scope,project_scoped,expires_at,revoked,subject_kind) VALUES" ++
+       "('sess-parent','alice','parent','p',1,?1,0,'mission')," ++
+       "('sess-worker','alice','running-worker','p',1,?1,0,'mission')," ++
+       "('sess-deep','alice','deep-worker','p',1,?1,0,'mission');")
+      #[s!"{now + 3600}"]
+      | throw (IO.userError "mcp_sessions_v1 insert failed")
+    IO.FS.writeFile s!"{store.rootDir}/secret_broker.json"
+      "{\"grants\":[{\"id\":\"g-worker\",\"mission_id\":\"running-worker\",\"secret_name\":\"ETH_RPC\",\"project\":\"p\"}],\"requests\":[]}"
+    let (_, subQ) ← registerSseSubscriber bHub none
+    let familyMoveCheck : JVal := .obj #[
+      ("project", .str "r"),
+      ("folder", .str "Audits"),
+      ("descendant_ids", .arr #[.str "callback-child"])
+    ]
+    let (chkSt, chkBody) ← restAt "POST" "/api/control/missions/parent/project" familyMoveCheck
+    check (chkSt == 409 && (chkBody.splitOn "approval_transfer_confirmation_required").length >= 2)
+      "POST /:id/project preflights cross-project secret grants across descendant workers"
+    check ((← snapshot "parent")[6]! == "p" && (← snapshot "running-worker")[6]! == "p")
+      "409 secret preflight leaves parent and running worker placement untouched"
+    let familyMoveRevoke : JVal := .obj #[
+      ("project", .str "r"),
+      ("folder", .str "Audits"),
+      ("approval_policy", .str "revoke"),
+      ("descendant_ids", .arr #[.str "callback-child"])
+    ]
+    let (mvSt, _) ← restAt "POST" "/api/control/missions/parent/project" familyMoveRevoke
+    check (mvSt == 200) "POST /api/control/missions/:id/project moves family with approval_policy=revoke"
+    let sseEvs ← subQ.get
+    check (!sseEvs.isEmpty && (sseEvs[0]!.splitOn "mission_placement_changed").length >= 2 &&
+      (sseEvs[0]!.splitOn "running-worker").length >= 2)
+      "POST /:id/project broadcasts mission_placement_changed for family"
+    let parentMoved ← snapshot "parent"
+    let forkMoved ← snapshot "fork-v1"
+    check (parentMoved[6]! == "r" && parentMoved[7]! == "Audits" && parentMoved[8]! == "8" &&
+      forkMoved[6]! == "r" && forkMoved[7]! == "Audits" && forkMoved[8]! == "8")
+      "root and co-located fork version move to destination project and folder"
+    for (cid, expRev) in #[
+        ("running-worker", "8"), ("deep-worker", "8"), ("rest", "9"),
+        ("mcp", "8"), ("grandchild", "8"), ("other-project", "8"),
+        ("btw-child", "8"), ("callback-child", "8")] do
+      let row ← snapshot cid
+      check (row[6]! == "r" && row[7]! == "" && row[8]! == expRev)
+        s!"descendant {cid} moved atomically to project r with folder cleared"
+    let updRows ← sql "SELECT updated_at FROM missions WHERE id='running-worker';"
+    check (updRows[1]![0]! == "2026-11-15T10:09:00Z")
+      "running worker updated_at preserved across family move"
+    let .ok scopeRows ← execParamQuery store.projectsDb
+      "SELECT mission_id, project_scope FROM mcp_sessions_v1 WHERE id IN ('sess-parent','sess-worker','sess-deep') ORDER BY id;" #[]
+      | throw (IO.userError "mcp_sessions_v1 select failed")
+    check (scopeRows.size == 4 && scopeRows[1]![1]! == "r" && scopeRows[2]![1]! == "r" && scopeRows[3]![1]! == "r")
+      "running worker and root MCP sessions rebound to destination project"
+    let foreignAfter ← snapshot "foreign"
+    let unrelatedAfter ← snapshot "unrelated"
+    check (foreignAfter[6]! == "p" && foreignAfter[7]! == "folder" && foreignAfter[8]! == "7" &&
+      unrelatedAfter[6]! == "p" && unrelatedAfter[7]! == "folder" && unrelatedAfter[8]! == "7")
+      "foreign-owner child and unrelated mission remain untouched"
   finally
     closeCoreStore store
 

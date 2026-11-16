@@ -4923,11 +4923,15 @@ private def loadAllMoveCandidateRows (st : CoreStore) : IO (Except String (Array
       }
     return .ok out
 
+private def sameMoveOwner (a b : String) : Bool :=
+  a.isEmpty || b.isEmpty || a == b
+
 private def expandColocatedForkGroupIfLeader
     (allRows : Array MoveCandidateRow)
     (findById : String → Option MoveCandidateRow)
     (selected : MoveCandidateRow) : Array MoveCandidateRow := Id.run do
   let targetProj := selected.project
+  let targetOwner := selected.ownerUserId
   let mut root := selected
   let mut climbSeen : Array String := #[selected.id]
   let mut climbing := true
@@ -4942,7 +4946,7 @@ private def expandColocatedForkGroupIfLeader
         match findById srcId with
         | none => climbing := false
         | some src =>
-          if src.project != targetProj then
+          if src.project != targetProj || !sameMoveOwner src.ownerUserId targetOwner || !sameMoveOwner src.ownerUserId root.ownerUserId then
             climbing := false
           else
             root := src
@@ -4953,7 +4957,12 @@ private def expandColocatedForkGroupIfLeader
     let cur := group[qIdx]!
     qIdx := qIdx + 1
     for cand in allRows do
-      if cand.project == targetProj && !bfsSeen.contains cand.id && isForkOfParentRow cand cur.id then
+      if cand.project == targetProj &&
+         sameMoveOwner cand.ownerUserId targetOwner &&
+         sameMoveOwner cand.ownerUserId root.ownerUserId &&
+         sameMoveOwner cand.ownerUserId cur.ownerUserId &&
+         !bfsSeen.contains cand.id &&
+         isForkOfParentRow cand cur.id then
         bfsSeen := bfsSeen.push cand.id
         group := group.push cand
   if group.size < 2 then
@@ -5048,39 +5057,57 @@ def planExpandedMoveFamily
     for member in expanded do
       if !rootIds.contains member.id then
         rootIds := rootIds.push member.id
+  let primaryOwner :=
+    (rootIds.findSome? (fun id => (findById id).map (·.ownerUserId) |>.filter (!·.isEmpty))).getD ""
+  let ownerAllowed (candOwner inheritedOwner : String) : Bool :=
+    sameMoveOwner candOwner inheritedOwner &&
+    sameMoveOwner candOwner primaryOwner &&
+    match callerUserId? with
+    | some uid => sameMoveOwner candOwner uid
+    | none => true
   -- BFS/DFS over launched non-fork `parent_mission_id` children, `btw-parent:<cur>`, and explicit `descendantIds`
   let mut visited : Array String := rootIds
-  let mut stack : Array String := rootIds
+  let mut stack : Array (String × String) := rootIds.map (fun rid =>
+    let rOwner := (findById rid).map (·.ownerUserId) |>.getD ""
+    (rid, if !rOwner.isEmpty then rOwner else primaryOwner))
   let mut launchedIds : Array String := #[]
   while !stack.isEmpty do
-    let cur := stack.back!
+    let (cur, inhOwner) := stack.back!
     stack := stack.pop
+    let curOwner := (findById cur).map (·.ownerUserId) |>.getD ""
+    let effOwner := if !inhOwner.isEmpty then inhOwner else curOwner
     for cand in allRows do
-      if !visited.contains cand.id then
+      if !visited.contains cand.id && ownerAllowed cand.ownerUserId effOwner then
         let isLaunchedChild := cand.parentId == cur && !isForkOfParentRow cand cur
         let isBtwChild := cand.tags.contains s!"btw-parent:{cur}"
         if isLaunchedChild || isBtwChild then
           visited := visited.push cand.id
           launchedIds := launchedIds.push cand.id
-          stack := stack.push cand.id
+          let nextOwner := if !cand.ownerUserId.isEmpty then cand.ownerUserId else effOwner
+          stack := stack.push (cand.id, nextOwner)
   for rawDid in descendantIds do
     let did := rawDid.trimAscii.toString
     if !did.isEmpty && !visited.contains did then
-      if (findById did).isSome then
-        visited := visited.push did
-        launchedIds := launchedIds.push did
-        let mut cbStack : Array String := #[did]
-        while !cbStack.isEmpty do
-          let cur := cbStack.back!
-          cbStack := cbStack.pop
-          for cand in allRows do
-            if !visited.contains cand.id then
-              let isLaunchedChild := cand.parentId == cur && !isForkOfParentRow cand cur
-              let isBtwChild := cand.tags.contains s!"btw-parent:{cur}"
-              if isLaunchedChild || isBtwChild then
-                visited := visited.push cand.id
-                launchedIds := launchedIds.push cand.id
-                cbStack := cbStack.push cand.id
+      if let some dRow := findById did then
+        if ownerAllowed dRow.ownerUserId primaryOwner then
+          visited := visited.push did
+          launchedIds := launchedIds.push did
+          let initOwner := if !dRow.ownerUserId.isEmpty then dRow.ownerUserId else primaryOwner
+          let mut cbStack : Array (String × String) := #[(did, initOwner)]
+          while !cbStack.isEmpty do
+            let (cur, inhOwner) := cbStack.back!
+            cbStack := cbStack.pop
+            let curOwner := (findById cur).map (·.ownerUserId) |>.getD ""
+            let effOwner := if !inhOwner.isEmpty then inhOwner else curOwner
+            for cand in allRows do
+              if !visited.contains cand.id && ownerAllowed cand.ownerUserId effOwner then
+                let isLaunchedChild := cand.parentId == cur && !isForkOfParentRow cand cur
+                let isBtwChild := cand.tags.contains s!"btw-parent:{cur}"
+                if isLaunchedChild || isBtwChild then
+                  visited := visited.push cand.id
+                  launchedIds := launchedIds.push cand.id
+                  let nextOwner := if !cand.ownerUserId.isEmpty then cand.ownerUserId else effOwner
+                  cbStack := cbStack.push (cand.id, nextOwner)
   let topRoots := rootIds.filter (fun id =>
     !launchedIds.contains id &&
     match findById id with
