@@ -315,6 +315,83 @@ class DeployGateTests(unittest.TestCase):
                 for rel, (old_text, _) in targets.items():
                     self.assertEqual((root / rel).read_text(), old_text, f"{rel} was not rolled back")
 
+    def test_deploy_mid_install_failure_rolls_back_via_exit_trap_and_stages_release_dir_atomically(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            targets = self._seed_existing_targets(root)
+            script = (Path(__file__).parent / "ops/orb-deploy").read_text()
+            for prefix in ("/usr/local", "/etc/systemd", "/run/lock"):
+                script = script.replace(prefix, str(root) + prefix)
+            fake_script = root / "orb-deploy-test"
+            fake_script.write_text(script)
+            fake_script.chmod(0o755)
+
+            tree = root / "tree"
+            (tree / "lean/OrbCore/.lake/build/bin").mkdir(parents=True, exist_ok=True)
+            (tree / "lean/OrbNode/.lake/build/bin").mkdir(parents=True, exist_ok=True)
+            (tree / "lean/OrbBin/.lake/build/bin").mkdir(parents=True, exist_ok=True)
+            (tree / "catalog/snapshots").mkdir(parents=True, exist_ok=True)
+            (tree / "scripts/ops").mkdir(parents=True, exist_ok=True)
+            (tree / "catalog/providers.json").write_text("{}\n")
+            for rel, content in {
+                "lean/OrbCore/.lake/build/bin/orb-core": "new-orb-core\n",
+                "lean/OrbCore/.lake/build/bin/orb-core-test": "#!/bin/sh\necho ok\n",
+                "lean/OrbNode/.lake/build/bin/orb-node": "new-orb-node\n",
+                "lean/OrbNode/.lake/build/bin/orb-node-test": "#!/bin/sh\necho ok\n",
+                "lean/OrbBin/.lake/build/bin/sandboxed-mcp": "new-sandboxed-mcp\n",
+                "lean/OrbBin/.lake/build/bin/orb-privd": "new-orb-privd\n",
+                "scripts/orb-node-provision.sh": "new-provision\n",
+                "scripts/ops/orb-monitor": "new-orb-monitor\n",
+                # Omit orb-sidecar-guard source so `install` fails mid-way after
+                # orb-node-provision.sh, sandboxed-node, sandboxed-mcp, orb-privd, and orb-monitor
+                # have already been replaced.
+                "scripts/ops/orb-dev-autodeploy": "new-orb-dev-autodeploy\n",
+                "scripts/ops/orb-env": "new-orb-env\n",
+                "scripts/ops/env-migration.json": '{"new": true}\n',
+            }.items():
+                target = tree / rel
+                target.write_text(content)
+                if "test" in rel:
+                    target.chmod(0o755)
+
+            bin_dir = root / "fake-bin"
+            bin_dir.mkdir(exist_ok=True)
+            (root / "run/lock").mkdir(parents=True, exist_ok=True)
+            stubs = {
+                "pgrep": "#!/bin/sh\nexit 1\n",
+                "git": f'#!/bin/sh\nif [ "$1" = "rev-parse" ]; then echo "{SHA}"; fi\nexit 0\n',
+                "lake": "#!/bin/sh\necho built\n",
+                "systemctl": "#!/bin/sh\nexit 0\n",
+                "sleep": "#!/bin/sh\nexit 0\n",
+                "date": '#!/bin/sh\necho "20261115T120000Z"\n',
+                "curl": f'#!/bin/sh\nprintf "%s" \'{{"status":"ok","build":"{SHA}"}}\'\n',
+            }
+            for name, body in stubs.items():
+                p = bin_dir / name
+                p.write_text(body)
+                p.chmod(0o755)
+
+            env = {
+                **os.environ,
+                "ORB_DEPLOY_TREE": str(tree),
+                "ORB_DEPLOY_LOG": str(root / "deploy.log"),
+                "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            }
+            res = subprocess.run(
+                ["bash", str(fake_script), SHA, "--rollout-nodes"],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(res.returncode, 0)
+            for rel, (old_text, _) in targets.items():
+                if rel == "usr/local/bin/orb-core":
+                    continue
+                self.assertEqual((root / rel).read_text(), old_text, f"{rel} was left partially updated after mid-install failure")
+            self.assertEqual((root / "usr/local/bin/orb-core").read_text(), "old-orb-core\n")
+
 
 if __name__ == "__main__":
     unittest.main()

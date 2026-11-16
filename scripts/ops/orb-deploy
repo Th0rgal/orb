@@ -130,14 +130,23 @@ test -f "$TREE/catalog/providers.json"
 test -d "$TREE/catalog/snapshots"
 mkdir -p "$(dirname "$CATALOG")"
 if [[ ! -d "$CATALOG" ]]; then
+  rm -rf "$CATALOG.new"
   cp -a "$TREE/catalog" "$CATALOG.new"
   mv "$CATALOG.new" "$CATALOG"
 fi
 if [[ $ROLLOUT_NODES == 1 ]]; then
-  mkdir -p "$RELEASE_BIN_DIR"
-  install -m 755 "$NODE_BIN" "$RELEASE_BIN_DIR/sandboxed-node.new" && mv "$RELEASE_BIN_DIR/sandboxed-node.new" "$RELEASE_BIN_DIR/sandboxed-node"
-  install -m 755 "$MCP_BIN" "$RELEASE_BIN_DIR/sandboxed-mcp.new" && mv "$RELEASE_BIN_DIR/sandboxed-mcp.new" "$RELEASE_BIN_DIR/sandboxed-mcp"
-  install -m 755 "$PRIVD_BIN" "$RELEASE_BIN_DIR/orb-privd.new" && mv "$RELEASE_BIN_DIR/orb-privd.new" "$RELEASE_BIN_DIR/orb-privd"
+  RELEASE_BIN_STAGING="$RELEASE_BIN_DIR.new.$$"
+  rm -rf "$RELEASE_BIN_STAGING"
+  mkdir -p "$RELEASE_BIN_STAGING"
+  install -m 755 "$NODE_BIN" "$RELEASE_BIN_STAGING/sandboxed-node"
+  install -m 755 "$MCP_BIN" "$RELEASE_BIN_STAGING/sandboxed-mcp"
+  install -m 755 "$PRIVD_BIN" "$RELEASE_BIN_STAGING/orb-privd"
+  rm -rf "$RELEASE_BIN_DIR.prev.$$"
+  if [[ -d "$RELEASE_BIN_DIR" ]]; then
+    mv "$RELEASE_BIN_DIR" "$RELEASE_BIN_DIR.prev.$$"
+  fi
+  mv "$RELEASE_BIN_STAGING" "$RELEASE_BIN_DIR"
+  rm -rf "$RELEASE_BIN_DIR.prev.$$"
 fi
 
 set_catalog sandboxed-sh-dev "$CATALOG"
@@ -179,55 +188,97 @@ for spec in "${OPS_TARGETS[@]}"; do
     cp -p "$dst" "$dst.pre-deploy-$TS"
   fi
 done
+STAGE_COMMITTED=0
+restore_backed_up_file() {
+  local backup="$1" dst="$2"
+  rm -f "$dst.new"
+  if [[ -n "$backup" && -f "$backup" ]]; then
+    cp -p "$backup" "$dst.restoring" && mv "$dst.restoring" "$dst"
+    cmp -s "$backup" "$dst"
+  fi
+}
 rollback_staged_files() {
-  [[ -n "$PROVISION_BACKUP" && -f "$PROVISION_BACKUP" ]] && cp -p "$PROVISION_BACKUP" /usr/local/lib/orb/orb-node-provision.sh
-  [[ -n "$NODE_BACKUP" && -f "$NODE_BACKUP" ]] && cp -p "$NODE_BACKUP" /usr/local/bin/sandboxed-node
-  [[ -n "$MCP_BACKUP" && -f "$MCP_BACKUP" ]] && cp -p "$MCP_BACKUP" /usr/local/bin/sandboxed-mcp
-  [[ -n "$PRIVD_BACKUP" && -f "$PRIVD_BACKUP" ]] && cp -p "$PRIVD_BACKUP" /usr/local/sbin/orb-privd
+  local rc=0
+  restore_backed_up_file "$PROVISION_BACKUP" /usr/local/lib/orb/orb-node-provision.sh || rc=1
+  restore_backed_up_file "$NODE_BACKUP" /usr/local/bin/sandboxed-node || rc=1
+  if [[ $ROLLOUT_NODES == 1 ]]; then
+    restore_backed_up_file "$MCP_BACKUP" /usr/local/bin/sandboxed-mcp || rc=1
+    restore_backed_up_file "$PRIVD_BACKUP" /usr/local/sbin/orb-privd || rc=1
+  fi
   for spec in "${OPS_TARGETS[@]}"; do
     IFS=: read -r dst _ _ <<< "$spec"
-    [[ -f "$dst.pre-deploy-$TS" ]] && cp -p "$dst.pre-deploy-$TS" "$dst"
+    restore_backed_up_file "$dst.pre-deploy-$TS" "$dst" || rc=1
   done
-  return 0
+  return "$rc"
 }
-install -m 644 "$TREE/scripts/orb-node-provision.sh" /usr/local/lib/orb/orb-node-provision.sh.new && mv /usr/local/lib/orb/orb-node-provision.sh.new /usr/local/lib/orb/orb-node-provision.sh
-install -m 755 "$NODE_BIN" /usr/local/bin/sandboxed-node.new && mv /usr/local/bin/sandboxed-node.new /usr/local/bin/sandboxed-node
+on_deploy_exit() {
+  local exit_code=$?
+  if [[ $STAGE_COMMITTED == 0 ]]; then
+    rollback_staged_files || true
+  fi
+  return "$exit_code"
+}
+trap on_deploy_exit EXIT
+install -m 644 "$TREE/scripts/orb-node-provision.sh" /usr/local/lib/orb/orb-node-provision.sh.new
+mv /usr/local/lib/orb/orb-node-provision.sh.new /usr/local/lib/orb/orb-node-provision.sh
+install -m 755 "$NODE_BIN" /usr/local/bin/sandboxed-node.new
+mv /usr/local/bin/sandboxed-node.new /usr/local/bin/sandboxed-node
 if [[ $ROLLOUT_NODES == 1 ]]; then
-  install -m 755 "$MCP_BIN" /usr/local/bin/sandboxed-mcp.new && mv /usr/local/bin/sandboxed-mcp.new /usr/local/bin/sandboxed-mcp
-  install -m 755 "$PRIVD_BIN" /usr/local/sbin/orb-privd.new && mv /usr/local/sbin/orb-privd.new /usr/local/sbin/orb-privd
+  install -m 755 "$MCP_BIN" /usr/local/bin/sandboxed-mcp.new
+  mv /usr/local/bin/sandboxed-mcp.new /usr/local/bin/sandboxed-mcp
+  install -m 755 "$PRIVD_BIN" /usr/local/sbin/orb-privd.new
+  mv /usr/local/sbin/orb-privd.new /usr/local/sbin/orb-privd
 fi
 for spec in "${OPS_TARGETS[@]}"; do
   IFS=: read -r dst mode src <<< "$spec"
-  install -m "$mode" "$src" "$dst.new" && mv "$dst.new" "$dst"
+  install -m "$mode" "$src" "$dst.new"
+  mv "$dst.new" "$dst"
 done
-install -m 755 "$BIN" /usr/local/bin/orb-core-dev.new && mv /usr/local/bin/orb-core-dev.new /usr/local/bin/orb-core-dev
+install -m 755 "$BIN" /usr/local/bin/orb-core-dev.new
+mv /usr/local/bin/orb-core-dev.new /usr/local/bin/orb-core-dev
 systemctl restart sandboxed-sh-dev
 if ! healthy 3002 30 "$SHA"; then
   rollback_staged_files
+  STAGE_COMMITTED=1
   say "dev unhealthy; prod untouched"
   exit 1
 fi
 say "dev healthy on $SHA"
-[[ $DEV_ONLY == 1 ]] && { say "done (dev only)"; exit 0; }
+[[ $DEV_ONLY == 1 ]] && { STAGE_COMMITTED=1; say "done (dev only)"; exit 0; }
 
 BACKUP="/usr/local/bin/orb-core.pre-deploy-$TS"
 OLD_SHA="$(sed -n 's/^Environment=ORB_BUILD_SHA=//p' /etc/systemd/system/sandboxed-sh-prod.service.d/30-build.conf 2>/dev/null || true)"
 CATALOG_CONF=/etc/systemd/system/sandboxed-sh-prod.service.d/31-catalog.conf
 OLD_CATALOG="$(sed -n 's/^Environment=SANDBOXED_CATALOG_DIR=//p' "$CATALOG_CONF" 2>/dev/null || true)"
 cp -p /usr/local/bin/orb-core "$BACKUP"
+on_deploy_exit() {
+  local exit_code=$?
+  if [[ $STAGE_COMMITTED == 0 ]]; then
+    if [[ -f "$BACKUP" ]]; then
+      cp -p "$BACKUP" /usr/local/bin/orb-core.restoring && mv /usr/local/bin/orb-core.restoring /usr/local/bin/orb-core || true
+      if [[ -n "$OLD_CATALOG" ]]; then set_catalog sandboxed-sh-prod "$OLD_CATALOG"; else rm -f "$CATALOG_CONF"; fi
+      set_build sandboxed-sh-prod "${OLD_SHA:-unknown}"; systemctl daemon-reload || true
+    fi
+    rollback_staged_files || true
+  fi
+  return "$exit_code"
+}
 set_catalog sandboxed-sh-prod "$CATALOG"
 set_build sandboxed-sh-prod "$SHA"; systemctl daemon-reload
-install -m 755 "$BIN" /usr/local/bin/orb-core.new && mv /usr/local/bin/orb-core.new /usr/local/bin/orb-core
+install -m 755 "$BIN" /usr/local/bin/orb-core.new
+mv /usr/local/bin/orb-core.new /usr/local/bin/orb-core
 systemctl restart sandboxed-sh-prod
 if ! healthy 3000 60 "$SHA"; then
   say "prod unhealthy; rolling back to $BACKUP"
   cp -p "$BACKUP" /usr/local/bin/orb-core
   if [[ -n "$OLD_CATALOG" ]]; then set_catalog sandboxed-sh-prod "$OLD_CATALOG"; else rm -f "$CATALOG_CONF"; fi
   rollback_staged_files
+  STAGE_COMMITTED=1
   set_build sandboxed-sh-prod "${OLD_SHA:-unknown}"; systemctl daemon-reload
   systemctl restart sandboxed-sh-prod
   exit 1
 fi
+STAGE_COMMITTED=1
 say "prod healthy on $SHA (backup $BACKUP)"
 # keep the five most recent backups
 ls -1t /usr/local/bin/orb-core.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
