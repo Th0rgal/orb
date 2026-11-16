@@ -2336,6 +2336,27 @@ def refreshCustomModelDiscovery (store : CoreStore) (workingDir : String) : IO U
   writeDataJsonFile workingDir store.rootDir "model-discovery.json"
     (.obj #[("schema_version", JVal.nat 1), ("connections", .arr connections)])
 
+private def filterDiscoveryConnectionModels (hps : Array HydratedProvider) (c : JVal) : JVal :=
+  let pid := (c.fieldStr? "provider_id").getD ""
+  let matched? := hps.find? (fun hp =>
+    hp.id == pid || s!"custom:{hp.id}" == pid || hp.providerType.toLower == pid.toLower ||
+    customProviderName hp.name == customProviderName pid)
+  let pName := (matched?.map (·.name)).getD pid
+  let bUrl := (matched?.map (·.baseUrl)).getD ""
+  let pId := (matched?.map (·.id)).getD pid
+  let keepModel (m : JVal) : Bool :=
+    let mid := (m.fieldStr? "id").getD ""
+    customProviderModelAllowed pName bUrl mid && customProviderModelAllowed pId bUrl mid
+  let c1 := match c.field? "last_success" with
+    | some ls@(.obj _) =>
+      match ls.fieldArr? "models" with
+      | some ms => c.setField "last_success" (ls.setField "models" (.arr (ms.filter keepModel)))
+      | none => c
+    | _ => c
+  match c1.fieldArr? "fallback_models" with
+  | some fms => c1.setField "fallback_models" (.arr (fms.filter keepModel))
+  | none => c1
+
 /-! ## Unified Dispatcher for AI Providers, Proxy Analytics, Model-Routing Health/Test & Catalog -/
 
 set_option maxHeartbeats 800000 in
@@ -2372,27 +2393,7 @@ def dispatchProviderAndAiRoute
     let disc ← readDataJsonFile workingDir store.rootDir "model-discovery.json"
     let rawRes := if disc.isNull then JVal.obj #[("schema_version", JVal.nat 1), ("connections", .arr #[])] else disc
     let hps ← loadHydratedProviders store workingDir
-    let filterConnModels (c : JVal) : JVal :=
-      let pid := (c.fieldStr? "provider_id").getD ""
-      let matched? := hps.find? (fun hp =>
-        hp.id == pid || s!"custom:{hp.id}" == pid || hp.providerType.toLower == pid.toLower ||
-        customProviderName hp.name == customProviderName pid)
-      let pName := (matched?.map (·.name)).getD pid
-      let bUrl := (matched?.map (·.baseUrl)).getD ""
-      let pId := (matched?.map (·.id)).getD pid
-      let keepModel (m : JVal) : Bool :=
-        let mid := (m.fieldStr? "id").getD ""
-        customProviderModelAllowed pName bUrl mid && customProviderModelAllowed pId bUrl mid
-      let c1 := match c.field? "last_success" with
-        | some ls@(.obj _) =>
-          match ls.fieldArr? "models" with
-          | some ms => c.setField "last_success" (ls.setField "models" (.arr (ms.filter keepModel)))
-          | none => c
-        | _ => c
-      match c1.fieldArr? "fallback_models" with
-      | some fms => c1.setField "fallback_models" (.arr (fms.filter keepModel))
-      | none => c1
-    let allConns := ((rawRes.fieldArr? "connections").getD #[]).map filterConnModels
+    let allConns := ((rawRes.fieldArr? "connections").getD #[]).map (filterDiscoveryConnectionModels hps)
     let res := rawRes.setField "connections" (.arr allConns)
     if effAdmin then
       return some (jsonResp 200 res)
