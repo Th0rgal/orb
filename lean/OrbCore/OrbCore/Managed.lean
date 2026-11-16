@@ -372,6 +372,7 @@ def managedComputeDdl : String :=
   "singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1)," ++
   "enabled INTEGER NOT NULL,boat_enabled INTEGER NOT NULL," ++
   "daily_cap_cents INTEGER NOT NULL,spent_today_cents INTEGER NOT NULL,max_concurrent INTEGER NOT NULL);" ++
+  "CREATE TABLE IF NOT EXISTS managed_global_budget_baseline(day_start INTEGER PRIMARY KEY,cents INTEGER NOT NULL);" ++
   "CREATE TABLE IF NOT EXISTS mission_budgets(" ++
   "mission_id TEXT PRIMARY KEY,budget_deci_milli_usd INTEGER," ++
   "reset_period TEXT NOT NULL DEFAULT 'total'," ++
@@ -604,6 +605,32 @@ def saveManagedFleetConfig (st : ManagedComputeStore) (enabled boatEnabled : Boo
   | .error e => return .error e
   | .ok _ => return .ok ()
 
+/-- The legacy counter is consumed once, forever: preserve only its unexplained
+    remainder after subtracting reservations it already represents today or that
+    are still live. Completed reservations from earlier days remain untouched.
+    Call under an immediate transaction, using the caller's injected clock. -/
+private def globalManagedSpendTx (st : ManagedComputeStore) (nowSec fallback : UInt64) :
+    IO (Except String UInt64) := do
+  let day := (nowSec / 86400) * 86400
+  let .ok _ ← execParamQueryUnlocked st.db
+      ("INSERT OR IGNORE INTO managed_global_budget_baseline(day_start,cents) " ++
+       "SELECT ?1,MAX(0,COALESCE((SELECT spent_today_cents FROM managed_fleet_state WHERE singleton_id=1),?2) " ++
+       "- COALESCE((SELECT SUM(r.cents) FROM managed_cost_reservations r WHERE r.day_start=?1 OR EXISTS " ++
+       "(SELECT 1 FROM managed_machines m WHERE m.id=r.machine_id AND " ++
+       "(m.phase_code IN (0,1) OR EXISTS(SELECT 1 FROM managed_resume_intents x " ++
+       "WHERE x.machine_id=m.id AND x.state IN ('pending','aborting'))))),0)) " ++
+       "WHERE NOT EXISTS (SELECT 1 FROM managed_global_budget_baseline);")
+      #[s!"{day}",s!"{fallback}"] | return .error "managed_global_budget_migration_failed"
+  let .ok rows ← execParamQueryUnlocked st.db
+      ("SELECT COALESCE((SELECT SUM(cents) FROM managed_global_budget_baseline WHERE day_start=?1),0) + " ++
+       "COALESCE((SELECT SUM(r.cents) FROM managed_cost_reservations r WHERE r.day_start=?1 OR EXISTS " ++
+       "(SELECT 1 FROM managed_machines m WHERE m.id=r.machine_id AND " ++
+       "(m.phase_code IN (0,1) OR EXISTS(SELECT 1 FROM managed_resume_intents x " ++
+       "WHERE x.machine_id=m.id AND x.state IN ('pending','aborting'))))),0);") #[s!"{day}"]
+    | return .error "managed_global_budget_read_failed"
+  if rows.size < 2 then return .error "managed_global_budget_read_failed"
+  return .ok (cellU64 rows[1]! 0)
+
 def loadManagedFleetAt (st : ManagedComputeStore) (enabled boatEnabled : Bool)
     (dailyCapCents spentTodayCents maxConcurrent nowEpoch : UInt64) : IO (Except String ManagedFleetState) := do
   let (en, boatEn, capC, spentC, maxConc) ← do
@@ -623,7 +650,10 @@ def loadManagedFleetAt (st : ManagedComputeStore) (enabled boatEnabled : Bool)
           #[s!"{(nowEpoch / 86400) * 86400}"] | return .error "managed_instance_budget_read_failed"
       if costs.size < 2 then return .error "managed_instance_budget_read_failed"
       pure (min capC st.dailyCapCeilingCents, cellU64 costs[1]! 0)
-    else pure (capC, spentC)
+    else do
+      let .ok spent ← withImmediateTx st.db (globalManagedSpendTx st nowEpoch spentC)
+        | return .error "managed_global_budget_read_failed"
+      pure (capC, spent)
   match ← loadMachineRows st.db with
   | .error e => return .error e
   | .ok rows =>
@@ -813,8 +843,21 @@ def applyVmLifecycle (st : ManagedComputeStore) (machineId : String) (ev : VmSli
             | return .error "managed_resume_close_failed"
         return .ok (next, effs)
 
+/-- The provider's declared shape for a machine's size, when Core knows it. -/
+def managedSizeSpec? (provider size : String) : Option ManagedProvider.Size :=
+  (ManagedProvider.declaration? (canonicalizeProvider provider)).bind fun entry =>
+    entry.sizes.find? (·.name == size)
+
+private def bandwidthRateCap (limits : JVal) : Option Nat := do
+  let .num raw ← limits.field? "compute_usd_per_hour" | none
+  match raw.splitOn "." with
+  | [whole] => return (← whole.toNat?) * 100000
+  | [whole, fraction] => return (← whole.toNat?) * 100000 +
+      (← ((fraction ++ "00000").take 5).toString.toNat?)
+  | _ => none
+
 private def admitManagedCostTx (st : ManagedComputeStore) (fleet : ManagedFleetState)
-    (provider ownerUserId : String) (cost ttlMinutes nowEpoch : UInt64) (newSlot : Bool)
+    (provider size ownerUserId missionId : String) (cost ttlMinutes nowEpoch : UInt64) (newSlot : Bool)
     (userAdmission? : Option ManagedUserAdmission) : IO (Except String ManagedFleetState) := do
   if ttlMinutes < 5 || ttlMinutes > 720 then return .error "managed_ttl_invalid"
   let .ok counts ← execParamQueryUnlocked st.db
@@ -839,7 +882,10 @@ private def admitManagedCostTx (st : ManagedComputeStore) (fleet : ManagedFleetS
       pure { current with
         instanceName := "dev", instanceDailyCapCents? := some st.dailyCapCeilingCents,
         dailyCapCents := min current.dailyCapCents st.dailyCapCeilingCents, spentTodayCents := cellU64 costs[1]! 0 }
-    else pure current
+  else do
+      let .ok spent ← globalManagedSpendTx st nowEpoch current.spentTodayCents
+        | return .error "managed_global_budget_read_failed"
+      pure { current with spentTodayCents := spent }
   if counts.size < 2 then return .error "managed_admission_read_failed"
   let active := (cellU64 counts[1]! 0).toNat
   -- An extension replaces one already-counted slot; a create/resume adds one.
@@ -847,6 +893,37 @@ private def admitManagedCostTx (st : ManagedComputeStore) (fleet : ManagedFleetS
   if !admitManagedSpawnCount current chargedActive cost ttlMinutes.toUInt32 then
     return .error "managed_spawn_rejected"
   if provider == "boat" && !current.boatEnabled then return .error "provider_disabled"
+  if !missionId.isEmpty then
+    let .ok budgetRows ← execParamQueryUnlocked st.db
+        "SELECT bandwidth_limits_json FROM mission_budgets WHERE mission_id=?1;" #[missionId]
+      | return .error "managed_bandwidth_read_failed"
+    if budgetRows.size > 1 then
+      let limits := (OrbBin.Json.parse (cell budgetRows[1]! 0)).toOption.getD (.obj #[])
+      let some shape := managedSizeSpec? provider size
+        | return .error "managed_bandwidth_shape_unknown"
+      let requestedCpu := shape.cpu
+      if let some cap := limits.fieldNat? "compute_vcpu_per_min" then
+        if requestedCpu > cap then return .error "managed_compute_vcpu_bandwidth_exceeded"
+      if let some cap := bandwidthRateCap limits then
+        if shape.milliCentsPerHour.toNat > cap then return .error "managed_compute_cost_bandwidth_exceeded"
+      let protectRoot := limits.fieldBool? "protect_root" |>.getD true
+      if !protectRoot && newSlot then
+        let .ok usageRows ← execParamQueryUnlocked st.db
+            ("SELECT provider,size FROM managed_machines m WHERE m.owner_mission=?1 AND " ++
+             "(m.phase_code IN (0,1) OR EXISTS(SELECT 1 FROM managed_resume_intents r WHERE r.machine_id=m.id AND r.state IN ('pending','aborting')));") #[missionId]
+          | return .error "managed_bandwidth_read_failed"
+        let mut cpu := requestedCpu
+        let mut rate := shape.milliCentsPerHour.toNat
+        for row in usageRows.extract 1 usageRows.size do
+          let some held := managedSizeSpec? (cell row 0) (cell row 1)
+            | return .error "managed_bandwidth_shape_unknown"
+          cpu := cpu + held.cpu
+          rate := rate + held.milliCentsPerHour.toNat
+        if let some cap := limits.fieldNat? "compute_vcpu_per_min" then
+          if cpu > cap then
+            return .error "managed_compute_vcpu_bandwidth_exceeded"
+        if let some cap := bandwidthRateCap limits then
+          if rate > cap then return .error "managed_compute_cost_bandwidth_exceeded"
   -- Instance cap on lean.ci machines. An explicit request beyond it is refused here;
   -- an unnamed one was already moved to the fallback by `chooseManagedProvider`.
   if newSlot && provider == "leanci" then
@@ -895,9 +972,9 @@ private def chargeManagedCostTx (st : ManagedComputeStore) (current : ManagedFle
     | return .error "managed_cost_reservation_failed"
   match ← execParamQueryUnlocked st.db
       ("INSERT INTO managed_fleet_state(singleton_id,enabled,boat_enabled,daily_cap_cents,spent_today_cents,max_concurrent) " ++
-       "VALUES(1,?1,?2,?3,?4,?5) ON CONFLICT(singleton_id) DO UPDATE SET spent_today_cents=spent_today_cents+?6;")
+       "VALUES(1,?1,?2,?3,?4,?5) ON CONFLICT(singleton_id) DO UPDATE SET spent_today_cents=excluded.spent_today_cents;")
       #[if current.enabled then "1" else "0", if current.boatEnabled then "1" else "0",
-        s!"{current.dailyCapCents}", s!"{current.spentTodayCents + cost}", s!"{current.maxConcurrent}", s!"{cost}"] with
+        s!"{current.dailyCapCents}", s!"{current.spentTodayCents + cost}", s!"{current.maxConcurrent}"] with
   | .error e => return .error e
   | .ok _ => return .ok ()
 
@@ -957,7 +1034,7 @@ def prepareManagedExtension (st : ManagedComputeStore) (fleet : ManagedFleetStat
     let .ok oldQuote := quote m.size m.ttlMinutes | return .error "managed_extension_quote_invalid"
     let .ok newQuote := quote m.size ttl | return .error "managed_extension_quote_invalid"
     let cost := newQuote - oldQuote
-    let current ← match ← admitManagedCostTx st fleet m.provider m.ownerUserId cost ttl nowEpoch false budget? with
+    let current ← match ← admitManagedCostTx st fleet m.provider m.size m.ownerUserId m.ownerMission cost ttl nowEpoch false budget? with
       | .ok value => pure value
       | .error e => return .error e
     let intent : ManagedExtensionIntent := {
@@ -1049,10 +1126,17 @@ def provisionManagedMachine (st : ManagedComputeStore) (fleet : ManagedFleetStat
     (machine : ManagedMachine) (nowEpoch : UInt64)
     (userAdmission? : Option ManagedUserAdmission := none) : IO (Except String ManagedMachine) := do
   if machine.ttlMinutes < 5 || machine.ttlMinutes > 720 then return .error "managed_ttl_invalid"
+  -- Preserve the caller-side fail-closed guard for stale or inflated snapshots;
+  -- the transaction below repeats admission against durable dated state.
   if st.instanceName != "dev" && !admitManagedSpawn fleet machine.spentCents machine.ttlMinutes.toUInt32 then
     return .error "managed_spawn_rejected"
   if !isKnownProvider machine.provider || machine.id.isEmpty || machine.nodeBootEpoch == 0 then
     return .error "managed_spawn_invalid"
+  -- Persist the migration's date even when admission subsequently refuses an
+  -- exhausted legacy allowance. Otherwise every retry could re-date that spend.
+  if st.instanceName != "dev" then
+    let .ok _ ← withImmediateTx st.db (globalManagedSpendTx st nowEpoch fleet.spentTodayCents)
+      | return .error "managed_global_budget_read_failed"
   let slice : VmSliceState := {
     phaseCode := 0
     activeComputeEligible := 0
@@ -1067,8 +1151,8 @@ def provisionManagedMachine (st : ManagedComputeStore) (fleet : ManagedFleetStat
     expiresAtSec := if machine.expiresAtSec == 0 then nowEpoch + machine.ttlMinutes * 60 else machine.expiresAtSec
   }
   withImmediateTx st.db do
-    let current ← match ← admitManagedCostTx st fleet machine.provider machine.ownerUserId
-        machine.spentCents machine.ttlMinutes nowEpoch true userAdmission? with
+    let current ← match ← admitManagedCostTx st fleet machine.provider machine.size machine.ownerUserId
+         machine.ownerMission machine.spentCents machine.ttlMinutes nowEpoch true userAdmission? with
       | .ok value => pure value
       | .error e => return .error e
     match ← selectMachineTx st.db machine.id with
@@ -1150,7 +1234,7 @@ def prepareManagedResume (st : ManagedComputeStore) (fleet : ManagedFleetState)
       return .error "vm_resume_rejected"
     if deadlineSec ≤ nowEpoch || m.spentCents + cost < m.spentCents then
       return .error "managed_resume_invalid"
-    let current ← match ← admitManagedCostTx st fleet m.provider m.ownerUserId cost ttl nowEpoch true userAdmission? with
+    let current ← match ← admitManagedCostTx st fleet m.provider m.size m.ownerUserId m.ownerMission cost ttl nowEpoch true userAdmission? with
       | .ok value => pure value
       | .error e => return .error e
     let intent : ManagedResumeIntent := {
@@ -1700,11 +1784,6 @@ def renderManagedProvidersJson
       ("key_hint", if isAdmin && globallyConfigured then .str "••••" else .null)
     ] ++ ManagedProvider.catalogFields p))
   "[" ++ String.intercalate "," items.toList ++ "]"
-
-/-- The provider's declared shape for a machine's size, when Core knows it. -/
-def managedSizeSpec? (provider size : String) : Option ManagedProvider.Size :=
-  (ManagedProvider.declaration? (canonicalizeProvider provider)).bind fun entry =>
-    entry.sizes.find? (·.name == size)
 
 /-- Hourly price as a JSON number of dollars, from the declared milli-cent rate. -/
 def managedUsdPerHourJson (provider size : String) : String :=
