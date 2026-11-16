@@ -1621,8 +1621,12 @@ def run (root : String) : IO Unit := do
     let (rawBearerSt, _) ← send "GET" "/api/auth/me" "configured-member-password-123" (.obj #[]) configured
     let (staleLoginSt, _) ← send "POST" "/api/auth/login" ""
       (.obj #[("username", .str "member"), ("password", .str "configured-member-password-123")]) configured
-    check (rawBearerSt == 401 && staleLoginSt == 401)
-      s!"r12_database_rejected_password_never_yields_session (bearer={rawBearerSt}, login={staleLoginSt})"
+    let (prodWrongPassSt, _) ← send "POST" "/api/auth/login" ""
+      (.obj #[("username", .str "admin"), ("password", .str "wrong-password-in-prod-mode")]) st
+    check (rawBearerSt == 401 && staleLoginSt == 401 && prodWrongPassSt == 401)
+      s!"r12_database_rejected_password_never_yields_session (bearer={rawBearerSt}, login={staleLoginSt}, prodWrong={prodWrongPassSt})"
+    check (prodWrongPassSt == 401)
+      s!"r12_production_mode_login_refuses_wrong_password (got {prodWrongPassSt})"
     -- 3. r12_http01_sec03_nested_auth_password_hash_precedence_and_redaction (SEC-03 / HTTP-01)
     let rustSavedHash ← hashPasswordPbkdf2 "rust-saved-admin-pass-777"
     let r12Dir := root ++ "/r12-sec03-hydrate"
