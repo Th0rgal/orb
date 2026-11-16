@@ -130,11 +130,14 @@ class RunnerSelectionTest(unittest.TestCase):
         "kernel-abi.yml": {"plan": "ubuntu-latest", "kernel-abi": "ubuntu-latest"},
     }
     # Jobs that need Docker (a `container:` image or `docker build`/`run`) stay
-    # on hosted runners: lean.ci guests have no Docker daemon.
-    HOSTED_ONLY = {"ci.yml": {"orb-browser", "orb-performance", "docker"}, "kernel-abi.yml": set()}
+    # on hosted runners: lean.ci guests have no Docker daemon. The desktop shell
+    # builds release binaries against Ubuntu 24.04 system libraries.
+    DOCKER_JOBS = {"ci.yml": {"orb-browser", "orb-performance", "docker"}, "kernel-abi.yml": set()}
+    HOSTED_ONLY = {"ci.yml": DOCKER_JOBS["ci.yml"] | {"orb-desktop-shell"}, "kernel-abi.yml": set()}
 
     def test_docker_jobs_are_hosted_only(self):
-        for workflow, hosted in self.HOSTED_ONLY.items():
+        self.assertEqual(self.HOSTED_ONLY["ci.yml"] - self.DOCKER_JOBS["ci.yml"], {"orb-desktop-shell"})
+        for workflow, hosted in self.DOCKER_JOBS.items():
             text = (ROOT / ".github/workflows" / workflow).read_text().split("\njobs:\n", 1)[1]
             blocks = dict(zip(*[iter(re.split(r"(?m)^  ([a-z0-9-]+):\n", text)[1:])] * 2))
             for job, body in blocks.items():
