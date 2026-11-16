@@ -1760,7 +1760,7 @@ def run (root : String) : IO Unit := do
       let (muV1St, _) ← send "GET" "/api/auth/me" v1OrbMonitorTok (.obj #[]) matSt
       let (muRollSt, _) ← send "GET" "/api/auth/me" rollingUpgradeTok (.obj #[]) matSt
       check (muRealSt == 200 && (muRealDoc.fieldOrNull "user").fieldStr? "id" == some "usr_real_admin_uuid" &&
-          (muRealDoc.fieldOrNull "user").fieldStr? "auth_mode" == some "multi_user" &&
+           muRealDoc.fieldStr? "auth_mode" == some "multi_user" &&
           muLitSt == 401 && muUnkSt == 401 && muV1St == 401 && muRollSt == 401)
         s!"r12_legacy_and_ops_caller_credential_matrix multi_user (real={muRealSt}, lit={muLitSt}, unk={muUnkSt}, v1={muV1St}, roll={muRollSt})"
       -- Single-user mode (disable second user so only usr_real_admin_uuid is active)
