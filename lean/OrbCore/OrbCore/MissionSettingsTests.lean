@@ -53,7 +53,7 @@ def run (root : String) : IO Unit := do
       return value
     let restAt (method path : String) (patch : JVal) := do
       let body := renderCompact patch
-      let jwt := mintSessionToken cfg.jwtSecret (now + 3600)
+      let jwt := mintSessionTokenV2 cfg.jwtSecret "alice" "member" 1 (now + 3600)
       let raw := s!"{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Type: application/json\r\nContent-Length: {body.toUTF8.size}\r\n\r\n{body}"
       let .ok req := parseRequest raw.toUTF8 none | throw (IO.userError "settings REST parse")
       let .ok response ← dispatchCoreRequest app req now | throw (IO.userError "settings REST dispatch")

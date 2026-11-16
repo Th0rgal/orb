@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import base64
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -16,6 +17,27 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import rolling_upgrade_nodes as roll  # noqa: E402
+
+
+class RollingUpgradeAuthTest(unittest.TestCase):
+    def test_r12_rollout_token_tracks_live_admin_id_and_disablement(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "missions.db"
+            con = sqlite3.connect(db)
+            con.execute("CREATE TABLE users(id TEXT, role TEXT, disabled INTEGER)")
+            con.executemany("INSERT INTO users VALUES(?,?,?)", [
+                ("admin", "admin", 1), ("real-admin-uuid", "admin", 0),
+                ("member", "member", 0), ("disabled-admin", "admin", 1)])
+            con.commit()
+            token = roll.mint_hs256_jwt("test-secret", roll.find_enabled_admin_id(db))
+            payload = json.loads(base64.urlsafe_b64decode(token.split(".")[1] + "=="))
+            self.assertEqual(payload["sub"], "real-admin-uuid")
+            self.assertEqual(roll.find_enabled_admin_id(db), "real-admin-uuid")
+            con.execute("UPDATE users SET disabled=1 WHERE id='real-admin-uuid'")
+            con.commit()
+            with self.assertRaises(RuntimeError):
+                roll.find_enabled_admin_id(db)
+            con.close()
 
 
 class FakeNodeOps:
@@ -312,7 +334,7 @@ if os.environ['FAILURE'] == 'swap':
         cordoned = {"ashur": True, "nippur": True, "babylon": True, "old-agent": True}
         server = _start_core_api_server(cordoned)
         try:
-            api = roll.HttpCoreApi(f"http://127.0.0.1:{server.server_port}", roll.mint_hs256_jwt("test-secret"))
+            api = roll.HttpCoreApi(f"http://127.0.0.1:{server.server_port}", roll.mint_hs256_jwt("test-secret", "real-admin-uuid"))
             remote_nodes = [
                 ("ashur", "/var/lib/sandboxed-node/jobs.db"),
                 ("nippur", "/var/lib/sandboxed-node/jobs.db"),
@@ -410,7 +432,7 @@ if os.environ['FAILURE'] == 'swap':
         cordoned = {"ashur": True, "nippur": False}
         server = _start_core_api_server(cordoned)
         try:
-            api = roll.HttpCoreApi(f"http://127.0.0.1:{server.server_port}", roll.mint_hs256_jwt("test-secret"))
+            api = roll.HttpCoreApi(f"http://127.0.0.1:{server.server_port}", roll.mint_hs256_jwt("test-secret", "real-admin-uuid"))
             remote_nodes = [("ashur", "/jobs.db"), ("nippur", "/jobs.db")]
             ops = FakeNodeOps(
                 {
@@ -679,7 +701,7 @@ if os.environ['FAILURE'] == 'swap':
         cordoned = {"ashur": False, "nippur": False}
         server = _start_core_api_server(cordoned)
         try:
-            api = roll.HttpCoreApi(f"http://127.0.0.1:{server.server_port}", roll.mint_hs256_jwt("test-secret"))
+            api = roll.HttpCoreApi(f"http://127.0.0.1:{server.server_port}", roll.mint_hs256_jwt("test-secret", "real-admin-uuid"))
             ops = FakeNodeOps(
                 {
                     "ashur": {"staged": True, "running": 0, "fail_upgrade": True},
@@ -999,7 +1021,7 @@ if os.environ['FAILURE'] == 'swap':
         cordoned = {"ashur": False, "nippur": False}
         server = _start_core_api_server(cordoned)
         try:
-            api = roll.HttpCoreApi(f"http://127.0.0.1:{server.server_port}", roll.mint_hs256_jwt("test-secret"))
+            api = roll.HttpCoreApi(f"http://127.0.0.1:{server.server_port}", roll.mint_hs256_jwt("test-secret", "real-admin-uuid"))
             ops = FakeNodeOps(
                 {
                     "ashur": {"staged": True, "running": 2},
@@ -1048,7 +1070,7 @@ if os.environ['FAILURE'] == 'swap':
         cordoned = {"ashur": False, "nippur": True, "babylon": False}
         server = _start_core_api_server(cordoned)
         try:
-            api = roll.HttpCoreApi(f"http://127.0.0.1:{server.server_port}", roll.mint_hs256_jwt("test-secret"))
+            api = roll.HttpCoreApi(f"http://127.0.0.1:{server.server_port}", roll.mint_hs256_jwt("test-secret", "real-admin-uuid"))
             staged_calls = []
 
             class ResumableOps(FakeNodeOps):
@@ -1547,7 +1569,7 @@ if os.environ['FAILURE'] == 'swap':
             cordoned = {"ashur": True, "nippur": False}
             server = _start_core_api_server(cordoned)
             try:
-                api = roll.HttpCoreApi(f"http://127.0.0.1:{server.server_port}", roll.mint_hs256_jwt("test-secret"))
+                api = roll.HttpCoreApi(f"http://127.0.0.1:{server.server_port}", roll.mint_hs256_jwt("test-secret", "real-admin-uuid"))
 
                 class RollbackFailedOps(FakeNodeOps):
                     def upgrade_remote(self, host, _db_path):
@@ -1586,7 +1608,7 @@ if os.environ['FAILURE'] == 'swap':
             server = _start_core_api_server(cordoned)
             try:
                 api_url = f"http://127.0.0.1:{server.server_port}"
-                token = roll.mint_hs256_jwt("test-secret")
+                token = roll.mint_hs256_jwt("test-secret", "real-admin-uuid")
                 api = roll.HttpCoreApi(api_url, token)
 
                 class FailingUpgradeOps(FakeNodeOps):
@@ -1729,7 +1751,7 @@ if os.environ['FAILURE'] == 'swap':
             server = _start_core_api_server(cordoned)
             try:
                 api_url = f"http://127.0.0.1:{server.server_port}"
-                token = roll.mint_hs256_jwt("test-secret")
+                token = roll.mint_hs256_jwt("test-secret", "real-admin-uuid")
                 api = roll.HttpCoreApi(api_url, token)
 
                 class PingAliveSshTimeoutAndOldNodeOps(FakeNodeOps):

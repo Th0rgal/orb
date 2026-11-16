@@ -489,7 +489,7 @@ def _default_health_check_probe(
     return {"ok": True, "build_sha": reported_build, "binary_sha256": reported_bins}
 
 
-def mint_hs256_jwt(secret, subject="admin", ttl_secs=300):
+def mint_hs256_jwt(secret, subject, ttl_secs=300):
     def b64u(data):
         return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
@@ -498,6 +498,16 @@ def mint_hs256_jwt(secret, subject="admin", ttl_secs=300):
     pay = b64u(json.dumps({"sub": subject, "iat": now, "exp": now + ttl_secs}, separators=(",", ":")).encode("utf-8"))
     sig = b64u(hmac.new(secret.encode("utf-8"), f"{hdr}.{pay}".encode("ascii"), hashlib.sha256).digest())
     return f"{hdr}.{pay}.{sig}"
+
+
+def find_enabled_admin_id(db_path):
+    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as con:
+        row = con.execute(
+            "SELECT id FROM users WHERE role='admin' AND disabled=0 ORDER BY id LIMIT 1"
+        ).fetchone()
+    if not row or not row[0]:
+        raise RuntimeError("could not locate an enabled Core admin user")
+    return row[0]
 
 
 def discover_local_core_auth(service_binary="/usr/local/bin/orb-core", default_port="3000"):
@@ -520,7 +530,20 @@ def discover_local_core_auth(service_binary="/usr/local/bin/orb-core", default_p
             port = val
     if not jwt_secret:
         raise RuntimeError("could not locate JWT secret in Core process environment")
-    return f"http://127.0.0.1:{port}", mint_hs256_jwt(jwt_secret)
+    # Use the database actually opened by this process, including legacy
+    # layouts, rather than guessing prod/dev from the rollout environment.
+    candidates = set()
+    for fd in Path(f"/proc/{pid}/fd").iterdir():
+        try:
+            target = fd.readlink()
+        except FileNotFoundError:
+            continue  # A transient descriptor closed during enumeration.
+        if target.name == "missions.db" or (target.name.startswith("missions-") and target.suffix == ".db"):
+            candidates.add(target)
+    if len(candidates) != 1:
+        raise RuntimeError("could not uniquely locate Core missions database")
+    db_path = candidates.pop()
+    return f"http://127.0.0.1:{port}", mint_hs256_jwt(jwt_secret, find_enabled_admin_id(db_path))
 
 
 class HttpCoreApi:

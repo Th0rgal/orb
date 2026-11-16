@@ -192,7 +192,7 @@ def transferCleanupSql : String :=
 
 def missionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS missions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'awaiting_user', backend TEXT NOT NULL DEFAULT 'codex', model_override TEXT, model_effort TEXT, working_directory TEXT NOT NULL DEFAULT '', project TEXT NOT NULL DEFAULT '', folder TEXT NOT NULL DEFAULT '', placement_revision INTEGER NOT NULL DEFAULT 0, parent_mission_id TEXT, created_at TEXT NOT NULL DEFAULT '', metadata_updated_at TEXT, short_description TEXT, github_pr TEXT, origin TEXT, origin_session_id TEXT, workspace_name TEXT, resumable INTEGER NOT NULL DEFAULT 0, requires_local_disk INTEGER NOT NULL DEFAULT 0, tags TEXT NOT NULL DEFAULT '[]', session_id TEXT, deferred_goal TEXT, workspace_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000', terminal_reason TEXT, updated_at TEXT NOT NULL DEFAULT '', opened_at TEXT, agent TEXT, config_profile TEXT, total_cost_cents INTEGER NOT NULL DEFAULT 0, history_json TEXT NOT NULL DEFAULT '[]', authority_mode TEXT NOT NULL DEFAULT 'writer' CHECK(authority_mode IN ('readonly','writer')), placement_kind TEXT NOT NULL DEFAULT 'managed', superseded_by_mission_id TEXT NOT NULL DEFAULT '', orphaned_at TEXT NOT NULL DEFAULT '', reserved_disk_gib INTEGER NOT NULL DEFAULT 0, state_revision INTEGER NOT NULL DEFAULT 1, owner_epoch INTEGER NOT NULL DEFAULT 1, run_generation INTEGER NOT NULL DEFAULT 1, node_boot_epoch INTEGER NOT NULL DEFAULT 1, track TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '', owner_user_id TEXT NOT NULL DEFAULT '');" ++
-  "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','member')), unix_username TEXT UNIQUE, session_epoch INTEGER NOT NULL DEFAULT 1, disabled INTEGER NOT NULL DEFAULT 0, daily_spend_cap_cents INTEGER, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
+  "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','member')), unix_username TEXT UNIQUE, session_epoch INTEGER NOT NULL DEFAULT 1, disabled INTEGER NOT NULL DEFAULT 0, daily_spend_cap_cents INTEGER, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '', password_seeded INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE TABLE IF NOT EXISTS mission_shares (mission_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'participant' CHECK(role IN ('participant')), granted_by TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY (mission_id, user_id));" ++
   "CREATE INDEX IF NOT EXISTS idx_mission_shares_user ON mission_shares(user_id);" ++
   "CREATE TABLE IF NOT EXISTS user_provider_prefs (user_id TEXT NOT NULL, provider_id TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT '', PRIMARY KEY (user_id, provider_id));" ++
@@ -414,6 +414,7 @@ def missionsAdditiveAlters : Array String := #[
   "ALTER TABLE mission_automations ADD COLUMN variables_used TEXT NOT NULL DEFAULT '{}';",
   "ALTER TABLE core_boot_state ADD COLUMN bunker_state INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE privilege_leases ADD COLUMN lease_epoch INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE users ADD COLUMN password_seeded INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE missions ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT '';",
   "CREATE INDEX IF NOT EXISTS idx_missions_owner ON missions(owner_user_id);",
   "CREATE INDEX IF NOT EXISTS idx_missions_project_folder ON missions(project, folder);",
@@ -3884,18 +3885,18 @@ def bootstrapUsersAndBackfill
         let uid ← newUuidV4
         let pwHash ← hashPasswordPbkdf2 rawP
         discard <| execParamQuery st.missionsDb
-          ("INSERT OR IGNORE INTO users(id,username,password_hash,role,unix_username,session_epoch,disabled,daily_spend_cap_cents,created_at,updated_at) " ++
-           "VALUES(?1,?2,?3,'admin',NULL,1,0,NULL,?4,?4);")
+          ("INSERT OR IGNORE INTO users(id,username,password_hash,role,unix_username,session_epoch,disabled,daily_spend_cap_cents,created_at,updated_at,password_seeded) " ++
+           "VALUES(?1,?2,?3,'admin',NULL,1,0,NULL,?4,?4,1);")
           #[uid, uname, pwHash, nowAt]
   let bootstrapAdminId ←
     match ← getBootstrapAdmin? st with
     | some adm => pure adm.id
     | none =>
       let uid := "usr_bootstrap_admin"
-      let pwHash ← hashPasswordPbkdf2 "dev-mode-placeholder"
+      let pwHash := "dev-mode-placeholder"
       discard <| execParamQuery st.missionsDb
-        ("INSERT OR IGNORE INTO users(id,username,password_hash,role,unix_username,session_epoch,disabled,daily_spend_cap_cents,created_at,updated_at) " ++
-         "VALUES(?1,'admin',?2,'admin',NULL,1,0,NULL,?3,?3);")
+        ("INSERT OR IGNORE INTO users(id,username,password_hash,role,unix_username,session_epoch,disabled,daily_spend_cap_cents,created_at,updated_at,password_seeded) " ++
+         "VALUES(?1,'admin',?2,'admin',NULL,1,0,NULL,?3,?3,1);")
         #[uid, pwHash, nowAt]
       pure uid
   discard <| execParamQuery st.missionsDb
@@ -4137,7 +4138,7 @@ def resetUserPasswordRecord
   let pwHash ← hashPasswordPbkdf2 newPassword
   let nextEpoch := cur.sessionEpoch + 1
   let res ← execParamQuery st.missionsDb
-    "UPDATE users SET password_hash=?2, session_epoch=?3, updated_at=?4 WHERE id=?1;"
+    "UPDATE users SET password_hash=?2, session_epoch=?3, updated_at=?4, password_seeded=0 WHERE id=?1;"
     #[targetUserId, pwHash, s!"{nextEpoch}", nowAt]
   match res with
   | .ok _ => return .ok { cur with passwordHash := pwHash, sessionEpoch := nextEpoch, updatedAt := nowAt }

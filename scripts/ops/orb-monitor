@@ -244,8 +244,15 @@ def core_token():
     secret = core_env("JWT_SECRET")
     if not secret:
         return ""
+    with ro(MISSIONS_DB) as con:
+        admin = con.execute(
+            "SELECT id, session_epoch FROM users WHERE role='admin' AND disabled=0 ORDER BY id LIMIT 1"
+        ).fetchone()
+    if not admin:
+        return ""
     exp = int(NOW) + 600
-    return f"{exp}." + hmac.new(secret.encode(), f"orb-jwt-v1:{exp}".encode(), hashlib.sha256).hexdigest()
+    payload = f"orb-jwt-v2:{admin[0]}:admin:{admin[1]}:{exp}"
+    return payload + "." + hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
 
 def post_inbox(text):

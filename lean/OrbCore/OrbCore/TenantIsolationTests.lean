@@ -474,11 +474,10 @@ def run (root : String) : IO Unit := do
       check (status == 200) s!"MCP transport {tool}"
       return doc
     let configured := { st with cfg := { st.cfg with usersJson := "{\"member\":\"configured-member-password-123\"}" } }
-    let (legacyStatus, legacyMe) ← send "GET" "/api/auth/me" "configured-member-password-123" (.obj #[]) configured
-    check (legacyStatus == 200 && (legacyMe.fieldOrNull "user").fieldStr? "id" == some "member" &&
-      (legacyMe.fieldOrNull "user").fieldStr? "role" == some "member") "configured raw password never becomes bootstrap admin"
+    let (legacyStatus, _) ← send "GET" "/api/auth/me" "configured-member-password-123" (.obj #[]) configured
+    check (legacyStatus == 401) "configured raw password as bearer is rejected (SEC-02)"
     let (legacyForeign, _) ← send "GET" "/api/control/missions/admin-mission" "configured-member-password-123" (.obj #[]) configured
-    check (legacyForeign == 404) "configured password retains REST tenant confinement"
+    check (legacyForeign == 401) "configured raw password bearer rejected on REST"
     let ambiguous := { configured with cfg := { configured.cfg with
       usersJson := "{\"admin\":\"configured-member-password-123\",\"member\":\"configured-member-password-123\"}" } }
     check ((← send "GET" "/api/auth/me" "configured-member-password-123" (.obj #[]) ambiguous).1 == 401)
@@ -523,19 +522,14 @@ def run (root : String) : IO Unit := do
       ((renderCompact mSearchDoc).splitOn "admin-mission").length == 1 &&
       ((renderCompact mSearchDoc).splitOn "admin-private-search-body").length == 1 &&
       ((renderCompact mSearchDoc).splitOn "admin-private-marker").length == 1
-    let legacyUnscopedApp := { st with bootstrapAdminId := "", cfg := { st.cfg with devMode := true } }
     let (admSearchSt, admSearchDoc) ← send "GET" "/api/control/missions/search/messages?q=shared-search-token" admin (.obj #[]) st
-    let (legSearchSt, legSearchDoc) ← send "GET" "/api/control/missions/search/messages?q=shared-search-token" "" (.obj #[]) legacyUnscopedApp
+    let (legSearchSt, legSearchDoc) ← send "GET" "/api/control/missions/search/messages?q=shared-search-token" "" (.obj #[]) st
     let bAdminOk := admSearchSt == 200 &&
       admSearchDoc.asArr?.isNone &&
       (admSearchDoc.fieldArr? "hits").isSome &&
       admSearchDoc.field? "next_cursor" == some .null &&
       ((admSearchDoc.field? "coverage").bind JVal.asObj?).isSome
-    let bLegacyOk := legSearchSt == 200 &&
-      legSearchDoc.asArr?.isNone &&
-      (legSearchDoc.fieldArr? "hits").isSome &&
-      legSearchDoc.field? "next_cursor" == some .null &&
-      ((legSearchDoc.field? "coverage").bind JVal.asObj?).isSome
+    let bLegacyOk := legSearchSt == 401 && legSearchDoc.fieldStr? "error" == some "unauthorized"
     check (aOk && bAdminOk && bLegacyOk && cOk && dOk)
       (s!"search/messages contract: " ++
        s!"(a) member={aOk} (st={mSearchSt}, body={renderCompact mSearchDoc}); " ++
@@ -1610,6 +1604,178 @@ def run (root : String) : IO Unit := do
     finally
       sseAcceptDone.set true
       let _ := sseServerTask.get
+    -- R12 named failing regression tests:
+    for emptyHash in #["", "   "] do
+      check (OrbCore.LegacyHydrate.settingsPasswordHash? (.obj #[
+        ("auth", .obj #[("password_hash", .str emptyHash)]),
+        ("dashboard_password_hash", .str "saved-top-level")]) == some "saved-top-level")
+        "r12_empty_nested_password_hash_falls_back"
+    -- 1. r12_legacy_token_unknown_subject_never_yields_session (SEC-02)
+    let unknownLegacyJwt := issueHs256Jwt st.cfg.jwtSecret "unknown-subject" "ghost" now (now + 3600) "admin"
+    let (unkJwtSt, _) ← send "GET" "/api/auth/me" unknownLegacyJwt
+    check (unkJwtSt == 401)
+      s!"r12_legacy_token_unknown_subject_never_yields_session (got {unkJwtSt})"
+    -- 2. r12_database_rejected_password_never_yields_session (HTTP-01 / SEC-02)
+    let rotatedHash ← hashPasswordPbkdf2 "rotated-db-password-999"
+    sql store.missionsDb "UPDATE users SET password_hash=?1 WHERE id='member';" #[rotatedHash]
+    let (rawBearerSt, _) ← send "GET" "/api/auth/me" "configured-member-password-123" (.obj #[]) configured
+    let (staleLoginSt, _) ← send "POST" "/api/auth/login" ""
+      (.obj #[("username", .str "member"), ("password", .str "configured-member-password-123")]) configured
+    let (prodWrongPassSt, _) ← send "POST" "/api/auth/login" ""
+      (.obj #[("username", .str "admin"), ("password", .str "wrong-password-in-prod-mode")]) st
+    check (rawBearerSt == 401 && staleLoginSt == 401 && prodWrongPassSt == 401)
+      s!"r12_database_rejected_password_never_yields_session (bearer={rawBearerSt}, login={staleLoginSt}, prodWrong={prodWrongPassSt})"
+    check (prodWrongPassSt == 401)
+      s!"r12_production_mode_login_refuses_wrong_password (got {prodWrongPassSt})"
+    -- 3. r12_http01_sec03_nested_auth_password_hash_precedence_and_redaction (SEC-03 / HTTP-01)
+    let rustSavedHash ← hashPasswordPbkdf2 "rust-saved-admin-pass-777"
+    let r12Dir := root ++ "/r12-sec03-hydrate"
+    IO.FS.createDirAll (System.FilePath.mk r12Dir)
+    IO.FS.writeFile (System.FilePath.mk (r12Dir ++ "/settings.json"))
+      s!"\{\"auth\":\{\"password_hash\":{jsonEscape rustSavedHash},\"password_changed_at\":\"2026-11-10T00:00:00Z\"},\"dashboard_password_hash\":{jsonEscape rustSavedHash},\"password_hash\":{jsonEscape rustSavedHash}}"
+    let .ok r12Store ← openCoreStore r12Dir | throw (IO.userError "r12 store")
+    let .ok r12Mc ← openManagedComputeStore (r12Dir ++ "/managed_compute.db") | throw (IO.userError "r12 mc")
+    try
+      let .ok bootId ← bootstrapUsersAndBackfill r12Store #[("admin", "env-bootstrap-pass-111")] s!"{now}"
+        | throw (IO.userError "r12 bootstrap")
+      hydrateLegacyDataDir r12Dir r12Dir r12Store r12Mc bootId false
+      let r12St : CoreAppState := {
+        st with
+        cfg := { st.cfg with workingDir := r12Dir, dashboardPassword := "env-bootstrap-pass-111", usersJson := "" }
+        store := r12Store
+        managedStore? := some r12Mc
+        bootstrapAdminId := bootId
+      }
+      let (envLoginSt, _) ← send "POST" "/api/auth/login" ""
+        (.obj #[("password", .str "env-bootstrap-pass-111")]) r12St
+      let (savedLoginSt, savedLoginDoc) ← send "POST" "/api/auth/login" ""
+        (.obj #[("password", .str "rust-saved-admin-pass-777")]) r12St
+      let savedTok := (savedLoginDoc.fieldStr? "token").getD ""
+      let (setSt, setDoc) ← send "GET" "/api/settings" savedTok (.obj #[]) r12St
+      let setRaw := renderCompact setDoc
+      check (envLoginSt == 401 && savedLoginSt == 200 && setSt == 200 &&
+          (setRaw.splitOn "password_hash").length == 1 &&
+          (setRaw.splitOn "dashboard_password_hash").length == 1 &&
+          (setRaw.splitOn rustSavedHash).length == 1)
+        s!"r12_http01_sec03_nested_auth_password_hash_precedence_and_redaction (env={envLoginSt}, saved={savedLoginSt}, set={setSt})"
+      -- r12_stored_non_placeholder_hash_survives_hydration
+      let explicitEpoch1Hash ← hashPasswordPbkdf2 "explicit-epoch1-admin-pass-888"
+      sql r12Store.missionsDb "UPDATE users SET password_hash=?1, session_epoch=1, password_seeded=0 WHERE id=?2;"
+        #[explicitEpoch1Hash, bootId]
+      hydrateLegacyDataDir r12Dir r12Dir r12Store r12Mc bootId false
+      let (legacyOverwriteSt, _) ← send "POST" "/api/auth/login" ""
+        (.obj #[("password", .str "rust-saved-admin-pass-777")]) r12St
+      let (explicitSurvivesSt, _) ← send "POST" "/api/auth/login" ""
+        (.obj #[("password", .str "explicit-epoch1-admin-pass-888")]) r12St
+      sql r12Store.missionsDb "UPDATE users SET password_hash='dev-mode-placeholder', session_epoch=1, password_seeded=0 WHERE id=?1;"
+        #[bootId]
+      hydrateLegacyDataDir r12Dir r12Dir r12Store r12Mc bootId false
+      let (placeholderReplacedSt, _) ← send "POST" "/api/auth/login" ""
+        (.obj #[("password", .str "rust-saved-admin-pass-777")]) r12St
+      check (legacyOverwriteSt == 401 && explicitSurvivesSt == 200 && placeholderReplacedSt == 200)
+        s!"r12_stored_non_placeholder_hash_survives_hydration (legacy={legacyOverwriteSt}, explicit={explicitSurvivesSt}, placeholder={placeholderReplacedSt})"
+    finally
+      closeManagedComputeStore r12Mc
+      closeCoreStore r12Store
+    -- 4. r12_valid_v2_session_credentials_resolve_principal
+    let (v2AdmSt, v2AdmDoc) ← send "GET" "/api/auth/me" admin
+    let (v2MemSt, v2MemDoc) ← send "GET" "/api/auth/me" member
+    check (v2AdmSt == 200 && (v2AdmDoc.fieldOrNull "user").fieldStr? "id" == some "admin" &&
+        v2MemSt == 200 && (v2MemDoc.fieldOrNull "user").fieldStr? "id" == some "member")
+      s!"r12_valid_v2_session_credentials_resolve_principal (adm={v2AdmSt}, mem={v2MemSt})"
+    -- 5. r12_mission_mcp_and_proxy_credentials_resolve_principal
+    let mcpCapDoc ← call memberSession "get_capabilities"
+    let .ok mptTok ← mintMissionProxyToken store "member-mission" "member" (now + 3600)
+      | throw (IO.userError "r12 mintMissionProxyToken")
+    let mptOk ← authenticateProxyRequest st #[("authorization", s!"Bearer {mptTok}")] now
+    check (mcpCapDoc.fieldBool? "ok" == some true && mptOk)
+      s!"r12_mission_mcp_and_proxy_credentials_resolve_principal (mcpOk={mcpCapDoc.fieldBool? "ok"}, mptOk={mptOk})"
+    -- 6. r12_node_token_credentials_resolve_principal
+    let r12Vm : ManagedMachine := {
+      id := "mm-r12-node-1", sandboxName := "orb-managed-mm-r12-node-1", provider := "boat",
+       size := "small", spentCents := 25, nodeBootEpoch := 1, deletableAtSec := now + 3600
+    }
+    let .ok _ ← provisionManagedMachine mc { enabled := true, boatEnabled := true } r12Vm now
+      | throw (IO.userError "r12 provisionManagedMachine")
+    let .ok () ← bindManagedProviderId mc r12Vm.id "boat-r12-1" 1
+      | throw (IO.userError "r12 bindManagedProviderId")
+    let .ok () ← putEnrollmentToken mc r12Vm.id "r12-enroll-tok-1"
+      | throw (IO.userError "r12 putEnrollmentToken")
+    let .ok (_, r12NodeTok) ← enrollManagedNode mc r12Vm.id "r12-enroll-tok-1" (some 1)
+      | throw (IO.userError "r12 enrollManagedNode")
+    let nodePollWire := s!"GET /api/managed-machines/relay/poll HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {r12NodeTok}\r\nx-orb-machine-id: {r12Vm.id}\r\nx-orb-boot-epoch: 1\r\n\r\n"
+    let .ok nodePollReq := parseRequest nodePollWire.toUTF8 none | throw (IO.userError "r12 node poll req")
+    let .ok nodePollResp ← dispatchCoreRequest st nodePollReq now | throw (IO.userError "r12 node poll dispatch")
+    check (nodePollResp.status == 200)
+      s!"r12_node_token_credentials_resolve_principal (got {nodePollResp.status})"
+    -- 7. r12_legacy_and_ops_caller_credential_matrix (multi_user with two active users AND single-user mode)
+    let matDir := root ++ "/r12-caller-matrix"
+    IO.FS.createDirAll (System.FilePath.mk matDir)
+    let .ok matStore ← openCoreStore matDir | throw (IO.userError "r12 matrix store")
+    let .ok matMc ← openManagedComputeStore (matDir ++ "/managed_compute.db") | throw (IO.userError "r12 matrix mc")
+    try
+      sql matStore.missionsDb
+        "INSERT INTO users(id,username,password_hash,role,session_epoch,disabled) VALUES('usr_real_admin_uuid','admin','pbkdf2-sha256$1$aa$bb','admin',1,0);"
+      sql matStore.missionsDb
+        "INSERT INTO users(id,username,password_hash,role,session_epoch,disabled) VALUES('usr_second_member','bob','pbkdf2-sha256$1$aa$bb','member',1,0);"
+      let matSt : CoreAppState := {
+        st with
+        cfg := { st.cfg with workingDir := matDir, usersJson := "" }
+        store := matStore
+        managedStore? := some matMc
+        bootstrapAdminId := "usr_real_admin_uuid"
+      }
+      let hsRealAdmin := issueHs256Jwt matSt.cfg.jwtSecret "usr_real_admin_uuid" "admin" now (now + 3600) "admin"
+      -- The rollout script uses a signed HS256 subject equal to the stored ID.
+      let rolloutLive := issueHs256Jwt matSt.cfg.jwtSecret "usr_real_admin_uuid" "" now (now + 300) ""
+      check ((← send "GET" "/api/auth/me" rolloutLive (.obj #[]) matSt).1 == 200)
+        "r12_rollout_token_live_admin_accepted"
+      sql matStore.missionsDb "UPDATE users SET disabled=1 WHERE id='usr_real_admin_uuid';"
+      check ((← send "GET" "/api/auth/me" rolloutLive (.obj #[]) matSt).1 == 401)
+        "r12_rollout_token_disabled_admin_refused"
+      sql matStore.missionsDb "UPDATE users SET disabled=0 WHERE id='usr_real_admin_uuid';"
+      let hsLiteralAdmin := issueHs256Jwt matSt.cfg.jwtSecret "admin" "admin" now (now + 3600) "admin"
+      let hsUnknownSub := issueHs256Jwt matSt.cfg.jwtSecret "unknown-subject-xyz" "ghost" now (now + 3600) "admin"
+      let v1OrbMonitorTok := mintSessionToken matSt.cfg.jwtSecret (now + 600)
+      let rollingUpgradeTok := issueHs256Jwt matSt.cfg.jwtSecret "admin" "" now (now + 300) ""
+      for mode in #["multi_user", "single_user"] do
+        sql matStore.missionsDb s!"UPDATE users SET disabled={if mode == "single_user" then "1" else "0"} WHERE id='usr_second_member';"
+        let v2 := mintSessionTokenV2 matSt.cfg.jwtSecret "usr_real_admin_uuid" "admin" 1 (now + 3600)
+        check ((← send "GET" "/api/auth/me" v2 (.obj #[]) matSt).1 == 200)
+          s!"r12_named_v2_accepted_{mode}"
+        for (name, credential) in #[("unknown_subject", hsUnknownSub), ("alias_subject", hsLiteralAdmin), ("subjectless_v1", v1OrbMonitorTok)] do
+          check ((← send "GET" "/api/auth/me" credential (.obj #[]) matSt).1 == 401)
+            s!"r12_no_bootstrap_fallback_{name}_{mode}"
+        check ((← send "POST" "/api/auth/login" "" (.obj #[("username", .str "unknown-user"),
+          ("password", .str matSt.cfg.dashboardPassword)]) matSt).1 == 401)
+          s!"r12_unknown_login_no_bootstrap_fallback_{mode}"
+        let unboundDev := { matSt with bootstrapAdminId := "", cfg := { matSt.cfg with devMode := true } }
+        check ((← send "GET" "/api/auth/me" "" (.obj #[]) unboundDev).1 == 401)
+          s!"r12_unbound_dev_no_synthetic_admin_{mode}"
+      sql matStore.missionsDb "UPDATE users SET disabled=0 WHERE id='usr_second_member';"
+      -- Multi-user mode (two active users: usr_real_admin_uuid and usr_second_member)
+      let (muRealSt, muRealDoc) ← send "GET" "/api/auth/me" hsRealAdmin (.obj #[]) matSt
+      let (muLitSt, _) ← send "GET" "/api/auth/me" hsLiteralAdmin (.obj #[]) matSt
+      let (muUnkSt, _) ← send "GET" "/api/auth/me" hsUnknownSub (.obj #[]) matSt
+      let (muV1St, _) ← send "GET" "/api/auth/me" v1OrbMonitorTok (.obj #[]) matSt
+      let (muRollSt, _) ← send "GET" "/api/auth/me" rollingUpgradeTok (.obj #[]) matSt
+      check (muRealSt == 200 && (muRealDoc.fieldOrNull "user").fieldStr? "id" == some "usr_real_admin_uuid" &&
+           muRealDoc.fieldStr? "auth_mode" == some "multi_user" &&
+          muLitSt == 401 && muUnkSt == 401 && muV1St == 401 && muRollSt == 401)
+        s!"r12_legacy_and_ops_caller_credential_matrix multi_user (real={muRealSt}, lit={muLitSt}, unk={muUnkSt}, v1={muV1St}, roll={muRollSt})"
+      -- Single-user mode (disable second user so only usr_real_admin_uuid is active)
+      sql matStore.missionsDb "UPDATE users SET disabled=1 WHERE id='usr_second_member';"
+      let (suRealSt, suRealDoc) ← send "GET" "/api/auth/me" hsRealAdmin (.obj #[]) matSt
+      let (suLitSt, _) ← send "GET" "/api/auth/me" hsLiteralAdmin (.obj #[]) matSt
+      let (suUnkSt, _) ← send "GET" "/api/auth/me" hsUnknownSub (.obj #[]) matSt
+      let (suV1St, _) ← send "GET" "/api/auth/me" v1OrbMonitorTok (.obj #[]) matSt
+      let (suRollSt, _) ← send "GET" "/api/auth/me" rollingUpgradeTok (.obj #[]) matSt
+      check (suRealSt == 200 && (suRealDoc.fieldOrNull "user").fieldStr? "id" == some "usr_real_admin_uuid" &&
+          suLitSt == 401 && suUnkSt == 401 && suV1St == 401 && suRollSt == 401)
+        s!"r12_legacy_and_ops_caller_credential_matrix single_user (real={suRealSt}, lit={suLitSt}, unk={suUnkSt}, v1={suV1St}, roll={suRollSt})"
+    finally
+      closeManagedComputeStore matMc
+      closeCoreStore matStore
     -- Disabling/deleting an issuer must stop every previously minted session,
     -- including an external session with no mission id and a shared mission.
     for update in #["UPDATE users SET disabled=1 WHERE id='member';", "DELETE FROM users WHERE id='member';"] do

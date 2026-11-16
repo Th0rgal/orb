@@ -442,11 +442,11 @@ def authenticateHttpBearer (cfg : CoreConfig) (hdrs : Array (String × String)) 
     match extractBearerToken? hdrs nowEpochSec with
     | none => false
     | some tok =>
-      (verifyAnySessionTokenExp? (effectiveJwtSecret cfg) tok nowEpochSec).isSome ||
-      verifyLoginCredentials cfg none tok
+      (verifyAnySessionTokenExp? (effectiveJwtSecret cfg) tok nowEpochSec).isSome
 
 /-- Resolve `CallerPrincipal` against `users` (`orb-jwt-v2` live session epoch + `!disabled` check
-    via `Orb.Kernel.multiuserRbacStep`, or bootstrap-admin / legacy unscoped fallback). -/
+    via `Orb.Kernel.multiuserRbacStep`, or verified single-tenant legacy token; never falls back
+    to bootstrap admin on a failed lookup or raw password bearer). -/
 def resolveCallerPrincipal?
     (st : CoreAppState)
     (hdrs : Array (String × String))
@@ -464,7 +464,7 @@ def resolveCallerPrincipal?
           (OrbCore.DevOperator.verifyIssuer st.cfg.devGrantIssuerHost) | return none
       let bunker ← match st.bunkerStateRef? with | some ref => ref.get | none => pure 0
       unless bunker == 0 do return none
-      let some admin ← getBootstrapAdmin? st.store | return none
+      let some admin ← getUserById? st.store st.bootstrapAdminId | return none
       if admin.disabled || admin.role != "admin" then return none
       return some { CallerPrincipal.ofUserRecord admin false with isDevOperator := true }
     if tok.startsWith "orb-jwt-v2:" then
@@ -480,65 +480,20 @@ def resolveCallerPrincipal?
         return none
       return some (CallerPrincipal.ofUserRecord u false)
     if tok.startsWith "eyJ" then
-      let some (jwtSub, jwtUser, _exp) := verifyHs256Jwt? sec tok nowEpochSec
+      let some (jwtSub, _jwtUser, _exp) := verifyHs256Jwt? sec tok nowEpochSec
         | return none
-      let multiUsers : Bool ← do
-        match ← execParamQuery st.store.missionsDb "SELECT COUNT(*) FROM users WHERE disabled=0;" #[] with
-        | .ok rows => pure (decide (((((rows[1]?.bind (·[0]?)).bind String.toNat?).getD 0) > 1)))
-        | .error _ => pure false
-      let singleTenantUnscoped := !multiUsers && (parseConfiguredUsers st.cfg.usersJson).isEmpty
-      if let some u ← getUserById? st.store jwtSub then
-        if u.disabled then return none
-        return some (CallerPrincipal.ofUserRecord u singleTenantUnscoped)
-      if let some adm ← getBootstrapAdmin? st.store then
-        if adm.disabled then return none
-        -- This verified legacy token is the administrator: rows it stored under its old subject
-        -- become the administrator's, so the owner's existing sessions stay the owner's.
-        adoptLegacyOwnerAlias st.store jwtSub adm.id
-        return some (CallerPrincipal.ofUserRecord adm singleTenantUnscoped)
-      return some {
-        userId           := jwtSub
-        username         := if jwtUser.isEmpty then "admin" else jwtUser
-        role             := "admin"
-        unixUsername?    := none
-        sessionEpoch     := 1
-        disabled         := false
-        dailySpendCapCents? := none
-        isLegacyUnscoped := singleTenantUnscoped
-      }
-  if !authenticateHttpBearer st.cfg hdrs nowEpochSec &&
-     !(allowWsSubproto && authenticateConsoleWsUpgrade st.cfg hdrs nowEpochSec) then
+      let some u ← getUserById? st.store jwtSub | return none
+      if u.disabled then return none
+      return some (CallerPrincipal.ofUserRecord u false)
+    -- Subjectless v1 tokens cannot identify a stored user.
     return none
-  -- Legacy configured passwords must resolve to their own stored user. The
-  -- boolean login check authenticates any configured account, not just admin.
-  -- Ambiguous/missing users fail closed instead of becoming bootstrap admin.
   if !st.cfg.devMode then
-    if let some token := rawTok? then
-      let dashboardMatch := !st.cfg.dashboardPassword.isEmpty &&
-        ctEqSlice (ByteSlice.ofString token) (ByteSlice.ofString st.cfg.dashboardPassword)
-      if !dashboardMatch && (verifyAnySessionTokenExp? sec token nowEpochSec).isNone then
-        let credentialMatches := (parseConfiguredUsers st.cfg.usersJson).filter (fun (_, password) =>
-          ctEqSlice (ByteSlice.ofString token) (ByteSlice.ofString password))
-        unless credentialMatches.size == 1 do return none
-        let some user ← getUserByUsername? st.store credentialMatches[0]!.1 | return none
-        if user.disabled then return none
-        return some (CallerPrincipal.ofUserRecord user false)
+    return none
   if !st.bootstrapAdminId.isEmpty then
-    if let some adm ← getUserById? st.store st.bootstrapAdminId then
-      if !adm.disabled then
-        return some (CallerPrincipal.ofUserRecord adm false)
-  if let some adm ← getBootstrapAdmin? st.store then
-    return some (CallerPrincipal.ofUserRecord adm (st.bootstrapAdminId.isEmpty))
-  return some {
-    userId           := ""
-    username         := "admin"
-    role             := "admin"
-    unixUsername?    := none
-    sessionEpoch     := 1
-    disabled         := false
-    dailySpendCapCents? := none
-    isLegacyUnscoped := true
-  }
+    let some adm ← getUserById? st.store st.bootstrapAdminId | return none
+    if adm.disabled || adm.role != "admin" then return none
+    return some (CallerPrincipal.ofUserRecord adm false)
+  return none
 
 /-- Authenticate `/v1/*` LLM proxy requests (`mission_proxy_token`, `SANDBOXED_PROXY_SECRET`, or Core bearer/`x-api-key`). -/
 def authenticateProxyRequest (st : CoreAppState) (hdrs : Array (String × String)) (nowEpochSec : UInt64) : IO Bool := do
@@ -548,19 +503,10 @@ def authenticateProxyRequest (st : CoreAppState) (hdrs : Array (String × String
     if !st.cfg.proxySecret.isEmpty &&
        ctEqSlice (ByteSlice.ofString pTok) (ByteSlice.ofString st.cfg.proxySecret) then
       return true
-    if pTok.startsWith "orb-jwt-v2:" then
-      let sec := effectiveJwtSecret st.cfg
-      if let some (uid, _, tokEp, _) := verifySessionTokenV2 sec pTok nowEpochSec then
-        if let some u ← getUserById? st.store uid then
-          return !u.disabled && u.sessionEpoch == tokEp
-      return false
-    if pTok.startsWith "eyJ" then
-      return (verifyHs256Jwt? (effectiveJwtSecret st.cfg) pTok nowEpochSec).isSome
+    if pTok.startsWith "orb-jwt-v2:" || pTok.startsWith "eyJ" then
+      let synthHdrs := #[("Authorization", s!"Bearer {pTok}")]
+      return (← resolveCallerPrincipal? st synthHdrs nowEpochSec).isSome
     if (← verifyProxyApiKeyFile st.store.rootDir pTok (formatEpochIso8601Utc nowEpochSec)) then
-      return true
-    if st.cfg.proxySecret.isEmpty &&
-       ((verifySessionToken (effectiveJwtSecret st.cfg) pTok nowEpochSec).isSome ||
-        verifyLoginCredentials st.cfg none pTok) then
       return true
     return false
   if !st.cfg.proxySecret.isEmpty then
@@ -1562,9 +1508,10 @@ private def targetSupportsExplicitCyber (tgt : ProviderTarget) (requestedModel c
   let preservesModel := tgt.modelId.isEmpty || bareModel tgt.modelId == requestedModel
   preservesModel && cyberEntrySupported tgt.provider requestedModel fullUrl tgt.apiKey false false
 
-/-- Settings as returned to clients: no password hash and no Bitwarden token in any of its spellings. -/
+/-- Settings as returned to clients: no password hash (`auth`, `password_hash`, `dashboard_password_hash`)
+    and no Bitwarden token in any of its spellings. -/
 private def redactSettingsSecrets (settings : JVal) : JVal :=
-  let base := (settings.removeField "password_hash").removeField "bws_access_token"
+  let base := (((settings.removeField "password_hash").removeField "dashboard_password_hash").removeField "auth").removeField "bws_access_token"
   match base.field? "bitwarden" with
   | some bw => base.setField "bitwarden" ((bw.removeField "encrypted_access_token").removeField "access_token")
   | none => base
@@ -2734,6 +2681,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let dbUser? ←
       match user?.map (·.trimAscii.toString) |>.filter (!·.isEmpty) with
       | some uname => getUserByUsername? st.store uname
+      -- Password-only login selects an account before password verification;
+      -- an unknown explicit username never falls back to this account.
       | none => getBootstrapAdmin? st.store
     let settingsPwdOk ← do
       let isAdmName := match user? with | none => true | some s => s.trimAscii.isEmpty || s.trimAscii.toString == "admin"
@@ -2741,26 +2690,24 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     if let some u := dbUser? then
       if u.disabled then
         return .ok (mkJson 401 "{\"error\":\"account_disabled\"}")
-      if (← verifyPasswordPbkdf2 supplied u.passwordHash) then
-        let tok := mintSessionTokenV2 sec u.id u.role u.sessionEpoch exp
-        let uJson := renderUserSummaryJson u
-        return .ok (mkJson 200 s!"\{\"token\":{jsonEscape tok},\"exp\":{exp},\"expires_at\":{exp},\"user\":{uJson}}")
-      -- If a specific non-admin DB account was named and PBKDF2 failed, reject unless static config matches
-      if !verifyLoginCredentials st.cfg user? supplied && !settingsPwdOk then
+      let hasAuthoritativeHash :=
+        !u.passwordHash.trimAscii.isEmpty && u.passwordHash.trimAscii.toString != "dev-mode-placeholder"
+      if hasAuthoritativeHash then
+        if (← verifyPasswordPbkdf2 supplied u.passwordHash) || st.cfg.devMode then
+          let tok := mintSessionTokenV2 sec u.id u.role u.sessionEpoch exp
+          let uJson := renderUserSummaryJson u
+          return .ok (mkJson 200 s!"\{\"token\":{jsonEscape tok},\"exp\":{exp},\"expires_at\":{exp},\"user\":{uJson}}")
         return .ok (mkJson 401 "{\"error\":\"invalid_credentials\"}")
+      if !verifyLoginCredentials st.cfg (some u.username) supplied && !settingsPwdOk then
+        return .ok (mkJson 401 "{\"error\":\"invalid_credentials\"}")
+      if !st.cfg.devMode && !supplied.isEmpty then
+        if let .ok migratedHash ← (hashPasswordPbkdf2 supplied).toBaseIO then
+          discard <| execParamQuery st.store.missionsDb
+            "UPDATE users SET password_hash=?2 WHERE id=?1 AND (password_hash='' OR password_hash='dev-mode-placeholder');"
+            #[u.id, migratedHash]
       let tok := mintSessionTokenV2 sec u.id u.role u.sessionEpoch exp
       let uJson := renderUserSummaryJson u
       return .ok (mkJson 200 s!"\{\"token\":{jsonEscape tok},\"exp\":{exp},\"expires_at\":{exp},\"user\":{uJson}}")
-    else if user?.any (fun s => !s.trimAscii.isEmpty) && (← hasMultipleActiveUsers st.store) && !verifyLoginCredentials st.cfg user? supplied then
-      return .ok (mkJson 401 "{\"error\":\"invalid_credentials\"}")
-    else if verifyLoginCredentials st.cfg user? supplied || settingsPwdOk then
-      if let some adm ← getBootstrapAdmin? st.store then
-        let tok := mintSessionTokenV2 sec adm.id adm.role adm.sessionEpoch exp
-        let uJson := renderUserSummaryJson adm
-        return .ok (mkJson 200 s!"\{\"token\":{jsonEscape tok},\"exp\":{exp},\"expires_at\":{exp},\"user\":{uJson}}")
-      else
-        let tok := mintSessionToken sec exp
-        return .ok (mkJson 200 s!"\{\"token\":{jsonEscape tok},\"exp\":{exp},\"expires_at\":{exp}}")
     else
       return .ok (mkJson 401 "{\"error\":\"invalid_credentials\"}")
 
@@ -6726,8 +6673,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           Id.run do
             let mut acc := JVal.obj basePairs
             for (k, v) in patchPairs do
-              -- `bitwarden` is owned by `/api/bitwarden/*`; a redacted copy sent back here must not erase the token.
-              if k != "password_hash" && k != "bitwarden" && k != "bws_access_token" then
+              -- `bitwarden` is owned by `/api/bitwarden/*` and auth hashes are owned by `/api/auth/*`.
+              if k != "password_hash" && k != "dashboard_password_hash" && k != "auth" && k != "bitwarden" && k != "bws_access_token" then
                 acc := acc.setField k v
             return acc
         | _, _ => curSettings
