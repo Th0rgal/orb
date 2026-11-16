@@ -10,6 +10,7 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   use: {baseURL: `http://127.0.0.1:${port}`, channel: process.env.ORB_REFERENCE_CHANNEL || 'chrome',
-    launchOptions: {args: (process.env.ORB_REFERENCE_CHROME_ARGS ?? '--disable-gpu --disable-partial-raster').split(' ').filter(Boolean)}},
+     launchOptions: {executablePath: process.env.ORB_REFERENCE_CHROME,
+       args: (process.env.ORB_REFERENCE_CHROME_ARGS ?? '--disable-gpu --disable-partial-raster').split(' ').filter(Boolean)}},
   webServer: {command: `node node_modules/vite/bin/vite.js --host 127.0.0.1 --port ${port}`, url: `http://127.0.0.1:${port}`, reuseExistingServer: false},
 });
