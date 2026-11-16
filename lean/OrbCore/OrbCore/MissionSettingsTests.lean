@@ -107,9 +107,40 @@ def routeRecovery (root : String) : IO Unit := do
   finally closeCoreStore store
   check (← OrbCore.MissionMoveRecovery.startup path).isOk "B5b_route_startup_repairs_markers"
 
+def missingDbRecovery (root : String) : IO Unit := do
+  let path := s!"{root}/b5b-missing-db"
+  let .ok store ← openCoreStore path | throw (IO.userError "B5b missing-db open")
+  let dbPath := s!"{path}/projects.db"
+  try
+    discard <| execParamQuery store.missionsDb
+      "INSERT INTO pending_mission_rebinds(mission_id) VALUES('missing-db-mission');" #[]
+    closeCoreStore store
+    IO.FS.removeFile dbPath
+    let refused ← OrbCore.MissionMoveRecovery.startup path
+    check (!refused.isOk) "B5b_missing_projects_db_fails_closed"
+    let .ok checkStore ← openCoreStore path | throw (IO.userError "B5b missing-db reopen")
+    try
+      check ((← OrbCore.MissionMoveRecovery.pending checkStore.missionsDb).toOption.getD #[] == #["missing-db-mission"])
+        "B5b_missing_projects_db_keeps_marker"
+    finally closeCoreStore checkStore
+  finally
+    try IO.FS.removeFile dbPath catch _ => pure ()
+
+  let .ok clean ← openCoreStore path | throw (IO.userError "B5b no-marker open")
+  closeCoreStore clean
+  let .ok empty ← openCoreStore path | throw (IO.userError "B5b no-marker reopen")
+  try
+    discard <| execParamQuery empty.missionsDb
+      "DELETE FROM pending_mission_rebinds;" #[]
+  finally closeCoreStore empty
+  let noMarker ← OrbCore.MissionMoveRecovery.startup path
+  check (match noMarker with | .ok () => true | .error _ => false)
+    "B5b_missing_projects_db_without_markers_succeeds"
+
 def run (root : String) : IO Unit := do
   moveRecovery root
   routeRecovery root
+  missingDbRecovery root
   let .ok store ← openCoreStore s!"{root}/mission-settings"
     | throw (IO.userError "settings store open failed")
   try

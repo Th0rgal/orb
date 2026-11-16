@@ -36,6 +36,11 @@ def reconcile (st : CoreStore) : IO (Except String Unit) := do
       ("SELECT p.mission_id,m.id,COALESCE(m.project,''),COALESCE(m.folder,''),COALESCE(m.placement_revision,0)," ++
        "p.owner_user_id,p.created_at FROM pending_mission_rebinds p LEFT JOIN missions m ON m.id=p.mission_id ORDER BY p.mission_id;") #[]
       | return .error "pending_rebind_read_failed"
+    let allIds := (rows.extract 1 rows.size).map (fun row => row[0]!)
+    let failure (id : String) (e : String) : String :=
+      let commands := allIds.map fun stuckId =>
+        "DELETE FROM pending_mission_rebinds WHERE mission_id='" ++ stuckId.replace "'" "''" ++ "';"
+      s!"mission_ids={allIds}; {id}: {e}; manual bypass on missions.db (leaves bindings unrepaired): {String.intercalate " " commands.toList}"
     for row in rows.extract 1 rows.size do
       let id := row[0]!
       let hasMission := !row[1]!.isEmpty
@@ -44,20 +49,20 @@ def reconcile (st : CoreStore) : IO (Except String Unit) := do
       if !hasMission then
         if let .error e ← execParamQueryUnlocked st.missionsDb
             "DELETE FROM pending_mission_rebinds WHERE mission_id=?1;" #[id] then
-          return .error s!"{id}: {e}"
+          return .error (failure id e)
         continue
       if !project.isEmpty && !owner.isEmpty then
         if let .error e ← execParamQuery st.projectsDb
             "INSERT OR IGNORE INTO project_owners(slug,owner_user_id,created_at) VALUES(?1,?2,?3);"
-            #[project, owner, row[6]!] then return .error s!"{id}: {e}"
+            #[project, owner, row[6]!] then return .error (failure id e)
       let item : MissionPlacementItem := {
         missionId := id, project? := if project.isEmpty then none else some project,
         folder := row[3]!, placementRevision := (row[4]!.toNat?.getD 0).toUInt64 }
       if let .error e ← rebindMovedMissionMcpSessionsChecked st #[item] row[6]! then
-        return .error s!"{id}: {e}"
+        return .error (failure id e)
       if let .error e ← execParamQueryUnlocked st.missionsDb
           "DELETE FROM pending_mission_rebinds WHERE mission_id=?1;" #[id] then
-        return .error s!"{id}: {e}"
+        return .error (failure id e)
     return .ok ()
 
 /-- Pre-server recovery deliberately avoids openCoreStore: no boot epoch allocation,
