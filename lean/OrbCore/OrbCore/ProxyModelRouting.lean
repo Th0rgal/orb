@@ -34,6 +34,15 @@ def customProviderName (name : String) : String :=
   String.ofList ((name.toList.filter (fun c => c.isAlphanum || c == '_' || c == '-')).map
     (fun c => if c == '-' then '_' else c.toLower))
 
+/-- True when a custom provider model id is supported for routing and catalog advertisement.
+    Plain `glm-5.3` on `ethereumfoundation` is rejected for our key while flash variants work. -/
+def customProviderModelAllowed (providerNameOrId baseUrl modelId : String) : Bool :=
+  let slug := String.ofList ((providerNameOrId.toList.filter Char.isAlphanum).map Char.toLower)
+  let isEthFoundation :=
+    slug == "ethereumfoundation" ||
+    (baseUrl.toLower.splitOn "inference.ethereum.foundation").length > 1
+  !(isEthFoundation && modelId.trimAscii.toString == "glm-5.3")
+
 private def googleModel (model : String) : String :=
   match model.trimAscii.toString with
   | "agy-demo" | "gemini-4-argon-eap" => "gemini-4-argon"
@@ -52,6 +61,7 @@ def directEntry? (requested _path : String)
     if providerPrefix.isEmpty || model.isEmpty then return none
     if let some provider := providerId? providerPrefix then
       return some (provider, if provider == "google" then googleModel model else model)
+    if !customProviderModelAllowed providerPrefix "" model then return none
     if customModels.contains (providerPrefix, model) then return some (providerPrefix, model)
     return none
   | _ =>
@@ -125,7 +135,10 @@ def chainResponse (id name modelsJson : String) (isDefault stripThinking : Bool)
         let provider := (it.fieldStr? "provider_id").orElse (fun _ => it.fieldStr? "provider")
         let model := (it.fieldStr? "model_id").orElse (fun _ => it.fieldStr? "modelId")
         match provider, model with
-        | some p, some m => some (JVal.obj #[("provider_id", .str p), ("model_id", .str m)])
+        | some p, some m =>
+          if customProviderModelAllowed p "" m then
+            some (JVal.obj #[("provider_id", .str p), ("model_id", .str m)])
+          else none
         | _, _ => none
     | _ => #[]
   .obj #[("id", .str id), ("name", .str name), ("entries", .arr entries),

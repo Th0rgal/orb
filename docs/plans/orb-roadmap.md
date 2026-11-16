@@ -269,7 +269,7 @@ does that once B2 and B3 are deployed.
 | X1 | Native Linux row menu: New cron, New folder, Rename, Archive | U4 decision may drop it | ready | — |
 | X2 | macOS native sidebar "+" buttons | — | ready | — |
 | X3 | Tether: lease revoked on every terminal transition; WAN endpoint chosen for remote fleet hosts | — | ready | Tests first |
-| X4 | Plain `ethereumfoundation/glm-5.3` is rejected for our key (the flash variants work): fix the entry or remove it from the catalog | — | ready | A turn on it replies, or it is gone from the list |
+| X4 | Plain `ethereumfoundation/glm-5.3` is rejected for our key (the flash variants work): fix the entry or remove it from the catalog | — | done | A turn on it replies, or it is gone from the list |
 | X5 | Tether end-to-end retest from a fleet node | 5.3 | blocked (Thomas) | SSH as `orb-tether` succeeds |
 | X6 | Routing checks from 15 Nov still hold on prod: provider catalog complete, chain test endpoint authenticated, one "Weekly" row for ChatGPT | — | verify | Three checks against prod |
 

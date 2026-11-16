@@ -29,6 +29,7 @@ import OrbBin.HttpClient
 import OrbBin.ClaudeControl
 import OrbCore.Store
 import OrbCore.Proxy
+import OrbCore.ProxyModelRouting
 import OrbCore.R7Core
 import OrbCore.LegacyHydrate
 
@@ -42,6 +43,7 @@ open OrbBin.Sqlite
 open OrbBin.HttpClient
 open OrbCore.Store
 open OrbCore.Proxy
+open OrbCore.ProxyModelRouting
 open OrbCore.R7Core
 open OrbCore.LegacyHydrate
 
@@ -434,7 +436,9 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
         | some arr => arr.filterMap JVal.asStr?
         | none => #[]
 
-    let cModels : Array JVal := p.customModels.map fun cm =>
+    let cModels : Array JVal := (p.customModels.filter (fun cm =>
+      customProviderModelAllowed p.name p.baseUrl cm.id &&
+      customProviderModelAllowed p.id p.baseUrl cm.id)).map fun cm =>
       .obj #[
         ("id", .str cm.id),
         ("name", match cm.name? with | some n => .str n | none => .null),
@@ -509,7 +513,9 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
         isDefault := (lid == defaultId)
         priority := (leg.fieldNat? "priority").getD out.size
         useForBackends := ((leg.fieldArr? "use_for_backends").getD #[]).filterMap JVal.asStr?
-        customModels := (leg.fieldArr? "custom_models").getD #[]
+        customModels := ((leg.fieldArr? "custom_models").getD #[]).filter (fun cm =>
+          let mid := (cm.fieldStr? "id").getD ""
+          customProviderModelAllowed nm bUrl mid && customProviderModelAllowed lid bUrl mid)
         rpmLimit? := none
         maxConcurrency? := none
         createdAt := (leg.fieldStr? "created_at").getD nowIso
@@ -2317,7 +2323,9 @@ def refreshCustomModelDiscovery (store : CoreStore) (workingDir : String) : IO U
             let mut models : Array JVal := #[]
             for row in rows do
               let id := ((row.fieldStr? "id").getD "").trimAscii.toString
-              if !id.isEmpty && !models.any (fun m => m.fieldStr? "id" == some id) then
+              if !id.isEmpty && customProviderModelAllowed hp.name hp.baseUrl id &&
+                  customProviderModelAllowed hp.id hp.baseUrl id &&
+                  !models.any (fun m => m.fieldStr? "id" == some id) then
                 models := models.push (.obj #[("id", .str id), ("name", .str id)])
             observation := observation.setField "status" (.str "discovered")
               |>.setField "source" (.str "discovery")
@@ -2327,6 +2335,27 @@ def refreshCustomModelDiscovery (store : CoreStore) (workingDir : String) : IO U
       connections := (connections.filter (fun c => c.fieldStr? "provider_id" != some pid)).push observation
   writeDataJsonFile workingDir store.rootDir "model-discovery.json"
     (.obj #[("schema_version", JVal.nat 1), ("connections", .arr connections)])
+
+private def filterDiscoveryConnectionModels (hps : Array HydratedProvider) (c : JVal) : JVal :=
+  let pid := (c.fieldStr? "provider_id").getD ""
+  let matched? := hps.find? (fun hp =>
+    hp.id == pid || s!"custom:{hp.id}" == pid || hp.providerType.toLower == pid.toLower ||
+    customProviderName hp.name == customProviderName pid)
+  let pName := (matched?.map (·.name)).getD pid
+  let bUrl := (matched?.map (·.baseUrl)).getD ""
+  let pId := (matched?.map (·.id)).getD pid
+  let keepModel (m : JVal) : Bool :=
+    let mid := (m.fieldStr? "id").getD ""
+    customProviderModelAllowed pName bUrl mid && customProviderModelAllowed pId bUrl mid
+  let c1 := match c.field? "last_success" with
+    | some ls@(.obj _) =>
+      match ls.fieldArr? "models" with
+      | some ms => c.setField "last_success" (ls.setField "models" (.arr (ms.filter keepModel)))
+      | none => c
+    | _ => c
+  match c1.fieldArr? "fallback_models" with
+  | some fms => c1.setField "fallback_models" (.arr (fms.filter keepModel))
+  | none => c1
 
 /-! ## Unified Dispatcher for AI Providers, Proxy Analytics, Model-Routing Health/Test & Catalog -/
 
@@ -2362,11 +2391,13 @@ def dispatchProviderAndAiRoute
   -- 2. `GET /api/providers/{discovery,catalog,snapshots}` & `POST /api/providers/catalog/refresh`
   if segs == ["api", "providers", "discovery"] && method == "GET" then
     let disc ← readDataJsonFile workingDir store.rootDir "model-discovery.json"
-    let res := if disc.isNull then JVal.obj #[("schema_version", JVal.nat 1), ("connections", .arr #[])] else disc
+    let rawRes := if disc.isNull then JVal.obj #[("schema_version", JVal.nat 1), ("connections", .arr #[])] else disc
+    let hps ← loadHydratedProviders store workingDir
+    let allConns := ((rawRes.fieldArr? "connections").getD #[]).map (filterDiscoveryConnectionModels hps)
+    let res := rawRes.setField "connections" (.arr allConns)
     if effAdmin then
       return some (jsonResp 200 res)
-    let hps ← loadHydratedProviders store workingDir
-    let conns := ((res.fieldArr? "connections").getD #[]).filterMap fun c =>
+    let conns := allConns.filterMap fun c =>
       let pid := (c.fieldStr? "provider_id").getD ""
       match hps.find? (fun hp => hp.enabled && (hp.hasApiKey || hp.hasOAuth) &&
           (hp.id == pid || hp.providerType.toLower == pid.toLower)) with

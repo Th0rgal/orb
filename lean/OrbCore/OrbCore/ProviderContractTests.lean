@@ -1168,6 +1168,35 @@ private def customDiscoveryContract (app : CoreAppState) (jwt : String) (now : U
       failures := failures.push "custom discovery must be present on discovery endpoint"
     if ((renderCompact cat ++ renderCompact disc).splitOn "discovery-fixture-key").length != 1 then
       failures := failures.push "custom discovery must never return API key"
+    -- Node X4: plain `ethereumfoundation/glm-5.3` is rejected upstream while flash variants work;
+    -- discovery, catalog, direct routing, and chain entries must drop plain `glm-5.3` and keep flash variants.
+    if OrbCore.ProxyModelRouting.customProviderModelAllowed "Ethereum Foundation" "https://inference.ethereum.foundation/v1" "glm-5.3" ||
+       OrbCore.ProxyModelRouting.customProviderModelAllowed "ethereumfoundation" "" "glm-5.3" ||
+       !OrbCore.ProxyModelRouting.customProviderModelAllowed "Ethereum Foundation" "https://inference.ethereum.foundation/v1" "glm-5.3-flash" ||
+       !OrbCore.ProxyModelRouting.customProviderModelAllowed "zai" "" "glm-5.3" then
+      failures := failures.push "X4: customProviderModelAllowed must reject plain ethereumfoundation/glm-5.3 while keeping flash variants and zai/glm-5.3"
+    if (OrbCore.ProxyModelRouting.directEntry? "ethereumfoundation/glm-5.3" "/v1/chat/completions"
+        #[("ethereumfoundation", "glm-5.3"), ("ethereumfoundation", "glm-5.3-flash")]).isSome ||
+       (OrbCore.ProxyModelRouting.directEntry? "ethereumfoundation/glm-5.3-flash" "/v1/chat/completions"
+        #[("ethereumfoundation", "glm-5.3"), ("ethereumfoundation", "glm-5.3-flash")]) != some ("ethereumfoundation", "glm-5.3-flash") then
+      failures := failures.push "X4: directEntry? must reject plain ethereumfoundation/glm-5.3 and allow ethereumfoundation/glm-5.3-flash"
+    let x4Chain := OrbCore.ProxyModelRouting.chainResponse "reviewer" "Reviewer"
+      "[{\"provider_id\":\"ethereumfoundation\",\"model_id\":\"glm-5.3\"},{\"provider_id\":\"ethereumfoundation\",\"model_id\":\"glm-5.3-flash\"},{\"provider_id\":\"zai\",\"model_id\":\"glm-5.3\"}]"
+      false false "t0" "t0"
+    let x4Entries := ((x4Chain.fieldArr? "entries").getD #[]).map (fun e =>
+      ((e.fieldStr? "provider_id").getD "", (e.fieldStr? "model_id").getD ""))
+    if x4Entries != #[("ethereumfoundation", "glm-5.3-flash"), ("zai", "glm-5.3")] then
+      failures := failures.push s!"X4: chainResponse must strip plain ethereumfoundation/glm-5.3 and preserve flash + zai/glm-5.3, got {x4Entries}"
+    let (_, _) ← postJson app jwt "/api/ai/providers"
+      (renderCompact (.obj #[("id", .str "prov-eth-x4"), ("name", .str "Ethereum Foundation"),
+        ("provider_type", .str "custom"), ("base_url", .str s!"http://127.0.0.1:{port}/v1/"),
+        ("api_key", .str "discovery-fixture-key"), ("enabled", .bool true),
+        ("custom_models", .arr #[.obj #[("id", .str "glm-5.3")], .obj #[("id", .str "glm-5.3-flash")]])])) now
+    let ethCat ← getJson app jwt "/api/providers/catalog" now
+    let ethProv := (((ethCat.fieldArr? "providers").getD #[]).find? (fun p => p.fieldStr? "id" == some "prov-eth-x4")).getD .null
+    let ethIds := ((ethProv.fieldArr? "models").getD #[]).filterMap (·.fieldStr? "id")
+    if ethIds != #["glm-5.3-flash"] then
+      failures := failures.push s!"X4: /api/providers/catalog must omit plain ethereumfoundation/glm-5.3 and keep glm-5.3-flash, got {ethIds}"
   finally
     stop.set true
     discard <| IO.wait server
