@@ -119,10 +119,24 @@ say "self-test"
 ./lean/OrbCore/.lake/build/bin/orb-core-test | tail -1
 ./lean/OrbNode/.lake/build/bin/orb-node-test | tail -1
 BIN="$TREE/lean/OrbCore/.lake/build/bin/orb-core"
-NODE_BIN="$TREE/lean/OrbNode/.lake/build/bin/orb-node"
+NODE_BIN="$TREE/lean/OrbNode/.lake/build/bin/sandboxed-node"
 if [[ $ROLLOUT_NODES == 1 ]]; then
   MCP_BIN="$TREE/lean/OrbBin/.lake/build/bin/sandboxed-mcp"
   PRIVD_BIN="$TREE/lean/OrbBin/.lake/build/bin/orb-privd"
+fi
+require_nonempty_file() {
+  if [[ ! -s "$1" ]]; then
+    say "required built binary missing or empty: $1"
+    exit 1
+  fi
+}
+require_nonempty_file "$BIN"
+require_nonempty_file "$NODE_BIN"
+if [[ $ROLLOUT_NODES == 1 ]]; then
+  require_nonempty_file "$MCP_BIN"
+  require_nonempty_file "$PRIVD_BIN"
+fi
+if [[ $ROLLOUT_NODES == 1 ]]; then
   say "binary $(sha256sum "$BIN" | cut -c1-12) node $(sha256sum "$NODE_BIN" | cut -c1-12) mcp $(sha256sum "$MCP_BIN" | cut -c1-12) privd $(sha256sum "$PRIVD_BIN" | cut -c1-12)"
 else
   say "binary $(sha256sum "$BIN" | cut -c1-12) node $(sha256sum "$NODE_BIN" | cut -c1-12)"
@@ -312,13 +326,24 @@ if [[ $ROLLOUT_NODES == 1 ]]; then
   install -m 755 "$BIN" /usr/local/bin/orb-core-dev.new
   mv /usr/local/bin/orb-core-dev.new /usr/local/bin/orb-core-dev
 else
-  install -m 644 "$TREE/scripts/orb-node-provision.sh" /usr/local/lib/orb/orb-node-provision.sh.new && mv /usr/local/lib/orb/orb-node-provision.sh.new /usr/local/lib/orb/orb-node-provision.sh
-  install -m 755 "$NODE_BIN" /usr/local/bin/sandboxed-node.new && mv /usr/local/bin/sandboxed-node.new /usr/local/bin/sandboxed-node
+  install -m 644 "$TREE/scripts/orb-node-provision.sh" /usr/local/lib/orb/orb-node-provision.sh.new
+  mv /usr/local/lib/orb/orb-node-provision.sh.new /usr/local/lib/orb/orb-node-provision.sh
+  install -m 755 "$NODE_BIN" /usr/local/bin/sandboxed-node.new
+  mv /usr/local/bin/sandboxed-node.new /usr/local/bin/sandboxed-node
   for spec in "${OPS_TARGETS[@]}"; do
     IFS=: read -r dst mode src <<< "$spec"
-    install -m "$mode" "$src" "$dst.new" && mv "$dst.new" "$dst"
+    install -m "$mode" "$src" "$dst.new"
+    mv "$dst.new" "$dst"
   done
-  install -m 755 "$BIN" /usr/local/bin/orb-core-dev.new && mv /usr/local/bin/orb-core-dev.new /usr/local/bin/orb-core-dev
+  install -m 755 "$BIN" /usr/local/bin/orb-core-dev.new
+  mv /usr/local/bin/orb-core-dev.new /usr/local/bin/orb-core-dev
+fi
+NODE_BUILD_SHA256="$(sha256sum "$NODE_BIN" | cut -d' ' -f1)"
+NODE_SERVED_SHA256="$(sha256sum /usr/local/bin/sandboxed-node | cut -d' ' -f1)"
+say "sandboxed-node sha256 served=$NODE_SERVED_SHA256 built=$NODE_BUILD_SHA256 commit=$SHA"
+if [[ "$NODE_SERVED_SHA256" != "$NODE_BUILD_SHA256" ]]; then
+  say "sandboxed-node checksum mismatch"
+  exit 1
 fi
 if [[ $ROLLOUT_NODES == 1 ]]; then DEV_TOUCHED=1; fi
 systemctl restart sandboxed-sh-dev
