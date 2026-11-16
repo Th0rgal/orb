@@ -46,6 +46,7 @@ def chromeIconPaths (name : String) : List (List (Int × Int)) :=
   | "file" => [[(42,24),(94,24),(120,52),(120,136),(108,148),(42,148),(30,136),(30,36),(42,24)],[(92,25),(92,53),(120,53)]]
   | "chat" => [[(30,110),(20,140),(60,120),(100,120),(130,100),(140,70),(130,40),(100,20),(60,20),(30,40),(20,70),(30,110)],[(50,60),(110,60)],[(50,85),(90,85)]]
   | "list" => [[(30,40),(130,40)],[(30,80),(100,80)],[(30,120),(130,120)]]
+  | "project-folder" => [[(133,133),(143,129),(147,120),(147,53),(143,44),(133,40),(81,40),(74,38),(69,34),(64,26),(59,22),(53,20),(27,20),(17,24),(13,33),(13,120),(17,129),(27,133),(133,133)]]
   | _ => [[(20,48),(20,38),(28,30),(61,30),(76,46),(122,46),(140,64),(140,114),(132,132),(38,132),(20,114),(20,48)]]
 
 def chromeIcon (name : String) (color : Color) (size : Nat := 16) : WidgetNode :=
@@ -109,14 +110,15 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
         (.treeDecoration isMission row.selected pal.borderSubtle
           (if isMission then statusBadgeColor pal row.status else if projectRunning then pal.accent else 0)
           (if row.selected then pal.rowActive else pal.sidebar))
-        [chromeIcon (if isMission then "mission" else row.rowId) pal.textMuted]
+        [chromeIcon (if isMission then "mission" else if row.kind == "project" then "project-folder" else row.rowId) pal.textMuted]
     let labelColor : Color :=
       if isFooter then (if row.selected then pal.textPrimary else pal.textSecondary)
       else if row.selected then pal.textStrong
       else if row.status == "muted" then pal.textMuted
       else if row.kind == "project" then pal.textSecondary
       else pal.textPrimary
-    let labelStyle := chromeText theme labelColor
+    -- Keep the row pitch fixed while lifting the sidebar's optical text baseline.
+    let labelStyle := { (chromeText theme labelColor) with lineHeightSub := pxToSub 17 }
     let badge : List WidgetNode :=
       if row.badge == 0 then []
       else

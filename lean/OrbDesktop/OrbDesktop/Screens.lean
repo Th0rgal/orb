@@ -74,9 +74,16 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
         |>.withAlign .center
         |>.withPadding (Edges.trbl 0 0 0 (pxToSub 4))
         |>.withFixedSize colW (pxToSub 24))
-      [ screenTextLine theme (pxToSub 60) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textSecondary "Default"
-      , screenTextLine theme (pxToSub 170) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textSecondary "Core (agent-core)"
-      , screenTextLine theme (pxToSub 60) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textSecondary "Folder"
+       [ WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center |>.withFixedSize (pxToSub 60) (pxToSub 24))
+           [screenTextLine theme (pxToSub 46) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textSecondary "Default",
+            chromeIcon "chevron-down" pal.textMuted 10]
+       , WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center |>.withFixedSize (pxToSub 150) (pxToSub 24))
+           [chromeIcon "nav:machines" pal.textMuted 14,
+            screenTextLine theme (pxToSub 112) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textSecondary "Core (agent-core)",
+            chromeIcon "chevron-down" pal.textMuted 10]
+       , WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center |>.withFixedSize (pxToSub 60) (pxToSub 24))
+           [chromeIcon "folder" pal.textMuted 14,
+            screenTextLine theme (pxToSub 42) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textSecondary "Folder"]
       ]
 
   let buttonStyle : BoxStyle :=
@@ -84,7 +91,7 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
       |>.withFixedSize (pxToSub 24) (pxToSub 24)
   let plusBtn : WidgetNode :=
     WidgetNode.rrect buttonStyle pal.plusBg (CornerRadii.uniform (pxToSub 12)) BorderStyle.none
-      [WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 10) (pxToSub 2)) pal.textMuted CornerRadii.zero]
+      [chromeIcon "plus" pal.textMuted 16]
   let sendBtn : WidgetNode :=
     if hasText then
       WidgetNode.rrect buttonStyle sendBgCol (CornerRadii.uniform (pxToSub 12)) BorderStyle.none
@@ -98,7 +105,10 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
         |>.withAlign .center
         |>.withFixedSize (pxToSub 582) (pxToSub 24))
       [ plusBtn
-      , screenTextLine theme (pxToSub 518) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textMuted "Orb Lorem 4.6 High Fast"
+       , WidgetNode.box (BoxStyle.row (pxToSub 5) |>.withAlign .center
+           |>.withPadding (Edges.xy (pxToSub 4) 0) |>.withFixedSize (pxToSub 518) (pxToSub 24))
+           [screenTextLine theme (pxToSub 151) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textMuted "Orb Lorem 4.6 High Fast",
+            chromeIcon "chevron-down" pal.textMuted 12]
       , sendBtn
       ]
 
@@ -111,8 +121,9 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
       (CornerRadii.uniform (pxToSub 12))
       (BorderStyle.uniform theme.borderWidth bdrCol)
       [ WidgetNode.box
-          (BoxStyle.col 0 |>.withFixedSize (pxToSub 582) (pxToSub 48))
-          [screenTextLine theme (pxToSub 582) (pxToSub 20) (pxToSub 13) (pxToSub 18) txtCol dispText]
+           (BoxStyle.col 0 |>.withPadding (Edges.trbl (pxToSub 2) 0 0 (pxToSub 2))
+             |>.withFixedSize (pxToSub 582) (pxToSub 48))
+           [screenTextLine theme (pxToSub 580) (pxToSub 20) (pxToSub 13) (pxToSub 20) txtCol dispText]
       , bottomRow
       ]
 
@@ -874,14 +885,20 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
       ]
 
   let dlgCard : WidgetNode :=
+    -- SearchDialog.css: color-mix(in srgb, var(--fg) 8%, var(--stroke)).
+    let channel (shift : Nat) :=
+      ((((pal.textPrimary >>> shift.toUInt32) &&& 255).toNat * 8 +
+        ((pal.border >>> shift.toUInt32) &&& 255).toNat * 92 + 50) / 100).toUInt32
+    let dialogBorder : Color :=
+      (channel 24 <<< 24) ||| (channel 16 <<< 16) ||| (channel 8 <<< 8) ||| 255
     WidgetNode.rrect
       (BoxStyle.col 0
         |>.withPadding (Edges.all bdr)
         |>.withFixedSize dlgW dlgH
-      |>.withShadow { offsetY := pxToSub 18, blur := pxToSub 48, color := if theme.isDark then 0x0000007F else 0x1E1E1C38 })
+       |>.withShadow { offsetY := pxToSub 18, blur := pxToSub 48, color := if theme.isDark then 0x0000007F else 0x1E1E1C38 })
       dlgBg
       (CornerRadii.uniform (pxToSub 12))
-      (BorderStyle.uniform bdr pal.border)
+      (BorderStyle.uniform bdr dialogBorder)
       [ headerNode
       , WidgetNode.box (BoxStyle.row 0 |>.withFixedSize innerW (pxToSub 468)) [leftPane, rightPane]
       , footerNode
