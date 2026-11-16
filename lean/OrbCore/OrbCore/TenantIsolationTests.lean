@@ -523,7 +523,7 @@ def run (root : String) : IO Unit := do
       ((renderCompact mSearchDoc).splitOn "admin-private-search-body").length == 1 &&
       ((renderCompact mSearchDoc).splitOn "admin-private-marker").length == 1
     let (admSearchSt, admSearchDoc) ← send "GET" "/api/control/missions/search/messages?q=shared-search-token" admin (.obj #[]) st
-    let (legSearchSt, legSearchDoc) ← send "GET" "/api/control/missions/search/messages?q=shared-search-token" "" st
+    let (legSearchSt, legSearchDoc) ← send "GET" "/api/control/missions/search/messages?q=shared-search-token" "" (.obj #[]) st
     let bAdminOk := admSearchSt == 200 &&
       admSearchDoc.asArr?.isNone &&
       (admSearchDoc.fieldArr? "hits").isSome &&
