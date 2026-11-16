@@ -227,9 +227,9 @@ def writeSettingsJson (dataRoot : String) (jv : JVal) (expected? : Option JVal :
 /-- Extract historical saved dashboard password hash from `settings.json`, checking
     nested `auth.password_hash` (`src/settings.rs`) first and then top-level `dashboard_password_hash`. -/
 def settingsPasswordHash? (settings : JVal) : Option String :=
-  let nested? := (settings.field? "auth").bind (fun a => a.fieldStr? "password_hash")
-  let raw? := nested?.orElse (fun _ => settings.fieldStr? "dashboard_password_hash")
-  raw?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+  let clean? (raw? : Option String) := raw?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+  let nested? := clean? ((settings.field? "auth").bind (fun a => a.fieldStr? "password_hash"))
+  nested?.orElse (fun _ => clean? (settings.fieldStr? "dashboard_password_hash"))
 
 /-- Check `auth.password_hash` or `dashboard_password_hash` inside `.sandboxed-sh/settings.json` (`pbkdf2:...` or `pbkdf2-sha256$...`). -/
 def verifySettingsPasswordHash (dataRoot suppliedPassword : String) : IO Bool := do

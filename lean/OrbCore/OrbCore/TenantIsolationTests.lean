@@ -1610,6 +1610,11 @@ def run (root : String) : IO Unit := do
       sseAcceptDone.set true
       let _ := sseServerTask.get
     -- R12 named failing regression tests:
+    for emptyHash in #["", "   "] do
+      check (OrbCore.LegacyHydrate.settingsPasswordHash? (.obj #[
+        ("auth", .obj #[("password_hash", .str emptyHash)]),
+        ("dashboard_password_hash", .str "saved-top-level")]) == some "saved-top-level")
+        "r12_empty_nested_password_hash_falls_back"
     -- 1. r12_legacy_token_unknown_subject_never_yields_session (SEC-02)
     let unknownLegacyJwt := issueHs256Jwt st.cfg.jwtSecret "unknown-subject" "ghost" now (now + 3600) "admin"
     let (unkJwtSt, _) ← send "GET" "/api/auth/me" unknownLegacyJwt
