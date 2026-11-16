@@ -101,6 +101,117 @@ def _write_build_conf_sha(build_conf_path, build_sha):
     os.replace(tmp, p)
 
 
+def _default_swap_journal_path(binary_path="/usr/local/bin/sandboxed-node"):
+    return Path(str(binary_path) + ".swap-journal.json")
+
+
+def _fsync_file_and_dir(path):
+    p = Path(path)
+    try:
+        with open(p, "rb") as handle:
+            os.fsync(handle.fileno())
+    except OSError:
+        pass
+    try:
+        dir_fd = os.open(str(p.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        pass
+
+
+def _write_swap_journal(journal_path, active_components, build_conf_path=None, prev_build_sha=None):
+    jp = Path(journal_path)
+    jp.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(str(jp) + ".tmp")
+    payload = {
+        "version": 1,
+        "components": [
+            {
+                "name": c["name"],
+                "bin": str(c["bin"]),
+                "backup": str(c["backup"]),
+                "installing": str(c.get("installing") or (str(c["bin"]) + ".installing")),
+                "restoring": str(c.get("restoring") or (str(c["bin"]) + ".restoring")),
+                "had_existing": bool(c.get("had_existing", True)),
+                "prev_sha256": c.get("prev_sha256"),
+            }
+            for c in active_components
+        ],
+        "build_conf_path": str(build_conf_path) if build_conf_path else None,
+        "prev_build_sha": prev_build_sha,
+    }
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    _fsync_file_and_dir(tmp)
+    os.replace(tmp, jp)
+    _fsync_file_and_dir(jp)
+
+
+def _recover_swap_journal(journal_path, service_ctl=None):
+    jp = Path(journal_path)
+    if not jp.is_file():
+        return False
+    try:
+        data = json.loads(jp.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"corrupt swap journal {jp}: {exc}") from exc
+    errors = []
+    for entry in reversed(data.get("components", [])):
+        bin_p = Path(entry["bin"])
+        backup_p = Path(entry["backup"])
+        inst_p = Path(entry.get("installing") or (str(bin_p) + ".installing"))
+        rest_p = Path(entry.get("restoring") or (str(bin_p) + ".restoring"))
+        had_existing = bool(entry.get("had_existing", True))
+        prev_sha = entry.get("prev_sha256")
+        try:
+            inst_p.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            if had_existing:
+                if not backup_p.is_file():
+                    errors.append(f"missing backup {backup_p} for {entry.get('name')}")
+                    continue
+                shutil.copy2(backup_p, rest_p)
+                os.chmod(rest_p, 0o755)
+                os.replace(rest_p, bin_p)
+                if prev_sha:
+                    got_sha = compute_file_sha256(bin_p)
+                    if got_sha != prev_sha.lower():
+                        errors.append(
+                            f"recovered {bin_p} sha256 {got_sha} != expected {prev_sha}"
+                        )
+            else:
+                bin_p.unlink(missing_ok=True)
+        except Exception as exc:
+            errors.append(f"failed recovering {bin_p}: {exc}")
+        finally:
+            try:
+                rest_p.unlink(missing_ok=True)
+            except OSError:
+                pass
+    conf_raw = data.get("build_conf_path")
+    if conf_raw:
+        conf_p = Path(conf_raw)
+        prev_sha = data.get("prev_build_sha")
+        try:
+            if prev_sha is not None:
+                _write_build_conf_sha(conf_p, prev_sha)
+            else:
+                conf_p.unlink(missing_ok=True)
+            if service_ctl is not None and hasattr(service_ctl, "daemon_reload"):
+                service_ctl.daemon_reload()
+        except Exception as exc:
+            errors.append(f"failed recovering build_conf {conf_p}: {exc}")
+    if errors:
+        raise RuntimeError(f"swap journal recovery failed ({jp}): " + "; ".join(errors))
+    jp.unlink(missing_ok=True)
+    return True
+
+
 def _default_health_check_probe(
     unit_name="sandboxed-node",
     env_file=None,
@@ -628,7 +739,9 @@ def probe_worker_state(
     quarantined = (not staged) and any(
         Path(str(p) + staged_suffix + ".failed").exists() for (_name, p) in comp_paths
     )
-    healthy = all(bool(ctl.is_active(u)) for (u, _db, _bp) in targets)
+    swap_journal = _default_swap_journal_path(node_path)
+    swap_journal_pending = swap_journal.is_file()
+    healthy = (not swap_journal_pending) and all(bool(ctl.is_active(u)) for (u, _db, _bp) in targets)
 
     db_running = 0
     runtime_running = 0
@@ -647,6 +760,8 @@ def probe_worker_state(
         "healthy": healthy,
         "quarantined": quarantined,
     }
+    if swap_journal_pending:
+        res["swap_journal_pending"] = True
     if include_metadata or expected_build_sha is not None or expected_sha256 is not None:
         resolved_conf = build_conf_path
         if resolved_conf is None and str(node_path) == "/usr/local/bin/sandboxed-node":
@@ -722,6 +837,10 @@ def perform_fenced_upgrade(
         mcp_binary_path=mcp_binary_path,
         privd_binary_path=privd_binary_path,
     )
+    swap_journal_path = _default_swap_journal_path(node_path)
+    if swap_journal_path.is_file():
+        _recover_swap_journal(swap_journal_path, service_ctl=ctl)
+
     comp_specs = [("sandboxed-node", node_path, True)]
     if mcp_path is not None:
         comp_specs.append(("sandboxed-mcp", mcp_path, False))
@@ -753,6 +872,8 @@ def perform_fenced_upgrade(
                     "installing": Path(str(comp_bin) + ".installing"),
                     "restoring": Path(str(comp_bin) + ".restoring"),
                     "had_existing": Path(comp_bin).is_file(),
+                    "prev_sha256": compute_file_sha256(comp_bin) if Path(comp_bin).is_file() else None,
+                    "staged_sha256": compute_file_sha256(stg),
                 }
             )
     if mismatch_errors:
@@ -873,16 +994,25 @@ def perform_fenced_upgrade(
                 ctl.start_best_effort(u)
             raise RuntimeError(f"failed stopping worker service before binary swap: {stop_err}") from stop_err
 
-        # Copy staged binaries via temporary paths so staged (.new) files are preserved
-        # until post-start activation and health checks succeed.
+        # Copy staged binaries and backups first, record a durable swap journal, and only then
+        # perform the renames so any crash mid-swap is deterministically recovered before start.
         replaced_comps = []
         try:
             for comp in active_components:
                 comp["bin"].parent.mkdir(parents=True, exist_ok=True)
                 if comp["bin"].is_file():
                     shutil.copy2(comp["bin"], comp["backup"])
+                    _fsync_file_and_dir(comp["backup"])
                 shutil.copy2(comp["staged"], comp["installing"])
                 os.chmod(comp["installing"], 0o755)
+                _fsync_file_and_dir(comp["installing"])
+            _write_swap_journal(
+                swap_journal_path,
+                active_components=active_components,
+                build_conf_path=resolved_build_conf if (resolved_build_conf and expected_build_sha) else None,
+                prev_build_sha=prev_build_sha,
+            )
+            for comp in active_components:
                 os.replace(comp["installing"], comp["bin"])
                 replaced_comps.append(comp)
             if resolved_build_conf and expected_build_sha:
@@ -900,6 +1030,7 @@ def perform_fenced_upgrade(
                 _restore_db_ownership(entry[0], entry[1])
             fences.clear()
             _restore_components(replaced_comps, quarantine=False)
+            swap_journal_path.unlink(missing_ok=True)
             if privd_was_active:
                 ctl.start_best_effort(privd_unit_name)
             for target_unit, _db, _bp in targets:
@@ -985,6 +1116,7 @@ def perform_fenced_upgrade(
                 raise RuntimeError("post-start health check returned no build_sha/binary_sha256 metadata")
     except Exception as act_err:
         _restore_components(active_components, quarantine=True)
+        swap_journal_path.unlink(missing_ok=True)
         if privd_was_active:
             ctl.restart_best_effort(privd_unit_name)
         for target_unit, _db, _bp in targets:
@@ -995,7 +1127,8 @@ def perform_fenced_upgrade(
             f"activation failed; rolled back to {primary_backup} and quarantined {primary_failed}: {act_err}"
         ) from act_err
 
-    # 4. Verified active! Consume staged artifacts and clear any prior failure markers.
+    # 4. Verified active! Consume staged artifacts, clear any prior failure markers, and remove swap journal.
+    swap_journal_path.unlink(missing_ok=True)
     for comp in active_components:
         comp["staged"].unlink(missing_ok=True)
         comp["failed"].unlink(missing_ok=True)
@@ -1010,6 +1143,10 @@ def _remote_worker_prelude():
         inspect.getsource(_resolve_companion_paths),
         inspect.getsource(_read_build_conf_sha),
         inspect.getsource(_write_build_conf_sha),
+        inspect.getsource(_default_swap_journal_path),
+        inspect.getsource(_fsync_file_and_dir),
+        inspect.getsource(_write_swap_journal),
+        inspect.getsource(_recover_swap_journal),
         inspect.getsource(SystemdServiceCtl),
         inspect.getsource(_parse_simple_env_file),
         inspect.getsource(_read_proc_environ),

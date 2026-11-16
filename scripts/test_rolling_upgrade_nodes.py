@@ -1089,6 +1089,143 @@ class RollingUpgradeNodesTest(unittest.TestCase):
                     )
                 self.assertEqual(node_bin.read_text(), "node-v1")
 
+    def test_durable_swap_journal_recovers_interrupted_mixed_build_before_start(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            db_path = root / "jobs.db"
+            con = sqlite3.connect(db_path)
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, state TEXT NOT NULL)")
+            con.commit()
+            con.close()
+
+            bin_dir = root / "usr/local/bin"
+            sbin_dir = root / "usr/local/sbin"
+            bin_dir.mkdir(parents=True)
+            sbin_dir.mkdir(parents=True)
+            node_bin = bin_dir / "sandboxed-node"
+            mcp_bin = bin_dir / "sandboxed-mcp"
+            privd_bin = sbin_dir / "orb-privd"
+            build_conf = root / "30-build.conf"
+
+            old_sha = "1" * 40
+            new_sha = "2" * 40
+            node_bin.write_text("node-v1")
+            mcp_bin.write_text("mcp-v1")
+            privd_bin.write_text("privd-v1")
+            build_conf.write_text(f"[Service]\nEnvironment=ORB_BUILD_SHA={old_sha}\n")
+
+            (bin_dir / "sandboxed-node.new").write_text("node-v2")
+            (bin_dir / "sandboxed-mcp.new").write_text("mcp-v2")
+            (sbin_dir / "orb-privd.new").write_text("privd-v2")
+
+            # Simulate a process death (SIGKILL/power loss) right after sandboxed-node was renamed
+            # to v2, before sandboxed-mcp or orb-privd were swapped.
+            journal_path = roll._default_swap_journal_path(node_bin)
+            roll._write_swap_journal(
+                journal_path,
+                active_components=[
+                    {
+                        "name": "sandboxed-node",
+                        "bin": node_bin,
+                        "backup": Path(str(node_bin) + ".prev"),
+                        "installing": Path(str(node_bin) + ".installing"),
+                        "restoring": Path(str(node_bin) + ".restoring"),
+                        "had_existing": True,
+                        "prev_sha256": roll.compute_file_sha256(node_bin),
+                    },
+                    {
+                        "name": "sandboxed-mcp",
+                        "bin": mcp_bin,
+                        "backup": Path(str(mcp_bin) + ".prev"),
+                        "installing": Path(str(mcp_bin) + ".installing"),
+                        "restoring": Path(str(mcp_bin) + ".restoring"),
+                        "had_existing": True,
+                        "prev_sha256": roll.compute_file_sha256(mcp_bin),
+                    },
+                    {
+                        "name": "orb-privd",
+                        "bin": privd_bin,
+                        "backup": Path(str(privd_bin) + ".prev"),
+                        "installing": Path(str(privd_bin) + ".installing"),
+                        "restoring": Path(str(privd_bin) + ".restoring"),
+                        "had_existing": True,
+                        "prev_sha256": roll.compute_file_sha256(privd_bin),
+                    },
+                ],
+                build_conf_path=build_conf,
+                prev_build_sha=old_sha,
+            )
+            # Backups were prepared before any rename, then only sandboxed-node was replaced before crash:
+            Path(str(node_bin) + ".prev").write_text("node-v1")
+            Path(str(mcp_bin) + ".prev").write_text("mcp-v1")
+            Path(str(privd_bin) + ".prev").write_text("privd-v1")
+            node_bin.write_text("node-v2")
+            build_conf.write_text(f"[Service]\nEnvironment=ORB_BUILD_SHA={new_sha}\n")
+
+            class RecordingCtl:
+                def __init__(self):
+                    self.events = []
+
+                def is_active(self, _u):
+                    return True
+
+                def stop(self, u):
+                    self.events.append(f"stop:{u}:{node_bin.read_text()}:{mcp_bin.read_text()}:{privd_bin.read_text()}")
+
+                def start(self, u):
+                    self.events.append(f"start:{u}:{node_bin.read_text()}:{mcp_bin.read_text()}:{privd_bin.read_text()}")
+
+                def start_best_effort(self, u):
+                    self.events.append(f"start_best_effort:{u}")
+
+                def restart_best_effort(self, u):
+                    self.events.append(f"restart_best_effort:{u}")
+
+                def daemon_reload(self):
+                    self.events.append("daemon_reload")
+
+            # probe_worker_state flags the node unhealthy while a mid-swap journal is present
+            probe_mid = roll.probe_worker_state(
+                db_path=str(db_path),
+                binary_path=str(node_bin),
+                service_ctl=RecordingCtl(),
+                runtime_busy_probe=lambda: 0,
+                live_work_dir_probe=lambda: str(root),
+                mcp_binary_path=str(mcp_bin),
+                privd_binary_path=str(privd_bin),
+                build_conf_path=str(build_conf),
+            )
+            self.assertFalse(probe_mid["healthy"])
+            self.assertTrue(probe_mid.get("swap_journal_pending"))
+
+            # Running perform_fenced_upgrade recovers the journal first (restoring node-v1 and old_sha
+            # before stopping/swapping), then completes the clean v2 upgrade and removes the journal.
+            ctl = RecordingCtl()
+            res = roll.perform_fenced_upgrade(
+                db_path=str(db_path),
+                binary_path=str(node_bin),
+                verify_delay_secs=0.0,
+                service_ctl=ctl,
+                runtime_busy_probe=lambda: 0,
+                live_work_dir_probe=lambda: str(root),
+                mcp_binary_path=str(mcp_bin),
+                privd_binary_path=str(privd_bin),
+                expected_build_sha=new_sha,
+                expected_sha256={
+                    "sandboxed-node": roll.compute_file_sha256(bin_dir / "sandboxed-node.new"),
+                    "sandboxed-mcp": roll.compute_file_sha256(bin_dir / "sandboxed-mcp.new"),
+                    "orb-privd": roll.compute_file_sha256(sbin_dir / "orb-privd.new"),
+                },
+                build_conf_path=str(build_conf),
+                health_check_probe=lambda sha, shas: {"ok": True, "build_sha": sha, "binary_sha256": shas},
+            )
+            self.assertEqual(res, "UPGRADED")
+            self.assertFalse(journal_path.exists())
+            # At stop time (before new swap), recovery had restored node-v1 so no mixed build remained
+            self.assertIn("stop:sandboxed-node:node-v1:mcp-v1:privd-v1", ctl.events)
+            self.assertIn("start:sandboxed-node:node-v2:mcp-v2:privd-v2", ctl.events)
+
 
 if __name__ == "__main__":
     unittest.main()
