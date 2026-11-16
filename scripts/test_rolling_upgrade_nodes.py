@@ -120,6 +120,22 @@ def _start_core_api_server(cordoned):
 
 
 class RollingUpgradeNodesTest(unittest.TestCase):
+    def test_recovery_uncordons_only_healthy_owned_cordon(self):
+        from unittest.mock import Mock
+        for owner in (None, "other-operator", roll.DEFAULT_CORDON_OWNER):
+            for healthy in (False, True, None):
+                with self.subTest(owner=owner, healthy=healthy), tempfile.TemporaryDirectory() as temp:
+                    ledger = Path(temp) / "cordons.json"
+                    if owner is not None:
+                        roll.record_cordon_owner("fake", cordoned_by=owner, reason="test", ledger_path=ledger)
+                    api = Mock()
+                    ops = Mock()
+                    ops.recover_remote.return_value = {"healthy": healthy}
+                    result = roll.recover_cordoned_node(api, ops, "fake", cordon_ledger_path=ledger)
+                    expected = owner == roll.DEFAULT_CORDON_OWNER and healthy is True
+                    self.assertEqual(result["uncordoned"], expected)
+                    self.assertEqual(api.set_cordon.call_count, int(expected))
+
     def test_stage_remote_executes_generated_shell_command(self):
         run = subprocess.run
         def shell_ssh(cmd, **kwargs):

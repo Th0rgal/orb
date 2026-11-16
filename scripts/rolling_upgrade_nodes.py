@@ -2140,7 +2140,9 @@ def recover_cordoned_node(
     if node_ops is not None and hasattr(node_ops, "recover_remote"):
         worker_recovery = node_ops.recover_remote(node_id)
     uncordoned = False
-    if node_id not in preserve_cordons and (force_uncordon or cordoned_by == DEFAULT_CORDON_OWNER or meta is not None or not cordoned_by):
+    healthy = bool(worker_recovery.get("healthy", False))
+    owns_cordon = cordoned_by == DEFAULT_CORDON_OWNER
+    if node_id not in preserve_cordons and healthy and owns_cordon:
         core_api.set_cordon(node_id, False)
         clear_cordon_owner(node_id, cordon_ledger_path)
         uncordoned = True
@@ -2152,7 +2154,7 @@ def recover_cordoned_node(
         "uncordoned": uncordoned,
         "journal_recovered": bool(worker_recovery.get("journal_recovered", False)),
         "cleared_artifacts": list(worker_recovery.get("cleared_artifacts", [])),
-        "healthy": bool(worker_recovery.get("healthy", True)),
+        "healthy": healthy,
     }
 
 
@@ -2390,7 +2392,7 @@ def main(argv=None):
                         node_id=host,
                         cordon_ledger_path=args.cordon_ledger,
                         preserve_cordons=frozenset(args.preserve_cordon),
-                        force_uncordon=True,
+                        force_uncordon=False,
                     )
                 )
             output = "".join(json.dumps(ev, sort_keys=True) + "\n" for ev in rec_events)
