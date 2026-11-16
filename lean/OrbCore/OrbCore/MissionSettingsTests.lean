@@ -31,10 +31,10 @@ def moveRecovery (root : String) : IO Unit := do
     let reached ← IO.mkRef false
     closeCoreStore store
     let code ← OrbCore.MissionMoveRecovery.startAfterRecovery path (do reached.set true; return 0)
+    let .ok store ← openCoreStore path | throw (IO.userError "B5b reopen after failure")
     check (code != 0 && !(← reached.get) &&
       ((← OrbCore.MissionMoveRecovery.pending store.missionsDb).toOption.getD #[]).size == 6)
       "B5b_startup_failure_blocks_server_and_keeps_markers"
-    let .ok store ← openCoreStore path | throw (IO.userError "B5b reopen after failure")
     discard <| sql store.projectsDb "DROP TRIGGER reject_rebind;"
   finally closeCoreStore store
   check (← OrbCore.MissionMoveRecovery.startup path).isOk "B5b_next_startup_repairs_after_failure"
