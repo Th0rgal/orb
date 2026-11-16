@@ -51,11 +51,9 @@ def run (root : String) : IO Unit := do
         "update_mission_settings" (patch.setField "mission_id" (.str mid)) now
       let .ok value := OrbBin.Json.parse raw | throw (IO.userError "settings MCP JSON")
       return value
-    let .ok restAdmin ← createUserRecord store "settings-admin" "fixture-password" "admin" none none "2026-11-16T00:00:00Z"
-      | throw (IO.userError "settings admin fixture")
     let restAt (method path : String) (patch : JVal) := do
       let body := renderCompact patch
-      let jwt := mintSessionTokenV2 cfg.jwtSecret restAdmin.id restAdmin.role restAdmin.sessionEpoch (now + 3600)
+      let jwt := mintSessionTokenV2 cfg.jwtSecret "alice" "member" 1 (now + 3600)
       let raw := s!"{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Type: application/json\r\nContent-Length: {body.toUTF8.size}\r\n\r\n{body}"
       let .ok req := parseRequest raw.toUTF8 none | throw (IO.userError "settings REST parse")
       let .ok response ← dispatchCoreRequest app req now | throw (IO.userError "settings REST dispatch")
