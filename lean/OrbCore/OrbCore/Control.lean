@@ -7517,6 +7517,8 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     -- open: such a spawn cannot be resumed or safely replayed.
     if let .error e ← ManagedSpawnActions.fenceInterrupted store then
       IO.eprintln s!"[sandboxed-sh] managed spawn action recovery failed: {e}"
+    if let .error e ← McpGateway.fenceInterruptedGenericActions store then
+      IO.eprintln s!"[sandboxed-sh] generic action recovery failed: {e}"
     IO.eprintln s!"[sandboxed-sh] listening on http://{bindHost}:{boundPort} (dev_mode={cfg.devMode})"
     if maxRequests?.isNone then
       let localWakeupLaunch : MissionRecord → String → Option String → IO Bool :=

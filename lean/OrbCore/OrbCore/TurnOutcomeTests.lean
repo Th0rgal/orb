@@ -215,6 +215,43 @@ def r24_startup_fences_spawn_only (store : CoreStore) : IO Unit := do
   let .ok _ ← OrbCore.ManagedSpawnActions.fenceInterrupted store | throw (IO.userError "fence failed")
   check ((← cellOf store.projectsDb "SELECT state FROM mcp_actions_v1 WHERE id='r24-fence';") == "uncertain") "startup fences generic accepted action"
 
+/-- Exercise the actual startup path with an ephemeral listener, not just the helper. -/
+private def startupRecovery (root : String) : IO Unit := do
+  let work := s!"{root}/recovery-server"
+  let data := s!"{work}/.sandboxed-sh"
+  IO.FS.createDirAll data
+  let .ok seeded ← openCoreStore data | throw (IO.userError "startup recovery seed store")
+  try
+    for (id, tool, state) in #[("generic-accepted", "start_mission", "accepted"),
+        ("generic-running", "resume_mission", "running"),
+        ("generic-succeeded", "start_mission", "succeeded"),
+        ("generic-failed", "start_mission", "failed"),
+        ("generic-uncertain", "start_mission", "uncertain"),
+        ("provider-settled", "spawn_managed_machine", "succeeded")] do
+      let .ok _ ← execParamQuery seeded.projectsDb
+          "INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state,result,created_at,updated_at) VALUES(?1,'',?1,?1,'{}','test',?2,'{}',?3,'{}','t0','t0');"
+          #[id, tool, state] | throw (IO.userError "startup recovery insert")
+  finally
+    closeCoreStore seeded
+  let exitCode ← runCoreServer {
+    host := "127.0.0.1"
+    port := 0
+    workingDir := work
+    devMode := true
+  } (some 0)
+  check (exitCode == 0) "isolated startup exits zero"
+  let .ok recovered ← openCoreStore data | throw (IO.userError "startup recovery read store")
+  try
+    for id in #["generic-accepted", "generic-running"] do
+      check ((← cellOf recovered.projectsDb "SELECT state FROM mcp_actions_v1 WHERE id=?1;" #[id]) == "uncertain")
+        s!"actual startup fences {id}"
+    for (id, state) in #[("generic-succeeded", "succeeded"), ("generic-failed", "failed"),
+        ("generic-uncertain", "uncertain"), ("provider-settled", "succeeded")] do
+      check ((← cellOf recovered.projectsDb "SELECT state || ':' || updated_at || ':' || result FROM mcp_actions_v1 WHERE id=?1;" #[id]) == state ++ ":t0:{}")
+        s!"actual startup preserves terminal receipt {id}"
+  finally
+    closeCoreStore recovered
+
 def run : IO Unit := do
   r24_lost_reply_is_uncertain_not_rejected
   r24_failed_enqueue_is_not_success
@@ -223,6 +260,7 @@ def run : IO Unit := do
   let root := s!"/tmp/orb-turn-outcome-{← newUuidV4}"
   IO.FS.createDirAll s!"{root}/.sandboxed-sh"
   try
+    startupRecovery root
     let .ok store ← openCoreStore s!"{root}/.sandboxed-sh" | throw (IO.userError "turn outcome store open failed")
     try
       let cfg : CoreConfig := {
@@ -321,6 +359,16 @@ def run : IO Unit := do
         "start_mission" (.obj #[("title", .str "ghost"), ("prompt", .str "work that can never start")]) 4000000000
       check ((reply.splitOn "no_execution_placement").length > 1) s!"an undispatchable start is refused: {reply}"
       check ((← cellOf db "SELECT COUNT(*) FROM missions WHERE title='ghost';") == "0") "no ghost mission is left behind"
+      let refusedArgs := JVal.obj #[("title", .str "ghost"), ("prompt", .str "cannot start"),
+        ("idempotency_key", .str "refused-start")]
+      let refusedRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root claims
+        "start_mission" refusedArgs 4000000000
+      let refusedReplay ← OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root claims
+        "start_mission" refusedArgs 4000000001
+      let refused := (OrbBin.Json.parse refusedRaw).toOption.getD .null |>.fieldOrNull "result"
+      check (refusedRaw == refusedReplay && verifyReceiptWord refused == 16777474 &&
+        refused.fieldStr? "code" == some "no_execution_placement") "refused start replays the same settled refusal"
+      check ((← cellOf db "SELECT COUNT(*) FROM missions WHERE title='ghost';") == "0") "refused replay leaves no ghost"
 
       -- Receipts name the model asked for and the model the turn is launched with;
       -- afterwards the mission reports which model and provider actually answered.
@@ -347,6 +395,9 @@ def run : IO Unit := do
           s!"{label} receipt must normalize to accepted (65793) with durable_success=true: {raw}"
       let startedMid := (((OrbBin.Json.parse receipt).toOption.getD .null).fieldOrNull "result").fieldStr? "mission_id" |>.getD ""
       let startActId := (((OrbBin.Json.parse receipt).toOption.getD .null).fieldOrNull "result").fieldStr? "action_id" |>.getD ""
+      check (!startedMid.isEmpty && receipt == receiptReplay &&
+        (← cellOf db "SELECT COUNT(*) FROM missions WHERE title='receipt';") == "1")
+        "start replay preserves exact receipt and creates exactly one mission"
       let startGetActRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
         "get_action" (.obj #[("action_id", .str startActId)]) 4000000000
       let startGetRes := (((OrbBin.Json.parse startGetActRaw).toOption.getD .null).fieldOrNull "result")
@@ -376,8 +427,13 @@ def run : IO Unit := do
       -- Unplaced `resume_mission` fails closed with `accepted:"no"` -> `16777474` (`action_outcome:"rejected"`, `durable_success:false`, `may_retry_fresh_key:true`)
       let resumeFailRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
         "resume_mission" (.obj #[("mission_id", .str startedMid), ("idempotency_key", .str "resume-fail-1")]) 4000000000
-      let resumeFailErr := (((OrbBin.Json.parse resumeFailRaw).toOption.getD .null).fieldOrNull "error").setField "accepted" (.str "no")
-      check (verifyReceiptWord (.obj #[("error", resumeFailErr)]) == 16777474)
+      let resumeFailRes := ((OrbBin.Json.parse resumeFailRaw).toOption.getD .null).fieldOrNull "result"
+      let resumeFailReplay ← OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root claims
+        "resume_mission" (.obj #[("mission_id", .str startedMid), ("idempotency_key", .str "resume-fail-1")]) 4000000001
+      check (verifyReceiptWord resumeFailRes == 16777474 &&
+        resumeFailRes.fieldStr? "accepted" == some "no" &&
+        resumeFailRes.fieldStr? "code" == some "no_execution_placement" &&
+        resumeFailRaw == resumeFailReplay)
         s!"failed resume_mission must normalize to rejected (16777474): {resumeFailRaw}"
       -- Placed `resume_mission` on a loopback node settles with `65793` (`action_outcome:"accepted"`, `result.status:"active"`) and replays idempotently
       let (nodeListenFd, nodePort) ← match ← LeanSys.Posix.tcpListen "127.0.0.1" 0 8 with
@@ -462,14 +518,19 @@ def run : IO Unit := do
       -- and no inner `result` field): both `get_action` and a retry with the same key must still normalize to `65793`
       -- (`action_outcome:"accepted"`, `durable_success:true`, `may_retry_fresh_key:false`) and preserve `result.status`.
       let oldRowJson := s!"\{\"ok\":true,\"mission_id\":\"{startedMid}\",\"status\":\"cancelled\",\"action_id\":\"act-old-cancel\",\"state\":\"succeeded\",\"accepted\":\"yes\"}"
+      let oldArgs := JVal.obj #[("mission_id", .str startedMid), ("idempotency_key", .str "old-cancel-key")]
       discard <| execParamQuery store.projectsDb
         ("INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state,result,created_at,updated_at) " ++
-         "VALUES('act-old-cancel',?1,'turn-outcome:m-tools:cancel_mission','old-cancel-key','old-cancel-key','coordinator::m-tools','cancel_mission','{}','succeeded',?2,'t0','t0');")
-        #[startedMid, oldRowJson]
+         "VALUES('act-old-cancel',?1,'turn-outcome:m-tools:cancel_mission','old-cancel-key','old-cancel-key','coordinator::m-tools','cancel_mission',?3,'succeeded',?2,'t0','t0');")
+        #[startedMid, oldRowJson, renderCompact oldArgs]
       let oldGetRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
         "get_action" (.obj #[("action_id", .str "act-old-cancel")]) 4000000000
       let oldReplayRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
-        "cancel_mission" (.obj #[("mission_id", .str startedMid), ("idempotency_key", .str "old-cancel-key")]) 4000000000
+        "cancel_mission" oldArgs 4000000000
+      let oldConflict ← OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root claims
+        "cancel_mission" (oldArgs.setField "mission_id" (.str "m-tools")) 4000000000
+      check ((oldConflict.splitOn "mcp_idempotency_conflict").length > 1)
+        "legacy retry-key fingerprint still refuses changed arguments"
       for (label, raw) in #[("old-shape get_action", oldGetRaw), ("old-shape retry", oldReplayRaw)] do
         let res := (((OrbBin.Json.parse raw).toOption.getD .null).fieldOrNull "result")
         check (verifyReceiptWord res == 65793 &&
