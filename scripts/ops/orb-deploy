@@ -289,12 +289,13 @@ done
 STAGE_COMMITTED=0
 restore_backed_up_file() {
   local backup="$1" dst="$2" remove_if_missing="${3:-0}"
-  rm -f "$dst.new"
+  if ! rm -f "$dst.new"; then return 1; fi
   if [[ -n "$backup" && -f "$backup" ]]; then
-    cp -p "$backup" "$dst.restoring" && mv "$dst.restoring" "$dst"
-    cmp -s "$backup" "$dst"
+    if ! cp -p "$backup" "$dst.restoring"; then return 1; fi
+    if ! mv "$dst.restoring" "$dst"; then return 1; fi
+    if ! cmp -s "$backup" "$dst"; then return 1; fi
   elif [[ "$remove_if_missing" == 1 ]]; then
-    rm -f "$dst"
+    if ! rm -f "$dst"; then return 1; fi
   fi
   return 0
 }
@@ -312,15 +313,45 @@ rollback_staged_files() {
     done
     return "$rc"
   fi
-  [[ -n "$PROVISION_BACKUP" && -f "$PROVISION_BACKUP" ]] && cp -p "$PROVISION_BACKUP" /usr/local/lib/orb/orb-node-provision.sh
-  [[ -n "$NODE_BACKUP" && -f "$NODE_BACKUP" ]] && cp -p "$NODE_BACKUP" /usr/local/bin/sandboxed-node
-  restore_backed_up_file "$GUEST_NODE_BACKUP" "$GUEST_NODE" 1
+  local rc=0
+  restore_backed_up_file "$PROVISION_BACKUP" /usr/local/lib/orb/orb-node-provision.sh || rc=1
+  restore_backed_up_file "$NODE_BACKUP" /usr/local/bin/sandboxed-node || rc=1
+  restore_backed_up_file "$GUEST_NODE_BACKUP" "$GUEST_NODE" 1 || rc=1
   for spec in "${OPS_TARGETS[@]}"; do
     IFS=: read -r dst _ _ <<< "$spec"
-    [[ -f "$dst.pre-deploy-$TS" ]] && cp -p "$dst.pre-deploy-$TS" "$dst"
+    restore_backed_up_file "$dst.pre-deploy-$TS" "$dst" || rc=1
   done
-  return 0
+  return "$rc"
 }
+if [[ $ROLLOUT_NODES != 1 ]]; then
+  PLAIN_PROD_TOUCHED=0
+  plain_deploy_exit() {
+    local rc=$? failed=0
+    trap - EXIT
+    if [[ $STAGE_COMMITTED == 0 ]]; then
+      if [[ -n "${BACKUP:-}" ]]; then
+        restore_backed_up_file "$BACKUP" /usr/local/bin/orb-core || failed=1
+      fi
+      if [[ -n "${OLD_CATALOG:-}" ]]; then
+        set_catalog sandboxed-sh-prod "$OLD_CATALOG" || failed=1
+      elif [[ -n "${CATALOG_CONF:-}" ]]; then
+        rm -f "$CATALOG_CONF" || failed=1
+      fi
+      rollback_staged_files || failed=1
+      if [[ $PLAIN_PROD_TOUCHED == 1 ]]; then
+        set_build sandboxed-sh-prod "${OLD_SHA:-unknown}" || failed=1
+        systemctl daemon-reload || failed=1
+        systemctl restart sandboxed-sh-prod || failed=1
+      fi
+      if [[ $failed == 1 ]]; then
+        say "ROLLBACK FAILED; recovery backups retained"
+        exit 1
+      fi
+    fi
+    exit "$rc"
+  }
+  trap plain_deploy_exit EXIT
+fi
 if [[ $ROLLOUT_NODES == 1 ]]; then
   install -m 644 "$TREE/scripts/orb-node-provision.sh" /usr/local/lib/orb/orb-node-provision.sh.new
   mv /usr/local/lib/orb/orb-node-provision.sh.new /usr/local/lib/orb/orb-node-provision.sh
@@ -352,7 +383,11 @@ if [[ $ROLLOUT_NODES == 1 ]]; then DEV_TOUCHED=1; fi
 systemctl restart sandboxed-sh-dev
 if ! healthy 3002 30 "$SHA"; then
   if [[ $ROLLOUT_NODES == 1 ]]; then rollback_release_bin_dir || true; fi
-  rollback_staged_files
+  trap - EXIT
+  if ! rollback_staged_files; then
+    say "ROLLBACK FAILED; recovery backups retained"
+    exit 1
+  fi
   STAGE_COMMITTED=1
   say "dev unhealthy; prod untouched"
   exit 1
@@ -365,6 +400,7 @@ OLD_SHA="$(sed -n 's/^Environment=ORB_BUILD_SHA=//p' /etc/systemd/system/sandbox
 CATALOG_CONF=/etc/systemd/system/sandboxed-sh-prod.service.d/31-catalog.conf
 OLD_CATALOG="$(sed -n 's/^Environment=SANDBOXED_CATALOG_DIR=//p' "$CATALOG_CONF" 2>/dev/null || true)"
 cp -p /usr/local/bin/orb-core "$BACKUP"
+PLAIN_PROD_TOUCHED=1
 set_catalog sandboxed-sh-prod "$CATALOG"
 set_build sandboxed-sh-prod "$SHA"; systemctl daemon-reload
 install -m 755 "$BIN" /usr/local/bin/orb-core.new && mv /usr/local/bin/orb-core.new /usr/local/bin/orb-core
@@ -388,14 +424,20 @@ fi
 if [[ $ROLLOUT_NODES == 1 ]]; then PROD_TOUCHED=1; fi
 systemctl restart sandboxed-sh-prod
 if ! healthy 3000 60 "$SHA"; then
+  trap - EXIT
+  rollback_failed=0
   say "prod unhealthy; rolling back to $BACKUP"
-  cp -p "$BACKUP" /usr/local/bin/orb-core
-  if [[ -n "$OLD_CATALOG" ]]; then set_catalog sandboxed-sh-prod "$OLD_CATALOG"; else rm -f "$CATALOG_CONF"; fi
+  restore_backed_up_file "$BACKUP" /usr/local/bin/orb-core || rollback_failed=1
+  if [[ -n "$OLD_CATALOG" ]]; then set_catalog sandboxed-sh-prod "$OLD_CATALOG" || rollback_failed=1; else rm -f "$CATALOG_CONF" || rollback_failed=1; fi
   if [[ $ROLLOUT_NODES == 1 ]]; then rollback_release_bin_dir || true; fi
-  rollback_staged_files
+  rollback_staged_files || rollback_failed=1
   STAGE_COMMITTED=1
-  set_build sandboxed-sh-prod "${OLD_SHA:-unknown}"; systemctl daemon-reload
-  systemctl restart sandboxed-sh-prod
+  set_build sandboxed-sh-prod "${OLD_SHA:-unknown}" || rollback_failed=1
+  systemctl daemon-reload || rollback_failed=1
+  systemctl restart sandboxed-sh-prod || rollback_failed=1
+  if [[ $rollback_failed == 1 ]]; then
+    say "ROLLBACK FAILED; recovery backups retained"
+  fi
   exit 1
 fi
 STAGE_COMMITTED=1

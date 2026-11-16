@@ -159,6 +159,34 @@ class DeployGateTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(guest.read_text(), "old-guest\n")
 
+    def test_plain_post_install_failure_restores_core_and_guest_state(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._seed_existing_targets(root)
+            guest = root / "usr/local/lib/orb/guest/sandboxed-node"
+            guest.parent.mkdir(parents=True, exist_ok=True)
+            guest.write_text("old-guest\n")
+            result = self._run_staged_deploy(root, fail_command="restart sandboxed-sh-prod")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((root / "usr/local/bin/orb-core").read_text(), "old-orb-core\n")
+            self.assertEqual(guest.read_text(), "old-guest\n")
+            self.assertEqual((root / "usr/local/lib/orb/orb-node-provision.sh").read_text(), "old-provision\n")
+
+    def test_plain_rollback_failure_is_propagated(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._seed_existing_targets(root)
+            guest = root / "usr/local/lib/orb/guest/sandboxed-node"
+            guest.parent.mkdir(parents=True, exist_ok=True)
+            guest.write_text("old-guest\n")
+            result = self._run_staged_deploy(
+                root, fail_command="restart sandboxed-sh-prod", fail_restore=True
+            )
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("ROLLBACK FAILED", result.stdout)
+
     def _run_staged_deploy(
         self,
         root: Path,
@@ -167,6 +195,7 @@ class DeployGateTests(unittest.TestCase):
         dev_only: bool = False,
         rollout_nodes: bool = False,
         fail_command: str = "",
+        fail_restore: bool = False,
         script_text=None,
         rollout_program=None,
         node_binary_content="new-sandboxed-node\n",
@@ -235,6 +264,14 @@ class DeployGateTests(unittest.TestCase):
                 "esac\n"
             ),
         }
+        if fail_restore:
+            stubs["cp"] = (
+                "#!/bin/sh\n"
+                "case \"$3\" in\n"
+                "  *.restoring) exit 73 ;;\n"
+                "  *) exec /bin/cp \"$@\" ;;\n"
+                "esac\n"
+            )
         for name, body in stubs.items():
             p = bin_dir / name
             p.write_text(body)
@@ -721,8 +758,8 @@ with patch.object(r, 'discover_local_core_auth', return_value=('http://fake', 'f
             self.assertNotEqual(res.returncode, 0)
             # Stale $CATALOG.new was NOT rm -rf'd before cp -a on the plain path:
             self.assertTrue((root / f"usr/local/share/orb/releases/{SHA}/catalog/catalog/marker").is_file())
-            # No EXIT trap ran on the plain path (exact master parity):
-            self.assertEqual((root / "usr/local/lib/orb/orb-node-provision.sh").read_text(), "new-provision\n")
+            # Plain-path EXIT rollback restores staged files after the failed dev restart.
+            self.assertEqual((root / "usr/local/lib/orb/orb-node-provision.sh").read_text(), "old-provision\n")
             self.assertEqual((root / "usr/local/bin/sandboxed-mcp").read_text(), targets["usr/local/bin/sandboxed-mcp"][0])
             self.assertEqual((root / "usr/local/sbin/orb-privd").read_text(), targets["usr/local/sbin/orb-privd"][0])
             self.assertFalse((root / f"usr/local/share/orb/releases/{SHA}/bin").exists())
