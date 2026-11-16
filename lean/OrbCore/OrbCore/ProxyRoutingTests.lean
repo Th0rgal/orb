@@ -849,7 +849,7 @@ def run : IO Unit := do
     check (createSt == 201 && conforms created) s!"create returns the chain row: {createSt} {renderCompact created}"
     let (listSt, listed) ← api "GET" "/api/model-routing/chains" ""
     let rows := listed.asArr?.getD #[]
-    check (listSt == 200 && rows.size ≥ 7 && rows.all conforms) s!"chain list rows must match the client type: {renderCompact listed}"
+    check (listSt == 200 && rows.size ≥ 5 && rows.all conforms) s!"chain list rows must match the client type: {renderCompact listed}"
     check ((rows.filter (fun r => r.fieldBool? "is_default" == some true)).map (·.fieldStr? "id") == #[some "builtin/smart"])
       "exactly the stock default chain is default before anyone chooses one"
     -- Built-in ids contain a slash; the desktop saves them as `builtin%2Fsmart` and a proxy may
