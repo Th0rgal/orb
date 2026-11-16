@@ -85,7 +85,11 @@ def runCli (args : List String) : IO UInt32 := do
   | "opencode-acp" :: rest =>
     runOpenCodeAcp rest
   | "--version" :: _ | "-V" :: _ =>
-    IO.println "sandboxed-node 1.3.0-lean4"
+    let sha ← resolveNodeBuildSha
+    if sha.isEmpty then
+      IO.println "sandboxed-node 1.3.0-lean4"
+    else
+      IO.println s!"sandboxed-node 1.3.0-lean4 ({sha})"
     return 0
   | "reload" :: rest =>
     let some unitBase := parseReloadArgs rest

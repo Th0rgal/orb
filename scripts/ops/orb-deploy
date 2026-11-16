@@ -17,12 +17,16 @@ LOG="${ORB_DEPLOY_LOG:-/var/log/orb-deploy.log}"
 DETACH=0
 if [[ "${1:-}" == "--detach" ]]; then DETACH=1; shift; fi
 if [[ $# -lt 1 || $# -gt 2 || ! "$1" =~ ^(master|[0-9a-f]{7,40})$ ||
-      ( $# -eq 2 && "$2" != "--dev-only" ) ]]; then
-  echo "usage: orb-deploy [--detach] <sha|master> [--dev-only]" >&2
+      ( $# -eq 2 && ! "$2" =~ ^(--dev-only|--rollout-nodes|--nodes-dry-run|--nodes-status)$ ) ]]; then
+  echo "usage: orb-deploy [--detach] <sha|master> [--dev-only|--rollout-nodes|--nodes-dry-run|--nodes-status]" >&2
   exit 64
 fi
 REF="$1"
-DEV_ONLY=0; [[ "${2:-}" == "--dev-only" ]] && DEV_ONLY=1
+MODE_FLAG="${2:-}"
+DEV_ONLY=0; [[ "$MODE_FLAG" == "--dev-only" ]] && DEV_ONLY=1
+ROLLOUT_NODES=0; [[ "$MODE_FLAG" == "--rollout-nodes" ]] && ROLLOUT_NODES=1
+NODES_DRY_RUN=0; [[ "$MODE_FLAG" == "--nodes-dry-run" ]] && NODES_DRY_RUN=1
+NODES_STATUS=0; [[ "$MODE_FLAG" == "--nodes-status" ]] && NODES_STATUS=1
 
 if [[ $DETACH == 1 ]]; then
   systemctl reset-failed orb-deploy.service 2>/dev/null || true
@@ -30,8 +34,44 @@ if [[ $DETACH == 1 ]]; then
     --property=Description="Orb Core deploy $*" "$(readlink -f "$0")" "$@"
 fi
 
-exec 9>/run/lock/orb-deploy.lock
-flock -n 9 || { echo "another orb-deploy is running" >&2; exit 2; }
+if [[ $NODES_STATUS == 1 || $NODES_DRY_RUN == 1 ]]; then
+  SHA=""
+  if [[ -d "$TREE/.git" ]]; then
+    R="$REF"
+    [[ "$R" == "master" ]] && R=origin/master
+    SHA="$(git -C "$TREE" rev-parse --verify "$R^{commit}" 2>/dev/null || true)"
+  fi
+  [[ -z "$SHA" && "$REF" =~ ^[0-9a-f]{40}$ ]] && SHA="$REF"
+  ROLLOUT_ARGS=()
+  [[ -n "$SHA" ]] && ROLLOUT_ARGS+=(--expected-build-sha "$SHA")
+  REL_BIN_DIR="/usr/local/share/orb/releases/$SHA/bin"
+  if [[ -n "$SHA" && -d "$REL_BIN_DIR" ]]; then
+    ROLLOUT_ARGS+=(--stage-from-dir "$REL_BIN_DIR")
+  else
+    for pair in "sandboxed-node:/usr/local/bin/sandboxed-node" \
+                "sandboxed-mcp:/usr/local/bin/sandboxed-mcp" \
+                "orb-privd:/usr/local/sbin/orb-privd"; do
+      comp="${pair%%:*}"; bin_p="${pair#*:}"
+      if [[ -f "$bin_p" ]]; then
+        ROLLOUT_ARGS+=(--expect-sha256 "$comp=$(sha256sum "$bin_p" | cut -d' ' -f1)")
+      fi
+    done
+  fi
+  if [[ $NODES_STATUS == 1 ]]; then
+    exec python3 "$TREE/scripts/rolling_upgrade_nodes.py" --status "${ROLLOUT_ARGS[@]}"
+  else
+    exec python3 "$TREE/scripts/rolling_upgrade_nodes.py" --dry-run "${ROLLOUT_ARGS[@]}"
+  fi
+fi
+
+if [[ $ROLLOUT_NODES == 1 ]]; then
+  exec 9<>/run/lock/orb-deploy.lock
+  flock -n 9 || { echo "deploy lock held by $(cat /run/lock/orb-deploy.lock)" >&2; exit 2; }
+  printf 'orb-deploy pid=%s\n' "$$" > /run/lock/orb-deploy.lock
+else
+  exec 9>/run/lock/orb-deploy.lock
+  flock -n 9 || { echo "another orb-deploy is running" >&2; exit 2; }
+fi
 exec > >(tee -a "$LOG") 2>&1
 say() { echo "[$(date -u +%FT%TZ)] $*"; }
 
@@ -72,22 +112,118 @@ git clean -fdq -- lean/OrbCore/OrbCore lean/OrbNode/OrbNode lean/OrbBin/OrbBin l
 say "build"
 (cd lean/OrbCore && lake build orb-core orb-core-test orb-spec-runner -- -DwarningAsError=true) | tail -4
 (cd lean/OrbNode && lake build orb-node orb-node-test -- -DwarningAsError=true) | tail -4
+if [[ $ROLLOUT_NODES == 1 ]]; then
+  (cd lean/OrbBin && lake build sandboxed-mcp orb-privd -- -DwarningAsError=true) | tail -4
+fi
 say "self-test"
 ./lean/OrbCore/.lake/build/bin/orb-core-test | tail -1
 ./lean/OrbNode/.lake/build/bin/orb-node-test | tail -1
 BIN="$TREE/lean/OrbCore/.lake/build/bin/orb-core"
 NODE_BIN="$TREE/lean/OrbNode/.lake/build/bin/orb-node"
-say "binary $(sha256sum "$BIN" | cut -c1-12) node $(sha256sum "$NODE_BIN" | cut -c1-12)"
+if [[ $ROLLOUT_NODES == 1 ]]; then
+  MCP_BIN="$TREE/lean/OrbBin/.lake/build/bin/sandboxed-mcp"
+  PRIVD_BIN="$TREE/lean/OrbBin/.lake/build/bin/orb-privd"
+  say "binary $(sha256sum "$BIN" | cut -c1-12) node $(sha256sum "$NODE_BIN" | cut -c1-12) mcp $(sha256sum "$MCP_BIN" | cut -c1-12) privd $(sha256sum "$PRIVD_BIN" | cut -c1-12)"
+else
+  say "binary $(sha256sum "$BIN" | cut -c1-12) node $(sha256sum "$NODE_BIN" | cut -c1-12)"
+fi
 
 # Pin resources to the deployed revision. Dev-only promotion must not change
 # prod's catalog; rollback restores its resource pointer alongside its binary.
+if [[ $ROLLOUT_NODES == 1 ]]; then
+  # Snapshot before the first published mutation. Backups remain available until
+  # the complete rollout succeeds; EXIT also handles failed restart commands.
+  ROLLOUT_COMMITTED=0
+  DEV_TOUCHED=0
+  PROD_TOUCHED=0
+  ROLLBACK_DIR="$(mktemp -d)"
+  ROLLBACK_PATHS=()
+  atomic_select() {
+    python3 - "$1" "$2" <<'PY'
+import ctypes, os, sys
+src, dst = sys.argv[1:]
+if os.path.isdir(dst) and not os.path.islink(dst) or os.path.isdir(src) and not os.path.islink(src) and os.path.lexists(dst):
+    # Linux rename exchange keeps the legacy directory selected until the
+    # replacement link exists; neither name is ever absent.
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.renameat2(-100, os.fsencode(src), -100, os.fsencode(dst), 2):
+        raise OSError(ctypes.get_errno(), "rename exchange failed")
+else:
+    os.replace(src, dst)
+PY
+  }
+  rollout_exit() {
+    local rc=$? i dst failed=0
+    trap - EXIT
+    if [[ $ROLLOUT_COMMITTED == 0 ]]; then
+      for ((i=${#ROLLBACK_PATHS[@]}-1; i>=0; i--)); do
+        dst="${ROLLBACK_PATHS[i]}"
+        if [[ -e "$ROLLBACK_DIR/$i" || -L "$ROLLBACK_DIR/$i" ]]; then
+          rm -rf "$dst.restoring"
+          cp -a "$ROLLBACK_DIR/$i" "$dst.restoring" && atomic_select "$dst.restoring" "$dst" || failed=1
+        else
+          rm -rf "$dst" || failed=1
+        fi
+      done
+      systemctl daemon-reload || failed=1
+      if [[ $DEV_TOUCHED == 1 ]]; then systemctl restart sandboxed-sh-dev || failed=1; fi
+      if [[ $PROD_TOUCHED == 1 ]]; then systemctl restart sandboxed-sh-prod || failed=1; fi
+      if [[ $failed == 1 ]]; then
+        say "ROLLBACK FAILED; recovery snapshots retained at $ROLLBACK_DIR"
+        exit 1
+      fi
+    fi
+    rm -rf "$ROLLBACK_DIR"
+    exit "$rc"
+  }
+  trap rollout_exit EXIT
+  for dst in /usr/local/bin/{orb-core,orb-core-dev,sandboxed-node,sandboxed-mcp} \
+      /usr/local/sbin/{orb-privd,orb-monitor,orb-sidecar-guard,orb-dev-autodeploy} \
+      /usr/local/lib/orb/orb-node-provision.sh /usr/local/libexec/{orb-env,env-migration.json} \
+      /etc/systemd/system/sandboxed-sh-{dev,prod}.service.d/{30-build,31-catalog}.conf \
+      "/usr/local/share/orb/releases/$SHA/bin"; do
+    if [[ -e "$dst" || -L "$dst" ]]; then
+      cp -a "$dst" "$ROLLBACK_DIR/${#ROLLBACK_PATHS[@]}"
+    fi
+    ROLLBACK_PATHS+=("$dst")
+  done
+fi
 CATALOG="/usr/local/share/orb/releases/$SHA/catalog"
 test -f "$TREE/catalog/providers.json"
 test -d "$TREE/catalog/snapshots"
 mkdir -p "$(dirname "$CATALOG")"
 if [[ ! -d "$CATALOG" ]]; then
+  if [[ $ROLLOUT_NODES == 1 ]]; then rm -rf "$CATALOG.new"; fi
   cp -a "$TREE/catalog" "$CATALOG.new"
   mv "$CATALOG.new" "$CATALOG"
+fi
+if [[ $ROLLOUT_NODES == 1 ]]; then
+  RELEASE_BIN_DIR="/usr/local/share/orb/releases/$SHA/bin"
+  STAGE_COMMITTED=0
+  RELEASE_BIN_PREV=""
+  RELEASE_BIN_STAGING=""
+  rollback_release_bin_dir() {
+    rm -rf "${RELEASE_BIN_STAGING:-}"
+    if [[ -n "${RELEASE_BIN_PREV:-}" && -d "$RELEASE_BIN_PREV" && ! -e "$RELEASE_BIN_DIR" ]]; then
+      mv "$RELEASE_BIN_PREV" "$RELEASE_BIN_DIR"
+    fi
+  }
+  RELEASE_BIN_TS="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  RELEASE_BIN_TARGET="/usr/local/share/orb/releases/$SHA/bin.$RELEASE_BIN_TS"
+  RELEASE_BIN_STAGING="$RELEASE_BIN_TARGET.new"
+  rm -rf "$RELEASE_BIN_STAGING" "$RELEASE_BIN_TARGET"
+  mkdir -p "$RELEASE_BIN_STAGING"
+  install -m 755 "$NODE_BIN" "$RELEASE_BIN_STAGING/sandboxed-node"
+  install -m 755 "$MCP_BIN" "$RELEASE_BIN_STAGING/sandboxed-mcp"
+  install -m 755 "$PRIVD_BIN" "$RELEASE_BIN_STAGING/orb-privd"
+  mv "$RELEASE_BIN_STAGING" "$RELEASE_BIN_TARGET"
+  RELEASE_BIN_STAGING=""
+  OLD_RELEASE_BIN_TARGET=""
+  if [[ -L "$RELEASE_BIN_DIR" ]]; then
+    OLD_RELEASE_BIN_TARGET="$(readlink -f "$RELEASE_BIN_DIR" || true)"
+  fi
+  ln -sfn "bin.$RELEASE_BIN_TS" "$RELEASE_BIN_DIR.link.$RELEASE_BIN_TS"
+  atomic_select "$RELEASE_BIN_DIR.link.$RELEASE_BIN_TS" "$RELEASE_BIN_DIR"
 fi
 
 set_catalog sandboxed-sh-dev "$CATALOG"
@@ -104,6 +240,18 @@ if [[ -f /usr/local/bin/sandboxed-node ]]; then
   NODE_BACKUP="/usr/local/bin/sandboxed-node.pre-deploy-$TS"
   cp -p /usr/local/bin/sandboxed-node "$NODE_BACKUP"
 fi
+MCP_BACKUP=""
+PRIVD_BACKUP=""
+if [[ $ROLLOUT_NODES == 1 ]]; then
+  if [[ -f /usr/local/bin/sandboxed-mcp ]]; then
+    MCP_BACKUP="/usr/local/bin/sandboxed-mcp.pre-deploy-$TS"
+    cp -p /usr/local/bin/sandboxed-mcp "$MCP_BACKUP"
+  fi
+  if [[ -f /usr/local/sbin/orb-privd ]]; then
+    PRIVD_BACKUP="/usr/local/sbin/orb-privd.pre-deploy-$TS"
+    cp -p /usr/local/sbin/orb-privd "$PRIVD_BACKUP"
+  fi
+fi
 OPS_TARGETS=(
   "/usr/local/sbin/orb-monitor:755:$TREE/scripts/ops/orb-monitor"
   "/usr/local/sbin/orb-sidecar-guard:755:$TREE/scripts/ops/orb-sidecar-guard"
@@ -117,7 +265,28 @@ for spec in "${OPS_TARGETS[@]}"; do
     cp -p "$dst" "$dst.pre-deploy-$TS"
   fi
 done
+STAGE_COMMITTED=0
+restore_backed_up_file() {
+  local backup="$1" dst="$2"
+  rm -f "$dst.new"
+  if [[ -n "$backup" && -f "$backup" ]]; then
+    cp -p "$backup" "$dst.restoring" && mv "$dst.restoring" "$dst"
+    cmp -s "$backup" "$dst"
+  fi
+}
 rollback_staged_files() {
+  if [[ $ROLLOUT_NODES == 1 ]]; then
+    local rc=0
+    restore_backed_up_file "$PROVISION_BACKUP" /usr/local/lib/orb/orb-node-provision.sh || rc=1
+    restore_backed_up_file "$NODE_BACKUP" /usr/local/bin/sandboxed-node || rc=1
+    restore_backed_up_file "$MCP_BACKUP" /usr/local/bin/sandboxed-mcp || rc=1
+    restore_backed_up_file "$PRIVD_BACKUP" /usr/local/sbin/orb-privd || rc=1
+    for spec in "${OPS_TARGETS[@]}"; do
+      IFS=: read -r dst _ _ <<< "$spec"
+      restore_backed_up_file "$dst.pre-deploy-$TS" "$dst" || rc=1
+    done
+    return "$rc"
+  fi
   [[ -n "$PROVISION_BACKUP" && -f "$PROVISION_BACKUP" ]] && cp -p "$PROVISION_BACKUP" /usr/local/lib/orb/orb-node-provision.sh
   [[ -n "$NODE_BACKUP" && -f "$NODE_BACKUP" ]] && cp -p "$NODE_BACKUP" /usr/local/bin/sandboxed-node
   for spec in "${OPS_TARGETS[@]}"; do
@@ -126,21 +295,42 @@ rollback_staged_files() {
   done
   return 0
 }
-install -m 644 "$TREE/scripts/orb-node-provision.sh" /usr/local/lib/orb/orb-node-provision.sh.new && mv /usr/local/lib/orb/orb-node-provision.sh.new /usr/local/lib/orb/orb-node-provision.sh
-install -m 755 "$NODE_BIN" /usr/local/bin/sandboxed-node.new && mv /usr/local/bin/sandboxed-node.new /usr/local/bin/sandboxed-node
-for spec in "${OPS_TARGETS[@]}"; do
-  IFS=: read -r dst mode src <<< "$spec"
-  install -m "$mode" "$src" "$dst.new" && mv "$dst.new" "$dst"
-done
-install -m 755 "$BIN" /usr/local/bin/orb-core-dev.new && mv /usr/local/bin/orb-core-dev.new /usr/local/bin/orb-core-dev
+if [[ $ROLLOUT_NODES == 1 ]]; then
+  install -m 644 "$TREE/scripts/orb-node-provision.sh" /usr/local/lib/orb/orb-node-provision.sh.new
+  mv /usr/local/lib/orb/orb-node-provision.sh.new /usr/local/lib/orb/orb-node-provision.sh
+  install -m 755 "$NODE_BIN" /usr/local/bin/sandboxed-node.new
+  mv /usr/local/bin/sandboxed-node.new /usr/local/bin/sandboxed-node
+  install -m 755 "$MCP_BIN" /usr/local/bin/sandboxed-mcp.new
+  mv /usr/local/bin/sandboxed-mcp.new /usr/local/bin/sandboxed-mcp
+  install -m 755 "$PRIVD_BIN" /usr/local/sbin/orb-privd.new
+  mv /usr/local/sbin/orb-privd.new /usr/local/sbin/orb-privd
+  for spec in "${OPS_TARGETS[@]}"; do
+    IFS=: read -r dst mode src <<< "$spec"
+    install -m "$mode" "$src" "$dst.new"
+    mv "$dst.new" "$dst"
+  done
+  install -m 755 "$BIN" /usr/local/bin/orb-core-dev.new
+  mv /usr/local/bin/orb-core-dev.new /usr/local/bin/orb-core-dev
+else
+  install -m 644 "$TREE/scripts/orb-node-provision.sh" /usr/local/lib/orb/orb-node-provision.sh.new && mv /usr/local/lib/orb/orb-node-provision.sh.new /usr/local/lib/orb/orb-node-provision.sh
+  install -m 755 "$NODE_BIN" /usr/local/bin/sandboxed-node.new && mv /usr/local/bin/sandboxed-node.new /usr/local/bin/sandboxed-node
+  for spec in "${OPS_TARGETS[@]}"; do
+    IFS=: read -r dst mode src <<< "$spec"
+    install -m "$mode" "$src" "$dst.new" && mv "$dst.new" "$dst"
+  done
+  install -m 755 "$BIN" /usr/local/bin/orb-core-dev.new && mv /usr/local/bin/orb-core-dev.new /usr/local/bin/orb-core-dev
+fi
+if [[ $ROLLOUT_NODES == 1 ]]; then DEV_TOUCHED=1; fi
 systemctl restart sandboxed-sh-dev
 if ! healthy 3002 30 "$SHA"; then
+  if [[ $ROLLOUT_NODES == 1 ]]; then rollback_release_bin_dir || true; fi
   rollback_staged_files
+  STAGE_COMMITTED=1
   say "dev unhealthy; prod untouched"
   exit 1
 fi
 say "dev healthy on $SHA"
-[[ $DEV_ONLY == 1 ]] && { say "done (dev only)"; exit 0; }
+[[ $DEV_ONLY == 1 ]] && { STAGE_COMMITTED=1; say "done (dev only)"; exit 0; }
 
 BACKUP="/usr/local/bin/orb-core.pre-deploy-$TS"
 OLD_SHA="$(sed -n 's/^Environment=ORB_BUILD_SHA=//p' /etc/systemd/system/sandboxed-sh-prod.service.d/30-build.conf 2>/dev/null || true)"
@@ -150,23 +340,40 @@ cp -p /usr/local/bin/orb-core "$BACKUP"
 set_catalog sandboxed-sh-prod "$CATALOG"
 set_build sandboxed-sh-prod "$SHA"; systemctl daemon-reload
 install -m 755 "$BIN" /usr/local/bin/orb-core.new && mv /usr/local/bin/orb-core.new /usr/local/bin/orb-core
+if [[ $ROLLOUT_NODES == 1 ]]; then PROD_TOUCHED=1; fi
 systemctl restart sandboxed-sh-prod
 if ! healthy 3000 60 "$SHA"; then
   say "prod unhealthy; rolling back to $BACKUP"
   cp -p "$BACKUP" /usr/local/bin/orb-core
   if [[ -n "$OLD_CATALOG" ]]; then set_catalog sandboxed-sh-prod "$OLD_CATALOG"; else rm -f "$CATALOG_CONF"; fi
+  if [[ $ROLLOUT_NODES == 1 ]]; then rollback_release_bin_dir || true; fi
   rollback_staged_files
+  STAGE_COMMITTED=1
   set_build sandboxed-sh-prod "${OLD_SHA:-unknown}"; systemctl daemon-reload
   systemctl restart sandboxed-sh-prod
   exit 1
 fi
+STAGE_COMMITTED=1
 say "prod healthy on $SHA (backup $BACKUP)"
 # keep the five most recent backups
 ls -1t /usr/local/bin/orb-core.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
 ls -1t /usr/local/bin/sandboxed-node.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
+if [[ $ROLLOUT_NODES == 1 ]]; then
+  ls -1t /usr/local/bin/sandboxed-mcp.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
+  ls -1t /usr/local/sbin/orb-privd.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
+fi
 ls -1t /usr/local/lib/orb/orb-node-provision.sh.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
 for spec in "${OPS_TARGETS[@]}"; do
   IFS=: read -r dst _ _ <<< "$spec"
   ls -1t "$dst".pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
 done
+if [[ $ROLLOUT_NODES == 1 ]]; then
+  say "rollout fleet nodes to $SHA"
+  ORB_DEPLOY_LOCK_FD=9 python3 "$TREE/scripts/rolling_upgrade_nodes.py" --apply \
+    --expected-build-sha "$SHA" \
+    --stage-from-dir "$RELEASE_BIN_DIR" \
+    --drain-timeout-secs "${ORB_DEPLOY_DRAIN_TIMEOUT_SECS:-900}" \
+    --max-concurrent-cordons 1
+fi
+if [[ $ROLLOUT_NODES == 1 ]]; then ROLLOUT_COMMITTED=1; fi
 say "done"

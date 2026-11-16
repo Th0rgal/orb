@@ -516,10 +516,17 @@ def scanSoftwareInventory : IO JVal := do
       ("ready", .bool isInstalled),
       ("ready_detail", .null)
     ])
+  let buildSha ← resolveNodeBuildSha
+  let binShas ← collectNodeBinaryShas
+  let buildLabel :=
+    if buildSha.isEmpty then "1.3.0-lean4 · turbo-lean"
+    else s!"1.3.0-lean4 · {buildSha}"
   let runtimeObj := JVal.obj #[
     ("name", .str "sandboxed-node"),
     ("version", .str "1.3.0-lean4"),
-    ("build", .str "1.3.0-lean4 · turbo-lean"),
+    ("build", .str buildLabel),
+    ("build_sha", if buildSha.isEmpty then .null else .str buildSha),
+    ("binary_sha256", binShas),
     ("path", exePathJson),
     ("restart_required", .bool false),
     ("running", .arr #[])
@@ -646,6 +653,18 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
   | "GET", ["heartbeat"] =>
     let hb ← buildHeartbeatJson rt
     return (rt, jsonResp 200 hb, preLaunches, #[])
+  | "GET", ["api", "health"] | "GET", ["health"] =>
+    let buildSha ← resolveNodeBuildSha
+    let binShas ← collectNodeBinaryShas
+    let buildVal : JVal := if buildSha.isEmpty then .null else .str buildSha
+    return (rt, jsonResp 200 (.obj #[
+      ("status", .str "ok"),
+      ("node_id", .str rt.cfg.nodeId),
+      ("version", .str "1.3.0-lean4"),
+      ("build", buildVal),
+      ("build_sha", buildVal),
+      ("binary_sha256", binShas)
+    ]), preLaunches, #[])
   | "POST", ["capacity"] =>
     let some bodyStr := String.fromUTF8? req.body
       | return (rt, textResp 400 "invalid UTF-8 body", preLaunches, #[])

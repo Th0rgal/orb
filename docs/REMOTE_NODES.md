@@ -55,19 +55,97 @@ Not supported yet:
 - node-side access to dashboard auth, mission DB, or broad core APIs
 - scheduled remote dispatch after a future `not_before`
 
-## Build
+## Build and Governed Rollout
 
-On core and each node:
+Do not hand-copy binaries or run a bare `systemctl restart` on fleet nodes.
+Build and stage `orb-core`, `sandboxed-node`, `sandboxed-mcp`, and `orb-privd`
+through `orb-deploy` on `agent-core`, and roll them out across static fleet
+nodes with `scripts/rolling_upgrade_nodes.py` (invoked directly or via
+`orb-deploy <sha> --rollout-nodes`). Plain `orb-deploy <sha>` (without
+`--rollout-nodes`, `--nodes-only`, `--nodes-status`, or `--nodes-dry-run`)
+builds and promotes only `orb-core` (dev -> prod) with exact `master` parity and
+does not stage or restart remote worker binaries.
 
 ```bash
-cargo build --bin sandboxed-sh --bin sandboxed-node
+# 1. Check reported build SHA, cordon owner, and component SHA-256 digests across the fleet:
+orb-deploy <40-char-sha> --nodes-status
+
+# 2. Dry-run the rollout plan (no cordon, copy, or restart):
+orb-deploy <40-char-sha> --nodes-dry-run
+
+# 3. Promote Core (dev -> prod) and roll out node binaries 1 node at a time:
+orb-deploy --detach <40-char-sha> --rollout-nodes
+
+# 4. Target an explicit node inventory (repeatable --node HOST or --node HOST:/path/to/jobs.db):
+python3 scripts/rolling_upgrade_nodes.py \
+  --stage-from-dir /usr/local/share/orb/releases/<40-char-sha>/bin \
+  --expected-build-sha <40-char-sha> \
+  --node ashur --node nippur:/var/lib/sandboxed-node/work/jobs.db \
+  --apply
+
+# 5. Recover and uncordon a node left cordoned or mid-swap after a failed rollout or SIGTERM:
+python3 scripts/rolling_upgrade_nodes.py --recover-node <node-id>
 ```
 
-Install the node binary on each runner:
+### Inventory, SSH, and sudo prerequisites
 
-```bash
-sudo install -m 0755 target/debug/sandboxed-node /usr/local/bin/sandboxed-node
-```
+- **Inventory (`--node`)**: When `--node` is omitted, `rolling_upgrade_nodes.py`
+  auto-discovers static (`ephemeral: false`) nodes from Core's admin
+  `GET /api/remote-nodes` endpoint. Pass `--node <host>` or
+  `--node <host>:/path/to/jobs.db` (repeatable) to target an explicit subset or
+  custom SQLite job ledger path.
+- **SSH and sudo**: The rollout controller connects from `agent-core` using the
+  governed SSH config (`--ssh-config`, default
+  `/root/.config/sandboxed-sh/development-identity/current/ssh/config`) with
+  `BatchMode=yes`, bounded `ConnectTimeout` / `ServerAliveInterval` (`--ssh-timeout-secs`,
+  default `30`), and bounded Core API requests (`--api-timeout-secs`, default `10`).
+  Each target node must allow non-interactive `sudo python3` for the governed SSH
+  identity so the worker probe and fenced upgrade can inspect `jobs.db`, install
+  the `ExecStartPre` swap guard, swap `/usr/local/bin/sandboxed-{node,mcp}` and
+  `/usr/local/sbin/orb-privd`, write `/etc/systemd/system/sandboxed-node.service.d/30-build.conf`,
+  and restart `orb-privd` and `sandboxed-node`.
+- **Unresponsive nodes and legacy build SHAs**: A node that answers ping (or
+  shows `online` in Core) while SSH or the API times out fails closed with
+  `probe_error` after `--ssh-timeout-secs` and blocks new cordons rather than
+  hanging the rollout. Pre-O5 nodes with no reported `ORB_BUILD_SHA` report
+  `"unknown"` (never `"current"`) and are never treated as already on target.
+
+### Per-node rollout lifecycle and recovery
+
+For each node, the rollout controller:
+
+1. Stages `/usr/local/bin/sandboxed-node.new`, `/usr/local/bin/sandboxed-mcp.new`,
+    and `/usr/local/sbin/orb-privd.new` from `/usr/local/share/orb/releases/<sha>/bin/`
+    and verifies their SHA-256 digests on the target host before stopping any unit.
+2. Cordons one node at a time (`--max-concurrent-cordons 1`) through Core's
+    `/api/nodes/:id/cordon` endpoint, records the cordon owner (`--cordon-owner`,
+    default `rolling_upgrade_nodes`) in `/var/lib/orb/rolling-upgrade-cordons.json`
+    (surfaced as `cordoned_by` in `--status`), and waits for active jobs (`jobs.db`
+    `queued`/`running` rows, active `sandboxed-node-job-*` / `sandboxed-node-exec-*`
+    systemd scopes, and `orb-privd` child processes) to drain without killing
+    running turns.
+3. Acquires an exclusive SQLite `BEGIN IMMEDIATE` fence on `jobs.db`, installs
+    the systemd `ExecStartPre` swap-journal recovery guard
+    (`/etc/systemd/system/sandboxed-node.service.d/25-swap-guard.conf` ->
+    `/usr/local/bin/sandboxed-node-swap-guard.py`) before opening
+    `/usr/local/bin/sandboxed-node.swap-journal.json`, stops `sandboxed-node`
+    (plus sibling worker units) and `orb-privd`, saves `.prev` backups,
+    atomically swaps all three binaries, writes `Environment=ORB_BUILD_SHA=<sha>`
+    to `/etc/systemd/system/sandboxed-node.service.d/30-build.conf`, and restarts
+    `orb-privd` and `sandboxed-node`.
+4. Verifies `/heartbeat` (and `/api/health`) reports `online: true`, the expected
+    `build_sha`, and the expected `binary_sha256` map for `sandboxed-node`,
+    `sandboxed-mcp`, and `orb-privd`, then uncordons the node and clears its
+    cordon-ledger entry.
+5. On any activation or health-check failure, automatically restores all `.prev`
+    binaries and `30-build.conf`, quarantines the failed `.new` artifacts as
+    `.new.failed`, restarts the previous binaries, leaves the node cordoned, and
+    halts the rollout before touching the next node. To recover a node left
+    cordoned or mid-swap after a rollout failure or `SIGTERM`, run
+    `python3 scripts/rolling_upgrade_nodes.py --recover-node <node-id>` (or
+    `--uncordon <node-id>`), which replays any open swap journal, clears
+    `.new`/`.new.failed` artifacts, verifies `sandboxed-node` is active, clears
+    the cordon ledger, and uncordons the node in Core.
 
 ## Native goal lifetime (protocol 5)
 

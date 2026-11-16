@@ -257,7 +257,7 @@ does that once B2 and B3 are deployed.
 | O2 | Env migration tooling and handoff (#1784, #1814) | — | done | — |
 | O3 | Env migration applied on dev, verified | — | ready | Both startup checks pass on dev |
 | O4 | Env migration applied on prod | O3 | blocked | Commands from the handoff run through a deploy; checks pass |
-| O5 | One governed, checksummed rollout for `sandboxed-node`, `sandboxed-mcp`, `orb-privd` with cordon, drain and rollback, driven by the deploy tool | — | ready | Every node reports the deployed build; no hand copy |
+| O5 | One governed, checksummed rollout for `sandboxed-node`, `sandboxed-mcp`, `orb-privd` with cordon, drain and rollback, driven by the deploy tool | — | wip | Every node reports the deployed build; no hand copy |
 | O6 | Dev deploys automatically on merge; prod stays deliberate | — | verify | A merge appears on dev with no human |
 | O7 | Failed units on agent-core fixed or deleted (`sandboxed-worker-rolling-upgrade`, `sandboxed-harness-update`, `sandboxed-development-identity`) | — | verify | `systemctl --failed` shows no Orb unit |
 | O8 | Retire `fleet-watcher`; monitor keeps only what Core cannot see about itself | R4 | blocked | — |

@@ -540,7 +540,8 @@ private def mkStaticNodeOfflineOrDegraded
 def probeStaticNodeHeartbeat
     (sn : StaticRemoteNode)
     (persistedCordons : Array String := #[])
-    (nowIso : String := "") : IO JVal := do
+    (nowIso : String := "")
+    (isAdmin : Bool := false) : IO JVal := do
   let persistedCordoned := persistedCordons.contains sn.id
   let baseColocated :=
     sn.id == "sepolia" || sn.id == "agent-core" || sn.id == "orb-core" ||
@@ -579,6 +580,13 @@ def probeStaticNodeHeartbeat
       let lastSeenVal :=
         if !nowIso.isEmpty then JVal.str nowIso
         else optStrJVal (hb.fieldStr? "timestamp")
+      let sanitizedHb : JVal :=
+        if isAdmin then hb
+        else
+          match hb with
+          | .obj hfs =>
+            .obj (hfs.filter fun (k, _) => k != "build" && k != "build_sha" && k != "binary_sha256")
+          | _ => hb
       let mut fields : Array (String × JVal) := #[
         ("resource_history", .arr resHist),
         ("id", .str sn.id),
@@ -588,7 +596,15 @@ def probeStaticNodeHeartbeat
         ("token_env", .str sn.tokenEnv),
         ("status", .str "online"),
         ("labels", .arr (effLabels.map .str)),
-        ("version", optStrJVal (hb.fieldStr? "version")),
+        ("version", optStrJVal (hb.fieldStr? "version"))
+      ]
+      if isAdmin then
+        fields := fields ++ #[
+          ("build", optStrJVal ((hb.fieldStr? "build").orElse (fun _ => hb.fieldStr? "build_sha"))),
+          ("build_sha", optStrJVal ((hb.fieldStr? "build_sha").orElse (fun _ => hb.fieldStr? "build"))),
+          ("binary_sha256", (hb.field? "binary_sha256").getD .null)
+        ]
+      fields := fields ++ #[
         ("protocol_version", optNatJVal (hb.fieldNat? "protocol_version")),
         ("capacity_total", JVal.nat cap),
         ("capacity_available", JVal.nat availSlots),
@@ -612,7 +628,7 @@ def probeStaticNodeHeartbeat
         ("quarantined_harnesses", .arr #[]),
         ("admin_only", .bool effAdminOnly),
         ("core_colocated", .bool effColocated),
-        ("heartbeat", hb)
+        ("heartbeat", sanitizedHb)
       ]
       if let some fj := hb.fieldNat? "forced_jobs" then
         if fj > 0 then fields := fields.push ("forced_jobs", JVal.nat fj)
@@ -631,11 +647,12 @@ def probeAllStaticNodesParallel
     (staticNodes : Array StaticRemoteNode)
     (persistedCordons : Array String)
     (nowIso : String)
-    (deadlineMs : Nat := 2500) : IO (Array JVal) := do
+    (deadlineMs : Nat := 2500)
+    (isAdmin : Bool := false) : IO (Array JVal) := do
   if staticNodes.isEmpty then return #[]
   let mut tasks : Array (Task (Except IO.Error JVal)) := Array.mkEmpty staticNodes.size
   for sn in staticNodes do
-    let t ← IO.asTask (prio := .dedicated) (probeStaticNodeHeartbeat sn persistedCordons nowIso)
+    let t ← IO.asTask (prio := .dedicated) (probeStaticNodeHeartbeat sn persistedCordons nowIso isAdmin)
     tasks := tasks.push t
   let mut waitedMs : Nat := 0
   let stepMs : Nat := 25
@@ -704,12 +721,13 @@ def buildComputeFleetJVal
     (dataRoot : String := "")
     (nowIso : String := "")
     (store? : Option CoreStore := none)
-    (probeDeadlineMs : Nat := 2500) : IO JVal := do
+    (probeDeadlineMs : Nat := 2500)
+    (isAdmin : Bool := false) : IO JVal := do
   let (rnEnabled, staticNodes) ← loadStaticRemoteNodes
   let nowSec ← nowEpoch
   let effIso := if nowIso.isEmpty then formatEpochIso8601Utc nowSec else nowIso
   let persistedCordons ← loadPersistedNodeCordons dataRoot
-  let probed ← probeAllStaticNodesParallel staticNodes persistedCordons effIso probeDeadlineMs
+  let probed ← probeAllStaticNodesParallel staticNodes persistedCordons effIso probeDeadlineMs isAdmin
   -- A node that did not answer keeps what its last heartbeat reported.
   let heartbeatCache ← loadNodeHeartbeatCache dataRoot
   let staticItems := probed.map (NodeLiveness.applyCache heartbeatCache)
@@ -1599,7 +1617,7 @@ def dispatchRemoteFleetAndRelayRoutes?
         let (_, cmp) ← getUserSpentTodayCents store callerUserId (nowIso.take 10).toString
         pure cmp
       else pure 0
-    let fv ← buildComputeFleetJVal hub? (some mc) fleet scopedUid? uSpent none store.rootDir nowIso (some store)
+    let fv ← buildComputeFleetJVal hub? (some mc) fleet scopedUid? uSpent none store.rootDir nowIso (some store) 2500 isAdmin
     return some (jsonResp 200 fv)
 
   -- 4. `/api/managed-machines/{settings,providers*,snapshots*,:id*}`
@@ -1820,7 +1838,7 @@ def dispatchRemoteFleetAndRelayRoutes?
         if 200 ≤ st && st < 300 then
           if let some sn := staticMatch? then
             let persistedCordons ← loadPersistedNodeCordons store.rootDir
-            let refreshed ← probeStaticNodeHeartbeat sn persistedCordons nowIso
+            let refreshed ← probeStaticNodeHeartbeat sn persistedCordons nowIso isAdmin
             return some (jsonResp 200 refreshed)
         return some (jsonResp st (jv?.getD (.obj #[("raw", .str txt)])))
 
