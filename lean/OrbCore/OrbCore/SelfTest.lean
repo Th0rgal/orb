@@ -2364,7 +2364,9 @@ private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let ackRaw := s!"POST /api/managed-machines/relay/respond HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {nodeTok1}\r\nx-orb-machine-id: mm-r5b-1\r\nx-orb-boot-epoch: 1\r\nContent-Length: {ackBody.utf8ByteSize}\r\n\r\n{ackBody}".toUTF8
   let .ok ackReq := parseRequest ackRaw none | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
   let .ok ackResp ← dispatchCoreRequest r5App ackReq 69 | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
-  let opJwt := mintSessionTokenV2 prodValid.jwtSecret "admin" "admin" 1 3660
+  let .ok opAdminId ← bootstrapUsersAndBackfill r5Store #[("admin", prodValid.dashboardPassword)] "60"
+    | return 1
+  let opJwt := mintSessionTokenV2 prodValid.jwtSecret opAdminId "admin" 1 3660
   let .ok () ← upsertMission r5Store {
     id := "m-owner-1", title := "Managed VM Owner", status := "active",
     backend := "codex", modelOverride := "", workingDirectory := r5Root,
@@ -2511,7 +2513,9 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
     bunkerStateRef? := some bunkerRef
   }
   let nowSec ← coreEpochSec
-  let jwt := mintSessionTokenV2 prodValid.jwtSecret "admin" "admin" 1 (nowSec + 3600)
+  let .ok fixtureAdminId ← bootstrapUsersAndBackfill store #[("admin", prodValid.dashboardPassword)] s!"{nowSec}"
+    | return 1
+  let jwt := mintSessionTokenV2 prodValid.jwtSecret fixtureAdminId "admin" 1 (nowSec + 3600)
   let dispatch (raw : String) : IO (Option CoreHttpResponse) := do
     match parseRequest raw.toUTF8 none with
     | .ok req =>
@@ -3578,7 +3582,9 @@ private def runWarmClaudeControlAndCheckpointsCoreTests (prodValid : CoreConfig)
     pendingControlCallsRef? := some pendingRef
   }
   let nowSec ← coreEpochSec
-  let jwt := mintSessionTokenV2 prodValid.jwtSecret "admin" "admin" 1 (nowSec + 3600)
+  let .ok fixtureAdminId ← bootstrapUsersAndBackfill store #[("admin", prodValid.dashboardPassword)] s!"{nowSec}"
+    | return 1
+  let jwt := mintSessionTokenV2 prodValid.jwtSecret fixtureAdminId "admin" 1 (nowSec + 3600)
   let dispatch (raw : String) : IO (Option CoreHttpResponse) := do
     match parseRequest raw.toUTF8 none with
     | .ok req =>
@@ -6142,7 +6148,9 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
 
   let jwtSec := "prod-parity-jwt-secret-0123456789abcdef"
   let nowSec : UInt64 := 1794400000
-  let hsJwt := issueHs256Jwt jwtSec "admin" "admin" nowSec (nowSec + 86400) "admin"
+  let .ok hsAdminId ← bootstrapUsersAndBackfill store #[("admin", "strong-prod-pass-1234")] s!"{nowSec}"
+    | return (← fail "HS256 admin fixture bootstrap failed")
+  let hsJwt := issueHs256Jwt jwtSec hsAdminId "admin" nowSec (nowSec + 86400) "admin"
   if !hsJwt.startsWith "eyJ" || (verifyHs256Jwt? jwtSec hsJwt nowSec).isNone then
     return (← fail "HS256 JWT roundtrip failed")
 
@@ -7014,7 +7022,6 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
 
   let jwtSec := "remote-btw-wakeup-jwt-secret-0123456789abcdef"
   let nowSec : UInt64 := 1794400000
-  let hsJwt := issueHs256Jwt jwtSec "admin" "admin" nowSec (nowSec + 86400) "admin"
   let cfg : CoreConfig := {
     host := "127.0.0.1"
     port := 13000
@@ -7025,6 +7032,7 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
   }
   let .ok remoteAdminId ← bootstrapUsersAndBackfill store #[("admin", cfg.dashboardPassword)] (formatEpochIso8601Utc nowSec)
     | return (← fail "remote fixture bootstrap failed")
+  let hsJwt := issueHs256Jwt jwtSec remoteAdminId "admin" nowSec (nowSec + 86400) "admin"
   let managedRef ← IO.mkRef ({ enabled := true, boatEnabled := true, dailyCapCents := 5000, maxConcurrent := 20 } : ManagedFleetState)
   let chainsRef ← IO.mkRef (#[] : Array RoutingChain)
   let cooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
@@ -7447,7 +7455,6 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
 
   let jwtSec := "library-parity-jwt-secret-0123456789abcdef"
   let nowSec : UInt64 := 1794500000
-  let hsJwt := issueHs256Jwt jwtSec "admin" "admin" nowSec (nowSec + 86400) "admin"
   let cfg : CoreConfig := {
     host := "127.0.0.1"
     port := 13001
@@ -7459,6 +7466,7 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
   let bootAdminId ← match ← bootstrapUsersAndBackfill store #[("admin", cfg.dashboardPassword)] (formatEpochIso8601Utc nowSec) with
     | .ok aid => pure aid
     | .error _ => pure ""
+  let hsJwt := issueHs256Jwt jwtSec bootAdminId "admin" nowSec (nowSec + 86400) "admin"
   let managedRef ← IO.mkRef ({} : ManagedFleetState)
   let chainsRef ← IO.mkRef (#[] : Array RoutingChain)
   let cooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
@@ -7948,6 +7956,9 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     IO.eprintln s!"[orb-core-test] FAIL: /api/health contract mismatch: {healthStr}"
     return 1
 
+  let .ok fixtureAdminId ← bootstrapUsersAndBackfill store
+      #[("admin", prodValid.dashboardPassword), ("alice", "alice-strong-pass-99")] s!"{nowSec}"
+    | return 1
   -- Login with `SANDBOXED_USERS` account (`alice`)
   let loginBody := "{\"username\":\"alice\",\"password\":\"alice-strong-pass-99\"}"
   let loginRaw := s!"POST /api/auth/login HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {loginBody.utf8ByteSize}\r\n\r\n{loginBody}".toUTF8
@@ -7971,7 +7982,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     return 1
 
   -- Privilege lease verification: unknown lease -> 403; valid stored lease -> 200
-  let validJwt := mintSessionTokenV2 prodValid.jwtSecret "admin" "admin" 1 (nowSec + 3600)
+  let validJwt := mintSessionTokenV2 prodValid.jwtSecret fixtureAdminId "admin" 1 (nowSec + 3600)
   let forgedPrivBody := "{\"mission_id\":\"m-alpha\",\"lease_token\":\"forged-lease-000\",\"target_host\":\"ashur\",\"executing_host\":\"ashur\",\"command\":\"systemctl status sandboxed-sh.service\"}"
   let forgedPrivRaw := s!"POST /api/privilege-access/verify-and-log HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {forgedPrivBody.utf8ByteSize}\r\n\r\n{forgedPrivBody}".toUTF8
   let .ok forgedPrivReq := parseRequest forgedPrivRaw none | do closeCoreStore store; return 1

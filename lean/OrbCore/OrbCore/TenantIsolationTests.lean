@@ -1731,6 +1731,14 @@ def run (root : String) : IO Unit := do
         bootstrapAdminId := "usr_real_admin_uuid"
       }
       let hsRealAdmin := issueHs256Jwt matSt.cfg.jwtSecret "usr_real_admin_uuid" "admin" now (now + 3600) "admin"
+      -- The rollout script uses a signed HS256 subject equal to the stored ID.
+      let rolloutLive := issueHs256Jwt matSt.cfg.jwtSecret "usr_real_admin_uuid" "" now (now + 300) ""
+      check ((← send "GET" "/api/auth/me" rolloutLive (.obj #[]) matSt).1 == 200)
+        "r12_rollout_token_live_admin_accepted"
+      sql matStore.missionsDb "UPDATE users SET disabled=1 WHERE id='usr_real_admin_uuid';"
+      check ((← send "GET" "/api/auth/me" rolloutLive (.obj #[]) matSt).1 == 401)
+        "r12_rollout_token_disabled_admin_refused"
+      sql matStore.missionsDb "UPDATE users SET disabled=0 WHERE id='usr_real_admin_uuid';"
       let hsLiteralAdmin := issueHs256Jwt matSt.cfg.jwtSecret "admin" "admin" now (now + 3600) "admin"
       let hsUnknownSub := issueHs256Jwt matSt.cfg.jwtSecret "unknown-subject-xyz" "ghost" now (now + 3600) "admin"
       let v1OrbMonitorTok := mintSessionToken matSt.cfg.jwtSecret (now + 600)
