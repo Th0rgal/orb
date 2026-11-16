@@ -9,6 +9,38 @@ open OrbCore.Managed OrbCore.ManagedProvider OrbCore.ManagedProvisioning OrbCore
 private def check (condition : Bool) (label : String) : IO Unit := do
   unless condition do throw (IO.userError s!"managed provider availability: {label}")
 
+-- Scope URL checks to each command substitution, not to the entire diagnostic:
+-- two URLs globally could mean two root probes and no node probe (or vice versa).
+private def hasOneQuotedHttpProbe (diagnostic probeStart quotedUrl : String) : Bool :=
+  match diagnostic.splitOn probeStart with
+  | [_, rest] =>
+    let probe := (rest.splitOn " 2>&1").head!
+    probe == "curl -sS -o /dev/null -m 3 -w '%{http_code}' " ++ quotedUrl &&
+      (probe.splitOn quotedUrl).length == 2
+  | _ => false
+
+private def checkHttpProbes (diagnostic quotedUrl : String) : IO Unit := do
+  let prefixes := #["node_http=$(run_as_node timeout 4 ", "core_http_root=$(timeout 4 "]
+  for probeStart in prefixes do
+    check (hasOneQuotedHttpProbe diagnostic probeStart quotedUrl)
+      s!"exactly one correctly quoted health URL in probe {probeStart}"
+    check (!hasOneQuotedHttpProbe (diagnostic.replace probeStart "") probeStart quotedUrl)
+      s!"missing probe is rejected: {probeStart}"
+    check (!hasOneQuotedHttpProbe (diagnostic ++ diagnostic) probeStart quotedUrl)
+      s!"duplicate probe is rejected: {probeStart}"
+    let probe := probeStart ++ "curl -sS -o /dev/null -m 3 -w '%{http_code}' "
+    check (!hasOneQuotedHttpProbe (diagnostic.replace (probe ++ quotedUrl) probe) probeStart quotedUrl)
+      s!"missing URL is rejected in probe {probeStart}"
+    check (!hasOneQuotedHttpProbe
+      (diagnostic.replace (probe ++ quotedUrl) (probe ++ quotedUrl ++ " " ++ quotedUrl)) probeStart quotedUrl)
+      s!"duplicate URL is rejected in probe {probeStart}"
+  for missing in prefixes do
+    for duplicate in prefixes do
+      if missing != duplicate then
+        check (!hasOneQuotedHttpProbe (diagnostic.replace missing duplicate) missing quotedUrl &&
+          !hasOneQuotedHttpProbe (diagnostic.replace missing duplicate) duplicate quotedUrl)
+          "two URLs cannot hide a missing probe and a duplicated other probe"
+
 private def expectError {α : Type} (result : Except String α) (expected label : String) : IO Unit := do
   match result with
   | .error actual => check (actual == expected) s!"{label}: expected {expected}, got {actual}"
@@ -49,8 +81,8 @@ def run (root : String) : IO Unit := do
   check (quotedDiagnostic.contains "getent hosts 'core.example'" &&
       quotedDiagnostic.contains "'https://core.example/o'\"'\"'hare/api/health'")
     "as-node DNS host is quoted against a single quote in the URL (fails on master: yes)"
-  check ((diagnostic.splitOn "'https://core.example/api/health'").length == 2)
-    "diagnostics probe Core's health URL, quoted (fails on master: no)"
+  checkHttpProbes diagnostic "'https://core.example/api/health'"
+  checkHttpProbes quotedDiagnostic "'https://core.example/o'\"'\"'hare/api/health'"
   let path := s!"{root}/provider-availability.db"
   let .ok mc ← openManagedComputeStore path
     | throw (IO.userError "availability store open failed")
