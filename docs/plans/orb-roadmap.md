@@ -7,8 +7,9 @@ history (`docs/archive/`) and are no longer edited.
 
 - **This file** holds what does not change every hour: the definition of done,
   the rules, and the DAG of work.
-- **The project board** (text board of project `orb`, written only by the
-  master mission) holds what does: who is working on which node, PR links,
+- **The mission board** of the master mission (written only by it; there is
+  no project board any more) holds what does: who is working on which node,
+  PR links,
   evidence, blockers, questions for Thomas.
 - Nothing is appended here as a log. A status line that will be stale tomorrow
   belongs on the board. This file changes by PR, when a node is added, split,
@@ -38,7 +39,8 @@ receipt (PR, deployed SHA, and the check that was run):
 
 ## 2. How the master mission works
 
-The master mission is the controller of project `orb`. It coordinates; it does
+The master mission is the controller; its workers run in project `now`
+(project `orb` no longer exists). It coordinates; it does
 not write feature code, run builds or read large logs itself.
 
 **It runs until section 1 is true.** Closing the nodes that happen to be open
@@ -123,7 +125,8 @@ replays the failure. Write the cause and the fix on the board in three lines.
 **Limits that are not negotiable.**
 - No secrets in output, repos or VMs. Managed VMs stay credential-free.
 - Fleet SSH only through the governed paths; never a break-glass key.
-- Do not touch missions outside project `orb`, and never `evm.fast`.
+- Do not touch missions the master did not start (project `orb` no longer
+  exists), and never `evm.fast`.
 - No `Co-Authored-By` or AI attribution in commits.
 - Follow `AGENTS.md`: iOS and Android ship together with version bumps,
   specs before tricky fixes, one owner per piece of state.
@@ -155,12 +158,14 @@ same node (then split or restate the node).
 | --- | --- | --- | --- | --- |
 | L1 | Agent tools and Lean on bare lean.ci guests (#1791, engine images layered) | — | done | — |
 | L2 | lean.ci default in code with Boat fallback (#1793), park/resume, extend (#1798, #1802) | — | done | — |
-| L3 | Node enrolment tries every resolved address (IPv4 when IPv6 has no route), public URL `orbcore.thomas.md` (owned by the mission "lean.ci: make a fresh VM enrol and run a turn") | — | wip (#1815) | Merged and deployed |
-| L4 | Probe: a fresh `auto-managed:leanci:small` VM enrols and runs opencode, claude and codex turns (owned by the mission "lean.ci: make a fresh VM enrol and run a turn") | L3 | blocked | Three "reply OK" turns on one VM, VM destroyed |
-| L5 | Prod `SANDBOXED_MANAGED_DEFAULT_PROVIDER=leanci` | L4 | blocked | Env changed through a deploy; a mission on `auto-managed` lands on lean.ci |
-| L6 | Rollout doc and `build` script match reality: idle check, 100 GiB default, warm-repo trap, layered update, rollback | — | ready | A dry run following only the doc succeeds |
-| L7 | Split the base image from warm project state with named snapshots | L5 | blocked (Thomas, 5.4) | — |
+| L3 | Node enrolment tries every resolved address (IPv4 when IPv6 has no route), public URL `orbcore.thomas.md` (owned by the mission "lean.ci: make a fresh VM enrol and run a turn") | — | done (#1815, 994ef16a) | Merged and deployed |
+| L4 | Probe: a fresh `auto-managed:leanci:small` VM enrols and runs opencode, claude and codex turns (16 Nov 11:52Z, reported by the operator: `orb-managed-d2f8a3e7-66d` ready 8 s after spawn, three "reply OK" turns, destroyed; it needed #1853) | L3 | done | Three "reply OK" turns on one VM, VM destroyed |
+| L5 | Prod uses lean.ci when a request names no provider. The code default is already `leanci` (`Managed.lean`, `defaultManagedProviderOf`), yet prod answers `default_provider: boat` (16 Nov), so the prod environment must set `SANDBOXED_MANAGED_DEFAULT_PROVIDER` (inferred, not read on the host); that name is not classified in `scripts/ops/orb-env`, which refuses unclassified keys | L4 | ready | Env changed through a deploy; `list_managed_machines` answers `default_provider: leanci`; a mission on `auto-managed` lands on lean.ci |
+| L6 | Rollout doc and `build` script match reality: idle check, 100 GiB default, warm-repo trap, layered update, rollback | — | done (lean.ci #40, 705dfaf9) | A dry run following only the doc succeeds |
+| L7 | Split the base image from warm project state with named snapshots | L5 | blocked | — |
 | L8 | Colab and lean.ci at Boat parity in the UI (list, start, stop, extend, destroy, cost) on desktop, iOS, Android | L5 | verify | Real rental through each client on dev then prod |
+| L9 | Enrolment diagnostics run as the node user. On 16 Nov every fresh lean.ci VM failed to enrol because the guest image has `/etc/resolv.conf` mode 0600 root:root and the node runs as `orbnode`; the deadline diagnostics (`guestDiagnosticCommand`) ran `curl` as root, printed `core_http=200` and hid it. The provision script now restores read access (#1853, 12951704) | — | wip | The diagnostics print the mode of `/etc/resolv.conf` and a DNS and an HTTP result obtained as `orbnode`; tests by name |
+| L10 | lean.ci engine images carry `/etc/resolv.conf` mode 0600 root:root since the image layering of 15 Nov; only the provision script works around it, and a deploy of a commit older than 12951704 removes the workaround | — | blocked (operator, engine sessions) | A guest booted from each engine image has a world-readable `/etc/resolv.conf` before the provision script runs |
 
 ### C. CI on lean.ci Mode 2
 
@@ -168,12 +173,13 @@ same node (then split or restate the node).
 | --- | --- | --- | --- | --- |
 | C1 | Workflow routing behind `ORB_LEAN_RUNNERS` with hosted fallback (#1771), planner, tree reuse (#1772), turbo-lean cache (#1786) | — | done | — |
 | C2 | Activation handoff documented (#1813) | — | done | — |
-| C3 | `lfglabs-dev/lean.ci` #33 and #34 (user-repo JIT runners, runner fence): apply the four listed fixes, `cargo test` on the four crates, merge | — | ready | Both merged, SHAs recorded |
+| C3 | `lfglabs-dev/lean.ci` #33 and #34 (user-repo JIT runners, runner fence): apply the four listed fixes, `cargo test` on the four crates, merge | — | done (lean.ci #33 91292be3, #34 60089561) | Both merged, SHAs recorded |
 | C4 | Deploy lean.ci controller, engines and shim from C3 | C3 | blocked (operator, YubiKey, 5.2) | Deployed SHAs recorded |
-| C5 | lean-ci GitHub App: Administration read/write, installed on `Th0rgal/orb` | — | blocked (Thomas, 5.1) | App installation visible |
-| C6 | Set `ORB_LEAN_RUNNERS=true`; one master run green on lean.ci labels | C4, C5 | blocked | Run URL with lean labels on the jobs |
+| C5 | lean-ci GitHub App: Administration read/write, installed on `Th0rgal/orb` | — | done (installation 181598910, reported by the operator 16 Nov) | App installation visible |
+| C6 | Set `ORB_LEAN_RUNNERS=true`; one master run green on lean.ci labels | C4, C5, C9 | blocked | Run URL with lean labels on the jobs |
 | C7 | Measure and record: web-only PR, warm Lean PR, cold full run | C6 | blocked | Three run URLs with timings; targets met or a node opened per miss |
 | C8 | Every Orb binary builds through turbo-lean with no raw-Lake fallback, locally and in CI. **C8a:** `nix/package.nix:220-224` sets `ORB_SKIP_TURBO_LEAN` and `ORB_ALLOW_RAW_LAKE_FALLBACK`, and no workflow builds Nix. **C8b:** `scripts/build_orb_bins.sh:309-320` fails closed when turbo-lean is absent unless `ORB_ALLOW_RAW_LAKE_FALLBACK=1` (fixed in #1836) | — | wip | `scripts/build_orb_bins.sh` builds all 12 binaries with the fallback variable unset; the Nix build no longer needs either variable |
+| C9 | The lean.ci runner image has the tools the workflows use. With `ORB_LEAN_RUNNERS=true` (16 Nov, 11:56Z to 12:29Z) the master runs of 12951704 failed on `lean-16vcpu-ubuntu-2604` and `lean-32vcpu-ubuntu-2604` runners: `cargo: command not found` in `setup-turbo-lean`, `docker: command not found` at job setup | — | ready | A master run on lean labels passes `setup-turbo-lean` and one job that needs docker |
 | C8c | `scripts/ops/orb-deploy:73-74` builds prod with raw `lake build`: move the deploy host to turbo-lean, or record the deploy build as exempt from C8 | O5 | blocked (Thomas) | The deploy build runs through turbo-lean, or the exemption is written in section 6 |
 
 ### U. LeanUI
@@ -224,8 +230,8 @@ Not on this roadmap: a macOS backend for LeanUI.
 | R21 | Provider usage truth: HTTP-08, HTTP-09, HTTP-10, PROV06, PROV07, PROV09, PROV10, PROV11, SEC-12 | — | ready | Usage, health, reliability and concurrency report observed caller-scoped values, never invented ones |
 | R22 | Managed budget: FLT-10, FLT-11 | — | ready | A mission pool and the dated global cap gate creation; an impossible single-VM fit is refused |
 | R23 | Legacy state migration: SEC-09, SEC-10 | — | ready | Existing bunker and telemetry state is migrated once, fail-closed, and survives restart |
-| R24 | Receipts under failure: a lost node reply is answered `accepted: no` and retryable although the job may have run; enqueue, dispatch and cancel errors are discarded before a success receipt; a failed receipt insert is ignored, so two same-key calls can both mutate (post-merge review of #1830) | B2 | ready | A lost reply, a failed enqueue and two concurrent same-key calls each give one truthful receipt; tests by name |
-| R25 | A Core deploy refreshes the node binary served to managed guests, and the served build is visible. Core served guests a node binary of 14 Nov, older than #1815, through every deploy since, so lean.ci guests failed to enrol (16 Nov). `orb-deploy` installs the node binary it built into a guest-serving path with backup and rollback, Core serves that path first and logs the sha256 it serves; then `/api/health` names the served node build | — | wip (#1848) | A deploy without `--rollout-nodes` changes the served binary, test by name; a fresh lean.ci VM enrols on the deployed build (L4); `/api/health` shows the served node build |
+| R24 | Receipts under failure: a lost node reply is answered `accepted: no` and retryable although the job may have run; enqueue, dispatch and cancel errors are discarded before a success receipt; a failed receipt insert is ignored, so two same-key calls can both mutate (post-merge review of #1830) | B2 | wip (#1847) | A lost reply, a failed enqueue and two concurrent same-key calls each give one truthful receipt; tests by name |
+| R25 | A Core deploy refreshes the node binary served to managed guests, and the served build is visible. Core served guests a node binary of 14 Nov, older than #1815, through every deploy since; it was refreshed by hand on 16 Nov and was not the cause of the enrolment failures of that day (see L9). `orb-deploy` installs the node binary it built into a guest-serving path with backup and rollback, Core serves that path first and logs the sha256 it serves; then `/api/health` names the served node build | — | wip (#1848) | A deploy without `--rollout-nodes` changes the served binary, test by name; a fresh lean.ci VM runs the deployed node build; `/api/health` shows the served node build |
 | R26 | An account disabled by its provider is terminal, not a cooldown. A refusal that says the account itself is disabled (Google `403 PERMISSION_DENIED` with reason `TOS_VIOLATION`, and the equivalent account-ban answers of other providers where already distinguishable) parks the account with no automatic retry until an operator clears it; the classification is a kernel reason code in `lean/Orb/Kernel.lean` with its spec, not a special case in the proxy. The Providers card on desktop, iOS and Android shows "disabled by provider" with the provider's message, not "payment required" or a countdown. Disabling an OAuth-only provider row in Core also disables its matched sidecar auth file, and re-enabling restores it; sidecar auth files with no Core row are shown. Incident 14 to 16 Nov: five Antigravity logins were reported as `payment_required` with a 10 to 30 minute cooldown and retried about ten times an hour (556 refusals); they were disabled by hand on 16 Nov and stay disabled. One PR with tests | — | ready | A replayed `403 TOS_VIOLATION` fixture leaves the account terminally parked with zero further upstream attempts; `GET /api/model-routing/health` and the three clients show the state; toggling a Core row changes the sidecar file's `disabled` flag in a test against a fake management endpoint; tests by name |
 
 ### B. A board per mission
@@ -241,11 +247,11 @@ code.
 | B1 | Spec `docs/specs/mission-board.md`: one text per mission, 16 KB, written only by that mission, readable by its owner and by the missions it started; a project page lists the boards of its missions; a mission keeps its board when it changes project; the existing project boards (`orb`, `evm-fast`) migrate to their controller mission; event orders that must never lose a board | — | ready | Spec merged |
 | B2 | Core: storage, `read_mission_board` / `write_mission_board`, REST route, migration; the project board tools keep working for one release as aliases onto the controller mission's board; tenant isolation tests | B1 | verify (#1832, 8c5ddc6d) | A member cannot read another user's board; both existing boards survive the migration byte for byte |
 | B2b | Named tests for the 31 spec clauses left without one in the table of #1832 (listing order and fields, lifecycle replays, concurrent writers, both startup orders, the alias window) | B2 | ready | Every row of the #1832 table names a passing test, or the spec line it came from is changed |
-| B3 | Desktop: the mission page shows its board; the project page shows the boards of its missions | B2 | wip | Browser test: write, move the mission to another project, board still there |
-| B4 | iOS and Android, shipped together with version bumps | B2 | ready | Unit tests on both, same fixtures in `shared/orb-spec/` |
+| B3 | Desktop: the mission page shows its board; the project page shows the boards of its missions | B2 | verify (#1842, c39c168f) | Browser test: write, move the mission to another project, board still there |
+| B4 | iOS and Android, shipped together with version bumps | B2 | verify (#1846, 01ff8d3e) | Unit tests on both, same fixtures in `shared/orb-spec/` |
 | B5 | Moving a mission moves its whole family: `POST /api/control/missions/:id/project` relabels only the mission on prod, against `docs/ui/mission-moves.md` (found 15 Nov: Pareto's 154 workers stayed behind) (#1829 c7a72614, fixed by #1834 39ad8d87, on prod since build 2c36e4608) | — | verify | Moving a root with running workers moves every descendant in one call; test replays it; replay on prod not yet run |
-| B5b | A crash between the `missions.db` commit and the `projects.db` rebinding of a family move still needs a retry of the move (review of #1834) | — | ready | A crash injected between the two commits is repaired at startup without a retry; test by name |
-| B6 | Skills `controllers-policy`, `project-manager` and `docs/AGENT_CONTROL_PLANE.md` describe the mission board | B2 | ready | No mention of a project-owned board |
+| B5b | A crash between the `missions.db` commit and the `projects.db` rebinding of a family move still needs a retry of the move (review of #1834) | — | wip (#1843) | A crash injected between the two commits is repaired at startup without a retry; test by name |
+| B6 | Skills `controllers-policy`, `project-manager` and `docs/AGENT_CONTROL_PLANE.md` describe the mission board | B2 | done (#1845, f27fbdde) | No mention of a project-owned board |
 
 B2 is a milestone (authorization and a data migration): independent review
 before merge. Do not move the Orb master or change any project; the operator
@@ -259,7 +265,7 @@ does that once B2 and B3 are deployed.
 | O2 | Env migration tooling and handoff (#1784, #1814) | — | done | — |
 | O3 | Env migration applied on dev, verified | — | ready | Both startup checks pass on dev |
 | O4 | Env migration applied on prod | O3 | blocked | Commands from the handoff run through a deploy; checks pass |
-| O5 | One governed, checksummed rollout for `sandboxed-node`, `sandboxed-mcp`, `orb-privd` with cordon, drain and rollback, driven by the deploy tool | — | wip | Every node reports the deployed build; no hand copy |
+| O5 | One governed, checksummed rollout for `sandboxed-node`, `sandboxed-mcp`, `orb-privd` with cordon, drain and rollback, driven by the deploy tool | — | wip (#1831, 3b5a35df; post-merge review failed, no rollout) | Every node reports the deployed build; no hand copy |
 | O6 | Dev deploys automatically on merge; prod stays deliberate | — | verify | A merge appears on dev with no human |
 | O7 | Failed units on agent-core fixed or deleted (`sandboxed-worker-rolling-upgrade`, `sandboxed-harness-update`, `sandboxed-development-identity`) | — | verify | `systemctl --failed` shows no Orb unit |
 | O8 | Retire `fleet-watcher`; monitor keeps only what Core cannot see about itself | R4 | blocked | — |
@@ -267,6 +273,7 @@ does that once B2 and B3 are deployed.
 | O10 | Hindsight pages updated when a group closes | per group | ready | Page ids on the board |
 | O11 | Old plan documents moved to `docs/archive/` with a pointer here (#1828, 24012e6a) | — | done | — |
 | O12 | Node configuration and packaging: OPS-01, OPS-02, OPS-03, OPS-04 | — | ready | A newer env edit beats a stale override, all capacity fields load and reload, the env file reloads without a signal, and the privd unit runs the installed artifact |
+| O13 | `orb-node-test` fails on the deploy host: the prod deploy of 3b5a35df (16 Nov 11:21Z) aborted with `failed parsing /jobs/:id/files JSON` while CI passes the same test; the test discards the status and body that would name the cause and waits 2.4 s for the job | — | wip | The cause is named, or the test reports status, body and job state and waits on a deadline; a prod deploy of master passes the node test |
 
 ### X. Clients and smaller items
 
@@ -283,11 +290,10 @@ does that once B2 and B3 are deployed.
 
 Only these. Each one names what it unblocks.
 
-1. **lean-ci GitHub App**: approve Administration read/write and install it
-   on `Th0rgal/orb` (unblocks C5, C6).
+1. **lean-ci GitHub App**: done 16 Nov (C5); C6 still waits on C4 and C9.
 2. **YubiKey sessions for lean.ci hosts** when C4 is ready to deploy.
 3. **`nh os switch`** on the laptop (unblocks X5).
-4. **Go-ahead for named snapshots** on lean.ci (L7).
+4. **Go-ahead for named snapshots** on lean.ci (L7): given 16 Nov, behind L5.
 5. **LeanUI as default**, once U3 passes (U4).
 6. **GitHub token on agent-core** is invalid, so library sync fails; replace
    it (library is updated by hand until then).
