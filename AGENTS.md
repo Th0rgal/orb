@@ -460,7 +460,7 @@ missions, settings and sealed provider keys are separate; the host and the
 cloud provider accounts are shared, so dev machines cost real money. Test risky
 changes on dev first. The plan to put both on one base configuration, sync
 settings between them and give missions a dev pass is
-[docs/plans/dev-prod-environments.md](docs/plans/dev-prod-environments.md).
+[docs/archive/plans/dev-prod-environments.md](docs/archive/plans/dev-prod-environments.md).
 
 Deploy with `orb-deploy [--detach] <sha|master> [--dev-only]` on agent-core
 (`scripts/ops/orb-deploy`): it builds that exact commit with the CI-parity

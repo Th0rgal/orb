@@ -3,7 +3,7 @@
 The workflows are staged with hosted runners as the default. Thomas must complete
 and approve the checklist below before setting `ORB_LEAN_RUNNERS=true`.
 
-The [15 Nov Mode 2 activation handoff](plans/orb-consolidation-2026-11.md#b2-mode-2-activation-handoff--15-nov-2026)
+The [15 Nov Mode 2 activation handoff](archive/plans/orb-consolidation-2026-11.md#b2-mode-2-activation-handoff--15-nov-2026)
 records the verified GitHub/upstream state and the ordered operator commands.
 Routing landed in Orb **#1771**; #1781 was a mobile version bump. As checked on
 15 Nov, the repository variable is unset, the runner inventory is empty, and

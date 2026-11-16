@@ -1,7 +1,7 @@
 # Per-user skill libraries
 
 Status: decided by Thomas 2026-11-14. Replaces the open policy question in
-`docs/plans/orb-consolidation-2026-11.md` ("members' missions still receive
+`docs/archive/plans/orb-consolidation-2026-11.md` ("members' missions still receive
 Library skill bodies"). Implementation is tracked on the multi-user track.
 
 ## Decision

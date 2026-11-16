@@ -10,7 +10,7 @@ Read-only source audit performed 2026-11-12. Only this document is written. No b
 - Supplemental **C**: `bb3dae11d^`, the parent of companion retirement #1575, for `src/bin/{automation_manager_mcp,desktop_mcp,fido_agent_proxy,palomactl,sandboxed_mcp,workspace_mcp}.rs`, `src/bin/palomactl/models.rs`, and `crates/lean-mesh/src/bin/lean-mesh.rs`.
 - Supplemental **N**: `3661fdc0c^`, the parent of node retirement #1588, for `src/bin/sandboxed_node.rs`. R retains the capacity library used by that entrypoint.
 - `R:path:line`, `L:path:line`, `C:path:line`, and `N:path:line` refer to those exact snapshots, not line numbers in an absent working-tree Rust file. Reproduce a historical citation with `git show <ref>:<path>` and number lines starting at 1.
-- Guidance read: `AGENTS.md:1-27,101-114,375-378,421-433`; both running plans, `docs/plans/core-recovery-2026-11.md` and `docs/plans/managed-providers-leanci-colab.md`.
+- Guidance read: `AGENTS.md:1-27,101-114,375-378,421-433`; both running plans, `docs/archive/plans/core-recovery-2026-11.md` and `docs/archive/plans/managed-providers-leanci-colab.md`.
 
 ### Classification
 

@@ -1,5 +1,9 @@
 # Dev and prod environments: one configuration, settings sync, agent access
 
+> Archived 2026-11-15. Superseded by the live plan,
+> [the Orb roadmap](../../plans/orb-roadmap.md); current state lives on the
+> board of project `orb`. Kept as written for history and no longer edited.
+
 ## Handoff 2026-11-13
 
 The operator is applying live steps on agent-core; the successor orchestrator
@@ -89,7 +93,7 @@ systemctl show sandboxed-sh-dev sandboxed-sh-prod -p EnvironmentFiles
 
 Both checks and backup comparisons must succeed. `daemon-reload` does not change
 a running instance's environment. Prod's next restart remains operator-owned.
-See [migration and rollback details](../operations/core-environments.md).
+See [migration and rollback details](../../operations/core-environments.md).
 
 **2. Dev deploy and fixed dev-operator host command installation.** This installs
 the only executable path accepted by Core's `deploy_dev`. No extra SSH or generic
@@ -203,7 +207,7 @@ Use the bearer against dev, revoke the grant through the normal approval UI,
 and verify the same dev request now fails. Do not send this token to prod as a
 test. Expiry, revoke/owner-disable and prohibited routes have local regressions;
 live grant acceptance remains unverified. There is no stand-alone dev-operator
-daemon or unit to install. See [the capability restrictions](../operations/dev-operator.md).
+daemon or unit to install. See [the capability restrictions](../../operations/dev-operator.md).
 
 With that redeemed bearer already saved privately by its requesting session,
 the concrete API verification is (do not substitute an ordinary admin bearer):
@@ -278,7 +282,7 @@ Still required: one deliberately capped dev-only rental, provider-visible
 then destroy it and confirm stopped billing/cleanup. Exercise denial at the
 instance ceiling, including resumes/extensions, without raising the cap or
 touching prod. Those live spending cases are **unfinished**, not certified by
-the metadata command. [Spending semantics](../operations/dev-spending.md)
+the metadata command. [Spending semantics](../../operations/dev-spending.md)
 cover rental estimates, reservation-day accounting and existing leases.
 
 ### Isolation status and unfinished work
@@ -381,7 +385,7 @@ Both instances run from the base plus overlays; a settings round trip (export pr
 - Item 1: the repository units share a base and enforce overlay ownership with
   `scripts/ops/orb-env`. The migration preserves both legacy env files as
   private backups and does not change running services. See
-  [the operator migration procedure](../operations/core-environments.md).
+  [the operator migration procedure](../../operations/core-environments.md).
   A reviewed names-only ownership manifest handles the operator's one-sided
   inventory without implicitly enabling prod-only authority on dev.
   Live application and dev verification are still required.
@@ -389,30 +393,30 @@ Both instances run from the base plus overlays; a settings round trip (export pr
   strict non-secret document, a printed diff, explicit `--yes` confirmation and
   stale-preview detection. Existing target users are matched by username;
   target credentials and instance data stay local. Library revision and monitor
-  thresholds are included. See [the transfer contract](../operations/settings-document.md).
+  thresholds are included. See [the transfer contract](../../operations/settings-document.md).
   Temporary-store round trips and rollback tests pass; the live dev round trip
   still requires operator application and verification.
 - Item 3: `seal-provider --all` discovers configured provider keys through
   Bitwarden metadata and seals them inside Core for the current instance.
-  See [the operator procedure](../operations/provider-sealing.md). Live sealing
+  See [the operator procedure](../../operations/provider-sealing.md). Live sealing
   remains an operator step; no vault values are delivered to a mission.
 
 - Item 4: `dev_operator` reuses hardware-approved mission leases for an opaque
   dev-only admin bearer, fixed dev deployment and bounded dev journal tools.
-  See [the dev pass contract](../operations/dev-operator.md). Cross-instance
+  See [the dev pass contract](../../operations/dev-operator.md). Cross-instance
   redemption requires the issuing Core to support verification; live acceptance
   remains pending operator installation.
 - Item 5: an operator-installed systemd timer follows master and submits exact
   commits through `orb-deploy --dev-only`, which builds, self-tests and verifies
-  the exact healthy SHA. See [dev auto-deployment](../operations/dev-autodeploy.md).
+  the exact healthy SHA. See [dev auto-deployment](../../operations/dev-autodeploy.md).
   The repository tests use fake systemd/network effects; live timer installation
   and observing a merge reach dev are still pending.
 - Item 6: dev rentals carry the provider-visible dev name and usage attribution,
   with a default $5 daily commitment ceiling checked transactionally across all
   users, including resumes and extensions. Settings imports cannot override it.
-  See [dev spending](../operations/dev-spending.md). Live rental and cap
+  See [dev spending](../../operations/dev-spending.md). Live rental and cap
   acceptance remains pending dev installation.
 - Isolation: the two-user HTTP regression suite covers REST and MCP ownership,
   including caller-selected MCP roles and sessions minted for shared missions.
-  See [the acceptance procedure](../operations/dev-isolation.md). These local
+  See [the acceptance procedure](../../operations/dev-isolation.md). These local
   regressions do not certify live dev or desktop acceptance; that work is pending.

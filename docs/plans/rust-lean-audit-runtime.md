@@ -7,8 +7,8 @@
 Read-only source audit, 2026-11-12. Rust baseline `4199fc06e^` resolves to
 `b22ed3181df64cf9681e887381ede7ed15fe96aa`; Lean/current HEAD is
 `5383bf27b8f8e664b654339cf88e14c90dba665c`. Read `AGENTS.md`,
-`docs/plans/core-recovery-2026-11.md`, and
-`docs/plans/managed-providers-leanci-colab.md`. No builds, tests, services, or
+`docs/archive/plans/core-recovery-2026-11.md`, and
+`docs/archive/plans/managed-providers-leanci-colab.md`. No builds, tests, services, or
 commits were run. Suggested checks below are future acceptance criteria, not
 observed test results. Independent source review confirmed 11 findings and
 narrowed RUN-10; the review verdicts and qualifications are recorded below.

@@ -1,5 +1,9 @@
 # Managed providers: lean.ci and Google Colab
 
+> Archived 2026-11-15. Superseded by the live plan,
+> [the Orb roadmap](../../plans/orb-roadmap.md); current state lives on the
+> board of project `orb`. Kept as written for history and no longer edited.
+
 ## Handoff 2026-11-13
 
 PR #1720 is merged at `6f1573fa8fb1799c5bc40c8269b5a1e7bb0e07f4`. This is a
@@ -107,7 +111,7 @@ not established by this handoff. Do not mark the original snapshot/warm-build or
 The original plan below is historical/task context, not a completed checklist.
 
 Goal: missions can rent machines on lean.ci and on Google Colab through Core, the same way they can on
-Boat since 2026-11-12. This plan is a child of `docs/plans/core-recovery-2026-11.md` (section 1, items 5
+Boat since 2026-11-12. This plan is a child of `core-recovery-2026-11.md` (section 1, items 5
 and 6) and is owned by its own mission; the recovery mission keeps the Boat lifecycle (snapshots, fork,
 restore, automatic placement) and fleet reconciliation.
 

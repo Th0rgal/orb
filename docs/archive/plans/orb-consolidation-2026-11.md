@@ -1,5 +1,9 @@
 # Orb consolidation roadmap (2026-11-13)
 
+> Archived 2026-11-15. Superseded by the live plan,
+> [the Orb roadmap](../../plans/orb-roadmap.md); current state lives on the
+> board of project `orb`. Kept as written for history and no longer edited.
+
 Status: approved by Thomas on 2026-11-13 ("full autonomy, approved to deploy and
 test in production, prioritise speed, do not wait for CI initially, fix any new
 bug you find"). Owner: the single mission **"Orb: consolidation"** (project
@@ -34,7 +38,7 @@ The one-sided-key tooling is implemented on master (`b1166b8e`, #1784):
 authority and rejects unknown names before writes. The installed-tool regression
 in `scripts/test_orb_env.py` exercises default policy discovery, dry-run, apply,
 both startup checks, exact backups and overwrite refusal using synthetic inputs.
-See [the handoff](../operations/env-migrate-report.md), including **Deploy/apply
+See [the handoff](../../operations/env-migrate-report.md), including **Deploy/apply
 on prod** commands. Repository delivery is complete; live inventory reconciliation,
 dev activation/verification and production activation remain operator-owned.
 The historical 65-name prod-only inventory is incomplete, so no claim of live
@@ -179,7 +183,7 @@ Actions runner.
    `ORB_LEAN_RUNNERS=false` (or delete it), cancel the affected runs and dispatch
    **new** runs with `use_lean_runners=false`. Already evaluated jobs do not
    automatically change runners. There is no automatic capacity fallback after
-   a lean label is selected. See [the rollback commands](../ci-lean-runners.md#immediate-rollback).
+   a lean label is selected. See [the rollback commands](../../ci-lean-runners.md#immediate-rollback).
 
 Repo-side acceptance: preserve the existing expressions and hosted defaults;
 run `python3 -m unittest -v scripts/test_ci_plan.py`, then merge this handoff
@@ -583,7 +587,7 @@ the test created, no account identifier in any evidence.
 worker `6fa970f7`, completed 14:04).** Read as a delayed message; its
 "current fetched master `6f17599d`" is 29 commits behind today's tip.
 Checked on origin: `b1320c6f` (per-key `orb-env` ownership), `d2e580e9`
-(dev/prod handoff in `docs/plans/dev-prod-environments.md`) and
+(dev/prod handoff in `dev-prod-environments.md`) and
 `scripts/dev_user_isolation.py` (`--url`, `--token-file`, `--sha`; creates a
 member with `daily_spend_cap_cents: 0`, disables it on cleanup) are all on
 master. Decisions:
@@ -798,7 +802,7 @@ Live builds at 23:31Z (health endpoints, 9-character `build` resolved in the rep
 
 - Merged: #1752 (`ba366e3614609763cfe910f2623c619791cab140`, a stream that ends without a clean end of body is no longer reported complete) and #1753 (`15d404cd7c49dcd003ec5d11bc79e3a61ffe1da1`, a member's provider toggle reply no longer carries the admin's per-model limits). Neither is deployed yet: dev and prod both report build `c77d4e162` at 00:29 UTC.
 - Open: #1754 (`d99871e1d216b8f6c3ec15d32b5c17de1384206b`), sidecar `reason` and `retry_at` are shown only in a fixed shape. Tests (a), (b), (d) failed before the fix per the worker; I read the full diff and did not rebuild it. CI on the new base was still running at 00:34 UTC. Limit: if the live sidecar uses another form for `reason`, every sidecar park shows `credential_quota` (operator request 5 would settle this).
-- Three settings pages that crash for every user (operator client walk). Traced by reading both sides at `21f20846`, nothing run. Core's replies lack the field names the desktop, iOS and Android read; the mismatch dates from #1693 (12 Nov), not from this week's merges, and the repo's own audit already lists it (`docs/plans/rust-lean-audit-provider-status.md`, PROV07 and HTTP08).
+- Three settings pages that crash for every user (operator client walk). Traced by reading both sides at `21f20846`, nothing run. Core's replies lack the field names the desktop, iOS and Android read; the mismatch dates from #1693 (12 Nov), not from this week's merges, and the repo's own audit already lists it (`../../plans/rust-lean-audit-provider-status.md`, PROV07 and HTTP08).
   - Usage summary: client reads `totals.requests`, `cost_cents`, `unknown_cost_requests`, `since`, `cost_status`, `by_hour`; Core sends `events`, `recorded_cost_cents`, `estimated_cost_cents`, `window_start`.
   - Proxy health: client reads `groups`, `chains`, `totals.ok`, `retried`, `fell_back`; Core sends `by_provider`, `by_chain`, `succeeded`, `retried_requests`, `fallback_requests`.
   - Routing health: client reads `cooldown_remaining_secs`, `is_healthy`, `total_input_tokens` and other counters; Core sends `cooldown_secs_remaining`, `remaining_quota_pct`, `sample_count`. My earlier instruction to keep `cooldown_secs_remaining` as the only cooldown field was wrong and is being reversed.
@@ -1118,7 +1122,7 @@ row stays, the card returns on the next fetch and the message is delivered
 after a later turn. `POST …/send-now?interrupt=true`
 (`ResourcesAndSystem.lean:2739`) only moves the row to the head and answers
 `promoted: true`; nothing stops the running turn. Both are already listed in
-`docs/plans/core-recovery-2026-11.md` line 172. This explains the queued
+`core-recovery-2026-11.md` line 172. This explains the queued
 steer that could not be removed on mission `734c3bb7`. C (`729e035b`, lagash)
 has the route as `wip/c-queue-delete`, tests first.
 

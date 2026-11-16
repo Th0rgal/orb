@@ -50,7 +50,7 @@ Unknown live keys fail with names only before creating any output. The optional
 key's allowed layer or admit unknown names.
 
 Historical inventory: **65 prod-only, 10 dev-only, 11 differing**. The report in
-`docs/plans/orb-consolidation-2026-11.md` names all dev-only/differing keys but
+`docs/archive/plans/orb-consolidation-2026-11.md` names all dev-only/differing keys but
 summarizes the prod-only group by families. All ten named dev-only keys and all
 eleven named differing keys are instance-owned in the checked-in policy. Prod-only
 shared tuning selects prod; secrets/paths stay local; Hermes/console stay prod-only.
@@ -100,5 +100,5 @@ The env ownership check is also useful after edits:
 
 Settings document transfer, provider sealing, dev grants and automatic dev
 deployment are separate steps of
-[the approved plan](../plans/dev-prod-environments.md). An env migration does
+[the approved plan](../archive/plans/dev-prod-environments.md). An env migration does
 not synchronize instance settings or data.
