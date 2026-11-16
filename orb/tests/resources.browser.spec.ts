@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 
 test("Resources page renders global Compute/Inference Sankey, USD toggle, bottom Timeline, and Fast-DAG drilldown", async ({
   page,
-}) => {
+}, testInfo) => {
   const missionId = "11111111-1111-4111-8111-111111111111";
   const childId = "22222222-2222-4222-8222-222222222222";
   const overviewRangesRequested: string[] = [];
@@ -470,6 +470,47 @@ test("Resources page renders global Compute/Inference Sankey, USD toggle, bottom
       (el) => Boolean((el as unknown as { __orbPollMarker?: boolean }).__orbPollMarker),
     ),
   ).toBe(true);
+
+  // The breakpoint follows content width (including the app sidebar), not the window.
+  // Pause the poll clock so any extra overview request here would be caused by resize.
+  await page.clock.install();
+  await page.clock.pauseAt(new Date());
+  const requestsBeforeResize = overviewRangesRequested.length;
+  for (const theme of ["dark", "light"]) {
+    await page.evaluate((theme) => document.documentElement.setAttribute("data-theme", theme), theme);
+    for (const width of [2000, 1200]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expect(page.getByTestId("res-sankey-svg")).toHaveCount(width === 2000 ? 2 : 1);
+      await expect(page.getByTestId("res-lens-inference")).toHaveCount(width === 2000 ? 0 : 1);
+      const boxes = await page.locator(".res-flow-row > .res-card").evaluateAll((els) => els.map((el) => {
+        const { x, y, width, height } = el.getBoundingClientRect();
+        return { x, y, width, height };
+      }));
+      const content = (await page.locator(".res-flow-row").boundingBox())!;
+      expect(boxes.reduce((sum, box) => sum + box.width, 0)).toBeGreaterThan(content.width * 0.8);
+      if (width === 2000) {
+        expect(boxes[0].y).toBe(boxes[1].y);
+        expect(boxes[1].x).toBeGreaterThan(boxes[0].x + boxes[0].width);
+        await expect(page.getByTestId("res-flow-compute")).toContainText("Boat");
+        await expect(page.getByTestId("res-flow-inference")).toContainText("Anthropic");
+        await page.getByTestId("res-metric-raw").focus();
+        await page.keyboard.press("Tab");
+        await expect(page.getByTestId("res-metric-usd")).toBeFocused();
+        await page.keyboard.press("Enter");
+        await expect(page.getByTestId("res-flow-inference")).toContainText("$29.2/h");
+        await expect(page.getByTestId("res-flow-compute")).toContainText("$3.20/h");
+        await page.getByTestId("res-metric-raw").click();
+      }
+      expect((await consumptionCard.boundingBox())!.y).toBe(baseCurveBox.y);
+      expect((await timelineBar.boundingBox())!.y).toBe(baseTimelineBox.y);
+      console.log(JSON.stringify({ theme, viewport: width, contentWidth: content.width, cards: boxes }));
+      const path = testInfo.outputPath(`resources-${width}-${theme}.png`);
+      await page.screenshot({ path });
+      await testInfo.attach(`resources-${width}-${theme}`, { path, contentType: "image/png" });
+    }
+  }
+  expect(overviewRangesRequested.length).toBe(requestsBeforeResize);
+  await page.clock.resume();
 
   // Click mission node in Sankey to drill down into per-mission Flow (default submode)
   await page.getByTestId(`res-node-${missionId}`).click();

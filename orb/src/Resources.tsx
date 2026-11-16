@@ -121,18 +121,15 @@ export default function Resources(props: {
   const [error, setError] = createSignal<string | null>(null);
 
   const [isolatedId, setIsolatedId] = createSignal<string | null>(null);
-  const [hoveredNodeId, setHoveredNodeId] = createSignal<string | null>(null);
-  const [hoveredLinkId, setHoveredLinkId] = createSignal<string | null>(null);
   const [hoveredBarId, setHoveredBarId] = createSignal<string | null>(null);
   const [hoverFrac, setHoverFrac] = createSignal<number | null>(null);
 
-  const [sankeyWidth, setSankeyWidth] = createSignal<number>(920);
   const [sankeyHeight, setSankeyHeight] = createSignal<number>(368);
   const [dagLaneWidth, setDagLaneWidth] = createSignal<number>(720);
   const [curveWidth, setCurveWidth] = createSignal<number>(920);
+  const [wideFlows, setWideFlows] = createSignal(false);
 
   let cardMainEl: HTMLDivElement | undefined;
-  let sankeyEl: HTMLDivElement | undefined;
   let dagLaneEl: HTMLDivElement | undefined;
   let curveSvgEl: SVGSVGElement | undefined;
   let ro: ResizeObserver | undefined;
@@ -166,6 +163,7 @@ export default function Resources(props: {
     ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
         if (entry.target === cardMainEl) {
+          setWideFlows(entry.contentRect.width > 1600);
           const ch = Math.floor(entry.contentRect.height);
           if (ch > CARD_HEAD_HEIGHT + 80) {
             const bodyH = Math.max(MIN_SANKEY_CANVAS_HEIGHT, ch - CARD_HEAD_HEIGHT);
@@ -175,9 +173,6 @@ export default function Resources(props: {
         }
         const w = Math.floor(entry.contentRect.width);
         if (w <= 40) continue;
-        if (entry.target === sankeyEl) {
-          setSankeyWidth((prev) => (Math.abs(prev - w) >= 1 ? w : prev));
-        }
         if (entry.target === dagLaneEl) {
           setDagLaneWidth((prev) => (Math.abs(prev - w) >= 1 ? w : prev));
         }
@@ -187,7 +182,6 @@ export default function Resources(props: {
       }
     });
     observeCardMainHeight(cardMainEl);
-    observeWidth(sankeyEl, (w) => setSankeyWidth(w));
     observeWidth(dagLaneEl, (w) => setDagLaneWidth(w));
     observeWidth(curveSvgEl, (w) => setCurveWidth(w));
     onCleanup(() => ro?.disconnect());
@@ -235,8 +229,6 @@ export default function Resources(props: {
       () => props.missionId ?? null,
       (mid) => {
         setIsolatedId(null);
-        setHoveredNodeId(null);
-        setHoveredLinkId(null);
         setHoveredBarId(null);
         setHoverFrac(null);
         if (mid) {
@@ -298,9 +290,6 @@ export default function Resources(props: {
     void _ld;
     queueMicrotask(() => {
       observeCardMainHeight(cardMainEl);
-      observeWidth(sankeyEl, (w) =>
-        setSankeyWidth((prev) => (Math.abs(prev - w) >= 1 ? w : prev)),
-      );
       observeWidth(dagLaneEl, (w) => {
         scrubRect = null;
         setDagLaneWidth((prev) => (Math.abs(prev - w) >= 1 ? w : prev));
@@ -355,7 +344,7 @@ export default function Resources(props: {
         data-testid="res-metric-raw"
         onClick={() => setMetric("raw")}
       >
-        {rawUnitLabel()}
+        {wideFlows() && (!isMissionMode() || submode() === "flow") ? "B tok/h · vCPU" : rawUnitLabel()}
       </button>
       <button
         type="button"
@@ -370,10 +359,8 @@ export default function Resources(props: {
   );
 
   // Sankey layout memo (used in Fleet mode & Mission "flow" submode)
-  const sankeyGraph = createMemo(() => {
-    const l = lens();
+  function buildGraph(l: ResourceLens, w: number) {
     const m = metric();
-    const w = sankeyWidth();
     const h = sankeyHeight();
     if (isMissionMode()) {
       const det = detail();
@@ -403,24 +390,7 @@ export default function Resources(props: {
         marginY: 16,
       }),
     };
-  });
-
-  const sankeyLinkMap = createMemo(
-    () => new Map((sankeyGraph()?.layout.links ?? []).map((l) => [l.id, l])),
-  );
-  const sankeyLinkIds = createMemo(
-    () => sankeyGraph()?.layout.links.map((l) => l.id) ?? [],
-    [],
-    { equals: eqIds },
-  );
-  const sankeyNodeMap = createMemo(
-    () => new Map((sankeyGraph()?.layout.nodes ?? []).map((n) => [n.id, n])),
-  );
-  const sankeyNodeIds = createMemo(
-    () => sankeyGraph()?.layout.nodes.map((n) => n.id) ?? [],
-    [],
-    { equals: eqIds },
-  );
+  }
 
   // Fast-DAG layout memo
   const dagLayout = createMemo(() => {
@@ -458,12 +428,6 @@ export default function Resources(props: {
     [],
     { equals: eqIds },
   );
-
-  const isolatedLabel = createMemo(() => {
-    const id = isolatedId();
-    if (!id) return null;
-    return sankeyNodeMap().get(id)?.label ?? id;
-  });
 
   // Header live summary stamp
   const headerStamp = createMemo(() => {
@@ -526,34 +490,6 @@ export default function Resources(props: {
   const activeReadout = createMemo(() => {
     const l = lens();
     const m = metric();
-    const hlId = hoveredLinkId();
-    if (hlId) {
-      const link = sankeyLinkMap().get(hlId);
-      if (link) {
-        const src = sankeyNodeMap().get(link.source)?.label ?? link.source;
-        const dst = sankeyNodeMap().get(link.target)?.label ?? link.target;
-        const val = formatResourceRate(
-          m === "usd" ? link.usdValue : link.rawValue,
-          l,
-          m,
-          true,
-        );
-        return `${src} → ${dst} · ${val}`;
-      }
-    }
-    const hnId = hoveredNodeId();
-    if (hnId) {
-      const node = sankeyNodeMap().get(hnId);
-      if (node) {
-        const val = formatResourceRate(
-          m === "usd" ? node.usdValue : node.rawValue,
-          l,
-          m,
-          true,
-        );
-        return node.sub ? `${node.label} · ${val} · ${node.sub}` : `${node.label} · ${val}`;
-      }
-    }
     if (hoveredBarId() && detail()) {
       const bar = dagBarById().get(hoveredBarId()!);
       if (bar) {
@@ -678,7 +614,7 @@ export default function Resources(props: {
     const filterId = isolatedId();
     const values = new Array<number>(len).fill(0);
     const visibleCol1Ids = new Set(
-      (sankeyGraph()?.layout.nodes ?? [])
+      buildOverviewSankeyInput(ov, l, m, sankeyHeight()).nodes
         .filter((n) => n.column === 1 && n.id !== "__other_missions__")
         .map((n) => n.id),
     );
@@ -786,14 +722,6 @@ export default function Resources(props: {
     };
   });
 
-  function isLinkDimmed(linkId: string, source: string, target: string): boolean {
-    const hl = hoveredLinkId();
-    if (hl) return hl !== linkId;
-    const hn = hoveredNodeId() ?? isolatedId();
-    if (hn) return source !== hn && target !== hn;
-    return false;
-  }
-
   function handleNodeClick(node: {
     id: string;
     column: number;
@@ -887,7 +815,7 @@ export default function Resources(props: {
             </Show>
           </Show>
 
-          <Show when={!isMissionMode()}>{renderLensToggle(false)}</Show>
+          <Show when={!isMissionMode() && !wideFlows()}>{renderLensToggle(false)}</Show>
 
           <Show when={isMissionMode()}>
             <div class="res-seg" role="tablist" aria-label="Mission view mode">
@@ -938,11 +866,12 @@ export default function Resources(props: {
       />
 
       {/* Main Flow / Fast-DAG Card */}
-      <div class="res-card res-card-main" ref={cardMainEl}>
+      <div class="res-flow-row" classList={{ "is-dual": wideFlows() && (!isMissionMode() || submode() === "flow") }} ref={cardMainEl}>
         <Show
           when={!loading()}
           fallback={
-            <>
+            <For each={wideFlows() && (!isMissionMode() || submode() === "flow") ? [0, 1] : [0]}>{() => (
+            <div class="res-card res-card-main">
               <div class="res-card-head">
                 <div class="res-skel" style={{ height: "14px", width: "210px" }} />
                 <div class="res-skel" style={{ height: "14px", width: "180px" }} />
@@ -953,13 +882,51 @@ export default function Resources(props: {
                   style={{ height: "100%", width: "100%" }}
                 />
               </div>
-            </>
+            </div>
+            )}</For>
           }
         >
           <Show
             when={isMissionMode() && submode() === "dag"}
             fallback={
-              <>
+              <For each={wideFlows() ? ["inference", "compute"] as ResourceLens[] : [lens()]}>
+                {(flowLens) => {
+                  // Each card owns only its geometry and hover state; data and controls stay shared.
+                  const lens = () => flowLens;
+                  const [sankeyWidth, setWidth] = createSignal(920);
+                  const sankeyGraph = createMemo(() => buildGraph(flowLens, sankeyWidth()));
+                  const sankeyLinkMap = createMemo(() => new Map((sankeyGraph()?.layout.links ?? []).map((l) => [l.id, l])));
+                  const sankeyNodeMap = createMemo(() => new Map((sankeyGraph()?.layout.nodes ?? []).map((n) => [n.id, n])));
+                  const sankeyLinkIds = createMemo(() => [...sankeyLinkMap().keys()], [], { equals: eqIds });
+                  const sankeyNodeIds = createMemo(() => [...sankeyNodeMap().keys()], [], { equals: eqIds });
+                  const [hoveredNodeId, setHoveredNodeId] = createSignal<string | null>(null);
+                  const [hoveredLinkId, setHoveredLinkId] = createSignal<string | null>(null);
+                  const isolatedLabel = () => sankeyNodeMap().get(isolatedId() ?? "")?.label;
+                  const activeReadout = () => {
+                    const link = sankeyLinkMap().get(hoveredLinkId() ?? "");
+                    const node = sankeyNodeMap().get(hoveredNodeId() ?? "");
+                    if (!link && !node) return null;
+                    const item = (link ?? node)!;
+                    const label = link
+                      ? `${sankeyNodeMap().get(link.source)?.label} → ${sankeyNodeMap().get(link.target)?.label}`
+                      : node!.label;
+                    const sub = node?.sub ? ` · ${node.sub}` : "";
+                    return `${label} · ${formatResourceRate(metric() === "usd" ? item.usdValue : item.rawValue, flowLens, metric(), true)}${sub}`;
+                  };
+                  const isLinkDimmed = (id: string, source: string, target: string) => {
+                    if (hoveredLinkId()) return hoveredLinkId() !== id;
+                    const node = hoveredNodeId() ?? isolatedId();
+                    return Boolean(node && source !== node && target !== node);
+                  };
+                  let wrap: HTMLDivElement | undefined;
+                  onMount(() => {
+                    const observer = new ResizeObserver(([entry]) => {
+                      if (entry.contentRect.width > 40) setWidth(Math.floor(entry.contentRect.width));
+                    });
+                    if (wrap) observer.observe(wrap);
+                    onCleanup(() => observer.disconnect());
+                  });
+                  return <div class="res-card res-card-main" data-testid={`res-flow-${flowLens}`}>
                 <div class="res-card-head">
                   <div class="res-card-head-left">
                     <span class="res-col-title">
@@ -996,7 +963,7 @@ export default function Resources(props: {
                   </div>
                 </div>
 
-                <div class="res-sankey-wrap" ref={sankeyEl}>
+                <div class="res-sankey-wrap" ref={wrap}>
                   <Show
                     when={
                       sankeyGraph() &&
@@ -1093,7 +1060,8 @@ export default function Resources(props: {
                                       nd().sub.length > 18
                                         ? `${nd().sub.slice(0, 17)}…`
                                         : nd().sub;
-                                    return `${valStr()} · ${rawSub}`;
+                                    const text = `${valStr()} · ${rawSub}`;
+                                    return text.length > 28 ? `${text.slice(0, 27)}…` : text;
                                   };
                                   const hitX = () =>
                                     isLeft()
@@ -1117,7 +1085,7 @@ export default function Resources(props: {
                                       onMouseLeave={() =>
                                         setHoveredNodeId((prev) => (prev === id ? null : prev))
                                       }
-                                      onClick={() => handleNodeClick(nd())}
+                                      onClick={() => { setLens(flowLens); handleNodeClick(nd()); }}
                                     >
                                       <title>
                                         {`${nd().label} · ${valStr()}${nd().sub ? ` (${nd().sub})` : ""}`}
@@ -1204,10 +1172,13 @@ export default function Resources(props: {
                     </svg>
                   </Show>
                 </div>
-              </>
+              </div>;
+                }}
+              </For>
             }
           >
             {/* Mission Fast-DAG View */}
+            <div class="res-card res-card-main">
             <div class="res-card-head">
               <div class="res-card-head-left">
                 <span class="res-col-title">
@@ -1567,6 +1538,7 @@ export default function Resources(props: {
                 );
               }}
             </Show>
+            </div>
           </Show>
         </Show>
       </div>
@@ -1580,7 +1552,7 @@ export default function Resources(props: {
             </span>
             <Show when={isMissionMode()}>
               <div class="res-curve-controls">
-                {renderLensToggle(true)}
+                <Show when={!wideFlows() || submode() === "dag"}>{renderLensToggle(true)}</Show>
                 {renderMetricToggle(true)}
               </div>
             </Show>
