@@ -308,9 +308,37 @@ BUILD_SCRIPT = r'''set -euo pipefail
 exec > >(tee -a /home/user/build.log) 2>&1
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -qq
-sudo apt-get install -y -qq --no-install-recommends build-essential pkg-config libssl-dev curl ca-certificates git sqlite3 zstd >/dev/null
+sudo apt-get install -y -qq --no-install-recommends build-essential pkg-config libssl-dev libsqlite3-dev bubblewrap curl ca-certificates git sqlite3 zstd python3 cargo rustc >/dev/null
 rm -rf "$HOME/src" && mkdir -p "$HOME/src" && tar -xf "$HOME/src.tar" -C "$HOME/src"
 cd "$HOME/src"
+lean_dest="$HOME/.local/lean-4.35.0"
+if [[ ! -x "$lean_dest/bin/lean" ]]; then
+  lean_archive="/tmp/lean-4.35.0.tar.zst"
+  curl --retry 5 --retry-all-errors -fsSL "https://github.com/leanprover/lean4/releases/download/v4.35.0/lean-4.35.0-linux.tar.zst" -o "$lean_archive"
+  echo "7289597a44543246c9227b8cae501767e095ce17f6d448b95fc4a8dc97268f6d  ${lean_archive}" | sha256sum -c -
+  mkdir -p "$lean_dest"
+  tar --zstd -xf "$lean_archive" --strip-components=1 -C "$lean_dest"
+  rm -f "$lean_archive"
+fi
+export PATH="$lean_dest/bin:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+if ! command -v turbo-lean >/dev/null 2>&1; then
+  revision="$(tr -d '[:space:]' < lean/turbo-lean-revision)"
+  [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+  source_dir="/tmp/turbo-lean-${revision}"
+  rm -rf "$source_dir"
+  git init -q "$source_dir"
+  git -C "$source_dir" fetch --depth 1 https://github.com/Th0rgal/turbo-lean.git "$revision"
+  git -C "$source_dir" checkout -q FETCH_HEAD
+  test "$(git -C "$source_dir" rev-parse HEAD)" = "$revision"
+  test -z "$(git -C "$source_dir" status --porcelain)"
+  test "$(cat "$source_dir/lean/lean-toolchain")" = "$(cat lean/lean-toolchain)"
+  CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR="$source_dir/target" cargo build --release --locked --manifest-path "$source_dir/Cargo.toml" -p turbo-lean
+  git -C "$source_dir" diff --exit-code
+  mkdir -p "$HOME/.local/bin"
+  install -m 0755 "$source_dir/target/release/turbo-lean" "$HOME/.local/bin/turbo-lean"
+  rm -rf "$source_dir"
+fi
+turbo-lean --version
 ./scripts/build_orb_bins.sh --ensure-lean --out-dir target/release --only sandboxed-node --only sandboxed-mcp || { echo BUILD_FAILED; exit 1; }
 install -m755 target/release/sandboxed-node "$HOME/sandboxed-node.out"
 install -m755 target/release/sandboxed-mcp "$HOME/sandboxed-mcp.out"

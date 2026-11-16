@@ -314,6 +314,25 @@ class TurboLeanCompatibilityTests(unittest.TestCase):
             self.assertEqual(len(raw), 1)
             self.assertIn('-DwarningAsError=true', raw[0]['args'])
 
+    def test_dockerfile_and_managed_image_build_pinned_turbo_lean_without_raw_fallback(self):
+        dockerfile = (ROOT / 'Dockerfile').read_text()
+        source_stage = dockerfile.split('FROM ubuntu:24.04 AS lean-prebuilt', 1)[0]
+        self.assertIn('lean/turbo-lean-revision', source_stage)
+        self.assertIn('https://github.com/Th0rgal/turbo-lean.git', source_stage)
+        self.assertIn('cargo build --release --locked', source_stage)
+        self.assertIn('/usr/local/bin/turbo-lean', source_stage)
+        self.assertNotIn('ORB_ALLOW_RAW_LAKE_FALLBACK', source_stage)
+        self.assertNotIn('ORB_SKIP_TURBO_LEAN', source_stage)
+
+        managed = (ROOT / 'scripts' / 'managed_image.py').read_text()
+        build_script = managed.split('BUILD_SCRIPT = r\'\'\'', 1)[1].split('\'\'\'', 1)[0]
+        self.assertIn('lean/turbo-lean-revision', build_script)
+        self.assertIn('https://github.com/Th0rgal/turbo-lean.git', build_script)
+        self.assertIn('cargo build --release --locked', build_script)
+        self.assertIn('turbo-lean --version', build_script)
+        self.assertNotIn('ORB_ALLOW_RAW_LAKE_FALLBACK', build_script)
+        self.assertNotIn('ORB_SKIP_TURBO_LEAN', build_script)
+
 
 
 if __name__ == '__main__':
