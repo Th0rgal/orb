@@ -4837,11 +4837,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let nowIso := formatEpochIso8601Utc nowEpochSec
       let sseEv? ←
         match ← MissionSettings.applyPlacementPatch st.store existing jv caller.userId caller.isLegacyUnscoped
-            st.bootstrapAdminId nowIso nowEpochSec with
+            st.bootstrapAdminId nowIso nowEpochSec (some settings) with
         | .ok ev? => pure ev?
         | .error (code, errBody) => return .ok (mkJson code errBody)
-      if let .error _ ← MissionSettings.persist st.store existing settings nowIso then
-        return .ok (mkJson 500 "{\"error\":\"mission_settings_update_failed\"}")
       if let some evPayload := sseEv? then
         publishControlEvent st.broadcastHub? "mission_placement_changed" evPayload
       let callerOpt := if caller.isLegacyUnscoped then none else some caller.userId

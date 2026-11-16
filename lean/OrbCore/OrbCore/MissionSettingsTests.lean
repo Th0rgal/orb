@@ -7,6 +7,7 @@ open OrbCore.Store OrbCore.Control OrbCore.Managed OrbCore.Proxy OrbCore.R7Core 
 
 private def check (ok : Bool) (label : String) : IO Unit := do
   unless ok do throw (IO.userError s!"mission settings: {label}")
+  if label.startsWith "B5_" then IO.println s!"PASS {label}"
 
 def run (root : String) : IO Unit := do
   let .ok store ← openCoreStore s!"{root}/mission-settings"
@@ -115,9 +116,10 @@ def run (root : String) : IO Unit := do
       clearedRest[2]! == "" && clearedRest[3]! == "" && clearedRest[4]! == "codex-session")
       "null patch parity preserves session"
     let move : JVal := .obj #[("project", .str "q"), ("folder", .str "moved")]
-    check ((← rest move) == 200) "REST placement patch"
+    let (moveStatus, moveBody) ← restAt "PATCH" "/api/control/missions/rest/settings" move
+    check (moveStatus == 200) s!"REST placement patch: {moveBody}"
     let moved ← snapshot "rest"
-    check (moved[6]! == "q" && moved[7]! == "moved" && moved[8]! == "8" && moved[4]! == "codex-session")
+    check (moved[6]! == "q" && moved[7]! == "" && moved[8]! == "8" && moved[4]! == "codex-session")
       "REST placement revision changes once and preserves session"
     -- B5 replay regression: `POST /api/control/missions/:id/project` moves root, co-located forks,
     -- running workers, nested grandchildren, `/btw` side sessions, and `descendant_ids` atomically.
@@ -227,6 +229,70 @@ def run (root : String) : IO Unit := do
       (wAckMove2 &&& 0xFFFFFFFF) == 1793 && (wAckMove2 >>> 32) == 9 &&
       (wOutOfOrderMove1 &&& 0xFFFFFFFF) == 4 && (wOutOfOrderMove1 >>> 32) == 9)
       "orb_placement_merge_step fences stale polls and out-of-order multi-hop family move responses"
+    -- B5 follow-up: each replay uses a fresh owned fixture family.
+    let memberRest (mid : String) (patch : JVal) := do
+      let body := renderCompact patch
+      let jwt := mintSessionTokenV2 cfg.jwtSecret "alice" "member" 1 (now + 3600)
+      let raw := s!"POST /api/control/missions/{mid}/project HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {jwt}\r\nContent-Type: application/json\r\nContent-Length: {body.toUTF8.size}\r\n\r\n{body}"
+      let .ok req := parseRequest raw.toUTF8 none | throw (IO.userError "member request parse")
+      let .ok response ← dispatchCoreRequest app req now | throw (IO.userError "member request dispatch")
+      return response.status
+    for (id, parent, tags) in #[
+        ("retry-root", "", "[]"), ("retry-worker", "retry-root", "[]"),
+        ("retry-fork", "retry-worker", "[\"fork-of:retry-worker\"]"),
+        ("retry-deep", "retry-fork", "[]"),
+        ("retry-btw", "", "[\"btw-parent:retry-root\"]")] do
+      discard <| sql
+        "INSERT INTO missions(id,title,backend,owner_user_id,project,folder,parent_mission_id,tags,placement_revision) VALUES(?1,'fixture','claudecode','alice','alice:source','old',?2,?3,7);"
+        #[id, parent, tags]
+    let patch : JVal := .obj #[("project", .str "destination"), ("folder", .str "new")]
+    check ((← memberRest "retry-worker" patch) == 200 && (← snapshot "retry-worker")[7]! == "")
+      "B5_selected_worker_folder"
+    check ((← memberRest "retry-btw" patch) == 200 && (← snapshot "retry-btw")[7]! == "")
+      "B5_selected_btw_folder"
+    discard <| sql "UPDATE missions SET project='alice:source',folder='old' WHERE id LIKE 'retry-%';"
+    discard <| sql "CREATE TRIGGER reject_b5_settings BEFORE UPDATE OF backend ON missions WHEN NEW.id='retry-root' BEGIN SELECT RAISE(ABORT,'fixture settings failure'); END;"
+    let failedPatch := patch.setField "backend" (.str "codex")
+    check ((← memberRest "retry-root" failedPatch) == 500)
+      "B5_combined_settings_failure_status"
+    check ((← snapshot "retry-root")[6]! == "alice:source" && (← snapshot "retry-worker")[6]! == "alice:source")
+      "B5_combined_settings_failure_atomic"
+    discard <| sql "DROP TRIGGER reject_b5_settings;"
+    let .ok _ ← execParamQuery store.projectsDb
+      "INSERT INTO mcp_sessions_v1(id,owner,mission_id,project_scope,project_scoped,expires_at,revoked,subject_kind) VALUES('retry-session','alice','retry-worker','alice:source',1,9999999999,0,'mission');" #[]
+      | throw (IO.userError "retry session fixture")
+    let .ok _ ← execParamQuery store.projectsDb
+      "CREATE TRIGGER reject_b5_session BEFORE UPDATE ON mcp_sessions_v1 WHEN NEW.id='retry-session' BEGIN SELECT RAISE(ABORT,'fixture session failure'); END;" #[]
+      | throw (IO.userError "retry failure trigger")
+    check ((← memberRest "retry-root" patch) == 500) "B5_rebind_database_failure"
+    let .ok _ ← execParamQuery store.projectsDb "DROP TRIGGER reject_b5_session;" #[]
+      | throw (IO.userError "retry failure cleanup")
+    check ((← memberRest "retry-root" patch) == 200) "B5_member_rest_retry"
+    let .ok repaired ← execParamQuery store.projectsDb
+      "SELECT project_scope FROM mcp_sessions_v1 WHERE id='retry-session';" #[]
+      | throw (IO.userError "retry session read")
+    check (repaired[1]![0]! == "alice:destination") "B5_retry_repairs_unchanged_session"
+    for id in #["retry-fork", "retry-deep"] do
+      let row ← snapshot id
+      check (row[6]! == "alice:destination" && row[7]! == "") "B5_nested_worker_fork_closure"
+    let .ok absent ← execParamQuery store.askDb
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='mcp_sessions_v1';" #[]
+      | throw (IO.userError "legacy table lookup")
+    check (absent.size <= 1 && (← memberRest "retry-root" patch) == 200)
+      "B5_missing_legacy_session_table"
+    let .ok _ ← execParamQuery store.askDb
+      "CREATE TABLE mcp_sessions_v1(mission_id TEXT, project_scope TEXT, project_scoped INTEGER);" #[]
+      | throw (IO.userError "legacy session table fixture")
+    let .ok _ ← execParamQuery store.askDb
+      "INSERT INTO mcp_sessions_v1 VALUES('retry-worker','alice:source',1);" #[]
+      | throw (IO.userError "legacy session fixture")
+    let .ok _ ← execParamQuery store.askDb
+      "CREATE TRIGGER reject_b5_legacy BEFORE UPDATE ON mcp_sessions_v1 BEGIN SELECT RAISE(ABORT,'no such table: injected failure in existing table'); END;" #[]
+      | throw (IO.userError "legacy trigger fixture")
+    check ((← memberRest "retry-root" patch) == 500) "B5_existing_legacy_session_error"
+    let .ok _ ← execParamQuery store.askDb "DROP TRIGGER reject_b5_legacy;" #[]
+      | throw (IO.userError "legacy trigger cleanup")
+    check ((← memberRest "retry-root" patch) == 200) "B5_legacy_session_retry"
   finally
     closeCoreStore store
 

@@ -5081,7 +5081,7 @@ def planExpandedMoveFamily
     let effOwner := if !inhOwner.isEmpty then inhOwner else curOwner
     for cand in allRows do
       if !visited.contains cand.id && ownerAllowed cand.ownerUserId effOwner then
-        let isLaunchedChild := cand.parentId == cur && !isForkOfParentRow cand cur
+        let isLaunchedChild := cand.parentId == cur
         let isBtwChild := cand.tags.contains s!"btw-parent:{cur}"
         if isLaunchedChild || isBtwChild then
           visited := visited.push cand.id
@@ -5104,7 +5104,7 @@ def planExpandedMoveFamily
             let effOwner := if !inhOwner.isEmpty then inhOwner else curOwner
             for cand in allRows do
               if !visited.contains cand.id && ownerAllowed cand.ownerUserId effOwner then
-                let isLaunchedChild := cand.parentId == cur && !isForkOfParentRow cand cur
+                let isLaunchedChild := cand.parentId == cur
                 let isBtwChild := cand.tags.contains s!"btw-parent:{cur}"
                 if isLaunchedChild || isBtwChild then
                   visited := visited.push cand.id
@@ -5145,7 +5145,8 @@ def planExpandedMoveFamily
 def batchSetMissionPlacementChecked
     (st : CoreStore)
     (updates : Array CheckedPlacementUpdate)
-    (nowIso : String) : IO (Except (Nat × String) (Array MissionPlacementItem × Array MissionPlacementItem)) := do
+    (nowIso : String)
+    (beforeCommit : IO (Except String Unit) := pure (.ok ())) : IO (Except (Nat × String) (Array MissionPlacementItem × Array MissionPlacementItem)) := do
   let txRes ← withImmediateTx st.missionsDb do
     let mut allItems : Array MissionPlacementItem := Array.mkEmpty updates.size
     let mut changedItems : Array MissionPlacementItem := #[]
@@ -5201,6 +5202,7 @@ def batchSetMissionPlacementChecked
         }
         allItems := allItems.push item
         changedItems := changedItems.push item
+    if let .error e ← beforeCommit then return .error e
     return .ok (allItems, changedItems)
   match txRes with
   | .ok pair => return .ok pair
@@ -5211,20 +5213,35 @@ def batchSetMissionPlacementChecked
 
 /-- Rebind `mcp_sessions_v1.project_scope` and active `project_track_leases` in `projects.db` (and legacy `ask.db`)
     when project-scoped missions move across projects (preserving sticky `project_scoped != 0` confinement even when moved to unassigned `""`). -/
-def rebindMovedMissionMcpSessions (st : CoreStore) (moved : Array MissionPlacementItem) (nowIso : String := "") : IO Unit := do
+def rebindMovedMissionMcpSessionsChecked (st : CoreStore) (moved : Array MissionPlacementItem) (nowIso : String := "") : IO (Except String Unit) := do
   for it in moved do
     let scope := it.project?.getD ""
-    discard <| execParamQuery st.projectsDb
+    let sessionRes ← execParamQuery st.projectsDb
       "UPDATE mcp_sessions_v1 SET project_scope=?2 WHERE mission_id=?1 AND COALESCE(project_scoped,0)<>0;"
       #[it.missionId, scope]
-    discard <| execParamQuery st.projectsDb
+    if let .error e := sessionRes then return .error s!"projects.db MCP session rebind failed: {e}"
+    let leaseRes ← execParamQuery st.projectsDb
       ("UPDATE OR REPLACE project_track_leases SET project_slug=?2, " ++
        "updated_at=CASE WHEN ?3<>'' THEN ?3 ELSE updated_at END " ++
        "WHERE mission_id=?1 AND phase IN ('preparing','active');")
       #[it.missionId, scope, nowIso]
-    discard <| execParamQuery st.askDb
-      "UPDATE mcp_sessions_v1 SET project_scope=?2 WHERE mission_id=?1 AND COALESCE(project_scoped,0)<>0;"
-      #[it.missionId, scope]
+    if let .error e := leaseRes then return .error s!"projects.db track lease rebind failed: {e}"
+    -- New stores keep sessions only in projects.db; legacy ask.db may have none.
+    -- Check the schema explicitly rather than swallowing an UPDATE/trigger error.
+    let .ok legacyTables ← execParamQuery st.askDb
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='mcp_sessions_v1';" #[]
+      | return .error "ask.db session schema lookup failed"
+    if legacyTables.size > 1 then
+      let askRes ← execParamQuery st.askDb
+        "UPDATE mcp_sessions_v1 SET project_scope=?2 WHERE mission_id=?1 AND COALESCE(project_scoped,0)<>0;"
+        #[it.missionId, scope]
+      if let .error e := askRes then
+        return .error s!"ask.db MCP session rebind failed: {e}"
+  return .ok ()
+
+def rebindMovedMissionMcpSessions (st : CoreStore) (moved : Array MissionPlacementItem) (nowIso : String := "") : IO Unit := do
+  if let .error e ← rebindMovedMissionMcpSessionsChecked st moved nowIso then
+    throw (IO.userError e)
 
 /-- Cascade a project directory rename/move (`fromPrefix -> toPrefix`) across `missions.folder` +
     `missions.placement_revision`, preserving `updated_at` and returning changed `MissionPlacementItem`s. -/

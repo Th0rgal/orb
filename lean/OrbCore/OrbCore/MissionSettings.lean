@@ -48,9 +48,9 @@ def resolve (existing : MissionRecord) (patch : JVal) : Except String Settings :
     githubPr? := patch.fieldStr? "github_pr"
   }
 
-def persist (store : CoreStore) (existing : MissionRecord) (settings : Settings)
-    (nowIso : String) : IO (Except String Unit) := do
-  match ← execParamQuery store.missionsDb
+def persistQuery (store : CoreStore) (existing : MissionRecord) (settings : Settings)
+    (nowIso : String) (query : SqliteDb → String → Array String → IO (Except String (Array (Array String)))) : IO (Except String Unit) := do
+  match ← query store.missionsDb
       ("UPDATE missions SET title=?2, backend=?3, model_override=?4, model_effort=?5, " ++
        "session_id=CASE WHEN backend<>?3 THEN NULL ELSE session_id END, " ++
        "resumable=CASE WHEN backend<>?3 THEN 0 ELSE resumable END, " ++
@@ -63,7 +63,15 @@ def persist (store : CoreStore) (existing : MissionRecord) (settings : Settings)
         if settings.shortDescription?.isSome then "1" else "0", settings.shortDescription?.getD "",
         if settings.githubPr?.isSome then "1" else "0", settings.githubPr?.getD ""] with
   | .error e => return .error e
-  | .ok _ => return .ok ()
+   | .ok _ => return .ok ()
+
+def persist (store : CoreStore) (existing : MissionRecord) (settings : Settings)
+    (nowIso : String) : IO (Except String Unit) :=
+  persistQuery store existing settings nowIso execParamQuery
+
+private def persistUnlocked (store : CoreStore) (existing : MissionRecord) (settings : Settings)
+    (nowIso : String) : IO (Except String Unit) :=
+  persistQuery store existing settings nowIso (fun db sql params => execParamQueryUnlocked db sql params)
 
 private def unscopeDisplayProject (userId : String) (isLegacyUnscoped : Bool) (p : String) : String :=
   if !isLegacyUnscoped && !userId.isEmpty && p.startsWith (userId ++ ":") then
@@ -82,10 +90,17 @@ def applyPlacementPatch
     (callerIsLegacyUnscoped : Bool)
     (bootstrapAdminId : String)
     (nowIso : String)
-    (nowEpochSec : UInt64) : IO (Except (Nat × String) (Option String)) := do
+    (nowEpochSec : UInt64)
+    (settings? : Option Settings := none) : IO (Except (Nat × String) (Option String)) := do
+  let saveSettings := match settings? with
+    | some settings => persistUnlocked store existing settings nowIso
+    | none => pure (.ok ())
   let hasProjPatch := (jv.field? "project").isSome || (jv.field? "project_slug").isSome
   let hasFolderPatch := (jv.field? "folder").isSome
   if !hasProjPatch && !hasFolderPatch then
+    if let some settings := settings? then
+      if let .error _ ← persist store existing settings nowIso then
+        return .error (500, "{\"error\":\"mission_settings_update_failed\"}")
     return .ok none
   let rawP ← do
     if !hasProjPatch then
@@ -156,10 +171,10 @@ def applyPlacementPatch
     missionId       := m.missionId
     expectedProject := m.currentProject
     nextProject     := nextProj
-    nextFolder      := if m.missionId == existing.id then nextFolder else m.targetFolder
+    nextFolder      := m.targetFolder
   }
-  let (_, changedMoved) ←
-    match ← batchSetMissionPlacementChecked store updates nowIso with
+  let (allMoved, changedMoved) ←
+    match ← batchSetMissionPlacementChecked store updates nowIso saveSettings with
     | .ok pair => pure pair
     | .error (code, msg) =>
       if let some prevRaw := brokerRawBefore? then
@@ -169,7 +184,8 @@ def applyPlacementPatch
     discard <| execParamQuery store.projectsDb
       "INSERT OR IGNORE INTO project_owners(slug,owner_user_id,created_at) VALUES(?1,?2,?3);"
       #[nextProj, callerUserId, s!"{nowEpochSec}"]
-  rebindMovedMissionMcpSessions store changedMoved nowIso
+  if let .error e ← rebindMovedMissionMcpSessionsChecked store allMoved nowIso then
+    return .error (500, s!"\{\"error\":{jsonEscape e}}")
   let unscopeItem (it : MissionPlacementItem) : MissionPlacementItem :=
     { it with project? := it.project?.map (unscopeDisplayProject callerUserId callerIsLegacyUnscoped) }
   let changedDisplay := changedMoved.map unscopeItem

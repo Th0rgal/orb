@@ -58,9 +58,21 @@ separate and governed by [ORB_MISSION_TRANSFER.md](../ORB_MISSION_TRANSFER.md).
         pending requests; `"keep"` rebinds `paloma_project` on grants and pending
         requests to `to_project`, auto-resolving pending `Read` requests covered
         by `to_project`'s `default_access`).
-     4. Dynamic authorization (`SecretBroker::caller_for` and MCP gateway
-        `authorize_job`) always resolves a mission principal's project from live
-        `MissionStore` state rather than a static creation-time JWT claim.
+      4. Dynamic authorization (`SecretBroker::caller_for` and MCP gateway
+         `authorize_job`) always resolves a mission principal's project from live
+         `MissionStore` state rather than a static creation-time JWT claim.
+
+### Retry and recovery convergence
+
+Every accepted move is a convergent operation keyed by the selected mission and
+destination `(project, folder)`. A retry after a timeout, process restart, or a
+failure while rebinding `projects.db` re-discovers the complete family from
+current `missions.db` rows, reapplies the destination placement and repairs all
+project-scoped MCP sessions and active track leases for every member. A retry is
+successful only after those repairs succeed; it then emits one authoritative
+placement event for the rows whose placement changed. No retry may move a
+descendant back to its source folder or project, and an incomplete repair must
+remain an error rather than being reported as success.
 
 4. **Server-side folder cascade.**
    Renaming or moving a folder via `POST /api/projects/:slug/file/transfer`
