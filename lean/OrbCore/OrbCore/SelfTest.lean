@@ -2364,7 +2364,7 @@ private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let ackRaw := s!"POST /api/managed-machines/relay/respond HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {nodeTok1}\r\nx-orb-machine-id: mm-r5b-1\r\nx-orb-boot-epoch: 1\r\nContent-Length: {ackBody.utf8ByteSize}\r\n\r\n{ackBody}".toUTF8
   let .ok ackReq := parseRequest ackRaw none | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
   let .ok ackResp ← dispatchCoreRequest r5App ackReq 69 | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
-  let opJwt := mintSessionToken prodValid.jwtSecret 3660
+  let opJwt := mintSessionTokenV2 prodValid.jwtSecret "admin" "admin" 1 3660
   let .ok () ← upsertMission r5Store {
     id := "m-owner-1", title := "Managed VM Owner", status := "active",
     backend := "codex", modelOverride := "", workingDirectory := r5Root,
@@ -2511,7 +2511,7 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
     bunkerStateRef? := some bunkerRef
   }
   let nowSec ← coreEpochSec
-  let jwt := mintSessionToken prodValid.jwtSecret (nowSec + 3600)
+  let jwt := mintSessionTokenV2 prodValid.jwtSecret "admin" "admin" 1 (nowSec + 3600)
   let dispatch (raw : String) : IO (Option CoreHttpResponse) := do
     match parseRequest raw.toUTF8 none with
     | .ok req =>
@@ -3578,7 +3578,7 @@ private def runWarmClaudeControlAndCheckpointsCoreTests (prodValid : CoreConfig)
     pendingControlCallsRef? := some pendingRef
   }
   let nowSec ← coreEpochSec
-  let jwt := mintSessionToken prodValid.jwtSecret (nowSec + 3600)
+  let jwt := mintSessionTokenV2 prodValid.jwtSecret "admin" "admin" 1 (nowSec + 3600)
   let dispatch (raw : String) : IO (Option CoreHttpResponse) := do
     match parseRequest raw.toUTF8 none with
     | .ok req =>
@@ -7971,7 +7971,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     return 1
 
   -- Privilege lease verification: unknown lease -> 403; valid stored lease -> 200
-  let validJwt := mintSessionToken prodValid.jwtSecret (nowSec + 3600)
+  let validJwt := mintSessionTokenV2 prodValid.jwtSecret "admin" "admin" 1 (nowSec + 3600)
   let forgedPrivBody := "{\"mission_id\":\"m-alpha\",\"lease_token\":\"forged-lease-000\",\"target_host\":\"ashur\",\"executing_host\":\"ashur\",\"command\":\"systemctl status sandboxed-sh.service\"}"
   let forgedPrivRaw := s!"POST /api/privilege-access/verify-and-log HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {forgedPrivBody.utf8ByteSize}\r\n\r\n{forgedPrivBody}".toUTF8
   let .ok forgedPrivReq := parseRequest forgedPrivRaw none | do closeCoreStore store; return 1
