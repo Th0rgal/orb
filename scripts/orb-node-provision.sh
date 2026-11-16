@@ -53,6 +53,9 @@ elf_header=$(od -An -tx1 -N20 "$node_tmp" | tr -d ' \n')
 [[ ${#elf_header} == 40 && ${elf_header:0:12} == 7f454c460201 && ${elf_header:36:4} == 3e00 ]] ||
   { printf '%s\n' 'bootstrap node is not Linux x86_64 ELF' >&2; exit 1; }
 chmod 0755 "$node_tmp"
+node_bytes=$(wc -c < "$node_tmp")
+node_sha256=$(sha256sum "$node_tmp" | cut -d' ' -f1)
+printf '%s\n' "[orb-node-provision] node path=/opt/orb/bin/sandboxed-node bytes=$node_bytes sha256=$node_sha256"
 mv -f "$node_tmp" /opt/orb/bin/sandboxed-node
 trap - EXIT
 # Fail now, with the reason, rather than leave a unit that restarts until Core's

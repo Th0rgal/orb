@@ -117,13 +117,47 @@ class DeployGateTests(unittest.TestCase):
             root = Path(temp)
             content = "node-build-for-r25\n"
             self._seed_existing_targets(root)
-            result = self._run_staged_deploy(root, node_binary_content=content, dev_only=True)
+            result = self._run_staged_deploy(root, node_binary_content=content)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             expected_hash = hashlib.sha256(content.encode()).hexdigest()
-            self.assertEqual((root / "usr/local/bin/sandboxed-node").read_text(), content)
-            match = re.search(r"sandboxed-node sha256 served=([0-9a-f]+) built=([0-9a-f]+) commit=", result.stdout)
+            self.assertEqual((root / "usr/local/lib/orb/guest/sandboxed-node").read_text(), content)
+            match = re.search(r"sandboxed-node guest sha256 served=([0-9a-f]+) built=([0-9a-f]+) commit=", result.stdout)
             self.assertIsNotNone(match, result.stdout)
             self.assertEqual(match.groups(), (expected_hash, expected_hash))
+
+    def test_plain_deploy_does_not_change_fleet_node_binary(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._seed_existing_targets(root)
+            old = (root / "usr/local/bin/sandboxed-node").read_text()
+            result = self._run_staged_deploy(root, dev_only=False)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((root / "usr/local/bin/sandboxed-node").read_text(), old)
+
+    def test_dev_only_does_not_change_guest_node_binary(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._seed_existing_targets(root)
+            guest = root / "usr/local/lib/orb/guest/sandboxed-node"
+            guest.parent.mkdir(parents=True, exist_ok=True)
+            guest.write_text("old-guest\n")
+            result = self._run_staged_deploy(root, dev_only=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(guest.read_text(), "old-guest\n")
+
+    def test_prod_unhealthy_restores_previous_guest_node_binary(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._seed_existing_targets(root)
+            guest = root / "usr/local/lib/orb/guest/sandboxed-node"
+            guest.parent.mkdir(parents=True, exist_ok=True)
+            guest.write_text("old-guest\n")
+            result = self._run_staged_deploy(root, prod_ok=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(guest.read_text(), "old-guest\n")
 
     def _run_staged_deploy(
         self,
@@ -153,6 +187,7 @@ class DeployGateTests(unittest.TestCase):
         (tree / "catalog/snapshots").mkdir(parents=True, exist_ok=True)
         (tree / "scripts/ops").mkdir(parents=True, exist_ok=True)
         (root / "usr/local/bin").mkdir(parents=True, exist_ok=True)
+        (root / "usr/local/lib/orb/guest").mkdir(parents=True, exist_ok=True)
         (tree / "catalog/providers.json").write_text("{}\n")
         (tree / "scripts/rolling_upgrade_nodes.py").write_text(
             rollout_program or "import sys, json\nprint(json.dumps({'rollout_argv': sys.argv[1:]}))\n"
@@ -346,7 +381,7 @@ with patch.object(r, 'discover_local_core_auth', return_value=('http://fake', 'f
             self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
 
             expected = {
-                "usr/local/bin/sandboxed-node": ("new-sandboxed-node\n", "old-orb-node\n", 0o755),
+                "usr/local/lib/orb/guest/sandboxed-node": ("new-sandboxed-node\n", None, 0o755),
                 "usr/local/sbin/orb-monitor": ("new-orb-monitor\n", "old-orb-monitor\n", 0o755),
                 "usr/local/sbin/orb-sidecar-guard": ("new-orb-sidecar-guard\n", "old-orb-sidecar-guard\n", 0o755),
                 "usr/local/sbin/orb-dev-autodeploy": ("new-orb-dev-autodeploy\n", "old-orb-dev-autodeploy\n", 0o755),
@@ -358,10 +393,15 @@ with patch.object(r, 'discover_local_core_auth', return_value=('http://fake', 'f
                 self.assertEqual(staged.read_text(), new_text)
                 self.assertEqual(stat.S_IMODE(staged.stat().st_mode), mode)
                 backup = Path(f"{staged}.pre-deploy-20261115T120000Z")
-                self.assertTrue(backup.is_file(), f"missing backup {backup}")
-                self.assertEqual(backup.read_text(), old_text)
+                if old_text is not None:
+                    self.assertTrue(backup.is_file(), f"missing backup {backup}")
+                    self.assertEqual(backup.read_text(), old_text)
+                else:
+                    self.assertFalse(backup.exists(), f"unexpected backup {backup}")
                 backups = list(staged.parent.glob(f"{staged.name}.pre-deploy-*"))
-                self.assertEqual(len(backups), 5, f"expected 5 pruned backups for {rel}, got {backups}")
+                expected_backup_count = 5 if old_text is not None else 0
+                self.assertEqual(len(backups), expected_backup_count,
+                                 f"expected {expected_backup_count} pruned backups for {rel}, got {backups}")
 
     def test_plain_deploy_does_not_build_or_stage_node_rollout_artifacts_while_rollout_nodes_does(self):
         import tempfile
