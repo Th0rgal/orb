@@ -6789,6 +6789,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       caller.userId st.bootstrapAdminId (isAdmCaller && !caller.isDevOperator) caller.isLegacyUnscoped nowIsoDisp then
     return .ok { status := pCode, contentType := pCtype, corsOrigin? := reqOrigin?, body := pBody }
 
+  if let some (bCode, bCtype, bBody) ← OrbCore.MissionBoard.dispatchRest
+      st.store.missionsDb st.store.projectsDb req.method cleanPath req.bodySlice.toByteArray
+      { userId := caller.userId } then
+    return .ok { status := bCode, contentType := bCtype, corsOrigin? := reqOrigin?, body := bBody }
+
   let cHubFallback ← match st.cloudHub? with | some h => pure h | none => newCloudRuntimeHub
   if let some (cCode, cCtype, cBody) ← dispatchCloudHttpRoute
       cHubFallback st.store st.broadcastHub? st.cfg.port

@@ -193,6 +193,7 @@ def missionBoardFixtures (root : String) : IO Unit := do
     let sql (db : SqliteDb) (q : String) (args : Array String := #[]) : IO Unit := do
       let .ok _ ← execParamQuery db q args | throw (IO.userError "board fixture SQL")
     let .ok () ← MissionBoard.initSchema store.missionsDb | throw (IO.userError "board schema")
+    sql store.missionsDb "DELETE FROM mission_board_migrations;"
     sql store.missionsDb ("INSERT INTO missions(id,owner_user_id,project,parent_mission_id,tags) VALUES " ++
       "('root','a','orb',NULL,'[]'),('child','a','orb','root','[]')," ++
       "('sibling','a','orb','root','[]'),('foreign','b','evm-fast',NULL,'[]')," ++
@@ -223,9 +224,13 @@ def missionBoardFixtures (root : String) : IO Unit := do
       "Authorization: descendant of another owner's mission through a shared mission denied"
     check ((← MissionBoard.authorizeRead store.missionsDb { childReader with missionId := "btw" } "root").isOk)
       "Authorization: mixed btw/parent lineage at depth two allowed"
-    let write (text time key : String) (fence : Option String := none) :=
-      MissionBoard.write store.missionsDb rootReader "root" text time fence key "fixture-scope" key "write_mission_board"
+    let write (text time key : String) (fence : Option String := none) (interrupt : Bool := false) :=
+      MissionBoard.write store.missionsDb rootReader "root" text time fence key "fixture-scope" key "write_mission_board" interrupt
     check ((← write "new board" "new-time" "w1").isOk) "Concurrency: transactional write succeeds"
+    let oldBoard ← MissionBoard.read store.missionsDb rootReader "root"
+    check (!(← write "rolled back" "rollback-time" "rollback-key" none true).isOk) "Concurrency: failure before commit is reported"
+    check ((← MissionBoard.read store.missionsDb rootReader "root").toOption == oldBoard.toOption) "Concurrency: failed write retains old text and no receipt"
+    check ((← MissionBoard.actionById? store.missionsDb "rollback-key").isNone) "Concurrency: failed write leaves no receipt"
     check ((← MissionBoard.migrate store.missionsDb store.projectsDb "retry").isOk) "Migration: retry completes marker"
     let newer ← MissionBoard.read store.missionsDb rootReader "root"
     check ((newer.toOption.bind (·.fieldStr? "text")) == some "new board") "Event order 5: migration replay preserves newer write"
@@ -234,6 +239,8 @@ def missionBoardFixtures (root : String) : IO Unit := do
     check (!(← write "conflicting" "later" "w2" (some "original")).isOk) "Concurrency: stale base_updated_at rejected"
     check ((← write "new board" "later" "w3").toOption == newer.toOption) "Concurrency: identical rewrite preserves columns"
     check ((← write "different retry" "later" "w1").toOption == newer.toOption) "Concurrency: settled key replay does not write"
+    check ((← MissionBoard.actionById? store.missionsDb "w1").isSome) "Surface: get_action returns board receipt"
+    check ((← MissionBoard.actionByKey? store.missionsDb "fixture-scope" "w1").isSome) "Concurrency: same key replays settled receipt"
     check (!(← write (String.ofList (List.replicate 8193 'é')) "later" "oversized").isOk) "Storage: UTF-8 byte cap rejects whole"
     for (uid, label, status) in #[("a", "owner user refused", 403), ("b", "member of another tenant zero-oracle", 404)] do
       let response ← MissionBoard.dispatchRest store.missionsDb store.projectsDb "PUT" "/api/control/missions/root/board" ByteArray.empty { userId := uid }

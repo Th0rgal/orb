@@ -12,6 +12,9 @@ def schemaSql : String :=
   "updated_at TEXT NOT NULL, updated_by_mission_id TEXT NOT NULL, text_sha256 TEXT NOT NULL DEFAULT '');" ++
   "CREATE INDEX IF NOT EXISTS idx_mission_board_updated ON mission_board(updated_at);" ++
   "CREATE TABLE IF NOT EXISTS mission_board_migrations (name TEXT PRIMARY KEY, completed_at TEXT NOT NULL, detail TEXT NOT NULL);" ++
+  "CREATE TABLE IF NOT EXISTS mission_board_actions (id TEXT PRIMARY KEY, owner TEXT NOT NULL, scope TEXT NOT NULL, " ++
+  "retry_key TEXT NOT NULL, tool TEXT NOT NULL, arguments TEXT NOT NULL DEFAULT '{}', state TEXT NOT NULL, " ++
+  "result TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(scope,retry_key));" ++
   -- Cleanup runs inside the deleting statement's transaction, including legacy delete paths.
   "CREATE TRIGGER IF NOT EXISTS mission_board_delete AFTER DELETE ON missions BEGIN " ++
   "DELETE FROM mission_board WHERE mission_id=OLD.id; END;"
@@ -137,7 +140,8 @@ def refuseUserWrite (db : SqliteDb) (user target : String) : IO String := do
     A missing fence differs from a present empty fence. The caller supplies a unique
     receipt id and authenticated scope; no board contents go to diagnostic output. -/
 def write (db : SqliteDb) (reader : Reader) (target text now : String)
-    (base : Option String) (actionId scope retryKey tool : String) : IO (Except String JVal) := do
+    (base : Option String) (actionId scope retryKey tool : String)
+    (interruptBeforeCommit : Bool := false) : IO (Except String JVal) := do
   -- Tenant denial precedes writer and payload validation, including idempotent replay.
   let .ok owners ← query db "SELECT owner_user_id FROM missions WHERE id=?1;" #[target]
     | return .error "db_error"
@@ -150,7 +154,7 @@ def write (db : SqliteDb) (reader : Reader) (target text now : String)
       | return .error "db_error"
     if live.size ≤ 1 || live[1]![0]?.getD "" != reader.userId then return .error "mission_not_found"
     if !retryKey.isEmpty then
-      let .ok replay ← q "SELECT result FROM mcp_actions_v1 WHERE scope=?1 AND retry_key=?2 AND state='succeeded';" #[scope, retryKey]
+      let .ok replay ← q "SELECT result FROM mission_board_actions WHERE scope=?1 AND retry_key=?2 AND state='succeeded';" #[scope, retryKey]
         | return .error "db_error"
       if replay.size > 1 then
         return OrbBin.Json.parse (replay[1]![0]?.getD "")
@@ -171,12 +175,36 @@ def write (db : SqliteDb) (reader : Reader) (target text now : String)
            "ON CONFLICT(mission_id) DO UPDATE SET text=excluded.text,updated_at=excluded.updated_at," ++
            "updated_by_mission_id=excluded.updated_by_mission_id,text_sha256=excluded.text_sha256;")
           #[target, text, now, digest text] then return .error e
+    if interruptBeforeCommit then return .error "board_write_interrupted_before_commit"
     if let .error e ← q
-        ("INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,tool,arguments,state,result,created_at,updated_at) " ++
+        ("INSERT INTO mission_board_actions(id,owner,scope,retry_key,tool,arguments,state,result,created_at,updated_at) " ++
          "VALUES(?1,?2,?3,?4,?5,'{}','succeeded',?6,?7,?7);")
         #[actionId, target, scope, if retryKey.isEmpty then "auto:" ++ actionId else retryKey,
           tool, renderCompact result, now] then return .error e
     return .ok result
+
+/-- Receipt lookup is called only after the gateway's existing receipt-scope check. -/
+def actionById? (db : SqliteDb) (actionId : String) : IO (Option JVal) := do
+  let .ok rows ← query db "SELECT owner,tool,result FROM mission_board_actions WHERE id=?1;" #[actionId]
+    | return none
+  if rows.size ≤ 1 then return none
+  let r := rows[1]!
+  let some result := (OrbBin.Json.parse (r[2]?.getD "")).toOption | return none
+  return some (result.setField "action_id" (.str actionId)
+    |>.setField "tool_name" (.str (r[1]?.getD ""))
+    |>.setField "target_mission_id" (.str (r[0]?.getD ""))
+    |>.setField "state" (.str "succeeded") |>.setField "status" (.str "completed")
+    |>.setField "accepted" (.str "yes") |>.setField "result" result)
+
+def actionByKey? (db : SqliteDb) (scope retryKey : String) : IO (Option JVal) := do
+  let .ok rows ← query db "SELECT result FROM mission_board_actions WHERE scope=?1 AND retry_key=?2 AND state='succeeded';" #[scope, retryKey]
+    | return none
+  return rows[1]? >>= (·[0]?) >>= fun raw => (OrbBin.Json.parse raw).toOption
+
+def actionScope? (db : SqliteDb) (actionId : String) : IO (Option (String × String)) := do
+  let .ok rows ← query db "SELECT owner,scope FROM mission_board_actions WHERE id=?1;" #[actionId]
+    | return none
+  return rows[1]?.map fun r => (r[0]?.getD "", r[1]?.getD "")
 
 def list (db : SqliteDb) (reader : Reader) (project : String) (all : Bool := false) : IO (Except String JVal) := do
   let .ok rows ← query db
