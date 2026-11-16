@@ -87,6 +87,7 @@ jobs:
             "$GITHUB_WORKSPACE/docs/ui/leanui-parity-reference.sha256")
 
       - name: Run U2 native script under Weston
+        if: ${{ !cancelled() }}
         env:
           FONTCONFIG_FILE: ${{ github.workspace }}/.ci/leanui/fontconfig/fonts.conf
         run: |
@@ -154,5 +155,7 @@ jobs:
             .ci/leanui/u2
             .ci/leanui/weston.log
             .ci/leanui/parity-diff
+            .ci/leanui/ref
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
