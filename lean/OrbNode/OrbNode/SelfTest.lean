@@ -1535,7 +1535,7 @@ private def runManagedSandboxMemberExecTests
     let absExecBody := String.fromUTF8? rAbsExec.body |>.getD ""
     check "managedSandbox=false confines member lease via orb-privd and fails immediately when privd socket is absent"
       (rAbsSub.status == 202 &&
-       absRec?.map (·.execUnixUser) == some "orb-alice" &&
+       absRec?.map (·.execUnixUser) == memberClaims.unixUsername &&
        absRec?.map (·.state) == some .failed &&
        (absErr.splitOn "ensure_mission_user failed: orb-privd connect failed").length > 1 &&
        rAbsExec.status == 503 &&
@@ -1761,6 +1761,7 @@ private def checkSlowProvisioning (check : String → Bool → IO Unit) : IO Uni
       | .error _ => false)
 
 set_option maxRecDepth 2048 in
+set_option maxHeartbeats 400000 in
 def runTests : IO UInt32 := do
   let passedRef ← IO.mkRef (0 : Nat)
   let check (label : String) (cond : Bool) : IO Unit := do
@@ -1937,6 +1938,8 @@ def runTests : IO UInt32 := do
 
   -- Multi-User Phase 2: LeaseClaims v2, ORB_NODE_ADMIN_ONLY=1 defense-in-depth, zero managed_auth leak, and live orb-privd job + file browser
   let nowMu ← OrbNode.Posix.nowEpoch
+  -- Never provision or delete a real operator account named orb-alice.
+  let memberUnix := s!"orb-test-{randN}-{(← getpid)}"
   let memberClaims : LeaseClaims := {
     missionId := "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
     nodeId := rt.cfg.nodeId
@@ -1944,7 +1947,7 @@ def runTests : IO UInt32 := do
     expiresAt := nowMu + 600
     ownerUserId := "usr_alice"
     callerRole := "member"
-    unixUsername := some "orb-alice"
+    unixUsername := some memberUnix
   }
   let memberTok := signLeaseToken rt.cfg.token memberClaims
   let verifiedMember := verifyLeaseToken memberTok rt.cfg.token none rt.cfg.nodeId .jobSubmit nowMu none
@@ -2050,6 +2053,10 @@ def runTests : IO UInt32 := do
     unsetenvVar "ORB_PRIVD_ALLOW_NONROOT_TEST"
     unsetenvVar "ORB_PRIVD_HOME_ROOT"
     unsetenvVar "ORB_PRIVD_STATE_DIR"
+    if (← geteuid) == 0 then
+      let removed ← IO.Process.output { cmd := "/usr/sbin/userdel", args := #[memberUnix] }
+      if removed.exitCode != 0 then
+        throw (IO.userError s!"self-test user cleanup failed: {removed.stderr}")
   let runMuInner : IO Unit := do
     let mut rtMu : NodeRuntime := {
       rt with
@@ -2124,12 +2131,12 @@ def runTests : IO UInt32 := do
        muFinished &&
        muRec?.map (·.state) == some .succeeded &&
        muRec?.map (·.ownerUserId) == some "usr_alice" &&
-       muRec?.map (·.execUnixUser) == some "orb-alice" &&
+       muRec?.map (·.execUnixUser) == some memberUnix &&
        muRec?.map (fun r => r.artifacts.size) == some 1 &&
        rMuFiles.status == 200 &&
        outTxt.trimAscii.toString == "KEY=orb-mpt-v1_scoped_alice|NODE=|CRED=0" &&
        rMuExec.status == 200 &&
-       (execOut.splitOn "/orb-alice/.orb-missions/").length > 1)
+       (execOut.splitOn s!"/{memberUnix}/.orb-missions/").length > 1)
   try
     runMuInner
     cleanupMuPrivd

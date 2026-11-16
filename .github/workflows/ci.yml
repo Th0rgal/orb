@@ -123,6 +123,8 @@ jobs:
             sudo journalctl --no-pager -u orb-job-eeeeeeeeeeee4eee8eeeeeeeeeeeee99.service -n 40
             exit 1
           }
+          # A second invocation catches fixture account/home state left by the first.
+          sudo --preserve-env=PATH ./lean/OrbNode/.lake/build/bin/orb-node-test
           (cd lean/OrbClient && "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" build orb-client-test && ./.lake/build/bin/orb-client-test)
           (cd lean/OrbCore && "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" build orb-core-test orb-spec-runner)
           ./lean/OrbCore/.lake/build/bin/orb-core-test
