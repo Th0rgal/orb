@@ -207,7 +207,7 @@ struct OrbMissionBoardView: View {
                     guard OrbMissionBoardProjection.accepts(raw, missionID: missionID, project: project, expectedRevision: expectedRevision, currentProject: current?.project ?? project, currentRevision: current?.revision ?? expectedRevision) else { return }
                     text = raw["text"].text; updatedAt = raw["updated_at"].text
                 } catch let failure as OrbHTTPError where failure.status == 404 { text = "" }
-                catch { self.error = error.localizedDescription }
+                catch let failure { self.error = failure.localizedDescription }
             }
         }
     }
@@ -251,7 +251,7 @@ struct OrbMissionBoardsSection: View {
     private func loadBoards() async {
         do { boards = OrbMissionBoardProjection.summaries(try await api.call("/api/projects/\(OrbCore.escape(project.id))/boards"), currentMissionIDs: Set(missions.filter { $0.project == project.id }.map(\.id))) }
         catch let failure as OrbHTTPError where failure.status == 404 { boards = [] }
-        catch { error = error.localizedDescription }
+        catch let failure { self.error = failure.localizedDescription }
     }
 }
 
