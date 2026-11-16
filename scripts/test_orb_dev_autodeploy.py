@@ -1,6 +1,7 @@
 """Exercise real decisions/arguments without a network, systemd or deployments."""
 import importlib.machinery
 import importlib.util
+import hashlib
 import subprocess
 from pathlib import Path
 import unittest
@@ -91,6 +92,101 @@ class DeployGateTests(unittest.TestCase):
                                             env={**env, "SYNTHETIC_HEALTH": health}, capture_output=True)
                     self.assertEqual(result.returncode, expected)
 
+    def test_missing_node_binary_fails_before_install_or_systemctl(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            result = self._run_staged_deploy(Path(temp), include_node_binary=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("required built binary missing or empty", result.stdout)
+            self.assertNotIn("+ install ", result.stderr)
+            self.assertNotIn("+ systemctl ", result.stderr)
+
+    def test_empty_node_binary_fails_before_install_or_systemctl(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            result = self._run_staged_deploy(Path(temp), node_binary_content="")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("required built binary missing or empty", result.stdout)
+            self.assertNotIn("+ install ", result.stderr)
+            self.assertNotIn("+ systemctl ", result.stderr)
+
+    def test_plain_deploy_installs_node_and_logs_full_matching_hash(self):
+        import re
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            content = "node-build-for-r25\n"
+            self._seed_existing_targets(root)
+            result = self._run_staged_deploy(root, node_binary_content=content)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            expected_hash = hashlib.sha256(content.encode()).hexdigest()
+            self.assertEqual((root / "usr/local/lib/orb/guest/sandboxed-node").read_text(), content)
+            match = re.search(r"sandboxed-node guest sha256 served=([0-9a-f]+) built=([0-9a-f]+) commit=", result.stdout)
+            self.assertIsNotNone(match, result.stdout)
+            self.assertEqual(match.groups(), (expected_hash, expected_hash))
+
+    def test_plain_deploy_does_not_change_fleet_node_binary(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._seed_existing_targets(root)
+            old = (root / "usr/local/bin/sandboxed-node").read_text()
+            result = self._run_staged_deploy(root, dev_only=False)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((root / "usr/local/bin/sandboxed-node").read_text(), old)
+
+    def test_dev_only_does_not_change_guest_node_binary(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._seed_existing_targets(root)
+            guest = root / "usr/local/lib/orb/guest/sandboxed-node"
+            guest.parent.mkdir(parents=True, exist_ok=True)
+            guest.write_text("old-guest\n")
+            result = self._run_staged_deploy(root, dev_only=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(guest.read_text(), "old-guest\n")
+
+    def test_prod_unhealthy_restores_previous_guest_node_binary(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._seed_existing_targets(root)
+            guest = root / "usr/local/lib/orb/guest/sandboxed-node"
+            guest.parent.mkdir(parents=True, exist_ok=True)
+            guest.write_text("old-guest\n")
+            result = self._run_staged_deploy(root, prod_ok=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(guest.read_text(), "old-guest\n")
+
+    def test_plain_post_install_failure_restores_core_and_guest_state(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._seed_existing_targets(root)
+            guest = root / "usr/local/lib/orb/guest/sandboxed-node"
+            guest.parent.mkdir(parents=True, exist_ok=True)
+            guest.write_text("old-guest\n")
+            result = self._run_staged_deploy(root, fail_command="restart sandboxed-sh-prod")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((root / "usr/local/bin/orb-core").read_text(), "old-orb-core\n")
+            self.assertEqual(guest.read_text(), "old-guest\n")
+            self.assertEqual((root / "usr/local/lib/orb/orb-node-provision.sh").read_text(), "old-provision\n")
+
+    def test_plain_rollback_failure_is_propagated(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._seed_existing_targets(root)
+            guest = root / "usr/local/lib/orb/guest/sandboxed-node"
+            guest.parent.mkdir(parents=True, exist_ok=True)
+            guest.write_text("old-guest\n")
+            result = self._run_staged_deploy(
+                root, fail_command="restart sandboxed-sh-prod", fail_restore=True
+            )
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("ROLLBACK FAILED", result.stdout)
+
     def _run_staged_deploy(
         self,
         root: Path,
@@ -99,8 +195,11 @@ class DeployGateTests(unittest.TestCase):
         dev_only: bool = False,
         rollout_nodes: bool = False,
         fail_command: str = "",
+        fail_restore: bool = False,
         script_text=None,
         rollout_program=None,
+        node_binary_content="new-sandboxed-node\n",
+        include_node_binary=True,
     ):
         import os
         script = script_text or (Path(__file__).parent / "ops/orb-deploy").read_text()
@@ -116,6 +215,8 @@ class DeployGateTests(unittest.TestCase):
         (tree / "lean/OrbBin/.lake/build/bin").mkdir(parents=True, exist_ok=True)
         (tree / "catalog/snapshots").mkdir(parents=True, exist_ok=True)
         (tree / "scripts/ops").mkdir(parents=True, exist_ok=True)
+        (root / "usr/local/bin").mkdir(parents=True, exist_ok=True)
+        (root / "usr/local/lib/orb/guest").mkdir(parents=True, exist_ok=True)
         (tree / "catalog/providers.json").write_text("{}\n")
         (tree / "scripts/rolling_upgrade_nodes.py").write_text(
             rollout_program or "import sys, json\nprint(json.dumps({'rollout_argv': sys.argv[1:]}))\n"
@@ -123,7 +224,7 @@ class DeployGateTests(unittest.TestCase):
         for rel, content in {
             "lean/OrbCore/.lake/build/bin/orb-core": "new-orb-core\n",
             "lean/OrbCore/.lake/build/bin/orb-core-test": "#!/bin/sh\necho ok\n",
-            "lean/OrbNode/.lake/build/bin/orb-node": "new-orb-node\n",
+            "lean/OrbNode/.lake/build/bin/sandboxed-node": node_binary_content,
             "lean/OrbNode/.lake/build/bin/orb-node-test": "#!/bin/sh\necho ok\n",
             "lean/OrbBin/.lake/build/bin/sandboxed-mcp": "new-sandboxed-mcp\n",
             "lean/OrbBin/.lake/build/bin/orb-privd": "new-orb-privd\n",
@@ -134,6 +235,8 @@ class DeployGateTests(unittest.TestCase):
             "scripts/ops/orb-env": "new-orb-env\n",
             "scripts/ops/env-migration.json": '{"new": true}\n',
         }.items():
+            if rel.endswith("/sandboxed-node") and not include_node_binary:
+                continue
             target = tree / rel
             target.write_text(content)
             if "test" in rel:
@@ -161,6 +264,14 @@ class DeployGateTests(unittest.TestCase):
                 "esac\n"
             ),
         }
+        if fail_restore:
+            stubs["cp"] = (
+                "#!/bin/sh\n"
+                "case \"$3\" in\n"
+                "  *.restoring) exit 73 ;;\n"
+                "  *) exec /bin/cp \"$@\" ;;\n"
+                "esac\n"
+            )
         for name, body in stubs.items():
             p = bin_dir / name
             p.write_text(body)
@@ -218,7 +329,7 @@ with patch.object(r, 'discover_local_core_auth', return_value=('http://fake', 'f
     def test_plain_deploy_executed_commands_match_master(self):
         import tempfile
         import re
-        baseline = subprocess.run(["git", "show", "origin/master:scripts/ops/orb-deploy"], capture_output=True, text=True)
+        baseline = subprocess.run(["git", "show", "HEAD^:scripts/ops/orb-deploy"], capture_output=True, text=True)
         if baseline.returncode:
             self.skipTest("parity requires origin/master; run in a full checkout")
         master = baseline.stdout
@@ -236,8 +347,14 @@ with patch.object(r, 'discover_local_core_auth', return_value=('http://fake', 'f
                     line = re.sub(r'^\++ ', '', line).replace(temp, '<ROOT>')
                     if re.match(r'^(git |lake |install |cp |mv |rm |systemctl |curl |python3 |flock |mkdir |ls |tail |xargs |sha256sum )', line):
                         commands.append(line)
-                traces.append(sorted(commands))
-        self.assertEqual(traces[0], traces[1])
+                traces.append(commands)
+        baseline_trace, current_trace = traces
+        self.assertEqual(
+            [line.replace("/bin/orb-node", "/bin/sandboxed-node") for line in baseline_trace
+             if "required built binary" not in line],
+            [line for line in current_trace
+             if "required built binary" not in line and "sandboxed-node sha256" not in line],
+        )
 
     def _seed_existing_targets(self, root: Path):
         targets = {
@@ -301,7 +418,7 @@ with patch.object(r, 'discover_local_core_auth', return_value=('http://fake', 'f
             self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
 
             expected = {
-                "usr/local/bin/sandboxed-node": ("new-orb-node\n", "old-orb-node\n", 0o755),
+                "usr/local/lib/orb/guest/sandboxed-node": ("new-sandboxed-node\n", None, 0o755),
                 "usr/local/sbin/orb-monitor": ("new-orb-monitor\n", "old-orb-monitor\n", 0o755),
                 "usr/local/sbin/orb-sidecar-guard": ("new-orb-sidecar-guard\n", "old-orb-sidecar-guard\n", 0o755),
                 "usr/local/sbin/orb-dev-autodeploy": ("new-orb-dev-autodeploy\n", "old-orb-dev-autodeploy\n", 0o755),
@@ -313,10 +430,15 @@ with patch.object(r, 'discover_local_core_auth', return_value=('http://fake', 'f
                 self.assertEqual(staged.read_text(), new_text)
                 self.assertEqual(stat.S_IMODE(staged.stat().st_mode), mode)
                 backup = Path(f"{staged}.pre-deploy-20261115T120000Z")
-                self.assertTrue(backup.is_file(), f"missing backup {backup}")
-                self.assertEqual(backup.read_text(), old_text)
+                if old_text is not None:
+                    self.assertTrue(backup.is_file(), f"missing backup {backup}")
+                    self.assertEqual(backup.read_text(), old_text)
+                else:
+                    self.assertFalse(backup.exists(), f"unexpected backup {backup}")
                 backups = list(staged.parent.glob(f"{staged.name}.pre-deploy-*"))
-                self.assertEqual(len(backups), 5, f"expected 5 pruned backups for {rel}, got {backups}")
+                expected_backup_count = 5 if old_text is not None else 0
+                self.assertEqual(len(backups), expected_backup_count,
+                                 f"expected {expected_backup_count} pruned backups for {rel}, got {backups}")
 
     def test_plain_deploy_does_not_build_or_stage_node_rollout_artifacts_while_rollout_nodes_does(self):
         import tempfile
@@ -342,7 +464,7 @@ with patch.object(r, 'discover_local_core_auth', return_value=('http://fake', 'f
             self.assertEqual((root / "usr/local/bin/sandboxed-mcp").read_text(), "new-sandboxed-mcp\n")
             self.assertEqual((root / "usr/local/sbin/orb-privd").read_text(), "new-orb-privd\n")
             rel_bin = root / f"usr/local/share/orb/releases/{SHA}/bin"
-            self.assertEqual((rel_bin / "sandboxed-node").read_text(), "new-orb-node\n")
+            self.assertEqual((rel_bin / "sandboxed-node").read_text(), "new-sandboxed-node\n")
             self.assertEqual((rel_bin / "sandboxed-mcp").read_text(), "new-sandboxed-mcp\n")
             self.assertEqual((rel_bin / "orb-privd").read_text(), "new-orb-privd\n")
 
@@ -423,7 +545,7 @@ with patch.object(r, 'discover_local_core_auth', return_value=('http://fake', 'f
             for rel, content in {
                 "lean/OrbCore/.lake/build/bin/orb-core": "new-orb-core\n",
                 "lean/OrbCore/.lake/build/bin/orb-core-test": "#!/bin/sh\necho ok\n",
-                "lean/OrbNode/.lake/build/bin/orb-node": "new-orb-node\n",
+                "lean/OrbNode/.lake/build/bin/sandboxed-node": "new-sandboxed-node\n",
                 "lean/OrbNode/.lake/build/bin/orb-node-test": "#!/bin/sh\necho ok\n",
                 "lean/OrbBin/.lake/build/bin/sandboxed-mcp": "new-sandboxed-mcp\n",
                 "lean/OrbBin/.lake/build/bin/orb-privd": "new-orb-privd\n",
@@ -508,7 +630,7 @@ with patch.object(r, 'discover_local_core_auth', return_value=('http://fake', 'f
             for rel, content in {
                 "lean/OrbCore/.lake/build/bin/orb-core": "new-orb-core\n",
                 "lean/OrbCore/.lake/build/bin/orb-core-test": "#!/bin/sh\necho ok\n",
-                "lean/OrbNode/.lake/build/bin/orb-node": "new-orb-node\n",
+                "lean/OrbNode/.lake/build/bin/sandboxed-node": "new-sandboxed-node\n",
                 "lean/OrbNode/.lake/build/bin/orb-node-test": "#!/bin/sh\necho ok\n",
                 "lean/OrbBin/.lake/build/bin/sandboxed-mcp": "new-sandboxed-mcp\n",
                 "lean/OrbBin/.lake/build/bin/orb-privd": "new-orb-privd\n",
@@ -590,7 +712,7 @@ with patch.object(r, 'discover_local_core_auth', return_value=('http://fake', 'f
             for rel, content in {
                 "lean/OrbCore/.lake/build/bin/orb-core": "new-orb-core\n",
                 "lean/OrbCore/.lake/build/bin/orb-core-test": "#!/bin/sh\necho ok\n",
-                "lean/OrbNode/.lake/build/bin/orb-node": "new-orb-node\n",
+                "lean/OrbNode/.lake/build/bin/sandboxed-node": "new-sandboxed-node\n",
                 "lean/OrbNode/.lake/build/bin/orb-node-test": "#!/bin/sh\necho ok\n",
                 "scripts/orb-node-provision.sh": "new-provision\n",
                 "scripts/ops/orb-monitor": "new-orb-monitor\n",
@@ -636,8 +758,8 @@ with patch.object(r, 'discover_local_core_auth', return_value=('http://fake', 'f
             self.assertNotEqual(res.returncode, 0)
             # Stale $CATALOG.new was NOT rm -rf'd before cp -a on the plain path:
             self.assertTrue((root / f"usr/local/share/orb/releases/{SHA}/catalog/catalog/marker").is_file())
-            # No EXIT trap ran on the plain path (exact master parity):
-            self.assertEqual((root / "usr/local/lib/orb/orb-node-provision.sh").read_text(), "new-provision\n")
+            # Plain-path EXIT rollback restores staged files after the failed dev restart.
+            self.assertEqual((root / "usr/local/lib/orb/orb-node-provision.sh").read_text(), "old-provision\n")
             self.assertEqual((root / "usr/local/bin/sandboxed-mcp").read_text(), targets["usr/local/bin/sandboxed-mcp"][0])
             self.assertEqual((root / "usr/local/sbin/orb-privd").read_text(), targets["usr/local/sbin/orb-privd"][0])
             self.assertFalse((root / f"usr/local/share/orb/releases/{SHA}/bin").exists())

@@ -13,6 +13,7 @@ set -euo pipefail
 
 TREE="${ORB_DEPLOY_TREE:-/var/tmp/orbcore-lean-build}"
 LOG="${ORB_DEPLOY_LOG:-/var/log/orb-deploy.log}"
+GUEST_NODE="/usr/local/lib/orb/guest/sandboxed-node"
 
 DETACH=0
 if [[ "${1:-}" == "--detach" ]]; then DETACH=1; shift; fi
@@ -119,10 +120,24 @@ say "self-test"
 ./lean/OrbCore/.lake/build/bin/orb-core-test | tail -1
 ./lean/OrbNode/.lake/build/bin/orb-node-test | tail -1
 BIN="$TREE/lean/OrbCore/.lake/build/bin/orb-core"
-NODE_BIN="$TREE/lean/OrbNode/.lake/build/bin/orb-node"
+NODE_BIN="$TREE/lean/OrbNode/.lake/build/bin/sandboxed-node"
 if [[ $ROLLOUT_NODES == 1 ]]; then
   MCP_BIN="$TREE/lean/OrbBin/.lake/build/bin/sandboxed-mcp"
   PRIVD_BIN="$TREE/lean/OrbBin/.lake/build/bin/orb-privd"
+fi
+require_nonempty_file() {
+  if [[ ! -s "$1" ]]; then
+    say "required built binary missing or empty: $1"
+    exit 1
+  fi
+}
+require_nonempty_file "$BIN"
+require_nonempty_file "$NODE_BIN"
+if [[ $ROLLOUT_NODES == 1 ]]; then
+  require_nonempty_file "$MCP_BIN"
+  require_nonempty_file "$PRIVD_BIN"
+fi
+if [[ $ROLLOUT_NODES == 1 ]]; then
   say "binary $(sha256sum "$BIN" | cut -c1-12) node $(sha256sum "$NODE_BIN" | cut -c1-12) mcp $(sha256sum "$MCP_BIN" | cut -c1-12) privd $(sha256sum "$PRIVD_BIN" | cut -c1-12)"
 else
   say "binary $(sha256sum "$BIN" | cut -c1-12) node $(sha256sum "$NODE_BIN" | cut -c1-12)"
@@ -180,6 +195,7 @@ PY
   for dst in /usr/local/bin/{orb-core,orb-core-dev,sandboxed-node,sandboxed-mcp} \
       /usr/local/sbin/{orb-privd,orb-monitor,orb-sidecar-guard,orb-dev-autodeploy} \
       /usr/local/lib/orb/orb-node-provision.sh /usr/local/libexec/{orb-env,env-migration.json} \
+      "$GUEST_NODE" \
       /etc/systemd/system/sandboxed-sh-{dev,prod}.service.d/{30-build,31-catalog}.conf \
       "/usr/local/share/orb/releases/$SHA/bin"; do
     if [[ -e "$dst" || -L "$dst" ]]; then
@@ -229,14 +245,14 @@ fi
 set_catalog sandboxed-sh-dev "$CATALOG"
 set_build sandboxed-sh-dev "$SHA"; systemctl daemon-reload
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
-install -d -m 755 /usr/local/lib/orb /usr/local/sbin /usr/local/libexec
+install -d -m 755 /usr/local/lib/orb /usr/local/lib/orb/guest /usr/local/sbin /usr/local/libexec
 PROVISION_BACKUP=""
 if [[ -f /usr/local/lib/orb/orb-node-provision.sh ]]; then
   PROVISION_BACKUP="/usr/local/lib/orb/orb-node-provision.sh.pre-deploy-$TS"
   cp -p /usr/local/lib/orb/orb-node-provision.sh "$PROVISION_BACKUP"
 fi
 NODE_BACKUP=""
-if [[ -f /usr/local/bin/sandboxed-node ]]; then
+if [[ $ROLLOUT_NODES == 1 && -f /usr/local/bin/sandboxed-node ]]; then
   NODE_BACKUP="/usr/local/bin/sandboxed-node.pre-deploy-$TS"
   cp -p /usr/local/bin/sandboxed-node "$NODE_BACKUP"
 fi
@@ -251,6 +267,11 @@ if [[ $ROLLOUT_NODES == 1 ]]; then
     PRIVD_BACKUP="/usr/local/sbin/orb-privd.pre-deploy-$TS"
     cp -p /usr/local/sbin/orb-privd "$PRIVD_BACKUP"
   fi
+fi
+GUEST_NODE_BACKUP=""
+if [[ -f "$GUEST_NODE" ]]; then
+  GUEST_NODE_BACKUP="$GUEST_NODE.pre-deploy-$TS"
+  cp -p "$GUEST_NODE" "$GUEST_NODE_BACKUP"
 fi
 OPS_TARGETS=(
   "/usr/local/sbin/orb-monitor:755:$TREE/scripts/ops/orb-monitor"
@@ -267,12 +288,16 @@ for spec in "${OPS_TARGETS[@]}"; do
 done
 STAGE_COMMITTED=0
 restore_backed_up_file() {
-  local backup="$1" dst="$2"
-  rm -f "$dst.new"
+  local backup="$1" dst="$2" remove_if_missing="${3:-0}"
+  if ! rm -f "$dst.new"; then return 1; fi
   if [[ -n "$backup" && -f "$backup" ]]; then
-    cp -p "$backup" "$dst.restoring" && mv "$dst.restoring" "$dst"
-    cmp -s "$backup" "$dst"
+    if ! cp -p "$backup" "$dst.restoring"; then return 1; fi
+    if ! mv "$dst.restoring" "$dst"; then return 1; fi
+    if ! cmp -s "$backup" "$dst"; then return 1; fi
+  elif [[ "$remove_if_missing" == 1 ]]; then
+    if ! rm -f "$dst"; then return 1; fi
   fi
+  return 0
 }
 rollback_staged_files() {
   if [[ $ROLLOUT_NODES == 1 ]]; then
@@ -281,20 +306,52 @@ rollback_staged_files() {
     restore_backed_up_file "$NODE_BACKUP" /usr/local/bin/sandboxed-node || rc=1
     restore_backed_up_file "$MCP_BACKUP" /usr/local/bin/sandboxed-mcp || rc=1
     restore_backed_up_file "$PRIVD_BACKUP" /usr/local/sbin/orb-privd || rc=1
+    restore_backed_up_file "$GUEST_NODE_BACKUP" "$GUEST_NODE" 1 || rc=1
     for spec in "${OPS_TARGETS[@]}"; do
       IFS=: read -r dst _ _ <<< "$spec"
       restore_backed_up_file "$dst.pre-deploy-$TS" "$dst" || rc=1
     done
     return "$rc"
   fi
-  [[ -n "$PROVISION_BACKUP" && -f "$PROVISION_BACKUP" ]] && cp -p "$PROVISION_BACKUP" /usr/local/lib/orb/orb-node-provision.sh
-  [[ -n "$NODE_BACKUP" && -f "$NODE_BACKUP" ]] && cp -p "$NODE_BACKUP" /usr/local/bin/sandboxed-node
+  local rc=0
+  restore_backed_up_file "$PROVISION_BACKUP" /usr/local/lib/orb/orb-node-provision.sh || rc=1
+  restore_backed_up_file "$NODE_BACKUP" /usr/local/bin/sandboxed-node || rc=1
+  restore_backed_up_file "$GUEST_NODE_BACKUP" "$GUEST_NODE" 1 || rc=1
   for spec in "${OPS_TARGETS[@]}"; do
     IFS=: read -r dst _ _ <<< "$spec"
-    [[ -f "$dst.pre-deploy-$TS" ]] && cp -p "$dst.pre-deploy-$TS" "$dst"
+    restore_backed_up_file "$dst.pre-deploy-$TS" "$dst" || rc=1
   done
-  return 0
+  return "$rc"
 }
+if [[ $ROLLOUT_NODES != 1 ]]; then
+  PLAIN_PROD_TOUCHED=0
+  plain_deploy_exit() {
+    local rc=$? failed=0
+    trap - EXIT
+    if [[ $STAGE_COMMITTED == 0 ]]; then
+      if [[ -n "${BACKUP:-}" ]]; then
+        restore_backed_up_file "$BACKUP" /usr/local/bin/orb-core || failed=1
+      fi
+      if [[ -n "${OLD_CATALOG:-}" ]]; then
+        set_catalog sandboxed-sh-prod "$OLD_CATALOG" || failed=1
+      elif [[ -n "${CATALOG_CONF:-}" ]]; then
+        rm -f "$CATALOG_CONF" || failed=1
+      fi
+      rollback_staged_files || failed=1
+      if [[ $PLAIN_PROD_TOUCHED == 1 ]]; then
+        set_build sandboxed-sh-prod "${OLD_SHA:-unknown}" || failed=1
+        systemctl daemon-reload || failed=1
+        systemctl restart sandboxed-sh-prod || failed=1
+      fi
+      if [[ $failed == 1 ]]; then
+        say "ROLLBACK FAILED; recovery backups retained"
+        exit 1
+      fi
+    fi
+    exit "$rc"
+  }
+  trap plain_deploy_exit EXIT
+fi
 if [[ $ROLLOUT_NODES == 1 ]]; then
   install -m 644 "$TREE/scripts/orb-node-provision.sh" /usr/local/lib/orb/orb-node-provision.sh.new
   mv /usr/local/lib/orb/orb-node-provision.sh.new /usr/local/lib/orb/orb-node-provision.sh
@@ -312,19 +369,25 @@ if [[ $ROLLOUT_NODES == 1 ]]; then
   install -m 755 "$BIN" /usr/local/bin/orb-core-dev.new
   mv /usr/local/bin/orb-core-dev.new /usr/local/bin/orb-core-dev
 else
-  install -m 644 "$TREE/scripts/orb-node-provision.sh" /usr/local/lib/orb/orb-node-provision.sh.new && mv /usr/local/lib/orb/orb-node-provision.sh.new /usr/local/lib/orb/orb-node-provision.sh
-  install -m 755 "$NODE_BIN" /usr/local/bin/sandboxed-node.new && mv /usr/local/bin/sandboxed-node.new /usr/local/bin/sandboxed-node
+  install -m 644 "$TREE/scripts/orb-node-provision.sh" /usr/local/lib/orb/orb-node-provision.sh.new
+  mv /usr/local/lib/orb/orb-node-provision.sh.new /usr/local/lib/orb/orb-node-provision.sh
   for spec in "${OPS_TARGETS[@]}"; do
     IFS=: read -r dst mode src <<< "$spec"
-    install -m "$mode" "$src" "$dst.new" && mv "$dst.new" "$dst"
+    install -m "$mode" "$src" "$dst.new"
+    mv "$dst.new" "$dst"
   done
-  install -m 755 "$BIN" /usr/local/bin/orb-core-dev.new && mv /usr/local/bin/orb-core-dev.new /usr/local/bin/orb-core-dev
+  install -m 755 "$BIN" /usr/local/bin/orb-core-dev.new
+  mv /usr/local/bin/orb-core-dev.new /usr/local/bin/orb-core-dev
 fi
 if [[ $ROLLOUT_NODES == 1 ]]; then DEV_TOUCHED=1; fi
 systemctl restart sandboxed-sh-dev
 if ! healthy 3002 30 "$SHA"; then
   if [[ $ROLLOUT_NODES == 1 ]]; then rollback_release_bin_dir || true; fi
-  rollback_staged_files
+  trap - EXIT
+  if ! rollback_staged_files; then
+    say "ROLLBACK FAILED; recovery backups retained"
+    exit 1
+  fi
   STAGE_COMMITTED=1
   say "dev unhealthy; prod untouched"
   exit 1
@@ -337,32 +400,59 @@ OLD_SHA="$(sed -n 's/^Environment=ORB_BUILD_SHA=//p' /etc/systemd/system/sandbox
 CATALOG_CONF=/etc/systemd/system/sandboxed-sh-prod.service.d/31-catalog.conf
 OLD_CATALOG="$(sed -n 's/^Environment=SANDBOXED_CATALOG_DIR=//p' "$CATALOG_CONF" 2>/dev/null || true)"
 cp -p /usr/local/bin/orb-core "$BACKUP"
+PLAIN_PROD_TOUCHED=1
 set_catalog sandboxed-sh-prod "$CATALOG"
 set_build sandboxed-sh-prod "$SHA"; systemctl daemon-reload
 install -m 755 "$BIN" /usr/local/bin/orb-core.new && mv /usr/local/bin/orb-core.new /usr/local/bin/orb-core
+install -m 755 "$NODE_BIN" "$GUEST_NODE.new"
+mv "$GUEST_NODE.new" "$GUEST_NODE"
+GUEST_NODE_BUILD_SHA256="$(sha256sum "$NODE_BIN" | cut -d' ' -f1)"
+GUEST_NODE_SERVED_SHA256="$(sha256sum "$GUEST_NODE" | cut -d' ' -f1)"
+say "sandboxed-node guest sha256 served=$GUEST_NODE_SERVED_SHA256 built=$GUEST_NODE_BUILD_SHA256 commit=$SHA"
+if [[ "$GUEST_NODE_SERVED_SHA256" != "$GUEST_NODE_BUILD_SHA256" ]]; then
+  say "sandboxed-node guest checksum mismatch"
+  exit 1
+fi
+if [[ $ROLLOUT_NODES == 1 ]]; then
+  NODE_SERVED_SHA256="$(sha256sum /usr/local/bin/sandboxed-node | cut -d' ' -f1)"
+  say "sandboxed-node fleet sha256 served=$NODE_SERVED_SHA256 built=$GUEST_NODE_BUILD_SHA256 commit=$SHA"
+  if [[ "$NODE_SERVED_SHA256" != "$GUEST_NODE_BUILD_SHA256" ]]; then
+    say "sandboxed-node fleet checksum mismatch"
+    exit 1
+  fi
+fi
 if [[ $ROLLOUT_NODES == 1 ]]; then PROD_TOUCHED=1; fi
 systemctl restart sandboxed-sh-prod
 if ! healthy 3000 60 "$SHA"; then
+  trap - EXIT
+  rollback_failed=0
   say "prod unhealthy; rolling back to $BACKUP"
-  cp -p "$BACKUP" /usr/local/bin/orb-core
-  if [[ -n "$OLD_CATALOG" ]]; then set_catalog sandboxed-sh-prod "$OLD_CATALOG"; else rm -f "$CATALOG_CONF"; fi
+  restore_backed_up_file "$BACKUP" /usr/local/bin/orb-core || rollback_failed=1
+  if [[ -n "$OLD_CATALOG" ]]; then set_catalog sandboxed-sh-prod "$OLD_CATALOG" || rollback_failed=1; else rm -f "$CATALOG_CONF" || rollback_failed=1; fi
   if [[ $ROLLOUT_NODES == 1 ]]; then rollback_release_bin_dir || true; fi
-  rollback_staged_files
+  rollback_staged_files || rollback_failed=1
   STAGE_COMMITTED=1
-  set_build sandboxed-sh-prod "${OLD_SHA:-unknown}"; systemctl daemon-reload
-  systemctl restart sandboxed-sh-prod
+  set_build sandboxed-sh-prod "${OLD_SHA:-unknown}" || rollback_failed=1
+  systemctl daemon-reload || rollback_failed=1
+  systemctl restart sandboxed-sh-prod || rollback_failed=1
+  if [[ $rollback_failed == 1 ]]; then
+    say "ROLLBACK FAILED; recovery backups retained"
+  fi
   exit 1
 fi
 STAGE_COMMITTED=1
 say "prod healthy on $SHA (backup $BACKUP)"
 # keep the five most recent backups
 ls -1t /usr/local/bin/orb-core.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
-ls -1t /usr/local/bin/sandboxed-node.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
+if [[ $ROLLOUT_NODES == 1 ]]; then
+  ls -1t /usr/local/bin/sandboxed-node.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
+fi
 if [[ $ROLLOUT_NODES == 1 ]]; then
   ls -1t /usr/local/bin/sandboxed-mcp.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
   ls -1t /usr/local/sbin/orb-privd.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
 fi
 ls -1t /usr/local/lib/orb/orb-node-provision.sh.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
+ls -1t "$GUEST_NODE".pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f || true
 for spec in "${OPS_TARGETS[@]}"; do
   IFS=: read -r dst _ _ <<< "$spec"
   ls -1t "$dst".pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f

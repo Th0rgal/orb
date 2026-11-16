@@ -6,7 +6,32 @@ namespace OrbCore.NodeLivenessTests
 open OrbBin.Json OrbCore.NodeLiveness OrbCore.Managed OrbCore.RemoteFleetAndRelay OrbCore.LegacyHydrate OrbCore.Store
 
 private def check (condition : Bool) (label : String) : IO Unit := do
-  unless condition do throw (IO.userError s!"node liveness: {label}")
+    unless condition do throw (IO.userError s!"node liveness: {label}")
+
+private def bootstrapBinaryTests : IO Unit := do
+  let root := s!"/tmp/orb-bootstrap-binary-tests-{← IO.monoMsNow}"
+  IO.FS.createDirAll root
+  let guest := s!"{root}/guest"
+  let old := s!"{root}/old"
+  let fallback := s!"{root}/fallback"
+  try
+    IO.FS.writeBinFile guest "guest".toUTF8
+    IO.FS.writeBinFile old "old".toUTF8
+    IO.FS.writeBinFile fallback "fallback".toUTF8
+    check ((← firstExistingReadableNonEmptyBootstrapBinary? #[guest, old, fallback]).map Prod.fst == some guest)
+      "guest path wins"
+    IO.FS.removeFile guest
+    check ((← firstExistingReadableNonEmptyBootstrapBinary? #[guest, old, fallback]).map Prod.fst == some old)
+      "missing guest falls back"
+    IO.FS.writeBinFile guest ByteArray.empty
+    check ((← firstExistingReadableNonEmptyBootstrapBinary? #[guest, old, fallback]).map Prod.fst == some old)
+      "empty guest falls back"
+    IO.FS.removeFile old
+    IO.FS.removeFile fallback
+    check ((← firstExistingReadableNonEmptyBootstrapBinary? #[guest, old, fallback]) == none)
+      "no candidate is unavailable"
+  finally
+    try IO.FS.removeDirAll root catch _ => pure ()
 
 private def pureTests : IO Unit := do
   check (lastSeen none 0 == none && lastSeen (some 50) 0 == some 50 && lastSeen none 70 == some 70 &&
@@ -107,6 +132,7 @@ private def fleetTests (root : String) : IO Unit := do
     closeManagedComputeStore mc
 
 def run (root : String) : IO Unit := do
+  bootstrapBinaryTests
   pureTests
   fleetTests root
 

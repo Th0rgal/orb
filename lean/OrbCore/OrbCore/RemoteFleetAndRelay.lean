@@ -41,6 +41,17 @@ open OrbCore.Managed
 open OrbCore.R7Core
 open OrbCore.LegacyHydrate
 
+def bootstrapBinaryCandidates : Array String :=
+  #["/usr/local/lib/orb/guest/sandboxed-node", "/usr/local/bin/sandboxed-node", "/usr/bin/sandboxed-node"]
+
+def firstExistingReadableNonEmptyBootstrapBinary?
+    (candidates : Array String) : IO (Option (String × ByteArray)) := do
+  for path in candidates do
+    if ← (System.FilePath.mk path).pathExists then
+      if let .ok bytes ← (IO.FS.readBinFile path).toBaseIO then
+        if !bytes.isEmpty then return some (path, bytes)
+  return none
+
 /-! ## Reverse Long-Poll HTTP Tunnel Hub (`RelayHub`) -/
 
 structure RelayHttpReq where
@@ -1575,12 +1586,12 @@ def dispatchRemoteFleetAndRelayRoutes?
     let mid := segs[3]!
     let some _ ← getManagedMachine? mc mid
       | return some (jsonErr 404 "managed_machine_not_found")
-    let binCandidates := #["/usr/local/bin/sandboxed-node", "/usr/bin/sandboxed-node"]
-    for bp in binCandidates do
-      if ← (System.FilePath.mk bp).pathExists then
-        if let .ok bytes ← (IO.FS.readBinFile bp).toBaseIO then
-          return some (200, "application/octet-stream", bytes)
-    return some (jsonErr 404 "bootstrap_binary_unavailable")
+    match ← firstExistingReadableNonEmptyBootstrapBinary? bootstrapBinaryCandidates with
+    | some (path, bytes) =>
+      let sha := bytesToHexLower (sha256Bytes bytes)
+      IO.eprintln s!"[orb-core] managed bootstrap binary machine={mid} path={path} bytes={bytes.size} sha256={sha}"
+      return some (200, "application/octet-stream", bytes)
+    | none => return some (jsonErr 404 "bootstrap_binary_unavailable")
 
   -- 2. Authenticated relay HTTP tunnel (`* /api/managed-machines/relay/tunnel/:id/*`)
   if segs.length ≥ 5 &&
