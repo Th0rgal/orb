@@ -308,7 +308,7 @@ BUILD_SCRIPT = r'''set -euo pipefail
 exec > >(tee -a /home/user/build.log) 2>&1
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -qq
-sudo apt-get install -y -qq --no-install-recommends build-essential pkg-config libssl-dev libsqlite3-dev bubblewrap curl ca-certificates git sqlite3 zstd python3 cargo rustc >/dev/null
+sudo apt-get install -y -qq --no-install-recommends build-essential pkg-config libssl-dev libsqlite3-dev bubblewrap curl ca-certificates git sqlite3 zstd python3 >/dev/null
 rm -rf "$HOME/src" && mkdir -p "$HOME/src" && tar -xf "$HOME/src.tar" -C "$HOME/src"
 cd "$HOME/src"
 lean_dest="$HOME/.local/lean-4.35.0"
@@ -320,7 +320,17 @@ if [[ ! -x "$lean_dest/bin/lean" ]]; then
   tar --zstd -xf "$lean_archive" --strip-components=1 -C "$lean_dest"
   rm -f "$lean_archive"
 fi
-export PATH="$lean_dest/bin:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+export RUSTUP_HOME="$HOME/.local/rustup"
+export CARGO_HOME="$HOME/.local/cargo"
+if [[ ! -x "$CARGO_HOME/bin/cargo" ]]; then
+  rustup_archive="/tmp/rustup-init"
+  curl --retry 5 --retry-all-errors -fsSL "https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init" -o "$rustup_archive"
+  echo "20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c  ${rustup_archive}" | sha256sum -c -
+  chmod 0755 "$rustup_archive"
+  "$rustup_archive" -y --no-modify-path --profile minimal --default-toolchain 1.93.0
+  rm -f "$rustup_archive"
+fi
+export PATH="$lean_dest/bin:$CARGO_HOME/bin:$HOME/.local/bin:$PATH"
 if ! command -v turbo-lean >/dev/null 2>&1; then
   revision="$(tr -d '[:space:]' < lean/turbo-lean-revision)"
   [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
