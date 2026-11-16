@@ -219,7 +219,8 @@ private def recordSettledMcpAction
   return .ok enriched
 
 private def settleReservedMcpAction
-    (store : CoreStore) (claims : McpSessionClaims) (callerUserId toolName key state message nowIso : String) : IO String := do
+    (store : CoreStore) (claims : McpSessionClaims) (callerUserId toolName key state message nowIso : String)
+    (code : String := "mutation_failed") : IO String := do
   let scope := actionScope claims callerUserId toolName
   let accepted := if state == "uncertain" then "unknown" else "no"
   let payload := renderCompact (.obj #[
@@ -228,7 +229,7 @@ private def settleReservedMcpAction
       "UPDATE mcp_actions_v1 SET state=?3,result=?4,updated_at=?5 WHERE scope=?1 AND retry_key=?2 AND state='accepted';"
       #[scope, key, state, payload, nowIso]
     | return mcpErr "receipt_record_failed" "The mutation outcome could not be recorded." false
-  return mcpErr "mutation_failed" message (state == "failed")
+  return mcpErr code message (state == "failed")
 
 /-- Own the whole reserved branch, including early returns and thrown IO errors.
     Only an accepted row may transition; retries and terminal rows are immutable.
@@ -1143,12 +1144,12 @@ def dispatchMcpToolCall
     let authMode := if toolName == "consult_model" then "readonly" else "writer"
     -- A consultation with nowhere to run must fail, not sit at awaiting_user/active.
     if isConsult && (remoteSup?.isNone || inheritedRn?.isNone) then
-      return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" "no execution node is available" nowIso
+      return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" "no execution node is available" nowIso "no_execution_placement"
     -- This gateway can only run a first turn on a node. With a prompt and nowhere to
     -- run it, refuse: a mission that will never be dispatched must not be created `active`.
     if !prompt.isEmpty && (remoteSup?.isNone || inheritedRn?.isNone) then
       releaseRented
-      return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" "no execution node is available" nowIso
+      return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" "no execution node is available" nowIso "no_execution_placement"
     let mid ← newUuidV4
     -- The model name the turn is launched with. Empty means the harness's own default.
     let sentModel := if backend == "opencode" && modelOv.isEmpty then "builtin/smart" else modelOv
@@ -1392,7 +1393,7 @@ def dispatchMcpToolCall
             | return mcpErr "receipt_record_failed" "The mutation completed but its receipt could not be recorded. Reconcile the action." false
           return mcpOk settled
       -- No node to run the turn on: say so; never mark the mission active.
-      return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" "no execution node is available" nowIso
+      return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" "no execution node is available" nowIso "no_execution_placement"
     else
       let nextSt := if toolName == "adopt_mission" then "awaiting_user" else "completed"
       discard <| execParamQuery store.missionsDb
