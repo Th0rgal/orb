@@ -522,19 +522,14 @@ def run (root : String) : IO Unit := do
       ((renderCompact mSearchDoc).splitOn "admin-mission").length == 1 &&
       ((renderCompact mSearchDoc).splitOn "admin-private-search-body").length == 1 &&
       ((renderCompact mSearchDoc).splitOn "admin-private-marker").length == 1
-    let legacyUnscopedApp := { st with bootstrapAdminId := "", cfg := { st.cfg with devMode := true } }
     let (admSearchSt, admSearchDoc) ← send "GET" "/api/control/missions/search/messages?q=shared-search-token" admin (.obj #[]) st
-    let (legSearchSt, legSearchDoc) ← send "GET" "/api/control/missions/search/messages?q=shared-search-token" "" (.obj #[]) legacyUnscopedApp
+    let (legSearchSt, legSearchDoc) ← send "GET" "/api/control/missions/search/messages?q=shared-search-token" "" st
     let bAdminOk := admSearchSt == 200 &&
       admSearchDoc.asArr?.isNone &&
       (admSearchDoc.fieldArr? "hits").isSome &&
       admSearchDoc.field? "next_cursor" == some .null &&
       ((admSearchDoc.field? "coverage").bind JVal.asObj?).isSome
-    let bLegacyOk := legSearchSt == 200 &&
-      legSearchDoc.asArr?.isNone &&
-      (legSearchDoc.fieldArr? "hits").isSome &&
-      legSearchDoc.field? "next_cursor" == some .null &&
-      ((legSearchDoc.field? "coverage").bind JVal.asObj?).isSome
+    let bLegacyOk := legSearchSt == 401 && legSearchDoc.fieldStr? "error" == some "unauthorized"
     check (aOk && bAdminOk && bLegacyOk && cOk && dOk)
       (s!"search/messages contract: " ++
        s!"(a) member={aOk} (st={mSearchSt}, body={renderCompact mSearchDoc}); " ++
