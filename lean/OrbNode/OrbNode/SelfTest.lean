@@ -2002,9 +2002,7 @@ def runTests : IO UInt32 := do
     auditLog := (System.FilePath.mk tmpRoot / "mu-audit.jsonl").toString
     hostLabel := "self"
   }
-  -- The broker runs blocking subprocess I/O during real root user provisioning.
-  -- Keep it off the client's shared task pool, like the separate production daemon.
-  let privdLoopTask ← IO.asTask (prio := Task.Priority.dedicated) do
+  let privdLoopTask ← IO.asTask do
     while !(← stopPrivdRef.get) do
       match ← LeanSys.Posix.tcpAcceptPoll privdLfd 100 with
       | .ok cfd => OrbBin.Privd.handleConnection cfd privdCfg
