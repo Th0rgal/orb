@@ -150,6 +150,111 @@ struct OrbProjectBoard: Equatable {
     }
 }
 
+struct OrbMissionBoardSummary: Equatable, Identifiable {
+    let id: String
+    let title: String
+    let status: String
+    let parentMissionID: String?
+    let updatedAt: String
+    let bytes: Int
+    let textSha256: String
+    init(_ raw: OrbJSON) {
+        id = raw["mission_id"].text
+        title = raw["title"].text
+        status = raw["status"].text
+        parentMissionID = raw["parent_mission_id"].text.isEmpty ? nil : raw["parent_mission_id"].text
+        updatedAt = raw["updated_at"].text
+        bytes = Int(raw["bytes"].doubleValue ?? 0)
+        textSha256 = raw["text_sha256"].text
+    }
+}
+
+enum OrbMissionBoardProjection {
+    static func summaries(_ raw: OrbJSON, placement: [String: UInt64] = [:], currentMissionIDs: Set<String>? = nil) -> [OrbMissionBoardSummary] {
+        raw["boards"].items.map(OrbMissionBoardSummary.init)
+            .filter { !$0.id.isEmpty && placement[$0.id] == nil && (currentMissionIDs == nil || currentMissionIDs!.contains($0.id)) }
+            .sorted { lhs, rhs in lhs.updatedAt == rhs.updatedAt ? lhs.id < rhs.id : lhs.updatedAt > rhs.updatedAt }
+    }
+    static func shouldShowEntry(_ board: OrbProjectBoard) -> Bool { !(board.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    static func accepts(_ response: OrbJSON, missionID: String, project: String, expectedRevision: UInt64, currentProject: String, currentRevision: UInt64) -> Bool {
+        response["mission_id"].text == missionID && project == currentProject && expectedRevision == currentRevision
+    }
+}
+
+struct OrbMissionBoardView: View {
+    let missionID: String
+    let title: String
+    let project: String
+    let expectedRevision: UInt64
+    @Environment(\.dismiss) private var dismiss
+    @State private var text = ""
+    @State private var updatedAt: String?
+    @State private var error: String?
+    private let api = OrbCore.shared
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let error { OrbNotice(message: error) }
+                else if text.isEmpty { ProgressView() }
+                else { ScrollView { Text(text).font(.system(.footnote, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding() } }
+            }
+            .navigationTitle(title.isEmpty ? "Mission board" : title)
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+            .task {
+                do {
+                    let raw = try await api.call("/api/control/missions/\(OrbCore.escape(missionID))/board")
+                    let current = OrbHierarchy.placement(of: missionID)
+                    guard OrbMissionBoardProjection.accepts(raw, missionID: missionID, project: project, expectedRevision: expectedRevision, currentProject: current?.project ?? project, currentRevision: current?.revision ?? expectedRevision) else { return }
+                    text = raw["text"].text; updatedAt = raw["updated_at"].text
+                } catch let failure as OrbHTTPError where failure.status == 404 { text = "" }
+                catch let failure { self.error = failure.localizedDescription }
+            }
+        }
+    }
+}
+
+struct OrbMissionBoardsSection: View {
+    let project: OrbRow
+    let missions: [OrbRow]
+    let refreshID: Int
+    @State private var boards: [OrbMissionBoardSummary] = []
+    @State private var selected: OrbMissionBoardSummary?
+    @State private var error: String?
+    private let api = OrbCore.shared
+    var body: some View {
+        Group {
+            if boards.isEmpty {
+                if let error { OrbNotice(message: error) }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Mission boards").font(.headline)
+                    ForEach(boards) { board in
+                        Button { selected = board } label: {
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text(board.title.isEmpty ? board.id : board.title)
+                                    Text("\(board.status) · \(board.bytes) bytes").font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text(board.updatedAt).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }.buttonStyle(.plain)
+                    }
+                }.padding(.vertical, 12)
+            }
+        }
+        .sheet(item: $selected) { board in
+            OrbMissionBoardView(missionID: board.id, title: board.title, project: project.id, expectedRevision: missions.first(where: { $0.id == board.id })?.placementRevision ?? 0)
+        }
+        .task(id: refreshID) { await loadBoards() }
+    }
+    private func loadBoards() async {
+        do { boards = OrbMissionBoardProjection.summaries(try await api.call("/api/projects/\(OrbCore.escape(project.id))/boards"), currentMissionIDs: Set(missions.filter { $0.project == project.id }.map(\.id))) }
+        catch let failure as OrbHTTPError where failure.status == 404 { boards = [] }
+        catch let failure { self.error = failure.localizedDescription }
+    }
+}
+
 struct OrbProjectBoardSection: View {
     let project: OrbRow
     let missions: [OrbRow]

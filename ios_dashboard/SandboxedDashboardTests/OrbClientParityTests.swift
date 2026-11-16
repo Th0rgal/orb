@@ -139,6 +139,18 @@ final class OrbClientParityTests: XCTestCase {
         }
     }
 
+    func testMissionBoardSharedFixtureAndProjectionRules() throws {
+        let raw = try JSONDecoder().decode(OrbJSON.self, from: Data(contentsOf: OrbSpec.url("fixtures/mission-board.json")))
+        let board = OrbMissionBoardSummary(raw["project"]["boards"].items[0])
+        XCTAssertEqual(board.id, "m1"); XCTAssertEqual(board.title, "Release planning")
+        XCTAssertEqual(OrbMissionBoardProjection.summaries(raw["project"]).map(\.id), ["m1"])
+        XCTAssertFalse(OrbMissionBoardProjection.shouldShowEntry(OrbProjectBoard(.object(["text": .string(" \n")]))))
+        XCTAssertTrue(OrbMissionBoardProjection.accepts(raw["mission"], missionID: "m1", project: "notes", expectedRevision: 1, currentProject: "notes", currentRevision: 1))
+        XCTAssertFalse(OrbMissionBoardProjection.accepts(raw["mission"], missionID: "m1", project: "old", expectedRevision: 1, currentProject: "notes", currentRevision: 1))
+        let equal = OrbJSON.object(["boards": .array([.object(["mission_id": .string("b"), "updated_at": .string("same")]), .object(["mission_id": .string("a"), "updated_at": .string("same")])])])
+        XCTAssertEqual(OrbMissionBoardProjection.summaries(equal).map(\.id), ["a", "b"])
+    }
+
     func testProjectLimitNormalization() {
         XCTAssertEqual(OrbProjectGrant.parseProjectLimit(""), .success(0))
         XCTAssertEqual(OrbProjectGrant.parseProjectLimit("4"), .success(4))

@@ -83,6 +83,8 @@ struct OrbConversation: View {
     @State var showFiles = false
     @State var sharing = false
     @State var showChanges = false
+    @State var showMissionBoard = false
+    @State var missionBoard: OrbProjectBoard?
     @FocusState var composerFocused: Bool
     @Environment(\.scenePhase) var phase
     @Environment(\.dismiss) var dismissConversation
@@ -350,6 +352,14 @@ struct OrbConversation: View {
                         .presentationDetents([.medium, .large])
                 }
             }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    if missionBoard != nil { Button("Board", systemImage: "note.text") { showMissionBoard = true } }
+                }
+            }
+            .sheet(isPresented: $showMissionBoard) {
+                if let id, let board = missionBoard { OrbMissionBoardView(missionID: id, title: title, project: effectiveProjectSlug, expectedRevision: OrbHierarchy.placement(of: id)?.revision ?? 0) }
+            }
             .sheet(item: $sideQuestion) { OrbSideQuestionSheet(parentID: $0.parent, question: $0.question).orbTrackPage("btw", surface: .sheet) }
             // Warm the /btw history so the side sheet opens on it, not on a spinner.
             .task(id: id) {
@@ -513,6 +523,12 @@ struct OrbConversation: View {
                     selection.node = resolveAutoNode(catalog["nodes"]["nodes"].items)
                 }
             }
+        }
+        if let id {
+            do {
+                let raw = try await api.call("/api/control/missions/\(OrbCore.escape(id))/board")
+                if !raw["text"].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { missionBoard = OrbProjectBoard(raw) }
+            } catch { missionBoard = nil }
         }
         let targetProject = effectiveProjectSlug
         if !targetProject.isEmpty {

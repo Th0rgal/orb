@@ -89,6 +89,21 @@ class OrbClientParityTest {
     }
 
     @Test
+    fun missionBoardSharedFixtureAndProjectionRules() {
+        val raw = OrbSpec.dict("fixtures/mission-board.json")
+        val project = OrbJSON.dict(raw["project"])!!
+        val mission = OrbJSON.dict(raw["mission"])!!
+        val board = OrbMissionBoardSummary.decode(OrbJSON.dictList(project["boards"])[0])
+        assertEquals("m1", board.id)
+        assertEquals(listOf("m1"), OrbMissionBoardProjection.summaries(project).map { it.id })
+        assertFalse(OrbMissionBoardProjection.shouldShowEntry(OrbProjectBoard.decode(mapOf("text" to " \n"))))
+        assertTrue(OrbMissionBoardProjection.accepts(mission, "m1", "notes", 1, "notes", 1))
+        assertFalse(OrbMissionBoardProjection.accepts(mission, "m1", "old", 1, "notes", 1))
+        val equal = mapOf("boards" to listOf(mapOf("mission_id" to "b", "updated_at" to "same"), mapOf("mission_id" to "a", "updated_at" to "same")))
+        assertEquals(listOf("a", "b"), OrbMissionBoardProjection.summaries(equal).map { it.id })
+    }
+
+    @Test
     fun projectLimitNormalization() {
         assertEquals(0, OrbProjectGrant.parseProjectLimit("").getOrNull())
         assertEquals(4, OrbProjectGrant.parseProjectLimit(" 4 ").getOrNull())

@@ -1399,6 +1399,7 @@ fun OrbProjectPage(
     var newFolderParent by remember { mutableStateOf("") }
     var newFolderDraft by remember { mutableStateOf("") }
     var boardRefreshID by remember(project) { mutableStateOf(0) }
+    var selectedMissionBoard by remember(project) { mutableStateOf<Pair<OrbMissionBoardSummary, Long>?>(null) }
     var isRefreshing by remember { mutableStateOf(false) }
     var folderActionError by remember { mutableStateOf<String?>(null) }
 
@@ -2038,6 +2039,7 @@ fun OrbProjectPage(
                 ) {
                     item(key = "project_board") {
                         OrbProjectBoardSection(core, liveProject, projectMissions, boardRefreshID, onOpenMission)
+                        OrbMissionBoardsSection(core, liveProject, projectMissions, boardRefreshID) { board, revision -> selectedMissionBoard = board to revision }
                     }
                     if (filter != OrbProjectFilter.All) {
                         item(key = "active_filter_bar") {
@@ -2814,6 +2816,9 @@ fun OrbProjectPage(
         },
         onError = { folderActionError = it }
     )
+    selectedMissionBoard?.let { (board, revision) ->
+        OrbMissionBoardView(core, board, liveProject.id, revision) { selectedMissionBoard = null }
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class)

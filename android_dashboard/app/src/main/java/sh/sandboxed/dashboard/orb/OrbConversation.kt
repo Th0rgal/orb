@@ -576,6 +576,17 @@ fun OrbConversationPage(
 
     var currentMission by remember(initialMission?.id) { mutableStateOf(initialMission) }
     val missionId = currentMission?.id
+    var missionBoard by remember(missionId) { mutableStateOf<OrbMissionBoardSummary?>(null) }
+    var showMissionBoard by remember(missionId) { mutableStateOf(false) }
+
+    LaunchedEffect(missionId, project.id) {
+        missionBoard = null
+        val id = missionId ?: return@LaunchedEffect
+        try {
+            val raw = core.fetchDict("/api/control/missions/${core.encodeComponent(id)}/board")
+            if (!((raw["text"] as? String).orEmpty().isBlank())) missionBoard = OrbMissionBoardSummary(id, currentMission?.str("title").orEmpty(), currentMission?.str("status", "state").orEmpty(), null, raw["updated_at"] as? String ?: "", (raw["text"] as? String).orEmpty().toByteArray().size, raw["text_sha256"] as? String ?: "")
+        } catch (_: Exception) { }
+    }
 
     LaunchedEffect(placementVersion, missionId) {
         if (placementVersion <= 0L || missionId == null) return@LaunchedEffect
@@ -2584,6 +2595,12 @@ fun OrbConversationPage(
             }
 
             if (missionId != null || onOpenDocuments != null) {
+                if (missionBoard != null) {
+                    Box(
+                        modifier = Modifier.size(40.dp).clip(CircleShape).background(OrbStyle.surface).border(1.dp, OrbStyle.border, CircleShape).orbPressClickable { showMissionBoard = true }.testTag("conversation.board"),
+                        contentAlignment = Alignment.Center
+                    ) { Icon(Icons.Default.ListAlt, contentDescription = "Mission board", tint = Color.White, modifier = Modifier.size(19.dp)) }
+                }
                 Box {
                     Box(
                         modifier = Modifier
@@ -2647,6 +2664,9 @@ fun OrbConversationPage(
                         onError = { errorMessage = it }
                     )
                 }
+            }
+            if (showMissionBoard && missionBoard != null) {
+                OrbMissionBoardView(core, missionBoard!!, project.id, OrbMissionTree.placementOf(missionId ?: "")?.revision ?: 0) { showMissionBoard = false }
             }
         }
 

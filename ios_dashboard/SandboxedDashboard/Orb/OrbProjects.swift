@@ -1561,6 +1561,7 @@ struct OrbProjectPage: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 OrbProjectBoardSection(project: project, missions: missions, refreshID: boardRefreshID)
+                OrbMissionBoardsSection(project: project, missions: missions, refreshID: boardRefreshID)
                 if filter != "All" {
                     HStack {
                         Text(filter)
