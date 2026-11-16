@@ -120,6 +120,12 @@ def _start_core_api_server(cordoned):
 
 
 class RollingUpgradeNodesTest(unittest.TestCase):
+    def test_apply_requires_expected_digests_before_auth(self):
+        with patch.object(roll, "discover_local_core_auth", side_effect=AssertionError("auth reached")):
+            with self.assertRaises(SystemExit) as raised:
+                roll.main(["--apply"])
+            self.assertEqual(raised.exception.code, 2)
+
     def test_lock_contention_is_nonzero_and_names_holder(self):
         import contextlib
         import io
@@ -131,7 +137,7 @@ class RollingUpgradeNodesTest(unittest.TestCase):
                 roll.fcntl.flock(holder, roll.fcntl.LOCK_EX | roll.fcntl.LOCK_NB)
                 stderr = io.StringIO()
                 with contextlib.redirect_stderr(stderr):
-                    result = roll.main(["--apply", "--lock-file", str(lock)])
+                    result = roll.main(["--recover-node", "fake", "--lock-file", str(lock)])
                 self.assertNotEqual(result, 0)
                 self.assertIn("pid=1234", stderr.getvalue())
 

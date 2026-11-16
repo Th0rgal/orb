@@ -2360,6 +2360,11 @@ def main(argv=None):
 
     remote_nodes = [parse_node_spec(item) for item in args.node]
 
+    if args.apply and not args.recover_nodes:
+        missing = [name for name, _ in DEFAULT_ROLLOUT_BINARIES if not expected_sha256.get(name)]
+        if missing:
+            parser.error("apply requires expected SHA-256 digests for: " + ", ".join(missing))
+
     lock_handle = None
     if (args.apply or args.recover_nodes) and args.lock_file:
         Path(args.lock_file).parent.mkdir(parents=True, exist_ok=True)
