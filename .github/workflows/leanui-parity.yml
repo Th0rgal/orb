@@ -83,8 +83,15 @@ jobs:
           set -euo pipefail
           node node_modules/.bin/playwright test \
             -c playwright.leanui-reference.config.ts --reporter=line
-          (cd "$ORB_REFERENCE_OUT" && sha256sum -c --quiet \
-            "$GITHUB_WORKSPACE/docs/ui/leanui-parity-reference.sha256")
+          set +e
+          (cd "$ORB_REFERENCE_OUT" && sha256sum -c \
+            "$GITHUB_WORKSPACE/docs/ui/leanui-parity-reference.sha256") \
+            > "$GITHUB_WORKSPACE/.ci/leanui/reference-hashes.txt" 2>&1
+          hash_status=$?
+          set -e
+          printf 'hashes_reproduced=%s\n' "$([[ "$hash_status" -eq 0 ]] && echo yes || echo no)" \
+            | tee -a "$GITHUB_WORKSPACE/.ci/leanui/reference-hashes.txt"
+          exit "$hash_status"
 
       - name: Run U2 native script under Weston
         if: ${{ !cancelled() }}
@@ -156,6 +163,7 @@ jobs:
             .ci/leanui/weston.log
             .ci/leanui/parity-diff
             .ci/leanui/ref
+            .ci/leanui/reference-hashes.txt
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14

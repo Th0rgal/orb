@@ -34,6 +34,42 @@ the repository.
 
 ## Results
 
+### Reproduction check, 16 November 2026
+
+The branch-triggered `.github/workflows/leanui-parity.yml` downloads Chrome for
+Testing 151.0.7922.108 and uses a private fontconfig directory. A private browser
+can also be selected locally with `ORB_REFERENCE_CHROME=/absolute/path/to/chrome`
+in the reference command above. This changes browser selection only.
+
+Reference verification is currently **blocked**, before native measurement:
+uruk reproduced 31/36 hashes; Ubuntu 24.04 workflow runs reproduced 32/36 and
+30/36. All four split-diff variants fail: commit `e201d833` changed the displayed
+mock filename from `lean/OrbDesktop/Main.lean` to
+`lean/OrbDesktop/OrbDesktop/Main.lean` without changing the reference hashes.
+The 2x transcript hashes also differ intermittently; that cause is unresolved.
+The table below is the prior measurement, not a newly verified result.
+The workflow fails on hash disagreement and preserves the captures; no reference
+hashes, comparison thresholds, masks, or rendering were changed for this check.
+
+U2's launch check passed on Ubuntu 24.04 in
+[run 43795949652](https://github.com/Th0rgal/orb/actions/runs/43795949652):
+`scripts/orb_desktop_dev.sh --native`, with both fallback variables unset,
+attached Wayland buffers and remained alive under Weston/Xvfb. Its
+[artifact](https://github.com/Th0rgal/orb/actions/runs/43795949652/artifacts/14194448300)
+contains `.ci/leanui/u2/native-window.png` and the protocol/build log.
+The existing CI step `Native LeanUI build and warm-cache invalidation` invokes
+`python3 scripts/test_native_desktop_cache.py`: it runs the same build script,
+checks a deliberately invalid source edit, rebuilds, and runs `--self-test`;
+it does not launch the normal window.
+
+Native linking requires libc++ compatible with the installed Lean runtime.
+On uruk, system Clang/libc++ is version 18 while the Lean toolchain bundles
+Clang 23.1.0; the link fails on libc++ atomic-wait symbols. Even with
+`LIBRARY_PATH` set to the toolchain's lib directory, system Clang's
+`-print-file-name=libc++.a` resolves `/lib/x86_64-linux-gnu/libc++.a`.
+The precise library-selection difference from CI still needs isolation; a green
+CI launch is not proof that uruk's script path is correct.
+
 <!-- parity:begin -->
 Reference: SolidJS desktop. Candidate: LeanUI. 36 pairs, 0 errors, tolerance 8.
 
