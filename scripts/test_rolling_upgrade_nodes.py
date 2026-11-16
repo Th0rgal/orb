@@ -992,6 +992,103 @@ class RollingUpgradeNodesTest(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_health_check_fails_closed_when_binary_sha256_or_token_missing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            db_path = root / "jobs.db"
+            con = sqlite3.connect(db_path)
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, state TEXT NOT NULL)")
+            con.commit()
+            con.close()
+
+            bin_dir = root / "usr/local/bin"
+            sbin_dir = root / "usr/local/sbin"
+            bin_dir.mkdir(parents=True)
+            sbin_dir.mkdir(parents=True)
+            node_bin = bin_dir / "sandboxed-node"
+            mcp_bin = bin_dir / "sandboxed-mcp"
+            privd_bin = sbin_dir / "orb-privd"
+            build_conf = root / "30-build.conf"
+
+            new_sha = "2" * 40
+            node_bin.write_text("node-v1")
+            mcp_bin.write_text("mcp-v1")
+            privd_bin.write_text("privd-v1")
+            (bin_dir / "sandboxed-node.new").write_text("node-v2")
+            (bin_dir / "sandboxed-mcp.new").write_text("mcp-v2")
+            (sbin_dir / "orb-privd.new").write_text("privd-v2")
+            expected_shas = {
+                "sandboxed-node": roll.compute_file_sha256(bin_dir / "sandboxed-node.new"),
+                "sandboxed-mcp": roll.compute_file_sha256(bin_dir / "sandboxed-mcp.new"),
+                "orb-privd": roll.compute_file_sha256(sbin_dir / "orb-privd.new"),
+            }
+
+            # 1. _default_health_check_probe must fail closed when SANDBOXED_NODE_TOKEN is missing
+            empty_env = root / "empty.env"
+            empty_env.write_text("SANDBOXED_NODE_BIND=127.0.0.1:3088\n")
+            with self.assertRaisesRegex(RuntimeError, "SANDBOXED_NODE_TOKEN"):
+                roll._default_health_check_probe(
+                    unit_name="nonexistent-sandboxed-node-unit",
+                    env_file=str(empty_env),
+                    expected_build_sha=new_sha,
+                    expected_sha256=expected_shas,
+                    build_conf_path=str(build_conf),
+                )
+
+            # 2. perform_fenced_upgrade must fail closed when health check returns missing binary_sha256 or missing component digest
+            class NoopCtl:
+                def is_active(self, _u):
+                    return True
+
+                def stop(self, _u):
+                    pass
+
+                def start(self, _u):
+                    pass
+
+                def start_best_effort(self, _u):
+                    pass
+
+                def restart_best_effort(self, _u):
+                    pass
+
+                def daemon_reload(self):
+                    pass
+
+            for bad_hc in [
+                {"ok": True, "build_sha": new_sha},
+                {"ok": True, "build_sha": new_sha, "binary_sha256": None},
+                {
+                    "ok": True,
+                    "build_sha": new_sha,
+                    "binary_sha256": {
+                        "sandboxed-node": expected_shas["sandboxed-node"],
+                        "sandboxed-mcp": expected_shas["sandboxed-mcp"],
+                        # orb-privd missing!
+                    },
+                },
+            ]:
+                (bin_dir / "sandboxed-node.new").write_text("node-v2")
+                (bin_dir / "sandboxed-mcp.new").write_text("mcp-v2")
+                (sbin_dir / "orb-privd.new").write_text("privd-v2")
+                with self.assertRaisesRegex(RuntimeError, "sha256|binary_sha256"):
+                    roll.perform_fenced_upgrade(
+                        db_path=str(db_path),
+                        binary_path=str(node_bin),
+                        verify_delay_secs=0.0,
+                        service_ctl=NoopCtl(),
+                        runtime_busy_probe=lambda: 0,
+                        live_work_dir_probe=lambda: str(root),
+                        mcp_binary_path=str(mcp_bin),
+                        privd_binary_path=str(privd_bin),
+                        expected_build_sha=new_sha,
+                        expected_sha256=expected_shas,
+                        build_conf_path=str(build_conf),
+                        health_check_probe=lambda _sha, _shas, res=bad_hc: res,
+                    )
+                self.assertEqual(node_bin.read_text(), "node-v1")
+
 
 if __name__ == "__main__":
     unittest.main()
