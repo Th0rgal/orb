@@ -25,7 +25,12 @@ these conditions hold:
   (its default is false). The repository variable is still required.
 
 Test and Kernel ABI use `lean-32vcpu-ubuntu-2604`; other Linux jobs, including
-both plan jobs, use `lean-16vcpu-ubuntu-2604`. Pull requests, fork repositories,
+both plan jobs, use `lean-16vcpu-ubuntu-2604`. Exception: Orb browser, Orb
+performance and Docker image always run on hosted runners, because they need
+Docker (a `container:` image or `docker build`/`run`) and lean.ci guests have no
+Docker daemon (first lean.ci master run, 16 Nov). lean.ci guests also ship
+without Rust: on a turbo-lean cache miss, `setup-turbo-lean` installs a pinned
+minimal Rust 1.99.1 through `rustup-init`. Pull requests, fork repositories,
 non-default branches, tags, other events, and unset/false variables preserve
 each job's original hosted runner:
 

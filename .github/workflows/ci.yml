@@ -304,7 +304,8 @@ jobs:
 
   orb-browser:
     name: Orb browser (${{ matrix.shard }}/8)
-    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && (github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.repository == 'Th0rgal/orb' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'lean-16vcpu-ubuntu-2604' || 'ubuntu-24.04' }}
+    # Hosted only: container job; lean.ci guests have no Docker (docs/ci-lean-runners.md).
+    runs-on: ubuntu-24.04
     # Version matches @playwright/test in orb/pnpm-lock.yaml. Contains browser
     # binaries, OS libraries and fonts; no per-shard apt update/install.
     container: mcr.microsoft.com/playwright:v1.55.0-noble
@@ -362,7 +363,8 @@ jobs:
   # Timing-sensitive specs: report-only on PRs, blocking on master.
   orb-performance:
     name: Orb performance
-    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && (github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.repository == 'Th0rgal/orb' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'lean-16vcpu-ubuntu-2604' || 'ubuntu-24.04' }}
+    # Hosted only: container job; lean.ci guests have no Docker (docs/ci-lean-runners.md).
+    runs-on: ubuntu-24.04
     # Version matches @playwright/test in orb/pnpm-lock.yaml. Contains browser
     # binaries, OS libraries and fonts; no per-shard apt update/install.
     container: mcr.microsoft.com/playwright:v1.55.0-noble
@@ -500,7 +502,8 @@ jobs:
 
   docker:
     name: Docker image
-    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && (github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.repository == 'Th0rgal/orb' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'lean-16vcpu-ubuntu-2604' || 'ubuntu-latest' }}
+    # Hosted only: builds and runs Docker images; lean.ci guests have no Docker (docs/ci-lean-runners.md).
+    runs-on: ubuntu-latest
     needs: plan
     if: (needs.plan.outputs.run_docker == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     steps:
