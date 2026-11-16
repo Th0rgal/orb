@@ -84,13 +84,13 @@ Reference: SolidJS desktop. Candidate: LeanUI. 36 pairs, 0 errors, tolerance 8.
 | 02_control_populated | light | 1x | 1.78 | 1.42 | 0.9814 | 7.38 / 0.9474 | 0.87 / 0.9859 | 0.00 / 1.0000 |
 | 02_control_populated | light | 2x | 1.36 | 1.19 | 0.9775 | 6.15 / 0.9032 | 0.57 / 0.9893 | 0.00 / 1.0000 |
 | 03_mission_transcript | dark | 1x | 7.09 | 4.35 | 0.9163 | 8.94 / 0.9162 | 5.75 / 0.9118 | 15.56 / 0.9431 |
-| 03_mission_transcript | dark | 2x | 6.23 | 3.75 | 0.9268 | 7.26 / 0.8866 | 5.07 / 0.9299 | 14.53 / 0.9558 |
+| 03_mission_transcript | dark | 2x | 6.28 | 3.78 | 0.9267 | 7.26 / 0.8866 | 5.07 / 0.9299 | 15.07 / 0.9547 |
 | 03_mission_transcript | light | 1x | 6.24 | 4.76 | 0.9139 | 9.03 / 0.9156 | 5.65 / 0.9088 | 7.23 / 0.9407 |
-| 03_mission_transcript | light | 2x | 5.26 | 4.15 | 0.9257 | 7.29 / 0.8872 | 4.91 / 0.9283 | 5.51 / 0.9552 |
-| 04_mission_split_diff | dark | 1x | 9.13 | 6.38 | 0.8676 | 8.94 / 0.9162 | 8.54 / 0.8519 | 13.05 / 0.9422 |
-| 04_mission_split_diff | dark | 2x | 7.83 | 5.33 | 0.8931 | 7.26 / 0.8866 | 7.20 / 0.8885 | 12.57 / 0.9537 |
-| 04_mission_split_diff | light | 1x | 9.26 | 7.09 | 0.8631 | 9.03 / 0.9156 | 9.49 / 0.8470 | 7.08 / 0.9377 |
-| 04_mission_split_diff | light | 2x | 7.87 | 6.00 | 0.8909 | 7.29 / 0.8872 | 8.18 / 0.8855 | 5.49 / 0.9530 |
+| 03_mission_transcript | light | 2x | 5.31 | 4.19 | 0.9255 | 7.29 / 0.8872 | 4.91 / 0.9283 | 6.08 / 0.9535 |
+| 04_mission_split_diff | dark | 1x | 9.25 | 6.51 | 0.8664 | 8.94 / 0.9162 | 8.71 / 0.8503 | 13.05 / 0.9422 |
+| 04_mission_split_diff | dark | 2x | 7.94 | 5.44 | 0.8920 | 7.26 / 0.8866 | 7.35 / 0.8869 | 12.57 / 0.9537 |
+| 04_mission_split_diff | light | 1x | 9.33 | 7.17 | 0.8622 | 9.03 / 0.9156 | 9.66 / 0.8453 | 6.50 / 0.9408 |
+| 04_mission_split_diff | light | 2x | 7.98 | 6.10 | 0.8898 | 7.29 / 0.8872 | 8.34 / 0.8841 | 5.49 / 0.9530 |
 | 05_machines_fleet | dark | 1x | 3.69 | 3.24 | 0.9535 | 7.30 / 0.9476 | 3.55 / 0.9468 | 0.00 / 1.0000 |
 | 05_machines_fleet | dark | 2x | 2.95 | 2.68 | 0.9588 | 6.11 / 0.9026 | 2.77 / 0.9635 | 0.00 / 1.0000 |
 | 05_machines_fleet | light | 1x | 3.70 | 3.25 | 0.9536 | 7.38 / 0.9475 | 3.54 / 0.9469 | 0.00 / 1.0000 |
@@ -99,10 +99,10 @@ Reference: SolidJS desktop. Candidate: LeanUI. 36 pairs, 0 errors, tolerance 8.
 | 06_settings_general | dark | 2x | 3.35 | 2.83 | 0.9496 | 1.49 / 0.9826 | 3.70 / 0.9437 | 4.57 / 0.9276 |
 | 06_settings_general | light | 1x | 4.18 | 3.88 | 0.9319 | 1.90 / 0.9885 | 4.57 / 0.9208 | 6.03 / 0.9049 |
 | 06_settings_general | light | 2x | 3.14 | 2.89 | 0.9485 | 1.47 / 0.9828 | 3.41 / 0.9420 | 4.59 / 0.9290 |
-| 07_search_dialog | dark | 1x | 11.11 | 1.71 | 0.9682 | 38.91 / 0.9960 | 7.08 / 0.9568 | 0.03 / 1.0000 |
-| 07_search_dialog | dark | 2x | 11.26 | 1.47 | 0.9738 | 40.25 / 0.9971 | 7.01 / 0.9643 | 0.07 / 1.0000 |
-| 07_search_dialog | light | 1x | 14.70 | 1.77 | 0.9683 | 46.96 / 0.9963 | 10.27 / 0.9569 | 0.41 / 1.0000 |
-| 07_search_dialog | light | 2x | 14.94 | 1.47 | 0.9738 | 49.09 / 0.9975 | 10.17 / 0.9642 | 0.43 / 1.0000 |
+| 07_search_dialog | dark | 1x | 10.90 | 1.51 | 0.9690 | 38.91 / 0.9960 | 6.80 / 0.9579 | 0.03 / 1.0000 |
+| 07_search_dialog | dark | 2x | 11.05 | 1.26 | 0.9744 | 40.25 / 0.9971 | 6.72 / 0.9651 | 0.07 / 1.0000 |
+| 07_search_dialog | light | 1x | 14.49 | 1.55 | 0.9689 | 46.96 / 0.9963 | 9.98 / 0.9576 | 0.41 / 1.0000 |
+| 07_search_dialog | light | 2x | 14.73 | 1.25 | 0.9743 | 49.09 / 0.9975 | 9.88 / 0.9649 | 0.43 / 1.0000 |
 | 08_new_mission_dialog | dark | 1x | 1.77 | 1.43 | 0.9815 | 7.30 / 0.9476 | 0.88 / 0.9860 | 0.00 / 1.0000 |
 | 08_new_mission_dialog | dark | 2x | 1.37 | 1.20 | 0.9771 | 6.12 / 0.9025 | 0.59 / 0.9889 | 0.00 / 1.0000 |
 | 08_new_mission_dialog | light | 1x | 1.78 | 1.43 | 0.9813 | 7.38 / 0.9474 | 0.87 / 0.9857 | 0.00 / 1.0000 |
@@ -112,12 +112,12 @@ Reference: SolidJS desktop. Candidate: LeanUI. 36 pairs, 0 errors, tolerance 8.
 | 09_toast_notifications | light | 1x | 6.45 | 2.43 | 0.9591 | 7.38 / 0.9474 | 4.24 / 0.9726 | 23.32 / 0.8741 |
 | 09_toast_notifications | light | 2x | 5.87 | 2.03 | 0.9594 | 6.15 / 0.9032 | 3.75 / 0.9780 | 23.06 / 0.9004 |
 
-Mean over 36 measured pairs: mismatch 5.00 %, above tolerance 2.69 %, SSIM 0.9522 (min 0.8631, max 0.9865).
+Mean over 36 measured pairs: mismatch 4.99 %, above tolerance 2.68 %, SSIM 0.9521 (min 0.8622, max 0.9865).
 
 Determinism (each renderer compared with a second capture of itself):
 
-- SolidJS reference: 36/36 images pixel-identical
-- LeanUI: 36/36 images pixel-identical
+- SolidJS reference: not measured
+- LeanUI: not measured
 <!-- parity:end -->
 
 ## Wave 3 status and acceptance

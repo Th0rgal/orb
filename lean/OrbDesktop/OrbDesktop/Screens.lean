@@ -874,14 +874,20 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
       ]
 
   let dlgCard : WidgetNode :=
+    -- SearchDialog.css: color-mix(in srgb, var(--fg) 8%, var(--stroke)).
+    let channel (shift : Nat) :=
+      ((((pal.textPrimary >>> shift.toUInt32) &&& 255).toNat * 8 +
+        ((pal.border >>> shift.toUInt32) &&& 255).toNat * 92 + 50) / 100).toUInt32
+    let dialogBorder : Color :=
+      (channel 24 <<< 24) ||| (channel 16 <<< 16) ||| (channel 8 <<< 8) ||| 255
     WidgetNode.rrect
       (BoxStyle.col 0
         |>.withPadding (Edges.all bdr)
         |>.withFixedSize dlgW dlgH
-      |>.withShadow { offsetY := pxToSub 18, blur := pxToSub 48, color := if theme.isDark then 0x0000007F else 0x1E1E1C38 })
+       |>.withShadow { offsetY := pxToSub 18, blur := pxToSub 48, color := if theme.isDark then 0x0000007F else 0x1E1E1C38 })
       dlgBg
       (CornerRadii.uniform (pxToSub 12))
-      (BorderStyle.uniform bdr pal.border)
+      (BorderStyle.uniform bdr dialogBorder)
       [ headerNode
       , WidgetNode.box (BoxStyle.row 0 |>.withFixedSize innerW (pxToSub 468)) [leftPane, rightPane]
       , footerNode
