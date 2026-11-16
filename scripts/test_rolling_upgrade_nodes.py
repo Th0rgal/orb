@@ -1458,6 +1458,90 @@ class RollingUpgradeNodesTest(unittest.TestCase):
             self.assertIn(secret_field, admin_node)
             self.assertIn(secret_field, admin_node["heartbeat"])
 
+    def test_cordon_owner_recorded_and_recover_node_uncordons_and_cleans_up(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            ledger_path = root / "cordons.json"
+            lock_path = root / "rollout.lock"
+            cordoned = {"ashur": False, "nippur": False}
+            server = _start_core_api_server(cordoned)
+            try:
+                api_url = f"http://127.0.0.1:{server.server_port}"
+                token = roll.mint_hs256_jwt("test-secret")
+                api = roll.HttpCoreApi(api_url, token)
+
+                class FailingUpgradeOps(FakeNodeOps):
+                    def upgrade_remote(self, host, _db_path):
+                        raise RuntimeError(f"simulated SIGTERM/failure on {host}")
+
+                    def recover_remote(self, host):
+                        return {
+                            "journal_recovered": True,
+                            "cleared_artifacts": ["/usr/local/bin/sandboxed-node.new.failed"],
+                            "healthy": True,
+                        }
+
+                ops = FailingUpgradeOps(
+                    {
+                        "ashur": {"staged": True, "running": 0, "healthy": True},
+                        "nippur": {"staged": True, "running": 0, "healthy": True},
+                    }
+                )
+                events, done = roll.run_governed_rollout(
+                    core_api=api,
+                    node_ops=ops,
+                    remote_nodes=[("ashur", None), ("nippur", None)],
+                    max_concurrent_cordons=1,
+                    apply=True,
+                    expected_build_sha="a" * 40,
+                    cordon_owner="rolling_upgrade_nodes",
+                    cordon_ledger_path=str(ledger_path),
+                )
+                self.assertFalse(done)
+                self.assertTrue(cordoned["ashur"])
+                self.assertFalse(cordoned["nippur"])
+
+                # Verify cordon owner is recorded in the ledger and surfaced in --status
+                ledger = roll.load_cordon_ledger(str(ledger_path))
+                self.assertIn("ashur", ledger)
+                self.assertEqual(ledger["ashur"]["cordoned_by"], "rolling_upgrade_nodes")
+                self.assertEqual(ledger["ashur"]["target_build_sha"], "a" * 40)
+
+                status_rows = roll.collect_fleet_rollout_status(
+                    core_api=api,
+                    node_ops=ops,
+                    remote_nodes=[("ashur", None), ("nippur", None)],
+                    expected_build_sha="a" * 40,
+                    cordon_ledger_path=str(ledger_path),
+                )
+                ashur_row = next(r for r in status_rows if r["node"] == "ashur")
+                self.assertTrue(ashur_row["cordoned"])
+                self.assertEqual(ashur_row["cordoned_by"], "rolling_upgrade_nodes")
+
+                # Recover the node left cordoned via recover_cordoned_node / CLI --recover-node
+                import os
+                from unittest import mock
+                with mock.patch.dict(os.environ, {"SANDBOXED_API_TOKEN": token}):
+                    with mock.patch.object(roll, "SshNodeOps", return_value=ops):
+                        rc = roll.main(
+                            [
+                                "--api-url",
+                                api_url,
+                                "--cordon-ledger",
+                                str(ledger_path),
+                                "--lock-file",
+                                str(lock_path),
+                                "--recover-node",
+                                "ashur",
+                            ]
+                        )
+                self.assertEqual(rc, 0)
+                self.assertFalse(cordoned["ashur"])
+                self.assertNotIn("ashur", roll.load_cordon_ledger(str(ledger_path)))
+            finally:
+                server.shutdown()
+                server.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()
