@@ -1734,6 +1734,33 @@ private def runManagedSandboxMemberExecTests
     throw e
 
 set_option maxRecDepth 2048 in
+private def checkSlowProvisioning (check : String → Bool → IO Unit) : IO Unit := do
+  let sock := s!"/tmp/on-slow-privd-{(← getpid)}.sock"
+  let .ok lfd ← LeanSys.Posix.unixListen sock 1
+    | throw (IO.userError "slow provisioning broker listen failed")
+  let task ← IO.asTask (prio := Task.Priority.dedicated) do
+    let .ok cfd ← LeanSys.Posix.tcpAcceptPoll lfd 5000 | return false
+    let mut ended := false
+    while !ended do
+      match ← readSocketTimed cfd 65536 5000 with
+      | .bytes _ => pure ()
+      | _ => ended := true
+    IO.sleep 31000
+    let sent ← LeanSys.Posix.writeAll cfd
+      "{\"ok\":true,\"uid\":2500,\"gid\":2500,\"home_dir\":\"/home/orb-slow\",\"mission_cwd\":\"/home/orb-slow/.orb-missions/test\"}\n".toUTF8
+    discard <| LeanSys.Posix.closeFd cfd
+    return match sent with | .ok _ => true | .error _ => false
+  let result ← OrbNode.PrivdClient.ensureMissionUser sock "orb-slow" "test" "member" false
+  let sent := task.get
+  discard <| LeanSys.Posix.closeFd lfd
+  IO.FS.removeFile sock
+  check "provisioning accepts a successful broker reply after 30 seconds"
+    ((match sent with | .ok true => true | _ => false) && match result with
+      | .ok u => u.uid == 2500 && u.homeDir == "/home/orb-slow" &&
+          u.missionCwd == "/home/orb-slow/.orb-missions/test"
+      | .error _ => false)
+
+set_option maxRecDepth 2048 in
 def runTests : IO UInt32 := do
   let passedRef ← IO.mkRef (0 : Nat)
   let check (label : String) (cond : Bool) : IO Unit := do
@@ -1787,7 +1814,10 @@ def runTests : IO UInt32 := do
 
   -- 5. Durable Store + SQLite `jobs.db` Dual-Sync + Crash Recovery + HTTP Handler E2E
   let randN ← IO.rand 100000 999999
-  let tmpRoot := s!"/tmp/orb-node-selftest-{randN}-{nowEp}"
+  -- Root exercises real systemd PrivateTmp confinement; its home and log paths
+  -- must remain visible outside the service's private /tmp and /var/tmp mounts.
+  let tmpBase := if (← geteuid) == 0 then "/run" else "/tmp"
+  let tmpRoot := s!"{tmpBase}/orb-node-selftest-{randN}-{nowEp}"
   IO.FS.createDirAll tmpRoot
   let .ok l0 ← openLedger tmpRoot
     | throw (IO.userError "openLedger l0 failed")
@@ -1973,6 +2003,10 @@ def runTests : IO UInt32 := do
      rNoUnixRej.status == 403 &&
      rRootUnixRej.status == 403 &&
      rCapMemberRej.status == 403)
+
+  -- A fresh root useradd can succeed after the former 30-second RPC budget.
+  -- Exercise the public provisioning client against a deliberately slow broker.
+  checkSlowProvisioning check
 
   -- Live OrbNode -> orb-privd confined user job + /jobs/:id/files + zero managed_auth leakage
   let privdHomes := System.FilePath.mk tmpRoot / "mu-homes"
