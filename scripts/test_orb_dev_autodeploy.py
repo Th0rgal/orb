@@ -98,6 +98,7 @@ class DeployGateTests(unittest.TestCase):
         prod_ok: bool = True,
         dev_only: bool = False,
         rollout_nodes: bool = False,
+        fail_command: str = "",
     ):
         import os
         script = (Path(__file__).parent / "ops/orb-deploy").read_text()
@@ -163,11 +164,26 @@ class DeployGateTests(unittest.TestCase):
             p.write_text(body)
             p.chmod(0o755)
 
+        # Fail once, then allow rollback commands to run. Record the binary
+        # selected by each service restart, rather than just its invocation.
+        systemctl = bin_dir / "systemctl"
+        systemctl.write_text(
+            '#!/bin/bash\n'
+            f'root={str(root)!r}\n'
+            'if [[ "$*" == "restart sandboxed-sh-dev" ]]; then bin=orb-core-dev; '
+            'elif [[ "$*" == "restart sandboxed-sh-prod" ]]; then bin=orb-core; else exit 0; fi\n'
+            'if [[ "$*" == "$FAIL_COMMAND" && ! -f "$root/failed" ]]; then '
+            'touch "$root/failed"; echo stopped > "$root/$bin.running"; exit 42; fi\n'
+            'cp "$root/usr/local/bin/$bin" "$root/$bin.running"\n'
+        )
+        systemctl.chmod(0o755)
+
         env = {
             **os.environ,
             "ORB_DEPLOY_TREE": str(tree),
             "ORB_DEPLOY_LOG": str(root / "deploy.log"),
             "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "FAIL_COMMAND": fail_command,
         }
         if dev_only:
             args = [SHA, "--dev-only"]
@@ -196,6 +212,29 @@ class DeployGateTests(unittest.TestCase):
             p.write_text(content)
             p.chmod(mode)
         return targets
+
+    def test_rollout_failure_restores_selected_release_and_running_services(self):
+        import tempfile
+        for failure in ("restart sandboxed-sh-dev", "restart sandboxed-sh-prod"):
+            for directory_pointer in (False, True):
+                with self.subTest(failure=failure, directory=directory_pointer), tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp)
+                    targets = self._seed_existing_targets(root)
+                    (root / "usr/local/bin/orb-core-dev").write_text("old-dev\n")
+                    base = root / f"usr/local/share/orb/releases/{SHA}"
+                    old = base / ("bin" if directory_pointer else "bin.old")
+                    old.mkdir(parents=True)
+                    (old / "sandboxed-node").write_text("old-release\n")
+                    if not directory_pointer:
+                        (base / "bin").symlink_to("bin.old")
+                    result = self._run_staged_deploy(root, rollout_nodes=True, fail_command=failure)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual((base / "bin/sandboxed-node").read_text(), "old-release\n")
+                    self.assertEqual((root / "orb-core-dev.running").read_text(), "old-dev\n")
+                    if failure.endswith("prod"):
+                        self.assertEqual((root / "orb-core.running").read_text(), "old-orb-core\n")
+                    for rel, (content, _) in targets.items():
+                        self.assertEqual((root / rel).read_text(), content, rel)
 
     def test_deploy_stages_ops_scripts_with_modes_backups_and_pruning(self):
         import os
