@@ -388,7 +388,7 @@ def _install_start_guard(
         guard_conf.parent.mkdir(parents=True, exist_ok=True)
         tmp_conf = Path(str(guard_conf) + ".tmp")
         tmp_conf.write_text(
-            f"[Service]\nExecStartPre=/usr/bin/python3 {guard_script}\n",
+            f"[Service]\nExecStartPre=+/usr/bin/python3 {guard_script}\n",
             encoding="utf-8",
         )
         os.chmod(tmp_conf, 0o644)
@@ -1265,13 +1265,21 @@ def perform_fenced_upgrade(
                 shutil.copy2(comp["staged"], comp["installing"])
                 os.chmod(comp["installing"], 0o755)
                 _fsync_file_and_dir(comp["installing"])
-            _install_start_guard(
-                binary_path=node_path,
-                journal_path=swap_journal_path,
-                build_conf_path=resolved_build_conf,
-                unit_name=unit_name,
-                service_ctl=ctl,
-            )
+            guard_units = [u for u, _db, _bp in targets]
+            if manage_privd_unit:
+                guard_units.append(privd_unit_name)
+            for guard_unit in guard_units:
+                guard_build_conf = resolved_build_conf
+                if guard_unit != unit_name and resolved_build_conf is not None:
+                    guard_build_conf = (resolved_build_conf.parent.parent /
+                        f"{_normalize_service_unit_name(guard_unit)}.service.d/30-build.conf")
+                _install_start_guard(
+                    binary_path=node_path,
+                    journal_path=swap_journal_path,
+                    build_conf_path=guard_build_conf,
+                    unit_name=guard_unit,
+                    service_ctl=ctl,
+                )
             _write_swap_journal(
                 swap_journal_path,
                 active_components=active_components,

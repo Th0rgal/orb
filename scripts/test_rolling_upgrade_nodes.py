@@ -120,6 +120,18 @@ def _start_core_api_server(cordoned):
 
 
 class RollingUpgradeNodesTest(unittest.TestCase):
+    def test_start_guard_is_privileged_and_clean_node_starts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            script, conf = roll._install_start_guard(
+                binary_path=root / "sandboxed-node",
+                build_conf_path=root / "worker.service.d/30-build.conf",
+            )
+            command = conf.read_text().split("ExecStartPre=", 1)[1].strip()
+            self.assertTrue(command.startswith("+"), command)
+            result = subprocess.run(command[1:].split(), capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_recovery_uncordons_only_healthy_owned_cordon(self):
         from unittest.mock import Mock
         for owner in (None, "other-operator", roll.DEFAULT_CORDON_OWNER):
