@@ -30,26 +30,42 @@ for (const theme of ["light", "dark"]) test(`controller board, skeleton geometry
   await page.screenshot({ path: `test-results/project-board-${theme}.png`, fullPage: true });
 });
 
-test.skip("mission board survives a project move", async ({ page }) => {
+for (const theme of ["light", "dark"]) test.describe(theme, () => {
+test("mission board survives a project move", async ({ page }) => {
   // This fixture server changes the board exactly as an MCP write would; the
   // browser only performs the real move action and never writes board REST.
   let project = "notes";
   const text = "# Mission plan\nKeep this text through the move.\n";
   const hash = "fixture-mission-board-sha256";
+  await page.addInitScript(theme => { localStorage.setItem("orb.apiUrl", location.origin); localStorage.setItem("orb.jwt", "test"); localStorage.setItem("orb.theme", theme); }, theme);
+  const mission = () => ({ id: "controller", title: "Release planning", project, placement_revision: project === "notes" ? 1 : 2, status: "completed", backend: "opencode", tags: [], history: [], updated_at: "2026-11-16T10:00:00Z" });
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
-    if (path === "/api/projects/notes") return route.fulfill({ json: { slug: "notes", controller_mission_id: null } });
+    if (path === "/api/projects") return route.fulfill({ json: { projects: [{ slug: "notes", title: "Notes" }, { slug: "next", title: "Next" }] } });
+    if (path === "/api/projects/notes" || path === "/api/projects/next") return route.fulfill({ json: { slug: path.split("/")[3], controller_mission_id: null } });
     if (path === "/api/projects/notes/boards" || path === "/api/projects/next/boards") {
-      return route.fulfill({ json: { project, boards: project === "next" ? [{ mission_id: "controller", title: "Release planning", status: "active", parent_mission_id: null, updated_at: "2026-11-16T10:00:00Z", bytes: text.length, text_sha256: hash }] : [] } });
+      return route.fulfill({ json: { project: path.split("/")[3], boards: project === path.split("/")[3] ? [{ mission_id: "controller", title: "Release planning", status: "active", parent_mission_id: null, updated_at: "2026-11-16T10:00:00Z", bytes: text.length, text_sha256: hash }] : [] } });
     }
     if (path === "/api/control/missions/controller/board") return route.fulfill({ json: { mission_id: "controller", text, updated_at: "2026-11-16T10:00:00Z", updated_by_mission_id: "controller", text_sha256: hash } });
     if (path === "/api/control/missions/move" && request.method() === "POST") { project = "next"; return route.fulfill({ json: { moved: [{ mission_id: "controller", project, folder: "", placement_revision: 2 }] } }); }
-    if (path.includes("/missions/controller")) return route.fulfill({ json: { id: "controller", title: "Release planning", project, status: "active", history: [] } });
-    return route.fulfill({ json: {} });
+    if (path === "/api/control/missions") return route.fulfill({ json: [mission()] });
+    if (path.includes("/missions/controller")) return route.fulfill({ json: mission() });
+    if (path.endsWith("/files")) return route.fulfill({ json: { entries: [] } });
+    return route.fulfill({ json: [] });
   });
-  await page.goto("/tests/project-board.html?theme=light");
-  await page.evaluate(() => fetch("/api/control/missions/move", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mission_ids: ["controller"], project: "next" }) }));
-  await page.reload();
-  await expect(page.locator("body")).toContainText("Mission plan");
-  await expect(page.locator("[data-text-sha256='fixture-mission-board-sha256']")).toHaveCount(0);
+  await page.goto("/");
+  const tree = page.getByRole("tree", { name: "Projects", exact: true });
+  await tree.getByRole("button", { name: "Notes", exact: true }).click();
+  const row = tree.getByRole("button", { name: "Release planning", exact: true });
+  await row.click();
+  await page.locator(".mission-board-disclosure > summary").click();
+  await expect(page.getByTestId("mission-board").locator("pre")).toHaveText(text);
+  await row.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Move", exact: true }).click();
+  await tree.getByRole("button", { name: "Next", exact: true }).click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Move here", exact: true }).click();
+  await expect.poll(() => project).toBe("next");
+  await expect(page.getByTestId("mission-board").locator("pre")).toHaveText(text);
+  await expect(page.getByTestId("mission-board")).toHaveAttribute("data-text-sha256", hash);
+});
 });
