@@ -173,7 +173,7 @@ same node (then split or restate the node).
 | C5 | lean-ci GitHub App: Administration read/write, installed on `Th0rgal/orb` | — | blocked (Thomas, 5.1) | App installation visible |
 | C6 | Set `ORB_LEAN_RUNNERS=true`; one master run green on lean.ci labels | C4, C5 | blocked | Run URL with lean labels on the jobs |
 | C7 | Measure and record: web-only PR, warm Lean PR, cold full run | C6 | blocked | Three run URLs with timings; targets met or a node opened per miss |
-| C8 | Every Orb binary builds through turbo-lean with no raw-Lake fallback, locally and in CI | — | verify | `scripts/build_orb_bins.sh` for all 12 binaries with the fallback variable unset |
+| C8 | Every Orb binary builds through turbo-lean with no raw-Lake fallback, locally and in CI. **C8a:** `nix/package.nix:220-224` sets `ORB_SKIP_TURBO_LEAN` and `ORB_ALLOW_RAW_LAKE_FALLBACK`, and no workflow builds Nix. **C8b:** `scripts/build_orb_bins.sh:309-315` runs raw Lake silently when turbo-lean is absent | — | wip | `scripts/build_orb_bins.sh` builds all 12 binaries with the fallback variable unset; the Nix build no longer needs either variable |
 
 ### U. LeanUI
 
@@ -200,8 +200,8 @@ Not on this roadmap: a macOS backend for LeanUI.
 
 | Id | Node | Needs | State | Done when |
 | --- | --- | --- | --- | --- |
-| R1 | Skill bundle reaches the node outside `argv` (file or stdin); no reference is dropped | — | wip | Library over 128 KiB installs completely on a node |
-| R2 | An exec failure on a node (E2BIG, ENOENT) is reported with its reason, not "exit 127" and an empty log | — | done | Oversized command yields an error naming the cause |
+| R1 | Skill bundle reaches the node outside `argv` (file or stdin); no reference is dropped (#1819, d42e8469) | — | done | — |
+| R2 | An exec failure on a node (E2BIG, ENOENT) is reported with its reason, not "exit 127" and an empty log (#1827, be0d66af) | — | wip (#1827) | Every node reports a build containing be0d66af; an oversized command names its cause |
 | R3 | A turn with no assistant output is retried, then `failed` with a reason | — | verify | Forced empty reply on dev |
 | R4 | Stall watchdog: a mission `active` with no job, or finished with live workers and no wake-up, is woken once and flagged | — | verify | Deliberately stalled test mission |
 | R5 | Honest tool receipts: `action_outcome` matches the result (start, resume and cancel report "rejected" on success today) | — | ready | Receipts of the three calls say `succeeded` |
@@ -209,7 +209,20 @@ Not on this roadmap: a macOS backend for LeanUI.
 | R7 | A 429 from a chain with one cooling target surfaces as a mission error within a minute | — | verify | Replay on dev |
 | R8 | `health/:account/clear` clears both cooldown stores; provider status comes from request evidence | — | verify | Replay on dev |
 | R9 | Controller closes out instead of dispatching: `start_mission` and the board make "ready node without worker" visible to the controller | — | ready | A controller tick lists ready nodes from the board |
-| R10 | Rust → Lean parity queue (`rust-lean-parity-audit.md`), RUN-07 first; no new audit documents | — | verify | Ranked queue with each item `done` or a node here |
+| R10 | Rust → Lean parity queue (`rust-lean-parity-audit.md`), RUN-07 first; no new audit documents. Already done: RUN-07, RUN-08, RUN-09, MCP-02, MCP-06, MCP-08, MCP-09, MCP-11, MCP-12, HTTP-06, HTTP-07, FLT-01, FLT-02, PROV01 to PROV05, SEC-05 | — | wip | Every audit item is done or covered by a node below |
+| R11 | SEC-01: an approval lease is marked biometric-signed without a verified enrolled-device signature | — | blocked (Thomas, 5.8) | A lease needs a valid request-bound P-256 signature; replay, bad-signature, wrong-body and expired cases are refused |
+| R12 | SEC-02, HTTP-01, SEC-03: one principal resolver | — | ready | A legacy token with an unknown subject and a password the database rejected never yield a session |
+| R13 | SEC-08: leases bound to a live mission and session at command time (X3 waits for it) | — | ready | A lease whose mission or session ended before its TTL is refused at verification and reaping |
+| R14 | FLT-13: raw exec on a managed machine never runs with a defaulted admin identity | — | ready | Raw exec on a worker is refused or runs as its own Unix identity, never admin |
+| R15 | MCP-05: a launch with `writer:false` runs read-only | — | ready | `start_mission(writer:false)` yields a read-only launch or an explicit refusal |
+| R16 | Tenant isolation residue: HTTP-14, MCP-13, SEC-04, MCP-14, FLT-03, FLT-09, FLT-15, FLT-16, SEC-07, SEC-11; with MCP-01 (and FLT-12, which dedupes to MCP-01/MCP-14) | — | ready | Two users and two unrelated same-user trees: no read, list, count, grant, lease or revocation crosses the boundary |
+| R17 | Honest answers, no stub that reports success: HTTP-04, HTTP-05, HTTP-13, HTTP-15, HTTP-16, MCP-04, MCP-10, MCP-15, MCP-16, MCP-17, MCP-18, FLT-04, FLT-14, PROV08, SEC-06 | — | ready | Each call performs its effect with a receipt or returns unsupported; no success without evidence |
+| R18 | Runtime liveness: FLT-05, FLT-06, FLT-07, FLT-08, RUN-01, RUN-02, RUN-03, RUN-05, RUN-06, RUN-10, RUN-11, RUN-12, MCP-03, MCP-07, FUP-01, FUP-02 | — | ready | A restart, partition, stale poller, blocked queue prefix or lost reply loses no owned work; SSE streams, WebSocket transports and queue delivery are live |
+| R19 | Hung node: a node whose API stops answering while it answers ping is cordoned from placement, its missions are flagged once, and a resume names the node as the cause (lagash, 2026-11-16) | — | ready | Reproduced on dev: cordon, one flag, resume names the node |
+| R20 | Data safety: HTTP-02, HTTP-03, HTTP-11, HTTP-12, HTTP-17, RUN-04 | — | ready | Uploads round-trip exact bytes with a usable receipt, downloads keep their headers, a color change keeps title and status, retention stays opt-in |
+| R21 | Provider usage truth: HTTP-08, HTTP-09, HTTP-10, PROV06, PROV07, PROV09, PROV10, PROV11, SEC-12 | — | ready | Usage, health, reliability and concurrency report observed caller-scoped values, never invented ones |
+| R22 | Managed budget: FLT-10, FLT-11 | — | ready | A mission pool and the dated global cap gate creation; an impossible single-VM fit is refused |
+| R23 | Legacy state migration: SEC-09, SEC-10 | — | ready | Existing bunker and telemetry state is migrated once, fail-closed, and survives restart |
 
 ### B. A board per mission
 
@@ -244,9 +257,10 @@ does that once B2 and B3 are deployed.
 | O6 | Dev deploys automatically on merge; prod stays deliberate | — | verify | A merge appears on dev with no human |
 | O7 | Failed units on agent-core fixed or deleted (`sandboxed-worker-rolling-upgrade`, `sandboxed-harness-update`, `sandboxed-development-identity`) | — | verify | `systemctl --failed` shows no Orb unit |
 | O8 | Retire `fleet-watcher`; monitor keeps only what Core cannot see about itself | R4 | blocked | — |
-| O9 | Hermes cron scheduler on agent-core | — | verify (probably dropped: Hermes controllers removed by #1807) | Closed with a reason |
+| O9 | Hermes cron scheduler on agent-core | — | dropped (#1807 removed the Hermes controllers) | — |
 | O10 | Hindsight pages updated when a group closes | per group | ready | Page ids on the board |
-| O11 | Old plan documents moved to `docs/archive/` with a pointer here | — | ready | One plan file left in `docs/plans/` besides audits still in use |
+| O11 | Old plan documents moved to `docs/archive/` with a pointer here (#1828, 24012e6a) | — | done | — |
+| O12 | Node configuration and packaging: OPS-01, OPS-02, OPS-03, OPS-04 | — | ready | A newer env edit beats a stale override, all capacity fields load and reload, the env file reloads without a signal, and the privd unit runs the installed artifact |
 
 ### X. Clients and smaller items
 
@@ -273,6 +287,8 @@ Only these. Each one names what it unblocks.
    it (library is updated by hand until then).
 7. **A `service_deploy` grant for the master mission**, if the master is to
    deploy on its own; otherwise deploys wait for the operator session.
+8. **Which clients approve leases** (desktop, iOS, Android), so SEC-01 can
+   verify their enrolled-device signatures before issuing one (unblocks R11).
 
 ## 6. Decisions in force
 
