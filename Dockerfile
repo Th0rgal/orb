@@ -13,10 +13,11 @@
 # ---------------------------------------------------------------------------
 ARG LEAN_BUILDER=lean-source-builder
 FROM ubuntu:24.04 AS lean-source-builder
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential git libssl-dev libsqlite3-dev zstd ca-certificates curl python3 \
+    build-essential pkg-config git libssl-dev libsqlite3-dev bubblewrap zstd ca-certificates curl python3 \
     && rm -rf /var/lib/apt/lists/* \
     && LEAN_ARCHIVE="/tmp/lean-4.35.0-linux.tar.zst" \
     && LEAN_SHA256="7289597a44543246c9227b8cae501767e095ce17f6d448b95fc4a8dc97268f6d" \
@@ -26,10 +27,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && echo "${LEAN_SHA256}  ${LEAN_ARCHIVE}" | sha256sum -c - \
     && mkdir -p /opt/lean-4.35.0 \
     && tar --zstd -xf "$LEAN_ARCHIVE" --strip-components=1 -C /opt/lean-4.35.0 \
-    && rm -f "$LEAN_ARCHIVE"
-ENV PATH="/opt/lean-4.35.0/bin:${PATH}"
+    && rm -f "$LEAN_ARCHIVE" \
+    && RUSTUP_ARCHIVE="/tmp/rustup-init" \
+    && RUSTUP_SHA256="20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c" \
+    && curl --retry 5 --retry-all-errors -fsSL \
+       "https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init" \
+       -o "$RUSTUP_ARCHIVE" \
+    && echo "${RUSTUP_SHA256}  ${RUSTUP_ARCHIVE}" | sha256sum -c - \
+    && chmod 0755 "$RUSTUP_ARCHIVE" \
+    && RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo "$RUSTUP_ARCHIVE" -y --no-modify-path --profile minimal --default-toolchain 1.93.0 \
+    && rm -f "$RUSTUP_ARCHIVE"
+ENV RUSTUP_HOME="/opt/rustup" CARGO_HOME="/opt/cargo" PATH="/opt/lean-4.35.0/bin:/opt/cargo/bin:${PATH}"
 
 WORKDIR /build
+
+COPY lean/lean-toolchain lean/turbo-lean-revision lean/
+RUN set -euo pipefail \
+    && revision="$(tr -d '[:space:]' < lean/turbo-lean-revision)" \
+    && [[ "$revision" =~ ^[0-9a-f]{40}$ ]] \
+    && source_dir="/tmp/turbo-lean-${revision}" \
+    && rm -rf "$source_dir" \
+    && git init -q "$source_dir" \
+    && git -C "$source_dir" fetch --depth 1 https://github.com/Th0rgal/turbo-lean.git "$revision" \
+    && git -C "$source_dir" checkout -q FETCH_HEAD \
+    && test "$(git -C "$source_dir" rev-parse HEAD)" = "$revision" \
+    && test -z "$(git -C "$source_dir" status --porcelain)" \
+    && test "$(cat "$source_dir/lean/lean-toolchain")" = "$(cat lean/lean-toolchain)" \
+    && CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR="$source_dir/target" cargo build --release --locked --manifest-path "$source_dir/Cargo.toml" -p turbo-lean \
+    && git -C "$source_dir" diff --exit-code \
+    && install -m 0755 "$source_dir/target/release/turbo-lean" "$CARGO_HOME/bin/turbo-lean" \
+    && rm -rf "$source_dir" \
+    && turbo-lean --version
 
 COPY lean/ lean/
 COPY shared/ shared/

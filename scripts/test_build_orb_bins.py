@@ -25,7 +25,8 @@ class BuildOrbBinsTests(unittest.TestCase):
         self.bin.mkdir()
         self.env = {"PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.root / "home"),
                     "FIXTURE_ROOT": str(self.root), "MOCK_ARCH": "x86_64",
-                    "MOCK_ELF_ARCH": "62", "ORB_SKIP_TURBO_LEAN": "1"}
+                    "MOCK_ELF_ARCH": "62", "ORB_SKIP_TURBO_LEAN": "1",
+                    "ORB_ALLOW_RAW_LAKE_FALLBACK": "1"}
         self.write("uname", '#!/bin/sh\ncase "$1" in -m) echo "$MOCK_ARCH";; *) echo Linux;; esac\n')
         self.write("nm", "#!/bin/sh\nexit 0\n")
         self.write("lake", '''#!/usr/bin/python3
@@ -287,8 +288,75 @@ class TurboLeanCompatibilityTests(unittest.TestCase):
     def test_skip_does_not_silently_bypass_installed_turbo(self):
         result = self.build('--only', 'sandboxed-mcp', ORB_SKIP_TURBO_LEAN='1')
         self.assertNotEqual(result.returncode, 0)
+        self.assertIn('ORB_SKIP_TURBO_LEAN=1', result.stderr)
         self.assertIn('ORB_ALLOW_RAW_LAKE_FALLBACK=1', result.stderr)
         self.assertFalse(self.log.exists())
+        allowed = self.build('--only', 'sandboxed-mcp', ORB_SKIP_TURBO_LEAN='1', ORB_ALLOW_RAW_LAKE_FALLBACK='1')
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        self.assertIn('WARNING:', allowed.stderr)
+        self.assertIn('ORB_SKIP_TURBO_LEAN=1', allowed.stderr)
+        self.assertEqual(len([c for c in self.calls() if c['tool'] == 'lake']), 1)
+
+    def test_missing_turbo_lean_requires_explicit_raw_lake_fallback(self):
+        (self.bin / 'turbo-lean').unlink()
+        with self.subTest(fallback='unset'):
+            result = self.build('--only', 'sandboxed-mcp')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('turbo-lean', result.stderr)
+            self.assertIn('ORB_ALLOW_RAW_LAKE_FALLBACK=1', result.stderr)
+            self.assertFalse(self.log.exists())
+        with self.subTest(fallback='allowed'):
+            result = self.build('--only', 'sandboxed-mcp', ORB_ALLOW_RAW_LAKE_FALLBACK='1')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('WARNING:', result.stderr)
+            self.assertIn('turbo-lean', result.stderr)
+            raw = [c for c in self.calls() if c['tool'] == 'lake']
+            self.assertEqual(len(raw), 1)
+            self.assertIn('-DwarningAsError=true', raw[0]['args'])
+
+    def test_dockerfile_and_managed_image_build_pinned_turbo_lean_without_raw_fallback(self):
+        dockerfile = (ROOT / 'Dockerfile').read_text()
+        source_stage = dockerfile.split('FROM ubuntu:24.04 AS lean-prebuilt', 1)[0]
+        self.assertIn('SHELL ["/bin/bash", "-o", "pipefail", "-c"]', source_stage)
+        self.assertIn('lean/turbo-lean-revision', source_stage)
+        self.assertIn('https://github.com/Th0rgal/turbo-lean.git', source_stage)
+        self.assertIn('https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init', source_stage)
+        self.assertIn('20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c', source_stage)
+        self.assertIn('--default-toolchain 1.93.0', source_stage)
+        self.assertIn('cargo build --release --locked', source_stage)
+        self.assertIn('turbo-lean --version', source_stage)
+        self.assertNotIn('ORB_ALLOW_RAW_LAKE_FALLBACK', source_stage)
+        self.assertNotIn('ORB_SKIP_TURBO_LEAN', source_stage)
+
+        has_bash_shell = False
+        for instruction in source_stage.replace('\\\n', ' ').splitlines():
+            stripped = instruction.strip()
+            if stripped.startswith('SHELL ') and '/bin/bash' in stripped:
+                has_bash_shell = True
+            elif stripped.startswith('RUN '):
+                if ('pipefail' in stripped or '[[' in stripped) and not has_bash_shell:
+                    self.fail(f'Dockerfile source stage RUN uses pipefail or [[ before a bash SHELL directive: {stripped}')
+
+        managed = (ROOT / 'scripts' / 'managed_image.py').read_text()
+        build_script = managed.split('BUILD_SCRIPT = r\'\'\'', 1)[1].split('\'\'\'', 1)[0]
+        self.assertIn('lean/turbo-lean-revision', build_script)
+        self.assertIn('https://github.com/Th0rgal/turbo-lean.git', build_script)
+        self.assertIn('https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init', build_script)
+        self.assertIn('20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c', build_script)
+        self.assertIn('--default-toolchain 1.93.0', build_script)
+        self.assertIn('cargo build --release --locked', build_script)
+        self.assertIn('turbo-lean --version', build_script)
+        self.assertNotIn('ORB_ALLOW_RAW_LAKE_FALLBACK', build_script)
+        self.assertNotIn('ORB_SKIP_TURBO_LEAN', build_script)
+
+        for label, snippet in (('Dockerfile', source_stage), ('managed_image.py', build_script)):
+            normalized = snippet.replace('\\\n', ' ')
+            for line in normalized.splitlines():
+                if 'apt-get' in line and 'install' in line:
+                    tokens = set(line.split())
+                    self.assertNotIn('cargo', tokens, f'{label} must not install unversioned apt cargo')
+                    self.assertNotIn('rustc', tokens, f'{label} must not install unversioned apt rustc')
+
 
 
 if __name__ == '__main__':
