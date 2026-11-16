@@ -1001,6 +1001,17 @@ def runOpenCodeAcpTests : IO Unit := do
   assertTrue "OpenCode ACP maps thinking and tool updates"
     (parsedAcp.any (fun pl => pl.thinking? == some "thinking") &&
      parsedAcp.any (fun pl => (pl.activity?.map (fun a => a.done && a.label == "shell" && a.kind == "command")) == some true))
+  let acpFailed := parseOneShotHarnessEvent "opencode"
+    "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"tool_call_update\",\"toolCallId\":\"t9\",\"kind\":\"other\",\"status\":\"failed\",\"title\":\"sandboxed_memory_recall\",\"content\":[{\"type\":\"content\",\"content\":{\"type\":\"text\",\"text\":\"Upstream Hindsight MCP transport failed\"}}],\"rawOutput\":{\"error\":\"Upstream Hindsight MCP transport failed\"}}}}"
+  let jsonFailed := parseOneShotHarnessEvent "opencode"
+    "{\"type\":\"tool_use\",\"part\":{\"id\":\"p9\",\"tool\":\"grep\",\"state\":{\"status\":\"error\",\"error\":\"file not found\",\"input\":{\"pattern\":\"PPL\"}}}}"
+  let acpDone := parseOneShotHarnessEvent "opencode"
+    "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"tool_call_update\",\"toolCallId\":\"t1\",\"status\":\"completed\",\"content\":[{\"type\":\"content\",\"content\":{\"type\":\"text\",\"text\":\"ok\"}}]}}}"
+  assertTrue "OpenCode failed tool calls keep their error text; successful ones carry none"
+    ((acpFailed.activity?.bind (·.error?)) == some "Upstream Hindsight MCP transport failed" &&
+     ((acpFailed.activity?.map (fun a => (a.toJVal.fieldStr? "error"))).join) == some "Upstream Hindsight MCP transport failed" &&
+     (jsonFailed.activity?.bind (·.error?)) == some "file not found" &&
+     (acpDone.activity?.bind (·.error?)) == none)
   let acpMethods ← IO.FS.readFile acpLog
   assertTrue "OpenCode ACP resumes, falls back to a new session, sets the model, then prompts"
     ((acpMethods.splitOn "session/resume \"ses_gone\"").length > 1 &&

@@ -78,7 +78,7 @@ export const localRunActive = (id: string) => !!running()[id];
 export interface LocalActivity {
   id: string; label: string; done: boolean; failed: boolean;
   kind?: string; background?: boolean; tool_use_id?: string | null;
-  detail?: string | null; status?: string; started_at?: number;
+  detail?: string | null; error?: string | null; status?: string; started_at?: number;
   updated_at?: number; finished_at?: number | null; thinking_tokens?: number | null;
 }
 const [activities, setActivities] = createSignal<Record<string, LocalActivity[]>>({});
