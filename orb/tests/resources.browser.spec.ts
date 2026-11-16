@@ -500,14 +500,19 @@ test("Resources page renders global Compute/Inference Sankey, USD toggle, bottom
         await expect(page.getByTestId("res-flow-inference")).toContainText("$29.2/h");
         await expect(page.getByTestId("res-flow-compute")).toContainText("$3.20/h");
         await page.getByTestId("res-metric-raw").click();
-        const history = page.getByRole("combobox", { name: "Consumption history" });
-        await history.focus();
-        await page.keyboard.press("ArrowDown");
-        await page.keyboard.press("Enter");
-        await expect(history).toHaveValue("compute");
-        await expect(consumptionCard).toContainText("Consumption · vCPU");
-        await expect(page.getByTestId("res-clear-filter")).toHaveCount(0);
-        await history.selectOption("inference");
+        // One consumption curve per flow: inference under the left flow, compute under the right one.
+        const computeCurve = page.getByTestId("res-consumption-card-compute");
+        await expect(consumptionCard).toContainText("Consumption · B tok/h");
+        await expect(computeCurve).toContainText("Consumption · vCPU");
+        await expect(page.getByRole("combobox", { name: "Consumption history" })).toHaveCount(0);
+        const left = (await consumptionCard.boundingBox())!;
+        const right = (await computeCurve.boundingBox())!;
+        expect(right.y).toBe(left.y);
+        expect(Math.abs(left.x - boxes[0].x)).toBeLessThan(2);
+        expect(Math.abs(right.x - boxes[1].x)).toBeLessThan(2);
+        expect(Math.abs(right.width - boxes[1].width)).toBeLessThan(2);
+      } else {
+        await expect(page.getByTestId("res-consumption-card-compute")).toHaveCount(0);
       }
       expect((await consumptionCard.boundingBox())!.y).toBe(baseCurveBox.y);
       expect((await timelineBar.boundingBox())!.y).toBe(baseTimelineBox.y);
