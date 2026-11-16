@@ -64,9 +64,7 @@ test("mission board survives a project move", async ({ page }) => {
   await page.getByRole("menuitem", { name: "Move", exact: true }).click();
   await tree.getByRole("button", { name: "Next", exact: true }).click({ button: "right" });
   await page.getByRole("menuitem", { name: "Move here", exact: true }).click();
-  // The fixture models the real POST /api/control/missions/move response;
-  // this assertion is intentionally on the response-side state.
-  await expect(page.locator("body")).toContainText("Mission board");
+  await expect.poll(() => project).toBe("next");
   await expect(page.getByTestId("mission-board").locator("pre")).toHaveText(text);
   await expect(page.getByTestId("mission-board")).toHaveAttribute("data-text-sha256", hash);
 });
