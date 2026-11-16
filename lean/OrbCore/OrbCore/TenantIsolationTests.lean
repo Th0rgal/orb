@@ -637,12 +637,25 @@ def run (root : String) : IO Unit := do
       let fetched ← call memberSession "get_action" (.obj #[("action_id", .str aid)])
       let replay ← call memberSession tool args
       check (first == fetched && first == replay) s!"{tool} first/get_action/retry equality"
+      let foreignReceipt ← call admin "get_action" (.obj #[("action_id", .str aid)])
+      check (foreignReceipt.fieldBool? "ok" == some false &&
+        (foreignReceipt.fieldOrNull "error").fieldStr? "code" == some "not_found" &&
+        !(renderCompact foreignReceipt).contains '🦉') s!"{tool} foreign tenant receipt not_found"
       let .ok stored ← execParamQuery store.missionsDb
           "SELECT result FROM mission_board_actions WHERE id=?1;" #[aid]
         | throw (IO.userError "board receipt query")
       let raw := (OrbBin.Json.parse (stored[1]![0]?.getD "")).toOption.getD .null
       check (raw == receipt.fieldOrNull "result" && (raw.field? "action_id").isNone)
         s!"{tool} stores raw payload"
+    for (bearer, target) in #[(member, "admin-mission"), (admin, "member-mission")] do
+      let (status, denied) ← send "GET" s!"/api/control/missions/{target}/board" bearer .null
+      check (status == 404 && denied.fieldStr? "error" == some "mission_not_found" &&
+        (denied.field? "text").isNone && (denied.field? "updated_at").isNone &&
+        (denied.field? "text_sha256").isNone) "B2_REST_foreign_board_read_zero_oracle"
+      let denied ← call bearer "read_mission_board" (.obj #[("mission_id", .str target)])
+      check (denied.fieldBool? "ok" == some false &&
+        (denied.fieldOrNull "error").fieldStr? "code" == some "not_found" &&
+        (denied.field? "result").isNone) "B2_MCP_foreign_board_read_zero_oracle"
     let .ok () ← upsertMission store {
       id := "board-reader", ownerUserId := "member", title := "board reader", parentMissionId := "member-mission",
       status := "awaiting_user", backend := "codex", modelOverride := "", workingDirectory := path,
@@ -674,6 +687,10 @@ def run (root : String) : IO Unit := do
     check (createdController.fieldBool? "ok" == some true && !successorId.isEmpty) s!"MCP start_mission accepts controller: {renderCompact createdController}"
     let (_, successorBoard) ← send "GET" "/api/projects/member-project/board" member
     check (successorBoard.fieldStr? "controller_mission_id" == some successorId) "MCP creation nominates controller"
+    let (oldBoardStatus, retainedBoard) ← send "GET" "/api/control/missions/member-mission/board" member .null
+    check (successorBoard.fieldStr? "text" == some "" &&
+      successorBoard.fieldOrNull "updated_at" == .null && oldBoardStatus == 200 &&
+      retainedBoard.fieldStr? "text" == some "controller plan") "B2_controller_replacement_preserves_old_board_new_empty"
     let (restControllerStatus, restController) ← send "POST" "/api/control/missions" member
       (.obj #[("title", .str "REST controller"), ("backend", .str "codex"),
         ("project", .str "member-project"), ("placement", .str "client"), ("controller", .bool true)])
