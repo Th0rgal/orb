@@ -336,7 +336,7 @@ def nominateCreatedProjectController (store : CoreStore) (slug title missionId n
   match ← execParamQuery store.projectsDb
       "UPDATE projects SET controller_mission_id=?2 WHERE slug=?1;" #[slug, missionId] with
   | .error e => return .error e
-  | .ok _ => return .ok ()
+  | .ok _ => return ← OrbCore.MissionBoard.claimUnclaimed store.missionsDb store.projectsDb slug missionId
 
 /-- Shared REST/MCP project board representation. -/
 def readProjectBoard (store : CoreStore) (slug : String) : IO JVal := do
@@ -811,6 +811,8 @@ def dispatchProjectAndControllerRoutes?
           | _ => return some (jsonErr 400 "invalid_mission_id")
         if let .error e ← execParamQuery store.projectsDb
             "UPDATE projects SET controller_mission_id=NULLIF(?2,'') WHERE slug=?1;" #[scopedSlug, mid] then
+          return some (jsonErr 500 e)
+        if let .error e ← OrbCore.MissionBoard.claimUnclaimed store.missionsDb store.projectsDb scopedSlug mid then
           return some (jsonErr 500 e)
         return some (jsonResp 200 (← readProjectBoard store scopedSlug))
 

@@ -90,6 +90,33 @@ structure Reader where
   missionId : String := ""
   role : String := ""
 
+/-- Claim only slugs recorded as unclaimed by migration. Consuming that record
+    in the same transaction prevents later controller replacement from copying it. -/
+def claimUnclaimed (missions projects : SqliteDb) (slug controller : String) : IO (Except String Unit) := do
+  if controller.isEmpty then return .ok ()
+  let .ok legacy ← query projects "SELECT text,updated_at FROM project_board WHERE slug=?1;" #[slug]
+    | return .error "db_error"
+  if legacy.size ≤ 1 then return .ok ()
+  transaction missions do
+    let q := sqliteQueryRowsRaw missions.handle
+    let .ok receipt ← q "SELECT detail FROM mission_board_migrations WHERE name=?1;" #[migrationName]
+      | return .error "db_error"
+    if receipt.size ≤ 1 then return .ok ()
+    let detail := (OrbBin.Json.parse (receipt[1]![0]?.getD "{}")).toOption.getD (.obj #[])
+    let unclaimed := (detail.fieldArr? "unclaimed").getD #[]
+    if !unclaimed.contains (.str slug) then return .ok ()
+    let text := legacy[1]![0]?.getD ""
+    if let .error e ← q
+        ("INSERT OR IGNORE INTO mission_board(mission_id,text,updated_at,updated_by_mission_id,text_sha256) " ++
+         "SELECT id,?2,?3,id,?4 FROM missions WHERE id=?1;")
+        #[controller, text, legacy[1]![1]?.getD "", digest text] then return .error e
+    let .ok target ← q "SELECT id FROM missions WHERE id=?1;" #[controller] | return .error "db_error"
+    if target.size ≤ 1 then return .error "mission_not_found"
+    if let .error e ← q "UPDATE mission_board_migrations SET detail=?2 WHERE name=?1;"
+        #[migrationName, renderCompact (detail.setField "unclaimed" (.arr (unclaimed.filter (· != .str slug))))] then
+      return .error e
+    return .ok ()
+
 /-- The sole board read decision. A mission session never inherits its owner's
     user-wide read authority. Every lineage hop must have the authenticated issuer's
     owner id; shares and foreign intermediaries confer no authority. -/
