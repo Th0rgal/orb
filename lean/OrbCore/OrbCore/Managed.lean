@@ -615,7 +615,8 @@ private def globalManagedSpendTx (st : ManagedComputeStore) (nowSec fallback : U
   let .ok _ ← execParamQueryUnlocked st.db
       ("INSERT OR IGNORE INTO managed_global_budget_baseline(day_start,cents) " ++
        "SELECT ?1,MAX(0,COALESCE((SELECT spent_today_cents FROM managed_fleet_state WHERE singleton_id=1),?2) " ++
-       "- COALESCE((SELECT SUM(cents) FROM managed_cost_reservations),0));")
+       "- COALESCE((SELECT SUM(cents) FROM managed_cost_reservations),0)) " ++
+       "WHERE NOT EXISTS (SELECT 1 FROM managed_global_budget_baseline);")
       #[s!"{day}",s!"{fallback}"] | return .error "managed_global_budget_migration_failed"
   let .ok rows ← execParamQueryUnlocked st.db
       ("SELECT COALESCE((SELECT SUM(cents) FROM managed_global_budget_baseline WHERE day_start=?1),0) + " ++
@@ -863,9 +864,11 @@ private def admitManagedCostTx (st : ManagedComputeStore) (fleet : ManagedFleetS
       "SELECT enabled,boat_enabled,daily_cap_cents,spent_today_cents,max_concurrent FROM managed_fleet_state WHERE singleton_id=1;" #[]
     | return .error "managed_admission_read_failed"
   let current := if rows.size > 1 then { fleet with
-      enabled := cell rows[1]! 0 == "1", boatEnabled := cell rows[1]! 1 == "1",
-      dailyCapCents := cellU64 rows[1]! 2, spentTodayCents := cellU64 rows[1]! 3,
-      maxConcurrent := cellU64 rows[1]! 4
+      enabled := fleet.enabled && cell rows[1]! 0 == "1",
+      boatEnabled := fleet.boatEnabled && cell rows[1]! 1 == "1",
+      dailyCapCents := min fleet.dailyCapCents (cellU64 rows[1]! 2),
+      spentTodayCents := cellU64 rows[1]! 3,
+      maxConcurrent := min fleet.maxConcurrent (cellU64 rows[1]! 4)
     } else fleet
   -- This is inside the SAME immediate transaction as charging. Settings imports,
   -- stale snapshots, counter resets and concurrent callers cannot raise or race
@@ -1124,11 +1127,6 @@ def provisionManagedMachine (st : ManagedComputeStore) (fleet : ManagedFleetStat
   if machine.ttlMinutes < 5 || machine.ttlMinutes > 720 then return .error "managed_ttl_invalid"
   if !isKnownProvider machine.provider || machine.id.isEmpty || machine.nodeBootEpoch == 0 then
     return .error "managed_spawn_invalid"
-  -- Keep the caller snapshot as a cheap, fail-closed preflight. The
-  -- authoritative transaction below repeats this check against the store and
-  -- also applies dated reservations and bandwidth limits.
-  if st.instanceName != "dev" && !admitManagedSpawn fleet machine.spentCents machine.ttlMinutes.toUInt32 then
-    return .error "managed_spawn_rejected"
   -- Persist the migration's date even when admission subsequently refuses an
   -- exhausted legacy allowance. Otherwise every retry could re-date that spend.
   if st.instanceName != "dev" then

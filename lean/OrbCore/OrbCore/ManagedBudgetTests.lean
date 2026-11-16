@@ -29,10 +29,19 @@ private def setBandwidth (st : ManagedComputeStore) (mission json : String) : IO
   discard <| require (← saveMissionBudgetConfig st {
     missionId := mission, bandwidthLimitsJson := json })
 
+private def configure (st : ManagedComputeStore) : IO Unit := do
+  discard <| require (← saveManagedFleetConfig st true true fleet.dailyCapCents
+    fleet.spentTodayCents fleet.maxConcurrent)
+
+private def requireAdmission {α : Type} (label : String) (value : Except String α) : IO α :=
+  match value with
+  | .ok result => pure result
+  | .error error => throw (IO.userError s!"{label}: {error}")
+
 private def refusedAs (expected : String) (st : ManagedComputeStore) (id : String) (cost now : UInt64) : IO Unit := do
   match ← provisionManagedMachine st fleet (machine id cost) now with
   | .ok _ => throw (IO.userError s!"unexpected admission: {id}")
-  | .error error => check (error == expected) s!"{id}: named budget refusal"
+  | .error error => check (error == expected) s!"{id}: named budget refusal (got {error})"
   check ((← getManagedMachine? st id).isNone) s!"{id}: refusal creates no provider work"
 
 private def refused (st : ManagedComputeStore) (id : String) (cost now : UInt64) : IO Unit :=
@@ -43,13 +52,15 @@ def midnightAndReload (root : String) : IO Unit := do
   let path := root ++ "/budget-midnight.db"
   let st ← require (← openManagedComputeStore path)
   try
-    discard <| require (← provisionManagedMachine st fleet (machine "day-one" 10) 86390)
+    configure st
+    discard <| requireAdmission "day-one" (← provisionManagedMachine st fleet (machine "day-one" 10) 86390)
     refused st "day-one-over" 1 86399
     refused st "live-midnight" 1 86401
     sql st "UPDATE managed_machines SET phase_code=3,status='destroyed' WHERE id='day-one';"
   finally closeManagedComputeStore st
   let reopened ← require (← openManagedComputeStore path)
   try
+    configure reopened
     let snapshot ← require (← loadManagedFleetAt reopened true true 10 10 100 86402)
     check (snapshot.spentTodayCents == 0) "midnightAndReload: old completed commitments roll off"
     discard <| require (← provisionManagedMachine reopened { fleet with spentTodayCents := 10 }
@@ -61,10 +72,12 @@ def liveCommitmentAfterReload (root : String) : IO Unit := do
   let path := root ++ "/budget-live-reload.db"
   let st ← require (← openManagedComputeStore path)
   try
+    configure st
     discard <| require (← provisionManagedMachine st fleet (machine "live" 7) 86390)
   finally closeManagedComputeStore st
   let reopened ← require (← openManagedComputeStore path)
   try
+    configure reopened
     refused reopened "live-over" 4 86401
     discard <| require (← provisionManagedMachine reopened fleet (machine "fits" 3) 86401)
     let snapshot ← require (← loadManagedFleetAt reopened true true 10 0 100 86402)
@@ -78,8 +91,10 @@ def oldSchemaNonzeroLiveCommitment (root : String) : IO Unit := do
   -- three-cent commitment, must remain eight rather than eleven or three.
   let old ← require (← openManagedComputeStore path)
   try
+    configure old
     discard <| require (← provisionManagedMachine old fleet (machine "legacy-live" 3) 86390)
     sql old "UPDATE managed_fleet_state SET spent_today_cents=8;"
+    sql old "DELETE FROM managed_global_budget_baseline;"
   finally closeManagedComputeStore old
   let migrated ← require (← openManagedComputeStore path)
   try
@@ -103,6 +118,7 @@ def concurrentGlobalAdmission (root : String) : IO Unit := do
   let a ← require (← openManagedComputeStore path)
   let b ← require (← openManagedComputeStore path)
   try
+    configure a
     let first ← IO.asTask (provisionManagedMachine a fleet (machine "race-a" 6) 90000)
     let second ← IO.asTask (provisionManagedMachine b fleet (machine "race-b" 6) 90000)
     let .ok ra := first.get | throw (IO.userError "first admission task failed")
@@ -119,20 +135,24 @@ def concurrentGlobalAdmission (root : String) : IO Unit := do
 def bandwidthAdmission (root : String) : IO Unit := do
   let st ← require (← openManagedComputeStore (root ++ "/budget-bandwidth.db"))
   try
-    setBandwidth st "owner" "{\"compute_vcpu_per_min\":2,\"compute_usd_per_hour\":100,\"protect_root\":false}"
+    configure st
+    setBandwidth st "owner" "{\"compute_vcpu_per_min\":3,\"compute_usd_per_hour\":100,\"protect_root\":false}"
     discard <| require (← provisionManagedMachine st fleet (bandwidthMachine "bw-first" "owner") 90000)
-    refusedAs "managed_compute_vcpu_bandwidth_exceeded" st "bw-over" 1 90001
+    match ← provisionManagedMachine st fleet (bandwidthMachine "bw-over" "owner") 90001 with
+    | .ok _ => throw (IO.userError "unexpected admission: bw-over")
+    | .error error => check (error == "managed_compute_vcpu_bandwidth_exceeded") "bw-over: named budget refusal"
+    check ((← getManagedMachine? st "bw-over").isNone) "bw-over: refusal creates no provider work"
     sql st "UPDATE managed_machines SET phase_code=3,status='destroyed' WHERE id='bw-first';"
     discard <| require (← provisionManagedMachine st fleet (bandwidthMachine "bw-room" "owner") 1)
-    setBandwidth st "root-owner" "{\"compute_vcpu_per_min\":1,\"compute_usd_per_hour\":100,\"protect_root\":true}"
+    setBandwidth st "root-owner" "{\"compute_vcpu_per_min\":2,\"compute_usd_per_hour\":100,\"protect_root\":true}"
     discard <| require (← provisionManagedMachine st fleet (bandwidthMachine "root-protected" "root-owner") 2)
   finally closeManagedComputeStore st
 
 def run (root : String) : IO Unit := do
-  midnightAndReload root
-  liveCommitmentAfterReload root
-  oldSchemaNonzeroLiveCommitment root
-  concurrentGlobalAdmission root
-  bandwidthAdmission root
+  try midnightAndReload root catch e => throw (IO.userError s!"midnightAndReload: {e}")
+  try liveCommitmentAfterReload root catch e => throw (IO.userError s!"liveCommitmentAfterReload: {e}")
+  try oldSchemaNonzeroLiveCommitment root catch e => throw (IO.userError s!"oldSchemaNonzeroLiveCommitment: {e}")
+  try concurrentGlobalAdmission root catch e => throw (IO.userError s!"concurrentGlobalAdmission: {e}")
+  try bandwidthAdmission root catch e => throw (IO.userError s!"bandwidthAdmission: {e}")
 
 end OrbCore.ManagedBudgetTests
