@@ -68,5 +68,13 @@ test("mission board survives a project move", async ({ page }) => {
   await expect.poll(() => project).toBe("next");
   await expect(page.getByTestId("mission-board").locator("pre")).toHaveText(text);
   await expect(page.getByTestId("mission-board")).toHaveAttribute("data-text-sha256", hash);
+  await tree.getByRole("button", { name: "Next", exact: true }).click();
+  await page.getByRole("button", { name: "Project actions for Next", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Project settings", exact: true }).click();
+  await expect(page.locator(`[data-board-mission="${id}"]`)).toBeVisible();
+  await tree.getByRole("button", { name: "Notes", exact: true }).click();
+  await page.getByRole("button", { name: "Project actions for Notes", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Project settings", exact: true }).click();
+  await expect(page.locator(`[data-board-mission="${id}"]`)).toHaveCount(0);
 });
 });
