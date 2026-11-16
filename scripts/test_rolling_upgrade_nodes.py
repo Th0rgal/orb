@@ -416,11 +416,15 @@ class RollingUpgradeNodesTest(unittest.TestCase):
             prelude_check = (
                 roll._remote_worker_prelude()
                 + "\nctl = type('C', (), {'is_active': lambda s, u: True})()"
-                + f"\nprint(json.dumps(probe_worker_state(None, binary_path={str(bin_path)!r}, service_ctl=ctl, runtime_busy_probe=lambda: 0, live_work_dir_probe=lambda: {str(root)!r})))\n"
+                + f"\nprint(json.dumps(probe_worker_state(None, binary_path={str(bin_path)!r}, service_ctl=ctl, runtime_busy_probe=lambda: 0, live_work_dir_probe=lambda: {str(root)!r}, include_metadata=True)))\n"
             )
             proc = subprocess.run([sys.executable, "-"], input=prelude_check, capture_output=True, text=True, check=True)
             parsed = json.loads(proc.stdout.strip())
-            self.assertEqual(parsed, {"staged": False, "running": 0, "healthy": True, "quarantined": False})
+            self.assertEqual(
+                {k: parsed[k] for k in ("staged", "running", "healthy", "quarantined")},
+                {"staged": False, "running": 0, "healthy": True, "quarantined": False},
+            )
+            self.assertEqual(parsed["binary_sha256"]["sandboxed-node"], roll.compute_file_sha256(bin_path))
 
     def test_missing_schemaless_or_mismatched_ledgers_fail_closed_and_wave_halts(self):
         self.assertEqual(roll.parse_node_spec("ashur"), ("ashur", None))
@@ -590,7 +594,10 @@ class RollingUpgradeNodesTest(unittest.TestCase):
                 live_work_dir_probe=lambda: str(primary_dir),
                 sibling_units_probe=sibling_probe,
             )
-            self.assertEqual(probe_busy, {"staged": True, "running": 1, "healthy": True, "quarantined": False})
+            self.assertEqual(
+                {k: probe_busy[k] for k in ("staged", "running", "healthy", "quarantined")},
+                {"staged": True, "running": 1, "healthy": True, "quarantined": False},
+            )
 
             busy_res = roll.perform_fenced_upgrade(
                 db_path=str(primary_db),
@@ -648,6 +655,342 @@ class RollingUpgradeNodesTest(unittest.TestCase):
             self.assertEqual(bin_path.read_text(), "v2")
             self.assertIn("restart_rollback:sandboxed-node:v2", actions)
             self.assertIn("restart_rollback:sandboxed-node-admin:v2", actions)
+
+    def test_replay_checksum_mismatch_quarantines_before_swap_without_stopping_services(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            db_path = root / "jobs.db"
+            con = sqlite3.connect(db_path)
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, state TEXT NOT NULL)")
+            con.commit()
+            con.close()
+
+            bin_dir = root / "usr/local/bin"
+            sbin_dir = root / "usr/local/sbin"
+            bin_dir.mkdir(parents=True)
+            sbin_dir.mkdir(parents=True)
+            node_bin = bin_dir / "sandboxed-node"
+            mcp_bin = bin_dir / "sandboxed-mcp"
+            privd_bin = sbin_dir / "orb-privd"
+            build_conf = root / "30-build.conf"
+
+            node_bin.write_text("node-v1")
+            mcp_bin.write_text("mcp-v1")
+            privd_bin.write_text("privd-v1")
+            build_conf.write_text("[Service]\nEnvironment=ORB_BUILD_SHA=1111111111111111111111111111111111111111\n")
+
+            (bin_dir / "sandboxed-node.new").write_text("node-v2")
+            (bin_dir / "sandboxed-mcp.new").write_text("mcp-v2-corrupted")
+            (sbin_dir / "orb-privd.new").write_text("privd-v2")
+
+            expected_shas = {
+                "sandboxed-node": roll.compute_file_sha256(bin_dir / "sandboxed-node.new"),
+                "sandboxed-mcp": "a" * 64,  # mismatch
+                "orb-privd": roll.compute_file_sha256(sbin_dir / "orb-privd.new"),
+            }
+            actions = []
+
+            class RecordingCtl:
+                def is_active(self, _u):
+                    return True
+
+                def stop(self, u):
+                    actions.append(f"stop:{u}")
+
+                def start(self, u):
+                    actions.append(f"start:{u}")
+
+                def start_best_effort(self, u):
+                    actions.append(f"start_best_effort:{u}")
+
+                def restart_best_effort(self, u):
+                    actions.append(f"restart:{u}")
+
+                def daemon_reload(self):
+                    actions.append("daemon_reload")
+
+            with self.assertRaisesRegex(RuntimeError, "checksum mismatch for sandboxed-mcp"):
+                roll.perform_fenced_upgrade(
+                    db_path=str(db_path),
+                    binary_path=str(node_bin),
+                    verify_delay_secs=0.0,
+                    service_ctl=RecordingCtl(),
+                    runtime_busy_probe=lambda: 0,
+                    live_work_dir_probe=lambda: str(root),
+                    mcp_binary_path=str(mcp_bin),
+                    privd_binary_path=str(privd_bin),
+                    expected_build_sha="2" * 40,
+                    expected_sha256=expected_shas,
+                    build_conf_path=str(build_conf),
+                )
+
+            # Services were never stopped, live binaries & build_conf are untouched, staged files are quarantined
+            self.assertEqual(actions, [])
+            self.assertEqual(node_bin.read_text(), "node-v1")
+            self.assertEqual(mcp_bin.read_text(), "mcp-v1")
+            self.assertEqual(privd_bin.read_text(), "privd-v1")
+            self.assertIn("1111111111111111111111111111111111111111", build_conf.read_text())
+            self.assertTrue((bin_dir / "sandboxed-node.new.failed").exists())
+            self.assertTrue((bin_dir / "sandboxed-mcp.new.failed").exists())
+            self.assertTrue((sbin_dir / "orb-privd.new.failed").exists())
+
+    def test_replay_failed_health_check_rolls_back_all_three_binaries_and_build_conf(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            db_path = root / "jobs.db"
+            con = sqlite3.connect(db_path)
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, state TEXT NOT NULL)")
+            con.commit()
+            con.close()
+
+            bin_dir = root / "usr/local/bin"
+            sbin_dir = root / "usr/local/sbin"
+            bin_dir.mkdir(parents=True)
+            sbin_dir.mkdir(parents=True)
+            node_bin = bin_dir / "sandboxed-node"
+            mcp_bin = bin_dir / "sandboxed-mcp"
+            privd_bin = sbin_dir / "orb-privd"
+            build_conf = root / "30-build.conf"
+
+            old_sha = "1" * 40
+            new_sha = "2" * 40
+            node_bin.write_text("node-v1")
+            mcp_bin.write_text("mcp-v1")
+            privd_bin.write_text("privd-v1")
+            build_conf.write_text(f"[Service]\nEnvironment=ORB_BUILD_SHA={old_sha}\n")
+
+            (bin_dir / "sandboxed-node.new").write_text("node-v2")
+            (bin_dir / "sandboxed-mcp.new").write_text("mcp-v2")
+            (sbin_dir / "orb-privd.new").write_text("privd-v2")
+
+            expected_shas = {
+                "sandboxed-node": roll.compute_file_sha256(bin_dir / "sandboxed-node.new"),
+                "sandboxed-mcp": roll.compute_file_sha256(bin_dir / "sandboxed-mcp.new"),
+                "orb-privd": roll.compute_file_sha256(sbin_dir / "orb-privd.new"),
+            }
+            actions = []
+
+            class HealthyUnitCtl:
+                def is_active(self, _u):
+                    return True
+
+                def stop(self, u):
+                    actions.append(f"stop:{u}")
+
+                def start(self, u):
+                    actions.append(f"start:{u}:{node_bin.read_text()}:{mcp_bin.read_text()}:{privd_bin.read_text()}")
+
+                def start_best_effort(self, u):
+                    actions.append(f"start_best_effort:{u}")
+
+                def restart_best_effort(self, u):
+                    actions.append(f"restart_rollback:{u}:{node_bin.read_text()}:{mcp_bin.read_text()}:{privd_bin.read_text()}")
+
+                def daemon_reload(self):
+                    actions.append("daemon_reload")
+
+            with self.assertRaisesRegex(RuntimeError, "health check reported build_sha"):
+                roll.perform_fenced_upgrade(
+                    db_path=str(db_path),
+                    binary_path=str(node_bin),
+                    verify_delay_secs=0.0,
+                    service_ctl=HealthyUnitCtl(),
+                    runtime_busy_probe=lambda: 0,
+                    live_work_dir_probe=lambda: str(root),
+                    mcp_binary_path=str(mcp_bin),
+                    privd_binary_path=str(privd_bin),
+                    expected_build_sha=new_sha,
+                    expected_sha256=expected_shas,
+                    build_conf_path=str(build_conf),
+                    health_check_probe=lambda exp_sha, _exp_shas: (
+                        False,
+                        f"health check reported build_sha={old_sha!r} != expected {exp_sha!r}",
+                    ),
+                )
+
+            # All 3 binaries and 30-build.conf are rolled back to v1, and both sandboxed-node + orb-privd restarted on v1
+            self.assertEqual(node_bin.read_text(), "node-v1")
+            self.assertEqual(mcp_bin.read_text(), "mcp-v1")
+            self.assertEqual(privd_bin.read_text(), "privd-v1")
+            self.assertEqual(roll._read_build_conf_sha(build_conf), old_sha)
+            self.assertTrue((bin_dir / "sandboxed-node.new.failed").exists())
+            self.assertTrue((bin_dir / "sandboxed-mcp.new.failed").exists())
+            self.assertTrue((sbin_dir / "orb-privd.new.failed").exists())
+            self.assertIn("stop:orb-privd", actions)
+            self.assertIn("restart_rollback:orb-privd:node-v1:mcp-v1:privd-v1", actions)
+            self.assertIn("restart_rollback:sandboxed-node:node-v1:mcp-v1:privd-v1", actions)
+
+    def test_replay_drain_timeout_leaves_node_cordoned_and_halts_rollout(self):
+        cordoned = {"ashur": False, "nippur": False}
+        server = _start_core_api_server(cordoned)
+        try:
+            api = roll.HttpCoreApi(f"http://127.0.0.1:{server.server_port}", roll.mint_hs256_jwt("test-secret"))
+            ops = FakeNodeOps(
+                {
+                    "ashur": {"staged": True, "running": 2},
+                    "nippur": {"staged": True, "running": 0},
+                }
+            )
+            fake_now = [100.0]
+
+            def fake_sleep(dt_secs):
+                fake_now[0] += dt_secs
+
+            events, done = roll.run_governed_rollout(
+                core_api=api,
+                node_ops=ops,
+                remote_nodes=[("ashur", None), ("nippur", None)],
+                max_concurrent_cordons=1,
+                apply=True,
+                drain_timeout_secs=10.0,
+                poll_interval_secs=4.0,
+                sleep_fn=fake_sleep,
+                clock_fn=lambda: fake_now[0],
+            )
+            self.assertFalse(done)
+            self.assertTrue(cordoned["ashur"])
+            self.assertFalse(cordoned["nippur"])
+            self.assertEqual(ops.upgraded_remotes, [])
+            self.assertTrue(any(ev["action"] == "drain_timeout" and ev["nodes"] == ["ashur"] for ev in events))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_replay_node_already_on_target_and_interrupted_rollout_resumed(self):
+        target_sha = "3" * 40
+        target_shas = {
+            "sandboxed-node": "a" * 64,
+            "sandboxed-mcp": "b" * 64,
+            "orb-privd": "c" * 64,
+        }
+        old_shas = {
+            "sandboxed-node": "1" * 64,
+            "sandboxed-mcp": "2" * 64,
+            "orb-privd": "3" * 64,
+        }
+        # Simulate an interrupted rollout where ashur was already upgraded, nippur was left cordoned mid-drain,
+        # and babylon has not been touched yet.
+        cordoned = {"ashur": False, "nippur": True, "babylon": False}
+        server = _start_core_api_server(cordoned)
+        try:
+            api = roll.HttpCoreApi(f"http://127.0.0.1:{server.server_port}", roll.mint_hs256_jwt("test-secret"))
+            staged_calls = []
+
+            class ResumableOps(FakeNodeOps):
+                def probe_remote(self, host, _db_path):
+                    st = self.remote_state[host]
+                    return {
+                        "staged": bool(st.get("staged", False)),
+                        "running": int(st.get("running", 0)),
+                        "healthy": bool(st.get("healthy", True)),
+                        "quarantined": bool(st.get("quarantined", False)),
+                        "build_sha": st.get("build_sha", ""),
+                        "binary_sha256": dict(st.get("binary_sha256", {})),
+                    }
+
+                def stage_remote(self, host, artifacts, build_sha=None):
+                    staged_calls.append(host)
+                    self.remote_state[host]["staged"] = True
+
+                def upgrade_remote(self, host, _db_path):
+                    res = super().upgrade_remote(host, _db_path)
+                    if res == "UPGRADED":
+                        self.remote_state[host]["build_sha"] = target_sha
+                        self.remote_state[host]["binary_sha256"] = dict(target_shas)
+                    return res
+
+            ops = ResumableOps(
+                {
+                    "ashur": {
+                        "staged": False,
+                        "running": 0,
+                        "healthy": True,
+                        "build_sha": target_sha,
+                        "binary_sha256": dict(target_shas),
+                    },
+                    "nippur": {
+                        "staged": True,
+                        "running": 1,
+                        "healthy": True,
+                        "build_sha": "1" * 40,
+                        "binary_sha256": dict(old_shas),
+                    },
+                    "babylon": {
+                        "staged": False,
+                        "running": 0,
+                        "healthy": True,
+                        "build_sha": "1" * 40,
+                        "binary_sha256": dict(old_shas),
+                    },
+                }
+            )
+            stage_spec = {
+                "sandboxed-node": ("/tmp/node", "/usr/local/bin/sandboxed-node"),
+                "sandboxed-mcp": ("/tmp/mcp", "/usr/local/bin/sandboxed-mcp"),
+                "orb-privd": ("/tmp/privd", "/usr/local/sbin/orb-privd"),
+            }
+
+            # Status view before resume shows ashur on_target=True and nippur/babylon on_target=False
+            status_before = roll.collect_fleet_rollout_status(
+                core_api=api,
+                node_ops=ops,
+                remote_nodes=[("ashur", None), ("nippur", None), ("babylon", None)],
+                expected_build_sha=target_sha,
+                expected_sha256=target_shas,
+            )
+            by_node = {r["node"]: r for r in status_before}
+            self.assertTrue(by_node["ashur"]["on_target"])
+            self.assertFalse(by_node["nippur"]["on_target"])
+            self.assertFalse(by_node["babylon"]["on_target"])
+
+            # Dry-run reports ashur as already_on_target, nippur as draining, babylon as pending_wave without mutating
+            dry_events, dry_done = roll.rolling_upgrade_step(
+                core_api=api,
+                node_ops=ops,
+                remote_nodes=[("ashur", None), ("nippur", None), ("babylon", None)],
+                max_concurrent_cordons=1,
+                apply=False,
+                stage_artifacts=stage_spec,
+                expected_build_sha=target_sha,
+                expected_sha256=target_shas,
+            )
+            self.assertFalse(dry_done)
+            self.assertEqual(staged_calls, [])
+            self.assertTrue(any(e["node"] == "ashur" and e["action"] == "already_on_target" for e in dry_events))
+            self.assertTrue(any(e["node"] == "nippur" and e["action"] == "draining" for e in dry_events))
+            self.assertTrue(any(e["node"] == "babylon" and e["action"] == "pending_wave" for e in dry_events))
+
+            # Resume rollout: nippur drains on poll tick 2, upgrades & uncordons, then babylon stages, upgrades & uncordons
+            tick_count = [0]
+
+            def on_sleep(_dt):
+                tick_count[0] += 1
+                if tick_count[0] >= 1:
+                    ops.remote_state["nippur"]["running"] = 0
+
+            events, done = roll.run_governed_rollout(
+                core_api=api,
+                node_ops=ops,
+                remote_nodes=[("ashur", None), ("nippur", None), ("babylon", None)],
+                max_concurrent_cordons=1,
+                apply=True,
+                stage_artifacts=stage_spec,
+                expected_build_sha=target_sha,
+                expected_sha256=target_shas,
+                drain_timeout_secs=30.0,
+                poll_interval_secs=1.0,
+                sleep_fn=on_sleep,
+            )
+            self.assertTrue(done)
+            # ashur was already on target -> never re-staged or re-upgraded
+            self.assertNotIn("ashur", staged_calls)
+            self.assertEqual(ops.upgraded_remotes, ["nippur", "babylon"])
+            self.assertTrue(all(not v for v in cordoned.values()))
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":
