@@ -1124,6 +1124,11 @@ def provisionManagedMachine (st : ManagedComputeStore) (fleet : ManagedFleetStat
   if machine.ttlMinutes < 5 || machine.ttlMinutes > 720 then return .error "managed_ttl_invalid"
   if !isKnownProvider machine.provider || machine.id.isEmpty || machine.nodeBootEpoch == 0 then
     return .error "managed_spawn_invalid"
+  -- Keep the caller snapshot as a cheap, fail-closed preflight. The
+  -- authoritative transaction below repeats this check against the store and
+  -- also applies dated reservations and bandwidth limits.
+  if st.instanceName != "dev" && !admitManagedSpawn fleet machine.spentCents machine.ttlMinutes.toUInt32 then
+    return .error "managed_spawn_rejected"
   -- Persist the migration's date even when admission subsequently refuses an
   -- exhausted legacy allowance. Otherwise every retry could re-date that spend.
   if st.instanceName != "dev" then
