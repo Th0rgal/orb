@@ -4834,30 +4834,16 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let settings ← match MissionSettings.resolve existing jv with
         | .ok settings => pure settings
         | .error e => return .ok (mkJson 400 (renderCompact (.obj #[("error", .str e)])))
-      let hasProjPatch := (jv.field? "project").isSome || (jv.field? "project_slug").isSome
-      let nextProj ← do
-        if !hasProjPatch then pure existing.project
-        else
-          let rawP :=
-            match (jv.field? "project").orElse (fun _ => jv.field? "project_slug") with
-            | some (.str s) => s.trimAscii.toString
-            | _ => ""
-          if rawP.isEmpty || caller.isLegacyUnscoped then pure rawP
-          else pure ((scopeProjectSlug caller.userId st.bootstrapAdminId rawP).getD existing.project)
-      let hasFolderPatch := (jv.field? "folder").isSome
-      let nextFolder ← do
-        if nextProj.isEmpty then pure ""
-        else if !hasFolderPatch then
-          pure (if nextProj != existing.project then "" else existing.folder)
-        else
-          match normalizeMissionFolderStrict ((jv.fieldStr? "folder").getD "") with
-          | .ok nf => pure nf
-          | .error _ => pure "__INVALID_FOLDER__"
-      if nextFolder == "__INVALID_FOLDER__" then
-        return .ok (mkJson 400 "{\"error\":\"invalid_folder\"}")
       let nowIso := formatEpochIso8601Utc nowEpochSec
-      if let .error _ ← MissionSettings.persist st.store existing settings nowIso (some (nextProj, nextFolder)) then
+      let sseEv? ←
+        match ← MissionSettings.applyPlacementPatch st.store existing jv caller.userId caller.isLegacyUnscoped
+            st.bootstrapAdminId nowIso nowEpochSec with
+        | .ok ev? => pure ev?
+        | .error (code, errBody) => return .ok (mkJson code errBody)
+      if let .error _ ← MissionSettings.persist st.store existing settings nowIso then
         return .ok (mkJson 500 "{\"error\":\"mission_settings_update_failed\"}")
+      if let some evPayload := sseEv? then
+        publishControlEvent st.broadcastHub? "mission_placement_changed" evPayload
       let callerOpt := if caller.isLegacyUnscoped then none else some caller.userId
       match ← missionDetailJson st.store mid callerOpt st.bootstrapAdminId with
       | .ok (some body) => return .ok (mkJson 200 body)

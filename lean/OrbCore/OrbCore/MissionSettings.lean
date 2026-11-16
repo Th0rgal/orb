@@ -1,9 +1,11 @@
 import OrbCore.Store
+import OrbCore.R7Core
+import OrbCore.SecretAndApproval
 import OrbBin.Json
 
 namespace OrbCore.MissionSettings
 
-open OrbCore.Store OrbBin.Json
+open OrbCore.Store OrbCore.R7Core OrbCore.SecretAndApproval OrbBin.Json
 
 def normalizeModelEffortForBackend (backend? : Option String) (raw : String) : Option String :=
   let level := raw.trimAscii.toString.toLower
@@ -47,23 +49,132 @@ def resolve (existing : MissionRecord) (patch : JVal) : Except String Settings :
   }
 
 def persist (store : CoreStore) (existing : MissionRecord) (settings : Settings)
-    (nowIso : String) (placement? : Option (String × String) := none) : IO (Except String Unit) := do
-  let (project, folder) := placement?.getD (existing.project, existing.folder)
-  let placementChanged := project != existing.project || folder != existing.folder
+    (nowIso : String) : IO (Except String Unit) := do
   match ← execParamQuery store.missionsDb
       ("UPDATE missions SET title=?2, backend=?3, model_override=?4, model_effort=?5, " ++
        "session_id=CASE WHEN backend<>?3 THEN NULL ELSE session_id END, " ++
        "resumable=CASE WHEN backend<>?3 THEN 0 ELSE resumable END, " ++
-       "project=?6, folder=?7, placement_revision=CASE WHEN ?8='1' THEN COALESCE(placement_revision,0)+1 ELSE placement_revision END, " ++
-       "metadata_updated_at=?9, state_revision=state_revision+1, " ++
-       "short_description=CASE WHEN ?10='1' THEN ?11 ELSE short_description END, " ++
-       "github_pr=CASE WHEN ?12='1' THEN ?13 ELSE github_pr END, " ++
-       "repo=CASE WHEN ?12='1' THEN ?13 ELSE repo END WHERE id=?1;")
+       "metadata_updated_at=?6, state_revision=state_revision+1, " ++
+       "short_description=CASE WHEN ?7='1' THEN ?8 ELSE short_description END, " ++
+       "github_pr=CASE WHEN ?9='1' THEN ?10 ELSE github_pr END, " ++
+       "repo=CASE WHEN ?9='1' THEN ?10 ELSE repo END WHERE id=?1;")
       #[existing.id, settings.title, settings.backend, settings.modelOverride, settings.modelEffort,
-        project, folder, if placementChanged then "1" else "0", nowIso,
+        nowIso,
         if settings.shortDescription?.isSome then "1" else "0", settings.shortDescription?.getD "",
         if settings.githubPr?.isSome then "1" else "0", settings.githubPr?.getD ""] with
   | .error e => return .error e
   | .ok _ => return .ok ()
+
+private def unscopeDisplayProject (userId : String) (isLegacyUnscoped : Bool) (p : String) : String :=
+  if !isLegacyUnscoped && !userId.isEmpty && p.startsWith (userId ++ ":") then
+    (p.drop (userId.length + 1)).toString
+  else
+    p
+
+/-- Resolve and atomically apply a family placement patch (`project`/`project_slug`/`folder`) on
+    `/api/control/missions/:id/project` or `/api/control/missions/:id/settings` (`docs/ui/mission-moves.md`).
+    Returns `.ok (some ssePayload)` when `mission_placement_changed` should be broadcast. -/
+def applyPlacementPatch
+    (store : CoreStore)
+    (existing : MissionRecord)
+    (jv : JVal)
+    (callerUserId : String)
+    (callerIsLegacyUnscoped : Bool)
+    (bootstrapAdminId : String)
+    (nowIso : String)
+    (nowEpochSec : UInt64) : IO (Except (Nat × String) (Option String)) := do
+  let hasProjPatch := (jv.field? "project").isSome || (jv.field? "project_slug").isSome
+  let hasFolderPatch := (jv.field? "folder").isSome
+  if !hasProjPatch && !hasFolderPatch then
+    return .ok none
+  let rawP ← do
+    if !hasProjPatch then
+      pure (unscopeDisplayProject callerUserId callerIsLegacyUnscoped existing.project)
+    else
+      match (jv.field? "project").orElse (fun _ => jv.field? "project_slug") with
+      | none | some .null => pure ""
+      | some (.str s) =>
+        let t := s.trimAscii.toString
+        pure (if t.isEmpty || t == "__unassigned__" then "" else t)
+      | some _ => pure "__INVALID_PROJECT__"
+  if rawP == "__INVALID_PROJECT__" then
+    return .error (400, "{\"error\":\"invalid_project\"}")
+  let nextProj ← do
+    if !hasProjPatch then pure existing.project
+    else if rawP.isEmpty || callerIsLegacyUnscoped then pure rawP
+    else
+      match scopeProjectSlug callerUserId bootstrapAdminId rawP with
+      | some sp => pure sp
+      | none => pure "__INVALID_PROJECT__"
+  if nextProj == "__INVALID_PROJECT__" then
+    return .error (400, "{\"error\":\"invalid_project\"}")
+  let nextFolder ← do
+    if !hasFolderPatch then
+      pure (if nextProj.isEmpty || nextProj != existing.project then "" else existing.folder)
+    else
+      let parsedF ←
+        match jv.field? "folder" with
+        | none | some .null => pure ""
+        | some (.str s) =>
+          match normalizeMissionFolderStrict s with
+          | .ok nf => pure nf
+          | .error _ => pure "__INVALID_FOLDER__"
+        | some _ => pure "__INVALID_FOLDER__"
+      if parsedF == "__INVALID_FOLDER__" then pure "__INVALID_FOLDER__"
+      else if nextProj.isEmpty then pure ""
+      else pure parsedF
+  if nextFolder == "__INVALID_FOLDER__" then
+    return .error (400, "{\"error\":\"invalid_folder\"}")
+  let policy := ((jv.fieldStr? "approval_policy").getD "check").trimAscii.toString.toLower
+  if policy != "check" && policy != "revoke" && policy != "keep" then
+    return .error (400, "{\"error\":\"invalid_approval_policy\"}")
+  let descendantIds : Array String :=
+    match jv.fieldArr? "descendant_ids" with
+    | some xs => xs.filterMap JVal.asStr? |>.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+    | none => #[]
+  let callerOpt := if callerIsLegacyUnscoped then none else some callerUserId
+  let plan ←
+    match ← planExpandedMoveFamily store #[existing.id] descendantIds nextFolder callerOpt with
+    | .ok p => pure p
+    | .error (code, msg) => return .error (code, s!"\{\"error\":{jsonEscape msg}}")
+  let crossProjIds := (plan.filter (fun m => m.currentProject != nextProj)).map (·.missionId)
+  if !crossProjIds.isEmpty && policy == "check" then
+    if let some confBody ← inspectCrossProjectSecretTransfer store.rootDir crossProjIds rawP nowEpochSec then
+      return .error (409, confBody)
+  let brokerPath := System.FilePath.mk s!"{store.rootDir}/secret_broker.json"
+  let brokerRawBefore? ← do
+    if !crossProjIds.isEmpty && (policy == "revoke" || policy == "keep") then
+      if ← brokerPath.pathExists then
+        let raw ← IO.FS.readFile brokerPath
+        applyCrossProjectSecretPolicy store.rootDir crossProjIds rawP policy nowIso nowEpochSec
+        pure (some raw)
+      else
+        pure none
+    else
+      pure none
+  let updates : Array CheckedPlacementUpdate := plan.map fun m => {
+    missionId       := m.missionId
+    expectedProject := m.currentProject
+    nextProject     := nextProj
+    nextFolder      := if m.missionId == existing.id then nextFolder else m.targetFolder
+  }
+  let (_, changedMoved) ←
+    match ← batchSetMissionPlacementChecked store updates nowIso with
+    | .ok pair => pure pair
+    | .error (code, msg) =>
+      if let some prevRaw := brokerRawBefore? then
+        IO.FS.writeFile brokerPath prevRaw
+      return .error (code, s!"\{\"error\":{jsonEscape msg}}")
+  if !nextProj.isEmpty && !callerIsLegacyUnscoped && !callerUserId.isEmpty then
+    discard <| execParamQuery store.projectsDb
+      "INSERT OR IGNORE INTO project_owners(slug,owner_user_id,created_at) VALUES(?1,?2,?3);"
+      #[nextProj, callerUserId, s!"{nowEpochSec}"]
+  rebindMovedMissionMcpSessions store changedMoved nowIso
+  let unscopeItem (it : MissionPlacementItem) : MissionPlacementItem :=
+    { it with project? := it.project?.map (unscopeDisplayProject callerUserId callerIsLegacyUnscoped) }
+  let changedDisplay := changedMoved.map unscopeItem
+  if changedDisplay.isEmpty then
+    return .ok none
+  return .ok (some (renderMissionPlacementChangedEventJson changedDisplay none none))
 
 end OrbCore.MissionSettings
