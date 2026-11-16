@@ -103,9 +103,13 @@ def macTetherToolsPrettyJson : String :=
   "    }\n" ++
   "  }"
 
+def missionBoardToolsJson : String :=
+  "{\"name\":\"read_mission_board\",\"description\":\"Read a mission board; defaults to your mission. Access follows live ownership and ancestor lineage.\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"mission_id\":{\"type\":\"string\"}}}}," ++
+  "{\"name\":\"write_mission_board\",\"description\":\"Replace your own mission board (maximum 16384 UTF-8 bytes). Only the mission itself may write.\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"text\"],\"properties\":{\"mission_id\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"},\"idempotency_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":200}}}}"
+
 private def appendMacTetherTools (baseJson : String) : String :=
   if baseJson.endsWith "\n]" then
-    (baseJson.dropEnd 2).toString ++ ",\n" ++ macTetherToolsPrettyJson ++ "\n]"
+    (baseJson.dropEnd 2).toString ++ ",\n" ++ macTetherToolsPrettyJson ++ ",\n" ++ missionBoardToolsJson ++ "\n]"
   else
     baseJson
 
@@ -118,6 +122,7 @@ def catalogPrettyJsonForRole (role : String) : Option String :=
 
 def mutatingControlToolNames : Array String := #[
   "write_project_board",
+  "write_mission_board",
   "acknowledge_mission",
   "adopt_mission", "answer_mission_question", "ask_mission", "cancel_action", "cancel_mission", "cancel_workspace_job",
   "consult_model", "create_workspace", "create_worktree", "delete_managed_snapshot",
