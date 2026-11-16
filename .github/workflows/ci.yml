@@ -118,6 +118,8 @@ jobs:
           (cd lean/OrbNetLeaf && "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" build orb-net-leaf-test && ./.lake/build/bin/orb-net-leaf-test)
           (cd lean/OrbBin && "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" build orb-bin-test && ./.lake/build/bin/orb-bin-test)
           (cd lean/OrbNode && "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" build orb-node-test && ./.lake/build/bin/orb-node-test)
+          # Deployment runs this same binary as root; exercise real privd confinement too.
+          sudo --preserve-env=PATH ./lean/OrbNode/.lake/build/bin/orb-node-test
           (cd lean/OrbClient && "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" build orb-client-test && ./.lake/build/bin/orb-client-test)
           (cd lean/OrbCore && "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" build orb-core-test orb-spec-runner)
           ./lean/OrbCore/.lake/build/bin/orb-core-test
