@@ -3892,7 +3892,7 @@ def bootstrapUsersAndBackfill
     | some adm => pure adm.id
     | none =>
       let uid := "usr_bootstrap_admin"
-      let pwHash ← hashPasswordPbkdf2 "dev-mode-placeholder"
+      let pwHash := "dev-mode-placeholder"
       discard <| execParamQuery st.missionsDb
         ("INSERT OR IGNORE INTO users(id,username,password_hash,role,unix_username,session_epoch,disabled,daily_spend_cap_cents,created_at,updated_at) " ++
          "VALUES(?1,'admin',?2,'admin',NULL,1,0,NULL,?3,?3);")

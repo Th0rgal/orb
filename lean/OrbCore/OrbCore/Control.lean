@@ -2767,13 +2767,21 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     if let some u := dbUser? then
       if u.disabled then
         return .ok (mkJson 401 "{\"error\":\"account_disabled\"}")
-      if (← verifyPasswordPbkdf2 supplied u.passwordHash) then
-        let tok := mintSessionTokenV2 sec u.id u.role u.sessionEpoch exp
-        let uJson := renderUserSummaryJson u
-        return .ok (mkJson 200 s!"\{\"token\":{jsonEscape tok},\"exp\":{exp},\"expires_at\":{exp},\"user\":{uJson}}")
-      -- If a specific non-admin DB account was named and PBKDF2 failed, reject unless static config matches
-      if !verifyLoginCredentials st.cfg user? supplied && !settingsPwdOk then
+      let hasAuthoritativeHash :=
+        !u.passwordHash.trimAscii.isEmpty && u.passwordHash.trimAscii.toString != "dev-mode-placeholder"
+      if hasAuthoritativeHash then
+        if (← verifyPasswordPbkdf2 supplied u.passwordHash) || st.cfg.devMode then
+          let tok := mintSessionTokenV2 sec u.id u.role u.sessionEpoch exp
+          let uJson := renderUserSummaryJson u
+          return .ok (mkJson 200 s!"\{\"token\":{jsonEscape tok},\"exp\":{exp},\"expires_at\":{exp},\"user\":{uJson}}")
         return .ok (mkJson 401 "{\"error\":\"invalid_credentials\"}")
+      if !verifyLoginCredentials st.cfg (some u.username) supplied && !settingsPwdOk then
+        return .ok (mkJson 401 "{\"error\":\"invalid_credentials\"}")
+      if !st.cfg.devMode && !supplied.isEmpty then
+        if let .ok migratedHash ← (hashPasswordPbkdf2 supplied).toBaseIO then
+          discard <| execParamQuery st.store.missionsDb
+            "UPDATE users SET password_hash=?2 WHERE id=?1 AND (password_hash='' OR password_hash='dev-mode-placeholder');"
+            #[u.id, migratedHash]
       let tok := mintSessionTokenV2 sec u.id u.role u.sessionEpoch exp
       let uJson := renderUserSummaryJson u
       return .ok (mkJson 200 s!"\{\"token\":{jsonEscape tok},\"exp\":{exp},\"expires_at\":{exp},\"user\":{uJson}}")
@@ -2781,6 +2789,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       return .ok (mkJson 401 "{\"error\":\"invalid_credentials\"}")
     else if verifyLoginCredentials st.cfg user? supplied || settingsPwdOk then
       if let some adm ← getBootstrapAdmin? st.store then
+        if adm.disabled then
+          return .ok (mkJson 401 "{\"error\":\"account_disabled\"}")
         let tok := mintSessionTokenV2 sec adm.id adm.role adm.sessionEpoch exp
         let uJson := renderUserSummaryJson adm
         return .ok (mkJson 200 s!"\{\"token\":{jsonEscape tok},\"exp\":{exp},\"expires_at\":{exp},\"user\":{uJson}}")
