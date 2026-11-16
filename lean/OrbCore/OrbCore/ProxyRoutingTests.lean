@@ -827,7 +827,9 @@ def run : IO Unit := do
       | throw (IO.userError "proxy_outcomes chain query failed")
     check ((((chainRows[1]?.bind (·[0]?)).bind String.toNat?).getD 0) > 0) "chain alias outcome records requested and effective model"
     -- Fallback Chains contract: every row decodes as the clients' `ModelChain`.
-    let jwt := mintSessionToken cfg.jwtSecret (1700001000 + 3600)
+    let .ok authAdmin ← createUserRecord store "routing-admin" "fixture-password" "admin" none none "2026-11-16T00:00:00Z"
+      | throw (IO.userError "routing admin fixture")
+    let jwt := mintSessionTokenV2 cfg.jwtSecret authAdmin.id authAdmin.role authAdmin.sessionEpoch (1700001000 + 3600)
     let api := fun (method path body : String) => do
       let raw := s!"{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
       let .ok req := parseRequest raw.toUTF8 none

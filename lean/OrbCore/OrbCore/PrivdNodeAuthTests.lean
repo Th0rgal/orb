@@ -181,7 +181,8 @@ def run (root : String) : IO Unit := do
       "the node path recovers when the bunker is lifted"
 
     -- 8. The admin path is unchanged: same answers, executing_host recorded as the caller states it.
-    let adminJwt := mintSessionToken st.cfg.jwtSecret (now + 600)
+    let some admin ← getUserById? store "admin" | throw (IO.userError "privd admin fixture")
+    let adminJwt := mintSessionTokenV2 st.cfg.jwtSecret admin.id admin.role admin.sessionEpoch (now + 600)
     check (allowed (← send (bearer adminJwt) (body "m-nimrud" "lease-nimrud" "self" "nimrud")))
       "admin bearer verifies a lease as before"
     check ((← lastAudit) == #["grant-lease-nimrud", "m-nimrud", "nimrud", "1"]) "admin audit rows keep the stated host"

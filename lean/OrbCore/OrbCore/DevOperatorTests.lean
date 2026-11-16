@@ -103,6 +103,7 @@ def run (root : String) : IO Unit := do
       "local bunker blocks local and remote grants before contacting issuer"
     let .ok () ← writePersistedBunkerState store 0 | throw (IO.userError "unbunker fixture")
     let st : CoreAppState := {
+      bootstrapAdminId := "admin",
       cfg := { instanceName := "dev", jwtSecret := "synthetic-dev-jwt-secret-not-shared" }, store := store,
       searchIdx? := none, managedRef := ← IO.mkRef {}, chainsRef := ← IO.mkRef #[],
       proxyCooldownsRef := ← IO.mkRef #[], seqRef := ← IO.mkRef 1 }
@@ -156,7 +157,7 @@ def run (root : String) : IO Unit := do
     check (verifyDoc.fieldStr? "token" == none && verifyDoc.fieldStr? "lease_token" == none &&
       verifyDoc.fieldStr? "jwt_secret" == none && verifyDoc.fieldUInt64? "expires_at" == some 2000)
       "issuer discloses expiry alone, with no usable credentials"
-    let adminJwt := mintSessionToken st.cfg.jwtSecret (now + 600)
+    let adminJwt := mintSessionTokenV2 st.cfg.jwtSecret unchangedAdmin.id unchangedAdmin.role unchangedAdmin.sessionEpoch (now + 600)
     let body := renderCompact (.obj #[("mission_id", .str "owner"), ("lease_token", .str lease.leaseToken),
       ("target_host", .str "dev"), ("executing_host", .str "dev"), ("command", .str "[exec]"),
       ("argv", .arr #[.str "id"])])

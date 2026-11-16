@@ -3110,7 +3110,9 @@ private def runR4dProxyAuthTests (prodValid : CoreConfig) : IO UInt32 := do
     cliProxySessionsRef? := some sessRef
   }
   let bearer := s!"Authorization: Bearer {prodValid.proxySecret}"
-  let jwt := mintSessionToken prodValid.jwtSecret (nowSec + 3600)
+  let .ok authAdmin ← createUserRecord store "proxy-admin" "fixture-password" "admin" none none "2026-11-16T00:00:00Z"
+    | return 1
+  let jwt := mintSessionTokenV2 prodValid.jwtSecret authAdmin.id authAdmin.role authAdmin.sessionEpoch (nowSec + 3600)
   let jwtH := s!"Authorization: Bearer {jwt}"
   let postV1 (extraHdrs body : String) (atEp : UInt64) : IO (Except String (Nat × String × Array (String × String))) := do
     let raw := s!"POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\n{bearer}\r\nContent-Type: application/json\r\n{extraHdrs}Content-Length: {body.utf8ByteSize}\r\n\r\n{body}".toUTF8
@@ -6140,7 +6142,7 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
 
   let jwtSec := "prod-parity-jwt-secret-0123456789abcdef"
   let nowSec : UInt64 := 1794400000
-  let hsJwt := issueHs256Jwt jwtSec "prod" "admin" nowSec (nowSec + 86400) "admin"
+  let hsJwt := issueHs256Jwt jwtSec "admin" "admin" nowSec (nowSec + 86400) "admin"
   if !hsJwt.startsWith "eyJ" || (verifyHs256Jwt? jwtSec hsJwt nowSec).isNone then
     return (← fail "HS256 JWT roundtrip failed")
 
@@ -7012,7 +7014,7 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
 
   let jwtSec := "remote-btw-wakeup-jwt-secret-0123456789abcdef"
   let nowSec : UInt64 := 1794400000
-  let hsJwt := issueHs256Jwt jwtSec "prod" "admin" nowSec (nowSec + 86400) "admin"
+  let hsJwt := issueHs256Jwt jwtSec "admin" "admin" nowSec (nowSec + 86400) "admin"
   let cfg : CoreConfig := {
     host := "127.0.0.1"
     port := 13000
@@ -7445,7 +7447,7 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
 
   let jwtSec := "library-parity-jwt-secret-0123456789abcdef"
   let nowSec : UInt64 := 1794500000
-  let hsJwt := issueHs256Jwt jwtSec "prod" "admin" nowSec (nowSec + 86400) "admin"
+  let hsJwt := issueHs256Jwt jwtSec "admin" "admin" nowSec (nowSec + 86400) "admin"
   let cfg : CoreConfig := {
     host := "127.0.0.1"
     port := 13001
