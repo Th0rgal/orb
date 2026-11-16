@@ -47,7 +47,7 @@ test("mission board survives a project move", async ({ page }) => {
       return route.fulfill({ json: { project: path.split("/")[3], boards: project === path.split("/")[3] ? [{ mission_id: "controller", title: "Release planning", status: "active", parent_mission_id: null, updated_at: "2026-11-16T10:00:00Z", bytes: text.length, text_sha256: hash }] : [] } });
     }
     if (path === "/api/control/missions/controller/board") return route.fulfill({ json: { mission_id: "controller", text, updated_at: "2026-11-16T10:00:00Z", updated_by_mission_id: "controller", text_sha256: hash } });
-    if (path === "/api/control/missions/move" && request.method() === "POST") { project = "next"; return route.fulfill({ json: { moved: [{ mission_id: "controller", project, folder: "", placement_revision: 2 }] } }); }
+    if (path.endsWith("/missions/move") && request.method() === "POST") { project = "next"; return route.fulfill({ json: { moved: [{ mission_id: "controller", project, folder: "", placement_revision: 2 }] } }); }
     if (path === "/api/control/missions") return route.fulfill({ json: [mission()] });
     if (path.includes("/missions/controller")) return route.fulfill({ json: mission() });
     if (path.endsWith("/files")) return route.fulfill({ json: { entries: [] } });
