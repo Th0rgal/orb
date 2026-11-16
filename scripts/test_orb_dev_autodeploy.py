@@ -91,7 +91,14 @@ class DeployGateTests(unittest.TestCase):
                                             env={**env, "SYNTHETIC_HEALTH": health}, capture_output=True)
                     self.assertEqual(result.returncode, expected)
 
-    def _run_staged_deploy(self, root: Path, dev_ok: bool = True, prod_ok: bool = True, dev_only: bool = False):
+    def _run_staged_deploy(
+        self,
+        root: Path,
+        dev_ok: bool = True,
+        prod_ok: bool = True,
+        dev_only: bool = False,
+        rollout_nodes: bool = False,
+    ):
         import os
         script = (Path(__file__).parent / "ops/orb-deploy").read_text()
         for prefix in ("/usr/local", "/etc/systemd", "/run/lock"):
@@ -107,6 +114,9 @@ class DeployGateTests(unittest.TestCase):
         (tree / "catalog/snapshots").mkdir(parents=True, exist_ok=True)
         (tree / "scripts/ops").mkdir(parents=True, exist_ok=True)
         (tree / "catalog/providers.json").write_text("{}\n")
+        (tree / "scripts/rolling_upgrade_nodes.py").write_text(
+            "import sys, json\nprint(json.dumps({'rollout_argv': sys.argv[1:]}))\n"
+        )
         for rel, content in {
             "lean/OrbCore/.lake/build/bin/orb-core": "new-orb-core\n",
             "lean/OrbCore/.lake/build/bin/orb-core-test": "#!/bin/sh\necho ok\n",
@@ -129,12 +139,13 @@ class DeployGateTests(unittest.TestCase):
         bin_dir = root / "fake-bin"
         bin_dir.mkdir(exist_ok=True)
         (root / "run/lock").mkdir(parents=True, exist_ok=True)
+        lake_log = root / "lake-invocations.log"
         dev_health = f'{{"status":"ok","build":"{SHA}"}}' if dev_ok else '{"status":"failed"}'
         prod_health = f'{{"status":"ok","build":"{SHA}"}}' if prod_ok else '{"status":"failed"}'
         stubs = {
             "pgrep": "#!/bin/sh\nexit 1\n",
             "git": f'#!/bin/sh\nif [ "$1" = "rev-parse" ]; then echo "{SHA}"; fi\nexit 0\n',
-            "lake": "#!/bin/sh\necho built\n",
+            "lake": f'#!/bin/sh\necho "$PWD:$*" >> "{lake_log}"\necho built\n',
             "systemctl": "#!/bin/sh\nexit 0\n",
             "sleep": "#!/bin/sh\nexit 0\n",
             "date": '#!/bin/sh\necho "20261115T120000Z"\n',
@@ -158,7 +169,12 @@ class DeployGateTests(unittest.TestCase):
             "ORB_DEPLOY_LOG": str(root / "deploy.log"),
             "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
         }
-        args = [SHA, "--dev-only"] if dev_only else [SHA]
+        if dev_only:
+            args = [SHA, "--dev-only"]
+        elif rollout_nodes:
+            args = [SHA, "--rollout-nodes"]
+        else:
+            args = [SHA]
         return subprocess.run(["bash", str(fake_script), *args], env=env, capture_output=True, text=True)
 
     def _seed_existing_targets(self, root: Path):
@@ -201,8 +217,6 @@ class DeployGateTests(unittest.TestCase):
 
             expected = {
                 "usr/local/bin/sandboxed-node": ("new-orb-node\n", "old-orb-node\n", 0o755),
-                "usr/local/bin/sandboxed-mcp": ("new-sandboxed-mcp\n", "old-sandboxed-mcp\n", 0o755),
-                "usr/local/sbin/orb-privd": ("new-orb-privd\n", "old-orb-privd\n", 0o755),
                 "usr/local/sbin/orb-monitor": ("new-orb-monitor\n", "old-orb-monitor\n", 0o755),
                 "usr/local/sbin/orb-sidecar-guard": ("new-orb-sidecar-guard\n", "old-orb-sidecar-guard\n", 0o755),
                 "usr/local/sbin/orb-dev-autodeploy": ("new-orb-dev-autodeploy\n", "old-orb-dev-autodeploy\n", 0o755),
@@ -218,6 +232,30 @@ class DeployGateTests(unittest.TestCase):
                 self.assertEqual(backup.read_text(), old_text)
                 backups = list(staged.parent.glob(f"{staged.name}.pre-deploy-*"))
                 self.assertEqual(len(backups), 5, f"expected 5 pruned backups for {rel}, got {backups}")
+
+    def test_plain_deploy_does_not_build_or_stage_node_rollout_artifacts_while_rollout_nodes_does(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._seed_existing_targets(root)
+            res = self._run_staged_deploy(root, dev_ok=True, prod_ok=True, rollout_nodes=False)
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            lake_invocations = (root / "lake-invocations.log").read_text()
+            self.assertNotIn("OrbBin", lake_invocations)
+            self.assertEqual((root / "usr/local/bin/sandboxed-mcp").read_text(), "old-sandboxed-mcp\n")
+            self.assertEqual((root / "usr/local/sbin/orb-privd").read_text(), "old-orb-privd\n")
+            rel_bin = root / f"usr/local/share/orb/releases/{SHA}/bin"
+            self.assertFalse(rel_bin.exists())
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._seed_existing_targets(root)
+            res = self._run_staged_deploy(root, dev_ok=True, prod_ok=True, rollout_nodes=True)
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            lake_invocations = (root / "lake-invocations.log").read_text()
+            self.assertIn("OrbBin", lake_invocations)
+            self.assertEqual((root / "usr/local/bin/sandboxed-mcp").read_text(), "new-sandboxed-mcp\n")
+            self.assertEqual((root / "usr/local/sbin/orb-privd").read_text(), "new-orb-privd\n")
             rel_bin = root / f"usr/local/share/orb/releases/{SHA}/bin"
             self.assertEqual((rel_bin / "sandboxed-node").read_text(), "new-orb-node\n")
             self.assertEqual((rel_bin / "sandboxed-mcp").read_text(), "new-sandboxed-mcp\n")

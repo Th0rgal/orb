@@ -106,15 +106,21 @@ git clean -fdq -- lean/OrbCore/OrbCore lean/OrbNode/OrbNode lean/OrbBin/OrbBin l
 say "build"
 (cd lean/OrbCore && lake build orb-core orb-core-test orb-spec-runner -- -DwarningAsError=true) | tail -4
 (cd lean/OrbNode && lake build orb-node orb-node-test -- -DwarningAsError=true) | tail -4
-(cd lean/OrbBin && lake build sandboxed-mcp orb-privd -- -DwarningAsError=true) | tail -4
+if [[ $ROLLOUT_NODES == 1 ]]; then
+  (cd lean/OrbBin && lake build sandboxed-mcp orb-privd -- -DwarningAsError=true) | tail -4
+fi
 say "self-test"
 ./lean/OrbCore/.lake/build/bin/orb-core-test | tail -1
 ./lean/OrbNode/.lake/build/bin/orb-node-test | tail -1
 BIN="$TREE/lean/OrbCore/.lake/build/bin/orb-core"
 NODE_BIN="$TREE/lean/OrbNode/.lake/build/bin/orb-node"
-MCP_BIN="$TREE/lean/OrbBin/.lake/build/bin/sandboxed-mcp"
-PRIVD_BIN="$TREE/lean/OrbBin/.lake/build/bin/orb-privd"
-say "binary $(sha256sum "$BIN" | cut -c1-12) node $(sha256sum "$NODE_BIN" | cut -c1-12) mcp $(sha256sum "$MCP_BIN" | cut -c1-12) privd $(sha256sum "$PRIVD_BIN" | cut -c1-12)"
+if [[ $ROLLOUT_NODES == 1 ]]; then
+  MCP_BIN="$TREE/lean/OrbBin/.lake/build/bin/sandboxed-mcp"
+  PRIVD_BIN="$TREE/lean/OrbBin/.lake/build/bin/orb-privd"
+  say "binary $(sha256sum "$BIN" | cut -c1-12) node $(sha256sum "$NODE_BIN" | cut -c1-12) mcp $(sha256sum "$MCP_BIN" | cut -c1-12) privd $(sha256sum "$PRIVD_BIN" | cut -c1-12)"
+else
+  say "binary $(sha256sum "$BIN" | cut -c1-12) node $(sha256sum "$NODE_BIN" | cut -c1-12)"
+fi
 
 # Pin resources to the deployed revision. Dev-only promotion must not change
 # prod's catalog; rollback restores its resource pointer alongside its binary.
@@ -122,14 +128,17 @@ CATALOG="/usr/local/share/orb/releases/$SHA/catalog"
 RELEASE_BIN_DIR="/usr/local/share/orb/releases/$SHA/bin"
 test -f "$TREE/catalog/providers.json"
 test -d "$TREE/catalog/snapshots"
-mkdir -p "$(dirname "$CATALOG")" "$RELEASE_BIN_DIR"
+mkdir -p "$(dirname "$CATALOG")"
 if [[ ! -d "$CATALOG" ]]; then
   cp -a "$TREE/catalog" "$CATALOG.new"
   mv "$CATALOG.new" "$CATALOG"
 fi
-install -m 755 "$NODE_BIN" "$RELEASE_BIN_DIR/sandboxed-node.new" && mv "$RELEASE_BIN_DIR/sandboxed-node.new" "$RELEASE_BIN_DIR/sandboxed-node"
-install -m 755 "$MCP_BIN" "$RELEASE_BIN_DIR/sandboxed-mcp.new" && mv "$RELEASE_BIN_DIR/sandboxed-mcp.new" "$RELEASE_BIN_DIR/sandboxed-mcp"
-install -m 755 "$PRIVD_BIN" "$RELEASE_BIN_DIR/orb-privd.new" && mv "$RELEASE_BIN_DIR/orb-privd.new" "$RELEASE_BIN_DIR/orb-privd"
+if [[ $ROLLOUT_NODES == 1 ]]; then
+  mkdir -p "$RELEASE_BIN_DIR"
+  install -m 755 "$NODE_BIN" "$RELEASE_BIN_DIR/sandboxed-node.new" && mv "$RELEASE_BIN_DIR/sandboxed-node.new" "$RELEASE_BIN_DIR/sandboxed-node"
+  install -m 755 "$MCP_BIN" "$RELEASE_BIN_DIR/sandboxed-mcp.new" && mv "$RELEASE_BIN_DIR/sandboxed-mcp.new" "$RELEASE_BIN_DIR/sandboxed-mcp"
+  install -m 755 "$PRIVD_BIN" "$RELEASE_BIN_DIR/orb-privd.new" && mv "$RELEASE_BIN_DIR/orb-privd.new" "$RELEASE_BIN_DIR/orb-privd"
+fi
 
 set_catalog sandboxed-sh-dev "$CATALOG"
 set_build sandboxed-sh-dev "$SHA"; systemctl daemon-reload
@@ -146,14 +155,16 @@ if [[ -f /usr/local/bin/sandboxed-node ]]; then
   cp -p /usr/local/bin/sandboxed-node "$NODE_BACKUP"
 fi
 MCP_BACKUP=""
-if [[ -f /usr/local/bin/sandboxed-mcp ]]; then
-  MCP_BACKUP="/usr/local/bin/sandboxed-mcp.pre-deploy-$TS"
-  cp -p /usr/local/bin/sandboxed-mcp "$MCP_BACKUP"
-fi
 PRIVD_BACKUP=""
-if [[ -f /usr/local/sbin/orb-privd ]]; then
-  PRIVD_BACKUP="/usr/local/sbin/orb-privd.pre-deploy-$TS"
-  cp -p /usr/local/sbin/orb-privd "$PRIVD_BACKUP"
+if [[ $ROLLOUT_NODES == 1 ]]; then
+  if [[ -f /usr/local/bin/sandboxed-mcp ]]; then
+    MCP_BACKUP="/usr/local/bin/sandboxed-mcp.pre-deploy-$TS"
+    cp -p /usr/local/bin/sandboxed-mcp "$MCP_BACKUP"
+  fi
+  if [[ -f /usr/local/sbin/orb-privd ]]; then
+    PRIVD_BACKUP="/usr/local/sbin/orb-privd.pre-deploy-$TS"
+    cp -p /usr/local/sbin/orb-privd "$PRIVD_BACKUP"
+  fi
 fi
 OPS_TARGETS=(
   "/usr/local/sbin/orb-monitor:755:$TREE/scripts/ops/orb-monitor"
@@ -181,8 +192,10 @@ rollback_staged_files() {
 }
 install -m 644 "$TREE/scripts/orb-node-provision.sh" /usr/local/lib/orb/orb-node-provision.sh.new && mv /usr/local/lib/orb/orb-node-provision.sh.new /usr/local/lib/orb/orb-node-provision.sh
 install -m 755 "$NODE_BIN" /usr/local/bin/sandboxed-node.new && mv /usr/local/bin/sandboxed-node.new /usr/local/bin/sandboxed-node
-install -m 755 "$MCP_BIN" /usr/local/bin/sandboxed-mcp.new && mv /usr/local/bin/sandboxed-mcp.new /usr/local/bin/sandboxed-mcp
-install -m 755 "$PRIVD_BIN" /usr/local/sbin/orb-privd.new && mv /usr/local/sbin/orb-privd.new /usr/local/sbin/orb-privd
+if [[ $ROLLOUT_NODES == 1 ]]; then
+  install -m 755 "$MCP_BIN" /usr/local/bin/sandboxed-mcp.new && mv /usr/local/bin/sandboxed-mcp.new /usr/local/bin/sandboxed-mcp
+  install -m 755 "$PRIVD_BIN" /usr/local/sbin/orb-privd.new && mv /usr/local/sbin/orb-privd.new /usr/local/sbin/orb-privd
+fi
 for spec in "${OPS_TARGETS[@]}"; do
   IFS=: read -r dst mode src <<< "$spec"
   install -m "$mode" "$src" "$dst.new" && mv "$dst.new" "$dst"
@@ -219,8 +232,10 @@ say "prod healthy on $SHA (backup $BACKUP)"
 # keep the five most recent backups
 ls -1t /usr/local/bin/orb-core.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
 ls -1t /usr/local/bin/sandboxed-node.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
-ls -1t /usr/local/bin/sandboxed-mcp.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
-ls -1t /usr/local/sbin/orb-privd.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
+if [[ $ROLLOUT_NODES == 1 ]]; then
+  ls -1t /usr/local/bin/sandboxed-mcp.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
+  ls -1t /usr/local/sbin/orb-privd.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
+fi
 ls -1t /usr/local/lib/orb/orb-node-provision.sh.pre-deploy-* 2>/dev/null | tail -n +6 | xargs -r rm -f
 for spec in "${OPS_TARGETS[@]}"; do
   IFS=: read -r dst _ _ <<< "$spec"
