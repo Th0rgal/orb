@@ -39,6 +39,13 @@ private def assertTrue (label : String) (cond : Bool) : IO Unit := do
   if !cond then
     throw (IO.userError s!"FAIL: {label}")
 
+private def responseBodyPrefix (body : ByteArray) : String :=
+  ((String.fromUTF8? body).getD "").take 300 |>.toString
+
+private def failResponseParse (endpoint : String) (status : Nat) (body : ByteArray)
+    (jobState : String) (finished : Bool) : IO Unit :=
+  throw (IO.userError s!"failed parsing {endpoint} JSON: status={status}, body={responseBodyPrefix body}, job_state={jobState}, finished={finished}")
+
 /-- Roadmap R2 regression tests: oversized command (`E2BIG`) and missing binary (`ENOENT`)
     report their cause in both the job `error` field and the job log, not bare exit 127 + empty log. -/
 private def runR2ExecFailureTests
@@ -2039,21 +2046,25 @@ def runTests : IO UInt32 := do
     }
     rtMu := rtMuSub
     let mut muFinished := false
-    for _ in [0:40] do
+    let muDeadline ← IO.monoNanosNow
+    let muDeadline := muDeadline + 30_000_000_000
+    while !muFinished && (← IO.monoNanosNow) < muDeadline do
       IO.sleep 60
       rtMu ← tickRuntime rtMu
       if let some jr := rtMu.ledger.jobs.get? muJobId then
         if jr.state.isTerminal then
           muFinished := true
-          break
     let muRec? := rtMu.ledger.jobs.get? muJobId
     let (_, rMuFiles) ← handleRequest rtMu {
       method := "POST", rawPath := s!"/jobs/{muJobId}/files", path := s!"/jobs/{muJobId}/files",
       query := #[], headers := authHdrs,
       body := (renderCompact (.obj #[("action", .str "read"), ("path", .str "out.txt")])).toUTF8
     }
-    let .ok muFileJv := OrbBin.Json.parse (String.fromUTF8? rMuFiles.body |>.getD "{}")
-      | throw (IO.userError "failed parsing /jobs/:id/files JSON")
+    let muState := muRec?.map (fun r => r.state.asString) |>.getD "missing"
+    let .ok muFileJv := OrbBin.Json.parse (String.fromUTF8? rMuFiles.body |>.getD "")
+      | failResponseParse "/jobs/:id/files" rMuFiles.status rMuFiles.body muState muFinished
+    if rMuFiles.status != 200 then
+      failResponseParse "/jobs/:id/files" rMuFiles.status rMuFiles.body muState muFinished
     let outTxt := (muFileJv.fieldStr? "content").getD ""
 
     let muExecClaims : LeaseClaims := { memberClaims with scope := .missionExecute }
@@ -2066,8 +2077,10 @@ def runTests : IO UInt32 := do
         ("command", .str "pwd")
       ])).toUTF8
     }
-    let .ok muExecJv := OrbBin.Json.parse (String.fromUTF8? rMuExec.body |>.getD "{}")
-      | throw (IO.userError "failed parsing /execute JSON")
+    let .ok muExecJv := OrbBin.Json.parse (String.fromUTF8? rMuExec.body |>.getD "")
+      | failResponseParse "/execute" rMuExec.status rMuExec.body muState muFinished
+    if rMuExec.status != 200 then
+      failResponseParse "/execute" rMuExec.status rMuExec.body muState muFinished
     let execOut := ((muExecJv.fieldStr? "stdout").getD "").trimAscii.toString
 
     check "End-to-end OrbNode -> orb-privd confined member job + /files + /execute isolates home and never leaks managed OAuth or node token"
