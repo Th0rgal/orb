@@ -16,7 +16,7 @@ private def sql (st : ManagedComputeStore) (query : String) : IO Unit := do
   discard <| require (← execParamQuery st.db query #[])
 
 private def fleet : ManagedFleetState :=
-  { enabled := true, boatEnabled := true, dailyCapCents := 10 }
+  { enabled := true, boatEnabled := true, dailyCapCents := 10, spentTodayCents := 0 }
 
 private def machine (id : String) (cost : UInt64) : ManagedMachine :=
   { id, sandboxName := "orb-managed-" ++ id, spentCents := cost, ttlMinutes := 60 }
@@ -38,11 +38,39 @@ private def requireAdmission {α : Type} (label : String) (value : Except String
   | .ok result => pure result
   | .error error => throw (IO.userError s!"{label}: {error}")
 
+private def reservationCount (st : ManagedComputeStore) : IO UInt64 := do
+  let rows ← require (← execParamQuery st.db
+    "SELECT COUNT(*) FROM managed_cost_reservations;" #[])
+  pure (if rows.size > 1 then cellU64 rows[1]! 0 else 0)
+
 private def refusedAs (expected : String) (st : ManagedComputeStore) (id : String) (cost now : UInt64) : IO Unit := do
+  let before ← reservationCount st
   match ← provisionManagedMachine st fleet (machine id cost) now with
   | .ok _ => throw (IO.userError s!"unexpected admission: {id}")
   | .error error => check (error == expected) s!"{id}: named budget refusal (got {error})"
   check ((← getManagedMachine? st id).isNone) s!"{id}: refusal creates no provider work"
+  let after ← reservationCount st
+  check (after == before) s!"{id}: refusal creates no reservation"
+
+private def refusedWithFleet (expected : String) (st : ManagedComputeStore)
+    (snapshot : ManagedFleetState) (id : String) (cost now : UInt64) : IO Unit := do
+  let before ← reservationCount st
+  match ← provisionManagedMachine st snapshot (machine id cost) now with
+  | .ok _ => throw (IO.userError s!"unexpected admission: {id}")
+  | .error error => check (error == expected) s!"{id}: named budget refusal (got {error})"
+  check ((← getManagedMachine? st id).isNone) s!"{id}: refusal creates no provider work"
+  let after ← reservationCount st
+  check (after == before) s!"{id}: refusal creates no reservation"
+
+private def refusedBandwidth (expected : String) (st : ManagedComputeStore)
+    (mission id : String) (_cost now : UInt64) : IO Unit := do
+  let before ← reservationCount st
+  match ← provisionManagedMachine st fleet (bandwidthMachine id mission) now with
+  | .ok _ => throw (IO.userError s!"unexpected admission: {id}")
+  | .error error => check (error == expected) s!"{id}: named budget refusal (got {error})"
+  check ((← getManagedMachine? st id).isNone) s!"{id}: refusal creates no provider work"
+  let after ← reservationCount st
+  check (after == before) s!"{id}: refusal creates no reservation"
 
 private def refused (st : ManagedComputeStore) (id : String) (cost now : UInt64) : IO Unit :=
   refusedAs "managed_spawn_rejected" st id cost now
@@ -63,9 +91,13 @@ def midnightAndReload (root : String) : IO Unit := do
     configure reopened
     let snapshot ← require (← loadManagedFleetAt reopened true true 10 10 100 86402)
     check (snapshot.spentTodayCents == 0) "midnightAndReload: old completed commitments roll off"
-    discard <| require (← provisionManagedMachine reopened { fleet with spentTodayCents := 10 }
-      (machine "day-two" 10) 86402)
-    refused reopened "day-two-over" 1 86403
+    sql reopened "UPDATE managed_fleet_state SET spent_today_cents=99;"
+    let later ← require (← loadManagedFleetAt reopened true true 10 0 100 172801)
+    check (later.spentTodayCents == 0) "midnightAndReload: legacy baseline is not reread"
+    let baselines ← require (← execParamQuery reopened.db
+      "SELECT COUNT(*) FROM managed_global_budget_baseline;" #[])
+    check (baselines.size > 1 && cellU64 baselines[1]! 0 == 1)
+      "midnightAndReload: one permanent legacy baseline"
   finally closeManagedComputeStore reopened
 
 def liveCommitmentAfterReload (root : String) : IO Unit := do
@@ -113,12 +145,55 @@ def oldSchemaNonzeroLiveCommitment (root : String) : IO Unit := do
     discard <| require (← provisionManagedMachine reloaded fleet (machine "legacy-next-day" 7) 86401)
   finally closeManagedComputeStore reloaded
 
+def priorDayReservationMigration (root : String) : IO Unit := do
+  let path := root ++ "/budget-prior-day.db"
+  let st ← require (← openManagedComputeStore path)
+  try
+    configure st
+    discard <| require (← provisionManagedMachine st fleet (machine "prior-day" 7) 86390)
+    sql st "UPDATE managed_machines SET phase_code=3,status='destroyed' WHERE id='prior-day';"
+    sql st "UPDATE managed_fleet_state SET spent_today_cents=10;"
+    sql st "DELETE FROM managed_global_budget_baseline;"
+  finally closeManagedComputeStore st
+  let reopened ← require (← openManagedComputeStore path)
+  try
+    let loaded ← require (← loadManagedFleetAt reopened true true 10 0 100 86401)
+    check (loaded.spentTodayCents == 10)
+      "priorDayReservationMigration: prior-day completed charge is not subtracted"
+    refused reopened "prior-day-over" 1 86402
+  finally closeManagedComputeStore reopened
+
+def snapshotParity (root : String) : IO Unit := do
+  let noRow ← require (← openManagedComputeStore (root ++ "/budget-snapshot-empty.db"))
+  try
+    refusedWithFleet "managed_spawn_rejected" noRow { fleet with spentTodayCents := 10 }
+      "snapshot-spent-no-row" 1 90000
+      -- fails at 27d2d096: no; master and this head both refuse the snapshot.
+  finally closeManagedComputeStore noRow
+  let withBaseline ← require (← openManagedComputeStore (root ++ "/budget-snapshot-baseline.db"))
+  try
+    configure withBaseline
+    sql withBaseline "INSERT INTO managed_global_budget_baseline(day_start,cents) VALUES(0,0);"
+    refusedWithFleet "managed_spawn_rejected" withBaseline { fleet with spentTodayCents := 10 }
+      "snapshot-spent-baseline" 1 90000
+      -- fails at 27d2d096: no; master and this head both refuse the snapshot.
+  finally closeManagedComputeStore withBaseline
+  let maxed ← require (← openManagedComputeStore (root ++ "/budget-snapshot-machines.db"))
+  try
+    configure maxed
+    let snapshot := { fleet with maxConcurrent := 1 }
+    let snapshot := { snapshot with machines := #[machine "snapshot-live" 0] }
+    refusedWithFleet "managed_spawn_rejected" maxed snapshot "snapshot-machines" 1 90000
+      -- fails at 27d2d096: no; master and this head both refuse the snapshot.
+  finally closeManagedComputeStore maxed
+
 def concurrentGlobalAdmission (root : String) : IO Unit := do
   let path := root ++ "/budget-concurrent.db"
   let a ← require (← openManagedComputeStore path)
   let b ← require (← openManagedComputeStore path)
   try
     configure a
+    let before ← reservationCount a
     let first ← IO.asTask (provisionManagedMachine a fleet (machine "race-a" 6) 90000)
     let second ← IO.asTask (provisionManagedMachine b fleet (machine "race-b" 6) 90000)
     let .ok ra := first.get | throw (IO.userError "first admission task failed")
@@ -126,8 +201,11 @@ def concurrentGlobalAdmission (root : String) : IO Unit := do
     check (ra.isOk != rb.isOk) "concurrentGlobalAdmission: exactly one reservation"
     let loser := if ra.isOk then rb else ra
     match loser with
-    | .error error => check (error == "managed_spawn_rejected") "concurrentGlobalAdmission: loser sees budget"
-    | .ok _ => throw (IO.userError "both requests admitted")
+     | .error error => check (error == "managed_spawn_rejected") "concurrentGlobalAdmission: loser sees budget"
+     | .ok _ => throw (IO.userError "both requests admitted")
+    let after ← reservationCount a
+    check (after == before + 1)
+      "concurrentGlobalAdmission: loser creates no reservation"
   finally
     closeManagedComputeStore b
     closeManagedComputeStore a
@@ -138,20 +216,36 @@ def bandwidthAdmission (root : String) : IO Unit := do
     configure st
     setBandwidth st "owner" "{\"compute_vcpu_per_min\":3,\"compute_usd_per_hour\":100,\"protect_root\":false}"
     discard <| require (← provisionManagedMachine st fleet (bandwidthMachine "bw-first" "owner") 90000)
+    let beforeOver ← reservationCount st
     match ← provisionManagedMachine st fleet (bandwidthMachine "bw-over" "owner") 90001 with
     | .ok _ => throw (IO.userError "unexpected admission: bw-over")
     | .error error => check (error == "managed_compute_vcpu_bandwidth_exceeded") "bw-over: named budget refusal"
     check ((← getManagedMachine? st "bw-over").isNone) "bw-over: refusal creates no provider work"
+    let afterOver ← reservationCount st
+    check (afterOver == beforeOver) "bw-over: refusal creates no reservation"
     sql st "UPDATE managed_machines SET phase_code=3,status='destroyed' WHERE id='bw-first';"
     discard <| require (← provisionManagedMachine st fleet (bandwidthMachine "bw-room" "owner") 1)
     setBandwidth st "root-owner" "{\"compute_vcpu_per_min\":2,\"compute_usd_per_hour\":100,\"protect_root\":true}"
+    discard <| require (← provisionManagedMachine st fleet (bandwidthMachine "root-first" "root-owner") 2)
     discard <| require (← provisionManagedMachine st fleet (bandwidthMachine "root-protected" "root-owner") 2)
+    setBandwidth st "root-owner" "{\"compute_vcpu_per_min\":1,\"compute_usd_per_hour\":100,\"protect_root\":true}"
+    let beforeSingle ← reservationCount st
+    refusedBandwidth "managed_compute_vcpu_bandwidth_exceeded" st "root-owner" "root-single-over" 0 90003
+    let afterSingle ← reservationCount st
+    check (afterSingle == beforeSingle) "root-single-over: refusal creates no reservation"
+    setBandwidth st "owner" "{\"compute_vcpu_per_min\":3,\"compute_usd_per_hour\":100,\"protect_root\":false}"
+    let beforeAggregate ← reservationCount st
+    refusedBandwidth "managed_compute_vcpu_bandwidth_exceeded" st "owner" "bw-aggregate-over" 0 90004
+    let afterAggregate ← reservationCount st
+    check (afterAggregate == beforeAggregate) "bw-aggregate-over: refusal creates no reservation"
   finally closeManagedComputeStore st
 
 def run (root : String) : IO Unit := do
   try midnightAndReload root catch e => throw (IO.userError s!"midnightAndReload: {e}")
   try liveCommitmentAfterReload root catch e => throw (IO.userError s!"liveCommitmentAfterReload: {e}")
   try oldSchemaNonzeroLiveCommitment root catch e => throw (IO.userError s!"oldSchemaNonzeroLiveCommitment: {e}")
+  try priorDayReservationMigration root catch e => throw (IO.userError s!"priorDayReservationMigration: {e}")
+  try snapshotParity root catch e => throw (IO.userError s!"snapshotParity: {e}")
   try concurrentGlobalAdmission root catch e => throw (IO.userError s!"concurrentGlobalAdmission: {e}")
   try bandwidthAdmission root catch e => throw (IO.userError s!"bandwidthAdmission: {e}")
 
