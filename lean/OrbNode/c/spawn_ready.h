@@ -1,6 +1,7 @@
 #ifndef ORB_NODE_SPAWN_READY_H
 #define ORB_NODE_SPAWN_READY_H
 #include <pthread.h>
+#include <sys/socket.h>
 
 /* Reserve a reaper before fork. On failure the caller never waits for a child
  * stuck in the kernel; this worker retains ownership until waitpid completes.
@@ -59,7 +60,7 @@ static void orb_spawn_release_reaper(struct orb_spawn_reaper *r, pid_t pid) {
  * publish successful setsid before the parent exposes its group to Runner.
  * No exec-status handshake: existing command exit codes 126/127 stay intact. */
 static int orb_ready_pipe(int fd[2]) {
-    if (pipe(fd) < 0) return -1;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fd) < 0) return -1;
     if (fcntl(fd[0], F_SETFD, FD_CLOEXEC) < 0 ||
         fcntl(fd[1], F_SETFD, FD_CLOEXEC) < 0) {
         int err = errno;
@@ -72,9 +73,14 @@ static int orb_ready_pipe(int fd[2]) {
 static void orb_child_ready(int fd[2]) {
     close(fd[0]);
     int err = setsid() < 0 ? errno : 0;
-    ssize_t n = write(fd[1], &err, sizeof(err));
+    ssize_t n = send(fd[1], &err, sizeof(err), MSG_NOSIGNAL);
+    /* Do not exec until the parent accepts readiness. On EINTR/timeout in
+     * the parent no command or descendant can escape direct-child cleanup. */
+    struct pollfd p = { .fd = fd[1], .events = POLLIN };
+    char accepted = 0;
+    if (err || n != sizeof(err) || poll(&p, 1, 5000) != 1 ||
+        read(fd[1], &accepted, 1) != 1 || accepted != 'R') _exit(126);
     close(fd[1]);
-    if (err || n != sizeof(err)) _exit(126);
 }
 
 static int orb_parent_ready(int fd[2], pid_t pid) {
@@ -85,6 +91,7 @@ static int orb_parent_ready(int fd[2], pid_t pid) {
     if (rc < 0) err = errno;
     else if (rc == 0) err = ETIMEDOUT;
     else if (!(p.revents & POLLIN) || read(fd[0], &err, sizeof(err)) != sizeof(err)) err = EIO;
+    if (!err && send(fd[0], "R", 1, MSG_NOSIGNAL) != 1) err = errno ? errno : EIO;
     close(fd[0]);
     if (!err) return 0;
     /* Our unreaped fork child cannot have been recycled. Never kill its

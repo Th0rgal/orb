@@ -24,6 +24,12 @@ static pid_t test_setsid(void) {
     return setsid();
 }
 static int test_poll(struct pollfd *fds, nfds_t n, int ms) {
+    if (mode == 7) {
+        int rc = poll(fds, n, ms);
+        assert(rc == 1); /* Child has published readiness, parent rejects it. */
+        errno = EINTR;
+        return -1;
+    }
     if (mode == 3) return 0;
     if (mode == 4) { errno = EINTR; return -1; }
     return poll(fds, n, ms);
@@ -48,7 +54,7 @@ static int fd_count(void) {
 int main(void) {
     alarm(15);
     int before = fd_count();
-    for (mode = 0; mode < 7; mode++) {
+    for (mode = 0; mode < 8; mode++) {
         int ready[2];
         assert(orb_ready_pipe(ready) == 0);
         pid_t pid = fork();
@@ -59,6 +65,7 @@ int main(void) {
             if (mode == 5) { close(ready[0]); assert(write(ready[1], "x", 1) == 1); _exit(125); }
             if (mode == 6) pause(); /* Real readiness deadline, no injected poll. */
             orb_child_ready(ready);
+            if (mode == 7) _exit(99); /* Must never cross acceptance barrier. */
             pause();
             _exit(0);
         }
@@ -71,9 +78,10 @@ int main(void) {
             assert(kill(-pid, SIGKILL) == 0);
             assert(waitpid(pid, &status, 0) == pid);
         } else {
-            int expected = mode == 1 ? EPERM : (mode == 3 || mode == 6) ? ETIMEDOUT : mode == 4 ? EINTR : EIO;
+            int expected = mode == 1 ? EPERM : (mode == 3 || mode == 6) ? ETIMEDOUT : (mode == 4 || mode == 7) ? EINTR : EIO;
             assert(err == expected);
             assert(waitpid(pid, &status, 0) == pid);
+            assert(!(WIFEXITED(status) && WEXITSTATUS(status) == 99));
             assert(waitpid(pid, &status, WNOHANG) == -1 && errno == ECHILD);
         }
         assert(fd_count() == before);

@@ -88,3 +88,21 @@ Root run is assigned to dgx-spark via controller after Core builds are idle.
 Root gate unavailable locally: mission uid995 has
 no_new_privs; sudo refuses; ORB_SUDO_TOKEN absent; no privileged-request tool
 or local Orb REST connection is provisioned. No production deployment.
+
+## PR review correction
+
+Review comment4591840523 identified an EINTR-after-ACK escape: the original
+one-way readiness channel allowed exec before the parent accepted readiness.
+The corrected protocol uses a CLOEXEC socketpair and a parent acceptance byte.
+The child waits boundedly for that byte before executing any command. A parent
+failure therefore still owns a child that cannot yet have spawned descendants.
+MSG_NOSIGNAL prevents a closed peer from turning setup failure into SIGPIPE.
+
+New case7 waits until child readiness is readable, then injects parent EINTR;
+it verifies the child never crosses acceptance, is reaped and leaks no FDs.
+All eight helper cases plus reserved reaper and exit-ownership cases: actual0.
+Both binaries rebuild: actual0. Actual Runner gated replay PID1181248
+ticks223231576: bothsignalsrc0, dead1/0, actual0. No full suite rerun.
+Per-file lines now214/118 production and72/124 test.
+New full binary SHA256:
+`4d7ae5ad49afb363537f115ad215568e4bbe80e434702534b4956d8162570922`.
