@@ -627,7 +627,7 @@ def run (root : String) : IO Unit := do
     check (writtenBoard.fieldBool? "ok" == some true &&
       (writtenBoard.fieldOrNull "result").fieldStr? "updated_by_mission_id" == some "member-mission") "controller writes board"
     let .ok () ← upsertMission store {
-      id := "board-reader", ownerUserId := "member", title := "board reader",
+      id := "board-reader", ownerUserId := "member", title := "board reader", parentMissionId := "member-mission",
       status := "awaiting_user", backend := "codex", modelOverride := "", workingDirectory := path,
       project := "member-project", updatedAt := "2026-11-13T10:00:00Z" }
       | throw (IO.userError "board reader fixture")
@@ -640,7 +640,7 @@ def run (root : String) : IO Unit := do
     let oversized : JVal := .obj #[("text", .str (String.ofList (List.replicate 8193 'é')))]
     let tooLarge ← call memberSession "write_project_board" oversized
     check ((tooLarge.fieldOrNull "error").fieldStr? "code" == some "board_too_large") "MCP board byte cap"
-    check ((← send "PUT" "/api/projects/member-project/board" member oversized).1 == 400) "REST board byte cap"
+    check ((← send "PUT" "/api/projects/member-project/board" member oversized).1 == 403) "REST alias refuses user writer"
     for method in #["GET", "PUT"] do
       check ((← send method "/api/projects/admin-project/board" member boardText).1 == 404) "foreign board is not found"
     check ((← send "PUT" "/api/projects/member-project/controller-mission" member

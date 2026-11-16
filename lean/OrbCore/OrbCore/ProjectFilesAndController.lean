@@ -351,6 +351,16 @@ def readProjectBoard (store : CoreStore) (slug : String) : IO JVal := do
       updated := cell rows[1]! 1
       author := cell rows[1]! 2
       controller := cell rows[1]! 3
+  if !controller.isEmpty then
+    if let .ok rows ← execParamQuery store.missionsDb
+        "SELECT text,updated_at,updated_by_mission_id FROM mission_board WHERE mission_id=?1;" #[controller] then
+      text := ""
+      updated := ""
+      author := ""
+      if rows.size > 1 then
+        text := cell rows[1]! 0
+        updated := cell rows[1]! 1
+        author := cell rows[1]! 2
   return .obj #[("text", .str text), ("updated_at", optStrJVal updated),
     ("updated_by_mission_id", optStrJVal author), ("controller_mission_id", optStrJVal controller)]
 
@@ -791,10 +801,7 @@ def dispatchProjectAndControllerRoutes?
         let .ok jv := OrbBin.Json.parseBytes bodyBytes
           | return some (jsonErr 400 "invalid_json")
         if tail == ["board"] then
-          let some text := jv.fieldStr? "text" | return some (jsonErr 400 "invalid_text")
-          match ← writeProjectBoard store scopedSlug text nowIso "" with
-          | .error e => return some (jsonErr (if e == "board_too_large" then 400 else 500) e)
-          | .ok () => return some (jsonResp 200 (← readProjectBoard store scopedSlug))
+          return some (jsonErr 403 "not_project_controller")
         let mid ← match jv.field? "mission_id" with
           | some .null => pure ""
           | some (.str mid) =>
