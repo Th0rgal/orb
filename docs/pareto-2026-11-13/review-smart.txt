@@ -1,0 +1,83 @@
+INDEPENDENT CREDIT-VAULT SOURCE AUDIT
+Repository: Idle-Labs/idle-tranches; branch fixes-and-updated
+Baseline: 54502d162e58fef706e7c3dfd24e59c442ae5576
+Reviewed head: 2ac4eab34d72478a3914ead646e1834976f37427
+Date: 2026-11-13 UTC
+
+VERDICT
+Do not treat this review as a full-gate pass or unconditional upgrade approval. The fresh-epoch openingUnclaimedFees snapshot and write-off denominator matched the intended formula in an executable case including carried fees and a mid-epoch entry. Existing storage field locations and recursive type shapes were preserved in the compiled epoch, prefunded, and strategy layouts. However, two newly introduced storage fields require explicit consideration of legacy economic state: live-epoch opening fees and accrued-but-unallocated management fees are not migrated automatically. Two additional checkpoint-sensitive accounting behaviors were reproduced; the public dust-deposit fee effect is demonstrably pre-existing at baseline, not a regression introduced by this diff.
+
+Scope: primary contract changes across the entire baseline-to-head range, not only the last write-off patch: IdleCDOCreditVault, IdleCDOEpochVariant, IdleCDOStorage, IdleCreditVault strategy, implied-price helper, prefunded inheritance, factory access changes, related source tests and dependencies. Deployment manifests/scripts/configuration were inspected selectively, not certified as a complete operational deployment system. No other reviewers' findings were consulted; no delegation, repository edits, commits, pushes, comments, or external finding disclosures were made.
+
+FINDING U1 — Live-epoch upgrades leave the opening-fee snapshot zero
+Evidence: executable-reproduced; conditional deployment hazard. Suggested severity: Medium if live-epoch upgrades with carried fees are permitted; otherwise an enforced upgrade precondition.
+Locations: contracts/IdleCDOEpochVariant.sol:245, :955-982; contracts/IdleCDOStorage.sol:133-135.
+The new openingUnclaimedFees slot is written by startEpoch only. An epoch started on the baseline implementation has no snapshot. Upgrading during that epoch leaves zero even if opening unclaimedFees were nonzero. writeOffDeposit then divides by gross strategy principal rather than principal excluding the opening reserve, so less active interest is waived than the new rule intends. Subsequent stopEpoch succeeds; this is not merely a revert.
+Reproduction: baseline proxies; ordinary 18-decimal ERC20; 20,000 AA principal; annual management fee 1%; performance fee zero. End a baseline epoch with the interest override 2 and new APR zero, carrying about 200 tokens of fees. Restore APR to 10%, start another epoch on baseline, then upgrade both CDO and strategy to head. Borrower burns 5,000 AA shares through writeOffDeposit.
+Observed opening reserve: 200000022165144593632 base units.
+Actual burned principal: 4949999981116818890823.
+Actual interest relief: 490049997581977743591.
+Relief with the true opening snapshot: 494999998111681889082.
+Under-relief: 4950000529704145491 (~4.95000053 tokens).
+Mitigation: enforce upgrades between epochs, or implement a one-time authenticated migration using the actual epoch-opening reserve. Do not substitute current unclaimedFees blindly after intra-epoch accrual. This reproduction does not establish that a live production pool has this state.
+
+FINDING U2 — Legacy accrued management fees are not classified into pendingManagementFees
+Evidence: executable-reproduced; conditional deployment hazard. Suggested severity: Medium when preserving the new pro-rata management-fee policy across an upgrade is required.
+Locations: contracts/IdleCDOCreditVault.sol:226-243, :319-342, :468-476, :559-563; contracts/IdleCDOStorage.sol:133.
+Baseline setFeeParams can accrue management fees into unclaimedFees without updating saved tranche NAVs. After upgrade, the new pendingManagementFees slot is zero. The next accounting update therefore treats that pre-existing fee liability as ordinary investment loss, applying the junior-first waterfall rather than the new NAV-proportional management-expense allocation.
+Reproduction: baseline proxies, AA and BB each deposit 10,000; management fee 1%; wait half a year, call setFeeParams with unchanged parameters to accrue about 100 tokens without allocating them; upgrade CDO; call updateAccounting at head.
+Observed old unallocated fees: 100000009497082698131; new fees: zero (first-epoch exemption).
+AA charged: zero. BB charged: 100000006326103499755 (~100 tokens).
+NAV-proportional BB share would be about 50000004756468797815 (~50 tokens).
+Small numeric differences reflect independently timed deposit/checkpoint transactions, not the approximately 50-token allocation discrepancy.
+Mitigation: checkpoint and allocate legacy fees on the old implementation before upgrading if accepting the old waterfall; otherwise migrate the unallocated management component explicitly and validate both NAVs. Not every unclaimed fee is pending management expense: blindly copying all unclaimedFees would also be incorrect.
+
+OBSERVATION A1 — Checkpoint timing changes APR0 receipt interest
+Evidence: executable-reproduced at head; root cause source-derived. Suggested severity: Low/Medium economic-policy issue; privileged checkpoint in this reproduction. Baseline equivalence was not established for this programmable-borrower case.
+Locations: contracts/IdleCDOEpochVariant.sol:368, :388-390; contracts/strategies/idle/IdleCreditVault.sol:504, :523-547; contracts/IdleCDOCreditVault.sol:126-128, :495-507.
+APR0 allocation reads getContractValue before stopEpoch checkpoints elapsed management fees. Thus it uses stale active net principal when there has been no prior accounting checkpoint, but fee-reduced principal if an owner/guardian checkpoints just before stop. Pending APR0 principal is unchanged. This changes the distribution of identical realized borrower interest between active and pending holders.
+Reproduction: complete a fee-free initial epoch; use the repository's deterministic mock ERC4626 vault and production ProgrammableBorrower proxy; APR zero, minted interest enabled; original active deposit 1,000; management fee 1%; request 500 shares; fund borrower and start; add 100 tokens of vault gain. Compare ordinary stop against owner updateAccounting immediately before stop.
+Pending receipt interest without checkpoint: 49748743718592964807 (~49.74874372).
+With checkpoint: 50000000016015046338 (~50.00000002).
+AA saved price respectively: 1090502510980495450 vs 1089999998391993246.
+The implied helper was close to actual settlement within each separate execution; that agreement does not remove checkpoint dependence.
+Mitigation: define the desired fee-adjusted principal basis for APR0 and use the same basis regardless of checkpoint history, including pending accrued expenses. Moving accrual earlier requires rechecking first-epoch exemption, loss previews, and the other stop branches.
+
+OBSERVATION A2 — A public dust deposit increases fees by crystallizing an interim management loss
+Evidence: executable-reproduced at BOTH baseline and head. Pre-existing behavior, not a new diff finding. Suggested severity: Medium accounting/griefing concern if fee policy requires epoch-level netting; no direct attacker profit demonstrated.
+Locations: contracts/IdleCDOEpochVariant.sol:664-690; contracts/IdleCDOCreditVault.sol:226-243, :313-320, :559-578.
+Management expenses reduce saved NAV when checkpointed before unrealized fixed-borrower epoch interest is booked. At final settlement, performance fees apply to gains above that reduced checkpoint NAV instead of netting all epoch management expenses against the epoch's interest. Frequent checkpoints also change the net-NAV management-fee accrual base. A one-base-unit mid-epoch deposit invokes the accounting checkpoint when enabled, AYS is off, and the caller satisfies the wallet policy. Its economic effect is not limited to its deposit size.
+Reproduction: 20,000 AA tokens; first fee-free epoch earns 10%, leaving 22,000; enable 1% annual management fee and 10% performance fee for the next annual 10%-APR epoch. Compare no intermediate call with a one-base-unit deposit halfway through that epoch.
+Baseline AND head gave identical respective results:
+No dust deposit: total fee receiver cash 418000025114155251140 (~418.00002511); NAV 23781999974885844748860.
+With dust deposit: fees 428505027779046169455 (~428.50502778); NAV 23771494972220953830546.
+Difference: about 10.505 tokens shifted from holders to fee receiver; transaction timestamp effects are negligible relative to this difference.
+Borrower writeOffDeposit(0, AA) also reproduced the checkpoint effect at head without a principal write-off.
+Mitigation: specify whether fees are checkpoint-local or epoch-net. If epoch-net is intended, preserve an epoch loss/expense carry or equivalent invariant so zero-economic-value interactions cannot materially change performance fees. Add paired-path tests, not only single-path expected-value assertions.
+
+POSITIVE/REFUTED CHECKS
+1. Fresh head: after creating a carried fee reserve, starting a new epoch, adding a 1,000-token mid-epoch deposit, and writing off 1,000 shares, actual relief exactly equaled burnedPrincipal * activeExpectedInterest / (grossPrincipal - openingReserve). Snapshot reserve was 200000025367833587009. Snapshot-before-running ordering is consistent with excluding only pre-epoch fees while current-epoch fee accrual remains in the interest-bearing base. Pending withdrawal fees remain a floor in source.
+2. A fully wiped BB tranche with outstanding supply was not revived by a later profitable epoch. Helper BB price and runtime BB virtualPrice remained zero; final AA NAV 13,200 tokens, BB NAV zero, total net assets 13,200. This candidate was refuted for the tested sequence.
+3. Exact-NAV mint and withdrawal changes avoid the previous price-rounding-first amplification. No new concrete rounding exploit was established. Floor rounding and permanently locked initial shares still require dust-aware assertions; no exhaustive decimal/range fuzz campaign was run.
+4. Manager APR mutation is now blocked during a running epoch in the paired strategy setters; CDO can set the next APR during stop. Removed public one-argument setApr is an integration ABI change.
+
+STORAGE / BUILD / INTEGRATION
+Compiled old and new layouts with solc 0.8.10 and OpenZeppelin 4.9.6. For all existing non-gap entries in IdleCDOEpochVariant, IdleCDOEpochVariantPrefunded, and IdleCreditVault, matched labels, slots, offsets, and recursive type shapes (including mapping/array/struct types). New pendingManagementFees occupies slot 243, openingUnclaimedFees slot 244; the base gap shrinks 43 to 41. isEpochRunning remains slot 286; prefunded epochQueue remains slot 301 offset 2. This is structural compatibility, not proof of semantic migration safety (U1/U2).
+Optimizer runs 1 runtime sizes from this independent compile: epoch 24,528 bytes, prefunded 24,410, strategy 17,103. Epoch has only 48 bytes of EIP-170 margin. Exact deployment artifacts and network rules still need checking; Hardhat permits unlimited local contract size.
+Head stop calls prepareStopEpochWithApr0(uint256,bool). The baseline strategy lacks that selector: upgrading only CDO caused a stop revert in preliminary reproduction; upgrading both resolved it. Coordinate paired upgrades and validate the actual deployed strategy ABI. The retained one-argument strategy overload supports old callers in the other direction, but does not make a new CDO compatible with an old strategy.
+
+ASSUMPTIONS / LIMITATIONS
+- Standard non-rebasing, non-fee-on-transfer ERC20; strategy tokens represent underlying 1:1. DepositDuringEpoch transfers/mints from the requested amount without balance-delta normalization. Exotic-token support was not established.
+- Owner/proxy admin, manager, guardian, strategy and programmable borrower are trust boundaries. Owners can set fees/configuration; privileged loss/default/recovery paths are not a permissionless solvency guarantee. Ordinary fixed borrowers can default. Mock ERC4626 exercised deterministic gain/liquidity, not an adversarial callback/reentrancy campaign.
+- No production state, deployment schedule, opening fee balances, or mandatory runbook enforcement was verified. U1/U2 are reachable local upgrade states, not assertions about live deployment exposure.
+- Repository Foundry/fork/Hardhat suites and official upgrade validator were NOT run: forge/node/npm and project dependencies were absent. package.json has no explicit lint/typecheck scripts. No formal full-gate or kernel proof was performed. Independent compilation and EVM reproductions are narrower evidence.
+- Factory/source authorization changes and script/config diffs received source inspection only; manifests, every network/address configuration, all operational scripts, and all inherited contract uses were not exhaustively executed.
+- No repository repair was attempted in this read-only review.
+
+REPRODUCTION ARTIFACT
+Sibling file: idle-audit-repro.py (outside the clean source repository).
+Run from this workspace:
+/tmp/opencode/idle-audit-venv/bin/python /var/lib/sandboxed-node/7716c4d5-abf3-4812-81d0-aeac8727f77f/idle-audit-repro.py
+Uses Python web3/eth-tester/PyEVM, /tmp/opencode/solc-0.8.10, OpenZeppelin v4.9.6 checkouts at /tmp/opencode/idle-oz and idle-oz-upgradeable, and /tmp/opencode/idle-uniswap. Production contract sources are compiled via standard JSON; only underlying token and deterministic ERC4626 vault are mocks. The compiler/layout checks include baseline and head. Reproductions assert successful transactions and no final borrower default where relevant, and print the values above. The dependency paths are local prerequisites, not a portable bundled environment.
+
+Recommended next gate: decide and enforce upgrade-state invariants; add U1/U2 legacy-state tests and paired checkpoint/no-checkpoint fee/APR0 tests; run the full repository suite, deployment-specific storage validation and exact-artifact bytecode-size check before approving an upgrade.

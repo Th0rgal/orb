@@ -140,6 +140,7 @@ static void emit_zoom(GtkGesture *g, int ph, double scale, WebKitWebView *wv) {
 static void on_zoom_begin(GtkGesture *g, GdkEventSequence *s, gpointer ud) { (void)s; emit_zoom(g, 0, 1.0, WEBKIT_WEB_VIEW(ud)); }
 static void on_zoom_scale(GtkGestureZoom *z, double sc, gpointer ud) { emit_zoom(GTK_GESTURE(z), 1, sc, WEBKIT_WEB_VIEW(ud)); }
 static void on_win_active(GObject *w, GParamSpec *p, gpointer ud) { (void)p; webkit_web_view_evaluate_javascript(WEBKIT_WEB_VIEW(ud), gtk_window_is_active(GTK_WINDOW(w)) ? "document.documentElement&&(document.documentElement.dataset.windowFocused='true')" : "document.documentElement&&(document.documentElement.dataset.windowFocused='false')", -1, NULL, NULL, NULL, NULL, NULL); }
+static gboolean on_context_menu(void) { return TRUE; } /* Orb draws its own menus; suppress WebKit Back/Forward/Reload. */
 static gboolean on_perm_req(WebKitWebView *wv, WebKitPermissionRequest *req, gpointer ud) {
     (void)ud; if (!is_confined_shell_uri(webkit_web_view_get_uri(wv)) || !WEBKIT_IS_USER_MEDIA_PERMISSION_REQUEST(req)) return FALSE;
     WebKitUserMediaPermissionRequest *um = WEBKIT_USER_MEDIA_PERMISSION_REQUEST(req);
@@ -196,7 +197,7 @@ int main(int argc, char **argv) {
     GtkWidget *wv = g_object_new(WEBKIT_TYPE_WEB_VIEW, "web-context", ctx, "network-session", webkit_network_session_get_default(), "settings", wks, "user-content-manager", ucm, NULL);
     g_object_unref(ctx); g_object_unref(wks); g_object_unref(ucm); webkit_web_view_set_background_color(WEBKIT_WEB_VIEW(wv), &(GdkRGBA){ 0, 0, 0, 0 });
     GtkGesture *zoom = gtk_gesture_zoom_new(); gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(zoom), GTK_PHASE_CAPTURE); g_signal_connect(zoom, "begin", G_CALLBACK(on_zoom_begin), wv); g_signal_connect(zoom, "scale-changed", G_CALLBACK(on_zoom_scale), wv); gtk_widget_add_controller(wv, GTK_EVENT_CONTROLLER(zoom));
-    g_signal_connect(win, "notify::is-active", G_CALLBACK(on_win_active), wv); g_signal_connect(wv, "permission-request", G_CALLBACK(on_perm_req), NULL); g_signal_connect(wv, "decide-policy", G_CALLBACK(on_decide_policy), NULL);
+    g_signal_connect(win, "notify::is-active", G_CALLBACK(on_win_active), wv); g_signal_connect(wv, "permission-request", G_CALLBACK(on_perm_req), NULL); g_signal_connect(wv, "decide-policy", G_CALLBACK(on_decide_policy), NULL); g_signal_connect(wv, "context-menu", G_CALLBACK(on_context_menu), NULL);
     gtk_window_set_child(GTK_WINDOW(win), wv); webkit_web_view_load_uri(WEBKIT_WEB_VIEW(wv), (dev_url && is_confined_shell_uri(dev_url)) ? dev_url : ((ui_root && *ui_root) ? "tauri://localhost/" : "http://127.0.0.1:1430"));
     gtk_window_present(GTK_WINDOW(win)); g_main_loop_run(loop); g_main_loop_unref(loop);
 #else

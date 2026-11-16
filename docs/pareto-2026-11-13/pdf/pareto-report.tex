@@ -1,0 +1,195 @@
+\documentclass[10.5pt,a4paper]{article}
+\usepackage[a4paper,left=27mm,right=27mm,top=26mm,bottom=26mm]{geometry}
+\usepackage{fontspec}
+\usepackage{xcolor}
+\usepackage{tabularx}
+\usepackage{xltabular}
+\usepackage{array}
+\usepackage{colortbl}
+\usepackage[most]{tcolorbox}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{microtype}
+\usepackage{needspace}
+\usepackage[hidelinks]{hyperref}
+
+\setmainfont{SourceSerif4}[Path=fonts/,Extension=.otf,UprightFont=*-Regular,ItalicFont=*-It,BoldFont=*-Semibold,BoldItalicFont=*-SemiboldIt]
+\setsansfont{PlusJakartaSans}[Path=fonts/,Extension=.ttf,UprightFont=*-Regular,BoldFont=*-SemiBold,Scale=0.92]
+\newfontfamily\sansmed{PlusJakartaSans}[Path=fonts/,Extension=.ttf,UprightFont=*-Medium,Scale=0.92]
+\setmonofont{IBMPlexMono}[Path=fonts/,Extension=.otf,UprightFont=*-Regular,BoldFont=*-Medium,Scale=0.86]
+
+\definecolor{ink}{HTML}{1A1A1A}
+\definecolor{muted}{HTML}{6B7280}
+\definecolor{rule}{HTML}{E5E7EB}
+\definecolor{head}{HTML}{F9FAFB}
+\definecolor{okbg}{HTML}{ECFDF5}\definecolor{okfg}{HTML}{047857}\definecolor{okbd}{HTML}{A7F3D0}
+\definecolor{wabg}{HTML}{FFFBEB}\definecolor{wafg}{HTML}{92400E}\definecolor{wabd}{HTML}{FDE68A}
+\definecolor{grbg}{HTML}{F9FAFB}\definecolor{grfg}{HTML}{4B5563}\definecolor{grbd}{HTML}{E5E7EB}
+\color{ink}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{7pt}
+\linespread{1.12}
+\hyphenpenalty=10000\exhyphenpenalty=10000\emergencystretch=3em
+\renewcommand{\arraystretch}{1.0}
+\arrayrulecolor{rule}
+\setlength{\LTpre}{2pt}\setlength{\LTpost}{4pt}
+\setlength{\arrayrulewidth}{0.5pt}
+
+\titleformat{\section}{\fontsize{14}{17}\selectfont\bfseries}{}{0pt}{}
+\titlespacing*{\section}{0pt}{26pt}{2pt}
+\titleformat{\subsection}{\fontsize{11.5}{14}\selectfont\bfseries}{}{0pt}{}
+\titlespacing*{\subsection}{0pt}{16pt}{2pt}
+
+\pagestyle{fancy}\fancyhf{}\renewcommand{\headrulewidth}{0pt}
+\fancyfoot[L]{\sffamily\fontsize{7.5}{9}\selectfont\color{muted}Verity Labs · Pareto Credit Vault · Formal verification report}
+\fancyfoot[R]{\sffamily\fontsize{7.5}{9}\selectfont\color{muted}\thepage}
+
+\newcommand{\lead}[1]{{\color{muted}\fontsize{10}{14}\selectfont #1}\par\vspace{4pt}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\mut}[1]{\textcolor{muted}{#1}}
+\newcommand{\thd}[1]{{\sffamily\fontsize{7.2}{9}\selectfont\color{muted}\addfontfeature{LetterSpace=6}\MakeUppercase{#1}}}
+\newcommand{\pill}[4]{\tcbox[on line,boxsep=0pt,left=5pt,right=5pt,top=2.2pt,bottom=2.2pt,arc=6pt,boxrule=0.5pt,colback=#1,colframe=#3]{\sansmed\fontsize{7.5}{9}\selectfont\color{#2}#4}}
+\newcommand{\proven}{\pill{okbg}{okfg}{okbd}{Proven}}
+\newcommand{\fixed}{\pill{okbg}{okfg}{okbd}{Fixed}}
+\newcommand{\bydesign}{\pill{grbg}{grfg}{grbd}{By design}}
+\newcommand{\scoped}{\pill{wabg}{wafg}{wabd}{Scoped}}
+\newcommand{\id}[1]{{\ttfamily\fontsize{7.5}{10}\selectfont\color{muted}#1}}
+\newcolumntype{L}{>{\raggedright\arraybackslash}X}
+\newcolumntype{P}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcommand{\rowpad}{\rule{0pt}{13pt}}
+\newcommand{\rowend}{\\[5pt]\hline}
+
+\newtcolorbox{card}[1][]{enhanced,colback=white,colframe=rule,boxrule=0.5pt,arc=4pt,left=10pt,right=10pt,top=8pt,bottom=8pt,#1}
+\newtcolorbox{tablebox}{enhanced,breakable,colback=white,colframe=rule,boxrule=0.5pt,arc=4pt,left=0pt,right=0pt,top=0pt,bottom=0pt,boxsep=0pt,clip upper}
+
+\begin{document}
+\raggedbottom
+
+{\sffamily\fontsize{7.5}{10}\selectfont\color{muted}\addfontfeature{LetterSpace=12}FORMAL VERIFICATION REPORT · NOVEMBER 2026}\par
+\vspace{6pt}
+{\fontsize{30}{34}\selectfont\bfseries Pareto Credit Vault}\par
+\vspace{8pt}
+\begin{minipage}{0.80\linewidth}\raggedright
+{\fontsize{12.5}{18.5}\selectfont\color{muted}Pareto runs on-chain credit vaults: lenders deposit, a borrower draws a fixed-rate line, and everything settles epoch by epoch. We formally verified the contracts that do the accounting.}
+\end{minipage}\par
+\vspace{14pt}
+
+\begin{tcolorbox}[enhanced,colback=wabg,colframe=wabd,boxrule=0.5pt,arc=4pt,left=10pt,right=10pt,top=6pt,bottom=6pt]
+\sffamily\fontsize{8.5}{12}\selectfont\color{wafg}{\sansmed Preliminary version.} The final proof run is still in progress. This report will link to the proofs once they are fully verified.
+\end{tcolorbox}
+\vspace{2pt}
+
+\begin{tcbraster}[raster columns=2,raster equal height,raster column skip=10pt]
+\begin{card}
+\thd{Source}\par\vspace{3pt}
+\href{https://github.com/Idle-Labs/idle-tranches/pull/112}{\underline{idle-tranches PR \#112}}\\
+\href{https://github.com/Idle-Labs/idle-tranches/tree/2ac4eab34d72478a3914ead646e1834976f37427}{\code{2ac4eab34d}}
+\end{card}
+\begin{card}
+\thd{Contracts}\par\vspace{3pt}
+\code{IdleCDOEpochVariant}\\ \code{IdleCDOCreditVault}\\ \code{IdleCreditVault}
+\end{card}
+\end{tcbraster}
+
+\section{Guarantees}
+\lead{What is proved, for every input and every sequence of calls the model allows.}
+
+\begin{xltabular}{\linewidth}{@{\hspace{10pt}}P{17mm}P{40mm}Lc@{\hspace{10pt}}}
+\hline
+\rowcolor{head}\rowpad & \thd{Guarantee} & \thd{What is proved} & \\[4pt]\hline\endhead
+\rowpad\id{PRICE-1} & \textbf{Tranche price only goes down for a known reason} & \mut{The AA price decreases only after a registered loss, a default, or management-fee accrual.} & \proven \rowend
+\rowpad\id{APR-1} & \textbf{The APR is locked during an epoch} & \mut{No one but the CDO can change the strategy APR while an epoch is running.} & \proven \rowend
+\rowpad\id{INTEREST-1} & \textbf{Epoch interest is computed once and correctly} & \mut{Epoch start records the expected interest; a normal stop settles exactly that amount net of fees, in cash and in minted mode.} & \proven \rowend
+\rowpad\id{APR0-1} & \textbf{APR-zero withdrawals are settled once} & \mut{Principal is returned exactly once, and interest is bounded by the request's share of that epoch's realized interest.} & \proven \rowend
+\rowpad\id{LOSS-1} & \textbf{A registered loss is split fairly} & \mut{Loss is split pro-rata between pending withdrawals and active holders, BB absorbs first, and the total is conserved.} & \proven \rowend
+\rowpad\id{RECOVERY-1} & \textbf{Default recovery is one-time and uniform} & \mut{A default is finalized once, every holder gets the same recovery rate, and the reserve backs all entitlements.} & \proven \rowend
+\rowpad\id{CLAIM-1} & \textbf{Claims are single-use and isolated} & \mut{A claim pays once, does not touch other users, and never overspends the recovery reserve.} & \proven \\[5pt]
+\hline
+\end{xltabular}
+
+{\fontsize{9.5}{13.5}\selectfont\color{muted}All seven rest on a 23-clause invariant linking the CDO, the strategy, the tranche tokens and the underlying token, proved at deployment and preserved by the operations the guarantees rely on.\par}
+
+\section{Assumptions}
+\lead{Confirmed with Pareto. None requires a code change.}
+
+\begin{xltabular}{\linewidth}{@{\hspace{10pt}}P{40mm}L@{\hspace{10pt}}}
+\hline
+\rowcolor{head}\rowpad\thd{Assumption} & \thd{Meaning} \\[4pt]\hline\endhead
+\rowpad\textbf{Trusted roles} & \mut{Owner and manager are operated by Pareto. The owner does not use \code{transferToken} on active reserves, fee and buffer parameters are not changed mid-epoch, and the settlement mode only moves from cash to minted.} \rowend
+\rowpad\textbf{Standard token} & \mut{The underlying is a standard ERC-20 (no transfer fee, no rebasing). The borrower interacts only through \code{transferFrom}.} \rowend
+\rowpad\textbf{Normal epoch stop} & \mut{INTEREST-1 covers the normal stop (\code{\_interest = 0}). The manager's interest override on stop is intended by design and outside this guarantee.} \rowend
+\rowpad\textbf{Two-tranche configuration} & \mut{Adaptive yield split (AYS) is enabled whenever both tranches are economically active, which disables \code{depositDuringEpoch}.} \rowend
+\rowpad\textbf{APR-zero scope} & \mut{The stop-to-settlement proof covers requests made in the epoch being stopped.} \rowend
+\rowpad\textbf{Upgrades} & \mut{Live vaults are upgraded from a clean state (no active default).} \rowend
+\rowpad\textbf{Vault value} & \mut{The underlying vault value does not fall on its own outside a registered loss or default.} \\[5pt]
+\hline
+\end{xltabular}
+
+{\fontsize{9.5}{13.5}\selectfont\color{muted}Out of scope: the prefunded variant and programmable-borrower vaults.\par}
+
+\section{Method}
+\lead{How the proofs connect to the Solidity.}
+
+\begin{tcbraster}[raster columns=3,raster equal height,raster column skip=10pt]
+\begin{card}
+{\fontsize{12}{15}\selectfont\bfseries Model}\par\vspace{2pt}
+{\fontsize{9.3}{13.2}\selectfont\color{muted}\raggedright Each Solidity contract is translated one-to-one into Verity, our contract language embedded in Lean~4.\par}
+\end{card}
+\begin{card}
+{\fontsize{12}{15}\selectfont\bfseries Prove}\par\vspace{2pt}
+{\fontsize{9.3}{13.2}\selectfont\color{muted}\raggedright Each guarantee is a Lean theorem about the model, checked by the Lean kernel.\par}
+\end{card}
+\begin{card}
+{\fontsize{12}{15}\selectfont\bfseries Replay}\par\vspace{2pt}
+{\fontsize{9.3}{13.2}\selectfont\color{muted}\raggedright Every counterexample and fix found on the model is replayed as a Foundry test on the real contracts.\par}
+\end{card}
+\end{tcbraster}
+
+\subsection{Why the model is faithful}
+
+We compared the model with the Solidity function by function: branch order, revert conditions, storage writes around external calls, rounding and storage layout.
+
+We then replayed every counterexample and fix found on the model against the real contracts: 57 Foundry tests across 15 suites on the pinned Solidity, compiled with Pareto's production settings (solc 0.8.10). The model's predictions match in all of them.
+
+The proofs rely on the Lean 4 kernel and its three standard axioms, with no \code{sorry}, no project axioms and no \code{native\_decide}. This is a reviewed translation plus differential testing, not a proof that the bytecode equals the model, so compiler correctness is assumed.
+
+\section{Findings}
+\lead{Everything found during the engagement, and how it was closed.}
+
+\begin{xltabular}{\linewidth}{@{\hspace{10pt}}P{58mm}P{17mm}L@{\hspace{10pt}}}
+\hline
+\rowcolor{head}\rowpad\thd{Finding} & & \thd{Resolution} \\[4pt]\hline\endhead
+\rowpad APR could be changed mid-epoch by the manager & \fixed & \mut{The setter reverts while an epoch is running.} \rowend
+\rowpad One-argument \code{setApr} skipped the instant-withdraw APR check during the buffer & \fixed & \mut{Public \code{setApr} removed at \code{2ac4eab3}.} \rowend
+\rowpad Management fee charged entirely to BB; a tiny BB balance could default the vault & \fixed & \mut{Fee allocated pro-rata by tranche NAV.} \rowend
+\rowpad Loss on an epoch that also earned interest was processed in the wrong order & \fixed & \mut{A stop with a loss settles zero active interest.} \rowend
+\rowpad Write-off after a late mid-epoch deposit subtracted full-epoch interest & \fixed & \mut{Interest is reduced proportionally.} \rowend
+\rowpad Fixed-epoch interest can be overridden on stop & \bydesign & \mut{Used to compensate lenders, for example after a late start.} \rowend
+\rowpad Management fee keeps accruing past \code{epochEndDate} if \code{stopEpoch} is delayed & \bydesign & \mut{Fees are continuous.} \rowend
+\rowpad Mid-epoch deposit can lower the saved price at a checkpoint & \scoped & \mut{Only with AYS disabled; 1 wei in AA-only vaults; no change in final payouts in our reproduction.} \\[5pt]
+\hline
+\end{xltabular}
+
+\section{Notes}
+\lead{A few things we looked at that sit outside the seven guarantees.}
+
+\code{maxWithdrawable} is an estimate. It does not account for pending management fees or instant mode, and Pareto chose to document that instead of changing it, since the contract is close to the bytecode size limit. For an exact quote, call \code{requestWithdraw} with \code{eth\_call}.
+
+We looked for an underflow in \code{\_projectedNAV} and found no reachable path. The fee projection and \code{virtualPrice} match what settlement actually pays, in both cash and minted modes.
+
+Default recovery uses one shared rate, without seniority between tranches. That is the current design. If it changes, RECOVERY-1 will need to be restated.
+
+An expired Keyring credential blocks new deposits and withdrawal requests. Requests already made can still be claimed.
+
+\needspace{9\baselineskip}
+\section{Reproduce}
+\lead{From the proof repository.}
+
+\begin{tcolorbox}[enhanced,colback=head,colframe=rule,boxrule=0.5pt,arc=4pt,left=10pt,right=10pt,top=7pt,bottom=7pt]
+\ttfamily\fontsize{8.6}{13}\selectfont
+lake build \hfill\mut{\# checks every proof}\\
+forge test -{}-root . -vvv \hfill\mut{\# replays findings and fixes on the pinned Solidity}
+\end{tcolorbox}
+
+\end{document}
