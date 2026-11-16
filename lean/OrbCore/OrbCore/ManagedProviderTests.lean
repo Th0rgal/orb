@@ -108,8 +108,11 @@ def run : IO Unit := do
     check (failure.status == status && (← requests.get).size == 1 &&
       (← requests.get)[0]!.method == "DELETE" && (← sleeps.get).isEmpty)
       "failed DELETE preserves error without STOP fallback"
+  requests.set #[]
   replies.set #[(204, .null)]
   check (← provider.destroy "sb-1").isOk "successful DELETE confirms destruction"
+  check ((← requests.get)[0]!.headers == #[("X-Ascii-Confirm-Delete", "sb-1")])
+    "DELETE repeats the sandbox ID in Boat's confirmation header"
   replies.set #[(400, .obj #[("code", .str "stop_failed")]), (200, .null)]
   check (← provider.stop "sb-1").isOk "explicit stop retains retry behavior"
   check ((← sleeps.get) == #[3000]) "bounded stop retry"
