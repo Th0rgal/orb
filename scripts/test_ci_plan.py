@@ -736,6 +736,26 @@ class PlannerCoverageTest(unittest.TestCase):
         self.assertIn(f"mcr.microsoft.com/playwright:v{pinned}-noble", browser)
         self.assertIn("include-hidden-files: true", build)
 
+    def test_setup_node_pnpm_cache_cannot_fail_path_validation(self):
+        """setup-node's post step saves `pnpm store path` and fails path
+        validation when it is absent, which is what happens whenever a
+        node_modules cache hit skips the install (master run 43785309691, job
+        133043694869). The store cache is keyed by the same lockfile as
+        node_modules, so no ci job delegates it to setup-node; node modules
+        stay cached explicitly."""
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertIsNone(re.search(r"(?m)^\s+cache: pnpm$", workflow))
+        jobs = re.split(r"(?m)^  ([a-z0-9-]+):\n", workflow)[1:]
+        caching = [job for job, body in zip(jobs[::2], jobs[1::2])
+                   if "path: orb/node_modules" in body]
+        self.assertTrue(caching, "no job caches node_modules; the pattern moved")
+        for job, body in zip(jobs[::2], jobs[1::2]):
+            if "path: orb/node_modules" not in body:
+                continue
+            with self.subTest(job=job):
+                self.assertIn("if: steps.modules.outputs.cache-hit != 'true'", body)
+                self.assertIn("run: pnpm install --frozen-lockfile", body)
+
 
 if __name__ == "__main__":
     unittest.main()
