@@ -32,6 +32,65 @@ DEFAULT_ROLLOUT_BINARIES = (
     ("sandboxed-mcp", "/usr/local/bin/sandboxed-mcp"),
     ("orb-privd", "/usr/local/sbin/orb-privd"),
 )
+DEFAULT_CORDON_OWNER = "rolling_upgrade_nodes"
+DEFAULT_CORDON_LEDGER_PATH = "/run/sandboxed-node-rolling-upgrade.cordons.json"
+
+
+def load_cordon_ledger(ledger_path=DEFAULT_CORDON_LEDGER_PATH):
+    if not ledger_path:
+        return {}
+    p = Path(ledger_path)
+    if not p.is_file():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        nodes = data.get("nodes") if isinstance(data, dict) else None
+        return dict(nodes) if isinstance(nodes, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_cordon_ledger(entries, ledger_path=DEFAULT_CORDON_LEDGER_PATH):
+    if not ledger_path:
+        return
+    p = Path(ledger_path)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = Path(str(p) + ".tmp")
+        payload = {"version": 1, "nodes": dict(entries)}
+        tmp.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, p)
+    except OSError:
+        if ledger_path != DEFAULT_CORDON_LEDGER_PATH:
+            raise
+
+
+def record_cordon_owner(
+    node_id,
+    cordoned_by=DEFAULT_CORDON_OWNER,
+    reason="rolling_upgrade_drain",
+    target_build_sha=None,
+    ledger_path=DEFAULT_CORDON_LEDGER_PATH,
+):
+    entries = load_cordon_ledger(ledger_path)
+    entries[node_id] = {
+        "node": node_id,
+        "cordoned_by": cordoned_by,
+        "reason": reason,
+        "target_build_sha": target_build_sha,
+        "cordoned_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "pid": os.getpid(),
+    }
+    save_cordon_ledger(entries, ledger_path)
+    return entries[node_id]
+
+
+def clear_cordon_owner(node_id, ledger_path=DEFAULT_CORDON_LEDGER_PATH):
+    entries = load_cordon_ledger(ledger_path)
+    removed = entries.pop(node_id, None)
+    save_cordon_ledger(entries, ledger_path)
+    return removed
 
 
 def compute_file_sha256(path):
@@ -1347,6 +1406,42 @@ def perform_fenced_upgrade(
     return "UPGRADED"
 
 
+def recover_worker_state(
+    binary_path="/usr/local/bin/sandboxed-node",
+    staged_suffix=".new",
+    unit_name="sandboxed-node",
+    service_ctl=None,
+    mcp_binary_path=None,
+    privd_binary_path=None,
+):
+    ctl = service_ctl or SystemdServiceCtl()
+    node_path, mcp_path, privd_path = _resolve_companion_paths(
+        binary_path=binary_path,
+        mcp_binary_path=mcp_binary_path,
+        privd_binary_path=privd_binary_path,
+    )
+    swap_journal_path = _default_swap_journal_path(node_path)
+    journal_recovered = False
+    if swap_journal_path.is_file():
+        journal_recovered = bool(_recover_swap_journal(swap_journal_path, service_ctl=ctl))
+    cleared = []
+    for comp_bin in (node_path, mcp_path, privd_path):
+        if comp_bin is None:
+            continue
+        for suffix in (staged_suffix, staged_suffix + ".failed", ".installing", ".restoring"):
+            cand = Path(str(comp_bin) + suffix)
+            if cand.exists():
+                cand.unlink(missing_ok=True)
+                cleared.append(str(cand))
+    if not ctl.is_active(unit_name):
+        ctl.restart_best_effort(unit_name)
+    return {
+        "journal_recovered": journal_recovered,
+        "cleared_artifacts": cleared,
+        "healthy": bool(ctl.is_active(unit_name)),
+    }
+
+
 def _remote_worker_prelude():
     parts = [
         "import hashlib, inspect, json, os, pathlib, shutil, sqlite3, subprocess, sys, time, urllib.request",
@@ -1382,6 +1477,7 @@ def _remote_worker_prelude():
         inspect.getsource(_build_worker_unit_targets),
         inspect.getsource(probe_worker_state),
         inspect.getsource(perform_fenced_upgrade),
+        inspect.getsource(recover_worker_state),
     ]
     return "\n\n".join(parts)
 
@@ -1486,6 +1582,16 @@ class SshNodeOps:
         out = self._ssh_python(host, code, timeout=max(45, int(self.verify_delay_secs) + 30))
         return out.splitlines()[-1]
 
+    def recover_remote(self, host, binary_path="/usr/local/bin/sandboxed-node"):
+        code = (
+            _remote_worker_prelude()
+            + "\nprint(json.dumps(recover_worker_state("
+            + f"binary_path={binary_path!r}, staged_suffix={self.staged_suffix!r}"
+            + ")))\n"
+        )
+        out = self._ssh_python(host, code, timeout=45)
+        return json.loads(out.splitlines()[-1])
+
     def probe_local(self, db_path, binary_path="/usr/local/bin/sandboxed-node", include_metadata=False):
         inc = bool(include_metadata or self.expected_build_sha or self.expected_sha256)
         return probe_worker_state(
@@ -1553,10 +1659,12 @@ def collect_fleet_rollout_status(
     local_jobs_db=None,
     expected_build_sha=None,
     expected_sha256=None,
+    cordon_ledger_path=DEFAULT_CORDON_LEDGER_PATH,
 ):
     """Return per-node reported build/checksums vs target build/checksums."""
     nodes_list = core_api.list_nodes()
     core_by_id = {n["id"]: n for n in nodes_list}
+    cordon_ledger = load_cordon_ledger(cordon_ledger_path)
     rows = []
 
     target_hosts = list(remote_nodes)
@@ -1598,6 +1706,11 @@ def collect_fleet_rollout_status(
         healthy = bool(probe_data.get("healthy", core_info.get("status") == "online"))
         running = int(probe_data.get("running", hb.get("active_jobs", 0)))
         cordoned = bool(core_info.get("cordoned", False))
+        cordon_meta = cordon_ledger.get(host) if isinstance(cordon_ledger, dict) else None
+        cordoned_by = (
+            (cordon_meta.get("cordoned_by") if isinstance(cordon_meta, dict) else None)
+            or core_info.get("cordoned_by")
+        )
 
         sha_matches = (expected_build_sha is None) or (reported_build == expected_build_sha)
         bins_match = True
@@ -1641,6 +1754,7 @@ def collect_fleet_rollout_status(
             "node": host,
             "state": state,
             "cordoned": cordoned,
+            "cordoned_by": cordoned_by if cordoned else None,
             "healthy": healthy,
             "quarantined": quarantined,
             "staged": staged,
@@ -1718,6 +1832,8 @@ def rolling_upgrade_step(
     stage_artifacts=None,
     expected_build_sha=None,
     expected_sha256=None,
+    cordon_owner=DEFAULT_CORDON_OWNER,
+    cordon_ledger_path=DEFAULT_CORDON_LEDGER_PATH,
 ):
     """Execute one idempotent rolling-upgrade reconciliation tick."""
     events = []
@@ -1746,6 +1862,7 @@ def rolling_upgrade_step(
             if host not in PreserveCordons:
                 core_api.set_cordon(host, False)
                 cordoned_map[host] = False
+                clear_cordon_owner(host, cordon_ledger_path)
             emit("upgraded_remote", node=host, uncordoned=(host not in PreserveCordons))
             return True
         if str(outcome).startswith("ROLLBACK_FAILED"):
@@ -1774,6 +1891,7 @@ def rolling_upgrade_step(
                 if apply:
                     core_api.set_cordon(host, False)
                     cordoned_map[host] = False
+                    clear_cordon_owner(host, cordon_ledger_path)
                 emit("uncordoned_completed_node", node=host)
             else:
                 emit(
@@ -1830,6 +1948,7 @@ def rolling_upgrade_step(
                 if apply:
                     core_api.set_cordon(host, False)
                     cordoned_map[host] = False
+                    clear_cordon_owner(host, cordon_ledger_path)
                 emit("uncordoned_completed_node", node=host)
             continue
 
@@ -1856,6 +1975,7 @@ def rolling_upgrade_step(
         if apply:
             core_api.set_cordon(excess, False)
             cordoned_map[excess] = False
+            clear_cordon_owner(excess, cordon_ledger_path)
         emit("uncordoned_excess_wave", node=excess)
 
     # Advance cordons only when all remote probes and prior upgrades succeeded (fail-closed)
@@ -1879,7 +1999,14 @@ def rolling_upgrade_step(
             if apply:
                 core_api.set_cordon(host, True)
                 cordoned_map[host] = True
-            emit("cordoned_for_drain", node=host, running_jobs=running)
+                record_cordon_owner(
+                    host,
+                    cordoned_by=cordon_owner,
+                    reason="rolling_upgrade_drain",
+                    target_build_sha=expected_build_sha,
+                    ledger_path=cordon_ledger_path,
+                )
+            emit("cordoned_for_drain", node=host, running_jobs=running, cordoned_by=cordon_owner)
             if running == 0:
                 if apply:
                     if try_upgrade_remote(host, db_path):
@@ -1944,6 +2071,38 @@ def rolling_upgrade_step(
     return events, all_complete
 
 
+def recover_cordoned_node(
+    core_api,
+    node_ops,
+    node_id,
+    cordon_ledger_path=DEFAULT_CORDON_LEDGER_PATH,
+    preserve_cordons=frozenset(),
+    force_uncordon=False,
+):
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    ledger = load_cordon_ledger(cordon_ledger_path)
+    meta = ledger.get(node_id) if isinstance(ledger, dict) else None
+    cordoned_by = meta.get("cordoned_by") if isinstance(meta, dict) else None
+    worker_recovery = {}
+    if node_ops is not None and hasattr(node_ops, "recover_remote"):
+        worker_recovery = node_ops.recover_remote(node_id)
+    uncordoned = False
+    if node_id not in preserve_cordons and (force_uncordon or cordoned_by == DEFAULT_CORDON_OWNER or meta is not None or not cordoned_by):
+        core_api.set_cordon(node_id, False)
+        clear_cordon_owner(node_id, cordon_ledger_path)
+        uncordoned = True
+    return {
+        "at": now,
+        "action": "recovered_node",
+        "node": node_id,
+        "cordoned_by": cordoned_by or DEFAULT_CORDON_OWNER,
+        "uncordoned": uncordoned,
+        "journal_recovered": bool(worker_recovery.get("journal_recovered", False)),
+        "cleared_artifacts": list(worker_recovery.get("cleared_artifacts", [])),
+        "healthy": bool(worker_recovery.get("healthy", True)),
+    }
+
+
 def run_governed_rollout(
     core_api,
     node_ops,
@@ -1960,6 +2119,8 @@ def run_governed_rollout(
     poll_interval_secs=2.0,
     sleep_fn=time.sleep,
     clock_fn=time.monotonic,
+    cordon_owner=DEFAULT_CORDON_OWNER,
+    cordon_ledger_path=DEFAULT_CORDON_LEDGER_PATH,
 ):
     """Run rolling_upgrade_step (looping up to drain_timeout_secs while nodes drain)."""
     start_ts = clock_fn()
@@ -1977,6 +2138,8 @@ def run_governed_rollout(
             stage_artifacts=stage_artifacts,
             expected_build_sha=expected_build_sha,
             expected_sha256=expected_sha256,
+            cordon_owner=cordon_owner,
+            cordon_ledger_path=cordon_ledger_path,
         )
         all_events.extend(step_events)
         if done or not apply:
@@ -2086,6 +2249,16 @@ def main(argv=None):
         help="Directory holding built sandboxed-node, sandboxed-mcp, and orb-privd binaries to stage",
     )
     parser.add_argument("--preserve-cordon", action="append", default=[], help="Node IDs to keep cordoned after upgrade")
+    parser.add_argument(
+        "--recover-node",
+        "--uncordon",
+        dest="recover_nodes",
+        action="append",
+        default=[],
+        help="Recover a node left cordoned or mid-swap after failure/SIGTERM (replays swap journal, clears quarantined/staged artifacts, and uncordons)",
+    )
+    parser.add_argument("--cordon-owner", default=DEFAULT_CORDON_OWNER, help="Owner label recorded when cordoning nodes")
+    parser.add_argument("--cordon-ledger", default=DEFAULT_CORDON_LEDGER_PATH, help="Path to local cordon ownership ledger")
     parser.add_argument("--stop-timer-on-complete", help="Systemd timer unit to stop when all nodes finish")
     parser.add_argument("--lock-file", default="/run/sandboxed-node-rolling-upgrade.lock")
     parser.add_argument("--audit-log", help="Append JSONL events to this file")
@@ -2115,7 +2288,7 @@ def main(argv=None):
     remote_nodes = [parse_node_spec(item) for item in args.node]
 
     lock_handle = None
-    if args.apply and args.lock_file:
+    if (args.apply or args.recover_nodes) and args.lock_file:
         Path(args.lock_file).parent.mkdir(parents=True, exist_ok=True)
         lock_handle = open(args.lock_file, "w")
         try:
@@ -2131,7 +2304,7 @@ def main(argv=None):
             base_url, bearer = discover_local_core_auth()
 
         core_api = HttpCoreApi(base_url, bearer)
-        if not remote_nodes and not args.local_jobs_db:
+        if not remote_nodes and not args.local_jobs_db and not args.recover_nodes:
             discovered = [
                 (n["id"], None)
                 for n in core_api.list_nodes()
@@ -2150,6 +2323,28 @@ def main(argv=None):
             expected_build_sha=args.expected_build_sha,
             expected_sha256=expected_sha256 or None,
         )
+        if args.recover_nodes:
+            rec_events = []
+            for target_node in args.recover_nodes:
+                host, _ = parse_node_spec(target_node)
+                rec_events.append(
+                    recover_cordoned_node(
+                        core_api=core_api,
+                        node_ops=node_ops,
+                        node_id=host,
+                        cordon_ledger_path=args.cordon_ledger,
+                        preserve_cordons=frozenset(args.preserve_cordon),
+                        force_uncordon=True,
+                    )
+                )
+            output = "".join(json.dumps(ev, sort_keys=True) + "\n" for ev in rec_events)
+            sys.stdout.write(output)
+            if args.audit_log:
+                Path(args.audit_log).parent.mkdir(parents=True, exist_ok=True)
+                with open(args.audit_log, "a", encoding="utf-8") as handle:
+                    handle.write(output)
+            return 0
+
         if args.status:
             status_rows = collect_fleet_rollout_status(
                 core_api=core_api,
@@ -2158,6 +2353,7 @@ def main(argv=None):
                 local_jobs_db=args.local_jobs_db,
                 expected_build_sha=args.expected_build_sha,
                 expected_sha256=expected_sha256 or None,
+                cordon_ledger_path=args.cordon_ledger,
             )
             output = "".join(json.dumps(row, sort_keys=True) + "\n" for row in status_rows)
             sys.stdout.write(output)
@@ -2177,6 +2373,8 @@ def main(argv=None):
             expected_sha256=expected_sha256 or None,
             drain_timeout_secs=args.drain_timeout_secs,
             poll_interval_secs=args.poll_interval_secs,
+            cordon_owner=args.cordon_owner,
+            cordon_ledger_path=args.cordon_ledger,
         )
         output = "".join(json.dumps(ev, sort_keys=True) + "\n" for ev in events)
         sys.stdout.write(output)
