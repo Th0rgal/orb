@@ -20,6 +20,7 @@
 #ifdef __APPLE__
 #include <crt_externs.h>
 #endif
+#include "spawn_ready.h"
 
 static volatile sig_atomic_t g_node_term = 0, g_node_hup = 0;
 static void orb_node_on_term(int sig) { (void)sig; g_node_term = 1; }
@@ -165,10 +166,9 @@ LEAN_EXPORT lean_obj_res orb_node_spawn_job_pgrp(
     (void)w;
     int log_fd = open(lean_string_cstr(log_path), O_CREAT | O_WRONLY | O_APPEND | O_CLOEXEC, 0600);
     if (log_fd < 0) return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string("open log_path failed")));
-    pid_t pid = fork();
-    if (pid < 0) { close(log_fd); return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string("fork() failed"))); }
+    pid_t pid = orb_spawn_session();
+    if (pid < 0) { int err = errno; close(log_fd); return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(strerror(err)))); }
     if (pid == 0) {
-        setsid();
         int null_fd = open("/dev/null", O_RDONLY);
         if (null_fd >= 0) { dup2(null_fd, STDIN_FILENO); close(null_fd); }
         dup2(log_fd, STDOUT_FILENO); dup2(log_fd, STDERR_FILENO); close(log_fd);
