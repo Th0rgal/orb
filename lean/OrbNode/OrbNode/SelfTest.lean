@@ -2055,6 +2055,8 @@ def runTests : IO UInt32 := do
         if jr.state.isTerminal then
           muFinished := true
     let muRec? := rtMu.ledger.jobs.get? muJobId
+    if muRec?.map (·.state) != some .succeeded then
+      IO.eprintln s!"confined self-test job error: {muRec?.bind (·.error?)}"
     let (_, rMuFiles) ← handleRequest rtMu {
       method := "POST", rawPath := s!"/jobs/{muJobId}/files", path := s!"/jobs/{muJobId}/files",
       query := #[], headers := authHdrs,
