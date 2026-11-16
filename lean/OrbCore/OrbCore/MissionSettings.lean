@@ -8,6 +8,29 @@ namespace OrbCore.MissionSettings
 
 open OrbCore.Store OrbCore.R7Core OrbCore.SecretAndApproval OrbBin.Json
 
+def commitPlacementWithRecovery
+    (store : CoreStore) (updates : Array CheckedPlacementUpdate) (owner nowIso : String)
+    (beforeCommitExtra : IO (Except String Unit) := pure (.ok ()))
+    (afterCommit : IO (Except String Unit) := pure (.ok ())) :
+    IO (Except (Nat × String) (Array MissionPlacementItem × Array MissionPlacementItem)) := do
+  if let .error _ ← MissionMoveRecovery.ensureSchema store.missionsDb then
+    return .error (500, "move_marker_schema_failed")
+  let beforeCommit := do
+    match ← MissionMoveRecovery.mark store (updates.map (·.missionId)) owner nowIso with
+    | .error e => return .error e
+    | .ok () => beforeCommitExtra
+  let moved ← batchSetMissionPlacementChecked store updates nowIso beforeCommit
+  let (allMoved, changedMoved) ← match moved with
+    | .error e => return .error e
+    | .ok pair => pure pair
+  if let .error _ := ← afterCommit then
+    return .error (500, "move_secret_policy_failed")
+  if let .error _ ← rebindMovedMissionMcpSessionsChecked store allMoved nowIso then
+    return .error (500, "move_rebind_failed")
+  if let .error _ ← MissionMoveRecovery.clearPending store (allMoved.map (·.missionId)) then
+    return .error (500, "move_marker_clear_failed")
+  return .ok (allMoved, changedMoved)
+
 def normalizeModelEffortForBackend (backend? : Option String) (raw : String) : Option String :=
   let level := raw.trimAscii.toString.toLower
   match backend? with
@@ -174,14 +197,8 @@ def applyPlacementPatch
     nextProject     := nextProj
     nextFolder      := m.targetFolder
   }
-  if let .error _ ← MissionMoveRecovery.ensureSchema store.missionsDb then
-    return .error (500, "{\"error\":\"move_marker_schema_failed\"}")
-  let beforeCommit := do
-    if let .error e ← MissionMoveRecovery.mark store (updates.map (·.missionId))
-        (if callerIsLegacyUnscoped then "" else callerUserId) nowIso then return .error e
-    saveSettings
   let (_allMoved, changedMoved) ←
-    match ← batchSetMissionPlacementChecked store updates nowIso beforeCommit with
+    match ← commitPlacementWithRecovery store updates (if callerIsLegacyUnscoped then "" else callerUserId) nowIso saveSettings with
     | .ok pair => pure pair
     | .error (code, msg) =>
       if let some prevRaw := brokerRawBefore? then

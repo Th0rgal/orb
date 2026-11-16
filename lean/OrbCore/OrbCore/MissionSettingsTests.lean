@@ -77,8 +77,31 @@ def moveRecovery (root : String) : IO Unit := do
       "B5b_deleted_mission_marker_removed_without_rebind"
   finally closeCoreStore reopened
 
+def routeRecovery (root : String) : IO Unit := do
+  let path := s!"{root}/b5b-route-recovery"
+  let .ok store ← openCoreStore path | throw (IO.userError "B5b route open")
+  let sql (db : SqliteDb) (q : String) := do
+    let .ok rows ← execParamQuery db q #[] | throw (IO.userError "B5b route query")
+    return rows
+  try
+    for id in #["route-root", "route-link"] do
+      discard <| sql store.missionsDb s!"INSERT INTO missions(id,project,owner_user_id) VALUES('{id}','source','alice');"
+      discard <| sql store.projectsDb s!"INSERT INTO mcp_sessions_v1(id,mission_id,project_scope,project_scoped) VALUES('{id}','{id}','source',1);"
+    discard <| sql store.projectsDb "CREATE TRIGGER reject_route_rebind BEFORE UPDATE ON mcp_sessions_v1 BEGIN SELECT RAISE(ABORT,'route crash'); END;"
+    let some rootRow ← getMission? store "route-root" | throw (IO.userError "route root")
+    let route ← OrbCore.MissionSettings.applyPlacementPatch store rootRow (.obj #[("project", .str "destination")]) "alice" true "" "r1" 1000
+    check (!route.isOk) "B5b_rest_route_marks_before_crash"
+    let link ← OrbCore.MissionSettings.commitPlacementWithRecovery store #[{
+      missionId := "route-link", expectedProject := "source", nextProject := "destination", nextFolder := "" }]
+      "alice" "r2"
+    check (!link.isOk) "B5b_link_route_marks_before_crash"
+    discard <| sql store.projectsDb "DROP TRIGGER reject_route_rebind;"
+  finally closeCoreStore store
+  check (← OrbCore.MissionMoveRecovery.startup path).isOk "B5b_route_startup_repairs_markers"
+
 def run (root : String) : IO Unit := do
   moveRecovery root
+  routeRecovery root
   let .ok store ← openCoreStore s!"{root}/mission-settings"
     | throw (IO.userError "settings store open failed")
   try

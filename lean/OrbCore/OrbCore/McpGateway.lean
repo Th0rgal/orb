@@ -1512,10 +1512,9 @@ def dispatchMcpToolCall
       nextProject := effProj
       nextFolder := if effProj.isEmpty then "" else folder
     }
-    match ← batchSetMissionPlacementChecked store #[upd] nowIso with
+    match ← MissionSettings.commitPlacementWithRecovery store #[upd] claims.project nowIso with
     | .error (_, e) => return mcpErr "move_failed" e
-    | .ok (_, changed) =>
-      rebindMovedMissionMcpSessions store changed
+    | .ok (_, _changed) =>
       return mcpOk (.obj #[("ok", .bool true), ("mission_id", .str mid), ("project", .str effProj), ("folder", .str folder)])
 
   -- Compute Fleet & Managed Machines

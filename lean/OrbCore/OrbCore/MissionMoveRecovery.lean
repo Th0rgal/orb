@@ -20,6 +20,13 @@ def pending (db : SqliteDb) : IO (Except String (Array String)) := do
   return (← execParamQuery db "SELECT mission_id FROM pending_mission_rebinds ORDER BY mission_id;" #[]).map
     (fun rows => (rows.extract 1 rows.size).map (fun row => row[0]!))
 
+def clearPending (st : CoreStore) (ids : Array String) : IO (Except String Unit) := do
+  for id in ids do
+    if let .error e ← execParamQuery st.missionsDb
+        "DELETE FROM pending_mission_rebinds WHERE mission_id=?1;" #[id] then
+      return .error e
+  return .ok ()
+
 /-- Serialize replay with placement commits. Always read the current destination,
     including when a later move superseded a pending one. Keep the marker on failure. -/
 def reconcile (st : CoreStore) : IO (Except String Unit) := do
