@@ -133,6 +133,80 @@ def r24_failed_remote_cancel_survives_ledger_rewrite (store : CoreStore) (root :
   check ((← cellOf store.missionsDb "SELECT status FROM missions WHERE id='m-tools';") != "cancelled")
     "failed remote cancellation does not claim mission termination"
 
+def r24_invalid_send_settles (store : CoreStore) (root : String) (claims : McpSessionClaims) : IO Unit := do
+  let args := JVal.obj #[("mission_id", .str "m-tools"), ("idempotency_key", .str "r24-invalid-send")]
+  discard <| OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root claims "send_message_to_mission" args 4000000000
+  check ((← cellOf store.projectsDb "SELECT state FROM mcp_actions_v1 WHERE retry_key='r24-invalid-send';") == "failed")
+    "invalid send settles reserved row as failed"
+  let before ← cellOf store.projectsDb "SELECT updated_at FROM mcp_actions_v1 WHERE retry_key='r24-invalid-send';"
+  discard <| OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root claims "send_message_to_mission" args 4000000001
+  check ((← cellOf store.projectsDb "SELECT updated_at FROM mcp_actions_v1 WHERE retry_key='r24-invalid-send';") == before)
+    "refusal replay does not resettle"
+
+def r24_note_write_failure_is_not_success (store : CoreStore) (root : String) (claims : McpSessionClaims) : IO Unit := do
+  let .ok _ ← execParamQuery store.askDb
+      "CREATE TRIGGER r24_deny_note BEFORE INSERT ON operator_notes BEGIN SELECT RAISE(ABORT,'injected note failure'); END;" #[]
+    | throw (IO.userError "note trigger failed")
+  try
+    let args := JVal.obj #[("mission_id", .str "m-tools"), ("content", .str "r24 denied note"), ("idempotency_key", .str "r24-note-failed")]
+    discard <| OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root claims "send_message_to_mission" args 4000000000
+    check ((← cellOf store.projectsDb "SELECT state FROM mcp_actions_v1 WHERE retry_key='r24-note-failed';") == "uncertain")
+      "failed note write is not successful delivery"
+  finally
+    let .ok _ ← execParamQuery store.askDb "DROP TRIGGER r24_deny_note;" #[]
+      | throw (IO.userError "note trigger cleanup failed")
+
+def r24_exception_and_restart (store : CoreStore) (claims : McpSessionClaims) : IO Unit := do
+  for (id, tool, state) in #[("r24-throw", "send_message_to_mission", "accepted"),
+      ("r24-abandoned", "cancel_mission", "running"), ("r24-provider", "spawn_managed_machine", "accepted")] do
+    let .ok _ ← execParamQuery store.projectsDb
+        "INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state,result,created_at,updated_at) VALUES(?1,'m-tools',?2,?1,'{}','test',?3,'{}',?4,'{}','t0','t0');"
+        #[id, s!"{claims.sessionId}:{claims.missionId}:{tool}", tool, state]
+      | throw (IO.userError "exception/restart fixture failed")
+  -- The current-master startup hook does not recover generic rows.
+  let .ok _ ← OrbCore.ManagedSpawnActions.fenceInterrupted store | throw (IO.userError "spawn fence failed")
+  check ((← cellOf store.projectsDb "SELECT state FROM mcp_actions_v1 WHERE id='r24-abandoned';") == "running")
+    "reproduce spawn-only hook leaving generic action abandoned"
+  let providerBefore ← cellOf store.projectsDb "SELECT result FROM mcp_actions_v1 WHERE id='r24-provider';"
+  let raw ← OrbCore.McpGateway.withReservedMcpOutcome store claims "" "send_message_to_mission" "r24-throw" "t1"
+    (throw (IO.userError "injected throw after reservation"))
+  check (((OrbBin.Json.parse raw).toOption.getD .null |>.fieldOrNull "result").fieldStr? "accepted" == some "unknown")
+    "exception first response is unknown"
+  check ((← cellOf store.projectsDb "SELECT state FROM mcp_actions_v1 WHERE id='r24-throw';") == "uncertain")
+    "exception settles accepted row"
+  let .ok _ ← OrbCore.McpGateway.fenceInterruptedGenericActions store | throw (IO.userError "generic fence failed")
+  check ((← cellOf store.projectsDb "SELECT state FROM mcp_actions_v1 WHERE id='r24-abandoned';") == "uncertain") "generic restart fences abandoned row"
+  check ((← cellOf store.projectsDb "SELECT result FROM mcp_actions_v1 WHERE id='r24-provider';") == providerBefore) "generic fence excludes provider"
+  check ((← cellOf store.projectsDb "SELECT updated_at FROM mcp_actions_v1 WHERE id='r24-throw';") == "t1") "restart leaves settled rows unchanged"
+
+def r24_settlement_write_failure (store : CoreStore) (root : String) (claims : McpSessionClaims) : IO Unit := do
+  let .ok _ ← execParamQuery store.projectsDb
+      "CREATE TRIGGER r24_deny_success BEFORE UPDATE ON mcp_actions_v1 WHEN NEW.state='succeeded' BEGIN SELECT RAISE(ABORT,'injected settlement failure'); END;" #[]
+    | throw (IO.userError "settlement trigger failed")
+  try
+    let args := JVal.obj #[("mission_id", .str "m-tools"), ("content", .str "r24 settlement"), ("idempotency_key", .str "r24-settlement-failed")]
+    for _ in [0:2] do
+      let raw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root claims "send_message_to_mission" args 4000000000
+      let receipt := ((OrbBin.Json.parse raw).toOption.getD .null).fieldOrNull "result"
+      check (receipt.fieldStr? "state" == some "uncertain" && receipt.fieldStr? "accepted" == some "unknown") "failed success settlement is uncertain on first response and retry"
+    check ((← cellOf store.askDb "SELECT COUNT(*) FROM operator_notes WHERE content='r24 settlement';") == "1") "failed settlement replay cannot duplicate mutation"
+  finally
+    let .ok _ ← execParamQuery store.projectsDb "DROP TRIGGER r24_deny_success;" #[]
+      | throw (IO.userError "settlement trigger cleanup failed")
+
+def r24_cancel_write_failure (store : CoreStore) (root : String) (claims : McpSessionClaims) : IO Unit := do
+  let .ok _ ← execParamQuery store.missionsDb
+      "CREATE TRIGGER r24_deny_cancel BEFORE UPDATE ON missions WHEN NEW.status='cancelled' BEGIN SELECT RAISE(ABORT,'injected cancellation write failure'); END;" #[]
+    | throw (IO.userError "cancel trigger failed")
+  try
+    let args := JVal.obj #[("mission_id", .str "m-tools"), ("idempotency_key", .str "r24-cancel-write")]
+    let raw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root claims "cancel_mission" args 4000000000
+    check (((OrbBin.Json.parse raw).toOption.getD .null |>.fieldOrNull "result").fieldStr? "state" == some "uncertain")
+      "failed mission cancellation write is not success"
+  finally
+    let .ok _ ← execParamQuery store.missionsDb "DROP TRIGGER r24_deny_cancel;" #[]
+      | throw (IO.userError "cancel trigger cleanup failed")
+
 def r24_startup_fences_spawn_only (store : CoreStore) : IO Unit := do
   let .ok _ ← execParamQuery store.projectsDb
       ("INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state,result,created_at,updated_at) " ++
@@ -236,7 +310,12 @@ def run : IO Unit := do
       r24_concurrent_same_key_mutates_once store root claims
       r24_receipt_insert_failure_blocks_mutation store root claims
       r24_same_key_retry_returns_stored_receipt store root claims
+      r24_invalid_send_settles store root claims
+      r24_note_write_failure_is_not_success store root claims
+      r24_settlement_write_failure store root claims
+      r24_exception_and_restart store claims
       r24_failed_remote_cancel_survives_ledger_rewrite store root claims
+      r24_cancel_write_failure store root claims
       r24_startup_fences_spawn_only store
       let reply ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
         "start_mission" (.obj #[("title", .str "ghost"), ("prompt", .str "work that can never start")]) 4000000000
