@@ -9,7 +9,49 @@ private def check (ok : Bool) (label : String) : IO Unit := do
   unless ok do throw (IO.userError s!"mission settings: {label}")
   if label.startsWith "B5_" then IO.println s!"PASS {label}"
 
+def moveRecovery (root : String) : IO Unit := do
+  let path := s!"{root}/b5b-recovery"
+  let .ok store ← openCoreStore path | throw (IO.userError "B5b open")
+  let sql (db : SqliteDb) (q : String) := do
+    let .ok rows ← execParamQuery db q #[] | throw (IO.userError s!"B5b query: {q}")
+    return rows
+  try
+    for family in #["a", "b"] do
+      for (suffix, parent) in #[("root", ""), ("child", family ++ "root"), ("deep", family ++ "child")] do
+        let id := family ++ suffix
+        discard <| sql store.missionsDb s!"INSERT INTO missions(id,project,parent_mission_id,owner_user_id) VALUES('{id}','source','{parent}','alice');"
+        discard <| sql store.projectsDb s!"INSERT INTO mcp_sessions_v1(id,mission_id,project_scope,project_scoped) VALUES('{id}','{id}','source',1);"
+        discard <| sql store.projectsDb s!"INSERT INTO project_track_leases(project_slug,track,reservation_id,mission_id,phase) VALUES('source','{id}','{id}','{id}','active');"
+    discard <| sql store.projectsDb "CREATE TRIGGER reject_rebind BEFORE UPDATE ON mcp_sessions_v1 BEGIN SELECT RAISE(ABORT,'injected crash boundary'); END;"
+    for id in #["aroot", "broot"] do
+      let some mr ← getMission? store id | throw (IO.userError "B5b fixture missing")
+      let result ← OrbCore.MissionSettings.applyPlacementPatch store mr
+        (.obj #[("project", .str "destination")]) "alice" true "" "t1" 1000
+      check (!result.isOk) "B5b injected post-commit failure"
+    discard <| sql store.projectsDb "DROP TRIGGER reject_rebind;"
+  finally closeCoreStore store
+  OrbCore.MissionMoveRecovery.startup path
+  let .ok reopened ← openCoreStore path | throw (IO.userError "B5b reopen")
+  try
+    let missions ← sql reopened.missionsDb "SELECT project FROM missions ORDER BY id;"
+    let sessions ← sql reopened.projectsDb "SELECT project_scope FROM mcp_sessions_v1 ORDER BY id;"
+    let leases ← sql reopened.projectsDb "SELECT project_slug FROM project_track_leases ORDER BY mission_id;"
+    check (missions.size == 7 && sessions.size == 7 && leases.size == 7 &&
+      (missions.extract 1 missions.size).all (fun r => r[0]! == "destination") &&
+      (sessions.extract 1 sessions.size).all (fun r => r[0]! == "destination") &&
+      (leases.extract 1 leases.size).all (fun r => r[0]! == "destination"))
+      "B5b_crash_between_commits_startup_repairs_two_families"
+    check ((← OrbCore.MissionMoveRecovery.pending reopened.missionsDb).toOption == some #[])
+      "B5b_recovery_clears_markers"
+    OrbCore.MissionMoveRecovery.startup path
+    check ((← sql reopened.missionsDb "SELECT project FROM missions ORDER BY id;") == missions &&
+      (← sql reopened.projectsDb "SELECT project_scope FROM mcp_sessions_v1 ORDER BY id;") == sessions &&
+      (← sql reopened.projectsDb "SELECT project_slug FROM project_track_leases ORDER BY mission_id;") == leases)
+      "B5b_second_startup_is_noop"
+  finally closeCoreStore reopened
+
 def run (root : String) : IO Unit := do
+  moveRecovery root
   let .ok store ← openCoreStore s!"{root}/mission-settings"
     | throw (IO.userError "settings store open failed")
   try

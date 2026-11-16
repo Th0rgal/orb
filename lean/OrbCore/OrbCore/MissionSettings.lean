@@ -1,4 +1,5 @@
 import OrbCore.Store
+import OrbCore.MissionMoveRecovery
 import OrbCore.R7Core
 import OrbCore.SecretAndApproval
 import OrbBin.Json
@@ -173,18 +174,20 @@ def applyPlacementPatch
     nextProject     := nextProj
     nextFolder      := m.targetFolder
   }
-  let (allMoved, changedMoved) ←
-    match ← batchSetMissionPlacementChecked store updates nowIso saveSettings with
+  if let .error _ ← MissionMoveRecovery.ensureSchema store.missionsDb then
+    return .error (500, "{\"error\":\"move_marker_schema_failed\"}")
+  let beforeCommit := do
+    if let .error e ← MissionMoveRecovery.mark store (updates.map (·.missionId))
+        (if callerIsLegacyUnscoped then "" else callerUserId) nowIso then return .error e
+    saveSettings
+  let (_allMoved, changedMoved) ←
+    match ← batchSetMissionPlacementChecked store updates nowIso beforeCommit with
     | .ok pair => pure pair
     | .error (code, msg) =>
       if let some prevRaw := brokerRawBefore? then
         IO.FS.writeFile brokerPath prevRaw
       return .error (code, s!"\{\"error\":{jsonEscape msg}}")
-  if !nextProj.isEmpty && !callerIsLegacyUnscoped && !callerUserId.isEmpty then
-    discard <| execParamQuery store.projectsDb
-      "INSERT OR IGNORE INTO project_owners(slug,owner_user_id,created_at) VALUES(?1,?2,?3);"
-      #[nextProj, callerUserId, s!"{nowEpochSec}"]
-  if let .error e ← rebindMovedMissionMcpSessionsChecked store allMoved nowIso then
+  if let .error e ← MissionMoveRecovery.reconcile store then
     return .error (500, s!"\{\"error\":{jsonEscape e}}")
   let unscopeItem (it : MissionPlacementItem) : MissionPlacementItem :=
     { it with project? := it.project?.map (unscopeDisplayProject callerUserId callerIsLegacyUnscoped) }

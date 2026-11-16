@@ -15,6 +15,7 @@ import OrbCore.Store
 import OrbCore.R7Core
 import OrbCore.ManagedProviderSealing
 import OrbCore.SettingsCli
+import OrbCore.MissionMoveRecovery
 
 namespace OrbCore.CliMain
 
@@ -168,4 +169,7 @@ def main (args : List String) : IO UInt32 := do
     OrbCore.SettingsCli.run rest root
   | _ =>
     let cfg ← OrbCore.Control.loadConfigFromEnv
+    let work := cfg.workingDir.trimAscii.toString.dropEndWhile (· == '/') |>.toString
+    let root := if work.endsWith "/.sandboxed-sh" || work == ".sandboxed-sh" then work else s!"{work}/.sandboxed-sh"
+    OrbCore.MissionMoveRecovery.startup root
     OrbCore.Control.runCoreServer cfg none
