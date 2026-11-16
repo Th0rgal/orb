@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - fix/leanui-pixel-parity
+      - master
     paths:
       - 'lean/LeanUI/**'
       - 'lean/OrbDesktop/**'
@@ -12,6 +13,8 @@ on:
       - 'scripts/leanui_parity.py'
       - 'scripts/test_leanui_*.py'
       - 'docs/ui/**'
+      - 'orb/tests/leanui-reference.capture.ts'
+      - 'orb/playwright.leanui-reference.config.ts'
       - '.github/workflows/leanui-parity.yml'
 
 permissions:
@@ -43,7 +46,7 @@ jobs:
             libjavascriptcoregtk-4.1-dev libssl-dev libsqlite3-dev zstd \
             libwayland-dev libxkbcommon-dev libfreetype-dev libharfbuzz-dev \
             libfontconfig-dev weston fonts-inter fonts-dejavu-core unzip \
-            xvfb imagemagick python3-numpy python3-pil
+            xvfb imagemagick python3-numpy python3-pil ripgrep
 
       - name: Install pinned Chrome for Testing and private fonts
         run: |
