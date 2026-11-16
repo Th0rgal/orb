@@ -218,7 +218,10 @@ with patch.object(r, 'discover_local_core_auth', return_value=('http://fake', 'f
     def test_plain_deploy_executed_commands_match_master(self):
         import tempfile
         import re
-        master = subprocess.check_output(["git", "show", "7cac2c92f902:scripts/ops/orb-deploy"], text=True)
+        baseline = subprocess.run(["git", "show", "origin/master:scripts/ops/orb-deploy"], capture_output=True, text=True)
+        if baseline.returncode:
+            self.skipTest("parity requires origin/master; run in a full checkout")
+        master = baseline.stdout
         traces = []
         for version in (master, None):
             with tempfile.TemporaryDirectory() as temp:
