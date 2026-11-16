@@ -225,8 +225,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: orb/pnpm-lock.yaml
+      # No `cache: pnpm`: setup-node's post step saves `pnpm store path`, but a
+      # node_modules cache hit skips the install that creates it and the save
+      # then fails path validation (master run 43785309691). The store is keyed
+      # by the same lockfile as the node_modules cache below, so it only ever
+      # helped a second run of a new lockfile and is redundant here.
       - uses: actions/cache@v5
         id: modules
         with:
@@ -279,8 +282,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: orb/pnpm-lock.yaml
+      # No `cache: pnpm`: setup-node's post step saves `pnpm store path`, but a
+      # node_modules cache hit skips the install that creates it and the save
+      # then fails path validation (master run 43785309691). The store is keyed
+      # by the same lockfile as the node_modules cache below, so it only ever
+      # helped a second run of a new lockfile and is redundant here.
       - uses: actions/cache@v5
         id: modules
         with:
@@ -319,8 +325,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: orb/pnpm-lock.yaml
+      # No `cache: pnpm`: setup-node's post step saves `pnpm store path`, but a
+      # node_modules cache hit skips the install that creates it and the save
+      # then fails path validation (master run 43785309691). The store is keyed
+      # by the same lockfile as the node_modules cache below, so it only ever
+      # helped a second run of a new lockfile and is redundant here.
       - uses: actions/cache@v5
         id: modules
         with:
@@ -373,8 +382,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: orb/pnpm-lock.yaml
+      # No `cache: pnpm`: setup-node's post step saves `pnpm store path`, but a
+      # node_modules cache hit skips the install that creates it and the save
+      # then fails path validation (master run 43785309691). The store is keyed
+      # by the same lockfile as the node_modules cache below, so it only ever
+      # helped a second run of a new lockfile and is redundant here.
       - uses: actions/cache@v5
         id: modules
         with:
