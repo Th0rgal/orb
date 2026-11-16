@@ -205,10 +205,12 @@ private def recordSettledMcpAction
   if existing.size > 1 then
     let storedId := cell existing[1]! 0
     let .ok _ ← execParamQuery store.projectsDb
-        "UPDATE mcp_actions_v1 SET state='succeeded',result=?2,updated_at=?3 WHERE id=?1;"
+        "UPDATE mcp_actions_v1 SET state='succeeded',result=?2,updated_at=?3 WHERE id=?1 AND (state='accepted' OR tool NOT IN ('send_message_to_mission','cancel_mission'));"
         #[storedId, resJson, nowIso]
       | return .error "mcp_action_record_failed"
-    return .ok (settledMcpActionReceipt storedId toolName "succeeded" payload ownerVal)
+    let some receipt ← lookupMcpActionById? store storedId
+      | return .error "mcp_action_record_failed"
+    return .ok receipt
   let .ok _ ← execParamQuery store.projectsDb
     ("INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state,result,created_at,updated_at) " ++
      "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'succeeded',?9,?10,?10);")
@@ -227,6 +229,38 @@ private def settleReservedMcpAction
       #[scope, key, state, payload, nowIso]
     | return mcpErr "receipt_record_failed" "The mutation outcome could not be recorded." false
   return mcpErr "mutation_failed" message (state == "failed")
+
+/-- Own the whole reserved branch, including early returns and thrown IO errors.
+    Only an accepted row may transition; retries and terminal rows are immutable.
+    A failed durable write is explicitly uncertain, never permission to retry fresh. -/
+def withReservedMcpOutcome (store : CoreStore) (claims : McpSessionClaims)
+    (userId tool key nowIso : String) (work : IO String) : IO String := do
+  if key.isEmpty || !(#["send_message_to_mission", "cancel_mission"].contains tool) then
+    return ← work
+  let fallback := mcpOk (.obj #[("state", .str "uncertain"), ("accepted", .str "unknown"),
+    ("tool_name", .str tool), ("error", .str "receipt_settlement_unavailable"), ("retryable", .bool false)])
+  try
+    let raw ← try work catch _ => pure fallback
+    let scope := actionScope claims userId tool
+    -- Any branch that did not explicitly settle has an unknown effect boundary.
+    let .ok _ ← execParamQuery store.projectsDb
+        "UPDATE mcp_actions_v1 SET state='uncertain',result=?3,updated_at=?4 WHERE scope=?1 AND retry_key=?2 AND state='accepted';"
+        #[scope, key, renderCompact (.obj #[("error", .str "mutation_outcome_uncertain")]), nowIso]
+      | return fallback
+    if let some receipt ← lookupMcpActionByRetryKey? store scope key then
+      return mcpOk receipt
+    return raw
+  catch _ => return fallback
+
+/-- Startup-only, after exclusive listen-port ownership and before dispatch.
+    Generic recovery never changes provider-spawn rows or settled outcomes. -/
+def fenceInterruptedGenericActions (store : CoreStore) : IO (Except String Unit) := do
+  let now := formatEpochIso8601Utc (← coreEpochSec)
+  match ← execParamQuery store.projectsDb
+      "UPDATE mcp_actions_v1 SET state='uncertain',result=?1,updated_at=?2 WHERE tool<>'spawn_managed_machine' AND state IN ('accepted','running');"
+      #[renderCompact (.obj #[("error", .str "core_restarted_during_action")]), now] with
+  | .error _ => return .error "generic_action_recovery_failed"
+  | .ok _ => return .ok ()
 
 /-- Only persisted external sessions carry an authenticated user independently of a mission.
     Roles are deliberately not used here: external roles and mission-session roles are
@@ -1224,19 +1258,24 @@ def dispatchMcpToolCall
       let sideId := (side.fieldStr? "id").getD ""
       return mcpOk (.obj #[("side_mission_id", .str sideId), ("status", .str ((side.fieldStr? "status").getD "")),
         ("hint", .str s!"Read the answer with get_mission_events on `{sideId}`.")])
-  | "send_message_to_mission" | "answer_mission_question" =>
+  | "send_message_to_mission" | "answer_mission_question" => withReservedMcpOutcome store claims callerUserId toolName idemKeyTop nowIso do
     let mid := (args.fieldStr? "mission_id").orElse (fun _ => args.fieldStr? "target_mission_id") |>.getD ""
     let content := ((args.fieldStr? "message").orElse (fun _ => (args.fieldStr? "content").orElse (fun _ => (args.fieldStr? "question").orElse (fun _ => args.fieldStr? "answer"))) |>.getD "").trimAscii.toString
     if mid.isEmpty || content.isEmpty then
-      return mcpErr "invalid_arguments" "mission_id and message/content are required"
+      if toolName != "send_message_to_mission" || idemKeyTop.isEmpty then
+        return mcpErr "invalid_arguments" "mission_id and message/content are required"
+      return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" "mission_id and message/content are required" nowIso
     if let some t := (args.fieldStr? "title").map (·.trimAscii.toString) then
       if !t.isEmpty then
-        discard <| execParamQuery store.missionsDb "UPDATE missions SET title=?2, metadata_updated_at=?3 WHERE id=?1;" #[mid, t, nowIso]
+        let .ok _ ← execParamQuery store.missionsDb "UPDATE missions SET title=?2, metadata_updated_at=?3 WHERE id=?1;" #[mid, t, nowIso]
+          | return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "title update failed" nowIso
     let noteId ← newUuidV4
-    discard <| execParamQuery store.askDb
+    let .ok _ ← execParamQuery store.askDb
       "INSERT INTO main.operator_notes(note_id,id,mission_id,content,body,created_at_iso,created_at) VALUES(?1,?1,?2,?3,?3,?4,?4);"
       #[noteId, mid, content, nowIso]
-    discard <| appendMissionEvent store mid "operator_note" (renderCompact (.obj #[("id", .str noteId), ("content", .str content)])) nowIso
+      | return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "note insert failed" nowIso
+    let .ok _ ← appendMissionEvent store mid "operator_note" (renderCompact (.obj #[("id", .str noteId), ("content", .str content)])) nowIso
+      | return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "note event failed" nowIso
     let mut queued := false
     if toolName == "send_message_to_mission" then
       if let (some sup, some mr) := (remoteSup?, ← getMission? store mid) then
@@ -1251,8 +1290,9 @@ def dispatchMcpToolCall
               if sRows.size > 1 then
                 let s := (cell sRows[1]! 0).trimAscii.toString
                 if !s.isEmpty then resumeSid? := some s
-            discard <| appendMissionEvent store mid "user_message"
+            let .ok _ ← appendMissionEvent store mid "user_message"
               (renderCompact (.obj #[("id", .str noteId), ("content", .str content), ("source", .str "mcp")])) nowIso
+              | return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "user message event failed" nowIso
             let spec : RemoteTurnSpec := {
               missionId        := mid
               targetNodeId     := targetNode
@@ -1281,9 +1321,12 @@ def dispatchMcpToolCall
       | return mcpErr "receipt_record_failed" "The mutation completed but its receipt could not be recorded. Reconcile the action." false
     return mcpOk settled
 
-  | "cancel_mission" | "acknowledge_mission" | "adopt_mission" | "resume_mission" =>
+  | "cancel_mission" | "acknowledge_mission" | "adopt_mission" | "resume_mission" => withReservedMcpOutcome store claims callerUserId toolName idemKeyTop nowIso do
     let mid := (args.fieldStr? "mission_id").orElse (fun _ => args.fieldStr? "id") |>.getD callerMid
-    if mid.isEmpty then return mcpErr "invalid_arguments" "missing mission_id"
+    if mid.isEmpty then
+      if toolName != "cancel_mission" || idemKeyTop.isEmpty then
+        return mcpErr "invalid_arguments" "missing mission_id"
+      return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" "missing mission_id" nowIso
     if toolName == "cancel_mission" then
       -- The cancellation helper rewrites job ledgers even when transport fails.
       -- Capture evidence before calling it; rewritten rows are not acknowledgement.
@@ -1298,12 +1341,14 @@ def dispatchMcpToolCall
       let remoteCancelled ← cancelActiveRemoteJobForMission store mc? relayHub? mid "Cancelled via MCP"
       if !remoteCancelled && hadPendingRemoteJob then
         return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "remote cancellation failed" nowIso
-      discard <| execParamQuery store.missionsDb
+      let .ok _ ← execParamQuery store.missionsDb
         "UPDATE mission_runs SET execution_state='terminal', terminal_reason='cancelled', updated_at=?2 WHERE mission_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted');"
         #[mid, nowIso]
-      discard <| execParamQuery store.missionsDb
+        | return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "run cancellation write failed" nowIso
+      let .ok _ ← execParamQuery store.missionsDb
         "UPDATE missions SET status='cancelled', terminal_reason='cancelled', updated_at=?2, state_revision=state_revision+1 WHERE id=?1;"
         #[mid, nowIso]
+        | return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "mission cancellation write failed" nowIso
       let .ok settled ← recordSettledMcpAction store claims callerUserId toolName args
         (.obj #[("ok", .bool true), ("mission_id", .str mid), ("status", .str "cancelled")]) nowIso mid
         | return mcpErr "receipt_record_failed" "The mutation completed but its receipt could not be recorded. Reconcile the action." false
