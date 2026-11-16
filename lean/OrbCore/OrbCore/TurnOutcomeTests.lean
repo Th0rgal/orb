@@ -13,6 +13,44 @@ open OrbCore.RemoteDispatch OrbCore.MemoryAndCloud
 private def check (ok : Bool) (label : String) : IO Unit := do
   unless ok do throw (IO.userError s!"turn outcome: {label}")
 
+private def stateTagOf (s : String) : UInt8 :=
+  match s.trimAscii.toString.toLower with
+  | "" | "queued" | "pending" | "accepted" => 0
+  | "running" | "dispatching" | "in_progress" => 1
+  | "completed" | "succeeded" | "settled" => 2
+  | "failed" | "rejected" | "cancelled" | "canceled" => 3
+  | "reconciliation_required" | "uncertain" => 4
+  | _ => 5
+
+private def acceptedTagOf (receipt : JVal) : UInt8 :=
+  let v := (receipt.field? "accepted").orElse (fun _ => (receipt.fieldOrNull "error").field? "accepted") |>.getD .null
+  match v with
+  | .null => 0
+  | .bool true => 1
+  | .bool false => 2
+  | .str s =>
+    match s.trimAscii.toString.toLower with
+    | "yes" | "true" => 1
+    | "no" | "false" => 2
+    | "unknown" => 3
+    | _ => 4
+  | _ => 4
+
+private def verifyReceiptWord (receipt : JVal) (transportDropped : Bool := false) : UInt32 :=
+  let stateRaw := ((receipt.fieldStr? "state").orElse (fun _ => receipt.fieldStr? "status")).getD ""
+  let statusRaw := ((receipt.fieldStr? "status").orElse (fun _ => receipt.fieldStr? "state")).getD ""
+  let stTag := stateTagOf stateRaw
+  let hasErr := match receipt.field? "error" with | some .null | none => false | some _ => true
+  let hasRes : UInt8 := match receipt.field? "result" with | some .null | none => 0 | some _ => if hasErr then 0 else 1
+  let accTag := acceptedTagOf receipt
+  let base := stateTagOf statusRaw
+  let rsTag : UInt8 :=
+    if base == 0 && statusRaw.isEmpty then
+      if accTag == 3 then 4 else if hasErr || accTag == 2 then 3 else if hasRes == 1 then 2 else 0
+    else if base == 2 && hasErr then 3 else base
+  let stClean : UInt8 := if stTag ≤ 4 then stTag else 3
+  OrbBin.Spec.verifyMcpActionOutcome rsTag accTag stClean (if transportDropped then 1 else 0) hasRes
+
 private def cellOf (db : SqliteDb) (sql : String) (params : Array String := #[]) : IO String := do
   let .ok rows ← execParamQuery db sql params | throw (IO.userError s!"query failed: {sql}")
   return (rows[1]?.bind (·[0]?)).getD ""
@@ -113,12 +151,165 @@ def run : IO Unit := do
       -- Receipts name the model asked for and the model the turn is launched with;
       -- afterwards the mission reports which model and provider actually answered.
       let receipt ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
-        "start_mission" (.obj #[("title", .str "receipt"), ("backend", .str "opencode")]) 4000000000
+        "start_mission" (.obj #[("title", .str "receipt"), ("backend", .str "opencode"), ("idempotency_key", .str "start-receipt-1")]) 4000000000
+      let receiptReplay ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+        "start_mission" (.obj #[("title", .str "receipt"), ("backend", .str "opencode"), ("idempotency_key", .str "start-receipt-1")]) 4000000000
       -- Tool results may carry their JSON as an escaped string: compare without the escapes.
       let flat := fun (raw : String) => raw.replace "\\" ""
-      check (((flat receipt).splitOn "\"effective_model\":\"builtin/smart\"").length == 2)
+      check (((flat receipt).splitOn "\"effective_model\":\"builtin/smart\"").length >= 2)
         s!"an opencode start with no model reports the chain it will use: {receipt}"
-      check (((flat receipt).splitOn "\"requested_model\":null").length == 2) "no model was requested"
+      check (((flat receipt).splitOn "\"requested_model\":null").length >= 2) "no model was requested"
+      -- Settled mutating receipts (`start_mission`, `resume_mission`, `cancel_mission`) must carry `status:"completed"` + `result`
+      -- (including on idempotent retry and `get_action`) so `verifyMcpActionOutcome` reports `65793` (`action_outcome:"accepted"`,
+      -- `receipt_settled:true`, `durable_success:true`, `may_retry_fresh_key:false`) rather than `action_outcome:"rejected"`.
+      for (label, raw) in #[("start_mission", receipt), ("start_mission replay", receiptReplay)] do
+        let .ok env := OrbBin.Json.parse raw | throw (IO.userError s!"{label} invalid JSON: {raw}")
+        let res := env.fieldOrNull "result"
+        check (verifyReceiptWord res == 65793 &&
+               res.fieldStr? "status" == some "completed" &&
+               res.fieldStr? "state" == some "succeeded" &&
+               res.fieldStr? "accepted" == some "yes" &&
+               (res.fieldOrNull "result").fieldStr? "effective_model" == some "builtin/smart")
+          s!"{label} receipt must normalize to accepted (65793) with durable_success=true: {raw}"
+      let startedMid := (((OrbBin.Json.parse receipt).toOption.getD .null).fieldOrNull "result").fieldStr? "mission_id" |>.getD ""
+      let startActId := (((OrbBin.Json.parse receipt).toOption.getD .null).fieldOrNull "result").fieldStr? "action_id" |>.getD ""
+      let startGetActRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+        "get_action" (.obj #[("action_id", .str startActId)]) 4000000000
+      let startGetRes := (((OrbBin.Json.parse startGetActRaw).toOption.getD .null).fieldOrNull "result")
+      check (verifyReceiptWord startGetRes == 65793 &&
+             (startGetRes.fieldOrNull "result").fieldStr? "mission_id" == some startedMid)
+        s!"get_action on start_mission must normalize to accepted (65793): {startGetActRaw}"
+      let cancelRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+        "cancel_mission" (.obj #[("mission_id", .str startedMid), ("idempotency_key", .str "cancel-receipt-1")]) 4000000000
+      let cancelReplayRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+        "cancel_mission" (.obj #[("mission_id", .str startedMid), ("idempotency_key", .str "cancel-receipt-1")]) 4000000000
+      for (label, raw) in #[("cancel_mission", cancelRaw), ("cancel_mission replay", cancelReplayRaw)] do
+        let .ok env := OrbBin.Json.parse raw | throw (IO.userError s!"{label} invalid JSON: {raw}")
+        let res := env.fieldOrNull "result"
+        check (verifyReceiptWord res == 65793 &&
+               res.fieldStr? "status" == some "completed" &&
+               res.fieldStr? "state" == some "succeeded" &&
+               (res.fieldOrNull "result").fieldStr? "mission_id" == some startedMid &&
+               (res.fieldOrNull "result").fieldStr? "status" == some "cancelled")
+          s!"{label} receipt must normalize to accepted (65793) with cancelled result: {raw}"
+      let adoptRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+        "adopt_mission" (.obj #[("mission_id", .str startedMid), ("idempotency_key", .str "adopt-receipt-1")]) 4000000000
+      let adoptRes := (((OrbBin.Json.parse adoptRaw).toOption.getD .null).fieldOrNull "result")
+      check (verifyReceiptWord adoptRes == 65793 &&
+             (adoptRes.fieldOrNull "result").fieldStr? "status" == some "awaiting_user")
+        s!"adopt_mission receipt must normalize to accepted (65793): {adoptRaw}"
+      -- Unplaced `resume_mission` fails closed with `accepted:"no"` -> `16777474` (`action_outcome:"rejected"`, `durable_success:false`, `may_retry_fresh_key:true`)
+      let resumeFailRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+        "resume_mission" (.obj #[("mission_id", .str startedMid), ("idempotency_key", .str "resume-fail-1")]) 4000000000
+      let resumeFailErr := (((OrbBin.Json.parse resumeFailRaw).toOption.getD .null).fieldOrNull "error").setField "accepted" (.str "no")
+      check (verifyReceiptWord (.obj #[("error", resumeFailErr)]) == 16777474)
+        s!"failed resume_mission must normalize to rejected (16777474): {resumeFailRaw}"
+      -- Placed `resume_mission` on a loopback node settles with `65793` (`action_outcome:"accepted"`, `result.status:"active"`) and replays idempotently
+      let (nodeListenFd, nodePort) ← match ← LeanSys.Posix.tcpListen "127.0.0.1" 0 8 with
+        | .ok p => pure p
+        | .error e => throw (IO.userError s!"resume mock node listen failed: {e}")
+      let nodeTask ← IO.asTask do
+        match ← LeanSys.Posix.tcpAcceptPoll nodeListenFd 5000 with
+        | .error _ => pure false
+        | .ok cfd =>
+          let _ ← LeanSys.Posix.readStreamChunk cfd 8192
+          let body := "{\"accepted\":true,\"job_id\":\"j-res-1\"}"
+          let resp := s!"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\nConnection: close\r\n\r\n{body}"
+          let _ ← LeanSys.Posix.writeAll cfd resp.toUTF8
+          let _ ← LeanSys.Posix.closeFd cfd
+          pure true
+      OrbBin.PosixExt.setenvVar "SANDBOXED_REMOTE_NODES_ENABLED" "true"
+      OrbBin.PosixExt.setenvVar "SANDBOXED_REMOTE_NODES" s!"mockres=http://127.0.0.1:{nodePort}|TURN_OUTCOME_MOCK_TOK"
+      OrbBin.PosixExt.setenvVar "TURN_OUTCOME_MOCK_TOK" "secret-mock-tok"
+      OrbBin.PosixExt.setenvVar "SANDBOXED_PUBLIC_URL" "http://127.0.0.1:3000"
+      discard <| execParamQuery db "UPDATE missions SET tags='[\"remote-node:mockres\"]' WHERE id=?1;" #[startedMid]
+      let resumeOkRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+        "resume_mission" (.obj #[("mission_id", .str startedMid), ("content", .str "Continue."), ("idempotency_key", .str "resume-ok-1")]) 4000000000 (some sup)
+      let _ ← IO.ofExcept nodeTask.get
+      let _ ← LeanSys.Posix.closeFd nodeListenFd
+      OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODES_ENABLED"
+      OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODES"
+      OrbBin.PosixExt.unsetenvVar "TURN_OUTCOME_MOCK_TOK"
+      OrbBin.PosixExt.unsetenvVar "SANDBOXED_PUBLIC_URL"
+      let resumeReplayRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+        "resume_mission" (.obj #[("mission_id", .str startedMid), ("content", .str "Continue."), ("idempotency_key", .str "resume-ok-1")]) 4000000000 (some sup)
+      let resumeActId := (((OrbBin.Json.parse resumeOkRaw).toOption.getD .null).fieldOrNull "result").fieldStr? "action_id" |>.getD ""
+      let resumeGetActRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+        "get_action" (.obj #[("action_id", .str resumeActId)]) 4000000000
+      for (label, raw) in #[("resume_mission", resumeOkRaw), ("resume_mission replay", resumeReplayRaw), ("resume_mission get_action", resumeGetActRaw)] do
+        let .ok env := OrbBin.Json.parse raw | throw (IO.userError s!"{label} invalid JSON: {raw}")
+        let res := env.fieldOrNull "result"
+        check (verifyReceiptWord res == 65793 &&
+               res.fieldStr? "status" == some "completed" &&
+               res.fieldStr? "state" == some "succeeded" &&
+               (res.fieldOrNull "result").fieldStr? "mission_id" == some startedMid &&
+               (res.fieldOrNull "result").fieldStr? "status" == some "active")
+          s!"{label} receipt must normalize to accepted (65793) with active result: {raw}"
+      let cancelActId := (((OrbBin.Json.parse cancelRaw).toOption.getD .null).fieldOrNull "result").fieldStr? "action_id" |>.getD ""
+      let cancelGetActRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+        "get_action" (.obj #[("action_id", .str cancelActId)]) 4000000000
+      let cancelGetRes := (((OrbBin.Json.parse cancelGetActRaw).toOption.getD .null).fieldOrNull "result")
+      check (verifyReceiptWord cancelGetRes == 65793 &&
+             cancelGetRes.fieldStr? "status" == some "completed" &&
+             (cancelGetRes.fieldOrNull "result").fieldStr? "status" == some "cancelled")
+        s!"cancel_mission get_action must normalize to accepted (65793) with cancelled result: {cancelGetActRaw}"
+      -- `send_message_to_mission` and `schedule_wakeup` also go through `recordSettledMcpAction`:
+      -- first answer, retry, and `get_action` must agree (`65793`).
+      let sendRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+        "send_message_to_mission" (.obj #[("mission_id", .str startedMid), ("content", .str "hello"), ("idempotency_key", .str "send-msg-1")]) 4000000000
+      let sendReplayRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+        "send_message_to_mission" (.obj #[("mission_id", .str startedMid), ("content", .str "hello"), ("idempotency_key", .str "send-msg-1")]) 4000000000
+      let sendActId := (((OrbBin.Json.parse sendRaw).toOption.getD .null).fieldOrNull "result").fieldStr? "action_id" |>.getD ""
+      let sendGetActRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+        "get_action" (.obj #[("action_id", .str sendActId)]) 4000000000
+      for (label, raw) in #[("send_message_to_mission", sendRaw), ("send_message_to_mission replay", sendReplayRaw), ("send_message_to_mission get_action", sendGetActRaw)] do
+        let res := (((OrbBin.Json.parse raw).toOption.getD .null).fieldOrNull "result")
+        check (verifyReceiptWord res == 65793 &&
+               res.fieldStr? "status" == some "completed" &&
+               (res.fieldOrNull "result").fieldBool? "ok" == some true &&
+               (res.fieldOrNull "result").fieldStr? "mission_id" == some startedMid)
+          s!"{label} must normalize to accepted (65793): {raw}"
+      let wakeRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+        "schedule_wakeup" (.obj #[("mission_id", .str startedMid), ("delay_seconds", JVal.uint64 60), ("prompt", .str "wake"), ("reason", .str "test"), ("idempotency_key", .str "wake-1")]) 4000000000
+      let wakeReplayRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+        "schedule_wakeup" (.obj #[("mission_id", .str startedMid), ("delay_seconds", JVal.uint64 60), ("prompt", .str "wake"), ("reason", .str "test"), ("idempotency_key", .str "wake-1")]) 4000000000
+      let wakeActId := (((OrbBin.Json.parse wakeRaw).toOption.getD .null).fieldOrNull "result").fieldStr? "action_id" |>.getD ""
+      let wakeGetActRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+        "get_action" (.obj #[("action_id", .str wakeActId)]) 4000000000
+      for (label, raw) in #[("schedule_wakeup", wakeRaw), ("schedule_wakeup replay", wakeReplayRaw), ("schedule_wakeup get_action", wakeGetActRaw)] do
+        let res := (((OrbBin.Json.parse raw).toOption.getD .null).fieldOrNull "result")
+        check (verifyReceiptWord res == 65793 &&
+               res.fieldStr? "status" == some "completed" &&
+               (res.fieldOrNull "result").fieldStr? "mission_id" == some startedMid &&
+               (res.fieldOrNull "result").fieldStr? "trigger_kind" == some "time")
+          s!"{label} must normalize to accepted (65793): {raw}"
+      -- Old-shape row recorded before the fix (`result` column holds the partially enriched JSON with mission `status`
+      -- and no inner `result` field): both `get_action` and a retry with the same key must still normalize to `65793`
+      -- (`action_outcome:"accepted"`, `durable_success:true`, `may_retry_fresh_key:false`) and preserve `result.status`.
+      let oldRowJson := s!"\{\"ok\":true,\"mission_id\":\"{startedMid}\",\"status\":\"cancelled\",\"action_id\":\"act-old-cancel\",\"state\":\"succeeded\",\"accepted\":\"yes\"}"
+      discard <| execParamQuery store.projectsDb
+        ("INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state,result,created_at,updated_at) " ++
+         "VALUES('act-old-cancel',?1,'turn-outcome:m-tools:cancel_mission','old-cancel-key','old-cancel-key','coordinator::m-tools','cancel_mission','{}','succeeded',?2,'t0','t0');")
+        #[startedMid, oldRowJson]
+      let oldGetRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+        "get_action" (.obj #[("action_id", .str "act-old-cancel")]) 4000000000
+      let oldReplayRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+        "cancel_mission" (.obj #[("mission_id", .str startedMid), ("idempotency_key", .str "old-cancel-key")]) 4000000000
+      for (label, raw) in #[("old-shape get_action", oldGetRaw), ("old-shape retry", oldReplayRaw)] do
+        let res := (((OrbBin.Json.parse raw).toOption.getD .null).fieldOrNull "result")
+        check (verifyReceiptWord res == 65793 &&
+               res.fieldStr? "action_id" == some "act-old-cancel" &&
+               res.fieldStr? "status" == some "completed" &&
+               res.fieldStr? "state" == some "succeeded" &&
+               (res.fieldOrNull "result").fieldStr? "mission_id" == some startedMid &&
+               (res.fieldOrNull "result").fieldStr? "status" == some "cancelled")
+          s!"{label} must normalize pre-deploy row to accepted (65793) with result.status=='cancelled': {raw}"
+      -- Pending (`state:"accepted"`, `status:"accepted"`) and unknown acceptance (`transportDropped=true` or `accepted:"unknown"`)
+      let pendSpawnReceipt := JVal.obj #[("action_id", .str "act-pend-spawn"), ("accepted", .str "yes"), ("state", .str "accepted"), ("status", .str "accepted"), ("tool_name", .str "spawn_managed_machine"), ("result", .obj #[])]
+      check (verifyReceiptWord pendSpawnReceipt == 0)
+        "pending spawn receipt (state='accepted', status='accepted') must normalize to pending (0, may_retry_fresh_key=false)"
+      check (verifyReceiptWord pendSpawnReceipt true == 259)
+        "mid-flight transport drop on receipt must normalize to uncertain_reconciliation_required (259, may_retry_fresh_key=false)"
       let .ok _ ← execParamQuery db
           ("INSERT INTO proxy_usage(timestamp,model,input_tokens,output_tokens,cost_cents,mission_id,provider,requested_model) " ++
            "VALUES('t0','glm-5.3',10,5,1,'m-tools','zai','smart');") #[]

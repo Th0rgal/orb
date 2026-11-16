@@ -204,7 +204,7 @@ Not on this roadmap: a macOS backend for LeanUI.
 | R2 | An exec failure on a node (E2BIG, ENOENT) is reported with its reason, not "exit 127" and an empty log | — | done | Oversized command yields an error naming the cause |
 | R3 | A turn with no assistant output is retried, then `failed` with a reason | — | verify | Forced empty reply on dev |
 | R4 | Stall watchdog: a mission `active` with no job, or finished with live workers and no wake-up, is woken once and flagged | — | verify | Deliberately stalled test mission |
-| R5 | Honest tool receipts: `action_outcome` matches the result (start, resume and cancel report "rejected" on success today) | — | ready | Receipts of the three calls say `succeeded` |
+| R5 | Honest tool receipts: `action_outcome` matches the result (start, resume and cancel report "rejected" on success today) | — | verify | Receipts of the three calls say `succeeded` |
 | R6 | A deploy does not kill running turns or lose their events (#1804 covers events) | — | verify | Deploy during a running turn: turn completes, no 502 |
 | R7 | A 429 from a chain with one cooling target surfaces as a mission error within a minute | — | verify | Replay on dev |
 | R8 | `health/:account/clear` clears both cooldown stores; provider status comes from request evidence | — | verify | Replay on dev |
