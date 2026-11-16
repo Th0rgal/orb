@@ -20,6 +20,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -1584,7 +1585,7 @@ class SshNodeOps:
                 "os.replace(tmp, dst)\n"
                 "print(got)\n"
             )
-            cmd = self._ssh_base_cmd(host) + [f"sudo python3 -c { json.dumps(install_script) }"]
+            cmd = self._ssh_base_cmd(host) + [f"sudo python3 -c {shlex.quote(install_script)}"]
             stage_timeout = max(30.0, self.ssh_timeout_secs * 4.0)
             try:
                 with open(src_p, "rb") as handle:

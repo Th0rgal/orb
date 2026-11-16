@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -119,6 +120,26 @@ def _start_core_api_server(cordoned):
 
 
 class RollingUpgradeNodesTest(unittest.TestCase):
+    def test_stage_remote_executes_generated_shell_command(self):
+        run = subprocess.run
+        def shell_ssh(cmd, **kwargs):
+            self.assertEqual(cmd[0], "ssh")
+            return run(["bash", "-c", 'sudo() { "$@"; }; ' + cmd[-1]], **kwargs)
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "artifact"
+            source.write_bytes(b"binary\x00payload\n")
+            destination = root / "space ' dollar $ and `tick`" / "sandboxed-node"
+            digest = roll.compute_file_sha256(source)
+            with patch.object(roll.subprocess, "run", side_effect=shell_ssh):
+                roll.SshNodeOps().stage_remote("fake-node", {
+                    "sandboxed-node": (source, destination),
+                }, {"sandboxed-node": digest})
+            staged = Path(str(destination) + ".new")
+            self.assertEqual(staged.read_bytes(), source.read_bytes())
+            self.assertEqual(staged.stat().st_mode & 0o777, 0o755)
+
     def test_zombie_children_do_not_hold_the_drain(self):
         # A finished child the worker never reaped must not count as running work.
         child = subprocess.Popen([sys.executable, "-c", "pass"])
