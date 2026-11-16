@@ -120,6 +120,88 @@ def _start_core_api_server(cordoned):
 
 
 class RollingUpgradeNodesTest(unittest.TestCase):
+    def test_fake_node_shell_end_to_end_failure_matrix(self):
+        import os
+        for failure in ("", "stage", "digest", "swap", "start", "health", "build"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                tools = root / "tools"
+                tools.mkdir()
+                bins = {name: root / name for name in ("sandboxed-node", "sandboxed-mcp", "orb-privd")}
+                artifacts = {}
+                for name, dst in bins.items():
+                    dst.write_text("old-" + name)
+                    src = root / (name + ".artifact")
+                    src.write_text("new-" + name)
+                    artifacts[name] = (src, dst)
+                conf = root / "units/sandboxed-node.service.d/30-build.conf"
+                conf.parent.mkdir(parents=True)
+                roll._write_build_conf_sha(conf, "1" * 40)
+                running = root / "running"
+                running.write_text("old-sandboxed-node")
+                scripts = {
+                    "ssh": '#!/bin/bash\nexec /bin/bash -c "${@: -1}"\n',
+                    "sudo": '#!/bin/sh\nexec "$@"\n',
+                    "systemctl": '#!/bin/bash\n'
+                        'case "$1" in\n'
+                        'is-active) test -f "$FAKE_ROOT/running";;\n'
+                        'stop) rm -f "$FAKE_ROOT/running";;\n'
+                        'start|restart) if [[ "$FAILURE" == start && ! -f "$FAKE_ROOT/failed" ]]; then touch "$FAKE_ROOT/failed"; exit 42; fi; '
+                        'cp "$FAKE_ROOT/sandboxed-node" "$FAKE_ROOT/running";;\n'
+                        '*) exit 0;; esac\n',
+                }
+                for name, body in scripts.items():
+                    (tools / name).write_text(body)
+                    (tools / name).chmod(0o755)
+                digests = {name: roll.compute_file_sha256(src) for name, (src, _) in artifacts.items()}
+                # Supply fixture discovery/heartbeat only; staging, swap, checksum,
+                # generated SSH commands, service controller and rollback are real.
+                prelude = roll._remote_worker_prelude() + f'''
+ROOT = Path({str(root)!r})
+_real_upgrade = perform_fenced_upgrade
+def perform_fenced_upgrade(*args, **kwargs):
+    kwargs.update(runtime_busy_probe=lambda: 0, live_work_dir_probe=lambda: None,
+        sibling_units_probe=lambda: [], mcp_binary_path=ROOT/'sandboxed-mcp',
+        privd_binary_path=ROOT/'orb-privd', build_conf_path=Path({str(conf)!r}),
+        health_check_probe=fixture_health)
+    return _real_upgrade(*args, **kwargs)
+def _build_worker_unit_targets(**kwargs):
+    return [('sandboxed-node', None, lambda: 0), ('sandboxed-node-sibling', None, lambda: 0)]
+def fixture_health(*args):
+    if os.environ['FAILURE'] == 'health': raise RuntimeError('injected health failure')
+    return {{'ok': True, 'build_sha': ('wrong' if os.environ['FAILURE'] == 'build' else _read_build_conf_sha(Path({str(conf)!r}))),
+        'binary_sha256': {{n: compute_file_sha256(ROOT/n) for n in {list(bins)!r}}}}}
+if os.environ['FAILURE'] == 'swap':
+    _replace = os.replace
+    def fail_replace(src, dst):
+        if str(src).endswith('sandboxed-mcp.installing'): raise OSError('injected swap failure')
+        return _replace(src, dst)
+    os.replace = fail_replace
+'''
+                env = {"PATH": str(tools) + os.pathsep + os.environ["PATH"], "FAKE_ROOT": str(root), "FAILURE": failure}
+                with patch.dict(os.environ, env), patch.object(roll, "_remote_worker_prelude", return_value=prelude):
+                    ops = roll.SshNodeOps(expected_build_sha="2" * 40, expected_sha256=digests, verify_delay_secs=0)
+                    try:
+                        if failure == "stage":
+                            (tools / "sudo").write_text("#!/bin/sh\nexit 42\n")
+                        ops.stage_remote("fake", artifacts, digests)
+                        if failure == "digest":
+                            Path(str(bins["sandboxed-node"]) + ".new").write_text("corrupt")
+                        result = ops.upgrade_remote("fake", None, binary_path=str(bins["sandboxed-node"]))
+                        self.assertEqual(failure, "", result)
+                        self.assertEqual(result, "UPGRADED")
+                    except RuntimeError:
+                        self.assertNotEqual(failure, "")
+                prefix = "old-" if failure else "new-"
+                for name, path in bins.items():
+                    self.assertEqual(path.read_text(), prefix + name)
+                self.assertEqual(running.read_text(), prefix + "sandboxed-node")
+                self.assertEqual(roll._read_build_conf_sha(conf), ("1" if failure else "2") * 40)
+                if failure not in ("stage", "digest"):
+                    for unit in ("sandboxed-node", "sandboxed-node-sibling", "orb-privd"):
+                        guard = root / f"units/{unit}.service.d/25-swap-guard.conf"
+                        self.assertIn("ExecStartPre=+", guard.read_text())
+
     def test_auto_discovery_refuses_core_colocated_host(self):
         from unittest.mock import Mock
         api = Mock()
