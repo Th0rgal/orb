@@ -66,8 +66,8 @@ controller mission can read a board but cannot write it; there is no
 administrative override, because an overridden board would no longer be that
 mission's account of its own work.
 
-Directionality is deliberate and not symmetric: a parent reads what it started,
-a child does not read its parent's board. Read access is re-derived from live
+Directionality is deliberate and not symmetric: a descendant reads its ancestors' boards;
+a parent without a project role cannot read its child's board. Read access is re-derived from live
 `missions` rows on every call (owner, `parent_mission_id`, `project`), never
 from a token claim captured at session creation.
 
