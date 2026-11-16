@@ -81,7 +81,7 @@ satisfy the new-under-1% merge condition.
 
 The `fix/leanui-parity-remaining` branch runs the existing pinned parity
 workflow. Keep reference hashes, thresholds, masks, and comparison code
-unchanged. U3 remains incomplete until the documented parity criteria pass.
+unchanged. U3 closes group by group on a listed deliberate improvement shown with reference/before/after crops; groups without that evidence remain open.
 U2 acceptance and the roadmap row are owned by the parent after merged-head
 run [43807502974](https://github.com/Th0rgal/orb/actions/runs/43807502974)
 passes; this follow-up does not change the roadmap.
