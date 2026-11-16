@@ -1,5 +1,7 @@
 import { For, Show, createEffect, createSignal, on, onCleanup } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
+import { Portal } from "solid-js/web";
+import { Popover } from "./Popover";
 import { connectionVersion, getMissionBoard, getProjectBoard, getProjectBoards, isConnected, type MissionBoard, type MissionBoardSummary, type ProjectBoard } from "./api";
 import { boardPlacementSnapshot, staleBoardListing, visibleBoards } from "./missionBoard";
 import { SettingsCard } from "./SettingsCard";
@@ -9,10 +11,12 @@ type Hint = { id: string | null };
 export function BoardSkeleton() {
   return <div class="project-board-skeleton" role="status" aria-label="Loading board"><span /><span /><span /></div>;
 }
-export function MissionBoardSection(p: { id: string; project?: string | null; missionHint?: Hint; hash?: string }) {
+export function MissionBoardSection(p: { id: string; project?: string | null; missionHint?: Hint; hash?: string; chrome?: boolean }) {
   const [board, setBoard] = createSignal<MissionBoard | ProjectBoard | null>(null);
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal(false);
+  const [open, setOpen] = createSignal(false);
+  let trigger!: HTMLButtonElement;
   let request = 0;
   onCleanup(() => { request++; });
   async function refresh(reset = false) {
@@ -21,17 +25,21 @@ export function MissionBoardSection(p: { id: string; project?: string | null; mi
     try {
       let next: MissionBoard | ProjectBoard | null = await getMissionBoard(p.id);
       if (token !== request) return;
-      if (next === null && p.project) next = await getProjectBoard(p.project);
+      if (next === null && p.project && !p.chrome) next = await getProjectBoard(p.project);
       if (token !== request) return;
       setBoard(next); setError(false);
     } catch { if (token === request) { setBoard(null); setError(true); } }
     finally { if (token === request) setLoading(false); }
   }
-  createEffect(on(() => [p.id, p.project, connectionVersion(), isConnected()] as const, () => { if (isConnected()) void refresh(true); }));
-  createEffect(on(() => [p.missionHint, p.hash] as const, ([hint]) => {
+  createEffect(on(() => [p.id, p.project, connectionVersion(), isConnected()] as const, () => {
+    request++; setOpen(false); setBoard(null); setError(false); setLoading(false);
+    if (isConnected()) void refresh(true);
+  }));
+  createEffect(on(() => p.hash, () => { if (isConnected()) void refresh(); }, { defer: true }));
+  createEffect(on(() => p.missionHint, hint => {
     if (!hint || hint.id === null || hint.id === p.id) void refresh();
   }, { defer: true }));
-  return <SettingsCard title="Mission board"><div class="project-board" aria-busy={loading()} data-testid="mission-board" data-text-sha256={board() && "text_sha256" in board()! ? (board() as MissionBoard).text_sha256 : undefined}>
+  const content = () => <SettingsCard title="Mission board"><div class="project-board" aria-busy={loading()} data-testid="mission-board" data-text-sha256={board() && "text_sha256" in board()! ? (board() as MissionBoard).text_sha256 : undefined}>
     <Show when={!loading()} fallback={<BoardSkeleton />}>
       <Show when={!error()} fallback={<p role="alert">Board unreadable. <button class="s-btn" onClick={() => void refresh()}>Retry</button></p>}>
         <Show when={board()?.updated_at}><time dateTime={board()!.updated_at!}>{new Date(board()!.updated_at!).toLocaleString()}</time></Show>
@@ -40,6 +48,14 @@ export function MissionBoardSection(p: { id: string; project?: string | null; mi
       </Show>
     </Show>
   </div></SettingsCard>;
+  return <Show when={p.chrome} fallback={content()}>
+    <Show when={!loading() && !error() && board()?.text && document.getElementById("tb-tools")}>
+      {mount => <Portal mount={mount() as HTMLElement}>
+        <button ref={trigger} class="s-btn" aria-label="Mission board" aria-expanded={open()} onClick={() => setOpen(!open())}>Board</button>
+        <Show when={open()}><Popover label="Mission board" anchor={trigger} width={480} onClose={() => setOpen(false)}>{content()}</Popover></Show>
+      </Portal>}
+    </Show>
+  </Show>;
 }
 
 function BoardCard(p: { row: MissionBoardSummary; project: string; missionHint?: Hint; onOpenMission: (id: string) => void }) {

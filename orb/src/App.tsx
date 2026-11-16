@@ -2290,7 +2290,7 @@ export default function App() {
           return (
             <div class="mission-slot" data-slot-key={slot.slotKey} hidden={!isActive()}>
               <SlotActiveContext.Provider value={isActive}>
-                <Show when={isActive() && slot.missionId()}><details class="mission-board-disclosure"><summary>Mission board</summary><MissionBoardSection id={slot.missionId()} project={findKnownMission(slot.missionId())?.project} missionHint={projectMissionHint()} /></details></Show>
+                <Show when={isActive() && slot.missionId()}><MissionBoardSection chrome id={slot.missionId()} project={findKnownMission(slot.missionId())?.project} missionHint={projectMissionHint()} /></Show>
                 <Show
                   when={slot.kind === "launch"}
                   fallback={
