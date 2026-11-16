@@ -444,14 +444,6 @@ def authenticateHttpBearer (cfg : CoreConfig) (hdrs : Array (String × String)) 
     | some tok =>
       (verifyAnySessionTokenExp? (effectiveJwtSecret cfg) tok nowEpochSec).isSome
 
-private def isSingleTenantLegacySubject (cfg : CoreConfig) (jwtSub jwtUser : String) : Bool :=
-  let sub := jwtSub.trimAscii.toString
-  let usr := jwtUser.trimAscii.toString
-  let cfgSub := if cfg.devMode then "dev" else "default"
-  let subOk := sub == "prod" || sub == "default" || sub == "dev" || sub == "admin" || sub == cfgSub || sub == cfg.instanceName
-  let usrOk := usr.isEmpty || usr == "admin" || usr == sub
-  subOk && usrOk
-
 /-- Resolve `CallerPrincipal` against `users` (`orb-jwt-v2` live session epoch + `!disabled` check
     via `Orb.Kernel.multiuserRbacStep`, or verified single-tenant legacy token; never falls back
     to bootstrap admin on a failed lookup or raw password bearer). -/
@@ -472,7 +464,7 @@ def resolveCallerPrincipal?
           (OrbCore.DevOperator.verifyIssuer st.cfg.devGrantIssuerHost) | return none
       let bunker ← match st.bunkerStateRef? with | some ref => ref.get | none => pure 0
       unless bunker == 0 do return none
-      let some admin ← getBootstrapAdmin? st.store | return none
+      let some admin ← getUserById? st.store st.bootstrapAdminId | return none
       if admin.disabled || admin.role != "admin" then return none
       return some { CallerPrincipal.ofUserRecord admin false with isDevOperator := true }
     if tok.startsWith "orb-jwt-v2:" then
@@ -488,69 +480,12 @@ def resolveCallerPrincipal?
         return none
       return some (CallerPrincipal.ofUserRecord u false)
     if tok.startsWith "eyJ" then
-      let some (jwtSub, jwtUser, _exp) := verifyHs256Jwt? sec tok nowEpochSec
+      let some (jwtSub, _jwtUser, _exp) := verifyHs256Jwt? sec tok nowEpochSec
         | return none
-      let (activeUsers, totalUsers) ← do
-        match ← execParamQuery st.store.missionsDb
-            "SELECT COALESCE(SUM(CASE WHEN disabled=0 THEN 1 ELSE 0 END),0), COUNT(*) FROM users;" #[] with
-        | .ok rows =>
-          let act := ((rows[1]?.bind (·[0]?)).bind String.toNat?).getD 0
-          let tot := ((rows[1]?.bind (·[1]?)).bind String.toNat?).getD 0
-          pure (act, tot)
-        | .error _ => pure (0, 0)
-      let singleTenantUnscoped := activeUsers ≤ 1 && (parseConfiguredUsers st.cfg.usersJson).isEmpty
-      if let some u ← getUserById? st.store jwtSub then
-        if u.disabled then return none
-        return some (CallerPrincipal.ofUserRecord u singleTenantUnscoped)
-      if singleTenantUnscoped && isSingleTenantLegacySubject st.cfg jwtSub jwtUser then
-        if let some adm ← getBootstrapAdmin? st.store then
-          if adm.disabled || adm.role != "admin" then return none
-          adoptLegacyOwnerAlias st.store jwtSub adm.id
-          return some (CallerPrincipal.ofUserRecord adm true)
-        if totalUsers == 0 then
-          return some {
-            userId           := jwtSub
-            username         := if jwtUser.isEmpty then "admin" else jwtUser
-            role             := "admin"
-            unixUsername?    := none
-            sessionEpoch     := 1
-            disabled         := false
-            dailySpendCapCents? := none
-            isLegacyUnscoped := true
-          }
-      return none
-    if tok.startsWith "orb-jwt-v1:" then
-      let some _ := verifySessionToken sec tok nowEpochSec
-        | return none
-      let (activeUsers, totalUsers) ← do
-        match ← execParamQuery st.store.missionsDb
-            "SELECT COALESCE(SUM(CASE WHEN disabled=0 THEN 1 ELSE 0 END),0), COUNT(*) FROM users;" #[] with
-        | .ok rows =>
-          let act := ((rows[1]?.bind (·[0]?)).bind String.toNat?).getD 0
-          let tot := ((rows[1]?.bind (·[1]?)).bind String.toNat?).getD 0
-          pure (act, tot)
-        | .error _ => pure (0, 0)
-      if activeUsers > 1 then return none
-      let singleTenantUnscoped := (parseConfiguredUsers st.cfg.usersJson).isEmpty
-      if !st.bootstrapAdminId.isEmpty then
-        let some adm ← getUserById? st.store st.bootstrapAdminId | return none
-        if adm.disabled || adm.role != "admin" then return none
-        return some (CallerPrincipal.ofUserRecord adm false)
-      if let some adm ← getBootstrapAdmin? st.store then
-        if adm.disabled || adm.role != "admin" then return none
-        return some (CallerPrincipal.ofUserRecord adm singleTenantUnscoped)
-      if totalUsers == 0 then
-        return some {
-          userId           := ""
-          username         := "admin"
-          role             := "admin"
-          unixUsername?    := none
-          sessionEpoch     := 1
-          disabled         := false
-          dailySpendCapCents? := none
-          isLegacyUnscoped := true
-        }
-      return none
+      let some u ← getUserById? st.store jwtSub | return none
+      if u.disabled then return none
+      return some (CallerPrincipal.ofUserRecord u false)
+    -- Subjectless v1 tokens cannot identify a stored user.
     return none
   if !st.cfg.devMode then
     return none
@@ -558,19 +493,7 @@ def resolveCallerPrincipal?
     let some adm ← getUserById? st.store st.bootstrapAdminId | return none
     if adm.disabled || adm.role != "admin" then return none
     return some (CallerPrincipal.ofUserRecord adm false)
-  if let some adm ← getBootstrapAdmin? st.store then
-    if adm.disabled || adm.role != "admin" then return none
-    return some (CallerPrincipal.ofUserRecord adm true)
-  return some {
-    userId           := ""
-    username         := "admin"
-    role             := "admin"
-    unixUsername?    := none
-    sessionEpoch     := 1
-    disabled         := false
-    dailySpendCapCents? := none
-    isLegacyUnscoped := true
-  }
+  return none
 
 /-- Authenticate `/v1/*` LLM proxy requests (`mission_proxy_token`, `SANDBOXED_PROXY_SECRET`, or Core bearer/`x-api-key`). -/
 def authenticateProxyRequest (st : CoreAppState) (hdrs : Array (String × String)) (nowEpochSec : UInt64) : IO Bool := do
@@ -585,9 +508,6 @@ def authenticateProxyRequest (st : CoreAppState) (hdrs : Array (String × String
       return (← resolveCallerPrincipal? st synthHdrs nowEpochSec).isSome
     if (← verifyProxyApiKeyFile st.store.rootDir pTok (formatEpochIso8601Utc nowEpochSec)) then
       return true
-    if st.cfg.proxySecret.isEmpty && pTok.startsWith "orb-jwt-v1:" then
-      let synthHdrs := #[("Authorization", s!"Bearer {pTok}")]
-      return (← resolveCallerPrincipal? st synthHdrs nowEpochSec).isSome
     return false
   if !st.cfg.proxySecret.isEmpty then
     return false
@@ -2761,6 +2681,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let dbUser? ←
       match user?.map (·.trimAscii.toString) |>.filter (!·.isEmpty) with
       | some uname => getUserByUsername? st.store uname
+      -- Password-only login selects an account before password verification;
+      -- an unknown explicit username never falls back to this account.
       | none => getBootstrapAdmin? st.store
     let settingsPwdOk ← do
       let isAdmName := match user? with | none => true | some s => s.trimAscii.isEmpty || s.trimAscii.toString == "admin"
@@ -2786,18 +2708,6 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let tok := mintSessionTokenV2 sec u.id u.role u.sessionEpoch exp
       let uJson := renderUserSummaryJson u
       return .ok (mkJson 200 s!"\{\"token\":{jsonEscape tok},\"exp\":{exp},\"expires_at\":{exp},\"user\":{uJson}}")
-    else if user?.any (fun s => !s.trimAscii.isEmpty) && (← hasMultipleActiveUsers st.store) && !verifyLoginCredentials st.cfg user? supplied then
-      return .ok (mkJson 401 "{\"error\":\"invalid_credentials\"}")
-    else if verifyLoginCredentials st.cfg user? supplied || settingsPwdOk then
-      if let some adm ← getBootstrapAdmin? st.store then
-        if adm.disabled then
-          return .ok (mkJson 401 "{\"error\":\"account_disabled\"}")
-        let tok := mintSessionTokenV2 sec adm.id adm.role adm.sessionEpoch exp
-        let uJson := renderUserSummaryJson adm
-        return .ok (mkJson 200 s!"\{\"token\":{jsonEscape tok},\"exp\":{exp},\"expires_at\":{exp},\"user\":{uJson}}")
-      else
-        let tok := mintSessionToken sec exp
-        return .ok (mkJson 200 s!"\{\"token\":{jsonEscape tok},\"exp\":{exp},\"expires_at\":{exp}}")
     else
       return .ok (mkJson 401 "{\"error\":\"invalid_credentials\"}")
 

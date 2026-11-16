@@ -1730,6 +1730,21 @@ def run (root : String) : IO Unit := do
       let hsUnknownSub := issueHs256Jwt matSt.cfg.jwtSecret "unknown-subject-xyz" "ghost" now (now + 3600) "admin"
       let v1OrbMonitorTok := mintSessionToken matSt.cfg.jwtSecret (now + 600)
       let rollingUpgradeTok := issueHs256Jwt matSt.cfg.jwtSecret "admin" "" now (now + 300) ""
+      for mode in #["multi_user", "single_user"] do
+        sql matStore.missionsDb s!"UPDATE users SET disabled={if mode == "single_user" then "1" else "0"} WHERE id='usr_second_member';"
+        let v2 := mintSessionTokenV2 matSt.cfg.jwtSecret "usr_real_admin_uuid" "admin" 1 (now + 3600)
+        check ((← send "GET" "/api/auth/me" v2 (.obj #[]) matSt).1 == 200)
+          s!"r12_named_v2_accepted_{mode}"
+        for (name, credential) in #[("unknown_subject", hsUnknownSub), ("alias_subject", hsLiteralAdmin), ("subjectless_v1", v1OrbMonitorTok)] do
+          check ((← send "GET" "/api/auth/me" credential (.obj #[]) matSt).1 == 401)
+            s!"r12_no_bootstrap_fallback_{name}_{mode}"
+        check ((← send "POST" "/api/auth/login" "" (.obj #[("username", .str "unknown-user"),
+          ("password", .str matSt.cfg.dashboardPassword)]) matSt).1 == 401)
+          s!"r12_unknown_login_no_bootstrap_fallback_{mode}"
+        let unboundDev := { matSt with bootstrapAdminId := "", cfg := { matSt.cfg with devMode := true } }
+        check ((← send "GET" "/api/auth/me" "" (.obj #[]) unboundDev).1 == 401)
+          s!"r12_unbound_dev_no_synthetic_admin_{mode}"
+      sql matStore.missionsDb "UPDATE users SET disabled=0 WHERE id='usr_second_member';"
       -- Multi-user mode (two active users: usr_real_admin_uuid and usr_second_member)
       let (muRealSt, muRealDoc) ← send "GET" "/api/auth/me" hsRealAdmin (.obj #[]) matSt
       let (muLitSt, _) ← send "GET" "/api/auth/me" hsLiteralAdmin (.obj #[]) matSt
