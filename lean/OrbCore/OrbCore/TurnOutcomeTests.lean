@@ -87,12 +87,22 @@ def r24_concurrent_same_key_mutates_once (store : CoreStore) (root : String) (cl
   let b := match t2.get with | .ok x => x | .error _ => ""
   let aid x := (((OrbBin.Json.parse x).toOption.getD .null).fieldOrNull "result").fieldStr? "action_id" |>.getD ""
   check (aid a == aid b && aid a != "") "same-key callers share one stored receipt"
+  check ((← cellOf store.askDb "SELECT COUNT(*) FROM operator_notes WHERE content='r24 concurrent';") == "1")
+    "same-key concurrent callers insert exactly one note"
 
 def r24_receipt_insert_failure_blocks_mutation (store : CoreStore) (root : String) (claims : McpSessionClaims) : IO Unit := do
   let args := .obj #[("mission_id", .str "m-tools"), ("content", .str "r24 reservation"), ("idempotency_key", .str "r24-reservation-key")]
-  let raw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root claims "send_message_to_mission" args 4000000000
-  let aid := (((OrbBin.Json.parse raw).toOption.getD .null).fieldOrNull "result").fieldStr? "action_id" |>.getD ""
-  check (aid != "" && (← cellOf store.projectsDb "SELECT COUNT(*) FROM mcp_actions_v1 WHERE id=?1;" #[aid]) == "1") "reservation is durable before mutation"
+  let .ok _ ← execParamQuery store.projectsDb
+      "CREATE TRIGGER r24_deny_reservation BEFORE INSERT ON mcp_actions_v1 BEGIN SELECT RAISE(ABORT,'injected reservation failure'); END;" #[]
+    | throw (IO.userError "reservation failure trigger failed")
+  try
+    let raw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root claims "send_message_to_mission" args 4000000000
+    check ((raw.splitOn "receipt_reservation_failed").length > 1) "reservation failure is reported"
+    check ((← cellOf store.askDb "SELECT COUNT(*) FROM operator_notes WHERE content='r24 reservation';") == "0")
+      "failed reservation prevents note mutation"
+  finally
+    let .ok _ ← execParamQuery store.projectsDb "DROP TRIGGER r24_deny_reservation;" #[]
+      | throw (IO.userError "reservation failure trigger cleanup failed")
 
 def r24_same_key_retry_returns_stored_receipt (store : CoreStore) (root : String) (claims : McpSessionClaims) : IO Unit := do
   let args := .obj #[("mission_id", .str "m-tools"), ("content", .str "r24 replay"), ("idempotency_key", .str "r24-replay-key")]
@@ -100,6 +110,28 @@ def r24_same_key_retry_returns_stored_receipt (store : CoreStore) (root : String
   let second ← OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root claims "send_message_to_mission" args 4000000000
   let aid x := (((OrbBin.Json.parse x).toOption.getD .null).fieldOrNull "result").fieldStr? "action_id" |>.getD ""
   check (aid first == aid second && aid first != "") "same-key retry returns stored receipt"
+  check ((← cellOf store.askDb "SELECT COUNT(*) FROM operator_notes WHERE content='r24 replay';") == "1")
+    "replay does not insert another note"
+
+def r24_failed_remote_cancel_survives_ledger_rewrite (store : CoreStore) (root : String) (claims : McpSessionClaims) : IO Unit := do
+  let .ok _ ← execParamQuery store.missionsDb
+      "CREATE TABLE IF NOT EXISTS remote_node_jobs (job_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL DEFAULT '', node_id TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'queued', payload_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" #[]
+    | throw (IO.userError "cancel table fixture failed")
+  let .ok _ ← execParamQuery store.missionsDb
+      "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state) VALUES('r24-cancel-job','m-tools','','running');" #[]
+    | throw (IO.userError "cancel job fixture failed")
+  let args := JVal.obj #[("mission_id", .str "m-tools"), ("idempotency_key", .str "r24-cancel-failed")]
+  discard <| OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root claims "cancel_mission" args 4000000000
+  check ((← cellOf store.missionsDb "SELECT state FROM remote_node_jobs WHERE job_id='r24-cancel-job';") == "cancelled")
+    "helper rewrites ledger despite missing node"
+  check ((← cellOf store.projectsDb "SELECT state FROM mcp_actions_v1 WHERE retry_key='r24-cancel-failed';") == "uncertain")
+    "failed cancellation remains uncertain after ledger rewrite"
+  let replay ← OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root claims "cancel_mission" args 4000000000
+  let receipt := ((OrbBin.Json.parse replay).toOption.getD .null).fieldOrNull "result"
+  check (receipt.fieldStr? "state" == some "uncertain" && receipt.fieldStr? "accepted" == some "unknown")
+    "retry preserves unknown remote cancellation outcome"
+  check ((← cellOf store.missionsDb "SELECT status FROM missions WHERE id='m-tools';") != "cancelled")
+    "failed remote cancellation does not claim mission termination"
 
 def r24_startup_fences_spawn_only (store : CoreStore) : IO Unit := do
   let .ok _ ← execParamQuery store.projectsDb
@@ -204,6 +236,7 @@ def run : IO Unit := do
       r24_concurrent_same_key_mutates_once store root claims
       r24_receipt_insert_failure_blocks_mutation store root claims
       r24_same_key_retry_returns_stored_receipt store root claims
+      r24_failed_remote_cancel_survives_ledger_rewrite store root claims
       r24_startup_fences_spawn_only store
       let reply ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
         "start_mission" (.obj #[("title", .str "ghost"), ("prompt", .str "work that can never start")]) 4000000000

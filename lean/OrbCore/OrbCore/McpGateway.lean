@@ -1285,15 +1285,19 @@ def dispatchMcpToolCall
     let mid := (args.fieldStr? "mission_id").orElse (fun _ => args.fieldStr? "id") |>.getD callerMid
     if mid.isEmpty then return mcpErr "invalid_arguments" "missing mission_id"
     if toolName == "cancel_mission" then
+      -- The cancellation helper rewrites job ledgers even when transport fails.
+      -- Capture evidence before calling it; rewritten rows are not acknowledgement.
+      let .ok pendingJobs ← execParamQuery store.missionsDb
+          "SELECT COUNT(*) FROM remote_node_jobs WHERE mission_id=?1 AND state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost');" #[mid]
+        | return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "remote cancellation state unavailable" nowIso
+      if pendingJobs.size ≤ 1 then
+        return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "remote cancellation state unavailable" nowIso
+      let hadPendingRemoteJob := cellNat pendingJobs[1]! 0 > 0
       let .ok _ ← revokeContinuations store mid nowIso true
         | return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "continuation revocation failed" nowIso
       let remoteCancelled ← cancelActiveRemoteJobForMission store mc? relayHub? mid "Cancelled via MCP"
-      if !remoteCancelled then
-        let .ok rows ← execParamQuery store.missionsDb
-            "SELECT COUNT(*) FROM remote_node_jobs WHERE mission_id=?1 AND state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost');" #[mid]
-          | return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "remote cancellation state unavailable" nowIso
-        if rows.size > 1 && cellNat rows[1]! 0 > 0 then
-          return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "remote cancellation failed" nowIso
+      if !remoteCancelled && hadPendingRemoteJob then
+        return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "remote cancellation failed" nowIso
       discard <| execParamQuery store.missionsDb
         "UPDATE mission_runs SET execution_state='terminal', terminal_reason='cancelled', updated_at=?2 WHERE mission_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted');"
         #[mid, nowIso]
