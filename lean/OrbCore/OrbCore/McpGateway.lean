@@ -115,7 +115,7 @@ private def lookupMcpActionById? (store : CoreStore) (actionId : String) : IO (O
       "SELECT id, tool, state, COALESCE(result,'{}'), COALESCE(owner,''), created_at, updated_at FROM mcp_actions_v1 WHERE id=?1 LIMIT 1;"
       #[actionId]
     | return none
-  if rows.size ≤ 1 then return none
+  if rows.size ≤ 1 then return ← MissionBoard.actionById? store.missionsDb actionId
   let r := rows[1]!
   let aid := cell r 0
   let tname := cell r 1
@@ -131,7 +131,7 @@ private def lookupMcpActionByRetryKey? (store : CoreStore) (scope retryKey : Str
       "SELECT id, tool, state, COALESCE(result,'{}'), COALESCE(owner,'') FROM mcp_actions_v1 WHERE scope=?1 AND retry_key=?2 AND state='succeeded' ORDER BY updated_at DESC LIMIT 1;"
       #[scope, retryKey]
     | return none
-  if rows.size ≤ 1 then return none
+  if rows.size ≤ 1 then return ← MissionBoard.actionByKey? store.missionsDb scope retryKey
   let r := rows[1]!
   let raw := cell r 3
   if raw.isEmpty then return none
@@ -500,6 +500,9 @@ def dispatchMcpToolCall
   let userCap? := user?.bind (·.dailySpendCapCents?)
 
   let lookupCallerAction? (aid : String) : IO (Option JVal) := do
+    if let some (owner, _) ← MissionBoard.actionScope? store.missionsDb aid then
+      unless ← checkTenantMission owner false do return none
+      return ← MissionBoard.actionById? store.missionsDb aid
     if tenantScoped then
       let .ok rows ← execParamQuery store.projectsDb
           "SELECT COALESCE(owner,''),scope FROM mcp_actions_v1 WHERE id=?1;" #[aid] | return none
