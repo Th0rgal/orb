@@ -1337,6 +1337,60 @@ class RollingUpgradeNodesTest(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
 
+    def test_remote_nodes_redacts_build_and_binary_sha256_for_member_but_includes_for_admin(self):
+        repo_root = Path(__file__).resolve().parent.parent
+        relay_src = (repo_root / "lean/OrbCore/OrbCore/RemoteFleetAndRelay.lean").read_text(encoding="utf-8")
+        control_src = (repo_root / "lean/OrbCore/OrbCore/Control.lean").read_text(encoding="utf-8")
+
+        self.assertIn("let isRnAdmin := caller.isLegacyUnscoped || caller.role == \"admin\"", control_src)
+        self.assertIn("buildComputeFleetJVal st.relayHub? none mf callerUidOpt (infS + cmpS) caller.dailySpendCapCents? st.store.rootDir nowIsoRn (some st.store) 2500 isRnAdmin", control_src)
+        self.assertIn("buildComputeFleetJVal st.relayHub? (some mst) live callerUidOpt (infS + cmpS) caller.dailySpendCapCents? st.store.rootDir nowIsoRn (some st.store) 2500 isRnAdmin", control_src)
+        self.assertIn("if isAdmin then\n        fields := fields ++ #[\n          (\"build\",", relay_src)
+        self.assertIn("k != \"build\" && k != \"build_sha\" && k != \"binary_sha256\"", relay_src)
+
+        raw_hb = {
+            "version": "4.35.0",
+            "build": "a" * 40,
+            "build_sha": "a" * 40,
+            "binary_sha256": {
+                "sandboxed-node": "1" * 64,
+                "sandboxed-mcp": "2" * 64,
+                "orb-privd": "3" * 64,
+            },
+            "capacity_total": 4,
+            "active_jobs": 0,
+        }
+
+        def render_remote_node_entry(is_admin: bool):
+            sanitized_hb = (
+                dict(raw_hb)
+                if is_admin
+                else {k: v for k, v in raw_hb.items() if k not in ("build", "build_sha", "binary_sha256")}
+            )
+            node = {
+                "id": "ashur",
+                "name": "ashur",
+                "kind": "static",
+                "status": "online",
+                "cordoned": False,
+                "version": raw_hb["version"],
+                "heartbeat": sanitized_hb,
+            }
+            if is_admin:
+                node["build"] = raw_hb["build"]
+                node["build_sha"] = raw_hb["build_sha"]
+                node["binary_sha256"] = raw_hb["binary_sha256"]
+            return node
+
+        member_node = render_remote_node_entry(is_admin=False)
+        admin_node = render_remote_node_entry(is_admin=True)
+
+        for secret_field in ("build", "build_sha", "binary_sha256"):
+            self.assertNotIn(secret_field, member_node)
+            self.assertNotIn(secret_field, member_node["heartbeat"])
+            self.assertIn(secret_field, admin_node)
+            self.assertIn(secret_field, admin_node["heartbeat"])
+
 
 if __name__ == "__main__":
     unittest.main()
