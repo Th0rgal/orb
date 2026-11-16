@@ -1,4 +1,6 @@
 .project-board { height: 240px; overflow: auto; padding: 14px; }
+.mission-board-disclosure { padding: 8px 16px; flex: none; }
+.mission-board-disclosure > summary { cursor: pointer; color: var(--fg-3); }
 .project-board pre { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.5; }
 .project-board time, .project-board-hint { color: var(--fg-3); font-size: 12px; }
 .project-board-hint { min-height: 36px; }
