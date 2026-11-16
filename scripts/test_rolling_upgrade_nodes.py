@@ -1199,6 +1199,73 @@ class RollingUpgradeNodesTest(unittest.TestCase):
             self.assertFalse(probe_mid["healthy"])
             self.assertTrue(probe_mid.get("swap_journal_pending"))
 
+            # Simulate a reboot before the next tool run: systemd invokes the installed ExecStartPre
+            # start guard (`25-swap-guard.conf` -> `sandboxed-node-swap-guard.py`) before starting
+            # `sandboxed-node`. The start guard recovers all components to v1 and clears the journal;
+            # if recovery cannot complete (e.g. missing backup), the start guard exits non-zero and
+            # refuses to start while the journal is open.
+            guard_script, guard_conf = roll._install_start_guard(
+                binary_path=str(node_bin),
+                journal_path=journal_path,
+                build_conf_path=str(build_conf),
+            )
+            self.assertTrue(guard_script.is_file())
+            self.assertTrue(guard_conf.is_file())
+            self.assertIn(f"ExecStartPre=/usr/bin/python3 {guard_script}", guard_conf.read_text())
+
+            # Case 1: corrupt/missing backup during boot -> start guard refuses to start
+            Path(str(node_bin) + ".prev").unlink()
+            with self.assertRaisesRegex(RuntimeError, "refused start"):
+                roll.run_start_guard(binary_path=str(node_bin), journal_path=journal_path)
+            self.assertTrue(journal_path.is_file())
+
+            # Case 2: intact backup on reboot -> start guard restores v1 and removes journal before service starts
+            Path(str(node_bin) + ".prev").write_text("node-v1")
+            roll.run_start_guard(binary_path=str(node_bin), journal_path=journal_path)
+            self.assertFalse(journal_path.exists())
+            self.assertEqual(node_bin.read_text(), "node-v1")
+            self.assertEqual(mcp_bin.read_text(), "mcp-v1")
+            self.assertEqual(privd_bin.read_text(), "privd-v1")
+            self.assertEqual(roll._read_build_conf_sha(build_conf), old_sha)
+
+            # Re-seed mid-swap state to also verify perform_fenced_upgrade direct recovery path:
+            roll._write_swap_journal(
+                journal_path,
+                active_components=[
+                    {
+                        "name": "sandboxed-node",
+                        "bin": node_bin,
+                        "backup": Path(str(node_bin) + ".prev"),
+                        "installing": Path(str(node_bin) + ".installing"),
+                        "restoring": Path(str(node_bin) + ".restoring"),
+                        "had_existing": True,
+                        "prev_sha256": roll.compute_file_sha256(node_bin),
+                    },
+                    {
+                        "name": "sandboxed-mcp",
+                        "bin": mcp_bin,
+                        "backup": Path(str(mcp_bin) + ".prev"),
+                        "installing": Path(str(mcp_bin) + ".installing"),
+                        "restoring": Path(str(mcp_bin) + ".restoring"),
+                        "had_existing": True,
+                        "prev_sha256": roll.compute_file_sha256(mcp_bin),
+                    },
+                    {
+                        "name": "orb-privd",
+                        "bin": privd_bin,
+                        "backup": Path(str(privd_bin) + ".prev"),
+                        "installing": Path(str(privd_bin) + ".installing"),
+                        "restoring": Path(str(privd_bin) + ".restoring"),
+                        "had_existing": True,
+                        "prev_sha256": roll.compute_file_sha256(privd_bin),
+                    },
+                ],
+                build_conf_path=build_conf,
+                prev_build_sha=old_sha,
+            )
+            node_bin.write_text("node-v2")
+            build_conf.write_text(f"[Service]\nEnvironment=ORB_BUILD_SHA={new_sha}\n")
+
             # Running perform_fenced_upgrade recovers the journal first (restoring node-v1 and old_sha
             # before stopping/swapping), then completes the clean v2 upgrade and removes the journal.
             ctl = RecordingCtl()

@@ -212,6 +212,148 @@ def _recover_swap_journal(journal_path, service_ctl=None):
     return True
 
 
+def _default_start_guard_script_path(binary_path="/usr/local/bin/sandboxed-node"):
+    return Path(str(binary_path) + "-swap-guard.py")
+
+
+def _default_start_guard_conf_path(build_conf_path=None, unit_name="sandboxed-node", binary_path="/usr/local/bin/sandboxed-node"):
+    if build_conf_path is not None:
+        return Path(build_conf_path).parent / "25-swap-guard.conf"
+    if str(binary_path) == "/usr/local/bin/sandboxed-node":
+        return Path(f"/etc/systemd/system/{_normalize_service_unit_name(unit_name)}.service.d/25-swap-guard.conf")
+    return None
+
+
+def _render_start_guard_script(journal_path):
+    jp_str = str(Path(journal_path))
+    return (
+        "#!/usr/bin/env python3\n"
+        "import hashlib, json, os, pathlib, shutil, sys\n"
+        f"jp = pathlib.Path({jp_str!r})\n"
+        "if not jp.is_file():\n"
+        "    raise SystemExit(0)\n"
+        "try:\n"
+        "    data = json.loads(jp.read_text(encoding='utf-8'))\n"
+        "except Exception as exc:\n"
+        "    sys.stderr.write(f'corrupt swap journal {jp}: {exc}\\n')\n"
+        "    raise SystemExit(1)\n"
+        "errors = []\n"
+        "for entry in reversed(data.get('components', [])):\n"
+        "    bin_p = pathlib.Path(entry['bin'])\n"
+        "    backup_p = pathlib.Path(entry['backup'])\n"
+        "    inst_p = pathlib.Path(entry.get('installing') or (str(bin_p) + '.installing'))\n"
+        "    rest_p = pathlib.Path(entry.get('restoring') or (str(bin_p) + '.restoring'))\n"
+        "    had_existing = bool(entry.get('had_existing', True))\n"
+        "    prev_sha = entry.get('prev_sha256')\n"
+        "    try:\n"
+        "        inst_p.unlink(missing_ok=True)\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    try:\n"
+        "        if had_existing:\n"
+        "            if not backup_p.is_file():\n"
+        "                errors.append(f'missing backup {backup_p} for {entry.get(\"name\")}')\n"
+        "                continue\n"
+        "            shutil.copy2(backup_p, rest_p)\n"
+        "            os.chmod(rest_p, 0o755)\n"
+        "            os.replace(rest_p, bin_p)\n"
+        "            if prev_sha:\n"
+        "                got_sha = hashlib.sha256(bin_p.read_bytes()).hexdigest()\n"
+        "                if got_sha != prev_sha.lower():\n"
+        "                    errors.append(f'recovered {bin_p} sha256 {got_sha} != expected {prev_sha}')\n"
+        "        else:\n"
+        "            bin_p.unlink(missing_ok=True)\n"
+        "    except Exception as exc:\n"
+        "        errors.append(f'failed recovering {bin_p}: {exc}')\n"
+        "    finally:\n"
+        "        try:\n"
+        "            rest_p.unlink(missing_ok=True)\n"
+        "        except OSError:\n"
+        "            pass\n"
+        "conf_raw = data.get('build_conf_path')\n"
+        "if conf_raw:\n"
+        "    conf_p = pathlib.Path(conf_raw)\n"
+        "    prev_sha = data.get('prev_build_sha')\n"
+        "    try:\n"
+        "        if prev_sha is not None:\n"
+        "            conf_p.parent.mkdir(parents=True, exist_ok=True)\n"
+        "            tmp = pathlib.Path(str(conf_p) + '.tmp')\n"
+        "            tmp.write_text(f'[Service]\\nEnvironment=ORB_BUILD_SHA={prev_sha}\\n', encoding='utf-8')\n"
+        "            os.chmod(tmp, 0o644)\n"
+        "            os.replace(tmp, conf_p)\n"
+        "        else:\n"
+        "            conf_p.unlink(missing_ok=True)\n"
+        "    except Exception as exc:\n"
+        "        errors.append(f'failed recovering build_conf {conf_p}: {exc}')\n"
+        "if errors:\n"
+        "    sys.stderr.write('swap journal recovery failed: ' + '; '.join(errors) + '\\n')\n"
+        "    raise SystemExit(1)\n"
+        "jp.unlink(missing_ok=True)\n"
+        "if jp.exists():\n"
+        "    sys.stderr.write(f'swap journal still open: {jp}\\n')\n"
+        "    raise SystemExit(1)\n"
+    )
+
+
+def _install_start_guard(
+    binary_path="/usr/local/bin/sandboxed-node",
+    journal_path=None,
+    build_conf_path=None,
+    unit_name="sandboxed-node",
+    service_ctl=None,
+):
+    jp = Path(journal_path) if journal_path is not None else _default_swap_journal_path(binary_path)
+    guard_script = _default_start_guard_script_path(binary_path)
+    guard_script.parent.mkdir(parents=True, exist_ok=True)
+    tmp_script = Path(str(guard_script) + ".tmp")
+    tmp_script.write_text(_render_start_guard_script(jp), encoding="utf-8")
+    os.chmod(tmp_script, 0o755)
+    _fsync_file_and_dir(tmp_script)
+    os.replace(tmp_script, guard_script)
+    _fsync_file_and_dir(guard_script)
+
+    guard_conf = _default_start_guard_conf_path(
+        build_conf_path=build_conf_path, unit_name=unit_name, binary_path=binary_path
+    )
+    if guard_conf is not None:
+        guard_conf.parent.mkdir(parents=True, exist_ok=True)
+        tmp_conf = Path(str(guard_conf) + ".tmp")
+        tmp_conf.write_text(
+            f"[Service]\nExecStartPre=/usr/bin/python3 {guard_script}\n",
+            encoding="utf-8",
+        )
+        os.chmod(tmp_conf, 0o644)
+        _fsync_file_and_dir(tmp_conf)
+        os.replace(tmp_conf, guard_conf)
+        _fsync_file_and_dir(guard_conf)
+        if service_ctl is not None and hasattr(service_ctl, "daemon_reload"):
+            service_ctl.daemon_reload()
+    return guard_script, guard_conf
+
+
+def run_start_guard(binary_path="/usr/local/bin/sandboxed-node", journal_path=None):
+    guard_script = _default_start_guard_script_path(binary_path)
+    if guard_script.is_file():
+        res = subprocess.run(
+            [sys.executable, str(guard_script)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode != 0:
+            raise RuntimeError(
+                f"start guard {guard_script} refused start: {(res.stderr or res.stdout).strip()}"
+            )
+        return True
+    jp = Path(journal_path) if journal_path is not None else _default_swap_journal_path(binary_path)
+    if jp.is_file():
+        _recover_swap_journal(jp)
+        if jp.is_file():
+            raise RuntimeError(f"refusing to start while swap journal is open: {jp}")
+        return True
+    return False
+
+
 def _default_health_check_probe(
     unit_name="sandboxed-node",
     env_file=None,
@@ -1044,6 +1186,13 @@ def perform_fenced_upgrade(
                 shutil.copy2(comp["staged"], comp["installing"])
                 os.chmod(comp["installing"], 0o755)
                 _fsync_file_and_dir(comp["installing"])
+            _install_start_guard(
+                binary_path=node_path,
+                journal_path=swap_journal_path,
+                build_conf_path=resolved_build_conf,
+                unit_name=unit_name,
+                service_ctl=ctl,
+            )
             _write_swap_journal(
                 swap_journal_path,
                 active_components=active_components,
@@ -1057,6 +1206,8 @@ def perform_fenced_upgrade(
                 _write_build_conf_sha(resolved_build_conf, expected_build_sha)
                 if hasattr(ctl, "daemon_reload"):
                     ctl.daemon_reload()
+            swap_journal_path.unlink(missing_ok=True)
+            _fsync_file_and_dir(swap_journal_path)
         except Exception as swap_err:
             for comp in active_components:
                 try:
@@ -1198,7 +1349,7 @@ def perform_fenced_upgrade(
 
 def _remote_worker_prelude():
     parts = [
-        "import hashlib, inspect, json, os, pathlib, shutil, sqlite3, subprocess, time, urllib.request",
+        "import hashlib, inspect, json, os, pathlib, shutil, sqlite3, subprocess, sys, time, urllib.request",
         "from pathlib import Path",
         inspect.getsource(compute_file_sha256),
         inspect.getsource(_resolve_companion_paths),
@@ -1208,6 +1359,11 @@ def _remote_worker_prelude():
         inspect.getsource(_fsync_file_and_dir),
         inspect.getsource(_write_swap_journal),
         inspect.getsource(_recover_swap_journal),
+        inspect.getsource(_default_start_guard_script_path),
+        inspect.getsource(_default_start_guard_conf_path),
+        inspect.getsource(_render_start_guard_script),
+        inspect.getsource(_install_start_guard),
+        inspect.getsource(run_start_guard),
         inspect.getsource(SystemdServiceCtl),
         inspect.getsource(_parse_simple_env_file),
         inspect.getsource(_read_proc_environ),
