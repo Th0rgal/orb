@@ -75,7 +75,8 @@ private def refusedBandwidth (expected : String) (st : ManagedComputeStore)
 private def refused (st : ManagedComputeStore) (id : String) (cost now : UInt64) : IO Unit :=
   refusedAs "managed_spawn_rejected" st id cost now
 
-/-- All times are supplied explicitly; there is no wall clock or provider here. -/
+/-- All times are supplied explicitly; there is no wall clock or provider here.
+    Fails at 27d2d096: no; guards the permanent marker across two midnights. -/
 def midnightAndReload (root : String) : IO Unit := do
   let path := root ++ "/budget-midnight.db"
   let st ← require (← openManagedComputeStore path)
@@ -145,6 +146,7 @@ def oldSchemaNonzeroLiveCommitment (root : String) : IO Unit := do
     discard <| require (← provisionManagedMachine reloaded fleet (machine "legacy-next-day" 7) 86401)
   finally closeManagedComputeStore reloaded
 
+/-- Fails at 27d2d096: yes; its lifetime subtraction loses seven cents. -/
 def priorDayReservationMigration (root : String) : IO Unit := do
   let path := root ++ "/budget-prior-day.db"
   let st ← require (← openManagedComputeStore path)
@@ -176,7 +178,7 @@ def snapshotParity (root : String) : IO Unit := do
     sql withBaseline "INSERT INTO managed_global_budget_baseline(day_start,cents) VALUES(0,0);"
     refusedWithFleet "managed_spawn_rejected" withBaseline { fleet with spentTodayCents := 10 }
       "snapshot-spent-baseline" 1 90000
-      -- fails at 27d2d096: no; master and this head both refuse the snapshot.
+      -- Fails at 27d2d096: yes; master and this head refuse, that head admits.
   finally closeManagedComputeStore withBaseline
   let maxed ← require (← openManagedComputeStore (root ++ "/budget-snapshot-machines.db"))
   try
@@ -184,15 +186,32 @@ def snapshotParity (root : String) : IO Unit := do
     let snapshot := { fleet with maxConcurrent := 1 }
     let snapshot := { snapshot with machines := #[machine "snapshot-live" 0] }
     refusedWithFleet "managed_spawn_rejected" maxed snapshot "snapshot-machines" 1 90000
-      -- fails at 27d2d096: no; master and this head both refuse the snapshot.
+      -- Fails at 27d2d096: yes; master and this head refuse, that head admits.
   finally closeManagedComputeStore maxed
 
+/-- Fails at 27d2d096: yes; min(snapshot cap, stored cap) rejects the second
+    request although its preflight passes and the authoritative cap has room. -/
+def storedRowAuthoritative (root : String) : IO Unit := do
+  let st ← require (← openManagedComputeStore (root ++ "/budget-stored-row.db"))
+  try
+    configure st
+    discard <| require (← provisionManagedMachine st fleet (machine "stored-first" 1) 90000)
+    discard <| require (← provisionManagedMachine st { fleet with dailyCapCents := 1 }
+      (machine "stored-second" 1) 90001)
+    sql st "UPDATE managed_fleet_state SET daily_cap_cents=2;"
+    refused st "stored-cap-over" 1 90002
+  finally closeManagedComputeStore st
+
+/-- Fails at 27d2d096: no; unlike the original race, this also requires dated
+    rollover (reverting production to master leaves both requests refused). -/
 def concurrentGlobalAdmission (root : String) : IO Unit := do
   let path := root ++ "/budget-concurrent.db"
   let a ← require (← openManagedComputeStore path)
   let b ← require (← openManagedComputeStore path)
   try
     configure a
+    discard <| require (← provisionManagedMachine a fleet (machine "race-yesterday" 10) 86390)
+    sql a "UPDATE managed_machines SET phase_code=3,status='destroyed' WHERE id='race-yesterday';"
     let before ← reservationCount a
     let first ← IO.asTask (provisionManagedMachine a fleet (machine "race-a" 6) 90000)
     let second ← IO.asTask (provisionManagedMachine b fleet (machine "race-b" 6) 90000)
@@ -206,6 +225,9 @@ def concurrentGlobalAdmission (root : String) : IO Unit := do
     let after ← reservationCount a
     check (after == before + 1)
       "concurrentGlobalAdmission: loser creates no reservation"
+    let loserId := if ra.isOk then "race-b" else "race-a"
+    check ((← getManagedMachine? a loserId).isNone)
+      "concurrentGlobalAdmission: loser creates no machine"
   finally
     closeManagedComputeStore b
     closeManagedComputeStore a
@@ -214,6 +236,7 @@ def bandwidthAdmission (root : String) : IO Unit := do
   let st ← require (← openManagedComputeStore (root ++ "/budget-bandwidth.db"))
   try
     configure st
+    -- small is 2 vCPU: cap 3 fits one but not two (4), isolating aggregate refusal.
     setBandwidth st "owner" "{\"compute_vcpu_per_min\":3,\"compute_usd_per_hour\":100,\"protect_root\":false}"
     discard <| require (← provisionManagedMachine st fleet (bandwidthMachine "bw-first" "owner") 90000)
     let beforeOver ← reservationCount st
@@ -225,6 +248,7 @@ def bandwidthAdmission (root : String) : IO Unit := do
     check (afterOver == beforeOver) "bw-over: refusal creates no reservation"
     sql st "UPDATE managed_machines SET phase_code=3,status='destroyed' WHERE id='bw-first';"
     discard <| require (← provisionManagedMachine st fleet (bandwidthMachine "bw-room" "owner") 1)
+    -- Cap 2 admits each small VM on its own; a second tests the aggregate bypass.
     setBandwidth st "root-owner" "{\"compute_vcpu_per_min\":2,\"compute_usd_per_hour\":100,\"protect_root\":true}"
     discard <| require (← provisionManagedMachine st fleet (bandwidthMachine "root-first" "root-owner") 2)
     discard <| require (← provisionManagedMachine st fleet (bandwidthMachine "root-protected" "root-owner") 2)
@@ -240,13 +264,30 @@ def bandwidthAdmission (root : String) : IO Unit := do
     check (afterAggregate == beforeAggregate) "bw-aggregate-over: refusal creates no reservation"
   finally closeManagedComputeStore st
 
+/-- Fails at 27d2d096: no; directly exercises the dollar-rate gate independently
+    of vCPU. Boat small costs $0.018/hour: $0.03 fits one but not two. -/
+def bandwidthRateAdmission (root : String) : IO Unit := do
+  let st ← require (← openManagedComputeStore (root ++ "/budget-bandwidth-rate.db"))
+  try
+    configure st
+    setBandwidth st "rate-owner" "{\"compute_usd_per_hour\":0.03,\"protect_root\":false}"
+    discard <| require (← provisionManagedMachine st fleet (bandwidthMachine "rate-first" "rate-owner") 90000)
+    refusedBandwidth "managed_compute_cost_bandwidth_exceeded" st "rate-owner" "rate-aggregate-over" 0 90001
+    setBandwidth st "rate-owner" "{\"compute_usd_per_hour\":0.03,\"protect_root\":true}"
+    discard <| require (← provisionManagedMachine st fleet (bandwidthMachine "rate-protected" "rate-owner") 90002)
+    setBandwidth st "rate-owner" "{\"compute_usd_per_hour\":0.01,\"protect_root\":true}"
+    refusedBandwidth "managed_compute_cost_bandwidth_exceeded" st "rate-owner" "rate-single-over" 0 90003
+  finally closeManagedComputeStore st
+
 def run (root : String) : IO Unit := do
   try midnightAndReload root catch e => throw (IO.userError s!"midnightAndReload: {e}")
   try liveCommitmentAfterReload root catch e => throw (IO.userError s!"liveCommitmentAfterReload: {e}")
   try oldSchemaNonzeroLiveCommitment root catch e => throw (IO.userError s!"oldSchemaNonzeroLiveCommitment: {e}")
   try priorDayReservationMigration root catch e => throw (IO.userError s!"priorDayReservationMigration: {e}")
   try snapshotParity root catch e => throw (IO.userError s!"snapshotParity: {e}")
+  try storedRowAuthoritative root catch e => throw (IO.userError s!"storedRowAuthoritative: {e}")
   try concurrentGlobalAdmission root catch e => throw (IO.userError s!"concurrentGlobalAdmission: {e}")
   try bandwidthAdmission root catch e => throw (IO.userError s!"bandwidthAdmission: {e}")
+  try bandwidthRateAdmission root catch e => throw (IO.userError s!"bandwidthRateAdmission: {e}")
 
 end OrbCore.ManagedBudgetTests
