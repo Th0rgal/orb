@@ -65,11 +65,13 @@ def reconcile (st : CoreStore) : IO (Except String Unit) := do
     idempotencyDb field and close each distinct handle exactly once. -/
 private def attemptStartup (root : String) : IO (Except String Unit) := do
   let mut ids : Array String := #[]
+  let mut markerDbPath := ""
   try
     let preferred ← IO.getEnv "SANDBOXED_SINGLE_TENANT_USER_ID"
     let fallback ← IO.getEnv "SINGLE_TENANT_USER_ID"
     let tenant := (preferred.filter (fun s => !s.trimAscii.isEmpty)).getD (fallback.getD "")
     let (mp, ap) ← resolveCoreStoreDbPaths root tenant
+    markerDbPath := mp
     if !(← (System.FilePath.mk mp).pathExists) then return .ok ()
     let .ok m ← openSqliteDb mp "SELECT 1;" | throw (IO.userError "missions database open failed")
     try
@@ -97,6 +99,18 @@ private def attemptStartup (root : String) : IO (Except String Unit) := do
       finally sqliteCloseRaw p.handle
     finally sqliteCloseRaw m.handle
   catch e =>
+    -- Preserve the operator-facing id list even when the failure happened
+    -- after the first marker read (or when a nested exception discarded the
+    -- local result).  The DELETE commands are the only supported bypass.
+    if ids.isEmpty && !markerDbPath.isEmpty && (← (System.FilePath.mk markerDbPath).pathExists) then
+      try
+        let .ok m ← openSqliteDb markerDbPath "SELECT 1;" | throw (IO.userError "marker database reopen failed")
+        try
+          match ← pending m with
+          | .ok found => ids := found
+          | .error _ => pure ()
+        finally sqliteCloseRaw m.handle
+      catch _ => pure ()
     let commands := ids.map fun id =>
       "DELETE FROM pending_mission_rebinds WHERE mission_id='" ++ id.replace "'" "''" ++ "';"
     return .error s!"mission_ids={ids}; step=startup-open-or-reconcile; error={e}; manual bypass on missions.db (leaves bindings unrepaired): {String.intercalate " " commands.toList}"
