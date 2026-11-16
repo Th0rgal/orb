@@ -91,11 +91,17 @@ def shapeDesktopRuns (ac : Text.GlyphAtlasCache) (font : Text.FontHandle)
     let mut glyphs : List ShapedGlyph := []
     let scDen : Int := scaleDen
     let scNum : Int := if scale120 == 0 then 120 else scale120
+    let mut penDev64 : Int := 0
     for sg in shaped do
-      let (ac', entry) ← Text.getOrRasterizeGlyph curAc font sg.glyphId devSize64 0
+      let glyphDev64 := penDev64 + sg.xOffset64
+      let fraction := glyphDev64 % 64
+      let subpx := (fraction.toNat / 16).toUInt32
+      let (ac', entry) ← Text.getOrRasterizeGlyph curAc font sg.glyphId devSize64 subpx
       curAc := ac'
       let advSubNat : SubPx := ((max 0 sg.xAdvance64 * scDen) / scNum).toNat
-      let xOffSub : Int := (sg.xOffset64 * scDen) / scNum
+      -- The glyph bitmap already contains its fractional horizontal phase.
+      -- Position its origin on the corresponding whole device pixel.
+      let xOffSub : Int := ((sg.xOffset64 - fraction) * scDen) / scNum
       let yOffSub : Int := (sg.yOffset64 * scDen) / scNum
       let g : ShapedGlyph := {
         glyphId := sg.glyphId.toNat
@@ -110,6 +116,7 @@ def shapeDesktopRuns (ac : Text.GlyphAtlasCache) (font : Text.FontHandle)
         isColor := entry.isColor
       }
       glyphs := glyphs ++ [g]
+      penDev64 := penDev64 + sg.xAdvance64
     let run : InlineRun := {
       glyphs := glyphs
       style := style

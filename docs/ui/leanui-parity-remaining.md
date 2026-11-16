@@ -57,3 +57,23 @@ unchanged. U3 remains incomplete until the documented parity criteria pass.
 U2 acceptance and the roadmap row are owned by the parent after merged-head
 run [43807502974](https://github.com/Th0rgal/orb/actions/runs/43807502974)
 passes; this follow-up does not change the roadmap.
+
+### Search border and glyph-phase corrections
+
+The search dialog border correction is committed in `db26c501`. It lowers
+search raw mismatch to 10.90/11.05/14.49/14.73% (dark 1x/2x, light 1x/2x).
+The follow-up glyph-phase correction uses quarter-pixel FreeType atlas phases
+from HarfBuzz advances. Against the same local baseline it changes the shared
+sidebar group as follows:
+
+| variant | before | after |
+|---|---:|---:|
+| populated dark 1x | 1.765% | 1.757% |
+| populated dark 2x | 1.360% | 1.336% |
+| populated light 1x | 1.778% | 1.774% |
+| populated light 2x | 1.363% | 1.339% |
+
+The full local table after both changes is mean mismatch **4.98%**, mean
+above tolerance **2.67%**, SSIM **0.9526**. No variant worsened by 0.1 point;
+the largest local increase was search light 1x at **+0.008 points**. No group
+has newly crossed below 1% yet, so this PR is not mergeable under the U3 rule.
