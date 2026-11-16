@@ -14,6 +14,7 @@ import OrbBin.PosixExt
 import OrbBin.Sqlite
 import OrbNetLeaf.Crypto
 import OrbCore.Spec
+import OrbCore.MissionBoard
 
 namespace OrbCore.Store
 
@@ -1204,6 +1205,10 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) (singleTenantUser
   let (missionsPath, askPath) ← resolveCoreStoreDbPaths trimmedRoot envTenant
   let mRes ← openSqliteDb missionsPath missionsSchemaSql missionsAdditiveAlters
   let .ok mDb := mRes | return .error (match mRes with | .error e => e | .ok _ => "err")
+  let boardSchemaRes ← OrbCore.MissionBoard.initSchema mDb
+  if let .error boardErr := boardSchemaRes then
+    sqliteCloseRaw mDb.handle
+    return .error s!"core_store_board_schema_failed:{boardErr}"
   let legacyRunsRes ← mDb.mu.atomically (migrateLegacyMissionRunsUnlocked mDb.handle)
   if let .error legErr := legacyRunsRes then
     sqliteCloseRaw mDb.handle
@@ -1373,6 +1378,11 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) (singleTenantUser
       if let .error r7Err := r7MissRes then
         sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; sqliteCloseRaw aDb.handle; sqliteCloseRaw iDb.handle
         return .error s!"core_store_r7_schema_failed:{r7Err}"
+      let boardNow ← mDb.mu.atomically (sqliteQueryRowsRaw mDb.handle "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now');" #[])
+      let boardTimestamp := boardNow.toOption.bind (·[1]?) |>.bind (·[0]?) |>.getD ""
+      if let .error boardMigErr ← OrbCore.MissionBoard.migrate mDb pDb boardTimestamp then
+        sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; sqliteCloseRaw aDb.handle; sqliteCloseRaw iDb.handle
+        return .error s!"core_store_board_migration_failed:{boardMigErr}"
       if let .error e ← exportLegacyProjectBoard trimmedRoot pDb mDb then
         IO.eprintln s!"[orb-core] legacy project-board archive failed: {e}"
       let closedRef ← IO.mkRef false

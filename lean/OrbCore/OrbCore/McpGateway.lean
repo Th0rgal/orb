@@ -23,6 +23,7 @@ import OrbCore.RemoteFleetAndRelay
 import OrbCore.RemoteDispatch
 import OrbCore.ProxyModelRouting
 import OrbCore.ProjectFilesAndController
+import OrbCore.MissionBoard
 
 namespace OrbCore.McpGateway
 
@@ -38,6 +39,7 @@ open OrbCore.SecretAndApproval
 open OrbCore.RemoteFleetAndRelay
 open OrbCore.RemoteDispatch
 open OrbCore.ProjectFilesAndController
+open OrbCore.MissionBoard
 
 private def mcpOk (res : JVal) : String :=
   renderCompact (.obj #[("ok", .bool true), ("result", res)])
@@ -97,14 +99,7 @@ private def checkMissionReadAccess
 
 /-- Enrich a settled MCP action result with receipt metadata (`action_id`, `tool_name`, `state`, `status`, `accepted`, `result`). -/
 private def settledMcpActionReceipt (actionId toolName state : String) (resObj : JVal) (targetMissionId : String := "") : JVal :=
-  let payload := resObj.removeField "result"
-  let baseObj := payload.setField "action_id" (.str actionId)
-    |>.setField "tool_name" (.str toolName)
-    |>.setField "state" (.str state)
-    |>.setField "status" (.str (if state == "succeeded" then "completed" else state))
-    |>.setField "accepted" (.str "yes")
-    |>.setField "result" payload
-  if targetMissionId.isEmpty then baseObj else baseObj.setField "target_mission_id" (.str targetMissionId)
+  MissionBoard.settledActionReceipt actionId toolName state resObj targetMissionId
 
 /-- Look up a persisted MCP action receipt by `id` from `mcp_actions_v1`. -/
 private def lookupMcpActionById? (store : CoreStore) (actionId : String) : IO (Option JVal) := do
@@ -113,7 +108,7 @@ private def lookupMcpActionById? (store : CoreStore) (actionId : String) : IO (O
       "SELECT id, tool, state, COALESCE(result,'{}'), COALESCE(owner,''), created_at, updated_at FROM mcp_actions_v1 WHERE id=?1 LIMIT 1;"
       #[actionId]
     | return none
-  if rows.size ≤ 1 then return none
+  if rows.size ≤ 1 then return ← MissionBoard.actionById? store.missionsDb actionId
   let r := rows[1]!
   let aid := cell r 0
   let tname := cell r 1
@@ -129,7 +124,7 @@ private def lookupMcpActionByRetryKey? (store : CoreStore) (scope retryKey : Str
       "SELECT id, tool, state, COALESCE(result,'{}'), COALESCE(owner,'') FROM mcp_actions_v1 WHERE scope=?1 AND retry_key=?2 AND state='succeeded' ORDER BY updated_at DESC LIMIT 1;"
       #[scope, retryKey]
     | return none
-  if rows.size ≤ 1 then return none
+  if rows.size ≤ 1 then return ← MissionBoard.actionByKey? store.missionsDb scope retryKey
   let r := rows[1]!
   let raw := cell r 3
   if raw.isEmpty then return none
@@ -498,6 +493,9 @@ def dispatchMcpToolCall
   let userCap? := user?.bind (·.dailySpendCapCents?)
 
   let lookupCallerAction? (aid : String) : IO (Option JVal) := do
+    if let some (owner, _) ← MissionBoard.actionScope? store.missionsDb aid then
+      unless ← checkTenantMission owner false do return none
+      return ← MissionBoard.actionById? store.missionsDb aid
     if tenantScoped then
       let .ok rows ← execParamQuery store.projectsDb
           "SELECT COALESCE(owner,''),scope FROM mcp_actions_v1 WHERE id=?1;" #[aid] | return none
@@ -513,7 +511,8 @@ def dispatchMcpToolCall
   -- Idempotent replay for retried mutating MCP calls carrying `idempotency_key`
   let idemKeyTop := ((args.fieldStr? "idempotency_key").getD "").trimAscii.toString
   if OrbBin.McpCatalog.isMutatingControlTool toolName && !idemKeyTop.isEmpty && toolName != "get_action" && toolName != "wait_actions" &&
-     toolName != "reconcile_action" && toolName != "cancel_action" then
+     toolName != "reconcile_action" && toolName != "cancel_action" &&
+     toolName != "write_project_board" && toolName != "write_mission_board" then
     let scope := actionScope claims callerUserId toolName
     if let some prevRes ← lookupMcpActionByRetryKey? store scope idemKeyTop then
       return mcpOk prevRes
@@ -817,14 +816,45 @@ def dispatchMcpToolCall
   | "read_project_board" | "write_project_board" =>
     let slug := (args.fieldStr? "project").getD callerProj
     if slug != callerProj then return mcpErr "not_found" "Project not found"
-    let board ← readProjectBoard store slug
-    if toolName == "read_project_board" then return mcpOk board
-    if callerMid.isEmpty || board.fieldStr? "controller_mission_id" != some callerMid then
+    let .ok projectRows ← execParamQuery store.projectsDb
+        "SELECT COALESCE(controller_mission_id,'') FROM projects WHERE slug=?1;" #[slug]
+      | return mcpErr "not_found" "Project not found"
+    if projectRows.size ≤ 1 then return mcpErr "not_found" "Project not found"
+    let controller := cell projectRows[1]! 0
+    if controller.isEmpty then
+      if toolName == "read_project_board" then
+        return mcpOk (← readProjectBoard store slug)
+      return mcpErr "forbidden" "not_project_controller"
+    let board ← MissionBoard.read store.missionsDb { userId := callerUserId, missionId := callerMid, role := claims.role } controller
+    if toolName == "read_project_board" then
+      match board with
+      | .ok b => return mcpOk b
+      | .error e => return mcpErr (if e == "mission_not_found" then "not_found" else e) e
+    if callerMid.isEmpty || controller != callerMid then
       return mcpErr "forbidden" "not_project_controller"
     let some text := args.fieldStr? "text" | return mcpErr "invalid_arguments" "text required"
-    match ← writeProjectBoard store slug text nowIso callerMid with
-    | .error e => return mcpErr (if e == "not_project_controller" then "forbidden" else e) e
-    | .ok () => return mcpOk (← readProjectBoard store slug)
+    let actionId ← newUuidV4
+    match ← MissionBoard.write store.missionsDb { userId := callerUserId, missionId := callerMid, role := claims.role }
+        controller text nowIso none actionId (actionScope claims callerUserId toolName)
+        ((args.fieldStr? "idempotency_key").getD "") toolName with
+    | .error e => return mcpErr (if e == "not_mission_writer" then "forbidden" else e) e
+    | .ok result => return mcpOk result
+
+  | "read_mission_board" =>
+    let mid := (args.fieldStr? "mission_id").getD callerMid
+    match ← MissionBoard.read store.missionsDb { userId := callerUserId, missionId := callerMid, role := claims.role } mid with
+    | .ok result => return mcpOk result
+    | .error e => return mcpErr (if e == "mission_not_found" then "not_found" else e) e
+
+  | "write_mission_board" =>
+    let mid := (args.fieldStr? "mission_id").getD callerMid
+    let some text := args.fieldStr? "text" | return mcpErr "invalid_arguments" "text required"
+    let actionId ← newUuidV4
+    match ← MissionBoard.write store.missionsDb { userId := callerUserId, missionId := callerMid, role := claims.role }
+        mid text nowIso none actionId (actionScope claims callerUserId toolName)
+        ((args.fieldStr? "idempotency_key").getD "") toolName with
+    | .error e => return mcpErr (if e == "not_mission_writer" then "forbidden" else e) e
+    | .ok result => return mcpOk result
 
   | "start_mission" | "consult_model" =>
     let title := ((args.fieldStr? "title").orElse (fun _ => args.fieldStr? "summary") |>.getD "Delegated Mission").trimAscii.toString

@@ -1,6 +1,7 @@
 import OrbCore.Control
 import OrbCore.ManagedProvisioningTests
 import OrbCore.ProviderUsageAndLogin
+import OrbCore.MissionBoard
 
 namespace OrbCore.TenantIsolationTests
 
@@ -186,7 +187,83 @@ private def legacyBoardArchive (root : String) : IO Unit := do
 
 /-- Two real stored principals through the REST/desktop and MCP HTTP boundary.
     All records, credentials and provider state are synthetic; no host effects. -/
+def missionBoardFixtures (root : String) : IO Unit := do
+  let .ok store ← openCoreStore (root ++ "/mission-board-fixtures") | throw (IO.userError "board fixture store")
+  try
+    let sql (db : SqliteDb) (q : String) (args : Array String := #[]) : IO Unit := do
+      let .ok _ ← execParamQuery db q args | throw (IO.userError "board fixture SQL")
+    let .ok () ← MissionBoard.initSchema store.missionsDb | throw (IO.userError "board schema")
+    sql store.missionsDb "DELETE FROM mission_board_migrations;"
+    sql store.missionsDb ("INSERT INTO missions(id,owner_user_id,project,parent_mission_id,tags) VALUES " ++
+      "('root','a','orb',NULL,'[]'),('child','a','orb','root','[]')," ++
+      "('sibling','a','orb','root','[]'),('foreign','b','evm-fast',NULL,'[]')," ++
+      "('shared-child','a','orb','foreign','[]'),('btw','a','orb',NULL,'[\"btw-parent:child\"]');")
+    sql store.projectsDb "INSERT INTO projects(slug,controller_mission_id) VALUES('orb','root'),('evm-fast','foreign');"
+    let nearLimit := String.ofList (List.replicate 16380 'x') ++ "\r\n"
+    let unicode := "  日本語 🦉 café é\r\n\n"
+    for (slug, text) in #[("orb", nearLimit), ("evm-fast", unicode)] do
+      sql store.projectsDb "INSERT INTO project_board(slug,text,updated_at) VALUES(?1,?2,'original');" #[slug, text]
+    check (!(← MissionBoard.migrate store.missionsDb store.projectsDb "first" true).isOk)
+      "Migration: interruption after committed copies, before completion marker"
+    let rootReader : MissionBoard.Reader := { userId := "a", missionId := "root", role := "executor" }
+    let childReader : MissionBoard.Reader := { rootReader with missionId := "child" }
+    let first ← MissionBoard.read store.missionsDb rootReader "root"
+    check ((first.toOption.bind (·.fieldStr? "text")).map String.toUTF8 == some nearLimit.toUTF8)
+      "Migration: near-16KB orb fixture survives byte for byte"
+    let foreign ← MissionBoard.read store.missionsDb { userId := "b" } "foreign"
+    check ((foreign.toOption.bind (·.fieldStr? "text")).map String.toUTF8 == some unicode.toUTF8)
+      "Migration: non-ASCII evm-fast fixture survives byte for byte"
+    check ((first.toOption.bind (·.fieldStr? "updated_at")) == some "original") "Migration: timestamp preserved"
+    check ((← MissionBoard.authorizeRead store.missionsDb childReader "root").isOk)
+      "Authorization: descendant reads ancestor allowed"
+    check (!(← MissionBoard.authorizeRead store.missionsDb rootReader "child").isOk)
+      "Authorization: ancestor mission without a project role reads descendant denied"
+    check (!(← MissionBoard.authorizeRead store.missionsDb childReader "sibling").isOk)
+      "Authorization: sibling reads sibling denied"
+    check (!(← MissionBoard.authorizeRead store.missionsDb { childReader with missionId := "shared-child" } "foreign").isOk)
+      "Authorization: descendant of another owner's mission through a shared mission denied"
+    check ((← MissionBoard.authorizeRead store.missionsDb { childReader with missionId := "btw" } "root").isOk)
+      "Authorization: mixed btw/parent lineage at depth two allowed"
+    let write (text time key : String) (fence : Option String := none) (interrupt : Bool := false) :=
+      MissionBoard.write store.missionsDb rootReader "root" text time fence key "fixture-scope" key "write_mission_board" interrupt
+    check ((← write "new board" "new-time" "w1").isOk) "Concurrency: transactional write succeeds"
+    let oldBoard ← MissionBoard.read store.missionsDb rootReader "root"
+    check (!(← write "rolled back" "rollback-time" "rollback-key" none true).isOk) "Concurrency: failure before commit is reported"
+    check ((← MissionBoard.read store.missionsDb rootReader "root").toOption == oldBoard.toOption) "Concurrency: failed write retains old text and no receipt"
+    check ((← MissionBoard.actionById? store.missionsDb "rollback-key").isNone) "Concurrency: failed write leaves no receipt"
+    check ((← MissionBoard.migrate store.missionsDb store.projectsDb "retry").isOk) "Migration: retry completes marker"
+    let newer ← MissionBoard.read store.missionsDb rootReader "root"
+    check ((newer.toOption.bind (·.fieldStr? "text")) == some "new board") "Event order 5: migration replay preserves newer write"
+    check ((← MissionBoard.migrate store.missionsDb store.projectsDb "third").isOk) "Migration: third run no-op"
+    check ((← MissionBoard.read store.missionsDb rootReader "root").toOption == newer.toOption) "Migration: run twice same result"
+    check (!(← write "conflicting" "later" "w2" (some "original")).isOk) "Concurrency: stale base_updated_at rejected"
+    check ((← write "new board" "later" "w3").toOption.map (·.fieldOrNull "result") == newer.toOption) "Concurrency: identical rewrite preserves columns"
+    check ((← write "different retry" "later" "w1").toOption.map (·.fieldOrNull "result") == newer.toOption) "Concurrency: settled key replay does not write"
+    check ((← MissionBoard.actionById? store.missionsDb "w1").isSome) "Surface: get_action returns board receipt"
+    check ((← MissionBoard.actionByKey? store.missionsDb "fixture-scope" "w1").isSome) "Concurrency: same key replays settled receipt"
+    check (!(← write (String.ofList (List.replicate 8193 'é')) "later" "oversized").isOk) "Storage: UTF-8 byte cap rejects whole"
+    for (uid, label, status) in #[("a", "owner user refused", 403), ("b", "member of another tenant zero-oracle", 404)] do
+      let response ← MissionBoard.dispatchRest store.missionsDb store.projectsDb "PUT" "/api/control/missions/root/board" ByteArray.empty { userId := uid }
+      check (response.map Prod.fst == some status) ("REST: " ++ label)
+    check ((← MissionBoard.refuseUserWrite store.missionsDb "a" "root") == "not_mission_writer") "REST: admin refused without override"
+    sql store.missionsDb "UPDATE missions SET project='new-project' WHERE id='root';"
+    check ((← MissionBoard.read store.missionsDb rootReader "root").toOption == newer.toOption) "Event order 1: write then move preserves board"
+    check ((← write "after move" "later" "w4").isOk) "Event order 2: move then write"
+    let oldList ← MissionBoard.list store.missionsDb { userId := "a" } "orb"
+    check ((oldList.toOption.bind (·.fieldArr? "boards")).getD #[] == #[]) "Event order 2: old project has no ghost"
+    sql store.missionsDb "UPDATE missions SET status='acknowledged' WHERE id='root';"
+    check ((← write "archived write" "latest" "w5").isOk) "Event order 4: archived mission still writable"
+    sql store.missionsDb "UPDATE missions SET status='awaiting_user' WHERE id='root';"
+    check (((← MissionBoard.read store.missionsDb rootReader "root").toOption.bind (·.fieldStr? "text")) == some "archived write")
+      "Event order 4: resume retains archived write"
+    sql store.missionsDb "DELETE FROM missions WHERE id='root';"
+    let .ok deleted ← execParamQuery store.missionsDb "SELECT mission_id FROM mission_board WHERE mission_id='root';" #[]
+      | throw (IO.userError "board deletion query")
+    check (deleted.size == 1 && !(← write "late" "late" "late").isOk) "Event order 9: delete wins; no orphan or late write"
+  finally closeCoreStore store
+
 def run (root : String) : IO Unit := do
+  missionBoardFixtures root
   legacyBoardArchive root
   let path := root ++ "/tenant-isolation"
   let .ok store ← openCoreStore path | throw (IO.userError "isolation store")
@@ -549,8 +626,38 @@ def run (root : String) : IO Unit := do
     let writtenBoard ← call memberSession "write_project_board" boardText
     check (writtenBoard.fieldBool? "ok" == some true &&
       (writtenBoard.fieldOrNull "result").fieldStr? "updated_by_mission_id" == some "member-mission") "controller writes board"
+    for tool in #["write_project_board", "write_mission_board"] do
+      let args := boardText.setField "idempotency_key" (.str ("receipt-parity-" ++ tool))
+      let first ← call memberSession tool args
+      let receipt := first.fieldOrNull "result"
+      let aid := (receipt.fieldStr? "action_id").getD ""
+      check (!aid.isEmpty && receipt.fieldStr? "state" == some "succeeded" &&
+        receipt.fieldStr? "status" == some "completed" && receipt.fieldStr? "accepted" == some "yes" &&
+        (receipt.fieldOrNull "result").fieldStr? "text" == some "controller plan") s!"{tool} settled receipt shape"
+      let fetched ← call memberSession "get_action" (.obj #[("action_id", .str aid)])
+      let replay ← call memberSession tool args
+      check (first == fetched && first == replay) s!"{tool} first/get_action/retry equality"
+      let foreignReceipt ← call admin "get_action" (.obj #[("action_id", .str aid)])
+      check (foreignReceipt.fieldBool? "ok" == some false &&
+        (foreignReceipt.fieldOrNull "error").fieldStr? "code" == some "not_found" &&
+        !(renderCompact foreignReceipt).contains '🦉') s!"{tool} foreign tenant receipt not_found"
+      let .ok stored ← execParamQuery store.missionsDb
+          "SELECT result FROM mission_board_actions WHERE id=?1;" #[aid]
+        | throw (IO.userError "board receipt query")
+      let raw := (OrbBin.Json.parse (stored[1]![0]?.getD "")).toOption.getD .null
+      check (raw == receipt.fieldOrNull "result" && (raw.field? "action_id").isNone)
+        s!"{tool} stores raw payload"
+    for (bearer, target) in #[(member, "admin-mission"), (admin, "member-mission")] do
+      let (status, denied) ← send "GET" s!"/api/control/missions/{target}/board" bearer .null
+      check (status == 404 && denied.fieldStr? "error" == some "mission_not_found" &&
+        (denied.field? "text").isNone && (denied.field? "updated_at").isNone &&
+        (denied.field? "text_sha256").isNone) "B2_REST_foreign_board_read_zero_oracle"
+      let denied ← call bearer "read_mission_board" (.obj #[("mission_id", .str target)])
+      check (denied.fieldBool? "ok" == some false &&
+        (denied.fieldOrNull "error").fieldStr? "code" == some "not_found" &&
+        (denied.field? "result").isNone) "B2_MCP_foreign_board_read_zero_oracle"
     let .ok () ← upsertMission store {
-      id := "board-reader", ownerUserId := "member", title := "board reader",
+      id := "board-reader", ownerUserId := "member", title := "board reader", parentMissionId := "member-mission",
       status := "awaiting_user", backend := "codex", modelOverride := "", workingDirectory := path,
       project := "member-project", updatedAt := "2026-11-13T10:00:00Z" }
       | throw (IO.userError "board reader fixture")
@@ -563,7 +670,7 @@ def run (root : String) : IO Unit := do
     let oversized : JVal := .obj #[("text", .str (String.ofList (List.replicate 8193 'é')))]
     let tooLarge ← call memberSession "write_project_board" oversized
     check ((tooLarge.fieldOrNull "error").fieldStr? "code" == some "board_too_large") "MCP board byte cap"
-    check ((← send "PUT" "/api/projects/member-project/board" member oversized).1 == 400) "REST board byte cap"
+    check ((← send "PUT" "/api/projects/member-project/board" member oversized).1 == 403) "REST alias refuses user writer"
     for method in #["GET", "PUT"] do
       check ((← send method "/api/projects/admin-project/board" member boardText).1 == 404) "foreign board is not found"
     check ((← send "PUT" "/api/projects/member-project/controller-mission" member
@@ -580,6 +687,10 @@ def run (root : String) : IO Unit := do
     check (createdController.fieldBool? "ok" == some true && !successorId.isEmpty) s!"MCP start_mission accepts controller: {renderCompact createdController}"
     let (_, successorBoard) ← send "GET" "/api/projects/member-project/board" member
     check (successorBoard.fieldStr? "controller_mission_id" == some successorId) "MCP creation nominates controller"
+    let (oldBoardStatus, retainedBoard) ← send "GET" "/api/control/missions/member-mission/board" member .null
+    check (successorBoard.fieldStr? "text" == some "" &&
+      successorBoard.fieldOrNull "updated_at" == .null && oldBoardStatus == 200 &&
+      retainedBoard.fieldStr? "text" == some "controller plan") "B2_controller_replacement_preserves_old_board_new_empty"
     let (restControllerStatus, restController) ← send "POST" "/api/control/missions" member
       (.obj #[("title", .str "REST controller"), ("backend", .str "codex"),
         ("project", .str "member-project"), ("placement", .str "client"), ("controller", .bool true)])
