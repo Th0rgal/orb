@@ -264,7 +264,7 @@ test('split cross-project subtree uses distinct placeholder keys and heals via m
   await expect(tree.getByRole('button',{name:'Show the 2 missions launched by evm.fast'})).toBeVisible();
 });
 
-test('pointer drag-and-drop and right-click Move here on a destination mission row transfer across projects', async ({page}) => {
+test('pointer drag does not move rows; right-click Move here transfers across projects', async ({page}) => {
   const {tree,release,missions}=await setup(page,{crossProject:true});
   release();
   await tree.getByRole('button',{name:'Other',exact:true}).click();
@@ -273,21 +273,23 @@ test('pointer drag-and-drop and right-click Move here on a destination mission r
   const srcBox=(await fredrik.boundingBox())!;
   const dstBox=(await otherHeader.boundingBox())!;
 
+  // Sidebar drag and drop is disabled: a press-and-drag onto another project changes nothing.
   await page.mouse.move(srcBox.x+20,srcBox.y+10);
   await page.mouse.down();
   await page.mouse.move(dstBox.x+20,dstBox.y+10,{steps:5});
-  await expect(tree.locator('.row.project[data-drop-project="other"]')).toHaveClass(/drop-active/);
-  await page.mouse.up();
-
-  await expect.poll(()=>missions().find(m=>m.id===F)?.project).toBe('other');
+  await page.waitForTimeout(600);
   await expect(tree.locator('.row.project.drop-active')).toHaveCount(0);
+  await expect(page.locator('.sidebar-drag-pill')).toHaveCount(0);
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+  expect(missions().find(m=>m.id===F)?.project).toBe('verity');
 
-  // Move Fredrik back to Verity by right-clicking Pareto (a mission row inside Verity) and choosing "Move here".
+  // Right-click Move, then Move here on a mission row inside Other.
   await fredrik.click({button:'right'});
   await page.getByRole('menuitem',{name:'Move',exact:true}).click();
-  await tree.getByRole('button',{name:'Pareto',exact:true}).click({button:'right'});
+  await otherHeader.click({button:'right'});
   await page.getByRole('menuitem',{name:'Move here',exact:true}).click();
-  await expect.poll(()=>missions().find(m=>m.id===F)?.project).toBe('verity');
+  await expect.poll(()=>missions().find(m=>m.id===F)?.project).toBe('other');
 });
 
 test('when system clipboard write is refused, paste prefers the active local cut over a stale system clipboard reference', async ({page}) => {
@@ -403,130 +405,6 @@ test('deleting a parent with unloaded server-side descendants or paused child re
   expect(acknowledged).toEqual([HIDDEN_PAUSED]);
   expect(deleteSearches).toEqual(['','?include_descendants=true','?include_descendants=true']);
   await expect(tree.getByRole('button',{name:'Fredrik',exact:true})).toHaveCount(0);
-});
-
-test('long-press lifts row, spring-loads collapsed project on 450ms dwell, opens Move to picker on hold-release without stealing selection, and moves folders with missions across projects', async ({page}) => {
-  await page.addInitScript(() => {localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
-  let missions:M[]=[
-    {id:P,title:'Pareto',status:'completed',project:'verity',folder:'',placement_revision:1,tags:[],history:[],updated_at:'2026-10-20T09:00:00Z'},
-    {id:F,title:'Fredrik',status:'completed',project:'verity',folder:'',placement_revision:1,tags:[],history:[],updated_at:'2026-10-20T06:00:00Z'},
-    {id:C,title:'Nested Agent',status:'completed',project:'verity',folder:'Specs',placement_revision:1,tags:[],history:[],updated_at:'2026-10-20T05:00:00Z'},
-  ];
-  let dirs:Record<string,Array<{name:string;kind:'file'|'dir'}>>={
-    'verity:':[{name:'Specs',kind:'dir'}],
-    'verity:Specs':[{name:'plan.md',kind:'file'}],
-    'other:':[{name:'Archive',kind:'dir'}],
-    'other:Archive':[],
-  };
-  await page.route('**/api/**',async route=>{
-    const req=route.request(),url=new URL(req.url()),path=url.pathname;
-    if(req.method()==='POST' && path==='/api/control/missions/move') {
-      const body=req.postDataJSON();
-      const rootSet=new Set<string>(body.mission_ids ?? []);
-      const moved:Array<{mission_id:string;project:string;folder:string;placement_revision:number}>=[];
-      missions=missions.map(m=>{
-        const isRoot=rootSet.has(m.id);
-        const isChild=!!m.parent_mission_id && rootSet.has(m.parent_mission_id);
-        if(!isRoot && !isChild) return m;
-        const nextProj=body.project ?? m.project;
-        const nextFolder=isRoot ? (body.folder ?? '') : '';
-        const nextRev=(m.placement_revision ?? 0) + 1;
-        moved.push({mission_id:m.id,project:nextProj,folder:nextFolder,placement_revision:nextRev});
-        return {...m,project:nextProj,folder:nextFolder,placement_revision:nextRev};
-      });
-      return route.fulfill({json:{moved,client_op_id:body.client_op_id}});
-    }
-    if(req.method()==='POST' && path.includes('/file/transfer')) {
-      const parts=path.split('/'),from=parts[3],to=parts[6]??from,body=req.postDataJSON();
-      const fromParent=body.path.includes('/')?body.path.slice(0,body.path.lastIndexOf('/')):'';
-      const base=body.path.includes('/')?body.path.slice(body.path.lastIndexOf('/')+1):body.path;
-      const moved=(dirs[`${from}:${fromParent}`]??[]).find(e=>e.name===base)??{name:base,kind:'dir' as const};
-      dirs[`${from}:${fromParent}`]=(dirs[`${from}:${fromParent}`]??[]).filter(e=>e.name!==base);
-      const toParent=body.destination.includes('/')?body.destination.slice(0,body.destination.lastIndexOf('/')):'';
-      const toBase=body.destination.includes('/')?body.destination.slice(body.destination.lastIndexOf('/')+1):body.destination;
-      dirs[`${to}:${toParent}`]=[...(dirs[`${to}:${toParent}`]??[]),{name:toBase,kind:moved.kind}];
-      if(moved.kind==='dir' && dirs[`${from}:${body.path}`]) {
-        dirs[`${to}:${body.destination}`]=dirs[`${from}:${body.path}`];
-        delete dirs[`${from}:${body.path}`];
-      }
-      return route.fulfill({json:{path:body.destination}});
-    }
-    if(path==='/api/projects') return route.fulfill({json:{projects:[{slug:'verity',title:'Verity'},{slug:'other',title:'Other'}]}});
-    if(path==='/api/control/missions') {
-      const proj=url.searchParams.get('project');
-      return route.fulfill({json:missions.filter(m=>!proj||m.project===proj)});
-    }
-    if(path.startsWith('/api/control/missions/')) {
-      const id=path.split('/')[4];
-      return route.fulfill({json:missions.find(m=>m.id===id)??{}});
-    }
-    const slug=path.split('/')[3];
-    if(path.endsWith('/files')) return route.fulfill({json:{entries:dirs[`${slug}:${url.searchParams.get('path')??''}`]??[]}});
-    if(path.endsWith('/controller')) return route.fulfill({json:{job:null,runs:[]}});
-    return route.fulfill({json:[]});
-  });
-
-  await page.goto('/');
-  await page.getByRole('button',{name:'Verity',exact:true}).click();
-  const tree=page.getByRole('tree',{name:'Projects',exact:true});
-
-  // Open Pareto so Pareto is the committed active conversation.
-  const paretoBtn=tree.getByRole('button',{name:'Pareto',exact:true});
-  await paretoBtn.click();
-  await expect(paretoBtn).toHaveAttribute('aria-current','page');
-
-  // 1. Long-press (>= 260ms) and release in place on unselected Fredrik -> opens searchable Move to Picker
-  //    without navigating away from Pareto, then moves Fredrik into Other / Archive!
-  const fredrikBtn=tree.getByRole('button',{name:'Fredrik',exact:true});
-  const fBox=(await fredrikBtn.boundingBox())!;
-  await page.mouse.move(fBox.x+24,fBox.y+10);
-  await page.mouse.down();
-  await page.waitForTimeout(300);
-  await expect(fredrikBtn).toHaveClass(/drag-source/);
-  await expect(page.locator('.sidebar-drag-pill')).toContainText('Fredrik');
-  await page.mouse.up();
-
-  const picker=page.getByRole('dialog',{name:'Move to'});
-  await expect(picker).toBeVisible();
-  // Pareto remains the committed open mission while Fredrik is transiently highlighted for the picker.
-  await expect(paretoBtn).toHaveAttribute('aria-current','page');
-  await picker.getByRole('combobox').fill('Archive');
-  await picker.getByRole('option',{name:/Archive/}).click();
-  await expect.poll(()=>missions.find(m=>m.id===F)).toMatchObject({project:'other',folder:'Archive'});
-  await expect(paretoBtn).toHaveAttribute('aria-current','page');
-
-  // Collapse Other again so we can test 450ms spring-loaded auto-expand while dragging!
-  const otherBtn=tree.getByRole('button',{name:'Other',exact:true});
-  if((await otherBtn.getAttribute('aria-expanded'))==='true') await otherBtn.click();
-  await expect(otherBtn).toHaveAttribute('aria-expanded','false');
-
-  // 2. Escape during an active drag cancels cleanly without moving.
-  const specsRow=tree.locator('[data-tree-id="pf:verity:Specs"] .row-main');
-  const sBox=(await specsRow.boundingBox())!;
-  const oBox=(await otherBtn.boundingBox())!;
-  await page.mouse.move(sBox.x+24,sBox.y+10);
-  await page.mouse.down();
-  await page.mouse.move(sBox.x+24,sBox.y+30,{steps:4});
-  await page.keyboard.press('Escape');
-  await page.mouse.up();
-  expect(dirs['verity:']?.map(e=>e.name)).toEqual(['Specs']);
-
-  // 3. Dragging folder "Specs" (containing mission "Nested Agent")
-  //    onto collapsed project "Other", dwelling >= 450ms to spring-load expand "Other", and dropping
-  //    moves the folder and nested mission across projects together!
-  await page.mouse.move(sBox.x+24,sBox.y+10);
-  await page.mouse.down();
-  await page.mouse.move(oBox.x+24,oBox.y+10,{steps:6});
-  await expect(tree.locator('.row.project[data-drop-project="other"]')).toHaveClass(/drop-active/);
-  await page.waitForTimeout(500);
-  await expect(otherBtn).toHaveAttribute('aria-expanded','true');
-  // Re-position on Other header in case expansion shifted rows, then drop.
-  const oBoxAfter=(await otherBtn.boundingBox())!;
-  await page.mouse.move(oBoxAfter.x+24,oBoxAfter.y+10);
-  await page.mouse.up();
-
-  await expect.poll(()=>dirs['other:']?.some(e=>e.name==='Specs')).toBe(true);
-  await expect.poll(()=>missions.find(m=>m.id===C)).toMatchObject({project:'other',folder:'Specs'});
 });
 
 test('selecting transcript text while Composer textarea is focused blurs empty Composer selection so Cmd+C copies transcript text', async ({page}) => {
