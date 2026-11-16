@@ -319,6 +319,9 @@ class TurboLeanCompatibilityTests(unittest.TestCase):
         source_stage = dockerfile.split('FROM ubuntu:24.04 AS lean-prebuilt', 1)[0]
         self.assertIn('lean/turbo-lean-revision', source_stage)
         self.assertIn('https://github.com/Th0rgal/turbo-lean.git', source_stage)
+        self.assertIn('https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init', source_stage)
+        self.assertIn('20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c', source_stage)
+        self.assertIn('--default-toolchain 1.93.0', source_stage)
         self.assertIn('cargo build --release --locked', source_stage)
         self.assertIn('/usr/local/bin/turbo-lean', source_stage)
         self.assertNotIn('ORB_ALLOW_RAW_LAKE_FALLBACK', source_stage)
@@ -328,10 +331,21 @@ class TurboLeanCompatibilityTests(unittest.TestCase):
         build_script = managed.split('BUILD_SCRIPT = r\'\'\'', 1)[1].split('\'\'\'', 1)[0]
         self.assertIn('lean/turbo-lean-revision', build_script)
         self.assertIn('https://github.com/Th0rgal/turbo-lean.git', build_script)
+        self.assertIn('https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init', build_script)
+        self.assertIn('20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c', build_script)
+        self.assertIn('--default-toolchain 1.93.0', build_script)
         self.assertIn('cargo build --release --locked', build_script)
         self.assertIn('turbo-lean --version', build_script)
         self.assertNotIn('ORB_ALLOW_RAW_LAKE_FALLBACK', build_script)
         self.assertNotIn('ORB_SKIP_TURBO_LEAN', build_script)
+
+        for label, snippet in (('Dockerfile', source_stage), ('managed_image.py', build_script)):
+            normalized = snippet.replace('\\\n', ' ')
+            for line in normalized.splitlines():
+                if 'apt-get' in line and 'install' in line:
+                    tokens = set(line.split())
+                    self.assertNotIn('cargo', tokens, f'{label} must not install unversioned apt cargo')
+                    self.assertNotIn('rustc', tokens, f'{label} must not install unversioned apt rustc')
 
 
 
