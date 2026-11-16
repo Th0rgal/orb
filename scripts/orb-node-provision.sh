@@ -19,6 +19,9 @@ machine_id=${2:?managed machine id required}
 systemctl stop orb-node.service 2>/dev/null || true
 id orbnode >/dev/null 2>&1 || useradd --system --create-home --home-dir /var/lib/orb-node --shell /bin/bash orbnode
 install -d -m 0750 -o orbnode -g orbnode /var/lib/orb-node /var/lib/orb-node/work
+# The node runs as orbnode. A root-only /etc/resolv.conf (lean.ci image, 15 Nov) leaves it without DNS:
+# every enrolment attempt then fails at once while root curl still works.
+if [ -e /etc/resolv.conf ]; then chmod a+r /etc/resolv.conf || true; fi
 # Name every directory on the node's path: this script runs with umask 077, and
 # some coreutils builds create missing parents with the umask instead of 0755,
 # which leaves /opt/orb closed to orbnode (systemd then fails with 203/EXEC).
