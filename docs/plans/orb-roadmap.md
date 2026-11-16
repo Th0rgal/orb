@@ -173,7 +173,7 @@ same node (then split or restate the node).
 | C5 | lean-ci GitHub App: Administration read/write, installed on `Th0rgal/orb` | — | blocked (Thomas, 5.1) | App installation visible |
 | C6 | Set `ORB_LEAN_RUNNERS=true`; one master run green on lean.ci labels | C4, C5 | blocked | Run URL with lean labels on the jobs |
 | C7 | Measure and record: web-only PR, warm Lean PR, cold full run | C6 | blocked | Three run URLs with timings; targets met or a node opened per miss |
-| C8 | Every Orb binary builds through turbo-lean with no raw-Lake fallback, locally and in CI. **C8a:** `nix/package.nix:220-224` sets `ORB_SKIP_TURBO_LEAN` and `ORB_ALLOW_RAW_LAKE_FALLBACK`, and no workflow builds Nix. **C8b:** `scripts/build_orb_bins.sh:309-315` runs raw Lake silently when turbo-lean is absent | — | wip | `scripts/build_orb_bins.sh` builds all 12 binaries with the fallback variable unset; the Nix build no longer needs either variable |
+| C8 | Every Orb binary builds through turbo-lean with no raw-Lake fallback, locally and in CI. **C8a:** `nix/package.nix:220-224` sets `ORB_SKIP_TURBO_LEAN` and `ORB_ALLOW_RAW_LAKE_FALLBACK`, and no workflow builds Nix. **C8b:** `scripts/build_orb_bins.sh:309-320` fails closed when turbo-lean is absent unless `ORB_ALLOW_RAW_LAKE_FALLBACK=1` (fixed in #1836) | — | wip | `scripts/build_orb_bins.sh` builds all 12 binaries with the fallback variable unset; the Nix build no longer needs either variable |
 | C8c | `scripts/ops/orb-deploy:73-74` builds prod with raw `lake build`: move the deploy host to turbo-lean, or record the deploy build as exempt from C8 | O5 | blocked (Thomas) | The deploy build runs through turbo-lean, or the exemption is written in section 6 |
 
 ### U. LeanUI
