@@ -35,8 +35,19 @@ def run (root : String) : IO Unit := do
       "[managed-bootstrap] machine=vm-1 guest: last"]) "guest output is decoded, redacted and line-prefixed"
   let flood := guestLogLines "vm-1" "" (String.ofList (List.replicate 9000 'x'))
   check (flood.size == 1 && flood.all (·.length < 4100) && (guestLogLines "vm-1" "" "\n\n").isEmpty) "guest output is bounded"
-  check ((guestDiagnosticCommand "https://core.example").splitOn "'https://core.example/api/health'" |>.length |> (· == 2))
-    "diagnostics probe Core's health URL, quoted"
+  let diagnostic := guestDiagnosticCommand "https://core.example"
+  check (diagnostic.contains "core_dns_as_node=" && diagnostic.contains "getent hosts 'core.example'")
+    "as-node DNS probe is present (fails on master: yes)"
+  check (diagnostic.contains "core_http_as_node=" && diagnostic.contains "curl -sS -o /dev/null -m 5 -w '%{http_code}' 'https://core.example/api/health'")
+    "as-node HTTP probe is present with quoted URL (fails on master: yes)"
+  check (diagnostic.contains "core_http_root=" && diagnostic.contains "timeout 11 curl")
+    "root HTTP probe is retained (fails on master: yes)"
+  let quotedDiagnostic := guestDiagnosticCommand "https://core.example/o'hare"
+  check (quotedDiagnostic.contains "getent hosts 'core.example'" &&
+      quotedDiagnostic.contains "'https://core.example/o'\"'\"'hare/api/health'")
+    "as-node DNS host is quoted against a single quote in the URL (fails on master: yes)"
+  check ((diagnostic.splitOn "'https://core.example/api/health'").length == 2)
+    "diagnostics probe Core's health URL, quoted (fails on master: no)"
   let path := s!"{root}/provider-availability.db"
   let .ok mc ← openManagedComputeStore path
     | throw (IO.userError "availability store open failed")
