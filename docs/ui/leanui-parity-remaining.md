@@ -77,3 +77,23 @@ The full local table after both changes is mean mismatch **4.98%**, mean
 above tolerance **2.67%**, SSIM **0.9526**. No variant worsened by 0.1 point;
 the largest local increase was search light 1x at **+0.008 points**. No group
 has newly crossed below 1% yet, so this PR is not mergeable under the U3 rule.
+
+
+### Shared composer control correction
+
+The centered composer was missing the reference's vector controls: project/core
+icons, dropdown chevrons, and the model dropdown indicator. Reusing the existing
+LeanUI icon primitives reduces the following raw mismatch values against the same
+reference set:
+
+| variant | before | after |
+|---|---:|---:|
+| control empty dark 1x | 1.195% | 1.140% |
+| control empty dark 2x | 0.850% | 0.823% |
+| control empty light 1x | 1.192% | 1.137% |
+| control empty light 2x | 0.848% | 0.821% |
+| new mission dark 2x | 1.345% | 1.287% |
+| new mission light 2x | 1.347% | 1.290% |
+
+No variant regressed; the full local mean is 4.96%, SSIM 0.9534, and the
+control empty 2x variants are now under 1%.

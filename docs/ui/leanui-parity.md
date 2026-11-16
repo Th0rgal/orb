@@ -75,14 +75,14 @@ Reference: SolidJS desktop. Candidate: LeanUI. 36 pairs, 0 errors, tolerance 8.
 
 | screen | theme | scale | mismatch % | > tol % | SSIM | sidebar | transcript | composer |
 |---|---|---|---:|---:|---:|---:|---:|---:|
-| 01_control_empty | dark | 1x | 1.19 | 1.07 | 0.9838 | 3.47 / 0.9614 | 0.87 / 0.9863 | 0.00 / 1.0000 |
-| 01_control_empty | dark | 2x | 0.85 | 0.76 | 0.9866 | 2.71 / 0.9636 | 0.57 / 0.9896 | 0.00 / 1.0000 |
-| 01_control_empty | light | 1x | 1.19 | 1.08 | 0.9834 | 3.46 / 0.9612 | 0.87 / 0.9858 | 0.00 / 1.0000 |
-| 01_control_empty | light | 2x | 0.85 | 0.77 | 0.9865 | 2.70 / 0.9638 | 0.57 / 0.9894 | 0.00 / 1.0000 |
-| 02_control_populated | dark | 1x | 1.76 | 1.42 | 0.9819 | 7.23 / 0.9487 | 0.87 / 0.9863 | 0.00 / 1.0000 |
-| 02_control_populated | dark | 2x | 1.34 | 1.16 | 0.9786 | 5.96 / 0.9091 | 0.57 / 0.9896 | 0.00 / 1.0000 |
-| 02_control_populated | light | 1x | 1.77 | 1.44 | 0.9816 | 7.35 / 0.9486 | 0.87 / 0.9858 | 0.00 / 1.0000 |
-| 02_control_populated | light | 2x | 1.34 | 1.16 | 0.9785 | 5.98 / 0.9099 | 0.57 / 0.9894 | 0.00 / 1.0000 |
+| 01_control_empty | dark | 1x | 1.14 | 1.03 | 0.9858 | 3.47 / 0.9614 | 0.80 / 0.9890 | 0.00 / 1.0000 |
+| 01_control_empty | dark | 2x | 0.82 | 0.74 | 0.9879 | 2.71 / 0.9636 | 0.53 / 0.9914 | 0.00 / 1.0000 |
+| 01_control_empty | light | 1x | 1.14 | 1.04 | 0.9855 | 3.46 / 0.9612 | 0.80 / 0.9887 | 0.00 / 1.0000 |
+| 01_control_empty | light | 2x | 0.82 | 0.74 | 0.9878 | 2.70 / 0.9638 | 0.53 / 0.9911 | 0.00 / 1.0000 |
+| 02_control_populated | dark | 1x | 1.70 | 1.38 | 0.9839 | 7.23 / 0.9487 | 0.80 / 0.9890 | 0.00 / 1.0000 |
+| 02_control_populated | dark | 2x | 1.31 | 1.13 | 0.9798 | 5.96 / 0.9091 | 0.53 / 0.9914 | 0.00 / 1.0000 |
+| 02_control_populated | light | 1x | 1.72 | 1.40 | 0.9836 | 7.35 / 0.9486 | 0.80 / 0.9887 | 0.00 / 1.0000 |
+| 02_control_populated | light | 2x | 1.31 | 1.13 | 0.9798 | 5.98 / 0.9099 | 0.53 / 0.9911 | 0.00 / 1.0000 |
 | 03_mission_transcript | dark | 1x | 7.09 | 4.37 | 0.9163 | 8.89 / 0.9175 | 5.76 / 0.9115 | 15.55 / 0.9428 |
 | 03_mission_transcript | dark | 2x | 6.27 | 3.75 | 0.9277 | 7.15 / 0.8914 | 5.08 / 0.9301 | 15.07 / 0.9554 |
 | 03_mission_transcript | light | 1x | 6.24 | 4.79 | 0.9138 | 9.00 / 0.9169 | 5.66 / 0.9086 | 7.22 / 0.9404 |
@@ -103,16 +103,16 @@ Reference: SolidJS desktop. Candidate: LeanUI. 36 pairs, 0 errors, tolerance 8.
 | 07_search_dialog | dark | 2x | 11.04 | 1.26 | 0.9745 | 40.15 / 0.9972 | 6.72 / 0.9652 | 0.07 / 1.0000 |
 | 07_search_dialog | light | 1x | 14.50 | 1.54 | 0.9691 | 47.10 / 0.9964 | 9.96 / 0.9580 | 0.41 / 1.0000 |
 | 07_search_dialog | light | 2x | 14.72 | 1.25 | 0.9744 | 48.99 / 0.9975 | 9.88 / 0.9651 | 0.43 / 1.0000 |
-| 08_new_mission_dialog | dark | 1x | 1.76 | 1.44 | 0.9817 | 7.23 / 0.9487 | 0.88 / 0.9860 | 0.00 / 1.0000 |
-| 08_new_mission_dialog | dark | 2x | 1.34 | 1.17 | 0.9781 | 5.96 / 0.9091 | 0.58 / 0.9890 | 0.00 / 1.0000 |
-| 08_new_mission_dialog | light | 1x | 1.77 | 1.45 | 0.9815 | 7.35 / 0.9486 | 0.87 / 0.9857 | 0.00 / 1.0000 |
-| 08_new_mission_dialog | light | 2x | 1.35 | 1.18 | 0.9781 | 5.98 / 0.9099 | 0.58 / 0.9888 | 0.00 / 1.0000 |
-| 09_toast_notifications | dark | 1x | 6.11 | 2.49 | 0.9574 | 7.23 / 0.9487 | 4.23 / 0.9737 | 20.13 / 0.8438 |
-| 09_toast_notifications | dark | 2x | 5.49 | 2.08 | 0.9589 | 5.96 / 0.9091 | 3.79 / 0.9785 | 19.12 / 0.8824 |
-| 09_toast_notifications | light | 1x | 6.43 | 2.43 | 0.9599 | 7.35 / 0.9486 | 4.23 / 0.9731 | 23.29 / 0.8759 |
-| 09_toast_notifications | light | 2x | 5.84 | 2.00 | 0.9605 | 5.98 / 0.9099 | 3.75 / 0.9781 | 23.04 / 0.9012 |
+| 08_new_mission_dialog | dark | 1x | 1.71 | 1.39 | 0.9839 | 7.23 / 0.9487 | 0.81 / 0.9891 | 0.00 / 1.0000 |
+| 08_new_mission_dialog | dark | 2x | 1.29 | 1.11 | 0.9806 | 5.96 / 0.9091 | 0.50 / 0.9923 | 0.00 / 1.0000 |
+| 08_new_mission_dialog | light | 1x | 1.72 | 1.40 | 0.9837 | 7.35 / 0.9486 | 0.80 / 0.9887 | 0.00 / 1.0000 |
+| 08_new_mission_dialog | light | 2x | 1.29 | 1.12 | 0.9806 | 5.98 / 0.9099 | 0.50 / 0.9922 | 0.00 / 1.0000 |
+| 09_toast_notifications | dark | 1x | 6.06 | 2.44 | 0.9594 | 7.23 / 0.9487 | 4.16 / 0.9765 | 20.13 / 0.8438 |
+| 09_toast_notifications | dark | 2x | 5.46 | 2.05 | 0.9602 | 5.96 / 0.9091 | 3.75 / 0.9802 | 19.12 / 0.8824 |
+| 09_toast_notifications | light | 1x | 6.37 | 2.39 | 0.9619 | 7.35 / 0.9486 | 4.15 / 0.9759 | 23.29 / 0.8759 |
+| 09_toast_notifications | light | 2x | 5.82 | 1.98 | 0.9618 | 5.98 / 0.9099 | 3.72 / 0.9798 | 23.04 / 0.9012 |
 
-Mean over 36 measured pairs: mismatch 4.98 %, above tolerance 2.67 %, SSIM 0.9526 (min 0.8624, max 0.9866).
+Mean over 36 measured pairs: mismatch 4.96 %, above tolerance 2.65 %, SSIM 0.9534 (min 0.8624, max 0.9879).
 
 Determinism (each renderer compared with a second capture of itself):
 
