@@ -475,6 +475,88 @@ class DeployGateTests(unittest.TestCase):
             self.assertEqual((rel_bin / "sandboxed-mcp").read_text(), "prev-sandboxed-mcp\n")
             self.assertEqual((rel_bin / "orb-privd").read_text(), "prev-orb-privd\n")
 
+    def test_plain_deploy_exact_master_parity_on_stale_catalog_new(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            targets = self._seed_existing_targets(root)
+            # Pre-seed a non-empty stale $CATALOG.new directory: on master, `cp -a $TREE/catalog $CATALOG.new`
+            # copies into the existing directory, causing `mv $CATALOG.new $CATALOG` or subsequent behavior
+            # to match master's exact plain path (never running `rm -rf $CATALOG.new` or installing the
+            # rollout EXIT trap when `ROLLOUT_NODES == 0`).
+            stale_cat_new = root / f"usr/local/share/orb/releases/{SHA}/catalog.new/catalog"
+            stale_cat_new.mkdir(parents=True, exist_ok=True)
+            (stale_cat_new / "marker").write_text("busy\n")
+
+            script = (Path(__file__).parent / "ops/orb-deploy").read_text()
+            for prefix in ("/usr/local", "/etc/systemd", "/run/lock"):
+                script = script.replace(prefix, str(root) + prefix)
+            fake_script = root / "orb-deploy-test"
+            fake_script.write_text(script)
+            fake_script.chmod(0o755)
+
+            tree = root / "tree"
+            (tree / "lean/OrbCore/.lake/build/bin").mkdir(parents=True, exist_ok=True)
+            (tree / "lean/OrbNode/.lake/build/bin").mkdir(parents=True, exist_ok=True)
+            (tree / "catalog/snapshots").mkdir(parents=True, exist_ok=True)
+            (tree / "scripts/ops").mkdir(parents=True, exist_ok=True)
+            (tree / "catalog/providers.json").write_text("{}\n")
+            for rel, content in {
+                "lean/OrbCore/.lake/build/bin/orb-core": "new-orb-core\n",
+                "lean/OrbCore/.lake/build/bin/orb-core-test": "#!/bin/sh\necho ok\n",
+                "lean/OrbNode/.lake/build/bin/orb-node": "new-orb-node\n",
+                "lean/OrbNode/.lake/build/bin/orb-node-test": "#!/bin/sh\necho ok\n",
+                "scripts/orb-node-provision.sh": "new-provision\n",
+                "scripts/ops/orb-monitor": "new-orb-monitor\n",
+                "scripts/ops/orb-sidecar-guard": "new-orb-sidecar-guard\n",
+                "scripts/ops/orb-dev-autodeploy": "new-orb-dev-autodeploy\n",
+                "scripts/ops/orb-env": "new-orb-env\n",
+                "scripts/ops/env-migration.json": '{"new": true}\n',
+            }.items():
+                target = tree / rel
+                target.write_text(content)
+                if "test" in rel:
+                    target.chmod(0o755)
+
+            bin_dir = root / "fake-bin"
+            bin_dir.mkdir(exist_ok=True)
+            (root / "run/lock").mkdir(parents=True, exist_ok=True)
+            stubs = {
+                "pgrep": "#!/bin/sh\nexit 1\n",
+                "git": f'#!/bin/sh\nif [ "$1" = "rev-parse" ]; then echo "{SHA}"; fi\nexit 0\n',
+                "lake": "#!/bin/sh\necho built\n",
+                "systemctl": '#!/bin/sh\nif [ "$1" = "restart" ] && [ "$2" = "sandboxed-sh-dev" ]; then exit 1; fi\nexit 0\n',
+                "sleep": "#!/bin/sh\nexit 0\n",
+                "date": '#!/bin/sh\necho "20261115T120000Z"\n',
+                "curl": f'#!/bin/sh\nprintf "%s" \'{{"status":"ok","build":"{SHA}"}}\'\n',
+            }
+            for name, body in stubs.items():
+                p = bin_dir / name
+                p.write_text(body)
+                p.chmod(0o755)
+
+            env = {
+                **os.environ,
+                "ORB_DEPLOY_TREE": str(tree),
+                "ORB_DEPLOY_LOG": str(root / "deploy.log"),
+                "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            }
+            res = subprocess.run(
+                ["bash", str(fake_script), SHA],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(res.returncode, 0)
+            # Stale $CATALOG.new was NOT rm -rf'd before cp -a on the plain path:
+            self.assertTrue((root / f"usr/local/share/orb/releases/{SHA}/catalog/catalog/marker").is_file())
+            # No EXIT trap ran on the plain path (exact master parity):
+            self.assertEqual((root / "usr/local/lib/orb/orb-node-provision.sh").read_text(), "new-provision\n")
+            self.assertEqual((root / "usr/local/bin/sandboxed-mcp").read_text(), targets["usr/local/bin/sandboxed-mcp"][0])
+            self.assertEqual((root / "usr/local/sbin/orb-privd").read_text(), targets["usr/local/sbin/orb-privd"][0])
+            self.assertFalse((root / f"usr/local/share/orb/releases/{SHA}/bin").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
