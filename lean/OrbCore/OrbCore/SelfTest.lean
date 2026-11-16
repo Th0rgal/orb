@@ -6445,14 +6445,18 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
 
   -- Verify `GET /api/remote-nodes` includes static fleet nodes, flattened heartbeat fields,
   -- `enabled: true`, `remote_launch.typed: true`, and persisted `node_state.json` cordons.
+  let .ok fleetMember ← createUserRecord store "fleet-reader" "fleet-reader-passphrase-1234" "member" none none "t"
+    | return (← fail "remote-nodes member fixture failed")
+  let fleetMemberToken := mintSessionTokenV2 jwtSec fleetMember.id fleetMember.role fleetMember.sessionEpoch (nowSec + 600)
   let .ok (mockHbFd, mockHbPort) ← tcpListen "127.0.0.1" 0 8
     | return (← fail "tcpListen mockHbFd failed")
   let hbTask ← IO.asTask (prio := .dedicated) do
-    for _ in [0:2] do
+    for _ in [0:4] do
       if let .ok cfd ← tcpAcceptPoll mockHbFd 3000 then
         discard <| readCoreHttpRequestFromFd cfd 1000
         let hbJson :=
-          "{\"version\":\"1.3.0-lean4\",\"protocol_version\":2,\"capacity_total\":10,\"capacity_available\":9," ++
+          "{\"build\":\"fleet-build-secret\",\"build_sha\":\"fleet-sha-secret\",\"binary_sha256\":{\"sandboxed-node\":\"fleet-digest-secret\"}," ++
+          "\"version\":\"1.3.0-lean4\",\"protocol_version\":2,\"capacity_total\":10,\"capacity_available\":9," ++
           "\"active_leases\":1,\"active_jobs\":1,\"queued_jobs\":0,\"cpu_total\":8," ++
           "\"mem_total_bytes\":68719476736,\"mem_available_bytes\":51539607552," ++
           "\"disk_total_bytes\":500000000000,\"disk_available_bytes\":400000000000," ++
@@ -6469,6 +6473,14 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
   OrbBin.PosixExt.setenvVar "ORB_TEST_ASHUR_TOK" "tok-ashur-1"
   OrbBin.PosixExt.setenvVar "ORB_TEST_SEPOLIA_TOK" "tok-sepolia-1"
   let (rnSt, rnBody) ← sendJson "GET" "/api/remote-nodes" hsJwt ""
+  let (memberFleetSt, memberFleetBody) ← sendJson "GET" "/api/remote-nodes" fleetMemberToken ""
+  -- Real parsed/authenticated request through dispatchCoreRequest; both flat
+  -- metadata and the nested heartbeat must be redacted, with an admin control.
+  let fleetMetadata := #["build_sha", "binary_sha256", "fleet-build-secret", "fleet-sha-secret", "fleet-digest-secret"]
+  if memberFleetSt != 200 || (memberFleetBody.splitOn "\"id\":\"ashur\"").length < 2 ||
+      fleetMetadata.any (fun key => (memberFleetBody.splitOn key).length > 1) ||
+      !fleetMetadata.all (fun key => (rnBody.splitOn key).length > 1) then
+    return (← fail s!"remote_nodes_member_request_redacts_build_metadata: admin={rnSt}:{rnBody} member={memberFleetSt}:{memberFleetBody}")
   let (cordonSt, cordonBody) ← sendJson "POST" "/api/nodes/ashur/cordon" hsJwt "{}"
   let (uncordonSt, uncordonBody) ← sendJson "POST" "/api/nodes/sepolia/uncordon" hsJwt "{}"
   OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODES_ENABLED"
