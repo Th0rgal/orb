@@ -307,10 +307,15 @@ run_lean_pkg_build() {
         LEAN_NUM_THREADS=1 SANDBOXED_ALLOW_RAW_LAKE=1 lake build "$@" -- -DwarningAsError=true
       fi
     else
-      if command -v turbo-lean >/dev/null 2>&1 && [[ "${ORB_ALLOW_RAW_LAKE_FALLBACK:-0}" != "1" ]]; then
-        echo "error: ORB_SKIP_TURBO_LEAN requires ORB_ALLOW_RAW_LAKE_FALLBACK=1 when turbo-lean is installed" >&2
+      local fallback_reason="turbo-lean not found on PATH"
+      if [[ "${ORB_SKIP_TURBO_LEAN:-0}" == "1" ]]; then
+        fallback_reason="ORB_SKIP_TURBO_LEAN=1"
+      fi
+      if [[ "${ORB_ALLOW_RAW_LAKE_FALLBACK:-0}" != "1" ]]; then
+        echo "error: ${fallback_reason} in ${pkg_dir##*/}; raw Lake fallback requires ORB_ALLOW_RAW_LAKE_FALLBACK=1" >&2
         exit 1
       fi
+      echo "WARNING: ${fallback_reason} in ${pkg_dir##*/}; explicitly allowed uncached raw lake build" >&2
       LEAN_NUM_THREADS=1 SANDBOXED_ALLOW_RAW_LAKE=1 lake build "$@" -- -DwarningAsError=true
     fi
   )

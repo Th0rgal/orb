@@ -25,7 +25,8 @@ class BuildOrbBinsTests(unittest.TestCase):
         self.bin.mkdir()
         self.env = {"PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.root / "home"),
                     "FIXTURE_ROOT": str(self.root), "MOCK_ARCH": "x86_64",
-                    "MOCK_ELF_ARCH": "62", "ORB_SKIP_TURBO_LEAN": "1"}
+                    "MOCK_ELF_ARCH": "62", "ORB_SKIP_TURBO_LEAN": "1",
+                    "ORB_ALLOW_RAW_LAKE_FALLBACK": "1"}
         self.write("uname", '#!/bin/sh\ncase "$1" in -m) echo "$MOCK_ARCH";; *) echo Linux;; esac\n')
         self.write("nm", "#!/bin/sh\nexit 0\n")
         self.write("lake", '''#!/usr/bin/python3
@@ -287,8 +288,32 @@ class TurboLeanCompatibilityTests(unittest.TestCase):
     def test_skip_does_not_silently_bypass_installed_turbo(self):
         result = self.build('--only', 'sandboxed-mcp', ORB_SKIP_TURBO_LEAN='1')
         self.assertNotEqual(result.returncode, 0)
+        self.assertIn('ORB_SKIP_TURBO_LEAN=1', result.stderr)
         self.assertIn('ORB_ALLOW_RAW_LAKE_FALLBACK=1', result.stderr)
         self.assertFalse(self.log.exists())
+        allowed = self.build('--only', 'sandboxed-mcp', ORB_SKIP_TURBO_LEAN='1', ORB_ALLOW_RAW_LAKE_FALLBACK='1')
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        self.assertIn('WARNING:', allowed.stderr)
+        self.assertIn('ORB_SKIP_TURBO_LEAN=1', allowed.stderr)
+        self.assertEqual(len([c for c in self.calls() if c['tool'] == 'lake']), 1)
+
+    def test_missing_turbo_lean_requires_explicit_raw_lake_fallback(self):
+        (self.bin / 'turbo-lean').unlink()
+        with self.subTest(fallback='unset'):
+            result = self.build('--only', 'sandboxed-mcp')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('turbo-lean', result.stderr)
+            self.assertIn('ORB_ALLOW_RAW_LAKE_FALLBACK=1', result.stderr)
+            self.assertFalse(self.log.exists())
+        with self.subTest(fallback='allowed'):
+            result = self.build('--only', 'sandboxed-mcp', ORB_ALLOW_RAW_LAKE_FALLBACK='1')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('WARNING:', result.stderr)
+            self.assertIn('turbo-lean', result.stderr)
+            raw = [c for c in self.calls() if c['tool'] == 'lake']
+            self.assertEqual(len(raw), 1)
+            self.assertIn('-DwarningAsError=true', raw[0]['args'])
+
 
 
 if __name__ == '__main__':
