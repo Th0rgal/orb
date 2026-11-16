@@ -474,11 +474,10 @@ def run (root : String) : IO Unit := do
       check (status == 200) s!"MCP transport {tool}"
       return doc
     let configured := { st with cfg := { st.cfg with usersJson := "{\"member\":\"configured-member-password-123\"}" } }
-    let (legacyStatus, legacyMe) ← send "GET" "/api/auth/me" "configured-member-password-123" (.obj #[]) configured
-    check (legacyStatus == 200 && (legacyMe.fieldOrNull "user").fieldStr? "id" == some "member" &&
-      (legacyMe.fieldOrNull "user").fieldStr? "role" == some "member") "configured raw password never becomes bootstrap admin"
+    let (legacyStatus, _) ← send "GET" "/api/auth/me" "configured-member-password-123" (.obj #[]) configured
+    check (legacyStatus == 401) "configured raw password as bearer is rejected (SEC-02)"
     let (legacyForeign, _) ← send "GET" "/api/control/missions/admin-mission" "configured-member-password-123" (.obj #[]) configured
-    check (legacyForeign == 404) "configured password retains REST tenant confinement"
+    check (legacyForeign == 401) "configured raw password bearer rejected on REST"
     let ambiguous := { configured with cfg := { configured.cfg with
       usersJson := "{\"admin\":\"configured-member-password-123\",\"member\":\"configured-member-password-123\"}" } }
     check ((← send "GET" "/api/auth/me" "configured-member-password-123" (.obj #[]) ambiguous).1 == 401)

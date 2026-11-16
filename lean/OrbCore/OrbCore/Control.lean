@@ -442,11 +442,19 @@ def authenticateHttpBearer (cfg : CoreConfig) (hdrs : Array (String × String)) 
     match extractBearerToken? hdrs nowEpochSec with
     | none => false
     | some tok =>
-      (verifyAnySessionTokenExp? (effectiveJwtSecret cfg) tok nowEpochSec).isSome ||
-      verifyLoginCredentials cfg none tok
+      (verifyAnySessionTokenExp? (effectiveJwtSecret cfg) tok nowEpochSec).isSome
+
+private def isSingleTenantLegacySubject (cfg : CoreConfig) (jwtSub jwtUser : String) : Bool :=
+  let sub := jwtSub.trimAscii.toString
+  let usr := jwtUser.trimAscii.toString
+  let cfgSub := if cfg.devMode then "dev" else "default"
+  let subOk := sub == "prod" || sub == "default" || sub == "dev" || sub == "admin" || sub == cfgSub || sub == cfg.instanceName
+  let usrOk := usr.isEmpty || usr == "admin" || usr == sub
+  subOk && usrOk
 
 /-- Resolve `CallerPrincipal` against `users` (`orb-jwt-v2` live session epoch + `!disabled` check
-    via `Orb.Kernel.multiuserRbacStep`, or bootstrap-admin / legacy unscoped fallback). -/
+    via `Orb.Kernel.multiuserRbacStep`, or verified single-tenant legacy token; never falls back
+    to bootstrap admin on a failed lookup or raw password bearer). -/
 def resolveCallerPrincipal?
     (st : CoreAppState)
     (hdrs : Array (String × String))
@@ -482,53 +490,77 @@ def resolveCallerPrincipal?
     if tok.startsWith "eyJ" then
       let some (jwtSub, jwtUser, _exp) := verifyHs256Jwt? sec tok nowEpochSec
         | return none
-      let multiUsers : Bool ← do
-        match ← execParamQuery st.store.missionsDb "SELECT COUNT(*) FROM users WHERE disabled=0;" #[] with
-        | .ok rows => pure (decide (((((rows[1]?.bind (·[0]?)).bind String.toNat?).getD 0) > 1)))
-        | .error _ => pure false
-      let singleTenantUnscoped := !multiUsers && (parseConfiguredUsers st.cfg.usersJson).isEmpty
+      let (activeUsers, totalUsers) ← do
+        match ← execParamQuery st.store.missionsDb
+            "SELECT COALESCE(SUM(CASE WHEN disabled=0 THEN 1 ELSE 0 END),0), COUNT(*) FROM users;" #[] with
+        | .ok rows =>
+          let act := ((rows[1]?.bind (·[0]?)).bind String.toNat?).getD 0
+          let tot := ((rows[1]?.bind (·[1]?)).bind String.toNat?).getD 0
+          pure (act, tot)
+        | .error _ => pure (0, 0)
+      let singleTenantUnscoped := activeUsers ≤ 1 && (parseConfiguredUsers st.cfg.usersJson).isEmpty
       if let some u ← getUserById? st.store jwtSub then
         if u.disabled then return none
         return some (CallerPrincipal.ofUserRecord u singleTenantUnscoped)
-      if let some adm ← getBootstrapAdmin? st.store then
-        if adm.disabled then return none
-        -- This verified legacy token is the administrator: rows it stored under its old subject
-        -- become the administrator's, so the owner's existing sessions stay the owner's.
-        adoptLegacyOwnerAlias st.store jwtSub adm.id
-        return some (CallerPrincipal.ofUserRecord adm singleTenantUnscoped)
-      return some {
-        userId           := jwtSub
-        username         := if jwtUser.isEmpty then "admin" else jwtUser
-        role             := "admin"
-        unixUsername?    := none
-        sessionEpoch     := 1
-        disabled         := false
-        dailySpendCapCents? := none
-        isLegacyUnscoped := singleTenantUnscoped
-      }
-  if !authenticateHttpBearer st.cfg hdrs nowEpochSec &&
-     !(allowWsSubproto && authenticateConsoleWsUpgrade st.cfg hdrs nowEpochSec) then
-    return none
-  -- Legacy configured passwords must resolve to their own stored user. The
-  -- boolean login check authenticates any configured account, not just admin.
-  -- Ambiguous/missing users fail closed instead of becoming bootstrap admin.
-  if !st.cfg.devMode then
-    if let some token := rawTok? then
-      let dashboardMatch := !st.cfg.dashboardPassword.isEmpty &&
-        ctEqSlice (ByteSlice.ofString token) (ByteSlice.ofString st.cfg.dashboardPassword)
-      if !dashboardMatch && (verifyAnySessionTokenExp? sec token nowEpochSec).isNone then
-        let credentialMatches := (parseConfiguredUsers st.cfg.usersJson).filter (fun (_, password) =>
-          ctEqSlice (ByteSlice.ofString token) (ByteSlice.ofString password))
-        unless credentialMatches.size == 1 do return none
-        let some user ← getUserByUsername? st.store credentialMatches[0]!.1 | return none
-        if user.disabled then return none
-        return some (CallerPrincipal.ofUserRecord user false)
-  if !st.bootstrapAdminId.isEmpty then
-    if let some adm ← getUserById? st.store st.bootstrapAdminId then
-      if !adm.disabled then
+      if singleTenantUnscoped && isSingleTenantLegacySubject st.cfg jwtSub jwtUser then
+        if let some adm ← getBootstrapAdmin? st.store then
+          if adm.disabled || adm.role != "admin" then return none
+          adoptLegacyOwnerAlias st.store jwtSub adm.id
+          return some (CallerPrincipal.ofUserRecord adm true)
+        if totalUsers == 0 then
+          return some {
+            userId           := jwtSub
+            username         := if jwtUser.isEmpty then "admin" else jwtUser
+            role             := "admin"
+            unixUsername?    := none
+            sessionEpoch     := 1
+            disabled         := false
+            dailySpendCapCents? := none
+            isLegacyUnscoped := true
+          }
+      return none
+    if tok.startsWith "orb-jwt-v1:" then
+      let some _ := verifySessionToken sec tok nowEpochSec
+        | return none
+      let (activeUsers, totalUsers) ← do
+        match ← execParamQuery st.store.missionsDb
+            "SELECT COALESCE(SUM(CASE WHEN disabled=0 THEN 1 ELSE 0 END),0), COUNT(*) FROM users;" #[] with
+        | .ok rows =>
+          let act := ((rows[1]?.bind (·[0]?)).bind String.toNat?).getD 0
+          let tot := ((rows[1]?.bind (·[1]?)).bind String.toNat?).getD 0
+          pure (act, tot)
+        | .error _ => pure (0, 0)
+      if activeUsers > 1 then return none
+      let singleTenantUnscoped := (parseConfiguredUsers st.cfg.usersJson).isEmpty
+      if !st.bootstrapAdminId.isEmpty then
+        let some adm ← getUserById? st.store st.bootstrapAdminId | return none
+        if adm.disabled || adm.role != "admin" then return none
         return some (CallerPrincipal.ofUserRecord adm false)
+      if let some adm ← getBootstrapAdmin? st.store then
+        if adm.disabled || adm.role != "admin" then return none
+        return some (CallerPrincipal.ofUserRecord adm singleTenantUnscoped)
+      if totalUsers == 0 then
+        return some {
+          userId           := ""
+          username         := "admin"
+          role             := "admin"
+          unixUsername?    := none
+          sessionEpoch     := 1
+          disabled         := false
+          dailySpendCapCents? := none
+          isLegacyUnscoped := true
+        }
+      return none
+    return none
+  if !st.cfg.devMode then
+    return none
+  if !st.bootstrapAdminId.isEmpty then
+    let some adm ← getUserById? st.store st.bootstrapAdminId | return none
+    if adm.disabled || adm.role != "admin" then return none
+    return some (CallerPrincipal.ofUserRecord adm false)
   if let some adm ← getBootstrapAdmin? st.store then
-    return some (CallerPrincipal.ofUserRecord adm (st.bootstrapAdminId.isEmpty))
+    if adm.disabled || adm.role != "admin" then return none
+    return some (CallerPrincipal.ofUserRecord adm true)
   return some {
     userId           := ""
     username         := "admin"
@@ -548,20 +580,14 @@ def authenticateProxyRequest (st : CoreAppState) (hdrs : Array (String × String
     if !st.cfg.proxySecret.isEmpty &&
        ctEqSlice (ByteSlice.ofString pTok) (ByteSlice.ofString st.cfg.proxySecret) then
       return true
-    if pTok.startsWith "orb-jwt-v2:" then
-      let sec := effectiveJwtSecret st.cfg
-      if let some (uid, _, tokEp, _) := verifySessionTokenV2 sec pTok nowEpochSec then
-        if let some u ← getUserById? st.store uid then
-          return !u.disabled && u.sessionEpoch == tokEp
-      return false
-    if pTok.startsWith "eyJ" then
-      return (verifyHs256Jwt? (effectiveJwtSecret st.cfg) pTok nowEpochSec).isSome
+    if pTok.startsWith "orb-jwt-v2:" || pTok.startsWith "eyJ" then
+      let synthHdrs := #[("Authorization", s!"Bearer {pTok}")]
+      return (← resolveCallerPrincipal? st synthHdrs nowEpochSec).isSome
     if (← verifyProxyApiKeyFile st.store.rootDir pTok (formatEpochIso8601Utc nowEpochSec)) then
       return true
-    if st.cfg.proxySecret.isEmpty &&
-       ((verifySessionToken (effectiveJwtSecret st.cfg) pTok nowEpochSec).isSome ||
-        verifyLoginCredentials st.cfg none pTok) then
-      return true
+    if st.cfg.proxySecret.isEmpty && pTok.startsWith "orb-jwt-v1:" then
+      let synthHdrs := #[("Authorization", s!"Bearer {pTok}")]
+      return (← resolveCallerPrincipal? st synthHdrs nowEpochSec).isSome
     return false
   if !st.cfg.proxySecret.isEmpty then
     return false
