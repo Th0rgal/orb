@@ -50,6 +50,23 @@ class OrbEnvTest(unittest.TestCase):
         with self.assertRaisesRegex(env.InvalidConfig, "duplicate ownership"):
             env.migration_policy(bad, {}, {})
 
+    def test_managed_default_provider_is_accepted_by_check(self):
+        base = {"SANDBOXED_MANAGED_DEFAULT_PROVIDER": "leanci"}
+        overlay = {"ORB_INSTANCE": "dev", "PORT": "3002", "WORKING_DIR": "/var/lib/dev",
+                   "JWT_SECRET": "dev-secret"}
+        env.check(base, overlay)
+
+    def test_managed_default_provider_lands_in_shared_base_via_migration(self):
+        self.prod.write_bytes(self.prod.read_bytes() + b"SANDBOXED_MANAGED_DEFAULT_PROVIDER=leanci\n")
+        self.dev.write_bytes(self.dev.read_bytes() + b"SANDBOXED_MANAGED_DEFAULT_PROVIDER=leanci\n")
+        env.migrate(self.prod, self.dev, self.output, apply=True)
+        base = env.parse_env((self.output / "core.env").read_bytes())
+        prod = env.parse_env((self.output / "prod.env").read_bytes())
+        dev = env.parse_env((self.output / "dev.env").read_bytes())
+        self.assertEqual(base["SANDBOXED_MANAGED_DEFAULT_PROVIDER"], "leanci")
+        self.assertNotIn("SANDBOXED_MANAGED_DEFAULT_PROVIDER", prod)
+        self.assertNotIn("SANDBOXED_MANAGED_DEFAULT_PROVIDER", dev)
+
     def test_observed_named_groups_stay_instance_owned(self):
         dev_only = "AUTOMATION_MANAGER_MCP_BIN CODEX_APP_SERVER_MODE LIBRARY_PATH OPENAGENT_DATA_DIR RUST_MIN_STACK SANDBOXED_MANAGED_ENABLED SANDBOXED_PROXY_SECRET SANDBOXED_SH_RTK_ENABLED SCOPE_REAPER_ENABLED WORKING_DIR".split()
         different = "BROWSER_ENABLED DASHBOARD_PASSWORD DEFAULT_MODEL JWT_SECRET PORT SANDBOXED_MANAGED_REAPER_DRY_RUN SANDBOXED_PUBLIC_URL SANDBOXED_REMOTE_NODES SANDBOXED_REMOTE_NODE_SEPOLIA_TOKEN SANDBOXED_SH_OPENCODE_DEFAULT_MODEL SANDBOXED_SINGLE_TENANT_USER_ID".split()
