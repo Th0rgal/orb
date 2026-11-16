@@ -99,9 +99,11 @@ class DeployGateTests(unittest.TestCase):
         dev_only: bool = False,
         rollout_nodes: bool = False,
         fail_command: str = "",
+        script_text=None,
+        rollout_program=None,
     ):
         import os
-        script = (Path(__file__).parent / "ops/orb-deploy").read_text()
+        script = script_text or (Path(__file__).parent / "ops/orb-deploy").read_text()
         for prefix in ("/usr/local", "/etc/systemd", "/run/lock"):
             script = script.replace(prefix, str(root) + prefix)
         fake_script = root / "orb-deploy-test"
@@ -116,7 +118,7 @@ class DeployGateTests(unittest.TestCase):
         (tree / "scripts/ops").mkdir(parents=True, exist_ok=True)
         (tree / "catalog/providers.json").write_text("{}\n")
         (tree / "scripts/rolling_upgrade_nodes.py").write_text(
-            "import sys, json\nprint(json.dumps({'rollout_argv': sys.argv[1:]}))\n"
+            rollout_program or "import sys, json\nprint(json.dumps({'rollout_argv': sys.argv[1:]}))\n"
         )
         for rel, content in {
             "lean/OrbCore/.lake/build/bin/orb-core": "new-orb-core\n",
@@ -191,7 +193,48 @@ class DeployGateTests(unittest.TestCase):
             args = [SHA, "--rollout-nodes"]
         else:
             args = [SHA]
-        return subprocess.run(["bash", str(fake_script), *args], env=env, capture_output=True, text=True)
+        return subprocess.run(["bash", "-x", str(fake_script), *args], env=env, capture_output=True, text=True)
+
+    def test_rollout_inherits_real_lock_without_self_contention(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._seed_existing_targets(root)
+            module = str(Path(__file__).parent.resolve())
+            program = f'''import os, sys
+sys.path.insert(0, {module!r})
+import rolling_upgrade_nodes as r
+from unittest.mock import patch
+class Api:
+    def list_nodes(self): return []
+class Ops:
+    def recover_remote(self, node): return {{'healthy': False}}
+with patch.object(r, 'discover_local_core_auth', return_value=('http://fake', 'fake')), patch.object(r, 'HttpCoreApi', return_value=Api()), patch.object(r, 'SshNodeOps', return_value=Ops()):
+    sys.exit(r.main(['--recover-node', 'fake', '--lock-file', {str(root / 'run/lock/orb-deploy.lock')!r}]))
+'''
+            result = self._run_staged_deploy(root, rollout_nodes=True, rollout_program=program)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_plain_deploy_executed_commands_match_master(self):
+        import tempfile
+        import re
+        master = subprocess.check_output(["git", "show", "7cac2c92f902:scripts/ops/orb-deploy"], text=True)
+        traces = []
+        for version in (master, None):
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                self._seed_existing_targets(root)
+                result = self._run_staged_deploy(root, script_text=version)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                # Only actual external commands; shell flag parsing and tests
+                # differ because the PR adds opt-in modes.
+                commands = []
+                for line in result.stderr.splitlines():
+                    line = re.sub(r'^\++ ', '', line).replace(temp, '<ROOT>')
+                    if re.match(r'^(git |lake |install |cp |mv |rm |systemctl |curl |python3 |flock |mkdir |ls |tail |xargs |sha256sum )', line):
+                        commands.append(line)
+                traces.append(sorted(commands))
+        self.assertEqual(traces[0], traces[1])
 
     def _seed_existing_targets(self, root: Path):
         targets = {
