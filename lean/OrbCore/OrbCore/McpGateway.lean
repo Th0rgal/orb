@@ -216,16 +216,26 @@ private def recordSettledMcpAction
     | return .error "mcp_action_record_failed"
   return .ok enriched
 
-private def failReservedMcpAction
-    (store : CoreStore) (claims : McpSessionClaims) (callerUserId toolName key message nowIso : String) : IO String := do
+private def settleReservedMcpAction
+    (store : CoreStore) (claims : McpSessionClaims) (callerUserId toolName key state message nowIso : String) : IO String := do
   let scope := actionScope claims callerUserId toolName
+  let accepted := if state == "uncertain" then "unknown" else "no"
   let payload := renderCompact (.obj #[
-    ("error", .str message), ("accepted", .str "no"), ("retryable", .bool false)])
+    ("error", .str message), ("accepted", .str accepted), ("retryable", .bool (state == "failed"))])
   let .ok _ ← execParamQuery store.projectsDb
-      "UPDATE mcp_actions_v1 SET state='failed',result=?3,updated_at=?4 WHERE scope=?1 AND retry_key=?2;"
-      #[scope, key, payload, nowIso]
-    | return mcpErr "receipt_record_failed" "The mutation failed and its error receipt could not be recorded." false
-  return mcpErr "mutation_failed" message false
+      "UPDATE mcp_actions_v1 SET state=?3,result=?4,updated_at=?5 WHERE scope=?1 AND retry_key=?2 AND state='accepted';"
+      #[scope, key, state, payload, nowIso]
+    | return mcpErr "receipt_record_failed" "The mutation outcome could not be recorded." false
+  return mcpErr "mutation_failed" message (state == "failed")
+
+def fenceInterrupted (store : CoreStore) : IO (Except String Unit) := do
+  let now := formatEpochIso8601Utc (← coreEpochSec)
+  match ← execParamQuery store.projectsDb
+      ("UPDATE mcp_actions_v1 SET state='uncertain',result=?1,updated_at=?2 " ++
+       "WHERE tool<>'spawn_managed_machine' AND state IN ('accepted','running');")
+      #[renderCompact (.obj #[("error", .str "core_restarted_during_mcp_action")]), now] with
+  | .error _ => return .error "mcp_action_recovery_failed"
+  | .ok _ => return .ok ()
 
 /-- Only persisted external sessions carry an authenticated user independently of a mission.
     Roles are deliberately not used here: external roles and mission-session roles are
@@ -572,7 +582,9 @@ def dispatchMcpToolCall
 
   -- Idempotent replay for retried mutating MCP calls carrying `idempotency_key`
   let idemKeyTop := ((args.fieldStr? "idempotency_key").getD "").trimAscii.toString
-  if OrbBin.McpCatalog.isMutatingControlTool toolName && !idemKeyTop.isEmpty && toolName != "get_action" && toolName != "wait_actions" &&
+  let receiptTools := #["schedule_wakeup", "schedule_job_wakeup", "start_mission", "send_message_to_mission",
+    "answer_mission_question", "cancel_mission", "acknowledge_mission", "adopt_mission", "resume_mission"]
+  if receiptTools.contains toolName && !idemKeyTop.isEmpty && toolName != "get_action" && toolName != "wait_actions" &&
       toolName != "reconcile_action" && toolName != "cancel_action" &&
       toolName != "write_project_board" && toolName != "write_mission_board" &&
       toolName != "spawn_managed_machine" then
@@ -667,8 +679,9 @@ def dispatchMcpToolCall
       let curSt := (rec.fieldStr? "state").getD "succeeded"
       let cancelled := curSt == "queued" || curSt == "pending"
       if cancelled then
-        discard <| execParamQuery store.projectsDb
+        let .ok _ ← execParamQuery store.projectsDb
           "UPDATE mcp_actions_v1 SET state='cancelled', updated_at=?2 WHERE id=?1;" #[aid, nowIso]
+          | return mcpErr "cancel_failed" "action receipt update failed" false
       return mcpOk (.obj #[
         ("action_id", .str aid),
         ("cancelled", .bool cancelled),
@@ -1033,7 +1046,7 @@ def dispatchMcpToolCall
         let spawnArgs := JVal.obj (#[("provider", JVal.str provider)] ++ rentFields ++ #[
           ("size", .str size), ("idempotency_key", .str ("start-mission:" ++ retryKey))])
         match ← spawnForCaller spawnArgs "" with
-        | .error (_, message) => return mcpErr "managed_placement_failed" message
+        | .error (_, message) => return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" message nowIso
         | .ok (rented, _) => pure (some s!"managed-{rented.id}", rented.id, none, choice)
     -- A failed start destroys what it rented, and hands back what it took over.
     let releaseRented : IO Unit := do
@@ -1050,7 +1063,7 @@ def dispatchMcpToolCall
     if let some rn := explicitRn? then
       if excluded.contains (AutoPlacement.normalize rn) then
         releaseRented
-        return mcpErr "placement_excluded" s!"node `{rn}` is excluded for this mission"
+      return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" s!"node `{rn}` is excluded for this mission" nowIso
     let parentRn? ←
       if explicitRn?.isSome then pure explicitRn?
       else if !parentMid.isEmpty then resolveMissionRemoteNode? store mc? parentMid
@@ -1080,12 +1093,12 @@ def dispatchMcpToolCall
       | .noFleet => pure (some "auto")
       | .noneEligible =>
         releaseRented
-        return mcpErr "placement_failed" "no_eligible_node" true
+        return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" "no_eligible_node" nowIso
     if let (some owner, some target) := (user?, inheritedRn?) then
       let (_, nodes) ← loadStaticRemoteNodes
       if let .error _ ← authorizeRemotePlacement mc? owner target nodes then
         releaseRented
-        return mcpErr "placement_forbidden" "This execution target is unavailable to this user"
+        return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" "This execution target is unavailable to this user" nowIso
     let effWorkDir :=
       match (args.fieldStr? "working_directory").map (·.trimAscii.toString) |>.filter (!·.isEmpty) with
       | some wd => wd
@@ -1101,12 +1114,12 @@ def dispatchMcpToolCall
     let authMode := if toolName == "consult_model" then "readonly" else "writer"
     -- A consultation with nowhere to run must fail, not sit at awaiting_user/active.
     if isConsult && (remoteSup?.isNone || inheritedRn?.isNone) then
-      return mcpErr "no_execution_placement" s!"consult_model `{modelOv}` was not started: no execution node is available for this session. Pass remote_node_id or run from a placed mission." true
+      return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" "no execution node is available" nowIso
     -- This gateway can only run a first turn on a node. With a prompt and nowhere to
     -- run it, refuse: a mission that will never be dispatched must not be created `active`.
     if !prompt.isEmpty && (remoteSup?.isNone || inheritedRn?.isNone) then
       releaseRented
-      return mcpErr "no_execution_placement" "The mission was not started: no execution node is available for its first turn. Pass remote_node_id, or start it without a prompt." true
+      return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" "no execution node is available" nowIso
     let mid ← newUuidV4
     -- The model name the turn is launched with. Empty means the harness's own default.
     let sentModel := if backend == "opencode" && modelOv.isEmpty then "builtin/smart" else modelOv
@@ -1118,7 +1131,7 @@ def dispatchMcpToolCall
     if let .error e ← execParamQuery store.missionsDb insSql
         #[mid, title, initStatus, backend, modelOv, effort, effWorkDir, effProj, folder, s!"{initRev}", parentMid, authMode, tagsJson, nowIso, s!"{store.bootEpoch}", callerUserId] then
       releaseRented
-      return mcpErr "db_error" e
+      return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" e nowIso
     if tenantScoped && !effProj.isEmpty then
       discard <| execParamQuery store.projectsDb
         "INSERT OR IGNORE INTO project_owners(slug,owner_user_id,created_at) VALUES(?1,?2,?3);"
@@ -1149,10 +1162,10 @@ def dispatchMcpToolCall
           discard <| execParamQuery store.missionsDb "DELETE FROM mission_events WHERE mission_id=?1;" #[mid]
           discard <| execParamQuery store.missionsDb "DELETE FROM missions WHERE id=?1;" #[mid]
           releaseRented
-          return mcpErr "remote_dispatch_failed" dispErr true
-    if controller then
-      if let .error e ← nominateCreatedProjectController store effProj effProj mid nowIso callerUserId then
-        return mcpErr "db_error" e
+          return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" dispErr nowIso
+      if controller then
+        if let .error e ← nominateCreatedProjectController store effProj effProj mid nowIso callerUserId then
+          return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" e nowIso
     publishControlEvent broadcastHub? "mission_created" (renderCompact (.obj #[
       ("mission_id", .str mid),
       ("project", if effProj.isEmpty then .null else .str effProj),
@@ -1236,7 +1249,7 @@ def dispatchMcpToolCall
           if mr.status == "active" || mr.status == "pending" then
             match ← enqueueStructuredFollowup store "core" noteId mid content "mcp" nowIso with
             | .ok _ => queued := true
-            | .error e => return mcpErr "enqueue_failed" e false
+            | .error e => return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" e nowIso
           else
             let mut resumeSid? : Option String := none
             if let .ok sRows ← execParamQuery store.missionsDb "SELECT COALESCE(session_id,'') FROM missions WHERE id=?1;" #[mid] then
@@ -1262,7 +1275,7 @@ def dispatchMcpToolCall
               resumeSessionId? := resumeSid?
             }
              if let .error e ← submitRemoteMissionTurn store mc? relayHub? broadcastHub? sup workingDir spec nowEpochSec then
-               return mcpErr "remote_dispatch_failed" e false
+               return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" e nowIso
     let resObj := JVal.obj #[
       ("ok", .bool true),
       ("mission_id", .str mid),
@@ -1279,8 +1292,13 @@ def dispatchMcpToolCall
     if toolName == "cancel_mission" then
       let .ok _ ← revokeContinuations store mid nowIso true
         | return mcpErr "cancel_failed" "continuation revocation failed" false
-      unless ← cancelActiveRemoteJobForMission store mc? relayHub? mid "Cancelled via MCP" do
-        return mcpErr "cancel_failed" "remote cancellation failed" false
+      let remoteCancelled ← cancelActiveRemoteJobForMission store mc? relayHub? mid "Cancelled via MCP"
+      if !remoteCancelled then
+        let .ok rows ← execParamQuery store.missionsDb
+            "SELECT COUNT(*) FROM remote_node_jobs WHERE mission_id=?1 AND state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost');" #[mid]
+          | return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "remote cancellation state unavailable" nowIso
+        if rows.size > 1 && cellNat rows[1]! 0 > 0 then
+          return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "remote cancellation failed" nowIso
       discard <| execParamQuery store.missionsDb
         "UPDATE mission_runs SET execution_state='terminal', terminal_reason='cancelled', updated_at=?2 WHERE mission_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted');"
         #[mid, nowIso]
@@ -1324,13 +1342,13 @@ def dispatchMcpToolCall
             resumeSessionId? := resumeSid?
           }
           if let .error dispErr ← submitRemoteMissionTurn store mc? relayHub? broadcastHub? sup workingDir spec nowEpochSec then
-            return mcpErr "remote_dispatch_failed" dispErr true
+            return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" dispErr nowIso
           let .ok settled ← recordSettledMcpAction store claims callerUserId toolName args
             (.obj #[("ok", .bool true), ("mission_id", .str mid), ("status", .str "active")]) nowIso mid
             | return mcpErr "receipt_record_failed" "The mutation completed but its receipt could not be recorded. Reconcile the action." false
           return mcpOk settled
       -- No node to run the turn on: say so; never mark the mission active.
-      return mcpErr "no_execution_placement" s!"Mission `{mid}` was not resumed: no execution node is available for it." true
+      return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" "no execution node is available" nowIso
     else
       let nextSt := if toolName == "adopt_mission" then "awaiting_user" else "completed"
       discard <| execParamQuery store.missionsDb

@@ -74,24 +74,41 @@ def r24_failed_cancel_is_not_success : IO Unit := do
   let receipt := JVal.obj #[("state", .str "failed"), ("status", .str "failed"), ("accepted", .str "no"), ("error", .str "cancel_failed")]
   check (verifyReceiptWord receipt == 16777474) "failed cancel is rejected"
 
-def r24_concurrent_same_key_mutates_once : IO Unit := do
-  check (OrbCore.ManagedSpawnActions.uncertain "pending:one" && !OrbCore.ManagedSpawnActions.uncertain "provider_disabled_for_user") "same-key fence has one pending owner"
+def r24_concurrent_same_key_mutates_once (store : CoreStore) (root : String) (claims : McpSessionClaims) : IO Unit := do
+  let args := .obj #[("title", .str "r24-concurrent"), ("idempotency_key", .str "r24-concurrent-key")]
+  let t1 ← IO.asTask (OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root claims "start_mission" args 4000000000)
+  let t2 ← IO.asTask (OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root claims "start_mission" args 4000000000)
+  let a := match t1.get with | .ok x => x | .error _ => ""
+  let b := match t2.get with | .ok x => x | .error _ => ""
+  let aid x := (((OrbBin.Json.parse x).toOption.getD .null).fieldOrNull "result").fieldStr? "action_id" |>.getD ""
+  check (aid a == aid b && aid a != "") "same-key callers share one stored receipt"
 
-def r24_receipt_insert_failure_blocks_mutation : IO Unit := do
-  check ("receipt_reservation_failed" != "mutation_started") "receipt reservation precedes mutation"
+def r24_receipt_insert_failure_blocks_mutation (store : CoreStore) (root : String) (claims : McpSessionClaims) : IO Unit := do
+  let args := .obj #[("title", .str "r24-reservation"), ("idempotency_key", .str "r24-reservation-key")]
+  let raw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root claims "start_mission" args 4000000000
+  let aid := (((OrbBin.Json.parse raw).toOption.getD .null).fieldOrNull "result").fieldStr? "action_id" |>.getD ""
+  check (aid != "" && (← cellOf store.projectsDb "SELECT COUNT(*) FROM mcp_actions_v1 WHERE id=?1;" #[aid]) == "1") "reservation is durable before mutation"
 
-def r24_same_key_retry_returns_stored_receipt : IO Unit := do
-  let receipt := JVal.obj #[("action_id", .str "same-action"), ("state", .str "succeeded"), ("status", .str "completed"), ("accepted", .str "yes"), ("result", .obj #[])]
-  check (verifyReceiptWord receipt == 65793 && receipt.fieldStr? "action_id" == some "same-action") "retry returns stored receipt"
+def r24_same_key_retry_returns_stored_receipt (store : CoreStore) (root : String) (claims : McpSessionClaims) : IO Unit := do
+  let args := .obj #[("title", .str "r24-replay"), ("idempotency_key", .str "r24-replay-key")]
+  let first ← OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root claims "start_mission" args 4000000000
+  let second ← OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root claims "start_mission" args 4000000000
+  let aid x := (((OrbBin.Json.parse x).toOption.getD .null).fieldOrNull "result").fieldStr? "action_id" |>.getD ""
+  check (aid first == aid second && aid first != "") "same-key retry returns stored receipt"
+
+def r24_startup_fences_generic_action (store : CoreStore) : IO Unit := do
+  let .ok _ ← execParamQuery store.projectsDb
+      ("INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state,result,created_at,updated_at) " ++
+       "VALUES('r24-fence','m-tools','r24-fence-scope','r24-fence-key','{}','coordinator','start_mission','{}','accepted','{}','t0','t0');") #[]
+    | throw (IO.userError "fence fixture insert failed")
+  let .ok _ ← OrbCore.McpGateway.fenceInterrupted store | throw (IO.userError "fence failed")
+  check ((← cellOf store.projectsDb "SELECT state FROM mcp_actions_v1 WHERE id='r24-fence';") == "uncertain") "startup fences generic accepted action"
 
 def run : IO Unit := do
   r24_lost_reply_is_uncertain_not_rejected
   r24_failed_enqueue_is_not_success
   r24_failed_dispatch_is_not_success
   r24_failed_cancel_is_not_success
-  r24_concurrent_same_key_mutates_once
-  r24_receipt_insert_failure_blocks_mutation
-  r24_same_key_retry_returns_stored_receipt
   let root := s!"/tmp/orb-turn-outcome-{← newUuidV4}"
   IO.FS.createDirAll s!"{root}/.sandboxed-sh"
   try
@@ -179,6 +196,10 @@ def run : IO Unit := do
 
       -- A first turn with nowhere to run is refused; nothing is left `active`.
       let claims : McpSessionClaims := { sessionId := "turn-outcome", missionId := "m-tools", role := "coordinator", expiresAt := 4100000000 }
+      r24_concurrent_same_key_mutates_once store root claims
+      r24_receipt_insert_failure_blocks_mutation store root claims
+      r24_same_key_retry_returns_stored_receipt store root claims
+      r24_startup_fences_generic_action store
       let reply ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
         "start_mission" (.obj #[("title", .str "ghost"), ("prompt", .str "work that can never start")]) 4000000000
       check ((reply.splitOn "no_execution_placement").length > 1) s!"an undispatchable start is refused: {reply}"
