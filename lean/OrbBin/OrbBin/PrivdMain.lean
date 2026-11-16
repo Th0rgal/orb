@@ -545,15 +545,12 @@ def handleEnsureMissionUser (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer :
     if isNonRootTest then
       pure ((2500 : UInt32), (2500 : UInt32), true)
     else do
-      IO.eprintln s!"O13 lookup start {(← IO.monoMsNow)}"
       let mut info? ← lookupUnixUserInfo uName
-      IO.eprintln s!"O13 lookup done {(← IO.monoMsNow)}"
       if info?.isNone then
         let _ ← IO.Process.output {
           cmd := "/usr/sbin/groupadd"
           args := #["-K", "GID_MIN=2000", "-K", "GID_MAX=60000", uName]
         }
-        IO.eprintln s!"O13 groupadd done; useradd start {(← IO.monoMsNow)}"
         let addOut ← IO.Process.output {
           cmd := "/usr/sbin/useradd"
           args := #[
@@ -567,7 +564,6 @@ def handleEnsureMissionUser (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer :
             uName
           ]
         }
-        IO.eprintln s!"O13 useradd done {(← IO.monoMsNow)} exit={addOut.exitCode}"
         if addOut.exitCode != 0 then
           return (← replyError cfd s!"useradd failed for {uName}: {addOut.stderr.trimAscii}" 126)
         info? ← lookupUnixUserInfo uName
@@ -597,10 +593,7 @@ def handleEnsureMissionUser (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer :
     for item in fArr do
       if let (some p, some c) := (item.fieldStr? "path", item.fieldStr? "content") then
         wsFiles := wsFiles.push (p, c)
-  IO.eprintln s!"O13 populate start {(← IO.monoMsNow)}"
-  let populated ← populateUserHomeDropped isNonRootTest uid gid homeRoot uName missionId wsFiles
-  IO.eprintln s!"O13 populate done {(← IO.monoMsNow)}"
-  match populated with
+  match ← populateUserHomeDropped isNonRootTest uid gid homeRoot uName missionId wsFiles with
   | .error err =>
     return (← replyError cfd err 126)
   | .ok (homeDir, missionCwd) =>

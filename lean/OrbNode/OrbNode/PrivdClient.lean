@@ -81,7 +81,10 @@ def ensureMissionUser
     ("lease_verified", .bool true),
     ("workspace_files", .arr filesArr)
   ]
-  match ← callPrivd socketPath req 30000 with
+  -- Fresh account creation includes host useradd hooks: on Ubuntu CI it takes
+  -- over 30 seconds even when successful. Provisioning needs a separate bounded
+  -- budget from ordinary job-control/file RPCs; otherwise we abandon a created user.
+  match ← callPrivd socketPath req 120000 with
   | .error e => return .error e
   | .ok resp =>
     let uid := ((resp.fieldNat? "uid").getD 0).toUInt32
