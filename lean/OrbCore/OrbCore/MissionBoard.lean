@@ -231,7 +231,7 @@ private def jsonError (status : Nat) (code : String) : Nat × String × ByteArra
 
 /-- REST surface kept independent of Control. User principals may read; PUT is
     intentionally refused until Core has a mission-bound REST credential. -/
-def dispatchRest (missions _projects : SqliteDb) (method target : String) (body : ByteArray)
+def dispatchRest (missions projects : SqliteDb) (method target : String) (body : ByteArray)
     (reader : Reader) (project : String := "") (all : Bool := false) : IO (Option (Nat × String × ByteArray)) := do
   let segs := (target.splitOn "/").filter (!·.isEmpty)
   if segs.length == 5 && segs[0]? == some "api" && segs[1]? == some "control" &&
@@ -253,7 +253,13 @@ def dispatchRest (missions _projects : SqliteDb) (method target : String) (body 
       segs[3]? == some "boards" && method == "GET" then
     let requested := segs[2]!
     if !project.isEmpty && requested != project then return some (jsonError 404 "project_not_found")
-    match ← list missions reader requested all with
+    let .ok projectRows ← query projects
+        ("SELECT p.slug FROM projects p JOIN project_owners o ON o.slug=p.slug " ++
+         "WHERE o.owner_user_id=?1 AND p.status<>'deleted' AND (p.slug=?2 OR p.slug=?3) " ++
+         "ORDER BY (p.slug=?3) DESC LIMIT 1;") #[reader.userId, requested, reader.userId ++ ":" ++ requested]
+      | return some (jsonError 500 "db_error")
+    if projectRows.size ≤ 1 then return some (jsonError 404 "project_not_found")
+    match ← list missions reader (projectRows[1]![0]?.getD "") all with
     | .ok result => return some (200, "application/json", renderCompact result |>.toUTF8)
     | .error _ => return some (jsonError 404 "project_not_found")
   return none

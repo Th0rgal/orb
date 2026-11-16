@@ -6791,7 +6791,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
 
   if let some (bCode, bCtype, bBody) ← OrbCore.MissionBoard.dispatchRest
       st.store.missionsDb st.store.projectsDb req.method cleanPath req.bodySlice.toByteArray
-      { userId := caller.userId } then
+      { userId := caller.userId } "" ((parseQueryParams rawTarget).any (fun p => p.1 == "all" && p.2 == "true")) then
     return .ok { status := bCode, contentType := bCtype, corsOrigin? := reqOrigin?, body := bBody }
 
   let cHubFallback ← match st.cloudHub? with | some h => pure h | none => newCloudRuntimeHub
