@@ -266,7 +266,9 @@ def withReservedMcpOutcome (store : CoreStore) (claims : McpSessionClaims)
       -- boundary requires an uncertain journal outcome.
       let parsed := (OrbBin.Json.parse raw).toOption.getD .null
       if receipt.fieldStr? "state" == some "uncertain" && parsed.fieldBool? "ok" == some false then
-        return renderCompact (parsed.setField "result" receipt)
+        let err := (parsed.fieldOrNull "error").setField "accepted" (.str "unknown")
+          |>.setField "retryable" (.bool false)
+        return renderCompact ((parsed.setField "error" err).setField "result" receipt)
       return mcpReceiptReply receipt
     return raw
   catch _ => return fallback

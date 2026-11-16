@@ -189,6 +189,11 @@ def r24_settlement_write_failure (store : CoreStore) (root : String) (claims : M
       let raw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root claims "send_message_to_mission" args 4000000000
       let receipt := ((OrbBin.Json.parse raw).toOption.getD .null).fieldOrNull "result"
       check (receipt.fieldStr? "state" == some "uncertain" && receipt.fieldStr? "accepted" == some "unknown") "failed success settlement is uncertain on first response and retry"
+      let reply := (OrbBin.Json.parse raw).toOption.getD .null
+      if reply.fieldBool? "ok" == some false then
+        let err := reply.fieldOrNull "error"
+        check (err.fieldStr? "accepted" == some "unknown" && err.fieldBool? "retryable" == some false)
+          "adapter error envelope cannot authorize a fresh retry after settlement failure"
     check ((← cellOf store.askDb "SELECT COUNT(*) FROM operator_notes WHERE content='r24 settlement';") == "1") "failed settlement replay cannot duplicate mutation"
   finally
     let .ok _ ← execParamQuery store.projectsDb "DROP TRIGGER r24_deny_success;" #[]
