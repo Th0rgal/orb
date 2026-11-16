@@ -151,22 +151,30 @@ class RunnerSelectionTest(unittest.TestCase):
                 self.assertEqual(runners["orb-macos-shell"], "macos-26")
             else:
                 self.assertEqual(runners["kernel-ok"], "ubuntu-latest")
-            for variable, repo, branch, event, manual in itertools.product(
+            for variable, repo, branch, event, manual, head in itertools.product(
                 ("", "false", "true", "typo"),
                 ("Th0rgal/orb", "someone/orb"),
                 ("refs/heads/master", "refs/heads/feature", "refs/tags/v1", "refs/pull/1/merge"),
                 ("push", "schedule", "workflow_dispatch", "pull_request", "pull_request_target"),
                 (False, True),
+                ("same", "fork"),
             ):
+                head_repo = repo if head == "same" else "attacker/orb"
                 context = {
                     "vars.ORB_LEAN_RUNNERS": variable, "github.repository": repo,
                     "github.ref": branch, "github.event.repository.default_branch": "master",
                     "github.event_name": event, "inputs.use_lean_runners": manual,
+                    "github.event.pull_request.head.repo.full_name": head_repo,
                 }
-                enabled = (variable == "true" and repo == "Th0rgal/orb"
-                           and branch == "refs/heads/master"
+                # Default-branch pushes, schedules and opted-in dispatches, and pull
+                # requests from a branch of this repository (never forks, never
+                # pull_request_target).
+                trusted = (branch == "refs/heads/master"
                            and event in {"push", "schedule", "workflow_dispatch"}
                            and (event != "workflow_dispatch" or manual))
+                same_repo_pr = event == "pull_request" and head == "same"
+                enabled = (variable == "true" and repo == "Th0rgal/orb"
+                           and (trusted or same_repo_pr))
                 for job, fallback in fallbacks.items():
                     size = 32 if job in {"test", "kernel-abi"} else 16
                     routed = enabled and job not in self.HOSTED_ONLY[workflow]
@@ -183,6 +191,7 @@ class RunnerSelectionTest(unittest.TestCase):
                     "github.ref": f"refs/heads/{branch}",
                     "github.event.repository.default_branch": "main",
                     "github.event_name": "push", "inputs.use_lean_runners": False,
+                    "github.event.pull_request.head.repo.full_name": "",
                 }
                 for job, fallback in fallbacks.items():
                     selected = runner_for(runners[job], context)
