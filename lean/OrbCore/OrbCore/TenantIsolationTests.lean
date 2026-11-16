@@ -1708,6 +1708,51 @@ def run (root : String) : IO Unit := do
     let .ok nodePollResp ← dispatchCoreRequest st nodePollReq now | throw (IO.userError "r12 node poll dispatch")
     check (nodePollResp.status == 200)
       s!"r12_node_token_credentials_resolve_principal (got {nodePollResp.status})"
+    -- 7. r12_legacy_and_ops_caller_credential_matrix (multi_user with two active users AND single-user mode)
+    let matDir := root ++ "/r12-caller-matrix"
+    IO.FS.createDirAll (System.FilePath.mk matDir)
+    let .ok matStore ← openCoreStore matDir | throw (IO.userError "r12 matrix store")
+    let .ok matMc ← openManagedComputeStore (matDir ++ "/managed_compute.db") | throw (IO.userError "r12 matrix mc")
+    try
+      sql matStore.missionsDb
+        "INSERT INTO users(id,username,password_hash,role,session_epoch,disabled) VALUES('usr_real_admin_uuid','admin','pbkdf2-sha256$1$aa$bb','admin',1,0);"
+      sql matStore.missionsDb
+        "INSERT INTO users(id,username,password_hash,role,session_epoch,disabled) VALUES('usr_second_member','bob','pbkdf2-sha256$1$aa$bb','member',1,0);"
+      let matSt : CoreAppState := {
+        st with
+        cfg := { st.cfg with workingDir := matDir, usersJson := "" }
+        store := matStore
+        managedStore? := some matMc
+        bootstrapAdminId := "usr_real_admin_uuid"
+      }
+      let hsRealAdmin := issueHs256Jwt matSt.cfg.jwtSecret "usr_real_admin_uuid" "admin" now (now + 3600) "admin"
+      let hsLiteralAdmin := issueHs256Jwt matSt.cfg.jwtSecret "admin" "admin" now (now + 3600) "admin"
+      let hsUnknownSub := issueHs256Jwt matSt.cfg.jwtSecret "unknown-subject-xyz" "ghost" now (now + 3600) "admin"
+      let v1OrbMonitorTok := mintSessionToken matSt.cfg.jwtSecret (now + 600)
+      let rollingUpgradeTok := issueHs256Jwt matSt.cfg.jwtSecret "admin" "" now (now + 300) ""
+      -- Multi-user mode (two active users: usr_real_admin_uuid and usr_second_member)
+      let (muRealSt, muRealDoc) ← send "GET" "/api/auth/me" hsRealAdmin (.obj #[]) matSt
+      let (muLitSt, _) ← send "GET" "/api/auth/me" hsLiteralAdmin (.obj #[]) matSt
+      let (muUnkSt, _) ← send "GET" "/api/auth/me" hsUnknownSub (.obj #[]) matSt
+      let (muV1St, _) ← send "GET" "/api/auth/me" v1OrbMonitorTok (.obj #[]) matSt
+      let (muRollSt, _) ← send "GET" "/api/auth/me" rollingUpgradeTok (.obj #[]) matSt
+      check (muRealSt == 200 && (muRealDoc.fieldOrNull "user").fieldStr? "id" == some "usr_real_admin_uuid" &&
+          (muRealDoc.fieldOrNull "user").fieldStr? "auth_mode" == some "multi_user" &&
+          muLitSt == 401 && muUnkSt == 401 && muV1St == 401 && muRollSt == 401)
+        s!"r12_legacy_and_ops_caller_credential_matrix multi_user (real={muRealSt}, lit={muLitSt}, unk={muUnkSt}, v1={muV1St}, roll={muRollSt})"
+      -- Single-user mode (disable second user so only usr_real_admin_uuid is active)
+      sql matStore.missionsDb "UPDATE users SET disabled=1 WHERE id='usr_second_member';"
+      let (suRealSt, suRealDoc) ← send "GET" "/api/auth/me" hsRealAdmin (.obj #[]) matSt
+      let (suLitSt, _) ← send "GET" "/api/auth/me" hsLiteralAdmin (.obj #[]) matSt
+      let (suUnkSt, _) ← send "GET" "/api/auth/me" hsUnknownSub (.obj #[]) matSt
+      let (suV1St, _) ← send "GET" "/api/auth/me" v1OrbMonitorTok (.obj #[]) matSt
+      let (suRollSt, _) ← send "GET" "/api/auth/me" rollingUpgradeTok (.obj #[]) matSt
+      check (suRealSt == 200 && (suRealDoc.fieldOrNull "user").fieldStr? "id" == some "usr_real_admin_uuid" &&
+          suLitSt == 401 && suUnkSt == 401 && suV1St == 401 && suRollSt == 401)
+        s!"r12_legacy_and_ops_caller_credential_matrix single_user (real={suRealSt}, lit={suLitSt}, unk={suUnkSt}, v1={suV1St}, roll={suRollSt})"
+    finally
+      closeManagedComputeStore matMc
+      closeCoreStore matStore
     -- Disabling/deleting an issuer must stop every previously minted session,
     -- including an external session with no mission id and a shared mission.
     for update in #["UPDATE users SET disabled=1 WHERE id='member';", "DELETE FROM users WHERE id='member';"] do
