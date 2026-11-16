@@ -4895,14 +4895,26 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let (alBoardPutSt, _, _) ← sendReq "POST" "/api/projects/lean-campaign/tracks" aliceTok
     "{\"track\":\"proof-track\",\"desired_condition\":\"Alice Secret Track\"}"
   let (alProjectSt, _, _) ← sendReq "POST" "/api/projects" aliceTok "{\"slug\":\"lean-campaign\"}"
-  let (alTextSt, _, _) ← sendReq "PUT" "/api/projects/lean-campaign/board" aliceTok
-    "{\"text\":\"proof-track private board\"}"
-  let (_, admBoardBody, _) ← sendReq "GET" "/api/projects/lean-campaign/board" adminTok ""
-  let (_, alBoardBody, _) ← sendReq "GET" "/api/projects/lean-campaign/board" aliceTok ""
+  -- Populate the board as its mission; user REST credentials cannot write it.
+  if let .error e ← OrbCore.ProjectFilesAndController.nominateCreatedProjectController store
+      (aliceId ++ ":lean-campaign") "lean-campaign" alMisId "t-board" aliceId then
+    return (← fail s!"board fixture nomination failed: {e}")
+  if let .error e ← OrbCore.MissionBoard.write store.missionsDb
+      { userId := aliceId, missionId := alMisId } alMisId "proof-track private board" "t-board"
+      none "multiuser-board-action" alMisId "multiuser-board-key" "write_mission_board" then
+    return (← fail s!"board fixture write failed: {e}")
+  let (alTextSt, alTextBody, _) ← sendReq "PUT" "/api/projects/lean-campaign/board" aliceTok
+    "{\"text\":\"unauthorized replacement\"}"
+  let (admBoardSt, admBoardBody, _) ← sendReq "GET" "/api/projects/lean-campaign/board" adminTok ""
+  let (alBoardSt, alBoardBody, _) ← sendReq "GET" "/api/projects/lean-campaign/board" aliceTok ""
+  let alBoard := (OrbBin.Json.parse alBoardBody).toOption.getD (.obj #[])
   let (alInbPutSt, _, _) ← sendReq "PUT" "/api/control/inbox-state/seen/m-secret" aliceTok
     "{\"clientId\":\"c-al\",\"mutationSeq\":1,\"expectedVersion\":0,\"stamp\":42}"
   let (_, admInbBody, _) ← sendReq "GET" "/api/control/inbox-state" adminTok ""
-  if alBoardPutSt != 410 || alProjectSt != 200 || alTextSt != 200 || (alBoardBody.splitOn "proof-track").length < 2 ||
+  if alBoardPutSt != 410 || alProjectSt != 200 || alTextSt != 403 ||
+     ((OrbBin.Json.parse alTextBody).toOption.getD (.obj #[]) |>.fieldStr? "error") != some "not_project_controller" ||
+     alBoardSt != 200 || alBoard.fieldStr? "text" != some "proof-track private board" ||
+     alBoard.fieldStr? "updated_at" != some "t-board" || admBoardSt != 404 ||
      (admBoardBody.splitOn "proof-track").length != 1 ||
      alInbPutSt != 200 || (admInbBody.splitOn "m-secret").length != 1 then
     return (← fail s!"project/inbox namespace isolation failed: alBoard={alBoardBody} admBoard={admBoardBody} admInb={admInbBody}")
