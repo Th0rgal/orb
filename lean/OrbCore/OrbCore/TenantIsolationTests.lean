@@ -1693,7 +1693,7 @@ def run (root : String) : IO Unit := do
     -- 6. r12_node_token_credentials_resolve_principal
     let r12Vm : ManagedMachine := {
       id := "mm-r12-node-1", sandboxName := "orb-managed-mm-r12-node-1", provider := "boat",
-      size := "small", spentCents := 25, nodeBootEpoch := 1, deletableAtSec := 100
+       size := "small", spentCents := 25, nodeBootEpoch := 1, deletableAtSec := now + 3600
     }
     let .ok _ ← provisionManagedMachine mc { enabled := true, boatEnabled := true } r12Vm 50
       | throw (IO.userError "r12 provisionManagedMachine")
