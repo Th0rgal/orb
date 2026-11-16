@@ -102,11 +102,11 @@ def guestDiagnosticCommand (coreUrl : String) : String :=
   "echo \"resolv=$(timeout 1 stat -Lc '%a %U:%G' /etc/resolv.conf 2>/dev/null || echo missing)\"; " ++
   "if timeout 1 id orbnode >/dev/null 2>&1; then " ++
   "node_user=present; " ++
-  "run_as_node() { if timeout 1 command -v setpriv >/dev/null 2>&1; then setpriv --reuid=orbnode --regid=orbnode --init-groups -- \"$@\"; " ++
+  "run_as_node() { if command -v setpriv >/dev/null 2>&1; then setpriv --reuid=orbnode --regid=orbnode --init-groups -- \"$@\"; " ++
   "else runuser -u orbnode -- \"$@\"; fi; }; " ++
-  "if node_dns=$(timeout 2 run_as_node getent hosts " ++ quotedHost ++ " 2>&1); then " ++
+  "if node_dns=$(run_as_node timeout 2 getent hosts " ++ quotedHost ++ " 2>&1); then " ++
   "echo \"core_dns_as_node=ok\"; else echo \"core_dns_as_node=$(printf '%s\\n' \"$node_dns\" | head -n 1)\"; fi; " ++
-  "if node_http=$(timeout 4 run_as_node curl -sS -o /dev/null -m 3 -w '%{http_code}' " ++ quotedHealthUrl ++ " 2>&1); then " ++
+  "if node_http=$(run_as_node timeout 4 curl -sS -o /dev/null -m 3 -w '%{http_code}' " ++ quotedHealthUrl ++ " 2>&1); then " ++
   "echo \"core_http_as_node=$node_http\"; else echo \"core_http_as_node=$(printf '%s\\n' \"$node_http\" | head -n 1)\"; fi; " ++
   "else echo \"node_user=missing\"; fi; " ++
   "echo \"core_http_root=$(timeout 4 curl -sS -o /dev/null -m 3 -w '%{http_code}' " ++ quotedHealthUrl ++ " 2>&1 | tail -c 200)\"; " ++

@@ -42,6 +42,9 @@ def run (root : String) : IO Unit := do
     "as-node HTTP probe is present with quoted URL (fails on master: yes)"
   check (diagnostic.contains "core_http_root=" && diagnostic.contains "timeout 11 curl")
     "root HTTP probe is retained (fails on master: yes)"
+  check (!diagnostic.contains "timeout 2 run_as_node" && !diagnostic.contains "timeout 4 run_as_node" &&
+      !diagnostic.contains "timeout 1 command -v")
+    "timeouts do not try to execute shell functions or builtins (fails on 30a4f3d8: yes)"
   let quotedDiagnostic := guestDiagnosticCommand "https://core.example/o'hare"
   check (quotedDiagnostic.contains "getent hosts 'core.example'" &&
       quotedDiagnostic.contains "'https://core.example/o'\"'\"'hare/api/health'")
