@@ -1170,10 +1170,10 @@ private def customDiscoveryContract (app : CoreAppState) (jwt : String) (now : U
       failures := failures.push "custom discovery must never return API key"
     -- Node X4: plain `ethereumfoundation/glm-5.3` is rejected upstream while flash variants work;
     -- discovery, catalog, direct routing, and chain entries must drop plain `glm-5.3` and keep flash variants.
-    if customProviderModelAllowed "Ethereum Foundation" "https://inference.ethereum.foundation/v1" "glm-5.3" ||
-       customProviderModelAllowed "ethereumfoundation" "" "glm-5.3" ||
-       !customProviderModelAllowed "Ethereum Foundation" "https://inference.ethereum.foundation/v1" "glm-5.3-flash" ||
-       !customProviderModelAllowed "zai" "" "glm-5.3" then
+    if OrbCore.ProxyModelRouting.customProviderModelAllowed "Ethereum Foundation" "https://inference.ethereum.foundation/v1" "glm-5.3" ||
+       OrbCore.ProxyModelRouting.customProviderModelAllowed "ethereumfoundation" "" "glm-5.3" ||
+       !OrbCore.ProxyModelRouting.customProviderModelAllowed "Ethereum Foundation" "https://inference.ethereum.foundation/v1" "glm-5.3-flash" ||
+       !OrbCore.ProxyModelRouting.customProviderModelAllowed "zai" "" "glm-5.3" then
       failures := failures.push "X4: customProviderModelAllowed must reject plain ethereumfoundation/glm-5.3 while keeping flash variants and zai/glm-5.3"
     if (OrbCore.ProxyModelRouting.directEntry? "ethereumfoundation/glm-5.3" "/v1/chat/completions"
         #[("ethereumfoundation", "glm-5.3"), ("ethereumfoundation", "glm-5.3-flash")]).isSome ||
