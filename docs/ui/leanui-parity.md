@@ -16,9 +16,8 @@ ORB_REFERENCE_OUT=/tmp/ref node node_modules/.bin/playwright test \
 # 2. Candidate: the same 36 frames from LeanUI.
 cd .. && scripts/build_orb_bins.sh --only orb-desktop-native --out-dir "$PWD/target/native"
 target/native/orb-desktop-native --headless-golden-all /tmp/native --width 1470 --height 923
-# If the build prints "CACHE HIT" after an edit under lean/LeanUI, the binary is
-# stale (turbo-lean 0.1.0 keys the package on lean/OrbDesktop only): rebuild
-# with TURBO_LEAN_HOME pointing at an empty directory.
+# LeanUI sources now live under lean/OrbDesktop/LeanUI, inside the package.
+# Their edits invalidate turbo-lean's source cache; keep the same TURBO_LEAN_HOME.
 
 # 3. Measure (needs numpy and Pillow) and rewrite the table below.
 python3 scripts/leanui_parity.py --reference /tmp/ref --native /tmp/native \
@@ -301,8 +300,8 @@ Weston's `WESTON_MODULE_MAP` and `LD_LIBRARY_PATH` in restricted environments.
 
 Build validation includes `LeanUISpec`: recovered geometry/damage guards plus
 `OrbDesktop.Spec.RasterParity` for whitespace paint, blur impulse response,
-constant surfaces, empty images, and zero sigma. The installed turbo-lean 0.1.0
-has no `--jobs` switch; use `RAYON_NUM_THREADS=2`, `LEAN_CC=/usr/bin/clang`,
-`LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:<lean-prefix>/lib`, and a fresh
-workspace-local `TURBO_LEAN_HOME` after edits outside the OrbDesktop package.
-This avoids stale cache hits and does not change master's build wrapper.
+constant surfaces, empty images, and zero sigma. The native package owns both
+`LeanUI/` and `OrbDesktop/` module trees and its C shims in `c/`, using the
+default package-local source directory. Use the pinned turbo-lean revision in
+`lean/turbo-lean-revision`. No raw-Lake fallback or cache reset is needed after
+LeanUI edits.

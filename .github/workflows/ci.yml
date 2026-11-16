@@ -431,7 +431,8 @@ jobs:
           ./scripts/ci_harden_ubuntu_apt.sh
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
-            libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libssl-dev libsqlite3-dev zstd
+            libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libssl-dev libsqlite3-dev zstd \
+            libwayland-dev libxkbcommon-dev libfreetype-dev libharfbuzz-dev libfontconfig-dev
       - name: Build orb-locald + sandboxed-mcp
         if: steps.desktop-bins.outputs.cache-hit != 'true' && steps.promoted-desktop.outcome != 'success'
         run: ./scripts/build_orb_bins.sh --ensure-lean --out-dir target/debug --only orb-locald --only sandboxed-mcp
@@ -444,6 +445,10 @@ jobs:
           make -C linux_shell clean
           make -C linux_shell test
           python3 -m unittest -v orb/tests/wakeup_mcp_test.py
+
+      - name: Native LeanUI build and warm-cache invalidation
+        if: needs.plan.outputs.run_orb_desktop_shell == 'true'
+        run: python3 scripts/test_native_desktop_cache.py
 
       # Tar preserves executable modes when promoted across run artifacts.
       - run: |

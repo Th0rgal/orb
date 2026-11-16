@@ -2,7 +2,6 @@ import Lake
 open System Lake DSL
 
 package «orb-desktop-native» where
-  srcDir := ".."
   leanOptions := #[⟨`autoImplicit, false⟩, ⟨`warningAsError, true⟩]
   moreLinkArgs := #["-lwayland-client", "-lxkbcommon", "-lfreetype", "-lharfbuzz", "-lfontconfig", "-ldl"]
 
@@ -23,23 +22,23 @@ lean_lib «LeanUIRuntime» where
 
 target lean_ui_wayland_o pkg : FilePath := do
   let oFile := pkg.buildDir / "c" / "lean_ui_wayland.o"
-  let srcJob ← inputTextFile <| pkg.dir / ".." / ".." / "c" / "lean_ui_wayland.c"
+  let srcJob ← inputTextFile <| pkg.dir / "c" / "lean_ui_wayland.c"
   let leanIncludeDir ← getLeanIncludeDir
-  let cDir := pkg.dir / ".." / ".." / "c"
+  let cDir := pkg.dir / "c"
   buildO oFile srcJob #["-I", leanIncludeDir.toString, "-I", cDir.toString] #["-std=c11", "-O2", "-fPIC"] ((← IO.getEnv "LEAN_CC").getD "cc")
 
 target lean_ui_text_o pkg : FilePath := do
   let oFile := pkg.buildDir / "c" / "lean_ui_text.o"
-  let srcJob ← inputTextFile <| pkg.dir / ".." / ".." / "c" / "lean_ui_text.c"
+  let srcJob ← inputTextFile <| pkg.dir / "c" / "lean_ui_text.c"
   let leanIncludeDir ← getLeanIncludeDir
-  let cDir := pkg.dir / ".." / ".." / "c"
+  let cDir := pkg.dir / "c"
   buildO oFile srcJob #["-I", leanIncludeDir.toString, "-I", cDir.toString, "-I/usr/include/freetype2", "-I/usr/include/harfbuzz"] #["-std=c11", "-O2", "-fPIC"] ((← IO.getEnv "LEAN_CC").getD "cc")
 
 target lean_ui_vulkan_o pkg : FilePath := do
   let oFile := pkg.buildDir / "c" / "lean_ui_vulkan.o"
-  let srcJob ← inputTextFile <| pkg.dir / ".." / ".." / "c" / "lean_ui_vulkan.c"
+  let srcJob ← inputTextFile <| pkg.dir / "c" / "lean_ui_vulkan.c"
   let leanIncludeDir ← getLeanIncludeDir
-  let cDir := pkg.dir / ".." / ".." / "c"
+  let cDir := pkg.dir / "c"
   buildO oFile srcJob #["-I", leanIncludeDir.toString, "-I", cDir.toString] #["-std=c11", "-O2", "-fPIC"] ((← IO.getEnv "LEAN_CC").getD "cc")
 
 extern_lib liblean_ui_c pkg := do

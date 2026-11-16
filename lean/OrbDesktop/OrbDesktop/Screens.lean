@@ -344,7 +344,7 @@ def buildSplitDiffRightPane (theme : Theme) (paneW paneH : SubPx) : WidgetNode :
           (CornerRadii.uniform (pxToSub 6))
           (BorderStyle.uniform bdr pal.border)
           [ screenTextLine theme (pxToSub 210) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textPrimary
-              "M  lean/OrbDesktop/Main.lean  +1 -1" ]
+               "M  lean/OrbDesktop/OrbDesktop/Main.lean  +1 -1" ]
       ]
 
   let splitRow (h : SubPx) (bgL bgR : Color) (lnL codeL lnR codeR : String) : WidgetNode :=
@@ -380,7 +380,7 @@ def buildSplitDiffRightPane (theme : Theme) (paneW paneH : SubPx) : WidgetNode :
           0x00000000
           CornerRadii.zero
           { widths := Edges.trbl 0 0 bdr 0, color := pal.borderSubtle }
-          [screenTextLine theme (pxToSub 240) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textPrimary "lean/OrbDesktop/Main.lean" 400 true]
+           [screenTextLine theme (pxToSub 240) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textPrimary "lean/OrbDesktop/OrbDesktop/Main.lean" 400 true]
       , WidgetNode.rrect
           (BoxStyle.row 0
             |>.withAlign .center

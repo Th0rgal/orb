@@ -34,7 +34,7 @@ def mix(a, b, fraction):
 class TokenTests(unittest.TestCase):
     def test_dark_and_light(self):
         css = (ROOT/'orb/src/styles.css').read_text()
-        lean = (ROOT/'lean/LeanUI/Style.lean').read_text()
+        lean = (ROOT/'lean/OrbDesktop/LeanUI/Style.lean').read_text()
         dark = re.search(r':root\s*\{(.*?)\n\}', css, re.S)[1]
         light = re.search(r':root\[data-theme="light"\]\s*\{(.*?)\n\}', css, re.S)[1]
         for theme, block in [('Dark', dark), ('Light', light)]:

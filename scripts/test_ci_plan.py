@@ -435,7 +435,7 @@ class TreeInputsTest(unittest.TestCase):
             self.assertNotEqual(commit()["orb_build_hash"], deleted["orb_build_hash"])
 
     def test_native_only_domains_are_exact(self):
-        for path in ("linux_shell/main.c", "linux_shell/gtk_chrome.c", "lean/OrbDesktop/Main.lean"):
+        for path in ("linux_shell/main.c", "linux_shell/gtk_chrome.c", "lean/OrbDesktop/OrbDesktop/Main.lean", "lean/OrbDesktop/LeanUI/Style.lean"):
             self.assertEqual(jobs([path]), {"fmt", "orb-desktop-shell"}, path)
         self.assertEqual(jobs(["macos_shell/main.swift"]),
                          {"fmt", "orb-desktop-shell", "orb-macos-shell"})
