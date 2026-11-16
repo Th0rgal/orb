@@ -1962,6 +1962,13 @@ def rolling_upgrade_step(
                 )
             continue
 
+        if not healthy:
+            pending_remotes.append((host, db_path, -1))
+            if cordoned_map.get(host, False):
+                currently_cordoned_pending.append(host)
+            emit("unhealthy_node", node=host, healthy=False)
+            continue
+
         if (
             not staged
             and stage_artifacts

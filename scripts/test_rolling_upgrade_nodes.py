@@ -120,6 +120,16 @@ def _start_core_api_server(cordoned):
 
 
 class RollingUpgradeNodesTest(unittest.TestCase):
+    def test_staged_unhealthy_node_is_never_upgraded(self):
+        from unittest.mock import Mock
+        api = Mock()
+        api.list_nodes.return_value = [{"id": "fake", "cordoned": True}]
+        ops = FakeNodeOps({"fake": {"staged": True, "healthy": False}})
+        events, done = roll.rolling_upgrade_step(api, ops, [("fake", None)], apply=True)
+        self.assertFalse(done)
+        self.assertEqual(ops.upgraded_remotes, [])
+        self.assertTrue(any(e["action"] == "unhealthy_node" for e in events))
+
     def test_start_guard_is_privileged_and_clean_node_starts(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
