@@ -216,6 +216,47 @@ data class OrbProjectBoard(
     }
 }
 
+data class OrbMissionBoardSummary(val id: String, val title: String, val status: String, val parentMissionID: String?, val updatedAt: String, val bytes: Int, val textSha256: String) {
+    companion object { fun decode(raw: OrbDict) = OrbMissionBoardSummary(OrbJSON.str(raw, "mission_id").orEmpty(), OrbJSON.str(raw, "title").orEmpty(), OrbJSON.str(raw, "status").orEmpty(), OrbJSON.str(raw, "parent_mission_id"), OrbJSON.str(raw, "updated_at").orEmpty(), OrbJSON.int(raw, "bytes") ?: 0, OrbJSON.str(raw, "text_sha256").orEmpty()) }
+}
+
+object OrbMissionBoardProjection {
+    fun summaries(raw: OrbDict, currentMissionIDs: Set<String>? = null): List<OrbMissionBoardSummary> = OrbJSON.dictList(raw["boards"]).map(OrbMissionBoardSummary::decode).filter { it.id.isNotEmpty() && (currentMissionIDs == null || it.id in currentMissionIDs) }.sortedWith(compareByDescending<OrbMissionBoardSummary> { it.updatedAt }.thenBy { it.id })
+    fun shouldShowEntry(board: OrbProjectBoard) = !board.text.isNullOrBlank()
+    fun accepts(raw: OrbDict, missionID: String, project: String, expectedRevision: Long, currentProject: String, currentRevision: Long) = OrbJSON.str(raw, "mission_id") == missionID && project == currentProject && expectedRevision == currentRevision
+}
+
+@Composable
+fun OrbMissionBoardView(core: OrbCore, item: OrbMissionBoardSummary, project: String, expectedRevision: Long, onDismiss: () -> Unit) {
+    var text by remember(item.id) { mutableStateOf<String?>(null) }
+    var error by remember(item.id) { mutableStateOf<String?>(null) }
+    LaunchedEffect(item.id) {
+        try {
+            val raw = core.fetchDict("/api/control/missions/${core.encodeComponent(item.id)}/board")
+            val current = OrbMissionTree.placementOf(item.id)
+            if (OrbMissionBoardProjection.accepts(raw, item.id, project, expectedRevision, current?.project ?: project, current?.revision ?: expectedRevision)) text = raw["text"] as? String
+        } catch (e: OrbError) { if (e.status == 404) text = "" else error = e.message } catch (e: Exception) { error = e.message }
+    }
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = OrbStyle.background, contentColor = Color.White) {
+        Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(item.title.ifEmpty { "Mission board" }, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+            when { error != null -> Text(error!!, color = OrbStyle.error); text == null -> CircularProgressIndicator(); else -> androidx.compose.foundation.text.selection.SelectionContainer { Text(text.orEmpty(), fontFamily = FontFamily.Monospace) } }
+            TextButton(onClick = onDismiss) { Text("Done") }
+        }
+    }
+}
+
+@Composable
+fun OrbMissionBoardsSection(core: OrbCore, project: OrbRow, missions: List<OrbRow>, refreshID: Int, onOpen: (OrbMissionBoardSummary, Long) -> Unit) {
+    var boards by remember(project.id) { mutableStateOf<List<OrbMissionBoardSummary>>(emptyList()) }
+    var error by remember(project.id) { mutableStateOf<String?>(null) }
+    LaunchedEffect(project.id, refreshID) { try { boards = OrbMissionBoardProjection.summaries(core.fetchDict("/api/projects/${core.encodeComponent(project.id)}/boards"), missions.filter { OrbMissionTree.effectiveProject(it) == project.id }.map { it.id }.toSet()) } catch (e: OrbError) { if (e.status == 404) boards = emptyList() else error = e.message } catch (e: Exception) { error = e.message } }
+    if (boards.isNotEmpty()) Column(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Mission boards", color = Color.White, fontWeight = FontWeight.SemiBold)
+        boards.forEach { board -> TextButton(onClick = { onOpen(board, missions.firstOrNull { it.id == board.id }?.let { (it.raw["placement_revision"] as? Number)?.toLong() ?: 0 } ?: 0) }) { Column(Modifier.fillMaxWidth()) { Text(board.title.ifEmpty { board.id }, color = Color.White); Text("${board.status} · ${board.bytes} bytes · ${board.updatedAt}", color = OrbStyle.textSecondary, fontSize = 12.sp) } } }
+    } else if (error != null) Text(error!!, color = OrbStyle.error)
+}
+
 @Composable
 fun OrbProjectBoardSection(core: OrbCore, project: OrbRow, missions: List<OrbRow>, refreshID: Int, onOpenMission: (OrbRow) -> Unit) {
     val slug = OrbProjectAppearance.slug(project).ifEmpty { project.id }
