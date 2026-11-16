@@ -19,69 +19,26 @@ parity workflow. No reference image, hash, threshold, mask, or comparison
 code was changed. The latest complete local measurement is 36/36 pairs, mean
 raw mismatch **4.85%**, and **2/36** variants under 1%.
 
-### Search-dialog border
+### U3 verdict table
 
-**CLOSED AS IMPROVEMENT.** The native search-dialog border now uses the
-reference's 8% foreground/stroke mix; the crop shows the border tone matching
-the SolidJS reference more closely, with light 1x mismatch **14.6969% →
-14.4888%**. Crop: `crops/search-border-ref.png` beside
-`crops/search-border-after.png` (the pre-fix comparison is
-`crops/search-border-before.png`). Remaining blur and typography differences
-are open renderer work.
+All seven groups are **OPEN**: these are measured improvements toward the
+reference, but no remaining difference has been shown to be intentional and
+better native rendering.
 
-### Shared populated sidebar
+| group | verdict | before → after | crop | remaining fix |
+|---|---|---|---|---|
+| Search dialog | **OPEN** | light 1x **14.6969% → 14.4888%**; dark/light 2x **10.46% / 14.08%** | `crops/07_search_dialog_dark_2x_ref_crop.png` + `crops/07_search_dialog_dark_2x_leanui_crop.png` | Match backdrop blur/compositing and dialog typography; border correction is progress, not closure. |
+| Shared populated sidebar | **OPEN** | dark 2x **1.3090% → 1.1561%**; light 2x **1.3122% → 1.1654%** | `crops/sidebar-text-2x.png` + `crops/sidebar-icons-2x.png` | Match remaining text coverage, status rings, and icon geometry; native text remains lighter. |
+| Shared composer controls | **OPEN** | new-mission dark 2x **1.345% → 1.287%**; light 2x **1.347% → 1.290%** | `crops/08_new_mission_dialog_dark_2x_ref_crop.png` + `crops/08_new_mission_dialog_dark_2x_leanui_crop.png` | Match remaining control glyph and text rasterisation differences. |
+| Mission transcript and split diff | **OPEN** | transcript dark **7.05% / 6.12%** at 1x/2x; split diff dark **9.20% / 7.78%** at 1x/2x | `crops/03_mission_transcript_dark_2x_ref_crop.png` + LeanUI crop; `crops/04_mission_split_diff_dark_2x_ref_crop.png` + LeanUI crop | Fix pane geometry, scrollbar, composer, and text rendering. |
+| Machines fleet | **OPEN** | dark 2x **2.77%** | `crops/05_machines_fleet_dark_2x_ref_crop.png` + LeanUI crop | Fix fleet/status icons and remaining sidebar text/geometry. |
+| Toast notifications | **OPEN** | dark 2x **5.31%** | `crops/09_toast_notifications_dark_2x_ref_crop.png` + LeanUI crop | Fix toast shadow and alert/close icon compositing. |
+| Settings general | **OPEN** | dark 2x **3.33%** | `crops/06_settings_general_dark_2x_ref_crop.png` + LeanUI crop | Fix settings pane and text geometry. |
 
-**CLOSED AS IMPROVEMENT.** Project rows now use the reference folder outline
-geometry and an optical text baseline while retaining the 30px row / 31px
-pitch; the 2x crop shows the native rows aligned with the reference. Sidebar
-region mismatch improved to **4.94% dark 2x / 5.00% light 2x**, and full-frame
-`02_control_populated` improved to **1.3090% → 1.1561% dark 2x** and
-**1.3122% → 1.1654% light 2x**. Crops:
-`crops/sidebar-overview-2x.png`, `crops/sidebar-navigation-2x.png`,
-`crops/sidebar-text-2x.png`, and `crops/sidebar-icons-2x.png`.
-
-### Shared composer controls
-
-**CLOSED AS IMPROVEMENT.** The native composer now includes the reference's
-centered project/core controls, chevrons, and model indicator; the existing
-before/after evidence shows the controls in the same positions and reduces
-affected full-frame mismatch (for example new-mission dark 2x **1.345% →
-1.287%**). Crop: `crops/08_new_mission_dialog_dark_2x_ref_crop.png` beside
-`crops/08_new_mission_dialog_dark_2x_leanui_crop.png`.
-
-### Mission transcript and split diff
-
-**OPEN.** The remaining native text, pane geometry, scrollbar, and composer
-differences are not demonstrated improvements. The latest full-frame values
-remain **7.05% / 6.12%** for transcript dark 1x/2x and **9.20% / 7.78%** for
-split diff dark 1x/2x. Regions and likely fixes are documented by
-`crops/03_mission_transcript_dark_2x_ref_crop.png` plus its LeanUI crop and
-`crops/04_mission_split_diff_dark_2x_ref_crop.png` plus its LeanUI crop;
-geometry and text rasterisation need further renderer work.
-
-### Search-dialog remainder
-
-**OPEN.** The border improvement is closed above, but the group remainder is
-not better: the dialog still measures **10.46% dark 2x / 14.08% light 2x**.
-The region is the blurred dialog backdrop and dialog typography; fixing
-compositing/blur and matching text rasterisation would be required. Crops:
-`crops/07_search_dialog_dark_2x_ref_crop.png` and
-`crops/07_search_dialog_dark_2x_leanui_crop.png`.
-
-### Machines, toasts, and settings screen-specific regions
-
-**OPEN.** These differences were inspected but are not deliberate improvements
-as a whole. The latest full-frame values are machines dark 2x **2.77%**, toasts
-dark 2x **5.31%**, and settings dark 2x **3.33%**; the remaining fixes are
-fleet/status icons, toast shadow/icon compositing, and settings pane/text
-geometry. Crops: `crops/05_machines_fleet_dark_2x_ref_crop.png` with its
-LeanUI crop, `crops/09_toast_notifications_dark_2x_ref_crop.png` with its
-LeanUI crop, and `crops/06_settings_general_dark_2x_ref_crop.png` with its
-LeanUI crop.
-
-The temporary parity workflow trigger for `fix/leanui-parity-remaining` exists
-only to run the pinned parity job for this U3 branch; it must be removed before
-merging because the workflow has no pull-request trigger.
+The last parity run covering renderer code was green
+[43842885377](https://github.com/Th0rgal/orb/actions/runs/43842885377) at
+`ad195eee`. The branch trigger was removed in `cd4474cf`, so the docs-only head
+`cd4474cf` has no new renderer parity run. U3 remains open for all seven groups.
 
 ### Search-dialog border correction
 
