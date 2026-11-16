@@ -228,6 +228,7 @@ object OrbMissionBoardProjection {
     fun accepts(raw: OrbDict, missionID: String, project: String, expectedRevision: Long, currentProject: String, currentRevision: Long) = OrbJSON.str(raw, "mission_id") == missionID && project == currentProject && expectedRevision == currentRevision
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun OrbMissionBoardView(core: OrbCore, item: OrbMissionBoardSummary, project: String, expectedRevision: Long, onDismiss: () -> Unit) {
     var text by remember(item.id) { mutableStateOf<String?>(null) }
