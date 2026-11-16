@@ -895,32 +895,70 @@ def perform_fenced_upgrade(
     prev_build_sha = _read_build_conf_sha(resolved_build_conf) if resolved_build_conf else None
     manage_privd_unit = any(c["name"] == "orb-privd" for c in active_components) and bool(privd_unit_name)
     privd_was_active = bool(ctl.is_active(privd_unit_name)) if manage_privd_unit else False
+    units_were_active = {target_unit: bool(ctl.is_active(target_unit)) for (target_unit, _db, _bp) in targets}
 
     def _restore_components(comps, quarantine=False):
+        restore_errors = []
         for comp in reversed(comps):
+            cname = comp.get("name", str(comp.get("bin")))
             try:
-                if comp["backup"].is_file():
-                    shutil.copy2(comp["backup"], comp["restoring"])
-                    os.chmod(comp["restoring"], 0o755)
-                    os.replace(comp["restoring"], comp["bin"])
+                if comp.get("had_existing", True):
+                    if not comp["backup"].is_file():
+                        restore_errors.append(
+                            f"{cname}: missing backup {comp['backup']}"
+                        )
+                    else:
+                        shutil.copy2(comp["backup"], comp["restoring"])
+                        os.chmod(comp["restoring"], 0o755)
+                        os.replace(comp["restoring"], comp["bin"])
+                        exp_prev = comp.get("prev_sha256")
+                        got_prev = compute_file_sha256(comp["bin"])
+                        if exp_prev and got_prev != exp_prev.lower():
+                            restore_errors.append(
+                                f"{cname}: restored sha256 {got_prev} != expected {exp_prev}"
+                            )
+                        elif not comp["bin"].is_file():
+                            restore_errors.append(
+                                f"{cname}: restored binary {comp['bin']} missing after replace"
+                            )
+                else:
+                    comp["bin"].unlink(missing_ok=True)
+                    if comp["bin"].exists():
+                        restore_errors.append(
+                            f"{cname}: failed removing newly-installed {comp['bin']}"
+                        )
+            except Exception as err:
+                restore_errors.append(f"{cname}: {err}")
             finally:
-                comp["restoring"].unlink(missing_ok=True)
+                try:
+                    comp["restoring"].unlink(missing_ok=True)
+                except OSError:
+                    pass
             if quarantine:
                 try:
                     if comp["staged"].exists():
                         os.replace(comp["staged"], comp["failed"])
-                except OSError:
-                    pass
+                except Exception as q_err:
+                    restore_errors.append(f"{cname} quarantine: {q_err}")
         if resolved_build_conf and expected_build_sha:
             try:
                 if prev_build_sha is not None:
                     _write_build_conf_sha(resolved_build_conf, prev_build_sha)
+                    if _read_build_conf_sha(resolved_build_conf) != prev_build_sha:
+                        restore_errors.append(
+                            f"build_conf {resolved_build_conf}: restored sha mismatch"
+                        )
                 else:
                     resolved_build_conf.unlink(missing_ok=True)
+                    if resolved_build_conf.exists():
+                        restore_errors.append(
+                            f"build_conf {resolved_build_conf}: failed unlinking"
+                        )
                 if hasattr(ctl, "daemon_reload"):
                     ctl.daemon_reload()
-            except OSError:
-                pass
+            except Exception as conf_err:
+                restore_errors.append(f"build_conf {resolved_build_conf}: {conf_err}")
+        return restore_errors
 
     # 1. Unlocked pre-check on verified existing ledgers so busy nodes never contend on jobs.db
     db_c1 = 0
@@ -1021,20 +1059,36 @@ def perform_fenced_upgrade(
                     ctl.daemon_reload()
         except Exception as swap_err:
             for comp in active_components:
-                comp["installing"].unlink(missing_ok=True)
+                try:
+                    comp["installing"].unlink(missing_ok=True)
+                except OSError:
+                    pass
             for entry in reversed(fences):
                 if entry[3]:
-                    entry[2].execute("ROLLBACK")
+                    try:
+                        entry[2].execute("ROLLBACK")
+                    except Exception:
+                        pass
                     entry[3] = False
-                entry[2].close()
+                try:
+                    entry[2].close()
+                except Exception:
+                    pass
                 _restore_db_ownership(entry[0], entry[1])
             fences.clear()
-            _restore_components(replaced_comps, quarantine=False)
-            swap_journal_path.unlink(missing_ok=True)
+            restore_errors = _restore_components(replaced_comps, quarantine=False)
+            if not restore_errors:
+                swap_journal_path.unlink(missing_ok=True)
             if privd_was_active:
                 ctl.start_best_effort(privd_unit_name)
+                if not ctl.is_active(privd_unit_name):
+                    restore_errors.append(f"{privd_unit_name}: inactive after rollback start")
             for target_unit, _db, _bp in targets:
                 ctl.start_best_effort(target_unit)
+                if units_were_active.get(target_unit, True) and not ctl.is_active(target_unit):
+                    restore_errors.append(f"{target_unit}: inactive after rollback start")
+            if restore_errors:
+                return f"ROLLBACK_FAILED:swap error ({swap_err}); rollback errors: {'; '.join(restore_errors)}"
             raise RuntimeError(f"binary swap failed; restored previous service: {swap_err}") from swap_err
 
         # Release SQLite write fences right before starting the new process(es) so
@@ -1115,12 +1169,19 @@ def perform_fenced_upgrade(
             elif expected_build_sha is not None or expected_sha256:
                 raise RuntimeError("post-start health check returned no build_sha/binary_sha256 metadata")
     except Exception as act_err:
-        _restore_components(active_components, quarantine=True)
-        swap_journal_path.unlink(missing_ok=True)
+        restore_errors = _restore_components(active_components, quarantine=True)
+        if not restore_errors:
+            swap_journal_path.unlink(missing_ok=True)
         if privd_was_active:
             ctl.restart_best_effort(privd_unit_name)
+            if not ctl.is_active(privd_unit_name):
+                restore_errors.append(f"{privd_unit_name}: inactive after rollback restart")
         for target_unit, _db, _bp in targets:
             ctl.restart_best_effort(target_unit)
+            if units_were_active.get(target_unit, True) and not ctl.is_active(target_unit):
+                restore_errors.append(f"{target_unit}: inactive after rollback restart")
+        if restore_errors:
+            return f"ROLLBACK_FAILED:activation error ({act_err}); rollback errors: {'; '.join(restore_errors)}"
         primary_backup = active_components[0]["backup"]
         primary_failed = active_components[0]["failed"]
         raise RuntimeError(
@@ -1531,6 +1592,10 @@ def rolling_upgrade_step(
                 cordoned_map[host] = False
             emit("upgraded_remote", node=host, uncordoned=(host not in PreserveCordons))
             return True
+        if str(outcome).startswith("ROLLBACK_FAILED"):
+            upgrade_failures += 1
+            emit("rollback_failed", node=host, error=str(outcome))
+            return False
         emit("upgrade_deferred", node=host, detail=outcome)
         return False
 
@@ -1697,6 +1762,9 @@ def rolling_upgrade_step(
                         else:
                             if outcome == "UPGRADED":
                                 emit("upgraded_local", running_jobs=0)
+                            elif str(outcome).startswith("ROLLBACK_FAILED"):
+                                local_pending = True
+                                emit("local_rollback_failed", error=str(outcome))
                             else:
                                 local_pending = True
                                 emit("local_deferred", detail=outcome)
@@ -1761,10 +1829,12 @@ def run_governed_rollout(
             "probe_error",
             "stage_failed",
             "upgrade_failed",
+            "rollback_failed",
             "upgrade_quarantined",
             "unhealthy_node",
             "local_probe_error",
             "local_upgrade_failed",
+            "local_rollback_failed",
             "local_upgrade_quarantined",
             "unhealthy_local",
         }
@@ -1962,10 +2032,12 @@ def main(argv=None):
             "probe_error",
             "stage_failed",
             "upgrade_failed",
+            "rollback_failed",
             "upgrade_quarantined",
             "unhealthy_node",
             "local_probe_error",
             "local_upgrade_failed",
+            "local_rollback_failed",
             "local_upgrade_quarantined",
             "unhealthy_local",
             "drain_timeout",
