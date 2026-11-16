@@ -149,6 +149,19 @@ for (const screen of SCREENS) for (const theme of THEMES) for (const scale of SC
    }
    expect(frames, 'the screen never settled').toBeLessThan(20);
    console.log(`${name}: settled after ${frames} frames`);
+   // scrollbarHover.ts hides its thumb 900ms after the last scroll. The stored
+   // 2x transcript reference includes that thumb: establish the same visible
+   // state after settling instead of racing capture against its hide timer.
+   if (screen.id === '03_mission_transcript' && scale === 2) {
+    await page.locator('.scroll').evaluate(el => el.dispatchEvent(new Event('scroll')));
+    shot = await page.screenshot({animations: 'disabled', caret: 'hide'});
+   }
+   // Opening the split pane also scrolls the transcript. Wait for its actual
+   // hide timer, not two identical frames within the 900ms visible interval.
+   if (screen.id === '04_mission_split_diff') {
+    await expect(page.locator('.transcript-scroll-thumb')).toBeHidden();
+    shot = await page.screenshot({animations: 'disabled', caret: 'hide'});
+   }
    fs.mkdirSync(OUT, {recursive: true});
    fs.writeFileSync(`${OUT}/${name}.png`, shot);
    if (name === '03_mission_transcript_dark_1x') {

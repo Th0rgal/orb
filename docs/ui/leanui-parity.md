@@ -34,6 +34,40 @@ the repository.
 
 ## Results
 
+### Reproduction check, 16 November 2026
+
+The branch-triggered `.github/workflows/leanui-parity.yml` downloads Chrome for
+Testing 151.0.7922.108 and uses a private fontconfig directory. A private browser
+can also be selected locally with `ORB_REFERENCE_CHROME=/absolute/path/to/chrome`
+in the reference command above. This changes browser selection only.
+
+Reference verification passes **36/36** in pinned Ubuntu 24.04
+[run 43802006749](https://github.com/Th0rgal/orb/actions/runs/43802006749).
+Only the four split-diff reference hashes were refreshed: commit `e201d833`
+changed the displayed mock filename to `lean/OrbDesktop/OrbDesktop/Main.lean`.
+The intermittent transcript mismatch was the custom scrollbar's 900ms hide
+timer, not font loading: the 2x dark difference occupied only x=2918..2933,
+y=1648..1833 (2793 pixels). Capture now explicitly establishes the stored visible
+2x transcript thumb and waits for the split-pane thumb to hide. No transcript
+hash, threshold, mask, or comparison method changed; no known-flaky exceptions
+are needed. The workflow fails on hash disagreement and preserves captures.
+The workflow measurement is 2/36 variants under 1%, mean mismatch 5.01%.
+The table below remains the prior checked-in measurement; the regenerated table
+and crops are in that run's artifact. U3 is not complete.
+
+U2's launch check passed on Ubuntu 24.04 in the same green workflow,
+[run 43802006749](https://github.com/Th0rgal/orb/actions/runs/43802006749):
+`scripts/orb_desktop_dev.sh --native`, with both fallback variables unset,
+attached Wayland buffers and remained alive under Weston/Xvfb. Its
+[artifact](https://github.com/Th0rgal/orb/actions/runs/43795949652/artifacts/14194448300)
+contains `.ci/leanui/u2/native-window.png` and the protocol/build log.
+The existing CI step `Native LeanUI build and warm-cache invalidation` invokes
+`python3 scripts/test_native_desktop_cache.py`: it runs the same build script,
+checks a deliberately invalid source edit, rebuilds, and runs `--self-test`;
+it does not launch the normal window.
+
+Host requirement: native linking needs libc++ compatible with the installed Lean runtime (uruk's libc++18 conflicts with its bundled Clang23 runtime).
+
 <!-- parity:begin -->
 Reference: SolidJS desktop. Candidate: LeanUI. 36 pairs, 0 errors, tolerance 8.
 
@@ -41,57 +75,57 @@ Reference: SolidJS desktop. Candidate: LeanUI. 36 pairs, 0 errors, tolerance 8.
 
 | screen | theme | scale | mismatch % | > tol % | SSIM | sidebar | transcript | composer |
 |---|---|---|---:|---:|---:|---:|---:|---:|
-| 01_control_empty | dark | 1x | 1.19 | 1.07 | 0.9836 | 3.48 / 0.9605 | 0.87 / 0.9862 | 0.00 / 1.0000 |
-| 01_control_empty | dark | 2x | 0.85 | 0.77 | 0.9865 | 2.72 / 0.9632 | 0.57 / 0.9895 | 0.00 / 1.0000 |
-| 01_control_empty | light | 1x | 1.19 | 1.09 | 0.9832 | 3.47 / 0.9604 | 0.87 / 0.9858 | 0.00 / 1.0000 |
-| 01_control_empty | light | 2x | 0.85 | 0.77 | 0.9863 | 2.70 / 0.9633 | 0.57 / 0.9893 | 0.00 / 1.0000 |
-| 02_control_populated | dark | 1x | 1.76 | 1.41 | 0.9817 | 7.27 / 0.9475 | 0.87 / 0.9862 | 0.00 / 1.0000 |
-| 02_control_populated | dark | 2x | 1.36 | 1.18 | 0.9775 | 6.13 / 0.9021 | 0.57 / 0.9895 | 0.00 / 1.0000 |
-| 02_control_populated | light | 1x | 1.78 | 1.42 | 0.9813 | 7.39 / 0.9474 | 0.87 / 0.9858 | 0.00 / 1.0000 |
-| 02_control_populated | light | 2x | 1.37 | 1.19 | 0.9774 | 6.16 / 0.9028 | 0.57 / 0.9893 | 0.00 / 1.0000 |
-| 03_mission_transcript | dark | 1x | 7.09 | 4.35 | 0.9163 | 8.92 / 0.9162 | 5.75 / 0.9118 | 15.56 / 0.9431 |
-| 03_mission_transcript | dark | 2x | 6.28 | 3.77 | 0.9267 | 7.28 / 0.8862 | 5.06 / 0.9299 | 15.07 / 0.9547 |
-| 03_mission_transcript | light | 1x | 6.24 | 4.76 | 0.9139 | 9.03 / 0.9156 | 5.65 / 0.9088 | 7.24 / 0.9407 |
-| 03_mission_transcript | light | 2x | 5.31 | 4.19 | 0.9255 | 7.30 / 0.8868 | 4.91 / 0.9284 | 6.09 / 0.9535 |
-| 04_mission_split_diff | dark | 1x | 9.11 | 6.34 | 0.8683 | 8.92 / 0.9162 | 8.44 / 0.8532 | 13.58 / 0.9405 |
-| 04_mission_split_diff | dark | 2x | 7.82 | 5.29 | 0.8934 | 7.28 / 0.8862 | 7.12 / 0.8891 | 13.11 / 0.9526 |
-| 04_mission_split_diff | light | 1x | 9.19 | 7.02 | 0.8640 | 9.03 / 0.9156 | 9.40 / 0.8483 | 7.08 / 0.9377 |
-| 04_mission_split_diff | light | 2x | 7.86 | 5.97 | 0.8911 | 7.30 / 0.8868 | 8.10 / 0.8862 | 6.06 / 0.9513 |
-| 05_machines_fleet | dark | 1x | 3.69 | 3.24 | 0.9535 | 7.27 / 0.9476 | 3.55 / 0.9468 | 0.00 / 1.0000 |
-| 05_machines_fleet | dark | 2x | 2.95 | 2.68 | 0.9588 | 6.13 / 0.9022 | 2.77 / 0.9635 | 0.00 / 1.0000 |
-| 05_machines_fleet | light | 1x | 3.70 | 3.24 | 0.9536 | 7.39 / 0.9475 | 3.54 / 0.9469 | 0.00 / 1.0000 |
-| 05_machines_fleet | light | 2x | 2.95 | 2.69 | 0.9594 | 6.15 / 0.9029 | 2.77 / 0.9642 | 0.00 / 1.0000 |
-| 06_settings_general | dark | 1x | 4.41 | 3.81 | 0.9340 | 1.90 / 0.9885 | 4.88 / 0.9239 | 6.07 / 0.9033 |
-| 06_settings_general | dark | 2x | 3.36 | 2.83 | 0.9495 | 1.48 / 0.9828 | 3.71 / 0.9435 | 4.58 / 0.9276 |
-| 06_settings_general | light | 1x | 4.19 | 3.88 | 0.9318 | 1.90 / 0.9885 | 4.57 / 0.9208 | 6.04 / 0.9049 |
-| 06_settings_general | light | 2x | 3.15 | 2.89 | 0.9484 | 1.47 / 0.9830 | 3.42 / 0.9418 | 4.60 / 0.9290 |
-| 07_search_dialog | dark | 1x | 11.21 | 1.94 | 0.9637 | 38.90 / 0.9960 | 7.23 / 0.9504 | 0.03 / 1.0000 |
-| 07_search_dialog | dark | 2x | 11.39 | 1.70 | 0.9703 | 40.26 / 0.9971 | 7.17 / 0.9594 | 0.07 / 1.0000 |
-| 07_search_dialog | light | 1x | 24.21 | 2.04 | 0.9631 | 88.58 / 0.9963 | 14.83 / 0.9496 | 0.49 / 1.0000 |
-| 07_search_dialog | light | 2x | 23.60 | 1.75 | 0.9699 | 90.50 / 0.9975 | 13.61 / 0.9588 | 0.32 / 1.0000 |
-| 08_new_mission_dialog | dark | 1x | 1.76 | 1.43 | 0.9815 | 7.27 / 0.9475 | 0.88 / 0.9860 | 0.00 / 1.0000 |
-| 08_new_mission_dialog | dark | 2x | 1.37 | 1.20 | 0.9770 | 6.13 / 0.9021 | 0.59 / 0.9889 | 0.00 / 1.0000 |
-| 08_new_mission_dialog | light | 1x | 1.78 | 1.43 | 0.9813 | 7.39 / 0.9474 | 0.87 / 0.9857 | 0.00 / 1.0000 |
-| 08_new_mission_dialog | light | 2x | 1.37 | 1.21 | 0.9770 | 6.16 / 0.9028 | 0.58 / 0.9887 | 0.00 / 1.0000 |
-| 09_toast_notifications | dark | 1x | 6.13 | 2.49 | 0.9565 | 7.27 / 0.9475 | 4.25 / 0.9730 | 20.16 / 0.8420 |
-| 09_toast_notifications | dark | 2x | 5.51 | 2.10 | 0.9579 | 6.13 / 0.9021 | 3.78 / 0.9784 | 19.12 / 0.8827 |
-| 09_toast_notifications | light | 1x | 6.49 | 2.46 | 0.9590 | 7.39 / 0.9474 | 4.31 / 0.9724 | 23.33 / 0.8740 |
-| 09_toast_notifications | light | 2x | 5.92 | 2.05 | 0.9595 | 6.16 / 0.9028 | 3.82 / 0.9780 | 23.02 / 0.9015 |
+| 01_control_empty | dark | 1x | 1.19 | 1.07 | 0.9836 | 3.48 / 0.9605 | 0.87 / 0.9863 | 0.00 / 1.0000 |
+| 01_control_empty | dark | 2x | 0.85 | 0.76 | 0.9865 | 2.70 / 0.9636 | 0.57 / 0.9895 | 0.00 / 1.0000 |
+| 01_control_empty | light | 1x | 1.19 | 1.09 | 0.9833 | 3.47 / 0.9604 | 0.87 / 0.9859 | 0.00 / 1.0000 |
+| 01_control_empty | light | 2x | 0.85 | 0.77 | 0.9864 | 2.69 / 0.9638 | 0.57 / 0.9893 | 0.00 / 1.0000 |
+| 02_control_populated | dark | 1x | 1.77 | 1.41 | 0.9817 | 7.30 / 0.9476 | 0.87 / 0.9863 | 0.00 / 1.0000 |
+| 02_control_populated | dark | 2x | 1.36 | 1.18 | 0.9775 | 6.12 / 0.9025 | 0.57 / 0.9895 | 0.00 / 1.0000 |
+| 02_control_populated | light | 1x | 1.78 | 1.42 | 0.9814 | 7.38 / 0.9474 | 0.87 / 0.9859 | 0.00 / 1.0000 |
+| 02_control_populated | light | 2x | 1.36 | 1.19 | 0.9775 | 6.15 / 0.9032 | 0.57 / 0.9893 | 0.00 / 1.0000 |
+| 03_mission_transcript | dark | 1x | 7.09 | 4.35 | 0.9163 | 8.94 / 0.9162 | 5.75 / 0.9118 | 15.56 / 0.9431 |
+| 03_mission_transcript | dark | 2x | 6.23 | 3.75 | 0.9268 | 7.26 / 0.8866 | 5.07 / 0.9299 | 14.53 / 0.9558 |
+| 03_mission_transcript | light | 1x | 6.24 | 4.76 | 0.9139 | 9.03 / 0.9156 | 5.65 / 0.9088 | 7.23 / 0.9407 |
+| 03_mission_transcript | light | 2x | 5.26 | 4.15 | 0.9257 | 7.29 / 0.8872 | 4.91 / 0.9283 | 5.51 / 0.9552 |
+| 04_mission_split_diff | dark | 1x | 9.13 | 6.38 | 0.8676 | 8.94 / 0.9162 | 8.54 / 0.8519 | 13.05 / 0.9422 |
+| 04_mission_split_diff | dark | 2x | 7.83 | 5.33 | 0.8931 | 7.26 / 0.8866 | 7.20 / 0.8885 | 12.57 / 0.9537 |
+| 04_mission_split_diff | light | 1x | 9.26 | 7.09 | 0.8631 | 9.03 / 0.9156 | 9.49 / 0.8470 | 7.08 / 0.9377 |
+| 04_mission_split_diff | light | 2x | 7.87 | 6.00 | 0.8909 | 7.29 / 0.8872 | 8.18 / 0.8855 | 5.49 / 0.9530 |
+| 05_machines_fleet | dark | 1x | 3.69 | 3.24 | 0.9535 | 7.30 / 0.9476 | 3.55 / 0.9468 | 0.00 / 1.0000 |
+| 05_machines_fleet | dark | 2x | 2.95 | 2.68 | 0.9588 | 6.11 / 0.9026 | 2.77 / 0.9635 | 0.00 / 1.0000 |
+| 05_machines_fleet | light | 1x | 3.70 | 3.25 | 0.9536 | 7.38 / 0.9475 | 3.54 / 0.9469 | 0.00 / 1.0000 |
+| 05_machines_fleet | light | 2x | 2.95 | 2.69 | 0.9594 | 6.14 / 0.9033 | 2.77 / 0.9641 | 0.00 / 1.0000 |
+| 06_settings_general | dark | 1x | 4.41 | 3.81 | 0.9340 | 1.90 / 0.9885 | 4.88 / 0.9239 | 6.07 / 0.9032 |
+| 06_settings_general | dark | 2x | 3.35 | 2.83 | 0.9496 | 1.49 / 0.9826 | 3.70 / 0.9437 | 4.57 / 0.9276 |
+| 06_settings_general | light | 1x | 4.18 | 3.88 | 0.9319 | 1.90 / 0.9885 | 4.57 / 0.9208 | 6.03 / 0.9049 |
+| 06_settings_general | light | 2x | 3.14 | 2.89 | 0.9485 | 1.47 / 0.9828 | 3.41 / 0.9420 | 4.59 / 0.9290 |
+| 07_search_dialog | dark | 1x | 11.11 | 1.71 | 0.9682 | 38.91 / 0.9960 | 7.08 / 0.9568 | 0.03 / 1.0000 |
+| 07_search_dialog | dark | 2x | 11.26 | 1.47 | 0.9738 | 40.25 / 0.9971 | 7.01 / 0.9643 | 0.07 / 1.0000 |
+| 07_search_dialog | light | 1x | 14.70 | 1.77 | 0.9683 | 46.96 / 0.9963 | 10.27 / 0.9569 | 0.41 / 1.0000 |
+| 07_search_dialog | light | 2x | 14.94 | 1.47 | 0.9738 | 49.09 / 0.9975 | 10.17 / 0.9642 | 0.43 / 1.0000 |
+| 08_new_mission_dialog | dark | 1x | 1.77 | 1.43 | 0.9815 | 7.30 / 0.9476 | 0.88 / 0.9860 | 0.00 / 1.0000 |
+| 08_new_mission_dialog | dark | 2x | 1.37 | 1.20 | 0.9771 | 6.12 / 0.9025 | 0.59 / 0.9889 | 0.00 / 1.0000 |
+| 08_new_mission_dialog | light | 1x | 1.78 | 1.43 | 0.9813 | 7.38 / 0.9474 | 0.87 / 0.9857 | 0.00 / 1.0000 |
+| 08_new_mission_dialog | light | 2x | 1.37 | 1.21 | 0.9770 | 6.15 / 0.9032 | 0.58 / 0.9887 | 0.00 / 1.0000 |
+| 09_toast_notifications | dark | 1x | 6.13 | 2.49 | 0.9567 | 7.30 / 0.9476 | 4.24 / 0.9732 | 20.16 / 0.8420 |
+| 09_toast_notifications | dark | 2x | 5.51 | 2.10 | 0.9578 | 6.12 / 0.9025 | 3.78 / 0.9784 | 19.14 / 0.8816 |
+| 09_toast_notifications | light | 1x | 6.45 | 2.43 | 0.9591 | 7.38 / 0.9474 | 4.24 / 0.9726 | 23.32 / 0.8741 |
+| 09_toast_notifications | light | 2x | 5.87 | 2.03 | 0.9594 | 6.15 / 0.9032 | 3.75 / 0.9780 | 23.06 / 0.9004 |
 
-Mean over 36 measured pairs: mismatch 5.51 %, above tolerance 2.71 %, SSIM 0.9517 (min 0.8640, max 0.9865).
+Mean over 36 measured pairs: mismatch 5.00 %, above tolerance 2.69 %, SSIM 0.9522 (min 0.8631, max 0.9865).
 
 Determinism (each renderer compared with a second capture of itself):
 
-- SolidJS reference: not measured
-- LeanUI: not measured
+- SolidJS reference: 36/36 images pixel-identical
+- LeanUI: 36/36 images pixel-identical
 <!-- parity:end -->
 
 ## Wave 3 status and acceptance
 
 LeanUI remains opt-in (`scripts/orb_desktop_dev.sh --native`). The default
 SolidJS desktop and its production launcher are unchanged. Wave 2 was recovered
-from public commit `ce5cff01`; this branch is based on master `cb4887d3e` and
-keeps master's `scripts/build_orb_bins.sh` verbatim.
+from public commit `ce5cff01`; this branch is based on the current `master` tip
+and keeps master's `scripts/build_orb_bins.sh` verbatim.
 
 **The <1% acceptance gate is not yet satisfied.** Architectural differences
 below are disclosed for review, not approved improvements. Missing icons,
@@ -131,14 +165,14 @@ metrics above include every pixel: no masks, excluded icons, or crop-only scores
 | Screen | Remaining reason; disposition |
 |---|---|
 | 01_control_empty | Sidebar/topbar cached vector icons, tall-composer focus border (`pal.borderStrong`), placeholder color (`--placeholder`), and empty-state hidden send button now match SolidJS; residual diff (`0.85%` at 2×, `1.19%` at 1×) is FreeType grayscale glyph coverage vs Chromium Skia. |
-| 02_control_populated | Sidebar project tree connectors, status rings, Inbox count, and mission ellipsis truncation added; residual diff (`1.36%` at 2×, `1.76%` at 1×) is FreeType vs Skia text/stroke rasterization down the 30-row sidebar. |
+| 02_control_populated | Sidebar project tree connectors, status rings, Inbox count, and mission ellipsis truncation added; residual diff (`1.36%` at 2×, `1.77%` at 1×) is FreeType vs Skia text/stroke rasterization down the 30-row sidebar. |
 | 03_mission_transcript | Composer dock drop-shadow (`offsetY=4, blur=16, alpha=0x14`), placeholder color, `+` glyph, stop-button radius, and metadata chevrons added (`20.0% → 6.1%` light composer diff); remaining diff is inline code chips, syntax spans, and box-shadow quantization. |
 | 04_mission_split_diff | Shares the `03` composer dock and sidebar improvements (`17.0% → 6.1%` light composer diff); remaining diff is diff header controls, syntax spans, and line wrapping. |
 | 05_machines_fleet | Added `.m-group-bar` fill (`#242424` / `#edece9`) and populated sidebar icons (`4.29% → 3.69%` 1×, `3.49% → 2.95%` 2×); remaining diff is fleet row status icons and FreeType vs Skia text rasterization. |
 | 06_settings_general | Added settings sidebar spacing/footer, active `Account` tab indicator, `API URL` `<input>` box, `Theme`/`Background sync` `<select>` boxes, and borderless `.s-btn` action buttons (`5.14% → 4.19%` 1×, `3.89% → 3.15%` 2×; sidebar `1.47%` / SSIM `0.9885`). |
-| 07_search_dialog | Premultiplied 8-bit `blendOver` compositing (`7.23%` dark dialog-body diff, `1.70%` above-tolerance at 2×, SSIM `0.9703`); residual diff is three-pass box blur vs Skia Gaussian backdrop filter. |
-| 08_new_mission_dialog | Centered New Agent composer with typed prompt, focus border, and active send button (`1.37%` at 2×, `1.76%` at 1×, SSIM `0.9815`). |
-| 09_toast_notifications | Premultiplied shadow compositing over the New Agent shell (`2.05%` above-tolerance at 2×, SSIM `0.9595`); residual diff is three-pass box shadow vs Skia shadow and toast alert/close icons. |
+| 07_search_dialog | Straight-alpha 8-bit `blendOver` compositing reduces the dark mismatch to `11.11%` / `11.26%` at 1×/2× and light to `14.70%` / `14.94%`; above-tolerance is `1.71%` / `1.47%` in both themes, with SSIM `0.9682` / `0.9738` dark and `0.9683` / `0.9738` light. Residual diff is three-pass box blur vs Skia Gaussian backdrop filtering. |
+| 08_new_mission_dialog | Centered New Agent composer with typed prompt, focus border, and active send button (`1.37%` at 2×, `1.77%` at 1×, SSIM `0.9815`). |
+| 09_toast_notifications | Premultiplied shadow compositing over the New Agent shell (`2.10%` above-tolerance at 2×, SSIM `0.9578`); residual diff is three-pass box shadow vs Skia shadow and toast alert/close icons. |
 
 ### 01_control_empty
 

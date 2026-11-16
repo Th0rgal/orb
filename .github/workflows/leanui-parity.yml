@@ -1,0 +1,172 @@
+name: LeanUI parity
+
+on:
+  push:
+    branches:
+      - fix/leanui-pixel-parity
+      - master
+    paths:
+      - 'lean/LeanUI/**'
+      - 'lean/OrbDesktop/**'
+      - 'scripts/build_orb_bins.sh'
+      - 'scripts/orb_desktop_dev.sh'
+      - 'scripts/leanui_parity.py'
+      - 'scripts/test_leanui_*.py'
+      - 'docs/ui/**'
+      - 'orb/tests/leanui-reference.capture.ts'
+      - 'orb/playwright.leanui-reference.config.ts'
+      - '.github/workflows/leanui-parity.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  parity:
+    runs-on: ubuntu-24.04
+    env:
+      CHROME_VERSION: 151.0.7922.108
+      ORB_ALLOW_RAW_LAKE_FALLBACK: ''
+      ORB_SKIP_TURBO_LEAN: ''
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/setup-turbo-lean
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.5
+
+      - name: Install desktop and capture dependencies
+        run: |
+          set -euo pipefail
+          ./scripts/ci_harden_ubuntu_apt.sh
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev libssl-dev libsqlite3-dev zstd \
+            libwayland-dev libxkbcommon-dev libfreetype-dev libharfbuzz-dev \
+            libfontconfig-dev weston fonts-inter fonts-dejavu-core unzip \
+            xvfb imagemagick python3-numpy python3-pil ripgrep
+
+      - name: Install pinned Chrome for Testing and private fonts
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/leanui/chrome .ci/leanui/fonts .ci/leanui/fontconfig/cache
+          curl --fail --location \
+            "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chrome-linux64.zip" \
+            -o .ci/leanui/chrome.zip
+          unzip -q .ci/leanui/chrome.zip -d .ci/leanui/chrome
+          cp /usr/share/fonts/opentype/inter/*.otf .ci/leanui/fonts/
+          cp /usr/share/fonts/truetype/dejavu/DejaVuSansMono*.ttf .ci/leanui/fonts/
+          cat > .ci/leanui/fontconfig/fonts.conf <<'EOF'
+          <?xml version="1.0"?>
+          <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+          <fontconfig>
+            <include ignore_missing="no">/etc/fonts/fonts.conf</include>
+            <dir prefix="relative">../fonts</dir>
+            <cachedir prefix="relative">cache</cachedir>
+          </fontconfig>
+          EOF
+          FONTCONFIG_FILE="$PWD/.ci/leanui/fontconfig/fonts.conf" fc-cache -f
+          .ci/leanui/chrome/chrome-linux64/chrome --version
+          FONTCONFIG_FILE="$PWD/.ci/leanui/fontconfig/fonts.conf" fc-match Inter
+          FONTCONFIG_FILE="$PWD/.ci/leanui/fontconfig/fonts.conf" fc-match 'DejaVu Sans Mono'
+
+      - name: Install frontend dependencies
+        working-directory: orb
+        run: bun install --frozen-lockfile
+
+      - name: Capture SolidJS reference and verify hashes
+        working-directory: orb
+        env:
+          ORB_REFERENCE_CHROME: ${{ github.workspace }}/.ci/leanui/chrome/chrome-linux64/chrome
+          FONTCONFIG_FILE: ${{ github.workspace }}/.ci/leanui/fontconfig/fonts.conf
+          ORB_REFERENCE_OUT: ${{ github.workspace }}/.ci/leanui/ref
+        run: |
+          set -euo pipefail
+          node node_modules/.bin/playwright test \
+            -c playwright.leanui-reference.config.ts --reporter=line
+          set +e
+          (cd "$ORB_REFERENCE_OUT" && sha256sum -c \
+            "$GITHUB_WORKSPACE/docs/ui/leanui-parity-reference.sha256") \
+            > "$GITHUB_WORKSPACE/.ci/leanui/reference-hashes.txt" 2>&1
+          hash_status=$?
+          set -e
+          printf 'hashes_reproduced=%s\n' "$([[ "$hash_status" -eq 0 ]] && echo yes || echo no)" \
+            | tee -a "$GITHUB_WORKSPACE/.ci/leanui/reference-hashes.txt"
+          exit "$hash_status"
+
+      - name: Run U2 native script under Weston
+        if: ${{ !cancelled() }}
+        env:
+          FONTCONFIG_FILE: ${{ github.workspace }}/.ci/leanui/fontconfig/fonts.conf
+        run: |
+          set -euo pipefail
+          unset ORB_ALLOW_RAW_LAKE_FALLBACK ORB_SKIP_TURBO_LEAN
+          scripts/build_orb_bins.sh --only orb-desktop-native --out-dir "$PWD/target/native"
+          mkdir -p .ci/leanui/weston .ci/leanui/u2
+          chmod 700 .ci/leanui/weston
+          export XDG_RUNTIME_DIR="$PWD/.ci/leanui/weston"
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1470x923x24 > .ci/leanui/xvfb.log 2>&1 &
+          xvfb_pid=$!
+          sleep 2
+          weston --backend=x11-backend.so --socket=leanui-u2 \
+            --width=1470 --height=923 \
+            --shell=kiosk-shell.so > .ci/leanui/weston.log 2>&1 &
+          weston_pid=$!
+          trap 'kill "${app_pid:-}" "$weston_pid" "$xvfb_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 50); do
+            [[ -S .ci/leanui/weston/leanui-u2 ]] && break
+            sleep 0.2
+          done
+          test -S .ci/leanui/weston/leanui-u2
+          export WAYLAND_DISPLAY=leanui-u2
+          WAYLAND_DEBUG=1 scripts/orb_desktop_dev.sh --native > .ci/leanui/u2.log 2>&1 &
+          app_pid=$!
+          for _ in $(seq 1 120); do
+            kill -0 "$app_pid"
+            if grep -q 'wl_surface.*attach' .ci/leanui/u2.log; then break; fi
+            sleep 1
+          done
+          grep -q 'wl_surface.*attach' .ci/leanui/u2.log
+          sleep 2
+          kill -0 "$app_pid"
+          import -window root .ci/leanui/u2/native-window.png
+
+      - name: Render LeanUI goldens and regenerate parity table
+        env:
+          FONTCONFIG_FILE: ${{ github.workspace }}/.ci/leanui/fontconfig/fonts.conf
+        run: |
+          set -euo pipefail
+          scripts/build_orb_bins.sh --only orb-desktop-native \
+            --out-dir "$PWD/target/native"
+          target/native/orb-desktop-native --headless-golden-all \
+            .ci/leanui/native --width 1470 --height 923
+          python3 scripts/leanui_parity.py \
+            --reference .ci/leanui/ref --native .ci/leanui/native \
+            --out .ci/leanui/parity-diff --require 36 \
+            --table docs/ui/leanui-parity.md \
+            --crops-dir docs/ui/crops
+
+      - name: Run parity tests
+        run: |
+          python3 -m unittest -v scripts/test_leanui_tokens.py scripts/test_leanui_parity.py
+          scripts/leanui_window_smoke.sh target/native/orb-desktop-native
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: leanui-parity-${{ github.sha }}
+          path: |
+            docs/ui/leanui-parity.md
+            docs/ui/crops
+            .ci/leanui/u2.log
+            .ci/leanui/u2
+            .ci/leanui/weston.log
+            .ci/leanui/parity-diff
+            .ci/leanui/ref
+            .ci/leanui/reference-hashes.txt
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
