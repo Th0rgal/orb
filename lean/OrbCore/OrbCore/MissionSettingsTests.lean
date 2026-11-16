@@ -7,6 +7,7 @@ open OrbCore.Store OrbCore.Control OrbCore.Managed OrbCore.Proxy OrbCore.R7Core 
 
 private def check (ok : Bool) (label : String) : IO Unit := do
   unless ok do throw (IO.userError s!"mission settings: {label}")
+  if label.startsWith "B5_" then IO.println s!"PASS {label}"
 
 def run (root : String) : IO Unit := do
   let .ok store ← openCoreStore s!"{root}/mission-settings"
@@ -274,6 +275,24 @@ def run (root : String) : IO Unit := do
     for id in #["retry-fork", "retry-deep"] do
       let row ← snapshot id
       check (row[6]! == "alice:destination" && row[7]! == "") "B5_nested_worker_fork_closure"
+    let .ok absent ← execParamQuery store.askDb
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='mcp_sessions_v1';" #[]
+      | throw (IO.userError "legacy table lookup")
+    check (absent.size <= 1 && (← memberRest "retry-root" patch) == 200)
+      "B5_missing_legacy_session_table"
+    let .ok _ ← execParamQuery store.askDb
+      "CREATE TABLE mcp_sessions_v1(mission_id TEXT, project_scope TEXT, project_scoped INTEGER);" #[]
+      | throw (IO.userError "legacy session table fixture")
+    let .ok _ ← execParamQuery store.askDb
+      "INSERT INTO mcp_sessions_v1 VALUES('retry-worker','alice:source',1);" #[]
+      | throw (IO.userError "legacy session fixture")
+    let .ok _ ← execParamQuery store.askDb
+      "CREATE TRIGGER reject_b5_legacy BEFORE UPDATE ON mcp_sessions_v1 BEGIN SELECT RAISE(ABORT,'no such table: injected failure in existing table'); END;" #[]
+      | throw (IO.userError "legacy trigger fixture")
+    check ((← memberRest "retry-root" patch) == 500) "B5_existing_legacy_session_error"
+    let .ok _ ← execParamQuery store.askDb "DROP TRIGGER reject_b5_legacy;" #[]
+      | throw (IO.userError "legacy trigger cleanup")
+    check ((← memberRest "retry-root" patch) == 200) "B5_legacy_session_retry"
   finally
     closeCoreStore store
 

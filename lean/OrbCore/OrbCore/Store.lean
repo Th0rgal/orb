@@ -5226,11 +5226,16 @@ def rebindMovedMissionMcpSessionsChecked (st : CoreStore) (moved : Array Mission
        "WHERE mission_id=?1 AND phase IN ('preparing','active');")
       #[it.missionId, scope, nowIso]
     if let .error e := leaseRes then return .error s!"projects.db track lease rebind failed: {e}"
-    let askRes ← execParamQuery st.askDb
-      "UPDATE mcp_sessions_v1 SET project_scope=?2 WHERE mission_id=?1 AND COALESCE(project_scoped,0)<>0;"
-      #[it.missionId, scope]
-    if let .error e := askRes then
-      if !e.contains "no such table" then
+    -- New stores keep sessions only in projects.db; legacy ask.db may have none.
+    -- Check the schema explicitly rather than swallowing an UPDATE/trigger error.
+    let .ok legacyTables ← execParamQuery st.askDb
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='mcp_sessions_v1';" #[]
+      | return .error "ask.db session schema lookup failed"
+    if legacyTables.size > 1 then
+      let askRes ← execParamQuery st.askDb
+        "UPDATE mcp_sessions_v1 SET project_scope=?2 WHERE mission_id=?1 AND COALESCE(project_scoped,0)<>0;"
+        #[it.missionId, scope]
+      if let .error e := askRes then
         return .error s!"ask.db MCP session rebind failed: {e}"
   return .ok ()
 
