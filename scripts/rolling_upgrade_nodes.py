@@ -2333,7 +2333,7 @@ def main(argv=None):
     parser.add_argument("--cordon-owner", default=DEFAULT_CORDON_OWNER, help="Owner label recorded when cordoning nodes")
     parser.add_argument("--cordon-ledger", default=DEFAULT_CORDON_LEDGER_PATH, help="Path to local cordon ownership ledger")
     parser.add_argument("--stop-timer-on-complete", help="Systemd timer unit to stop when all nodes finish")
-    parser.add_argument("--lock-file", default="/run/sandboxed-node-rolling-upgrade.lock")
+    parser.add_argument("--lock-file", default="/run/lock/orb-deploy.lock")
     parser.add_argument("--audit-log", help="Append JSONL events to this file")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="Inspect and report planned actions only (default)")
@@ -2363,11 +2363,27 @@ def main(argv=None):
     lock_handle = None
     if (args.apply or args.recover_nodes) and args.lock_file:
         Path(args.lock_file).parent.mkdir(parents=True, exist_ok=True)
-        lock_handle = open(args.lock_file, "w")
+        inherited_fd = os.environ.get("ORB_DEPLOY_LOCK_FD")
+        if inherited_fd is not None:
+            fd = int(inherited_fd)
+            if os.fstat(fd).st_ino != os.stat(args.lock_file).st_ino or os.fstat(fd).st_dev != os.stat(args.lock_file).st_dev:
+                raise RuntimeError("inherited deploy lock does not match lock file")
+            lock_handle = os.fdopen(os.dup(fd), "r+")
+        else:
+            lock_handle = open(args.lock_file, "a+")
         try:
             fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            return 0
+            lock_handle.seek(0)
+            holder = lock_handle.read().strip() or "orb-deploy (holder metadata unavailable)"
+            print(f"rollout lock held by {holder}", file=sys.stderr)
+            lock_handle.close()
+            return 2
+        if inherited_fd is None:
+            lock_handle.seek(0)
+            lock_handle.truncate()
+            lock_handle.write(f"rolling_upgrade_nodes pid={os.getpid()}\n")
+            lock_handle.flush()
 
     try:
         token = os.environ.get(args.token_env)

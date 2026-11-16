@@ -120,6 +120,21 @@ def _start_core_api_server(cordoned):
 
 
 class RollingUpgradeNodesTest(unittest.TestCase):
+    def test_lock_contention_is_nonzero_and_names_holder(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as temp:
+            lock = Path(temp) / "deploy.lock"
+            with lock.open("w+") as holder:
+                holder.write("orb-deploy pid=1234\n")
+                holder.flush()
+                roll.fcntl.flock(holder, roll.fcntl.LOCK_EX | roll.fcntl.LOCK_NB)
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    result = roll.main(["--apply", "--lock-file", str(lock)])
+                self.assertNotEqual(result, 0)
+                self.assertIn("pid=1234", stderr.getvalue())
+
     def test_staged_unhealthy_node_is_never_upgraded(self):
         from unittest.mock import Mock
         api = Mock()

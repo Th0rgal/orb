@@ -64,8 +64,14 @@ if [[ $NODES_STATUS == 1 || $NODES_DRY_RUN == 1 ]]; then
   fi
 fi
 
-exec 9>/run/lock/orb-deploy.lock
-flock -n 9 || { echo "another orb-deploy is running" >&2; exit 2; }
+if [[ $ROLLOUT_NODES == 1 ]]; then
+  exec 9<>/run/lock/orb-deploy.lock
+  flock -n 9 || { echo "deploy lock held by $(cat /run/lock/orb-deploy.lock)" >&2; exit 2; }
+  printf 'orb-deploy pid=%s\n' "$$" > /run/lock/orb-deploy.lock
+else
+  exec 9>/run/lock/orb-deploy.lock
+  flock -n 9 || { echo "another orb-deploy is running" >&2; exit 2; }
+fi
 exec > >(tee -a "$LOG") 2>&1
 say() { echo "[$(date -u +%FT%TZ)] $*"; }
 
@@ -348,7 +354,7 @@ for spec in "${OPS_TARGETS[@]}"; do
 done
 if [[ $ROLLOUT_NODES == 1 ]]; then
   say "rollout fleet nodes to $SHA"
-  python3 "$TREE/scripts/rolling_upgrade_nodes.py" --apply \
+  ORB_DEPLOY_LOCK_FD=9 python3 "$TREE/scripts/rolling_upgrade_nodes.py" --apply \
     --expected-build-sha "$SHA" \
     --stage-from-dir "$RELEASE_BIN_DIR" \
     --drain-timeout-secs "${ORB_DEPLOY_DRAIN_TIMEOUT_SECS:-900}" \
