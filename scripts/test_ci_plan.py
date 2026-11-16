@@ -129,6 +129,18 @@ class RunnerSelectionTest(unittest.TestCase):
         },
         "kernel-abi.yml": {"plan": "ubuntu-latest", "kernel-abi": "ubuntu-latest"},
     }
+    # Jobs that need Docker (a `container:` image or `docker build`/`run`) stay
+    # on hosted runners: lean.ci guests have no Docker daemon.
+    HOSTED_ONLY = {"ci.yml": {"orb-browser", "orb-performance", "docker"}, "kernel-abi.yml": set()}
+
+    def test_docker_jobs_are_hosted_only(self):
+        for workflow, hosted in self.HOSTED_ONLY.items():
+            text = (ROOT / ".github/workflows" / workflow).read_text().split("\njobs:\n", 1)[1]
+            blocks = dict(zip(*[iter(re.split(r"(?m)^  ([a-z0-9-]+):\n", text)[1:])] * 2))
+            for job, body in blocks.items():
+                needs_docker = bool(re.search(r"(?m)^    container:|\bdocker (?:build|buildx|run)\b", body))
+                with self.subTest(workflow=workflow, job=job):
+                    self.assertEqual(needs_docker, job in hosted)
 
     def test_every_linux_job_preserves_fallback_and_trust_boundary(self):
         for workflow, fallbacks in self.FALLBACKS.items():
@@ -157,7 +169,8 @@ class RunnerSelectionTest(unittest.TestCase):
                            and (event != "workflow_dispatch" or manual))
                 for job, fallback in fallbacks.items():
                     size = 32 if job in {"test", "kernel-abi"} else 16
-                    expected = f"lean-{size}vcpu-ubuntu-2604" if enabled else fallback
+                    routed = enabled and job not in self.HOSTED_ONLY[workflow]
+                    expected = f"lean-{size}vcpu-ubuntu-2604" if routed else fallback
                     with self.subTest(workflow=workflow, job=job, **context):
                         self.assertEqual(runner_for(runners[job], context), expected)
 
@@ -173,7 +186,8 @@ class RunnerSelectionTest(unittest.TestCase):
                 }
                 for job, fallback in fallbacks.items():
                     selected = runner_for(runners[job], context)
-                    self.assertEqual(selected.startswith("lean-"), enabled)
+                    self.assertEqual(selected.startswith("lean-"),
+                                     enabled and job not in self.HOSTED_ONLY[workflow])
                     if not enabled:
                         self.assertEqual(selected, fallback)
 
