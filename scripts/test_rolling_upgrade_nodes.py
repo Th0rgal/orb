@@ -1226,6 +1226,117 @@ class RollingUpgradeNodesTest(unittest.TestCase):
             self.assertIn("stop:sandboxed-node:node-v1:mcp-v1:privd-v1", ctl.events)
             self.assertIn("start:sandboxed-node:node-v2:mcp-v2:privd-v2", ctl.events)
 
+    def test_restore_components_isolates_per_component_errors_verifies_rollback_and_halts_rollout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            db_path = root / "jobs.db"
+            con = sqlite3.connect(db_path)
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, state TEXT NOT NULL)")
+            con.commit()
+            con.close()
+
+            bin_dir = root / "usr/local/bin"
+            sbin_dir = root / "usr/local/sbin"
+            bin_dir.mkdir(parents=True)
+            sbin_dir.mkdir(parents=True)
+            node_bin = bin_dir / "sandboxed-node"
+            mcp_bin = bin_dir / "sandboxed-mcp"
+            privd_bin = sbin_dir / "orb-privd"
+            build_conf = root / "30-build.conf"
+
+            old_sha = "1" * 40
+            new_sha = "2" * 40
+            node_bin.write_text("node-v1")
+            mcp_bin.write_text("mcp-v1")
+            privd_bin.write_text("privd-v1")
+            build_conf.write_text(f"[Service]\nEnvironment=ORB_BUILD_SHA={old_sha}\n")
+
+            (bin_dir / "sandboxed-node.new").write_text("node-v2")
+            (bin_dir / "sandboxed-mcp.new").write_text("mcp-v2")
+            (sbin_dir / "orb-privd.new").write_text("privd-v2")
+
+            class CorruptedBackupOnStartCtl:
+                def is_active(self, _u):
+                    return True
+
+                def stop(self, _u):
+                    pass
+
+                def start(self, u):
+                    # Corrupt orb-privd.prev right before activation fails so orb-privd rollback fails verification
+                    if u == "orb-privd":
+                        Path(str(privd_bin) + ".prev").unlink(missing_ok=True)
+
+                def start_best_effort(self, _u):
+                    pass
+
+                def restart_best_effort(self, _u):
+                    pass
+
+                def daemon_reload(self):
+                    pass
+
+            outcome = roll.perform_fenced_upgrade(
+                db_path=str(db_path),
+                binary_path=str(node_bin),
+                verify_delay_secs=0.0,
+                service_ctl=CorruptedBackupOnStartCtl(),
+                runtime_busy_probe=lambda: 0,
+                live_work_dir_probe=lambda: str(root),
+                mcp_binary_path=str(mcp_bin),
+                privd_binary_path=str(privd_bin),
+                expected_build_sha=new_sha,
+                expected_sha256={
+                    "sandboxed-node": roll.compute_file_sha256(bin_dir / "sandboxed-node.new"),
+                    "sandboxed-mcp": roll.compute_file_sha256(bin_dir / "sandboxed-mcp.new"),
+                    "orb-privd": roll.compute_file_sha256(sbin_dir / "orb-privd.new"),
+                },
+                build_conf_path=str(build_conf),
+                health_check_probe=lambda _sha, _shas: (False, "post-start health check failed"),
+            )
+            # Even though orb-privd.prev was missing/corrupted, _restore_components did not escape early:
+            # sandboxed-mcp, sandboxed-node, and 30-build.conf were still restored and verified, and a
+            # distinct ROLLBACK_FAILED:... result was returned.
+            self.assertTrue(str(outcome).startswith("ROLLBACK_FAILED:"), outcome)
+            self.assertEqual(node_bin.read_text(), "node-v1")
+            self.assertEqual(mcp_bin.read_text(), "mcp-v1")
+            self.assertEqual(roll._read_build_conf_sha(build_conf), old_sha)
+
+            # And rolling_upgrade_step / run_governed_rollout emit rollback_failed and halt the rollout immediately
+            cordoned = {"ashur": True, "nippur": False}
+            server = _start_core_api_server(cordoned)
+            try:
+                api = roll.HttpCoreApi(f"http://127.0.0.1:{server.server_port}", roll.mint_hs256_jwt("test-secret"))
+
+                class RollbackFailedOps(FakeNodeOps):
+                    def upgrade_remote(self, host, _db_path):
+                        if host == "ashur":
+                            return outcome
+                        return super().upgrade_remote(host, _db_path)
+
+                ops = RollbackFailedOps(
+                    {
+                        "ashur": {"staged": True, "running": 0, "healthy": True},
+                        "nippur": {"staged": True, "running": 0, "healthy": True},
+                    }
+                )
+                events, done = roll.run_governed_rollout(
+                    core_api=api,
+                    node_ops=ops,
+                    remote_nodes=[("ashur", None), ("nippur", None)],
+                    max_concurrent_cordons=1,
+                    apply=True,
+                    drain_timeout_secs=10.0,
+                )
+                self.assertFalse(done)
+                self.assertTrue(cordoned["ashur"])
+                self.assertFalse(cordoned["nippur"])
+                self.assertTrue(any(e["action"] == "rollback_failed" and e["node"] == "ashur" for e in events))
+            finally:
+                server.shutdown()
+                server.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()
