@@ -258,6 +258,75 @@ private def runR7bMcpAndPrivdTests (tmpDir : System.FilePath) : IO Unit := do
   assertEq "Live mutating mid-flight socket drop may_retry_fresh_key == false"
     (scDrop.fieldBool? "may_retry_fresh_key") (some false)
 
+  -- (d) Live settled `start_mission` / `resume_mission` / `cancel_mission` / `send_message_to_mission` / `schedule_wakeup`
+  --     receipts (status:"completed" + result) and pending (`state:"accepted"`, `status:"accepted"`) receipts via `McpClient.handleRpc`
+  for (idx, toolName, midStatus, rKey) in #[
+      (14, "start_mission", "awaiting_user", "k-start-ok"),
+      (15, "resume_mission", "active", "k-resume-ok"),
+      (16, "cancel_mission", "cancelled", "k-cancel-ok"),
+      (17, "send_message_to_mission", "awaiting_user", "k-send-ok"),
+      (18, "schedule_wakeup", "awaiting_user", "k-wake-ok")] do
+    let srvOkTask ← IO.asTask do
+      match (← LeanSys.Posix.tcpAcceptPoll coreListenFd 5000) with
+      | .error _ => pure false
+      | .ok cfd =>
+        let _ ← LeanSys.Posix.readStreamChunk cfd 8192
+        let resPayload := s!"\{\"mission_id\":\"m-r5-1\",\"status\":\"{midStatus}\"}"
+        let bodyOk :=
+          s!"\{\"ok\":true,\"result\":\{\"mission_id\":\"m-r5-1\",\"status\":\"completed\",\"action_id\":\"a-{idx}\",\"tool_name\":\"{toolName}\",\"state\":\"succeeded\",\"accepted\":\"yes\",\"result\":{resPayload}}}"
+        let respOk := s!"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {bodyOk.utf8ByteSize}\r\nConnection: close\r\n\r\n{bodyOk}"
+        let _ ← LeanSys.Posix.writeAll cfd respOk.toUTF8
+        let _ ← LeanSys.Posix.closeFd cfd
+        pure true
+    let rpcOk ← liveClient.handleRpc (.obj #[
+      ("jsonrpc", .str "2.0"),
+      ("id", .nat idx),
+      ("method", .str "tools/call"),
+      ("params", .obj #[
+        ("name", .str toolName),
+        ("arguments", .obj #[("mission_id", .str "m-r5-1"), ("title", .str "t"), ("prompt", .str "p"), ("content", .str "c"), ("reason", .str "r"), ("delay_seconds", .nat 60), ("idempotency_key", .str rKey)])
+      ])
+    ]) cancelRef1
+    let _ ← IO.ofExcept srvOkTask.get
+    let resOk := rpcOk.fieldOrNull "result"
+    let scOk := resOk.fieldOrNull "structuredContent"
+    assertEq s!"Live {toolName} success sets isError=false" (resOk.fieldBool? "isError") (some false)
+    assertEq s!"Live {toolName} success action_outcome == accepted" (scOk.fieldStr? "action_outcome") (some "accepted")
+    assertEq s!"Live {toolName} success durable_success == true" (scOk.fieldBool? "durable_success") (some true)
+    assertEq s!"Live {toolName} success receipt_settled == true" (scOk.fieldBool? "receipt_settled") (some true)
+    assertEq s!"Live {toolName} success may_retry_fresh_key == false" (scOk.fieldBool? "may_retry_fresh_key") (some false)
+    assertEq s!"Live {toolName} success preserves result.status == {midStatus}"
+      ((scOk.fieldOrNull "result").fieldStr? "status") (some midStatus)
+
+  let srvPendTask ← IO.asTask do
+    match (← LeanSys.Posix.tcpAcceptPoll coreListenFd 5000) with
+    | .error _ => pure false
+    | .ok cfd =>
+      let _ ← LeanSys.Posix.readStreamChunk cfd 8192
+      let bodyPend :=
+        "{\"ok\":true,\"result\":{\"action_id\":\"a-pend-1\",\"accepted\":\"yes\",\"state\":\"accepted\",\"status\":\"accepted\",\"tool_name\":\"spawn_managed_machine\",\"result\":{},\"next_tool\":\"get_action\"}}"
+      let respPend := s!"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {bodyPend.utf8ByteSize}\r\nConnection: close\r\n\r\n{bodyPend}"
+      let _ ← LeanSys.Posix.writeAll cfd respPend.toUTF8
+      let _ ← LeanSys.Posix.closeFd cfd
+      pure true
+  let rpcPend ← liveClient.handleRpc (.obj #[
+    ("jsonrpc", .str "2.0"),
+    ("id", .nat 19),
+    ("method", .str "tools/call"),
+    ("params", .obj #[
+      ("name", .str "spawn_managed_machine"),
+      ("arguments", .obj #[("idempotency_key", .str "k-pend")])
+    ])
+  ]) cancelRef1
+  let _ ← IO.ofExcept srvPendTask.get
+  let resPend := rpcPend.fieldOrNull "result"
+  let scPend := resPend.fieldOrNull "structuredContent"
+  assertEq "Live pending receipt sets isError=false" (resPend.fieldBool? "isError") (some false)
+  assertEq "Live pending receipt action_outcome == pending" (scPend.fieldStr? "action_outcome") (some "pending")
+  assertEq "Live pending receipt durable_success == false" (scPend.fieldBool? "durable_success") (some false)
+  assertEq "Live pending receipt receipt_settled == false" (scPend.fieldBool? "receipt_settled") (some false)
+  assertEq "Live pending receipt may_retry_fresh_key == false" (scPend.fieldBool? "may_retry_fresh_key") (some false)
+
   let _ ← LeanSys.Posix.closeFd coreListenFd
 
   -- 2. Generation-fenced external stdio MCP lifecycle + `/proc/<pid>/stat` start-ticks reaping

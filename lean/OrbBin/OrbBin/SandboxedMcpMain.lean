@@ -531,7 +531,7 @@ structure ActionReceiptOutcome where
 
 private def parseReceiptStateTag (s : String) : UInt8 :=
   match s.trimAscii.toString.toLower with
-  | "" | "queued" | "pending" => 0
+  | "" | "queued" | "pending" | "accepted" => 0
   | "running" | "dispatching" | "in_progress" => 1
   | "completed" | "succeeded" | "settled" => 2
   | "failed" | "rejected" | "cancelled" | "canceled" => 3

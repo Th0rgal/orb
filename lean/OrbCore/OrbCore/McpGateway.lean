@@ -95,6 +95,17 @@ private def checkMissionReadAccess
       return .ok ()
   return .error s!"read access to mission `{targetMissionId}` requires operator role or `request_mission_access` approval"
 
+/-- Enrich a settled MCP action result with receipt metadata (`action_id`, `tool_name`, `state`, `status`, `accepted`, `result`). -/
+private def settledMcpActionReceipt (actionId toolName state : String) (resObj : JVal) (targetMissionId : String := "") : JVal :=
+  let payload := resObj.removeField "result"
+  let baseObj := payload.setField "action_id" (.str actionId)
+    |>.setField "tool_name" (.str toolName)
+    |>.setField "state" (.str state)
+    |>.setField "status" (.str (if state == "succeeded" then "completed" else state))
+    |>.setField "accepted" (.str "yes")
+    |>.setField "result" payload
+  if targetMissionId.isEmpty then baseObj else baseObj.setField "target_mission_id" (.str targetMissionId)
+
 /-- Look up a persisted MCP action receipt by `id` from `mcp_actions_v1`. -/
 private def lookupMcpActionById? (store : CoreStore) (actionId : String) : IO (Option JVal) := do
   if actionId.trimAscii.toString.isEmpty then return none
@@ -109,26 +120,21 @@ private def lookupMcpActionById? (store : CoreStore) (actionId : String) : IO (O
   let stStr := cell r 2
   let resJv := (OrbBin.Json.parse (cell r 3)).toOption.getD (.obj #[])
   let tmid := cell r 4
-  let baseObj := resJv.setField "action_id" (.str aid)
-    |>.setField "tool_name" (.str tname)
-    |>.setField "state" (.str stStr)
-    |>.setField "status" (.str (if stStr == "succeeded" then "completed" else stStr))
-    |>.setField "accepted" (.str "yes")
-    |>.setField "result" resJv
-  let withMid := if tmid.isEmpty then baseObj else baseObj.setField "target_mission_id" (.str tmid)
-  return some withMid
+  return some (settledMcpActionReceipt aid tname stStr resJv tmid)
 
 /-- Look up a previously settled MCP action receipt by `(scope, retry_key)`. -/
 private def lookupMcpActionByRetryKey? (store : CoreStore) (scope retryKey : String) : IO (Option JVal) := do
   if retryKey.trimAscii.toString.isEmpty then return none
   let .ok rows ← execParamQuery store.projectsDb
-      "SELECT COALESCE(result,'') FROM mcp_actions_v1 WHERE scope=?1 AND retry_key=?2 AND state='succeeded' ORDER BY updated_at DESC LIMIT 1;"
+      "SELECT id, tool, state, COALESCE(result,'{}'), COALESCE(owner,'') FROM mcp_actions_v1 WHERE scope=?1 AND retry_key=?2 AND state='succeeded' ORDER BY updated_at DESC LIMIT 1;"
       #[scope, retryKey]
     | return none
   if rows.size ≤ 1 then return none
-  let raw := cell rows[1]! 0
+  let r := rows[1]!
+  let raw := cell r 3
   if raw.isEmpty then return none
-  return (OrbBin.Json.parse raw).toOption
+  let some resJv := (OrbBin.Json.parse raw).toOption | return none
+  return some (settledMcpActionReceipt (cell r 0) (cell r 1) (cell r 2) resJv (cell r 4))
 
 /-- Direct dashboard callers share a synthetic session id. Partition their retry
     keys by the verified user; real scoped sessions already have unique ids. -/
@@ -151,14 +157,11 @@ private def recordSettledMcpAction
   let retryKey := ((args.fieldStr? "idempotency_key").getD "").trimAscii.toString
   let effRetryKey := if retryKey.isEmpty then s!"auto:{actId}" else retryKey
   let scope := actionScope claims callerUserId toolName
-  let enriched :=
-    resObj
-      |>.setField "action_id" (.str actId)
-      |>.setField "state" (.str "succeeded")
-      |>.setField "accepted" (.str "yes")
-  let resJson := renderCompact enriched
-  let reqJson := renderCompact args
   let ownerVal := if targetMissionId.isEmpty then claims.missionId else targetMissionId
+  let payload := resObj.removeField "result"
+  let enriched := settledMcpActionReceipt actId toolName "succeeded" payload ownerVal
+  let resJson := renderCompact payload
+  let reqJson := renderCompact args
   let principalVal := s!"{claims.role}:{callerUserId}:{claims.missionId}"
   discard <| execParamQuery store.projectsDb
     ("INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state,result,created_at,updated_at) " ++
