@@ -1542,6 +1542,122 @@ class RollingUpgradeNodesTest(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
 
+    def test_ping_alive_ssh_api_timeout_skips_with_bounded_timeout_and_old_node_reports_unknown_build_sha(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            db_path = root / "jobs.db"
+            con = sqlite3.connect(db_path)
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, state TEXT NOT NULL)")
+            con.commit()
+            con.close()
+
+            bin_dir = root / "usr/local/bin"
+            sbin_dir = root / "usr/local/sbin"
+            bin_dir.mkdir(parents=True)
+            sbin_dir.mkdir(parents=True)
+            node_bin = bin_dir / "sandboxed-node"
+            mcp_bin = bin_dir / "sandboxed-mcp"
+            privd_bin = sbin_dir / "orb-privd"
+            node_bin.write_text("node-old")
+            mcp_bin.write_text("mcp-old")
+            privd_bin.write_text("privd-old")
+            old_shas = {
+                "sandboxed-node": roll.compute_file_sha256(node_bin),
+                "sandboxed-mcp": roll.compute_file_sha256(mcp_bin),
+                "orb-privd": roll.compute_file_sha256(privd_bin),
+            }
+
+            class ActiveCtl:
+                def is_active(self, _u):
+                    return True
+
+            # 1. Old node with no 30-build.conf / no reported build SHA must report "unknown", never "current" or on_target=True
+            probe_old = roll.probe_worker_state(
+                db_path=str(db_path),
+                binary_path=str(node_bin),
+                mcp_binary_path=str(mcp_bin),
+                privd_binary_path=str(privd_bin),
+                build_conf_path=str(root / "missing-30-build.conf"),
+                service_ctl=ActiveCtl(),
+                runtime_busy_probe=lambda: 0,
+                live_work_dir_probe=lambda: str(root),
+                sibling_units_probe=lambda: [],
+                expected_sha256=old_shas,
+                include_metadata=True,
+            )
+            self.assertEqual(probe_old["build_sha"], "unknown")
+            self.assertNotEqual(probe_old["build_sha"], "current")
+            self.assertFalse(probe_old["on_target"])
+
+            # 2. SshNodeOps._ssh_python must enforce bounded SSH ConnectTimeout and ServerAliveInterval
+            ssh_ops = roll.SshNodeOps(ssh_timeout_secs=4.0)
+            from unittest import mock
+            with mock.patch.object(
+                roll.subprocess,
+                "run",
+                side_effect=roll.subprocess.TimeoutExpired(cmd=["ssh", "ashur"], timeout=4.0),
+            ) as mock_run:
+                with self.assertRaisesRegex(RuntimeError, "timed out after 4"):
+                    ssh_ops.probe_remote("ashur", "/var/lib/sandboxed-node/work/jobs.db")
+                called_cmd = " ".join(mock_run.call_args[0][0])
+                self.assertIn("ConnectTimeout=4", called_cmd)
+                self.assertIn("ServerAliveInterval=4", called_cmd)
+                self.assertIn("ServerAliveCountMax=2", called_cmd)
+
+            # 3. Node answering ping (online in Core) while SSH/API times out is skipped fail-closed and old node shows "unknown"
+            cordoned = {"ashur": False, "nippur": False}
+            server = _start_core_api_server(cordoned)
+            try:
+                api_url = f"http://127.0.0.1:{server.server_port}"
+                token = roll.mint_hs256_jwt("test-secret")
+                api = roll.HttpCoreApi(api_url, token)
+
+                class PingAliveSshTimeoutAndOldNodeOps(FakeNodeOps):
+                    def probe_remote(self, host, _db_path, include_metadata=False):
+                        if host == "ashur":
+                            raise RuntimeError("ssh ashur timed out after 4.0s (ping alive, SSH/API hung)")
+                        # nippur is an old node with no build_sha or reporting legacy "current"
+                        return {
+                            "staged": False,
+                            "running": 0,
+                            "healthy": True,
+                            "quarantined": False,
+                            "build_sha": "current",
+                            "binary_sha256": dict(old_shas),
+                        }
+
+                ops = PingAliveSshTimeoutAndOldNodeOps({})
+                status_rows = roll.collect_fleet_rollout_status(
+                    core_api=api,
+                    node_ops=ops,
+                    remote_nodes=[("ashur", None), ("nippur", None)],
+                    expected_sha256=old_shas,
+                )
+                by_node = {r["node"]: r for r in status_rows}
+                self.assertEqual(by_node["ashur"]["state"], "probe_error")
+                self.assertFalse(by_node["ashur"]["on_target"])
+                self.assertEqual(by_node["ashur"]["reported_build_sha"], "unknown")
+                self.assertEqual(by_node["nippur"]["reported_build_sha"], "unknown")
+                self.assertNotEqual(by_node["nippur"]["reported_build_sha"], "current")
+                self.assertFalse(by_node["nippur"]["on_target"])
+
+                events, done = roll.rolling_upgrade_step(
+                    core_api=api,
+                    node_ops=ops,
+                    remote_nodes=[("ashur", None), ("nippur", None)],
+                    max_concurrent_cordons=1,
+                    apply=True,
+                    expected_sha256=old_shas,
+                )
+                self.assertFalse(done)
+                self.assertTrue(any(e["action"] == "probe_error" and e["node"] == "ashur" for e in events))
+                self.assertFalse(cordoned["ashur"])
+                self.assertFalse(cordoned["nippur"])
+            finally:
+                server.shutdown()
+                server.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

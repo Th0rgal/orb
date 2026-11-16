@@ -133,6 +133,15 @@ def _resolve_companion_paths(
     return node_path, mcp_path, privd_path
 
 
+def _normalize_reported_build_sha(raw_sha):
+    if not raw_sha or not isinstance(raw_sha, str):
+        return "unknown"
+    val = raw_sha.strip()
+    if not val or val.lower() in ("unknown", "current", "none", "null"):
+        return "unknown"
+    return val
+
+
 def _read_build_conf_sha(build_conf_path):
     if not build_conf_path:
         return None
@@ -514,9 +523,10 @@ def discover_local_core_auth(service_binary="/usr/local/bin/orb-core", default_p
 
 
 class HttpCoreApi:
-    def __init__(self, base_url, bearer_token):
+    def __init__(self, base_url, bearer_token, timeout_secs=10.0):
         self.base_url = base_url.rstrip("/")
         self.bearer_token = bearer_token
+        self.timeout_secs = max(1.0, float(timeout_secs))
 
     def _request(self, path, method="GET"):
         req = urllib.request.Request(
@@ -528,8 +538,15 @@ class HttpCoreApi:
             },
             method=method,
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout_secs) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():
+                raise RuntimeError(
+                    f"core API {method} {path} timed out after {self.timeout_secs}s: {exc}"
+                ) from exc
+            raise
 
     def list_nodes(self):
         payload = self._request("/api/remote-nodes", method="GET")
@@ -976,13 +993,15 @@ def probe_worker_state(
             stg_sha = compute_file_sha256(str(comp_p) + staged_suffix)
             if stg_sha:
                 staged_shas[comp_name] = stg_sha
-        build_sha = _read_build_conf_sha(resolved_conf)
+        build_sha = _normalize_reported_build_sha(_read_build_conf_sha(resolved_conf))
         res["build_sha"] = build_sha
         res["binary_sha256"] = binary_shas
         if staged_shas:
             res["staged_sha256"] = staged_shas
         if expected_build_sha is not None or expected_sha256 is not None:
-            sha_ok = (expected_build_sha is None) or (build_sha == expected_build_sha)
+            sha_ok = (build_sha != "unknown") and (
+                (expected_build_sha is None) or (build_sha == expected_build_sha)
+            )
             bins_ok = True
             if expected_sha256:
                 for comp_name, exp_hash in expected_sha256.items():
@@ -1448,6 +1467,7 @@ def _remote_worker_prelude():
         "from pathlib import Path",
         inspect.getsource(compute_file_sha256),
         inspect.getsource(_resolve_companion_paths),
+        inspect.getsource(_normalize_reported_build_sha),
         inspect.getsource(_read_build_conf_sha),
         inspect.getsource(_write_build_conf_sha),
         inspect.getsource(_default_swap_journal_path),
@@ -1491,6 +1511,7 @@ class SshNodeOps:
         verify_delay_secs=2.0,
         expected_build_sha=None,
         expected_sha256=None,
+        ssh_timeout_secs=30.0,
     ):
         self.ssh_config = ssh_config
         self.staged_suffix = staged_suffix
@@ -1498,13 +1519,38 @@ class SshNodeOps:
         self.verify_delay_secs = float(verify_delay_secs)
         self.expected_build_sha = expected_build_sha
         self.expected_sha256 = dict(expected_sha256) if expected_sha256 else None
+        self.ssh_timeout_secs = max(1.0, float(ssh_timeout_secs))
 
-    def _ssh_python(self, host, code, timeout=30):
+    def _ssh_base_cmd(self, host):
+        connect_timeout = max(1, min(8, int(self.ssh_timeout_secs)))
+        alive_interval = max(1, min(5, int(self.ssh_timeout_secs)))
         cmd = ["ssh"]
         if self.ssh_config:
             cmd.extend(["-F", str(self.ssh_config)])
-        cmd.extend(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, "sudo python3 -"])
-        res = subprocess.run(cmd, input=code, capture_output=True, text=True, timeout=timeout)
+        cmd.extend(
+            [
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                f"ConnectTimeout={connect_timeout}",
+                "-o",
+                f"ServerAliveInterval={alive_interval}",
+                "-o",
+                "ServerAliveCountMax=2",
+                host,
+            ]
+        )
+        return cmd
+
+    def _ssh_python(self, host, code, timeout=None):
+        eff_timeout = float(timeout) if timeout is not None else self.ssh_timeout_secs
+        cmd = self._ssh_base_cmd(host) + ["sudo python3 -"]
+        try:
+            res = subprocess.run(cmd, input=code, capture_output=True, text=True, timeout=eff_timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"ssh {host} timed out after {eff_timeout:g}s (host may answer ping while SSH/API is hung)"
+            ) from exc
         if res.returncode != 0:
             raise RuntimeError(f"ssh {host} failed: {res.stderr.strip()}")
         return res.stdout.strip()
@@ -1538,21 +1584,15 @@ class SshNodeOps:
                 "os.replace(tmp, dst)\n"
                 "print(got)\n"
             )
-            cmd = ["ssh"]
-            if self.ssh_config:
-                cmd.extend(["-F", str(self.ssh_config)])
-            cmd.extend(
-                [
-                    "-o",
-                    "BatchMode=yes",
-                    "-o",
-                    "ConnectTimeout=8",
-                    host,
-                    f"sudo python3 -c { json.dumps(install_script) }",
-                ]
-            )
-            with open(src_p, "rb") as handle:
-                res = subprocess.run(cmd, stdin=handle, capture_output=True, timeout=120)
+            cmd = self._ssh_base_cmd(host) + [f"sudo python3 -c { json.dumps(install_script) }"]
+            stage_timeout = max(30.0, self.ssh_timeout_secs * 4.0)
+            try:
+                with open(src_p, "rb") as handle:
+                    res = subprocess.run(cmd, stdin=handle, capture_output=True, timeout=stage_timeout)
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    f"staging {comp_name} on {host} timed out after {stage_timeout:g}s"
+                ) from exc
             if res.returncode != 0:
                 err = res.stderr.decode("utf-8", "replace").strip()
                 raise RuntimeError(f"staging {comp_name} on {host} failed: {err}")
@@ -1628,8 +1668,10 @@ def _normalize_probe_result(raw, expected_build_sha=None, expected_sha256=None):
         if "on_target" in raw:
             on_target = bool(raw["on_target"])
         elif expected_build_sha is not None or expected_sha256 is not None:
-            rep_sha = raw.get("build_sha") or raw.get("build")
-            sha_ok = (expected_build_sha is None) or (rep_sha == expected_build_sha)
+            rep_sha = _normalize_reported_build_sha(raw.get("build_sha") or raw.get("build"))
+            sha_ok = (rep_sha != "unknown") and (
+                (expected_build_sha is None) or (rep_sha == expected_build_sha)
+            )
             bins_ok = True
             rep_bins = raw.get("binary_sha256")
             if expected_sha256:
@@ -1688,13 +1730,19 @@ def collect_fleet_rollout_status(
             except Exception as exc:
                 probe_err = str(exc)
 
-        reported_build = (
-            probe_data.get("build_sha")
-            or hb.get("build_sha")
-            or hb.get("build")
-            or core_info.get("build_sha")
-            or core_info.get("build")
-        )
+        raw_reported_build = None
+        for cand_build in (
+            probe_data.get("build_sha"),
+            hb.get("build_sha"),
+            hb.get("build"),
+            core_info.get("build_sha"),
+            core_info.get("build"),
+        ):
+            norm_b = _normalize_reported_build_sha(cand_build)
+            if norm_b != "unknown":
+                raw_reported_build = norm_b
+                break
+        reported_build = raw_reported_build or "unknown"
         reported_bins = (
             probe_data.get("binary_sha256")
             or hb.get("binary_sha256")
@@ -1703,7 +1751,7 @@ def collect_fleet_rollout_status(
         )
         staged = bool(probe_data.get("staged", False))
         quarantined = bool(probe_data.get("quarantined", False))
-        healthy = bool(probe_data.get("healthy", core_info.get("status") == "online"))
+        healthy = False if probe_err is not None else bool(probe_data.get("healthy", core_info.get("status") == "online"))
         running = int(probe_data.get("running", hb.get("active_jobs", 0)))
         cordoned = bool(core_info.get("cordoned", False))
         cordon_meta = cordon_ledger.get(host) if isinstance(cordon_ledger, dict) else None
@@ -1712,7 +1760,9 @@ def collect_fleet_rollout_status(
             or core_info.get("cordoned_by")
         )
 
-        sha_matches = (expected_build_sha is None) or (reported_build == expected_build_sha)
+        sha_matches = (reported_build != "unknown") and (
+            (expected_build_sha is None) or (reported_build == expected_build_sha)
+        )
         bins_match = True
         mismatched_components = []
         if expected_sha256:
@@ -1779,9 +1829,11 @@ def collect_fleet_rollout_status(
             if not isinstance(lp, dict):
                 s, r, h, q, ot = _normalize_probe_result(lp)
                 lp = {"staged": s, "running": r, "healthy": h, "quarantined": q, "on_target": ot}
-            rep_b = lp.get("build_sha")
+            rep_b = _normalize_reported_build_sha(lp.get("build_sha"))
             rep_bins = lp.get("binary_sha256") or {}
-            sha_ok = (expected_build_sha is None) or (rep_b == expected_build_sha)
+            sha_ok = (rep_b != "unknown") and (
+                (expected_build_sha is None) or (rep_b == expected_build_sha)
+            )
             bins_ok = True
             mm = []
             if expected_sha256:
@@ -2235,6 +2287,8 @@ def main(argv=None):
     parser.add_argument("--backup-suffix", default=".prev", help="Suffix for backup binary (default: .prev)")
     parser.add_argument("--max-concurrent-cordons", type=int, default=1)
     parser.add_argument("--verify-delay-secs", type=float, default=2.0)
+    parser.add_argument("--ssh-timeout-secs", type=float, default=30.0, help="Bounded timeout in seconds for per-node SSH probes/commands")
+    parser.add_argument("--api-timeout-secs", type=float, default=10.0, help="Bounded timeout in seconds for Core API requests")
     parser.add_argument("--drain-timeout-secs", type=float, default=0.0, help="Wait up to N seconds for cordoned nodes to drain")
     parser.add_argument("--poll-interval-secs", type=float, default=5.0, help="Seconds between drain poll ticks")
     parser.add_argument("--expected-build-sha", help="Expected 40-char ORB_BUILD_SHA after upgrade")
@@ -2303,7 +2357,7 @@ def main(argv=None):
         else:
             base_url, bearer = discover_local_core_auth()
 
-        core_api = HttpCoreApi(base_url, bearer)
+        core_api = HttpCoreApi(base_url, bearer, timeout_secs=args.api_timeout_secs)
         if not remote_nodes and not args.local_jobs_db and not args.recover_nodes:
             discovered = [
                 (n["id"], None)
@@ -2322,6 +2376,7 @@ def main(argv=None):
             verify_delay_secs=args.verify_delay_secs,
             expected_build_sha=args.expected_build_sha,
             expected_sha256=expected_sha256 or None,
+            ssh_timeout_secs=args.ssh_timeout_secs,
         )
         if args.recover_nodes:
             rec_events = []
