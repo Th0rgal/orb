@@ -93,9 +93,12 @@ environment files; provision normal node enrollment/configuration through the
 operator process before expecting approved remote actions to succeed. Never
 copy an administrator credential to a worker. This build procedure neither
 reads nor provisions tokens. Only the authorized node service identity should
-belong to the socket group; do not grant it to arbitrary users. Existing
-installations should back up their unit/binary, retain their environment, and
-use `systemctl restart orb-privd` after installing the native override and binary.
+belong to the socket group; do not grant it to arbitrary users. After first-time
+bootstrap, subsequent upgrades must use the governed, checksummed rollout
+(`scripts/rolling_upgrade_nodes.py` with `--stage-from-dir target/aarch64-linux --expected-build-sha <sha>`)
+so `sandboxed-node`, `sandboxed-mcp`, and `orb-privd` are cordoned, drained,
+verified by SHA-256, health-checked against `ORB_BUILD_SHA`, and automatically
+rolled back on failure rather than hand-copied or restarted under live turns.
 
 ## Credential-free worker evidence (2026-11-14)
 

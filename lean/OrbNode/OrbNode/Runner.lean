@@ -1270,6 +1270,70 @@ private def detectLeanRuntimeReady (workDir : String) : IO Bool := do
     if (← cand.pathExists) && !(← cand.isDir) then return true
   return false
 
+private def computeBinarySha256? (fp : System.FilePath) : IO (Option String) := do
+  if !(← fp.pathExists) || (← fp.isDir) then return none
+  if let .ok md ← fp.metadata |>.toBaseIO then
+    if md.byteSize ≤ 32 * 1024 * 1024 then
+      if let .ok bytes ← IO.FS.readBinFile fp |>.toBaseIO then
+        return some (bytesToHexLower (sha256Bytes bytes))
+  if let .ok out ← (IO.Process.output { cmd := "sha256sum", args := #[fp.toString] }).toBaseIO then
+    if out.exitCode == 0 then
+      let hex := ((out.stdout.splitOn " ").headD "").trimAscii.toString.toLower
+      if hex.length == 64 then return some hex
+  return none
+
+private def firstExistingBinarySha256? (paths : Array String) : IO (Option String) := do
+  for p in paths do
+    if !p.isEmpty then
+      if let some hex ← computeBinarySha256? (System.FilePath.mk p) then
+        return some hex
+  return none
+
+def resolveNodeBuildSha : IO String := do
+  let envSha := ((← IO.getEnv "ORB_BUILD_SHA").getD "").trimAscii.toString
+  if !envSha.isEmpty then return envSha
+  for conf in #["/etc/systemd/system/sandboxed-node.service.d/30-build.conf",
+                "/etc/systemd/system/orb-node.service.d/30-build.conf",
+                "/var/lib/sandboxed-node/build_sha"] do
+    let fp := System.FilePath.mk conf
+    if ← fp.pathExists then
+      if let .ok raw ← (IO.FS.readFile fp).toBaseIO then
+        for line in raw.splitOn "\n" do
+          let t := line.trimAscii.toString
+          if t.startsWith "Environment=ORB_BUILD_SHA=" then
+            let v := (t.drop 26).trimAscii.toString
+            if !v.isEmpty then return v
+          else if !t.startsWith "[" && !t.startsWith "#" && !t.contains '=' && !t.isEmpty then
+            return t
+  return ""
+
+def collectNodeBinaryShas : IO JVal := do
+  let selfPath? ← match ← (IO.appPath).toBaseIO with
+    | .ok p => pure (some p.toString)
+    | .error _ => pure none
+  let mut nodeCands : Array String := #[]
+  if let some envP ← IO.getEnv "ORB_NODE_BINARY_PATH" then
+    nodeCands := nodeCands.push envP.trimAscii.toString
+  if let some sp := selfPath? then
+    nodeCands := nodeCands.push sp
+  nodeCands := nodeCands ++ #["/usr/local/bin/sandboxed-node", "/opt/orb/bin/sandboxed-node"]
+  let mut mcpCands : Array String := #[]
+  if let some envP ← IO.getEnv "ORB_MCP_BINARY_PATH" then
+    mcpCands := mcpCands.push envP.trimAscii.toString
+  mcpCands := mcpCands ++ #["/usr/local/bin/sandboxed-mcp", "/opt/orb/bin/sandboxed-mcp"]
+  let mut privdCands : Array String := #[]
+  if let some envP ← IO.getEnv "ORB_PRIVD_BINARY_PATH" then
+    privdCands := privdCands.push envP.trimAscii.toString
+  privdCands := privdCands ++ #["/usr/local/sbin/orb-privd", "/opt/orb/bin/orb-privd"]
+  let nodeSha? ← firstExistingBinarySha256? nodeCands
+  let mcpSha? ← firstExistingBinarySha256? mcpCands
+  let privdSha? ← firstExistingBinarySha256? privdCands
+  return .obj #[
+    ("sandboxed-node", match nodeSha? with | some s => .str s | none => .null),
+    ("sandboxed-mcp", match mcpSha? with | some s => .str s | none => .null),
+    ("orb-privd", match privdSha? with | some s => .str s | none => .null)
+  ]
+
 def buildHeartbeatJson (rt : NodeRuntime) : IO JVal := do
   let st ← OrbNode.Posix.hostStats rt.cfg.workDir
   let leanReady ← detectLeanRuntimeReady rt.cfg.workDir
@@ -1285,6 +1349,9 @@ def buildHeartbeatJson (rt : NodeRuntime) : IO JVal := do
   let diskPinned := ((diskWord &&& 0xFFFFFFFF).toUInt32 &&& 256) == 0
   let toolchains ← listCachedToolchains rt.cfg.workDir
   let advAuth ← advertisedManagedAuth rt.cfg.managedAuth
+  let buildSha ← resolveNodeBuildSha
+  let binShas ← collectNodeBinaryShas
+  let buildVal : JVal := if buildSha.isEmpty then .null else .str buildSha
   return .obj #[
     ("resource_history", .arr #[]),
     ("node_id", .str rt.cfg.nodeId),
@@ -1293,6 +1360,9 @@ def buildHeartbeatJson (rt : NodeRuntime) : IO JVal := do
     ("capacity_available", JVal.nat capAvail.toNat),
     ("active_leases", JVal.nat rt.activeExecMain.toNat),
     ("version", .str "1.3.0-lean4"),
+    ("build", buildVal),
+    ("build_sha", buildVal),
+    ("binary_sha256", binShas),
     ("protocol_version", JVal.nat 5),
     ("labels", .arr (labels.map .str)),
     ("cpu_total", JVal.nat st.cpuTotal.toNat),

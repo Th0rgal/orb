@@ -1479,8 +1479,12 @@ def runMain (args : List String) : IO UInt32 := do
   if args.contains "--help" || args.contains "-h" then
     IO.println "Usage: orb-privd [--socket <path>] | [--check-scope-json <json>]"
     return 0
-  if args.contains "--version" then
-    IO.println "orb-privd 1.3.0 (Lean 4)"
+  if args.contains "--version" || args.contains "-V" then
+    let sha := ((← IO.getEnv "ORB_BUILD_SHA").getD "").trimAscii.toString
+    if sha.isEmpty then
+      IO.println "orb-privd 1.3.0 (Lean 4)"
+    else
+      IO.println s!"orb-privd 1.3.0 (Lean 4, {sha})"
     return 0
   match args with
   | ["--check-scope-json", rawJson] =>

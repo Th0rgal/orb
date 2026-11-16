@@ -103,6 +103,7 @@ class DeployGateTests(unittest.TestCase):
         tree = root / "tree"
         (tree / "lean/OrbCore/.lake/build/bin").mkdir(parents=True, exist_ok=True)
         (tree / "lean/OrbNode/.lake/build/bin").mkdir(parents=True, exist_ok=True)
+        (tree / "lean/OrbBin/.lake/build/bin").mkdir(parents=True, exist_ok=True)
         (tree / "catalog/snapshots").mkdir(parents=True, exist_ok=True)
         (tree / "scripts/ops").mkdir(parents=True, exist_ok=True)
         (tree / "catalog/providers.json").write_text("{}\n")
@@ -111,6 +112,8 @@ class DeployGateTests(unittest.TestCase):
             "lean/OrbCore/.lake/build/bin/orb-core-test": "#!/bin/sh\necho ok\n",
             "lean/OrbNode/.lake/build/bin/orb-node": "new-orb-node\n",
             "lean/OrbNode/.lake/build/bin/orb-node-test": "#!/bin/sh\necho ok\n",
+            "lean/OrbBin/.lake/build/bin/sandboxed-mcp": "new-sandboxed-mcp\n",
+            "lean/OrbBin/.lake/build/bin/orb-privd": "new-orb-privd\n",
             "scripts/orb-node-provision.sh": "new-provision\n",
             "scripts/ops/orb-monitor": "new-orb-monitor\n",
             "scripts/ops/orb-sidecar-guard": "new-orb-sidecar-guard\n",
@@ -162,6 +165,8 @@ class DeployGateTests(unittest.TestCase):
         targets = {
             "usr/local/bin/orb-core": ("old-orb-core\n", 0o755),
             "usr/local/bin/sandboxed-node": ("old-orb-node\n", 0o755),
+            "usr/local/bin/sandboxed-mcp": ("old-sandboxed-mcp\n", 0o755),
+            "usr/local/sbin/orb-privd": ("old-orb-privd\n", 0o755),
             "usr/local/lib/orb/orb-node-provision.sh": ("old-provision\n", 0o644),
             "usr/local/sbin/orb-monitor": ("old-orb-monitor\n", 0o755),
             "usr/local/sbin/orb-sidecar-guard": ("old-orb-sidecar-guard\n", 0o755),
@@ -195,6 +200,9 @@ class DeployGateTests(unittest.TestCase):
             self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
 
             expected = {
+                "usr/local/bin/sandboxed-node": ("new-orb-node\n", "old-orb-node\n", 0o755),
+                "usr/local/bin/sandboxed-mcp": ("new-sandboxed-mcp\n", "old-sandboxed-mcp\n", 0o755),
+                "usr/local/sbin/orb-privd": ("new-orb-privd\n", "old-orb-privd\n", 0o755),
                 "usr/local/sbin/orb-monitor": ("new-orb-monitor\n", "old-orb-monitor\n", 0o755),
                 "usr/local/sbin/orb-sidecar-guard": ("new-orb-sidecar-guard\n", "old-orb-sidecar-guard\n", 0o755),
                 "usr/local/sbin/orb-dev-autodeploy": ("new-orb-dev-autodeploy\n", "old-orb-dev-autodeploy\n", 0o755),
@@ -210,6 +218,53 @@ class DeployGateTests(unittest.TestCase):
                 self.assertEqual(backup.read_text(), old_text)
                 backups = list(staged.parent.glob(f"{staged.name}.pre-deploy-*"))
                 self.assertEqual(len(backups), 5, f"expected 5 pruned backups for {rel}, got {backups}")
+            rel_bin = root / f"usr/local/share/orb/releases/{SHA}/bin"
+            self.assertEqual((rel_bin / "sandboxed-node").read_text(), "new-orb-node\n")
+            self.assertEqual((rel_bin / "sandboxed-mcp").read_text(), "new-sandboxed-mcp\n")
+            self.assertEqual((rel_bin / "orb-privd").read_text(), "new-orb-privd\n")
+
+    def test_deploy_nodes_status_and_dry_run_invoke_rolling_upgrade_controller(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = (Path(__file__).parent / "ops/orb-deploy").read_text()
+            for prefix in ("/usr/local", "/etc/systemd", "/run/lock"):
+                script = script.replace(prefix, str(root) + prefix)
+            fake_script = root / "orb-deploy-test"
+            fake_script.write_text(script)
+            fake_script.chmod(0o755)
+
+            tree = root / "tree"
+            (tree / "scripts").mkdir(parents=True, exist_ok=True)
+            (tree / "scripts/rolling_upgrade_nodes.py").write_text(
+                "import sys, json\nprint(json.dumps({'argv': sys.argv[1:]}))\n"
+            )
+            rel_bin = root / f"usr/local/share/orb/releases/{SHA}/bin"
+            rel_bin.mkdir(parents=True, exist_ok=True)
+            for name in ("sandboxed-node", "sandboxed-mcp", "orb-privd"):
+                (rel_bin / name).write_text(f"bin-{name}\n")
+
+            env = {
+                **os.environ,
+                "ORB_DEPLOY_TREE": str(tree),
+                "ORB_DEPLOY_LOG": str(root / "deploy.log"),
+            }
+            for flag, expected_mode in [("--nodes-status", "--status"), ("--nodes-dry-run", "--dry-run")]:
+                res = subprocess.run(
+                    ["bash", str(fake_script), SHA, flag],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                import json
+                payload = json.loads(res.stdout.strip())
+                self.assertIn(expected_mode, payload["argv"])
+                self.assertIn("--expected-build-sha", payload["argv"])
+                self.assertIn(SHA, payload["argv"])
+                self.assertIn("--stage-from-dir", payload["argv"])
+                self.assertIn(str(rel_bin), payload["argv"])
 
     def test_deploy_rolls_back_staged_ops_scripts_on_dev_or_prod_health_failure(self):
         import tempfile
