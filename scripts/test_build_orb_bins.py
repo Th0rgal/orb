@@ -317,15 +317,25 @@ class TurboLeanCompatibilityTests(unittest.TestCase):
     def test_dockerfile_and_managed_image_build_pinned_turbo_lean_without_raw_fallback(self):
         dockerfile = (ROOT / 'Dockerfile').read_text()
         source_stage = dockerfile.split('FROM ubuntu:24.04 AS lean-prebuilt', 1)[0]
+        self.assertIn('SHELL ["/bin/bash", "-o", "pipefail", "-c"]', source_stage)
         self.assertIn('lean/turbo-lean-revision', source_stage)
         self.assertIn('https://github.com/Th0rgal/turbo-lean.git', source_stage)
         self.assertIn('https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init', source_stage)
         self.assertIn('20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c', source_stage)
         self.assertIn('--default-toolchain 1.93.0', source_stage)
         self.assertIn('cargo build --release --locked', source_stage)
-        self.assertIn('/usr/local/bin/turbo-lean', source_stage)
+        self.assertIn('turbo-lean --version', source_stage)
         self.assertNotIn('ORB_ALLOW_RAW_LAKE_FALLBACK', source_stage)
         self.assertNotIn('ORB_SKIP_TURBO_LEAN', source_stage)
+
+        has_bash_shell = False
+        for instruction in source_stage.replace('\\\n', ' ').splitlines():
+            stripped = instruction.strip()
+            if stripped.startswith('SHELL ') and '/bin/bash' in stripped:
+                has_bash_shell = True
+            elif stripped.startswith('RUN '):
+                if ('pipefail' in stripped or '[[' in stripped) and not has_bash_shell:
+                    self.fail(f'Dockerfile source stage RUN uses pipefail or [[ before a bash SHELL directive: {stripped}')
 
         managed = (ROOT / 'scripts' / 'managed_image.py').read_text()
         build_script = managed.split('BUILD_SCRIPT = r\'\'\'', 1)[1].split('\'\'\'', 1)[0]
