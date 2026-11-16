@@ -38,18 +38,19 @@ test("mission board survives a project move", async ({ page }) => {
   const text = "# Mission plan\nKeep this text through the move.\n";
   const hash = "fixture-mission-board-sha256";
   await page.addInitScript(theme => { localStorage.setItem("orb.apiUrl", location.origin); localStorage.setItem("orb.jwt", "test"); localStorage.setItem("orb.theme", theme); }, theme);
-  const mission = () => ({ id: "controller", title: "Release planning", project, placement_revision: project === "notes" ? 1 : 2, status: "completed", backend: "opencode", tags: [], history: [], updated_at: "2026-11-16T10:00:00Z" });
+  const id = "00000000-0000-0000-0000-0000000000b3";
+  const mission = () => ({ id, title: "Release planning", project, placement_revision: project === "notes" ? 1 : 2, status: "completed", backend: "opencode", tags: [], history: [], updated_at: "2026-11-16T10:00:00Z" });
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
-    if (path === "/api/projects") return route.fulfill({ json: { projects: [{ slug: "notes", title: "Notes" }, { slug: "next", title: "Next" }] } });
+    if (path === "/api/projects") return route.fulfill({ json: { projects: [{ slug: "notes", title: "Notes", status: "active", updated_at: "2026-11-16T10:00:00Z" }, { slug: "next", title: "Next", status: "active", updated_at: "2026-11-16T10:00:00Z" }] } });
     if (path === "/api/projects/notes" || path === "/api/projects/next") return route.fulfill({ json: { slug: path.split("/")[3], controller_mission_id: null } });
     if (path === "/api/projects/notes/boards" || path === "/api/projects/next/boards") {
-      return route.fulfill({ json: { project: path.split("/")[3], boards: project === path.split("/")[3] ? [{ mission_id: "controller", title: "Release planning", status: "active", parent_mission_id: null, updated_at: "2026-11-16T10:00:00Z", bytes: text.length, text_sha256: hash }] : [] } });
+      return route.fulfill({ json: { project: path.split("/")[3], boards: project === path.split("/")[3] ? [{ mission_id: id, title: "Release planning", status: "active", parent_mission_id: null, updated_at: "2026-11-16T10:00:00Z", bytes: text.length, text_sha256: hash }] : [] } });
     }
-    if (path === "/api/control/missions/controller/board") return route.fulfill({ json: { mission_id: "controller", text, updated_at: "2026-11-16T10:00:00Z", updated_by_mission_id: "controller", text_sha256: hash } });
-    if (path.endsWith("/missions/move") && request.method() === "POST") { project = "next"; return route.fulfill({ json: { moved: [{ mission_id: "controller", project, folder: "", placement_revision: 2 }] } }); }
+    if (path === `/api/control/missions/${id}/board`) return route.fulfill({ json: { mission_id: id, text, updated_at: "2026-11-16T10:00:00Z", updated_by_mission_id: id, text_sha256: hash } });
+    if (path === "/api/control/missions/move" && request.method() === "POST") { project = "next"; return route.fulfill({ json: { moved: [{ mission_id: id, project, folder: "", placement_revision: 2 }] } }); }
     if (path === "/api/control/missions") return route.fulfill({ json: [mission()] });
-    if (path.includes("/missions/controller")) return route.fulfill({ json: mission() });
+    if (path.includes(`/missions/${id}`)) return route.fulfill({ json: mission() });
     if (path.endsWith("/files")) return route.fulfill({ json: { entries: [] } });
     return route.fulfill({ json: [] });
   });
