@@ -93,15 +93,7 @@ def stockChains : Array (String × String × Array (String × String)) := #[
   ("builtin/cheap", "Cheap", #[("zai", "glm-4.7")]),
   ("builtin/fast", "Fast", #[("zai", "glm-5-turbo")]),
   ("builtin/assistant", "Assistant (Hermes)", #[
-    ("google", "gemini-4-carbon-eap"), ("minimax", "MiniMax-M3"), ("cerebras", "zai-glm-4.7")]),
-  ("google-opus", "Google Opus 5.5 (Antigravity Only)", #[
-    ("antigravity", "claude-opus-5-5-high"), ("antigravity", "claude-opus-5-5-medium"),
-    ("antigravity", "claude-opus-4-6-thinking"), ("antigravity", "agy-model-high"),
-    ("google", "gemini-4-carbon-eap")]),
-  ("google-sonnet", "Google Sonnet 5.5 (Antigravity Only)", #[
-    ("antigravity", "claude-sonnet-5-5-high"), ("antigravity", "claude-sonnet-5-5-medium"),
-    ("antigravity", "claude-sonnet-4-6"), ("antigravity", "agy-model-high"),
-    ("google", "gemini-4-carbon-eap")])
+    ("minimax", "MiniMax-M3"), ("cerebras", "zai-glm-4.7")])
 ]
 
 def entriesJson (entries : Array (String × String)) : String :=
