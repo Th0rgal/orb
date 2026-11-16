@@ -44,11 +44,12 @@ SHA-256-checked Linux aarch64 v4.35.0 release if `lake` is absent. If `lake`
 is already on PATH (including elan shims), ensure its pinned v4.35.0 toolchain
 is installed and usable first. It does not replace an existing `lake`.
 
-If installed, turbo-lean is preferred with telemetry disabled and the above
-memory/job bounds. Otherwise the script uses raw Lake; budget memory accordingly
-and keep one heavy build at a time. For a systemd-managed user session, a hard
-cap can be applied by prefixing the build command with
-`systemd-run --user --scope -p MemoryMax=8G --`.
+`turbo-lean` must be on `PATH`; `scripts/build_orb_bins.sh` runs it with
+telemetry disabled and the above memory/job bounds, and fails closed unless
+`ORB_ALLOW_RAW_LAKE_FALLBACK=1` is explicitly set (if overriding to raw Lake,
+budget memory accordingly and keep one heavy build at a time). For a
+systemd-managed user session, a hard cap can be applied by prefixing the build
+command with `systemd-run --user --scope -p MemoryMax=8G --`.
 
 Omit all `--only` options to build the default Orb set, including `sandboxed-node`,
 `orb-core`, `orb-locald` and the MCP tools. Repeat `--only` to select binaries;
