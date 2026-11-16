@@ -7,7 +7,7 @@ open OrbCore.Store OrbCore.Control OrbCore.Managed OrbCore.Proxy OrbCore.R7Core 
 
 private def check (ok : Bool) (label : String) : IO Unit := do
   unless ok do throw (IO.userError s!"mission settings: {label}")
-  if label.startsWith "B5_" then IO.println s!"PASS {label}"
+  if label.startsWith "B5_" || label.startsWith "B5b_" then IO.println s!"PASS {label}"
 
 def moveRecovery (root : String) : IO Unit := do
   let path := s!"{root}/b5b-recovery"
@@ -43,11 +43,25 @@ def moveRecovery (root : String) : IO Unit := do
       "B5b_crash_between_commits_startup_repairs_two_families"
     check ((← OrbCore.MissionMoveRecovery.pending reopened.missionsDb).toOption == some #[])
       "B5b_recovery_clears_markers"
+    discard <| sql reopened.missionsDb "CREATE TRIGGER reject_settings BEFORE UPDATE OF backend ON missions BEGIN SELECT RAISE(ABORT,'before commit'); END;"
+    let some before ← getMission? reopened "aroot" | throw (IO.userError "missing root")
+    let settings : OrbCore.MissionSettings.Settings := {
+      title := "rollback", backend := "codex", modelOverride := "", modelEffort := "",
+      shortDescription? := none, githubPr? := none }
+    let rolled ← OrbCore.MissionSettings.applyPlacementPatch reopened before
+      (.obj #[("project", .str "rollback-target")]) "alice" true "" "t2" 1001 (some settings)
+    check (!rolled.isOk && (← OrbCore.MissionMoveRecovery.pending reopened.missionsDb).toOption == some #[])
+      "B5b_before_commit_failure_has_no_marker"
+    discard <| sql reopened.missionsDb "DROP TRIGGER reject_settings;"
     OrbCore.MissionMoveRecovery.startup path
     check ((← sql reopened.missionsDb "SELECT project FROM missions ORDER BY id;") == missions &&
       (← sql reopened.projectsDb "SELECT project_scope FROM mcp_sessions_v1 ORDER BY id;") == sessions &&
       (← sql reopened.projectsDb "SELECT project_slug FROM project_track_leases ORDER BY mission_id;") == leases)
       "B5b_second_startup_is_noop"
+    let normal ← OrbCore.MissionSettings.applyPlacementPatch reopened before
+      (.obj #[("project", .str "normal-target")]) "alice" true "" "t3" 1002
+    check (normal.isOk && (← OrbCore.MissionMoveRecovery.pending reopened.missionsDb).toOption == some #[])
+      "B5b_normal_move_has_no_marker"
   finally closeCoreStore reopened
 
 def run (root : String) : IO Unit := do
