@@ -500,6 +500,14 @@ test("Resources page renders global Compute/Inference Sankey, USD toggle, bottom
         await expect(page.getByTestId("res-flow-inference")).toContainText("$29.2/h");
         await expect(page.getByTestId("res-flow-compute")).toContainText("$3.20/h");
         await page.getByTestId("res-metric-raw").click();
+        const history = page.getByRole("combobox", { name: "Consumption history" });
+        await history.focus();
+        await page.keyboard.press("ArrowDown");
+        await page.keyboard.press("Enter");
+        await expect(history).toHaveValue("compute");
+        await expect(consumptionCard).toContainText("Consumption · vCPU");
+        await expect(page.getByTestId("res-clear-filter")).toHaveCount(0);
+        await history.selectOption("inference");
       }
       expect((await consumptionCard.boundingBox())!.y).toBe(baseCurveBox.y);
       expect((await timelineBar.boundingBox())!.y).toBe(baseTimelineBox.y);

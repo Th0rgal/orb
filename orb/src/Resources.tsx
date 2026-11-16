@@ -1550,6 +1550,20 @@ export default function Resources(props: {
             <span class="res-col-title">
               Consumption · {metric() === "usd" ? "Est. USD / hour" : rawUnitLabel()}
             </span>
+            <Show when={wideFlows() && (!isMissionMode() || submode() === "flow")}>
+              <select
+                class="res-curve-lens"
+                aria-label="Consumption history"
+                value={lens()}
+                onChange={(event) => {
+                  setLens(event.currentTarget.value as ResourceLens);
+                  setIsolatedId(null);
+                }}
+              >
+                <option value="inference">Inference</option>
+                <option value="compute">Compute</option>
+              </select>
+            </Show>
             <Show when={isMissionMode()}>
               <div class="res-curve-controls">
                 <Show when={!wideFlows() || submode() === "dag"}>{renderLensToggle(true)}</Show>

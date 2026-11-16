@@ -498,6 +498,21 @@
   gap: 6px;
 }
 
+.res-curve-lens {
+  height: 24px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--fg-2);
+  font: inherit;
+  outline: none;
+  box-shadow: none;
+}
+
+.res-curve-lens:focus {
+  border-color: var(--focus-border);
+}
+
 .res-seg-compact {
   padding: 2px;
 }
