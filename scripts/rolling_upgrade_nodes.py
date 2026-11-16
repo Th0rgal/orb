@@ -1963,6 +1963,7 @@ def rolling_upgrade_step(
             continue
 
         if not healthy:
+            upgrade_failures += 1
             pending_remotes.append((host, db_path, -1))
             if cordoned_map.get(host, False):
                 currently_cordoned_pending.append(host)
