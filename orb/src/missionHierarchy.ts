@@ -68,6 +68,10 @@ type PlacementState = {
 };
 
 const placements = new Map<string, PlacementState>();
+/** Read-only revision fence for metadata-only project board requests. */
+export function boardPlacementEntries(): [string, number][] {
+  return [...placements].map(([id, placement]) => [id, placement.rev]);
+}
 let nextClientOpId = 0;
 
 export const LOCAL_PLACEMENT_CLIENT_ID: string =

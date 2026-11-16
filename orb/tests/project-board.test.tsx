@@ -11,6 +11,7 @@ beforeEach(() => {
   vi.spyOn(api, "isConnected").mockReturnValue(true);
   vi.spyOn(api, "getProject").mockResolvedValue(project);
   vi.spyOn(api, "getProjectBoard").mockResolvedValue(null);
+  vi.spyOn(api, "getProjectBoards").mockResolvedValue(null);
   vi.spyOn(api, "getMission").mockResolvedValue(mission);
   vi.spyOn(api, "setProjectControllerMission").mockResolvedValue(true);
 });

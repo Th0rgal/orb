@@ -1850,6 +1850,32 @@ export async function getProjectBoard(slug: string): Promise<ProjectBoard | null
   return board && typeof board.text === "string" ? board : null;
 }
 
+export interface MissionBoard {
+  mission_id: string;
+  text: string;
+  updated_at: string | null;
+  updated_by_mission_id: string | null;
+  text_sha256: string;
+}
+export interface MissionBoardSummary {
+  mission_id: string;
+  title: string;
+  status: string;
+  parent_mission_id: string | null;
+  updated_at: string;
+  bytes: number;
+  text_sha256: string;
+}
+export interface ProjectBoards { project: string; boards: MissionBoardSummary[] }
+
+/** null means the route is absent on an older Core; authorization errors stay errors. */
+export function getMissionBoard(id: string): Promise<MissionBoard | null> {
+  return optionalProjectApi<MissionBoard>(`/api/control/missions/${encodeURIComponent(id)}/board`);
+}
+export function getProjectBoards(slug: string, all = false): Promise<ProjectBoards | null> {
+  return optionalProjectApi<ProjectBoards>(`/api/projects/${encodeURIComponent(slug)}/boards${all ? "?all=true" : ""}`);
+}
+
 export async function setProjectControllerMission(slug: string, missionId: string | null): Promise<boolean> {
   // The write contract does not require a response body (Core may return 204).
   const result = await optionalProjectApi<unknown>(`/api/projects/${encodeURIComponent(slug)}/controller-mission`, {
@@ -3251,6 +3277,5 @@ export function getMissionResources(
     signal ? { signal } : undefined,
   );
 }
-
 
 

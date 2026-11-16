@@ -4,6 +4,7 @@ import { displayTitle } from "./goal";
 import { SettingsCard, SettingsRow } from "./SettingsCard";
 import { SteerComposer } from "./SteerComposer";
 import "./ProjectBoard.css";
+import { ProjectMissionBoards } from "./MissionBoard";
 
 export function ProjectBoardSection(p: { slug: string; selectedMission?: Mission | null; missionHint?: { id: string | null }; onOpenMission: (id: string) => void }) {
   const [supported, setSupported] = createSignal(false);
@@ -102,12 +103,12 @@ export function ProjectBoardSection(p: { slug: string; selectedMission?: Mission
           }
         })(p.slug, connectionVersion())} />
     </SettingsCard>
-    <Show when={loading() || board()}><SettingsCard title="Board">
+    <ProjectMissionBoards slug={p.slug} missionHint={p.missionHint} onOpenMission={p.onOpenMission} legacy={() => <Show when={loading() || board()}><SettingsCard title="Board">
       <div class="project-board" aria-busy={loading()}>
         <Show when={!loading()} fallback={<div class="project-board-skeleton" role="status" aria-label="Loading board"><span /><span /><span /></div>}>
           <Show when={board()}>{value => <><Show when={value().updated_at}><time dateTime={value().updated_at!}>{new Date(value().updated_at!).toLocaleString()}</time></Show><pre>{value().text}</pre></>}</Show>
         </Show>
       </div>
-    </SettingsCard></Show>
+    </SettingsCard></Show>} />
   </Show>;
 }

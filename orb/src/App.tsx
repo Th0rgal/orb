@@ -10,6 +10,7 @@ import { markUnfocusedBtwDirty, noteBtwPresentationHint } from "./btwAgent";
 import { lookupMissionById, resetMissionLookup } from "./missionLookup";
 import { movedMission, withMovedMissions } from "./moves";
 import { applyServerPlacementEvent, moveMissions, planMissionMoves } from "./missionMove";
+import { MissionBoardSection } from "./MissionBoard";
 import { MissionLookupContext } from "./orchestrationModel";
 import { renamedTitle, renameOptimistically, withRenamedTitles } from "./renames";
 import { readString, writeString } from "./storage";
@@ -2289,6 +2290,7 @@ export default function App() {
           return (
             <div class="mission-slot" data-slot-key={slot.slotKey} hidden={!isActive()}>
               <SlotActiveContext.Provider value={isActive}>
+                <Show when={isActive() && slot.missionId()}><MissionBoardSection chrome id={slot.missionId()} project={findKnownMission(slot.missionId())?.project} missionHint={projectMissionHint()} /></Show>
                 <Show
                   when={slot.kind === "launch"}
                   fallback={

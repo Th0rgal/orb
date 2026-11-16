@@ -1,0 +1,21 @@
+{
+  "mission": {
+    "mission_id": "m1",
+    "text": "# Plan\nShip B3.\n",
+    "updated_at": "2026-11-16T10:00:00Z",
+    "updated_by_mission_id": "m1",
+    "text_sha256": "fixture-m1-sha256"
+  },
+  "project": {
+    "project": "notes",
+    "boards": [{
+      "mission_id": "m1",
+      "title": "Release planning",
+      "status": "active",
+      "parent_mission_id": null,
+      "updated_at": "2026-11-16T10:00:00Z",
+      "bytes": 18,
+      "text_sha256": "fixture-m1-sha256"
+    }]
+  }
+}
