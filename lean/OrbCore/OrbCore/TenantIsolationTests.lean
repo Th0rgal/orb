@@ -1695,7 +1695,7 @@ def run (root : String) : IO Unit := do
       id := "mm-r12-node-1", sandboxName := "orb-managed-mm-r12-node-1", provider := "boat",
        size := "small", spentCents := 25, nodeBootEpoch := 1, deletableAtSec := now + 3600
     }
-    let .ok _ ← provisionManagedMachine mc { enabled := true, boatEnabled := true } r12Vm 50
+    let .ok _ ← provisionManagedMachine mc { enabled := true, boatEnabled := true } r12Vm now
       | throw (IO.userError "r12 provisionManagedMachine")
     let .ok () ← bindManagedProviderId mc r12Vm.id "boat-r12-1" 1
       | throw (IO.userError "r12 bindManagedProviderId")
