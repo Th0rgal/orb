@@ -28,9 +28,16 @@ def moveRecovery (root : String) : IO Unit := do
       let result ← OrbCore.MissionSettings.applyPlacementPatch store mr
         (.obj #[("project", .str "destination")]) "alice" true "" "t1" 1000
       check (!result.isOk) "B5b injected post-commit failure"
+    let reached ← IO.mkRef false
+    closeCoreStore store
+    let code ← OrbCore.MissionMoveRecovery.startAfterRecovery path (do reached.set true; return 0)
+    check (code != 0 && !(← reached.get) &&
+      ((← OrbCore.MissionMoveRecovery.pending store.missionsDb).toOption.getD #[]).size == 6)
+      "B5b_startup_failure_blocks_server_and_keeps_markers"
+    let .ok store ← openCoreStore path | throw (IO.userError "B5b reopen after failure")
     discard <| sql store.projectsDb "DROP TRIGGER reject_rebind;"
   finally closeCoreStore store
-  OrbCore.MissionMoveRecovery.startup path
+  check (← OrbCore.MissionMoveRecovery.startup path).isOk "B5b_next_startup_repairs_after_failure"
   let .ok reopened ← openCoreStore path | throw (IO.userError "B5b reopen")
   try
     let missions ← sql reopened.missionsDb "SELECT project FROM missions ORDER BY id;"
@@ -53,7 +60,7 @@ def moveRecovery (root : String) : IO Unit := do
     check (!rolled.isOk && (← OrbCore.MissionMoveRecovery.pending reopened.missionsDb).toOption == some #[])
       "B5b_before_commit_failure_has_no_marker"
     discard <| sql reopened.missionsDb "DROP TRIGGER reject_settings;"
-    OrbCore.MissionMoveRecovery.startup path
+    check (← OrbCore.MissionMoveRecovery.startup path).isOk "B5b_second_startup_succeeds"
     check ((← sql reopened.missionsDb "SELECT project FROM missions ORDER BY id;") == missions &&
       (← sql reopened.projectsDb "SELECT project_scope FROM mcp_sessions_v1 ORDER BY id;") == sessions &&
       (← sql reopened.projectsDb "SELECT project_slug FROM project_track_leases ORDER BY mission_id;") == leases)
@@ -62,6 +69,12 @@ def moveRecovery (root : String) : IO Unit := do
       (.obj #[("project", .str "normal-target")]) "alice" true "" "t3" 1002
     check (normal.isOk && (← OrbCore.MissionMoveRecovery.pending reopened.missionsDb).toOption == some #[])
       "B5b_normal_move_has_no_marker"
+    discard <| sql reopened.missionsDb "INSERT INTO pending_mission_rebinds(mission_id) VALUES('deleted');"
+    discard <| sql reopened.projectsDb "INSERT INTO mcp_sessions_v1(id,mission_id,project_scope,project_scoped) VALUES('deleted','deleted','source',1);"
+    check (← OrbCore.MissionMoveRecovery.startup path).isOk "B5b_deleted_mission_startup_succeeds"
+    check ((← sql reopened.projectsDb "SELECT project_scope FROM mcp_sessions_v1 WHERE id='deleted';")[1]![0]! == "source" &&
+      (← OrbCore.MissionMoveRecovery.pending reopened.missionsDb).toOption == some #[])
+      "B5b_deleted_mission_marker_removed_without_rebind"
   finally closeCoreStore reopened
 
 def run (root : String) : IO Unit := do
