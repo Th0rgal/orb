@@ -35,6 +35,7 @@ import OrbCore.ProxyRoutingTests
 import OrbCore.SettingsDocumentTests
 import OrbCore.TenantIsolationTests
 import OrbCore.DevSpendingTests
+import OrbCore.ManagedBudgetTests
 import OrbCore.DevOperatorTests
 import OrbCore.SettingsTransferTests
 import OrbCore.MacTetherTests
@@ -7734,6 +7735,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     OrbCore.ManagedProvisioningTests.run tmpRoot
     OrbCore.ManagedResumeTests.run tmpRoot
     OrbCore.DevSpendingTests.run tmpRoot
+    OrbCore.ManagedBudgetTests.run tmpRoot
     OrbCore.DevOperatorTests.run tmpRoot
     OrbCore.ManagedAccessTests.run tmpRoot
     OrbCore.MissionSettingsTests.run tmpRoot
