@@ -1260,7 +1260,7 @@ class RollingUpgradeNodesTest(unittest.TestCase):
             )
             self.assertTrue(guard_script.is_file())
             self.assertTrue(guard_conf.is_file())
-            self.assertIn(f"ExecStartPre=/usr/bin/python3 {guard_script}", guard_conf.read_text())
+            self.assertIn(f"ExecStartPre=+/usr/bin/python3 {guard_script}", guard_conf.read_text())
 
             # Case 1: corrupt/missing backup during boot -> start guard refuses to start
             Path(str(node_bin) + ".prev").unlink()
