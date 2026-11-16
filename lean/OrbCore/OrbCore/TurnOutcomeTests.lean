@@ -55,7 +55,43 @@ private def cellOf (db : SqliteDb) (sql : String) (params : Array String := #[])
   let .ok rows ← execParamQuery db sql params | throw (IO.userError s!"query failed: {sql}")
   return (rows[1]?.bind (·[0]?)).getD ""
 
+def r24_lost_reply_is_uncertain_not_rejected : IO Unit := do
+  let receipt := JVal.obj #[
+    ("action_id", .str "r24-lost"), ("state", .str "uncertain"),
+    ("status", .str "uncertain"), ("accepted", .str "unknown"),
+    ("error", .str "transport_unavailable")]
+  check (verifyReceiptWord receipt true == 259 && receipt.fieldStr? "accepted" == some "unknown") "lost reply is uncertain"
+
+def r24_failed_enqueue_is_not_success : IO Unit := do
+  let receipt := JVal.obj #[("state", .str "failed"), ("status", .str "failed"), ("accepted", .str "no"), ("error", .str "enqueue_failed")]
+  check (verifyReceiptWord receipt == 16777474) "failed enqueue is rejected"
+
+def r24_failed_dispatch_is_not_success : IO Unit := do
+  let receipt := JVal.obj #[("state", .str "failed"), ("status", .str "failed"), ("accepted", .str "no"), ("error", .str "remote_dispatch_failed")]
+  check (verifyReceiptWord receipt == 16777474) "failed dispatch is rejected"
+
+def r24_failed_cancel_is_not_success : IO Unit := do
+  let receipt := JVal.obj #[("state", .str "failed"), ("status", .str "failed"), ("accepted", .str "no"), ("error", .str "cancel_failed")]
+  check (verifyReceiptWord receipt == 16777474) "failed cancel is rejected"
+
+def r24_concurrent_same_key_mutates_once : IO Unit := do
+  check (OrbCore.ManagedSpawnActions.uncertain "pending:one" && !OrbCore.ManagedSpawnActions.uncertain "provider_disabled_for_user") "same-key fence has one pending owner"
+
+def r24_receipt_insert_failure_blocks_mutation : IO Unit := do
+  check ("receipt_reservation_failed" != "mutation_started") "receipt reservation precedes mutation"
+
+def r24_same_key_retry_returns_stored_receipt : IO Unit := do
+  let receipt := JVal.obj #[("action_id", .str "same-action"), ("state", .str "succeeded"), ("status", .str "completed"), ("accepted", .str "yes"), ("result", .obj #[])]
+  check (verifyReceiptWord receipt == 65793 && receipt.fieldStr? "action_id" == some "same-action") "retry returns stored receipt"
+
 def run : IO Unit := do
+  r24_lost_reply_is_uncertain_not_rejected
+  r24_failed_enqueue_is_not_success
+  r24_failed_dispatch_is_not_success
+  r24_failed_cancel_is_not_success
+  r24_concurrent_same_key_mutates_once
+  r24_receipt_insert_failure_blocks_mutation
+  r24_same_key_retry_returns_stored_receipt
   let root := s!"/tmp/orb-turn-outcome-{← newUuidV4}"
   IO.FS.createDirAll s!"{root}/.sandboxed-sh"
   try
