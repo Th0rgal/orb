@@ -163,6 +163,17 @@ def refuseUserWrite (db : SqliteDb) (user target : String) : IO String := do
   | .error e => return e
   | .ok () => return "not_mission_writer"
 
+/-- R5 receipt envelope shared by ordinary MCP actions and atomic board actions. -/
+def settledActionReceipt (actionId toolName state : String) (resObj : JVal) (targetMissionId : String := "") : JVal :=
+  let payload := resObj.removeField "result"
+  let baseObj := payload.setField "action_id" (.str actionId)
+    |>.setField "tool_name" (.str toolName)
+    |>.setField "state" (.str state)
+    |>.setField "status" (.str (if state == "succeeded" then "completed" else state))
+    |>.setField "accepted" (.str "yes")
+    |>.setField "result" payload
+  if targetMissionId.isEmpty then baseObj else baseObj.setField "target_mission_id" (.str targetMissionId)
+
 /-- A board and its settled MCP receipt share missions.db and one IMMEDIATE transaction.
     A missing fence differs from a present empty fence. The caller supplies a unique
     receipt id and authenticated scope; no board contents go to diagnostic output. -/
@@ -181,10 +192,12 @@ def write (db : SqliteDb) (reader : Reader) (target text now : String)
       | return .error "db_error"
     if live.size ≤ 1 || live[1]![0]?.getD "" != reader.userId then return .error "mission_not_found"
     if !retryKey.isEmpty then
-      let .ok replay ← q "SELECT result FROM mission_board_actions WHERE scope=?1 AND retry_key=?2 AND state='succeeded';" #[scope, retryKey]
+      let .ok replay ← q "SELECT result,id,tool,owner FROM mission_board_actions WHERE scope=?1 AND retry_key=?2 AND state='succeeded';" #[scope, retryKey]
         | return .error "db_error"
       if replay.size > 1 then
-        return OrbBin.Json.parse (replay[1]![0]?.getD "")
+        let r := replay[1]!
+        return (OrbBin.Json.parse (r[0]?.getD "")).map fun payload =>
+          settledActionReceipt (r[1]?.getD "") (r[2]?.getD "") "succeeded" payload (r[3]?.getD "")
     let .ok rows ← q "SELECT text,updated_at,updated_by_mission_id,text_sha256 FROM mission_board WHERE mission_id=?1;" #[target]
       | return .error "db_error"
     let previous := rows[1]?.getD #[]
@@ -208,7 +221,7 @@ def write (db : SqliteDb) (reader : Reader) (target text now : String)
          "VALUES(?1,?2,?3,?4,?5,'{}','succeeded',?6,?7,?7);")
         #[actionId, target, scope, if retryKey.isEmpty then "auto:" ++ actionId else retryKey,
           tool, renderCompact result, now] then return .error e
-    return .ok result
+    return .ok (settledActionReceipt actionId tool "succeeded" result target)
 
 /-- Receipt lookup is called only after the gateway's existing receipt-scope check. -/
 def actionById? (db : SqliteDb) (actionId : String) : IO (Option JVal) := do
@@ -217,16 +230,13 @@ def actionById? (db : SqliteDb) (actionId : String) : IO (Option JVal) := do
   if rows.size ≤ 1 then return none
   let r := rows[1]!
   let some result := (OrbBin.Json.parse (r[2]?.getD "")).toOption | return none
-  return some (result.setField "action_id" (.str actionId)
-    |>.setField "tool_name" (.str (r[1]?.getD ""))
-    |>.setField "target_mission_id" (.str (r[0]?.getD ""))
-    |>.setField "state" (.str "succeeded") |>.setField "status" (.str "completed")
-    |>.setField "accepted" (.str "yes") |>.setField "result" result)
+  return some (settledActionReceipt actionId (r[1]?.getD "") "succeeded" result (r[0]?.getD ""))
 
 def actionByKey? (db : SqliteDb) (scope retryKey : String) : IO (Option JVal) := do
-  let .ok rows ← query db "SELECT result FROM mission_board_actions WHERE scope=?1 AND retry_key=?2 AND state='succeeded';" #[scope, retryKey]
+  let .ok rows ← query db "SELECT id FROM mission_board_actions WHERE scope=?1 AND retry_key=?2 AND state='succeeded';" #[scope, retryKey]
     | return none
-  return rows[1]? >>= (·[0]?) >>= fun raw => (OrbBin.Json.parse raw).toOption
+  let some actionId := rows[1]? >>= (·[0]?) | return none
+  return ← actionById? db actionId
 
 def actionScope? (db : SqliteDb) (actionId : String) : IO (Option (String × String)) := do
   let .ok rows ← query db "SELECT owner,scope FROM mission_board_actions WHERE id=?1;" #[actionId]

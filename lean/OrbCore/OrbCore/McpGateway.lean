@@ -99,14 +99,7 @@ private def checkMissionReadAccess
 
 /-- Enrich a settled MCP action result with receipt metadata (`action_id`, `tool_name`, `state`, `status`, `accepted`, `result`). -/
 private def settledMcpActionReceipt (actionId toolName state : String) (resObj : JVal) (targetMissionId : String := "") : JVal :=
-  let payload := resObj.removeField "result"
-  let baseObj := payload.setField "action_id" (.str actionId)
-    |>.setField "tool_name" (.str toolName)
-    |>.setField "state" (.str state)
-    |>.setField "status" (.str (if state == "succeeded" then "completed" else state))
-    |>.setField "accepted" (.str "yes")
-    |>.setField "result" payload
-  if targetMissionId.isEmpty then baseObj else baseObj.setField "target_mission_id" (.str targetMissionId)
+  MissionBoard.settledActionReceipt actionId toolName state resObj targetMissionId
 
 /-- Look up a persisted MCP action receipt by `id` from `mcp_actions_v1`. -/
 private def lookupMcpActionById? (store : CoreStore) (actionId : String) : IO (Option JVal) := do

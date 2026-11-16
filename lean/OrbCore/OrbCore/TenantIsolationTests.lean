@@ -237,8 +237,8 @@ def missionBoardFixtures (root : String) : IO Unit := do
     check ((← MissionBoard.migrate store.missionsDb store.projectsDb "third").isOk) "Migration: third run no-op"
     check ((← MissionBoard.read store.missionsDb rootReader "root").toOption == newer.toOption) "Migration: run twice same result"
     check (!(← write "conflicting" "later" "w2" (some "original")).isOk) "Concurrency: stale base_updated_at rejected"
-    check ((← write "new board" "later" "w3").toOption == newer.toOption) "Concurrency: identical rewrite preserves columns"
-    check ((← write "different retry" "later" "w1").toOption == newer.toOption) "Concurrency: settled key replay does not write"
+    check ((← write "new board" "later" "w3").toOption.map (·.fieldOrNull "result") == newer.toOption) "Concurrency: identical rewrite preserves columns"
+    check ((← write "different retry" "later" "w1").toOption.map (·.fieldOrNull "result") == newer.toOption) "Concurrency: settled key replay does not write"
     check ((← MissionBoard.actionById? store.missionsDb "w1").isSome) "Surface: get_action returns board receipt"
     check ((← MissionBoard.actionByKey? store.missionsDb "fixture-scope" "w1").isSome) "Concurrency: same key replays settled receipt"
     check (!(← write (String.ofList (List.replicate 8193 'é')) "later" "oversized").isOk) "Storage: UTF-8 byte cap rejects whole"
@@ -626,6 +626,23 @@ def run (root : String) : IO Unit := do
     let writtenBoard ← call memberSession "write_project_board" boardText
     check (writtenBoard.fieldBool? "ok" == some true &&
       (writtenBoard.fieldOrNull "result").fieldStr? "updated_by_mission_id" == some "member-mission") "controller writes board"
+    for tool in #["write_project_board", "write_mission_board"] do
+      let args := boardText.setField "idempotency_key" (.str ("receipt-parity-" ++ tool))
+      let first ← call memberSession tool args
+      let receipt := first.fieldOrNull "result"
+      let aid := (receipt.fieldStr? "action_id").getD ""
+      check (!aid.isEmpty && receipt.fieldStr? "state" == some "succeeded" &&
+        receipt.fieldStr? "status" == some "completed" && receipt.fieldStr? "accepted" == some "yes" &&
+        (receipt.fieldOrNull "result").fieldStr? "text" == some "controller plan") s!"{tool} settled receipt shape"
+      let fetched ← call memberSession "get_action" (.obj #[("action_id", .str aid)])
+      let replay ← call memberSession tool args
+      check (first == fetched && first == replay) s!"{tool} first/get_action/retry equality"
+      let .ok stored ← execParamQuery store.missionsDb
+          "SELECT result FROM mission_board_actions WHERE id=?1;" #[aid]
+        | throw (IO.userError "board receipt query")
+      let raw := (OrbBin.Json.parse (stored[1]![0]?.getD "")).toOption.getD .null
+      check (raw == receipt.fieldOrNull "result" && (raw.field? "action_id").isNone)
+        s!"{tool} stores raw payload"
     let .ok () ← upsertMission store {
       id := "board-reader", ownerUserId := "member", title := "board reader", parentMissionId := "member-mission",
       status := "awaiting_user", backend := "codex", modelOverride := "", workingDirectory := path,
