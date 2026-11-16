@@ -28,8 +28,8 @@ better native rendering.
 | group | verdict | before → after | crop | remaining fix |
 |---|---|---|---|---|
 | Search dialog | **OPEN** | light 1x **14.6969% → 14.4888%**; dark/light 2x **10.46% / 14.08%** | `crops/07_search_dialog_dark_2x_ref_crop.png` + `crops/07_search_dialog_dark_2x_leanui_crop.png` | Match backdrop blur/compositing and dialog typography; border correction is progress, not closure. |
-| Shared populated sidebar | **OPEN** | dark 2x **1.3090% → 1.1561%**; light 2x **1.3122% → 1.1654%** | `crops/sidebar-text-2x.png` + `crops/sidebar-icons-2x.png` | Match remaining text coverage, status rings, and icon geometry; native text remains lighter. |
-| Shared composer controls | **OPEN** | new-mission dark 2x **1.345% → 1.287%**; light 2x **1.347% → 1.290%** | `crops/08_new_mission_dialog_dark_2x_ref_crop.png` + `crops/08_new_mission_dialog_dark_2x_leanui_crop.png` | Match remaining control glyph and text rasterisation differences. |
+| Shared populated sidebar | **OPEN** | dark 2x **1.3090% → 1.1560%**; light 2x **1.3122% → 1.1653%** | `crops/sidebar-followup-ref-after-2x.png` + `crops/sidebar-followup-diff-2x.png` | Match remaining text coverage, status rings, and icon geometry; native text remains lighter. |
+| Shared composer controls | **OPEN** | new-mission dark 2x **1.2874% → 1.1345%**; light 2x **1.2897% → 1.1427%** | `crops/composer-icons-dark-2x.png` | Match remaining control glyph and text rasterisation differences. |
 | Mission transcript and split diff | **OPEN** | transcript dark **7.05% / 6.12%** at 1x/2x; split diff dark **9.20% / 7.78%** at 1x/2x | `crops/03_mission_transcript_dark_2x_ref_crop.png` + LeanUI crop; `crops/04_mission_split_diff_dark_2x_ref_crop.png` + LeanUI crop | Fix pane geometry, scrollbar, composer, and text rendering. |
 | Machines fleet | **OPEN** | dark 2x **2.77%** | `crops/05_machines_fleet_dark_2x_ref_crop.png` + LeanUI crop | Fix fleet/status icons and remaining sidebar text/geometry. |
 | Toast notifications | **OPEN** | dark 2x **5.31%** | `crops/09_toast_notifications_dark_2x_ref_crop.png` + LeanUI crop | Fix toast shadow and alert/close icon compositing. |
@@ -67,7 +67,9 @@ Border crops (light 1x, x=470..570, y=68..90):
 
 Search remains above 1%; blur and typography differences remain renderer work,
 not a demonstrated external reference blocker. This correction alone does not
-satisfy the new-under-1% merge condition.
+close the group: U3 requires deliberate improvement with reference/before/after
+crop evidence, and remaining differences must be shown to be intentional and
+better native rendering.
 
 - Search dialog: inspect backdrop blur/compositing and sidebar differences
   first; all four variants exceed 11% mismatch, while above-tolerance
@@ -104,7 +106,8 @@ sidebar group as follows:
 The full local table after both changes is mean mismatch **4.98%**, mean
 above tolerance **2.67%**, SSIM **0.9526**. No variant worsened by 0.1 point;
 the largest local increase was search light 1x at **+0.008 points**. No group
-has newly crossed below 1% yet, so this PR is not mergeable under the U3 rule.
+has newly crossed below 1% yet; the group remains open because the remaining
+differences have not been shown to be intentional and better native rendering.
 
 
 ### Shared composer control correction
@@ -120,10 +123,13 @@ reference set:
 | control empty dark 2x | 0.850% | 0.823% |
 | control empty light 1x | 1.192% | 1.137% |
 | control empty light 2x | 0.848% | 0.821% |
-| new mission dark 2x | 1.345% | 1.287% |
-| new mission light 2x | 1.347% | 1.290% |
+| new mission dark 2x | 1.2874% | 1.1345% |
+| new mission light 2x | 1.2897% | 1.1427% |
 
-No variant regressed; the full local mean is 4.96%, SSIM 0.9534, and
-**2/36** variants are under 1%. The control empty 2x variants were already
+No variant regressed; the full local mean after the destination-icon correction
+is 4.85%, with **2/36** variants under 1%, and the largest regression is
+**+0.00015 percentage points**. The control empty 2x variants were already
 under 1%; no new variant crossed the threshold. The `049b3c8a` commit body
 incorrectly reports 4/36; the generated table and this correction supersede it.
+The group remains OPEN because the residual differences have not been shown to
+be intentional and better native rendering.
