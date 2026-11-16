@@ -906,12 +906,14 @@ def run : IO Unit := do
       #[("my_spark_42", "org/model-x")] == some ("my_spark_42", "org/model-x")) "advertised custom namespace"
     check ((OrbCore.ProxyModelRouting.directEntry? "my_spark_42/typo" "/v1/chat/completions"
       #[("my_spark_42", "org/model-x")]).isNone) "unadvertised custom model"
-    -- Fresh stores retain all six historical stock chain ids, without guessing
+    -- Fresh stores carry the four stock chain ids, without guessing
     -- targets for arbitrary reviewer/scout aliases.
     let stock ← loadRoutingChainsFromStore store root
-    for id in #["builtin/smart", "builtin/cheap", "builtin/fast", "builtin/assistant",
-        "google-opus", "google-sonnet"] do
+    for id in #["builtin/smart", "builtin/cheap", "builtin/fast", "builtin/assistant"] do
       check (stock.any (fun c => c.id == id)) s!"missing stock chain {id}"
+    -- The Antigravity-only chains were retired; a deleted one must not come back.
+    for id in #["google-opus", "google-sonnet"] do
+      check (!stock.any (fun c => c.id == id)) s!"retired stock chain {id} is back"
     chainsRef.set stock
     -- A chain saved behind the running snapshot (import, another process) is found
     -- in the store before its name is refused.
