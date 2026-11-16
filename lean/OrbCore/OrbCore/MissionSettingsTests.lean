@@ -130,7 +130,16 @@ def run (root : String) : IO Unit := do
        "('deep-worker','Worker 2','active','codex','gpt-model','high','w2-sess',1,'p','folder',7,'running-worker','alice','[]','2026-11-15T10:03:00Z','2026-11-15T10:08:00Z')," ++
        "('fork-v1','Fork v1','awaiting_user','claudecode','claude-model','high','f1-sess',1,'p','folder',7,'parent','alice','[\"fork-of:parent\"]','2026-11-15T10:01:00Z','2026-11-15T10:01:00Z')," ++
        "('btw-child','Side Question','awaiting_user','claudecode','claude-model','high','btw-sess',1,'p','',7,'','alice','[\"btw-parent:parent\"]','2026-11-15T10:04:00Z','2026-11-15T10:04:00Z')," ++
-       "('callback-child','Callback Worker','active','codex','gpt-model','high','cb-sess',1,'p','folder',7,'','alice','[]','2026-11-15T10:05:00Z','2026-11-15T10:05:00Z');")
+       "('callback-child','Callback Worker','active','codex','gpt-model','high','cb-sess',1,'p','folder',7,'','alice','[]','2026-11-15T10:05:00Z','2026-11-15T10:05:00Z')," ++
+       "('unowned-child','Unowned Child','active','codex','gpt-model','high','uo-sess',1,'p','folder',7,'parent','','[]','2026-11-15T10:06:00Z','2026-11-15T10:06:00Z');")
+    discard <| sql
+      ("INSERT INTO dispatch_lease_intents(reservation_id,mission_id,project_slug,track,repo,authority_mode,phase,boot_epoch,created_at,updated_at) VALUES" ++
+       "('res-worker-1','running-worker','p','b5-track','Th0rgal/orb#1829','writer','active',1,'2026-11-15T10:02:00Z','2026-11-15T10:09:00Z');")
+    let .ok _ ← execParamQuery store.projectsDb
+      ("INSERT INTO project_track_leases(project_slug,track,reservation_id,mission_id,repo,authority_mode,phase,boot_epoch,updated_at) VALUES" ++
+       "('p','b5-track','res-worker-1','running-worker','Th0rgal/orb#1829','writer','active',1,'2026-11-15T10:09:00Z');")
+      #[]
+      | throw (IO.userError "project_track_leases insert failed")
     let .ok _ ← execParamQuery store.projectsDb
       ("INSERT INTO mcp_sessions_v1(id,owner,mission_id,project_scope,project_scoped,expires_at,revoked,subject_kind) VALUES" ++
        "('sess-parent','alice','parent','p',1,?1,0,'mission')," ++
@@ -144,7 +153,7 @@ def run (root : String) : IO Unit := do
     let familyMoveCheck : JVal := .obj #[
       ("project", .str "r"),
       ("folder", .str "Audits"),
-      ("descendant_ids", .arr #[.str "callback-child"])
+      ("descendant_ids", .arr #[.str "callback-child", .str "unowned-child"])
     ]
     let (chkSt, chkBody) ← restAt "POST" "/api/control/missions/parent/project" familyMoveCheck
     check (chkSt == 409 && (chkBody.splitOn "approval_transfer_confirmation_required").length >= 2)
@@ -155,7 +164,7 @@ def run (root : String) : IO Unit := do
       ("project", .str "r"),
       ("folder", .str "Audits"),
       ("approval_policy", .str "revoke"),
-      ("descendant_ids", .arr #[.str "callback-child"])
+      ("descendant_ids", .arr #[.str "callback-child", .str "unowned-child"])
     ]
     let (mvSt, _) ← restAt "POST" "/api/control/missions/parent/project" familyMoveRevoke
     check (mvSt == 200) "POST /api/control/missions/:id/project moves family with approval_policy=revoke"
@@ -183,11 +192,41 @@ def run (root : String) : IO Unit := do
       | throw (IO.userError "mcp_sessions_v1 select failed")
     check (scopeRows.size == 4 && scopeRows[1]![1]! == "r" && scopeRows[2]![1]! == "r" && scopeRows[3]![1]! == "r")
       "running worker and root MCP sessions rebound to destination project"
+    let intentRows ← sql "SELECT project_slug FROM dispatch_lease_intents WHERE reservation_id='res-worker-1';"
+    let .ok leaseRows ← execParamQuery store.projectsDb
+      "SELECT project_slug FROM project_track_leases WHERE reservation_id='res-worker-1';" #[]
+      | throw (IO.userError "project_track_leases select failed")
+    check (intentRows.size == 2 && intentRows[1]![0]! == "r" && leaseRows.size == 2 && leaseRows[1]![0]! == "r")
+      "active track leases and dispatch lease intents transfer to destination project"
     let foreignAfter ← snapshot "foreign"
     let unrelatedAfter ← snapshot "unrelated"
+    let unownedAfter ← snapshot "unowned-child"
     check (foreignAfter[6]! == "p" && foreignAfter[7]! == "folder" && foreignAfter[8]! == "7" &&
-      unrelatedAfter[6]! == "p" && unrelatedAfter[7]! == "folder" && unrelatedAfter[8]! == "7")
-      "foreign-owner child and unrelated mission remain untouched"
+      unrelatedAfter[6]! == "p" && unrelatedAfter[7]! == "folder" && unrelatedAfter[8]! == "7" &&
+      unownedAfter[6]! == "p" && unownedAfter[7]! == "folder" && unownedAfter[8]! == "7")
+      "foreign-owner, unowned, and unrelated missions remain untouched"
+    -- Event-order reconciliation replay (`orb_placement_merge_step`, `docs/ui/mission-moves.md`):
+    -- 1) Stale pre-move poll (rev=7) during in-flight move (pendingOpId=101) is fenced (`status=5`).
+    -- 2) Authoritative family move event (rev=8, ackOpId=101) commits and clears pending op (`1793`).
+    -- 3) Late stale poll (rev=7) after commit (curRev=8) is rejected (`status=4`).
+    -- 4) Second hop to project `s` (rev=9) followed by out-of-order first-hop response (rev=8) stays at `rev=9`.
+    let wStaleInflight := Orb.Kernel.placementMergeStep 7 7 101 0 0 1
+    let wAckMove1 := Orb.Kernel.placementMergeStep 7 (parentMoved[8]!.toNat?.getD 0).toUInt64 101 101 1 1
+    let wLateStalePoll := Orb.Kernel.placementMergeStep 8 7 0 0 0 1
+    let (mv2St, _) ← restAt "POST" "/api/control/missions/parent/project"
+      (.obj #[("project", .str "s"), ("folder", .str "Final"), ("approval_policy", .str "keep")])
+    let parentHop2 ← snapshot "parent"
+    let workerHop2 ← snapshot "running-worker"
+    let wAckMove2 := Orb.Kernel.placementMergeStep 8 (parentHop2[8]!.toNat?.getD 0).toUInt64 102 102 1 1
+    let wOutOfOrderMove1 := Orb.Kernel.placementMergeStep 9 8 0 101 1 1
+    check (mv2St == 200 && parentHop2[6]! == "s" && parentHop2[7]! == "Final" && parentHop2[8]! == "9" &&
+      workerHop2[6]! == "s" && workerHop2[7]! == "" && workerHop2[8]! == "9" &&
+      (wStaleInflight &&& 0xFFFFFFFF) == 5 &&
+      (wAckMove1 &&& 0xFFFFFFFF) == 1793 && (wAckMove1 >>> 32) == 8 &&
+      (wLateStalePoll &&& 0xFFFFFFFF) == 4 && (wLateStalePoll >>> 32) == 8 &&
+      (wAckMove2 &&& 0xFFFFFFFF) == 1793 && (wAckMove2 >>> 32) == 9 &&
+      (wOutOfOrderMove1 &&& 0xFFFFFFFF) == 4 && (wOutOfOrderMove1 >>> 32) == 9)
+      "orb_placement_merge_step fences stale polls and out-of-order multi-hop family move responses"
   finally
     closeCoreStore store
 

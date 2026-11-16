@@ -141,10 +141,17 @@ def applyPlacementPatch
   if !crossProjIds.isEmpty && policy == "check" then
     if let some confBody ← inspectCrossProjectSecretTransfer store.rootDir crossProjIds rawP nowEpochSec then
       return .error (409, confBody)
-  if !nextProj.isEmpty && !callerIsLegacyUnscoped && !callerUserId.isEmpty then
-    discard <| execParamQuery store.projectsDb
-      "INSERT OR IGNORE INTO project_owners(slug,owner_user_id,created_at) VALUES(?1,?2,?3);"
-      #[nextProj, callerUserId, s!"{nowEpochSec}"]
+  let brokerPath := System.FilePath.mk s!"{store.rootDir}/secret_broker.json"
+  let brokerRawBefore? ← do
+    if !crossProjIds.isEmpty && (policy == "revoke" || policy == "keep") then
+      if ← brokerPath.pathExists then
+        let raw ← IO.FS.readFile brokerPath
+        applyCrossProjectSecretPolicy store.rootDir crossProjIds rawP policy nowIso nowEpochSec
+        pure (some raw)
+      else
+        pure none
+    else
+      pure none
   let updates : Array CheckedPlacementUpdate := plan.map fun m => {
     missionId       := m.missionId
     expectedProject := m.currentProject
@@ -154,10 +161,15 @@ def applyPlacementPatch
   let (_, changedMoved) ←
     match ← batchSetMissionPlacementChecked store updates nowIso with
     | .ok pair => pure pair
-    | .error (code, msg) => return .error (code, s!"\{\"error\":{jsonEscape msg}}")
-  if !crossProjIds.isEmpty && (policy == "revoke" || policy == "keep") then
-    applyCrossProjectSecretPolicy store.rootDir crossProjIds rawP policy nowIso nowEpochSec
-  rebindMovedMissionMcpSessions store changedMoved
+    | .error (code, msg) =>
+      if let some prevRaw := brokerRawBefore? then
+        IO.FS.writeFile brokerPath prevRaw
+      return .error (code, s!"\{\"error\":{jsonEscape msg}}")
+  if !nextProj.isEmpty && !callerIsLegacyUnscoped && !callerUserId.isEmpty then
+    discard <| execParamQuery store.projectsDb
+      "INSERT OR IGNORE INTO project_owners(slug,owner_user_id,created_at) VALUES(?1,?2,?3);"
+      #[nextProj, callerUserId, s!"{nowEpochSec}"]
+  rebindMovedMissionMcpSessions store changedMoved nowIso
   let unscopeItem (it : MissionPlacementItem) : MissionPlacementItem :=
     { it with project? := it.project?.map (unscopeDisplayProject callerUserId callerIsLegacyUnscoped) }
   let changedDisplay := changedMoved.map unscopeItem

@@ -4924,7 +4924,7 @@ private def loadAllMoveCandidateRows (st : CoreStore) : IO (Except String (Array
     return .ok out
 
 private def sameMoveOwner (a b : String) : Bool :=
-  a.isEmpty || b.isEmpty || a == b
+  a == b
 
 private def expandColocatedForkGroupIfLeader
     (allRows : Array MoveCandidateRow)
@@ -5063,8 +5063,11 @@ def planExpandedMoveFamily
     sameMoveOwner candOwner inheritedOwner &&
     sameMoveOwner candOwner primaryOwner &&
     match callerUserId? with
-    | some uid => sameMoveOwner candOwner uid
+    | some uid => candOwner == uid || (candOwner.isEmpty && primaryOwner.isEmpty)
     | none => true
+  let explicitDescendantAllowed (candOwner : String) : Bool :=
+    ownerAllowed candOwner primaryOwner &&
+    (!candOwner.isEmpty || (callerUserId?.isNone && primaryOwner.isEmpty))
   -- BFS/DFS over launched non-fork `parent_mission_id` children, `btw-parent:<cur>`, and explicit `descendantIds`
   let mut visited : Array String := rootIds
   let mut stack : Array (String × String) := rootIds.map (fun rid =>
@@ -5089,7 +5092,7 @@ def planExpandedMoveFamily
     let did := rawDid.trimAscii.toString
     if !did.isEmpty && !visited.contains did then
       if let some dRow := findById did then
-        if ownerAllowed dRow.ownerUserId primaryOwner then
+        if explicitDescendantAllowed dRow.ownerUserId then
           visited := visited.push did
           launchedIds := launchedIds.push did
           let initOwner := if !dRow.ownerUserId.isEmpty then dRow.ownerUserId else primaryOwner
@@ -5183,6 +5186,13 @@ def batchSetMissionPlacementChecked
           #[u.missionId, nextProj, nextFolder, s!"{nextRev}", nowIso, nextTagsJson]
         if let .error e := upd then
           return .error s!"internal:{e}"
+        if curProj != nextProj then
+          let leaseUpd ← execParamQueryUnlocked st.missionsDb
+            ("UPDATE dispatch_lease_intents SET project_slug=?2, updated_at=?3 " ++
+             "WHERE mission_id=?1 AND phase IN ('preparing','active');")
+            #[u.missionId, nextProj, nowIso]
+          if let .error e := leaseUpd then
+            return .error s!"internal:{e}"
         let item : MissionPlacementItem := {
           missionId := u.missionId
           project? := if nextProj.isEmpty then none else some nextProj
@@ -5199,14 +5209,19 @@ def batchSetMissionPlacementChecked
     else if e.startsWith "conflict:" then return .error (409, (e.drop 9).toString)
     else return .error (500, e)
 
-/-- Rebind `mcp_sessions_v1.project_scope` in `projects.db` (and legacy `ask.db`) when project-scoped
-    missions move across projects (preserving sticky `project_scoped != 0` confinement even when moved to unassigned `""`). -/
-def rebindMovedMissionMcpSessions (st : CoreStore) (moved : Array MissionPlacementItem) : IO Unit := do
+/-- Rebind `mcp_sessions_v1.project_scope` and active `project_track_leases` in `projects.db` (and legacy `ask.db`)
+    when project-scoped missions move across projects (preserving sticky `project_scoped != 0` confinement even when moved to unassigned `""`). -/
+def rebindMovedMissionMcpSessions (st : CoreStore) (moved : Array MissionPlacementItem) (nowIso : String := "") : IO Unit := do
   for it in moved do
     let scope := it.project?.getD ""
     discard <| execParamQuery st.projectsDb
       "UPDATE mcp_sessions_v1 SET project_scope=?2 WHERE mission_id=?1 AND COALESCE(project_scoped,0)<>0;"
       #[it.missionId, scope]
+    discard <| execParamQuery st.projectsDb
+      ("UPDATE OR REPLACE project_track_leases SET project_slug=?2, " ++
+       "updated_at=CASE WHEN ?3<>'' THEN ?3 ELSE updated_at END " ++
+       "WHERE mission_id=?1 AND phase IN ('preparing','active');")
+      #[it.missionId, scope, nowIso]
     discard <| execParamQuery st.askDb
       "UPDATE mcp_sessions_v1 SET project_scope=?2 WHERE mission_id=?1 AND COALESCE(project_scoped,0)<>0;"
       #[it.missionId, scope]
