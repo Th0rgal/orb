@@ -392,6 +392,89 @@ class DeployGateTests(unittest.TestCase):
                 self.assertEqual((root / rel).read_text(), old_text, f"{rel} was left partially updated after mid-install failure")
             self.assertEqual((root / "usr/local/bin/orb-core").read_text(), "old-orb-core\n")
 
+    def test_release_bin_dir_survives_kill_between_staging_and_switch(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._seed_existing_targets(root)
+            rel_base = root / f"usr/local/share/orb/releases/{SHA}"
+            prev_target = rel_base / "bin.20261114T000000Z-1"
+            prev_target.mkdir(parents=True, exist_ok=True)
+            for name in ("sandboxed-node", "sandboxed-mcp", "orb-privd"):
+                (prev_target / name).write_text(f"prev-{name}\n")
+            rel_bin = rel_base / "bin"
+            rel_bin.symlink_to("bin.20261114T000000Z-1")
+
+            script = (Path(__file__).parent / "ops/orb-deploy").read_text()
+            for prefix in ("/usr/local", "/etc/systemd", "/run/lock"):
+                script = script.replace(prefix, str(root) + prefix)
+            fake_script = root / "orb-deploy-test"
+            fake_script.write_text(script)
+            fake_script.chmod(0o755)
+
+            tree = root / "tree"
+            (tree / "lean/OrbCore/.lake/build/bin").mkdir(parents=True, exist_ok=True)
+            (tree / "lean/OrbNode/.lake/build/bin").mkdir(parents=True, exist_ok=True)
+            (tree / "lean/OrbBin/.lake/build/bin").mkdir(parents=True, exist_ok=True)
+            (tree / "catalog/snapshots").mkdir(parents=True, exist_ok=True)
+            (tree / "scripts/ops").mkdir(parents=True, exist_ok=True)
+            (tree / "catalog/providers.json").write_text("{}\n")
+            for rel, content in {
+                "lean/OrbCore/.lake/build/bin/orb-core": "new-orb-core\n",
+                "lean/OrbCore/.lake/build/bin/orb-core-test": "#!/bin/sh\necho ok\n",
+                "lean/OrbNode/.lake/build/bin/orb-node": "new-orb-node\n",
+                "lean/OrbNode/.lake/build/bin/orb-node-test": "#!/bin/sh\necho ok\n",
+                "lean/OrbBin/.lake/build/bin/sandboxed-mcp": "new-sandboxed-mcp\n",
+                "lean/OrbBin/.lake/build/bin/orb-privd": "new-orb-privd\n",
+                "scripts/orb-node-provision.sh": "new-provision\n",
+                "scripts/ops/orb-monitor": "new-orb-monitor\n",
+                "scripts/ops/orb-sidecar-guard": "new-orb-sidecar-guard\n",
+                "scripts/ops/orb-dev-autodeploy": "new-orb-dev-autodeploy\n",
+                "scripts/ops/orb-env": "new-orb-env\n",
+                "scripts/ops/env-migration.json": '{"new": true}\n',
+            }.items():
+                target = tree / rel
+                target.write_text(content)
+                if "test" in rel:
+                    target.chmod(0o755)
+
+            bin_dir = root / "fake-bin"
+            bin_dir.mkdir(exist_ok=True)
+            (root / "run/lock").mkdir(parents=True, exist_ok=True)
+            # Simulate process death right before `ln -sfn` / `mv -T` switches the release pointer
+            stubs = {
+                "pgrep": "#!/bin/sh\nexit 1\n",
+                "git": f'#!/bin/sh\nif [ "$1" = "rev-parse" ]; then echo "{SHA}"; fi\nexit 0\n',
+                "lake": "#!/bin/sh\necho built\n",
+                "systemctl": "#!/bin/sh\nexit 0\n",
+                "sleep": "#!/bin/sh\nexit 0\n",
+                "date": '#!/bin/sh\necho "20261115T120000Z"\n',
+                "ln": '#!/bin/sh\nkill -9 $PPID\nexit 1\n',
+            }
+            for name, body in stubs.items():
+                p = bin_dir / name
+                p.write_text(body)
+                p.chmod(0o755)
+
+            env = {
+                **os.environ,
+                "ORB_DEPLOY_TREE": str(tree),
+                "ORB_DEPLOY_LOG": str(root / "deploy.log"),
+                "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            }
+            res = subprocess.run(
+                ["bash", str(fake_script), SHA, "--rollout-nodes"],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(res.returncode, 0)
+            self.assertTrue(rel_bin.is_dir())
+            self.assertEqual((rel_bin / "sandboxed-node").read_text(), "prev-sandboxed-node\n")
+            self.assertEqual((rel_bin / "sandboxed-mcp").read_text(), "prev-sandboxed-mcp\n")
+            self.assertEqual((rel_bin / "orb-privd").read_text(), "prev-orb-privd\n")
+
 
 if __name__ == "__main__":
     unittest.main()
