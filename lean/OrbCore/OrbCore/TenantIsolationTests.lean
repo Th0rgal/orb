@@ -1632,7 +1632,7 @@ def run (root : String) : IO Unit := do
     let r12Dir := root ++ "/r12-sec03-hydrate"
     IO.FS.createDirAll (System.FilePath.mk r12Dir)
     IO.FS.writeFile (System.FilePath.mk (r12Dir ++ "/settings.json"))
-      s!"\{\"auth\":\{\"password_hash\":{jsonEscape rustSavedHash},\"password_changed_at\":\"2026-11-10T00:00:00Z\"}}"
+      s!"\{\"auth\":\{\"password_hash\":{jsonEscape rustSavedHash},\"password_changed_at\":\"2026-11-10T00:00:00Z\"},\"dashboard_password_hash\":{jsonEscape rustSavedHash},\"password_hash\":{jsonEscape rustSavedHash}}"
     let .ok r12Store ← openCoreStore r12Dir | throw (IO.userError "r12 store")
     let .ok r12Mc ← openManagedComputeStore (r12Dir ++ "/managed_compute.db") | throw (IO.userError "r12 mc")
     try
@@ -1654,7 +1654,9 @@ def run (root : String) : IO Unit := do
       let (setSt, setDoc) ← send "GET" "/api/settings" savedTok (.obj #[]) r12St
       let setRaw := renderCompact setDoc
       check (envLoginSt == 401 && savedLoginSt == 200 && setSt == 200 &&
-          (setRaw.splitOn "password_hash").length == 1 && (setRaw.splitOn rustSavedHash).length == 1)
+          (setRaw.splitOn "password_hash").length == 1 &&
+          (setRaw.splitOn "dashboard_password_hash").length == 1 &&
+          (setRaw.splitOn rustSavedHash).length == 1)
         s!"r12_http01_sec03_nested_auth_password_hash_precedence_and_redaction (env={envLoginSt}, saved={savedLoginSt}, set={setSt})"
       -- r12_stored_non_placeholder_hash_survives_hydration
       let explicitEpoch1Hash ← hashPasswordPbkdf2 "explicit-epoch1-admin-pass-888"
