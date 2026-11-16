@@ -228,15 +228,6 @@ private def settleReservedMcpAction
     | return mcpErr "receipt_record_failed" "The mutation outcome could not be recorded." false
   return mcpErr "mutation_failed" message (state == "failed")
 
-def fenceInterrupted (store : CoreStore) : IO (Except String Unit) := do
-  let now := formatEpochIso8601Utc (← coreEpochSec)
-  match ← execParamQuery store.projectsDb
-      ("UPDATE mcp_actions_v1 SET state='uncertain',result=?1,updated_at=?2 " ++
-       "WHERE tool<>'spawn_managed_machine' AND state IN ('accepted','running');")
-      #[renderCompact (.obj #[("error", .str "core_restarted_during_mcp_action")]), now] with
-  | .error _ => return .error "mcp_action_recovery_failed"
-  | .ok _ => return .ok ()
-
 /-- Only persisted external sessions carry an authenticated user independently of a mission.
     Roles are deliberately not used here: external roles and mission-session roles are
     selected at mint time, not evidence of cross-tenant operator authority. -/
@@ -582,8 +573,10 @@ def dispatchMcpToolCall
 
   -- Idempotent replay for retried mutating MCP calls carrying `idempotency_key`
   let idemKeyTop := ((args.fieldStr? "idempotency_key").getD "").trimAscii.toString
-  let receiptTools := #["schedule_wakeup", "schedule_job_wakeup", "start_mission", "send_message_to_mission",
-    "answer_mission_question", "cancel_mission", "acknowledge_mission", "adopt_mission", "resume_mission"]
+  -- Only these branches reserve before mutation. Other mutating tools retain the
+  -- legacy settle-after-mutation path until their validation/exception envelope
+  -- can be made atomic; reserving them here would strand accepted rows.
+  let receiptTools := #["send_message_to_mission", "cancel_mission"]
   if receiptTools.contains toolName && !idemKeyTop.isEmpty && toolName != "get_action" && toolName != "wait_actions" &&
       toolName != "reconcile_action" && toolName != "cancel_action" &&
       toolName != "write_project_board" && toolName != "write_mission_board" &&
@@ -1061,9 +1054,11 @@ def dispatchMcpToolCall
       ((((args.fieldArr? "exclude_nodes").getD #[]).filterMap JVal.asStr?) ++
         (← AutoPlacement.lineageExclusions store parentMid))
     if let some rn := explicitRn? then
-      if excluded.contains (AutoPlacement.normalize rn) then
+      let normalizedRn := AutoPlacement.normalize rn
+      let concreteExplicit := rn.toLower != "auto" && !rn.toLower.startsWith "auto:"
+      if concreteExplicit && excluded.contains normalizedRn then
         releaseRented
-      return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" s!"node `{rn}` is excluded for this mission" nowIso
+        return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" s!"node `{rn}` is excluded for this mission" nowIso
     let parentRn? ←
       if explicitRn?.isSome then pure explicitRn?
       else if !parentMid.isEmpty then resolveMissionRemoteNode? store mc? parentMid
@@ -1291,7 +1286,7 @@ def dispatchMcpToolCall
     if mid.isEmpty then return mcpErr "invalid_arguments" "missing mission_id"
     if toolName == "cancel_mission" then
       let .ok _ ← revokeContinuations store mid nowIso true
-        | return mcpErr "cancel_failed" "continuation revocation failed" false
+        | return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "continuation revocation failed" nowIso
       let remoteCancelled ← cancelActiveRemoteJobForMission store mc? relayHub? mid "Cancelled via MCP"
       if !remoteCancelled then
         let .ok rows ← execParamQuery store.missionsDb

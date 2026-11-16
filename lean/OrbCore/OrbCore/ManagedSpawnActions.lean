@@ -174,7 +174,7 @@ def fenceInterrupted (store : CoreStore) : IO (Except String Unit) := do
   let now := formatEpochIso8601Utc (← coreEpochSec)
   match ← execParamQuery store.projectsDb
       ("UPDATE mcp_actions_v1 SET state='uncertain',result=?1,updated_at=?2 " ++
-       "WHERE state IN ('accepted','running');")
+       "WHERE tool='spawn_managed_machine' AND state IN ('accepted','running');")
       #[renderCompact (.obj #[("error", .str "core_restarted_during_managed_spawn")]), now] with
   | .error _ => return .error "managed_action_recovery_failed"
   | .ok _ => return .ok ()
