@@ -899,8 +899,8 @@ private def runRound2RegressionTests
   let packSha := sourceArchiveSha256 packCommit rawPackBytes
   let packB64 := base64Encode rawPackBytes false true
 
-  -- Set capacity=2, start two 1s timeout regular jobs, shrink capacity to 1 (`shrinkDebt = 1`), let both time out,
-  -- and submit a queued archive-backed `lean_build` while saturated so it launches on a LATER tick!
+  -- Hold two regular jobs on stdin until queue/redaction has been observed. A one-second
+  -- timeout here races request processing (including systemd scope setup) under load.
   let cap2Lease := signLeaseToken "sec-primary-123" {
     missionId := "00000000-0000-0000-0000-000000000000", nodeId := "test-node", scope := .nodeCapacity, expiresAt := nowEp + 600
   }
@@ -913,10 +913,18 @@ private def runRound2RegressionTests
     let tid := s!"99999999-9999-4999-8999-99999999999{k}"
     let tb := renderCompact (.obj #[
       ("job_id", .str tid), ("mission_id", .str missionId), ("lease_token", .str submitLease),
-      ("payload", .obj #[("kind", .str "raw_command"), ("command", .str "sleep 10"), ("timeout_secs", JVal.uint64 1)])
+      ("payload", .obj #[("kind", .str "raw_command"), ("command", .str "read -r release"),
+        ("pipe_stdin", .bool true), ("long_running", .bool true)])
     ])
     let (rtT, _) ← handleRequest rt { method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs, body := tb.toUTF8 }
     rt := rtT
+  let blockersRunning := fun (r : NodeRuntime) => [1, 2].all (fun k =>
+    (r.ledger.jobs.get? s!"99999999-9999-4999-8999-99999999999{k}").map (·.state) == some .running)
+  let runningDeadline := (← IO.monoMsNow) + 30000
+  while !blockersRunning rt && (← IO.monoMsNow) < runningDeadline do
+    IO.sleep 50
+    rt ← tickRuntime rt
+  check "both saturation blockers are running" (blockersRunning rt)
   -- Shrink capacity 2 -> 1 while both regular jobs are running (`shrinkDebt == 1`)
   let (rtShrink, _) ← handleRequest rt {
     method := "POST", rawPath := "/capacity", path := "/capacity", query := #[], headers := authHdrs,
@@ -957,12 +965,19 @@ private def runRound2RegressionTests
      (rt.ledger.jobs.get? archJobId).map (·.state) == some .queued &&
      !persistedHasB64)
 
-  -- Wait for the two 1s jobs to time out (`nowEp > startedEp + 1`), repay `shrinkDebt`, and admit `archJobId` from `queuedPayloads`!
-  for _ in [0:45] do
-    IO.sleep 100
+  -- Only now expire the blockers' runtime deadlines. This exercises the real timeout
+  -- branch and debt repayment without racing a wall-clock/systemd timer during setup.
+  let expiredStart := (← OrbNode.Posix.nowEpoch) - 2
+  for k in [1, 2] do
+    let tid := s!"99999999-9999-4999-8999-99999999999{k}"
+    let some lp := rt.liveProcs.get? tid
+      | throw (IO.userError s!"saturation blocker {tid} disappeared")
+    rt := { rt with liveProcs := rt.liveProcs.insert tid { lp with startedEp := expiredStart, timeoutSecs? := some 1 } }
+  let archiveDeadline := (← IO.monoMsNow) + 30000
+  while (rt.ledger.jobs.get? archJobId).map (·.state) != some .succeeded &&
+      (← IO.monoMsNow) < archiveDeadline do
     rt ← tickRuntime rt
-    if (rt.ledger.jobs.get? archJobId).map (·.state) == some .succeeded then
-      break
+    IO.sleep 50
   let t1ErrOk := match (rt.ledger.jobs.get? "99999999-9999-4999-8999-999999999991").bind (·.error?) with
     | some e => e == "timed out after 1s" || e.startsWith "command exited with Some("
     | none => false
