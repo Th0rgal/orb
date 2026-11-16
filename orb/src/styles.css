@@ -764,11 +764,11 @@ textarea {
 textarea::placeholder { color: var(--placeholder); }
 .picks { display: flex; align-items: center; gap: 2px; min-width: 0; height: 24px; }
 .picks-sep { color: var(--fg-4); font-size: 12px; padding: 0 2px; }
-.model-wrap { position: relative; }
+.model-wrap { position: relative; min-width: 0; }
 .model { color: var(--fg-3); display: inline-flex; align-items: center; gap: 5px; height: 24px; }
 .model:hover, .model.on { color: var(--fg); }
-.model { padding: 0 4px; border-radius: var(--radius-sm); max-width: 200px; }
-.model > :first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model { padding: 0 4px; border-radius: var(--radius-sm); min-width: 0; }
+.model-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model:hover, .model.on { background: var(--bg-active); }
 .send-slot { display: flex; align-items: center; gap: 6px; }
 .send { width: 24px; height: 24px; border-radius: 50%; background: var(--send-bg); color: var(--send-fg); display: grid; place-items: center; }
@@ -825,7 +825,7 @@ textarea::placeholder { color: var(--placeholder); }
 .under-harness { cursor: default; }
 .under-model-wrap { position: relative; min-width: 0; flex: 0 1 auto; display: inline-flex; }
 .under-effort-wrap { flex: 0 3 auto; }
-.under-model { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.under-model { min-width: 0; }
 button.under-model { color: inherit; }
 .under-model svg, .under-loc svg:last-child, .under-harness svg:last-child { width: 10px; height: 10px; flex: none; }
 .under-model-menu { min-width: 180px; }
@@ -854,13 +854,11 @@ button.under-model { color: inherit; }
 @container (max-width: 520px) {
   .under { gap: 4px; padding-left: 6px; padding-right: 6px; }
   .under-verbose-prefix, .under-verbose-suffix { display: none; }
-  .under-model { max-width: 130px; }
   .under-link-label { display: none; }
   .under-link-pill { padding: 0 6px; }
 }
 @container (max-width: 360px) {
   .under-loc > .under-label { display: none; }
-  .under-model { max-width: 105px; }
 }
 .ctx-panel {
   width: min(360px, 70vw); padding: 12px 14px 10px; color: var(--fg); text-align: left;

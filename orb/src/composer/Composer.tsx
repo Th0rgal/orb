@@ -912,7 +912,7 @@ export function Composer(p: {
           fallback={
             <div class="model-wrap">
               <button class="model" onClick={() => setMenu(!menu())}>
-                {model()} <Ic.ChevronDown size={12} />
+                <span class="model-label">{model()}</span> <Ic.ChevronDown size={12} />
               </button>
               <Show when={menu()}>
                 <Picker label="Models" searchable={false} selected={model()} items={MODELS.map(m => ({id:m,label:m}))}
@@ -930,7 +930,7 @@ export function Composer(p: {
               if (opening && isConnected()) void refreshHarnessChoices();
               if (opening && p.uploadTarget !== "local" && p.uploadTarget !== "side") void refreshNodeAntigravityModels(p.uploadTarget ?? "core");
             }}>
-              {choice()?.backend.name ?? "Harness"} <Ic.ChevronDown size={12} />
+              <span class="model-label">{choice()?.backend.name ?? "Harness"}</span> <Ic.ChevronDown size={12} />
             </button>
             <Show when={which() === "harness"}>
               <Picker label="Harness" searchable={false} selected={pick()?.backend}
@@ -949,12 +949,12 @@ export function Composer(p: {
           </div>
           <span class="picks-sep">·</span>
           <div class="model-wrap">
-            <button class={`model ${which() === "model" ? "on" : ""}`} title="Model" onClick={() => {
+            <button class={`model ${which() === "model" ? "on" : ""}`} title={modelLabel()} onClick={() => {
               const opening = which() !== "model";
               setWhich(opening ? "model" : null);
               if (opening && isConnected()) void refreshHarnessChoices();
             }}>
-              {modelLabel()} <Ic.ChevronDown size={12} />
+              <span class="model-label">{modelLabel()}</span> <Ic.ChevronDown size={12} />
             </button>
             <Show when={which() === "model"}>
               <Picker label="Models" searchLabel="Search models" selected={pick()?.model}
@@ -979,7 +979,7 @@ export function Composer(p: {
                 aria-label={`Reasoning effort: ${effortLabel(pick()?.effort,pick()?.backend,pick()?.model)}`}
                 onClick={() => setWhich(which() === "effort" ? null : "effort")}
               >
-                {effortLabel(pick()?.effort,pick()?.backend,pick()?.model)} <Ic.ChevronDown size={12} />
+                <span class="model-label">{effortLabel(pick()?.effort,pick()?.backend,pick()?.model)}</span> <Ic.ChevronDown size={12} />
               </button>
               <Show when={which() === "effort"}>
                 <Picker label="Reasoning effort" searchable={false} selected={pick()?.effort ?? ""}

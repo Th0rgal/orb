@@ -368,14 +368,14 @@ function MissionDock(p: {
             when={canChangeModel()}
             fallback={
               <span class="under-model" title={modelLabel()}>
-                {modelLabel()}
+                <span class="model-label">{modelLabel()}</span>
               </span>
             }
           >
             <button
               class={`under-model ${modelOpen() ? "on" : ""}`}
               disabled={saving()}
-              title={isWorking(p.mission?.status) ? "Model · applies from the next turn" : "Model for the next turn"}
+              title={modelLabel()}
               onClick={() => {
                 const opening = !modelOpen();
                 setModelOpen(opening);
@@ -386,7 +386,7 @@ function MissionDock(p: {
                 }
               }}
             >
-              {modelLabel()} <Ic.ChevronDown size={10} />
+              <span class="model-label">{modelLabel()}</span> <Ic.ChevronDown size={10} />
             </button>
             <Show when={modelOpen()}>
               <Picker label="Models" searchLabel="Search models" placement="top-start" selected={modelId()}
