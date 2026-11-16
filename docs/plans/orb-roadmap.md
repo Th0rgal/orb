@@ -155,8 +155,8 @@ same node (then split or restate the node).
 | --- | --- | --- | --- | --- |
 | L1 | Agent tools and Lean on bare lean.ci guests (#1791, engine images layered) | — | done | — |
 | L2 | lean.ci default in code with Boat fallback (#1793), park/resume, extend (#1798, #1802) | — | done | — |
-| L3 | Node enrolment tries every resolved address (IPv4 when IPv6 has no route), public URL `orbcore.thomas.md` | — | wip (#1815) | Merged and deployed |
-| L4 | Probe: a fresh `auto-managed:leanci:small` VM enrols and runs opencode, claude and codex turns | L3 | blocked | Three "reply OK" turns on one VM, VM destroyed |
+| L3 | Node enrolment tries every resolved address (IPv4 when IPv6 has no route), public URL `orbcore.thomas.md` (owned by the mission "lean.ci: make a fresh VM enrol and run a turn") | — | wip (#1815) | Merged and deployed |
+| L4 | Probe: a fresh `auto-managed:leanci:small` VM enrols and runs opencode, claude and codex turns (owned by the mission "lean.ci: make a fresh VM enrol and run a turn") | L3 | blocked | Three "reply OK" turns on one VM, VM destroyed |
 | L5 | Prod `SANDBOXED_MANAGED_DEFAULT_PROVIDER=leanci` | L4 | blocked | Env changed through a deploy; a mission on `auto-managed` lands on lean.ci |
 | L6 | Rollout doc and `build` script match reality: idle check, 100 GiB default, warm-repo trap, layered update, rollback | — | ready | A dry run following only the doc succeeds |
 | L7 | Split the base image from warm project state with named snapshots | L5 | blocked (Thomas, 5.4) | — |
@@ -211,7 +211,7 @@ Not on this roadmap: a macOS backend for LeanUI.
 | R8 | `health/:account/clear` clears both cooldown stores; provider status comes from request evidence | — | verify | Replay on dev |
 | R9 | Controller closes out instead of dispatching: `start_mission` and the board make "ready node without worker" visible to the controller | — | ready | A controller tick lists ready nodes from the board |
 | R10 | Rust → Lean parity queue (`rust-lean-parity-audit.md`), RUN-07 first; no new audit documents. Already done: RUN-07, RUN-08, RUN-09, MCP-02, MCP-06, MCP-08, MCP-09, MCP-11, MCP-12, HTTP-06, HTTP-07, FLT-01, FLT-02, PROV01 to PROV05, SEC-05 | — | wip | Every audit item is done or covered by a node below |
-| R11 | SEC-01: an approval lease is marked biometric-signed without a verified enrolled-device signature | — | blocked (Thomas, 5.8) | A lease needs a valid request-bound P-256 signature; replay, bad-signature, wrong-body and expired cases are refused |
+| R11 | SEC-01: an approval lease is marked biometric-signed without a verified enrolled-device signature | — | ready | A lease needs a valid request-bound P-256 signature; replay, bad-signature, wrong-body and expired cases are refused |
 | R12 | SEC-02, HTTP-01, SEC-03: one principal resolver | — | ready | A legacy token with an unknown subject and a password the database rejected never yield a session |
 | R13 | SEC-08: leases bound to a live mission and session at command time (X3 waits for it) | — | ready | A lease whose mission or session ended before its TTL is refused at verification and reaping |
 | R14 | FLT-13: raw exec on a managed machine never runs with a defaulted admin identity | — | ready | Raw exec on a worker is refused or runs as its own Unix identity, never admin |
@@ -237,12 +237,13 @@ code.
 | Id | Node | Needs | State | Done when |
 | --- | --- | --- | --- | --- |
 | B1 | Spec `docs/specs/mission-board.md`: one text per mission, 16 KB, written only by that mission, readable by its owner and by the missions it started; a project page lists the boards of its missions; a mission keeps its board when it changes project; the existing project boards (`orb`, `evm-fast`) migrate to their controller mission; event orders that must never lose a board | — | ready | Spec merged |
-| B2 | Core: storage, `read_mission_board` / `write_mission_board`, REST route, migration; the project board tools keep working for one release as aliases onto the controller mission's board; tenant isolation tests | B1 | blocked | A member cannot read another user's board; both existing boards survive the migration byte for byte |
-| B3 | Desktop: the mission page shows its board; the project page shows the boards of its missions | B2 | blocked | Browser test: write, move the mission to another project, board still there |
-| B4 | iOS and Android, shipped together with version bumps | B2 | blocked | Unit tests on both, same fixtures in `shared/orb-spec/` |
+| B2 | Core: storage, `read_mission_board` / `write_mission_board`, REST route, migration; the project board tools keep working for one release as aliases onto the controller mission's board; tenant isolation tests | B1 | verify (#1832, 8c5ddc6d) | A member cannot read another user's board; both existing boards survive the migration byte for byte |
+| B2b | Named tests for the 31 spec clauses left without one in the table of #1832 (listing order and fields, lifecycle replays, concurrent writers, both startup orders, the alias window) | B2 | ready | Every row of the #1832 table names a passing test, or the spec line it came from is changed |
+| B3 | Desktop: the mission page shows its board; the project page shows the boards of its missions | B2 | wip | Browser test: write, move the mission to another project, board still there |
+| B4 | iOS and Android, shipped together with version bumps | B2 | ready | Unit tests on both, same fixtures in `shared/orb-spec/` |
 | B5 | Moving a mission moves its whole family: `POST /api/control/missions/:id/project` relabels only the mission on prod, against `docs/ui/mission-moves.md` (found 15 Nov: Pareto's 154 workers stayed behind) (#1829 c7a72614, fixed by #1834 39ad8d87, on prod since build 2c36e4608) | — | verify | Moving a root with running workers moves every descendant in one call; test replays it; replay on prod not yet run |
 | B5b | A crash between the `missions.db` commit and the `projects.db` rebinding of a family move still needs a retry of the move (review of #1834) | — | ready | A crash injected between the two commits is repaired at startup without a retry; test by name |
-| B6 | Skills `controllers-policy`, `project-manager` and `docs/AGENT_CONTROL_PLANE.md` describe the mission board | B2 | blocked | No mention of a project-owned board |
+| B6 | Skills `controllers-policy`, `project-manager` and `docs/AGENT_CONTROL_PLANE.md` describe the mission board | B2 | ready | No mention of a project-owned board |
 
 B2 is a milestone (authorization and a data migration): independent review
 before merge. Do not move the Orb master or change any project; the operator
@@ -290,8 +291,9 @@ Only these. Each one names what it unblocks.
    it (library is updated by hand until then).
 7. **A `service_deploy` grant for the master mission**, if the master is to
    deploy on its own; otherwise deploys wait for the operator session.
-8. **Which clients approve leases** (desktop, iOS, Android), so SEC-01 can
-   verify their enrolled-device signatures before issuing one (unblocks R11).
+8. **Which clients approve leases** (desktop, iOS, Android): all three sign,
+   answered 16 Nov; SEC-01 verifies their enrolled-device signatures before
+   issuing one (unblocks R11).
 
 ## 6. Decisions in force
 
