@@ -222,29 +222,36 @@ struct OrbMissionBoardsSection: View {
     @State private var error: String?
     private let api = OrbCore.shared
     var body: some View {
-        if !boards.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Mission boards").font(.headline)
-                ForEach(boards) { board in
-                    Button { selected = board } label: {
-                        HStack {
-                            VStack(alignment: .leading) { Text(board.title.isEmpty ? board.id : board.title); Text("\(board.status) · \(board.bytes) bytes").font(.caption).foregroundStyle(.secondary) }
-                            Spacer(); Text(board.updatedAt).font(.caption).foregroundStyle(.secondary)
-                        }
-                    }.buttonStyle(.plain)
-                }
-            }.padding(.vertical, 12)
-        } else if let error { OrbNotice(message: error) }
-        else { EmptyView() }
+        Group {
+            if boards.isEmpty {
+                if let error { OrbNotice(message: error) }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Mission boards").font(.headline)
+                    ForEach(boards) { board in
+                        Button { selected = board } label: {
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text(board.title.isEmpty ? board.id : board.title)
+                                    Text("\(board.status) · \(board.bytes) bytes").font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text(board.updatedAt).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }.buttonStyle(.plain)
+                    }
+                }.padding(.vertical, 12)
+            }
+        }
         .sheet(item: $selected) { board in
-            let mission = missions.first { $0.id == board.id }
-            OrbMissionBoardView(missionID: board.id, title: board.title, project: project.id, expectedRevision: mission?.placementRevision ?? 0)
+            OrbMissionBoardView(missionID: board.id, title: board.title, project: project.id, expectedRevision: missions.first(where: { $0.id == board.id })?.placementRevision ?? 0)
         }
-        .task(id: refreshID) {
-            do { boards = OrbMissionBoardProjection.summaries(try await api.call("/api/projects/\(OrbCore.escape(project.id))/boards"), currentMissionIDs: Set(missions.filter { $0.project == project.id }.map(\.id))) }
-            catch let failure as OrbHTTPError where failure.status == 404 { boards = [] }
-            catch { error = error.localizedDescription }
-        }
+        .task(id: refreshID) { await loadBoards() }
+    }
+    private func loadBoards() async {
+        do { boards = OrbMissionBoardProjection.summaries(try await api.call("/api/projects/\(OrbCore.escape(project.id))/boards"), currentMissionIDs: Set(missions.filter { $0.project == project.id }.map(\.id))) }
+        catch let failure as OrbHTTPError where failure.status == 404 { boards = [] }
+        catch { error = error.localizedDescription }
     }
 }
 
