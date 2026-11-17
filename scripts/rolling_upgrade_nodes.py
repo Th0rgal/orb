@@ -26,6 +26,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 SETTLED_JOB_STATES = ("succeeded", "failed", "cancelled", "retired", "completed", "lost")
@@ -459,11 +460,22 @@ def _default_health_check_probe(
         headers={"Authorization": f"Bearer {token}"},
         method="GET",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            hb = json.loads(resp.read().decode("utf-8"))
-    except Exception as exc:
-        raise RuntimeError(f"post-start /heartbeat health check failed: {exc}") from exc
+    # A freshly started node needs a moment to bind its port: retry only while the
+    # connection is refused, for up to ~20 s, before declaring the start failed.
+    deadline = time.monotonic() + 20.0
+    while True:
+        try:
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                hb = json.loads(resp.read().decode("utf-8"))
+            break
+        except urllib.error.URLError as exc:
+            refused = isinstance(getattr(exc, "reason", None), ConnectionRefusedError)
+            if refused and time.monotonic() < deadline:
+                time.sleep(1.0)
+                continue
+            raise RuntimeError(f"post-start /heartbeat health check failed: {exc}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"post-start /heartbeat health check failed: {exc}") from exc
     if not hb.get("online", False):
         raise RuntimeError("post-start /heartbeat reported online=false")
     reported_build = hb.get("build_sha") or hb.get("build")
@@ -1498,7 +1510,7 @@ def recover_worker_state(
 
 def _remote_worker_prelude():
     parts = [
-        "import hashlib, inspect, json, os, pathlib, shutil, sqlite3, subprocess, sys, time, urllib.request",
+        "import hashlib, inspect, json, os, pathlib, shutil, sqlite3, subprocess, sys, time, urllib.error, urllib.request",
         "from pathlib import Path",
         inspect.getsource(compute_file_sha256),
         inspect.getsource(_resolve_companion_paths),
