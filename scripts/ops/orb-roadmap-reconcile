@@ -19,7 +19,8 @@ start (missions are recognised by track "roadmap-<row id>").
 Config (environment, see deploy/systemd/orb-roadmap-reconcile.service):
   ORB_ROADMAP_STATE        nudge ledger (default /var/lib/orb-roadmap/state.json)
   ORB_ROADMAP_MAX_WORKERS  live workers at once (default 3)
-  ORB_ROADMAP_MODEL        worker model (default openai/gpt-6-astra)
+  ORB_ROADMAP_MODELS       worker models, one per attempt, comma-separated
+                           (default openai/gpt-6-astra,anthropic/claude-fable-5-2)
   ORB_ROADMAP_INBOX_MISSION mission whose transcript receives decision requests
   ORB_ROADMAP_DRY_RUN=1    print the plan, change nothing
   ORB_ROADMAP_FILE         read the roadmap from this file instead of master
@@ -33,10 +34,13 @@ CORE = ENV("ORB_ROADMAP_CORE", "http://127.0.0.1:3000")
 STATE = ENV("ORB_ROADMAP_STATE", "/var/lib/orb-roadmap/state.json")
 MISSIONS_DB = ENV("ORB_ROADMAP_MISSIONS_DB", "/root/.sandboxed-sh/missions/missions-prod.db")
 MAX_WORKERS = int(ENV("ORB_ROADMAP_MAX_WORKERS", "3"))
-MODEL = ENV("ORB_ROADMAP_MODEL", "openai/gpt-6-astra")
+MODELS = [m.strip() for m in ENV("ORB_ROADMAP_MODELS",
+          "openai/gpt-6-astra,anthropic/claude-fable-5-2").split(",") if m.strip()]
 IDLE_SECONDS = 15 * 60          # an idle worker is nudged after this long
 FOREIGN_PR_SECONDS = 60 * 60    # an open PR touched this recently has an owner elsewhere
 MAX_ATTEMPTS = 2                # missions per row before a human decides
+QUICK_DEATH_SECONDS = 5 * 60    # a worker that ended this fast is replaced, not nudged
+MASTER_WINDOW_SECONDS = 24 * 3600  # master-fix attempts older than this are forgotten
 LIVE = {"pending", "active"}
 ROW_ID = r"[A-Z]\d+[a-z]?"
 MASTER_FIX = "MASTER"
@@ -102,10 +106,26 @@ def plan(rows, queue, prs, missions, master_green, ledger, now):
     """Return the list of actions for this run. Pure: no I/O."""
     by_row = {}
     for m in missions:
-        by_row.setdefault(m["track"][len("roadmap-"):], []).append(m)
+        # Attempt n > 1 runs on track roadmap-<id>-<n>: a dead worker keeps its
+        # track's writer lease, so a replacement on the same track is refused.
+        rid = re.sub(r"-\d+$", "", m["track"][len("roadmap-"):])
+        if rid == MASTER_FIX and now - m["created_ts"] > MASTER_WINDOW_SECONDS:
+            continue
+        if rid == MASTER_FIX or re.fullmatch(ROW_ID, rid):
+            by_row.setdefault(rid, []).append(m)
     for ms in by_row.values():
         ms.sort(key=lambda m: m["created_at"])
-    live = sum(1 for ms in by_row.values() for m in ms if m["status"] in LIVE)
+    # A worker that died at start in the last 15 minutes still holds its slot:
+    # otherwise a provider cooldown turns every run into three fresh deaths.
+    live = sum(1 for ms in by_row.values() for m in ms
+               if m["status"] in LIVE or (now - m["updated_ts"] < IDLE_SECONDS
+                                          and m["updated_ts"] - m["created_ts"] < QUICK_DEATH_SECONDS))
+    def quick(m):
+        return m["status"] not in LIVE and m["updated_ts"] - m["created_ts"] < QUICK_DEATH_SECONDS
+    # Deaths at start are provider cooldowns, not the row's fault: they cost no
+    # attempt, and two of them in 15 minutes pause dispatch until the next run.
+    paused = sum(1 for ms in by_row.values() for m in ms
+                 if quick(m) and now - m["updated_ts"] < IDLE_SECONDS) >= 2
     actions = []
     targets = queue if master_green else [MASTER_FIX]
     for rid in targets:
@@ -126,6 +146,9 @@ def plan(rows, queue, prs, missions, master_green, ledger, now):
         open_prs = prs.get(rid, {}).get("open", [])
         if latest and latest["status"] in LIVE:
             continue
+        attempts = sum(1 for m in ms if not quick(m))
+        if paused and (latest is None or quick(latest)):
+            continue
         if latest is None:
             foreign = [p for p in open_prs if now - p["updated_ts"] < FOREIGN_PR_SECONDS]
             if foreign:
@@ -136,9 +159,9 @@ def plan(rows, queue, prs, missions, master_green, ledger, now):
             continue
         if now - latest["updated_ts"] < IDLE_SECONDS:
             continue
-        if ledger.get("nudged", {}).get(latest["id"]) is None:
+        if not quick(latest) and ledger.get("nudged", {}).get(latest["id"]) is None:
             actions.append(("nudge", rid, latest["id"]))
-        elif len(ms) < MAX_ATTEMPTS:
+        elif attempts < MAX_ATTEMPTS:
             if live < MAX_WORKERS:
                 actions.append(("start", rid, len(ms) + 1))
                 live += 1
@@ -204,15 +227,19 @@ def fetch_github():
     if ENV("ORB_ROADMAP_FILE"):  # a local copy, for dry runs of a roadmap edit
         text = open(ENV("ORB_ROADMAP_FILE")).read()
     else:
+        # The contents API, not raw.githubusercontent.com: its CDN served a
+        # stale roadmap for over 15 minutes after a merge.
         with urllib.request.urlopen(urllib.request.Request(
-                f"https://raw.githubusercontent.com/{REPO}/master/{ROADMAP_PATH}",
-                headers={"User-Agent": "orb-roadmap-reconcile"}), timeout=20) as r:
+                f"{api}/contents/{ROADMAP_PATH}?ref=master",
+                headers={"User-Agent": "orb-roadmap-reconcile",
+                         "Accept": "application/vnd.github.raw"}), timeout=20) as r:
             text = r.read().decode()
     prs = http_json(f"{api}/pulls?state=all&sort=updated&direction=desc&per_page=100")
     for p in prs:
         p["updated_ts"] = iso_ts(p.get("updated_at"))
     runs = http_json(f"{api}/actions/runs?branch=master&event=push&per_page=10")["workflow_runs"]
     done = [r for r in runs if r["name"] == "CI" and r["status"] == "completed"]
+    done = [r for r in done if r["conclusion"] in ("success", "failure")]  # cancelled runs say nothing
     master_green = not done or done[0]["conclusion"] == "success"
     return text, prs, master_green
 
@@ -222,7 +249,7 @@ def fetch_missions():
     rows = con.execute("SELECT id, status, track, created_at, updated_at FROM missions "
                        "WHERE track LIKE 'roadmap-%'").fetchall()
     return [{"id": r[0], "status": r[1], "track": r[2], "created_at": r[3] or "",
-             "updated_ts": iso_ts(r[4])} for r in rows]
+             "created_ts": iso_ts(r[3]), "updated_ts": iso_ts(r[4])} for r in rows]
 
 
 def core_token():
@@ -239,8 +266,9 @@ def start_worker(row, attempt, open_prs):
     rid = row["id"]
     return core_post("/api/control/missions", {
         "title": f"Roadmap {rid}: {row['node'][:80]}", "prompt": brief(row, attempt, open_prs),
-        "project": "now", "track": f"roadmap-{rid}", "backend": "opencode",
-        "model_override": MODEL, "remote_node_id": "auto", "tags": EXCLUDE,
+        "project": "now",
+        "track": f"roadmap-{rid}" if attempt == 1 else f"roadmap-{rid}-{attempt}", "backend": "opencode",
+        "model_override": MODELS[(attempt - 1) % len(MODELS)], "remote_node_id": "auto", "tags": EXCLUDE,
         "idempotency_key": f"roadmap-{rid}-attempt-{attempt}"})
 
 
@@ -292,4 +320,5 @@ def main():
 
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(line_buffering=True)
     main()
