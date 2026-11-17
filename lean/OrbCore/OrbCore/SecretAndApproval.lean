@@ -9,6 +9,7 @@ import OrbBin.PosixExt
 import OrbCore.Store
 import OrbCore.R7Core
 import OrbCore.LegacyHydrate
+import OrbCore.ApprovalSignature
 
 namespace OrbCore.SecretAndApproval
 
@@ -785,6 +786,17 @@ private def approveSinglePrivilegeRequest
   let reqs := (doc.fieldArr? "requests").getD #[]
   let some r := reqs.find? (fun x => (x.fieldStr? "id").getD "" == reqId)
     | return .error (404, "{\"error\":\"request_not_found\"}")
+  let normalized := normalizePrivilegeRequestJVal r #[] nowEpochSec nowIso
+  if normalized.fieldStr? "state" != some "pending" then
+    return .error (409, "{\"error\":\"approval_not_pending\"}")
+  -- A second, separately signed challenge must not mint another lease either.
+  let .ok _ ← execParamQuery st.missionsDb
+    "CREATE TABLE IF NOT EXISTS approved_privilege_requests (id TEXT PRIMARY KEY);" #[]
+    | return .error (500, "{\"error\":\"approval_store_failed\"}")
+  let .ok claimed ← execParamQuery st.missionsDb
+    "INSERT INTO approved_privilege_requests(id) VALUES(?1) ON CONFLICT DO NOTHING RETURNING id;" #[reqId]
+    | return .error (500, "{\"error\":\"approval_store_failed\"}")
+  if claimed.size != 2 then return .error (409, "{\"error\":\"approval_not_pending\"}")
   let gid ← newUuidV4
   let .ok rnd ← OrbNetLeaf.Crypto.randBytes 24
     | return .error (500, "{\"error\":\"csprng_failed\"}")
@@ -1038,11 +1050,28 @@ def dispatchSecretAndApprovalRoutes?
     (isAdmin : Bool)
     (method _rawTarget cleanPath : String)
     (bodyBytes : ByteArray)
-    (nowEpochSec : UInt64) : IO (Option (Nat × String × String)) := do
+    (nowEpochSec : UInt64)
+    (approvalHeader : String := "") : IO (Option (Nat × String × String)) := do
   -- Returns `Option (statusCode × contentType × bodyString)`
   let nowIso := formatEpochIso8601Utc nowEpochSec
   let okJson (code : Nat) (s : String) : Option (Nat × String × String) :=
     some (code, "application/json", s)
+
+  let needsSignature := method == "POST" &&
+    (cleanPath == "/api/approvals/approve-all" ||
+      (cleanPath.startsWith "/api/privilege-access/" && cleanPath.endsWith "/approve"))
+  if needsSignature then
+    if !isAdmin then return okJson 403 "{\"error\":\"admin_required\"}"
+    let [nonce, deviceId, signature] := approvalHeader.splitOn "."
+      | return okJson 403 "{\"error\":\"device_approval_required\"}"
+    let devDoc ← readDataJsonObj dataRoot "approval_devices.json"
+    let some device := ((devDoc.fieldArr? "devices").getD #[]).find?
+        (fun d => d.fieldStr? "id" == some deviceId)
+      | return okJson 403 "{\"error\":\"approval_device_unknown\"}"
+    match ← OrbCore.ApprovalSignature.consume st nonce
+        ((device.fieldStr? "public_key").getD "") signature method _rawTarget bodyBytes nowEpochSec with
+    | .error err => return okJson 403 (renderCompact (.obj #[("error", .str err)]))
+    | .ok () => pure ()
 
   -- 1. `/api/approvals/*`
   if cleanPath == "/api/approvals" || cleanPath.startsWith "/api/approvals/" then
@@ -1083,6 +1112,8 @@ def dispatchSecretAndApprovalRoutes?
         | none => bytesToHexLower (sha256Bytes ((jv.fieldStr? "body").getD "").toUTF8)
       let expAt := nowEpochSec + 120
       let payloadStr := s!"paloma-approval-v1\n{nonce}\n{cMethod} {cPath}\n{cBodyHash}\n{expAt}\n{cSummary}"
+      let .ok () ← OrbCore.ApprovalSignature.issue st nonce cMethod cPath cBodyHash payloadStr expAt
+        | return okJson 500 "{\"error\":\"approval_store_failed\"}"
       return okJson 200 (renderCompact (.obj #[
         ("challenge", .str nonce),
         ("challenge_id", .str nonce),

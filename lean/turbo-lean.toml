@@ -254,6 +254,7 @@ allow = [
   "OrbNetLeaf.Crypto=OrbNetLeaf.Crypto.rawAead=orb_net_leaf_aead",
   "OrbNetLeaf.Crypto=OrbNetLeaf.Crypto.rawQuicHpMask=orb_net_leaf_quic_hp_mask",
   "OrbNetLeaf.Crypto=OrbNetLeaf.Crypto.rawEdX25519=orb_net_leaf_ed_x25519",
+  "OrbNetLeaf.Crypto=OrbNetLeaf.Crypto.rawVerifyP256=orb_net_leaf_verify_p256",
   "OrbNetLeaf.Pty=OrbNetLeaf.Pty.rawOpenPty=orb_net_leaf_openpty",
   "OrbNetLeaf.Pty=OrbNetLeaf.Pty.rawPtyResize=orb_net_leaf_pty_resize",
   "OrbNetLeaf.TlsHttp=OrbNetLeaf.TlsHttp.rawTlsOpen=orb_net_leaf_tls_open",

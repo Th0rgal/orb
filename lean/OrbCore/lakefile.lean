@@ -24,6 +24,7 @@ extern_lib liborb_core_sqlite pkg := do
   let name := nameToStaticLib "orb_core_sqlite"
   buildStaticLib (pkg.staticLibDir / name) #[shimO]
 
+
 @[default_target]
 lean_lib «OrbCore» where
   roots := #[`OrbCore]

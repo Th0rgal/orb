@@ -39,6 +39,7 @@ import OrbCore.TenantIsolationTests
 import OrbCore.DevSpendingTests
 import OrbCore.ManagedBudgetTests
 import OrbCore.DevOperatorTests
+import OrbCore.ApprovalSignatureTests
 import OrbCore.SettingsTransferTests
 import OrbCore.MacTetherTests
 import OrbCore.PrivdNodeAuthTests
@@ -6812,7 +6813,16 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
      (aqGetBody.splitOn "\"risk\":\"elevated\"").length < 2 then
     return (← fail s!"GET /api/privilege-access or /api/approvals/queue mismatch: pa={paGetSt}:{paGetBody} aq={aqGetSt}:{aqGetBody}")
 
-  let (paAppSt, paAppBody) ← sendJson "POST" s!"/api/privilege-access/{paReqId}/approve" hsJwt
+  let (approvalPublicKey, approvalSign) ← OrbCore.ApprovalSignatureTests.makeSigner (store.rootDir ++ "/parity-signer")
+  let _ ← sendJson "POST" "/api/approvals/devices" hsJwt
+    (OrbBin.Json.renderCompact (.obj #[("id", .str "test-device"), ("public_key", .str approvalPublicKey)]))
+  let sendSigned := fun (path body : String) => do
+    let signedHeader ← OrbCore.ApprovalSignatureTests.header store approvalSign path body nowSec
+    let wire := s!"POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {hsJwt}\r\nX-Paloma-Approval: {signedHeader}\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+    let .ok req := parseRequest wire.toUTF8 none | throw (IO.userError "signed parity request")
+    let .ok res ← dispatchCoreRequest appSt req nowSec | throw (IO.userError "signed parity dispatch")
+    return (res.status, (String.fromUTF8? res.body).getD "")
+  let (paAppSt, paAppBody) ← sendSigned s!"/api/privilege-access/{paReqId}/approve"
     "{\"ttl_minutes\":60,\"session_scoped\":true}"
   if paAppSt != 200 || (paAppBody.splitOn "\"state\":\"approved\"").length < 2 ||
      (paAppBody.splitOn "\"expires_at\":\"20").length < 2 ||
@@ -6832,9 +6842,9 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
   let (_, rootReqBody) ← sendJson "POST" "/api/privilege-access/request" hsJwt
     "{\"scope\":\"root_exec\",\"target_host\":\"self\",\"ttl_minutes\":30,\"reason\":\"Root check\"}"
   let rootReqId := (((OrbBin.Json.parse rootReqBody).toOption.getD (.obj #[])).fieldStr? "request_id").getD ""
-  let (critNoConfirmSt, _) ← sendJson "POST" "/api/approvals/approve-all" hsJwt
+  let (critNoConfirmSt, _) ← sendSigned "/api/approvals/approve-all"
     s!"\{\"items\":[\{\"kind\":\"privilege\",\"id\":\"{rootReqId}\",\"digest\":\"\"}],\"confirm_critical\":false}"
-  let (critConfirmSt, critConfirmBody) ← sendJson "POST" "/api/approvals/approve-all" hsJwt
+  let (critConfirmSt, critConfirmBody) ← sendSigned "/api/approvals/approve-all"
     s!"\{\"items\":[\{\"kind\":\"privilege\",\"id\":\"{rootReqId}\",\"digest\":\"\"}],\"confirm_critical\":true}"
   let (bunkSt, _) ← sendJson "POST" "/api/privilege-access/bunker" hsJwt "{\"level\":2,\"reason\":\"test\"}"
   let (unbunkSt, unbunkBody) ← sendJson "POST" "/api/privilege-access/unbunker" hsJwt ""
@@ -7778,6 +7788,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     OrbCore.DevSpendingTests.run tmpRoot
     OrbCore.ManagedBudgetTests.run tmpRoot
     OrbCore.DevOperatorTests.run tmpRoot
+    OrbCore.ApprovalSignatureTests.run tmpRoot
     OrbCore.ManagedAccessTests.run tmpRoot
     OrbCore.MissionSettingsTests.run tmpRoot
     OrbCore.LocalOriginTests.run s!"{tmpRoot}/local-origin"
