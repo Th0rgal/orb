@@ -53,7 +53,9 @@ requests and master CI on GitHub, and the missions on track
 A row is done when its state here says so or when a PR whose title ends with
 `(<row id>)` has merged. Workers merge their own PR on green CI (rule M). The
 reconciler never merges, deploys, or touches a mission it did not start.
-To change what runs next, edit the queue by PR. A row whose needs name a
+Install or update it with `install -m 755 scripts/ops/orb-roadmap-reconcile
+/usr/local/sbin/` and the two units in `deploy/systemd`. To change what runs next,
+edit the queue by PR. A row whose needs name a
 human, a date or anything other than row ids is never dispatched.
 
 The master mission is optional: it plans (adds, splits and orders rows by PR),

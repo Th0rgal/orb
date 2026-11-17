@@ -193,7 +193,7 @@ PY
   }
   trap rollout_exit EXIT
   for dst in /usr/local/bin/{orb-core,orb-core-dev,sandboxed-node,sandboxed-mcp} \
-      /usr/local/sbin/{orb-privd,orb-monitor,orb-roadmap-reconcile,orb-sidecar-guard,orb-dev-autodeploy} \
+      /usr/local/sbin/{orb-privd,orb-monitor,orb-sidecar-guard,orb-dev-autodeploy} \
       /usr/local/lib/orb/orb-node-provision.sh /usr/local/libexec/{orb-env,env-migration.json} \
       "$GUEST_NODE" \
       /etc/systemd/system/sandboxed-sh-{dev,prod}.service.d/{30-build,31-catalog}.conf \
@@ -275,7 +275,6 @@ if [[ -f "$GUEST_NODE" ]]; then
 fi
 OPS_TARGETS=(
   "/usr/local/sbin/orb-monitor:755:$TREE/scripts/ops/orb-monitor"
-  "/usr/local/sbin/orb-roadmap-reconcile:755:$TREE/scripts/ops/orb-roadmap-reconcile"
   "/usr/local/sbin/orb-sidecar-guard:755:$TREE/scripts/ops/orb-sidecar-guard"
   "/usr/local/sbin/orb-dev-autodeploy:755:$TREE/scripts/ops/orb-dev-autodeploy"
   "/usr/local/libexec/orb-env:755:$TREE/scripts/ops/orb-env"
