@@ -881,11 +881,12 @@ def carryArmedWakeupsForward
     #[missionId, s!"{nextGen}", nowIso]
 
 def actOnContinuation
-    (st : CoreStore) (contId action nowAt : String) (nowEpoch : UInt64) : IO (Except String ContinuationActOutcome) :=
+    (st : CoreStore) (contId action nowAt : String) (nowEpoch : UInt64)
+    (expectedSnapshot? : Option (String × UInt64) := none) : IO (Except String ContinuationActOutcome) :=
   withImmediateTx st.missionsDb do
     let isoNow := normalizeContinuationIso8601 nowAt nowEpoch
     let rows ← execParamQueryUnlocked st.missionsDb
-      "SELECT c.phase,c.run_generation,c.due_epoch,c.mission_id,m.status,COALESCE(m.run_generation,1) FROM mission_continuations c JOIN missions m ON m.id=c.mission_id WHERE c.id=?1;"
+      "SELECT c.phase,c.run_generation,c.due_epoch,c.mission_id,m.status,COALESCE(m.run_generation,1),c.request_id FROM mission_continuations c JOIN missions m ON m.id=c.mission_id WHERE c.id=?1;"
       #[contId]
     let .ok rs := rows | return .error "continuation_select_failed"
     if rs.size ≤ 1 then return .error "continuation_not_found"
@@ -896,6 +897,11 @@ def actOnContinuation
     let mid := cell row 3
     let status := cell row 4
     let runGen := cellNat row 5 |>.toUInt64
+    -- A scheduler scan is not the claimed occurrence: replacement can reuse
+    -- the row ID, and a follow-up can carry it into another generation.
+    if let some (requestId, generation) := expectedSnapshot? then
+      if cell row 6 != requestId || armed != generation then
+        return .error "continuation_snapshot_changed"
     if action == "cancel" then
       if phase != 1 then return .error "continuation_cancel_race"
       let admit := verifyWakeupContinuationAdmit phase 4 (ownerTerminalOfStatus status) (ownerBusyOfStatus status) armed runGen due nowEpoch

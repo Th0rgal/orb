@@ -1730,7 +1730,7 @@ def tickContinuationScheduler
   ensureDurableJobsTableLocal store
   let dueRes ← execParamQuery store.missionsDb
     ("SELECT id, mission_id, COALESCE(run_generation,1), COALESCE(due_epoch,0), COALESCE(trigger_kind,'time'), " ++
-     "COALESCE(prompt,''), COALESCE(reason,''), COALESCE(job_id,''), COALESCE(recurrence,''), COALESCE(stop_after_first,1), COALESCE(error,'') " ++
+     "COALESCE(prompt,''), COALESCE(reason,''), COALESCE(job_id,''), COALESCE(recurrence,''), COALESCE(stop_after_first,1), COALESCE(error,''), request_id " ++
      "FROM mission_continuations " ++
      "WHERE phase = 1 AND (" ++
      "  (trigger_kind = 'time' AND due_epoch <= CAST(?1 AS INTEGER)) OR " ++
@@ -1754,6 +1754,7 @@ def tickContinuationScheduler
     let stopFirst := cellNat r 9 != 0
     -- Launch attempts already made for this wake-up (`launch_retry:N`).
     let rowErr := (cell r 10).trimAscii.toString
+    let requestId := cell r 11
     let tries := if rowErr.startsWith "launch_retry:" then ((rowErr.drop 13).toString.toNat?).getD 0 else 0
     let mut jobDue := trigKind != "durable_job_terminal" || dueEp ≤ nowSec
     -- A wake-up waiting out its retry backoff is not due early, even if its job is terminal.
@@ -1769,12 +1770,12 @@ def tickContinuationScheduler
       if let some mr ← getMission? store mid then
         if mr.status == "cancelled" || mr.status == "failed" || mr.status == "not_feasible" then
           discard <| execParamQuery store.missionsDb
-            "UPDATE mission_continuations SET phase=4, error='owner_terminal', updated_at=?2 WHERE id=?1 AND phase=1;"
-            #[cid, nowIso]
+            "UPDATE mission_continuations SET phase=4, error='owner_terminal', updated_at=?2 WHERE id=?1 AND phase=1 AND request_id=?3 AND run_generation=CAST(?4 AS INTEGER);"
+            #[cid, nowIso, requestId, s!"{cGen}"]
         else if mr.runGeneration != cGen then
           discard <| execParamQuery store.missionsDb
-            "UPDATE mission_continuations SET phase=3, error='stale_run_generation', updated_at=?2 WHERE id=?1 AND phase=1;"
-            #[cid, nowIso]
+            "UPDATE mission_continuations SET phase=3, error='stale_run_generation', updated_at=?2 WHERE id=?1 AND phase=1 AND request_id=?3 AND run_generation=CAST(?4 AS INTEGER);"
+            #[cid, nowIso, requestId, s!"{cGen}"]
         else if mr.status == "active" || mr.status == "pending" || mr.status == "waiting_background" then
           -- Mission is currently executing a turn; keep armed so it fires once idle
           pure ()
@@ -1787,8 +1788,9 @@ def tickContinuationScheduler
           -- A job wake-up is armed with a far deadline; once its job is terminal it is due now.
           if trigKind == "durable_job_terminal" && dueEp > nowSec then
             discard <| execParamQuery store.missionsDb
-              "UPDATE mission_continuations SET due_epoch=CAST(?2 AS INTEGER) WHERE id=?1 AND phase=1;" #[cid, s!"{nowSec}"]
-          match ← actOnContinuation store cid "resume" nowIso nowSec with
+              "UPDATE mission_continuations SET due_epoch=CAST(?2 AS INTEGER) WHERE id=?1 AND phase=1 AND request_id=?3 AND run_generation=CAST(?4 AS INTEGER);"
+              #[cid, s!"{nowSec}", requestId, s!"{cGen}"]
+          match ← actOnContinuation store cid "resume" nowIso nowSec (some (requestId, cGen)) with
           | .ok (.ok _) =>
             let mut resumeSid? : Option String := none
             if let .ok sRows ← execParamQuery store.missionsDb "SELECT COALESCE(session_id,'') FROM missions WHERE id=?1;" #[mid] then
@@ -1874,9 +1876,11 @@ def tickContinuationScheduler
               else
                 let backoff := Nat.min 900 (60 * 2 ^ (Nat.min tries 4))
                 discard <| execParamQuery store.missionsDb
-                  ("UPDATE mission_continuations SET phase=1, due_epoch=CAST(?2 AS INTEGER), error=?3, updated_at=?4, " ++
-                   "run_generation=COALESCE((SELECT run_generation FROM missions WHERE id=mission_continuations.mission_id),run_generation) WHERE id=?1 AND phase=2;")
-                  #[cid, s!"{nowSec + backoff.toUInt64}", s!"launch_retry:{tries + 1}", nowIso]
+                  ("UPDATE mission_continuations SET phase=1, due_epoch=CAST(?2 AS INTEGER), error=?3, updated_at=?4 " ++
+                   "WHERE id=?1 AND phase=2 AND request_id=?5 AND run_generation=CAST(?6 AS INTEGER) " ++
+                   "AND EXISTS (SELECT 1 FROM missions m WHERE m.id=mission_continuations.mission_id " ++
+                   "AND m.run_generation=CAST(?6 AS INTEGER) AND m.status NOT IN ('cancelled','failed','not_feasible'));")
+                  #[cid, s!"{nowSec + backoff.toUInt64}", s!"launch_retry:{tries + 1}", nowIso, requestId, s!"{cGen}"]
 
             -- Re-arm next interval using the exact post-launch `missions.run_generation`
             -- (if `launchedOk == false` due to a transient remote/node hiccup, still re-arm in 60s so a recurring wakeup is never permanently dropped!)
