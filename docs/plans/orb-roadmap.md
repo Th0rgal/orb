@@ -44,7 +44,7 @@ receipt (PR, deployed SHA, and the check that was run):
 requests and master CI on GitHub, and the missions on track
 `roadmap-<row id>`, then:
 
-- starts a worker (one per queued row, no other limit; spread over uruk, babylon, nippur and ashur) for every row of the
+- starts a worker (one per queued row, no other limit; spread over ashur and dgx-spark, the nodes with a checkout and the development identity) for every row of the
   queue (section 7) whose needs are done and that has no live worker;
 - resumes a worker that went idle for 15 minutes without a merged PR once,
   then replaces it once, then posts a decision request to the Inbox;

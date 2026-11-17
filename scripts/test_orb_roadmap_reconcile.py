@@ -88,7 +88,7 @@ class ReconcileTest(unittest.TestCase):
     def test_old_master_fix_attempts_and_foreign_tracks_are_ignored(self):
         old = mission("MASTER", "cancelled", created_ts=NOW - 2 * 86400)
         pivot = mission("pivot", "active")
-        self.assertEqual(self.run_plan(green=False, missions=[old, pivot]), [("start", "MASTER", 1)])
+        self.assertEqual(self.run_plan(green=False, missions=[old, pivot]), [("start", "MASTER", 2)])
 
     def test_workers_start_on_the_first_free_model_and_wait_when_none_is(self):
         astra, sol = NS["MODELS"][:2]
@@ -114,6 +114,20 @@ class ReconcileTest(unittest.TestCase):
         acts = plan(self.rows, self.queue, {}, [], True, {}, NOW,
                     {"openai": NOW + 600, "anthropic": NOW + 600, "ethereumfoundation": NOW + 1})
         self.assertEqual([a for a in acts if a[0] == "start"], [])
+
+    def test_a_quickly_completed_blocked_worker_costs_an_attempt(self):
+        ms = [mission("A2", "completed", mid=f"b{i}", created=f"2026-11-17T1{i}:00:00Z",
+                      updated=NOW - 7000 + i, created_ts=NOW - 7060 + i) for i in range(2)]
+        acts = self.run_plan(missions=ms, ledger={"nudged": {"b0": 1, "b1": 1}})
+        self.assertIn(("escalate", "A2", "b1"), acts)
+
+    def test_forgotten_attempts_still_number_new_tracks(self):
+        old = mission("A2", "completed", mid="o1", created="2026-01-01T00:00:00Z")
+        NS["plan"].__globals__["SINCE"] = "2026-06-01T00:00:00"
+        try:
+            self.assertIn(("start", "A2", 2), self.run_plan(missions=[old]))
+        finally:
+            NS["plan"].__globals__["SINCE"] = ""
 
     def test_each_attempt_uses_the_next_model(self):
         self.assertEqual(NS["MODELS"], ["openai/gpt-6-astra", "openai/gpt-6.1-sol",
