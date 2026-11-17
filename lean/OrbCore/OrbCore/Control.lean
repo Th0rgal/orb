@@ -707,6 +707,7 @@ private def fallbackCatalogProviders : Array (String × String × String × Stri
   ("openai", "OpenAI (Subscription)", "subscription", "ChatGPT Plus/Pro via OAuth", #[
     ("gpt-6.1-sol", "GPT-6.1 Sol", "Newest Codex flagship (efforts low..ultra). Default."),
     ("gpt-6.1-terra", "GPT-6.1 Terra", "GPT-6.1 model with lower cost than Sol (efforts low..ultra)."),
+    ("gpt-6.2-astra", "GPT-6.2 Astra", "OpenAI's most capable Codex model for the hardest projects (efforts low..max), 272K context."),
     ("gpt-6-astra", "GPT-6 Astra", "OpenAI's GPT-6 flagship in Codex (efforts low..ultra)."),
     ("gpt-6-sol", "GPT-6 Sol", "GPT-6 model for complex reasoning and coding (efforts low..ultra)."),
     ("gpt-6-luna", "GPT-6 Luna", "GPT-6 model optimized for speed and cost (efforts low..max)."),
@@ -5293,6 +5294,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let codexModels : Array String := #[
       mkOpt "gpt-6.1-sol" "OpenAI (Subscription) — GPT-6.1 Sol" "Newest Codex flagship (efforts low..ultra). Default.",
       mkOpt "gpt-6.1-terra" "OpenAI (Subscription) — GPT-6.1 Terra" "GPT-6.1 model with lower cost than Sol (efforts low..ultra).",
+      mkOpt "gpt-6.2-astra" "OpenAI (Subscription) — GPT-6.2 Astra" "OpenAI's most capable Codex model for the hardest projects (efforts low..max), 272K context.",
       mkOpt "gpt-6-astra" "OpenAI (Subscription) — GPT-6 Astra" "OpenAI's GPT-6 flagship in Codex (efforts low..ultra).",
       mkOpt "gpt-6-sol" "OpenAI (Subscription) — GPT-6 Sol" "GPT-6 model for complex reasoning and coding (efforts low..ultra).",
       mkOpt "gpt-6-luna" "OpenAI (Subscription) — GPT-6 Luna" "GPT-6 model optimized for speed and cost (efforts low..max).",

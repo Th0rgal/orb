@@ -17,6 +17,11 @@
       "description": "GPT-6.1 model with lower cost than Sol (efforts low..ultra). Fast tier: 1.5x speed. Cyber: Standard only."
     },
     {
+      "id": "gpt-6.2-astra",
+      "name": "GPT-6.2 Astra",
+      "description": "OpenAI's most capable Codex model for the hardest projects (efforts low..max), 272K context."
+    },
+    {
       "id": "gpt-6-astra",
       "name": "GPT-6 Astra",
       "description": "OpenAI's GPT-6 flagship in Codex (efforts low..ultra)."
