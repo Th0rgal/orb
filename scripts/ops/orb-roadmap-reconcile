@@ -18,9 +18,10 @@ start (missions are recognised by track "roadmap-<row id>").
 
 Config (environment, see deploy/systemd/orb-roadmap-reconcile.service):
   ORB_ROADMAP_STATE        nudge ledger (default /var/lib/orb-roadmap/state.json)
-  ORB_ROADMAP_MAX_WORKERS  live workers at once (default 3)
+  ORB_ROADMAP_NODES        nodes workers are spread over (default uruk,babylon,nippur,ashur)
   ORB_ROADMAP_MODELS       worker models, one per attempt, comma-separated
-                           (default openai/gpt-6-astra,anthropic/claude-fable-5-2)
+                           (default openai/gpt-6-astra,openai/gpt-6.1-sol,
+                           anthropic/claude-fable-5-2,ethereumfoundation/deepseek-v4.1-flash)
   ORB_ROADMAP_INBOX_MISSION mission whose transcript receives decision requests
   ORB_ROADMAP_DRY_RUN=1    print the plan, change nothing
   ORB_ROADMAP_FILE         read the roadmap from this file instead of master
@@ -33,9 +34,11 @@ ROADMAP_PATH = "docs/plans/orb-roadmap.md"
 CORE = ENV("ORB_ROADMAP_CORE", "http://127.0.0.1:3000")
 STATE = ENV("ORB_ROADMAP_STATE", "/var/lib/orb-roadmap/state.json")
 MISSIONS_DB = ENV("ORB_ROADMAP_MISSIONS_DB", "/root/.sandboxed-sh/missions/missions-prod.db")
-MAX_WORKERS = int(ENV("ORB_ROADMAP_MAX_WORKERS", "3"))
+# Workers are spread over these nodes by queue position; "auto" put all of them on one host.
+NODES = [n.strip() for n in ENV("ORB_ROADMAP_NODES", "uruk,babylon,nippur,ashur").split(",") if n.strip()]
 MODELS = [m.strip() for m in ENV("ORB_ROADMAP_MODELS",
-          "openai/gpt-6-astra,anthropic/claude-fable-5-2").split(",") if m.strip()]
+          "openai/gpt-6-astra,openai/gpt-6.1-sol,anthropic/claude-fable-5-2,"
+          "ethereumfoundation/deepseek-v4.1-flash").split(",") if m.strip()]
 IDLE_SECONDS = 15 * 60          # an idle worker is nudged after this long
 FOREIGN_PR_SECONDS = 60 * 60    # an open PR touched this recently has an owner elsewhere
 MAX_ATTEMPTS = 2                # missions per row before a human decides
@@ -102,7 +105,7 @@ def is_done(row, prs):
     return row["state"].startswith(("done", "dropped")) or bool(prs.get(row["id"], {}).get("merged"))
 
 
-def plan(rows, queue, prs, missions, master_green, ledger, now):
+def plan(rows, queue, prs, missions, master_green, ledger, now, parked=None):
     """Return the list of actions for this run. Pure: no I/O."""
     by_row = {}
     for m in missions:
@@ -115,19 +118,27 @@ def plan(rows, queue, prs, missions, master_green, ledger, now):
             by_row.setdefault(rid, []).append(m)
     for ms in by_row.values():
         ms.sort(key=lambda m: m["created_at"])
-    # A worker that died at start in the last 15 minutes still holds its slot:
-    # otherwise a provider cooldown turns every run into three fresh deaths.
-    live = sum(1 for ms in by_row.values() for m in ms
-               if m["status"] in LIVE or (now - m["updated_ts"] < IDLE_SECONDS
-                                          and m["updated_ts"] - m["created_ts"] < QUICK_DEATH_SECONDS))
     def quick(m):
         return m["status"] not in LIVE and m["updated_ts"] - m["created_ts"] < QUICK_DEATH_SECONDS
     # Deaths at start are provider cooldowns, not the row's fault: they cost no
     # attempt, and two of them in 15 minutes pause dispatch until the next run.
-    recent = [m for ms in by_row.values() for m in ms if quick(m) and now - m["updated_ts"] < IDLE_SECONDS]
-    # When the provider said when it returns, wait exactly that long.
-    returns = max((m.get("returns_ts", 0) for m in recent), default=0)
-    paused = now < returns if returns else len(recent) >= 2
+    recent = [m for ms in by_row.values() for m in ms if quick(m) and now - m["updated_ts"] < 3 * 3600]
+    # Each model is cooling until the latest "returns at" its dead workers
+    # reported; a worker starts on the first model that is free.
+    cooling = {}
+    for m in recent:
+        if m.get("returns_ts", 0) > now and m.get("model"):
+            cooling[m["model"]] = max(cooling.get(m["model"], 0), m["returns_ts"])
+    # Core's routing health is the truth: a provider whose every account is
+    # parked cannot serve any of its models.
+    for x in MODELS:
+        until = (parked or {}).get(x.split("/", 1)[0])
+        if until and until > now:
+            cooling[x] = max(cooling.get(x, 0), until)
+    free = [x for x in MODELS if x not in cooling]
+    unexplained = sum(1 for m in recent if not m.get("returns_ts") and now - m["updated_ts"] < IDLE_SECONDS)
+    paused = not free or unexplained >= 2
+    model = free[0] if free else None
     actions = []
     targets = queue if master_green else [MASTER_FIX]
     for rid in targets:
@@ -155,18 +166,14 @@ def plan(rows, queue, prs, missions, master_green, ledger, now):
             foreign = [p for p in open_prs if now - p["updated_ts"] < FOREIGN_PR_SECONDS]
             if foreign:
                 continue  # someone else is driving that PR right now
-            if live < MAX_WORKERS:
-                actions.append(("start", rid, 1))
-                live += 1
+            actions.append(("start", rid, 1, model))
             continue
         if now - latest["updated_ts"] < IDLE_SECONDS:
             continue
         if not quick(latest) and ledger.get("nudged", {}).get(latest["id"]) is None:
             actions.append(("nudge", rid, latest["id"]))
         elif attempts < MAX_ATTEMPTS:
-            if live < MAX_WORKERS:
-                actions.append(("start", rid, len(ms) + 1))
-                live += 1
+            actions.append(("start", rid, len(ms) + 1, model))
         elif ledger.get("reported", {}).get(rid) != latest["id"]:
             actions.append(("escalate", rid, latest["id"]))
     return actions
@@ -248,12 +255,12 @@ def fetch_github():
 
 def fetch_missions():
     con = sqlite3.connect(f"file:{MISSIONS_DB}?mode=ro", uri=True, timeout=10)
-    rows = con.execute("SELECT id, status, track, created_at, updated_at FROM missions "
+    rows = con.execute("SELECT id, status, track, created_at, updated_at, model_override FROM missions "
                        "WHERE track LIKE 'roadmap-%'").fetchall()
     out = []
     for r in rows:
         m = {"id": r[0], "status": r[1], "track": r[2], "created_at": r[3] or "",
-             "created_ts": iso_ts(r[3]), "updated_ts": iso_ts(r[4])}
+             "created_ts": iso_ts(r[3]), "updated_ts": iso_ts(r[4]), "model": r[5]}
         if m["updated_ts"] - m["created_ts"] < QUICK_DEATH_SECONDS:
             err = con.execute("SELECT payload FROM mission_events WHERE mission_id=? AND event_type='error' "
                               "ORDER BY id DESC LIMIT 1", (r[0],)).fetchone()
@@ -274,13 +281,27 @@ def core_post(path, body):
     return http_json(CORE + path, body, {"Authorization": "Bearer " + core_token()})
 
 
-def start_worker(row, attempt, open_prs):
+def fetch_parked():
+    """{provider: parked-until epoch} for providers whose every account is parked."""
+    req = urllib.request.Request(CORE + "/api/model-routing/health",
+                                 headers={"Authorization": "Bearer " + core_token(),
+                                          "User-Agent": "orb-roadmap-reconcile"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        accounts = json.load(r)
+    by = {}
+    for a in accounts if isinstance(accounts, list) else []:
+        until = iso_ts(a.get("parked_until") or "")
+        by.setdefault(a.get("provider_id", ""), []).append(until)
+    return {p: min(us) for p, us in by.items() if us and all(us)}
+
+
+def start_worker(row, attempt, open_prs, model, node="auto"):
     rid = row["id"]
     return core_post("/api/control/missions", {
         "title": f"Roadmap {rid}: {row['node'][:80]}", "prompt": brief(row, attempt, open_prs),
         "project": "now",
         "track": f"roadmap-{rid}" if attempt == 1 else f"roadmap-{rid}-{attempt}", "backend": "opencode",
-        "model_override": MODELS[(attempt - 1) % len(MODELS)], "remote_node_id": "auto", "tags": EXCLUDE,
+        "model_override": model, "remote_node_id": node, "tags": EXCLUDE,
         "idempotency_key": f"roadmap-{rid}-attempt-{attempt}"})
 
 
@@ -295,20 +316,26 @@ def main():
         ledger = json.load(open(STATE))
     except (OSError, ValueError):
         ledger = {}
-    actions = plan(rows, queue, prs, missions, master_green, ledger, now)
+    try:
+        parked = fetch_parked()
+    except Exception as exc:  # health unavailable: fall back to dead workers' errors
+        print(f"routing health unavailable: {type(exc).__name__}: {exc}", file=sys.stderr)
+        parked = {}
+    actions = plan(rows, queue, prs, missions, master_green, ledger, now, parked)
     print(f"master {'green' if master_green else 'RED'}; queue {queue}; "
           f"live {[m['track'] for m in missions if m['status'] in LIVE]}; actions {actions}")
     if dry:
         return
     fix_row = {"id": MASTER_FIX, "node": "Master CI is red: find the failing check and fix it.",
                "done_when": "The latest master CI run passes"}
-    for kind, rid, arg in actions:
+    for kind, rid, arg, *rest in actions:
         row = rows.get(rid, fix_row)
         open_prs = prs.get(rid, {}).get("open", [])
         try:
             if kind == "start":
-                r = start_worker(row, arg, open_prs)
-                print(f"started {rid} attempt {arg}: {r.get('id') or r.get('mission_id')}")
+                node = NODES[queue.index(rid) % len(NODES)] if NODES and rid in queue else "auto"
+                r = start_worker(row, arg, open_prs, rest[0], node)
+                print(f"started {rid} attempt {arg} on {rest[0]}: {r.get('id') or r.get('mission_id')}")
             elif kind == "nudge":
                 core_post(f"/api/control/missions/{arg}/resume", {"content": nudge_text(open_prs)})
                 ledger.setdefault("nudged", {})[arg] = int(now)

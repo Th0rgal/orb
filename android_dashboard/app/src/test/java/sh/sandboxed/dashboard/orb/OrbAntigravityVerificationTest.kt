@@ -14,4 +14,13 @@ class OrbAntigravityVerificationTest {
         )
         assertEquals("antigravity · Verification required", providerStatusSubtitle(OrbRow(mapOf("provider_type" to "antigravity", "status" to mapOf("type" to "connected"))), refused))
     }
+
+    @Test
+    fun providerDisabledAccountIsTerminal() {
+        val provider = OrbRow(mapOf("provider_type" to "antigravity", "enabled" to true, "status" to mapOf("type" to "connected")))
+        val disabled = OrbRow(mapOf("account_state" to "disabled_by_provider", "disabled_by_provider" to true))
+        assertEquals("antigravity · Disabled by provider", providerStatusSubtitle(provider, null, disabled))
+        val sidecarDisabled = OrbRow(mapOf("account_state" to "disabled", "disabled" to true))
+        assertEquals("antigravity · Disabled", providerStatusSubtitle(provider, null, sidecarDisabled))
+    }
 }

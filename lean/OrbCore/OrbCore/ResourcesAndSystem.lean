@@ -2483,6 +2483,7 @@ def dispatchResourcesAndSystemRoute
     let ghFile := System.FilePath.mk s!"{workingDir}/.sandboxed-sh/github_connection.json"
     let envTok := ((← IO.getEnv "GITHUB_TOKEN").getD "").trimAscii.toString
     if method == "GET" && segs == ["api", "integrations", "github", "status"] then
+      if !effAdmin then return some (jsonErr 403 "admin_required")
       let fileJv ← if (← ghFile.pathExists) then
         match ← (try some <$> IO.FS.readFile ghFile catch _ => pure none) with
         | some raw => pure ((OrbBin.Json.parse raw).toOption.getD .null)

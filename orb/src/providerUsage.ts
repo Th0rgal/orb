@@ -101,6 +101,10 @@ export function effectiveProviderStatus(a: AIProvider, usage?: ProviderUsage, he
   // Google refuses to serve the account until its owner verifies it. Its
   // 403 also trips the breaker, but the login itself is fine: verifying,
   // not re-authenticating, is the fix.
+  // The provider itself banned or disabled this login. Terminal: never shown as
+  // a payment/credit problem, a verification prompt or a countdown.
+  if (health?.account_state === "disabled_by_provider") return "disabled_by_provider";
+  if (health?.account_state === "disabled") return "disabled";
   if (usage?.status === "needs_verification") return "needs_verification";
   if (health?.account_state === "out_of_credit") return "out_of_credit";
   if (health?.account_state === "auth_failed") return "auth_failed";

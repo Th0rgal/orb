@@ -348,6 +348,10 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
         h.double("avg_latency_ms")?.let { parts += "${it.roundToInt()} ms" }
         val cd = h.int("cooldown_remaining_secs") ?: 0
         if (cd > 0) parts += "cooldown ${OrbActivityCompaction.formatCooldown(cd)}"
+        if (h.bool("disabled_by_provider") == true) {
+            parts += "disabled by provider"
+            h.str("disabled_by_provider_message")?.takeIf { it.isNotEmpty() }?.let { parts += it }
+        }
         h.str("last_failure_reason")?.takeIf { it.isNotEmpty() }?.let { parts += it }
         return parts.joinToString(" · ")
     }
@@ -574,7 +578,7 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                 Text(accountTitle(h), color = Color.White, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(healthLine(h), color = OrbStyle.textMuted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
-                            if (cooldown > 0) {
+                            if (cooldown > 0 || h.bool("disabled_by_provider") == true) {
                                 TextButton(enabled = !busy, onClick = {
                                     val aid = h.str("account_id").orEmpty()
                                     runAct { core.request("/api/model-routing/health/${core.encodeComponent(aid)}/clear", "POST") }

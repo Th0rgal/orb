@@ -6,7 +6,7 @@ import OrbCore.Control
 
 namespace OrbCore.ProxyRoutingTests
 open LeanSys.Http LeanSys.Posix OrbBin.Json OrbBin.PosixExt OrbBin.Sqlite
-open OrbCore.Control OrbCore.Store OrbCore.Proxy OrbCore.Managed
+open OrbCore.Control OrbCore.Store OrbCore.Proxy OrbCore.Managed OrbNetLeaf.TlsHttp
 
 private def check (ok : Bool) (label : String) : IO Unit := do
   unless ok do throw (IO.userError s!"proxy routing contract: {label}")
@@ -650,10 +650,48 @@ def runStreamingPumpContracts : IO Unit := do
   check bad.isEmpty (String.intercalate "; " bad.toList)
 
 
+/-- R26: a replayed Antigravity `403 TOS_VIOLATION` fixture parks the login terminally.
+    The first request reaches the upstream and records the provider's message; the second and
+    every later request makes zero upstream attempts until an operator clears the account. -/
+def r26ProviderDisabledIsTerminal : IO Unit := do
+  let fixtureRaw ← IO.FS.readFile "shared/orb-spec/fixtures/provider-disabled-by-provider.json"
+  let .ok fixture := OrbBin.Json.parse fixtureRaw
+    | throw (IO.userError "provider-disabled fixture parse failed")
+  let status := fixture.fieldNat? "status" |>.getD 403
+  let body := fixture.fieldStr? "body" |>.getD ""
+  let expectedMessage := fixture.fieldStr? "expected_message" |>.getD ""
+  check (providerFailureReasonCode status body == 6)
+    s!"a provider-disabled 403 must be reason 6, got {providerFailureReasonCode status body}"
+  check (providerDisabledMessage? status body == some expectedMessage)
+    s!"provider message must be preserved, got {providerDisabledMessage? status body}"
+  let tracker ← newProviderHealthTracker 1 2
+  let hits ← IO.mkRef (0 : Nat)
+  let target : ProviderTarget := {
+    accountId := "r26-disabled", provider := "antigravity",
+    baseUrl := "http://127.0.0.1:1", apiKey := "fixture-only", modelId := "m"
+  }
+  let disabledChain : RoutingChain := { id := "r26", name := "r26", targets := #[target] }
+  let mock : ProviderTarget → IO (Except String HttpsResponse) := fun _ => do
+    hits.modify (· + 1)
+    pure (.ok { status := status, headers := #[("Content-Type", "application/json")], body := body.toUTF8 })
+  let first ← forwardProxyChain disabledChain "POST" "/v1/chat/completions" #[]
+    "{}".toUTF8 (mockTransport? := some mock) (healthTracker? := some tracker) (nowEpoch? := some 1000)
+  check (first.status == 403) s!"disabled upstream answer must pass through on first refusal, got {first.status}"
+  let rec ← lookupAccountHealthRecord tracker "r26-disabled"
+  check (rec.disabledByProvider && rec.cooldown?.isNone && rec.disabledMessage == expectedMessage)
+    s!"provider disable must be terminal without a cooldown, got disabled={rec.disabledByProvider} cool={rec.cooldown?.isSome} msg={rec.disabledMessage}"
+  let plan ← planChainFromHealth tracker disabledChain 1001
+  check plan.eligible.isEmpty s!"a provider-disabled account must not stay in the routing chain"
+  let second ← forwardProxyChain disabledChain "POST" "/v1/chat/completions" #[]
+    "{}".toUTF8 (mockTransport? := some mock) (healthTracker? := some tracker) (nowEpoch? := some 1001)
+  check (second.status == 503 && (← hits.get) == 1)
+    s!"a provider-disabled account must make zero further upstream attempts, got status={second.status} hits={← hits.get}"
+
 /-- Actual request routing, including unknown errors and no default/name/suffix aliasing. -/
 def run : IO Unit := do
   runStreaming
   runStreamingPumpContracts
+  r26ProviderDisabledIsTerminal
   -- A spent Antigravity quota cools only that model: Opus 4.6 and Gemini stay eligible.
   let agClaude := OrbCore.ProxyModelRouting.antigravityPoolAccount "claude-opus-5-5-high"
   let agGemini := OrbCore.ProxyModelRouting.antigravityPoolAccount "gemini-4-carbon-eap"

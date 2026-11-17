@@ -452,14 +452,17 @@ internal fun subscriptionResetSummary(
     )
 }
 
-internal fun providerStatusSubtitle(provider: OrbRow, detail: OrbDict?): String {
+internal fun providerStatusSubtitle(provider: OrbRow, detail: OrbDict?, health: OrbRow? = null): String {
     val providerType = provider.str("provider_type", "type") ?: ""
     val statusObj = provider.dict("status")
     val statusType = OrbJSON.str(statusObj, "type") ?: provider.str("status", "state") ?: "ready"
     val detailStatus = OrbJSON.str(detail, "status") ?: ""
     val detailError = OrbJSON.str(detail, "error") ?: ""
     var showResetBadge = false
+    val healthState = health?.str("account_state").orEmpty()
     val state = when {
+        healthState == "disabled_by_provider" -> "Disabled by provider"
+        healthState == "disabled" -> "Disabled"
         !effectiveProviderEnabled(provider) -> when {
             provider.bool("globally_enabled") == false -> "Disabled by admin"
             provider.bool("user_enabled") == false -> "Skipped for your missions"
@@ -551,6 +554,7 @@ fun OrbProvidersSettingsPage(
     val isAdmin = OrbCore.computeIsAdmin(authMode, currentUser)
     var providers by remember(cachedProviders) { mutableStateOf(cachedProviders) }
     var usageEntries by remember { mutableStateOf<Map<String, OrbDict>>(emptyMap()) }
+    var healthByProvider by remember { mutableStateOf<Map<String, OrbRow>>(emptyMap()) }
     var cloudAccounts by remember { mutableStateOf<List<OrbRow>>(emptyList()) }
     var cloudUsage by remember { mutableStateOf<Map<String, OrbDict>>(emptyMap()) }
     var expandedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
@@ -603,6 +607,12 @@ fun OrbProvidersSettingsPage(
         var loadedProviders = providers
         val providersTask = async { runCatching { core.fetchRows("/api/ai/providers", "providers") } }
         val usageTask = async { runCatching { core.fetchDict("/api/ai/providers/usage") } }
+        val healthTask = async {
+            runCatching {
+                OrbJSON.dictList(core.request("/api/model-routing/health"))
+                    .map { OrbRow(it, (it["account_id"] as? String).orEmpty()) }
+            }
+        }
         val cloudAccountsTask = if (isAdmin) async { runCatching { core.fetchRows("/api/cloud/accounts", "items") } } else null
         val cloudUsageTask = if (isAdmin) async { runCatching { core.fetchDict("/api/cloud/usage") } } else null
 
@@ -615,6 +625,19 @@ fun OrbProvidersSettingsPage(
             .onFailure { e ->
                 if (e is CancellationException) throw e
                 errorBanner = e.message
+            }
+
+        healthTask.await()
+            .onFailure { if (it is CancellationException) throw it }
+            .onSuccess { rows ->
+                val byProvider = mutableMapOf<String, OrbRow>()
+                for (row in rows) {
+                    val pid = row.str("provider_id").orEmpty().ifEmpty { row.str("account_id").orEmpty() }
+                    if (pid.isNotEmpty()) byProvider[pid] = row
+                    val aid = row.str("account_id").orEmpty()
+                    if (aid.isNotEmpty()) byProvider[aid] = row
+                }
+                healthByProvider = byProvider
             }
 
         usageTask.await()
@@ -1246,7 +1269,8 @@ fun OrbProvidersSettingsPage(
                                 val splitName = splitProviderDisplayName(provider)
                                 val providerType = provider.str("provider_type", "type") ?: ""
                                 val detail = usageEntries[pid]
-                                val rawSubtitle = providerStatusSubtitle(provider, detail)
+                                val providerHealth = healthByProvider[pid]
+                                val rawSubtitle = providerStatusSubtitle(provider, detail, providerHealth)
                                 val stateOnly = if (providerType.isNotEmpty() && rawSubtitle.startsWith("$providerType · ")) {
                                     rawSubtitle.removePrefix("$providerType · ")
                                 } else {
@@ -1257,7 +1281,9 @@ fun OrbProvidersSettingsPage(
                                 } else {
                                     rawSubtitle
                                 }
-                                val quotaLevel = providerQuotaStatus(provider, detail)?.level ?: OrbQuotaLevel.Normal
+                                val healthState = providerHealth?.str("account_state").orEmpty()
+                                val quotaLevel = if (healthState == "disabled_by_provider" || healthState == "disabled") OrbQuotaLevel.Exhausted
+                                    else providerQuotaStatus(provider, detail)?.level ?: OrbQuotaLevel.Normal
                                 val expanded = expandedIds.contains(pid)
                                 val windows = providerQuotaWindows(detail)
                                 val manages = canManageProvider(provider, isAdmin)
@@ -1341,6 +1367,20 @@ fun OrbProvidersSettingsPage(
                                                 }
                                             }
 
+                                            if (healthState == "disabled_by_provider") {
+                                                Text(
+                                                    text = providerHealth?.str("disabled_by_provider_message")?.takeIf { it.isNotEmpty() }
+                                                        ?: "The provider disabled this account. Ask the provider to restore it, then clear the disabled state.",
+                                                    color = OrbStyle.error,
+                                                    fontSize = 12.sp
+                                                )
+                                            } else if (healthState == "disabled") {
+                                                Text(
+                                                    text = "This login is disabled in CLIProxyAPI. Re-enable the Core provider to restore it.",
+                                                    color = OrbStyle.warning,
+                                                    fontSize = 12.sp
+                                                )
+                                            }
                                             OrbJSON.str(detail, "error")?.takeIf { it.isNotEmpty() }?.let { errText ->
                                                 Text(text = errText, color = OrbStyle.warning, fontSize = 12.sp)
                                             }

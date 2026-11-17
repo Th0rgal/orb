@@ -719,6 +719,61 @@ private def buildMissionAccessApprovalItem (rRaw : JVal) (nowIso : String) : JVa
     ("request", rNorm)
   ]
 
+/-- Liveness inputs for a privilege lease: `missionActive` for `orb_privilege_step` and the
+    session clock that bounds the grant. A non-session-scoped lease is an explicit TTL grant. -/
+def privilegeLeaseLiveness (st : CoreStore) (lease : PrivilegeLeaseRecord)
+    (nowEpochSec : UInt64) : IO (UInt8 × UInt64) := do
+  if !lease.sessionScoped then
+    return (1, lease.expiresAtEpoch)
+  let grantExp := lease.expiresAtEpoch
+  let storedSessExp := if lease.sessionExpiresAtEpoch == 0 then grantExp else lease.sessionExpiresAtEpoch
+  let bound := min storedSessExp grantExp
+  if !lease.missionId.isEmpty then
+    match ← getMission? st lease.missionId with
+    | some m => return (if isLiveMissionStatus m.status then 1 else 0, bound)
+    | none => return (0, bound)
+  if lease.sessionId.isEmpty then
+    return (0, bound)
+  match ← execParamQuery st.projectsDb
+      "SELECT COALESCE(revoked,0), COALESCE(hard_expires_at,0), COALESCE(expires_at,0) FROM mcp_sessions_v1 WHERE id=?1;"
+      #[lease.sessionId] with
+  | .error _ => return (0, bound)
+  | .ok rows =>
+    if rows.size ≤ 1 then return (0, bound)
+    let revoked := ((rows[1]?.bind (·[0]?)).getD "0") != "0"
+    let hardExp := (((rows[1]?.bind (·[1]?)).bind String.toNat?).getD 0).toUInt64
+    let rollingExp := (((rows[1]?.bind (·[2]?)).bind String.toNat?).getD 0).toUInt64
+    let sessionExp := if hardExp > 0 then hardExp else rollingExp
+    let sessExp := if sessionExp > 0 then min bound sessionExp else bound
+    let live := !revoked && (sessExp == 0 || nowEpochSec < sessExp)
+    return (if live then 1 else 0, sessExp)
+
+/-- True when a lease must no longer authorize anything: its TTL elapsed, its mission or
+    external MCP session ended, or a session-scoped lease carries no live session identity. -/
+def privilegeLeaseDead (st : CoreStore) (lease : PrivilegeLeaseRecord)
+    (nowEpochSec : UInt64) : IO Bool := do
+  if lease.expiresAtEpoch ≤ nowEpochSec then return true
+  if !lease.sessionScoped then return false
+  if lease.sessionExpiresAtEpoch != 0 && nowEpochSec ≥ lease.sessionExpiresAtEpoch then return true
+  let (missionActive, sessionExp) ← privilegeLeaseLiveness st lease nowEpochSec
+  return missionActive == 0 || nowEpochSec ≥ sessionExp
+
+/-- Revoke every lease that outlived its mission or session. Returns the number revoked. -/
+def reapPrivilegeLeases (st : CoreStore) (nowEpochSec : UInt64) : IO Nat := do
+  let .ok rows ← execParamQuery st.missionsDb
+      "SELECT lease_token FROM privilege_leases WHERE revoked=0;" #[]
+    | return 0
+  let mut reaped := 0
+  for i in [1:rows.size] do
+    let some tok := rows[i]?.bind (·[0]?) | continue
+    let some lease ← lookupPrivilegeLease? st tok | continue
+    if ← privilegeLeaseDead st lease nowEpochSec then
+      match ← execParamQuery st.missionsDb
+          "UPDATE privilege_leases SET revoked=1 WHERE grant_id=?1 AND revoked=0;" #[lease.grantId] with
+      | .ok _ => reaped := reaped + 1
+      | .error _ => pure ()
+  return reaped
+
 private def approveSinglePrivilegeRequest
     (st : CoreStore)
     (dataRoot reqId : String)
@@ -760,6 +815,9 @@ private def approveSinglePrivilegeRequest
     revoked := false
     expiresAtEpoch := expEpoch
     leaseEpoch := expEpoch
+    sessionScoped := sessScoped
+    sessionId := if mid.isEmpty then ((r.fieldStr? "session_id").getD "").trimAscii.toString else ""
+    sessionExpiresAtEpoch := expEpoch
   }
   if let .error e ← upsertPrivilegeLease st lease then
     return .error (500, s!"\{\"error\":{jsonEscape e}}")

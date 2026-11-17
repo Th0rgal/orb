@@ -536,7 +536,7 @@ def run (root : String) : IO Unit := do
        s!"(b) admin={bAdminOk} (st={admSearchSt}, body={renderCompact admSearchDoc}), legacy={bLegacyOk} (st={legSearchSt}, body={renderCompact legSearchDoc}); " ++
        s!"(c) ownMessages={cOk} (st={ownMsgSt}, count={ownMsgs.size}); " ++
        s!"(d) memberIsolated={dOk} (hits={renderCompact (.arr mSearchHits)})")
-    for target in #["/api/bitwarden/status", "/api/secrets", "/api/admin/users"] do
+    for target in #["/api/bitwarden/status", "/api/secrets", "/api/admin/users", "/api/integrations/github/status"] do
       check ((← send "GET" target member).1 == 403) s!"REST admin boundary {target}"
     for method in #["GET", "POST"] do
       let target := if method == "GET" then "/api/managed-machines/admin-machine" else "/api/managed-machines/admin-machine/stop"
@@ -667,6 +667,11 @@ def run (root : String) : IO Unit := do
     check ((← send "PUT" "/api/projects/member-project/board" member oversized).1 == 403) "REST alias refuses user writer"
     for method in #["GET", "PUT"] do
       check ((← send method "/api/projects/admin-project/board" member boardText).1 == 404) "foreign board is not found"
+    check ((← send "GET" "/api/projects/admin-project/file?path=secret.txt" member).1 == 404)
+      "foreign project file read is not found"
+    check ((← send "PUT" "/api/projects/admin-project/file" member
+      (.obj #[("path", .str "pwn.txt"), ("content", .str "x")])).1 == 404)
+      "foreign project file write is not found"
     check ((← send "PUT" "/api/projects/member-project/controller-mission" member
       (.obj #[("mission_id", .str "admin-mission")])).1 == 404) "controller must belong to project"
     let (_, projectBoardDetail) ← send "GET" "/api/projects/member-project" member

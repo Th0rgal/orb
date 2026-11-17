@@ -1958,6 +1958,10 @@ def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) : OrbBin.
       else if armedWakeups > 0 then "awaiting_user"
       else if isSideQ then "completed"
       else "awaiting_user"
+    -- A failed turn must say why: record the harness's own error text.
+    if isErr && transientVerdict?.isNone then
+      if let some errText := finalSnap.error?.map (·.trimAscii.toString) |>.filter (!·.isEmpty) then
+        discard <| appendMissionEvent st.store missionId "error" (renderCompact (.obj #[("content", .str errText)])) ts
     if let some (_, tReason) := transientVerdict? then
       discard <| execParamQuery st.store.missionsDb
         "UPDATE missions SET status=?2,terminal_reason=?3,state_revision=state_revision+1,updated_at=?4 WHERE id=?1 AND status IN ('active','pending');"
@@ -2906,12 +2910,19 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let bunkerWord := bunkerStep liveBunker 0 0 0 0
     let bunkerState : UInt8 := (bunkerWord &&& 0xFF).toUInt8
     let sameOwner : UInt8 := if lease.missionId == missionId && targetMatches && execMatches && nodeBound then 1 else 0
+    let (missionActive, sessionExpiresAt) ←
+      OrbCore.SecretAndApproval.privilegeLeaseLiveness st.store lease nowEpochSec
+    let leaseLapsed := lease.expiresAtEpoch ≤ nowEpochSec || missionActive == 0 ||
+      nowEpochSec ≥ sessionExpiresAt
+    if leaseLapsed && !lease.revoked then
+      discard <| execParamQuery st.store.missionsDb
+        "UPDATE privilege_leases SET revoked=1 WHERE grant_id=?1 AND revoked=0;" #[lease.grantId]
     let privWord := privilegeStep
-      sameOwner 1
+      sameOwner missionActive
       (if lease.biometricSigned then 1 else 0)
       sRank sRank bunkerState
-      (if lease.revoked then 1 else 0)
-      nowEpochSec lease.expiresAtEpoch (lease.expiresAtEpoch + 3600)
+      (if lease.revoked || leaseLapsed then 1 else 0)
+      nowEpochSec lease.expiresAtEpoch sessionExpiresAt
     let rawTgtHash : UInt32 := (hash64Fnv1a normLeaseHost &&& 0xFFFFFFFF).toUInt32
     let tgtHash : UInt32 := if rawTgtHash == 0 then 1 else rawTgtHash
     let execHash : UInt32 :=
@@ -3671,10 +3682,12 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         return .ok (mkJson cCode cBody)
       let nowIso := formatEpochIso8601Utc nowEpochSec
       discard <| cancelActiveRemoteJobForMission st.store st.managedStore? st.relayHub? mid "Mission stopped on Core"
-      -- A stop request ends the session for its tethers even when no run is active.
+      -- A stop request ends the session for its tethers and session-scoped grants even when no run is active.
       revokeSessionScopedMacTethersForMission st.store st.macTether? mid nowEpochSec
       match ← hostedStop st.store mid nowIso with
-      | .ok gen => return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"run_generation\":{gen}}")
+      | .ok gen =>
+        discard <| OrbCore.SecretAndApproval.reapPrivilegeLeases st.store nowEpochSec
+        return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"run_generation\":{gen}}")
       | .error "mission_not_found" => return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
       | .error e =>
         if e.startsWith "interrupt_rejected:" || e == "interrupt_cas_lost" || e == "mission_terminal" || e == "fence_cas_lost" then
@@ -3700,6 +3713,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           -- An archived mission must not be woken again by its own reminders.
           if nextStatus == "acknowledged" then
             discard <| revokeContinuations st.store mid nowIso true
+          discard <| OrbCore.SecretAndApproval.reapPrivilegeLeases st.store nowEpochSec
           let payload := renderCompact (.obj #[("status", .str nextStatus), ("mission_id", .str mid)])
           discard <| appendMissionEvent st.store mid "mission_status_changed" payload nowIso
           publishControlEvent st.broadcastHub? "mission_status_changed" payload (some mid)
@@ -5026,7 +5040,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           execParamQueryUnlocked st.store.missionsDb "DELETE FROM missions WHERE id=?1;" #[mid]
         match delRes with
         | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
-        | .ok _ => return .ok (mkJson 200 "{\"ok\":true}")
+        | .ok _ =>
+          discard <| OrbCore.SecretAndApproval.reapPrivilegeLeases st.store nowEpochSec
+          return .ok (mkJson 200 "{\"ok\":true}")
 
   if cleanPath == "/api/control/repair/borrowed-tracks" ||
       (matchRoutePattern? "/api/control/projects/:slug/decisions" rawTarget).isSome then
@@ -5217,6 +5233,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           appendProviderAuditLog st.store caller.userId (if isAdm then "admin" else "member") "edit" pid changed s!"{nowEpochSec}"
           let refreshed ← loadRoutingChainsFromStore st.store st.cfg.workingDir
           discard <| publishRoutingChainsUpdate st refreshed
+          if existing.enabled != updated.enabled then
+            if let some errResp ← syncSidecarAuthFileDisabledForProvider
+                st.store st.cfg.workingDir pid (!updated.enabled) then
+              let (code, ctype, body) := errResp
+              return .ok { status := code, contentType := ctype, body := body }
           if !isAdm && !own then
             let uPrefs ← getUserProviderPrefs st.store caller.userId
             return .ok (mkJson 200 (renderAIProviderForCallerJson updated false (isUserProviderEnabled uPrefs updated.id)))
@@ -7662,6 +7683,9 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
           if let .ok fresh ← loadManagedFleet managedStore cached.enabled cached.boatEnabled
               cached.dailyCapCents cached.spentTodayCents cached.maxConcurrent then
             managedRef.set fresh
+          let reapedPriv ← OrbCore.SecretAndApproval.reapPrivilegeLeases store observedAt
+          if reapedPriv > 0 then
+            IO.eprintln s!"[orb-core] reaped {reapedPriv} privilege lease(s) whose mission or session ended"
           IO.sleep 30000
     let notifySock := ((← IO.getEnv "NOTIFY_SOCKET").getD "").trimAscii.toString
     let simulateWedge := ((← IO.getEnv "SANDBOXED_SH_SIMULATE_WEDGE").getD "") == "1"

@@ -33,6 +33,14 @@ private def postJson (app : CoreAppState) (jwt target body : String) (now : UInt
     | throw (IO.userError "provider contract dispatch failed")
   return (resp.status, (parseBytes resp.body).toOption.getD .null)
 
+private def putJson (app : CoreAppState) (jwt target body : String) (now : UInt64) : IO (Nat × JVal) := do
+  let raw := s!"PUT {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+  let .ok req := parseRequest raw.toUTF8 none
+    | throw (IO.userError "provider contract request parse failed")
+  let .ok resp ← dispatchCoreRequest app req now
+    | throw (IO.userError "provider contract dispatch failed")
+  return (resp.status, (parseBytes resp.body).toOption.getD .null)
+
 /-- Loopback stand-in for the CLIProxyAPI management API. Each connection is answered 200
     with the JSON body the `answer` ref currently holds (default `{"status":"ok"}`), so a
     test can re-script it between requests. `stop` ends the loop. -/
@@ -717,6 +725,134 @@ private def sidecarParkedHealthContract
   finally
     cooldownsRef.set #[]
     IO.FS.writeFile s!"{root}/.sandboxed-sh/ai_providers.json" origProvidersRaw
+    stop.set true
+    discard <| IO.wait server
+    discard <| LeanSys.Posix.closeFd fd
+    match priorBase with
+    | some v => setenvVar "CLAUDE_CODE_PROXY_BASE_URL" v
+    | none => unsetenvVar "CLAUDE_CODE_PROXY_BASE_URL"
+    match priorKey with
+    | some v => setenvVar "CLI_PROXY_MANAGEMENT_KEY" v
+    | none => unsetenvVar "CLI_PROXY_MANAGEMENT_KEY"
+  return failures
+
+/-- R26: a provider-disabled login is terminal on `GET /api/model-routing/health`: no countdown,
+    explicit `account_state`, and the provider's own message. Operator clear removes the terminal
+    state. -/
+private def r26DisabledProviderHealthContract
+    (app : CoreAppState) (jwt : String) (tracker : ProviderHealthTracker) : IO (Array String) := do
+  let mut failures : Array String := #[]
+  let oauthOnly := "10000000-0000-4000-8000-000000000001"
+  let providerMessage := "This account violated the Terms of Service"
+  tracker.health.atomically do
+    modify fun s => { s with accounts := s.accounts.filter (fun r => r.accountId != oauthOnly) }
+  tracker.health.atomically do
+    modify fun s => { s with accounts := s.accounts.push {
+      accountId := oauthOnly, slotId := accountSlotId oauthOnly,
+      disabledByProvider := true, disabledMessage := providerMessage, lastVerdictCode := 5
+    } }
+  let now : UInt64 := 0
+  let before := (← getJson app jwt "/api/model-routing/health" now).asArr?.getD #[]
+  let row := (before.find? (fun v => v.fieldStr? "account_id" == some oauthOnly)).getD .null
+  if row.fieldStr? "account_state" != some "disabled_by_provider" ||
+     row.fieldBool? "disabled_by_provider" != some true ||
+     row.fieldBool? "disabled" != some true ||
+     row.fieldStr? "disabled_by_provider_message" != some providerMessage then
+    failures := failures.push s!"R26 health: disabled account state/message missing, got {renderCompact row}"
+  if (row.fieldUInt64? "cooldown_secs_remaining").getD 0 != 0 ||
+     (row.fieldUInt64? "cooldown_remaining_secs").getD 0 != 0 ||
+     (row.field? "parked_until") != some .null then
+    failures := failures.push s!"R26 health: provider disable must have no cooldown countdown, got {renderCompact row}"
+  let (clearCode, _) ← postJson app jwt s!"/api/model-routing/health/{oauthOnly}/clear" "" now
+  let cleared ← lookupAccountHealthRecord tracker oauthOnly
+  if clearCode != 204 || cleared.disabledByProvider then
+    failures := failures.push
+      s!"R26 health: operator clear must remove terminal disable, got code={clearCode} disabled={cleared.disabledByProvider}"
+  return failures
+
+/-- R26: toggling an OAuth-only Core row changes its matched sidecar login's `disabled` flag, and
+    a disabled sidecar login with no Core row still appears in the provider list. -/
+private def r26SidecarToggleAndOrphanContract
+    (app : CoreAppState) (root jwt : String) : IO (Array String) := do
+  let mut failures : Array String := #[]
+  let oauthOnly := "10000000-0000-4000-8000-000000000001"
+  let now : UInt64 := 0
+  let (fd, port) ← IO.ofExcept (← LeanSys.Posix.tcpListen "127.0.0.1" 0 16)
+  let priorBase ← IO.getEnv "CLAUDE_CODE_PROXY_BASE_URL"
+  let priorKey ← IO.getEnv "CLI_PROXY_MANAGEMENT_KEY"
+  setenvVar "CLAUDE_CODE_PROXY_BASE_URL" s!"http://127.0.0.1:{port}"
+  setenvVar "CLI_PROXY_MANAGEMENT_KEY" "fixture-only"
+  let delayMs ← IO.mkRef (0 : UInt32)
+  let patchBodies ← IO.mkRef (#[] : Array String)
+  let sidecarFilesJsonRef ← IO.mkRef
+    ("{\"files\":[" ++
+      "{\"name\":\"claude-secret-file.json\",\"provider\":\"claude\",\"email\":\"owner-secret@fixture.invalid\",\"disabled\":false,\"status\":\"ok\",\"cooldowns\":[]}," ++
+      "{\"name\":\"xai-orphan.json\",\"provider\":\"xai\",\"email\":\"orphan@fixture.invalid\",\"disabled\":true,\"status\":\"disabled\",\"cooldowns\":[]}" ++
+    "]}")
+  let handler : String → String → IO (Nat × String) := fun reqLine reqBody => do
+    if reqLine.startsWith "GET /v0/management/auth-files" then
+      return (200, ← sidecarFilesJsonRef.get)
+    if reqLine.startsWith "PATCH /v0/management/auth-files/status" then
+      patchBodies.modify (·.push reqBody)
+      return (200, "{\"status\":\"ok\"}")
+    return (404, "{\"error\":\"not_found\"}")
+  let handlerRef ← IO.mkRef handler
+  let stop ← IO.mkRef false
+  let server ← mockSidecarAuthFiles fd delayMs handlerRef stop
+  let origProvidersRaw ← IO.FS.readFile s!"{root}/.sandboxed-sh/ai_providers.json"
+  let .ok origArr := (OrbBin.Json.parse origProvidersRaw).map (fun j => j.asArr?.getD #[])
+    | throw (IO.userError "R26 orig providers parse")
+  let updated := origArr.map fun row =>
+    if row.fieldStr? "id" == some oauthOnly then
+      match row with
+      | .obj kvs => .obj ((kvs.filter (fun (k, _) => k != "account_email")).push ("account_email", .str "owner-secret@fixture.invalid"))
+      | other => other
+    else row
+  let orphanPath := s!"{root}/auth-empty/xai-orphan.json"
+  try
+    IO.FS.writeFile s!"{root}/.sandboxed-sh/ai_providers.json" (renderCompact (.arr updated))
+    match ← upsertAIProvider app.store {
+        id := oauthOnly, providerType := "anthropic", name := "Anthropic fixture",
+        apiKey := "cli-proxy-managed", updatedAt := "1700001000" } with
+    | .error e => throw (IO.userError s!"R26 seed provider failed: {e}")
+    | .ok () => pure ()
+    IO.FS.writeFile orphanPath
+      "{\"type\":\"xai\",\"email\":\"orphan@fixture.invalid\",\"disabled\":true}"
+    let listed := (← getJson app jwt "/api/ai/providers" now).asArr?.getD #[]
+    let orphan := (listed.find? (fun v => v.fieldStr? "id" == some "cliproxyapi:xai")).getD .null
+    if orphan.isNull then
+      failures := failures.push "R26 sidecar: a disabled sidecar login with no Core row must be listed"
+    let healthRows := (← getJson app jwt "/api/model-routing/health" now).asArr?.getD #[]
+    let orphanHealth := (healthRows.find? (fun v => v.fieldStr? "account_id" == some "cliproxyapi:xai")).getD .null
+    if orphanHealth.fieldStr? "account_state" != some "disabled" ||
+       orphanHealth.fieldBool? "disabled" != some true ||
+       (orphanHealth.fieldUInt64? "cooldown_secs_remaining").getD 0 != 0 then
+      failures := failures.push s!"R26 sidecar: orphan disabled login health must be disabled without countdown, got {renderCompact orphanHealth}"
+
+    patchBodies.set #[]
+    let (disableCode, _) ← putJson app jwt s!"/api/ai/providers/{oauthOnly}" "{\"enabled\":false}" now
+    let disableBodies ← patchBodies.get
+    if disableCode != 200 || disableBodies.size != 1 ||
+       (disableBodies[0]!.splitOn "\"name\":\"claude-secret-file.json\"").length != 2 ||
+       (disableBodies[0]!.splitOn "\"disabled\":true").length != 2 then
+      failures := failures.push s!"R26 sidecar: disabling the Core row must disable its login once, got code={disableCode} bodies={disableBodies}"
+    sidecarFilesJsonRef.set
+      ("{\"files\":[" ++
+        "{\"name\":\"claude-secret-file.json\",\"provider\":\"claude\",\"email\":\"owner-secret@fixture.invalid\",\"disabled\":true,\"status\":\"disabled\",\"cooldowns\":[]}," ++
+        "{\"name\":\"xai-orphan.json\",\"provider\":\"xai\",\"email\":\"orphan@fixture.invalid\",\"disabled\":true,\"status\":\"disabled\",\"cooldowns\":[]}" ++
+      "]}")
+
+    patchBodies.set #[]
+    let (enableCode, _) ← putJson app jwt s!"/api/ai/providers/{oauthOnly}" "{\"enabled\":true}" now
+    let enableBodies ← patchBodies.get
+    if enableCode != 200 || enableBodies.size != 1 ||
+       (enableBodies[0]!.splitOn "\"name\":\"claude-secret-file.json\"").length != 2 ||
+       (enableBodies[0]!.splitOn "\"disabled\":false").length != 2 then
+      failures := failures.push s!"R26 sidecar: re-enabling the Core row must re-enable its login once, got code={enableCode} bodies={enableBodies}"
+  finally
+    discard <| deleteAIProvider app.store oauthOnly
+    IO.FS.writeFile s!"{root}/.sandboxed-sh/ai_providers.json" origProvidersRaw
+    discard <| (IO.FS.removeFile orphanPath).toBaseIO
     stop.set true
     discard <| IO.wait server
     discard <| LeanSys.Posix.closeFd fd
@@ -1485,6 +1621,10 @@ def run : IO Unit := do
       failures := failures ++ (← antigravityReconnectClearsPerModelKeys hub store root cooldownsRef)
       failures := failures ++ (← healthCooldownOwners app jwt cooldownsRef)
       failures := failures ++ (← sidecarParkedHealthContract app root jwt cooldownsRef)
+      let r26Tracker ← newProviderHealthTracker
+      let r26App := { app with healthTracker? := some r26Tracker }
+      failures := failures ++ (← r26DisabledProviderHealthContract r26App jwt r26Tracker)
+      failures := failures ++ (← r26SidecarToggleAndOrphanContract app root jwt)
       failures := failures ++ (← proxyHealthClientShapeContract app store jwt now)
       failures := failures ++ (← usageSummaryClientShapeContract app store jwt now)
       failures := failures ++ (← providerUsageFetchersContract)

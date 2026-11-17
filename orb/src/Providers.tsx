@@ -1281,9 +1281,9 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
     }
   };
   // Quota severity uses the shared level colors (warning 80-99%, danger exhausted).
-  const stClass = () => status() === "connected" ? "connected" : ["quota_exhausted", "pool_exhausted", "out_of_credit"].includes(status()) ? "exhausted" : status() === "quota_warning" ? "warning" : ["needs_reauth", "needs_verification", "error", "auth_failed"].includes(status()) ? "needs_reauth" : "not_configured";
+  const stClass = () => status() === "connected" ? "connected" : ["quota_exhausted", "pool_exhausted", "out_of_credit"].includes(status()) ? "exhausted" : status() === "quota_warning" ? "warning" : ["needs_reauth", "needs_verification", "error", "auth_failed", "disabled_by_provider", "disabled"].includes(status()) ? "needs_reauth" : "not_configured";
   // Core's `ready` means credentials are saved, not that a live authentication probe succeeded.
-  const stLabel = () => (!manages() && globallyDisabled() ? "Disabled by admin" : !isAdminUser() && userSkipped() ? "Skipped for your missions" : ({ connected: "Connected", ready: "Configured", disabled: "Disabled", needs_reauth: "Sign in again", needs_verification: "Verification required", quota_exhausted: quota()?.level === "exhausted" ? quota()!.label : "Quota exhausted", pool_exhausted: quota()?.label || "Quota exhausted", quota_warning: quota()?.label || "Connected", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown"));
+  const stLabel = () => (!manages() && globallyDisabled() ? "Disabled by admin" : !isAdminUser() && userSkipped() ? "Skipped for your missions" : ({ connected: "Connected", ready: "Configured", disabled: "Disabled", disabled_by_provider: "Disabled by provider", needs_reauth: "Sign in again", needs_verification: "Verification required", quota_exhausted: quota()?.level === "exhausted" ? quota()!.label : "Quota exhausted", pool_exhausted: quota()?.label || "Quota exhausted", quota_warning: quota()?.label || "Connected", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown"));
   // Pool names and percentages already live in the quota summary.
   const statusText = () => a.provider_type === "antigravity" && quota()
     ? ["quota_exhausted", "pool_exhausted"].includes(status()) ? "Limit reached"
@@ -1292,7 +1292,7 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
   const canReconnect = () => !!p.onReconnect && reconnectable(a);
   const mistralSubscription = () => isAdminUser() && a.provider_type === "mistral" && a.uses_oauth;
   // Core sends an informational message ("Connected via OAuth") for healthy accounts; only a problem is worth showing.
-  const problem = () => status() === "connected" ? undefined : (a.status.reason || a.status.message);
+  const problem = () => status() === "connected" || status() === "disabled_by_provider" ? undefined : (a.status.reason || a.status.message);
   const isKeyRow = () => !(a.provider_type === "mistral" && a.uses_oauth) && ((a.has_api_key === true && a.has_oauth === false) || !a.uses_oauth);
   const editLabel = () => manages() && isKeyRow() ? "Edit API key" : "Edit settings";
   const [localOpen, setLocalOpen] = createSignal(false);
@@ -1313,7 +1313,7 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
   };
   const email = () => a.account_email || p.usage?.account_email || a.name.match(/\(([^()]+@[^()]+)\)/)?.[1];
   const hasUsageDetails = () => hasProviderUsageDetails(p.usage, email());
-  const expandable = () => !!p.rank || resetSupported() || !!resetInfo() || status() === "out_of_credit" || status() === "auth_failed" || status() === "needs_verification" || a.provider_type === "antigravity" || (!!p.onEditKey && isKeyRow()) || (canReconnect() && needsAuth()) || mistralSubscription() || hasUsageDetails() || !!problem();
+  const expandable = () => !!p.rank || resetSupported() || !!resetInfo() || status() === "out_of_credit" || status() === "auth_failed" || status() === "needs_verification" || status() === "disabled_by_provider" || a.provider_type === "antigravity" || (!!p.onEditKey && isKeyRow()) || (canReconnect() && needsAuth()) || mistralSubscription() || hasUsageDetails() || !!problem();
   const plan = () => a.provider_type === "antigravity" ? p.usage?.antigravity_plan || "Subscription account"
     : a.provider_type === "google" ? (a.has_api_key && !a.has_oauth ? "API key" : "Model routing")
     : p.usage?.codex_plan_type || p.usage?.xai_plan || p.usage?.kimi_plan || p.usage?.zai_plan ? `${p.usage!.codex_plan_type || p.usage!.xai_plan || p.usage!.kimi_plan || p.usage!.zai_plan}`
@@ -1416,6 +1416,9 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
               </Show>
             </div>
             <Show when={checkError()}><p class="s-row-desc inline-error">{checkError()}</p></Show>
+          </Show>
+          <Show when={status() === "disabled_by_provider"}>
+            <p class="s-row-desc inline-error">{p.health?.disabled_by_provider_message || "The provider disabled this account. Ask the provider to restore it, then clear the account here."}</p>
           </Show>
           <Show when={status() === "out_of_credit" || status() === "auth_failed"}>
             <p class="s-row-desc inline-error">{status() === "out_of_credit"

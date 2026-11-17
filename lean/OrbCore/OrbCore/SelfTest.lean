@@ -2690,7 +2690,8 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
    let .ok () ← upsertPrivilegeLease store {
      grantId := "grant-r7", leaseToken := "lease-r7-live-01", missionId := "m-r7",
      targetHost := "self", scope := "service_deploy", allowedUnitsJson := "[\"sandboxed-sh-dev.service\"]",
-     requireForceCmd := false, biometricSigned := true, revoked := false, expiresAtEpoch := privExp
+     requireForceCmd := false, biometricSigned := true, revoked := false, expiresAtEpoch := privExp,
+     sessionScoped := false
    } | do closeCoreStore store; return 1
    let dryBody2 := "{\"service\":\"sandboxed-sh-dev\",\"dry_run\":true,\"lease_token\":\"lease-r7-live-01\"}"
    let dry ← dispatch s!"POST /api/system/deploy HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {dryBody2.utf8ByteSize}\r\n\r\n{dryBody2}"
@@ -2699,7 +2700,8 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
    let .ok () ← upsertPrivilegeLease store {
      grantId := "grant-unsigned", leaseToken := "lease-r7-unsigned", missionId := "m-r7",
      targetHost := "self", scope := "service_deploy", allowedUnitsJson := "[\"*\"]",
-     requireForceCmd := false, biometricSigned := false, revoked := false, expiresAtEpoch := privExp
+     requireForceCmd := false, biometricSigned := false, revoked := false, expiresAtEpoch := privExp,
+     sessionScoped := false
    } | do closeCoreStore store; return 1
    let prodDeny ← dispatch s!"POST /api/system/deploy HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {prodLie.utf8ByteSize}\r\n\r\n{prodLie}"
    let some liveLease ← lookupPrivilegeLease? store "lease-r7-live-01" | do closeCoreStore store; return 1
@@ -2736,7 +2738,7 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
      grantId := "grant-revoke", leaseToken := "lease-r7-revoke-01", missionId := "m-r7",
      targetHost := "self", scope := "service_deploy", allowedUnitsJson := "[\"sandboxed-sh-dev.service\"]",
      requireForceCmd := false, biometricSigned := true, revoked := false,
-     expiresAtEpoch := privExp, leaseEpoch := 42
+     expiresAtEpoch := privExp, leaseEpoch := 42, sessionScoped := false
    } | do closeCoreStore store; return 1
    let some preRevokeLease ← lookupPrivilegeLease? store "lease-r7-revoke-01" | do closeCoreStore store; return 1
    let revokeObs ← observeDeployLive store "sandboxed-sh-dev.service" false false false (some preRevokeLease) nowSec
@@ -2781,7 +2783,8 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
    let .ok () ← upsertPrivilegeLease cliStore {
      grantId := "grant-cli", leaseToken := "lease-r7-cli-01", missionId := "m-cli",
      targetHost := "self", scope := "service_deploy", allowedUnitsJson := "[\"sandboxed-sh-dev.service\"]",
-     requireForceCmd := false, biometricSigned := true, revoked := false, expiresAtEpoch := privExp
+     requireForceCmd := false, biometricSigned := true, revoked := false, expiresAtEpoch := privExp,
+     sessionScoped := false
    } | do closeCoreStore cliStore; IO.FS.removeDirAll r7Root; return 1
    closeCoreStore cliStore
    let cliWithLease ← IO.Process.output {
@@ -8027,7 +8030,8 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   let .ok () ← upsertPrivilegeLease store {
     grantId := "grant-1", leaseToken := "lease-live-1234567890", missionId := "m-alpha",
     targetHost := "ashur", scope := "service_deploy", allowedUnitsJson := "[\"sandboxed-sh.service\"]",
-    requireForceCmd := false, biometricSigned := true, revoked := false, expiresAtEpoch := nowSec + 300
+    requireForceCmd := false, biometricSigned := true, revoked := false, expiresAtEpoch := nowSec + 300,
+    sessionScoped := false
   } | do closeCoreStore store; return 1
   -- Local orb-privd sends target_host="self" + executing_host="ashur" + argv
   let validPrivBody := "{\"mission_id\":\"m-alpha\",\"lease_token\":\"lease-live-1234567890\",\"target_host\":\"self\",\"executing_host\":\"ashur\",\"command\":\"systemctl restart sandboxed-sh.service\",\"argv\":[\"systemctl\",\"restart\",\"sandboxed-sh.service\"]}"
@@ -8053,7 +8057,8 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   let .ok () ← upsertPrivilegeLease store {
     grantId := "grant-bad-scope", leaseToken := "lease-bad-scope-123", missionId := "m-alpha",
     targetHost := "ashur", scope := "ops_admin", allowedUnitsJson := "[]",
-    requireForceCmd := false, biometricSigned := true, revoked := false, expiresAtEpoch := nowSec + 300
+    requireForceCmd := false, biometricSigned := true, revoked := false, expiresAtEpoch := nowSec + 300,
+    sessionScoped := false
   } | do closeCoreStore store; return 1
   let badScopeBody := "{\"mission_id\":\"m-alpha\",\"lease_token\":\"lease-bad-scope-123\",\"target_host\":\"ashur\",\"executing_host\":\"ashur\",\"command\":\"uname -a\",\"argv\":[\"uname\",\"-a\"]}"
   let badScopeRaw := s!"POST /api/privilege-access/verify-and-log HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {badScopeBody.utf8ByteSize}\r\n\r\n{badScopeBody}".toUTF8
