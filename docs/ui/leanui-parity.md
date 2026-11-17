@@ -134,10 +134,10 @@ Reference: SolidJS desktop. Candidate: LeanUI. 36 pairs, 0 errors, tolerance 8.
 | 05_machines_fleet | dark | 2x | 2.72 | 2.36 | 0.9685 | 4.57 / 0.9659 | 2.77 / 0.9640 | 0.00 / 1.0000 |
 | 05_machines_fleet | light | 1x | 3.64 | 3.08 | 0.9596 | 7.01 / 0.9746 | 3.53 / 0.9497 | 0.00 / 1.0000 |
 | 05_machines_fleet | light | 2x | 2.72 | 2.37 | 0.9690 | 4.63 / 0.9661 | 2.77 / 0.9646 | 0.00 / 1.0000 |
-| 06_settings_general | dark | 1x | 3.88 | 3.50 | 0.9429 | 1.89 / 0.9916 | 4.15 / 0.9347 | 6.02 / 0.9105 |
-| 06_settings_general | dark | 2x | 2.73 | 2.39 | 0.9557 | 1.32 / 0.9912 | 2.89 / 0.9500 | 4.48 / 0.9302 |
-| 06_settings_general | light | 1x | 3.87 | 3.55 | 0.9411 | 1.88 / 0.9917 | 4.14 / 0.9320 | 5.98 / 0.9123 |
-| 06_settings_general | light | 2x | 2.74 | 2.43 | 0.9547 | 1.30 / 0.9914 | 2.91 / 0.9484 | 4.49 / 0.9317 |
+| 06_settings_general | dark | 1x | 3.83 | 3.46 | 0.9479 | 1.89 / 0.9916 | 4.08 / 0.9417 | 6.02 / 0.9105 |
+| 06_settings_general | dark | 2x | 2.70 | 2.34 | 0.9589 | 1.32 / 0.9912 | 2.84 / 0.9545 | 4.48 / 0.9302 |
+| 06_settings_general | light | 1x | 3.82 | 3.50 | 0.9461 | 1.88 / 0.9917 | 4.07 / 0.9390 | 5.98 / 0.9123 |
+| 06_settings_general | light | 2x | 2.71 | 2.38 | 0.9579 | 1.30 / 0.9914 | 2.86 / 0.9529 | 4.49 / 0.9317 |
 | 07_search_dialog | dark | 1x | 10.66 | 1.44 | 0.9713 | 37.78 / 0.9962 | 6.72 / 0.9610 | 0.03 / 1.0000 |
 | 07_search_dialog | dark | 2x | 10.41 | 1.24 | 0.9749 | 35.99 / 0.9976 | 6.70 / 0.9657 | 0.07 / 1.0000 |
 | 07_search_dialog | light | 1x | 14.30 | 1.48 | 0.9712 | 46.14 / 0.9965 | 9.90 / 0.9608 | 0.41 / 1.0000 |
@@ -151,7 +151,7 @@ Reference: SolidJS desktop. Candidate: LeanUI. 36 pairs, 0 errors, tolerance 8.
 | 09_toast_notifications | light | 1x | 6.31 | 2.21 | 0.9678 | 7.01 / 0.9746 | 4.14 / 0.9775 | 23.26 / 0.8797 |
 | 09_toast_notifications | light | 2x | 5.56 | 1.60 | 0.9729 | 4.64 / 0.9660 | 3.65 / 0.9827 | 22.98 / 0.9055 |
 
-Mean over 36 measured pairs: mismatch 4.68 %, above tolerance 2.36 %, SSIM 0.9618 (min 0.8860, max 0.9902).
+Mean over 36 measured pairs: mismatch 4.68 %, above tolerance 2.35 %, SSIM 0.9623 (min 0.8860, max 0.9902).
 
 Determinism (each renderer compared with a second capture of itself):
 
@@ -285,16 +285,20 @@ light, 2x: [SolidJS](crops/05_machines_fleet_light_2x_ref_crop.png) → [LeanUI]
 
 ### 06_settings_general
 
-<!-- parity:crop 06_settings_general_dark_1x 553 230 50 16 -->
+These crops show the cloud-account title and the restored second description
+line. Other settings differences remain open; these are correction evidence,
+not deliberate-improvement exemptions.
+
+<!-- parity:crop 06_settings_general_dark_1x 553 514 60 28 -->
 dark, 1x: [SolidJS](crops/06_settings_general_dark_1x_ref_crop.png) → [LeanUI](crops/06_settings_general_dark_1x_leanui_crop.png).
 
-<!-- parity:crop 06_settings_general_dark_2x 553 230 50 16 -->
+<!-- parity:crop 06_settings_general_dark_2x 553 514 60 28 -->
 dark, 2x: [SolidJS](crops/06_settings_general_dark_2x_ref_crop.png) → [LeanUI](crops/06_settings_general_dark_2x_leanui_crop.png).
 
-<!-- parity:crop 06_settings_general_light_1x 553 230 50 16 -->
+<!-- parity:crop 06_settings_general_light_1x 553 514 60 28 -->
 light, 1x: [SolidJS](crops/06_settings_general_light_1x_ref_crop.png) → [LeanUI](crops/06_settings_general_light_1x_leanui_crop.png).
 
-<!-- parity:crop 06_settings_general_light_2x 553 230 50 16 -->
+<!-- parity:crop 06_settings_general_light_2x 553 514 60 28 -->
 light, 2x: [SolidJS](crops/06_settings_general_light_2x_ref_crop.png) → [LeanUI](crops/06_settings_general_light_2x_leanui_crop.png).
 
 ### 07_search_dialog
