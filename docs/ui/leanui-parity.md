@@ -34,6 +34,22 @@ the repository.
 
 ## Results
 
+### U3 reproduction, 17 November 2026
+
+Regenerated the table and declared crops from the native renderer at
+`2fb35f99`, which includes the previous U3 follow-up (#1849). The native build
+used pinned turbo-lean `aee2d179` with both fallback variables unset, on
+Ubuntu 24.04 aarch64 with Inter 4.0. Its self-test and the seven parity/token
+tests pass. Reference PNGs were recovered from verified run
+[43869155079](https://github.com/Th0rgal/orb/actions/runs/43869155079), rather
+than recaptured on a different Chromium architecture. This is a baseline:
+**2/36** variants are under 1%, and the remaining groups are still open.
+
+The current-master capture in
+[44172956130](https://github.com/Th0rgal/orb/actions/runs/44172956130) fails
+20 reference hashes. Final acceptance requires resolving that reproduction
+failure as well as the renderer differences; the stored hashes are unchanged.
+
 ### Reproduction check, 16 November 2026
 
 The branch-triggered `.github/workflows/leanui-parity.yml` downloads Chrome for
@@ -75,44 +91,44 @@ Reference: SolidJS desktop. Candidate: LeanUI. 36 pairs, 0 errors, tolerance 8.
 
 | screen | theme | scale | mismatch % | > tol % | SSIM | sidebar | transcript | composer |
 |---|---|---|---:|---:|---:|---:|---:|---:|
-| 01_control_empty | dark | 1x | 1.14 | 1.03 | 0.9858 | 3.47 / 0.9614 | 0.80 / 0.9890 | 0.00 / 1.0000 |
-| 01_control_empty | dark | 2x | 0.82 | 0.74 | 0.9879 | 2.71 / 0.9636 | 0.53 / 0.9914 | 0.00 / 1.0000 |
+| 01_control_empty | dark | 1x | 1.14 | 1.03 | 0.9858 | 3.47 / 0.9614 | 0.80 / 0.9891 | 0.00 / 1.0000 |
+| 01_control_empty | dark | 2x | 0.80 | 0.71 | 0.9892 | 2.54 / 0.9721 | 0.53 / 0.9914 | 0.00 / 1.0000 |
 | 01_control_empty | light | 1x | 1.14 | 1.04 | 0.9855 | 3.46 / 0.9612 | 0.80 / 0.9887 | 0.00 / 1.0000 |
-| 01_control_empty | light | 2x | 0.82 | 0.74 | 0.9878 | 2.70 / 0.9638 | 0.53 / 0.9911 | 0.00 / 1.0000 |
-| 02_control_populated | dark | 1x | 1.70 | 1.38 | 0.9839 | 7.23 / 0.9487 | 0.80 / 0.9890 | 0.00 / 1.0000 |
-| 02_control_populated | dark | 2x | 1.31 | 1.13 | 0.9798 | 5.96 / 0.9091 | 0.53 / 0.9914 | 0.00 / 1.0000 |
-| 02_control_populated | light | 1x | 1.72 | 1.40 | 0.9836 | 7.35 / 0.9486 | 0.80 / 0.9887 | 0.00 / 1.0000 |
-| 02_control_populated | light | 2x | 1.31 | 1.13 | 0.9798 | 5.98 / 0.9099 | 0.53 / 0.9911 | 0.00 / 1.0000 |
-| 03_mission_transcript | dark | 1x | 7.09 | 4.37 | 0.9163 | 8.89 / 0.9175 | 5.76 / 0.9115 | 15.55 / 0.9428 |
-| 03_mission_transcript | dark | 2x | 6.27 | 3.75 | 0.9277 | 7.15 / 0.8914 | 5.08 / 0.9301 | 15.07 / 0.9554 |
-| 03_mission_transcript | light | 1x | 6.24 | 4.79 | 0.9138 | 9.00 / 0.9169 | 5.66 / 0.9086 | 7.22 / 0.9404 |
-| 03_mission_transcript | light | 2x | 5.30 | 4.17 | 0.9265 | 7.18 / 0.8921 | 4.92 / 0.9286 | 6.08 / 0.9542 |
-| 04_mission_split_diff | dark | 1x | 9.24 | 6.49 | 0.8667 | 8.89 / 0.9175 | 8.71 / 0.8504 | 13.04 / 0.9419 |
-| 04_mission_split_diff | dark | 2x | 7.93 | 5.42 | 0.8928 | 7.15 / 0.8914 | 7.37 / 0.8869 | 12.57 / 0.9545 |
-| 04_mission_split_diff | light | 1x | 9.33 | 7.17 | 0.8624 | 9.00 / 0.9169 | 9.66 / 0.8454 | 6.50 / 0.9406 |
-| 04_mission_split_diff | light | 2x | 7.97 | 6.09 | 0.8906 | 7.18 / 0.8921 | 8.35 / 0.8841 | 5.49 / 0.9538 |
-| 05_machines_fleet | dark | 1x | 3.68 | 3.24 | 0.9540 | 7.23 / 0.9488 | 3.55 / 0.9472 | 0.00 / 1.0000 |
-| 05_machines_fleet | dark | 2x | 2.93 | 2.65 | 0.9598 | 5.95 / 0.9092 | 2.78 / 0.9635 | 0.00 / 1.0000 |
-| 05_machines_fleet | light | 1x | 3.70 | 3.26 | 0.9541 | 7.35 / 0.9486 | 3.54 / 0.9473 | 0.00 / 1.0000 |
-| 05_machines_fleet | light | 2x | 2.93 | 2.66 | 0.9604 | 5.98 / 0.9100 | 2.77 / 0.9642 | 0.00 / 1.0000 |
+| 01_control_empty | light | 2x | 0.80 | 0.71 | 0.9890 | 2.53 / 0.9722 | 0.53 / 0.9911 | 0.00 / 1.0000 |
+| 02_control_populated | dark | 1x | 1.65 | 1.27 | 0.9863 | 6.85 / 0.9653 | 0.80 / 0.9891 | 0.00 / 1.0000 |
+| 02_control_populated | dark | 2x | 1.16 | 0.94 | 0.9865 | 4.94 / 0.9540 | 0.53 / 0.9914 | 0.00 / 1.0000 |
+| 02_control_populated | light | 1x | 1.68 | 1.29 | 0.9861 | 7.09 / 0.9653 | 0.80 / 0.9887 | 0.00 / 1.0000 |
+| 02_control_populated | light | 2x | 1.17 | 0.95 | 0.9864 | 5.00 / 0.9543 | 0.53 / 0.9911 | 0.00 / 1.0000 |
+| 03_mission_transcript | dark | 1x | 7.05 | 4.29 | 0.9180 | 8.61 / 0.9293 | 5.76 / 0.9115 | 15.55 / 0.9428 |
+| 03_mission_transcript | dark | 2x | 6.12 | 3.58 | 0.9344 | 6.16 / 0.9366 | 5.08 / 0.9301 | 15.07 / 0.9554 |
+| 03_mission_transcript | light | 1x | 6.21 | 4.72 | 0.9156 | 8.82 / 0.9287 | 5.66 / 0.9086 | 7.22 / 0.9404 |
+| 03_mission_transcript | light | 2x | 5.16 | 3.99 | 0.9331 | 6.21 / 0.9368 | 4.92 / 0.9286 | 6.08 / 0.9542 |
+| 04_mission_split_diff | dark | 1x | 9.20 | 6.42 | 0.8684 | 8.61 / 0.9293 | 8.71 / 0.8504 | 13.04 / 0.9419 |
+| 04_mission_split_diff | dark | 2x | 7.78 | 5.24 | 0.8995 | 6.16 / 0.9366 | 7.37 / 0.8869 | 12.57 / 0.9545 |
+| 04_mission_split_diff | light | 1x | 9.30 | 7.10 | 0.8641 | 8.82 / 0.9287 | 9.66 / 0.8454 | 6.50 / 0.9406 |
+| 04_mission_split_diff | light | 2x | 7.82 | 5.91 | 0.8972 | 6.21 / 0.9368 | 8.35 / 0.8841 | 5.49 / 0.9538 |
+| 05_machines_fleet | dark | 1x | 3.63 | 3.14 | 0.9564 | 6.85 / 0.9654 | 3.55 / 0.9472 | 0.00 / 1.0000 |
+| 05_machines_fleet | dark | 2x | 2.77 | 2.47 | 0.9665 | 4.93 / 0.9540 | 2.78 / 0.9635 | 0.00 / 1.0000 |
+| 05_machines_fleet | light | 1x | 3.66 | 3.16 | 0.9565 | 7.09 / 0.9653 | 3.54 / 0.9473 | 0.00 / 1.0000 |
+| 05_machines_fleet | light | 2x | 2.78 | 2.47 | 0.9670 | 4.99 / 0.9544 | 2.77 / 0.9642 | 0.00 / 1.0000 |
 | 06_settings_general | dark | 1x | 4.41 | 3.83 | 0.9340 | 1.90 / 0.9880 | 4.88 / 0.9240 | 6.04 / 0.9035 |
-| 06_settings_general | dark | 2x | 3.35 | 2.81 | 0.9499 | 1.49 / 0.9826 | 3.70 / 0.9440 | 4.57 / 0.9278 |
+| 06_settings_general | dark | 2x | 3.33 | 2.79 | 0.9509 | 1.34 / 0.9897 | 3.70 / 0.9440 | 4.57 / 0.9278 |
 | 06_settings_general | light | 1x | 4.18 | 3.88 | 0.9319 | 1.90 / 0.9880 | 4.57 / 0.9209 | 6.00 / 0.9051 |
-| 06_settings_general | light | 2x | 3.14 | 2.88 | 0.9488 | 1.47 / 0.9828 | 3.41 / 0.9423 | 4.58 / 0.9292 |
-| 07_search_dialog | dark | 1x | 10.86 | 1.49 | 0.9693 | 38.79 / 0.9960 | 6.78 / 0.9583 | 0.03 / 1.0000 |
-| 07_search_dialog | dark | 2x | 11.04 | 1.26 | 0.9745 | 40.15 / 0.9972 | 6.72 / 0.9652 | 0.07 / 1.0000 |
-| 07_search_dialog | light | 1x | 14.50 | 1.54 | 0.9691 | 47.10 / 0.9964 | 9.96 / 0.9580 | 0.41 / 1.0000 |
-| 07_search_dialog | light | 2x | 14.72 | 1.25 | 0.9744 | 48.99 / 0.9975 | 9.88 / 0.9651 | 0.43 / 1.0000 |
-| 08_new_mission_dialog | dark | 1x | 1.71 | 1.39 | 0.9839 | 7.23 / 0.9487 | 0.81 / 0.9891 | 0.00 / 1.0000 |
-| 08_new_mission_dialog | dark | 2x | 1.29 | 1.11 | 0.9806 | 5.96 / 0.9091 | 0.50 / 0.9923 | 0.00 / 1.0000 |
-| 08_new_mission_dialog | light | 1x | 1.72 | 1.40 | 0.9837 | 7.35 / 0.9486 | 0.80 / 0.9887 | 0.00 / 1.0000 |
-| 08_new_mission_dialog | light | 2x | 1.29 | 1.12 | 0.9806 | 5.98 / 0.9099 | 0.50 / 0.9922 | 0.00 / 1.0000 |
-| 09_toast_notifications | dark | 1x | 6.06 | 2.44 | 0.9594 | 7.23 / 0.9487 | 4.16 / 0.9765 | 20.13 / 0.8438 |
-| 09_toast_notifications | dark | 2x | 5.46 | 2.05 | 0.9602 | 5.96 / 0.9091 | 3.75 / 0.9802 | 19.12 / 0.8824 |
-| 09_toast_notifications | light | 1x | 6.37 | 2.39 | 0.9619 | 7.35 / 0.9486 | 4.15 / 0.9759 | 23.29 / 0.8759 |
-| 09_toast_notifications | light | 2x | 5.82 | 1.98 | 0.9618 | 5.98 / 0.9099 | 3.72 / 0.9798 | 23.04 / 0.9012 |
+| 06_settings_general | light | 2x | 3.12 | 2.85 | 0.9498 | 1.33 / 0.9898 | 3.41 / 0.9423 | 4.58 / 0.9292 |
+| 07_search_dialog | dark | 1x | 10.73 | 1.49 | 0.9693 | 37.92 / 0.9961 | 6.78 / 0.9583 | 0.03 / 1.0000 |
+| 07_search_dialog | dark | 2x | 10.46 | 1.26 | 0.9745 | 36.28 / 0.9976 | 6.72 / 0.9652 | 0.07 / 1.0000 |
+| 07_search_dialog | light | 1x | 14.37 | 1.54 | 0.9691 | 46.25 / 0.9964 | 9.96 / 0.9580 | 0.41 / 1.0000 |
+| 07_search_dialog | light | 2x | 14.08 | 1.26 | 0.9744 | 44.70 / 0.9977 | 9.88 / 0.9651 | 0.43 / 1.0000 |
+| 08_new_mission_dialog | dark | 1x | 1.65 | 1.29 | 0.9864 | 6.85 / 0.9653 | 0.81 / 0.9891 | 0.00 / 1.0000 |
+| 08_new_mission_dialog | dark | 2x | 1.13 | 0.93 | 0.9872 | 4.94 / 0.9540 | 0.50 / 0.9924 | 0.00 / 1.0000 |
+| 08_new_mission_dialog | light | 1x | 1.69 | 1.30 | 0.9861 | 7.09 / 0.9653 | 0.80 / 0.9887 | 0.00 / 1.0000 |
+| 08_new_mission_dialog | light | 2x | 1.14 | 0.93 | 0.9871 | 5.00 / 0.9543 | 0.50 / 0.9922 | 0.00 / 1.0000 |
+| 09_toast_notifications | dark | 1x | 6.00 | 2.34 | 0.9619 | 6.85 / 0.9653 | 4.16 / 0.9765 | 20.13 / 0.8438 |
+| 09_toast_notifications | dark | 2x | 5.31 | 1.86 | 0.9669 | 4.94 / 0.9540 | 3.75 / 0.9802 | 19.12 / 0.8824 |
+| 09_toast_notifications | light | 1x | 6.33 | 2.28 | 0.9644 | 7.09 / 0.9653 | 4.15 / 0.9759 | 23.29 / 0.8759 |
+| 09_toast_notifications | light | 2x | 5.67 | 1.79 | 0.9684 | 5.00 / 0.9543 | 3.72 / 0.9798 | 23.04 / 0.9012 |
 
-Mean over 36 measured pairs: mismatch 4.96 %, above tolerance 2.65 %, SSIM 0.9534 (min 0.8624, max 0.9879).
+Mean over 36 measured pairs: mismatch 4.85 %, above tolerance 2.56 %, SSIM 0.9565 (min 0.8641, max 0.9892).
 
 Determinism (each renderer compared with a second capture of itself):
 
