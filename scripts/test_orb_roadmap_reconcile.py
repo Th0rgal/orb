@@ -26,9 +26,10 @@ def pr(title, state="open", merged=False, updated=NOW - 7200, number=1):
             "updated_ts": updated, "number": number, "html_url": "u"}
 
 
-def mission(rid, status, updated=NOW - 3600, created="2026-11-17T10:00:00Z", mid=None):
+def mission(rid, status, updated=NOW - 3600, created="2026-11-17T10:00:00Z", mid=None, created_ts=None):
     return {"id": mid or f"m-{rid}-{created}", "status": status, "track": f"roadmap-{rid}",
-            "created_at": created, "updated_ts": updated}
+            "created_at": created, "created_ts": created_ts if created_ts is not None else updated - 3600,
+            "updated_ts": updated}
 
 
 class ReconcileTest(unittest.TestCase):
@@ -67,6 +68,18 @@ class ReconcileTest(unittest.TestCase):
         self.assertIn(("escalate", "A2", "m2"), self.run_plan(missions=[first, second], ledger=both))
         both["reported"] = {"A2": "m2"}
         self.assertNotIn("A2", [a[1] for a in self.run_plan(missions=[first, second], ledger=both)])
+
+    def test_a_worker_that_died_at_start_is_replaced_not_nudged(self):
+        dead = mission("A2", "cancelled", mid="m1", created_ts=NOW - 3605)
+        self.assertIn(("start", "A2", 2), self.run_plan(missions=[dead]))
+
+    def test_old_master_fix_attempts_and_foreign_tracks_are_ignored(self):
+        old = mission("MASTER", "cancelled", created_ts=NOW - 2 * 86400)
+        pivot = mission("pivot", "active")
+        self.assertEqual(self.run_plan(green=False, missions=[old, pivot]), [("start", "MASTER", 1)])
+
+    def test_each_attempt_uses_the_next_model(self):
+        self.assertEqual(NS["MODELS"][:2], ["openai/gpt-6-astra", "anthropic/claude-fable-5-2"])
 
     def test_a_recently_idle_worker_is_not_nudged_yet(self):
         self.assertNotIn("A2", [a[1] for a in self.run_plan(missions=[mission("A2", "awaiting_user", updated=NOW - 60)])])
