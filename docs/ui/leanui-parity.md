@@ -40,6 +40,14 @@ the repository.
 
 ### U3 reproduction, 17 November 2026
 
+Latest local renderer measurement: `be73a0b1`, **4.76%** mean raw mismatch,
+**2/36** under 1%. The table and declared crops below were regenerated with
+the documented comparison command. Since the recovered baseline, settings
+input containment improves its four variants by 0.25–0.49 percentage points;
+split transcript width and complete diff text improve its four variants by
+0.40–0.44 points. No variant regressed against that baseline.
+These are incremental parity fixes, not accepted deliberate differences.
+
 Regenerated the table and declared crops from the native renderer at
 `2fb35f99`, which includes the previous U3 follow-up (#1849). The native build
 used pinned turbo-lean `aee2d179` with both fallback variables unset, on
@@ -102,29 +110,29 @@ Reference: SolidJS desktop. Candidate: LeanUI. 36 pairs, 0 errors, tolerance 8.
 | screen | theme | scale | mismatch % | > tol % | SSIM | sidebar | transcript | composer |
 |---|---|---|---:|---:|---:|---:|---:|---:|
 | 01_control_empty | dark | 1x | 1.14 | 1.03 | 0.9858 | 3.47 / 0.9614 | 0.80 / 0.9891 | 0.00 / 1.0000 |
-| 01_control_empty | dark | 2x | 0.80 | 0.71 | 0.9892 | 2.54 / 0.9721 | 0.53 / 0.9914 | 0.00 / 1.0000 |
-| 01_control_empty | light | 1x | 1.14 | 1.04 | 0.9855 | 3.46 / 0.9612 | 0.80 / 0.9887 | 0.00 / 1.0000 |
-| 01_control_empty | light | 2x | 0.80 | 0.71 | 0.9890 | 2.53 / 0.9722 | 0.53 / 0.9911 | 0.00 / 1.0000 |
+| 01_control_empty | dark | 2x | 0.80 | 0.71 | 0.9892 | 2.54 / 0.9722 | 0.53 / 0.9914 | 0.00 / 1.0000 |
+| 01_control_empty | light | 1x | 1.14 | 1.04 | 0.9855 | 3.45 / 0.9612 | 0.80 / 0.9887 | 0.00 / 1.0000 |
+| 01_control_empty | light | 2x | 0.80 | 0.71 | 0.9890 | 2.53 / 0.9723 | 0.53 / 0.9911 | 0.00 / 1.0000 |
 | 02_control_populated | dark | 1x | 1.65 | 1.27 | 0.9863 | 6.85 / 0.9653 | 0.80 / 0.9891 | 0.00 / 1.0000 |
 | 02_control_populated | dark | 2x | 1.16 | 0.94 | 0.9865 | 4.94 / 0.9540 | 0.53 / 0.9914 | 0.00 / 1.0000 |
 | 02_control_populated | light | 1x | 1.68 | 1.29 | 0.9861 | 7.09 / 0.9653 | 0.80 / 0.9887 | 0.00 / 1.0000 |
 | 02_control_populated | light | 2x | 1.17 | 0.95 | 0.9864 | 5.00 / 0.9543 | 0.53 / 0.9911 | 0.00 / 1.0000 |
-| 03_mission_transcript | dark | 1x | 7.05 | 4.29 | 0.9180 | 8.61 / 0.9293 | 5.76 / 0.9115 | 15.55 / 0.9428 |
-| 03_mission_transcript | dark | 2x | 6.12 | 3.58 | 0.9344 | 6.16 / 0.9366 | 5.08 / 0.9301 | 15.07 / 0.9554 |
-| 03_mission_transcript | light | 1x | 6.21 | 4.72 | 0.9156 | 8.82 / 0.9287 | 5.66 / 0.9086 | 7.22 / 0.9404 |
-| 03_mission_transcript | light | 2x | 5.16 | 3.99 | 0.9331 | 6.21 / 0.9368 | 4.92 / 0.9286 | 6.08 / 0.9542 |
-| 04_mission_split_diff | dark | 1x | 9.20 | 6.42 | 0.8684 | 8.61 / 0.9293 | 8.71 / 0.8504 | 13.04 / 0.9419 |
-| 04_mission_split_diff | dark | 2x | 7.78 | 5.24 | 0.8995 | 6.16 / 0.9366 | 7.37 / 0.8869 | 12.57 / 0.9545 |
-| 04_mission_split_diff | light | 1x | 9.30 | 7.10 | 0.8641 | 8.82 / 0.9287 | 9.66 / 0.8454 | 6.50 / 0.9406 |
-| 04_mission_split_diff | light | 2x | 7.82 | 5.91 | 0.8972 | 6.21 / 0.9368 | 8.35 / 0.8841 | 5.49 / 0.9538 |
+| 03_mission_transcript | dark | 1x | 7.03 | 4.27 | 0.9188 | 8.61 / 0.9293 | 5.74 / 0.9126 | 15.55 / 0.9428 |
+| 03_mission_transcript | dark | 2x | 6.11 | 3.56 | 0.9350 | 6.16 / 0.9366 | 5.06 / 0.9310 | 15.07 / 0.9554 |
+| 03_mission_transcript | light | 1x | 6.19 | 4.70 | 0.9163 | 8.82 / 0.9287 | 5.64 / 0.9095 | 7.22 / 0.9404 |
+| 03_mission_transcript | light | 2x | 5.14 | 3.97 | 0.9337 | 6.21 / 0.9368 | 4.90 / 0.9293 | 6.08 / 0.9542 |
+| 04_mission_split_diff | dark | 1x | 8.80 | 6.18 | 0.8772 | 8.61 / 0.9293 | 8.15 / 0.8627 | 13.04 / 0.9419 |
+| 04_mission_split_diff | dark | 2x | 7.35 | 4.97 | 0.9058 | 6.16 / 0.9366 | 6.77 / 0.8957 | 12.57 / 0.9545 |
+| 04_mission_split_diff | light | 1x | 8.88 | 6.67 | 0.8730 | 8.82 / 0.9287 | 9.09 / 0.8578 | 6.50 / 0.9406 |
+| 04_mission_split_diff | light | 2x | 7.38 | 5.46 | 0.9034 | 6.21 / 0.9368 | 7.74 / 0.8927 | 5.49 / 0.9538 |
 | 05_machines_fleet | dark | 1x | 3.63 | 3.14 | 0.9564 | 6.85 / 0.9654 | 3.55 / 0.9472 | 0.00 / 1.0000 |
 | 05_machines_fleet | dark | 2x | 2.77 | 2.47 | 0.9665 | 4.93 / 0.9540 | 2.78 / 0.9635 | 0.00 / 1.0000 |
 | 05_machines_fleet | light | 1x | 3.66 | 3.16 | 0.9565 | 7.09 / 0.9653 | 3.54 / 0.9473 | 0.00 / 1.0000 |
 | 05_machines_fleet | light | 2x | 2.78 | 2.47 | 0.9670 | 4.99 / 0.9544 | 2.77 / 0.9642 | 0.00 / 1.0000 |
-| 06_settings_general | dark | 1x | 4.41 | 3.83 | 0.9340 | 1.90 / 0.9880 | 4.88 / 0.9240 | 6.04 / 0.9035 |
-| 06_settings_general | dark | 2x | 3.33 | 2.79 | 0.9509 | 1.34 / 0.9897 | 3.70 / 0.9440 | 4.57 / 0.9278 |
-| 06_settings_general | light | 1x | 4.18 | 3.88 | 0.9319 | 1.90 / 0.9880 | 4.57 / 0.9209 | 6.00 / 0.9051 |
-| 06_settings_general | light | 2x | 3.12 | 2.85 | 0.9498 | 1.33 / 0.9898 | 3.41 / 0.9423 | 4.58 / 0.9292 |
+| 06_settings_general | dark | 1x | 3.94 | 3.58 | 0.9360 | 1.90 / 0.9880 | 4.23 / 0.9268 | 6.04 / 0.9035 |
+| 06_settings_general | dark | 2x | 2.83 | 2.54 | 0.9524 | 1.34 / 0.9897 | 3.02 / 0.9462 | 4.57 / 0.9278 |
+| 06_settings_general | light | 1x | 3.93 | 3.63 | 0.9341 | 1.90 / 0.9880 | 4.22 / 0.9239 | 6.00 / 0.9051 |
+| 06_settings_general | light | 2x | 2.84 | 2.58 | 0.9514 | 1.33 / 0.9898 | 3.03 / 0.9445 | 4.58 / 0.9292 |
 | 07_search_dialog | dark | 1x | 10.73 | 1.49 | 0.9693 | 37.92 / 0.9961 | 6.78 / 0.9583 | 0.03 / 1.0000 |
 | 07_search_dialog | dark | 2x | 10.46 | 1.26 | 0.9745 | 36.28 / 0.9976 | 6.72 / 0.9652 | 0.07 / 1.0000 |
 | 07_search_dialog | light | 1x | 14.37 | 1.54 | 0.9691 | 46.25 / 0.9964 | 9.96 / 0.9580 | 0.41 / 1.0000 |
@@ -138,7 +146,7 @@ Reference: SolidJS desktop. Candidate: LeanUI. 36 pairs, 0 errors, tolerance 8.
 | 09_toast_notifications | light | 1x | 6.33 | 2.28 | 0.9644 | 7.09 / 0.9653 | 4.15 / 0.9759 | 23.29 / 0.8759 |
 | 09_toast_notifications | light | 2x | 5.67 | 1.79 | 0.9684 | 5.00 / 0.9543 | 3.72 / 0.9798 | 23.04 / 0.9012 |
 
-Mean over 36 measured pairs: mismatch 4.85 %, above tolerance 2.56 %, SSIM 0.9565 (min 0.8641, max 0.9892).
+Mean over 36 measured pairs: mismatch 4.76 %, above tolerance 2.49 %, SSIM 0.9576 (min 0.8730, max 0.9892).
 
 Determinism (each renderer compared with a second capture of itself):
 
