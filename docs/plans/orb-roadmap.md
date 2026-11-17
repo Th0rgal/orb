@@ -261,6 +261,7 @@ Not on this roadmap: a macOS backend for LeanUI.
 | R29 | Cut-rate monitoring. `orb-monitor` reports per provider/model cuts per 1,000 requests and killed turns, from `mission_events` joined to `proxy_usage`, and alerts on a jump; the 48 h query becomes the standing check | R27 | blocked | The monitor output shows the rate and an injected spike alerts |
 | R30 | Safe in-proxy recovery without breaking the sticky fence. Kernel (`lean/Orb/Kernel.lean`, `Spec.lean`, `audit-spec` clean) gains two endings: (a) cut before any complete tool call: retryable abort, the proxy retries the same provider first (warm cache), then the next chain target after a context-size check, stripping provider-bound reasoning (OpenAI encrypted reasoning, Anthropic signed thinking) when switching; (b) cut after one or more complete tool calls: close the stream cleanly at the end of the last complete tool call as a normal tool-call response and drop only the unfinished tail. Proved: two attempts are never mixed in one stream, a tool call is never delivered twice, abort only before a tool call completes | R27 | blocked | The R27 fixtures pass end to end through opencode on dev with no killed turn and no duplicated tool call |
 | R31 | Routing by turn length. After one week of R29 data: coordinator and long-running missions default to targets whose measured cut rate keeps a 200-request turn above 99% survival; short calls may keep `surplusintelligence`; reorder `builtin/smart` from the data | R29 (+ 7 days) | blocked | The chain change is merged with the data table in the PR |
+| R32 | One "overloaded" or rate-limit reply parks a provider account for an hour although the account reports 100% quota left: on 17 Nov both OpenAI accounts were re-parked for 3600 s after a single `overloaded` answer (`consecutive_failures: 1`), and the OpenAI and Anthropic accounts sat parked most of the afternoon, so every roadmap worker died at start. A transient overload gets a short, growing cooldown (seconds to minutes) that resets on success; only quota exhaustion or an account-level refusal parks for long. The cooldown policy is the kernel's `orb_breaker_step`, with its spec | — | ready | A replayed single `overloaded` reply parks for at most a few minutes; a run of them grows the cooldown and a success resets it; a quota-exhausted reply still parks until the reported reset; tests by name |
 
 ### B. A board per mission
 
@@ -345,7 +346,7 @@ Only these. Each one names what it unblocks.
 | The five Antigravity logins disabled on 16 Nov stay disabled; `antigravity` entries stay out of `builtin/smart`, `builtin/fast`, `genius` and `google-sonnet` (R26) | Thomas, 16 Nov |
 | Canonical Core URL is `https://orbcore.thomas.md` | Thomas, 15 Nov |
 | Master on `builtin/genius`; until R27 and R28 are deployed, workers that run long turns (implementation, integration, coordination) use `openai/gpt-6-astra`, and `builtin/smart` is used only for short read-only checks; spawned sparingly | Thomas, 17 Nov (replaces 15 Nov "workers on `builtin/smart`") |
-| Roadmap workers start on the first model that is not cooling down, in order `openai/gpt-6-astra`, `anthropic/claude-fable-5-2`, `ethereumfoundation/deepseek-v4.1-flash` (both of the first two were out of quota for most of 17 Nov afternoon) | Thomas, 17 Nov |
+| Roadmap workers start on the first model that is not cooling down, in order `openai/gpt-6-astra`, `openai/gpt-6.1-sol`, `anthropic/claude-fable-5-2`, `ethereumfoundation/deepseek-v4.1-flash` (DeepSeek last) (both of the first two were out of quota for most of 17 Nov afternoon) | Thomas, 17 Nov |
 | Workers push often; milestone PRs get an independent review; merges need no approval | Thomas, 15 Nov |
 | Green before merge again (CI is fast enough since #1786) | this file |
 | Managed VMs hold no credentials; the integrator pushes for them | 13 Nov |
@@ -355,4 +356,4 @@ Only these. Each one names what it unblocks.
 Rows the reconciler dispatches, in order. A row leaves the queue by PR when it
 is done or dropped.
 
-`R28`, `R29`, `R30`, `R26`, `R13`, `R14`, `R15`, `R11`, `M3`, `B1`
+`R28`, `R32`, `R29`, `R30`, `R26`, `R13`, `R14`, `R15`, `R11`, `M3`, `B1`
