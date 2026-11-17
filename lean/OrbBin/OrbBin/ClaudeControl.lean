@@ -914,6 +914,8 @@ structure WarmClaudeEntry where
   pendingReqsRef   : IO.Ref (Array PendingControlRequest)
   implementPlanRef : IO.Ref Bool
   permissionModeRef : IO.Ref ClaudePermissionMode
+  /-- Set once the stdout reader has finished, including its end-of-stream turn handling. -/
+  readerExitedRef  : IO.Ref Bool
 
 /-- Shared manager supervising warm Claude Code processes and active one-shot CLI runs (`codex`, `opencode`, `antigravity`, `grok`, `vibe`). -/
 structure WarmHarnessManager where
@@ -1229,22 +1231,6 @@ private def launchOrReuseWarmClaude
     let ws ← mgr.warmProcsRef.get
     pure ((ws.find? (fun (k, _) => k == missionId)).map Prod.snd)
 
-  -- A process started with `extraEnv` holds that turn's proxy credential, which expires.
-  -- Such turns never reuse a warm process: retire it and respawn with `--resume`.
-  if !extraEnv.isEmpty then
-    if let some entry := existingWarm? then
-      mgr.mu.atomically do
-        let ws ← mgr.warmProcsRef.get
-        mgr.warmProcsRef.set (ws.filter (fun (k, _) => k != missionId))
-      entry.aliveRef.set false
-      closeFdRaw entry.stdinFd
-      let _ ← killSig (-entry.pid) 15
-      IO.sleep 80
-      if (← waitpidWnohang entry.pid) == 0xFFFFFFFF then
-        let _ ← killSig (-entry.pid) 9
-        let _ ← waitpidBlock entry.pid
-      closeFdRaw entry.stdoutFd
-
   -- Case 1: Reuse live warm Claude process in the same working directory!
   if let some entry := existingWarm?.filter (fun _ => extraEnv.isEmpty) then
     if (← entry.aliveRef.get) && entry.cwd == cwd then
@@ -1290,6 +1276,7 @@ private def launchOrReuseWarmClaude
     | .ok sp => pure sp
 
   let writeMu ← Std.Mutex.new ()
+  let readerExitedRef ← IO.mkRef false
   let aliveRef ← IO.mkRef true
   let pendingReqsRef ← IO.mkRef (#[] : Array PendingControlRequest)
   let implementPlanRef ← IO.mkRef false
@@ -1306,6 +1293,7 @@ private def launchOrReuseWarmClaude
     pendingReqsRef := pendingReqsRef
     implementPlanRef := implementPlanRef
     permissionModeRef := permModeRef
+    readerExitedRef := readerExitedRef
   }
   mgr.mu.atomically do
     let ws ← mgr.warmProcsRef.get
@@ -1411,6 +1399,7 @@ private def launchOrReuseWarmClaude
         ("state", finalSnap.toPollJVal)
       ])
       cb.onTurnFinished finalSnap
+    entry.readerExitedRef.set true
   return .ok ()
 
 /-- Normalize an Antigravity model + optional effort for `agy` CLI 1.5+ (where Carbon and Argon
@@ -1952,6 +1941,24 @@ def startHarnessTurn
       if let .ok wt ← createMissionWorktree effectiveCwd id none worktreesParentDir? then
         effectiveCwd := wt.worktreePath
         createdWtPath? := some wt.worktreePath
+
+  -- A warm Claude started with `extraEnv` holds that turn's proxy credential, which expires.
+  -- Such turns never reuse it: retire it and wait for its reader to finish *before* this
+  -- turn's callbacks and state exist, so its end-of-stream handling cannot touch this turn.
+  if harness == "claudecode" && !extraEnv.isEmpty then
+    let old? ← mgr.mu.atomically do
+      let ws ← mgr.warmProcsRef.get
+      mgr.warmProcsRef.set (ws.filter (fun (k, _) => k != id))
+      pure ((ws.find? (fun (k, _) => k == id)).map Prod.snd)
+    if let some old := old? then
+      old.aliveRef.set false
+      let _ ← killSig (-old.pid) 15
+      let mut waitedMs := 0
+      while !(← old.readerExitedRef.get) && waitedMs < 10000 do
+        if waitedMs == 3000 then
+          let _ ← killSig (-old.pid) 9
+        IO.sleep 50
+        waitedMs := waitedMs + 50
 
   setCallbacksFor mgr id callbacks
   let prevState? ← getRunState? mgr id
