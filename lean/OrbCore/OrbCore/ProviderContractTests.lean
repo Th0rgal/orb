@@ -453,7 +453,44 @@ private def sidecarParkedHealthContract
     let fresh ← getJson app jwt s!"/api/ai/providers/{oauthOnly}" now
     if statusOf fresh == some "needs_reauth" then
       failures := failures.push "r32_login_reporting_fixture_and_fresh_login: fresh login did not clear status"
+    -- An old disabled duplicate must not prevent recovery of the enabled login.
+    setOauthEmail (some "owner-secret@fixture.invalid")
+    let .ok initialDoc := OrbBin.Json.parse initialFiles
+      | throw (IO.userError "initial sidecar fixture parse")
+    let duplicate := JVal.obj #[("name", .str "old-disabled.json"), ("provider", .str "claude"),
+      ("email", .str "owner-secret@fixture.invalid"), ("disabled", .bool true)]
+    sidecarFilesJsonRef.set (renderCompact (.obj #[("files", .arr
+      (((initialDoc.fieldArr? "files").getD #[]).push duplicate))]))
+    patchCalls.set #[]
+    let (duplicateCode, _) ← postJson app jwt s!"/api/model-routing/health/{oauthOnly}/clear" "{}" now
+    let duplicateCalls ← patchCalls.get
+    if duplicateCode != 204 || duplicateCalls.size != 2 ||
+        duplicateCalls.any (fun s => (s.splitOn "old-disabled.json").length > 1) then
+      failures := failures.push "r32_enabled_recovery_with_disabled_duplicate: must only toggle enabled file"
     sidecarFilesJsonRef.set initialFiles
+    -- A skipped OAuth login must not replace the eligible account's context error.
+    let chains ← IO.mkRef #[{ id := "r32-reporting", name := "R32", targets := #[
+      { accountId := oauthOnly, provider := "openai", modelId := "fixture", baseUrl := "https://fixture.invalid", apiKey := "fixture" },
+      { accountId := keyOwned, provider := "openai", modelId := "fixture", baseUrl := "https://fixture.invalid", apiKey := "fixture" }
+    ] : RoutingChain }]
+    cooldownsRef.set #[{ accountId := oauthOnly, untilEpoch := 2400, reason := .usageLimit, label := "fixture" }]
+    let seen ← IO.mkRef (0 : Nat)
+    let proxyApp := { app with
+      chainsRef := chains
+      healthTracker? := none
+      proxyMockTransport? := some (fun _ => do
+        seen.modify (· + 1)
+        return .ok { status := 400, headers := #[], body :=
+          "{\"error\":{\"code\":\"context_length_exceeded\"},\"message\":\"Reduce context\"}".toUTF8 }) }
+    let body := "{\"model\":\"r32-reporting\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+    let wire := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {app.cfg.proxySecret}\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+    let .ok request := parseRequest wire.toUTF8 none | throw (IO.userError "r32 request parse")
+    let .ok response ← dispatchCoreRequest proxyApp request now | throw (IO.userError "r32 dispatch")
+    let .ok errorDoc := OrbBin.Json.parseBytes response.body | throw (IO.userError "r32 response parse")
+    if response.status != 400 || (← seen.get) != 1 || errorDoc.field? "login_status" != none ||
+        errorDoc.fieldStr? "message" != some "Reduce context" then
+      failures := failures.push s!"r32_skipped_login_preserves_request_error: {renderCompact errorDoc}"
+    cooldownsRef.set #[]
     let extraClaudeNoEmail : JVal := .obj #[
       ("id", .str "10000000-0000-4000-8000-000000000009"),
       ("name", .str "Claude second"),

@@ -1787,7 +1787,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   let prevSelectedStreak : UInt32 :=
     (prevStreaks.find? (fun (aid, _) => aid == out.selectedAccount)).map Prod.snd |>.getD 0
   let loginMessage? ← if out.status ≥ 400 then
-      sidecarLoginFailureMessage st.store st.cfg.workingDir (dispatchChain.targets.map (·.accountId))
+      sidecarLoginFailureMessage st.store st.cfg.workingDir #[out.selectedAccount]
     else pure none
   let loginFields := match OrbBin.Json.parseBytes out.body with
     | .ok (.obj fields) => fields.filter (fun (k, _) => k != "message" && k != "login_status")

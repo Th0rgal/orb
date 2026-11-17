@@ -2773,7 +2773,10 @@ def dispatchProviderAndAiRoute
     if let some t := healthTracker? then clearAccountHealthWhere t keys.contains
     if let some hp := matchedProv? then
       let sidecarFiles ← fetchSidecarAuthFiles
-      if let some file := matchSidecarFileForProvider? hps sidecarFiles hp then
+      -- Recovery retains enabled-only matching even when reporting also sees old disabled files.
+      let recoveryFile? := (matchSidecarFileForProvider? hps (sidecarFiles.filter (!·.disabled)) hp).orElse
+        fun _ => matchSidecarFileForProvider? hps sidecarFiles hp
+      if let some file := recoveryFile? then
         if let some errResp ← clearSidecarAuthFileCooldown hp.id file then
           return some errResp
     return some (204, "text/plain", ByteArray.empty)
