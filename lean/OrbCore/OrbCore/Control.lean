@@ -1766,6 +1766,12 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     if headersAlreadyCommitted then some pinnedAcctHdr else none
   let authEvidence ← IO.mkRef (#[] : Array (String × String))
   let bodyTimedOutRef ← IO.mkRef false
+  let prevStreaks ← match st.healthTracker? with
+    | some htr =>
+      dispatchChain.targets.mapM (fun t => do
+        let r ← lookupAccountHealthRecord htr t.accountId
+        pure (t.accountId, r.transientStreak))
+    | none => pure #[]
   let out ← forwardProxyChain dispatchChain req.method cleanPath #[] forwardBody
     st.proxyMockTransport? headersAlreadyCommitted st.pacingTracker?
     (skipAccountIds := skipAccountIds)
@@ -1776,6 +1782,8 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     (authEvidence? := some authEvidence)
     (streamLimits? := st.proxyStreamLimits?)
     (bodyTimedOutRef? := some bodyTimedOutRef)
+  let prevSelectedStreak : UInt32 :=
+    (prevStreaks.find? (fun (aid, _) => aid == out.selectedAccount)).map Prod.snd |>.getD 0
   -- Provider status follows what real requests saw: a refused login is recorded per
   -- upstream account, and an account that just served a request is cleared.
   for (accountKey, code) in (← authEvidence.get) do
@@ -1854,17 +1862,31 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   ]
   match out.stream? with
   | some pump =>
+    let wantsStreamReq := requestWantsStream cleanPath forwardBody
     return { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := diagHdrs,
              body := ByteArray.empty, bodyStream? := some fun emit => do
+               let streamCopyRef ← IO.mkRef ByteArray.empty
+               let streamOkRef ← IO.mkRef false
                try
                  let (copy, ok) ← pump emit
+                 streamCopyRef.set copy
+                 streamOkRef.set ok
                  accountBody copy
                  return ok
                finally
-                 if (← bodyTimedOutRef.get) then
+                 let copy ← streamCopyRef.get
+                 let ok ← streamOkRef.get
+                 let timedOut ← bodyTimedOutRef.get
+                 let streamStatus := classifyProxyStreamOutcome out.contentType wantsStreamReq copy ok timedOut
+                 if streamStatus != "ok" then
                    if let some oid := outcomeId? then
                      discard <| execParamQuery st.store.missionsDb
-                       "UPDATE proxy_outcomes SET status='upstream_idle_timeout' WHERE id=?1;" #[oid] }
+                       "UPDATE proxy_outcomes SET status=?2 WHERE id=?1;" #[oid, streamStatus]
+                   if !out.selectedAccount.isEmpty then
+                     if let some htr := st.healthTracker? then
+                       discard <| recordStreamCutHealth htr out.selectedAccount prevSelectedStreak nowEpochSec
+                       let active ← snapshotActiveHealthCooldowns htr nowEpochSec
+                       st.proxyCooldownsRef.set active }
   | none =>
     accountBody out.body
     return { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := diagHdrs, body := out.body }

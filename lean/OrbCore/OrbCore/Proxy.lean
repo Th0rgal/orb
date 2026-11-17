@@ -633,6 +633,176 @@ def recordHealthAttempt
     set hst'
     return (slice', v, effs)
 
+/-- Pure circuit-breaker evaluation for a post-head stream cut (`stream_incomplete` or `upstream_idle_timeout`).
+    Increments `transientStreak` from `prevTransientStreak` (preserving the pre-stream streak across the 200 head)
+    and steps `Orb.Kernel.breakerStep 4` so reaching `transientThreshold` trips an exponential cooldown via
+    `Orb.Kernel.accountCooldownSecs`. -/
+def stepStreamCutHealthPure
+    (hst : ProviderHealthState)
+    (accountId : String)
+    (prevTransientStreak : UInt32)
+    (nowEpoch : UInt64) : ProviderHealthState × UInt32 × Option AccountCooldown :=
+  if accountId.isEmpty then
+    (hst, 0, none)
+  else
+    let rec0 := lookupAccountHealth hst.accounts accountId
+    let baseStreak := max rec0.transientStreak prevTransientStreak
+    let nextStreak := if baseStreak < 0xFFFFFFFF then baseStreak + 1 else baseStreak
+    let breakerWord := Orb.Kernel.breakerStep 4 nextStreak hst.transientThreshold
+    let breakerCooldown := ((breakerWord >>> 16) &&& 0xFF) == 1
+    let nextConsecutive := if rec0.consecutiveTrips < 0xFFFFFFFF then rec0.consecutiveTrips + 1 else rec0.consecutiveTrips
+    let coolSecs := exponentialCooldownSecs .serverError nextConsecutive
+    let nextCool? : Option AccountCooldown :=
+      if breakerCooldown then
+        some { accountId := accountId, untilEpoch := nowEpoch + clampCooldownRetryAfter coolSecs, reason := .serverError, label := "" }
+      else
+        rec0.cooldown?
+    let nextTrips : UInt32 := if breakerCooldown then nextConsecutive else rec0.consecutiveTrips
+    let rec1 : AccountHealthRecord := {
+      rec0 with
+      transientStreak := nextStreak
+      consecutiveTrips := nextTrips
+      cooldown? := nextCool?
+      lastVerdictCode := ProviderAttemptVerdict.encode .abortCommittedLock
+    }
+    ({ hst with accounts := upsertAccountHealth hst.accounts rec1 }, breakerWord, nextCool?)
+
+/-- Atomically record a post-head stream cut (`stream_incomplete` or `upstream_idle_timeout`) on `ProviderHealthTracker`. -/
+def recordStreamCutHealth
+    (tracker : ProviderHealthTracker)
+    (accountId : String)
+    (prevTransientStreak : UInt32)
+    (nowEpoch : UInt64) : IO (UInt32 × Option AccountCooldown) :=
+  tracker.health.atomically do
+    let hst ← get
+    let (hst', bw, cool?) := stepStreamCutHealthPure hst accountId prevTransientStreak nowEpoch
+    set hst'
+    return (bw, cool?)
+
+private def jsonFieldIndicatesError (jv : JVal) : Bool :=
+  match jv.field? "error" with
+  | some .null | none =>
+    match jv.fieldStr? "type" with
+    | some "error" | some "response.failed" | some "response.incomplete" => true
+    | _ =>
+      match jv.fieldStr? "finish_reason" with
+      | some "error" | some "network_error" => true
+      | _ => false
+  | some (.bool false) => false
+  | some (.str s) => !s.trimAscii.toString.isEmpty
+  | some _ => true
+
+private def jsonChoiceHasTerminalFinish (choice : JVal) : Bool :=
+  match choice.fieldStr? "finish_reason" with
+  | some fr =>
+    let clean := fr.trimAscii.toString
+    !clean.isEmpty && clean != "null" && clean != "error" && clean != "network_error"
+  | none =>
+    match choice.fieldStr? "stop_reason" with
+    | some sr => !sr.trimAscii.toString.isEmpty && sr.trimAscii.toString != "null"
+    | none =>
+      match choice.fieldStr? "finishReason" with
+      | some gr =>
+        let clean := gr.trimAscii.toString
+        !clean.isEmpty && clean != "null" && clean != "FINISH_REASON_UNSPECIFIED"
+      | none => false
+
+private def jsonEventHasTerminalFinish (jv : JVal) : Bool :=
+  match jv.fieldStr? "type" with
+  | some "message_stop" | some "response.completed" | some "content_block_stop" =>
+    match jv.fieldStr? "type" with
+    | some "message_stop" | some "response.completed" => true
+    | _ => false
+  | _ =>
+    match jv.fieldStr? "stop_reason" with
+    | some sr => !sr.trimAscii.toString.isEmpty && sr.trimAscii.toString != "null"
+    | none =>
+      match (jv.fieldOrNull "delta").fieldStr? "stop_reason" with
+      | some sr => !sr.trimAscii.toString.isEmpty && sr.trimAscii.toString != "null"
+      | none =>
+        match (jv.fieldOrNull "response").fieldStr? "status" with
+        | some "completed" => true
+        | _ =>
+          let choices := (jv.fieldArr? "choices").getD #[]
+          let candidates := (jv.fieldArr? "candidates").getD #[]
+          choices.any jsonChoiceHasTerminalFinish || candidates.any jsonChoiceHasTerminalFinish
+
+private def jsonEventIsStructuredModelPayload (jv : JVal) : Bool :=
+  (jv.field? "choices").isSome ||
+  (jv.field? "candidates").isSome ||
+  (jv.field? "delta").isSome ||
+  (jv.field? "response").isSome ||
+  match jv.fieldStr? "object" with
+  | some o => containsSubstring o "chat.completion" || containsSubstring o "response"
+  | none =>
+    match jv.fieldStr? "type" with
+    | some t =>
+      t.startsWith "message_" || t.startsWith "content_block_" || t.startsWith "response."
+    | none => false
+
+/-- Classify a completed or cut streamed body into `"ok"`, `"stream_incomplete"`, or `"upstream_idle_timeout"`.
+    - If `timedOut` is true, returns `"upstream_idle_timeout"`.
+    - If `!framingComplete` (missing terminating chunk, short `Content-Length`, or unclean EOF), returns `"stream_incomplete"`.
+    - For SSE replies (`text/event-stream`), inspects `data:` frames:
+      * Any concatenated frame after `[DONE]` (`[DONE]data:...`), any frame after `[DONE]`, or any JSON error frame
+        (`"error":...`, `"type":"error"`, `"type":"response.failed"`) returns `"stream_incomplete"`.
+      * Any structured model SSE stream (`choices`, `candidates`, `message_start`/`content_block_*`, `response.*`)
+        or stream ending with `[DONE]` that never emitted a terminal finish (`finish_reason`, `stop_reason`,
+        `finishReason`, `message_stop`, `response.completed`) returns `"stream_incomplete"`. -/
+def classifyProxyStreamOutcome
+    (contentType : String)
+    (wantsStream : Bool)
+    (body : ByteArray)
+    (framingComplete : Bool)
+    (timedOut : Bool) : String := Id.run do
+  if timedOut then
+    return "upstream_idle_timeout"
+  if !framingComplete then
+    return "stream_incomplete"
+  let isSse := containsSubstring contentType.toLower "text/event-stream" || wantsStream
+  if !isSse then
+    return "ok"
+  let some text := String.fromUTF8? body
+    | return "stream_incomplete"
+  let mut sawDataFrame := false
+  let mut sawModelProtocol := false
+  let mut sawTerminalFinish := false
+  let mut sawDone := false
+  let mut sawError := false
+  for rawLine in text.splitOn "\n" do
+    let line := rawLine.trimAscii.toString
+    if line.startsWith "data:" then
+      sawDataFrame := true
+      let payload := (line.drop 5).toString.trimAscii.toString
+      if sawDone then
+        sawError := true
+      else if payload == "[DONE]" then
+        sawDone := true
+      else if payload.startsWith "[DONE]" then
+        sawDone := true
+        let tail := (payload.drop 6).toString.trimAscii.toString
+        if !tail.isEmpty then
+          sawError := true
+      else if !payload.isEmpty then
+        match OrbBin.Json.parse payload with
+        | .ok jv =>
+          if jsonFieldIndicatesError jv then
+            sawError := true
+          if jsonEventIsStructuredModelPayload jv then
+            sawModelProtocol := true
+          if jsonEventHasTerminalFinish jv then
+            sawTerminalFinish := true
+        | .error _ =>
+          if containsSubstring payload "[DONE]" || containsSubstring payload "\"error\"" ||
+             containsSubstring payload "\"choices\"" || containsSubstring payload "\"tool_calls\"" ||
+             containsSubstring payload "\"delta\"" then
+            sawError := true
+  if sawError then
+    return "stream_incomplete"
+  if sawDataFrame && (sawModelProtocol || sawDone) && !sawTerminalFinish then
+    return "stream_incomplete"
+  return "ok"
+
 def cooldownReply (chainId : String) (retryAfterSecs : UInt64) : ProxyHttpReply :=
   let secs := clampCooldownRetryAfter retryAfterSecs
   { status := 429
