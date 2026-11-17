@@ -1943,6 +1943,10 @@ def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) : OrbBin.
       else if armedWakeups > 0 then "awaiting_user"
       else if isSideQ then "completed"
       else "awaiting_user"
+    -- A failed turn must say why: record the harness's own error text.
+    if isErr && transientVerdict?.isNone then
+      if let some errText := finalSnap.error?.map (·.trimAscii.toString) |>.filter (!·.isEmpty) then
+        discard <| appendMissionEvent st.store missionId "error" (renderCompact (.obj #[("content", .str errText)])) ts
     if let some (_, tReason) := transientVerdict? then
       discard <| execParamQuery st.store.missionsDb
         "UPDATE missions SET status=?2,terminal_reason=?3,state_revision=state_revision+1,updated_at=?4 WHERE id=?1 AND status IN ('active','pending');"
