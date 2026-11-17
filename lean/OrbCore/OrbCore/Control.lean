@@ -1883,24 +1883,10 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
                      discard <| execParamQuery st.store.missionsDb
                        "UPDATE proxy_outcomes SET status=?2 WHERE id=?1;" #[oid, streamStatus]
                    if !out.selectedAccount.isEmpty then
-                     match st.healthTracker? with
-                     | some htr =>
+                     if let some htr := st.healthTracker? then
                        discard <| recordStreamCutHealth htr out.selectedAccount prevSelectedStreak nowEpochSec
                        let active ← snapshotActiveHealthCooldowns htr nowEpochSec
-                       st.proxyCooldownsRef.set active
-                     | none =>
-                       let bw := Orb.Kernel.breakerStep 4 2 2
-                       if ((bw >>> 16) &&& 0xFF) == 1 then
-                         let cooldowns ← st.proxyCooldownsRef.get
-                         let stillActive := activeCooldowns cooldowns nowEpochSec
-                         let withoutSelected := stillActive.filter (fun c => c.accountId != out.selectedAccount)
-                         let secs := clampCooldownRetryAfter (defaultCooldownSecs .serverError)
-                         st.proxyCooldownsRef.set (withoutSelected.push {
-                           accountId := out.selectedAccount
-                           untilEpoch := nowEpochSec + secs
-                           reason := .serverError
-                           label := ""
-                         }) }
+                       st.proxyCooldownsRef.set active }
   | none =>
     accountBody out.body
     return { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := diagHdrs, body := out.body }
