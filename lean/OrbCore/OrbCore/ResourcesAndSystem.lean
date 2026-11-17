@@ -90,6 +90,14 @@ private def execParamStmt (db : SqliteDb) (sql : String) (params : Array String)
   | .ok _ => return .ok ()
   | .error e => return .error e
 
+/-- Upsert of a mission started on a client computer (`POST /api/control/local-origins`).
+    Sets `workspace_id` explicitly: databases created before the column had a
+    default still declare it `NOT NULL` without one (prod, 16 Nov 2026). -/
+def localOriginMissionUpsertSql : String :=
+  "INSERT INTO missions (id, title, status, backend, model_override, model_effort, working_directory, project, folder, placement_revision, created_at, updated_at, origin, resumable, tags, history_json, authority_mode, placement_kind, owner_user_id, workspace_id) " ++
+         "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?11, 'orb-client', 1, ?12, ?13, 'writer', 'client', ?14, '00000000-0000-0000-0000-000000000000') " ++
+         "ON CONFLICT(id) DO UPDATE SET status=excluded.status, updated_at=excluded.updated_at, history_json=excluded.history_json, state_revision=missions.state_revision+1;"
+
 private def hasMultipleActiveUsers (st : CoreStore) : IO Bool := do
   match ← execParamQuery st.missionsDb "SELECT COUNT(*) FROM users WHERE disabled=0;" #[] with
   | .ok rows => return (((rows[1]?.bind (·[0]?)).bind String.toNat?).getD 0) > 1
@@ -2639,23 +2647,25 @@ def dispatchResourcesAndSystemRoute
         } }
 
       let origCompact := renderCompact origJv
-      let _ ← execParamStmt store.missionsDb
-        "INSERT INTO local_origins (mission_id, origin, sequence, terminal) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(mission_id) DO UPDATE SET sequence=excluded.sequence, terminal=excluded.terminal;"
-        #[mid, origCompact, toString seq, if isTerm then "1" else "0"]
+      -- A failed write must not be acknowledged: orb-locald would mark the
+      -- mission synced and it would never appear on any client.
+      if let .error e ← execParamStmt store.missionsDb
+          "INSERT INTO local_origins (mission_id, origin, sequence, terminal) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(mission_id) DO UPDATE SET sequence=excluded.sequence, terminal=excluded.terminal;"
+          #[mid, origCompact, toString seq, if isTerm then "1" else "0"] then
+        return some (jsonErr 500 s!"local origin not stored: {e}")
 
       let histItems : Array JVal :=
         #[.obj #[("role", .str "user"), ("content", .str prompt)]] ++
         (if text.trimAscii.toString.isEmpty then #[] else #[.obj #[("role", .str "assistant"), ("content", .str text)]])
       let tagsJson := "[\"pr-writer\",\"placement:client\"]"
-      let _ ← execParamStmt store.missionsDb
-        ("INSERT INTO missions (id, title, status, backend, model_override, model_effort, working_directory, project, folder, placement_revision, created_at, updated_at, origin, resumable, tags, history_json, authority_mode, placement_kind, owner_user_id) " ++
-         "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?11, 'orb-client', 1, ?12, ?13, 'writer', 'client', ?14) " ++
-         "ON CONFLICT(id) DO UPDATE SET status=excluded.status, updated_at=excluded.updated_at, history_json=excluded.history_json, state_revision=missions.state_revision+1;")
-        #[mid, title, stStr, backend, modelStr, effStr, cwd, proj, folder, createdIso, nowIso, tagsJson, renderCompact (.arr histItems), callerUserId]
+      if let .error e ← execParamStmt store.missionsDb localOriginMissionUpsertSql
+          #[mid, title, stStr, backend, modelStr, effStr, cwd, proj, folder, createdIso, nowIso, tagsJson, renderCompact (.arr histItems), callerUserId] then
+        return some (jsonErr 500 s!"local mission not stored: {e}")
 
-      let _ ← execParamStmt store.missionsDb
-        "INSERT OR REPLACE INTO mission_runs (id, mission_id, generation, execution_state, terminal_reason, remote_job_id, updated_at) VALUES (?1, ?2, 1, ?3, ?4, '', ?5);"
-        #[runId, mid, if isTerm then "terminal" else "running", if isTerm then "client_runner" else "", nowIso]
+      if let .error e ← execParamStmt store.missionsDb
+          "INSERT OR REPLACE INTO mission_runs (id, mission_id, generation, execution_state, terminal_reason, remote_job_id, updated_at) VALUES (?1, ?2, 1, ?3, ?4, '', ?5);"
+          #[runId, mid, if isTerm then "terminal" else "running", if isTerm then "client_runner" else "", nowIso] then
+        return some (jsonErr 500 s!"local run not stored: {e}")
 
       return some (jsonResp 200 (.obj #[("ok", .bool true)]))
 
