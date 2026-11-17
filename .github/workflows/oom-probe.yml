@@ -1,0 +1,14 @@
+# Temporary: proves lean.ci re-runs an OOM-killed job once with more memory. Delete with the branch.
+name: lean.ci OOM probe
+on:
+  push:
+    branches: [ci/oom-probe]
+jobs:
+  oom-probe:
+    # A label no other Orb job uses, so no runner swap with real CI.
+    runs-on: lean-8vcpu-ubuntu-2604
+    timeout-minutes: 15
+    steps:
+      - run: |
+          echo "attempt ${GITHUB_RUN_ATTEMPT}"; free -m
+          python3 -c "x = b'\x01' * (20 << 30); print('allocated', len(x) >> 30, 'GiB')"
