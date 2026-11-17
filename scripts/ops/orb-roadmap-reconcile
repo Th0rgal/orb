@@ -113,7 +113,11 @@ def plan(rows, queue, prs, missions, master_green, ledger, now):
             by_row.setdefault(rid, []).append(m)
     for ms in by_row.values():
         ms.sort(key=lambda m: m["created_at"])
-    live = sum(1 for ms in by_row.values() for m in ms if m["status"] in LIVE)
+    # A worker that died at start in the last 15 minutes still holds its slot:
+    # otherwise a provider cooldown turns every run into three fresh deaths.
+    live = sum(1 for ms in by_row.values() for m in ms
+               if m["status"] in LIVE or (now - m["updated_ts"] < IDLE_SECONDS
+                                          and m["updated_ts"] - m["created_ts"] < QUICK_DEATH_SECONDS))
     actions = []
     targets = queue if master_green else [MASTER_FIX]
     for rid in targets:
@@ -149,6 +153,7 @@ def plan(rows, queue, prs, missions, master_green, ledger, now):
             actions.append(("nudge", rid, latest["id"]))
         elif len(ms) < MAX_ATTEMPTS:
             if live < MAX_WORKERS:
+                actions.append(("replace", rid, latest["id"]))
                 actions.append(("start", rid, len(ms) + 1))
                 live += 1
         elif ledger.get("reported", {}).get(rid) != latest["id"]:
@@ -282,6 +287,9 @@ def main():
             if kind == "start":
                 r = start_worker(row, arg, open_prs)
                 print(f"started {rid} attempt {arg}: {r.get('id') or r.get('mission_id')}")
+            elif kind == "replace":  # release the track's writer lease first
+                core_post(f"/api/control/missions/{arg}/cancel", {})
+                print(f"cancelled {rid} ({arg}) before replacing it")
             elif kind == "nudge":
                 core_post(f"/api/control/missions/{arg}/resume", {"content": nudge_text(open_prs)})
                 ledger.setdefault("nudged", {})[arg] = int(now)

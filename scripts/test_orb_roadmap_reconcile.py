@@ -62,7 +62,8 @@ class ReconcileTest(unittest.TestCase):
         first = mission("A2", "completed", mid="m1")
         self.assertIn(("nudge", "A2", "m1"), self.run_plan(missions=[first]))
         nudged = {"nudged": {"m1": NOW - 1800}}
-        self.assertIn(("start", "A2", 2), self.run_plan(missions=[first], ledger=nudged))
+        self.assertEqual(self.run_plan(missions=[first], ledger=nudged)[:2],
+                         [("replace", "A2", "m1"), ("start", "A2", 2)])
         second = mission("A2", "failed", created="2026-11-17T11:00:00Z", mid="m2")
         both = {"nudged": {"m1": 1, "m2": 1}}
         self.assertIn(("escalate", "A2", "m2"), self.run_plan(missions=[first, second], ledger=both))
@@ -72,6 +73,10 @@ class ReconcileTest(unittest.TestCase):
     def test_a_worker_that_died_at_start_is_replaced_not_nudged(self):
         dead = mission("A2", "cancelled", mid="m1", created_ts=NOW - 3605)
         self.assertIn(("start", "A2", 2), self.run_plan(missions=[dead]))
+
+    def test_recent_quick_deaths_hold_their_slots(self):
+        dead = [mission(f"Z{i}", "cancelled", updated=NOW - 60, created_ts=NOW - 65) for i in range(3)]
+        self.assertEqual(self.run_plan(missions=dead), [])
 
     def test_old_master_fix_attempts_and_foreign_tracks_are_ignored(self):
         old = mission("MASTER", "cancelled", created_ts=NOW - 2 * 86400)
