@@ -213,9 +213,12 @@ def fetch_github():
     if ENV("ORB_ROADMAP_FILE"):  # a local copy, for dry runs of a roadmap edit
         text = open(ENV("ORB_ROADMAP_FILE")).read()
     else:
+        # The contents API, not raw.githubusercontent.com: its CDN served a
+        # stale roadmap for over 15 minutes after a merge.
         with urllib.request.urlopen(urllib.request.Request(
-                f"https://raw.githubusercontent.com/{REPO}/master/{ROADMAP_PATH}",
-                headers={"User-Agent": "orb-roadmap-reconcile"}), timeout=20) as r:
+                f"{api}/contents/{ROADMAP_PATH}?ref=master",
+                headers={"User-Agent": "orb-roadmap-reconcile",
+                         "Accept": "application/vnd.github.raw"}), timeout=20) as r:
             text = r.read().decode()
     prs = http_json(f"{api}/pulls?state=all&sort=updated&direction=desc&per_page=100")
     for p in prs:
