@@ -1228,4 +1228,189 @@ def run : IO Unit := do
     closeCoreStore store
     IO.FS.removeDirAll root
 
+/-- R27: Stream-cut truth across `shared/orb-spec/fixtures/stream-cut-truth.json`,
+    `proxy_outcomes`, `orb_breaker_step` (`ProviderHealthTracker`), chain failover, and
+    `GET /api/ai/proxy/health`. -/
+def r27_stream_cut_truth_fixtures_and_breaker : IO Unit := do
+  let fixtureRaw ← IO.FS.readFile "shared/orb-spec/fixtures/stream-cut-truth.json"
+  let .ok fixture := OrbBin.Json.parse fixtureRaw
+    | throw (IO.userError "r27: failed to parse shared/orb-spec/fixtures/stream-cut-truth.json")
+  let cases := (fixture.fieldArr? "cases").getD #[]
+  check (cases.size == 5) s!"r27: expected 5 stream-cut-truth fixture cases, got {cases.size}"
+  let r27Root := s!"/tmp/orb-r27-stream-cut-{← newUuidV4}"
+  let .ok r27Store ← openCoreStore r27Root
+    | throw (IO.userError "r27: openCoreStore failed")
+  try
+    let r27Managed ← IO.mkRef ({} : ManagedFleetState)
+    let r27Cooldowns ← IO.mkRef (#[] : Array AccountCooldown)
+    let r27Seq ← IO.mkRef (1 : UInt64)
+    let r27Cfg : CoreConfig := {
+      workingDir := r27Root
+      dashboardPassword := "r27-stream-cut-password"
+      proxySecret := "r27-stream-cut-secret-0123456789"
+      jwtSecret := "r27-stream-cut-jwt-secret-0123456789"
+    }
+    -- 1. Replay all 5 fixtures through live loopback HTTP streaming & `ProviderHealthTracker`:
+    --    Each fixture must classify as `stream_incomplete`, record `status = 'stream_incomplete'` in `proxy_outcomes`,
+    --    and step `ProviderHealthTracker` (`orb_breaker_step` reason 4).
+    for c in cases do
+      let cid := (c.fieldStr? "id").getD ""
+      let expectedStatus := (c.fieldStr? "expected_status").getD ""
+      let cleanFraming := (c.fieldBool? "clean_framing").getD true
+      let chunks := ((c.fieldArr? "chunks").getD #[]).filterMap JVal.asStr?
+      let joined := String.join chunks.toList
+      let pureClass := classifyProxyStreamOutcome "text/event-stream" true joined.toUTF8 cleanFraming false
+      check (pureClass == expectedStatus)
+        s!"r27 fixture {cid}: classifyProxyStreamOutcome expected {expectedStatus}, got {pureClass}"
+      let htr ← newProviderHealthTracker 1 2
+      let .ok (uLfd, uPort) ← tcpListen "127.0.0.1" 0 4
+        | throw (IO.userError s!"r27 fixture {cid}: upstream listen failed")
+      let uTask ← IO.asTask (prio := .dedicated) do
+        if let .ok ufd ← tcpAcceptPoll uLfd 5000 then
+          discard <| pollReadable ufd 2000
+          discard <| readStreamChunk ufd 65536
+          discard <| writeAll ufd ("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").toUTF8 false
+          for ch in chunks do
+            discard <| writeAll ufd (encodeHttpChunk ch.toUTF8) false
+          if cleanFraming then
+            discard <| writeAll ufd (encodeHttpChunk ByteArray.empty) false
+          discard <| closeFd ufd
+        discard <| closeFd uLfd
+      let chRef ← IO.mkRef #[({
+        id := s!"chain-{cid}", name := cid,
+        targets := #[{ accountId := s!"acct-{cid}", provider := "openai", baseUrl := s!"http://127.0.0.1:{uPort}", apiKey := "k", modelId := "m-cut" }]
+      } : RoutingChain)]
+      let app : CoreAppState := {
+        cfg := r27Cfg, store := r27Store, searchIdx? := none,
+        managedRef := r27Managed, chainsRef := chRef,
+        proxyCooldownsRef := r27Cooldowns, seqRef := r27Seq,
+        pacingTracker? := some htr.pacing, healthTracker? := some htr
+      }
+      let .ok (cLfd, cPort) ← tcpListen "127.0.0.1" 0 4
+        | throw (IO.userError s!"r27 fixture {cid}: client listen failed")
+      let cSrv ← IO.asTask (prio := .dedicated) do
+        if let .ok sfd ← tcpAcceptPoll cLfd 5000 then
+          handleClientConn app sfd false
+        discard <| closeFd cLfd
+      let reqBody := s!"\{\"model\":\"chain-{cid}\",\"stream\":true}"
+      let reqWire := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {r27Cfg.proxySecret}\r\nContent-Length: {reqBody.utf8ByteSize}\r\n\r\n{reqBody}"
+      if let .ok cfd ← tcpConnect "127.0.0.1" cPort then
+        discard <| writeAll cfd reqWire.toUTF8 false
+        let mut done := false
+        while !done do
+          match ← pollReadable cfd 5000 with
+          | .ok () =>
+            let part ← readStreamChunk cfd 65536
+            if part.isEmpty then done := true
+          | .error _ => done := true
+        discard <| closeFd cfd
+      let _ := cSrv.get
+      let _ := uTask.get
+      let .ok oRows ← execParamQuery r27Store.missionsDb
+          "SELECT status, http_status FROM proxy_outcomes WHERE chain_id=?1 ORDER BY id DESC LIMIT 1;" #[s!"chain-{cid}"]
+        | throw (IO.userError s!"r27 fixture {cid}: query proxy_outcomes failed")
+      check (oRows.size > 1 && oRows[1]! == #[expectedStatus, "200"])
+        s!"r27 fixture {cid}: expected proxy_outcomes=[{expectedStatus}, 200], got {oRows}"
+      let hRec ← lookupAccountHealthRecord htr s!"acct-{cid}"
+      check (hRec.transientStreak == 1)
+        s!"r27 fixture {cid}: expected transientStreak=1 after 1 stream cut, got {hRec.transientStreak}"
+
+    -- 2. Breaker trip & chain failover after 2 consecutive stream cuts on primary target:
+    --    Primary target cuts mid-stream twice (reaching transientThreshold = 2), which cools down
+    --    primary via `orb_breaker_step` and routes the 3rd request to backup target (`acct-backup`).
+    let hFailover ← newProviderHealthTracker 1 2
+    let .ok (primLfd, primPort) ← tcpListen "127.0.0.1" 0 8
+      | throw (IO.userError "r27 failover: primary listen failed")
+    let primHits ← IO.mkRef (0 : Nat)
+    let primTask ← IO.asTask (prio := .dedicated) do
+      for _ in [0:2] do
+        if let .ok ufd ← tcpAcceptPoll primLfd 5000 then
+          primHits.modify (· + 1)
+          discard <| pollReadable ufd 2000
+          discard <| readStreamChunk ufd 65536
+          let cutFrame := "data: [DONE]data: {\"error\":{\"message\":\"cut\"}}\n\n"
+          discard <| writeAll ufd (("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").toUTF8 ++
+            encodeHttpChunk cutFrame.toUTF8 ++ encodeHttpChunk ByteArray.empty) false
+          discard <| closeFd ufd
+      discard <| closeFd primLfd
+    let .ok (bakLfd, bakPort) ← tcpListen "127.0.0.1" 0 4
+      | throw (IO.userError "r27 failover: backup listen failed")
+    let bakHits ← IO.mkRef (0 : Nat)
+    let bakTask ← IO.asTask (prio := .dedicated) do
+      if let .ok ufd ← tcpAcceptPoll bakLfd 5000 then
+        bakHits.modify (· + 1)
+        discard <| pollReadable ufd 2000
+        discard <| readStreamChunk ufd 65536
+        let okFrame := "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+        discard <| writeAll ufd (("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").toUTF8 ++
+          encodeHttpChunk okFrame.toUTF8 ++ encodeHttpChunk ByteArray.empty) false
+        discard <| closeFd ufd
+      discard <| closeFd bakLfd
+    let foChains ← IO.mkRef #[({
+      id := "r27-failover", name := "r27-failover",
+      targets := #[
+        { accountId := "r27-prim", provider := "openai", baseUrl := s!"http://127.0.0.1:{primPort}", apiKey := "k1", modelId := "m-prim" },
+        { accountId := "r27-bak", provider := "anthropic", baseUrl := s!"http://127.0.0.1:{bakPort}", apiKey := "k2", modelId := "m-bak" }
+      ]
+    } : RoutingChain)]
+    let foCooldowns ← IO.mkRef (#[] : Array AccountCooldown)
+    let foApp : CoreAppState := {
+      cfg := r27Cfg, store := r27Store, searchIdx? := none,
+      managedRef := r27Managed, chainsRef := foChains,
+      proxyCooldownsRef := foCooldowns, seqRef := r27Seq,
+      pacingTracker? := some hFailover.pacing, healthTracker? := some hFailover
+    }
+    for _ in [0:3] do
+      let .ok (cLfd, cPort) ← tcpListen "127.0.0.1" 0 4
+        | throw (IO.userError "r27 failover: client listen failed")
+      let cSrv ← IO.asTask (prio := .dedicated) do
+        if let .ok sfd ← tcpAcceptPoll cLfd 5000 then
+          handleClientConn foApp sfd false
+        discard <| closeFd cLfd
+      let reqBody := "{\"model\":\"r27-failover\",\"stream\":true}"
+      let reqWire := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {r27Cfg.proxySecret}\r\nContent-Length: {reqBody.utf8ByteSize}\r\n\r\n{reqBody}"
+      if let .ok cfd ← tcpConnect "127.0.0.1" cPort then
+        discard <| writeAll cfd reqWire.toUTF8 false
+        let mut done := false
+        while !done do
+          match ← pollReadable cfd 5000 with
+          | .ok () =>
+            let part ← readStreamChunk cfd 65536
+            if part.isEmpty then done := true
+          | .error _ => done := true
+        discard <| closeFd cfd
+      let _ := cSrv.get
+    let _ := primTask.get
+    let _ := bakTask.get
+    let primRec ← lookupAccountHealthRecord hFailover "r27-prim"
+    check (primRec.transientStreak == 2 && primRec.consecutiveTrips == 1 && primRec.cooldown?.isSome)
+      s!"r27 failover: expected r27-prim breaker tripped after 2 cuts, got streak={primRec.transientStreak} trips={primRec.consecutiveTrips} cool={primRec.cooldown?.isSome}"
+    check ((← primHits.get) == 2 && (← bakHits.get) == 1)
+      s!"r27 failover: expected 2 hits on primary and 1 hit on backup, got prim={← primHits.get} bak={← bakHits.get}"
+
+    -- 3. `GET /api/ai/proxy/health` reports all 7 cut streams (`5` fixtures + `2` failover cuts) as failed
+    --    under `errors.stream_incomplete`, and only the 1 complete backup stream as `ok`.
+    let nowSec ← coreEpochSec
+    let .ok adminUser ← createUserRecord r27Store "r27-admin" "r27-admin-pass-1234" "admin" none none "2026-11-17T00:00:00Z"
+      | throw (IO.userError "r27: createUserRecord failed")
+    let adminJwt := mintSessionTokenV2 r27Cfg.jwtSecret adminUser.id "admin" adminUser.sessionEpoch (nowSec + 3600)
+    let healthRaw := s!"GET /api/ai/proxy/health?window=24h HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {adminJwt}\r\n\r\n"
+    let .ok healthReq := parseRequest healthRaw.toUTF8 none
+      | throw (IO.userError "r27: parse health request failed")
+    let .ok healthResp ← dispatchCoreRequest foApp healthReq nowSec
+      | throw (IO.userError "r27: dispatch health request failed")
+    check (healthResp.status == 200) s!"r27: expected 200 from /api/ai/proxy/health, got {healthResp.status}"
+    let .ok healthJv := OrbBin.Json.parseBytes healthResp.body
+      | throw (IO.userError "r27: failed to parse /api/ai/proxy/health JSON")
+    let totals := healthJv.fieldOrNull "totals"
+    let totReqs := (totals.fieldNat? "requests").getD 0
+    let totOk := (totals.fieldNat? "ok").getD 0
+    let totFailed := (totals.fieldNat? "failed").getD 0
+    let streamIncCnt := ((totals.fieldOrNull "errors").fieldNat? "stream_incomplete").getD 0
+    check (totReqs == 8 && totOk == 1 && totFailed == 7 && streamIncCnt == 7)
+      s!"r27: /api/ai/proxy/health expected requests=8 ok=1 failed=7 stream_incomplete=7, got reqs={totReqs} ok={totOk} failed={totFailed} stream_incomplete={streamIncCnt}"
+  finally
+    closeCoreStore r27Store
+    discard <| (IO.FS.removeDirAll r27Root).toBaseIO
+
 end OrbCore.ProxyRoutingTests

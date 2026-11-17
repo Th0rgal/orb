@@ -7691,6 +7691,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     discard <| runHttpResponseWireTests
     OrbCore.ProviderContractTests.run
     OrbCore.ProxyRoutingTests.run
+    OrbCore.ProxyRoutingTests.r27_stream_cut_truth_fixtures_and_breaker
   catch e =>
     IO.eprintln s!"[orb-core-test] FAIL: {e}"
     return 1

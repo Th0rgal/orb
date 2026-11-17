@@ -2457,6 +2457,7 @@ def dispatchProviderAndAiRoute
     let errorKeyFor (status : String) (httpStatus : Nat) : String :=
       let s := status.trimAscii.toString
       if s == "timeout" || s == "stalled" || s == "empty_before_first_chunk" ||
+         s == "stream_incomplete" || s == "upstream_idle_timeout" || s == "idle_timeout" ||
          s.startsWith "client_error:" || s.startsWith "server_error:" then s
       else if httpStatus >= 400 && httpStatus < 500 then s!"client_error:{httpStatus}"
       else if httpStatus >= 500 then s!"server_error:{httpStatus}"

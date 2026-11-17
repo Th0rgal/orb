@@ -1,0 +1,57 @@
+{
+  "description": "Replay fixtures for R27 stream-cut truth: SSE streams after an HTTP 200 head that end without finish_reason, carry an error frame after [DONE] or mid-stream, or cut mid tool-call JSON must be recorded as stream_incomplete (never ok) and step orb_breaker_step.",
+  "cases": [
+    {
+      "id": "cut_before_content",
+      "description": "Stream opens with role delta or metadata and cuts before any content or finish_reason.",
+      "expected_status": "stream_incomplete",
+      "expected_breaker_reason": 4,
+      "chunks": [
+        "data: {\"id\":\"chatcmpl-cut-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n"
+      ],
+      "clean_framing": false
+    },
+    {
+      "id": "cut_mid_text",
+      "description": "Stream emits partial assistant text chunks and cuts without finish_reason or [DONE].",
+      "expected_status": "stream_incomplete",
+      "expected_breaker_reason": 4,
+      "chunks": [
+        "data: {\"id\":\"chatcmpl-cut-2\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Analyzing the \"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-cut-2\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"failure mode\"},\"finish_reason\":null}]}\n\n"
+      ],
+      "clean_framing": false
+    },
+    {
+      "id": "cut_mid_tool_call_json",
+      "description": "Stream starts a tool_calls arguments delta with truncated JSON and closes before finish_reason.",
+      "expected_status": "stream_incomplete",
+      "expected_breaker_reason": 4,
+      "chunks": [
+        "data: {\"id\":\"chatcmpl-cut-3\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"git status\"}}]},\"finish_reason\":null}]}\n\n"
+      ],
+      "clean_framing": true
+    },
+    {
+      "id": "cut_after_complete_tool_call",
+      "description": "Stream emits a complete tool-call arguments JSON object but ends without finish_reason or [DONE].",
+      "expected_status": "stream_incomplete",
+      "expected_breaker_reason": 4,
+      "chunks": [
+        "data: {\"id\":\"chatcmpl-cut-4\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}]},\"finish_reason\":null}]}\n\n"
+      ],
+      "clean_framing": true
+    },
+    {
+      "id": "done_then_error_frame",
+      "description": "Observed incident shape: [DONE] concatenated with or followed by an error SSE frame.",
+      "expected_status": "stream_incomplete",
+      "expected_breaker_reason": 4,
+      "chunks": [
+        "data: {\"id\":\"chatcmpl-cut-5\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+        "data: [DONE]data: {\"error\":{\"message\":\"upstream stream reset\",\"type\":\"server_error\"}}\n\n"
+      ],
+      "clean_framing": true
+    }
+  ]
+}
