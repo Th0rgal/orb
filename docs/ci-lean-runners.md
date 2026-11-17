@@ -19,19 +19,28 @@ these conditions hold:
 
 - Repository Actions variable `ORB_LEAN_RUNNERS` equals `true`.
 - `github.repository == 'Th0rgal/orb'`.
-- `github.ref == format('refs/heads/{0}', github.event.repository.default_branch)`.
-- The event is `push`, `schedule`, or `workflow_dispatch`.
-- For `workflow_dispatch`, the boolean input `use_lean_runners` is checked
-  (its default is false). The repository variable is still required.
+- And either:
+  - `github.ref == format('refs/heads/{0}', github.event.repository.default_branch)`,
+    the event is `push`, `schedule`, or `workflow_dispatch`, and for
+    `workflow_dispatch` the boolean input `use_lean_runners` is checked (its
+    default is false); or
+  - the event is `pull_request` and the pull request's head repository is
+    `Th0rgal/orb` itself (a branch of this repository, which only people with
+    write access can push). Fork pull requests and `pull_request_target` stay
+    on hosted runners. lean.ci enforces the same rule on its side: it admits a
+    pull request run only when its head repository id is the repository's, and
+    the runner is fenced to that one run (lean.ci #41).
 
 Test and Kernel ABI use `lean-32vcpu-ubuntu-2604`; other Linux jobs, including
 both plan jobs, use `lean-16vcpu-ubuntu-2604`. Exception: Orb browser, Orb
 performance and Docker image always run on hosted runners, because they need
 Docker (a `container:` image or `docker build`/`run`) and lean.ci guests have no
-Docker daemon (first lean.ci master run, 16 Nov). lean.ci guests also ship
+Docker daemon (first lean.ci master run, 16 Nov). Orb Desktop Shell also stays hosted: it builds the
+Linux desktop release binaries, which must link against Ubuntu 24.04 system
+libraries, and lean.ci guests are Ubuntu 26.04. lean.ci guests also ship
 without Rust: on a turbo-lean cache miss, `setup-turbo-lean` installs a pinned
-minimal Rust 1.99.1 through `rustup-init`. Pull requests, fork repositories,
-non-default branches, tags, other events, and unset/false variables preserve
+minimal Rust 1.99.1 through `rustup-init`. Fork pull requests, fork repositories,
+other non-default-branch events, tags, other events, and unset/false variables preserve
 each job's original hosted runner:
 
 | Workflow | Jobs | Hosted fallback |

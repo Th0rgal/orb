@@ -127,11 +127,13 @@ export default function Resources(props: {
   const [sankeyHeight, setSankeyHeight] = createSignal<number>(368);
   const [dagLaneWidth, setDagLaneWidth] = createSignal<number>(720);
   const [curveWidth, setCurveWidth] = createSignal<number>(920);
+  const [curveWidth2, setCurveWidth2] = createSignal<number>(460);
   const [wideFlows, setWideFlows] = createSignal(false);
 
   let cardMainEl: HTMLDivElement | undefined;
   let dagLaneEl: HTMLDivElement | undefined;
   let curveSvgEl: SVGSVGElement | undefined;
+  let curveSvgEl2: SVGSVGElement | undefined;
   let ro: ResizeObserver | undefined;
 
   const observedEls = new WeakSet<Element>();
@@ -179,11 +181,15 @@ export default function Resources(props: {
         if (entry.target === curveSvgEl) {
           setCurveWidth((prev) => (Math.abs(prev - w) >= 1 ? w : prev));
         }
+        if (entry.target === curveSvgEl2) {
+          setCurveWidth2((prev) => (Math.abs(prev - w) >= 1 ? w : prev));
+        }
       }
     });
     observeCardMainHeight(cardMainEl);
     observeWidth(dagLaneEl, (w) => setDagLaneWidth(w));
     observeWidth(curveSvgEl, (w) => setCurveWidth(w));
+    observeWidth(curveSvgEl2, (w) => setCurveWidth2(w));
     onCleanup(() => ro?.disconnect());
   });
 
@@ -285,9 +291,11 @@ export default function Resources(props: {
     const _mid = props.missionId;
     const _sub = submode();
     const _ld = loading();
+    const _dual = wideFlows();
     void _mid;
     void _sub;
     void _ld;
+    void _dual;
     queueMicrotask(() => {
       observeCardMainHeight(cardMainEl);
       observeWidth(dagLaneEl, (w) => {
@@ -297,6 +305,10 @@ export default function Resources(props: {
       observeWidth(curveSvgEl, (w) => {
         scrubRect = null;
         setCurveWidth((prev) => (Math.abs(prev - w) >= 1 ? w : prev));
+      });
+      observeWidth(curveSvgEl2, (w) => {
+        scrubRect = null;
+        setCurveWidth2((prev) => (Math.abs(prev - w) >= 1 ? w : prev));
       });
     });
   });
@@ -521,10 +533,9 @@ export default function Resources(props: {
   });
 
   // Synchronized bottom consumption curve geometry
-  const curveGeometry = createMemo(() => {
-    const l = lens();
+  const buildCurveGeometry = (l: ResourceLens, widthPx: number) => {
     const m = metric();
-    const w = Math.max(240, curveWidth());
+    const w = Math.max(240, widthPx);
     const h = 108;
     const padX = 8;
     const topY = 12;
@@ -720,7 +731,11 @@ export default function Resources(props: {
         };
       },
     };
-  });
+  };
+  /** Wide fleet view: one curve per flow, inference left and compute right. */
+  const dualCurves = () => wideFlows() && (!isMissionMode() || submode() === "flow");
+  const curveGeometry = createMemo(() => buildCurveGeometry(dualCurves() ? "inference" : lens(), curveWidth()));
+  const curveGeometry2 = createMemo(() => (dualCurves() ? buildCurveGeometry("compute", curveWidth2()) : null));
 
   function handleNodeClick(node: {
     id: string;
@@ -776,6 +791,166 @@ export default function Resources(props: {
       pendingScrubFrac = frac;
     }
   }
+
+  type CurveGeo = NonNullable<ReturnType<typeof buildCurveGeometry>>;
+  const renderCurveCard = (geo: () => CurveGeo | null, cardLens: () => ResourceLens, which: 0 | 1) => (
+      <div class="res-curve-card" data-testid={which === 0 ? "res-consumption-card" : "res-consumption-card-compute"}>
+        <div class="res-curve-head">
+          <div class="res-curve-head-left">
+            <span class="res-col-title">
+              Consumption · {metric() === "usd" ? "Est. USD / hour" : (cardLens() === "compute" ? "vCPU" : "B tok/h")}
+            </span>
+            <Show when={isMissionMode()}>
+              <div class="res-curve-controls">
+                <Show when={which === 0 && !dualCurves()}>{renderLensToggle(true)}</Show>
+                <Show when={which === 0}>{renderMetricToggle(true)}</Show>
+              </div>
+            </Show>
+          </div>
+          <div class="res-curve-legend">
+            <Show
+              when={hoverFrac() != null && geo()}
+              fallback={
+                <Show when={geo()}>
+                  {(cg) => (
+                    <>
+                      <span>
+                        Peak{" "}
+                        {formatResourceRate(cg().peak, cardLens(), metric(), true)}
+                      </span>
+                      <Show when={cg().projected}>
+                        <span>· Dashed = projected wave</span>
+                      </Show>
+                    </>
+                  )}
+                </Show>
+              }
+            >
+              {(_) => {
+                const sample = () => geo()!.valueAtFrac(hoverFrac()!);
+                return (
+                  <span>
+                    {sample().timeLabel} · <strong>{sample().valLabel}</strong>
+                  </span>
+                );
+              }}
+            </Show>
+          </div>
+        </div>
+
+        <Show
+          when={!loading() && geo()}
+          fallback={<div class="res-skel" style={{ height: "108px", width: "100%" }} />}
+        >
+          {(cg) => {
+            const accent = () =>
+              cardLens() === "compute" ? "var(--blue)" : "var(--purple)";
+            return (
+              <svg
+                ref={(el) => { if (which === 0) curveSvgEl = el; else curveSvgEl2 = el; }}
+                class="res-curve-svg"
+                viewBox={`0 0 ${cg().width} ${cg().height}`}
+                onMouseEnter={() => { scrubRect = null; }}
+                onMouseMove={(e) =>
+                  handlePointerScrub(e, e.currentTarget, cg().padX, cg().padX)
+                }
+                onMouseLeave={clearPointerScrub}
+              >
+                <defs>
+                  <linearGradient id={`resCurveGrad${which}`} x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color={accent()} stop-opacity="0.26" />
+                    <stop offset="100%" stop-color={accent()} stop-opacity="0.01" />
+                  </linearGradient>
+                </defs>
+
+                <line
+                  x1={cg().padX}
+                  y1={cg().baseY}
+                  x2={cg().width - cg().padX}
+                  y2={cg().baseY}
+                  stroke="var(--stroke-soft)"
+                  stroke-width="1"
+                />
+
+                <Show when={cg().observed.areaPath}>
+                  <path d={cg().observed.areaPath} fill={`url(#resCurveGrad${which})`} />
+                  <path
+                    d={cg().observed.linePath}
+                    fill="none"
+                    stroke={accent()}
+                    stroke-width="1.8"
+                  />
+                </Show>
+
+                <Show when={cg().projected}>
+                  {(proj) => (
+                    <path
+                      d={proj().linePath}
+                      fill="none"
+                      stroke={accent()}
+                      stroke-width="1.6"
+                      stroke-dasharray="5 4"
+                      opacity="0.75"
+                    />
+                  )}
+                </Show>
+
+                <Show when={cg().nowX}>
+                  {(nx) => (
+                    <line
+                      x1={nx()}
+                      y1={8}
+                      x2={nx()}
+                      y2={cg().baseY}
+                      stroke="var(--fg-3)"
+                      stroke-width="1"
+                      stroke-dasharray="3 3"
+                    />
+                  )}
+                </Show>
+
+                <Show when={hoverFrac()}>
+                  {(hf) => {
+                    const cx = () => cg().padX + hf() * cg().plotW;
+                    return (
+                      <line
+                        x1={cx()}
+                        y1={6}
+                        x2={cx()}
+                        y2={cg().baseY}
+                        stroke="var(--fg-strong)"
+                        stroke-opacity="0.5"
+                        stroke-width="1"
+                      />
+                    );
+                  }}
+                </Show>
+
+                <text
+                  x={cg().padX}
+                  y={cg().height - 4}
+                  font-family="var(--mono)"
+                  font-size="10"
+                  fill="var(--fg-3)"
+                >
+                  {cg().startLabel}
+                </text>
+                <text
+                  x={cg().width - cg().padX}
+                  y={cg().height - 4}
+                  text-anchor="end"
+                  font-family="var(--mono)"
+                  font-size="10"
+                  fill="var(--fg-3)"
+                >
+                  {cg().endLabel}
+                </text>
+              </svg>
+            );
+          }}
+        </Show>
+      </div>
+  );
 
   const rawUnitLabel = createMemo(() => (lens() === "compute" ? "vCPU" : "B tok/h"));
 
@@ -1543,176 +1718,10 @@ export default function Resources(props: {
         </Show>
       </div>
 
-      {/* Synchronized Consumption Curve Underneath */}
-      <div class="res-curve-card" data-testid="res-consumption-card">
-        <div class="res-curve-head">
-          <div class="res-curve-head-left">
-            <span class="res-col-title">
-              Consumption · {metric() === "usd" ? "Est. USD / hour" : rawUnitLabel()}
-            </span>
-            <Show when={wideFlows() && (!isMissionMode() || submode() === "flow")}>
-              <select
-                class="res-curve-lens"
-                aria-label="Consumption history"
-                value={lens()}
-                onChange={(event) => {
-                  setLens(event.currentTarget.value as ResourceLens);
-                  setIsolatedId(null);
-                }}
-              >
-                <option value="inference">Inference</option>
-                <option value="compute">Compute</option>
-              </select>
-            </Show>
-            <Show when={isMissionMode()}>
-              <div class="res-curve-controls">
-                <Show when={!wideFlows() || submode() === "dag"}>{renderLensToggle(true)}</Show>
-                {renderMetricToggle(true)}
-              </div>
-            </Show>
-          </div>
-          <div class="res-curve-legend">
-            <Show
-              when={hoverFrac() != null && curveGeometry()}
-              fallback={
-                <Show when={curveGeometry()}>
-                  {(cg) => (
-                    <>
-                      <span>
-                        Peak{" "}
-                        {formatResourceRate(cg().peak, lens(), metric(), true)}
-                      </span>
-                      <Show when={cg().projected}>
-                        <span>· Dashed = projected wave</span>
-                      </Show>
-                    </>
-                  )}
-                </Show>
-              }
-            >
-              {(_) => {
-                const sample = () => curveGeometry()!.valueAtFrac(hoverFrac()!);
-                return (
-                  <span>
-                    {sample().timeLabel} · <strong>{sample().valLabel}</strong>
-                  </span>
-                );
-              }}
-            </Show>
-          </div>
-        </div>
-
-        <Show
-          when={!loading() && curveGeometry()}
-          fallback={<div class="res-skel" style={{ height: "108px", width: "100%" }} />}
-        >
-          {(cg) => {
-            const accent = () =>
-              lens() === "compute" ? "var(--blue)" : "var(--purple)";
-            return (
-              <svg
-                ref={curveSvgEl}
-                class="res-curve-svg"
-                viewBox={`0 0 ${cg().width} ${cg().height}`}
-                onMouseEnter={() => { scrubRect = null; }}
-                onMouseMove={(e) =>
-                  handlePointerScrub(e, e.currentTarget, cg().padX, cg().padX)
-                }
-                onMouseLeave={clearPointerScrub}
-              >
-                <defs>
-                  <linearGradient id="resCurveGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stop-color={accent()} stop-opacity="0.26" />
-                    <stop offset="100%" stop-color={accent()} stop-opacity="0.01" />
-                  </linearGradient>
-                </defs>
-
-                <line
-                  x1={cg().padX}
-                  y1={cg().baseY}
-                  x2={cg().width - cg().padX}
-                  y2={cg().baseY}
-                  stroke="var(--stroke-soft)"
-                  stroke-width="1"
-                />
-
-                <Show when={cg().observed.areaPath}>
-                  <path d={cg().observed.areaPath} fill="url(#resCurveGrad)" />
-                  <path
-                    d={cg().observed.linePath}
-                    fill="none"
-                    stroke={accent()}
-                    stroke-width="1.8"
-                  />
-                </Show>
-
-                <Show when={cg().projected}>
-                  {(proj) => (
-                    <path
-                      d={proj().linePath}
-                      fill="none"
-                      stroke={accent()}
-                      stroke-width="1.6"
-                      stroke-dasharray="5 4"
-                      opacity="0.75"
-                    />
-                  )}
-                </Show>
-
-                <Show when={cg().nowX}>
-                  {(nx) => (
-                    <line
-                      x1={nx()}
-                      y1={8}
-                      x2={nx()}
-                      y2={cg().baseY}
-                      stroke="var(--fg-3)"
-                      stroke-width="1"
-                      stroke-dasharray="3 3"
-                    />
-                  )}
-                </Show>
-
-                <Show when={hoverFrac()}>
-                  {(hf) => {
-                    const cx = () => cg().padX + hf() * cg().plotW;
-                    return (
-                      <line
-                        x1={cx()}
-                        y1={6}
-                        x2={cx()}
-                        y2={cg().baseY}
-                        stroke="var(--fg-strong)"
-                        stroke-opacity="0.5"
-                        stroke-width="1"
-                      />
-                    );
-                  }}
-                </Show>
-
-                <text
-                  x={cg().padX}
-                  y={cg().height - 4}
-                  font-family="var(--mono)"
-                  font-size="10"
-                  fill="var(--fg-3)"
-                >
-                  {cg().startLabel}
-                </text>
-                <text
-                  x={cg().width - cg().padX}
-                  y={cg().height - 4}
-                  text-anchor="end"
-                  font-family="var(--mono)"
-                  font-size="10"
-                  fill="var(--fg-3)"
-                >
-                  {cg().endLabel}
-                </text>
-              </svg>
-            );
-          }}
-        </Show>
+      {/* Synchronized Consumption Curve Underneath: one per flow on wide screens */}
+      <div class="res-curve-row" classList={{ "is-dual": dualCurves() }}>
+        {renderCurveCard(curveGeometry, () => (dualCurves() ? "inference" : lens()), 0)}
+        <Show when={dualCurves()}>{renderCurveCard(curveGeometry2, () => "compute", 1)}</Show>
       </div>
 
       {/* Bottom-Anchored Timeline Bar */}

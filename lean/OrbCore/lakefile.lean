@@ -49,3 +49,7 @@ lean_exe «orb-managed-provider-test» where
 lean_exe «orb-spec-runner» where
   root := `OrbCore.SpecRunnerMain
   supportInterpreter := false
+
+lean_exe «r24-focused» where
+  root := `R24Focused
+  supportInterpreter := false

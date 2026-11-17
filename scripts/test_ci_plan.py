@@ -130,11 +130,14 @@ class RunnerSelectionTest(unittest.TestCase):
         "kernel-abi.yml": {"plan": "ubuntu-latest", "kernel-abi": "ubuntu-latest"},
     }
     # Jobs that need Docker (a `container:` image or `docker build`/`run`) stay
-    # on hosted runners: lean.ci guests have no Docker daemon.
-    HOSTED_ONLY = {"ci.yml": {"orb-browser", "orb-performance", "docker"}, "kernel-abi.yml": set()}
+    # on hosted runners: lean.ci guests have no Docker daemon. The desktop shell
+    # builds release binaries against Ubuntu 24.04 system libraries.
+    DOCKER_JOBS = {"ci.yml": {"orb-browser", "orb-performance", "docker"}, "kernel-abi.yml": set()}
+    HOSTED_ONLY = {"ci.yml": DOCKER_JOBS["ci.yml"] | {"orb-desktop-shell"}, "kernel-abi.yml": set()}
 
     def test_docker_jobs_are_hosted_only(self):
-        for workflow, hosted in self.HOSTED_ONLY.items():
+        self.assertEqual(self.HOSTED_ONLY["ci.yml"] - self.DOCKER_JOBS["ci.yml"], {"orb-desktop-shell"})
+        for workflow, hosted in self.DOCKER_JOBS.items():
             text = (ROOT / ".github/workflows" / workflow).read_text().split("\njobs:\n", 1)[1]
             blocks = dict(zip(*[iter(re.split(r"(?m)^  ([a-z0-9-]+):\n", text)[1:])] * 2))
             for job, body in blocks.items():
@@ -151,22 +154,30 @@ class RunnerSelectionTest(unittest.TestCase):
                 self.assertEqual(runners["orb-macos-shell"], "macos-26")
             else:
                 self.assertEqual(runners["kernel-ok"], "ubuntu-latest")
-            for variable, repo, branch, event, manual in itertools.product(
+            for variable, repo, branch, event, manual, head in itertools.product(
                 ("", "false", "true", "typo"),
                 ("Th0rgal/orb", "someone/orb"),
                 ("refs/heads/master", "refs/heads/feature", "refs/tags/v1", "refs/pull/1/merge"),
                 ("push", "schedule", "workflow_dispatch", "pull_request", "pull_request_target"),
                 (False, True),
+                ("same", "fork"),
             ):
+                head_repo = repo if head == "same" else "attacker/orb"
                 context = {
                     "vars.ORB_LEAN_RUNNERS": variable, "github.repository": repo,
                     "github.ref": branch, "github.event.repository.default_branch": "master",
                     "github.event_name": event, "inputs.use_lean_runners": manual,
+                    "github.event.pull_request.head.repo.full_name": head_repo,
                 }
-                enabled = (variable == "true" and repo == "Th0rgal/orb"
-                           and branch == "refs/heads/master"
+                # Default-branch pushes, schedules and opted-in dispatches, and pull
+                # requests from a branch of this repository (never forks, never
+                # pull_request_target).
+                trusted = (branch == "refs/heads/master"
                            and event in {"push", "schedule", "workflow_dispatch"}
                            and (event != "workflow_dispatch" or manual))
+                same_repo_pr = event == "pull_request" and head == "same"
+                enabled = (variable == "true" and repo == "Th0rgal/orb"
+                           and (trusted or same_repo_pr))
                 for job, fallback in fallbacks.items():
                     size = 32 if job in {"test", "kernel-abi"} else 16
                     routed = enabled and job not in self.HOSTED_ONLY[workflow]
@@ -183,6 +194,7 @@ class RunnerSelectionTest(unittest.TestCase):
                     "github.ref": f"refs/heads/{branch}",
                     "github.event.repository.default_branch": "main",
                     "github.event_name": "push", "inputs.use_lean_runners": False,
+                    "github.event.pull_request.head.repo.full_name": "",
                 }
                 for job, fallback in fallbacks.items():
                     selected = runner_for(runners[job], context)
