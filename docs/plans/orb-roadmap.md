@@ -345,6 +345,7 @@ Only these. Each one names what it unblocks.
 | The five Antigravity logins disabled on 16 Nov stay disabled; `antigravity` entries stay out of `builtin/smart`, `builtin/fast`, `genius` and `google-sonnet` (R26) | Thomas, 16 Nov |
 | Canonical Core URL is `https://orbcore.thomas.md` | Thomas, 15 Nov |
 | Master on `builtin/genius`; until R27 and R28 are deployed, workers that run long turns (implementation, integration, coordination) use `openai/gpt-6-astra`, and `builtin/smart` is used only for short read-only checks; spawned sparingly | Thomas, 17 Nov (replaces 15 Nov "workers on `builtin/smart`") |
+| Roadmap workers start on the first model that is not cooling down, in order `openai/gpt-6-astra`, `anthropic/claude-fable-5-2`, `ethereumfoundation/deepseek-v4.1-flash` (both of the first two were out of quota for most of 17 Nov afternoon) | Thomas, 17 Nov |
 | Workers push often; milestone PRs get an independent review; merges need no approval | Thomas, 15 Nov |
 | Green before merge again (CI is fast enough since #1786) | this file |
 | Managed VMs hold no credentials; the integrator pushes for them | 13 Nov |

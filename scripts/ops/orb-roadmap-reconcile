@@ -20,7 +20,8 @@ Config (environment, see deploy/systemd/orb-roadmap-reconcile.service):
   ORB_ROADMAP_STATE        nudge ledger (default /var/lib/orb-roadmap/state.json)
   ORB_ROADMAP_MAX_WORKERS  live workers at once (default 3)
   ORB_ROADMAP_MODELS       worker models, one per attempt, comma-separated
-                           (default openai/gpt-6-astra,anthropic/claude-fable-5-2)
+                           (default openai/gpt-6-astra,anthropic/claude-fable-5-2,
+                           ethereumfoundation/deepseek-v4.1-flash)
   ORB_ROADMAP_INBOX_MISSION mission whose transcript receives decision requests
   ORB_ROADMAP_DRY_RUN=1    print the plan, change nothing
   ORB_ROADMAP_FILE         read the roadmap from this file instead of master
@@ -35,7 +36,7 @@ STATE = ENV("ORB_ROADMAP_STATE", "/var/lib/orb-roadmap/state.json")
 MISSIONS_DB = ENV("ORB_ROADMAP_MISSIONS_DB", "/root/.sandboxed-sh/missions/missions-prod.db")
 MAX_WORKERS = int(ENV("ORB_ROADMAP_MAX_WORKERS", "3"))
 MODELS = [m.strip() for m in ENV("ORB_ROADMAP_MODELS",
-          "openai/gpt-6-astra,anthropic/claude-fable-5-2").split(",") if m.strip()]
+          "openai/gpt-6-astra,anthropic/claude-fable-5-2,ethereumfoundation/deepseek-v4.1-flash").split(",") if m.strip()]
 IDLE_SECONDS = 15 * 60          # an idle worker is nudged after this long
 FOREIGN_PR_SECONDS = 60 * 60    # an open PR touched this recently has an owner elsewhere
 MAX_ATTEMPTS = 2                # missions per row before a human decides
