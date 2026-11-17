@@ -275,7 +275,7 @@ def buildMissionTranscriptBody (st : DesktopState) (mainW bodyH : SubPx)
     (_runs : ShapedScreenRuns) : WidgetNode :=
   let theme := st.theme
   let pal := theme.palette
-  let colW : SubPx := min (pxToSub 748) (mainW - pxToSub 68)
+  let colW : SubPx := min (pxToSub 748) (mainW - pxToSub 48)
   let turn58 := buildReferenceTurnWidget theme colW 58
   let turn59 := buildReferenceTurnWidget theme colW 59
   let workingRow : WidgetNode :=
@@ -327,7 +327,7 @@ def buildSplitDiffRightPane (theme : Theme) (paneW paneH : SubPx) : WidgetNode :
       [ WidgetNode.rrect
           (BoxStyle.row 0 |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 10) 0) |>.withFixedSize (pxToSub 158) (pxToSub 26))
           pal.elevatedSurface (CornerRadii.uniform (pxToSub 6)) (BorderStyle.uniform bdr pal.border)
-          [screenTextLine theme (pxToSub 136) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textPrimary "All changes"]
+          [screenTextLine theme (pxToSub 136) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textPrimary "Working tree vs HEAD"]
       , WidgetNode.rrect
           (BoxStyle.row 0 |>.withAlign .center |>.withFixedSize (pxToSub 100) (pxToSub 25))
           0x00000000 (CornerRadii.uniform (pxToSub 6)) (BorderStyle.uniform bdr pal.border)
@@ -374,13 +374,13 @@ def buildSplitDiffRightPane (theme : Theme) (paneW paneH : SubPx) : WidgetNode :
           [screenTextLine theme (pxToSub 28) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textMuted lnL 400 true]
       , WidgetNode.rrect (BoxStyle.row 0 |>.withPadding (Edges.xy (pxToSub 6) 0) |>.withFixedSize halfW h)
           bgL CornerRadii.zero { widths := Edges.trbl 0 bdr 0 0, color := pal.borderSubtle }
-          [screenTextLine theme (halfW - pxToSub 12) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textPrimary codeL 400 true]
+            [screenTextLine theme (halfW - pxToSub 12) h (pxToSub 12) (pxToSub 17) pal.textPrimary codeL 400 true]
       , WidgetNode.rrect (BoxStyle.row 0 |>.withPadding (Edges.xy (pxToSub 6) 0) |>.withFixedSize (pxToSub 40) h)
           bgR CornerRadii.zero BorderStyle.none
           [screenTextLine theme (pxToSub 28) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textMuted lnR 400 true]
       , WidgetNode.rrect (BoxStyle.row 0 |>.withPadding (Edges.xy (pxToSub 6) 0) |>.withFixedSize halfW h)
           bgR CornerRadii.zero BorderStyle.none
-          [screenTextLine theme (halfW - pxToSub 12) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textPrimary codeR 400 true]
+            [screenTextLine theme (halfW - pxToSub 12) h (pxToSub 12) (pxToSub 17) pal.textPrimary codeR 400 true]
       ]
 
   let diffCard : WidgetNode :=
@@ -411,7 +411,7 @@ def buildSplitDiffRightPane (theme : Theme) (paneW paneH : SubPx) : WidgetNode :
           [screenTextLine theme (cardInnerW - pxToSub 20) (pxToSub 16) (pxToSub 11) (pxToSub 16) pal.textSecondary
             "@@ -120,3 +120,3 @@ def renderDesktopFrame" 400 true]
       , splitRow (pxToSub 17) 0x00000000 0x00000000 "120" "let availW := viewport.w" "120" "let availW := viewport.w"
-      , splitRow (pxToSub 52) delRowBg addRowBg "121" "-  webkit_web_view_load_uri(wv," "121" "+  buildDesktopScreen st availW"
+      , splitRow (pxToSub 52) delRowBg addRowBg "121" "-  webkit_web_view_load_uri(wv, orb_dev_url);" "121" "+  buildDesktopScreen st availW availH shapedRuns"
       , splitRow (pxToSub 18) 0x00000000 0x00000000 "122" "let availH := viewport.h" "122" "let availH := viewport.h"
       ]
 
