@@ -18,13 +18,15 @@ start (missions are recognised by track "roadmap-<row id>").
 
 Config (environment, see deploy/systemd/orb-roadmap-reconcile.service):
   ORB_ROADMAP_STATE        nudge ledger (default /var/lib/orb-roadmap/state.json)
-  ORB_ROADMAP_NODES        nodes workers are spread over (default uruk,babylon,nippur,ashur)
-  ORB_ROADMAP_MODELS       worker models in order of preference, comma-separated
+  ORB_ROADMAP_NODES        nodes workers are spread over (default ashur,dgx-spark: the
+                           nodes with a checkout and the development identity)
+  ORB_ROADMAP_MODELS       worker models, one per attempt, comma-separated
                            (default openai/gpt-6.2-astra,openai/gpt-6.2-sol,
                            anthropic/claude-fable-5-2,ethereumfoundation/deepseek-v4.1-flash)
   ORB_ROADMAP_INBOX_MISSION mission whose transcript receives decision requests
   ORB_ROADMAP_DRY_RUN=1    print the plan, change nothing
   ORB_ROADMAP_FILE         read the roadmap from this file instead of master
+  ORB_ROADMAP_SINCE        ISO time; ended attempts started earlier are forgotten
 """
 import calendar, json, os, re, sqlite3, sys, time, urllib.request
 
@@ -34,8 +36,10 @@ ROADMAP_PATH = "docs/plans/orb-roadmap.md"
 CORE = ENV("ORB_ROADMAP_CORE", "http://127.0.0.1:3000")
 STATE = ENV("ORB_ROADMAP_STATE", "/var/lib/orb-roadmap/state.json")
 MISSIONS_DB = ENV("ORB_ROADMAP_MISSIONS_DB", "/root/.sandboxed-sh/missions/missions-prod.db")
-# Workers are spread over these nodes by queue position; "auto" put all of them on one host.
-NODES = [n.strip() for n in ENV("ORB_ROADMAP_NODES", "uruk,babylon,nippur,ashur").split(",") if n.strip()]
+# Workers are spread over these nodes by queue position. Only nodes with a repository
+# checkout and the development identity (gh) qualify: on 17 Nov workers placed on
+# uruk, babylon and nippur ended at once with "gh is unauthenticated".
+NODES = [n.strip() for n in ENV("ORB_ROADMAP_NODES", "ashur,dgx-spark").split(",") if n.strip()]
 MODELS = [m.strip() for m in ENV("ORB_ROADMAP_MODELS",
           "openai/gpt-6.2-astra,openai/gpt-6.2-sol,anthropic/claude-fable-5-2,"
           "ethereumfoundation/deepseek-v4.1-flash").split(",") if m.strip()]
@@ -44,6 +48,15 @@ FOREIGN_PR_SECONDS = 60 * 60    # an open PR touched this recently has an owner 
 MAX_ATTEMPTS = 2                # missions per row before a human decides
 QUICK_DEATH_SECONDS = 5 * 60    # a worker that ended this fast is replaced, not nudged
 MASTER_WINDOW_SECONDS = 24 * 3600  # master-fix attempts older than this are forgotten
+# Attempts started before this time are forgotten (set after a placement or
+# credential fault that made every worker fail through no fault of its row).
+SINCE = ENV("ORB_ROADMAP_SINCE", "")
+# When set, the reconciler does not start workers itself: the master mission
+# (the orchestrator) starts them as its own children, and the reconciler is its
+# heartbeat. It resumes the master with the work to do whenever a row is ready
+# without a worker, a worker needs a nudge, or the master has been idle too long.
+MASTER = ENV("ORB_ROADMAP_MASTER", "").strip()
+MASTER_HEARTBEAT_SECONDS = int(ENV("ORB_ROADMAP_MASTER_HEARTBEAT", "3600"))
 LIVE = {"pending", "active"}
 ROW_ID = r"[A-Z]\d+[a-z]?"
 MASTER_FIX = "MASTER"
@@ -107,19 +120,26 @@ def is_done(row, prs):
 
 def plan(rows, queue, prs, missions, master_green, ledger, now, parked=None):
     """Return the list of actions for this run. Pure: no I/O."""
-    by_row = {}
+    by_row, total = {}, {}
     for m in missions:
+        rid0 = re.sub(r"-\d+$", "", m["track"][len("roadmap-"):])
+        total[rid0] = total.get(rid0, 0) + 1
         # Attempt n > 1 runs on track roadmap-<id>-<n>: a dead worker keeps its
         # track's writer lease, so a replacement on the same track is refused.
         rid = re.sub(r"-\d+$", "", m["track"][len("roadmap-"):])
         if rid == MASTER_FIX and now - m["created_ts"] > MASTER_WINDOW_SECONDS:
+            continue
+        if SINCE and m["created_at"] < SINCE and m["status"] not in LIVE:
             continue
         if rid == MASTER_FIX or re.fullmatch(ROW_ID, rid):
             by_row.setdefault(rid, []).append(m)
     for ms in by_row.values():
         ms.sort(key=lambda m: m["created_at"])
     def quick(m):
-        return m["status"] not in LIVE and m["updated_ts"] - m["created_ts"] < QUICK_DEATH_SECONDS
+        # A provider refusal ends the turn as interrupted/cancelled; a worker that
+        # completes its turn quickly (say, "BLOCKED: ...") did run and costs an attempt.
+        return (m["status"] not in LIVE and m["status"] != "completed"
+                and m["updated_ts"] - m["created_ts"] < QUICK_DEATH_SECONDS)
     # Deaths at start are provider cooldowns, not the row's fault: they cost no
     # attempt, and two of them in 15 minutes pause dispatch until the next run.
     recent = [m for ms in by_row.values() for m in ms if quick(m) and now - m["updated_ts"] < 3 * 3600]
@@ -166,17 +186,40 @@ def plan(rows, queue, prs, missions, master_green, ledger, now, parked=None):
             foreign = [p for p in open_prs if now - p["updated_ts"] < FOREIGN_PR_SECONDS]
             if foreign:
                 continue  # someone else is driving that PR right now
-            actions.append(("start", rid, 1, model))
+            actions.append(("start", rid, total.get(rid, 0) + 1, model))
             continue
         if now - latest["updated_ts"] < IDLE_SECONDS:
             continue
         if not quick(latest) and ledger.get("nudged", {}).get(latest["id"]) is None:
             actions.append(("nudge", rid, latest["id"]))
         elif attempts < MAX_ATTEMPTS:
-            actions.append(("start", rid, len(ms) + 1, model))
+            actions.append(("start", rid, total.get(rid, 0) + 1, model))
         elif ledger.get("reported", {}).get(rid) != latest["id"]:
             actions.append(("escalate", rid, latest["id"]))
     return actions
+
+
+def master_tick(actions, rows, prs, now, master, heartbeat_due):
+    """One resume message for the orchestrator, or None when nothing calls for it."""
+    starts = [a for a in actions if a[0] == "start"]
+    if master is None or master["status"] in LIVE or not (starts or heartbeat_due):
+        return None
+    lines = ["Roadmap tick from orb-roadmap-reconcile (the heartbeat; you are the orchestrator)."]
+    for _, rid, attempt, model, *_ in starts:
+        row = rows.get(rid, {"node": "Master CI is red: make it green.", "done_when": "The latest master CI run passes"})
+        open_prs = ", ".join(f"#{p['number']}" for p in prs.get(rid, {}).get("open", [])) or "none"
+        track = f"roadmap-{rid}" if attempt == 1 else f"roadmap-{rid}-{attempt}"
+        lines.append(f"- START row {rid} now as YOUR child mission: start_mission with track "
+                     f"\"{track}\", "
+                     f"model_override \"{model}\", project \"now\", remote_node_id on ashur or dgx-spark "
+                     f"(nodes with a checkout and gh identity), the row text and done-when below, "
+                     f"PR title ending \"({rid})\", worker merges its own PR on green CI. Open PRs: {open_prs}.\n"
+                     f"  Row: {row['node'][:600]}\n  Done when: {row['done_when'][:300]}")
+    if not starts:
+        lines.append("- No row is waiting for a worker. Review your children and open PRs: merge what is green, "
+                     "unblock or replace stuck children, keep the queue (roadmap section 7) ordered and full.")
+    lines.append("Do these now, write your board, then end the turn; the heartbeat wakes you again.")
+    return "\n".join(lines)
 
 
 def brief(row, attempt, open_prs):
@@ -281,6 +324,12 @@ def core_post(path, body):
     return http_json(CORE + path, body, {"Authorization": "Bearer " + core_token()})
 
 
+def fetch_mission(mid):
+    con = sqlite3.connect(f"file:{MISSIONS_DB}?mode=ro", uri=True, timeout=10)
+    r = con.execute("SELECT id, status, updated_at FROM missions WHERE id=?", (mid,)).fetchone()
+    return {"id": r[0], "status": r[1], "updated_ts": iso_ts(r[2])} if r else None
+
+
 def fetch_parked():
     """{provider: parked-until epoch} for providers whose every account is parked."""
     req = urllib.request.Request(CORE + "/api/model-routing/health",
@@ -322,6 +371,13 @@ def main():
         print(f"routing health unavailable: {type(exc).__name__}: {exc}", file=sys.stderr)
         parked = {}
     actions = plan(rows, queue, prs, missions, master_green, ledger, now, parked)
+    if MASTER:
+        master = fetch_mission(MASTER)
+        heartbeat_due = master is not None and now - master["updated_ts"] > MASTER_HEARTBEAT_SECONDS
+        tick = master_tick(actions, rows, prs, now, master, heartbeat_due)
+        actions = [a for a in actions if a[0] != "start"]  # the master starts workers, not us
+        if tick:
+            actions.append(("tick", "master", MASTER, tick))
     print(f"master {'green' if master_green else 'RED'}; queue {queue}; "
           f"live {[m['track'] for m in missions if m['status'] in LIVE]}; actions {actions}")
     if dry:
@@ -336,6 +392,9 @@ def main():
                 node = NODES[queue.index(rid) % len(NODES)] if NODES and rid in queue else "auto"
                 r = start_worker(row, arg, open_prs, rest[0], node)
                 print(f"started {rid} attempt {arg} on {rest[0]}: {r.get('id') or r.get('mission_id')}")
+            elif kind == "tick":
+                core_post(f"/api/control/missions/{arg}/resume", {"content": rest[0]})
+                print(f"resumed the master ({arg}) with {rest[0].count('- START')} row(s) to start")
             elif kind == "nudge":
                 core_post(f"/api/control/missions/{arg}/resume", {"content": nudge_text(open_prs)})
                 ledger.setdefault("nudged", {})[arg] = int(now)
