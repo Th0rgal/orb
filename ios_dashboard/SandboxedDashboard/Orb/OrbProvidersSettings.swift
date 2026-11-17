@@ -85,6 +85,7 @@ struct OrbProvidersSettings: View {
     @State private var client = OrbSettingsClient()
     @State private var providers: [OrbJSON] = []
     @State private var usage: OrbJSON = .null
+    @State private var health: [String: OrbJSON] = [:]
     @State private var error = ""
     @State private var usageError = ""
     @State private var loading = false
@@ -255,6 +256,17 @@ struct OrbProvidersSettings: View {
                             .disabled(!ready || busy)
                         }
                         if !detail["error"].text.isEmpty { Text(detail["error"].text).font(.caption).foregroundStyle(.orange) }
+                        let providerHealth = health[provider["id"].text]
+                        if let ph = providerHealth, ph["account_state"].text == "disabled_by_provider" {
+                            let message = ph["disabled_by_provider_message"].text
+                            Text(message.isEmpty
+                                ? "The provider disabled this account. Ask the provider to restore it, then clear the disabled state."
+                                : message)
+                                .font(.caption).foregroundStyle(OrbStyle.error)
+                        } else if providerHealth?["account_state"].text == "disabled" {
+                            Text("This login is disabled in CLIProxyAPI. Re-enable the Core provider to restore it.")
+                                .font(.caption).foregroundStyle(.orange)
+                        }
                         let manages = Self.canManageProvider(provider, isAdmin: isAdmin)
                         let unverified = detail["status"].text == "needs_verification"
                         if unverified && manages {
@@ -307,7 +319,7 @@ struct OrbProvidersSettings: View {
                                     .lineLimit(1)
                                 Text(status(provider, accountHint: parsed.account))
                                     .font(.caption)
-                                    .foregroundStyle(quotaStatus(provider)?.level.color ?? .secondary)
+                                    .foregroundStyle(statusColor(provider))
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                             }
@@ -431,11 +443,24 @@ struct OrbProvidersSettings: View {
         return (raw.isEmpty ? p["provider_type"].text : raw, explicitEmail)
     }
 
+    /// Terminal provider-side disable (Google TOS_VIOLATION and equivalent account bans).
+    private func disabledState(_ p: OrbJSON) -> String {
+        health[p["id"].text]?["account_state"].text ?? ""
+    }
+    private func statusColor(_ p: OrbJSON) -> Color {
+        if ["disabled_by_provider", "disabled"].contains(disabledState(p)) { return OrbStyle.error }
+        return quotaStatus(p)?.level.color ?? .secondary
+    }
     private func status(_ p: OrbJSON, accountHint: String = "") -> String {
         let detail = usage[p["id"].text]
         let state: String
         var showResetBadge = false
-        if !Self.isEffectiveEnabled(p) {
+        let healthState = disabledState(p)
+        if healthState == "disabled_by_provider" {
+            state = "Disabled by provider"
+        } else if healthState == "disabled" {
+            state = "Disabled"
+        } else if !Self.isEffectiveEnabled(p) {
             if p["globally_enabled"] == .bool(false) { state = "Disabled by admin" }
             else if p["user_enabled"] == .bool(false) { state = "Skipped for your missions" }
             else { state = "Disabled" }
@@ -474,6 +499,7 @@ struct OrbProvidersSettings: View {
         loading = true
         async let providersReq = client.call("/api/ai/providers")
         async let usageReq = client.call("/api/ai/providers/usage")
+        async let healthReq = client.call("/api/model-routing/health")
         do {
             let response = try await providersReq
             providers = response["providers"] == .null ? response.items : response["providers"].items
@@ -493,6 +519,16 @@ struct OrbProvidersSettings: View {
         do {
             let bulkEntries = try await usageReq["entries"]
             usage = bulkEntries
+            if let rows = try? await healthReq.items {
+                var byProvider: [String: OrbJSON] = [:]
+                for row in rows {
+                    let pid = row["provider_id"].text.isEmpty ? row["account_id"].text : row["provider_id"].text
+                    if !pid.isEmpty { byProvider[pid] = row }
+                    let aid = row["account_id"].text
+                    if !aid.isEmpty { byProvider[aid] = row }
+                }
+                health = byProvider
+            }
             usageError = ""
             loading = false
             var entries: [String: OrbJSON] = {
@@ -1045,6 +1081,7 @@ struct OrbCloudAccountsSettings: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var accounts: [OrbJSON] = []
     @State private var usage: OrbJSON = .null
+    @State private var health: [String: OrbJSON] = [:]
     @State private var error = ""
     @State private var loaded = false
     private let dashboards = ["cursor_cloud": "https://cursor.com/dashboard/usage", "grok_bot": "https://grok.com/"]

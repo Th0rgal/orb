@@ -50,7 +50,7 @@ export type GroupChip = {
 
 export type ProviderGroupSummary = {
   count: number;
-  /** Worst first: sign-in, verification, credit, error, limit reached, near limit, disabled. */
+  /** Worst first: sign-in, verification, provider disability, credit, error, limit reached, near limit, disabled. */
   parts: GroupStatusPart[];
   /** "4 accounts · 1 limit reached · 2 near limit". */
   text: string;
@@ -62,6 +62,7 @@ export type ProviderGroupSummary = {
 const BUCKETS: { statuses: string[]; one: string; many: string; tone: GroupTone; attention?: boolean }[] = [
   { statuses: ["needs_reauth", "needs_auth", "auth_failed"], one: "needs sign-in", many: "need sign-in", tone: "attention", attention: true },
   { statuses: ["needs_verification"], one: "needs verification", many: "need verification", tone: "attention", attention: true },
+  { statuses: ["disabled_by_provider"], one: "disabled by provider", many: "disabled by provider", tone: "attention", attention: true },
   { statuses: ["out_of_credit"], one: "out of credit", many: "out of credit", tone: "exhausted", attention: true },
   { statuses: ["error"], one: "error", many: "errors", tone: "attention", attention: true },
   { statuses: ["quota_exhausted", "pool_exhausted"], one: "limit reached", many: "limit reached", tone: "exhausted" },

@@ -163,7 +163,7 @@ struct OrbRoutingSettings: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
-            if let cooldown = h["cooldown_remaining_secs"].number, cooldown > 0 {
+            if h["disabled_by_provider"].flag || (h["cooldown_remaining_secs"].number ?? 0) > 0 {
                 Button("Clear") {
                     Task { await run { _ = try await client.call("/api/model-routing/health/\(OrbCore.escape(h["account_id"].text))/clear", method: "POST") } }
                 }
@@ -202,6 +202,11 @@ struct OrbRoutingSettings: View {
         if let latency = h["avg_latency_ms"].number { parts.append("\(Int(latency)) ms") }
         if let cooldown = h["cooldown_remaining_secs"].number, cooldown > 0 {
             parts.append("cooldown \(OrbActivityCompaction.formatCooldown(Int(cooldown)))")
+        }
+        if h["disabled_by_provider"].flag {
+            parts.append("disabled by provider")
+            let message = h["disabled_by_provider_message"].text
+            if !message.isEmpty { parts.append(message) }
         }
         if !h["last_failure_reason"].text.isEmpty { parts.append(h["last_failure_reason"].text) }
         return parts.joined(separator: " · ")

@@ -129,6 +129,9 @@ it("identifies the Mistral monthly allowance without fabricating an API percenta
   expect(effectiveProviderStatus(mistral, {provider_type:'mistral'})).toBe('connected');
 });
 it("shows router circuit-breaker state instead of Connected", async () => {
+  expect(effectiveProviderStatus(account("ben"), usage(10), { account_state: "disabled_by_provider", disabled_by_provider: true } as never)).toBe("disabled_by_provider");
+  expect(effectiveProviderStatus(account("ben"), { ...usage(10), status: "needs_verification" }, { account_state: "disabled_by_provider" } as never)).toBe("disabled_by_provider");
+  expect(effectiveProviderStatus(account("ben"), usage(10), { account_state: "disabled" } as never)).toBe("disabled");
   expect(effectiveProviderStatus(account("ben"), usage(10), { account_state: "out_of_credit" } as never)).toBe("out_of_credit");
   expect(effectiveProviderStatus(account("ben"), usage(10), { account_state: "auth_failed" } as never)).toBe("auth_failed");
   expect(effectiveProviderStatus(account("ben"), usage(10), { account_state: "available" } as never)).toBe("connected");

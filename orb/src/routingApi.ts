@@ -93,8 +93,13 @@ export interface AccountHealthSnapshot {
   total_output_tokens?: number;
   is_degraded?: boolean;
   rate_limit_snapshot?: RateLimitSnapshot | null;
-  /** available, out_of_credit, auth_failed, quota_exhausted, rate_limited or cooldown (older cores omit it). */
-  account_state?: "available" | "out_of_credit" | "auth_failed" | "quota_exhausted" | "rate_limited" | "cooldown";
+  /** available, out_of_credit, auth_failed, quota_exhausted, rate_limited, cooldown,
+   *  disabled or disabled_by_provider (older cores omit it). */
+  account_state?: "available" | "out_of_credit" | "auth_failed" | "quota_exhausted" | "rate_limited" | "cooldown" | "disabled" | "disabled_by_provider";
+  /** Provider-side terminal disable (Google TOS_VIOLATION and equivalent account bans). */
+  disabled?: boolean;
+  disabled_by_provider?: boolean;
+  disabled_by_provider_message?: string | null;
   /** When the circuit breaker lets the next probe request through. */
   next_probe_at?: string | null;
 }

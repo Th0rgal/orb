@@ -761,6 +761,8 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
               <For each={health()}>
                 {(h) => {
                   const cooldown = () => h.cooldown_remaining_secs ?? h.cooldown_secs_remaining;
+                  const disabledByProvider = () => h.disabled_by_provider === true;
+                  const disabled = () => disabledByProvider() || h.account_state === "disabled";
                   return (
                   <details
                     class="s-card routing-health"
@@ -779,9 +781,13 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
                       <strong>{accountName(h.account_id)}</strong>
                       <span>{h.provider_id || h.account_id.slice(0, 8)}</span>
                       <span
-                        class={`routing-status ${cooldown() ? "bad" : h.is_degraded ? "warn" : h.total_requests && h.is_healthy ? "good" : ""}`}
+                        class={`routing-status ${cooldown() || disabled() ? "bad" : h.is_degraded ? "warn" : h.total_requests && h.is_healthy ? "good" : ""}`}
                       >
-                        {cooldown()
+                        {disabledByProvider()
+                          ? "Disabled by provider"
+                          : h.account_state === "disabled"
+                            ? "Disabled"
+                          : cooldown()
                           ? `Cooldown · ${Math.ceil(cooldown()!)}s`
                           : h.is_degraded
                             ? "Degraded"
@@ -804,6 +810,9 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
                       </span>
                     </summary>
                     <div class="routing-result">
+                      <Show when={disabledByProvider()}>
+                        <p class="inline-error">{h.disabled_by_provider_message || "The provider disabled this account."}</p>
+                      </Show>
                       <p>Account: {h.account_id}</p>
                       <p>
                         Last failure: {h.last_failure_reason || "None"} ·{" "}
@@ -842,8 +851,9 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
                       </Show>
                       <Show
                         when={
-                          cooldown() != null &&
-                          cooldown()! > 0
+                          disabled() ||
+                          (cooldown() != null &&
+                          cooldown()! > 0)
                         }
                       >
                         <button
@@ -853,7 +863,7 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
                             void action(() => R.clearCooldown(h.account_id))
                           }
                         >
-                          Clear cooldown
+                          {disabled() ? "Clear disabled state" : "Clear cooldown"}
                         </button>
                       </Show>
                     </div>
