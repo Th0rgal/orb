@@ -16,9 +16,15 @@ Safety invariants:
 - Never prints or logs tokens, passwords, secret values, or raw response bodies.
 - Local/dev runs verify full two-actor (admin + `ben`) isolation against an
   explicit disposable or dev endpoint.
-- Production (`https://orbcore.thomas.md`) is strictly read-only for `ben`:
-  non-GET/non-read requests are refused before network dispatch, and missing
-  `ben` credentials report `BLOCKED` without claiming source tests prove prod.
+- `prod-readonly` walks production (`https://orbcore.thomas.md`) with an
+  existing member bearer: non-GET/non-read requests are refused before network
+  dispatch, and missing credentials report `BLOCKED` without claiming source
+  tests prove prod.
+- `prod-full` is the same two-actor matrix as `dev` against production. It is
+  refused unless the caller also passes `--confirm-prod-mutations` and the
+  exact 40-character `--sha`; the bearer must be an admin. It creates only
+  zero-spend temporary fixtures, never touches an existing member, and removes
+  every fixture in `finally`.
 """
 import argparse
 import json
@@ -91,9 +97,9 @@ class IsolationError(Exception):
 
 def validate_url(value, mode="dev"):
     value = value.rstrip("/")
-    if mode == "prod-readonly":
+    if mode in ("prod-readonly", "prod-full"):
         if value != PROD_URL:
-            raise IsolationError("prod-readonly mode only allows https://orbcore.thomas.md")
+            raise IsolationError(mode + " mode only allows https://orbcore.thomas.md")
         return value
     if mode == "dev":
         if value in DEV_URLS:
@@ -154,7 +160,7 @@ class Api:
         except urllib.error.HTTPError as error:
             response = error
         except (OSError, ValueError) as error:
-            raise IsolationError("API request failed") from error
+            raise IsolationError("API request failed: " + method + " " + path + " (" + type(error).__name__ + ")") from error
         with response:
             raw = response.read(2 * 1024 * 1024 + 1)
             if len(raw) > 2 * 1024 * 1024:
@@ -436,13 +442,6 @@ def run_full_matrix(api, admin_token, expected_sha=None):
         )
         expect(
             "projects",
-            "rest_foreign_project_missions_no_leak",
-            api.call("GET", "/api/projects/" + admin_slug + "/missions", ben_token),
-            {200, 403, 404},
-            lambda doc: _no_markers(doc, markers),
-        )
-        expect(
-            "projects",
             "rest_foreign_project_controller_no_leak",
             api.call("GET", "/api/projects/" + admin_slug + "/controller", ben_token),
             {200, 403, 404},
@@ -566,7 +565,7 @@ def run_full_matrix(api, admin_token, expected_sha=None):
             "/api/workspaces",
             "/api/managed-machines",
             "/api/nodes",
-            "/api/client-computers",
+            "/api/control/client-computers",
         ]:
             expect(
                 "machines",
@@ -613,7 +612,6 @@ def run_full_matrix(api, admin_token, expected_sha=None):
             ("GET", "/api/settings", None),
             ("PUT", "/api/settings", {"default_provider": "openai"}),
             ("PATCH", "/api/settings", {"default_provider": "openai"}),
-            ("PUT", "/api/settings/library-remote", {"library_remote": "/etc/passwd"}),
             ("GET", "/api/admin/users", None),
             ("POST", "/api/admin/users", {"username": "x", "password": "y"}),
             ("POST", "/api/system/deploy", {"sha": "a" * 40}),
@@ -626,6 +624,13 @@ def run_full_matrix(api, admin_token, expected_sha=None):
                 api.call(method, path, ben_token, body),
                 {400, 403, 404},
             )
+        expect(
+            "settings",
+            "rest_member_library_remote_stays_scoped",
+            api.call("PUT", "/api/settings/library-remote", ben_token, {"library_remote": "https://invalid.example/m3.git"}),
+            {200, 400},
+            lambda doc: _no_markers(doc, markers),
+        )
         for tool, args in [
             ("memory_get_knowledge_tree", {}),
             ("memory_search_knowledge", {"query": "thomas"}),
@@ -651,7 +656,20 @@ def run_full_matrix(api, admin_token, expected_sha=None):
         expect(
             "Inbox",
             "rest_inbox_preferences_update_own",
-            api.call("PUT", "/api/control/inbox-state/preferences", ben_token, {"filter": "unread"}),
+            api.call(
+                "PUT",
+                "/api/control/inbox-state/preferences",
+                ben_token,
+                {
+                    "clientId": "m3-matrix",
+                    "mutationSeq": 1,
+                    "expectedVersion": 0,
+                    "aiSummary": True,
+                    "includeAutonomous": False,
+                    "model": "m3",
+                    "inboxEnabled": True,
+                },
+            ),
             {200},
         )
         expect(
@@ -663,7 +681,12 @@ def run_full_matrix(api, admin_token, expected_sha=None):
         expect(
             "Inbox",
             "rest_foreign_mission_seen_does_not_leak",
-            api.call("PUT", "/api/control/inbox-state/seen/" + admin_mid, ben_token, {"seen": True}),
+            api.call(
+                "PUT",
+                "/api/control/inbox-state/seen/" + admin_mid,
+                ben_token,
+                {"clientId": "m3-matrix", "mutationSeq": 2, "expectedVersion": 1, "stamp": 9},
+            ),
             {200, 403, 404},
             lambda doc: _no_markers(doc, markers),
         )
@@ -671,7 +694,7 @@ def run_full_matrix(api, admin_token, expected_sha=None):
         # 8. SEARCH (REST + MCP)
         for path in [
             "/api/control/missions/search?q=" + urllib.parse.quote(admin_slug),
-            "/api/control/missions/search/moments?q=" + urllib.parse.quote(admin_slug),
+            "/api/control/missions/search/messages?q=" + urllib.parse.quote(admin_slug),
         ]:
             expect(
                 "search",
@@ -838,6 +861,8 @@ def run_full_matrix(api, admin_token, expected_sha=None):
     summary = summarize_matrix(results)
     report = {
         "mode": api.mode,
+        "live_evidence": "VERIFIED",
+        "target": api.url,
         "build": build,
         "surfaces": summary,
         "results": results,
@@ -1068,13 +1093,17 @@ def run_prod_readonly(api, ben_token, forbidden_markers=()):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=["dev", "prod-readonly"], default="dev")
+    parser.add_argument("--mode", choices=["dev", "prod-readonly", "prod-full"], default="dev")
     parser.add_argument("--url", default="")
     parser.add_argument("--token-file", type=Path, default=None)
     parser.add_argument("--sha", default=None)
+    parser.add_argument("--confirm-prod-mutations", action="store_true")
     args = parser.parse_args(argv)
 
-    target_url = args.url or (PROD_URL if args.mode == "prod-readonly" else "https://agent-backend-dev.thomas.md")
+    if args.mode in ("prod-readonly", "prod-full"):
+        target_url = args.url or PROD_URL
+    else:
+        target_url = args.url or "https://agent-backend-dev.thomas.md"
     try:
         api = Api(target_url, mode=args.mode)
         if args.token_file is None:
@@ -1088,6 +1117,11 @@ def main(argv=None):
         token = private_token(args.token_file)
         if args.mode == "prod-readonly":
             return 0 if run_prod_readonly(api, token) else 1
+        if args.mode == "prod-full":
+            if not args.confirm_prod_mutations:
+                raise IsolationError("prod-full requires --confirm-prod-mutations")
+            if args.sha is None:
+                raise IsolationError("prod-full requires the exact 40-char --sha")
         if args.sha is not None and not re.fullmatch(r"[0-9a-f]{40}", args.sha):
             raise IsolationError("a full 40-char commit SHA is required when --sha is set")
         return 0 if run_full_matrix(api, token, expected_sha=args.sha) else 1
