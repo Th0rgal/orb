@@ -573,6 +573,7 @@ def buildSettingsRow (theme : Theme) (rowW h : SubPx) (title desc rightLabel : S
   let bdr := theme.borderWidth
   let inputBg : Color := if theme.isDark then 0x202020FF else 0xFFFFFFFF
   let inputBdr : Color := if theme.isDark then 0x333333FF else 0xD8D8D8FF
+  let labelW := rowW - pxToSub (if isInput then 276 else 148)
   let rightNode : WidgetNode :=
     if isInput then
       WidgetNode.rrect
@@ -618,9 +619,9 @@ def buildSettingsRow (theme : Theme) (rowW h : SubPx) (title desc rightLabel : S
     CornerRadii.zero
     (if hasBottomBorder then { widths := Edges.trbl 0 0 bdr 0, color := pal.borderSubtle } else BorderStyle.none)
     [ WidgetNode.box
-        (BoxStyle.col (pxToSub 2) |>.withFixedSize (rowW - pxToSub 148) (pxToSub 36))
-        [ screenTextLine theme (rowW - pxToSub 148) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textPrimary title
-        , screenTextLine theme (rowW - pxToSub 148) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textMuted desc
+        (BoxStyle.col (pxToSub 2) |>.withFixedSize labelW (pxToSub 36))
+        [ screenTextLine theme labelW (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textPrimary title
+        , screenTextLine theme labelW (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textMuted desc
         ]
     , rightNode
     ]
