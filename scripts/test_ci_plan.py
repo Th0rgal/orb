@@ -179,7 +179,8 @@ class RunnerSelectionTest(unittest.TestCase):
                 enabled = (variable == "true" and repo == "Th0rgal/orb"
                            and (trusted or same_repo_pr))
                 for job, fallback in fallbacks.items():
-                    size = 32 if job in {"test", "kernel-abi"} else 16
+                    # lean.ci labels are minimums; idle engines burst them larger.
+                    size = 2 if job in {"plan", "fmt", "capability-matrix", "ci-ok"} else 4
                     routed = enabled and job not in self.HOSTED_ONLY[workflow]
                     expected = f"lean-{size}vcpu-ubuntu-2604" if routed else fallback
                     with self.subTest(workflow=workflow, job=job, **context):
