@@ -11,5 +11,5 @@ jobs:
     steps:
       - run: |
           echo "attempt ${GITHUB_RUN_ATTEMPT}"; free -m
-          # 256 MiB touched chunks, ~20 GiB in a few seconds: the kernel OOM killer fires before live growth can catch up.
-          python3 -c "import sys; xs=[bytearray(b'\x01'*(256<<20)) for _ in range(80)]; print('allocated', len(xs)//4, 'GiB')"
+          # 256 MiB touched chunks, ~8 GiB in a few seconds: the kernel OOM killer fires before live growth can catch up.
+          python3 -c "import sys; xs=[bytearray(b'\x01'*(256<<20)) for _ in range(32)]; print('allocated', len(xs)//4, 'GiB')"
