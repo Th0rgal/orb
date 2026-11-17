@@ -836,7 +836,9 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
         |>.withFixedSize (pxToSub 482) (pxToSub 57))
       (if isTarget then (if theme.isDark then 0x1F1F1FFF else 0xF2F2F2FF) else 0x00000000)
       (CornerRadii.uniform (pxToSub 8))
-      BorderStyle.none
+      (if isTarget then
+        { widths := Edges.trbl 0 0 0 (pxToSub 3), color := pal.accent }
+       else BorderStyle.none)
       [ WidgetNode.box
           (BoxStyle.row 0 |>.withAlign .center |>.withJustify .spaceBetween |>.withFixedSize (pxToSub 456) (pxToSub 16))
           [ screenTextLine theme (pxToSub 80) (pxToSub 16) (pxToSub 11) (pxToSub 16) pal.textSecondary role 550
