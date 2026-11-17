@@ -1897,28 +1897,38 @@ def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) : OrbBin.
     let isErr := finalSnap.error?.isSome || (finalSnap.exitCode?.getD 0) != 0
     let mut armedWakeups : Nat := 0
     let mut isSideQ := false
+    if let .ok tRows ← execParamQuery st.store.missionsDb
+        "SELECT COALESCE(tags,'[]') FROM missions WHERE id=?1;" #[missionId] then
+      let tRaw := (tRows[1]?.bind (·[0]?)).getD "[]"
+      isSideQ := (tRaw.splitOn "\"side-question\"").length > 1
     if !isErr then
       if let .ok cRows ← execParamQuery st.store.missionsDb
           "SELECT COUNT(*) FROM mission_continuations WHERE mission_id=?1 AND phase=1;" #[missionId] then
         if cRows.size > 1 then armedWakeups := ((cRows[1]?.bind (·[0]?)).bind String.toNat?).getD 0
-      if let .ok tRows ← execParamQuery st.store.missionsDb
-          "SELECT COALESCE(tags,'[]') FROM missions WHERE id=?1;" #[missionId] then
-        let tRaw := (tRows[1]?.bind (·[0]?)).getD "[]"
-        isSideQ := (tRaw.splitOn "\"side-question\"").length > 1
     -- Exit 0 with no text and no tool call is not a finished turn: retry, then fail.
     let emptyVerdict? ←
       if !isErr && finalSnap.text.trimAscii.toString.isEmpty then
         OrbCore.RemoteDispatch.settleEmptyTurn st.store st.broadcastHub? missionId ts nowSec (retryable := !isSideQ)
       else pure none
+    let transientVerdict? ←
+      if isErr then
+        OrbCore.RemoteDispatch.settleTransientTurnFailure st.store st.broadcastHub? missionId ts nowSec finalSnap.error? (retryable := !isSideQ)
+      else pure none
     let nextStatus :=
       if let some verdict := emptyVerdict? then verdict
+      else if let some (tStatus, _) := transientVerdict? then tStatus
       else if isErr then "failed"
       else if armedWakeups > 0 then "awaiting_user"
       else if isSideQ then "completed"
       else "awaiting_user"
-    discard <| execParamQuery st.store.missionsDb
-      "UPDATE missions SET status=?2,state_revision=state_revision+1,updated_at=?3 WHERE id=?1 AND status IN ('active','pending');"
-      #[missionId, nextStatus, ts]
+    if let some (_, tReason) := transientVerdict? then
+      discard <| execParamQuery st.store.missionsDb
+        "UPDATE missions SET status=?2,terminal_reason=?3,state_revision=state_revision+1,updated_at=?4 WHERE id=?1 AND status IN ('active','pending');"
+        #[missionId, nextStatus, tReason, ts]
+    else
+      discard <| execParamQuery st.store.missionsDb
+        "UPDATE missions SET status=?2,state_revision=state_revision+1,updated_at=?3 WHERE id=?1 AND status IN ('active','pending');"
+        #[missionId, nextStatus, ts]
     if let some tSink := st.telemetrySink? then
       let mRec? ← getMission? st.store missionId
       let bLow := finalSnap.harness.trimAscii.toString.toLower

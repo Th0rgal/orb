@@ -348,6 +348,58 @@ def run : IO Unit := do
       finishEmpty "m-side"
       check ((← statusOf "m-side") == "failed" && (← retries "m-side").isEmpty) s!"empty side question, got {← statusOf "m-side"}"
 
+      -- R28: Transient turn failure recovery (`stream_incomplete` and `idle_timeout`).
+      -- (1) Forced stream cut recovers once and completes on the next turn.
+      let finishStreamCut := fun (mid errMsg : String) =>
+        (buildCoreHarnessCallbacks app mid).onTurnFinished
+          { runId := "r-cut", generation := 1, harness := "opencode", cwd := root, done := true,
+            exitCode? := some 1, error? := some errMsg }
+      let finishSuccessWithText := fun (mid txt : String) =>
+        (buildCoreHarnessCallbacks app mid).onTurnFinished
+          { runId := "r-ok", generation := 1, harness := "opencode", cwd := root, text := txt, done := true,
+            exitCode? := some 0 }
+      let recoveredEvents := fun (mid : String) =>
+        cellOf db "SELECT COUNT(*) FROM mission_events WHERE mission_id=?1 AND event_type='recovered';" #[mid]
+      let termReasonOf := fun (mid : String) =>
+        cellOf db "SELECT COALESCE(terminal_reason,'') FROM missions WHERE id=?1;" #[mid]
+
+      newMission "m-r28-recover" "[]"
+      finishStreamCut "m-r28-recover" "JSON parsing failed: [DONE]data: {\"error\":{\"message\":\"upstream stream ended without a finish_reason\",\"code\":\"stream_incomplete\"}}"
+      check ((← statusOf "m-r28-recover") == "awaiting_user")
+        s!"r28 first stream cut parks mission in awaiting_user for retry, got '{← statusOf "m-r28-recover"}'"
+      check ((← retries "m-r28-recover") == "transient_turn_retry:1:stream_incomplete/1")
+        s!"r28 first stream cut arms transient_turn_retry:1:stream_incomplete, got '{← retries "m-r28-recover"}'"
+      check ((← recoveredEvents "m-r28-recover") == "1")
+        s!"r28 first stream cut emits a visible recovered event, got '{← recoveredEvents "m-r28-recover"}'"
+      let prevLaunches ← launches.get
+      tick 4000000300
+      check ((← launches.get) == prevLaunches + 1 && (← statusOf "m-r28-recover") == "active")
+        "r28 due continuation relaunches the cut turn on the same mission"
+      finishSuccessWithText "m-r28-recover" "Completed after transient stream cut recovery."
+      check ((← statusOf "m-r28-recover") == "awaiting_user" && (← retries "m-r28-recover") == "transient_turn_retry:1:stream_incomplete/4")
+        s!"r28 recovered turn finishes cleanly after 1 retry, status='{← statusOf "m-r28-recover"}', retries='{← retries "m-r28-recover"}'"
+
+      -- (2) Third consecutive cut (`stream_incomplete` / `idle_timeout`) ends `failed` with the reason.
+      newMission "m-r28-three-cuts" "[]"
+      finishStreamCut "m-r28-three-cuts" "upstream stream ended without a finish_reason (stream_incomplete)"
+      check ((← retries "m-r28-three-cuts") == "transient_turn_retry:1:stream_incomplete/1" && (← recoveredEvents "m-r28-three-cuts") == "1")
+        "r28 cut #1 arms retry 1 and emits recovered #1"
+      tick 4000000400
+      finishStreamCut "m-r28-three-cuts" "upstream_idle_timeout: stream stalled"
+      check ((← retries "m-r28-three-cuts") == "transient_turn_retry:1:stream_incomplete/4,transient_turn_retry:2:idle_timeout/1" &&
+             (← recoveredEvents "m-r28-three-cuts") == "2" && (← statusOf "m-r28-three-cuts") == "awaiting_user")
+        s!"r28 cut #2 arms retry 2 and emits recovered #2, got retries='{← retries "m-r28-three-cuts"}'"
+      tick 4000000500
+      let launchesBeforeThirdCut ← launches.get
+      finishStreamCut "m-r28-three-cuts" "upstream stream ended without a finish_reason (stream_incomplete)"
+      check ((← statusOf "m-r28-three-cuts") == "failed" && (← termReasonOf "m-r28-three-cuts") == "stream_incomplete")
+        s!"r28 third consecutive cut ends failed with reason stream_incomplete, got status='{← statusOf "m-r28-three-cuts"}' reason='{← termReasonOf "m-r28-three-cuts"}'"
+      check ((← retries "m-r28-three-cuts") == "transient_turn_retry:1:stream_incomplete/4,transient_turn_retry:2:idle_timeout/4" &&
+             (← recoveredEvents "m-r28-three-cuts") == "2")
+        "r28 third consecutive cut does not arm a third retry or emit a third recovered event"
+      tick 4000000600
+      check ((← launches.get) == launchesBeforeThirdCut) "r28 failed mission after 3rd cut is not relaunched"
+
       -- A first turn with nowhere to run is refused; nothing is left `active`.
       let claims : McpSessionClaims := { sessionId := "turn-outcome", missionId := "m-tools", role := "coordinator", expiresAt := 4100000000 }
       r24_concurrent_same_key_mutates_once store root claims

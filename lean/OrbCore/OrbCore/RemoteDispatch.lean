@@ -8,6 +8,7 @@ import OrbBin.PosixExt
 import OrbBin.HttpClient
 import OrbBin.ClaudeControl
 import OrbCore.Store
+import OrbCore.Spec
 import OrbCore.Managed
 import OrbCore.MemoryAndCloud
 import OrbCore.QueueCont
@@ -25,6 +26,7 @@ open OrbBin.Json
 open OrbBin.PosixExt
 open OrbBin.HttpClient
 open OrbCore.Store
+open OrbCore.Spec
 open OrbCore.Managed
 open OrbCore.MemoryAndCloud
 open OrbCore.QueueCont
@@ -781,6 +783,94 @@ def settleEmptyTurn (store : CoreStore) (broadcastHub? : Option BroadcastHub)
       ("code", .str "empty_turn"), ("retryable", .bool false)])) nowIso
   return some "failed"
 
+/-- Retries a turn gets after a transient stream-cut (`stream_incomplete` / `idle_timeout`) before the mission is `failed`. -/
+def maxTransientTurnRetries : Nat := 2
+
+/-- Classify an error message or proxy outcome status into a transient turn failure reason (`1 = stream_incomplete`, `2 = idle_timeout`). -/
+def classifyTransientTurnFailureText? (raw : String) : Option TransientTurnFailureReason :=
+  let low := raw.trimAscii.toString.toLower
+  if low.isEmpty then none
+  else if (low.splitOn "stream_incomplete").length > 1 ||
+          (low.splitOn "upstream stream ended without a finish_reason").length > 1 ||
+          (low.splitOn "[done]data:").length > 1 then
+    some .streamIncomplete
+  else if (low.splitOn "idle_timeout").length > 1 ||
+          (low.splitOn "upstream_idle_timeout").length > 1 then
+    some .idleTimeout
+  else none
+
+/-- Encode `TransientTurnFailureReason` as its kernel gate reason code (`1` or `2`). -/
+def transientTurnFailureReasonCode : TransientTurnFailureReason → UInt8
+  | .streamIncomplete => 1
+  | .idleTimeout      => 2
+
+/-- Settle a failed turn when the failure is caused by a transient stream cut (`stream_incomplete` or `idle_timeout`).
+    Consults `verifyTransientTurnRecovery` (`OrbCore.Spec`):
+    - At most `maxTransientTurnRetries` (`2`) times per user instruction, emits a visible `recovered` event,
+      arms a durable one-shot `mission_continuations` row with `20 * (prior + 1)` seconds backoff, and returns
+      `some ("awaiting_user", "transient_turn_retry")`.
+    - On the 3rd consecutive cut (`prior >= 2`) or when `retryable = false`, emits a terminal `error` event and
+      returns `some ("failed", reasonString)`.
+    - Returns `none` when the turn failure is not a transient stream cut / idle timeout. -/
+def settleTransientTurnFailure
+    (store : CoreStore)
+    (broadcastHub? : Option BroadcastHub)
+    (missionId nowIso : String)
+    (nowSec : UInt64)
+    (errText? : Option String := none)
+    (retryable : Bool := true) : IO (Option (String × String)) := do
+  let mut reason? := errText?.bind classifyTransientTurnFailureText?
+  if reason?.isNone then
+    if let .ok eRows ← execParamQuery store.missionsDb
+        ("SELECT COALESCE(payload,'') FROM mission_events WHERE mission_id=?1 AND event_type='error' " ++
+         "AND id > COALESCE((SELECT MAX(id) FROM mission_events WHERE mission_id=?1 AND event_type='user_message'),0) " ++
+         "ORDER BY id DESC LIMIT 1;") #[missionId] then
+      if eRows.size > 1 then
+        reason? := classifyTransientTurnFailureText? (cell eRows[1]! 0)
+  let some reason := reason?
+    | return none
+  let reasonStr := reason.reasonString
+  let reasonCode := transientTurnFailureReasonCode reason
+  let prior := match ← execParamQuery store.missionsDb
+      ("SELECT c.reason FROM mission_continuations c WHERE c.mission_id=?1 AND c.reason LIKE 'transient_turn_retry:%' AND instr(COALESCE(" ++
+       "(SELECT payload FROM mission_events WHERE mission_id=?1 AND event_type='user_message' ORDER BY id DESC LIMIT 1),''), c.id) > 0 LIMIT 1;") #[missionId] with
+    | .ok rs =>
+      ((rs[1]?.bind (·[0]?)).bind fun r =>
+        let rest := (r.drop 21).toString
+        ((rest.splitOn ":").headD "").toNat?).getD 0
+    | .error _ => maxTransientTurnRetries
+  let priorU8 : UInt8 := (Nat.min prior 255).toUInt8
+  let retryFlag : UInt8 := if retryable then 1 else 0
+  if verifyTransientTurnRecovery reasonCode priorU8 retryFlag == 1 then
+    let cid ← newUuidV4
+    let backoffSec := 20 * (prior.toUInt64 + 1)
+    let armed ← execParamQuery store.missionsDb
+      ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,error,recurrence,stop_after_first,created_at,updated_at) " ++
+       "SELECT ?1,id,COALESCE(run_generation,1),1,CAST(?3 AS INTEGER),'time',?4,?5,?1,'','transient-turn-retry','','',1,?6,?6 FROM missions WHERE id=?2;")
+      #[cid, missionId, s!"{nowSec + backoffSec}", s!"transient_turn_retry:{prior + 1}:{reasonStr}",
+        s!"Your previous turn was interrupted by a transient upstream stream cut ({reasonStr}). Continue the task from where you left off.", nowIso]
+    if armed.isOk then
+      emitMissionEventAndBroadcast store broadcastHub? missionId "recovered"
+        (renderCompact (.obj #[
+          ("message", .str s!"Transient upstream stream cut ({reasonStr}); recovering turn ({prior + 1} of {maxTransientTurnRetries})."),
+          ("reason", .str reasonStr),
+          ("code", .str reasonStr),
+          ("attempt", .num (prior + 1)),
+          ("max_retries", .num maxTransientTurnRetries),
+          ("backoff_seconds", .num backoffSec.toNat),
+          ("continuation_id", .str cid),
+          ("retryable", .bool true)
+        ])) nowIso
+      return some ("awaiting_user", "transient_turn_retry")
+  emitMissionEventAndBroadcast store broadcastHub? missionId "error"
+    (renderCompact (.obj #[
+      ("message", .str s!"Turn failed after {prior + 1} transient upstream stream cut attempt(s) ({reasonStr})."),
+      ("reason", .str reasonStr),
+      ("code", .str reasonStr),
+      ("retryable", .bool false)
+    ])) nowIso
+  return some ("failed", reasonStr)
+
 private def persistDiscoveredSessionId (store : CoreStore) (missionId sid : String) : IO Unit := do
   let clean := sid.trimAscii.toString
   if !clean.isEmpty then
@@ -1347,6 +1437,13 @@ partial def spawnRemoteJobPoller
                   if jState == "succeeded" && finalText.isEmpty then
                     settleEmptyTurn store broadcastHub? missionId nowIso nowSec
                   else pure none
+                let transientErrHint? :=
+                  acc.lastError?.orElse (fun _ => nodeErr?).orElse (fun _ =>
+                    if !logTail.trimAscii.toString.isEmpty then some ((logTail.trimAscii.toString.take 600).toString) else none)
+                let transientVerdict? ←
+                  if jState != "succeeded" && jState != "cancelled" then
+                    settleTransientTurnFailure store broadcastHub? missionId nowIso nowSec transientErrHint?
+                  else pure none
                 let mut curTermReason := ""
                 if let .ok trRows ← execParamQuery store.missionsDb
                     "SELECT COALESCE(terminal_reason,'') FROM missions WHERE id=?1 LIMIT 1;" #[missionId] then
@@ -1355,19 +1452,26 @@ partial def spawnRemoteJobPoller
                 let isProvErr := curTermReason == "provider_error" || (nodeErr?.map (· == "provider_error")).getD false
                 let nextMissionStatus :=
                   if let some verdict := emptyVerdict? then verdict
+                  else if let some (tStatus, _) := transientVerdict? then tStatus
                   else if jState == "succeeded" then
                     if armedWakeups > 0 then "awaiting_user" else "completed"
                   else if jState == "cancelled" then
                     if isProvErr then "interrupted" else "cancelled"
                   else "failed"
+                let nextTermReason :=
+                  if emptyVerdict?.isSome then (if nextMissionStatus == "failed" then "empty_turn" else "empty_turn_retry")
+                  else if let some (_, tReason) := transientVerdict? then tReason
+                  else if nextMissionStatus == "awaiting_user" then "awaiting_wakeup"
+                  else if jState == "cancelled" && isProvErr then "provider_error"
+                  else termReason
+                if transientVerdict?.isSome then
+                  discard <| execParamQuery store.missionsDb
+                    "UPDATE mission_runs SET terminal_reason=?2, updated_at=?3 WHERE mission_id=?1 AND remote_job_id=?4;"
+                    #[missionId, nextTermReason, nowIso, jobId]
                 discard <| execParamQuery store.missionsDb
                   ("UPDATE missions SET status=?2, terminal_reason=?3, state_revision=state_revision+1, updated_at=?4 " ++
                    "WHERE id=?1 AND status NOT IN ('cancelled','interrupted');")
-                  #[missionId, nextMissionStatus,
-                    if emptyVerdict?.isSome then (if nextMissionStatus == "failed" then "empty_turn" else "empty_turn_retry")
-                    else if nextMissionStatus == "awaiting_user" then "awaiting_wakeup"
-                    else if jState == "cancelled" && isProvErr then "provider_error"
-                    else termReason, nowIso]
+                  #[missionId, nextMissionStatus, nextTermReason, nowIso]
                 emitMissionEventAndBroadcast store broadcastHub? missionId "mission_status_changed"
                   (renderCompact (.obj #[("status", .str nextMissionStatus), ("content", .str finalText)])) nowIso
           else
