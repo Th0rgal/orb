@@ -16,5 +16,24 @@ print(runs[0]["status"], runs[0]["conclusion"] or "-") if runs else print("missi
 if [[ "$status" != completed || "$conclusion" != success ]]; then echo "master $sha CI $status/$conclusion; skip"; exit 0; fi
 live=$(curl -fsS -m 10 http://127.0.0.1:3000/api/health | python3 -c 'import json,sys; print(json.load(sys.stdin).get("build",""))')
 if [[ "$live" == "$sha" ]]; then echo "prod already on $sha"; exit 0; fi
+# A commit whose deploy already failed is not retried: the master gets the log
+# tail once and assigns a fix; the next green commit is deployed as usual.
+LOG=/var/log/orb-deploy.log
+if grep -q "deploy $sha " "$LOG" 2>/dev/null && ! grep -q "prod healthy on $sha" "$LOG"; then
+  marker=/var/lib/orb-roadmap/deploy-failed-$sha
+  if [[ ! -e $marker && -n "${ORB_ROADMAP_MASTER:-}" ]]; then
+    tail=$(awk -v s="deploy $sha " 'index($0,s){f=1} f' "$LOG" | grep -vE "archived 0 legacy" | tail -25)
+    python3 - "$ORB_ROADMAP_MASTER" "$sha" "$tail" <<'PY' && touch "$marker"
+import sys
+ns={"__name__":"x"}; exec(open("/usr/local/sbin/orb-roadmap-reconcile").read(), ns)
+mid, sha, tail = sys.argv[1:4]
+msg=(f"orb-auto-deploy: the prod deploy of master {sha} FAILED on agent-core and was not installed "
+     f"(prod keeps the previous build). Start a child worker to find and fix the cause; the next green "
+     f"commit deploys automatically. Last lines of /var/log/orb-deploy.log:\n{tail}")
+ns["core_post"](f"/api/control/missions/{mid}/resume", {"content": msg})
+PY
+  fi
+  echo "deploy of $sha already failed; not retrying"; exit 0
+fi
 echo "deploying $sha (prod on $live)"
 exec /usr/local/sbin/orb-deploy --detach "$sha"
