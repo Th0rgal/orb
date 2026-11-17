@@ -1566,6 +1566,8 @@ private def stopMissionTurnForUnavailableChain
       else
         (false, "", "")
   if !shouldStop then return ()
+  let loginMessage? ← sidecarLoginFailureMessage st.store st.cfg.workingDir (cooling.map (·.accountId))
+  let errMsg := loginMessage?.map (fun msg => s!"{msg} {errMsg}") |>.getD errMsg
   match ← hostedStop st.store mid nowIso termReason (onlyWhenRunning := true) with
   | .error _ => return ()
   | .ok _ =>
@@ -1784,6 +1786,19 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     (bodyTimedOutRef? := some bodyTimedOutRef)
   let prevSelectedStreak : UInt32 :=
     (prevStreaks.find? (fun (aid, _) => aid == out.selectedAccount)).map Prod.snd |>.getD 0
+  let loginMessage? ← if out.status ≥ 400 then
+      sidecarLoginFailureMessage st.store st.cfg.workingDir (dispatchChain.targets.map (·.accountId))
+    else pure none
+  let loginFields := match OrbBin.Json.parseBytes out.body with
+    | .ok (.obj fields) => fields.filter (fun (k, _) => k != "message" && k != "login_status")
+    | _ => #[("error", .str "provider_login_unavailable")]
+  let loginErrorBody := (renderCompact (.obj (loginFields ++ #[
+    ("login_status", .str "needs_reauth"),
+    ("message", .str (loginMessage?.getD "Sign in again: the provider rejected this login. Open Providers to reconnect."))]))).toUTF8
+  let out := if out.status ≥ 400 && !out.firstByteCommitted &&
+      (loginMessage?.isSome || !(← authEvidence.get).isEmpty) then
+    { out with body := loginErrorBody, contentType := "application/json" }
+    else out
   -- Provider status follows what real requests saw: a refused login is recorded per
   -- upstream account, and an account that just served a request is cleared.
   for (accountKey, code) in (← authEvidence.get) do

@@ -463,7 +463,7 @@ internal fun providerStatusSubtitle(provider: OrbRow, detail: OrbDict?): String 
             else -> "Disabled"
         }
         detailStatus == "needs_verification" -> "Verification required"
-        statusType == "needs_reauth" || detailStatus == "needs_reauth" -> "Reconnect"
+        statusType == "needs_reauth" || detailStatus == "needs_reauth" -> "Sign in again"
         detailError.isNotEmpty() -> "Usage unavailable"
         else -> {
             val q = quotaStatus(providerQuotaWindows(detail))

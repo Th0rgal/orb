@@ -190,7 +190,21 @@ def sidecar_logins():
 
 def check_sidecar(problems):
     """A Claude login the sidecar refuses to use is invisible in Core (13 Nov 2026: ten hours)."""
-    claude = [f for f in sidecar_logins() if f.get("provider") == "claude" and not f.get("disabled")]
+    files = sidecar_logins()
+    login_problems = []
+    for entry in files:
+        status = str(entry.get("status") or "")
+        message = str(entry.get("status_message") or "")
+        quota = any(c.get("reason") in ("quota", "credential_quota", "quota_exhausted")
+                    and int(c.get("remaining_seconds") or 0) > 0
+                    for c in entry.get("cooldowns") or [])
+        if (entry.get("disabled") or status == "expired" or quota or
+                any(code in status or code in message for code in
+                    ("invalid_refresh_token", "invalid_grant", "token_expired", "auth_unavailable"))):
+            login_problems.append(entry)
+    if login_problems:
+        problems["provider:sign-in-again"] = "Sign in again: one or more provider logins are refresh-failed, disabled, expired or quota-exhausted (see Providers)."
+    claude = [f for f in files if f.get("provider") == "claude" and not f.get("disabled") and f not in login_problems]
     banned = {}
     for entry in claude:
         seconds = max([int(c.get("remaining_seconds") or 0) for c in entry.get("cooldowns") or []] or [0])

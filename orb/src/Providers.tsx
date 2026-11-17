@@ -1283,7 +1283,7 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
   // Quota severity uses the shared level colors (warning 80-99%, danger exhausted).
   const stClass = () => status() === "connected" ? "connected" : ["quota_exhausted", "pool_exhausted", "out_of_credit"].includes(status()) ? "exhausted" : status() === "quota_warning" ? "warning" : ["needs_reauth", "needs_verification", "error", "auth_failed"].includes(status()) ? "needs_reauth" : "not_configured";
   // Core's `ready` means credentials are saved, not that a live authentication probe succeeded.
-  const stLabel = () => (!manages() && globallyDisabled() ? "Disabled by admin" : !isAdminUser() && userSkipped() ? "Skipped for your missions" : ({ connected: "Connected", ready: "Configured", disabled: "Disabled", needs_reauth: "Reconnect", needs_verification: "Verification required", quota_exhausted: quota()?.level === "exhausted" ? quota()!.label : "Quota exhausted", pool_exhausted: quota()?.label || "Quota exhausted", quota_warning: quota()?.label || "Connected", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown"));
+  const stLabel = () => (!manages() && globallyDisabled() ? "Disabled by admin" : !isAdminUser() && userSkipped() ? "Skipped for your missions" : ({ connected: "Connected", ready: "Configured", disabled: "Disabled", needs_reauth: "Sign in again", needs_verification: "Verification required", quota_exhausted: quota()?.level === "exhausted" ? quota()!.label : "Quota exhausted", pool_exhausted: quota()?.label || "Quota exhausted", quota_warning: quota()?.label || "Connected", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown"));
   // Pool names and percentages already live in the quota summary.
   const statusText = () => a.provider_type === "antigravity" && quota()
     ? ["quota_exhausted", "pool_exhausted"].includes(status()) ? "Limit reached"
@@ -1475,4 +1475,3 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
     </div>
   );
 }
-

@@ -423,6 +423,37 @@ private def sidecarParkedHealthContract
     IO.FS.writeFile s!"{root}/.sandboxed-sh/ai_providers.json" (renderCompact (.arr (updated ++ extraRows)))
   try
     -- Case 1(a): row email set and 1 row + 1 enabled file of that type carry it (even with a 2nd OAuth row & file).
+    -- r32_login_reporting_fixture_and_fresh_login: actual list/detail/health endpoints.
+    let statusOf (v : JVal) := (v.fieldOrNull "status").fieldStr? "type"
+    let initialFiles ← sidecarFilesJsonRef.get
+    let fixtureRaw ← IO.FS.readFile "shared/orb-spec/fixtures/provider-login-health.json"
+    let .ok fixture := OrbBin.Json.parse fixtureRaw
+      | throw (IO.userError "r32 fixture parse failed")
+    sidecarFilesJsonRef.set (renderCompact fixture)
+    for file in (fixture.fieldArr? "files").getD #[] do
+      setOauthEmail (file.fieldStr? "email")
+      let detail ← getJson app jwt s!"/api/ai/providers/{oauthOnly}" now
+      let listed := (← getJson app jwt "/api/ai/providers" now).asArr?.getD #[]
+      let listedRow := (listed.find? (fun v => v.fieldStr? "id" == some oauthOnly)).getD .null
+      if statusOf detail != some "needs_reauth" || statusOf listedRow != some "needs_reauth" then
+        failures := failures.push "r32_login_reporting_fixture_and_fresh_login: list/detail must report needs_reauth"
+      let health := (← getJson app jwt "/api/model-routing/health" now).asArr?.getD #[]
+      let row := (health.find? (fun v => v.fieldStr? "account_id" == some oauthOnly)).getD .null
+      if row.fieldStr? "login_message" != some "Sign in again" then
+        failures := failures.push "r32_login_reporting_fixture_and_fresh_login: health must report Sign in again"
+      if file.fieldStr? "name" == some "quota.json" &&
+          row.fieldStr? "parked_until" != some "2026-11-18T12:00:00Z" then
+        failures := failures.push "r32_login_reporting_fixture_and_fresh_login: reported reset changed"
+      if (file.fieldBool? "disabled").getD false then
+        patchCalls.set #[]
+        let (code, _) ← postJson app jwt s!"/api/model-routing/health/{oauthOnly}/clear" "{}" now
+        if code != 409 || !(← patchCalls.get).isEmpty then
+          failures := failures.push "r32_disabled_clear_never_reenables: disabled login was modified"
+    sidecarFilesJsonRef.set "{\"files\":[{\"name\":\"fresh.json\",\"provider\":\"claude\",\"status\":\"ok\"}]}"
+    let fresh ← getJson app jwt s!"/api/ai/providers/{oauthOnly}" now
+    if statusOf fresh == some "needs_reauth" then
+      failures := failures.push "r32_login_reporting_fixture_and_fresh_login: fresh login did not clear status"
+    sidecarFilesJsonRef.set initialFiles
     let extraClaudeNoEmail : JVal := .obj #[
       ("id", .str "10000000-0000-4000-8000-000000000009"),
       ("name", .str "Claude second"),
