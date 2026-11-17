@@ -506,7 +506,12 @@ extension StoredEvent {
 
         case "goal_status", "goal_iteration":
             let content = (data["summary"] as? String) ?? (data["content"] as? String) ?? ""
-            guard !content.isEmpty else { return nil }
+            let structured = OrbRemoteGoal.event(["type": type, "data": data])?["data"] as? [String: Any]
+            guard !content.isEmpty || structured != nil else { return nil }
+            var meta: [String: AnyCodable] = [:]
+            if let structured {
+                meta["remote_goal"] = AnyCodable(structured)
+            }
             return StoredEvent(
                 id: sequence,
                 missionId: missionId,
@@ -517,7 +522,7 @@ extension StoredEvent {
                 toolCallId: nil,
                 toolName: nil,
                 content: content,
-                metadata: [:]
+                metadata: meta
             )
 
         default:

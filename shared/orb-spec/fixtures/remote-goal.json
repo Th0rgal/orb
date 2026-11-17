@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"name":"status-only","event":{"type":"goal_status","data":{"status":"active","revision":1}},"expected":{"type":"goal_status","data":{"status":"active","revision":1}}},
+    {"name":"iteration","event":{"type":"goal_iteration","data":{"iteration":2,"objective":"Verify changes","revision":2}},"expected":{"type":"goal_iteration","data":{"iteration":2,"objective":"Verify changes","revision":2}}},
+    {"name":"completion","event":{"type":"goal_status","data":{"status":"complete","revision":3}},"expected":{"type":"goal_status","data":{"status":"complete","revision":3}}},
+    {"name":"blocked","event":{"type":"goal_status","data":{"status":"blocked","reason":"needs_input"}},"expected":{"type":"goal_status","data":{"status":"blocked","reason":"needs_input"}}},
+    {"name":"stop","event":{"type":"goal_status","data":{"status":"stopped","objective":"Keep checking"}},"expected":{"type":"goal_status","data":{"status":"stopped","objective":"Keep checking"}}},
+    {"name":"native-unsupported","event":{"type":"goal_status","data":{"status":"blocked","reason":"remote_native_goal_unsupported","driver":"native","scope":"remote"}},"expected":{"type":"goal_status","data":{"status":"blocked","reason":"remote_native_goal_unsupported","driver":"native","scope":"remote"}}},
+    {"name":"unknown-fields","event":{"type":"goal_status","data":{"status":"future_status","future":{"value":42},"content":""}},"expected":{"type":"goal_status","data":{"status":"future_status","future":{"value":42},"content":""}}},
+    {"name":"unrelated","event":{"type":"text_delta","data":{"content":"hello"}},"expected":null},
+    {"name":"missing-data","event":{"type":"goal_status"},"expected":null},
+    {"name":"array-data","event":{"type":"goal_status","data":[]},"expected":null}
+  ]
+}

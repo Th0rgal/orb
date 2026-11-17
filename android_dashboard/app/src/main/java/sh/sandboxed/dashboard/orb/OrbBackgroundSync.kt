@@ -586,7 +586,13 @@ object OrbLiveEventReducer {
             }
             "goal_status", "goal_iteration" -> {
                 val content = OrbJSON.str(parsed, "summary", "content") ?: ""
-                if (content.isBlank()) return null
+                val structured = OrbRemoteGoal.event(mapOf("type" to normalizedType, "data" to parsed))?.get("data") as? Map<*, *>
+                if (content.isBlank() && structured == null) return null
+                val meta: Map<String, Any?> = if (structured != null) {
+                    mapOf("remote_goal" to structured.toMap())
+                } else {
+                    emptyMap()
+                }
                 OrbRow(
                     "goal-$seq",
                     mapOf(
@@ -596,7 +602,7 @@ object OrbLiveEventReducer {
                         "event_type" to normalizedType,
                         "timestamp" to timestamp,
                         "content" to content,
-                        "metadata" to emptyMap<String, Any?>(),
+                        "metadata" to meta,
                     )
                 )
             }
