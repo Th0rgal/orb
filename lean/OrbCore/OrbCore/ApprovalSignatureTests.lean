@@ -56,8 +56,14 @@ def run (root : String) : IO Unit := do
       let .ok req := parseRequest wire.toUTF8 none | throw (IO.userError "approval HTTP parse")
       let .ok res ← dispatchCoreRequest st req time | throw (IO.userError "approval HTTP dispatch")
       return (res.status, (OrbBin.Json.parseBytes res.body).toOption.getD .null)
+    IO.FS.writeFile (store.rootDir ++ "/approval_enrollment_code") "fixture-enrollment-code\n"
     let enrolled ← send "POST" "/api/approvals/devices"
       (renderCompact (.obj #[("id", .str "test-device"), ("public_key", .str publicKey)])) "" now
+    check (enrolled.1 == 403) "enrollment requires out-of-band code"
+    IO.FS.writeFile (store.rootDir ++ "/approval_enrollment_code") "fixture-enrollment-code\n"
+    let enrolled ← send "POST" "/api/approvals/devices"
+      (renderCompact (.obj #[("id", .str "test-device"), ("public_key", .str publicKey),
+        ("enrollment_code", .str "fixture-enrollment-code")])) "" now
     check (enrolled.1 == 201) "enroll fixture"
     let newRequest := fun (scope : String) => do
       let result ← mcpRequestPrivilegedAccess (some store) store.rootDir "" "test-session" scope "self"
@@ -72,7 +78,10 @@ def run (root : String) : IO Unit := do
         | throw (IO.userError "lease count")
       return ((rows[1]?.bind (·[0]?)).bind String.toNat?).getD 0
     let good ← header store sign path body now
-    for bad in #["", good ++ "x", good.replace ".test-device." ".unknown."] do
+    let parts := good.splitOn "."
+    let badSignature ← sign "different payload"
+    let badCrypto := s!"{(parts[0]?).getD ""}.test-device.{badSignature}"
+    for bad in #["", good ++ "x", good.replace ".test-device." ".unknown.", badCrypto] do
       check ((← send "POST" path body bad now).1 == 403) "unsigned, corrupt and unknown device refused"
     check ((← send "POST" path "{ }" good now).1 == 403) "exact wire body binding"
     check ((← send "POST" (path ++ "?other=1") body good now).1 == 403) "raw target binding"

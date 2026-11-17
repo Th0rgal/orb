@@ -20,5 +20,8 @@ request-expiry validation precede that claim. A failed operation may consume
 its authorization; it never restores a reusable nonce.
 
 Both privilege approval URL forms and the shared approve-all endpoint require
-verification. Existing admin-only enrollment remains the trust boundary for
-enrolled keys; this change does not attest device hardware or biometric policy.
+verification. Enrollment requires the one-time out-of-band code stored at
+`approval_enrollment_code`; it is consumed on success, so an admin bearer
+cannot silently replace or add an enrolled key. Device removal and approval
+mode changes use the same signed request path. This change does not attest
+device hardware or biometric policy.

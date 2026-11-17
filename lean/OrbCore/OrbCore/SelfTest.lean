@@ -6814,8 +6814,10 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
     return (← fail s!"GET /api/privilege-access or /api/approvals/queue mismatch: pa={paGetSt}:{paGetBody} aq={aqGetSt}:{aqGetBody}")
 
   let (approvalPublicKey, approvalSign) ← OrbCore.ApprovalSignatureTests.makeSigner (store.rootDir ++ "/parity-signer")
+  discard <| IO.FS.writeFile (store.rootDir ++ "/approval_enrollment_code") "parity-enrollment-code\n"
   let _ ← sendJson "POST" "/api/approvals/devices" hsJwt
-    (OrbBin.Json.renderCompact (.obj #[("id", .str "test-device"), ("public_key", .str approvalPublicKey)]))
+    (OrbBin.Json.renderCompact (.obj #[("id", .str "test-device"), ("public_key", .str approvalPublicKey),
+      ("enrollment_code", .str "parity-enrollment-code")]))
   let sendSigned := fun (path body : String) => do
     let signedHeader ← OrbCore.ApprovalSignatureTests.header store approvalSign path body nowSec
     let wire := s!"POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {hsJwt}\r\nX-Paloma-Approval: {signedHeader}\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
@@ -6846,8 +6848,8 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
     s!"\{\"items\":[\{\"kind\":\"privilege\",\"id\":\"{rootReqId}\",\"digest\":\"\"}],\"confirm_critical\":false}"
   let (critConfirmSt, critConfirmBody) ← sendSigned "/api/approvals/approve-all"
     s!"\{\"items\":[\{\"kind\":\"privilege\",\"id\":\"{rootReqId}\",\"digest\":\"\"}],\"confirm_critical\":true}"
-  let (bunkSt, _) ← sendJson "POST" "/api/privilege-access/bunker" hsJwt "{\"level\":2,\"reason\":\"test\"}"
-  let (unbunkSt, unbunkBody) ← sendJson "POST" "/api/privilege-access/unbunker" hsJwt ""
+  let (bunkSt, _) ← sendSigned "/api/privilege-access/bunker" "{\"level\":2,\"reason\":\"test\"}"
+  let (unbunkSt, unbunkBody) ← sendSigned "/api/privilege-access/unbunker" ""
   if critNoConfirmSt != 400 || critConfirmSt != 200 || (critConfirmBody.splitOn "\"approved\":1").length < 2 ||
      bunkSt != 200 || unbunkSt != 200 || (unbunkBody.splitOn "\"bunker_state\":0").length < 2 then
     return (← fail s!"approve-all / bunker / unbunker failed: noConf={critNoConfirmSt} conf={critConfirmSt}:{critConfirmBody} bunk={bunkSt} unbunk={unbunkSt}:{unbunkBody}")

@@ -1059,7 +1059,13 @@ def dispatchSecretAndApprovalRoutes?
 
   let needsSignature := method == "POST" &&
     (cleanPath == "/api/approvals/approve-all" ||
-      (cleanPath.startsWith "/api/privilege-access/" && cleanPath.endsWith "/approve"))
+      (cleanPath.startsWith "/api/privilege-access/" &&
+        (cleanPath.endsWith "/approve" || cleanPath.endsWith "/bunker" ||
+          cleanPath.endsWith "/unbunker")) ||
+      (cleanPath.startsWith "/api/mission-access/" && cleanPath.endsWith "/approve") ||
+      (cleanPath.startsWith "/api/bitwarden/requests/" && cleanPath.endsWith "/approve")) ||
+    (method == "DELETE" && cleanPath.startsWith "/api/approvals/devices/") ||
+    (method == "PUT" && cleanPath == "/api/approvals/mode")
   if needsSignature then
     if !isAdmin then return okJson 403 "{\"error\":\"admin_required\"}"
     let [nonce, deviceId, signature] := approvalHeader.splitOn "."
@@ -1088,6 +1094,15 @@ def dispatchSecretAndApprovalRoutes?
       let did ← match jv.fieldStr? "id" with | some s => pure s | none => newUuidV4
       let name := (jv.fieldStr? "name").getD "Approval Device"
       let pubKey := (jv.fieldStr? "public_key").getD ""
+      let enrollmentCode := (jv.fieldStr? "enrollment_code").getD "" |>.trimAscii.toString
+      let enrollmentPath := System.FilePath.mk s!"{dataRoot}/approval_enrollment_code"
+      let storedCode := match ← try some <$> IO.FS.readFile enrollmentPath catch _ => pure none with
+        | some code => code.trimAscii.toString
+        | none => ""
+      if storedCode.isEmpty || enrollmentCode.isEmpty || storedCode != enrollmentCode then
+        return okJson 403 "{\"error\":\"approval_enrollment_required\"}"
+      discard <| IO.FS.removeFile enrollmentPath
+      if pubKey.isEmpty then return okJson 400 "{\"error\":\"public_key_required\"}"
       let entry := JVal.obj #[
         ("id", .str did), ("name", .str name), ("public_key", .str pubKey), ("created_at", .str nowIso)
       ]
