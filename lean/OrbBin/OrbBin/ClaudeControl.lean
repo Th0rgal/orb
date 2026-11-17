@@ -1229,8 +1229,24 @@ private def launchOrReuseWarmClaude
     let ws ← mgr.warmProcsRef.get
     pure ((ws.find? (fun (k, _) => k == missionId)).map Prod.snd)
 
+  -- A process started with `extraEnv` holds that turn's proxy credential, which expires.
+  -- Such turns never reuse a warm process: retire it and respawn with `--resume`.
+  if !extraEnv.isEmpty then
+    if let some entry := existingWarm? then
+      mgr.mu.atomically do
+        let ws ← mgr.warmProcsRef.get
+        mgr.warmProcsRef.set (ws.filter (fun (k, _) => k != missionId))
+      entry.aliveRef.set false
+      closeFdRaw entry.stdinFd
+      let _ ← killSig (-entry.pid) 15
+      IO.sleep 80
+      if (← waitpidWnohang entry.pid) == 0xFFFFFFFF then
+        let _ ← killSig (-entry.pid) 9
+        let _ ← waitpidBlock entry.pid
+      closeFdRaw entry.stdoutFd
+
   -- Case 1: Reuse live warm Claude process in the same working directory!
-  if let some entry := existingWarm? then
+  if let some entry := existingWarm?.filter (fun _ => extraEnv.isEmpty) then
     if (← entry.aliveRef.get) && entry.cwd == cwd then
       let prevMode ← entry.permissionModeRef.get
       if prevMode != effectiveMode then
