@@ -88,6 +88,13 @@ class ReconcileTest(unittest.TestCase):
         pivot = mission("pivot", "active")
         self.assertEqual(self.run_plan(green=False, missions=[old, pivot]), [("start", "MASTER", 1)])
 
+    def test_dispatch_waits_until_the_provider_returns(self):
+        dead = mission("Z0", "cancelled", updated=NOW - 60, created_ts=NOW - 65)
+        dead["returns_ts"] = NOW + 600
+        self.assertEqual(self.run_plan(missions=[dead]), [])
+        dead["returns_ts"] = NOW - 1
+        self.assertEqual(self.run_plan(missions=[dead]), [("start", "A2", 1), ("start", "A6", 1)])
+
     def test_each_attempt_uses_the_next_model(self):
         self.assertEqual(NS["MODELS"][:2], ["openai/gpt-6-astra", "anthropic/claude-fable-5-2"])
 

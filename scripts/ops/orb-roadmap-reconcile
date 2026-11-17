@@ -124,8 +124,10 @@ def plan(rows, queue, prs, missions, master_green, ledger, now):
         return m["status"] not in LIVE and m["updated_ts"] - m["created_ts"] < QUICK_DEATH_SECONDS
     # Deaths at start are provider cooldowns, not the row's fault: they cost no
     # attempt, and two of them in 15 minutes pause dispatch until the next run.
-    paused = sum(1 for ms in by_row.values() for m in ms
-                 if quick(m) and now - m["updated_ts"] < IDLE_SECONDS) >= 2
+    recent = [m for ms in by_row.values() for m in ms if quick(m) and now - m["updated_ts"] < IDLE_SECONDS]
+    # When the provider said when it returns, wait exactly that long.
+    returns = max((m.get("returns_ts", 0) for m in recent), default=0)
+    paused = now < returns if returns else len(recent) >= 2
     actions = []
     targets = queue if master_green else [MASTER_FIX]
     for rid in targets:
@@ -248,8 +250,18 @@ def fetch_missions():
     con = sqlite3.connect(f"file:{MISSIONS_DB}?mode=ro", uri=True, timeout=10)
     rows = con.execute("SELECT id, status, track, created_at, updated_at FROM missions "
                        "WHERE track LIKE 'roadmap-%'").fetchall()
-    return [{"id": r[0], "status": r[1], "track": r[2], "created_at": r[3] or "",
-             "created_ts": iso_ts(r[3]), "updated_ts": iso_ts(r[4])} for r in rows]
+    out = []
+    for r in rows:
+        m = {"id": r[0], "status": r[1], "track": r[2], "created_at": r[3] or "",
+             "created_ts": iso_ts(r[3]), "updated_ts": iso_ts(r[4])}
+        if m["updated_ts"] - m["created_ts"] < QUICK_DEATH_SECONDS:
+            err = con.execute("SELECT payload FROM mission_events WHERE mission_id=? AND event_type='error' "
+                              "ORDER BY id DESC LIMIT 1", (r[0],)).fetchone()
+            hit = re.search(r"returns at (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)", (err or [""])[0] or "")
+            if hit:
+                m["returns_ts"] = iso_ts(hit.group(1))
+        out.append(m)
+    return out
 
 
 def core_token():
