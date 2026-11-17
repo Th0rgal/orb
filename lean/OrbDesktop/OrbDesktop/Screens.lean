@@ -573,7 +573,8 @@ def buildSettingsRow (theme : Theme) (rowW h : SubPx) (title desc rightLabel : S
   let bdr := theme.borderWidth
   let inputBg : Color := if theme.isDark then 0x202020FF else 0xFFFFFFFF
   let inputBdr : Color := if theme.isDark then 0x333333FF else 0xD8D8D8FF
-  let labelW := rowW - pxToSub (if isInput then 276 else 148)
+  let labelW := rowW - pxToSub (if isInput then 276 else if isSelect then 96 else 148)
+  let descH := pxToSub (if desc.contains '\n' then 34 else 17)
   let rightNode : WidgetNode :=
     if isInput then
       WidgetNode.rrect
@@ -619,9 +620,9 @@ def buildSettingsRow (theme : Theme) (rowW h : SubPx) (title desc rightLabel : S
     CornerRadii.zero
     (if hasBottomBorder then { widths := Edges.trbl 0 0 bdr 0, color := pal.borderSubtle } else BorderStyle.none)
     [ WidgetNode.box
-        (BoxStyle.col (pxToSub 2) |>.withFixedSize labelW (pxToSub 36))
+        (BoxStyle.col (pxToSub 2) |>.withFixedSize labelW (pxToSub 19 + descH))
         [ screenTextLine theme labelW (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textPrimary title
-        , screenTextLine theme labelW (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textMuted desc
+        , screenTextLine theme labelW descH (pxToSub 12) (pxToSub 17) pal.textMuted desc
         ]
     , rightNode
     ]
@@ -668,7 +669,7 @@ def buildSettingsGeneralBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetN
         |>.withFixedSize colW (pxToSub 122))
       [ screenTextLine theme (pxToSub 584) (pxToSub 22) (pxToSub 16) (pxToSub 22) pal.textPrimary "Account" 500
       , screenTextLine theme (pxToSub 584) (pxToSub 26) (pxToSub 13) (pxToSub 18) pal.textSecondary
-          "Your server connection, connected accounts, and desktop appearance."
+          "Your server connection, connected accounts, how Orb looks and usage telemetry."
       , tabsBar
       ]
 
@@ -684,15 +685,15 @@ def buildSettingsGeneralBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetN
 
   let githubCard := sCard (pxToSub 62)
     [ buildSettingsRow theme rowW (pxToSub 62) "Mission git & gh credentials"
-        "Configure GITHUB_OAUTH_CLIENT_ID on Core to enable." "Connect GitHub" true false false ]
+        "Configure GITHUB_OAUTH_CLIENT_ID on Core to connect." "Connect GitHub" true false false ]
 
   let cloudCard := sCard (pxToSub 79)
     [ buildSettingsRow theme rowW (pxToSub 79) "Connected services"
-        "Cloud agents use accounts connected to Core." "Refresh accounts" true false false ]
+        "Cloud agents use accounts connected to Core. Connecting an account\ndoes not start work." "Refresh accounts" true false false ]
 
   let appearCard := sCard (pxToSub 125)
     [ buildSettingsRow theme rowW (pxToSub 63) "Theme" "Auto follows your desktop appearance." themeLabel false false true false true
-    , buildSettingsRow theme rowW (pxToSub 62) "Background sync" "Active — keeping recent conversations live." "Auto" false false false false true
+    , buildSettingsRow theme rowW (pxToSub 62) "Background sync" "Active — keeping recent conversations live; pauses automatically on slow links." "Auto" false false false false true
     ]
 
   let aboutCard := sCard (pxToSub 116)
