@@ -37,7 +37,9 @@ class ReconcileTest(unittest.TestCase):
         self.rows, self.queue = parse(ROADMAP)
 
     def run_plan(self, prs=(), missions=(), green=True, ledger=None):
-        return plan(self.rows, self.queue, tagged(list(prs)), list(missions), green, ledger or {}, NOW)
+        acts = plan(self.rows, self.queue, tagged(list(prs)), list(missions), green, ledger or {}, NOW)
+        self.models = [a[3] for a in acts if a[0] == "start"]
+        return [a[:3] for a in acts]
 
     def test_parse_reads_rows_needs_and_queue(self):
         self.assertEqual(self.queue, ["A2", "A3", "A4", "A5", "A6"])
@@ -88,15 +90,34 @@ class ReconcileTest(unittest.TestCase):
         pivot = mission("pivot", "active")
         self.assertEqual(self.run_plan(green=False, missions=[old, pivot]), [("start", "MASTER", 1)])
 
-    def test_dispatch_waits_until_the_provider_returns(self):
-        dead = mission("Z0", "cancelled", updated=NOW - 60, created_ts=NOW - 65)
-        dead["returns_ts"] = NOW + 600
-        self.assertEqual(self.run_plan(missions=[dead]), [])
-        dead["returns_ts"] = NOW - 1
-        self.assertEqual(self.run_plan(missions=[dead]), [("start", "A2", 1), ("start", "A6", 1)])
+    def test_workers_start_on_the_first_free_model_and_wait_when_none_is(self):
+        astra, sol = NS["MODELS"][:2]
+        fable = sol  # the second model is the one used when the first cools
+        a = mission("Z0", "cancelled", updated=NOW - 60, created_ts=NOW - 65)
+        a.update(returns_ts=NOW + 600, model=astra)
+        self.assertEqual(self.run_plan(missions=[a]), [("start", "A2", 1), ("start", "A6", 1)])
+        self.assertEqual(self.models, [fable, fable])
+        f = mission("Z1", "cancelled", updated=NOW - 60, created_ts=NOW - 65)
+        f.update(returns_ts=NOW + 3600, model=fable)
+        d = mission("Z2", "cancelled", updated=NOW - 60, created_ts=NOW - 65)
+        d.update(returns_ts=NOW + 3600, model=NS["MODELS"][2])
+        e = mission("Z3", "cancelled", updated=NOW - 60, created_ts=NOW - 65)
+        e.update(returns_ts=NOW + 3600, model=NS["MODELS"][3])
+        self.assertEqual(self.run_plan(missions=[a, f, d, e]), [])
+        a["returns_ts"] = NOW - 1
+        self.assertEqual(self.run_plan(missions=[a, f, d, e]), [("start", "A2", 1), ("start", "A6", 1)])
+        self.assertEqual(self.models, [astra, astra])
+
+    def test_a_provider_with_every_account_parked_is_skipped(self):
+        acts = plan(self.rows, self.queue, {}, [], True, {}, NOW, {"openai": NOW + 600})
+        self.assertEqual({a[3] for a in acts if a[0] == "start"}, {"anthropic/claude-fable-5-2"})
+        acts = plan(self.rows, self.queue, {}, [], True, {}, NOW,
+                    {"openai": NOW + 600, "anthropic": NOW + 600, "ethereumfoundation": NOW + 1})
+        self.assertEqual([a for a in acts if a[0] == "start"], [])
 
     def test_each_attempt_uses_the_next_model(self):
-        self.assertEqual(NS["MODELS"][:2], ["openai/gpt-6-astra", "anthropic/claude-fable-5-2"])
+        self.assertEqual(NS["MODELS"], ["openai/gpt-6-astra", "openai/gpt-6.1-sol",
+                                        "anthropic/claude-fable-5-2", "ethereumfoundation/deepseek-v4.1-flash"])
 
     def test_a_recently_idle_worker_is_not_nudged_yet(self):
         self.assertNotIn("A2", [a[1] for a in self.run_plan(missions=[mission("A2", "awaiting_user", updated=NOW - 60)])])
@@ -105,9 +126,9 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.run_plan(green=False), [("start", "MASTER", 1)])
         self.assertEqual(self.run_plan(green=False, missions=[mission("MASTER", "active")]), [])
 
-    def test_worker_limit_is_respected(self):
-        live = [mission(f"Z{i}", "active") for i in range(3)]
-        self.assertEqual(self.run_plan(missions=live), [])
+    def test_other_live_workers_do_not_hold_back_queued_rows(self):
+        live = [mission(f"Z{i}", "active") for i in range(20)]
+        self.assertEqual(self.run_plan(missions=live), [("start", "A2", 1), ("start", "A6", 1)])
 
     def test_unknown_queue_entry_is_reported(self):
         self.queue.append("Q9")
