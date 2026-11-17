@@ -93,10 +93,10 @@ def run : IO Unit := do
       tick (due + 6000)
       tick (due + 6002)
       check ((← launches.get).size == before + 1) "a failed job wake-up waits for its backoff"
-      let mut now := due + 6002
+      let mut retryNow := due + 6002
       for _ in [0:maxWakeupLaunchTries + 2] do
-        now := now + 1000
-        tick now
+        retryNow := retryNow + 1000
+        tick retryNow
       check ((← launches.get).size == before + maxWakeupLaunchTries) "launch attempts are bounded"
       check ((← cellOf store.missionsDb "SELECT phase || ':' || error FROM mission_continuations WHERE id='c-job2';" #[]) == "4:launch_failed")
         "an abandoned wake-up is retired with a stated error"
@@ -117,6 +117,120 @@ def run : IO Unit := do
       check ((← cellOf store.missionsDb "SELECT group_concat(id || ':' || run_generation || ':' || phase, ' ') FROM (SELECT * FROM mission_continuations WHERE mission_id='m-follow' ORDER BY id);" #[])
           == "f-fired:3:2 f-keep:4:1 f-old:2:3 f-retry:3:3")
         "a follow-up turn carries the armed wake-up forward and fences the rest"
+      let staleClaim ← OrbCore.QueueCont.actOnContinuation store "f-keep" "resume" "t2" 2000000000 (some ("f-keep", 3))
+      check (match staleClaim with | .error "continuation_snapshot_changed" => true | _ => false)
+        "a carried occurrence rejects its old scheduler generation"
+      check ((← cellOf store.missionsDb "SELECT phase FROM mission_continuations WHERE id='f-keep';" #[]) == "1")
+        "a stale claim must leave the carried wake-up armed"
+      -- Same row, same generation and already-due deadline, different request:
+      -- only request identity distinguishes the new payload from the scan.
+      let .ok _ ← execParamQuery store.missionsDb
+          "UPDATE missions SET run_generation=4 WHERE id='m-follow';" #[]
+        | throw (IO.userError "claim mission generation")
+      let replacement : OrbCore.QueueCont.ContinuationDraft := {
+        id := "unused-replacement-id", missionId := "m-follow", requestId := "f-new",
+        prompt := "new due prompt", reason := "test", source := "mcp",
+        triggerKind := "time", dueEpoch := 1900000001 }
+      let .ok replacedId ← OrbCore.QueueCont.registerContinuation store replacement 1800000000 "t2"
+        | throw (IO.userError "due replacement registration")
+      check (replacedId == "f-keep") "replacement must exercise same-row identity"
+      let .ok replayId ← OrbCore.QueueCont.registerContinuation store replacement 1800000000 "t2"
+        | throw (IO.userError "replacement registration replay")
+      check (replayId == replacedId) "same-request registration replay preserves identity"
+      let oldClaim ← OrbCore.QueueCont.actOnContinuation store replacedId "resume" "t3" 2000000000 (some ("f-keep", 4))
+      check (match oldClaim with | .error "continuation_snapshot_changed" => true | _ => false)
+        "old same-generation snapshot cannot claim new due payload"
+      check ((← cellOf store.missionsDb "SELECT phase || ':' || prompt FROM mission_continuations WHERE id='f-keep';" #[]) == "1:new due prompt")
+        "rejected old claim leaves replacement payload armed"
+      let newClaim ← OrbCore.QueueCont.actOnContinuation store replacedId "resume" "t3" 2000000000 (some ("f-new", 4))
+      check (match newClaim with | .ok (.ok "m-follow") => true | _ => false)
+        "matching replacement snapshot claims normally"
+      let duplicateClaim ← OrbCore.QueueCont.actOnContinuation store replacedId "resume" "t3" 2000000000 (some ("f-new", 4))
+      check (match duplicateClaim with | .error _ => true | _ => false)
+        "a claimed occurrence cannot be claimed twice"
+      -- A throw before launch and a throw after acceptance look identical to
+      -- today's Bool callback. Neither may blindly reset a claimed occurrence.
+      -- Record both event orders explicitly before attempting any recovery fix.
+      for accepted in #[false, true] do
+        let mid := if accepted then "m-accepted-throw" else "m-presubmit-throw"
+        let cid := if accepted then "c-accepted-throw" else "c-presubmit-throw"
+        let .ok _ ← execParamQuery store.missionsDb
+            ("INSERT INTO missions(id,title,status,backend,working_directory,project,placement_kind,tags,run_generation,node_boot_epoch,created_at,updated_at) " ++
+             "VALUES(?1,'wakeup','awaiting_user','claudecode','','','managed','[]',1,1,'t0','t0');") #[mid]
+          | throw (IO.userError "fault mission insert failed")
+        let .ok _ ← OrbCore.QueueCont.registerContinuation store
+            { id := cid, missionId := mid, requestId := cid, prompt := "fault probe",
+              reason := "test", source := "mcp", triggerKind := "time", dueEpoch := due + 250000 }
+            due "t0"
+          | throw (IO.userError "fault continuation registration")
+        let attempts ← IO.mkRef (0 : Nat)
+        let acceptedInputs ← IO.mkRef (#[] : Array String)
+        let faultyLaunch : MissionRecord → String → Option String → IO Bool := fun _ prompt _ => do
+          check ((← cellOf store.missionsDb "SELECT phase FROM mission_continuations WHERE id=?1;" #[cid]) == "2")
+            "fault injection must occur after durable claim"
+          attempts.modify (· + 1)
+          if accepted then acceptedInputs.modify (·.push prompt)
+          throw (IO.userError "injected launch boundary fault")
+        let tickFault := fun t => tickContinuationScheduler store none none none sup none root (some faultyLaunch) t
+        let threw ← try
+          discard <| tickFault (some (due + 250001))
+          pure false
+        catch _ => pure true
+        check threw "baseline launch boundary fault must escape the scheduler pass"
+        discard <| tickFault (some (due + 250100))
+        check ((← attempts.get) == 1) "claimed uncertain launch must not be blindly replayed"
+        check ((← acceptedInputs.get).size == (if accepted then 1 else 0))
+          "pre-submit and accepted-before-error have different external effects"
+        check ((← cellOf store.missionsDb "SELECT phase FROM mission_continuations WHERE id=?1;" #[cid]) == "2")
+          "baseline fault leaves the claimed occurrence outside future scans"
+      -- The due scan is a snapshot. While A launches, B's same-job watcher is
+      -- replaced. B must not consume the replacement using the old prompt.
+      for mid in #["m-snapshot-a", "m-snapshot-b", "m-stop-retry"] do
+        let .ok _ ← execParamQuery store.missionsDb
+            ("INSERT INTO missions(id,title,status,backend,working_directory,project,placement_kind,tags,run_generation,node_boot_epoch,created_at,updated_at) " ++
+             "VALUES(?1,'wakeup','awaiting_user','claudecode','','','managed','[]',1,1,'t0','t0');") #[mid]
+          | throw (IO.userError "snapshot mission insert failed")
+      let now := due + 300000
+      let register := fun (id mid prompt kind job : String) (dueAt : UInt64) =>
+        OrbCore.QueueCont.registerContinuation store
+          { id := id, missionId := mid, requestId := id, prompt := prompt,
+            reason := "test", source := "mcp", triggerKind := kind, jobId := job, dueEpoch := dueAt }
+          (now - 100) "t0"
+      let .ok _ ← register "snapshot-a" "m-snapshot-a" "first" "time" "" (now - 1)
+        | throw (IO.userError "snapshot A registration")
+      let .ok _ ← register "snapshot-b" "m-snapshot-b" "old" "durable_job_terminal" "job-done" (now + 86400)
+        | throw (IO.userError "snapshot B registration")
+      let delivered ← IO.mkRef (#[] : Array String)
+      let replaceDuringLaunch : MissionRecord → String → Option String → IO Bool := fun mr prompt _ => do
+        if mr.id == "m-snapshot-a" then
+          let .ok _ ← register "snapshot-b-new" "m-snapshot-b" "replacement" "durable_job_terminal" "job-done" (now + 86400)
+            | throw (IO.userError "replace B during A launch")
+        else if mr.id == "m-snapshot-b" then
+          -- Observe actual local process input/output, not just a callback Bool.
+          -- This verifies local delivery only, not a remote node/provider ACK.
+          let receipt ← IO.Process.output { cmd := "/usr/bin/printf", args := #["%s", prompt] }
+          check (receipt.exitCode == 0) "local scheduled-input process must exit successfully"
+          delivered.modify (·.push receipt.stdout)
+        return true
+      discard <| tickContinuationScheduler store none none none sup none root (some replaceDuringLaunch) (some now)
+      discard <| tickContinuationScheduler store none none none sup none root (some replaceDuringLaunch) (some (now + 1))
+      check ((← delivered.get) == #["replacement"])
+        "snapshot replacement must deliver only the replacement prompt exactly once"
+      -- Stop wins while the admitted launch is returning a definite failure.
+      -- Retry must never adopt Stop's newer generation and resurrect the wake.
+      let .ok _ ← register "stop-retry" "m-stop-retry" "stop me" "time" "" now
+        | throw (IO.userError "stop retry registration")
+      let stoppedLaunches ← IO.mkRef (0 : Nat)
+      let stopDuringLaunch : MissionRecord → String → Option String → IO Bool := fun mr _ _ => do
+        stoppedLaunches.modify (· + 1)
+        let .ok _ ← OrbCore.QueueCont.hostedStop store mr.id "t-stop"
+          | throw (IO.userError "stop during failed launch")
+        return false
+      discard <| tickContinuationScheduler store none none none sup none root (some stopDuringLaunch) (some now)
+      discard <| tickContinuationScheduler store none none none sup none root (some stopDuringLaunch) (some (now + 120))
+      check ((← stoppedLaunches.get) == 1) "Stop must fence a failed launch retry"
+      check ((← cellOf store.missionsDb "SELECT COUNT(*) FROM mission_continuations WHERE mission_id='m-stop-retry' AND phase=1;" #[]) == "0")
+        "Stop must leave no rearmed wake-up"
     finally
       closeCoreStore store
   finally
