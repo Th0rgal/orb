@@ -106,7 +106,9 @@ def plan(rows, queue, prs, missions, master_green, ledger, now):
     """Return the list of actions for this run. Pure: no I/O."""
     by_row = {}
     for m in missions:
-        rid = m["track"][len("roadmap-"):]
+        # Attempt n > 1 runs on track roadmap-<id>-<n>: a dead worker keeps its
+        # track's writer lease, so a replacement on the same track is refused.
+        rid = re.sub(r"-\d+$", "", m["track"][len("roadmap-"):])
         if rid == MASTER_FIX and now - m["created_ts"] > MASTER_WINDOW_SECONDS:
             continue
         if rid == MASTER_FIX or re.fullmatch(ROW_ID, rid):
@@ -118,6 +120,12 @@ def plan(rows, queue, prs, missions, master_green, ledger, now):
     live = sum(1 for ms in by_row.values() for m in ms
                if m["status"] in LIVE or (now - m["updated_ts"] < IDLE_SECONDS
                                           and m["updated_ts"] - m["created_ts"] < QUICK_DEATH_SECONDS))
+    def quick(m):
+        return m["status"] not in LIVE and m["updated_ts"] - m["created_ts"] < QUICK_DEATH_SECONDS
+    # Deaths at start are provider cooldowns, not the row's fault: they cost no
+    # attempt, and two of them in 15 minutes pause dispatch until the next run.
+    paused = sum(1 for ms in by_row.values() for m in ms
+                 if quick(m) and now - m["updated_ts"] < IDLE_SECONDS) >= 2
     actions = []
     targets = queue if master_green else [MASTER_FIX]
     for rid in targets:
@@ -138,6 +146,9 @@ def plan(rows, queue, prs, missions, master_green, ledger, now):
         open_prs = prs.get(rid, {}).get("open", [])
         if latest and latest["status"] in LIVE:
             continue
+        attempts = sum(1 for m in ms if not quick(m))
+        if paused and (latest is None or quick(latest)):
+            continue
         if latest is None:
             foreign = [p for p in open_prs if now - p["updated_ts"] < FOREIGN_PR_SECONDS]
             if foreign:
@@ -148,12 +159,10 @@ def plan(rows, queue, prs, missions, master_green, ledger, now):
             continue
         if now - latest["updated_ts"] < IDLE_SECONDS:
             continue
-        quick = latest["updated_ts"] - latest["created_ts"] < QUICK_DEATH_SECONDS
-        if not quick and ledger.get("nudged", {}).get(latest["id"]) is None:
+        if not quick(latest) and ledger.get("nudged", {}).get(latest["id"]) is None:
             actions.append(("nudge", rid, latest["id"]))
-        elif len(ms) < MAX_ATTEMPTS:
+        elif attempts < MAX_ATTEMPTS:
             if live < MAX_WORKERS:
-                actions.append(("replace", rid, latest["id"]))
                 actions.append(("start", rid, len(ms) + 1))
                 live += 1
         elif ledger.get("reported", {}).get(rid) != latest["id"]:
@@ -257,7 +266,8 @@ def start_worker(row, attempt, open_prs):
     rid = row["id"]
     return core_post("/api/control/missions", {
         "title": f"Roadmap {rid}: {row['node'][:80]}", "prompt": brief(row, attempt, open_prs),
-        "project": "now", "track": f"roadmap-{rid}", "backend": "opencode",
+        "project": "now",
+        "track": f"roadmap-{rid}" if attempt == 1 else f"roadmap-{rid}-{attempt}", "backend": "opencode",
         "model_override": MODELS[(attempt - 1) % len(MODELS)], "remote_node_id": "auto", "tags": EXCLUDE,
         "idempotency_key": f"roadmap-{rid}-attempt-{attempt}"})
 
@@ -287,9 +297,6 @@ def main():
             if kind == "start":
                 r = start_worker(row, arg, open_prs)
                 print(f"started {rid} attempt {arg}: {r.get('id') or r.get('mission_id')}")
-            elif kind == "replace":  # release the track's writer lease first
-                core_post(f"/api/control/missions/{arg}/cancel", {})
-                print(f"cancelled {rid} ({arg}) before replacing it")
             elif kind == "nudge":
                 core_post(f"/api/control/missions/{arg}/resume", {"content": nudge_text(open_prs)})
                 ledger.setdefault("nudged", {})[arg] = int(now)
@@ -313,4 +320,5 @@ def main():
 
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(line_buffering=True)
     main()

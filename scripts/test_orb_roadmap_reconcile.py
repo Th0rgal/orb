@@ -62,9 +62,9 @@ class ReconcileTest(unittest.TestCase):
         first = mission("A2", "completed", mid="m1")
         self.assertIn(("nudge", "A2", "m1"), self.run_plan(missions=[first]))
         nudged = {"nudged": {"m1": NOW - 1800}}
-        self.assertEqual(self.run_plan(missions=[first], ledger=nudged)[:2],
-                         [("replace", "A2", "m1"), ("start", "A2", 2)])
+        self.assertIn(("start", "A2", 2), self.run_plan(missions=[first], ledger=nudged))
         second = mission("A2", "failed", created="2026-11-17T11:00:00Z", mid="m2")
+        second["track"] = "roadmap-A2-2"
         both = {"nudged": {"m1": 1, "m2": 1}}
         self.assertIn(("escalate", "A2", "m2"), self.run_plan(missions=[first, second], ledger=both))
         both["reported"] = {"A2": "m2"}
@@ -74,9 +74,14 @@ class ReconcileTest(unittest.TestCase):
         dead = mission("A2", "cancelled", mid="m1", created_ts=NOW - 3605)
         self.assertIn(("start", "A2", 2), self.run_plan(missions=[dead]))
 
-    def test_recent_quick_deaths_hold_their_slots(self):
-        dead = [mission(f"Z{i}", "cancelled", updated=NOW - 60, created_ts=NOW - 65) for i in range(3)]
+    def test_recent_quick_deaths_pause_dispatch_and_cost_no_attempt(self):
+        dead = [mission(f"Z{i}", "cancelled", updated=NOW - 60, created_ts=NOW - 65) for i in range(2)]
         self.assertEqual(self.run_plan(missions=dead), [])
+        many = [mission("A2", "cancelled", mid=f"q{i}", created=f"2026-11-17T1{i}:00:00Z",
+                        updated=NOW - 7000 + i, created_ts=NOW - 7005 + i) for i in range(3)]
+        acts = self.run_plan(missions=many)
+        self.assertIn(("start", "A2", 4), acts)
+        self.assertNotIn("escalate", [a[0] for a in acts])
 
     def test_old_master_fix_attempts_and_foreign_tracks_are_ignored(self):
         old = mission("MASTER", "cancelled", created_ts=NOW - 2 * 86400)
