@@ -108,6 +108,13 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.run_plan(missions=[a, f, d, e]), [("start", "A2", 1), ("start", "A6", 1)])
         self.assertEqual(self.models, [astra, astra])
 
+    def test_a_provider_with_every_account_parked_is_skipped(self):
+        acts = plan(self.rows, self.queue, {}, [], True, {}, NOW, {"openai": NOW + 600})
+        self.assertEqual({a[3] for a in acts if a[0] == "start"}, {"anthropic/claude-fable-5-2"})
+        acts = plan(self.rows, self.queue, {}, [], True, {}, NOW,
+                    {"openai": NOW + 600, "anthropic": NOW + 600, "ethereumfoundation": NOW + 1})
+        self.assertEqual([a for a in acts if a[0] == "start"], [])
+
     def test_each_attempt_uses_the_next_model(self):
         self.assertEqual(NS["MODELS"], ["openai/gpt-6-astra", "openai/gpt-6.1-sol",
                                         "anthropic/claude-fable-5-2", "ethereumfoundation/deepseek-v4.1-flash"])

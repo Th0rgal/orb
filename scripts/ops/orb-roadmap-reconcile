@@ -107,7 +107,7 @@ def is_done(row, prs):
     return row["state"].startswith(("done", "dropped")) or bool(prs.get(row["id"], {}).get("merged"))
 
 
-def plan(rows, queue, prs, missions, master_green, ledger, now):
+def plan(rows, queue, prs, missions, master_green, ledger, now, parked=None):
     """Return the list of actions for this run. Pure: no I/O."""
     by_row = {}
     for m in missions:
@@ -132,6 +132,12 @@ def plan(rows, queue, prs, missions, master_green, ledger, now):
     for m in recent:
         if m.get("returns_ts", 0) > now and m.get("model"):
             cooling[m["model"]] = max(cooling.get(m["model"], 0), m["returns_ts"])
+    # Core's routing health is the truth: a provider whose every account is
+    # parked cannot serve any of its models.
+    for x in MODELS:
+        until = (parked or {}).get(x.split("/", 1)[0])
+        if until and until > now:
+            cooling[x] = max(cooling.get(x, 0), until)
     free = [x for x in MODELS if x not in cooling]
     unexplained = sum(1 for m in recent if not m.get("returns_ts") and now - m["updated_ts"] < IDLE_SECONDS)
     paused = not free or unexplained >= 2
@@ -282,6 +288,20 @@ def core_post(path, body):
     return http_json(CORE + path, body, {"Authorization": "Bearer " + core_token()})
 
 
+def fetch_parked():
+    """{provider: parked-until epoch} for providers whose every account is parked."""
+    req = urllib.request.Request(CORE + "/api/model-routing/health",
+                                 headers={"Authorization": "Bearer " + core_token(),
+                                          "User-Agent": "orb-roadmap-reconcile"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        accounts = json.load(r)
+    by = {}
+    for a in accounts if isinstance(accounts, list) else []:
+        until = iso_ts(a.get("parked_until") or "")
+        by.setdefault(a.get("provider_id", ""), []).append(until)
+    return {p: min(us) for p, us in by.items() if us and all(us)}
+
+
 def start_worker(row, attempt, open_prs, model, node="auto"):
     rid = row["id"]
     return core_post("/api/control/missions", {
@@ -303,7 +323,12 @@ def main():
         ledger = json.load(open(STATE))
     except (OSError, ValueError):
         ledger = {}
-    actions = plan(rows, queue, prs, missions, master_green, ledger, now)
+    try:
+        parked = fetch_parked()
+    except Exception as exc:  # health unavailable: fall back to dead workers' errors
+        print(f"routing health unavailable: {type(exc).__name__}: {exc}", file=sys.stderr)
+        parked = {}
+    actions = plan(rows, queue, prs, missions, master_green, ledger, now, parked)
     print(f"master {'green' if master_green else 'RED'}; queue {queue}; "
           f"live {[m['track'] for m in missions if m['status'] in LIVE]}; actions {actions}")
     if dry:
