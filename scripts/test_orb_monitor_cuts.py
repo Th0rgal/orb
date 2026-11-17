@@ -42,7 +42,7 @@ class MonitorCutsTest(unittest.TestCase):
                 );
                 """
             )
-            for i in range(10):
+            for i in range(9):
                 con.execute(
                     "INSERT INTO proxy_usage VALUES(?,?,?,?,?,?)",
                     (i + 1, "2026-11-17T12:00:00+00:00", "google", "gemini-4-argon", "", "m1"),
@@ -50,8 +50,9 @@ class MonitorCutsTest(unittest.TestCase):
             con.executemany(
                 "INSERT INTO proxy_outcomes VALUES(?,?,?,?,?,?)",
                 [
-                    (1, "2026-11-17T12:00:00+00:00", "google", "gemini-4-argon", "", "ok"),
-                    (2, "2026-11-17T12:01:00+00:00", "google", "gemini-4-argon", "", "stream_incomplete"),
+                    (i + 1, f"2026-11-17T12:{i:02d}:00+00:00", "google", "gemini-4-argon", "",
+                     "stream_incomplete" if i == 9 else "ok")
+                    for i in range(10)
                 ],
             )
             con.execute(

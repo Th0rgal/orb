@@ -191,7 +191,7 @@ def cut_rates(previous_info=None):
     with ro(MISSIONS_DB) as con:
         request_rows = con.execute(
             "SELECT COALESCE(provider,''), COALESCE(model,requested_model,''), COUNT(*) "
-            "FROM proxy_usage WHERE timestamp >= ? GROUP BY 1,2;", (cutoff,)
+            "FROM proxy_outcomes WHERE timestamp >= ? GROUP BY 1,2;", (cutoff,)
         ).fetchall()
         outcome_rows = con.execute(
             "SELECT COALESCE(provider,''), COALESCE(model,requested_model,''), COUNT(*) "
