@@ -20,7 +20,7 @@ Config (environment, see deploy/systemd/orb-roadmap-reconcile.service):
   ORB_ROADMAP_STATE        nudge ledger (default /var/lib/orb-roadmap/state.json)
   ORB_ROADMAP_NODES        nodes workers are spread over (default uruk,babylon,nippur,ashur)
   ORB_ROADMAP_MODELS       worker models in order of preference, comma-separated
-                           (default openai/gpt-6.2-astra,openai/gpt-6-astra,openai/gpt-6.1-sol,
+                           (default openai/gpt-6.2-astra,openai/gpt-6.2-sol,
                            anthropic/claude-fable-5-2,ethereumfoundation/deepseek-v4.1-flash)
   ORB_ROADMAP_INBOX_MISSION mission whose transcript receives decision requests
   ORB_ROADMAP_DRY_RUN=1    print the plan, change nothing
@@ -37,7 +37,7 @@ MISSIONS_DB = ENV("ORB_ROADMAP_MISSIONS_DB", "/root/.sandboxed-sh/missions/missi
 # Workers are spread over these nodes by queue position; "auto" put all of them on one host.
 NODES = [n.strip() for n in ENV("ORB_ROADMAP_NODES", "uruk,babylon,nippur,ashur").split(",") if n.strip()]
 MODELS = [m.strip() for m in ENV("ORB_ROADMAP_MODELS",
-          "openai/gpt-6.2-astra,openai/gpt-6-astra,openai/gpt-6.1-sol,anthropic/claude-fable-5-2,"
+          "openai/gpt-6.2-astra,openai/gpt-6.2-sol,anthropic/claude-fable-5-2,"
           "ethereumfoundation/deepseek-v4.1-flash").split(",") if m.strip()]
 IDLE_SECONDS = 15 * 60          # an idle worker is nudged after this long
 FOREIGN_PR_SECONDS = 60 * 60    # an open PR touched this recently has an owner elsewhere

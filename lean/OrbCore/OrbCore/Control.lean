@@ -705,7 +705,8 @@ private def fallbackCatalogProviders : Array (String × String × String × Stri
     ("claude-haiku-5-5", "Claude Haiku 5.5", "Latest Haiku, fastest for quick answers")
   ]),
   ("openai", "OpenAI (Subscription)", "subscription", "ChatGPT Plus/Pro via OAuth", #[
-    ("gpt-6.1-sol", "GPT-6.1 Sol", "Newest Codex flagship (efforts low..ultra). Default."),
+    ("gpt-6.2-sol", "GPT-6.2 Sol", "Newest Codex flagship for complex reasoning and coding. Default."),
+    ("gpt-6.1-sol", "GPT-6.1 Sol", "Previous Codex flagship (efforts low..ultra)."),
     ("gpt-6.1-terra", "GPT-6.1 Terra", "GPT-6.1 model with lower cost than Sol (efforts low..ultra)."),
     ("gpt-6.2-astra", "GPT-6.2 Astra", "OpenAI's most capable Codex model for the hardest projects (efforts low..max), 272K context."),
     ("gpt-6-astra", "GPT-6 Astra", "OpenAI's GPT-6 flagship in Codex (efforts low..ultra)."),
@@ -5292,7 +5293,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       mkOpt "claude-haiku-5-5" "Claude (Subscription) — Claude Haiku 5.5" "Latest Haiku, fastest for quick answers"
     ]
     let codexModels : Array String := #[
-      mkOpt "gpt-6.1-sol" "OpenAI (Subscription) — GPT-6.1 Sol" "Newest Codex flagship (efforts low..ultra). Default.",
+      mkOpt "gpt-6.2-sol" "OpenAI (Subscription) — GPT-6.2 Sol" "Newest Codex flagship for complex reasoning and coding. Default.",
+      mkOpt "gpt-6.1-sol" "OpenAI (Subscription) — GPT-6.1 Sol" "Previous Codex flagship (efforts low..ultra).",
       mkOpt "gpt-6.1-terra" "OpenAI (Subscription) — GPT-6.1 Terra" "GPT-6.1 model with lower cost than Sol (efforts low..ultra).",
       mkOpt "gpt-6.2-astra" "OpenAI (Subscription) — GPT-6.2 Astra" "OpenAI's most capable Codex model for the hardest projects (efforts low..max), 272K context.",
       mkOpt "gpt-6-astra" "OpenAI (Subscription) — GPT-6 Astra" "OpenAI's GPT-6 flagship in Codex (efforts low..ultra).",

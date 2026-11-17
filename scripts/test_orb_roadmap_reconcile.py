@@ -103,11 +103,10 @@ class ReconcileTest(unittest.TestCase):
         d.update(returns_ts=NOW + 3600, model=NS["MODELS"][2])
         e = mission("Z3", "cancelled", updated=NOW - 60, created_ts=NOW - 65)
         e.update(returns_ts=NOW + 3600, model=NS["MODELS"][3])
-        g = mission("Z4", "cancelled", updated=NOW - 60, created_ts=NOW - 65)
-        g.update(returns_ts=NOW + 3600, model=NS["MODELS"][4])
-        self.assertEqual(self.run_plan(missions=[a, f, d, e, g]), [])
+
+        self.assertEqual(self.run_plan(missions=[a, f, d, e]), [])
         a["returns_ts"] = NOW - 1
-        self.assertEqual(self.run_plan(missions=[a, f, d, e, g]), [("start", "A2", 1), ("start", "A6", 1)])
+        self.assertEqual(self.run_plan(missions=[a, f, d, e]), [("start", "A2", 1), ("start", "A6", 1)])
         self.assertEqual(self.models, [astra, astra])
 
     def test_a_provider_with_every_account_parked_is_skipped(self):
@@ -118,7 +117,7 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual([a for a in acts if a[0] == "start"], [])
 
     def test_each_attempt_uses_the_next_model(self):
-        self.assertEqual(NS["MODELS"], ["openai/gpt-6.2-astra", "openai/gpt-6-astra", "openai/gpt-6.1-sol",
+        self.assertEqual(NS["MODELS"], ["openai/gpt-6.2-astra", "openai/gpt-6.2-sol",
                                         "anthropic/claude-fable-5-2", "ethereumfoundation/deepseek-v4.1-flash"])
 
     def test_a_recently_idle_worker_is_not_nudged_yet(self):
