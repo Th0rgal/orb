@@ -1214,7 +1214,8 @@ private def launchOrReuseWarmClaude
     (sessionId? : Option String)
     (permMode : ClaudePermissionMode)
     (imagePaths : Array String)
-    (stRef : IO.Ref LocalRunState) : IO (Except String Unit) := do
+    (stRef : IO.Ref LocalRunState)
+    (extraEnv : Array (String × String) := #[]) : IO (Except String Unit) := do
   -- Plan prefix (`/plan ...`) automatically activates Claude's `plan` permission mode
   let trimmed := prompt.trimAscii.toString
   let (effectiveMode, effectivePrompt) :=
@@ -1262,8 +1263,10 @@ private def launchOrReuseWarmClaude
   let envPairs ← currentEnvPairs
   let mut envStrs : Array String := #[]
   for (k, v) in envPairs do
-    if k != "CLAUDECODE" then
+    if k != "CLAUDECODE" && !extraEnv.any (fun (ek, _) => ek == k) then
       envStrs := envStrs.push s!"{k}={v}"
+  for (k, v) in extraEnv do
+    envStrs := envStrs.push s!"{k}={v}"
   -- Use `/bin/sh -c 'cd "$1" && shift && exec "$@"' sh <cwd> <binPath> <claudeArgs...>` so child starts cleanly in `cwd`
   let shArgs := #["-c", "cd \"$1\" && shift && exec \"$@\"", "sh", cwd, binPath] ++ claudeArgs
   let spawned ← match ← (spawnPgrp "/bin/sh" shArgs envStrs (pipeStdin := true) (nullStdio := true) (pipeStdout := true)).toBaseIO with
@@ -1905,7 +1908,11 @@ def startHarnessTurn
     (worktreeMode : String := "local") -- "local" | "worktree" | "auto"
     (imagePaths : Array String := #[])
     (callbacks : HarnessCallbacks := {})
-    (worktreesParentDir? : Option String := none) : IO (Except String LocalRunState) := do
+    (worktreesParentDir? : Option String := none)
+    -- Set by Core for turns it runs itself: proxy environment and CLI arguments
+    -- (see `OrbCore.RemoteDispatch.harnessProxySetup`). The model is then used as given.
+    (extraEnv : Array (String × String) := #[])
+    (extraArgs : Array String := #[]) : IO (Except String LocalRunState) := do
   let resolvedBin? ←
     if !binPath.trimAscii.toString.isEmpty && (← System.FilePath.pathExists binPath.trimAscii.toString) then
       pure (some binPath.trimAscii.toString)
@@ -1959,7 +1966,7 @@ def startHarnessTurn
   callbacks.onOutputEvent (.obj #[("text", .str ""), ("reset", .bool true), ("activities", .arr #[])])
 
   if harness == "claudecode" then
-    match ← launchOrReuseWarmClaude mgr id actualBin effectiveCwd prompt model? effort? effSid? permissionMode imagePaths stRef with
+    match ← launchOrReuseWarmClaude mgr id actualBin effectiveCwd prompt model? effort? effSid? permissionMode imagePaths stRef extraEnv with
     | .error e =>
       stRef.modify fun s => { s with done := true, exitCode? := some 1, error? := some e }
       return .error e
@@ -1967,7 +1974,9 @@ def startHarnessTurn
       return .ok (← stRef.get)
   else
     let resolvedModel? ←
-      if harness == "opencode" then
+      if harness == "opencode" && extraEnv.any (fun (k, _) => k == "OPENCODE_CONFIG_CONTENT") then
+        pure model?
+      else if harness == "opencode" then
         let (defModel?, provNames, cfgModels) ← readLocalOpenCodeConfigInfo
         let firstChoice := resolveOpenCodeModelForLocal model? defModel? (provNames.map Prod.fst) cfgModels
         let needsCliProbe :=
@@ -1987,8 +1996,12 @@ def startHarnessTurn
           pure firstChoice
       else
         pure model?
-    let cliArgs := buildOneShotHarnessArgs harness prompt resolvedModel? effort? effSid? permissionMode imagePaths
-    let envPairs ← currentEnvPairs
+    let baseArgs := buildOneShotHarnessArgs harness prompt resolvedModel? effort? effSid? permissionMode imagePaths
+    -- Extra arguments go right after the subcommand (`codex exec -c ...`).
+    let cliArgs :=
+      if extraArgs.isEmpty || baseArgs.isEmpty then baseArgs
+      else (baseArgs.extract 0 1) ++ extraArgs ++ (baseArgs.extract 1 baseArgs.size)
+    let envPairs := (← currentEnvPairs).filter (fun (k, _) => !extraEnv.any (fun (ek, _) => ek == k)) ++ extraEnv
     let mut envStrs := envPairs.map fun (k, v) => s!"{k}={v}"
     if !envPairs.any (fun (k, _) => k == "NO_COLOR") then
       envStrs := envStrs.push "NO_COLOR=1"

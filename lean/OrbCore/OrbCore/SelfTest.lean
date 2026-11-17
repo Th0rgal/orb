@@ -25,6 +25,7 @@ import OrbCore.LocalOriginTests
 import OrbCore.ManagedTtlTests
 import OrbCore.ManagedHarvestTests
 import OrbCore.AutoPlacementTests
+import OrbCore.HarnessProxyTests
 import OrbCore.ManagedReuseTests
 import OrbCore.ManagedSnapshotLifecycleTests
 import OrbCore.NodeLivenessTests
@@ -7780,6 +7781,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     OrbCore.ManagedTtlTests.run tmpRoot
     OrbCore.ManagedHarvestTests.run tmpRoot
     OrbCore.AutoPlacementTests.run tmpRoot
+    OrbCore.HarnessProxyTests.run
     OrbCore.ManagedReuseTests.run tmpRoot
     runManagedMcpProviderContractTests tmpRoot
     OrbCore.ManagedSnapshotLifecycleTests.run tmpRoot

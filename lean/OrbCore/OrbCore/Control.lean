@@ -2034,8 +2034,30 @@ private def launchLocalCoreMissionTurn
       | none => pure none
     let ownerUname? := (ownerUser?.map (·.username.trimAscii.toString)).filter (!·.isEmpty)
     ensureTurnTelemetryStarted tSink missionId prompt ownerUid? ownerUname?
+  -- Route the harness through Core's own model router, like a node turn: same model
+  -- aliases and provider accounts, no reliance on logins stored on the Core host.
+  let boundPort ← match st.remoteSup? with
+    | some sup => sup.boundPortRef.get
+    | none => pure (0 : UInt16)
+  let proxied := boundPort != 0 && (normHarness == "opencode" || normHarness == "claudecode" || normHarness == "codex")
+  let failLaunch : String → IO (Except String String) := fun err => do
+    -- Nothing was started: the mission must not keep showing `active`, and the reason must be visible.
+    discard <| appendMissionEvent st.store missionId "error" (renderCompact (.obj #[("content", .str err)])) ts
+    discard <| execParamQuery st.store.missionsDb
+      ("UPDATE missions SET status='interrupted', terminal_reason='launch_failed', state_revision=state_revision+1, updated_at=?3 " ++
+       "WHERE id=?1 AND status='active' AND run_generation=CAST(?2 AS INTEGER);")
+      #[missionId, s!"{nextGen}", ts]
+    return .error err
+  let setup ←
+    if proxied then
+      match ← mintMissionProxyToken st.store missionId mission.ownerUserId (nowSec + 86400) with
+      | .ok tok => pure (OrbCore.RemoteDispatch.harnessProxySetup normHarness model s!"http://127.0.0.1:{boundPort}" tok)
+      | .error e => return ← failLaunch s!"failed to mint mission proxy token: {e}"
+    else
+      pure ({ model := model? } : OrbCore.RemoteDispatch.HarnessProxySetup)
   match ← OrbBin.ClaudeControl.startHarnessTurn
-      mgr missionId normHarness binOverride safeCwd prompt nextGen model? effort? sessionId? parsedPerm wtArg #[] cbs (some safeRoot) with
+      mgr missionId normHarness binOverride safeCwd prompt nextGen setup.model effort? sessionId? parsedPerm wtArg #[] cbs (some safeRoot)
+      setup.env setup.args with
   | .ok runSt =>
     if runSt.cwd != safeCwd && !runSt.cwd.isEmpty then
       if let .ok safeWt ← confineWorkingDirectory st.cfg.workingDir runSt.cwd then
@@ -2043,13 +2065,7 @@ private def launchLocalCoreMissionTurn
           "UPDATE missions SET working_directory=?2 WHERE id=?1;" #[missionId, safeWt]
         return .ok safeWt
     return .ok safeCwd
-  | .error err =>
-    -- Nothing was started: the mission must not keep showing `active`.
-    discard <| execParamQuery st.store.missionsDb
-      ("UPDATE missions SET status='interrupted', terminal_reason='launch_failed', state_revision=state_revision+1, updated_at=?3 " ++
-       "WHERE id=?1 AND status='active' AND run_generation=CAST(?2 AS INTEGER);")
-      #[missionId, s!"{nextGen}", ts]
-    return .error err
+  | .error err => failLaunch err
 
 /-- Resolve or provision a concrete remote node when a control-plane mission turn targets
     `auto-managed[:provider][:size]`. Reuses any existing scoped ready machine for the mission/user;
