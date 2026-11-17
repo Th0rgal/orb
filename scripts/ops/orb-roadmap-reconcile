@@ -18,7 +18,6 @@ start (missions are recognised by track "roadmap-<row id>").
 
 Config (environment, see deploy/systemd/orb-roadmap-reconcile.service):
   ORB_ROADMAP_STATE        nudge ledger (default /var/lib/orb-roadmap/state.json)
-  ORB_ROADMAP_MAX_WORKERS  live workers at once (default 10)
   ORB_ROADMAP_NODES        nodes workers are spread over (default uruk,babylon,nippur,ashur)
   ORB_ROADMAP_MODELS       worker models, one per attempt, comma-separated
                            (default openai/gpt-6-astra,openai/gpt-6.1-sol,
@@ -35,7 +34,6 @@ ROADMAP_PATH = "docs/plans/orb-roadmap.md"
 CORE = ENV("ORB_ROADMAP_CORE", "http://127.0.0.1:3000")
 STATE = ENV("ORB_ROADMAP_STATE", "/var/lib/orb-roadmap/state.json")
 MISSIONS_DB = ENV("ORB_ROADMAP_MISSIONS_DB", "/root/.sandboxed-sh/missions/missions-prod.db")
-MAX_WORKERS = int(ENV("ORB_ROADMAP_MAX_WORKERS", "10"))
 # Workers are spread over these nodes by queue position; "auto" put all of them on one host.
 NODES = [n.strip() for n in ENV("ORB_ROADMAP_NODES", "uruk,babylon,nippur,ashur").split(",") if n.strip()]
 MODELS = [m.strip() for m in ENV("ORB_ROADMAP_MODELS",
@@ -120,7 +118,6 @@ def plan(rows, queue, prs, missions, master_green, ledger, now, parked=None):
             by_row.setdefault(rid, []).append(m)
     for ms in by_row.values():
         ms.sort(key=lambda m: m["created_at"])
-    live = sum(1 for ms in by_row.values() for m in ms if m["status"] in LIVE)
     def quick(m):
         return m["status"] not in LIVE and m["updated_ts"] - m["created_ts"] < QUICK_DEATH_SECONDS
     # Deaths at start are provider cooldowns, not the row's fault: they cost no
@@ -169,18 +166,14 @@ def plan(rows, queue, prs, missions, master_green, ledger, now, parked=None):
             foreign = [p for p in open_prs if now - p["updated_ts"] < FOREIGN_PR_SECONDS]
             if foreign:
                 continue  # someone else is driving that PR right now
-            if live < MAX_WORKERS:
-                actions.append(("start", rid, 1, model))
-                live += 1
+            actions.append(("start", rid, 1, model))
             continue
         if now - latest["updated_ts"] < IDLE_SECONDS:
             continue
         if not quick(latest) and ledger.get("nudged", {}).get(latest["id"]) is None:
             actions.append(("nudge", rid, latest["id"]))
         elif attempts < MAX_ATTEMPTS:
-            if live < MAX_WORKERS:
-                actions.append(("start", rid, len(ms) + 1, model))
-                live += 1
+            actions.append(("start", rid, len(ms) + 1, model))
         elif ledger.get("reported", {}).get(rid) != latest["id"]:
             actions.append(("escalate", rid, latest["id"]))
     return actions

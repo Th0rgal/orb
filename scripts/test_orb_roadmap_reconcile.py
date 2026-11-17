@@ -126,9 +126,9 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.run_plan(green=False), [("start", "MASTER", 1)])
         self.assertEqual(self.run_plan(green=False, missions=[mission("MASTER", "active")]), [])
 
-    def test_worker_limit_is_respected(self):
-        live = [mission(f"Z{i}", "active") for i in range(NS["MAX_WORKERS"])]
-        self.assertEqual(self.run_plan(missions=live), [])
+    def test_other_live_workers_do_not_hold_back_queued_rows(self):
+        live = [mission(f"Z{i}", "active") for i in range(20)]
+        self.assertEqual(self.run_plan(missions=live), [("start", "A2", 1), ("start", "A6", 1)])
 
     def test_unknown_queue_entry_is_reported(self):
         self.queue.append("Q9")

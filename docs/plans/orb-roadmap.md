@@ -44,7 +44,7 @@ receipt (PR, deployed SHA, and the check that was run):
 requests and master CI on GitHub, and the missions on track
 `roadmap-<row id>`, then:
 
-- starts a worker (at most 10 live, spread over uruk, babylon, nippur and ashur) for every row of the
+- starts a worker (one per queued row, no other limit; spread over uruk, babylon, nippur and ashur) for every row of the
   queue (section 7) whose needs are done and that has no live worker;
 - resumes a worker that went idle for 15 minutes without a merged PR once,
   then replaces it once, then posts a decision request to the Inbox;
@@ -107,7 +107,7 @@ spawned sparingly: one per ready node, none for work a node already has.
     then `openai/gpt-6.1-sol`.
   The plain `ethereumfoundation/glm-5.3` is rejected for our key (node X4).
   Record requested and effective model.
-- At most 10 writers at once (Thomas, 17 Nov). Never two writers on the same files.
+- One writer per queued row; the queue is the only limit (Thomas, 17 Nov). Never two writers on the same files.
 - Placement: spread them. No more than 2 Lean-building workers on one static
   node (8 cores each); use `auto-managed:<provider>:large` for the rest. Never
   `nimrud` (reserved), never the Core host. Destroy a VM when its worker ends,
