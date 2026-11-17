@@ -168,13 +168,15 @@ def streamDeadlines
 /--
   Unboxed C-ABI Provider Circuit-Breaker Stepper (`orb_breaker_step`):
   `reason`: `0 = ok`, `1 = rate_limit_429`, `2 = quota_exhausted`, `3 = payment_required_402`,
-            `4 = transient_502_timeout`, `5 = auth_401_403`.
+            `4 = transient_502_timeout`, `5 = auth_401_403`, `6 = disabled_by_provider`.
   Packs `(parkAccount : UInt8, poisonSubscription : UInt8, applyCooldown : UInt8)` into a 32-bit word:
   `bit 0 = parkAccount`, `bit 8 = poisonSubscription`, `bit 16 = applyCooldown`.
   - Transient 502/timeout (`reason == 4`) with `transientStreak < transientThreshold` applies zero cooldown (`0`)
     and never poisons the subscription.
   - Only `rate_limit_429` (`1`) or `quota_exhausted` (`2`) may poison a shared subscription (`bit 8`).
   - `quota_exhausted` (`2`) and `payment_required_402` (`3`) park the account across restarts (`bit 0`).
+  - `disabled_by_provider` (`6`) parks the account terminally (`bit 0`) with no cooldown and no poison:
+    provider-disabled logins stay out of rotation until an operator clears them or signs in again.
 -/
 @[inline, export orb_breaker_step]
 def breakerStep (reason : UInt8) (transientStreak transientThreshold : UInt32) : UInt32 :=
@@ -186,6 +188,8 @@ def breakerStep (reason : UInt8) (transientStreak transientThreshold : UInt32) :
     (1 : UInt32) ||| sub ||| 65536
   else if reason == 1 then
     65792
+  else if reason == 6 then
+    1
   else
     65536
 

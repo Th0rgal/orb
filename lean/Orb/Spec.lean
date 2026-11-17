@@ -611,6 +611,13 @@ theorem breaker_transient_never_poisons_subscription
     breakerStep 4 streak threshold = 0 := by
   unfold breakerStep; simp [h_below]
 
+/-- Corollary 15b (`ConservedResource` — `orb_breaker_step`): A provider-disabled account (`reason == 6`)
+    is parked terminally (`bit 0 == 1`) with no cooldown (`bit 16 == 0`) and never poisons a shared
+    subscription (`bit 8 == 0`), regardless of its transient streak. -/
+theorem breaker_provider_disabled_parks_terminally (streak threshold : UInt32) :
+    breakerStep 6 streak threshold = 1 := by
+  unfold breakerStep; simp
+
 /-- Corollary 16 (`StickyFence` — `orb_mission_step`): An armed `/goal` turn with an agent-armed wakeup
     (`wakeupArmed == 1`, `signal == 0`, `continuationPending == 0`) transitions to `4 (paused_wakeup)`, never `1 (complete)`. -/
 theorem mission_goal_wakeup_pauses_never_completes

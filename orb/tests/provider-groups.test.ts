@@ -67,6 +67,10 @@ describe("summarizeProviderGroup", () => {
     expect(one({}, "out_of_credit").attention).toBe(true);
     expect(one({}, "auth_failed").text).toBe("2 accounts · 1 needs sign-in");
     expect(one({}, "quota_exhausted").attention).toBe(false);
+    expect(one({}, "disabled_by_provider").text).toBe("2 accounts · 1 disabled by provider");
+    expect(one({}, "disabled_by_provider").attention).toBe(true);
+    expect(one({}, "disabled_by_provider").text).toBe("2 accounts · 1 disabled by provider");
+    expect(one({}, "disabled_by_provider").attention).toBe(true);
   });
 });
 

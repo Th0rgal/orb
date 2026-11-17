@@ -345,10 +345,43 @@ def defaultCooldownSecs (reason : CooldownReason) : UInt64 :=
 def exponentialCooldownSecs (reason : CooldownReason) (consecutive : UInt32 := 1) : UInt64 :=
   Orb.Kernel.accountCooldownSecs (defaultCooldownBaseSecs reason) maxCooldownRetryAfterSecs consecutive
 
+/-- An account-ban answer: the provider itself disabled this login. Google Antigravity answers
+    `403 PERMISSION_DENIED` with reason `TOS_VIOLATION`; equivalent account-ban messages are
+    matched so they do not become a retryable `permission` failure. -/
+def providerDisabledHint (body : String) : Bool :=
+  let low := body.toLower
+  containsSubstring low "tos_violation" ||
+  containsSubstring low "account_disabled" ||
+  containsSubstring low "account has been disabled" ||
+  containsSubstring low "account was disabled" ||
+  containsSubstring low "account is disabled" ||
+  containsSubstring low "account_deactivated" ||
+  containsSubstring low "account has been suspended" ||
+  containsSubstring low "account suspended" ||
+  containsSubstring low "account has been banned" ||
+  containsSubstring low "account banned" ||
+  containsSubstring low "account_terminated" ||
+  containsSubstring low "violation of terms" ||
+  containsSubstring low "violation of our terms"
+
+/-- Provider-supplied explanation for a terminal account disable, when the response carries one. -/
+def providerDisabledMessage? (status : Nat) (body : String) : Option String :=
+  if status != 403 || !providerDisabledHint body then none
+  else
+    let fallback := "Provider disabled this account"
+    match OrbBin.Json.parse body with
+    | .ok jv =>
+      let err := jv.fieldOrNull "error"
+      let msg := (err.fieldStr? "message").orElse (fun _ => jv.fieldStr? "message") |>.getD ""
+      some (if msg.trimAscii.toString.isEmpty then fallback else msg.trimAscii.toString)
+    | .error _ =>
+      let raw := body.trimAscii.toString
+      some (if raw.isEmpty then fallback else raw)
+
 /-- Map an upstream HTTP status + response body to `Orb.HarnessCloud.classifyProviderAttempt` /
-    `Orb.Kernel.breakerStep` failure reason code (`0..5`):
+    `Orb.Kernel.breakerStep` failure reason code (`0..6`):
     `0 = ok_fresh`, `1 = rate_limit_429`, `2 = quota_exhausted`, `3 = payment_required_402`,
-    `4 = transient_502_stall`, `5 = auth_401_403`. -/
+    `4 = transient_502_stall`, `5 = auth_401_403`, `6 = disabled_by_provider`. -/
 def providerFailureReasonCode (status : Nat) (body : String) : UInt8 :=
   if status ≥ 200 && status < 300 then 0
   else if status == 429 then
@@ -356,7 +389,8 @@ def providerFailureReasonCode (status : Nat) (body : String) : UInt8 :=
   else if status == 402 then 3
   else if status == 401 then 5
   else if status == 403 then
-    if authHint body then 5 else 0
+    if providerDisabledHint body then 6
+    else if authHint body then 5 else 0
   else if status ≥ 500 && status < 600 then 4
   else 0
 
@@ -412,16 +446,20 @@ def accountSlotId (accountId : String) : UInt32 := Id.run do
     h := (h ^^^ b.toUInt32) * 16777619
   return if h == 0 then 1 else h
 
-/-- Per-account circuit-breaker, streak, parking & exponential cooldown state owned by `ProviderHealthTracker`. -/
+/-- Per-account circuit-breaker, streak, parking & exponential cooldown state owned by `ProviderHealthTracker`.
+    `disabledByProvider` is terminal: it survives cooldown expiry and is cleared only by an operator
+    health-clear or a completed sign-in. `disabledMessage` is the provider's own explanation, if any. -/
 structure AccountHealthRecord where
-  accountId        : String
-  slotId           : UInt32
-  transientStreak  : UInt32 := 0
-  consecutiveTrips : UInt32 := 0
-  parkedQuota      : Bool   := false
-  poisonedSub      : Bool   := false
-  cooldown?        : Option AccountCooldown := none
-  lastVerdictCode  : UInt8  := 0
+  accountId           : String
+  slotId              : UInt32
+  transientStreak     : UInt32 := 0
+  consecutiveTrips    : UInt32 := 0
+  parkedQuota         : Bool   := false
+  poisonedSub         : Bool   := false
+  cooldown?           : Option AccountCooldown := none
+  lastVerdictCode     : UInt8  := 0
+  disabledByProvider  : Bool   := false
+  disabledMessage     : String := ""
   deriving Repr, DecidableEq, Inhabited
 
 /-- Single-owner provider health, circuit-breaker, route-generation, and pacing state (`SM-21`). -/
@@ -496,17 +534,29 @@ def snapshotActiveHealthCooldowns (tracker : ProviderHealthTracker) (nowEpoch : 
     set { st with accounts := updated }
     return active
 
-/-- Operator reset: forget the cooldown, quota park, poison and streaks of every account whose
+/-- Accounts the provider itself disabled. These are terminal: unlike cooldowns they never expire
+    on their own, so every routing decision must exclude them until `clearAccountHealthWhere` runs. -/
+def snapshotDisabledHealthAccountIds (tracker : ProviderHealthTracker) : IO (Array String) :=
+  tracker.health.atomically do
+    let st ← get
+    return st.accounts.filterMap (fun r => if r.disabledByProvider then some r.accountId else none)
+
+/-- Operator reset: forget the cooldown, quota park, poison, provider disable and streaks of every account whose
     id satisfies `pick`. Used by the health "clear" route and after a completed login. -/
 def clearAccountHealthWhere (tracker : ProviderHealthTracker) (pick : String → Bool) : IO Unit :=
   tracker.health.atomically do
     let st ← get
     set { st with accounts := st.accounts.filter (fun r => !pick r.accountId) }
 
-/-- Plan a `RoutingChain` directly from `ProviderHealthTracker`'s single-owner state at `nowEpoch`. -/
+/-- Plan a `RoutingChain` directly from `ProviderHealthTracker`'s single-owner state at `nowEpoch`.
+    Provider-disabled accounts are removed from `eligible` and are not reported as cooling down. -/
 def planChainFromHealth (tracker : ProviderHealthTracker) (chain : RoutingChain) (nowEpoch : UInt64) : IO ChainPlan := do
   let active ← snapshotActiveHealthCooldowns tracker nowEpoch
-  return planChain chain active nowEpoch
+  let disabled ← snapshotDisabledHealthAccountIds tracker
+  let plan := planChain chain active nowEpoch
+  return { plan with
+    eligible := plan.eligible.filter (fun t => !disabled.contains t.accountId)
+    cooling := plan.cooling.filter (fun c => !disabled.contains c.accountId) }
 
 /-- Pure single-step reconciliation of an attempt outcome against `(ProviderHealthState, ProviderAttemptSliceState)`
     using `Orb.HarnessCloud.stepProviderAttemptSlice`, `Orb.Kernel.breakerStep`, and `Orb.Kernel.accountCooldownSecs`.
@@ -554,9 +604,12 @@ def stepHealthAttemptPure
       clampCooldownRetryAfter (if announced == 0 then computed else announced)
   let nextCooldownEpoch :=
     if proposedCooldownSecs > 0 then nowEpoch + proposedCooldownSecs else activeCoolUntil
+  -- The generic attempt classifier treats a provider-disable like an account-level quota park;
+  -- `breakerStep 6` below is what makes it terminal instead of a cooldown.
+  let classifyCode : UInt8 := if failCode == 6 then 5 else failCode
   let ev : ProviderAttemptSliceEvent := {
     chunkCommits := if chunkCommits then 1 else 0
-    failureReason := failCode
+    failureReason := classifyCode
     candidateAccountId := candId
     maxRetries := maxRetries
     transientThreshold := hst.transientThreshold
@@ -601,14 +654,19 @@ def stepHealthAttemptPure
       if verdict == 1 then 0
       else if tripped then nextConsecutive
       else rec0.consecutiveTrips
+    let disabledMessage :=
+      if failCode == 6 then (providerDisabledMessage? status respBody).getD rec0.disabledMessage
+      else rec0.disabledMessage
     let rec1 : AccountHealthRecord := {
       rec0 with
       transientStreak := sliceOut.transientStreak
       consecutiveTrips := nextTrips
       parkedQuota := if verdict == 1 then false else (rec0.parkedQuota || parkAcct)
       poisonedSub := if verdict == 1 then false else (rec0.poisonedSub || poisonSub)
-      cooldown? := nextCool?
+      cooldown? := if failCode == 6 then none else nextCool?
       lastVerdictCode := verdict
+      disabledByProvider := rec0.disabledByProvider || failCode == 6
+      disabledMessage := disabledMessage
     }
     ({ hst with accounts := upsertAccountHealth hst.accounts rec1 }, sliceOut, verdict, effs)
 
@@ -1354,9 +1412,14 @@ def forwardProxyChain
       else
         let active ← snapshotActiveHealthCooldowns htr nowSec
         pure (active.map (fun c => c.accountId))
+  let disabledIds ← match healthTracker? with
+    | none => pure #[]
+    | some htr =>
+      if headersAlreadyCommitted then pure #[] else snapshotDisabledHealthAccountIds htr
   let targets := capProxyTargets (chain.targets.filter (fun t =>
     !skipAccountIds.any (fun id => id == t.accountId) &&
-    !healthCooldownIds.any (fun id => id == t.accountId)))
+    !healthCooldownIds.any (fun id => id == t.accountId) &&
+    !disabledIds.any (fun id => id == t.accountId)))
   let n := targets.size
   let explicitPin? : Option String :=
     pinnedAccount?.map (·.trimAscii.toString)

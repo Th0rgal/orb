@@ -448,7 +448,9 @@ def ProviderAttemptVerdict.admitsDispatch : ProviderAttemptVerdict → Bool
 /-- Pure generation-fenced provider attempt classifier extending proxy commitment & breaker rules (`SM-21`):
     `failureReason`:
       `0 = ok_fresh`, `1 = rate_limit_429`, `2 = quota_exhausted`, `3 = payment_required_402`,
-      `4 = transient_502_stall`, `5 = auth_401_403`.
+      `4 = transient_502_stall`, `5 = auth_401_403`. Core's kernel-level
+      `6 = disabled_by_provider` is normalized to `5` before this classifier, so the terminal park
+      comes from `Orb.Kernel.breakerStep` rather than a retryable auth cooldown.
     - Fails closed (`0 = rejectStaleOrPin`) whenever `routeGeneration == 0`, `attemptGeneration != routeGeneration`
       (stale generation), `candidateAccountId == 0`, `(pinnedAccountId != 0 && candidateAccountId != pinnedAccountId)`,
       `(firstByteCommitted == 1 && pinnedAccountId == 0)`, `nowEpoch < cooldownUntilEpoch`, or `failureReason > 5`.
