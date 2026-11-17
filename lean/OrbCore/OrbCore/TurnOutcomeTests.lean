@@ -335,6 +335,7 @@ def run : IO Unit := do
       finishEmpty "m-empty"
       check ((← statusOf "m-empty") == "awaiting_user" && ((← retries "m-empty").splitOn "empty_turn_retry:1/1").length == 2)
         "a new user message resets the retry count"
+      discard <| execParamQuery db "UPDATE mission_continuations SET phase=4 WHERE mission_id='m-empty' AND phase=1;" #[]
 
       -- A turn that only called tools did work: not empty.
       newMission "m-tools" "[]"
@@ -372,7 +373,8 @@ def run : IO Unit := do
       check ((← recoveredEvents "m-r28-recover") == "1")
         s!"r28 first stream cut emits a visible recovered event, got '{← recoveredEvents "m-r28-recover"}'"
       let prevLaunches ← launches.get
-      tick 4000000300
+      let dueEp1 := ((← cellOf db "SELECT COALESCE(due_epoch,0) FROM mission_continuations WHERE mission_id='m-r28-recover' ORDER BY rowid DESC LIMIT 1;").toNat?).getD 0
+      tick (dueEp1.toUInt64 + 10)
       check ((← launches.get) == prevLaunches + 1 && (← statusOf "m-r28-recover") == "active")
         "r28 due continuation relaunches the cut turn on the same mission"
       finishSuccessWithText "m-r28-recover" "Completed after transient stream cut recovery."
@@ -384,12 +386,14 @@ def run : IO Unit := do
       finishStreamCut "m-r28-three-cuts" "upstream stream ended without a finish_reason (stream_incomplete)"
       check ((← retries "m-r28-three-cuts") == "transient_turn_retry:1:stream_incomplete/1" && (← recoveredEvents "m-r28-three-cuts") == "1")
         "r28 cut #1 arms retry 1 and emits recovered #1"
-      tick 4000000400
+      let dueEpCut1 := ((← cellOf db "SELECT COALESCE(due_epoch,0) FROM mission_continuations WHERE mission_id='m-r28-three-cuts' ORDER BY rowid DESC LIMIT 1;").toNat?).getD 0
+      tick (dueEpCut1.toUInt64 + 10)
       finishStreamCut "m-r28-three-cuts" "upstream_idle_timeout: stream stalled"
       check ((← retries "m-r28-three-cuts") == "transient_turn_retry:1:stream_incomplete/4,transient_turn_retry:2:idle_timeout/1" &&
              (← recoveredEvents "m-r28-three-cuts") == "2" && (← statusOf "m-r28-three-cuts") == "awaiting_user")
         s!"r28 cut #2 arms retry 2 and emits recovered #2, got retries='{← retries "m-r28-three-cuts"}'"
-      tick 4000000500
+      let dueEpCut2 := ((← cellOf db "SELECT COALESCE(due_epoch,0) FROM mission_continuations WHERE mission_id='m-r28-three-cuts' ORDER BY rowid DESC LIMIT 1;").toNat?).getD 0
+      tick (dueEpCut2.toUInt64 + 10)
       let launchesBeforeThirdCut ← launches.get
       finishStreamCut "m-r28-three-cuts" "upstream stream ended without a finish_reason (stream_incomplete)"
       check ((← statusOf "m-r28-three-cuts") == "failed" && (← termReasonOf "m-r28-three-cuts") == "stream_incomplete")
@@ -397,7 +401,7 @@ def run : IO Unit := do
       check ((← retries "m-r28-three-cuts") == "transient_turn_retry:1:stream_incomplete/4,transient_turn_retry:2:idle_timeout/4" &&
              (← recoveredEvents "m-r28-three-cuts") == "2")
         "r28 third consecutive cut does not arm a third retry or emit a third recovered event"
-      tick 4000000600
+      tick (dueEpCut2.toUInt64 + 100)
       check ((← launches.get) == launchesBeforeThirdCut) "r28 failed mission after 3rd cut is not relaunched"
 
       -- A first turn with nowhere to run is refused; nothing is left `active`.

@@ -855,9 +855,9 @@ def settleTransientTurnFailure
           ("message", .str s!"Transient upstream stream cut ({reasonStr}); recovering turn ({prior + 1} of {maxTransientTurnRetries})."),
           ("reason", .str reasonStr),
           ("code", .str reasonStr),
-          ("attempt", .num (prior + 1)),
-          ("max_retries", .num maxTransientTurnRetries),
-          ("backoff_seconds", .num backoffSec.toNat),
+          ("attempt", .num s!"{prior + 1}"),
+          ("max_retries", .num s!"{maxTransientTurnRetries}"),
+          ("backoff_seconds", .num s!"{backoffSec}"),
           ("continuation_id", .str cid),
           ("retryable", .bool true)
         ])) nowIso
@@ -1438,8 +1438,13 @@ partial def spawnRemoteJobPoller
                     settleEmptyTurn store broadcastHub? missionId nowIso nowSec
                   else pure none
                 let transientErrHint? :=
-                  acc.lastError?.orElse (fun _ => nodeErr?).orElse (fun _ =>
-                    if !logTail.trimAscii.toString.isEmpty then some ((logTail.trimAscii.toString.take 600).toString) else none)
+                  match acc.lastError? with
+                  | some e => some e
+                  | none =>
+                    match nodeErr? with
+                    | some e => some e
+                    | none =>
+                      if !logTail.trimAscii.toString.isEmpty then some ((logTail.trimAscii.toString.take 600).toString) else none
                 let transientVerdict? ←
                   if jState != "succeeded" && jState != "cancelled" then
                     settleTransientTurnFailure store broadcastHub? missionId nowIso nowSec transientErrHint?
