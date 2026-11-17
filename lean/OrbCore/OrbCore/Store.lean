@@ -141,6 +141,9 @@ structure PrivilegeLeaseRecord where
   revoked          : Bool   := false
   expiresAtEpoch   : UInt64
   leaseEpoch       : UInt64 := 0
+  sessionScoped    : Bool   := true
+  sessionId        : String := ""
+  sessionExpiresAtEpoch : UInt64 := 0
   deriving Repr, DecidableEq
 
 /-- Committed `mission_events` row queued in transaction order for ordered live dispatch. -/
@@ -219,7 +222,7 @@ def missionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS mission_search_docs (doc_id INTEGER PRIMARY KEY AUTOINCREMENT, doc_key TEXT NOT NULL UNIQUE, mission_id TEXT NOT NULL, locator TEXT NOT NULL, role TEXT NOT NULL, sequence INTEGER, event_id TEXT, timestamp TEXT NOT NULL, title_text TEXT NOT NULL DEFAULT '', body_text TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_automations (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, cron_expr TEXT NOT NULL, prompt TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, variables_used TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS model_routing_chains (id TEXT PRIMARY KEY, name TEXT NOT NULL, models_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL DEFAULT '');" ++
-  "CREATE TABLE IF NOT EXISTS privilege_leases (grant_id TEXT PRIMARY KEY, lease_token TEXT NOT NULL UNIQUE, mission_id TEXT NOT NULL, target_host TEXT NOT NULL, scope TEXT NOT NULL, allowed_units_json TEXT NOT NULL DEFAULT '[]', require_force_cmd INTEGER NOT NULL DEFAULT 0, biometric_signed INTEGER NOT NULL DEFAULT 1, revoked INTEGER NOT NULL DEFAULT 0, expires_at_epoch INTEGER NOT NULL DEFAULT 0, lease_epoch INTEGER NOT NULL DEFAULT 0);" ++
+  "CREATE TABLE IF NOT EXISTS privilege_leases (grant_id TEXT PRIMARY KEY, lease_token TEXT NOT NULL UNIQUE, mission_id TEXT NOT NULL, target_host TEXT NOT NULL, scope TEXT NOT NULL, allowed_units_json TEXT NOT NULL DEFAULT '[]', require_force_cmd INTEGER NOT NULL DEFAULT 0, biometric_signed INTEGER NOT NULL DEFAULT 1, revoked INTEGER NOT NULL DEFAULT 0, expires_at_epoch INTEGER NOT NULL DEFAULT 0, lease_epoch INTEGER NOT NULL DEFAULT 0, session_scoped INTEGER NOT NULL DEFAULT 1, session_id TEXT NOT NULL DEFAULT '', session_expires_at INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE TABLE IF NOT EXISTS privilege_audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, grant_id TEXT NOT NULL, mission_id TEXT NOT NULL, target_host TEXT NOT NULL, executing_host TEXT NOT NULL, command TEXT NOT NULL, allowed INTEGER NOT NULL, created_at TEXT NOT NULL);" ++
   "CREATE TABLE IF NOT EXISTS core_boot_state (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1), boot_epoch INTEGER NOT NULL DEFAULT 0, bunker_state INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE TABLE IF NOT EXISTS remote_message_queue (sequence INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, message_id TEXT NOT NULL, mission_id TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'waiting', UNIQUE(user_id,message_id));" ++
@@ -414,6 +417,9 @@ def missionsAdditiveAlters : Array String := #[
   "ALTER TABLE mission_automations ADD COLUMN variables_used TEXT NOT NULL DEFAULT '{}';",
   "ALTER TABLE core_boot_state ADD COLUMN bunker_state INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE privilege_leases ADD COLUMN lease_epoch INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE privilege_leases ADD COLUMN session_scoped INTEGER NOT NULL DEFAULT 1;",
+  "ALTER TABLE privilege_leases ADD COLUMN session_id TEXT NOT NULL DEFAULT '';",
+  "ALTER TABLE privilege_leases ADD COLUMN session_expires_at INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE users ADD COLUMN password_seeded INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE missions ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT '';",
   "CREATE INDEX IF NOT EXISTS idx_missions_owner ON missions(owner_user_id);",
@@ -2542,6 +2548,10 @@ def isStatusMovable (status : String) : Bool :=
   status == "interrupted" || status == "paused" || status == "blocked" ||
   status == "not_feasible" || status == "acknowledged" || status == "waiting_rate_limit"
 
+/-- Statuses whose mission still owns a live turn or live background work. -/
+def isLiveMissionStatus (status : String) : Bool :=
+  status == "active" || status == "pending" || status == "waiting_background"
+
 /-- Transactional fence-checked machine-transfer initiation gated by `verifyTransferFence` (`OrbCore.Spec`). -/
 def startMachineTransfer (st : CoreStore) (t : TransferRecord) : IO (Except String TransferRecord) := do
   let nowSec ← coreEpochSec
@@ -2590,20 +2600,23 @@ def startMachineTransfer (st : CoreStore) (t : TransferRecord) : IO (Except Stri
 /-- Insert or update a hardware-approved JIT privilege lease in `missions.db`. -/
 def upsertPrivilegeLease (st : CoreStore) (rec : PrivilegeLeaseRecord) : IO (Except String Unit) := do
   let res ← execParamQuery st.missionsDb
-    "INSERT OR REPLACE INTO privilege_leases(grant_id,lease_token,mission_id,target_host,scope,allowed_units_json,require_force_cmd,biometric_signed,revoked,expires_at_epoch,lease_epoch) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11);"
+    "INSERT OR REPLACE INTO privilege_leases(grant_id,lease_token,mission_id,target_host,scope,allowed_units_json,require_force_cmd,biometric_signed,revoked,expires_at_epoch,lease_epoch,session_scoped,session_id,session_expires_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14);"
     #[rec.grantId, rec.leaseToken, rec.missionId, rec.targetHost, rec.scope, rec.allowedUnitsJson,
       if rec.requireForceCmd then "1" else "0",
       if rec.biometricSigned then "1" else "0",
       if rec.revoked then "1" else "0",
       s!"{rec.expiresAtEpoch}",
-      s!"{rec.leaseEpoch}"]
+      s!"{rec.leaseEpoch}",
+      if rec.sessionScoped then "1" else "0",
+      rec.sessionId,
+      s!"{rec.sessionExpiresAtEpoch}"]
   return res.map (fun _ => ())
 
 /-- Look up a privilege lease by `lease_token` in `missions.db`. -/
 def lookupPrivilegeLease? (st : CoreStore) (leaseToken : String) : IO (Option PrivilegeLeaseRecord) := do
   if leaseToken.isEmpty then return none
   match ← execParamQuery st.missionsDb
-    "SELECT grant_id,lease_token,mission_id,target_host,scope,allowed_units_json,require_force_cmd,biometric_signed,revoked,expires_at_epoch,lease_epoch FROM privilege_leases WHERE lease_token=?1;" #[leaseToken] with
+    "SELECT grant_id,lease_token,mission_id,target_host,scope,allowed_units_json,require_force_cmd,biometric_signed,revoked,expires_at_epoch,lease_epoch,session_scoped,session_id,session_expires_at FROM privilege_leases WHERE lease_token=?1;" #[leaseToken] with
   | .error _ => return none
   | .ok rows =>
     if rows.size ≤ 1 then return none
@@ -2620,6 +2633,9 @@ def lookupPrivilegeLease? (st : CoreStore) (leaseToken : String) : IO (Option Pr
       revoked          := ((r[8]?).getD "0") == "1"
       expiresAtEpoch   := (((r[9]?).bind String.toNat?).getD 0).toUInt64
       leaseEpoch       := (((r[10]?).bind String.toNat?).getD 0).toUInt64
+      sessionScoped    := ((r[11]?).getD "1") != "0"
+      sessionId        := (r[12]?).getD ""
+      sessionExpiresAtEpoch := (((r[13]?).bind String.toNat?).getD 0).toUInt64
     }
 
 /-- Persistent bunker lattice (`0` normal, `1` soft, `2` hard). Shared by every process on this store. -/
