@@ -98,9 +98,11 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.models, [fable, fable])
         f = mission("Z1", "cancelled", updated=NOW - 60, created_ts=NOW - 65)
         f.update(returns_ts=NOW + 3600, model=fable)
-        self.assertEqual(self.run_plan(missions=[a, f]), [])
+        d = mission("Z2", "cancelled", updated=NOW - 60, created_ts=NOW - 65)
+        d.update(returns_ts=NOW + 3600, model=NS["MODELS"][2])
+        self.assertEqual(self.run_plan(missions=[a, f, d]), [])
         a["returns_ts"] = NOW - 1
-        self.assertEqual(self.run_plan(missions=[a, f]), [("start", "A2", 1), ("start", "A6", 1)])
+        self.assertEqual(self.run_plan(missions=[a, f, d]), [("start", "A2", 1), ("start", "A6", 1)])
         self.assertEqual(self.models, [astra, astra])
 
     def test_each_attempt_uses_the_next_model(self):
