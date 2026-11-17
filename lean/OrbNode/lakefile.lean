@@ -16,6 +16,8 @@ require «orb-bin» from "../OrbBin"
 target orb_node_posix_o pkg : FilePath := do
   let oFile := pkg.buildDir / "c" / "orb_node_posix.o"
   let srcJob ← inputTextFile <| pkg.dir / "c" / "orb_node_posix.c"
+  let readyJob ← inputTextFile <| pkg.dir / "c" / "spawn_ready.h"
+  let srcJob := srcJob.zipWith (fun src _ => src) readyJob
   let leanIncludeDir ← getLeanIncludeDir
   buildO oFile srcJob #["-I", leanIncludeDir.toString] #["-std=gnu11", "-O3", "-fPIC", "-Wall", "-Wextra", "-Werror"] ((← IO.getEnv "LEAN_CC").getD "cc")
 
@@ -38,4 +40,8 @@ lean_exe «orb-node» where
 @[default_target]
 lean_exe «orb-node-test» where
   root := `OrbNode.SelfTest
+  supportInterpreter := false
+
+lean_exe «orb-node-spawn-cleanup-test» where
+  root := `OrbNode.SpawnCleanupTest
   supportInterpreter := false

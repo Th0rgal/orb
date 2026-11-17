@@ -1734,6 +1734,7 @@ private def runManagedSandboxMemberExecTests
     throw e
 
 set_option maxRecDepth 2048 in
+set_option maxHeartbeats 400000 in
 def runTests : IO UInt32 := do
   let passedRef ← IO.mkRef (0 : Nat)
   let check (label : String) (cond : Bool) : IO Unit := do
@@ -1975,7 +1976,21 @@ def runTests : IO UInt32 := do
      rCapMemberRej.status == 403)
 
   -- Live OrbNode -> orb-privd confined user job + /jobs/:id/files + zero managed_auth leakage
-  let privdHomes := System.FilePath.mk tmpRoot / "mu-homes"
+  -- A root run provisions a real account. Never reuse a host account or a prior
+  -- run's home: those belong to a different confinement boundary.
+  let fixtureNonce ← newUuidV4
+  let fixtureUser := "orb-t" ++ ((fixtureNonce.replace "-" "").take 20).toString
+  let fixtureClaims := { memberClaims with unixUsername := some fixtureUser }
+  let fixtureToken := signLeaseToken rt.cfg.token fixtureClaims
+  let fixtureRoot := (← geteuid) == 0
+  if fixtureRoot then
+    let absent ← IO.Process.output { cmd := "python3", args := #["-c",
+      "import pwd,grp,sys\nfor lookup in (pwd.getpwnam,grp.getgrnam):\n try: lookup(sys.argv[1])\n except KeyError: continue\n raise SystemExit('test identity already exists')", fixtureUser] }
+    unless absent.exitCode == 0 do throw (IO.userError "confined test identity collision")
+  -- PrivateTmp hides /tmp from the real systemd service. Keep its confined
+  -- home outside that namespace, without weakening the production sandbox.
+  let privdHomes := if fixtureRoot then System.FilePath.mk s!"/run/{fixtureUser}-homes"
+    else System.FilePath.mk tmpRoot / "mu-homes"
   let privdState := System.FilePath.mk tmpRoot / "mu-privd-state"
   let fakeAgHome := System.FilePath.mk tmpRoot / "fake-ag-home"
   IO.FS.createDirAll privdHomes
@@ -2013,6 +2028,12 @@ def runTests : IO UInt32 := do
     let _ ← LeanSys.Posix.closeFd privdLfd
     let _ := privdLoopTask.get
     try IO.FS.removeFile muSock catch _ => pure ()
+    if fixtureRoot then
+      let cleanup ← IO.Process.output { cmd := "python3", args := #["-c",
+        "import pwd,grp,sys,subprocess,os\nu,home=sys.argv[1:]\ntry: p=pwd.getpwnam(u)\nexcept KeyError: p=None\nif p is not None:\n if p.pw_dir != home: raise SystemExit('refusing cleanup: unexpected home')\n if os.path.exists(home) and os.stat(home).st_uid != p.pw_uid: raise SystemExit('refusing cleanup: unexpected home owner')\n subprocess.run(['/usr/sbin/userdel',u],check=True)\ntry: grp.getgrnam(u)\nexcept KeyError: pass\nelse: subprocess.run(['/usr/sbin/groupdel',u],check=True)",
+        fixtureUser, (privdHomes / fixtureUser).toString] }
+      unless cleanup.exitCode == 0 do throw (IO.userError s!"confined fixture cleanup: {cleanup.stderr}")
+      IO.FS.removeDirAll privdHomes
     unsetenvVar "ORB_PRIVD_ALLOW_NONROOT_TEST"
     unsetenvVar "ORB_PRIVD_HOME_ROOT"
     unsetenvVar "ORB_PRIVD_STATE_DIR"
@@ -2025,13 +2046,13 @@ def runTests : IO UInt32 := do
         managedAuth := { rt.cfg.managedAuth with antigravityHome? := some fakeAgHome.toString }
       }
     }
-    let muJobId := "eeeeeeee-eeee-4eee-8eee-eeeeeeeeee99"
+    let muJobId := fixtureNonce
     let (rtMuSub, rMuSub) ← handleRequest rtMu {
       method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs,
       body := (renderCompact (.obj #[
         ("job_id", .str muJobId),
         ("mission_id", .str memberClaims.missionId),
-        ("lease_token", .str memberTok),
+        ("lease_token", .str fixtureToken),
         ("payload", .obj #[
           ("kind", .str "raw_command"),
           ("managed_auth", .arr #[.str "antigravity"]),
@@ -2067,7 +2088,7 @@ def runTests : IO UInt32 := do
       failResponseParse "/jobs/:id/files" rMuFiles.status rMuFiles.body muState muFinished
     let outTxt := (muFileJv.fieldStr? "content").getD ""
 
-    let muExecClaims : LeaseClaims := { memberClaims with scope := .missionExecute }
+    let muExecClaims : LeaseClaims := { fixtureClaims with scope := .missionExecute }
     let muExecTok := signLeaseToken rt.cfg.token muExecClaims
     let (_, rMuExec) ← handleRequest rtMu {
       method := "POST", rawPath := "/execute", path := "/execute", query := #[], headers := authHdrs,
@@ -2088,12 +2109,12 @@ def runTests : IO UInt32 := do
        muFinished &&
        muRec?.map (·.state) == some .succeeded &&
        muRec?.map (·.ownerUserId) == some "usr_alice" &&
-       muRec?.map (·.execUnixUser) == some "orb-alice" &&
+       muRec?.map (·.execUnixUser) == some fixtureUser &&
        muRec?.map (fun r => r.artifacts.size) == some 1 &&
        rMuFiles.status == 200 &&
        outTxt.trimAscii.toString == "KEY=orb-mpt-v1_scoped_alice|NODE=|CRED=0" &&
        rMuExec.status == 200 &&
-       (execOut.splitOn "/orb-alice/.orb-missions/").length > 1)
+       (execOut.splitOn s!"/{fixtureUser}/.orb-missions/").length > 1)
   try
     runMuInner
     cleanupMuPrivd
@@ -2166,7 +2187,7 @@ def runTests : IO UInt32 := do
   rt := rt6
   let .ok jobJson := OrbBin.Json.parse (String.fromUTF8! rGet.body)
     | throw (IO.userError "GET /jobs/:id invalid JSON")
-  check "lean_build job succeeded with globbed SHA-256 artifact"
+  check s!"lean_build job succeeded with globbed SHA-256 artifact: {renderCompact jobJson}"
     (jobJson.fieldStr? "state" == some "succeeded" &&
      ((jobJson.fieldArr? "artifacts").map Array.size == some 1))
 
@@ -2987,7 +3008,7 @@ def runTests : IO UInt32 := do
      !(← (System.FilePath.mk sm20ScratchDir).pathExists) &&
      secondRetire && recreateKept && !foreignRetire && foreignKept &&
      !cliRetireWrongSeq && cliStillExists && cliRetireOk && cliRemoved && cliSecondRetire && cliRecreateKept)
-  check "SM-20 unsampled/boot_id/post-spawn/runBoundedOutput proc liveness fail-closed gates"
+  check s!"SM-20 unsampled/boot_id/post-spawn/runBoundedOutput proc liveness fail-closed gates (signals={unsampledSignal.2}/{bootMismatchSignal.2}, self={selfStillAlive.procMissing}/{selfStillAlive.actualTicks}/{selfSample.actualTicks}, exec={stExec}/{execAccepted}/{execCode}, bounded={bOutMissing.exitCode}, sigint={sigintZeroTicks}/{sigintBadBoot}, unsampled={repr (failUnsampled?.map (·.state))}/{repr (failUnsampled?.bind (·.error?))}, ledger={repr (failLedger?.map (·.state))}/{repr (failLedger?.bind (·.error?))}, dead={failLedgerDeadSample.procMissing}/{failLedgerDeadSample.isZombie})"
     (!unsampledSignal.2 && !bootMismatchSignal.2 &&
      selfStillAlive.procMissing == 0 && selfStillAlive.actualTicks == selfSample.actualTicks &&
      stExec == 200 && execAccepted && execCode == 0 &&
