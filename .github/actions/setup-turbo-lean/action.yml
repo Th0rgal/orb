@@ -158,7 +158,7 @@ runs:
         "$bin_path" --version
 
     - name: Save cached turbo-lean release binary
-      if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.build-bin.outputs.need-save == 'true' && steps.cache-bin.outputs.cache-hit != 'true'
+      if: ((github.event_name == 'push' && github.ref == 'refs/heads/master') || startsWith(runner.name, 'boost-jit-')) && steps.build-bin.outputs.need-save == 'true' && steps.cache-bin.outputs.cache-hit != 'true'
       continue-on-error: true
       uses: actions/cache/save@v5
       with:
@@ -167,8 +167,11 @@ runs:
           audit-results/turbo-lean-provenance.json
         key: turbo-lean-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/turbo-lean-revision') }}
 
+    # GitHub-hosted runners only restore outside master: their 10 GB cache quota cannot hold
+    # ~2 GB per job and branch. lean.ci runners (boost-jit-*) save on every run; a PR's caches
+    # stay scoped to its branch, so a second push to the same PR starts warm.
     - name: Restore Lean CAS and Lake artifacts (pull requests and read-only events)
-      if: github.event_name != 'push' || github.ref != 'refs/heads/master'
+      if: (github.event_name != 'push' || github.ref != 'refs/heads/master') && !startsWith(runner.name, 'boost-jit-')
       uses: actions/cache/restore@v5
       with:
         path: |
@@ -179,8 +182,8 @@ runs:
         restore-keys: |
           lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-${{ hashFiles('lean/**/*.lean', 'lean/**/*.c', 'c/**/*.c', 'c/**/*.h') }}-
           lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-
-    - name: Restore and save Lean CAS and Lake artifacts (master)
-      if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    - name: Restore and save Lean CAS and Lake artifacts (master and lean.ci runners)
+      if: (github.event_name == 'push' && github.ref == 'refs/heads/master') || startsWith(runner.name, 'boost-jit-')
       uses: actions/cache@v5
       with:
         path: |
