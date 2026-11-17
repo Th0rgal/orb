@@ -29,8 +29,9 @@ cd ~/work/orb
 sudo apt-get update
 sudo apt-get install -y build-essential clang libssl-dev libsqlite3-0 \
   python3 curl git zstd binutils file
-export LEAN_CC=/usr/bin/clang
 export ORB_TURBO_LEAN_JOBS=2 ORB_TURBO_LEAN_MAX_MB=6144
+# First build in a fresh checkout only (see below):
+export ORB_ALLOW_RAW_LAKE_FALLBACK=1
 scripts/build_orb_bins.sh --target-arch aarch64 --ensure-lean --no-telemetry \
   --only sandboxed-mcp --only orb-privd --only orb-sudo \
   --out-dir "$PWD/target/aarch64-linux"
@@ -43,6 +44,19 @@ Expect `ELF 64-bit LSB ... ARM aarch64` for all three and no `not found` in
 SHA-256-checked Linux aarch64 v4.35.0 release if `lake` is absent. If `lake`
 is already on PATH (including elan shims), ensure its pinned v4.35.0 toolchain
 is installed and usable first. It does not replace an existing `lake`.
+
+Do not set `LEAN_CC=/usr/bin/clang`: the system clang links without the C++
+runtime bundled with Lean, and `orb-privd`/`sandboxed-mcp` then fail to link
+with undefined `std::__1::__atomic_notify_one_native` references from
+`libleanrt.a`. Leave `LEAN_CC` unset so Lean uses its own toolchain (the
+`clang` package is still needed for the C shims).
+
+In a fresh checkout, turbo-lean refuses OrbBin until its C shims exist as static
+libraries (`declares dynamic extern_lib ... without prebuilt static artifact in
+.lake/build/lib`). Run the first build with `ORB_ALLOW_RAW_LAKE_FALLBACK=1`
+under a memory cap; later builds in the same checkout can drop it. Verified on
+spark on 17 Nov 2026 building `sandboxed-node`, `sandboxed-mcp` and `orb-privd`
+at `e555842`.
 
 `turbo-lean` must be on `PATH`; `scripts/build_orb_bins.sh` runs it with
 telemetry disabled and the above memory/job bounds, and fails closed unless
