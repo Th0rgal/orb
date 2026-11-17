@@ -55,7 +55,8 @@ def run (root : String) : IO Unit := do
     let units := "[\"sandboxed-sh.service\"]"
     let lease (token mission host : String) : PrivilegeLeaseRecord := {
       grantId := "grant-" ++ token, leaseToken := token, missionId := mission, targetHost := host,
-      scope := "service_deploy", allowedUnitsJson := units, expiresAtEpoch := now + 300 }
+      scope := "service_deploy", allowedUnitsJson := units, expiresAtEpoch := now + 300,
+      sessionScoped := false }
     let save (l : PrivilegeLeaseRecord) : IO Unit := do
       let .ok () ← upsertPrivilegeLease store l | throw (IO.userError "privd node auth lease fixture")
     for l in #[lease "lease-nimrud" "m-nimrud" "nimrud", lease "lease-ashur" "m-ashur" "ashur",
@@ -202,7 +203,45 @@ def run (root : String) : IO Unit := do
     check (denied (← send (bearer memberJwt) (body "m-nimrud" "lease-nimrud" "self" "nimrud")) "admin_required")
       "a non-admin user is still refused"
 
-    -- 9. Removing the node from the fleet, or its token from Core, removes the authority.
+    -- 9. A session-scoped lease ends with its mission or external session, before its TTL.
+    for (id, status) in #[("m-live", "active"), ("m-done", "completed")] do
+      discard <| sql store.missionsDb
+        "INSERT INTO missions(id,owner_user_id,project,tags,status) VALUES(?1,'admin','p','[]',?2);" #[id, status]
+    let sessionLease (token mission host : String) : PrivilegeLeaseRecord := {
+      (lease token mission host) with sessionScoped := true, sessionExpiresAtEpoch := now + 300 }
+    let leaseRevoked (token : String) : IO Bool := do
+      match ← execParamQuery store.missionsDb "SELECT revoked FROM privilege_leases WHERE lease_token=?1;" #[token] with
+      | .ok rs => pure (rs.size > 1 && ((rs[1]?.bind (·[0]?)).getD "0") != "0")
+      | .error _ => pure false
+    save (sessionLease "lease-live" "m-live" "nimrud")
+    check (allowed (← send (bearer nimrudTok) (body "m-live" "lease-live" "self" "nimrud")))
+      "a session-scoped lease with a live mission is allowed"
+    save (sessionLease "lease-done" "m-done" "nimrud")
+    check (denied (← send (bearer nimrudTok) (body "m-done" "lease-done" "self" "nimrud")) "lease_denied")
+      "a session-scoped lease outliving its mission is refused at verification"
+    check (← leaseRevoked "lease-done") "verification reaps a session-scoped lease whose mission ended"
+    save { (sessionLease "lease-sess-exp" "m-live" "nimrud") with sessionExpiresAtEpoch := now }
+    check (denied (← send (bearer nimrudTok) (body "m-live" "lease-sess-exp" "self" "nimrud")) "lease_denied")
+      "a session-scoped lease past its session clock is refused at verification"
+    check (← leaseRevoked "lease-sess-exp") "verification reaps a session-scoped lease past its session clock"
+    save { (lease "lease-ttl-done" "m-done" "nimrud") with sessionScoped := false }
+    check (allowed (← send (bearer nimrudTok) (body "m-done" "lease-ttl-done" "self" "nimrud")))
+      "an explicitly non-session-scoped TTL grant stays valid until its TTL"
+    -- External MCP sessions are reaped by the same owner when revoked or hard-expired.
+    for (sid, revoked, hardExp) in #[("sess-revoked", 1, now + 300), ("sess-expired", 0, now), ("sess-live", 0, now + 300)] do
+      discard <| sql store.projectsDb
+        "INSERT OR REPLACE INTO mcp_sessions_v1(id,owner,mission_id,expires_at,revoked,subject_kind,hard_expires_at) VALUES(?1,'admin','',?2,?3,'external_session',?4);"
+        #[sid, s!"{now + 300}", s!"{revoked}", s!"{hardExp}"]
+      let extLease := lease ("lease-" ++ sid) "" "all"
+      save { extLease with sessionScoped := true, sessionId := sid, sessionExpiresAtEpoch := now + 300 }
+    let reaped ← OrbCore.SecretAndApproval.reapPrivilegeLeases store now
+    check (reaped >= 2) "reaping counts the ended session-scoped leases"
+    check ((← leaseRevoked "lease-sess-revoked") && (← leaseRevoked "lease-sess-expired"))
+      "reaping revokes leases of revoked or hard-expired external sessions"
+    check (!(← leaseRevoked "lease-sess-live") && !(← leaseRevoked "lease-live"))
+      "reaping keeps a lease whose external session and mission are still live"
+
+    -- 10. Removing the node from the fleet, or its token from Core, removes the authority.
     unsetenvVar "ORB_TEST_PRIVD_NIMRUD_TOKEN"
     check ((← send (bearer nimrudTok) (body "m-nimrud" "lease-nimrud" "self" "nimrud")).1 == 401)
       "a node whose token Core no longer holds is 401"
