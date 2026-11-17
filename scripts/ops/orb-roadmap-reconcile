@@ -18,7 +18,8 @@ start (missions are recognised by track "roadmap-<row id>").
 
 Config (environment, see deploy/systemd/orb-roadmap-reconcile.service):
   ORB_ROADMAP_STATE        nudge ledger (default /var/lib/orb-roadmap/state.json)
-  ORB_ROADMAP_MAX_WORKERS  live workers at once (default 3)
+  ORB_ROADMAP_MAX_WORKERS  live workers at once (default 10)
+  ORB_ROADMAP_NODES        nodes workers are spread over (default uruk,babylon,nippur,ashur)
   ORB_ROADMAP_MODELS       worker models, one per attempt, comma-separated
                            (default openai/gpt-6-astra,openai/gpt-6.1-sol,
                            anthropic/claude-fable-5-2,ethereumfoundation/deepseek-v4.1-flash)
@@ -34,7 +35,9 @@ ROADMAP_PATH = "docs/plans/orb-roadmap.md"
 CORE = ENV("ORB_ROADMAP_CORE", "http://127.0.0.1:3000")
 STATE = ENV("ORB_ROADMAP_STATE", "/var/lib/orb-roadmap/state.json")
 MISSIONS_DB = ENV("ORB_ROADMAP_MISSIONS_DB", "/root/.sandboxed-sh/missions/missions-prod.db")
-MAX_WORKERS = int(ENV("ORB_ROADMAP_MAX_WORKERS", "3"))
+MAX_WORKERS = int(ENV("ORB_ROADMAP_MAX_WORKERS", "10"))
+# Workers are spread over these nodes by queue position; "auto" put all of them on one host.
+NODES = [n.strip() for n in ENV("ORB_ROADMAP_NODES", "uruk,babylon,nippur,ashur").split(",") if n.strip()]
 MODELS = [m.strip() for m in ENV("ORB_ROADMAP_MODELS",
           "openai/gpt-6-astra,openai/gpt-6.1-sol,anthropic/claude-fable-5-2,"
           "ethereumfoundation/deepseek-v4.1-flash").split(",") if m.strip()]
@@ -279,13 +282,13 @@ def core_post(path, body):
     return http_json(CORE + path, body, {"Authorization": "Bearer " + core_token()})
 
 
-def start_worker(row, attempt, open_prs, model):
+def start_worker(row, attempt, open_prs, model, node="auto"):
     rid = row["id"]
     return core_post("/api/control/missions", {
         "title": f"Roadmap {rid}: {row['node'][:80]}", "prompt": brief(row, attempt, open_prs),
         "project": "now",
         "track": f"roadmap-{rid}" if attempt == 1 else f"roadmap-{rid}-{attempt}", "backend": "opencode",
-        "model_override": model, "remote_node_id": "auto", "tags": EXCLUDE,
+        "model_override": model, "remote_node_id": node, "tags": EXCLUDE,
         "idempotency_key": f"roadmap-{rid}-attempt-{attempt}"})
 
 
@@ -312,7 +315,8 @@ def main():
         open_prs = prs.get(rid, {}).get("open", [])
         try:
             if kind == "start":
-                r = start_worker(row, arg, open_prs, rest[0])
+                node = NODES[queue.index(rid) % len(NODES)] if NODES and rid in queue else "auto"
+                r = start_worker(row, arg, open_prs, rest[0], node)
                 print(f"started {rid} attempt {arg} on {rest[0]}: {r.get('id') or r.get('mission_id')}")
             elif kind == "nudge":
                 core_post(f"/api/control/missions/{arg}/resume", {"content": nudge_text(open_prs)})

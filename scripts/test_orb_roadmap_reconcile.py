@@ -120,7 +120,7 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.run_plan(green=False, missions=[mission("MASTER", "active")]), [])
 
     def test_worker_limit_is_respected(self):
-        live = [mission(f"Z{i}", "active") for i in range(3)]
+        live = [mission(f"Z{i}", "active") for i in range(NS["MAX_WORKERS"])]
         self.assertEqual(self.run_plan(missions=live), [])
 
     def test_unknown_queue_entry_is_reported(self):
