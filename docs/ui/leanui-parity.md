@@ -7,14 +7,18 @@ reference; the LeanUI frames are the candidate.
 ## Reproduce
 
 ```sh
-# 1. Reference: 36 screenshots of the SolidJS desktop (9 screens, dark/light, 1x/2x).
-cd orb && bun install --frozen-lockfile
+# 1. Reference: capture the versioned SolidJS baseline, not the candidate UI.
+# Run from the repository root. Use the pinned Chrome and fonts described below.
+git fetch origin 6d1e7a27174b681f558285d673938880ddcc2706
+git worktree add --detach .ci/leanui/reference-source 6d1e7a27174b681f558285d673938880ddcc2706
+ROOT="$PWD"
+cd .ci/leanui/reference-source/orb && bun install --frozen-lockfile
 ORB_REFERENCE_OUT=/tmp/ref node node_modules/.bin/playwright test \
   -c playwright.leanui-reference.config.ts --reporter=line
-(cd /tmp/ref && sha256sum -c --quiet "$OLDPWD/../docs/ui/leanui-parity-reference.sha256")
+(cd /tmp/ref && sha256sum -c --quiet "$ROOT/docs/ui/leanui-parity-reference.sha256")
 
 # 2. Candidate: the same 36 frames from LeanUI.
-cd .. && scripts/build_orb_bins.sh --only orb-desktop-native --out-dir "$PWD/target/native"
+cd "$ROOT" && scripts/build_orb_bins.sh --only orb-desktop-native --out-dir "$PWD/target/native"
 target/native/orb-desktop-native --headless-golden-all /tmp/native --width 1470 --height 923
 # LeanUI sources now live under lean/OrbDesktop/LeanUI, inside the package.
 # Their edits invalidate turbo-lean's source cache; keep the same TURBO_LEAN_HOME.
@@ -49,6 +53,12 @@ The current-master capture in
 [44172956130](https://github.com/Th0rgal/orb/actions/runs/44172956130) fails
 20 reference hashes. Final acceptance requires resolving that reproduction
 failure as well as the renderer differences; the stored hashes are unchanged.
+
+The difference is confined to 2–3 pixels in each affected model label or
+chevron, following #1850's label clipping change. Both the workflow and local
+commands now pin the reference source to the last verified capture revision,
+`6d1e7a27174b681f558285d673938880ddcc2706`, while building the candidate from
+the PR head. This preserves all 36 reference hashes and the comparison method.
 
 ### Reproduction check, 16 November 2026
 

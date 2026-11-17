@@ -31,6 +31,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # The reference is a versioned baseline, not whichever UI happens to be on
+      # the candidate branch. #1850 changed glyph clipping by 2–3 pixels/frame.
+      - uses: actions/checkout@v6
+        with:
+          ref: 6d1e7a27174b681f558285d673938880ddcc2706
+          path: .ci/leanui/reference-source
+
       - uses: ./.github/actions/setup-turbo-lean
 
       - uses: oven-sh/setup-bun@v2
@@ -74,11 +81,11 @@ jobs:
           FONTCONFIG_FILE="$PWD/.ci/leanui/fontconfig/fonts.conf" fc-match 'DejaVu Sans Mono'
 
       - name: Install frontend dependencies
-        working-directory: orb
+        working-directory: .ci/leanui/reference-source/orb
         run: bun install --frozen-lockfile
 
       - name: Capture SolidJS reference and verify hashes
-        working-directory: orb
+        working-directory: .ci/leanui/reference-source/orb
         env:
           ORB_REFERENCE_CHROME: ${{ github.workspace }}/.ci/leanui/chrome/chrome-linux64/chrome
           FONTCONFIG_FILE: ${{ github.workspace }}/.ci/leanui/fontconfig/fonts.conf
