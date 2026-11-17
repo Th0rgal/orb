@@ -136,17 +136,22 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
   let toastCard (w h : SubPx) (t : ToastSpec) : WidgetNode :=
     let toastBg : Color := if theme.isDark then 0x191919FF else 0xFAFAFAFF
     let toastBdr : Color := if theme.isDark then 0x333333FF else 0xE0DFD9FF
+    let textCol : WidgetNode :=
+      WidgetNode.box
+        (BoxStyle.col (pxToSub 2) |>.withFixedSize (w - pxToSub 30) (h - pxToSub 18))
+        [ screenTextLine theme (w - pxToSub 30) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textPrimary t.title 500
+        , screenTextLine theme (w - pxToSub 30) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textSecondary t.message ]
     WidgetNode.rrect
-      (BoxStyle.col (pxToSub 2)
-        |>.withPadding (Edges.trbl (pxToSub 9) (pxToSub 15) (pxToSub 9) (pxToSub 15))
-        |>.withFixedSize w h
-        |>.withShadow { offsetY := pxToSub 10, blur := pxToSub 32, color := if theme.isDark then 0x0000007F else 0x1E1E1C2D })
+      (BoxStyle.row (pxToSub 8)
+         |>.withAlign .start |>.withJustify .spaceBetween
+         |>.withPadding (Edges.trbl (pxToSub 9) (pxToSub 15) (pxToSub 9) (pxToSub 15))
+         |>.withFixedSize w h
+         |>.withShadow { offsetY := pxToSub 10, blur := pxToSub 32, color := if theme.isDark then 0x0000007F else 0x1E1E1C2D })
       toastBg
       (CornerRadii.uniform (pxToSub 8))
       (BorderStyle.uniform theme.borderWidth toastBdr)
-      [ screenTextLine theme (w - pxToSub 30) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textPrimary t.title 500
-      , screenTextLine theme (w - pxToSub 30) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textSecondary t.message
-      ]
+      [ textCol
+      , chromeIcon "close" pal.textMuted 14 ]
 
   let toastRegion : List WidgetNode :=
     match st.toasts with

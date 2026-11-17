@@ -122,14 +122,14 @@ Reference: SolidJS desktop. Candidate: LeanUI. 36 pairs, 0 errors, tolerance 8.
 | 02_control_populated | dark | 2x | 1.10 | 0.84 | 0.9885 | 4.58 / 0.9658 | 0.53 / 0.9917 | 0.00 / 1.0000 |
 | 02_control_populated | light | 1x | 1.67 | 1.24 | 0.9875 | 7.01 / 0.9746 | 0.81 / 0.9885 | 0.00 / 1.0000 |
 | 02_control_populated | light | 2x | 1.11 | 0.84 | 0.9884 | 4.64 / 0.9660 | 0.53 / 0.9915 | 0.00 / 1.0000 |
-| 03_mission_transcript | dark | 1x | 7.02 | 4.11 | 0.9228 | 8.17 / 0.9637 | 5.82 / 0.9111 | 15.53 / 0.9431 |
-| 03_mission_transcript | dark | 2x | 6.05 | 3.43 | 0.9369 | 5.63 / 0.9541 | 5.09 / 0.9297 | 15.02 / 0.9577 |
-| 03_mission_transcript | light | 1x | 6.17 | 4.53 | 0.9203 | 8.29 / 0.9633 | 5.72 / 0.9080 | 7.20 / 0.9407 |
-| 03_mission_transcript | light | 2x | 5.08 | 3.86 | 0.9355 | 5.68 / 0.9541 | 4.94 / 0.9280 | 6.02 / 0.9565 |
-| 04_mission_split_diff | dark | 1x | 8.77 | 5.99 | 0.8819 | 8.17 / 0.9637 | 8.20 / 0.8622 | 13.02 / 0.9422 |
-| 04_mission_split_diff | dark | 2x | 7.28 | 4.82 | 0.9083 | 5.63 / 0.9541 | 6.79 / 0.8952 | 12.52 / 0.9568 |
-| 04_mission_split_diff | light | 1x | 8.86 | 6.47 | 0.8777 | 8.29 / 0.9633 | 9.16 / 0.8572 | 6.48 / 0.9408 |
-| 04_mission_split_diff | light | 2x | 7.31 | 5.32 | 0.9060 | 5.68 / 0.9541 | 7.76 / 0.8923 | 5.42 / 0.9561 |
+| 03_mission_transcript | dark | 1x | 6.87 | 3.92 | 0.9311 | 8.17 / 0.9637 | 5.61 / 0.9226 | 15.53 / 0.9431 |
+| 03_mission_transcript | dark | 2x | 5.93 | 3.31 | 0.9417 | 5.63 / 0.9541 | 4.93 / 0.9364 | 15.02 / 0.9577 |
+| 03_mission_transcript | light | 1x | 6.02 | 4.34 | 0.9286 | 8.29 / 0.9633 | 5.51 / 0.9195 | 7.20 / 0.9407 |
+| 03_mission_transcript | light | 2x | 4.96 | 3.73 | 0.9404 | 5.68 / 0.9541 | 4.77 / 0.9347 | 6.02 / 0.9565 |
+| 04_mission_split_diff | dark | 1x | 8.62 | 5.81 | 0.8902 | 8.17 / 0.9637 | 7.99 / 0.8737 | 13.02 / 0.9422 |
+| 04_mission_split_diff | dark | 2x | 7.16 | 4.70 | 0.9131 | 5.63 / 0.9541 | 6.62 / 0.9020 | 12.52 / 0.9568 |
+| 04_mission_split_diff | light | 1x | 8.71 | 6.28 | 0.8860 | 8.29 / 0.9633 | 8.96 / 0.8687 | 6.48 / 0.9408 |
+| 04_mission_split_diff | light | 2x | 7.19 | 5.19 | 0.9108 | 5.68 / 0.9541 | 7.60 / 0.8990 | 5.42 / 0.9561 |
 | 05_machines_fleet | dark | 1x | 3.61 | 3.07 | 0.9595 | 6.80 / 0.9746 | 3.54 / 0.9496 | 0.00 / 1.0000 |
 | 05_machines_fleet | dark | 2x | 2.72 | 2.36 | 0.9685 | 4.57 / 0.9659 | 2.77 / 0.9640 | 0.00 / 1.0000 |
 | 05_machines_fleet | light | 1x | 3.64 | 3.08 | 0.9596 | 7.01 / 0.9746 | 3.53 / 0.9497 | 0.00 / 1.0000 |
@@ -146,12 +146,12 @@ Reference: SolidJS desktop. Candidate: LeanUI. 36 pairs, 0 errors, tolerance 8.
 | 08_new_mission_dialog | dark | 2x | 1.07 | 0.82 | 0.9894 | 4.58 / 0.9658 | 0.49 / 0.9930 | 0.00 / 1.0000 |
 | 08_new_mission_dialog | light | 1x | 1.65 | 1.21 | 0.9899 | 7.01 / 0.9746 | 0.78 / 0.9919 | 0.00 / 1.0000 |
 | 08_new_mission_dialog | light | 2x | 1.08 | 0.82 | 0.9894 | 4.64 / 0.9660 | 0.49 / 0.9929 | 0.00 / 1.0000 |
-| 09_toast_notifications | dark | 1x | 5.99 | 2.27 | 0.9653 | 6.80 / 0.9745 | 4.16 / 0.9781 | 20.12 / 0.8475 |
-| 09_toast_notifications | dark | 2x | 5.22 | 1.67 | 0.9713 | 4.58 / 0.9658 | 3.70 / 0.9831 | 19.12 / 0.8866 |
-| 09_toast_notifications | light | 1x | 6.31 | 2.21 | 0.9678 | 7.01 / 0.9746 | 4.14 / 0.9775 | 23.26 / 0.8797 |
-| 09_toast_notifications | light | 2x | 5.56 | 1.60 | 0.9729 | 4.64 / 0.9660 | 3.65 / 0.9827 | 22.98 / 0.9055 |
+| 09_toast_notifications | dark | 1x | 6.00 | 2.28 | 0.9650 | 6.80 / 0.9745 | 4.16 / 0.9779 | 20.14 / 0.8464 |
+| 09_toast_notifications | dark | 2x | 5.23 | 1.68 | 0.9712 | 4.58 / 0.9658 | 3.71 / 0.9829 | 19.13 / 0.8860 |
+| 09_toast_notifications | light | 1x | 6.31 | 2.22 | 0.9676 | 7.01 / 0.9746 | 4.14 / 0.9774 | 23.28 / 0.8787 |
+| 09_toast_notifications | light | 2x | 5.57 | 1.60 | 0.9727 | 4.64 / 0.9660 | 3.65 / 0.9826 | 22.99 / 0.9049 |
 
-Mean over 36 measured pairs: mismatch 4.71 %, above tolerance 2.39 %, SSIM 0.9608 (min 0.8777, max 0.9902).
+Mean over 36 measured pairs: mismatch 4.68 %, above tolerance 2.35 %, SSIM 0.9623 (min 0.8860, max 0.9902).
 
 Determinism (each renderer compared with a second capture of itself):
 
