@@ -914,6 +914,12 @@ def dispatchProjectAndControllerRoutes?
         | .ok gv => return some (jsonResp 200 gv)
         | .error e => return some (jsonErr 500 e)
 
+    if !isLegacyUnscoped && callerUserId != bootstrapAdminId then
+      let .ok ownerRows ← execParamQuery store.projectsDb
+          "SELECT 1 FROM project_owners WHERE (slug=?1 OR slug=?2) AND owner_user_id=?3 LIMIT 1;"
+          #[scopedSlug, clientSlug, callerUserId]
+        | return some (jsonErr 500 "db_error")
+      if ownerRows.size ≤ 1 then return some (jsonErr 404 "not_found")
     if let some r ← dispatchProjectFilesTail? store broadcastHub? clientSlug scopedSlug tail qMap method bodyBytes callerUserId bootstrapAdminId isLegacyUnscoped nowIso then
       return some r
 

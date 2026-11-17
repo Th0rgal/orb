@@ -19,6 +19,7 @@ class SyntheticCoreApi:
 
     def __init__(self, leak_surface=None):
         self.mode = "dev"
+        self.url = "synthetic://core"
         self.leak_surface = leak_surface
         self.missions = {}
         self.projects = {}
@@ -159,7 +160,7 @@ class SyntheticCoreApi:
             return 403, {"error": "admin_required"}
 
         # 5. Machines
-        if path in {"/api/workspaces", "/api/managed-machines", "/api/nodes", "/api/client-computers"}:
+        if path in {"/api/workspaces", "/api/managed-machines", "/api/nodes", "/api/control/client-computers"}:
             return 200, []
         if path.startswith(("/api/nodes/", "/api/remote/hosts", "/api/tether/")):
             if self.leak_surface == "machines":
@@ -167,6 +168,8 @@ class SyntheticCoreApi:
             return 403, {"error": "admin_required"}
 
         # 6. Settings
+        if path == "/api/settings/library-remote" and method == "PUT":
+            return 200, {"library_remote": (body or {}).get("library_remote")}
         if path.startswith(("/api/settings", "/api/system/", "/api/backups", "/api/integrations/")):
             if self.leak_surface == "settings":
                 return 200, {"ok": True}
@@ -296,8 +299,14 @@ class BenIsolationMatrixTests(unittest.TestCase):
             matrix.validate_url("http://127.0.0.1:41234/", mode="dev"),
             "http://127.0.0.1:41234",
         )
+        self.assertEqual(
+            matrix.validate_url("https://orbcore.thomas.md/", mode="prod-full"),
+            "https://orbcore.thomas.md",
+        )
         with self.assertRaises(matrix.IsolationError):
             matrix.validate_url("https://agent-backend-dev.thomas.md", mode="prod-readonly")
+        with self.assertRaises(matrix.IsolationError):
+            matrix.validate_url("https://agent-backend-dev.thomas.md", mode="prod-full")
         with self.assertRaises(matrix.IsolationError):
             matrix.validate_url("https://orbcore.thomas.md", mode="dev")
         with self.assertRaises(matrix.IsolationError):
@@ -305,6 +314,27 @@ class BenIsolationMatrixTests(unittest.TestCase):
         self.assertIsNone(
             matrix.NoRedirect().redirect_request(None, None, 302, "", {}, "https://evil.example.com")
         )
+
+    def test_prod_full_requires_explicit_confirmation_and_exact_sha(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            token_path = Path(tmp) / "admin.token"
+            token_path.write_text("orb-jwt-v2-test\n", encoding="utf-8")
+            token_path.chmod(0o600)
+            base = ["--mode", "prod-full", "--token-file", str(token_path)]
+            for extra in ([], ["--confirm-prod-mutations"]):
+                with self.subTest(extra=extra):
+                    out = io.StringIO()
+                    with contextlib.redirect_stdout(out):
+                        rc = matrix.main(base + extra)
+                    self.assertEqual(rc, 2)
+                    payload = json.loads(out.getvalue())
+                    self.assertEqual(payload["live_evidence"], "ERROR")
+                    self.assertIn("prod-full", payload["reason"])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = matrix.main(base + ["--confirm-prod-mutations", "--sha", "a" * 39])
+            self.assertEqual(rc, 2)
+            self.assertEqual(json.loads(out.getvalue())["live_evidence"], "ERROR")
 
     def test_missing_token_file_reports_blocked_honestly(self):
         out = io.StringIO()
