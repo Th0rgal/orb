@@ -37,7 +37,32 @@ receipt (PR, deployed SHA, and the check that was run):
    migration applied on dev and prod, monitoring quiet.
 7. Every node in section 4 is `done` or `dropped` with a reason.
 
-## 2. How the master mission works
+## 2. How the work moves
+
+**Dispatch is mechanical.** `orb-roadmap-reconcile` (`scripts/ops`, a
+5-minute timer on the Core host) reads this file from master, the pull
+requests and master CI on GitHub, and the missions on track
+`roadmap-<row id>`, then:
+
+- starts a worker (`openai/gpt-6-astra`, at most 3 live) for every row of the
+  queue (section 7) whose needs are done and that has no live worker;
+- resumes a worker that went idle for 15 minutes without a merged PR once,
+  then replaces it once, then posts a decision request to the Inbox;
+- when master CI is red, starts only a worker that fixes master.
+
+A row is done when its state here says so or when a PR whose title ends with
+`(<row id>)` has merged. Workers merge their own PR on green CI (rule M). The
+reconciler never merges, deploys, or touches a mission it did not start.
+Install or update it with `install -m 755 scripts/ops/orb-roadmap-reconcile
+/usr/local/sbin/` and the two units in `deploy/systemd`. To change what runs next,
+edit the queue by PR. A row whose needs name a
+human, a date or anything other than row ids is never dispatched.
+
+The master mission is optional: it plans (adds, splits and orders rows by PR),
+reviews milestones and answers the decision requests the reconciler posts. It
+does not dispatch workers for queued rows.
+
+### The master mission
 
 The master mission is the controller; its workers run in project `now`
 (project `orb` no longer exists). It coordinates; it does
@@ -55,10 +80,8 @@ State lives on the board, not in the conversation.
 1. **Reconcile.** For every node marked `wip`: is its worker alive, is its PR
    moving? A dead or silent worker (no event for 30 min, or the same command
    three times) is replaced, not waited for.
-2. **Dispatch.** Every node whose dependencies are `done` and that has no live
-   worker gets one, up to the worker limit. *A turn must not end while a ready
-   node has no worker and a slot is free.* Finishing bookkeeping is not
-   finishing the roadmap.
+2. **Queue.** The reconciler dispatches queued rows; the master keeps the
+   queue (section 7) short, ordered and free of rows a worker cannot finish.
 3. **Verify.** A worker's report is not proof. Before marking a node `done`,
    check the merged SHA and the node's "done when" yourself or with a
    read-only reviewer from another model family.
@@ -325,3 +348,10 @@ Only these. Each one names what it unblocks.
 | Workers push often; milestone PRs get an independent review; merges need no approval | Thomas, 15 Nov |
 | Green before merge again (CI is fast enough since #1786) | this file |
 | Managed VMs hold no credentials; the integrator pushes for them | 13 Nov |
+
+## 7. Queue
+
+Rows the reconciler dispatches, in order. A row leaves the queue by PR when it
+is done or dropped.
+
+`R28`, `R29`, `R30`, `R26`, `R13`, `R14`, `R15`, `R11`, `M3`, `B1`

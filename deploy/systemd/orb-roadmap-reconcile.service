@@ -1,0 +1,12 @@
+[Unit]
+Description=Orb roadmap reconciler (starts, nudges and escalates roadmap workers)
+After=network-online.target sandboxed-sh-prod.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/orb/roadmap.env
+ExecStart=/usr/local/sbin/orb-roadmap-reconcile
+StateDirectory=orb-roadmap
+Environment=ORB_ROADMAP_STATE=/var/lib/orb-roadmap/state.json
+Nice=10
+TimeoutStartSec=120
