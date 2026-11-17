@@ -265,6 +265,21 @@ if os.environ['FAILURE'] == 'swap':
         self.assertIsNotNone(re.match(pattern, "/usr/local/bin/orb-core --port 3000"))
         self.assertIsNone(re.match(pattern, "/usr/local/bin/orb-core-dev"))
 
+    def test_elf_arch_mismatch_refuses_foreign_cpu(self):
+        with tempfile.TemporaryDirectory() as temp:
+            def elf(machine):
+                p = Path(temp) / f"bin-{machine}"
+                p.write_bytes(b"\x7fELF\x02\x01\x01" + b"\0" * 11 + machine.to_bytes(2, "little") + b"\0" * 40)
+                return p
+            with patch.object(roll.os, "uname", return_value=type("U", (), {"machine": "aarch64"})()):
+                self.assertIn("x86_64", roll._elf_arch_mismatch(elf(62)))
+                self.assertIsNone(roll._elf_arch_mismatch(elf(183)))
+            with patch.object(roll.os, "uname", return_value=type("U", (), {"machine": "x86_64"})()):
+                self.assertIsNone(roll._elf_arch_mismatch(elf(62)))
+            not_elf = Path(temp) / "script"
+            not_elf.write_text("#!/bin/sh\n")
+            self.assertIsNone(roll._elf_arch_mismatch(not_elf))
+
     def test_apply_requires_expected_digests_before_auth(self):
         with patch.object(roll, "discover_local_core_auth", side_effect=AssertionError("auth reached")):
             with self.assertRaises(SystemExit) as raised:

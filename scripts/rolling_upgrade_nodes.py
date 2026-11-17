@@ -96,6 +96,29 @@ def clear_cordon_owner(node_id, ledger_path=DEFAULT_CORDON_LEDGER_PATH):
     return removed
 
 
+def _elf_arch_mismatch(path):
+    """Return an error if the ELF binary at `path` is for another CPU than this host.
+
+    The rollout stages one build for the whole fleet; an aarch64 node (dgx-spark)
+    given an x86-64 binary must be refused before any service is stopped."""
+    machines = {62: "x86_64", 183: "aarch64"}
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(20)
+    except OSError:
+        return None
+    if len(head) < 20 or head[:4] != b"\x7fELF":
+        return None
+    little = head[5] == 1
+    e_machine = int.from_bytes(head[18:20], "little" if little else "big")
+    binary_arch = machines.get(e_machine)
+    host_arch = os.uname().machine
+    host_arch = {"arm64": "aarch64", "amd64": "x86_64"}.get(host_arch, host_arch)
+    if binary_arch and binary_arch != host_arch:
+        return f"built for {binary_arch}, but this node is {host_arch}"
+    return None
+
+
 def compute_file_sha256(path):
     p = Path(path)
     if not p.is_file():
@@ -1121,6 +1144,9 @@ def perform_fenced_upgrade(
                     mismatch_errors.append(
                         f"checksum mismatch for {comp_name} ({stg}): expected {exp_hash}, got {actual_hash}"
                     )
+            arch_error = _elf_arch_mismatch(stg)
+            if arch_error:
+                mismatch_errors.append(f"{comp_name} ({stg}): {arch_error}")
             active_components.append(
                 {
                     "name": comp_name,
@@ -1512,6 +1538,7 @@ def _remote_worker_prelude():
     parts = [
         "import hashlib, inspect, json, os, pathlib, shutil, sqlite3, subprocess, sys, time, urllib.error, urllib.request",
         "from pathlib import Path",
+        inspect.getsource(_elf_arch_mismatch),
         inspect.getsource(compute_file_sha256),
         inspect.getsource(_resolve_companion_paths),
         inspect.getsource(_normalize_reported_build_sha),
