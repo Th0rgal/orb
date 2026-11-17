@@ -603,7 +603,12 @@ fun OrbProvidersSettingsPage(
         var loadedProviders = providers
         val providersTask = async { runCatching { core.fetchRows("/api/ai/providers", "providers") } }
         val usageTask = async { runCatching { core.fetchDict("/api/ai/providers/usage") } }
-        val healthTask = async { runCatching { OrbJSON.dictList(core.request("/api/model-routing/health")) } }
+        val healthTask = async {
+            runCatching {
+                OrbJSON.dictList(core.request("/api/model-routing/health"))
+                    .map { OrbRow(it, (it["account_id"] as? String).orEmpty()) }
+            }
+        }
         val cloudAccountsTask = if (isAdmin) async { runCatching { core.fetchRows("/api/cloud/accounts", "items") } } else null
         val cloudUsageTask = if (isAdmin) async { runCatching { core.fetchDict("/api/cloud/usage") } } else null
 
@@ -1273,7 +1278,7 @@ fun OrbProvidersSettingsPage(
                                     rawSubtitle
                                 }
                                 val healthState = providerHealth?.str("account_state").orEmpty()
-                                val quotaLevel = if (["disabled_by_provider", "disabled"].contains(healthState)) OrbQuotaLevel.Exhausted
+                                val quotaLevel = if (healthState == "disabled_by_provider" || healthState == "disabled") OrbQuotaLevel.Exhausted
                                     else providerQuotaStatus(provider, detail)?.level ?: OrbQuotaLevel.Normal
                                 val expanded = expandedIds.contains(pid)
                                 val windows = providerQuotaWindows(detail)
