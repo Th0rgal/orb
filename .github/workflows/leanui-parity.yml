@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - fix/leanui-pixel-parity
+      - fix/leanui-parity-u3-final
       - master
     paths:
       - 'lean/LeanUI/**'
