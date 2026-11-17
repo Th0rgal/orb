@@ -311,4 +311,47 @@ final class OrbBackgroundSyncTests: XCTestCase {
             .rebase(expectedVersion: 8, mutationSeq: 4)
         )
     }
+
+    func testStructuredGoalEventsRetainOpaqueNestedMetadataAndLegacyText() throws {
+        let mid = "m-goal-sync"
+        let statusOnly = try XCTUnwrap(
+            StoredEvent.fromStreamFrame(
+                missionId: mid,
+                type: "goal_status",
+                data: ["sequence": 10, "status": "active", "revision": 1]
+            )
+        )
+        XCTAssertEqual(statusOnly.sequence, 10)
+        XCTAssertEqual(statusOnly.content, "")
+        let remoteGoalMeta = try XCTUnwrap(statusOnly.metadata["remote_goal"]?.value as? [String: Any])
+        XCTAssertEqual(remoteGoalMeta["status"] as? String, "active")
+        XCTAssertEqual((remoteGoalMeta["revision"] as? NSNumber)?.intValue, 1)
+
+        let unknownFields = try XCTUnwrap(
+            StoredEvent.fromStreamFrame(
+                missionId: mid,
+                type: "goal_iteration",
+                data: ["sequence": 12, "status": "future_status", "future": ["value": 42], "summary": "Iterating"]
+            )
+        )
+        XCTAssertEqual(unknownFields.sequence, 12)
+        XCTAssertEqual(unknownFields.content, "Iterating")
+        let futureMeta = try XCTUnwrap(unknownFields.metadata["remote_goal"]?.value as? [String: Any])
+        XCTAssertEqual(futureMeta["status"] as? String, "future_status")
+
+        XCTAssertNil(
+            StoredEvent.fromStreamFrame(
+                missionId: mid,
+                type: "text_delta",
+                data: ["sequence": 13, "content": "ignored"]
+            )
+        )
+        XCTAssertNil(
+            StoredEvent.fromStreamFrame(
+                missionId: mid,
+                type: "goal_status",
+                data: ["status": "active"]
+            )
+        )
+    }
 }

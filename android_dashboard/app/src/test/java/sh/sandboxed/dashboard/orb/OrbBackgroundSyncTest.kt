@@ -256,4 +256,43 @@ class OrbBackgroundSyncTest {
             assertEquals(name, OrbJSON.strList(c, "expected"), OrbConnection.candidateEndpoints(configured))
         }
     }
+
+    @Test
+    fun retainsStructuredGoalEventsInOpaqueNestedMetadataAndPreservesDeduplication() {
+        val mid = "m-android-goal"
+        val statusOnly = OrbLiveEventReducer.streamFrameToStoredRow(
+            mid,
+            "goal_status",
+            mapOf("sequence" to 10L, "status" to "active", "revision" to 1)
+        )
+        assertNotNull(statusOnly)
+        assertEquals("", statusOnly!!.str("content"))
+        val meta = statusOnly.dict("metadata")
+        assertNotNull(meta)
+        val remoteGoal = OrbJSON.dict(meta!!["remote_goal"])
+        assertNotNull(remoteGoal)
+        assertEquals("active", OrbJSON.str(remoteGoal, "status"))
+
+        val iterEvent = OrbLiveEventReducer.streamFrameToStoredRow(
+            mid,
+            "goal_iteration",
+            mapOf("sequence" to 8L, "summary" to "Iteration 1", "iteration" to 1, "future" to mapOf("value" to 42))
+        )
+        assertNotNull(iterEvent)
+        assertEquals("Iteration 1", iterEvent!!.str("content"))
+
+        val dupStatus = OrbLiveEventReducer.streamFrameToStoredRow(
+            mid,
+            "goal_status",
+            mapOf("sequence" to 10L, "status" to "complete", "revision" to 2)
+        )
+        assertNotNull(dupStatus)
+
+        val merged = OrbLiveEventReducer.mergeMissionEvents(listOf(statusOnly), listOf(iterEvent, dupStatus!!))
+        assertEquals(2, merged.size)
+        assertEquals(8, merged[0].int("sequence"))
+        assertEquals(10, merged[1].int("sequence"))
+        val mergedRemoteGoal = OrbJSON.dict(merged[1].dict("metadata")?.get("remote_goal"))
+        assertEquals("complete", OrbJSON.str(mergedRemoteGoal, "status"))
+    }
 }
