@@ -16,8 +16,8 @@ def run : IO Unit := do
   let oc := harnessProxySetup "opencode" "builtin/smart" base "tok"
   check (oc.model == some "builtin/smart") "opencode keeps the router alias"
   check (envOf oc "SANDBOXED_PROXY_API_KEY" == some "tok") "opencode gets the mission proxy token"
-  check (((envOf oc "OPENCODE_CONFIG_CONTENT").getD "").splitOn s!"{base}/v1" |>.length > 1)
-    "opencode config points at Core's router"
+  let ocCfg := (envOf oc "OPENCODE_CONFIG_CONTENT").getD ""
+  check ((ocCfg.splitOn s!"{base}/v1").length > 1) "opencode config points at Core's router"
   check ((harnessProxySetup "opencode" "" base "tok").model == some "builtin/smart") "opencode defaults to smart"
   check ((harnessProxySetup "opencode" "openai/gpt-6-astra" base "tok").model == some "builtin/openai/gpt-6-astra")
     "a provider model goes through the router, not the host's provider login"

@@ -2051,7 +2051,14 @@ private def launchLocalCoreMissionTurn
   let setup ←
     if proxied then
       match ← mintMissionProxyToken st.store missionId mission.ownerUserId (nowSec + 86400) with
-      | .ok tok => pure (OrbCore.RemoteDispatch.harnessProxySetup normHarness model s!"http://127.0.0.1:{boundPort}" tok)
+      | .ok tok =>
+        -- Reach Core where it listens: loopback for wildcard binds, else the bound address.
+        let h := st.cfg.host.trimAscii.toString
+        let host :=
+          if h.isEmpty || h == "0.0.0.0" || h == "::" || h == "[::]" || h == "localhost" then "127.0.0.1"
+          else if h.contains ':' && !h.startsWith "[" then s!"[{h}]"
+          else h
+        pure (OrbCore.RemoteDispatch.harnessProxySetup normHarness model s!"http://{host}:{boundPort}" tok)
       | .error e => return ← failLaunch s!"failed to mint mission proxy token: {e}"
     else
       pure ({ model := model? } : OrbCore.RemoteDispatch.HarnessProxySetup)
