@@ -2,6 +2,7 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import base64
+import re
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -234,6 +235,35 @@ if os.environ['FAILURE'] == 'swap':
             with self.assertRaisesRegex(RuntimeError, "core-host.*core_colocated"):
                 roll.main(["--dry-run"])
             ssh.assert_not_called()
+
+    def test_auto_discovery_skips_managed_vms(self):
+        from unittest.mock import Mock
+        api = Mock()
+        api.list_nodes.return_value = [
+            {"id": "ashur"},
+            {"id": "managed-01f71d95-46f4-4a6e-aafa-eade3990a01a", "provider": "leanci"},
+        ]
+        with patch.object(roll, "discover_local_core_auth", return_value=("http://fake", "token")), \
+             patch.object(roll, "HttpCoreApi", return_value=api), \
+             patch.object(roll, "SshNodeOps") as ssh:
+            roll.main(["--dry-run"])
+            calls = str(ssh.return_value.mock_calls)
+            self.assertIn("ashur", calls)
+            self.assertNotIn("managed-01f71d95", calls)
+
+    def test_local_core_discovery_does_not_match_dev_binary(self):
+        seen = {}
+        def fake_run(cmd, **kw):
+            seen["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 1, "", "")
+        with patch.object(roll.subprocess, "run", side_effect=fake_run), \
+             patch.object(roll.subprocess, "check_output", side_effect=subprocess.CalledProcessError(1, "pgrep")):
+            with self.assertRaises(Exception):
+                roll.discover_local_core_auth()
+        pattern = seen["cmd"][-1]
+        self.assertIsNotNone(re.match(pattern, "/usr/local/bin/orb-core"))
+        self.assertIsNotNone(re.match(pattern, "/usr/local/bin/orb-core --port 3000"))
+        self.assertIsNone(re.match(pattern, "/usr/local/bin/orb-core-dev"))
 
     def test_apply_requires_expected_digests_before_auth(self):
         with patch.object(roll, "discover_local_core_auth", side_effect=AssertionError("auth reached")):

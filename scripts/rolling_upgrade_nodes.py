@@ -18,6 +18,7 @@ import hmac
 import inspect
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import shlex
@@ -511,7 +512,9 @@ def find_enabled_admin_id(db_path):
 
 
 def discover_local_core_auth(service_binary="/usr/local/bin/orb-core", default_port="3000"):
-    out = subprocess.run(["pgrep", "-f", service_binary], text=True, capture_output=True)
+    # Anchor the match: a bare `-f /usr/local/bin/orb-core` also matches
+    # `/usr/local/bin/orb-core-dev`, so the dev Core could be picked for prod.
+    out = subprocess.run(["pgrep", "-f", f"^{re.escape(service_binary)}( |$)"], text=True, capture_output=True)
     pids = out.stdout.split()
     if not pids and service_binary == "/usr/local/bin/orb-core":
         pids = subprocess.check_output(["pgrep", "-f", "/usr/local/bin/sandboxed-sh-prod"], text=True).split()
@@ -2425,7 +2428,9 @@ def main(argv=None):
             discovered = [
                 (n["id"], None)
                 for n in core_api.list_nodes()
-                if n.get("id") and not n.get("ephemeral", False)
+                # Managed VMs are listed as nodes too, but they are not fleet hosts
+                # (no SSH alias) and get their node binary from Core at boot.
+                if n.get("id") and not n.get("ephemeral", False) and not n["id"].startswith("managed-")
             ]
             remote_nodes = discovered
             colocated = [n.get("id") for n in core_api.list_nodes() if n.get("id") and n.get("core_colocated")]
