@@ -301,6 +301,8 @@ structure LocalActivityItem where
   background     : Bool := false
   toolUseId?     : Option String := none
   detail?        : Option String := none
+  /-- Why a failed tool call failed (harness error text, bounded); `none` otherwise. -/
+  error?         : Option String := none
   status         : String := "running"
   startedAt      : UInt64 := 0
   updatedAt      : UInt64 := 0
@@ -322,6 +324,7 @@ def LocalActivityItem.toJVal (a : LocalActivityItem) : JVal := Id.run do
   ]
   if let some tid := a.toolUseId? then fields := fields.push ("tool_use_id", .str tid)
   if let some det := a.detail? then fields := fields.push ("detail", .str det)
+  if let some err := a.error? then fields := fields.push ("error", .str err)
   if let some fin := a.finishedAt? then fields := fields.push ("finished_at", .nat fin.toNat)
   if let some tok := a.thinkingTokens? then fields := fields.push ("thinking_tokens", .nat tok.toNat)
   return .obj fields
@@ -1526,6 +1529,12 @@ def buildOneShotHarnessArgs
     -- `vibe` or custom CLI
     return #["--prompt", prompt]
 
+/-- Bounded error text of a failed tool call: an explicit error string, else the first text block of `content`. -/
+def toolErrorText? (errField? : Option String) (content : JVal) : Option String :=
+  let fromContent? := (content.asArr?.getD #[]).findSome? fun blk =>
+    ((blk.fieldOrNull "content").fieldStr? "text").orElse (fun _ => blk.fieldStr? "text")
+  (errField?.orElse (fun _ => fromContent?)).filter (!·.trimAscii.toString.isEmpty) |>.map (fun e => (e.take 500).toString)
+
 /-- Map one OpenCode ACP `session/update` payload onto the shared line result. -/
 def parseOpenCodeAcpUpdate (u : JVal) : OneShotLineParsed :=
   let kind := (u.fieldStr? "sessionUpdate").getD ""
@@ -1567,6 +1576,7 @@ def parseOpenCodeAcpUpdate (u : JVal) : OneShotLineParsed :=
           kind := kindStr
           toolUseId? := some aid
           detail? := detail?.map (fun d => (d.take 240).toString)
+          error? := if isFailed then toolErrorText? ((u.fieldOrNull "rawOutput").fieldStr? "error") (u.fieldOrNull "content") else none
           status := if isFailed then "failed" else if isDone then "completed" else "running"
         } }
   else {}
@@ -1664,6 +1674,7 @@ def parseOneShotHarnessEvent (harness : String) (rawLine : String) : OneShotLine
           kind := kind
           toolUseId? := some aid
           detail? := detailRaw?.map (fun d => (d.take 240).toString)
+          error? := if isFailed then toolErrorText? (stateObj.fieldStr? "error") .null else none
           status := if isFailed then "failed" else if isDone then "completed" else "running"
           startedAt := startTs
           updatedAt := endTs?.getD startTs

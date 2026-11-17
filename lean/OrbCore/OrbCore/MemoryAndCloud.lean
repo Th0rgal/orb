@@ -38,6 +38,10 @@ def defaultRecallTokens : UInt32 := 4096
 def maxRecallTokens : UInt32 := 8192
 def defaultMemoryMcpBaseUrl : String := "https://memory.thomas.md/mcp"
 def tokenCacheTtlSecs : UInt64 := 300
+/-- Upstream Hindsight call budget. Recall spends 17-72 s (p50 23 s, p90 45 s, Nov 2026) in its
+    CPU cross-encoder reranker whatever the `max_tokens`, so this sits just under `sandboxed-mcp`'s Core request budget
+    (`coreRequestTimeoutMs`, 55 s), which sits under the harnesses' 60 s MCP tool timeout. -/
+def hindsightRequestTimeoutMs : UInt32 := 50000
 
 /-- Caller security context evaluated by `Orb.Kernel.memoryToolGate`. -/
 structure MemoryCallerContext where
@@ -274,7 +278,7 @@ def executeMemoryMcpTool
     ("Content-Type", "application/json"),
     ("Accept", "application/json, text/event-stream")
   ]
-  match ← sendRequest "POST" endpoint hdrs (renderCompact rpcPayload).toUTF8 20000 with
+  match ← sendRequest "POST" endpoint hdrs (renderCompact rpcPayload).toUTF8 hindsightRequestTimeoutMs with
   | .error e => return .error s!"Upstream Hindsight MCP transport failed: {e}"
   | .ok resp =>
     if resp.status < 200 || resp.status ≥ 300 then

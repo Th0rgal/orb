@@ -316,6 +316,11 @@ def McpClient.getToken
       set (some (newTok, exp))
       return .ok newTok
 
+/-- Budget for one tool request to Core: just under the 60 s MCP tool timeout that OpenCode and
+    Codex are configured with, so slow brokered tools (Hindsight recall) finish instead of
+    being cut off at the 30 s HTTP default. -/
+def coreRequestTimeoutMs : UInt32 := 55000
+
 inductive CoreRequestOutcome where
   | ok (payload : JVal)
   | preflightFailed (message : String)
@@ -344,7 +349,7 @@ def McpClient.requestDetailed
       if (← cRef.get) then
         return .preflightFailed "Request cancelled; accepted actions continue"
     let method := if body?.isSome then "POST" else "GET"
-    match (← sendJsonRequest method s!"{c.apiUrl}{path}" (some tok) body?) with
+    match (← sendJsonRequest method s!"{c.apiUrl}{path}" (some tok) body? (timeoutMs := coreRequestTimeoutMs)) with
     | .error _ =>
       return .transportUncertain "Core connection failed; acceptance is unknown for a submitted mutation"
     | .ok (status, _, respJson?) =>
