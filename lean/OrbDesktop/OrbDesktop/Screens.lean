@@ -198,9 +198,11 @@ def buildReferenceTurnWidget (theme : Theme) (colW : SubPx) (stepNum : Nat) : Wi
     WidgetNode.box
       (BoxStyle.row 0
         |>.withAlign .center
-        |>.withPadding (Edges.trbl (pxToSub 16) 0 (pxToSub 14) (pxToSub 18))
+        |>.withPadding (Edges.trbl (pxToSub 2) 0 (pxToSub 14) 0)
         |>.withFixedSize innerW (pxToSub 56))
-      [screenTextLine theme (pxToSub 120) (pxToSub 21) (pxToSub 13) (pxToSub 21) pal.textMuted "4 commands"]
+      [chromeIcon "chevron-right" pal.textFaint 12,
+       WidgetNode.box (BoxStyle.row 0 |>.withPadding (Edges.trbl 0 0 0 (pxToSub 6)))
+         [screenTextLine theme (pxToSub 120) (pxToSub 21) (pxToSub 13) (pxToSub 21) pal.textMuted "4 commands"]]
 
   let h2Row : WidgetNode :=
     screenTextLine theme innerW (pxToSub 25) (pxToSub 13) (pxToSub 21) pal.textPrimary s!"Step {stepNum}" 650
@@ -223,6 +225,13 @@ def buildReferenceTurnWidget (theme : Theme) (colW : SubPx) (stepNum : Nat) : Wi
       , bullet "see docs" pal.accent
       ]
 
+  let codeLine (tokens : List (String × Color)) : WidgetNode :=
+    let style := { (Theme.codeText theme) with sizeSub := pxToSub 12, lineHeightSub := pxToSub 17, weight := 400 }
+    WidgetNode.text (BoxStyle.row 0 |>.withFixedSize (innerW - pxToSub 24) (pxToSub 17))
+      (pxToSub 17) (tokens.map fun (text, color) => overlaySynthRun { style with color := color } text)
+  let keyword : Color := if theme.isDark then 0x86D3D4FF else 0x007A7AFF
+  let functionName : Color := if theme.isDark then 0xE8AE74FF else 0x795E26FF
+  let number : Color := if theme.isDark then 0xA2C99EFF else 0x098658FF
   let codeCard : WidgetNode :=
     WidgetNode.rrect
       (BoxStyle.col (pxToSub 4)
@@ -231,12 +240,11 @@ def buildReferenceTurnWidget (theme : Theme) (colW : SubPx) (stepNum : Nat) : Wi
       codeBgCol
       (CornerRadii.uniform (pxToSub 8))
       (BorderStyle.uniform theme.borderWidth pal.border)
-      [ screenTextLine theme (innerW - pxToSub 24) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.accent
-          s!"export function fn_{stepNum}(x: number) \{" 400 true
-      , screenTextLine theme (innerW - pxToSub 24) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textPrimary
-          s!"  return x * {stepNum} + 1;" 400 true
-      , screenTextLine theme (innerW - pxToSub 24) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textPrimary
-          "}" 400 true
+      [ codeLine [("export function ", keyword), (s!"fn_{stepNum}", functionName),
+          ("(x: number) {", pal.textPrimary)]
+      , codeLine [("  ", pal.textPrimary), ("return", keyword), (" x * ", pal.textPrimary),
+          (toString stepNum, number), (" + ", pal.textPrimary), ("1", number), (";", pal.textPrimary)]
+      , codeLine [("}", pal.textPrimary)]
       ]
 
   let closeRow : WidgetNode :=
