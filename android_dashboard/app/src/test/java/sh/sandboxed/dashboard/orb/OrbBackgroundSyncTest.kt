@@ -266,7 +266,7 @@ class OrbBackgroundSyncTest {
             mapOf("sequence" to 10L, "status" to "active", "revision" to 1)
         )
         assertNotNull(statusOnly)
-        assertEquals("", statusOnly!!.str("content"))
+        assertEquals("", statusOnly!!.raw["content"])
         val meta = statusOnly.dict("metadata")
         assertNotNull(meta)
         val remoteGoal = OrbJSON.dict(meta!!["remote_goal"])
