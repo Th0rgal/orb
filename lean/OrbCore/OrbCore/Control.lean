@@ -2068,7 +2068,19 @@ private def launchLocalCoreMissionTurn
           if h.isEmpty || h == "0.0.0.0" || h == "::" || h == "[::]" || h == "localhost" then "127.0.0.1"
           else if h.contains ':' && !h.startsWith "[" then s!"[{h}]"
           else h
-        pure (OrbCore.RemoteDispatch.harnessProxySetup normHarness model s!"http://{host}:{boundPort}" tok)
+        let s := OrbCore.RemoteDispatch.harnessProxySetup normHarness model s!"http://{host}:{boundPort}" tok
+        -- Core runs as root and its home holds the operator's own harness setup.
+        -- Claude refuses to skip permissions as root unless told it is sandboxed;
+        -- Codex gets its own home per mission (sessions for `resume` stay there)
+        -- instead of root's config, whose MCP servers it hangs starting.
+        let hostEnv ←
+          if normHarness == "claudecode" then pure #[("IS_SANDBOX", "1")]
+          else if normHarness == "codex" then do
+            let codexHome := s!"{st.store.rootDir}/core-turns/codex-home/{missionId}"
+            IO.FS.createDirAll codexHome
+            pure #[("CODEX_HOME", codexHome)]
+          else pure #[]
+        pure { s with env := s.env ++ hostEnv }
       | .error e => return ← failLaunch s!"failed to mint mission proxy token: {e}"
     else
       pure ({ model := model? } : OrbCore.RemoteDispatch.HarnessProxySetup)
