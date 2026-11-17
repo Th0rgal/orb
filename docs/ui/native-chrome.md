@@ -69,8 +69,11 @@ routes through the verified unboxed kernel functions in `Orb.Kernel`:
   already reserves, so nothing moves when they appear. A click calls
   `window.__ORB_NATIVE_NAV__("new-project")` or `("new-agent:<slug>[:<folder path>]")`; `App.tsx`
   runs the same `startNewProject` / `newAgentIn` as the HTML rows. The target is derived from
-  `row_id` / `target`, so the `OrbLocald` row model is unchanged. macOS (`NSTableView`) does not
-  have these buttons yet; there the native sidebar still needs Cmd+N.
+  `row_id` / `target`, so the `OrbLocald` row model is unchanged. macOS (`NSTableView`) uses
+  always-visible, keyboard-accessible native buttons with the same targets. Activating a
+  button does not select or expand its row. Buttons carry row identities rather than row
+  indices: after insertion, removal or retargeting, activation resolves the current row;
+  a button for a removed row does nothing. Labels and badges reserve the button's space.
 - Multi-selection: Ctrl/Super-click toggles a mission, project, folder or file row, Shift-click
   extends from the anchor, a plain click or Escape clears it. Right-click inside a selection of
   more than one shows only bulk actions: for missions Move N to ▸, Archive/Restore N and Delete N…

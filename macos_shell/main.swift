@@ -268,6 +268,17 @@ struct OrbSidebarRowItem: Equatable {
     let selected: Bool
     let attention: Bool
 
+    var addTarget: String? {
+        if kind == "section" && rowId == "section:projects" { return "new-project" }
+        if kind == "project", target.hasPrefix("project:"), target.count > 8 {
+            return "new-agent:" + target.dropFirst(8)
+        }
+        if kind == "folder", rowId.hasPrefix("folder:"), rowId.count > 7 {
+            return "new-agent:" + rowId.dropFirst(7)
+        }
+        return nil
+    }
+
     func hasSameCellContent(as other: OrbSidebarRowItem) -> Bool {
         return rowId == other.rowId &&
             kind == other.kind &&
@@ -784,6 +795,18 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         dispatchItem(item)
     }
 
+    func addTarget(for button: NSButton) -> String? {
+        guard let rowId = button.identifier?.rawValue else { return nil }
+        return rows.first(where: { $0.rowId == rowId })?.addTarget
+    }
+
+    @objc private func onSidebarAddClick(_ sender: NSButton) {
+        guard let target = addTarget(for: sender) else { return }
+        let lit = OrbAppDelegate.jsonStringLiteral(target)
+        webView?.evaluateJavaScript("window.__ORB_NATIVE_NAV__&&window.__ORB_NATIVE_NAV__(\(lit));", completionHandler: nil)
+        if let win = hostWindow, let wv = webView { win.makeFirstResponder(wv) }
+    }
+
     func numberOfRows(in tableView: NSTableView) -> Int {
         return rows.count
     }
@@ -844,7 +867,8 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         }()
 
         let width = max(120, tableView.bounds.width)
-        let rightReserve: CGFloat = (hasSubToggle || !metaText.isEmpty) ? 68 : 8
+        let addReserve: CGFloat = item.addTarget == nil ? 0 : 28
+        let rightReserve: CGFloat = ((hasSubToggle || !metaText.isEmpty) ? 68 : 8) + addReserve
         let lbl = NSTextField(labelWithString: item.title)
         lbl.lineBreakMode = .byTruncatingTail
         if isSection {
@@ -896,9 +920,25 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
             meta.textColor = (item.attention && item.shortcut.isEmpty && item.badge == 0)
                 ? (Self.parseHexColor("#c9a227") ?? .systemYellow)
                 : .tertiaryLabelColor
-            meta.frame = NSRect(x: width - 68, y: 7, width: 60, height: 16)
+            meta.frame = NSRect(x: width - 68 - addReserve, y: 7, width: 60, height: 16)
             meta.autoresizingMask = [.minXMargin]
             cell.addSubview(meta)
+        }
+        if item.addTarget != nil {
+            let button = NSButton(frame: NSRect(x: width - 30, y: 4, width: 24, height: 22))
+            button.title = "+"
+            button.bezelStyle = .recessed
+            button.isBordered = false
+            button.font = NSFont.systemFont(ofSize: 16, weight: .regular)
+            button.contentTintColor = .secondaryLabelColor
+            let label = isSection ? "New project" : "New agent in \(item.title)"
+            button.toolTip = label
+            button.setAccessibilityLabel(label)
+            button.identifier = NSUserInterfaceItemIdentifier(item.rowId)
+            button.target = self
+            button.action = #selector(onSidebarAddClick(_:))
+            button.autoresizingMask = [.minXMargin]
+            cell.addSubview(button)
         }
         return cell
     }
@@ -2141,6 +2181,51 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
               !testChrome.acceptSidebarResponse(reqGen: 2, scope: "scope:a", revision: 99) else {
             fputs("self-test failed: OrbNativeChromeController per-scope revision fencing mismatch\n", stderr)
             exit(1)
+        }
+        // Creation controls survive row insertion/retargeting and ignore removed rows.
+        let creationRows: [[String: Any]] = [
+            ["row_id": "section:projects", "kind": "section", "title": "Projects"],
+            ["row_id": "proj:default", "kind": "project", "title": "Default", "target": "project:default"],
+            ["row_id": "folder:orb:audits/2026:review", "kind": "folder", "title": "Review"],
+            ["row_id": "archive", "kind": "archive", "title": "Archived"],
+            ["row_id": "proj:empty", "kind": "project", "title": "Empty", "target": "project:"],
+            ["row_id": "mission:test", "kind": "mission", "title": "Mission", "target": "m:test", "selected": true]
+        ]
+        testChrome.applyRowsPayload(creationRows)
+        let expectedAddTargets: [String?] = ["new-project", "new-agent:default", "new-agent:orb:audits/2026:review", nil, nil, nil]
+        var creationButtons: [NSButton] = []
+        for (idx, expected) in expectedAddTargets.enumerated() {
+            guard testChrome.rows[idx].addTarget == expected,
+                  let cell = testChrome.tableView(testChrome.sidebarTable, viewFor: nil, row: idx) as? NSTableCellView else {
+                fatalError("self-test failed: sidebar creation target \(idx)")
+            }
+            let buttons = cell.subviews.compactMap { $0 as? NSButton }
+            guard buttons.count == (expected == nil ? 0 : 1) else {
+                fatalError("self-test failed: sidebar creation button count \(idx)")
+            }
+            if let button = buttons.first {
+                guard testChrome.addTarget(for: button) == expected,
+                      button.action != nil, button.target === testChrome,
+                      button.toolTip?.isEmpty == false,
+                      (cell.textField?.frame.maxX ?? 0) <= button.frame.minX else {
+                    fatalError("self-test failed: sidebar creation button wiring/layout \(idx)")
+                }
+                let selected = testChrome.sidebarTable.selectedRow
+                let before = testChrome.rows
+                button.performClick(nil)
+                guard testChrome.sidebarTable.selectedRow == selected, testChrome.rows == before else {
+                    fatalError("self-test failed: creation click changed selection/expansion")
+                }
+                creationButtons.append(button)
+            }
+        }
+        var retargeted = creationRows[1]
+        retargeted["target"] = "project:renamed"
+        testChrome.applyRowsPayload([creationRows[5], retargeted, creationRows[0]])
+        guard testChrome.addTarget(for: creationButtons[0]) == "new-project",
+              testChrome.addTarget(for: creationButtons[1]) == "new-agent:renamed",
+              testChrome.addTarget(for: creationButtons[2]) == nil else {
+            fatalError("self-test failed: stale creation button after row update")
         }
         testChrome.setSidebarOpen(false)
         guard testChrome.sidebarPane.isHidden else {
