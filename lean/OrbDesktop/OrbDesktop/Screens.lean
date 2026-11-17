@@ -54,6 +54,16 @@ def screenTextLine (theme : Theme) (w h sizePx linePx : SubPx) (color : Color)
   let st : TextStyle := { base with sizeSub := sizePx, lineHeightSub := linePx, color := color, weight := weight }
   WidgetNode.text (BoxStyle.row 0 |>.withFixedSize w h) linePx [overlaySynthRun st text]
 
+def screenCodeLine (theme : Theme) (w h : SubPx) (text : String) : WidgetNode :=
+  WidgetNode.text (BoxStyle.row 0 |>.withFixedSize w h) h
+    [overlaySynthRun { (Theme.codeText theme) with sizeSub := pxToSub 12, lineHeightSub := h } text]
+
+def screenCopyButton (theme : Theme) (w : SubPx) : WidgetNode :=
+  WidgetNode.box
+    (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center
+      |>.withFixedSize w (pxToSub 18))
+    [chromeIcon "file" theme.palette.textMuted 13]
+
 /-! ## 1 & 2 & 8 & 9. New Agent Centered Composer (`01`, `02`, `07`, `08`, `09`) -/
 
 /-- Build the centered `.composer.tall` New Agent card (`x=541..1149, y=378..511`) and optional toast stack. -/
@@ -257,14 +267,20 @@ def buildReferenceTurnWidget (theme : Theme) (colW : SubPx) (stepNum : Nat) : Wi
       [ screenTextLine theme (innerW - pxToSub 70) (pxToSub 21) (pxToSub 13) (pxToSub 21) pal.textPrimary
           "The change keeps behaviour identical."
       , screenTextLine theme (pxToSub 50) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textMuted ""
-      ]
+       ]
+
+  let copyButton : WidgetNode :=
+    WidgetNode.box
+      (BoxStyle.row 0 |>.withAlign .center |>.withJustify .end_
+        |>.withFixedSize innerW (pxToSub 18))
+      [screenCopyButton theme (pxToSub 18)]
 
   let bodyBlock : WidgetNode :=
     WidgetNode.box
       (BoxStyle.col 0
         |>.withPadding (Edges.xy (pxToSub 10) 0)
         |>.withFixedSize colW (pxToSub 302))
-      [cmdRow, h2Row, p1Row, bullets, codeCard, closeRow]
+       [cmdRow, h2Row, p1Row, bullets, codeCard, copyButton, closeRow]
 
   WidgetNode.box
     (BoxStyle.col 0 |>.withFixedSize colW (pxToSub 345))
