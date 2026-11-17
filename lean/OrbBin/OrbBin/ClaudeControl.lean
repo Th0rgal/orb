@@ -1270,7 +1270,9 @@ private def launchOrReuseWarmClaude
   for (k, v) in extraEnv do
     envStrs := envStrs.push s!"{k}={v}"
   -- Use `/bin/sh -c 'cd "$1" && shift && exec "$@"' sh <cwd> <binPath> <claudeArgs...>` so child starts cleanly in `cwd`
-  let shArgs := #["-c", "cd \"$1\" && shift && exec \"$@\"", "sh", cwd, binPath] ++ claudeArgs
+  -- Keep Claude's stderr (otherwise discarded) so a startup failure has a visible reason.
+  let stderrPath := s!"/tmp/orb-claude-{missionId}.stderr"
+  let shArgs := #["-c", "umask 077; f=\"$1\"; shift; cd \"$1\" && shift && exec \"$@\" 2>\"$f\"", "sh", stderrPath, cwd, binPath] ++ claudeArgs
   let spawned ← match ← (spawnPgrp "/bin/sh" shArgs envStrs (pipeStdin := true) (nullStdio := true) (pipeStdout := true)).toBaseIO with
     | .error e => return .error s!"Failed to start Claude Code: {e}"
     | .ok sp => pure sp
@@ -1389,7 +1391,16 @@ private def launchOrReuseWarmClaude
     let curSnap ← stRef.get
     if !curSnap.done then
       let exitInt : Int := Int.ofNat rawExit.toNat
-      let errMsg? := if rawExit == 0 then none else some s!"Claude Code exited (code {rawExit})"
+      let stderrTail ← do
+        try
+          let raw ← IO.FS.readFile stderrPath
+          let t := raw.trimAscii.toString
+          pure (if t.length > 600 then (t.drop (t.length - 600)).toString else t)
+        catch _ => pure ""
+      let errMsg? :=
+        if rawExit == 0 then none
+        else if stderrTail.isEmpty then some s!"Claude Code exited (code {rawExit})"
+        else some s!"Claude Code exited (code {rawExit}): {stderrTail}"
       stRef.modify fun s => { s with done := true, exitCode? := some exitInt, error? := errMsg? }
       let finalSnap ← stRef.get
       let cb ← getCallbacksFor mgr missionId
