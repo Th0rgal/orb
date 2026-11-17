@@ -56,14 +56,14 @@ class MonitorSidecarCheckTest(unittest.TestCase):
         monitor.check_sidecar(found)
         return found
 
-    def test_reports_the_long_ban_and_that_no_login_is_left(self):
+    def test_r32_reports_quota_login_once_without_duplicate_outage(self):
         found = self.problems([dict(login("claude-a.json", 471_600), email="a@example.test")])
-        self.assertEqual(sorted(found), ["claude-banned:a@example.test", "claude:none"])
+        self.assertEqual(sorted(found), ["provider:sign-in-again"])
 
-    def test_one_working_login_and_short_bans_are_not_an_outage(self):
+    def test_r32_working_login_does_not_hide_another_login_quota(self):
         files = [dict(login("claude-a.json", 900), email="a@example.test"), login("claude-b.json", 0),
                  login("antigravity-x.json", 430_000, provider="antigravity")]
-        self.assertEqual(self.problems(files), {})
+        self.assertEqual(list(self.problems(files)), ["provider:sign-in-again"])
 
 
 if __name__ == "__main__":
