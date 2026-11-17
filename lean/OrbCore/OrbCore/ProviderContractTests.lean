@@ -491,7 +491,7 @@ private def sidecarParkedHealthContract
         return .ok { status := 400, headers := #[], body :=
           "{\"error\":{\"code\":\"context_length_exceeded\"},\"message\":\"Reduce context\"}".toUTF8 }) }
     let body := "{\"model\":\"r32-reporting\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
-    let wire := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {app.cfg.proxySecret}\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+    let wire := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
     let .ok request := parseRequest wire.toUTF8 none | throw (IO.userError "r32 request parse")
     let .ok response ← dispatchCoreRequest proxyApp request now | throw (IO.userError "r32 dispatch")
     let .ok errorDoc := OrbBin.Json.parseBytes response.body | throw (IO.userError "r32 response parse")
