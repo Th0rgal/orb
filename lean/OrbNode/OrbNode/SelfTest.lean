@@ -824,6 +824,34 @@ private def runNodeStdinStreamAndGitWorkspaceTests
      (streamBodyStr.splitOn "event: log_slice").length >= 2 &&
      (streamBodyStr.splitOn "from-stdin-relay").length >= 2)
 
+/-- Expose the invoking host's installed `ELAN_HOME` toolchains (read-only via symlink) inside
+    `<tmpRoot>/caches/elan` and return an already-installed `lean-toolchain` string so `lean_build`
+    fixtures in `orb-node-test` run offline without network toolchain downloads even when invoked as
+    `root` or with an isolated per-job `HOME`. -/
+private def prepareSelfTestLeanToolchain (tmpRoot : String) : IO String := do
+  let hostElan ← resolveElanHome tmpRoot
+  let wElan := System.FilePath.mk tmpRoot / "caches" / "elan"
+  IO.FS.createDirAll wElan
+  if hostElan != wElan && (← hasInstalledToolchains hostElan) then
+    if !(← (wElan / "toolchains").pathExists) then
+      let _ ← IO.Process.output {
+        cmd := "ln"
+        args := #["-sfn", (hostElan / "toolchains").toString, (wElan / "toolchains").toString]
+      }
+    if (← (hostElan / "bin").isDir) && !(← (wElan / "bin").pathExists) then
+      let _ ← IO.Process.output {
+        cmd := "ln"
+        args := #["-sfn", (hostElan / "bin").toString, (wElan / "bin").toString]
+      }
+  let cached ← listCachedToolchains tmpRoot
+  let chosenDir :=
+    if cached.contains "leanprover--lean4---v4.35.0" then
+      "leanprover--lean4---v4.35.0"
+    else
+      (cached.find? (fun s => s.startsWith "leanprover--lean4---")).getD
+        (cached[0]?.getD "leanprover--lean4---v4.35.0")
+  return elanDirNameToToolchain chosenDir ++ "\n"
+
 /-- Section 12: Round-2 regression checks (split UTF-8 log slicing, >150 KiB SQLite stdin,
     pure-Lean tar+zstd `-C` / newline filename safety, timeout shrinkDebt repayment, and
     saturated-queue cold archive-backed `lean_build` execution). -/
@@ -878,12 +906,13 @@ private def runRound2RegressionTests
 
   -- 12d. Queued archive-backed `lean_build` retains unsanitized `source.archive` across saturated ticks,
   --      and timed-out regular jobs repay `shrinkDebt`!
+  let fixtureTc ← prepareSelfTestLeanToolchain tmpRoot
   let packRepoDir := System.FilePath.mk tmpRoot / "archive-pack-src"
   IO.FS.createDirAll packRepoDir
   let _ ← IO.Process.output { cmd := "git", args := #["init", "--quiet"], cwd := some packRepoDir.toString }
   let _ ← IO.Process.output { cmd := "git", args := #["config", "user.email", "test@orb.dev"], cwd := some packRepoDir.toString }
   let _ ← IO.Process.output { cmd := "git", args := #["config", "user.name", "Orb Test"], cwd := some packRepoDir.toString }
-  IO.FS.writeFile (packRepoDir / "lean-toolchain") "leanprover/lean4:v4.35.0\n"
+  IO.FS.writeFile (packRepoDir / "lean-toolchain") fixtureTc
   IO.FS.writeFile (packRepoDir / "Main.lean") "def x := 42\n#eval x\n"
   let _ ← IO.Process.output { cmd := "git", args := #["add", "lean-toolchain", "Main.lean"], cwd := some packRepoDir.toString }
   let _ ← IO.Process.output { cmd := "git", args := #["commit", "-m", "init", "--quiet"], cwd := some packRepoDir.toString }
@@ -958,10 +987,10 @@ private def runRound2RegressionTests
      !persistedHasB64)
 
   -- Wait for the two 1s jobs to time out (`nowEp > startedEp + 1`), repay `shrinkDebt`, and admit `archJobId` from `queuedPayloads`!
-  for _ in [0:45] do
+  for _ in [0:450] do
     IO.sleep 100
     rt ← tickRuntime rt
-    if (rt.ledger.jobs.get? archJobId).map (·.state) == some .succeeded then
+    if (rt.ledger.jobs.get? archJobId).any (fun r => r.state.isTerminal) then
       break
   let t1ErrOk := match (rt.ledger.jobs.get? "99999999-9999-4999-8999-999999999991").bind (·.error?) with
     | some e => e == "timed out after 1s" || e.startsWith "command exited with Some("
@@ -2133,7 +2162,8 @@ def runTests : IO UInt32 := do
 
   -- POST /jobs valid lean_build with complete bundle + SHA-256 + `lean` argv -> 202 -> succeeded + artifact
   let jobId := "33333333-3333-4333-8333-333333333333"
-  let tcBytes := "leanprover/lean4:v4.35.0\n".toUTF8
+  let fixtureTc ← prepareSelfTestLeanToolchain tmpRoot
+  let tcBytes := fixtureTc.toUTF8
   let tcSha := bytesToHexLower (sha256Bytes tcBytes)
   let fileBytes := "def orbNodeCheck : Nat := 42\n#eval orbNodeCheck\n".toUTF8
   let fileSha := bytesToHexLower (sha256Bytes fileBytes)
@@ -2175,10 +2205,10 @@ def runTests : IO UInt32 := do
   rt := rt5
   check "POST /jobs valid lean_build returns 202" (rSub.status == 202)
 
-  for _ in [0:80] do
+  for _ in [0:900] do
     IO.sleep 50
     rt ← tickRuntime rt
-    if (rt.ledger.jobs.get? jobId).map (·.state) == some .succeeded then break
+    if (rt.ledger.jobs.get? jobId).any (fun r => r.state.isTerminal) then break
 
   let (rt6, rGet) ← handleRequest rt {
     method := "GET", rawPath := s!"/jobs/{jobId}", path := s!"/jobs/{jobId}",
