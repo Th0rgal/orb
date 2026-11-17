@@ -1,8 +1,8 @@
 # Temporary: proves lean.ci re-runs an OOM-killed job once with more memory. Delete with the branch.
 name: lean.ci OOM probe
 on:
-  push:
-    branches: [ci/oom-probe]
+  pull_request:
+    paths: [.github/workflows/oom-probe.yml]
 jobs:
   oom-probe:
     # A label no other Orb job uses, so no runner swap with real CI.
