@@ -319,7 +319,7 @@ private def runManagedMcpProviderContractTests (root : String) : IO Unit := do
     closeManagedComputeStore mc
     closeCoreStore core
 
-private def runR2bRound2Extras (store : CoreStore) (appSt : CoreAppState) (validJwt : String) (nowSec : UInt64) : IO UInt32 := do
+private def runR2bRound2Extras (store : CoreStore) (appSt : CoreAppState) (validJwt fixtureAdminId : String) (nowSec : UInt64) : IO UInt32 := do
   -- Same-boot orphan mission cleanup: if a mission row is deleted while an intent/lease exists at the current boot,
   -- `recoverDispatchLeases` rolls back the orphaned reservation so the track is never wedged.
   let .ok () ← releaseDispatchTrackLease store "rsv-post-crash" "t5b"
@@ -395,6 +395,7 @@ private def runR2bRound2Extras (store : CoreStore) (appSt : CoreAppState) (valid
   -- 1. Create mission `m-ashur-9409f9a9` and arm a scheduled-origin `RemoteWait` (`failed_job_id = "job-origin-0"`, `scheduled_origin_job_id = "job-origin-0"`).
   let .ok () ← upsertMission store {
     id := "m-ashur-9409f9a9", title := "evm.fast (claude takeover)", status := "interrupted",
+    ownerUserId := fixtureAdminId,
     backend := "claude", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
     project := "evm-fast", updatedAt := "t-w0", totalCostCents := 0
   } | do closeCoreStore store; return 1
@@ -460,6 +461,7 @@ private def runR2bRound2Extras (store : CoreStore) (appSt : CoreAppState) (valid
   --    `POST /api/control/missions/:id/remote-replay` MUST return `409 scheduled_recovery_superseded` and clear the stale wait!
   let .ok () ← upsertMission store {
     id := "m-manual-sup", title := "Manual Supersession Test", status := "waiting_rate_limit",
+    ownerUserId := fixtureAdminId,
     backend := "claude", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
     updatedAt := "t-sup0", totalCostCents := 0
   } | do closeCoreStore store; return 1
@@ -589,7 +591,7 @@ private def sendTestHttp
   return .ok (resp.status, String.fromUTF8! resp.body)
 
 private def runR3cdQueueAndContinuationTests
-    (store : CoreStore) (appSt : CoreAppState) (validJwt : String) (nowSec : UInt64) : IO UInt32 := do
+    (store : CoreStore) (appSt : CoreAppState) (validJwt fixtureAdminId : String) (nowSec : UInt64) : IO UInt32 := do
   let failWith (msg : String) : IO UInt32 := do
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: {msg}"
@@ -599,6 +601,7 @@ private def runR3cdQueueAndContinuationTests
   for (mid, place, stStr) in #[("m-r3c-local", "managed", "active"), ("m-r3c-remote", "remote", "active"), ("m-r3d-cont", "managed", "awaiting_user"), ("m-r3d-place", "client", "awaiting_user")] do
     let .ok () ← upsertMission store {
       id := mid, title := s!"R3 {mid}", status := stStr,
+      ownerUserId := fixtureAdminId,
       backend := "codex", modelOverride := "", modelEffort := "medium", workingDirectory := store.rootDir,
       placementKind := place, nodeBootEpoch := store.bootEpoch, updatedAt := s!"{nowSec}", totalCostCents := 0
     } | return (← failWith s!"upsertMission {mid} failed")
@@ -882,6 +885,7 @@ private def runR3cdQueueAndContinuationTests
   -- Round-2 BLOCK regressions (lifecycle CAS, trailer strip, durable background wait, rate-limit status).
   let .ok () ← upsertMission store {
     id := "m-r2-term", title := "Terminal Stop Fence", status := "completed",
+    ownerUserId := fixtureAdminId,
     backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
     updatedAt := "t-r2", totalCostCents := 0
   } | return (← failWith "seed m-r2-term")
@@ -897,6 +901,7 @@ private def runR3cdQueueAndContinuationTests
     return (← failWith s!"BLOCK1 stop/interrupt codes: stopT={sStopTerm} intT={sIntTerm} stopM={sStopMiss} intM={sIntMiss}")
   let .ok () ← upsertMission store {
     id := "m-r2-run", title := "Terminal Begin Fence", status := "failed",
+    ownerUserId := fixtureAdminId,
     backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
     updatedAt := "t-r2b", totalCostCents := 0, placementKind := "managed"
   } | return (← failWith "seed m-r2-run")
@@ -931,6 +936,7 @@ private def runR3cdQueueAndContinuationTests
 
   let .ok () ← upsertMission store {
     id := "m-r2-bg", title := "Durable Background", status := "waiting_background",
+    ownerUserId := fixtureAdminId,
     backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
     updatedAt := "t-r2c", totalCostCents := 0
   } | return (← failWith "seed m-r2-bg")
@@ -985,7 +991,7 @@ private def runR3cdQueueAndContinuationTests
   return 0
 
 private def runR3cdRound3BlockerTests
-    (store : CoreStore) (appSt : CoreAppState) (validJwt : String) (nowSec : UInt64) : IO UInt32 := do
+    (store : CoreStore) (appSt : CoreAppState) (validJwt fixtureAdminId : String) (nowSec : UInt64) : IO UInt32 := do
   let failWith (msg : String) : IO UInt32 := do
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: {msg}"
@@ -1001,6 +1007,7 @@ private def runR3cdRound3BlockerTests
     return (← failWith s!"R3-BLOCK-1 ISO-8601 codec roundtrip failed: ep={repr ep2030} off={repr ep2030Offset}")
   let .ok () ← upsertMission store {
     id := "m-r3b-iso", title := "ISO Wakeup Contract", status := "awaiting_user",
+    ownerUserId := fixtureAdminId,
     backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
     placementKind := "managed", nodeBootEpoch := store.bootEpoch, updatedAt := formatEpochIso8601Utc nowSec, totalCostCents := 0
   } | return (← failWith "seed m-r3b-iso")
@@ -1080,6 +1087,7 @@ private def runR3cdRound3BlockerTests
   -- if `hostedStop` ran across multiple transactions, `missions.status='interrupted'` or `run_generation+1` would commit before revocation failed!
   let .ok () ← upsertMission store {
     id := "m-r3b-stop-tx", title := "Atomic Hosted Stop", status := "active",
+    ownerUserId := fixtureAdminId,
     backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
     placementKind := "managed", nodeBootEpoch := store.bootEpoch, updatedAt := formatEpochIso8601Utc nowSec, totalCostCents := 0
   } | return (← failWith "seed m-r3b-stop-tx")
@@ -1174,6 +1182,7 @@ private def runR3cdRound3BlockerTests
   -- Superseded mission (`superseded_by_mission_id != ''`) MUST be rejected by `Orb.Lifecycle` (`remote_replay_lifecycle_rejected`, HTTP 409) without mutating status!
   let .ok () ← upsertMission store {
     id := "m-r3b-replay-sup", title := "Superseded Replay Fence", status := "waiting_rate_limit",
+    ownerUserId := fixtureAdminId,
     backend := "claude", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
     placementKind := "remote", nodeBootEpoch := store.bootEpoch, updatedAt := formatEpochIso8601Utc nowSec, totalCostCents := 0
   } | return (← failWith "seed m-r3b-replay-sup")
@@ -1194,6 +1203,7 @@ private def runR3cdRound3BlockerTests
   for (midAct, badStatus) in #[("m-r3b-honest-act", "active"), ("m-r3b-honest-pend", "pending")] do
     let .ok () ← upsertMission store {
       id := midAct, title := s!"Honest Phase {badStatus}", status := badStatus,
+      ownerUserId := fixtureAdminId,
       backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
       placementKind := "managed", nodeBootEpoch := store.bootEpoch, updatedAt := formatEpochIso8601Utc nowSec, totalCostCents := 0
     } | return (← failWith s!"seed {midAct}")
@@ -1208,6 +1218,7 @@ private def runR3cdRound3BlockerTests
   -- Also verify `verifyRunLifecycleAdmit` (`begin_run_rejected`) blocks a second live run even if `missions.status` is `awaiting_user`:
   let .ok () ← upsertMission store {
     id := "m-r3b-honest-live", title := "Honest Live Run Row", status := "awaiting_user",
+    ownerUserId := fixtureAdminId,
     backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
     placementKind := "managed", nodeBootEpoch := store.bootEpoch, updatedAt := formatEpochIso8601Utc nowSec, totalCostCents := 0
   } | return (← failWith "seed m-r3b-honest-live")
@@ -1224,6 +1235,7 @@ private def runR3cdRound3BlockerTests
   -- R4-BLOCK-2 (`GET /api/control/missions/:id` returns full `Mission` fields + compatibility tags with no shadowed duplicate route):
   let .ok () ← upsertMission store {
     id := "m-r4b-detail", title := "Detail Contract Mission", status := "awaiting_user",
+    ownerUserId := fixtureAdminId,
     backend := "codex", modelOverride := "gpt-6.1-sol", modelEffort := "xhigh",
     workingDirectory := store.rootDir, project := "orb", track := "r3cd-track", repo := "Th0rgal/orb#1617",
     authorityMode := "writer", placementKind := "managed", supersededById := "m-r4b-succ",
@@ -1288,7 +1300,7 @@ private def runR3cdRound3BlockerTests
    return 0
 
 private def runR3cdReviewFixTests
-    (store : CoreStore) (appSt : CoreAppState) (validJwt : String) (nowSec : UInt64) : IO UInt32 := do
+    (store : CoreStore) (appSt : CoreAppState) (validJwt fixtureAdminId : String) (nowSec : UInt64) : IO UInt32 := do
   let failWith (msg : String) : IO UInt32 := do
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: {msg}"
@@ -1296,6 +1308,7 @@ private def runR3cdReviewFixTests
 
   let .ok () ← upsertMission store {
     id := "m-r5-fix", title := "Review Fixes", status := "awaiting_user",
+    ownerUserId := fixtureAdminId,
     backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
     placementKind := "managed", nodeBootEpoch := store.bootEpoch, updatedAt := formatEpochIso8601Utc nowSec, totalCostCents := 0
   } | return (← failWith "seed m-r5-fix")
@@ -1876,7 +1889,7 @@ private def runFastMemoryBrokerTests
   return 0
 
 private def runCloudHandoffTests
-    (tmpRoot : String) (store : CoreStore) (appSt : CoreAppState) (validJwt : String) (nowSec : UInt64) : IO UInt32 := do
+    (tmpRoot : String) (store : CoreStore) (appSt : CoreAppState) (validJwt fixtureAdminId : String) (nowSec : UInt64) : IO UInt32 := do
   -- (c) Instant Paloma wakeup + SSE delta reducer (monotone cursor dedup across reconnects)
   let wake ← newCloudWorkerWakeup
   let g1 ← notifyCloudWorker wake
@@ -1896,6 +1909,7 @@ private def runCloudHandoffTests
   -- (d) Cloud-to-workspace handoff & native mission fork (`POST /api/control/missions/:id/fork`)
   let cloudSrc : MissionRecord := {
     id := "m-paloma-1", title := "Quick Paloma Ask", status := "completed",
+    ownerUserId := fixtureAdminId,
     backend := "cloud_hermes", modelOverride := "", workingDirectory := tmpRoot,
     updatedAt := "2026-11-07T00:00:00Z"
   }
@@ -1975,7 +1989,7 @@ private def runCloudHandoffTests
   return 0
 
 private def runCyberAndSkillDeliveryTests
-    (tmpRoot : String) (store : CoreStore) (appSt0 : CoreAppState) (validJwt : String) (nowSec : UInt64) : IO UInt32 := do
+    (tmpRoot : String) (store : CoreStore) (appSt0 : CoreAppState) (validJwt fixtureAdminId : String) (nowSec : UInt64) : IO UInt32 := do
   let appSt := { appSt0 with cfg := { appSt0.cfg with workingDir := tmpRoot } }
   -- 1. `#1497` Codex Cyber Access + `/goal` fail-closed HTTP gates
   let capsRaw := s!"GET /api/control/cyber-capabilities?model=gpt-6.1-sol&mode=daybreak HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\n\r\n".toUTF8
@@ -2073,8 +2087,8 @@ private def runCyberAndSkillDeliveryTests
     return 1
 
   -- 2. `#1553` `/api/library/skill-delivery` + `/skill:<name>` validation
-  let globalSkillDir := System.FilePath.mk tmpRoot / "library" / "skills" / "lean-audit"
-  let ctxSkillDir := System.FilePath.mk tmpRoot / "project-files" / "orb" / "skills" / "orb-release"
+  let globalSkillDir := System.FilePath.mk store.rootDir / "library" / "users" / fixtureAdminId / "skills" / "lean-audit"
+  let ctxSkillDir := System.FilePath.mk store.rootDir / "project-files" / s!"{fixtureAdminId}:orb" / "skills" / "orb-release"
   IO.FS.createDirAll globalSkillDir
   IO.FS.createDirAll ctxSkillDir
   IO.FS.writeFile (globalSkillDir / "SKILL.md") "---\ndescription: \"Audit formal Lean specs\"\n---\nCheck specs.\n"
@@ -2367,9 +2381,12 @@ private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let .ok ackResp ← dispatchCoreRequest r5App ackReq 69 | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
   let .ok opAdminId ← bootstrapUsersAndBackfill r5Store #[("admin", prodValid.dashboardPassword)] "60"
     | return 1
+  let .ok () ← backfillManagedMachineOwner mst opAdminId
+    | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
   let opJwt := mintSessionTokenV2 prodValid.jwtSecret opAdminId "admin" 1 3660
   let .ok () ← upsertMission r5Store {
     id := "m-owner-1", title := "Managed VM Owner", status := "active",
+    ownerUserId := opAdminId,
     backend := "codex", modelOverride := "", workingDirectory := r5Root,
     project := "orb", placementKind := "managed", updatedAt := "70"
   } | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
@@ -2400,7 +2417,7 @@ private def runR5bManagedStoreTests (prodValid : CoreConfig) : IO UInt32 := do
      (((String.fromUTF8? rnListResp.body).getD "").splitOn "\"managed-mm-r5b-1\"").length <= 1 then
     closeCoreStore r5Store
     closeManagedComputeStore mst
-    IO.eprintln "[orb-core-test] FAIL: HTTP relay poll/respond or operator fleet routes failed"
+    IO.eprintln s!"[orb-core-test] FAIL: HTTP relay poll/respond or operator fleet routes failed: poll={pollResp.status} stale={staleLeaseResp.status} ack={ackResp.status} machines={mmListResp.status}:{String.fromUTF8! mmListResp.body} nodes={rnListResp.status}:{String.fromUTF8! rnListResp.body}"
     return 1
   let .ok () ← enqueueRelayCommand mst "mm-r5b-1" "cmd-1" "{\"op\":\"ping\"}"
     | do closeCoreStore r5Store; closeManagedComputeStore mst; return 1
@@ -2570,7 +2587,7 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let streamResp ← dispatch s!"GET /api/projects/orb/context/stream HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
   let travBody := "{\"id\":\"op-3\",\"path\":\"../x\",\"delete\":true}"
   let traversal ← dispatch s!"POST /api/projects/orb/context/operations HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {travBody.utf8ByteSize}\r\n\r\n{travBody}"
-  let blobDirStat ← OrbBin.PosixExt.statPath (contextBlobDir r7Root "orb").toString
+   let blobDirStat ← OrbBin.PosixExt.statPath (contextBlobDir r7Root s!"{fixtureAdminId}:orb").toString
   let fiveMib := ByteArray.mk (Array.replicate (5 * 1024 * 1024) (65 : UInt8))
   let fiveMibStatus ← do
     let hdrs := s!"POST /api/projects/orb/context/blobs HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {fiveMib.size}\r\n\r\n".toUTF8
@@ -6165,6 +6182,9 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
   }
   let _ ← bootstrapUsersAndBackfill store #[("admin", cfg.dashboardPassword)] s!"{nowSec}"
   hydrateLegacyDataDir workRoot dataRoot store mStore "" false
+  let _ ← execParamQuery store.missionsDb
+    "UPDATE missions SET owner_user_id=?1,project=?2 WHERE id IN ('8a349331-41cf-4223-a25f-459c00cd0d98','c1665d11-0000-4000-8000-000000000001');"
+    #[hsAdminId, s!"{hsAdminId}:verity-core"]
   let managedRef ← IO.mkRef ({ enabled := true, boatEnabled := true, dailyCapCents := 5000, maxConcurrent := 20 } : ManagedFleetState)
   let chainsRef ← IO.mkRef (#[] : Array RoutingChain)
   let cooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
@@ -6244,6 +6264,9 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
      "('f-btw','Side Question','awaiting_user','codex','/tmp','verity-core','','[\"btw-parent:f-lead\"]','2026-11-10T11:02:00Z','2026-11-10T11:02:00Z');") #[]
   let _ ← execParamQuery store.missionsDb
     "UPDATE missions SET parent_mission_id='f-lead' WHERE id='f-child';" #[]
+  let _ ← execParamQuery store.missionsDb
+    "UPDATE missions SET owner_user_id=?1,project=?2 WHERE id IN ('f-lead','f-child','f-btw');"
+    #[hsAdminId, s!"{hsAdminId}:verity-core"]
   let (mvChildSt, _) ← sendJson "POST" "/api/control/missions/move" hsJwt
     "{\"mission_ids\":[\"f-child\"],\"project\":\"verity-core\",\"folder\":\"Drafts\"}"
   let leadAfterChild ← execParamQuery store.missionsDb "SELECT folder FROM missions WHERE id='f-lead';" #[]
@@ -6274,7 +6297,7 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
   let rebScope := match rebRows with | .ok rs => (rs[1]?.bind (·[0]?)).getD "" | .error _ => ""
   if mcpSessSt != 200 || xpCheckSt != 409 ||
      (xpCheckBody.splitOn "approval_transfer_confirmation_required").length < 2 ||
-     xpRevSt != 200 || rebScope != "paloma" then
+     xpRevSt != 200 || rebScope != s!"{hsAdminId}:paloma" then
     return (← fail s!"cross-project approval/MCP rebind failed: sess={mcpSessSt}:{mcpSessBody} chk={xpCheckSt}:{xpCheckBody} rev={xpRevSt} reb={rebScope}")
 
   -- Move Pareto back into `verity-core` / `Audits`, then rename folder `Audits` -> `SecurityAudits` via `/file/transfer`
@@ -6283,7 +6306,7 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
   let (tfSt, tfBody) ← sendJson "POST" "/api/projects/verity-core/file/transfer" hsJwt
     "{\"path\":\"Audits\",\"destination\":\"SecurityAudits\",\"copy\":false}"
   let cascRows ← execParamQuery store.missionsDb
-    "SELECT COUNT(*) FROM missions WHERE project='verity-core' AND folder='SecurityAudits';" #[]
+    "SELECT COUNT(*) FROM missions WHERE project=?1 AND folder='SecurityAudits';" #[s!"{hsAdminId}:verity-core"]
   let cascCnt := match cascRows with | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0 | .error _ => 0
   if tfSt != 200 || cascCnt != 2 || (tfBody.splitOn "\"folder\":\"SecurityAudits\"").length < 3 then
     return (← fail s!"project folder transfer cascade failed: st={tfSt} body={tfBody} cnt={cascCnt}")
@@ -6418,7 +6441,7 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
   -- `POST /api/control/missions/:id/status`: archive and reopen a stopped mission; refuse unknown
   -- statuses, unknown missions and missions with a live run.
   discard <| execParamQuery store.missionsDb
-    "INSERT INTO missions(id,title,status,backend,working_directory,updated_at) VALUES('m-status-route','Status route','completed','opencode','/tmp','2026-11-12T00:00:00Z');" #[]
+    "INSERT INTO missions(id,title,status,backend,working_directory,updated_at,owner_user_id) VALUES('m-status-route','Status route','completed','opencode','/tmp','2026-11-12T00:00:00Z',?1);" #[hsAdminId]
   let (ackSt, ackBody) ← sendJson "POST" "/api/control/missions/m-status-route/status" hsJwt "{\"status\":\"acknowledged\"}"
   let ackRows ← execParamQuery store.missionsDb "SELECT status FROM missions WHERE id='m-status-route';" #[]
   let (reopenSt, _) ← sendJson "POST" "/api/control/missions/m-status-route/status" hsJwt "{\"status\":\"paused\"}"
@@ -7199,6 +7222,8 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
   let _ ← execParamQuery store.missionsDb
     ("INSERT INTO missions(id,title,status,backend,working_directory,project,placement_kind,tags,session_id,run_generation,created_at,updated_at) " ++
      "VALUES('m-legacy-auto','ldgr','completed','opencode','','ldgr','managed','[\"remote-node:mocknode\"]','ses_ldgr1',2,?1,?1);") #[legPastIso]
+  let _ ← execParamQuery store.missionsDb
+    "UPDATE missions SET owner_user_id=?1 WHERE id='m-legacy-auto';" #[remoteAdminId]
   let _ ← execParamQuery store.missionsDb
     ("CREATE TABLE IF NOT EXISTS automations (" ++
      "id TEXT PRIMARY KEY NOT NULL, mission_id TEXT NOT NULL, command_source_type TEXT NOT NULL DEFAULT 'inline', " ++
@@ -8037,8 +8062,9 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   -- Expired privilege lease on a fresh mission MUST NOT permanently fence `startMachineTransfer`!
   let .ok () ← upsertMission store {
     id := "m-exp-lease", title := "Expired Lease Transfer Test", status := "awaiting_user",
+    ownerUserId := fixtureAdminId,
     backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := tmpRoot,
-    project := "proj-cap", updatedAt := "2026-11-06T00:00:00Z", totalCostCents := 0
+    project := s!"{fixtureAdminId}:proj-cap", updatedAt := "2026-11-06T00:00:00Z", totalCostCents := 0
   } | do closeCoreStore store; return 1
   let .ok () ← upsertPrivilegeLease store {
     grantId := "grant-exp", leaseToken := "lease-expired-999", missionId := "m-exp-lease",
@@ -8058,7 +8084,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   -- Per-project `parallel_missions_cap` returns HTTP 429 `{"error":"parallel_missions_cap","cap":1,"active":1}`
   -- for `"proj-cap"`, while unrelated `"other-proj"` succeeds!
   let _ ← execParamQuery store.projectsDb upsertProjectGrantSql
-    #["proj-cap", "owner", "1h", "1", "", "", "high", "propose", "2026-11-06T00:00:00Z"]
+    #[s!"{fixtureAdminId}:proj-cap", "owner", "1h", "1", "", "", "high", "propose", "2026-11-06T00:00:00Z"]
   let capHitBody := "{\"id\":\"m-cap-2\",\"title\":\"Blocked\",\"backend\":\"codex\",\"project_slug\":\"proj-cap\"}"
   let capHitRaw := s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {capHitBody.utf8ByteSize}\r\n\r\n{capHitBody}".toUTF8
   let .ok capHitReq := parseRequest capHitRaw none | do closeCoreStore store; return 1
@@ -8096,7 +8122,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   -- Raise `proj-cap` to 2: `m-exp-lease` holds 1 slot while `m-btw-cap-1` + `m-btw-cap-2` hold 0 slots,
   -- so a 2nd regular mission `m-cap-reg-2` succeeds (201) and a 3rd `m-cap-reg-3` hits 429 (`active:2`)!
   let _ ← execParamQuery store.projectsDb upsertProjectGrantSql
-    #["proj-cap", "owner", "1h", "2", "", "", "high", "propose", "2026-11-06T00:01:00Z"]
+    #[s!"{fixtureAdminId}:proj-cap", "owner", "1h", "2", "", "", "high", "propose", "2026-11-06T00:01:00Z"]
   let reg2Body := "{\"id\":\"m-cap-reg-2\",\"title\":\"Second Regular\",\"backend\":\"codex\",\"project_slug\":\"proj-cap\"}"
   let reg2Raw := s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {reg2Body.utf8ByteSize}\r\n\r\n{reg2Body}".toUTF8
   let .ok reg2Req := parseRequest reg2Raw none | do closeCoreStore store; return 1
@@ -8117,7 +8143,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   -- Clean up `/btw` cap test rows so subsequent `listMissionsJson` fixture counts stay unchanged.
   let _ ← execParamQuery store.missionsDb "DELETE FROM missions WHERE id IN ('m-btw-cap-1','m-btw-cap-2','m-cap-reg-2');" #[]
   let _ ← execParamQuery store.projectsDb upsertProjectGrantSql
-    #["proj-cap", "owner", "1h", "1", "", "", "high", "propose", "2026-11-06T00:01:00Z"]
+    #[s!"{fixtureAdminId}:proj-cap", "owner", "1h", "1", "", "", "high", "propose", "2026-11-06T00:01:00Z"]
 
   -- Symlinked-ancestor confinement: `<tmpRoot>/escape_link -> /etc` with non-existent leaf must fail closed!
   let symOut ← IO.Process.output { cmd := "/bin/ln", args := #["-s", "/etc", s!"{tmpRoot}/escape_link"] }
@@ -8138,13 +8164,14 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     IO.eprintln s!"[orb-core-test] FAIL: unauthenticated /api/console/ws returned {wsUnauthResp.status} instead of 401"
     return 1
 
-  let wsAuthRaw := s!"GET /api/console/ws HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: jwt.{validJwt}\r\n\r\n".toUTF8
+  let wsToken := validJwt.replace ":" "~"
+  let wsAuthRaw := s!"GET /api/console/ws HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: jwt.{wsToken}\r\n\r\n".toUTF8
   let .ok wsAuthReq := parseRequest wsAuthRaw none | do closeCoreStore store; return 1
   match ← dispatchCoreRequest appSt wsAuthReq nowSec with
   | .error raw101 =>
     let resp101 := String.fromUTF8! raw101
     if (resp101.splitOn "101 Switching Protocols").length != 2 ||
-       (resp101.splitOn s!"Sec-WebSocket-Protocol: jwt.{validJwt}").length != 2 then
+       (resp101.splitOn s!"Sec-WebSocket-Protocol: jwt.{wsToken}").length != 2 then
       closeCoreStore store
       IO.eprintln s!"[orb-core-test] FAIL: authenticated /api/console/ws missing 101 or echoed subprotocol: {resp101}"
       return 1
@@ -8378,7 +8405,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     track := "r2-track", repo := "Th0rgal/orb", authorityMode := "writer",
     reservedDiskGib := 4, bootEpoch := 2, nowAt := "t5"
   } | do closeCoreStore store; IO.eprintln "[orb-core-test] FAIL: post-crash lease acquisition blocked"; return 1
-  if (← runR2bRound2Extras store appSt validJwt nowSec) != 0 then return 1
+  if (← runR2bRound2Extras store appSt validJwt fixtureAdminId nowSec) != 0 then return 1
 
   -- SM-12: pre-effect in-flight idempotency reservation + committed `2xx` > 512 KiB `committed_oversize` sentinel
   let .ok .Claimed ← claimIdempotencySlot store "missions_create" "idem-inflight-1" "t5"
@@ -8407,14 +8434,14 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
 
   if (← runCustomProviderRateLimitTests store appSt validJwt nowSec) != 0 then return 1
   if (← runFastMemoryBrokerTests store appSt validJwt nowSec) != 0 then return 1
-  if (← runCloudHandoffTests tmpRoot store appSt validJwt nowSec) != 0 then return 1
-  if (← runCyberAndSkillDeliveryTests tmpRoot store appSt validJwt nowSec) != 0 then return 1
+  if (← runCloudHandoffTests tmpRoot store appSt validJwt fixtureAdminId nowSec) != 0 then return 1
+  if (← runCyberAndSkillDeliveryTests tmpRoot store appSt validJwt fixtureAdminId nowSec) != 0 then return 1
   if (← runR4cHarnessSessionTests store tmpRoot) != 0 then
     closeCoreStore store
     return 1
-  if (← runR3cdQueueAndContinuationTests store appSt validJwt nowSec) != 0 then return 1
-  if (← runR3cdRound3BlockerTests store appSt validJwt nowSec) != 0 then return 1
-  if (← runR3cdReviewFixTests store appSt validJwt nowSec) != 0 then return 1
+  if (← runR3cdQueueAndContinuationTests store appSt validJwt fixtureAdminId nowSec) != 0 then return 1
+  if (← runR3cdRound3BlockerTests store appSt validJwt fixtureAdminId nowSec) != 0 then return 1
+  if (← runR3cdReviewFixTests store appSt validJwt fixtureAdminId nowSec) != 0 then return 1
   if (← runPostCrashAndReconcileExtras store tmpRoot) != 0 then return 1
   IO.FS.removeDirAll tmpRoot
 
@@ -8922,10 +8949,65 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":11,\"harness_contracts\":10,\"host_tests\":99}"
   return 0
 
+/-- Run the cyber/skill fixture group in isolation with the same authenticated tenant setup. -/
+def runCyberSkillGroup (queueOnly : Bool := false) (managedOnly : Bool := false) (contextOnly : Bool := false) (parityOnly : Bool := false) : IO UInt32 := do
+  let nonce ← IO.monoNanosNow
+  let root := s!"/tmp/orb-core-cyber-skills-{nonce}"
+  IO.FS.createDirAll root
+  let .ok store ← openCoreStore root 0 "prod" | return 1
+  let cfg : CoreConfig := {
+    devMode := false, host := "127.0.0.1", workingDir := root,
+    dashboardPassword := "ci-test-strong-passphrase",
+    jwtSecret := "ci-test-random-jwt-secret-0123456789abcdef",
+    proxySecret := "proxy-secret-0123456789abcdef0123456789"
+  }
+  let nowSec : UInt64 := 1700001000
+  if managedOnly then
+    closeCoreStore store
+    return ← runR5bManagedStoreTests cfg
+  if contextOnly then
+    closeCoreStore store
+    return ← runR7CoreTests cfg
+  if parityOnly then
+    closeCoreStore store
+    if (← runProdParityAndMissionMoveTests cfg) != 0 then return 1
+    return ← runRemoteDispatchWakeupAndBtwTests cfg
+  let .ok fixtureAdminId ← bootstrapUsersAndBackfill store
+      #[("admin", cfg.dashboardPassword)] s!"{nowSec}" | return 1
+  let managedRef ← IO.mkRef ({ enabled := true, boatEnabled := true } : ManagedFleetState)
+  let chainsRef ← IO.mkRef (#[] : Array RoutingChain)
+  let proxyCooldownsRef ← IO.mkRef (#[] : Array AccountCooldown)
+  let seqRef ← IO.mkRef (1 : UInt64)
+  let appSt : CoreAppState := {
+    cfg := cfg, store := store, searchIdx? := none, managedRef := managedRef, chainsRef := chainsRef,
+    proxyCooldownsRef := proxyCooldownsRef, seqRef := seqRef
+  }
+  let validJwt := mintSessionTokenV2 cfg.jwtSecret fixtureAdminId "admin" 1 (nowSec + 3600)
+  let rc ← if queueOnly then
+      do
+        let rc ← runR3cdQueueAndContinuationTests store appSt validJwt fixtureAdminId nowSec
+        if rc != 0 then pure rc else do
+          let rc ← runR3cdRound3BlockerTests store appSt validJwt fixtureAdminId nowSec
+          if rc != 0 then pure rc else
+            runR3cdReviewFixTests store appSt validJwt fixtureAdminId nowSec
+    else runCyberAndSkillDeliveryTests root store appSt validJwt fixtureAdminId nowSec
+  if rc == 0 then closeCoreStore store
+  return rc
+
 end OrbCore.SelfTest
 
 def main (args : List String) : IO UInt32 := do
   OrbBin.PosixExt.setenvVar "ORB_HERMETIC_TEST" "1"
+  if args.contains "--cyber-skills-only" then
+    return ← OrbCore.SelfTest.runCyberSkillGroup
+  if args.contains "--queue-continuations-only" then
+    return ← OrbCore.SelfTest.runCyberSkillGroup true
+  if args.contains "--managed-store-only" then
+    return ← OrbCore.SelfTest.runCyberSkillGroup false true
+  if args.contains "--context-only" then
+    return ← OrbCore.SelfTest.runCyberSkillGroup false false true
+  if args.contains "--prod-parity-only" then
+    return ← OrbCore.SelfTest.runCyberSkillGroup false false false true
   OrbCore.SettingsDocumentTests.run
   OrbCore.SettingsTransferTests.run
   OrbCore.SelfTest.runSuite (OrbCore.SelfTest.findFlag? args "--emit-evidence-log")

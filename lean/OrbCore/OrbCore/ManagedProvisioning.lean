@@ -87,16 +87,31 @@ def guestFactsCommand : String :=
 
 /-- What to ask a guest whose node never reached Core. Read-only. -/
 def guestDiagnosticCommand (coreUrl : String) : String :=
-  "echo \"pid1=$(cat /proc/1/comm 2>/dev/null) arch=$(uname -m)\"; " ++
-  "ls -ld /opt /opt/orb /opt/orb/bin /opt/orb/bin/sandboxed-node 2>&1; " ++
-  "echo \"mount=$(findmnt -T /opt/orb/bin -no TARGET,OPTIONS 2>&1 | head -n 1)\"; " ++
-  "systemctl cat orb-node.service 2>/dev/null | grep -E '^(User|ExecStart)=' ; " ++
+  let coreHost := match OrbBin.HttpClient.parseUrl coreUrl with
+    | .ok parsed => parsed.host
+    | .error _ => ""
+  let quotedHost := shellSingleQuote coreHost
+  let quotedHealthUrl := shellSingleQuote (coreUrl ++ "/api/health")
+  "echo \"pid1=$(timeout 1 cat /proc/1/comm 2>/dev/null) arch=$(timeout 1 uname -m)\"; " ++
+  "timeout 1 ls -ld /opt /opt/orb /opt/orb/bin /opt/orb/bin/sandboxed-node 2>&1; " ++
+  "echo \"mount=$(timeout 1 findmnt -T /opt/orb/bin -no TARGET,OPTIONS 2>&1 | head -n 1)\"; " ++
+  "timeout 1 systemctl cat orb-node.service 2>/dev/null | grep -E '^(User|ExecStart)=' ; " ++
   "echo \"systemd=$([ -d /run/systemd/system ] && echo yes || echo no)\"; " ++
-  "echo \"unit=$(systemctl is-active orb-node.service 2>&1 | head -n 1)\"; " ++
-  "echo \"node_processes=$(pgrep -u orbnode -x sandboxed-node 2>/dev/null | wc -l)\"; " ++
-  "echo \"core_http=$(curl -sS -o /dev/null -m 10 -w '%{http_code}' " ++ shellSingleQuote (coreUrl ++ "/api/health") ++ " 2>&1 | tail -c 200)\"; " ++
-  "(journalctl -u orb-node.service -n 25 --no-pager 2>/dev/null || true) | tail -n 25; " ++
-  "tail -n 25 /var/log/orb-node.log 2>/dev/null || true"
+  "echo \"unit=$(timeout 1 systemctl is-active orb-node.service 2>&1 | head -n 1)\"; " ++
+  "echo \"node_processes=$(timeout 1 pgrep -u orbnode -x sandboxed-node 2>/dev/null | wc -l)\"; " ++
+  "echo \"resolv=$(timeout 1 stat -Lc '%a %U:%G' /etc/resolv.conf 2>/dev/null || echo missing)\"; " ++
+  "if timeout 1 id orbnode >/dev/null 2>&1; then " ++
+  "node_user=present; " ++
+  "run_as_node() { if command -v setpriv >/dev/null 2>&1; then setpriv --reuid=orbnode --regid=orbnode --init-groups -- \"$@\"; " ++
+  "else runuser -u orbnode -- \"$@\"; fi; }; " ++
+  "if node_dns=$(run_as_node timeout 2 getent hosts " ++ quotedHost ++ " 2>&1); then " ++
+  "echo \"core_dns_as_node=ok\"; else echo \"core_dns_as_node=$(printf '%s\\n' \"$node_dns\" | head -n 1)\"; fi; " ++
+  "if node_http=$(run_as_node timeout 4 curl -sS -o /dev/null -m 3 -w '%{http_code}' " ++ quotedHealthUrl ++ " 2>&1); then " ++
+  "echo \"core_http_as_node=$node_http\"; else echo \"core_http_as_node=$(printf '%s\\n' \"$node_http\" | head -n 1)\"; fi; " ++
+  "else echo \"node_user=missing\"; fi; " ++
+  "echo \"core_http_root=$(timeout 4 curl -sS -o /dev/null -m 3 -w '%{http_code}' " ++ quotedHealthUrl ++ " 2>&1 | tail -c 200)\"; " ++
+  "(timeout 1 journalctl -u orb-node.service -n 25 --no-pager 2>/dev/null || true) | tail -n 25; " ++
+  "timeout 1 tail -n 25 /var/log/orb-node.log 2>/dev/null || true"
 
 def bootstrapAndWait (mc : ManagedComputeStore) (provider : ManagedProvider.Provider)
     (machine : ManagedMachine) (cfg : BootstrapConfig) (runtime : Runtime)
