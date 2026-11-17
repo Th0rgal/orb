@@ -403,6 +403,41 @@ private def remoteOpenCodeConfigJson (modelKey proxyBaseUrl : String) : String :
     ])
   ])
 
+/-- What a harness needs to reach Core's model router: its environment, extra CLI arguments,
+    and the model name to launch it with. Turns that Core runs itself use this; without it a
+    harness on the Core host falls back to its own logins and model list. -/
+structure HarnessProxySetup where
+  env   : Array (String × String) := #[]
+  args  : Array String := #[]
+  model : Option String := none
+
+def harnessProxySetup (harness rawModel proxyBase proxyToken : String) : HarnessProxySetup :=
+  let raw := rawModel.trimAscii.toString
+  if harness == "opencode" then
+    let stripped :=
+      if raw.startsWith "builtin/" then (raw.drop 8).toString
+      else if raw.startsWith "sandboxed-sh/" then (raw.drop 13).toString
+      else raw
+    let key := if stripped.isEmpty then "smart" else stripped
+    { env := #[("SANDBOXED_PROXY_API_KEY", proxyToken),
+               ("OPENCODE_CONFIG_CONTENT", remoteOpenCodeConfigJson key proxyBase)]
+      model := some s!"builtin/{key}" }
+  else if harness == "claudecode" then
+    let bare := if raw.startsWith "anthropic/" then (raw.drop 10).toString else raw
+    { env := #[("ANTHROPIC_BASE_URL", proxyBase), ("ANTHROPIC_AUTH_TOKEN", proxyToken)]
+      model := if bare.isEmpty then none else some bare }
+  else if harness == "codex" then
+    let bare := if raw.startsWith "openai/" then (raw.drop 7).toString else raw
+    { env := #[("SANDBOXED_PROXY_API_KEY", proxyToken)]
+      args := #["-c", "model_provider=\"sandboxed\"",
+                "-c", "model_providers.sandboxed.name=\"Sandboxed\"",
+                "-c", s!"model_providers.sandboxed.base_url=\"{proxyBase}/v1\"",
+                "-c", "model_providers.sandboxed.wire_api=\"responses\"",
+                "-c", "model_providers.sandboxed.env_key=\"SANDBOXED_PROXY_API_KEY\""]
+      model := if bare.isEmpty then none else some bare }
+  else
+    { model := if raw.isEmpty then none else some raw }
+
 private def wrapWithRemoteMcp (harness innerCmd : String) : String :=
   s!"if [ -x /usr/local/bin/sandboxed-mcp ]; then /usr/local/bin/sandboxed-mcp launch --harness {harness} -- {innerCmd}; else {innerCmd}; fi"
 

@@ -914,6 +914,8 @@ structure WarmClaudeEntry where
   pendingReqsRef   : IO.Ref (Array PendingControlRequest)
   implementPlanRef : IO.Ref Bool
   permissionModeRef : IO.Ref ClaudePermissionMode
+  /-- Set once the stdout reader has finished, including its end-of-stream turn handling. -/
+  readerExitedRef  : IO.Ref Bool
 
 /-- Shared manager supervising warm Claude Code processes and active one-shot CLI runs (`codex`, `opencode`, `antigravity`, `grok`, `vibe`). -/
 structure WarmHarnessManager where
@@ -1214,7 +1216,8 @@ private def launchOrReuseWarmClaude
     (sessionId? : Option String)
     (permMode : ClaudePermissionMode)
     (imagePaths : Array String)
-    (stRef : IO.Ref LocalRunState) : IO (Except String Unit) := do
+    (stRef : IO.Ref LocalRunState)
+    (extraEnv : Array (String × String) := #[]) : IO (Except String Unit) := do
   -- Plan prefix (`/plan ...`) automatically activates Claude's `plan` permission mode
   let trimmed := prompt.trimAscii.toString
   let (effectiveMode, effectivePrompt) :=
@@ -1229,7 +1232,7 @@ private def launchOrReuseWarmClaude
     pure ((ws.find? (fun (k, _) => k == missionId)).map Prod.snd)
 
   -- Case 1: Reuse live warm Claude process in the same working directory!
-  if let some entry := existingWarm? then
+  if let some entry := existingWarm?.filter (fun _ => extraEnv.isEmpty) then
     if (← entry.aliveRef.get) && entry.cwd == cwd then
       let prevMode ← entry.permissionModeRef.get
       if prevMode != effectiveMode then
@@ -1262,8 +1265,10 @@ private def launchOrReuseWarmClaude
   let envPairs ← currentEnvPairs
   let mut envStrs : Array String := #[]
   for (k, v) in envPairs do
-    if k != "CLAUDECODE" then
+    if k != "CLAUDECODE" && !extraEnv.any (fun (ek, _) => ek == k) then
       envStrs := envStrs.push s!"{k}={v}"
+  for (k, v) in extraEnv do
+    envStrs := envStrs.push s!"{k}={v}"
   -- Use `/bin/sh -c 'cd "$1" && shift && exec "$@"' sh <cwd> <binPath> <claudeArgs...>` so child starts cleanly in `cwd`
   let shArgs := #["-c", "cd \"$1\" && shift && exec \"$@\"", "sh", cwd, binPath] ++ claudeArgs
   let spawned ← match ← (spawnPgrp "/bin/sh" shArgs envStrs (pipeStdin := true) (nullStdio := true) (pipeStdout := true)).toBaseIO with
@@ -1271,6 +1276,7 @@ private def launchOrReuseWarmClaude
     | .ok sp => pure sp
 
   let writeMu ← Std.Mutex.new ()
+  let readerExitedRef ← IO.mkRef false
   let aliveRef ← IO.mkRef true
   let pendingReqsRef ← IO.mkRef (#[] : Array PendingControlRequest)
   let implementPlanRef ← IO.mkRef false
@@ -1287,6 +1293,7 @@ private def launchOrReuseWarmClaude
     pendingReqsRef := pendingReqsRef
     implementPlanRef := implementPlanRef
     permissionModeRef := permModeRef
+    readerExitedRef := readerExitedRef
   }
   mgr.mu.atomically do
     let ws ← mgr.warmProcsRef.get
@@ -1392,6 +1399,7 @@ private def launchOrReuseWarmClaude
         ("state", finalSnap.toPollJVal)
       ])
       cb.onTurnFinished finalSnap
+    entry.readerExitedRef.set true
   return .ok ()
 
 /-- Normalize an Antigravity model + optional effort for `agy` CLI 1.5+ (where Carbon and Argon
@@ -1905,7 +1913,11 @@ def startHarnessTurn
     (worktreeMode : String := "local") -- "local" | "worktree" | "auto"
     (imagePaths : Array String := #[])
     (callbacks : HarnessCallbacks := {})
-    (worktreesParentDir? : Option String := none) : IO (Except String LocalRunState) := do
+    (worktreesParentDir? : Option String := none)
+    -- Set by Core for turns it runs itself: proxy environment and CLI arguments
+    -- (see `OrbCore.RemoteDispatch.harnessProxySetup`). The model is then used as given.
+    (extraEnv : Array (String × String) := #[])
+    (extraArgs : Array String := #[]) : IO (Except String LocalRunState) := do
   let resolvedBin? ←
     if !binPath.trimAscii.toString.isEmpty && (← System.FilePath.pathExists binPath.trimAscii.toString) then
       pure (some binPath.trimAscii.toString)
@@ -1929,6 +1941,24 @@ def startHarnessTurn
       if let .ok wt ← createMissionWorktree effectiveCwd id none worktreesParentDir? then
         effectiveCwd := wt.worktreePath
         createdWtPath? := some wt.worktreePath
+
+  -- A warm Claude started with `extraEnv` holds that turn's proxy credential, which expires.
+  -- Such turns never reuse it: retire it and wait for its reader to finish *before* this
+  -- turn's callbacks and state exist, so its end-of-stream handling cannot touch this turn.
+  if harness == "claudecode" && !extraEnv.isEmpty then
+    let old? ← mgr.mu.atomically do
+      let ws ← mgr.warmProcsRef.get
+      mgr.warmProcsRef.set (ws.filter (fun (k, _) => k != id))
+      pure ((ws.find? (fun (k, _) => k == id)).map Prod.snd)
+    if let some old := old? then
+      old.aliveRef.set false
+      let _ ← killSig (-old.pid) 15
+      let mut waitedMs := 0
+      while !(← old.readerExitedRef.get) && waitedMs < 10000 do
+        if waitedMs == 3000 then
+          let _ ← killSig (-old.pid) 9
+        IO.sleep 50
+        waitedMs := waitedMs + 50
 
   setCallbacksFor mgr id callbacks
   let prevState? ← getRunState? mgr id
@@ -1959,7 +1989,7 @@ def startHarnessTurn
   callbacks.onOutputEvent (.obj #[("text", .str ""), ("reset", .bool true), ("activities", .arr #[])])
 
   if harness == "claudecode" then
-    match ← launchOrReuseWarmClaude mgr id actualBin effectiveCwd prompt model? effort? effSid? permissionMode imagePaths stRef with
+    match ← launchOrReuseWarmClaude mgr id actualBin effectiveCwd prompt model? effort? effSid? permissionMode imagePaths stRef extraEnv with
     | .error e =>
       stRef.modify fun s => { s with done := true, exitCode? := some 1, error? := some e }
       return .error e
@@ -1967,7 +1997,9 @@ def startHarnessTurn
       return .ok (← stRef.get)
   else
     let resolvedModel? ←
-      if harness == "opencode" then
+      if harness == "opencode" && extraEnv.any (fun (k, _) => k == "OPENCODE_CONFIG_CONTENT") then
+        pure model?
+      else if harness == "opencode" then
         let (defModel?, provNames, cfgModels) ← readLocalOpenCodeConfigInfo
         let firstChoice := resolveOpenCodeModelForLocal model? defModel? (provNames.map Prod.fst) cfgModels
         let needsCliProbe :=
@@ -1987,8 +2019,12 @@ def startHarnessTurn
           pure firstChoice
       else
         pure model?
-    let cliArgs := buildOneShotHarnessArgs harness prompt resolvedModel? effort? effSid? permissionMode imagePaths
-    let envPairs ← currentEnvPairs
+    let baseArgs := buildOneShotHarnessArgs harness prompt resolvedModel? effort? effSid? permissionMode imagePaths
+    -- Extra arguments go right after the subcommand (`codex exec -c ...`).
+    let cliArgs :=
+      if extraArgs.isEmpty || baseArgs.isEmpty then baseArgs
+      else (baseArgs.extract 0 1) ++ extraArgs ++ (baseArgs.extract 1 baseArgs.size)
+    let envPairs := (← currentEnvPairs).filter (fun (k, _) => !extraEnv.any (fun (ek, _) => ek == k)) ++ extraEnv
     let mut envStrs := envPairs.map fun (k, v) => s!"{k}={v}"
     if !envPairs.any (fun (k, _) => k == "NO_COLOR") then
       envStrs := envStrs.push "NO_COLOR=1"
