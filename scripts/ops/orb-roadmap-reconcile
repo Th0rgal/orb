@@ -115,19 +115,22 @@ def plan(rows, queue, prs, missions, master_green, ledger, now):
             by_row.setdefault(rid, []).append(m)
     for ms in by_row.values():
         ms.sort(key=lambda m: m["created_at"])
-    # A worker that died at start in the last 15 minutes still holds its slot:
-    # otherwise a provider cooldown turns every run into three fresh deaths.
-    live = sum(1 for ms in by_row.values() for m in ms
-               if m["status"] in LIVE or (now - m["updated_ts"] < IDLE_SECONDS
-                                          and m["updated_ts"] - m["created_ts"] < QUICK_DEATH_SECONDS))
+    live = sum(1 for ms in by_row.values() for m in ms if m["status"] in LIVE)
     def quick(m):
         return m["status"] not in LIVE and m["updated_ts"] - m["created_ts"] < QUICK_DEATH_SECONDS
     # Deaths at start are provider cooldowns, not the row's fault: they cost no
     # attempt, and two of them in 15 minutes pause dispatch until the next run.
-    recent = [m for ms in by_row.values() for m in ms if quick(m) and now - m["updated_ts"] < IDLE_SECONDS]
-    # When the provider said when it returns, wait exactly that long.
-    returns = max((m.get("returns_ts", 0) for m in recent), default=0)
-    paused = now < returns if returns else len(recent) >= 2
+    recent = [m for ms in by_row.values() for m in ms if quick(m) and now - m["updated_ts"] < 3 * 3600]
+    # Each model is cooling until the latest "returns at" its dead workers
+    # reported; a worker starts on the first model that is free.
+    cooling = {}
+    for m in recent:
+        if m.get("returns_ts", 0) > now and m.get("model"):
+            cooling[m["model"]] = max(cooling.get(m["model"], 0), m["returns_ts"])
+    free = [x for x in MODELS if x not in cooling]
+    unexplained = sum(1 for m in recent if not m.get("returns_ts") and now - m["updated_ts"] < IDLE_SECONDS)
+    paused = not free or unexplained >= 2
+    model = free[0] if free else None
     actions = []
     targets = queue if master_green else [MASTER_FIX]
     for rid in targets:
@@ -156,7 +159,7 @@ def plan(rows, queue, prs, missions, master_green, ledger, now):
             if foreign:
                 continue  # someone else is driving that PR right now
             if live < MAX_WORKERS:
-                actions.append(("start", rid, 1))
+                actions.append(("start", rid, 1, model))
                 live += 1
             continue
         if now - latest["updated_ts"] < IDLE_SECONDS:
@@ -165,7 +168,7 @@ def plan(rows, queue, prs, missions, master_green, ledger, now):
             actions.append(("nudge", rid, latest["id"]))
         elif attempts < MAX_ATTEMPTS:
             if live < MAX_WORKERS:
-                actions.append(("start", rid, len(ms) + 1))
+                actions.append(("start", rid, len(ms) + 1, model))
                 live += 1
         elif ledger.get("reported", {}).get(rid) != latest["id"]:
             actions.append(("escalate", rid, latest["id"]))
@@ -248,12 +251,12 @@ def fetch_github():
 
 def fetch_missions():
     con = sqlite3.connect(f"file:{MISSIONS_DB}?mode=ro", uri=True, timeout=10)
-    rows = con.execute("SELECT id, status, track, created_at, updated_at FROM missions "
+    rows = con.execute("SELECT id, status, track, created_at, updated_at, model_override FROM missions "
                        "WHERE track LIKE 'roadmap-%'").fetchall()
     out = []
     for r in rows:
         m = {"id": r[0], "status": r[1], "track": r[2], "created_at": r[3] or "",
-             "created_ts": iso_ts(r[3]), "updated_ts": iso_ts(r[4])}
+             "created_ts": iso_ts(r[3]), "updated_ts": iso_ts(r[4]), "model": r[5]}
         if m["updated_ts"] - m["created_ts"] < QUICK_DEATH_SECONDS:
             err = con.execute("SELECT payload FROM mission_events WHERE mission_id=? AND event_type='error' "
                               "ORDER BY id DESC LIMIT 1", (r[0],)).fetchone()
@@ -274,13 +277,13 @@ def core_post(path, body):
     return http_json(CORE + path, body, {"Authorization": "Bearer " + core_token()})
 
 
-def start_worker(row, attempt, open_prs):
+def start_worker(row, attempt, open_prs, model):
     rid = row["id"]
     return core_post("/api/control/missions", {
         "title": f"Roadmap {rid}: {row['node'][:80]}", "prompt": brief(row, attempt, open_prs),
         "project": "now",
         "track": f"roadmap-{rid}" if attempt == 1 else f"roadmap-{rid}-{attempt}", "backend": "opencode",
-        "model_override": MODELS[(attempt - 1) % len(MODELS)], "remote_node_id": "auto", "tags": EXCLUDE,
+        "model_override": model, "remote_node_id": "auto", "tags": EXCLUDE,
         "idempotency_key": f"roadmap-{rid}-attempt-{attempt}"})
 
 
@@ -302,13 +305,13 @@ def main():
         return
     fix_row = {"id": MASTER_FIX, "node": "Master CI is red: find the failing check and fix it.",
                "done_when": "The latest master CI run passes"}
-    for kind, rid, arg in actions:
+    for kind, rid, arg, *rest in actions:
         row = rows.get(rid, fix_row)
         open_prs = prs.get(rid, {}).get("open", [])
         try:
             if kind == "start":
-                r = start_worker(row, arg, open_prs)
-                print(f"started {rid} attempt {arg}: {r.get('id') or r.get('mission_id')}")
+                r = start_worker(row, arg, open_prs, rest[0])
+                print(f"started {rid} attempt {arg} on {rest[0]}: {r.get('id') or r.get('mission_id')}")
             elif kind == "nudge":
                 core_post(f"/api/control/missions/{arg}/resume", {"content": nudge_text(open_prs)})
                 ledger.setdefault("nudged", {})[arg] = int(now)

@@ -37,7 +37,9 @@ class ReconcileTest(unittest.TestCase):
         self.rows, self.queue = parse(ROADMAP)
 
     def run_plan(self, prs=(), missions=(), green=True, ledger=None):
-        return plan(self.rows, self.queue, tagged(list(prs)), list(missions), green, ledger or {}, NOW)
+        acts = plan(self.rows, self.queue, tagged(list(prs)), list(missions), green, ledger or {}, NOW)
+        self.models = [a[3] for a in acts if a[0] == "start"]
+        return [a[:3] for a in acts]
 
     def test_parse_reads_rows_needs_and_queue(self):
         self.assertEqual(self.queue, ["A2", "A3", "A4", "A5", "A6"])
@@ -88,12 +90,18 @@ class ReconcileTest(unittest.TestCase):
         pivot = mission("pivot", "active")
         self.assertEqual(self.run_plan(green=False, missions=[old, pivot]), [("start", "MASTER", 1)])
 
-    def test_dispatch_waits_until_the_provider_returns(self):
-        dead = mission("Z0", "cancelled", updated=NOW - 60, created_ts=NOW - 65)
-        dead["returns_ts"] = NOW + 600
-        self.assertEqual(self.run_plan(missions=[dead]), [])
-        dead["returns_ts"] = NOW - 1
-        self.assertEqual(self.run_plan(missions=[dead]), [("start", "A2", 1), ("start", "A6", 1)])
+    def test_workers_start_on_the_first_free_model_and_wait_when_none_is(self):
+        astra, fable = NS["MODELS"][:2]
+        a = mission("Z0", "cancelled", updated=NOW - 60, created_ts=NOW - 65)
+        a.update(returns_ts=NOW + 600, model=astra)
+        self.assertEqual(self.run_plan(missions=[a]), [("start", "A2", 1), ("start", "A6", 1)])
+        self.assertEqual(self.models, [fable, fable])
+        f = mission("Z1", "cancelled", updated=NOW - 60, created_ts=NOW - 65)
+        f.update(returns_ts=NOW + 3600, model=fable)
+        self.assertEqual(self.run_plan(missions=[a, f]), [])
+        a["returns_ts"] = NOW - 1
+        self.assertEqual(self.run_plan(missions=[a, f]), [("start", "A2", 1), ("start", "A6", 1)])
+        self.assertEqual(self.models, [astra, astra])
 
     def test_each_attempt_uses_the_next_model(self):
         self.assertEqual(NS["MODELS"][:2], ["openai/gpt-6-astra", "anthropic/claude-fable-5-2"])
