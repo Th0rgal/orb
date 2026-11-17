@@ -143,7 +143,10 @@ class Harness(unittest.TestCase):
                 errors = json.loads((Path(directory) / "lnir-errors.json").read_text())
                 self.assertEqual(len(errors), 1)
                 self.assertEqual(errors[0]["case"]["id"], 1)
-                self.assertIn("RecursionError", errors[0]["error"])
+                # Python <= 3.13 raises RecursionError on the 200000-deep array; 3.14's
+                # parser accepts it and the row-shape check rejects it instead.
+                self.assertRegex(errors[0]["error"],
+                                 r"RecursionError|LNIR request must return exactly one object row")
 
     def test_engine_environment_is_allowlisted(self):
         env = conformance.conformance_environment(Path("evidence"), {
