@@ -4,4 +4,5 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+EnvironmentFile=-/etc/orb/roadmap.env
 ExecStart=/usr/local/sbin/orb-auto-deploy
