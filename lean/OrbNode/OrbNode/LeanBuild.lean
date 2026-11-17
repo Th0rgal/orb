@@ -58,24 +58,74 @@ def lakeAdvisoryWrapper : String :=
   "fi\n" ++
   "exec \"$real_lake\" \"$@\"\n"
 
+/-- Check whether `elanRoot / "toolchains"` is a directory containing at least one installed
+    toolchain subdirectory (preventing an empty `toolchains/` directory from shadowing a populated
+    host `ELAN_HOME` or `/root/.elan`). -/
+def hasInstalledToolchains (elanRoot : System.FilePath) : IO Bool := do
+  let tcDir := elanRoot / "toolchains"
+  if !(← tcDir.isDir) then
+    return false
+  match ← tcDir.readDir |>.toBaseIO with
+  | .ok entries =>
+    for e in entries do
+      if ← e.path.isDir then
+        return true
+    return false
+  | .error _ =>
+    return false
+
+/-- Convert an elan toolchain directory name (e.g. `leanprover--lean4---v4.35.0`) back to its
+    `lean-toolchain` string (`leanprover/lean4:v4.35.0`). -/
+def elanDirNameToToolchain (dirName : String) : String :=
+  match dirName.splitOn "---" with
+  | [repoPart, verPart] =>
+    let repo := String.intercalate "/" (repoPart.splitOn "--")
+    s!"{repo}:{verPart}"
+  | _ => dirName
+
+/-- Resolve the active `ELAN_HOME` directory for `workDir`, checking in order:
+    1. `<workDir>/caches/elan` (if its `toolchains/` contains at least one installed toolchain)
+    2. `ELAN_HOME` environment variable
+    3. `/opt/orb/elan`
+    4. `/opt/elan`
+    5. `$HOME/.elan`
+    6. `/root/.elan` (crucial when `orb-deploy` / `systemd-run` runs as `root` without `HOME=/root`)
+    7. Any `<dir>` where `<dir>/bin` is on `PATH` and `<dir>/toolchains` has an installed toolchain
+    8.Fallback to `<workDir>/caches/elan`. -/
+def resolveElanHome (workDir : String) : IO System.FilePath := do
+  let wElan := System.FilePath.mk workDir / "caches" / "elan"
+  if ← hasInstalledToolchains wElan then
+    return wElan
+  if let some envElan ← getEnvNonEmpty "ELAN_HOME" then
+    let p := System.FilePath.mk envElan
+    if ← hasInstalledToolchains p then
+      return p
+  for sysPath in #[System.FilePath.mk "/opt/orb/elan", System.FilePath.mk "/opt/elan"] do
+    if ← hasInstalledToolchains sysPath then
+      return sysPath
+  if let some h ← getEnvNonEmpty "HOME" then
+    let p := System.FilePath.mk h / ".elan"
+    if ← hasInstalledToolchains p then
+      return p
+  let rootElan := System.FilePath.mk "/root/.elan"
+  if ← hasInstalledToolchains rootElan then
+    return rootElan
+  let servicePath := (← IO.getEnv "PATH").getD "/usr/local/bin:/usr/bin:/bin"
+  for d in (servicePath.splitOn ":").filter (·.startsWith "/") do
+    let binPath := System.FilePath.mk d
+    if binPath.fileName == some "bin" then
+      if let some parent := binPath.parent then
+        if ← hasInstalledToolchains parent then
+          return parent
+  if ← (wElan / "toolchains").isDir then
+    return wElan
+  return wElan
+
 /-- Prepare `<workDir>/caches/{elan,turbo-lean,bin/lake}` and return baseline cleared-env pairs. -/
 def prepareSharedMissionEnv (workDir cwd : String) : IO (Array (String × String)) := do
   let root := System.FilePath.mk workDir
   let caches := root / "caches"
-  let elan ← do
-    let wElan := caches / "elan"
-    if ← (wElan / "toolchains").isDir then pure wElan
-    else if let some envElan ← getEnvNonEmpty "ELAN_HOME" then
-      let p := System.FilePath.mk envElan
-      if ← (p / "toolchains").isDir then pure p else pure wElan
-    else if ← (System.FilePath.mk "/opt/orb/elan/toolchains").isDir then
-      pure (System.FilePath.mk "/opt/orb/elan")
-    else if ← (System.FilePath.mk "/opt/elan/toolchains").isDir then
-      pure (System.FilePath.mk "/opt/elan")
-    else if let some h ← getEnvNonEmpty "HOME" then
-      let p := System.FilePath.mk h / ".elan"
-      if ← (p / "toolchains").isDir then pure p else pure wElan
-    else pure wElan
+  let elan ← resolveElanHome workDir
   let tl := caches / "turbo-lean"
   let bin := caches / "bin"
   IO.FS.createDirAll (caches / "elan")
@@ -704,20 +754,7 @@ def buildLeanJobEnv
     (payloadEnv : Array (String × JVal)) : IO (Array (String × String)) := do
   let root := System.FilePath.mk workDir
   let caches := root / "caches"
-  let elan ← do
-    let wElan := caches / "elan"
-    if ← (wElan / "toolchains").isDir then pure wElan
-    else if let some envElan ← getEnvNonEmpty "ELAN_HOME" then
-      let p := System.FilePath.mk envElan
-      if ← (p / "toolchains").isDir then pure p else pure wElan
-    else if ← (System.FilePath.mk "/opt/orb/elan/toolchains").isDir then
-      pure (System.FilePath.mk "/opt/orb/elan")
-    else if ← (System.FilePath.mk "/opt/elan/toolchains").isDir then
-      pure (System.FilePath.mk "/opt/elan")
-    else if let some h ← getEnvNonEmpty "HOME" then
-      let p := System.FilePath.mk h / ".elan"
-      if ← (p / "toolchains").isDir then pure p else pure wElan
-    else pure wElan
+  let elan ← resolveElanHome workDir
   let repoHash16 := (bytesToHexLower (sha256Bytes repo.toUTF8)).take 16 |>.toString
   let tlHome := caches / "turbo-lean" / repoHash16
   let tlStage := caches / "turbo-lean-staging" / repoHash16 / "base"
@@ -851,12 +888,18 @@ def collectArtifactsConfined (rootDir : String) (patterns : Array String) : IO (
   return out
 
 def listCachedToolchains (workDir : String) : IO (Array String) := do
-  let mut names : Array String := #[]
-  for dir in #[
+  let resolved ← resolveElanHome workDir
+  let mut dirs : Array System.FilePath := #[
+    resolved / "toolchains",
     System.FilePath.mk workDir / "caches" / "elan" / "toolchains",
     System.FilePath.mk "/opt/orb/elan/toolchains",
-    System.FilePath.mk "/opt/elan/toolchains"
-  ] do
+    System.FilePath.mk "/opt/elan/toolchains",
+    System.FilePath.mk "/root/.elan/toolchains"
+  ]
+  if let some h ← getEnvNonEmpty "HOME" then
+    dirs := dirs.push (System.FilePath.mk h / ".elan" / "toolchains")
+  let mut names : Array String := #[]
+  for dir in dirs do
     if ← dir.isDir then
       if let .ok entries ← dir.readDir |>.toBaseIO then
         for e in entries do
