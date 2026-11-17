@@ -1,0 +1,7 @@
+[Unit]
+Description=Deploy green master to prod when it is new (unattended, hourly)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/orb-auto-deploy
