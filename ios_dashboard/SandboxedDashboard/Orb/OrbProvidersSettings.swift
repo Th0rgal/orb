@@ -431,6 +431,10 @@ struct OrbProvidersSettings: View {
         return (raw.isEmpty ? p["provider_type"].text : raw, explicitEmail)
     }
 
+    static func loginStatusLabel(_ status: String) -> String? {
+        status == "needs_reauth" ? "Sign in again" : nil
+    }
+
     private func status(_ p: OrbJSON, accountHint: String = "") -> String {
         let detail = usage[p["id"].text]
         let state: String
@@ -441,7 +445,7 @@ struct OrbProvidersSettings: View {
             else { state = "Disabled" }
         }
         else if detail["status"].text == "needs_verification" { state = "Verification required" }
-        else if p["status"]["type"].text == "needs_reauth" || detail["status"].text == "needs_reauth" { state = "Sign in again" }
+        else if let login = Self.loginStatusLabel(p["status"]["type"].text) ?? Self.loginStatusLabel(detail["status"].text) { state = login }
         else if !detail["error"].text.isEmpty { state = "Usage unavailable" }
         else if let quota = OrbProviderQuota.quotaStatus(OrbProviderQuota.windows(detail)) {
             state = quota.label

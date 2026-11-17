@@ -232,6 +232,9 @@ internal enum class OrbQuotaLevel(val wire: String) {
 internal data class OrbQuotaStatus(val level: OrbQuotaLevel, val label: String, val accountWide: Boolean)
 
 /** "Gemini", "Claude & GPT and Gemini", "A, B and C". */
+internal fun providerLoginStatusLabel(status: String): String? =
+    if (status == "needs_reauth") "Sign in again" else null
+
 private fun joinNames(names: List<String>): String =
     if (names.size < 2) names.joinToString("") else names.dropLast(1).joinToString(", ") + " and " + names.last()
 
@@ -463,7 +466,8 @@ internal fun providerStatusSubtitle(provider: OrbRow, detail: OrbDict?): String 
             else -> "Disabled"
         }
         detailStatus == "needs_verification" -> "Verification required"
-        statusType == "needs_reauth" || detailStatus == "needs_reauth" -> "Sign in again"
+        providerLoginStatusLabel(statusType) != null -> providerLoginStatusLabel(statusType)!!
+        providerLoginStatusLabel(detailStatus) != null -> providerLoginStatusLabel(detailStatus)!!
         detailError.isNotEmpty() -> "Usage unavailable"
         else -> {
             val q = quotaStatus(providerQuotaWindows(detail))
