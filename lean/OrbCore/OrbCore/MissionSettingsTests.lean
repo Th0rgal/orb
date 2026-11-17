@@ -119,7 +119,7 @@ def run (root : String) : IO Unit := do
     let (moveStatus, moveBody) ← restAt "PATCH" "/api/control/missions/rest/settings" move
     check (moveStatus == 200) s!"REST placement patch: {moveBody}"
     let moved ← snapshot "rest"
-    check (moved[6]! == "q" && moved[7]! == "" && moved[8]! == "8" && moved[4]! == "codex-session")
+    check (moved[6]! == "alice:q" && moved[7]! == "" && moved[8]! == "8" && moved[4]! == "codex-session")
       "REST placement revision changes once and preserves session"
     -- B5 replay regression: `POST /api/control/missions/:id/project` moves root, co-located forks,
     -- running workers, nested grandchildren, `/btw` side sessions, and `descendant_ids` atomically.
@@ -176,15 +176,15 @@ def run (root : String) : IO Unit := do
       "POST /:id/project broadcasts mission_placement_changed for family"
     let parentMoved ← snapshot "parent"
     let forkMoved ← snapshot "fork-v1"
-    check (parentMoved[6]! == "r" && parentMoved[7]! == "Audits" && parentMoved[8]! == "8" &&
-      forkMoved[6]! == "r" && forkMoved[7]! == "Audits" && forkMoved[8]! == "8")
+    check (parentMoved[6]! == "alice:r" && parentMoved[7]! == "Audits" && parentMoved[8]! == "8" &&
+      forkMoved[6]! == "alice:r" && forkMoved[7]! == "Audits" && forkMoved[8]! == "8")
       "root and co-located fork version move to destination project and folder"
     for (cid, expRev) in #[
         ("running-worker", "8"), ("deep-worker", "8"), ("rest", "9"),
         ("mcp", "8"), ("grandchild", "8"), ("other-project", "8"),
         ("btw-child", "8"), ("callback-child", "8")] do
       let row ← snapshot cid
-      check (row[6]! == "r" && row[7]! == "" && row[8]! == expRev)
+      check (row[6]! == "alice:r" && row[7]! == "" && row[8]! == expRev)
         s!"descendant {cid} moved atomically to project r with folder cleared"
     let updRows ← sql "SELECT updated_at FROM missions WHERE id='running-worker';"
     check (updRows[1]![0]! == "2026-11-15T10:09:00Z")
@@ -192,13 +192,13 @@ def run (root : String) : IO Unit := do
     let .ok scopeRows ← execParamQuery store.projectsDb
       "SELECT mission_id, project_scope FROM mcp_sessions_v1 WHERE id IN ('sess-parent','sess-worker','sess-deep') ORDER BY id;" #[]
       | throw (IO.userError "mcp_sessions_v1 select failed")
-    check (scopeRows.size == 4 && scopeRows[1]![1]! == "r" && scopeRows[2]![1]! == "r" && scopeRows[3]![1]! == "r")
+    check (scopeRows.size == 4 && scopeRows[1]![1]! == "alice:r" && scopeRows[2]![1]! == "alice:r" && scopeRows[3]![1]! == "alice:r")
       "running worker and root MCP sessions rebound to destination project"
     let intentRows ← sql "SELECT project_slug FROM dispatch_lease_intents WHERE reservation_id='res-worker-1';"
     let .ok leaseRows ← execParamQuery store.projectsDb
       "SELECT project_slug FROM project_track_leases WHERE reservation_id='res-worker-1';" #[]
       | throw (IO.userError "project_track_leases select failed")
-    check (intentRows.size == 2 && intentRows[1]![0]! == "r" && leaseRows.size == 2 && leaseRows[1]![0]! == "r")
+    check (intentRows.size == 2 && intentRows[1]![0]! == "alice:r" && leaseRows.size == 2 && leaseRows[1]![0]! == "alice:r")
       "active track leases and dispatch lease intents transfer to destination project"
     let foreignAfter ← snapshot "foreign"
     let unrelatedAfter ← snapshot "unrelated"
@@ -221,8 +221,8 @@ def run (root : String) : IO Unit := do
     let workerHop2 ← snapshot "running-worker"
     let wAckMove2 := Orb.Kernel.placementMergeStep 8 (parentHop2[8]!.toNat?.getD 0).toUInt64 102 102 1 1
     let wOutOfOrderMove1 := Orb.Kernel.placementMergeStep 9 8 0 101 1 1
-    check (mv2St == 200 && parentHop2[6]! == "s" && parentHop2[7]! == "Final" && parentHop2[8]! == "9" &&
-      workerHop2[6]! == "s" && workerHop2[7]! == "" && workerHop2[8]! == "9" &&
+    check (mv2St == 200 && parentHop2[6]! == "alice:s" && parentHop2[7]! == "Final" && parentHop2[8]! == "9" &&
+      workerHop2[6]! == "alice:s" && workerHop2[7]! == "" && workerHop2[8]! == "9" &&
       (wStaleInflight &&& 0xFFFFFFFF) == 5 &&
       (wAckMove1 &&& 0xFFFFFFFF) == 1793 && (wAckMove1 >>> 32) == 8 &&
       (wLateStalePoll &&& 0xFFFFFFFF) == 4 && (wLateStalePoll >>> 32) == 8 &&
