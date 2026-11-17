@@ -107,6 +107,11 @@ def verifyDeployRecheckMutantStaleLease
   else if !(observedDigest != 0 && observedDigest == execDigest) then 518
   else 257
 
+/-- Mutant 12: Allows a 3rd automatic recovery (`priorRetries <= 2`) after two consecutive stream cuts! -/
+def verifyTransientTurnRecoveryMutantUnboundedThirdRetry
+    (reasonCode priorRetries retryable : UInt8) : UInt8 :=
+  if (reasonCode == 1 || reasonCode == 2) && priorRetries ≤ 2 && retryable == 1 then 1 else 0
+
 /-- Theorem 1: `verifyCoreStartupConfig` kills the non-loopback `DEV_MODE=true` remote exposure mutant
     AND agrees on valid production config. -/
 theorem core_startup_kills_remote_dev_mutant :
@@ -189,6 +194,13 @@ theorem deploy_recheck_kills_stale_lease_mutant :
       verifyDeployRecheckMutantStaleLease 1 2 0 9 9 4 5 10 20 8 8 ∧
     verifyDeployRecheck 1 2 0 9 9 4 4 10 20 8 8 =
       verifyDeployRecheckMutantStaleLease 1 2 0 9 9 4 4 10 20 8 8 := by
+  decide
+
+theorem transient_turn_recovery_kills_third_retry_mutant :
+    verifyTransientTurnRecovery 1 2 1 ≠
+      verifyTransientTurnRecoveryMutantUnboundedThirdRetry 1 2 1 ∧
+    verifyTransientTurnRecovery 1 1 1 =
+      verifyTransientTurnRecoveryMutantUnboundedThirdRetry 1 1 1 := by
   decide
 
 end OrbCore.MutantSuite

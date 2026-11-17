@@ -873,7 +873,7 @@ def carryArmedWakeupsForward
     (missionId : String) (nextGen : Nat) (nowIso : String) : IO Unit := do
   discard <| query
     ("UPDATE mission_continuations SET run_generation=CAST(?2 AS INTEGER), updated_at=?3 WHERE mission_id=?1 AND phase=1 " ++
-     "AND COALESCE(source,'')<>'empty-turn-retry' AND run_generation<CAST(?2 AS INTEGER) " ++
+     "AND COALESCE(source,'') NOT IN ('empty-turn-retry','transient-turn-retry') AND run_generation<CAST(?2 AS INTEGER) " ++
      "AND run_generation=(SELECT COALESCE(run_generation,1) FROM missions WHERE id=?1);")
     #[missionId, s!"{nextGen}", nowIso]
   discard <| query

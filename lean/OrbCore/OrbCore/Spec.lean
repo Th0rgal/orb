@@ -1362,4 +1362,95 @@ theorem library_scope_explicit (sameOwner : UInt8) :
     orbLibraryScopeGate sameOwner 1 = 1 := by
   simp [orbLibraryScopeGate]
 
+/-! ### 13. Transient Turn Recovery Gate (`R28` stream_incomplete / idle_timeout) -/
+
+inductive TransientTurnFailureReason where
+  | streamIncomplete
+  | idleTimeout
+  deriving Repr, DecidableEq
+
+def TransientTurnFailureReason.decode? : Nat → Option TransientTurnFailureReason
+  | 1 => some .streamIncomplete
+  | 2 => some .idleTimeout
+  | _ => none
+
+def TransientTurnFailureReason.reasonString : TransientTurnFailureReason → String
+  | .streamIncomplete => "stream_incomplete"
+  | .idleTimeout      => "idle_timeout"
+
+structure TransientTurnRecoveryCheck where
+  reasonCode   : UInt8
+  priorRetries : UInt8
+  retryable    : UInt8
+  deriving Repr, DecidableEq
+
+/-- Independent transient turn recovery domain specification (`R28`):
+    the turn failed with a recognized transient stream-cut reason (`1 = stream_incomplete`,
+    `2 = idle_timeout`), the mission is eligible for automatic turn recovery (`retryable = 1`,
+    i.e. not a one-shot side question), and fewer than 2 automatic recoveries have already run
+    for the current user instruction (`priorRetries < 2`). -/
+def TransientTurnRecoveryDomainSafe (c : TransientTurnRecoveryCheck) : Prop :=
+  (TransientTurnFailureReason.decode? c.reasonCode.toNat).isSome = true ∧
+  c.priorRetries.toNat < 2 ∧
+  c.retryable.toNat = 1
+
+@[inline, export orb_core_verify_transient_turn_recovery]
+def verifyTransientTurnRecovery (reasonCode priorRetries retryable : UInt8) : UInt8 :=
+  if (reasonCode == 1 || reasonCode == 2) && priorRetries < 2 && retryable == 1 then 1 else 0
+
+def transientTurnRecoveryMetaGate : MetaGateSpec TransientTurnRecoveryCheck TransientTurnRecoveryDomainSafe where
+  gate c := verifyTransientTurnRecovery c.reasonCode c.priorRetries c.retryable == 1
+  sound c h := by
+    rcases c with ⟨rc, pr, rt⟩
+    change (verifyTransientTurnRecovery rc pr rt == 1) = true at h
+    dsimp [TransientTurnRecoveryDomainSafe]
+    unfold verifyTransientTurnRecovery at h
+    have hc : ((rc == 1 || rc == 2) && pr < 2 && rt == 1) = true := by
+      cases hb : ((rc == 1 || rc == 2) && pr < 2 && rt == 1)
+      · rw [hb] at h; contradiction
+      · rfl
+    simp only [Bool.and_eq_true, Bool.or_eq_true, beq_iff_eq, decide_eq_true_eq] at hc
+    rcases hc with ⟨⟨hrc, hpr⟩, hrt⟩
+    have hprNat : pr.toNat < 2 := UInt8.lt_iff_toNat_lt.mp hpr
+    refine ⟨?_, hprNat, by subst hrt; rfl⟩
+    rcases hrc with rfl | rfl <;> rfl
+  complete c h := by
+    rcases c with ⟨rc, pr, rt⟩
+    change (verifyTransientTurnRecovery rc pr rt == 1) = true
+    dsimp [TransientTurnRecoveryDomainSafe] at h
+    rcases h with ⟨hrc, hpr, hrt⟩
+    unfold verifyTransientTurnRecovery
+    have hrcB : (rc == 1 || rc == 2) = true := by
+      unfold TransientTurnFailureReason.decode? at hrc
+      split at hrc
+      · rename_i h1
+        have heq : rc = 1 := u8_eq_of_toNat rc 1 (by omega) h1
+        subst heq; rfl
+      · rename_i h2
+        have heq : rc = 2 := u8_eq_of_toNat rc 2 (by omega) h2
+        subst heq; rfl
+      · contradiction
+    have hprLt : pr < 2 := UInt8.lt_iff_toNat_lt.mpr hpr
+    have hrtEq : rt = 1 := u8_eq_of_toNat rt 1 (by omega) hrt
+    subst hrtEq
+    simp [hrcB, hprLt]
+  posWitness := { reasonCode := 1, priorRetries := 1, retryable := 1 }
+  negWitness := { reasonCode := 1, priorRetries := 2, retryable := 1 }
+  nonVacuous := by decide
+  tight := by decide
+
+theorem transient_turn_recovery_rejects_third_cut
+    (rc rt : UInt8) (hge : 2 ≤ (2 : UInt8).toNat) :
+    verifyTransientTurnRecovery rc 2 rt = 0 := by
+  have _ := hge
+  have hbad : ¬ TransientTurnRecoveryDomainSafe ⟨rc, 2, rt⟩ := by
+    rintro ⟨_, hlt, _⟩
+    change (2 : Nat) < 2 at hlt
+    omega
+  have hf := transientTurnRecoveryMetaGate.rejects_unsafe ⟨rc, 2, rt⟩ hbad
+  unfold transientTurnRecoveryMetaGate at hf
+  dsimp at hf
+  unfold verifyTransientTurnRecovery at hf ⊢
+  exact bit_gate_eq_zero hf
+
 end OrbCore.Spec
