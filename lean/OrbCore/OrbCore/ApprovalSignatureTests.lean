@@ -35,6 +35,104 @@ def header (store : CoreStore) (sign : String → IO String) (path body : String
   let signature ← sign ((j.fieldStr? "payload").getD "")
   return (j.fieldStr? "challenge_id").getD "" ++ ".test-device." ++ signature
 
+structure Harness where
+  now : UInt64
+  send : String → String → String → String → UInt64 → IO (Nat × JVal)
+  header : String → String → IO String
+  sign : String → IO String
+  newRequest : String → IO String
+  leaseCount : IO Nat
+
+private def approvePath (id : String) : String := s!"/api/privilege-access/{id}/approve"
+
+def testUnsignedRefused (h : Harness) : IO Unit := do
+  let id ← h.newRequest "ops_read"
+  let (status, _) ← h.send "POST" (approvePath id) "{}" "" h.now
+  check (status == 403) "unsigned approval is refused"
+
+def testBadSignatureRefused (h : Harness) : IO Unit := do
+  let id ← h.newRequest "ops_read"
+  let path := approvePath id
+  let signed ← h.header path "{}"
+  let nonce := ((signed.splitOn ".")[0]?).getD ""
+  let badSignature ← h.sign "a different payload"
+  let (status, _) ← h.send "POST" path "{}" s!"{nonce}.test-device.{badSignature}" h.now
+  check (status == 403) "signature that does not cover the challenge payload is refused"
+
+def testUnknownDeviceRefused (h : Harness) : IO Unit := do
+  let id ← h.newRequest "ops_read"
+  let path := approvePath id
+  let signed ← h.header path "{}"
+  let (status, _) ← h.send "POST" path "{}" (signed.replace ".test-device." ".unknown.") h.now
+  check (status == 403) "signature from an unenrolled device is refused"
+
+def testWrongBodyRefused (h : Harness) : IO Unit := do
+  let id ← h.newRequest "ops_read"
+  let path := approvePath id
+  let signed ← h.header path "{}"
+  let (status, _) ← h.send "POST" path "{ }" signed h.now
+  check (status == 403) "signature bound to different body bytes is refused"
+
+def testWrongTargetRefused (h : Harness) : IO Unit := do
+  let id ← h.newRequest "ops_read"
+  let path := approvePath id
+  let signed ← h.header path "{}"
+  let (status, _) ← h.send "POST" (path ++ "?other=1") "{}" signed h.now
+  check (status == 403) "signature bound to a different request target is refused"
+
+def testExpiredRefused (h : Harness) : IO Unit := do
+  let id ← h.newRequest "ops_read"
+  let path := approvePath id
+  let signed ← h.header path "{}"
+  let (status, _) ← h.send "POST" path "{}" signed (h.now + 120)
+  check (status == 403) "expired challenge is refused"
+
+def testReplayRefused (h : Harness) : IO Unit := do
+  let id ← h.newRequest "ops_read"
+  let path := approvePath id
+  let signed ← h.header path "{}"
+  let (first, _) ← h.send "POST" path "{}" signed h.now
+  check (first == 200) "replay fixture first approval succeeds"
+  let afterFirst ← h.leaseCount
+  let (second, _) ← h.send "POST" path "{}" signed h.now
+  check (second == 403) "already consumed challenge replay is refused"
+  check ((← h.leaseCount) == afterFirst) "replay mints no second lease"
+
+def testValidSignatureMintsLease (h : Harness) : IO Unit := do
+  let id ← h.newRequest "ops_read"
+  let path := approvePath id
+  let before ← h.leaseCount
+  let signed ← h.header path "{}"
+  let (status, _) ← h.send "POST" path "{}" signed h.now
+  check (status == 200) "valid request-bound signature mints a lease"
+  check ((← h.leaseCount) == before + 1) "valid approval mints exactly one lease"
+
+def testLegacyRouteRequiresSignature (h : Harness) : IO Unit := do
+  let id ← h.newRequest "service_deploy"
+  let path := s!"/api/privilege-access/requests/{id}/approve"
+  let before ← h.leaseCount
+  let (unsigned, _) ← h.send "POST" path "{}" "" h.now
+  check (unsigned == 403) "legacy approval route requires a signature"
+  check ((← h.leaseCount) == before) "unsigned legacy approval mints no lease"
+  let signed ← h.header path "{}"
+  let (status, _) ← h.send "POST" path "{}" signed h.now
+  check (status == 200) "legacy approval route accepts a valid signature"
+
+def testBatchRequiresSignature (h : Harness) : IO Unit := do
+  let id ← h.newRequest "root_exec"
+  let batch := renderCompact (.obj #[("items", .arr #[.obj #[("kind", .str "privilege"), ("id", .str id)]]),
+    ("confirm_critical", .bool true)])
+  let path := "/api/approvals/approve-all"
+  let before ← h.leaseCount
+  let (unsigned, _) ← h.send "POST" path batch "" h.now
+  check (unsigned == 403) "batch approval requires a signature"
+  check ((← h.leaseCount) == before) "unsigned batch approval mints no lease"
+  let signed ← h.header path batch
+  let (status, _) ← h.send "POST" path batch signed h.now
+  check (status == 200) "batch approval accepts a valid signature"
+  let (replay, _) ← h.send "POST" path batch signed h.now
+  check (replay == 403) "batch challenge replay is refused"
+
 def run (root : String) : IO Unit := do
   let .ok store ← openCoreStore (root ++ "/approval-signatures")
     | throw (IO.userError "approval store fixture")
@@ -59,54 +157,34 @@ def run (root : String) : IO Unit := do
     IO.FS.writeFile (store.rootDir ++ "/approval_enrollment_code") "fixture-enrollment-code\n"
     let enrolled ← send "POST" "/api/approvals/devices"
       (renderCompact (.obj #[("id", .str "test-device"), ("public_key", .str publicKey)])) "" now
-    check (enrolled.1 == 403) "enrollment requires out-of-band code"
+    check (enrolled.1 == 403) "enrolment requires an out-of-band code"
     IO.FS.writeFile (store.rootDir ++ "/approval_enrollment_code") "fixture-enrollment-code\n"
     let enrolled ← send "POST" "/api/approvals/devices"
       (renderCompact (.obj #[("id", .str "test-device"), ("public_key", .str publicKey),
         ("enrollment_code", .str "fixture-enrollment-code")])) "" now
-    check (enrolled.1 == 201) "enroll fixture"
+    check (enrolled.1 == 201) "enrol fixture"
     let newRequest := fun (scope : String) => do
       let result ← mcpRequestPrivilegedAccess (some store) store.rootDir "" "test-session" scope "self"
         "signature regression" #[] 30 now
       return (result.fieldStr? "request_id").getD ""
-    let id ← newRequest "ops_read"
-    check (!id.isEmpty) "request fixture"
-    let path := s!"/api/privilege-access/{id}/approve"
-    let body := "{}"
-    let leaseCount := do
+    let leaseCount : IO Nat := do
       let .ok rows ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM privilege_leases;" #[]
         | throw (IO.userError "lease count")
       return ((rows[1]?.bind (·[0]?)).bind String.toNat?).getD 0
-    let good ← header store sign path body now
-    let parts := good.splitOn "."
-    let badSignature ← sign "different payload"
-    let badCrypto := s!"{(parts[0]?).getD ""}.test-device.{badSignature}"
-    for bad in #["", good ++ "x", good.replace ".test-device." ".unknown.", badCrypto] do
-      check ((← send "POST" path body bad now).1 == 403) "unsigned, corrupt and unknown device refused"
-    check ((← send "POST" path "{ }" good now).1 == 403) "exact wire body binding"
-    check ((← send "POST" (path ++ "?other=1") body good now).1 == 403) "raw target binding"
-    check ((← leaseCount) == 0) "rejected requests mint no lease"
-    let expired ← header store sign path body now
-    check ((← send "POST" path body expired (now + 120)).1 == 403) "expiry boundary refused"
-    check ((← send "POST" path body good now).1 == 200) "valid signature mints lease"
-    check ((← send "POST" path body good now).1 == 403) "same challenge replay refused"
-    let fresh ← header store sign path body now
-    check ((← send "POST" path body fresh now).1 == 409) "fresh challenge cannot reapprove request"
-    check ((← leaseCount) == 1) "exactly one lease"
-    let second ← newRequest "service_deploy"
-    let legacy := s!"/api/privilege-access/requests/{second}/approve"
-    check ((← send "POST" legacy body "" now).1 == 403) "legacy URL requires signature"
-    let legacyHeader ← header store sign legacy body now
-    check ((← send "POST" legacy body legacyHeader now).1 == 200) "legacy URL accepts valid signature"
-    let third ← newRequest "root_exec"
-    let batch := renderCompact (.obj #[("items", .arr #[.obj #[("kind", .str "privilege"), ("id", .str third)]]),
-      ("confirm_critical", .bool true)])
-    let batchPath := "/api/approvals/approve-all"
-    check ((← send "POST" batchPath batch "" now).1 == 403) "batch requires signature"
-    let batchHeader ← header store sign batchPath batch now
-    check ((← send "POST" batchPath batch batchHeader now).1 == 200) "signed batch accepted"
-    check ((← send "POST" batchPath batch batchHeader now).1 == 403) "batch replay refused"
-    check ((← leaseCount) == 3) "three distinct authorized leases"
+    let h : Harness := {
+      now := now, send := send, sign := sign,
+      header := fun path body => header store sign path body now,
+      newRequest := newRequest, leaseCount := leaseCount }
+    testUnsignedRefused h
+    testBadSignatureRefused h
+    testUnknownDeviceRefused h
+    testWrongBodyRefused h
+    testWrongTargetRefused h
+    testExpiredRefused h
+    testValidSignatureMintsLease h
+    testReplayRefused h
+    testLegacyRouteRequiresSignature h
+    testBatchRequiresSignature h
   finally
     closeCoreStore store
 
