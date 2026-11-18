@@ -7456,20 +7456,19 @@ def handleClientConn (st : CoreAppState) (cfd : Fd) (allowKeepAlive : Bool := fa
           -- client that stopped reading must not hold a keep-alive slot.
            let wroteHead ← writeCoreHttpResponse responseWrite httpResp false
            let alive ← IO.mkRef wroteHead
-           if !wroteHead then
-             -- Do not enter a recovery pump after the client has rejected the
-             -- response head: close its upstream immediately, including a
-             -- head-only chunked response with no body callback opportunity.
-             discard <| responseWrite ByteArray.empty
+           -- Always enter the pump once so it can close the upstream reader;
+           -- a refused head must be propagated as a refused empty callback.
            let complete ← pump fun piece => do
-            if !(← alive.get) then return false
-            if piece.isEmpty then return true
-            let ok ← responseWrite (encodeHttpChunk piece)
-            alive.set ok
-            return ok
-          if complete && (← alive.get) then
-            discard <| responseWrite (encodeHttpChunk ByteArray.empty)
-          keepGoing := false
+             if !(← alive.get) then return false
+             if piece.isEmpty then
+               if !wroteHead then return false
+               return true
+             let ok ← responseWrite (encodeHttpChunk piece)
+             alive.set ok
+             return ok
+           if complete && (← alive.get) then
+             discard <| responseWrite (encodeHttpChunk ByteArray.empty)
+           keepGoing := false
       | .error rawUpgrade101 =>
         let wrote := (← writeAll cfd rawUpgrade101 false).isOk
         if wrote then
