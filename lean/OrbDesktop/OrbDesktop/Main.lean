@@ -163,20 +163,20 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
         -- A fixed-width clipped label is a CSS single-line ellipsis label.
         if style.clip && style.maxWidth > 0 then
           let total := shapedRuns.foldl (fun n r => n + r.glyphs.foldl (fun n g => n + g.xAdvance) 0) 0
-          if total > style.maxWidth then
-            if let some r := shapedRuns.head? then
-              let (ac', dots) ← shapeDesktopRuns curAc font scale120 r.style "…"
-              curAc := ac'
-              let dotW := dots.foldl (fun n r => n + r.glyphs.foldl (fun n g => n + g.xAdvance) 0) 0
-              let mut used := 0
-              let mut glyphs : Array ShapedGlyph := #[]
-              for g in r.glyphs do
-                if used + g.xAdvance + dotW > style.maxWidth then break
-                used := used + g.xAdvance
-                glyphs := glyphs.push g
-              shapedRuns := #[( { r with glyphs := glyphs.toList, allowBreakAfter := false } )]
-              for dot in dots do
-                shapedRuns := shapedRuns.push dot
+          if total > style.maxWidth && !shapedRuns.isEmpty then
+            let r := shapedRuns[0]!
+            let (ac', dots) ← shapeDesktopRuns curAc font scale120 r.style "…"
+            curAc := ac'
+            let dotW := dots.foldl (fun n r => n + r.glyphs.foldl (fun n g => n + g.xAdvance) 0) 0
+            let mut used := 0
+            let mut glyphs : Array ShapedGlyph := #[]
+            for g in r.glyphs do
+              if used + g.xAdvance + dotW > style.maxWidth then break
+              used := used + g.xAdvance
+              glyphs := glyphs.push g
+            shapedRuns := #[( { r with glyphs := glyphs.toList, allowBreakAfter := false } )]
+            for dot in dots do
+              shapedRuns := shapedRuns.push dot
         pure (WidgetPayload.text lineHeightSub shapedRuns.toList)
       | other => pure other
     let mut shapedChildren : Array WidgetNode := #[]
