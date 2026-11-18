@@ -117,11 +117,17 @@ MCP (replacing the project board pair, one release of aliases in *Compatibility 
 REST:
 
 - `GET /api/control/missions/:id/board` — the same body as the read tool.
-- `PUT /api/control/missions/:id/board` — `{text, base_updated_at?}`.
-  `base_updated_at` is an optional optimistic-concurrency fence: when present
-  and different from the stored `updated_at`, the write answers `409`
-  `{"error":"board_conflict","updated_at":…}` and changes nothing. Omitting it
-  is an unconditional replace.
+- `PUT /api/control/missions/:id/board` — reserved for a mission-bound REST
+  credential. Core does not yet issue that credential, so user principals are
+  refused exactly like the other mission-board write surface: unreadable
+  missions answer `404 {"error":"mission_not_found"}` and readable missions
+  answer `403 {"error":"not_mission_writer"}`. The `{text, base_updated_at?}`
+  body and its optimistic fence remain the contract for mission-bound writers:
+  when `base_updated_at` is present and differs from the stored `updated_at`,
+  the write answers `409 {"error":"board_conflict","updated_at":…}` and changes
+  nothing. Omitting it is an unconditional replace. Until the credential exists,
+  MCP `write_mission_board` is the write surface and the storage fence is named
+  in `B2b`.
 - `GET /api/projects/:slug/boards` — the project page listing (*Project page listing*).
 
 ## Project page listing
