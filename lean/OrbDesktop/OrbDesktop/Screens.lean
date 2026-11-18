@@ -311,7 +311,8 @@ def buildMissionTranscriptBody (st : DesktopState) (mainW bodyH : SubPx)
 /-! ## 4. `04_mission_split_diff` (`/?screen=mission&id=m-diff&mode=split`) -/
 
 /-- Build the right-hand diff viewer pane (`562 x 888`) for `04_mission_split_diff`. -/
-def buildSplitDiffRightPane (theme : Theme) (paneW paneH : SubPx) : WidgetNode :=
+def buildSplitDiffRightPane (theme : Theme) (paneW paneH : SubPx)
+    (delRuns : List InlineRun := []) (addRuns : List InlineRun := []) : WidgetNode :=
   let pal := theme.palette
   let bdr := theme.borderWidth
   let cardW := paneW - pxToSub 24
@@ -372,21 +373,30 @@ def buildSplitDiffRightPane (theme : Theme) (paneW paneH : SubPx) : WidgetNode :
                "M  lean/OrbDesktop/OrbDesktop/Main.lean  +1 -1" ]
       ]
 
-  let splitRow (h : SubPx) (bgL bgR : Color) (lnL codeL lnR codeR : String) : WidgetNode :=
+  let shapedCodeLine (w h : SubPx) (fallback : String) (runs : List InlineRun) : WidgetNode :=
+    if runs.isEmpty then
+      screenTextLine theme (w - pxToSub 12) h (pxToSub 12) (pxToSub 17) pal.textPrimary fallback 400 true
+    else
+      WidgetNode.text
+        (BoxStyle.row 0 |>.withPadding (Edges.xy (pxToSub 6) 0) |>.withFixedSize w h)
+        (pxToSub 17) runs
+
+  let splitRow (h : SubPx) (bgL bgR : Color) (lnL codeL lnR codeR : String)
+      (codeRunsL codeRunsR : List InlineRun := []) : WidgetNode :=
     WidgetNode.box
       (BoxStyle.row 0 |>.withFixedSize cardInnerW h)
       [ WidgetNode.rrect (BoxStyle.row 0 |>.withPadding (Edges.xy (pxToSub 6) 0) |>.withFixedSize (pxToSub 40) h)
           bgL CornerRadii.zero BorderStyle.none
           [screenTextLine theme (pxToSub 28) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textMuted lnL 400 true]
       , WidgetNode.rrect (BoxStyle.row 0 |>.withPadding (Edges.xy (pxToSub 6) 0) |>.withFixedSize halfW h)
-          bgL CornerRadii.zero { widths := Edges.trbl 0 bdr 0 0, color := pal.borderSubtle }
-            [screenTextLine theme (halfW - pxToSub 12) h (pxToSub 12) (pxToSub 17) pal.textPrimary codeL 400 true]
+           bgL CornerRadii.zero { widths := Edges.trbl 0 bdr 0 0, color := pal.borderSubtle }
+             [shapedCodeLine halfW h codeL codeRunsL]
       , WidgetNode.rrect (BoxStyle.row 0 |>.withPadding (Edges.xy (pxToSub 6) 0) |>.withFixedSize (pxToSub 40) h)
           bgR CornerRadii.zero BorderStyle.none
           [screenTextLine theme (pxToSub 28) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textMuted lnR 400 true]
       , WidgetNode.rrect (BoxStyle.row 0 |>.withPadding (Edges.xy (pxToSub 6) 0) |>.withFixedSize halfW h)
-          bgR CornerRadii.zero BorderStyle.none
-            [screenTextLine theme (halfW - pxToSub 12) h (pxToSub 12) (pxToSub 17) pal.textPrimary codeR 400 true]
+           bgR CornerRadii.zero BorderStyle.none
+             [shapedCodeLine halfW h codeR codeRunsR]
       ]
 
   let diffCard : WidgetNode :=
@@ -418,6 +428,7 @@ def buildSplitDiffRightPane (theme : Theme) (paneW paneH : SubPx) : WidgetNode :
             "@@ -120,3 +120,3 @@ def renderDesktopFrame" 400 true]
       , splitRow (pxToSub 17) 0x00000000 0x00000000 "120" "let availW := viewport.w" "120" "let availW := viewport.w"
       , splitRow (pxToSub 52) delRowBg addRowBg "121" "-  webkit_web_view_load_uri(wv, orb_dev_url);" "121" "+  buildDesktopScreen st availW availH shapedRuns"
+          delRuns addRuns
       , splitRow (pxToSub 18) 0x00000000 0x00000000 "122" "let availH := viewport.h" "122" "let availH := viewport.h"
       ]
 
@@ -971,7 +982,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
           CornerRadii.zero
           { widths := Edges.trbl 0 theme.borderWidth 0 0, color := pal.borderSubtle }
           [leftTranscript, leftComposer]
-      let rightPane := buildSplitDiffRightPane theme rightW splitH
+      let rightPane := buildSplitDiffRightPane theme rightW splitH runs.diffDelRuns runs.diffAddRuns
       let splitBody : WidgetNode :=
         WidgetNode.box
           (BoxStyle.row 0 |>.withFixedSize mainW splitH |>.withBg pal.canvas)
