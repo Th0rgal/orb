@@ -15,6 +15,7 @@ import LeanUI.Text
 import LeanUI.Vulkan
 import LeanUI.Runtime
 import OrbDesktop.State
+import OrbDesktop.Core
 import OrbDesktop.Chrome
 import OrbDesktop.Screens
 /-!
@@ -346,7 +347,9 @@ def main (args : List String) : IO UInt32 := do
     let ok ← renderSingleGoldenToFile rcfg.width rcfg.height scr rcfg.darkTheme rcfg.scale120 outPath
     return (if ok then 0 else 1)
   let scr := dcfg.screenOpt.getD .missionTranscript
-  let initSt := DesktopState.forScreen scr rcfg.darkTheme rcfg.scale120
+  let initSt ← if dcfg.screenOpt.isNone && !dcfg.selfTest then
+    (loadLiveState).map (·.getD (DesktopState.forScreen scr rcfg.darkTheme rcfg.scale120))
+  else pure (DesktopState.forScreen scr rcfg.darkTheme rcfg.scale120)
   if dcfg.selfTest then
     return (← runSelfTest rcfg initSt)
   try
