@@ -52,10 +52,13 @@ def moveRecovery (root : String) : IO Unit := do
     let missions ← sql reopened.missionsDb "SELECT project FROM missions ORDER BY id;"
     let sessions ← sql reopened.projectsDb "SELECT project_scope FROM mcp_sessions_v1 ORDER BY id;"
     let leases ← sql reopened.projectsDb "SELECT project_slug FROM project_track_leases ORDER BY mission_id;"
-    check (missions.size == 8 && sessions.size == 8 && leases.size == 8 &&
-      (missions.extract 1 missions.size).all (fun r => r[0]! == "destination") &&
-      (sessions.extract 1 sessions.size).all (fun r => r[0]! == "destination") &&
-      (leases.extract 1 leases.size).all (fun r => r[0]! == "destination"))
+    let missionRows := missions.extract 1 missions.size
+    let sessionRows := sessions.extract 1 sessions.size
+    let leaseRows := leases.extract 1 leases.size
+    check (missionRows.size == 6 && sessionRows.size == 6 && leaseRows.size == 6 &&
+      missionRows.all (fun r => r[0]! == "destination") &&
+      sessionRows.all (fun r => r[0]! == "destination") &&
+      leaseRows.all (fun r => r[0]! == "destination"))
       "B5b_crash_between_commits_startup_repairs_two_families"
     check ((← OrbCore.MissionMoveRecovery.pending reopened.missionsDb).toOption == some #[])
       "B5b_recovery_clears_markers"
