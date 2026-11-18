@@ -2291,7 +2291,11 @@ def sidecarLoginFailureMessage (store : CoreStore) (workingDir : String)
       k == s!"cliproxyapi:{hp.providerType}" || k.startsWith s!"cliproxyapi:{hp.providerType}:")) &&
     (matchSidecarFileForProvider? hps files hp (includeDisabled := true)).any (·.needsReauth)
   if affected.isEmpty then return none
-  return some "Sign in again: a provider login is refresh-failed, disabled, expired or quota-exhausted. See Providers for the sidecar's reported reset."
+  let emails := affected.filterMap fun hp =>
+    (matchSidecarFileForProvider? hps files hp (includeDisabled := true)).bind fun file =>
+      if file.email.trimAscii.toString.isEmpty then none else some file.email.trimAscii.toString
+  let identity := if emails.isEmpty then "the provider login" else String.intercalate ", " emails.toList
+  return some s!"Sign in again for {identity}: the login is refresh-failed, disabled, expired or quota-exhausted. See Providers for the sidecar's reported reset."
 
 /-- Clear a matched sidecar auth file's parked state by toggling `disabled: true` then `disabled: false`
     via `PATCH /v0/management/auth-files/status` (2-second timeout per call).

@@ -447,8 +447,8 @@ private def sidecarParkedHealthContract
         failures := failures.push "r32_login_reporting_fixture_and_fresh_login: list/detail must report needs_reauth"
       let health := (← getJson app jwt "/api/model-routing/health" now).asArr?.getD #[]
       let row := (health.find? (fun v => v.fieldStr? "account_id" == some oauthOnly)).getD .null
-      if row.fieldStr? "login_message" != some "Sign in again" then
-        failures := failures.push "r32_login_reporting_fixture_and_fresh_login: health must report Sign in again"
+       if row.fieldStr? "login_message" != some "Sign in again" then
+         failures := failures.push "r32_login_reporting_fixture_and_fresh_login: health must report Sign in again"
       if file.fieldStr? "name" == some "quota.json" &&
           row.fieldStr? "parked_until" != some "2026-11-18T12:00:00Z" then
         failures := failures.push "r32_login_reporting_fixture_and_fresh_login: reported reset changed"
