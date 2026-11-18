@@ -162,8 +162,9 @@ Determinism (each renderer compared with a second capture of itself):
 
 ## Wave 3 status and acceptance
 
-LeanUI remains opt-in (`scripts/orb_desktop_dev.sh --native`). The default
-SolidJS desktop and its production launcher are unchanged. Wave 2 was recovered
+On Linux, LeanUI is now the default desktop (`orb-desktop-native`); the legacy
+SolidJS/WebKitGTK desktop remains available only with the explicit `--webkit`
+flag. macOS keeps its existing WebKit shell. Wave 2 was recovered
 from public commit `ce5cff01`; this branch is based on the current `master` tip
 and keeps master's `scripts/build_orb_bins.sh` verbatim.
 

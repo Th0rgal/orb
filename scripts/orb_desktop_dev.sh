@@ -2,7 +2,8 @@
 # Fast Orb Desktop developer loop & macOS/Linux bundle staging.
 #
 # Usage:
-#   ./scripts/orb_desktop_dev.sh                     # UI HMR dev loop: Vite on 127.0.0.1:1430 + native shell + orb-locald (shares ~/.orb prod connection)
+#   ./scripts/orb_desktop_dev.sh                     # Linux: launch LeanUI; macOS: launch the WebKit shell
+#   ./scripts/orb_desktop_dev.sh --webkit            # Linux: explicitly launch the legacy WebKit shell
 #   ./scripts/orb_desktop_dev.sh --local-server      # Isolated full-stack loop: also starts local orb-server in .orb-dev/
 #   ./scripts/orb_desktop_dev.sh --rebuild           # Force rebuild of Lean/native binaries even if sources are unchanged
 #   ./scripts/orb_desktop_dev.sh --install-desktop   # Install 'Orb Dev' XDG desktop launcher entry (~/.local/share/applications/orb-dev.desktop)
@@ -13,11 +14,16 @@ set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 ORIG_ARGS=("$@")
-if [[ "${1:-}" == "--native" ]]; then
+OS_NAME="$(uname -s)"
+USE_WEBKIT=0
+if [[ "$OS_NAME" == "Linux" && "${1:-}" == "--native" ]]; then
   shift
-  [[ "$(uname -s)" == "Linux" ]] || { echo "error: --native requires Linux" >&2; exit 2; }
   "$ROOT_DIR/scripts/build_orb_bins.sh" --only orb-desktop-native --out-dir "$ROOT_DIR/target/native"
   exec "$ROOT_DIR/target/native/orb-desktop-native" "$@"
+fi
+if [[ "$OS_NAME" == "Linux" && "${1:-}" == "--webkit" ]]; then
+  shift
+  USE_WEBKIT=1
 fi
 MODE="dev"
 INSTALL_APP=0
@@ -73,8 +79,6 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-
-OS_NAME="$(uname -s)"
 
 if [[ "$INSTALL_DESKTOP" == "1" ]]; then
   if [[ "$OS_NAME" != "Linux" ]]; then
@@ -286,11 +290,14 @@ if [[ "$OS_NAME" == "Darwin" ]]; then
     python3 "$ROOT_DIR/orb/scripts/build-signer.py"
   fi
 elif [[ "$OS_NAME" == "Linux" ]]; then
-  if [[ "$FORCE_REBUILD" == "1" || "$MODE" == "bundle" || ! -x "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/linux_shell/main.c" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/linux_shell/gtk_chrome.c" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/linux_shell/gtk_chrome.h" -nt "$STAGE_BIN_DIR/orb" || "$ROOT_DIR/linux_shell/Makefile" -nt "$STAGE_BIN_DIR/orb" ]]; then
+  if [[ "$FORCE_REBUILD" == "1" || "$MODE" == "bundle" || ! -x "$STAGE_BIN_DIR/orb-webkit" || "$ROOT_DIR/linux_shell/main.c" -nt "$STAGE_BIN_DIR/orb-webkit" || "$ROOT_DIR/linux_shell/gtk_chrome.c" -nt "$STAGE_BIN_DIR/orb-webkit" || "$ROOT_DIR/linux_shell/gtk_chrome.h" -nt "$STAGE_BIN_DIR/orb-webkit" || "$ROOT_DIR/linux_shell/Makefile" -nt "$STAGE_BIN_DIR/orb-webkit" ]]; then
     notify_gui_build
     echo "==> Compiling native linux_shell..."
     make -C "$ROOT_DIR/linux_shell"
-    install -m 0755 "$ROOT_DIR/linux_shell/orb-desktop" "$STAGE_BIN_DIR/orb"
+    install -m 0755 "$ROOT_DIR/linux_shell/orb-desktop" "$STAGE_BIN_DIR/orb-webkit"
+  fi
+  if [[ "$FORCE_REBUILD" == "1" || "$MODE" == "bundle" || ! -x "$STAGE_BIN_DIR/orb-desktop-native" ]]; then
+    "$ROOT_DIR/scripts/build_orb_bins.sh" --only orb-desktop-native --out-dir "$STAGE_BIN_DIR"
   fi
   if [[ "$FORCE_REBUILD" == "1" || "$MODE" == "bundle" || ! -x "$STAGE_BIN_DIR/orb-signer" || "$ROOT_DIR/linux_shell/signer/orb-signer.py" -nt "$STAGE_BIN_DIR/orb-signer" || "$ROOT_DIR/orb/scripts/build-signer.py" -nt "$STAGE_BIN_DIR/orb-signer" ]]; then
     python3 "$ROOT_DIR/orb/scripts/build-signer.py"
@@ -395,7 +402,8 @@ EOF
       LINUX_APP_DIR="$XDG_DATA/orb-app"
       PY_BIN="$(command -v python3)"
       mkdir -p "$LINUX_APP_DIR/bin" "$LINUX_APP_DIR/share/orb" "$XDG_DATA/applications" "$XDG_DATA/icons/hicolor/256x256/apps"
-      install -m 0755 "$STAGE_BIN_DIR/orb" "$LINUX_APP_DIR/bin/.orb-desktop-unwrapped"
+      install -m 0755 "$STAGE_BIN_DIR/orb-desktop-native" "$LINUX_APP_DIR/bin/orb-desktop-native"
+      install -m 0755 "$STAGE_BIN_DIR/orb-webkit" "$LINUX_APP_DIR/bin/orb-webkit"
       install -m 0755 "$STAGE_BIN_DIR/orb-locald" "$LINUX_APP_DIR/bin/orb-locald"
       install -m 0755 "$STAGE_BIN_DIR/orb-signer" "$LINUX_APP_DIR/bin/orb-signer"
       install -m 0755 "$STAGE_BIN_DIR/sandboxed-mcp" "$LINUX_APP_DIR/bin/sandboxed-mcp"
@@ -541,8 +549,12 @@ fi
 if [[ -d /run/opengl-driver/share/glvnd/egl_vendor.d ]]; then
   export __EGL_VENDOR_LIBRARY_DIRS="/run/opengl-driver/share/glvnd/egl_vendor.d"
 fi
+if [[ " \${1:-} " == " --webkit " ]]; then
+  shift
+  exec "\$APP_DIR/bin/orb-webkit" "\$@"
+fi
 if [[ " \$* " == *" --self-test "* ]]; then
-  exec "\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
+  exec "\$APP_DIR/bin/orb-desktop-native" "\$@"
 fi
 if [[ -z "\${ORB_DEV_URL:-}" && -z "\${ORB_DIST_DIR:-}" ]]; then
   export ORB_DIST_DIR="\$APP_DIR/share/orb"
@@ -774,10 +786,22 @@ elif ! curl -fsS "http://127.0.0.1:${VITE_PORT}/" >/dev/null 2>&1; then
 fi
 
 echo "==> Launching native Orb shell against http://127.0.0.1:${VITE_PORT}/ (orb-locald port ${LOCALD_PORT})..."
+if [[ "$OS_NAME" == "Linux" ]]; then
+  if [[ "$USE_WEBKIT" == "1" ]]; then
+    ORB_APP_ICON="$ROOT_DIR/macos_shell/icons/icon.icns" \
+    ORB_STATE_DIR="$DEV_STATE_DIR" \
+    ORB_LOCALD_PORT="$LOCALD_PORT" \
+    ORB_LOCALD_BIN="$STAGE_BIN_DIR/orb-locald" \
+    ORB_SIGNER_BIN="$STAGE_BIN_DIR/orb-signer" \
+    ORB_DEV_URL="http://127.0.0.1:${VITE_PORT}/" \
+      exec "$STAGE_BIN_DIR/orb-webkit"
+  fi
+  exec "$STAGE_BIN_DIR/orb-desktop-native"
+fi
 ORB_APP_ICON="$ROOT_DIR/macos_shell/icons/icon.icns" \
 ORB_STATE_DIR="$DEV_STATE_DIR" \
 ORB_LOCALD_PORT="$LOCALD_PORT" \
 ORB_LOCALD_BIN="$STAGE_BIN_DIR/orb-locald" \
 ORB_SIGNER_BIN="$STAGE_BIN_DIR/orb-signer" \
 ORB_DEV_URL="http://127.0.0.1:${VITE_PORT}/" \
-  "$STAGE_BIN_DIR/orb"
+  exec "$STAGE_BIN_DIR/orb"
