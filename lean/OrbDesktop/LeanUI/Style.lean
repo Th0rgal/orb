@@ -379,6 +379,10 @@ def orbLightPalette : Palette := {
   sendFg          := 0xFFFFFFFF
 }
 
+/-- Replace only the alpha component of a packed `0xRRGGBBAA` color. -/
+@[inline] def withAlpha (c : Color) (alpha : UInt32) : Color :=
+  (c &&& 0xFFFFFF00) ||| (alpha &&& 0xFF)
+
 /-- Canonical Orb Dark theme. -/
 def orbDarkTheme : Theme := {
   isDark := true
@@ -392,6 +396,18 @@ def orbLightTheme : Theme := {
 }
 
 namespace Theme
+
+/-- The live Wayland shell uses the same frosted surface alphas as the WebKit client.
+Headless golden renders keep the opaque parity palette; the runtime applies this theme only
+for a real compositor window. -/
+def withWindowEffects (t : Theme) : Theme :=
+  let mainAlpha : UInt32 := if t.isDark then 240 else 244
+  let sidebarAlpha : UInt32 := if t.isDark then 199 else 184
+  { t with palette :=
+      { t.palette with
+        canvas := withAlpha t.palette.canvas mainAlpha
+        header := withAlpha t.palette.header mainAlpha
+        sidebar := withAlpha t.palette.sidebar sidebarAlpha } }
 
 @[inline] def bodyText (t : Theme) : TextStyle :=
   { fontId := t.typo.fontSans, sizeSub := t.typo.base, lineHeightSub := t.typo.lineBase,
