@@ -946,9 +946,11 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
 /-! ## 8. Complete `OrbDesktop` Screen Assembly -/
 
 /-- Build the complete declarative `WidgetNode` tree for any `DesktopState`, viewport `(availW, availH)`
-in `SubPx`, and optional pre-shaped `ShapedScreenRuns`. -/
+in `SubPx`, and optional pre-shaped `ShapedScreenRuns`. `windowEffects` is enabled only by the
+live Wayland runtime so deterministic golden renders retain the opaque parity palette. -/
 def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
-    (runs : ShapedScreenRuns := {}) : WidgetNode :=
+    (runs : ShapedScreenRuns := {}) (windowEffects : Bool := false) : WidgetNode :=
+  let st := if windowEffects then { st with theme := Theme.withWindowEffects st.theme } else st
   let theme := st.theme
   let pal := theme.palette
   let sidebarW := chromeSidebarWidthSub
@@ -1011,6 +1013,12 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
       (BoxStyle.row 0 |>.withFixedSize availW availH |>.withBg pal.canvas)
       [sidebarNode, rightColumn]
 
-  baseShell
+  if windowEffects then
+    WidgetNode.roundedClip
+      (BoxStyle.row 0 |>.withFixedSize availW availH)
+      (CornerRadii.uniform (pxToSub 12))
+      [baseShell]
+  else
+    baseShell
 
 end OrbDesktop
