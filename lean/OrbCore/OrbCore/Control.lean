@@ -7530,7 +7530,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
         IO.eprintln s!"[sandboxed-sh] FATAL: failed to open SQLite CoreStore at {dataRoot}: {storeErr}"
         return 1
     let managedStore ← match ← openManagedComputeStore s!"{dataRoot}/managed_compute.db" with
-      | .ok ms => pure ms
+      | .ok ms => pure { ms with missionsDb? := some store.missionsDb }
       | .error msErr =>
         closeCoreStore store
         IO.eprintln s!"[sandboxed-sh] FATAL: failed to open managed_compute.db at {dataRoot}: {msErr}"
