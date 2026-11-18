@@ -3,12 +3,13 @@ import { test,expect,type Page } from "@playwright/test";
 import { writeFileSync } from "node:fs";
 const objective="Check remote startup without losing this draft";
 const prompt=`/goal ${objective}`;
+const plainPrompt=objective;
 const base={id:"accepted",title:"Remote task",status:"pending",history:[],workspace_name:"host",backend:"grok",model_override:"grok-4.6",created_at:"",updated_at:""};
 const node={id:"dgx-spark",status:"online",cordoned:false};
 // What production (release 21e29373) advertises today. Grok appears only when a
 // backend that supports native Grok remote launches says so.
-type Capability={typed?:boolean;harnesses?:string[];raw_command?:boolean;proxy_url_configured?:boolean;requires_proxy_harnesses?:string[]};
-const typedCapability:Capability={typed:true,harnesses:["claudecode","opencode"],raw_command:true,proxy_url_configured:true};
+type Capability={typed?:boolean;harnesses?:string[];goal_harnesses?:string[];raw_command?:boolean;proxy_url_configured?:boolean;requires_proxy_harnesses?:string[]};
+const typedCapability:Capability={typed:true,harnesses:["claudecode","opencode"],goal_harnesses:["opencode"],raw_command:true,proxy_url_configured:true};
 async function setup(page:Page, options:{cyberRefusal?:boolean;reject?:boolean;legacy?:boolean;remoteSuccess?:boolean;missing?:boolean;failed?:boolean;remoteJob?:{phase:string;node_state?:string};emptyStatus?:string;capability?:Capability|null;fleetFailAfterFirst?:boolean;files?:{name:string;kind:string}[];emptyContext?:boolean}={}){
  let attachmentReads:string[]=[];
  let posts:any[]=[], releasePost!:()=>void,releaseHistory!:()=>void;
@@ -209,24 +210,24 @@ test("preflight refuses Grok on a node whose server only advertises Claude Code 
 });
 
 test("Grok remote launch is sent unchanged once the server advertises grok",async({page})=>{
- const state=await setup(page,{remoteSuccess:true,capability:{...typedCapability,harnesses:["claudecode","opencode","grok"]}});
+  const state=await setup(page,{remoteSuccess:true,capability:{...typedCapability,harnesses:["claudecode","opencode","grok"]}});
  await chooseRemote(page);
  await page.getByRole("button",{name:"Grok",exact:true}).click();
  const menu=page.locator(".picker");await expect(menu.getByRole("option",{name:/^Grok 1/})).toBeVisible();await expect(menu.getByRole("option",{name:/^Codex/})).toContainText("not on DGX Spark");
  await page.keyboard.press("Escape");
- const input=composerInput(page);await input.fill(prompt);await input.press("Enter");
- await expectGoalTurn(page,".scroll .user");await expect(phaseStatus(page)).toContainText("Working on DGX Spark");
+  const input=composerInput(page);await input.fill(plainPrompt);await input.press("Enter");
+  await expect(page.locator(".scroll .user:not(.sk-user)")).toHaveCount(1);await expect(page.locator(".scroll .user:not(.sk-user) > span")).toHaveText(plainPrompt);await expect(phaseStatus(page)).toContainText("Working on DGX Spark");
  await expect.poll(()=>state.posts.length).toBe(1);
- expect(state.posts[0]).toMatchObject({backend:"grok",model_override:"grok-4.6",remote_node_id:"dgx-spark",prompt,title:"Check remote startup without losing this…"});
+  expect(state.posts[0]).toMatchObject({backend:"grok",model_override:"grok-4.6",remote_node_id:"dgx-spark",prompt:plainPrompt,title:"Check remote startup without losing this…"});
  expect(state.posts[0]).not.toHaveProperty("remote_command");
- state.releasePost();await expect(page.getByPlaceholder("Send follow-up")).toBeVisible({timeout:1500});
+  state.releasePost();await expect(page.getByPlaceholder("Send follow-up")).toBeVisible({timeout:1500});
  await expect(page.locator(".under-loc")).toContainText("DGX Spark");
  await expect(page.locator(".under-harness")).toHaveText("Grok");
  await expect(page.locator(".under-model")).toHaveText("4.6");
  await expect(phaseStatus(page)).toContainText("Working on DGX Spark");
  // Acceptance keeps the same quiet working state instead of inserting a banner.
  await expect(page.locator(".launch-status")).toHaveCount(0);
- await expectGoalTurn(page,".user");state.releaseHistory();await expectGoalTurn(page,".user");
+  await expect(page.locator(".user:not(.sk-user)")).toHaveCount(1);state.releaseHistory();await expect(page.locator(".user:not(.sk-user)")).toHaveCount(1);
  await page.screenshot({path:"test-results/orb-remote-grok-accepted.png"});
 });
 
@@ -235,7 +236,7 @@ test("server without the remote_launch capability is refused before POST and sho
  await page.getByRole("button",{name:"Grok",exact:true}).click();
  await expect(page.locator(".picker").getByRole("option",{name:/^Claude Code/})).toContainText("no typed remote launch");
  await page.getByRole("option",{name:/^Claude Code/}).click();
- const input=composerInput(page);await input.fill(prompt);await input.press("Enter");
+  const input=composerInput(page);await input.fill(plainPrompt);await input.press("Enter");
  await expect(page.getByRole("alert")).toContainText("does not support structured remote launches");
  await expect(input).toHaveValue(objective);expect(state.posts).toHaveLength(0);
  await page.getByRole("button",{name:/DGX Spark/}).click();
@@ -245,7 +246,7 @@ test("server without the remote_launch capability is refused before POST and sho
 test("capability read failure refuses before POST and reports support as last known",async({page})=>{
  const state=await setup(page,{fleetFailAfterFirst:true});state.releasePost();await chooseRemote(page);state.changeFleet();
  await page.getByRole("button",{name:"Grok",exact:true}).click();await page.getByRole("option",{name:"Claude Code 1 model",exact:true}).click();
- const input=composerInput(page);await input.fill(prompt);await input.press("Enter");
+  const input=composerInput(page);await input.fill(plainPrompt);await input.press("Enter");
  await expect(page.getByRole("alert")).toContainText("Could not confirm remote launch support on DGX Spark");
  await expect(input).toHaveValue(objective);expect(state.posts).toHaveLength(0);
  await page.getByRole("button",{name:/DGX Spark/}).click();
@@ -255,7 +256,7 @@ test("capability read failure refuses before POST and reports support as last kn
  test("proxy URL not configured still launches native Grok OAuth",async({page})=>{
   const noProxy={...typedCapability,harnesses:["claudecode","opencode","grok"],proxy_url_configured:false};
   const state=await setup(page,{remoteSuccess:true,capability:noProxy});state.releasePost();await chooseRemote(page);
-  const input=composerInput(page);await input.fill(prompt);await input.press("Enter");
+  const input=composerInput(page);await input.fill(plainPrompt);await input.press("Enter");
   await expect.poll(()=>state.posts.length).toBe(1);
   expect(state.posts[0]).toMatchObject({backend:"grok",model_override:"grok-4.6",remote_node_id:"dgx-spark"});
   await expect(page.getByRole("alert")).toHaveCount(0);
@@ -265,7 +266,7 @@ test("capability read failure refuses before POST and reports support as last kn
   const noProxy={...typedCapability,harnesses:["claudecode","opencode","grok"],proxy_url_configured:false};
   const state=await setup(page,{capability:noProxy});state.releasePost();await chooseRemote(page);
   await page.getByRole("button",{name:"Grok",exact:true}).click();await page.getByRole("option",{name:"Claude Code 1 model",exact:true}).click();
-  const input=composerInput(page);await input.fill(prompt);await input.press("Enter");
+  const input=composerInput(page);await input.fill(plainPrompt);await input.press("Enter");
   await expect(page.getByRole("alert")).toContainText("cannot reach this backend's model proxy");
   await expect(page.getByRole("alert")).not.toContainText("SANDBOXED_PUBLIC_URL");
   await expect(input).toHaveValue(objective);expect(state.posts).toHaveLength(0);
@@ -282,7 +283,7 @@ test("empty failed mission shows recovered saved goal and honest terminal status
 test("unsupported remote harness is explicit and never changed to Claude",async({page})=>{
  const state=await setup(page);state.releasePost();await chooseRemote(page);
  await page.getByRole("button",{name:"Grok",exact:true}).click();await page.getByRole("option",{name:/^Codex/}).click();
- const input=composerInput(page);await input.fill(prompt);await input.press("Enter");
+   const input=composerInput(page);await input.fill(plainPrompt);await input.press("Enter");
  await expect(page.getByRole("alert")).toContainText("codex (codex-model) is not supported");await expect(input).toHaveValue(objective);
  expect(state.posts).toHaveLength(0);
 });
@@ -293,7 +294,7 @@ test("startup timing benchmark: repeated explicit launches get distinct request 
  for(let i=0;i<12;i++){
   if(i)await page.getByRole("button",{name:/New Agent/}).click();
   await page.evaluate(()=>{for(const key of Object.keys((window as any).launchTiming))delete (window as any).launchTiming[key];});
-  const input=composerInput(page);await input.fill(prompt);await input.press("Enter");
+  const input=composerInput(page);await input.fill(plainPrompt);await input.press("Enter");
   await expect(page.locator(".tb-title .goal-tag")).toBeVisible();
   samples.push(await page.evaluate(()=>{const {optimistic,acceptedView}=(window as any).launchTiming;return {optimistic,acceptedView};}));
  }
@@ -323,25 +324,26 @@ for(const [phase,node_state,label] of [["observed",undefined,"Remote job accepte
 for(const harness of ["claudecode", "opencode"] as const)test(`supported remote ${harness} slow POST preserves selection and opens durable job immediately`,async({page})=>{
  const state=await setup(page,{remoteSuccess:true});await chooseRemote(page);
  await page.getByRole("button",{name:"Grok",exact:true}).click();await page.getByRole("option",{name:harness === "claudecode" ? "Claude Code 1 model" : "OpenCode 2 models",exact:true}).click();
- const input=composerInput(page);await input.fill(prompt);await input.press("Enter");
- await expectGoalTurn(page,".scroll .user");
+  const remotePrompt=harness === "opencode" ? prompt : plainPrompt;
+  const input=composerInput(page);await input.fill(remotePrompt);await input.press("Enter");
+  if(harness === "opencode") await expectGoalTurn(page,".scroll .user"); else await expect(page.locator(".scroll .user:not(.sk-user)")).toHaveCount(1);
  await expect(phaseStatus(page)).toContainText("Working on DGX Spark");
  await expect.poll(()=>state.posts.length).toBe(1);
- expect(state.posts[0]).toMatchObject({backend:harness,model_override:harness === "claudecode" ? "claude-sonnet-4-6" : "builtin/smart",remote_node_id:"dgx-spark",prompt});
+  expect(state.posts[0]).toMatchObject({backend:harness,model_override:harness === "claudecode" ? "claude-sonnet-4-6" : "builtin/smart",remote_node_id:"dgx-spark",prompt:remotePrompt});
  expect(state.posts[0]).not.toHaveProperty("remote_command");expect(state.posts[0]).not.toHaveProperty("remote_async");
  await input.dispatchEvent("keydown",{key:"Enter"});
  await page.waitForTimeout(1000);expect(state.posts).toHaveLength(1);
- await expectGoalTurn(page,".scroll .user");
+  if(harness === "opencode") await expectGoalTurn(page,".scroll .user"); else await expect(page.locator(".scroll .user:not(.sk-user)")).toHaveCount(1);
  state.releasePost();await expect(page.getByPlaceholder("Send follow-up")).toBeVisible({timeout:1500});
  await expect(phaseStatus(page)).toContainText("Working on DGX Spark");
- await expectGoalTurn(page,".user");state.releaseHistory();await expectGoalTurn(page,".user");
+  if(harness === "opencode") await expectGoalTurn(page,".user"); else await expect(page.locator(".user:not(.sk-user)")).toHaveCount(1);state.releaseHistory();if(harness === "opencode") await expectGoalTurn(page,".user"); else await expect(page.locator(".user:not(.sk-user)")).toHaveCount(1);
  await page.screenshot({path:`test-results/orb-remote-${harness}-accepted.png`});
 });
 
 test("typed-capable server that still answers remote_command required is explained without retry or fallback",async({page})=>{
  const state=await setup(page,{legacy:true});state.releasePost();await chooseRemote(page);
  await page.getByRole("button",{name:"Grok",exact:true}).click();await page.getByRole("option",{name:"Claude Code 1 model",exact:true}).click();
- const input=composerInput(page);await input.fill(prompt);await input.press("Enter");
+  const input=composerInput(page);await input.fill(plainPrompt);await input.press("Enter");
  await expect(page.getByRole("alert")).toContainText("does not support structured remote launches");
  await expect(input).toHaveValue(objective);expect(state.posts).toHaveLength(1);
  expect(state.posts[0]).toMatchObject({backend:"claudecode",model_override:"claude-sonnet-4-6",remote_node_id:"dgx-spark"});
