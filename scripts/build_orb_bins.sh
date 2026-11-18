@@ -321,6 +321,15 @@ run_lean_pkg_build() {
   )
 }
 
+# With --with-tests, each package builds its binaries and its test executables in one
+# turbo-lean run: a second run with a different target set rebuilds the whole package.
+if [[ "$WITH_TESTS" == "1" ]]; then
+  ORB_BIN_TARGETS+=("orb-bin-test")
+  ORB_NODE_TARGETS+=("orb-node-test")
+  ORB_CORE_TARGETS+=("orb-core-test" "orb-spec-runner")
+  ORB_LOCALD_TARGETS+=("orb-locald-test")
+fi
+
 if [[ ${#ORB_BIN_TARGETS[@]} -gt 0 ]]; then
   run_lean_pkg_build "$ROOT_DIR/lean/OrbBin" "${ORB_BIN_TARGETS[@]}"
 fi
@@ -400,15 +409,11 @@ done
 if [[ "$WITH_TESTS" == "1" ]]; then
   run_lean_pkg_build "$ROOT_DIR/lean/OrbNetLeaf" orb-net-leaf-test
   "$ROOT_DIR/lean/OrbNetLeaf/.lake/build/bin/orb-net-leaf-test"
-  run_lean_pkg_build "$ROOT_DIR/lean/OrbBin" orb-bin-test
   "$ROOT_DIR/lean/OrbBin/.lake/build/bin/orb-bin-test"
-  run_lean_pkg_build "$ROOT_DIR/lean/OrbNode" orb-node-test
   "$ROOT_DIR/lean/OrbNode/.lake/build/bin/orb-node-test"
   run_lean_pkg_build "$ROOT_DIR/lean/OrbClient" orb-client-test
   "$ROOT_DIR/lean/OrbClient/.lake/build/bin/orb-client-test"
-  run_lean_pkg_build "$ROOT_DIR/lean/OrbCore" orb-core-test orb-spec-runner
   "$ROOT_DIR/lean/OrbCore/.lake/build/bin/orb-core-test"
   "$ROOT_DIR/lean/OrbCore/.lake/build/bin/orb-spec-runner" --fixtures "$ROOT_DIR/shared/orb-spec/fixtures"
-  run_lean_pkg_build "$ROOT_DIR/lean/OrbLocald" orb-locald-test
   "$ROOT_DIR/lean/OrbLocald/.lake/build/bin/orb-locald-test"
 fi
