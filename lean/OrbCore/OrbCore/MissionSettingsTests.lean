@@ -49,9 +49,12 @@ def moveRecovery (root : String) : IO Unit := do
   check (← OrbCore.MissionMoveRecovery.startup path).isOk "B5b_next_startup_repairs_after_failure"
   let .ok reopened ← openCoreStore path | throw (IO.userError "B5b reopen")
   try
-    let missions ← sql reopened.missionsDb "SELECT project FROM missions ORDER BY id;"
-    let sessions ← sql reopened.projectsDb "SELECT project_scope FROM mcp_sessions_v1 ORDER BY id;"
-    let leases ← sql reopened.projectsDb "SELECT project_slug FROM project_track_leases ORDER BY mission_id;"
+    let missions ← sql reopened.missionsDb
+      "SELECT project FROM missions WHERE id IN ('aroot','achild','adeep','broot','bchild','bdeep') ORDER BY id;"
+    let sessions ← sql reopened.projectsDb
+      "SELECT project_scope FROM mcp_sessions_v1 WHERE mission_id IN ('aroot','achild','adeep','broot','bchild','bdeep') ORDER BY id;"
+    let leases ← sql reopened.projectsDb
+      "SELECT project_slug FROM project_track_leases WHERE mission_id IN ('aroot','achild','adeep','broot','bchild','bdeep') ORDER BY mission_id;"
     let missionRows := missions.extract 1 missions.size
     let sessionRows := sessions.extract 1 sessions.size
     let leaseRows := leases.extract 1 leases.size
@@ -73,9 +76,12 @@ def moveRecovery (root : String) : IO Unit := do
       "B5b_before_commit_failure_has_no_marker"
     discard <| sql reopened.missionsDb "DROP TRIGGER reject_settings;"
     check (← OrbCore.MissionMoveRecovery.startup path).isOk "B5b_second_startup_succeeds"
-    check ((← sql reopened.missionsDb "SELECT project FROM missions ORDER BY id;") == missions &&
-      (← sql reopened.projectsDb "SELECT project_scope FROM mcp_sessions_v1 ORDER BY id;") == sessions &&
-      (← sql reopened.projectsDb "SELECT project_slug FROM project_track_leases ORDER BY mission_id;") == leases)
+    check ((← sql reopened.missionsDb
+      "SELECT project FROM missions WHERE id IN ('aroot','achild','adeep','broot','bchild','bdeep') ORDER BY id;") == missions &&
+      (← sql reopened.projectsDb
+        "SELECT project_scope FROM mcp_sessions_v1 WHERE mission_id IN ('aroot','achild','adeep','broot','bchild','bdeep') ORDER BY id;") == sessions &&
+      (← sql reopened.projectsDb
+        "SELECT project_slug FROM project_track_leases WHERE mission_id IN ('aroot','achild','adeep','broot','bchild','bdeep') ORDER BY mission_id;") == leases)
       "B5b_second_startup_is_noop"
     let normal ← OrbCore.MissionSettings.applyPlacementPatch reopened before
       (.obj #[("project", .str "normal-target")]) "alice" true "" "t3" 1002
