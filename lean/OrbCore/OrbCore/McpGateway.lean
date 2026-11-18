@@ -93,9 +93,10 @@ private def checkMissionReadAccess
     return .ok ()
   if !claims.missionId.isEmpty && parentMid == claims.missionId then
     return .ok ()
-  if !claims.missionId.isEmpty then
-    if ← hasApprovedMissionReadAccess store.rootDir claims.missionId targetMissionId nowEpochSec then
-      return .ok ()
+  let callerSubject := if claims.isExternal then "session:" ++ claims.sessionId
+    else if !claims.missionId.isEmpty then "mission:" ++ claims.missionId else ""
+  if ← hasApprovedMissionReadAccess store.rootDir claims.missionId targetMissionId nowEpochSec callerSubject then
+    return .ok ()
   return .error s!"read access to mission `{targetMissionId}` requires operator role or `request_mission_access` approval"
 
 /-- Enrich a settled MCP action result with receipt metadata (`action_id`, `tool_name`, `state`, `status`, `accepted`, `result`). -/
@@ -434,8 +435,11 @@ def dispatchMcpToolCall
     -- below); the row's own owner id can be a pre-cutover tenant label.
     if machine.ownerMission.isEmpty && !machine.ownerUserId.isEmpty && machine.ownerUserId != callerUserId then return false
     if machine.ownerMission.isEmpty then
-      -- User-owned machines have no project/lineage to delegate to a mission.
-      return (claims.isExternal || directOperator) && machine.ownerUserId == callerUserId && callerProj.isEmpty
+      -- User-owned machines have no project/lineage to delegate to a mission;
+      -- dashboard/external callers keep their own user-owned fleet.
+      if !callerMid.isEmpty then return false
+      return (claims.isExternal || directOperator || !callerUserId.isEmpty) &&
+        machine.ownerUserId == callerUserId && callerProj.isEmpty
     let some owner ← getMission? store machine.ownerMission | return false
     if owner.ownerUserId != callerUserId then return false
     if !callerProj.isEmpty && owner.project != callerProj then return false
@@ -559,10 +563,30 @@ def dispatchMcpToolCall
   -- The REST collaboration class permits messages and cancellation to shared
   -- participants; changing owner settings/placement or resuming remains owner-only.
   let collaborateTools := #["send_message_to_mission", "ask_mission", "answer_mission_question", "cancel_mission"]
+  let missionInTree (ancestor candidate : String) : IO Bool := do
+    if ancestor == candidate then return true
+    match ← execParamQuery store.missionsDb
+        ("WITH RECURSIVE lineage(id) AS (SELECT id FROM missions WHERE id=?1 AND owner_user_id=?3 " ++
+         "UNION SELECT m.id FROM missions m JOIN lineage l ON m.parent_mission_id=l.id " ++
+         "WHERE m.owner_user_id=?3) SELECT id FROM lineage WHERE id=?2 LIMIT 1;")
+        #[ancestor, candidate, callerUserId] with
+    | .ok rows => return rows.size > 1
+    | .error _ => return false
+  let sameMissionTree (a b : String) : IO Bool := do
+    if a == b then return true
+    if a.isEmpty || b.isEmpty then return false
+    if ← missionInTree a b then return true
+    missionInTree b a
   let checkTenantMission (mid : String) (allowParticipant : Bool) : IO Bool := do
     if !tenantScoped then return true
     let (exists_, owns, shares) ← getMissionRelationship store mid callerUserId
-    return exists_ && (owns || (allowParticipant && shares))
+    if !exists_ then return false
+    if allowParticipant && shares then return true
+    if !owns then return false
+    -- A mission session acts inside its own lineage, not every mission the same
+    -- user happens to own (`R16`: unrelated same-user trees stay isolated).
+    if callerMid.isEmpty || claims.isExternal then return true
+    sameMissionTree callerMid mid
   if missionReadTools.contains toolName || missionWriteTools.contains toolName then
     let mid := (args.fieldStr? "mission_id").orElse (fun _ =>
       (args.fieldStr? "target_mission_id").orElse (fun _ => args.fieldStr? "id")) |>.getD callerMid
@@ -741,12 +765,25 @@ def dispatchMcpToolCall
     return mcpOk (.obj #[("action_id", .str aid), ("cancelled", .bool false), ("state", .str "not_found")])
 
   | "get_fleet_sweep" =>
+    let scopeTree := !callerMid.isEmpty && !claims.isExternal && !directOperator
+    let countScoped (ids : Array String) : IO Nat := do
+      let mut n : Nat := 0
+      for id in ids do
+        if ← sameMissionTree callerMid id then n := n + 1
+      return n
     let mut activeCnt : Nat := 0
     let mut armedCnt : Nat := 0
-    if let .ok r1 ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM missions WHERE status='active';" #[] then
-      if r1.size > 1 then activeCnt := cellNat r1[1]! 0
-    if let .ok r2 ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM mission_continuations WHERE phase=1;" #[] then
-      if r2.size > 1 then armedCnt := cellNat r2[1]! 0
+    if scopeTree then
+      if let .ok r1 ← execParamQuery store.missionsDb "SELECT id FROM missions WHERE status='active';" #[] then
+        activeCnt ← countScoped ((r1.extract 1 r1.size).map (fun r => cell r 0))
+      if let .ok r2 ← execParamQuery store.missionsDb
+          "SELECT DISTINCT mission_id FROM mission_continuations WHERE phase=1;" #[] then
+        armedCnt ← countScoped ((r2.extract 1 r2.size).map (fun r => cell r 0))
+    else
+      if let .ok r1 ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM missions WHERE status='active';" #[] then
+        if r1.size > 1 then activeCnt := cellNat r1[1]! 0
+      if let .ok r2 ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM mission_continuations WHERE phase=1;" #[] then
+        if r2.size > 1 then armedCnt := cellNat r2[1]! 0
     let fleetVal ← match mc? with
       | some mc =>
         let fl ← match ← loadManagedFleet mc defaultFleet.enabled defaultFleet.boatEnabled
@@ -888,8 +925,16 @@ def dispatchMcpToolCall
     match ← listMissionsJson store none scopedUid? flt with
     | .error e => return mcpErr "db_error" e
     | .ok rawArr =>
-      let arr := (OrbBin.Json.parse rawArr).toOption.getD (.arr #[])
-      return mcpOk (.obj #[("missions", arr)])
+      let arr : Array JVal := match OrbBin.Json.parse rawArr with
+        | .ok (.arr xs) => xs
+        | _ => #[]
+      let mut visible : Array JVal := #[]
+      for item in arr do
+        let id := (item.fieldStr? "id").getD ""
+        if callerMid.isEmpty || claims.isExternal || directOperator || id.isEmpty ||
+            (← sameMissionTree callerMid id) then
+          visible := visible.push item
+      return mcpOk (.obj #[("missions", .arr visible)])
 
   | "get_mission" | "get_mission_health" | "get_mission_diagnostics" =>
     let mid := (args.fieldStr? "mission_id").orElse (fun _ => args.fieldStr? "id") |>.getD callerMid
@@ -1498,9 +1543,11 @@ def dispatchMcpToolCall
     -- Destroyed machines are history, and there are thousands of them: the
     -- default list is the live ones; `verbose` adds the last 24 hours.
     let verbose := (args.fieldBool? "verbose").getD false
-    let shown := fleet.machines.filter fun m =>
-      (!tenantScoped || m.ownerUserId == callerUserId) &&
-        (m.status != "destroyed" || (verbose && max m.createdAtSec m.expiresAtSec + 86400 ≥ nowEpochSec))
+    let mut shown : Array ManagedMachine := #[]
+    for m in fleet.machines do
+      if m.status == "destroyed" && !(verbose && max m.createdAtSec m.expiresAtSec + 86400 ≥ nowEpochSec) then
+        continue
+      if ← canManageMachine m then shown := shown.push m
     let raw := renderManagedMachinesJson { fleet with machines := shown } scopedUid? userIsAdmin prefs userComputeSpent userCap?
     return mcpOk ((((OrbBin.Json.parse raw).toOption.getD (.obj #[])).setField "providers" catalog).setField
       "default_provider" (.str (← defaultManagedProvider)))
@@ -1514,6 +1561,10 @@ def dispatchMcpToolCall
       | .error _ => pure defaultFleet
     let targetMid := (args.fieldStr? "mission_id").getD callerMid
     if !targetMid.isEmpty then
+      if targetMid != callerMid then
+        match ← checkMissionReadAccess store claims targetMid nowEpochSec with
+        | .ok () => pure ()
+        | .error _ => return mcpErr "not_found" "Mission not found"
       let bCfg ← getMissionBudgetConfig mc targetMid
       let raw := renderMissionBudgetJson fleet bCfg nowEpochSec
       return mcpOk ((OrbBin.Json.parse raw).toOption.getD (.obj #[]))
@@ -1824,7 +1875,9 @@ def dispatchMcpToolCall
 
   -- Bitwarden Secret Broker, Mission Access & Privilege Broker
   | "secret_list" =>
-    return mcpOk (← mcpSecretList workingDir store.rootDir callerMid callerProj nowEpochSec)
+    let callerSubject := if claims.isExternal then "session:" ++ claims.sessionId
+      else if !callerMid.isEmpty then "mission:" ++ callerMid else ""
+    return mcpOk (← mcpSecretList workingDir store.rootDir callerMid callerProj nowEpochSec callerSubject)
 
   | "secret_get" =>
     let secName := (args.fieldStr? "name").orElse (fun _ => args.fieldStr? "secret_name") |>.getD ""
@@ -1836,7 +1889,9 @@ def dispatchMcpToolCall
       else do
         let node? ← resolveMissionRemoteNode? store mc? callerMid
         pure ((node?.map (·.startsWith "managed-")).getD false)
-    return mcpOk (← mcpSecretGet workingDir store.rootDir callerMid callerProj secName reason callerOnManagedNode nowEpochSec)
+    let callerSubject := if claims.isExternal then "session:" ++ claims.sessionId
+      else if !callerMid.isEmpty then "mission:" ++ callerMid else ""
+    return mcpOk (← mcpSecretGet workingDir store.rootDir callerMid callerProj secName reason callerOnManagedNode nowEpochSec callerSubject)
 
   | "secret_request" | "secret_put" | "secret_delete" | "secret_move" =>
     let bwProj := (args.fieldStr? "bitwarden_project").orElse (fun _ => args.fieldStr? "project") |>.getD "unassigned"
@@ -1844,17 +1899,23 @@ def dispatchMcpToolCall
     let val := (args.fieldStr? "value").getD ""
     let note := (args.fieldStr? "note").getD ""
     let reason := (args.fieldStr? "reason").getD ""
-    return mcpOk (← mcpSecretQueueAction workingDir store.rootDir toolName callerMid callerProj bwProj secName val note reason nowEpochSec)
+    let callerSubject := if claims.isExternal then "session:" ++ claims.sessionId
+      else if !callerMid.isEmpty then "mission:" ++ callerMid else ""
+    return mcpOk (← mcpSecretQueueAction workingDir store.rootDir toolName callerMid callerProj bwProj secName val note reason nowEpochSec callerSubject)
 
   | "request_mission_access" =>
     let targetMid := (args.fieldStr? "target_mission_id").orElse (fun _ => args.fieldStr? "mission_id") |>.getD ""
     let reason := (args.fieldStr? "reason").getD ""
     let ttlHrs := (args.fieldNat? "ttl_hours").getD 24
     if targetMid.isEmpty then return mcpErr "invalid_arguments" "missing target_mission_id"
-    return mcpOk (← mcpRequestMissionAccess store.rootDir callerMid targetMid reason ttlHrs nowEpochSec)
+    let callerSubject := if claims.isExternal then "session:" ++ claims.sessionId
+      else if !callerMid.isEmpty then "mission:" ++ callerMid else ""
+    return mcpOk (← mcpRequestMissionAccess store.rootDir callerMid targetMid reason ttlHrs nowEpochSec callerSubject)
 
   | "list_mission_access" =>
-    return mcpOk (← mcpListMissionAccess store.rootDir callerMid nowEpochSec)
+    let callerSubject := if claims.isExternal then "session:" ++ claims.sessionId
+      else if !callerMid.isEmpty then "mission:" ++ callerMid else ""
+    return mcpOk (← mcpListMissionAccess store.rootDir callerMid nowEpochSec callerSubject)
 
   | "get_dev_access" | "deploy_dev" | "read_dev_logs" =>
     if claims.isExternal || callerMid.isEmpty then

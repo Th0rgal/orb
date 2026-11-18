@@ -972,6 +972,50 @@ private def admitMissionComputeBandwidthTx (st : ManagedComputeStore)
           if rate > cap then return .error "managed_compute_cost_bandwidth_exceeded"
   return .ok ()
 
+/-- FLT-09: mission and per-provider concurrency limits are admission inputs, not
+    display-only settings. Each budget in the same-owner lineage bounds the live
+    machines in its own subtree, inside the managed admission transaction. -/
+private def admitMissionConcurrencyTx (st : ManagedComputeStore)
+    (provider missionId ownerUserId : String) (newSlot : Bool) : IO (Except String Unit) := do
+  if missionId.isEmpty || !newSlot then return .ok ()
+  let .ok lineage ← managedMissionLineage st missionId ownerUserId
+    | return .error "managed_admission_read_failed"
+  if lineage.isEmpty then return .ok ()
+  let canonical := canonicalizeProvider provider
+  let .ok liveRows ← execParamQueryUnlocked st.db
+      ("SELECT owner_mission,requested_by_mission_id,provider FROM managed_machines m WHERE " ++
+       "(m.phase_code IN (0,1) OR EXISTS(SELECT 1 FROM managed_resume_intents r " ++
+       "WHERE r.machine_id=m.id AND r.state IN ('pending','aborting')));") #[]
+    | return .error "managed_admission_read_failed"
+  for poolId in lineage do
+    let .ok limitRows ← execParamQueryUnlocked st.db
+        "SELECT vm_limits_json FROM mission_budgets WHERE mission_id=?1;" #[poolId]
+      | return .error "managed_admission_read_failed"
+    if limitRows.size > 1 then
+      let vmLimits := (OrbBin.Json.parse (cell limitRows[1]! 0)).toOption.getD (.obj #[])
+      let mut providerCap? : Option Nat := none
+      if let some (.obj pkvs) := vmLimits.field? "provider_max_concurrent" then
+        for (pk, pv) in pkvs do
+          if canonicalizeProvider pk == canonical then
+            providerCap? := pv.asNat?
+      if (vmLimits.fieldNat? "max_concurrent").isSome || providerCap?.isSome then
+        let .ok subtree ← managedMissionSubtree st poolId ownerUserId
+          | return .error "managed_admission_read_failed"
+        let mut missionActive : Nat := 0
+        let mut providerActive : Nat := 0
+        for row in liveRows.extract 1 liveRows.size do
+          let ownerMission := cell row 0
+          let requestedBy := cell row 1
+          if subtree.contains ownerMission || subtree.contains requestedBy then
+            missionActive := missionActive + 1
+            if canonicalizeProvider (cell row 2) == canonical then
+              providerActive := providerActive + 1
+        if let some cap := vmLimits.fieldNat? "max_concurrent" then
+          if missionActive ≥ cap then return .error "managed_mission_concurrency_limit_reached"
+        if let some cap := providerCap? then
+          if providerActive ≥ cap then return .error "managed_provider_mission_concurrency_limit_reached"
+  return .ok ()
+
 private def admitManagedCostTx (st : ManagedComputeStore) (fleet : ManagedFleetState)
     (provider size ownerUserId missionId : String) (cost ttlMinutes nowEpoch : UInt64) (newSlot : Bool)
     (userAdmission? : Option ManagedUserAdmission) : IO (Except String ManagedFleetState) := do
@@ -1010,6 +1054,9 @@ private def admitManagedCostTx (st : ManagedComputeStore) (fleet : ManagedFleetS
     return .error "managed_spawn_rejected"
   if provider == "boat" && !current.boatEnabled then return .error "provider_disabled"
   match ← admitMissionComputeBandwidthTx st provider size ownerUserId missionId newSlot with
+  | .ok () => pure ()
+  | .error e => return .error e
+  match ← admitMissionConcurrencyTx st provider missionId ownerUserId newSlot with
   | .ok () => pure ()
   | .error e => return .error e
   -- Instance cap on lean.ci machines. An explicit request beyond it is refused here;
