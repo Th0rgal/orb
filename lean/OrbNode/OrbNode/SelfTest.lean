@@ -1605,7 +1605,7 @@ private def runManagedSandboxMemberExecTests
 
     let managedRawExecBody := (renderCompact (.obj #[
       ("mission_id", .str msMissionId),
-      ("lease_token", .str msMemberTok),
+      ("lease_token", .str msExecTok),
       ("command", .str "id -u")
     ])).toUTF8
     let (_, managedRawExecResponse) ← handleRequest rtManaged {
