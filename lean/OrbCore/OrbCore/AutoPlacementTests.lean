@@ -75,6 +75,22 @@ private def gatewayTests (root : String) : IO Unit := do
       let err := (reply.field? "error").getD .null
       (err.fieldStr? "code", err.fieldStr? "message")
     let missionCount : IO Nat := do return (← sql "SELECT id FROM missions;").size - 1
+    -- R15: `writer:false` must be persisted as readonly at the MCP launch
+    -- boundary, rather than being inferred later from a tag or prompt.
+    let readonlyReply ← start "readonly-launch" #[
+      ("writer", .bool false)]
+    let some readonlyId := ((readonlyReply.field? "result").getD .null).fieldStr? "mission_id"
+      | throw (IO.userError "R15 start_mission(writer:false) did not create a mission")
+    let readonlyRows ← sql "SELECT authority_mode FROM missions WHERE id=?1;" #[readonlyId]
+    check ((readonlyRows[1]?.bind (·[0]?)).getD "" == "readonly")
+      "R15 writer:false launch is persisted readonly"
+    let readonlyClaims : McpSessionClaims := {
+      sessionId := "readonly-session", missionId := readonlyId, role := "executor", expiresAt := 2000 }
+    let refusedRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none fleet root readonlyClaims
+      "start_mission" (.obj #[("title", .str "forbidden child"), ("idempotency_key", .str "r15-readonly-child")]) now
+    let refused ← OrbBin.Json.parse refusedRaw |>.toOption.getD .null
+    check (refused.fieldStr? "error" |>.bind (·.fieldStr? "code") == some "read_only_mission")
+      "R15 readonly mission refuses mutating child launch"
     -- Unconstrained: ashur is idle (its only job finished), so it is the least busy node.
     let free ← tagsOf (← start "free")
     check (free.contains "remote-node:ashur") s!"least busy node is chosen: {free}"
