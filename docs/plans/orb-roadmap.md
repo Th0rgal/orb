@@ -52,7 +52,7 @@ file from master, PRs and CI on GitHub and the roadmap missions in Core, and
   hour;
 - resumes an idle worker once, then has the master replace it with the next
   model that is not cooling down (`openai/gpt-6.2-astra`, `openai/gpt-6.2-sol`,
-  `anthropic/claude-fable-5-2`, `ethereumfoundation/deepseek-v4.1-flash`), then
+  `anthropic/claude-fable-5-2`; DeepSeek was dropped on 18 Nov after it hung on three rows), then
   posts a decision request to the Inbox after two failed attempts;
 - when master CI is red, asks only for the worker that fixes it.
 

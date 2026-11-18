@@ -22,7 +22,7 @@ Config (environment, see deploy/systemd/orb-roadmap-reconcile.service):
                            nodes with a checkout and the development identity)
   ORB_ROADMAP_MODELS       worker models, one per attempt, comma-separated
                            (default openai/gpt-6.2-astra,openai/gpt-6.2-sol,
-                           anthropic/claude-fable-5-2,ethereumfoundation/deepseek-v4.1-flash)
+                           anthropic/claude-fable-5-2; DeepSeek hung on long rows)
   ORB_ROADMAP_INBOX_MISSION mission whose transcript receives decision requests
   ORB_ROADMAP_DRY_RUN=1    print the plan, change nothing
   ORB_ROADMAP_FILE         read the roadmap from this file instead of master
@@ -41,8 +41,7 @@ MISSIONS_DB = ENV("ORB_ROADMAP_MISSIONS_DB", "/root/.sandboxed-sh/missions/missi
 # uruk, babylon and nippur ended at once with "gh is unauthenticated".
 NODES = [n.strip() for n in ENV("ORB_ROADMAP_NODES", "ashur,dgx-spark").split(",") if n.strip()]
 MODELS = [m.strip() for m in ENV("ORB_ROADMAP_MODELS",
-          "openai/gpt-6.2-astra,openai/gpt-6.2-sol,anthropic/claude-fable-5-2,"
-          "ethereumfoundation/deepseek-v4.1-flash").split(",") if m.strip()]
+          "openai/gpt-6.2-astra,openai/gpt-6.2-sol,anthropic/claude-fable-5-2").split(",") if m.strip()]
 IDLE_SECONDS = 15 * 60          # an idle worker is nudged after this long
 FOREIGN_PR_SECONDS = 60 * 60    # an open PR touched this recently has an owner elsewhere
 MAX_ATTEMPTS = 2                # missions per row before a human decides
