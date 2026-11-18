@@ -509,14 +509,13 @@ def mcpSecretWait
     if status == "rejected" || status == "denied" then
       return .obj #[("status", .str "denied"), ("error", .str "Operator denied access")]
     let now ← coreEpochSec
-    if remaining == 0 then
-      return .obj #[("status", .str "pending"), ("request_id", .str requestId)]
-    if now >= deadline then
-      return .obj #[("status", .str "pending"), ("request_id", .str requestId)]
-    IO.sleep 1000
-    poll (remaining - 1)
-    termination_by remaining
-    decreasing_by omega
+    match remaining with
+    | 0 => return .obj #[("status", .str "pending"), ("request_id", .str requestId)]
+    | n + 1 =>
+      if now >= deadline then
+        return .obj #[("status", .str "pending"), ("request_id", .str requestId)]
+      IO.sleep 1000
+      poll n
   poll (Nat.min 25 timeoutSecs)
 
 def mcpSecretQueueAction
