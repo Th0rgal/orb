@@ -1512,7 +1512,7 @@ def dispatchMcpToolCall
       nextProject := effProj
       nextFolder := if effProj.isEmpty then "" else folder
     }
-    match ← MissionSettings.commitPlacementWithRecovery store #[upd] claims.project nowIso with
+    match ← MissionSettings.commitPlacementWithRecovery store #[upd] callerUserId nowIso with
     | .error (_, e) => return mcpErr "move_failed" e
     | .ok (_, _changed) =>
       return mcpOk (.obj #[("ok", .bool true), ("mission_id", .str mid), ("project", .str effProj), ("folder", .str folder)])

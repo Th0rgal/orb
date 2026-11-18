@@ -32,18 +32,19 @@ def moveRecovery (root : String) : IO Unit := do
     closeCoreStore store
     let blocked ← OrbCore.MissionMoveRecovery.startup path
     let code ← OrbCore.MissionMoveRecovery.startAfterRecovery path (do reached.set true; return 0)
-    let .ok store ← openCoreStore path | throw (IO.userError "B5b reopen after failure")
+    let .ok reopenedAfterFailure ← openCoreStore path | throw (IO.userError "B5b reopen after failure")
     check (code != 0 && !(← reached.get) &&
-      ((← OrbCore.MissionMoveRecovery.pending store.missionsDb).toOption.getD #[]).size == 6)
+      ((← OrbCore.MissionMoveRecovery.pending reopenedAfterFailure.missionsDb).toOption.getD #[]).size == 6)
       "B5b_startup_failure_blocks_server_and_keeps_markers"
     let blockedMsg := match blocked with | .ok _ => "" | .error e => e
     check (!blocked.isOk && blockedMsg.contains "aroot" && blockedMsg.contains "achild" &&
       blockedMsg.contains "bdeep")
       "B5b_startup_failure_names_stuck_mission_ids"
-    discard <| sql store.projectsDb "DROP TRIGGER reject_rebind;"
-    let triggerRows ← sql store.projectsDb
+    discard <| sql reopenedAfterFailure.projectsDb "DROP TRIGGER reject_rebind;"
+    let triggerRows ← sql reopenedAfterFailure.projectsDb
       "SELECT name FROM sqlite_master WHERE type='trigger' AND name='reject_rebind';"
     check (triggerRows.size == 0) "B5b_startup_repair_trigger_removed"
+    closeCoreStore reopenedAfterFailure
   finally closeCoreStore store
   check (← OrbCore.MissionMoveRecovery.startup path).isOk "B5b_next_startup_repairs_after_failure"
   let .ok reopened ← openCoreStore path | throw (IO.userError "B5b reopen")

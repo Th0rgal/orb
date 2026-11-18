@@ -4898,6 +4898,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       nextFolder      := m.targetFolder
     }
     let (allMoved, changedMoved) ← match ← MissionSettings.commitPlacementWithRecovery st.store updates caller.userId nowIso
+      (pure (.ok ()))
       (if !crossProjIds.isEmpty && (policy == "revoke" || policy == "keep") then
         do applyCrossProjectSecretPolicy st.store.rootDir crossProjIds rawProjSlug policy nowIso nowEpochSec; return .ok ()
       else pure (.ok ())) with

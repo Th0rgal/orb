@@ -169,6 +169,7 @@ def main (args : List String) : IO UInt32 := do
     OrbCore.SettingsCli.run rest root
   | _ =>
     let cfg ← OrbCore.Control.loadConfigFromEnv
-    let work := cfg.workingDir.trimAscii.toString.dropEndWhile (· == '/') |>.toString
+    let trimmed := cfg.workingDir.trimAscii.toString.dropEndWhile (· == '/') |>.toString
+    let work := if trimmed.isEmpty then "/" else trimmed
     let root := if work.endsWith "/.sandboxed-sh" || work == ".sandboxed-sh" then work else s!"{work}/.sandboxed-sh"
     OrbCore.MissionMoveRecovery.startAfterRecovery root (OrbCore.Control.runCoreServer cfg none)
