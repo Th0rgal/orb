@@ -504,4 +504,40 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
   if composer == st.composer then (st, none)
   else ({ st with composer }, Damage.add none (composerDamageRect scale120 viewport))
 
+/-- Device-pixel band occupied by the live transcript. Stream deltas repaint this band only; the
+sidebar, header and composer retain their framebuffer pixels. -/
+def transcriptDamageRect (scale120 : Nat) (viewport : Rect) : Rect :=
+  let x0 := floorDev scale120 (Int.ofNat chromeSidebarWidthSub)
+  let y0 := ceilDev scale120 (Int.ofNat chromeHeaderHeightSub)
+  let bottom := viewport.bottom - ceilDev scale120 (Int.ofNat chromeComposerHeightSub)
+  { x := viewport.x + x0, y := viewport.y + y0, w := viewport.w - x0, h := max 0 (bottom - (viewport.y + y0)) }
+
+/-- Queue a streamed text delta without requesting a redraw. The next display tick flushes all
+queued deltas together, using the coalescer proved in `Orb.Stream`. -/
+def enqueueStreamDelta (st : DesktopState) (delta : String) : DesktopState :=
+  { st with stream := st.stream.pushDelta delta }
+
+/-- Compatibility name for callers that already use the reducer vocabulary. -/
+abbrev pushStreamDelta := enqueueStreamDelta
+
+/-- The committed streamed text in display order. -/
+def streamedText (st : DesktopState) : String :=
+  st.stream.shown.foldl (fun acc chunk => acc ++ chunk) ""
+
+/-- Flush one display frame of streamed text. Empty frames are true no-ops; a burst of deltas
+produces one transcript damage rectangle and one coalescer render. -/
+def flushStreamFrame (scale120 : Nat) (viewport : Rect) (st : DesktopState) : DesktopState × Damage :=
+  let stream' := st.stream.flushFrame
+  if stream'.renders == st.stream.renders then
+    (st, none)
+  else
+    ({ st with stream := stream' }, Damage.add none (transcriptDamageRect scale120 viewport))
+
+/-- Queue and flush a batch at the display boundary. This is the native adapter for the
+`Orb.Stream.Coalescer` contract: N deltas become one visible frame. -/
+def applyStreamFrame (scale120 : Nat) (viewport : Rect) (st : DesktopState)
+    (deltas : List String) : DesktopState × Damage :=
+  let queued := deltas.foldl pushStreamDelta st
+  flushStreamFrame scale120 viewport queued
+
 end OrbDesktop

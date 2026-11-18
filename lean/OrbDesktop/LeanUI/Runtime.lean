@@ -178,7 +178,9 @@ def stepFrame {σ : Type} (rt : RuntimeState σ)
         framebuffer := ByteArray.mk (Array.replicate (bw * bh * 4) 0) }
     else st.vulkan
   let (atlas', clearColor, scene, regions) ← view { st with vulkan := vk0 }
-  let vk' ← Vulkan.renderFrame vk0 clearColor atlas' scene
+  let vk' ← match st.damage with
+    | some dirty => Vulkan.renderFrameDamage vk0 clearColor atlas' dirty scene
+    | none => Vulkan.renderFrame vk0 clearColor atlas' scene
   return {
     st with
     vulkan := vk'

@@ -13,7 +13,7 @@ lean_lib «LeanUI» where
 
 /-- Proof shards and replayed-event checks. Built by `scripts/build_orb_bins.sh` with the binary. -/
 lean_lib «LeanUISpec» where
-  roots := #[`LeanUI.Spec.LayoutSpec, `LeanUI.Spec.DamageSpec, `LeanUI.Spec.FocusSpec, `LeanUI.Spec.AtlasSpec, `LeanUI.Spec.MutantSuite, `OrbDesktop.Spec.ComposerDamage, `OrbDesktop.Spec.ChromeGeometry, `OrbDesktop.Spec.RasterParity]
+  roots := #[`LeanUI.Spec.LayoutSpec, `LeanUI.Spec.DamageSpec, `LeanUI.Spec.SceneDamageSpec, `LeanUI.Spec.FocusSpec, `LeanUI.Spec.AtlasSpec, `LeanUI.Spec.MutantSuite, `OrbDesktop.Spec.ComposerDamage, `OrbDesktop.Spec.StreamDamage, `OrbDesktop.Spec.ChromeGeometry, `OrbDesktop.Spec.RasterParity]
   precompileModules := false
 
 lean_lib «LeanUIRuntime» where

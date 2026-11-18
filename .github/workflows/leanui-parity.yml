@@ -17,6 +17,20 @@ on:
       - 'orb/tests/leanui-reference.capture.ts'
       - 'orb/playwright.leanui-reference.config.ts'
       - '.github/workflows/leanui-parity.yml'
+  pull_request:
+    branches: [master, main]
+    paths:
+      - 'lean/LeanUI/**'
+      - 'lean/OrbDesktop/**'
+      - 'scripts/build_orb_bins.sh'
+      - 'scripts/orb_desktop_dev.sh'
+      - 'scripts/leanui_parity.py'
+      - 'scripts/test_leanui_*.py'
+      - 'scripts/bench_desktop.sh'
+      - 'docs/ui/**'
+      - 'orb/tests/leanui-reference.capture.ts'
+      - 'orb/playwright.leanui-reference.config.ts'
+      - '.github/workflows/leanui-parity.yml'
 
 permissions:
   contents: read
@@ -162,6 +176,11 @@ jobs:
           python3 -m unittest -v scripts/test_leanui_tokens.py scripts/test_leanui_parity.py
           scripts/leanui_window_smoke.sh target/native/orb-desktop-native
 
+      - name: Run U7 native frame budget and stream damage benchmark
+        run: |
+          scripts/bench_desktop.sh --bin target/native/orb-desktop-native \
+            --label leanui-u7 --runs 3 --out .ci/leanui/u7-benchmark.json
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -175,6 +194,7 @@ jobs:
             .ci/leanui/parity-diff
             .ci/leanui/ref
             .ci/leanui/reference-hashes.txt
+            .ci/leanui/u7-benchmark.json
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14

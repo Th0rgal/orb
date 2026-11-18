@@ -56,6 +56,12 @@ structure VulkanContext where
   width : Nat := 1280
   height : Nat := 800
   framebuffer : ByteArray := ByteArray.empty
+  /-- Number of visual primitives submitted by the last frame. -/
+  lastDrawnPrims : Nat := 0
+  /-- Number of device pixels cleared by the last frame's damage pass. -/
+  lastDamagePixels : Nat := 0
+  /-- Number of frames that reused the framebuffer outside a dirty rectangle. -/
+  partialFrames : Nat := 0
   deriving Inhabited
 
 /-- Resolve `vkGetInstanceProcAddr` from `libvulkan.so.1` via `FFI.dlSym`, allocate a native
@@ -295,22 +301,39 @@ def blurBackdrop (fb : ByteArray) (vw vh sigma : Nat) : ByteArray := Id.run do
     out := blurAxis out vw vh radius false
   return out
 
-/-- Render a `Scene` (`Array Prim`) onto an RGBA8 buffer `(vw × vh)` using the unified SDF
-rounded-rect / border / drop-shadow / glyph-atlas / clip / layer pipeline. -/
-def rasterizeScene (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtlasCache)
-    (scene : Scene) : ByteArray × Array GpuPrimInstance := Id.run do
+/-- Render a scene into either a fresh framebuffer or an existing framebuffer. When `dirty` is
+present, only pixels and visual primitives intersecting that rectangle are touched; structural clip
+and layer commands remain so compositing order is unchanged. -/
+def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtlasCache)
+    (initial : Option ByteArray) (dirty : Option Rect) (scene : Scene) : ByteArray × Array GpuPrimInstance := Id.run do
   let (cr, cg, cb, ca) := unpackColor clearColor
   let totalBytes := vw * vh * 4
-  let mut fb := ByteArray.emptyWithCapacity totalBytes
-  for _ in [0 : vw * vh] do
-    fb := fb.push cr |>.push cg |>.push cb |>.push ca
   let fullClip : Rect := { x := 0, y := 0, w := (vw : Int), h := (vh : Int) }
-  let mut clipStack : List Rect := [fullClip]
+  let renderClip := match dirty with
+    | none => fullClip
+    | some d => intersectRect fullClip d
+  let mut fb := match initial with
+    | some previous => if previous.size == totalBytes then previous else ByteArray.emptyWithCapacity totalBytes
+    | none => ByteArray.emptyWithCapacity totalBytes
+  if fb.size == 0 then
+    for _ in [0 : vw * vh] do
+      fb := fb.push cr |>.push cg |>.push cb |>.push ca
+  if let some d := dirty then
+    let (x0, y0, x1, y1) := clampBounds vw vh fullClip d
+    if x1 > x0 && y1 > y0 then
+      for py in [y0.toNat : y1.toNat] do
+        for px in [x0.toNat : x1.toNat] do
+          let idx := (py * vw + px) * 4
+          fb := fb.set! idx cr |>.set! (idx + 1) cg |>.set! (idx + 2) cb |>.set! (idx + 3) ca
+  let mut clipStack : List Rect := [renderClip]
   let mut layerStack : List LayerFrame := []
   let mut instances : Array GpuPrimInstance := #[]
 
   for prim in scene do
-    let curClip := clipStack.head?.getD fullClip
+    if let some d := dirty then
+      if !prim.intersects d then
+        continue
+    let curClip := clipStack.head?.getD renderClip
     match prim with
     | .backdropBlur sigma =>
       fb := blurBackdrop fb vw vh sigma
@@ -330,7 +353,7 @@ def rasterizeScene (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtlasCa
         layerStack := rest
         let layerBuf := fb
         fb := top.savedBuf
-        let (x0, y0, x1, y1) := clampBounds vw vh top.clip fullClip
+        let (x0, y0, x1, y1) := clampBounds vw vh top.clip renderClip
         if x1 > x0 && y1 > y0 then
           for py in [y0.toNat : y1.toNat] do
             for px in [x0.toNat : x1.toNat] do
@@ -493,12 +516,43 @@ def rasterizeScene (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtlasCa
       fb := drawRoundedBox vw vh fb curClip dst radii 0xC8D2E6FF (0, 0, 0, 0) 0
   return (fb, instances)
 
+/-- Full-frame compatibility entry point. -/
+def rasterizeScene (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtlasCache)
+    (scene : Scene) : ByteArray × Array GpuPrimInstance :=
+  rasterizeSceneInto vw vh clearColor atlas none none scene
+
 /-- Render a `Scene` onto `ctx`, staging GPU instances into native scratch memory via `FFI.memWrite`. -/
 def renderFrame (ctx : VulkanContext) (clearColor : Color) (atlas : Text.GlyphAtlasCache)
     (scene : Scene) : IO VulkanContext := do
   let (fb, insts) := rasterizeScene ctx.width ctx.height clearColor atlas scene
   let _ ← stageInstances ctx insts
-  return { ctx with framebuffer := fb }
+  return { ctx with framebuffer := fb, lastDrawnPrims := insts.size, lastDamagePixels := ctx.width * ctx.height }
+
+/-- Backdrop blur samples the whole framebuffer and therefore cannot be safely clipped to a dirty
+rectangle. Such scenes use the full path; ordinary changed-node scenes reuse the old framebuffer. -/
+def hasGlobalEffect (scene : Scene) : Bool :=
+  scene.any fun p => match p with
+    | .backdropBlur _ | .layerPush _ | .layerPop => true
+    | _ => false
+
+/-- Render only a dirty rectangle, preserving pixels outside it and culling unchanged visual
+primitives. The scene remains authoritative: structural clip/layer commands are retained. -/
+def renderFrameDamage (ctx : VulkanContext) (clearColor : Color) (atlas : Text.GlyphAtlasCache)
+    (dirty : Rect) (scene : Scene) : IO VulkanContext := do
+  let fullDamage := dirty.x ≤ 0 && dirty.y ≤ 0 && dirty.right ≥ (ctx.width : Int) && dirty.bottom ≥ (ctx.height : Int)
+  if fullDamage || ctx.framebuffer.size != ctx.width * ctx.height * 4 || hasGlobalEffect scene then
+    return ← renderFrame ctx clearColor atlas scene
+  let (fb, insts) := rasterizeSceneInto ctx.width ctx.height clearColor atlas (some ctx.framebuffer) (some dirty) scene
+  let _ ← stageInstances ctx insts
+  let clipped := intersectRect { x := 0, y := 0, w := (ctx.width : Int), h := (ctx.height : Int) } dirty
+  let pixels := (max 0 clipped.w * max 0 clipped.h).toNat
+  return {
+    ctx with
+    framebuffer := fb
+    lastDrawnPrims := insts.size
+    lastDamagePixels := pixels
+    partialFrames := ctx.partialFrames + 1
+  }
 
 /-- Compute IEEE 802.3 CRC-32 for a PNG chunk (`type ++ data`). -/
 def crc32 (data : ByteArray) : UInt32 := Id.run do

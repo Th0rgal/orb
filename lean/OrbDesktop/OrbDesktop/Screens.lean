@@ -35,6 +35,7 @@ structure ShapedScreenRuns where
   headerTitleRuns : List InlineRun := []
   primarySubtitleRuns : List InlineRun := []
   codeSampleRuns : List InlineRun := []
+  streamRuns : List InlineRun := []
   diffDelRuns : List InlineRun := []
   diffAddRuns : List InlineRun := []
   deriving Repr, Inhabited
@@ -293,12 +294,21 @@ def buildMissionTranscriptBody (st : DesktopState) (mainW bodyH : SubPx)
       [ screenTextLine theme (pxToSub 200) (pxToSub 21) (pxToSub 12) (pxToSub 21) pal.textMuted "Working on selected machine…"
       , screenTextLine theme (pxToSub 60) (pxToSub 21) (pxToSub 13) (pxToSub 21) pal.textFaint "11 h 50"
       ]
+  let liveStreamRow : List WidgetNode :=
+    if _runs.streamRuns.isEmpty then []
+    else [WidgetNode.box
+      (BoxStyle.row 0
+        |>.withPadding (Edges.xy (pxToSub 20) (pxToSub 6))
+        |>.withFixedSize colW (pxToSub 30))
+      [WidgetNode.text
+        (BoxStyle.row 0 |>.withFixedSize (colW - pxToSub 40) (pxToSub 20))
+        theme.typo.lineBase _runs.streamRuns (some 900)]]
 
   let colNode : WidgetNode :=
     WidgetNode.box
       (BoxStyle.col (pxToSub 23)
         |>.withFixedSize colW (bodyH - pxToSub 3))
-      [turn58, turn59, workingRow]
+      ([turn58, turn59] ++ liveStreamRow ++ [workingRow])
 
   WidgetNode.box
     (BoxStyle.col 0

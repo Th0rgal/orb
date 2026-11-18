@@ -206,27 +206,33 @@ def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) :
     shapeDesktopRuns ac3 rt.primaryFont sc
       { (Theme.codeText theme) with color := pal.diffAddText }
       "+ buildDesktopScreen st availW availH shapedRuns"
+  let streamText := if st.stream.renders > 1 then streamedText st else ""
+  let (ac5, streamRuns) ←
+    shapeDesktopRuns ac4 rt.primaryFont sc
+      { (Theme.bodyText theme) with color := pal.textPrimary }
+      streamText
 
   let shapedRuns : ShapedScreenRuns := {
     headerTitleRuns := hdrRuns
     codeSampleRuns := codeRuns
+    streamRuns := streamRuns
     diffDelRuns := delRuns
     diffAddRuns := addRuns
   }
 
   let widgetRootRaw := buildDesktopScreen st availW availH shapedRuns
-  let (ac5, widgetRoot) ← shapeWidgetTree ac4 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc widgetRootRaw
+  let (ac6, widgetRoot) ← shapeWidgetTree ac5 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc widgetRootRaw
   let layoutRoot := widgetRoot.toLayoutNode
   let rootBox := layoutNode sc rt.focus.owner pal.focusRing 0 0 availW availH layoutRoot
   let sceneOut := buildSceneFromLayout sc rt.focus theme widgetRoot rootBox
   if st.screen == .searchDialog then
     let overRaw := buildSearchModalOverlay theme availW availH
-    let (ac6, overWidget) ← shapeWidgetTree ac5 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc overRaw
+    let (ac7, overWidget) ← shapeWidgetTree ac6 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc overRaw
     let overBox := layoutNode sc none pal.focusRing 0 0 availW availH overWidget.toLayoutNode
     let overScene := buildSceneFromLayout sc rt.focus theme overWidget overBox
-    return (ac6, pal.canvas, sceneOut.prims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overScene.prims, sceneOut.hitRegionsSub ++ overScene.hitRegionsSub)
+    return (ac7, pal.canvas, sceneOut.prims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overScene.prims, sceneOut.hitRegionsSub ++ overScene.hitRegionsSub)
   else
-    return (ac5, pal.canvas, sceneOut.prims, sceneOut.hitRegionsSub)
+    return (ac6, pal.canvas, sceneOut.prims, sceneOut.hitRegionsSub)
 
 /-- `stepDesktopEvent` for the window `rt` currently has. -/
 def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
@@ -283,10 +289,10 @@ def fmtMs (us : Nat) : String :=
   let frac := (us % 1000) / 10
   s!"{us / 1000}.{if frac < 10 then "0" else ""}{frac}"
 
-/-- Execute `--bench <iterations>`. Every iteration lays out, shapes and rasterises one full
-frame at the requested size through `Runtime.stepFrame`, the path the window uses, then checks
-that the next quiescent frame is skipped. `first_frame_crc32` is the CRC-32 of the first RGBA
-framebuffer (`03_mission_transcript`), so a run can be tied to the golden of the same size. -/
+/-- Execute `--bench <iterations>`. The cold pass records startup, then a transcript is opened from
+an already-running control screen. Each measured update queues several stream deltas and flushes
+once into the transcript damage band, exercising changed-node rasterisation and the
+`Orb.Stream.Coalescer` frame boundary. `first_frame_crc32` ties the run to the transcript golden. -/
 def runDesktopBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) : IO UInt32 := do
   let iters := max 1 iterations
   let tStartNs ← IO.monoNanosNow
@@ -296,25 +302,45 @@ def runDesktopBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) : IO UInt32
   let mut rt ← Runtime.stepFrame rt0 (desktopReducer rt0) renderDesktopFrame
   let coldUs : Nat := ((← IO.monoNanosNow) - tStartNs) / 1000
   let firstCrc := Vulkan.crc32 rt.vulkan.framebuffer
+  let fullScenePrims := rt.vulkan.lastDrawnPrims
+
+  let openStartNs ← IO.monoNanosNow
+  let openSt := DesktopState.forScreen .controlEmpty cfg.darkTheme cfg.scale120
+  let openRt0Raw ← Runtime.initRuntime { cfg with headless := true } openSt
+  let openRt0 := { openRt0Raw with focus := openSt.initialFocusState }
+  let mut openRt ← Runtime.stepFrame openRt0 (desktopReducer openRt0) renderDesktopFrame
+  openRt := { openRt.markFullDamage with app := firstSt, focus := firstSt.initialFocusState }
+  openRt ← Runtime.stepFrame openRt (desktopReducer openRt) renderDesktopFrame
+  let transcriptOpenUs : Nat := ((← IO.monoNanosNow) - openStartNs) / 1000
+  Runtime.shutdownRuntime openRt
+
   let mut frameTimesUs : Array Nat := #[]
+  let mut partialDrawnPrims : Nat := 0
   for idx in [0:iters] do
-    let scr := ScreenId.all[idx % ScreenId.all.length]?.getD .missionTranscript
-    let nextSt := DesktopState.forScreen scr (idx % 2 == 0) cfg.scale120
-    rt := { rt.markFullDamage with app := nextSt, focus := nextSt.initialFocusState }
+    let (nextSt, streamDamage) :=
+      applyStreamFrame cfg.scale120 rt.viewportDeviceRect rt.app
+        [s!" streamed fragment {idx}", " with stable transcript identity"]
+    let nextDamage := match streamDamage with
+      | none => rt.damage
+      | some d => Damage.add rt.damage d
+    rt := { rt with app := nextSt, damage := nextDamage }
     let f0 ← IO.monoNanosNow
     rt ← Runtime.stepFrame rt (desktopReducer rt) renderDesktopFrame
     let f1 ← IO.monoNanosNow
     frameTimesUs := frameTimesUs.push ((f1 - f0) / 1000)
+    partialDrawnPrims := rt.vulkan.lastDrawnPrims
     rt ← Runtime.stepFrame rt (desktopReducer rt) renderDesktopFrame
   let (bw, bh) := (rt.vulkan.width, rt.vulkan.height)
   let fbBytes := rt.vulkan.framebuffer.size
+  let partialFrames := rt.vulkan.partialFrames
   Runtime.shutdownRuntime rt
   let sorted := frameTimesUs.qsort (· < ·)
   let p50Us := sorted[sorted.size / 2]?.getD 0
   let p99Us := sorted[min ((sorted.size * 99) / 100) (sorted.size - 1)]?.getD 0
   let errors : Nat :=
-    if rt.framesRendered == iters + 1 && rt.quiescentSkips == iters && fbBytes == bw * bh * 4 then 0 else 1
-  IO.println s!"\{\"cold_ms\": {fmtMs coldUs}, \"frame_p50_ms\": {fmtMs p50Us}, \"frame_p99_ms\": {fmtMs p99Us}, \"frames_rendered\": {rt.framesRendered}, \"quiescent_skips\": {rt.quiescentSkips}, \"work_units\": {iters}, \"error_count\": {errors}, \"width\": {bw}, \"height\": {bh}, \"scale120\": {cfg.scale120}, \"first_frame_crc32\": {firstCrc.toNat}}"
+    if rt.framesRendered == iters + 1 && rt.quiescentSkips == iters && partialFrames == iters &&
+        fbBytes == bw * bh * 4 && partialDrawnPrims < fullScenePrims then 0 else 1
+  IO.println s!"\{\"cold_ms\": {fmtMs coldUs}, \"startup_ms\": {fmtMs coldUs}, \"transcript_open_ms\": {fmtMs transcriptOpenUs}, \"frame_p50_ms\": {fmtMs p50Us}, \"frame_p99_ms\": {fmtMs p99Us}, \"frames_rendered\": {rt.framesRendered}, \"quiescent_skips\": {rt.quiescentSkips}, \"partial_frames\": {partialFrames}, \"full_scene_prims\": {fullScenePrims}, \"partial_drawn_prims\": {partialDrawnPrims}, \"work_units\": {iters}, \"error_count\": {errors}, \"width\": {bw}, \"height\": {bh}, \"scale120\": {cfg.scale120}, \"first_frame_crc32\": {firstCrc.toNat}}"
   return (if errors == 0 then 0 else 1)
 
 /-- `--self-test`: render one frame offscreen and check that the next, quiescent one is skipped. -/

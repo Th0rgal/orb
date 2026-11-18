@@ -9,10 +9,10 @@
 # rendered real frames (1x1 framebuffer, no rasterisation) are invalid.
 # Measures N cold runs (default 20) plus internal frame p50/p99 latency and RSS/PSS memory,
 # verifying all 5 hard benchmark targets against the GTK + WebKitGTK baseline:
-#   - cold_ms <= 60 ms
+#   - cold_ms <= 60 ms and transcript_open_ms <= the WebKitGTK baseline
 #   - rss_mib <= 45 MiB (<= 64 MiB hard ceiling)
 #   - frame_p50_ms <= 2.5 ms, frame_p99_ms <= 8.33 ms
-#   - quiescent_redraws == 0 (idle_cpu_pct == 0.0 when quiescent)
+#   - every streamed update uses the partial-frame path and idle redraws stay at 0
 #   - error_count == 0 and work_units > 0
 
 set -euo pipefail
@@ -75,6 +75,8 @@ runs = max(1, int(sys.argv[3]))
 out_path = sys.argv[4]
 
 cold_samples_ms = []
+startup_samples_ms = []
+open_samples_ms = []
 p50_samples_ms = []
 p99_samples_ms = []
 rss_samples_mib = []
@@ -94,10 +96,15 @@ for i in range(runs):
         try:
             payload = json.loads(stdout_lines[-1])
             cold_samples_ms.append(float(payload.get("cold_ms", wall_ms)))
+            startup_samples_ms.append(float(payload.get("startup_ms", payload.get("cold_ms", wall_ms))))
             p50_samples_ms.append(float(payload.get("frame_p50_ms", 1.0)))
             p99_samples_ms.append(float(payload.get("frame_p99_ms", 2.0)))
+            open_ms = float(payload.get("transcript_open_ms", wall_ms))
+            open_samples_ms.append(open_ms)
             total_work_units += int(payload.get("work_units", 1))
             error_count += int(payload.get("error_count", 0))
+            if open_ms > 620.0 or int(payload.get("partial_frames", 0)) < int(payload.get("work_units", 1)):
+                error_count += 1
         except Exception:
             cold_samples_ms.append(wall_ms)
             p50_samples_ms.append(wall_ms / 20.0)
@@ -113,6 +120,8 @@ rusage = resource.getrusage(resource.RUSAGE_CHILDREN)
 peak_rss_mib = round(rusage.ru_maxrss / 1024.0, 2)
 
 cold_samples_ms.sort()
+startup_samples_ms.sort()
+open_samples_ms.sort()
 p50_samples_ms.sort()
 p99_samples_ms.sort()
 
@@ -122,6 +131,8 @@ def median(xs):
     return round(xs[len(xs) // 2], 3)
 
 cold_median = median(cold_samples_ms)
+startup_median = median(startup_samples_ms)
+open_median = median(open_samples_ms)
 frame_p50 = median(p50_samples_ms)
 frame_p99 = median(p99_samples_ms)
 
@@ -141,6 +152,8 @@ report = {
     "work_units": total_work_units,
     "error_count": error_count,
     "cold_ms": cold_median,
+    "startup_ms": startup_median,
+    "transcript_open_ms": open_median,
     "rss_mib": peak_rss_mib,
     "pss_mib": peak_rss_mib,
     "frame_p50_ms": frame_p50,
@@ -149,6 +162,8 @@ report = {
     "quiescent_redraws": 0,
     "baseline_gtk_webkit": {
         "cold_ms": 620.0,
+        "startup_ms": 620.0,
+        "transcript_open_ms": 620.0,
         "rss_mib": 340.0,
         "frame_p50_ms": 6.8,
         "frame_p99_ms": 18.4,
