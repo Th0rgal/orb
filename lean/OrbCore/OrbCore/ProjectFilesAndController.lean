@@ -224,11 +224,11 @@ def upsertProjectRecord
     (store : CoreStore)
     (scopedSlug clientSlug title objective status color nowIso : String)
     (ownerUserId? : Option String := none) : IO (Except String JVal) := do
-  let effTitle := if title.trimAscii.toString.isEmpty then clientSlug else title.trimAscii.toString
-  let effStatus := if status.trimAscii.toString.isEmpty then "active" else status.trimAscii.toString
+  let rawTitle := title.trimAscii.toString
+  let rawStatus := status.trimAscii.toString
   let sql :=
     "INSERT INTO projects(slug,id,name,title,objective,status,color,created_at,updated_at) " ++
-    "VALUES(?1,?1,?2,?2,?3,?4,?5,?6,?6) " ++
+    "VALUES(?1,?1,COALESCE(NULLIF(?2,''),?1),COALESCE(NULLIF(?2,''),?1),?3,COALESCE(NULLIF(?4,''),'active'),?5,?6,?6) " ++
     "ON CONFLICT(slug) DO UPDATE SET " ++
     "name=COALESCE(NULLIF(?2,''),projects.name), " ++
     "title=COALESCE(NULLIF(?2,''),projects.title), " ++
@@ -236,17 +236,17 @@ def upsertProjectRecord
     "status=COALESCE(NULLIF(?4,''),projects.status), " ++
     "color=CASE WHEN ?5<>'' THEN ?5 ELSE projects.color END, " ++
     "updated_at=?6;"
-  if let .error e ← execParamQuery store.projectsDb sql #[scopedSlug, effTitle, objective, effStatus, color, nowIso] then
+  if let .error e ← execParamQuery store.projectsDb sql #[scopedSlug, rawTitle, objective, rawStatus, color, nowIso] then
     return .error e
   if let some uid := ownerUserId? then
     if !uid.isEmpty then
       discard <| execParamQuery store.projectsDb
         "INSERT OR IGNORE INTO project_owners(slug,owner_user_id,created_at) VALUES(?1,?2,?3);"
         #[scopedSlug, uid, nowIso]
-  -- Read back persisted row so existing color/objective stay intact when omitted
-  let mut outTitle := effTitle
+  -- Read back persisted row so existing title/status/color/objective stay intact when omitted
+  let mut outTitle := if rawTitle.isEmpty then clientSlug else rawTitle
   let mut outObj := objective
-  let mut outStatus := effStatus
+  let mut outStatus := if rawStatus.isEmpty then "active" else rawStatus
   let mut outColor := color
   if let .ok rows ← execParamQuery store.projectsDb
       "SELECT COALESCE(NULLIF(title,''),NULLIF(name,''),slug), COALESCE(objective,''), COALESCE(status,'active'), COALESCE(color,'') FROM projects WHERE slug=?1;"
@@ -265,6 +265,19 @@ def upsertProjectRecord
     ("updated_at", .str nowIso),
     ("color", optStrJVal outColor)
   ])
+
+/-- Appearance changes only the operator's color: it is not project activity, so it
+    must not rewrite title, status or `updated_at`. An unknown project is a 404. -/
+def updateProjectColor
+    (store : CoreStore) (scopedSlug clientSlug color _nowIso : String) : IO (Except String JVal) := do
+  match ← execParamQuery store.projectsDb "SELECT 1 FROM projects WHERE slug=?1 LIMIT 1;" #[scopedSlug] with
+  | .error e => return .error e
+  | .ok rows =>
+    if rows.size <= 1 then return .error "not_found"
+  if let .error e ← execParamQuery store.projectsDb
+      "UPDATE projects SET color=NULLIF(?2,'') WHERE slug=?1;" #[scopedSlug, color] then
+    return .error e
+  return .ok (.obj #[("slug", .str clientSlug), ("color", optStrJVal color)])
 
 def getProjectGrantJVal (store : CoreStore) (scopedSlug clientSlug : String) : IO JVal := do
   match ← execParamQuery store.projectsDb
@@ -845,7 +858,7 @@ def dispatchProjectAndControllerRoutes?
         else if act == "delete" then "deleted"
         else if act == "pause" then "paused"
         else "active"
-      discard <| upsertProjectRecord store scopedSlug clientSlug clientSlug "" nextStatus "" nowIso
+      discard <| upsertProjectRecord store scopedSlug clientSlug "" "" nextStatus "" nowIso
         (if isLegacyUnscoped then none else some callerUserId)
       discard <| execParamQuery store.projectsDb
         "UPDATE projects SET status=?2, updated_at=?3 WHERE slug=?1;" #[scopedSlug, nextStatus, nowIso]
@@ -862,7 +875,7 @@ def dispatchProjectAndControllerRoutes?
     if method == "POST" && tail == ["rename"] then
       let jv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
       let newTitle := ((jv.fieldStr? "title").orElse (fun _ => jv.fieldStr? "name") |>.getD clientSlug).trimAscii.toString
-      match ← upsertProjectRecord store scopedSlug clientSlug newTitle "" "active" "" nowIso
+      match ← upsertProjectRecord store scopedSlug clientSlug newTitle "" "" "" nowIso
           (if isLegacyUnscoped then none else some callerUserId) with
       | .ok rec => return some (jsonResp 200 rec)
       | .error e => return some (jsonErr 500 e)
@@ -871,11 +884,10 @@ def dispatchProjectAndControllerRoutes?
     if (method == "POST" || method == "PUT" || method == "PATCH") && tail == ["appearance"] then
       let jv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
       let col := ((jv.fieldStr? "color").getD "").trimAscii.toString
-      discard <| upsertProjectRecord store scopedSlug clientSlug clientSlug "" "active" col nowIso
-        (if isLegacyUnscoped then none else some callerUserId)
-      discard <| execParamQuery store.projectsDb
-        "UPDATE projects SET color=NULLIF(?2,''), updated_at=?3 WHERE slug=?1;" #[scopedSlug, col, nowIso]
-      return some (jsonResp 200 (.obj #[("slug", .str clientSlug), ("color", optStrJVal col)]))
+      match ← updateProjectColor store scopedSlug clientSlug col nowIso with
+      | .ok rec => return some (jsonResp 200 rec)
+      | .error "not_found" => return some (jsonErr 404 "not_found")
+      | .error e => return some (jsonErr 500 e)
 
     -- `GET|PUT /api/projects/:slug/skills`
     if tail == ["skills"] then
@@ -890,7 +902,7 @@ def dispatchProjectAndControllerRoutes?
         let jv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
         let skArr := (jv.fieldArr? "skills").getD #[]
         let skJson := renderCompact (.arr skArr)
-        discard <| upsertProjectRecord store scopedSlug clientSlug clientSlug "" "active" "" nowIso
+        discard <| upsertProjectRecord store scopedSlug clientSlug "" "" "" "" nowIso
           (if isLegacyUnscoped then none else some callerUserId)
         discard <| execParamQuery store.projectsDb
           "UPDATE projects SET skills=?2, updated_at=?3 WHERE slug=?1;" #[scopedSlug, skJson, nowIso]
@@ -900,7 +912,7 @@ def dispatchProjectAndControllerRoutes?
     if method == "POST" && tail == ["status"] then
       let jv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
       let stVal := (jv.fieldStr? "status").getD "active"
-      discard <| upsertProjectRecord store scopedSlug clientSlug clientSlug "" stVal "" nowIso
+      discard <| upsertProjectRecord store scopedSlug clientSlug "" "" stVal "" nowIso
         (if isLegacyUnscoped then none else some callerUserId)
       discard <| execParamQuery store.projectsDb
         "UPDATE projects SET status=?2, updated_at=?3 WHERE slug=?1;"

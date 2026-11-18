@@ -1361,6 +1361,50 @@ def buildLibraryStatusJson (libDir : String) (defaultRemote : String) (requireOw
     fields := fields.push ("last_synced_at", JVal.uint64 syncedMtime)
   return .obj fields
 
+
+private def maxChunkUploadChunks : Nat := 4096
+private def maxChunkUploadBytes : Nat := 2 * 1024 * 1024 * 1024
+private def maxChunkUploadChunkBytes : Nat := 128 * 1024 * 1024
+
+private def byteArrayFind? (hay needle : ByteArray) (start : Nat := 0) : Option Nat := Id.run do
+  if needle.isEmpty then return some start
+  let mut i := start
+  while i + needle.size <= hay.size do
+    let mut j := 0
+    let mut ok := true
+    while j < needle.size do
+      if hay.get! (i + j) != needle.get! j then
+        ok := false
+        j := needle.size
+      else j := j + 1
+    if ok then return some i
+    i := i + 1
+  return none
+
+/-- Legacy chunk clients send `multipart/form-data`; store only the file part,
+    never the MIME envelope. Raw octet-stream bodies are accepted unchanged. -/
+private def chunkUploadPayload (headers : Array (String × String)) (body : ByteArray) : Except String ByteArray := do
+  let ct := (((headers.find? (fun (k, _) => k.toLower == "content-type")).map Prod.snd).getD "").toLower
+  if !ct.startsWith "multipart/form-data" then return body
+  let idx := match ct.splitOn "boundary=" with
+    | _ :: rest => rest
+    | [] => []
+  let rawBoundary := (String.intercalate "boundary=" idx).trimAscii.toString
+  let boundary :=
+    if rawBoundary.startsWith "\"" && rawBoundary.endsWith "\"" && rawBoundary.length >= 2 then
+      (rawBoundary.drop 1).dropEnd 1 |>.toString
+    else rawBoundary
+  if boundary.isEmpty then throw "Invalid multipart boundary"
+  let headerEnd := byteArrayFind? body "\r\n\r\n".toUTF8
+  let some h := headerEnd | throw "Invalid multipart body"
+  let dataStart := h + 4
+  let closing := ("\r\n--" ++ boundary).toUTF8
+  let some close := byteArrayFind? body closing dataStart | throw "Invalid multipart body"
+  return body.extract dataStart close
+
+private def validLegacyUploadId (id : String) : Bool :=
+  !id.isEmpty && !id.contains '/' && !id.contains '\\' && !id.contains ".."
+
 private def countSkillLines (s : String) : Nat :=
   if s.isEmpty then 0 else (s.splitOn "\n").length
 
@@ -2222,30 +2266,52 @@ def dispatchResourcesAndSystemRoute
 
     if method == "POST" && sub == "upload-chunk" then
       let upId := ((qParam? qMap "upload_id").getD "").trimAscii.toString
-      let chunkIdx := ((qParam? qMap "chunk_index").bind String.toNat?).getD 0
-      if upId.isEmpty || (upId.splitOn "..").length > 1 || upId.contains '/' then
-        return some (jsonErr 400 "Invalid upload_id")
+      let some chunkIdx := (qParam? qMap "chunk_index").bind String.toNat?
+        | return some (jsonErr 400 "missing or invalid chunk_index")
+      let some totChunks := (qParam? qMap "total_chunks").bind String.toNat?
+        | return some (jsonErr 400 "missing or invalid total_chunks")
+      if !validLegacyUploadId upId then return some (jsonErr 400 "Invalid upload_id")
+      if totChunks == 0 || totChunks > maxChunkUploadChunks then
+        return some (jsonErr 400 s!"Invalid total_chunks: must be between 1 and {maxChunkUploadChunks}")
+      if chunkIdx >= totChunks then return some (jsonErr 400 "chunk_index must be less than total_chunks")
+      let payload ← match chunkUploadPayload headers bodyBytes with
+        | .ok b => pure b
+        | .error e => return some (jsonErr 400 e)
+      if payload.size > maxChunkUploadChunkBytes then
+        return some (jsonErr 413 s!"Chunk too large: limit is {maxChunkUploadChunkBytes} bytes")
       let stageDir := System.FilePath.mk s!"/tmp/sandboxed-sh-uploads/{upId}"
       IO.FS.createDirAll stageDir
-      IO.FS.writeBinFile (stageDir / s!"chunk_{chunkIdx}") bodyBytes
-      return some (jsonResp 200 (.obj #[("ok", .bool true), ("chunk_index", JVal.nat chunkIdx), ("received_bytes", JVal.nat bodyBytes.size)]))
+      IO.FS.writeBinFile (stageDir / s!"chunk_{chunkIdx}") payload
+      return some (jsonResp 200 (.obj #[("ok", .bool true), ("chunk_index", JVal.nat chunkIdx), ("total_chunks", JVal.nat totChunks), ("received_bytes", JVal.nat payload.size)]))
 
     if method == "POST" && sub == "upload-finalize" then
       let .ok reqJv := OrbBin.Json.parseBytes bodyBytes | return some (jsonErr 400 "Invalid JSON")
       let upId := ((reqJv.fieldStr? "upload_id").getD "").trimAscii.toString
       let fName := (((reqJv.fieldStr? "file_name").getD "upload.bin").splitOn "/").getLast?.getD "upload.bin"
       let totChunks := (reqJv.fieldNat? "total_chunks").getD 0
-      if upId.isEmpty || (upId.splitOn "..").length > 1 || upId.contains '/' then
-        return some (jsonErr 400 "Invalid upload_id")
+      if !validLegacyUploadId upId then return some (jsonErr 400 "Invalid upload_id")
+      if totChunks == 0 || totChunks > maxChunkUploadChunks then
+        return some (jsonErr 400 s!"Invalid total_chunks: must be between 1 and {maxChunkUploadChunks}")
+      let stageDir := System.FilePath.mk s!"/tmp/sandboxed-sh-uploads/{upId}"
+      let mut chunks : Array ByteArray := #[]
+      let mut total := 0
+      for idx in [0:totChunks] do
+        let chunkPath := stageDir / s!"chunk_{idx}"
+        let st ← statIdentity chunkPath.toString false
+        if !st.exists_ then return some (jsonErr 400 s!"missing_chunk_{idx}")
+        if st.size > maxChunkUploadChunkBytes.toUInt64 then
+          return some (jsonErr 413 s!"Chunk {idx} too large: limit is {maxChunkUploadChunkBytes} bytes")
+        total := total + st.size.toNat
+        if total > maxChunkUploadBytes then
+          return some (jsonErr 413 s!"Assembled upload too large: limit is {maxChunkUploadBytes} bytes")
+        match ← (IO.FS.readBinFile chunkPath).toBaseIO with
+        | .ok cb => chunks := chunks.push cb
+        | .error _ => return some (jsonErr 500 s!"Failed to read chunk {idx}")
       let .ok dirFp ← resolveHostFsTarget store workingDir ((reqJv.fieldStr? "path").getD "") (reqJv.fieldStr? "mission_id")
         | return some (jsonErr 400 "Invalid path")
       IO.FS.createDirAll dirFp
       let dest := dirFp / fName
-      let mut combined := ByteArray.empty
-      let stageDir := System.FilePath.mk s!"/tmp/sandboxed-sh-uploads/{upId}"
-      for idx in [0:totChunks] do
-        if let .ok cb ← (IO.FS.readBinFile (stageDir / s!"chunk_{idx}")).toBaseIO then
-          combined := combined ++ cb
+      let combined := chunks.foldl (fun acc b => acc ++ b) ByteArray.empty
       IO.FS.writeBinFile dest combined
       let _ ← runCmdCapture "rm" #["-rf", "--", stageDir.toString]
       return some (jsonResp 200 (.obj #[("ok", .bool true), ("path", .str dest.toString), ("name", .str fName), ("size", JVal.nat combined.size)]))

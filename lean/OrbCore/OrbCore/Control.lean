@@ -12,6 +12,7 @@ import OrbBin.PosixExt
 import OrbBin.PrivdShared
 import OrbBin.GitWorkspace
 import OrbBin.ClaudeControl
+import OrbNode.FileBrowser
 import OrbCore.Spec
 import OrbCore.Store
 import OrbCore.MissionSettings
@@ -41,6 +42,7 @@ import OrbCore.ProviderUsageAndLogin
 import OrbCore.ResourcesAndSystem
 import OrbCore.DevOperator
 import OrbCore.McpGateway
+import OrbCore.Maintenance
 import OrbNetLeaf.TlsHttp
 import OrbNetLeaf.Gzip
 
@@ -2703,6 +2705,46 @@ private def dispatchMissionControlAndGitRoutes?
 
   return none
 
+/-- Workspace files are agent-written and untrusted: never sniff them into another
+    type, and if opened directly an HTML/SVG file loads nothing and runs no script. -/
+private def downloadHardeningHeaders (filename : String) : Array (String × String) :=
+  let safeName := String.ofList (filename.toList.map fun c =>
+    if c == '"' || c == '\\' || c.toNat < 32 || c.toNat == 127 then '_' else c)
+  let name := if safeName.trimAscii.toString.isEmpty then "download" else safeName
+  #[("Content-Disposition", s!"attachment; filename=\"{name}\""),
+    ("X-Content-Type-Options", "nosniff"),
+    ("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")]
+
+private def basenameOfPath (raw : String) : String :=
+  let decoded := (percentDecodeStrict raw).getD raw
+  (decoded.splitOn "/").filter (!·.isEmpty) |>.getLast?.getD "download"
+
+private def downloadFilename? (method cleanPath rawTarget : String) (body : ByteArray) : Option String :=
+  if cleanPath == "/api/fs/download" || cleanPath == "/api/fs/file" then
+    let qMap := parseQueryParams rawTarget
+    ((qMap.find? (fun p => p.1 == "path")).bind (fun p => percentDecodeStrict p.2)).map basenameOfPath
+  else if cleanPath == "/api/file-resources" && (method == "GET" || method == "POST") then
+    match OrbBin.Json.parseBytes body with
+    | .ok jv =>
+      if jv.fieldStr? "action" == some "download" then
+        (jv.fieldStr? "path").map basenameOfPath
+      else none
+    | .error _ => none
+  else if method == "GET" && cleanPath.startsWith "/api/projects/" && cleanPath.endsWith "/files" then
+    some (basenameOfPath cleanPath)
+  else
+    none
+
+private def hardenedDownloadResponse (method cleanPath rawTarget : String) (body : ByteArray)
+    (status : Nat) (contentType : String) (bytes : ByteArray) (corsOrigin? : Option String) : CoreHttpResponse :=
+  let hdrs :=
+    if status == 200 || status == 206 then
+      match downloadFilename? method cleanPath rawTarget body with
+      | some name => downloadHardeningHeaders name
+      | none => #[]
+    else #[]
+  { status := status, contentType := contentType, corsOrigin? := corsOrigin?, extraHdrs := hdrs, body := bytes }
+
 set_option maxHeartbeats 1600000 in
 private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowEpochSec : UInt64) : IO (Except ByteArray CoreHttpResponse) := do
   let legacyManagedPrefix := "/api/managed/machines"
@@ -3565,23 +3607,84 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         items := items.push s!"\{\"id\":{jsonEscape s!"managed-{vm.id}"},\"name\":{jsonEscape vm.sandboxName},\"provider\":{jsonEscape vm.provider},\"status\":{jsonEscape vm.status},\"admin_only\":false}"
     return .ok (mkJson 200 ("[" ++ String.intercalate "," items.toList ++ "]"))
 
-  if req.method == "POST" && cleanPath == "/api/uploads" then
-    let maxUploadBytes : Nat := 16 * 1024 * 1024
-    if req.bodySlice.len > maxUploadBytes then
-      return .ok (mkJson 413 "{\"error\":\"upload_too_large\"}")
-    let uploadOwnerSeg := if caller.userId.isEmpty then "legacy" else caller.userId
+  let uploadOwnerSeg := if caller.userId.isEmpty then "legacy" else caller.userId
+  let uploadRoot : System.FilePath := System.FilePath.mk st.store.rootDir / "uploads" / uploadOwnerSeg
+  let uploadErrStatus (msg : String) : Nat :=
+    if msg.toLower.contains "too large" || msg.toLower.contains "2 gib" || msg.toLower.contains "20 mib" then 413
+    else if msg.toLower.contains "not found" || msg.toLower.contains "unavailable" then 404
+    else if msg.toLower.contains "already" || msg.toLower.contains "finalized" || msg.toLower.contains "conflict" then 409
+    else 400
+  let uploadQuery := parseQueryParams rawTarget
+  let remoteNode? : String :=
+    let fromQuery := (((uploadQuery.find? (fun p => p.1 == "node_id")).bind (fun p => percentDecodeStrict p.2)).getD "").trimAscii.toString
+    if !fromQuery.isEmpty then fromQuery
+    else if req.method == "POST" && (cleanPath == "/api/uploads" || cleanPath == "/api/uploads/sessions") then
+      ((OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption.bind (·.fieldStr? "node_id") |>.getD "").trimAscii.toString
+    else ""
+  let isLocalUpload := remoteNode?.isEmpty || remoteNode? == "local" || remoteNode? == "core" || remoteNode? == "client"
+  let remoteUpload (method path : String) (body : ByteArray) (contentType : String := "application/octet-stream") :
+      IO (Except ByteArray CoreHttpResponse) := do
+    match ← OrbCore.RemoteDispatch.callRemoteNodeRawOpt st.relayHub? st.managedStore? remoteNode? method path body contentType #[] 60000 with
+    | .error e => return .ok (mkJson 502 s!"\{\"error\":\"upload_relay_failed\",\"message\":{jsonEscape e}}")
+    | .ok (status, txt, _, _, _) =>
+      return .ok { status := status, contentType := "application/json", corsOrigin? := reqOrigin?, body := txt.toUTF8 }
+  let localUploads (action : System.FilePath → IO (Except String JVal)) :
+      IO (Except ByteArray CoreHttpResponse) := do
     if hasSegmentTraversal uploadOwnerSeg then
       return .ok (mkJson 400 "{\"error\":\"invalid_upload_owner\"}")
-    let uploadId ← newUuidV4
-    let uploadDir : System.FilePath := System.FilePath.mk st.store.rootDir / "uploads" / uploadOwnerSeg
-    if let .error e ← ensurePrivateDir0700 uploadDir then
+    if let .error e ← ensurePrivateDir0700 uploadRoot then
       return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
-    let dest := uploadDir / uploadId
-    try
-      IO.FS.writeBinFile dest req.bodySlice.toByteArray
-    catch e =>
-      return .ok (mkJson 500 s!"\{\"error\":{jsonEscape s!"upload_write_failed:{e}"}}")
-    return .ok (mkJson 201 s!"\{\"id\":{jsonEscape uploadId},\"size\":{req.bodySlice.len},\"owner_user_id\":{jsonEscape uploadOwnerSeg}}")
+    match ← action uploadRoot with
+    | .ok receipt =>
+      let receipt := receipt.setField "owner_user_id" (.str uploadOwnerSeg)
+      return .ok (mkJson 200 (renderCompact receipt))
+    | .error e => return .ok (mkJson (uploadErrStatus e) s!"\{\"error\":{jsonEscape e}}")
+  if req.method == "POST" && cleanPath == "/api/uploads" then
+    if req.bodySlice.len > 30 * 1024 * 1024 then
+      return .ok (mkJson 413 "{\"error\":\"upload_too_large\"}")
+    if !isLocalUpload then
+      return ← remoteUpload "POST" "/uploads" req.bodySlice.toByteArray "application/json"
+    let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+      | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+    return ← localUploads (fun root => OrbNode.FileBrowser.storeSingleUploadAt root jv)
+  if req.method == "POST" && cleanPath == "/api/uploads/sessions" then
+    if !isLocalUpload then
+      return ← remoteUpload "POST" "/uploads/sessions" req.bodySlice.toByteArray "application/json"
+    let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+      | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+    return ← localUploads (fun root => OrbNode.FileBrowser.initOrStatusUploadSessionAt root jv)
+  if req.method == "PUT" && cleanPath.startsWith "/api/uploads/sessions/" then
+    let segs := (cleanPath.splitOn "/").filter (!·.isEmpty)
+    if segs.length == 6 && segs[0]? == some "api" && segs[1]? == some "uploads" &&
+        segs[2]? == some "sessions" && segs[4]? == some "chunks" then
+      let uid := segs[3]!
+      let some idx := segs[5]!.toNat?
+        | return .ok (mkJson 400 "{\"error\":\"invalid_chunk_index\"}")
+      if req.bodySlice.len > OrbNode.FileBrowser.maxChunkBytes then
+        return .ok (mkJson 413 "{\"error\":\"chunk_too_large\"}")
+      if !isLocalUpload then
+        return ← remoteUpload "PUT" s!"/uploads/sessions/{uid}/chunks/{idx}" req.bodySlice.toByteArray
+      return ← localUploads (fun root => OrbNode.FileBrowser.writeUploadSessionChunkAt root uid idx req.bodySlice.toByteArray)
+  if req.method == "POST" && cleanPath.startsWith "/api/uploads/sessions/" && cleanPath.endsWith "/complete" then
+    let segs := (cleanPath.splitOn "/").filter (!·.isEmpty)
+    if segs.length == 5 && segs[0]? == some "api" && segs[1]? == some "uploads" &&
+        segs[2]? == some "sessions" && segs[4]? == some "complete" then
+      let uid := segs[3]!
+      if !isLocalUpload then
+        return ← remoteUpload "POST" s!"/uploads/sessions/{uid}/complete" ByteArray.empty
+      return ← localUploads (fun root => OrbNode.FileBrowser.completeUploadSessionAt root uid)
+  if req.method == "DELETE" && cleanPath.startsWith "/api/uploads/sessions/" then
+    let segs := (cleanPath.splitOn "/").filter (!·.isEmpty)
+    if segs.length == 4 && segs[0]? == some "api" && segs[1]? == some "uploads" &&
+        segs[2]? == some "sessions" then
+      let uid := segs[3]!
+      if !isLocalUpload then
+        return ← remoteUpload "DELETE" s!"/uploads/sessions/{uid}" ByteArray.empty
+      if hasSegmentTraversal uploadOwnerSeg then
+        return .ok (mkJson 400 "{\"error\":\"invalid_upload_owner\"}")
+      match ← OrbNode.FileBrowser.cancelUploadSessionAt uploadRoot uid with
+      | .ok () => return .ok { status := 204, corsOrigin? := reqOrigin?, body := ByteArray.empty }
+      | .error e => return .ok (mkJson (uploadErrStatus e) s!"\{\"error\":{jsonEscape e}}")
 
   -- 6d. Admin-only Backup / Restore / Settings Guards
   if cleanPath == "/api/settings/backup" || cleanPath == "/api/settings/restore" then
@@ -5027,7 +5130,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         req.method cleanPath rawTarget req.headers req.bodySlice.toByteArray
         caller.userId caller.username st.bootstrapAdminId
         (caller.isLegacyUnscoped || caller.role == "admin") caller.isLegacyUnscoped then
-      return .ok { status := sCode, contentType := sCtype, corsOrigin? := reqOrigin?, body := sBody }
+      return .ok (hardenedDownloadResponse req.method cleanPath rawTarget req.bodySlice.toByteArray sCode sCtype sBody reqOrigin?)
 
   -- Mission Detail & Delete (`GET|DELETE /api/control/missions/:id`, `SM-01`, `SM-07`)
   if let some params := matchRoutePattern? "/api/control/missions/:id" rawTarget then
@@ -5916,7 +6019,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         req.method cleanPath rawTarget req.headers req.bodySlice.toByteArray
         caller.userId caller.username st.bootstrapAdminId
         (caller.isLegacyUnscoped || caller.role == "admin") caller.isLegacyUnscoped then
-      return .ok { status := sCode, contentType := sCtype, corsOrigin? := reqOrigin?, body := sBody }
+      return .ok (hardenedDownloadResponse req.method cleanPath rawTarget req.bodySlice.toByteArray sCode sCtype sBody reqOrigin?)
 
   if let some params := matchRoutePattern? "/api/control/queue/:id" rawTarget then
     if req.method == "PATCH" then
@@ -6889,7 +6992,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       st.bunkerStateRef? st.managedStore? st.relayHub? st.broadcastHub?
       req.method cleanPath rawTarget req.headers req.bodySlice.toByteArray
       caller.userId caller.username st.bootstrapAdminId isAdmCaller caller.isLegacyUnscoped then
-    return .ok { status := sysCode, contentType := sysCtype, corsOrigin? := reqOrigin?, body := sysBody }
+    return .ok (hardenedDownloadResponse req.method cleanPath rawTarget req.bodySlice.toByteArray sysCode sysCtype sysBody reqOrigin?)
 
   return .ok (mkJson 404 s!"\{\"error\":\"not_found\",\"path\":{jsonEscape cleanPath}}")
 
@@ -7685,9 +7788,16 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
         let mut lastInventory : UInt64 := 0
         let mut checkedDestroyed : Array String := #[]
         let mut lastSampledMinute : UInt64 := 0
+        let mut maintTracker : OrbCore.Maintenance.Tracker := {}
         while true do
           let cached ← managedRef.get
           let observedAt ← coreEpochSec
+          let (nextMaint, maintReport) ← OrbCore.Maintenance.tick store cfg.workingDir observedAt maintTracker
+          maintTracker := nextMaint
+          let maintRemoved := (maintReport.fieldNat? "removed").getD 0
+          let maintProposed := (maintReport.fieldNat? "would_remove").getD 0
+          if maintRemoved > 0 || maintProposed > 0 then
+            IO.eprintln s!"[orb-core] workspace maintenance: proposed={maintProposed} removed={maintRemoved} execute={(maintReport.fieldBool? "execute").getD false}"
           -- One compute sample per minute feeds the Resources history.
           if observedAt / 60 != lastSampledMinute then
             lastSampledMinute := observedAt / 60
