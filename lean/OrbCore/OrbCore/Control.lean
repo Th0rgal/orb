@@ -3203,6 +3203,15 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | return .ok (mkJson 400 "{\"ok\":false,\"error\":{\"code\":\"invalid_json\",\"message\":\"Malformed JSON body\",\"accepted\":\"no\",\"retryable\":false}}")
       let toolName := (jv.fieldStr? "name").getD ""
       let args := (jv.field? "arguments").getD (.obj #[])
+      let roleNorm := normalizeMcpRole activeClaims.role
+      -- Dashboard bearers are tenant-scoped by mission ownership; the role
+      -- catalogue gate targets harness/external sessions that carry a role.
+      if (!activeClaims.missionId.isEmpty || activeClaims.isExternal) &&
+          !OrbBin.McpCatalog.rolePermitsCatalogTool roleNorm toolName then
+        return .ok (mkJson 200 (renderCompact (.obj #[("ok", .bool false), ("error", .obj #[
+          ("code", .str "forbidden_tool_role"),
+          ("message", .str s!"Tool `{toolName}` is not available to role `{roleNorm}`"),
+          ("accepted", .str "no"), ("retryable", .bool false)])])))
       if (mcpCaller?.map (·.isDevOperator)).getD false &&
           (isMemoryToolName toolName || isMacTetherToolName toolName || toolName.startsWith "secret_" || #["request_privileged_access", "list_privileged_access",
             "revoke_privileged_access", "execute_privileged_command", "deploy_sandboxed_sh"].contains toolName) then
@@ -3229,8 +3238,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         unless (← ownerAllowed) do
           return .ok (mkJson 200 "{\"ok\":false,\"error\":{\"code\":\"memory_tool_denied\",\"message\":\"Administrator required\"}}")
         let mut onManagedNode := false
-        let mut hasProjSkill := !activeClaims.isExternal && !activeClaims.project.isEmpty
-        if !activeClaims.missionId.isEmpty then
+        -- Memory authority comes from an attached skill or an explicit grant, never
+        -- from the mere existence of a project (`SEC-11`).
+        let mut hasProjSkill := false
+        if !activeClaims.isExternal && !activeClaims.missionId.isEmpty then
           if let .ok mRs ← execParamQuery st.store.missionsDb
               "SELECT placement_kind, project, tags FROM missions WHERE id=?1;" #[activeClaims.missionId] then
             if mRs.size > 1 then
@@ -3239,8 +3250,16 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               let mTags := parseStringJsonArray ((mRs[1]?.bind (·[2]?)).getD "[]")
               if pk == "managed_vm" || pk.startsWith "managed-" then
                 onManagedNode := true
-              if !activeClaims.isExternal && (!mProj.isEmpty || mTags.contains "skill:spark-memory") then
+              if mTags.contains "skill:spark-memory" then
                 hasProjSkill := true
+              else if !mProj.isEmpty then
+                let scopedProj := if !activeClaims.project.isEmpty then activeClaims.project else mProj
+                if let .ok pRs ← execParamQuery st.store.projectsDb
+                    "SELECT COALESCE(skills,'[]') FROM projects WHERE slug=?1 OR slug=?2 LIMIT 1;"
+                    #[mProj, scopedProj] then
+                  if pRs.size > 1 then
+                    let skills := parseStringJsonArray ((pRs[1]?.bind (·[0]?)).getD "[]")
+                    hasProjSkill := skills.contains "spark-memory" || skills.contains "skill:spark-memory"
           if !onManagedNode then
             if let some mst := st.managedStore? then
               if let .ok vmRs ← execParamQuery mst.db
@@ -3358,7 +3377,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       if (jv.fieldUInt64? "lease_id").isNone then
         if let some rHub := st.relayHub? then
           if let some httpResp := parseRelayHttpRespJson? jv then
-            deliverRelayHttpResp rHub httpResp
+            deliverRelayHttpResp rHub mid httpResp
             return .ok (mkJson 200 "{\"ok\":true}")
       let cmdId := (jv.fieldStr? "id").getD ""
       let leaseId := (jv.fieldUInt64? "lease_id").getD 0
@@ -6940,10 +6959,40 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     return .ok (mkJson 200 (renderCompact (.obj #[("capabilities", caps)])))
 
   if req.method == "GET" && cleanPath == "/api/stats" then
-    let mCnt ← match ← execParamQuery st.store.missionsDb "SELECT COUNT(*) FROM missions;" #[] with
-      | .ok rs => pure (((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0)
-      | .error _ => pure 0
-    return .ok (mkJson 200 s!"\{\"missions\":{mCnt}}")
+    let qParams := parseQueryParams rawTarget
+    let since? := (qParams.find? (fun p => p.1 == "since" || p.1 == "updated_since")).bind (fun p => percentDecodeStrict p.2)
+    let mut conds : Array String := #[]
+    let mut params : Array String := #[]
+    if !caller.isLegacyUnscoped then
+      params := params.push caller.userId
+      conds := conds.push s!"(m.owner_user_id = ?1 OR EXISTS (SELECT 1 FROM mission_shares s WHERE s.mission_id = m.id AND s.user_id = ?1))"
+    if let some rawSince := since? then
+      let cleanSince := rawSince.trimAscii.toString
+      if !cleanSince.isEmpty then
+        params := params.push cleanSince
+        let p := params.size
+        conds := conds.push s!"((CASE WHEN m.updated_at != '' AND NOT (m.updated_at GLOB '*[^0-9]*') THEN CAST(m.updated_at AS INTEGER) ELSE COALESCE(CAST(strftime('%s', m.updated_at) AS INTEGER), 0) END) >= (CASE WHEN ?{p} != '' AND NOT (?{p} GLOB '*[^0-9]*') THEN CAST(?{p} AS INTEGER) ELSE COALESCE(CAST(strftime('%s', ?{p}) AS INTEGER), 9223372036854775807) END))"
+    let whereSql := if conds.isEmpty then "" else " WHERE " ++ String.intercalate " AND " conds.toList
+    let q :=
+      "SELECT COUNT(*),COALESCE(SUM(CASE WHEN m.status IN ('active','running','starting','resuming','working','in_progress','processing','streaming','pending','queued','waiting_background','awaiting_user') THEN 1 ELSE 0 END),0)," ++
+      "COALESCE(SUM(CASE WHEN m.status IN ('completed','succeeded','done') THEN 1 ELSE 0 END),0)," ++
+      "COALESCE(SUM(CASE WHEN m.status IN ('failed','error','lost','cancelled') THEN 1 ELSE 0 END),0) FROM missions m" ++ whereSql ++ ";"
+    let (total, active, completed, failed) ← match ← execParamQuery st.store.missionsDb q params with
+      | .ok rs => pure (if rs.size > 1 then
+          (((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0,
+           ((rs[1]?.bind (·[1]?)).bind String.toNat?).getD 0,
+           ((rs[1]?.bind (·[2]?)).bind String.toNat?).getD 0,
+           ((rs[1]?.bind (·[3]?)).bind String.toNat?).getD 0)
+          else (0,0,0,0))
+      | .error _ => pure (0,0,0,0)
+    let sinceVal := match since? with | some sv => .str sv | none => .null
+    return .ok (mkJson 200 (renderCompact (.obj #[
+      ("missions", JVal.nat total),
+      ("since", sinceVal),
+      ("tasks", .obj #[("total", JVal.nat total), ("active", JVal.nat active),
+        ("completed", JVal.nat completed), ("failed", JVal.nat failed)]),
+      ("cost", .obj #[("actual_cents", JVal.nat 0), ("estimated_cents", JVal.nat 0),
+        ("unknown_cents", JVal.nat 0), ("provenance", .str "unknown")])])))
 
   let isAdmCaller := caller.isLegacyUnscoped || caller.role == "admin"
   let nowIsoDisp := formatEpochIso8601Utc nowEpochSec

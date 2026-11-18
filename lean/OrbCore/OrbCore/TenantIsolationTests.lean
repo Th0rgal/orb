@@ -299,6 +299,16 @@ def run (root : String) : IO Unit := do
         ownerKind := "user", spentCents := 0 } now | throw (IO.userError "isolation machine")
       let .ok () ← addUserSpendCents store uid (currentUtcDay now) 0 (if uid == "admin" then 73 else 2)
         | throw (IO.userError "isolation usage")
+    -- R16 MCP-14: a second, unrelated mission tree for the same user.
+    let .ok () ← upsertMission store {
+      id := "member-other", ownerUserId := "member", title := "member-other-private-marker",
+      status := "awaiting_user", backend := "codex", modelOverride := "",
+      workingDirectory := path, project := "member-project", updatedAt := "2026-11-13T10:00:00Z" }
+      | throw (IO.userError "isolation other mission")
+    let .ok _ ← provisionManagedMachine mc fleet {
+      id := "member-other-machine", sandboxName := "member-other-private-marker", ownerUserId := "member",
+      ownerKind := "user", ownerMission := "member-other", requestedByMissionId := "member-other",
+      spentCents := 0 } now | throw (IO.userError "isolation other machine")
     sql mc.db "CREATE TABLE IF NOT EXISTS managed_snapshots (id TEXT PRIMARY KEY,name TEXT NOT NULL,provider TEXT NOT NULL DEFAULT 'boat',source_machine_id TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'ready',size_gb INTEGER NOT NULL DEFAULT 20,created_at TEXT NOT NULL DEFAULT '');"
     for uid in #["admin", "member", "legacy"] do
       sql mc.db "INSERT INTO managed_snapshots(id,name,source_machine_id) VALUES(?1,?2,?3);"
@@ -320,6 +330,17 @@ def run (root : String) : IO Unit := do
       let .ok request := parseRequest wire.toUTF8 none | throw (IO.userError "isolation request")
       let .ok response ← dispatchCoreRequest app request now | throw (IO.userError "isolation dispatch")
       return (response.status, (parseBytes response.body).toOption.getD .null)
+    -- R16 HTTP-14: aggregate stats are tenant scoped and honor `since`.
+    let (memberStatsSt, memberStats) ← send "GET" "/api/stats" member
+    let (adminStatsSt, adminStats) ← send "GET" "/api/stats" admin
+    let (futureStatsSt, futureStats) ← send "GET" "/api/stats?since=2099-01-01T00:00:00Z" member
+    check (memberStatsSt == 200 && adminStatsSt == 200 &&
+      memberStats.fieldNat? "missions" == some 2 && adminStats.fieldNat? "missions" == some 1 &&
+      (memberStats.fieldOrNull "tasks").fieldNat? "total" == some 2 &&
+      (memberStats.fieldOrNull "cost").fieldStr? "provenance" == some "unknown")
+      s!"r16_http14_stats_tenant_scoped (member={memberStatsSt}/{memberStats.fieldNat? "missions"}, admin={adminStatsSt}/{adminStats.fieldNat? "missions"})"
+    check (futureStatsSt == 200 && futureStats.fieldNat? "missions" == some 0)
+      s!"r16_http14_stats_since_filter (got {futureStatsSt}/{futureStats.fieldNat? "missions"})"
     -- Per-user Library contract: real HTTP dispatch and local fixture git only.
     let previousLibraryPath ← IO.getEnv "LIBRARY_PATH"
     let ownerLibrary := path ++ "/owner-library"
@@ -583,6 +604,22 @@ def run (root : String) : IO Unit := do
       machineResult.fieldNat? "spent_today_cents" == some 2) "MCP machine inventory and usage stay with member"
     let budget ← call member "get_budget"
     check ((budget.fieldOrNull "result").fieldNat? "spent_today_cents" == some 2) "MCP budget excludes admin spend"
+    -- R16 FLT-03: durable jobs are tenant scoped for list/get/cancel.
+    sql store.missionsDb
+      "CREATE TABLE IF NOT EXISTS remote_node_jobs (job_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL DEFAULT '', node_id TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'queued', payload_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');"
+    for (jid, mid) in #[("admin-job", "admin-mission"), ("member-job", "member-mission")] do
+      sql store.missionsDb
+        "INSERT INTO remote_node_jobs(job_id,mission_id,state,created_at,updated_at) VALUES(?1,?2,'queued','2026-11-13T10:00:00Z','2026-11-13T10:00:00Z');"
+        #[jid, mid]
+    let (memberJobsSt, memberJobs) ← send "GET" "/api/durable-jobs" member
+    let (foreignJobSt, foreignJob) ← send "GET" "/api/durable-jobs/admin-job" member
+    let (foreignCancelSt, _) ← send "POST" "/api/durable-jobs/admin-job/cancel" member
+    let (ownJobSt, ownJob) ← send "GET" "/api/durable-jobs/member-job" member
+    check (memberJobsSt == 200 && ((renderCompact memberJobs).splitOn "admin-job").length == 1 &&
+      ((renderCompact memberJobs).splitOn "member-job").length > 1 &&
+      foreignJobSt == 404 && foreignJob.fieldStr? "error" == some "durable_job_not_found" &&
+      foreignCancelSt == 404 && ownJobSt == 200 && ownJob.fieldStr? "job_id" == some "member-job")
+      s!"r16_flt03_durable_jobs_tenant_scoped (list={memberJobsSt}, foreign={foreignJobSt}, cancel={foreignCancelSt}, own={ownJobSt})"
     let projectArgs : JVal := .obj #[("project", .str "admin-project"), ("status", .str "archived")]
     for tool in #["get_project", "get_project_grant", "update_project_status"] do
       let doc ← call member tool projectArgs
@@ -606,6 +643,23 @@ def run (root : String) : IO Unit := do
         check (doc.fieldBool? "ok" == some false &&
           (doc.fieldOrNull "error").fieldStr? "code" == some "forbidden")
           s!"scoped role cannot use owner secret broker {role}/{tool}"
+    -- R16 MCP-14/SEC-04: unrelated same-user trees do not share machines,
+    -- budgets, mission lists, or role escalation.
+    let scopedMachines ← call memberSession "list_managed_machines"
+    let (_, scopedBudget) ← send "GET" "/api/mcp/call" memberSession (.obj #[("name", .str "get_budget"),
+      ("arguments", .obj #[("mission_id", .str "member-other")])])
+    let scopedMissions ← call memberSession "list_missions"
+    let escalatedSettings ← call memberSession "update_mission_settings" (.obj #[("mission_id", .str "member-mission"),
+      ("role", .str "coordinator")])
+    check (scopedMachines.fieldBool? "ok" == some true &&
+      ((renderCompact scopedMachines).splitOn "member-other-machine").length == 1 &&
+      scopedBudget.fieldBool? "ok" != some true &&
+      scopedMissions.fieldBool? "ok" == some false &&
+      (scopedMissions.fieldOrNull "error").fieldStr? "code" == some "forbidden_tool_role" &&
+      ((renderCompact scopedMissions).splitOn "member-other").length == 1 &&
+      escalatedSettings.fieldBool? "ok" == some false &&
+      (escalatedSettings.fieldOrNull "error").fieldStr? "code" == some "forbidden_tool_role")
+      s!"r16_same_user_unrelated_tree_isolated (machines={renderCompact scopedMachines}, missions={renderCompact scopedMissions}, budget={renderCompact scopedBudget}, roles={renderCompact escalatedSettings})"
     -- Project board contract: owner nomination, controller-only mutation, shared reads.
     let emptyBoard ← call memberSession "read_project_board"
     check (emptyBoard.fieldBool? "ok" == some true &&
@@ -1781,6 +1835,21 @@ def run (root : String) : IO Unit := do
     finally
       closeManagedComputeStore matMc
       closeCoreStore matStore
+    -- R16 FLT-16: a relay response only settles the waiter its own machine owns.
+    let hub ← OrbCore.RemoteFleetAndRelay.newRelayHub 0
+    let relayReq : OrbCore.RemoteFleetAndRelay.RelayHttpReq := {
+      id := "relay-waiter", machineId := "relay-machine-a", method := "GET", path := "/",
+      headers := #[], bodyB64 := "" }
+    let relayResp : OrbCore.RemoteFleetAndRelay.RelayHttpResp := {
+      id := "relay-waiter", status := 200, headers := #[], bodyB64 := "" }
+    OrbCore.RemoteFleetAndRelay.enqueueRelayHttpReq hub relayReq
+    OrbCore.RemoteFleetAndRelay.deliverRelayHttpResp hub "relay-machine-b" relayResp
+    let wrongOwner ← OrbCore.RemoteFleetAndRelay.takeRelayHttpResp? hub "relay-machine-a" "relay-waiter"
+    OrbCore.RemoteFleetAndRelay.deliverRelayHttpResp hub "relay-machine-a" relayResp
+    let otherReader ← OrbCore.RemoteFleetAndRelay.takeRelayHttpResp? hub "relay-machine-b" "relay-waiter"
+    let owner ← OrbCore.RemoteFleetAndRelay.takeRelayHttpResp? hub "relay-machine-a" "relay-waiter"
+    check (wrongOwner.isNone && otherReader.isNone && owner.isSome)
+      s!"r16_flt16_relay_waiter_machine_bound (wrongOwner={wrongOwner.isSome}, other={otherReader.isSome}, owner={owner.isSome})"
     -- Disabling/deleting an issuer must stop every previously minted session,
     -- including an external session with no mission id and a shared mission.
     for update in #["UPDATE users SET disabled=1 WHERE id='member';", "DELETE FROM users WHERE id='member';"] do

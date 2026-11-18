@@ -66,14 +66,18 @@ structure RelayHttpReq where
   deriving Repr, Inhabited
 
 structure RelayHttpResp where
-  id      : String
-  status  : Nat
-  headers : Array (String × String)
-  bodyB64 : String
+  id        : String
+  machineId : String := ""
+  status    : Nat
+  headers   : Array (String × String)
+  bodyB64   : String
   deriving Repr, Inhabited
 
 structure RelayHubState where
   pendingByMachine : Array (String × Array RelayHttpReq) := #[]
+  -- Machine/request membership is registered before enqueue and only the
+  -- authenticated machine may complete it once (`FLT-16`).
+  outstandingById  : Array (String × String) := #[]
   completedById    : Array (String × RelayHttpResp) := #[]
   lastSeenSec      : Array (String × UInt64) := #[]
 
@@ -101,7 +105,9 @@ def enqueueRelayHttpReq (hub : RelayHub) (req : RelayHttpReq) : IO Unit :=
     let st ← get
     let cur := ((st.pendingByMachine.find? (fun (m, _) => m == req.machineId)).map Prod.snd).getD #[]
     let others := st.pendingByMachine.filter (fun (m, _) => m != req.machineId)
-    set { st with pendingByMachine := others.push (req.machineId, cur.push req) }
+    set { st with
+      pendingByMachine := others.push (req.machineId, cur.push req)
+      outstandingById := (st.outstandingById.filter (fun (p : String × String) => p.1 != req.id)).push ((req.id, req.machineId) : String × String) }
 
 def drainRelayHttpReqs (hub : RelayHub) (machineId : String) : IO (Array RelayHttpReq) :=
   hub.mu.atomically do
@@ -114,23 +120,32 @@ def drainRelayHttpReqs (hub : RelayHub) (machineId : String) : IO (Array RelayHt
       set { st with pendingByMachine := others }
       return cur
 
-def deliverRelayHttpResp (hub : RelayHub) (resp : RelayHttpResp) : IO Unit :=
+def deliverRelayHttpResp (hub : RelayHub) (machineId : String) (resp : RelayHttpResp) : IO Unit :=
   hub.mu.atomically do
     let st ← get
+    let ownsWaiter := st.outstandingById.any (fun (p : String × String) => p.1 == resp.id && p.2 == machineId)
+    unless ownsWaiter do
+      return
     let kept :=
       if st.completedById.size > 512 then
         st.completedById.extract (st.completedById.size - 256) st.completedById.size
       else
         st.completedById
     let withoutDup := kept.filter (fun (id, _) => id != resp.id)
-    set { st with completedById := withoutDup.push (resp.id, resp) }
+    let pending := st.pendingByMachine.map fun (m, arr) =>
+      if m == machineId then (m, arr.filter (fun q => q.id != resp.id)) else (m, arr)
+    set { st with
+      pendingByMachine := pending
+      outstandingById := st.outstandingById.filter (fun (p : String × String) => p.1 != resp.id)
+      completedById := withoutDup.push (resp.id, { resp with machineId := machineId }) }
 
-def takeRelayHttpResp? (hub : RelayHub) (reqId : String) : IO (Option RelayHttpResp) :=
+def takeRelayHttpResp? (hub : RelayHub) (machineId reqId : String) : IO (Option RelayHttpResp) :=
   hub.mu.atomically do
     let st ← get
     match st.completedById.find? (fun (id, _) => id == reqId) with
     | none => return none
     | some (_, resp) =>
+      unless resp.machineId == machineId do return none
       set { st with completedById := st.completedById.filter (fun (id, _) => id != reqId) }
       return some resp
 
@@ -212,7 +227,7 @@ def tunnelHttpToManagedMachine
   let stepMs : Nat := 25
   let maxIters := Nat.max 1 (timeoutMs / stepMs)
   for _ in [0:maxIters] do
-    if let some r ← takeRelayHttpResp? hub reqId then
+    if let some r ← takeRelayHttpResp? hub machineId reqId then
       let decodedBody := (OrbBin.PosixExt.base64Decode? r.bodyB64).getD ByteArray.empty
       return .ok {
         status := r.status
@@ -225,7 +240,9 @@ def tunnelHttpToManagedMachine
     let st ← get
     let updated := st.pendingByMachine.map fun (m, arr) =>
       if m == machineId then (m, arr.filter (fun q => q.id != reqId)) else (m, arr)
-    set { st with pendingByMachine := updated }
+    set { st with
+      pendingByMachine := updated
+      outstandingById := st.outstandingById.filter (fun (p : String × String) => p.1 != reqId) }
   return .error s!"relay tunnel timeout waiting for managed machine `{machineId}`"
 
 /-! ## `OrbNode.Lease` Scoped HMAC-SHA256 Token Minting -/
@@ -1501,15 +1518,32 @@ private def ensureDurableJobsTable (store : CoreStore) : IO Unit := do
   discard <| execParamQuery store.missionsDb
     "CREATE TABLE IF NOT EXISTS remote_node_jobs (job_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL DEFAULT '', node_id TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'queued', payload_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" #[]
 
-def listDurableJobsJson (store : CoreStore) (missionId? : Option String := none) (limit : Nat := 100) : IO JVal := do
+private def durableJobVisibleSql : String :=
+  "(m.owner_user_id = ?1 OR EXISTS (SELECT 1 FROM mission_shares s WHERE s.mission_id = m.id AND s.user_id = ?1))"
+
+def listDurableJobsJson (store : CoreStore) (missionId? : Option String := none) (limit : Nat := 100)
+    (callerUserId? : Option String := none) (isAdmin : Bool := false) : IO JVal := do
   ensureDurableJobsTable store
   let lim := Nat.min (Nat.max limit 1) 500
-  let qRes ← match missionId? with
-    | some mid =>
+  let scope := if isAdmin then none else callerUserId?
+  let qRes ← match scope, missionId? with
+    | some uid, some mid =>
+      execParamQuery store.missionsDb
+        ("SELECT j.job_id,j.mission_id,j.node_id,j.state,j.payload_json,j.created_at,j.updated_at FROM remote_node_jobs j " ++
+         "JOIN missions m ON m.id=j.mission_id WHERE j.mission_id=?2 AND " ++ durableJobVisibleSql ++
+         " ORDER BY j.updated_at DESC LIMIT ?3;")
+        #[uid, mid, s!"{lim}"]
+    | some uid, none =>
+      execParamQuery store.missionsDb
+        ("SELECT j.job_id,j.mission_id,j.node_id,j.state,j.payload_json,j.created_at,j.updated_at FROM remote_node_jobs j " ++
+         "JOIN missions m ON m.id=j.mission_id WHERE " ++ durableJobVisibleSql ++
+         " ORDER BY j.updated_at DESC LIMIT ?2;")
+        #[uid, s!"{lim}"]
+    | none, some mid =>
       execParamQuery store.missionsDb
         "SELECT job_id,mission_id,node_id,state,payload_json,created_at,updated_at FROM remote_node_jobs WHERE mission_id=?1 ORDER BY updated_at DESC LIMIT ?2;"
         #[mid, s!"{lim}"]
-    | none =>
+    | none, none =>
       execParamQuery store.missionsDb
         "SELECT job_id,mission_id,node_id,state,payload_json,created_at,updated_at FROM remote_node_jobs ORDER BY updated_at DESC LIMIT ?1;"
         #[s!"{lim}"]
@@ -1856,13 +1890,24 @@ def dispatchRemoteFleetAndRelayRoutes?
   -- 6. `/api/durable-jobs*`
   if segs.length ≥ 2 && segs[0]? == some "api" && segs[1]? == some "durable-jobs" then
     let qMap := parseRawQueryMap rawTarget
+    let durableJobVisible (jid : String) : IO Bool := do
+      if isAdmin then return true
+      match scopedUid? with
+      | none => return true
+      | some uid =>
+        match ← execParamQuery store.missionsDb
+            ("SELECT 1 FROM remote_node_jobs j JOIN missions m ON m.id=j.mission_id WHERE j.job_id=?2 AND " ++
+             durableJobVisibleSql ++ " LIMIT 1;") #[uid, jid] with
+        | .ok rows => return rows.size > 1
+        | .error _ => return false
     if method == "GET" && segs.length == 2 then
       let mid? := lookupQueryParam? qMap "mission_id"
       let lim := (lookupQueryParam? qMap "limit" >>= String.toNat?).getD 100
-      return some (jsonResp 200 (← listDurableJobsJson store mid? lim))
+      return some (jsonResp 200 (← listDurableJobsJson store mid? lim scopedUid? isAdmin))
     else if method == "GET" && segs.length == 3 then
       ensureDurableJobsTable store
       let jid := segs[2]!
+      unless ← durableJobVisible jid do return some (jsonErr 404 "durable_job_not_found")
       match ← execParamQuery store.missionsDb
           "SELECT job_id,mission_id,node_id,state,payload_json,created_at,updated_at FROM remote_node_jobs WHERE job_id=?1;" #[jid] with
       | .ok rows =>
@@ -1887,6 +1932,7 @@ def dispatchRemoteFleetAndRelayRoutes?
     else if method == "POST" && segs.length == 4 && segs[3]? == some "cancel" then
       ensureDurableJobsTable store
       let jid := segs[2]!
+      unless ← durableJobVisible jid do return some (jsonErr 404 "durable_job_not_found")
       let mut targetNode := ""
       let mut found := false
       if let .ok rows ← execParamQuery store.missionsDb
