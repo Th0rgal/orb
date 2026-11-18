@@ -27,7 +27,7 @@ def cycleFocusRuntime (focusState : FocusState) (order : List EntityId) : FocusS
         | [] => none
         | [x] => if x == current then some first else none
         | x :: y :: rest => if x == current then some y else next (y :: rest)
-      focusState.request (next admitted).getD first
+      focusState.request ((next admitted).getD first)
 
 /-- CLI options parsed by `parseRuntimeArgs`. -/
 structure RuntimeConfig where
