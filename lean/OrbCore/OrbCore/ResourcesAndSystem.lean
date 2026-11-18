@@ -2944,26 +2944,34 @@ def dispatchResourcesAndSystemRoute
     if method == "POST" && segs.length == 5 && segs[2]? == some "queue" && segs[4]? == some "send-now" then
       let msgId := segs[3]!
       let qRows ← execParamQuery store.missionsDb
-        "SELECT mission_id, sequence FROM remote_message_queue WHERE user_id='core' AND message_id=?1 LIMIT 1;" #[msgId]
+        "SELECT mission_id, COALESCE(sequence,0), COALESCE(state,''), COALESCE(phase,0) FROM remote_message_queue WHERE user_id='core' AND message_id=?1 LIMIT 1;" #[msgId]
       let .ok rs := qRows | return some (jsonErr 500 "Queue query failed")
       if rs.size ≤ 1 then return some (jsonErr 404 "message not in queue")
       let qMid := (rs[1]![0]?).getD ""
       let allowed ← canAccessMission store qMid callerUserId bootstrapAdminId isLegacyUnscoped true
       if !allowed then return some (jsonErr 403 "Write access denied")
       let interrupt := ((qParam? qMap "interrupt").getD "false") == "true"
-      -- Promote queued message sequence to head of waiting items for this mission
+      if interrupt then
+        return some (jsonErr 409 "interrupt_not_supported")
+      let qState := (rs[1]![2]?).getD ""
+      let qPhase := ((rs[1]![3]?).bind String.toNat?).getD 0
+      if qState != "waiting" || qPhase != 0 then
+        return some (jsonErr 409 "already_claimed_or_delivered")
+      let mut promoted := false
+      -- `send-now` is an ordering promise, so success means this row is the head
+      -- of the mission's waiting prefix and the drainer orders by `sequence`.
       if let .ok minRows ← execParamQuery store.missionsDb
-          "SELECT COALESCE(MIN(sequence), 1) FROM remote_message_queue WHERE user_id='core' AND mission_id=?1 AND state='waiting';"
+          "SELECT COALESCE(MIN(sequence), 0) FROM remote_message_queue WHERE user_id='core' AND mission_id=?1 AND state='waiting' AND COALESCE(phase,0)=0;"
           #[qMid] then
         if minRows.size > 1 then
-          let minSeq := ((minRows[1]![0]?).bind String.toNat?).getD 1
-          if minSeq > 1 then
+          let minSeq := ((minRows[1]![0]?).bind String.toNat?).getD 0
+          let curSeq := ((rs[1]![1]?).bind String.toNat?).getD 0
+          if curSeq > minSeq then
             let _ ← execParamStmt store.missionsDb
               "UPDATE remote_message_queue SET sequence=?2 WHERE user_id='core' AND message_id=?1;"
-              #[msgId, toString (minSeq - 1)]
-      if interrupt then
-        return some (jsonResp 200 (.obj #[("ok", .bool true), ("delivered", .bool false), ("promoted", .bool true)]))
-      return some (jsonResp 200 (.obj #[("ok", .bool true), ("delivered", .bool false)]))
+              #[msgId, s!"{(minSeq : Int) - 1}"]
+            promoted := true
+      return some (jsonResp 200 (.obj #[("ok", .bool true), ("delivered", .bool false), ("promoted", .bool promoted)]))
 
   return none
 

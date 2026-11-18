@@ -40,6 +40,7 @@ import OrbCore.LegacyMigrationTests
 import OrbCore.TenantIsolationTests
 import OrbCore.DevSpendingTests
 import OrbCore.ManagedBudgetTests
+import OrbCore.R18LivenessTests
 import OrbCore.DevOperatorTests
 import OrbCore.ApprovalSignatureTests
 import OrbCore.SettingsTransferTests
@@ -2638,7 +2639,6 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
    let history2Text := (history2Resp.map (·.body)).bind String.fromUTF8? |>.getD ""
    let historyArr := match OrbBin.Json.parse historyText with | .ok (.arr xs) => xs | _ => #[]
    let history2Arr := match OrbBin.Json.parse history2Text with | .ok (.arr xs) => xs | _ => #[]
-   let streamText := (streamResp.map (·.body)).bind String.fromUTF8? |>.getD ""
    let sameText := (sameResp.map (·.body)).bind String.fromUTF8? |>.getD ""
    let clashText := (clashResp.map (·.body)).bind String.fromUTF8? |>.getD ""
    if blobResp.map (·.status) != some 200 || !isSha256Hex hash ||
@@ -2670,7 +2670,7 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
       (history2Arr[1]?).bind (·.fieldNat? "revision") != some 2 ||
       streamResp.map (·.status) != some 200 ||
       streamResp.map (·.contentType) != some "text/event-stream" ||
-      !streamText.startsWith "data: {" || !streamText.endsWith "\n\n" ||
+      streamResp.map (fun r => r.bodyStream?.isSome) != some true ||
       (manifestText.splitOn "\"docs/a.txt\"").length < 2 ||
       (stl.splitOn "\"preferences\":1").length < 2 ||
       traversal.map (·.status) != some 400 || fiveMibStatus != some 200 || bigHttp != some 413 then
@@ -7839,6 +7839,8 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     OrbCore.ManagedResumeTests.run tmpRoot
     OrbCore.DevSpendingTests.run tmpRoot
     OrbCore.ManagedBudgetTests.run tmpRoot
+    OrbCore.R18LivenessTests.recoveryAndOrphanReaping s!"{tmpRoot}/r18-recovery"
+    OrbCore.R18LivenessTests.lineageMissionBudget s!"{tmpRoot}/r18-lineage"
     OrbCore.DevOperatorTests.run tmpRoot
     OrbCore.ApprovalSignatureTests.run tmpRoot
     OrbCore.ManagedAccessTests.run tmpRoot
@@ -8242,16 +8244,29 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   let wsAuthRaw := s!"GET /api/console/ws HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: jwt.{wsToken}\r\n\r\n".toUTF8
   let .ok wsAuthReq := parseRequest wsAuthRaw none | do closeCoreStore store; return 1
   match ← dispatchCoreRequest appSt wsAuthReq nowSec with
+  | .ok r =>
+    if r.status != 501 then
+      closeCoreStore store
+      IO.eprintln s!"[orb-core-test] FAIL: unsupported /api/console/ws returned HTTP {r.status}, expected 501"
+      return 1
+  | .error raw =>
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: unsupported /api/console/ws upgraded instead of 501: {String.fromUTF8! raw}"
+    return 1
+
+  let wsSyncRaw := s!"GET /api/control/sync HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: jwt.{wsToken}\r\n\r\n".toUTF8
+  let .ok wsSyncReq := parseRequest wsSyncRaw none | do closeCoreStore store; return 1
+  match ← dispatchCoreRequest appSt wsSyncReq nowSec with
   | .error raw101 =>
     let resp101 := String.fromUTF8! raw101
     if (resp101.splitOn "101 Switching Protocols").length != 2 ||
        (resp101.splitOn s!"Sec-WebSocket-Protocol: jwt.{wsToken}").length != 2 then
       closeCoreStore store
-      IO.eprintln s!"[orb-core-test] FAIL: authenticated /api/console/ws missing 101 or echoed subprotocol: {resp101}"
+      IO.eprintln s!"[orb-core-test] FAIL: /api/control/sync missing 101 or echoed subprotocol: {resp101}"
       return 1
   | .ok r =>
     closeCoreStore store
-    IO.eprintln s!"[orb-core-test] FAIL: authenticated /api/console/ws returned HTTP {r.status}"
+    IO.eprintln s!"[orb-core-test] FAIL: /api/control/sync returned HTTP {r.status}"
     return 1
 
   -- Durable queue edit (`GET /api/control/queue`, `PATCH /api/control/queue/:id`):
@@ -8353,6 +8368,39 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   if boundPatchResp.status != 409 then
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: job-bound PATCH returned {boundPatchResp.status}"
+    return 1
+
+  -- R18 FUP-02: `send-now` must actually move the waiting row to the head and
+  -- report promotion truthfully; `interrupt` is rejected rather than claimed.
+  let sendNowRaw := s!"POST /api/control/queue/q-3/send-now HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: 0\r\n\r\n".toUTF8
+  let .ok sendNowReq := parseRequest sendNowRaw none | do closeCoreStore store; return 1
+  let .ok sendNowResp ← dispatchCoreRequest appSt sendNowReq nowSec | do closeCoreStore store; return 1
+  let sendNowText := String.fromUTF8! sendNowResp.body
+  if sendNowResp.status != 200 || (sendNowText.splitOn "\"promoted\":true").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: send-now did not report promotion: {sendNowResp.status} {sendNowText}"
+    return 1
+  let .ok (_, qHeadBody) ← sendTestHttp appSt validJwt "GET" "/api/control/queue?mission_id=m-alpha" "" nowSec
+    | do closeCoreStore store; return 1
+  if !qHeadBody.startsWith "[{\"id\":\"q-3\"" then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: send-now did not put q-3 at the waiting head: {qHeadBody}"
+    return 1
+  let interruptRaw := s!"POST /api/control/queue/q-3/send-now?interrupt=true HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: 0\r\n\r\n".toUTF8
+  let .ok interruptReq := parseRequest interruptRaw none | do closeCoreStore store; return 1
+  let .ok interruptResp ← dispatchCoreRequest appSt interruptReq nowSec | do closeCoreStore store; return 1
+  let interruptText := String.fromUTF8! interruptResp.body
+  if interruptResp.status != 409 || (interruptText.splitOn "interrupt_not_supported").length < 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: interrupt send-now was not rejected truthfully ({interruptResp.status})"
+    return 1
+  -- R18 FUP-01: collection DELETE clears the mission's whole waiting prefix.
+  let clearQueueRaw := s!"DELETE /api/control/queue?mission_id=m-alpha HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\n\r\n".toUTF8
+  let .ok clearQueueReq := parseRequest clearQueueRaw none | do closeCoreStore store; return 1
+  let .ok clearQueueResp ← dispatchCoreRequest appSt clearQueueReq nowSec | do closeCoreStore store; return 1
+  if clearQueueResp.status != 200 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: collection queue DELETE returned {clearQueueResp.status}: {String.fromUTF8! clearQueueResp.body}"
     return 1
 
   -- 6b. Phase R2-B & R2-C regressions (`SM-01`, `SM-02`, `SM-08`, `SM-12`)

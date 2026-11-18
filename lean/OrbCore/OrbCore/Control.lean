@@ -1911,6 +1911,45 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     accountBody out.body
     return { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := diagHdrs, body := out.body }
 
+/-- Observe local harness processes independently of the HTTP accept loop. A
+    non-stopping run whose pid disappeared without a reader callback would
+    otherwise leave its mission `active` forever. The conditional database
+    update and receipt make the observation idempotent with the reader. -/
+def tickLocalHarnessSupervisor (st : CoreAppState) (nowIso : String) : IO Nat := do
+  let some mgr := st.warmMgr?
+    | return 0
+  let runs ← mgr.runsRef.get
+  let pids ← mgr.activePidsRef.get
+  let mut observed : Nat := 0
+  for (mid, runRef) in runs do
+    let run ← runRef.get
+    if run.done || run.stopping then continue
+    let pid? := (pids.find? (fun p => p.1 == mid)).map Prod.snd
+    let some pid := pid?
+      | continue
+    let alive ← (System.FilePath.mk s!"/proc/{pid}").pathExists
+    if alive then continue
+    let claim ← execParamQuery st.store.missionsDb
+        ("UPDATE missions SET status='interrupted', terminal_reason='local_harness_exited', " ++
+         "state_revision=state_revision+1, updated_at=?2 " ++
+         "WHERE id=?1 AND status='active' AND run_generation=CAST(?3 AS INTEGER) RETURNING id;")
+        #[mid, nowIso, s!"{run.generation}"]
+    let .ok claimRows := claim | continue
+    if claimRows.size <= 1 then continue
+    runRef.modify fun r => { r with done := true, error? := some "local_harness_exited" }
+    discard <| execParamQuery st.store.missionsDb
+      ("UPDATE mission_runs SET execution_state='terminal', terminal_reason='local_harness_exited', updated_at=?2 " ++
+       "WHERE mission_id=?1 AND generation=CAST(?3 AS INTEGER) AND execution_state NOT IN ('terminal','completed','failed','aborted');")
+      #[mid, nowIso, s!"{run.generation}"]
+    let payload := renderCompact (.obj #[
+      ("status", .str "interrupted"),
+      ("reason", .str "local_harness_exited"),
+      ("reattached", .bool false)
+    ])
+    discard <| appendMissionEvent st.store mid "recovery_receipt" payload nowIso
+    observed := observed + 1
+  return observed
+
 /-- Map structured `HarnessCallbacks` from `OrbBin.ClaudeControl` onto persisted `mission_events` rows
     and record pending `control_request` call IDs so `POST /api/control/tool_result` can route answers cleanly. -/
 def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) : OrbBin.ClaudeControl.HarnessCallbacks := {
@@ -2852,6 +2891,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         (matchRoutePattern? "/api/workspaces/:id/shell" rawTarget).isSome) &&
        !wsCaller.isLegacyUnscoped && wsCaller.role != "admin" then
       return .ok (mkJson 403 "{\"error\":\"admin_required\"}")
+    -- Only the control sync socket is a real bidirectional live transport. The
+    -- other legacy upgrade paths have no session loop; answering 501 keeps the
+    -- client from believing it holds a stream that Core never pumps.
+    if cleanPath != "/api/control/sync" then
+      return .ok (mkJson 501 "{\"error\":\"websocket_transport_not_implemented\",\"supported\":\"/api/control/sync\"}")
     let negProto? := negotiateWsSubprotocol? req.headers
     match buildWebSocketUpgradeResponse? req negProto? with
     | some raw101 => return .error raw101
@@ -3308,6 +3352,16 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             let (code, body) ← launchBtwSideAgent st { asker with userId := if asker.userId.isEmpty then owner else asker.userId }
               srcMid (.obj #[("side_question", .str question)]) idem nowEpochSec
             pure (if code < 300 then .ok body else .error body))
+          (some fun mid callId answers => do
+            match st.warmMgr? with
+            | none => pure (.error "warm harness manager unavailable")
+            | some mgr =>
+              let ok ← OrbBin.ClaudeControl.respondToControlRequest mgr mid callId
+                (.obj #[("action", .str "accept"), ("answers", answers)])
+              if ok then
+                if let some ref := st.pendingControlCallsRef? then
+                  ref.modify fun xs => xs.filter (fun p => p.1 != callId)
+              pure (.ok ok))
           st.cloudHub?
         return .ok (mkJson 200 outJson)
 
@@ -5981,6 +6035,27 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
         return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
 
+  -- Collection cancel: clients should not have to know every queued id to
+  -- clear a mission's pending prefix. Item DELETE remains the single-item form.
+  if req.method == "DELETE" && cleanPath == "/api/control/queue" then
+    let missionId := ((parseQueryParams rawTarget).find? (fun p => p.1 == "mission_id")).map Prod.snd |>.getD ""
+    if missionId.isEmpty then
+      return .ok (mkJson 400 "{\"error\":\"missing_mission_id\"}")
+    if let some (cCode, cBody) := (← authorizeMissionOp st caller missionId false) then
+      return .ok (mkJson cCode cBody)
+    let qRows ← execParamQuery st.store.missionsDb
+      "SELECT message_id FROM remote_message_queue WHERE user_id='core' AND mission_id=?1 AND state='waiting' AND COALESCE(phase,0)=0 ORDER BY rowid ASC;"
+      #[missionId]
+    let .ok rs := qRows | return .ok (mkJson 500 "{\"error\":\"queue_read_failed\"}")
+    let mut cancelled : Nat := 0
+    for i in [1:rs.size] do
+      let messageId := (cell rs[i]! 0).trimAscii.toString
+      if messageId.isEmpty then continue
+      match ← stepQueueItem st.store "core" messageId 5 "0" s!"{st.store.bootEpoch}" "0" s!"{nowEpochSec}" 0 0 "" with
+      | .ok (.ok _) => cancelled := cancelled + 1
+      | _ => pure ()
+    return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape missionId},\"cancelled\":{cancelled}}")
+
   if let some params := matchRoutePattern? "/api/control/queue/:id/step" rawTarget then
     if req.method == "POST" then
       let messageId := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
@@ -6728,16 +6803,38 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | .ok body => return .ok (mkJson 200 body)
         | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       else if kind == "stream" && req.method == "GET" && arg.isEmpty then
-        match ← contextStreamEvent st.store proj with
-        | .ok ev =>
+        match ← contextManifestJson st.store proj with
+        | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+        | .ok firstBody =>
           return .ok {
             status := 200,
             contentType := "text/event-stream",
             corsOrigin? := reqOrigin?,
             extraHdrs := #[("Cache-Control", "no-cache"), ("X-Accel-Buffering", "no")],
-            body := ev.toUTF8
+            body := ByteArray.empty,
+            bodyStream? := some fun emit => do
+              if !(← emit s!"data: {firstBody}\n\n".toUTF8) then return false
+              let mut lastBody := firstBody
+              let mut lastEmitMs := ← IO.monoMsNow
+              let mut running := true
+              while running do
+                IO.sleep 1000
+                match ← contextManifestJson st.store proj with
+                | .ok body =>
+                  if body != lastBody then
+                    lastBody := body
+                    lastEmitMs ← IO.monoMsNow
+                    if !(← emit s!"data: {body}\n\n".toUTF8) then running := false
+                | .error e =>
+                  discard <| emit s!"event: error\ndata: \{\"error\":{jsonEscape e}}\n\n".toUTF8
+                  running := false
+                if running then
+                  let nowMs ← IO.monoMsNow
+                  if nowMs - lastEmitMs ≥ 15000 then
+                    lastEmitMs := nowMs
+                    if !(← emit ": keep-alive\n\n".toUTF8) then running := false
+              return true
           }
-        | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       else if kind == "blobs" && req.method == "POST" && arg.isEmpty then
         let qParams := parseQueryParams rawTarget
         let confirmedLarge :=
@@ -7681,8 +7778,8 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       | .error storeErr =>
         IO.eprintln s!"[sandboxed-sh] FATAL: failed to open SQLite CoreStore at {dataRoot}: {storeErr}"
         return 1
-    let managedStore ← match ← openManagedComputeStore s!"{dataRoot}/managed_compute.db" with
-      | .ok ms => pure { ms with missionsDb? := some store.missionsDb }
+    let managedStore ← match ← openManagedComputeStore s!"{dataRoot}/managed_compute.db" (some store.missionsDb) with
+      | .ok ms => pure ms
       | .error msErr =>
         closeCoreStore store
         IO.eprintln s!"[sandboxed-sh] FATAL: failed to open managed_compute.db at {dataRoot}: {msErr}"
@@ -7828,10 +7925,14 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
         catch e =>
           IO.eprintln s!"[sandboxed-sh] remote job re-attach failed: {e}"
         while true do
-          try
-            discard <| tickContinuationScheduler store (some managedStore) (some relayHub) (some broadcastHub) remoteSup (some warmMgr) cfg.workingDir (some localWakeupLaunch)
-          catch e =>
-            IO.eprintln s!"[sandboxed-sh] wake-up scheduler pass failed: {e}"
+           try
+             discard <| tickContinuationScheduler store (some managedStore) (some relayHub) (some broadcastHub) remoteSup (some warmMgr) cfg.workingDir (some localWakeupLaunch)
+             let nowSec ← coreEpochSec
+             discard <| tickLocalHarnessSupervisor appState (formatEpochIso8601Utc nowSec)
+             discard <| reapOrphanedMissionRuns store.missionsDb (formatEpochIso8601Utc nowSec)
+             discard <| tickRemoteFollowupPump store (some managedStore) (some relayHub) (some broadcastHub) remoteSup cfg.workingDir nowSec
+           catch e =>
+             IO.eprintln s!"[sandboxed-sh] wake-up scheduler pass failed: {e}"
           IO.sleep 2000
       discard <| IO.asTask (prio := .dedicated) do
         let mut lastInventory : UInt64 := 0
@@ -7915,6 +8016,11 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
             if curSec ≥ lastWatchdogSec + wdIntervalSec then
               lastWatchdogSec := curSec
               discard <| sdNotifyRaw notifySock "WATCHDOG=1\n"
+          if maxRequests?.isNone then
+            let curSec ← coreEpochSec
+            if curSec ≥ lastTelFlushSec + 30 then
+              lastTelFlushSec := curSec
+              discard <| IO.asTask (prio := .dedicated) (do discard <| flushTelemetryOnce telemetrySink curSec)
         served := served + 1
     if !notifySock.isEmpty then
       discard <| sdNotifyRaw notifySock "STOPPING=1\n"
