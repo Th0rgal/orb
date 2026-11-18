@@ -18,6 +18,7 @@ private def step (s : DesktopState) (e : Event) : DesktopState :=
   (stepDesktopEvent 120 viewport s e).1
 
 #guard (step (step base (.text "hello")) (.activate 2)).messageSent
+#guard !(step (step base (.text "hello")) (.activate 2)).missionStopped
 #guard (step (step base (.text "hello")) (.activate 2)).composer.text == ""
 #guard (step { base with composer := { base.composer with isRunning := true } } (.activate 2)).missionStopped
 #guard (step base (.activate 106)).missionArchived
