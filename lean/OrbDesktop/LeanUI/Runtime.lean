@@ -162,7 +162,7 @@ def stepEvent (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage) (
       if state == .pressed || state == .repeated then
         -- Tab is handled here so every screen shares one focus traversal policy.
         if keysym == 0xff09 then
-          { rt with focus := cycleFocus rt.focus rt.focusableOrder }
+          { rt with focus := LeanUI.cycleFocus rt.focus rt.focusableOrder }
         else if keysym == 0xff0d || keysym == 0x20 then
           match rt.focus.owner with
           | some id =>
