@@ -139,6 +139,11 @@ class ReconcileTest(unittest.TestCase):
         self.assertIsNone(NS["master_tick"]([], self.rows, {}, NOW, idle, False))
         self.assertIn("No row is waiting", NS["master_tick"]([], self.rows, {}, NOW, idle, True))
 
+    def test_a_master_child_track_maps_back_to_its_row(self):
+        child = mission("A2", "active")
+        child["track"] = "roadmap-A2-c1234abcd"
+        self.assertNotIn("A2", [a[1] for a in self.run_plan(missions=[child])])
+
     def test_each_attempt_uses_the_next_model(self):
         self.assertEqual(NS["MODELS"], ["openai/gpt-6.2-astra", "openai/gpt-6.2-sol",
                                         "anthropic/claude-fable-5-2", "ethereumfoundation/deepseek-v4.1-flash"])
