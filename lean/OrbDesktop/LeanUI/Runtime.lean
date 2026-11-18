@@ -68,6 +68,8 @@ structure RuntimeState (σ : Type) where
   windowFocused : Bool := true
   hoveredEntity : Option EntityId := none
   hitRegions : List (EntityId × Rect) := []
+  focusableOrder : List EntityId := []
+  pressedEntity : Option EntityId := none
   scrollOffsetSub : Nat := 0
   contentHeightSub : Nat := 64000
   damage : Damage := none
@@ -135,9 +137,20 @@ def stepEvent (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage) (
         | some id =>
           let r := (rt.hitRegions.find? (·.1 == id)).map (·.2) |>.getD rt.viewportDeviceRect
           let devR := roundRectOut rt.wayland.scale120 r
-          rt.requestFocus id devR
+          { (rt.requestFocus id devR) with pressedEntity := some id }
         | none => rt
-      else rt
+      else
+        match hitTest rt.hitRegions px py, rt.pressedEntity with
+        | some id, some pressed =>
+          let rt' := { rt with pressedEntity := none }
+          if id == pressed then
+            let (app', appDmg) := onEvent rt'.app (.activate id)
+            let finalDmg := match appDmg with
+              | none => rt'.damage
+              | some r => Damage.add rt'.damage r
+            { rt' with app := app', damage := finalDmg }
+          else rt'
+        | _, _ => { rt with pressedEntity := none }
     | .scroll _px _py _dx dy =>
       let (_, vhSub) := rt.wayland.logicalSubSize
       let nextOff := scrollStep rt.contentHeightSub vhSub rt.scrollOffsetSub dy
@@ -145,6 +158,22 @@ def stepEvent (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage) (
       else { (rt.markFullDamage) with scrollOffsetSub := nextOff }
     | .closeRequested =>
       { rt with running := false }
+    | .key keysym _mods state =>
+      if state == .pressed || state == .repeated then
+        -- Tab is handled here so every screen shares one focus traversal policy.
+        if keysym == 0xff09 then
+          { rt with focus := cycleFocus rt.focus rt.focusableOrder }
+        else if keysym == 0xff0d || keysym == 0x20 then
+          match rt.focus.owner with
+          | some id =>
+            let (app', appDmg) := onEvent rt.app (.activate id)
+            let finalDmg := match appDmg with
+              | none => rt.damage
+              | some r => Damage.add rt.damage r
+            { rt with app := app', damage := finalDmg }
+          | none => rt
+        else rt
+      else rt
     | _ => rt
   let (app', appDmg) := onEvent rt1.app ev
   let finalDmg := match appDmg with
@@ -184,6 +213,7 @@ def stepFrame {σ : Type} (rt : RuntimeState σ)
     vulkan := vk'
     atlas := atlas'
     hitRegions := regions
+    focusableOrder := regions.map (·.1)
     damage := none
     framesRendered := st.framesRendered + 1
   }
