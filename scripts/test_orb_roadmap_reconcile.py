@@ -101,11 +101,10 @@ class ReconcileTest(unittest.TestCase):
         f.update(returns_ts=NOW + 3600, model=fable)
         d = mission("Z2", "cancelled", updated=NOW - 60, created_ts=NOW - 65)
         d.update(returns_ts=NOW + 3600, model=NS["MODELS"][2])
-        e = mission("Z3", "cancelled", updated=NOW - 60, created_ts=NOW - 65)
-        e.update(returns_ts=NOW + 3600, model=NS["MODELS"][3])
-        self.assertEqual(self.run_plan(missions=[a, f, d, e]), [])
+
+        self.assertEqual(self.run_plan(missions=[a, f, d]), [])
         a["returns_ts"] = NOW - 1
-        self.assertEqual(self.run_plan(missions=[a, f, d, e]), [("start", "A2", 1), ("start", "A6", 1)])
+        self.assertEqual(self.run_plan(missions=[a, f, d]), [("start", "A2", 1), ("start", "A6", 1)])
         self.assertEqual(self.models, [astra, astra])
 
     def test_a_provider_with_every_account_parked_is_skipped(self):
@@ -146,7 +145,7 @@ class ReconcileTest(unittest.TestCase):
 
     def test_each_attempt_uses_the_next_model(self):
         self.assertEqual(NS["MODELS"], ["openai/gpt-6.2-astra", "openai/gpt-6.2-sol",
-                                        "anthropic/claude-fable-5-2", "ethereumfoundation/deepseek-v4.1-flash"])
+                                        "anthropic/claude-fable-5-2"])
 
     def test_a_recently_idle_worker_is_not_nudged_yet(self):
         self.assertNotIn("A2", [a[1] for a in self.run_plan(missions=[mission("A2", "awaiting_user", updated=NOW - 60)])])
