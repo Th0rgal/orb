@@ -426,11 +426,11 @@ def dispatchMcpToolCall
   -- cancellation, board write, or machine operation.  Keep the decision in
   -- Core, beside the persisted authority mode, rather than trusting tags or
   -- prompt text supplied by the worker.
-  let readonlyCaller := if callerMid.isEmpty then false else
+  let readonlyCaller ← if callerMid.isEmpty then pure false else
     match ← execParamQuery store.missionsDb
       "SELECT COALESCE(authority_mode,'writer') FROM missions WHERE id=?1;" #[callerMid] with
-    | .ok rows => rows.size > 1 && cell rows[1]! 0 == "readonly"
-    | .error _ => false
+    | .ok rows => pure (rows.size > 1 && cell rows[1]! 0 == "readonly")
+    | .error _ => pure false
 
   let canManageMachine (machine : ManagedMachine) : IO Bool := do
     if operatorIsAdmin then return true
@@ -1177,7 +1177,7 @@ def dispatchMcpToolCall
     let requestedWriter? := args.fieldBool? "writer"
     let requestedTags := (args.fieldArr? "tags").getD #[] |>.filterMap JVal.asStr?
     let requestedIntent := (args.fieldStr? "intent").getD ""
-    let .ok authMode ← classifyAuthorityMode requestedWriter? requestedTags
+    let .ok authMode := classifyAuthorityMode requestedWriter? requestedTags
         (toolName == "consult_model" || requestedIntent == "review_only" || requestedIntent == "readonly")
       | return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed"
           "contradictory_authority_tags" nowIso "contradictory_authority_tags"
