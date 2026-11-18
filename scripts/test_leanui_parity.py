@@ -6,6 +6,7 @@ import re
 import struct
 import tempfile
 import unittest
+ROOT = Path(__file__).resolve().parents[1]
 try:
     import numpy as np
     from PIL import Image
@@ -17,6 +18,15 @@ except ModuleNotFoundError:
 
 
 class ParityTests(unittest.TestCase):
+    def test_split_diff_uses_shaped_code_runs(self):
+        source = (ROOT / 'lean/OrbDesktop/OrbDesktop/Screens.lean').read_text()
+        self.assertIn(
+            'buildSplitDiffRightPane theme rightW splitH runs.diffDelRuns runs.diffAddRuns',
+            source,
+        )
+        self.assertIn('shapedCodeLine halfW h codeL codeRunsL', source)
+        self.assertIn('shapedCodeLine halfW h codeR codeRunsR', source)
+
     @unittest.skipUnless(HAS_IMAGE_DEPS, 'requires numpy and Pillow')
     def test_metrics_and_strict_tolerance(self):
         a = np.zeros((10, 10, 3), dtype=np.uint8)

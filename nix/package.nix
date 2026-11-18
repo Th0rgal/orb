@@ -229,6 +229,11 @@
     # bake them into DT_RUNPATH during `installPhase` on Linux.
     LD_LIBRARY_PATH = lib.makeLibraryPath [openssl sqlite];
 
+    # lean/OrbDesktop's text renderer includes <hb-ft.h> and <ft2build.h>, which
+    # live in subdirectories of the dev outputs.
+    LEANUI_TEXT_CFLAGS = lib.optionalString (stdenv.hostPlatform.isLinux && wayland != null)
+      "-I${lib.getDev freetype}/include/freetype2 -I${lib.getDev harfbuzz}/include/harfbuzz";
+
     # Each layer builds in a fresh sandbox, so turbo-lean's module cache always
     # starts empty there and its extra kernel audits only add time (OrbCore:
     # 7m22s with turbo-lean vs 4m45s with Lake on DGX Spark). Nix caches the
@@ -318,13 +323,16 @@
     src = leanSource [../lean/OrbNode];
     bins = ["sandboxed-node"];
     deps = [leanBase];
+    keepLake = true; # the Core layer reuses OrbNode's build tree
   };
 
+  # OrbCore requires the OrbNode package (`require «orb-node» from "../OrbNode"`),
+  # so its source holds OrbNode too and it reuses the Node layer's build tree.
   leanCore = mkLeanLayer {
     pname = "orb-lean-core";
-    src = leanSource [../lean/OrbCore];
+    src = leanSource [../lean/OrbNode ../lean/OrbCore];
     bins = ["orb-core"];
-    deps = [leanBase];
+    deps = [leanBase leanNode];
   };
 
   leanLocald = mkLeanLayer {

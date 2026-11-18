@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Named U4 evidence: Linux defaults to LeanUI and keeps WebKit explicit."""
+"""Linux starts the GTK/WebKit client by default; LeanUI only with --leanui.
+
+LeanUI renders the parity screens from fixtures but does not load real data or
+handle input yet (roadmap U5-U9), so it must not be what Orb opens by default.
+"""
 from pathlib import Path
 
 
@@ -9,13 +13,13 @@ PACKAGE = (ROOT / "nix/desktop.nix").read_text()
 
 
 def main() -> None:
-    assert 'OS_NAME="$(uname -s)"' in SCRIPT
-    assert '"${1:-}" == "--webkit"' in SCRIPT
-    assert 'exec "$STAGE_BIN_DIR/orb-webkit"' in SCRIPT
-    assert 'exec "$STAGE_BIN_DIR/orb-desktop-native"' in SCRIPT
-    assert 'exec "$(dirname "$0")/orb-webkit"' in PACKAGE
-    assert 'exec "$(dirname "$0")/orb-desktop-native"' in PACKAGE
-    print("linux desktop selection: LeanUI default, WebKit explicit --webkit")
+    assert "USE_WEBKIT=1" in SCRIPT
+    assert '"${1:-}" == "--leanui"' in SCRIPT
+    assert ".orb-desktop-unwrapped" not in SCRIPT, "the installed launcher must start orb-webkit"
+    pkg_default = PACKAGE.strip().split('[[ "\'\'${1:-}" == "--webkit" ]] && shift')[1]
+    assert 'exec "$(dirname "$0")/orb-webkit"' in pkg_default
+    assert '"--leanui"' in PACKAGE
+    print("linux desktop selection: WebKit default, LeanUI explicit --leanui")
 
 
 if __name__ == "__main__":

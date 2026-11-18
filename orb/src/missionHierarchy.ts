@@ -26,6 +26,7 @@ export type HierarchyFields = {
   callback_parent_mission_id?: string | null;
   tags?: readonly string[] | null;
   title?: string | null;
+  metadata_updated_at?: string | null;
   project?: string | null;
   folder?: string | null;
   placement_revision?: number;
@@ -435,14 +436,25 @@ export function mergeMission<M extends HierarchyFields>(prev: M | undefined, nex
   } else {
     observeMission(next as HierarchyFields, mode === "partial");
   }
-  const prevLink = links.get(next.id);
+  // Detail reads can finish after a rename.  A full stale response must not
+  // redraw metadata that a newer list or mutation has already committed.
+  const incoming = (() => {
+    if (mode !== "full" || !prev) return next;
+    const previousMetadata = prev.metadata_updated_at ? Date.parse(prev.metadata_updated_at) : NaN;
+    const incomingMetadata = next.metadata_updated_at ? Date.parse(next.metadata_updated_at) : NaN;
+    if (!Number.isNaN(previousMetadata) && !Number.isNaN(incomingMetadata) && incomingMetadata < previousMetadata) {
+      return { ...next, title: prev.title, metadata_updated_at: prev.metadata_updated_at };
+    }
+    return next;
+  })();
+  const prevLink = links.get(incoming.id);
   const curParentOrd = internParentOrd(prevLink?.parent ?? nonEmpty(prev?.parent_mission_id));
-  const incParent = nonEmpty(next.parent_mission_id);
+  const incParent = nonEmpty(incoming.parent_mission_id);
   const incParentOrd = internParentOrd(incParent);
   const curSuperseded = Boolean(prevLink?.superseded || hasTypedSuperseded(prev));
-  const incSupersede = curSuperseded || hasTypedSuperseded(next);
+  const incSupersede = curSuperseded || hasTypedSuperseded(incoming);
   const curArchived = curSuperseded || prev?.status === "completed" || prev?.status === "acknowledged";
-  const incArchive = incSupersede || next.status === "completed" || next.status === "acknowledged";
+  const incArchive = incSupersede || incoming.status === "completed" || incoming.status === "acknowledged";
   const incUnarchive = !incArchive && curArchived;
   const currentEpoch = hierarchyEpoch;
   hierarchyEpoch += 1n;
@@ -464,10 +476,10 @@ export function mergeMission<M extends HierarchyFields>(prev: M | undefined, nex
   if (!step.admitted && prev) {
     merged = { ...prev };
   } else if (mode === "full" || !prev) {
-    merged = next as M;
+    merged = incoming as M;
   } else {
     merged = { ...prev };
-    for (const [key, value] of Object.entries(next)) if (value !== undefined) (merged as Record<string, unknown>)[key] = value;
+    for (const [key, value] of Object.entries(incoming)) if (value !== undefined) (merged as Record<string, unknown>)[key] = value;
   }
   return withHierarchy(merged);
 }

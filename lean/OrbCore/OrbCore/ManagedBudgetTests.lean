@@ -29,6 +29,10 @@ private def setBandwidth (st : ManagedComputeStore) (mission json : String) : IO
   discard <| require (← saveMissionBudgetConfig st {
     missionId := mission, bandwidthLimitsJson := json })
 
+private def setVmLimits (st : ManagedComputeStore) (mission json : String) : IO Unit := do
+  discard <| require (← saveMissionBudgetConfig st {
+    missionId := mission, vmLimitsJson := json })
+
 private def configure (st : ManagedComputeStore) : IO Unit := do
   discard <| require (← saveManagedFleetConfig st true true fleet.dailyCapCents
     fleet.spentTodayCents fleet.maxConcurrent)
@@ -279,6 +283,91 @@ def bandwidthRateAdmission (root : String) : IO Unit := do
     refusedBandwidth "managed_compute_cost_bandwidth_exceeded" st "rate-owner" "rate-single-over" 0 90003
   finally closeManagedComputeStore st
 
+/-- FLT-10: a parent mission's compute bandwidth pool covers its descendants,
+    including the impossible single-VM fit and subtree aggregate use, while a
+    machine the pool's own mission owns keeps the `protect_root` bypass. -/
+def ancestorBandwidthAdmission (root : String) : IO Unit := do
+  let core ← require (← openCoreStore (root ++ "/budget-lineage-core"))
+  try
+    let st ← require (← openManagedComputeStore (root ++ "/budget-lineage.db"))
+    let st := { st with missionsDb? := some core.missionsDb }
+    try
+      configure st
+      for (id, parent, owner) in #[
+          ("lineage-parent", "", "alice"), ("lineage-child", "lineage-parent", "alice"),
+          ("lineage-grandchild", "lineage-child", "alice"),
+          ("lineage-outsider", "lineage-parent", "bob")] do
+        discard <| require (← execParamQuery core.missionsDb
+          "INSERT INTO missions(id,parent_mission_id,owner_user_id,project) VALUES(?1,?2,?3,'p');"
+          #[id, parent, owner])
+      setBandwidth st "lineage-parent"
+        "{\"compute_vcpu_per_min\":3,\"compute_usd_per_hour\":100,\"protect_root\":false}"
+      discard <| require (← provisionManagedMachine st fleet
+        (bandwidthMachine "lineage-first" "lineage-child") 90000)
+      let beforeOver ← reservationCount st
+      match ← provisionManagedMachine st fleet
+          (bandwidthMachine "lineage-over" "lineage-grandchild") 90001 with
+      | .ok _ => throw (IO.userError "unexpected admission: lineage-over")
+      | .error error =>
+        check (error == "managed_compute_vcpu_bandwidth_exceeded")
+          "lineage-over: ancestor pool refuses subtree aggregate"
+      check ((← getManagedMachine? st "lineage-over").isNone)
+        "lineage-over: refusal creates no provider work"
+      let afterOver ← reservationCount st
+      check (afterOver == beforeOver) "lineage-over: refusal creates no reservation"
+      -- A single VM larger than the whole ancestor ceiling can never be admitted.
+      setBandwidth st "lineage-parent"
+        "{\"compute_vcpu_per_min\":1,\"compute_usd_per_hour\":100,\"protect_root\":true}"
+      refusedBandwidth "managed_compute_vcpu_bandwidth_exceeded" st
+        "lineage-child" "lineage-single-over" 0 90002
+      -- The root mission's own VM bypasses aggregate pacing, a child's VM does not.
+      setBandwidth st "lineage-parent"
+        "{\"compute_vcpu_per_min\":3,\"compute_usd_per_hour\":100,\"protect_root\":true}"
+      discard <| require (← provisionManagedMachine st fleet
+        (bandwidthMachine "lineage-root" "lineage-parent") 90003)
+      refusedBandwidth "managed_compute_vcpu_bandwidth_exceeded" st
+        "lineage-child" "lineage-child-over" 0 90004
+      -- An ancestor pool never crosses into another owner's mission tree.
+      discard <| require (← provisionManagedMachine st fleet
+        { bandwidthMachine "lineage-outsider" "lineage-outsider" with ownerUserId := "bob" } 90005)
+    finally closeManagedComputeStore st
+  finally closeCoreStore core
+
+/-- FLT-09: mission and provider concurrency caps are admission inputs, and an
+    ancestor's cap covers its same-owner subtree instead of only its own row. -/
+def ancestorConcurrencyAdmission (root : String) : IO Unit := do
+  let core ← require (← openCoreStore (root ++ "/budget-concurrency-lineage-core"))
+  try
+    let st ← require (← openManagedComputeStore (root ++ "/budget-concurrency-lineage.db"))
+    let st := { st with missionsDb? := some core.missionsDb }
+    try
+      configure st
+      for (id, parent, owner) in #[
+          ("conc-parent", "", "alice"), ("conc-child", "conc-parent", "alice"),
+          ("conc-grandchild", "conc-child", "alice")] do
+        discard <| require (← execParamQuery core.missionsDb
+          "INSERT INTO missions(id,parent_mission_id,owner_user_id,project) VALUES(?1,?2,?3,'p');"
+          #[id, parent, owner])
+      setVmLimits st "conc-parent" "{\"max_concurrent\":1}"
+      discard <| require (← provisionManagedMachine st fleet
+        (bandwidthMachine "conc-first" "conc-child") 90000)
+      let beforeMission ← reservationCount st
+      refusedBandwidth "managed_mission_concurrency_limit_reached" st
+        "conc-grandchild" "conc-mission-over" 0 90001
+      check ((← reservationCount st) == beforeMission)
+        "conc-mission-over: refusal creates no reservation"
+      sql st "UPDATE managed_machines SET phase_code=3,status='destroyed' WHERE id='conc-first';"
+      setVmLimits st "conc-parent" "{\"max_concurrent\":8,\"provider_max_concurrent\":{\"boat\":1}}"
+      discard <| require (← provisionManagedMachine st fleet
+        (bandwidthMachine "conc-provider-first" "conc-child") 90002)
+      let beforeProvider ← reservationCount st
+      refusedBandwidth "managed_provider_mission_concurrency_limit_reached" st
+        "conc-grandchild" "conc-provider-over" 0 90003
+      check ((← reservationCount st) == beforeProvider)
+        "conc-provider-over: refusal creates no reservation"
+    finally closeManagedComputeStore st
+  finally closeCoreStore core
+
 def run (root : String) : IO Unit := do
   try midnightAndReload root catch e => throw (IO.userError s!"midnightAndReload: {e}")
   try liveCommitmentAfterReload root catch e => throw (IO.userError s!"liveCommitmentAfterReload: {e}")
@@ -289,5 +378,7 @@ def run (root : String) : IO Unit := do
   try concurrentGlobalAdmission root catch e => throw (IO.userError s!"concurrentGlobalAdmission: {e}")
   try bandwidthAdmission root catch e => throw (IO.userError s!"bandwidthAdmission: {e}")
   try bandwidthRateAdmission root catch e => throw (IO.userError s!"bandwidthRateAdmission: {e}")
+  try ancestorBandwidthAdmission root catch e => throw (IO.userError s!"ancestorBandwidthAdmission: {e}")
+  try ancestorConcurrencyAdmission root catch e => throw (IO.userError s!"ancestorConcurrencyAdmission: {e}")
 
 end OrbCore.ManagedBudgetTests

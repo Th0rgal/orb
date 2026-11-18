@@ -8,7 +8,7 @@ package «orb-desktop-native» where
 require «orb-spec» from ".."
 
 lean_lib «LeanUI» where
-  roots := #[`LeanUI, `OrbDesktop.State, `OrbDesktop.Chrome, `OrbDesktop.Screens]
+  roots := #[`LeanUI, `OrbDesktop.State, `OrbDesktop.Core, `OrbDesktop.Chrome, `OrbDesktop.Screens]
   precompileModules := false
 
 /-- Proof shards and replayed-event checks. Built by `scripts/build_orb_bins.sh` with the binary. -/
@@ -17,7 +17,7 @@ lean_lib «LeanUISpec» where
   precompileModules := false
 
 lean_lib «LeanUIRuntime» where
-  roots := #[`LeanUI.FFI, `LeanUI.Wayland, `LeanUI.Text, `LeanUI.Vulkan, `LeanUI.Runtime, `LeanUI.Canary, `OrbDesktop.Main]
+  roots := #[`LeanUI.FFI, `LeanUI.Wayland, `LeanUI.Text, `LeanUI.Vulkan, `LeanUI.Runtime, `LeanUI.Canary, `OrbDesktop.Core, `OrbDesktop.Main]
   precompileModules := false
 
 target lean_ui_wayland_o pkg : FilePath := do
@@ -32,7 +32,13 @@ target lean_ui_text_o pkg : FilePath := do
   let srcJob ← inputTextFile <| pkg.dir / "c" / "lean_ui_text.c"
   let leanIncludeDir ← getLeanIncludeDir
   let cDir := pkg.dir / "c"
-  buildO oFile srcJob #["-I", leanIncludeDir.toString, "-I", cDir.toString, "-I/usr/include/freetype2", "-I/usr/include/harfbuzz"] #["-std=c11", "-O2", "-fPIC"] ((← IO.getEnv "LEAN_CC").getD "cc")
+  -- FreeType and HarfBuzz keep their headers in a subdirectory; Nix sets
+  -- LEANUI_TEXT_CFLAGS to its store paths, other hosts use the system ones.
+  let textFlags : Array String :=
+    match (← IO.getEnv "LEANUI_TEXT_CFLAGS") with
+    | some f => ((f.splitOn " ").filter (· ≠ "")).toArray
+    | none => #["-I/usr/include/freetype2", "-I/usr/include/harfbuzz"]
+  buildO oFile srcJob (#["-I", leanIncludeDir.toString, "-I", cDir.toString] ++ textFlags) #["-std=c11", "-O2", "-fPIC"] ((← IO.getEnv "LEAN_CC").getD "cc")
 
 target lean_ui_vulkan_o pkg : FilePath := do
   let oFile := pkg.buildDir / "c" / "lean_ui_vulkan.o"

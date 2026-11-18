@@ -263,14 +263,9 @@ jobs:
           gtk_menu_lines=$(wc -l < linux_shell/gtk_menu.c)
           echo "linux_shell/gtk_menu.c LOC: $gtk_menu_lines"
           test "$gtk_menu_lines" -le 220
-          ./scripts/build_orb_bins.sh --out-dir target/debug
-          (cd lean/OrbBin && "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" build orb-bin-test && ./.lake/build/bin/orb-bin-test)
-          (cd lean/OrbNode && "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" build orb-node-test && ./.lake/build/bin/orb-node-test)
-          (cd lean/OrbClient && "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" build orb-client-test && ./.lake/build/bin/orb-client-test)
-          (cd lean/OrbCore && "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" build orb-core-test orb-spec-runner)
-          ./lean/OrbCore/.lake/build/bin/orb-core-test
-          ./lean/OrbCore/.lake/build/bin/orb-spec-runner --fixtures shared/orb-spec/fixtures
-          (cd lean/OrbLocald && "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" build orb-locald-test && ./.lake/build/bin/orb-locald-test)
+          # One turbo-lean run per package builds its binaries and tests together, then the
+          # tests run; building the test targets separately rebuilt each package.
+          ./scripts/build_orb_bins.sh --with-tests --out-dir target/debug
           for test_bin in lean/OrbBin/.lake/build/bin/orb-bin-test lean/OrbNode/.lake/build/bin/orb-node-test lean/OrbClient/.lake/build/bin/orb-client-test lean/OrbCore/.lake/build/bin/orb-core-test lean/OrbCore/.lake/build/bin/orb-spec-runner lean/OrbLocald/.lake/build/bin/orb-locald-test; do
             elab_syms=$(nm -u "$test_bin" | grep -c lean_elab || true)
             test "$elab_syms" -eq 0

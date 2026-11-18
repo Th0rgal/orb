@@ -335,7 +335,7 @@ private def resolveUploadDest
     return .ok dest
   | _, _ => return .error "Folder uploads need both batch_id and relative_path"
 
-def storeSingleUpload (workDir : String) (jv : JVal) : IO (Except String JVal) := do
+def storeSingleUploadAt (uploadsRoot : System.FilePath) (jv : JVal) : IO (Except String JVal) := do
   let some name := jv.fieldStr? "name" | return .error "missing name"
   let some b64 := jv.fieldStr? "data_base64" | return .error "missing data_base64"
   if let .error e := validateUploadName name then return .error e
@@ -353,7 +353,6 @@ def storeSingleUpload (workDir : String) (jv : JVal) : IO (Except String JVal) :
       | .ok d => pure (some d)
       | .error e => return .error e
     | none => pure none
-  let uploadsRoot := System.FilePath.mk workDir / "uploads"
   IO.FS.createDirAll uploadsRoot
   let urst ← statPath uploadsRoot.toString
   if !urst.exists_ || urst.isSymlink || !urst.isDir then
@@ -402,6 +401,9 @@ def storeSingleUpload (workDir : String) (jv : JVal) : IO (Except String JVal) :
   | .ok inner => return inner
   | .error _ => return .error "upload destination claim lock failed"
 
+def storeSingleUpload (workDir : String) (jv : JVal) : IO (Except String JVal) :=
+  storeSingleUploadAt (System.FilePath.mk workDir / "uploads") jv
+
 private def liftSys {α : Type} (r : LeanSys.Posix.SysResult α) (msg : String) : Except String α :=
   match r with
   | .ok v => .ok v
@@ -445,7 +447,7 @@ private def verifyCompletedReceipt (rec : JVal) (expectedSize : UInt64) : IO Boo
     return false
   destBytesMatch (System.FilePath.mk pathStr) expectedSize recSha
 
-def initOrStatusUploadSession (workDir : String) (jv : JVal) : IO (Except String JVal) := do
+def initOrStatusUploadSessionAt (uploadsRoot : System.FilePath) (jv : JVal) : IO (Except String JVal) := do
   let some uid := jv.fieldStr? "upload_id" | return .error "missing upload_id"
   let some name := jv.fieldStr? "name" | return .error "missing name"
   let some size := jv.fieldUInt64? "size" | return .error "missing size"
@@ -463,7 +465,6 @@ def initOrStatusUploadSession (workDir : String) (jv : JVal) : IO (Except String
       | .ok d => pure (some d)
       | .error e => return .error e
     | none => pure none
-  let uploadsRoot := System.FilePath.mk workDir / "uploads"
   if let (some rb, some rr) := (batchId?, relPath?) then
     let some batch := parseUuidCanonical? rb | return .error "Invalid folder upload ID"
     if let .error e := validateRelativeUploadPath rr then return .error e
@@ -535,9 +536,12 @@ def initOrStatusUploadSession (workDir : String) (jv : JVal) : IO (Except String
   | .ok inner => return inner
   | .error _ => return .error "upload session lock failed"
 
-def writeUploadSessionChunk (workDir uid : String) (index : Nat) (bytes : ByteArray) : IO (Except String JVal) := do
+def initOrStatusUploadSession (workDir : String) (jv : JVal) : IO (Except String JVal) :=
+  initOrStatusUploadSessionAt (System.FilePath.mk workDir / "uploads") jv
+
+def writeUploadSessionChunkAt (uploadsRoot : System.FilePath) (uid : String) (index : Nat) (bytes : ByteArray) : IO (Except String JVal) := do
   if let .error e := validateUploadId uid then return .error e
-  let sessDir := System.FilePath.mk workDir / "uploads" / ".sessions" / uid
+  let sessDir := uploadsRoot / ".sessions" / uid
   let metaPath := sessDir / "meta.json"
   if !(← metaPath.pathExists) then
     return .error "Upload session not found; reinitialize the upload"
@@ -601,6 +605,9 @@ def writeUploadSessionChunk (workDir uid : String) (index : Nat) (bytes : ByteAr
   with
   | .ok inner => return inner
   | .error _ => return .error "upload session lock failed"
+
+def writeUploadSessionChunk (workDir uid : String) (index : Nat) (bytes : ByteArray) : IO (Except String JVal) :=
+  writeUploadSessionChunkAt (System.FilePath.mk workDir / "uploads") uid index bytes
 
 private def readUploadMeta (metaPath : System.FilePath) : IO (Except String JVal) := do
   if !(← metaPath.pathExists) then
@@ -692,9 +699,8 @@ private def resolveSessionDest
     | .error e => return .error e
   | _, _ => return .error "Folder uploads need both batch_id and relative_path"
 
-def completeUploadSession (workDir uid : String) (crashAfterDestDurable : Bool := false) : IO (Except String JVal) := do
+def completeUploadSessionAt (uploadsRoot : System.FilePath) (uid : String) (crashAfterDestDurable : Bool := false) : IO (Except String JVal) := do
   if let .error e := validateUploadId uid then return .error e
-  let uploadsRoot := System.FilePath.mk workDir / "uploads"
   let sessDir := uploadsRoot / ".sessions" / uid
   let metaPath := sessDir / "meta.json"
   if !(← sessDir.pathExists) || !(← metaPath.pathExists) then
@@ -780,9 +786,12 @@ def completeUploadSession (workDir uid : String) (crashAfterDestDurable : Bool :
   | .ok inner => return inner
   | .error _ => return .error "upload finalize lock failed"
 
-def cancelUploadSession (workDir uid : String) : IO (Except String Unit) := do
+def completeUploadSession (workDir uid : String) (crashAfterDestDurable : Bool := false) : IO (Except String JVal) :=
+  completeUploadSessionAt (System.FilePath.mk workDir / "uploads") uid crashAfterDestDurable
+
+def cancelUploadSessionAt (uploadsRoot : System.FilePath) (uid : String) : IO (Except String Unit) := do
   if let .error e := validateUploadId uid then return .error e
-  let sessDir := System.FilePath.mk workDir / "uploads" / ".sessions" / uid
+  let sessDir := uploadsRoot / ".sessions" / uid
   if !(← sessDir.pathExists) then
     return .ok ()
   let sdst ← statPath sessDir.toString
@@ -801,6 +810,9 @@ def cancelUploadSession (workDir uid : String) : IO (Except String Unit) := do
   with
   | .ok inner => return inner
   | .error _ => return .error "upload cancel lock failed"
+
+def cancelUploadSession (workDir uid : String) : IO (Except String Unit) :=
+  cancelUploadSessionAt (System.FilePath.mk workDir / "uploads") uid
 
 /-- Content-addressed shared Library skills archive (`library-skills-<hex>.tar.gz`) uploaded once per
     content digest and reused across remote worker missions. Strictly rejects any path separators,

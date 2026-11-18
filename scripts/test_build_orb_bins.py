@@ -70,8 +70,10 @@ for target in sys.argv[2:]:
         self.run_build('--only', 'sandboxed-mcp', '--only', 'orb-privd',
                        '--out-dir', str(self.root / 'one'), '--out-dir', str(self.root / 'two'))
         for directory in ('one', 'two'):
-            self.assertEqual(sorted(p.name for p in (self.root / directory).iterdir()),
-                             ['orb-privd', 'sandboxed-mcp'])
+            staged = sorted(p for p in (self.root / directory).iterdir())
+            self.assertEqual([p.name for p in staged], ['orb-privd', 'sandboxed-mcp'])
+            for path in staged:
+                self.assertTrue(os.access(path, os.X_OK), f"{path} must be executable")
         self.assertIn('OrbBin build sandboxed-mcp orb-privd', self.log())
 
     def test_native_aarch64(self):

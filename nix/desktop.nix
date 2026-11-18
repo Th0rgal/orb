@@ -19,22 +19,35 @@ stdenv.mkDerivation {
     runHook postBuild
   '';
   installPhase = ''
-    mkdir -p "$out/bin"
+    mkdir -p "$out/bin" "$out/share/applications" "$out/share/orb-desktop"
     install -m 0755 "${core}/bin/orb-desktop-native" "$out/bin/orb-desktop-native"
     install -m 0755 orb-webkit "$out/bin/orb-webkit"
+    install -m 0644 "$src/nix/orb-desktop.hyprland.conf" "$out/share/orb-desktop/hyprland.conf"
     cat > "$out/bin/orb-desktop" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "''${1:-}" == "--webkit" ]]; then
+# GTK/WebKit is the default; LeanUI is experimental (renders the parity screens only).
+if [[ "''${1:-}" == "--leanui" ]]; then
   shift
-  exec "$(dirname "$0")/orb-webkit" "$@"
+  exec "$(dirname "$0")/orb-desktop-native" "$@"
 fi
-exec "$(dirname "$0")/orb-desktop-native" "$@"
+[[ "''${1:-}" == "--webkit" ]] && shift
+exec "$(dirname "$0")/orb-webkit" "$@"
 SH
     chmod 0755 "$out/bin/orb-desktop"
+    cat > "$out/share/applications/orb-desktop.desktop" <<EOF
+[Desktop Entry]
+Name=Orb
+Comment=Orb desktop client
+Exec=$out/bin/orb-desktop
+Terminal=false
+Type=Application
+Categories=Development;Utility;
+StartupWMClass=orb-desktop
+EOF
   '';
   meta = {
-    description = "Orb LeanUI Linux desktop (WebKit fallback: --webkit)";
+    description = "Orb Linux desktop: GTK/WebKit client (experimental LeanUI: --leanui)";
     mainProgram = "orb-desktop";
     platforms = lib.platforms.linux;
   };

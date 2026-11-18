@@ -1240,19 +1240,41 @@ def run : IO Unit := do
     check (stSide == "active" && trSide == "" && genSide == 1 && liveSide == 1 && errsSide.isEmpty)
       s!"(2) side-call on a different cooling chain must not stop mission turn: status={stSide} reason={trSide} gen={genSide} live={liveSide} errs={errsSide.size}"
 
+    -- R33: a transient cooldown (rate limit, overload, server error) never stops a running turn,
+    -- however long it is; the harness retries. Only quota and authentication refusals stop it.
+    for (label, reason) in [("ratelimit", OrbCore.Proxy.CooldownReason.rateLimit),
+                            ("overloaded", .overloaded), ("servererror", .serverError)] do
+      cooldowns.set #[{
+        accountId := "acct-secret-alice@example.test",
+        untilEpoch := nowT + 2400,
+        reason := reason,
+        label := "acct-secret-alice@example.test"
+      }]
+      let mid := s!"m-r33-{label}"
+      let tokT ← seedRunningMission mid ""
+      let rT ← postBound tokT "cool-test"
+      check (rT.status == 429) s!"(R33) {label} cooling status: {rT.status}"
+      let (stT, trT, genT, liveT, errsT) ← readMissionState mid
+      check (stT == "active" && trT == "" && genT == 1 && liveT == 1 && errsT.isEmpty)
+        s!"(R33) a transient {label} cooldown must not stop the turn: status={stT} reason={trT} errs={errsT.size}"
+    check (OrbCore.Proxy.cooldownSecsFor .rateLimit 3600 15 == OrbCore.Proxy.maxTransientCooldownSecs)
+      "(R33) an announced hour-long rate-limit Retry-After is capped to the transient maximum"
+    check (OrbCore.Proxy.cooldownSecsFor .usageLimit 3600 300 == 3600)
+      "(R33) quota exhaustion keeps the announced cooldown"
+
     -- Point 3 (non-quota cooldown reason label and message):
-    -- When the soonest cooldown is `.overloaded` / `.serverError` / `.authFailure` (not `.rateLimit` or `.usageLimit`),
-    -- `terminal_reason` is `"provider_unavailable"` (not `"remote_quota"`) and the `error` event says the provider
-    -- is unavailable while naming the chain and return time with zero account identifiers.
+    -- When the soonest cooldown is `.authFailure`, `terminal_reason` is `"provider_unavailable"`
+    -- (not `"remote_quota"`) and the `error` event says the provider is unavailable while naming
+    -- the chain and return time with zero account identifiers.
     cooldowns.set #[{
       accountId := "acct-secret-alice@example.test",
       untilEpoch := nowT + 2400,
-      reason := .overloaded,
+      reason := .authFailure,
       label := "acct-secret-alice@example.test"
     }]
     let tokNonQuota ← seedRunningMission "m-pt3-overloaded" ""
     let rNonQuota ← postBound tokNonQuota "cool-test"
-    check (rNonQuota.status == 429) s!"(3) overloaded cooling status: {rNonQuota.status}"
+    check (rNonQuota.status == 429) s!"(3) auth-failure cooling status: {rNonQuota.status}"
     let (stNq, trNq, genNq, liveNq, errsNq) ← readMissionState "m-pt3-overloaded"
     let errTextNq := errsNq[0]?.getD ""
     check (errsNq.size == 1 && liveNq == 0 && stNq == "interrupted" && trNq == "provider_unavailable" && genNq == 2 &&

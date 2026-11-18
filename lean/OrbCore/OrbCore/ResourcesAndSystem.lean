@@ -1361,6 +1361,50 @@ def buildLibraryStatusJson (libDir : String) (defaultRemote : String) (requireOw
     fields := fields.push ("last_synced_at", JVal.uint64 syncedMtime)
   return .obj fields
 
+
+private def maxChunkUploadChunks : Nat := 4096
+private def maxChunkUploadBytes : Nat := 2 * 1024 * 1024 * 1024
+private def maxChunkUploadChunkBytes : Nat := 128 * 1024 * 1024
+
+private def byteArrayFind? (hay needle : ByteArray) (start : Nat := 0) : Option Nat := Id.run do
+  if needle.isEmpty then return some start
+  let mut i := start
+  while i + needle.size <= hay.size do
+    let mut j := 0
+    let mut ok := true
+    while j < needle.size do
+      if hay.get! (i + j) != needle.get! j then
+        ok := false
+        j := needle.size
+      else j := j + 1
+    if ok then return some i
+    i := i + 1
+  return none
+
+/-- Legacy chunk clients send `multipart/form-data`; store only the file part,
+    never the MIME envelope. Raw octet-stream bodies are accepted unchanged. -/
+private def chunkUploadPayload (headers : Array (String × String)) (body : ByteArray) : Except String ByteArray := do
+  let ct := (((headers.find? (fun (k, _) => k.toLower == "content-type")).map Prod.snd).getD "").toLower
+  if !ct.startsWith "multipart/form-data" then return body
+  let idx := match ct.splitOn "boundary=" with
+    | _ :: rest => rest
+    | [] => []
+  let rawBoundary := (String.intercalate "boundary=" idx).trimAscii.toString
+  let boundary :=
+    if rawBoundary.startsWith "\"" && rawBoundary.endsWith "\"" && rawBoundary.length >= 2 then
+      (rawBoundary.drop 1).dropEnd 1 |>.toString
+    else rawBoundary
+  if boundary.isEmpty then throw "Invalid multipart boundary"
+  let headerEnd := byteArrayFind? body "\r\n\r\n".toUTF8
+  let some h := headerEnd | throw "Invalid multipart body"
+  let dataStart := h + 4
+  let closing := ("\r\n--" ++ boundary).toUTF8
+  let some close := byteArrayFind? body closing dataStart | throw "Invalid multipart body"
+  return body.extract dataStart close
+
+private def validLegacyUploadId (id : String) : Bool :=
+  !id.isEmpty && !id.contains '/' && !id.contains '\\' && !id.contains ".."
+
 private def countSkillLines (s : String) : Nat :=
   if s.isEmpty then 0 else (s.splitOn "\n").length
 
@@ -2222,30 +2266,52 @@ def dispatchResourcesAndSystemRoute
 
     if method == "POST" && sub == "upload-chunk" then
       let upId := ((qParam? qMap "upload_id").getD "").trimAscii.toString
-      let chunkIdx := ((qParam? qMap "chunk_index").bind String.toNat?).getD 0
-      if upId.isEmpty || (upId.splitOn "..").length > 1 || upId.contains '/' then
-        return some (jsonErr 400 "Invalid upload_id")
+      let some chunkIdx := (qParam? qMap "chunk_index").bind String.toNat?
+        | return some (jsonErr 400 "missing or invalid chunk_index")
+      let some totChunks := (qParam? qMap "total_chunks").bind String.toNat?
+        | return some (jsonErr 400 "missing or invalid total_chunks")
+      if !validLegacyUploadId upId then return some (jsonErr 400 "Invalid upload_id")
+      if totChunks == 0 || totChunks > maxChunkUploadChunks then
+        return some (jsonErr 400 s!"Invalid total_chunks: must be between 1 and {maxChunkUploadChunks}")
+      if chunkIdx >= totChunks then return some (jsonErr 400 "chunk_index must be less than total_chunks")
+      let payload ← match chunkUploadPayload headers bodyBytes with
+        | .ok b => pure b
+        | .error e => return some (jsonErr 400 e)
+      if payload.size > maxChunkUploadChunkBytes then
+        return some (jsonErr 413 s!"Chunk too large: limit is {maxChunkUploadChunkBytes} bytes")
       let stageDir := System.FilePath.mk s!"/tmp/sandboxed-sh-uploads/{upId}"
       IO.FS.createDirAll stageDir
-      IO.FS.writeBinFile (stageDir / s!"chunk_{chunkIdx}") bodyBytes
-      return some (jsonResp 200 (.obj #[("ok", .bool true), ("chunk_index", JVal.nat chunkIdx), ("received_bytes", JVal.nat bodyBytes.size)]))
+      IO.FS.writeBinFile (stageDir / s!"chunk_{chunkIdx}") payload
+      return some (jsonResp 200 (.obj #[("ok", .bool true), ("chunk_index", JVal.nat chunkIdx), ("total_chunks", JVal.nat totChunks), ("received_bytes", JVal.nat payload.size)]))
 
     if method == "POST" && sub == "upload-finalize" then
       let .ok reqJv := OrbBin.Json.parseBytes bodyBytes | return some (jsonErr 400 "Invalid JSON")
       let upId := ((reqJv.fieldStr? "upload_id").getD "").trimAscii.toString
       let fName := (((reqJv.fieldStr? "file_name").getD "upload.bin").splitOn "/").getLast?.getD "upload.bin"
       let totChunks := (reqJv.fieldNat? "total_chunks").getD 0
-      if upId.isEmpty || (upId.splitOn "..").length > 1 || upId.contains '/' then
-        return some (jsonErr 400 "Invalid upload_id")
+      if !validLegacyUploadId upId then return some (jsonErr 400 "Invalid upload_id")
+      if totChunks == 0 || totChunks > maxChunkUploadChunks then
+        return some (jsonErr 400 s!"Invalid total_chunks: must be between 1 and {maxChunkUploadChunks}")
+      let stageDir := System.FilePath.mk s!"/tmp/sandboxed-sh-uploads/{upId}"
+      let mut chunks : Array ByteArray := #[]
+      let mut total := 0
+      for idx in [0:totChunks] do
+        let chunkPath := stageDir / s!"chunk_{idx}"
+        let st ← statIdentity chunkPath.toString false
+        if !st.exists_ then return some (jsonErr 400 s!"missing_chunk_{idx}")
+        if st.size > maxChunkUploadChunkBytes.toUInt64 then
+          return some (jsonErr 413 s!"Chunk {idx} too large: limit is {maxChunkUploadChunkBytes} bytes")
+        total := total + st.size.toNat
+        if total > maxChunkUploadBytes then
+          return some (jsonErr 413 s!"Assembled upload too large: limit is {maxChunkUploadBytes} bytes")
+        match ← (IO.FS.readBinFile chunkPath).toBaseIO with
+        | .ok cb => chunks := chunks.push cb
+        | .error _ => return some (jsonErr 500 s!"Failed to read chunk {idx}")
       let .ok dirFp ← resolveHostFsTarget store workingDir ((reqJv.fieldStr? "path").getD "") (reqJv.fieldStr? "mission_id")
         | return some (jsonErr 400 "Invalid path")
       IO.FS.createDirAll dirFp
       let dest := dirFp / fName
-      let mut combined := ByteArray.empty
-      let stageDir := System.FilePath.mk s!"/tmp/sandboxed-sh-uploads/{upId}"
-      for idx in [0:totChunks] do
-        if let .ok cb ← (IO.FS.readBinFile (stageDir / s!"chunk_{idx}")).toBaseIO then
-          combined := combined ++ cb
+      let combined := chunks.foldl (fun acc b => acc ++ b) ByteArray.empty
       IO.FS.writeBinFile dest combined
       let _ ← runCmdCapture "rm" #["-rf", "--", stageDir.toString]
       return some (jsonResp 200 (.obj #[("ok", .bool true), ("path", .str dest.toString), ("name", .str fName), ("size", JVal.nat combined.size)]))
@@ -2878,26 +2944,34 @@ def dispatchResourcesAndSystemRoute
     if method == "POST" && segs.length == 5 && segs[2]? == some "queue" && segs[4]? == some "send-now" then
       let msgId := segs[3]!
       let qRows ← execParamQuery store.missionsDb
-        "SELECT mission_id, sequence FROM remote_message_queue WHERE user_id='core' AND message_id=?1 LIMIT 1;" #[msgId]
+        "SELECT mission_id, COALESCE(sequence,0), COALESCE(state,''), COALESCE(phase,0) FROM remote_message_queue WHERE user_id='core' AND message_id=?1 LIMIT 1;" #[msgId]
       let .ok rs := qRows | return some (jsonErr 500 "Queue query failed")
       if rs.size ≤ 1 then return some (jsonErr 404 "message not in queue")
       let qMid := (rs[1]![0]?).getD ""
       let allowed ← canAccessMission store qMid callerUserId bootstrapAdminId isLegacyUnscoped true
       if !allowed then return some (jsonErr 403 "Write access denied")
       let interrupt := ((qParam? qMap "interrupt").getD "false") == "true"
-      -- Promote queued message sequence to head of waiting items for this mission
+      if interrupt then
+        return some (jsonErr 409 "interrupt_not_supported")
+      let qState := (rs[1]![2]?).getD ""
+      let qPhase := ((rs[1]![3]?).bind String.toNat?).getD 0
+      if qState != "waiting" || qPhase != 0 then
+        return some (jsonErr 409 "already_claimed_or_delivered")
+      let mut promoted := false
+      -- `send-now` is an ordering promise, so success means this row is the head
+      -- of the mission's waiting prefix and the drainer orders by `sequence`.
       if let .ok minRows ← execParamQuery store.missionsDb
-          "SELECT COALESCE(MIN(sequence), 1) FROM remote_message_queue WHERE user_id='core' AND mission_id=?1 AND state='waiting';"
+          "SELECT COALESCE(MIN(sequence), 0) FROM remote_message_queue WHERE user_id='core' AND mission_id=?1 AND state='waiting' AND COALESCE(phase,0)=0;"
           #[qMid] then
         if minRows.size > 1 then
-          let minSeq := ((minRows[1]![0]?).bind String.toNat?).getD 1
-          if minSeq > 1 then
+          let minSeq := ((minRows[1]![0]?).bind String.toNat?).getD 0
+          let curSeq := ((rs[1]![1]?).bind String.toNat?).getD 0
+          if curSeq > minSeq then
             let _ ← execParamStmt store.missionsDb
               "UPDATE remote_message_queue SET sequence=?2 WHERE user_id='core' AND message_id=?1;"
-              #[msgId, toString (minSeq - 1)]
-      if interrupt then
-        return some (jsonResp 200 (.obj #[("ok", .bool true), ("delivered", .bool false), ("promoted", .bool true)]))
-      return some (jsonResp 200 (.obj #[("ok", .bool true), ("delivered", .bool false)]))
+              #[msgId, s!"{(minSeq : Int) - 1}"]
+            promoted := true
+      return some (jsonResp 200 (.obj #[("ok", .bool true), ("delivered", .bool false), ("promoted", .bool promoted)]))
 
   return none
 

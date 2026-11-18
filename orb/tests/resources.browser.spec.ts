@@ -474,7 +474,9 @@ test("Resources page renders global Compute/Inference Sankey, USD toggle, bottom
   // The breakpoint follows content width (including the app sidebar), not the window.
   // Pause the poll clock so any extra overview request here would be caused by resize.
   await page.clock.install();
-  await page.clock.pauseAt(new Date());
+  // Use a future anchor: installing the clock can advance real time before
+  // pauseAt() runs, which otherwise makes Playwright reject the pause target.
+  await page.clock.pauseAt(new Date(Date.now() + 1_000));
   const requestsBeforeResize = overviewRangesRequested.length;
   for (const theme of ["dark", "light"]) {
     await page.evaluate((theme) => document.documentElement.setAttribute("data-theme", theme), theme);

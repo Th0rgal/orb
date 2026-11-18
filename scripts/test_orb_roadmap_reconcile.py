@@ -101,11 +101,10 @@ class ReconcileTest(unittest.TestCase):
         f.update(returns_ts=NOW + 3600, model=fable)
         d = mission("Z2", "cancelled", updated=NOW - 60, created_ts=NOW - 65)
         d.update(returns_ts=NOW + 3600, model=NS["MODELS"][2])
-        e = mission("Z3", "cancelled", updated=NOW - 60, created_ts=NOW - 65)
-        e.update(returns_ts=NOW + 3600, model=NS["MODELS"][3])
-        self.assertEqual(self.run_plan(missions=[a, f, d, e]), [])
+
+        self.assertEqual(self.run_plan(missions=[a, f, d]), [])
         a["returns_ts"] = NOW - 1
-        self.assertEqual(self.run_plan(missions=[a, f, d, e]), [("start", "A2", 1), ("start", "A6", 1)])
+        self.assertEqual(self.run_plan(missions=[a, f, d]), [("start", "A2", 1), ("start", "A6", 1)])
         self.assertEqual(self.models, [astra, astra])
 
     def test_a_provider_with_every_account_parked_is_skipped(self):
@@ -144,9 +143,17 @@ class ReconcileTest(unittest.TestCase):
         child["track"] = "roadmap-A2-c1234abcd"
         self.assertNotIn("A2", [a[1] for a in self.run_plan(missions=[child])])
 
+    def test_a_busy_model_overflows_to_the_next_and_none_means_no_start(self):
+        busy = [dict(mission(f"Z{i}", "active"), model=NS["MODELS"][0]) for i in range(NS["MAX_PER_MODEL"])]
+        self.run_plan(missions=busy)
+        self.assertEqual(self.models, [NS["MODELS"][1], NS["MODELS"][1]])
+        full = busy + [dict(mission(f"Y{i}", "active"), model=m) for m in NS["MODELS"][1:]
+                       for i in range(NS["MAX_PER_MODEL"])]
+        self.assertEqual([a for a in self.run_plan(missions=full) if a[0] == "start"], [])
+
     def test_each_attempt_uses_the_next_model(self):
         self.assertEqual(NS["MODELS"], ["openai/gpt-6.2-astra", "openai/gpt-6.2-sol",
-                                        "anthropic/claude-fable-5-2", "ethereumfoundation/deepseek-v4.1-flash"])
+                                        "anthropic/claude-fable-5-2"])
 
     def test_a_recently_idle_worker_is_not_nudged_yet(self):
         self.assertNotIn("A2", [a[1] for a in self.run_plan(missions=[mission("A2", "awaiting_user", updated=NOW - 60)])])

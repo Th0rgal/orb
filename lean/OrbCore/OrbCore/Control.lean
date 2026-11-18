@@ -12,6 +12,7 @@ import OrbBin.PosixExt
 import OrbBin.PrivdShared
 import OrbBin.GitWorkspace
 import OrbBin.ClaudeControl
+import OrbNode.FileBrowser
 import OrbCore.Spec
 import OrbCore.Store
 import OrbCore.MissionSettings
@@ -41,6 +42,7 @@ import OrbCore.ProviderUsageAndLogin
 import OrbCore.ResourcesAndSystem
 import OrbCore.DevOperator
 import OrbCore.McpGateway
+import OrbCore.Maintenance
 import OrbNetLeaf.TlsHttp
 import OrbNetLeaf.Gzip
 
@@ -1514,6 +1516,7 @@ private def targetSupportsExplicitCyber (tgt : ProviderTarget) (requestedModel c
     and no Bitwarden token in any of its spellings. -/
 private def redactSettingsSecrets (settings : JVal) : JVal :=
   let base := (((settings.removeField "password_hash").removeField "dashboard_password_hash").removeField "auth").removeField "bws_access_token"
+  let base := redactLegacyTelemetry base
   match base.field? "bitwarden" with
   | some bw => base.setField "bitwarden" ((bw.removeField "encrypted_access_token").removeField "access_token")
   | none => base
@@ -1556,17 +1559,22 @@ private def stopMissionTurnForUnavailableChain
       let soonest := (soonestCooldown? cooling).getD
         { accountId := "", untilEpoch := nowEpochSec + 60, reason := .rateLimit, label := "" }
       let waitSecs := soonest.remainingSecs nowEpochSec
-      if waitSecs > 60 then
-        let returnIso := formatEpochIso8601Utc soonest.untilEpoch
-        match soonest.reason with
-        | .rateLimit | .usageLimit =>
+      let returnIso := formatEpochIso8601Utc soonest.untilEpoch
+      -- Transient refusals (rate limit, overload, server error) cool down for at
+      -- most `maxTransientCooldownSecs`: the harness retries and the turn goes on.
+      -- Only quota exhaustion and authentication failures stop running turns (R33).
+      match soonest.reason with
+      | .usageLimit =>
+        if waitSecs > 60 then
           (true, "remote_quota",
            s!"No eligible provider target in chain '{chainId}'; soonest target returns at {returnIso} (in {waitSecs}s). Stopping turn.")
-        | .authFailure | .overloaded | .serverError =>
+        else (false, "", "")
+      | .authFailure =>
+        if waitSecs > 60 then
           (true, "provider_unavailable",
            s!"Provider is unavailable in chain '{chainId}'; soonest target returns at {returnIso} (in {waitSecs}s). Stopping turn.")
-      else
-        (false, "", "")
+        else (false, "", "")
+      | .rateLimit | .overloaded | .serverError => (false, "", "")
   if !shouldStop then return ()
   let loginMessage? ← sidecarLoginFailureMessage st.store st.cfg.workingDir (cooling.map (·.accountId))
   let errMsg := loginMessage?.map (fun msg => s!"{msg} {errMsg}") |>.getD errMsg
@@ -1907,6 +1915,45 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   | none =>
     accountBody out.body
     return { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := diagHdrs, body := out.body }
+
+/-- Observe local harness processes independently of the HTTP accept loop. A
+    non-stopping run whose pid disappeared without a reader callback would
+    otherwise leave its mission `active` forever. The conditional database
+    update and receipt make the observation idempotent with the reader. -/
+def tickLocalHarnessSupervisor (st : CoreAppState) (nowIso : String) : IO Nat := do
+  let some mgr := st.warmMgr?
+    | return 0
+  let runs ← mgr.runsRef.get
+  let pids ← mgr.activePidsRef.get
+  let mut observed : Nat := 0
+  for (mid, runRef) in runs do
+    let run ← runRef.get
+    if run.done || run.stopping then continue
+    let pid? := (pids.find? (fun p => p.1 == mid)).map Prod.snd
+    let some pid := pid?
+      | continue
+    let alive ← (System.FilePath.mk s!"/proc/{pid}").pathExists
+    if alive then continue
+    let claim ← execParamQuery st.store.missionsDb
+        ("UPDATE missions SET status='interrupted', terminal_reason='local_harness_exited', " ++
+         "state_revision=state_revision+1, updated_at=?2 " ++
+         "WHERE id=?1 AND status='active' AND run_generation=CAST(?3 AS INTEGER) RETURNING id;")
+        #[mid, nowIso, s!"{run.generation}"]
+    let .ok claimRows := claim | continue
+    if claimRows.size <= 1 then continue
+    runRef.modify fun r => { r with done := true, error? := some "local_harness_exited" }
+    discard <| execParamQuery st.store.missionsDb
+      ("UPDATE mission_runs SET execution_state='terminal', terminal_reason='local_harness_exited', updated_at=?2 " ++
+       "WHERE mission_id=?1 AND generation=CAST(?3 AS INTEGER) AND execution_state NOT IN ('terminal','completed','failed','aborted');")
+      #[mid, nowIso, s!"{run.generation}"]
+    let payload := renderCompact (.obj #[
+      ("status", .str "interrupted"),
+      ("reason", .str "local_harness_exited"),
+      ("reattached", .bool false)
+    ])
+    discard <| appendMissionEvent st.store mid "recovery_receipt" payload nowIso
+    observed := observed + 1
+  return observed
 
 /-- Map structured `HarnessCallbacks` from `OrbBin.ClaudeControl` onto persisted `mission_events` rows
     and record pending `control_request` call IDs so `POST /api/control/tool_result` can route answers cleanly. -/
@@ -2702,6 +2749,46 @@ private def dispatchMissionControlAndGitRoutes?
 
   return none
 
+/-- Workspace files are agent-written and untrusted: never sniff them into another
+    type, and if opened directly an HTML/SVG file loads nothing and runs no script. -/
+private def downloadHardeningHeaders (filename : String) : Array (String × String) :=
+  let safeName := String.ofList (filename.toList.map fun c =>
+    if c == '"' || c == '\\' || c.toNat < 32 || c.toNat == 127 then '_' else c)
+  let name := if safeName.trimAscii.toString.isEmpty then "download" else safeName
+  #[("Content-Disposition", s!"attachment; filename=\"{name}\""),
+    ("X-Content-Type-Options", "nosniff"),
+    ("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")]
+
+private def basenameOfPath (raw : String) : String :=
+  let decoded := (percentDecodeStrict raw).getD raw
+  (decoded.splitOn "/").filter (!·.isEmpty) |>.getLast?.getD "download"
+
+private def downloadFilename? (method cleanPath rawTarget : String) (body : ByteArray) : Option String :=
+  if cleanPath == "/api/fs/download" || cleanPath == "/api/fs/file" then
+    let qMap := parseQueryParams rawTarget
+    ((qMap.find? (fun p => p.1 == "path")).bind (fun p => percentDecodeStrict p.2)).map basenameOfPath
+  else if cleanPath == "/api/file-resources" && (method == "GET" || method == "POST") then
+    match OrbBin.Json.parseBytes body with
+    | .ok jv =>
+      if jv.fieldStr? "action" == some "download" then
+        (jv.fieldStr? "path").map basenameOfPath
+      else none
+    | .error _ => none
+  else if method == "GET" && cleanPath.startsWith "/api/projects/" && cleanPath.endsWith "/files" then
+    some (basenameOfPath cleanPath)
+  else
+    none
+
+private def hardenedDownloadResponse (method cleanPath rawTarget : String) (body : ByteArray)
+    (status : Nat) (contentType : String) (bytes : ByteArray) (corsOrigin? : Option String) : CoreHttpResponse :=
+  let hdrs :=
+    if status == 200 || status == 206 then
+      match downloadFilename? method cleanPath rawTarget body with
+      | some name => downloadHardeningHeaders name
+      | none => #[]
+    else #[]
+  { status := status, contentType := contentType, corsOrigin? := corsOrigin?, extraHdrs := hdrs, body := bytes }
+
 set_option maxHeartbeats 1600000 in
 private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowEpochSec : UInt64) : IO (Except ByteArray CoreHttpResponse) := do
   let legacyManagedPrefix := "/api/managed/machines"
@@ -2809,6 +2896,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         (matchRoutePattern? "/api/workspaces/:id/shell" rawTarget).isSome) &&
        !wsCaller.isLegacyUnscoped && wsCaller.role != "admin" then
       return .ok (mkJson 403 "{\"error\":\"admin_required\"}")
+    -- Only the control sync socket is a real bidirectional live transport. The
+    -- other legacy upgrade paths have no session loop; answering 501 keeps the
+    -- client from believing it holds a stream that Core never pumps.
+    if cleanPath != "/api/control/sync" then
+      return .ok (mkJson 501 "{\"error\":\"websocket_transport_not_implemented\",\"supported\":\"/api/control/sync\"}")
     let negProto? := negotiateWsSubprotocol? req.headers
     match buildWebSocketUpgradeResponse? req negProto? with
     | some raw101 => return .error raw101
@@ -3160,6 +3252,15 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | return .ok (mkJson 400 "{\"ok\":false,\"error\":{\"code\":\"invalid_json\",\"message\":\"Malformed JSON body\",\"accepted\":\"no\",\"retryable\":false}}")
       let toolName := (jv.fieldStr? "name").getD ""
       let args := (jv.field? "arguments").getD (.obj #[])
+      let roleNorm := normalizeMcpRole activeClaims.role
+      -- Dashboard bearers are tenant-scoped by mission ownership; the role
+      -- catalogue gate targets harness/external sessions that carry a role.
+      if (!activeClaims.missionId.isEmpty || activeClaims.isExternal) &&
+          !OrbBin.McpCatalog.rolePermitsCatalogTool roleNorm toolName then
+        return .ok (mkJson 200 (renderCompact (.obj #[("ok", .bool false), ("error", .obj #[
+          ("code", .str "forbidden_tool_role"),
+          ("message", .str s!"Tool `{toolName}` is not available to role `{roleNorm}`"),
+          ("accepted", .str "no"), ("retryable", .bool false)])])))
       if (mcpCaller?.map (·.isDevOperator)).getD false &&
           (isMemoryToolName toolName || isMacTetherToolName toolName || toolName.startsWith "secret_" || #["request_privileged_access", "list_privileged_access",
             "revoke_privileged_access", "execute_privileged_command", "deploy_sandboxed_sh"].contains toolName) then
@@ -3186,8 +3287,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         unless (← ownerAllowed) do
           return .ok (mkJson 200 "{\"ok\":false,\"error\":{\"code\":\"memory_tool_denied\",\"message\":\"Administrator required\"}}")
         let mut onManagedNode := false
-        let mut hasProjSkill := !activeClaims.isExternal && !activeClaims.project.isEmpty
-        if !activeClaims.missionId.isEmpty then
+        -- Memory authority comes from an attached skill or an explicit grant, never
+        -- from the mere existence of a project (`SEC-11`).
+        let mut hasProjSkill := false
+        if !activeClaims.isExternal && !activeClaims.missionId.isEmpty then
           if let .ok mRs ← execParamQuery st.store.missionsDb
               "SELECT placement_kind, project, tags FROM missions WHERE id=?1;" #[activeClaims.missionId] then
             if mRs.size > 1 then
@@ -3196,8 +3299,16 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               let mTags := parseStringJsonArray ((mRs[1]?.bind (·[2]?)).getD "[]")
               if pk == "managed_vm" || pk.startsWith "managed-" then
                 onManagedNode := true
-              if !activeClaims.isExternal && (!mProj.isEmpty || mTags.contains "skill:spark-memory") then
+              if mTags.contains "skill:spark-memory" then
                 hasProjSkill := true
+              else if !mProj.isEmpty then
+                let scopedProj := if !activeClaims.project.isEmpty then activeClaims.project else mProj
+                if let .ok pRs ← execParamQuery st.store.projectsDb
+                    "SELECT COALESCE(skills,'[]') FROM projects WHERE slug=?1 OR slug=?2 LIMIT 1;"
+                    #[mProj, scopedProj] then
+                  if pRs.size > 1 then
+                    let skills := parseStringJsonArray ((pRs[1]?.bind (·[0]?)).getD "[]")
+                    hasProjSkill := skills.contains "spark-memory" || skills.contains "skill:spark-memory"
           if !onManagedNode then
             if let some mst := st.managedStore? then
               if let .ok vmRs ← execParamQuery mst.db
@@ -3246,6 +3357,16 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             let (code, body) ← launchBtwSideAgent st { asker with userId := if asker.userId.isEmpty then owner else asker.userId }
               srcMid (.obj #[("side_question", .str question)]) idem nowEpochSec
             pure (if code < 300 then .ok body else .error body))
+          (some fun mid callId answers => do
+            match st.warmMgr? with
+            | none => pure (.error "warm harness manager unavailable")
+            | some mgr =>
+              let ok ← OrbBin.ClaudeControl.respondToControlRequest mgr mid callId
+                (.obj #[("action", .str "accept"), ("answers", answers)])
+              if ok then
+                if let some ref := st.pendingControlCallsRef? then
+                  ref.modify fun xs => xs.filter (fun p => p.1 != callId)
+              pure (.ok ok))
           st.cloudHub?
         return .ok (mkJson 200 outJson)
 
@@ -3315,7 +3436,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       if (jv.fieldUInt64? "lease_id").isNone then
         if let some rHub := st.relayHub? then
           if let some httpResp := parseRelayHttpRespJson? jv then
-            deliverRelayHttpResp rHub httpResp
+            deliverRelayHttpResp rHub mid httpResp
             return .ok (mkJson 200 "{\"ok\":true}")
       let cmdId := (jv.fieldStr? "id").getD ""
       let leaseId := (jv.fieldUInt64? "lease_id").getD 0
@@ -3564,23 +3685,84 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         items := items.push s!"\{\"id\":{jsonEscape s!"managed-{vm.id}"},\"name\":{jsonEscape vm.sandboxName},\"provider\":{jsonEscape vm.provider},\"status\":{jsonEscape vm.status},\"admin_only\":false}"
     return .ok (mkJson 200 ("[" ++ String.intercalate "," items.toList ++ "]"))
 
-  if req.method == "POST" && cleanPath == "/api/uploads" then
-    let maxUploadBytes : Nat := 16 * 1024 * 1024
-    if req.bodySlice.len > maxUploadBytes then
-      return .ok (mkJson 413 "{\"error\":\"upload_too_large\"}")
-    let uploadOwnerSeg := if caller.userId.isEmpty then "legacy" else caller.userId
+  let uploadOwnerSeg := if caller.userId.isEmpty then "legacy" else caller.userId
+  let uploadRoot : System.FilePath := System.FilePath.mk st.store.rootDir / "uploads" / uploadOwnerSeg
+  let uploadErrStatus (msg : String) : Nat :=
+    if msg.toLower.contains "too large" || msg.toLower.contains "2 gib" || msg.toLower.contains "20 mib" then 413
+    else if msg.toLower.contains "not found" || msg.toLower.contains "unavailable" then 404
+    else if msg.toLower.contains "already" || msg.toLower.contains "finalized" || msg.toLower.contains "conflict" then 409
+    else 400
+  let uploadQuery := parseQueryParams rawTarget
+  let remoteNode? : String :=
+    let fromQuery := (((uploadQuery.find? (fun p => p.1 == "node_id")).bind (fun p => percentDecodeStrict p.2)).getD "").trimAscii.toString
+    if !fromQuery.isEmpty then fromQuery
+    else if req.method == "POST" && (cleanPath == "/api/uploads" || cleanPath == "/api/uploads/sessions") then
+      ((OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption.bind (·.fieldStr? "node_id") |>.getD "").trimAscii.toString
+    else ""
+  let isLocalUpload := remoteNode?.isEmpty || remoteNode? == "local" || remoteNode? == "core" || remoteNode? == "client"
+  let remoteUpload (method path : String) (body : ByteArray) (contentType : String := "application/octet-stream") :
+      IO (Except ByteArray CoreHttpResponse) := do
+    match ← OrbCore.RemoteDispatch.callRemoteNodeRawOpt st.relayHub? st.managedStore? remoteNode? method path body contentType #[] 60000 with
+    | .error e => return .ok (mkJson 502 s!"\{\"error\":\"upload_relay_failed\",\"message\":{jsonEscape e}}")
+    | .ok (status, txt, _, _, _) =>
+      return .ok { status := status, contentType := "application/json", corsOrigin? := reqOrigin?, body := txt.toUTF8 }
+  let localUploads (action : System.FilePath → IO (Except String JVal)) :
+      IO (Except ByteArray CoreHttpResponse) := do
     if hasSegmentTraversal uploadOwnerSeg then
       return .ok (mkJson 400 "{\"error\":\"invalid_upload_owner\"}")
-    let uploadId ← newUuidV4
-    let uploadDir : System.FilePath := System.FilePath.mk st.store.rootDir / "uploads" / uploadOwnerSeg
-    if let .error e ← ensurePrivateDir0700 uploadDir then
+    if let .error e ← ensurePrivateDir0700 uploadRoot then
       return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
-    let dest := uploadDir / uploadId
-    try
-      IO.FS.writeBinFile dest req.bodySlice.toByteArray
-    catch e =>
-      return .ok (mkJson 500 s!"\{\"error\":{jsonEscape s!"upload_write_failed:{e}"}}")
-    return .ok (mkJson 201 s!"\{\"id\":{jsonEscape uploadId},\"size\":{req.bodySlice.len},\"owner_user_id\":{jsonEscape uploadOwnerSeg}}")
+    match ← action uploadRoot with
+    | .ok receipt =>
+      let receipt := receipt.setField "owner_user_id" (.str uploadOwnerSeg)
+      return .ok (mkJson 200 (renderCompact receipt))
+    | .error e => return .ok (mkJson (uploadErrStatus e) s!"\{\"error\":{jsonEscape e}}")
+  if req.method == "POST" && cleanPath == "/api/uploads" then
+    if req.bodySlice.len > 30 * 1024 * 1024 then
+      return .ok (mkJson 413 "{\"error\":\"upload_too_large\"}")
+    if !isLocalUpload then
+      return ← remoteUpload "POST" "/uploads" req.bodySlice.toByteArray "application/json"
+    let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+      | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+    return ← localUploads (fun root => OrbNode.FileBrowser.storeSingleUploadAt root jv)
+  if req.method == "POST" && cleanPath == "/api/uploads/sessions" then
+    if !isLocalUpload then
+      return ← remoteUpload "POST" "/uploads/sessions" req.bodySlice.toByteArray "application/json"
+    let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+      | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+    return ← localUploads (fun root => OrbNode.FileBrowser.initOrStatusUploadSessionAt root jv)
+  if req.method == "PUT" && cleanPath.startsWith "/api/uploads/sessions/" then
+    let segs := (cleanPath.splitOn "/").filter (!·.isEmpty)
+    if segs.length == 6 && segs[0]? == some "api" && segs[1]? == some "uploads" &&
+        segs[2]? == some "sessions" && segs[4]? == some "chunks" then
+      let uid := segs[3]!
+      let some idx := segs[5]!.toNat?
+        | return .ok (mkJson 400 "{\"error\":\"invalid_chunk_index\"}")
+      if req.bodySlice.len > OrbNode.FileBrowser.maxChunkBytes then
+        return .ok (mkJson 413 "{\"error\":\"chunk_too_large\"}")
+      if !isLocalUpload then
+        return ← remoteUpload "PUT" s!"/uploads/sessions/{uid}/chunks/{idx}" req.bodySlice.toByteArray
+      return ← localUploads (fun root => OrbNode.FileBrowser.writeUploadSessionChunkAt root uid idx req.bodySlice.toByteArray)
+  if req.method == "POST" && cleanPath.startsWith "/api/uploads/sessions/" && cleanPath.endsWith "/complete" then
+    let segs := (cleanPath.splitOn "/").filter (!·.isEmpty)
+    if segs.length == 5 && segs[0]? == some "api" && segs[1]? == some "uploads" &&
+        segs[2]? == some "sessions" && segs[4]? == some "complete" then
+      let uid := segs[3]!
+      if !isLocalUpload then
+        return ← remoteUpload "POST" s!"/uploads/sessions/{uid}/complete" ByteArray.empty
+      return ← localUploads (fun root => OrbNode.FileBrowser.completeUploadSessionAt root uid)
+  if req.method == "DELETE" && cleanPath.startsWith "/api/uploads/sessions/" then
+    let segs := (cleanPath.splitOn "/").filter (!·.isEmpty)
+    if segs.length == 4 && segs[0]? == some "api" && segs[1]? == some "uploads" &&
+        segs[2]? == some "sessions" then
+      let uid := segs[3]!
+      if !isLocalUpload then
+        return ← remoteUpload "DELETE" s!"/uploads/sessions/{uid}" ByteArray.empty
+      if hasSegmentTraversal uploadOwnerSeg then
+        return .ok (mkJson 400 "{\"error\":\"invalid_upload_owner\"}")
+      match ← OrbNode.FileBrowser.cancelUploadSessionAt uploadRoot uid with
+      | .ok () => return .ok { status := 204, corsOrigin? := reqOrigin?, body := ByteArray.empty }
+      | .error e => return .ok (mkJson (uploadErrStatus e) s!"\{\"error\":{jsonEscape e}}")
 
   -- 6d. Admin-only Backup / Restore / Settings Guards
   if cleanPath == "/api/settings/backup" || cleanPath == "/api/settings/restore" then
@@ -5026,7 +5208,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         req.method cleanPath rawTarget req.headers req.bodySlice.toByteArray
         caller.userId caller.username st.bootstrapAdminId
         (caller.isLegacyUnscoped || caller.role == "admin") caller.isLegacyUnscoped then
-      return .ok { status := sCode, contentType := sCtype, corsOrigin? := reqOrigin?, body := sBody }
+      return .ok (hardenedDownloadResponse req.method cleanPath rawTarget req.bodySlice.toByteArray sCode sCtype sBody reqOrigin?)
 
   -- Mission Detail & Delete (`GET|DELETE /api/control/missions/:id`, `SM-01`, `SM-07`)
   if let some params := matchRoutePattern? "/api/control/missions/:id" rawTarget then
@@ -5858,6 +6040,27 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
         return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
 
+  -- Collection cancel: clients should not have to know every queued id to
+  -- clear a mission's pending prefix. Item DELETE remains the single-item form.
+  if req.method == "DELETE" && cleanPath == "/api/control/queue" then
+    let missionId := ((parseQueryParams rawTarget).find? (fun p => p.1 == "mission_id")).map Prod.snd |>.getD ""
+    if missionId.isEmpty then
+      return .ok (mkJson 400 "{\"error\":\"missing_mission_id\"}")
+    if let some (cCode, cBody) := (← authorizeMissionOp st caller missionId false) then
+      return .ok (mkJson cCode cBody)
+    let qRows ← execParamQuery st.store.missionsDb
+      "SELECT message_id FROM remote_message_queue WHERE user_id='core' AND mission_id=?1 AND state='waiting' AND COALESCE(phase,0)=0 ORDER BY rowid ASC;"
+      #[missionId]
+    let .ok rs := qRows | return .ok (mkJson 500 "{\"error\":\"queue_read_failed\"}")
+    let mut cancelled : Nat := 0
+    for i in [1:rs.size] do
+      let messageId := (cell rs[i]! 0).trimAscii.toString
+      if messageId.isEmpty then continue
+      match ← stepQueueItem st.store "core" messageId 5 "0" s!"{st.store.bootEpoch}" "0" s!"{nowEpochSec}" 0 0 "" with
+      | .ok (.ok _) => cancelled := cancelled + 1
+      | _ => pure ()
+    return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape missionId},\"cancelled\":{cancelled}}")
+
   if let some params := matchRoutePattern? "/api/control/queue/:id/step" rawTarget then
     if req.method == "POST" then
       let messageId := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
@@ -5915,7 +6118,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         req.method cleanPath rawTarget req.headers req.bodySlice.toByteArray
         caller.userId caller.username st.bootstrapAdminId
         (caller.isLegacyUnscoped || caller.role == "admin") caller.isLegacyUnscoped then
-      return .ok { status := sCode, contentType := sCtype, corsOrigin? := reqOrigin?, body := sBody }
+      return .ok (hardenedDownloadResponse req.method cleanPath rawTarget req.bodySlice.toByteArray sCode sCtype sBody reqOrigin?)
 
   if let some params := matchRoutePattern? "/api/control/queue/:id" rawTarget then
     if req.method == "PATCH" then
@@ -6605,16 +6808,38 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | .ok body => return .ok (mkJson 200 body)
         | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       else if kind == "stream" && req.method == "GET" && arg.isEmpty then
-        match ← contextStreamEvent st.store proj with
-        | .ok ev =>
+        match ← contextManifestJson st.store proj with
+        | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+        | .ok firstBody =>
           return .ok {
             status := 200,
             contentType := "text/event-stream",
             corsOrigin? := reqOrigin?,
             extraHdrs := #[("Cache-Control", "no-cache"), ("X-Accel-Buffering", "no")],
-            body := ev.toUTF8
+            body := ByteArray.empty,
+            bodyStream? := some fun emit => do
+              if !(← emit s!"data: {firstBody}\n\n".toUTF8) then return false
+              let mut lastBody := firstBody
+              let mut lastEmitMs := ← IO.monoMsNow
+              let mut running := true
+              while running do
+                IO.sleep 1000
+                match ← contextManifestJson st.store proj with
+                | .ok body =>
+                  if body != lastBody then
+                    lastBody := body
+                    lastEmitMs ← IO.monoMsNow
+                    if !(← emit s!"data: {body}\n\n".toUTF8) then running := false
+                | .error e =>
+                  discard <| emit s!"event: error\ndata: \{\"error\":{jsonEscape e}}\n\n".toUTF8
+                  running := false
+                if running then
+                  let nowMs ← IO.monoMsNow
+                  if nowMs - lastEmitMs ≥ 15000 then
+                    lastEmitMs := nowMs
+                    if !(← emit ": keep-alive\n\n".toUTF8) then running := false
+              return true
           }
-        | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       else if kind == "blobs" && req.method == "POST" && arg.isEmpty then
         let qParams := parseQueryParams rawTarget
         let confirmedLarge :=
@@ -6792,7 +7017,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             let mut acc := JVal.obj basePairs
             for (k, v) in patchPairs do
               -- `bitwarden` is owned by `/api/bitwarden/*` and auth hashes are owned by `/api/auth/*`.
-              if k != "password_hash" && k != "dashboard_password_hash" && k != "auth" && k != "bitwarden" && k != "bws_access_token" then
+              if k != "password_hash" && k != "dashboard_password_hash" && k != "auth" && k != "bitwarden" && k != "bws_access_token" && k != "orb_telemetry" then
                 acc := acc.setField k v
             return acc
         | _, _ => curSettings
@@ -6836,10 +7061,40 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     return .ok (mkJson 200 (renderCompact (.obj #[("capabilities", caps)])))
 
   if req.method == "GET" && cleanPath == "/api/stats" then
-    let mCnt ← match ← execParamQuery st.store.missionsDb "SELECT COUNT(*) FROM missions;" #[] with
-      | .ok rs => pure (((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0)
-      | .error _ => pure 0
-    return .ok (mkJson 200 s!"\{\"missions\":{mCnt}}")
+    let qParams := parseQueryParams rawTarget
+    let since? := (qParams.find? (fun p => p.1 == "since" || p.1 == "updated_since")).bind (fun p => percentDecodeStrict p.2)
+    let mut conds : Array String := #[]
+    let mut params : Array String := #[]
+    if !caller.isLegacyUnscoped then
+      params := params.push caller.userId
+      conds := conds.push s!"(m.owner_user_id = ?1 OR EXISTS (SELECT 1 FROM mission_shares s WHERE s.mission_id = m.id AND s.user_id = ?1))"
+    if let some rawSince := since? then
+      let cleanSince := rawSince.trimAscii.toString
+      if !cleanSince.isEmpty then
+        params := params.push cleanSince
+        let p := params.size
+        conds := conds.push s!"((CASE WHEN m.updated_at != '' AND NOT (m.updated_at GLOB '*[^0-9]*') THEN CAST(m.updated_at AS INTEGER) ELSE COALESCE(CAST(strftime('%s', m.updated_at) AS INTEGER), 0) END) >= (CASE WHEN ?{p} != '' AND NOT (?{p} GLOB '*[^0-9]*') THEN CAST(?{p} AS INTEGER) ELSE COALESCE(CAST(strftime('%s', ?{p}) AS INTEGER), 9223372036854775807) END))"
+    let whereSql := if conds.isEmpty then "" else " WHERE " ++ String.intercalate " AND " conds.toList
+    let q :=
+      "SELECT COUNT(*),COALESCE(SUM(CASE WHEN m.status IN ('active','running','starting','resuming','working','in_progress','processing','streaming','pending','queued','waiting_background','awaiting_user') THEN 1 ELSE 0 END),0)," ++
+      "COALESCE(SUM(CASE WHEN m.status IN ('completed','succeeded','done') THEN 1 ELSE 0 END),0)," ++
+      "COALESCE(SUM(CASE WHEN m.status IN ('failed','error','lost','cancelled') THEN 1 ELSE 0 END),0) FROM missions m" ++ whereSql ++ ";"
+    let (total, active, completed, failed) ← match ← execParamQuery st.store.missionsDb q params with
+      | .ok rs => pure (if rs.size > 1 then
+          (((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0,
+           ((rs[1]?.bind (·[1]?)).bind String.toNat?).getD 0,
+           ((rs[1]?.bind (·[2]?)).bind String.toNat?).getD 0,
+           ((rs[1]?.bind (·[3]?)).bind String.toNat?).getD 0)
+          else (0,0,0,0))
+      | .error _ => pure (0,0,0,0)
+    let sinceVal := match since? with | some sv => .str sv | none => .null
+    return .ok (mkJson 200 (renderCompact (.obj #[
+      ("missions", JVal.nat total),
+      ("since", sinceVal),
+      ("tasks", .obj #[("total", JVal.nat total), ("active", JVal.nat active),
+        ("completed", JVal.nat completed), ("failed", JVal.nat failed)]),
+      ("cost", .obj #[("actual_cents", JVal.nat 0), ("estimated_cents", JVal.nat 0),
+        ("unknown_cents", JVal.nat 0), ("provenance", .str "unknown")])])))
 
   let isAdmCaller := caller.isLegacyUnscoped || caller.role == "admin"
   let nowIsoDisp := formatEpochIso8601Utc nowEpochSec
@@ -6888,7 +7143,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       st.bunkerStateRef? st.managedStore? st.relayHub? st.broadcastHub?
       req.method cleanPath rawTarget req.headers req.bodySlice.toByteArray
       caller.userId caller.username st.bootstrapAdminId isAdmCaller caller.isLegacyUnscoped then
-    return .ok { status := sysCode, contentType := sysCtype, corsOrigin? := reqOrigin?, body := sysBody }
+    return .ok (hardenedDownloadResponse req.method cleanPath rawTarget req.bodySlice.toByteArray sysCode sysCtype sysBody reqOrigin?)
 
   return .ok (mkJson 404 s!"\{\"error\":\"not_found\",\"path\":{jsonEscape cleanPath}}")
 
@@ -7528,7 +7783,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       | .error storeErr =>
         IO.eprintln s!"[sandboxed-sh] FATAL: failed to open SQLite CoreStore at {dataRoot}: {storeErr}"
         return 1
-    let managedStore ← match ← openManagedComputeStore s!"{dataRoot}/managed_compute.db" with
+    let managedStore ← match ← openManagedComputeStore s!"{dataRoot}/managed_compute.db" (some store.missionsDb) with
       | .ok ms => pure ms
       | .error msErr =>
         closeCoreStore store
@@ -7546,6 +7801,13 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       | .ok aid => pure aid
       | .error _ => pure ""
     discard <| backfillManagedMachineOwner managedStore bootAdminId
+    match ← migrateLegacySecurityState cfg.workingDir dataRoot (effectiveJwtSecret cfg) store with
+    | .error e =>
+      closeManagedComputeStore managedStore
+      closeCoreStore store
+      IO.eprintln s!"[sandboxed-sh] FATAL: legacy security-state migration failed closed: {e}"
+      return 1
+    | .ok () => pure ()
     hydrateLegacyDataDir cfg.workingDir dataRoot store managedStore bootAdminId cfg.devMode
     let repairedOwners ← repairManagedMachineOwners store managedStore
     if repairedOwners > 0 then
@@ -7668,18 +7930,29 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
         catch e =>
           IO.eprintln s!"[sandboxed-sh] remote job re-attach failed: {e}"
         while true do
-          try
-            discard <| tickContinuationScheduler store (some managedStore) (some relayHub) (some broadcastHub) remoteSup (some warmMgr) cfg.workingDir (some localWakeupLaunch)
-          catch e =>
-            IO.eprintln s!"[sandboxed-sh] wake-up scheduler pass failed: {e}"
+           try
+             discard <| tickContinuationScheduler store (some managedStore) (some relayHub) (some broadcastHub) remoteSup (some warmMgr) cfg.workingDir (some localWakeupLaunch)
+             let nowSec ← coreEpochSec
+             discard <| tickLocalHarnessSupervisor appState (formatEpochIso8601Utc nowSec)
+             discard <| reapOrphanedMissionRuns store.missionsDb (formatEpochIso8601Utc nowSec)
+             discard <| tickRemoteFollowupPump store (some managedStore) (some relayHub) (some broadcastHub) remoteSup cfg.workingDir nowSec
+           catch e =>
+             IO.eprintln s!"[sandboxed-sh] wake-up scheduler pass failed: {e}"
           IO.sleep 2000
       discard <| IO.asTask (prio := .dedicated) do
         let mut lastInventory : UInt64 := 0
         let mut checkedDestroyed : Array String := #[]
         let mut lastSampledMinute : UInt64 := 0
+        let mut maintTracker : OrbCore.Maintenance.Tracker := {}
         while true do
           let cached ← managedRef.get
           let observedAt ← coreEpochSec
+          let (nextMaint, maintReport) ← OrbCore.Maintenance.tick store cfg.workingDir observedAt maintTracker
+          maintTracker := nextMaint
+          let maintRemoved := (maintReport.fieldNat? "removed").getD 0
+          let maintProposed := (maintReport.fieldNat? "would_remove").getD 0
+          if maintRemoved > 0 || maintProposed > 0 then
+            IO.eprintln s!"[orb-core] workspace maintenance: proposed={maintProposed} removed={maintRemoved} execute={(maintReport.fieldBool? "execute").getD false}"
           -- One compute sample per minute feeds the Resources history.
           if observedAt / 60 != lastSampledMinute then
             lastSampledMinute := observedAt / 60
@@ -7748,6 +8021,11 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
             if curSec ≥ lastWatchdogSec + wdIntervalSec then
               lastWatchdogSec := curSec
               discard <| sdNotifyRaw notifySock "WATCHDOG=1\n"
+          if maxRequests?.isNone then
+            let curSec ← coreEpochSec
+            if curSec ≥ lastTelFlushSec + 30 then
+              lastTelFlushSec := curSec
+              discard <| IO.asTask (prio := .dedicated) (do discard <| flushTelemetryOnce telemetrySink curSec)
         served := served + 1
     if !notifySock.isEmpty then
       discard <| sdNotifyRaw notifySock "STOPPING=1\n"

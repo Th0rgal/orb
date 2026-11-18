@@ -26,12 +26,16 @@
       sandboxed-sh = orb-core;
     };
 
-    packages = forAllSystems (pkgs: rec {
+    packages = forAllSystems (pkgs: let
       turbo-lean = pkgs.callPackage ./nix/turbo-lean.nix {};
       orb-core = pkgs.callPackage ./nix/package.nix {inherit turbo-lean;};
+    in {
+      inherit turbo-lean orb-core;
       sandboxed-sh = orb-core;
       default = orb-core;
     } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+      # `turbo-lean` must come from the let above: a `rec` set does not reach
+      # across `//`, which left this attribute undefined (U4).
       orb-desktop = pkgs.callPackage ./nix/desktop.nix {inherit turbo-lean;};
     });
 

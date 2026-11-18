@@ -120,6 +120,25 @@ def catalogPrettyJsonForRole (role : String) : Option String :=
   | "operator" => some (appendMacTetherTools operatorCatalogPrettyJson)
   | _ => none
 
+private def catalogForRole (role : String) : String :=
+  match role with
+  | "executor" => executorCatalogPrettyJson
+  | "coordinator" => coordinatorCatalogPrettyJson
+  | "operator" => operatorCatalogPrettyJson
+  | _ => executorCatalogPrettyJson
+
+private def catalogHasTool (raw name : String) : Bool :=
+  !name.isEmpty && raw.contains s!"\"name\": \"{name}\""
+
+/-- Server-side role admission: a tool advertised to some role is not thereby
+    available to another role, even when the caller omits it from its local
+    catalogue. Tools with no catalogue entry stay governed by their own gates. -/
+def rolePermitsCatalogTool (role name : String) : Bool :=
+  let known := catalogHasTool executorCatalogPrettyJson name ||
+    catalogHasTool coordinatorCatalogPrettyJson name ||
+    catalogHasTool operatorCatalogPrettyJson name
+  !known || catalogHasTool (catalogForRole role) name
+
 def mutatingControlToolNames : Array String := #[
   "write_project_board",
   "write_mission_board",
