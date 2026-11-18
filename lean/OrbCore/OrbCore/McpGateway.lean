@@ -425,6 +425,17 @@ def dispatchMcpToolCall
       | some uid => if uid.isEmpty then "admin" else uid
       | none => ""
 
+  -- A read-only mission is an inspection/review worker.  Its scoped MCP token
+  -- must not be able to turn that capability into a mutating child, message,
+  -- cancellation, board write, or machine operation.  Keep the decision in
+  -- Core, beside the persisted authority mode, rather than trusting tags or
+  -- prompt text supplied by the worker.
+  let readonlyCaller ← if callerMid.isEmpty then pure false else
+    match ← execParamQuery store.missionsDb
+      "SELECT COALESCE(authority_mode,'writer') FROM missions WHERE id=?1;" #[callerMid] with
+    | .ok rows => pure (rows.size > 1 && cell rows[1]! 0 == "readonly")
+    | .error _ => pure false
+
   let canManageMachine (machine : ManagedMachine) : IO Bool := do
     if operatorIsAdmin then return true
     if let some uid := operatorPrincipal? then
@@ -655,6 +666,8 @@ def dispatchMcpToolCall
 
   -- Idempotent replay for retried mutating MCP calls carrying `idempotency_key`
   let idemKeyTop := ((args.fieldStr? "idempotency_key").getD "").trimAscii.toString
+  if readonlyCaller && OrbBin.McpCatalog.isMutatingControlTool toolName then
+    return mcpErr "read_only_mission" "This mission was launched with writer:false and cannot use mutating MCP tools."
   -- Reserve before effects, replay before admission, and settle each winning row
   -- once. Every reserved branch is enclosed by withReservedMcpOutcome.
   let receiptTools := #["send_message_to_mission", "cancel_mission", "start_mission", "consult_model",
@@ -1213,7 +1226,13 @@ def dispatchMcpToolCall
     for nodeId in excluded do
       tagsArr := tagsArr.push (AutoPlacement.exclusionTagPrefix ++ nodeId)
     let tagsJson := renderCompact (.arr (tagsArr.map JVal.str))
-    let authMode := if toolName == "consult_model" then "readonly" else "writer"
+    let requestedWriter? := args.fieldBool? "writer"
+    let requestedTags := (args.fieldArr? "tags").getD #[] |>.filterMap JVal.asStr?
+    let requestedIntent := (args.fieldStr? "intent").getD ""
+    let .ok authMode := classifyAuthorityMode requestedWriter? requestedTags
+        (toolName == "consult_model" || requestedIntent == "review_only" || requestedIntent == "readonly")
+      | return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed"
+          "contradictory_authority_tags" nowIso "contradictory_authority_tags"
     -- A consultation with nowhere to run must fail, not sit at awaiting_user/active.
     if isConsult && (remoteSup?.isNone || inheritedRn?.isNone) then
       return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" "no execution node is available" nowIso "no_execution_placement"
