@@ -4619,14 +4619,15 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
       })
   }
 
-  let sendReq (method target tok body : String) (retryKey : String := "") : IO (Nat × String × Array (String × String)) := do
+  let sendReq (method target tok body : String) (retryKey : String := "")
+      (contentType : String := "application/json") : IO (Nat × String × Array (String × String)) := do
     let authHdr := (if tok.isEmpty then "" else s!"Authorization: Bearer {tok}\r\n") ++
       (if retryKey.isEmpty then "" else s!"Idempotency-Key: {retryKey}\r\n")
     let raw :=
       if body.isEmpty then
         s!"{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authHdr}\r\n"
       else
-        s!"{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authHdr}Content-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+        s!"{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authHdr}Content-Type: {contentType}\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
     match parseRequest raw.toUTF8 none with
     | .error e => return (0, s!"parse_err:{e}", #[])
     | .ok req =>
@@ -4887,9 +4888,56 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
      (admNodesBody.splitOn "\"id\":\"core\"").length < 2 then
     return (← fail s!"member placement confinement failed: core={alCoreMisSt} coloc={alColocMisSt} dgx={alDgxMisSt}:{alDgxMisBody} sep={alSepMisSt}:{alSepMisBody} ws={alWsSt} alNodes={alNodesBody} admNodes={admNodesBody}")
 
-  let (alUploadSt, alUploadBody, _) ← sendReq "POST" "/api/uploads?name=spec.md" aliceTok "hello-staged-attachment"
-  if alUploadSt != 201 || (alUploadBody.splitOn s!"\"owner_user_id\":{jsonEscape aliceId}").length < 2 then
-    return (← fail s!"member staged upload failed or unconfined: st={alUploadSt} body={alUploadBody}")
+  let alUploadBytes := "hello-staged-attachment".toUTF8
+  let alUploadJson := OrbBin.Json.renderCompact (.obj #[
+    ("name", .str "spec.md"),
+    ("data_base64", .str (OrbBin.PosixExt.base64Encode alUploadBytes false true))])
+  let (alUploadSt, alUploadBody, _) ← sendReq "POST" "/api/uploads" aliceTok alUploadJson
+  let alUploadJv := (OrbBin.Json.parse alUploadBody).toOption.getD (.obj #[])
+  let alUploadPath := (alUploadJv.fieldStr? "path").getD ""
+  let alUploadSha := (alUploadJv.fieldStr? "sha256").getD ""
+  let alUploadBack ←
+    if alUploadPath.isEmpty then pure ""
+    else try IO.FS.readFile (System.FilePath.mk alUploadPath) catch _ => pure ""
+  if alUploadSt != 200 || (alUploadBody.splitOn s!"\"owner_user_id\":{jsonEscape aliceId}").length < 2 ||
+      alUploadPath.isEmpty || alUploadSha.isEmpty || alUploadBack != "hello-staged-attachment" then
+    return (← fail s!"member staged upload failed, unconfined or not byte-exact: st={alUploadSt} body={alUploadBody}")
+  let legacyUpId := s!"r20-http12-{nowSec}"
+  let legacyBoundary := "----r20-http12-boundary"
+  let legacyChunk0 := "chunk-zero-"
+  let legacyChunk1 := "chunk-one"
+  let multipartChunk (payload : String) : String :=
+    s!"--{legacyBoundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"chunk.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n{payload}\r\n--{legacyBoundary}--\r\n"
+  let chunkUrl (idx total : Nat) : String :=
+    s!"/api/fs/upload-chunk?upload_id={legacyUpId}&chunk_index={idx}&total_chunks={total}&path=/tmp"
+  let ctHeader := s!"multipart/form-data; boundary={legacyBoundary}"
+  let (lc0St, _, _) ← sendReq "POST" (chunkUrl 0 2) adminTok (multipartChunk legacyChunk0) "" ctHeader
+  let (lf0St, lf0Body, _) ← sendReq "POST" "/api/fs/upload-finalize" adminTok
+    (OrbBin.Json.renderCompact (.obj #[("path", .str "/tmp"), ("upload_id", .str legacyUpId),
+      ("file_name", .str s!"{legacyUpId}.bin"), ("total_chunks", OrbBin.Json.JVal.nat 2)]))
+  if lc0St != 200 || lf0St != 400 || !(lf0Body.contains "missing_chunk_1") then
+    return (← fail s!"legacy chunk missing-detection failed: c0={lc0St} f0={lf0St}:{lf0Body}")
+  let (lc1St, lc1Body, _) ← sendReq "POST" (chunkUrl 1 2) adminTok (multipartChunk legacyChunk1) "" ctHeader
+  let (lf1St, lf1Body, _) ← sendReq "POST" "/api/fs/upload-finalize" adminTok
+    (OrbBin.Json.renderCompact (.obj #[("path", .str "/tmp"), ("upload_id", .str legacyUpId),
+      ("file_name", .str s!"{legacyUpId}.bin"), ("total_chunks", OrbBin.Json.JVal.nat 2)]))
+  let legacyDest := s!"/tmp/{legacyUpId}.bin"
+  let legacyRead ← try IO.FS.readFile (System.FilePath.mk legacyDest) catch _ => pure ""
+  try IO.FS.removeFile legacyDest catch _ => pure ()
+  if lc1St != 200 || lf1St != 200 || !(lf1Body.contains s!"\"size\":{legacyChunk0.length + legacyChunk1.length}") ||
+      legacyRead != legacyChunk0 ++ legacyChunk1 then
+    return (← fail s!"legacy chunk exact assembly failed: c1={lc1St}:{lc1Body} f1={lf1St}:{lf1Body} got={legacyRead}")
+  let (lmissSt, _, _) ← sendReq "POST" s!"/api/fs/upload-chunk?upload_id={legacyUpId}&total_chunks=2" adminTok (multipartChunk "x") "" ctHeader
+  if lmissSt != 400 then
+    return (← fail s!"legacy chunk accepted a missing chunk_index: {lmissSt}")
+  let (alDlSt, alDlBody, alDlHdrs) ← sendReq "GET" s!"/api/fs/download?path={alUploadPath}" adminTok ""
+  let alDlHdr (name : String) : String :=
+    ((alDlHdrs.find? (fun p => p.1.toLower == name)).map (·.2)).getD ""
+  if alDlSt != 200 || alDlBody != "hello-staged-attachment" ||
+      !(alDlHdr "content-disposition").startsWith "attachment" ||
+      alDlHdr "x-content-type-options" != "nosniff" ||
+      !(alDlHdr "content-security-policy").contains "default-src 'none'" then
+    return (← fail s!"download hardening failed: st={alDlSt} headers={reprStr alDlHdrs} body={alDlBody}")
 
   -- `alice` creates mission on dedicated fleet node `ashur` with project `lean-campaign`
   let (alMisSt, alMisBody, _) ← sendReq "POST" "/api/control/missions" aliceTok

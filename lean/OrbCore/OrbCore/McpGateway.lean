@@ -1747,7 +1747,7 @@ def dispatchMcpToolCall
       | .ok s => pure s
       | .error e => return mcpErr "project_scope_violation" e
     let stVal := (args.fieldStr? "status").getD "active"
-    discard <| upsertProjectRecord store slug slug slug "" stVal "" nowIso none
+    discard <| upsertProjectRecord store slug slug "" "" stVal "" nowIso none
     discard <| execParamQuery store.projectsDb
       "UPDATE projects SET status=?2, updated_at=?3 WHERE slug=?1;"
       #[slug, stVal, nowIso]

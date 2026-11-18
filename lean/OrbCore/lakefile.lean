@@ -12,6 +12,7 @@ package «orb-core» where
 require «orb-spec» from ".."
 require «orb-net-leaf» from "../OrbNetLeaf"
 require «orb-bin» from "../OrbBin"
+require «orb-node» from "../OrbNode"
 
 target orb_core_sqlite_o pkg : FilePath := do
   let oFile := pkg.buildDir / "c" / "orb_core_sqlite.o"
