@@ -6852,7 +6852,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
 
   if let some (sCode, sCtype, sBody) ← dispatchSecretAndApprovalRoutes?
       st.store st.cfg.workingDir st.store.rootDir st.bunkerStateRef? isAdmCaller
-      req.method rawTarget cleanPath req.bodySlice.toByteArray nowEpochSec then
+      req.method rawTarget cleanPath req.bodySlice.toByteArray nowEpochSec
+      (((req.headers.filter (fun h => h.1.toLower == "x-paloma-approval")).toList.map (·.2))
+        |> String.intercalate ",") then
     return .ok { status := sCode, contentType := sCtype, corsOrigin? := reqOrigin?, body := sBody.toUTF8 }
 
   if let some mst := st.managedStore? then

@@ -18,10 +18,17 @@ target orb_net_leaf_o pkg : FilePath := do
   let leanIncludeDir ← getLeanIncludeDir
   buildO oFile srcJob #["-I", leanIncludeDir.toString] #["-std=gnu11", "-O3", "-fPIC", "-Wall", "-Wextra", "-Werror"] ((← IO.getEnv "LEAN_CC").getD "cc")
 
+target orb_net_leaf_signature_o pkg : FilePath := do
+  let oFile := pkg.buildDir / "c" / "orb_net_leaf_signature.o"
+  let srcJob ← inputTextFile <| pkg.dir / "c" / "orb_net_leaf_signature.c"
+  let leanIncludeDir ← getLeanIncludeDir
+  buildO oFile srcJob #["-I", leanIncludeDir.toString] #["-std=gnu11", "-O3", "-fPIC", "-Wall", "-Wextra", "-Werror"] ((← IO.getEnv "LEAN_CC").getD "cc")
+
 extern_lib liborb_net_leaf_shim pkg := do
   let shimO ← orb_net_leaf_o.fetch
+  let signatureO ← orb_net_leaf_signature_o.fetch
   let name := nameToStaticLib "orb_net_leaf_shim"
-  buildStaticLib (pkg.staticLibDir / name) #[shimO]
+  buildStaticLib (pkg.staticLibDir / name) #[shimO, signatureO]
 
 @[default_target]
 lean_lib «OrbNetLeaf» where

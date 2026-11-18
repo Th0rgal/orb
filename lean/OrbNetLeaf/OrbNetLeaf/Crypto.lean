@@ -34,6 +34,13 @@ private opaque rawEdX25519
     (op : UInt8)
     (k1 k2 msg : @& ByteArray) : IO ByteArray
 
+@[extern "orb_net_leaf_verify_p256"]
+private opaque rawVerifyP256
+    (key signature payload : @& ByteArray) : IO Bool
+
+def verifyP256 (key signature payload : ByteArray) : IO Bool :=
+  rawVerifyP256 key signature payload
+
 inductive AeadAlg where
   | aes256Gcm
   | chacha20Poly1305
