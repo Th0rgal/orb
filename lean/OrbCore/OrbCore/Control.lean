@@ -3249,7 +3249,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let rawId := (cleanPath.drop routePrefix.length).dropEnd "/wait".length |>.toString
       let some reqId := parseUuidCanonical? rawId
         | return .ok (mkJson 400 "{\"error\":\"invalid_secret_request_id\"}")
-      let timeoutRaw := (parseQueryParams req.rawPath).find? (fun (k, _) => k == "timeout_secs") |>.map Prod.snd
+      let timeoutRaw := (parseQueryParams req.path).find? (fun (k, _) => k == "timeout_secs") |>.map Prod.snd
       let timeoutSecs := (timeoutRaw.bind String.toNat?).getD 20 |>.min 25
       let projectSlug := activeClaims.project
       let callerSubject := if activeClaims.isExternal then
