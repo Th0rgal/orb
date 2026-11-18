@@ -1863,9 +1863,12 @@ def run (root : String) : IO Unit := do
         | throw (IO.userError s!"legacy unscoped dispatch missing on {routeName}")
       let .ok lDoc := OrbBin.Json.parseBytes lBytes
         | throw (IO.userError s!"legacy unscoped JSON parse failed on {routeName}")
-      check (aStatus == 200 && lStatus == 200) s!"admin and legacy unscoped status 200 on {routeName}"
-      check (renderCompact (stripGeneratedAt aDoc) == renderCompact (stripGeneratedAt lDoc))
-        s!"admin and legacy unscoped receive identical response on {routeName}"
+      let expectedAdminStatus := if target == "/api/ai/proxy/timing" then 403 else 200
+      check (aStatus == expectedAdminStatus && lStatus == 200)
+        s!"admin status {expectedAdminStatus} and legacy status 200 on {routeName}"
+      if expectedAdminStatus == 200 then
+        check (renderCompact (stripGeneratedAt aDoc) == renderCompact (stripGeneratedAt lDoc))
+          s!"admin and legacy unscoped receive identical response on {routeName}"
       adminSiblingDocs := adminSiblingDocs.push aDoc
     let adminSiblingCombined := renderCompact (.arr adminSiblingDocs)
     for marker in #[provNameMarker, "admin-provider-name-marker-beta", disabledProvMarker, "admin-mission", accountMarker, modelMarker, discoveryMarker] do
@@ -1873,7 +1876,8 @@ def run (root : String) : IO Unit := do
     let mut siblingLeaks : Array String := #[]
     for (routeName, target) in siblingRoutes do
       let (mStatus, mDoc) ← send "GET" target member (.obj #[]) stWithProviders
-      check (mStatus == 200) s!"member status 200 on {routeName}"
+      let expectedMemberStatus := if target == "/api/ai/proxy/timing" then 403 else 200
+      check (mStatus == expectedMemberStatus) s!"member status {expectedMemberStatus} on {routeName}"
       let raw := renderCompact mDoc
       let mut leakedOnRoute : Array String := #[]
       for marker in siblingMarkers do
@@ -1888,6 +1892,9 @@ def run (root : String) : IO Unit := do
     sql store.missionsDb
       "INSERT INTO proxy_usage(timestamp,model,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,cost_cents,provider,account_id,api_key_id,api_key_name,mission_id,caller_kind,purpose,reasoning_tokens,account_bound) VALUES(?1,'claude-sonnet-4-5',80,40,0,0,5,'anthropic','member-acct','','','member-mission','mission','turn',0,1);"
       #[nowIsoReal]
+    sql store.missionsDb
+      "INSERT INTO proxy_usage(timestamp,model,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,cost_cents,provider,account_id,api_key_id,api_key_name,mission_id,caller_kind,purpose,reasoning_tokens,account_bound) VALUES(?1,'claude-sonnet-4-5',100,50,0,0,12,'anthropic',?2,'','','admin-mission','mission','turn',0,1);"
+      #[nowIsoReal, accountMarker]
     let (ovAdminSt, ovAdminDoc) ← send "GET" "/api/resources/overview" admin (.obj #[]) stWithProviders
     let (ovSt, ovDoc) ← send "GET" "/api/resources/overview" member (.obj #[]) stWithProviders
     let ovComp := ovDoc.fieldOrNull "compute"
@@ -1956,17 +1963,16 @@ def run (root : String) : IO Unit := do
       "member /api/ai/proxy/health returns empty groups, chains, and zeroed totals"
     let (_, mUsageDoc) ← send "GET" "/api/ai/usage/summary" member (.obj #[]) stWithProviders
     let mUsageTot := mUsageDoc.fieldOrNull "totals"
+    let mUsageMissions := mUsageDoc.fieldArr? "by_mission" |>.getD #[]
     check (mUsageDoc.field? "since" == mUsageDoc.field? "window_start" &&
-      mUsageTot.fieldNat? "requests" == some 0 &&
-      mUsageTot.fieldNat? "events" == some 0 &&
-      (mUsageTot.field? "cost_cents").isNone &&
-      (mUsageTot.field? "unknown_cost_requests").isNone &&
-      mUsageDoc.fieldArr? "by_route" == some #[] &&
-      mUsageDoc.fieldArr? "by_root_mission" == some #[] &&
-      mUsageDoc.fieldArr? "by_hour" == some #[] &&
-      mUsageDoc.fieldArr? "by_day" == some #[] &&
-      mUsageDoc.fieldArr? "by_mission" == some #[])
-      "member /api/ai/usage/summary returns zeroed totals and empty breakdown arrays"
+      mUsageTot.fieldNat? "requests" == some 1 &&
+      mUsageTot.fieldNat? "events" == some 1 &&
+      mUsageMissions.any (fun row => row.fieldStr? "key" == some "member-mission") &&
+      mUsageDoc.fieldArr? "by_route" != some #[] &&
+      mUsageDoc.fieldArr? "by_root_mission" != some #[] &&
+      mUsageDoc.fieldArr? "by_hour" != some #[] &&
+      mUsageDoc.fieldArr? "by_day" != some #[])
+      s!"member /api/ai/usage/summary returns only the caller-scoped usage: {renderCompact mUsageDoc}"
     -- Held-open SSE streams (`GET /api/control/stream` and `GET /api/control/missions/:id/stream`)
     -- over real loopback TCP sockets before disabling/deleting the member principal.
     sql store.missionsDb "DELETE FROM mission_shares WHERE mission_id='admin-mission' AND user_id='member';"
