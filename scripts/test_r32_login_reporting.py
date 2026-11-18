@@ -26,6 +26,7 @@ class R32LoginReporting(unittest.TestCase):
             with ExitStack() as stack:
                 for name in ("check_health", "check_proxy", "check_missions", "check_machines", "check_units", "check_builds"):
                     stack.enter_context(patch.object(monitor, name, return_value=None))
+                stack.enter_context(patch.object(monitor, "ro", side_effect=Exception("unused sqlite")))
                 Path(monitor.STATE).write_text('{"problems":{},"info":{}}')
                 monitor.main()
                 monitor.main()
