@@ -1364,6 +1364,9 @@ def streamingUpstreamRequest (isTls : Bool) (method host : String) (port : UInt1
     if status ≥ 200 && status < 300 && !isBodylessHttpResponse method status then
       return .ok ({ status, headers := hdrs, body := ByteArray.empty },
         some fun emit => do
+          if !(← emit ByteArray.empty) then
+            r.close
+            return (ByteArray.empty, false)
           let (copy, complete) ← pumpUpstreamBody r framing tail emit
           if !complete then
             if let some ref := bodyTimedOutRef? then
@@ -1381,6 +1384,7 @@ private def completeToolCallBoundary? (body : ByteArray) : Option Nat := Id.run 
   | some text =>
     let mut offset : Nat := 0
     let mut arguments : Array (Nat × String) := #[]
+    let mut anthropicToolBlocks : Array (Nat × String) := #[]
     for frame in text.splitOn "\n\n" do
       let frameBytes := (frame ++ "\n\n").toUTF8
       offset := offset + frameBytes.size
@@ -1400,6 +1404,25 @@ private def completeToolCallBoundary? (body : ByteArray) : Option Nat := Id.run 
                     let combined := previous ++ args
                     arguments := arguments.filter (fun (i, _) => i != index)
                     arguments := arguments.push (index, combined)
+                    if (OrbBin.Json.parse combined).isOk then return some offset
+              if jv.fieldStr? "type" == some "content_block_start" then
+                if let some block := jv.fieldOrNull "content_block" |>.fieldStr? "type" then
+                  if block == "tool_use" then
+                    let index := jv.fieldNat? "index" |>.getD 0
+                    let input := match (jv.fieldOrNull "content_block").field? "input" with
+                      | some value => renderCompact value
+                      | none => ""
+                    anthropicToolBlocks := anthropicToolBlocks.push (index, input)
+                    if (OrbBin.Json.parse input).isOk then return some offset
+              if jv.fieldStr? "type" == some "content_block_delta" then
+                let delta := jv.fieldOrNull "delta"
+                if delta.fieldStr? "type" == some "input_json_delta" then
+                  let index := jv.fieldNat? "index" |>.getD 0
+                  if let some fragment := delta.fieldStr? "partial_json" then
+                    let previous := (anthropicToolBlocks.find? (fun (i, _) => i == index)).map Prod.snd |>.getD ""
+                    let combined := previous ++ fragment
+                    anthropicToolBlocks := anthropicToolBlocks.filter (fun (i, _) => i != index)
+                    anthropicToolBlocks := anthropicToolBlocks.push (index, combined)
                     if (OrbBin.Json.parse combined).isOk then return some offset
     return none
 
@@ -1437,33 +1460,50 @@ private def recoverBufferedStream
   let mut remaining := 2
   let mut pump := initial
   let mut result : Option (ByteArray × Bool) := none
+  let allCopyRef ← IO.mkRef ByteArray.empty
   while result.isNone do
     let bufferRef ← IO.mkRef ByteArray.empty
     let copyRef ← IO.mkRef ByteArray.empty
     let modeRef : IO.Ref (Option Bool) ← IO.mkRef none
+    let downstreamOpenRef ← IO.mkRef true
     let (_, complete) ← pump (fun piece => do
       copyRef.modify (· ++ piece)
-      let text := (String.fromUTF8? piece).getD ""
+      bufferRef.modify (· ++ piece)
+      let buffered ← bufferRef.get
+      let text := (String.fromUTF8? buffered).getD ""
       let model := containsSubstring text "\"choices\"" ||
         containsSubstring text "\"candidates\"" ||
         containsSubstring text "\"tool_calls\"" ||
-        containsSubstring text "\"response\""
+        containsSubstring text "\"response\"" ||
+        containsSubstring text "\"content_block_start\"" ||
+        containsSubstring text "\"content_block_delta\""
       match ← modeRef.get with
       | none =>
-        modeRef.set (some model)
-        if model then bufferRef.modify (· ++ piece) else discard <| emit piece
-      | some true => bufferRef.modify (· ++ piece)
-      | some false => discard <| emit piece
-      pure true)
+        if model then modeRef.set (some true)
+        if (← downstreamOpenRef.get) then
+          let clientOpen ← emit piece
+          downstreamOpenRef.set clientOpen
+        downstreamOpenRef.get
+      | some true => downstreamOpenRef.get
+      | some false => downstreamOpenRef.get)
     let buffered ← bufferRef.get
     let copied ← copyRef.get
+    allCopyRef.modify (· ++ copied)
+    let allCopied ← allCopyRef.get
+    if !(← downstreamOpenRef.get) then
+      result := some (allCopied, false)
+      continue
+    if (← modeRef.get) == none && complete then
+      discard <| emit copied
+      result := some (allCopied, true)
+      continue
     if (← modeRef.get) == some false then
-      result := some (copied, complete)
+      result := some (allCopied, complete)
       continue
     let streamStatus := classifyProxyStreamOutcome contentType true buffered complete false
     if complete && streamStatus == "ok" then
       discard <| emit buffered
-      result := some (buffered, true)
+      result := some (allCopied, true)
     else
       let completeCalls : UInt32 := if (completeToolCallBoundary? buffered).isSome then 1 else 0
       let ending := Orb.Kernel.streamRecoveryStep
@@ -1472,17 +1512,17 @@ private def recoverBufferedStream
         (if remaining > 0 then 1 else 0) 1
       if (ending &&& 0xFF) == 3 then
         let some boundary := completeToolCallBoundary? buffered
-          | result := some (buffered, false); continue
+          | result := some (allCopied, false); continue
         let clean := synthesizeToolCallClose contentType (buffered.extract 0 boundary)
         discard <| emit clean
-        result := some (clean, true)
+        result := some (allCopied ++ clean, true)
       else if (ending &&& 0xFF) == 4 then
         discard <| emit buffered
-        result := some (buffered, false)
+        result := some (allCopied, false)
       else
         if remaining == 0 then
           discard <| emit buffered
-          result := some (buffered, false)
+          result := some (allCopied, false)
         else
           match ← retry (2 - remaining) with
           | some nextPump =>
@@ -1490,7 +1530,7 @@ private def recoverBufferedStream
             pump := nextPump
           | none =>
             discard <| emit buffered
-            result := some (buffered, false)
+            result := some (allCopied, false)
   return result.get!
 
 /- Execute a bounded `/v1/*` proxy forward across `chain.targets` with proactive pacing spillover,
@@ -1866,7 +1906,8 @@ def forwardProxyChain
                     IO (Option BodyPump) := do
                   let (retryTls, retryHost, retryPort, retryPath, retryHdrs, retryWireBody) :=
                     upstreamRequest retryTarget relPath extraHeaders retryBody
-                  if retryWireBody.size.toUInt32 > retryTarget.contextLimit then
+                  let estimatedTokens := (retryWireBody.size + 3) / 4
+                  if estimatedTokens.toUInt32 > retryTarget.contextLimit then
                     pure none
                   else if retryPort == 0 || (!retryTls && !isPrivatePlaintextHost retryHost) then
                     pure none
