@@ -106,12 +106,18 @@ for i in range(runs):
             if open_ms > 620.0 or int(payload.get("partial_frames", 0)) < int(payload.get("work_units", 1)):
                 error_count += 1
         except Exception:
+            error_count += 1
             cold_samples_ms.append(wall_ms)
+            startup_samples_ms.append(wall_ms)
+            open_samples_ms.append(wall_ms)
             p50_samples_ms.append(wall_ms / 20.0)
             p99_samples_ms.append(wall_ms / 10.0)
             total_work_units += 1
     else:
+        error_count += 1
         cold_samples_ms.append(wall_ms)
+        startup_samples_ms.append(wall_ms)
+        open_samples_ms.append(wall_ms)
         p50_samples_ms.append(wall_ms)
         p99_samples_ms.append(wall_ms)
         total_work_units += 1
@@ -142,6 +148,7 @@ ok = (
     and len(cold_samples_ms) >= runs
     and cold_median <= 60.0
     and peak_rss_mib <= 64.0
+    and frame_p50 <= 2.5
     and frame_p99 <= 8.33
 )
 

@@ -316,6 +316,7 @@ def runDesktopBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) : IO UInt32
 
   let mut frameTimesUs : Array Nat := #[]
   let mut partialDrawnPrims : Nat := 0
+  let mut allUpdatesCulled : Bool := true
   for idx in [0:iters] do
     let (nextSt, streamDamage) :=
       applyStreamFrame cfg.scale120 rt.viewportDeviceRect rt.app
@@ -329,6 +330,7 @@ def runDesktopBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) : IO UInt32
     let f1 ← IO.monoNanosNow
     frameTimesUs := frameTimesUs.push ((f1 - f0) / 1000)
     partialDrawnPrims := rt.vulkan.lastDrawnPrims
+    allUpdatesCulled := allUpdatesCulled && rt.vulkan.lastDrawnPrims < fullScenePrims
     rt ← Runtime.stepFrame rt (desktopReducer rt) renderDesktopFrame
   let (bw, bh) := (rt.vulkan.width, rt.vulkan.height)
   let fbBytes := rt.vulkan.framebuffer.size
@@ -339,7 +341,7 @@ def runDesktopBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) : IO UInt32
   let p99Us := sorted[min ((sorted.size * 99) / 100) (sorted.size - 1)]?.getD 0
   let errors : Nat :=
     if rt.framesRendered == iters + 1 && rt.quiescentSkips == iters && partialFrames == iters &&
-        fbBytes == bw * bh * 4 && partialDrawnPrims < fullScenePrims then 0 else 1
+        fbBytes == bw * bh * 4 && allUpdatesCulled then 0 else 1
   IO.println s!"\{\"cold_ms\": {fmtMs coldUs}, \"startup_ms\": {fmtMs coldUs}, \"transcript_open_ms\": {fmtMs transcriptOpenUs}, \"frame_p50_ms\": {fmtMs p50Us}, \"frame_p99_ms\": {fmtMs p99Us}, \"frames_rendered\": {rt.framesRendered}, \"quiescent_skips\": {rt.quiescentSkips}, \"partial_frames\": {partialFrames}, \"full_scene_prims\": {fullScenePrims}, \"partial_drawn_prims\": {partialDrawnPrims}, \"work_units\": {iters}, \"error_count\": {errors}, \"width\": {bw}, \"height\": {bh}, \"scale120\": {cfg.scale120}, \"first_frame_crc32\": {firstCrc.toNat}}"
   return (if errors == 0 then 0 else 1)
 

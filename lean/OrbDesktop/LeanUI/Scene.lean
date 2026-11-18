@@ -274,7 +274,13 @@ structure SceneOutput where
 /-- Fingerprint paint-affecting node content without including child nodes, which are tracked by
 separate records. -/
 def nodeFingerprint (node : WidgetNode) (box : ComputedBox) : UInt64 :=
-  hash s!"{repr node.styleOf}|{repr node.payloadOf}|{repr box.rectDev}|{repr box.lines}"
+  hash s!"{repr node.styleOf}|{repr node.payloadOf}|{repr box.rectDev}|{repr box.lines}|{repr box.focusedBorderPrim}"
+
+/-- Expand a node's layout damage enough to cover local shadows, focus rings, and decorative
+branches. This is deliberately conservative: under-invalidation leaves stale pixels, while a
+slightly larger dirty box still preserves the damage-only path. -/
+def effectBounds (r : Rect) : Rect :=
+  { x := r.x - 64, y := r.y - 64, w := r.w + 128, h := r.h + 128 }
 
 /-- Collect explicitly identified nodes in document order. Anonymous nodes remain covered by the
 existing conservative root damage path. -/
@@ -287,7 +293,7 @@ def collectNodeRecords : WidgetNode → ComputedBox → Array SceneNodeRecord
         | some wid =>
           let record : SceneNodeRecord :=
             { id := wid
-              effectBoundsDev := box.damageRectDev
+              effectBoundsDev := effectBounds box.damageRectDev
               fingerprint := nodeFingerprint node box }
           #[record]
       self ++ collectChildren children box.children
