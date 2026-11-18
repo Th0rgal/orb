@@ -318,13 +318,16 @@
     src = leanSource [../lean/OrbNode];
     bins = ["sandboxed-node"];
     deps = [leanBase];
+    keepLake = true; # the Core layer reuses OrbNode's build tree
   };
 
+  # OrbCore requires the OrbNode package (`require «orb-node» from "../OrbNode"`),
+  # so its source holds OrbNode too and it reuses the Node layer's build tree.
   leanCore = mkLeanLayer {
     pname = "orb-lean-core";
-    src = leanSource [../lean/OrbCore];
+    src = leanSource [../lean/OrbNode ../lean/OrbCore];
     bins = ["orb-core"];
-    deps = [leanBase];
+    deps = [leanBase leanNode];
   };
 
   leanLocald = mkLeanLayer {
