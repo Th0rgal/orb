@@ -15,7 +15,12 @@ object OrbRemoteGoal {
         val envelope = event(value) ?: return previous
         val data = envelope["data"] as? Map<*, *> ?: return previous
         val status = data["status"] as? String
-        val phase = if (status in setOf("active", "complete", "stopped", "paused", "blocked")) status!! else previous.phase
+        val phase = when {
+            previous.phase == "complete" && status == "active" -> previous.phase
+            previous.phase == "stopped" && status == "active" -> previous.phase
+            status in setOf("active", "complete", "stopped", "paused", "blocked") -> status!!
+            else -> previous.phase
+        }
         return Projection(phase, data["objective"] as? String ?: previous.objective, (data["iteration"] as? Number)?.toInt() ?: previous.iteration, data["summary"] as? String ?: previous.detail)
     }
 }
