@@ -79,8 +79,8 @@ system development libraries and turbo-lean, as before.
 These are operator commands, after verifying the output above. First-time
 installation needs an existing root shell or ordinary sudo; a broker that is
 not installed yet cannot authorize its own installation. Do not install the
-Python confinement model as the daemon. The checked-in service still names a
-Python interpreter, so install a systemd override for the native executable:
+Python confinement model as the daemon. The checked-in service executes the
+installed native artifact directly:
 
 ```bash
 cd ~/work/orb
@@ -88,13 +88,7 @@ getent group sandboxed-node || sudo groupadd --system sandboxed-node
 sudo install -o root -g root -m 0755 target/aarch64-linux/orb-privd /usr/local/sbin/orb-privd
 sudo install -o root -g root -m 0755 target/aarch64-linux/orb-sudo /usr/local/bin/orb-sudo
 sudo install -o root -g root -m 0755 target/aarch64-linux/sandboxed-mcp /usr/local/bin/sandboxed-mcp
-sudo install -d -o root -g root -m 0755 /etc/systemd/system/orb-privd.service.d
 sudo install -o root -g root -m 0644 deploy/systemd/orb-privd.service /etc/systemd/system/orb-privd.service
-sudo tee /etc/systemd/system/orb-privd.service.d/native.conf >/dev/null <<'UNIT'
-[Service]
-ExecStart=
-ExecStart=/usr/local/sbin/orb-privd
-UNIT
 sudo systemctl daemon-reload
 sudo systemctl enable --now orb-privd.service
 sudo systemctl status --no-pager orb-privd.service
