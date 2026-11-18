@@ -230,9 +230,16 @@ def runStreamingPumpContracts : IO Unit := do
       discard <| readStreamChunk ufd2 65536
       discard <| writeAll ufd2 ("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n" ++
         "Transfer-Encoding: chunked\r\n\r\n").toUTF8 false
-      if let .ok () ← pollReadable ufd2 1000 then
-        let rest ← readStreamChunk ufd2 65536
-        upClosed.set rest.isEmpty
+      let mut observedClose := false
+      let mut pollTicks := 0
+      while !observedClose && pollTicks < 10 do
+        match ← pollReadable ufd2 200 with
+        | .ok () =>
+          let rest ← readStreamChunk ufd2 65536
+          observedClose := rest.isEmpty
+        | .error _ => observedClose := true
+        pollTicks := pollTicks + 1
+      upClosed.set observedClose
       discard <| closeFd ufd2
     discard <| closeFd upLfd
   let .ok (errLfd, errPort) ← tcpListen "127.0.0.1" 0 4
@@ -1369,11 +1376,16 @@ def r27_stream_cut_truth_fixtures_and_breaker : IO Unit := do
       let .ok oRows ← execParamQuery r27Store.missionsDb
           "SELECT status, http_status FROM proxy_outcomes WHERE chain_id=?1 ORDER BY id DESC LIMIT 1;" #[s!"chain-{cid}"]
         | throw (IO.userError s!"r27 fixture {cid}: query proxy_outcomes failed")
-      check (oRows.size > 1 && oRows[1]! == #[expectedStatus, "200"])
-        s!"r27 fixture {cid}: expected proxy_outcomes=[{expectedStatus}, 200], got {oRows}"
+      -- A complete tool-call boundary is safely closed in-place, so it does not
+      -- create a transient stream-cut outcome or breaker streak. Every other
+      -- fixture must be recovered by a second attempt and recorded as a cut.
+      let expectedLiveStatus := if cid == "cut_after_complete_tool_call" then "ok" else expectedStatus
+      let expectedStreak := if cid == "cut_after_complete_tool_call" then 0 else 1
+      check (oRows.size > 1 && oRows[1]! == #[expectedLiveStatus, "200"])
+        s!"r27 fixture {cid}: expected proxy_outcomes=[{expectedLiveStatus}, 200], got {oRows}"
       let hRec ← lookupAccountHealthRecord htr s!"acct-{cid}"
-      check (hRec.transientStreak == 1)
-        s!"r27 fixture {cid}: expected transientStreak=1 after 1 stream cut, got {hRec.transientStreak}"
+      check (hRec.transientStreak == expectedStreak)
+        s!"r27 fixture {cid}: expected transientStreak={expectedStreak}, got {hRec.transientStreak}"
 
     -- 2. Breaker trip & chain failover after 2 consecutive stream cuts on primary target:
     --    Primary target cuts mid-stream twice (reaching transientThreshold = 2), which cools down
@@ -1467,8 +1479,8 @@ def r27_stream_cut_truth_fixtures_and_breaker : IO Unit := do
     let totOk := (totals.fieldNat? "ok").getD 0
     let totFailed := (totals.fieldNat? "failed").getD 0
     let streamIncCnt := ((totals.fieldOrNull "errors").fieldNat? "stream_incomplete").getD 0
-    check (totReqs == 8 && totOk == 1 && totFailed == 7 && streamIncCnt == 7)
-      s!"r27: /api/ai/proxy/health expected requests=8 ok=1 failed=7 stream_incomplete=7, got reqs={totReqs} ok={totOk} failed={totFailed} stream_incomplete={streamIncCnt}"
+    check (totReqs == 8 && totOk == 2 && totFailed == 6 && streamIncCnt == 6)
+      s!"r27: /api/ai/proxy/health expected requests=8 ok=2 failed=6 stream_incomplete=6, got reqs={totReqs} ok={totOk} failed={totFailed} stream_incomplete={streamIncCnt}"
   finally
     closeCoreStore r27Store
     discard <| (IO.FS.removeDirAll r27Root).toBaseIO

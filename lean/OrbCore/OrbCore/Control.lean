@@ -873,6 +873,9 @@ def parseChainTargetsJson
       let inlineMdlRpm? := (parseOptionalBoundedU32 it "model_rpm_limit" 1 100000).toOption.join
       let inlineMdlTpm? := (parseOptionalBoundedU64 it "model_tpm_limit" 1 1000000000).toOption.join
       let inlineMdlConc? := (parseOptionalBoundedU32 it "model_max_concurrency" 1 1024).toOption.join
+      let inlineContextLimit :=
+        (parseOptionalBoundedU32 it "context_limit" 1 1000000000).toOption.join
+          |>.orElse (fun _ => matchedModel?.bind (·.contextLimit?)) |>.getD 128000
 
       -- When `providers`/`hydratedProvs` are populated (live store hydration) and every matching account is disabled
       -- with no inline credentials, skip this unconfigured/disabled entry instead of emitting an unauthenticated dead target!
@@ -907,6 +910,7 @@ def parseChainTargetsJson
             modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
             modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
             modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
+            contextLimit          := inlineContextLimit
           }
         else
           let acct :=
@@ -936,6 +940,7 @@ def parseChainTargetsJson
               modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
               modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
               modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
+              contextLimit          := inlineContextLimit
             }
           else
             out := out.push {
@@ -949,6 +954,7 @@ def parseChainTargetsJson
               modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
               modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
               modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
+              contextLimit          := inlineContextLimit
             }
     return out
   | _ => return #[]
@@ -1794,6 +1800,14 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     (authEvidence? := some authEvidence)
     (streamLimits? := st.proxyStreamLimits?)
     (bodyTimedOutRef? := some bodyTimedOutRef)
+  let selectedAccountAfterStream : IO String := do
+    match out.streamSelectedAccountRef? with
+    | some ref => ref.get
+    | none => pure out.selectedAccount
+  let attemptsAfterStream : IO Nat := do
+    match out.streamAttemptsRef? with
+    | some ref => ref.get
+    | none => pure out.attemptsUsed
   let prevSelectedStreak : UInt32 :=
     (prevStreaks.find? (fun (aid, _) => aid == out.selectedAccount)).map Prod.snd |>.getD 0
   let loginMessage? ← if out.status ≥ 400 then
@@ -1836,11 +1850,12 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   -- stream they run once the stream has ended.
   let accountBody : ByteArray → IO Unit := fun body => do
     if out.status ≥ 200 && out.status < 300 then
+      let selectedAccount ← selectedAccountAfterStream
       if let some ownerUid := proxyOwnerUserId? then
         let estCents := estimateProxyUsageCostCents out.headers body
         if estCents > 0 then
           discard <| addUserSpendCents st.store ownerUid utcDay estCents 0 s!"{nowEpochSec}"
-      let usedTarget? := dispatchChain.targets.find? (fun t => t.accountId == out.selectedAccount)
+      let usedTarget? := dispatchChain.targets.find? (fun t => t.accountId == selectedAccount)
       let usedMissionId := boundMid?.getD ""
       let callerKind ←
         if usedMissionId.isEmpty then pure "api"
@@ -1849,7 +1864,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
           pure (if parent.isEmpty then "mission" else "subagent")
       recordProxyUsage st.store nowEpochSec
         ((usedTarget?.map (·.modelId)).getD requestedModel) ((usedTarget?.map (·.provider)).getD "")
-        out.selectedAccount (execKey?.getD "") usedMissionId callerKind (extractProxyUsage body)
+        selectedAccount (execKey?.getD "") usedMissionId callerKind (extractProxyUsage body)
         (requestedModel := rawRequestedModel)
     if let (some program, some mid, some sel) := (expected?, boundMid?, selection?) then
       let text := String.fromUTF8? body |>.getD ""
@@ -1902,14 +1917,26 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
                  let copy ← streamCopyRef.get
                  let ok ← streamOkRef.get
                  let timedOut ← bodyTimedOutRef.get
+                 let finalAccount ← selectedAccountAfterStream
+                 let finalAttempts ← attemptsAfterStream
+                 let finalTarget? := dispatchChain.targets.find? (fun t => t.accountId == finalAccount)
+                 if let some oid := outcomeId? then
+                   if finalAccount != out.selectedAccount || finalAttempts != out.attemptsUsed then
+                     discard <| execParamQuery st.store.missionsDb
+                       ("UPDATE proxy_outcomes SET provider=?2,account_id=?3,model=?4,retries=?5 WHERE id=?1;")
+                       #[oid, (finalTarget?.map (·.provider)).getD "", finalAccount,
+                         (finalTarget?.map (·.modelId)).getD rawRequestedModel,
+                         toString (finalAttempts - 1)]
                  let streamStatus := classifyProxyStreamOutcome out.contentType wantsStreamReq copy ok timedOut
                  if streamStatus != "ok" then
                    if let some oid := outcomeId? then
                      discard <| execParamQuery st.store.missionsDb
                        "UPDATE proxy_outcomes SET status=?2 WHERE id=?1;" #[oid, streamStatus]
-                   if !out.selectedAccount.isEmpty then
+                   if !finalAccount.isEmpty then
                      if let some htr := st.healthTracker? then
-                       discard <| recordStreamCutHealth htr out.selectedAccount prevSelectedStreak nowEpochSec
+                       let finalPrevStreak :=
+                         (prevStreaks.find? (fun (aid, _) => aid == finalAccount)).map Prod.snd |>.getD prevSelectedStreak
+                       discard <| recordStreamCutHealth htr finalAccount finalPrevStreak nowEpochSec
                        let active ← snapshotActiveHealthCooldowns htr nowEpochSec
                        st.proxyCooldownsRef.set active }
   | none =>
@@ -7746,14 +7773,19 @@ def handleClientConn (st : CoreAppState) (cfd : Fd) (allowKeepAlive : Bool := fa
           -- client that stopped reading must not hold a keep-alive slot.
           let wroteHead ← writeCoreHttpResponse responseWrite httpResp false
           let alive ← IO.mkRef wroteHead
-          let complete ← pump fun piece => do
-            if !(← alive.get) then return false
-            if piece.isEmpty then return true
-            let ok ← responseWrite (encodeHttpChunk piece)
-            alive.set ok
-            return ok
-          if complete && (← alive.get) then
-            discard <| responseWrite (encodeHttpChunk ByteArray.empty)
+          -- Always enter the pump once so it can close the upstream reader;
+          -- a refused head must be propagated as a refused empty callback.
+          if !wroteHead then
+            discard <| pump (fun _ => pure false)
+          else
+            let complete ← pump fun piece => do
+              if !(← alive.get) then return false
+              if piece.isEmpty then return true
+              let ok ← responseWrite (encodeHttpChunk piece)
+              alive.set ok
+              return ok
+            if complete && (← alive.get) then
+              discard <| responseWrite (encodeHttpChunk ByteArray.empty)
           keepGoing := false
       | .error rawUpgrade101 =>
         let wrote := (← writeAll cfd rawUpgrade101 false).isOk
