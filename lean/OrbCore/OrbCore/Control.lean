@@ -3244,6 +3244,20 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let some activeClaims := effClaims?
       | return .ok (mkJson 401 "{\"error\":\"unauthorized_mcp\"}")
 
+    if req.method == "GET" && cleanPath.startsWith "/api/mcp/requests/secret/" && cleanPath.endsWith "/wait" then
+      let prefix := "/api/mcp/requests/secret/"
+      let rawId := (cleanPath.drop prefix.length).dropEnd "/wait".length |>.toString
+      let some reqId := parseUuidCanonical? rawId
+        | return .ok (mkJson 400 "{\"error\":\"invalid_secret_request_id\"}")
+      let timeoutSecs := min 25 ((req.query? "timeout_secs").bind String.toNat?).getD 20
+      let projectSlug := activeClaims.project
+      let callerSubject := if activeClaims.isExternal then
+        requesterSubject "" activeClaims.sessionId
+      else ""
+      let waited ← mcpSecretWait st.cfg.workingDir st.store.rootDir activeClaims.missionId
+        projectSlug reqId callerSubject false timeoutSecs nowEpochSec
+      return .ok (mkJson 200 (renderCompact waited))
+
     if req.method == "GET" && cleanPath == "/api/mcp/capabilities" then
       return .ok (mkJson 200 (buildMcpCapabilitiesJson activeClaims))
 
