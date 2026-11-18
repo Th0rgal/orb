@@ -7970,6 +7970,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
           IO.eprintln s!"[sandboxed-sh] remote job re-attach failed: {e}"
         while true do
            try
+             discard <| wakeHungMissions store (some managedStore) (some broadcastHub) (← coreEpochSec)
              discard <| tickContinuationScheduler store (some managedStore) (some relayHub) (some broadcastHub) remoteSup (some warmMgr) cfg.workingDir (some localWakeupLaunch)
              let nowSec ← coreEpochSec
              discard <| tickLocalHarnessSupervisor appState (formatEpochIso8601Utc nowSec)

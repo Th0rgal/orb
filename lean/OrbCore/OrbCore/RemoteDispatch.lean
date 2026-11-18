@@ -399,7 +399,7 @@ private def ensureDurableJobsTableLocal (store : CoreStore) : IO Unit := do
      "job_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL DEFAULT '', node_id TEXT NOT NULL DEFAULT '', " ++
      "state TEXT NOT NULL DEFAULT 'queued', payload_json TEXT NOT NULL DEFAULT '{}', " ++
      "created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');")
-    #[]
+     #[]
   discard <| execParamQuery store.missionsDb
     "CREATE TABLE IF NOT EXISTS remote_log_offsets (job_id TEXT PRIMARY KEY, published_offset INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT '');"
     #[]
@@ -411,6 +411,63 @@ private def ensureDurableJobsTableLocal (store : CoreStore) : IO Unit := do
      "finished_at TEXT, exit_status INTEGER, artifacts_json TEXT NOT NULL DEFAULT '[]', " ++
      "wake_required INTEGER NOT NULL DEFAULT 0, wake_delivered_at TEXT, wake_suppressed_by TEXT, updated_at TEXT NOT NULL);")
     #[]
+
+/-! ## Hung-node watchdog -/
+
+/-- Recover a mission which still owns live execution work but lost the wake-up
+    that would normally return control to Core.  The first observation changes
+    the owner state to `awaiting_user`, records the stall, and arms exactly one
+    fenced continuation; later watchdog passes are idempotent. -/
+def wakeHungMissions
+    (store : CoreStore)
+    (mc? : Option ManagedComputeStore)
+    (broadcastHub? : Option BroadcastHub)
+    (nowSec : UInt64) : IO Nat := do
+  ensureDurableJobsTableLocal store
+  let nowIso := formatEpochIso8601Utc nowSec
+  let candidates ← execParamQuery store.missionsDb
+     ("SELECT m.id FROM missions m WHERE m.status IN ('active','completed') " ++
+     "AND NOT EXISTS (SELECT 1 FROM mission_continuations c WHERE c.mission_id=m.id AND c.phase=1) " ++
+     "AND (EXISTS (SELECT 1 FROM mission_runs r WHERE r.mission_id=m.id AND r.execution_state NOT IN ('terminal','completed','failed','aborted')) " ++
+     " OR EXISTS (SELECT 1 FROM remote_node_jobs j WHERE j.mission_id=m.id AND j.state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted')));") #[]
+  let .ok rows := candidates | return 0
+  if rows.size ≤ 1 then return 0
+  let mut recovered := 0
+  for i in [1:rows.size] do
+    let mid := (cell rows[i]! 0).trimAscii.toString
+    let mut hasManaged := false
+    if let some mc := mc? then
+      if let .ok vmRows ← execParamQuery mc.db
+          "SELECT 1 FROM managed_machines WHERE owner_mission=?1 AND phase_code<>3 LIMIT 1;" #[mid] then
+        hasManaged := vmRows.size > 1
+    let coreLive ← execParamQuery store.missionsDb
+      ("SELECT 1 WHERE EXISTS (SELECT 1 FROM mission_runs r WHERE r.mission_id=?1 AND r.execution_state NOT IN ('terminal','completed','failed','aborted')) " ++
+       "OR EXISTS (SELECT 1 FROM remote_node_jobs j WHERE j.mission_id=?1 AND j.state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted')); ") #[mid]
+    let projectLive ← execParamQuery store.projectsDb
+      "SELECT 1 FROM remote_jobs j WHERE j.mission_id=?1 AND j.state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted') LIMIT 1;" #[mid]
+    let hasLive := hasManaged || (match coreLive with | .ok rs => rs.size > 1 | .error _ => false) ||
+      (match projectLive with | .ok rs => rs.size > 1 | .error _ => false)
+    if hasLive then
+      let .ok armNo ← bumpSupervision store mid "stall_consecutive_arms" nowIso
+        | continue
+      if armNo == 1 then
+        let cid ← newUuidV4
+        let rid ← newUuidV4
+        let .ok _ ← execParamQuery store.missionsDb
+            ("UPDATE missions SET status='awaiting_user',terminal_reason='hung_node',state_revision=state_revision+1,updated_at=?2 " ++
+             "WHERE id=?1 AND status IN ('active','completed');") #[mid, nowIso]
+          | continue
+        let .ok _ ← execParamQuery store.missionsDb
+            ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,error,recurrence,stop_after_first,created_at,updated_at) " ++
+             "SELECT ?1,id,COALESCE(run_generation,1),1,CAST(?2 AS INTEGER),'time','hung_node_watchdog',?3,?4,'','stall-watchdog','','',1,?5,?5 FROM missions WHERE id=?6;")
+            #[cid, s!"{nowSec}", "A worker or managed node is still live but this mission has no wake-up. Inspect the node and continue.", rid, nowIso, mid]
+          | continue
+        discard <| appendMissionEvent store mid "error"
+          (renderCompact (.obj #[("message", .str "Hung-node watchdog armed a recovery wake-up"), ("reason", .str "hung_node")])) nowIso
+        publishControlEvent broadcastHub? "error"
+          (renderCompact (.obj #[("message", .str "Hung-node watchdog armed a recovery wake-up"), ("reason", .str "hung_node")])) (some mid)
+        recovered := recovered + 1
+  return recovered
 
 private def remoteOpenCodeConfigJson (modelKey proxyBaseUrl : String) : String :=
   let low := modelKey.toLower
@@ -815,7 +872,7 @@ private structure RemoteStreamAcc where
   outputTokens?    : Option UInt64 := none
   cacheReadTokens? : Option UInt64 := none
 
-private def emitMissionEventAndBroadcast
+def emitMissionEventAndBroadcast
     (store : CoreStore)
     (broadcastHub? : Option BroadcastHub)
     (missionId evType payloadJson nowIso : String) : IO Unit := do

@@ -30,6 +30,7 @@ import OrbCore.HarnessProxyTests
 import OrbCore.ManagedReuseTests
 import OrbCore.ManagedSnapshotLifecycleTests
 import OrbCore.NodeLivenessTests
+import OrbCore.HungNodeTests
 import OrbCore.ComputeRollupTests
 import OrbCore.MissionEventsToolTests
 import OrbCore.ManagedSnapshotCatalogTests
@@ -7871,6 +7872,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     runManagedMcpProviderContractTests tmpRoot
     OrbCore.ManagedSnapshotLifecycleTests.run tmpRoot
     OrbCore.NodeLivenessTests.run tmpRoot
+    OrbCore.HungNodeTests.run
     OrbCore.ComputeRollupTests.run tmpRoot
     OrbCore.MissionEventsToolTests.run tmpRoot
     OrbCore.MacTetherTests.run tmpRoot
