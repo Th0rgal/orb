@@ -187,7 +187,7 @@ LEAN_EXPORT lean_obj_res orb_bin_waitpid_block(int64_t pid, lean_obj_arg w) {
 LEAN_EXPORT lean_obj_res orb_bin_waitpid_wnohang(int64_t pid, lean_obj_arg w) {
     (void)w;
     int status = 0;
-    pid_t rc = waitpid((pid_t)pid, &status, WNOHANG);
+    pid_t rc; do { rc = waitpid((pid_t)pid, &status, WNOHANG); } while (rc < 0 && errno == EINTR);
     if (rc == 0) return lean_io_result_mk_ok(lean_box_uint32(0xFFFFFFFFu));
     if (rc < 0) return lean_io_result_mk_ok(lean_box_uint32(1u));
     if (WIFEXITED(status)) return lean_io_result_mk_ok(lean_box_uint32((uint32_t)WEXITSTATUS(status)));

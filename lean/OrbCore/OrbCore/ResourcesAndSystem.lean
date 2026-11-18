@@ -167,49 +167,24 @@ private def runCmdCapture (prog : String) (args : Array String) (cwd? : Option S
   return (st.toNat, (String.fromUTF8? acc).getD "")
 
 /-- Execute `git` non-interactively (`GIT_TERMINAL_PROMPT=0`, batch SSH) and capture combined stdout+stderr. -/
-private def runGitCapture (args : Array String) (cwd? : Option String := none) : IO (Nat × String) := do
+def runGitCapture (args : Array String) (cwd? : Option String := none) : IO (Nat × String) := do
   let env ← environList
   let hasSshCmd := env.any (fun e => e.startsWith "GIT_SSH_COMMAND=")
   let envPrefix :=
     "GIT_TERMINAL_PROMPT=0 " ++
     (if hasSshCmd then "" else "GIT_SSH_COMMAND='ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new' ")
   let cdPrefix := match cwd? with | some dir => "cd " ++ shellSingleQuote dir ++ " && " | none => ""
-  let outputFile := s!"/tmp/orb_git_capture_{← IO.monoNanosNow}"
-  let cmdLine := cdPrefix ++ envPrefix ++ "exec 'git'" ++
-    (if args.isEmpty then "" else " " ++ String.intercalate " " (args.toList.map shellSingleQuote)) ++
-    " >" ++ shellSingleQuote outputFile ++ " 2>&1"
-  -- Do not synchronously drain a pipe: a descendant inheriting the pipe can
-  -- keep the drain blocked after the shell itself has stopped progressing.
-  let sp ← spawnPgrp "/bin/sh" #["-c", cmdLine] env false true false
-  if sp.pid < 0 then return (127, "failed to spawn git")
-  let timeoutMs := 30000
-  let mut elapsedMs := 0
-  let mut status : Option Nat := none
-  while elapsedMs < timeoutMs do
-    let st ← waitpidWnohang sp.pid
-    if st != 0xFFFFFFFF then
-      status := some st.toNat
-      elapsedMs := timeoutMs
-    else
-      IO.sleep 10
-      elapsedMs := elapsedMs + 10
-  if status.isNone then
-    -- Kill the entire process group so a stuck git/SSH helper cannot survive.
-    discard <| killSig (-sp.pid) 15
-    IO.sleep 100
-    discard <| killSig (-sp.pid) 9
-    let mut reapMs := 0
-    while reapMs < 1000 do
-      let st ← waitpidWnohang sp.pid
-      if st != 0xFFFFFFFF then
-        status := some st.toNat
-        reapMs := 1000
-      else
-        IO.sleep 10
-        reapMs := reapMs + 10
-  let output ← try IO.FS.readFile outputFile catch _ => pure ""
-  try IO.FS.removeFile outputFile catch _ => pure ()
-  return (status.getD 124, output)
+  IO.FS.withTempFile fun output path => do
+    -- Redirect before cd so its diagnostic is captured too. File-backed capture
+    -- lets us wait for the child status independently of inherited stdio.
+    let cmdLine := "exec >" ++ shellSingleQuote path.toString ++ " 2>&1; " ++
+      cdPrefix ++ envPrefix ++ "exec 'git'" ++
+      (if args.isEmpty then "" else " " ++ String.intercalate " " (args.toList.map shellSingleQuote))
+    let sp ← spawnPgrp "/bin/sh" #["-c", cmdLine] env false true false
+    let status ← waitPgrpBounded sp.pid 30000
+    if status == 124 then return (status, "git command timed out")
+    let bytes ← output.read 524288
+    return (status, (String.fromUTF8? bytes).getD "")
 
 private def sanitizeRelPath? (raw : String) : Option String := Id.run do
   let norm := String.ofList (raw.toList.map (fun c => if c == '\\' then '/' else c))
@@ -1290,7 +1265,10 @@ def ensureLibraryRepo (libDir effRemote : String) (forceReinit : Bool := false) 
     if rcHead != 0 then
       if let some ref ← resolveRemoteTrackingRef libDir "main" then
         let targetBr := if ref.startsWith "origin/" then (ref.drop 7).toString else "main"
-        let _ ← runGitCapture #["checkout", "-B", targetBr, "--track", ref] (some libDir)
+        let (rcCo, outCo) ← runGitCapture #["checkout", "-B", targetBr, "--track", ref] (some libDir)
+        if rcCo != 0 then
+          let msg := outCo.trimAscii.toString
+          return .error (if msg.isEmpty then "git checkout failed" else msg)
     protectLibraryLocalState libDir
     return .ok true
   if !(← gitFp.pathExists) then
@@ -1332,7 +1310,10 @@ def ensureLibraryRepo (libDir effRemote : String) (forceReinit : Bool := false) 
       let br ← gitCurrentBranch libDir
       if let some ref ← resolveRemoteTrackingRef libDir br then
         let targetBr := if ref.startsWith "origin/" then (ref.drop 7).toString else br
-        let _ ← runGitCapture #["checkout", "-B", targetBr, "--track", ref] (some libDir)
+        let (rcCo, outCo) ← runGitCapture #["checkout", "-B", targetBr, "--track", ref] (some libDir)
+        if rcCo != 0 then
+          let msg := outCo.trimAscii.toString
+          return .error (if msg.isEmpty then "git checkout failed" else msg)
   return .ok true
 
 def buildLibraryStatusJson (libDir : String) (defaultRemote : String) (requireOwnRepo : Bool := false) : IO JVal := do

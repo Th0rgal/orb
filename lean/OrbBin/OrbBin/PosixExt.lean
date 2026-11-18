@@ -127,6 +127,24 @@ def spawnPgrp
   let stdoutFd : Int32 := Int32.ofBitVec (BitVec.ofNat 32 outU32.toNat)
   return { pid, stdinFd, stdoutFd }
 
+/-- Wait for a spawned process group without waiting for EOF on its stdio.
+    Keep the leader unreaped during escalation so its group ID cannot be reused. -/
+def waitPgrpBounded (pid : Int64) (timeoutMs : Nat) : IO Nat := do
+  if pid <= 0 then return 127
+  let poll (ms : Nat) : IO (Option Nat) := do
+    let deadline := (← IO.monoMsNow) + ms
+    repeat
+      let status ← waitpidWnohang pid
+      if status != 0xFFFFFFFF then return some status.toNat
+      if (← IO.monoMsNow) >= deadline then return none
+      IO.sleep 10
+  if let some status ← poll timeoutMs then return status
+  discard <| killSig (-pid) 15
+  IO.sleep 100
+  discard <| killSig (-pid) 9
+  discard <| poll 1000
+  return 124
+
 /-- Read current process environment as `(key, value)` pairs. -/
 def currentEnvPairs : IO (Array (String × String)) := do
   let raw ← environList
