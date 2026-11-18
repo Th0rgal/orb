@@ -492,7 +492,7 @@ def mcpSecretWait
     (workingDir dataRoot missionId projectSlug requestId callerSubject : String)
     (callerOnManagedNode : Bool) (timeoutSecs : Nat) (nowEpochSec : UInt64) : IO JVal := do
   let deadline := nowEpochSec + (Nat.min 25 timeoutSecs).toUInt64
-  while true do
+  let rec poll : IO JVal := do
     let broker ← readSecretBrokerWithDefaults dataRoot
     let reqs := (broker.fieldArr? "requests").getD #[]
     let some req := reqs.find? (fun r => (r.fieldStr? "id").getD "" == requestId)
@@ -511,6 +511,8 @@ def mcpSecretWait
     if now >= deadline then
       return .obj #[("status", .str "pending"), ("request_id", .str requestId)]
     IO.sleep 1000
+    poll
+  poll
 
 def mcpSecretQueueAction
     (workingDir dataRoot kind missionId projectSlug bwProject secretName? plainValue? note? reason : String)
