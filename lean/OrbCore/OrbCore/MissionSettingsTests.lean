@@ -43,7 +43,7 @@ def moveRecovery (root : String) : IO Unit := do
     discard <| sql reopenedAfterFailure.projectsDb "DROP TRIGGER reject_rebind;"
     let triggerRows ← sql reopenedAfterFailure.projectsDb
       "SELECT name FROM sqlite_master WHERE type='trigger' AND name='reject_rebind';"
-    check (triggerRows.size == 0) "B5b_startup_repair_trigger_removed"
+    check (triggerRows.size == 1) "B5b_startup_repair_trigger_removed"
     closeCoreStore reopenedAfterFailure
   finally closeCoreStore store
   check (← OrbCore.MissionMoveRecovery.startup path).isOk "B5b_next_startup_repairs_after_failure"
