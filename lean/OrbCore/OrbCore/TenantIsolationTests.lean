@@ -1225,13 +1225,18 @@ def run (root : String) : IO Unit := do
       "SELECT COALESCE(placement_revision,0) FROM missions WHERE id='b2b-route-root';" #[]
       | throw (IO.userError "B2b route revision")
     let rootRevBefore := ((rootRevRows[1]?.bind (·[0]?)).getD "0").toNat?.getD 0
+    let .ok childRevRows ← execParamQuery store.missionsDb
+      "SELECT COALESCE(placement_revision,0) FROM missions WHERE id='b2b-route-child';" #[]
+      | throw (IO.userError "B2b route child revision")
+    let childRevBefore := ((childRevRows[1]?.bind (·[0]?)).getD "0").toNat?.getD 0
     let (moveStatus, moveDoc) ← send "POST" "/api/control/missions/move" admin
       (.obj #[("mission_ids", .arr #[.str "b2b-route-root"]), ("project", .str "b2b-routes-new")])
     check (moveStatus == 200) s!"B2b event order 1: family move route {moveStatus} {renderCompact moveDoc}"
     let moved := moveDoc.fieldArr? "moved" |>.getD #[]
     let movedRev (mid : String) : Option Nat :=
       (moved.find? (fun m => m.fieldStr? "mission_id" == some mid)).bind (·.fieldNat? "placement_revision")
-    check (movedRev "b2b-route-root" == some (rootRevBefore + 1) && movedRev "b2b-route-child" == some 1)
+    check (movedRev "b2b-route-root" == some (rootRevBefore + 1) &&
+      movedRev "b2b-route-child" == some (childRevBefore + 1))
       "B2b event order 3: move response advances placement_revision"
     let (_, oldAfterMove) ← send "GET" "/api/projects/b2b-routes/boards" admin
     let (_, newAfterMove) ← send "GET" "/api/projects/b2b-routes-new/boards" admin
