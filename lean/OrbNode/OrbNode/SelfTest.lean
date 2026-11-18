@@ -1616,7 +1616,9 @@ private def runManagedSandboxMemberExecTests
       (managedRawExecResponse.status == 403 &&
        (String.fromUTF8? managedRawExecResponse.body |>.getD "").contains "raw execution is unavailable")
 
-    let concurrentRawExecResponse ← handleRequestConcurrent (← IO.mkRef rtManaged) (← IO.mkRef ()) {
+    let managedRawExecMutex ← Std.Mutex.new rtManaged
+    let managedRawExecTransferMutex ← Std.Mutex.new ()
+    let concurrentRawExecResponse ← handleRequestConcurrent managedRawExecMutex managedRawExecTransferMutex {
       method := "POST", rawPath := "/execute", path := "/execute", query := #[], headers := authHdrs,
       body := managedRawExecBody
     }
