@@ -1790,6 +1790,14 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     (authEvidence? := some authEvidence)
     (streamLimits? := st.proxyStreamLimits?)
     (bodyTimedOutRef? := some bodyTimedOutRef)
+  let selectedAccountAfterStream : IO String := do
+    match out.streamSelectedAccountRef? with
+    | some ref => ref.get
+    | none => pure out.selectedAccount
+  let attemptsAfterStream : IO Nat := do
+    match out.streamAttemptsRef? with
+    | some ref => ref.get
+    | none => pure out.attemptsUsed
   let prevSelectedStreak : UInt32 :=
     (prevStreaks.find? (fun (aid, _) => aid == out.selectedAccount)).map Prod.snd |>.getD 0
   -- Provider status follows what real requests saw: a refused login is recorded per
@@ -1819,11 +1827,12 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   -- stream they run once the stream has ended.
   let accountBody : ByteArray → IO Unit := fun body => do
     if out.status ≥ 200 && out.status < 300 then
+      let selectedAccount ← selectedAccountAfterStream
       if let some ownerUid := proxyOwnerUserId? then
         let estCents := estimateProxyUsageCostCents out.headers body
         if estCents > 0 then
           discard <| addUserSpendCents st.store ownerUid utcDay estCents 0 s!"{nowEpochSec}"
-      let usedTarget? := dispatchChain.targets.find? (fun t => t.accountId == out.selectedAccount)
+      let usedTarget? := dispatchChain.targets.find? (fun t => t.accountId == selectedAccount)
       let usedMissionId := boundMid?.getD ""
       let callerKind ←
         if usedMissionId.isEmpty then pure "api"
@@ -1832,7 +1841,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
           pure (if parent.isEmpty then "mission" else "subagent")
       recordProxyUsage st.store nowEpochSec
         ((usedTarget?.map (·.modelId)).getD requestedModel) ((usedTarget?.map (·.provider)).getD "")
-        out.selectedAccount (execKey?.getD "") usedMissionId callerKind (extractProxyUsage body)
+        selectedAccount (execKey?.getD "") usedMissionId callerKind (extractProxyUsage body)
         (requestedModel := rawRequestedModel)
     if let (some program, some mid, some sel) := (expected?, boundMid?, selection?) then
       let text := String.fromUTF8? body |>.getD ""
@@ -1885,14 +1894,26 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
                  let copy ← streamCopyRef.get
                  let ok ← streamOkRef.get
                  let timedOut ← bodyTimedOutRef.get
+                 let finalAccount ← selectedAccountAfterStream
+                 let finalAttempts ← attemptsAfterStream
+                 let finalTarget? := dispatchChain.targets.find? (fun t => t.accountId == finalAccount)
+                 if let some oid := outcomeId? then
+                   if finalAccount != out.selectedAccount || finalAttempts != out.attemptsUsed then
+                     discard <| execParamQuery st.store.missionsDb
+                       ("UPDATE proxy_outcomes SET provider=?2,account_id=?3,model=?4,retries=?5 WHERE id=?1;")
+                       #[oid, (finalTarget?.map (·.provider)).getD "", finalAccount,
+                         (finalTarget?.map (·.modelId)).getD rawRequestedModel,
+                         toString (finalAttempts - 1)]
                  let streamStatus := classifyProxyStreamOutcome out.contentType wantsStreamReq copy ok timedOut
                  if streamStatus != "ok" then
                    if let some oid := outcomeId? then
                      discard <| execParamQuery st.store.missionsDb
                        "UPDATE proxy_outcomes SET status=?2 WHERE id=?1;" #[oid, streamStatus]
-                   if !out.selectedAccount.isEmpty then
+                   if !finalAccount.isEmpty then
                      if let some htr := st.healthTracker? then
-                       discard <| recordStreamCutHealth htr out.selectedAccount prevSelectedStreak nowEpochSec
+                       let finalPrevStreak :=
+                         (prevStreaks.find? (fun (aid, _) => aid == finalAccount)).map Prod.snd |>.getD prevSelectedStreak
+                       discard <| recordStreamCutHealth htr finalAccount finalPrevStreak nowEpochSec
                        let active ← snapshotActiveHealthCooldowns htr nowEpochSec
                        st.proxyCooldownsRef.set active }
   | none =>

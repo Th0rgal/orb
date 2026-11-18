@@ -1090,7 +1090,7 @@ private def runR3cdRound3BlockerTests
   let .ok () ← upsertMission store {
     id := "m-r3b-stop-tx", title := "Atomic Hosted Stop", status := "active",
     ownerUserId := fixtureAdminId,
-    backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
+    backend := "codex", modelOverride := "gpt-6-astra", modelEffort := "", workingDirectory := store.rootDir,
     placementKind := "managed", nodeBootEpoch := store.bootEpoch, updatedAt := formatEpochIso8601Utc nowSec, totalCostCents := 0
   } | return (← failWith "seed m-r3b-stop-tx")
   let _ ← execParamQuery store.missionsDb
