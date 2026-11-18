@@ -59,7 +59,7 @@ import { ErrorToast, SlotActiveContext, notify } from "./toast";
 import { copyText } from "./clipboard";
 import type { ApprovalConfirmationPrompt } from "./tree/moves";
 const ApprovalTransferDialog = lazy(() => import("./ApprovalTransferDialog"));
-import { rememberLaunch, recalledLaunch, missionDestination, launchRefusal, isAdministrationNode, remoteLaunchPreflight, remoteHarnessSupport, remoteLaunchUnconfirmed, missionGoal, type LaunchReceipt, type LaunchRefusal, type RemoteSupport } from "./missionLaunch";
+import { rememberLaunch, recalledLaunch, missionDestination, launchRefusal, isAdministrationNode, remoteLaunchPreflight, remoteGoalPreflight, remoteHarnessSupport, remoteLaunchUnconfirmed, missionGoal, type LaunchReceipt, type LaunchRefusal, type RemoteSupport } from "./missionLaunch";
 import { goalDraft, goalPrompt, planObjective, missionTitle, displayTitle, EMPTY_GOAL_ERROR } from "./goal";
 import { chipToAttachment, type AttachChip } from "./attach";
 import { DEFAULT_PROJECT, ensureDefaultProject, projectChoices } from "./defaultProject";
@@ -1327,6 +1327,10 @@ export default function App() {
           acceptFleet(fleet);
           const refusal = remoteLaunchPreflight(fleet, machine, pick, harnessName);
           if (refusal) throw new Error(refusal);
+          if (goal.kind === "goal") {
+            const goalRefusal = remoteGoalPreflight(fleet, machine, pick.backend);
+            if (goalRefusal) throw new Error(goalRefusal);
+          }
         }
         // `effectivePick` already dropped an effort this harness can't take, so
         // an omitted field means "backend default" rather than a stale level.

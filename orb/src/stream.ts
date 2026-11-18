@@ -396,6 +396,9 @@ export function storedToStream(ev: StoredEvent): StreamEvent | null {
       return d({ message: ev.content, resumable: false });
     case "mission_status_changed":
       return d({ status: ev.metadata?.status, summary: ev.content || undefined });
+    case "goal_status":
+    case "goal_iteration":
+      return d({ ...ev.metadata, ...(() => { try { return JSON.parse(ev.content || "{}"); } catch { return {}; } })() });
     default:
       return null;
   }

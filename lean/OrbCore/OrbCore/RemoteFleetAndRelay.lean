@@ -486,8 +486,9 @@ def buildRemoteLaunchCapabilitiesJVal : IO JVal := do
   let proxyConfigured := !p1.isEmpty || !p2.isEmpty
   return .obj #[
     ("typed", .bool true),
-    ("harnesses", .arr #[.str "claudecode", .str "opencode", .str "grok", .str "codex", .str "antigravity"]),
-    ("requires_proxy_harnesses", .arr #[.str "claudecode", .str "opencode", .str "codex"]),
+    ("harnesses", .arr #[.str "claudecode", .str "opencode", .str "grok", .str "codex", .str "antigravity", .str "vibe"]),
+    ("goal_harnesses", .arr #[.str "opencode"]),
+    ("requires_proxy_harnesses", .arr #[.str "claudecode", .str "opencode", .str "codex", .str "vibe"]),
     ("raw_command", .bool true),
     ("proxy_url_configured", .bool proxyConfigured),
     ("error_prefixes", .arr #[

@@ -8,4 +8,14 @@ enum OrbRemoteGoal {
               let data = value["data"] as? [String: Any] else { return nil }
         return ["type": type, "data": data]
     }
+
+    enum Phase: String { case active, complete, stopped, paused, blocked }
+    struct Projection { var phase: Phase; var objective: String; var iteration: Int; var detail: String? }
+
+    static func apply(_ previous: Projection, event value: [String: Any]) -> Projection {
+        guard let envelope = event(value), let data = envelope["data"] as? [String: Any] else { return previous }
+        let status = data["status"] as? String
+        let phase = Phase(rawValue: status ?? "") ?? previous.phase
+        return Projection(phase: phase, objective: data["objective"] as? String ?? previous.objective, iteration: data["iteration"] as? Int ?? previous.iteration, detail: data["summary"] as? String ?? previous.detail)
+    }
 }

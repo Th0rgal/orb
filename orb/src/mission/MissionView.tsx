@@ -11,6 +11,7 @@ import { Popover } from "../Popover";
 import { RemoteQueue, type RemoteQueueHandle } from "../RemoteQueue";
 import { MissionCyber, getCyber, requireCyberSupport } from "../cyberAccess";
 import { EMPTY_GOAL_ERROR, goalDraft } from "../goal";
+import { applyRemoteGoalEvent, remoteGoalStatusLabel, type RemoteGoalProjection } from "../remoteGoal";
 import {NextReminder} from "../AutomaticReminder";
 import { LazyCloudConversation, peekCloudAgentsModule } from "../cloudAgentsLoader";
 import {QueuedMessages} from "../QueuedMessages";
@@ -552,6 +553,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
   });
   onCleanup(() => { if (p.active !== false) p.onMission?.(null); });
   const [items, setItems] = createSignal<StreamItem[]>(cached?.items ?? []);
+  let remoteGoalProjection: RemoteGoalProjection = { phase: "active", objective: mission()?.goal_objective ?? "", iteration: 0 };
   const [awaiting, setAwaiting] = createSignal(!cached || !!cached.detailsPending);
   createEffect(on(transcriptVersion, () => {
     if (!awaiting() || staleMission()) return;
@@ -997,6 +999,11 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
               if (!missionPhase({ status } as Mission, false).moving) void resync(true);
             }
             void refresh(true);
+            return;
+          }
+          if (ev.type === "goal_status" || ev.type === "goal_iteration") {
+            remoteGoalProjection = applyRemoteGoalEvent(remoteGoalProjection, { type: ev.type, data: ev.data });
+            setMission(old => old ? { ...old, status_message: remoteGoalStatusLabel(remoteGoalProjection) } : old);
             return;
           }
           if (replaying) held.push(ev);
@@ -1920,4 +1927,3 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
     </>
   );
 }
-

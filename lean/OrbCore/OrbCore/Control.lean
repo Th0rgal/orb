@@ -4587,6 +4587,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let bodyJv := bodyVal?.getD (.obj #[])
       let modelOverride := (JsonTape.lookupString? tape "model_override").getD ""
       let prompt? := JsonTape.lookupString? tape "prompt"
+      let goalObjective? := prompt?.bind Cyber.parseGoalPrefix?
       let mut selectedSkills : Array SelectedSkill := #[]
       if !clientPlaced then
         if let some prompt := prompt? then
@@ -4655,8 +4656,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         project := projSlug, folder := normCreateFolder, createdAt := nowIso, updatedAt := nowIso, totalCostCents := 0,
         authorityMode := authMode, placementKind := placeKind, reservedDiskGib := diskGib,
         nodeBootEpoch := st.store.bootEpoch, tagsJson := initTagsJson, track := effTrack, repo := repo,
-        ownerUserId := caller.userId
-      }
+         ownerUserId := caller.userId
+         goalMode := goalObjective?.isSome
+         goalObjective := goalObjective?.getD ""
+       }
       match ← insertNewMission st.store mRec with
       | .error "mission_already_exists" =>
         abortIdem

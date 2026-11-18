@@ -160,6 +160,15 @@ export function remoteLaunchPreflight(fleet: RemoteNodesResponse, nodeId: string
   }
   return null;
 }
+
+export function remoteGoalPreflight(fleet: RemoteNodesResponse, nodeId: string, backend: string): string | null {
+  if (!isAutoManagedTarget(nodeId) && !fleet.nodes?.some(n => n.id === nodeId)) return "The selected remote node is unavailable. Your draft is kept.";
+  const supported = fleet.remote_launch?.goal_harnesses;
+  if (!Array.isArray(supported) || !supported.includes(backend)) {
+    return `Goal mode is unavailable for ${backend} on ${nodeLabel(nodeId)} because this remote harness cannot continue the objective safely. Choose OpenCode on a Goal-capable remote node, or use a standard turn.`;
+  }
+  return null;
+}
 /** Native Grok uses managed OAuth and does not need the model proxy. Claude Code and OpenCode do, unless the server lists `requires_proxy_harnesses`. */
 export function remoteHarnessNeedsProxy(capability: RemoteLaunchCapability, backend: string): boolean {
   const listed = capability.requires_proxy_harnesses;
