@@ -82,7 +82,7 @@ lean_obj_res lean_ui_font_open(b_lean_obj_arg pattern, lean_obj_arg w) {
   }
   f->ft = ft;
   f->hb = hb_ft_font_create(ft, NULL);
-  hb_ft_font_set_load_flags(f->hb, FT_LOAD_DEFAULT | FT_LOAD_COLOR);
+  hb_ft_font_set_load_flags(f->hb, FT_LOAD_TARGET_LIGHT | FT_LOAD_COLOR);
   set_face_size(f, 16 * 64);
   return lean_io_result_mk_ok(lean_box_usize((size_t)f));
 }
@@ -162,7 +162,7 @@ lean_obj_res lean_ui_rasterize(size_t face, uint32_t size64, uint32_t glyph, uin
   ui_face_t *f = (ui_face_t *)face;
   if (!f || set_face_size(f, size64))
     return io_err("lean_ui_rasterize: invalid face or size");
-  if (FT_Load_Glyph(f->ft, glyph, FT_LOAD_DEFAULT | FT_LOAD_COLOR))
+  if (FT_Load_Glyph(f->ft, glyph, FT_LOAD_TARGET_LIGHT | FT_LOAD_COLOR))
     return io_err("FT_Load_Glyph failed");
   FT_GlyphSlot slot = f->ft->glyph;
   if (slot->format == FT_GLYPH_FORMAT_OUTLINE) {

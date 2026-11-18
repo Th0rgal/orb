@@ -29,6 +29,14 @@
   python3,
   sqlite,
   zstd,
+  wayland ? null,
+  libxkbcommon ? null,
+  freetype ? null,
+  harfbuzz ? null,
+  fontconfig ? null,
+  libGL ? null,
+  vulkan-loader ? null,
+  buildDesktop ? false,
   turbo-lean ? null,
 }: let
   orbPackageJson = lib.importJSON ../orb/package.json;
@@ -206,12 +214,25 @@
     buildInputs = [
       openssl
       sqlite
+    ] ++ lib.optionals (stdenv.hostPlatform.isLinux && wayland != null) [
+      wayland
+      libxkbcommon
+      freetype
+      harfbuzz
+      fontconfig
+      libGL
+      vulkan-loader
     ];
 
     # OrbCore loads libsqlite3 and libcrypto via dlopen() (`orb_core_sqlite.c`),
     # so expose their runtime library paths to `nix develop` (`inputsFrom`) and
     # bake them into DT_RUNPATH during `installPhase` on Linux.
     LD_LIBRARY_PATH = lib.makeLibraryPath [openssl sqlite];
+
+    # lean/OrbDesktop's text renderer includes <hb-ft.h> and <ft2build.h>, which
+    # live in subdirectories of the dev outputs.
+    LEANUI_TEXT_CFLAGS = lib.optionalString (stdenv.hostPlatform.isLinux && wayland != null)
+      "-I${lib.getDev freetype}/include/freetype2 -I${lib.getDev harfbuzz}/include/harfbuzz";
 
     # Each layer builds in a fresh sandbox, so turbo-lean's module cache always
     # starts empty there and its extra kernel audits only add time (OrbCore:
@@ -302,13 +323,16 @@
     src = leanSource [../lean/OrbNode];
     bins = ["sandboxed-node"];
     deps = [leanBase];
+    keepLake = true; # the Core layer reuses OrbNode's build tree
   };
 
+  # OrbCore requires the OrbNode package (`require «orb-node» from "../OrbNode"`),
+  # so its source holds OrbNode too and it reuses the Node layer's build tree.
   leanCore = mkLeanLayer {
     pname = "orb-lean-core";
-    src = leanSource [../lean/OrbCore];
+    src = leanSource [../lean/OrbNode ../lean/OrbCore];
     bins = ["orb-core"];
-    deps = [leanBase];
+    deps = [leanBase leanNode];
   };
 
   leanLocald = mkLeanLayer {
@@ -318,7 +342,14 @@
     deps = [leanBase];
   };
 
-  layers = [leanBase leanNode leanCore leanLocald];
+  leanDesktop = mkLeanLayer {
+    pname = "orb-lean-desktop";
+    src = leanSource [../lean/OrbDesktop];
+    bins = ["orb-desktop-native"];
+    deps = [leanBase];
+  };
+
+  layers = [leanBase leanNode leanCore leanLocald] ++ lib.optionals (buildDesktop && stdenv.hostPlatform.isLinux) [leanDesktop];
 in
   # Node, Core and Locald build in parallel on top of the base layer; this
   # derivation only gathers their binaries and fixes their runtime paths.
@@ -376,7 +407,7 @@ in
         done
       '';
 
-      passthru = {inherit leanBase leanNode leanCore leanLocald;};
+      passthru = {inherit leanBase leanNode leanCore leanLocald leanDesktop;};
 
       meta = {
         description = "Self-hosted orchestrator for AI coding agents";

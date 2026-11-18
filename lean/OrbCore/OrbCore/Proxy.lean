@@ -262,6 +262,21 @@ def clampCooldownRetryAfter (secs : UInt64) : UInt64 :=
   let s := if secs == 0 then 1 else secs
   if s > maxCooldownRetryAfterSecs then maxCooldownRetryAfterSecs else s
 
+/-- Longest cooldown a transient refusal (rate limit, overload, server error) may
+    impose, whatever `Retry-After` announces. On 18 Nov a few dozen 429s among
+    four thousand successful requests on one subscription parked the account for
+    up to an hour each time and stopped every mission on it (R33). Quota
+    exhaustion and authentication failures keep the long, announced cooldown. -/
+def maxTransientCooldownSecs : UInt64 := 120
+
+/-- The one cooldown policy: transient refusals stay short, quota and
+    authentication refusals keep the announced (or computed) delay. -/
+def cooldownSecsFor (reason : CooldownReason) (announced computed : UInt64) : UInt64 :=
+  let secs := clampCooldownRetryAfter (if announced == 0 then computed else announced)
+  match reason with
+  | .rateLimit | .overloaded | .serverError => min secs maxTransientCooldownSecs
+  | .usageLimit | .authFailure => secs
+
 def AccountCooldown.remainingSecs (c : AccountCooldown) (now : UInt64) : UInt64 :=
   if c.untilEpoch > now then c.untilEpoch - now else 0
 
@@ -432,8 +447,7 @@ def cooldownForOutcomeWithBreaker
         | none => none
         | some reason =>
           let announced := (retryAfterSecs? out.headers).getD 0
-          let computed := exponentialCooldownSecs reason consecutive
-          let secs := clampCooldownRetryAfter (if announced == 0 then computed else announced)
+          let secs := cooldownSecsFor reason announced (exponentialCooldownSecs reason consecutive)
           some { accountId := out.selectedAccount, untilEpoch := now + secs, reason := reason, label := "" }
 
 /-- Record the failed selected account's cooldown after a proxy outcome. -/
@@ -605,8 +619,7 @@ def stepHealthAttemptPure
     | none => 0
     | some reason =>
       let announced := (retryAfterSecs? respHeaders).getD 0
-      let computed := exponentialCooldownSecs reason nextConsecutive
-      clampCooldownRetryAfter (if announced == 0 then computed else announced)
+      cooldownSecsFor reason announced (exponentialCooldownSecs reason nextConsecutive)
   let nextCooldownEpoch :=
     if proposedCooldownSecs > 0 then nowEpoch + proposedCooldownSecs else activeCoolUntil
   -- The generic attempt classifier treats a provider-disable like an account-level quota park;
@@ -991,8 +1004,10 @@ def upstreamErrorCode (body : String) : String :=
     not enough (it is also used for model or region permission). -/
 def isAuthRejection (status : Nat) (code body : String) : Bool :=
   status == 401 || code == "auth_unavailable" || code == "invalid_grant" ||
+    code == "invalid_refresh_token" ||
     code == "authentication_error" || code == "invalid_api_key" ||
-    (body.splitOn "invalid_grant").length > 1
+    (body.splitOn "invalid_grant").length > 1 ||
+    (body.splitOn "invalid_refresh_token").length > 1
 
 /-- Body returned when every target of a chain failed: the class, and each target's outcome. -/
 def chainExhaustedBody (errCode errMsg : String) (failures : Array (String × String × Nat × String)) : ByteArray :=

@@ -443,6 +443,10 @@ struct OrbProvidersSettings: View {
         return (raw.isEmpty ? p["provider_type"].text : raw, explicitEmail)
     }
 
+    static func loginStatusLabel(_ status: String) -> String? {
+        status == "needs_reauth" ? "Sign in again" : nil
+    }
+
     /// Terminal provider-side disable (Google TOS_VIOLATION and equivalent account bans).
     private func disabledState(_ p: OrbJSON) -> String {
         health[p["id"].text]?["account_state"].text ?? ""
@@ -466,7 +470,7 @@ struct OrbProvidersSettings: View {
             else { state = "Disabled" }
         }
         else if detail["status"].text == "needs_verification" { state = "Verification required" }
-        else if p["status"]["type"].text == "needs_reauth" || detail["status"].text == "needs_reauth" { state = "Reconnect" }
+        else if let login = Self.loginStatusLabel(p["status"]["type"].text) ?? Self.loginStatusLabel(detail["status"].text) { state = login }
         else if !detail["error"].text.isEmpty { state = "Usage unavailable" }
         else if let quota = OrbProviderQuota.quotaStatus(OrbProviderQuota.windows(detail)) {
             state = quota.label

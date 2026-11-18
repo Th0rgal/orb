@@ -15,7 +15,7 @@ Environment=ORB_PRIVD_STATE_DIR=/run/orb-privd-jobs
 EnvironmentFile=-/etc/orb-privd.env
 EnvironmentFile=-/etc/orb-node.env
 EnvironmentFile=-/etc/sandboxed-node.env
-ExecStart=/usr/bin/python3 /usr/local/sbin/orb-privd
+ExecStart=/usr/local/sbin/orb-privd
 Restart=always
 RestartSec=2
 

@@ -225,6 +225,7 @@ def missionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS privilege_leases (grant_id TEXT PRIMARY KEY, lease_token TEXT NOT NULL UNIQUE, mission_id TEXT NOT NULL, target_host TEXT NOT NULL, scope TEXT NOT NULL, allowed_units_json TEXT NOT NULL DEFAULT '[]', require_force_cmd INTEGER NOT NULL DEFAULT 0, biometric_signed INTEGER NOT NULL DEFAULT 1, revoked INTEGER NOT NULL DEFAULT 0, expires_at_epoch INTEGER NOT NULL DEFAULT 0, lease_epoch INTEGER NOT NULL DEFAULT 0, session_scoped INTEGER NOT NULL DEFAULT 1, session_id TEXT NOT NULL DEFAULT '', session_expires_at INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE TABLE IF NOT EXISTS privilege_audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, grant_id TEXT NOT NULL, mission_id TEXT NOT NULL, target_host TEXT NOT NULL, executing_host TEXT NOT NULL, command TEXT NOT NULL, allowed INTEGER NOT NULL, created_at TEXT NOT NULL);" ++
   "CREATE TABLE IF NOT EXISTS core_boot_state (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1), boot_epoch INTEGER NOT NULL DEFAULT 0, bunker_state INTEGER NOT NULL DEFAULT 0);" ++
+  "CREATE TABLE IF NOT EXISTS legacy_state_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS remote_message_queue (sequence INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, message_id TEXT NOT NULL, mission_id TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'waiting', UNIQUE(user_id,message_id));" ++
   "CREATE INDEX IF NOT EXISTS remote_message_pending ON remote_message_queue(state,sequence);" ++
   "CREATE TABLE IF NOT EXISTS ai_providers (id TEXT PRIMARY KEY, provider_type TEXT NOT NULL, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, base_url TEXT NOT NULL DEFAULT '', api_key TEXT NOT NULL DEFAULT '', rpm_limit INTEGER, max_concurrency INTEGER, custom_models_json TEXT NOT NULL DEFAULT '[]', sort_order INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT '', created_by_user_id TEXT NOT NULL DEFAULT '');" ++
@@ -1523,6 +1524,33 @@ def execParamQueryUnlocked (db : SqliteDb) (sql : String) (params : Array String
 def execParamQuery (db : SqliteDb) (sql : String) (params : Array String) : IO (Except String (Array (Array String))) :=
   db.mu.atomically (sqliteQueryRowsRaw db.handle sql params)
 
+/-- Convert Unix epoch seconds (`1970-01-01T00:00:00Z = 0`) into canonical ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`)
+    using the Howard Hinnant civil-from-days algorithm (`0 import Lean`, `SM-07`). -/
+def formatEpochIso8601Utc (epochSecs : UInt64) : String :=
+  let totalSecs : Nat := epochSecs.toNat
+  let daySecs : Nat := totalSecs % 86400
+  let hh : Nat := daySecs / 3600
+  let mm : Nat := (daySecs % 3600) / 60
+  let ss : Nat := daySecs % 60
+  let z : Int := Int.ofNat (totalSecs / 86400) + 719468
+  let era : Int := (if z ≥ 0 then z else z - 146096) / 146097
+  let doe : Nat := (z - era * 146097).toNat
+  let yoe : Nat := (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+  let y : Int := Int.ofNat yoe + era * 400
+  let doy : Nat := doe - (365 * yoe + yoe / 4 - yoe / 100)
+  let mp : Nat := (5 * doy + 2) / 153
+  let d : Nat := doy - (153 * mp + 2) / 5 + 1
+  let m : Nat := if mp < 10 then mp + 3 else mp - 9
+  let yr : Int := if m ≤ 2 then y + 1 else y
+  let pad2 (n : Nat) : String := if n < 10 then s!"0{n}" else s!"{n}"
+  let pad4 (n : Int) : String :=
+    let k := n.toNat
+    if k < 10 then s!"000{k}"
+    else if k < 100 then s!"00{k}"
+    else if k < 1000 then s!"0{k}"
+    else s!"{k}"
+  s!"{pad4 yr}-{pad2 m}-{pad2 d}T{pad2 hh}:{pad2 mm}:{pad2 ss}Z"
+
 /-- Server start only (after the listen socket is bound, before any turn is launched):
     a mission still `active` with no surviving run belonged to a previous Core process.
     Left `active` it would look busy forever and its armed wake-up would never be
@@ -1540,6 +1568,39 @@ def interruptTurnsLostToRestart (mDb : SqliteDb) : IO Nat := do
      "AND NOT EXISTS (SELECT 1 FROM mission_runs r WHERE r.mission_id=missions.id AND r.execution_state NOT IN ('terminal','completed','failed','aborted')) " ++
      "AND NOT EXISTS (SELECT 1 FROM remote_node_jobs j WHERE j.mission_id=missions.id AND j.state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted')) " ++
      "RETURNING id;") #[]
+  match res with
+  | .ok rows =>
+    let lost := if rows.size == 0 then #[] else rows.extract 1 rows.size
+    let nowIso := formatEpochIso8601Utc (← coreEpochSec)
+    -- A restart must leave an explicit, client-visible recovery receipt for every
+    -- turn it could not reattach. Marking the mission is not enough: the receipt
+    -- records that Core owned this turn and intentionally did not start a duplicate.
+    for row in lost do
+      let mid := (row[0]?).getD ""
+      if mid.isEmpty then continue
+      let seqRes ← execParamQuery mDb
+        "SELECT COALESCE(MAX(CASE WHEN COALESCE(seq,0)>=COALESCE(sequence,0) THEN COALESCE(seq,0) ELSE COALESCE(sequence,0) END),0)+1 FROM mission_events WHERE mission_id=?1;"
+        #[mid]
+      let nextSeq : UInt64 :=
+        match seqRes with
+        | .ok srs => (((srs[1]?.bind (·[0]?)).bind String.toNat?).getD 1).toUInt64
+        | .error _ => 1
+      discard <| execParamQuery mDb
+        "INSERT INTO mission_events(mission_id,seq,sequence,event_type,payload,created_at,timestamp) VALUES(?1,?2,?2,'recovery_receipt',?3,?4,?4);"
+        #[mid, s!"{nextSeq}", "{\"status\":\"interrupted\",\"reason\":\"core_restarted\",\"reattached\":false}", nowIso]
+    return lost.size
+  | .error _ => return 0
+
+/-- Settle runs whose mission already reached a terminal state. Old Core execution
+    scopes have no independent provider object to enumerate, so this is the
+    periodic ownership backstop: a run can never outlive the mission that owns it.
+    It deliberately leaves `awaiting_user` and `waiting_background` missions alone. -/
+def reapOrphanedMissionRuns (mDb : SqliteDb) (nowAt : String) : IO Nat := do
+  let res ← execParamQuery mDb
+    ("UPDATE mission_runs SET execution_state='terminal',terminal_reason='orphaned_scope',updated_at=?1 " ++
+     "WHERE execution_state NOT IN ('terminal','completed','failed','aborted') " ++
+     "AND EXISTS (SELECT 1 FROM missions m WHERE m.id=mission_runs.mission_id " ++
+     "AND m.status IN ('completed','cancelled','failed','not_feasible')) RETURNING mission_id;") #[nowAt]
   match res with
   | .ok rows => return rows.size - 1
   | .error _ => return 0
@@ -2068,33 +2129,6 @@ def queryProjectParallelMissions? (st : CoreStore) (slug : String) : IO (Option 
   | .ok rows =>
     if rows.size ≤ 1 then return none
     return (rows[1]?.bind (·[0]?)).bind String.toInt?
-
-/-- Convert Unix epoch seconds (`1970-01-01T00:00:00Z = 0`) into canonical ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`)
-    using the Howard Hinnant civil-from-days algorithm (`0 import Lean`, `SM-07`). -/
-def formatEpochIso8601Utc (epochSecs : UInt64) : String :=
-  let totalSecs : Nat := epochSecs.toNat
-  let daySecs : Nat := totalSecs % 86400
-  let hh : Nat := daySecs / 3600
-  let mm : Nat := (daySecs % 3600) / 60
-  let ss : Nat := daySecs % 60
-  let z : Int := Int.ofNat (totalSecs / 86400) + 719468
-  let era : Int := (if z ≥ 0 then z else z - 146096) / 146097
-  let doe : Nat := (z - era * 146097).toNat
-  let yoe : Nat := (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
-  let y : Int := Int.ofNat yoe + era * 400
-  let doy : Nat := doe - (365 * yoe + yoe / 4 - yoe / 100)
-  let mp : Nat := (5 * doy + 2) / 153
-  let d : Nat := doy - (153 * mp + 2) / 5 + 1
-  let m : Nat := if mp < 10 then mp + 3 else mp - 9
-  let yr : Int := if m ≤ 2 then y + 1 else y
-  let pad2 (n : Nat) : String := if n < 10 then s!"0{n}" else s!"{n}"
-  let pad4 (n : Int) : String :=
-    let k := n.toNat
-    if k < 10 then s!"000{k}"
-    else if k < 100 then s!"00{k}"
-    else if k < 1000 then s!"0{k}"
-    else s!"{k}"
-  s!"{pad4 yr}-{pad2 m}-{pad2 d}T{pad2 hh}:{pad2 mm}:{pad2 ss}Z"
 
 private def isLeapYearUtc (y : Nat) : Bool :=
   (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
@@ -2652,6 +2686,21 @@ def writePersistedBunkerState (st : CoreStore) (state : UInt8) : IO (Except Stri
   let res ← execParamQuery st.missionsDb
     "INSERT INTO core_boot_state(singleton_id,boot_epoch,bunker_state) VALUES(1,0,?1) ON CONFLICT(singleton_id) DO UPDATE SET bunker_state=excluded.bunker_state;"
     #[s!"{clamped}"]
+  return res.map (fun _ => ())
+
+/-- True when a one-time legacy state migration has already been durably recorded. -/
+def legacyMigrationApplied? (st : CoreStore) (name : String) : IO Bool := do
+  match ← execParamQuery st.missionsDb
+      "SELECT 1 FROM legacy_state_migrations WHERE name=?1;" #[name] with
+  | .ok rows => pure (rows.size > 1)
+  | .error _ => pure false
+
+/-- Durably mark a legacy state migration as applied. Marking is idempotent and must
+    happen only after the migrated authority has been written. -/
+def markLegacyMigration (st : CoreStore) (name : String) : IO (Except String Unit) := do
+  let res ← execParamQuery st.missionsDb
+    "INSERT OR IGNORE INTO legacy_state_migrations(name,applied_at) VALUES(?1,strftime('%Y-%m-%dT%H:%M:%SZ','now'));"
+    #[name]
   return res.map (fun _ => ())
 
 /-- Live writer missions: non-terminal runs plus active writer track leases. -/

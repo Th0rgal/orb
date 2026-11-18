@@ -44,6 +44,7 @@ def chromeIconPaths (name : String) : List (List (Int × Int)) :=
   | "plus" => [[(40,80),(120,80)],[(80,40),(80,120)]]
   | "close" => [[(45,45),(115,115)],[(115,45),(45,115)]]
   | "chevron-down" => [[(50,65),(80,95),(110,65)]]
+  | "chevron-right" => [[(65,50),(95,80),(65,110)]]
   | "file" => [[(42,24),(94,24),(120,52),(120,136),(108,148),(42,148),(30,136),(30,36),(42,24)],[(92,25),(92,53),(120,53)]]
   | "folder" => [[(20,48),(20,38),(28,30),(61,30),(76,46),(122,46),(140,64),(140,114),(132,132),(38,132),(20,114),(20,48)]]
   | "chat" => [[(30,110),(20,140),(60,120),(100,120),(130,100),(140,70),(130,40),(100,20),(60,20),(30,40),(20,70),(30,110)],[(50,60),(110,60)],[(50,85),(90,85)]]
@@ -95,7 +96,7 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
         |>.withMargin margin
         |>.withFixedSize innerW (pxToSub 18))
        [chromeLabel small.lineHeightSub [overlaySynthRun small row.title] 1,
-        chromeIcon "plus" pal.textFaint 14]
+        chromeIcon (if row.rowId == "section:archived" then "chevron-right" else "plus") pal.textFaint 14]
   else
     let isFooter := row.kind == "footer"
     let isMission := row.kind == "mission"

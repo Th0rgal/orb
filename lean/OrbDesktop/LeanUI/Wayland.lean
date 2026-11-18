@@ -590,12 +590,20 @@ def waitEvents (c : WaylandClient) : IO Unit := do
   let r ← nativeCall c.window.fnDispatch c.display.toUInt64
   if r.toUInt32 ≥ 0x80000000 then throw (IO.userError "connection to the Wayland compositor was lost")
 
-/-- Reorder an RGBA8 framebuffer into `WL_SHM_FORMAT_XRGB8888` (bytes B, G, R, X). -/
-def rgbaToXrgb (rgba : ByteArray) : ByteArray := Id.run do
+/-- `wl_shm` format code for premultiplied ARGB8888 (little-endian bytes B, G, R, A). -/
+def wlShmFormatArgb8888 : UInt32 := 0
+
+/-- Convert a straight-alpha RGBA8 framebuffer to premultiplied
+`WL_SHM_FORMAT_ARGB8888` (little-endian bytes B, G, R, A). -/
+def rgbaToArgb (rgba : ByteArray) : ByteArray := Id.run do
   let mut out := rgba
   for i in [0:rgba.size / 4] do
     let o := i * 4
-    out := (out.set! o (rgba.get! (o + 2))).set! (o + 2) (rgba.get! o)
+    let a := (rgba.get! (o + 3)).toNat
+    let pm (c : UInt8) : UInt8 := ((c.toNat * a + 127) / 255).toUInt8
+    out := (out.set! o (pm (rgba.get! (o + 2))))
+      |>.set! (o + 1) (pm (rgba.get! (o + 1)))
+      |>.set! (o + 2) (pm (rgba.get! o))
   return out
 
 private def releaseShm (c : WaylandClient) : IO Unit := do
@@ -617,7 +625,8 @@ private def allocShm (c : WaylandClient) (w h : Nat) : IO ShmBuffers := do
   let shmProxy := c.window.shmGlobal
   let pool ← marshalRequest shmProxy 0 c.ifaces.wlShmPool 1 0 0 #[.newId, .fd fd, .int bytes]
   let mk (offset : Nat) : IO USize :=
-    marshalRequest pool 0 c.ifaces.wlBuffer 1 0 0 #[.newId, .int offset, .int w, .int h, .int (w * 4), .uint 1]
+    marshalRequest pool 0 c.ifaces.wlBuffer 1 0 0
+      #[.newId, .int offset, .int w, .int h, .int (w * 4), .uint wlShmFormatArgb8888]
   return { fd, ptr := ptr.toUSize, bytes, pool, bufA := ← mk 0, bufB := ← mk frame, w, h }
 
 /-- Show the RGBA8 framebuffer `fb` (device size) in the window: copy it into the back buffer,
@@ -631,7 +640,7 @@ def present (c : WaylandClient) (fb : ByteArray) : IO WaylandClient := do
     allocShm c bw bh
   let toB := !shm.frontIsB
   let (buf, offset) := if toB then (shm.bufB, bw * bh * 4) else (shm.bufA, 0)
-  FFI.memWrite (shm.ptr + offset.toUSize) (rgbaToXrgb fb)
+  FFI.memWrite (shm.ptr + offset.toUSize) (rgbaToArgb fb)
   let surface := c.window.surface
   let _ ← marshalRequest surface 1 0 4 0 0 #[.obj buf, .int 0, .int 0]
   let _ ← marshalRequest c.window.viewport 2 0 1 0 0 #[.int c.pendingW, .int c.pendingH]

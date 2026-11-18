@@ -9,6 +9,7 @@ import OrbBin.PosixExt
 import OrbCore.Store
 import OrbCore.R7Core
 import OrbCore.LegacyHydrate
+import OrbCore.ApprovalSignature
 
 namespace OrbCore.SecretAndApproval
 
@@ -191,25 +192,50 @@ def readSecretBrokerWithDefaults (dataRoot : String) : IO JVal := do
 
 /-! ## Cross-Mission Read Access Grants (`.sandboxed-sh/mission_access.json`) -/
 
-def hasApprovedMissionReadAccess (dataRoot callerMissionId targetMissionId : String) (nowEpochSec : UInt64) : IO Bool := do
-  if callerMissionId.isEmpty || targetMissionId.isEmpty then return false
+/-- Typed requester identity for access/secret grants. Missions and external
+    sessions never compare equal; an empty subject is anonymous. -/
+def requesterSubject (callerMissionId callerSubject : String) : String :=
+  let subj := callerSubject.trimAscii.toString
+  if !subj.isEmpty then subj
+  else if !callerMissionId.isEmpty then "mission:" ++ callerMissionId
+  else ""
+
+private def grantMatchesRequester
+    (g : JVal) (callerMissionId callerSubject : String) : Bool :=
+  let subject := requesterSubject callerMissionId callerSubject
+  if subject.isEmpty then false
+  else
+    let stored := (g.fieldStr? "requester_subject").getD "" |>.trimAscii.toString
+    if !stored.isEmpty then stored == subject
+    else
+      -- Legacy grants had no subject. They remain readable only by the same
+      -- nonempty mission, never by an external session.
+      !callerMissionId.isEmpty &&
+        ((g.fieldStr? "requester_mission_id").getD "" == callerMissionId ||
+         (g.fieldStr? "mission_id").getD "" == callerMissionId)
+
+def hasApprovedMissionReadAccess (dataRoot callerMissionId targetMissionId : String)
+    (nowEpochSec : UInt64) (callerSubject : String := "") : IO Bool := do
+  if (requesterSubject callerMissionId callerSubject).isEmpty || targetMissionId.isEmpty then return false
   let nowIso := formatEpochIso8601Utc nowEpochSec
   let doc ← readDataJsonObj dataRoot "mission_access.json"
   let grants := (doc.fieldArr? "grants").getD #[]
   return grants.any fun g =>
-    ((g.fieldStr? "requester_mission_id").getD "" == callerMissionId ||
-     (g.fieldStr? "mission_id").getD "" == callerMissionId) &&
+    grantMatchesRequester g callerMissionId callerSubject &&
     (g.fieldStr? "target_mission_id").getD "" == targetMissionId &&
     grantIsActive g nowEpochSec nowIso
 
 def mcpRequestMissionAccess
     (dataRoot callerMissionId targetMissionId reason : String)
-    (ttlHours : Nat) (nowEpochSec : UInt64) : IO JVal := do
+    (ttlHours : Nat) (nowEpochSec : UInt64) (callerSubject : String := "") : IO JVal := do
   let nowIso := formatEpochIso8601Utc nowEpochSec
+  let subject := requesterSubject callerMissionId callerSubject
+  if subject.isEmpty then
+    return .obj #[("status", .str "denied"), ("error", .str "requester_subject_required")]
   let doc ← readDataJsonObj dataRoot "mission_access.json"
   let grants := (doc.fieldArr? "grants").getD #[]
   if grants.any (fun g =>
-      (g.fieldStr? "requester_mission_id").getD "" == callerMissionId &&
+      grantMatchesRequester g callerMissionId callerSubject &&
       (g.fieldStr? "target_mission_id").getD "" == targetMissionId &&
       grantIsActive g nowEpochSec nowIso) then
     return .obj #[
@@ -218,7 +244,7 @@ def mcpRequestMissionAccess
     ]
   let reqs := (doc.fieldArr? "requests").getD #[]
   if let some existing := reqs.find? (fun r =>
-      (r.fieldStr? "requester_mission_id").getD "" == callerMissionId &&
+      grantMatchesRequester r callerMissionId callerSubject &&
       (r.fieldStr? "target_mission_id").getD "" == targetMissionId &&
       (r.fieldStr? "status").getD "" == "pending") then
     return .obj #[
@@ -231,6 +257,7 @@ def mcpRequestMissionAccess
   let newReq := JVal.obj #[
     ("id", .str reqId),
     ("requester_mission_id", .str callerMissionId),
+    ("requester_subject", .str subject),
     ("target_mission_id", .str targetMissionId),
     ("scope", .str "read"),
     ("reason", .str reason),
@@ -245,13 +272,16 @@ def mcpRequestMissionAccess
     ("target_mission_id", .str targetMissionId)
   ]
 
-def mcpListMissionAccess (dataRoot callerMissionId : String) (nowEpochSec : UInt64) : IO JVal := do
+def mcpListMissionAccess (dataRoot callerMissionId : String) (nowEpochSec : UInt64)
+    (callerSubject : String := "") : IO JVal := do
   let nowIso := formatEpochIso8601Utc nowEpochSec
+  if requesterSubject callerMissionId callerSubject |>.isEmpty then
+    return .obj #[("requests", .arr #[]), ("grants", .arr #[])]
   let doc ← readDataJsonObj dataRoot "mission_access.json"
   let reqs := ((doc.fieldArr? "requests").getD #[]).filter (fun r =>
-    callerMissionId.isEmpty || (r.fieldStr? "requester_mission_id").getD "" == callerMissionId)
+    grantMatchesRequester r callerMissionId callerSubject)
   let grants := ((doc.fieldArr? "grants").getD #[]).filter (fun g =>
-    (callerMissionId.isEmpty || (g.fieldStr? "requester_mission_id").getD "" == callerMissionId) &&
+    grantMatchesRequester g callerMissionId callerSubject &&
     grantIsActive g nowEpochSec nowIso)
   return .obj #[("requests", .arr reqs), ("grants", .arr grants)]
 
@@ -330,20 +360,21 @@ private def defaultBwProjectsForSlug (broker : JVal) (projectSlug : String) : Ar
 
 private def missionHasBwProjectAccess
     (broker : JVal) (missionId projectSlug bwProjName bwProjId : String)
-    (nowEpochSec : UInt64) (nowIso : String) : Bool :=
+    (nowEpochSec : UInt64) (nowIso : String) (callerSubject : String := "") : Bool :=
   let defaults := defaultBwProjectsForSlug broker projectSlug
   if defaults.any (fun d => d == "all" || d == bwProjName || (!bwProjId.isEmpty && d == bwProjId)) then
     true
   else
     let grants := (broker.fieldArr? "grants").getD #[]
     grants.any fun g =>
-      (g.fieldStr? "mission_id").getD "" == missionId &&
+      grantMatchesRequester g missionId callerSubject &&
       grantIsActive g nowEpochSec nowIso &&
       let gp := (g.fieldStr? "bitwarden_project").getD ""
       (gp == "all" || gp == bwProjName || (!bwProjId.isEmpty && gp == bwProjId))
 
 def mcpSecretList
-    (workingDir dataRoot missionId projectSlug : String) (nowEpochSec : UInt64) : IO JVal := do
+    (workingDir dataRoot missionId projectSlug : String) (nowEpochSec : UInt64)
+    (callerSubject : String := "") : IO JVal := do
   let nowIso := formatEpochIso8601Utc nowEpochSec
   let broker ← readSecretBrokerWithDefaults dataRoot
   match ← listBitwardenProjectsAndSecrets workingDir dataRoot with
@@ -357,7 +388,7 @@ def mcpSecretList
       let pid := (s.fieldStr? "projectId").getD ""
       let pname := ((projMap.find? (fun (k, _) => k == pid)).map Prod.snd).getD "unassigned"
       let readable := !isCoreReservedComputeSecret key &&
-        missionHasBwProjectAccess broker missionId projectSlug pname pid nowEpochSec nowIso
+        missionHasBwProjectAccess broker missionId projectSlug pname pid nowEpochSec nowIso callerSubject
       JVal.obj #[
         ("name", .str key),
         ("bitwarden_project", .str pname),
@@ -368,7 +399,7 @@ def mcpSecretList
 def mcpSecretGet
     (workingDir dataRoot missionId projectSlug secretName reason : String)
     (callerOnManagedNode : Bool)
-    (nowEpochSec : UInt64) : IO JVal := do
+    (nowEpochSec : UInt64) (callerSubject : String := "") : IO JVal := do
   let nowIso := formatEpochIso8601Utc nowEpochSec
   if !admitsSecretDelivery secretName callerOnManagedNode then
     return .obj #[("status", .str "refused"), ("name", .str secretName),
@@ -386,9 +417,9 @@ def mcpSecretGet
   let secId := (matchedSec.fieldStr? "id").getD ""
   let pid := (matchedSec.fieldStr? "projectId").getD ""
   let pname := ((projs.find? (fun p => (p.fieldStr? "id").getD "" == pid)).bind (·.fieldStr? "name")).getD "unassigned"
-  let allowed := missionHasBwProjectAccess broker missionId projectSlug pname pid nowEpochSec nowIso ||
+  let allowed := missionHasBwProjectAccess broker missionId projectSlug pname pid nowEpochSec nowIso callerSubject ||
     ((broker.fieldArr? "grants").getD #[]).any (fun g =>
-      (g.fieldStr? "mission_id").getD "" == missionId &&
+      grantMatchesRequester g missionId callerSubject &&
       grantIsActive g nowEpochSec nowIso &&
       (g.fieldStr? "secret_name").getD "" == secretName)
   if !allowed then
@@ -398,6 +429,7 @@ def mcpSecretGet
       ("id", .str reqId),
       ("kind", .str "secret_get"),
       ("mission_id", .str missionId),
+      ("requester_subject", .str (requesterSubject missionId callerSubject)),
       ("project", if projectSlug.isEmpty then .null else .str projectSlug),
       ("secret_name", .str secretName),
       ("bitwarden_project", .str pname),
@@ -424,7 +456,7 @@ def mcpSecretGet
 
 def mcpSecretQueueAction
     (workingDir dataRoot kind missionId projectSlug bwProject secretName? plainValue? note? reason : String)
-    (nowEpochSec : UInt64) : IO JVal := do
+    (nowEpochSec : UInt64) (callerSubject : String := "") : IO JVal := do
   let nowIso := formatEpochIso8601Utc nowEpochSec
   let broker ← readDataJsonObj dataRoot "secret_broker.json"
   let reqs := (broker.fieldArr? "requests").getD #[]
@@ -442,6 +474,7 @@ def mcpSecretQueueAction
     ("id", .str reqId),
     ("kind", .str kind),
     ("mission_id", .str missionId),
+    ("requester_subject", .str (requesterSubject missionId callerSubject)),
     ("project", if projectSlug.isEmpty then .null else .str projectSlug),
     ("bitwarden_project", .str bwProject),
     ("secret_name", if secretName?.isEmpty then .null else .str secretName?),
@@ -785,6 +818,17 @@ private def approveSinglePrivilegeRequest
   let reqs := (doc.fieldArr? "requests").getD #[]
   let some r := reqs.find? (fun x => (x.fieldStr? "id").getD "" == reqId)
     | return .error (404, "{\"error\":\"request_not_found\"}")
+  let normalized := normalizePrivilegeRequestJVal r #[] nowEpochSec nowIso
+  if normalized.fieldStr? "state" != some "pending" then
+    return .error (409, "{\"error\":\"approval_not_pending\"}")
+  -- A second, separately signed challenge must not mint another lease either.
+  let .ok _ ← execParamQuery st.missionsDb
+    "CREATE TABLE IF NOT EXISTS approved_privilege_requests (id TEXT PRIMARY KEY);" #[]
+    | return .error (500, "{\"error\":\"approval_store_failed\"}")
+  let .ok claimed ← execParamQuery st.missionsDb
+    "INSERT INTO approved_privilege_requests(id) VALUES(?1) ON CONFLICT DO NOTHING RETURNING id;" #[reqId]
+    | return .error (500, "{\"error\":\"approval_store_failed\"}")
+  if claimed.size != 2 then return .error (409, "{\"error\":\"approval_not_pending\"}")
   let gid ← newUuidV4
   let .ok rnd ← OrbNetLeaf.Crypto.randBytes 24
     | return .error (500, "{\"error\":\"csprng_failed\"}")
@@ -1038,11 +1082,34 @@ def dispatchSecretAndApprovalRoutes?
     (isAdmin : Bool)
     (method _rawTarget cleanPath : String)
     (bodyBytes : ByteArray)
-    (nowEpochSec : UInt64) : IO (Option (Nat × String × String)) := do
+    (nowEpochSec : UInt64)
+    (approvalHeader : String := "") : IO (Option (Nat × String × String)) := do
   -- Returns `Option (statusCode × contentType × bodyString)`
   let nowIso := formatEpochIso8601Utc nowEpochSec
   let okJson (code : Nat) (s : String) : Option (Nat × String × String) :=
     some (code, "application/json", s)
+
+  let needsSignature := method == "POST" &&
+    (cleanPath == "/api/approvals/approve-all" ||
+      (cleanPath.startsWith "/api/privilege-access/" &&
+        (cleanPath.endsWith "/approve" || cleanPath.endsWith "/bunker" ||
+          cleanPath.endsWith "/unbunker")) ||
+      (cleanPath.startsWith "/api/mission-access/" && cleanPath.endsWith "/approve") ||
+      (cleanPath.startsWith "/api/bitwarden/requests/" && cleanPath.endsWith "/approve")) ||
+    (method == "DELETE" && cleanPath.startsWith "/api/approvals/devices/") ||
+    (method == "PUT" && cleanPath == "/api/approvals/mode")
+  if needsSignature then
+    if !isAdmin then return okJson 403 "{\"error\":\"admin_required\"}"
+    let [nonce, deviceId, signature] := approvalHeader.splitOn "."
+      | return okJson 403 "{\"error\":\"device_approval_required\"}"
+    let devDoc ← readDataJsonObj dataRoot "approval_devices.json"
+    let some device := ((devDoc.fieldArr? "devices").getD #[]).find?
+        (fun d => d.fieldStr? "id" == some deviceId)
+      | return okJson 403 "{\"error\":\"approval_device_unknown\"}"
+    match ← OrbCore.ApprovalSignature.consume st nonce
+        ((device.fieldStr? "public_key").getD "") signature method _rawTarget bodyBytes nowEpochSec with
+    | .error err => return okJson 403 (renderCompact (.obj #[("error", .str err)]))
+    | .ok () => pure ()
 
   -- 1. `/api/approvals/*`
   if cleanPath == "/api/approvals" || cleanPath.startsWith "/api/approvals/" then
@@ -1059,6 +1126,15 @@ def dispatchSecretAndApprovalRoutes?
       let did ← match jv.fieldStr? "id" with | some s => pure s | none => newUuidV4
       let name := (jv.fieldStr? "name").getD "Approval Device"
       let pubKey := (jv.fieldStr? "public_key").getD ""
+      let enrollmentCode := (jv.fieldStr? "enrollment_code").getD "" |>.trimAscii.toString
+      let enrollmentPath := System.FilePath.mk s!"{dataRoot}/approval_enrollment_code"
+      let storedCode := match ← try some <$> IO.FS.readFile enrollmentPath catch _ => pure none with
+        | some code => code.trimAscii.toString
+        | none => ""
+      if storedCode.isEmpty || enrollmentCode.isEmpty || storedCode != enrollmentCode then
+        return okJson 403 "{\"error\":\"approval_enrollment_required\"}"
+      discard <| IO.FS.removeFile enrollmentPath
+      if pubKey.isEmpty then return okJson 400 "{\"error\":\"public_key_required\"}"
       let entry := JVal.obj #[
         ("id", .str did), ("name", .str name), ("public_key", .str pubKey), ("created_at", .str nowIso)
       ]
@@ -1083,6 +1159,8 @@ def dispatchSecretAndApprovalRoutes?
         | none => bytesToHexLower (sha256Bytes ((jv.fieldStr? "body").getD "").toUTF8)
       let expAt := nowEpochSec + 120
       let payloadStr := s!"paloma-approval-v1\n{nonce}\n{cMethod} {cPath}\n{cBodyHash}\n{expAt}\n{cSummary}"
+      let .ok () ← OrbCore.ApprovalSignature.issue st nonce cMethod cPath cBodyHash payloadStr expAt
+        | return okJson 500 "{\"error\":\"approval_store_failed\"}"
       return okJson 200 (renderCompact (.obj #[
         ("challenge", .str nonce),
         ("challenge_id", .str nonce),
@@ -1144,6 +1222,8 @@ def dispatchSecretAndApprovalRoutes?
         let liveRisk := (liveItem.fieldStr? "risk").getD "routine"
         if liveRisk == "critical" && !confirmCrit then
           return okJson 400 s!"\{\"error\":\"critical_confirmation_required\",\"id\":{jsonEscape bId}}"
+        if bKind == "secret" && (liveItem.fieldStr? "tier").getD "read" != "read" then
+          return okJson 409 s!"\{\"error\":\"unsupported_secret_tier\",\"id\":{jsonEscape bId},\"message\":\"Only read secret requests can be approved; write/delete/move mutations remain unsupported.\"}"
       let mut approvedCnt : Nat := 0
       for bi in batchItems do
         let bKind := (bi.fieldStr? "kind").getD ""
@@ -1159,6 +1239,8 @@ def dispatchSecretAndApprovalRoutes?
             let gid ← newUuidV4
             let newGrant := JVal.obj #[
               ("id", .str gid),
+              ("request_id", .str bId),
+              ("requester_subject", targetReq.fieldOrNull "requester_subject"),
               ("mission_id", targetReq.fieldOrNull "mission_id"),
               ("project", targetReq.fieldOrNull "project"),
               ("bitwarden_project", targetReq.fieldOrNull "bitwarden_project"),
@@ -1168,7 +1250,10 @@ def dispatchSecretAndApprovalRoutes?
             ]
             let nextReqs := curReqs.map fun r =>
               if (r.fieldStr? "id").getD "" == bId then
-                ((r.removeField "encrypted_value").setField "status" (.str "approved")).setField "decided_at" (.str nowIso)
+                r.removeField "encrypted_value"
+                  |>.setField "status" (.str "approved")
+                  |>.setField "decided_at" (.str nowIso)
+                  |>.setField "grant_id" (.str gid)
               else r
             discard <| writeDataJsonObj dataRoot "secret_broker.json"
               ((curBroker.setField "requests" (.arr nextReqs)).setField "grants" (.arr (curGrants.push newGrant)))
@@ -1184,6 +1269,8 @@ def dispatchSecretAndApprovalRoutes?
             let gid ← newUuidV4
             let grant := JVal.obj #[
               ("id", .str gid),
+              ("request_id", .str bId),
+              ("requester_subject", r.fieldOrNull "requester_subject"),
               ("requester_mission_id", r.fieldOrNull "requester_mission_id"),
               ("target_mission_id", r.fieldOrNull "target_mission_id"),
               ("scope", .str ((r.fieldStr? "scope").getD "read")),
@@ -1198,6 +1285,7 @@ def dispatchSecretAndApprovalRoutes?
                   |>.setField "status" (.str "approved")
                   |>.setField "decided_at" (.str nowIso)
                   |>.setField "expires_at" (.str expIso)
+                  |>.setField "grant_id" (.str gid)
               else x
             discard <| writeDataJsonObj dataRoot "mission_access.json"
               ((curDoc.setField "requests" (.arr nextReqs)).setField "grants" (.arr (curGrants.push grant)))
@@ -1287,10 +1375,14 @@ def dispatchSecretAndApprovalRoutes?
       let reqs := (broker.fieldArr? "requests").getD #[]
       let some targetReq := reqs.find? (fun r => (r.fieldStr? "id").getD "" == reqId)
         | return okJson 404 "{\"error\":\"request_not_found\"}"
+      if normalizeSecretTier ((targetReq.fieldStr? "kind").getD "read") != "read" then
+        return okJson 409 "{\"error\":\"unsupported\",\"message\":\"Only read secret requests can be approved; the intended write/delete/move effect is not supported.\"}"
       let grants := (broker.fieldArr? "grants").getD #[]
       let gid ← newUuidV4
       let newGrant := JVal.obj #[
         ("id", .str gid),
+        ("request_id", .str reqId),
+        ("requester_subject", targetReq.fieldOrNull "requester_subject"),
         ("mission_id", targetReq.fieldOrNull "mission_id"),
         ("project", targetReq.fieldOrNull "project"),
         ("bitwarden_project", targetReq.fieldOrNull "bitwarden_project"),
@@ -1300,7 +1392,10 @@ def dispatchSecretAndApprovalRoutes?
       ]
       let nextReqs := reqs.map fun r =>
         if (r.fieldStr? "id").getD "" == reqId then
-          ((r.removeField "encrypted_value").setField "status" (.str "approved")).setField "decided_at" (.str nowIso)
+          r.removeField "encrypted_value"
+            |>.setField "status" (.str "approved")
+            |>.setField "decided_at" (.str nowIso)
+            |>.setField "grant_id" (.str gid)
         else r
       let nextBroker := (broker.setField "requests" (.arr nextReqs)).setField "grants" (.arr (grants.push newGrant))
       discard <| writeDataJsonObj dataRoot "secret_broker.json" nextBroker
@@ -1315,13 +1410,32 @@ def dispatchSecretAndApprovalRoutes?
         else r
       discard <| writeDataJsonObj dataRoot "secret_broker.json" (broker.setField "requests" (.arr nextReqs))
       return okJson 200 "{\"ok\":true}"
-    if method == "DELETE" && cleanPath.startsWith "/api/bitwarden/grants/" then
-      let gid := (cleanPath.drop 22).toString
+    if method == "DELETE" && (cleanPath.startsWith "/api/bitwarden/grants/" ||
+        cleanPath.startsWith "/api/bitwarden/requests/") then
+      let isRequest := cleanPath.startsWith "/api/bitwarden/requests/"
+      let rawId := if isRequest then (cleanPath.drop 24).toString else (cleanPath.drop 22).toString
+      let id := if rawId.startsWith "grants/" then (rawId.drop 7).toString else rawId
       let broker ← readDataJsonObj dataRoot "secret_broker.json"
+      let reqs := (broker.fieldArr? "requests").getD #[]
       let grants := (broker.fieldArr? "grants").getD #[]
+      let linkedGid :=
+        match reqs.find? (fun r => (r.fieldStr? "id").getD "" == id) with
+        | some r => (r.fieldStr? "grant_id").getD ""
+        | none => ""
       let nextGrants := grants.map fun g =>
-        if (g.fieldStr? "id").getD "" == gid then g.setField "revoked_at" (.str nowIso) else g
-      discard <| writeDataJsonObj dataRoot "secret_broker.json" (broker.setField "grants" (.arr nextGrants))
+        let gid := (g.fieldStr? "id").getD ""
+        let greq := (g.fieldStr? "request_id").getD ""
+        if gid == id || (!linkedGid.isEmpty && gid == linkedGid) || (isRequest && greq == id) then
+          g.setField "revoked_at" (.str nowIso)
+        else g
+      let nextReqs := reqs.map fun r =>
+        let rid := (r.fieldStr? "id").getD ""
+        let rgid := (r.fieldStr? "grant_id").getD ""
+        if rid == id || (!isRequest && (rgid == id || (!linkedGid.isEmpty && rgid == linkedGid))) then
+          r.setField "status" (.str "revoked") |>.setField "revoked_at" (.str nowIso)
+        else r
+      discard <| writeDataJsonObj dataRoot "secret_broker.json"
+        ((broker.setField "grants" (.arr nextGrants)).setField "requests" (.arr nextReqs))
       return okJson 200 "{\"ok\":true}"
     if method == "PUT" && cleanPath.startsWith "/api/bitwarden/default-access/" then
       let rawSlug := (cleanPath.drop 30).toString
@@ -1346,7 +1460,12 @@ def dispatchSecretAndApprovalRoutes?
     let redact (s : JVal) : JVal := ((s.removeField "value").removeField "encrypted_value").setField "has_value" (.bool true)
     if method == "GET" && cleanPath == "/api/secrets/status" then
       let hasKey := (← loadPrivateKeyBytes? workingDir dataRoot).isSome
-      return okJson 200 (renderCompact (.obj #[("initialized", .bool hasKey), ("unlocked", .bool hasKey)]))
+      return okJson 200 (renderCompact (.obj #[
+        ("initialized", .bool hasKey),
+        ("supported", .bool false),
+        ("unlocked", .bool false),
+        ("message", .str "Legacy passphrase lock/unlock is retired; use Bitwarden secrets.")
+      ]))
     if method == "GET" && cleanPath == "/api/secrets/categories" then
       return okJson 200 "{\"categories\":[\"api_key\",\"oauth\",\"ssh\",\"other\"]}"
     if method == "GET" && cleanPath == "/api/secrets/registry" then
@@ -1354,8 +1473,13 @@ def dispatchSecretAndApprovalRoutes?
     if method == "GET" && cleanPath == "/api/secrets" then
       return okJson 200 (renderCompact (.arr (items.map redact)))
     if method == "POST" && (cleanPath == "/api/secrets/initialize" || cleanPath == "/api/secrets/unlock" || cleanPath == "/api/secrets/lock") then
-      discard <| loadOrCreatePrivateKeyBytes workingDir dataRoot
-      return okJson 200 "{\"ok\":true,\"unlocked\":true}"
+      let action := cleanPath.drop 13 |>.toString
+      return okJson 501 (renderCompact (.obj #[
+        ("ok", .bool false),
+        ("error", .str "unsupported"),
+        ("action", .str action),
+        ("message", .str "Legacy passphrase lock/unlock is retired; use Bitwarden secrets.")
+      ]))
 
   -- 4. `/api/mission-access*`
   if cleanPath == "/api/mission-access" || cleanPath.startsWith "/api/mission-access/" then
@@ -1384,6 +1508,8 @@ def dispatchSecretAndApprovalRoutes?
       let gid ← newUuidV4
       let grant := JVal.obj #[
         ("id", .str gid),
+        ("request_id", .str reqId),
+        ("requester_subject", r.fieldOrNull "requester_subject"),
         ("requester_mission_id", r.fieldOrNull "requester_mission_id"),
         ("target_mission_id", r.fieldOrNull "target_mission_id"),
         ("scope", .str ((r.fieldStr? "scope").getD "read")),
@@ -1401,6 +1527,7 @@ def dispatchSecretAndApprovalRoutes?
             |>.setField "ttl_hours" (JVal.nat ttlH)
             |>.setField "decided_at" (.str nowIso)
             |>.setField "expires_at" (.str expIso)
+            |>.setField "grant_id" (.str gid)
           approvedReq := upd
           nextReqs := nextReqs.push upd
         else nextReqs := nextReqs.push x
@@ -1428,16 +1555,30 @@ def dispatchSecretAndApprovalRoutes?
       return okJson 200 (renderCompact ((deniedReq?.getD (.obj #[])).setField "ok" (.bool true)))
     if method == "DELETE" && cleanPath.startsWith "/api/mission-access/" then
       let rawId := (cleanPath.drop 20).toString
-      let gid := if rawId.startsWith "grants/" then (rawId.drop 7).toString else rawId
+      let id := if rawId.startsWith "grants/" then (rawId.drop 7).toString else rawId
+      -- A request and its grant are one authority record: revoking either id
+      -- revokes both, including the historical request-id DELETE (`SEC-07`).
+      let matchedReq? := reqs.find? (fun x => (x.fieldStr? "id").getD "" == id)
+      let linkedGid :=
+        match matchedReq?.bind (·.fieldStr? "grant_id") with
+        | some g => g.trimAscii.toString
+        | none => ""
       let nextGrants := grants.map fun g =>
-        if (g.fieldStr? "id").getD "" == gid then g.setField "revoked_at" (.str nowIso) else g
-      let nextReqs := reqs.map fun x =>
-        if (x.fieldStr? "id").getD "" == gid then
+        let gid := (g.fieldStr? "id").getD ""
+        let reqId := (g.fieldStr? "request_id").getD ""
+        if gid == id || (!linkedGid.isEmpty && gid == linkedGid) || (!reqId.isEmpty && reqId == id) then
+          g.setField "revoked_at" (.str nowIso)
+        else g
+      let revokeReq (x : JVal) : JVal :=
+        let xid := (x.fieldStr? "id").getD ""
+        let xgid := (x.fieldStr? "grant_id").getD ""
+        if xid == id || (!linkedGid.isEmpty && xid == linkedGid) || (!xgid.isEmpty && xgid == id) then
           x
             |>.setField "state" (.str "revoked")
             |>.setField "status" (.str "revoked")
             |>.setField "revoked_at" (.str nowIso)
         else x
+      let nextReqs := reqs.map revokeReq
       discard <| writeDataJsonObj dataRoot "mission_access.json"
         ((doc.setField "grants" (.arr nextGrants)).setField "requests" (.arr nextReqs))
       return okJson 200 "{\"ok\":true}"

@@ -21,6 +21,7 @@ import OrbCore.WakeupRestartTests
 import OrbCore.TurnOutcomeTests
 import OrbCore.ManagedAccessTests
 import OrbCore.MissionSettingsTests
+import OrbCore.R17Tests
 import OrbCore.LocalOriginTests
 import OrbCore.ManagedTtlTests
 import OrbCore.ManagedHarvestTests
@@ -35,10 +36,13 @@ import OrbCore.ManagedSnapshotCatalogTests
 import OrbCore.ProviderContractTests
 import OrbCore.ProxyRoutingTests
 import OrbCore.SettingsDocumentTests
+import OrbCore.LegacyMigrationTests
 import OrbCore.TenantIsolationTests
 import OrbCore.DevSpendingTests
 import OrbCore.ManagedBudgetTests
+import OrbCore.R18LivenessTests
 import OrbCore.DevOperatorTests
+import OrbCore.ApprovalSignatureTests
 import OrbCore.SettingsTransferTests
 import OrbCore.MacTetherTests
 import OrbCore.PrivdNodeAuthTests
@@ -485,7 +489,7 @@ private def runR2bRound2Extras (store : CoreStore) (appSt : CoreAppState) (valid
   -- 6. `restoreMissionStatus` `StickyFence` on `acknowledged` & live-run protection:
   let .ok () ← upsertMission store {
     id := "m-rb-ack", title := "Archived Mission", status := "acknowledged",
-    backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
+     backend := "codex", modelOverride := "gpt-6.1-sol", modelEffort := "", workingDirectory := store.rootDir,
     updatedAt := "t-rb0", totalCostCents := 0
   } | do closeCoreStore store; return 1
   let .ok ackRb ← restoreMissionStatus store "m-rb-ack" "interrupted" "usage_limit_wait" "t-rb1"
@@ -1090,7 +1094,7 @@ private def runR3cdRound3BlockerTests
   let .ok () ← upsertMission store {
     id := "m-r3b-stop-tx", title := "Atomic Hosted Stop", status := "active",
     ownerUserId := fixtureAdminId,
-    backend := "codex", modelOverride := "gpt-6-astra", modelEffort := "", workingDirectory := store.rootDir,
+    backend := "codex", modelOverride := "gpt-6.1-sol", modelEffort := "", workingDirectory := store.rootDir,
     placementKind := "managed", nodeBootEpoch := store.bootEpoch, updatedAt := formatEpochIso8601Utc nowSec, totalCostCents := 0
   } | return (← failWith "seed m-r3b-stop-tx")
   let _ ← execParamQuery store.missionsDb
@@ -2635,7 +2639,6 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
    let history2Text := (history2Resp.map (·.body)).bind String.fromUTF8? |>.getD ""
    let historyArr := match OrbBin.Json.parse historyText with | .ok (.arr xs) => xs | _ => #[]
    let history2Arr := match OrbBin.Json.parse history2Text with | .ok (.arr xs) => xs | _ => #[]
-   let streamText := (streamResp.map (·.body)).bind String.fromUTF8? |>.getD ""
    let sameText := (sameResp.map (·.body)).bind String.fromUTF8? |>.getD ""
    let clashText := (clashResp.map (·.body)).bind String.fromUTF8? |>.getD ""
    if blobResp.map (·.status) != some 200 || !isSha256Hex hash ||
@@ -2667,7 +2670,7 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
       (history2Arr[1]?).bind (·.fieldNat? "revision") != some 2 ||
       streamResp.map (·.status) != some 200 ||
       streamResp.map (·.contentType) != some "text/event-stream" ||
-      !streamText.startsWith "data: {" || !streamText.endsWith "\n\n" ||
+      streamResp.map (fun r => r.bodyStream?.isSome) != some true ||
       (manifestText.splitOn "\"docs/a.txt\"").length < 2 ||
       (stl.splitOn "\"preferences\":1").length < 2 ||
       traversal.map (·.status) != some 400 || fiveMibStatus != some 200 || bigHttp != some 413 then
@@ -4619,14 +4622,15 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
       })
   }
 
-  let sendReq (method target tok body : String) (retryKey : String := "") : IO (Nat × String × Array (String × String)) := do
+  let sendReq (method target tok body : String) (retryKey : String := "")
+      (contentType : String := "application/json") : IO (Nat × String × Array (String × String)) := do
     let authHdr := (if tok.isEmpty then "" else s!"Authorization: Bearer {tok}\r\n") ++
       (if retryKey.isEmpty then "" else s!"Idempotency-Key: {retryKey}\r\n")
     let raw :=
       if body.isEmpty then
         s!"{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authHdr}\r\n"
       else
-        s!"{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authHdr}Content-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+        s!"{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authHdr}Content-Type: {contentType}\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
     match parseRequest raw.toUTF8 none with
     | .error e => return (0, s!"parse_err:{e}", #[])
     | .ok req =>
@@ -4887,9 +4891,56 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
      (admNodesBody.splitOn "\"id\":\"core\"").length < 2 then
     return (← fail s!"member placement confinement failed: core={alCoreMisSt} coloc={alColocMisSt} dgx={alDgxMisSt}:{alDgxMisBody} sep={alSepMisSt}:{alSepMisBody} ws={alWsSt} alNodes={alNodesBody} admNodes={admNodesBody}")
 
-  let (alUploadSt, alUploadBody, _) ← sendReq "POST" "/api/uploads?name=spec.md" aliceTok "hello-staged-attachment"
-  if alUploadSt != 201 || (alUploadBody.splitOn s!"\"owner_user_id\":{jsonEscape aliceId}").length < 2 then
-    return (← fail s!"member staged upload failed or unconfined: st={alUploadSt} body={alUploadBody}")
+  let alUploadBytes := "hello-staged-attachment".toUTF8
+  let alUploadJson := OrbBin.Json.renderCompact (.obj #[
+    ("name", .str "spec.md"),
+    ("data_base64", .str (OrbBin.PosixExt.base64Encode alUploadBytes false true))])
+  let (alUploadSt, alUploadBody, _) ← sendReq "POST" "/api/uploads" aliceTok alUploadJson
+  let alUploadJv := (OrbBin.Json.parse alUploadBody).toOption.getD (.obj #[])
+  let alUploadPath := (alUploadJv.fieldStr? "path").getD ""
+  let alUploadSha := (alUploadJv.fieldStr? "sha256").getD ""
+  let alUploadBack ←
+    if alUploadPath.isEmpty then pure ""
+    else try IO.FS.readFile (System.FilePath.mk alUploadPath) catch _ => pure ""
+  if alUploadSt != 200 || (alUploadBody.splitOn s!"\"owner_user_id\":{jsonEscape aliceId}").length < 2 ||
+      alUploadPath.isEmpty || alUploadSha.isEmpty || alUploadBack != "hello-staged-attachment" then
+    return (← fail s!"member staged upload failed, unconfined or not byte-exact: st={alUploadSt} body={alUploadBody}")
+  let legacyUpId := s!"r20-http12-{nowSec}"
+  let legacyBoundary := "----r20-http12-boundary"
+  let legacyChunk0 := "chunk-zero-"
+  let legacyChunk1 := "chunk-one"
+  let multipartChunk (payload : String) : String :=
+    s!"--{legacyBoundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"chunk.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n{payload}\r\n--{legacyBoundary}--\r\n"
+  let chunkUrl (idx total : Nat) : String :=
+    s!"/api/fs/upload-chunk?upload_id={legacyUpId}&chunk_index={idx}&total_chunks={total}&path=/tmp"
+  let ctHeader := s!"multipart/form-data; boundary={legacyBoundary}"
+  let (lc0St, _, _) ← sendReq "POST" (chunkUrl 0 2) adminTok (multipartChunk legacyChunk0) "" ctHeader
+  let (lf0St, lf0Body, _) ← sendReq "POST" "/api/fs/upload-finalize" adminTok
+    (OrbBin.Json.renderCompact (.obj #[("path", .str "/tmp"), ("upload_id", .str legacyUpId),
+      ("file_name", .str s!"{legacyUpId}.bin"), ("total_chunks", OrbBin.Json.JVal.nat 2)]))
+  if lc0St != 200 || lf0St != 400 || !(lf0Body.contains "missing_chunk_1") then
+    return (← fail s!"legacy chunk missing-detection failed: c0={lc0St} f0={lf0St}:{lf0Body}")
+  let (lc1St, lc1Body, _) ← sendReq "POST" (chunkUrl 1 2) adminTok (multipartChunk legacyChunk1) "" ctHeader
+  let (lf1St, lf1Body, _) ← sendReq "POST" "/api/fs/upload-finalize" adminTok
+    (OrbBin.Json.renderCompact (.obj #[("path", .str "/tmp"), ("upload_id", .str legacyUpId),
+      ("file_name", .str s!"{legacyUpId}.bin"), ("total_chunks", OrbBin.Json.JVal.nat 2)]))
+  let legacyDest := s!"/tmp/{legacyUpId}.bin"
+  let legacyRead ← try IO.FS.readFile (System.FilePath.mk legacyDest) catch _ => pure ""
+  try IO.FS.removeFile legacyDest catch _ => pure ()
+  if lc1St != 200 || lf1St != 200 || !(lf1Body.contains s!"\"size\":{legacyChunk0.length + legacyChunk1.length}") ||
+      legacyRead != legacyChunk0 ++ legacyChunk1 then
+    return (← fail s!"legacy chunk exact assembly failed: c1={lc1St}:{lc1Body} f1={lf1St}:{lf1Body} got={legacyRead}")
+  let (lmissSt, _, _) ← sendReq "POST" s!"/api/fs/upload-chunk?upload_id={legacyUpId}&total_chunks=2" adminTok (multipartChunk "x") "" ctHeader
+  if lmissSt != 400 then
+    return (← fail s!"legacy chunk accepted a missing chunk_index: {lmissSt}")
+  let (alDlSt, alDlBody, alDlHdrs) ← sendReq "GET" s!"/api/fs/download?path={alUploadPath}" adminTok ""
+  let alDlHdr (name : String) : String :=
+    ((alDlHdrs.find? (fun p => p.1.toLower == name)).map (·.2)).getD ""
+  if alDlSt != 200 || alDlBody != "hello-staged-attachment" ||
+      !(alDlHdr "content-disposition").startsWith "attachment" ||
+      alDlHdr "x-content-type-options" != "nosniff" ||
+      !(alDlHdr "content-security-policy").contains "default-src 'none'" then
+    return (← fail s!"download hardening failed: st={alDlSt} headers={reprStr alDlHdrs} body={alDlBody}")
 
   -- `alice` creates mission on dedicated fleet node `ashur` with project `lean-campaign`
   let (alMisSt, alMisBody, _) ← sendReq "POST" "/api/control/missions" aliceTok
@@ -6812,7 +6863,18 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
      (aqGetBody.splitOn "\"risk\":\"elevated\"").length < 2 then
     return (← fail s!"GET /api/privilege-access or /api/approvals/queue mismatch: pa={paGetSt}:{paGetBody} aq={aqGetSt}:{aqGetBody}")
 
-  let (paAppSt, paAppBody) ← sendJson "POST" s!"/api/privilege-access/{paReqId}/approve" hsJwt
+  let (approvalPublicKey, approvalSign) ← OrbCore.ApprovalSignatureTests.makeSigner (store.rootDir ++ "/parity-signer")
+  discard <| IO.FS.writeFile (store.rootDir ++ "/approval_enrollment_code") "parity-enrollment-code\n"
+  let _ ← sendJson "POST" "/api/approvals/devices" hsJwt
+    (OrbBin.Json.renderCompact (.obj #[("id", .str "test-device"), ("public_key", .str approvalPublicKey),
+      ("enrollment_code", .str "parity-enrollment-code")]))
+  let sendSigned := fun (path body : String) => do
+    let signedHeader ← OrbCore.ApprovalSignatureTests.header store approvalSign path body nowSec
+    let wire := s!"POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {hsJwt}\r\nX-Paloma-Approval: {signedHeader}\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+    let .ok req := parseRequest wire.toUTF8 none | throw (IO.userError "signed parity request")
+    let .ok res ← dispatchCoreRequest appSt req nowSec | throw (IO.userError "signed parity dispatch")
+    return (res.status, (String.fromUTF8? res.body).getD "")
+  let (paAppSt, paAppBody) ← sendSigned s!"/api/privilege-access/{paReqId}/approve"
     "{\"ttl_minutes\":60,\"session_scoped\":true}"
   if paAppSt != 200 || (paAppBody.splitOn "\"state\":\"approved\"").length < 2 ||
      (paAppBody.splitOn "\"expires_at\":\"20").length < 2 ||
@@ -6832,12 +6894,12 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
   let (_, rootReqBody) ← sendJson "POST" "/api/privilege-access/request" hsJwt
     "{\"scope\":\"root_exec\",\"target_host\":\"self\",\"ttl_minutes\":30,\"reason\":\"Root check\"}"
   let rootReqId := (((OrbBin.Json.parse rootReqBody).toOption.getD (.obj #[])).fieldStr? "request_id").getD ""
-  let (critNoConfirmSt, _) ← sendJson "POST" "/api/approvals/approve-all" hsJwt
+  let (critNoConfirmSt, _) ← sendSigned "/api/approvals/approve-all"
     s!"\{\"items\":[\{\"kind\":\"privilege\",\"id\":\"{rootReqId}\",\"digest\":\"\"}],\"confirm_critical\":false}"
-  let (critConfirmSt, critConfirmBody) ← sendJson "POST" "/api/approvals/approve-all" hsJwt
+  let (critConfirmSt, critConfirmBody) ← sendSigned "/api/approvals/approve-all"
     s!"\{\"items\":[\{\"kind\":\"privilege\",\"id\":\"{rootReqId}\",\"digest\":\"\"}],\"confirm_critical\":true}"
-  let (bunkSt, _) ← sendJson "POST" "/api/privilege-access/bunker" hsJwt "{\"level\":2,\"reason\":\"test\"}"
-  let (unbunkSt, unbunkBody) ← sendJson "POST" "/api/privilege-access/unbunker" hsJwt ""
+  let (bunkSt, _) ← sendSigned "/api/privilege-access/bunker" "{\"level\":2,\"reason\":\"test\"}"
+  let (unbunkSt, unbunkBody) ← sendSigned "/api/privilege-access/unbunker" ""
   if critNoConfirmSt != 400 || critConfirmSt != 200 || (critConfirmBody.splitOn "\"approved\":1").length < 2 ||
      bunkSt != 200 || unbunkSt != 200 || (unbunkBody.splitOn "\"bunker_state\":0").length < 2 then
     return (← fail s!"approve-all / bunker / unbunker failed: noConf={critNoConfirmSt} conf={critConfirmSt}:{critConfirmBody} bunk={bunkSt} unbunk={unbunkSt}:{unbunkBody}")
@@ -7777,9 +7839,13 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     OrbCore.ManagedResumeTests.run tmpRoot
     OrbCore.DevSpendingTests.run tmpRoot
     OrbCore.ManagedBudgetTests.run tmpRoot
+    OrbCore.R18LivenessTests.recoveryAndOrphanReaping s!"{tmpRoot}/r18-recovery"
+    OrbCore.R18LivenessTests.lineageMissionBudget s!"{tmpRoot}/r18-lineage"
     OrbCore.DevOperatorTests.run tmpRoot
+    OrbCore.ApprovalSignatureTests.run tmpRoot
     OrbCore.ManagedAccessTests.run tmpRoot
     OrbCore.MissionSettingsTests.run tmpRoot
+    OrbCore.R17Tests.run tmpRoot
     OrbCore.LocalOriginTests.run s!"{tmpRoot}/local-origin"
     OrbCore.ManagedTtlTests.run tmpRoot
     OrbCore.ManagedHarvestTests.run tmpRoot
@@ -8178,16 +8244,29 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   let wsAuthRaw := s!"GET /api/console/ws HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: jwt.{wsToken}\r\n\r\n".toUTF8
   let .ok wsAuthReq := parseRequest wsAuthRaw none | do closeCoreStore store; return 1
   match ← dispatchCoreRequest appSt wsAuthReq nowSec with
+  | .ok r =>
+    if r.status != 501 then
+      closeCoreStore store
+      IO.eprintln s!"[orb-core-test] FAIL: unsupported /api/console/ws returned HTTP {r.status}, expected 501"
+      return 1
+  | .error raw =>
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: unsupported /api/console/ws upgraded instead of 501: {String.fromUTF8! raw}"
+    return 1
+
+  let wsSyncRaw := s!"GET /api/control/sync HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: jwt.{wsToken}\r\n\r\n".toUTF8
+  let .ok wsSyncReq := parseRequest wsSyncRaw none | do closeCoreStore store; return 1
+  match ← dispatchCoreRequest appSt wsSyncReq nowSec with
   | .error raw101 =>
     let resp101 := String.fromUTF8! raw101
     if (resp101.splitOn "101 Switching Protocols").length != 2 ||
        (resp101.splitOn s!"Sec-WebSocket-Protocol: jwt.{wsToken}").length != 2 then
       closeCoreStore store
-      IO.eprintln s!"[orb-core-test] FAIL: authenticated /api/console/ws missing 101 or echoed subprotocol: {resp101}"
+      IO.eprintln s!"[orb-core-test] FAIL: /api/control/sync missing 101 or echoed subprotocol: {resp101}"
       return 1
   | .ok r =>
     closeCoreStore store
-    IO.eprintln s!"[orb-core-test] FAIL: authenticated /api/console/ws returned HTTP {r.status}"
+    IO.eprintln s!"[orb-core-test] FAIL: /api/control/sync returned HTTP {r.status}"
     return 1
 
   -- Durable queue edit (`GET /api/control/queue`, `PATCH /api/control/queue/:id`):
@@ -8289,6 +8368,39 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   if boundPatchResp.status != 409 then
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: job-bound PATCH returned {boundPatchResp.status}"
+    return 1
+
+  -- R18 FUP-02: `send-now` must actually move the waiting row to the head and
+  -- report promotion truthfully; `interrupt` is rejected rather than claimed.
+  let sendNowRaw := s!"POST /api/control/queue/q-3/send-now HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: 0\r\n\r\n".toUTF8
+  let .ok sendNowReq := parseRequest sendNowRaw none | do closeCoreStore store; return 1
+  let .ok sendNowResp ← dispatchCoreRequest appSt sendNowReq nowSec | do closeCoreStore store; return 1
+  let sendNowText := String.fromUTF8! sendNowResp.body
+  if sendNowResp.status != 200 || (sendNowText.splitOn "\"promoted\":true").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: send-now did not report promotion: {sendNowResp.status} {sendNowText}"
+    return 1
+  let .ok (_, qHeadBody) ← sendTestHttp appSt validJwt "GET" "/api/control/queue?mission_id=m-alpha" "" nowSec
+    | do closeCoreStore store; return 1
+  if !qHeadBody.startsWith "[{\"id\":\"q-3\"" then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: send-now did not put q-3 at the waiting head: {qHeadBody}"
+    return 1
+  let interruptRaw := s!"POST /api/control/queue/q-3/send-now?interrupt=true HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: 0\r\n\r\n".toUTF8
+  let .ok interruptReq := parseRequest interruptRaw none | do closeCoreStore store; return 1
+  let .ok interruptResp ← dispatchCoreRequest appSt interruptReq nowSec | do closeCoreStore store; return 1
+  let interruptText := String.fromUTF8! interruptResp.body
+  if interruptResp.status != 409 || (interruptText.splitOn "interrupt_not_supported").length < 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: interrupt send-now was not rejected truthfully ({interruptResp.status})"
+    return 1
+  -- R18 FUP-01: collection DELETE clears the mission's whole waiting prefix.
+  let clearQueueRaw := s!"DELETE /api/control/queue?mission_id=m-alpha HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\n\r\n".toUTF8
+  let .ok clearQueueReq := parseRequest clearQueueRaw none | do closeCoreStore store; return 1
+  let .ok clearQueueResp ← dispatchCoreRequest appSt clearQueueReq nowSec | do closeCoreStore store; return 1
+  if clearQueueResp.status != 200 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: collection queue DELETE returned {clearQueueResp.status}: {String.fromUTF8! clearQueueResp.body}"
     return 1
 
   -- 6b. Phase R2-B & R2-C regressions (`SM-01`, `SM-02`, `SM-08`, `SM-12`)
@@ -9019,5 +9131,6 @@ def main (args : List String) : IO UInt32 := do
   if args.contains "--prod-parity-only" then
     return ← OrbCore.SelfTest.runCyberSkillGroup false false false true
   OrbCore.SettingsDocumentTests.run
+  OrbCore.LegacyMigrationTests.run
   OrbCore.SettingsTransferTests.run
   OrbCore.SelfTest.runSuite (OrbCore.SelfTest.findFlag? args "--emit-evidence-log")

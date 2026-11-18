@@ -11,6 +11,8 @@ runs:
         echo "TURBO_LEAN_TELEMETRY=off" >> "$GITHUB_ENV"
         echo "LEAN_NATIVE_TELEMETRY=off" >> "$GITHUB_ENV"
         echo "TURBO_LEAN_NO_DAEMON=1" >> "$GITHUB_ENV"
+        # One line per package splitting native compile, exe link and publish time.
+        echo "TURBO_LEAN_PROFILE_PHASES=1" >> "$GITHUB_ENV"
         # GitHub-hosted runners are small; lean.ci runners (boost-jit-*) get more vCPUs at boot
         # when engines are idle, so let Lean use what the VM has.
         if [[ "${RUNNER_NAME:-}" == boost-jit-* ]]; then

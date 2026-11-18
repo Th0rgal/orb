@@ -5,7 +5,7 @@ import OrbCore.MissionBoard
 
 namespace OrbCore.TenantIsolationTests
 
-open OrbCore.Control OrbCore.MemoryAndCloud OrbCore.Store OrbCore.Managed OrbCore.ProviderUsageAndLogin OrbCore.LegacyHydrate OrbBin.Json LeanSys.Http LeanSys.Posix
+open OrbCore.Control OrbCore.ProjectFilesAndController OrbCore.MemoryAndCloud OrbCore.Store OrbCore.Managed OrbCore.ProviderUsageAndLogin OrbCore.LegacyHydrate OrbBin.Json LeanSys.Http LeanSys.Posix
 
 private def check (condition : Bool) (label : String) : IO Unit := do
   unless condition do throw (IO.userError s!"tenant isolation: {label}")
@@ -262,8 +262,461 @@ def missionBoardFixtures (root : String) : IO Unit := do
     check (deleted.size == 1 && !(← write "late" "late" "late").isOk) "Event order 9: delete wins; no orphan or late write"
   finally closeCoreStore store
 
+/-- B2b named coverage for the mission-board contract rows left open by PR #1832.
+    Storage-level rows use the same write/read/migration functions as the tools
+    and REST routes; route-level rows are added in `run`. -/
+private def missionBoardClauseFixtures (root : String) : IO Unit := do
+  let path := root ++ "/mission-board-clauses"
+  let .ok store ← openCoreStore path | throw (IO.userError "B2b clause store")
+  try
+    let sql (db : SqliteDb) (q : String) (args : Array String := #[]) : IO Unit := do
+      let .ok _ ← execParamQuery db q args | throw (IO.userError s!"B2b clause SQL: {q}")
+    let putBoard (mid text time : String) : IO Unit :=
+      sql store.missionsDb
+        "INSERT INTO mission_board(mission_id,text,updated_at,updated_by_mission_id,text_sha256) VALUES(?1,?2,?3,?1,?4) ON CONFLICT(mission_id) DO UPDATE SET text=excluded.text,updated_at=excluded.updated_at,updated_by_mission_id=excluded.updated_by_mission_id,text_sha256=excluded.text_sha256;"
+        #[mid, text, time, MissionBoard.digest text]
+    let addMission (id owner project title : String) (parent : String := "") (tags : String := "[]")
+        (status : String := "active") (time : String := "2026-11-01T00:00:00Z") (folder : String := "") : IO Unit :=
+      sql store.missionsDb
+        "INSERT INTO missions(id,owner_user_id,project,parent_mission_id,tags,title,status,updated_at,folder) VALUES(?1,?2,?3,NULLIF(?4,''),?5,?6,?7,?8,?9);"
+        #[id, owner, project, parent, tags, title, status, time, folder]
+    let addProject (slug controller : String) (owner : String := "a") (status : String := "active") : IO Unit := do
+      sql store.projectsDb "INSERT INTO projects(slug,controller_mission_id,status) VALUES(?1,NULLIF(?2,''),?3);"
+        #[slug, controller, status]
+      sql store.projectsDb "INSERT INTO project_owners(slug,owner_user_id) VALUES(?1,?2);" #[slug, owner]
+    let boardCount (mid : String) : IO Nat := do
+      let .ok rows ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM mission_board WHERE mission_id=?1;" #[mid]
+        | throw (IO.userError "B2b board count")
+      return ((rows[1]?.bind (·[0]?)).getD "0").toNat?.getD 0
+    let readBoard (uid mid : String) : IO JVal := do
+      let .ok doc ← MissionBoard.read store.missionsDb { userId := uid } mid
+        | throw (IO.userError s!"B2b read {mid}")
+      return doc
+    let boardField (uid mid field : String) : IO (Option String) := do
+      let doc ← readBoard uid mid
+      return doc.fieldStr? field
+    let restBody (r : Option (Nat × String × ByteArray)) : Option (Nat × String) :=
+      r.map fun (st, _, body) => (st, String.fromUTF8? body |>.getD "")
+    let rest (method target : String) (reader : MissionBoard.Reader) : IO (Option (Nat × String)) := do
+      return restBody (← MissionBoard.dispatchRest store.missionsDb store.projectsDb method target ByteArray.empty reader)
+    let writeAs (reader : MissionBoard.Reader) (target text now key : String) (fence : Option String := none) :=
+      MissionBoard.write store.missionsDb reader target text now fence key ("B2b:" ++ target) key "write_mission_board"
+
+    addMission "b2b-main" "a" "clause-main" "Main"
+    addMission "b2b-missing" "a" "clause-main" "Missing"
+    addMission "b2b-empty" "a" "clause-main" "Empty"
+    addMission "b2b-hash" "a" "clause-main" "Hash"
+    addMission "b2b-child" "a" "clause-main" "Child" (parent := "b2b-main")
+    addMission "b2b-sibling" "a" "clause-main" "Sibling" (parent := "b2b-main")
+    addMission "b2b-btw" "a" "clause-main" "Btw" (tags := "[\"btw-parent:b2b-child\"]")
+    addMission "b2b-other" "b" "clause-other" "Other"
+    addMission "b2b-op" "a" "clause-main" "Operator"
+    addMission "b2b-co" "a" "clause-main" "Coordinator"
+    addMission "b2b-op-other" "a" "clause-other" "Operator other"
+    addMission "b2b-live" "a" "clause-list" "Live"
+    addMission "b2b-arch" "a" "clause-list" "Archived" (status := "archived")
+    addMission "b2b-ack" "a" "clause-list" "Acknowledged" (status := "acknowledged")
+    addMission "b2b-del" "a" "clause-list" "Deleted" (status := "deleted")
+    addMission "b2b-list-foreign" "b" "clause-list" "Foreign list"
+    for mid in #["b2b-order-a", "b2b-order-b", "b2b-order-c", "b2b-order-d", "b2b-order-0"] do
+      addMission mid "a" "clause-order" mid
+    addMission "b2b-fields" "a" "clause-fields" "Fields"
+    addMission "b2b-folder" "a" "clause-folder" "Folder" (folder := "Old/Sub")
+    addMission "b2b-proj" "a" "clause-proj" "Project"
+    addMission "b2b-mach" "a" "clause-mach" "Machine"
+    addMission "b2b-ctrl1" "a" "clause-ctrl" "Controller one"
+    addMission "b2b-ctrl2" "a" "clause-ctrl" "Controller two"
+    addMission "b2b-mig1" "a" "clause-mig-a" "Migrated one"
+    addMission "b2b-mig2" "a" "clause-mig-b" "Migrated two"
+    addMission "b2b-claim-controller" "a" "clause-unclaimed" "Claim controller"
+    addMission "b2b-claim-controller2" "a" "clause-unclaimed" "Claim controller two"
+    addMission "b2b-fork-src" "a" "clause-fork" "Fork source"
+    addMission "b2b-fork-new" "a" "clause-fork" "Fork new"
+    addMission "b2b-restart" "a" "clause-restart" "Restart"
+    addMission "b2b-atomic" "a" "clause-atomic" "Atomic"
+    addMission "b2b-race-fence" "a" "clause-race" "Race fence"
+    addMission "b2b-race-open" "a" "clause-race" "Race open"
+    addMission "b2b-del-race" "a" "clause-race" "Race delete"
+    addMission "b2b-truth" "a" "clause-truth" "Truth"
+    addMission "b2b-alias" "a" "clause-alias" "Alias"
+    addMission "b2b-shared-a" "a" "a:shared-slug" "Shared A"
+    addMission "b2b-shared-b" "b" "b:shared-slug" "Shared B"
+
+    addProject "clause-main" "b2b-main"
+    addProject "clause-other" "b2b-other" (owner := "b")
+    addProject "clause-list" "b2b-live"
+    addProject "clause-order" "b2b-order-a"
+    addProject "clause-fields" "b2b-fields"
+    addProject "clause-folder" "b2b-folder"
+    addProject "clause-proj" "b2b-proj"
+    addProject "clause-mach" "b2b-mach"
+    addProject "clause-mig-a" "b2b-mig1"
+    addProject "clause-mig-b" "b2b-mig2"
+    addProject "clause-ctrl" "b2b-ctrl1"
+    addProject "clause-unclaimed" ""
+    addProject "clause-fork" "b2b-fork-src"
+    addProject "clause-restart" "b2b-restart"
+    addProject "clause-atomic" "b2b-atomic"
+    addProject "clause-race" "b2b-race-fence"
+    addProject "clause-alias" ""
+    addProject "a:shared-slug" "b2b-shared-a" (owner := "a")
+    addProject "b:shared-slug" "b2b-shared-b" (owner := "b")
+
+    let mainReader : MissionBoard.Reader := { userId := "a", missionId := "b2b-main" }
+    check ((← writeAs mainReader "b2b-main" "first" "2026-11-02T00:00:00Z" "B2b-identity-1").isOk)
+      "B2b identity: first write succeeds"
+    check ((← boardCount "b2b-main") == 1) "B2b identity: one row per mission"
+    check ((← writeAs mainReader "b2b-main" "second" "2026-11-02T00:00:01Z" "B2b-identity-2").isOk)
+      "B2b identity: replacement write succeeds"
+    check ((← boardCount "b2b-main") == 1 && (← boardField "a" "b2b-main" "text") == some "second")
+      "B2b identity: whole replacement, never append"
+
+    check (MissionBoard.digest "" == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+      "B2b hash: SHA-256 empty UTF-8 vector"
+    check (MissionBoard.digest "abc" == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+      "B2b hash: SHA-256 ASCII vector"
+    check (MissionBoard.digest "日本語" == "77710aedc74ecfa33685e33a6c7df5cc83004da1bdcef7fb280f5c2b2e97e0a5")
+      "B2b hash: SHA-256 non-ASCII UTF-8 vector"
+    let unicodeText := "  日本語 🦉 café é\r\n\n"
+    discard <| writeAs { userId := "a", missionId := "b2b-hash" } "b2b-hash" unicodeText "2026-11-02T00:00:02Z" "B2b-hash-1"
+    check ((← readBoard "a" "b2b-hash").fieldStr? "text_sha256" == some (MissionBoard.digest unicodeText))
+      "B2b hash: stored text_sha256 is the exact UTF-8 digest"
+
+    discard <| writeAs { userId := "a", missionId := "b2b-empty" } "b2b-empty" "" "2026-11-02T00:00:03Z" "B2b-empty-1"
+    let emptyDoc ← readBoard "a" "b2b-empty"
+    let missingDoc ← readBoard "a" "b2b-missing"
+    check (emptyDoc.fieldStr? "text" == some "" && emptyDoc.fieldStr? "updated_at" == some "2026-11-02T00:00:03Z" &&
+      emptyDoc.fieldStr? "text_sha256" == some (MissionBoard.digest ""))
+      "B2b empty: empty write is a present row"
+    check (missingDoc.fieldStr? "text" == some "" && missingDoc.field? "updated_at" == some .null &&
+      missingDoc.field? "updated_by_mission_id" == some .null)
+      "B2b empty: missing row is distinguished by absent metadata"
+
+    let ownerRead ← MissionBoard.authorizeRead store.missionsDb { userId := "a" } "b2b-main"
+    let ownRead ← MissionBoard.authorizeRead store.missionsDb mainReader "b2b-main"
+    let opRead ← MissionBoard.authorizeRead store.missionsDb { userId := "a", missionId := "b2b-op", role := "operator" } "b2b-main"
+    let coRead ← MissionBoard.authorizeRead store.missionsDb { userId := "a", missionId := "b2b-co", role := "coordinator" } "b2b-main"
+    let opOther ← MissionBoard.authorizeRead store.missionsDb { userId := "a", missionId := "b2b-op-other", role := "operator" } "b2b-main"
+    check (ownerRead.isOk && ownRead.isOk && opRead.isOk && coRead.isOk && opOther.isOk == false)
+      "B2b authorization: own mission, owner, and same-project operator/coordinator"
+
+    check ((← rest "GET" "/api/control/missions/b2b-ghost/board" { userId := "a" }) ==
+      some (404, "{\"error\":\"mission_not_found\"}")) "B2b zero-oracle: unknown mission is not found"
+    check ((← rest "GET" "/api/control/missions/b2b-other/board" { userId := "a" }) ==
+      some (404, "{\"error\":\"mission_not_found\"}")) "B2b zero-oracle: unreadable foreign mission is not found"
+    check ((← rest "GET" "/api/control/missions/b2b-sibling/board"
+      { userId := "a", missionId := "b2b-child" }) == some (403, "{\"error\":\"forbidden\"}"))
+      "B2b zero-oracle: same-tenant sibling read is forbidden"
+    check ((← rest "PUT" "/api/control/missions/b2b-sibling/board"
+      { userId := "a", missionId := "b2b-child" }) == some (403, "{\"error\":\"not_mission_writer\"}"))
+      "B2b zero-oracle: same-tenant write is not_mission_writer"
+    check ((← rest "PUT" "/api/control/missions/b2b-main/board" { userId := "b" }) ==
+      some (404, "{\"error\":\"mission_not_found\"}")) "B2b zero-oracle: foreign write is not found"
+
+    putBoard "b2b-fields" "hello" "2026-11-05T00:00:00Z"
+    let .ok fieldsDoc ← MissionBoard.list store.missionsDb { userId := "a" } "clause-fields"
+      | throw (IO.userError "B2b fields listing")
+    let fields := (fieldsDoc.fieldArr? "boards").getD #[]
+    check (fields.size == 1) "B2b listing: joined mission without a board is not listed"
+    let field := fields[0]!
+    check (((field.asObj?.getD #[]).map Prod.fst) ==
+      #["mission_id", "title", "status", "parent_mission_id", "updated_at", "bytes", "text_sha256"])
+      "B2b listing: exact metadata field set"
+    check (field.fieldStr? "mission_id" == some "b2b-fields" && field.fieldStr? "title" == some "Fields" &&
+      field.fieldStr? "status" == some "active" && field.field? "parent_mission_id" == some .null &&
+      field.fieldStr? "updated_at" == some "2026-11-05T00:00:00Z" &&
+      field.fieldNat? "bytes" == some 5 && field.fieldStr? "text_sha256" == some (MissionBoard.digest "hello") &&
+      field.field? "text" == none) "B2b listing: metadata values and no text"
+
+    for (mid, time) in #[("b2b-order-a", "2026-11-06T00:00:00Z"), ("b2b-order-b", "2026-11-06T00:00:00Z"),
+        ("b2b-order-c", "2026-11-06T00:00:00Z"), ("b2b-order-d", "2026-11-07T00:00:00Z"),
+        ("b2b-order-0", "2026-11-05T00:00:00Z")] do
+      putBoard mid mid time
+    let .ok orderDoc ← MissionBoard.list store.missionsDb { userId := "a" } "clause-order"
+      | throw (IO.userError "B2b order listing")
+    let orderIds := ((orderDoc.fieldArr? "boards").getD #[]).map (fun b => (b.fieldStr? "mission_id").getD "")
+    check (orderIds == #["b2b-order-d", "b2b-order-a", "b2b-order-b", "b2b-order-c", "b2b-order-0"])
+      "B2b listing: updated_at descending then mission_id ascending"
+
+    putBoard "b2b-live" "live" "2026-11-08T00:00:00Z"
+    putBoard "b2b-arch" "arch" "2026-11-08T00:00:01Z"
+    putBoard "b2b-ack" "ack" "2026-11-08T00:00:02Z"
+    putBoard "b2b-del" "deleted" "2026-11-08T00:00:03Z"
+    putBoard "b2b-list-foreign" "foreign" "2026-11-08T00:00:04Z"
+    let listIds (all : Bool) : IO (Array String) := do
+      let .ok doc ← MissionBoard.list store.missionsDb { userId := "a" } "clause-list" all
+        | throw (IO.userError "B2b listing matrix")
+      return ((doc.fieldArr? "boards").getD #[]).map (fun b => (b.fieldStr? "mission_id").getD "")
+    let visible ← listIds false
+    let allVisible ← listIds true
+    check (visible == #["b2b-live"] && allVisible.contains "b2b-arch" && allVisible.contains "b2b-ack" &&
+      !allVisible.contains "b2b-del" && !allVisible.contains "b2b-list-foreign")
+      "B2b listing: archived only with all=true; deleted and unreadable omitted"
+    putBoard "b2b-shared-a" "shared a" "2026-11-08T00:00:05Z"
+    putBoard "b2b-shared-b" "shared b" "2026-11-08T00:00:06Z"
+    let scopedListing ← MissionBoard.dispatchRest store.missionsDb store.projectsDb "GET"
+      "/api/projects/shared-slug/boards" ByteArray.empty { userId := "a" }
+    let scopedIds := match scopedListing with
+      | some (200, _, body) =>
+        let doc := (OrbBin.Json.parse (String.fromUTF8? body |>.getD "{}")).toOption.getD .null
+        ((doc.fieldArr? "boards").getD #[]).map (fun b => (b.fieldStr? "mission_id").getD "")
+      | _ => #[]
+    check (scopedIds == #["b2b-shared-a"]) "B2b listing: owner-scoped project slug never shares boards"
+
+    putBoard "b2b-folder" "folder text" "2026-11-09T00:00:00Z"
+    let folderBefore ← readBoard "a" "b2b-folder"
+    check ((← cascadeRenameMissionFolder store "clause-folder" "Old" "New" "2026-11-09T00:00:01Z").isOk)
+      "B2b folder: rename cascade applies"
+    check ((← readBoard "a" "b2b-folder") == folderBefore) "B2b folder: rename cascade preserves board"
+    check ((← batchSetMissionPlacementChecked store
+      #[{ missionId := "b2b-folder", expectedProject := "clause-folder", nextProject := "clause-folder-moved", nextFolder := "Moved" }]
+      "2026-11-09T00:00:02Z").isOk) "B2b folder: move applies"
+    check ((← readBoard "a" "b2b-folder") == folderBefore) "B2b folder: move preserves board"
+
+    putBoard "b2b-proj" "project text" "2026-11-10T00:00:00Z"
+    let projBefore ← readBoard "a" "b2b-proj"
+    sql store.projectsDb "UPDATE projects SET slug='clause-proj-renamed' WHERE slug='clause-proj';"
+    sql store.projectsDb "INSERT INTO project_owners(slug,owner_user_id,created_at) SELECT 'clause-proj-renamed',owner_user_id,created_at FROM project_owners WHERE slug='clause-proj';"
+    sql store.projectsDb "DELETE FROM project_owners WHERE slug='clause-proj';"
+    sql store.missionsDb "UPDATE missions SET project='clause-proj-renamed' WHERE project='clause-proj';"
+    check ((← readBoard "a" "b2b-proj") == projBefore) "B2b project: re-slug preserves board"
+    for status in #["archived", "active"] do
+      sql store.projectsDb "UPDATE projects SET status=?1 WHERE slug='clause-proj-renamed';" #[status]
+      check ((← readBoard "a" "b2b-proj") == projBefore) s!"B2b project: {status} preserves board"
+    match ← rest "GET" "/api/projects/clause-proj-renamed/boards" { userId := "a" } with
+    | some (200, body) => check ((body.splitOn "\"b2b-proj\"").length > 1) "B2b project: live renamed page lists boards"
+    | _ => check false "B2b project: live renamed page lists boards"
+    sql store.projectsDb "DELETE FROM projects WHERE slug='clause-proj-renamed';"
+    check ((← rest "GET" "/api/projects/clause-proj-renamed/boards" { userId := "a" }) ==
+      some (404, "{\"error\":\"project_not_found\"}")) "B2b project: deleted page is hidden"
+    check ((← readBoard "a" "b2b-proj") == projBefore)
+      "B2b event order 8: project delete then mission board read"
+
+    putBoard "b2b-mach" "machine text" "2026-11-11T00:00:00Z"
+    let machBefore ← readBoard "a" "b2b-mach"
+    discard <| updateMissionBoundManagedNode store "b2b-mach" "managed-b2b-node" "2026-11-11T00:00:01Z"
+    check ((← readBoard "a" "b2b-mach") == machBefore) "B2b machine: handoff retaining mission id preserves board"
+
+    sql store.missionsDb "DELETE FROM mission_board_migrations;"
+    sql store.projectsDb "INSERT INTO project_board(slug,text,updated_at) VALUES('clause-mig-a','migrated a','2026-11-01T00:00:00Z'),('clause-mig-b','migrated b','2026-11-01T00:00:01Z');"
+    check ((← MissionBoard.migrate store.missionsDb store.projectsDb "B2b-cardinality").isOk)
+      "B2b migration: attribution migration completes"
+    let .ok migRows ← execParamQuery store.missionsDb
+      "SELECT mission_id,updated_by_mission_id,text FROM mission_board WHERE mission_id IN ('b2b-mig1','b2b-mig2') ORDER BY mission_id;" #[]
+      | throw (IO.userError "B2b migration rows")
+    check (migRows.size == 3 && migRows[1]? == some #["b2b-mig1", "b2b-mig1", "migrated a"] &&
+      migRows[2]? == some #["b2b-mig2", "b2b-mig2", "migrated b"])
+      "B2b migration: exact controller attribution and one row per board"
+
+    sql store.missionsDb "DELETE FROM mission_board_migrations;"
+    sql store.projectsDb "INSERT INTO project_board(slug,text,updated_at) VALUES('clause-unclaimed','unclaimed text','2026-11-01T00:00:02Z');"
+    check ((← MissionBoard.migrate store.missionsDb store.projectsDb "B2b-unclaimed").isOk)
+      "B2b unclaimed: migration records without attribution"
+    check ((← boardCount "b2b-claim-controller") == 0) "B2b unclaimed: no controller gets arbitrary text"
+    let aliasBefore ← readProjectBoard store "clause-unclaimed"
+    check ((aliasBefore.fieldStr? "text") == some "unclaimed text") "B2b unclaimed: alias reads unclaimed legacy text"
+    match ← writeProjectBoard store "clause-unclaimed" "forbidden" "2026-11-01T00:00:03Z" "b2b-main" with
+    | .error "not_project_controller" => pure ()
+    | _ => check false "B2b unclaimed: alias writer refusal"
+    check ((← nominateCreatedProjectController store "clause-unclaimed" "Unclaimed" "b2b-claim-controller"
+      "2026-11-01T00:00:04Z" "a").isOk) "B2b unclaimed: nomination claims the legacy text"
+    check ((← boardField "a" "b2b-claim-controller" "text") == some "unclaimed text")
+      "B2b unclaimed: claimed text lands on controller board"
+    sql store.projectsDb "UPDATE project_board SET text='second legacy' WHERE slug='clause-unclaimed';"
+    check ((← nominateCreatedProjectController store "clause-unclaimed" "Unclaimed" "b2b-claim-controller2"
+      "2026-11-01T00:00:05Z" "a").isOk) "B2b unclaimed: second nomination completes"
+    check ((← boardCount "b2b-claim-controller2") == 0) "B2b unclaimed: claim is consumed exactly once"
+    check (((← readProjectBoard store "clause-unclaimed").fieldStr? "text") == some "")
+      "B2b unclaimed: alias now reads the nominated controller's empty board"
+
+    sql store.missionsDb "DELETE FROM mission_board_migrations;"
+    sql store.projectsDb "INSERT INTO project_board(slug,text,updated_at) VALUES('clause-ctrl','migrated controller','2026-11-01T00:00:06Z');"
+    check ((← MissionBoard.migrate store.missionsDb store.projectsDb "B2b-controller").isOk)
+      "B2b event order 6: migrated controller board completes"
+    check ((← boardField "a" "b2b-ctrl1" "text") == some "migrated controller")
+      "B2b event order 6: migrated text stays with receiver"
+    check ((← nominateCreatedProjectController store "clause-ctrl" "Controller" "b2b-ctrl2"
+      "2026-11-01T00:00:07Z" "a").isOk) "B2b event order 6: controller replacement completes"
+    check ((← boardCount "b2b-ctrl2") == 0 && (← readProjectBoard store "clause-ctrl").fieldStr? "text" == some "")
+      "B2b event order 6: replacement controller starts empty"
+
+    putBoard "b2b-fork-src" "source text" "2026-11-12T00:00:00Z"
+    let forkWrite ← writeAs { userId := "a", missionId := "b2b-fork-src" } "b2b-fork-src" "after fork" "2026-11-12T00:00:01Z" "B2b-fork-write"
+    check (forkWrite.isOk && (← boardField "a" "b2b-fork-src" "text") == some "after fork" &&
+      (← boardCount "b2b-fork-new") == 0) "B2b event order 7: source keeps text, fork starts absent"
+
+    putBoard "b2b-restart" "durable text" "2026-11-13T00:00:00Z"
+    sql store.projectsDb "INSERT INTO mcp_sessions_v1(id,owner,mission_id,project_scope,project_scoped,expires_at,revoked,subject_kind) VALUES('b2b-restart-session','a','b2b-restart','clause-restart',1,9999999999,0,'mission');"
+    let .ok moved ← batchSetMissionPlacementChecked store
+      #[{ missionId := "b2b-restart", expectedProject := "clause-restart", nextProject := "clause-restart-new", nextFolder := "" }]
+      "2026-11-13T00:00:01Z" | throw (IO.userError "B2b restart move")
+    check ((← rebindMovedMissionMcpSessionsChecked store moved.2 "2026-11-13T00:00:01Z").isOk)
+      "B2b restart: session rebind applies"
+    let .ok scopeRows ← execParamQuery store.projectsDb
+      "SELECT project_scope FROM mcp_sessions_v1 WHERE id='b2b-restart-session';" #[]
+      | throw (IO.userError "B2b restart scope")
+    let restartBeforeClose ← readBoard "a" "b2b-restart"
+    check (scopeRows[1]? == some #["clause-restart-new"] &&
+      restartBeforeClose.fieldStr? "text" == some "durable text")
+      "B2b restart: project rebinding leaves board unchanged"
+    closeCoreStore store
+    let .ok reopened ← openCoreStore path | throw (IO.userError "B2b restart reopen")
+    try
+      let .ok afterRestart ← MissionBoard.read reopened.missionsDb { userId := "a" } "b2b-restart"
+        | throw (IO.userError "B2b restart read")
+      check (afterRestart == restartBeforeClose) "B2b restart: board survives store restart"
+    finally closeCoreStore reopened
+    let .ok store2 ← openCoreStore path | throw (IO.userError "B2b continue store")
+    check ((← MissionBoard.read store2.missionsDb { userId := "a" } "b2b-main").isOk)
+      "B2b restart: reopened store remains usable"
+    let putBoard (mid text time : String) : IO Unit :=
+      sql store2.missionsDb
+        "INSERT INTO mission_board(mission_id,text,updated_at,updated_by_mission_id,text_sha256) VALUES(?1,?2,?3,?1,?4) ON CONFLICT(mission_id) DO UPDATE SET text=excluded.text,updated_at=excluded.updated_at,updated_by_mission_id=excluded.updated_by_mission_id,text_sha256=excluded.text_sha256;"
+        #[mid, text, time, MissionBoard.digest text]
+    let boardCount (mid : String) : IO Nat := do
+      let .ok rows ← execParamQuery store2.missionsDb "SELECT COUNT(*) FROM mission_board WHERE mission_id=?1;" #[mid]
+        | throw (IO.userError "B2b board count")
+      return ((rows[1]?.bind (·[0]?)).getD "0").toNat?.getD 0
+    let readBoard (uid mid : String) : IO JVal := do
+      let .ok doc ← MissionBoard.read store2.missionsDb { userId := uid } mid
+        | throw (IO.userError s!"B2b read {mid}")
+      return doc
+    let boardField (uid mid field : String) : IO (Option String) := do
+      let doc ← readBoard uid mid
+      return doc.fieldStr? field
+    let writeAs (reader : MissionBoard.Reader) (target text now key : String) (fence : Option String := none) :=
+      MissionBoard.write store2.missionsDb reader target text now fence key ("B2b:" ++ target) key "write_mission_board"
+
+    putBoard "b2b-atomic" "seed" "2026-11-14T00:00:00Z"
+    let writer ← IO.asTask (prio := .dedicated) do
+      for i in [1:12] do
+        discard <| MissionBoard.write store2.missionsDb { userId := "a", missionId := "b2b-atomic" }
+          "b2b-atomic" s!"chunk-{i}" s!"2026-11-14T00:00:{i}" none s!"B2b-atomic-{i}" "B2b:atomic" s!"atomic-{i}" "write_mission_board"
+      return ()
+    let reader1 ← IO.asTask (prio := .dedicated) do
+      let mut ok := true
+      for _ in [0:40] do
+        match ← MissionBoard.read store2.missionsDb { userId := "a" } "b2b-atomic" with
+        | .ok doc =>
+          let text := (doc.fieldStr? "text").getD ""
+          ok := ok && doc.fieldStr? "text_sha256" == some (MissionBoard.digest text)
+        | .error _ => ok := false
+      return ok
+    let reader2 ← IO.asTask (prio := .dedicated) do
+      let mut ok := true
+      for _ in [0:40] do
+        match ← MissionBoard.read store2.missionsDb { userId := "a" } "b2b-atomic" with
+        | .ok doc =>
+          let text := (doc.fieldStr? "text").getD ""
+          ok := ok && doc.fieldStr? "text_sha256" == some (MissionBoard.digest text)
+        | .error _ => ok := false
+      return ok
+    let _ := writer.get
+    let .ok reader1Ok := reader1.get | throw (IO.userError "B2b concurrent reader 1 failed")
+    let .ok reader2Ok := reader2.get | throw (IO.userError "B2b concurrent reader 2 failed")
+    check (reader1Ok && reader2Ok) "B2b concurrency: readers never see partial text or mismatched hash"
+
+    putBoard "b2b-race-fence" "base" "2026-11-15T00:00:00Z"
+    let fenceA ← IO.asTask (prio := .dedicated)
+      (writeAs { userId := "a", missionId := "b2b-race-fence" } "b2b-race-fence" "fence-a" "2026-11-15T00:00:01Z" "B2b-fence-a" (some "2026-11-15T00:00:00Z"))
+    let fenceB ← IO.asTask (prio := .dedicated)
+      (writeAs { userId := "a", missionId := "b2b-race-fence" } "b2b-race-fence" "fence-b" "2026-11-15T00:00:02Z" "B2b-fence-b" (some "2026-11-15T00:00:00Z"))
+    let succeeded (r : Except IO.Error (Except String JVal)) : Bool :=
+      match r with | .ok (.ok _) => true | _ => false
+    let ra := fenceA.get
+    let rb := fenceB.get
+    check (succeeded ra != succeeded rb) "B2b concurrency: fenced writers have exactly one winner"
+    let fenceText ← boardField "a" "b2b-race-fence" "text"
+    check (fenceText == some "fence-a" || fenceText == some "fence-b")
+      "B2b concurrency: fenced winner text is whole"
+    putBoard "b2b-race-open" "base" "2026-11-15T00:00:03Z"
+    let openA ← IO.asTask (prio := .dedicated)
+      (writeAs { userId := "a", missionId := "b2b-race-open" } "b2b-race-open" "open-a" "2026-11-15T00:00:04Z" "B2b-open-a")
+    let openB ← IO.asTask (prio := .dedicated)
+      (writeAs { userId := "a", missionId := "b2b-race-open" } "b2b-race-open" "open-b" "2026-11-15T00:00:05Z" "B2b-open-b")
+    let oa := openA.get
+    let ob := openB.get
+    check (succeeded oa && succeeded ob) "B2b concurrency: unfenced writers both commit without merge"
+    let openText ← boardField "a" "b2b-race-open" "text"
+    check (openText == some "open-a" || openText == some "open-b")
+      "B2b concurrency: later unfenced commit wins whole text"
+
+    putBoard "b2b-del-race" "before" "2026-11-15T00:00:06Z"
+    let raceWrite ← IO.asTask (prio := .dedicated)
+      (writeAs { userId := "a", missionId := "b2b-del-race" } "b2b-del-race" "after" "2026-11-15T00:00:07Z" "B2b-del-race")
+    let raceDelete ← IO.asTask (prio := .dedicated) do
+      let .ok _ ← execParamQuery store2.missionsDb "DELETE FROM missions WHERE id='b2b-del-race';" #[]
+        | throw (IO.userError "B2b delete race")
+      return ()
+    let rw := raceWrite.get
+    let _ := raceDelete.get
+    let deleteRaceValid := match rw with
+      | .ok (.ok _) => true
+      | .ok (.error e) => e == "mission_not_found"
+      | .error _ => false
+    check (deleteRaceValid && (← boardCount "b2b-del-race") == 0)
+      "B2b event order 9: delete/write race leaves no orphan board"
+
+    putBoard "b2b-truth" "transport text" "2026-11-16T00:00:00Z"
+    let truthWrite ← writeAs { userId := "a", missionId := "b2b-truth" } "b2b-truth" "transport text" "2026-11-16T00:00:01Z" "B2b-transport"
+    let truthRead ← readBoard "a" "b2b-truth"
+    let truthReceipt ← MissionBoard.actionByKey? store2.missionsDb "B2b:b2b-truth" "B2b-transport"
+    check (truthWrite.isOk && truthRead.fieldStr? "text" == some "transport text" &&
+      truthRead.fieldStr? "text_sha256" == some (MissionBoard.digest "transport text") &&
+      truthReceipt == truthWrite.toOption) "B2b transport: re-read hash and settled receipt are authoritative"
+    closeCoreStore store2
+
+    let startupRoot := path ++ "/startup-order"
+    let .ok startupSeed ← openCoreStore startupRoot | throw (IO.userError "B2b startup seed store")
+    try
+      sql startupSeed.missionsDb "INSERT INTO missions(id,owner_user_id,project,tags,title,status,updated_at) VALUES('b2b-start-a','a','clause-start-a','[]','Start A','active','2026-11-01T00:00:00Z'),('b2b-start-b','a','clause-start-b','[]','Start B','active','2026-11-01T00:00:00Z');"
+      sql startupSeed.projectsDb "INSERT INTO projects(slug,controller_mission_id) VALUES('clause-start-a','b2b-start-a'),('clause-start-b','b2b-start-b');"
+      sql startupSeed.projectsDb "INSERT INTO project_board(slug,text,updated_at) VALUES('clause-start-a','start a','2026-11-01T00:00:00Z'),('clause-start-b','start b','2026-11-01T00:00:01Z');"
+      sql startupSeed.missionsDb "DELETE FROM mission_board_migrations; DELETE FROM mission_board WHERE mission_id IN ('b2b-start-a','b2b-start-b');"
+      let marker := System.FilePath.mk startupRoot / "archive" / "project-board-legacy.done"
+      if ← marker.pathExists then IO.FS.removeFile marker
+      closeCoreStore startupSeed
+      let .ok startup ← openCoreStore startupRoot | throw (IO.userError "B2b startup reopen")
+      try
+        let .ok rows ← execParamQuery startup.missionsDb
+          "SELECT mission_id,text FROM mission_board WHERE mission_id IN ('b2b-start-a','b2b-start-b') ORDER BY mission_id;" #[]
+          | throw (IO.userError "B2b startup rows")
+        check (rows.size == 3 && rows[1]? == some #["b2b-start-a", "start a"] && rows[2]? == some #["b2b-start-b", "start b"] &&
+          (← marker.pathExists)) "B2b startup: migration completes before legacy export marker"
+      finally closeCoreStore startup
+    finally
+      try closeCoreStore startupSeed catch _ => pure ()
+
+    let orderRoot := path ++ "/startup-explicit"
+    let .ok orderStore ← openCoreStore orderRoot | throw (IO.userError "B2b explicit order store")
+    try
+      sql orderStore.missionsDb "INSERT INTO missions(id,owner_user_id,project,tags,title,status,updated_at) VALUES('b2b-order-mig','a','clause-order-mig','[]','Order mig','active','2026-11-01T00:00:00Z');"
+      sql orderStore.projectsDb "INSERT INTO projects(slug,controller_mission_id) VALUES('clause-order-mig','b2b-order-mig');"
+      sql orderStore.projectsDb "INSERT INTO project_board(slug,text,updated_at) VALUES('clause-order-mig','order mig','2026-11-01T00:00:00Z');"
+      sql orderStore.missionsDb "DELETE FROM mission_board_migrations; DELETE FROM mission_board WHERE mission_id='b2b-order-mig';"
+      let marker := System.FilePath.mk orderRoot / "archive" / "project-board-legacy.done"
+      if ← marker.pathExists then IO.FS.removeFile marker
+      check ((← exportLegacyProjectBoard orderRoot orderStore.projectsDb orderStore.missionsDb).isOk)
+        "B2b event order 10: export-then-migration export completes"
+      check ((← MissionBoard.migrate orderStore.missionsDb orderStore.projectsDb "B2b-order").isOk)
+        "B2b event order 10: export-then-migration migration completes"
+      check ((← MissionBoard.read orderStore.missionsDb { userId := "a" } "b2b-order-mig").toOption.bind (fun doc => doc.fieldStr? "text") == some "order mig" && (← marker.pathExists))
+        "B2b event order 10: export then migration preserves bytes and archive"
+      sql orderStore.missionsDb "DELETE FROM mission_board_migrations; DELETE FROM mission_board WHERE mission_id='b2b-order-mig';"
+      if ← marker.pathExists then IO.FS.removeFile marker
+      check ((← MissionBoard.migrate orderStore.missionsDb orderStore.projectsDb "B2b-order2").isOk)
+        "B2b event order 10: migration-then-export migration completes"
+      check ((← exportLegacyProjectBoard orderRoot orderStore.projectsDb orderStore.missionsDb).isOk)
+        "B2b event order 10: migration-then-export export completes"
+      check ((← MissionBoard.read orderStore.missionsDb { userId := "a" } "b2b-order-mig").toOption.bind (fun doc => doc.fieldStr? "text") == some "order mig" && (← marker.pathExists))
+        "B2b event order 10: migration then export preserves bytes and archive"
+    finally closeCoreStore orderStore
+  finally
+    try closeCoreStore store catch _ => pure ()
+
 def run (root : String) : IO Unit := do
   missionBoardFixtures root
+  missionBoardClauseFixtures root
   legacyBoardArchive root
   let path := root ++ "/tenant-isolation"
   let .ok store ← openCoreStore path | throw (IO.userError "isolation store")
@@ -299,6 +752,16 @@ def run (root : String) : IO Unit := do
         ownerKind := "user", spentCents := 0 } now | throw (IO.userError "isolation machine")
       let .ok () ← addUserSpendCents store uid (currentUtcDay now) 0 (if uid == "admin" then 73 else 2)
         | throw (IO.userError "isolation usage")
+    -- R16 MCP-14: a second, unrelated mission tree for the same user.
+    let .ok () ← upsertMission store {
+      id := "member-other", ownerUserId := "member", title := "member-other-private-marker",
+      status := "awaiting_user", backend := "codex", modelOverride := "",
+      workingDirectory := path, project := "member-project", updatedAt := "2026-11-13T10:00:00Z" }
+      | throw (IO.userError "isolation other mission")
+    let .ok _ ← provisionManagedMachine mc fleet {
+      id := "member-other-machine", sandboxName := "member-other-private-marker", ownerUserId := "member",
+      ownerKind := "user", ownerMission := "member-other", requestedByMissionId := "member-other",
+      spentCents := 0 } now | throw (IO.userError "isolation other machine")
     sql mc.db "CREATE TABLE IF NOT EXISTS managed_snapshots (id TEXT PRIMARY KEY,name TEXT NOT NULL,provider TEXT NOT NULL DEFAULT 'boat',source_machine_id TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'ready',size_gb INTEGER NOT NULL DEFAULT 20,created_at TEXT NOT NULL DEFAULT '');"
     for uid in #["admin", "member", "legacy"] do
       sql mc.db "INSERT INTO managed_snapshots(id,name,source_machine_id) VALUES(?1,?2,?3);"
@@ -320,6 +783,17 @@ def run (root : String) : IO Unit := do
       let .ok request := parseRequest wire.toUTF8 none | throw (IO.userError "isolation request")
       let .ok response ← dispatchCoreRequest app request now | throw (IO.userError "isolation dispatch")
       return (response.status, (parseBytes response.body).toOption.getD .null)
+    -- R16 HTTP-14: aggregate stats are tenant scoped and honor `since`.
+    let (memberStatsSt, memberStats) ← send "GET" "/api/stats" member
+    let (adminStatsSt, adminStats) ← send "GET" "/api/stats" admin
+    let (futureStatsSt, futureStats) ← send "GET" "/api/stats?since=2099-01-01T00:00:00Z" member
+    check (memberStatsSt == 200 && adminStatsSt == 200 &&
+      memberStats.fieldNat? "missions" == some 2 && adminStats.fieldNat? "missions" == some 1 &&
+      (memberStats.fieldOrNull "tasks").fieldNat? "total" == some 2 &&
+      (memberStats.fieldOrNull "cost").fieldStr? "provenance" == some "unknown")
+      s!"r16_http14_stats_tenant_scoped (member={memberStatsSt}/{memberStats.fieldNat? "missions"}, admin={adminStatsSt}/{adminStats.fieldNat? "missions"})"
+    check (futureStatsSt == 200 && futureStats.fieldNat? "missions" == some 0)
+      s!"r16_http14_stats_since_filter (got {futureStatsSt}/{futureStats.fieldNat? "missions"})"
     -- Per-user Library contract: real HTTP dispatch and local fixture git only.
     let previousLibraryPath ← IO.getEnv "LIBRARY_PATH"
     let ownerLibrary := path ++ "/owner-library"
@@ -583,6 +1057,22 @@ def run (root : String) : IO Unit := do
       machineResult.fieldNat? "spent_today_cents" == some 2) "MCP machine inventory and usage stay with member"
     let budget ← call member "get_budget"
     check ((budget.fieldOrNull "result").fieldNat? "spent_today_cents" == some 2) "MCP budget excludes admin spend"
+    -- R16 FLT-03: durable jobs are tenant scoped for list/get/cancel.
+    sql store.missionsDb
+      "CREATE TABLE IF NOT EXISTS remote_node_jobs (job_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL DEFAULT '', node_id TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'queued', payload_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');"
+    for (jid, mid) in #[("admin-job", "admin-mission"), ("member-job", "member-mission")] do
+      sql store.missionsDb
+        "INSERT INTO remote_node_jobs(job_id,mission_id,state,created_at,updated_at) VALUES(?1,?2,'queued','2026-11-13T10:00:00Z','2026-11-13T10:00:00Z');"
+        #[jid, mid]
+    let (memberJobsSt, memberJobs) ← send "GET" "/api/durable-jobs" member
+    let (foreignJobSt, foreignJob) ← send "GET" "/api/durable-jobs/admin-job" member
+    let (foreignCancelSt, _) ← send "POST" "/api/durable-jobs/admin-job/cancel" member
+    let (ownJobSt, ownJob) ← send "GET" "/api/durable-jobs/member-job" member
+    check (memberJobsSt == 200 && ((renderCompact memberJobs).splitOn "admin-job").length == 1 &&
+      ((renderCompact memberJobs).splitOn "member-job").length > 1 &&
+      foreignJobSt == 404 && foreignJob.fieldStr? "error" == some "durable_job_not_found" &&
+      foreignCancelSt == 404 && ownJobSt == 200 && ownJob.fieldStr? "job_id" == some "member-job")
+      s!"r16_flt03_durable_jobs_tenant_scoped (list={memberJobsSt}, foreign={foreignJobSt}, cancel={foreignCancelSt}, own={ownJobSt})"
     let projectArgs : JVal := .obj #[("project", .str "admin-project"), ("status", .str "archived")]
     for tool in #["get_project", "get_project_grant", "update_project_status"] do
       let doc ← call member tool projectArgs
@@ -606,6 +1096,23 @@ def run (root : String) : IO Unit := do
         check (doc.fieldBool? "ok" == some false &&
           (doc.fieldOrNull "error").fieldStr? "code" == some "forbidden")
           s!"scoped role cannot use owner secret broker {role}/{tool}"
+    -- R16 MCP-14/SEC-04: unrelated same-user trees do not share machines,
+    -- budgets, mission lists, or role escalation.
+    let scopedMachines ← call memberSession "list_managed_machines"
+    let (_, scopedBudget) ← send "GET" "/api/mcp/call" memberSession (.obj #[("name", .str "get_budget"),
+      ("arguments", .obj #[("mission_id", .str "member-other")])])
+    let scopedMissions ← call memberSession "list_missions"
+    let escalatedSettings ← call memberSession "update_mission_settings" (.obj #[("mission_id", .str "member-mission"),
+      ("role", .str "coordinator")])
+    check (scopedMachines.fieldBool? "ok" == some true &&
+      ((renderCompact scopedMachines).splitOn "member-other-machine").length == 1 &&
+      scopedBudget.fieldBool? "ok" != some true &&
+      scopedMissions.fieldBool? "ok" == some false &&
+      (scopedMissions.fieldOrNull "error").fieldStr? "code" == some "forbidden_tool_role" &&
+      ((renderCompact scopedMissions).splitOn "member-other").length == 1 &&
+      escalatedSettings.fieldBool? "ok" == some false &&
+      (escalatedSettings.fieldOrNull "error").fieldStr? "code" == some "forbidden_tool_role")
+      s!"r16_same_user_unrelated_tree_isolated (machines={renderCompact scopedMachines}, missions={renderCompact scopedMissions}, budget={renderCompact scopedBudget}, roles={renderCompact escalatedSettings})"
     -- Project board contract: owner nomination, controller-only mutation, shared reads.
     let emptyBoard ← call memberSession "read_project_board"
     check (emptyBoard.fieldBool? "ok" == some true &&
@@ -719,6 +1226,119 @@ def run (root : String) : IO Unit := do
     sql store.projectsDb "DELETE FROM project_owners WHERE slug IN ('member:controller-owned-by-a','other-member:controller-owned-by-a');"
     sql store.projectsDb "DELETE FROM projects WHERE slug IN ('member:controller-owned-by-a','other-member:controller-owned-by-a');"
     sql store.missionsDb "DELETE FROM users WHERE id='other-member';"
+    -- B2b route replay: MCP surfaces, family moves, archive/resume and placement revision.
+    sql store.projectsDb "INSERT INTO projects(slug,name,controller_mission_id) VALUES('admin:b2b-routes','b2b routes','b2b-route-root'),('admin:b2b-routes-event2','b2b event2',''),('admin:b2b-routes-arch','b2b archive',''),('b2b-routes-new','b2b routes new',''),('b2b-routes-event2-new','b2b event2 new','');"
+    for slug in #["admin:b2b-routes", "admin:b2b-routes-event2", "admin:b2b-routes-arch", "b2b-routes-new", "b2b-routes-event2-new"] do
+      sql store.projectsDb "INSERT INTO project_owners(slug,owner_user_id) VALUES(?1,'admin');" #[slug]
+    let addRouteMission (id title project parent : String) : IO Unit := do
+      let .ok () ← upsertMission store {
+        id := id, ownerUserId := "admin", title := title, parentMissionId := parent,
+        status := "awaiting_user", backend := "codex", modelOverride := "",
+        workingDirectory := path, project := project, updatedAt := "2026-11-13T10:00:00Z" }
+        | throw (IO.userError s!"B2b route mission {id}")
+    addRouteMission "b2b-route-root" "Route root" "admin:b2b-routes" ""
+    addRouteMission "b2b-route-child" "Route child" "admin:b2b-routes" "b2b-route-root"
+    addRouteMission "b2b-route-move2" "Route move2" "admin:b2b-routes-event2" ""
+    addRouteMission "b2b-route-arch" "Route archive" "admin:b2b-routes-arch" ""
+    let mintRouteSession (mid : String) : IO String := do
+      let (mintStatus, minted) ← send "POST" "/api/mcp/session" admin
+        (.obj #[("mission_id", .str mid), ("role", .str "executor")])
+      check (mintStatus == 200) s!"B2b route session {mid}"
+      return (minted.fieldStr? "token").getD ""
+    let routeRootToken ← mintRouteSession "b2b-route-root"
+    let routeChildToken ← mintRouteSession "b2b-route-child"
+    let routeMove2Token ← mintRouteSession "b2b-route-move2"
+    let routeArchToken ← mintRouteSession "b2b-route-arch"
+    let actionCount : IO Nat := do
+      let .ok rows ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM mission_board_actions;" #[]
+        | throw (IO.userError "B2b route action count")
+      return ((rows[1]?.bind (·[0]?)).getD "0").toNat?.getD 0
+    let beforeReads ← actionCount
+    let defaultRead ← call routeRootToken "read_mission_board"
+    let explicitRead ← call routeRootToken "read_mission_board" (.obj #[("mission_id", .str "b2b-route-root")])
+    check (defaultRead.fieldBool? "ok" == some true && explicitRead.fieldBool? "ok" == some true &&
+      (← actionCount) == beforeReads) "B2b MCP surface: default/explicit reads create no receipt"
+    let defaultWrite ← call routeRootToken "write_mission_board"
+      (.obj #[("text", .str "route root before"), ("idempotency_key", .str "b2b-route-root-default")])
+    let explicitWrite ← call routeRootToken "write_mission_board"
+      (.obj #[("mission_id", .str "b2b-route-root"), ("text", .str "route root second"), ("idempotency_key", .str "b2b-route-root-explicit")])
+    check (defaultWrite.fieldBool? "ok" == some true && explicitWrite.fieldBool? "ok" == some true &&
+      (defaultWrite.fieldOrNull "result").fieldStr? "updated_by_mission_id" == some "b2b-route-root" &&
+      (explicitWrite.fieldOrNull "result").fieldStr? "updated_by_mission_id" == some "b2b-route-root" &&
+      (← actionCount) == beforeReads + 2) "B2b MCP surface: default and explicit writes mutate and receipt"
+    discard <| call routeChildToken "write_mission_board"
+      (.obj #[("text", .str "route child before"), ("idempotency_key", .str "b2b-route-child-default")])
+    let (_, oldRouteListing) ← send "GET" "/api/projects/b2b-routes/boards" admin
+    let listingIdsHashes (doc : JVal) : Array (String × String) :=
+      ((doc.fieldArr? "boards").getD #[]).map fun b =>
+        ((b.fieldStr? "mission_id").getD "", (b.fieldStr? "text_sha256").getD "")
+    let oldRoute := listingIdsHashes oldRouteListing
+    check (oldRoute.any (·.1 == "b2b-route-root") && oldRoute.any (·.1 == "b2b-route-child"))
+      "B2b event order 1: old listing shows family boards"
+    let .ok rootRevRows ← execParamQuery store.missionsDb
+      "SELECT COALESCE(placement_revision,0) FROM missions WHERE id='b2b-route-root';" #[]
+      | throw (IO.userError "B2b route revision")
+    let rootRevBefore := ((rootRevRows[1]?.bind (·[0]?)).getD "0").toNat?.getD 0
+    let .ok childRevRows ← execParamQuery store.missionsDb
+      "SELECT COALESCE(placement_revision,0) FROM missions WHERE id='b2b-route-child';" #[]
+      | throw (IO.userError "B2b route child revision")
+    let childRevBefore := ((childRevRows[1]?.bind (·[0]?)).getD "0").toNat?.getD 0
+    let (moveStatus, moveDoc) ← send "POST" "/api/control/missions/move" admin
+      (.obj #[("mission_ids", .arr #[.str "b2b-route-root"]), ("project", .str "b2b-routes-new")])
+    check (moveStatus == 200) s!"B2b event order 1: family move route {moveStatus} {renderCompact moveDoc}"
+    let moved := moveDoc.fieldArr? "moved" |>.getD #[]
+    let movedRev (mid : String) : Option Nat :=
+      (moved.find? (fun m => m.fieldStr? "mission_id" == some mid)).bind (·.fieldNat? "placement_revision")
+    let rootMoved := movedRev "b2b-route-root"
+    let childMoved := movedRev "b2b-route-child"
+    check (rootMoved.isSome && childMoved.isSome &&
+      rootMoved.getD 0 > rootRevBefore && childMoved.getD 0 > childRevBefore)
+      "B2b event order 3: move response advances placement_revision"
+    let (_, oldAfterMove) ← send "GET" "/api/projects/b2b-routes/boards" admin
+    let (_, newAfterMove) ← send "GET" "/api/projects/b2b-routes-new/boards" admin
+    let newIds := listingIdsHashes newAfterMove
+    check (((oldAfterMove.fieldArr? "boards").getD #[]).isEmpty &&
+      newIds.any (fun (mid, hash) => mid == "b2b-route-root" && hash == MissionBoard.digest "route root second") &&
+      newIds.any (fun (mid, hash) => mid == "b2b-route-child" && hash == MissionBoard.digest "route child before"))
+      "B2b event order 1: family move leaves old listing empty and new listing byte-identical"
+    discard <| call routeRootToken "write_mission_board"
+      (.obj #[("text", .str "route after move"), ("idempotency_key", .str "b2b-route-after-move")])
+    let (_, afterMoveWrite) ← send "GET" "/api/projects/b2b-routes-new/boards" admin
+    check ((listingIdsHashes afterMoveWrite).any (fun (mid, hash) =>
+      mid == "b2b-route-root" && hash == MissionBoard.digest "route after move") &&
+      oldRoute.any (fun (mid, hash) => mid == "b2b-route-root" && hash == MissionBoard.digest "route root second"))
+      "B2b event order 3: stale pre-move listing is not authoritative after the later write"
+    let (move2Status, _) ← send "POST" "/api/control/missions/move" admin
+      (.obj #[("mission_ids", .arr #[.str "b2b-route-move2"]), ("project", .str "b2b-routes-event2-new")])
+    check (move2Status == 200) "B2b event order 2: move-before-write route succeeds"
+    discard <| call routeMove2Token "write_mission_board"
+      (.obj #[("text", .str "route moved then wrote"), ("idempotency_key", .str "b2b-route-move2-write")])
+    let (_, event2Old) ← send "GET" "/api/projects/b2b-routes-event2/boards" admin
+    let (_, event2New) ← send "GET" "/api/projects/b2b-routes-event2-new/boards" admin
+    check (((event2Old.fieldArr? "boards").getD #[]).isEmpty &&
+      (listingIdsHashes event2New).any (fun (mid, hash) =>
+        mid == "b2b-route-move2" && hash == MissionBoard.digest "route moved then wrote"))
+      "B2b event order 2: moved-then-written board appears only under new project"
+    discard <| call routeArchToken "write_mission_board"
+      (.obj #[("text", .str "before archive"), ("idempotency_key", .str "b2b-route-arch-before")])
+    let (archStatus, _) ← send "POST" "/api/control/missions/b2b-route-arch/status" admin
+      (.obj #[("status", .str "acknowledged")])
+    check (archStatus == 200) "B2b event order 4: archive route succeeds"
+    discard <| call routeArchToken "write_mission_board"
+      (.obj #[("text", .str "archived write"), ("idempotency_key", .str "b2b-route-arch-write")])
+    let (resumeStatus, _) ← send "POST" "/api/control/missions/b2b-route-arch/status" admin
+      (.obj #[("status", .str "awaiting_user")])
+    let (_, archBoard) ← send "GET" "/api/control/missions/b2b-route-arch/board" admin .null
+    check (resumeStatus == 200 && archBoard.fieldStr? "text" == some "archived write")
+      "B2b event order 4: archive/write/reopen keeps the archived text"
+    let (restPutStatus, _) ← send "PUT" "/api/control/missions/b2b-route-root/board" admin
+      (.obj #[("text", .str "rest write"), ("base_updated_at", .str "route root second")])
+    check (restPutStatus == 403) "B2b REST: user principal PUT remains refused"
+    match ← MissionBoard.write store.missionsDb { userId := "admin", missionId := "b2b-route-root" }
+        "b2b-route-root" "stale rest" "2026-11-13T10:00:09Z" (some "wrong-base") "b2b-route-stale"
+        "B2b:route" "b2b-route-stale" "write_mission_board" with
+    | .error "board_conflict" => pure ()
+    | _ => check false "B2b REST: base_updated_at fence rejects a stale write"
     -- Members can request the plan's dev-only pass for their OWN mission. It
     -- still requires a separately approved live lease and never exposes host
     -- audit or generic privilege tokens. Dashboard role labels cannot redeem it.
@@ -860,15 +1480,17 @@ def run (root : String) : IO Unit := do
     check ((hiddenBinding.field? "slug").getD .null == .null) "project session binding cannot disclose another user's project"
     let (_, ownBinding) ← send "GET" "/api/projects/by-session/admin-session" admin
     check (ownBinding.fieldStr? "slug" == some "admin-project") "owner retains project session binding"
-    for suffix in #["controller", "controller/action", "crons", "crons/defaults", "crons/admin-job", "crons/admin-job/action", "tasks", "decision", "tracks", "task-board"] do
+    for suffix in #["controller", "controller/action", "crons", "crons/defaults", "crons/admin-job", "crons/admin-job/action",
+        "track", "tracks", "tasks", "task-board", "decision", "decisions", "steers", "state", "situation"] do
       for method in #["GET", "POST", "PATCH", "DELETE"] do
         let (code, body) ← send method ("/api/projects/admin-project/" ++ suffix) member
         if method == "GET" && suffix == "controller" then
-          check (code == 200 && body == .obj #[("job", .null)]) "empty controller compatibility response"
+          check (code == 200 && body == .obj #[("job", .null)]) "B2b compatibility: empty controller response retained"
         else if method == "GET" && suffix == "crons" then
-          check (code == 200 && body == .obj #[("jobs", .arr #[])]) "empty crons compatibility response"
+          check (code == 200 && body == .obj #[("jobs", .arr #[])]) "B2b compatibility: empty crons response retained"
         else
-          check (code == 410 && body.fieldStr? "error" == some "removed") "removed routes disclose no tenant data"
+          check (code == 410 && body.fieldStr? "error" == some "removed")
+            s!"B2b compatibility: structured route {suffix} {method} retains 410"
     sql store.projectsDb "INSERT INTO mcp_actions_v1(id,scope,retry_key,tool,state,result) VALUES('retired-action','00000000-0000-4000-8000-000000000000::user:admin:plan_tasks','old-key','plan_tasks','succeeded','{\"old\":true}');"
     let retiredReplay ← call admin "plan_tasks" (.obj #[("idempotency_key", .str "old-key")])
     check ((retiredReplay.fieldOrNull "error").fieldStr? "code" == some "unknown_tool") "retired tools cannot replay an old success receipt"
@@ -1781,6 +2403,21 @@ def run (root : String) : IO Unit := do
     finally
       closeManagedComputeStore matMc
       closeCoreStore matStore
+    -- R16 FLT-16: a relay response only settles the waiter its own machine owns.
+    let hub ← OrbCore.RemoteFleetAndRelay.newRelayHub 0
+    let relayReq : OrbCore.RemoteFleetAndRelay.RelayHttpReq := {
+      id := "relay-waiter", machineId := "relay-machine-a", method := "GET", path := "/",
+      headers := #[], bodyB64 := "" }
+    let relayResp : OrbCore.RemoteFleetAndRelay.RelayHttpResp := {
+      id := "relay-waiter", status := 200, headers := #[], bodyB64 := "" }
+    OrbCore.RemoteFleetAndRelay.enqueueRelayHttpReq hub relayReq
+    OrbCore.RemoteFleetAndRelay.deliverRelayHttpResp hub "relay-machine-b" relayResp
+    let wrongOwner ← OrbCore.RemoteFleetAndRelay.takeRelayHttpResp? hub "relay-machine-a" "relay-waiter"
+    OrbCore.RemoteFleetAndRelay.deliverRelayHttpResp hub "relay-machine-a" relayResp
+    let otherReader ← OrbCore.RemoteFleetAndRelay.takeRelayHttpResp? hub "relay-machine-b" "relay-waiter"
+    let owner ← OrbCore.RemoteFleetAndRelay.takeRelayHttpResp? hub "relay-machine-a" "relay-waiter"
+    check (wrongOwner.isNone && otherReader.isNone && owner.isSome)
+      s!"r16_flt16_relay_waiter_machine_bound (wrongOwner={wrongOwner.isSome}, other={otherReader.isSome}, owner={owner.isSome})"
     -- Disabling/deleting an issuer must stop every previously minted session,
     -- including an external session with no mission id and a shared mission.
     for update in #["UPDATE users SET disabled=1 WHERE id='member';", "DELETE FROM users WHERE id='member';"] do

@@ -35,6 +35,7 @@ import OrbCore.CloudHttpAndWorker
 import OrbCore.ProviderUsageAndLogin
 import OrbCore.ResourcesAndSystem
 import OrbCore.McpGateway
+import OrbCore.Maintenance
 import OrbCore.Control
 import OrbCore.HostObservers
 import OrbCore.HostTests
