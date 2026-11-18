@@ -15,6 +15,20 @@ runner.
 -/
 namespace LeanUI.Runtime
 
+def cycleFocusRuntime (focusState : FocusState) (order : List EntityId) : FocusState :=
+  let admitted := order.filter focusState.admits
+  match admitted with
+  | [] => focusState
+  | first :: _ =>
+    match focusState.owner with
+    | none => focusState.request first
+    | some current =>
+      let rec next : List EntityId → Option EntityId
+        | [] => none
+        | [x] => if x == current then some first else none
+        | x :: y :: rest => if x == current then some y else next (y :: rest)
+      focusState.request (next admitted).getD first
+
 /-- CLI options parsed by `parseRuntimeArgs`. -/
 structure RuntimeConfig where
   headlessGolden : Option System.FilePath := none
@@ -162,7 +176,7 @@ def stepEvent (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage) (
       if state == .pressed || state == .repeated then
         -- Tab is handled here so every screen shares one focus traversal policy.
         if keysym == 0xff09 then
-          { rt with focus := LeanUI.cycleFocus rt.focus rt.focusableOrder }
+          { rt with focus := cycleFocusRuntime rt.focus rt.focusableOrder }
         else if keysym == 0xff0d || keysym == 0x20 then
           match rt.focus.owner with
           | some id =>
