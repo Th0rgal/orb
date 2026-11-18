@@ -783,6 +783,11 @@ class PlannerCoverageTest(unittest.TestCase):
                 self.assertIn("if: steps.modules.outputs.cache-hit != 'true'", body)
                 self.assertIn("run: pnpm install --frozen-lockfile", body)
 
+    def test_apt_hardening_uses_https_for_ubuntu_archives(self):
+        script = (ROOT / "scripts/ci_harden_ubuntu_apt.sh").read_text()
+        self.assertIn('replace("http://archive.ubuntu.com", "https://archive.ubuntu.com")', script)
+        self.assertIn('replace("http://security.ubuntu.com", "https://security.ubuntu.com")', script)
+
 
 if __name__ == "__main__":
     unittest.main()
