@@ -36,6 +36,12 @@ private def secretRequestIsLive (r : JVal) (nowEpochSec : UInt64) : Bool :=
     | some exp => nowEpochSec < exp
     | none => true
 
+private def secretApprovalIsLive (r : JVal) (nowEpochSec : UInt64) : Bool :=
+  (r.fieldStr? "status").getD "" == "approved" &&
+    match r.fieldUInt64? "expires_at_epoch" with
+    | some exp => nowEpochSec < exp
+    | none => true
+
 /-! ## Private JSON File Helpers under `.sandboxed-sh/` -/
 
 private def readDataJsonObj (dataRoot fileName : String) : IO JVal := do
@@ -440,8 +446,7 @@ def mcpSecretGet
       (g.fieldStr? "secret_name").getD "" == secretName)
   let approvedRequest := ((broker.fieldArr? "requests").getD #[]).any (fun r =>
     secretRequestMatches r missionId projectSlug secretName callerSubject &&
-    (r.fieldStr? "status").getD "" == "approved" &&
-    secretRequestIsLive r nowEpochSec)
+    secretApprovalIsLive r nowEpochSec)
   if !allowed && !approvedRequest then
     let reqs := (broker.fieldArr? "requests").getD #[]
     if let some existing := reqs.find? (fun r =>
