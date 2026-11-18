@@ -700,7 +700,7 @@ private def missionBoardClauseFixtures (root : String) : IO Unit := do
         "B2b event order 10: export-then-migration export completes"
       check ((← MissionBoard.migrate orderStore.missionsDb orderStore.projectsDb "B2b-order").isOk)
         "B2b event order 10: export-then-migration migration completes"
-      check ((← boardField "a" "b2b-order-mig" "text") == some "order mig" && (← marker.pathExists))
+      check ((← MissionBoard.read orderStore.missionsDb { userId := "a" } "b2b-order-mig").toOption.bind (fun doc => doc.fieldStr? "text") == some "order mig" && (← marker.pathExists))
         "B2b event order 10: export then migration preserves bytes and archive"
       sql orderStore.missionsDb "DELETE FROM mission_board_migrations; DELETE FROM mission_board WHERE mission_id='b2b-order-mig';"
       if ← marker.pathExists then IO.FS.removeFile marker
@@ -708,7 +708,7 @@ private def missionBoardClauseFixtures (root : String) : IO Unit := do
         "B2b event order 10: migration-then-export migration completes"
       check ((← exportLegacyProjectBoard orderRoot orderStore.projectsDb orderStore.missionsDb).isOk)
         "B2b event order 10: migration-then-export export completes"
-      check ((← boardField "a" "b2b-order-mig" "text") == some "order mig" && (← marker.pathExists))
+      check ((← MissionBoard.read orderStore.missionsDb { userId := "a" } "b2b-order-mig").toOption.bind (fun doc => doc.fieldStr? "text") == some "order mig" && (← marker.pathExists))
         "B2b event order 10: migration then export preserves bytes and archive"
     finally closeCoreStore orderStore
   finally
