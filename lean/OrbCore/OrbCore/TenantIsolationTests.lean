@@ -475,6 +475,8 @@ private def missionBoardClauseFixtures (root : String) : IO Unit := do
     putBoard "b2b-proj" "project text" "2026-11-10T00:00:00Z"
     let projBefore ← readBoard "a" "b2b-proj"
     sql store.projectsDb "UPDATE projects SET slug='clause-proj-renamed' WHERE slug='clause-proj';"
+    sql store.projectsDb "INSERT INTO project_owners(slug,owner_user_id,created_at) SELECT 'clause-proj-renamed',owner_user_id,created_at FROM project_owners WHERE slug='clause-proj';"
+    sql store.projectsDb "DELETE FROM project_owners WHERE slug='clause-proj';"
     sql store.missionsDb "UPDATE missions SET project='clause-proj-renamed' WHERE project='clause-proj';"
     check ((← readBoard "a" "b2b-proj") == projBefore) "B2b project: re-slug preserves board"
     for status in #["archived", "active"] do
