@@ -186,6 +186,13 @@ def blitGlyph (page : AtlasPageBuffer) (dstRect : Rect) (rg : RasterizedGlyph) :
 
 end AtlasPageBuffer
 
+structure ShapeCacheEntry where
+  fontId : Nat
+  size64 : UInt32
+  text : String
+  features : String
+  glyphs : Array ShapedGlyph
+
 /-- Supersampled round-cap/round-join SVG strokes, shared by desktop chrome icons.
 The source view box is 16px; path coordinates are tenths of a logical pixel. -/
 def rasterizeIcon (paths : List (List (Int × Int))) (size : Nat) : RasterizedGlyph := Id.run do
@@ -221,7 +228,7 @@ structure GlyphAtlasCache where
   pages : Array AtlasPageBuffer := #[]
   cache : HashCache AtlasGlyphEntry := {}
   /-- Shaping results reused across frames; glyph rasterization is cached separately below. -/
-  shapeCache : Array (Nat × UInt32 × String × String × Array ShapedGlyph) := #[]
+  shapeCache : Array ShapeCacheEntry := #[]
   hits : Nat := 0
   misses : Nat := 0
   deriving Inhabited
@@ -311,13 +318,13 @@ def shapeText (f : FontHandle) (size64 : UInt32) (text : String) (features : Str
 features, so unchanged chrome is not sent through HarfBuzz on every display tick. -/
 def shapeTextCached (ac : GlyphAtlasCache) (f : FontHandle) (size64 : UInt32) (text : String)
     (features : String := "") : IO (GlyphAtlasCache × Array ShapedGlyph) := do
-  match ac.shapeCache.find? (fun (fontId, cachedSize, cachedText, cachedFeatures) =>
-      fontId == f.fontId && cachedSize == size64 && cachedText == text && cachedFeatures == features) with
-  | some (_, _, _, cached) =>
-    return (ac, cached)
+  match ac.shapeCache.find? (fun cached =>
+      cached.fontId == f.fontId && cached.size64 == size64 && cached.text == text && cached.features == features) with
+  | some cached =>
+    return (ac, cached.glyphs)
   | none =>
     let shaped ← shapeText f size64 text features
-    let next := ac.shapeCache.push (f.fontId, size64, text, features, shaped)
+    let next := ac.shapeCache.push { fontId := f.fontId, size64, text, features, glyphs := shaped }
     let bounded := if next.size > 64 then next.extract (next.size - 64) next.size else next
     return ({ ac with shapeCache := bounded }, shaped)
 
