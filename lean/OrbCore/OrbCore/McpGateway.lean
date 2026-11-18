@@ -22,6 +22,7 @@ import OrbCore.SecretAndApproval
 import OrbCore.RemoteFleetAndRelay
 import OrbCore.RemoteDispatch
 import OrbCore.ProxyModelRouting
+import OrbCore.CloudHttpAndWorker
 import OrbCore.ProjectFilesAndController
 import OrbCore.MissionBoard
 
@@ -352,7 +353,8 @@ def dispatchMcpToolCall
     (managedProvisioningOverride? : Option (ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig) := none)
     (authenticatedUserId : String := "")
     (authenticatedAdmin : Bool := false)
-    (askSide? : Option (String → String → String → IO (Except String String)) := none) : IO String := do
+    (askSide? : Option (String → String → String → IO (Except String String)) := none)
+    (cloudHub? : Option OrbCore.CloudHttpAndWorker.CloudRuntimeHub := none) : IO String := do
   let nowIso := formatEpochIso8601Utc nowEpochSec
   let callerMid := claims.missionId
   -- `authenticatedAdmin` is Core's own verdict on the caller of a direct (not
@@ -592,7 +594,7 @@ def dispatchMcpToolCall
     callerProj := mission.project
   if (toolName == "read_project_board" || toolName == "write_project_board") && (callerMid.isEmpty || callerProj.isEmpty) then
     return mcpErr "no_project" "Mission has no project"
-  let projectTools := #["read_project_board", "write_project_board", "get_project", "update_project_status", "get_project_grant", "link_mission_to_project"]
+  let projectTools := #["read_project_board", "write_project_board", "get_project", "update_project_status", "get_project_grant", "set_project_grant", "link_mission_to_project"]
   let mut args := args
   if tenantScoped && projectTools.contains toolName then
     let raw := if toolName == "read_project_board" || toolName == "write_project_board" then callerProj
@@ -984,6 +986,10 @@ def dispatchMcpToolCall
     | .ok result => return mcpOk result
 
   | "start_mission" | "consult_model" => withReservedMcpOutcome store claims callerUserId toolName idemKeyTop nowIso do
+    match args.field? "cloud" with
+    | none | some .null => pure ()
+    | some _ =>
+      return mcpErr "unsupported" "Cloud-hosted MCP mission launches are not implemented; no mission was started. Use a native launch without `cloud` for now."
     let title := ((args.fieldStr? "title").orElse (fun _ => args.fieldStr? "summary") |>.getD "Delegated Mission").trimAscii.toString
     let isConsult := toolName == "consult_model"
     -- The published consult contract carries `question` (+ optional `files`).
@@ -1760,6 +1766,26 @@ def dispatchMcpToolCall
       | .error e => return mcpErr "project_scope_violation" e
     return mcpOk (← getProjectGrantJVal store slug slug)
 
+  | "set_project_grant" =>
+    if normalizeMcpRole claims.role != "operator" && !userIsAdmin then
+      return mcpErr "forbidden" "set_project_grant requires operator role"
+    let rawSlug := (args.fieldStr? "project").orElse (fun _ => args.fieldStr? "slug") |>.getD callerProj
+    let slug ← match checkProjectScope claims rawSlug with
+      | .ok s => pure s
+      | .error e => return mcpErr "project_scope_violation" e
+    if slug.isEmpty then return mcpErr "invalid_arguments" "missing project slug"
+    if ((args.fieldStr? "idempotency_key").getD "").trimAscii.toString.isEmpty then
+      return mcpErr "invalid_arguments" "missing idempotency_key"
+    if let some lvl := args.fieldStr? "autonomy_level" then
+      if !(["observe", "propose", "act_reversible", "act_full"].contains lvl) then
+        return mcpErr "invalid_arguments" s!"unknown autonomy_level `{lvl}`"
+    match ← execParamQuery store.projectsDb "SELECT slug FROM projects WHERE slug=?1 LIMIT 1;" #[slug] with
+    | .ok rows => unless rows.size > 1 do return mcpErr "not_found" s!"Project `{slug}` not found"
+    | .error e => return mcpErr "internal_error" e
+    match ← upsertProjectGrantJVal store slug slug args nowIso with
+    | .ok grant => return mcpOk grant
+    | .error e => return mcpErr "internal_error" e
+
   -- Workspaces & Jobs
   | "list_workspaces" =>
     let mut items : Array JVal := #[]
@@ -1794,9 +1820,7 @@ def dispatchMcpToolCall
     return mcpErr "not_found" s!"Workspace `{wid}` not found"
 
   | "start_workspace_job" | "get_workspace_job" | "cancel_workspace_job" =>
-    let jid ← match (args.fieldStr? "job_id").filter (!·.isEmpty) with | some j => pure j | none => newUuidV4
-    let stStr := if toolName == "cancel_workspace_job" then "cancelled" else "completed"
-    return mcpOk (.obj #[("job_id", .str jid), ("status", .str stStr)])
+    return mcpErr "not_implemented" s!"`{toolName}` is not implemented; use start_mission or durable jobs instead"
 
   -- Bitwarden Secret Broker, Mission Access & Privilege Broker
   | "secret_list" =>
@@ -1870,15 +1894,30 @@ def dispatchMcpToolCall
   | "execute_privileged_command" =>
     return mcpErr "privilege_requires_lease" "Use POST /api/privilege/exec with an active biometric-approved grant_id"
 
+  | "create_worktree" | "remove_worktree" | "merge_branch" | "create_workspace" | "update_workspace"
+  | "delete_workspace" | "get_backend_auth_status" | "deploy_sandboxed_sh" =>
+    return mcpErr "unsupported" s!"`{toolName}` is advertised but not implemented; no state was changed."
+
   -- Cloud Execution / Models Discovery
   | "list_cloud_models" =>
-    return mcpOk (.obj #[("models", .arr #[])])
+    return mcpErr "not_implemented" "Cloud model discovery is not implemented; no models were listed."
 
   | "list_cloud_accounts" =>
-    return mcpOk (.obj #[("accounts", .arr #[])])
+    let some hub := cloudHub?
+      | return mcpErr "cloud_unavailable" "Cloud runtime is unavailable; no accounts were listed."
+    let username := (user?.map (·.username)).getD ""
+    let bootstrapId := ((← getBootstrapAdmin? store).map (·.id)).getD ""
+    let accts ← OrbCore.CloudHttpAndWorker.buildCloudAccountsJson hub store 0 callerUserId username bootstrapId userIsAdmin legacyOwner
+    return mcpOk (.obj #[("accounts", accts)])
 
   | "get_cloud_execution" =>
-    return mcpOk (.obj #[("enabled", .bool false)])
+    let mid := (args.fieldStr? "mission_id").orElse (fun _ => args.fieldStr? "id") |>.getD callerMid
+    if mid.isEmpty then return mcpErr "invalid_arguments" "missing mission_id"
+    match ← OrbCore.CloudHttpAndWorker.loadCloudExecutionJson? store mid with
+    | none =>
+      return mcpOk (.obj #[("enabled", .bool false), ("mission_id", .str mid), ("revision", .null), ("execution", .null)])
+    | some (rev, execJv) =>
+      return mcpOk (.obj #[("enabled", .bool true), ("mission_id", .str mid), ("revision", JVal.nat rev), ("execution", execJv)])
 
   | _ =>
     return mcpErr "unknown_tool" s!"Unknown or unsupported MCP tool `{toolName}`"

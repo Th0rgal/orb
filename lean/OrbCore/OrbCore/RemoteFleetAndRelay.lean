@@ -469,8 +469,8 @@ def buildRemoteLaunchCapabilitiesJVal : IO JVal := do
   let proxyConfigured := !p1.isEmpty || !p2.isEmpty
   return .obj #[
     ("typed", .bool true),
-    ("harnesses", .arr #[.str "claudecode", .str "opencode", .str "grok", .str "codex", .str "antigravity", .str "vibe"]),
-    ("requires_proxy_harnesses", .arr #[.str "claudecode", .str "opencode", .str "codex", .str "vibe"]),
+    ("harnesses", .arr #[.str "claudecode", .str "opencode", .str "grok", .str "codex", .str "antigravity"]),
+    ("requires_proxy_harnesses", .arr #[.str "claudecode", .str "opencode", .str "codex"]),
     ("raw_command", .bool true),
     ("proxy_url_configured", .bool proxyConfigured),
     ("error_prefixes", .arr #[
@@ -1878,40 +1878,73 @@ def dispatchRemoteFleetAndRelayRoutes?
           ]))
         else return some (jsonErr 404 "durable_job_not_found")
       | .error e => return some (jsonErr 500 e)
-    else if method == "POST" && segs.length == 4 && (segs[3]? == some "cancel" || segs[3]? == some "force") then
+    else if method == "POST" && segs.length == 4 && segs[3]? == some "force" then
+      return some (jsonResp 501 (.obj #[
+        ("ok", .bool false),
+        ("error", .str "unsupported"),
+        ("message", .str "Forced durable job termination is not implemented; no job state was changed.")
+      ]))
+    else if method == "POST" && segs.length == 4 && segs[3]? == some "cancel" then
       ensureDurableJobsTable store
       let jid := segs[2]!
-      let act := segs[3]!
-      let nextState := if act == "cancel" then "cancelled" else "running"
-      if act == "cancel" then
-        let mut targetNode := ""
-        if let .ok rows ← execParamQuery store.missionsDb
-            "SELECT COALESCE(node_id,'') FROM remote_node_jobs WHERE job_id=?1 LIMIT 1;" #[jid] then
-          if rows.size > 1 then
-            targetNode := (cell rows[1]! 0).trimAscii.toString
-        if targetNode.isEmpty then
-          if let .ok pRows ← execParamQuery store.projectsDb
-              "SELECT COALESCE(node_id,'') FROM remote_jobs WHERE job_id=?1 LIMIT 1;" #[jid] then
-            if pRows.size > 1 then
-              targetNode := (cell pRows[1]! 0).trimAscii.toString
-        if !targetNode.isEmpty && targetNode != "local" && targetNode != "client" then
-          let hdrs := #[
-            ("x-sandboxed-cancel-actor", "core"),
-            ("x-sandboxed-cancel-reason", "Durable job cancelled via API")
-          ]
-          let (_, staticNodes) ← loadStaticRemoteNodes
-          if let some sn := staticNodes.find? (fun n => n.id == targetNode) then
-            if let some tok ← resolveStaticNodeToken? sn then
-              discard <| sendJsonRequest "POST" s!"{sn.baseUrl}/jobs/{jid}/cancel" (some tok) (some (.obj #[])) hdrs 10000
-          else
-            discard <| callRemoteNodeHttp hub? mc targetNode "POST" s!"/jobs/{jid}/cancel" (some (.obj #[])) hdrs 10000
-      discard <| execParamQuery store.missionsDb
-        "UPDATE remote_node_jobs SET state=?2,updated_at=?3 WHERE job_id=?1;"
-        #[jid, nextState, nowIso]
-      discard <| execParamQuery store.projectsDb
-        "UPDATE remote_jobs SET state=?2, heartbeat_at=?3, finished_at=CASE WHEN ?2 IN ('succeeded','failed','cancelled','lost') THEN COALESCE(finished_at,?3) ELSE finished_at END, updated_at=?3 WHERE job_id=?1;"
-        #[jid, nextState, nowIso]
-      return some (jsonResp 200 (.obj #[("ok", .bool true), ("job_id", .str jid), ("state", .str nextState)]))
+      let mut targetNode := ""
+      let mut found := false
+      if let .ok rows ← execParamQuery store.missionsDb
+          "SELECT COALESCE(node_id,'') FROM remote_node_jobs WHERE job_id=?1 LIMIT 1;" #[jid] then
+        if rows.size > 1 then
+          found := true
+          targetNode := (cell rows[1]! 0).trimAscii.toString
+      if !found then
+        if let .ok pRows ← execParamQuery store.projectsDb
+            "SELECT COALESCE(node_id,'') FROM remote_jobs WHERE job_id=?1 LIMIT 1;" #[jid] then
+          if pRows.size > 1 then
+            found := true
+            targetNode := (cell pRows[1]! 0).trimAscii.toString
+      if !found then
+        return some (jsonErr 404 "durable_job_not_found")
+      if targetNode.isEmpty || targetNode == "local" || targetNode == "client" then
+        discard <| execParamQuery store.missionsDb
+          "UPDATE remote_node_jobs SET state='cancelled',updated_at=?2 WHERE job_id=?1;" #[jid, nowIso]
+        discard <| execParamQuery store.projectsDb
+          "UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1;"
+          #[jid, nowIso]
+        return some (jsonResp 200 (.obj #[
+          ("ok", .bool true), ("job_id", .str jid), ("state", .str "cancelled"),
+          ("cancel_requested", .bool true), ("confirmed", .bool true)
+        ]))
+      let hdrs := #[
+        ("x-sandboxed-cancel-actor", "core"),
+        ("x-sandboxed-cancel-reason", "Durable job cancelled via API")
+      ]
+      match ← callRemoteNodeHttp hub? mc targetNode "POST" s!"/jobs/{jid}/cancel" (some (.obj #[])) hdrs 10000 with
+      | .error e =>
+        return some (jsonResp 502 (.obj #[
+          ("ok", .bool false), ("error", .str "cancel_not_confirmed"),
+          ("message", .str e), ("job_id", .str jid)
+        ]))
+      | .ok (st, txt, jv?, _, _) =>
+        if !(200 ≤ st && st < 300) then
+          return some (jsonResp 502 (.obj #[
+            ("ok", .bool false), ("error", .str "cancel_not_confirmed"),
+            ("message", .str s!"node HTTP {st}: {txt}"), ("job_id", .str jid)
+          ]))
+        let confirmed := match jv? with
+          | some j => (j.fieldBool? "cancel_requested").getD false
+          | none => false
+        if !confirmed then
+          return some (jsonResp 202 (.obj #[
+            ("ok", .bool false), ("error", .str "cancel_not_confirmed"),
+            ("cancel_requested", .bool false), ("confirmed", .bool false), ("job_id", .str jid)
+          ]))
+        discard <| execParamQuery store.missionsDb
+          "UPDATE remote_node_jobs SET state='cancelled',updated_at=?2 WHERE job_id=?1;" #[jid, nowIso]
+        discard <| execParamQuery store.projectsDb
+          "UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1;"
+          #[jid, nowIso]
+        return some (jsonResp 200 (.obj #[
+          ("ok", .bool true), ("job_id", .str jid), ("state", .str "cancelled"),
+          ("cancel_requested", .bool true), ("confirmed", .bool true)
+        ]))
 
   return none
 

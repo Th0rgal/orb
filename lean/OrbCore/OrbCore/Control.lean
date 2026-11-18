@@ -705,8 +705,10 @@ private def fallbackCatalogProviders : Array (String × String × String × Stri
     ("claude-haiku-5-5", "Claude Haiku 5.5", "Latest Haiku, fastest for quick answers")
   ]),
   ("openai", "OpenAI (Subscription)", "subscription", "ChatGPT Plus/Pro via OAuth", #[
-    ("gpt-6.1-sol", "GPT-6.1 Sol", "Newest Codex flagship (efforts low..ultra). Default."),
+    ("gpt-6.2-sol", "GPT-6.2 Sol", "Newest Codex flagship for complex reasoning and coding. Default."),
+    ("gpt-6.1-sol", "GPT-6.1 Sol", "Previous Codex flagship (efforts low..ultra)."),
     ("gpt-6.1-terra", "GPT-6.1 Terra", "GPT-6.1 model with lower cost than Sol (efforts low..ultra)."),
+    ("gpt-6.2-astra", "GPT-6.2 Astra", "OpenAI's most capable Codex model for the hardest projects (efforts low..max), 272K context."),
     ("gpt-6-astra", "GPT-6 Astra", "OpenAI's GPT-6 flagship in Codex (efforts low..ultra)."),
     ("gpt-6-sol", "GPT-6 Sol", "GPT-6 model for complex reasoning and coding (efforts low..ultra)."),
     ("gpt-6-luna", "GPT-6 Luna", "GPT-6 model optimized for speed and cost (efforts low..max)."),
@@ -2947,6 +2949,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let unitsRaw := if lease.allowedUnitsJson.startsWith "[" then lease.allowedUnitsJson else "[]"
     return .ok (mkJson 200 s!"\{\"allow_exec\":true,\"allowed\":true,\"grant_id\":{jsonEscape lease.grantId},\"scope\":{jsonEscape lease.scope},\"allowed_units\":{unitsRaw},\"require_force_cmd\":{rfStr},\"bunker_state\":{bunkerState.toNat},\"expires_at\":{lease.expiresAtEpoch},\"lease_epoch\":{liveLeaseEp}}")
 
+  -- 5b0. Retired dynamic MCP management surface: explicit unsupported, never fabricated.
+  if cleanPath == "/api/mcp" || cleanPath == "/api/tools" then
+    return .ok (mkJson 501 "{\"ok\":false,\"error\":\"unsupported\",\"message\":\"Dynamic MCP server management and configured HTTP transport are not implemented; stdio servers from SANDBOXED_MCP_STDIO_SERVERS remain available.\"}")
+
   -- 5b. Unified Control-Plane MCP Gateway (`/api/mcp/session`, `/api/mcp/external-sessions`, `/api/mcp/renew`, `/api/mcp/capabilities`, `/api/mcp/call`)
   if cleanPath.startsWith "/api/mcp/" then
     let bearerTok? := extractBearerToken? req.headers nowEpochSec
@@ -3240,7 +3246,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             let (code, body) ← launchBtwSideAgent st { asker with userId := if asker.userId.isEmpty then owner else asker.userId }
               srcMid (.obj #[("side_question", .str question)]) idem nowEpochSec
             pure (if code < 300 then .ok body else .error body))
+          st.cloudHub?
         return .ok (mkJson 200 outJson)
+
+    return .ok (mkJson 501 "{\"ok\":false,\"error\":\"unsupported\",\"message\":\"Dynamic MCP server management is not implemented; no server was added, updated, enabled, disabled, refreshed or removed.\"}")
 
   -- 5c. Managed Node Dial-Out Enrollment & Leased Relay
   if req.method == "POST" && cleanPath == "/api/managed-machines/enroll" then
@@ -3577,7 +3586,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   if cleanPath == "/api/settings/backup" || cleanPath == "/api/settings/restore" then
     if let some (cCode, cBody) := requireAdminPrincipal caller then
       return .ok (mkJson cCode cBody)
-    return .ok (mkJson 200 "{\"ok\":true}")
+    let action := if cleanPath.endsWith "/restore" then "restore" else "backup"
+    return .ok (mkJson 501 (renderCompact (.obj #[
+      ("error", .str "unsupported"),
+      ("message", .str s!"Settings {action} archives are not implemented; no files were changed.")
+    ])))
 
   -- Mission Automations (`"/api/control/missions/:id/automations"`) + SM-07 wakeup interception
   if let some params := matchRoutePattern? "/api/control/missions/:id/automations" rawTarget then
@@ -5272,7 +5285,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       "{\"id\":\"grok\",\"name\":\"Grok\",\"native_plan\":false}," ++
       "{\"id\":\"opencode\",\"name\":\"OpenCode\",\"native_plan\":false}," ++
       "{\"id\":\"antigravity\",\"name\":\"Antigravity CLI\",\"native_plan\":true}," ++
-      "{\"id\":\"vibe\",\"name\":\"Mistral Vibe\",\"native_plan\":false}" ++
+      "{\"id\":\"vibe\",\"name\":\"Mistral Vibe\",\"native_plan\":true}" ++
       "]"
     return .ok (mkJson 200 backendsJson)
 
@@ -5306,8 +5319,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       mkOpt "claude-haiku-5-5" "Claude (Subscription) — Claude Haiku 5.5" "Latest Haiku, fastest for quick answers"
     ]
     let codexModels : Array String := #[
-      mkOpt "gpt-6.1-sol" "OpenAI (Subscription) — GPT-6.1 Sol" "Newest Codex flagship (efforts low..ultra). Default.",
+      mkOpt "gpt-6.2-sol" "OpenAI (Subscription) — GPT-6.2 Sol" "Newest Codex flagship for complex reasoning and coding. Default.",
+      mkOpt "gpt-6.1-sol" "OpenAI (Subscription) — GPT-6.1 Sol" "Previous Codex flagship (efforts low..ultra).",
       mkOpt "gpt-6.1-terra" "OpenAI (Subscription) — GPT-6.1 Terra" "GPT-6.1 model with lower cost than Sol (efforts low..ultra).",
+      mkOpt "gpt-6.2-astra" "OpenAI (Subscription) — GPT-6.2 Astra" "OpenAI's most capable Codex model for the hardest projects (efforts low..max), 272K context.",
       mkOpt "gpt-6-astra" "OpenAI (Subscription) — GPT-6 Astra" "OpenAI's GPT-6 flagship in Codex (efforts low..ultra).",
       mkOpt "gpt-6-sol" "OpenAI (Subscription) — GPT-6 Sol" "GPT-6 model for complex reasoning and coding (efforts low..ultra).",
       mkOpt "gpt-6-luna" "OpenAI (Subscription) — GPT-6 Luna" "GPT-6 model optimized for speed and cost (efforts low..max).",
@@ -6805,7 +6820,20 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       else return .ok (mkJson 404 "{\"error\":\"not_found\"}")
 
   if req.method == "GET" && cleanPath == "/api/capabilities" then
-    return .ok (mkJson 200 "{\"mission_moves\":true,\"project_folders\":true,\"mcp_gateway\":true,\"managed_relay\":true}")
+    let cap (available : Bool) (detail remedy : String) : JVal :=
+      let base : Array (String × JVal) := #[("available", .bool available), ("detail", .str detail)]
+      if remedy.isEmpty then .obj base else .obj (base.push ("remedy", .str remedy))
+    let ghConfigured := !st.cfg.githubClientId.isEmpty
+    let ghDetail :=
+      if ghConfigured then "GitHub OAuth is configured."
+      else "GitHub OAuth is not configured."
+    let ghRemedy := if ghConfigured then "" else "Configure a GitHub OAuth client or connect GitHub."
+    let caps := JVal.obj #[
+      ("mission_dispatch", cap true "Mission dispatch is available on this Core." ""),
+      ("github_push", cap ghConfigured ghDetail ghRemedy),
+      ("dashboard_github_login", cap ghConfigured ghDetail ghRemedy)
+    ]
+    return .ok (mkJson 200 (renderCompact (.obj #[("capabilities", caps)])))
 
   if req.method == "GET" && cleanPath == "/api/stats" then
     let mCnt ← match ← execParamQuery st.store.missionsDb "SELECT COUNT(*) FROM missions;" #[] with

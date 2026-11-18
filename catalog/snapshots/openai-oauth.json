@@ -7,6 +7,11 @@
   "completeness": "partial",
   "models": [
     {
+      "id": "gpt-6.2-sol",
+      "name": "GPT-6.2 Sol",
+      "description": "Newest Codex flagship for complex reasoning and coding. Default."
+    },
+    {
       "id": "gpt-6.1-sol",
       "name": "GPT-6.1 Sol",
       "description": "Newest Codex flagship (efforts low..ultra). Default. Fast tier: 2x speed, increased usage."
@@ -15,6 +20,11 @@
       "id": "gpt-6.1-terra",
       "name": "GPT-6.1 Terra",
       "description": "GPT-6.1 model with lower cost than Sol (efforts low..ultra). Fast tier: 1.5x speed. Cyber: Standard only."
+    },
+    {
+      "id": "gpt-6.2-astra",
+      "name": "GPT-6.2 Astra",
+      "description": "OpenAI's most capable Codex model for the hardest projects (efforts low..max), 272K context."
     },
     {
       "id": "gpt-6-astra",

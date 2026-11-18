@@ -15,7 +15,7 @@ open OrbBin.PosixExt
 
 def nilRevision : String := "00000000-0000-0000-0000-000000000000"
 
-def defaultCodexModel : String := "gpt-6.1-sol"
+def defaultCodexModel : String := "gpt-6.2-sol"
 
 def nativeGoalExplicitCyberRefusal : String :=
   "unsupported_access_program: native goal continuations cannot confirm a per-turn cyber selection. Choose Automatic explicitly for this goal."

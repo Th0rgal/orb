@@ -299,10 +299,32 @@ private def toolStopSession (args : JVal) : IO (Except String String) := do
   let killedJson := renderCompact (.arr (killed.map JVal.int))
   return .ok s!"\{\"success\": true, \"display\": {escapeJsonString displayId}, \"killed_pids\": {killedJson}}"
 
+private def parseWaitMillis (v : JVal) : Option Nat :=
+  match v with
+  | .num raw =>
+    let s := raw.trimAscii.toString
+    if s.isEmpty || s.startsWith "-" then none
+    else
+      let parts := s.splitOn "."
+      match parts with
+      | [whole] => (if whole.isEmpty then some 0 else String.toNat? whole) |>.map (· * 1000)
+      | [whole, frac] =>
+        let w? := if whole.isEmpty then some 0 else String.toNat? whole
+        let fText := ((frac ++ "000").take 3).toString
+        if frac.isEmpty || !frac.all (fun c => c >= '0' && c <= '9') then none
+        else
+          match w?, String.toNat? fText with
+          | some w, some f => some (w * 1000 + f)
+          | _, _ => none
+      | _ => none
+  | _ => none
+
 private def toolScreenshot (args : JVal) : IO (Except String (String × Option String)) := do
   let some displayId := args.fieldStr? "display" | return .error "Missing 'display' argument"
-  if let some waitSec := args.fieldNat? "wait_seconds" then
-    if waitSec > 0 then IO.sleep (waitSec * 1000).toUInt32
+  if let some waitVal := args.field? "wait_seconds" then
+    let some waitMs := parseWaitMillis waitVal
+      | return .error "wait_seconds must be a non-negative number of seconds (e.g. 0.5)"
+    if waitMs > 0 then IO.sleep waitMs.toUInt32
   let epoch ← nowEpoch
   let shotId ← newUuidV4
   let filename := (args.fieldStr? "filename").getD s!"screenshot_{epoch}_{shotId}.png"
@@ -423,6 +445,9 @@ private def toolI3Command (args : JVal) : IO (Except String String) := do
 
 private def toolGetText (args : JVal) : IO (Except String String) := do
   let some displayId := args.fieldStr? "display" | return .error "Missing 'display' argument"
+  let method := ((args.fieldStr? "method").getD "ocr").trimAscii.toString.toLower
+  if method != "ocr" then
+    return .error s!"unsupported desktop_get_text method: {method}; only 'ocr' is implemented"
   let wd ← getWorkingDir
   let screenshotsDir := wd / "screenshots"
   try IO.FS.createDirAll screenshotsDir catch e => return .error s!"Failed to create screenshots dir: {e}"
@@ -577,7 +602,14 @@ def toolDefinitions : Array JVal := #[
     ("description", .str "Extract visible text from the desktop using OCR (Tesseract)."),
     ("inputSchema", .obj #[
       ("type", .str "object"),
-      ("properties", .obj #[("display", mkProp "string" "The display identifier (e.g., ':99')")]),
+      ("properties", .obj #[
+        ("display", mkProp "string" "The display identifier (e.g., ':99')"),
+        ("method", .obj #[
+          ("type", .str "string"),
+          ("enum", .arr #[.str "ocr"]),
+          ("description", .str "Text extraction method; only OCR is implemented")
+        ])
+      ]),
       ("required", .arr #[.str "display"])
     ])
   ]

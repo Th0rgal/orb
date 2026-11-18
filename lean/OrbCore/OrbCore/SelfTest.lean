@@ -21,6 +21,7 @@ import OrbCore.WakeupRestartTests
 import OrbCore.TurnOutcomeTests
 import OrbCore.ManagedAccessTests
 import OrbCore.MissionSettingsTests
+import OrbCore.R17Tests
 import OrbCore.LocalOriginTests
 import OrbCore.ManagedTtlTests
 import OrbCore.ManagedHarvestTests
@@ -485,7 +486,7 @@ private def runR2bRound2Extras (store : CoreStore) (appSt : CoreAppState) (valid
   -- 6. `restoreMissionStatus` `StickyFence` on `acknowledged` & live-run protection:
   let .ok () ← upsertMission store {
     id := "m-rb-ack", title := "Archived Mission", status := "acknowledged",
-    backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
+     backend := "codex", modelOverride := "gpt-6.1-sol", modelEffort := "", workingDirectory := store.rootDir,
     updatedAt := "t-rb0", totalCostCents := 0
   } | do closeCoreStore store; return 1
   let .ok ackRb ← restoreMissionStatus store "m-rb-ack" "interrupted" "usage_limit_wait" "t-rb1"
@@ -1090,7 +1091,7 @@ private def runR3cdRound3BlockerTests
   let .ok () ← upsertMission store {
     id := "m-r3b-stop-tx", title := "Atomic Hosted Stop", status := "active",
     ownerUserId := fixtureAdminId,
-    backend := "codex", modelOverride := "", modelEffort := "", workingDirectory := store.rootDir,
+    backend := "codex", modelOverride := "gpt-6.1-sol", modelEffort := "", workingDirectory := store.rootDir,
     placementKind := "managed", nodeBootEpoch := store.bootEpoch, updatedAt := formatEpochIso8601Utc nowSec, totalCostCents := 0
   } | return (← failWith "seed m-r3b-stop-tx")
   let _ ← execParamQuery store.missionsDb
@@ -7780,6 +7781,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     OrbCore.DevOperatorTests.run tmpRoot
     OrbCore.ManagedAccessTests.run tmpRoot
     OrbCore.MissionSettingsTests.run tmpRoot
+    OrbCore.R17Tests.run tmpRoot
     OrbCore.LocalOriginTests.run s!"{tmpRoot}/local-origin"
     OrbCore.ManagedTtlTests.run tmpRoot
     OrbCore.ManagedHarvestTests.run tmpRoot
