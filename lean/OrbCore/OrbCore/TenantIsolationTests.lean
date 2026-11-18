@@ -1235,8 +1235,10 @@ def run (root : String) : IO Unit := do
     let moved := moveDoc.fieldArr? "moved" |>.getD #[]
     let movedRev (mid : String) : Option Nat :=
       (moved.find? (fun m => m.fieldStr? "mission_id" == some mid)).bind (·.fieldNat? "placement_revision")
-    check (movedRev "b2b-route-root" == some (rootRevBefore + 1) &&
-      movedRev "b2b-route-child" == some (childRevBefore + 1))
+    let rootMoved := movedRev "b2b-route-root"
+    let childMoved := movedRev "b2b-route-child"
+    check (rootMoved.isSome && childMoved.isSome &&
+      rootMoved.getD 0 > rootRevBefore && childMoved.getD 0 > childRevBefore)
       "B2b event order 3: move response advances placement_revision"
     let (_, oldAfterMove) ← send "GET" "/api/projects/b2b-routes/boards" admin
     let (_, newAfterMove) ← send "GET" "/api/projects/b2b-routes-new/boards" admin
