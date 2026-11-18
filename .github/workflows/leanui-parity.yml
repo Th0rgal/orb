@@ -1,6 +1,7 @@
 name: LeanUI parity
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - fix/leanui-pixel-parity
