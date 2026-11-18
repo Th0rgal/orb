@@ -2292,36 +2292,17 @@ def dispatchResourcesAndSystemRoute
 
     if method == "POST" && segs == ["api", "software", "updates"] then
       if !effAdmin then return some (jsonErr 403 "admin_required")
-      let .ok reqJv := OrbBin.Json.parseBytes bodyBytes | return some (jsonErr 400 "Invalid JSON")
-      let comps := ((reqJv.fieldArr? "components").getD #[]).filterMap JVal.asStr?
-      let jid ← newUuidV4
-      let nowIso := formatEpochIso8601Utc (← nowEpoch)
-      let jobJv : JVal := .obj #[
-        ("id", .str jid),
-        ("node_id", .str "local"),
-        ("node_name", .str "orb-core"),
-        ("components", .arr (comps.map JVal.str)),
-        ("force", .bool ((reqJv.fieldBool? "force").getD false)),
-        ("status", .str "succeeded"),
-        ("phase", .str "done"),
-        ("current_component", .null),
-        ("started_at", .str nowIso),
-        ("finished_at", .str nowIso),
-        ("error", .null),
-        ("results", .arr #[]),
-        ("logs", .arr #[.str "Software inventory verified."])
-      ]
-      return some (jsonResp 202 (.obj #[("job", jobJv)]))
+      return some (jsonResp 501 (.obj #[
+        ("error", .str "unsupported"),
+        ("message", .str "Software update jobs are not implemented; no update was started.")
+      ]))
 
     if method == "POST" && segs == ["api", "software", "updates", "cancel"] then
       if !effAdmin then return some (jsonErr 403 "admin_required")
-      let nowIso := formatEpochIso8601Utc (← nowEpoch)
-      return some (jsonResp 200 (.obj #[("job", .obj #[
-        ("id", .str "cancelled"), ("node_id", .str "local"), ("node_name", .str "orb-core"),
-        ("components", .arr #[]), ("force", .bool false), ("status", .str "cancelled"),
-        ("phase", .str "done"), ("started_at", .str nowIso), ("finished_at", .str nowIso),
-        ("results", .arr #[]), ("logs", .arr #[])
-      ])]))
+      return some (jsonResp 501 (.obj #[
+        ("error", .str "unsupported"),
+        ("message", .str "Software update cancellation is not implemented; no job was changed.")
+      ]))
 
   -- 5. Library (`/api/library/*` & `PUT /api/settings/library-remote`)
   if !isLegacyUnscoped && callerUserId.isEmpty &&

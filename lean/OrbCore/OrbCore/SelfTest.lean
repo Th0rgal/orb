@@ -21,6 +21,7 @@ import OrbCore.WakeupRestartTests
 import OrbCore.TurnOutcomeTests
 import OrbCore.ManagedAccessTests
 import OrbCore.MissionSettingsTests
+import OrbCore.R17Tests
 import OrbCore.LocalOriginTests
 import OrbCore.ManagedTtlTests
 import OrbCore.ManagedHarvestTests
@@ -7780,6 +7781,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     OrbCore.DevOperatorTests.run tmpRoot
     OrbCore.ManagedAccessTests.run tmpRoot
     OrbCore.MissionSettingsTests.run tmpRoot
+    OrbCore.R17Tests.run tmpRoot
     OrbCore.LocalOriginTests.run s!"{tmpRoot}/local-origin"
     OrbCore.ManagedTtlTests.run tmpRoot
     OrbCore.ManagedHarvestTests.run tmpRoot

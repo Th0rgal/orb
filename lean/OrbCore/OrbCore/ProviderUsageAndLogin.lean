@@ -3203,11 +3203,14 @@ def dispatchProviderAndAiRoute
         if !effAdmin then return some (jsonErr 403 "admin_required")
         let some hp := matchedProv?
           | return some (jsonErr 404 "Provider not found")
-        let cur ← proxyCooldownsRef.get
-        proxyCooldownsRef.set (cur.filter (fun c => c.accountId != hp.id))
-        let live ← probeProviderUsage hub hp
-        let enriched := (live.setField "reset_redeemed" (.bool true)).setField "woken_missions" (JVal.nat 0)
-        return some (jsonResp 200 enriched)
+        return some (jsonResp 501 (.obj #[
+          ("ok", .bool false),
+          ("error", .str "unsupported"),
+          ("message", .str "Vendor usage reset redemption is not implemented; no cooldown, grant, or mission state was changed."),
+          ("provider_id", .str hp.id),
+          ("reset_redeemed", .bool false),
+          ("woken_missions", JVal.nat 0)
+        ]))
 
       -- `POST /api/ai/providers/:id/antigravity/recheck`
       if method == "POST" && segs.length == 6 && segs[4]? == some "antigravity" && segs[5]? == some "recheck" then

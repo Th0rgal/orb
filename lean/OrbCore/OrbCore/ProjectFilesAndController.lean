@@ -308,20 +308,23 @@ def upsertProjectGrantJVal (store : CoreStore) (scopedSlug clientSlug : String) 
   let resumeC := (jv.fieldStr? "resume_condition").getD ""
   let matBar := (jv.fieldStr? "material_bar").getD ""
   let autoLvl := (jv.fieldStr? "autonomy_level").getD ""
+  let has : String → String := fun f => if (jv.field? f).isSome then "1" else "0"
   let sql :=
     "INSERT INTO project_grant(slug,merge_authority,budget_per_tick,parallel_missions,pause_reason,resume_condition,material_bar,autonomy_level,updated_at) " ++
     "VALUES(?1,NULLIF(?2,''),NULLIF(?3,''),CASE WHEN ?4='' THEN NULL ELSE CAST(?4 AS INTEGER) END,NULLIF(?5,''),NULLIF(?6,''),NULLIF(?7,''),NULLIF(?8,''),?9) " ++
     "ON CONFLICT(slug) DO UPDATE SET " ++
-    "merge_authority=COALESCE(excluded.merge_authority,project_grant.merge_authority)," ++
-    "budget_per_tick=COALESCE(excluded.budget_per_tick,project_grant.budget_per_tick)," ++
-    "parallel_missions=COALESCE(excluded.parallel_missions,project_grant.parallel_missions)," ++
-    "pause_reason=COALESCE(excluded.pause_reason,project_grant.pause_reason)," ++
-    "resume_condition=COALESCE(excluded.resume_condition,project_grant.resume_condition)," ++
-    "material_bar=COALESCE(excluded.material_bar,project_grant.material_bar)," ++
-    "autonomy_level=COALESCE(excluded.autonomy_level,project_grant.autonomy_level)," ++
+    "merge_authority=CASE WHEN ?10='1' THEN excluded.merge_authority ELSE project_grant.merge_authority END," ++
+    "budget_per_tick=CASE WHEN ?11='1' THEN excluded.budget_per_tick ELSE project_grant.budget_per_tick END," ++
+    "parallel_missions=CASE WHEN ?12='1' THEN excluded.parallel_missions ELSE project_grant.parallel_missions END," ++
+    "pause_reason=CASE WHEN ?13='1' THEN excluded.pause_reason ELSE project_grant.pause_reason END," ++
+    "resume_condition=CASE WHEN ?14='1' THEN excluded.resume_condition ELSE project_grant.resume_condition END," ++
+    "material_bar=CASE WHEN ?15='1' THEN excluded.material_bar ELSE project_grant.material_bar END," ++
+    "autonomy_level=CASE WHEN ?16='1' THEN excluded.autonomy_level ELSE project_grant.autonomy_level END," ++
     "updated_at=excluded.updated_at;"
   if let .error e ← execParamQuery store.projectsDb sql
-      #[scopedSlug, mergeAuth, budget, parStr, pauseR, resumeC, matBar, autoLvl, nowIso] then
+      #[scopedSlug, mergeAuth, budget, parStr, pauseR, resumeC, matBar, autoLvl, nowIso,
+        has "merge_authority", has "budget_per_tick", has "parallel_missions", has "pause_reason",
+        has "resume_condition", has "material_bar", has "autonomy_level"] then
     return .error e
   return .ok (← getProjectGrantJVal store scopedSlug clientSlug)
 

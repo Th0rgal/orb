@@ -1144,6 +1144,8 @@ def dispatchSecretAndApprovalRoutes?
         let liveRisk := (liveItem.fieldStr? "risk").getD "routine"
         if liveRisk == "critical" && !confirmCrit then
           return okJson 400 s!"\{\"error\":\"critical_confirmation_required\",\"id\":{jsonEscape bId}}"
+        if bKind == "secret" && (liveItem.fieldStr? "tier").getD "read" != "read" then
+          return okJson 409 s!"\{\"error\":\"unsupported_secret_tier\",\"id\":{jsonEscape bId},\"message\":\"Only read secret requests can be approved; write/delete/move mutations remain unsupported.\"}"
       let mut approvedCnt : Nat := 0
       for bi in batchItems do
         let bKind := (bi.fieldStr? "kind").getD ""
@@ -1287,6 +1289,8 @@ def dispatchSecretAndApprovalRoutes?
       let reqs := (broker.fieldArr? "requests").getD #[]
       let some targetReq := reqs.find? (fun r => (r.fieldStr? "id").getD "" == reqId)
         | return okJson 404 "{\"error\":\"request_not_found\"}"
+      if normalizeSecretTier ((targetReq.fieldStr? "kind").getD "read") != "read" then
+        return okJson 409 "{\"error\":\"unsupported\",\"message\":\"Only read secret requests can be approved; the intended write/delete/move effect is not supported.\"}"
       let grants := (broker.fieldArr? "grants").getD #[]
       let gid ← newUuidV4
       let newGrant := JVal.obj #[
@@ -1346,7 +1350,12 @@ def dispatchSecretAndApprovalRoutes?
     let redact (s : JVal) : JVal := ((s.removeField "value").removeField "encrypted_value").setField "has_value" (.bool true)
     if method == "GET" && cleanPath == "/api/secrets/status" then
       let hasKey := (← loadPrivateKeyBytes? workingDir dataRoot).isSome
-      return okJson 200 (renderCompact (.obj #[("initialized", .bool hasKey), ("unlocked", .bool hasKey)]))
+      return okJson 200 (renderCompact (.obj #[
+        ("initialized", .bool hasKey),
+        ("supported", .bool false),
+        ("unlocked", .bool false),
+        ("message", .str "Legacy passphrase lock/unlock is retired; use Bitwarden secrets.")
+      ]))
     if method == "GET" && cleanPath == "/api/secrets/categories" then
       return okJson 200 "{\"categories\":[\"api_key\",\"oauth\",\"ssh\",\"other\"]}"
     if method == "GET" && cleanPath == "/api/secrets/registry" then
@@ -1354,8 +1363,13 @@ def dispatchSecretAndApprovalRoutes?
     if method == "GET" && cleanPath == "/api/secrets" then
       return okJson 200 (renderCompact (.arr (items.map redact)))
     if method == "POST" && (cleanPath == "/api/secrets/initialize" || cleanPath == "/api/secrets/unlock" || cleanPath == "/api/secrets/lock") then
-      discard <| loadOrCreatePrivateKeyBytes workingDir dataRoot
-      return okJson 200 "{\"ok\":true,\"unlocked\":true}"
+      let action := cleanPath.drop 13 |>.toString
+      return okJson 501 (renderCompact (.obj #[
+        ("ok", .bool false),
+        ("error", .str "unsupported"),
+        ("action", .str action),
+        ("message", .str "Legacy passphrase lock/unlock is retired; use Bitwarden secrets.")
+      ]))
 
   -- 4. `/api/mission-access*`
   if cleanPath == "/api/mission-access" || cleanPath.startsWith "/api/mission-access/" then
