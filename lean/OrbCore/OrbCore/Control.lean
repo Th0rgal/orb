@@ -3245,8 +3245,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       | return .ok (mkJson 401 "{\"error\":\"unauthorized_mcp\"}")
 
     if req.method == "GET" && cleanPath.startsWith "/api/mcp/requests/secret/" && cleanPath.endsWith "/wait" then
-      let prefix := "/api/mcp/requests/secret/"
-      let rawId := (cleanPath.drop prefix.length).dropEnd "/wait".length |>.toString
+      let routePrefix := "/api/mcp/requests/secret/"
+      let rawId := (cleanPath.drop routePrefix.length).dropEnd "/wait".length |>.toString
       let some reqId := parseUuidCanonical? rawId
         | return .ok (mkJson 400 "{\"error\":\"invalid_secret_request_id\"}")
       let timeoutSecs := min 25 ((req.query? "timeout_secs").bind String.toNat?).getD 20
