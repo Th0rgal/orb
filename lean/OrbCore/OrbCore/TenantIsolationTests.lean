@@ -337,6 +337,7 @@ private def missionBoardClauseFixtures (root : String) : IO Unit := do
     addMission "b2b-race-fence" "a" "clause-race" "Race fence"
     addMission "b2b-race-open" "a" "clause-race" "Race open"
     addMission "b2b-del-race" "a" "clause-race" "Race delete"
+    addMission "b2b-truth" "a" "clause-truth" "Truth"
     addMission "b2b-alias" "a" "clause-alias" "Alias"
     addMission "b2b-shared-a" "a" "a:shared-slug" "Shared A"
     addMission "b2b-shared-b" "b" "b:shared-slug" "Shared B"
