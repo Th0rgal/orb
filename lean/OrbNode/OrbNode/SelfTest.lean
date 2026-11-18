@@ -1762,6 +1762,191 @@ private def runManagedSandboxMemberExecTests
     cleanupRecPrivd
     throw e
 
+private def setTestMtime (path stamp : String) : IO Unit := do
+  let out ← IO.Process.output { cmd := "touch", args := #["-d", stamp, path] }
+  if out.exitCode != 0 then
+    throw (IO.userError s!"touch -d {stamp} {path} failed: {out.stderr}")
+
+private def capacityOk (res : Except String CapacitySettings) (expected : CapacitySettings) : Bool :=
+  match res with
+  | .ok got => got == expected
+  | .error _ => false
+
+/-- O12 / OPS-01..03: one typed resolver for env-file fields, legacy overrides,
+    mtime precedence and live reload. OPS-04 is asserted by
+    `scripts/test_orb_privd_unit.py`. -/
+private def runO12CapacityConfigTests (check : String → Bool → IO Unit) (tmpRoot : String) : IO Unit := do
+  let root := s!"{tmpRoot}/o12-capacity"
+  IO.FS.createDirAll root
+  let envPath := s!"{root}/node.env"
+  let ovPath := s!"{root}/capacity_override.json"
+  let base : CapacitySettings := {
+    capacityTotal := 1
+    sideCapacity := 2
+    coordinatorCapacity := 2
+    minFreeDiskBytes := 10 * 1024 * 1024 * 1024
+  }
+  let allFields : CapacitySettings := {
+    capacityTotal := 6
+    sideCapacity := 4
+    coordinatorCapacity := 5
+    minFreeDiskBytes := 80 * 1024 * 1024 * 1024
+  }
+  check "OPS-02: env parser reads capacity, side, coordinator, and min_free_gb (quotes/last-wins)"
+    (capacityOk (capacitySettingsFromEnvContent
+      "# node\nexport SANDBOXED_NODE_CAPACITY=\"6\"\nSANDBOXED_NODE_SIDE_CAPACITY='4'\n\
+       SANDBOXED_NODE_COORDINATOR_CAPACITY=5\nSANDBOXED_NODE_MIN_FREE_GB=80\n" base) allFields)
+  check "OPS-02: malformed env capacity is rejected instead of silently clamped"
+    ((capacitySettingsFromEnvContent "SANDBOXED_NODE_CAPACITY=0\n" base).isOk == false)
+  check "OPS-02: override reads optional side/coordinator/floor fields"
+    (capacityOk (capacitySettingsFromOverrideContent
+      "{\"capacity\":6,\"side_capacity\":4,\"coordinator_capacity\":5,\"min_free_gb\":80,\"updated_at\":\"2026-01-01T00:00:00Z\"}"
+      base) allFields)
+  check "OPS-02: override absent optional fields keep the env values"
+    (capacityOk (capacitySettingsFromOverrideContent
+      "{\"capacity\":9,\"updated_at\":\"2026-01-01T00:00:00Z\"}" allFields)
+      { allFields with capacityTotal := 9 })
+
+  let t100 : IO.FS.SystemTime := { sec := 100, nsec := 0 }
+  let t200 : IO.FS.SystemTime := { sec := 200, nsec := 0 }
+  check "OPS-01: newer override wins, equal mtimes favour env, missing env allows override"
+    (capacityOverrideTakesPrecedence (some t200) (some t100) &&
+     !capacityOverrideTakesPrecedence (some t100) (some t100) &&
+     capacityOverrideTakesPrecedence (some t100) none)
+
+  IO.FS.writeFile envPath "SANDBOXED_NODE_CAPACITY=2\n"
+  setTestMtime envPath "2026-01-01T00:00:00Z"
+  IO.FS.writeFile ovPath "{\"capacity\":8,\"coordinator_capacity\":3,\"updated_at\":\"2026-01-02T00:00:00Z\"}\n"
+  setTestMtime ovPath "2026-01-02T00:00:00Z"
+  check "OPS-01: newer override survives startup and supplies coord; absent side/floor keep env values"
+    (capacityOk (← loadCapacitySettingsFromFiles base envPath root)
+      { base with capacityTotal := 8, coordinatorCapacity := 3 })
+
+  IO.FS.writeFile envPath
+    "SANDBOXED_NODE_CAPACITY=2\nSANDBOXED_NODE_SIDE_CAPACITY=4\nSANDBOXED_NODE_MIN_FREE_GB=45\n"
+  setTestMtime envPath "2026-01-03T00:00:00Z"
+  check "OPS-01/OPS-02: newer env edit beats stale override and loads side/floor at startup"
+    (capacityOk (← loadCapacitySettingsFromFiles base envPath root)
+      { base with capacityTotal := 2, sideCapacity := 4,
+                   minFreeDiskBytes := 45 * 1024 * 1024 * 1024 })
+
+  IO.FS.writeFile envPath "SANDBOXED_NODE_CAPACITY=5\n"
+  setTestMtime envPath "2026-01-04T00:00:00Z"
+  setTestMtime ovPath "2026-01-04T00:00:00Z"
+  check "OPS-01: equal env/override mtimes favour the env file"
+    (capacityOk (← loadCapacitySettingsFromFiles base envPath root)
+      { base with capacityTotal := 5 })
+
+  IO.FS.removeFile envPath
+  check "OPS-01: a fresh override still applies when the env file is missing"
+    (capacityOk (← loadCapacitySettingsFromFiles base envPath root)
+      { base with capacityTotal := 8, coordinatorCapacity := 3 })
+
+  IO.FS.writeFile envPath "SANDBOXED_NODE_CAPACITY=2\n"
+  setTestMtime envPath "2026-01-05T00:00:00Z"
+  IO.FS.writeFile ovPath "{not-json\n"
+  setTestMtime ovPath "2026-01-06T00:00:00Z"
+  check "OPS-01: a malformed newer override is rejected instead of replacing config"
+    ((← loadCapacitySettingsFromFiles base envPath root).isOk == false)
+
+  IO.FS.writeFile envPath
+    "SANDBOXED_NODE_CAPACITY=5\nSANDBOXED_NODE_SIDE_CAPACITY=4\nSANDBOXED_NODE_COORDINATOR_CAPACITY=3\nSANDBOXED_NODE_MIN_FREE_GB=45\n"
+  setTestMtime envPath "2026-01-07T00:00:00Z"
+  IO.FS.writeFile ovPath "{\"capacity\":9,\"updated_at\":\"2026-01-06T00:00:00Z\"}\n"
+  setTestMtime ovPath "2026-01-06T00:00:00Z"
+  let reloadRoot := s!"{root}/work"
+  IO.FS.createDirAll reloadRoot
+  let .ok ledger ← openLedger reloadRoot
+    | throw (IO.userError "OPS-02 reload test: openLedger failed")
+  let rt0 : NodeRuntime := {
+    cfg := {
+      nodeId := "o12-node"
+      token := "tok-o12"
+      workDir := root
+      envFile := envPath
+      capacityTotal := 1
+      sideCapacity := 2
+      coordinatorCapacity := 2
+      minFreeDiskBytes := 10 * 1024 * 1024 * 1024
+    }
+    ledger := ledger
+  }
+  let rt1 ← reloadCapacityFromFiles rt0
+  check "OPS-02: reload applies all four env fields while keeping a stale override from winning"
+    (rt1.cfg.capacityTotal == 5 && rt1.cfg.sideCapacity == 4 &&
+     rt1.cfg.coordinatorCapacity == 3 &&
+     rt1.cfg.minFreeDiskBytes == 45 * 1024 * 1024 * 1024)
+
+  IO.FS.writeFile ovPath "{\"capacity\":7,\"updated_at\":\"2026-01-08T00:00:00Z\"}\n"
+  setTestMtime ovPath "2026-01-08T00:00:00Z"
+  let rt2 ← reloadCapacityFromFiles rt1
+  check "OPS-01/OPS-02: newer override resizes capacity but absent side/floor preserve live env values"
+    (rt2.cfg.capacityTotal == 7 && rt2.cfg.sideCapacity == 4 &&
+     rt2.cfg.coordinatorCapacity == 3 &&
+     rt2.cfg.minFreeDiskBytes == 45 * 1024 * 1024 * 1024)
+
+  IO.FS.writeFile envPath "SANDBOXED_NODE_CAPACITY=bad\n"
+  setTestMtime envPath "2026-01-09T00:00:00Z"
+  let rt3 ← reloadCapacityFromFiles rt2
+  check "OPS-02/OPS-03: a malformed env edit keeps live capacity fields and shrink debt"
+    (rt3.cfg.capacityTotal == 7 && rt3.cfg.sideCapacity == 4 &&
+     rt3.cfg.coordinatorCapacity == 3 &&
+     rt3.cfg.minFreeDiskBytes == 45 * 1024 * 1024 * 1024 &&
+     rt3.shrinkDebt == rt2.shrinkDebt)
+
+  IO.FS.writeFile envPath "SANDBOXED_NODE_CAPACITY=4\n"
+  setTestMtime envPath "2026-01-10T00:00:00Z"
+  let rt4 ← reloadCapacityFromFiles rt3
+  check "OPS-03: the same reload owner applied by SIGHUP sees an env change immediately"
+    (rt4.cfg.capacityTotal == 4 && rt4.cfg.sideCapacity == 4 &&
+     rt4.cfg.coordinatorCapacity == 3 &&
+     rt4.cfg.minFreeDiskBytes == 45 * 1024 * 1024 * 1024)
+
+  -- No signal: a live node must notice a changed env file via the bounded mtime poll.
+  let watchRoot := s!"{root}/watch"
+  IO.FS.createDirAll watchRoot
+  let watchEnv := s!"{root}/watch.env"
+  IO.FS.writeFile watchEnv "SANDBOXED_NODE_CAPACITY=3\n"
+  setTestMtime watchEnv "2026-01-01T00:00:00Z"
+  let selfExe ← IO.appPath
+  let child ← IO.Process.spawn {
+    cmd := selfExe.toString
+    args := #["--sandboxed-test-daemon"]
+    env := #[
+      ("LEAN_NUM_THREADS", some "1"),
+      ("SANDBOXED_NODE_BIND", some "127.0.0.1:19501"),
+      ("SANDBOXED_NODE_ID", some "o12-watch"),
+      ("SANDBOXED_NODE_TOKEN", some "tok-o12-watch"),
+      ("SANDBOXED_NODE_WORK_DIR", some watchRoot),
+      ("SANDBOXED_NODE_ENV_FILE", some watchEnv),
+      ("SANDBOXED_NODE_CAPACITY_POLL_MS", some "200"),
+      ("SANDBOXED_NODE_ALLOW_ROOT", some "1")
+    ]
+    stdin := .null
+    stdout := .null
+    stderr := .null
+  }
+  let heartbeatCapacity := fun (want : String) => do
+    let mut seen := false
+    for _ in [0:40] do
+      IO.sleep 100
+      let hb ← IO.Process.output {
+        cmd := "curl"
+        args := #["-fsS", "--max-time", "2", "-H", "Authorization: Bearer tok-o12-watch",
+                 "http://127.0.0.1:19501/heartbeat"]
+      }
+      if hb.exitCode == 0 && (hb.stdout.splitOn s!"\"capacity_total\":{want}").length > 1 then
+        seen := true
+        break
+    return seen
+  let sawInitial ← heartbeatCapacity "3"
+  IO.FS.writeFile watchEnv "SANDBOXED_NODE_CAPACITY=4\n"
+  setTestMtime watchEnv "2026-01-02T00:00:00Z"
+  let sawReload ← heartbeatCapacity "4"
+  try child.kill catch _ => pure ()
+  let _ ← child.wait.toBaseIO
+  check "OPS-03: changed env file reloads a running node without a signal" (sawInitial && sawReload)
+
 set_option maxRecDepth 2048 in
 set_option maxHeartbeats 400000 in
 def runTests : IO UInt32 := do
@@ -1819,6 +2004,7 @@ def runTests : IO UInt32 := do
   let randN ← IO.rand 100000 999999
   let tmpRoot := s!"/tmp/orb-node-selftest-{randN}-{nowEp}"
   IO.FS.createDirAll tmpRoot
+  runO12CapacityConfigTests check tmpRoot
   let .ok l0 ← openLedger tmpRoot
     | throw (IO.userError "openLedger l0 failed")
   check "jobs.db created for rolling_upgrade_nodes.py fencing"
