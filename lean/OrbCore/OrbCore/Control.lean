@@ -832,7 +832,8 @@ def parseChainTargetsJson
     (providers : Array AIProviderRecord := #[])
     (hydratedProvs : Array HydratedProvider := #[])
     (cliProxyUrl : String := "")
-    (cliProxyKey : String := "") : Array ProviderTarget := Id.run do
+    (cliProxyKey : String := "")
+    (googleMaxConcurrency? : Option UInt32 := some 10) : Array ProviderTarget := Id.run do
   match OrbBin.Json.parse rawJson with
   | .ok (.arr items) =>
     let mut out : Array ProviderTarget := #[]
@@ -901,7 +902,8 @@ def parseChainTargetsJson
             apiKey                 := cliProxyKey
             modelId                := if isAg then mdl else OrbCore.ProxyModelRouting.cliProxyModelId effProvType mdl
             accountRpmLimit?       := inlineAcctRpm?.orElse (fun _ => matchedHydrated?.bind (·.rpmLimit?))
-            accountMaxConcurrency? := inlineAcctConc?.orElse (fun _ => matchedHydrated?.bind (·.maxConcurrency?))
+            accountMaxConcurrency? := (inlineAcctConc?.orElse (fun _ => matchedHydrated?.bind (·.maxConcurrency?))).orElse
+               (fun _ => if effProvType == "google" || effProvType == "antigravity" then googleMaxConcurrency? else none)
             modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
             modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
             modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
@@ -930,7 +932,8 @@ def parseChainTargetsJson
               apiKey                 := cliProxyKey
               modelId                := if isAg then mdl else OrbCore.ProxyModelRouting.cliProxyModelId effProvType mdl
               accountRpmLimit?       := inlineAcctRpm?.orElse (fun _ => matchedProv?.bind (·.rpmLimit?))
-              accountMaxConcurrency? := inlineAcctConc?.orElse (fun _ => matchedProv?.bind (·.maxConcurrency?))
+              accountMaxConcurrency? := (inlineAcctConc?.orElse (fun _ => matchedProv?.bind (·.maxConcurrency?))).orElse
+                 (fun _ => if effProvType == "google" || effProvType == "antigravity" then googleMaxConcurrency? else none)
               modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
               modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
               modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
@@ -958,6 +961,8 @@ def loadRoutingChainsFromStore (st : CoreStore) (workingDir : String := "") : IO
   let hydratedProvs ← loadHydratedProviders st effWorkDir
   let cliKey := ((← lookupEnvWithFiles? "CLI_PROXY_API_KEY").getD "").trimAscii.toString
   let cliUrl ← resolveCliProxyBaseUrl
+  let envGoogle := (((← IO.getEnv "PROXY_GOOGLE_MAX_CONCURRENCY").getD "10").trimAscii.toString.toNat?).getD 10
+  let googleMax := min 128 (max 1 envGoogle)
   let .ok rows ← execParamQuery st.missionsDb "SELECT id,name,models_json FROM model_routing_chains ORDER BY id ASC;" #[]
     | throw (IO.userError "routing_chain_store_unavailable")
   let mut out : Array RoutingChain := #[]
@@ -966,12 +971,12 @@ def loadRoutingChainsFromStore (st : CoreStore) (workingDir : String := "") : IO
     let cid := (r[0]?).getD ""
     let nm := (r[1]?).getD cid
     let mj := (r[2]?).getD "[]"
-    out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey }
+    out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey (some googleMax.toUInt32) }
   -- Immutable defaults are a derived view, not a second mutable config store.
   -- Persisted ids (even empty/unavailable chains) always win over stock entries.
   for (id, name, entries) in OrbCore.ProxyModelRouting.stockChains do
     if !out.any (fun c => c.id == id) then
-      out := out.push { id := id, name := name, targets := parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson entries) providers hydratedProvs cliUrl cliKey }
+      out := out.push { id := id, name := name, targets := parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson entries) providers hydratedProvs cliUrl cliKey (some googleMax.toUInt32) }
   return out
 
 private def optU32Json (v? : Option UInt32) : String :=
@@ -1037,8 +1042,10 @@ private def directRoutingChain? (st : CoreAppState) (chains : Array RoutingChain
   let hydrated ← loadHydratedProviders st.store st.cfg.workingDir
   let cliKey := ((← lookupEnvWithFiles? "CLI_PROXY_API_KEY").getD "").trimAscii.toString
   let cliUrl ← resolveCliProxyBaseUrl
+  let envGoogle := (((← IO.getEnv "PROXY_GOOGLE_MAX_CONCURRENCY").getD "10").trimAscii.toString.toNat?).getD 10
+  let googleMax := min 128 (max 1 envGoogle)
   let targets := (parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson #[(provider, model)])
-    providers hydrated cliUrl cliKey).filter (fun t => !t.apiKey.isEmpty)
+    providers hydrated cliUrl cliKey (some googleMax.toUInt32)).filter (fun t => !t.apiKey.isEmpty)
   -- Explicit in-memory chain snapshots can be the configured standard accounts
   -- (including hermetic transports). Do not resurrect them over disabled store rows.
   let hasConfiguredOwner := providers.any (fun p => p.providerType == provider || p.id == provider ||
