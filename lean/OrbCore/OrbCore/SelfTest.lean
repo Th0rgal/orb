@@ -7501,18 +7501,34 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
   IO.FS.createDirAll (System.FilePath.mk s!"{seedRepo}/skill/orb-basics/tools")
   IO.FS.createDirAll (System.FilePath.mk s!"{seedRepo}/skill/proton-mail")
 
-  let shRun (cmd : String) : IO Nat := do
+  let shRun (cmd : String) (timeoutMs : Nat := 30000) : IO Nat := do
     let env ← OrbBin.PosixExt.environList
-    let sp ← OrbBin.PosixExt.spawnPgrp "/bin/sh" #["-c", cmd] env false false true
+    -- Do not pipe stdout here: a descendant that inherits the pipe can keep the
+    -- drain blocked after the shell itself has stopped making progress.
+    let sp ← OrbBin.PosixExt.spawnPgrp "/bin/sh" #["-c", cmd] env false true false
     if sp.pid < 0 then return 127
-    if sp.stdoutFd >= 0 then
-      let mut eof := false
-      while !eof do
-        let chunk ← OrbBin.PosixExt.readFdChunk sp.stdoutFd 4096
-        if chunk.isEmpty then eof := true
-      OrbBin.PosixExt.closeFdRaw sp.stdoutFd
-    let st ← OrbBin.PosixExt.waitpidBlock sp.pid
-    return st.toNat
+    let mut elapsedMs := 0
+    while elapsedMs < timeoutMs do
+      let st ← OrbBin.PosixExt.waitpidWnohang sp.pid
+      if st != 0xFFFFFFFF then return st.toNat
+      IO.sleep 10
+      elapsedMs := elapsedMs + 10
+    -- The child is a process-group leader; terminate the whole group so a
+    -- stuck git helper cannot survive the shell timeout and hold resources.
+    discard <| OrbBin.PosixExt.killSig (-sp.pid) 15
+    IO.sleep 100
+    discard <| OrbBin.PosixExt.killSig (-sp.pid) 9
+    let _ ← OrbBin.PosixExt.waitpidBlock sp.pid
+    return 124
+
+  -- Regression: a child that never exits must be bounded and reaped. This is
+  -- intentionally short so the parity suite does not hide a future hang.
+  let timeoutProbeStart ← IO.monoNanosNow
+  let timeoutProbeRc ← shRun "sleep 60" 100
+  let timeoutProbeElapsedMs := ((← IO.monoNanosNow) - timeoutProbeStart) / 1000000
+  if timeoutProbeRc != 124 || timeoutProbeElapsedMs > 2000 then
+    IO.eprintln s!"[orb-core-test] FAIL (library-parity): bounded git helper regression failed: rc={timeoutProbeRc} elapsed_ms={timeoutProbeElapsedMs}"
+    return 1
 
   IO.FS.writeFile (System.FilePath.mk s!"{seedRepo}/skill/orb-basics/SKILL.md")
     "---\nname: orb-basics\ndescription: \"Orient an Orb agent to its environment.\"\nmetadata:\n  sandboxed:\n    audience: [mission, local]\n    scope: global\n---\n\n# Orb Basics\n\nFollow Core contracts.\n"
