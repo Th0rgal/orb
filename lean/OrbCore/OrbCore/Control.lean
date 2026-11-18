@@ -3252,10 +3252,24 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let timeoutSecs := min 25 ((req.query? "timeout_secs").bind String.toNat?).getD 20
       let projectSlug := activeClaims.project
       let callerSubject := if activeClaims.isExternal then
-        requesterSubject "" activeClaims.sessionId
+        requesterSubject "" ("session:" ++ activeClaims.sessionId)
       else ""
+      let mut onManagedNode := false
+      if !activeClaims.missionId.isEmpty then
+        if let .ok mRs ← execParamQuery st.store.missionsDb
+            "SELECT placement_kind FROM missions WHERE id=?1;" #[activeClaims.missionId] then
+          if mRs.size > 1 then
+            let pk := (mRs[1]?.bind (·[0]?)).getD ""
+            if pk == "managed_vm" || pk.startsWith "managed-" then onManagedNode := true
+        if !onManagedNode then
+          if let some mst := st.managedStore? then
+            if let .ok vmRs ← execParamQuery mst.db
+                ("SELECT 1 FROM managed_machines WHERE owner_mission=?1 AND status<>'destroyed' " ++
+                 "UNION ALL SELECT 1 FROM managed_vm_claims WHERE owner_mission=?1 AND phase_code=1 LIMIT 1;")
+                #[activeClaims.missionId] then
+              if vmRs.size > 1 then onManagedNode := true
       let waited ← mcpSecretWait st.cfg.workingDir st.store.rootDir activeClaims.missionId
-        projectSlug reqId callerSubject false timeoutSecs nowEpochSec
+        projectSlug reqId callerSubject onManagedNode timeoutSecs nowEpochSec
       return .ok (mkJson 200 (renderCompact waited))
 
     if req.method == "GET" && cleanPath == "/api/mcp/capabilities" then
