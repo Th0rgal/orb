@@ -513,6 +513,8 @@ def mcpSecretWait
       return .obj #[("status", .str "pending"), ("request_id", .str requestId)]
     IO.sleep 1000
     poll (remaining - 1)
+    termination_by remaining
+    decreasing_by omega
   poll (Nat.min 25 timeoutSecs)
 
 def mcpSecretQueueAction
