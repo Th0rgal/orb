@@ -486,7 +486,8 @@ private def missionBoardClauseFixtures (root : String) : IO Unit := do
     sql store.projectsDb "DELETE FROM projects WHERE slug='clause-proj-renamed';"
     check ((← rest "GET" "/api/projects/clause-proj-renamed/boards" { userId := "a" }) ==
       some (404, "{\"error\":\"project_not_found\"}")) "B2b project: deleted page is hidden"
-    check ((← readBoard "a" "b2b-proj") == projBefore) "B2b project: delete preserves mission board"
+    check ((← readBoard "a" "b2b-proj") == projBefore)
+      "B2b event order 8: project delete then mission board read"
 
     putBoard "b2b-mach" "machine text" "2026-11-11T00:00:00Z"
     let machBefore ← readBoard "a" "b2b-mach"
@@ -627,7 +628,11 @@ private def missionBoardClauseFixtures (root : String) : IO Unit := do
       return ()
     let rw := raceWrite.get
     let _ := raceDelete.get
-    check ((← boardCount "b2b-del-race") == 0 && (rw.isOk || !rw.isOk))
+    let deleteRaceValid := match rw with
+      | .ok (.ok _) => true
+      | .ok (.error e) => e == "mission_not_found"
+      | .error _ => false
+    check (deleteRaceValid && (← boardCount "b2b-del-race") == 0)
       "B2b event order 9: delete/write race leaves no orphan board"
 
     putBoard "b2b-truth" "transport text" "2026-11-16T00:00:00Z"
