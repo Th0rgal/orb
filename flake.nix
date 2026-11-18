@@ -31,6 +31,8 @@
       orb-core = pkgs.callPackage ./nix/package.nix {inherit turbo-lean;};
       sandboxed-sh = orb-core;
       default = orb-core;
+    } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+      orb-desktop = pkgs.callPackage ./nix/desktop.nix {inherit turbo-lean;};
     });
 
     devShells = forAllSystems (pkgs: let

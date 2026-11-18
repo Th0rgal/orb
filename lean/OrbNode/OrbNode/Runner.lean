@@ -47,6 +47,7 @@ structure NodeConfig where
   coordinatorCapacity : UInt32 := 2
   maxQueued           : Nat := 4
   maxJobSecs          : UInt64 := 14400
+  capacityPollMs      : Nat := 30000
   minFreeDiskBytes    : UInt64 := 10 * 1024 * 1024 * 1024
   envAllowlist        : Array String := #[
     "LEAN_NUM_THREADS", "LAKE_JOBS", "TURBO_LEAN_MAX_MEMORY_MB", "TURBO_LEAN_NO_AUDIT_CACHE"
@@ -72,21 +73,195 @@ private def isTruthyEnv (s? : Option String) : Bool :=
     lv == "1" || lv == "true" || lv == "yes"
   | none => false
 
-private def parseEnvFileCapacity (envFile : String) : IO (Option UInt32) := do
-  let p := System.FilePath.mk envFile
-  if !(← p.pathExists) then return none
-  let .ok raw ← IO.FS.readFile p |>.toBaseIO | return none
-  for line in raw.splitOn "\n" do
-    let trimmed := line.trimAscii.toString
-    if trimmed.startsWith "SANDBOXED_NODE_CAPACITY=" ||
-       trimmed.startsWith "export SANDBOXED_NODE_CAPACITY=" then
-      let valRaw := (trimmed.splitOn "=").tail! |> String.intercalate "="
-      let unquoted := (valRaw.trimAscii.toString.dropWhile (fun c => c == '"' || c == '\'')
-        |>.dropEndWhile (fun c => c == '"' || c == '\'')).toString
-      if let some n := unquoted.toNat? then
-        if 1 ≤ n && n ≤ 256 then
-          return some n.toUInt32
-  return none
+/-- Typed capacity snapshot shared by startup, `SIGHUP`, the mtime poll and live resize. -/
+structure CapacitySettings where
+  capacityTotal       : UInt32 := 1
+  sideCapacity        : UInt32 := 2
+  coordinatorCapacity : UInt32 := 2
+  minFreeDiskBytes    : UInt64 := 10 * 1024 * 1024 * 1024
+  deriving Repr, BEq, Inhabited
+
+def capacitySettingsOfConfig (cfg : NodeConfig) : CapacitySettings := {
+  capacityTotal := cfg.capacityTotal
+  sideCapacity := cfg.sideCapacity
+  coordinatorCapacity := cfg.coordinatorCapacity
+  minFreeDiskBytes := cfg.minFreeDiskBytes
+}
+
+private def parseBoundedNat? (raw : String) (lo hi : Nat) : Option Nat :=
+  match raw.trimAscii.toString.toNat? with
+  | some n => if lo ≤ n && n ≤ hi then some n else none
+  | none => none
+
+private def parseRequiredCapacity (label raw : String) (hi : Nat) : Except String UInt32 :=
+  match parseBoundedNat? raw 1 hi with
+  | some n => .ok n.toUInt32
+  | none => .error s!"invalid {label} '{raw}' (expected 1..={hi})"
+
+private def parseRequiredMinFreeGb (raw : String) : Except String UInt64 :=
+  match raw.trimAscii.toString.toNat? with
+  | some n =>
+    let gib : Nat := 1024 * 1024 * 1024
+    let maxGib : Nat := (0xFFFFFFFFFFFFFFFF : UInt64).toNat / gib
+    .ok (if n > maxGib then 0xFFFFFFFFFFFFFFFF else n.toUInt64 * 1024 * 1024 * 1024)
+  | none => .error s!"invalid SANDBOXED_NODE_MIN_FREE_GB '{raw}' (expected a non-negative integer)"
+
+private def unquoteEnvValue (raw : String) : String :=
+  if raw.length ≥ 2 &&
+      ((raw.startsWith "\"" && raw.endsWith "\"") ||
+       (raw.startsWith "'" && raw.endsWith "'")) then
+    (raw.drop 1 |>.dropEnd 1).toString
+  else raw
+
+/-- Minimal systemd `EnvironmentFile=` parser: last assignment wins, optional
+    `export ` prefix, `#`/`;` comments, single or double quotes. -/
+private def envAssignments (content : String) : Array (String × String) := Id.run do
+  let mut out : Array (String × String) := #[]
+  for rawLine in content.splitOn "\n" do
+    let line := rawLine.trimAscii.toString
+    if line.isEmpty || line.startsWith "#" || line.startsWith ";" then
+      continue
+    let line := if line.startsWith "export " then (line.drop 7).toString else line
+    match line.splitOn "=" with
+    | keyRaw :: valueParts =>
+      let key := keyRaw.trimAscii.toString
+      if !key.isEmpty then
+        let value := unquoteEnvValue (String.intercalate "=" valueParts |>.trimAscii.toString)
+        out := out.push (key, value)
+    | [] => pure ()
+  return out
+
+/-- Parse all four resource settings from env-file content over `fallback`.
+    A missing key keeps the fallback; a present malformed value is an error so
+    reload keeps the live settings instead of silently shrinking the node. -/
+def capacitySettingsFromEnvContent (content : String) (fallback : CapacitySettings) :
+    Except String CapacitySettings := do
+  let vars := envAssignments content
+  let get (key : String) : Option String :=
+    vars.foldl (fun acc (k, v) => if k == key then some v else acc) none
+  let capacity ← match get "SANDBOXED_NODE_CAPACITY" with
+    | some raw => parseRequiredCapacity "SANDBOXED_NODE_CAPACITY" raw 256
+    | none => pure fallback.capacityTotal
+  let side ← match get "SANDBOXED_NODE_SIDE_CAPACITY" with
+    | some raw => parseRequiredCapacity "SANDBOXED_NODE_SIDE_CAPACITY" raw 16
+    | none => pure fallback.sideCapacity
+  let coordinator ← match get "SANDBOXED_NODE_COORDINATOR_CAPACITY" with
+    | some raw => parseRequiredCapacity "SANDBOXED_NODE_COORDINATOR_CAPACITY" raw 16
+    | none => pure fallback.coordinatorCapacity
+  let minFree ← match get "SANDBOXED_NODE_MIN_FREE_GB" with
+    | some raw => parseRequiredMinFreeGb raw
+    | none => pure fallback.minFreeDiskBytes
+  return {
+    capacityTotal := capacity
+    sideCapacity := side
+    coordinatorCapacity := coordinator
+    minFreeDiskBytes := minFree
+  }
+
+/-- Parse a legacy/operator `capacity_override.json` over `fallback`. Optional
+    fields keep the fallback (usually the env-file value); malformed JSON or an
+    out-of-range required `capacity` is an error and never replaces live state. -/
+def capacitySettingsFromOverrideContent (content : String) (fallback : CapacitySettings) :
+    Except String CapacitySettings := do
+  let .ok jv := OrbBin.Json.parse content
+    | throw "malformed capacity_override.json"
+  let some capacityRaw := jv.fieldNat? "capacity"
+    | throw "capacity_override.json is missing capacity"
+  if capacityRaw < 1 || capacityRaw > 256 then
+    throw "capacity_override.json capacity is outside 1..=256"
+  let side := match jv.fieldNat? "side_capacity" with
+    | some n => (max 1 (min 16 n)).toUInt32
+    | none => fallback.sideCapacity
+  let coordinator := match jv.fieldNat? "coordinator_capacity" with
+    | some n => (max 1 (min 16 n)).toUInt32
+    | none => fallback.coordinatorCapacity
+  let minFree := match jv.fieldNat? "min_free_gb" with
+    | some n =>
+      let gib : Nat := 1024 * 1024 * 1024
+      let maxGib : Nat := (0xFFFFFFFFFFFFFFFF : UInt64).toNat / gib
+      if n > maxGib then 0xFFFFFFFFFFFFFFFF else n.toUInt64 * 1024 * 1024 * 1024
+    | none => fallback.minFreeDiskBytes
+  return {
+    capacityTotal := capacityRaw.toUInt32
+    sideCapacity := side
+    coordinatorCapacity := coordinator
+    minFreeDiskBytes := minFree
+  }
+
+/-- The override wins only when it is strictly newer than the env file; equal
+    mtimes (and a missing override) favour the env file, as the Rust node did. -/
+def capacityOverrideTakesPrecedence
+    (overrideMtime? envMtime? : Option IO.FS.SystemTime) : Bool :=
+  match overrideMtime? with
+  | none => false
+  | some overrideMtime =>
+    match envMtime? with
+    | none => true
+    | some envMtime => overrideMtime > envMtime
+
+private def applyFreshCapacityOverride (current : CapacitySettings)
+    (overrideContent? : Option String) (envMtime? overrideMtime? : Option IO.FS.SystemTime) :
+    Except String CapacitySettings := do
+  if capacityOverrideTakesPrecedence overrideMtime? envMtime? then
+    match overrideContent? with
+    | some raw => capacitySettingsFromOverrideContent raw current
+    | none => pure current
+  else
+    pure current
+
+/-- Startup resolver: env content over `base`, then a strictly newer override.
+    A missing env file leaves `base` in place and still allows a fresh override. -/
+def resolveStartupCapacity (base : CapacitySettings)
+    (envContent? overrideContent? : Option String)
+    (envMtime? overrideMtime? : Option IO.FS.SystemTime) : Except String CapacitySettings := do
+  let envSettings ← match envContent? with
+    | some raw => capacitySettingsFromEnvContent raw base
+    | none => pure base
+  applyFreshCapacityOverride envSettings overrideContent? envMtime? overrideMtime?
+
+/-- Live reload resolver: an absent/unreadable env file keeps the running
+    settings; otherwise env content applies and a strictly newer override wins. -/
+def resolveReloadCapacity (live : CapacitySettings)
+    (envContent? overrideContent? : Option String)
+    (envMtime? overrideMtime? : Option IO.FS.SystemTime) : Except String CapacitySettings := do
+  match envContent? with
+  | none => pure live
+  | some raw =>
+    let envSettings ← capacitySettingsFromEnvContent raw live
+    applyFreshCapacityOverride envSettings overrideContent? envMtime? overrideMtime?
+
+private def readTextFile? (path : System.FilePath) : IO (Option String) := do
+  try
+    if ← path.pathExists then
+      match ← IO.FS.readFile path |>.toBaseIO with
+      | .ok raw => pure (some raw)
+      | .error _ => pure none
+    else pure none
+  catch _ => pure none
+
+private def fileMtime? (path : System.FilePath) : IO (Option IO.FS.SystemTime) := do
+  try
+    if ← path.pathExists then
+      pure (some (← path.metadata).modified)
+    else pure none
+  catch _ => pure none
+
+def capacityEnvMtime? (envFile : String) : IO (Option IO.FS.SystemTime) :=
+  fileMtime? (System.FilePath.mk envFile)
+
+private def overridePath (workDir : String) : System.FilePath :=
+  System.FilePath.mk workDir / "capacity_override.json"
+
+/-- Read the env file and override once and resolve the effective startup snapshot. -/
+def loadCapacitySettingsFromFiles (base : CapacitySettings) (envFile workDir : String) :
+    IO (Except String CapacitySettings) := do
+  let envPath := System.FilePath.mk envFile
+  let ovPath := overridePath workDir
+  let envContent? ← readTextFile? envPath
+  let envMtime? ← fileMtime? envPath
+  let ovContent? ← readTextFile? ovPath
+  let ovMtime? ← fileMtime? ovPath
+  return resolveStartupCapacity base envContent? ovContent? envMtime? ovMtime?
 
 def loadConfigFromEnv : IO NodeConfig := do
   let bindRaw := (← IO.getEnv "SANDBOXED_NODE_BIND").getD "127.0.0.1:3088"
@@ -115,11 +290,22 @@ def loadConfigFromEnv : IO NodeConfig := do
   let maxQueued := ((← IO.getEnv "SANDBOXED_NODE_MAX_QUEUED") >>= String.toNat?).getD (capClamped.toNat * 4)
   let maxJobSecs := ((← IO.getEnv "SANDBOXED_NODE_MAX_JOB_SECS") >>= String.toNat?).getD 14400
   let minFreeGb := ((← IO.getEnv "SANDBOXED_NODE_MIN_FREE_GB") >>= String.toNat?).getD 10
+  let capacityPollMs := ((← IO.getEnv "SANDBOXED_NODE_CAPACITY_POLL_MS") >>= String.toNat?).getD 30000
   let allowRaw := (← IO.getEnv "SANDBOXED_NODE_ENV_ALLOWLIST").getD
     "LEAN_NUM_THREADS,LAKE_JOBS,TURBO_LEAN_MAX_MEMORY_MB,TURBO_LEAN_NO_AUDIT_CACHE"
   let allowKeys := (allowRaw.splitOn ",").toArray.map (·.trimAscii.toString) |>.filter (fun s => !s.isEmpty)
   let managedAuth ← loadManagedAuthFromEnv workDir
-  let mut cfg : NodeConfig := {
+  let baseSettings : CapacitySettings := {
+    capacityTotal := capClamped
+    sideCapacity := (max 1 (min 16 sideCap)).toUInt32
+    coordinatorCapacity := (max 1 (min 16 coordCap)).toUInt32
+    minFreeDiskBytes := minFreeGb.toUInt64 * 1024 * 1024 * 1024
+  }
+  let resolvedSettings ← loadCapacitySettingsFromFiles baseSettings envFile workDir
+  let capacitySettings := match resolvedSettings with
+    | .ok settings => settings
+    | .error _ => baseSettings
+  let cfg : NodeConfig := {
     bindHost := host
     bindPort := port
     nodeId := if nodeId.isEmpty then "local-node" else nodeId
@@ -132,27 +318,16 @@ def loadConfigFromEnv : IO NodeConfig := do
     adminOnly := adminOnly
     managedSandbox := managedSandbox
     privdSocket := privdSocket
-    capacityTotal := capClamped
-    sideCapacity := (max 1 (min 16 sideCap)).toUInt32
-    coordinatorCapacity := (max 1 (min 16 coordCap)).toUInt32
+    capacityTotal := capacitySettings.capacityTotal
+    sideCapacity := capacitySettings.sideCapacity
+    coordinatorCapacity := capacitySettings.coordinatorCapacity
     maxQueued := max 1 maxQueued
     maxJobSecs := maxJobSecs.toUInt64
-    minFreeDiskBytes := minFreeGb.toUInt64 * 1024 * 1024 * 1024
+    capacityPollMs := max 100 capacityPollMs
+    minFreeDiskBytes := capacitySettings.minFreeDiskBytes
     envAllowlist := allowKeys
     managedAuth := managedAuth
   }
-  if let some envCap ← parseEnvFileCapacity envFile then
-    cfg := { cfg with capacityTotal := envCap }
-  let ovPath := System.FilePath.mk workDir / "capacity_override.json"
-  if ← ovPath.pathExists then
-    if let .ok raw ← IO.FS.readFile ovPath |>.toBaseIO then
-      if let .ok jv := OrbBin.Json.parse raw then
-        if let some c := jv.fieldNat? "capacity" then
-          if 1 ≤ c && c ≤ 256 then
-            cfg := { cfg with capacityTotal := c.toUInt32 }
-        if let some cc := jv.fieldNat? "coordinator_capacity" then
-          if 1 ≤ cc && cc ≤ 16 then
-            cfg := { cfg with coordinatorCapacity := cc.toUInt32 }
   return cfg
 
 /-! ### Bounded Log Byte-Range Slicing (`GET /jobs/:id/log?offset=N&max_bytes=M`) -/
@@ -1211,12 +1386,14 @@ def decideQueuedAdmission (rt : NodeRuntime) (payload : JVal) : Option (Bool × 
   | 257 => some (false, false, trackBg)  -- AdmitMain
   | _   => none
 
-/-- Apply operator-authorized live capacity resize via `Orb.Kernel.nodeResizeStep` + `OrbNode.Spec`. -/
-def resizeCapacity
-    (rt : NodeRuntime) (targetCap : UInt32) (targetCoord? : Option UInt32)
-    (persistOverride : Bool := true) :
+/-- Apply one complete capacity snapshot, preserving live jobs and shrink debt
+    (`Orb.Kernel.nodeResizeStep`), including side capacity and the disk floor. -/
+def applyCapacitySettings
+    (rt : NodeRuntime) (next : CapacitySettings)
+    (persistOverride : Bool := false) :
     IO (Except String NodeRuntime) := do
-  let nextCoord := targetCoord?.getD rt.cfg.coordinatorCapacity
+  let targetCap := next.capacityTotal
+  let nextCoord := next.coordinatorCapacity
   if verifyNodeCapacityDisk targetCap nextCoord 0 0 1 0 != 1 then
     return .error "capacity bounds rejected (capacity in 1..=256, coordinator_capacity in 1..=16)"
   let running := activeRegularCount rt
@@ -1227,7 +1404,12 @@ def resizeCapacity
   let nextDebt := (word >>> 32).toUInt32
   if (lo32 &&& 256) == 0 then
     return .error s!"orb_node_resize_step rejected with code {lo32}"
-  let nextCfg := { rt.cfg with capacityTotal := targetCap, coordinatorCapacity := nextCoord }
+  let nextCfg := { rt.cfg with
+    capacityTotal := targetCap
+    sideCapacity := max 1 (min 16 next.sideCapacity)
+    coordinatorCapacity := nextCoord
+    minFreeDiskBytes := next.minFreeDiskBytes
+  }
   if persistOverride then
     let nowTs ← nowRfc3339
     let ovJson := renderCompact (.obj #[
@@ -1235,27 +1417,37 @@ def resizeCapacity
       ("coordinator_capacity", JVal.nat nextCoord.toNat),
       ("updated_at", .str nowTs)
     ])
-    let ovPath := System.FilePath.mk rt.cfg.workDir / "capacity_override.json"
+    let ovPath := overridePath rt.cfg.workDir
     IO.FS.writeFile ovPath (ovJson ++ "\n")
   return .ok { rt with cfg := nextCfg, shrinkDebt := nextDebt }
 
-/-- Reload capacity from `envFile` and `capacity_override.json` (`SIGHUP` handler). -/
+/-- Apply operator-authorized live capacity resize via `Orb.Kernel.nodeResizeStep` + `OrbNode.Spec`. -/
+def resizeCapacity
+    (rt : NodeRuntime) (targetCap : UInt32) (targetCoord? : Option UInt32)
+    (persistOverride : Bool := true) :
+    IO (Except String NodeRuntime) :=
+  applyCapacitySettings rt {
+    capacitySettingsOfConfig rt.cfg with
+    capacityTotal := targetCap
+    coordinatorCapacity := targetCoord?.getD rt.cfg.coordinatorCapacity
+  } persistOverride
+
+/-- Reload capacity from `envFile` and `capacity_override.json` (`SIGHUP` handler).
+    Used unchanged by the bounded mtime poll. Invalid files keep live state. -/
 def reloadCapacityFromFiles (rt : NodeRuntime) : IO NodeRuntime := do
-  let mut targetCap := rt.cfg.capacityTotal
-  let mut targetCoord := rt.cfg.coordinatorCapacity
-  if let some envCap ← parseEnvFileCapacity rt.cfg.envFile then
-    targetCap := envCap
-  let ovPath := System.FilePath.mk rt.cfg.workDir / "capacity_override.json"
-  if ← ovPath.pathExists then
-    if let .ok raw ← IO.FS.readFile ovPath |>.toBaseIO then
-      if let .ok jv := OrbBin.Json.parse raw then
-        if let some c := jv.fieldNat? "capacity" then
-          if 1 ≤ c && c ≤ 256 then targetCap := c.toUInt32
-        if let some cc := jv.fieldNat? "coordinator_capacity" then
-          if 1 ≤ cc && cc ≤ 16 then targetCoord := cc.toUInt32
-  match ← resizeCapacity rt targetCap (some targetCoord) false with
-  | .ok rt' => return rt'
+  let envPath := System.FilePath.mk rt.cfg.envFile
+  let ovPath := overridePath rt.cfg.workDir
+  let envContent? ← readTextFile? envPath
+  let envMtime? ← fileMtime? envPath
+  let ovContent? ← readTextFile? ovPath
+  let ovMtime? ← fileMtime? ovPath
+  match resolveReloadCapacity (capacitySettingsOfConfig rt.cfg)
+      envContent? ovContent? envMtime? ovMtime? with
   | .error _ => return rt
+  | .ok next =>
+    match ← applyCapacitySettings rt next false with
+    | .ok rt' => return rt'
+    | .error _ => return rt
 
 private def detectLeanRuntimeReady (workDir : String) : IO Bool := do
   let cachedLake := System.FilePath.mk workDir / "caches" / "elan" / "bin" / "lake"

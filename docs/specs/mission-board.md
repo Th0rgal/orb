@@ -3,6 +3,9 @@
 Status: contract for roadmap node `B1` (`docs/plans/orb-roadmap.md`). `B2`
 implements storage, tools, the REST route and the migration; `B3` (desktop),
 `B4` (iOS/Android) and `B6` (skills, `docs/AGENT_CONTROL_PLANE.md`) follow.
+This document specifies the ownership boundary and replay guarantees; it does
+not transfer operator-owned project or mission lifecycle operations to a
+mission.
 
 ## Problem
 
@@ -21,6 +24,12 @@ label, its owner and its controller mission; it no longer owns prose.
 - The project board is retired. `project_board` rows are migrated (see *Migration from project boards*) and the
   table is retained unread for a later removal, exactly like the other retired
   project tables in `docs/AGENT_CONTROL_PLANE.md`.
+
+The controller mission is a project assignment, not a second owner for the
+board. Project creation, mission moves, project moves, mission archiving,
+project archiving and controller nomination/replacement remain operator-owned
+operations. They may change which missions a project page lists, but they may
+not write, copy, clear or otherwise take ownership of a mission's board.
 
 ## Storage
 
@@ -61,6 +70,14 @@ Reads:
 | `operator` / `coordinator`, confined to the same project | within that project |
 | any other mission or user | none |
 
+The owner means the mission's owning user as recorded by Core. An owner may
+read the boards of that user's missions, subject to the same tenant and
+project-scope checks as other Core reads. A mission may additionally read the
+boards of missions it started, through the recorded parent/fork lineage at any
+depth. That relation is directional: a parent does not gain permission to
+read a child merely by starting it. A project page applies these same checks to
+each listed mission rather than granting project-wide board access.
+
 Writes: only the mission itself. An operator, the project owner or the
 controller mission can read a board but cannot write it; there is no
 administrative override, because an overridden board would no longer be that
@@ -100,17 +117,23 @@ MCP (replacing the project board pair, one release of aliases in *Compatibility 
 REST:
 
 - `GET /api/control/missions/:id/board` — the same body as the read tool.
-- `PUT /api/control/missions/:id/board` — `{text, base_updated_at?}`.
-  `base_updated_at` is an optional optimistic-concurrency fence: when present
-  and different from the stored `updated_at`, the write answers `409`
-  `{"error":"board_conflict","updated_at":…}` and changes nothing. Omitting it
-  is an unconditional replace.
+- `PUT /api/control/missions/:id/board` — reserved for a mission-bound REST
+  credential. Core does not yet issue that credential, so user principals are
+  refused exactly like the other mission-board write surface: unreadable
+  missions answer `404 {"error":"mission_not_found"}` and readable missions
+  answer `403 {"error":"not_mission_writer"}`. The `{text, base_updated_at?}`
+  body and its optimistic fence remain the contract for mission-bound writers:
+  when `base_updated_at` is present and differs from the stored `updated_at`,
+  the write answers `409 {"error":"board_conflict","updated_at":…}` and changes
+  nothing. Omitting it is an unconditional replace. Until the credential exists,
+  MCP `write_mission_board` is the write surface and the storage fence is named
+  in `B2b`.
 - `GET /api/projects/:slug/boards` — the project page listing (*Project page listing*).
 
 ## Project page listing
 
-`GET /api/projects/:slug/boards` returns the boards of the missions the caller
-may read in that project:
+`GET /api/projects/:slug/boards` returns metadata for the boards of the
+missions in that project that the caller may read:
 
 ```json
 {"project":"orb","boards":[
@@ -118,27 +141,28 @@ may read in that project:
    "updated_at":"…","bytes":1284,"text_sha256":"…"}]}
 ```
 
-- Metadata only. The text is fetched per board with the mission route, so a
-  project with many missions stays one small response and one row repaint per
-  board card.
+- Metadata only, and only for missions that have a board row. The text is
+  fetched per board with the mission route, so a project with many missions
+  stays one small response and one row repaint per board card. A caller never
+  learns that an unreadable mission has a board from this listing.
 - Ordering is `updated_at` descending, then `mission_id` ascending, so equal
   timestamps never reorder between polls.
 - Archived missions are included only when `?all=true`; deleted missions and
   missions the caller cannot read are omitted entirely. The listing never
   returns a count that reveals an unreadable board.
 
-## Lifecycle
+## Lifecycle and operator-owned transitions
 
 | Event | Effect on the board |
 | --- | --- |
 | Mission moves project or folder (`POST /api/control/missions/move`, family expansion) | None. The row is keyed by `mission_id`; the text, `updated_at` and writer are untouched. The mission leaves one project listing and appears in the other with the same hash. |
 | Folder rename cascade | None, same reason. |
 | Project rename, re-slug, archive, restore, delete | None. Boards follow missions, not project rows. A `status='deleted'` project hides its page but keeps its missions and their boards. |
-| Mission archived (`Acknowledged`) | Board retained and still writable. Archiving changes presentation only, as in `docs/specs/mission-workspace-purge.md`. |
+| Mission archived (`Acknowledged`) | Board retained and still writable by the mission. Archiving changes presentation only, as in `docs/specs/mission-workspace-purge.md`; the archive operation remains operator-owned. |
 | Mission resumed | Board unchanged. Resume never re-creates, truncates or re-reads a board. |
 | `POST /api/control/missions/:id/fork` | The source keeps its board; the fork is a new mission id and starts with no board row. A fork is a new account of work, not a copy of the old one. |
 | Machine transfer / handoff that keeps the same mission id | Board unchanged. Identity is the id, not the machine, node or backend. |
-| `DELETE /api/control/missions/:id` | The board row is deleted in the same transaction as the mission row and its events. Deletion is the only path that removes a board, and it is explicit. |
+| `DELETE /api/control/missions/:id` | The board row is deleted in the same transaction as the mission row and its events. Deletion is the only path that removes a board, and it is explicit and operator-owned. |
 | Controller mission replaced (`PUT /api/projects/:slug/controller-mission`) | No board is copied or moved. The old controller keeps its board; the new one starts empty. |
 
 ## Migration from project boards
@@ -230,7 +254,18 @@ Each order is a required replay test in `B2`, asserted on stored bytes:
    board without its mission.
 10. **Legacy export and migration in either startup order.** Export then
     migration and migration then export both leave the `orb` and `evm-fast`
-    texts byte-identical and the archive complete.
+    texts byte-identical, attributed to their controller missions, and the
+    legacy archive complete. Neither marker may cause a board row to be
+    discarded or a newer mission-owned text to be overwritten.
+
+11. **Operator transition ordering.** A project create, mission move, project
+    move, mission archive, project archive, controller replacement or restart
+    may occur before, after or between a board read/write and its response.
+    The committed board remains keyed to the same `mission_id`; no transition
+    may create a second board, replace committed text with an empty response,
+    or make a stale project listing delete a board. The only removal ordering
+    is an explicit mission deletion transaction, which removes the mission and
+    its board together.
 
 ## Out of scope
 

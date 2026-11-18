@@ -28,6 +28,11 @@ DEFAULT_THRESHOLDS = {
     "proxy_5xx_count": 20, "proxy_4xx_count": 30,
     "vm_expiry_grace_seconds": 0, "long_build_minutes": 90,
 }
+CUT_RATE_WINDOW_SECONDS = 48 * 60 * 60
+CUT_RATE_JUMP_FACTOR = 2.0
+CUT_RATE_MIN_REQUESTS = 10
+CUT_STATUSES = ("stream_incomplete", "upstream_idle_timeout", "idle_timeout")
+CUT_MARKERS = ("stream_incomplete", "upstream_idle_timeout", "idle_timeout", "stream cut", "stream_cut")
 THRESHOLDS = DEFAULT_THRESHOLDS.copy()
 
 
@@ -168,6 +173,96 @@ def check_builds(problems):
         problems["build:long"] = f"a lake build has been running for {longest // 60} min"
 
 
+def _cut_rate_key(provider, model):
+    return f"{provider or 'unknown'}/{model or 'unknown'}"
+
+
+def cut_rates(previous_info=None):
+    """Return the standing 48-hour cut report from the proxy and mission ledger.
+
+    ``proxy_outcomes`` is the authoritative R27 stream-cut ledger.  A killed
+    turn is an error event naming a stream-cut reason; its provider/model is
+    the latest preceding proxy request for that mission.  Keeping that join
+    here, rather than in Core, lets the check remain useful while Core is down.
+    """
+    cutoff = datetime.datetime.fromtimestamp(
+        NOW - CUT_RATE_WINDOW_SECONDS, datetime.timezone.utc
+    ).isoformat(timespec="seconds")
+    with ro(MISSIONS_DB) as con:
+        request_rows = con.execute(
+            "SELECT COALESCE(provider,''), COALESCE(model,requested_model,''), COUNT(*) "
+            "FROM proxy_outcomes WHERE timestamp >= ? GROUP BY 1,2;", (cutoff,)
+        ).fetchall()
+        outcome_rows = con.execute(
+            "SELECT COALESCE(provider,''), COALESCE(model,requested_model,''), COUNT(*) "
+            "FROM proxy_outcomes WHERE timestamp >= ? AND status IN (?,?,?) GROUP BY 1,2;",
+            (cutoff, *CUT_STATUSES),
+        ).fetchall()
+        marker_sql = " OR ".join(
+            "lower(COALESCE(e.payload,'') || ' ' || COALESCE(e.content,'')) LIKE ?"
+            for _ in CUT_MARKERS
+        )
+        killed_rows = con.execute(
+            "SELECT COALESCE(u.provider,''), COALESCE(u.model,u.requested_model,''), "
+            "COUNT(DISTINCT e.id) "
+            "FROM mission_events e JOIN proxy_usage u ON u.id = ("
+            "  SELECT u2.id FROM proxy_usage u2 "
+            "  WHERE u2.mission_id=e.mission_id "
+            "    AND u2.timestamp <= COALESCE(NULLIF(e.created_at,''),NULLIF(e.timestamp,''),'9999') "
+            "  ORDER BY u2.timestamp DESC,u2.id DESC LIMIT 1"
+            ") WHERE COALESCE(NULLIF(e.created_at,''),NULLIF(e.timestamp,''),'9999') >= ? "
+            "AND e.event_type='error' AND (" + marker_sql + ") GROUP BY 1,2;",
+            (cutoff, *(f"%{marker}%" for marker in CUT_MARKERS)),
+        ).fetchall()
+
+    report = {}
+    for provider, model, count in request_rows:
+        report[_cut_rate_key(provider, model)] = {
+            "provider": provider or "unknown", "model": model or "unknown",
+            "requests": count, "cuts": 0, "killed_turns": 0,
+        }
+    for provider, model, count in outcome_rows:
+        row = report.setdefault(_cut_rate_key(provider, model), {
+            "provider": provider or "unknown", "model": model or "unknown",
+            "requests": 0, "cuts": 0, "killed_turns": 0,
+        })
+        row["cuts"] = count
+    for provider, model, count in killed_rows:
+        row = report.setdefault(_cut_rate_key(provider, model), {
+            "provider": provider or "unknown", "model": model or "unknown",
+            "requests": 0, "cuts": 0, "killed_turns": 0,
+        })
+        row["killed_turns"] = count
+    for row in report.values():
+        row["cuts_per_1000"] = round(row["cuts"] * 1000 / row["requests"], 2) if row["requests"] else 0.0
+
+    previous = (previous_info or {}).get("cut_rates", {})
+    for key, row in report.items():
+        old = previous.get(key) or {}
+        old_rate = float(old.get("cuts_per_1000", 0) or 0)
+        if row["requests"] >= CUT_RATE_MIN_REQUESTS and old.get("requests", 0) and \
+                row["cuts_per_1000"] > old_rate * CUT_RATE_JUMP_FACTOR and \
+                row["cuts_per_1000"] > old_rate:
+            row["jump"] = True
+    return report
+
+
+def check_cut_rates(problems, info, previous_info=None):
+    try:
+        report = cut_rates(previous_info)
+    except sqlite3.Error as exc:
+        problems["db:cut-rates"] = f"cannot read cut-rate ledger ({exc})"
+        return
+    info["cut_rates"] = report
+    for key, row in report.items():
+        if row.get("jump"):
+            problems[f"cut-rate:{key}"] = (
+                f"{key} cut rate jumped to {row['cuts_per_1000']:.2f}/1,000 "
+                f"({row['cuts']} cuts/{row['requests']} requests; "
+                f"{row['killed_turns']} killed turns)"
+            )
+
+
 def core_env(key):
     """One value from Core's own env file on this host ('' when absent)."""
     try:
@@ -190,7 +285,27 @@ def sidecar_logins():
 
 def check_sidecar(problems):
     """A Claude login the sidecar refuses to use is invisible in Core (13 Nov 2026: ten hours)."""
-    claude = [f for f in sidecar_logins() if f.get("provider") == "claude" and not f.get("disabled")]
+    files = sidecar_logins()
+    login_problems = []
+    for entry in files:
+        status = str(entry.get("status") or "")
+        message = str(entry.get("status_message") or "")
+        quota = any(c.get("reason") in ("quota", "credential_quota", "quota_exhausted")
+                    and int(c.get("remaining_seconds") or 0) > 0
+                    for c in entry.get("cooldowns") or [])
+        if (entry.get("disabled") or status == "expired" or quota or
+                any(code in status or code in message for code in
+                    ("invalid_refresh_token", "invalid_grant", "token_expired", "auth_unavailable"))):
+            login_problems.append(entry)
+    providers = {}
+    for entry in files:
+        providers.setdefault(str(entry.get("provider") or "unknown"), []).append(entry)
+    unusable = {id(entry) for entry in login_problems}
+    all_logins_unusable = any(entries and all(id(entry) in unusable for entry in entries)
+                              for entries in providers.values())
+    if all_logins_unusable:
+        problems["provider:sign-in-again"] = "Sign in again: one or more provider logins are refresh-failed, disabled, expired or quota-exhausted (see Providers)."
+    claude = [f for f in files if f.get("provider") == "claude" and not f.get("disabled") and f not in login_problems]
     banned = {}
     for entry in claude:
         seconds = max([int(c.get("remaining_seconds") or 0) for c in entry.get("cooldowns") or []] or [0])
@@ -287,6 +402,11 @@ def notify(text, opened=(), cleared=()):
 def main():
     problems, info = {}, {}
     try:
+        with open(STATE) as state_file:
+            prev = json.load(state_file)
+    except (OSError, ValueError):
+        prev = None
+    try:
         THRESHOLDS.update(load_thresholds())
     except (OSError, sqlite3.Error, ValueError, TypeError):
         THRESHOLDS.update(DEFAULT_THRESHOLDS)
@@ -297,11 +417,12 @@ def main():
         except Exception as exc:  # a broken check is itself a problem, never a crash
             problems[f"check:{check.__name__}"] = f"{check.__name__} crashed: {type(exc).__name__}: {exc}"
     try:
-        prev = json.load(open(STATE))
-    except (OSError, ValueError):
-        prev = None
+        check_cut_rates(problems, info, (prev or {}).get("info"))
+    except Exception as exc:
+        problems["check:cut-rates"] = f"check_cut_rates crashed: {type(exc).__name__}: {exc}"
     os.makedirs(os.path.dirname(STATE), exist_ok=True)
-    json.dump({"problems": problems, "info": info, "at": int(NOW)}, open(STATE + ".tmp", "w"), indent=1)
+    with open(STATE + ".tmp", "w") as state_file:
+        json.dump({"problems": problems, "info": info, "at": int(NOW)}, state_file, indent=1)
     os.replace(STATE + ".tmp", STATE)
     if "--print" in sys.argv:
         print(json.dumps({"problems": problems, "info": info}, indent=1))

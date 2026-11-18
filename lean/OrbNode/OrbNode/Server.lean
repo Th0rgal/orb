@@ -1913,9 +1913,20 @@ def handleRequestConcurrent
       spawnSteerWatchers mtx watchers
     return resp
 
+/-- Reload capacity from the same owner as `SIGHUP`, then tick reserved slots. -/
+private def reloadCapacityAndTick (mtx : Std.Mutex NodeRuntime) : IO Unit := do
+  let launches ← mtx.atomically do
+    let rt ← get
+    let rtReloaded ← reloadCapacityFromFiles rt
+    let (rtNext, ls) ← tickRuntimeReserve rtReloaded
+    set rtNext
+    return ls
+  if !launches.isEmpty then
+    spawnAsyncLaunches mtx launches
+
 /-- Serve HTTP/1.1 requests concurrently on `rt.cfg.bindHost:rt.cfg.bindPort` until `SIGTERM`/`SIGINT`
-    (or `410 Gone` from dial-out relay), reloading capacity on `SIGHUP` and running background
-    2-second project-context replica synchronization. -/
+    (or `410 Gone` from dial-out relay), reloading capacity on `SIGHUP` or a changed env-file mtime
+    and running background 2-second project-context replica synchronization. -/
 def runServerLoop (rtInit : NodeRuntime) (dialCred? : Option OrbNode.Dial.DialCredential := none) : IO UInt32 := do
   OrbNode.Posix.installSignals
   let lfd ← OrbNode.Posix.tcpListen rtInit.cfg.bindHost rtInit.cfg.bindPort
@@ -1925,6 +1936,9 @@ def runServerLoop (rtInit : NodeRuntime) (dialCred? : Option OrbNode.Dial.DialCr
   let authTokensConst := some (rtInit.cfg.token, rtInit.cfg.tokenPrevious?)
   let goneRef ← IO.mkRef false
   let _ ← startProjectContextDaemon rtInit.cfg.workDir goneRef
+  let capacityPollMs := rtInit.cfg.capacityPollMs
+  let mut lastCapacityEnvMtime ← capacityEnvMtime? rtInit.cfg.envFile
+  let mut nextCapacityPoll ← IO.monoMsNow
   if let some cred := dialCred? then
     let _ ← OrbNode.Dial.spawnRelay cred rtInit.cfg.bindPort goneRef
   try
@@ -1932,14 +1946,15 @@ def runServerLoop (rtInit : NodeRuntime) (dialCred? : Option OrbNode.Dial.DialCr
       let sigs ← OrbNode.Posix.pollSignals
       if (sigs &&& 1) != 0 then break
       if (sigs &&& 2) != 0 then
-        let launches ← mtx.atomically do
-          let rt ← get
-          let rtReloaded ← reloadCapacityFromFiles rt
-          let (rtNext, ls) ← tickRuntimeReserve rtReloaded
-          set rtNext
-          return ls
-        if !launches.isEmpty then
-          spawnAsyncLaunches mtx launches
+        reloadCapacityAndTick mtx
+        lastCapacityEnvMtime ← capacityEnvMtime? rtInit.cfg.envFile
+      let nowPoll ← IO.monoMsNow
+      if nowPoll ≥ nextCapacityPoll then
+        nextCapacityPoll := nowPoll + capacityPollMs
+        let currentMtime ← capacityEnvMtime? rtInit.cfg.envFile
+        if currentMtime != lastCapacityEnvMtime then
+          lastCapacityEnvMtime := currentMtime
+          reloadCapacityAndTick mtx
       let cfd ← OrbNode.Posix.tcpAccept lfd 200
       if cfd == 0xFFFFFFFF then
         let launches ← mtx.atomically do

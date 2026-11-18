@@ -88,7 +88,7 @@ class ReconcileTest(unittest.TestCase):
     def test_old_master_fix_attempts_and_foreign_tracks_are_ignored(self):
         old = mission("MASTER", "cancelled", created_ts=NOW - 2 * 86400)
         pivot = mission("pivot", "active")
-        self.assertEqual(self.run_plan(green=False, missions=[old, pivot]), [("start", "MASTER", 1)])
+        self.assertEqual(self.run_plan(green=False, missions=[old, pivot]), [("start", "MASTER", 2)])
 
     def test_workers_start_on_the_first_free_model_and_wait_when_none_is(self):
         astra, sol = NS["MODELS"][:2]
@@ -101,12 +101,10 @@ class ReconcileTest(unittest.TestCase):
         f.update(returns_ts=NOW + 3600, model=fable)
         d = mission("Z2", "cancelled", updated=NOW - 60, created_ts=NOW - 65)
         d.update(returns_ts=NOW + 3600, model=NS["MODELS"][2])
-        e = mission("Z3", "cancelled", updated=NOW - 60, created_ts=NOW - 65)
-        e.update(returns_ts=NOW + 3600, model=NS["MODELS"][3])
 
-        self.assertEqual(self.run_plan(missions=[a, f, d, e]), [])
+        self.assertEqual(self.run_plan(missions=[a, f, d]), [])
         a["returns_ts"] = NOW - 1
-        self.assertEqual(self.run_plan(missions=[a, f, d, e]), [("start", "A2", 1), ("start", "A6", 1)])
+        self.assertEqual(self.run_plan(missions=[a, f, d]), [("start", "A2", 1), ("start", "A6", 1)])
         self.assertEqual(self.models, [astra, astra])
 
     def test_a_provider_with_every_account_parked_is_skipped(self):
@@ -116,9 +114,38 @@ class ReconcileTest(unittest.TestCase):
                     {"openai": NOW + 600, "anthropic": NOW + 600, "ethereumfoundation": NOW + 1})
         self.assertEqual([a for a in acts if a[0] == "start"], [])
 
+    def test_a_quickly_completed_blocked_worker_costs_an_attempt(self):
+        ms = [mission("A2", "completed", mid=f"b{i}", created=f"2026-11-17T1{i}:00:00Z",
+                      updated=NOW - 7000 + i, created_ts=NOW - 7060 + i) for i in range(2)]
+        acts = self.run_plan(missions=ms, ledger={"nudged": {"b0": 1, "b1": 1}})
+        self.assertIn(("escalate", "A2", "b1"), acts)
+
+    def test_forgotten_attempts_still_number_new_tracks(self):
+        old = mission("A2", "completed", mid="o1", created="2026-01-01T00:00:00Z")
+        NS["plan"].__globals__["SINCE"] = "2026-06-01T00:00:00"
+        try:
+            self.assertIn(("start", "A2", 2), self.run_plan(missions=[old]))
+        finally:
+            NS["plan"].__globals__["SINCE"] = ""
+
+    def test_master_tick_lists_rows_to_start_and_skips_a_live_master(self):
+        acts = plan(self.rows, self.queue, {}, [], True, {}, NOW)
+        idle = {"id": "M", "status": "completed", "updated_ts": NOW - 60}
+        msg = NS["master_tick"](acts, self.rows, {}, NOW, idle, False)
+        self.assertIn('START row A2', msg)
+        self.assertIn('track "roadmap-A2"', msg)
+        self.assertIsNone(NS["master_tick"](acts, self.rows, {}, NOW, dict(idle, status="active"), True))
+        self.assertIsNone(NS["master_tick"]([], self.rows, {}, NOW, idle, False))
+        self.assertIn("No row is waiting", NS["master_tick"]([], self.rows, {}, NOW, idle, True))
+
+    def test_a_master_child_track_maps_back_to_its_row(self):
+        child = mission("A2", "active")
+        child["track"] = "roadmap-A2-c1234abcd"
+        self.assertNotIn("A2", [a[1] for a in self.run_plan(missions=[child])])
+
     def test_each_attempt_uses_the_next_model(self):
         self.assertEqual(NS["MODELS"], ["openai/gpt-6.2-astra", "openai/gpt-6.2-sol",
-                                        "anthropic/claude-fable-5-2", "ethereumfoundation/deepseek-v4.1-flash"])
+                                        "anthropic/claude-fable-5-2"])
 
     def test_a_recently_idle_worker_is_not_nudged_yet(self):
         self.assertNotIn("A2", [a[1] for a in self.run_plan(missions=[mission("A2", "awaiting_user", updated=NOW - 60)])])

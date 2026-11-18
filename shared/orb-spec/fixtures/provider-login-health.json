@@ -1,0 +1,11 @@
+{
+  "files": [
+    {"name":"refresh.json","provider":"claude","email":"refresh@fixture.invalid","status":"error","status_message":"invalid_refresh_token","disabled":false,"cooldowns":[]},
+    {"name":"quota.json","provider":"claude","email":"quota@fixture.invalid","status":"error","disabled":false,"cooldowns":[{"reason":"credential_quota","remaining_seconds":7200,"retry_at":"2026-11-18T12:00:00Z"}]},
+    {"name":"disabled.json","provider":"claude","email":"disabled@fixture.invalid","status":"disabled","disabled":true,"cooldowns":[]},
+    {"name":"expired.json","provider":"claude","email":"expired@fixture.invalid","status":"expired","disabled":false,"cooldowns":[]}
+  ],
+  "expected_status":"needs_reauth",
+  "expected_label":"Sign in again",
+  "expected_monitor_key":"provider:sign-in-again"
+}

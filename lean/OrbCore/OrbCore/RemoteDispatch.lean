@@ -185,6 +185,50 @@ def callRemoteNodeHttpOpt
       | return .error s!"unknown remote node `{targetNodeId}`"
     callRemoteNodeHttp hub? mc targetNodeId method pathQuery jsonBody? extraHeaders timeoutMs
 
+/-- Call a static node or dial-out managed VM with an exact byte body (uploads, chunks, downloads). -/
+def callRemoteNodeRawOpt
+    (hub? : Option RelayHub)
+    (mc? : Option ManagedComputeStore)
+    (targetNodeId method pathQuery : String)
+    (bodyBytes : ByteArray)
+    (contentType : String := "application/octet-stream")
+    (extraHeaders : Array (String × String) := #[])
+    (timeoutMs : Nat := 30000) : IO (Except String (Nat × String × Option JVal × String × String)) := do
+  let (_, staticNodes) ← loadStaticRemoteNodes
+  let cleanPath := if pathQuery.startsWith "/" then pathQuery else "/" ++ pathQuery
+  if let some sn := staticNodes.find? (fun n => n.id == targetNodeId) then
+    let some tok ← resolveStaticNodeToken? sn
+      | return .error s!"remote node `{sn.id}` has no token in `{sn.tokenEnv}`"
+    let mut hdrs := extraHeaders.push ("Authorization", s!"Bearer {tok}")
+    if !bodyBytes.isEmpty then hdrs := hdrs.push ("Content-Type", contentType)
+    match ← sendRequest method (sn.baseUrl ++ cleanPath) hdrs bodyBytes timeoutMs.toUInt32 67108864 with
+    | .error e => return .error e
+    | .ok resp =>
+      let text := (String.fromUTF8? resp.body).getD ""
+      let parsedJson := match OrbBin.Json.parseBytes resp.body with
+        | .ok j => some j
+        | .error _ => none
+      return .ok (resp.status, text, parsedJson, sn.id, tok)
+  else
+    let some mc := mc?
+      | return .error s!"unknown remote node `{targetNodeId}`"
+    let some mid ← resolveManagedMachineId? mc targetNodeId
+      | return .error s!"unknown remote node `{targetNodeId}`"
+    let some hub := hub?
+      | return .error "relay_hub_unavailable"
+    let some (_, nodeTok) ← getManagedNodeAuth? mc mid
+      | return .error s!"managed node `{mid}` has no enrolled token"
+    let mut hdrs := extraHeaders.push ("Authorization", s!"Bearer {nodeTok}")
+    if !bodyBytes.isEmpty then hdrs := hdrs.push ("Content-Type", contentType)
+    match ← tunnelHttpToManagedMachine hub mc mid method cleanPath hdrs bodyBytes timeoutMs with
+    | .error e => return .error e
+    | .ok resp =>
+      let text := (String.fromUTF8? resp.body).getD ""
+      let parsedJson := match OrbBin.Json.parseBytes resp.body with
+        | .ok j => some j
+        | .error _ => none
+      return .ok (resp.status, text, parsedJson, targetNodeId, nodeTok)
+
 /-- Check whether `targetNodeId` resolves to a loopback HTTP URL (`127.0.0.1` or `localhost`). -/
 private def isLoopbackStaticNode (targetNodeId : String) : IO Bool := do
   let (_, staticNodes) ← loadStaticRemoteNodes

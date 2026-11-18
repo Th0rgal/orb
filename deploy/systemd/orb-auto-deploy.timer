@@ -1,0 +1,9 @@
+[Unit]
+Description=Run orb-auto-deploy hourly
+
+[Timer]
+OnCalendar=*-*-* *:17:00
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

@@ -986,8 +986,10 @@ def upstreamErrorCode (body : String) : String :=
     not enough (it is also used for model or region permission). -/
 def isAuthRejection (status : Nat) (code body : String) : Bool :=
   status == 401 || code == "auth_unavailable" || code == "invalid_grant" ||
+    code == "invalid_refresh_token" ||
     code == "authentication_error" || code == "invalid_api_key" ||
-    (body.splitOn "invalid_grant").length > 1
+    (body.splitOn "invalid_grant").length > 1 ||
+    (body.splitOn "invalid_refresh_token").length > 1
 
 /-- Body returned when every target of a chain failed: the class, and each target's outcome. -/
 def chainExhaustedBody (errCode errMsg : String) (failures : Array (String × String × Nat × String)) : ByteArray :=

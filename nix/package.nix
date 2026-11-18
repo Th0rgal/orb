@@ -29,6 +29,14 @@
   python3,
   sqlite,
   zstd,
+  wayland ? null,
+  libxkbcommon ? null,
+  freetype ? null,
+  harfbuzz ? null,
+  fontconfig ? null,
+  libGL ? null,
+  vulkan-loader ? null,
+  buildDesktop ? false,
   turbo-lean ? null,
 }: let
   orbPackageJson = lib.importJSON ../orb/package.json;
@@ -206,6 +214,14 @@
     buildInputs = [
       openssl
       sqlite
+    ] ++ lib.optionals (stdenv.hostPlatform.isLinux && wayland != null) [
+      wayland
+      libxkbcommon
+      freetype
+      harfbuzz
+      fontconfig
+      libGL
+      vulkan-loader
     ];
 
     # OrbCore loads libsqlite3 and libcrypto via dlopen() (`orb_core_sqlite.c`),
@@ -318,7 +334,14 @@
     deps = [leanBase];
   };
 
-  layers = [leanBase leanNode leanCore leanLocald];
+  leanDesktop = mkLeanLayer {
+    pname = "orb-lean-desktop";
+    src = leanSource [../lean/OrbDesktop];
+    bins = ["orb-desktop-native"];
+    deps = [leanBase];
+  };
+
+  layers = [leanBase leanNode leanCore leanLocald] ++ lib.optionals (buildDesktop && stdenv.hostPlatform.isLinux) [leanDesktop];
 in
   # Node, Core and Locald build in parallel on top of the base layer; this
   # derivation only gathers their binaries and fixes their runtime paths.
@@ -376,7 +399,7 @@ in
         done
       '';
 
-      passthru = {inherit leanBase leanNode leanCore leanLocald;};
+      passthru = {inherit leanBase leanNode leanCore leanLocald leanDesktop;};
 
       meta = {
         description = "Self-hosted orchestrator for AI coding agents";

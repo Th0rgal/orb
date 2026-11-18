@@ -20,6 +20,7 @@
   - 300s `AntigravityModelsCache` so `/api/providers/antigravity-models` and `/api/providers/backend-models` never block
 -/
 import Std.Sync.Mutex
+import Orb.ProviderLogin
 import LeanSys.Auth
 import LeanSys.Http
 import OrbBin.Json
@@ -2176,6 +2177,8 @@ private structure SidecarAuthFileEntry where
   provider : String
   email : String := ""
   disabled : Bool := false
+  needsReauth : Bool := false
+  loginReason : UInt8 := 0
   remainingSecs : UInt64 := 0
   retryAt? : Option String := none
   reason? : Option String := none
@@ -2212,6 +2215,9 @@ private def fetchSidecarAuthFiles : IO (Array SidecarAuthFileEntry) := do
       if !name.isEmpty && !prov.isEmpty then
         let email := ((f.fieldStr? "email").getD "").trimAscii.toString
         let disabled := (f.fieldBool? "disabled").getD false
+        let status := (f.fieldStr? "status").getD ""
+        let message := (f.fieldStr? "status_message").getD ""
+        let refreshFailed := isAuthRejection 0 status message
         let cds := (f.fieldArr? "cooldowns").getD #[]
         let mut bestRem : UInt64 := 0
         let mut bestRetry? : Option String := none
@@ -2222,11 +2228,17 @@ private def fetchSidecarAuthFiles : IO (Array SidecarAuthFileEntry) := do
             bestRem := rem
             bestRetry? := (cd.fieldStr? "retry_at").filter validSidecarRetryAt
             bestReason? := (cd.fieldStr? "reason").filter validSidecarReasonSlug
+        let loginReason := Orb.Kernel.providerLoginReason refreshFailed disabled
+          (status == "expired" || (message.splitOn "token_expired").length > 1)
+          (bestRem > 0 && (bestReason? == some "quota_exhausted" ||
+            bestReason? == some "credential_quota" || bestReason? == some "quota"))
         out := out.push {
           name := name
           provider := prov
           email := email
           disabled := disabled
+          needsReauth := loginReason != 0
+          loginReason := loginReason
           remainingSecs := bestRem
           retryAt? := bestRetry?
           reason? := bestReason?
@@ -2269,6 +2281,22 @@ private def matchSidecarFileForProvider?
     else
       none
 
+/-- Reporting-only hint for a failed routing chain. Does not alter selection or recovery. -/
+def sidecarLoginFailureMessage (store : CoreStore) (workingDir : String)
+    (accounts : Array String) : IO (Option String) := do
+  let hps ← loadHydratedProviders store workingDir
+  let files ← fetchSidecarAuthFiles
+  let affected := hps.filter fun hp =>
+    (accounts.contains hp.id || accounts.any (fun k =>
+      k == s!"cliproxyapi:{hp.providerType}" || k.startsWith s!"cliproxyapi:{hp.providerType}:")) &&
+    (matchSidecarFileForProvider? hps files hp (includeDisabled := true)).any (·.needsReauth)
+  if affected.isEmpty then return none
+  let emails := affected.filterMap fun hp =>
+    (matchSidecarFileForProvider? hps files hp (includeDisabled := true)).bind fun file =>
+      if file.email.trimAscii.toString.isEmpty then none else some file.email.trimAscii.toString
+  let identity := if emails.isEmpty then "the provider login" else String.intercalate ", " emails.toList
+  return some s!"Sign in again for {identity}: the login is refresh-failed, disabled, expired or quota-exhausted. See Providers for the sidecar's reported reset."
+
 /-- Clear a matched sidecar auth file's parked state by toggling `disabled: true` then `disabled: false`
     via `PATCH /v0/management/auth-files/status` (2-second timeout per call).
     - If `file.remainingSecs == 0`, returns `none` without making any sidecar PATCH calls.
@@ -2278,6 +2306,8 @@ private def matchSidecarFileForProvider?
       naming `providerId`, stating that the login was left disabled, and advising to re-enable it in CLIProxyAPI
       (never exposing the file name or email). -/
 private def clearSidecarAuthFileCooldown (providerId : String) (file : SidecarAuthFileEntry) : IO (Option (Nat × String × ByteArray)) := do
+  if file.disabled then
+    return some (jsonErr 409 "Sign in again: the login is disabled; clearing cooldown cannot re-enable it")
   if file.remainingSecs == 0 then return none
   let mgmtBase ← resolveCliProxyBaseUrl
   let some mgmtKey ← resolveCliProxyMgmtKey?
@@ -2399,7 +2429,7 @@ private def filterDiscoveryConnectionModels (hps : Array HydratedProvider) (c : 
 
 /-! ## Unified Dispatcher for AI Providers, Proxy Analytics, Model-Routing Health/Test & Catalog -/
 
-set_option maxHeartbeats 800000 in
+set_option maxHeartbeats 1200000 in
 def dispatchProviderAndAiRoute
     (hub : ProviderRuntimeHub)
     (store : CoreStore)
@@ -2719,6 +2749,7 @@ def dispatchProviderAndAiRoute
         (matchSidecarFileForProvider? hps sidecarFiles hp).orElse
           (fun _ => matchSidecarFileForProvider? hps sidecarFiles hp (includeDisabled := true))
       let sidecarDisabled := (matchedSidecar?.map (·.disabled)).getD false
+      let loginUnavailable := matchedSidecar?.any (·.needsReauth)
       let sidecarRem : UInt64 := if sidecarDisabled then 0 else (matchedSidecar?.map (·.remainingSecs)).getD 0
       let trackerRecs ← match healthTracker? with
         | some t => keys.mapM (lookupAccountHealthRecord t)
@@ -2729,13 +2760,14 @@ def dispatchProviderAndAiRoute
         match disabledRec? with
         | some r => if r.disabledMessage.trimAscii.toString.isEmpty then "Provider disabled this account" else r.disabledMessage
         | none => ""
-      let cdRem : UInt64 := if disabledByProvider || sidecarDisabled then 0 else max coreRem sidecarRem
+      let cdRem : UInt64 := if disabledByProvider || sidecarDisabled then 0
+        else if loginUnavailable then sidecarRem else max coreRem sidecarRem
       let (parkedUntilJv, parkedReasonJv, parkedSourceJv) : JVal × JVal × JVal :=
         if disabledByProvider then
           (.null, .str "disabled_by_provider", .str "provider")
         else if sidecarDisabled then
           (.null, .str "disabled", .str "sidecar")
-        else if sidecarRem > 0 && sidecarRem >= coreRem then
+        else if sidecarRem > 0 && (loginUnavailable || sidecarRem >= coreRem) then
           let uJv := match matchedSidecar?.bind (·.retryAt?) with
             | some iso => .str iso
             | none => .str (formatEpochIso8601Utc (nowSec + sidecarRem))
@@ -2743,7 +2775,7 @@ def dispatchProviderAndAiRoute
             | some r => .str r
             | none => .str "credential_quota"
           (uJv, rJv, .str "sidecar")
-        else if coreRem > 0 then
+        else if coreRem > 0 && !loginUnavailable then
           (.str (formatEpochIso8601Utc (nowSec + coreRem)),
            .str (coreReason?.getD "rate_limit"),
            .str "core")
@@ -2752,7 +2784,7 @@ def dispatchProviderAndAiRoute
       let trackerFails : Nat :=
         trackerRecs.foldl (fun acc r => max acc (max r.transientStreak.toNat r.consecutiveTrips.toNat)) 0
       let parkedOrPoisoned : Bool :=
-        disabledByProvider || sidecarDisabled || cdRem > 0 ||
+        loginUnavailable || disabledByProvider || sidecarDisabled || cdRem > 0 ||
         trackerRecs.any (fun r => r.parkedQuota || r.poisonedSub)
       let failCnt : Nat := max trackerFails (if parkedOrPoisoned then 1 else 0)
       let isDegraded : Bool := parkedOrPoisoned || failCnt > 0
@@ -2788,6 +2820,9 @@ def dispatchProviderAndAiRoute
         ("parked_until", parkedUntilJv),
         ("parked_reason", parkedReasonJv),
         ("parked_source", parkedSourceJv),
+        ("login_status", if loginUnavailable then .str "needs_reauth" else .null),
+        ("login_reason_code", JVal.nat ((matchedSidecar?.map (fun (f : SidecarAuthFileEntry) => f.loginReason)).getD 0).toNat),
+        ("login_message", if loginUnavailable then .str "Sign in again" else .null),
         ("sample_count", JVal.nat 0),
         ("antigravity_refusal", .null)
       ])
@@ -2806,7 +2841,10 @@ def dispatchProviderAndAiRoute
     if let some t := healthTracker? then clearAccountHealthWhere t keys.contains
     if let some hp := matchedProv? then
       let sidecarFiles ← fetchSidecarAuthFiles
-      if let some file := matchSidecarFileForProvider? hps sidecarFiles hp then
+      -- Recovery retains enabled-only matching even when reporting also sees old disabled files.
+      let recoveryFile? := (matchSidecarFileForProvider? hps sidecarFiles hp).orElse
+        fun _ => matchSidecarFileForProvider? hps sidecarFiles hp (includeDisabled := true)
+      if let some file := recoveryFile? then
         if let some errResp ← clearSidecarAuthFileCooldown hp.id file then
           return some errResp
     return some (204, "text/plain", ByteArray.empty)
@@ -2862,11 +2900,14 @@ def dispatchProviderAndAiRoute
       let hps ← loadHydratedProviders store workingDir
       let uPrefs ← if isLegacyUnscoped then pure #[] else getUserProviderPrefs store callerUserId
       let usernames ← listUsernamesById store
+      let sidecarFiles ← fetchSidecarAuthFiles
       let mut arr : Array JVal := #[]
       for hp in hps do
         if effAdmin || providerAddedBy hp callerUserId || (hp.enabled && (hp.hasApiKey || hp.hasOAuth)) then
           let uEn? := if isLegacyUnscoped then none else some (isUserProviderEnabled uPrefs hp.id)
           let rejected ← loginRejectedFor hub store hp
+          let rejected := rejected ||
+            (matchSidecarFileForProvider? hps sidecarFiles hp (includeDisabled := true)).any (·.needsReauth)
           let obs? ← match pacingTracker? with
             | some tr => if effAdmin then lookupObservedKeyRpm? tr hp.id else pure none
             | none => pure none
@@ -3124,6 +3165,9 @@ def dispatchProviderAndAiRoute
         if !effAdmin && !providerAddedBy hp callerUserId && !(hp.enabled && (hp.hasApiKey || hp.hasOAuth)) then
           return some (jsonErr 404 "Provider not found")
         let rejected ← loginRejectedFor hub store hp
+        let sidecarFiles ← fetchSidecarAuthFiles
+        let rejected := rejected ||
+          (matchSidecarFileForProvider? hps sidecarFiles hp (includeDisabled := true)).any (·.needsReauth)
         let usernames ← listUsernamesById store
         if effAdmin then
           let obs? ← match pacingTracker? with
@@ -3203,11 +3247,14 @@ def dispatchProviderAndAiRoute
         if !effAdmin then return some (jsonErr 403 "admin_required")
         let some hp := matchedProv?
           | return some (jsonErr 404 "Provider not found")
-        let cur ← proxyCooldownsRef.get
-        proxyCooldownsRef.set (cur.filter (fun c => c.accountId != hp.id))
-        let live ← probeProviderUsage hub hp
-        let enriched := (live.setField "reset_redeemed" (.bool true)).setField "woken_missions" (JVal.nat 0)
-        return some (jsonResp 200 enriched)
+        return some (jsonResp 501 (.obj #[
+          ("ok", .bool false),
+          ("error", .str "unsupported"),
+          ("message", .str "Vendor usage reset redemption is not implemented; no cooldown, grant, or mission state was changed."),
+          ("provider_id", .str hp.id),
+          ("reset_redeemed", .bool false),
+          ("woken_missions", JVal.nat 0)
+        ]))
 
       -- `POST /api/ai/providers/:id/antigravity/recheck`
       if method == "POST" && segs.length == 6 && segs[4]? == some "antigravity" && segs[5]? == some "recheck" then
