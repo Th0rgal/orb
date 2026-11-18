@@ -135,7 +135,7 @@ test('an account that needs sign-in opens its group by default', async ({ page }
   // The signed-out account counts as not available, not as missing.
   await expect(head(page).locator('.p-usage-chip')).toHaveText(['Claude & GPT1 of 2 left', 'Gemini1 of 2 left']);
   await expect(rows(page)).toHaveCount(2);
-  await expect(rows(page).nth(1).locator('.p-st')).toHaveText('Reconnect');
+  await expect(rows(page).nth(1).locator('.p-st')).toHaveText('Sign in again');
   await subscriptions(page).screenshot({ path: report ? `${report}/groups-needs-sign-in.png` : info.outputPath('groups-needs-sign-in.png') });
 
   // Collapsing it anyway is the user's choice and is kept; the header still says why.

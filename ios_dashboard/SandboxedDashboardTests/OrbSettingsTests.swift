@@ -3,6 +3,12 @@ import XCTest
 
 @MainActor
 final class OrbSettingsTests: XCTestCase {
+    func testR32SignInAgainSharedFixture() throws {
+        let spec = try OrbSpec.json("fixtures/provider-login-health.json")
+        let status = try XCTUnwrap(spec["expected_status"] as? String)
+        XCTAssertEqual(OrbProvidersSettings.loginStatusLabel(status), spec["expected_label"] as? String)
+        XCTAssertNil(OrbProvidersSettings.loginStatusLabel("connected"))
+    }
     func testRoutingProviderAliasesMatchSharedFixture() throws {
         let spec = try OrbSpec.json("fixtures/routing-provider.json")
         let data = try JSONSerialization.data(withJSONObject: spec["catalog"] as Any)
