@@ -174,19 +174,42 @@ private def runGitCapture (args : Array String) (cwd? : Option String := none) :
     "GIT_TERMINAL_PROMPT=0 " ++
     (if hasSshCmd then "" else "GIT_SSH_COMMAND='ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new' ")
   let cdPrefix := match cwd? with | some dir => "cd " ++ shellSingleQuote dir ++ " && " | none => ""
+  let outputFile := s!"/tmp/orb_git_capture_{← IO.monoNanosNow}"
   let cmdLine := cdPrefix ++ envPrefix ++ "exec 'git'" ++
-    (if args.isEmpty then "" else " " ++ String.intercalate " " (args.toList.map shellSingleQuote)) ++ " 2>&1"
-  let sp ← spawnPgrp "/bin/sh" #["-c", cmdLine] env false false true
+    (if args.isEmpty then "" else " " ++ String.intercalate " " (args.toList.map shellSingleQuote)) ++
+    " >" ++ shellSingleQuote outputFile ++ " 2>&1"
+  -- Do not synchronously drain a pipe: a descendant inheriting the pipe can
+  -- keep the drain blocked after the shell itself has stopped progressing.
+  let sp ← spawnPgrp "/bin/sh" #["-c", cmdLine] env false true false
   if sp.pid < 0 then return (127, "failed to spawn git")
-  let mut acc := ByteArray.empty
-  if sp.stdoutFd >= 0 then
-    let mut eof := false
-    while !eof && acc.size < 524288 do
-      let chunk ← readFdChunk sp.stdoutFd 8192
-      if chunk.isEmpty then eof := true else acc := acc ++ chunk
-    closeFdRaw sp.stdoutFd
-  let st ← waitpidBlock sp.pid
-  return (st.toNat, (String.fromUTF8? acc).getD "")
+  let timeoutMs := 30000
+  let mut elapsedMs := 0
+  let mut status : Option Nat := none
+  while elapsedMs < timeoutMs do
+    let st ← waitpidWnohang sp.pid
+    if st != 0xFFFFFFFF then
+      status := some st.toNat
+      elapsedMs := timeoutMs
+    else
+      IO.sleep 10
+      elapsedMs := elapsedMs + 10
+  if status.isNone then
+    -- Kill the entire process group so a stuck git/SSH helper cannot survive.
+    discard <| killSig (-sp.pid) 15
+    IO.sleep 100
+    discard <| killSig (-sp.pid) 9
+    let mut reapMs := 0
+    while reapMs < 1000 do
+      let st ← waitpidWnohang sp.pid
+      if st != 0xFFFFFFFF then
+        status := some st.toNat
+        reapMs := 1000
+      else
+        IO.sleep 10
+        reapMs := reapMs + 10
+  let output ← try IO.FS.readFile outputFile catch _ => pure ""
+  try IO.FS.removeFile outputFile catch _ => pure ()
+  return (status.getD 124, output)
 
 private def sanitizeRelPath? (raw : String) : Option String := Id.run do
   let norm := String.ofList (raw.toList.map (fun c => if c == '\\' then '/' else c))
@@ -1613,6 +1636,15 @@ def handleLibraryRoute
     return if isOwner then status else status.setField "path" (.str "")
   let libFp := System.FilePath.mk libDir
   let gitFp := libFp / ".git"
+
+  -- A configured remote with no checkout must be initialized before any route
+  -- can report an empty/successful Library. Failed initialization is explicit.
+  if !effRemote.isEmpty && !(← libFp.pathExists) &&
+      !(segs == ["api", "library", "status"] ||
+        segs == ["api", "library", "sync"] || segs == ["api", "library", "force-sync"]) then
+    match ← ensureLibraryRepo libDir effRemote false with
+    | .ok _ => pure ()
+    | .error e => return some (jsonErr 502 s!"Failed to initialize Library repository: {e}")
 
   -- A transferred revision pins the next explicit synchronization. Importing
   -- configuration never copies Library files or resets a working checkout.
