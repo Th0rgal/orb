@@ -7454,21 +7454,22 @@ def handleClientConn (st : CoreAppState) (cfd : Fd) (allowKeepAlive : Bool := fa
         | some pump =>
           -- A relayed stream ends the connection: its length is unknown up front and a
           -- client that stopped reading must not hold a keep-alive slot.
-           let wroteHead ← writeCoreHttpResponse responseWrite httpResp false
-           let alive ← IO.mkRef wroteHead
-           -- Always enter the pump once so it can close the upstream reader;
-           -- a refused head must be propagated as a refused empty callback.
-           let complete ← pump fun piece => do
-             if !(← alive.get) then return false
-             if piece.isEmpty then
-               if !wroteHead then return false
-               return true
-             let ok ← responseWrite (encodeHttpChunk piece)
-             alive.set ok
-             return ok
-           if complete && (← alive.get) then
-             discard <| responseWrite (encodeHttpChunk ByteArray.empty)
-           keepGoing := false
+          let wroteHead ← writeCoreHttpResponse responseWrite httpResp false
+          let alive ← IO.mkRef wroteHead
+          -- Always enter the pump once so it can close the upstream reader;
+          -- a refused head must be propagated as a refused empty callback.
+          if !wroteHead then
+            discard <| pump (fun _ => pure false)
+          else
+            let complete ← pump fun piece => do
+              if !(← alive.get) then return false
+              if piece.isEmpty then return true
+              let ok ← responseWrite (encodeHttpChunk piece)
+              alive.set ok
+              return ok
+            if complete && (← alive.get) then
+              discard <| responseWrite (encodeHttpChunk ByteArray.empty)
+          keepGoing := false
       | .error rawUpgrade101 =>
         let wrote := (← writeAll cfd rawUpgrade101 false).isOk
         if wrote then

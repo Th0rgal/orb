@@ -230,9 +230,16 @@ def runStreamingPumpContracts : IO Unit := do
       discard <| readStreamChunk ufd2 65536
       discard <| writeAll ufd2 ("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n" ++
         "Transfer-Encoding: chunked\r\n\r\n").toUTF8 false
-      if let .ok () ← pollReadable ufd2 1000 then
-        let rest ← readStreamChunk ufd2 65536
-        upClosed.set rest.isEmpty
+      let mut observedClose := false
+      let mut pollTicks := 0
+      while !observedClose && pollTicks < 10 do
+        match ← pollReadable ufd2 200 with
+        | .ok () =>
+          let rest ← readStreamChunk ufd2 65536
+          observedClose := rest.isEmpty
+        | .error _ => observedClose := true
+        pollTicks := pollTicks + 1
+      upClosed.set observedClose
       discard <| closeFd ufd2
     discard <| closeFd upLfd
   let .ok (errLfd, errPort) ← tcpListen "127.0.0.1" 0 4
