@@ -5368,9 +5368,10 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let ownerExec ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
     "exec_raw_managed_machine" (.obj #[("machine_id", .str parityId), ("command", .str "true")]) nowSec none app.managedProvisioningOverride?
   let ownerExecJson := (OrbBin.Json.parse ownerExec).toOption.getD .null
+  let ownerExecError := (ownerExecJson.field? "error").getD .null
   if ownerExecJson.fieldBool? "ok" != some false ||
-      ownerExecJson.field? "error" |>.getD .null |>.fieldStr? "code" != some "unsupported" ||
-      ownerExecJson.field? "error" |>.getD .null |>.fieldStr? "message" != some "raw execution is unavailable on managed machines" then
+      ownerExecError.fieldStr? "code" != some "unsupported" ||
+      ownerExecError.fieldStr? "message" != some "raw execution is unavailable on managed machines" then
     return (← fail s!"owned managed raw execution must be refused explicitly: {ownerExec}")
   let some (stillReadyAfterOwnerExec, _) ← getManagedMachine? mStore parityId
     | return (← fail "owned raw execution erased managed machine")
