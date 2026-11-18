@@ -8,12 +8,14 @@ set -euo pipefail
 REPO=Th0rgal/orb
 api() { curl -fsS -m 20 -H "User-Agent: orb-auto-deploy" "https://api.github.com/repos/$REPO/$1"; }
 if systemctl is-active --quiet orb-deploy; then echo "a deploy is running; skip"; exit 0; fi
-sha=$(api "commits/master" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])')
-read -r status conclusion < <(api "actions/runs?branch=master&event=push&head_sha=$sha&per_page=10" | python3 -c '
+# The newest master commit whose CI passed: merges often land faster than CI,
+# so the head is usually still running and must not block every deploy.
+sha=$(api "actions/runs?branch=master&event=push&per_page=30" | python3 -c '
 import json,sys
 runs=[r for r in json.load(sys.stdin)["workflow_runs"] if r["name"]=="CI"]
-print(runs[0]["status"], runs[0]["conclusion"] or "-") if runs else print("missing -")')
-if [[ "$status" != completed || "$conclusion" != success ]]; then echo "master $sha CI $status/$conclusion; skip"; exit 0; fi
+ok=[r for r in runs if r["status"]=="completed" and r["conclusion"]=="success"]
+print(ok[0]["head_sha"] if ok else "")')
+if [[ -z "$sha" ]]; then echo "no green master commit among recent runs; skip"; exit 0; fi
 live=$(curl -fsS -m 10 http://127.0.0.1:3000/api/health | python3 -c 'import json,sys; print(json.load(sys.stdin).get("build",""))')
 if [[ "$live" == "$sha" ]]; then echo "prod already on $sha"; exit 0; fi
 # A commit whose deploy already failed is not retried: the master gets the log
