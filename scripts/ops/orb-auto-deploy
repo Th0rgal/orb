@@ -7,7 +7,32 @@
 set -euo pipefail
 REPO=Th0rgal/orb
 api() { curl -fsS -m 20 -H "User-Agent: orb-auto-deploy" "https://api.github.com/repos/$REPO/$1"; }
-if systemctl is-active --quiet orb-deploy; then echo "a deploy is running; skip"; exit 0; fi
+# A deploy that has run for more than two hours is stuck (on 18 Nov orb-core-test
+# hung for 4.5 hours in self-test and blocked every later deploy). Nothing is
+# installed before the self-tests pass, so stopping it is safe; the master gets
+# the log tail and assigns a fix, and the next green commit deploys as usual.
+if systemctl is-active --quiet orb-deploy; then
+  started=$(systemctl show orb-deploy -p ActiveEnterTimestampMonotonic --value)
+  now=$(awk '{print int($1*1000000)}' /proc/uptime)
+  if [[ -n "$started" && "$started" != 0 && $(( (now - started) / 1000000 )) -gt 7200 ]]; then
+    tail_txt=$(tail -25 /var/log/orb-deploy.log | grep -v "archived 0 legacy")
+    systemctl stop orb-deploy
+    echo "stopped a deploy stuck for more than two hours"
+    if [[ -n "${ORB_ROADMAP_MASTER:-}" ]]; then
+      python3 - "$ORB_ROADMAP_MASTER" "$tail_txt" <<'PY' || true
+import sys
+ns={"__name__":"x"}; exec(open("/usr/local/sbin/orb-roadmap-reconcile").read(), ns)
+mid, tail = sys.argv[1:3]
+ns["core_post"](f"/api/control/missions/{mid}/resume", {"content":
+    "orb-auto-deploy: a prod deploy ran for more than two hours (stuck in its self-tests) and was "
+    "stopped; nothing was installed. Start a child worker to find the hanging test and fix it. "
+    f"Last lines of /var/log/orb-deploy.log:\n{tail}"})
+PY
+    fi
+  else
+    echo "a deploy is running; skip"; exit 0
+  fi
+fi
 # The newest master commit whose CI passed: merges often land faster than CI,
 # so the head is usually still running and must not block every deploy.
 sha=$(api "actions/runs?branch=master&event=push&per_page=30" | python3 -c '
