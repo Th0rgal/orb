@@ -35,6 +35,7 @@ import OrbCore.ManagedSnapshotCatalogTests
 import OrbCore.ProviderContractTests
 import OrbCore.ProxyRoutingTests
 import OrbCore.SettingsDocumentTests
+import OrbCore.LegacyMigrationTests
 import OrbCore.TenantIsolationTests
 import OrbCore.DevSpendingTests
 import OrbCore.ManagedBudgetTests
@@ -9019,5 +9020,6 @@ def main (args : List String) : IO UInt32 := do
   if args.contains "--prod-parity-only" then
     return ← OrbCore.SelfTest.runCyberSkillGroup false false false true
   OrbCore.SettingsDocumentTests.run
+  OrbCore.LegacyMigrationTests.run
   OrbCore.SettingsTransferTests.run
   OrbCore.SelfTest.runSuite (OrbCore.SelfTest.findFlag? args "--emit-evidence-log")

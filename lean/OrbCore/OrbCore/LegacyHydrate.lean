@@ -17,6 +17,7 @@ import OrbCore.Store
 import OrbCore.Managed
 import OrbCore.R7Core
 import OrbCore.SettingsFile
+import OrbCore.TelemetryAndVoice
 
 namespace OrbCore.LegacyHydrate
 
@@ -28,6 +29,7 @@ open OrbNetLeaf.Crypto
 open OrbCore.Store
 open OrbCore.Managed
 open OrbCore.R7Core
+open OrbCore.TelemetryAndVoice
 
 def encryptedPrefix : String := "<encrypted v=\"1\">"
 def encryptedSuffix : String := "</encrypted>"
@@ -411,6 +413,170 @@ def unregisterSseSubscriber (hub : BroadcastHub) (subId : UInt64) : IO Unit := d
   hub.mu.atomically do
     let (seq, xs) ← get
     set (seq, xs.filter (fun s => s.id != subId))
+
+/-! ## One-time legacy security-state migration (`SEC-09`, `SEC-10`)
+
+The Rust service kept bunker state in `.sandboxed-sh/privilege_access.json` and
+telemetry configuration in `.sandboxed-sh/settings.json`.  The Lean authority is
+`core_boot_state.bunker_state` and the private `telemetry_config.json`.  These
+migrations run before the listener starts, apply the historical state once, and
+record a durable marker so stale legacy files can never undo later operator
+changes.  Corrupt security input fails closed: bunker startup is refused, and
+unusable telemetry state is imported disabled. -/
+
+def legacyBunkerStatePath (dataRoot : String) : System.FilePath :=
+  System.FilePath.mk s!"{dataRoot}/privilege_access.json"
+
+/-- Read the historical Rust bunker state.  Absence is `none`; a present but
+    corrupt or out-of-range value is an error so startup can fail closed. -/
+def readLegacyBunkerState? (dataRoot : String) : IO (Except String (Option UInt8)) := do
+  let p := legacyBunkerStatePath dataRoot
+  if !(← p.pathExists) then return .ok none
+  let raw ← try IO.FS.readFile p catch _ => return .error "legacy_bunker_state_unreadable"
+  match OrbBin.Json.parse raw with
+  | .error _ => return .error "legacy_bunker_state_invalid_json"
+  | .ok jv =>
+    match jv with
+    | .obj _ =>
+      match jv.field? "bunker_state" with
+      | none => return .ok (some 0)
+      | some v =>
+        match v.asNat? with
+        | some n =>
+          if n ≤ 2 then return .ok (some n.toUInt8)
+          else return .error "legacy_bunker_state_out_of_range"
+        | none => return .error "legacy_bunker_state_invalid_type"
+    | _ => return .error "legacy_bunker_state_not_an_object"
+
+/-- One-time monotonic migration from `privilege_access.json` into the live
+    `core_boot_state.bunker_state` authority.  The marker is written only after
+    the new value is durable. -/
+def migrateLegacyBunkerState (dataRoot : String) (st : CoreStore) : IO (Except String Unit) := do
+  if ← legacyMigrationApplied? st "bunker_state" then return .ok ()
+  match ← readLegacyBunkerState? dataRoot with
+  | .error e => return .error e
+  | .ok legacy? =>
+    let current ← readPersistedBunkerState st
+    let target := match legacy? with
+      | some old => if old.toNat > current.toNat then old else current
+      | none => current
+    if target != current then
+      match ← writePersistedBunkerState st target with
+      | .error e => return .error s!"legacy_bunker_state_write_failed:{e}"
+      | .ok () => pure ()
+    match ← markLegacyMigration st "bunker_state" with
+    | .error e => return .error s!"legacy_bunker_state_mark_failed:{e}"
+    | .ok () => return .ok ()
+
+private def optionalBoolField? (v : JVal) (key : String) : Option (Option Bool) :=
+  match v.field? key with
+  | none => some none
+  | some (.bool b) => some (some b)
+  | some _ => none
+
+private def optionalStringField? (v : JVal) (key : String) : Option (Option String) :=
+  match v.field? key with
+  | none => some none
+  | some (.str s) => some (some (s.trimAscii.toString))
+  | some _ => none
+
+private def disableTelemetryState (hubUrl : String) (ns? : Option String) : PersistedTelemetrySettings :=
+  {
+    enabled := false
+    promptsEnabled := false
+    hubUrl := if hubUrlAllowed hubUrl then hubUrl else defaultHubUrl
+    ns := ns?.filter validTelemetryNamespace
+    encryptedToken := none
+  }
+
+/-- One-time migration from the historical nested `orb_telemetry` settings object
+    to the private `telemetry_config.json`, decrypting the old shared-key envelope
+    and re-encrypting the token under the current telemetry key.  Prompts stay off
+    unless historically opted in.  A token or destination that cannot be used
+    imports telemetry disabled rather than enabling an unverified sink. -/
+def migrateLegacyTelemetryState
+    (workingDir dataRoot jwtSecret : String) (st : CoreStore) : IO (Except String Unit) := do
+  if ← legacyMigrationApplied? st "telemetry" then return .ok ()
+  let configPath := System.FilePath.mk s!"{dataRoot}/telemetry_config.json"
+  -- A private configuration written by this Core is authoritative and is never
+  -- overwritten by a legacy file left behind on disk.
+  if (← configPath.pathExists) then
+    return (← markLegacyMigration st "telemetry")
+  let snapshot ← OrbCore.SettingsFile.read dataRoot
+  let legacy? : Option JVal :=
+    match snapshot with
+    | .ok snap => snap.value.field? "orb_telemetry"
+    | .error _ => none
+  let some tel := legacy? | return (← markLegacyMigration st "telemetry")
+  let some enOpt := optionalBoolField? tel "enabled" | do
+    let .ok () ← saveTelemetrySettings dataRoot (disableTelemetryState defaultHubUrl none)
+      | return .error "legacy_telemetry_write_failed"
+    return (← markLegacyMigration st "telemetry")
+  let some prOpt := optionalBoolField? tel "prompts_enabled" | do
+    let .ok () ← saveTelemetrySettings dataRoot (disableTelemetryState defaultHubUrl none)
+      | return .error "legacy_telemetry_write_failed"
+    return (← markLegacyMigration st "telemetry")
+  let some urlOpt := optionalStringField? tel "hub_url" | do
+    let .ok () ← saveTelemetrySettings dataRoot (disableTelemetryState defaultHubUrl none)
+      | return .error "legacy_telemetry_write_failed"
+    return (← markLegacyMigration st "telemetry")
+  let some nsOpt := optionalStringField? tel "namespace" | do
+    let .ok () ← saveTelemetrySettings dataRoot (disableTelemetryState defaultHubUrl none)
+      | return .error "legacy_telemetry_write_failed"
+    return (← markLegacyMigration st "telemetry")
+  let some tokOpt := optionalStringField? tel "encrypted_token" | do
+    let .ok () ← saveTelemetrySettings dataRoot (disableTelemetryState defaultHubUrl none)
+      | return .error "legacy_telemetry_write_failed"
+    return (← markLegacyMigration st "telemetry")
+  let enabled := enOpt.getD false
+  let promptsWanted := enabled && (prOpt.getD false)
+  let hubUrl := (urlOpt.filter (!·.isEmpty)).getD defaultHubUrl
+  let ns? := nsOpt.filter (!·.isEmpty)
+  let destinationOk := hubUrlAllowed hubUrl &&
+    (match ns? with | some n => validTelemetryNamespace n | none => false)
+  let key32? ← loadPrivateKeyBytes? workingDir dataRoot
+  let mut plainToken? : Option String := none
+  let mut tokenUsable := true
+  match tokOpt.filter (!·.isEmpty) with
+  | none => tokenUsable := false
+  | some enc =>
+    if enc.startsWith "<encrypted" && !isEncryptedValue enc then
+      tokenUsable := false
+    else
+      match ← decryptEnvValue key32? enc with
+      | .ok plain =>
+        let cleaned := plain.trimAscii.toString
+        if cleaned.isEmpty then tokenUsable := false else plainToken? := some cleaned
+      | .error _ => tokenUsable := false
+  let usable := enabled && destinationOk && tokenUsable
+  if !usable then
+    let .ok () ← saveTelemetrySettings dataRoot (disableTelemetryState hubUrl ns?)
+      | return .error "legacy_telemetry_write_failed"
+    return (← markLegacyMigration st "telemetry")
+  let some plainToken := plainToken?
+    | return .error "legacy_telemetry_missing_token"
+  let .ok encrypted ← encryptTelemetryToken jwtSecret dataRoot plainToken
+    | return .error "legacy_telemetry_encrypt_failed"
+  let migrated : PersistedTelemetrySettings := {
+    enabled := true
+    promptsEnabled := promptsWanted
+    hubUrl := hubUrl
+    ns := ns?
+    encryptedToken := some encrypted
+  }
+  match ← saveTelemetrySettings dataRoot migrated with
+  | .error e => return .error s!"legacy_telemetry_write_failed:{e}"
+  | .ok () =>
+    match ← markLegacyMigration st "telemetry" with
+    | .error e => return .error s!"legacy_telemetry_mark_failed:{e}"
+    | .ok () => return .ok ()
+
+/-- Run both one-time migrations before the HTTP listener starts. -/
+def migrateLegacySecurityState
+    (workingDir dataRoot jwtSecret : String) (st : CoreStore) : IO (Except String Unit) := do
+  match ← migrateLegacyBunkerState dataRoot st with
+  | .error e => return .error e
+  | .ok () => migrateLegacyTelemetryState workingDir dataRoot jwtSecret st
 
 /-! ## Non-Destructive Legacy `.sandboxed-sh/` Hydration -/
 
