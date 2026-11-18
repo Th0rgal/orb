@@ -568,6 +568,23 @@ private def missionBoardClauseFixtures (root : String) : IO Unit := do
     let .ok store2 ← openCoreStore path | throw (IO.userError "B2b continue store")
     check ((← MissionBoard.read store2.missionsDb { userId := "a" } "b2b-main").isOk)
       "B2b restart: reopened store remains usable"
+    let putBoard (mid text time : String) : IO Unit :=
+      sql store2.missionsDb
+        "INSERT INTO mission_board(mission_id,text,updated_at,updated_by_mission_id,text_sha256) VALUES(?1,?2,?3,?1,?4) ON CONFLICT(mission_id) DO UPDATE SET text=excluded.text,updated_at=excluded.updated_at,updated_by_mission_id=excluded.updated_by_mission_id,text_sha256=excluded.text_sha256;"
+        #[mid, text, time, MissionBoard.digest text]
+    let boardCount (mid : String) : IO Nat := do
+      let .ok rows ← execParamQuery store2.missionsDb "SELECT COUNT(*) FROM mission_board WHERE mission_id=?1;" #[mid]
+        | throw (IO.userError "B2b board count")
+      return ((rows[1]?.bind (·[0]?)).getD "0").toNat?.getD 0
+    let readBoard (uid mid : String) : IO JVal := do
+      let .ok doc ← MissionBoard.read store2.missionsDb { userId := uid } mid
+        | throw (IO.userError s!"B2b read {mid}")
+      return doc
+    let boardField (uid mid field : String) : IO (Option String) := do
+      let doc ← readBoard uid mid
+      return doc.fieldStr? field
+    let writeAs (reader : MissionBoard.Reader) (target text now key : String) (fence : Option String := none) :=
+      MissionBoard.write store2.missionsDb reader target text now fence key ("B2b:" ++ target) key "write_mission_board"
 
     putBoard "b2b-atomic" "seed" "2026-11-14T00:00:00Z"
     let writer ← IO.asTask (prio := .dedicated) do
