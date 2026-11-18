@@ -1173,8 +1173,8 @@ def run (root : String) : IO Unit := do
     sql store.projectsDb "DELETE FROM projects WHERE slug IN ('member:controller-owned-by-a','other-member:controller-owned-by-a');"
     sql store.missionsDb "DELETE FROM users WHERE id='other-member';"
     -- B2b route replay: MCP surfaces, family moves, archive/resume and placement revision.
-    sql store.projectsDb "INSERT INTO projects(slug,name,controller_mission_id) VALUES('admin:b2b-routes','b2b routes','b2b-route-root'),('admin:b2b-routes-new','b2b routes new',''),('admin:b2b-routes-event2','b2b event2',''),('admin:b2b-routes-event2-new','b2b event2 new',''),('admin:b2b-routes-arch','b2b archive','');"
-    for slug in #["admin:b2b-routes", "admin:b2b-routes-new", "admin:b2b-routes-event2", "admin:b2b-routes-event2-new", "admin:b2b-routes-arch"] do
+    sql store.projectsDb "INSERT INTO projects(slug,name,controller_mission_id) VALUES('admin:b2b-routes','b2b routes','b2b-route-root'),('admin:b2b-routes-new','b2b routes new',''),('admin:b2b-routes-event2','b2b event2',''),('admin:b2b-routes-event2-new','b2b event2 new',''),('admin:b2b-routes-arch','b2b archive',''),('b2b-routes-new','b2b routes new',''),('b2b-routes-event2-new','b2b event2 new','');"
+    for slug in #["admin:b2b-routes", "admin:b2b-routes-new", "admin:b2b-routes-event2", "admin:b2b-routes-event2-new", "admin:b2b-routes-arch", "b2b-routes-new", "b2b-routes-event2-new"] do
       sql store.projectsDb "INSERT INTO project_owners(slug,owner_user_id) VALUES(?1,'admin');" #[slug]
     let addRouteMission (id title project parent : String) : IO Unit := do
       let .ok () ← upsertMission store {
