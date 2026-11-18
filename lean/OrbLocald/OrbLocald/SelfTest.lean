@@ -2551,11 +2551,11 @@ def main : IO UInt32 := do
       (if scenario == "missing_digest" then #[] else #[("expected_digest", if scenario == "bad_digest" then .bool true else .str digest)]))
     let result ← dispatchRpcCommand state (if scenario == "list" then "pending_requests_list" else "pending_requests_approve") args (some fx)
     let log ← calls.get
-    let success := #["list", "success", "critical", "privilege", "mission_access"].contains scenario
+    let success := #["list", "success", "critical", "privilege", "mission_access", "switch_back"].contains scenario
     let correctResult := match result with
       | .ok j => success && (if scenario == "list" then j.fieldArr? "items" |>.isSome else j.fieldBool? "approved" == some true)
       | .error _ => !success
-    let shouldPost := #["success", "critical", "privilege", "mission_access", "http_error"].contains scenario
+    let shouldPost := #["success", "critical", "privilege", "mission_access", "switch_back", "http_error"].contains scenario
     let noEarlyEffects := if #["locked", "bad_kind", "bad_id", "bad_digest", "missing_digest"].contains scenario then log.isEmpty else true
     let didSign ← signed.get
     let scopeGuardOk := !blockedScope || (log == #["GET /api/approvals/queue"] && !didSign)
