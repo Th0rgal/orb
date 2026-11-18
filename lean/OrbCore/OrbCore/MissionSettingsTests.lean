@@ -52,7 +52,7 @@ def moveRecovery (root : String) : IO Unit := do
     let missions ← sql reopened.missionsDb "SELECT project FROM missions ORDER BY id;"
     let sessions ← sql reopened.projectsDb "SELECT project_scope FROM mcp_sessions_v1 ORDER BY id;"
     let leases ← sql reopened.projectsDb "SELECT project_slug FROM project_track_leases ORDER BY mission_id;"
-    check (missions.size == 7 && sessions.size == 7 && leases.size == 7 &&
+    check (missions.size == 8 && sessions.size == 8 && leases.size == 8 &&
       (missions.extract 1 missions.size).all (fun r => r[0]! == "destination") &&
       (sessions.extract 1 sessions.size).all (fun r => r[0]! == "destination") &&
       (leases.extract 1 leases.size).all (fun r => r[0]! == "destination"))
