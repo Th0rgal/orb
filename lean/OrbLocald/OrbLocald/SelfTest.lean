@@ -2565,8 +2565,7 @@ def main : IO UInt32 := do
         (if #["stale", "unenrolled", "bad_challenge", "challenge_changed", "missing_item", "malformed_queue", "wrong_summary"].contains scenario then !didSign else true))) then passed := passed + 1
   -- R33: a null connection save is non-authoritative and must not clobber the
   -- last usable connection held by the desktop.
-  let connState ← IO.mkRef ({ launchToken := "test",
-    connectionJson := .obj #[("api_url", .str "https://core.example"), ("token", .str "token")] } : LocaldState)
+  let connState ← IO.mkRef ({ launchToken := "test", connectionJson := .obj #[("api_url", .str "https://core.example"), ("token", .str "token")] } : LocaldState)
   discard <| dispatchRpcCommand connState "desktop_connection_save" (.obj #[ ("connection", .null) ])
   let connAfter ← connState.get
   total := total + 1
