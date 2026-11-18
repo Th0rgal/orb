@@ -510,8 +510,8 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
   let actionState :=
     match ev with
     | .activate 2 =>
-      if st.composer.isRunning then { st with missionStopped := true, composer := { st.composer with isRunning := false } }
-      else if !st.composer.text.isEmpty then { st with messageSent := true, composer := { st.composer with text := "", cursorOffset := 0 } }
+      if !st.composer.text.isEmpty then { st with messageSent := true, composer := { st.composer with text := "", cursorOffset := 0 } }
+      else if st.composer.isRunning then { st with missionStopped := true, composer := { st.composer with isRunning := false } }
       else st
     | .activate 101 => { st with screen := .controlEmpty, modal := .none }
     | .activate 102 => { st with screen := .controlPopulated, modal := .none }
@@ -528,7 +528,10 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
     | .activate 913 => { st with toasts := st.toasts.drop 1 }
     | .key 0x1b _ .pressed => { st with modal := .none }
     | _ => st
-  let next := { actionState with composer := composer }
+  let next :=
+    match ev with
+    | .activate 2 => actionState
+    | _ => { actionState with composer := composer }
   let actionChanged :=
     match ev with
     | .activate 2 => st.composer.isRunning || !st.composer.text.isEmpty

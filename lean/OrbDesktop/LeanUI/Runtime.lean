@@ -176,7 +176,9 @@ def stepEvent (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage) (
       if state == .pressed || state == .repeated then
         -- Tab is handled here so every screen shares one focus traversal policy.
         if keysym == 0xff09 then
-          { rt with focus := cycleFocusRuntime rt.focus rt.focusableOrder }
+          let focus' := cycleFocusRuntime rt.focus rt.focusableOrder
+          let dmg' := if focus'.owner == rt.focus.owner then rt.damage else Damage.add rt.damage rt.viewportDeviceRect
+          { rt with focus := focus', damage := dmg' }
         else if keysym == 0xff0d || keysym == 0x20 then
           match rt.focus.owner with
           | some id =>
@@ -204,7 +206,7 @@ end RuntimeState
    clear `rt.damage` to `none`. -/
 def stepFrame {σ : Type} (rt : RuntimeState σ)
     (onEvent : σ → Event → σ × Damage)
-    (view : RuntimeState σ → IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect))) :
+    (view : RuntimeState σ → IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect) × List EntityId)) :
     IO (RuntimeState σ) := do
   let (wl1, evs) ← Wayland.pumpEvents rt.wayland
   let mut st := { rt with wayland := wl1 }
@@ -220,14 +222,14 @@ def stepFrame {σ : Type} (rt : RuntimeState σ)
         height := bh
         framebuffer := ByteArray.mk (Array.replicate (bw * bh * 4) 0) }
     else st.vulkan
-  let (atlas', clearColor, scene, regions) ← view { st with vulkan := vk0 }
+  let (atlas', clearColor, scene, regions, focusOrder) ← view { st with vulkan := vk0 }
   let vk' ← Vulkan.renderFrame vk0 clearColor atlas' scene
   return {
     st with
     vulkan := vk'
     atlas := atlas'
     hitRegions := regions
-    focusableOrder := regions.map (·.1)
+    focusableOrder := focusOrder
     damage := none
     framesRendered := st.framesRendered + 1
   }
@@ -235,7 +237,7 @@ def stepFrame {σ : Type} (rt : RuntimeState σ)
 /-- Build the canonical Orb Desktop canary scene (sidebar, header bar, transcript cards,
 code block, focus border, and shaped text labels) at the current scale factor and theme. -/
 def buildCanaryScene (rt : RuntimeState Unit) :
-    IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect)) := do
+    IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect) × List EntityId) := do
   let (bw, bh) := rt.wayland.deviceBufferSize
   let sc := rt.wayland.scale120
   let px (n : Int) : Int := (n * (sc : Int)) / (scaleDen : Int)
@@ -312,7 +314,7 @@ def buildCanaryScene (rt : RuntimeState Unit) :
   let compSubRect : Rect :=
     { x := subScale compRect.x, y := subScale compRect.y
       w := subScale compRect.w, h := subScale compRect.h }
-  return (ac, bgClear, prims, [(1, compSubRect)])
+  return (ac, bgClear, prims, [(1, compSubRect)], [1])
 
 /-- `RuntimeState` for the Wayland session `wl`, with the whole viewport damaged. -/
 def initRuntimeOn {σ : Type} (cfg : RuntimeConfig) (wl : Wayland.WaylandClient) (initialApp : σ) :
@@ -356,7 +358,7 @@ def openWindowRuntime {σ : Type} (cfg : RuntimeConfig) (appId : String) (initia
 block on the compositor. Nothing is drawn before the first `xdg_surface.configure`. -/
 def runWindow {σ : Type} (rt0 : RuntimeState σ)
     (onEvent : RuntimeState σ → σ → Event → σ × Damage)
-    (view : RuntimeState σ → IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect))) :
+    (view : RuntimeState σ → IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect) × List EntityId)) :
     IO (RuntimeState σ) := do
   let mut rt := rt0
   while rt.running do
