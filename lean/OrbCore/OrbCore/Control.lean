@@ -1514,6 +1514,7 @@ private def targetSupportsExplicitCyber (tgt : ProviderTarget) (requestedModel c
     and no Bitwarden token in any of its spellings. -/
 private def redactSettingsSecrets (settings : JVal) : JVal :=
   let base := (((settings.removeField "password_hash").removeField "dashboard_password_hash").removeField "auth").removeField "bws_access_token"
+  let base := redactLegacyTelemetry base
   match base.field? "bitwarden" with
   | some bw => base.setField "bitwarden" ((bw.removeField "encrypted_access_token").removeField "access_token")
   | none => base
@@ -6792,7 +6793,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             let mut acc := JVal.obj basePairs
             for (k, v) in patchPairs do
               -- `bitwarden` is owned by `/api/bitwarden/*` and auth hashes are owned by `/api/auth/*`.
-              if k != "password_hash" && k != "dashboard_password_hash" && k != "auth" && k != "bitwarden" && k != "bws_access_token" then
+              if k != "password_hash" && k != "dashboard_password_hash" && k != "auth" && k != "bitwarden" && k != "bws_access_token" && k != "orb_telemetry" then
                 acc := acc.setField k v
             return acc
         | _, _ => curSettings
@@ -7546,6 +7547,13 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       | .ok aid => pure aid
       | .error _ => pure ""
     discard <| backfillManagedMachineOwner managedStore bootAdminId
+    match ← migrateLegacySecurityState cfg.workingDir dataRoot (effectiveJwtSecret cfg) store with
+    | .error e =>
+      closeManagedComputeStore managedStore
+      closeCoreStore store
+      IO.eprintln s!"[sandboxed-sh] FATAL: legacy security-state migration failed closed: {e}"
+      return 1
+    | .ok () => pure ()
     hydrateLegacyDataDir cfg.workingDir dataRoot store managedStore bootAdminId cfg.devMode
     let repairedOwners ← repairManagedMachineOwners store managedStore
     if repairedOwners > 0 then

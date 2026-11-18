@@ -547,6 +547,12 @@ def syncSinkTarget (sink : TelemetrySink) (target? : Option HubTarget) : IO Unit
     else
       modify fun q => { q with target? := target? }
 
+/-- Generic settings responses must not project the legacy `orb_telemetry` object:
+    the private `telemetry_config.json` is the only owner and its token must never
+    be exposed as stored ciphertext. -/
+def redactLegacyTelemetry (settings : JVal) : JVal :=
+  settings.removeField "orb_telemetry"
+
 def renderTelemetryStatusJson (s : PersistedTelemetrySettings) (sink : TelemetrySink) : IO String := do
   let (active, queued, lastErr?) ← sink.mu.atomically do
     let q ← get

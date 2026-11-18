@@ -225,6 +225,7 @@ def missionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS privilege_leases (grant_id TEXT PRIMARY KEY, lease_token TEXT NOT NULL UNIQUE, mission_id TEXT NOT NULL, target_host TEXT NOT NULL, scope TEXT NOT NULL, allowed_units_json TEXT NOT NULL DEFAULT '[]', require_force_cmd INTEGER NOT NULL DEFAULT 0, biometric_signed INTEGER NOT NULL DEFAULT 1, revoked INTEGER NOT NULL DEFAULT 0, expires_at_epoch INTEGER NOT NULL DEFAULT 0, lease_epoch INTEGER NOT NULL DEFAULT 0, session_scoped INTEGER NOT NULL DEFAULT 1, session_id TEXT NOT NULL DEFAULT '', session_expires_at INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE TABLE IF NOT EXISTS privilege_audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, grant_id TEXT NOT NULL, mission_id TEXT NOT NULL, target_host TEXT NOT NULL, executing_host TEXT NOT NULL, command TEXT NOT NULL, allowed INTEGER NOT NULL, created_at TEXT NOT NULL);" ++
   "CREATE TABLE IF NOT EXISTS core_boot_state (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1), boot_epoch INTEGER NOT NULL DEFAULT 0, bunker_state INTEGER NOT NULL DEFAULT 0);" ++
+  "CREATE TABLE IF NOT EXISTS legacy_state_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS remote_message_queue (sequence INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, message_id TEXT NOT NULL, mission_id TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'waiting', UNIQUE(user_id,message_id));" ++
   "CREATE INDEX IF NOT EXISTS remote_message_pending ON remote_message_queue(state,sequence);" ++
   "CREATE TABLE IF NOT EXISTS ai_providers (id TEXT PRIMARY KEY, provider_type TEXT NOT NULL, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, base_url TEXT NOT NULL DEFAULT '', api_key TEXT NOT NULL DEFAULT '', rpm_limit INTEGER, max_concurrency INTEGER, custom_models_json TEXT NOT NULL DEFAULT '[]', sort_order INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT '', created_by_user_id TEXT NOT NULL DEFAULT '');" ++
@@ -2652,6 +2653,21 @@ def writePersistedBunkerState (st : CoreStore) (state : UInt8) : IO (Except Stri
   let res ← execParamQuery st.missionsDb
     "INSERT INTO core_boot_state(singleton_id,boot_epoch,bunker_state) VALUES(1,0,?1) ON CONFLICT(singleton_id) DO UPDATE SET bunker_state=excluded.bunker_state;"
     #[s!"{clamped}"]
+  return res.map (fun _ => ())
+
+/-- True when a one-time legacy state migration has already been durably recorded. -/
+def legacyMigrationApplied? (st : CoreStore) (name : String) : IO Bool := do
+  match ← execParamQuery st.missionsDb
+      "SELECT 1 FROM legacy_state_migrations WHERE name=?1;" #[name] with
+  | .ok rows => pure (rows.size > 1)
+  | .error _ => pure false
+
+/-- Durably mark a legacy state migration as applied. Marking is idempotent and must
+    happen only after the migrated authority has been written. -/
+def markLegacyMigration (st : CoreStore) (name : String) : IO (Except String Unit) := do
+  let res ← execParamQuery st.missionsDb
+    "INSERT OR IGNORE INTO legacy_state_migrations(name,applied_at) VALUES(?1,strftime('%Y-%m-%dT%H:%M:%SZ','now'));"
+    #[name]
   return res.map (fun _ => ())
 
 /-- Live writer missions: non-terminal runs plus active writer track leases. -/
