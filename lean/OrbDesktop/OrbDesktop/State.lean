@@ -522,7 +522,7 @@ abbrev pushStreamDelta := enqueueStreamDelta
 
 /-- The committed streamed text in display order. -/
 def streamedText (st : DesktopState) : String :=
-  st.stream.shown.foldl (fun acc chunk => acc ++ chunk) ""
+  String.intercalate "" st.stream.shown
 
 /-- Flush one display frame of streamed text. Empty frames are true no-ops; a burst of deltas
 produces one transcript damage rectangle and one coalescer render. -/

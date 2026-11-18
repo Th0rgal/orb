@@ -29,6 +29,27 @@ No push or credential access was used. Delivery is a git bundle.
 Native binary SHA-256:
 `ca62ca7ea53639a056b34a8dd3fd7eb683c8d439eac8616379c5cdceb930c8d1`.
 
+## U7 follow-up (replacement worker)
+
+The U7 benchmark remains authoritative for the stated 60 fps/WebKit acceptance:
+`scripts/bench_desktop.sh` still requires cold startup `<= 60 ms`, frame p50
+`<= 2.5 ms`, frame p99 `<= 8.33 ms`, and transcript-open time no slower than
+the WebKitGTK baseline. Acceptance was not relaxed.
+
+This follow-up reduces per-frame allocation in the exact native render path:
+glyphs, shaped runs, and shaped child nodes are accumulated in arrays, and
+committed stream chunks use a single `String.intercalate` join. The U7 stream
+spec adds an exact-order regression case in
+`OrbDesktop/Spec/StreamDamage.lean`.
+
+Portable verification limitation: this replacement worker cannot execute the
+native LeanUI benchmark because the checkout host does not provide
+`wayland-client-core.h`; `turbo-lean build --project-dir lean/OrbDesktop
+LeanUISpec` fails while compiling `c/lean_ui_wayland.c` at that missing system
+header. The WebKit/m2air comparison was therefore not accessible here. The
+portable source/spec checks and CI-native benchmark are required for the new
+head.
+
 ## Visual gate
 
 **Not accepted:** mean mismatch 5.86%, above 8-level channel tolerance 2.84%,

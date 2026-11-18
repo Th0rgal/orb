@@ -34,4 +34,9 @@ example :
     d.covers 900 400 = true ∧ d.covers 100 400 = false ∧ d.covers 900 900 = false := by
   decide
 
+/-- U7: joining committed chunks preserves their exact display order. -/
+example :
+    streamedText { initial with stream := { initial.stream with shown := ["left", "-", "right"] } } = "left-right" := by
+  decide
+
 end OrbDesktop.Spec

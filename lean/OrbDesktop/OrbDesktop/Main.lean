@@ -89,7 +89,7 @@ def shapeDesktopRuns (ac : Text.GlyphAtlasCache) (font : Text.FontHandle)
   if font.facePtr != 0 then
     let shaped ← Text.shapeText font devSize64 text ""
     let mut curAc := ac
-    let mut glyphs : List ShapedGlyph := []
+    let mut glyphs : Array ShapedGlyph := #[]
     let scDen : Int := scaleDen
     let scNum : Int := if scale120 == 0 then 120 else scale120
     let mut penDev64 : Int := 0
@@ -116,10 +116,10 @@ def shapeDesktopRuns (ac : Text.GlyphAtlasCache) (font : Text.FontHandle)
         bearingPx := (entry.bearingX, entry.bearingY)
         isColor := entry.isColor
       }
-      glyphs := glyphs ++ [g]
+      glyphs := glyphs.push g
       penDev64 := penDev64 + sg.xAdvance64
     let run : InlineRun := {
-      glyphs := glyphs
+      glyphs := glyphs.toList
       style := style
       allowBreakAfter := true
       hardBreakAfter := false
@@ -147,7 +147,7 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
         curAc := ac'
         pure (WidgetPayload.iconMask entry.page entry.uv color)
       | .text lineHeightSub runs =>
-        let mut shapedRuns : List InlineRun := []
+        let mut shapedRuns : Array InlineRun := #[]
         for r in runs do
           let isSynth := !r.glyphs.isEmpty && r.glyphs.all (fun g => g.sizePx.1 == 0 && g.sizePx.2 == 0)
           if isSynth then
@@ -156,9 +156,10 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
             curAc := ac'
             let rsAdjusted := rs.map (fun sr =>
               { sr with allowBreakAfter := r.allowBreakAfter, hardBreakAfter := r.hardBreakAfter })
-            shapedRuns := shapedRuns ++ rsAdjusted
+            for sr in rsAdjusted do
+              shapedRuns := shapedRuns.push sr
           else
-            shapedRuns := shapedRuns ++ [r]
+            shapedRuns := shapedRuns.push r
         -- A fixed-width clipped label is a CSS single-line ellipsis label.
         if style.clip && style.maxWidth > 0 then
           let total := shapedRuns.foldl (fun n r => n + r.glyphs.foldl (fun n g => n + g.xAdvance) 0) 0
@@ -168,20 +169,22 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
               curAc := ac'
               let dotW := dots.foldl (fun n r => n + r.glyphs.foldl (fun n g => n + g.xAdvance) 0) 0
               let mut used := 0
-              let mut glyphs := []
+              let mut glyphs : Array ShapedGlyph := #[]
               for g in r.glyphs do
                 if used + g.xAdvance + dotW > style.maxWidth then break
                 used := used + g.xAdvance
-                glyphs := glyphs ++ [g]
-              shapedRuns := [{ r with glyphs := glyphs, allowBreakAfter := false }] ++ dots
-        pure (WidgetPayload.text lineHeightSub shapedRuns)
+                glyphs := glyphs.push g
+              shapedRuns := #[( { r with glyphs := glyphs.toList, allowBreakAfter := false } )]
+              for dot in dots do
+                shapedRuns := shapedRuns.push dot
+        pure (WidgetPayload.text lineHeightSub shapedRuns.toList)
       | other => pure other
-    let mut shapedChildren : List WidgetNode := []
+    let mut shapedChildren : Array WidgetNode := #[]
     for c in children do
       let (ac', c') ← shapeWidgetTree curAc font mono bold medium semibold scale120 c
       curAc := ac'
-      shapedChildren := shapedChildren ++ [c']
-    return (curAc, .mk wid focusable hitTestable style newPayload shapedChildren)
+      shapedChildren := shapedChildren.push c'
+    return (curAc, .mk wid focusable hitTestable style newPayload shapedChildren.toList)
 
 /-- Render one frame of `DesktopState` via `OrbDesktop.buildDesktopScreen`, `Layout.layoutNode`,
 `Scene.buildSceneFromLayout`, and HarfBuzz/FreeType glyph shaping (`shapeDesktopRuns` + `Text.layoutTextRun`). -/
