@@ -4656,8 +4656,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         project := projSlug, folder := normCreateFolder, createdAt := nowIso, updatedAt := nowIso, totalCostCents := 0,
         authorityMode := authMode, placementKind := placeKind, reservedDiskGib := diskGib,
         nodeBootEpoch := st.store.bootEpoch, tagsJson := initTagsJson, track := effTrack, repo := repo,
-         ownerUserId := caller.userId
-         goalMode := goalObjective?.isSome
+         ownerUserId := caller.userId,
+         goalMode := goalObjective?.isSome,
          goalObjective := goalObjective?.getD ""
        }
       match ← insertNewMission st.store mRec with
