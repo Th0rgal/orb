@@ -2,8 +2,8 @@
 # Fast Orb Desktop developer loop & macOS/Linux bundle staging.
 #
 # Usage:
-#   ./scripts/orb_desktop_dev.sh                     # Linux: launch LeanUI; macOS: launch the WebKit shell
-#   ./scripts/orb_desktop_dev.sh --webkit            # Linux: explicitly launch the legacy WebKit shell
+#   ./scripts/orb_desktop_dev.sh                     # UI dev loop with the native GTK/WebKit shell (Linux and macOS)
+#   ./scripts/orb_desktop_dev.sh --leanui            # Linux: launch the experimental LeanUI client instead (not yet a full client)
 #   ./scripts/orb_desktop_dev.sh --local-server      # Isolated full-stack loop: also starts local orb-server in .orb-dev/
 #   ./scripts/orb_desktop_dev.sh --rebuild           # Force rebuild of Lean/native binaries even if sources are unchanged
 #   ./scripts/orb_desktop_dev.sh --install-desktop   # Install 'Orb Dev' XDG desktop launcher entry (~/.local/share/applications/orb-dev.desktop)
@@ -15,15 +15,16 @@ set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 ORIG_ARGS=("$@")
 OS_NAME="$(uname -s)"
-USE_WEBKIT=0
-if [[ "$OS_NAME" == "Linux" && "${1:-}" == "--native" ]]; then
+# The GTK/WebKit shell is the Linux default: LeanUI renders the parity screens but
+# does not yet load real data or handle input (roadmap U5-U9).
+USE_WEBKIT=1
+if [[ "$OS_NAME" == "Linux" && ( "${1:-}" == "--native" || "${1:-}" == "--leanui" ) ]]; then
   shift
   "$ROOT_DIR/scripts/build_orb_bins.sh" --only orb-desktop-native --out-dir "$ROOT_DIR/target/native"
   exec "$ROOT_DIR/target/native/orb-desktop-native" "$@"
 fi
 if [[ "$OS_NAME" == "Linux" && "${1:-}" == "--webkit" ]]; then
-  shift
-  USE_WEBKIT=1
+  shift  # accepted for compatibility: WebKit is the default
 fi
 MODE="dev"
 INSTALL_APP=0
@@ -549,9 +550,12 @@ fi
 if [[ -d /run/opengl-driver/share/glvnd/egl_vendor.d ]]; then
   export __EGL_VENDOR_LIBRARY_DIRS="/run/opengl-driver/share/glvnd/egl_vendor.d"
 fi
+if [[ " \${1:-} " == " --leanui " ]]; then
+  shift
+  exec "\$APP_DIR/bin/orb-desktop-native" "\$@"
+fi
 if [[ " \${1:-} " == " --webkit " ]]; then
   shift
-  exec "\$APP_DIR/bin/orb-webkit" "\$@"
 fi
 if [[ " \$* " == *" --self-test "* ]]; then
   exec "\$APP_DIR/bin/orb-desktop-native" "\$@"
@@ -582,9 +586,9 @@ if [[ -z "\${ORB_LOCALD_PORT:-}" ]]; then
   export ORB_LOCALD_PORT=\$("${PY_BIN}" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
 fi
 if [[ -n "\$mig_url" ]]; then
-  ORB_DEV_URL="\$mig_url" exec "\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
+  ORB_DEV_URL="\$mig_url" exec "\$APP_DIR/bin/orb-webkit" "\$@"
 fi
-exec "\$APP_DIR/bin/.orb-desktop-unwrapped" "\$@"
+exec "\$APP_DIR/bin/orb-webkit" "\$@"
 EOF
       chmod 0755 "$LINUX_APP_DIR/bin/orb"
       cat > "$XDG_DATA/applications/orb.desktop" <<EOF

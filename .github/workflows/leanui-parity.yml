@@ -160,6 +160,7 @@ jobs:
       - name: Run parity tests
         run: |
           python3 -m unittest -v scripts/test_leanui_tokens.py scripts/test_leanui_parity.py
+          python3 -I scripts/test_leanui_window_effects.py
           scripts/leanui_window_smoke.sh target/native/orb-desktop-native
 
       - uses: actions/upload-artifact@v4

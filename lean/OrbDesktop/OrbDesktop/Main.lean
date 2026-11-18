@@ -15,6 +15,7 @@ import LeanUI.Text
 import LeanUI.Vulkan
 import LeanUI.Runtime
 import OrbDesktop.State
+import OrbDesktop.Core
 import OrbDesktop.Chrome
 import OrbDesktop.Screens
 /-!
@@ -185,9 +186,10 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
 /-- Render one frame of `DesktopState` via `OrbDesktop.buildDesktopScreen`, `Layout.layoutNode`,
 `Scene.buildSceneFromLayout`, and HarfBuzz/FreeType glyph shaping (`shapeDesktopRuns` + `Text.layoutTextRun`). -/
 def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) :
-    IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect)) := do
+    IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect) × List EntityId) := do
   let st := rt.app
-  let theme := st.theme
+  let liveWindow := !rt.wayland.headless
+  let theme := if liveWindow then Theme.withWindowEffects st.theme else st.theme
   let pal := theme.palette
   let sc := rt.wayland.scale120
   let (availW, availH) := rt.wayland.logicalSubSize
@@ -214,7 +216,7 @@ def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) :
     diffAddRuns := addRuns
   }
 
-  let widgetRootRaw := buildDesktopScreen st availW availH shapedRuns
+  let widgetRootRaw := buildDesktopScreen st availW availH shapedRuns liveWindow
   let (ac5, widgetRoot) ← shapeWidgetTree ac4 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc widgetRootRaw
   let layoutRoot := widgetRoot.toLayoutNode
   let rootBox := layoutNode sc rt.focus.owner pal.focusRing 0 0 availW availH layoutRoot
@@ -224,9 +226,11 @@ def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) :
     let (ac6, overWidget) ← shapeWidgetTree ac5 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc overRaw
     let overBox := layoutNode sc none pal.focusRing 0 0 availW availH overWidget.toLayoutNode
     let overScene := buildSceneFromLayout sc rt.focus theme overWidget overBox
-    return (ac6, pal.canvas, sceneOut.prims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overScene.prims, sceneOut.hitRegionsSub ++ overScene.hitRegionsSub)
+    let clearColor := if liveWindow then 0x00000000 else pal.canvas
+    return (ac6, clearColor, sceneOut.prims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overScene.prims, sceneOut.hitRegionsSub ++ overScene.hitRegionsSub, sceneOut.focusableOrder ++ overScene.focusableOrder)
   else
-    return (ac5, pal.canvas, sceneOut.prims, sceneOut.hitRegionsSub)
+    let clearColor := if liveWindow then 0x00000000 else pal.canvas
+    return (ac5, clearColor, sceneOut.prims, sceneOut.hitRegionsSub, sceneOut.focusableOrder)
 
 /-- `stepDesktopEvent` for the window `rt` currently has. -/
 def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
@@ -346,7 +350,9 @@ def main (args : List String) : IO UInt32 := do
     let ok ← renderSingleGoldenToFile rcfg.width rcfg.height scr rcfg.darkTheme rcfg.scale120 outPath
     return (if ok then 0 else 1)
   let scr := dcfg.screenOpt.getD .missionTranscript
-  let initSt := DesktopState.forScreen scr rcfg.darkTheme rcfg.scale120
+  let initSt ← if dcfg.screenOpt.isNone && !dcfg.selfTest then
+    (loadLiveState).map (·.getD (DesktopState.forScreen scr rcfg.darkTheme rcfg.scale120))
+  else pure (DesktopState.forScreen scr rcfg.darkTheme rcfg.scale120)
   if dcfg.selfTest then
     return (← runSelfTest rcfg initSt)
   try

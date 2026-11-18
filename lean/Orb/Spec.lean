@@ -8453,6 +8453,19 @@ theorem proxySseScan_done_terminates_without_delta
   simp only [h0, h2, hd, Bool.not_true, Bool.false_eq_true, ite_false, ite_true]
   cases inThink == 1 <;> decide
 
+/-! R30 stream recovery: the completed-tool-call fence dominates every retry,
+and provider-bound reasoning is stripped only when changing targets. -/
+theorem streamRecoveryStep_complete_tool_call_closes :
+    (streamRecoveryStep 1 1 0 2 1 1 1 &&& 0xFF) = 3 := by decide
+
+theorem streamRecoveryStep_retry_has_no_complete_tool_call :
+    (streamRecoveryStep 1 0 0 2 1 1 1 &&& 0xFF) = 1 ∧
+    (streamRecoveryStep 1 0 1 1 0 1 1 &&& 0xFF) = 2 := by decide
+
+theorem streamRecoveryStep_strip_only_on_next_target :
+    (streamRecoveryStep 1 0 1 1 0 1 1 &&& 256) != 0 ∧
+    (streamRecoveryStep 1 0 1 1 0 1 1 &&& 0xFF) = 2 := by decide
+
 /-- Cancellation or hash collision in `streamRepetitionStep` fails open to
     `Inconclusive` (`lo32 = 2`) and preserves `prevCount`. -/
 theorem streamRepetition_cancel_or_collision_inconclusive

@@ -1,8 +1,8 @@
 {
   "kernel_abi_json_sha256": "b85d83803cfa9a9f867b9ba68022c9bed554db3042c1547d3ab843dcb6ede5f4",
-  "kernel_lean_sha256": "887b12576dae8e982d9b12fe6bec31a54d6c01b0939be626dddbe92dca4cdfa0",
+  "kernel_lean_sha256": "476809b3c9b07d8e1e4b1b98d0d021fddcbf1a79f2077f408079bab9e2a493ff",
   "leannative_aarch64_ll_sha256": "882138cb381ff0fe934d3ce3c843084828edb39bb9b83a7e898d7f157a16a730",
   "leannative_x86_64_ll_sha256": "24493b60c2aa4aa1a60bdf5542a57606353164b4d41b2c50cbd5c9c2c04c55a2",
   "schema": "orb.kernel.leannative.ll.v1",
-  "unboxed_c_sha256": "d9562c153c94d3e33bffc4bd10946191b8a4667ca6d8768fda482519c0f19534"
+  "unboxed_c_sha256": "54ecf4da34c2d7bed5f6f8f30de1984674a790d82a19ba570109dbecb2f1b540"
 }

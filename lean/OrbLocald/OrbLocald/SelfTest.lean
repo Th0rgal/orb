@@ -2551,11 +2551,11 @@ def main : IO UInt32 := do
       (if scenario == "missing_digest" then #[] else #[("expected_digest", if scenario == "bad_digest" then .bool true else .str digest)]))
     let result ← dispatchRpcCommand state (if scenario == "list" then "pending_requests_list" else "pending_requests_approve") args (some fx)
     let log ← calls.get
-    let success := #["list", "success", "critical", "privilege", "mission_access"].contains scenario
+    let success := #["list", "success", "critical", "privilege", "mission_access", "switch_back"].contains scenario
     let correctResult := match result with
       | .ok j => success && (if scenario == "list" then j.fieldArr? "items" |>.isSome else j.fieldBool? "approved" == some true)
       | .error _ => !success
-    let shouldPost := #["success", "critical", "privilege", "mission_access", "http_error"].contains scenario
+    let shouldPost := #["success", "critical", "privilege", "mission_access", "switch_back", "http_error"].contains scenario
     let noEarlyEffects := if #["locked", "bad_kind", "bad_id", "bad_digest", "missing_digest"].contains scenario then log.isEmpty else true
     let didSign ← signed.get
     let scopeGuardOk := !blockedScope || (log == #["GET /api/approvals/queue"] && !didSign)
@@ -2563,6 +2563,15 @@ def main : IO UInt32 := do
     if (← assertTrue s!"pending_dispatch_{scenario}" (correctResult && (← posted.get) == shouldPost && noEarlyEffects && scopeGuardOk &&
         (log.filter (· == "POST /api/approvals/approve-all")).size == (if shouldPost then 1 else 0) &&
         (if #["stale", "unenrolled", "bad_challenge", "challenge_changed", "missing_item", "malformed_queue", "wrong_summary"].contains scenario then !didSign else true))) then passed := passed + 1
+  -- R33: a null connection save is non-authoritative and must not clobber the
+  -- last usable connection held by the desktop.
+  let connState ← IO.mkRef ({ launchToken := "test", connectionJson := .obj #[("api_url", .str "https://core.example"), ("token", .str "token")] } : LocaldState)
+  discard <| dispatchRpcCommand connState "desktop_connection_save" (.obj #[ ("connection", .null) ])
+  let connAfter ← connState.get
+  total := total + 1
+  if (← assertTrue "R33_connection_save_null_preserves_state"
+      (connAfter.connectionJson.fieldStr? "api_url" == some "https://core.example")) then passed := passed + 1
+
   for (code, output, expected) in #[(0, "false\n", true), (0, "true\n", false), (1, "false", false), (0, "", false), (0, "unlocked", false)] do
     total := total + 1
     if (← assertTrue "pending_lock_fail_closed" (pendingLockOutputUnlocked code output == expected)) then passed := passed + 1

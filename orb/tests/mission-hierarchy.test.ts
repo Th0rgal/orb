@@ -23,6 +23,20 @@ test("a partial patch changes only the fields it names", () => {
   expect(next).toMatchObject({ status: "running", status_message: "x", callback_parent_mission_id: "p" });
 });
 
+test("a stale full detail response cannot restore an older renamed title", () => {
+  const renamed = mergeMission(undefined, row("c", {
+    title: "Final title",
+    metadata_updated_at: "2026-11-18T08:00:00Z",
+  }));
+  const stale = mergeMission(renamed, {
+    id: "c",
+    title: "Draft title",
+    metadata_updated_at: "2026-11-18T07:00:00Z",
+  });
+  expect(stale.title).toBe("Final title");
+  expect(stale.metadata_updated_at).toBe("2026-11-18T08:00:00Z");
+});
+
 test("the derived callback link Core puts only on list/read answers sticks to later answers", () => {
   stickHierarchy(row("c", { callback_parent_mission_id: "p" }));
   const resumed = stickHierarchy(row("c", { status: "pending" }));
