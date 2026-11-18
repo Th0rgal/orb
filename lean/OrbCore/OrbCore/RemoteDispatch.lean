@@ -1581,23 +1581,23 @@ partial def spawnRemoteJobPoller
                   discard <| execParamQuery store.missionsDb
                     "UPDATE mission_runs SET terminal_reason=?2, updated_at=?3 WHERE mission_id=?1 AND remote_job_id=?4;"
                     #[missionId, nextTermReason, nowIso, jobId]
-                 let goalCandidate? := mRec?.filter (fun m => m.goalMode && m.backend == "opencode") |>.map (·.goalObjective)
-                 let mut goalContinuation := false
-                 if jState == "succeeded" then
-                   if let some goal ← goalCandidate? then
-                     if remoteGoalComplete finalText then
-                       emitMissionEventAndBroadcast store broadcastHub? missionId "goal_status"
-                         (renderCompact (.obj #[("status", .str "complete"), ("objective", .str goal)])) nowIso
-                     else
-                       goalContinuation ← scheduleRemoteGoalContinuation store broadcastHub? missionId goal nowIso nowSec
-                 let finalStatus := if goalContinuation then "awaiting_user" else nextMissionStatus
-                 let finalReason := if goalContinuation then "remote_goal_continuation" else nextTermReason
-                 discard <| execParamQuery store.missionsDb
-                   ("UPDATE missions SET status=?2, terminal_reason=?3, state_revision=state_revision+1, updated_at=?4 " ++
-                    "WHERE id=?1 AND status NOT IN ('cancelled','interrupted');")
-                   #[missionId, finalStatus, finalReason, nowIso]
-                 emitMissionEventAndBroadcast store broadcastHub? missionId "mission_status_changed"
-                   (renderCompact (.obj #[("status", .str finalStatus), ("content", .str finalText)])) nowIso
+                let goalCandidate? : Option String := mRec?.filter (fun m => m.goalMode && m.backend == "opencode") |>.map (·.goalObjective)
+                let mut goalContinuation := false
+                if jState == "succeeded" then
+                  if let some goal := goalCandidate? then
+                    if remoteGoalComplete finalText then
+                      emitMissionEventAndBroadcast store broadcastHub? missionId "goal_status"
+                        (renderCompact (.obj #[("status", .str "complete"), ("objective", .str goal)])) nowIso
+                    else
+                      goalContinuation ← scheduleRemoteGoalContinuation store broadcastHub? missionId goal nowIso nowSec
+                let finalStatus := if goalContinuation then "awaiting_user" else nextMissionStatus
+                let finalReason : String := if goalContinuation then "remote_goal_continuation" else nextTermReason
+                discard <| execParamQuery store.missionsDb
+                  ("UPDATE missions SET status=?2, terminal_reason=?3, state_revision=state_revision+1, updated_at=?4 " ++
+                   "WHERE id=?1 AND status NOT IN ('cancelled','interrupted');")
+                  #[missionId, finalStatus, finalReason, nowIso]
+                emitMissionEventAndBroadcast store broadcastHub? missionId "mission_status_changed"
+                  (renderCompact (.obj #[("status", .str finalStatus), ("content", .str finalText)])) nowIso
           else
             let _ := jTxt
             consecNetErrors := consecNetErrors + 1
