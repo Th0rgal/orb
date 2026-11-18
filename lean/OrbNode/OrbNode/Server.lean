@@ -1320,6 +1320,8 @@ def handleRequest (rt0 : NodeRuntime) (req : HttpRequest) : IO (NodeRuntime × H
     match verifyLeaseToken leaseTok rt.cfg.token rt.cfg.tokenPrevious? rt.cfg.nodeId .missionExecute nowEp none with
     | .error msg => return (rt, textResp 400 msg)
     | .ok claims =>
+      if rt.cfg.managedSandbox then
+        return (rt, textResp 403 "raw execution is unavailable on managed machines")
       if let .error forbidResp := admitNodeLeaseRole rt.cfg claims false then
         return (rt, forbidResp)
       if claims.missionId != missionId then
@@ -1359,6 +1361,8 @@ def handleRequestConcurrent
       match verifyLeaseToken leaseTok rt.cfg.token rt.cfg.tokenPrevious? rt.cfg.nodeId .missionExecute nowEp none with
       | .error msg => return (Except.error (textResp 400 msg), preL)
       | .ok claims =>
+        if rt.cfg.managedSandbox then
+          return (Except.error (textResp 403 "raw execution is unavailable on managed machines"), preL)
         if let .error forbidResp := admitNodeLeaseRole rt.cfg claims false then
           return (Except.error forbidResp, preL)
         if claims.missionId != missionId then

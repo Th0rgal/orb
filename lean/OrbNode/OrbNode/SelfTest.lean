@@ -1555,10 +1555,6 @@ private def runManagedSandboxMemberExecTests
         ("command", .str "pwd")
       ])).toUTF8
     }
-    let msExecOut :=
-      match OrbBin.Json.parse (String.fromUTF8? rMsExec.body |>.getD "{}") with
-      | .ok jv => ((jv.fieldStr? "stdout").getD "").trimAscii.toString
-      | .error _ => ""
     let ensureCalls ← recEnsureCountRef.get
 
     check "managedSandbox=true admits member lease with valid unix_username, skips ensureMissionUser, and never writes managed_auth"
@@ -1571,9 +1567,9 @@ private def runManagedSandboxMemberExecTests
        rMsFiles.status == 200 &&
        msOutTxt == "KEY=orb-mpt-v1_scoped_alice_vm|CRED=0|GROK=" &&
        !geminiExists &&
-       forceRoleOk &&
-       rMsExec.status == 200 &&
-       msExecOut == msMissionDir.toString)
+        forceRoleOk &&
+        rMsExec.status == 403 &&
+        (String.fromUTF8? rMsExec.body |>.getD "") == "raw execution is unavailable on managed machines")
 
     -- Test 3: `managedSandbox=true`, `callerRole="member"`, no `unix_username` (and valid `unix_username`):
     -- assert exact `Orb.Kernel.placementRoleAdmit` result for `(member, targetKind=3)` and verify `admitNodeLeaseRole`.
@@ -1606,6 +1602,27 @@ private def runManagedSandboxMemberExecTests
        msNoUnixBody == "member node execution requires a valid confined unix_username" &&
        rMsAdminOnly.status == 403 &&
        (String.fromUTF8? rMsAdminOnly.body |>.getD "") == "member leases are forbidden on admin-only colocated nodes")
+
+    let managedRawExecBody := (renderCompact (.obj #[
+      ("mission_id", .str msMissionId),
+      ("lease_token", .str msMemberTok),
+      ("command", .str "id -u")
+    ])).toUTF8
+    let (_, managedRawExecResponse) ← handleRequest rtManaged {
+      method := "POST", rawPath := "/execute", path := "/execute", query := #[], headers := authHdrs,
+      body := managedRawExecBody
+    }
+    check "managedSandbox=true refuses raw /execute before it can default to the admin identity"
+      (managedRawExecResponse.status == 403 &&
+       (String.fromUTF8? managedRawExecResponse.body |>.getD "").contains "raw execution is unavailable")
+
+    let concurrentRawExecResponse ← handleRequestConcurrent (← IO.mkRef rtManaged) (← IO.mkRef ()) {
+      method := "POST", rawPath := "/execute", path := "/execute", query := #[], headers := authHdrs,
+      body := managedRawExecBody
+    }
+    check "managedSandbox=true concurrent raw /execute refuses before reserving a default admin execution"
+      (concurrentRawExecResponse.status == 403 &&
+       (String.fromUTF8? concurrentRawExecResponse.body |>.getD "").contains "raw execution is unavailable")
 
     -- Test 4: `lean_build` payload from a member lease is still refused with the same status and body as master.
     let leanBuildPayload : JVal := .obj #[
