@@ -294,7 +294,7 @@ test("startup timing benchmark: repeated explicit launches get distinct request 
  for(let i=0;i<12;i++){
   if(i)await page.getByRole("button",{name:/New Agent/}).click();
   await page.evaluate(()=>{for(const key of Object.keys((window as any).launchTiming))delete (window as any).launchTiming[key];});
-  const input=composerInput(page);await input.fill(plainPrompt);await input.press("Enter");
+   const input=composerInput(page);await input.fill(prompt);await input.press("Enter");
   await expect(page.locator(".tb-title .goal-tag")).toBeVisible();
   samples.push(await page.evaluate(()=>{const {optimistic,acceptedView}=(window as any).launchTiming;return {optimistic,acceptedView};}));
  }
