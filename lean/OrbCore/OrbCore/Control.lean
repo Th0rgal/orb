@@ -871,6 +871,9 @@ def parseChainTargetsJson
       let inlineMdlRpm? := (parseOptionalBoundedU32 it "model_rpm_limit" 1 100000).toOption.join
       let inlineMdlTpm? := (parseOptionalBoundedU64 it "model_tpm_limit" 1 1000000000).toOption.join
       let inlineMdlConc? := (parseOptionalBoundedU32 it "model_max_concurrency" 1 1024).toOption.join
+      let inlineContextLimit :=
+        (parseOptionalBoundedU32 it "context_limit" 1 1000000000).toOption.join
+          |>.orElse (fun _ => matchedModel?.bind (·.contextLimit?)) |>.getD 128000
 
       -- When `providers`/`hydratedProvs` are populated (live store hydration) and every matching account is disabled
       -- with no inline credentials, skip this unconfigured/disabled entry instead of emitting an unauthenticated dead target!
@@ -905,6 +908,7 @@ def parseChainTargetsJson
             modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
             modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
             modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
+            contextLimit          := inlineContextLimit
           }
         else
           let acct :=
@@ -934,6 +938,7 @@ def parseChainTargetsJson
               modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
               modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
               modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
+              contextLimit          := inlineContextLimit
             }
           else
             out := out.push {
@@ -947,6 +952,7 @@ def parseChainTargetsJson
               modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
               modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
               modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
+              contextLimit          := inlineContextLimit
             }
     return out
   | _ => return #[]

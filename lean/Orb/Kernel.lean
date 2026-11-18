@@ -2932,6 +2932,31 @@ def proxySseScanStep
     let emitBit : UInt32 := if hasNonEmptyContent == 1 then 256 else 0
     (2 : UInt32) ||| emitBit ||| thinkBit
 
+/-!
+  R30 safe stream recovery.  The low byte is the ending selected for a cut:
+  `0` keeps the current attempt, `1` retries the same provider, `2` retries a
+  later chain target, `3` closes at the last complete tool call, and `4` fails.
+  Bit 8 requests removal of provider-bound reasoning when the retry changes
+  targets.  A completed tool call is a hard fence: it can only close cleanly,
+  never retry, so two upstream attempts cannot be mixed in one client stream.
+-/
+@[inline]
+def streamRecoveryStep
+    (cut : UInt8)
+    (completeToolCalls : UInt32)
+    (retries maxRetries : UInt32)
+    (sameProviderAvailable nextTargetAvailable contextFits : UInt8) : UInt32 :=
+  if cut == 0 then
+    0
+  else if completeToolCalls > 0 then
+    3
+  else if sameProviderAvailable == 1 && retries < maxRetries then
+    1
+  else if nextTargetAvailable == 1 && contextFits == 1 then
+    2 ||| 256
+  else
+    4
+
 /--
   Unboxed C-ABI Bounded-Budget Stream Repetition Stepper (`orb_stream_repetition_step`):
   Governs per-candidate non-overlapping occurrence progression in `stream_guard.rs` with

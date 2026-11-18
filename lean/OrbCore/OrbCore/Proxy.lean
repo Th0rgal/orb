@@ -37,6 +37,8 @@ structure ProviderTarget where
   modelRpmLimit?        : Option UInt32 := none
   modelTpmLimit?        : Option UInt64 := none
   modelMaxConcurrency?  : Option UInt32 := none
+  /-- Maximum input context accepted by this target, used before cross-target recovery. -/
+  contextLimit            : UInt32 := 128000
   deriving Repr, DecidableEq, Inhabited
 
 /-- In-memory sliding-window RPM, active in-flight concurrency & learned upstream header state. -/
@@ -1373,7 +1375,125 @@ def streamingUpstreamRequest (isTls : Bool) (method host : String) (port : UInt1
         else (·.1) <$> pumpUpstreamBody r framing tail (fun _ => pure true)
       return .ok ({ status, headers := hdrs, body := whole }, none)
 
-/-- Execute a bounded `/v1/*` proxy forward across `chain.targets` with proactive pacing spillover,
+private def completeToolCallBoundary? (body : ByteArray) : Option Nat := Id.run do
+  match String.fromUTF8? body with
+  | none => return none
+  | some text =>
+    let mut offset : Nat := 0
+    let mut arguments : Array (Nat × String) := #[]
+    for frame in text.splitOn "\n\n" do
+      let frameBytes := (frame ++ "\n\n").toUTF8
+      offset := offset + frameBytes.size
+      for line in frame.splitOn "\n" do
+        let trimmed := line.trimAscii.toString
+        if trimmed.startsWith "data:" then
+          let payload := (trimmed.drop 5).toString.trimAscii.toString
+          if payload != "[DONE]" then
+            if let .ok jv := OrbBin.Json.parse payload then
+              let choices := (jv.fieldArr? "choices").getD #[]
+              for choice in choices do
+                let calls := ((choice.fieldOrNull "delta").fieldArr? "tool_calls").getD #[]
+                for call in calls do
+                  if let some args := (call.fieldOrNull "function").fieldStr? "arguments" then
+                    let index := (call.fieldNat? "index").getD 0
+                    let previous := (arguments.find? (fun (i, _) => i == index)).map Prod.snd |>.getD ""
+                    let combined := previous ++ args
+                    arguments := arguments.filter (fun (i, _) => i != index)
+                    arguments := arguments.push (index, combined)
+                    if (OrbBin.Json.parse combined).isOk then return some offset
+    return none
+
+private partial def stripProviderReasoningJVal : JVal → JVal
+  | .arr xs => .arr (xs.filterMap fun x =>
+      match x with
+      | .obj fields =>
+        let typ := (JVal.obj fields).fieldStr? "type"
+        if typ == some "reasoning" || typ == some "thinking" || typ == some "redacted_thinking" then none
+        else some (stripProviderReasoningJVal x)
+      | _ => some (stripProviderReasoningJVal x))
+  | .obj fields => .obj (fields.filterMap fun (k, v) =>
+      if k == "encrypted_content" || k == "signature" || k == "redacted_thinking" then none
+      else some (k, stripProviderReasoningJVal v))
+  | other => other
+
+private def stripProviderBoundReasoning (body : ByteArray) : ByteArray :=
+  match String.fromUTF8? body with
+  | some raw => match OrbBin.Json.parse raw with
+    | .ok jv => (renderCompact (stripProviderReasoningJVal jv)).toUTF8
+    | .error _ => body
+  | none => body
+
+private def synthesizeToolCallClose (contentType : String) (head : ByteArray) : ByteArray :=
+  if containsSubstring contentType.toLower "anthropic" then
+    head ++ ("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n".toUTF8)
+  else
+    head ++ ("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n".toUTF8)
+
+private def recoverBufferedStream
+    (contentType : String)
+    (initial : BodyPump)
+    (retry : Nat → IO (Option BodyPump))
+    (emit : BodyEmit) : IO (ByteArray × Bool) := do
+  let mut remaining := 2
+  let mut pump := initial
+  let mut result : Option (ByteArray × Bool) := none
+  while result.isNone do
+    let bufferRef ← IO.mkRef ByteArray.empty
+    let copyRef ← IO.mkRef ByteArray.empty
+    let modeRef : IO.Ref (Option Bool) ← IO.mkRef none
+    let (_, complete) ← pump (fun piece => do
+      copyRef.modify (· ++ piece)
+      let text := (String.fromUTF8? piece).getD ""
+      let model := containsSubstring text "\"choices\"" ||
+        containsSubstring text "\"candidates\"" ||
+        containsSubstring text "\"tool_calls\"" ||
+        containsSubstring text "\"response\""
+      match ← modeRef.get with
+      | none =>
+        modeRef.set (some model)
+        if model then bufferRef.modify (· ++ piece) else discard <| emit piece
+      | some true => bufferRef.modify (· ++ piece)
+      | some false => discard <| emit piece
+      pure true)
+    let buffered ← bufferRef.get
+    let copied ← copyRef.get
+    if (← modeRef.get) == some false then
+      result := some (copied, complete)
+      continue
+    let streamStatus := classifyProxyStreamOutcome contentType true buffered complete false
+    if complete && streamStatus == "ok" then
+      discard <| emit buffered
+      result := some (buffered, true)
+    else
+      let completeCalls : UInt32 := if (completeToolCallBoundary? buffered).isSome then 1 else 0
+      let ending := Orb.Kernel.streamRecoveryStep
+        1 completeCalls (2 - remaining).toUInt32 2
+        (if remaining > 1 then 1 else 0)
+        (if remaining > 0 then 1 else 0) 1
+      if (ending &&& 0xFF) == 3 then
+        let some boundary := completeToolCallBoundary? buffered
+          | result := some (buffered, false); continue
+        let clean := synthesizeToolCallClose contentType (buffered.extract 0 boundary)
+        discard <| emit clean
+        result := some (clean, true)
+      else if (ending &&& 0xFF) == 4 then
+        discard <| emit buffered
+        result := some (buffered, false)
+      else
+        if remaining == 0 then
+          discard <| emit buffered
+          result := some (buffered, false)
+        else
+          match ← retry (2 - remaining) with
+          | some nextPump =>
+            remaining := remaining - 1
+            pump := nextPump
+          | none =>
+            discard <| emit buffered
+            result := some (buffered, false)
+  return result.get!
+
+/- Execute a bounded `/v1/*` proxy forward across `chain.targets` with proactive pacing spillover,
     sticky `firstByteCommitted` pin enforcement via `Orb.HarnessCloud.stepProviderAttemptSlice` /
     `classifyProviderAttempt` (`SM-21`), pre-header failover on `402`, `429`, and `5xx` via
     `Orb.Kernel.proxyStep` + `verifyProxyFailoverStep`, and deterministic exhaustion classification via
@@ -1735,6 +1855,39 @@ def forwardProxyChain
               pinnedAccountId := nextSlice.pinnedAccountId
               verdictCode := vCode
             }
+          let recoveryPump? : Option BodyPump ←
+            match pump? with
+            | none => pure none
+            | some rawPump =>
+              if !wantsStream then
+                pure (some rawPump)
+              else
+                let openRecoveryTarget (retryTarget : ProviderTarget) (retryBody : ByteArray) :
+                    IO (Option BodyPump) := do
+                  let (retryTls, retryHost, retryPort, retryPath, retryHdrs, retryWireBody) :=
+                    upstreamRequest retryTarget relPath extraHeaders retryBody
+                  if retryWireBody.size.toUInt32 > retryTarget.contextLimit then
+                    pure none
+                  else if retryPort == 0 || (!retryTls && !isPrivatePlaintextHost retryHost) then
+                    pure none
+                  else
+                    match ← streamingUpstreamRequest retryTls method retryHost retryPort retryPath retryHdrs retryWireBody
+                      effStreamLimits.idleMs effStreamLimits.totalMs streamHeadDeadlineMs? bodyTimedOutRef? with
+                    | .ok (_, some p) => pure (some p)
+                    | _ => pure none
+                let reopen (retryNo : Nat) : IO (Option BodyPump) := do
+                  if retryNo == 0 then
+                    match ← openRecoveryTarget tgt outBody with
+                    | some p => pure (some p)
+                    | none =>
+                      match targets[idx + 1]? with
+                      | some nextTarget => openRecoveryTarget nextTarget (stripProviderBoundReasoning outBody)
+                      | none => pure none
+                  else
+                    match targets[idx + retryNo]? with
+                    | some retryTarget => openRecoveryTarget retryTarget (stripProviderBoundReasoning outBody)
+                    | none => pure none
+                pure (some fun emit => recoverBufferedStream ctype rawPump reopen emit)
           return {
             status := resp.status
             contentType := ctype
@@ -1745,7 +1898,7 @@ def forwardProxyChain
             firstByteCommitted := nextSlice.firstByteCommitted == 1
             pinnedAccountId := nextSlice.pinnedAccountId
             verdictCode := vCode
-            stream? := pump?
+            stream? := recoveryPump?
           }
         let upstreamCode := upstreamErrorCode respBodyStr
         failures := failures.push (tgt.provider, tgt.modelId, resp.status, upstreamCode)
