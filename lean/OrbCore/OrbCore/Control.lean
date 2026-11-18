@@ -7454,9 +7454,14 @@ def handleClientConn (st : CoreAppState) (cfd : Fd) (allowKeepAlive : Bool := fa
         | some pump =>
           -- A relayed stream ends the connection: its length is unknown up front and a
           -- client that stopped reading must not hold a keep-alive slot.
-          let wroteHead ← writeCoreHttpResponse responseWrite httpResp false
-          let alive ← IO.mkRef wroteHead
-          let complete ← pump fun piece => do
+           let wroteHead ← writeCoreHttpResponse responseWrite httpResp false
+           let alive ← IO.mkRef wroteHead
+           if !wroteHead then
+             -- Do not enter a recovery pump after the client has rejected the
+             -- response head: close its upstream immediately, including a
+             -- head-only chunked response with no body callback opportunity.
+             discard <| responseWrite ByteArray.empty
+           let complete ← pump fun piece => do
             if !(← alive.get) then return false
             if piece.isEmpty then return true
             let ok ← responseWrite (encodeHttpChunk piece)
