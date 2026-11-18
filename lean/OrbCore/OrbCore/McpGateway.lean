@@ -355,6 +355,7 @@ def dispatchMcpToolCall
     (authenticatedUserId : String := "")
     (authenticatedAdmin : Bool := false)
     (askSide? : Option (String → String → String → IO (Except String String)) := none)
+    (answerQuestion? : Option (String → String → JVal → IO (Except String Bool)) := none)
     (cloudHub? : Option OrbCore.CloudHttpAndWorker.CloudRuntimeHub := none) : IO String := do
   let nowIso := formatEpochIso8601Utc nowEpochSec
   let callerMid := claims.missionId
@@ -1315,6 +1316,11 @@ def dispatchMcpToolCall
     -- mission's own transcript; read the answer from the returned side mission.
     let mid := (args.fieldStr? "mission_id").orElse (fun _ => args.fieldStr? "target_mission_id") |>.getD ""
     let question := ((args.fieldStr? "content").orElse (fun _ => (args.fieldStr? "question").orElse (fun _ => args.fieldStr? "message")) |>.getD "").trimAscii.toString
+    -- The side-agent launcher has no thread/sandbox continuation store: accepting
+    -- these knobs would silently start a fresh side mission instead of the
+    -- requested thread, so reject them instead of lying.
+    if (args.field? "thread_id").isSome || (args.fieldBool? "sandbox").getD false then
+      return mcpErr "unsupported_argument" "ask_mission does not support thread_id or sandbox" false
     if mid.isEmpty || question.isEmpty then
       return mcpErr "invalid_arguments" "mission_id and content are required"
     if let .error e ← checkMissionReadAccess store claims mid nowEpochSec then
@@ -1330,9 +1336,35 @@ def dispatchMcpToolCall
       let sideId := (side.fieldStr? "id").getD ""
       return mcpOk (.obj #[("side_mission_id", .str sideId), ("status", .str ((side.fieldStr? "status").getD "")),
         ("hint", .str s!"Read the answer with get_mission_events on `{sideId}`.")])
-  | "send_message_to_mission" | "answer_mission_question" => withReservedMcpOutcome store claims callerUserId toolName idemKeyTop nowIso do
+  | "answer_mission_question" => withReservedMcpOutcome store claims callerUserId toolName idemKeyTop nowIso do
+    let mid := (args.fieldStr? "mission_id").orElse (fun _ => (args.fieldStr? "target_mission_id").orElse (fun _ => args.fieldStr? "id")) |>.getD ""
+    let callId := (args.fieldStr? "tool_call_id").orElse (fun _ => args.fieldStr? "request_id") |>.getD ""
+    let answers := (args.field? "answers").getD .null
+    if mid.isEmpty || callId.isEmpty || answers == .null then
+      return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" "mission_id, tool_call_id and answers are required" nowIso
+    let some answerQuestion := answerQuestion?
+      | return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "answer_mission_question needs the Core server's live control-request router" nowIso
+    match ← answerQuestion mid callId answers with
+    | .error e =>
+      return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" e nowIso
+    | .ok false =>
+      return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "no live pending question for this tool_call_id" nowIso
+    | .ok true =>
+      let resObj := JVal.obj #[
+        ("ok", .bool true),
+        ("mission_id", .str mid),
+        ("tool_call_id", .str callId),
+        ("delivered", .bool true)
+      ]
+      let .ok settled ← recordSettledMcpAction store claims callerUserId toolName args resObj nowIso mid
+        | return mcpErr "receipt_record_failed" "The answer was delivered but its receipt could not be recorded. Reconcile the action." false
+      return mcpOk settled
+
+  | "send_message_to_mission" => withReservedMcpOutcome store claims callerUserId toolName idemKeyTop nowIso do
     let mid := (args.fieldStr? "mission_id").orElse (fun _ => args.fieldStr? "target_mission_id") |>.getD ""
     let content := ((args.fieldStr? "message").orElse (fun _ => (args.fieldStr? "content").orElse (fun _ => (args.fieldStr? "question").orElse (fun _ => args.fieldStr? "answer"))) |>.getD "").trimAscii.toString
+    if (args.fieldBool? "interrupt").getD false || (args.fieldStr? "mode").getD "" == "interrupt" then
+      return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" "interrupt delivery is not supported" nowIso
     if mid.isEmpty || content.isEmpty then
       if toolName != "send_message_to_mission" || idemKeyTop.isEmpty then
         return mcpErr "invalid_arguments" "mission_id and message/content are required"
