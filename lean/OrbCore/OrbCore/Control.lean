@@ -1559,17 +1559,22 @@ private def stopMissionTurnForUnavailableChain
       let soonest := (soonestCooldown? cooling).getD
         { accountId := "", untilEpoch := nowEpochSec + 60, reason := .rateLimit, label := "" }
       let waitSecs := soonest.remainingSecs nowEpochSec
-      if waitSecs > 60 then
-        let returnIso := formatEpochIso8601Utc soonest.untilEpoch
-        match soonest.reason with
-        | .rateLimit | .usageLimit =>
+      let returnIso := formatEpochIso8601Utc soonest.untilEpoch
+      -- Transient refusals (rate limit, overload, server error) cool down for at
+      -- most `maxTransientCooldownSecs`: the harness retries and the turn goes on.
+      -- Only quota exhaustion and authentication failures stop running turns (R33).
+      match soonest.reason with
+      | .usageLimit =>
+        if waitSecs > 60 then
           (true, "remote_quota",
            s!"No eligible provider target in chain '{chainId}'; soonest target returns at {returnIso} (in {waitSecs}s). Stopping turn.")
-        | .authFailure | .overloaded | .serverError =>
+        else (false, "", "")
+      | .authFailure =>
+        if waitSecs > 60 then
           (true, "provider_unavailable",
            s!"Provider is unavailable in chain '{chainId}'; soonest target returns at {returnIso} (in {waitSecs}s). Stopping turn.")
-      else
-        (false, "", "")
+        else (false, "", "")
+      | .rateLimit | .overloaded | .serverError => (false, "", "")
   if !shouldStop then return ()
   let loginMessage? ← sidecarLoginFailureMessage st.store st.cfg.workingDir (cooling.map (·.accountId))
   let errMsg := loginMessage?.map (fun msg => s!"{msg} {errMsg}") |>.getD errMsg
