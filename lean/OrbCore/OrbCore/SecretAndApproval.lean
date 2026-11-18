@@ -492,7 +492,7 @@ def mcpSecretWait
     (workingDir dataRoot missionId projectSlug requestId callerSubject : String)
     (callerOnManagedNode : Bool) (timeoutSecs : Nat) (nowEpochSec : UInt64) : IO JVal := do
   let deadline := nowEpochSec + (Nat.min 25 timeoutSecs).toUInt64
-  let rec poll : IO JVal := do
+  let rec poll (remaining : Nat) : IO JVal := do
     let broker ← readSecretBrokerWithDefaults dataRoot
     let reqs := (broker.fieldArr? "requests").getD #[]
     let some req := reqs.find? (fun r => (r.fieldStr? "id").getD "" == requestId)
@@ -509,11 +509,11 @@ def mcpSecretWait
     if status == "rejected" || status == "denied" then
       return .obj #[("status", .str "denied"), ("error", .str "Operator denied access")]
     let now ← coreEpochSec
-    if now >= deadline then
+    if remaining == 0 || now >= deadline then
       return .obj #[("status", .str "pending"), ("request_id", .str requestId)]
     IO.sleep 1000
-    poll
-  poll
+    poll (remaining - 1)
+  poll (Nat.min 25 timeoutSecs)
 
 def mcpSecretQueueAction
     (workingDir dataRoot kind missionId projectSlug bwProject secretName? plainValue? note? reason : String)
