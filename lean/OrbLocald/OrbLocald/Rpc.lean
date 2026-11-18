@@ -5051,17 +5051,18 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let rawConn := (args.field? "connection").getD args
     let connVal : JVal :=
       match rawConn with
-      | .null => .null
+      | .null => st.connectionJson
       | _ =>
         let url := ((rawConn.fieldStr? "api_url").orElse (fun _ => rawConn.fieldStr? "apiUrl")).getD ""
         let tok := (rawConn.fieldStr? "token").getD ""
-        if url.isEmpty && tok.isEmpty then .null
+        if url.isEmpty && tok.isEmpty then st.connectionJson
         else .obj #[("api_url", .str url), ("token", .str tok)]
-    stRef.modify fun s => { s with connectionJson := connVal, connectionGeneration := s.connectionGeneration + 1 }
-    if let some path := connectionFilePath? st then
-      let payload := (renderCompact connVal ++ "\n").toUTF8
-      if let .error e ← OrbBin.PosixExt.writeAtomicPrivate0600 path payload then
-        return .error e
+    if renderCompact connVal != renderCompact st.connectionJson then
+      stRef.modify fun s => { s with connectionJson := connVal, connectionGeneration := s.connectionGeneration + 1 }
+      if let some path := connectionFilePath? st then
+        let payload := (renderCompact connVal ++ "\n").toUTF8
+        if let .error e ← OrbBin.PosixExt.writeAtomicPrivate0600 path payload then
+          return .error e
     return .ok .null
   | "desktop_prefs_load" =>
     let sinceRev? := args.fieldStr? "since_rev"

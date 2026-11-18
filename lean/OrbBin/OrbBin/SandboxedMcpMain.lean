@@ -513,6 +513,14 @@ def McpClient.fetchSecretFile
         let waited ← match (← c.request waitPath none) with
           | .ok w => pure w
           | .error e => return .error e
+        if (waited.field? "secret_delivery").isSome then
+          let dir ← c.secretsDir
+          let delivered ← deliverSecretIn dir waited
+          if let some errStr := delivered.fieldStr? "error" then
+            return .error errStr
+          let some pathStr := delivered.fieldStr? "path" | return .error "Missing delivered secret file path"
+          let some exportLine := delivered.fieldStr? "export" | return .error "Missing delivered secret export line"
+          return .ok (System.FilePath.mk pathStr, exportLine)
         match (waited.fieldStr? "status").getD "pending" with
         | "approved" => approved := true
         | "denied" =>
