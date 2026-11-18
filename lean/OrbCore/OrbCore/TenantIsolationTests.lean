@@ -603,9 +603,11 @@ private def missionBoardClauseFixtures (root : String) : IO Unit := do
       (writeAs { userId := "a", missionId := "b2b-race-fence" } "b2b-race-fence" "fence-a" "2026-11-15T00:00:01Z" "B2b-fence-a" (some "2026-11-15T00:00:00Z"))
     let fenceB ← IO.asTask (prio := .dedicated)
       (writeAs { userId := "a", missionId := "b2b-race-fence" } "b2b-race-fence" "fence-b" "2026-11-15T00:00:02Z" "B2b-fence-b" (some "2026-11-15T00:00:00Z"))
+    let succeeded (r : Except IO.Error (Except String JVal)) : Bool :=
+      match r with | .ok (.ok _) => true | _ => false
     let ra := fenceA.get
     let rb := fenceB.get
-    check (ra.isOk != rb.isOk) "B2b concurrency: fenced writers have exactly one winner"
+    check (succeeded ra != succeeded rb) "B2b concurrency: fenced writers have exactly one winner"
     let fenceText ← boardField "a" "b2b-race-fence" "text"
     check (fenceText == some "fence-a" || fenceText == some "fence-b")
       "B2b concurrency: fenced winner text is whole"
@@ -616,7 +618,7 @@ private def missionBoardClauseFixtures (root : String) : IO Unit := do
       (writeAs { userId := "a", missionId := "b2b-race-open" } "b2b-race-open" "open-b" "2026-11-15T00:00:05Z" "B2b-open-b")
     let oa := openA.get
     let ob := openB.get
-    check (oa.isOk && ob.isOk) "B2b concurrency: unfenced writers both commit without merge"
+    check (succeeded oa && succeeded ob) "B2b concurrency: unfenced writers both commit without merge"
     let openText ← boardField "a" "b2b-race-open" "text"
     check (openText == some "open-a" || openText == some "open-b")
       "B2b concurrency: later unfenced commit wins whole text"
