@@ -26,6 +26,7 @@ class R32LoginReporting(unittest.TestCase):
             with ExitStack() as stack:
                 for name in ("check_health", "check_proxy", "check_missions", "check_machines", "check_units", "check_builds"):
                     stack.enter_context(patch.object(monitor, name, return_value=None))
+                stack.enter_context(patch.object(monitor, "check_cut_rates", return_value=None))
                 stack.enter_context(patch.object(monitor, "ro", side_effect=Exception("unused sqlite")))
                 stack.enter_context(patch.object(monitor, "subprocess", run=lambda *args, **kwargs: type("R", (), {"stdout": ""})()))
                 Path(monitor.STATE).write_text('{"problems":{},"info":{}}')
@@ -38,6 +39,23 @@ class R32LoginReporting(unittest.TestCase):
                 files = [{"name": "fresh.json", "provider": "claude", "status": "ok"}]
                 monitor.main()
                 self.assertEqual(json.loads(Path(monitor.STATE).read_text())["problems"], {})
+
+    def test_r32_partial_provider_login_failure_does_not_alert(self):
+        fixture = json.loads((ROOT / "shared/orb-spec/fixtures/provider-login-health.json").read_text())
+        files = fixture["files"] + [{"name": "healthy.json", "provider": "claude", "status": "ok"}]
+        with tempfile.TemporaryDirectory() as tmp, patch.object(monitor, "STATE", tmp + "/state.json"), \
+                patch.object(monitor, "sidecar_logins", return_value=files), \
+                patch.object(monitor, "load_thresholds", return_value=monitor.DEFAULT_THRESHOLDS), \
+                patch.object(monitor, "notify") as notify:
+            Path(monitor.STATE).write_text('{"problems":{},"info":{}}')
+            for name in ("check_health", "check_proxy", "check_missions", "check_machines", "check_units", "check_builds", "check_cut_rates"):
+                patch.object(monitor, name, return_value=None).start()
+            try:
+                monitor.main()
+            finally:
+                patch.stopall()
+            self.assertEqual(notify.call_count, 0)
+            self.assertNotIn(fixture["expected_monitor_key"], json.loads(Path(monitor.STATE).read_text())["problems"])
 
 
 if __name__ == "__main__":

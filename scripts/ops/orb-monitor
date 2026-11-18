@@ -297,7 +297,13 @@ def check_sidecar(problems):
                 any(code in status or code in message for code in
                     ("invalid_refresh_token", "invalid_grant", "token_expired", "auth_unavailable"))):
             login_problems.append(entry)
-    if login_problems:
+    providers = {}
+    for entry in files:
+        providers.setdefault(str(entry.get("provider") or "unknown"), []).append(entry)
+    unusable = {id(entry) for entry in login_problems}
+    all_logins_unusable = any(entries and all(id(entry) in unusable for entry in entries)
+                              for entries in providers.values())
+    if all_logins_unusable:
         problems["provider:sign-in-again"] = "Sign in again: one or more provider logins are refresh-failed, disabled, expired or quota-exhausted (see Providers)."
     claude = [f for f in files if f.get("provider") == "claude" and not f.get("disabled") and f not in login_problems]
     banned = {}
