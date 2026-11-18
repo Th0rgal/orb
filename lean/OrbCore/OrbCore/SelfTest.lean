@@ -7728,8 +7728,28 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
   let oldestRev := (histArr.back?.bind (·.fieldStr? "rev")).getD ""
   let (revSt, revCtype, revBody) ← sendReq "GET" s!"/api/library/skill/orb-basics/history/{oldestRev}" hsJwt ""
   if putSkSt != 200 || cmtSt != 200 || pushSt != 200 || histSt != 200 || histArr.size < 2 ||
-     revSt != 200 || !(revCtype.startsWith "text/plain") || (revBody.splitOn "Follow Core contracts.").length != 2 then
+      revSt != 200 || !(revCtype.startsWith "text/plain") || (revBody.splitOn "Follow Core contracts.").length != 2 then
     return (← fail s!"commit/push/history roundtrip failed: put={putSkSt} cmt={cmtSt}:{cmtBody} push={pushSt}:{pushBody} hist={histBody} rev=({revSt},{revBody})")
+
+  -- Missing checkout regression: a failed `cd` must fail closed at the next
+  -- Library route, rather than reporting an empty successful catalog or
+  -- leaving the self-test blocked in a git child/pipe wait.
+  let libraryDirForMissing ← resolveLibraryDir workRoot dataRoot
+  discard <| (IO.FS.removeDirAll libraryDirForMissing).toBaseIO
+  let missingRemote := s!"{workRoot}/missing-after-push.git"
+  let (missingSetSt, _, _) ← sendReq "PUT" "/api/settings/library-remote" hsJwt
+    s!"\{\"library_remote\":{jsonEscape missingRemote}}"
+  let missingStarted ← IO.monoNanosNow
+  let (missingListSt, _, missingListBody) ← sendReq "GET" "/api/library/skill" hsJwt ""
+  let missingElapsedMs := ((← IO.monoNanosNow) - missingStarted) / 1000000
+  if missingSetSt != 200 || missingListSt != 502 ||
+      (missingListBody.splitOn "Failed to initialize Library repository").length < 2 ||
+      missingElapsedMs > 35000 then
+    return (← fail s!"missing Library checkout did not fail closed: set={missingSetSt} list={missingListSt}:{missingListBody} elapsed_ms={missingElapsedMs}")
+  let (restoreSt, _, _) ← sendReq "PUT" "/api/settings/library-remote" hsJwt
+    s!"\{\"library_remote\":{jsonEscape bareRepo},\"force_reinitialize\":true}"
+  if restoreSt != 200 then
+    return (← fail s!"could not restore Library checkout after missing-directory regression: status={restoreSt}")
 
   -- 4. Diverged history (`409 DIVERGED_HISTORY`) on `sync`/`push` and recovery via `force-sync`
   let divergeRc ← shRun
