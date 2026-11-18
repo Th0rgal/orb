@@ -1358,6 +1358,16 @@ def dispatchMcpToolCall
     | .ok accepted => return mcpOk accepted
 
   | "exec_raw_managed_machine" =>
+    let some mc := mc? | return mcpErr "unavailable" "managed compute store not configured"
+    let mid := (args.fieldStr? "machine_id").orElse (fun _ => args.fieldStr? "node_id") |>.getD ""
+    let cmd := (args.fieldStr? "command").getD ""
+    if mid.isEmpty || cmd.isEmpty then
+      return mcpErr "invalid_arguments" "machine_id and command are required"
+    let some canonicalId ← resolveManagedMachineId? mc mid
+      | return mcpErr "not_found" "Managed machine not found"
+    let some (machine, _) ← getManagedMachine? mc canonicalId
+      | return mcpErr "not_found" "Managed machine not found"
+    if !(← canManageMachine machine) then return mcpErr "not_found" "Managed machine not found"
     return mcpErr "unsupported" "raw execution is unavailable on managed machines"
 
   | "stop_managed_machine" | "resume_managed_machine" | "destroy_managed_machine" | "extend_managed_machine" =>
