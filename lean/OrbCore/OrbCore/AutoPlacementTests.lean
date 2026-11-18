@@ -88,7 +88,7 @@ private def gatewayTests (root : String) : IO Unit := do
       sessionId := "readonly-session", missionId := readonlyId, role := "executor", expiresAt := 2000 }
     let refusedRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none fleet root readonlyClaims
       "start_mission" (.obj #[("title", .str "forbidden child"), ("idempotency_key", .str "r15-readonly-child")]) now
-    let refused ← OrbBin.Json.parse refusedRaw |>.toOption.getD .null
+    let refused := (OrbBin.Json.parse refusedRaw).toOption.getD .null
     check ((refused.fieldStr? "error" |>.bind (·.fieldStr? "code")) == some "read_only_mission")
       "R15 readonly mission refuses mutating child launch"
     -- Unconstrained: ashur is idle (its only job finished), so it is the least busy node.
