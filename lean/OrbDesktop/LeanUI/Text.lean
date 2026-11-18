@@ -220,6 +220,8 @@ structure GlyphAtlasCache where
   pad : Nat := 1
   pages : Array AtlasPageBuffer := #[]
   cache : HashCache AtlasGlyphEntry := {}
+  /-- Shaping results reused across frames; glyph rasterization is cached separately below. -/
+  shapeCache : Array (Nat × UInt32 × String × String × Array ShapedGlyph) := #[]
   hits : Nat := 0
   misses : Nat := 0
   deriving Inhabited
@@ -304,6 +306,20 @@ def shapeText (f : FontHandle) (size64 : UInt32) (text : String) (features : Str
   if text.isEmpty then return #[]
   let raw ← FFI.shape f.facePtr size64 text features
   return decodeShapedGlyphs raw
+
+/-- Shape text with a small atlas-owned cache. The key includes the font, size, text, and shaping
+features, so unchanged chrome is not sent through HarfBuzz on every display tick. -/
+def shapeTextCached (ac : GlyphAtlasCache) (f : FontHandle) (size64 : UInt32) (text : String)
+    (features : String := "") : IO (GlyphAtlasCache × Array ShapedGlyph) := do
+  match ac.shapeCache.find? (fun (fontId, cachedSize, cachedText, cachedFeatures) =>
+      fontId == f.fontId && cachedSize == size64 && cachedText == text && cachedFeatures == features) with
+  | some (_, _, _, cached) =>
+    return (ac, cached)
+  | none =>
+    let shaped ← shapeText f size64 text features
+    let next := ac.shapeCache.push (f.fontId, size64, text, features, shaped)
+    let bounded := if next.size > 64 then next.extract (next.size - 64) next.size else next
+    return ({ ac with shapeCache := bounded }, shaped)
 
 /-- Rasterize a single glyph at `(size64, subpx)` or return it from `GlyphAtlasCache` on hit. -/
 def getOrRasterizeGlyph (ac : GlyphAtlasCache) (f : FontHandle) (glyphId : UInt32)

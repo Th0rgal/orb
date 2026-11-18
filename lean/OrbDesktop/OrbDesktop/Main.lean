@@ -87,8 +87,8 @@ def shapeDesktopRuns (ac : Text.GlyphAtlasCache) (font : Text.FontHandle)
     return (ac, [])
   let devSize64 : UInt32 := ((style.sizeSub * scale120 + scaleDen / 2) / scaleDen).toUInt32
   if font.facePtr != 0 then
-    let shaped ← Text.shapeText font devSize64 text ""
-    let mut curAc := ac
+    let (ac', shaped) ← Text.shapeTextCached ac font devSize64 text ""
+    let mut curAc := ac'
     let mut glyphs : Array ShapedGlyph := #[]
     let scDen : Int := scaleDen
     let scNum : Int := if scale120 == 0 then 120 else scale120
