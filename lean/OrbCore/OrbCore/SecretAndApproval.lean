@@ -504,7 +504,8 @@ def mcpSecretWait
     if status == "approved" then
       let name := (req.fieldStr? "secret_name").getD ""
       let reason := (req.fieldStr? "reason").getD ""
-      return mcpSecretGet workingDir dataRoot missionId projectSlug name reason callerOnManagedNode (← coreEpochSec) callerSubject
+      let granted ← mcpSecretGet workingDir dataRoot missionId projectSlug name reason callerOnManagedNode (← coreEpochSec) callerSubject
+      return granted
     if status == "rejected" || status == "denied" then
       return .obj #[("status", .str "denied"), ("error", .str "Operator denied access")]
     let now ← coreEpochSec
