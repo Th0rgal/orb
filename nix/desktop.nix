@@ -25,16 +25,18 @@ stdenv.mkDerivation {
     cat > "$out/bin/orb-desktop" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "''${1:-}" == "--webkit" ]]; then
+# GTK/WebKit is the default; LeanUI is experimental (renders the parity screens only).
+if [[ "''${1:-}" == "--leanui" ]]; then
   shift
-  exec "$(dirname "$0")/orb-webkit" "$@"
+  exec "$(dirname "$0")/orb-desktop-native" "$@"
 fi
-exec "$(dirname "$0")/orb-desktop-native" "$@"
+[[ "''${1:-}" == "--webkit" ]] && shift
+exec "$(dirname "$0")/orb-webkit" "$@"
 SH
     chmod 0755 "$out/bin/orb-desktop"
   '';
   meta = {
-    description = "Orb LeanUI Linux desktop (WebKit fallback: --webkit)";
+    description = "Orb Linux desktop: GTK/WebKit client (experimental LeanUI: --leanui)";
     mainProgram = "orb-desktop";
     platforms = lib.platforms.linux;
   };
