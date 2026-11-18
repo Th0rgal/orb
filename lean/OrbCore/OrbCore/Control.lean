@@ -834,7 +834,8 @@ def parseChainTargetsJson
     (providers : Array AIProviderRecord := #[])
     (hydratedProvs : Array HydratedProvider := #[])
     (cliProxyUrl : String := "")
-    (cliProxyKey : String := "") : Array ProviderTarget := Id.run do
+    (cliProxyKey : String := "")
+    (googleMaxConcurrency? : Option UInt32 := some 10) : Array ProviderTarget := Id.run do
   match OrbBin.Json.parse rawJson with
   | .ok (.arr items) =>
     let mut out : Array ProviderTarget := #[]
@@ -873,6 +874,9 @@ def parseChainTargetsJson
       let inlineMdlRpm? := (parseOptionalBoundedU32 it "model_rpm_limit" 1 100000).toOption.join
       let inlineMdlTpm? := (parseOptionalBoundedU64 it "model_tpm_limit" 1 1000000000).toOption.join
       let inlineMdlConc? := (parseOptionalBoundedU32 it "model_max_concurrency" 1 1024).toOption.join
+      let inlineContextLimit :=
+        (parseOptionalBoundedU32 it "context_limit" 1 1000000000).toOption.join
+          |>.orElse (fun _ => matchedModel?.bind (·.contextLimit?)) |>.getD 128000
 
       -- When `providers`/`hydratedProvs` are populated (live store hydration) and every matching account is disabled
       -- with no inline credentials, skip this unconfigured/disabled entry instead of emitting an unauthenticated dead target!
@@ -903,10 +907,12 @@ def parseChainTargetsJson
             apiKey                 := cliProxyKey
             modelId                := if isAg then mdl else OrbCore.ProxyModelRouting.cliProxyModelId effProvType mdl
             accountRpmLimit?       := inlineAcctRpm?.orElse (fun _ => matchedHydrated?.bind (·.rpmLimit?))
-            accountMaxConcurrency? := inlineAcctConc?.orElse (fun _ => matchedHydrated?.bind (·.maxConcurrency?))
+            accountMaxConcurrency? := (inlineAcctConc?.orElse (fun _ => matchedHydrated?.bind (·.maxConcurrency?))).orElse
+               (fun _ => if effProvType == "google" || effProvType == "antigravity" then googleMaxConcurrency? else none)
             modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
             modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
             modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
+            contextLimit          := inlineContextLimit
           }
         else
           let acct :=
@@ -932,10 +938,12 @@ def parseChainTargetsJson
               apiKey                 := cliProxyKey
               modelId                := if isAg then mdl else OrbCore.ProxyModelRouting.cliProxyModelId effProvType mdl
               accountRpmLimit?       := inlineAcctRpm?.orElse (fun _ => matchedProv?.bind (·.rpmLimit?))
-              accountMaxConcurrency? := inlineAcctConc?.orElse (fun _ => matchedProv?.bind (·.maxConcurrency?))
+              accountMaxConcurrency? := (inlineAcctConc?.orElse (fun _ => matchedProv?.bind (·.maxConcurrency?))).orElse
+                 (fun _ => if effProvType == "google" || effProvType == "antigravity" then googleMaxConcurrency? else none)
               modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
               modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
               modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
+              contextLimit          := inlineContextLimit
             }
           else
             out := out.push {
@@ -949,6 +957,7 @@ def parseChainTargetsJson
               modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
               modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
               modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
+              contextLimit          := inlineContextLimit
             }
     return out
   | _ => return #[]
@@ -960,6 +969,8 @@ def loadRoutingChainsFromStore (st : CoreStore) (workingDir : String := "") : IO
   let hydratedProvs ← loadHydratedProviders st effWorkDir
   let cliKey := ((← lookupEnvWithFiles? "CLI_PROXY_API_KEY").getD "").trimAscii.toString
   let cliUrl ← resolveCliProxyBaseUrl
+  let envGoogle := (((← IO.getEnv "PROXY_GOOGLE_MAX_CONCURRENCY").getD "10").trimAscii.toString.toNat?).getD 10
+  let googleMax := min 128 (max 1 envGoogle)
   let .ok rows ← execParamQuery st.missionsDb "SELECT id,name,models_json FROM model_routing_chains ORDER BY id ASC;" #[]
     | throw (IO.userError "routing_chain_store_unavailable")
   let mut out : Array RoutingChain := #[]
@@ -968,12 +979,12 @@ def loadRoutingChainsFromStore (st : CoreStore) (workingDir : String := "") : IO
     let cid := (r[0]?).getD ""
     let nm := (r[1]?).getD cid
     let mj := (r[2]?).getD "[]"
-    out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey }
+    out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey (some googleMax.toUInt32) }
   -- Immutable defaults are a derived view, not a second mutable config store.
   -- Persisted ids (even empty/unavailable chains) always win over stock entries.
   for (id, name, entries) in OrbCore.ProxyModelRouting.stockChains do
     if !out.any (fun c => c.id == id) then
-      out := out.push { id := id, name := name, targets := parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson entries) providers hydratedProvs cliUrl cliKey }
+      out := out.push { id := id, name := name, targets := parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson entries) providers hydratedProvs cliUrl cliKey (some googleMax.toUInt32) }
   return out
 
 private def optU32Json (v? : Option UInt32) : String :=
@@ -1039,8 +1050,10 @@ private def directRoutingChain? (st : CoreAppState) (chains : Array RoutingChain
   let hydrated ← loadHydratedProviders st.store st.cfg.workingDir
   let cliKey := ((← lookupEnvWithFiles? "CLI_PROXY_API_KEY").getD "").trimAscii.toString
   let cliUrl ← resolveCliProxyBaseUrl
+  let envGoogle := (((← IO.getEnv "PROXY_GOOGLE_MAX_CONCURRENCY").getD "10").trimAscii.toString.toNat?).getD 10
+  let googleMax := min 128 (max 1 envGoogle)
   let targets := (parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson #[(provider, model)])
-    providers hydrated cliUrl cliKey).filter (fun t => !t.apiKey.isEmpty)
+    providers hydrated cliUrl cliKey (some googleMax.toUInt32)).filter (fun t => !t.apiKey.isEmpty)
   -- Explicit in-memory chain snapshots can be the configured standard accounts
   -- (including hermetic transports). Do not resurrect them over disabled store rows.
   let hasConfiguredOwner := providers.any (fun p => p.providerType == provider || p.id == provider ||
@@ -1794,6 +1807,14 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     (authEvidence? := some authEvidence)
     (streamLimits? := st.proxyStreamLimits?)
     (bodyTimedOutRef? := some bodyTimedOutRef)
+  let selectedAccountAfterStream : IO String := do
+    match out.streamSelectedAccountRef? with
+    | some ref => ref.get
+    | none => pure out.selectedAccount
+  let attemptsAfterStream : IO Nat := do
+    match out.streamAttemptsRef? with
+    | some ref => ref.get
+    | none => pure out.attemptsUsed
   let prevSelectedStreak : UInt32 :=
     (prevStreaks.find? (fun (aid, _) => aid == out.selectedAccount)).map Prod.snd |>.getD 0
   let loginMessage? ← if out.status ≥ 400 then
@@ -1836,11 +1857,12 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   -- stream they run once the stream has ended.
   let accountBody : ByteArray → IO Unit := fun body => do
     if out.status ≥ 200 && out.status < 300 then
+      let selectedAccount ← selectedAccountAfterStream
       if let some ownerUid := proxyOwnerUserId? then
         let estCents := estimateProxyUsageCostCents out.headers body
         if estCents > 0 then
           discard <| addUserSpendCents st.store ownerUid utcDay estCents 0 s!"{nowEpochSec}"
-      let usedTarget? := dispatchChain.targets.find? (fun t => t.accountId == out.selectedAccount)
+      let usedTarget? := dispatchChain.targets.find? (fun t => t.accountId == selectedAccount)
       let usedMissionId := boundMid?.getD ""
       let callerKind ←
         if usedMissionId.isEmpty then pure "api"
@@ -1849,7 +1871,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
           pure (if parent.isEmpty then "mission" else "subagent")
       recordProxyUsage st.store nowEpochSec
         ((usedTarget?.map (·.modelId)).getD requestedModel) ((usedTarget?.map (·.provider)).getD "")
-        out.selectedAccount (execKey?.getD "") usedMissionId callerKind (extractProxyUsage body)
+        selectedAccount (execKey?.getD "") usedMissionId callerKind (extractProxyUsage body)
         (requestedModel := rawRequestedModel)
     if let (some program, some mid, some sel) := (expected?, boundMid?, selection?) then
       let text := String.fromUTF8? body |>.getD ""
@@ -1902,14 +1924,26 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
                  let copy ← streamCopyRef.get
                  let ok ← streamOkRef.get
                  let timedOut ← bodyTimedOutRef.get
+                 let finalAccount ← selectedAccountAfterStream
+                 let finalAttempts ← attemptsAfterStream
+                 let finalTarget? := dispatchChain.targets.find? (fun t => t.accountId == finalAccount)
+                 if let some oid := outcomeId? then
+                   if finalAccount != out.selectedAccount || finalAttempts != out.attemptsUsed then
+                     discard <| execParamQuery st.store.missionsDb
+                       ("UPDATE proxy_outcomes SET provider=?2,account_id=?3,model=?4,retries=?5 WHERE id=?1;")
+                       #[oid, (finalTarget?.map (·.provider)).getD "", finalAccount,
+                         (finalTarget?.map (·.modelId)).getD rawRequestedModel,
+                         toString (finalAttempts - 1)]
                  let streamStatus := classifyProxyStreamOutcome out.contentType wantsStreamReq copy ok timedOut
                  if streamStatus != "ok" then
                    if let some oid := outcomeId? then
                      discard <| execParamQuery st.store.missionsDb
                        "UPDATE proxy_outcomes SET status=?2 WHERE id=?1;" #[oid, streamStatus]
-                   if !out.selectedAccount.isEmpty then
+                   if !finalAccount.isEmpty then
                      if let some htr := st.healthTracker? then
-                       discard <| recordStreamCutHealth htr out.selectedAccount prevSelectedStreak nowEpochSec
+                       let finalPrevStreak :=
+                         (prevStreaks.find? (fun (aid, _) => aid == finalAccount)).map Prod.snd |>.getD prevSelectedStreak
+                       discard <| recordStreamCutHealth htr finalAccount finalPrevStreak nowEpochSec
                        let active ← snapshotActiveHealthCooldowns htr nowEpochSec
                        st.proxyCooldownsRef.set active }
   | none =>
@@ -3243,6 +3277,35 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
 
     let some activeClaims := effClaims?
       | return .ok (mkJson 401 "{\"error\":\"unauthorized_mcp\"}")
+
+    if req.method == "GET" && cleanPath.startsWith "/api/mcp/requests/secret/" && cleanPath.endsWith "/wait" then
+      let routePrefix := "/api/mcp/requests/secret/"
+      let rawId := (cleanPath.drop routePrefix.length).dropEnd "/wait".length |>.toString
+      let some reqId := parseUuidCanonical? rawId
+        | return .ok (mkJson 400 "{\"error\":\"invalid_secret_request_id\"}")
+      let timeoutRaw := (parseQueryParams req.path).find? (fun (k, _) => k == "timeout_secs") |>.map Prod.snd
+      let timeoutSecs := (timeoutRaw.bind String.toNat?).getD 20 |>.min 25
+      let projectSlug := activeClaims.project
+      let callerSubject := if activeClaims.isExternal then
+        requesterSubject "" ("session:" ++ activeClaims.sessionId)
+      else ""
+      let mut onManagedNode := false
+      if !activeClaims.missionId.isEmpty then
+        if let .ok mRs ← execParamQuery st.store.missionsDb
+            "SELECT placement_kind FROM missions WHERE id=?1;" #[activeClaims.missionId] then
+          if mRs.size > 1 then
+            let pk := (mRs[1]?.bind (·[0]?)).getD ""
+            if pk == "managed_vm" || pk.startsWith "managed-" then onManagedNode := true
+        if !onManagedNode then
+          if let some mst := st.managedStore? then
+            if let .ok vmRs ← execParamQuery mst.db
+                ("SELECT 1 FROM managed_machines WHERE owner_mission=?1 AND status<>'destroyed' " ++
+                 "UNION ALL SELECT 1 FROM managed_vm_claims WHERE owner_mission=?1 AND phase_code=1 LIMIT 1;")
+                #[activeClaims.missionId] then
+              if vmRs.size > 1 then onManagedNode := true
+      let waited ← mcpSecretWait st.cfg.workingDir st.store.rootDir activeClaims.missionId
+        projectSlug reqId callerSubject onManagedNode timeoutSecs nowEpochSec
+      return .ok (mkJson 200 (renderCompact waited))
 
     if req.method == "GET" && cleanPath == "/api/mcp/capabilities" then
       return .ok (mkJson 200 (buildMcpCapabilitiesJson activeClaims))
@@ -7746,14 +7809,19 @@ def handleClientConn (st : CoreAppState) (cfd : Fd) (allowKeepAlive : Bool := fa
           -- client that stopped reading must not hold a keep-alive slot.
           let wroteHead ← writeCoreHttpResponse responseWrite httpResp false
           let alive ← IO.mkRef wroteHead
-          let complete ← pump fun piece => do
-            if !(← alive.get) then return false
-            if piece.isEmpty then return true
-            let ok ← responseWrite (encodeHttpChunk piece)
-            alive.set ok
-            return ok
-          if complete && (← alive.get) then
-            discard <| responseWrite (encodeHttpChunk ByteArray.empty)
+          -- Always enter the pump once so it can close the upstream reader;
+          -- a refused head must be propagated as a refused empty callback.
+          if !wroteHead then
+            discard <| pump (fun _ => pure false)
+          else
+            let complete ← pump fun piece => do
+              if !(← alive.get) then return false
+              if piece.isEmpty then return true
+              let ok ← responseWrite (encodeHttpChunk piece)
+              alive.set ok
+              return ok
+            if complete && (← alive.get) then
+              discard <| responseWrite (encodeHttpChunk ByteArray.empty)
           keepGoing := false
       | .error rawUpgrade101 =>
         let wrote := (← writeAll cfd rawUpgrade101 false).isOk

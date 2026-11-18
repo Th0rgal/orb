@@ -267,6 +267,12 @@ structure DesktopState where
   toasts : List ToastSpec := []
   modal : ActiveModal := .none
   composer : ComposerBuffer := {}
+  /-- Mission actions exposed by the native interaction layer. -/
+  missionCreated : Bool := false
+  messageSent : Bool := false
+  missionStopped : Bool := false
+  missionArchived : Bool := false
+  sidePanelOpen : Bool := false
   deriving Repr, Inhabited
 
 /-! ## 3. Canonical Screen Fixtures (`01` .. `09`) -/
@@ -501,8 +507,42 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
     | .preedit utf8 _ _ => st.composer.setPreedit utf8
     | .imeBatch db da commit preedit _ _ => st.composer.applyImeBatch db da commit preedit
     | _ => st.composer
-  if composer == st.composer then (st, none)
-  else ({ st with composer }, Damage.add none (composerDamageRect scale120 viewport))
+  let actionState :=
+    match ev with
+    | .activate 2 =>
+      if !st.composer.text.isEmpty then { st with messageSent := true, composer := { st.composer with text := "", cursorOffset := 0 } }
+      else if st.composer.isRunning then { st with missionStopped := true, composer := { st.composer with isRunning := false } }
+      else st
+    | .activate 101 => { st with screen := .controlEmpty, modal := .none }
+    | .activate 102 => { st with screen := .controlPopulated, modal := .none }
+    | .activate 103 => { st with screen := .settingsGeneral, modal := .none }
+    | .activate 111 => { st with sidePanelOpen := !st.sidePanelOpen }
+    | .activate 106 => { st with missionArchived := true }
+    | .activate 805 =>
+      match st.modal with
+      | .newMission _ _ _ _ => { st with missionCreated := true, modal := .none }
+      | _ => st
+    | .activate 804 => { st with modal := .none }
+    | .activate 911 => { st with toasts := st.toasts.drop 1 }
+    | .activate 912 => { st with toasts := st.toasts.drop 1 }
+    | .activate 913 => { st with toasts := st.toasts.drop 1 }
+    | .key 0x1b _ .pressed => { st with modal := .none }
+    | _ => st
+  let next :=
+    match ev with
+    | .activate 2 => actionState
+    | _ => { actionState with composer := composer }
+  let actionChanged :=
+    match ev with
+    | .activate 2 => st.composer.isRunning || !st.composer.text.isEmpty
+    | .activate 101 | .activate 102 | .activate 103 | .activate 106 | .activate 111
+    | .activate 804 | .activate 805 | .activate 911 | .activate 912 | .activate 913
+    | .key 0x1b _ .pressed => true
+    | _ => false
+  if !actionChanged && composer == st.composer then (st, none)
+  else
+    let dmg := if composer != st.composer then composerDamageRect scale120 viewport else viewport
+    (next, Damage.add none dmg)
 
 /-- Device-pixel band occupied by the live transcript. Stream deltas repaint this band only; the
 sidebar, header and composer retain their framebuffer pixels. -/

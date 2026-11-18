@@ -1667,10 +1667,7 @@ def dispatchMcpToolCall
     let some (machine, _) ← getManagedMachine? mc canonicalId
       | return mcpErr "not_found" "Managed machine not found"
     if !(← canManageMachine machine) then return mcpErr "not_found" "Managed machine not found"
-    let timeoutMs := ((args.fieldNat? "timeout_secs").getD 60) * 1000
-    match ← execOnRemoteNode relayHub? mc canonicalId callerMid cmd false timeoutMs with
-    | .ok res => return mcpOk res
-    | .error e => return mcpErr "exec_failed" e true
+    return mcpErr "unsupported" "raw execution is unavailable on managed machines"
 
   | "stop_managed_machine" | "resume_managed_machine" | "destroy_managed_machine" | "extend_managed_machine" =>
     let some mc := mc? | return mcpErr "unavailable" "managed compute store not configured"

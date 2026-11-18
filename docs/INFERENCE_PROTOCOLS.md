@@ -225,18 +225,24 @@ headers were sent. Regression tests: `src/api/proxy.rs` `latency_tests`,
    output-idle watchdogs (OpenCode: `PROXY_STREAM_RECENT`) do not kill a
    turn the router is still legitimately waiting on.
 5. **Commitment.** A stream is committed once the client received answer
-   text (`delta.content` non-empty), a tool call, a legacy `function_call`
-   or `audio`. Role-only, reasoning-only and keepalive chunks do not commit.
+   text (`delta.content` non-empty), a legacy `function_call`, audio, or a
+   complete tool call. A tool-call prefix whose JSON arguments are incomplete
+   does not commit. Role-only, reasoning-only and keepalive chunks do not
+   commit.
 6. **Stall before commitment: transparent replay.** The stalled upstream
    is dropped and the same request is re-routed, at most
-   `PROXY_MID_STREAM_STALL_RETRIES` (2) times: first through the chain as
-   usual (normally the same entry), then without the stalled account when
-   another entry exists. The replacement stream is appended after what the
-   client already has (it may repeat a role chunk or reasoning, never
-   answer text or a tool call). Keepalives continue while the replay waits.
-7. **Stall after commitment: surfaced.** The stream ends with
-   `data: {"error":{"code":"upstream_stalled",...}}` then `data: [DONE]`.
-   Mid-stream non-timeout failures end with `upstream_stream_error`.
+   `PROXY_MID_STREAM_STALL_RETRIES` (2) times: first to the same provider for
+   warm-cache continuity, then to the next chain target when its context
+   limit admits the request. Provider-bound reasoning (OpenAI encrypted
+   reasoning and Anthropic signed thinking) is stripped only on that target
+   change. The proxy buffers the unfinished attempt, so two attempts cannot
+   mix and no tool call can be delivered twice. Keepalives continue while the
+   replay waits.
+7. **Stall after commitment: clean tool-call close.** If at least one
+   complete tool call was received, the proxy closes at the last complete
+   tool-call boundary with a normal tool-call finish and drops only the
+   unfinished tail. Mid-stream failures before any complete tool call remain
+   retryable; exhausted recovery ends with `upstream_stream_error`.
 8. **Core recovery.** A remote turn that failed with `upstream_stalled` or
    `upstream_stream_error` is a Transport failure: the first auto-resume is
    sent after 10 s, later ones back off as for other transport failures.

@@ -37,6 +37,8 @@ structure ProviderTarget where
   modelRpmLimit?        : Option UInt32 := none
   modelTpmLimit?        : Option UInt64 := none
   modelMaxConcurrency?  : Option UInt32 := none
+  /-- Maximum input context accepted by this target, used before cross-target recovery. -/
+  contextLimit            : UInt32 := 128000
   deriving Repr, DecidableEq, Inhabited
 
 /-- In-memory sliding-window RPM, active in-flight concurrency & learned upstream header state. -/
@@ -222,6 +224,9 @@ structure ProxyOutcome where
   verdictCode        : UInt8 := 0
   /-- Set for a committed 2xx streamed reply: `body` is empty and the pump relays it. -/
   stream?            : Option BodyPump := none
+  /-- Mutable metadata updated if recovery opens a different target after headers are sent. -/
+  streamSelectedAccountRef? : Option (IO.Ref String) := none
+  streamAttemptsRef?       : Option (IO.Ref Nat) := none
   deriving Inhabited
 
 /-- Why a routing-chain target is temporarily unavailable. -/
@@ -1377,18 +1382,241 @@ def streamingUpstreamRequest (isTls : Bool) (method host : String) (port : UInt1
     if status ≥ 200 && status < 300 && !isBodylessHttpResponse method status then
       return .ok ({ status, headers := hdrs, body := ByteArray.empty },
         some fun emit => do
+          if !(← emit ByteArray.empty) then
+            r.close
+            return (ByteArray.empty, false)
           let (copy, complete) ← pumpUpstreamBody r framing tail emit
-          if !complete then
-            if let some ref := bodyTimedOutRef? then
-              if ← r.timedOut then
-                ref.set true
+          if let some ref := bodyTimedOutRef? then
+            if complete then
+              ref.set false
+            else if ← r.timedOut then
+              ref.set true
           return (copy, complete))
     else
       let whole ← if isBodylessHttpResponse method status then do r.close; pure ByteArray.empty
         else (·.1) <$> pumpUpstreamBody r framing tail (fun _ => pure true)
       return .ok ({ status, headers := hdrs, body := whole }, none)
 
-/-- Execute a bounded `/v1/*` proxy forward across `chain.targets` with proactive pacing spillover,
+private def completeToolCallBoundary? (body : ByteArray) : Option Nat := Id.run do
+  match String.fromUTF8? body with
+  | none => return none
+  | some text =>
+    let delimiter := if text.contains "\r\n\r\n" then "\r\n\r\n" else "\n\n"
+    let mut offset : Nat := 0
+    let mut arguments : Array (Nat × String) := #[]
+    let mut anthropicToolBlocks : Array (Nat × String) := #[]
+    for frame in text.splitOn delimiter do
+      let frameBytes := (frame ++ delimiter).toUTF8
+      offset := offset + frameBytes.size
+      let normalizedFrame := frame.replace "\r\n" "\n"
+      for line in normalizedFrame.splitOn "\n" do
+        let trimmed := line.trimAscii.toString
+        if trimmed.startsWith "data:" then
+          let payload := (trimmed.drop 5).toString.trimAscii.toString
+          if payload != "[DONE]" then
+            if let .ok jv := OrbBin.Json.parse payload then
+              let choices := (jv.fieldArr? "choices").getD #[]
+              for choice in choices do
+                let calls := ((choice.fieldOrNull "delta").fieldArr? "tool_calls").getD #[]
+                for call in calls do
+                  if let some args := (call.fieldOrNull "function").fieldStr? "arguments" then
+                    let index := (call.fieldNat? "index").getD 0
+                    let previous := (arguments.find? (fun (i, _) => i == index)).map Prod.snd |>.getD ""
+                    let combined := previous ++ args
+                    arguments := arguments.filter (fun (i, _) => i != index)
+                    arguments := arguments.push (index, combined)
+                    if (OrbBin.Json.parse combined).isOk then return some offset
+              let candidates := (jv.fieldArr? "candidates").getD #[]
+              for candidate in candidates do
+                let parts := ((candidate.fieldOrNull "content").fieldArr? "parts").getD #[]
+                for part in parts do
+                  if let some functionCall := part.field? "functionCall" then
+                    if functionCall.asObj?.isSome then
+                      return some offset
+              if jv.fieldStr? "type" == some "content_block_start" then
+                if let some block := jv.fieldOrNull "content_block" |>.fieldStr? "type" then
+                  if block == "tool_use" then
+                    let index := jv.fieldNat? "index" |>.getD 0
+                    let input := match (jv.fieldOrNull "content_block").field? "input" with
+                      | some value => renderCompact value
+                      | none => ""
+                    anthropicToolBlocks := anthropicToolBlocks.filter (fun (i, _) => i != index)
+                    anthropicToolBlocks := anthropicToolBlocks.push (index, input)
+              if jv.fieldStr? "type" == some "content_block_delta" then
+                let delta := jv.fieldOrNull "delta"
+                if delta.fieldStr? "type" == some "input_json_delta" then
+                  let index := jv.fieldNat? "index" |>.getD 0
+                  if let some fragment := delta.fieldStr? "partial_json" then
+                    let previous := (anthropicToolBlocks.find? (fun (i, _) => i == index)).map Prod.snd |>.getD ""
+                    let combined := previous ++ fragment
+                    anthropicToolBlocks := anthropicToolBlocks.filter (fun (i, _) => i != index)
+                    anthropicToolBlocks := anthropicToolBlocks.push (index, combined)
+              if jv.fieldStr? "type" == some "content_block_stop" then
+                let index := jv.fieldNat? "index" |>.getD 0
+                if let some input := (anthropicToolBlocks.find? (fun (i, _) => i == index)).map Prod.snd then
+                  if (OrbBin.Json.parse input).isOk then
+                    return some offset
+    return none
+
+private partial def stripProviderReasoningContent : JVal → JVal
+  | .arr xs => .arr (xs.filterMap fun x =>
+      match x with
+      | .obj fields =>
+        let typ := (JVal.obj fields).fieldStr? "type"
+        if typ == some "reasoning" || typ == some "thinking" || typ == some "redacted_thinking" then none
+        else some (stripProviderReasoningContent x)
+      | _ => some (stripProviderReasoningContent x))
+  | .obj fields => .obj (fields.map fun (k, v) => (k, stripProviderReasoningContent v))
+  | other => other
+
+private partial def stripProviderReasoningJVal : JVal → JVal
+  | .arr xs => .arr (xs.map stripProviderReasoningJVal)
+  | .obj fields => .obj (fields.map fun (k, v) =>
+      if k == "messages" || k == "input" || k == "content" then
+        (k, stripProviderReasoningContent v)
+      else
+        (k, v))
+  | other => other
+
+private def stripProviderBoundReasoning (body : ByteArray) : ByteArray :=
+  match String.fromUTF8? body with
+  | some raw => match OrbBin.Json.parse raw with
+    | .ok jv => (renderCompact (stripProviderReasoningJVal jv)).toUTF8
+    | .error _ => body
+  | none => body
+
+private def synthesizeToolCallClose (contentType : String) (head : ByteArray) : ByteArray :=
+  let headText := (String.fromUTF8? head).getD ""
+  if containsSubstring contentType.toLower "anthropic" ||
+     containsSubstring headText "\"content_block_start\"" ||
+     containsSubstring headText "\"content_block_delta\"" then
+    head ++ ("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n".toUTF8)
+  else if containsSubstring headText "\"functionCall\"" then
+    head ++ ("data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n".toUTF8)
+  else
+    head ++ ("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n".toUTF8)
+
+private def recoverBufferedStream
+    (contentType : String)
+    (initial : BodyPump)
+    (releaseInitial : IO Unit)
+    (retry : Nat → IO (Option BodyPump))
+    (emit : BodyEmit) : IO (ByteArray × Bool) := do
+  let mut remaining := 2
+  let mut pump := initial
+  let mut result : Option (ByteArray × Bool) := none
+  let emittedRef ← IO.mkRef ByteArray.empty
+  let recordEmit : BodyEmit := fun piece => do
+    let clientOpen ← emit piece
+    if clientOpen && !piece.isEmpty then
+      emittedRef.modify fun old =>
+        if old.size ≥ maxStreamCopyBytes then old
+        else
+          let room := maxStreamCopyBytes - old.size
+          old ++ piece.extract 0 (Nat.min room piece.size)
+    pure clientOpen
+  while result.isNone do
+    let bufferRef ← IO.mkRef ByteArray.empty
+    let modeRef : IO.Ref (Option Bool) ← IO.mkRef none
+    let downstreamOpenRef ← IO.mkRef true
+    let firstAttempt := remaining == 2
+    let pumpResult ← try
+      pump (fun piece => do
+        if !(← downstreamOpenRef.get) then
+          return false
+        if piece.isEmpty then
+          let clientOpen ← recordEmit piece
+          downstreamOpenRef.set clientOpen
+          return clientOpen
+        match ← modeRef.get with
+        | some false =>
+          let clientOpen ← recordEmit piece
+          downstreamOpenRef.set clientOpen
+          return clientOpen
+        | _ =>
+          let buffered ← bufferRef.get
+          if buffered.size + piece.size > maxStreamCopyBytes then
+            -- Once the bounded analysis buffer is full, stop trying to recover this
+            -- attempt. Flush it exactly once and relay the rest without duplication.
+            modeRef.set (some false)
+            let firstOpen ← recordEmit buffered
+            if !firstOpen then
+              downstreamOpenRef.set false
+              return false
+            let clientOpen ← recordEmit piece
+            downstreamOpenRef.set clientOpen
+            return clientOpen
+          let nextBuffer := buffered ++ piece
+          bufferRef.set nextBuffer
+          let text := (String.fromUTF8? nextBuffer).getD ""
+          let model := containsSubstring text "\"choices\"" ||
+            containsSubstring text "\"candidates\"" ||
+            containsSubstring text "\"tool_calls\"" ||
+            containsSubstring text "\"response\"" ||
+            containsSubstring text "\"message_start\"" ||
+            containsSubstring text "\"content_block_start\"" ||
+            containsSubstring text "\"content_block_delta\"" ||
+            containsSubstring text "\"functionCall\""
+          if model then
+            modeRef.set (some true)
+          else if text.contains "\n\n" || text.contains "\r\n\r\n" then
+            -- An unrecognized complete SSE frame is safe to relay as-is. Holding
+            -- only the first frame avoids replay while preserving event latency.
+            modeRef.set (some false)
+            let clientOpen ← recordEmit nextBuffer
+            bufferRef.set ByteArray.empty
+            downstreamOpenRef.set clientOpen
+            return clientOpen
+          downstreamOpenRef.get)
+      finally
+        if firstAttempt then
+          releaseInitial
+    let (_, complete) := pumpResult
+    let buffered ← bufferRef.get
+    if !(← downstreamOpenRef.get) then
+      result := some (← emittedRef.get, false)
+      continue
+    if (← modeRef.get) == some false then
+      result := some (← emittedRef.get, complete)
+      continue
+    if (← modeRef.get) == none && complete then
+      discard <| recordEmit buffered
+      result := some (← emittedRef.get, true)
+      continue
+    let streamStatus := classifyProxyStreamOutcome contentType true buffered complete false
+    if complete && streamStatus == "ok" then
+      discard <| recordEmit buffered
+      result := some (← emittedRef.get, true)
+    else
+      let completeCalls : UInt32 := if (completeToolCallBoundary? buffered).isSome then 1 else 0
+      let ending := Orb.Kernel.streamRecoveryStep
+        1 completeCalls (2 - remaining).toUInt32 2
+        (if remaining > 1 then 1 else 0)
+        (if remaining > 0 then 1 else 0) 1
+      if (ending &&& 0xFF) == 3 then
+        let some boundary := completeToolCallBoundary? buffered
+          | result := some (← emittedRef.get, false); continue
+        let clean := synthesizeToolCallClose contentType (buffered.extract 0 boundary)
+        discard <| recordEmit clean
+        result := some (← emittedRef.get, true)
+      else if (ending &&& 0xFF) == 4 then
+        discard <| recordEmit buffered
+        result := some (← emittedRef.get, false)
+      else
+        if remaining == 0 then
+          discard <| recordEmit buffered
+          result := some (← emittedRef.get, false)
+        else
+          match ← retry (2 - remaining) with
+          | some nextPump =>
+            remaining := remaining - 1
+            pump := nextPump
+          | none =>
+            discard <| recordEmit buffered
+            result := some (← emittedRef.get, false)
+  return result.get!
+
+/- Execute a bounded `/v1/*` proxy forward across `chain.targets` with proactive pacing spillover,
     sticky `firstByteCommitted` pin enforcement via `Orb.HarnessCloud.stepProviderAttemptSlice` /
     `classifyProviderAttempt` (`SM-21`), pre-header failover on `402`, `429`, and `5xx` via
     `Orb.Kernel.proxyStep` + `verifyProxyFailoverStep`, and deterministic exhaustion classification via
@@ -1692,13 +1920,18 @@ def forwardProxyChain
       let releaseSlot : IO Unit := do
         if let some tracker := effPacing? then
           releaseTargetSlot tracker tgt
+      let slotReleasedRef ← IO.mkRef false
+      let releaseSlotOnce : IO Unit := do
+        if !(← slotReleasedRef.get) then
+          slotReleasedRef.set true
+          releaseSlot
       let respRes : Except String (HttpsResponse × Option BodyPump) := match respRes with
         | .ok (resp, some rawPump) =>
           .ok (resp, some fun emit => do
             try
               rawPump emit
             finally
-              releaseSlot)
+              releaseSlotOnce)
         | other => other
       if let .ok (_, some _) := respRes then
         pure ()
@@ -1750,6 +1983,67 @@ def forwardProxyChain
               pinnedAccountId := nextSlice.pinnedAccountId
               verdictCode := vCode
             }
+          let streamSelectedAccountRef ← IO.mkRef tgt.accountId
+          let streamAttemptsRef ← IO.mkRef (idx + 1)
+          let recoveryPump? : Option BodyPump ←
+            match pump? with
+            | none => pure none
+            | some rawPump =>
+              if !wantsStream then
+                pure (some rawPump)
+              else
+                let openRecoveryTarget (retryTarget : ProviderTarget) (retryBody : ByteArray)
+                    (attemptNo : Nat) : IO (Option BodyPump) := do
+                  let admitted ← match effPacing? with
+                    | none => pure true
+                    | some tracker => do
+                      let nowMs ← IO.monoMsNow
+                      tryAcquireTargetSlot tracker retryTarget nowMs.toUInt64
+                  if !admitted then
+                    pure none
+                  else
+                    let (retryTls, retryHost, retryPort, retryPath, retryHdrs, retryWireBody) :=
+                      upstreamRequest retryTarget relPath extraHeaders retryBody
+                    let estimatedTokens := (retryWireBody.size + 3) / 4
+                    if estimatedTokens.toUInt32 > retryTarget.contextLimit then
+                      if let some tracker := effPacing? then
+                        releaseTargetSlot tracker retryTarget
+                      pure none
+                    else if retryPort == 0 || (!retryTls && !isPrivatePlaintextHost retryHost) then
+                      if let some tracker := effPacing? then
+                        releaseTargetSlot tracker retryTarget
+                      pure none
+                    else
+                      match ← streamingUpstreamRequest retryTls method retryHost retryPort retryPath retryHdrs retryWireBody
+                        effStreamLimits.idleMs effStreamLimits.totalMs streamHeadDeadlineMs? bodyTimedOutRef? with
+                      | .ok (retryResp, some p) =>
+                        if let some tracker := effPacing? then
+                          recordObservedHeaders tracker retryTarget.accountId retryResp.headers
+                        streamSelectedAccountRef.set retryTarget.accountId
+                        streamAttemptsRef.set attemptNo
+                        pure (some fun emit => do
+                          try
+                            p emit
+                          finally
+                            if let some tracker := effPacing? then
+                              releaseTargetSlot tracker retryTarget)
+                      | _ =>
+                        if let some tracker := effPacing? then
+                          releaseTargetSlot tracker retryTarget
+                        pure none
+                let reopen (retryNo : Nat) : IO (Option BodyPump) := do
+                  if retryNo == 0 then
+                    match ← openRecoveryTarget tgt outBody (idx + 2) with
+                    | some p => pure (some p)
+                    | none =>
+                      match targets[idx + 1]? with
+                      | some nextTarget => openRecoveryTarget nextTarget (stripProviderBoundReasoning outBody) (idx + 3)
+                      | none => pure none
+                  else
+                    match targets[idx + retryNo]? with
+                    | some retryTarget => openRecoveryTarget retryTarget (stripProviderBoundReasoning outBody) (idx + retryNo + 2)
+                    | none => pure none
+                pure (some fun emit => recoverBufferedStream ctype rawPump releaseSlotOnce reopen emit)
           return {
             status := resp.status
             contentType := ctype
@@ -1760,7 +2054,9 @@ def forwardProxyChain
             firstByteCommitted := nextSlice.firstByteCommitted == 1
             pinnedAccountId := nextSlice.pinnedAccountId
             verdictCode := vCode
-            stream? := pump?
+            stream? := recoveryPump?
+            streamSelectedAccountRef? := if recoveryPump?.isSome then some streamSelectedAccountRef else none
+            streamAttemptsRef? := if recoveryPump?.isSome then some streamAttemptsRef else none
           }
         let upstreamCode := upstreamErrorCode respBodyStr
         failures := failures.push (tgt.provider, tgt.modelId, resp.status, upstreamCode)

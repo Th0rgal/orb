@@ -134,6 +134,8 @@ inductive Event where
   | closeRequested
   /-- Pointer left the surface (clears hover). -/
   | pointerLeave
+  /-- Activation emitted by the runtime after a pointer release or keyboard accept. -/
+  | activate (entityId : EntityId)
   /-- One atomic text-input-v3 `done` batch, applied in protocol order: delete
   `delBefore`/`delAfter` bytes around the cursor, insert `commit`, then show `preedit`. -/
   | imeBatch (delBefore delAfter : Nat) (commit : String) (preedit : String)

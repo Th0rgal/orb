@@ -189,7 +189,7 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
 /-- Render one frame of `DesktopState` via `OrbDesktop.buildDesktopScreen`, `Layout.layoutNode`,
 `Scene.buildSceneFromLayout`, and HarfBuzz/FreeType glyph shaping (`shapeDesktopRuns` + `Text.layoutTextRun`). -/
 def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) :
-    IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect)) := do
+    IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect) × List EntityId) := do
   let st := rt.app
   let liveWindow := !rt.wayland.headless
   let theme := if liveWindow then Theme.withWindowEffects st.theme else st.theme
@@ -236,10 +236,10 @@ def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) :
     let overBox := layoutNode sc none pal.focusRing 0 0 availW availH overWidget.toLayoutNode
     let overScene := buildSceneFromLayout sc rt.focus theme overWidget overBox
     let clearColor := if liveWindow then 0x00000000 else pal.canvas
-    return (ac7, clearColor, sceneOut.prims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overScene.prims, sceneOut.hitRegionsSub ++ overScene.hitRegionsSub)
+    return (ac7, clearColor, sceneOut.prims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overScene.prims, sceneOut.hitRegionsSub ++ overScene.hitRegionsSub, sceneOut.focusableOrder ++ overScene.focusableOrder)
   else
     let clearColor := if liveWindow then 0x00000000 else pal.canvas
-    return (ac6, clearColor, sceneOut.prims, sceneOut.hitRegionsSub)
+    return (ac6, clearColor, sceneOut.prims, sceneOut.hitRegionsSub, sceneOut.focusableOrder)
 
 /-- `stepDesktopEvent` for the window `rt` currently has. -/
 def desktopReducer (rt : Runtime.RuntimeState DesktopState) :

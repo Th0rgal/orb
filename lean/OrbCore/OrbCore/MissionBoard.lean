@@ -15,8 +15,10 @@ def schemaSql : String :=
   "CREATE TABLE IF NOT EXISTS mission_board_actions (id TEXT PRIMARY KEY, owner TEXT NOT NULL, scope TEXT NOT NULL, " ++
   "retry_key TEXT NOT NULL, tool TEXT NOT NULL, arguments TEXT NOT NULL DEFAULT '{}', state TEXT NOT NULL, " ++
   "result TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(scope,retry_key));" ++
+  -- Recreate the trigger so upgrades cannot retain a stale same-named cleanup body.
+  "DROP TRIGGER IF EXISTS mission_board_delete;" ++
   -- Cleanup runs inside the deleting statement's transaction, including legacy delete paths.
-  "CREATE TRIGGER IF NOT EXISTS mission_board_delete AFTER DELETE ON missions BEGIN " ++
+  "CREATE TRIGGER mission_board_delete AFTER DELETE ON missions BEGIN " ++
   "DELETE FROM mission_board WHERE mission_id=OLD.id; END;"
 
 def initSchema (db : SqliteDb) : IO (Except String Unit) :=

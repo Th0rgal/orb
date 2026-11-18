@@ -351,7 +351,7 @@ def buildCanaryWidgetTree (theme : Theme) (availW availH : SubPx) (scrollOffsetS
 3. Emit shaped glyph runs (`Text.layoutTextRun`) into the shelf-packed `GlyphAtlasCache` and
    append them to the Z-ordered `Scene`. -/
 def renderCanaryFrame (rt : Runtime.RuntimeState CanaryState) :
-    IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect)) := do
+    IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect) × List EntityId) := do
   let theme := rt.app.theme
   let pal := theme.palette
   let sc := rt.wayland.scale120
@@ -422,7 +422,7 @@ def renderCanaryFrame (rt : Runtime.RuntimeState CanaryState) :
   let compFocused := rt.focus.owner == some composerWidgetId
   prims := prims.push (focusBorder compFocused compRectDev pal.focusRing)
 
-  return (ac, pal.canvas, prims, sceneOut.hitRegionsSub)
+  return (ac, pal.canvas, prims, sceneOut.hitRegionsSub, sceneOut.focusableOrder)
 
 /-- Event reducer for the Canary screen (handles Tab focus cycling and scroll). -/
 def onCanaryEvent (st : CanaryState) (ev : Event) : CanaryState × Damage :=
