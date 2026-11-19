@@ -38,9 +38,9 @@ separate and governed by [ORB_MISSION_TRANSFER.md](../ORB_MISSION_TRANSFER.md).
    - **Intra-project folder move (`from_project == to_project`):** Pure metadata
      relocation. Executes in a single `IMMEDIATE` SQLite transaction on
      `missions.db` (`SET folder = ?, placement_revision = placement_revision + 1`
-     with `updated_at` preserved so activity recency order never jumps). Touches
-     neither `ControlCommand` actor queues, `durable_lock`, `projects.db`, nor
-     `SecretBroker`.
+      with `updated_at` preserved so activity recency order never jumps). Shared
+      move completion may refresh bindings in `projects.db` and finish pending
+      repairs. The folder move itself requests no secret policy change.
    - **Cross-project transfer (`from_project != to_project`):** Atomic batch
      transfer across the expanded family closure:
      1. Preflights `SecretBroker` for live approved Touch-ID grants (`Grant`) or
@@ -54,25 +54,27 @@ separate and governed by [ORB_MISSION_TRANSFER.md](../ORB_MISSION_TRANSFER.md).
         explicitly `"revoke"` or `"keep"`, transfers track leases in `projects.db`,
         updates `(project, folder, placement_revision = placement_revision + 1)`
         with `updated_at` preserved, updates `mcp_sessions_v1.project_scope`, and
-        applies the chosen secret policy (`"revoke"` revokes live grants and denies
-        pending requests; `"keep"` rebinds `paloma_project` on grants and pending
-        requests to `to_project`, auto-resolving pending `Read` requests covered
-        by `to_project`'s `default_access`).
+         applies the chosen secret policy (`"revoke"` revokes live grants and
+         cancels pending requests; `"keep"` updates their project).
       4. Dynamic authorization (`SecretBroker::caller_for` and MCP gateway
          `authorize_job`) always resolves a mission principal's project from live
          `MissionStore` state rather than a static creation-time JWT claim.
 
 ### Retry and recovery convergence
 
-Every accepted move is a convergent operation keyed by the selected mission and
-destination `(project, folder)`. A retry after a timeout, process restart, or a
-failure while rebinding `projects.db` re-discovers the complete family from
-current `missions.db` rows, reapplies the destination placement and repairs all
-project-scoped MCP sessions and active track leases for every member. A retry is
-successful only after those repairs succeed; it then emits one authoritative
-placement event for the rows whose placement changed. No retry may move a
-descendant back to its source folder or project, and an incomplete repair must
-remain an error rather than being reported as success.
+The placement transaction records a pending marker for each mission and the
+chosen `keep` or `revoke` operation for each cross-project transfer. A rollback
+leaves neither. After commit, the live caller and pre-server startup use the
+same serialized repair. No client retry is needed after a crash: repair applies
+policy operations in commit order and reads each mission's **current** project
+to rebind its sessions and active track leases. An older caller resuming after
+a newer commit cannot restore its old destination or clear newer work unrepaired.
+
+Repair clears its durable work only on success. A failed broker write or binding
+update leaves it pending. If startup cannot repair it, Core refuses to serve.
+The synthetic regressions `B5b_crash_between_commits_startup_repairs_two_families`,
+`B5b_failed_policy_write_keeps_intent`, `B5b_overlap_preserves_revoke_and_latest_bindings`,
+and `B5b_second_startup_is_noop` exercise these boundaries.
 
 4. **Server-side folder cascade.**
    Renaming or moving a folder via `POST /api/projects/:slug/file/transfer`
