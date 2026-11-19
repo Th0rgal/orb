@@ -235,14 +235,17 @@ headers were sent. Regression tests: `src/api/proxy.rs` `latency_tests`,
    warm-cache continuity, then to the next chain target when its context
    limit admits the request. Provider-bound reasoning (OpenAI encrypted
    reasoning and Anthropic signed thinking) is stripped only on that target
-   change. The proxy buffers the unfinished attempt, so two attempts cannot
+   change. The proxy buffers the uncommitted prefix, so two attempts cannot
    mix and no tool call can be delivered twice. Keepalives continue while the
    replay waits.
 7. **Stall after commitment: clean tool-call close.** If at least one
    complete tool call was received, the proxy closes at the last complete
    tool-call boundary with a normal tool-call finish and drops only the
-   unfinished tail. Mid-stream failures before any complete tool call remain
-   retryable; exhausted recovery ends with `upstream_stream_error`.
+   unfinished tail. A complete `choices` frame with nonempty `delta.content`
+   reaches the client without waiting for upstream completion. Once that text
+   is visible, a cut cannot replay the attempt: without a complete tool call
+   the client receives an incomplete stream. Before commitment, exhausted
+   recovery ends with `upstream_stream_error`.
 8. **Core recovery.** A remote turn that failed with `upstream_stalled` or
    `upstream_stream_error` is a Transport failure: the first auto-resume is
    sent after 10 s, later ones back off as for other transport failures.
