@@ -3560,7 +3560,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let stored ← getAIProvider? st.store account
     let coreOwned := !hp.hasOAuth && stored.any (fun p => !p.apiKey.isEmpty && p.apiKey != "cli-proxy-managed")
     let mut configure? : Option (Bool → IO (Except String Unit)) := none
-    if hp.hasOAuth && !hp.hasApiKey && providerTypeMatchesAuthType hp.providerType "codex" &&
+    if hp.hasOAuth && !hp.hasApiKey && ["codex", "claude"].any (providerTypeMatchesAuthType hp.providerType) &&
         !hp.oauthFile.isEmpty && (providers.filter (fun p => p.oauthFile == hp.oauthFile)).size == 1 then
       if let some url := st.vpnRelayPort?.bind (fun port =>
           AccountVpnRelay.proxyUrl (effectiveJwtSecret st.cfg) port hp.providerType hp.id) then

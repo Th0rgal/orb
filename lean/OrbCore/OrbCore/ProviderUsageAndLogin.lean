@@ -72,6 +72,7 @@ structure CliLoginSession where
   createdSec    : UInt64
   beforeFiles   : Array (String × UInt64)
   routedFile? : Option String := none
+  vpnGeneration? : Option Nat := none
   completionStartedSec? : Option UInt64 := none
   status        : String := "pending"
   message?      : Option String := none
@@ -2157,6 +2158,14 @@ def reconcileCliLoginCompletion
     modify fun st => { st with loginSessions := st.loginSessions.map (fun s => if s.sessionId == sess.sessionId then result else s) }
   return result
 
+private def changedLoginRoute? (store : CoreStore) (sess : CliLoginSession) :
+    IO (Option (Nat × String × ByteArray)) := do
+  let some account := sess.targetProvId? | return none
+  match ← AccountVpnRoutes.checkGeneration store.missionsDb account sess.vpnGeneration? with
+  | .ok () => return none
+  | .error "vpn_route_changed" => return some (jsonErr 409 "The account connection changed. Start sign-in again.")
+  | .error _ => return some (jsonErr 503 "VPN route storage unavailable")
+
 private def loginSessionResponse (sess : CliLoginSession) : Nat × String × ByteArray :=
   jsonResp 200 (.obj #[("status", .str sess.status), ("auth_url", .str sess.authUrl),
     ("message", sess.message?.map JVal.str |>.getD .null)])
@@ -3033,10 +3042,12 @@ def dispatchProviderAndAiRoute
                 return some (jsonErr 403 "not_account_owner")
         let beforeFiles := (← scanCliProxyAuthFiles).map (fun af => (af.fileName, af.fingerprint))
         let mut routedRequest? : Option JVal := none
+        let mut vpnGeneration? : Option Nat := none
         if let some account := targetProvId? then
           let .ok pref ← AccountVpnRoutes.read store.missionsDb account
             | return some (jsonErr 503 "VPN route storage unavailable")
-          if pref.isSome then
+          if let some selected := pref then
+            vpnGeneration? := some selected.generation
             let accounts ← loadHydratedProviders store workingDir
             let some hp := accounts.find? (fun p => p.id == account)
               | return some (jsonErr 409 "VPN credential unavailable")
@@ -3064,7 +3075,7 @@ def dispatchProviderAndAiRoute
             let nowSec ← nowEpoch
             let sess : CliLoginSession := {
               sessionId := sid, providerSlug := slug, authFileType := authType,
-              targetProvId? := targetProvId?, routedFile? := routedFile?, stateToken := stTok, authUrl := authUrl,
+              targetProvId? := targetProvId?, routedFile? := routedFile?, vpnGeneration? := vpnGeneration?, stateToken := stTok, authUrl := authUrl,
               flow := flow, createdSec := nowSec, beforeFiles := beforeFiles,
               userId := callerUserId
             }
@@ -3111,6 +3122,7 @@ def dispatchProviderAndAiRoute
         if method == "GET" then
           if sess.status == "completed" || sess.status == "failed" then
             return some (loginSessionResponse sess)
+          if let some failed ← changedLoginRoute? store sess then return some failed
           -- While not terminal, keep asking the sidecar even mid-completion: it accepts a
           -- callback before it exchanges the code, so only a later `error` reports why a
           -- wrong or expired callback URL will never produce a file. `ok` alone still
@@ -3162,8 +3174,9 @@ def dispatchProviderAndAiRoute
             | _ => sess.stateToken)
         if stateParam != sess.stateToken then
           return some (jsonErr 400 "Callback state does not match login session")
+        if let some failed ← changedLoginRoute? store sess then return some failed
         let cbPayload : JVal := .obj #[
-          ("provider", .str sess.providerSlug),
+          ("provider", .str (if sess.routedFile?.isSome then sess.authFileType else sess.providerSlug)),
           ("code", .str codeParam),
           ("state", .str stateParam)
         ]

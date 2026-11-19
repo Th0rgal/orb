@@ -117,3 +117,10 @@ operator prefix. Before forwarding a pinned VPN request to CLIProxyAPI,
 Core checks the file’s current proxy URL and prefix against its route. The
 local request carries the sidecar service credential. The sidecar sends the
 provider credential through the authenticated relay.
+
+The cross-category sidecar fixture uses a synthetic Claude credential with
+the same gateway as ChatGPT A. The independent TLS receiver checks the
+messages request and OAuth refresh and authorization-code exchanges. Claude
+continues to use that gateway when the relay refuses ChatGPT A. Orb checks
+the account’s saved VPN generation before accepting a targeted login callback
+or reconciling an unfinished login.

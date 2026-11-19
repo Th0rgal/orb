@@ -12,15 +12,15 @@ def main (args : List String) : IO UInt32 := do
     let key := (← input.getLine).trimAscii.toString
     let unavailable ← IO.mkRef false
     let listener ← IO.ofExcept (← OrbCore.AccountVpnRelay.start 0 key fun provider account => do
-      unless provider == "openai" do return .error "unknown_provider"
-      match account with
-      | "a" => return if ← unavailable.get then .error "vpn_exit_unverified" else .ok a.toUInt16
-      | "b" => return .ok b.toUInt16
-      | _ => return .error "unknown_account")
+      match provider, account with
+      | "openai", "a" => return if ← unavailable.get then .error "vpn_exit_unverified" else .ok a.toUInt16
+      | "openai", "b" => return .ok b.toUInt16
+      | "anthropic", "c" => return .ok a.toUInt16
+      | _, _ => return .error "unknown_account")
     try
       let out ← IO.getStdout
-      for account in ["a", "b"] do
-        let some url := OrbCore.AccountVpnRelay.proxyUrl key listener.port "openai" account | return 1
+      for (provider, account) in [("openai", "a"), ("openai", "b"), ("anthropic", "c")] do
+        let some url := OrbCore.AccountVpnRelay.proxyUrl key listener.port provider account | return 1
         out.putStrLn url
       out.flush
       if (← input.getLine).trimAscii == "drop-a" then

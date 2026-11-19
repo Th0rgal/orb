@@ -27,6 +27,15 @@ def read (db : SqliteDb) (account : String) : IO (Except String (Option Preferen
   if !validCountry country then return .error "vpn_route_store_invalid"
   return .ok (some ⟨country, n, server⟩)
 
+/-- An OAuth callback belongs to the route from which its login was started.
+A route change can require another authenticated exchange. -/
+def checkGeneration (db : SqliteDb) (account : String) (expected : Option Nat) : IO (Except String Unit) := do
+  match ← read db account with
+  | .error e => return .error e
+  | .ok current =>
+    if current.map (·.generation) == expected then return .ok ()
+    return .error "vpn_route_changed"
+
 /-- Persist the desired country. Direct uses an empty country so turning a VPN
 off and on again cannot accidentally reuse an older admission generation. -/
 def set (db : SqliteDb) (account : String) (country? : Option String) : IO (Except String Unit) := do

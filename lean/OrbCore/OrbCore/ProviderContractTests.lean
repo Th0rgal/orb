@@ -74,6 +74,17 @@ private def lateSidecarError (app : CoreAppState) (hub : ProviderRuntimeHub) (an
         targetProvId? := some "10000000-0000-4000-8000-000000000001", stateToken := "late-state",
         authUrl := "https://fixture.invalid/auth", flow := "redirect", createdSec := wallNow, beforeFiles := baseline
       }) }
+  let staleAccount := "vpn-callback-fixture"
+  hub.mu.atomically do
+    modify fun st => { st with loginSessions := st.loginSessions.push ({
+      sessionId := "stale-vpn-callback", providerSlug := "codex", authFileType := "codex",
+      targetProvId? := some staleAccount, stateToken := "fixture-state", authUrl := "https://fixture.invalid/",
+      flow := "redirect", createdSec := wallNow, beforeFiles := baseline
+    }) }
+  IO.ofExcept (← OrbCore.AccountVpnRoutes.set app.store.missionsDb staleAccount (some "NL"))
+  let (staleCode, _) ← postJson app jwt "/api/ai/providers/cli-proxy-login/stale-vpn-callback/callback"
+    "{\"url\":\"http://localhost/callback?code=fixture&state=fixture-state\"}" now
+  if staleCode != 409 then failures := failures.push "A Direct login callback must be refused after selecting VPN"
   let session := "/api/ai/providers/cli-proxy-login/late-error-fixture"
   -- The sidecar accepts the callback before it exchanges the code, then reports an error.
   answer.set "{\"status\":\"ok\"}"

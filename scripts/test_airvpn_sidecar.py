@@ -57,7 +57,7 @@ def run(binary, reconnect=False, orb_configure=None):
                 if host in {"127.0.0.1", "receiver.example.invalid"} and port == receiver:
                     destination = receiver
                 else:
-                    assert host in {"chatgpt.com", "auth.openai.com"} and port == 443
+                    assert host in {"chatgpt.com", "auth.openai.com", "api.anthropic.com", "platform.claude.com"} and port == 443
                     destination = model_port
                 with socket.create_connection(("127.0.0.1", destination), 4, (source_ip, 0)) as dest:
                     sock.sendall(bytes([5, 0, 0, 1, 127, 0, 0, 1, 0, 0]))
@@ -79,19 +79,54 @@ def run(binary, reconnect=False, orb_configure=None):
         root = Path(temp)
         cert, tls_key = root / "cert.pem", root / "key.pem"
         subprocess.run(["openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048", "-days", "1",
-                        "-subj", "/CN=chatgpt.com", "-addext", "subjectAltName=DNS:chatgpt.com,DNS:auth.openai.com",
+                        "-subj", "/CN=chatgpt.com", "-addext", "subjectAltName=DNS:chatgpt.com,DNS:auth.openai.com,DNS:api.anthropic.com,DNS:platform.claude.com",
                         "-out", cert, "-keyout", tls_key], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls.load_cert_chain(cert, tls_key)
         model_hits = []
+        claude_hits = []
+        claude_oauth = []
         refresh_hits = []
         reconnect_hits = []
         class Model(Receiver):
             def setup(self):
                 self.request = tls.wrap_socket(self.request, server_side=True)
                 super().setup()
+            def send_json(self, payload):
+                data = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                claude_oauth.append((self.path, self.client_address[0]))
+                self.send_json({"account": {"uuid": "acct-c", "email": "c@example.invalid"},
+                                "organization": {"uuid": "org-c", "name": "Fixture"}})
             def do_POST(self):
                 body = self.rfile.read(int(self.headers["Content-Length"]))
+                if self.path == "/v1/oauth/token":
+                    fields = json.loads(body)
+                    grant = fields["grant_type"]
+                    assert grant in ("refresh_token", "authorization_code")
+                    claude_oauth.append((grant, self.client_address[0]))
+                    self.send_json({"access_token": "fixture-c", "refresh_token": "rotated-c" if grant == "authorization_code" else fields["refresh_token"],
+                                    "expires_in": 3600, "account": {"uuid": "acct-c", "email_address": "c@example.invalid"},
+                                    "organization": {"uuid": "org-c"}})
+                    return
+                if self.path.split("?")[0] == "/v1/messages":
+                    token = self.headers.get("Authorization") or self.headers.get("X-Api-Key")
+                    claude_hits.append((self.client_address[0], token))
+                    data = json.dumps({"id": "msg_fixture", "type": "message", "role": "assistant",
+                                       "model": json.loads(body)["model"], "content": [{"type": "text", "text": "fixture"}],
+                                       "stop_reason": "end_turn", "usage": {"input_tokens": 1, "output_tokens": 1}}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
                 if self.path == "/oauth/token":
                     fields = urllib.parse.parse_qs(body.decode())
                     if fields["grant_type"] == ["authorization_code"]:
@@ -127,6 +162,8 @@ def run(binary, reconnect=False, orb_configure=None):
         auth.mkdir()
         for name in ("a", "b", "direct"):
             (auth / f"{name}.json").write_text(json.dumps({"type": "codex", "access_token": "fixture-" + name, "prefix": "" if orb_configure and name == "a" else name, "account_id": "acct-" + name, "expired": "2099-01-01T00:00:00Z", "email": name + "@example.invalid"}))
+        (auth / "c.json").write_text(json.dumps({"type": "claude", "access_token": "fixture-c", "prefix": "c",
+                                                "email": "c@example.invalid", "account_uuid": "acct-c", "expired": "2099-01-01T00:00:00Z"}))
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             port = listener.getsockname()[1]
@@ -139,7 +176,7 @@ def run(binary, reconnect=False, orb_configure=None):
                                              headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
             with urllib.request.urlopen(request, timeout=8) as response:
                 return json.load(response)
-        routes = {"a": f"socks5://127.0.0.1:{a}", "b": f"socks5://127.0.0.1:{b}"}
+        routes = {"a": f"socks5://127.0.0.1:{a}", "b": f"socks5://127.0.0.1:{b}", "c": f"socks5://127.0.0.1:{a}"}
         orb_relay = None
         proc = subprocess.Popen([binary, "-config", str(config)], cwd=root,
                                 env={"HOME": temp, "PATH": os.defpath, "SSL_CERT_FILE": str(cert)}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -155,7 +192,7 @@ def run(binary, reconnect=False, orb_configure=None):
             for _ in range(100):
                 try:
                     files = api("GET", "credentials")["files"]
-                    if len(files) == 3:
+                    if len(files) == 4:
                         break
                 except urllib.error.URLError:
                     pass
@@ -211,17 +248,28 @@ def run(binary, reconnect=False, orb_configure=None):
                     except urllib.error.HTTPError as e:
                         raise AssertionError((name, e.code, e.read(2048))) from e
                 assert model_hits == [("127.0.0.2", "Bearer fixture-a"), ("127.0.0.3", "Bearer fixture-b")], model_hits
-                for name in ("a", "b"):
+                def claude_inference():
+                    model = next(m for m in models if m.startswith("c/claude-"))
+                    wire = json.dumps({"model": model, "max_tokens": 8, "messages": [{"role": "user", "content": "synthetic"}]}).encode()
+                    req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/messages", data=wire,
+                                                 headers={"Authorization": "Bearer fixture-client", "Content-Type": "application/json",
+                                                          "Anthropic-Version": "2023-06-01"})
+                    with urllib.request.urlopen(req, timeout=12) as response:
+                        assert json.load(response)["id"] == "msg_fixture"
+                    assert claude_hits[-1] == ("127.0.0.2", "Bearer fixture-c"), claude_hits
+                claude_inference()
+                for name in ("a", "b", "c"):
                     api("PATCH", "credentials/fields", {"name": name + ".json", "refresh_token": "refresh-" + name})
                     api("POST", "credentials/refresh", {"name": name + ".json"})
                 assert set(refresh_hits) == {("127.0.0.2", "refresh-a"), ("127.0.0.3", "refresh-b")}, refresh_hits
                 if reconnect:
                     for name, url in routes.items():
+                        provider = "claude" if name == "c" else "codex"
                         filename = name + ".json"
-                        session = api("POST", "oauth/auth-url", {"provider": "codex", "name": filename, "proxy_url": url})
+                        session = api("POST", "oauth/auth-url", {"provider": provider, "name": filename, "proxy_url": url})
                         assert session["target_auth_id"] == filename
                         state = session["state"]
-                        api("POST", "oauth/callback", {"provider": "codex", "code": name, "state": state})
+                        api("POST", "oauth/callback", {"provider": provider, "code": name, "state": state})
                         for _ in range(80):
                             status = api("GET", "oauth/status?state=" + urllib.parse.quote(state))
                             if status["status"] != "wait":
@@ -229,9 +277,13 @@ def run(binary, reconnect=False, orb_configure=None):
                             time.sleep(.1)
                         assert status.get("adopted") and status.get("auth_id") == filename, status
                         saved = api("GET", "credentials/download?name=" + filename)
+                        assert saved.get("prefix") == prefixes[name]
                         assert saved["refresh_token"] == "rotated-" + name and saved["proxy_url"] == url
                     assert reconnect_hits == [("127.0.0.2", "a"), ("127.0.0.3", "b")], reconnect_hits
-                    print("Targeted OAuth reconnect passed for both credential exits.")
+                    assert ("authorization_code", "127.0.0.2") in claude_oauth, claude_oauth
+                    print("Targeted OAuth reconnect passed for two ChatGPT fixtures and the Claude fixture.")
+                assert ("refresh_token", "127.0.0.2") in claude_oauth, claude_oauth
+                assert all(ip == "127.0.0.2" for _, ip in claude_oauth), claude_oauth
                 with socket.socket() as unavailable:
                     unavailable.bind(("127.0.0.1", 0))
                     if orb_relay:
@@ -239,6 +291,7 @@ def run(binary, reconnect=False, orb_configure=None):
                         orb_relay.stdin.flush()
                         assert orb_relay.stdout.readline().strip() == "blocked"
                         assert request("b")["body"] == "127.0.0.3"
+                        claude_inference()
                     else:
                         api("PATCH", "credentials/fields", {"name": "a.json", "proxy_url": f"socks5://127.0.0.1:{unavailable.getsockname()[1]}"})
                     try:
