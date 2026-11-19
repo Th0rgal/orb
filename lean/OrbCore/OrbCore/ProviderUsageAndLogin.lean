@@ -2861,7 +2861,8 @@ def dispatchProviderAndAiRoute
   -- The chain id may contain a slash (`builtin/smart`), so it is every segment between `chains` and `test`.
   if method == "POST" && segs.length >= 5 && segs[0]? == some "api" && segs[1]? == some "model-routing" && segs[2]? == some "chains" && segs.getLast? == some "test" then
     if !effAdmin then return some (jsonErr 403 "admin_required")
-    let cid := String.intercalate "/" ((segs.drop 3).take (segs.length - 4))
+    let rawId := String.intercalate "/" ((segs.drop 3).take (segs.length - 4))
+    let cid := (percentDecodeStrict rawId).getD rawId
     let testAll := ((qParam? qMap "all").getD "false") == "true"
     let probeModel := if cid.startsWith "builtin/" then cid else s!"builtin/{cid}"
     let probeBody : JVal := .obj #[

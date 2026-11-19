@@ -1484,9 +1484,11 @@ private def routingChainProbeContract (app : CoreAppState) (jwt : String) (now :
           s!"HTTP/1.1 {code} Result\r\nContent-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\nConnection: close\r\n\r\n{body}".toUTF8
         discard <| LeanSys.Posix.closeFd client
   try
-    let (_, doc) ← postJson app jwt "/api/model-routing/chains/builtin/smart/test" "{}" now
-    if doc.fieldBool? "ok" != some true || !(← reached.get) then
-      failures := failures.push s!"authenticated builtin/smart test must reach upstream: {renderCompact doc}"
+    for pathId in ["builtin/smart", "builtin%2Fsmart", "smart"] do
+      reached.set false
+      let (_, doc) ← postJson app jwt s!"/api/model-routing/chains/{pathId}/test" "{}" now
+      if doc.fieldBool? "ok" != some true || !(← reached.get) then
+        failures := failures.push s!"authenticated {pathId} test must reach upstream: {renderCompact doc}"
     if ← authenticateProxyRequest app #[] now then
       failures := failures.push "proxy must still reject missing credentials"
   finally
