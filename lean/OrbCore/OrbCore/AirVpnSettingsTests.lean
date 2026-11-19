@@ -1,6 +1,6 @@
 import OrbCore.AirVpnSettings
 import OrbCore.AirVpnTunnel
-import OrbCore.AccountVpnRoutes
+import OrbCore.AccountVpnPool
 
 namespace OrbCore.AirVpnSettingsTests
 
@@ -37,6 +37,19 @@ private def routeStorage (root : String) : IO Unit := do
   finally discard <| OrbBin.Sqlite.sqliteCloseRaw reopened.handle
 
 def run (root : String) : IO Unit := do
+  let cat := AccountVpnPool.category
+  check (cat "ChatGPT" == cat " Codex " && cat "Gemini" == cat "google" &&
+    cat "Claude" != cat "ChatGPT") "credential category aliases"
+  let exits := [Orb.AccountVpn.ExitAddress.v4 1, .v6 0 42]
+  let .ok firstLocks ← AccountVpnPool.lockExits root (cat "codex") exits | throw (IO.userError "first VPN lease")
+  try
+    check (!(← AccountVpnPool.lockExits root (cat "chatgpt") [.v4 2, .v6 0 42]).isOk)
+      "same-category overlap across independent file handles"
+    let .ok second ← AccountVpnPool.lockExits root (cat "claude") exits | throw (IO.userError "cross-category VPN lease")
+    second.forM fun fd => OrbBin.PosixExt.closeFdRaw fd.toInt32
+    let .ok released ← AccountVpnPool.lockExits root (cat "codex") [.v4 2] | throw (IO.userError "partial lease retained")
+    released.forM fun fd => OrbBin.PosixExt.closeFdRaw fd.toInt32
+  finally firstLocks.forM fun fd => OrbBin.PosixExt.closeFdRaw fd.toInt32
   routeStorage root
   let parseIp := AirVpnObservation.parseExit?
   let v4 := Orb.AccountVpn.ExitAddress.v4 0x01020304
@@ -95,6 +108,10 @@ def run (root : String) : IO Unit := do
   check (invalidEdit == 400) "malformed replacement rejected"
   check ((← openAirVpnSecret dir (.device "device")).toOption == some profile)
     "previous device retained on invalid edit"
+  let (namedStatus, _) ← put (.obj #[("device_id", .str "device"), ("profile", .str profile),
+    ("country", .str "NL"), ("server", .str "west")])
+  check (namedStatus == 200 && (← endpoints dir) == [⟨"device", "NL", "west"⟩])
+    "named server metadata and device profile updated together"
   let (keyStatus, _) ← put (.obj #[("api_key", .str "synthetic-api-key")])
   check (keyStatus == 200) "api key saved"
   let (readStatus, summary) ← settings dir "GET" ByteArray.empty

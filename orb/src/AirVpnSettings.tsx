@@ -19,6 +19,8 @@ function AirVpnForm() {
   const [message, setMessage] = createSignal("");
   let key!: HTMLInputElement;
   let device!: HTMLInputElement;
+  let server!: HTMLInputElement;
+  let country!: HTMLInputElement;
   let profile!: HTMLInputElement;
 
   async function save(kind: "key" | "device") {
@@ -32,10 +34,10 @@ function AirVpnForm() {
         if (!key.reportValidity()) return;
         body = { api_key: key.value };
       } else {
-        if (!device.reportValidity() || !profile.reportValidity()) return;
+        if (!device.reportValidity() || !country.reportValidity() || !server.reportValidity() || !profile.reportValidity()) return;
         const file = profile.files?.[0];
         if (!file || file.size > 30_000) throw new Error("Choose a WireGuard profile under 30 KB.");
-        body = { device_id: device.value, profile: await file.text() };
+        body = { device_id: device.value, country: country.value.toUpperCase(), server: server.value, profile: await file.text() };
       }
       if (connectionVersion() !== version) return;
       await api(path, { method: "PUT", body: JSON.stringify(body) });
@@ -79,6 +81,10 @@ function AirVpnForm() {
       <SettingsRow title="WireGuard device profile" desc={status()?.devices.length ? status()!.devices.join(", ") : "In AirVPN’s Config Generator, select an Orb device, WireGuard, and one named server. Import the downloaded .conf file."} stack>
         <input ref={device} class="s-input" aria-label="Device name" placeholder="Device name"
           required pattern="[a-z0-9\-]{1,64}" maxlength={64} />
+        <input ref={country} class="s-input" aria-label="Server country code" placeholder="Country code (e.g. NL)"
+          required pattern="[a-zA-Z]{2}" maxlength={2} />
+        <input ref={server} class="s-input" aria-label="AirVPN server name" placeholder="AirVPN server name"
+          required pattern="[a-zA-Z0-9\-]{1,64}" maxlength={64} />
         <input ref={profile} type="file" aria-label="WireGuard profile" accept=".conf" required />
         <button class="s-btn" disabled={saving()} onClick={() => void save("device")}>Import profile</button>
       </SettingsRow>

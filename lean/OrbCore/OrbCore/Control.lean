@@ -35,7 +35,7 @@ import OrbCore.SecretAndApproval
 import OrbCore.RemoteFleetAndRelay
 import OrbCore.ManagedProviderSealing
 import OrbCore.AirVpnSettings
-import OrbCore.AccountVpnRoutes
+import OrbCore.AccountVpnPool
 import OrbCore.AutoPlacement
 import OrbCore.RemoteDispatch
 import OrbCore.ProjectFilesAndController
@@ -116,6 +116,8 @@ structure CoreAppState where
   pacingTracker?  : Option ProxyPacingTracker := none
   healthTracker?  : Option ProviderHealthTracker := none
   proxyMockTransport? : Option (ProviderTarget → IO (Except String HttpsResponse)) := none
+  vpnPool? : Option AccountVpnPool.Pool := none
+  vpnCoordinatorDir : String := ""
   proxyStreamLimits?  : Option StreamLimits := none
   sseKeepAliveMs?     : Option Nat := none
   authRoot        : String := ""
@@ -1810,7 +1812,11 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     (streamLimits? := st.proxyStreamLimits?)
     (bodyTimedOutRef? := some bodyTimedOutRef)
     (resolveTransport := fun target => AccountVpnRoutes.resolve st.store.missionsDb target.accountId
-      (fun _ => pure (.error "account_vpn_unavailable")))
+      (fun pref => do
+        let some pool := st.vpnPool? | return .error "vpn_coordinator_unavailable"
+        let some record ← getAIProvider? st.store target.accountId | return .error "vpn_credential_owner_unknown"
+        return ← AccountVpnPool.allocate pool st.store.rootDir st.vpnCoordinatorDir st.store.missionsDb
+          record.id record.providerType pref))
   let selectedAccountAfterStream : IO String := do
     match out.streamSelectedAccountRef? with
     | some ref => ref.get
@@ -7980,12 +7986,16 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let systemHub ← newSystemRuntimeHub
     let remoteSup ← newRemoteJobSupervisor (effectiveJwtSecret cfg) cfg.devMode (some telemetrySink)
     let macTetherRt ← startMacTetherRuntime store
+    let vpnPool ← Std.Mutex.new ([] : List AccountVpnPool.Active)
+    let vpnCoordinatorDir := (← IO.getEnv "ORB_AIRVPN_COORDINATOR_DIR").getD ""
     let appState : CoreAppState := {
       cfg := cfg
       store := store
       searchIdx? := searchRes.toOption
       managedRef := managedRef
       chainsRef := chainsRef
+      vpnPool? := some vpnPool
+      vpnCoordinatorDir := vpnCoordinatorDir
       proxyCooldownsRef := proxyCooldownsRef
       seqRef := seqRef
       pacingTracker? := some healthTracker.pacing
@@ -8161,6 +8171,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     discard <| closeFd listenFd
     stopMacTetherRuntime macTetherRt
     closeManagedComputeStore managedStore
+    AccountVpnPool.shutdown vpnPool
     closeCoreStore store
     return 0
 

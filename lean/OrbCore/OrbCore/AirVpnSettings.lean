@@ -85,17 +85,43 @@ def activeSessions (root : String) : IO (Except (Nat × String) (Array JVal)) :=
     | return .error (502, "airvpn_session_evidence_unavailable")
   return .ok sessions
 
+structure Endpoint where
+  device : String
+  country : String
+  server : String
+  deriving DecidableEq, Repr
+
+def deviceNames (root : String) : IO (Array String) := do
+  let dir := managedSecretDir root
+  let mut names := #[]
+  if ← dir.pathExists then
+    for entry in ← dir.readDir do
+      if entry.fileName.startsWith "airvpn-device-" && entry.fileName.endsWith ".aead" then
+        names := names.push ((entry.fileName.drop 14).dropEnd 5).toString
+  return names.qsort (· < ·)
+
+def readEndpoint (root device : String) : IO (Option (Endpoint × DeviceProfile)) := do
+  let .ok raw ← openAirVpnSecret root (.device device) | return none
+  let .ok j := parse raw | return none
+  return do
+    let country ← j.fieldStr? "country"
+    let server ← j.fieldStr? "server"
+    let profile ← j.fieldStr? "profile"
+    let parsed ← (parseProfile profile).toOption
+    return (⟨device, country, server⟩, parsed)
+
+def endpoints (root : String) : IO (List Endpoint) := do
+  let mut all := []
+  for device in ← deviceNames root do
+    if let some (endpoint, _) ← readEndpoint root device then all := endpoint :: all
+  return all.reverse
+
 def settings (root method : String) (payload : ByteArray) : IO (Nat × JVal) := do
   let err := fun (status : Nat) (code : String) => (status, JVal.obj #[("error", .str code)])
   if method == "GET" then
-    let dir := managedSecretDir root
-    let mut profiles : Array String := #[]
-    if ← dir.pathExists then
-      for entry in ← dir.readDir do
-        if entry.fileName.startsWith "airvpn-device-" && entry.fileName.endsWith ".aead" then
-          profiles := profiles.push ((entry.fileName.drop 14).dropEnd 5).toString
+    let profiles ← deviceNames root
     return (200, .obj #[("api_key_configured", .bool (← airVpnSecretConfigured root .apiKey)),
-      ("devices", .arr ((profiles.qsort (· < ·)).map JVal.str))])
+      ("devices", .arr (profiles.map JVal.str))])
   if method == "POST" then
     match ← activeSessions root with
     | .ok sessions => return (200, .obj #[("active_sessions", .num (toString sessions.size))])
@@ -111,7 +137,15 @@ def settings (root method : String) (payload : ByteArray) : IO (Nat × JVal) := 
       pure (AirVpnSecret.apiKey, clean)
     | none, some id, some profile => do
       if let .error e := parseProfile profile then return err 400 e
-      pure (AirVpnSecret.device id, profile)
+      match j.field? "country", j.field? "server" with
+      | none, none => pure (AirVpnSecret.device id, profile)
+      | some (.str country), some (.str server) =>
+        unless country.length == 2 && country.toList.all (fun c => 'A' ≤ c && c ≤ 'Z') &&
+            !server.isEmpty && server.length ≤ 64 && server.all (fun c => c.isAlphanum || c == '-') do
+          return err 400 "invalid_airvpn_server"
+        pure (AirVpnSecret.device id, renderCompact (.obj #[("country", .str country),
+          ("server", .str server), ("profile", .str profile)]))
+      | _, _ => return err 400 "expected_country_and_server"
     | _, _, _ => return err 400 "expected_api_key_or_device_profile"
   match ← sealAirVpnSecret root secret value with
   | .ok () => return (200, .obj #[("saved", .bool true)])

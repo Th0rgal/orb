@@ -67,8 +67,8 @@ def startVerified (root sharedDir device server country : String) (port : UInt16
   let lock ← flockExclusiveNb ((System.FilePath.mk sharedDir) / "airvpn.lock").toString
   if lock ≥ 0xFFFFFFFE then return .error "vpn_coordinator_busy"
   try
-    let .ok raw ← openAirVpnSecret root (.device device) | return .error "vpn_profile_unavailable"
-    let .ok profile := parseProfile raw | return .error "invalid_wireguard_profile"
+    let some (endpoint, profile) ← readEndpoint root device | return .error "vpn_profile_unavailable"
+    if endpoint.country != country || endpoint.server != server then return .error "vpn_profile_changed"
     let .ok sessions ← activeSessions root | return .error "airvpn_session_evidence_unavailable"
     if let .error e := checkReservation profile.addresses sessions then return .error e
     let .ok t ← start profile port | return .error "vpn_start_failed"
