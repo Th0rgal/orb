@@ -212,6 +212,18 @@ Uninstrumented, same-host back-to-back strict pinned builds, unchanged three-run
 All 20 independently rendered stream frames and 36 unchanged golden PNGs
 matched. The strict warm-cache test passed. Latency gates still fail.
 
+### Hosted vs local after upload batching
+
+The only failed check at `77a7b0b6d` was the full-size [parity benchmark](https://github.com/Th0rgal/orb/actions/runs/44488424974/job/135437617003); both frame percentiles exceeded their budgets. The hosted first-frame CRC was 3085882631, local 2783534071, so use within-host comparisons for changes rather than treating one host as a substitute for the other.
+
+| Three-run build | Startup ms | Open ms | Frame p50 ms | Frame p99 ms | Peak RSS MiB |
+|---|---:|---:|---:|---:|---:|
+| Hosted `77a7b0b6d` | 35.95 | 38.93 | 2.81 | 8.96 | 47.20 |
+| Local strict `77a7b0b6d`, rerun | 70.39 | 81.04 | 5.76 | 19.31 | 53.74 |
+| Local strict, single-run measurement + opaque strips + bounded shaping cache | 52.12 | 52.39 | 4.59 | 15.10 | 45.57 |
+
+The first two changes reduced median layout from 1.28 to 0.66 ms and first-update raster from 14.78 to 11.98 ms in separate local traces. Intrinsic measurement avoids allocating positions for a single run; raster copies fully covered opaque interior strips while retaining the original border/corner calculations. Growing text above 128 UTF-8 bytes still goes through HarfBuzz but no longer occupies the shaping cache. The independent stream comparisons, clip/atlas fixtures, all 36 PNGs and the strict warm-cache gate passed. No m2air/WebKit comparison is implied by either Linux measurement.
+
 ## Visual gate
 
 **Not accepted:** mean mismatch 5.86%, above 8-level channel tolerance 2.84%,

@@ -387,6 +387,9 @@ def shapeText (f : FontHandle) (size64 : UInt32) (text : String) (features : Str
 features, so unchanged chrome is not sent through HarfBuzz on every display tick. -/
 def shapeTextCached (ac : GlyphAtlasCache) (f : FontHandle) (size64 : UInt32) (text : String)
     (features : String := "") : IO (GlyphAtlasCache × Array ShapedGlyph) := do
+  -- Bound retained bytes as well as entry count. Growing replies are shaped
+  -- once per new prefix; keeping those prefixes evicts reusable labels.
+  if text.utf8ByteSize > 128 then return (ac, ← shapeText f size64 text features)
   match ac.shapeCache.find? (fun cached =>
       cached.fontId == f.fontId && cached.size64 == size64 && cached.text == text && cached.features == features) with
   | some cached =>

@@ -262,12 +262,23 @@ private def drawRoundedBox (vw vh : Nat) (fb : ByteArray) (curClip r : Rect)
   -- Inside either straight strip the pixel has full coverage. Only corner
   -- pixels need a signed distance, including for the inner border edge.
   let margin : Int := max (max tl tr) (max brR blR)
+  let spanL := min x1 (max x0 (max (r.x + margin) (if hasBorder then innerRect.x + margin else x0)))
+  let spanR := max spanL (min x1 (min (r.right - margin) (if hasBorder then innerRect.right - margin else x1)))
+  let bulk := fa == 255 && spanR - spanL ≥ 16
+  let mut strip := ByteArray.empty
+  if bulk then
+    strip := ByteArray.emptyWithCapacity ((spanR-spanL).toNat * 4)
+    for _ in [:(spanR-spanL).toNat] do strip := strip.push fr |>.push fg |>.push fbC |>.push fa
   for py in [y0.toNat : y1.toNat] do
     let y : Int := py
     let straightRow := y ≥ r.y + margin && y < r.bottom - margin
     let innerRow := y ≥ innerRect.y && y < innerRect.bottom
     let straightInnerRow := y ≥ innerRect.y + margin && y < innerRect.bottom - margin
-    for px in [x0.toNat : x1.toNat] do
+    let useStrip := bulk && (!hasBorder || innerRow)
+    if useStrip then out := strip.copySlice 0 out ((py * vw + spanL.toNat) * 4) strip.size
+    let skip := if useStrip then (spanR-spanL).toNat else 0
+    for edgeX in [x0.toNat : x1.toNat - skip] do
+      let px := if useStrip && edgeX ≥ spanL.toNat then edgeX + skip else edgeX
       let x : Int := px
       let dOut16 := if straightRow || (x ≥ r.x + margin && x < r.right - margin) then -8
         else sdfRoundedRect16 r radii x y
