@@ -127,6 +127,13 @@ def requestFocus (rt : RuntimeState σ) (entityId : EntityId) (focusRect : Rect)
   let dmg' := match borderDmg with
     | none => rt.damage
     | some r => Damage.add rt.damage r
+  let dmg' := if focus'.owner != rt.focus.owner then
+      match rt.focus.owner with
+      | none => dmg'
+      | some old =>
+        let oldRect := (rt.hitRegions.find? (·.1 == old)).map (fun p => roundRectOut rt.wayland.scale120 p.2)
+        Damage.add dmg' (oldRect.getD rt.viewportDeviceRect)
+    else dmg'
   { rt with focus := focus', damage := dmg' }
 
 /-- Apply one `Event` to the runtime state and invoke the application's event reducer `onEvent`. -/

@@ -570,7 +570,9 @@ private def stepDesktopInput (scale120 : Nat) (viewport : Rect) (st : DesktopSta
     | _ => false
   if !actionChanged && composer == st.composer then (st, none)
   else
-    let dmg := if composer != st.composer then composerDamageRect scale120 viewport else viewport
+    -- Only the transcript has a fixed bottom composer. Other screens can center
+    -- the editor; without its layout bounds use the full viewport.
+    let dmg := if composer != st.composer && st.screen == .missionTranscript then composerDamageRect scale120 viewport else viewport
     let next := if next.openMission.isSome && next.screen != .missionTranscript then
       resetSelection next none else next
     (next, Damage.add none dmg)

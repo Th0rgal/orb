@@ -73,6 +73,8 @@ private def verifyFocusTransfer : IO Unit := do
   let base ← Vulkan.renderFrame { width := 80, height := 24 } theme.palette.canvas {} first.prims
   let got ← checkPartial "focus transfer" base clicked.damage {} theme.palette.canvas (view clicked.focus).prims
   for (id, r) in first.hitRegionsDev do
+    unless clicked.damage.any (fun d => d.x ≤ r.x && d.y ≤ r.y && d.right ≥ r.right && d.bottom ≥ r.bottom) do
+      throw <| IO.userError s!"focus: damage missed widget {id}"
     let differs := (List.range r.h.toNat).any fun y => (List.range r.w.toNat).any fun x =>
       let i := 4 * ((r.y.toNat + y) * base.width + r.x.toNat + x)
       base.framebuffer.extract i (i+4) != got.framebuffer.extract i (i+4)
@@ -98,6 +100,16 @@ def verifyDesktopEdges (view : Runtime.RuntimeState DesktopState → IO Runtime.
     let (hinted, _) := Vulkan.rasterizeSceneInto base.width base.height clear' atlas'
       (some base.framebuffer) edited.damage scene'
     unless hinted == got.framebuffer do throw <| IO.userError "composer: damage missed edited pixels"
+
+    let center := { rt with app := DesktopState.forScreen .controlEmpty, atlas := atlas', damage := none }
+    let (ca, cc, cs, _, _) ← view center
+    let before ← Vulkan.renderFrame center.vulkan cc ca cs
+    let edit := ({ center with atlas := ca }).stepEvent (stepDesktopEvent 120 center.viewportDeviceRect) (.text "W")
+    let (ea, ec, es, _, _) ← view edit
+    let after ← Vulkan.renderFrame before ec ea es
+    let (replayed, _) := Vulkan.rasterizeSceneInto before.width before.height ec ea (some before.framebuffer) edit.damage es
+    unless edit.damage == some center.viewportDeviceRect && before.framebuffer != after.framebuffer && replayed == after.framebuffer do
+      throw <| IO.userError "centered composer: damage missed edited pixels"
 
     let label ac := shape ac rt.primaryFont 120 (Theme.bodyText st.theme)
     let mut ac : Text.GlyphAtlasCache := {}
