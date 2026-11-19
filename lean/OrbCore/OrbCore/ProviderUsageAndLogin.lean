@@ -83,9 +83,23 @@ structure ProviderHubState where
   loginSessions   : Array CliLoginSession := #[]
   catalogRefreshedSec : UInt64 := 0
 
+/-- JSON HTTP transport of the vendor usage adapters, in the shape of `sendJsonRequest`
+    (method, url, bearer, body, extra headers, timeout ms, response byte cap). Production passes
+    `liveUsageHttp`; tests replay recorded vendor responses through the same adapter code. -/
+abbrev UsageHttp :=
+  String → String → Option String → Option JVal → Array (String × String) → UInt32 → Nat →
+    IO (Except String (Nat × String × Option JVal))
+
+/-- The production transport. -/
+def liveUsageHttp : UsageHttp :=
+  fun method url bearer body headers timeoutMs maxBytes =>
+    sendJsonRequest method url bearer body headers timeoutMs maxBytes
+
 structure ProviderRuntimeHub where
   mu : Std.Mutex ProviderHubState
   usageProbe? : Option (String → IO JVal) := none
+  /-- Vendor transport of the usage adapters. Only tests replace it. -/
+  usageHttp : UsageHttp := liveUsageHttp
 
 def newProviderRuntimeHub : IO ProviderRuntimeHub := do
   let mu ← Std.Mutex.new ({} : ProviderHubState)
@@ -231,6 +245,8 @@ structure CliAuthFileInfo where
   disabled    : Bool
   mtimeSec    : UInt64
   fingerprint : UInt64 := 0
+  /-- Muse Code device credential (`dca_token`); empty for every other login type. -/
+  deviceToken : String := ""
   deriving Repr, Inhabited
 
 def scanCliProxyAuthFiles : IO (Array CliAuthFileInfo) := do
@@ -257,10 +273,11 @@ def scanCliProxyAuthFiles : IO (Array CliAuthFileInfo) := do
                   else if e.fileName.startsWith "xai-" then "xai"
                   else ""
                 let email := ((jv.fieldStr? "email").orElse (fun _ => jv.fieldStr? "account_email") |>.getD "").trimAscii.toString
-                let tok := ((jv.fieldStr? "access_token").orElse (fun _ => (jv.fieldStr? "token").orElse (fun _ => jv.fieldStr? "refresh_token")) |>.getD "").trimAscii.toString
+                let tok := ((jv.fieldStr? "access_token").orElse (fun _ => jv.fieldStr? "token") |>.getD "").trimAscii.toString
                 let acctId := ((jv.fieldStr? "account_id").getD "").trimAscii.toString
                 let pfx := ((jv.fieldStr? "prefix").getD "").trimAscii.toString
                 let dis := (jv.fieldBool? "disabled").getD false
+                let deviceTok := if inferredType == "meta" then ((jv.fieldStr? "dca_token").getD "").trimAscii.toString else ""
                 seenNames := seenNames.push e.fileName
                 out := out.push {
                   fileName := e.fileName
@@ -273,6 +290,7 @@ def scanCliProxyAuthFiles : IO (Array CliAuthFileInfo) := do
                   disabled := dis
                   mtimeSec := st.mtime
                   fingerprint := hash raw
+                  deviceToken := deviceTok
                 }
   return out
 
@@ -365,7 +383,23 @@ structure HydratedProvider where
   updatedAt       : String
   /-- User who added the account (`''` for operator/legacy rows). -/
   createdByUserId : String := ""
+  /-- Muse Code device credential (`dca_token` in the CLIProxyAPI auth file). The vendor quota
+      endpoint accepts this credential, not the minted `access_token`. Never rendered. -/
+  deviceToken     : String := ""
   deriving Repr, Inhabited
+
+/-- Muse Code device credential of a row: the matched CLIProxyAPI file's `dca_token`, else the
+    legacy `oauth.refresh_token` when that holds a token and not an auth-file name. Empty for
+    every other provider type, so no other adapter can pick it up. -/
+private def museDeviceToken (providerType : String) (matchedAuth? : Option CliAuthFileInfo)
+    (legacyRefresh : String) : String :=
+  if providerType.toLower != "muse-code" then ""
+  else
+    let fromFile := (matchedAuth?.map (·.deviceToken)).getD ""
+    let legacy := legacyRefresh.trimAscii.toString
+    if !fromFile.isEmpty then fromFile
+    else if !legacy.isEmpty && !legacy.endsWith ".json" then legacy
+    else ""
 
 def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array HydratedProvider) := do
   let key32? ← loadPrivateKeyBytes? workingDir store.rootDir
@@ -433,6 +467,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
         else if p.providerType.toLower == "muse-code" && !legRefreshFile.isEmpty && !legRefreshFile.endsWith ".json" then legRefreshFile
         else ""
     let effOauthFile := (matchedAuth?.map (·.fileName)).getD legRefreshFile
+    let effDeviceTok := museDeviceToken p.providerType matchedAuth? legRefreshFile
 
     let bksFromFile : Array String :=
       match backendsJv.fieldArr? p.id with
@@ -477,6 +512,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
       createdAt := createdStr
       updatedAt := updatedStr
       createdByUserId := p.createdByUserId
+      deviceToken := effDeviceTok
     }
 
   -- Include any entries present in `.sandboxed-sh/ai_providers.json` not yet in SQLite
@@ -526,6 +562,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
         maxConcurrency? := none
         createdAt := (leg.fieldStr? "created_at").getD nowIso
         updatedAt := (leg.fieldStr? "updated_at").getD nowIso
+        deviceToken := museDeviceToken pType matchedAuth? refFile
       }
 
   -- Any sidecar login may precede creation of a Core provider row. Disabled files with no
@@ -543,8 +580,9 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
         oauthToken := af.accessToken
         oauthFile := af.fileName
         accountEmail := af.email
-        enabled := true
+        enabled := !af.disabled
         priority := out.size
+        deviceToken := af.deviceToken
       }
   return out.qsort (fun a b => a.priority < b.priority)
 
@@ -602,7 +640,7 @@ def projectMemberProviderUsageJv (jv : JVal) (displayName : String) : JVal :=
       if k == "account_email" || k == "account_name" || k == "account" ||
          k == "organization" || k == "organization_id" || k == "google_project_id" ||
          k == "xai_key_name" || k == "xai_team_id" ||
-         k == "label" || k == "diagnostic" then
+         k == "label" || k == "diagnostic" || k == "verification_url" then
         none
       else if k == "provider_name" || k == "access_profile" then
         some (k, .str displayName)
@@ -975,8 +1013,13 @@ private def jvalNumRaw? (v : JVal) : Option String :=
   | .str s =>
     let t := s.trimAscii.toString
     if t.isEmpty then none
-    else if t.toInt?.isSome || (t.splitOn ".").length == 2 then some t
-    else none
+    else if t.toInt?.isSome then some t
+    else
+      -- A vendor string is only passed on as a JSON number when it is one.
+      match t.splitOn "." with
+      | [whole, frac] =>
+        if whole.toInt?.isSome && !frac.isEmpty && frac.all Char.isDigit then some t else none
+      | _ => none
   | _ => none
 
 /-- Parse numeric, numeric-string, or `{val: ...}` JSON value into Nat. -/
@@ -1074,22 +1117,90 @@ private def formatKimiMembershipLevel (raw : String) : Option String :=
     if words.isEmpty then none
     else some (String.intercalate " " (words.map fun w => w.toLower.capitalize))
 
-private def classifyKimiWindowKind (entry : JVal) : String := Id.run do
-  if let some win := entry.field? "window" then
-    let dur := (win.fieldNat? "duration").getD 0
+/-- Length of a Kimi `window` object in minutes (`duration` + `timeUnit`); an unknown unit counts as hours. -/
+private def kimiWindowMinutes? (win : JVal) : Option Nat :=
+  ((win.field? "duration").bind jvalNatFlex?).map fun dur =>
     let unit := ((win.fieldStr? "timeUnit").orElse (fun _ => win.fieldStr? "time_unit") |>.getD "").toUpper
-    if (unit.endsWith "MINUTE" || unit.endsWith "MINUTES") && dur == 300 then return "5h"
-    if (unit.endsWith "HOUR" || unit.endsWith "HOURS") && dur == 5 then return "5h"
-    if (unit.endsWith "DAY" || unit.endsWith "DAYS") && dur == 7 then return "weekly"
-    if (unit.endsWith "WEEK" || unit.endsWith "WEEKS") && dur == 1 then return "weekly"
-  let name := ((entry.fieldStr? "name").orElse (fun _ => (entry.fieldStr? "type").orElse (fun _ => entry.fieldStr? "model_name")) |>.getD "").toLower
-  if name == "all" || (name.splitOn "week").length > 1 || (name.splitOn "7d").length > 1 then return "weekly"
-  if (name.splitOn "5h").length > 1 || (name.splitOn "300m").length > 1 || (name.splitOn "five").length > 1 then return "5h"
-  return ""
+    let has (s : String) : Bool := (unit.splitOn s).length > 1
+    if has "MINUTE" then dur
+    else if has "HOUR" then dur * 60
+    else if has "DAY" then dur * 1440
+    else if has "WEEK" then dur * 10080
+    else dur * 60
 
-private def parseKimiDetailTenthsAndReset (entry : JVal) (nowSec : UInt64) : Option (Nat × Option UInt64) := Id.run do
+private def classifyKimiMinutes (minutes : Nat) : String :=
+  if 294 < minutes && minutes < 306 then "5h"
+  else if minutes ≥ 8640 then "weekly"
+  else "other"
+
+private def classifyKimiLabel (label : String) : String :=
+  let l := label.toLower
+  let has (s : String) : Bool := (l.splitOn s).length > 1
+  if has "5h" || has "5-hour" || has "5 hour" || has "300m" || has "five" then "5h"
+  else if l == "all" || has "week" || has "7d" || has "7-day" then "weekly"
+  else "other"
+
+/-- `"5h"`, `"weekly"` or `"other"`: the entry's `window` length when it has one, else its names. -/
+private def classifyKimiEntry (entry : JVal) (label : String) : String :=
+  match (entry.field? "window").bind kimiWindowMinutes? with
+  | some minutes => classifyKimiMinutes minutes
+  | none =>
+    let name := ((entry.fieldStr? "name").orElse (fun _ => (entry.fieldStr? "type").orElse (fun _ => entry.fieldStr? "model_name")) |>.getD "")
+    let kind := classifyKimiLabel name
+    if kind != "other" then kind else classifyKimiLabel label
+
+/-- Label of `limits[idx]` from its `window`; never a guessed 5h/weekly name. -/
+private def kimiLimitLabel (item : JVal) (idx : Nat) : String :=
+  let fallback := s!"Limit {idx + 1}"
+  match item.field? "window" with
+  | none => fallback
+  | some win =>
+    match kimiWindowMinutes? win with
+    | none => fallback
+    | some minutes =>
+      let kind := classifyKimiMinutes minutes
+      if kind == "5h" then "5h"
+      else if kind == "weekly" then "Weekly"
+      else
+        let dur := ((win.field? "duration").bind jvalNumRaw?).getD ""
+        let unit := ((win.fieldStr? "timeUnit").orElse (fun _ => win.fieldStr? "time_unit") |>.getD "").trimAscii.toString
+        (s!"{dur} {unit}").trimAscii.toString
+
+/-- One Kimi quota window as the vendor reported it. Absent values stay absent. -/
+private structure KimiWindow where
+  label       : String
+  kind        : String := "other"
+  used?       : Option String := none
+  limit?      : Option String := none
+  remaining?  : Option String := none
+  usedTenths? : Option Nat := none
+  reset?      : Option UInt64 := none
+  deriving Inhabited
+
+/-- Read one window from a `data[]` item, the `usage` object or a `limits[]` entry (its `detail`
+    when present). `none` when it reports no used, limit, remaining or percentage value. -/
+private def kimiWindowFrom? (entry : JVal) (defaultLabel : String) (nowSec : UInt64) : Option KimiWindow := Id.run do
   let detail := (entry.field? "detail").getD entry
-  let resetSec? : Option UInt64 :=
+  let raw (keys : Array String) : Option String := keys.findSome? fun k => (detail.field? k).bind jvalNumRaw?
+  let nat (keys : Array String) : Option Nat := keys.findSome? fun k => (detail.field? k).bind jvalNatFlex?
+  let limitKeys := #["limit", "limit_amount", "total"]
+  let remainingKeys := #["remaining", "left", "remain"]
+  let usedKeys := #["used", "used_amount", "consumed", "current"]
+  let derivedUsed? : Option Nat :=
+    match nat limitKeys, nat remainingKeys with
+    | some lim, some rem => some (lim - rem)
+    | _, _ => none
+  let usedNat? := (nat usedKeys).orElse fun _ => derivedUsed?
+  let used? := (raw usedKeys).orElse fun _ => derivedUsed?.map toString
+  let reported? := ((raw #["used_percent", "usedPercent", "percentage", "percent"]).bind parseNumTenths?).map (min · 1000)
+  let usedTenths? : Option Nat := reported?.orElse fun _ =>
+    match usedNat?, nat limitKeys with
+    | some u, some lim => if lim > 0 then some (min ((u * 1000 + lim / 2) / lim) 1000) else none
+    | _, _ => none
+  if used?.isNone && (raw limitKeys).isNone && (raw remainingKeys).isNone && usedTenths?.isNone then return none
+  let named? := #["name", "title", "model_name"].findSome? fun k =>
+    ((detail.fieldStr? k).map (·.trimAscii.toString)).filter (fun s => !s.isEmpty && s != "all")
+  let reset? : Option UInt64 :=
     ((detail.field? "resetTime").orElse fun _ =>
      (detail.field? "reset_at").orElse fun _ =>
      (detail.field? "reset_time").orElse fun _ =>
@@ -1098,90 +1209,90 @@ private def parseKimiDetailTenthsAndReset (entry : JVal) (nowSec : UInt64) : Opt
      (entry.field? "reset_at").orElse fun _ =>
      entry.field? "reset_time").bind jvalEpochSec?
     <|> ((detail.fieldNat? "reset_in").orElse (fun _ => entry.fieldNat? "reset_in")).map (fun s => nowSec + s.toUInt64)
-  for k in #["used_percent", "usedPercent", "percentage", "percent"] do
-    if let some raw := (detail.field? k).bind jvalNumRaw? then
-      if let some t := parseNumTenths? raw then
-        return some (min t 1000, resetSec?)
-  let limit? := (detail.field? "limit").orElse (fun _ => detail.field? "total") |>.bind jvalNatFlex?
-  let used? := (detail.field? "used").orElse (fun _ => detail.field? "current") |>.bind jvalNatFlex?
-  let rem? := (detail.field? "remaining").orElse (fun _ => detail.field? "remain") |>.bind jvalNatFlex?
-  if let some lim := limit? then
-    if lim > 0 then
-      let effUsed? := used?.orElse fun _ => rem?.map (fun r => if lim >= r then lim - r else 0)
-      if let some u := effUsed? then
-        let tenths := min ((u * 1000 + lim / 2) / lim) 1000
-        return some (tenths, resetSec?)
-  return none
+  return some {
+    label := named?.getD defaultLabel
+    used? := used?
+    limit? := raw limitKeys
+    remaining? := raw remainingKeys
+    usedTenths? := usedTenths?
+    reset? := reset?
+  }
 
-/-- Pure Kimi Coding usage projector (`GET https://api.kimi.com/coding/v1/usages`). -/
+private def kimiWindowJv (w : KimiWindow) : JVal := Id.run do
+  let mut fields : Array (String × JVal) := #[("label", .str w.label)]
+  if let some v := w.used? then fields := fields.push ("used", .num v)
+  if let some v := w.limit? then fields := fields.push ("limit", .num v)
+  if let some v := w.remaining? then fields := fields.push ("remaining", .num v)
+  if let some tenths := w.usedTenths? then
+    fields := fields.push ("used_percent", .num (formatTenthsPct tenths))
+    fields := fields.push ("remaining_percent", .num (formatTenthsPct (1000 - min tenths 1000)))
+  if let some r := w.reset? then fields := fields.push ("reset_at", JVal.uint64 r)
+  return .obj fields
+
+/-- Pure Kimi Coding usage projector (`GET https://api.kimi.com/coding/v1/usages`).
+    Reads both payload families: a `data[]` list of windows, or `usage` (the weekly window) plus
+    `limits[]`. Every reported window is kept in `kimi_windows` with the vendor's own label; the
+    first 5-hour and first weekly window also fill the `kimi_5h_*` / `kimi_weekly_*` scalars and
+    lead the list. A window that is neither is never renamed 5h or weekly. -/
 def projectKimiUsage (body : JVal) (nowSec : UInt64 := 0) : Array (String × JVal) × Array JVal × JVal := Id.run do
   let mut fields : Array (String × JVal) := #[]
   let mut optWins : Array JVal := #[]
-  let mut kimiWins : Array JVal := #[]
   let plan? : Option String :=
     (((body.field? "user").bind (·.field? "membership")).bind (·.fieldStr? "level")).bind formatKimiMembershipLevel
     <|> (body.fieldStr? "plan").orElse (fun _ => (body.fieldStr? "tier").orElse (fun _ => body.fieldStr? "plan_type"))
+    <|> (body.field? "data").bind (·.fieldStr? "plan")
   if let some p := plan? then
     if !p.trimAscii.isEmpty then
       fields := fields.push ("kimi_plan", .str p.trimAscii.toString)
 
-  let mut win5h? : Option (Nat × Option UInt64) := none
-  let mut winWeekly? : Option (Nat × Option UInt64) := none
+  let mut rows : Array KimiWindow := #[]
+  match body.field? "data" with
+  | some (.arr items) =>
+    for item in items do
+      let fallback := if item.fieldStr? "model_name" == some "all" then "Weekly" else "Quota"
+      if let some w := kimiWindowFrom? item fallback nowSec then
+        rows := rows.push { w with kind := classifyKimiEntry item w.label }
+  | _ =>
+    if let some usage := body.field? "usage" then
+      if let some w := kimiWindowFrom? usage "Weekly" nowSec then
+        rows := rows.push { w with kind := "weekly" }
+    let limits := (body.fieldArr? "limits").getD #[]
+    for idx in [0:limits.size] do
+      let item := limits[idx]!
+      let label := kimiLimitLabel item idx
+      if let some w := kimiWindowFrom? item label nowSec then
+        rows := rows.push { w with kind := classifyKimiEntry item label }
 
-  for item in (body.fieldArr? "limits").getD #[] do
-    let kind := classifyKimiWindowKind item
-    if let some parsed := parseKimiDetailTenthsAndReset item nowSec then
-      if kind == "5h" && win5h?.isNone then win5h? := some parsed
-      else if kind == "weekly" && winWeekly?.isNone then winWeekly? := some parsed
-      else if win5h?.isNone then win5h? := some parsed
+  let fiveIdx? := rows.findIdx? (·.kind == "5h")
+  let weeklyIdx? := rows.findIdx? (·.kind == "weekly")
+  let mut ordered : Array KimiWindow := #[]
 
-  for item in (body.fieldArr? "data").getD #[] do
-    let kind := classifyKimiWindowKind item
-    if let some parsed := parseKimiDetailTenthsAndReset item nowSec then
-      if kind == "5h" && win5h?.isNone then win5h? := some parsed
-      else if kind == "weekly" && winWeekly?.isNone then winWeekly? := some parsed
-
-  if let some uObj := body.field? "usage" then
-    let kind := classifyKimiWindowKind uObj
-    if let some parsed := parseKimiDetailTenthsAndReset uObj nowSec then
-      if kind == "5h" && win5h?.isNone then win5h? := some parsed
-      else if winWeekly?.isNone then winWeekly? := some parsed
-      else if win5h?.isNone then win5h? := some parsed
-
-  if let some (tenths, reset?) := win5h? then
-    let usedStr := formatTenthsPct tenths
-    let remStr := formatTenthsPct (1000 - min tenths 1000)
-    fields := fields.push ("kimi_5h_used_percent", .num usedStr)
-    fields := fields.push ("kimi_5h_remaining_percent", .num remStr)
-    if let some r := reset? then
+  if let some w := fiveIdx?.bind (rows[·]?) then
+    ordered := ordered.push w
+    if let some tenths := w.usedTenths? then
+      let usedStr := formatTenthsPct tenths
+      fields := fields.push ("kimi_5h_used_percent", .num usedStr)
+      fields := fields.push ("kimi_5h_remaining_percent", .num (formatTenthsPct (1000 - min tenths 1000)))
+      optWins := optWins.push (buildOptimizeWindow "kimi_5h" "5-hour" "requests" "kimi_usage" usedStr 18000 (w.reset?.map formatEpochIso8601Utc))
+    if let some r := w.reset? then
       fields := fields.push ("kimi_5h_reset", JVal.uint64 r)
-    let mut wFields : Array (String × JVal) := #[
-      ("label", .str "5h"),
-      ("used_percent", .num usedStr),
-      ("remaining_percent", .num remStr)
-    ]
-    if let some r := reset? then wFields := wFields.push ("reset_at", JVal.uint64 r)
-    kimiWins := kimiWins.push (.obj wFields)
-    optWins := optWins.push (buildOptimizeWindow "kimi_5h" "5-hour" "requests" "kimi_usage" usedStr 18000 (reset?.map formatEpochIso8601Utc))
 
-  if let some (tenths, reset?) := winWeekly? then
-    let usedStr := formatTenthsPct tenths
-    let remStr := formatTenthsPct (1000 - min tenths 1000)
-    fields := fields.push ("kimi_weekly_used_percent", .num usedStr)
-    fields := fields.push ("kimi_weekly_remaining_percent", .num remStr)
-    if let some r := reset? then
+  if let some w := weeklyIdx?.bind (rows[·]?) then
+    ordered := ordered.push w
+    if let some tenths := w.usedTenths? then
+      let usedStr := formatTenthsPct tenths
+      fields := fields.push ("kimi_weekly_used_percent", .num usedStr)
+      fields := fields.push ("kimi_weekly_remaining_percent", .num (formatTenthsPct (1000 - min tenths 1000)))
+      optWins := optWins.push (buildOptimizeWindow "kimi_weekly" "weekly" "requests" "kimi_usage" usedStr 604800 (w.reset?.map formatEpochIso8601Utc))
+    if let some r := w.reset? then
       fields := fields.push ("kimi_weekly_reset", JVal.uint64 r)
-    let mut wFields : Array (String × JVal) := #[
-      ("label", .str "Weekly"),
-      ("used_percent", .num usedStr),
-      ("remaining_percent", .num remStr)
-    ]
-    if let some r := reset? then wFields := wFields.push ("reset_at", JVal.uint64 r)
-    kimiWins := kimiWins.push (.obj wFields)
-    optWins := optWins.push (buildOptimizeWindow "kimi_weekly" "weekly" "requests" "kimi_usage" usedStr 604800 (reset?.map formatEpochIso8601Utc))
 
-  if !kimiWins.isEmpty then
-    fields := fields.push ("kimi_windows", .arr kimiWins)
+  for idx in [0:rows.size] do
+    if some idx != fiveIdx? && some idx != weeklyIdx? then
+      ordered := ordered.push rows[idx]!
+
+  if !ordered.isEmpty then
+    fields := fields.push ("kimi_windows", .arr (ordered.map kimiWindowJv))
   return (fields, optWins, selectPrimaryOptimizeWindow optWins)
 
 /-- Pure xAI / Grok billing + settings projector. -/
@@ -1369,7 +1480,124 @@ def projectAntigravityAssist (aJv : JVal) : Option String × Bool := Id.run do
   let needsVerification := !hasProject && ineligible && !hasTierObj
   return (plan?, needsVerification)
 
-def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
+/-- Parsed CLIProxyAPI `/v0/management/auth-files` entry used internally to join sidecar
+    parked credentials onto Core provider rows without exposing `name` or `email` on any
+    API response. -/
+private structure SidecarAuthFileEntry where
+  name : String
+  provider : String
+  email : String := ""
+  disabled : Bool := false
+  needsReauth : Bool := false
+  loginReason : UInt8 := 0
+  remainingSecs : UInt64 := 0
+  retryAt? : Option String := none
+  reason? : Option String := none
+  /-- Google refused this login until its owner verifies the account (a proxied Cloud Code
+      403 `VALIDATION_REQUIRED` recorded by the sidecar). -/
+  needsVerification : Bool := false
+  /-- Google's `https://` verification link for that refusal, when it sent one. -/
+  verificationUrl? : Option String := none
+  deriving Inhabited
+
+/-- Read a Cloud Code verification refusal from a sidecar auth-file `status_message` (the
+    refusal as a JSON object, or the JSON string CLIProxyAPI stores). `some url?` only for a
+    403 whose details carry reason `VALIDATION_REQUIRED` in domain `cloudcode-pa.googleapis.com`;
+    the message text is never matched. The link is kept only when it is a plain `https://` URL. -/
+def antigravityValidationRequired? (statusMessage : JVal) : Option (Option String) := do
+  let body ← match statusMessage with
+    | .str raw => (OrbBin.Json.parse raw).toOption
+    | .obj _ => some statusMessage
+    | _ => none
+  let err ← body.field? "error"
+  if err.fieldNat? "code" != some 403 then none
+  let detail ← ((err.fieldArr? "details").getD #[]).find? fun d =>
+    d.fieldStr? "reason" == some "VALIDATION_REQUIRED" &&
+    d.fieldStr? "domain" == some "cloudcode-pa.googleapis.com"
+  let url? := ((detail.field? "metadata").bind (·.fieldStr? "validation_url")).filter fun u =>
+    u.startsWith "https://" && u.length ≤ 2048 && u.all (fun ch => ch.val > 32 && ch.val < 127)
+  return url?
+
+private def validSidecarReasonSlug (s : String) : Bool :=
+  1 ≤ s.length && s.length ≤ 40 &&
+  s.all (fun c => ('a' ≤ c && c ≤ 'z') || ('0' ≤ c && c ≤ '9') || c == '_')
+
+private def validSidecarRetryAt (s : String) : Bool :=
+  1 ≤ s.length && s.length ≤ 35 &&
+  s.all (fun c => ('0' ≤ c && c ≤ '9') || c == '-' || c == ':' || c == 'T' || c == 'Z' || c == '+' || c == '.')
+
+/-- Read CLIProxyAPI `/v0/management/auth-files` with a strict 2-second timeout.
+    Any transport error, missing management key, or malformed payload degrades to `#[]`. -/
+private def fetchSidecarAuthFiles (http : UsageHttp := liveUsageHttp) : IO (Array SidecarAuthFileEntry) := do
+  let mgmtBase ← resolveCliProxyBaseUrl
+  let some mgmtKey ← resolveCliProxyMgmtKey?
+    | return #[]
+  match ← http "GET" s!"{mgmtBase}/v0/management/auth-files" (some mgmtKey) none #[] 2000 262144 with
+  | .ok (200, _, some jv) =>
+    let files := (jv.fieldArr? "files").getD #[]
+    let mut out : Array SidecarAuthFileEntry := #[]
+    for f in files do
+      let name := (f.fieldStr? "name").getD ""
+      let prov := ((f.fieldStr? "provider").orElse (fun _ => f.fieldStr? "type")).getD "" |>.trimAscii.toString.toLower
+      if !name.isEmpty && !prov.isEmpty then
+        let email := ((f.fieldStr? "email").getD "").trimAscii.toString
+        let disabled := (f.fieldBool? "disabled").getD false
+        let status := (f.fieldStr? "status").getD ""
+        let message := (f.fieldStr? "status_message").getD ""
+        let refreshFailed := isAuthRejection 0 status message
+        let validation? := if prov == "antigravity" then (f.field? "status_message").bind antigravityValidationRequired? else none
+        let cds := (f.fieldArr? "cooldowns").getD #[]
+        let mut bestRem : UInt64 := 0
+        let mut bestRetry? : Option String := none
+        let mut bestReason? : Option String := none
+        for cd in cds do
+          let rem := (cd.fieldUInt64? "remaining_seconds").getD 0
+          if rem > bestRem then
+            bestRem := rem
+            bestRetry? := (cd.fieldStr? "retry_at").filter validSidecarRetryAt
+            bestReason? := (cd.fieldStr? "reason").filter validSidecarReasonSlug
+        let loginReason := Orb.Kernel.providerLoginReason refreshFailed disabled
+          (status == "expired" || (message.splitOn "token_expired").length > 1)
+          (bestRem > 0 && (bestReason? == some "quota_exhausted" ||
+            bestReason? == some "credential_quota" || bestReason? == some "quota"))
+        out := out.push {
+          name := name
+          provider := prov
+          email := email
+          disabled := disabled
+          needsReauth := loginReason != 0
+          loginReason := loginReason
+          remainingSecs := bestRem
+          retryAt? := bestRetry?
+          reason? := bestReason?
+          needsVerification := validation?.isSome
+          verificationUrl? := validation?.join
+        }
+    return out
+  | _ => return #[]
+
+/-- Outcome of one Antigravity Cloud Code call. -/
+private inductive AntigravityCall where
+  | ok (body : JVal)
+  /-- The access token Core read was refused. CLIProxyAPI owns its renewal. -/
+  | unauthorized
+  | unavailable (reason : String)
+
+private def antigravityCall (http : UsageHttp) (token method : String) (body : JVal) (maxBytes : Nat) : IO AntigravityCall := do
+  match ← http "POST" s!"https://cloudcode-pa.googleapis.com/v1internal:{method}" (some token) (some body)
+      #[("User-Agent", "antigravity")] 10000 maxBytes with
+  | .ok (code, _, body?) =>
+    if 200 ≤ code && code < 300 then
+      match body? with
+      | some jv => return .ok jv
+      | none => return .unavailable "Unreadable Antigravity quota"
+    else if code == 401 || code == 403 then return .unauthorized
+    else return .unavailable s!"Antigravity quota returned HTTP {code}"
+  | .error _ => return .unavailable "Antigravity quota unreachable"
+
+/-- Read one provider account's usage from its vendor. `http` is the only way out to the vendor
+    for the Kimi, Muse Code and Antigravity adapters (and the sidecar row Antigravity joins). -/
+def fetchLiveProviderUsage (hp : HydratedProvider) (http : UsageHttp := liveUsageHttp) : IO JVal := do
   let nowSec ← nowEpoch
   let nowIso := formatEpochIso8601Utc nowSec
   let pType := hp.providerType.toLower
@@ -1496,7 +1724,8 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
   else if pType == "kimi" then
     let tok := if !hp.oauthToken.isEmpty then hp.oauthToken else hp.apiKey
     if !tok.isEmpty then
-      if let .ok (code, _, body?) ← sendJsonRequest "GET" "https://api.kimi.com/coding/v1/usages" (some tok) none #[("User-Agent", "KimiCLI/1.5")] 5000 262144 then
+      match ← http "GET" "https://api.kimi.com/coding/v1/usages" (some tok) none #[("User-Agent", "KimiCLI/1.5")] 5000 262144 with
+      | .ok (code, _, body?) =>
         if 200 ≤ code && code < 300 then
           if let some kJv := body? then
             let (fields, windows, primary) := projectKimiUsage kJv nowSec
@@ -1505,8 +1734,11 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
             primaryWin := primary
         else if code == 401 || code == 403 then
           statusStr := "needs_reauth"
+          extraFields := extraFields.push ("error", .str s!"Kimi Code usage endpoint returned HTTP {code}")
+      | .error _ =>
+        extraFields := extraFields.push ("error", .str "Failed to reach Kimi usage API")
     if !hp.apiKey.isEmpty then
-      if let .ok (bCode, _, some bJv) ← sendJsonRequest "GET" "https://api.moonshot.ai/v1/users/me/balance" (some hp.apiKey) none #[] 5000 65536 then
+      if let .ok (bCode, _, some bJv) ← http "GET" "https://api.moonshot.ai/v1/users/me/balance" (some hp.apiKey) none #[] 5000 65536 then
         if 200 ≤ bCode && bCode < 300 then
           let dObj := (bJv.field? "data").getD bJv
           if let some avail := (dObj.field? "available_balance").bind jvalNumRaw? then
@@ -1530,23 +1762,30 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
 
   -- 5. Muse Code subscription quota & Muse pay-as-you-go note
   else if pType == "muse-code" then
-    let tok := if !hp.oauthToken.isEmpty then hp.oauthToken else hp.apiKey
-    if !tok.isEmpty then
-      match ← sendJsonRequest "POST" "https://api.meta.ai/muse-code/key" (some tok) (some (.obj #[])) #[] 5000 262144 with
+    -- The quota read takes the device credential. The minted key and the Meta API key are a
+    -- different role: they are never sent here, and there is no fallback to them.
+    if hp.deviceToken.isEmpty then
+      extraFields := extraFields.push ("usage_note", .str "Muse Code subscription via CLIProxyAPI. No fallback to the Meta API account.")
+    else
+      let unavailable (reason : String) : String × JVal :=
+        ("usage_note", .str s!"Muse Code quota is unavailable right now ({reason}).")
+      match ← http "POST" "https://api.meta.ai/muse-code/key" (some hp.deviceToken) (some (.obj #[])) #[] 5000 262144 with
       | .ok (code, _, body?) =>
         if 200 ≤ code && code < 300 then
-          if let some mJv := body? then
+          match body? with
+          | some mJv =>
             let (fields, windows, primary) := projectMuseCodeUsage mJv
             extraFields := fields
             optWindows := windows
             primaryWin := primary
+          | none => extraFields := extraFields.push (unavailable "Unreadable Muse Code quota")
         else if code == 401 || code == 403 then
           statusStr := "needs_reauth"
           extraFields := extraFields.push ("error", .str "Muse Code rejected the saved login")
         else
-          extraFields := extraFields.push ("usage_note", .str s!"Muse Code usage endpoint returned HTTP {code}.")
+          extraFields := extraFields.push (unavailable s!"Muse Code quota returned HTTP {code}")
       | .error _ =>
-        extraFields := extraFields.push ("usage_note", .str "Muse Code usage endpoint is temporarily unreachable.")
+        extraFields := extraFields.push (unavailable "Muse Code quota unreachable")
 
   else if pType == "muse" then
     extraFields := extraFields.push ("usage_note", .str "This API key uses pay-as-you-go billing. Muse Code subscription quota requires a separate Muse Code account connection.")
@@ -1619,42 +1858,79 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
         if let some v := findHeaderCI? resp.headers hName then
           extraFields := extraFields.push (fName, .str v.trimAscii.toString)
 
-  -- 9. Antigravity Cloud Code: plan from `loadCodeAssist`, then the shared 5h/weekly
-  -- windows from `retrieveUserQuotaSummary`, falling back to per-model `retrieveUserQuota`.
+  -- 9. Antigravity Cloud Code: eligibility and plan from `loadCodeAssist`, then the shared
+  -- 5h/weekly windows from `retrieveUserQuotaSummary`, falling back to per-model
+  -- `retrieveUserQuota`. A refused access token is not a lost login: CLIProxyAPI renews it.
   else if pType == "antigravity" && !hp.oauthToken.isEmpty then
-    let base := "https://cloudcode-pa.googleapis.com/v1internal"
-    let ua := #[("User-Agent", "antigravity")]
+    let refreshNote : String × JVal :=
+      ("usage_note", .str "Antigravity quota is unavailable until the Google login refreshes.")
+    let unavailable (reason : String) : String × JVal :=
+      ("usage_note", .str s!"Antigravity quota is unavailable right now ({reason}).")
+    let verifyNote : String × JVal :=
+      ("usage_note", .str "Google Cloud Code requires account verification before Antigravity quota can be used.")
     let assistBody : JVal := .obj #[("metadata", .obj #[
       ("ideType", .str "ANTIGRAVITY"), ("platform", .str "PLATFORM_UNSPECIFIED"), ("pluginType", .str "GEMINI")])]
-    if let .ok (code, _, some aJv) ← sendJsonRequest "POST" s!"{base}:loadCodeAssist" (some hp.oauthToken) (some assistBody) ua 10000 262144 then
-      if 200 ≤ code && code < 300 then
-        let (plan?, needsVerif) := projectAntigravityAssist aJv
+    let mut verifyNoted := false
+    match ← antigravityCall http hp.oauthToken "loadCodeAssist" assistBody 262144 with
+    | .unauthorized => extraFields := extraFields.push refreshNote
+    | .unavailable reason => extraFields := extraFields.push (unavailable reason)
+    | .ok aJv =>
+      let (plan?, needsVerif) := projectAntigravityAssist aJv
+      if needsVerif then
+        -- Google serves nothing until the owner verifies the account: no plan, no quota read.
+        statusStr := "needs_verification"
+        extraFields := extraFields.push ("antigravity_eligibility", .str "needs_verification")
+        for tier in (aJv.fieldArr? "ineligibleTiers").getD #[] do
+          if tier.fieldStr? "reasonCode" == some "VALIDATION_REQUIRED" then
+            if let some url := (tier.fieldStr? "validationUrl").filter (·.startsWith "https://") then
+              extraFields := extraFields.push ("verification_url", .str url)
+              break
+        extraFields := extraFields.push verifyNote
+        verifyNoted := true
+      else
         if let some plan := plan? then
           extraFields := extraFields.push ("antigravity_plan", .str plan)
-        if needsVerif then
-          statusStr := "needs_verification"
-          extraFields := extraFields.push ("antigravity_eligibility", .str "needs_verification")
-          extraFields := extraFields.push ("usage_note", .str "Google Cloud Code requires account verification before Antigravity quota can be used.")
         let projStr :=
           ((aJv.fieldStr? "cloudaicompanionProject").orElse fun _ =>
             (aJv.field? "cloudaicompanionProject").bind (·.fieldStr? "id")).getD ""
         let quotaBody : JVal := if projStr.trimAscii.isEmpty then .obj #[] else .obj #[("project", .str projStr.trimAscii.toString)]
-        let mut windows : Array JVal := #[]
+        let mut windows? : Option (Array JVal) := none
         let mut unauthorized := false
-        if let .ok (c2, _, some sJv) ← sendJsonRequest "POST" s!"{base}:retrieveUserQuotaSummary" (some hp.oauthToken) (some quotaBody) ua 10000 1048576 then
-          if 200 ≤ c2 && c2 < 300 then windows := parseAntigravitySummary sJv
-          else if c2 == 401 || c2 == 403 then unauthorized := true
-        let hasGemini := windows.any fun w => ((w.fieldStr? "label").getD "").startsWith "Gemini"
-        if !unauthorized && (windows.isEmpty || !hasGemini) then
-          if let .ok (c3, _, some qJv) ← sendJsonRequest "POST" s!"{base}:retrieveUserQuota" (some hp.oauthToken) (some quotaBody) ua 10000 1048576 then
-            if 200 ≤ c3 && c3 < 300 then
-              if windows.isEmpty then windows := parseAntigravityQuota qJv
-              else if let some g := antigravityGeminiWindow? qJv (← nowEpoch) then windows := #[g] ++ windows
-            else if c3 == 401 || c3 == 403 then unauthorized := true
-        if unauthorized then statusStr := "needs_reauth"
-        else extraFields := extraFields.push ("antigravity_windows", .arr windows)
-      else if code == 401 || code == 403 then
-        statusStr := "needs_reauth"
+        let mut failure? : Option String := none
+        match ← antigravityCall http hp.oauthToken "retrieveUserQuotaSummary" quotaBody 1048576 with
+        | .ok sJv =>
+          let summary := parseAntigravitySummary sJv
+          if !summary.isEmpty then
+            -- The summary drops the Gemini group once it is exhausted; read it per model.
+            let hasGemini := summary.any fun w => ((w.fieldStr? "label").getD "").startsWith "Gemini"
+            let mut merged := summary
+            if !hasGemini then
+              if let .ok qJv ← antigravityCall http hp.oauthToken "retrieveUserQuota" quotaBody 1048576 then
+                if let some g := antigravityGeminiWindow? qJv (← nowEpoch) then merged := #[g] ++ merged
+            windows? := some merged
+        | .unauthorized => unauthorized := true
+        | .unavailable reason => failure? := some reason
+        if windows?.isNone && !unauthorized then
+          match ← antigravityCall http hp.oauthToken "retrieveUserQuota" quotaBody 1048576 with
+          | .ok qJv => windows? := some (parseAntigravityQuota qJv)
+          | .unauthorized => unauthorized := true
+          | .unavailable reason => failure? := some reason
+        if unauthorized then extraFields := extraFields.push refreshNote
+        else
+          match windows? with
+          | some windows => extraFields := extraFields.push ("antigravity_windows", .arr windows)
+          -- Neither quota view answered: say so instead of reporting an empty quota.
+          | none => extraFields := extraFields.push (unavailable (failure?.getD "Antigravity quota unreachable"))
+    -- Google can accept the login and still refuse every request until its owner verifies the
+    -- account. That refusal, and its link, exist only on the sidecar's row for this auth file.
+    if !hp.oauthFile.isEmpty then
+      let sidecarFiles ← fetchSidecarAuthFiles http
+      if let some row := sidecarFiles.find? (fun f => f.name == hp.oauthFile && f.needsVerification) then
+        statusStr := "needs_verification"
+        if !verifyNoted then
+          extraFields := (extraFields.filter (·.1 != "usage_note")).push verifyNote
+        if let some url := row.verificationUrl? then
+          extraFields := (extraFields.filter (·.1 != "verification_url")).push ("verification_url", .str url)
 
   let baseFields : Array (String × JVal) := #[
     ("provider_type", .str hp.providerType),
@@ -1673,44 +1949,92 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
 private def probeProviderUsage (hub : ProviderRuntimeHub) (hp : HydratedProvider) : IO JVal :=
   match hub.usageProbe? with
   | some probe => probe hp.id
-  | none => fetchLiveProviderUsage hp
+  | none => fetchLiveProviderUsage hp hub.usageHttp
 
-private def refreshProviderUsageAsync (hub : ProviderRuntimeHub) (hp : HydratedProvider) : IO Unit := do
-  let generation ← hub.mu.atomically (do return (← get).usageGeneration)
-  let shouldSpawn ← hub.mu.atomically do
+/-- Seconds after which a cached usage entry is refreshed again. -/
+def usageRefreshAfterSecs : UInt64 := 120
+
+/-- The Codex OAuth usage read is never polled on a timer: only an explicit request reads it. -/
+private def usageProbeOnDemandOnly (hp : HydratedProvider) : Bool :=
+  hp.providerType.toLower == "openai" && !hp.hasApiKey && hp.hasOAuth
+
+/-- Claim the refresh of one provider's cached usage. `none` when a refresh already holds it;
+    otherwise the cache generation the result must still match to be stored. -/
+private def claimUsageRefresh (hub : ProviderRuntimeHub) (hp : HydratedProvider) : IO (Option Nat) :=
+  hub.mu.atomically do
     let st ← get
     if st.refreshingProviderIds.contains hp.id then
-      return false
+      return none
     match st.usageEntries.find? (fun e => e.providerId == hp.id) with
     | some existing =>
-      if existing.refreshing then return false
+      if existing.refreshing then return none
       let updated := st.usageEntries.map (fun e => if e.providerId == hp.id then { e with refreshing := true } else e)
       set { st with usageEntries := updated, refreshingProviderIds := st.refreshingProviderIds.push hp.id }
-      return true
+      return some st.usageGeneration
     | none =>
-       set { st with refreshingProviderIds := st.refreshingProviderIds.push hp.id }
-       return true
-  if shouldSpawn then
-    let _ ← IO.asTask (prio := .dedicated) do
-      let fresh ← (try probeProviderUsage hub hp catch _ =>
-        pure (.obj #[("provider_type", .str hp.providerType), ("provider_name", .str hp.name), ("status", .str "error")]))
-      let ts ← nowEpoch
-      let tsIso := formatEpochIso8601Utc ts
-      hub.mu.atomically do
-        let st ← get
-        let cleared := st.refreshingProviderIds.filter (· != hp.id)
-        if st.usageGeneration == generation then
-          let others := st.usageEntries.filter (fun e => e.providerId != hp.id)
-          let entry : CachedUsageEntry := {
-            providerId := hp.id
-            fetchedSec := ts
-            fetchedIso := tsIso
-            payload := fresh
-            refreshing := false
-          }
-          set { st with usageEntries := others.push entry, refreshingProviderIds := cleared }
-        else
-          set { st with refreshingProviderIds := cleared }
+      set { st with refreshingProviderIds := st.refreshingProviderIds.push hp.id }
+      return some st.usageGeneration
+
+/-- Probe a claimed provider and store the result, unless the cache was reset meanwhile.
+    Always releases the claim. -/
+private def finishUsageRefresh (hub : ProviderRuntimeHub) (hp : HydratedProvider) (generation : Nat) : IO Unit := do
+  let fresh ← (try probeProviderUsage hub hp catch _ =>
+    pure (.obj #[("provider_type", .str hp.providerType), ("provider_name", .str hp.name), ("status", .str "error")]))
+  let ts ← nowEpoch
+  let tsIso := formatEpochIso8601Utc ts
+  hub.mu.atomically do
+    let st ← get
+    let cleared := st.refreshingProviderIds.filter (· != hp.id)
+    if st.usageGeneration == generation then
+      let others := st.usageEntries.filter (fun e => e.providerId != hp.id)
+      let entry : CachedUsageEntry := {
+        providerId := hp.id
+        fetchedSec := ts
+        fetchedIso := tsIso
+        payload := fresh
+        refreshing := false
+      }
+      set { st with usageEntries := others.push entry, refreshingProviderIds := cleared }
+    else
+      set { st with refreshingProviderIds := cleared }
+
+private def refreshProviderUsageAsync (hub : ProviderRuntimeHub) (hp : HydratedProvider) : IO Unit := do
+  if let some generation ← claimUsageRefresh hub hp then
+    let _ ← IO.asTask (prio := .dedicated) (finishUsageRefresh hub hp generation)
+
+/-- One pass of the background usage upkeep: refresh enabled observation-only adapters
+    with credentials whose entry is missing or older than `refreshAfterSecs`, one at a time,
+    `spreadMs` apart. It runs with no client open, so a login the vendor rejects is reported as
+    `needs_reauth` before anyone looks. It only reads usage: renewing a login stays with
+    CLIProxyAPI. Returns the ids it refreshed. -/
+def runProviderUsageUpkeepPass (hub : ProviderRuntimeHub) (store : CoreStore) (workingDir : String)
+    (spreadMs : UInt32 := 2000) (refreshAfterSecs : UInt64 := usageRefreshAfterSecs) : IO (Array String) := do
+  let hps ← loadHydratedProviders store workingDir
+  let mut refreshed : Array String := #[]
+  for hp in hps do
+    -- Only observation-only adapters belong on a timer. Other adapters can mint a
+    -- key or send billable inference even though their caller asks for usage.
+    if hp.enabled && (hp.hasApiKey || hp.hasOAuth) &&
+        #["antigravity", "kimi", "zai", "minimax", "xai"].contains hp.providerType.toLower then
+      let nowSec ← nowEpoch
+      let isFresh ← hub.mu.atomically do
+        return (← get).usageEntries.any (fun e => e.providerId == hp.id && nowSec < e.fetchedSec + refreshAfterSecs)
+      if !isFresh then
+        if let some generation ← claimUsageRefresh hub hp then
+          if !refreshed.isEmpty && spreadMs > 0 then IO.sleep spreadMs
+          finishUsageRefresh hub hp generation
+          refreshed := refreshed.push hp.id
+  return refreshed
+
+/-- The background usage upkeep duty of a serving Core: first pass after 20 s, then one every
+    `usageRefreshAfterSecs`. An error in one pass never ends the duty. -/
+def providerUsageUpkeepLoop (hub : ProviderRuntimeHub) (store : CoreStore) (workingDir : String) : IO Unit := do
+  if ← isHermeticTestMode then return
+  IO.sleep 20000
+  while true do
+    try discard <| runProviderUsageUpkeepPass hub store workingDir
+    catch e => IO.eprintln s!"[sandboxed-sh] provider usage upkeep pass failed: {e}"
+    IO.sleep (usageRefreshAfterSecs * 1000).toUInt32
 
 private def decorateCachedUsage (entry : CachedUsageEntry) (nowSec : UInt64) : JVal :=
   let withCached := (entry.payload.setField "cached" (.bool true)).setField "fetched_at" (.str entry.fetchedIso)
@@ -2173,82 +2497,12 @@ private def loginSessionResponse (sess : CliLoginSession) : Nat × String × Byt
   jsonResp 200 (.obj #[("status", .str sess.status), ("auth_url", .str sess.authUrl),
     ("message", sess.message?.map JVal.str |>.getD .null)])
 
-/-- Parsed CLIProxyAPI `/v0/management/auth-files` entry used internally to join sidecar
-    parked credentials onto Core provider rows without exposing `name` or `email` on any
-    API response. -/
-private structure SidecarAuthFileEntry where
-  name : String
-  provider : String
-  email : String := ""
-  disabled : Bool := false
-  needsReauth : Bool := false
-  loginReason : UInt8 := 0
-  remainingSecs : UInt64 := 0
-  retryAt? : Option String := none
-  reason? : Option String := none
-  deriving Inhabited
-
 private def cooldownReasonSlug : CooldownReason → String
   | .rateLimit   => "rate_limit"
   | .usageLimit  => "usage_limit"
   | .authFailure => "auth_failure"
   | .overloaded  => "overloaded"
   | .serverError => "server_error"
-
-private def validSidecarReasonSlug (s : String) : Bool :=
-  1 ≤ s.length && s.length ≤ 40 &&
-  s.all (fun c => ('a' ≤ c && c ≤ 'z') || ('0' ≤ c && c ≤ '9') || c == '_')
-
-private def validSidecarRetryAt (s : String) : Bool :=
-  1 ≤ s.length && s.length ≤ 35 &&
-  s.all (fun c => ('0' ≤ c && c ≤ '9') || c == '-' || c == ':' || c == 'T' || c == 'Z' || c == '+' || c == '.')
-
-/-- Read CLIProxyAPI `/v0/management/auth-files` with a strict 2-second timeout.
-    Any transport error, missing management key, or malformed payload degrades to `#[]`. -/
-private def fetchSidecarAuthFiles : IO (Array SidecarAuthFileEntry) := do
-  let mgmtBase ← resolveCliProxyBaseUrl
-  let some mgmtKey ← resolveCliProxyMgmtKey?
-    | return #[]
-  match ← sendJsonRequest "GET" s!"{mgmtBase}/v0/management/auth-files" (some mgmtKey) none #[] 2000 262144 with
-  | .ok (200, _, some jv) =>
-    let files := (jv.fieldArr? "files").getD #[]
-    let mut out : Array SidecarAuthFileEntry := #[]
-    for f in files do
-      let name := (f.fieldStr? "name").getD ""
-      let prov := ((f.fieldStr? "provider").orElse (fun _ => f.fieldStr? "type")).getD "" |>.trimAscii.toString.toLower
-      if !name.isEmpty && !prov.isEmpty then
-        let email := ((f.fieldStr? "email").getD "").trimAscii.toString
-        let disabled := (f.fieldBool? "disabled").getD false
-        let status := (f.fieldStr? "status").getD ""
-        let message := (f.fieldStr? "status_message").getD ""
-        let refreshFailed := isAuthRejection 0 status message
-        let cds := (f.fieldArr? "cooldowns").getD #[]
-        let mut bestRem : UInt64 := 0
-        let mut bestRetry? : Option String := none
-        let mut bestReason? : Option String := none
-        for cd in cds do
-          let rem := (cd.fieldUInt64? "remaining_seconds").getD 0
-          if rem > bestRem then
-            bestRem := rem
-            bestRetry? := (cd.fieldStr? "retry_at").filter validSidecarRetryAt
-            bestReason? := (cd.fieldStr? "reason").filter validSidecarReasonSlug
-        let loginReason := Orb.Kernel.providerLoginReason refreshFailed disabled
-          (status == "expired" || (message.splitOn "token_expired").length > 1)
-          (bestRem > 0 && (bestReason? == some "quota_exhausted" ||
-            bestReason? == some "credential_quota" || bestReason? == some "quota"))
-        out := out.push {
-          name := name
-          provider := prov
-          email := email
-          disabled := disabled
-          needsReauth := loginReason != 0
-          loginReason := loginReason
-          remainingSecs := bestRem
-          retryAt? := bestRetry?
-          reason? := bestReason?
-        }
-    return out
-  | _ => return #[]
 
 /-- Match an OAuth-only Core provider row to a single CLIProxyAPI auth file:
     - (a) Row email set and 1 OAuth-only row + 1 file of that type carry it: match.
@@ -2939,16 +3193,16 @@ def dispatchProviderAndAiRoute
               else projectMemberProviderUsageJv rawUsage (memberProviderDisplayName hps hp)
             entryPairs := entryPairs.push (hp.id, projectedUsage)
             -- Refresh in background if >= 120s old (skip OpenAI OAuth-only unless forced)
-            let isCodexOAuthOnly := hp.providerType.toLower == "openai" && !hp.hasApiKey && hp.hasOAuth
-            if nowSec >= hit.fetchedSec + 120 && !isCodexOAuthOnly then
+            let isCodexOAuthOnly := usageProbeOnDemandOnly hp
+            if nowSec >= hit.fetchedSec + usageRefreshAfterSecs && !isCodexOAuthOnly then
               refreshProviderUsageAsync hub hp
           | none =>
-            let isCodexOAuthOnly := hp.providerType.toLower == "openai" && !hp.hasApiKey && hp.hasOAuth
+            let isCodexOAuthOnly := usageProbeOnDemandOnly hp
             if !isCodexOAuthOnly then
               refreshProviderUsageAsync hub hp
       return some (jsonResp 200 (.obj #[
         ("entries", .obj entryPairs),
-        ("refresh_after_seconds", JVal.nat 120)
+        ("refresh_after_seconds", JVal.nat usageRefreshAfterSecs.toNat)
       ]))
 
     -- 5c. `GET /api/ai/providers/types`
@@ -3204,7 +3458,7 @@ def dispatchProviderAndAiRoute
             let st ← get
             return st.usageEntries.find? (fun e => e.providerId == hp.id)
           if let some hit := hit? then
-            if nowSec >= hit.fetchedSec + 120 && !cachedOnly then
+            if nowSec >= hit.fetchedSec + usageRefreshAfterSecs && !cachedOnly then
               refreshProviderUsageAsync hub hp
             return some (jsonResp 200 (projectUsage (decorateCachedUsage hit nowSec)))
         if cachedOnly then

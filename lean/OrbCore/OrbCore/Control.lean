@@ -953,7 +953,8 @@ def parseChainTargetsJson
               apiKey                 := key
               modelId                := mdl
               accountRpmLimit?       := inlineAcctRpm?.orElse (fun _ => matchedProv?.bind (·.rpmLimit?))
-              accountMaxConcurrency? := inlineAcctConc?.orElse (fun _ => matchedProv?.bind (·.maxConcurrency?))
+              accountMaxConcurrency? := (inlineAcctConc?.orElse (fun _ => matchedProv?.bind (·.maxConcurrency?))).orElse
+                (fun _ => if effProvType == "google" || effProvType == "antigravity" then googleMaxConcurrency? else none)
               modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
               modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
               modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
@@ -962,6 +963,23 @@ def parseChainTargetsJson
     return out
   | _ => return #[]
 
+/-- Per-account concurrency cap of Google and Antigravity targets: the saved
+    `google_max_concurrency` setting when it is at least 1, else a positive
+    `PROXY_GOOGLE_MAX_CONCURRENCY`, else 10; never above 128. -/
+def effectiveGoogleMaxConcurrency (setting? : Option Nat) (env? : Option String) : UInt32 :=
+  let chosen :=
+    match setting?.filter (· ≥ 1) with
+    | some n => n
+    | none => ((env?.bind (·.trimAscii.toString.toNat?)).filter (· > 0)).getD 10
+  (min 128 chosen).toUInt32
+
+/-- The cap in force now, read from the settings file and the environment. Every routing
+    target is built with this value; nothing else reads either source. -/
+def resolveGoogleMaxConcurrency (dataRoot : String) : IO UInt32 := do
+  let settings ← readSettingsJson dataRoot
+  return effectiveGoogleMaxConcurrency (settings.fieldNat? "google_max_concurrency")
+    (← IO.getEnv "PROXY_GOOGLE_MAX_CONCURRENCY")
+
 /-- Hydrate `RoutingChain` table from `missions.db` (`model_routing_chains` + `ai_providers` + decrypted `.sandboxed-sh/ai_providers.json` + CLIProxyAPI). -/
 def loadRoutingChainsFromStore (st : CoreStore) (workingDir : String := "") : IO (Array RoutingChain) := do
   let providers ← listAIProviders st
@@ -969,8 +987,7 @@ def loadRoutingChainsFromStore (st : CoreStore) (workingDir : String := "") : IO
   let hydratedProvs ← loadHydratedProviders st effWorkDir
   let cliKey := ((← lookupEnvWithFiles? "CLI_PROXY_API_KEY").getD "").trimAscii.toString
   let cliUrl ← resolveCliProxyBaseUrl
-  let envGoogle := (((← IO.getEnv "PROXY_GOOGLE_MAX_CONCURRENCY").getD "10").trimAscii.toString.toNat?).getD 10
-  let googleMax := min 128 (max 1 envGoogle)
+  let googleMax ← resolveGoogleMaxConcurrency st.rootDir
   let .ok rows ← execParamQuery st.missionsDb "SELECT id,name,models_json FROM model_routing_chains ORDER BY id ASC;" #[]
     | throw (IO.userError "routing_chain_store_unavailable")
   let mut out : Array RoutingChain := #[]
@@ -979,12 +996,12 @@ def loadRoutingChainsFromStore (st : CoreStore) (workingDir : String := "") : IO
     let cid := (r[0]?).getD ""
     let nm := (r[1]?).getD cid
     let mj := (r[2]?).getD "[]"
-    out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey (some googleMax.toUInt32) }
+    out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey (some googleMax) }
   -- Immutable defaults are a derived view, not a second mutable config store.
   -- Persisted ids (even empty/unavailable chains) always win over stock entries.
   for (id, name, entries) in OrbCore.ProxyModelRouting.stockChains do
     if !out.any (fun c => c.id == id) then
-      out := out.push { id := id, name := name, targets := parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson entries) providers hydratedProvs cliUrl cliKey (some googleMax.toUInt32) }
+      out := out.push { id := id, name := name, targets := parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson entries) providers hydratedProvs cliUrl cliKey (some googleMax) }
   return out
 
 private def optU32Json (v? : Option UInt32) : String :=
@@ -1050,10 +1067,9 @@ private def directRoutingChain? (st : CoreAppState) (chains : Array RoutingChain
   let hydrated ← loadHydratedProviders st.store st.cfg.workingDir
   let cliKey := ((← lookupEnvWithFiles? "CLI_PROXY_API_KEY").getD "").trimAscii.toString
   let cliUrl ← resolveCliProxyBaseUrl
-  let envGoogle := (((← IO.getEnv "PROXY_GOOGLE_MAX_CONCURRENCY").getD "10").trimAscii.toString.toNat?).getD 10
-  let googleMax := min 128 (max 1 envGoogle)
+  let googleMax ← resolveGoogleMaxConcurrency st.store.rootDir
   let targets := (parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson #[(provider, model)])
-    providers hydrated cliUrl cliKey (some googleMax.toUInt32)).filter (fun t => !t.apiKey.isEmpty)
+    providers hydrated cliUrl cliKey (some googleMax)).filter (fun t => !t.apiKey.isEmpty)
   -- Explicit in-memory chain snapshots can be the configured standard accounts
   -- (including hermetic transports). Do not resurrect them over disabled store rows.
   let hasConfiguredOwner := providers.any (fun p => p.providerType == provider || p.id == provider ||
@@ -7121,6 +7137,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | _, _ => curSettings
       if let .error e ← writeSettingsJson st.store.rootDir merged (some curSettings) then
         return .ok (mkJson (OrbCore.SettingsFile.errorStatus e) s!"\{\"error\":{jsonEscape e}}")
+      -- The Google cap is part of every published routing target: a change applies now, not at
+      -- the next restart.
+      if merged.fieldOrNull "google_max_concurrency" != curSettings.fieldOrNull "google_max_concurrency" then
+        discard <| publishRoutingChainsUpdate st (← loadRoutingChainsFromStore st.store st.cfg.workingDir) (forceBump := false)
       let scopedSettings ← scopeLibrarySettingsResponse st.store.rootDir st.cfg.workingDir caller.userId st.bootstrapAdminId merged
       return .ok (mkJson 200 (renderCompact (redactSettingsSecrets scopedSettings)))
 
@@ -8048,6 +8068,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
            catch e =>
              IO.eprintln s!"[sandboxed-sh] wake-up scheduler pass failed: {e}"
           IO.sleep 2000
+      discard <| IO.asTask (prio := .dedicated) (providerUsageUpkeepLoop providerHub store cfg.workingDir)
       discard <| IO.asTask (prio := .dedicated) do
         while true do
           try
