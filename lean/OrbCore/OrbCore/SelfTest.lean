@@ -7832,7 +7832,7 @@ def runSoftwareVersionProbeTest : IO UInt32 := do
       return 1
     return 0
 
-private def traceTest (name : String) (test : IO α) : IO α := do
+private def traceTest {α : Type} (name : String) (test : IO α) : IO α := do
   IO.eprintln s!"{← IO.monoMsNow} START {name}"
   try
     let result ← test
