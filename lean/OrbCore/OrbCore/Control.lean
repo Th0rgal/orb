@@ -2523,6 +2523,23 @@ private def dispatchMissionControlAndGitRoutes?
   let mkJsonHdr (code : Nat) (bodyStr : String) (hdrs : Array (String × String)) : CoreHttpResponse :=
     jsonResponse code bodyStr hdrs reqOrigin?
 
+  if req.method == "GET" then
+    if let some params := matchRoutePattern? "/api/control/missions/:id/current-bubble" rawTarget then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      if !isSafeMissionId mid then return some (.ok (mkJson 400 "{\"error\":\"invalid_mission_id\"}"))
+      if let some (code, body) ← authorizeMissionOp st caller mid false then
+        return some (.ok (mkJson code body))
+      let presence := ((parseQueryParams rawTarget).find? (fun p => p.1 == "presence")).map Prod.snd == some "1"
+      let .ok rows ← execParamQuery st.store.missionsDb (include_str "current_bubble.sql")
+          #[mid, if caller.isLegacyUnscoped then "1" else "0", caller.userId, if presence then "1" else "0"]
+        | return some (.ok (mkJson 500 "{\"error\":\"projection_failed\"}"))
+      let some r := rows[1]? | return some (.ok (mkJson 404 "{\"error\":\"mission_not_found\"}"))
+      let content := r[2]?.getD ""
+      let text := if content.length > 65536 then (content.take 65536).toString ++ "…" else content
+      let body := renderCompact (.obj #[("id", .str mid), ("title", .str (r[0]?.getD "")),
+        ("status", .str (r[1]?.getD "")), ("text", .str text)])
+      return some (.ok (mkJsonHdr 200 body #[("Cache-Control", "no-store")]))
+
   if let some params := matchRoutePattern? "/api/control/missions/:id/events" rawTarget then
     if req.method == "GET" then
       let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""

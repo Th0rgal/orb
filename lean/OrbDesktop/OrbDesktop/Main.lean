@@ -140,6 +140,40 @@ def shapeDesktopRuns (ac : Text.GlyphAtlasCache) (font : Text.FontHandle)
   else
     return (ac, [overlaySynthRun style text])
 
+/-- Shape words independently so the layout engine can break between them. Keep
+spaces and explicit empty lines; split oversized tokens only between clusters. -/
+def shapeStreamRuns (atlas : Text.GlyphAtlasCache) (font : Text.FontHandle) (scale : Nat)
+    (style : TextStyle) (text : String) (width : Nat) : IO (Text.GlyphAtlasCache × List InlineRun) := do
+  let mut ac := atlas
+  let mut runs : Array InlineRun := #[]
+  let lines := (text.splitOn "\n").toArray
+  for i in [:lines.size] do
+    let start := runs.size
+    let words := (lines[i]!.splitOn " ").toArray
+    for j in [:words.size] do
+      let token := words[j]! ++ (if j+1 < words.size then " " else "")
+      let (next, shaped) ← shapeDesktopRuns ac font scale style token
+      ac := next
+      for run in shaped do
+        if width == 0 || run.advance ≤ width then runs := runs.push run
+        else
+          let mut part := #[]
+          let mut advance := 0
+          let mut cluster := none
+          for g in run.glyphs do
+            if !part.isEmpty && cluster != some g.cluster && advance + g.xAdvance > width then
+              runs := runs.push { run with glyphs := part.toList }
+              part := #[]
+              advance := 0
+            part := part.push g
+            advance := advance + g.xAdvance
+            cluster := some g.cluster
+          if !part.isEmpty then runs := runs.push { run with glyphs := part.toList }
+    if i+1 < lines.size then
+      if runs.size == start then runs := runs.push { style, glyphs := [], hardBreakAfter := true }
+      else runs := runs.modify (runs.size-1) fun r => { r with hardBreakAfter := true }
+  return (ac, runs.toList)
+
 /-- Recursively shape any synthetic `.text` runs in `WidgetNode` into real HarfBuzz/FreeType
 glyph runs so every label, badge, table cell, composer text, modal, and toast renders with `Inter`. -/
 partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium semibold : Text.FontHandle) (scale120 : Nat)
@@ -198,10 +232,15 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
       shapedChildren := shapedChildren.push c'
     return (curAc, .mk wid focusable hitTestable style newPayload shapedChildren.toList)
 
+private partial def scrollRegionsOf (b : ComputedBox) : List Runtime.ScrollRegion :=
+  match b.id, b.scrollLimitXY with
+  | some id, some (_, lim) => [⟨id, b.contentRectSub, lim⟩]
+  | _, _ => b.children.flatMap scrollRegionsOf
+
 /-- Render one frame of `DesktopState` via `OrbDesktop.buildDesktopScreen`, `Layout.layoutNode`,
 `Scene.buildSceneFromLayout`, and HarfBuzz/FreeType glyph shaping (`shapeDesktopRuns` + `Text.layoutTextRun`). -/
-def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) :
-    IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect) × List EntityId) := do
+def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
+    IO (Runtime.FrameView × List Runtime.ScrollRegion) := do
   let st := rt.app
   let liveWindow := !rt.wayland.headless
   let theme := if liveWindow then Theme.withWindowEffects st.theme else st.theme
@@ -213,7 +252,7 @@ def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) :
 
   let (ac1, hdrRuns) ←
     shapeDesktopRuns rt.atlas.beginUploads rt.primaryFont sc (chromeTitleStyle theme)
-      st.screen.headerTitle
+      st.headerTitle
   let (ac2, codeRuns) ←
     shapeDesktopRuns ac1 rt.primaryFont sc (Theme.bodyText theme)
       "Turn #1 (builtin/smart) — Verified pure Lean 4 layout, KaTeX math, and unified diff:"
@@ -227,9 +266,9 @@ def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) :
       "+ buildDesktopScreen st availW availH shapedRuns"
   let streamText := if st.stream.renders > 1 then streamedText st else ""
   let (ac5, streamRuns) ←
-    shapeDesktopRuns ac4 rt.primaryFont sc
+    shapeStreamRuns ac4 rt.primaryFont sc
       { (Theme.bodyText theme) with color := pal.textPrimary }
-      streamText
+      streamText (transcriptTextWidth (availW - chromeSidebarWidthSub))
 
   let shapedRuns : ShapedScreenRuns := {
     headerTitleRuns := hdrRuns
@@ -254,15 +293,35 @@ def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) :
     let overBox := layoutNode sc none pal.focusRing 0 0 availW availH overWidget.toLayoutNode
     let overScene := buildSceneFromLayout sc rt.focus theme overWidget overBox (recordNodes := false)
     let clearColor := if liveWindow then 0x00000000 else pal.canvas
-    return (ac7.finishUploads, clearColor, sceneOut.prims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overScene.prims, sceneOut.hitRegionsSub ++ overScene.hitRegionsSub, sceneOut.focusableOrder ++ overScene.focusableOrder)
+    return ((ac7.finishUploads, clearColor, sceneOut.prims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overScene.prims, sceneOut.hitRegionsSub ++ overScene.hitRegionsSub, sceneOut.focusableOrder ++ overScene.focusableOrder), [])
   else
     let clearColor := if liveWindow then 0x00000000 else pal.canvas
-    return (ac6.finishUploads, clearColor, sceneOut.prims, sceneOut.hitRegionsSub, sceneOut.focusableOrder)
+    return ((ac6.finishUploads, clearColor, sceneOut.prims, sceneOut.hitRegionsSub, sceneOut.focusableOrder),
+      if st.liveData then scrollRegionsOf rootBox else [])
+
+def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) : IO Runtime.FrameView :=
+  Prod.fst <$> renderDesktopView rt
 
 /-- `stepDesktopEvent` for the window `rt` currently has. -/
 def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
     DesktopState → Event → DesktopState × Damage :=
-  stepDesktopEvent rt.wayland.scale120 rt.viewportDeviceRect
+  fun st ev => Id.run do
+    if let .scroll x y _ dy := ev then
+      if st.liveData then
+        let some r := rt.scrollRegions.find? (fun r => r.bounds.contains x y) | return (st, none)
+        let h := r.bounds.h.toNat
+        let content := r.limitY + h
+        let damage := some (roundRectOut rt.wayland.scale120 r.bounds)
+        if r.id == rosterViewportId then
+          let top := scrollStep content h (min r.limitY st.rosterTopSub) dy
+          if top == st.rosterTopSub then return (st, none)
+          return ({ st with rosterTopSub := top }, damage)
+        if r.id == transcriptViewportId && st.screen == .missionTranscript then
+          let current := st.scroll.onLayout content h
+          let next := current.onUserScroll content h dy
+          if next == current then return (st, none)
+          return ({ st with scroll := next }, damage)
+    return stepDesktopEvent rt.wayland.scale120 rt.viewportDeviceRect st ev
 
 /-- Render one `(ScreenId, isDark, scale120)` configuration to `outFile`, verifying that
 Frame 1 renders (`framesRendered == 1`) and Frame 2 skips redraw when quiescent (`quiescentSkips >= 1`). -/
@@ -319,7 +378,9 @@ an already-running control screen. Each measured update queues several stream de
 once into the transcript damage band, exercising changed-node rasterisation and the
 `Orb.Stream.Coalescer` frame boundary. `first_frame_crc32` ties the run to the transcript golden. -/
 def runDesktopBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) (verifyRepaint := false) : IO UInt32 := do
-  if verifyRepaint then verifyRepaintEdges
+  if verifyRepaint then
+    verifyRepaintEdges
+    verifyDesktopEdges renderDesktopFrame shapeDesktopRuns
   let iters := max 1 iterations
   let tStartNs ← IO.monoNanosNow
   let firstSt := DesktopState.forScreen .missionTranscript cfg.darkTheme cfg.scale120
@@ -333,11 +394,11 @@ def runDesktopBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) (verifyRepa
   let firstCrc := Vulkan.crc32 rt.vulkan.framebuffer
   let fullScenePrims := rt.vulkan.lastDrawnPrims
 
-  let openStartNs ← IO.monoNanosNow
   let openSt := DesktopState.forScreen .controlEmpty cfg.darkTheme cfg.scale120
   let openRt0Raw ← Runtime.initRuntime { cfg with headless := true } openSt
   let openRt0 := { openRt0Raw with focus := openSt.initialFocusState }
   let mut openRt ← Runtime.stepFrame openRt0 (desktopReducer openRt0) renderDesktopFrame
+  let openStartNs ← IO.monoNanosNow
   openRt := { openRt.markFullDamage with app := firstSt, focus := firstSt.initialFocusState }
   openRt ← Runtime.stepFrame openRt (desktopReducer openRt) renderDesktopFrame
   let transcriptOpenUs : Nat := ((← IO.monoNanosNow) - openStartNs) / 1000
@@ -357,16 +418,17 @@ def runDesktopBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) (verifyRepa
     let f0 ← IO.monoNanosNow
     let reference ← if verifyRepaint then do
       let ref ← Runtime.stepFrame rt.markFullDamage (desktopReducer rt) renderDesktopFrame
-      pure (some ref.vulkan.framebuffer)
+      pure (some (ref.vulkan.framebuffer, ref.vulkan.lastDrawnPrims))
       else pure none
     rt ← Runtime.stepFrame rt (desktopReducer rt) renderDesktopFrame
-    if let some fb := reference then
+    if let some (fb, fullPrims) := reference then
       if fb != rt.vulkan.framebuffer then throw <| IO.userError s!"stream frame {idx} differs from full repaint"
+      if rt.vulkan.lastDrawnPrims >= fullPrims then throw <| IO.userError s!"stream frame {idx} did not cull unchanged primitives"
     let f1 ← IO.monoNanosNow
     if profile then IO.eprintln s!"u7-update {idx} ns={f1-f0} pixels={rt.vulkan.lastDamagePixels} primitives={rt.vulkan.lastDrawnPrims}"
     frameTimesUs := frameTimesUs.push ((f1 - f0) / 1000)
     partialDrawnPrims := rt.vulkan.lastDrawnPrims
-    allUpdatesCulled := allUpdatesCulled && rt.vulkan.lastDrawnPrims < fullScenePrims
+    allUpdatesCulled := allUpdatesCulled && rt.vulkan.lastDrawnPrims > 0 && rt.vulkan.lastDamagePixels < rt.vulkan.width * rt.vulkan.height
     rt ← Runtime.stepFrame rt (desktopReducer rt) renderDesktopFrame
   let (bw, bh) := (rt.vulkan.width, rt.vulkan.height)
   let fbBytes := rt.vulkan.framebuffer.size
@@ -381,8 +443,56 @@ def runDesktopBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) (verifyRepa
   IO.println s!"\{\"cold_ms\": {fmtMs coldUs}, \"startup_ms\": {fmtMs coldUs}, \"transcript_open_ms\": {fmtMs transcriptOpenUs}, \"frame_p50_ms\": {fmtMs p50Us}, \"frame_p99_ms\": {fmtMs p99Us}, \"frames_rendered\": {rt.framesRendered}, \"quiescent_skips\": {rt.quiescentSkips}, \"partial_frames\": {partialFrames}, \"full_scene_prims\": {fullScenePrims}, \"partial_drawn_prims\": {partialDrawnPrims}, \"work_units\": {iters}, \"error_count\": {errors}, \"width\": {bw}, \"height\": {bh}, \"scale120\": {cfg.scale120}, \"first_frame_crc32\": {firstCrc.toNat}}"
   return (if errors == 0 then 0 else 1)
 
-/-- `--self-test`: render one frame offscreen and check that the next, quiescent one is skipped. -/
+/-- Exercise wheel routing and click selection against the hit map of the painted layout. -/
+def liveViewportRegression : Bool := Id.run do
+  let cards := (List.range 32).map fun i => { (default : MissionSummaryCard) with
+    widgetId := 1001 + i, missionId := s!"m{i}", title := s!"Mission {i}" }
+  let rows := cards.map fun c => { (default : ChromeSidebarRow) with
+    widgetId := c.widgetId, rowId := c.missionId, kind := "mission", title := c.title }
+  let initial := { DesktopState.liveUnavailable with sidebarRows := rows, missionCards := cards }
+  let w := pxToSub 800
+  let h := pxToSub 320
+  -- Give the last line a distinct atlas rectangle so we check its paint position.
+  let marker : Rect := ⟨777, 1, 1, 1⟩
+  let lines : List InlineRun := (List.range 48).map fun i =>
+    { style := Theme.bodyText initial.theme, hardBreakAfter := i != 47,
+      glyphs := [{ glyphId := 1, xAdvance := pxToSub 8, sizePx := (1, 1), atlasSrc := if i == 47 then marker else ⟨0, 0, 1, 1⟩ }] }
+  let frame (st : DesktopState) := Id.run do
+    let widget := buildDesktopScreen st w h { streamRuns := lines }
+    let box := layoutNode 120 none 0 0 0 w h widget.toLayoutNode
+    let scene := buildSceneFromLayout 120 {} st.theme widget box (recordNodes := false)
+    let rt : Runtime.RuntimeState DesktopState :=
+      { app := st, scrollRegions := scrollRegionsOf box, hitRegions := scene.hitRegionsSub }
+    return (rt, scene.prims)
+  let wheel (rt : Runtime.RuntimeState DesktopState) (id : Nat) (dy : Int) : Option DesktopState := do
+    let r ← rt.scrollRegions.find? (fun (r : Runtime.ScrollRegion) => r.id == id)
+    return (rt.stepEvent (desktopReducer rt) (.scroll (r.bounds.x+1) (r.bounds.y+1) 0 dy)).app
+  let last := cards.getLast!
+  let (start, _) := frame initial
+  if start.hitRegions.any (·.1 == last.widgetId) then return false
+  let some down := wheel start rosterViewportId 999999 | return false
+  let (scrolled, _) := frame down
+  let some (_, row) := scrolled.hitRegions.find? (fun (p : EntityId × Rect) => p.1 == last.widgetId) | return false
+  let click := fun pressed => Event.pointerButton (row.x + row.w/2) (row.y + row.h/2) 1 pressed
+  let press := scrolled.stepEvent (desktopReducer scrolled) (click true)
+  let selected := (press.stepEvent (desktopReducer press) (click false)).app
+  if selected.openMission != some last.missionId then return false
+  let some top := wheel (frame selected).1 transcriptViewportId (-999999) | return false
+  let (atTop, before) := frame top
+  let some bottom := wheel atTop transcriptViewportId 999999 | return false
+  let (atBottom, after) := frame bottom
+  let some pane := atBottom.scrollRegions.find? (fun (r : Runtime.ScrollRegion) => r.id == transcriptViewportId) | return false
+  let visible (p : Prim) := match p with
+    | .glyph src dst .. => src == marker && (roundRectOut 120 pane.bounds).contains dst.x dst.y
+    | _ => false
+  return !before.any visible && after.any visible && bottom.rosterTopSub == down.rosterTopSub &&
+    !atBottom.hitRegions.any (·.1 == 2)
+
+/-- `--self-test`: check live viewports and quiescent rendering. -/
 def runSelfTest (cfg : Runtime.RuntimeConfig) (initSt : DesktopState) : IO UInt32 := do
+  unless liveViewportRegression do
+    IO.eprintln "orb-desktop self-test: live viewport regression"
+    return 1
   let rt0Raw ← Runtime.initRuntime { cfg with headless := true } initSt
   let rt0 := { rt0Raw with focus := initSt.initialFocusState }
   let mut rt ← Runtime.stepFrame rt0 (desktopReducer rt0) renderDesktopFrame
@@ -411,13 +521,17 @@ def main (args : List String) : IO UInt32 := do
     return (if ok then 0 else 1)
   let scr := dcfg.screenOpt.getD .missionTranscript
   let initSt ← if dcfg.screenOpt.isNone && !dcfg.selfTest then
-    (loadLiveState).map (·.getD (DesktopState.forScreen scr rcfg.darkTheme rcfg.scale120))
+    (loadLiveState).map (·.getD (DesktopState.liveUnavailable rcfg.darkTheme rcfg.scale120))
   else pure (DesktopState.forScreen scr rcfg.darkTheme rcfg.scale120)
   if dcfg.selfTest then
     return (← runSelfTest rcfg initSt)
   try
     let rt0 ← Runtime.openWindowRuntime rcfg "orb-desktop" initSt
-    let rt ← Runtime.runWindow { rt0 with focus := initSt.initialFocusState } desktopReducer renderDesktopFrame
+    let slot ← IO.mkRef (none : Option LiveSubscription)
+    let rt ← try
+      Runtime.runWindow { rt0 with focus := initSt.initialFocusState } desktopReducer renderDesktopView
+        (fun rt => readLiveFrame slot rt.wayland.scale120 rt.viewportDeviceRect rt.app) DesktopState.hasLiveConnection
+    finally closeLiveSubscription slot
     Runtime.shutdownRuntime rt
     return 0
   catch e =>

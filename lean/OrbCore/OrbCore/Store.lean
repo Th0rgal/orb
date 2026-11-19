@@ -426,6 +426,7 @@ def missionsAdditiveAlters : Array String := #[
   "CREATE INDEX IF NOT EXISTS idx_missions_owner ON missions(owner_user_id);",
   "CREATE INDEX IF NOT EXISTS idx_missions_project_folder ON missions(project, folder);",
   "CREATE INDEX IF NOT EXISTS idx_events_mission ON mission_events(mission_id, sequence);",
+  "CREATE INDEX IF NOT EXISTS idx_current_bubble ON mission_events(mission_id,(CASE WHEN seq > 0 THEN seq ELSE COALESCE(sequence,0) END) DESC,id DESC) WHERE event_type IN ('user_message','text_delta','assistant_message','assistant_message_canonical');",
   "CREATE INDEX IF NOT EXISTS idx_mission_events_mission_seq ON mission_events(mission_id, seq) WHERE seq > 0;",
   "CREATE INDEX IF NOT EXISTS idx_mission_events_mission_type_seq ON mission_events(mission_id, event_type, seq) WHERE seq > 0;",
   "CREATE INDEX IF NOT EXISTS idx_missions_updated_at ON missions(updated_at DESC);",

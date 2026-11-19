@@ -67,6 +67,14 @@ def parseRuntimeArgs (args : List String) : RuntimeConfig :=
       loop rest cfg
   loop args {}
 
+structure ScrollRegion where
+  id : EntityId
+  bounds : Rect
+  limitY : SubPx
+  deriving Inhabited
+
+abbrev FrameView := Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect) × List EntityId
+
 /-- Single-owner UI state store driving layout, focus, scroll, damage, text atlas, and Vulkan. -/
 structure RuntimeState (σ : Type) where
   app : σ
@@ -82,6 +90,7 @@ structure RuntimeState (σ : Type) where
   windowFocused : Bool := true
   hoveredEntity : Option EntityId := none
   hitRegions : List (EntityId × Rect) := []
+  scrollRegions : List ScrollRegion := []
   focusableOrder : List EntityId := []
   pressedEntity : Option EntityId := none
   scrollOffsetSub : Nat := 0
@@ -166,6 +175,7 @@ def stepEvent (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage) (
           else rt'
         | _, _ => { rt with pressedEntity := none }
     | .scroll _px _py _dx dy =>
+      if !rt.scrollRegions.isEmpty then rt else
       let (_, vhSub) := rt.wayland.logicalSubSize
       let nextOff := scrollStep rt.contentHeightSub vhSub rt.scrollOffsetSub dy
       if nextOff == rt.scrollOffsetSub then rt
@@ -204,9 +214,9 @@ end RuntimeState
 2. Check `needsRedraw rt.damage`: if `false`, skip rendering completely (`quiescentSkips + 1`).
 3. If `needsRedraw rt.damage == true`, build the `Scene`, render via `Vulkan.renderFrame`, and
    clear `rt.damage` to `none`. -/
-def stepFrame {σ : Type} (rt : RuntimeState σ)
+def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
     (onEvent : σ → Event → σ × Damage)
-    (view : RuntimeState σ → IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect) × List EntityId)) :
+    (view : RuntimeState σ → IO (FrameView × List ScrollRegion)) :
     IO (RuntimeState σ) := do
   let (wl1, evs) ← Wayland.pumpEvents rt.wayland
   let mut st := { rt with wayland := wl1 }
@@ -222,7 +232,7 @@ def stepFrame {σ : Type} (rt : RuntimeState σ)
         height := bh
         framebuffer := ByteArray.empty }
     else st.vulkan
-  let (atlas', clearColor, scene, regions, focusOrder) ← view { st with vulkan := vk0 }
+  let ((atlas', clearColor, scene, regions, focusOrder), scrollRegions) ← view { st with vulkan := vk0 }
   let vk' ← match st.damage with
     | some dirty => Vulkan.renderFrameDamage vk0 clearColor atlas' dirty scene
     | none => Vulkan.renderFrame vk0 clearColor atlas' scene
@@ -231,13 +241,18 @@ def stepFrame {σ : Type} (rt : RuntimeState σ)
     vulkan := vk'
     atlas := atlas'
     hitRegions := regions
+    scrollRegions
     focusableOrder := focusOrder
     damage := none
     framesRendered := st.framesRendered + 1
   }
 
-/-- Build the canonical Orb Desktop canary scene (sidebar, header bar, transcript cards,
-code block, focus border, and shaped text labels) at the current scale factor and theme. -/
+/-- Frame tick for views without independently scrollable input regions. -/
+def stepFrame {σ : Type} (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage)
+    (view : RuntimeState σ → IO FrameView) : IO (RuntimeState σ) :=
+  stepFrameWithRegions rt onEvent fun st => do return (← view st, [])
+
+/-- Build the canonical Orb Desktop canary scene. -/
 def buildCanaryScene (rt : RuntimeState Unit) :
     IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect) × List EntityId) := do
   let (bw, bh) := rt.wayland.deviceBufferSize
@@ -356,12 +371,32 @@ def openWindowRuntime {σ : Type} (cfg : RuntimeConfig) (appId : String) (initia
   let wl ← Wayland.openWindow cfg.title appId cfg.width cfg.height cfg.scale120
   initRuntimeOn cfg wl initialApp
 
+/-- On Linux, poll the compositor fd with a timeout only when the app has a
+background producer. Wayland input wakes immediately; the timeout samples the
+mailbox without a frame-rate idle timer. `pumpEvents` owns actual dispatch. -/
+private def withWindowWait {α σ : Type} (rt : RuntimeState σ) (k : IO Unit → IO α) : IO α := do
+  if rt.wayland.display == 0 then return ← k (IO.sleep 500)
+  let getFd ← FFI.dlSym "libwayland-client.so.0" "wl_display_get_fd"
+  let pollFn ← FFI.dlSym "" "poll"
+  if getFd == 0 || pollFn == 0 then throw (IO.userError "window poll unavailable")
+  let args (a b c : UInt64) := [a,b,c,0,0,0].foldl Wayland.pushU64LE ByteArray.empty
+  let fd ← FFI.call getFd (args rt.wayland.display.toUInt64 0 0)
+  let p ← FFI.memAlloc 8
+  if p == 0 then throw (IO.userError "window poll allocation failed")
+  try
+    -- Linux struct pollfd { int fd; short events; short revents; }, POLLIN=1.
+    FFI.memWrite p (Wayland.pushU32LE (Wayland.pushU32LE ByteArray.empty fd.toUInt32) 1)
+    k (discard <| FFI.call pollFn (args p.toUInt64 1 500))
+  finally FFI.memFree p
+
 /-- Run the window until it is closed: render and present when there is damage, otherwise
 block on the compositor. Nothing is drawn before the first `xdg_surface.configure`. -/
 def runWindow {σ : Type} (rt0 : RuntimeState σ)
     (onEvent : RuntimeState σ → σ → Event → σ × Damage)
-    (view : RuntimeState σ → IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect) × List EntityId)) :
-    IO (RuntimeState σ) := do
+    (view : RuntimeState σ → IO (FrameView × List ScrollRegion))
+    (pollFrame : RuntimeState σ → IO (σ × Damage) := fun rt => pure (rt.app, none))
+    (hasProducer : σ → Bool := fun _ => false) :
+    IO (RuntimeState σ) := withWindowWait rt0 fun timedWait => do
   let mut rt := rt0
   while rt.running do
     if !rt.wayland.configured then
@@ -371,13 +406,16 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
       for ev in evs do
         rt := rt.stepEvent (onEvent rt) ev
     else
+      let (app, damage) ← pollFrame rt
+      rt := { rt with app }
+      if let some rect := damage then rt := rt.markDirty rect
       let rendered := rt.framesRendered
-      rt ← stepFrame rt (onEvent rt) view
+      rt ← stepFrameWithRegions rt (onEvent rt) view
       if rt.framesRendered != rendered then
         let wl ← Wayland.present rt.wayland rt.vulkan.framebuffer
         rt := { rt with wayland := wl }
       else if rt.running then
-        Wayland.waitEvents rt.wayland
+        if hasProducer rt.app then timedWait else Wayland.waitEvents rt.wayland
   return rt
 
 /-- Cleanly release font and Vulkan scratch resources owned by `RuntimeState`. -/

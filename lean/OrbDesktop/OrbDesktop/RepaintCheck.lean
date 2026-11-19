@@ -1,4 +1,5 @@
-import LeanUI.Vulkan
+import LeanUI.Runtime
+import OrbDesktop.State
 
 namespace OrbDesktop
 open LeanUI
@@ -35,5 +36,78 @@ def verifyRepaintEdges : IO Unit := do
   discard <| check (withByte 3) (scene 4 2) false
   let unused := { page with rgba := page.rgba.set! 7 255 }
   discard <| check { atlas with pages := #[unused] } (scene 4 2) true
+
+private def checkPartial (label : String) (base : Vulkan.VulkanContext) (dirty : Damage)
+    (atlas : Text.GlyphAtlasCache) (clear : Color) (scene : Scene) : IO Vulkan.VulkanContext := do
+  let some rect := dirty | throw <| IO.userError s!"{label}: missing invalidation"
+  let got ← Vulkan.renderFrameDamage base clear atlas rect scene
+  let ref ← Vulkan.renderFrame base clear atlas scene
+  unless got.partialFrames == base.partialFrames + 1 && got.lastDamagePixels > 0 &&
+      got.lastDamagePixels < base.width * base.height do
+    throw <| IO.userError s!"{label}: expected a nonempty partial repaint"
+  unless base.framebuffer != ref.framebuffer && got.framebuffer == ref.framebuffer do
+    throw <| IO.userError s!"{label}: expected changed pixels matching full repaint"
+  return got
+
+private def verifyFocusTransfer : IO Unit := do
+  let theme := orbDarkTheme
+  let button (id : Nat) := WidgetNode.focusable id <| WidgetNode.box
+    (BoxStyle.row 0 |>.withFixedSize (pxToSub 18) (pxToSub 12)) []
+  let root := WidgetNode.box (BoxStyle.row (pxToSub 16)) [button 1, button 2]
+  let view (f : FocusState) := (renderWidgetTree 120 (pxToSub 80) (pxToSub 24) f theme root).2
+  let focus : FocusState := { owner := some 1 }
+  let first := view focus
+  let rt : Runtime.RuntimeState Unit := { app := (), focus, hitRegions := first.hitRegionsSub }
+  let some (_, target) := first.hitRegionsSub.find? (·.1 == 2)
+    | throw <| IO.userError "focus: missing target"
+  let clicked := rt.stepEvent (fun s _ => (s, none))
+    (.pointerButton (target.x + target.w/2) (target.y + target.h/2) 1 true)
+  unless clicked.focus.owner == some 2 do throw <| IO.userError "focus: transfer failed"
+  let base ← Vulkan.renderFrame { width := 80, height := 24 } theme.palette.canvas {} first.prims
+  let got ← checkPartial "focus transfer" base clicked.damage {} theme.palette.canvas (view clicked.focus).prims
+  for (id, r) in first.hitRegionsDev do
+    let differs := (List.range r.h.toNat).any fun y => (List.range r.w.toNat).any fun x =>
+      let i := 4 * ((r.y.toNat + y) * base.width + r.x.toNat + x)
+      base.framebuffer.extract i (i+4) != got.framebuffer.extract i (i+4)
+    unless differs do throw <| IO.userError s!"focus: border {id} did not change"
+
+def verifyDesktopEdges (view : Runtime.RuntimeState DesktopState → IO Runtime.FrameView)
+    (shape : Text.GlyphAtlasCache → Text.FontHandle → Nat → TextStyle → String →
+      IO (Text.GlyphAtlasCache × List InlineRun)) : IO Unit := do
+  verifyFocusTransfer
+  let st := DesktopState.forScreen .missionTranscript
+  let st := { st with composer := { st.composer with text := "leftRIGHT", cursorOffset := 4 } }
+  let rt ← Runtime.initRuntime { headless := true, width := 960, height := 720, scale120 := 120 } st
+  try
+    let (atlas, clear, scene, _, _) ← view rt
+    let base ← Vulkan.renderFrame rt.vulkan clear atlas scene
+    let edited := ({ rt with atlas, damage := none }).stepEvent
+      (stepDesktopEvent 120 rt.viewportDeviceRect) (.text "W")
+    unless edited.app.composer.text == "leftWRIGHT" do throw <| IO.userError "composer: middle insert failed"
+    let (atlas', clear', scene', _, _) ← view edited
+    let got ← checkPartial "composer middle insert" base edited.damage atlas' clear' scene'
+    -- Scene diffing can repair an undersized reducer hint. Independently replay just
+    -- that hint over the old pixels so a clipped suffix cannot hide behind the diff.
+    let (hinted, _) := Vulkan.rasterizeSceneInto base.width base.height clear' atlas'
+      (some base.framebuffer) edited.damage scene'
+    unless hinted == got.framebuffer do throw <| IO.userError "composer: damage missed edited pixels"
+
+    let label ac := shape ac rt.primaryFont 120 (Theme.bodyText st.theme)
+    let mut ac : Text.GlyphAtlasCache := {}
+    for i in [:130] do ac := (← label ac s!"label{i}").1
+    let boundary := String.ofList (List.replicate 64 'é') -- exactly 128 UTF-8 bytes
+    ac := (← label ac boundary).1
+    let shaped := ac.shapeCache.map (·.text)
+    let resolved := ac.resolved.map (·.text)
+    unless shaped.size == 64 && resolved.size == 128 && shaped.back? == some boundary &&
+        resolved.back? == some boundary && !shaped.contains "label0" && !resolved.contains "label0" do
+      throw <| IO.userError "shape caches: expected bounded short-label retention"
+    for text in [boundary ++ "x", String.ofList (List.replicate 4096 'w')] do
+      let (next, runs) ← label ac text
+      unless runs.any (fun r => !r.glyphs.isEmpty) && next.shapeCache.map (·.text) == shaped &&
+          next.resolved.map (·.text) == resolved do
+        throw <| IO.userError s!"shape caches: oversized {text.utf8ByteSize}-byte input not shaped or retained keys changed"
+      ac := next
+  finally Runtime.shutdownRuntime rt
 
 end OrbDesktop

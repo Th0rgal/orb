@@ -363,19 +363,18 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
   if let some d := dirty then
     let (x0, y0, x1, y1) := clampBounds vw vh fullClip d
     if x1 > x0 && y1 > y0 then
+      let w := (x1-x0).toNat
+      let mut row := ByteArray.emptyWithCapacity (4*w)
+      for _ in [:w] do row := row.push cr |>.push cg |>.push cb |>.push ca
       for py in [y0.toNat : y1.toNat] do
-        for px in [x0.toNat : x1.toNat] do
-          let idx := (py * vw + px) * 4
-          fb := fb.set! idx cr |>.set! (idx + 1) cg |>.set! (idx + 2) cb |>.set! (idx + 3) ca
+        fb := row.copySlice 0 fb ((py * vw + x0.toNat) * 4) row.size
   let mut clipStack : List Rect := [renderClip]
   let mut layerStack : List LayerFrame := []
   let mut instances : Array GpuPrimInstance := #[]
 
   for prim in scene do
-    if let some d := dirty then
-      if !prim.intersects d then
-        continue
     let curClip := clipStack.head?.getD renderClip
+    if !prim.intersects curClip then continue
     match prim with
     | .backdropBlur sigma =>
       fb := blurBackdrop fb vw vh sigma

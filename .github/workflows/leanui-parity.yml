@@ -10,6 +10,7 @@ on:
     paths:
       - 'lean/LeanUI/**'
       - 'lean/OrbDesktop/**'
+      - 'lean/OrbCore/OrbCore/current_bubble.sql'
       - 'scripts/build_orb_bins.sh'
       - 'scripts/orb_desktop_dev.sh'
       - 'scripts/leanui_parity.py'
@@ -23,6 +24,7 @@ on:
     paths:
       - 'lean/LeanUI/**'
       - 'lean/OrbDesktop/**'
+      - 'lean/OrbCore/OrbCore/current_bubble.sql'
       - 'scripts/build_orb_bins.sh'
       - 'scripts/orb_desktop_dev.sh'
       - 'scripts/leanui_parity.py'
@@ -119,14 +121,30 @@ jobs:
             | tee -a "$GITHUB_WORKSPACE/.ci/leanui/reference-hashes.txt"
           exit "$hash_status"
 
-      - name: Run U2 native script under Weston
+      - name: Build native desktop
         if: ${{ !cancelled() }}
-        env:
-          FONTCONFIG_FILE: ${{ github.workspace }}/.ci/leanui/fontconfig/fonts.conf
+        id: native_build
         run: |
           set -euo pipefail
           unset ORB_ALLOW_RAW_LAKE_FALLBACK ORB_SKIP_TURBO_LEAN
           scripts/build_orb_bins.sh --only orb-desktop-native --out-dir "$PWD/target/native"
+
+      - name: Check U5 bootstrap, rendered mission selection and live delivery
+        if: ${{ !cancelled() && steps.native_build.outcome == 'success' }}
+        working-directory: lean/OrbDesktop
+        run: |
+          set -euo pipefail
+          python3 -IB ../../scripts/test_leanui_local_core_u5.py
+          # Resolve absolute package and orb-spec import paths from this checkout's
+          # manifest. Use the already built modules, not another native build.
+          lake env python3 -IB tests/test_live_delivery.py -v
+
+      - name: Run U2 native script under Weston
+        if: ${{ !cancelled() && steps.native_build.outcome == 'success' }}
+        env:
+          FONTCONFIG_FILE: ${{ github.workspace }}/.ci/leanui/fontconfig/fonts.conf
+        run: |
+          set -euo pipefail
           mkdir -p .ci/leanui/weston .ci/leanui/u2
           chmod 700 .ci/leanui/weston
           export XDG_RUNTIME_DIR="$PWD/.ci/leanui/weston"

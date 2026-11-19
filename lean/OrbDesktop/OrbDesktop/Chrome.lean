@@ -240,6 +240,13 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
            else Edges.trbl 0 0 (pxToSub 1) 0)
   let footRows : List WidgetNode :=
     (rowsSource.filter isFoot).map fun r => buildSidebarRowWidget theme rowW r
+  let rosterH := availH - chromeHeaderHeightSub - footH
+  let rosterStyle := BoxStyle.col 0
+    |>.withPadding (Edges.trbl 0 (pxToSub 6) (pxToSub 12) (pxToSub 6))
+  let roster := if st.liveData then
+      WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize innerW rosterH)
+        { offsetY := st.rosterTopSub } (WidgetNode.box rosterStyle (navRows ++ treeRows)) (some rosterViewportId)
+    else WidgetNode.box (rosterStyle.withFixedSize innerW rosterH) (navRows ++ treeRows)
   WidgetNode.rrect
     (BoxStyle.col 0
       |>.withPadding (Edges.trbl 0 border 0 0)
@@ -254,11 +261,7 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
          WidgetNode.box { BoxStyle.row 0 with grow := 1 } [],
          chromeIcon "back" pal.textMuted 14,
          WidgetNode.box (BoxStyle.row 0 |>.withMargin (Edges.trbl 0 0 0 (pxToSub 12))) [chromeIcon "forward" pal.textFaint 14]]
-    , WidgetNode.box
-        (BoxStyle.col 0
-          |>.withPadding (Edges.trbl 0 (pxToSub 6) (pxToSub 12) (pxToSub 6))
-          |>.withFixedSize innerW (availH - chromeHeaderHeightSub - footH))
-        (navRows ++ treeRows)
+    , roster
     , WidgetNode.rrect
         (BoxStyle.row 0
           |>.withPadding (Edges.trbl (pxToSub 6 + border) (pxToSub 6) (pxToSub 6) (pxToSub 6))
@@ -278,7 +281,7 @@ def buildHeaderChrome (st : DesktopState) (mainW : SubPx)
   let titleStyle := chromeTitleStyle theme
   let titleRuns :=
     if titleOverrideRuns.isEmpty then
-      [overlaySynthRun titleStyle st.screen.headerTitle]
+      [overlaySynthRun titleStyle st.headerTitle]
     else titleOverrideRuns
   let inset : SubPx :=
     match st.screen with

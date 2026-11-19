@@ -277,6 +277,8 @@ def buildReferenceTurnWidget (theme : Theme) (colW : SubPx) (stepNum : Nat) : Wi
     (BoxStyle.col 0 |>.withFixedSize colW (pxToSub 345))
     [userPill, bodyBlock]
 
+def transcriptTextWidth (mainW : SubPx) := min (pxToSub 748) (mainW - pxToSub 48) - pxToSub 40
+
 /-- Build the Mission Transcript body (`03_mission_transcript`) matching the SolidJS transcript column. -/
 def buildMissionTranscriptBody (st : DesktopState) (mainW bodyH : SubPx)
     (_runs : ShapedScreenRuns) : WidgetNode :=
@@ -296,27 +298,28 @@ def buildMissionTranscriptBody (st : DesktopState) (mainW bodyH : SubPx)
       ]
   let liveStreamRow : List WidgetNode :=
     if _runs.streamRuns.isEmpty then []
-    else [WidgetNode.box
+    else Id.run do
+      let width := transcriptTextWidth mainW
+      let (_, _, height) := wrapInlineRuns width theme.typo.lineBase _runs.streamRuns
+      return [WidgetNode.box
       (BoxStyle.row 0
         |>.withPadding (Edges.xy (pxToSub 20) (pxToSub 6))
-        |>.withFixedSize colW (pxToSub 30))
+        |>.withFixedSize colW (height + pxToSub 12))
       [WidgetNode.text
-        (BoxStyle.row 0 |>.withFixedSize (colW - pxToSub 40) (pxToSub 20))
+        (BoxStyle.row 0 |>.withFixedSize width height)
         theme.typo.lineBase _runs.streamRuns (some 900)]]
 
-  let colNode : WidgetNode :=
-    WidgetNode.box
-      (BoxStyle.col (pxToSub 23)
-        |>.withFixedSize colW (bodyH - pxToSub 3))
-      ([turn58, turn59] ++ liveStreamRow ++ [workingRow])
-
-  WidgetNode.box
-    (BoxStyle.col 0
-      |>.withAlign .center
-      |>.withPadding (Edges.trbl (pxToSub 3) 0 0 0)
-      |>.withFixedSize mainW bodyH
-      |>.withBg pal.canvas)
-    [colNode]
+  let liveRows := liveStreamRow ++ (st.selectedCard.toList.map fun c =>
+    screenTextLine theme colW (pxToSub 21) (pxToSub 12) (pxToSub 21) pal.textMuted c.status)
+  Id.run do
+    let rows := if st.liveData then liveRows else [turn58, turn59] ++ liveStreamRow ++ [workingRow]
+    let column := WidgetNode.box { BoxStyle.col (pxToSub 23) with minWidth := colW, maxWidth := colW } rows
+    let child := WidgetNode.box (BoxStyle.col 0 |>.withAlign .center
+      |>.withPadding (Edges.trbl (pxToSub 3) 0 0 0)) [column]
+    let (_, contentH) := measureNode mainW child.toLayoutNode
+    let offset := if !st.liveData && liveStreamRow.isEmpty then 0 else (st.scroll.onLayout contentH bodyH).topSub
+    return WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize mainW bodyH |>.withBg pal.canvas)
+      { offsetY := offset } child (some transcriptViewportId)
 
 /-! ## 4. `04_mission_split_diff` (`/?screen=mission&id=m-diff&mode=split`) -/
 
@@ -967,19 +970,19 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
   let headerH := chromeHeaderHeightSub
   let composerH := chromeComposerHeightSub
   let mainW : SubPx := availW - sidebarW
-  let useRefSidebar := !runs.headerTitleRuns.isEmpty
+  let useRefSidebar := !st.liveData && !runs.headerTitleRuns.isEmpty
   let sidebarNode := buildSidebarChrome st availH useRefSidebar
   let headerNode := buildHeaderChrome st mainW runs.headerTitleRuns
 
   let rightColumn : WidgetNode :=
     match st.screen with
     | .missionTranscript =>
-      let bodyH := availH - headerH - composerH
+      let bodyH := availH - headerH - (if st.liveData then 0 else composerH)
       let bodyNode := buildMissionTranscriptBody st mainW bodyH runs
       let composerNode := buildComposerWidget theme mainW composerH st.composer
       WidgetNode.box
         (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg pal.canvas)
-        [headerNode, bodyNode, composerNode]
+        ([headerNode, bodyNode] ++ (if st.liveData then [] else [composerNode]))
     | .missionSplitDiff =>
       let splitH := availH - headerH
       let leftW : SubPx := pxToSub 688
@@ -1016,7 +1019,9 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
       let bodyH := availH - headerH
       WidgetNode.box
         (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg pal.canvas)
-        [headerNode, buildNewAgentBody st mainW bodyH]
+         [headerNode, if st.liveData then screenTextLine theme mainW (pxToSub 32) (pxToSub 13)
+           (pxToSub 21) pal.textMuted (if st.hasLiveConnection then "Select a mission" else "Core unavailable")
+           else buildNewAgentBody st mainW bodyH]
 
   let baseShell : WidgetNode :=
     WidgetNode.box
