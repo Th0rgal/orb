@@ -29,10 +29,13 @@ private def reasonMessage : String → String
   | _ => "The VPN route is unavailable."
 
 private def observed? (pool : AccountVpnPool.Pool) (account : String) (pref : Preference) :
-    IO (Option VerifiedTunnel) := pool.atomically do
-  for t in ← get do
+    IO (Option (Except String VerifiedTunnel)) := pool.atomically do
+  let state ← get
+  if let some (generation, reason) := state.failures.get? account then
+    if generation == pref.generation then return some (.error reason)
+  for t in state.active do
     if t.occupants.any (fun o => o.binding.account == account && o.generation == pref.generation) &&
-        (← t.tunnel.child.tryWait).isNone then return some t.evidence
+        (← t.tunnel.child.tryWait).isNone then return some (.ok t.evidence)
   return none
 
 def route (store : CoreStore) (pool? : Option AccountVpnPool.Pool) (dir account provider : String)
@@ -67,8 +70,10 @@ def route (store : CoreStore) (pool? : Option AccountVpnPool.Pool) (dir account 
   if let some pool := pool? then
     if method == "PUT" then
       if let .error e ← AccountVpnPool.allocate pool store.rootDir dir store.missionsDb account provider pref then return blocked e
-    if let some t ← observed? pool account pref then
-      return (200, .obj (fields ++ #[("status", .str "verified"), ("server", .str t.server),
+    match ← observed? pool account pref with
+    | some (.error e) => return blocked e
+    | none => pure ()
+    | some (.ok t) => return (200, .obj (fields ++ #[("status", .str "verified"), ("server", .str t.server),
         ("exits", .arr (t.exits.toArray.map (fun ip => .str (formatExit ip))))]))
   return blocked reason
 

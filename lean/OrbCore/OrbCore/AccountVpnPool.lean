@@ -28,7 +28,11 @@ structure Active where
   occupants : List Occupant
   retiredLocks : List UInt32 := []
 
-abbrev Pool := Std.Mutex (List Active)
+structure PoolState where
+  active : List Active := []
+  failures : Std.HashMap String (Nat × String) := {}
+
+abbrev Pool := Std.Mutex PoolState
 
 private def unlock (locks : List UInt32) : IO Unit :=
   locks.forM fun fd => closeFdRaw fd.toInt32
@@ -74,7 +78,9 @@ def savePreference (pool : Pool) (db : SqliteDb) (account : String) (country? : 
     if let some configure := configure? then
       if let .error e ← configure true then return .error e
   if let .error e ← AccountVpnRoutes.set db account country? then return .error e
-  if before.map (·.country) != country? then set (← detach (← get) account)
+  if before.map (·.country) != country? then
+    let active ← detach (← get).active account
+    modify fun state => { state with active, failures := state.failures.erase account }
   if country?.isNone then
     if let some configure := configure? then
       if let .error e ← configure false then return .error e
@@ -95,15 +101,15 @@ private def install (dir : String) (db : SqliteDb) (account cat : String) (pref 
 
 /-- Recheck the credential's saved generation while serializing local admission.
 Each selected listener belongs to a running process with fresh exit evidence. -/
-def allocate (pool : Pool) (root dir : String) (db : SqliteDb) (account provider : String)
-    (pref : Preference) : IO (Except String UInt16) := pool.atomically do
-  if dir.isEmpty then return .error "vpn_coordinator_unconfigured"
+private def allocateLocked (root dir : String) (db : SqliteDb) (account provider : String)
+    (pref : Preference) : Std.AtomicT PoolState IO (Except String UInt16) := do
   let .ok current ← AccountVpnRoutes.read db account | return .error "vpn_route_store_unavailable"
   let some current := current | return .error "vpn_route_changed"
   if current.generation != pref.generation || current.country != pref.country then
     return .error "vpn_route_changed"
+  if dir.isEmpty then return .error "vpn_coordinator_unconfigured"
   let cat := category provider
-  let mut available ← get
+  let mut available := (← get).active
   -- Reusing a socket after its binding changed would also keep old streams alive.
   for t in available do
     if let some o := t.occupants.find? (fun o => o.binding.account == account) then
@@ -114,7 +120,7 @@ def allocate (pool : Pool) (root dir : String) (db : SqliteDb) (account provider
         available := available.filter (fun a => a.tunnel.port != t.tunnel.port)
       else
         available ← detach available account
-      set available
+      modify fun state => { state with active := available }
   let req : Request := ⟨account, cat, pref.country, some current.preferredServer⟩
   let configured := (← endpoints root).filter (fun e => e.country == pref.country)
   let running := (available.filter (fun a => a.endpoint.country == pref.country)).map (·.endpoint)
@@ -130,13 +136,13 @@ def allocate (pool : Pool) (root dir : String) (db : SqliteDb) (account provider
       if (← t.tunnel.verify root endpoint.server pref.country) == some t.evidence then
         match ← install dir db account cat pref t others with
         | .ok active =>
-          set (active :: others)
+          modify fun state => { state with active := active :: others }
           return .ok t.tunnel.port
         | .error e => failure := e
         continue
       drain t
       available := others
-      set available
+      modify fun state => { state with active := available }
       if !configured.contains endpoint then continue
     if startupBlocked.isSome then continue
     let .ok bytes ← OrbNetLeaf.Crypto.randBytes 2 | return .error "vpn_port_unavailable"
@@ -149,12 +155,24 @@ def allocate (pool : Pool) (root dir : String) (db : SqliteDb) (account provider
       let active : Active := { endpoint, tunnel, evidence := verified, occupants := [] }
       match ← install dir db account cat pref active available with
       | .ok admitted =>
-        set (admitted :: available)
+        modify fun state => { state with active := admitted :: available }
         return .ok port
       | .error e =>
         tunnel.stop
         failure := e
   return .error (startupBlocked.getD failure)
+
+/-- Keep the last verification outcome with the live pool. It expires when a
+preference changes or Core restarts. A delayed request cannot replace a newer outcome. -/
+def allocate (pool : Pool) (root dir : String) (db : SqliteDb) (account provider : String)
+    (pref : Preference) : IO (Except String UInt16) := pool.atomically do
+  let result ← allocateLocked root dir db account provider pref
+  match result with
+  | .ok _ => modify fun state => { state with failures := state.failures.erase account }
+  | .error "vpn_route_changed" | .error "vpn_route_store_unavailable" => pure ()
+  | .error reason =>
+    modify fun state => { state with failures := state.failures.insert account (pref.generation, reason) }
+  return result
 
 def resolve (pool? : Option Pool) (store : OrbCore.Store.CoreStore) (dir account : String) :
     OrbBin.HttpClient.ResolveTransport :=
@@ -164,7 +182,7 @@ def resolve (pool? : Option Pool) (store : OrbCore.Store.CoreStore) (dir account
     allocate pool store.rootDir dir store.missionsDb record.id record.providerType pref
 
 def shutdown (pool : Pool) : IO Unit := pool.atomically do
-  for t in ← get do drain t
-  set ([] : List Active)
+  for t in (← get).active do drain t
+  set ({} : PoolState)
 
 end OrbCore.AccountVpnPool

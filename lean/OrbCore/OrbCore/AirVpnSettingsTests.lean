@@ -30,7 +30,7 @@ private def routeStorage (root : String) : IO Unit := do
     check (← AccountVpnRoutes.set db "a" none).isOk "switch to Direct"
     check (← AccountVpnRoutes.set db "a" (some "NL")).isOk "switch back to VPN"
     check (!(← AccountVpnRoutes.rememberServer db "a" first "stale").isOk) "stale observation after re-enable"
-    let pool ← Std.Mutex.new ([] : List AccountVpnPool.Active)
+    let pool ← Std.Mutex.new ({} : AccountVpnPool.PoolState)
     check (!(← AccountVpnRoutes.checkGeneration db "a" (some first.generation)).isOk)
       "a pending VPN exchange cannot use a replacement route generation"
     let stale ← AccountVpnPool.allocate pool root root db "a" "openai" first
@@ -72,7 +72,7 @@ def run (root : String) : IO Unit := do
   check (match plain with | .error e => e == "vpn_requires_tls" | _ => false) "plaintext quota bypass rejected"
   let store ← IO.ofExcept (← OrbCore.Store.openCoreStore (root ++ "/vpn-api"))
   try
-    let pool ← Std.Mutex.new ([] : List AccountVpnPool.Active)
+    let pool ← Std.Mutex.new ({} : AccountVpnPool.PoolState)
     let route := AccountVpnApi.route store (some pool) "" "a" "openai"
     let payload := "{\"mode\":\"vpn\",\"country\":\"NL\"}".toUTF8
     let (sidecar, _) ← route false "PUT" payload
@@ -92,6 +92,14 @@ def run (root : String) : IO Unit := do
     check (saved == 200 && state.fieldStr? "mode" == some "vpn" &&
       state.fieldStr? "status" == some "blocked" &&
       state.fieldStr? "reason" == some "vpn_coordinator_unconfigured") "saved VPN reports blocked with reason"
+    let reload := AccountVpnApi.route store (some pool) root "a" "openai"
+    let (_, noProfile) ← reload true "PUT" payload
+    check (noProfile.fieldStr? "reason" == some "vpn_no_compatible_profile")
+      "verification reports the missing country profile"
+    let (_, reopened) ← reload true "GET" ByteArray.empty
+    check (reopened.fieldStr? "reason" == noProfile.fieldStr? "reason" &&
+      reopened.fieldStr? "message" == noProfile.fieldStr? "message")
+      "reopening Settings retains the actionable failure"
     let (_, direct) ← AccountVpnApi.route store (some pool) "" "a" "openai" true "PUT" "{\"mode\":\"direct\"}".toUTF8 (some configure)
     check (!(← patched.get)) "sidecar unbound after explicit Direct selection"
     check (direct.fieldStr? "mode" == some "direct" && (direct.field? "exits").isNone) "direct clears VPN selection"

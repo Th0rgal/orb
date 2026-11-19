@@ -8036,7 +8036,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let systemHub ← newSystemRuntimeHub
     let remoteSup ← newRemoteJobSupervisor (effectiveJwtSecret cfg) cfg.devMode (some telemetrySink)
     let macTetherRt ← startMacTetherRuntime store
-    let vpnPool ← Std.Mutex.new ([] : List AccountVpnPool.Active)
+    let vpnPool ← Std.Mutex.new ({} : AccountVpnPool.PoolState)
     let vpnCoordinatorDir := (← IO.getEnv "ORB_AIRVPN_COORDINATOR_DIR").getD ""
     let providerHub := { baseProviderHub with
       resolveTransport? := some (fun provider account => AccountVpnRoutes.resolve store.missionsDb account fun pref =>
