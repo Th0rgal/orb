@@ -309,7 +309,7 @@ def buildOutboundHttp11Request
   hdrBlock := hdrBlock ++ "\r\n"
   return hdrBlock.toUTF8 ++ body
 
-private def readSocksBytes (fd : Fd) (count deadline : Nat) : IO (Option ByteArray) := do
+def readSocksBytes (fd : Fd) (count deadline : Nat) : IO (Option ByteArray) := do
   let mut bytes := ByteArray.empty
   while bytes.size < count do
     let now ← IO.monoMsNow
@@ -322,7 +322,7 @@ private def readSocksBytes (fd : Fd) (count deadline : Nat) : IO (Option ByteArr
 
 /-- SOCKS5 resolves the destination in the tunnel namespace. Only the
 Core-owned listener is dialed locally; the origin remains the TLS identity. -/
-private def negotiateSocks (fd : Fd) (host : String) (port : UInt16) (deadline : Nat) : IO Bool := do
+def negotiateSocks (fd : Fd) (host : String) (port : UInt16) (deadline : Nat) : IO Bool := do
   unless (← writeAll fd ⟨#[5, 1, 0]⟩).isOk do return false
   let some method ← readSocksBytes fd 2 deadline | return false
   unless method.data == #[5, 0] do return false

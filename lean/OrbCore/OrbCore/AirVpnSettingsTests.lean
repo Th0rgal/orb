@@ -1,3 +1,4 @@
+import OrbCore.AccountVpnRelayTests
 import OrbCore.AirVpnSettings
 import OrbCore.AirVpnTunnel
 import OrbCore.AccountVpnApi
@@ -38,6 +39,7 @@ private def routeStorage (root : String) : IO Unit := do
   finally discard <| OrbBin.Sqlite.sqliteCloseRaw reopened.handle
 
 def run (root : String) : IO Unit := do
+  AccountVpnRelayTests.run
   let cat := AccountVpnPool.category
   check (cat "ChatGPT" == cat " Codex " && cat "Gemini" == cat "google" &&
     cat "Claude" != cat "ChatGPT") "credential category aliases"

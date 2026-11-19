@@ -36,6 +36,7 @@ import OrbCore.RemoteFleetAndRelay
 import OrbCore.ManagedProviderSealing
 import OrbCore.AirVpnSettings
 import OrbCore.AccountVpnApi
+import OrbCore.AccountVpnRelay
 import OrbCore.AutoPlacement
 import OrbCore.RemoteDispatch
 import OrbCore.ProjectFilesAndController
@@ -118,6 +119,7 @@ structure CoreAppState where
   proxyMockTransport? : Option (ProviderTarget → IO (Except String HttpsResponse)) := none
   vpnPool? : Option AccountVpnPool.Pool := none
   vpnCoordinatorDir : String := ""
+  vpnRelayPort? : Option UInt16 := none
   proxyStreamLimits?  : Option StreamLimits := none
   sseKeepAliveMs?     : Option Nat := none
   authRoot        : String := ""
@@ -8049,6 +8051,17 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       closeCoreStore store
       IO.eprintln s!"[sandboxed-sh] FATAL: Goal submission startup fence failed: {e}"
       return 1
+    let vpnRelay? ← match ← AccountVpnRelay.configured (← IO.getEnv "ORB_AIRVPN_RELAY_PORT")
+        (effectiveJwtSecret cfg) vpnCoordinatorDir (!cfg.devMode) vpnPool store with
+      | .ok listener => pure listener
+      | .error e =>
+        discard <| closeFd listenFd
+        stopMacTetherRuntime macTetherRt
+        closeManagedComputeStore managedStore
+        closeCoreStore store
+        IO.eprintln s!"[sandboxed-sh] Failed to initialize the AirVPN account relay: {e}"
+        return 1
+    let appState := { appState with vpnRelayPort? := vpnRelay?.map (·.port) }
     let lostTurns ← interruptTurnsLostToRestart store.missionsDb
     if lostTurns > 0 then
       IO.eprintln s!"[sandboxed-sh] {lostTurns} mission turn(s) lost to the restart marked interrupted"
@@ -8184,6 +8197,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     discard <| closeFd listenFd
     stopMacTetherRuntime macTetherRt
     closeManagedComputeStore managedStore
+    if let some listener := vpnRelay? then listener.stop
     AccountVpnPool.shutdown vpnPool
     closeCoreStore store
     return 0

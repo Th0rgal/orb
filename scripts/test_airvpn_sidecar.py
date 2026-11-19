@@ -14,6 +14,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 
 from test_account_vpn_transport import exact, serve
 
@@ -55,7 +56,7 @@ def run(binary):
                 if (host, port) == ("127.0.0.1", receiver):
                     destination = receiver
                 else:
-                    assert (host, port) == ("chatgpt.com", 443)
+                    assert host in {"chatgpt.com", "auth.openai.com"} and port == 443
                     destination = model_port
                 with socket.create_connection(("127.0.0.1", destination), 4, (source_ip, 0)) as dest:
                     sock.sendall(bytes([5, 0, 0, 1, 127, 0, 0, 1, 0, 0]))
@@ -77,17 +78,31 @@ def run(binary):
         root = Path(temp)
         cert, tls_key = root / "cert.pem", root / "key.pem"
         subprocess.run(["openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048", "-days", "1",
-                        "-subj", "/CN=chatgpt.com", "-addext", "subjectAltName=DNS:chatgpt.com",
+                        "-subj", "/CN=chatgpt.com", "-addext", "subjectAltName=DNS:chatgpt.com,DNS:auth.openai.com",
                         "-out", cert, "-keyout", tls_key], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls.load_cert_chain(cert, tls_key)
         model_hits = []
+        refresh_hits = []
         class Model(Receiver):
             def setup(self):
                 self.request = tls.wrap_socket(self.request, server_side=True)
                 super().setup()
             def do_POST(self):
-                self.rfile.read(int(self.headers["Content-Length"]))
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                if self.path == "/oauth/token":
+                    fields = urllib.parse.parse_qs(body.decode())
+                    assert fields["grant_type"] == ["refresh_token"]
+                    token, = fields["refresh_token"]
+                    refresh_hits.append((self.client_address[0], token))
+                    data = json.dumps({"access_token": "renewed-" + token, "refresh_token": token,
+                                       "token_type": "Bearer", "expires_in": 3600}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
                 model_hits.append((self.client_address[0], self.headers.get("Authorization")))
                 event = {"type": "response.completed", "response": {"id": "resp_fixture", "object": "response",
                          "status": "completed", "model": "gpt-5", "output": []}}
@@ -100,7 +115,7 @@ def run(binary):
         auth = root / "auth"
         auth.mkdir()
         for name in ("a", "b", "direct"):
-            (auth / f"{name}.json").write_text(json.dumps({"type": "codex", "access_token": "fixture-" + name, "prefix": name, "email": name + "@example.invalid"}))
+            (auth / f"{name}.json").write_text(json.dumps({"type": "codex", "access_token": "fixture-" + name, "prefix": name, "expired": "2099-01-01T00:00:00Z", "email": name + "@example.invalid"}))
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             port = listener.getsockname()[1]
@@ -153,25 +168,29 @@ def run(binary):
                     except urllib.error.HTTPError as e:
                         raise AssertionError((name, e.code, e.read(2048))) from e
                 assert model_hits == [("127.0.0.2", "Bearer fixture-a"), ("127.0.0.3", "Bearer fixture-b")], model_hits
-            with socket.socket() as unavailable:
-                unavailable.bind(("127.0.0.1", 0))
-                api("PATCH", "credentials/fields", {"name": "a.json", "proxy_url": f"socks5://127.0.0.1:{unavailable.getsockname()[1]}"})
-                try:
-                    result = request("a")
-                    assert result.get("status_code") != 200
-                except urllib.error.HTTPError as e:
-                    assert 400 <= e.code <= 599
-                model = next(m for m in models if m.startswith("a/gpt-5"))
-                wire = json.dumps({"model": model, "input": "synthetic"}).encode()
-                broken = urllib.request.Request(f"http://127.0.0.1:{port}/v1/responses", data=wire,
-                                                headers={"Authorization": "Bearer fixture-client", "Content-Type": "application/json"})
-                try:
-                    urllib.request.urlopen(broken, timeout=12).close()
-                    raise AssertionError("inference unexpectedly succeeded with unavailable proxy")
-                except urllib.error.HTTPError as e:
-                    assert 400 <= e.code <= 599
+                for name in ("a", "b"):
+                    api("PATCH", "credentials/fields", {"name": name + ".json", "refresh_token": "refresh-" + name})
+                    api("POST", "credentials/refresh", {"name": name + ".json"})
+                assert set(refresh_hits) == {("127.0.0.2", "refresh-a"), ("127.0.0.3", "refresh-b")}, refresh_hits
+                with socket.socket() as unavailable:
+                    unavailable.bind(("127.0.0.1", 0))
+                    api("PATCH", "credentials/fields", {"name": "a.json", "proxy_url": f"socks5://127.0.0.1:{unavailable.getsockname()[1]}"})
+                    try:
+                        result = request("a")
+                        assert result.get("status_code") != 200
+                    except urllib.error.HTTPError as e:
+                        assert 400 <= e.code <= 599
+                    model = next(m for m in models if m.startswith("a/gpt-5"))
+                    wire = json.dumps({"model": model, "input": "synthetic"}).encode()
+                    broken = urllib.request.Request(f"http://127.0.0.1:{port}/v1/responses", data=wire,
+                                                    headers={"Authorization": "Bearer fixture-client", "Content-Type": "application/json"})
+                    try:
+                        urllib.request.urlopen(broken, timeout=12).close()
+                        raise AssertionError("inference unexpectedly succeeded with unavailable proxy")
+                    except urllib.error.HTTPError as e:
+                        assert 400 <= e.code <= 599
             assert hits == ["127.0.0.2", "127.0.0.3", "127.0.0.1"], hits
-            print("CLIProxyAPI v8 fixture passed: separate credential exits for buffered and streaming inference, Direct management request, proxy outage blocked")
+            print("CLIProxyAPI v8 fixture passed: separate credential exits for buffered and streaming inference and token refresh, Direct management request, proxy outage blocked")
         finally:
             proc.terminate()
             proc.wait(timeout=8)

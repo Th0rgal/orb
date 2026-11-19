@@ -79,5 +79,14 @@ management request for the Direct credential reached its receiver from
 127.0.0.1. After changing only account A to an unavailable SOCKS proxy, its
 management request and inference request failed. Run the fixture with
 `unshare -n sh -c 'ip link set lo up && python3 scripts/test_airvpn_sidecar.py /usr/local/bin/cli-proxy-api'`.
-The fixture covers per-file routing on this binary; reconnect, refresh,
+A forced refresh of each synthetic login reached a TLS token receiver over its own exit.
+The fixture covers per-file routing on this binary; reconnect,
 Orb-driven configuration and live AirVPN sessions require separate receipts.
+
+Core's sidecar listener binds to loopback when `ORB_AIRVPN_RELAY_PORT` is
+configured. Use a distinct fixed port per Core instance and the same
+operator-owned `ORB_AIRVPN_COORDINATOR_DIR` for instances on one host.
+The relay authenticates an account-specific SOCKS5 credential and re-reads
+that account's preference for each CONNECT. The downstream name goes to the
+verified WireGuard gateway. A missing preference or unavailable gateway
+rejects the connection.
