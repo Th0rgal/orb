@@ -177,6 +177,41 @@ Acceptance still fails. In a separate trace the first painted update spent
 view spent 349.34 ms in widget construction/shaping. A glyph hash-map trial
 was discarded because it measured 67.43 MiB, above the hard ceiling.
 
+### Glyph miss and page-copy profile
+
+A diagnostic relink of the pinned build instrumented generated function entry
+and exit and wrapped `lean_copy_sarray_nonlinear` only while inside atlas blits.
+The first view was a cold transcript; the next two views exercised open; the
+fourth was the first painted stream update. Times below are inclusive (do not
+sum upload and copy time). Copy counts exclude explicit growth of a page.
+
+| Stage | Cold `f32589299` | Cold candidate | First update `f32589299` | First update candidate |
+|---|---:|---:|---:|---:|
+| Rasterized glyph misses | 343 | 343 | 38 | 38 |
+| FreeType raster / decode ms | 6.50 / 0.28 | 3.63 / 0.10 | 0.53 / 0.02 | 0.32 / 0.01 |
+| HarfBuzz shape ms | 3.06 | 3.37 | 0.05 | 0.05 |
+| Bitmap blits / inclusive ms | 345 / 275.78 | 345 / 12.29 | 38 / 23.54 | 38 / 0.19 |
+| COW copies / MiB / ms | 344 / 1376 / 274.40 | 0 / 0 / 0 | 38 / 152 / 23.40 | 1 / 0.5 / 0.10 |
+| Total view ms | 326.11 | 30.99 | 27.92 | 3.71 |
+
+Five cold font opens totalled 12.06 ms before and 8.95 ms after. Allocation
+now assigns UVs in order, queues bitmaps and commits each page's writes in
+order before returning the frame. Previous frames remain immutable. Pixel
+storage grows in 64-row bands without changing logical shelf dimensions;
+validation compares the sampled rectangle against both backing lengths and
+falls back to a full repaint if it cannot prove reuse. The full-sized batch
+prototype was rejected at 67.56 MiB RSS.
+
+Uninstrumented, same-host back-to-back strict pinned builds, unchanged three-run gate:
+
+| Build | Startup ms | Open ms | Frame p50 ms | Frame p99 ms | Peak RSS MiB |
+|---|---:|---:|---:|---:|---:|
+| `f32589299` rerun | 439.34 | 495.12 | 7.47 | 55.49 | 60.71 |
+| Batched uploads and banded storage | 79.51 | 81.56 | 5.45 | 19.58 | 53.55 |
+
+All 20 independently rendered stream frames and 36 unchanged golden PNGs
+matched. The strict warm-cache test passed. Latency gates still fail.
+
 ## Visual gate
 
 **Not accepted:** mean mismatch 5.86%, above 8-level channel tolerance 2.84%,

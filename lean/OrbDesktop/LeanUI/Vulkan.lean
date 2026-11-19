@@ -346,8 +346,9 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
     | some previous => if previous.size == totalBytes then previous else ByteArray.emptyWithCapacity totalBytes
     | none => ByteArray.emptyWithCapacity totalBytes
   if fb.size == 0 then
-    for _ in [0 : vw * vh] do
-      fb := fb.push cr |>.push cg |>.push cb |>.push ca
+    let mut row := ByteArray.emptyWithCapacity (vw * 4)
+    for _ in [:vw] do row := row.push cr |>.push cg |>.push cb |>.push ca
+    for y in [:vh] do fb := row.copySlice 0 fb (y * row.size) row.size
   if let some d := dirty then
     let (x0, y0, x1, y1) := clampBounds vw vh fullClip d
     if x1 > x0 && y1 > y0 then
@@ -609,7 +610,7 @@ private def changedBounds (vp : Rect) (old new : Scene) : Option Rect := Id.run 
 -- New glyph allocations may change unused texels. Prove that every old
 -- sampling command still sees the same bytes, or discard the framebuffer.
 private def samplesUnchanged (scene : Scene) (idx : Nat) (a b : Text.AtlasPageBuffer) : Bool := Id.run do
-  if a.atlas.width != b.atlas.width || a.atlas.height != b.atlas.height || a.rgba.size != b.rgba.size then return false
+  if a.atlas.width != b.atlas.width || a.atlas.height != b.atlas.height then return false
   if a.rgba == b.rgba then return true
   for p in scene do
     let pair := match p with
@@ -622,7 +623,7 @@ private def samplesUnchanged (scene : Scene) (idx : Nat) (a b : Text.AtlasPageBu
       let w := min dst.w.toNat (a.atlas.width - x)
       let h := min dst.h.toNat (a.atlas.height - y)
       if w > 0 && h > 0 then
-        if a.atlas.width * a.atlas.height * 4 != a.rgba.size then return false
+        if ((y+h-1)*a.atlas.width+x+w)*4 > min a.rgba.size b.rgba.size then return false
         if !FFI.sameRows a.rgba b.rgba ((y * a.atlas.width + x) * 4).toUSize
             (a.atlas.width * 4).toUSize (w * 4).toUSize h.toUSize then return false
   return true

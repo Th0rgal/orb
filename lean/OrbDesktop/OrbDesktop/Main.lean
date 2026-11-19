@@ -212,7 +212,7 @@ def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) :
   let t0 ← IO.monoNanosNow
 
   let (ac1, hdrRuns) ←
-    shapeDesktopRuns rt.atlas rt.primaryFont sc (chromeTitleStyle theme)
+    shapeDesktopRuns rt.atlas.beginUploads rt.primaryFont sc (chromeTitleStyle theme)
       st.screen.headerTitle
   let (ac2, codeRuns) ←
     shapeDesktopRuns ac1 rt.primaryFont sc (Theme.bodyText theme)
@@ -254,10 +254,10 @@ def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) :
     let overBox := layoutNode sc none pal.focusRing 0 0 availW availH overWidget.toLayoutNode
     let overScene := buildSceneFromLayout sc rt.focus theme overWidget overBox (recordNodes := false)
     let clearColor := if liveWindow then 0x00000000 else pal.canvas
-    return (ac7, clearColor, sceneOut.prims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overScene.prims, sceneOut.hitRegionsSub ++ overScene.hitRegionsSub, sceneOut.focusableOrder ++ overScene.focusableOrder)
+    return (ac7.finishUploads, clearColor, sceneOut.prims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overScene.prims, sceneOut.hitRegionsSub ++ overScene.hitRegionsSub, sceneOut.focusableOrder ++ overScene.focusableOrder)
   else
     let clearColor := if liveWindow then 0x00000000 else pal.canvas
-    return (ac6, clearColor, sceneOut.prims, sceneOut.hitRegionsSub, sceneOut.focusableOrder)
+    return (ac6.finishUploads, clearColor, sceneOut.prims, sceneOut.hitRegionsSub, sceneOut.focusableOrder)
 
 /-- `stepDesktopEvent` for the window `rt` currently has. -/
 def desktopReducer (rt : Runtime.RuntimeState DesktopState) :

@@ -145,14 +145,18 @@ namespace AtlasPageBuffer
 
 /-- Allocate packed pixels directly; an `Array UInt8` temporary needs a pointer per byte. -/
 def zeroBytes (n : Nat) : ByteArray := Id.run do
-  let mut out := ByteArray.emptyWithCapacity n
-  for _ in [:n] do out := out.push 0
+  if n == 0 then return ByteArray.empty
+  let mut out := (ByteArray.emptyWithCapacity n).push 0
+  -- Extend in contiguous chunks; avoid a Lean loop per zero byte.
+  let block := ByteArray.mk (Array.replicate (min 4096 n) 0)
+  while out.size < n do
+    out := block.copySlice 0 out out.size (min block.size (n - out.size))
   return out
 
 /-- Create an empty zero-initialized `pw × ph` RGBA8 atlas page. -/
 def create (pw ph : Nat) : AtlasPageBuffer :=
   { atlas := { width := pw, height := ph, shelves := [], nextY := 0 }
-    rgba := zeroBytes (pw * ph * 4) }
+    rgba := ByteArray.empty }
 
 /-- Blit a `RasterizedGlyph` into `dstRect` on this page.
 R8 glyphs are stored with `(255, 255, 255, cov)` and BGRA8 glyphs are swizzled to RGBA8. -/
@@ -162,6 +166,13 @@ def blitGlyph (page : AtlasPageBuffer) (dstRect : Rect) (rg : RasterizedGlyph) :
   let dx := dstRect.x.toNat
   let dy := dstRect.y.toNat
   let mut buf := page.rgba
+  -- Keep the shelf geometry fixed; untouched trailing rows sample transparent.
+  -- Allocate bands on first write so a snapshot copies only populated rows.
+  let rows := min ph (((dy + rg.height + 63) / 64) * 64)
+  let needed := rows * pw * 4
+  if needed > buf.size then
+    let padding := zeroBytes (needed - buf.size)
+    buf := padding.copySlice 0 buf buf.size padding.size
   for row in [0:rg.height] do
     let y := dy + row
     if y < ph then
@@ -260,6 +271,9 @@ structure GlyphAtlasCache where
   pageHeight : Nat := 1024
   pad : Nat := 1
   pages : Array AtlasPageBuffer := #[]
+  /-- While building a frame, allocate UVs immediately but commit new bitmaps
+  together so an immutable previous frame costs at most one page copy. -/
+  pendingUploads : Option (Array (Nat × Rect × RasterizedGlyph)) := none
   cache : HashCache AtlasGlyphEntry := {}
   /-- Shaping results reused across frames; glyph rasterization is cached separately below. -/
   shapeCache : Array ShapeCacheEntry := #[]
@@ -270,12 +284,26 @@ structure GlyphAtlasCache where
 
 namespace GlyphAtlasCache
 
+def beginUploads (ac : GlyphAtlasCache) : GlyphAtlasCache :=
+  { ac with pendingUploads := some (ac.pendingUploads.getD #[]) }
+
+def finishUploads (ac : GlyphAtlasCache) : GlyphAtlasCache := Id.run do
+  let some uploads := ac.pendingUploads | return ac
+  let mut pages := ac.pages
+  if !uploads.isEmpty then
+    pages := pages.mapIdx fun idx page => Id.run do
+      let mut out := page
+      for (p, rect, glyph) in uploads do
+        if p == idx then out := out.blitGlyph rect glyph
+      return out
+  return { ac with pages, pendingUploads := none }
+
 /-- Reset all atlas pages (`Atlas.reset`) and clear the `HashCache`. -/
 def resetAll (ac : GlyphAtlasCache) : GlyphAtlasCache :=
   let pages' := ac.pages.map fun p =>
     { atlas := p.atlas.reset
-      rgba := AtlasPageBuffer.zeroBytes (p.atlas.width * p.atlas.height * 4) }
-  { ac with pages := pages', cache := {}, resolved := #[] }
+      rgba := ByteArray.empty }
+  { ac with pages := pages', cache := {}, resolved := #[], pendingUploads := none }
 
 /-- Allocate a padded slot `(w, h)` across pages using `Atlas.allocPadded` / `Atlas.allocPages`
 and blit the rasterized bitmap into the chosen page. -/
@@ -293,11 +321,14 @@ def insertRasterized (ac : GlyphAtlasCache) (key : GlyphKey) (rg : RasterizedGly
     if let some (rect, atlas') := p.atlas.allocPadded ac.pad rg.width rg.height then
       -- Modify the element in place when the atlas is uniquely owned. Holding
       -- the old page during blit forces a 4 MiB copy for each new glyph.
-      let pages' := ac.pages.modify idx fun page => ({ page with atlas := atlas' }).blitGlyph rect rg
+      let pages' := ac.pages.modify idx fun page =>
+        let updated := { page with atlas := atlas' }
+        if ac.pendingUploads.isSome then updated else updated.blitGlyph rect rg
       let entry : AtlasGlyphEntry :=
         { page := idx, uv := rect, bearingX := rg.bearingX, bearingY := rg.bearingY, isColor := rg.isColor }
       let cache' := ac.cache.insert hashGlyphKey key entry
-      return ({ ac with pages := pages', cache := cache', misses := ac.misses + 1 }, entry)
+      return ({ ac with pages := pages', cache := cache', misses := ac.misses + 1,
+                        pendingUploads := ac.pendingUploads.map (·.push (idx, rect, rg)) }, entry)
   -- Otherwise allocate a new page via `Atlas.allocPages` / `Atlas.allocPadded`
   let pw := max ac.pageWidth (rg.width + ac.pad)
   let ph := max ac.pageHeight (rg.height + ac.pad)
@@ -305,12 +336,14 @@ def insertRasterized (ac : GlyphAtlasCache) (key : GlyphKey) (rg : RasterizedGly
   let pageIdx := ac.pages.size
   match fresh.atlas.allocPadded ac.pad rg.width rg.height with
   | some (rect, atlas') =>
-    let fresh' := ({ fresh with atlas := atlas' }).blitGlyph rect rg
+    let allocated := { fresh with atlas := atlas' }
+    let fresh' := if ac.pendingUploads.isSome then allocated else allocated.blitGlyph rect rg
     let pages' := ac.pages.push fresh'
     let entry : AtlasGlyphEntry :=
       { page := pageIdx, uv := rect, bearingX := rg.bearingX, bearingY := rg.bearingY, isColor := rg.isColor }
     let cache' := ac.cache.insert hashGlyphKey key entry
-    return ({ ac with pages := pages', cache := cache', misses := ac.misses + 1 }, entry)
+    return ({ ac with pages := pages', cache := cache', misses := ac.misses + 1,
+                      pendingUploads := ac.pendingUploads.map (·.push (pageIdx, rect, rg)) }, entry)
   | none =>
     -- Also exercise `Atlas.allocPages` fallback
     let atlases := (ac.pages.map (·.atlas)).toList
