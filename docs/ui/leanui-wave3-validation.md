@@ -154,6 +154,29 @@ not improve. All independent stream frames, atlas/clip cases and 36 PNGs
 matched. Startup and frame budgets still fail; local RSS is below the hard
 limit with little headroom.
 
+### Packed native filters and icon coverage
+
+The native RGBA8 blur pass retains the same integer rolling sum, replicated
+edge samples and rounding as the Lean reference. Icon coverage uses the same
+16 sample positions, round endpoints and threshold, with a Lean fallback for
+inputs outside the compact coordinate/size range. Differential checks cover
+both filter directions, single-row/column buffers, oversized radii, degenerate
+icon segments and multiple scales. All 20 streamed framebuffers, clip/atlas
+fixtures and 36 golden PNGs matched. The strict warm-cache build test passed.
+
+Back-to-back on the same shared Linux host, pinned native build mode, unchanged
+three-run 1470×923 gate (absolute times vary with host load):
+
+| Build | Startup ms | Open ms | Frame p50 ms | Frame p99 ms | Peak RSS MiB |
+|---|---:|---:|---:|---:|---:|
+| `1c9df8e21` rerun | 576.82 | 632.72 | 7.93 | 131.90 | 56.27 |
+| Packed filters and icon coverage | 451.24 | 542.75 | 7.40 | 51.89 | 56.14 |
+
+Acceptance still fails. In a separate trace the first painted update spent
+15.03 ms rasterizing and 36.52 ms building/shaping widgets; the first cold
+view spent 349.34 ms in widget construction/shaping. A glyph hash-map trial
+was discarded because it measured 67.43 MiB, above the hard ceiling.
+
 ## Visual gate
 
 **Not accepted:** mean mismatch 5.86%, above 8-level channel tolerance 2.84%,

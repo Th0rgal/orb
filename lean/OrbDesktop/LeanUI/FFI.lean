@@ -3,6 +3,12 @@
 -/
 namespace LeanUI.FFI
 
+@[extern "lean_ui_icon_mask"]
+opaque iconMask (segments : @& ByteArray) (size : USize) : ByteArray
+
+@[extern "lean_ui_box_axis"]
+opaque boxAxis (src : @& ByteArray) (w h radius : USize) (horizontal : Bool) : ByteArray
+
 @[extern "lean_ui_same_rows"]
 opaque sameRows (a b : @& ByteArray) (off stride bytes rows : USize) : Bool
 

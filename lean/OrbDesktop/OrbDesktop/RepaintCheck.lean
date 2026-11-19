@@ -5,6 +5,16 @@ open LeanUI
 
 /-- Differential fixtures for invalidations that the stream benchmark does not force. -/
 def verifyRepaintEdges : IO Unit := do
+  for n in [0, 7, 16, 31] do
+    let paths := [[(-4,2),(90,156),(90,156)],[(160,0),(0,160)]]
+    if (Text.rasterizeIcon paths n).pixels != (Text.rasterizeIconReference paths n).pixels then
+      throw <| IO.userError "native icon coverage differs from reference"
+  for (w,h) in [(1,5),(7,1),(9,4)] do
+    let pixels := ByteArray.mk ((Array.range (w*h*4)).map fun i => ((i*i+13*i)%251).toUInt8)
+    for r in [0,1,2,12] do
+      for axis in [false,true] do
+        if FFI.boxAxis pixels w.toUSize h.toUSize r.toUSize axis != Vulkan.blurAxis pixels w h r axis then
+          throw <| IO.userError "native box filter differs from reference"
   let ctx : Vulkan.VulkanContext := { width := 16, height := 12 }
   let page : Text.AtlasPageBuffer := { atlas := { width := 2, height := 1 }, rgba := ⟨#[255,255,255,255, 0,0,0,0]⟩ }
   let atlas : Text.GlyphAtlasCache := { pages := #[page] }

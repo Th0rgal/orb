@@ -322,8 +322,13 @@ def blurBackdrop (fb : ByteArray) (vw vh sigma : Nat) : ByteArray := Id.run do
   if sigma == 0 then return fb
   let mut out := fb
   for radius in [sigma - 1, sigma - 1, sigma] do
-    out := blurAxis out vw vh radius true
-    out := blurAxis out vw vh radius false
+    if radius == 0 then continue
+    if radius ≤ 65535 && vw * vh * 4 == fb.size then
+      out := FFI.boxAxis out vw.toUSize vh.toUSize radius.toUSize true
+      out := FFI.boxAxis out vw.toUSize vh.toUSize radius.toUSize false
+    else
+      out := blurAxis out vw vh radius true
+      out := blurAxis out vw vh radius false
   return out
 
 /-- Render a scene into either a fresh framebuffer or an existing framebuffer. When `dirty` is

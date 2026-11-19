@@ -202,7 +202,7 @@ structure ShapeCacheEntry where
 
 /-- Supersampled round-cap/round-join SVG strokes, shared by desktop chrome icons.
 The source view box is 16px; path coordinates are tenths of a logical pixel. -/
-def rasterizeIcon (paths : List (List (Int × Int))) (size : Nat) : RasterizedGlyph := Id.run do
+def rasterizeIconReference (paths : List (List (Int × Int))) (size : Nat) : RasterizedGlyph := Id.run do
   let segments := (paths.flatMap fun ps => ps.zip (ps.drop 1)).map fun ((ax, ay), (bx, by_)) =>
     let dx := (bx - ax).toFloat
     let dy := (by_ - ay).toFloat
@@ -232,6 +232,19 @@ def rasterizeIcon (paths : List (List (Int × Int))) (size : Nat) : RasterizedGl
       pixels := pixels.push ((coverage * 255 + 8) / 16).toUInt8
   return { width := size, height := size, bearingX := 0, bearingY := 0,
            format := 1, isColor := false, pixels := pixels }
+
+def rasterizeIcon (paths : List (List (Int × Int))) (size : Nat) : RasterizedGlyph := Id.run do
+  if size > 1024 then return rasterizeIconReference paths size
+  let mut segments := ByteArray.empty
+  for path in paths do
+    for ((ax,ay),(bx,by_)) in path.zip (path.drop 1) do
+      for coord in [ax,ay,bx,by_] do
+        if coord < -128 || coord > 255 then return rasterizeIconReference paths size
+        -- Store signed coordinates losslessly in two little-endian bytes.
+        let biased := (coord + 128).toNat
+        segments := segments.push biased.toUInt8 |>.push (biased / 256).toUInt8
+  return { width := size, height := size, bearingX := 0, bearingY := 0,
+           format := 1, isColor := false, pixels := FFI.iconMask segments size.toUSize }
 
 /-- Short label with atlas-resolved glyph positions, scoped to the owning atlas. -/
 structure ResolvedRun where
