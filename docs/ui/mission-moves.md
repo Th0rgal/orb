@@ -63,7 +63,8 @@ separate and governed by [ORB_MISSION_TRANSFER.md](../ORB_MISSION_TRANSFER.md).
 ### Retry and recovery convergence
 
 The placement transaction records a pending marker for each mission and the
-chosen `keep` or `revoke` operation for each cross-project transfer. A rollback
+chosen `keep` or `revoke` operation with the IDs of the affected grants and
+requests. Replay cannot revoke a later approval for the same mission. A rollback
 leaves neither. After commit, the live caller and pre-server startup use the
 same serialized repair. No client retry is needed after a crash: repair applies
 policy operations in commit order and reads each mission's **current** project

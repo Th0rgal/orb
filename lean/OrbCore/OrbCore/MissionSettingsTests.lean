@@ -129,7 +129,7 @@ def policyReplay (root : String) : IO Unit := do
     let .ok rows ← execParamQuery db q #[] | throw (IO.userError "policy fixture SQL")
     return rows
   let broker := path ++ "/secret_broker.json"
-  let seed := "{\"grants\":[{\"mission_id\":\"m\",\"project\":\"a\"}],\"requests\":[{\"mission_id\":\"m\",\"status\":\"pending\"}]}"
+  let seed := "{\"grants\":[{\"id\":\"g1\",\"mission_id\":\"m\",\"project\":\"a\"}],\"requests\":[{\"id\":\"r1\",\"mission_id\":\"m\",\"status\":\"pending\"}]}"
   try
     discard <| sql st.missionsDb "INSERT INTO missions(id,project) VALUES('m','a');"
     discard <| sql st.projectsDb "INSERT INTO mcp_sessions_v1(id,mission_id,project_scope,project_scoped) VALUES('s','m','a',1);"
@@ -156,6 +156,9 @@ def policyReplay (root : String) : IO Unit := do
     let keptGrant := ((kept.fieldArr? "grants").get!)[0]!
     check (keptGrant.fieldStr? "project" == some "b") "B5b_keep_repaired_grant"
     check (← pause "b" "c" "revoke").isOk "B5b_superseded_move_committed_before_policy"
+    let late : JVal := .obj #[("id", .str "later"), ("mission_id", .str "m"), ("status", .str "pending")]
+    let withLate := (kept.setField "grants" (.arr (((kept.fieldArr? "grants").get!).push late))).setField "requests" (.arr (((kept.fieldArr? "requests").get!).push late))
+    IO.FS.writeFile broker (renderCompact withLate)
     let latest ← OrbCore.MissionSettings.commitPlacementWithRecovery st #[move "c" "d"] "owner" "t2"
       (intent := { ids := #["m"], target := "d", policy := "keep", epoch := 2 })
     check latest.isOk "B5b_newer_move_finishes_first"
@@ -163,6 +166,8 @@ def policyReplay (root : String) : IO Unit := do
     let finalBroker ← readBroker
     let grant := ((finalBroker.fieldArr? "grants").get!)[0]!
     let req := ((finalBroker.fieldArr? "requests").get!)[0]!
+    check ((((finalBroker.fieldArr? "grants").get!)[1]!.field? "revoked_at").isNone &&
+      ((finalBroker.fieldArr? "requests").get!)[1]!.fieldStr? "status" == some "pending") "B5b_replayed_revoke_spares_new_approvals"
     check (grant.fieldStr? "revoked_at" == some "t1" && req.fieldStr? "status" == some "cancelled" &&
       (← sql st.projectsDb "SELECT project_scope FROM mcp_sessions_v1 WHERE id='s';")[1]![0]! == "d" &&
       (← sql st.projectsDb "SELECT project_slug FROM project_track_leases WHERE reservation_id='r';")[1]![0]! == "d" &&

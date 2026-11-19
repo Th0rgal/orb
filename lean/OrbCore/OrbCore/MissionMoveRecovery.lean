@@ -8,7 +8,7 @@ open OrbCore.Store OrbBin.Sqlite
 def ensureSchema (db : SqliteDb) : IO (Except String Unit) := do
   if let .error e ← execParamQuery db
     "CREATE TABLE IF NOT EXISTS pending_mission_rebinds (mission_id TEXT PRIMARY KEY NOT NULL, owner_user_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '');" #[] then return .error e
-  return (← execParamQuery db "CREATE TABLE IF NOT EXISTS pending_move_policies (seq INTEGER PRIMARY KEY, mission_id TEXT NOT NULL, target TEXT NOT NULL, policy TEXT NOT NULL CHECK(policy IN ('keep','revoke')), applied_at TEXT NOT NULL, epoch INTEGER NOT NULL);" #[]).map (fun _ => ())
+  return (← execParamQuery db "CREATE TABLE IF NOT EXISTS pending_move_policies (seq INTEGER PRIMARY KEY, mission_id TEXT NOT NULL, target TEXT NOT NULL, policy TEXT NOT NULL CHECK(policy IN ('keep','revoke')), applied_at TEXT NOT NULL, epoch INTEGER NOT NULL, kind TEXT NOT NULL, approval_id TEXT NOT NULL);" #[]).map (fun _ => ())
 
 structure PolicyIntent where
   ids : Array String := #[]
@@ -23,9 +23,12 @@ def mark (st : CoreStore) (ids : Array String) (owner now : String) (intent : Po
         "INSERT OR REPLACE INTO pending_mission_rebinds VALUES(?1,?2,?3);" #[id, owner, now] then
       return .error e
     if intent.ids.contains id && (intent.policy == "keep" || intent.policy == "revoke") then
-      if let .error e ← execParamQueryUnlocked st.missionsDb
-          "INSERT INTO pending_move_policies(mission_id,target,policy,applied_at,epoch) VALUES(?1,?2,?3,?4,?5);"
-          #[id, intent.target, intent.policy, now, toString intent.epoch] then return .error e
+      match ← OrbCore.SecretAndApproval.moveApprovalIds st.rootDir id now intent.epoch with
+      | .error e => return .error e
+      | .ok targets => for (kind, approvalId) in targets do
+          if let .error e ← execParamQueryUnlocked st.missionsDb
+              "INSERT INTO pending_move_policies(mission_id,target,policy,applied_at,epoch,kind,approval_id) VALUES(?1,?2,?3,?4,?5,?6,?7);"
+              #[id, intent.target, intent.policy, now, toString intent.epoch, kind, approvalId] then return .error e
   return .ok ()
 
 def pending (db : SqliteDb) : IO (Except String (Array String)) := do
@@ -48,11 +51,11 @@ def reconcile (st : CoreStore) : IO (Except String Unit) := do
       s!"mission_ids={allIds}; {id}: {e}; manual bypass on missions.db (leaves bindings unrepaired): {String.intercalate " " commands.toList}"
     -- Grants may match either a root or a child: replay across all missions in commit order.
     let .ok policies ← execParamQueryUnlocked st.missionsDb
-      "SELECT p.mission_id,p.target,p.policy,p.applied_at,p.epoch FROM pending_move_policies p JOIN missions m ON m.id=p.mission_id ORDER BY p.seq;" #[]
+      "SELECT p.mission_id,p.target,p.policy,p.applied_at,p.epoch,p.kind,p.approval_id FROM pending_move_policies p JOIN missions m ON m.id=p.mission_id ORDER BY p.seq;" #[]
       | return .error "move_policy_read_failed"
     for p in policies.extract 1 policies.size do
       let some epoch := p[4]!.toNat? | return .error (failure p[0]! "move_policy_epoch_invalid")
-      if let .error e ← OrbCore.SecretAndApproval.applyCrossProjectSecretPolicy st.rootDir #[p[0]!] p[1]! p[2]! p[3]! epoch.toUInt64 then
+      if let .error e ← OrbCore.SecretAndApproval.applyCrossProjectSecretPolicy st.rootDir p[5]! p[6]! p[1]! p[2]! p[3]! epoch.toUInt64 then
         return .error (failure p[0]! e)
     if let .error e ← execParamQueryUnlocked st.missionsDb "DELETE FROM pending_move_policies;" #[] then return .error e
     for row in rows.extract 1 rows.size do
