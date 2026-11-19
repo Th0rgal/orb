@@ -1559,10 +1559,10 @@ partial def spawnRemoteJobPoller
                 return ()
               | _, _ =>
                 if curRunGen != capturedGen then break
-                 if jState == "succeeded" then
-                   if let some goal := (mRec?.filter (·.goalMode)).map (·.goalObjective) then
-                     match ← settleRemoteGoal store missionId jobId goal finalText capturedGen nowSec
-                       (curSid?.any (·.startsWith "ses_")) with
+                if jState == "succeeded" then
+                  if let some goal := (mRec?.filter (·.goalMode)).map (·.goalObjective) then
+                    match ← settleRemoteGoal store missionId jobId goal finalText capturedGen nowSec
+                      (curSid?.any (·.startsWith "ses_")) with
                     | .ok (some (status, reason, iteration)) =>
                       let phase := if reason == "remote_goal_complete" then "complete"
                         else if reason == "remote_goal_continuation" || reason == "awaiting_wakeup" then "active"
