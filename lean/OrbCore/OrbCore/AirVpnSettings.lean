@@ -1,3 +1,4 @@
+import OrbCore.AirVpnObservation
 import OrbBin.HttpClient
 import OrbCore.Managed
 
@@ -5,18 +6,27 @@ namespace OrbCore.AirVpnSettings
 
 open OrbBin.Json OrbBin.PosixExt OrbCore.Managed
 
+structure DeviceProfile where
+  config : String
+  addresses : List Orb.AccountVpn.ExitAddress
+
 /-- Accept the single-interface, single-peer data fields used by AirVPN's
 WireGuard exporter. Never import shell directives from wg-quick profiles. -/
-def validateProfile (raw : String) : Except String Unit := do
+def parseProfile (raw : String) : Except String DeviceProfile := do
+  if raw.utf8ByteSize > 30000 then throw "invalid_wireguard_profile"
   let mut stanza := ""
+  let mut config := ""
+  let mut addresses := []
   let mut seen : List (String × String) := []
   for rawLine in raw.splitOn "\n" do
     let line := rawLine.trimAscii.toString
     if line.isEmpty || line.startsWith "#" then continue
     if line == "[Interface]" && stanza.isEmpty then
+      config := config ++ "[Interface]\n"
       stanza := "interface"
       continue
     if line == "[Peer]" && stanza == "interface" then
+      config := config ++ "[Peer]\n"
       stanza := "peer"
       continue
     let name := (line.takeWhile (· != '=')).toString
@@ -31,29 +41,45 @@ def validateProfile (raw : String) : Except String Unit := do
     unless permitted.contains field && !(seen.contains (stanza, field)) &&
         !value.isEmpty && value.toList.all (fun (c : Char) => c.isAlphanum || "+/=.,:-[] ".contains c) do
       throw "invalid_wireguard_profile"
+    if field == "Address" then
+      for part in value.splitOn "," do
+        let pieces := part.trimAscii.toString.splitOn "/"
+        let [addr, mask] := pieces | throw "invalid_wireguard_address"
+        let some ip := AirVpnObservation.parseExit? addr | throw "invalid_wireguard_address"
+        let some prefixLen := mask.toNat? | throw "invalid_wireguard_address"
+        let maxBits := match ip with | .v4 _ => 32 | .v6 .. => 128
+        unless prefixLen ≤ maxBits do throw "invalid_wireguard_address"
+        addresses := ip :: addresses
+    if field == "DNS" then
+      unless (value.splitOn ",").all (fun literal =>
+        let ip := literal.trimAscii.toString
+        (Std.Net.IPv4Addr.ofString ip).isSome || (Std.Net.IPv6Addr.ofString ip).isSome) do
+        throw "invalid_wireguard_dns"
     if ["PrivateKey", "PublicKey", "PresharedKey"].contains field then
       unless (base64Decode? value).any (·.size == 32) do throw "invalid_wireguard_key"
+    config := config ++ field ++ " = " ++ value ++ "\n"
     seen := (stanza, field) :: seen
-  for pair in [("interface", "PrivateKey"), ("interface", "Address"),
+  for pair in [("interface", "DNS"), ("interface", "PrivateKey"), ("interface", "Address"),
       ("peer", "PublicKey"), ("peer", "Endpoint"), ("peer", "AllowedIPs")] do
     unless seen.contains pair do throw "incomplete_wireguard_profile"
+  return ⟨config, addresses⟩
 
 /-- Missing session evidence cannot be interpreted as a free slot. -/
-def sessionCount? (response : JVal) : Option Nat := do
+def sessionRecords? (response : JVal) : Option (Array JVal) := do
   guard (response.fieldStr? "result" == some "ok")
-  let sessions ← response.fieldArr? "sessions"
-  return sessions.size
+  response.fieldArr? "sessions"
 
-private def testKey (root : String) : IO (Nat × JVal) := do
+/-- Only the runtime owner receives session records; the settings endpoint returns the count. -/
+def activeSessions (root : String) : IO (Except (Nat × String) (Array JVal)) := do
   let .ok key ← openAirVpnSecret root .apiKey
-    | return (409, .obj #[("error", .str "airvpn_api_key_unavailable")])
+    | return .error (409, "airvpn_api_key_unavailable")
   let payload := JVal.obj #[("key", .str key), ("format", .str "json")]
   let .ok (200, _, some response) ← OrbBin.HttpClient.sendJsonRequest "POST"
       "https://airvpn.org/api/userinfo/" none (some payload) #[] 10000 262144
-    | return (502, .obj #[("error", .str "airvpn_session_lookup_failed")])
-  let some count := sessionCount? response
-    | return (502, .obj #[("error", .str "airvpn_session_evidence_unavailable")])
-  return (200, .obj #[("active_sessions", .num (toString count))])
+    | return .error (502, "airvpn_session_lookup_failed")
+  let some sessions := sessionRecords? response
+    | return .error (502, "airvpn_session_evidence_unavailable")
+  return .ok sessions
 
 def settings (root method : String) (payload : ByteArray) : IO (Nat × JVal) := do
   let err := fun (status : Nat) (code : String) => (status, JVal.obj #[("error", .str code)])
@@ -66,7 +92,10 @@ def settings (root method : String) (payload : ByteArray) : IO (Nat × JVal) := 
           profiles := profiles.push ((entry.fileName.drop 14).dropEnd 5).toString
     return (200, .obj #[("api_key_configured", .bool (← airVpnSecretConfigured root .apiKey)),
       ("devices", .arr ((profiles.qsort (· < ·)).map JVal.str))])
-  if method == "POST" then return ← testKey root
+  if method == "POST" then
+    match ← activeSessions root with
+    | .ok sessions => return (200, .obj #[("active_sessions", .num (toString sessions.size))])
+    | .error (status, code) => return err status code
   if method != "PUT" then return err 405 "method_not_allowed"
   if payload.size > 32768 then return err 413 "settings_too_large"
   let .ok j := parseBytes payload | return err 400 "invalid_json"
@@ -77,7 +106,7 @@ def settings (root method : String) (payload : ByteArray) : IO (Nat × JVal) := 
         return err 400 "invalid_airvpn_api_key"
       pure (AirVpnSecret.apiKey, clean)
     | none, some id, some profile => do
-      if let .error e := validateProfile profile then return err 400 e
+      if let .error e := parseProfile profile then return err 400 e
       pure (AirVpnSecret.device id, profile)
     | _, _, _ => return err 400 "expected_api_key_or_device_profile"
   match ← sealAirVpnSecret root secret value with
