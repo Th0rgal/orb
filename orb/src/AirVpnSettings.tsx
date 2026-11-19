@@ -68,7 +68,7 @@ function AirVpnForm() {
     <Show when={!status.error} fallback={<SettingsRow title="Couldn’t load AirVPN settings">
       <button class="s-btn" onClick={() => void refetch()}>Retry</button>
     </SettingsRow>}>
-      <SettingsRow title="API key" desc={status()?.api_key_configured ? "Configured" : undefined}>
+      <SettingsRow title="API key" desc={status()?.api_key_configured ? "Configured" : "Generate a key in AirVPN’s Client Area → API. Orb uses it to check active sessions."}>
         <input ref={key} class="s-input" type="password" aria-label="AirVPN API key"
           autocomplete="new-password" required maxlength={512} />
         <button class="s-btn" disabled={saving()} onClick={() => void save("key")}>Save key</button>
@@ -76,7 +76,7 @@ function AirVpnForm() {
           <button class="s-btn" disabled={saving()} onClick={() => void checkSessions()}>Test saved key</button>
         </Show>
       </SettingsRow>
-      <SettingsRow title="WireGuard device profile" desc={status()?.devices.join(", ")} stack>
+      <SettingsRow title="WireGuard device profile" desc={status()?.devices.length ? status()!.devices.join(", ") : "In AirVPN’s Config Generator, select an Orb device, WireGuard, and one named server. Import the downloaded .conf file."} stack>
         <input ref={device} class="s-input" aria-label="Device name" placeholder="Device name"
           required pattern="[a-z0-9\-]{1,64}" maxlength={64} />
         <input ref={profile} type="file" aria-label="WireGuard profile" accept=".conf" required />

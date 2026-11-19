@@ -52,3 +52,21 @@ for the production canary. Record the selected account identifiers in the
 restricted deployment receipt. Exercise cross-category sharing with a fixture
 until a live account in another category is designated. Use the existing admin
 login for Settings. Never include credentials in the receipt.
+
+### Sidecar version and reconnect acceptance
+
+The binary inspected on agent-core reports CLIProxyAPI 8.0.26, commit
+`a27799ec`; its SHA-256 is
+`65e5de542296ea80293711d91393b7dbd655d40eb64461e993cd46fd9865b31e`.
+In that revision, PATCH `/v0/management/auth-files/fields` sets
+`proxy_url` on a named OAuth credential. The Codex executor passes that
+credential's proxy URL to its refresh client. Its WebSocket transport also
+honors a request-level override ahead of the credential setting. The OAuth
+login handler constructs its exchange client from global configuration.
+
+A passing per-file PATCH therefore cannot activate a verified route on its
+own. Exercise a reconnect/token exchange and a request-level override against
+an independent receiver before enabling a routed ChatGPT account. The
+selected account's route must cover both flows. Core's display hydration can
+fall back to the first matching provider type; never use that fallback as
+authority to edit a particular credential.
