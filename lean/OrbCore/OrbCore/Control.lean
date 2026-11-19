@@ -8008,6 +8008,11 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
              IO.eprintln s!"[sandboxed-sh] wake-up scheduler pass failed: {e}"
           IO.sleep 2000
       discard <| IO.asTask (prio := .dedicated) do
+        while true do
+          try monitorStaticNodeApis store
+          catch e => IO.eprintln s!"[sandboxed-sh] node API health check failed: {e}"
+          IO.sleep 30000
+      discard <| IO.asTask (prio := .dedicated) do
         let mut lastInventory : UInt64 := 0
         let mut checkedDestroyed : Array String := #[]
         let mut lastSampledMinute : UInt64 := 0

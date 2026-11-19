@@ -670,6 +670,43 @@ def probeStaticNodeHeartbeat
     | .error err =>
       return mkOfflineOrDegraded "offline" err
 
+def nodeApiHangCause? (store : CoreStore) (node : String) : IO (Option String) := do
+  let .ok rows ← execParamQuery store.missionsDb "SELECT node_id FROM node_api_hangs WHERE node_id=?1" #[node]
+    | throw (IO.userError "node health read failed")
+  return rows[1]?.map fun r => s!"Node `{cell r 0}` answers ping but its API is unresponsive."
+
+/-- The monitor owns its cordon independently of operator cordons. A successful
+    heartbeat ends the incident; an unreachable host alone never starts one. -/
+def observeNodeApi (store : CoreStore) (node status now : String) (ping : IO Bool) : IO Unit := do
+  let query := fun q args => do
+    match ← execParamQuery store.missionsDb q args with
+    | .ok rows => pure rows
+    | .error e => throw (IO.userError e)
+  if status == "online" then
+    discard <| query "DELETE FROM node_api_hangs WHERE node_id=?1" #[node]
+  else if status == "offline" then
+    unless ← ping do return
+    discard <| query "INSERT OR IGNORE INTO node_api_hangs VALUES(?1,?2)" #[node, ← OrbBin.PosixExt.newUuidV4]
+    -- A single SQLite statement allocates each sequence and deduplicates the
+    -- visible flag, including after restart or when several jobs share a mission.
+    discard <| query ("INSERT INTO mission_events(mission_id,seq,sequence,event_type,payload,created_at,timestamp) " ++
+      "SELECT id,n,n,'error',json_object('reason','hung_node','node_id',?1,'incident_id',incident_id,'message',?3),?2,?2 FROM (" ++
+      "SELECT m.id,h.incident_id,1+COALESCE((SELECT MAX(MAX(seq,sequence)) FROM mission_events e WHERE e.mission_id=m.id),0) n " ++
+      "FROM missions m JOIN node_api_hangs h ON h.node_id=?1 WHERE EXISTS (SELECT 1 FROM remote_node_jobs j WHERE j.node_id=?1 AND j.mission_id=m.id " ++
+      "AND j.state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost')) AND NOT EXISTS " ++
+      "(SELECT 1 FROM mission_events e WHERE e.mission_id=m.id AND e.event_type='error' AND CASE WHEN json_valid(e.payload) THEN json_extract(e.payload,'$.incident_id') END=h.incident_id))")
+      #[node, now, s!"Node `{node}` answers ping but its API is unresponsive."]
+
+def monitorStaticNodeApis (store : CoreStore) : IO Unit := do
+  let (enabled, nodes) ← loadStaticRemoteNodes
+  if !enabled then return
+  for sn in nodes do
+    let hb ← probeStaticNodeHeartbeat sn
+    observeNodeApi store sn.id ((hb.fieldStr? "status").getD "") (formatEpochIso8601Utc (← nowEpoch)) do
+      let .ok url := OrbBin.HttpClient.parseUrl sn.baseUrl | return false
+      try return (← IO.Process.output {cmd := "ping", args := #["-n", "-c", "1", "-W", "1", "--", url.connectHost]}).exitCode == 0
+      catch _ => return false
+
 /-- Probe all configured static nodes concurrently so 9 nodes complete in a single ~15ms RTT. -/
 def probeAllStaticNodesParallel
     (staticNodes : Array StaticRemoteNode)
@@ -754,7 +791,10 @@ def buildComputeFleetJVal
   let (rnEnabled, staticNodes) ← loadStaticRemoteNodes
   let nowSec ← nowEpoch
   let effIso := if nowIso.isEmpty then formatEpochIso8601Utc nowSec else nowIso
-  let persistedCordons ← loadPersistedNodeCordons dataRoot
+  let mut persistedCordons ← loadPersistedNodeCordons dataRoot
+  if let some st := store? then
+    if let .ok rows ← execParamQuery st.missionsDb "SELECT node_id FROM node_api_hangs" #[] then
+      persistedCordons := persistedCordons ++ (rows.extract 1 rows.size).map (fun r => cell r 0)
   let probed ← probeAllStaticNodesParallel staticNodes persistedCordons effIso probeDeadlineMs isAdmin
   -- A node that did not answer keeps what its last heartbeat reported.
   let heartbeatCache ← loadNodeHeartbeatCache dataRoot
