@@ -90,3 +90,11 @@ The relay authenticates an account-specific SOCKS5 credential and re-reads
 that account's preference for each CONNECT. The downstream name goes to the
 verified WireGuard gateway. A missing preference or unavailable gateway
 rejects the connection.
+
+For targeted OAuth reconnects, CLIProxyAPIPlus v8.0.56-0 at
+`0341bcc440583738d7d0e673abefc63bbe99e131` provides the v8 per-login
+proxy and target credential fields. Run the same isolated fixture with
+`--reconnect` after the binary path. Its authorization-code receiver checks
+the source address for each account. It also checks the adopted credential
+ID, rotated refresh token and retained proxy URL for each file. This test
+uses synthetic identities and the released aarch64 Linux binary.

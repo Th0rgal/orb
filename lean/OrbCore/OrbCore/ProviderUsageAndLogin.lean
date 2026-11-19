@@ -71,6 +71,7 @@ structure CliLoginSession where
   flow          : String
   createdSec    : UInt64
   beforeFiles   : Array (String × UInt64)
+  routedFile? : Option String := none
   completionStartedSec? : Option UInt64 := none
   status        : String := "pending"
   message?      : Option String := none
@@ -2099,9 +2100,11 @@ def reconcileCliLoginCompletion
   let candidate (f : CliAuthFileInfo) : Bool :=
     f.authType == sess.authFileType && !f.disabled && !f.accessToken.isEmpty &&
     !(sess.beforeFiles.contains (f.fileName, f.fingerprint)) &&
-    match target? with
-    | none => true
-    | some hp =>
+    match sess.routedFile?, target? with
+    | some file, some hp => f.fileName == file && hp.oauthFile == file
+    | some _, none => false
+    | none, none => true
+    | none, some hp =>
       let typeOk := providerTypeMatchesAuthType hp.providerType f.authType
       let idOk := f.prefixId == hp.id || f.accountId == hp.id
       let emailOk := !hp.accountEmail.isEmpty && !f.email.isEmpty && hp.accountEmail.toLower == f.email.toLower
@@ -3046,11 +3049,14 @@ def dispatchProviderAndAiRoute
             let stTok := (uJv.fieldStr? "state").getD ""
             if authUrl.isEmpty || stTok.isEmpty then
               return some (jsonErr 502 "CLIProxy returned incomplete auth URL response")
+            let routedFile? := routedRequest?.bind (fun data => data.fieldStr? "name")
+            if routedFile?.isSome && uJv.fieldStr? "target_auth_id" != routedFile? then
+              return some (jsonErr 502 "Sidecar did not confirm the requested OAuth credential.")
             let sid ← newUuidV4
             let nowSec ← nowEpoch
             let sess : CliLoginSession := {
               sessionId := sid, providerSlug := slug, authFileType := authType,
-              targetProvId? := targetProvId?, stateToken := stTok, authUrl := authUrl,
+              targetProvId? := targetProvId?, routedFile? := routedFile?, stateToken := stTok, authUrl := authUrl,
               flow := flow, createdSec := nowSec, beforeFiles := beforeFiles,
               userId := callerUserId
             }
@@ -3087,7 +3093,8 @@ def dispatchProviderAndAiRoute
           return some (jsonErr 404 "Login session not found or expired")
 
         if method == "DELETE" then
-          let _ ← sendJsonRequest "DELETE" s!"{mgmtBase}/v0/management/oauth-session?state={urlEncodeComponent sess.stateToken}" (some mgmtKey) none #[] 5000 65536
+          let path := if sess.routedFile?.isSome then "/v8/management/oauth/session" else "/v0/management/oauth-session"
+          let _ ← sendJsonRequest "DELETE" s!"{mgmtBase}{path}?state={urlEncodeComponent sess.stateToken}" (some mgmtKey) none #[] 5000 65536
           hub.mu.atomically do
             let st ← get
             set { st with loginSessions := st.loginSessions.filter (fun s => s.sessionId != sid) }
@@ -3101,7 +3108,8 @@ def dispatchProviderAndAiRoute
           -- wrong or expired callback URL will never produce a file. `ok` alone still
           -- never completes: that belongs to `reconcileCliLoginCompletion`'s visibility
           -- check.
-          match ← sendJsonRequest "GET" s!"{mgmtBase}/v0/management/get-auth-status?state={urlEncodeComponent sess.stateToken}" (some mgmtKey) none #[] 8000 262144 with
+          let path := if sess.routedFile?.isSome then "/v8/management/oauth/status" else "/v0/management/get-auth-status"
+          match ← sendJsonRequest "GET" s!"{mgmtBase}{path}?state={urlEncodeComponent sess.stateToken}" (some mgmtKey) none #[] 8000 262144 with
           | .ok (200, _, some stJv) =>
             let stStr := ((stJv.fieldStr? "status").getD "wait").toLower
             if stStr == "error" then
@@ -3110,10 +3118,13 @@ def dispatchProviderAndAiRoute
               hub.mu.atomically do
                 modify fun st => { st with loginSessions := st.loginSessions.map (fun s => if s.sessionId == sess.sessionId then failed else s) }
               return some (loginSessionResponse failed)
-            if sess.completionStartedSec?.isNone && stStr != "ok" then
+            if let some file := sess.routedFile? then
+              if stStr == "ok" && (stJv.fieldStr? "auth_id" != some file || stJv.fieldBool? "adopted" != some true) then
+                return some (loginSessionResponse { sess with status := "failed", message? := some "Sidecar could not confirm the reconnected credential." })
+            if (sess.routedFile?.isSome || sess.completionStartedSec?.isNone) && stStr != "ok" then
               return some (jsonResp 200 (.obj #[("status", .str "pending"), ("auth_url", .str sess.authUrl), ("message", .null)]))
           | _ =>
-            if sess.completionStartedSec?.isNone then
+            if sess.routedFile?.isSome || sess.completionStartedSec?.isNone then
               return some (jsonResp 200 (.obj #[("status", .str sess.status), ("auth_url", .str sess.authUrl), ("message", .null)]))
           return some (loginSessionResponse (← reconcileCliLoginCompletion hub store workingDir proxyCooldownsRef healthTracker? sess nowSec))
 
@@ -3148,9 +3159,11 @@ def dispatchProviderAndAiRoute
           ("code", .str codeParam),
           ("state", .str stateParam)
         ]
-        match ← sendJsonRequest "POST" s!"{mgmtBase}/v0/management/oauth-callback" (some mgmtKey) (some cbPayload) #[] 15000 262144 with
+        let path := if sess.routedFile?.isSome then "/v8/management/oauth/callback" else "/v0/management/oauth-callback"
+        match ← sendJsonRequest "POST" s!"{mgmtBase}{path}" (some mgmtKey) (some cbPayload) #[] 15000 262144 with
         | .ok (c, _, _) =>
           if 200 ≤ c && c < 300 then
+            if sess.routedFile?.isSome then return some (loginSessionResponse { sess with status := "completing" })
             return some (loginSessionResponse (← reconcileCliLoginCompletion hub store workingDir proxyCooldownsRef healthTracker? sess nowSec))
           return some (loginSessionResponse { sess with status := "failed", message? := some "CLIProxy rejected the callback" })
         | .error e =>

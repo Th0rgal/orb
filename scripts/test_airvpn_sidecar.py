@@ -1,4 +1,5 @@
 """Exercise per-login egress against a real CLIProxyAPI v8 binary in an isolated Linux netns."""
+import base64
 import http.server
 import json
 import os
@@ -19,7 +20,7 @@ import urllib.parse
 from test_account_vpn_transport import exact, serve
 
 
-def run(binary):
+def run(binary, reconnect=False):
     interfaces = {line.split(":")[0].strip() for line in Path("/proc/net/dev").read_text().splitlines()[2:]}
     if interfaces != {"lo"}:
         raise RuntimeError("Run in a fresh network namespace with only loopback enabled")
@@ -84,6 +85,7 @@ def run(binary):
         tls.load_cert_chain(cert, tls_key)
         model_hits = []
         refresh_hits = []
+        reconnect_hits = []
         class Model(Receiver):
             def setup(self):
                 self.request = tls.wrap_socket(self.request, server_side=True)
@@ -92,11 +94,20 @@ def run(binary):
                 body = self.rfile.read(int(self.headers["Content-Length"]))
                 if self.path == "/oauth/token":
                     fields = urllib.parse.parse_qs(body.decode())
-                    assert fields["grant_type"] == ["refresh_token"]
-                    token, = fields["refresh_token"]
-                    refresh_hits.append((self.client_address[0], token))
-                    data = json.dumps({"access_token": "renewed-" + token, "refresh_token": token,
-                                       "token_type": "Bearer", "expires_in": 3600}).encode()
+                    if fields["grant_type"] == ["authorization_code"]:
+                        code, = fields["code"]
+                        reconnect_hits.append((self.client_address[0], code))
+                        identity = {"email": code + "@example.invalid",
+                                    "https://api.openai.com/auth": {"chatgpt_account_id": "acct-" + code}}
+                        claims = base64.urlsafe_b64encode(json.dumps(identity).encode()).rstrip(b"=").decode()
+                        reply = {"access_token": "reconnected-" + code, "refresh_token": "rotated-" + code,
+                                 "id_token": "e30." + claims + ".fixture"}
+                    else:
+                        assert fields["grant_type"] == ["refresh_token"]
+                        token, = fields["refresh_token"]
+                        refresh_hits.append((self.client_address[0], token))
+                        reply = {"access_token": "renewed-" + token, "refresh_token": token}
+                    data = json.dumps(dict(reply, token_type="Bearer", expires_in=3600)).encode()
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(data)))
@@ -115,7 +126,7 @@ def run(binary):
         auth = root / "auth"
         auth.mkdir()
         for name in ("a", "b", "direct"):
-            (auth / f"{name}.json").write_text(json.dumps({"type": "codex", "access_token": "fixture-" + name, "prefix": name, "expired": "2099-01-01T00:00:00Z", "email": name + "@example.invalid"}))
+            (auth / f"{name}.json").write_text(json.dumps({"type": "codex", "access_token": "fixture-" + name, "prefix": name, "account_id": "acct-" + name, "expired": "2099-01-01T00:00:00Z", "email": name + "@example.invalid"}))
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             port = listener.getsockname()[1]
@@ -172,6 +183,24 @@ def run(binary):
                     api("PATCH", "credentials/fields", {"name": name + ".json", "refresh_token": "refresh-" + name})
                     api("POST", "credentials/refresh", {"name": name + ".json"})
                 assert set(refresh_hits) == {("127.0.0.2", "refresh-a"), ("127.0.0.3", "refresh-b")}, refresh_hits
+                if reconnect:
+                    for name, proxy in (("a", a), ("b", b)):
+                        filename = name + ".json"
+                        url = f"socks5://127.0.0.1:{proxy}"
+                        session = api("POST", "oauth/auth-url", {"provider": "codex", "name": filename, "proxy_url": url})
+                        assert session["target_auth_id"] == filename
+                        state = session["state"]
+                        api("POST", "oauth/callback", {"provider": "codex", "code": name, "state": state})
+                        for _ in range(80):
+                            status = api("GET", "oauth/status?state=" + urllib.parse.quote(state))
+                            if status["status"] != "wait":
+                                break
+                            time.sleep(.1)
+                        assert status.get("adopted") and status.get("auth_id") == filename, status
+                        saved = api("GET", "credentials/download?name=" + filename)
+                        assert saved["refresh_token"] == "rotated-" + name and saved["proxy_url"] == url
+                    assert reconnect_hits == [("127.0.0.2", "a"), ("127.0.0.3", "b")], reconnect_hits
+                    print("Targeted OAuth reconnect passed for both credential exits.")
                 with socket.socket() as unavailable:
                     unavailable.bind(("127.0.0.1", 0))
                     api("PATCH", "credentials/fields", {"name": "a.json", "proxy_url": f"socks5://127.0.0.1:{unavailable.getsockname()[1]}"})
@@ -197,4 +226,4 @@ def run(binary):
 
 
 if __name__ == "__main__":
-    run(sys.argv[1])
+    run(str(Path(sys.argv[1]).resolve()), reconnect="--reconnect" in sys.argv[2:])
