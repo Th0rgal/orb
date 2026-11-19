@@ -602,11 +602,14 @@ private def samplesUnchanged (scene : Scene) (idx : Nat) (a b : Text.AtlasPageBu
       | .mask page src dst _ => if idx == page then some (src,dst) else none
       | _ => none
     if let some (src,dst) := pair then
-      for y in [src.y.toNat:min a.atlas.height (src.y.toNat + dst.h.toNat)] do
-        for x in [src.x.toNat:min a.atlas.width (src.x.toNat + dst.w.toNat)] do
-          let pos := (y * a.atlas.width + x) * 4
-          for k in [:4] do
-            if a.rgba[pos+k]? != b.rgba[pos+k]? then return false
+      let x := src.x.toNat
+      let y := src.y.toNat
+      let w := min dst.w.toNat (a.atlas.width - x)
+      let h := min dst.h.toNat (a.atlas.height - y)
+      if w > 0 && h > 0 then
+        if a.atlas.width * a.atlas.height * 4 != a.rgba.size then return false
+        if !FFI.sameRows a.rgba b.rgba ((y * a.atlas.width + x) * 4).toUSize
+            (a.atlas.width * 4).toUSize (w * 4).toUSize h.toUSize then return false
   return true
 
 /-- Render only a dirty rectangle, preserving pixels outside it and culling unchanged visual

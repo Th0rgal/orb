@@ -103,6 +103,34 @@ latency budgets. The 20 independent full-repaint comparisons, clip/atlas
 fixtures and all 36 unchanged golden PNGs passed. There is no new on-device
 WebKit/m2air comparison.
 
+### Atlas validation and stable labels
+
+Repeated the same native Lake build mode, host, sysroot, viewport and 20-update
+stream using the preserved `8b3d174cc` binary and the candidate. Of 20 updates,
+18 changed no visible pixels. On those 18 the mean exact atlas validation fell
+from 11.804 to 0.238 ms (bounded row comparisons, not hashes), and widget
+construction/shaping from 6.972 to 3.968 ms (bounded cache of short resolved
+labels, discarded on atlas reset). Layout and lowering still cost 1.326 and
+0.899 ms respectively on the candidate.
+
+With `ORB_U7_PROFILE=1`, `u7-startup-ns` separates runtime initialization from
+the first render and `u7-update` labels each streamed frame with pixels and
+primitive count. In the candidate trace cold init was 8.59 ms; the first frame
+was 933.36 ms including 636.77 ms of widget construction/shaping. Stream update
+0 painted 53,265 pixels using 151 primitives: 134.55 ms total, 101.51 ms in
+changed-region raster. Update 1 painted 2,506 pixels using 24 primitives:
+8.37 ms total, 0.46 ms raster. The other 18 did no raster work. Visibility is
+determined after shaping/layout and scene diff; the renderer currently needs
+the new command stream even to recognize a fully clipped append.
+
+| Unprofiled, 3 runs | Startup ms | Open ms | Frame p50 ms | Frame p99 ms | Peak RSS MiB |
+|---|---:|---:|---:|---:|---:|
+| `8b3d174cc`, rerun | 951.26 | 1102.21 | 23.82 | 139.23 | 54.53 |
+| Row comparison and resolved labels | 972.40 | 1160.68 | 6.99 | 134.49 | 54.72 |
+
+All 20 independent full-frame comparisons, atlas/clip invalidation cases and
+36 byte-identical PNGs passed. Budgets remain unchanged; acceptance still fails.
+
 ## Visual gate
 
 **Not accepted:** mean mismatch 5.86%, above 8-level channel tolerance 2.84%,

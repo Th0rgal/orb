@@ -90,6 +90,12 @@ def shapeDesktopRuns (ac : Text.GlyphAtlasCache) (font : Text.FontHandle)
     return (ac, [])
   let devSize64 : UInt32 := ((style.sizeSub * scale120 + scaleDen / 2) / scaleDen).toUInt32
   if font.facePtr != 0 then
+    -- Cache short labels, not the growing stream. UVs remain valid through
+    -- append-only shelf allocation; resetAll discards all resolved runs.
+    let cacheable := text.utf8ByteSize ≤ 128
+    if cacheable then
+      if let some hit := ac.resolved.find? (fun e => e.face == font.facePtr && e.scale == scale120 && e.text == text && e.style == style) then
+        return (ac, [hit.run])
     let (ac', shaped) ← Text.shapeTextCached ac font devSize64 text ""
     let mut curAc := ac'
     let mut glyphs : Array ShapedGlyph := #[]
@@ -127,6 +133,9 @@ def shapeDesktopRuns (ac : Text.GlyphAtlasCache) (font : Text.FontHandle)
       allowBreakAfter := true
       hardBreakAfter := false
     }
+    if cacheable then
+      let entries := curAc.resolved.push ⟨font.facePtr, scale120, text, style, run⟩
+      curAc := { curAc with resolved := if entries.size > 128 then entries.extract 1 entries.size else entries }
     return (curAc, [run])
   else
     return (ac, [overlaySynthRun style text])
@@ -315,9 +324,12 @@ def runDesktopBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) (verifyRepa
   let tStartNs ← IO.monoNanosNow
   let firstSt := DesktopState.forScreen .missionTranscript cfg.darkTheme cfg.scale120
   let rt0Raw ← Runtime.initRuntime { cfg with headless := true } firstSt
+  let tInit ← IO.monoNanosNow
   let rt0 := { rt0Raw with focus := firstSt.initialFocusState }
   let mut rt ← Runtime.stepFrame rt0 (desktopReducer rt0) renderDesktopFrame
   let coldUs : Nat := ((← IO.monoNanosNow) - tStartNs) / 1000
+  let profile := (← IO.getEnv "ORB_U7_PROFILE") == some "1"
+  if profile then IO.eprintln s!"u7-startup-ns init={tInit-tStartNs} firstFrame={(← IO.monoNanosNow)-tInit}"
   let firstCrc := Vulkan.crc32 rt.vulkan.framebuffer
   let fullScenePrims := rt.vulkan.lastDrawnPrims
 
@@ -351,6 +363,7 @@ def runDesktopBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) (verifyRepa
     if let some fb := reference then
       if fb != rt.vulkan.framebuffer then throw <| IO.userError s!"stream frame {idx} differs from full repaint"
     let f1 ← IO.monoNanosNow
+    if profile then IO.eprintln s!"u7-update {idx} ns={f1-f0} pixels={rt.vulkan.lastDamagePixels} primitives={rt.vulkan.lastDrawnPrims}"
     frameTimesUs := frameTimesUs.push ((f1 - f0) / 1000)
     partialDrawnPrims := rt.vulkan.lastDrawnPrims
     allUpdatesCulled := allUpdatesCulled && rt.vulkan.lastDrawnPrims < fullScenePrims

@@ -1,4 +1,5 @@
 import LeanUI.Defs
+import LeanUI.Layout
 import LeanUI.Kernel
 import LeanUI.FFI
 /-!
@@ -226,7 +227,15 @@ def rasterizeIcon (paths : List (List (Int × Int))) (size : Nat) : RasterizedGl
   return { width := size, height := size, bearingX := 0, bearingY := 0,
            format := 1, isColor := false, pixels := pixels }
 
-/-- Multi-page shelf-packed glyph atlas + `HashCache AtlasGlyphEntry` with hit/miss counters. -/
+/-- Short label with atlas-resolved glyph positions, scoped to the owning atlas. -/
+structure ResolvedRun where
+  face : USize
+  scale : Nat
+  text : String
+  style : TextStyle
+  run : InlineRun
+
+/-- Multi-page shelf-packed glyph atlas and bounded font/label caches. -/
 structure GlyphAtlasCache where
   pageWidth : Nat := 1024
   pageHeight : Nat := 1024
@@ -235,6 +244,7 @@ structure GlyphAtlasCache where
   cache : HashCache AtlasGlyphEntry := {}
   /-- Shaping results reused across frames; glyph rasterization is cached separately below. -/
   shapeCache : Array ShapeCacheEntry := #[]
+  resolved : Array ResolvedRun := #[]
   hits : Nat := 0
   misses : Nat := 0
   deriving Inhabited
@@ -246,7 +256,7 @@ def resetAll (ac : GlyphAtlasCache) : GlyphAtlasCache :=
   let pages' := ac.pages.map fun p =>
     { atlas := p.atlas.reset
       rgba := AtlasPageBuffer.zeroBytes (p.atlas.width * p.atlas.height * 4) }
-  { ac with pages := pages', cache := {} }
+  { ac with pages := pages', cache := {}, resolved := #[] }
 
 /-- Allocate a padded slot `(w, h)` across pages using `Atlas.allocPadded` / `Atlas.allocPages`
 and blit the rasterized bitmap into the chosen page. -/

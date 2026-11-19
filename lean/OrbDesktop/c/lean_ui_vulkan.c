@@ -7,6 +7,20 @@ static lean_obj_res io_err(const char *msg) {
   return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(msg)));
 }
 
+/* Compare a strided rectangle in equal-sized RGBA buffers. Out-of-range
+ * rectangles cannot establish reuse; the caller then repaints in full. */
+uint8_t lean_ui_same_rows(b_lean_obj_arg a, b_lean_obj_arg b, size_t off,
+                          size_t stride, size_t bytes, size_t rows) {
+  size_t len = lean_sarray_size(a);
+  if (len != lean_sarray_size(b) || off > len || bytes > len - off) return 0;
+  if (rows == 0 || bytes == 0) return 1;
+  if (!stride || rows - 1 > (len - off - bytes) / stride) return 0;
+  for (size_t i = 0; i < rows; ++i)
+    if (memcmp(lean_sarray_cptr(a) + off + i * stride,
+               lean_sarray_cptr(b) + off + i * stride, bytes)) return 0;
+  return 1;
+}
+
 typedef uint64_t (*fn6_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 lean_obj_res lean_ui_dl_sym(b_lean_obj_arg lib, b_lean_obj_arg sym, lean_obj_arg w) {

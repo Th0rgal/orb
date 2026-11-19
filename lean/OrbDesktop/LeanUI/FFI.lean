@@ -3,6 +3,9 @@
 -/
 namespace LeanUI.FFI
 
+@[extern "lean_ui_same_rows"]
+opaque sameRows (a b : @& ByteArray) (off stride bytes rows : USize) : Bool
+
 /-- Connect to `$WAYLAND_DISPLAY`. Returns `wl_display*` as `USize` (`0` = null). -/
 @[extern "lean_ui_wl_connect"]
 opaque wlConnect : IO USize
