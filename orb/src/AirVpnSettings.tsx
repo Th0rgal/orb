@@ -58,7 +58,7 @@ function AirVpnForm() {
     setSaving(true);
     try {
       const result = await api<{ active_sessions: number }>(path, { method: "POST" });
-      setMessage(`AirVPN reports ${result.active_sessions} active sessions.`);
+      setMessage(`AirVPN reports ${result.active_sessions} active session${result.active_sessions === 1 ? "" : "s"}.`);
     } catch (e) {
       setMessage(e instanceof Error ? e.message : String(e));
     } finally {
@@ -89,6 +89,6 @@ function AirVpnForm() {
         <button class="s-btn" disabled={saving()} onClick={() => void save("device")}>Import profile</button>
       </SettingsRow>
     </Show>
-    <Show when={message()}><SettingsRow title={message()} status /></Show>
+    <Show when={message()}><SettingsRow title={<span role="status">{message()}</span>} /></Show>
   </SettingsCard>;
 }

@@ -1,9 +1,12 @@
+import OrbCore.AccountVpnWireGuardTests
 import OrbCore.AccountVpnSidecar
 import OrbCore.AccountVpnRelay
 
 /-- Fixture entry point for the same management client used by the account
 Settings route. The short-lived fixture management key arrives on stdin. -/
 def main (args : List String) : IO UInt32 := do
+  if let ["wireguard", root] := args then return ← OrbCore.AccountVpnWireGuardTests.run root false
+  if let ["wireguard-resume", root] := args then return ← OrbCore.AccountVpnWireGuardTests.run root true
   if let ["relay", first, second] := args then
     let some a := first.toNat? | return 2
     let some b := second.toNat? | return 2
