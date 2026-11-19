@@ -267,6 +267,7 @@ def run : IO Unit := do
   try
     startupRecovery root
     let .ok store ← openCoreStore s!"{root}/.sandboxed-sh" | throw (IO.userError "turn outcome store open failed")
+    let sup ← newRemoteJobSupervisor "turn-outcome-fixture-secret" false
     try
       let cfg : CoreConfig := {
         workingDir := root
@@ -301,7 +302,6 @@ def run : IO Unit := do
       check ((← statusOf "m-empty") == "awaiting_user" && (← emptyErrors "m-empty") == "1") "the empty turn is reported as an error"
 
       -- The durable scheduler relaunches it; each relaunch that is empty again counts.
-      let sup ← newRemoteJobSupervisor "turn-outcome-fixture-secret" false
       let launches ← IO.mkRef (0 : Nat)
       let prompts ← IO.mkRef (#[] : Array String)
       let launch : MissionRecord → String → Option String → IO Bool := fun mr prompt _ => do
@@ -693,6 +693,13 @@ def run : IO Unit := do
         check (ref == String.ofList (List.replicate 20000 'r')) s!"complete reference {i} arrives"
     finally
       closeCoreStore store
+    -- The resume fixture shuts down its mock node without a terminal job reply.
+    -- The observer must release that job when the store closes.
+    let pollersIdle := sup.mu.atomically do return (← get).isEmpty
+    let deadline := (← IO.monoMsNow) + 5000
+    while !(← pollersIdle) && (← IO.monoMsNow) < deadline do
+      IO.sleep 10
+    check (← pollersIdle) "the mock resume poller exits after its store closes"
   finally
     IO.FS.removeDirAll root
 

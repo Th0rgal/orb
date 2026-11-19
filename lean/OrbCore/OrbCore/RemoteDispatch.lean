@@ -1265,6 +1265,8 @@ partial def spawnRemoteJobPoller
     let turnStartSec ← nowEpoch
     while keepRunning do
       IO.sleep 350
+      -- The poller must not retry an unreachable node after its store shuts down.
+      if (← store.closedRef.get) then break
       let nowSec ← nowEpoch
       let nowIso := formatEpochIso8601Utc nowSec
       -- Check if mission was cancelled/interrupted on Core
