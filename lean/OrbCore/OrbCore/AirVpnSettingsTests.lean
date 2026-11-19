@@ -1,6 +1,7 @@
 import OrbCore.AirVpnSettings
 import OrbCore.AirVpnTunnel
 import OrbCore.AccountVpnApi
+import OrbCore.ProviderCredentialIdentity
 
 namespace OrbCore.AirVpnSettingsTests
 
@@ -72,6 +73,19 @@ def run (root : String) : IO Unit := do
     let (_, direct) ← route true "PUT" "{\"mode\":\"direct\"}".toUTF8
     check (direct.fieldStr? "mode" == some "direct" && (direct.field? "exits").isNone) "direct clears VPN selection"
   finally OrbCore.Store.closeCoreStore store
+  let first : ProviderUsageAndLogin.CliAuthFileInfo := { (default : ProviderUsageAndLogin.CliAuthFileInfo) with
+    fileName := "one.json", authType := "codex", prefixId := "first" }
+  let second := { first with fileName := "two.json", prefixId := "second" }
+  let identify := ProviderUsageAndLogin.matchCredential? #[first, second]
+  check ((identify "first" true "" "" "" "" false).any (·.fileName == "one.json") &&
+    (identify "db-row" false "two.json" "" "" "" false).any (·.fileName == "two.json"))
+    "same-category sidecar account matched independently"
+  check ((identify "first" false "two.json" "" "" "" false).isNone &&
+    (identify "db-row" false "" "" "" "" true).isNone &&
+    (identify "db-row" true "two.json" "" "" "" false).isNone)
+    "conflicting, ambiguous and member-unowned bindings rejected"
+  check (ProviderUsageAndLogin.fileAccountId "openai" first.fileName != ProviderUsageAndLogin.fileAccountId "openai" second.fileName)
+    "two unprefixed auth files get distinct IDs"
   routeStorage root
   let parseIp := AirVpnObservation.parseExit?
   let v4 := Orb.AccountVpn.ExitAddress.v4 0x01020304

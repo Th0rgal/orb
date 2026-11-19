@@ -21,6 +21,7 @@
 -/
 import Std.Sync.Mutex
 import Orb.ProviderLogin
+import OrbCore.ProviderCredentialIdentity
 import LeanSys.Auth
 import LeanSys.Http
 import OrbBin.Json
@@ -221,19 +222,6 @@ def candidateCliProxyAuthDirs : IO (Array String) := do
     dirs := dirs.push "/root/.cli-proxy-api"
   return dirs
 
-structure CliAuthFileInfo where
-  fileName    : String
-  fullPath    : String
-  authType    : String
-  email       : String
-  accessToken : String
-  accountId   : String
-  prefixId    : String
-  disabled    : Bool
-  mtimeSec    : UInt64
-  fingerprint : UInt64 := 0
-  deriving Repr, Inhabited
-
 def scanCliProxyAuthFiles : IO (Array CliAuthFileInfo) := do
   let dirs ← candidateCliProxyAuthDirs
   let mut out : Array CliAuthFileInfo := #[]
@@ -276,16 +264,6 @@ def scanCliProxyAuthFiles : IO (Array CliAuthFileInfo) := do
                   fingerprint := hash raw
                 }
   return out
-
-private def providerTypeMatchesAuthType (provType authType : String) : Bool :=
-  match provType.toLower, authType.toLower with
-  | "anthropic", "claude" | "anthropic", "anthropic" => true
-  | "openai", "codex" | "openai", "openai" => true
-  | "antigravity", "antigravity" => true
-  | "kimi", "kimi" => true
-  | "xai", "xai" => true
-  | "muse-code", "meta" | "muse-code", "muse-code" => true
-  | _, _ => false
 
 /-! ## Built-in Provider Metadata & Rich `ProviderResponse` Hydration -/
 
@@ -406,15 +384,9 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
      let legSandboxedId := (leg?.bind (fun j => (j.fieldStr? "sandboxed_provider_id").orElse (fun _ => j.fieldStr? "account_id"))).getD ""
     let legAccessTok := (legOauthObj?.bind (fun o => o.fieldStr? "access_token")).getD ""
 
-    -- Match CLIProxy auth file by prefix == p.id, refresh_token filename, email, or provider type
-    let matchedAuth? :=
-      if memberAdded then authFiles.find? (fun af => !af.disabled && af.prefixId == p.id) else
-       (authFiles.find? (fun af => !af.disabled && (af.prefixId == p.id || af.accountId == p.id))).orElse fun _ =>
-       (authFiles.find? (fun af => !af.disabled && !legAuthFile.isEmpty && af.fileName == legAuthFile)).orElse fun _ =>
-       (authFiles.find? (fun af => !af.disabled && !legSandboxedId.isEmpty && (af.prefixId == legSandboxedId || af.accountId == legSandboxedId))).orElse fun _ =>
-      (authFiles.find? (fun af => !af.disabled && !legRefreshFile.isEmpty && af.fileName == legRefreshFile)).orElse fun _ =>
-      (authFiles.find? (fun af => !af.disabled && !legEmail.isEmpty && af.email.toLower == legEmail.toLower && providerTypeMatchesAuthType p.providerType af.authType)).orElse fun _ =>
-      (authFiles.find? (fun af => !af.disabled && providerTypeMatchesAuthType p.providerType af.authType))
+    let typed := authFiles.filter (fun f => !f.disabled && providerTypeMatchesAuthType p.providerType f.authType)
+    let singleton := plainKey == "cli-proxy-managed" && (dbProvs.filter (fun r => r.providerType == p.providerType)).size == 1
+    let matchedAuth? := matchCredential? typed p.id memberAdded legAuthFile legRefreshFile legSandboxedId legEmail singleton
 
     let metaInfo := lookupProviderMeta p.providerType
     let envKeyVal ← match metaInfo.envVar? with
@@ -495,9 +467,9 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
       let oauthObj? := leg.field? "oauth"
       let refFile := (oauthObj?.bind (fun o => o.fieldStr? "refresh_token")).getD ""
       let accTok := (oauthObj?.bind (fun o => o.fieldStr? "access_token")).getD ""
-      let matchedAuth? :=
-         (authFiles.find? (fun af => !af.disabled && (af.prefixId == lid || af.accountId == lid || (!refFile.isEmpty && af.fileName == refFile)))).orElse fun _ =>
-        (authFiles.find? (fun af => !af.disabled && !email.isEmpty && af.email.toLower == email.toLower && providerTypeMatchesAuthType pType af.authType))
+      let typed := authFiles.filter (fun f => !f.disabled && providerTypeMatchesAuthType pType f.authType)
+      let authFile := ((leg.fieldStr? "cli_proxy_auth_file").orElse fun _ => leg.fieldStr? "auth_file").getD ""
+      let matchedAuth? := matchCredential? typed lid false authFile refFile "" email false
       let hasApi := !aKey.isEmpty && aKey != "cli-proxy-managed"
       let hasOa := matchedAuth?.isSome || !accTok.isEmpty || (pType.toLower == "muse-code" && !refFile.isEmpty && !refFile.endsWith ".json")
       let effLegTok :=
@@ -535,16 +507,17 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
   for af in authFiles do
     let pType := if af.authType == "codex" then "openai" else if af.authType == "claude" then "anthropic" else af.authType
     if !out.any (fun hp => hp.oauthFile == af.fileName ||
-        hp.id == af.prefixId || hp.providerType == pType) then
+        (!hp.enabled && hp.id == af.prefixId && !af.prefixId.isEmpty)) then
       out := out.push { (default : HydratedProvider) with
-        id := if af.prefixId.isEmpty then s!"cliproxyapi:{pType}" else af.prefixId
+        id := if af.prefixId.isEmpty || out.any (fun hp => hp.id == af.prefixId) ||
+            (authFiles.filter (fun f => f.prefixId == af.prefixId)).size != 1 then fileAccountId pType af.fileName else af.prefixId
         name := (lookupProviderMeta pType).name
         providerType := pType
         hasOAuth := true
         oauthToken := af.accessToken
         oauthFile := af.fileName
         accountEmail := af.email
-        enabled := true
+        enabled := !af.disabled
         priority := out.size
       }
   return out.qsort (fun a b => a.priority < b.priority)
