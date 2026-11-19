@@ -1,4 +1,5 @@
 """Exercise per-login egress against a real CLIProxyAPI v8 binary in an isolated Linux netns."""
+import argparse
 import base64
 import http.server
 import json
@@ -10,7 +11,6 @@ import ssl
 import socket
 import socketserver
 import subprocess
-import sys
 import tempfile
 import time
 import urllib.error
@@ -20,7 +20,7 @@ import urllib.parse
 from test_account_vpn_transport import exact, serve
 
 
-def run(binary, reconnect=False):
+def run(binary, reconnect=False, orb_configure=None):
     interfaces = {line.split(":")[0].strip() for line in Path("/proc/net/dev").read_text().splitlines()[2:]}
     if interfaces != {"lo"}:
         raise RuntimeError("Run in a fresh network namespace with only loopback enabled")
@@ -54,7 +54,7 @@ def run(binary, reconnect=False):
                     assert family == 3
                     host = exact(sock, exact(sock, 1)[0]).decode()
                 port = int.from_bytes(exact(sock, 2), "big")
-                if (host, port) == ("127.0.0.1", receiver):
+                if host in {"127.0.0.1", "receiver.example.invalid"} and port == receiver:
                     destination = receiver
                 else:
                     assert host in {"chatgpt.com", "auth.openai.com"} and port == 443
@@ -139,9 +139,19 @@ def run(binary, reconnect=False):
                                              headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
             with urllib.request.urlopen(request, timeout=8) as response:
                 return json.load(response)
+        routes = {"a": f"socks5://127.0.0.1:{a}", "b": f"socks5://127.0.0.1:{b}"}
+        orb_relay = None
         proc = subprocess.Popen([binary, "-config", str(config)], cwd=root,
                                 env={"HOME": temp, "PATH": os.defpath, "SSL_CERT_FILE": str(cert)}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
+            if orb_configure:
+                orb_relay = subprocess.Popen([orb_configure, "relay", str(a), str(b)], stdin=subprocess.PIPE,
+                                             stdout=subprocess.PIPE, text=True)
+                orb_relay.stdin.write(secrets.token_hex(32) + "\n")
+                orb_relay.stdin.flush()
+                for name in routes:
+                    routes[name] = orb_relay.stdout.readline().strip()
+                    assert routes[name].startswith("socks5://"), "Orb fixture relay startup failed"
             for _ in range(100):
                 try:
                     files = api("GET", "credentials")["files"]
@@ -155,11 +165,23 @@ def run(binary, reconnect=False):
             else:
                 raise RuntimeError("fixture credentials unavailable")
             ids = {f["name"]: f["auth_index"] for f in files}
-            def request(name):
+            def request(name, via_vpn=True):
+                host = "receiver.example.invalid" if via_vpn and name != "direct" else "127.0.0.1"
                 return api("POST", "requests/api-call", {"auth_index": ids[name + ".json"], "method": "GET",
-                           "url": f"http://127.0.0.1:{receiver}/source"})
-            for name, proxy in (("a", a), ("b", b)):
-                api("PATCH", "credentials/fields", {"name": name + ".json", "proxy_url": f"socks5://127.0.0.1:{proxy}"})
+                           "url": f"http://{host}:{receiver}/source"})
+            def configure(name, url, mode):
+                if orb_configure:
+                    return subprocess.run([orb_configure, f"http://127.0.0.1:{port}", name + ".json", url, mode],
+                                          input=key + "\n", text=True, capture_output=True, timeout=15)
+                api("PATCH", "credentials/fields", {"name": name + ".json", "proxy_url": url if mode == "enable" else ""})
+
+            for name, url in routes.items():
+                changed = configure(name, url, "enable")
+                if orb_configure:
+                    assert changed.returncode == 0, changed.stderr
+            if orb_configure:
+                conflict = configure("a", routes["b"], "enable")
+                assert conflict.returncode == 1 and conflict.stderr.strip() == "vpn_sidecar_proxy_conflict"
             for name, expected in (("a", "127.0.0.2"), ("b", "127.0.0.3"), ("direct", "127.0.0.1")):
                 result = request(name)
                 assert result["status_code"] == 200 and result["body"] == expected, (name, result)
@@ -170,7 +192,8 @@ def run(binary, reconnect=False):
                 for name, stream in (("a", False), ("b", True)):
                     choices = [m for m in models if m.startswith(name + "/gpt-5")]
                     assert choices, models[:25]
-                    payload = json.dumps({"model": choices[0], "stream": stream, "input": "synthetic"}).encode()
+                    payload = json.dumps({"model": choices[0], "stream": stream, "input": "synthetic",
+                                          "proxy_url": f"socks5://127.0.0.1:{b if name == 'a' else a}"}).encode()
                     req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/responses", data=payload,
                                                  headers={"Authorization": "Bearer fixture-client", "Content-Type": "application/json"})
                     try:
@@ -184,9 +207,8 @@ def run(binary, reconnect=False):
                     api("POST", "credentials/refresh", {"name": name + ".json"})
                 assert set(refresh_hits) == {("127.0.0.2", "refresh-a"), ("127.0.0.3", "refresh-b")}, refresh_hits
                 if reconnect:
-                    for name, proxy in (("a", a), ("b", b)):
+                    for name, url in routes.items():
                         filename = name + ".json"
-                        url = f"socks5://127.0.0.1:{proxy}"
                         session = api("POST", "oauth/auth-url", {"provider": "codex", "name": filename, "proxy_url": url})
                         assert session["target_auth_id"] == filename
                         state = session["state"]
@@ -203,9 +225,15 @@ def run(binary, reconnect=False):
                     print("Targeted OAuth reconnect passed for both credential exits.")
                 with socket.socket() as unavailable:
                     unavailable.bind(("127.0.0.1", 0))
-                    api("PATCH", "credentials/fields", {"name": "a.json", "proxy_url": f"socks5://127.0.0.1:{unavailable.getsockname()[1]}"})
+                    if orb_relay:
+                        orb_relay.stdin.write("drop-a\n")
+                        orb_relay.stdin.flush()
+                        assert orb_relay.stdout.readline().strip() == "blocked"
+                        assert request("b")["body"] == "127.0.0.3"
+                    else:
+                        api("PATCH", "credentials/fields", {"name": "a.json", "proxy_url": f"socks5://127.0.0.1:{unavailable.getsockname()[1]}"})
                     try:
-                        result = request("a")
+                        result = request("a", via_vpn=False)
                         assert result.get("status_code") != 200
                     except urllib.error.HTTPError as e:
                         assert 400 <= e.code <= 599
@@ -218,12 +246,27 @@ def run(binary, reconnect=False):
                         raise AssertionError("inference unexpectedly succeeded with unavailable proxy")
                     except urllib.error.HTTPError as e:
                         assert 400 <= e.code <= 599
-            assert hits == ["127.0.0.2", "127.0.0.3", "127.0.0.1"], hits
+            if orb_configure:
+                disabled = configure("b", routes["b"], "disable")
+                assert disabled.returncode == 0, disabled.stderr
+                assert request("b", via_vpn=False)["body"] == "127.0.0.1"
+            expected_hits = ["127.0.0.2", "127.0.0.3", "127.0.0.1"]
+            if orb_configure:
+                expected_hits.extend(["127.0.0.3", "127.0.0.1"])
+            assert hits == expected_hits, hits
             print("CLIProxyAPI v8 fixture passed: separate credential exits for buffered and streaming inference and token refresh, Direct management request, proxy outage blocked")
         finally:
             proc.terminate()
             proc.wait(timeout=8)
+            if orb_relay:
+                orb_relay.stdin.close()
+                orb_relay.wait(timeout=12)
 
 
 if __name__ == "__main__":
-    run(str(Path(sys.argv[1]).resolve()), reconnect="--reconnect" in sys.argv[2:])
+    parser = argparse.ArgumentParser()
+    parser.add_argument("binary", type=Path)
+    parser.add_argument("--reconnect", action="store_true")
+    parser.add_argument("--orb-configure", type=Path, help="Path to the orb-airvpn-sidecar-test executable")
+    opts = parser.parse_args()
+    run(str(opts.binary.resolve()), opts.reconnect, str(opts.orb_configure.resolve()) if opts.orb_configure else None)

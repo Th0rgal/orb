@@ -98,3 +98,12 @@ proxy and target credential fields. Run the same isolated fixture with
 the source address for each account. It also checks the adopted credential
 ID, rotated refresh token and retained proxy URL for each file. This test
 uses synthetic identities and the released aarch64 Linux binary.
+
+Build the optional `orb-airvpn-sidecar-test` executable in the OrbCore Lean
+package and pass its absolute path with `--orb-configure` to the fixture above.
+This runs Core’s credential configuration client and authenticated relay against
+the real sidecar. Only the verified gateway lookup and the upstream services
+are fixtures. The independent receiver checks both accounts through the relay,
+including requests with a conflicting `proxy_url` field in the public inference
+JSON. Blocking account A in the relay leaves account B usable. Choosing Direct
+for B clears its sidecar proxy and the receiver observes the direct source.

@@ -95,20 +95,20 @@ def start (port : UInt16) (key : String) (resolve : String → String → IO (Ex
   let .ok (fd, bound) ← tcpListen "127.0.0.1" port 64 | return .error "vpn_relay_bind_failed"
   let stopping ← IO.mkRef false
   let work ← IO.asTask (prio := .dedicated) do
-    let mut workers : Array (Task (Except IO.Error Unit)) := #[]
+    let workers ← IO.mkRef (#[] : Array (Task (Except IO.Error Unit)))
     try
       while !(← stopping.get) do
         let .ok client ← tcpAcceptPoll fd 250 | continue
-        workers ← workers.filterM (fun task => return !(← IO.hasFinished task))
-        if workers.size ≥ 64 then
+        let live ← (← workers.get).filterM (fun task => return !(← IO.hasFinished task))
+        if live.size ≥ 64 then
           discard <| closeFd client
         else
           let worker ← IO.asTask (prio := .dedicated) do
             try serve client key resolve stopping.get finally discard <| closeFd client
-          workers := workers.push worker
+          workers.set (live.push worker)
     finally
       discard <| closeFd fd
-      for worker in workers do discard <| IO.wait worker
+      for worker in ← workers.get do discard <| IO.wait worker
   return .ok ⟨bound, stopping, work⟩
 
 /-- The configured port must survive Core restarts because the credential owner
