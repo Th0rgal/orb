@@ -1590,6 +1590,7 @@ partial def submitRemoteMissionTurn
     | .error e => return .error e
 
   -- Resolve node auth `(leaseNodeId, nodeSecret)` so we can sign the HMAC `job:submit` lease token
+  if let some cause ← nodeApiHangCause? store effTarget then return .error cause
   let (_, staticNodes) ← loadStaticRemoteNodes
   let spec ← match ← bindRemoteTurnOwner store mc? spec effTarget staticNodes with
     | .ok owned => pure owned

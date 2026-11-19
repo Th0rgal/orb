@@ -1214,6 +1214,10 @@ def dispatchMcpToolCall
       if let .error _ ← authorizeRemotePlacement mc? owner target nodes then
         releaseRented
         return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" "This execution target is unavailable to this user" nowIso "placement_forbidden"
+    if let some target := inheritedRn? then
+      if let some cause ← nodeApiHangCause? store target then
+        releaseRented
+        return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" cause nowIso "hung_node"
     let effWorkDir :=
       match (args.fieldStr? "working_directory").map (·.trimAscii.toString) |>.filter (!·.isEmpty) with
       | some wd => wd
@@ -1477,6 +1481,9 @@ def dispatchMcpToolCall
         | return mcpErr "receipt_record_failed" "The mutation completed but its receipt could not be recorded. Reconcile the action." false
       return mcpOk settled
     else if toolName == "resume_mission" then
+      if let some target ← resolveMissionRemoteNode? store mc? mid then
+        if let some cause ← nodeApiHangCause? store target then
+          return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" cause nowIso "hung_node"
       if let some t := (args.fieldStr? "title").map (·.trimAscii.toString) then
         if !t.isEmpty then
           discard <| execParamQuery store.missionsDb "UPDATE missions SET title=?2, metadata_updated_at=?3 WHERE id=?1;" #[mid, t, nowIso]
