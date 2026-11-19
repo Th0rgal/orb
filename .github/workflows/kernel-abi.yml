@@ -231,6 +231,7 @@ jobs:
           echo "orb_net_leaf.c LOC: $c_lines"
           test "$c_lines" -le 220
           (cd lean/OrbNetLeaf && "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" build && ./.lake/build/bin/orb-net-leaf-test)
+          python3 scripts/test_account_vpn_transport.py lean/OrbNetLeaf/.lake/build/bin/orb-net-leaf-test --probe-account-vpn
           elab_syms=$(nm -u lean/OrbNetLeaf/.lake/build/bin/orb-net-leaf-test | grep -c lean_elab || true)
           test "$elab_syms" -eq 0
       - name: Build and self-test Wave 1 OrbBin + Wave 2 OrbNode + Wave 3 OrbClient + Wave 4 OrbCore & OrbLocald (<= 220 C LOC, zero lean_elab)

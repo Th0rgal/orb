@@ -48,6 +48,10 @@ private opaque rawTlsOpen
     (req : @& ByteArray) (verifyPeer alpnMode : UInt8)
     (timeoutMs : UInt32) : IO TlsOpenOutcome
 
+@[extern "orb_net_leaf_tls_open_tunnel"]
+private opaque rawTlsOpenTunnel (host : @& String) (fd : UInt32)
+    (req : @& ByteArray) (timeoutMs : UInt32) : IO TlsOpenOutcome
+
 @[extern "orb_net_leaf_tls_write"]
 private opaque rawTlsWrite
     (sess : @& TlsSession) (buf : @& ByteArray) : IO UInt8
@@ -305,6 +309,54 @@ def buildOutboundHttp11Request
   hdrBlock := hdrBlock ++ "\r\n"
   return hdrBlock.toUTF8 ++ body
 
+private def readSocksBytes (fd : Fd) (count deadline : Nat) : IO (Option ByteArray) := do
+  let mut bytes := ByteArray.empty
+  while bytes.size < count do
+    let now ← IO.monoMsNow
+    if now ≥ deadline then return none
+    unless (← pollReadable fd (deadline - now).toUInt32).isOk do return none
+    let chunk ← readStreamChunk fd (count - bytes.size)
+    if chunk.isEmpty then return none
+    bytes := bytes ++ chunk
+  return some bytes
+
+/-- SOCKS5 resolves the destination in the tunnel namespace. Only the
+Core-owned listener is dialed locally; the origin remains the TLS identity. -/
+private def negotiateSocks (fd : Fd) (host : String) (port : UInt16) (deadline : Nat) : IO Bool := do
+  unless (← writeAll fd ⟨#[5, 1, 0]⟩).isOk do return false
+  let some method ← readSocksBytes fd 2 deadline | return false
+  unless method.data == #[5, 0] do return false
+  let name := host.toUTF8
+  if name.isEmpty || name.size > 255 then return false
+  let request : ByteArray := ⟨#[5, 1, 0, 3, name.size.toUInt8]⟩ ++ name ++
+    ⟨#[(port >>> 8).toUInt8, port.toUInt8]⟩
+  unless (← writeAll fd request).isOk do return false
+  let some reply ← readSocksBytes fd 4 deadline | return false
+  unless reply[0]! == 5 && reply[1]! == 0 && reply[2]! == 0 do return false
+  let len ← match reply[3]! with
+    | 1 => pure 4
+    | 4 => pure 16
+    | 3 => do
+      let some n ← readSocksBytes fd 1 deadline | return false
+      if n[0]! == 0 then return false
+      pure n[0]!.toNat
+    | _ => return false
+  return (← readSocksBytes fd (len + 2) deadline).isSome
+
+private def openHttp11Transport (host : String) (port : UInt16) (wire : ByteArray)
+    (verifyPeer : UInt8) (timeoutMs : UInt32) (socksPort? : Option UInt16) : IO TlsOpenOutcome := do
+  let some socksPort := socksPort? | return ← rawTlsOpen host port wire verifyPeer 0 timeoutMs
+  if socksPort == 0 || verifyPeer != 1 then return .failed
+  let timeout := if timeoutMs == 0 then 15000 else timeoutMs
+  let deadline := (← IO.monoMsNow) + timeout.toNat
+  let .ok fd ← tcpConnectTimed "127.0.0.1" socksPort timeout | return .failed
+  let ready ← try negotiateSocks fd host port deadline catch _ => pure false
+  let now ← IO.monoMsNow
+  if !ready || now ≥ deadline then
+    discard <| closeFd fd
+    return .failed
+  rawTlsOpenTunnel host fd.raw wire (deadline - now).toUInt32
+
 /-- Open a verified WebPKI TLS 1.3/1.2 HTTP/1.1 streaming session (`ALPN "http/1.1"`),
     sending a smuggling-safe HTTP/1.1 request gated by `OrbNetLeaf.Spec.verifyOutboundRequest`. -/
 def openHttps11Stream
@@ -313,7 +365,7 @@ def openHttps11Stream
     (body : ByteArray := ByteArray.empty)
     (verifyPeer : Bool := true)
     (timeoutMs : UInt32 := 10000)
-    (initialHeadCapBytes : Nat := 65536) : IO (Except String TlsSession) := do
+    (initialHeadCapBytes : Nat := 65536) (socksPort? : Option UInt16 := none) : IO (Except String TlsSession) := do
   let noCrLf := if isValidBareHost host && hasNoCrLfOrNul host == 1 then (1 : UInt8) else 0
   let vpFlag : UInt8 := if verifyPeer then 1 else 0
   let hostAuth := formatHostAuthority host port 443
@@ -323,7 +375,7 @@ def openHttps11Stream
   if verifyOutboundRequest noCrLf vpFlag port.toUInt32
       host.toUTF8.size.toUInt64 reqWire.size.toUInt64 initialHeadCapBytes.toUInt64 != 1 then
     return .error "openHttps11Stream rejected by verifyOutboundRequest"
-  match ← rawTlsOpen host port reqWire vpFlag 0 timeoutMs with
+  match ← openHttp11Transport host port reqWire vpFlag timeoutMs socksPort? with
   | .ok sess => return .ok sess
   | .failed | .alpnNotH2 => return .error s!"TLS stream connection failed to {host}:{port}"
 
@@ -668,7 +720,7 @@ def httpsRequest
     (body : ByteArray := ByteArray.empty)
     (maxRespBytes : Nat := 4194304)
     (verifyPeer : Bool := true)
-    (timeoutMs : UInt32 := 30000) : IO (Except String HttpsResponse) := do
+    (timeoutMs : UInt32 := 30000) (socksPort? : Option UInt16 := none) : IO (Except String HttpsResponse) := do
   let noCrLf := if isValidBareHost host && hasNoCrLfOrNul host == 1 then (1 : UInt8) else 0
   let vpFlag : UInt8 := if verifyPeer then 1 else 0
   let hostAuth := formatHostAuthority host port 443
@@ -680,7 +732,7 @@ def httpsRequest
     return .error "httpsRequest rejected by verifyOutboundRequest"
   let maxWireCap := maxRespBytes + 65536
   let connectTimeoutMs : UInt32 := if timeoutMs == 0 || timeoutMs > 15000 then 15000 else timeoutMs
-  let .ok sess ← rawTlsOpen host port reqWire vpFlag 0 connectTimeoutMs
+  let .ok sess ← openHttp11Transport host port reqWire vpFlag connectTimeoutMs socksPort?
     | return .error s!"TLS roundtrip failed to {host}:{port}"
   let framed ← drainTlsSessionToFramed sess maxWireCap timeoutMs
   if framed.isEmpty then

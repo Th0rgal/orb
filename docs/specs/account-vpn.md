@@ -44,3 +44,11 @@ tunnel interruption, Core restart, and a full session budget. A VPN transport
 failure must never open a direct connection for the credential. Settings
 responses, settings exports, logs and client state must omit secret material
 after submission. These are deployment acceptance obligations.
+
+## Live account selection
+
+Use two connected ChatGPT accounts on dev and one connected ChatGPT account
+for the production canary. Record the selected account identifiers in the
+restricted deployment receipt. Exercise cross-category sharing with a fixture
+until a live account in another category is designated. Use the existing admin
+login for Settings. Never include credentials in the receipt.

@@ -100,6 +100,14 @@ private def testDualStackConnectAndTls : IO Unit := do
     (tlsProbeOut.exitCode == 0 && (tTls1 - tTls0) < 5000 && tlsProbeOut.stdout.trimAscii.toString == "200:{\"node_token\":\"ok\"}")
 
 def main (args : List String) : IO Unit := do
+  if let ["--probe-account-vpn", host, portStr, proxyStr] := args then
+    let some port := portStr.toNat? | throw (IO.userError "invalid test port")
+    let some proxyPort := proxyStr.toNat? | throw (IO.userError "invalid test proxy")
+    let via := if proxyPort == 0 then none else some proxyPort.toUInt16
+    match ← httpsRequest "GET" host port.toUInt16 "/" #[] ByteArray.empty 4096 true 3000 via with
+    | .ok response => IO.println ((String.fromUTF8? response.body).getD "")
+    | .error _ => IO.println "failed"
+    return
   if let ["--probe-dualstack-connect", portStr] := args then
     let some portNat := portStr.toNat? | throw (IO.userError "bad port")
     match ← tcpConnectTimed "dualstack-unroutable.test" portNat.toUInt16 15000 with
