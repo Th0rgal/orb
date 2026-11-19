@@ -46,6 +46,13 @@ def call6 (fn : USize) (a0 a1 a2 a3 a4 a5 : UInt64 := 0) : IO UInt64 := do
   args := pushU64LE args a5
   FFI.call fn args
 
+private structure PaintSnapshot where
+  scene : Scene
+  pages : Array Text.AtlasPageBuffer
+  clear : Color
+  width : Nat
+  height : Nat
+
 /-- Dynamic Vulkan 1.3 loader and scratch buffer context backed by `LeanUI.FFI`. -/
 structure VulkanContext where
   vkGetInstanceProcAddr : USize := 0
@@ -56,6 +63,13 @@ structure VulkanContext where
   width : Nat := 1280
   height : Nat := 800
   framebuffer : ByteArray := ByteArray.empty
+  previousPaint : Option PaintSnapshot := none
+  /-- Number of visual primitives submitted by the last frame. -/
+  lastDrawnPrims : Nat := 0
+  /-- Number of device pixels cleared by the last frame's damage pass. -/
+  lastDamagePixels : Nat := 0
+  /-- Number of frames that reused the framebuffer outside a dirty rectangle. -/
+  partialFrames : Nat := 0
   deriving Inhabited
 
 /-- Resolve `vkGetInstanceProcAddr` from `libvulkan.so.1` via `FFI.dlSym`, allocate a native
@@ -73,7 +87,6 @@ def initVulkan (width height : Nat) : IO VulkanContext := do
     else pure 0
   let scratchCap : USize := 65536
   let scratchPtr ← try FFI.memAlloc scratchCap catch _ => pure 0
-  let fb := ByteArray.mk (Array.replicate (width * height * 4) 0)
   return {
     vkGetInstanceProcAddr := getProc
     vkCreateInstance := createInst
@@ -82,7 +95,6 @@ def initVulkan (width height : Nat) : IO VulkanContext := do
     scratchCap
     width
     height
-    framebuffer := fb
   }
 
 /-- Free native scratch memory (`FFI.memFree`) owned by `VulkanContext`. -/
@@ -149,9 +161,9 @@ def stageInstances (ctx : VulkanContext) (insts : Array GpuPrimInstance) : IO By
   let mut x := n
   let mut y := (x + 1) / 2
   for _ in [0:32] do
-    if y < x then
-      x := y
-      y := (x + n / x) / 2
+    if y ≥ x then break
+    x := y
+    y := (x + n / x) / 2
   return x
 
 /-- Signed distance in fixed-point (`1/16` px) from pixel center `(px, py)` to a rounded rectangle
@@ -226,6 +238,16 @@ private def drawRoundedBox (vw vh : Nat) (fb : ByteArray) (curClip r : Rect)
   let (br, bg, bb, ba) := unpackColor borderCol
   let (bt, brW, bbW, blW) := borders
   let hasBorder := (bt > 0 || brW > 0 || bbW > 0 || blW > 0) && ba > 0
+  if fa == 0 && !hasBorder then return out
+  if fa == 255 && !hasBorder && radii == (0, 0, 0, 0) then
+    -- Pixel-aligned opaque rectangles have constant coverage: build one
+    -- scanline, then copy it into the clipped span of each affected row.
+    let w := (x1 - x0).toNat
+    let mut row := ByteArray.emptyWithCapacity (w * 4)
+    for _ in [:w] do row := row.push fr |>.push fg |>.push fbC |>.push fa
+    for y in [y0.toNat:y1.toNat] do
+      out := row.copySlice 0 out ((y * vw + x0.toNat) * 4) row.size
+    return out
   let innerRect : Rect :=
     { x := r.x + (blW : Int)
       y := r.y + (bt : Int)
@@ -237,19 +259,39 @@ private def drawRoundedBox (vw vh : Nat) (fb : ByteArray) (curClip r : Rect)
      tr - min tr (max bt brW),
      brR - min brR (max bbW brW),
      blR - min blR (max bbW blW))
+  -- Inside either straight strip the pixel has full coverage. Only corner
+  -- pixels need a signed distance, including for the inner border edge.
+  let margin : Int := max (max tl tr) (max brR blR)
+  let spanL := min x1 (max x0 (max (r.x + margin) (if hasBorder then innerRect.x + margin else x0)))
+  let spanR := max spanL (min x1 (min (r.right - margin) (if hasBorder then innerRect.right - margin else x1)))
+  let bulk := fa == 255 && spanR - spanL ≥ 16
+  let mut strip := ByteArray.empty
+  if bulk then
+    strip := ByteArray.emptyWithCapacity ((spanR-spanL).toNat * 4)
+    for _ in [:(spanR-spanL).toNat] do strip := strip.push fr |>.push fg |>.push fbC |>.push fa
   for py in [y0.toNat : y1.toNat] do
-    for px in [x0.toNat : x1.toNat] do
-      let dOut16 := sdfRoundedRect16 r radii (px : Int) (py : Int)
+    let y : Int := py
+    let straightRow := y ≥ r.y + margin && y < r.bottom - margin
+    let innerRow := y ≥ innerRect.y && y < innerRect.bottom
+    let straightInnerRow := y ≥ innerRect.y + margin && y < innerRect.bottom - margin
+    let useStrip := bulk && (!hasBorder || innerRow)
+    if useStrip then out := strip.copySlice 0 out ((py * vw + spanL.toNat) * 4) strip.size
+    let skip := if useStrip then (spanR-spanL).toNat else 0
+    for edgeX in [x0.toNat : x1.toNat - skip] do
+      let px := if useStrip && edgeX ≥ spanL.toNat then edgeX + skip else edgeX
+      let x : Int := px
+      let dOut16 := if straightRow || (x ≥ r.x + margin && x < r.right - margin) then -8
+        else sdfRoundedRect16 r radii x y
       if dOut16 < 8 then
         let covOut : Nat := if dOut16 ≤ -8 then 255 else ((8 - dOut16).toNat * 255) / 16
         let idx := (py * vw + px) * 4
         if fa > 0 then
           let effA : UInt8 := ((fa.toNat * covOut + 127) / 255).toUInt8
-          let (nr, ng, nb, na) :=
-            blendOver (out.get! idx) (out.get! (idx + 1)) (out.get! (idx + 2)) (out.get! (idx + 3))
-              fr fg fbC effA
+          let (nr, ng, nb, na) := if effA == 255 then (fr, fg, fbC, effA) else
+            blendOver (out.get! idx) (out.get! (idx + 1)) (out.get! (idx + 2)) (out.get! (idx + 3)) fr fg fbC effA
           out := out.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
-        if hasBorder then
+        if hasBorder && !(innerRow && x ≥ innerRect.x && x < innerRect.right &&
+            (straightInnerRow || (x ≥ innerRect.x + margin && x < innerRect.right - margin))) then
           let dIn16 := sdfRoundedRect16 innerRect innerRadii (px : Int) (py : Int)
           if dIn16 > -8 then
             let covIn : Nat := if dIn16 ≥ 8 then 255 else ((dIn16 + 8).toNat * 255) / 16
@@ -265,7 +307,7 @@ private def drawRoundedBox (vw vh : Nat) (fb : ByteArray) (curClip r : Rect)
 The framebuffer is opaque; each pass preserves alpha and constant-color surfaces. -/
 def blurAxis (fb : ByteArray) (vw vh radius : Nat) (horizontal : Bool) : ByteArray := Id.run do
   if vw == 0 || vh == 0 || radius == 0 then return fb
-  let mut out := ByteArray.mk (Array.replicate fb.size 0)
+  let mut out := Text.AtlasPageBuffer.zeroBytes fb.size
   let len := if horizontal then vw else vh
   let count := if horizontal then vh else vw
   let index (line pos channel : Nat) :=
@@ -291,26 +333,48 @@ def blurBackdrop (fb : ByteArray) (vw vh sigma : Nat) : ByteArray := Id.run do
   if sigma == 0 then return fb
   let mut out := fb
   for radius in [sigma - 1, sigma - 1, sigma] do
-    out := blurAxis out vw vh radius true
-    out := blurAxis out vw vh radius false
+    if radius == 0 then continue
+    if radius ≤ 65535 && vw * vh * 4 == fb.size then
+      out := FFI.boxAxis out vw.toUSize vh.toUSize radius.toUSize true
+      out := FFI.boxAxis out vw.toUSize vh.toUSize radius.toUSize false
+    else
+      out := blurAxis out vw vh radius true
+      out := blurAxis out vw vh radius false
   return out
 
-/-- Render a `Scene` (`Array Prim`) onto an RGBA8 buffer `(vw × vh)` using the unified SDF
-rounded-rect / border / drop-shadow / glyph-atlas / clip / layer pipeline. -/
-def rasterizeScene (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtlasCache)
-    (scene : Scene) : ByteArray × Array GpuPrimInstance := Id.run do
+/-- Render a scene into either a fresh framebuffer or an existing framebuffer. When `dirty` is
+present, only pixels and visual primitives intersecting that rectangle are touched; structural clip
+and layer commands remain so compositing order is unchanged. -/
+def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtlasCache)
+    (initial : Option ByteArray) (dirty : Option Rect) (scene : Scene) : ByteArray × Array GpuPrimInstance := Id.run do
   let (cr, cg, cb, ca) := unpackColor clearColor
   let totalBytes := vw * vh * 4
-  let mut fb := ByteArray.emptyWithCapacity totalBytes
-  for _ in [0 : vw * vh] do
-    fb := fb.push cr |>.push cg |>.push cb |>.push ca
   let fullClip : Rect := { x := 0, y := 0, w := (vw : Int), h := (vh : Int) }
-  let mut clipStack : List Rect := [fullClip]
+  let renderClip := match dirty with
+    | none => fullClip
+    | some d => intersectRect fullClip d
+  let mut fb := match initial with
+    | some previous => if previous.size == totalBytes then previous else ByteArray.emptyWithCapacity totalBytes
+    | none => ByteArray.emptyWithCapacity totalBytes
+  if fb.size == 0 then
+    let mut row := ByteArray.emptyWithCapacity (vw * 4)
+    for _ in [:vw] do row := row.push cr |>.push cg |>.push cb |>.push ca
+    for y in [:vh] do fb := row.copySlice 0 fb (y * row.size) row.size
+  if let some d := dirty then
+    let (x0, y0, x1, y1) := clampBounds vw vh fullClip d
+    if x1 > x0 && y1 > y0 then
+      let w := (x1-x0).toNat
+      let mut row := ByteArray.emptyWithCapacity (4*w)
+      for _ in [:w] do row := row.push cr |>.push cg |>.push cb |>.push ca
+      for py in [y0.toNat : y1.toNat] do
+        fb := row.copySlice 0 fb ((py * vw + x0.toNat) * 4) row.size
+  let mut clipStack : List Rect := [renderClip]
   let mut layerStack : List LayerFrame := []
   let mut instances : Array GpuPrimInstance := #[]
 
   for prim in scene do
-    let curClip := clipStack.head?.getD fullClip
+    let curClip := clipStack.head?.getD renderClip
+    if !prim.intersects curClip then continue
     match prim with
     | .backdropBlur sigma =>
       fb := blurBackdrop fb vw vh sigma
@@ -320,17 +384,17 @@ def rasterizeScene (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtlasCa
       clipStack := intersectRect curClip r :: clipStack
     | .clipPop =>
       if let _ :: tail := clipStack then
-        clipStack := if tail.isEmpty then [fullClip] else tail
+        clipStack := if tail.isEmpty then [renderClip] else tail
     | .layerPush opacity =>
       let saved := fb
-      fb := ByteArray.mk (Array.replicate totalBytes 0)
+      fb := Text.AtlasPageBuffer.zeroBytes totalBytes
       layerStack := { opacity := min opacity 255, clip := curClip, savedBuf := saved } :: layerStack
     | .layerPop =>
       if let top :: rest := layerStack then
         layerStack := rest
         let layerBuf := fb
         fb := top.savedBuf
-        let (x0, y0, x1, y1) := clampBounds vw vh top.clip fullClip
+        let (x0, y0, x1, y1) := clampBounds vw vh top.clip renderClip
         if x1 > x0 && y1 > y0 then
           for py in [y0.toNat : y1.toNat] do
             for px in [x0.toNat : x1.toNat] do
@@ -406,15 +470,25 @@ def rasterizeScene (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtlasCa
       let (sr, sg, sb, sa) := unpackColor col
       -- CSS blur-radius is twice Gaussian sigma. Blur coverage, not the distance
       -- field: the old polynomial falloff made broad dark wedges beside dialogs.
-      let empty := ByteArray.mk (Array.replicate totalBytes 0)
-      let mask := drawRoundedBox vw vh empty fullClip r radii 0xFFFFFFFF (0, 0, 0, 0) 0
-      let blurred := blurBackdrop mask vw vh (blur / 2)
       let (x0, y0, x1, y1) := clampBounds vw vh curClip expanded
       if x1 > x0 && y1 > y0 && sa > 0 then
+        -- Each pass reads at most its radius on either side. Include the
+        -- entire dependency halo, retaining edge replication at viewport edges.
+        let sigma := blur / 2
+        let halo : Int := (sigma + (sigma - 1) * 2 : Nat)
+        let mx := max 0 (x0 - halo)
+        let my := max 0 (y0 - halo)
+        let mw := (min (vw : Int) (x1 + halo) - mx).toNat
+        let mh := (min (vh : Int) (y1 + halo) - my).toNat
+        let bounds : Rect := ⟨0, 0, mw, mh⟩
+        let empty := Text.AtlasPageBuffer.zeroBytes (mw * mh * 4)
+        let mask := drawRoundedBox mw mh empty bounds { r with x := r.x - mx, y := r.y - my } radii 0xFFFFFFFF (0, 0, 0, 0) 0
+        let blurred := blurBackdrop mask mw mh sigma
         for py in [y0.toNat : y1.toNat] do
           for px in [x0.toNat : x1.toNat] do
             let idx := (py * vw + px) * 4
-            let effA := ((sa.toNat * (blurred.get! (idx + 3)).toNat + 127) / 255).toUInt8
+            let alpha := ((py - my.toNat) * mw + px - mx.toNat) * 4 + 3
+            let effA := ((sa.toNat * (blurred.get! alpha).toNat + 127) / 255).toUInt8
             let (nr, ng, nb, na) :=
               blendOver (fb.get! idx) (fb.get! (idx + 1)) (fb.get! (idx + 2)) (fb.get! (idx + 3))
                 sr sg sb effA
@@ -431,7 +505,15 @@ def rasterizeScene (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtlasCa
         let (sr, sg, sb, sa) := unpackColor col
         let (x0, y0, x1, y1) := clampBounds vw vh curClip dst
         if x1 > x0 && y1 > y0 && sa > 0 then
-          for py in [y0.toNat : y1.toNat] do
+          let sx := src.x.toNat + (x0.toNat - dst.x.toNat)
+          let sy := src.y.toNat + (y0.toNat - dst.y.toNat)
+          let w := min (pw-sx) (x1-x0).toNat
+          let h := min (ph-sy) (y1-y0).toNat
+          if h > 0 && w > 0 && (sy+h-1)*pw+sx+w ≤ page.rgba.size/4 then
+            fb := FFI.blitGlyph fb page.rgba (y0.toNat*vw+x0.toNat).toUSize (sy*pw+sx).toUSize
+              vw.toUSize pw.toUSize w.toUSize h.toUSize col isColor
+          else
+           for py in [y0.toNat : y1.toNat] do
             let ty := src.y.toNat + (py - dst.y.toNat)
             if ty < ph then
               for px in [x0.toNat : x1.toNat] do
@@ -493,12 +575,182 @@ def rasterizeScene (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtlasCa
       fb := drawRoundedBox vw vh fb curClip dst radii 0xC8D2E6FF (0, 0, 0, 0) 0
   return (fb, instances)
 
+/-- Full-frame compatibility entry point. -/
+def rasterizeScene (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtlasCache)
+    (scene : Scene) : ByteArray × Array GpuPrimInstance :=
+  rasterizeSceneInto vw vh clearColor atlas none none scene
+
 /-- Render a `Scene` onto `ctx`, staging GPU instances into native scratch memory via `FFI.memWrite`. -/
 def renderFrame (ctx : VulkanContext) (clearColor : Color) (atlas : Text.GlyphAtlasCache)
     (scene : Scene) : IO VulkanContext := do
   let (fb, insts) := rasterizeScene ctx.width ctx.height clearColor atlas scene
   let _ ← stageInstances ctx insts
-  return { ctx with framebuffer := fb }
+  return { ctx with
+    framebuffer := fb
+    lastDrawnPrims := insts.size
+    lastDamagePixels := ctx.width * ctx.height
+    previousPaint := some ⟨scene, atlas.pages, clearColor, ctx.width, ctx.height⟩ }
+
+/-- Backdrop blur samples the whole framebuffer and therefore cannot be safely clipped to a dirty
+rectangle. Such scenes use the full path; ordinary changed-node scenes reuse the old framebuffer. -/
+def hasGlobalEffect (scene : Scene) : Bool :=
+  scene.any fun p => match p with
+    | .backdropBlur _ | .layerPush _ | .layerPop => true
+    | _ => false
+
+-- Diff the exact command stream. A structural edit can change the meaning of
+-- an identical suffix; never infer local damage across such an edit.
+private def changedBounds (vp : Rect) (old new : Scene) : Option Rect := Id.run do
+  let n := min old.size new.size
+  let mut pre := 0
+  while pre < n && old[pre]? == new[pre]? do pre := pre + 1
+  let mut suf := 0
+  while suf < n - pre && old[old.size-1-suf]? == new[new.size-1-suf]? do suf := suf + 1
+  let mut clips := [vp]
+  for i in [:pre] do
+    match old[i]? with
+    | some (.clipPush r) | some (.clipPushRounded r _) => clips := intersectRect (clips.head?.getD vp) r :: clips
+    | some .clipPop => clips := match clips with | _ :: _ :: _ => clips.tail! | _ => [vp]
+    | _ => pure ()
+  let clip := clips.head?.getD vp
+  let mut area : Option Rect := none
+  for cmds in #[old, new] do
+    for i in [pre:cmds.size-suf] do
+      let some p := cmds[i]? | return none
+      let some r := p.bounds | return none
+      let b := intersectRect clip r
+      if b.w > 0 && b.h > 0 then
+        area := some (match area with
+          | none => b
+          | some a => ⟨min a.x b.x, min a.y b.y, max a.right b.right - min a.x b.x, max a.bottom b.bottom - min a.y b.y⟩)
+  return some (area.getD ⟨0,0,0,0⟩)
+
+-- Express paints in coordinates relative to a horizontal band. Equality includes
+-- paint order, all style/sampling parameters and the actually visible scissor.
+private def bandPaint (scene : Scene) (band : Rect) : Option (Array (Prim × Rect)) := Id.run do
+  let mut stack := [band]
+  let mut paints := #[]
+  let rel := fun (r : Rect) => { r with y := r.y - band.y }
+  for p in scene do
+    let clip := stack.head?.getD band
+    match p with
+    | .clipPush r => stack := intersectRect clip r :: stack
+    | .clipPop => if stack.length < 2 then return none else stack := stack.tail!
+    | _ =>
+      let some r := p.bounds | return none
+      let vis := intersectRect clip r
+      if !vis.isEmpty then
+        let v := rel vis
+        let key : Option Prim := match p with
+          | .quad b c rad w e => some (.quad (if rad == 0 && w == 0 then v else rel b) c rad w e)
+          | .rrect b c rad w e => some (.rrect (rel b) c rad w e)
+          | .glyph s d c k => if d.y < 0 then none else some (.glyph s (rel d) c k)
+          | .mask i s d c => if d.y < 0 then none else some (.mask i s (rel d) c)
+          | _ => none
+        let some k := key | return none
+        paints := paints.push (k,v)
+  return some paints
+
+-- A matching glyph proposes a displacement only. Accept the copy solely when
+-- the entire source and destination band have identical clipped paint programs.
+private def scrollBand (old new : Scene) (dirty vp : Rect) : Option (Rect × Nat) := Id.run do
+  if dirty.h < 160 || dirty.w < 128 then return none
+  let mut i := 0
+  while i < min old.size new.size && old[i]? == new[i]? do i := i + 1
+  let mut shift := 0
+  for j in [i:old.size] do
+    if let some (.glyph s a c k) := old[j]? then
+      if a.y > dirty.y + 64 && a.y < dirty.bottom then
+        for n in [max i (j-160):min new.size (j+64)] do
+          if let some (.glyph t b e l) := new[n]? then
+            if s == t && a.x == b.x && c == e && k == l && a.y > b.y && a.y-b.y ≤ 64 then
+              shift := (a.y-b.y).toNat
+              break
+        if shift > 0 then break
+  if shift == 0 then return none
+  let band := { dirty with h := dirty.h - max 96 (2 * (shift : Int)) }
+  let src := { band with y := band.y + shift }
+  if intersectRect vp src != src then return none
+  let some a := bandPaint old src | return none
+  let some b := bandPaint new band | return none
+  if a != b then return none
+  return some (band,shift)
+
+-- New glyph allocations may change unused texels. Prove that every old
+-- sampling command still sees the same bytes, or discard the framebuffer.
+private def samplesUnchanged (scene : Scene) (idx : Nat) (a b : Text.AtlasPageBuffer) : Bool := Id.run do
+  if a.atlas.width != b.atlas.width || a.atlas.height != b.atlas.height then return false
+  if a.rgba == b.rgba then return true
+  for p in scene do
+    let pair := match p with
+      | .glyph src dst _ _ => if idx == 0 then some (src,dst) else none
+      | .mask page src dst _ => if idx == page then some (src,dst) else none
+      | _ => none
+    if let some (src,dst) := pair then
+      let x := src.x.toNat
+      let y := src.y.toNat
+      let w := min dst.w.toNat (a.atlas.width - x)
+      let h := min dst.h.toNat (a.atlas.height - y)
+      if w > 0 && h > 0 then
+        if ((y+h-1)*a.atlas.width+x+w)*4 > min a.rgba.size b.rgba.size then return false
+        if !FFI.sameRows a.rgba b.rgba ((y * a.atlas.width + x) * 4).toUSize
+            (a.atlas.width * 4).toUSize (w * 4).toUSize h.toUSize then return false
+  return true
+
+/-- Render only a dirty rectangle, preserving pixels outside it and culling unchanged visual
+primitives. The scene remains authoritative: structural clip/layer commands are retained. -/
+def renderFrameDamage (ctx : VulkanContext) (clearColor : Color) (atlas : Text.GlyphAtlasCache)
+    (dirty : Rect) (scene : Scene) : IO VulkanContext := do
+  let fullDamage := dirty.x ≤ 0 && dirty.y ≤ 0 && dirty.right ≥ (ctx.width : Int) && dirty.bottom ≥ (ctx.height : Int)
+  let some prev := ctx.previousPaint | return ← renderFrame ctx clearColor atlas scene
+  if fullDamage || prev.width != ctx.width || prev.height != ctx.height || prev.clear != clearColor ||
+      ctx.framebuffer.size != ctx.width * ctx.height * 4 || hasGlobalEffect scene || hasGlobalEffect prev.scene then
+    return ← renderFrame ctx clearColor atlas scene
+  let vp : Rect := ⟨0,0,ctx.width,ctx.height⟩
+  let profile := (← IO.getEnv "ORB_U7_PROFILE") == some "1"
+  let t0 ← IO.monoNanosNow
+  let some dirty := changedBounds vp prev.scene scene | return ← renderFrame ctx clearColor atlas scene
+  let t1 ← IO.monoNanosNow
+  if prev.pages.size != atlas.pages.size then return ← renderFrame ctx clearColor atlas scene
+  for i in [:prev.pages.size] do
+    let a := prev.pages[i]!
+    let b := atlas.pages[i]!
+    if !samplesUnchanged prev.scene i a b then
+      return ← renderFrame ctx clearColor atlas scene
+  if dirty.w == 0 || dirty.h == 0 then
+    if profile then IO.eprintln s!"u7-paint-ns {t1-t0} {(← IO.monoNanosNow)-t1} 0 0 0"
+    return { ctx with
+      previousPaint := some ⟨scene, atlas.pages, clearColor, ctx.width, ctx.height⟩
+      lastDamagePixels := 0
+      lastDrawnPrims := 0
+      partialFrames := ctx.partialFrames + 1 }
+  let t2 ← IO.monoNanosNow
+  -- In profile mode make the copy-on-write allocation explicit so it can be
+  -- timed separately from clearing and painting. Ordinary runs retain COW.
+  let initial := if profile then ctx.framebuffer.copySlice 0 ByteArray.empty 0 ctx.framebuffer.size else ctx.framebuffer
+  let ctx := { ctx with framebuffer := ByteArray.empty }
+  let t3 ← IO.monoNanosNow
+  let mut initial := initial
+  let mut paint := dirty
+  if let some (band, shift) := scrollBand prev.scene scene dirty vp then
+    initial := FFI.scrollRows initial ((band.y.toNat*ctx.width+band.x.toNat)*4).toUSize
+      (ctx.width*4).toUSize (band.w.toNat*4).toUSize band.h.toNat.toUSize shift.toUSize
+    paint := { dirty with y := band.bottom, h := dirty.bottom - band.bottom }
+    if profile then IO.eprintln s!"u7-scroll-reuse dy={shift} pixels={band.w*band.h}"
+  let (fb, insts) := rasterizeSceneInto ctx.width ctx.height clearColor atlas (some initial) (some paint) scene
+  let t4 ← IO.monoNanosNow
+  let _ ← stageInstances ctx insts
+  if profile then IO.eprintln s!"u7-paint-ns {t1-t0} {t2-t1} {t3-t2} {t4-t3} {(← IO.monoNanosNow)-t4}"
+  let clipped := intersectRect { x := 0, y := 0, w := (ctx.width : Int), h := (ctx.height : Int) } dirty
+  let pixels := (max 0 clipped.w * max 0 clipped.h).toNat
+  return {
+    ctx with
+    framebuffer := fb
+    previousPaint := some ⟨scene, atlas.pages, clearColor, ctx.width, ctx.height⟩
+    lastDrawnPrims := insts.size
+    lastDamagePixels := pixels
+    partialFrames := ctx.partialFrames + 1
+  }
 
 /-- Compute IEEE 802.3 CRC-32 for a PNG chunk (`type ++ data`). -/
 def crc32 (data : ByteArray) : UInt32 := Id.run do

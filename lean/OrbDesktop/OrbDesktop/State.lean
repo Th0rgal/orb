@@ -253,13 +253,20 @@ inductive ActiveModal where
   | newMission (dialog : DialogSpec) (titleField : FieldSpec) (repoField : FieldSpec) (modelSelect : SelectSpec)
   deriving DecidableEq, Repr, Inhabited
 
+def rosterViewportId : WidgetId := 970
+def transcriptViewportId : WidgetId := 971
+
 /-- Complete single-owner pure state of the Orb Desktop shell. -/
 structure DesktopState where
   screen : ScreenId := .missionTranscript
   theme : Theme := orbDarkTheme
   scale120 : Nat := 120
   scroll : ScrollPolicyState := {}
+  rosterTopSub : SubPx := 0
   stream : StreamCoalescer := Orb.Stream.Coalescer.empty
+  liveData : Bool := false
+  connectionBinding : String := ""
+  openMission : Option String := none
   syncCursor : SyncCursorState := {}
   sidebarRows : List ChromeSidebarRow := []
   missionCards : List MissionSummaryCard := []
@@ -274,6 +281,28 @@ structure DesktopState where
   missionArchived : Bool := false
   sidePanelOpen : Bool := false
   deriving Repr, Inhabited
+
+/-- A failed bootstrap or invalidated identity must not fall back to golden fixtures. -/
+def DesktopState.liveUnavailable (isDark := true) (scale120 := 120) : DesktopState :=
+  { liveData := true, screen := .controlEmpty, theme := if isDark then orbDarkTheme else orbLightTheme
+    scale120, syncCursor := { epoch := 0, seq := 0 } }
+
+def DesktopState.selectedCard (st : DesktopState) : Option MissionSummaryCard :=
+  st.openMission.bind fun mid => st.missionCards.find? (·.missionId == mid)
+
+def DesktopState.hasLiveConnection (st : DesktopState) : Bool := st.liveData && !st.connectionBinding.isEmpty
+
+def DesktopState.headerTitle (st : DesktopState) : String :=
+  if st.liveData && !st.hasLiveConnection then "Core unavailable"
+  else (st.selectedCard.map (·.title)).getD st.screen.headerTitle
+
+private def resetSelection (st : DesktopState) (card : Option MissionSummaryCard) : DesktopState :=
+  let mid := card.map (·.missionId)
+  { st with
+    openMission := mid, stream := { shown := [], pending := [], renders := 1 }, scroll := {}
+    composer := { isRunning := (card.map (·.status)) == some "active" || (card.map (·.status)) == some "running" }
+    messageSent := false, missionStopped := false, missionArchived := false, sidePanelOpen := false
+    sidebarRows := st.sidebarRows.map fun row => { row with selected := row.widgetId == (card.map (·.widgetId)).getD 101 } }
 
 /-! ## 3. Canonical Screen Fixtures (`01` .. `09`) -/
 
@@ -499,7 +528,7 @@ def composerDamageRect (scale120 : Nat) (viewport : Rect) : Rect :=
 
 /-- Pure event reducer for `DesktopState`. A text, preedit or IME edit damages the composer
 band exactly when it changed the composer buffer; `viewport` is the window in device pixels. -/
-def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev : Event) :
+private def stepDesktopInput (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev : Event) :
     DesktopState × Damage :=
   let composer :=
     match ev with
@@ -541,7 +570,69 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
     | _ => false
   if !actionChanged && composer == st.composer then (st, none)
   else
-    let dmg := if composer != st.composer then composerDamageRect scale120 viewport else viewport
+    -- Only the transcript has a fixed bottom composer. Other screens can center
+    -- the editor; without its layout bounds use the full viewport.
+    let dmg := if composer != st.composer && st.screen == .missionTranscript then composerDamageRect scale120 viewport else viewport
+    let next := if next.openMission.isSome && next.screen != .missionTranscript then
+      resetSelection next none else next
     (next, Damage.add none dmg)
+
+def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev : Event) :
+    DesktopState × Damage := Id.run do
+  if st.liveData then
+    match ev with
+    | .text _ | .preedit .. | .imeBatch .. => return (st, none)
+    | _ => pure ()
+    if let .activate id := ev then
+      if id == 2 then return (st, none) -- native Send/Stop have no authorized effect implementation
+      if let some card := st.missionCards.find? (·.widgetId == id) then
+        if st.openMission == some card.missionId then return (st, none)
+        return (resetSelection { st with screen := .missionTranscript } (some card), some viewport)
+  return stepDesktopInput scale120 viewport st ev
+
+/-- Device-pixel band occupied by the live transcript. Stream deltas repaint this band only; the
+sidebar, header and composer retain their framebuffer pixels. -/
+def transcriptDamageRect (scale120 : Nat) (viewport : Rect) (live := false) : Rect :=
+  let x0 := floorDev scale120 (Int.ofNat chromeSidebarWidthSub)
+  let y0 := ceilDev scale120 (Int.ofNat chromeHeaderHeightSub)
+  let bottom := viewport.bottom - (if live then 0 else ceilDev scale120 (Int.ofNat chromeComposerHeightSub))
+  { x := viewport.x + x0, y := viewport.y + y0, w := viewport.w - x0, h := max 0 (bottom - (viewport.y + y0)) }
+
+/-- Queue a streamed text delta without requesting a redraw. The next display tick flushes all
+queued deltas together, using the coalescer proved in `Orb.Stream`. -/
+def enqueueStreamDelta (st : DesktopState) (delta : String) : DesktopState :=
+  { st with stream := st.stream.pushDelta delta }
+
+/-- Compatibility name for callers that already use the reducer vocabulary. -/
+abbrev pushStreamDelta := enqueueStreamDelta
+
+/-- The committed streamed text in display order. -/
+def streamedText (st : DesktopState) : String :=
+  String.intercalate "" st.stream.shown
+
+/-- Flush one display frame of streamed text. Empty frames are true no-ops; a burst of deltas
+produces one transcript damage rectangle and one coalescer render. -/
+def flushStreamFrame (scale120 : Nat) (viewport : Rect) (st : DesktopState) : DesktopState × Damage :=
+  let stream' := st.stream.flushFrame
+  if stream'.renders == st.stream.renders then
+    (st, none)
+  else
+    ({ st with stream := stream' }, Damage.add none (transcriptDamageRect scale120 viewport st.liveData))
+
+/-- Queue and flush a batch at the display boundary. This is the native adapter for the
+`Orb.Stream.Coalescer` contract: N deltas become one visible frame. -/
+def applyStreamFrame (scale120 : Nat) (viewport : Rect) (st : DesktopState)
+    (deltas : List String) : DesktopState × Damage :=
+  let queued := deltas.foldl pushStreamDelta st
+  flushStreamFrame scale120 viewport queued
+
+/-- RemoteDispatch emits cumulative content, including authoritative corrections. -/
+def applyLiveText (scale : Nat) (viewport : Rect) (st : DesktopState) (mission text : String) :
+    DesktopState × Damage :=
+  if !st.liveData || st.screen != .missionTranscript || st.openMission != some mission || streamedText st == text then
+    (st, none)
+  else
+    -- Even an empty replacement is a real frame (turn boundary / access loss).
+    flushStreamFrame scale viewport { st with stream := { st.stream with shown := [], pending := [text] } }
 
 end OrbDesktop

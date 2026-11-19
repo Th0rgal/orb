@@ -245,14 +245,85 @@ def emitPayloadPrims (scale120 : Nat) (box : ComputedBox) : WidgetPayload → Li
   let b0 := min a.bottom b.bottom
   { x := x0, y := y0, w := max 0 (r0 - x0), h := max 0 (b0 - y0) }
 
-/-- Output of lowering a laid-out widget tree into a Z-ordered `Scene` (`Array Prim`), tab order, and hit regions. -/
+/-- Stable paint record for one explicitly identified widget. The effect bounds include shadows,
+borders and text geometry, so replacing or moving a node invalidates both its old and new pixels. -/
+structure SceneNodeRecord where
+  id : WidgetId
+  effectBoundsDev : Rect
+  fingerprint : UInt64
+  deriving DecidableEq, Repr, Inhabited
+
+/-- Conservative diff result for identified scene nodes. -/
+structure SceneDiff where
+  damage : Damage := none
+  fullRedraw : Bool := false
+  changed : List WidgetId := []
+  deriving DecidableEq, Repr, Inhabited
+
+/-- Output of lowering a laid-out widget tree into a Z-ordered `Scene` (`Array Prim`), tab order,
+hit regions, and stable records for changed-node damage tracking. -/
 structure SceneOutput where
   prims : Scene
   focusableOrder : List WidgetId
   hitRegionsSub : List (WidgetId × Rect)
   hitRegionsDev : List (WidgetId × Rect)
   boundsDamage : Damage
+  nodeRecords : Array SceneNodeRecord := #[]
   deriving Repr, Inhabited
+
+/-- Fingerprint paint-affecting node content without including child nodes, which are tracked by
+separate records. -/
+def nodeFingerprint (node : WidgetNode) (box : ComputedBox) : UInt64 :=
+  hash s!"{repr node.styleOf}|{repr node.payloadOf}|{repr box.rectDev}|{repr box.lines}|{repr box.focusedBorderPrim}"
+
+/-- Expand a node's layout damage enough to cover local shadows, focus rings, and decorative
+branches. This is deliberately conservative: under-invalidation leaves stale pixels, while a
+slightly larger dirty box still preserves the damage-only path. -/
+def effectBounds (r : Rect) : Rect :=
+  { x := r.x - 64, y := r.y - 64, w := r.w + 128, h := r.h + 128 }
+
+/-- Collect explicitly identified nodes in document order. Anonymous nodes remain covered by the
+existing conservative root damage path. -/
+def collectNodeRecords : WidgetNode → ComputedBox → Array SceneNodeRecord
+  | node, box =>
+    match node with
+    | .mk id _ _ _ _ children =>
+      let self := match id with
+        | none => #[]
+        | some wid =>
+          let record : SceneNodeRecord :=
+            { id := wid
+              effectBoundsDev := effectBounds box.damageRectDev
+              fingerprint := nodeFingerprint node box }
+          #[record]
+      self ++ collectChildren children box.children
+where
+  collectChildren : List WidgetNode → List ComputedBox → Array SceneNodeRecord
+    | [], _ => #[]
+    | _, [] => #[]
+    | n :: ns, b :: bs => collectNodeRecords n b ++ collectChildren ns bs
+
+private def findNodeRecord (records : Array SceneNodeRecord) (id : WidgetId) : Option SceneNodeRecord :=
+  records.find? (·.id == id)
+
+/-- Diff node records, unioning both old and new effect bounds for moved/resized/replaced nodes. -/
+def diffSceneNodes (before after : Array SceneNodeRecord) : SceneDiff :=
+  let ids := ((before.toList.map (·.id)) ++ (after.toList.map (·.id))).eraseDups
+  ids.foldl (fun acc id =>
+    match findNodeRecord before id, findNodeRecord after id with
+    | some old, some new =>
+      if old.fingerprint == new.fingerprint && old.effectBoundsDev == new.effectBoundsDev then acc
+      else
+        { damage := Damage.add (Damage.add acc.damage old.effectBoundsDev) new.effectBoundsDev,
+          changed := acc.changed ++ [id] }
+    | some old, none =>
+      { damage := Damage.add acc.damage old.effectBoundsDev, changed := acc.changed ++ [id] }
+    | none, some new =>
+      { damage := Damage.add acc.damage new.effectBoundsDev, changed := acc.changed ++ [id] }
+    | none, none => acc) {}
+
+@[inline] def SceneOutput.diff (before after : SceneOutput) : SceneDiff :=
+  diffSceneNodes before.nodeRecords after.nodeRecords
 
 /-- Lower a widget node and its paired `ComputedBox` into balanced `Prim` list, focusable tab order, and hit regions. -/
 def lowerWidgetPair (scale120 : Nat) (focusState : FocusState) (theme : Theme)
@@ -363,7 +434,7 @@ where
 
 /-- Lower a laid-out widget tree (`WidgetNode` + `ComputedBox`) into a `SceneOutput`. -/
 def buildSceneFromLayout (scale120 : Nat) (focusState : FocusState) (theme : Theme)
-    (rootWidget : WidgetNode) (rootBox : ComputedBox) : SceneOutput :=
+    (rootWidget : WidgetNode) (rootBox : ComputedBox) (recordNodes := true) : SceneOutput :=
   let (primsList, focusOrder, hitsSub, hitsDev) :=
     lowerWidgetPair scale120 focusState theme none none rootWidget rootBox
   let dmg := Damage.add none rootBox.damageRectDev
@@ -371,7 +442,8 @@ def buildSceneFromLayout (scale120 : Nat) (focusState : FocusState) (theme : The
     focusableOrder := focusOrder,
     hitRegionsSub := hitsSub,
     hitRegionsDev := hitsDev,
-    boundsDamage := dmg }
+    boundsDamage := dmg,
+    nodeRecords := if recordNodes then collectNodeRecords rootWidget rootBox else #[] }
 
 /-- Perform layout and scene lowering in one pure pass from a declarative `WidgetNode` root. -/
 def renderWidgetTree (scale120 : Nat) (availW availH : SubPx)

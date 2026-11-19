@@ -80,6 +80,35 @@ inductive Prim where
   | backdropBlur (sigma : Nat)
   deriving DecidableEq, Repr
 
+namespace Prim
+
+/-- Conservative device-pixel bounds for damage culling. Structural commands return `none` because
+    they must remain in the scene to preserve clip/layer nesting. -/
+def bounds : Prim → Option Rect
+  | .quad r _ _ _ _ => some r
+  | .shadow r _ _ blur =>
+    let pad : Int := (blur * 2 : Int)
+    some { x := r.x - pad, y := r.y - pad, w := r.w + 2 * pad, h := r.h + 2 * pad }
+  | .glyph _ dst _ _ => some dst
+  | .clipPush _ => none
+  | .clipPop => none
+  | .rrect r _ _ _ _ => some r
+  | .linear r _ _ _ _ => some r
+  | .mask _ _ dst _ => some dst
+  | .image _ _ dst _ => some dst
+  | .clipPushRounded _ _ => none
+  | .layerPush _ => none
+  | .layerPop => none
+  | .backdropBlur _ => none
+
+def intersects (p : Prim) (dirty : Rect) : Bool :=
+  match p.bounds with
+  | none => true
+  | some r =>
+    !(r.right ≤ dirty.x || dirty.right ≤ r.x || r.bottom ≤ dirty.y || dirty.bottom ≤ r.y)
+
+end Prim
+
 abbrev Scene := Array Prim
 
 /-- Accumulated damage: `none` means nothing to redraw. -/

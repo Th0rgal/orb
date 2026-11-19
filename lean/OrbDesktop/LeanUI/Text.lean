@@ -1,4 +1,5 @@
 import LeanUI.Defs
+import LeanUI.Layout
 import LeanUI.Kernel
 import LeanUI.FFI
 /-!
@@ -142,10 +143,20 @@ structure AtlasPageBuffer where
 
 namespace AtlasPageBuffer
 
+/-- Allocate packed pixels directly; an `Array UInt8` temporary needs a pointer per byte. -/
+def zeroBytes (n : Nat) : ByteArray := Id.run do
+  if n == 0 then return ByteArray.empty
+  let mut out := (ByteArray.emptyWithCapacity n).push 0
+  -- Extend in contiguous chunks; avoid a Lean loop per zero byte.
+  let block := ByteArray.mk (Array.replicate (min 4096 n) 0)
+  while out.size < n do
+    out := block.copySlice 0 out out.size (min block.size (n - out.size))
+  return out
+
 /-- Create an empty zero-initialized `pw × ph` RGBA8 atlas page. -/
 def create (pw ph : Nat) : AtlasPageBuffer :=
   { atlas := { width := pw, height := ph, shelves := [], nextY := 0 }
-    rgba := ByteArray.mk (Array.replicate (pw * ph * 4) 0) }
+    rgba := ByteArray.empty }
 
 /-- Blit a `RasterizedGlyph` into `dstRect` on this page.
 R8 glyphs are stored with `(255, 255, 255, cov)` and BGRA8 glyphs are swizzled to RGBA8. -/
@@ -155,6 +166,13 @@ def blitGlyph (page : AtlasPageBuffer) (dstRect : Rect) (rg : RasterizedGlyph) :
   let dx := dstRect.x.toNat
   let dy := dstRect.y.toNat
   let mut buf := page.rgba
+  -- Keep the shelf geometry fixed; untouched trailing rows sample transparent.
+  -- Allocate bands on first write so a snapshot copies only populated rows.
+  let rows := min ph (((dy + rg.height + 63) / 64) * 64)
+  let needed := rows * pw * 4
+  if needed > buf.size then
+    let padding := zeroBytes (needed - buf.size)
+    buf := padding.copySlice 0 buf buf.size padding.size
   for row in [0:rg.height] do
     let y := dy + row
     if y < ph then
@@ -186,24 +204,37 @@ def blitGlyph (page : AtlasPageBuffer) (dstRect : Rect) (rg : RasterizedGlyph) :
 
 end AtlasPageBuffer
 
+structure ShapeCacheEntry where
+  fontId : Nat
+  size64 : UInt32
+  text : String
+  features : String
+  glyphs : Array ShapedGlyph
+
 /-- Supersampled round-cap/round-join SVG strokes, shared by desktop chrome icons.
 The source view box is 16px; path coordinates are tenths of a logical pixel. -/
-def rasterizeIcon (paths : List (List (Int × Int))) (size : Nat) : RasterizedGlyph := Id.run do
-  let segments := paths.flatMap fun ps => ps.zip (ps.drop 1)
+def rasterizeIconReference (paths : List (List (Int × Int))) (size : Nat) : RasterizedGlyph := Id.run do
+  let segments := (paths.flatMap fun ps => ps.zip (ps.drop 1)).map fun ((ax, ay), (bx, by_)) =>
+    let dx := (bx - ax).toFloat
+    let dy := (by_ - ay).toFloat
+    (ax.toFloat, ay.toFloat, dx, dy, dx * dx + dy * dy,
+      (min ay by_ - 6).toFloat, (max ay by_ + 6).toFloat)
   let mut pixels := ByteArray.empty
   for y in [0:size] do
+    -- Coverage radius is 5.5 view units. Exclude segments outside this
+    -- scanline's expanded interval before running the 16 sample tests.
+    let lo := y.toFloat * 160 / size.toFloat
+    let hi := (y + 1).toFloat * 160 / size.toFloat
+    let active := segments.filter fun (_, _, _, _, _, ymin, ymax) => ymin ≤ hi && ymax ≥ lo
     for x in [0:size] do
       let mut coverage := 0
       for sy in [0:4] do
         for sx in [0:4] do
           let px := (x.toFloat + (sx.toFloat + 0.5) / 4) * 160 / size.toFloat
           let py := (y.toFloat + (sy.toFloat + 0.5) / 4) * 160 / size.toFloat
-          let hit := segments.any fun ((ax, ay), (bx, by_)) =>
-            let dx := (bx - ax).toFloat
-            let dy := (by_ - ay).toFloat
-            let vx := px - ax.toFloat
-            let vy := py - ay.toFloat
-            let len := dx * dx + dy * dy
+          let hit := active.any fun (ax, ay, dx, dy, len, _, _) =>
+            let vx := px - ax
+            let vy := py - ay
             let t := if len == 0 then 0 else max 0 (min 1 ((vx * dx + vy * dy) / len))
             let ex := vx - t * dx
             let ey := vy - t * dy
@@ -213,25 +244,66 @@ def rasterizeIcon (paths : List (List (Int × Int))) (size : Nat) : RasterizedGl
   return { width := size, height := size, bearingX := 0, bearingY := 0,
            format := 1, isColor := false, pixels := pixels }
 
-/-- Multi-page shelf-packed glyph atlas + `HashCache AtlasGlyphEntry` with hit/miss counters. -/
+def rasterizeIcon (paths : List (List (Int × Int))) (size : Nat) : RasterizedGlyph := Id.run do
+  if size > 1024 then return rasterizeIconReference paths size
+  let mut segments := ByteArray.empty
+  for path in paths do
+    for ((ax,ay),(bx,by_)) in path.zip (path.drop 1) do
+      for coord in [ax,ay,bx,by_] do
+        if coord < -128 || coord > 255 then return rasterizeIconReference paths size
+        -- Store signed coordinates losslessly in two little-endian bytes.
+        let biased := (coord + 128).toNat
+        segments := segments.push biased.toUInt8 |>.push (biased / 256).toUInt8
+  return { width := size, height := size, bearingX := 0, bearingY := 0,
+           format := 1, isColor := false, pixels := FFI.iconMask segments size.toUSize }
+
+/-- Short label with atlas-resolved glyph positions, scoped to the owning atlas. -/
+structure ResolvedRun where
+  face : USize
+  scale : Nat
+  text : String
+  style : TextStyle
+  run : InlineRun
+
+/-- Multi-page shelf-packed glyph atlas and bounded font/label caches. -/
 structure GlyphAtlasCache where
   pageWidth : Nat := 1024
   pageHeight : Nat := 1024
   pad : Nat := 1
   pages : Array AtlasPageBuffer := #[]
+  /-- While building a frame, allocate UVs immediately but commit new bitmaps
+  together so an immutable previous frame costs at most one page copy. -/
+  pendingUploads : Option (Array (Nat × Rect × RasterizedGlyph)) := none
   cache : HashCache AtlasGlyphEntry := {}
+  /-- Shaping results reused across frames; glyph rasterization is cached separately below. -/
+  shapeCache : Array ShapeCacheEntry := #[]
+  resolved : Array ResolvedRun := #[]
   hits : Nat := 0
   misses : Nat := 0
   deriving Inhabited
 
 namespace GlyphAtlasCache
 
+def beginUploads (ac : GlyphAtlasCache) : GlyphAtlasCache :=
+  { ac with pendingUploads := some (ac.pendingUploads.getD #[]) }
+
+def finishUploads (ac : GlyphAtlasCache) : GlyphAtlasCache := Id.run do
+  let some uploads := ac.pendingUploads | return ac
+  let mut pages := ac.pages
+  if !uploads.isEmpty then
+    pages := pages.mapIdx fun idx page => Id.run do
+      let mut out := page
+      for (p, rect, glyph) in uploads do
+        if p == idx then out := out.blitGlyph rect glyph
+      return out
+  return { ac with pages, pendingUploads := none }
+
 /-- Reset all atlas pages (`Atlas.reset`) and clear the `HashCache`. -/
 def resetAll (ac : GlyphAtlasCache) : GlyphAtlasCache :=
   let pages' := ac.pages.map fun p =>
     { atlas := p.atlas.reset
-      rgba := ByteArray.mk (Array.replicate (p.atlas.width * p.atlas.height * 4) 0) }
-  { ac with pages := pages', cache := {} }
+      rgba := ByteArray.empty }
+  { ac with pages := pages', cache := {}, resolved := #[], pendingUploads := none }
 
 /-- Allocate a padded slot `(w, h)` across pages using `Atlas.allocPadded` / `Atlas.allocPages`
 and blit the rasterized bitmap into the chosen page. -/
@@ -247,12 +319,16 @@ def insertRasterized (ac : GlyphAtlasCache) (key : GlyphKey) (rg : RasterizedGly
   for idx in [0:ac.pages.size] do
     let p := ac.pages[idx]!
     if let some (rect, atlas') := p.atlas.allocPadded ac.pad rg.width rg.height then
-      let p' := ({ p with atlas := atlas' }).blitGlyph rect rg
-      let pages' := ac.pages.set! idx p'
+      -- Modify the element in place when the atlas is uniquely owned. Holding
+      -- the old page during blit forces a 4 MiB copy for each new glyph.
+      let pages' := ac.pages.modify idx fun page =>
+        let updated := { page with atlas := atlas' }
+        if ac.pendingUploads.isSome then updated else updated.blitGlyph rect rg
       let entry : AtlasGlyphEntry :=
         { page := idx, uv := rect, bearingX := rg.bearingX, bearingY := rg.bearingY, isColor := rg.isColor }
       let cache' := ac.cache.insert hashGlyphKey key entry
-      return ({ ac with pages := pages', cache := cache', misses := ac.misses + 1 }, entry)
+      return ({ ac with pages := pages', cache := cache', misses := ac.misses + 1,
+                        pendingUploads := ac.pendingUploads.map (·.push (idx, rect, rg)) }, entry)
   -- Otherwise allocate a new page via `Atlas.allocPages` / `Atlas.allocPadded`
   let pw := max ac.pageWidth (rg.width + ac.pad)
   let ph := max ac.pageHeight (rg.height + ac.pad)
@@ -260,12 +336,14 @@ def insertRasterized (ac : GlyphAtlasCache) (key : GlyphKey) (rg : RasterizedGly
   let pageIdx := ac.pages.size
   match fresh.atlas.allocPadded ac.pad rg.width rg.height with
   | some (rect, atlas') =>
-    let fresh' := ({ fresh with atlas := atlas' }).blitGlyph rect rg
+    let allocated := { fresh with atlas := atlas' }
+    let fresh' := if ac.pendingUploads.isSome then allocated else allocated.blitGlyph rect rg
     let pages' := ac.pages.push fresh'
     let entry : AtlasGlyphEntry :=
       { page := pageIdx, uv := rect, bearingX := rg.bearingX, bearingY := rg.bearingY, isColor := rg.isColor }
     let cache' := ac.cache.insert hashGlyphKey key entry
-    return ({ ac with pages := pages', cache := cache', misses := ac.misses + 1 }, entry)
+    return ({ ac with pages := pages', cache := cache', misses := ac.misses + 1,
+                      pendingUploads := ac.pendingUploads.map (·.push (pageIdx, rect, rg)) }, entry)
   | none =>
     -- Also exercise `Atlas.allocPages` fallback
     let atlases := (ac.pages.map (·.atlas)).toList
@@ -304,6 +382,23 @@ def shapeText (f : FontHandle) (size64 : UInt32) (text : String) (features : Str
   if text.isEmpty then return #[]
   let raw ← FFI.shape f.facePtr size64 text features
   return decodeShapedGlyphs raw
+
+/-- Shape text with a small atlas-owned cache. The key includes the font, size, text, and shaping
+features, so unchanged chrome is not sent through HarfBuzz on every display tick. -/
+def shapeTextCached (ac : GlyphAtlasCache) (f : FontHandle) (size64 : UInt32) (text : String)
+    (features : String := "") : IO (GlyphAtlasCache × Array ShapedGlyph) := do
+  -- Bound retained bytes as well as entry count. Growing replies are shaped
+  -- once per new prefix; keeping those prefixes evicts reusable labels.
+  if text.utf8ByteSize > 128 then return (ac, ← shapeText f size64 text features)
+  match ac.shapeCache.find? (fun cached =>
+      cached.fontId == f.fontId && cached.size64 == size64 && cached.text == text && cached.features == features) with
+  | some cached =>
+    return (ac, cached.glyphs)
+  | none =>
+    let shaped ← shapeText f size64 text features
+    let next := ac.shapeCache.push { fontId := f.fontId, size64, text, features, glyphs := shaped }
+    let bounded := if next.size > 64 then next.extract (next.size - 64) next.size else next
+    return ({ ac with shapeCache := bounded }, shaped)
 
 /-- Rasterize a single glyph at `(size64, subpx)` or return it from `GlyphAtlasCache` on hit. -/
 def getOrRasterizeGlyph (ac : GlyphAtlasCache) (f : FontHandle) (glyphId : UInt32)
