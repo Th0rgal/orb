@@ -212,9 +212,7 @@ test('Hermes approvals, turn-only stop and reload retain the same conversation',
  await expect.poll(()=>phase).toBe('cancelled');
  expect(actions[1].path).toBe(`/api/control/missions/${id}/cloud/cancel`);
  await page.reload();
- await page.getByRole('button',{name:'Demo',exact:true}).waitFor();
- if(await page.getByRole('button',{name:'Demo',exact:true}).getAttribute('aria-expanded')!=='true')await page.getByRole('button',{name:'Demo',exact:true}).click();
- await page.locator('button.row.agent').filter({hasText:mission.title}).click();
+ await expect(page.getByRole('button',{name:`Session details: ${mission.title}`,exact:true})).toBeVisible();
  await expect(page.getByText('Marker retained.',{exact:true})).toBeVisible();
  await expect(page.getByRole('button',{name:'Harmless delegated check'})).toBeVisible();
  await page.getByLabel('Model',{exact:true}).click();
@@ -469,4 +467,3 @@ test('Hermes supports router catalog models, effort switching mid-mission withou
  await expect.poll(()=>settingsPuts.length).toBe(1);
  expect(settingsPuts[0].default_model).toBe('builtin/smart');
 });
-
