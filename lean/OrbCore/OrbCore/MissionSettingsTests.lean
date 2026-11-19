@@ -11,7 +11,9 @@ private def check (ok : Bool) (label : String) : IO Unit := do
 
 def moveRecovery (root : String) : IO Unit := do
   let path := s!"{root}/b5b-recovery"
-  let .ok store ← openCoreStore path | throw (IO.userError "B5b open")
+  -- Keep the observer opens from expiring this test's active dispatch reservations.
+  let bootEpoch := 1
+  let .ok store ← openCoreStore path bootEpoch | throw (IO.userError "B5b open")
   let sql (db : SqliteDb) (q : String) := do
     let .ok rows ← execParamQuery db q #[] | throw (IO.userError s!"B5b query: {q}")
     return rows
@@ -21,6 +23,7 @@ def moveRecovery (root : String) : IO Unit := do
         let id := family ++ suffix
         discard <| sql store.missionsDb s!"INSERT INTO missions(id,project,parent_mission_id,owner_user_id) VALUES('{id}','source','{parent}','alice');"
         discard <| sql store.projectsDb s!"INSERT INTO mcp_sessions_v1(id,mission_id,project_scope,project_scoped) VALUES('{id}','{id}','source',1);"
+        discard <| sql store.missionsDb s!"INSERT INTO dispatch_lease_intents(reservation_id,mission_id,project_slug,track,phase,boot_epoch) VALUES('{id}','{id}','source','{id}','active',{bootEpoch});"
         discard <| sql store.projectsDb s!"INSERT INTO project_track_leases(project_slug,track,reservation_id,mission_id,phase) VALUES('source','{id}','{id}','{id}','active');"
     discard <| sql store.projectsDb "CREATE TRIGGER reject_rebind BEFORE UPDATE ON mcp_sessions_v1 BEGIN SELECT RAISE(ABORT,'injected crash boundary'); END;"
     for id in #["aroot", "broot"] do
@@ -32,7 +35,7 @@ def moveRecovery (root : String) : IO Unit := do
     closeCoreStore store
     let blocked ← OrbCore.MissionMoveRecovery.startup path
     let code ← OrbCore.MissionMoveRecovery.startAfterRecovery path (do reached.set true; return 0)
-    let .ok reopenedAfterFailure ← openCoreStore path | throw (IO.userError "B5b reopen after failure")
+    let .ok reopenedAfterFailure ← openCoreStore path bootEpoch | throw (IO.userError "B5b reopen after failure")
     check (code != 0 && !(← reached.get) &&
       ((← OrbCore.MissionMoveRecovery.pending reopenedAfterFailure.missionsDb).toOption.getD #[]).size == 6)
       "B5b_startup_failure_blocks_server_and_keeps_markers"
@@ -47,7 +50,7 @@ def moveRecovery (root : String) : IO Unit := do
     closeCoreStore reopenedAfterFailure
   finally closeCoreStore store
   check (← OrbCore.MissionMoveRecovery.startup path).isOk "B5b_next_startup_repairs_after_failure"
-  let .ok reopened ← openCoreStore path | throw (IO.userError "B5b reopen")
+  let .ok reopened ← openCoreStore path bootEpoch | throw (IO.userError "B5b reopen")
   try
     let missions ← sql reopened.missionsDb
       "SELECT project FROM missions WHERE id IN ('aroot','achild','adeep','broot','bchild','bdeep') ORDER BY id;"
@@ -122,12 +125,16 @@ def missingDbRecovery (root : String) : IO Unit := do
   let .ok store ← openCoreStore path | throw (IO.userError "B5b missing-db open")
   let dbPath := s!"{path}/projects.db"
   try
-    discard <| execParamQuery store.missionsDb
+    let .ok () ← OrbCore.MissionMoveRecovery.ensureSchema store.missionsDb | throw (IO.userError "B5b marker schema")
+    let .ok _ ← execParamQuery store.missionsDb "INSERT INTO missions(id,project) VALUES('missing-db-mission','destination');" #[]
+      | throw (IO.userError "B5b missing-db mission fixture")
+    let .ok _ ← execParamQuery store.missionsDb
       "INSERT INTO pending_mission_rebinds(mission_id) VALUES('missing-db-mission');" #[]
+      | throw (IO.userError "B5b missing-db marker fixture")
     closeCoreStore store
     IO.FS.removeFile dbPath
     let refused ← OrbCore.MissionMoveRecovery.startup path
-    check (!refused.isOk) "B5b_missing_projects_db_fails_closed"
+    check (!refused.isOk && !(← (System.FilePath.mk dbPath).pathExists)) "B5b_missing_projects_db_fails_closed"
     let .ok checkStore ← openCoreStore path | throw (IO.userError "B5b missing-db reopen")
     try
       check ((← OrbCore.MissionMoveRecovery.pending checkStore.missionsDb).toOption.getD #[] == #["missing-db-mission"])
@@ -143,6 +150,7 @@ def missingDbRecovery (root : String) : IO Unit := do
     discard <| execParamQuery empty.missionsDb
       "DELETE FROM pending_mission_rebinds;" #[]
   finally closeCoreStore empty
+  IO.FS.removeFile dbPath
   let noMarker ← OrbCore.MissionMoveRecovery.startup path
   check (match noMarker with | .ok () => true | .error _ => false)
     "B5b_missing_projects_db_without_markers_succeeds"

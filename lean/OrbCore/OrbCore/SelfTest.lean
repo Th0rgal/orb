@@ -9168,6 +9168,11 @@ end OrbCore.SelfTest
 
 def main (args : List String) : IO UInt32 := do
   OrbBin.PosixExt.setenvVar "ORB_HERMETIC_TEST" "1"
+  if let some root := OrbCore.SelfTest.findFlag? args "--move-recovery-test-root" then
+    OrbCore.MissionSettingsTests.moveRecovery root
+    OrbCore.MissionSettingsTests.routeRecovery root
+    OrbCore.MissionSettingsTests.missingDbRecovery root
+    return 0
   if args.contains "--cyber-skills-only" then
     return ← OrbCore.SelfTest.runCyberSkillGroup
   if args.contains "--queue-continuations-only" then

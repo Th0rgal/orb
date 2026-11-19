@@ -84,6 +84,8 @@ private def attemptStartup (root : String) : IO (Except String Unit) := do
       let .ok pendingIds ← pending m | throw (IO.userError "marker read failed")
       ids := pendingIds
       if ids.isEmpty then return .ok ()
+      if !(← (System.FilePath.mk s!"{root}/projects.db").pathExists) then
+        return .error s!"mission_ids={ids}; step=projects-open; projects database is missing"
       let .ok p ← openSqliteDb s!"{root}/projects.db" "SELECT 1;"
         | throw (IO.userError "projects database open failed")
       try
