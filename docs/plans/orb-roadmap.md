@@ -201,10 +201,21 @@ same node (then split or restate the node).
 | C4 | Deploy lean.ci controller, engines and shim from C3 | C3 | verify | Deployed SHAs recorded |
 | C5 | lean-ci GitHub App: Administration read/write, installed on `Th0rgal/orb` | — | done (installation 181598910, reported by the operator 16 Nov) | App installation visible |
 | C6 | Set `ORB_LEAN_RUNNERS=true`; one master run green on lean.ci labels | C4, C5, C9 | done | Run URL with lean labels on the jobs |
-| C7 | Measure and record: web-only PR, warm Lean PR, cold full run | C6 | ready | Three run URLs with timings; targets met or a node opened per miss |
+| C7 | Measure web-only PR, warm Lean PR and cold full CI (receipts below) | C6 | verify | Web and warm measured; full run missed even with some warm artifacts. C7c owns the fully cold confirmation. |
+| C7a | Reduce the web PR critical path: inspect the 6m36s between the last browser shard and the start of CI OK | — | ready | A web-only PR builds and tests the changed web inputs and reaches CI OK in <5 min from run creation |
+| C7b | Profile Docker (17m04s) and Test (15m02s) on a warm Lean PR; reduce both critical paths | — | ready | A Lean PR with a logged build-cache restore runs the affected tests and reaches CI OK in <10 min |
+| C7c | Measure full CI with isolated empty project-build caches (including desktop binaries, web dist and Docker layers); separate runner wait from cold build time | — | ready | All planned jobs execute, logs establish cold project outputs without evicting shared caches, and CI OK finishes in <20 min |
 | C8 | Every Orb binary builds through turbo-lean with no raw-Lake fallback, locally and in CI. **C8a:** `nix/package.nix:220-224` sets `ORB_SKIP_TURBO_LEAN` and `ORB_ALLOW_RAW_LAKE_FALLBACK`, and no workflow builds Nix. **C8b:** `scripts/build_orb_bins.sh:309-320` fails closed when turbo-lean is absent unless `ORB_ALLOW_RAW_LAKE_FALLBACK=1` (fixed in #1836) | — | ready | `scripts/build_orb_bins.sh` builds all 12 binaries with the fallback variable unset; the Nix build no longer needs either variable |
 | C9 | The lean.ci runner image has the tools the workflows use. With `ORB_LEAN_RUNNERS=true` (16 Nov, 11:56Z to 12:29Z) the master runs of 12951704 failed on `lean-16vcpu-ubuntu-2604` and `lean-32vcpu-ubuntu-2604` runners: `cargo: command not found` in `setup-turbo-lean`, `docker: command not found` at job setup | — | ready | A master run on lean labels passes `setup-turbo-lean` and one job that needs docker |
 | C8c | `scripts/ops/orb-deploy:73-74` builds prod with raw `lake build`: move the deploy host to turbo-lean, or record the deploy build as exempt from C8 | O5 | blocked (Thomas) | The deploy build runs through turbo-lean, or the exemption is written in section 6 |
+
+**C7 timing receipts.** Wall clock for each `CI` workflow, attempt 1: GitHub run `created_at` to the `CI OK` job's `completed_at`, including queue time. Times below are UTC; parallel job durations are not added together.
+
+| Sample | Start → CI OK | Scope and cache evidence | Target |
+| --- | --- | --- | --- |
+| [Web-only PR #1930](https://github.com/Th0rgal/orb/actions/runs/44278806268) | Nov 18 09:44:49 → 09:56:34 · **11m45s** | Only `orb/src/missionHierarchy.ts` and its unit test changed. [Orb build](https://github.com/Th0rgal/orb/actions/runs/44278806268/job/134714134890) restored modules, missed dist and ran Vite; unit and all eight browser shards passed. Lean Test was out of scope. | <5 min: miss → C7a |
+| [Warm Lean PR #1945](https://github.com/Th0rgal/orb/actions/runs/44445622666) | Nov 19 02:37:03 → 02:54:46 · **17m43s** | Five `lean/OrbCore` files changed. [Test](https://github.com/Th0rgal/orb/actions/runs/44445622666/job/135297058362) on `lean-4vcpu-ubuntu-2604` restored the `lean-build-…-test` fallback key and logged OrbNetLeaf and OrbClient cache hits; Test and Docker both ran. | <10 min: miss → C7b |
+| [Full master dispatch](https://github.com/Th0rgal/orb/actions/runs/44028707423) | Nov 17 06:05:59 → 07:15:10 · **69m11s** | All 21 jobs passed, including eight browser shards. Plan started after 39m42s. [Test](https://github.com/Th0rgal/orb/actions/runs/44028707423/job/133871230126) on `lean-32vcpu-ubuntu-2604`, Harness and Policy missed the Lean build cache; Test alone took 24m23s. Web dist missed, but Desktop restored binaries and Docker restored a Lean build cache. | <20 min: miss → C7c; mixed-cache full run, not a fully cold timing |
 
 ### U. LeanUI
 
@@ -363,4 +374,4 @@ Only these. Each one names what it unblocks.
 Rows the reconciler dispatches, in order. A row leaves the queue by PR when it
 is done or dropped.
 
-`U5`, `U8`, `U6`, `U7`, `R32`, `U3`, `R29`, `X7`, `R30`, `B1`, `B2`, `R26`, `X2`, `R13`, `R14`, `R15`, `R11`, `M3`, `L5`, `R16`, `R17`, `R18`, `R19`, `R20`, `R21`, `R22`, `R23`, `B2b`, `O3`, `O4`, `O12`, `R31`
+`U5`, `U8`, `U6`, `U7`, `U3`, `X7`, `R30`, `M3`, `L5`, `R16`, `R17`, `R18`, `R19`, `R21`, `O3`, `O4`, `X3`, `R10`, `C7`, `C8`, `R31`
