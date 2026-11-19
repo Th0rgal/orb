@@ -285,6 +285,39 @@ def run (root : String) : IO Unit := do
     check (listStatus == 200 && ((all.fieldArr? "requests").getD #[]).size == 3 && !has all "tether1.") "the daemon's list has every request and no token"
     check ((← send "POST" "/api/mac-tether/requests/00000000-0000-4000-8000-000000000000/approve" admin approval).1 == 404)
       "an unknown request is not found"
+    let lan := "192.0.2.10:51889"
+    let wan := "198.51.100.10:51889"
+    let mut failures : Array String := #[]
+    for (placement, expected) in #[("host", lan), ("remote", wan), ("remote_node", wan)] do
+      discard <| sql "UPDATE missions SET placement_kind=?1 WHERE id='admin-other';" #[placement]
+      let request ← call otherMission "request_macbook_tether" requestArgs
+      let some id := (request.fieldOrNull "result").fieldStr? "request_id" | throw (IO.userError "endpoint fixture")
+      let (code, doc) ← send "POST" s!"/api/mac-tether/requests/{id}/approve" admin
+        ((approval.setField "mac_direct_endpoint" (.str lan)).setField "mac_wan_endpoint" (.str wan))
+      if code != 200 || (doc.fieldOrNull "tether").fieldStr? "mac_direct_endpoint" != some expected then
+        failures := failures.push s!"{placement}: expected {expected}"
+    discard <| sql "INSERT INTO mac_tether_requests(id,mission_id,state,lease_token,session_scoped) VALUES('persistent','admin-mission','approved','keep',0);"
+    for status in #["cancelled", "completed", "failed", "interrupted", "blocked", "not_feasible", "acknowledged", "archived", "paused", "stopped"] do
+      discard <| sql "UPDATE missions SET status='active' WHERE id='admin-mission';"
+      discard <| sql "INSERT INTO mac_tether_requests(id,mission_id,state,lease_token,session_scoped) VALUES(?1,'admin-mission','approved','fixture',1);" #[status]
+      for waiting in #["pending", "waiting_background", "waiting_rate_limit", "awaiting_user"] do
+        discard <| sql "UPDATE missions SET status=?1 WHERE id='admin-mission';" #[waiting]
+        check ((← sql "SELECT lease_token FROM mac_tether_requests WHERE id=?1;" #[status])[1]? == some #["fixture"]) s!"{waiting} keeps the session"
+      discard <| sql "UPDATE missions SET status=?1 WHERE id='admin-mission';" #[status]
+      if (← sql "SELECT state,lease_token FROM mac_tether_requests WHERE id=?1;" #[status])[1]? != some #["revoked", ""] then
+        failures := failures.push status
+      let epoch ← sql "SELECT epoch FROM tether_lifecycle_epoch;"
+      discard <| sql "UPDATE missions SET status=?1 WHERE id='admin-mission';" #[status]
+      check ((← sql "SELECT epoch FROM tether_lifecycle_epoch;") == epoch) "terminal replay is a no-op"
+    check ((← sql "SELECT state,lease_token FROM mac_tether_requests WHERE id='persistent';")[1]? == some #["approved", "keep"]) "unscoped lease survives"
+    check ((← sql "SELECT COUNT(*) FROM mac_tether_requests WHERE mission_id='admin-other' AND state='approved';")[1]? == some #["3"]) "another mission's leases survive"
+    let pendingDelete ← call otherMission "request_macbook_tether" requestArgs
+    check (pendingDelete.fieldBool? "ok" == some true) "pending deletion fixture"
+    let beforeDelete ← rt.gen.atomically get
+    discard <| sql "DELETE FROM missions WHERE id='admin-other';"
+    check ((← sql "SELECT COUNT(*) FROM mac_tether_requests WHERE mission_id='admin-other' AND state='revoked' AND lease_token='';")[1]? == some #["4"]) "deletion revokes pending and approved leases atomically"
+    check ((← waitForMacTetherGen rt beforeDelete 3000) != beforeDelete && (← rt.slotsMu.atomically get).isEmpty) "durable cleanup invalidates cached relay slots and wakes the daemon"
+    check failures.isEmpty s!"tether regressions: {repr failures}"
   finally
     stopMacTetherRuntime rt
     closeCoreStore store
