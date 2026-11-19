@@ -238,6 +238,16 @@ private def drawRoundedBox (vw vh : Nat) (fb : ByteArray) (curClip r : Rect)
   let (br, bg, bb, ba) := unpackColor borderCol
   let (bt, brW, bbW, blW) := borders
   let hasBorder := (bt > 0 || brW > 0 || bbW > 0 || blW > 0) && ba > 0
+  if fa == 0 && !hasBorder then return out
+  if fa == 255 && !hasBorder && radii == (0, 0, 0, 0) then
+    -- Pixel-aligned opaque rectangles have constant coverage: build one
+    -- scanline, then copy it into the clipped span of each affected row.
+    let w := (x1 - x0).toNat
+    let mut row := ByteArray.emptyWithCapacity (w * 4)
+    for _ in [:w] do row := row.push fr |>.push fg |>.push fbC |>.push fa
+    for y in [y0.toNat:y1.toNat] do
+      out := row.copySlice 0 out ((y * vw + x0.toNat) * 4) row.size
+    return out
   let innerRect : Rect :=
     { x := r.x + (blW : Int)
       y := r.y + (bt : Int)

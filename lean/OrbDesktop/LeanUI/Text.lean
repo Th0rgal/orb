@@ -203,21 +203,27 @@ structure ShapeCacheEntry where
 /-- Supersampled round-cap/round-join SVG strokes, shared by desktop chrome icons.
 The source view box is 16px; path coordinates are tenths of a logical pixel. -/
 def rasterizeIcon (paths : List (List (Int × Int))) (size : Nat) : RasterizedGlyph := Id.run do
-  let segments := paths.flatMap fun ps => ps.zip (ps.drop 1)
+  let segments := (paths.flatMap fun ps => ps.zip (ps.drop 1)).map fun ((ax, ay), (bx, by_)) =>
+    let dx := (bx - ax).toFloat
+    let dy := (by_ - ay).toFloat
+    (ax.toFloat, ay.toFloat, dx, dy, dx * dx + dy * dy,
+      (min ay by_ - 6).toFloat, (max ay by_ + 6).toFloat)
   let mut pixels := ByteArray.empty
   for y in [0:size] do
+    -- Coverage radius is 5.5 view units. Exclude segments outside this
+    -- scanline's expanded interval before running the 16 sample tests.
+    let lo := y.toFloat * 160 / size.toFloat
+    let hi := (y + 1).toFloat * 160 / size.toFloat
+    let active := segments.filter fun (_, _, _, _, _, ymin, ymax) => ymin ≤ hi && ymax ≥ lo
     for x in [0:size] do
       let mut coverage := 0
       for sy in [0:4] do
         for sx in [0:4] do
           let px := (x.toFloat + (sx.toFloat + 0.5) / 4) * 160 / size.toFloat
           let py := (y.toFloat + (sy.toFloat + 0.5) / 4) * 160 / size.toFloat
-          let hit := segments.any fun ((ax, ay), (bx, by_)) =>
-            let dx := (bx - ax).toFloat
-            let dy := (by_ - ay).toFloat
-            let vx := px - ax.toFloat
-            let vy := py - ay.toFloat
-            let len := dx * dx + dy * dy
+          let hit := active.any fun (ax, ay, dx, dy, len, _, _) =>
+            let vx := px - ax
+            let vy := py - ay
             let t := if len == 0 then 0 else max 0 (min 1 ((vx * dx + vy * dy) / len))
             let ex := vx - t * dx
             let ey := vy - t * dy
@@ -272,8 +278,9 @@ def insertRasterized (ac : GlyphAtlasCache) (key : GlyphKey) (rg : RasterizedGly
   for idx in [0:ac.pages.size] do
     let p := ac.pages[idx]!
     if let some (rect, atlas') := p.atlas.allocPadded ac.pad rg.width rg.height then
-      let p' := ({ p with atlas := atlas' }).blitGlyph rect rg
-      let pages' := ac.pages.set! idx p'
+      -- Modify the element in place when the atlas is uniquely owned. Holding
+      -- the old page during blit forces a 4 MiB copy for each new glyph.
+      let pages' := ac.pages.modify idx fun page => ({ page with atlas := atlas' }).blitGlyph rect rg
       let entry : AtlasGlyphEntry :=
         { page := idx, uv := rect, bearingX := rg.bearingX, bearingY := rg.bearingY, isColor := rg.isColor }
       let cache' := ac.cache.insert hashGlyphKey key entry

@@ -131,6 +131,29 @@ the new command stream even to recognize a fully clipped append.
 All 20 independent full-frame comparisons, atlas/clip invalidation cases and
 36 byte-identical PNGs passed. Budgets remain unchanged; acceptance still fails.
 
+### Strict native build and cold-render follow-up
+
+On `56053d301` kernel ABI found stale generated FFI manifests; Desktop Shell
+and parity rejected `LeanUI.FFI.sameRows` at native build time. `51c61264a`
+regenerated both manifests. The allowlist check and strict warm-cache edit
+regression passed without raw Lake fallback. Both measurements below use the
+same pinned turbo-lean native build mode, Linux host, desktop sysroot and
+three 1470×923 runs (not the raw Lake numbers above).
+
+| Build | Startup ms | Open ms | Frame p50 ms | Frame p99 ms | Peak RSS MiB |
+|---|---:|---:|---:|---:|---:|
+| Repair only | 557.30 | 767.98 | 3.86 | 79.04 | 56.03 |
+| Atlas page modification, opaque scanlines, scanline-filtered icon segments | 276.72 | 323.77 | 5.24 | 87.79 | 63.43 |
+
+In a separate profile cold widget construction/shaping fell from 339.81 to
+145.64 ms. Cold labels include vector-icon mask construction: precomputing
+segment geometry and excluding distant segments retains the 16 sample points
+and coverage formula. The first changed-region raster (53,265 pixels) fell
+from 66.31 to 59.97 ms in the trace, but the unprofiled frame percentiles did
+not improve. All independent stream frames, atlas/clip cases and 36 PNGs
+matched. Startup and frame budgets still fail; local RSS is below the hard
+limit with little headroom.
+
 ## Visual gate
 
 **Not accepted:** mean mismatch 5.86%, above 8-level channel tolerance 2.84%,
