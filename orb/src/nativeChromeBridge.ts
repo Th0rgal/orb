@@ -115,7 +115,8 @@ export function serializeNativeChromeMission(m: Mission): NativeChromeMissionWir
     fork_of: forkOf,
     is_fork: Boolean(forkOf),
     is_btw: isBtwMission(m),
-    acknowledged: isArchived(m.status),
+    // Core archives by tagging `archived` (`POST /missions/:id/archive`), not only by status.
+    acknowledged: isArchived(m.status) || (m.tags ?? []).includes("archived"),
     superseded: hasTypedSuperseded(m),
     created_at_ms: Number.isFinite(createdMs) && createdMs > 0 ? Math.floor(createdMs) : 0,
     updated_at_ms: Number.isFinite(updatedMs) && updatedMs > 0 ? Math.floor(updatedMs) : 0,
