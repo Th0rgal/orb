@@ -65,13 +65,16 @@ def startVerified (root sharedDir device server country : String) (port : UInt16
     IO (Except String (Tunnel × VerifiedTunnel)) := do
   if sharedDir.isEmpty then return .error "vpn_coordinator_unconfigured"
   let lock ← flockExclusiveNb ((System.FilePath.mk sharedDir) / "airvpn.lock").toString
-  if lock ≥ 0xFFFFFFFE then return .error "vpn_coordinator_busy"
+  if lock == 0xFFFFFFFE then return .error "vpn_coordinator_busy"
+  if lock == 0xFFFFFFFF then return .error "vpn_coordinator_unavailable"
   try
     let some (endpoint, profile) ← readEndpoint root device | return .error "vpn_profile_unavailable"
     if endpoint.country != country || endpoint.server != server then return .error "vpn_profile_changed"
     let .ok sessions ← activeSessions root | return .error "airvpn_session_evidence_unavailable"
     if let .error e := checkReservation profile.addresses sessions then return .error e
-    let .ok t ← start profile port | return .error "vpn_start_failed"
+    let t ← match ← start profile port with
+      | .ok t => pure t
+      | .error e => return .error e
     let checked ← try
       let mut evidence := none
       for _ in [:6] do

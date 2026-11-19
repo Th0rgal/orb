@@ -18,6 +18,7 @@ private def reasonMessage : String → String
   | "vpn_awaiting_verification" => "Waiting for exit verification."
   | "airvpn_session_evidence_unavailable" => "Check the saved API key and AirVPN session lookup."
   | "vpn_coordinator_unconfigured" => "The Core VPN coordinator needs configuration."
+  | "vpn_coordinator_unavailable" => "Check Core’s access to the shared AirVPN coordinator directory."
   | "vpn_coordinator_busy" => "Another VPN connection is starting. Retry shortly."
   | "airvpn_device_in_use" => "This WireGuard device already has an active session."
   | "vpn_route_changed" => "The account connection changed during verification. Reload its settings."

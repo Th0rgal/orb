@@ -85,18 +85,42 @@ structure Request where
 private def binding (req : Request) (t : VerifiedTunnel) : Binding :=
   ⟨req.account, req.category, t.country, t.exits⟩
 
+/-- A saved server can be restarted even when a different server is already
+running. Within each tier, shared transports precede new sessions. -/
+def serverOrder {α : Type} (server : α → String) (preferred : Option String)
+    (candidates : List α) : List α :=
+  let (first, rest) := candidates.partition (fun t => some (server t) == preferred)
+  first ++ rest
+
+theorem saved_server_precedes_alternatives {α : Type} (server : α → String)
+    (preferred : String) (candidates : List α) :
+    ∃ pinned alternatives, serverOrder server (some preferred) candidates = pinned ++ alternatives ∧
+      (∀ t ∈ candidates, t ∈ pinned ↔ server t = preferred) ∧
+      (∀ t ∈ candidates, t ∈ alternatives ↔ server t ≠ preferred) := by
+  unfold serverOrder
+  simp only [List.partition_eq_filter_filter]
+  refine ⟨_, _, rfl, ?_, ?_⟩
+  · intro t ht
+    simp [ht]
+  · intro t ht
+    simp [ht]
+
 /-- Consider the persisted server first. Reordering preserves the relative
 order of other servers, so a stable input inventory gives stable choices. -/
 def choose (req : Request) (ready : List Binding) (healthy : List VerifiedTunnel) :
     Option VerifiedTunnel :=
-  let preferred := fun (t : VerifiedTunnel) => some t.server == req.preferredServer
-  let (first, rest) := healthy.partition preferred
-  (first ++ rest).find? fun t =>
+  (serverOrder (·.server) req.preferredServer healthy).find? fun t =>
     (admit req.country (binding req t) ready).isSome
 
 private def chatA : Request := ⟨"a", "openai", "NL", some "nl-west"⟩
 private def west : VerifiedTunnel := ⟨"nl-west", "NL", [.v4 1, .v6 0 2]⟩
 private def east : VerifiedTunnel := ⟨"nl-east", "NL", [.v4 3, .v6 0 4]⟩
+
+-- A cold saved server precedes a warm alternative. The alternative remains
+-- available when session capacity prevents restarting the saved server.
+example : serverOrder Prod.fst (some "west")
+    [("east", true), ("west", false), ("south", false)] =
+    [("west", false), ("east", true), ("south", false)] := by decide
 
 -- Persisted preference wins across reordered inventory.
 example : choose chatA [] [east, west] = some west := by decide

@@ -124,6 +124,9 @@ def run (root : String) : IO Unit := do
       (observed "west" "NL" sessions (.v4 123) none).isNone &&
       (observed "west" "NL" sessions v4 (some v4)).isNone)
     "country, server, source address and family mismatch reject"
+  let missingDir ← AirVpnTunnel.startVerified root (root ++ "/missing/dir") "device" "east" "NL" 30001
+  check (match missingDir with | .error "vpn_coordinator_unavailable" => true | _ => false)
+    "missing coordinator directory needs an operator fix"
   let checkSlot := AirVpnTunnel.checkReservation [v4]
   let used := JVal.obj #[("vpn_ip", .str "::ffff:1.2.3.4")]
   let other := JVal.obj #[("vpn_ip", .str "10.1.2.3")]

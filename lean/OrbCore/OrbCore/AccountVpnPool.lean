@@ -115,32 +115,35 @@ def allocate (pool : Pool) (root dir : String) (db : SqliteDb) (account provider
       else
         available ← detach available account
       set available
-  let ready := available.flatMap (fun t => t.occupants.map (·.binding))
   let req : Request := ⟨account, cat, pref.country, some current.preferredServer⟩
-  let mut candidates := available
-  repeat
-    let some best := choose req ready (candidates.map (·.evidence)) | break
-    let some t := candidates.find? (fun a => a.evidence == best) | break
-    candidates := candidates.filter (fun a => a.tunnel.port != t.tunnel.port)
-    if (← t.tunnel.verify root t.endpoint.server pref.country) != some best then
-      drain t
-      available := available.filter (fun a => a.tunnel.port != t.tunnel.port)
-      set available
-      continue
-    let others := available.filter (fun a => a.tunnel.port != t.tunnel.port)
-    if let .ok active ← install dir db account cat pref t others then
-      set (active :: others)
-      return .ok t.tunnel.port
-  let inventory := (← endpoints root).filter fun e =>
-    e.country == pref.country && !available.any (fun a => a.endpoint.device == e.device)
-  let (preferred, rest) := inventory.partition (fun e => e.server == current.preferredServer)
+  let configured := (← endpoints root).filter (fun e => e.country == pref.country)
+  let running := (available.filter (fun a => a.endpoint.country == pref.country)).map (·.endpoint)
+  let candidates := serverOrder (·.server) req.preferredServer
+    (running ++ configured.filter (fun e => !running.any (fun r => r.device == e.device)))
+  let mut startupBlocked : Option String := none
   let mut failure := "vpn_no_compatible_profile"
-  for endpoint in preferred ++ rest do
+  for endpoint in candidates do
+    if let some t := available.find? (fun a => a.endpoint.device == endpoint.device) then
+      let ready := available.flatMap (fun a => a.occupants.map (·.binding))
+      if (choose req ready [t.evidence]).isNone then continue
+      let others := available.filter (fun a => a.tunnel.port != t.tunnel.port)
+      if (← t.tunnel.verify root endpoint.server pref.country) == some t.evidence then
+        match ← install dir db account cat pref t others with
+        | .ok active =>
+          set (active :: others)
+          return .ok t.tunnel.port
+        | .error e => failure := e
+        continue
+      drain t
+      available := others
+      set available
+      if !configured.contains endpoint then continue
+    if startupBlocked.isSome then continue
     let .ok bytes ← OrbNetLeaf.Crypto.randBytes 2 | return .error "vpn_port_unavailable"
     let port := (20000 + ((bytes[0]!.toNat * 256 + bytes[1]!.toNat) % 40000)).toUInt16
     match ← startVerified root dir endpoint.device endpoint.server endpoint.country port with
     | .error e =>
-      if e == "airvpn_session_limit" || e == "vpn_coordinator_busy" then return .error e
+      if e == "airvpn_session_limit" || e == "vpn_coordinator_busy" then startupBlocked := some e
       failure := e
     | .ok (tunnel, verified) =>
       let active : Active := { endpoint, tunnel, evidence := verified, occupants := [] }
@@ -151,7 +154,7 @@ def allocate (pool : Pool) (root dir : String) (db : SqliteDb) (account provider
       | .error e =>
         tunnel.stop
         failure := e
-  return .error failure
+  return .error (startupBlocked.getD failure)
 
 def resolve (pool? : Option Pool) (store : OrbCore.Store.CoreStore) (dir account : String) :
     OrbBin.HttpClient.ResolveTransport :=
