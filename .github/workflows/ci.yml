@@ -113,6 +113,7 @@ jobs:
       - name: Build all 12 native Lean binaries and run all self-test suites
         run: |
           set -euo pipefail
+          unset ORB_SKIP_TURBO_LEAN ORB_ALLOW_RAW_LAKE_FALLBACK
           # One turbo-lean run per package builds its binaries and tests together, then
           # the tests run; building the test targets separately rebuilt each package.
           ./scripts/build_orb_bins.sh --ensure-lean --with-tests --out-dir target/debug

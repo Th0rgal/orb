@@ -3,6 +3,7 @@
 #define ORB_GTK_ICONS_H
 
 int orb_status_badge_kind(const char *status);
+extern int orb_icons_light; /* status badge disc follows the light theme */
 int orb_gtk_icons_self_test(void);
 
 #if defined(ORB_HAS_WEBKITGTK)

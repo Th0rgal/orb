@@ -119,7 +119,7 @@
   #   orb-core        assembles every layer's binaries (no compilation)
   #
   # Each later layer copies the earlier layer's `.lake` build trees into place, so
-  # Lake reuses them instead of rebuilding. Every source set below holds only the
+  # turbo-lean can reuse them. Every source set below holds only the
   # files that layer compiles, so editing one package leaves the others cached.
   baseLeanFiles = with lib.fileset; [
     ../lean/lakefile.lean
@@ -130,6 +130,8 @@
     ../lean/OrbNetLeaf
     ../lean/OrbBin
     ../scripts/build_orb_bins.sh
+    ../scripts/turbo_lean.sh
+    ../scripts/ensure_lean_sys.sh
   ];
 
   leanSource = extra:
@@ -191,7 +193,7 @@
         data["packages"] = new_pkgs
         p.write_text(json.dumps(data, indent=1) + "\n")
     PY
-    patchShebangs scripts/build_orb_bins.sh
+    patchShebangs scripts
   '';
 
   commonAttrs = {
@@ -234,16 +236,6 @@
     LEANUI_TEXT_CFLAGS = lib.optionalString (stdenv.hostPlatform.isLinux && wayland != null)
       "-I${lib.getDev freetype}/include/freetype2 -I${lib.getDev harfbuzz}/include/harfbuzz";
 
-    # Each layer builds in a fresh sandbox, so turbo-lean's module cache always
-    # starts empty there and its extra kernel audits only add time (OrbCore:
-    # 7m22s with turbo-lean vs 4m45s with Lake on DGX Spark). Nix caches the
-    # layers instead; turbo-lean stays the default for warm local and CI builds.
-    ORB_SKIP_TURBO_LEAN = "1";
-    # The Nix build deliberately uses raw Lake (turbo-lean is in the sandbox only
-    # as a runtime dependency), and `build_orb_bins.sh` fails closed unless this
-    # is stated explicitly.
-    ORB_ALLOW_RAW_LAKE_FALLBACK = "1";
-
     dontConfigure = true;
 
     # The test suite runs in CI (`scripts/build_orb_bins.sh --with-tests`);
@@ -252,8 +244,8 @@
     doCheck = false;
   };
 
-  # Builds `bins` (names understood by `build_orb_bins.sh --only`) on top of
-  # `deps`, and outputs the binaries plus this layer's `.lake` build trees.
+  # Builds `bins` (names understood by `build_orb_bins.sh --only`) and their
+  # imports on top of `deps`, and optionally preserves the `.lake` build trees.
   mkLeanLayer = {
     pname,
     src,
@@ -270,13 +262,6 @@
           ${restoreLake deps}
           mkdir -p "$TMPDIR/orb-bins"
           ./scripts/build_orb_bins.sh --out-dir "$TMPDIR/orb-bins" ${lib.concatMapStringsSep " " (b: "--only ${b}") bins}
-          ${lib.optionalString keepLake ''
-            # Later layers import shared modules (e.g. Orb.Spec) that this
-            # layer's own binaries do not, so build the whole shared libraries
-            # here; otherwise Node, Core and Locald each recompile them.
-            (cd lean && SANDBOXED_ALLOW_RAW_LAKE=1 lake build Orb -- -DwarningAsError=true)
-            (cd lean/OrbBin && SANDBOXED_ALLOW_RAW_LAKE=1 lake build OrbBin -- -DwarningAsError=true)
-          ''}
           runHook postBuild
         '';
         installPhase = ''

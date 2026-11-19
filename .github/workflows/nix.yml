@@ -1,0 +1,53 @@
+name: Nix
+
+on:
+  pull_request:
+    branches: [master, main]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - '.github/workflows/nix.yml'
+      - 'flake.*'
+      - 'nix/**'
+      - 'lean/**'
+      - 'scripts/build_orb_bins.sh'
+      - 'scripts/turbo_lean.sh'
+      - 'scripts/ensure_lean_sys.sh'
+      - 'orb/package.json'
+  push:
+    branches: [master, main]
+    paths:
+      - '.github/workflows/nix.yml'
+      - 'flake.*'
+      - 'nix/**'
+      - 'lean/**'
+      - 'scripts/build_orb_bins.sh'
+      - 'scripts/turbo_lean.sh'
+      - 'scripts/ensure_lean_sys.sh'
+      - 'orb/package.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build Orb with Nix
+    if: github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - name: Build and verify all 12 binaries
+        run: |
+          set -euo pipefail
+          unset ORB_SKIP_TURBO_LEAN ORB_ALLOW_RAW_LAKE_FALLBACK
+          out=$(nix build .#orb-core --max-jobs 1 --cores 2 --no-link --print-out-paths -L)
+          for bin in fido-agent-proxy orb-privd orb-sudo lean-mesh palomactl sandboxed-mcp workspace-mcp desktop-mcp automation-manager-mcp sandboxed-node orb-core orb-locald; do
+            test -x "$out/bin/$bin"
+          done
+          test "$(readlink "$out/bin/sandboxed-sh")" = orb-core

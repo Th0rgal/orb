@@ -161,7 +161,7 @@ static const char ORB_CHROME_CSS[] = ".orb-paned,.orb-sb scrolledwindow,.orb-sb 
 static void orb_chrome_apply_theme(OrbGtkChrome *c, gboolean light) {
     static const char *m[][2] = { {"#d8d8d7", "#242423"}, {"#e6e6e5", "#101010"}, {"#b1b1b1", "#535250"}, {"#8a8a8a", "#7b7a76"}, {"#6c6c6b", "#939290"}, {"#5c5c5c", "#a9a8a2"}, {"#5b5b5a", "#a9a8a2"}, {"#2c2c2c", "#e8e7e2"}, {"rgba(18,19,19,0.78)", "rgba(246,246,244,0.72)"}, {"216,216,215", "36,36,35"} };
     char *s = g_strdup(ORB_CHROME_CSS); for (size_t i = 0; light && i < G_N_ELEMENTS(m); i++) { char **parts = g_strsplit(s, m[i][0], -1); g_free(s); s = g_strjoinv(m[i][1], parts); g_strfreev(parts); }
-    gtk_css_provider_load_from_data(c->css, s, -1, NULL); g_free(s);
+    gtk_css_provider_load_from_data(c->css, s, -1, NULL); g_free(s); orb_icons_light = light; if (c->win) { gtk_widget_queue_draw(c->win); }
 }
 static void on_script_msg(WebKitUserContentManager *ucm, WebKitJavascriptResult *jr, gpointer ud) {
     (void)ucm; OrbGtkChrome *c = (OrbGtkChrome *)ud; JSCValue *v = webkit_javascript_result_get_js_value(jr); if (!v || !jsc_value_is_object(v)) { return; }

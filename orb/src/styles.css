@@ -1026,7 +1026,9 @@ button.under-model { color: inherit; }
 .p-group-count { flex: none; color: var(--fg-3); }
 .p-st.p-group-st.attention { color: var(--warning); }
 .p-st.p-group-st.muted { color: var(--fg-4); }
-.p-group-body { padding-left: 16px; border-top: 1px solid var(--stroke-soft); }
+.p-group-body { border-top: 1px solid var(--stroke-soft); }
+/* Indent the content, not the row, so a nested row's hover fills the card edge to edge. */
+.p-group-body .p-acc { padding-left: 30px; }
 .p-acc-btn:hover .p-acc-chev { color: var(--fg-2); }
 .p-acc-body { padding: 2px 14px 14px 48px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px 12px; }
 .p-acc-body > .s-row-desc { grid-column: 1 / -1; }
