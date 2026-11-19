@@ -44,11 +44,15 @@ def parseProfile (raw : String) : Except String DeviceProfile := do
     if field == "Address" then
       for part in value.splitOn "," do
         let pieces := part.trimAscii.toString.splitOn "/"
-        let [addr, mask] := pieces | throw "invalid_wireguard_address"
+        let addr :: suffix := pieces | throw "invalid_wireguard_address"
         let some ip := AirVpnObservation.parseExit? addr | throw "invalid_wireguard_address"
-        let some prefixLen := mask.toNat? | throw "invalid_wireguard_address"
-        let maxBits := match ip with | .v4 _ => 32 | .v6 .. => 128
-        unless prefixLen ≤ maxBits do throw "invalid_wireguard_address"
+        match suffix with
+        | [] => pure ()
+        | [mask] =>
+          let some prefixLen := mask.toNat? | throw "invalid_wireguard_address"
+          let maxBits := match ip with | .v4 _ => 32 | .v6 .. => 128
+          unless prefixLen ≤ maxBits do throw "invalid_wireguard_address"
+        | _ => throw "invalid_wireguard_address"
         addresses := ip :: addresses
     if field == "DNS" then
       unless (value.splitOn ",").all (fun literal =>

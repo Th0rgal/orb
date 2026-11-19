@@ -42,6 +42,11 @@ def run (root : String) : IO Unit := do
     "explicit empty session list"
   let key := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
   let profile := s!"[Interface]\nDNS = 10.2.0.1\nAddress = 10.2.0.2/32\nPrivateKey = {key}\n[Peer]\nPublicKey = {key}\nEndpoint = example.invalid:1637\nAllowedIPs = 0.0.0.0/0"
+  let dualStack := profile.replace "10.2.0.2/32" "10.2.0.2, fd00::2/128"
+  check ((parseProfile dualStack).toOption.any (fun p => p.addresses.length == 2))
+    "bare addresses and CIDR addresses can coexist in WireGuard export"
+  check (!(parseProfile (profile.replace "10.2.0.2/32" "10.2.0.2/33")).isOk)
+    "reject out-of-range prefix length"
   let put := fun (value : JVal) => settings dir "PUT" (renderCompact value).toUTF8
   let upload := fun id content => put (.obj #[("device_id", .str id), ("profile", .str content)])
   let (invalid, _) ← upload "../boat" profile
