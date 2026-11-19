@@ -3289,20 +3289,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let callerSubject := if activeClaims.isExternal then
         requesterSubject "" ("session:" ++ activeClaims.sessionId)
       else ""
-      let mut onManagedNode := false
-      if !activeClaims.missionId.isEmpty then
-        if let .ok mRs ← execParamQuery st.store.missionsDb
-            "SELECT placement_kind FROM missions WHERE id=?1;" #[activeClaims.missionId] then
-          if mRs.size > 1 then
-            let pk := (mRs[1]?.bind (·[0]?)).getD ""
-            if pk == "managed_vm" || pk.startsWith "managed-" then onManagedNode := true
-        if !onManagedNode then
-          if let some mst := st.managedStore? then
-            if let .ok vmRs ← execParamQuery mst.db
-                ("SELECT 1 FROM managed_machines WHERE owner_mission=?1 AND status<>'destroyed' " ++
-                 "UNION ALL SELECT 1 FROM managed_vm_claims WHERE owner_mission=?1 AND phase_code=1 LIMIT 1;")
-                #[activeClaims.missionId] then
-              if vmRs.size > 1 then onManagedNode := true
+      let onManagedNode ← missionHasManagedPlacement st.store st.managedStore? activeClaims.missionId
       let waited ← mcpSecretWait st.cfg.workingDir st.store.rootDir activeClaims.missionId
         projectSlug reqId callerSubject onManagedNode timeoutSecs nowEpochSec
       return .ok (mkJson 200 (renderCompact waited))
@@ -3734,6 +3721,17 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       | .ok _ =>
         return .ok (mkJson 201 s!"\{\"id\":{jsonEscape wid},\"name\":{jsonEscape wname},\"path\":{jsonEscape safePath},\"workspace_type\":{jsonEscape wtype}}")
+
+  if req.method == "GET" || req.method == "POST" then
+    if let some params := matchRoutePattern? "/api/workspaces/:id/resources" rawTarget then
+      let wid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      match ← execParamQuery st.store.missionsDb
+          "SELECT 1 FROM workspaces WHERE id=?1 AND (?2='1' OR owner_user_id=?3);"
+          #[wid, if caller.isLegacyUnscoped then "1" else "0", caller.userId] with
+      | .error _ => return .ok (mkJson 503 "{\"error\":\"workspace_store_unavailable\"}")
+      | .ok rows =>
+        if rows.size < 2 then return .ok (mkJson 404 "{\"error\":\"workspace_not_found\"}")
+        return .ok (mkJson 501 "{\"error\":\"workspace_resources_unsupported\",\"message\":\"This Core runtime cannot read, persist or apply per-workspace resource limits.\"}")
 
   if req.method == "GET" && (cleanPath == "/api/nodes" || cleanPath == "/api/machines") then
     let mf ← st.managedRef.get

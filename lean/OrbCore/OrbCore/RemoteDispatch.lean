@@ -391,6 +391,41 @@ def resolveMissionRemoteNode?
         return (← resolveMissionRemoteNode? store mc? anc (depth - 1))
   return none
 
+/-- Trust classification for secret delivery, shared by direct retrieval and
+    approval polling. A managed binding is sufficient even before enrollment;
+    unresolved automatic placement is not evidence of a trusted host. -/
+def missionHasManagedPlacement (store : CoreStore) (mc? : Option ManagedComputeStore)
+    (missionId : String) : IO Bool := do
+  if missionId.isEmpty then return false
+  match ← execParamQuery store.missionsDb
+      "SELECT COALESCE(placement_kind,'') FROM missions WHERE id=?1;" #[missionId] with
+  | .error _ => return true
+  | .ok rows =>
+    let kind := (rows[1]?.bind (·[0]?)).getD ""
+    if rows.size < 2 || kind == "managed_vm" || kind.startsWith "managed-" then return true
+  if let some mc := mc? then
+    -- Preserve the wait path's existing restriction for an owned VM or active claim.
+    match ← execParamQuery mc.db
+        ("SELECT 1 FROM managed_machines WHERE owner_mission=?1 AND phase_code<>3 " ++
+         "UNION ALL SELECT 1 FROM managed_vm_claims WHERE owner_mission=?1 AND phase_code=1 LIMIT 1;")
+        #[missionId] with
+    | .error _ => return true
+    | .ok rows => if rows.size > 1 then return true
+  -- A bound job is stronger evidence than a placement request such as `auto`.
+  -- In particular, the static fleet may have changed since dispatch.
+  if let .ok rows ← execParamQuery store.missionsDb
+      ("SELECT node_id FROM remote_node_jobs WHERE mission_id=?1 AND node_id<>'' " ++
+       "AND state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted') " ++
+       "ORDER BY updated_at DESC, rowid DESC LIMIT 1;") #[missionId] then
+    if ((rows[1]?.bind (·[0]?)).getD "").startsWith "managed-" then return true
+  let some target ← resolveMissionRemoteNode? store mc? missionId | return false
+  if target.startsWith "managed-" || target == "auto-managed" || target.startsWith "auto-managed:" then
+    return true
+  let concrete ← resolveConcreteRemoteTargetNode mc? target (some (store, missionId))
+  return match concrete with
+  | .ok node => node.startsWith "managed-"
+  | .error _ => true
+
 /-! ## Remote Harness Command & Environment Construction -/
 
 private def ensureDurableJobsTableLocal (store : CoreStore) : IO Unit := do
