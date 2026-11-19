@@ -305,13 +305,16 @@ def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) : IO Runtime.Fra
 /-- `stepDesktopEvent` for the window `rt` currently has. -/
 def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
     DesktopState → Event → DesktopState × Damage :=
+  let regions := rt.scrollRegions
+  let scale := rt.wayland.scale120
+  let viewport := rt.viewportDeviceRect
   fun st ev => Id.run do
     if let .scroll x y _ dy := ev then
       if st.liveData then
-        let some r := rt.scrollRegions.find? (fun r => r.bounds.contains x y) | return (st, none)
+        let some r := regions.find? (fun r => r.bounds.contains x y) | return (st, none)
         let h := r.bounds.h.toNat
         let content := r.limitY + h
-        let damage := some (roundRectOut rt.wayland.scale120 r.bounds)
+        let damage := some (roundRectOut scale r.bounds)
         if r.id == rosterViewportId then
           let top := scrollStep content h (min r.limitY st.rosterTopSub) dy
           if top == st.rosterTopSub then return (st, none)
@@ -321,7 +324,7 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
           let next := current.onUserScroll content h dy
           if next == current then return (st, none)
           return ({ st with scroll := next }, damage)
-    return stepDesktopEvent rt.wayland.scale120 rt.viewportDeviceRect st ev
+    return stepDesktopEvent scale viewport st ev
 
 /-- Render one `(ScreenId, isDark, scale120)` configuration to `outFile`, verifying that
 Frame 1 renders (`framesRendered == 1`) and Frame 2 skips redraw when quiescent (`quiescentSkips >= 1`). -/

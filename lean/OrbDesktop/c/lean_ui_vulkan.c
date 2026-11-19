@@ -9,6 +9,43 @@ static lean_obj_res io_err(const char *msg) {
 
 /* Compare a strided rectangle in two RGBA buffers. Out-of-range
  * rectangles cannot establish reuse; the caller then repaints in full. */
+/* Offsets, widths and pitches in pixels. Validate without overflowing, then
+ * use the same straight-alpha integer rounding as the reference rasterizer. */
+static int fits_rows(size_t len, size_t off, size_t pitch, size_t w, size_t h) {
+  return h && w && pitch >= w && off <= len && w <= len-off && h-1 <= (len-off-w)/pitch;
+}
+lean_obj_res lean_ui_blit_glyph(lean_obj_arg fb, b_lean_obj_arg atlas, size_t dst, size_t src,
+    size_t stride, size_t pitch, size_t w, size_t h, uint32_t color, uint8_t colored) {
+  if (!fits_rows(lean_sarray_size(fb)/4,dst,stride,w,h) ||
+      !fits_rows(lean_sarray_size(atlas)/4,src,pitch,w,h)) return fb;
+  fb = lean_sarray_ensure_exclusive(fb);
+  for (size_t y=0; y<h; ++y) {
+    uint8_t *d = lean_sarray_cptr(fb) + 4*(dst+y*stride);
+    const uint8_t *s = lean_sarray_cptr(atlas) + 4*(src+y*pitch);
+    for (size_t x=0; x<w; ++x,d+=4,s+=4) {
+      unsigned a = (s[3]*(color & 255)+127)/255;
+      if (!a) continue;
+      for (unsigned i=0; i<3; ++i) {
+        unsigned c = colored ? s[i] : ((color >> (24-8*i)) & 255);
+        d[i] = (c*a + d[i]*(255-a)+127)/255;
+      }
+      d[3] = a + (d[3]*(255-a)+127)/255;
+    }
+  }
+  return fb;
+}
+
+lean_obj_res lean_ui_scroll_rows(lean_obj_arg fb, size_t off, size_t stride, size_t w,
+                                size_t h, size_t shift) {
+  size_t len = lean_sarray_size(fb);
+  if (!stride || off > len || shift > (len-off)/stride ||
+      !fits_rows(len,off+shift*stride,stride,w,h)) return fb;
+  fb = lean_sarray_ensure_exclusive(fb);
+  uint8_t *p = lean_sarray_cptr(fb) + off;
+  for (size_t y=0; y<h; ++y) memmove(p+y*stride,p+(y+shift)*stride,w);
+  return fb;
+}
+
 uint8_t lean_ui_same_rows(b_lean_obj_arg a, b_lean_obj_arg b, size_t off,
                           size_t stride, size_t bytes, size_t rows) {
   size_t len = lean_sarray_size(a) < lean_sarray_size(b) ? lean_sarray_size(a) : lean_sarray_size(b);

@@ -505,7 +505,15 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
         let (sr, sg, sb, sa) := unpackColor col
         let (x0, y0, x1, y1) := clampBounds vw vh curClip dst
         if x1 > x0 && y1 > y0 && sa > 0 then
-          for py in [y0.toNat : y1.toNat] do
+          let sx := src.x.toNat + (x0.toNat - dst.x.toNat)
+          let sy := src.y.toNat + (y0.toNat - dst.y.toNat)
+          let w := min (pw-sx) (x1-x0).toNat
+          let h := min (ph-sy) (y1-y0).toNat
+          if h > 0 && w > 0 && (sy+h-1)*pw+sx+w ≤ page.rgba.size/4 then
+            fb := FFI.blitGlyph fb page.rgba (y0.toNat*vw+x0.toNat).toUSize (sy*pw+sx).toUSize
+              vw.toUSize pw.toUSize w.toUSize h.toUSize col isColor
+          else
+           for py in [y0.toNat : y1.toNat] do
             let ty := src.y.toNat + (py - dst.y.toNat)
             if ty < ph then
               for px in [x0.toNat : x1.toNat] do
@@ -720,13 +728,13 @@ def renderFrameDamage (ctx : VulkanContext) (clearColor : Color) (atlas : Text.G
   -- In profile mode make the copy-on-write allocation explicit so it can be
   -- timed separately from clearing and painting. Ordinary runs retain COW.
   let initial := if profile then ctx.framebuffer.copySlice 0 ByteArray.empty 0 ctx.framebuffer.size else ctx.framebuffer
+  let ctx := { ctx with framebuffer := ByteArray.empty }
   let t3 ← IO.monoNanosNow
   let mut initial := initial
   let mut paint := dirty
   if let some (band, shift) := scrollBand prev.scene scene dirty vp then
-    for y in [band.y.toNat:band.bottom.toNat] do
-      initial := ctx.framebuffer.copySlice (((y+shift)*ctx.width+band.x.toNat)*4) initial
-        ((y*ctx.width+band.x.toNat)*4) (band.w.toNat*4)
+    initial := FFI.scrollRows initial ((band.y.toNat*ctx.width+band.x.toNat)*4).toUSize
+      (ctx.width*4).toUSize (band.w.toNat*4).toUSize band.h.toNat.toUSize shift.toUSize
     paint := { dirty with y := band.bottom, h := dirty.bottom - band.bottom }
     if profile then IO.eprintln s!"u7-scroll-reuse dy={shift} pixels={band.w*band.h}"
   let (fb, insts) := rasterizeSceneInto ctx.width ctx.height clearColor atlas (some initial) (some paint) scene

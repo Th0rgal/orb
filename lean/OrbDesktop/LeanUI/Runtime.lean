@@ -233,6 +233,9 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
         framebuffer := ByteArray.empty }
     else st.vulkan
   let ((atlas', clearColor, scene, regions, focusOrder), scrollRegions) ← view { st with vulkan := vk0 }
+  -- Transfer the old surface into the painter; retaining it in `st` forces
+  -- a framebuffer-sized copy even for a small in-place repaint.
+  st := { st with vulkan := default }
   let vk' ← match st.damage with
     | some dirty => Vulkan.renderFrameDamage vk0 clearColor atlas' dirty scene
     | none => Vulkan.renderFrame vk0 clearColor atlas' scene

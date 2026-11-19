@@ -6,6 +6,13 @@ open LeanUI
 
 /-- Differential fixtures for invalidations that the stream benchmark does not force. -/
 def verifyRepaintEdges : IO Unit := do
+  let dest : ByteArray := ⟨#[1,2,3,4, 0,50,100,200, 5,6,7,8]⟩
+  let src : ByteArray := ⟨#[80,120,160,128]⟩
+  for (colored, rgb) in [(true, #[20,68,115]), (false, #[50,63,75])] do
+    -- Effective alpha 64; check both color sources and unchanged guard pixels.
+    let expected : ByteArray := ⟨(#[1,2,3,4] ++ rgb ++ #[214,5,6,7,8]).map Nat.toUInt8⟩
+    unless FFI.blitGlyph dest src 1 0 3 1 1 1 0xC8640080 colored == expected do
+      throw <| IO.userError "native glyph blend differs from reference pixel"
   for n in [0, 7, 16, 31] do
     let paths := [[(-4,2),(90,156),(90,156)],[(160,0),(0,160)]]
     if (Text.rasterizeIcon paths n).pixels != (Text.rasterizeIconReference paths n).pixels then

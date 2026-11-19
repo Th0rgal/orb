@@ -209,6 +209,9 @@ end LayoutNode
 /-- Intrinsic content measurement `(widthSub, heightSub)` (including padding & margins) for a `LayoutNode`. -/
 def measureNode (availWidthSub : SubPx) : LayoutNode → SubPx × SubPx
   | .box _ s children =>
+    if s.minWidth == s.maxWidth && s.minHeight == s.maxHeight then
+      (s.minWidth + s.margin.horizontal, s.minHeight + s.margin.vertical)
+    else
     let padW := s.padding.horizontal
     let padH := s.padding.vertical
     let marW := s.margin.horizontal
@@ -233,6 +236,9 @@ def measureNode (availWidthSub : SubPx) : LayoutNode → SubPx × SubPx
     let clampedH := clampNat s.minHeight s.maxHeight rawH
     (clampedW + marW, clampedH + marH)
   | .text _ s lineHeightSub runs =>
+    if s.minWidth == s.maxWidth && s.minHeight == s.maxHeight then
+      (s.minWidth + s.margin.horizontal, s.minHeight + s.margin.vertical)
+    else
     let padW := s.padding.horizontal
     let padH := s.padding.vertical
     let marW := s.margin.horizontal
@@ -249,6 +255,9 @@ def measureNode (availWidthSub : SubPx) : LayoutNode → SubPx × SubPx
     let clampedH := clampNat s.minHeight s.maxHeight rawH
     (clampedW + marW, clampedH + marH)
   | .scroll _ s _ child =>
+    if s.minWidth == s.maxWidth && s.minHeight == s.maxHeight then
+      (s.minWidth + s.margin.horizontal, s.minHeight + s.margin.vertical)
+    else
     let padW := s.padding.horizontal
     let padH := s.padding.vertical
     let marW := s.margin.horizontal
