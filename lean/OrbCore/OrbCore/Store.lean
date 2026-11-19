@@ -343,6 +343,7 @@ def idempotencySchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS idempotency_keys (scope TEXT NOT NULL, request_key TEXT NOT NULL, response_json TEXT NOT NULL, status_code INTEGER NOT NULL DEFAULT 200, committed_oversize INTEGER NOT NULL DEFAULT 0, body_bytes INTEGER NOT NULL DEFAULT 0, phase TEXT NOT NULL DEFAULT 'committed', created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(scope, request_key));"
 
 def missionsAdditiveAlters : Array String := #[
+  "ALTER TABLE mission_continuations ADD COLUMN dispatch_job_id TEXT NOT NULL DEFAULT '';",
   -- NULL means "never set": the stock default applies (see `chainResponse`).
   "ALTER TABLE model_routing_chains ADD COLUMN is_default INTEGER;",
   "ALTER TABLE model_routing_chains ADD COLUMN strip_thinking INTEGER;",
