@@ -523,7 +523,8 @@ structure RemoteTurnSpec where
   companionOf?       : Option String := none
   coordinatorPrio    : Bool := false
   rawCommandOverride?: Option String := none
-  goalContinuation?  : Option (String × UInt64) := none
+  -- Empty claim ID is the initial Goal launch; otherwise it is a durable continuation UUID.
+  goalDispatch?      : Option (String × UInt64) := none
   deriving Repr
 
 /-- Remote execution uses the stored tenant's Linux identity and a dedicated
@@ -829,9 +830,23 @@ def remoteGoalPrompt (objective : String) : String :=
 
 def maxRemoteGoalContinuations : Nat := 20
 
+-- Parameters: mission ID, generation, whether this is the initial launch ("1"/"0").
+private def remoteGoalDispatchOwnerSql : String :=
+  "m.id=?1 AND m.run_generation=CAST(?2 AS INTEGER) AND m.goal_mode=1 AND m.status='awaiting_user' " ++
+  "AND ((?3='1' AND COALESCE(m.terminal_reason,'')='') OR " ++
+  "(?3='0' AND m.terminal_reason IN ('remote_goal_continuation','remote_goal_dispatch_blocked')))"
+
+private def remoteGoalDispatchOwned (store : CoreStore) (missionId jobId : String)
+    (gen : UInt64) (initial : Bool) : IO (Except String Bool) := do
+  let rows ← execParamQueryUnlocked store.missionsDb
+    ("SELECT 1 FROM missions m JOIN remote_node_jobs j ON j.mission_id=m.id WHERE " ++
+      remoteGoalDispatchOwnerSql ++ " AND j.job_id=?4 AND j.state IN ('submitting','uncertain');")
+    #[missionId, s!"{gen}", if initial then "1" else "0", jobId]
+  return rows.map (·.size > 1)
+
 /-- Settle the owning job and arm at most one intent under the same write lock as Stop. -/
 def settleRemoteGoal (store : CoreStore) (missionId jobId objective finalText : String)
-    (generation nowSec : UInt64) (hasSession : Bool) : IO (Except String (Option (String × String × Nat))) := do
+    (generation nowSec : UInt64) (hasSession drained : Bool) : IO (Except String (Option (String × String × Nat))) := do
   let cid ← newUuidV4
   let iso := formatEpochIso8601Utc nowSec
   withImmediateTx store.missionsDb do
@@ -846,10 +861,10 @@ def settleRemoteGoal (store : CoreStore) (missionId jobId objective finalText : 
     let iteration := cellNat row 0
     let fence : RemoteGoal.TurnFence := ⟨missionId, 1, generation.toNat, jobId⟩
     let decision := RemoteGoal.decide { owner := fence, continuations := iteration }
-      { owner := fence, outcome := .succeeded, drained := true, finalText := finalText,
+      { owner := fence, outcome := .succeeded, drained := drained, finalText := finalText,
         kind := .finalAssistant, completionConfirmed := RemoteGoal.hasCompletionMarker finalText, madeProgress := true }
       { maxContinuations := some maxRemoteGoalContinuations, wakeupPending := cellNat row 1 != 0 }
-    let (status, reason) := match decision.effect with
+    let (status, reason) := if !drained then ("awaiting_user", "remote_goal_evidence_incomplete") else match decision.effect with
       | .completed => ("completed", "remote_goal_complete")
       | .requestContinuation => if hasSession then ("awaiting_user", "remote_goal_continuation")
         else ("awaiting_user", "remote_goal_session_missing")
@@ -1188,8 +1203,10 @@ def cancelActiveRemoteJobForMission
         jobId := (cell mRows[1]! 0).trimAscii.toString
   if jobId.isEmpty then
     if let .ok jRows ← execParamQuery store.missionsDb
-        ("SELECT COALESCE(job_id,''), COALESCE(node_id,'') FROM remote_node_jobs WHERE mission_id=?1 " ++
-        "AND state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost') ORDER BY updated_at DESC LIMIT 1;")
+         ("SELECT COALESCE(job_id,''), COALESCE(node_id,'') FROM remote_node_jobs WHERE mission_id=?1 " ++
+         "AND state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost') " ++
+         "AND NOT (state IN ('submitting','uncertain') AND instr(payload_json,'\"goal_generation\":null')=0 AND instr(payload_json,'\"goal_generation\":')>0) " ++
+         "ORDER BY updated_at DESC LIMIT 1;")
         #[missionId] then
       if jRows.size > 1 then
         jobId := (cell jRows[1]! 0).trimAscii.toString
@@ -1283,6 +1300,8 @@ partial def spawnRemoteJobPoller
         "SELECT COALESCE(run_generation,1) FROM missions WHERE id=?1 LIMIT 1;" #[missionId] then
       if gRows.size > 1 then capturedGen := (cellNat gRows[1]! 0).toUInt64
     let mut offset : Nat := initialOffset
+    let isGoal := (← getMission? store missionId).any (·.goalMode)
+    let mut evidenceIntact := initialOffset == 0
     let mut lineRem : String := ""
     let mut acc : RemoteStreamAcc := {}
     let mut unreachableNotified : Bool := false
@@ -1351,6 +1370,10 @@ partial def spawnRemoteJobPoller
                 let chunk := (ljv.fieldStr? "data").getD ""
                 let nextOff := (ljv.fieldNat? "next_offset").getD (offset + chunk.utf8ByteSize)
                 let logLen := (ljv.fieldNat? "log_len").getD nextOff
+                if isGoal && ((ljv.fieldNat? "offset") != some offset || (ljv.fieldNat? "next_offset").isNone ||
+                    (ljv.fieldNat? "log_len").isNone || (ljv.fieldStr? "data").isNone || nextOff < offset ||
+                    nextOff > logLen || ((nextOff == offset) != chunk.isEmpty)) then
+                  evidenceIntact := false
                 if !chunk.isEmpty then
                   let (lines, rem) := splitCompleteLines (lineRem ++ chunk)
                   lineRem := rem
@@ -1450,15 +1473,29 @@ partial def spawnRemoteJobPoller
                 (renderCompact (.obj #[("status", .str "failed"), ("reason", .str reason)])) nowIso
             else if jState == "succeeded" || jState == "failed" || jState == "cancelled" || jState == "lost" then
               -- Final log drain after terminal transition
-              if let .ok (flSt, _, flJv?, _, _) ← callRemoteNodeHttpOpt relayHub? mc? effNodeId "GET" s!"/jobs/{jobId}/log?offset={offset}&max_bytes=262144" none #[] 10000 then
-                if 200 ≤ flSt && flSt < 300 then
-                  if let some flJv := flJv? then
-                    let chunk := (flJv.fieldStr? "data").getD ""
-                    if !chunk.isEmpty then
-                      let (lines, rem) := splitCompleteLines (lineRem ++ chunk)
-                      lineRem := rem
-                      for ln in lines do
-                        acc ← ingestRemoteHarnessLine store broadcastHub? backend missionId ln nowIso acc
+              let mut finalDrained := false
+              let mut remaining := if isGoal && jState == "succeeded" then 8 else 1
+              while remaining > 0 do
+                remaining := remaining - 1
+                let .ok (flSt, _, some flJv, _, _) ← callRemoteNodeHttpOpt relayHub? mc? effNodeId "GET" s!"/jobs/{jobId}/log?offset={offset}&max_bytes=262144" none #[] 10000
+                  | break
+                if flSt < 200 || flSt ≥ 300 then break
+                let chunk := (flJv.fieldStr? "data").getD ""
+                if !chunk.isEmpty then
+                  let (lines, rem) := splitCompleteLines (lineRem ++ chunk)
+                  lineRem := rem
+                  for ln in lines do
+                    acc ← ingestRemoteHarnessLine store broadcastHub? backend missionId ln nowIso acc
+                let some nextOff := flJv.fieldNat? "next_offset" | break
+                let some logLen := flJv.fieldNat? "log_len" | break
+                if (flJv.fieldNat? "offset") != some offset || (flJv.fieldStr? "data").isNone ||
+                    nextOff < offset || nextOff > logLen || ((nextOff == offset) != chunk.isEmpty) then break
+                if nextOff == logLen then
+                  -- Older nodes also return an empty zero-length slice for file I/O errors.
+                  finalDrained := evidenceIntact && logLen > 0
+                  break
+                if nextOff == offset then break
+                offset := nextOff
               if !lineRem.trimAscii.toString.isEmpty then
                 acc ← ingestRemoteHarnessLine store broadcastHub? backend missionId lineRem nowIso acc
                 lineRem := ""
@@ -1530,7 +1567,7 @@ partial def spawnRemoteJobPoller
                 observeControlTurnFinished tSink missionId turnUsage ownerUid? ownerUname? nowSec
 
               let nextQueued? ←
-                if jState == "cancelled" || curRunGen != capturedGen then pure none
+                if jState == "cancelled" || curRunGen != capturedGen || (isGoal && jState == "succeeded" && !finalDrained) then pure none
                 else popNextQueuedFollowup? store missionId curRunGen nowIso
               match nextQueued?, mRec? with
               | some (nextMsgId, nextPrompt), some mr =>
@@ -1562,7 +1599,7 @@ partial def spawnRemoteJobPoller
                 if jState == "succeeded" then
                   if let some goal := (mRec?.filter (·.goalMode)).map (·.goalObjective) then
                     match ← settleRemoteGoal store missionId jobId goal finalText capturedGen nowSec
-                      (curSid?.any (·.startsWith "ses_")) with
+                      (curSid?.any (·.startsWith "ses_")) finalDrained with
                     | .ok (some (status, reason, iteration)) =>
                       let phase := if reason == "remote_goal_complete" then "complete"
                         else if reason == "remote_goal_continuation" || reason == "awaiting_wakeup" then "active"
@@ -1730,17 +1767,27 @@ partial def submitRemoteMissionTurn
   let preMeta := renderCompact (.obj #[
     ("backend", .str spec.backend),
     ("side_question", .bool spec.sideQuestion),
-    ("goal_generation", spec.goalContinuation?.map (fun g => JVal.uint64 g.2) |>.getD .null),
+    ("goal_generation", spec.goalDispatch?.map (fun g => JVal.uint64 g.2) |>.getD .null),
+    ("goal_claim", spec.goalDispatch?.map (fun g => JVal.str g.1) |>.getD .null),
     ("prompt_bytes", JVal.nat spec.prompt.utf8ByteSize)
   ])
-  let intentRes ← match spec.goalContinuation? with
-    | some (cid, gen) =>
-      execParamQuery store.missionsDb
+  let intentRes ← match spec.goalDispatch? with
+    | some (cid, gen) => withImmediateTx store.missionsDb do
+      let query := execParamQueryUnlocked store.missionsDb
+      let .ok owners ← query ("SELECT 1 FROM missions m WHERE " ++ remoteGoalDispatchOwnerSql ++ ";")
+        #[spec.missionId, s!"{gen}", if cid.isEmpty then "1" else "0"]
+        | return .error "remote_goal_owner_read_failed"
+      if owners.size ≤ 1 then return .error "remote_goal_dispatch_fenced"
+      if !cid.isEmpty then
+        let .ok claimed ← query
+          ("UPDATE mission_continuations SET job_id=?4 WHERE id=?1 AND mission_id=?2 AND phase=2 " ++
+           "AND run_generation=CAST(?3 AS INTEGER) AND COALESCE(job_id,'')='' RETURNING id;")
+          #[cid, spec.missionId, s!"{gen}", jobId] | return .error "remote_goal_claim_write_failed"
+        if claimed.size ≤ 1 then return .error "remote_goal_dispatch_fenced"
+      query
         ("INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,payload_json,created_at,updated_at) " ++
-         "SELECT ?1,?2,?3,'submitting',?4,?5,?5 FROM missions m JOIN mission_continuations c ON c.mission_id=m.id " ++
-         "WHERE m.id=?2 AND c.id=?6 AND c.phase=2 AND c.run_generation=CAST(?7 AS INTEGER) " ++
-         "AND m.run_generation=c.run_generation AND m.status='awaiting_user' AND m.terminal_reason='remote_goal_continuation' RETURNING job_id;")
-        #[jobId, spec.missionId, effTarget, preMeta, submitNowIso, cid, s!"{gen}"]
+         "VALUES(?1,?2,?3,'submitting',?4,?5,?5);")
+        #[jobId, spec.missionId, effTarget, preMeta, submitNowIso]
     | none =>
       execParamQuery store.missionsDb
         ("INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,payload_json,created_at,updated_at) " ++
@@ -1748,12 +1795,16 @@ partial def submitRemoteMissionTurn
          "ON CONFLICT(job_id) DO UPDATE SET state='submitting', node_id=excluded.node_id, updated_at=excluded.updated_at;")
         #[jobId, spec.missionId, effTarget, preMeta, submitNowIso]
   match intentRes with
-  | .error e => return .error s!"remote_launch_intent_failed:{e}"
-  | .ok rows =>
-    if spec.goalContinuation?.isSome && rows.size ≤ 1 then
-      if !prep.proxyToken.isEmpty then revokeSingleMissionProxyToken store prep.proxyToken
-      return .error "remote_goal_dispatch_fenced"
+  | .error e =>
+    if !prep.proxyToken.isEmpty then revokeSingleMissionProxyToken store prep.proxyToken
+    return .error (if e == "remote_goal_dispatch_fenced" then e else s!"remote_launch_intent_failed:{e}")
+  | .ok _ => pure ()
 
+  if let some (cid, _) := spec.goalDispatch? then
+    if !cid.isEmpty then
+      emitMissionEventAndBroadcast store broadcastHub? spec.missionId "user_message"
+        (renderCompact (.obj #[("type", .str "user_message"), ("content", .str spec.prompt),
+          ("source", .str "wakeup"), ("continuation_id", .str cid)])) submitNowIso
   match ← callRemoteNodeHttpOpt relayHub? mc? effTarget "POST" "/jobs" (some submitBody) #[] 20000 with
   | .error e =>
     -- The request may have been accepted before the transport failed. Keep the
@@ -1776,9 +1827,9 @@ partial def submitRemoteMissionTurn
     let recMeta := renderCompact (.obj #[
       ("backend", .str spec.backend),
       ("side_question", .bool spec.sideQuestion),
-      ("goal_generation", spec.goalContinuation?.map (fun g => JVal.uint64 g.2) |>.getD .null)
+      ("goal_generation", .null)
     ])
-    if spec.goalContinuation?.isNone then
+    if spec.goalDispatch?.isNone then
       discard <| execParamQuery store.missionsDb
         ("INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,payload_json,created_at,updated_at) " ++
          "VALUES(?1,?2,?3,'running',?4,?5,?5) " ++
@@ -1792,6 +1843,11 @@ partial def submitRemoteMissionTurn
 
     let runId ← newUuidV4
     let txRes ← withImmediateTx store.missionsDb do
+      if let some (cid, expected) := spec.goalDispatch? then
+        match ← remoteGoalDispatchOwned store spec.missionId jobId expected cid.isEmpty with
+        | .error e => return .error e
+        | .ok false => return .error "remote_goal_dispatch_fenced"
+        | .ok true => pure ()
       let gRows ← execParamQueryUnlocked store.missionsDb
         "SELECT COALESCE(run_generation,1), COALESCE((SELECT MAX(generation) FROM mission_runs WHERE mission_id=?1),0),status FROM missions WHERE id=?1;"
         #[spec.missionId]
@@ -1800,14 +1856,11 @@ partial def submitRemoteMissionTurn
         if grs.size > 1 then
           let mg := cellNat grs[1]! 0
           let rg := cellNat grs[1]! 1
-          if let some (_, expected) := spec.goalContinuation? then
-            if mg != expected.toNat || cell grs[1]! 2 != "awaiting_user" then
-              return .error "remote_goal_dispatch_fenced"
           nextGen := if rg == 0 then Nat.max 1 mg else Nat.max mg (rg + 1)
       if let .error e ← insertMissionRunUnlocked
         store.missionsDb runId spec.missionId s!"{nextGen}" "running" "" jobId nowIso true
         s!"remote-job:{jobId}" s!"remote-node:{effTarget}" then return .error e
-      if spec.goalContinuation?.isSome then
+      if spec.goalDispatch?.isSome then
         if let .error e ← execParamQueryUnlocked store.missionsDb
           "UPDATE remote_node_jobs SET state='running',updated_at=?2 WHERE job_id=?1;" #[jobId, nowIso] then return .error e
       carryArmedWakeupsForward (execParamQueryUnlocked store.missionsDb) spec.missionId nextGen nowIso
@@ -1874,6 +1927,7 @@ def reconcileUncertainRemoteSubmissions
     let metaJv := (OrbBin.Json.parse (cell r 3)).toOption.getD (.obj #[])
     let backend := (metaJv.fieldStr? "backend").getD "codex"
     let goalGen? := metaJv.fieldUInt64? "goal_generation"
+    let initialGoal := metaJv.fieldStr? "goal_claim" == some ""
     let node? ← match ← resolveConcreteRemoteTargetNode mc? rawNode (some (store, mid)) with
       | .ok n => pure (some n)
       | .error _ => pure (if rawNode.isEmpty then none else some rawNode)
@@ -1882,6 +1936,16 @@ def reconcileUncertainRemoteSubmissions
     | .error _ => pure ()
     | .ok (status, _, _, _, _) =>
       if status == 404 then
+        if let some gen := goalGen? then
+          discard <| withImmediateTx store.missionsDb do
+            if let .ok true ← remoteGoalDispatchOwned store mid jid gen initialGoal then
+              if let .error e ← execParamQueryUnlocked store.missionsDb
+                "UPDATE missions SET status='interrupted',terminal_reason='remote_dispatch_uncertain_missing',state_revision=state_revision+1,updated_at=?2 WHERE id=?1;"
+                #[mid, nowIso] then return .error e
+            execParamQueryUnlocked store.missionsDb
+              "UPDATE remote_node_jobs SET state='failed',updated_at=?2 WHERE job_id=?1 AND state IN ('submitting','uncertain');"
+              #[jid, nowIso]
+          continue
         discard <| execParamQuery store.missionsDb
           "UPDATE remote_node_jobs SET state='failed', updated_at=?2 WHERE job_id=?1 AND state IN ('submitting','uncertain');"
           #[jid, nowIso]
@@ -1892,13 +1956,6 @@ def reconcileUncertainRemoteSubmissions
            "AND j.state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted'));")
           #[mid, nowIso, jid]
       else if 200 ≤ status && status < 300 then
-        if let some gen := goalGen? then
-          let mission ← getMission? store mid
-          if !(mission.any (fun m => m.runGeneration == gen && m.status == "awaiting_user")) then
-            if let .ok (code, _, _, _, _) ← callRemoteNodeHttpOpt relayHub? mc? node "POST" s!"/jobs/{jid}/cancel" (some (.obj #[])) #[] 8000 then
-              if 200 ≤ code && code < 300 then
-                discard <| execParamQuery store.missionsDb "UPDATE remote_node_jobs SET state='cancelled' WHERE job_id=?1;" #[jid]
-            continue
         if goalGen?.isNone then
           discard <| execParamQuery store.missionsDb
             "UPDATE remote_node_jobs SET state='running', updated_at=?2 WHERE job_id=?1;"
@@ -1914,13 +1971,10 @@ def reconcileUncertainRemoteSubmissions
         let runId ← newUuidV4
         let txRes ← withImmediateTx store.missionsDb do
           if let some gen := goalGen? then
-            let .ok owner ← execParamQueryUnlocked store.missionsDb
-              ("SELECT m.id FROM missions m JOIN remote_node_jobs j ON j.mission_id=m.id " ++
-               "WHERE m.id=?1 AND m.run_generation=CAST(?2 AS INTEGER) AND m.status='awaiting_user' " ++
-               "AND m.terminal_reason IN ('remote_goal_continuation','remote_goal_dispatch_blocked') " ++
-               "AND j.job_id=?3 AND j.state IN ('submitting','uncertain');")
-              #[mid, s!"{gen}", jid] | return .error "remote_goal_owner_read_failed"
-            if owner.size ≤ 1 then return .error "remote_goal_dispatch_fenced"
+            match ← remoteGoalDispatchOwned store mid jid gen initialGoal with
+            | .error e => return .error e
+            | .ok false => return .error "remote_goal_dispatch_fenced"
+            | .ok true => pure ()
             if let .error e ← execParamQueryUnlocked store.missionsDb
               "UPDATE remote_node_jobs SET state='running',updated_at=?2 WHERE job_id=?1;" #[jid, nowIso] then return .error e
           if let .error e ← insertMissionRunUnlocked
@@ -1930,6 +1984,13 @@ def reconcileUncertainRemoteSubmissions
             "UPDATE missions SET status='active', terminal_reason='remote_node_job', placement_job_id=?2, run_generation=CAST(?3 AS INTEGER), state_revision=state_revision+1, updated_at=?4 WHERE id=?1 AND status NOT IN ('cancelled','completed','failed');"
             #[mid, jid, s!"{nextGen}", nowIso]
         match txRes with
+        | .error "remote_goal_dispatch_fenced" =>
+          if let .ok pending ← execParamQuery store.missionsDb
+              "SELECT 1 FROM remote_node_jobs WHERE job_id=?1 AND state IN ('submitting','uncertain');" #[jid] then
+            if pending.size > 1 then
+              if let .ok (code, _, _, _, _) ← callRemoteNodeHttpOpt relayHub? mc? node "POST" s!"/jobs/{jid}/cancel" (some (.obj #[])) #[] 8000 then
+                if 200 ≤ code && code < 300 then
+                  discard <| execParamQuery store.missionsDb "UPDATE remote_node_jobs SET state='cancelled' WHERE job_id=?1 AND state IN ('submitting','uncertain');" #[jid]
         | .error _ =>
           -- The accepted job is still owned by Core; keep it probeable rather
           -- than leaving a `running` job without a local owner row.
@@ -2221,13 +2282,17 @@ def tickContinuationScheduler
   -- candidates yet; a terminal receipt is the only thing that makes them due.
   let dueRes ← execParamQuery store.missionsDb
     ("SELECT c.id, c.mission_id, COALESCE(c.run_generation,1), COALESCE(c.due_epoch,0), COALESCE(c.trigger_kind,'time'), " ++
-     "COALESCE(c.prompt,''), COALESCE(c.reason,''), COALESCE(c.job_id,''), COALESCE(c.recurrence,''), COALESCE(c.stop_after_first,1), COALESCE(c.error,''), c.request_id " ++
+     "COALESCE(c.prompt,''), COALESCE(c.reason,''), COALESCE(c.job_id,''), COALESCE(c.recurrence,''), COALESCE(c.stop_after_first,1), COALESCE(c.error,''), c.request_id,c.phase " ++
      "FROM mission_continuations c LEFT JOIN missions m ON m.id=c.mission_id " ++
      "WHERE c.phase = 1 AND (" ++
      "  (c.trigger_kind = 'time' AND c.due_epoch <= CAST(?1 AS INTEGER)) OR " ++
      "  (c.trigger_kind = 'durable_job_terminal' AND (c.due_epoch <= CAST(?1 AS INTEGER) OR " ++
      "     EXISTS(SELECT 1 FROM remote_node_jobs j WHERE j.job_id=c.job_id AND j.state IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted'))))" ++
-     ") ORDER BY CASE WHEN COALESCE(m.status,'') IN ('active','pending','waiting_background') THEN 1 ELSE 0 END ASC, " ++
+     ") OR (c.phase=2 AND c.reason='remote_goal' AND COALESCE(c.job_id,'')='' " ++
+     "AND m.run_generation=c.run_generation AND m.status='awaiting_user' AND m.terminal_reason='remote_goal_continuation' " ++
+     "AND NOT EXISTS (SELECT 1 FROM remote_node_jobs j WHERE j.mission_id=c.mission_id " ++
+     "AND j.state IN ('submitting','uncertain') AND instr(j.payload_json,'\"goal_generation\":'||c.run_generation||',')>0)) " ++
+     "ORDER BY CASE WHEN COALESCE(m.status,'') IN ('active','pending','waiting_background') THEN 1 ELSE 0 END ASC, " ++
      "c.due_epoch ASC, c.id ASC LIMIT 256;")
     #[s!"{nowSec}"]
   let .ok rows := dueRes | return 0
@@ -2248,6 +2313,7 @@ def tickContinuationScheduler
     -- Launch attempts already made for this wake-up (`launch_retry:N`).
     let rowErr := (cell r 10).trimAscii.toString
     let requestId := cell r 11
+    let recoverClaim := cellNat r 12 == 2
     let tries := if rowErr.startsWith "launch_retry:" then ((rowErr.drop 13).toString.toNat?).getD 0 else 0
     let mut jobDue := trigKind != "durable_job_terminal" || dueEp ≤ nowSec
     -- A wake-up waiting out its retry backoff is not due early, even if its job is terminal.
@@ -2283,7 +2349,8 @@ def tickContinuationScheduler
             discard <| execParamQuery store.missionsDb
               "UPDATE mission_continuations SET due_epoch=CAST(?2 AS INTEGER) WHERE id=?1 AND phase=1 AND request_id=?3 AND run_generation=CAST(?4 AS INTEGER);"
               #[cid, s!"{nowSec}", requestId, s!"{cGen}"]
-          match ← actOnContinuation store cid "resume" nowIso nowSec (some (requestId, cGen)) with
+          match ← (if recoverClaim then pure (.ok (.ok mid))
+            else actOnContinuation store cid "resume" nowIso nowSec (some (requestId, cGen))) with
           | .ok (.ok _) =>
             let mut resumeSid? : Option String := none
             if let .ok sRows ← execParamQuery store.missionsDb "SELECT COALESCE(session_id,'') FROM missions WHERE id=?1;" #[mid] then
@@ -2298,7 +2365,7 @@ def tickContinuationScheduler
               else "Scheduled wakeup triggered. Inspect current status and continue."
 
             -- One transcript entry per wake-up, not one per launch attempt.
-            if tries == 0 then
+            if tries == 0 && reason != "remote_goal" then
               emitMissionEventAndBroadcast store broadcastHub? mid "user_message"
                 (renderCompact (.obj #[
                   ("type", .str "user_message"),
@@ -2326,7 +2393,7 @@ def tickContinuationScheduler
                 tagsJson         := mr.tagsJson
                 prompt           := effPrompt
                 resumeSessionId? := resumeSid?
-                goalContinuation? := if reason == "remote_goal" then some (cid, cGen) else none
+                goalDispatch?    := if reason == "remote_goal" then some (cid, cGen) else none
               }
               let result ← if reason == "remote_goal" && !(resumeSid?.any (·.startsWith "ses_")) then pure (.error "remote_goal_session_missing")
                 else submitRemoteMissionTurn store mc? relayHub? broadcastHub? sup coreWorkDir spec nowSec
@@ -2358,6 +2425,7 @@ def tickContinuationScheduler
             let isRecurringInterval := !stopFirst && recurrence.startsWith "interval:"
             -- Never allocate a second job after a Goal dispatch with unknown acceptance.
             if reason == "remote_goal" && !launchedOk then
+              if goalDispatchError == "remote_goal_dispatch_fenced" then continue
               discard <| execParamQuery store.missionsDb
                 "UPDATE mission_continuations SET phase=4,error=?2,updated_at=?3 WHERE id=?1 AND phase=2;"
                 #[cid, goalDispatchError, nowIso]

@@ -4870,17 +4870,24 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
                 tagsJson         := effTagsJson
                 prompt           := launchPrompt
                 sideQuestion     := isBtwReq
+                goalDispatch?    := if remoteGoal then some ("", 1) else none
               }
               match ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec with
-              | .ok _ => initStatus := "active"
+              | .ok _ =>
+                initStatus := if remoteGoal then ((← getMission? st.store mid).map (·.status)).getD "active" else "active"
               | .error dispErr =>
-                if !rentedVmId.isEmpty then
-                  if let some mst := st.managedStore? then
-                    let mf0 ← st.managedRef.get
-                    discard <| runConfiguredManagedLifecycle mst
-                      { store := st.store, fleet := mf0, override? := st.managedProvisioningOverride? } rentedVmId "destroy" nowEpochSec
-                rollbackUnbornCreate
-                return .ok (mkJson 502 s!"\{\"error\":{jsonEscape dispErr}}")
+                if remoteGoal && (dispErr == "remote_goal_dispatch_fenced" || dispErr.startsWith "remote_dispatch_uncertain:" ||
+                    dispErr.startsWith "remote_accept_persist_failed:") then
+                  -- Stop or reconciliation owns the durable mission and its job now.
+                  initStatus := ((← getMission? st.store mid).map (·.status)).getD "awaiting_user"
+                else
+                  if !rentedVmId.isEmpty then
+                    if let some mst := st.managedStore? then
+                      let mf0 ← st.managedRef.get
+                      discard <| runConfiguredManagedLifecycle mst
+                        { store := st.store, fleet := mf0, override? := st.managedProvisioningOverride? } rentedVmId "destroy" nowEpochSec
+                  rollbackUnbornCreate
+                  return .ok (mkJson 502 s!"\{\"error\":{jsonEscape dispErr}}")
         if controller then
           let ownerId := if caller.isLegacyUnscoped then st.bootstrapAdminId else caller.userId
           if let .error e ← nominateCreatedProjectController st.store projSlug rawProjSlug mid nowIso ownerId then
@@ -6343,6 +6350,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let mission? ← match mid? with
       | some mid => getMission? st.store mid
       | none => pure none
+    if (parseGoalPrefix? content).isSome then
+      if let some m := mission? then
+        if m.placementKind == "remote" || m.placementKind == "remote_node" || m.placementKind == "managed_vm" ||
+            (← resolveMissionRemoteNode? st.store st.managedStore? m.id).isSome then
+          return .ok (mkJson 400 "{\"error\":\"remote_goal_followup_unsupported: Start a new Goal-capable mission to use /goal, or send a standard follow-up.\"}")
     let mut promoteCyber? : Option (String × Selection × String) := none
     if let some mid := mid? then
       if let some m := mission? then

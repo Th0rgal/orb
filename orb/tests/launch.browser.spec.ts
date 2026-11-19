@@ -92,6 +92,24 @@ const composerInput=(page:Page)=>page.getByPlaceholder(/Describe a task, \/ for 
  * where the test is specifically about the visible banner.
  */
 const phaseStatus=(page:Page)=>page.locator(".scroll .agent-wait-status[role=status]").first();
+
+test("an existing remote harness does not offer or send Goal follow-ups",async({page})=>{
+ const {posts}=await setup(page,{failed:true,emptyStatus:"awaiting_user"});
+ const followups:string[]=[];
+ page.on("request",req=>{if(req.method()==="POST" && req.url().endsWith("/api/control/message"))followups.push(req.postData()??"");});
+ await page.getByRole("button",{name:"Test",exact:true}).click();
+ await page.getByRole("button",{name:/Remote task/}).click();
+ const input=page.getByPlaceholder("Send follow-up");
+ await input.fill("/g");
+ await expect(page.getByRole("option",{name:"Goal",exact:true})).toHaveCount(0);
+ await input.fill(prompt);
+ await expect(page.getByText("Start a new Goal-capable mission to use /goal, or send a standard follow-up.", {exact:true})).toBeVisible();
+ await input.press("Enter");
+ await expect(input).toHaveValue(prompt);
+ expect(followups).toEqual([]);
+ expect(posts).toEqual([]);
+});
+
 /** A `/goal` turn renders as a Goal tag plus the exact objective, never the raw slash command. */
 async function expectGoalTurn(page:Page,selector:string,text=objective){
  const turn=page.locator(`${selector}:not(.sk-user)`);await expect(turn).toHaveCount(1);

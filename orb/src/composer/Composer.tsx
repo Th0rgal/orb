@@ -724,6 +724,10 @@ export function Composer(p: {
     let payload = draftOf(original);
     if (!payload && !images().length && p.onEmptySubmit && !p.disabled && !sending()) { p.onEmptySubmit(); return; }
     if (p.disabled || (!payload && !images().length) || sendingLocked() || uploading() || readingImages()) return;
+    if (p.goalUnavailable && (mode() === "goal" || /^\s*\/goal(?:\s|$)/.test(payload))) {
+      setUploadError(p.goalUnavailable);
+      return;
+    }
     if (folderBusy()) { setUploadError("Wait for the folder upload to finish, or cancel it. Your draft is kept."); return; }
     const skillError = validateSkillSelection(payload, backend(), availableSkills());
     if (skillError) { setUploadError(`${skillError}. Your draft is kept.`); return; }

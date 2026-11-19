@@ -5,6 +5,8 @@
 Core advertises OpenCode in `remote_launch.goal_harnesses` when the typed remote
 adapter is available. The mission-create endpoint independently rejects an empty
 Goal objective or an unsupported remote harness before creating a mission.
+Remote follow-ups steer the existing mission; `/goal` can only start a new
+remote mission. Rejected commands leave the transcript and queue untouched.
 
 After a successful OpenCode job drains, a standalone `<!-- GOAL_COMPLETE -->`
 on the final assistant line outside a fenced code block is completion evidence.
@@ -12,12 +14,16 @@ An unfinished response can arm one durable continuation in the same OpenCode
 session. Core parks when that session is missing or the limit of 20 automatic
 continuations is reached. Goal progress and the terminal reason are available
 in mission detail as well as in structured events.
+If the terminal log cannot be read through its confirmed end, Core parks the
+Goal with `remote_goal_evidence_incomplete`; partial evidence cannot complete
+the Goal or arm a continuation.
 
 Settlement and Stop serialize on the mission database. The generation, job ID,
 and current status fence settlement; Stop advances the generation and revokes
-the armed continuation. Before POSTing a continuation job, Core records its job
-ID under that generation. If acceptance is uncertain, Core probes the same job
-ID. It cannot attach that job to the mission after Stop, and requests cancellation
+the armed continuation. Before POSTing either the first job or a continuation,
+Core records its job ID under that generation. A recovered continuation claim
+without a job intent can proceed; with an intent, Core probes that same job ID.
+Core cannot attach that job to the mission after Stop, and requests cancellation
 if the node accepted it. A committed Stop is not proof of remote process exit.
 
 The sections below record the original baseline, pure policy and broader design

@@ -1359,6 +1359,13 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
   // Retrying an uncertain network result reuses the original message identity.
   // A different draft/selection, or a definitive rejection, starts a new attempt.
   let retryMessage: { key: string; id: string } | null = null;
+  const goalUnavailable = () => {
+    const m = mission();
+    const node = missionAssignedNode(m);
+    if (!clientPlaced() && ((node && node !== "local" && node !== "core") || /^(remote(?:_node)?|managed[_-].+)$/.test(m?.placement_kind ?? ""))) {
+      return "Start a new Goal-capable mission to use /goal, or send a standard follow-up.";
+    }
+  };
   const sendMsgOnce = async (text: string, images: DraftImage[], chips: AttachChip[], attemptId: ReturnType<typeof crypto.randomUUID>, explicitId?: ReturnType<typeof crypto.randomUUID>, replace = false) => {
     const targetMissionId = boundMissionId || p.id;
     if (!targetMissionId || staleMission()) return false;
@@ -1881,6 +1888,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
             onEmptySubmit={sendQueueFromComposer}
             onEditFirstQueued={editFirstQueued}
             onStop={stopM}
+            goalUnavailable={goalUnavailable()}
             keepStopVisible={!participant() && remoteGoal()?.phase === "active"}
             scope={`m:${p.id}`}
             uploadTarget={clientPlaced() ? "local" : missionAssignedNode(mission()) ?? "core"}
