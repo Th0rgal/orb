@@ -27,9 +27,12 @@ def providerTypeMatchesAuthType (provType authType : String) : Bool :=
 
 /-- An unmatched login keeps the same identifier when another login joins,
 departs, refreshes, or changes its display label. -/
-def fileAccountId (provider file : String) : String :=
-  let digest := LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes file.toUTF8)
-  s!"cliproxyapi:{provider}:{digest}"
+private def fileDigest (file : String) := LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes file.toUTF8)
+
+def fileAccountId (provider file : String) : String := s!"cliproxyapi:{provider}:{fileDigest file}"
+
+/-- Sidecar model namespace for an OAuth file that originally had no prefix. -/
+def vpnModelPrefix (file : String) : String := "orb-vpn-" ++ fileDigest file
 
 /-- Explicit metadata must resolve uniquely. In particular a stale filename
 or conflicting identity hints must never select the first login of the type. -/

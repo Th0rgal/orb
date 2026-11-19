@@ -107,3 +107,13 @@ are fixtures. The independent receiver checks both accounts through the relay,
 including requests with a conflicting `proxy_url` field in the public inference
 JSON. Blocking account A in the relay leaves account B usable. Choosing Direct
 for B clears its sidecar proxy and the receiver observes the direct source.
+
+For a routing-chain entry that names a sidecar account, Core selects the model
+using that credential’s unique sidecar prefix. When enabling VPN for a file
+with an empty prefix, Core sets a deterministic prefix and the account relay
+URL in one management PATCH. The account keeps its original Orb identifier.
+Disabling VPN removes the generated prefix and preserves a pre-existing
+operator prefix. Before forwarding a pinned VPN request to CLIProxyAPI,
+Core checks the file’s current proxy URL and prefix against its route. The
+local request carries the sidecar service credential. The sidecar sends the
+provider credential through the authenticated relay.

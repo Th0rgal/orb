@@ -1551,6 +1551,12 @@ def run : IO Unit := do
         failures := failures.push "An explicitly selected account must supply its own credential"
       unless (parseChainTargetsJson entry #[] #[a, { b with enabled := false }]).isEmpty do
         failures := failures.push "A disabled selected account must not resolve another login"
+      let sidecarAccount := { b with hasApiKey := false, apiKey := "", hasOAuth := true,
+        oauthFile := "selected.json", modelPrefix := "selected" }
+      let viaOwner := (parseChainTargetsJson entry #[] #[a, sidecarAccount] "http://127.0.0.1:8317" "fixture-sidecar")[0]?
+      unless viaOwner.any (fun t => t.modelId == "selected/gpt-5" &&
+          t.sidecarCredential?.any (fun c => c.file == "selected.json" && c.modelPrefix == "selected")) do
+        failures := failures.push "A pinned sidecar account must use the selected credential’s model namespace"
       let vpnSettings := "/api/settings/airvpn"
       let accountRoute := "/api/ai/providers/missing-account/vpn"
       for path in [vpnSettings, accountRoute] do

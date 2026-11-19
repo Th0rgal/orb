@@ -126,7 +126,7 @@ def run(binary, reconnect=False, orb_configure=None):
         auth = root / "auth"
         auth.mkdir()
         for name in ("a", "b", "direct"):
-            (auth / f"{name}.json").write_text(json.dumps({"type": "codex", "access_token": "fixture-" + name, "prefix": name, "account_id": "acct-" + name, "expired": "2099-01-01T00:00:00Z", "email": name + "@example.invalid"}))
+            (auth / f"{name}.json").write_text(json.dumps({"type": "codex", "access_token": "fixture-" + name, "prefix": "" if orb_configure and name == "a" else name, "account_id": "acct-" + name, "expired": "2099-01-01T00:00:00Z", "email": name + "@example.invalid"}))
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             port = listener.getsockname()[1]
@@ -179,6 +179,15 @@ def run(binary, reconnect=False, orb_configure=None):
                 changed = configure(name, url, "enable")
                 if orb_configure:
                     assert changed.returncode == 0, changed.stderr
+            prefixes = {name: api("GET", "credentials/download?name=" + name + ".json")["prefix"] for name in routes}
+            if orb_configure:
+                assert prefixes["a"].startswith("orb-vpn-") and prefixes["b"] == "b"
+                def confirm(name, url, prefix):
+                    return subprocess.run([orb_configure, "confirm", f"http://127.0.0.1:{port}", name + ".json", url, prefix],
+                                          input=key + "\n", text=True, capture_output=True, timeout=15).returncode
+                assert confirm("a", routes["a"], prefixes["a"]) == 0
+                assert confirm("a", routes["b"], prefixes["a"]) == 1
+                assert confirm("a", routes["a"], prefixes["b"]) == 1
             if orb_configure:
                 conflict = configure("a", routes["b"], "enable")
                 assert conflict.returncode == 1 and conflict.stderr.strip() == "vpn_sidecar_proxy_conflict"
@@ -190,7 +199,7 @@ def run(binary, reconnect=False, orb_configure=None):
                 models = [item["id"] for item in json.load(response)["data"]]
             with serve(Model) as model_port:
                 for name, stream in (("a", False), ("b", True)):
-                    choices = [m for m in models if m.startswith(name + "/gpt-5")]
+                    choices = [m for m in models if m.startswith(prefixes[name] + "/gpt-5")]
                     assert choices, models[:25]
                     payload = json.dumps({"model": choices[0], "stream": stream, "input": "synthetic",
                                           "proxy_url": f"socks5://127.0.0.1:{b if name == 'a' else a}"}).encode()
@@ -237,7 +246,7 @@ def run(binary, reconnect=False, orb_configure=None):
                         assert result.get("status_code") != 200
                     except urllib.error.HTTPError as e:
                         assert 400 <= e.code <= 599
-                    model = next(m for m in models if m.startswith("a/gpt-5"))
+                    model = next(m for m in models if m.startswith(prefixes["a"] + "/gpt-5"))
                     wire = json.dumps({"model": model, "input": "synthetic"}).encode()
                     broken = urllib.request.Request(f"http://127.0.0.1:{port}/v1/responses", data=wire,
                                                     headers={"Authorization": "Bearer fixture-client", "Content-Type": "application/json"})
@@ -250,6 +259,10 @@ def run(binary, reconnect=False, orb_configure=None):
                 disabled = configure("b", routes["b"], "disable")
                 assert disabled.returncode == 0, disabled.stderr
                 assert request("b", via_vpn=False)["body"] == "127.0.0.1"
+                disabled_a = configure("a", routes["a"], "disable")
+                assert disabled_a.returncode == 0, disabled_a.stderr
+                assert not api("GET", "credentials/download?name=a.json").get("prefix")
+                assert api("GET", "credentials/download?name=b.json")["prefix"] == "b"
             expected_hits = ["127.0.0.2", "127.0.0.3", "127.0.0.1"]
             if orb_configure:
                 expected_hits.extend(["127.0.0.3", "127.0.0.1"])

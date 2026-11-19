@@ -25,6 +25,12 @@ open OrbCore.Spec
 open OrbCore.Store
 open OrbNetLeaf.TlsHttp
 
+structure SidecarCredential where
+  provider : String
+  file : String
+  modelPrefix : String
+  deriving Repr, DecidableEq, Inhabited
+
 /-- Single upstream provider target inside a model-routing fallback chain. -/
 structure ProviderTarget where
   accountId             : String
@@ -39,6 +45,7 @@ structure ProviderTarget where
   modelMaxConcurrency?  : Option UInt32 := none
   /-- Maximum input context accepted by this target, used before cross-target recovery. -/
   contextLimit            : UInt32 := 128000
+  sidecarCredential? : Option SidecarCredential := none
   deriving Repr, DecidableEq, Inhabited
 
 /-- In-memory sliding-window RPM, active in-flight concurrency & learned upstream header state. -/

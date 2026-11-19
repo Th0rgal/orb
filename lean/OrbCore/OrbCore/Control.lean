@@ -907,6 +907,13 @@ def parseChainTargetsJson
              | none => false)
           )
         if useCliProxy then
+          let credential? : Option SidecarCredential := if pinned then matchedHydrated?.map (fun hp =>
+            ⟨hp.providerType, hp.oauthFile, hp.modelPrefix⟩) else none
+          let rawModel := if isAg then mdl else OrbCore.ProxyModelRouting.cliProxyModelId effProvType mdl
+          let routedModel := match credential? with
+            | some c => if c.modelPrefix.isEmpty || rawModel.isEmpty || rawModel.startsWith (c.modelPrefix ++ "/")
+                        then rawModel else c.modelPrefix ++ "/" ++ rawModel
+            | none => rawModel
           let acct :=
             if hasExplicitAcct then acctRaw
             else match matchedHydrated? with
@@ -917,7 +924,8 @@ def parseChainTargetsJson
             provider               := provRaw
             baseUrl                := cliProxyUrl
             apiKey                 := cliProxyKey
-            modelId                := if isAg then mdl else OrbCore.ProxyModelRouting.cliProxyModelId effProvType mdl
+            modelId                := routedModel
+            sidecarCredential?     := credential?
             accountRpmLimit?       := inlineAcctRpm?.orElse (fun _ => matchedHydrated?.bind (·.rpmLimit?))
             accountMaxConcurrency? := (inlineAcctConc?.orElse (fun _ => matchedHydrated?.bind (·.maxConcurrency?))).orElse
                (fun _ => if effProvType == "google" || effProvType == "antigravity" then googleMaxConcurrency? else none)
@@ -1819,7 +1827,21 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     (authEvidence? := some authEvidence)
     (streamLimits? := st.proxyStreamLimits?)
     (bodyTimedOutRef? := some bodyTimedOutRef)
-    (resolveTransport := fun target => AccountVpnPool.resolve st.vpnPool? st.store st.vpnCoordinatorDir target.accountId)
+    (resolveTransport := fun target => do
+      let some owner := target.sidecarCredential? |
+        return ← AccountVpnPool.resolve st.vpnPool? st.store st.vpnCoordinatorDir target.accountId
+      let .ok pref ← AccountVpnRoutes.read st.store.missionsDb target.accountId | return .error "vpn_route_store_unavailable"
+      if pref.isNone then return .ok none
+      unless !owner.modelPrefix.isEmpty && target.modelId.startsWith (owner.modelPrefix ++ "/") do
+        return .error "vpn_sidecar_binding_unavailable"
+      let base ← resolveCliProxyBaseUrl
+      unless base == target.baseUrl do return .error "vpn_sidecar_binding_changed"
+      let some key ← resolveCliProxyMgmtKey? | return .error "vpn_sidecar_unavailable"
+      let some url := st.vpnRelayPort?.bind (fun port =>
+        AccountVpnRelay.proxyUrl (effectiveJwtSecret st.cfg) port owner.provider target.accountId)
+        | return .error "vpn_sidecar_unavailable"
+      if let .error e ← AccountVpnSidecar.confirm base key owner.file url owner.modelPrefix then return .error e
+      return .ok none)
   let selectedAccountAfterStream : IO String := do
     match out.streamSelectedAccountRef? with
     | some ref => ref.get

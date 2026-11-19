@@ -348,6 +348,7 @@ structure HydratedProvider where
   updatedAt       : String
   /-- User who added the account (`''` for operator/legacy rows). -/
   createdByUserId : String := ""
+  modelPrefix : String := ""
   deriving Repr, Inhabited
 
 def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array HydratedProvider) := do
@@ -364,6 +365,10 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
   let defaultId := (defJv.fieldStr? "default_provider_id").getD ""
   let backendsJv ← readDataJsonFile workingDir store.rootDir "provider_backends.json"
   let authFiles ← scanCliProxyAuthFiles
+  let uniquePrefix := fun (file : CliAuthFileInfo) =>
+    if !file.prefixId.isEmpty && !file.prefixId.contains '/' &&
+        (authFiles.filter (fun f => f.prefixId == file.prefixId)).size == 1 then file.prefixId else ""
+
   let nowIso := formatEpochIso8601Utc (← nowEpoch)
   -- Accounts added by a member never inherit the operator's credentials: no instance env-key
   -- fallback and no CLIProxy auth file joined by provider type or email, only by exact row id.
@@ -443,6 +448,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
       hasOAuth := hasOAuth
       oauthToken := effOauthTok
       oauthFile := effOauthFile
+      modelPrefix := (matchedAuth?.map uniquePrefix).getD ""
       accountEmail := effEmail
       enabled := p.enabled
       isDefault := (p.id == defaultId)
@@ -491,6 +497,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
         hasOAuth := hasOa
         oauthToken := (matchedAuth?.map (·.accessToken)).getD effLegTok
         oauthFile := (matchedAuth?.map (·.fileName)).getD refFile
+        modelPrefix := (matchedAuth?.map uniquePrefix).getD ""
         accountEmail := if !email.isEmpty then email else (matchedAuth?.map (·.email)).getD ""
         enabled := en
         isDefault := (lid == defaultId)
@@ -513,13 +520,14 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
     if !out.any (fun hp => hp.oauthFile == af.fileName ||
         (!hp.enabled && hp.id == af.prefixId && !af.prefixId.isEmpty)) then
       out := out.push { (default : HydratedProvider) with
-        id := if af.prefixId.isEmpty || out.any (fun hp => hp.id == af.prefixId) ||
+        id := if af.prefixId.isEmpty || af.prefixId == vpnModelPrefix af.fileName || out.any (fun hp => hp.id == af.prefixId) ||
             (authFiles.filter (fun f => f.prefixId == af.prefixId)).size != 1 then fileAccountId pType af.fileName else af.prefixId
         name := (lookupProviderMeta pType).name
         providerType := pType
         hasOAuth := true
         oauthToken := af.accessToken
         oauthFile := af.fileName
+        modelPrefix := uniquePrefix af
         accountEmail := af.email
         enabled := !af.disabled
         priority := out.size

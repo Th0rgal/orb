@@ -30,6 +30,10 @@ def main (args : List String) : IO UInt32 := do
         discard input.getLine
       return 0
     finally listener.stop
+  if let ["confirm", base, file, relay, modelPrefix] := args then
+    let key := (← (← IO.getStdin).getLine).trimAscii.toString
+    if (← OrbCore.AccountVpnSidecar.confirm base key file relay modelPrefix).isOk then return 0
+    return 1
   let [base, file, relay, mode] := args | return 2
   if !["enable", "disable"].contains mode then return 2
   let key := (← (← IO.getStdin).getLine).trimAscii.toString
