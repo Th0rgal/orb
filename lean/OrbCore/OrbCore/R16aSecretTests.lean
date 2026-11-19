@@ -43,7 +43,9 @@ private def withFakeVault (root : System.FilePath) (run : IO Unit) : IO Unit := 
 private def exercise (root : System.FilePath) (store : CoreStore) (mc : ManagedComputeStore) : IO Unit := do
   let now ← coreEpochSec
   let project := "synthetic-r16a"
-  sql store.missionsDb "INSERT INTO users(id,username,password_hash,role) VALUES('fixture','fixture','inert','member');"
+  -- The vault is owner-only. The synthetic operator owns every fixture mission;
+  -- each companion still authenticates with its own scoped executor session.
+  sql store.missionsDb "INSERT INTO users(id,username,password_hash,role) VALUES('fixture','fixture','inert','admin');"
   let placements := #["bound", "inherited", "ledger", "alias", "automatic", "pending", "claim", "host"]
   for mid in placements do
     sql store.missionsDb "INSERT INTO missions(id,owner_user_id,project,working_directory) VALUES(?1,'fixture',?2,?3);"
@@ -63,7 +65,7 @@ private def exercise (root : System.FilePath) (store : CoreStore) (mc : ManagedC
   } now | throw (IO.userError "R16a managed fixture")
   let st : CoreAppState := {
     cfg := { instanceName := "dev", jwtSecret := "r16a-inline-synthetic-signing-input", workingDir := root.toString },
-    store, managedStore? := some mc, searchIdx? := none, managedRef := ← IO.mkRef fleet,
+    store, managedStore? := some mc, bootstrapAdminId := "fixture", searchIdx? := none, managedRef := ← IO.mkRef fleet,
     chainsRef := ← IO.mkRef #[], proxyCooldownsRef := ← IO.mkRef #[], seqRef := ← IO.mkRef 1 }
   let requestId := "8e646d70-7777-4b2c-bdeb-2daa22440501"
   let brokerFile := System.FilePath.mk store.rootDir / "secret_broker.json"
@@ -106,8 +108,10 @@ private def exercise (root : System.FilePath) (store : CoreStore) (mc : ManagedC
       if mid == "host" then continue
       let (_, reserved) ← call client "BOAT_API_KEY"
       let (_, hostOnly) ← call client "R16A_HOST_ONLY"
+      let outcome (doc : JVal) := (doc.fieldStr? "status").getD
+        ((doc.fieldOrNull "error").fieldStr? "code" |>.getD "missing")
       check (reserved.fieldStr? "status" == some "refused" && hostOnly.fieldStr? "status" == some "refused" &&
-        !(← calls.pathExists)) s!"{mid}: reserved and non-allowlisted names refused before any vault access"
+        !(← calls.pathExists)) s!"{mid}: expected pre-vault refusal (reserved={outcome reserved}, non-allowlisted={outcome hostOnly})"
     let requester ← findClient "inherited"
     let sibling ← findClient "bound"
     let waitPath := s!"/api/mcp/requests/secret/{requestId}/wait?timeout_secs=0"
