@@ -856,15 +856,21 @@ def parseChainTargetsJson
       let mdlRaw := (it.fieldStr? "model_id").orElse (fun _ => it.fieldStr? "modelId") |>.getD ""
       let inlineUrl? := (it.fieldStr? "base_url").orElse (fun _ => it.fieldStr? "baseUrl") |>.filter (!·.isEmpty)
       let inlineKey? := (it.fieldStr? "api_key").orElse (fun _ => it.fieldStr? "apiKey") |>.filter (!·.isEmpty)
-      let matchedHydrated? := hydratedProvs.find? fun hp =>
+      -- A chain can name one account among several of the same provider type.
+      -- Once that identity exists, resolve credentials and limits only on its rows.
+      let pinned := hasExplicitAcct && (providers.any (fun p => p.id == acctRaw) ||
+        hydratedProvs.any (fun hp => hp.id == acctRaw))
+      let eligibleRows := if pinned then providers.filter (fun p => p.id == acctRaw) else providers
+      let eligibleHydrated := if pinned then hydratedProvs.filter (fun p => p.id == acctRaw) else hydratedProvs
+      let matchedHydrated? := eligibleHydrated.find? fun hp =>
         hp.enabled && (hp.hasApiKey || hp.hasOAuth) && (
           hp.id == acctRaw ||
           hp.id == strippedProv ||
           (!provRaw.startsWith "custom:" && hp.providerType == provRaw) ||
           (!provSlug.isEmpty && providerSlugOf hp.name == provSlug)
         )
-      let matchedProv? := matchProviderForChainTarget? providers acctRaw provRaw
-      let anyCfgProv? := providers.find? fun p =>
+      let matchedProv? := matchProviderForChainTarget? eligibleRows acctRaw provRaw
+      let anyCfgProv? := eligibleRows.find? fun p =>
         p.id == acctRaw || p.id == strippedProv ||
         (!provRaw.startsWith "custom:" && p.providerType == provRaw) ||
         (!provSlug.isEmpty && providerSlugOf p.name == provSlug)
@@ -890,8 +896,8 @@ def parseChainTargetsJson
         (!providers.isEmpty || !hydratedProvs.isEmpty) &&
         inlineKey?.isNone && inlineUrl?.isNone &&
         matchedHydrated?.isNone && matchedProv?.isNone &&
-        (anyCfgProv?.map (!·.enabled) |>.getD false) &&
-        !isAg
+        ((anyCfgProv?.map (!·.enabled) |>.getD false) ||
+          (pinned && eligibleHydrated.any (fun hp => !hp.enabled))) && (!isAg || pinned)
       if !explicitlyDisabledInStore then
         let useCliProxy :=
           !cliProxyKey.isEmpty && !cliProxyUrl.isEmpty && inlineKey?.isNone && inlineUrl?.isNone && (

@@ -1542,6 +1542,15 @@ def run : IO Unit := do
           none none "2026-11-16T00:00:00Z"
         | throw (IO.userError "VPN settings member creation failed")
       let memberJwt := mintSessionTokenV2 cfg.jwtSecret member.id member.role member.sessionEpoch (now + 3600)
+      let a : HydratedProvider := { (default : HydratedProvider) with id := "fixture-a",
+        providerType := "openai", enabled := true, hasApiKey := true, apiKey := "synthetic-a" }
+      let b := { a with id := "fixture-b", apiKey := "synthetic-b" }
+      let entry := "[{\"provider_id\":\"openai\",\"account_id\":\"fixture-b\",\"model_id\":\"gpt-5\"}]"
+      let target := (parseChainTargetsJson entry #[] #[a, b])[0]?
+      unless target.any (fun t => t.accountId == b.id && t.apiKey == b.apiKey) do
+        failures := failures.push "An explicitly selected account must supply its own credential"
+      unless (parseChainTargetsJson entry #[] #[a, { b with enabled := false }]).isEmpty do
+        failures := failures.push "A disabled selected account must not resolve another login"
       let vpnSettings := "/api/settings/airvpn"
       let accountRoute := "/api/ai/providers/missing-account/vpn"
       for path in [vpnSettings, accountRoute] do
