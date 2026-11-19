@@ -155,9 +155,9 @@ def stageInstances (ctx : VulkanContext) (insts : Array GpuPrimInstance) : IO By
   let mut x := n
   let mut y := (x + 1) / 2
   for _ in [0:32] do
-    if y < x then
-      x := y
-      y := (x + n / x) / 2
+    if y ≥ x then break
+    x := y
+    y := (x + n / x) / 2
   return x
 
 /-- Signed distance in fixed-point (`1/16` px) from pixel center `(px, py)` to a rounded rectangle
@@ -243,19 +243,28 @@ private def drawRoundedBox (vw vh : Nat) (fb : ByteArray) (curClip r : Rect)
      tr - min tr (max bt brW),
      brR - min brR (max bbW brW),
      blR - min blR (max bbW blW))
+  -- Inside either straight strip the pixel has full coverage. Only corner
+  -- pixels need a signed distance, including for the inner border edge.
+  let margin : Int := max (max tl tr) (max brR blR)
   for py in [y0.toNat : y1.toNat] do
+    let y : Int := py
+    let straightRow := y ≥ r.y + margin && y < r.bottom - margin
+    let innerRow := y ≥ innerRect.y && y < innerRect.bottom
+    let straightInnerRow := y ≥ innerRect.y + margin && y < innerRect.bottom - margin
     for px in [x0.toNat : x1.toNat] do
-      let dOut16 := sdfRoundedRect16 r radii (px : Int) (py : Int)
+      let x : Int := px
+      let dOut16 := if straightRow || (x ≥ r.x + margin && x < r.right - margin) then -8
+        else sdfRoundedRect16 r radii x y
       if dOut16 < 8 then
         let covOut : Nat := if dOut16 ≤ -8 then 255 else ((8 - dOut16).toNat * 255) / 16
         let idx := (py * vw + px) * 4
         if fa > 0 then
           let effA : UInt8 := ((fa.toNat * covOut + 127) / 255).toUInt8
-          let (nr, ng, nb, na) :=
-            blendOver (out.get! idx) (out.get! (idx + 1)) (out.get! (idx + 2)) (out.get! (idx + 3))
-              fr fg fbC effA
+          let (nr, ng, nb, na) := if effA == 255 then (fr, fg, fbC, effA) else
+            blendOver (out.get! idx) (out.get! (idx + 1)) (out.get! (idx + 2)) (out.get! (idx + 3)) fr fg fbC effA
           out := out.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
-        if hasBorder then
+        if hasBorder && !(innerRow && x ≥ innerRect.x && x < innerRect.right &&
+            (straightInnerRow || (x ≥ innerRect.x + margin && x < innerRect.right - margin))) then
           let dIn16 := sdfRoundedRect16 innerRect innerRadii (px : Int) (py : Int)
           if dIn16 > -8 then
             let covIn : Nat := if dIn16 ≥ 8 then 255 else ((dIn16 + 8).toNat * 255) / 16
@@ -429,15 +438,25 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
       let (sr, sg, sb, sa) := unpackColor col
       -- CSS blur-radius is twice Gaussian sigma. Blur coverage, not the distance
       -- field: the old polynomial falloff made broad dark wedges beside dialogs.
-      let empty := ByteArray.mk (Array.replicate totalBytes 0)
-      let mask := drawRoundedBox vw vh empty fullClip r radii 0xFFFFFFFF (0, 0, 0, 0) 0
-      let blurred := blurBackdrop mask vw vh (blur / 2)
       let (x0, y0, x1, y1) := clampBounds vw vh curClip expanded
       if x1 > x0 && y1 > y0 && sa > 0 then
+        -- Each pass reads at most its radius on either side. Include the
+        -- entire dependency halo, retaining edge replication at viewport edges.
+        let sigma := blur / 2
+        let halo : Int := (sigma + (sigma - 1) * 2 : Nat)
+        let mx := max 0 (x0 - halo)
+        let my := max 0 (y0 - halo)
+        let mw := (min (vw : Int) (x1 + halo) - mx).toNat
+        let mh := (min (vh : Int) (y1 + halo) - my).toNat
+        let bounds : Rect := ⟨0, 0, mw, mh⟩
+        let empty := ByteArray.mk (Array.replicate (mw * mh * 4) 0)
+        let mask := drawRoundedBox mw mh empty bounds { r with x := r.x - mx, y := r.y - my } radii 0xFFFFFFFF (0, 0, 0, 0) 0
+        let blurred := blurBackdrop mask mw mh sigma
         for py in [y0.toNat : y1.toNat] do
           for px in [x0.toNat : x1.toNat] do
             let idx := (py * vw + px) * 4
-            let effA := ((sa.toNat * (blurred.get! (idx + 3)).toNat + 127) / 255).toUInt8
+            let alpha := ((py - my.toNat) * mw + px - mx.toNat) * 4 + 3
+            let effA := ((sa.toNat * (blurred.get! alpha).toNat + 127) / 255).toUInt8
             let (nr, ng, nb, na) :=
               blendOver (fb.get! idx) (fb.get! (idx + 1)) (fb.get! (idx + 2)) (fb.get! (idx + 3))
                 sr sg sb effA

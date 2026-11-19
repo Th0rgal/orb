@@ -42,13 +42,22 @@ committed stream chunks use a single `String.intercalate` join. The U7 stream
 spec adds an exact-order regression case in
 `OrbDesktop/Spec/StreamDamage.lean`.
 
-Portable verification limitation: this replacement worker cannot execute the
-native LeanUI benchmark because the checkout host does not provide
-`wayland-client-core.h`; `turbo-lean build --project-dir lean/OrbDesktop
-LeanUISpec` fails while compiling `c/lean_ui_wayland.c` at that missing system
-header. The WebKit/m2air comparison was therefore not accessible here. The
-portable source/spec checks and CI-native benchmark are required for the new
-head.
+Local Linux measurements (`scripts/bench_desktop.sh`, 1470×923, three runs,
+60 streamed updates) used the repo's raw Lake fallback and a desktop sysroot.
+Sampling attributed 63% of baseline CPU samples to the blur loops. Cropping
+shadow masks to the visible area plus their blur halo shifted the largest cost
+to rounded boxes; straight strips can determine full coverage without a distance
+calculation. All 36 native golden PNGs matched the baseline byte for byte after
+both changes. First-frame CRC32 remained 2783534071.
+
+| Local build | Startup ms | Open ms | Frame p50 ms | Frame p99 ms | Peak RSS MiB |
+|---|---:|---:|---:|---:|---:|
+| `054155ae2` | 1731.32 | 2108.49 | 1260.88 | 1399.22 | 118.27 |
+| Shadow crop + integer square-root early exit | 854.04 | 1212.35 | 344.87 | 366.96 | 95.99 |
+| Plus rounded-box straight strips | 538.83 | 668.59 | 145.20 | 165.76 | 96.20 |
+
+The local gate still fails, including the 64 MiB hard RSS ceiling. There is
+no new on-device WebKit/m2air comparison.
 
 ## Visual gate
 
