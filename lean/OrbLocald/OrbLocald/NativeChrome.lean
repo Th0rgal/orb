@@ -370,7 +370,8 @@ def parseMissionInput? (jv : JVal) (fallbackProject : String := "") : Option Chr
   let launchedParentId :=
     let direct := if !forkSrc.isEmpty && forkSrc == rawParentId then "" else rawParentId
     if !direct.isEmpty then direct else callbackParentId
-  let statusArchived := statusLower == "acknowledged" || statusLower == "archived"
+  -- Core archives a mission by tagging it `archived` (`POST /missions/:id/archive`).
+  let statusArchived := statusLower == "acknowledged" || statusLower == "archived" || tags.contains "archived"
   let ack :=
     (jv.fieldBool? "acknowledged").getD
       ((jv.fieldBool? "archived").getD statusArchived)

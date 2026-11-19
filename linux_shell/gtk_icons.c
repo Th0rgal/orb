@@ -42,9 +42,10 @@ void orb_spinner_stop(OrbIconSpinner *sp) {
     if (sp->src) { g_source_remove(sp->src); sp->src = 0; }
     if (sp->spinning) { g_ptr_array_free(sp->spinning, TRUE); sp->spinning = NULL; }
 }
+int orb_icons_light = 0;
 static void draw_status_badge(cairo_t *cr, int bk, int step) {
     const double cx = 13.8, cy = 13.8;
-    cairo_save(cr); cairo_set_source_rgba(cr, 0.078, 0.078, 0.078, 1.0); cairo_arc(cr, cx, cy, 5.4, 0, 6.2832); cairo_fill(cr);
+    cairo_save(cr); if (orb_icons_light) { cairo_set_source_rgba(cr, 0.965, 0.965, 0.957, 1.0); } else { cairo_set_source_rgba(cr, 0.078, 0.078, 0.078, 1.0); } cairo_arc(cr, cx, cy, 5.4, 0, 6.2832); cairo_fill(cr);
     if (bk == 1 || bk == 2) { cairo_set_source_rgba(cr, 0.525, 0.682, 0.894, 1.0); }
     else if (bk == 4) { cairo_set_source_rgba(cr, 0.502, 0.698, 0.553, 1.0); }
     else if (bk == 5) { cairo_set_source_rgba(cr, 0.788, 0.635, 0.153, 1.0); }
