@@ -794,6 +794,17 @@ def run (root : String) : IO Unit := do
       projection.fieldStr? "text" == some "" && (projection.field? "history").isNone &&
       anonCode == 401 && foreignCode == 404 && missingCode == 404 && renderCompact denied == renderCompact missing)
       "current bubble requires an authenticated mission reader"
+    for method in #["GET", "POST"] do
+      let route := "/api/workspaces/member-workspace/resources"
+      let body := JVal.obj #[("memory_max", .str "1G"), ("cpu_quota", .str "50%")]
+      let (status, doc) ← send method route member body
+      check (status == 501 && doc.fieldStr? "error" == some "workspace_resources_unsupported")
+        s!"r16a_flt15_workspace_resources_explicitly_unsupported ({method})"
+      check ((← send method route "" body).1 == 401) "r16a_flt15_workspace_resources_requires_auth"
+      let foreignResult ← send method "/api/workspaces/admin-workspace/resources" member body
+      let missingResult ← send method "/api/workspaces/no-such-workspace/resources" member body
+      check (foreignResult.1 == 404 && foreignResult == missingResult)
+        "r16a_flt15_workspace_resources_preserves_ownership"
     -- R16 HTTP-14: aggregate stats are tenant scoped and honor `since`.
     let (memberStatsSt, memberStats) ← send "GET" "/api/stats" member
     let (adminStatsSt, adminStats) ← send "GET" "/api/stats" admin
@@ -1924,7 +1935,9 @@ def run (root : String) : IO Unit := do
     let (lsSt, lsDoc) ← send "GET" "/api/library/status" member (.obj #[]) stWithProviders
     check (lsSt != 200 || (lsDoc.fieldStr? "path" == some "" && lsDoc.fieldStr? "remote" == some (path ++ "/fixture-library")))
       "member library status hides host path and returns only own remote"
+    IO.eprintln s!"{← IO.monoMsNow} START tenant isolation: member GET /api/system/info"
     let (siSt, siDoc) ← send "GET" "/api/system/info" member (.obj #[]) stWithProviders
+    IO.eprintln s!"{← IO.monoMsNow} END tenant isolation: member GET /api/system/info rc={siSt}"
     check (siSt == 200 && ((siDoc.fieldArr? "components").getD #[]).all (fun c => (c.field? "path").getD .null == .null))
       "member system info hides binary paths"
     let (skSt, skDoc) ← send "GET" "/api/library/skill" member (.obj #[]) stWithProviders
@@ -1932,7 +1945,9 @@ def run (root : String) : IO Unit := do
       ((renderCompact skDoc).splitOn "member-only-skill").length > 1) "member Library skill list is own"
     check ((← send "GET" "/api/library/skill/paloma-infra" member (.obj #[]) stWithProviders).1 == 404)
       "member cannot read a Library skill body"
+    IO.eprintln s!"{← IO.monoMsNow} START tenant isolation: member GET /api/software"
     let (swSt, swDoc) ← send "GET" "/api/software" member (.obj #[]) stWithProviders
+    IO.eprintln s!"{← IO.monoMsNow} END tenant isolation: member GET /api/software rc={swSt}"
     check (swSt == 200 && ((swDoc.fieldArr? "components").getD #[]).all (fun c => (c.field? "binary_path").getD .null == .null))
       "member software inventory hides binary paths"
     check ((← send "POST" "/api/software/updates" member (.obj #[]) stWithProviders).1 == 403)

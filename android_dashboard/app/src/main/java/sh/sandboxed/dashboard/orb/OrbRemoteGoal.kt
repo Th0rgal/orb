@@ -9,4 +9,37 @@ object OrbRemoteGoal {
         if (data.keys.any { it !is String }) return null
         return mapOf("type" to type, "data" to data.toMap())
     }
+
+    data class Projection(val phase: String, val objective: String, val iteration: Int, val detail: String? = null)
+
+    const val UNSUPPORTED = "Goal mode is unavailable for this remote harness because it cannot continue the objective safely. Choose OpenCode or send a standard turn."
+
+    fun phase(status: String?, reason: String?): String = when {
+        reason == "remote_goal_complete" -> "complete"
+        reason == "remote_goal_stopped" || status == "cancelled" -> "stopped"
+        status == "active" || status == "pending" || reason == "remote_goal_continuation" || reason == "awaiting_wakeup" -> "active"
+        status == "paused" -> "paused"
+        else -> "blocked"
+    }
+
+    fun label(phase: String, iteration: Int): String = when {
+        phase != "active" -> "Goal $phase"
+        iteration > 0 -> "Goal in progress · iteration $iteration"
+        else -> "Goal in progress"
+    }
+
+    fun supports(fleet: Map<String, Any?>, backend: String): Boolean =
+        ((fleet["remote_launch"] as? Map<*, *>)?.get("goal_harnesses") as? List<*>)?.contains(backend) == true
+    fun apply(previous: Projection, value: Map<String, Any?>): Projection {
+        val envelope = event(value) ?: return previous
+        val data = envelope["data"] as? Map<*, *> ?: return previous
+        val status = data["status"] as? String
+        val phase = when {
+            previous.phase == "complete" && status == "active" -> previous.phase
+            previous.phase == "stopped" && status == "active" -> previous.phase
+            status in setOf("active", "complete", "stopped", "paused", "blocked") -> status!!
+            else -> previous.phase
+        }
+        return Projection(phase, data["objective"] as? String ?: previous.objective, (data["iteration"] as? Number)?.toInt() ?: previous.iteration, data["summary"] as? String ?: previous.detail)
+    }
 }

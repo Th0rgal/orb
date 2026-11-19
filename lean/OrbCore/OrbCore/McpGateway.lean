@@ -1214,6 +1214,10 @@ def dispatchMcpToolCall
       if let .error _ ← authorizeRemotePlacement mc? owner target nodes then
         releaseRented
         return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" "This execution target is unavailable to this user" nowIso "placement_forbidden"
+    if let some target := inheritedRn? then
+      if let some cause ← nodeApiHangCause? store target then
+        releaseRented
+        return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" cause nowIso "hung_node"
     let effWorkDir :=
       match (args.fieldStr? "working_directory").map (·.trimAscii.toString) |>.filter (!·.isEmpty) with
       | some wd => wd
@@ -1477,6 +1481,9 @@ def dispatchMcpToolCall
         | return mcpErr "receipt_record_failed" "The mutation completed but its receipt could not be recorded. Reconcile the action." false
       return mcpOk settled
     else if toolName == "resume_mission" then
+      if let some target ← resolveMissionRemoteNode? store mc? mid then
+        if let some cause ← nodeApiHangCause? store target then
+          return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" cause nowIso "hung_node"
       if let some t := (args.fieldStr? "title").map (·.trimAscii.toString) then
         if !t.isEmpty then
           discard <| execParamQuery store.missionsDb "UPDATE missions SET title=?2, metadata_updated_at=?3 WHERE id=?1;" #[mid, t, nowIso]
@@ -1563,10 +1570,9 @@ def dispatchMcpToolCall
       nextProject := effProj
       nextFolder := if effProj.isEmpty then "" else folder
     }
-    match ← batchSetMissionPlacementChecked store #[upd] nowIso with
+    match ← MissionSettings.commitPlacementWithRecovery store #[upd] callerUserId nowIso with
     | .error (_, e) => return mcpErr "move_failed" e
-    | .ok (_, changed) =>
-      rebindMovedMissionMcpSessions store changed
+    | .ok (_, _changed) =>
       return mcpOk (.obj #[("ok", .bool true), ("mission_id", .str mid), ("project", .str effProj), ("folder", .str folder)])
 
   -- Compute Fleet & Managed Machines
@@ -1932,11 +1938,7 @@ def dispatchMcpToolCall
     let reason := (args.fieldStr? "reason").getD ""
     if secName.isEmpty then return mcpErr "invalid_arguments" "missing secret name"
     -- A caller whose mission runs on a managed machine is untrusted: allowlisted secrets only.
-    let callerOnManagedNode ←
-      if callerMid.isEmpty then pure false
-      else do
-        let node? ← resolveMissionRemoteNode? store mc? callerMid
-        pure ((node?.map (·.startsWith "managed-")).getD false)
+    let callerOnManagedNode ← missionHasManagedPlacement store mc? callerMid
     let callerSubject := if claims.isExternal then "session:" ++ claims.sessionId
       else if !callerMid.isEmpty then "mission:" ++ callerMid else ""
     return mcpOk (← mcpSecretGet workingDir store.rootDir callerMid callerProj secName reason callerOnManagedNode nowEpochSec callerSubject)

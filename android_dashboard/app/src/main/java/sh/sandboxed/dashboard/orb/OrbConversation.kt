@@ -736,6 +736,15 @@ fun OrbConversationPage(
                 !project.str("remote_node_id").isNullOrEmpty()
         )
     }
+    val remoteGoalTarget = selectedWorkspaceId.isEmpty() && selectedNodeId.isNotEmpty() && selectedNodeId != "core" &&
+        selectedBackend !in setOf("cursor_cloud", "grok_bot", "hermes")
+    var remoteGoalAvailable by remember(selectedBackend, remoteGoalTarget, missionId) { mutableStateOf(false) }
+    LaunchedEffect(selectedBackend, remoteGoalTarget, missionId) {
+        if (remoteGoalTarget && missionId == null) {
+            remoteGoalAvailable = runCatching { OrbRemoteGoal.supports(core.fetchDict("/api/remote-nodes"), selectedBackend) }.getOrDefault(false)
+        }
+    }
+    val offersGoal = !remoteGoalTarget || remoteGoalAvailable
     var allow24hCommitment by remember(currentMission?.id) { mutableStateOf(false) }
     var managedCatalog by remember { mutableStateOf<ManagedMachinesResponse?>(null) }
     LaunchedEffect(showAgentPicker, currentMission?.id) {
@@ -891,6 +900,8 @@ fun OrbConversationPage(
             !OrbJSON.str(liveRow?.dict("cloud"), "provider").isNullOrEmpty()
     }
     val isCloudComposer = isCloudMission || selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes") || selectedBackend.startsWith("cloud_")
+    val remoteGoalPhase = liveRow?.takeIf { it.bool("goal_mode") == true && it.str("backend") == "opencode" }
+        ?.let { OrbRemoteGoal.phase(it.str("status", "state"), it.str("terminal_reason")) }
     val effectiveProjectSlug = remember(currentMission, project) {
         currentMission?.str("project")?.takeIf { it.isNotEmpty() } ?: project.str("slug", "id") ?: project.id
     }
@@ -1459,6 +1470,9 @@ fun OrbConversationPage(
                             core.refreshMissionsQuietly()
                         }
                     }
+                    evType == "goal_status" || evType == "goal_iteration" -> {
+                        scheduleCoalescedHistoryRefresh(id)
+                    }
                     evType == "stream_lagged" || evType == "disconnected" -> {
                         scope.launch(Dispatchers.Main) { loadHistory(id) }
                     }
@@ -2003,6 +2017,10 @@ fun OrbConversationPage(
         isSending = true
         scope.launch {
             try {
+                if (remoteGoalTarget && (composeMode == OrbComposeMode.Goal || Regex("^/goal(?:\\s|$)", RegexOption.IGNORE_CASE).containsMatchIn(text))) {
+                    if (missionId != null || !OrbRemoteGoal.supports(core.fetchDict("/api/remote-nodes"), selectedBackend))
+                        throw OrbError(OrbRemoteGoal.UNSUPPORTED)
+                }
                 validateComposerSkills(composeMode.wrapPrompt(text))?.let { err ->
                     errorMessage = err
                     isSending = false
@@ -2517,7 +2535,7 @@ fun OrbConversationPage(
                     )
                     if (liveRow != null && OrbMissionTree.isGoal(liveRow)) {
                         Text(
-                            text = "Goal",
+                            text = remoteGoalPhase?.let { OrbRemoteGoal.label(it, (liveRow.raw["goal_iteration"] as? Number)?.toInt() ?: 0) } ?: "Goal",
                             color = OrbStyle.textSecondary,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.SemiBold,
@@ -3087,11 +3105,11 @@ fun OrbConversationPage(
                 if (isCloudComposer) OrbSkillQuery(open = false, query = "", start = -1)
                 else OrbSkillSlash.skillQuery(inputText, inputText.length)
             }
-            val slashModes = remember(showModePicker, slashQuery, composeMode) {
+            val slashModes = remember(showModePicker, slashQuery, composeMode, offersGoal) {
                 when {
-                    showModePicker -> OrbComposeMode.entries
+                    showModePicker -> OrbComposeMode.entries.filter { it != OrbComposeMode.Goal || offersGoal }
                     slashQuery.open && slashQuery.start == 0 && composeMode == OrbComposeMode.Message ->
-                        OrbComposeMode.entries.filter { slashQuery.query.isEmpty() || it.id.startsWith(slashQuery.query) }
+                        OrbComposeMode.entries.filter { (it != OrbComposeMode.Goal || offersGoal) && (slashQuery.query.isEmpty() || it.id.startsWith(slashQuery.query)) }
                     else -> emptyList()
                 }
             }
@@ -3469,7 +3487,7 @@ fun OrbConversationPage(
                             }
                         }
 
-                        if (isLive && missionId != null) {
+                        if ((isLive || remoteGoalPhase == "active") && missionId != null) {
                             Box(
                                 modifier = Modifier
                                     .size(44.dp)

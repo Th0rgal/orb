@@ -86,6 +86,12 @@ export function composerModes(backend?: string | null, planSupported = false): S
   return modes;
 }
 
+export function remoteGoalSupport(capability: { goal_harnesses?: string[] } | null | undefined, backend?: string | null): boolean {
+  return !!backend && capability?.goal_harnesses?.includes(backend) === true;
+}
+
+export const REMOTE_GOAL_UNSUPPORTED = "Goal mode is unavailable for this remote harness because it cannot continue the objective safely. Choose OpenCode on a Goal-capable remote node, or use a standard turn.";
+
 /** `/` plus a query with no whitespace — the Cursor slash palette trigger. */
 export function slashQuery(text: string): { open: boolean; query: string } {
   const m = /^\/([^\s]*)$/.exec(text);

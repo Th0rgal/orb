@@ -3306,20 +3306,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let callerSubject := if activeClaims.isExternal then
         requesterSubject "" ("session:" ++ activeClaims.sessionId)
       else ""
-      let mut onManagedNode := false
-      if !activeClaims.missionId.isEmpty then
-        if let .ok mRs ← execParamQuery st.store.missionsDb
-            "SELECT placement_kind FROM missions WHERE id=?1;" #[activeClaims.missionId] then
-          if mRs.size > 1 then
-            let pk := (mRs[1]?.bind (·[0]?)).getD ""
-            if pk == "managed_vm" || pk.startsWith "managed-" then onManagedNode := true
-        if !onManagedNode then
-          if let some mst := st.managedStore? then
-            if let .ok vmRs ← execParamQuery mst.db
-                ("SELECT 1 FROM managed_machines WHERE owner_mission=?1 AND status<>'destroyed' " ++
-                 "UNION ALL SELECT 1 FROM managed_vm_claims WHERE owner_mission=?1 AND phase_code=1 LIMIT 1;")
-                #[activeClaims.missionId] then
-              if vmRs.size > 1 then onManagedNode := true
+      let onManagedNode ← missionHasManagedPlacement st.store st.managedStore? activeClaims.missionId
       let waited ← mcpSecretWait st.cfg.workingDir st.store.rootDir activeClaims.missionId
         projectSlug reqId callerSubject onManagedNode timeoutSecs nowEpochSec
       return .ok (mkJson 200 (renderCompact waited))
@@ -3752,6 +3739,17 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       | .ok _ =>
         return .ok (mkJson 201 s!"\{\"id\":{jsonEscape wid},\"name\":{jsonEscape wname},\"path\":{jsonEscape safePath},\"workspace_type\":{jsonEscape wtype}}")
 
+  if req.method == "GET" || req.method == "POST" then
+    if let some params := matchRoutePattern? "/api/workspaces/:id/resources" rawTarget then
+      let wid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      match ← execParamQuery st.store.missionsDb
+          "SELECT 1 FROM workspaces WHERE id=?1 AND (?2='1' OR owner_user_id=?3);"
+          #[wid, if caller.isLegacyUnscoped then "1" else "0", caller.userId] with
+      | .error _ => return .ok (mkJson 503 "{\"error\":\"workspace_store_unavailable\"}")
+      | .ok rows =>
+        if rows.size < 2 then return .ok (mkJson 404 "{\"error\":\"workspace_not_found\"}")
+        return .ok (mkJson 501 "{\"error\":\"workspace_resources_unsupported\",\"message\":\"This Core runtime cannot read, persist or apply per-workspace resource limits.\"}")
+
   if req.method == "GET" && (cleanPath == "/api/nodes" || cleanPath == "/api/machines") then
     let mf ← st.managedRef.get
     let visibleVms :=
@@ -3956,11 +3954,18 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
         return .ok (mkJson cCode cBody)
       let nowIso := formatEpochIso8601Utc nowEpochSec
-      discard <| cancelActiveRemoteJobForMission st.store st.managedStore? st.relayHub? mid "Mission stopped on Core"
+      let remoteGoal := ((← getMission? st.store mid).map (·.goalMode)).getD false
+      if !remoteGoal then
+        discard <| cancelActiveRemoteJobForMission st.store st.managedStore? st.relayHub? mid "Mission stopped on Core"
       -- A stop request ends the session for its tethers and session-scoped grants even when no run is active.
       revokeSessionScopedMacTethersForMission st.store st.macTether? mid nowEpochSec
-      match ← hostedStop st.store mid nowIso with
+      match ← hostedStop st.store mid nowIso (if remoteGoal then "remote_goal_stopped" else "hosted_stop") with
       | .ok gen =>
+        if remoteGoal then
+          discard <| cancelActiveRemoteJobForMission st.store st.managedStore? st.relayHub? mid "Goal stopped on Core"
+          let payload := renderCompact (.obj #[("status", .str "stopped"), ("run_generation", JVal.uint64 gen)])
+          discard <| appendMissionEvent st.store mid "goal_status" payload nowIso
+          publishControlEvent st.broadcastHub? "goal_status" payload (some mid)
         discard <| OrbCore.SecretAndApproval.reapPrivilegeLeases st.store nowEpochSec
         return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"run_generation\":{gen}}")
       | .error "mission_not_found" => return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
@@ -4726,6 +4731,19 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let bodyJv := bodyVal?.getD (.obj #[])
       let modelOverride := (JsonTape.lookupString? tape "model_override").getD ""
       let prompt? := JsonTape.lookupString? tape "prompt"
+      let goalObjective? := prompt?.bind Cyber.parseGoalPrefix?
+      let remoteGoal := !clientPlaced && remoteNodeId?.isSome && goalObjective?.isSome
+      if remoteGoal then
+        let capability := if RemoteGoal.harnesses.contains backend && st.remoteSup?.isSome
+          then RemoteGoal.Capability.coreOpenCode else .unavailable
+        match RemoteGoal.admit capability false (goalObjective?.getD "") with
+        | .error .emptyObjective =>
+          abortIdem
+          return .ok (mkJson 400 "{\"error\":\"Goal mode requires a non-empty objective.\"}")
+        | .error _ =>
+          abortIdem
+          return .ok (mkJson 400 "{\"error\":\"remote_goal_unsupported: This remote harness cannot continue a Goal. Choose OpenCode or send a standard turn.\"}")
+        | .ok _ => pure ()
       let mut selectedSkills : Array SelectedSkill := #[]
       if !clientPlaced then
         if let some prompt := prompt? then
@@ -4794,7 +4812,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         project := projSlug, folder := normCreateFolder, createdAt := nowIso, updatedAt := nowIso, totalCostCents := 0,
         authorityMode := authMode, placementKind := placeKind, reservedDiskGib := diskGib,
         nodeBootEpoch := st.store.bootEpoch, tagsJson := initTagsJson, track := effTrack, repo := repo,
-        ownerUserId := caller.userId
+        ownerUserId := caller.userId,
+        goalMode := remoteGoal,
+        goalObjective := if remoteGoal then goalObjective?.getD "" else ""
       }
       match ← insertNewMission st.store mRec with
       | .error "mission_already_exists" =>
@@ -4840,6 +4860,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
                 effRemoteNodeId? := some resolvedNode
                 effTagsJson ← updateMissionBoundManagedNode st.store mid resolvedNode nowIso
               let deliv := if selectedSkills.isEmpty then rawPrompt else withDirective rawPrompt selectedSkills
+              let launchPrompt := if remoteGoal then
+                let goalPrompt := remoteGoalPrompt (goalObjective?.getD "")
+                if selectedSkills.isEmpty then goalPrompt else withDirective goalPrompt selectedSkills
+              else deliv
               discard <| appendMissionEvent st.store mid "user_message"
                 (renderCompact (.obj #[("type", .str "user_message"), ("content", .str deliv), ("mission_id", .str mid)])) nowIso
               if let some tSink := st.telemetrySink? then
@@ -4859,19 +4883,26 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
                 placementKind    := placeKind
                 reservedDiskGib  := diskGib
                 tagsJson         := effTagsJson
-                prompt           := deliv
+                prompt           := launchPrompt
                 sideQuestion     := isBtwReq
+                goalDispatch?    := if remoteGoal then some ("", 1) else none
               }
               match ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec with
-              | .ok _ => initStatus := "active"
+              | .ok _ =>
+                initStatus ← if remoteGoal then pure (((← getMission? st.store mid).map (·.status)).getD "active") else pure "active"
               | .error dispErr =>
-                if !rentedVmId.isEmpty then
-                  if let some mst := st.managedStore? then
-                    let mf0 ← st.managedRef.get
-                    discard <| runConfiguredManagedLifecycle mst
-                      { store := st.store, fleet := mf0, override? := st.managedProvisioningOverride? } rentedVmId "destroy" nowEpochSec
-                rollbackUnbornCreate
-                return .ok (mkJson 502 s!"\{\"error\":{jsonEscape dispErr}}")
+                if remoteGoal && (dispErr == "remote_goal_dispatch_fenced" || dispErr.startsWith "remote_dispatch_uncertain:" ||
+                    dispErr.startsWith "remote_accept_persist_failed:") then
+                  -- Stop or reconciliation owns the durable mission and its job now.
+                  initStatus := ((← getMission? st.store mid).map (·.status)).getD "awaiting_user"
+                else
+                  if !rentedVmId.isEmpty then
+                    if let some mst := st.managedStore? then
+                      let mf0 ← st.managedRef.get
+                      discard <| runConfiguredManagedLifecycle mst
+                        { store := st.store, fleet := mf0, override? := st.managedProvisioningOverride? } rentedVmId "destroy" nowEpochSec
+                  rollbackUnbornCreate
+                  return .ok (mkJson 502 s!"\{\"error\":{jsonEscape dispErr}}")
         if controller then
           let ownerId := if caller.isLegacyUnscoped then st.bootstrapAdminId else caller.userId
           if let .error e ← nominateCreatedProjectController st.store projSlug rawProjSlug mid nowIso ownerId then
@@ -5036,12 +5067,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       nextProject     := projSlug
       nextFolder      := m.targetFolder
     }
-    let (allMoved, changedMoved) ← match ← batchSetMissionPlacementChecked st.store updates nowIso with
+    let (allMoved, changedMoved) ← match ← MissionSettings.commitPlacementWithRecovery st.store updates caller.userId nowIso
+      (pure (.ok ()))
+      { ids := crossProjIds, target := rawProjSlug, policy, epoch := nowEpochSec } with
       | .ok pair => pure pair
       | .error (code, msg) => return .ok (mkJson code s!"\{\"error\":{jsonEscape msg}}")
-    if !crossProjIds.isEmpty && (policy == "revoke" || policy == "keep") then
-      applyCrossProjectSecretPolicy st.store.rootDir crossProjIds rawProjSlug policy nowIso nowEpochSec
-    rebindMovedMissionMcpSessions st.store changedMoved
     let unscopeItem (it : MissionPlacementItem) : MissionPlacementItem :=
       if caller.isLegacyUnscoped then it
       else
@@ -6335,6 +6365,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let mission? ← match mid? with
       | some mid => getMission? st.store mid
       | none => pure none
+    if (parseGoalPrefix? content).isSome then
+      if let some m := mission? then
+        if m.placementKind == "remote" || m.placementKind == "remote_node" || m.placementKind == "managed_vm" ||
+            (← resolveMissionRemoteNode? st.store st.managedStore? m.id).isSome then
+          return .ok (mkJson 400 "{\"error\":\"remote_goal_followup_unsupported: Start a new Goal-capable mission to use /goal, or send a standard follow-up.\"}")
     let mut promoteCyber? : Option (String × Selection × String) := none
     if let some mid := mid? then
       if let some m := mission? then
@@ -7979,8 +8014,6 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       systemHub? := some systemHub
       remoteSup? := some remoteSup
     }
-    if maxRequests?.isNone then
-      startCloudSupervisorLoop cloudHub store (some broadcastHub) cfg.port
     let bindHost := if cfg.host == "localhost" then "127.0.0.1" else cfg.host
     let .ok (listenFd, boundPort) ← tcpListen bindHost cfg.port 128
       | do
@@ -7990,6 +8023,13 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
         IO.eprintln s!"[sandboxed-sh] FATAL: failed to bind {bindHost}:{cfg.port}"
         return 1
     remoteSup.boundPortRef.set boundPort
+    if let .error e ← fenceInterruptedGoalSubmissions store then
+      discard <| LeanSys.Posix.closeFd listenFd
+      stopMacTetherRuntime macTetherRt
+      closeManagedComputeStore managedStore
+      closeCoreStore store
+      IO.eprintln s!"[sandboxed-sh] FATAL: Goal submission startup fence failed: {e}"
+      return 1
     let lostTurns ← interruptTurnsLostToRestart store.missionsDb
     if lostTurns > 0 then
       IO.eprintln s!"[sandboxed-sh] {lostTurns} mission turn(s) lost to the restart marked interrupted"
@@ -8001,6 +8041,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       IO.eprintln s!"[sandboxed-sh] generic action recovery failed: {e}"
     IO.eprintln s!"[sandboxed-sh] listening on http://{bindHost}:{boundPort} (dev_mode={cfg.devMode})"
     if maxRequests?.isNone then
+      startCloudSupervisorLoop cloudHub store (some broadcastHub) cfg.port
       let localWakeupLaunch : MissionRecord → String → Option String → IO Bool :=
         fun mr prompt sid? => do
           match ← launchLocalCoreMissionTurn appState mr.id mr.backend mr.workingDirectory prompt mr.modelOverride mr.modelEffort "bypassPermissions" sid? "local" false with
@@ -8024,6 +8065,13 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
            catch e =>
              IO.eprintln s!"[sandboxed-sh] wake-up scheduler pass failed: {e}"
           IO.sleep 2000
+      discard <| IO.asTask (prio := .dedicated) do
+        while true do
+          try
+            monitorStaticNodeApis store
+            discard <| reconcileUncertainRemoteSubmissions store (some managedStore) (some relayHub) (some broadcastHub) remoteSup cfg.workingDir false
+          catch e => IO.eprintln s!"[sandboxed-sh] node API health check failed: {e}"
+          IO.sleep 30000
       discard <| IO.asTask (prio := .dedicated) do
         let mut lastInventory : UInt64 := 0
         let mut checkedDestroyed : Array String := #[]

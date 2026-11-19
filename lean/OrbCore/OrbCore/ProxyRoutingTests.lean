@@ -34,22 +34,38 @@ def runStreaming : IO Unit := do
   match stepBodyFraming (.length 3) "abcdef".toUTF8 with
   | .ok (out, _, fin) => check (out == "abc".toUTF8 && fin) "content-length framing"
   | .error _ => check false "content-length framing"
-  -- Live relay over a loopback upstream that pauses between SSE events.
-  let pieces := #["data: {\"n\":1}\n\n", "data: {\"n\":2}\n\n", "data: [DONE]\n\n"]
-  let pauseMs : UInt32 := 400
+  for withTool in [false, true] do
+    runRelayCut withTool
+where
+ runRelayCut (withTool : Bool) : IO Unit := do
+  -- The test client alone releases the upstream. A buffered relay cannot
+  -- pass by delivering several events together just before the socket closes.
+  let delta := "data: {\"choices\":[{\"delta\":{\"content\":\"visible\"}}]}\n\n"
+  let tool := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_once\",\"function\":{\"name\":\"test\",\"arguments\":\"{}\"}}]}}]}\n\n"
+  let finish := "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"
+  let sendDelta ← IO.Promise.new
+  let release ← IO.Promise.new
   let .ok (lfd, port) ← tcpListen "127.0.0.1" 0 4
     | throw (IO.userError "proxy streaming: listen failed")
-  let _ ← IO.asTask (prio := .dedicated) do
+  let upstream ← IO.asTask (prio := .dedicated) do
     if let .ok cfd ← tcpAcceptPoll lfd 5000 then
       discard <| pollReadable cfd 2000
       discard <| readStreamChunk cfd 65536
       discard <| writeAll cfd ("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n" ++
         "Transfer-Encoding: chunked\r\n\r\n").toUTF8 false
-      for p in pieces do
-        discard <| writeAll cfd (encodeHttpChunk p.toUTF8) false
-        IO.sleep pauseMs
-      discard <| writeAll cfd (encodeHttpChunk ByteArray.empty) false
+      discard <| IO.wait sendDelta.result?
+      discard <| writeAll cfd (encodeHttpChunk delta.toUTF8) false
+      discard <| IO.wait release.result?
+      if withTool then discard <| writeAll cfd (encodeHttpChunk tool.toUTF8) false
+      -- Cut before either the model finish or the HTTP zero chunk.
       discard <| closeFd cfd
+    -- A real, distinguishable second attempt is available if the relay retries.
+    -- The test wakes this accept with an empty connection on the correct path.
+    if let .ok retryFd ← tcpAcceptPoll lfd 10000 then
+      discard <| pollReadable retryFd 5000
+      unless (← readStreamChunk retryFd 65536).isEmpty do
+        discard <| writeAll retryFd "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nsecond-answer".toUTF8 false
+      discard <| closeFd retryFd
     discard <| closeFd lfd
   let streamChain : RoutingChain := {
     id := "s", name := "s",
@@ -59,16 +75,36 @@ def runStreaming : IO Unit := do
   check (out.status == 200) s!"streamed status {out.status}"
   let some pump := out.stream?
     | throw (IO.userError "proxy streaming: 2xx stream reply was buffered")
-  let t0 ← IO.monoMsNow
-  let arrivals ← IO.mkRef (#[] : Array Nat)
-  let (copy, _) := PumpOutcome.unpack <| ← pump fun piece => do
-    if !piece.isEmpty then
-      arrivals.modify (·.push ((← IO.monoMsNow) - t0))
-    return true
-  let times ← arrivals.get
-  check (String.fromUTF8? copy == some (String.join pieces.toList)) "streamed body is intact"
-  -- The first event must not wait for the upstream to finish (~3 pauses).
-  check (times.size ≥ 2 && times[0]! + pauseMs.toNat ≤ times[times.size - 1]!) s!"events arrive as produced: {times}"
+  let .ok (clientListener, clientPort) ← tcpListen "127.0.0.1" 0 1
+    | throw (IO.userError "stream client listen")
+  let .ok client ← tcpConnect "127.0.0.1" clientPort | throw (IO.userError "stream client connect")
+  let .ok downstream ← tcpAcceptPoll clientListener 2000 | throw (IO.userError "stream client accept")
+  discard <| closeFd clientListener
+  let relay ← IO.asTask (prio := .dedicated) do
+    try pump fun piece => do return (← writeAll downstream piece false).isOk
+    finally discard <| closeFd downstream
+  sendDelta.resolve ()
+  let receive (size : Nat) : IO ByteArray := do
+    let mut bytes := ByteArray.empty
+    while bytes.size < size do
+      unless (← pollReadable client 5000).isOk do break
+      let part ← readStreamChunk client 65536
+      if part.isEmpty then break
+      bytes := bytes ++ part
+    return bytes
+  try
+    check ((← receive delta.utf8ByteSize) == delta.toUTF8) "client sees choices delta before upstream release"
+  finally release.resolve ()
+  let suffix ← receive (tool.utf8ByteSize + finish.utf8ByteSize + 1)
+  discard <| closeFd client
+  let (copy, complete) ← IO.ofExcept relay.get
+  if let .ok wake ← tcpConnect "127.0.0.1" port then discard <| closeFd wake
+  IO.ofExcept upstream.get
+  let expected := if withTool then tool ++ finish else ""
+  check (complete == withTool && suffix == expected.toUTF8 && copy == (delta ++ expected).toUTF8)
+    s!"cut after visible text never mixes attempts and closes only a complete tool call: {withTool}"
+  let some attempts := out.streamAttemptsRef? | throw (IO.userError "missing stream attempt count")
+  check ((← attempts.get) == 1) "visible text pins the first attempt"
 
 def runStreamingPumpContracts : IO Unit := do
   let failures ← IO.mkRef (#[] : Array String)

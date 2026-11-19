@@ -36,7 +36,7 @@ extension OrbConversation {
         let q = OrbSkillSlash.skillQuery(text, caret: (text as NSString).length)
         guard q.open else { return nil }
         let modes = supportsMode && mode == "Message" && q.start == 0
-            ? ["Message", "Plan", "Goal"].filter { q.query.isEmpty || $0.lowercased().hasPrefix(q.query) }
+            ? ["Message", "Plan", "Goal"].filter { ($0 != "Goal" || offersGoal) && (q.query.isEmpty || $0.lowercased().hasPrefix(q.query)) }
             : []
         let skills = OrbSkillSlash.filterSkills(skillItems, query: q.query, selected: selectedSkillNames)
         guard !modes.isEmpty || !skills.isEmpty || skillCatalogError != nil else { return nil }
@@ -517,10 +517,17 @@ extension OrbConversation {
             dictation: dictation,
             busy: busy,
             canSend: canSend,
-            showStop: working && (!isCloud || selection.canCancel),
+            showStop: (working || remoteGoalPhase == .active) && (!isCloud || selection.canCancel),
             onSend: { Task { await send() } },
             onStop: { Task { await cancel() } }
         ) {
+            if let remoteGoalPhase {
+                Text(OrbRemoteGoal.label(remoteGoalPhase, iteration: Int(mission["goal_iteration"].doubleValue ?? 0)))
+                    .font(.caption).foregroundStyle(OrbStyle.textSecondary)
+            }
+            if !offersGoal && (mode == "Goal" || text == "/" || text.lowercased().hasPrefix("/g")) {
+                Text(OrbRemoteGoal.unsupported).font(.caption).foregroundStyle(OrbStyle.textSecondary)
+            }
             if !attachments.isEmpty { OrbAttachments(files: $attachments, error: $error, canAdd: false) }
             let mentioned = mentionedContextItems
             let skills = selectedSkillNames
@@ -660,6 +667,12 @@ extension OrbConversation {
             .disabled(isParticipant)
             .accessibilityLabel("Agent and model: \(selection.label)")
             .accessibilityIdentifier("agent-selection")
+        }
+        .task(id: remoteGoalTarget) {
+            guard remoteGoalTarget, id == nil else { return }
+            if let fleet = try? await api.call("/api/remote-nodes") {
+                remoteGoalHarnesses = Set(fleet["remote_launch"]["goal_harnesses"].items.map(\.text))
+            }
         }
     }
 

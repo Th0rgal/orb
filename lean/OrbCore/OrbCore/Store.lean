@@ -79,6 +79,8 @@ structure MissionRecord where
   track             : String := ""
   repo              : String := ""
   ownerUserId       : String := ""
+  goalMode          : Bool := false
+  goalObjective     : String := ""
   history           : Array MissionHistoryEntry := #[]
   deriving Repr, DecidableEq
 
@@ -194,7 +196,8 @@ def transferCleanupSql : String :=
   "COMMIT;"
 
 def missionsSchemaSql : String :=
-  "CREATE TABLE IF NOT EXISTS missions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'awaiting_user', backend TEXT NOT NULL DEFAULT 'codex', model_override TEXT, model_effort TEXT, working_directory TEXT NOT NULL DEFAULT '', project TEXT NOT NULL DEFAULT '', folder TEXT NOT NULL DEFAULT '', placement_revision INTEGER NOT NULL DEFAULT 0, parent_mission_id TEXT, created_at TEXT NOT NULL DEFAULT '', metadata_updated_at TEXT, short_description TEXT, github_pr TEXT, origin TEXT, origin_session_id TEXT, workspace_name TEXT, resumable INTEGER NOT NULL DEFAULT 0, requires_local_disk INTEGER NOT NULL DEFAULT 0, tags TEXT NOT NULL DEFAULT '[]', session_id TEXT, deferred_goal TEXT, workspace_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000', terminal_reason TEXT, updated_at TEXT NOT NULL DEFAULT '', opened_at TEXT, agent TEXT, config_profile TEXT, total_cost_cents INTEGER NOT NULL DEFAULT 0, history_json TEXT NOT NULL DEFAULT '[]', authority_mode TEXT NOT NULL DEFAULT 'writer' CHECK(authority_mode IN ('readonly','writer')), placement_kind TEXT NOT NULL DEFAULT 'managed', superseded_by_mission_id TEXT NOT NULL DEFAULT '', orphaned_at TEXT NOT NULL DEFAULT '', reserved_disk_gib INTEGER NOT NULL DEFAULT 0, state_revision INTEGER NOT NULL DEFAULT 1, owner_epoch INTEGER NOT NULL DEFAULT 1, run_generation INTEGER NOT NULL DEFAULT 1, node_boot_epoch INTEGER NOT NULL DEFAULT 1, track TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '', owner_user_id TEXT NOT NULL DEFAULT '');" ++
+  "CREATE TABLE IF NOT EXISTS node_api_hangs(node_id TEXT PRIMARY KEY COLLATE NOCASE,incident_id TEXT NOT NULL);" ++
+  "CREATE TABLE IF NOT EXISTS missions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'awaiting_user', backend TEXT NOT NULL DEFAULT 'codex', model_override TEXT, model_effort TEXT, working_directory TEXT NOT NULL DEFAULT '', project TEXT NOT NULL DEFAULT '', folder TEXT NOT NULL DEFAULT '', placement_revision INTEGER NOT NULL DEFAULT 0, parent_mission_id TEXT, created_at TEXT NOT NULL DEFAULT '', metadata_updated_at TEXT, short_description TEXT, github_pr TEXT, origin TEXT, origin_session_id TEXT, workspace_name TEXT, resumable INTEGER NOT NULL DEFAULT 0, requires_local_disk INTEGER NOT NULL DEFAULT 0, tags TEXT NOT NULL DEFAULT '[]', session_id TEXT, deferred_goal TEXT, goal_mode INTEGER NOT NULL DEFAULT 0, goal_objective TEXT NOT NULL DEFAULT '', workspace_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000', terminal_reason TEXT, updated_at TEXT NOT NULL DEFAULT '', opened_at TEXT, agent TEXT, config_profile TEXT, total_cost_cents INTEGER NOT NULL DEFAULT 0, history_json TEXT NOT NULL DEFAULT '[]', authority_mode TEXT NOT NULL DEFAULT 'writer' CHECK(authority_mode IN ('readonly','writer')), placement_kind TEXT NOT NULL DEFAULT 'managed', superseded_by_mission_id TEXT NOT NULL DEFAULT '', orphaned_at TEXT NOT NULL DEFAULT '', reserved_disk_gib INTEGER NOT NULL DEFAULT 0, state_revision INTEGER NOT NULL DEFAULT 1, owner_epoch INTEGER NOT NULL DEFAULT 1, run_generation INTEGER NOT NULL DEFAULT 1, node_boot_epoch INTEGER NOT NULL DEFAULT 1, track TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '', owner_user_id TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','member')), unix_username TEXT UNIQUE, session_epoch INTEGER NOT NULL DEFAULT 1, disabled INTEGER NOT NULL DEFAULT 0, daily_spend_cap_cents INTEGER, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '', password_seeded INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE TABLE IF NOT EXISTS mission_shares (mission_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'participant' CHECK(role IN ('participant')), granted_by TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY (mission_id, user_id));" ++
   "CREATE INDEX IF NOT EXISTS idx_mission_shares_user ON mission_shares(user_id);" ++
@@ -358,6 +361,8 @@ def missionsAdditiveAlters : Array String := #[
   "ALTER TABLE missions ADD COLUMN authority_mode TEXT NOT NULL DEFAULT 'writer';",
   "ALTER TABLE missions ADD COLUMN placement_kind TEXT NOT NULL DEFAULT 'managed';",
   "ALTER TABLE missions ADD COLUMN deferred_goal TEXT;",
+  "ALTER TABLE missions ADD COLUMN goal_mode INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE missions ADD COLUMN goal_objective TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE missions ADD COLUMN terminal_reason TEXT;",
   "ALTER TABLE missions ADD COLUMN model_override TEXT;",
   "ALTER TABLE missions ADD COLUMN model_effort TEXT;",
@@ -1734,8 +1739,8 @@ def upsertMission (st : CoreStore) (m : MissionRecord) : IO (Except String Unit)
   let runGen := if m.runGeneration == 0 then 1 else m.runGeneration
   let bootEp := if m.nodeBootEpoch == 0 then 1 else m.nodeBootEpoch
   let sql :=
-    "INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,project,folder,placement_revision,parent_mission_id,created_at,metadata_updated_at,workspace_id,short_description,updated_at,total_cost_cents,authority_mode,placement_kind,superseded_by_mission_id,orphaned_at,reserved_disk_gib,state_revision,owner_epoch,run_generation,node_boot_epoch,tags,track,repo,owner_user_id) " ++
-    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,NULLIF(?11,''),?12,NULLIF(?13,''),?14,NULLIF(?15,''),?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30) " ++
+    "INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,project,folder,placement_revision,parent_mission_id,created_at,metadata_updated_at,workspace_id,short_description,updated_at,total_cost_cents,authority_mode,placement_kind,superseded_by_mission_id,orphaned_at,reserved_disk_gib,state_revision,owner_epoch,run_generation,node_boot_epoch,tags,track,repo,owner_user_id,goal_mode,goal_objective) " ++
+    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,NULLIF(?11,''),?12,NULLIF(?13,''),?14,NULLIF(?15,''),?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32) " ++
     "ON CONFLICT(id) DO UPDATE SET title=excluded.title,status=excluded.status,backend=excluded.backend,model_override=excluded.model_override,model_effort=excluded.model_effort,working_directory=excluded.working_directory,project=excluded.project," ++
     "folder=CASE WHEN excluded.folder<>'' THEN excluded.folder ELSE missions.folder END," ++
     "placement_revision=CASE WHEN excluded.placement_revision>missions.placement_revision THEN excluded.placement_revision ELSE missions.placement_revision END," ++
@@ -1743,12 +1748,13 @@ def upsertMission (st : CoreStore) (m : MissionRecord) : IO (Except String Unit)
     "metadata_updated_at=COALESCE(excluded.metadata_updated_at,missions.metadata_updated_at)," ++
     "short_description=COALESCE(excluded.short_description,missions.short_description)," ++
     "updated_at=excluded.updated_at,total_cost_cents=excluded.total_cost_cents," ++
-    "track=excluded.track,repo=excluded.repo,owner_user_id=CASE WHEN excluded.owner_user_id<>'' THEN excluded.owner_user_id ELSE missions.owner_user_id END;"
+    "track=excluded.track,repo=excluded.repo,owner_user_id=CASE WHEN excluded.owner_user_id<>'' THEN excluded.owner_user_id ELSE missions.owner_user_id END,goal_mode=excluded.goal_mode,goal_objective=excluded.goal_objective;"
   let res ← execParamQuery st.missionsDb sql #[
     m.id, m.title, m.status, m.backend, m.modelOverride, m.modelEffort, m.workingDirectory, m.project,
     normFolder, s!"{m.placementRevision}", m.parentMissionId, effCreated, m.metadataUpdatedAt, effWsId, m.shortDescription,
     m.updatedAt, s!"{m.totalCostCents}", m.authorityMode, m.placementKind, m.supersededById, m.orphanedAt,
-    s!"{m.reservedDiskGib}", s!"{rev}", s!"{ownEp}", s!"{runGen}", s!"{bootEp}", compatTags, m.track, m.repo, m.ownerUserId
+    s!"{m.reservedDiskGib}", s!"{rev}", s!"{ownEp}", s!"{runGen}", s!"{bootEp}", compatTags, m.track, m.repo, m.ownerUserId,
+    if m.goalMode then "1" else "0", m.goalObjective
   ]
   if res.isOk then
     emitMissionPresentationNotice st m.id "mission_updated"
@@ -1781,13 +1787,14 @@ def insertNewMission (st : CoreStore) (m : MissionRecord) : IO (Except String Un
     if ers.size > 1 then
       return .error "mission_already_exists"
     let sql :=
-      "INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,project,folder,placement_revision,parent_mission_id,created_at,metadata_updated_at,workspace_id,short_description,updated_at,total_cost_cents,authority_mode,placement_kind,superseded_by_mission_id,orphaned_at,reserved_disk_gib,state_revision,owner_epoch,run_generation,node_boot_epoch,tags,track,repo,owner_user_id) " ++
-      "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,NULLIF(?11,''),?12,NULLIF(?13,''),?14,NULLIF(?15,''),?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30);"
+      "INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,project,folder,placement_revision,parent_mission_id,created_at,metadata_updated_at,workspace_id,short_description,updated_at,total_cost_cents,authority_mode,placement_kind,superseded_by_mission_id,orphaned_at,reserved_disk_gib,state_revision,owner_epoch,run_generation,node_boot_epoch,tags,track,repo,owner_user_id,goal_mode,goal_objective) " ++
+      "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,NULLIF(?11,''),?12,NULLIF(?13,''),?14,NULLIF(?15,''),?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32);"
     let res ← execParamQueryUnlocked st.missionsDb sql #[
       m.id, m.title, m.status, m.backend, m.modelOverride, m.modelEffort, m.workingDirectory, m.project,
       normFolder, s!"{m.placementRevision}", m.parentMissionId, effCreated, m.metadataUpdatedAt, effWsId, m.shortDescription,
       m.updatedAt, s!"{m.totalCostCents}", m.authorityMode, m.placementKind, m.supersededById, m.orphanedAt,
-      s!"{m.reservedDiskGib}", s!"{rev}", s!"{ownEp}", s!"{runGen}", s!"{bootEp}", compatTags, m.track, m.repo, m.ownerUserId
+      s!"{m.reservedDiskGib}", s!"{rev}", s!"{ownEp}", s!"{runGen}", s!"{bootEp}", compatTags, m.track, m.repo, m.ownerUserId,
+      if m.goalMode then "1" else "0", m.goalObjective
     ]
     return res.map (fun _ => ())
 
@@ -2051,7 +2058,7 @@ def getMission? (st : CoreStore) (missionId : String) : IO (Option MissionRecord
      "COALESCE(placement_revision,0),COALESCE(parent_mission_id,''),COALESCE(NULLIF(created_at,''),updated_at)," ++
      "COALESCE(metadata_updated_at,''),COALESCE(workspace_id,'00000000-0000-0000-0000-000000000000')," ++
      "COALESCE(short_description,''),COALESCE(track,''),COALESCE(NULLIF(github_pr,''),repo,'')," ++
-     "COALESCE(run_generation,1),COALESCE(reserved_disk_gib,0),COALESCE(owner_epoch,1),COALESCE(node_boot_epoch,1) FROM missions WHERE id=?1;") #[missionId] with
+     "COALESCE(run_generation,1),COALESCE(reserved_disk_gib,0),COALESCE(owner_epoch,1),COALESCE(node_boot_epoch,1),COALESCE(goal_mode,0),COALESCE(goal_objective,'') FROM missions WHERE id=?1;") #[missionId] with
   | .error _ => return none
   | .ok rows =>
     if rows.size ≤ 1 then return none
@@ -2085,6 +2092,8 @@ def getMission? (st : CoreStore) (missionId : String) : IO (Option MissionRecord
       reservedDiskGib   := (((r[25]?).bind String.toNat?).getD 0).toUInt64
       ownerEpoch        := (((r[26]?).bind String.toNat?).getD 1).toUInt64
       nodeBootEpoch     := (((r[27]?).bind String.toNat?).getD 1).toUInt64
+      goalMode          := (((r[28]?).bind String.toNat?).getD 0) != 0
+      goalObjective     := (r[29]?).getD ""
     }
 
 /-- List all mission status strings currently persisted in `missions.db`. -/

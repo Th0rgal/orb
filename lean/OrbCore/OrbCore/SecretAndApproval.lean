@@ -106,43 +106,60 @@ def inspectCrossProjectSecretTransfer
     ("pending_requests", .arr safePending)
   ]))
 
-/-- Apply `approval_policy` (`"revoke"` or `"keep"`) to `.sandboxed-sh/secret_broker.json` on cross-project move. -/
-def applyCrossProjectSecretPolicy
-    (dataRoot : String)
-    (movingMissionIds : Array String)
-    (targetProject policy nowIso : String)
-    (nowEpochSec : UInt64) : IO Unit := do
-  if movingMissionIds.isEmpty then return ()
-  let broker ← readDataJsonObj dataRoot "secret_broker.json"
+private def readMoveBroker (dataRoot : String) : IO (Except String JVal) := do
+  let raw ← try IO.FS.readFile s!"{dataRoot}/secret_broker.json" catch e =>
+    match e with
+    | .noFileOrDirectory .. => return .ok (.obj #[])
+    | _ => return .error "secret_policy_read_failed"
+  let .ok broker@(.obj _) := OrbBin.Json.parse raw | return .error "secret_policy_invalid_broker"
+  for field in #["grants", "requests"] do
+    if (broker.field? field).isSome && (broker.fieldArr? field).isNone then
+      return .error "secret_policy_invalid_broker"
+  return .ok broker
+
+def moveApprovalIds (root mission nowIso : String) (epoch : UInt64) : IO (Except String (Array (String × String))) := do
+  let .ok broker ← readMoveBroker root | return .error "secret_policy_read_failed"
+  let mut targets := #[]
+  for kind in #["grants", "requests"] do
+    for item in (broker.fieldArr? kind).getD #[] do
+      if grantMatchesMissions item #[mission] && (if kind == "grants" then grantIsActive item epoch nowIso else item.fieldStr? "status" == some "pending") then
+        let id := (item.fieldStr? "id").getD ""
+        if id.isEmpty then return .error "secret_policy_missing_approval_id"
+        targets := targets.push (kind, id)
+  return .ok targets
+
+def applyCrossProjectSecretPolicy (dataRoot kind id targetProject policy nowIso : String)
+    (nowEpochSec : UInt64) : IO (Except String Unit) := do
+  let .ok broker ← readMoveBroker dataRoot | return .error "secret_policy_read_failed"
   let grants := (broker.fieldArr? "grants").getD #[]
   let requests := (broker.fieldArr? "requests").getD #[]
-  if grants.isEmpty && requests.isEmpty then return ()
+  if grants.isEmpty && requests.isEmpty then return .ok ()
   let nextProjVal : JVal := if targetProject.trimAscii.isEmpty then .null else .str targetProject.trimAscii.toString
   let (nextGrants, nextReqs) :=
     if policy == "revoke" then
       let gs := grants.map fun g =>
-        if grantMatchesMissions g movingMissionIds && grantIsActive g nowEpochSec nowIso then
+        if kind == "grants" && g.fieldStr? "id" == some id && grantIsActive g nowEpochSec nowIso then
           g.setField "revoked_at" (.str nowIso)
         else g
       let rs := requests.map fun r =>
-        if grantMatchesMissions r movingMissionIds && ((r.fieldStr? "status").getD "") == "pending" then
+        if kind == "requests" && r.fieldStr? "id" == some id && ((r.fieldStr? "status").getD "") == "pending" then
           (r.setField "status" (.str "cancelled")).setField "decided_at" (.str nowIso)
         else r
       (gs, rs)
     else if policy == "keep" then
       let gs := grants.map fun g =>
-        if grantMatchesMissions g movingMissionIds && grantIsActive g nowEpochSec nowIso then
+        if kind == "grants" && g.fieldStr? "id" == some id && grantIsActive g nowEpochSec nowIso then
           g.setField "project" nextProjVal
         else g
       let rs := requests.map fun r =>
-        if grantMatchesMissions r movingMissionIds && ((r.fieldStr? "status").getD "") == "pending" then
+        if kind == "requests" && r.fieldStr? "id" == some id && ((r.fieldStr? "status").getD "") == "pending" then
           r.setField "project" nextProjVal
         else r
       (gs, rs)
     else
       (grants, requests)
   let updated := (broker.setField "grants" (.arr nextGrants)).setField "requests" (.arr nextReqs)
-  discard <| writeDataJsonObj dataRoot "secret_broker.json" updated
+  writeDataJsonObj dataRoot "secret_broker.json" updated
 
 /-! ## Bitwarden Secrets Manager (`bws`) Wrapper -/
 

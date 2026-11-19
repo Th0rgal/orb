@@ -8,4 +8,35 @@ enum OrbRemoteGoal {
               let data = value["data"] as? [String: Any] else { return nil }
         return ["type": type, "data": data]
     }
+
+    enum Phase: String { case active, complete, stopped, paused, blocked }
+    struct Projection { var phase: Phase; var objective: String; var iteration: Int; var detail: String? }
+
+    static let unsupported = "Goal mode is unavailable for this remote harness because it cannot continue the objective safely. Choose OpenCode or send a standard turn."
+
+    static func phase(status: String, reason: String) -> Phase {
+        if reason == "remote_goal_complete" { return .complete }
+        if reason == "remote_goal_stopped" || status == "cancelled" { return .stopped }
+        if ["active", "pending"].contains(status) || ["remote_goal_continuation", "awaiting_wakeup"].contains(reason) { return .active }
+        return status == "paused" ? .paused : .blocked
+    }
+
+    static func label(_ phase: Phase, iteration: Int) -> String {
+        if phase != .active { return "Goal \(phase.rawValue)" }
+        return iteration > 0 ? "Goal in progress · iteration \(iteration)" : "Goal in progress"
+    }
+
+    static func apply(_ previous: Projection, event value: [String: Any]) -> Projection {
+        guard let envelope = event(value), let data = envelope["data"] as? [String: Any] else { return previous }
+        let status = data["status"] as? String
+        let phase: Phase
+        if previous.phase == .complete && status == "active" {
+            phase = previous.phase
+        } else if previous.phase == .stopped && status == "active" {
+            phase = previous.phase
+        } else {
+            phase = Phase(rawValue: status ?? "") ?? previous.phase
+        }
+        return Projection(phase: phase, objective: data["objective"] as? String ?? previous.objective, iteration: data["iteration"] as? Int ?? previous.iteration, detail: data["summary"] as? String ?? previous.detail)
+    }
 }

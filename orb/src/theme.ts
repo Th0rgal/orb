@@ -29,7 +29,15 @@ function apply(pref: ThemePref) {
   if (!document.documentElement.dataset.platform) {
     document.documentElement.dataset.platform = detectDesktopPlatform();
   }
-  document.documentElement.dataset.theme = resolved(pref);
+  const theme = resolved(pref);
+  document.documentElement.dataset.theme = theme;
+  // The Linux GTK shell draws its sidebar natively and needs the resolved theme.
+  try {
+    (window as { webkit?: { messageHandlers?: { orbNative?: { postMessage(m: unknown): void } } } })
+      .webkit?.messageHandlers?.orbNative?.postMessage({ command: "set_window_theme", args: { theme } });
+  } catch {
+    // No native chrome (browser preview, macOS uses the invoke bridge below).
+  }
   // `withGlobalTauri` is enabled in tauri.conf.json. Keep this optional so
   // the same bundle remains a faithful web preview instead of requiring a
   // desktop-only import at startup.

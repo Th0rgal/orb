@@ -42,9 +42,10 @@ void orb_spinner_stop(OrbIconSpinner *sp) {
     if (sp->src) { g_source_remove(sp->src); sp->src = 0; }
     if (sp->spinning) { g_ptr_array_free(sp->spinning, TRUE); sp->spinning = NULL; }
 }
+int orb_icons_light = 0;
 static void draw_status_badge(cairo_t *cr, int bk, int step) {
     const double cx = 13.8, cy = 13.8;
-    cairo_save(cr); cairo_set_source_rgba(cr, 0.078, 0.078, 0.078, 1.0); cairo_arc(cr, cx, cy, 5.4, 0, 6.2832); cairo_fill(cr);
+    cairo_save(cr); if (orb_icons_light) { cairo_set_source_rgba(cr, 0.965, 0.965, 0.957, 1.0); } else { cairo_set_source_rgba(cr, 0.078, 0.078, 0.078, 1.0); } cairo_arc(cr, cx, cy, 5.4, 0, 6.2832); cairo_fill(cr);
     if (bk == 1 || bk == 2) { cairo_set_source_rgba(cr, 0.525, 0.682, 0.894, 1.0); }
     else if (bk == 4) { cairo_set_source_rgba(cr, 0.502, 0.698, 0.553, 1.0); }
     else if (bk == 5) { cairo_set_source_rgba(cr, 0.788, 0.635, 0.153, 1.0); }
@@ -88,7 +89,7 @@ static gboolean on_draw_icon(GtkWidget *w, cairo_t *cr, gpointer ud) {
 }
 GtkWidget *orb_make_icon_widget(OrbIconSpinner *sp, const char *icon, const char *color, const char *status) {
     int is_bot = icon && strcmp(icon, "bot") == 0, bk = is_bot ? orb_status_badge_kind(status) : 0;
-    GtkWidget *da = gtk_drawing_area_new(); gtk_widget_set_size_request(da, is_bot ? 19 : 16, is_bot ? 18 : 16);
+    GtkWidget *da = gtk_drawing_area_new(); gtk_widget_set_size_request(da, is_bot ? 20 : 16, is_bot ? 20 : 16);
     gtk_widget_set_valign(da, GTK_ALIGN_CENTER); gtk_style_context_add_class(gtk_widget_get_style_context(da), "orb-ico");
     g_object_set_data_full(G_OBJECT(da), "orb-icon", g_strdup(icon ? icon : ""), g_free);
     if (color && *color) { g_object_set_data_full(G_OBJECT(da), "orb-color", g_strdup(color), g_free); }

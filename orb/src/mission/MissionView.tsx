@@ -11,6 +11,7 @@ import { Popover } from "../Popover";
 import { RemoteQueue, type RemoteQueueHandle } from "../RemoteQueue";
 import { MissionCyber, getCyber, requireCyberSupport } from "../cyberAccess";
 import { EMPTY_GOAL_ERROR, goalDraft } from "../goal";
+import { applyRemoteGoalEvent, remoteGoalPhase, remoteGoalStatusLabel, type RemoteGoalProjection } from "../remoteGoal";
 import {NextReminder} from "../AutomaticReminder";
 import { LazyCloudConversation, peekCloudAgentsModule } from "../cloudAgentsLoader";
 import {QueuedMessages} from "../QueuedMessages";
@@ -552,6 +553,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
   });
   onCleanup(() => { if (p.active !== false) p.onMission?.(null); });
   const [items, setItems] = createSignal<StreamItem[]>(cached?.items ?? []);
+  const [liveGoal, setLiveGoal] = createSignal<RemoteGoalProjection>();
   const [awaiting, setAwaiting] = createSignal(!cached || !!cached.detailsPending);
   createEffect(on(transcriptVersion, () => {
     if (!awaiting() || staleMission()) return;
@@ -999,6 +1001,10 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
             void refresh(true);
             return;
           }
+          if (ev.type === "goal_status" || ev.type === "goal_iteration") {
+            setLiveGoal(old => applyRemoteGoalEvent(old ?? { phase: "active", objective: "", iteration: 0 }, { type: ev.type, data: ev.data }));
+            return;
+          }
           if (replaying) held.push(ev);
           else applyLive(ev);
         },
@@ -1187,6 +1193,13 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
     });
     if (!stillHandingOver) setQueueHandoverState(null);
   });
+  const remoteGoal = createMemo(() => {
+    const m = mission();
+    if (!m?.goal_mode || clientPlaced() || m.backend !== "opencode") return;
+    const phase = remoteGoalPhase(m.status, m.terminal_reason);
+    const live = liveGoal();
+    return { phase: phase === "active" ? live?.phase ?? phase : phase, objective: m.goal_objective ?? "", iteration: Math.max(m.goal_iteration ?? 0, live?.iteration ?? 0) };
+  });
   const working = () => {
     if(sendError())return false;
     if(!p.id)return !p.launchError;
@@ -1346,6 +1359,13 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
   // Retrying an uncertain network result reuses the original message identity.
   // A different draft/selection, or a definitive rejection, starts a new attempt.
   let retryMessage: { key: string; id: string } | null = null;
+  const goalUnavailable = () => {
+    const m = mission();
+    const node = missionAssignedNode(m);
+    if (!clientPlaced() && ((node && node !== "local" && node !== "core") || /^(remote(?:_node)?|managed[_-].+)$/.test(m?.placement_kind ?? ""))) {
+      return "Start a new Goal-capable mission to use /goal, or send a standard follow-up.";
+    }
+  };
   const sendMsgOnce = async (text: string, images: DraftImage[], chips: AttachChip[], attemptId: ReturnType<typeof crypto.randomUUID>, explicitId?: ReturnType<typeof crypto.randomUUID>, replace = false) => {
     const targetMissionId = boundMissionId || p.id;
     if (!targetMissionId || staleMission()) return false;
@@ -1551,9 +1571,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
       void stopLocal(targetMissionId).then(() => flushClientLink(targetMissionId)).then(() => setClientMissionStatus(targetMissionId, "interrupted")).then(() => refresh()).catch(e => setSendError(String(e)));
       return;
     }
-    void cancelMission(targetMissionId)
-      .catch(swallow("mission.cancel", { mission: targetMissionId }))
-      .then(() => refresh());
+    void cancelMission(targetMissionId).then(() => refresh()).catch(e => setSendError(launchError(e)));
   };
 
   const [recoveryPending, setRecoveryPending] = createSignal(false);
@@ -1757,6 +1775,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
           </Show>
 
           <NextReminder mission={p.id} active={isSlotActive()} busy={busy()} archived={isArchived(mission()?.status)} />
+          <Show when={remoteGoal()}>{goal => <div role="status">{remoteGoalStatusLabel(goal())}</div>}</Show>
           <Show when={refreshing()}><div class="agent-wait-status" role="status">Refreshing conversation…</div></Show>
         </div>
       </div>
@@ -1869,6 +1888,8 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
             onEmptySubmit={sendQueueFromComposer}
             onEditFirstQueued={editFirstQueued}
             onStop={stopM}
+            goalUnavailable={goalUnavailable()}
+            keepStopVisible={!participant() && remoteGoal()?.phase === "active"}
             scope={`m:${p.id}`}
             uploadTarget={clientPlaced() ? "local" : missionAssignedNode(mission()) ?? "core"}
             backend={mission()?.backend}
@@ -1920,4 +1941,3 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
     </>
   );
 }
-

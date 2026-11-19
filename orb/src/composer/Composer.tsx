@@ -69,6 +69,8 @@ export function Composer(p: {
   busy: boolean;
   onSend: (t: string, images: DraftImage[], files?: UploadedFile[]) => void | boolean | Promise<void | boolean>;
   onStop?: () => void;
+  keepStopVisible?: boolean;
+  goalUnavailable?: string;
   textOnly?: boolean;
   imagesOnly?: boolean;
   directFileUpload?: boolean;
@@ -499,7 +501,7 @@ export function Composer(p: {
     if (target === "local") void refreshLocalAgents(false);
     else if (target && target !== "side") void refreshNodeAntigravityModels(target);
   });
-  const modes = createMemo(() => p.textOnly || p.imagesOnly || p.sideQuestion ? [] : [...composerModes(backend(), p.uploadTarget === "local" ? !!localInstalled().find(h=>h.id===backend())?.plan_supported : !!p.uploadTarget && !!harnessChoices(p.uploadTarget).find(h=>h.backend.id===backend())?.backend.native_plan), ...(p.onBtw ? [{id:"btw" as const, section:"Modes" as const,label:"Side question",title:"Ask without interrupting the agent"}] : [])]);
+  const modes = createMemo(() => p.textOnly || p.imagesOnly || p.sideQuestion ? [] : [...composerModes(backend(), p.uploadTarget === "local" ? !!localInstalled().find(h=>h.id===backend())?.plan_supported : !!p.uploadTarget && !!harnessChoices(p.uploadTarget).find(h=>h.backend.id===backend())?.backend.native_plan).filter(item => item.id !== "goal" || !p.goalUnavailable), ...(p.onBtw ? [{id:"btw" as const, section:"Modes" as const,label:"Side question",title:"Ask without interrupting the agent"}] : [])]);
   const resolvedLocalCwd = () =>
     p.uploadTarget === "local"
       ? p.localCwd?.trim() || (p.missionId ? localBinding(p.missionId)?.cwd : undefined) || ""
@@ -722,6 +724,10 @@ export function Composer(p: {
     let payload = draftOf(original);
     if (!payload && !images().length && p.onEmptySubmit && !p.disabled && !sending()) { p.onEmptySubmit(); return; }
     if (p.disabled || (!payload && !images().length) || sendingLocked() || uploading() || readingImages()) return;
+    if (p.goalUnavailable && (mode() === "goal" || /^\s*\/goal(?:\s|$)/.test(payload))) {
+      setUploadError(p.goalUnavailable);
+      return;
+    }
     if (folderBusy()) { setUploadError("Wait for the folder upload to finish, or cancel it. Your draft is kept."); return; }
     const skillError = validateSkillSelection(payload, backend(), availableSkills());
     if (skillError) { setUploadError(`${skillError}. Your draft is kept.`); return; }
@@ -1016,7 +1022,7 @@ export function Composer(p: {
           <Ic.ArrowUpIcon size={14} />
         </button>
       </Show>
-      <Show when={p.busy && p.onStop}>
+      <Show when={(p.busy || p.keepStopVisible) && p.onStop}>
         <button class="send stop" disabled={p.disabled} onClick={p.onStop} title="Stop">
           <Ic.StopIcon size={14} />
         </button>
@@ -1146,6 +1152,7 @@ export function Composer(p: {
         action={!p.textOnly && !p.imagesOnly ? { label: "Re-attach", primary: true, run: () => { setStaleFiles([]); void chooseFiles(); } } : undefined}
       />
       <ErrorToast error={uploadError()} title="Couldn’t upload the file" onDismiss={() => setUploadError(null)} />
+      <Show when={p.goalUnavailable && (/^\/g(?:o(?:a(?:l)?)?)?\b/i.test(text()) || mode() === "goal")}>{p.goalUnavailable}</Show>
       <Show when={mode()}>{m => <ModeChip mode={m()} onClear={clearMode} />}</Show>
       <Show when={selectedSkills().length}><div class="skill-chips" aria-label="Selected skills"><For each={selectedSkills()}>{name => <span class="mode-chip skill-chip" role="status"><Ic.SkillsIcon size={12}/><span class="mode-chip-label">/{name}</span><button type="button" class="mode-chip-x" title={`Remove ${name}`} aria-label={`Remove skill ${name}`} onClick={e => { e.preventDefault(); e.stopPropagation(); clearSkill(name); }}><Ic.CloseIcon size={10}/></button></span>}</For></div></Show>
       <Show when={!mode() && p.editingQueued}>{editing => <span class="mode-chip edit-queued" role="status" aria-label="Editing a queued message">
@@ -1283,4 +1290,3 @@ export function floatingDock(el: HTMLDivElement) {
     if (!isSide) el.closest<HTMLElement>(".app")?.style.removeProperty("--composer-bottom-space");
   });
 }
-

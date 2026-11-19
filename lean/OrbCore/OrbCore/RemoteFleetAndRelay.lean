@@ -19,6 +19,7 @@ import OrbBin.Json
 import OrbBin.PosixExt
 import OrbBin.HttpClient
 import OrbCore.Store
+import OrbCore.RemoteGoal
 import OrbCore.Managed
 import OrbCore.NodeLiveness
 import OrbCore.ManagedProvisioning
@@ -486,8 +487,9 @@ def buildRemoteLaunchCapabilitiesJVal : IO JVal := do
   let proxyConfigured := !p1.isEmpty || !p2.isEmpty
   return .obj #[
     ("typed", .bool true),
-    ("harnesses", .arr #[.str "claudecode", .str "opencode", .str "grok", .str "codex", .str "antigravity"]),
-    ("requires_proxy_harnesses", .arr #[.str "claudecode", .str "opencode", .str "codex"]),
+    ("harnesses", .arr #[.str "claudecode", .str "opencode", .str "grok", .str "codex", .str "antigravity", .str "vibe"]),
+    ("goal_harnesses", .arr (RemoteGoal.harnesses.map JVal.str)),
+    ("requires_proxy_harnesses", .arr #[.str "claudecode", .str "opencode", .str "codex", .str "vibe"]),
     ("raw_command", .bool true),
     ("proxy_url_configured", .bool proxyConfigured),
     ("error_prefixes", .arr #[
@@ -670,6 +672,44 @@ def probeStaticNodeHeartbeat
     | .error err =>
       return mkOfflineOrDegraded "offline" err
 
+def nodeApiHangCause? (store : CoreStore) (node : String) : IO (Option String) := do
+  let .ok rows ← execParamQuery store.missionsDb "SELECT node_id FROM node_api_hangs WHERE node_id=?1" #[node]
+    | throw (IO.userError "node health read failed")
+  return rows[1]?.map fun r => s!"Node `{cell r 0}` answers ping but its API is unresponsive."
+
+/-- The monitor owns its cordon independently of operator cordons. A successful
+    heartbeat ends the incident; an unreachable host alone never starts one. -/
+def observeNodeApi (store : CoreStore) (node status now : String) (ping : IO Bool) : IO Unit := do
+  let query := fun q args => do
+    match ← execParamQuery store.missionsDb q args with
+    | .ok rows => pure rows
+    | .error e => throw (IO.userError e)
+  if status == "online" then
+    discard <| query "DELETE FROM node_api_hangs WHERE node_id=?1" #[node]
+  else if status == "offline" then
+    unless ← ping do return
+    discard <| query "INSERT OR IGNORE INTO node_api_hangs VALUES(?1,?2)" #[node, ← OrbBin.PosixExt.newUuidV4]
+    -- The single monitor processes observations sequentially. The committed
+    -- event is also its restart receipt; never flag twice for two live jobs.
+    let pending ← query ("SELECT m.id,h.incident_id " ++
+      "FROM missions m JOIN node_api_hangs h ON h.node_id=?1 WHERE EXISTS (SELECT 1 FROM remote_node_jobs j WHERE j.node_id=?1 AND j.mission_id=m.id " ++
+      "AND j.state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost')) AND NOT EXISTS " ++
+      "(SELECT 1 FROM mission_events e WHERE e.mission_id=m.id AND e.event_type='error' AND CASE WHEN json_valid(e.payload) THEN json_extract(e.payload,'$.incident_id') END=h.incident_id)") #[node]
+    for r in pending.extract 1 pending.size do
+      let payload := renderCompact (.obj #[("reason", .str "hung_node"), ("node_id", .str node),
+        ("incident_id", .str (cell r 1)), ("message", .str s!"Node `{node}` answers ping but its API is unresponsive.")])
+      if let .error e ← appendMissionEvent store (cell r 0) "error" payload now then throw (IO.userError e)
+
+def monitorStaticNodeApis (store : CoreStore) : IO Unit := do
+  let (enabled, nodes) ← loadStaticRemoteNodes
+  if !enabled then return
+  for sn in nodes do
+    let hb ← probeStaticNodeHeartbeat sn
+    observeNodeApi store sn.id ((hb.fieldStr? "status").getD "") (formatEpochIso8601Utc (← nowEpoch)) do
+      let .ok url := OrbBin.HttpClient.parseUrl sn.baseUrl | return false
+      try return (← IO.Process.output {cmd := "ping", args := #["-n", "-c", "1", "-W", "1", "--", url.connectHost]}).exitCode == 0
+      catch _ => return false
+
 /-- Probe all configured static nodes concurrently so 9 nodes complete in a single ~15ms RTT. -/
 def probeAllStaticNodesParallel
     (staticNodes : Array StaticRemoteNode)
@@ -754,7 +794,10 @@ def buildComputeFleetJVal
   let (rnEnabled, staticNodes) ← loadStaticRemoteNodes
   let nowSec ← nowEpoch
   let effIso := if nowIso.isEmpty then formatEpochIso8601Utc nowSec else nowIso
-  let persistedCordons ← loadPersistedNodeCordons dataRoot
+  let mut persistedCordons ← loadPersistedNodeCordons dataRoot
+  if let some st := store? then
+    if let .ok rows ← execParamQuery st.missionsDb "SELECT node_id FROM node_api_hangs" #[] then
+      persistedCordons := persistedCordons ++ (rows.extract 1 rows.size).map (fun r => cell r 0)
   let probed ← probeAllStaticNodesParallel staticNodes persistedCordons effIso probeDeadlineMs isAdmin
   -- A node that did not answer keeps what its last heartbeat reported.
   let heartbeatCache ← loadNodeHeartbeatCache dataRoot
