@@ -220,7 +220,7 @@ def stepFrame {σ : Type} (rt : RuntimeState σ)
       { st.vulkan with
         width := bw
         height := bh
-        framebuffer := ByteArray.mk (Array.replicate (bw * bh * 4) 0) }
+        framebuffer := ByteArray.empty }
     else st.vulkan
   let (atlas', clearColor, scene, regions, focusOrder) ← view { st with vulkan := vk0 }
   let vk' ← match st.damage with

@@ -87,7 +87,6 @@ def initVulkan (width height : Nat) : IO VulkanContext := do
     else pure 0
   let scratchCap : USize := 65536
   let scratchPtr ← try FFI.memAlloc scratchCap catch _ => pure 0
-  let fb := ByteArray.mk (Array.replicate (width * height * 4) 0)
   return {
     vkGetInstanceProcAddr := getProc
     vkCreateInstance := createInst
@@ -96,7 +95,6 @@ def initVulkan (width height : Nat) : IO VulkanContext := do
     scratchCap
     width
     height
-    framebuffer := fb
   }
 
 /-- Free native scratch memory (`FFI.memFree`) owned by `VulkanContext`. -/
@@ -288,7 +286,7 @@ private def drawRoundedBox (vw vh : Nat) (fb : ByteArray) (curClip r : Rect)
 The framebuffer is opaque; each pass preserves alpha and constant-color surfaces. -/
 def blurAxis (fb : ByteArray) (vw vh radius : Nat) (horizontal : Bool) : ByteArray := Id.run do
   if vw == 0 || vh == 0 || radius == 0 then return fb
-  let mut out := ByteArray.mk (Array.replicate fb.size 0)
+  let mut out := Text.AtlasPageBuffer.zeroBytes fb.size
   let len := if horizontal then vw else vh
   let count := if horizontal then vh else vw
   let index (line pos channel : Nat) :=
@@ -363,7 +361,7 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
         clipStack := if tail.isEmpty then [renderClip] else tail
     | .layerPush opacity =>
       let saved := fb
-      fb := ByteArray.mk (Array.replicate totalBytes 0)
+      fb := Text.AtlasPageBuffer.zeroBytes totalBytes
       layerStack := { opacity := min opacity 255, clip := curClip, savedBuf := saved } :: layerStack
     | .layerPop =>
       if let top :: rest := layerStack then
@@ -457,7 +455,7 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
         let mw := (min (vw : Int) (x1 + halo) - mx).toNat
         let mh := (min (vh : Int) (y1 + halo) - my).toNat
         let bounds : Rect := ⟨0, 0, mw, mh⟩
-        let empty := ByteArray.mk (Array.replicate (mw * mh * 4) 0)
+        let empty := Text.AtlasPageBuffer.zeroBytes (mw * mh * 4)
         let mask := drawRoundedBox mw mh empty bounds { r with x := r.x - mx, y := r.y - my } radii 0xFFFFFFFF (0, 0, 0, 0) 0
         let blurred := blurBackdrop mask mw mh sigma
         for py in [y0.toNat : y1.toNat] do
@@ -621,7 +619,10 @@ def renderFrameDamage (ctx : VulkanContext) (clearColor : Color) (atlas : Text.G
       ctx.framebuffer.size != ctx.width * ctx.height * 4 || hasGlobalEffect scene || hasGlobalEffect prev.scene then
     return ← renderFrame ctx clearColor atlas scene
   let vp : Rect := ⟨0,0,ctx.width,ctx.height⟩
+  let profile := (← IO.getEnv "ORB_U7_PROFILE") == some "1"
+  let t0 ← IO.monoNanosNow
   let some dirty := changedBounds vp prev.scene scene | return ← renderFrame ctx clearColor atlas scene
+  let t1 ← IO.monoNanosNow
   if prev.pages.size != atlas.pages.size then return ← renderFrame ctx clearColor atlas scene
   for i in [:prev.pages.size] do
     let a := prev.pages[i]!
@@ -629,13 +630,21 @@ def renderFrameDamage (ctx : VulkanContext) (clearColor : Color) (atlas : Text.G
     if !samplesUnchanged prev.scene i a b then
       return ← renderFrame ctx clearColor atlas scene
   if dirty.w == 0 || dirty.h == 0 then
+    if profile then IO.eprintln s!"u7-paint-ns {t1-t0} {(← IO.monoNanosNow)-t1} 0 0 0"
     return { ctx with
       previousPaint := some ⟨scene, atlas.pages, clearColor, ctx.width, ctx.height⟩
       lastDamagePixels := 0
       lastDrawnPrims := 0
       partialFrames := ctx.partialFrames + 1 }
-  let (fb, insts) := rasterizeSceneInto ctx.width ctx.height clearColor atlas (some ctx.framebuffer) (some dirty) scene
+  let t2 ← IO.monoNanosNow
+  -- In profile mode make the copy-on-write allocation explicit so it can be
+  -- timed separately from clearing and painting. Ordinary runs retain COW.
+  let initial := if profile then ctx.framebuffer.copySlice 0 ByteArray.empty 0 ctx.framebuffer.size else ctx.framebuffer
+  let t3 ← IO.monoNanosNow
+  let (fb, insts) := rasterizeSceneInto ctx.width ctx.height clearColor atlas (some initial) (some dirty) scene
+  let t4 ← IO.monoNanosNow
   let _ ← stageInstances ctx insts
+  if profile then IO.eprintln s!"u7-paint-ns {t1-t0} {t2-t1} {t3-t2} {t4-t3} {(← IO.monoNanosNow)-t4}"
   let clipped := intersectRect { x := 0, y := 0, w := (ctx.width : Int), h := (ctx.height : Int) } dirty
   let pixels := (max 0 clipped.w * max 0 clipped.h).toNat
   return {

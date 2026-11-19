@@ -434,7 +434,7 @@ where
 
 /-- Lower a laid-out widget tree (`WidgetNode` + `ComputedBox`) into a `SceneOutput`. -/
 def buildSceneFromLayout (scale120 : Nat) (focusState : FocusState) (theme : Theme)
-    (rootWidget : WidgetNode) (rootBox : ComputedBox) : SceneOutput :=
+    (rootWidget : WidgetNode) (rootBox : ComputedBox) (recordNodes := true) : SceneOutput :=
   let (primsList, focusOrder, hitsSub, hitsDev) :=
     lowerWidgetPair scale120 focusState theme none none rootWidget rootBox
   let dmg := Damage.add none rootBox.damageRectDev
@@ -443,7 +443,7 @@ def buildSceneFromLayout (scale120 : Nat) (focusState : FocusState) (theme : The
     hitRegionsSub := hitsSub,
     hitRegionsDev := hitsDev,
     boundsDamage := dmg,
-    nodeRecords := collectNodeRecords rootWidget rootBox }
+    nodeRecords := if recordNodes then collectNodeRecords rootWidget rootBox else #[] }
 
 /-- Perform layout and scene lowering in one pure pass from a declarative `WidgetNode` root. -/
 def renderWidgetTree (scale120 : Nat) (availW availH : SubPx)

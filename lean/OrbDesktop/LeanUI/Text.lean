@@ -142,10 +142,16 @@ structure AtlasPageBuffer where
 
 namespace AtlasPageBuffer
 
+/-- Allocate packed pixels directly; an `Array UInt8` temporary needs a pointer per byte. -/
+def zeroBytes (n : Nat) : ByteArray := Id.run do
+  let mut out := ByteArray.emptyWithCapacity n
+  for _ in [:n] do out := out.push 0
+  return out
+
 /-- Create an empty zero-initialized `pw × ph` RGBA8 atlas page. -/
 def create (pw ph : Nat) : AtlasPageBuffer :=
   { atlas := { width := pw, height := ph, shelves := [], nextY := 0 }
-    rgba := ByteArray.mk (Array.replicate (pw * ph * 4) 0) }
+    rgba := zeroBytes (pw * ph * 4) }
 
 /-- Blit a `RasterizedGlyph` into `dstRect` on this page.
 R8 glyphs are stored with `(255, 255, 255, cov)` and BGRA8 glyphs are swizzled to RGBA8. -/
@@ -239,7 +245,7 @@ namespace GlyphAtlasCache
 def resetAll (ac : GlyphAtlasCache) : GlyphAtlasCache :=
   let pages' := ac.pages.map fun p =>
     { atlas := p.atlas.reset
-      rgba := ByteArray.mk (Array.replicate (p.atlas.width * p.atlas.height * 4) 0) }
+      rgba := AtlasPageBuffer.zeroBytes (p.atlas.width * p.atlas.height * 4) }
   { ac with pages := pages', cache := {} }
 
 /-- Allocate a padded slot `(w, h)` across pages using `Atlas.allocPadded` / `Atlas.allocPages`

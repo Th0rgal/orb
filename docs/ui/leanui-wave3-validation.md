@@ -64,8 +64,44 @@ changes. All 36 golden PNGs remained byte-identical. The last stream update
 needed zero draw primitives. The table uses the ordinary three-run benchmark
 without the reference renders; startup and transcript-open were slower in this run.
 
-The local gate still fails, including the 64 MiB hard RSS ceiling. There is
-no new on-device WebKit/m2air comparison.
+### Stream stage attribution
+
+`ORB_U7_PROFILE=1 orb-desktop-native --bench 20 --width 1470 --height 923`
+emits wall-clock nanoseconds to stderr. Compare the last 20 `u7-view-ns` rows
+(exclude three startup/open views) and all 20 `u7-paint-ns` rows. Baseline and
+candidate used the same raw Lake native build, host, sysroot and stream input.
+Means in milliseconds, including zero-raster frames:
+
+| Stage (in log column order) | Instrumented `0d6b7c3f2` | Candidate |
+|---|---:|---:|
+| Widget construction, shaping and conversion to layout inputs | 9.031 | 8.555 |
+| Layout | 1.281 | 1.348 |
+| Scene command generation | 53.062 | 0.945 |
+| Changed bounds | 0.278 | 0.157 |
+| Atlas validation | 12.474 | 10.752 |
+| Framebuffer copy | 0.145 | 0.090 |
+| Changed-region clear and raster | 4.914 | 4.956 |
+| Instance staging | 0.013 | 0.011 |
+
+Profile mode times an explicit framebuffer copy on painted frames in place of
+the normal implicit copy-on-write. Only 2/20 frames painted. Raster cost is
+therefore about 50 ms per painted frame on average, despite the low stream-wide
+mean. The renderer no longer computes unused per-widget damage fingerprints;
+the node-record API retains its default behavior. Packed zero buffers avoid
+pointer-sized temporary arrays for atlas and filter scratch allocation.
+
+Separate three-run acceptance measurements with profiling disabled:
+
+| Build | Startup ms | Open ms | Frame p50 ms | Frame p99 ms | Peak RSS MiB |
+|---|---:|---:|---:|---:|---:|
+| Same-build baseline | 990.02 | 1205.54 | 72.41 | 159.16 | 87.94 |
+| No unused fingerprints or initial framebuffer | 1071.34 | 1319.42 | 23.08 | 174.94 | 87.69 |
+| Plus packed atlas and filter buffers | 1020.83 | 1270.21 | 24.62 | 163.72 | 59.83 |
+
+The final run passes the 64 MiB hard RSS ceiling, not the 45 MiB target or
+latency budgets. The 20 independent full-repaint comparisons, clip/atlas
+fixtures and all 36 unchanged golden PNGs passed. There is no new on-device
+WebKit/m2air comparison.
 
 ## Visual gate
 

@@ -199,6 +199,8 @@ def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) :
   let pal := theme.palette
   let sc := rt.wayland.scale120
   let (availW, availH) := rt.wayland.logicalSubSize
+  let profile := (← IO.getEnv "ORB_U7_PROFILE") == some "1"
+  let t0 ← IO.monoNanosNow
 
   let (ac1, hdrRuns) ←
     shapeDesktopRuns rt.atlas rt.primaryFont sc (chromeTitleStyle theme)
@@ -231,13 +233,17 @@ def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) :
   let widgetRootRaw := buildDesktopScreen st availW availH shapedRuns liveWindow
   let (ac6, widgetRoot) ← shapeWidgetTree ac5 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc widgetRootRaw
   let layoutRoot := widgetRoot.toLayoutNode
+  let t1 ← IO.monoNanosNow
   let rootBox := layoutNode sc rt.focus.owner pal.focusRing 0 0 availW availH layoutRoot
-  let sceneOut := buildSceneFromLayout sc rt.focus theme widgetRoot rootBox
+  let t2 ← IO.monoNanosNow
+  -- This backend diffs paint commands; it does not consume per-node fingerprints.
+  let sceneOut := buildSceneFromLayout sc rt.focus theme widgetRoot rootBox (recordNodes := false)
+  if profile then IO.eprintln s!"u7-view-ns {t1-t0} {t2-t1} {(← IO.monoNanosNow)-t2}"
   if st.screen == .searchDialog then
     let overRaw := buildSearchModalOverlay theme availW availH
     let (ac7, overWidget) ← shapeWidgetTree ac6 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc overRaw
     let overBox := layoutNode sc none pal.focusRing 0 0 availW availH overWidget.toLayoutNode
-    let overScene := buildSceneFromLayout sc rt.focus theme overWidget overBox
+    let overScene := buildSceneFromLayout sc rt.focus theme overWidget overBox (recordNodes := false)
     let clearColor := if liveWindow then 0x00000000 else pal.canvas
     return (ac7, clearColor, sceneOut.prims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overScene.prims, sceneOut.hitRegionsSub ++ overScene.hitRegionsSub, sceneOut.focusableOrder ++ overScene.focusableOrder)
   else
