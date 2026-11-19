@@ -1938,11 +1938,7 @@ def dispatchMcpToolCall
     let reason := (args.fieldStr? "reason").getD ""
     if secName.isEmpty then return mcpErr "invalid_arguments" "missing secret name"
     -- A caller whose mission runs on a managed machine is untrusted: allowlisted secrets only.
-    let callerOnManagedNode ←
-      if callerMid.isEmpty then pure false
-      else do
-        let node? ← resolveMissionRemoteNode? store mc? callerMid
-        pure ((node?.map (·.startsWith "managed-")).getD false)
+    let callerOnManagedNode ← missionHasManagedPlacement store mc? callerMid
     let callerSubject := if claims.isExternal then "session:" ++ claims.sessionId
       else if !callerMid.isEmpty then "mission:" ++ callerMid else ""
     return mcpOk (← mcpSecretGet workingDir store.rootDir callerMid callerProj secName reason callerOnManagedNode nowEpochSec callerSubject)

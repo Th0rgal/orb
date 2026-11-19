@@ -94,6 +94,12 @@ The coordinator relayed a completed independent publication-diff review at **`f3
 
 ### SEC-05 — Historical High / M at pinned snapshot — Worker-safe secret policy was absent before the broker's Core fetch/write
 
+**Regression contract:** direct retrieval and approval waits must apply the same
+managed-placement classification. Refuse reserved keys and managed-disallowed
+names before contacting the vault. A permitted value goes back on the requesting
+companion's authenticated response; the companion materializes it privately and
+removes the delivery envelope from model-facing output.
+
 **Status:** valid historical finding at `5383bf27b`; **addressed after pin at `f3863239c` for callers classified managed**, as recorded in the publication-diff note above. **Not remaining new work; no new SEC-05 PR.** Later source citations supersede the Core-only delivery description for the reported current path, without proving complete placement coverage or live delivery.
 
 **Category:** historical missing untrusted-compute secret-delivery policy gate. **Evidence tier:** code-confirmed — source-derived (approval/default access was still required; actual remote plaintext delivery was not established). This excludes the provider-key reservation issue already owned by the provider plan.

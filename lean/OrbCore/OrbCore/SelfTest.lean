@@ -22,6 +22,7 @@ import OrbCore.TurnOutcomeTests
 import OrbCore.ManagedAccessTests
 import OrbCore.MissionSettingsTests
 import OrbCore.R17Tests
+import OrbCore.R16aSecretTests
 import OrbCore.LocalOriginTests
 import OrbCore.ManagedTtlTests
 import OrbCore.ManagedHarvestTests
@@ -7934,6 +7935,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     | do IO.eprintln "[orb-core-test] FAIL: openCoreStore failed"; return 1
   try
     traceTest "TenantIsolationTests.run" (OrbCore.TenantIsolationTests.run tmpRoot)
+    traceTest "R16aSecretTests.run" OrbCore.R16aSecretTests.run
     OrbCore.ManagedProvisioningTests.run tmpRoot
     OrbCore.ManagedResumeTests.run tmpRoot
     OrbCore.DevSpendingTests.run tmpRoot

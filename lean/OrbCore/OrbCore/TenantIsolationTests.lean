@@ -783,6 +783,17 @@ def run (root : String) : IO Unit := do
       let .ok request := parseRequest wire.toUTF8 none | throw (IO.userError "isolation request")
       let .ok response ← dispatchCoreRequest app request now | throw (IO.userError "isolation dispatch")
       return (response.status, (parseBytes response.body).toOption.getD .null)
+    for method in #["GET", "POST"] do
+      let route := "/api/workspaces/member-workspace/resources"
+      let body := JVal.obj #[("memory_max", .str "1G"), ("cpu_quota", .str "50%")]
+      let (status, doc) ← send method route member body
+      check (status == 501 && doc.fieldStr? "error" == some "workspace_resources_unsupported")
+        s!"r16a_flt15_workspace_resources_explicitly_unsupported ({method})"
+      check ((← send method route "" body).1 == 401) "r16a_flt15_workspace_resources_requires_auth"
+      let foreignResult ← send method "/api/workspaces/admin-workspace/resources" member body
+      let missingResult ← send method "/api/workspaces/no-such-workspace/resources" member body
+      check (foreignResult.1 == 404 && foreignResult == missingResult)
+        "r16a_flt15_workspace_resources_preserves_ownership"
     -- R16 HTTP-14: aggregate stats are tenant scoped and honor `since`.
     let (memberStatsSt, memberStats) ← send "GET" "/api/stats" member
     let (adminStatsSt, adminStats) ← send "GET" "/api/stats" admin
