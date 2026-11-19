@@ -5019,12 +5019,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       nextProject     := projSlug
       nextFolder      := m.targetFolder
     }
-    let (allMoved, changedMoved) ← match ← batchSetMissionPlacementChecked st.store updates nowIso with
+    let (allMoved, changedMoved) ← match ← MissionSettings.commitPlacementWithRecovery st.store updates caller.userId nowIso
+      (pure (.ok ()))
+      { ids := crossProjIds, target := rawProjSlug, policy, epoch := nowEpochSec } with
       | .ok pair => pure pair
       | .error (code, msg) => return .ok (mkJson code s!"\{\"error\":{jsonEscape msg}}")
-    if !crossProjIds.isEmpty && (policy == "revoke" || policy == "keep") then
-      applyCrossProjectSecretPolicy st.store.rootDir crossProjIds rawProjSlug policy nowIso nowEpochSec
-    rebindMovedMissionMcpSessions st.store changedMoved
     let unscopeItem (it : MissionPlacementItem) : MissionPlacementItem :=
       if caller.isLegacyUnscoped then it
       else
