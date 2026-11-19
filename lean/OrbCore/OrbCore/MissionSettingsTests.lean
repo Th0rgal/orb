@@ -120,6 +120,56 @@ def routeRecovery (root : String) : IO Unit := do
   finally closeCoreStore store
   check (← OrbCore.MissionMoveRecovery.startup path).isOk "B5b_route_startup_repairs_markers"
 
+/-- Split the two database commits at their real transaction boundary. A second
+    move can finish before the first caller resumes, or startup can finish both. -/
+def policyReplay (root : String) : IO Unit := do
+  let path := s!"{root}/policy-replay"
+  let .ok st ← openCoreStore path 1 | throw (IO.userError "policy fixture open")
+  let sql (db : SqliteDb) (q : String) := do
+    let .ok rows ← execParamQuery db q #[] | throw (IO.userError "policy fixture SQL")
+    return rows
+  let broker := path ++ "/secret_broker.json"
+  let seed := "{\"grants\":[{\"mission_id\":\"m\",\"project\":\"a\"}],\"requests\":[{\"mission_id\":\"m\",\"status\":\"pending\"}]}"
+  try
+    discard <| sql st.missionsDb "INSERT INTO missions(id,project) VALUES('m','a');"
+    discard <| sql st.projectsDb "INSERT INTO mcp_sessions_v1(id,mission_id,project_scope,project_scoped) VALUES('s','m','a',1);"
+    discard <| sql st.projectsDb "INSERT INTO project_track_leases(project_slug,track,reservation_id,mission_id,phase) VALUES('a','t','r','m','active');"
+    let .ok () ← OrbCore.MissionMoveRecovery.ensureSchema st.missionsDb | throw (IO.userError "policy fixture schema")
+    let move (src dst : String) : CheckedPlacementUpdate := { missionId := "m", expectedProject := src, nextProject := dst, nextFolder := "" }
+    let pause (src dst policy : String) := batchSetMissionPlacementChecked st #[move src dst] "t1"
+      (OrbCore.MissionMoveRecovery.mark st #["m"] "owner" "t1" { ids := #["m"], target := dst, policy, epoch := 1 })
+    IO.FS.writeFile broker seed
+    check (← pause "a" "b" "keep").isOk "B5b_first_move_committed_before_policy"
+    -- A symlinked parent is readable but rejected by the atomic private writer.
+    let aliasPath := path ++ "-alias"
+    let link ← IO.Process.output { cmd := "ln", args := #["-s", path, aliasPath] }
+    check (link.exitCode == 0) "policy fixture symlink"
+    let failed ← OrbCore.MissionMoveRecovery.reconcile { st with rootDir := aliasPath }
+    check (!failed.isOk && (← IO.FS.readFile broker) == seed &&
+      (← OrbCore.MissionMoveRecovery.pending st.missionsDb).toOption == some #["m"] &&
+      (← sql st.missionsDb "SELECT policy FROM pending_move_policies;")[1]![0]! == "keep") "B5b_failed_policy_write_keeps_intent"
+    check (← OrbCore.MissionMoveRecovery.startup path).isOk "B5b_startup_replays_keep"
+    let readBroker := do
+      let .ok v := OrbBin.Json.parse (← IO.FS.readFile broker) | throw (IO.userError "policy fixture JSON")
+      return v
+    let kept ← readBroker
+    let keptGrant := ((kept.fieldArr? "grants").get!)[0]!
+    check (keptGrant.fieldStr? "project" == some "b") "B5b_keep_repaired_grant"
+    check (← pause "b" "c" "revoke").isOk "B5b_superseded_move_committed_before_policy"
+    let latest ← OrbCore.MissionSettings.commitPlacementWithRecovery st #[move "c" "d"] "owner" "t2"
+      (intent := { ids := #["m"], target := "d", policy := "keep", epoch := 2 })
+    check latest.isOk "B5b_newer_move_finishes_first"
+    check (← OrbCore.MissionMoveRecovery.reconcile st).isOk "B5b_delayed_older_completion"
+    let finalBroker ← readBroker
+    let grant := ((finalBroker.fieldArr? "grants").get!)[0]!
+    let req := ((finalBroker.fieldArr? "requests").get!)[0]!
+    check (grant.fieldStr? "revoked_at" == some "t1" && req.fieldStr? "status" == some "cancelled" &&
+      (← sql st.projectsDb "SELECT project_scope FROM mcp_sessions_v1 WHERE id='s';")[1]![0]! == "d" &&
+      (← sql st.projectsDb "SELECT project_slug FROM project_track_leases WHERE reservation_id='r';")[1]![0]! == "d" &&
+      (← OrbCore.MissionMoveRecovery.pending st.missionsDb).toOption == some #[] &&
+      (← sql st.missionsDb "SELECT seq FROM pending_move_policies;").size == 1) "B5b_overlap_preserves_revoke_and_latest_bindings"
+  finally closeCoreStore st
+
 def missingDbRecovery (root : String) : IO Unit := do
   let path := s!"{root}/b5b-missing-db"
   let .ok store ← openCoreStore path | throw (IO.userError "B5b missing-db open")
@@ -156,6 +206,7 @@ def missingDbRecovery (root : String) : IO Unit := do
     "B5b_missing_projects_db_without_markers_succeeds"
 
 def run (root : String) : IO Unit := do
+  policyReplay root
   moveRecovery root
   routeRecovery root
   missingDbRecovery root

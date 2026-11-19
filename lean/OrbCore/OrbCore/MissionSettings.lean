@@ -11,24 +11,20 @@ open OrbCore.Store OrbCore.R7Core OrbCore.SecretAndApproval OrbBin.Json
 def commitPlacementWithRecovery
     (store : CoreStore) (updates : Array CheckedPlacementUpdate) (owner nowIso : String)
     (beforeCommitExtra : IO (Except String Unit) := pure (.ok ()))
-    (afterCommit : IO (Except String Unit) := pure (.ok ())) :
+    (intent : MissionMoveRecovery.PolicyIntent := {}) :
     IO (Except (Nat × String) (Array MissionPlacementItem × Array MissionPlacementItem)) := do
   if let .error _ ← MissionMoveRecovery.ensureSchema store.missionsDb then
     return .error (500, "move_marker_schema_failed")
   let beforeCommit := do
-    match ← MissionMoveRecovery.mark store (updates.map (·.missionId)) owner nowIso with
+    match ← MissionMoveRecovery.mark store (updates.map (·.missionId)) owner nowIso intent with
     | .error e => return .error e
     | .ok () => beforeCommitExtra
   let moved ← batchSetMissionPlacementChecked store updates nowIso beforeCommit
   let (allMoved, changedMoved) ← match moved with
     | .error e => return .error e
     | .ok pair => pure pair
-  if let .error _ := ← afterCommit then
-    return .error (500, "move_secret_policy_failed")
-  if let .error _ ← rebindMovedMissionMcpSessionsChecked store allMoved nowIso then
+  if let .error _ ← MissionMoveRecovery.reconcile store then
     return .error (500, "move_rebind_failed")
-  if let .error _ ← MissionMoveRecovery.clearPending store (allMoved.map (·.missionId)) then
-    return .error (500, "move_marker_clear_failed")
   return .ok (allMoved, changedMoved)
 
 def normalizeModelEffortForBackend (backend? : Option String) (raw : String) : Option String :=
@@ -188,18 +184,10 @@ def applyPlacementPatch
   }
   let (_allMoved, changedMoved) ←
     match ← commitPlacementWithRecovery store updates (if callerIsLegacyUnscoped then "" else callerUserId) nowIso saveSettings
-      (if !crossProjIds.isEmpty && (policy == "revoke" || policy == "keep") then
-        do applyCrossProjectSecretPolicy store.rootDir crossProjIds rawP policy nowIso nowEpochSec; return .ok ()
-      else pure (.ok ())) with
+      { ids := crossProjIds, target := rawP, policy, epoch := nowEpochSec } with
     | .ok pair => pure pair
     | .error (code, msg) =>
       return .error (code, s!"\{\"error\":{jsonEscape msg}}")
-  if !nextProj.isEmpty && !callerIsLegacyUnscoped && !callerUserId.isEmpty then
-    discard <| execParamQuery store.projectsDb
-      "INSERT OR IGNORE INTO project_owners(slug,owner_user_id,created_at) VALUES(?1,?2,?3);"
-      #[nextProj, callerUserId, s!"{nowEpochSec}"]
-  if let .error e ← MissionMoveRecovery.reconcile store then
-    return .error (500, s!"\{\"error\":{jsonEscape e}}")
   let unscopeItem (it : MissionPlacementItem) : MissionPlacementItem :=
     { it with project? := it.project?.map (unscopeDisplayProject callerUserId callerIsLegacyUnscoped) }
   let changedDisplay := changedMoved.map unscopeItem

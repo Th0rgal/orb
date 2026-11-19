@@ -5021,9 +5021,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     }
     let (allMoved, changedMoved) ← match ← MissionSettings.commitPlacementWithRecovery st.store updates caller.userId nowIso
       (pure (.ok ()))
-      (if !crossProjIds.isEmpty && (policy == "revoke" || policy == "keep") then
-        do applyCrossProjectSecretPolicy st.store.rootDir crossProjIds rawProjSlug policy nowIso nowEpochSec; return .ok ()
-      else pure (.ok ())) with
+      { ids := crossProjIds, target := rawProjSlug, policy, epoch := nowEpochSec } with
       | .ok pair => pure pair
       | .error (code, msg) => return .ok (mkJson code s!"\{\"error\":{jsonEscape msg}}")
     let unscopeItem (it : MissionPlacementItem) : MissionPlacementItem :=

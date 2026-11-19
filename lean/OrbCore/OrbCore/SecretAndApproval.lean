@@ -111,12 +111,19 @@ def applyCrossProjectSecretPolicy
     (dataRoot : String)
     (movingMissionIds : Array String)
     (targetProject policy nowIso : String)
-    (nowEpochSec : UInt64) : IO Unit := do
-  if movingMissionIds.isEmpty then return ()
-  let broker ← readDataJsonObj dataRoot "secret_broker.json"
+    (nowEpochSec : UInt64) : IO (Except String Unit) := do
+  if movingMissionIds.isEmpty then return .ok ()
+  let raw ← try IO.FS.readFile s!"{dataRoot}/secret_broker.json" catch e =>
+    match e with
+    | .noFileOrDirectory .. => return .ok ()
+    | _ => return .error "secret_policy_read_failed"
+  let .ok broker@(.obj _) := OrbBin.Json.parse raw | return .error "secret_policy_invalid_broker"
+  for field in #["grants", "requests"] do
+    if (broker.field? field).isSome && (broker.fieldArr? field).isNone then
+      return .error "secret_policy_invalid_broker"
   let grants := (broker.fieldArr? "grants").getD #[]
   let requests := (broker.fieldArr? "requests").getD #[]
-  if grants.isEmpty && requests.isEmpty then return ()
+  if grants.isEmpty && requests.isEmpty then return .ok ()
   let nextProjVal : JVal := if targetProject.trimAscii.isEmpty then .null else .str targetProject.trimAscii.toString
   let (nextGrants, nextReqs) :=
     if policy == "revoke" then
@@ -142,7 +149,7 @@ def applyCrossProjectSecretPolicy
     else
       (grants, requests)
   let updated := (broker.setField "grants" (.arr nextGrants)).setField "requests" (.arr nextReqs)
-  discard <| writeDataJsonObj dataRoot "secret_broker.json" updated
+  writeDataJsonObj dataRoot "secret_broker.json" updated
 
 /-! ## Bitwarden Secrets Manager (`bws`) Wrapper -/
 

@@ -9169,6 +9169,7 @@ end OrbCore.SelfTest
 def main (args : List String) : IO UInt32 := do
   OrbBin.PosixExt.setenvVar "ORB_HERMETIC_TEST" "1"
   if let some root := OrbCore.SelfTest.findFlag? args "--move-recovery-test-root" then
+    OrbCore.MissionSettingsTests.policyReplay root
     OrbCore.MissionSettingsTests.moveRecovery root
     OrbCore.MissionSettingsTests.routeRecovery root
     OrbCore.MissionSettingsTests.missingDbRecovery root
