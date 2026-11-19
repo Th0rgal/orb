@@ -89,7 +89,7 @@ static gboolean on_draw_icon(GtkWidget *w, cairo_t *cr, gpointer ud) {
 }
 GtkWidget *orb_make_icon_widget(OrbIconSpinner *sp, const char *icon, const char *color, const char *status) {
     int is_bot = icon && strcmp(icon, "bot") == 0, bk = is_bot ? orb_status_badge_kind(status) : 0;
-    GtkWidget *da = gtk_drawing_area_new(); gtk_widget_set_size_request(da, is_bot ? 19 : 16, is_bot ? 18 : 16);
+    GtkWidget *da = gtk_drawing_area_new(); gtk_widget_set_size_request(da, is_bot ? 20 : 16, is_bot ? 20 : 16);
     gtk_widget_set_valign(da, GTK_ALIGN_CENTER); gtk_style_context_add_class(gtk_widget_get_style_context(da), "orb-ico");
     g_object_set_data_full(G_OBJECT(da), "orb-icon", g_strdup(icon ? icon : ""), g_free);
     if (color && *color) { g_object_set_data_full(G_OBJECT(da), "orb-color", g_strdup(color), g_free); }
