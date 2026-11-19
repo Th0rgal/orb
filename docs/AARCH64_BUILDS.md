@@ -30,8 +30,6 @@ sudo apt-get update
 sudo apt-get install -y build-essential clang libssl-dev libsqlite3-0 \
   python3 curl git zstd binutils file
 export ORB_TURBO_LEAN_JOBS=2 ORB_TURBO_LEAN_MAX_MB=6144
-# First build in a fresh checkout only (see below):
-export ORB_ALLOW_RAW_LAKE_FALLBACK=1
 scripts/build_orb_bins.sh --target-arch aarch64 --ensure-lean --no-telemetry \
   --only sandboxed-mcp --only orb-privd --only orb-sudo \
   --out-dir "$PWD/target/aarch64-linux"
@@ -51,17 +49,11 @@ with undefined `std::__1::__atomic_notify_one_native` references from
 `libleanrt.a`. Leave `LEAN_CC` unset so Lean uses its own toolchain (the
 `clang` package is still needed for the C shims).
 
-In a fresh checkout, turbo-lean refuses OrbBin until its C shims exist as static
-libraries (`declares dynamic extern_lib ... without prebuilt static artifact in
-.lake/build/lib`). Run the first build with `ORB_ALLOW_RAW_LAKE_FALLBACK=1`
-under a memory cap; later builds in the same checkout can drop it. Verified on
-spark on 17 Nov 2026 building `sandboxed-node`, `sandboxed-mcp` and `orb-privd`
-at `e555842`.
-
-`turbo-lean` must be on `PATH`; `scripts/build_orb_bins.sh` runs it with
-telemetry disabled and the above memory/job bounds, and fails closed unless
-`ORB_ALLOW_RAW_LAKE_FALLBACK=1` is explicitly set (if overriding to raw Lake,
-budget memory accordingly and keep one heavy build at a time). For a
+Use the `turbo-lean` revision in `lean/turbo-lean-revision` (the same one used
+by CI and Nix) on `PATH`, including for a fresh checkout. Older versions can
+reject Orb's C shims as dynamic `extern_lib` targets without prebuilt archives.
+`scripts/build_orb_bins.sh` runs turbo-lean with telemetry disabled and the
+above memory/job bounds, and fails if it is missing or the build fails. For a
 systemd-managed user session, a hard cap can be applied by prefixing the build
 command with `systemd-run --user --scope -p MemoryMax=8G --`.
 
