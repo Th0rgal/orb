@@ -20,6 +20,10 @@ private def reasonMessage : String → String
   | "vpn_coordinator_unconfigured" => "The Core VPN coordinator needs configuration."
   | "vpn_coordinator_busy" => "Another VPN connection is starting. Retry shortly."
   | "airvpn_device_in_use" => "This WireGuard device already has an active session."
+  | "vpn_route_changed" => "The account connection changed during verification. Reload its settings."
+  | "vpn_profile_changed" | "vpn_profile_unavailable" => "Check the saved WireGuard profile for this server in AirVPN Settings."
+  | "vpn_process_unavailable" | "vpn_start_failed" | "vpn_config_transfer_failed" =>
+    "Check that Core can launch wireproxy and load the selected profile, then retry verification."
   | "vpn_exit_unverified" => "The server, country, or exit address could not be verified."
   | _ => "The VPN route is unavailable."
 
@@ -57,12 +61,14 @@ def route (store : CoreStore) (pool? : Option AccountVpnPool.Pool) (dir account 
   fields := fields ++ #[("mode", .str "vpn"), ("country", .str pref.country)]
   let mut reason := "vpn_awaiting_verification"
   if dir.isEmpty || pool?.isNone then reason := "vpn_coordinator_unconfigured"
+  let blocked := fun cause => (200, JVal.obj (fields ++ #[("status", .str "blocked"), ("reason", .str cause),
+    ("message", .str (reasonMessage cause))]))
   if let some pool := pool? then
     if method == "PUT" then
-      if let .error e ← AccountVpnPool.allocate pool store.rootDir dir store.missionsDb account provider pref then reason := e
+      if let .error e ← AccountVpnPool.allocate pool store.rootDir dir store.missionsDb account provider pref then return blocked e
     if let some t ← observed? pool account pref then
       return (200, .obj (fields ++ #[("status", .str "verified"), ("server", .str t.server),
         ("exits", .arr (t.exits.toArray.map (fun ip => .str (formatExit ip))))]))
-  return (200, .obj (fields ++ #[("status", .str "blocked"), ("reason", .str reason), ("message", .str (reasonMessage reason))]))
+  return blocked reason
 
 end OrbCore.AccountVpnApi

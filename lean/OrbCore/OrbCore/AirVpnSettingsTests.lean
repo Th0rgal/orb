@@ -27,6 +27,10 @@ private def routeStorage (root : String) : IO Unit := do
     check (← AccountVpnRoutes.set db "a" none).isOk "switch to Direct"
     check (← AccountVpnRoutes.set db "a" (some "NL")).isOk "switch back to VPN"
     check (!(← AccountVpnRoutes.rememberServer db "a" first "stale").isOk) "stale observation after re-enable"
+    let pool ← Std.Mutex.new ([] : List AccountVpnPool.Active)
+    let stale ← AccountVpnPool.allocate pool root root db "a" "openai" first
+    check (match stale with | .error "vpn_route_changed" => true | _ => false)
+      "a delayed request cannot allocate or detach a newer generation"
     let some current := (← AccountVpnRoutes.read db "a").toOption.join | throw (IO.userError "current route missing")
     check (← AccountVpnRoutes.rememberServer db "a" current "east").isOk "save new generation server"
   finally discard <| OrbBin.Sqlite.sqliteCloseRaw db.handle

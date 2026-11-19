@@ -98,6 +98,10 @@ Each selected listener belongs to a running process with fresh exit evidence. -/
 def allocate (pool : Pool) (root dir : String) (db : SqliteDb) (account provider : String)
     (pref : Preference) : IO (Except String UInt16) := pool.atomically do
   if dir.isEmpty then return .error "vpn_coordinator_unconfigured"
+  let .ok current ← AccountVpnRoutes.read db account | return .error "vpn_route_store_unavailable"
+  let some current := current | return .error "vpn_route_changed"
+  if current.generation != pref.generation || current.country != pref.country then
+    return .error "vpn_route_changed"
   let cat := category provider
   let mut available ← get
   -- Reusing a socket after its binding changed would also keep old streams alive.
@@ -112,7 +116,7 @@ def allocate (pool : Pool) (root dir : String) (db : SqliteDb) (account provider
         available ← detach available account
       set available
   let ready := available.flatMap (fun t => t.occupants.map (·.binding))
-  let req : Request := ⟨account, cat, pref.country, some pref.preferredServer⟩
+  let req : Request := ⟨account, cat, pref.country, some current.preferredServer⟩
   let mut candidates := available
   repeat
     let some best := choose req ready (candidates.map (·.evidence)) | break
@@ -129,7 +133,7 @@ def allocate (pool : Pool) (root dir : String) (db : SqliteDb) (account provider
       return .ok t.tunnel.port
   let inventory := (← endpoints root).filter fun e =>
     e.country == pref.country && !available.any (fun a => a.endpoint.device == e.device)
-  let (preferred, rest) := inventory.partition (fun e => e.server == pref.preferredServer)
+  let (preferred, rest) := inventory.partition (fun e => e.server == current.preferredServer)
   let mut failure := "vpn_no_compatible_profile"
   for endpoint in preferred ++ rest do
     let .ok bytes ← OrbNetLeaf.Crypto.randBytes 2 | return .error "vpn_port_unavailable"

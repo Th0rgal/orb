@@ -1538,6 +1538,22 @@ def run : IO Unit := do
         | throw (IO.userError "provider contract admin creation failed")
       let jwt := mintSessionTokenV2 cfg.jwtSecret admin.id admin.role admin.sessionEpoch (now + 3600)
       let mut failures : Array String := #[]
+      let .ok member ← createUserRecord store "vpn-settings-member" "vpn-member-fixture-password" "member"
+          none none "2026-11-16T00:00:00Z"
+        | throw (IO.userError "VPN settings member creation failed")
+      let memberJwt := mintSessionTokenV2 cfg.jwtSecret member.id member.role member.sessionEpoch (now + 3600)
+      let vpnSettings := "/api/settings/airvpn"
+      let accountRoute := "/api/ai/providers/missing-account/vpn"
+      for path in [vpnSettings, accountRoute] do
+        let (anonymous, _) ← putJson app "" path "{}" now
+        let (memberCode, _) ← putJson app memberJwt path "{}" now
+        if anonymous != 401 || memberCode != 403 then
+          failures := failures.push s!"VPN settings authority {path}: anonymous={anonymous}, member={memberCode}"
+      let (missing, _) ← putJson app jwt accountRoute "{}" now
+      if missing != 404 then failures := failures.push "VPN admin route must resolve the selected account"
+      let settings ← getJson app jwt vpnSettings now
+      if settings.fieldBool? "api_key_configured" != some false then
+        failures := failures.push "VPN admin settings must expose the initial configuration status"
       let listed ← getJson app jwt "/api/ai/providers" now
       let items := listed.asArr?.getD #[]
       if items.size != cases.size then failures := failures.push "provider list row count"
