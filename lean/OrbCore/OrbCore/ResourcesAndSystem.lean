@@ -167,26 +167,24 @@ private def runCmdCapture (prog : String) (args : Array String) (cwd? : Option S
   return (st.toNat, (String.fromUTF8? acc).getD "")
 
 /-- Execute `git` non-interactively (`GIT_TERMINAL_PROMPT=0`, batch SSH) and capture combined stdout+stderr. -/
-private def runGitCapture (args : Array String) (cwd? : Option String := none) : IO (Nat × String) := do
+def runGitCapture (args : Array String) (cwd? : Option String := none) : IO (Nat × String) := do
   let env ← environList
   let hasSshCmd := env.any (fun e => e.startsWith "GIT_SSH_COMMAND=")
   let envPrefix :=
     "GIT_TERMINAL_PROMPT=0 " ++
     (if hasSshCmd then "" else "GIT_SSH_COMMAND='ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new' ")
   let cdPrefix := match cwd? with | some dir => "cd " ++ shellSingleQuote dir ++ " && " | none => ""
-  let cmdLine := cdPrefix ++ envPrefix ++ "exec 'git'" ++
-    (if args.isEmpty then "" else " " ++ String.intercalate " " (args.toList.map shellSingleQuote)) ++ " 2>&1"
-  let sp ← spawnPgrp "/bin/sh" #["-c", cmdLine] env false false true
-  if sp.pid < 0 then return (127, "failed to spawn git")
-  let mut acc := ByteArray.empty
-  if sp.stdoutFd >= 0 then
-    let mut eof := false
-    while !eof && acc.size < 524288 do
-      let chunk ← readFdChunk sp.stdoutFd 8192
-      if chunk.isEmpty then eof := true else acc := acc ++ chunk
-    closeFdRaw sp.stdoutFd
-  let st ← waitpidBlock sp.pid
-  return (st.toNat, (String.fromUTF8? acc).getD "")
+  IO.FS.withTempFile fun output path => do
+    -- Redirect before cd so its diagnostic is captured too. File-backed capture
+    -- lets us wait for the child status independently of inherited stdio.
+    let cmdLine := "exec >" ++ shellSingleQuote path.toString ++ " 2>&1; " ++
+      cdPrefix ++ envPrefix ++ "exec 'git'" ++
+      (if args.isEmpty then "" else " " ++ String.intercalate " " (args.toList.map shellSingleQuote))
+    let sp ← spawnPgrp "/bin/sh" #["-c", cmdLine] env false true false
+    let status ← waitPgrpBounded sp.pid 30000
+    if status == 124 then return (status, "git command timed out")
+    let bytes ← output.read 524288
+    return (status, (String.fromUTF8? bytes).getD "")
 
 private def sanitizeRelPath? (raw : String) : Option String := Id.run do
   let norm := String.ofList (raw.toList.map (fun c => if c == '\\' then '/' else c))
@@ -1267,7 +1265,10 @@ def ensureLibraryRepo (libDir effRemote : String) (forceReinit : Bool := false) 
     if rcHead != 0 then
       if let some ref ← resolveRemoteTrackingRef libDir "main" then
         let targetBr := if ref.startsWith "origin/" then (ref.drop 7).toString else "main"
-        let _ ← runGitCapture #["checkout", "-B", targetBr, "--track", ref] (some libDir)
+        let (rcCo, outCo) ← runGitCapture #["checkout", "-B", targetBr, "--track", ref] (some libDir)
+        if rcCo != 0 then
+          let msg := outCo.trimAscii.toString
+          return .error (if msg.isEmpty then "git checkout failed" else msg)
     protectLibraryLocalState libDir
     return .ok true
   if !(← gitFp.pathExists) then
@@ -1309,7 +1310,10 @@ def ensureLibraryRepo (libDir effRemote : String) (forceReinit : Bool := false) 
       let br ← gitCurrentBranch libDir
       if let some ref ← resolveRemoteTrackingRef libDir br then
         let targetBr := if ref.startsWith "origin/" then (ref.drop 7).toString else br
-        let _ ← runGitCapture #["checkout", "-B", targetBr, "--track", ref] (some libDir)
+        let (rcCo, outCo) ← runGitCapture #["checkout", "-B", targetBr, "--track", ref] (some libDir)
+        if rcCo != 0 then
+          let msg := outCo.trimAscii.toString
+          return .error (if msg.isEmpty then "git checkout failed" else msg)
   return .ok true
 
 def buildLibraryStatusJson (libDir : String) (defaultRemote : String) (requireOwnRepo : Bool := false) : IO JVal := do
@@ -1613,6 +1617,15 @@ def handleLibraryRoute
     return if isOwner then status else status.setField "path" (.str "")
   let libFp := System.FilePath.mk libDir
   let gitFp := libFp / ".git"
+
+  -- A configured remote with no checkout must be initialized before any route
+  -- can report an empty/successful Library. Failed initialization is explicit.
+  if !effRemote.isEmpty && !(← libFp.pathExists) &&
+      !(segs == ["api", "library", "status"] ||
+        segs == ["api", "library", "sync"] || segs == ["api", "library", "force-sync"]) then
+    match ← ensureLibraryRepo libDir effRemote false with
+    | .ok _ => pure ()
+    | .error e => return some (jsonErr 502 s!"Failed to initialize Library repository: {e}")
 
   -- A transferred revision pins the next explicit synchronization. Importing
   -- configuration never copies Library files or resets a working checkout.

@@ -2776,11 +2776,22 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
    let rows ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM deploy_receipts;" #[]
    let nReceipts := match rows with | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0 | .error _ => 0
    closeCoreStore store
-   let cliNoLease ← IO.Process.output {
-     cmd := "./lean/OrbCore/.lake/build/bin/orb-core"
-     args := #["deploy", "--service", "sandboxed-sh-dev.service", "--dry-run"]
-     env := #[("WORKING_DIR", some r7Root), ("DEV_MODE", some "true")]
-   }
+   let runCli (root : String) (args : Array String) : IO (Nat × String) :=
+     IO.FS.withTempFile fun output path => do
+       let env ← OrbBin.PosixExt.environList
+       let env := env.filter fun e => !e.startsWith "WORKING_DIR=" && !e.startsWith "DEV_MODE="
+       let sp ← OrbBin.PosixExt.spawnPgrp "/bin/sh"
+         (#["-c", "out=$1; shift; exec \"$@\" >\"$out\" 2>&1", "sh", path.toString,
+            "./lean/OrbCore/.lake/build/bin/orb-core", "deploy", "--service", "sandboxed-sh-dev.service", "--dry-run"] ++ args)
+         (env ++ #[s!"WORKING_DIR={root}", "DEV_MODE=true"]) false true false
+       let status ← OrbBin.PosixExt.waitPgrpBounded sp.pid 30000
+       let bytes ← output.read 8192
+       return (status, (String.fromUTF8? bytes).getD "")
+   let (cliNoLease, noLeaseOutput) ← runCli r7Root #[]
+   if cliNoLease != 1 || (noLeaseOutput.splitOn "--lease is required").length < 2 then
+     IO.FS.removeDirAll r7Root
+     IO.eprintln s!"[orb-core-test] FAIL: CLI without lease: rc={cliNoLease} output={noLeaseOutput}"
+     return 1
    let cliSubRoot := s!"{r7Root}-cli"
    let .ok cliStore ← openCoreStore s!"{cliSubRoot}/.sandboxed-sh" | do IO.FS.removeDirAll r7Root; return 1
    let .ok () ← upsertPrivilegeLease cliStore {
@@ -2790,11 +2801,7 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
      sessionScoped := false
    } | do closeCoreStore cliStore; IO.FS.removeDirAll r7Root; return 1
    closeCoreStore cliStore
-   let cliWithLease ← IO.Process.output {
-     cmd := "./lean/OrbCore/.lake/build/bin/orb-core"
-     args := #["deploy", "--service", "sandboxed-sh-dev.service", "--dry-run", "--lease", "lease-r7-cli-01", "--force"]
-     env := #[("WORKING_DIR", some cliSubRoot), ("DEV_MODE", some "true")]
-   }
+   let (cliWithLease, leaseOutput) ← runCli cliSubRoot #["--lease", "lease-r7-cli-01", "--force"]
    IO.FS.removeDirAll cliSubRoot
    IO.FS.removeDirAll r7Root
    if       noLease.map (·.status) != some 403 ||
@@ -2819,11 +2826,11 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
       revokeRcpt.verdict != "reconciliation_required" || revokeRcpt.verdictCode != 516 ||
       revokeRcpt.restart || wasRevokeRestarted ||
       execFailRes.isOk || nExecFailed != 1 || nFalseAdmitted != 0 ||
-      cliNoLease.exitCode == 0 || cliWithLease.exitCode != 0 ||
+      cliWithLease != 0 || (leaseOutput.splitOn "dry_run_admitted").length < 2 ||
       nReceipts < 2 then
-    IO.eprintln s!"[orb-core-test] FAIL: guarded deploy / privilege bunker wire contract mismatch: hdr={hdrLeaseDeploy.map (·.status)}:{hdrLeaseText} revObs={revokeObs.leaseEpoch}->{postRevokeObs.leaseEpoch} revRcpt={revokeRcpt.verdict}:{revokeRcpt.verdictCode} cliNo={cliNoLease.exitCode} cliWith={cliWithLease.exitCode}:{cliWithLease.stderr} ok={privOkText} bunker={privBunkerText}"
+    IO.eprintln s!"[orb-core-test] FAIL: guarded deploy / privilege bunker wire contract mismatch: hdr={hdrLeaseDeploy.map (·.status)}:{hdrLeaseText} revObs={revokeObs.leaseEpoch}->{postRevokeObs.leaseEpoch} revRcpt={revokeRcpt.verdict}:{revokeRcpt.verdictCode} cliWith={cliWithLease}:{leaseOutput} ok={privOkText} bunker={privBunkerText}"
     return 1
-  return 0
+   return 0
 
 private def runR4dUnitTests (r4dRoot : String) (r4dChain : RoutingChain) : IO UInt32 := do
   -- (A) `OrbCore.Proxy`: sticky `firstByteCommitted` lock (`abortCommittedLock = 4` on mid-stream failure,
@@ -5459,6 +5466,18 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let some (stillReady, _) ← getManagedMachine? mStore parityId
     | return (← fail "foreign caller erased managed machine")
   if stillReady.status != "ready" then return (← fail "foreign caller changed managed machine")
+  let ownerExec ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
+    "exec_raw_managed_machine" (.obj #[("machine_id", .str parityId), ("command", .str "true")]) nowSec none app.managedProvisioningOverride?
+  let ownerExecJson := (OrbBin.Json.parse ownerExec).toOption.getD .null
+  let ownerExecError := (ownerExecJson.field? "error").getD .null
+  if ownerExecJson.fieldBool? "ok" != some false ||
+      ownerExecError.fieldStr? "code" != some "unsupported" ||
+      ownerExecError.fieldStr? "message" != some "raw execution is unavailable on managed machines" then
+    return (← fail s!"owned managed raw execution must be refused explicitly: {ownerExec}")
+  let some (stillReadyAfterOwnerExec, _) ← getManagedMachine? mStore parityId
+    | return (← fail "owned raw execution erased managed machine")
+  if stillReadyAfterOwnerExec.status != "ready" then
+    return (← fail "owned raw execution changed managed machine state")
   let mcpStopped ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
     "stop_managed_machine" (.obj #[("machine_id", .str parityId)]) nowSec none app.managedProvisioningOverride?
   let resumeArgs := OrbBin.Json.JVal.obj #[("machine_id", .str parityId), ("ttl_minutes", .nat 5),
@@ -7487,9 +7506,7 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
   return 0
 
 set_option maxHeartbeats 400000 in
-private def runLibraryGitAndSkillParityTests : IO UInt32 := do
-  let ts ← IO.monoNanosNow
-  let workRoot := s!"/tmp/orb_library_parity_{ts}"
+private def runLibraryGitAndSkillParityTests (workRoot : String) : IO UInt32 := do
   let dataRoot := s!"{workRoot}/.sandboxed-sh"
   let bareRepo := s!"{workRoot}/remote-library.git"
   let seedRepo := s!"{workRoot}/seed-library"
@@ -7503,31 +7520,33 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
 
   let shRun (cmd : String) (timeoutMs : Nat := 30000) : IO Nat := do
     let env ← OrbBin.PosixExt.environList
-    -- Do not pipe stdout here: a descendant that inherits the pipe can keep the
-    -- drain blocked after the shell itself has stopped making progress.
     let sp ← OrbBin.PosixExt.spawnPgrp "/bin/sh" #["-c", cmd] env false true false
-    if sp.pid < 0 then return 127
-    let mut elapsedMs := 0
-    while elapsedMs < timeoutMs do
-      let st ← OrbBin.PosixExt.waitpidWnohang sp.pid
-      if st != 0xFFFFFFFF then return st.toNat
-      IO.sleep 10
-      elapsedMs := elapsedMs + 10
-    -- The child is a process-group leader; terminate the whole group so a
-    -- stuck git helper cannot survive the shell timeout and hold resources.
-    discard <| OrbBin.PosixExt.killSig (-sp.pid) 15
-    IO.sleep 100
-    discard <| OrbBin.PosixExt.killSig (-sp.pid) 9
-    let _ ← OrbBin.PosixExt.waitpidBlock sp.pid
-    return 124
+    OrbBin.PosixExt.waitPgrpBounded sp.pid timeoutMs
 
-  -- Regression: a child that never exits must be bounded and reaped. This is
-  -- intentionally short so the parity suite does not hide a future hang.
-  let timeoutProbeStart ← IO.monoNanosNow
-  let timeoutProbeRc ← shRun "sleep 60" 100
-  let timeoutProbeElapsedMs := ((← IO.monoNanosNow) - timeoutProbeStart) / 1000000
-  if timeoutProbeRc != 124 || timeoutProbeElapsedMs > 2000 then
+  -- A TERM-resistant descendant keeps its output open and must die on group KILL.
+  let ready := s!"{workRoot}/timeout-ready"
+  let timeoutProbeStart ← IO.monoMsNow
+  let probe ← OrbBin.PosixExt.spawnPgrp "/bin/sh"
+    #["-c", s!"(trap '' TERM; echo ready > '{ready}'; exec sleep 60) & wait"]
+    (← OrbBin.PosixExt.environList) false true true
+  let timeoutProbeRc ← OrbBin.PosixExt.waitPgrpBounded probe.pid 1000
+  let eof ← try
+      match ← OrbBin.PosixExt.readSocketTimed { raw := probe.stdoutFd.toUInt32 } 1 500 with
+      | .eof => pure true
+      | _ => pure false
+    finally OrbBin.PosixExt.closeFdRaw probe.stdoutFd
+  let timeoutProbeElapsedMs := (← IO.monoMsNow) - timeoutProbeStart
+  if timeoutProbeRc != 124 || !eof || !(← (System.FilePath.mk ready).pathExists) || timeoutProbeElapsedMs > 3000 then
     IO.eprintln s!"[orb-core-test] FAIL (library-parity): bounded git helper regression failed: rc={timeoutProbeRc} elapsed_ms={timeoutProbeElapsedMs}"
+    return 1
+
+  -- Use a Git command that would succeed if the failed cd were ignored.
+  let missingCheckout := s!"{dataRoot}/library"
+  let (failedCdRc, failedCdOutput) ← runGitCapture #["--version"] (some missingCheckout)
+  if failedCdRc == 0 || failedCdRc == 124 ||
+      (failedCdOutput.splitOn missingCheckout).length < 2 ||
+      (failedCdOutput.splitOn "git version").length != 1 then
+    IO.eprintln s!"[orb-core-test] FAIL (library-parity): failed cd: rc={failedCdRc} output={failedCdOutput}"
     return 1
 
   IO.FS.writeFile (System.FilePath.mk s!"{seedRepo}/skill/orb-basics/SKILL.md")
@@ -7716,8 +7735,28 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
   let oldestRev := (histArr.back?.bind (·.fieldStr? "rev")).getD ""
   let (revSt, revCtype, revBody) ← sendReq "GET" s!"/api/library/skill/orb-basics/history/{oldestRev}" hsJwt ""
   if putSkSt != 200 || cmtSt != 200 || pushSt != 200 || histSt != 200 || histArr.size < 2 ||
-     revSt != 200 || !(revCtype.startsWith "text/plain") || (revBody.splitOn "Follow Core contracts.").length != 2 then
+      revSt != 200 || !(revCtype.startsWith "text/plain") || (revBody.splitOn "Follow Core contracts.").length != 2 then
     return (← fail s!"commit/push/history roundtrip failed: put={putSkSt} cmt={cmtSt}:{cmtBody} push={pushSt}:{pushBody} hist={histBody} rev=({revSt},{revBody})")
+
+  -- Missing checkout regression: a failed `cd` must fail closed at the next
+  -- Library route, rather than reporting an empty successful catalog or
+  -- leaving the self-test blocked in a git child/pipe wait.
+  let libraryDirForMissing ← resolveLibraryDir workRoot dataRoot
+  discard <| (IO.FS.removeDirAll libraryDirForMissing).toBaseIO
+  let missingRemote := s!"{workRoot}/missing-after-push.git"
+  let (missingSetSt, _, _) ← sendReq "PUT" "/api/settings/library-remote" hsJwt
+    s!"\{\"library_remote\":{jsonEscape missingRemote}}"
+  let missingStarted ← IO.monoNanosNow
+  let (missingListSt, _, missingListBody) ← sendReq "GET" "/api/library/skill" hsJwt ""
+  let missingElapsedMs := ((← IO.monoNanosNow) - missingStarted) / 1000000
+  if missingSetSt != 200 || missingListSt != 502 ||
+      (missingListBody.splitOn "Failed to initialize Library repository").length < 2 ||
+      missingElapsedMs > 35000 then
+    return (← fail s!"missing Library checkout did not fail closed: set={missingSetSt} list={missingListSt}:{missingListBody} elapsed_ms={missingElapsedMs}")
+  let (restoreSt, _, restoreBody) ← sendReq "PUT" "/api/settings/library-remote" hsJwt
+    s!"\{\"library_remote\":{jsonEscape bareRepo},\"force_reinitialize\":true}"
+  if restoreSt != 200 || (restoreBody.splitOn "\"library_reinitialized\":true").length != 2 then
+    return (← fail s!"could not restore Library checkout after missing-directory regression: status={restoreSt} body={restoreBody}")
 
   -- 4. Diverged history (`409 DIVERGED_HISTORY`) on `sync`/`push` and recovery via `force-sync`
   let divergeRc ← shRun
@@ -7758,6 +7797,16 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
   closeCoreStore store
   discard <| (IO.FS.removeDirAll workRoot).toBaseIO
   return 0
+
+def runLibraryParityGroup : IO UInt32 := do
+  let previous ← IO.getEnv "LIBRARY_PATH"
+  let workRoot := s!"/tmp/orb_library_parity_{← IO.monoNanosNow}"
+  OrbBin.PosixExt.setenvVar "LIBRARY_PATH" s!"{workRoot}/.sandboxed-sh/library"
+  try runLibraryGitAndSkillParityTests workRoot
+  finally
+    match previous with
+    | some value => OrbBin.PosixExt.setenvVar "LIBRARY_PATH" value
+    | none => OrbBin.PosixExt.unsetenvVar "LIBRARY_PATH"
 
 set_option maxHeartbeats 800000 in
 set_option maxRecDepth 4000 in
@@ -9082,7 +9131,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   if (← runOrbUriCorsTests) != 0 then return 1
   if (← runProdParityAndMissionMoveTests prodValid) != 0 then return 1
   if (← runRemoteDispatchWakeupAndBtwTests prodValid) != 0 then return 1
-  if (← runLibraryGitAndSkillParityTests) != 0 then return 1
+  if (← runLibraryParityGroup) != 0 then return 1
 
   IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":11,\"harness_contracts\":10,\"host_tests\":99}"
   return 0
@@ -9144,6 +9193,8 @@ def main (args : List String) : IO UInt32 := do
     return ← OrbCore.SelfTest.runCyberSkillGroup false true
   if args.contains "--context-only" then
     return ← OrbCore.SelfTest.runCyberSkillGroup false false true
+  if args.contains "--library-parity-only" then
+    return ← OrbCore.SelfTest.runLibraryParityGroup
   if args.contains "--prod-parity-only" then
     return ← OrbCore.SelfTest.runCyberSkillGroup false false false true
   OrbCore.SettingsDocumentTests.run

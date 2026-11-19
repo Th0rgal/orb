@@ -20,6 +20,28 @@ open OrbCore.Store
 open OrbCore.R7Core
 open OrbCore.LegacyHydrate
 
+private def secretApprovalTtlSec : UInt64 := 300
+
+private def secretRequestMatches (r : JVal) (missionId projectSlug secretName callerSubject : String) : Bool :=
+  (r.fieldStr? "kind").getD "" == "secret_get" &&
+  (r.fieldStr? "mission_id").getD "" == missionId &&
+  (r.fieldStr? "secret_name").getD "" == secretName &&
+  (r.fieldStr? "project").getD "" == projectSlug &&
+  (callerSubject.isEmpty || (r.fieldStr? "requester_subject").getD "" == callerSubject)
+
+private def secretRequestIsLive (r : JVal) (nowEpochSec : UInt64) : Bool :=
+  let status := (r.fieldStr? "status").getD "pending"
+  status == "pending" &&
+    match r.fieldUInt64? "expires_at_epoch" with
+    | some exp => nowEpochSec < exp
+    | none => true
+
+private def secretApprovalIsLive (r : JVal) (nowEpochSec : UInt64) : Bool :=
+  (r.fieldStr? "status").getD "" == "approved" &&
+    match r.fieldUInt64? "expires_at_epoch" with
+    | some exp => nowEpochSec < exp
+    | none => true
+
 /-! ## Private JSON File Helpers under `.sandboxed-sh/` -/
 
 private def readDataJsonObj (dataRoot fileName : String) : IO JVal := do
@@ -422,8 +444,19 @@ def mcpSecretGet
       grantMatchesRequester g missionId callerSubject &&
       grantIsActive g nowEpochSec nowIso &&
       (g.fieldStr? "secret_name").getD "" == secretName)
-  if !allowed then
+  let approvedRequest := ((broker.fieldArr? "requests").getD #[]).any (fun r =>
+    secretRequestMatches r missionId projectSlug secretName callerSubject &&
+    secretApprovalIsLive r nowEpochSec)
+  if !allowed && !approvedRequest then
     let reqs := (broker.fieldArr? "requests").getD #[]
+    if let some existing := reqs.find? (fun r =>
+        secretRequestMatches r missionId projectSlug secretName callerSubject && secretRequestIsLive r nowEpochSec) then
+      return .obj #[
+        ("status", .str "pending"),
+        ("request_id", .str ((existing.fieldStr? "id").getD "")),
+        ("name", .str secretName),
+        ("bitwarden_project", .str pname)
+      ]
     let reqId ← newUuidV4
     let newReq := JVal.obj #[
       ("id", .str reqId),
@@ -435,7 +468,8 @@ def mcpSecretGet
       ("bitwarden_project", .str pname),
       ("reason", .str reason),
       ("status", .str "pending"),
-      ("created_at", .str nowIso)
+      ("created_at", .str nowIso),
+      ("expires_at_epoch", JVal.uint64 (nowEpochSec + secretApprovalTtlSec))
     ]
     discard <| writeDataJsonObj dataRoot "secret_broker.json" (broker.setField "requests" (.arr (reqs.push newReq)))
     return .obj #[("status", .str "pending"), ("request_id", .str reqId), ("name", .str secretName), ("bitwarden_project", .str pname)]
@@ -451,8 +485,38 @@ def mcpSecretGet
       ("status", .str "granted"),
       ("name", .str secretName),
       ("project", if projectSlug.isEmpty then .null else .str projectSlug),
-      ("secret_delivery", .obj #[("name", .str (if safeName.isEmpty then "secret" else safeName)), ("value", .str val)])
-    ]
+     ("secret_delivery", .obj #[("name", .str (if safeName.isEmpty then "secret" else safeName)), ("value", .str val)])
+     ]
+
+def mcpSecretWait
+    (workingDir dataRoot missionId projectSlug requestId callerSubject : String)
+    (callerOnManagedNode : Bool) (timeoutSecs : Nat) (nowEpochSec : UInt64) : IO JVal := do
+  let deadline := nowEpochSec + (Nat.min 25 timeoutSecs).toUInt64
+  let rec poll (remaining : Nat) : IO JVal := do
+    let broker ← readSecretBrokerWithDefaults dataRoot
+    let reqs := (broker.fieldArr? "requests").getD #[]
+    let some req := reqs.find? (fun r => (r.fieldStr? "id").getD "" == requestId)
+      | return .obj #[("status", .str "not_found")]
+    if (req.fieldStr? "mission_id").getD "" != missionId ||
+        (callerSubject.isEmpty == false && (req.fieldStr? "requester_subject").getD "" != callerSubject) then
+      return .obj #[("status", .str "not_found")]
+    let status := (req.fieldStr? "status").getD "pending"
+    if status == "approved" then
+      let name := (req.fieldStr? "secret_name").getD ""
+      let reason := (req.fieldStr? "reason").getD ""
+      let granted ← mcpSecretGet workingDir dataRoot missionId projectSlug name reason callerOnManagedNode (← coreEpochSec) callerSubject
+      return granted
+    if status == "rejected" || status == "denied" then
+      return .obj #[("status", .str "denied"), ("error", .str "Operator denied access")]
+    let now ← coreEpochSec
+    match remaining with
+    | 0 => return .obj #[("status", .str "pending"), ("request_id", .str requestId)]
+    | n + 1 =>
+      if now >= deadline then
+        return .obj #[("status", .str "pending"), ("request_id", .str requestId)]
+      IO.sleep 1000
+      poll n
+  poll (Nat.min 25 timeoutSecs)
 
 def mcpSecretQueueAction
     (workingDir dataRoot kind missionId projectSlug bwProject secretName? plainValue? note? reason : String)

@@ -15,6 +15,20 @@ runner.
 -/
 namespace LeanUI.Runtime
 
+def cycleFocusRuntime (focusState : FocusState) (order : List EntityId) : FocusState :=
+  let admitted := order.filter focusState.admits
+  match admitted with
+  | [] => focusState
+  | first :: _ =>
+    match focusState.owner with
+    | none => focusState.request first
+    | some current =>
+      let rec next : List EntityId → Option EntityId
+        | [] => none
+        | [x] => if x == current then some first else none
+        | x :: y :: rest => if x == current then some y else next (y :: rest)
+      focusState.request ((next admitted).getD first)
+
 /-- CLI options parsed by `parseRuntimeArgs`. -/
 structure RuntimeConfig where
   headlessGolden : Option System.FilePath := none
@@ -68,6 +82,8 @@ structure RuntimeState (σ : Type) where
   windowFocused : Bool := true
   hoveredEntity : Option EntityId := none
   hitRegions : List (EntityId × Rect) := []
+  focusableOrder : List EntityId := []
+  pressedEntity : Option EntityId := none
   scrollOffsetSub : Nat := 0
   contentHeightSub : Nat := 64000
   damage : Damage := none
@@ -135,9 +151,20 @@ def stepEvent (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage) (
         | some id =>
           let r := (rt.hitRegions.find? (·.1 == id)).map (·.2) |>.getD rt.viewportDeviceRect
           let devR := roundRectOut rt.wayland.scale120 r
-          rt.requestFocus id devR
+          { (rt.requestFocus id devR) with pressedEntity := some id }
         | none => rt
-      else rt
+      else
+        match hitTest rt.hitRegions px py, rt.pressedEntity with
+        | some id, some pressed =>
+          let rt' := { rt with pressedEntity := none }
+          if id == pressed then
+            let (app', appDmg) := onEvent rt'.app (.activate id)
+            let finalDmg := match appDmg with
+              | none => rt'.damage
+              | some r => Damage.add rt'.damage r
+            { rt' with app := app', damage := finalDmg }
+          else rt'
+        | _, _ => { rt with pressedEntity := none }
     | .scroll _px _py _dx dy =>
       let (_, vhSub) := rt.wayland.logicalSubSize
       let nextOff := scrollStep rt.contentHeightSub vhSub rt.scrollOffsetSub dy
@@ -145,6 +172,24 @@ def stepEvent (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage) (
       else { (rt.markFullDamage) with scrollOffsetSub := nextOff }
     | .closeRequested =>
       { rt with running := false }
+    | .key keysym _mods state =>
+      if state == .pressed || state == .repeated then
+        -- Tab is handled here so every screen shares one focus traversal policy.
+        if keysym == 0xff09 then
+          let focus' := cycleFocusRuntime rt.focus rt.focusableOrder
+          let dmg' := if focus'.owner == rt.focus.owner then rt.damage else Damage.add rt.damage rt.viewportDeviceRect
+          { rt with focus := focus', damage := dmg' }
+        else if keysym == 0xff0d || keysym == 0x20 then
+          match rt.focus.owner with
+          | some id =>
+            let (app', appDmg) := onEvent rt.app (.activate id)
+            let finalDmg := match appDmg with
+              | none => rt.damage
+              | some r => Damage.add rt.damage r
+            { rt with app := app', damage := finalDmg }
+          | none => rt
+        else rt
+      else rt
     | _ => rt
   let (app', appDmg) := onEvent rt1.app ev
   let finalDmg := match appDmg with
@@ -161,7 +206,7 @@ end RuntimeState
    clear `rt.damage` to `none`. -/
 def stepFrame {σ : Type} (rt : RuntimeState σ)
     (onEvent : σ → Event → σ × Damage)
-    (view : RuntimeState σ → IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect))) :
+    (view : RuntimeState σ → IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect) × List EntityId)) :
     IO (RuntimeState σ) := do
   let (wl1, evs) ← Wayland.pumpEvents rt.wayland
   let mut st := { rt with wayland := wl1 }
@@ -177,13 +222,14 @@ def stepFrame {σ : Type} (rt : RuntimeState σ)
         height := bh
         framebuffer := ByteArray.mk (Array.replicate (bw * bh * 4) 0) }
     else st.vulkan
-  let (atlas', clearColor, scene, regions) ← view { st with vulkan := vk0 }
+  let (atlas', clearColor, scene, regions, focusOrder) ← view { st with vulkan := vk0 }
   let vk' ← Vulkan.renderFrame vk0 clearColor atlas' scene
   return {
     st with
     vulkan := vk'
     atlas := atlas'
     hitRegions := regions
+    focusableOrder := focusOrder
     damage := none
     framesRendered := st.framesRendered + 1
   }
@@ -191,7 +237,7 @@ def stepFrame {σ : Type} (rt : RuntimeState σ)
 /-- Build the canonical Orb Desktop canary scene (sidebar, header bar, transcript cards,
 code block, focus border, and shaped text labels) at the current scale factor and theme. -/
 def buildCanaryScene (rt : RuntimeState Unit) :
-    IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect)) := do
+    IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect) × List EntityId) := do
   let (bw, bh) := rt.wayland.deviceBufferSize
   let sc := rt.wayland.scale120
   let px (n : Int) : Int := (n * (sc : Int)) / (scaleDen : Int)
@@ -268,7 +314,7 @@ def buildCanaryScene (rt : RuntimeState Unit) :
   let compSubRect : Rect :=
     { x := subScale compRect.x, y := subScale compRect.y
       w := subScale compRect.w, h := subScale compRect.h }
-  return (ac, bgClear, prims, [(1, compSubRect)])
+  return (ac, bgClear, prims, [(1, compSubRect)], [1])
 
 /-- `RuntimeState` for the Wayland session `wl`, with the whole viewport damaged. -/
 def initRuntimeOn {σ : Type} (cfg : RuntimeConfig) (wl : Wayland.WaylandClient) (initialApp : σ) :
@@ -312,7 +358,7 @@ def openWindowRuntime {σ : Type} (cfg : RuntimeConfig) (appId : String) (initia
 block on the compositor. Nothing is drawn before the first `xdg_surface.configure`. -/
 def runWindow {σ : Type} (rt0 : RuntimeState σ)
     (onEvent : RuntimeState σ → σ → Event → σ × Damage)
-    (view : RuntimeState σ → IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect))) :
+    (view : RuntimeState σ → IO (Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect) × List EntityId)) :
     IO (RuntimeState σ) := do
   let mut rt := rt0
   while rt.running do

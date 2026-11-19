@@ -16,6 +16,15 @@ fi
 
 sudo python3 - <<'PY'
 import json, socket, urllib.request
+from pathlib import Path
+
+for sources in [Path("/etc/apt/sources.list"), *Path("/etc/apt/sources.list.d").glob("*")]:
+    if not sources.is_file():
+        continue
+    text = sources.read_text(encoding="utf-8")
+    sources.write_text(text.replace("http://archive.ubuntu.com", "https://archive.ubuntu.com")
+                         .replace("http://security.ubuntu.com", "https://security.ubuntu.com"),
+                        encoding="utf-8")
 
 hosts = ["azure.archive.ubuntu.com", "archive.ubuntu.com", "security.ubuntu.com"]
 with open("/etc/hosts", "r", encoding="utf-8") as f:
