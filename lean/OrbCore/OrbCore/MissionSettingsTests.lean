@@ -7,9 +7,214 @@ open OrbCore.Store OrbCore.Control OrbCore.Managed OrbCore.Proxy OrbCore.R7Core 
 
 private def check (ok : Bool) (label : String) : IO Unit := do
   unless ok do throw (IO.userError s!"mission settings: {label}")
-  if label.startsWith "B5_" then IO.println s!"PASS {label}"
+  if label.startsWith "B5_" || label.startsWith "B5b_" then IO.println s!"PASS {label}"
+
+def moveRecovery (root : String) : IO Unit := do
+  let path := s!"{root}/b5b-recovery"
+  -- Keep the observer opens from expiring this test's active dispatch reservations.
+  let bootEpoch := 1
+  let .ok store ← openCoreStore path bootEpoch | throw (IO.userError "B5b open")
+  let sql (db : SqliteDb) (q : String) := do
+    let .ok rows ← execParamQuery db q #[] | throw (IO.userError s!"B5b query: {q}")
+    return rows
+  try
+    for family in #["a", "b"] do
+      for (suffix, parent) in #[("root", ""), ("child", family ++ "root"), ("deep", family ++ "child")] do
+        let id := family ++ suffix
+        discard <| sql store.missionsDb s!"INSERT INTO missions(id,project,parent_mission_id,owner_user_id) VALUES('{id}','source','{parent}','alice');"
+        discard <| sql store.projectsDb s!"INSERT INTO mcp_sessions_v1(id,mission_id,project_scope,project_scoped) VALUES('{id}','{id}','source',1);"
+        discard <| sql store.missionsDb s!"INSERT INTO dispatch_lease_intents(reservation_id,mission_id,project_slug,track,phase,boot_epoch) VALUES('{id}','{id}','source','{id}','active',{bootEpoch});"
+        discard <| sql store.projectsDb s!"INSERT INTO project_track_leases(project_slug,track,reservation_id,mission_id,phase) VALUES('source','{id}','{id}','{id}','active');"
+    discard <| sql store.projectsDb "CREATE TRIGGER reject_rebind BEFORE UPDATE ON mcp_sessions_v1 BEGIN SELECT RAISE(ABORT,'injected crash boundary'); END;"
+    for id in #["aroot", "broot"] do
+      let some mr ← getMission? store id | throw (IO.userError "B5b fixture missing")
+      let result ← OrbCore.MissionSettings.applyPlacementPatch store mr
+        (.obj #[("project", .str "destination")]) "alice" true "" "t1" 1000
+      check (!result.isOk) "B5b injected post-commit failure"
+    let reached ← IO.mkRef false
+    closeCoreStore store
+    let blocked ← OrbCore.MissionMoveRecovery.startup path
+    let code ← OrbCore.MissionMoveRecovery.startAfterRecovery path (do reached.set true; return 0)
+    let .ok reopenedAfterFailure ← openCoreStore path bootEpoch | throw (IO.userError "B5b reopen after failure")
+    check (code != 0 && !(← reached.get) &&
+      ((← OrbCore.MissionMoveRecovery.pending reopenedAfterFailure.missionsDb).toOption.getD #[]).size == 6)
+      "B5b_startup_failure_blocks_server_and_keeps_markers"
+    let blockedMsg := match blocked with | .ok _ => "" | .error e => e
+    check (!blocked.isOk && blockedMsg.contains "aroot" && blockedMsg.contains "achild" &&
+      blockedMsg.contains "bdeep")
+      "B5b_startup_failure_names_stuck_mission_ids"
+    discard <| sql reopenedAfterFailure.projectsDb "DROP TRIGGER reject_rebind;"
+    let triggerRows ← sql reopenedAfterFailure.projectsDb
+      "SELECT name FROM sqlite_master WHERE type='trigger' AND name='reject_rebind';"
+    check (triggerRows.size == 1) "B5b_startup_repair_trigger_removed"
+    closeCoreStore reopenedAfterFailure
+  finally closeCoreStore store
+  check (← OrbCore.MissionMoveRecovery.startup path).isOk "B5b_next_startup_repairs_after_failure"
+  let .ok reopened ← openCoreStore path bootEpoch | throw (IO.userError "B5b reopen")
+  try
+    let missions ← sql reopened.missionsDb
+      "SELECT project FROM missions WHERE id IN ('aroot','achild','adeep','broot','bchild','bdeep') ORDER BY id;"
+    let sessions ← sql reopened.projectsDb
+      "SELECT project_scope FROM mcp_sessions_v1 WHERE mission_id IN ('aroot','achild','adeep','broot','bchild','bdeep') ORDER BY id;"
+    let leases ← sql reopened.projectsDb
+      "SELECT project_slug FROM project_track_leases WHERE mission_id IN ('aroot','achild','adeep','broot','bchild','bdeep') ORDER BY mission_id;"
+    let missionRows := missions.extract 1 missions.size
+    let sessionRows := sessions.extract 1 sessions.size
+    let leaseRows := leases.extract 1 leases.size
+    check (missionRows.size == 6 && sessionRows.size == 6 && leaseRows.size == 6 &&
+      missionRows.all (fun r => r[0]! == "destination") &&
+      sessionRows.all (fun r => r[0]! == "destination") &&
+      leaseRows.all (fun r => r[0]! == "destination"))
+      "B5b_crash_between_commits_startup_repairs_two_families"
+    check ((← OrbCore.MissionMoveRecovery.pending reopened.missionsDb).toOption == some #[])
+      "B5b_recovery_clears_markers"
+    discard <| sql reopened.missionsDb "CREATE TRIGGER reject_settings BEFORE UPDATE OF backend ON missions BEGIN SELECT RAISE(ABORT,'before commit'); END;"
+    let some before ← getMission? reopened "aroot" | throw (IO.userError "missing root")
+    let settings : OrbCore.MissionSettings.Settings := {
+      title := "rollback", backend := "codex", modelOverride := "", modelEffort := "",
+      shortDescription? := none, githubPr? := none }
+    let rolled ← OrbCore.MissionSettings.applyPlacementPatch reopened before
+      (.obj #[("project", .str "rollback-target")]) "alice" true "" "t2" 1001 (some settings)
+    check (!rolled.isOk && (← OrbCore.MissionMoveRecovery.pending reopened.missionsDb).toOption == some #[])
+      "B5b_before_commit_failure_has_no_marker"
+    discard <| sql reopened.missionsDb "DROP TRIGGER reject_settings;"
+    check (← OrbCore.MissionMoveRecovery.startup path).isOk "B5b_second_startup_succeeds"
+    check ((← sql reopened.missionsDb
+      "SELECT project FROM missions WHERE id IN ('aroot','achild','adeep','broot','bchild','bdeep') ORDER BY id;") == missions &&
+      (← sql reopened.projectsDb
+        "SELECT project_scope FROM mcp_sessions_v1 WHERE mission_id IN ('aroot','achild','adeep','broot','bchild','bdeep') ORDER BY id;") == sessions &&
+      (← sql reopened.projectsDb
+        "SELECT project_slug FROM project_track_leases WHERE mission_id IN ('aroot','achild','adeep','broot','bchild','bdeep') ORDER BY mission_id;") == leases)
+      "B5b_second_startup_is_noop"
+    let normal ← OrbCore.MissionSettings.applyPlacementPatch reopened before
+      (.obj #[("project", .str "normal-target")]) "alice" true "" "t3" 1002
+    check (normal.isOk && (← OrbCore.MissionMoveRecovery.pending reopened.missionsDb).toOption == some #[])
+      "B5b_normal_move_has_no_marker"
+    discard <| sql reopened.missionsDb "INSERT INTO pending_mission_rebinds(mission_id) VALUES('deleted');"
+    discard <| sql reopened.projectsDb "INSERT INTO mcp_sessions_v1(id,mission_id,project_scope,project_scoped) VALUES('deleted','deleted','source',1);"
+    check (← OrbCore.MissionMoveRecovery.startup path).isOk "B5b_deleted_mission_startup_succeeds"
+    check ((← sql reopened.projectsDb "SELECT project_scope FROM mcp_sessions_v1 WHERE id='deleted';")[1]![0]! == "source" &&
+      (← OrbCore.MissionMoveRecovery.pending reopened.missionsDb).toOption == some #[])
+      "B5b_deleted_mission_marker_removed_without_rebind"
+  finally closeCoreStore reopened
+
+def routeRecovery (root : String) : IO Unit := do
+  let path := s!"{root}/b5b-route-recovery"
+  let .ok store ← openCoreStore path | throw (IO.userError "B5b route open")
+  let sql (db : SqliteDb) (q : String) := do
+    let .ok rows ← execParamQuery db q #[] | throw (IO.userError "B5b route query")
+    return rows
+  try
+    for id in #["route-root", "route-link"] do
+      discard <| sql store.missionsDb s!"INSERT INTO missions(id,project,owner_user_id) VALUES('{id}','source','alice');"
+      discard <| sql store.projectsDb s!"INSERT INTO mcp_sessions_v1(id,mission_id,project_scope,project_scoped) VALUES('{id}','{id}','source',1);"
+    discard <| sql store.projectsDb "CREATE TRIGGER reject_route_rebind BEFORE UPDATE ON mcp_sessions_v1 BEGIN SELECT RAISE(ABORT,'route crash'); END;"
+    let some rootRow ← getMission? store "route-root" | throw (IO.userError "route root")
+    let route ← OrbCore.MissionSettings.applyPlacementPatch store rootRow (.obj #[("project", .str "destination")]) "alice" true "" "r1" 1000
+    check (!route.isOk) "B5b_rest_route_marks_before_crash"
+    let link ← OrbCore.MissionSettings.commitPlacementWithRecovery store #[{
+      missionId := "route-link", expectedProject := "source", nextProject := "destination", nextFolder := "" }]
+      "alice" "r2"
+    check (!link.isOk) "B5b_link_route_marks_before_crash"
+    discard <| sql store.projectsDb "DROP TRIGGER reject_route_rebind;"
+  finally closeCoreStore store
+  check (← OrbCore.MissionMoveRecovery.startup path).isOk "B5b_route_startup_repairs_markers"
+
+/-- Split the two database commits at their real transaction boundary. A second
+    move can finish before the first caller resumes, or startup can finish both. -/
+def policyReplay (root : String) : IO Unit := do
+  let path := s!"{root}/policy-replay"
+  let .ok st ← openCoreStore path 1 | throw (IO.userError "policy fixture open")
+  let sql (db : SqliteDb) (q : String) := do
+    let .ok rows ← execParamQuery db q #[] | throw (IO.userError "policy fixture SQL")
+    return rows
+  let broker := path ++ "/secret_broker.json"
+  let seed := "{\"grants\":[{\"id\":\"g1\",\"mission_id\":\"m\",\"project\":\"a\"}],\"requests\":[{\"id\":\"r1\",\"mission_id\":\"m\",\"status\":\"pending\"}]}"
+  try
+    discard <| sql st.missionsDb "INSERT INTO missions(id,project) VALUES('m','a');"
+    discard <| sql st.projectsDb "INSERT INTO mcp_sessions_v1(id,mission_id,project_scope,project_scoped) VALUES('s','m','a',1);"
+    discard <| sql st.projectsDb "INSERT INTO project_track_leases(project_slug,track,reservation_id,mission_id,phase) VALUES('a','t','r','m','active');"
+    let .ok () ← OrbCore.MissionMoveRecovery.ensureSchema st.missionsDb | throw (IO.userError "policy fixture schema")
+    let move (src dst : String) : CheckedPlacementUpdate := { missionId := "m", expectedProject := src, nextProject := dst, nextFolder := "" }
+    let pause (src dst policy : String) := batchSetMissionPlacementChecked st #[move src dst] "t1"
+      (OrbCore.MissionMoveRecovery.mark st #["m"] "owner" "t1" { ids := #["m"], target := dst, policy, epoch := 1 })
+    IO.FS.writeFile broker seed
+    check (← pause "a" "b" "keep").isOk "B5b_first_move_committed_before_policy"
+    -- A symlinked parent is readable but rejected by the atomic private writer.
+    let aliasPath := path ++ "-alias"
+    let link ← IO.Process.output { cmd := "ln", args := #["-s", path, aliasPath] }
+    check (link.exitCode == 0) "policy fixture symlink"
+    let failed ← OrbCore.MissionMoveRecovery.reconcile { st with rootDir := aliasPath }
+    check (!failed.isOk && (← IO.FS.readFile broker) == seed &&
+      (← OrbCore.MissionMoveRecovery.pending st.missionsDb).toOption == some #["m"] &&
+      (← sql st.missionsDb "SELECT policy FROM pending_move_policies;")[1]![0]! == "keep") "B5b_failed_policy_write_keeps_intent"
+    check (← OrbCore.MissionMoveRecovery.startup path).isOk "B5b_startup_replays_keep"
+    let readBroker := do
+      let .ok v := OrbBin.Json.parse (← IO.FS.readFile broker) | throw (IO.userError "policy fixture JSON")
+      return v
+    let kept ← readBroker
+    let keptGrant := ((kept.fieldArr? "grants").get!)[0]!
+    check (keptGrant.fieldStr? "project" == some "b") "B5b_keep_repaired_grant"
+    check (← pause "b" "c" "revoke").isOk "B5b_superseded_move_committed_before_policy"
+    let late : JVal := .obj #[("id", .str "later"), ("mission_id", .str "m"), ("status", .str "pending")]
+    let withLate := (kept.setField "grants" (.arr (((kept.fieldArr? "grants").get!).push late))).setField "requests" (.arr (((kept.fieldArr? "requests").get!).push late))
+    IO.FS.writeFile broker (renderCompact withLate)
+    let latest ← OrbCore.MissionSettings.commitPlacementWithRecovery st #[move "c" "d"] "owner" "t2"
+      (intent := { ids := #["m"], target := "d", policy := "keep", epoch := 2 })
+    check latest.isOk "B5b_newer_move_finishes_first"
+    check (← OrbCore.MissionMoveRecovery.reconcile st).isOk "B5b_delayed_older_completion"
+    let finalBroker ← readBroker
+    let grant := ((finalBroker.fieldArr? "grants").get!)[0]!
+    let req := ((finalBroker.fieldArr? "requests").get!)[0]!
+    check ((((finalBroker.fieldArr? "grants").get!)[1]!.field? "revoked_at").isNone &&
+      ((finalBroker.fieldArr? "requests").get!)[1]!.fieldStr? "status" == some "pending") "B5b_replayed_revoke_spares_new_approvals"
+    check (grant.fieldStr? "revoked_at" == some "t1" && req.fieldStr? "status" == some "cancelled" &&
+      (← sql st.projectsDb "SELECT project_scope FROM mcp_sessions_v1 WHERE id='s';")[1]![0]! == "d" &&
+      (← sql st.projectsDb "SELECT project_slug FROM project_track_leases WHERE reservation_id='r';")[1]![0]! == "d" &&
+      (← OrbCore.MissionMoveRecovery.pending st.missionsDb).toOption == some #[] &&
+      (← sql st.missionsDb "SELECT seq FROM pending_move_policies;").size == 1) "B5b_overlap_preserves_revoke_and_latest_bindings"
+  finally closeCoreStore st
+
+def missingDbRecovery (root : String) : IO Unit := do
+  let path := s!"{root}/b5b-missing-db"
+  let .ok store ← openCoreStore path | throw (IO.userError "B5b missing-db open")
+  let dbPath := s!"{path}/projects.db"
+  try
+    let .ok () ← OrbCore.MissionMoveRecovery.ensureSchema store.missionsDb | throw (IO.userError "B5b marker schema")
+    let .ok _ ← execParamQuery store.missionsDb "INSERT INTO missions(id,project) VALUES('missing-db-mission','destination');" #[]
+      | throw (IO.userError "B5b missing-db mission fixture")
+    let .ok _ ← execParamQuery store.missionsDb
+      "INSERT INTO pending_mission_rebinds(mission_id) VALUES('missing-db-mission');" #[]
+      | throw (IO.userError "B5b missing-db marker fixture")
+    closeCoreStore store
+    IO.FS.removeFile dbPath
+    let refused ← OrbCore.MissionMoveRecovery.startup path
+    check (!refused.isOk && !(← (System.FilePath.mk dbPath).pathExists)) "B5b_missing_projects_db_fails_closed"
+    let .ok checkStore ← openCoreStore path | throw (IO.userError "B5b missing-db reopen")
+    try
+      check ((← OrbCore.MissionMoveRecovery.pending checkStore.missionsDb).toOption.getD #[] == #["missing-db-mission"])
+        "B5b_missing_projects_db_keeps_marker"
+    finally closeCoreStore checkStore
+  finally
+    try IO.FS.removeFile dbPath catch _ => pure ()
+
+  let .ok clean ← openCoreStore path | throw (IO.userError "B5b no-marker open")
+  closeCoreStore clean
+  let .ok empty ← openCoreStore path | throw (IO.userError "B5b no-marker reopen")
+  try
+    discard <| execParamQuery empty.missionsDb
+      "DELETE FROM pending_mission_rebinds;" #[]
+  finally closeCoreStore empty
+  IO.FS.removeFile dbPath
+  let noMarker ← OrbCore.MissionMoveRecovery.startup path
+  check (match noMarker with | .ok () => true | .error _ => false)
+    "B5b_missing_projects_db_without_markers_succeeds"
 
 def run (root : String) : IO Unit := do
+  policyReplay root
+  moveRecovery root
+  routeRecovery root
+  missingDbRecovery root
   let .ok store ← openCoreStore s!"{root}/mission-settings"
     | throw (IO.userError "settings store open failed")
   try
