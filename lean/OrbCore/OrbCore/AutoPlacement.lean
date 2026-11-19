@@ -78,7 +78,8 @@ def lineageExclusions (store : CoreStore) (missionId : String) : IO (Array Strin
   return normalizeAll found
 
 def candidates (store : CoreStore) (nodes : Array StaticRemoteNode) : IO (Array Candidate) := do
-  let cordons := (← loadPersistedNodeCordons store.rootDir).map normalize
+  let .ok hung ← execParamQuery store.missionsDb "SELECT node_id FROM node_api_hangs" #[] | return #[]
+  let cordons := ((← loadPersistedNodeCordons store.rootDir) ++ (hung.extract 1 hung.size).map (fun r => cell r 0)).map normalize
   let mut load : Array (String × Nat) := #[]
   if let .ok rows ← execParamQuery store.missionsDb
       ("SELECT node_id, COUNT(*) FROM remote_node_jobs WHERE state NOT IN " ++

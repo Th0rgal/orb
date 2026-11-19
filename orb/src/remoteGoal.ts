@@ -20,17 +20,20 @@ export function applyRemoteGoalEvent(previous: RemoteGoalProjection, value: unkn
   if (!event) return previous;
   const data = event.data;
   const status = typeof data.status === "string" ? data.status : undefined;
-  const phase: RemoteGoalPhase = status === "complete" ? "complete" : status === "stopped" ? "stopped" : status === "blocked" ? "blocked" : status === "paused" ? "paused" : previous.phase === "complete" || previous.phase === "stopped" ? previous.phase : "active";
+  const phase: RemoteGoalPhase = status === "complete" || status === "stopped" || status === "paused" || status === "blocked" ? status : status === "active" && previous.phase !== "complete" && previous.phase !== "stopped" ? "active" : previous.phase;
   return {
     phase,
     objective: typeof data.objective === "string" ? data.objective : previous.objective,
     iteration: typeof data.iteration === "number" ? data.iteration : previous.iteration,
-    ...(typeof data.summary === "string" ? { detail: data.summary } : {}),
+    detail: typeof data.summary === "string" ? data.summary : previous.detail,
   };
 }
 
-export function remoteGoalStopLabel(projection: RemoteGoalProjection): string {
-  return projection.phase === "active" ? "Stop Goal" : "Goal stopped";
+export function remoteGoalPhase(status: string | undefined, reason: string | null | undefined): RemoteGoalPhase {
+  if (reason === "remote_goal_complete") return "complete";
+  if (reason === "remote_goal_stopped" || status === "cancelled") return "stopped";
+  if (status === "active" || status === "pending" || reason === "remote_goal_continuation" || reason === "awaiting_wakeup") return "active";
+  return status === "paused" ? "paused" : "blocked";
 }
 
 export function remoteGoalStatusLabel(projection: RemoteGoalProjection): string {

@@ -11,7 +11,7 @@ import { Popover } from "../Popover";
 import { RemoteQueue, type RemoteQueueHandle } from "../RemoteQueue";
 import { MissionCyber, getCyber, requireCyberSupport } from "../cyberAccess";
 import { EMPTY_GOAL_ERROR, goalDraft } from "../goal";
-import { applyRemoteGoalEvent, remoteGoalStatusLabel, type RemoteGoalProjection } from "../remoteGoal";
+import { applyRemoteGoalEvent, remoteGoalPhase, remoteGoalStatusLabel, type RemoteGoalProjection } from "../remoteGoal";
 import {NextReminder} from "../AutomaticReminder";
 import { LazyCloudConversation, peekCloudAgentsModule } from "../cloudAgentsLoader";
 import {QueuedMessages} from "../QueuedMessages";
@@ -553,7 +553,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
   });
   onCleanup(() => { if (p.active !== false) p.onMission?.(null); });
   const [items, setItems] = createSignal<StreamItem[]>(cached?.items ?? []);
-  let remoteGoalProjection: RemoteGoalProjection = { phase: "active", objective: mission()?.goal_objective ?? "", iteration: 0 };
+  const [liveGoal, setLiveGoal] = createSignal<RemoteGoalProjection>();
   const [awaiting, setAwaiting] = createSignal(!cached || !!cached.detailsPending);
   createEffect(on(transcriptVersion, () => {
     if (!awaiting() || staleMission()) return;
@@ -1002,8 +1002,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
             return;
           }
           if (ev.type === "goal_status" || ev.type === "goal_iteration") {
-            remoteGoalProjection = applyRemoteGoalEvent(remoteGoalProjection, { type: ev.type, data: ev.data });
-            setMission(old => old ? { ...old, status_message: remoteGoalStatusLabel(remoteGoalProjection) } : old);
+            setLiveGoal(old => applyRemoteGoalEvent(old ?? { phase: "active", objective: "", iteration: 0 }, { type: ev.type, data: ev.data }));
             return;
           }
           if (replaying) held.push(ev);
@@ -1193,6 +1192,13 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
       return serverListed && !step.retiredNow && !deliveredSet.has(id);
     });
     if (!stillHandingOver) setQueueHandoverState(null);
+  });
+  const remoteGoal = createMemo(() => {
+    const m = mission();
+    if (!m?.goal_mode || clientPlaced() || m.backend !== "opencode") return;
+    const phase = remoteGoalPhase(m.status, m.terminal_reason);
+    const live = liveGoal();
+    return { phase: phase === "active" ? live?.phase ?? phase : phase, objective: m.goal_objective ?? "", iteration: Math.max(m.goal_iteration ?? 0, live?.iteration ?? 0) };
   });
   const working = () => {
     if(sendError())return false;
@@ -1558,9 +1564,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
       void stopLocal(targetMissionId).then(() => flushClientLink(targetMissionId)).then(() => setClientMissionStatus(targetMissionId, "interrupted")).then(() => refresh()).catch(e => setSendError(String(e)));
       return;
     }
-    void cancelMission(targetMissionId)
-      .catch(swallow("mission.cancel", { mission: targetMissionId }))
-      .then(() => refresh());
+    void cancelMission(targetMissionId).then(() => refresh()).catch(e => setSendError(launchError(e)));
   };
 
   const [recoveryPending, setRecoveryPending] = createSignal(false);
@@ -1764,6 +1768,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
           </Show>
 
           <NextReminder mission={p.id} active={isSlotActive()} busy={busy()} archived={isArchived(mission()?.status)} />
+          <Show when={remoteGoal()}>{goal => <div role="status">{remoteGoalStatusLabel(goal())}</div>}</Show>
           <Show when={refreshing()}><div class="agent-wait-status" role="status">Refreshing conversation…</div></Show>
         </div>
       </div>
@@ -1876,6 +1881,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
             onEmptySubmit={sendQueueFromComposer}
             onEditFirstQueued={editFirstQueued}
             onStop={stopM}
+            keepStopVisible={!participant() && remoteGoal()?.phase === "active"}
             scope={`m:${p.id}`}
             uploadTarget={clientPlaced() ? "local" : missionAssignedNode(mission()) ?? "core"}
             backend={mission()?.backend}

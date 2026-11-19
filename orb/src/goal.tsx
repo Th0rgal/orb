@@ -87,7 +87,7 @@ export function composerModes(backend?: string | null, planSupported = false): S
 }
 
 export function remoteGoalSupport(capability: { goal_harnesses?: string[] } | null | undefined, backend?: string | null): boolean {
-  return !!backend && Array.isArray(capability?.goal_harnesses) && capability!.goal_harnesses!.includes(backend);
+  return !!backend && capability?.goal_harnesses?.includes(backend) === true;
 }
 
 export const REMOTE_GOAL_UNSUPPORTED = "Goal mode is unavailable for this remote harness because it cannot continue the objective safely. Choose OpenCode on a Goal-capable remote node, or use a standard turn.";

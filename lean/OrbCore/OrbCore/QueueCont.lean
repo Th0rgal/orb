@@ -1169,7 +1169,8 @@ def missionDetailJson
     "COALESCE(m.short_description,''),COALESCE(m.workspace_id,'00000000-0000-0000-0000-000000000000')," ++
     "COALESCE(m.workspace_name,''),COALESCE(m.agent,''),COALESCE(m.config_profile,''),COALESCE(m.resumable,0)," ++
     "COALESCE(m.history_json,'[]')," ++
-     liveChildrenCountSql ++ " AS live_children_count,COALESCE(m.goal_mode,0),COALESCE(m.goal_objective,'') " ++
+    liveChildrenCountSql ++ " AS live_children_count,COALESCE(m.goal_mode,0),COALESCE(m.goal_objective,'')," ++
+    "(SELECT COUNT(*) FROM mission_continuations c WHERE c.mission_id=m.id AND c.source='remote-goal') " ++
     "FROM missions m LEFT JOIN mission_terminal_evidence e ON e.mission_id=m.id WHERE m.id=?1;"
   let rows ← execParamQuery st.missionsDb sql #[missionId]
   match rows with
@@ -1288,7 +1289,9 @@ def missionDetailJson
       s!"\"viewer_role\":{jsonEscape viewerRole},\"owner_username\":{jsonEscape ownerUname},\"shared_with\":{sharedWithJson}," ++
       s!"\"state_revision\":{cellNat r 14},\"not_before\":{cellNat r 17},\"resume_intent\":{cellNat r 18}," ++
       s!"\"run_generation\":{cellNat r 19},\"health_verdict\":{jsonEscape verdict}," ++
-       s!"\"terminal_evidence\":{evJson},\"continuation\":{contJson},\"tags\":{tagsOut},\"history\":{histOut},\"goal_mode\":{if goalMode then "true" else "false"},\"goal_objective\":{jsonEscape goalObjective}}"))
+      s!"\"terminal_evidence\":{evJson},\"continuation\":{contJson},\"tags\":{tagsOut},\"history\":{histOut}," ++
+      s!"\"goal_mode\":{if goalMode then "true" else "false"},\"goal_objective\":{jsonEscape goalObjective},\"goal_iteration\":{cellNat r 51}" ++
+      (if goalMode then s!",\"terminal_reason\":{jsonEscape mReason}" else "") ++ "}"))
 
 def ensureQueueContSchema (st : CoreStore) : IO (Except String Unit) := do
   match ← st.missionsDb.mu.atomically (sqliteExecRaw st.missionsDb.handle queueContSchemaSql) with

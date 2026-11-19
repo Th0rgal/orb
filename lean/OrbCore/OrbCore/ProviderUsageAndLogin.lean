@@ -79,6 +79,7 @@ structure ProviderHubState where
   agyModelsCache? : Option (UInt64 × Array (String × String)) := none
   usageEntries    : Array CachedUsageEntry := #[]
   usageGeneration : Nat := 0
+  refreshingProviderIds : Array String := #[]
   loginSessions   : Array CliLoginSession := #[]
   catalogRefreshedSec : UInt64 := 0
 
@@ -399,13 +400,17 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
     let legEmail := (leg?.bind (fun j => j.fieldStr? "account_email")).getD ""
     let legGoogleProj := (leg?.bind (fun j => j.fieldStr? "google_project_id")).getD ""
     let legOauthObj? := leg?.bind (fun j => j.field? "oauth")
-    let legRefreshFile := (legOauthObj?.bind (fun o => o.fieldStr? "refresh_token")).getD ""
+     let legRefreshFile := (legOauthObj?.bind (fun o => o.fieldStr? "refresh_token")).getD ""
+     let legAuthFile := (leg?.bind (fun j => (j.fieldStr? "cli_proxy_auth_file").orElse (fun _ => j.fieldStr? "auth_file"))).getD ""
+     let legSandboxedId := (leg?.bind (fun j => (j.fieldStr? "sandboxed_provider_id").orElse (fun _ => j.fieldStr? "account_id"))).getD ""
     let legAccessTok := (legOauthObj?.bind (fun o => o.fieldStr? "access_token")).getD ""
 
     -- Match CLIProxy auth file by prefix == p.id, refresh_token filename, email, or provider type
     let matchedAuth? :=
       if memberAdded then authFiles.find? (fun af => !af.disabled && af.prefixId == p.id) else
-      (authFiles.find? (fun af => !af.disabled && af.prefixId == p.id)).orElse fun _ =>
+       (authFiles.find? (fun af => !af.disabled && (af.prefixId == p.id || af.accountId == p.id))).orElse fun _ =>
+       (authFiles.find? (fun af => !af.disabled && !legAuthFile.isEmpty && af.fileName == legAuthFile)).orElse fun _ =>
+       (authFiles.find? (fun af => !af.disabled && !legSandboxedId.isEmpty && (af.prefixId == legSandboxedId || af.accountId == legSandboxedId))).orElse fun _ =>
       (authFiles.find? (fun af => !af.disabled && !legRefreshFile.isEmpty && af.fileName == legRefreshFile)).orElse fun _ =>
       (authFiles.find? (fun af => !af.disabled && !legEmail.isEmpty && af.email.toLower == legEmail.toLower && providerTypeMatchesAuthType p.providerType af.authType)).orElse fun _ =>
       (authFiles.find? (fun af => !af.disabled && providerTypeMatchesAuthType p.providerType af.authType))
@@ -490,7 +495,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
       let refFile := (oauthObj?.bind (fun o => o.fieldStr? "refresh_token")).getD ""
       let accTok := (oauthObj?.bind (fun o => o.fieldStr? "access_token")).getD ""
       let matchedAuth? :=
-        (authFiles.find? (fun af => !af.disabled && (af.prefixId == lid || (!refFile.isEmpty && af.fileName == refFile)))).orElse fun _ =>
+         (authFiles.find? (fun af => !af.disabled && (af.prefixId == lid || af.accountId == lid || (!refFile.isEmpty && af.fileName == refFile)))).orElse fun _ =>
         (authFiles.find? (fun af => !af.disabled && !email.isEmpty && af.email.toLower == email.toLower && providerTypeMatchesAuthType pType af.authType))
       let hasApi := !aKey.isEmpty && aKey != "cli-proxy-managed"
       let hasOa := matchedAuth?.isSome || !accTok.isEmpty || (pType.toLower == "muse-code" && !refFile.isEmpty && !refFile.endsWith ".json")
@@ -1674,25 +1679,17 @@ private def refreshProviderUsageAsync (hub : ProviderRuntimeHub) (hp : HydratedP
   let generation ← hub.mu.atomically (do return (← get).usageGeneration)
   let shouldSpawn ← hub.mu.atomically do
     let st ← get
+    if st.refreshingProviderIds.contains hp.id then
+      return false
     match st.usageEntries.find? (fun e => e.providerId == hp.id) with
     | some existing =>
       if existing.refreshing then return false
       let updated := st.usageEntries.map (fun e => if e.providerId == hp.id then { e with refreshing := true } else e)
-      set { st with usageEntries := updated }
+      set { st with usageEntries := updated, refreshingProviderIds := st.refreshingProviderIds.push hp.id }
       return true
     | none =>
-      let nowSec ← nowEpoch
-      let placeholder : JVal := .obj #[
-        ("provider_type", .str hp.providerType),
-        ("provider_name", .str hp.name),
-        ("account_email", if hp.accountEmail.isEmpty then .null else .str hp.accountEmail),
-        ("status", .str "connected"),
-        ("optimize", .obj #[("as_of", .str (formatEpochIso8601Utc nowSec)), ("primary_window", .null), ("windows", .arr #[])])
-      ]
-      set { st with usageEntries := st.usageEntries.push {
-        providerId := hp.id, fetchedSec := nowSec, fetchedIso := formatEpochIso8601Utc nowSec, payload := placeholder, refreshing := true
-      } }
-      return true
+       set { st with refreshingProviderIds := st.refreshingProviderIds.push hp.id }
+       return true
   if shouldSpawn then
     let _ ← IO.asTask (prio := .dedicated) do
       let fresh ← (try probeProviderUsage hub hp catch _ =>
@@ -1701,9 +1698,19 @@ private def refreshProviderUsageAsync (hub : ProviderRuntimeHub) (hp : HydratedP
       let tsIso := formatEpochIso8601Utc ts
       hub.mu.atomically do
         let st ← get
+        let cleared := st.refreshingProviderIds.filter (· != hp.id)
         if st.usageGeneration == generation then
           let others := st.usageEntries.filter (fun e => e.providerId != hp.id)
-          set { st with usageEntries := others.push { providerId := hp.id, fetchedSec := ts, fetchedIso := tsIso, payload := fresh, refreshing := false } }
+          let entry : CachedUsageEntry := {
+            providerId := hp.id
+            fetchedSec := ts
+            fetchedIso := tsIso
+            payload := fresh
+            refreshing := false
+          }
+          set { st with usageEntries := others.push entry, refreshingProviderIds := cleared }
+        else
+          set { st with refreshingProviderIds := cleared }
 
 private def decorateCachedUsage (entry : CachedUsageEntry) (nowSec : UInt64) : JVal :=
   let withCached := (entry.payload.setField "cached" (.bool true)).setField "fetched_at" (.str entry.fetchedIso)
@@ -1725,6 +1732,13 @@ private def parseWindowSeconds? (win : String) : Option UInt64 := Id.run do
     return ((w.dropEnd 1).toString.toNat?).map (fun n => (n * 604800).toUInt64)
   return some 86400
 
+private def sqlStringLiteral (s : String) : String :=
+  "'" ++ s.replace "'" "''" ++ "'"
+
+private def callerUsageScope (callerUserId : String) (effAdmin : Bool) : String :=
+  if effAdmin || callerUserId.isEmpty then ""
+  else s!" AND proxy_usage.mission_id IN (SELECT id FROM missions WHERE owner_user_id={sqlStringLiteral callerUserId})"
+
 private def mkTotalsJv (ev inp outTok cRead cCreate reas costCents : Nat) : JVal :=
   let totalTok := inp + outTok + cRead + cCreate + reas
   let billableTok := inp + outTok + cCreate + reas
@@ -1742,13 +1756,13 @@ private def mkTotalsJv (ev inp outTok cRead cCreate reas costCents : Nat) : JVal
     ("estimated_cost_cents", JVal.nat costCents)
   ]
 
-private def queryTotalsSince (store : CoreStore) (sinceIso? : Option String) : IO JVal := do
+private def queryTotalsSince (store : CoreStore) (sinceIso? : Option String) (scopeSql : String := "") : IO JVal := do
   let (sql, args) :=
     match sinceIso? with
     | some s =>
-      ("SELECT COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cost_cents),0) FROM proxy_usage WHERE timestamp >= ?1;", #[s])
+      (s!"SELECT COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cost_cents),0) FROM proxy_usage WHERE timestamp >= ?1{scopeSql};", #[s])
     | none =>
-      ("SELECT COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cost_cents),0) FROM proxy_usage;", #[])
+      (s!"SELECT COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cost_cents),0) FROM proxy_usage WHERE 1=1{scopeSql};", #[])
   match ← execParamQuery store.missionsDb sql args with
   | .ok rs =>
     if rs.size > 1 then
@@ -1760,11 +1774,12 @@ private def queryTotalsSince (store : CoreStore) (sinceIso? : Option String) : I
 
 private def queryGroupedUsageBuckets (store : CoreStore) (colExpr : String) (sinceIso? : Option String) (limit : Nat)
     (labelExpr? : Option String := none) (fromClause : String := "proxy_usage")
-    (nullKeyVal : Option String := some "unknown") (nullLabelVal : Option String := none) : IO (Array JVal) := do
+    (nullKeyVal : Option String := some "unknown") (nullLabelVal : Option String := none)
+    (scopeSql : String := "") : IO (Array JVal) := do
   let (whereSql, args) :=
     match sinceIso? with
-    | some s => ("WHERE proxy_usage.timestamp >= ?1", #[s, toString limit])
-    | none => ("", #[toString limit])
+    | some s => (s!"WHERE proxy_usage.timestamp >= ?1{scopeSql}", #[s, toString limit])
+    | none => (if scopeSql.isEmpty then "" else s!"WHERE 1=1{scopeSql}", #[toString limit])
   let limParam := if sinceIso?.isSome then "?2" else "?1"
   let lblCol := labelExpr?.getD colExpr
   let sql :=
@@ -1853,11 +1868,12 @@ private def rollupByRootMission (store : CoreStore) (byMission : Array JVal) (li
       | none, _ => false
   return sorted.toList.take (Nat.min limit sorted.size) |>.toArray |>.map (fun (_, _, jv) => jv)
 
-private def queryModelUsageBuckets (store : CoreStore) (sinceIso? : Option String) (limit : Nat) : IO (Array JVal) := do
+private def queryModelUsageBuckets (store : CoreStore) (sinceIso? : Option String) (limit : Nat)
+    (scopeSql : String := "") : IO (Array JVal) := do
   let (whereSql, args) :=
     match sinceIso? with
-    | some s => ("WHERE timestamp >= ?1", #[s, toString limit])
-    | none => ("", #[toString limit])
+    | some s => (s!"WHERE timestamp >= ?1{scopeSql}", #[s, toString limit])
+    | none => (if scopeSql.isEmpty then "" else s!"WHERE 1=1{scopeSql}", #[toString limit])
   let limParam := if sinceIso?.isSome then "?2" else "?1"
   let sql :=
     "SELECT COALESCE(NULLIF(model,''),'unknown') AS m, COALESCE(MAX(NULLIF(provider,'')),'unknown') AS p, " ++
@@ -1883,7 +1899,8 @@ private def queryModelUsageBuckets (store : CoreStore) (sinceIso? : Option Strin
       ] ++ totPairs))
   return out
 
-def buildAiUsageSummaryJson (store : CoreStore) (qMap : Array (String × String)) (effAdmin : Bool := true) : IO JVal := do
+def buildAiUsageSummaryJson (store : CoreStore) (qMap : Array (String × String))
+    (callerUserId : String := "") (effAdmin : Bool := true) : IO JVal := do
   let nowSec ← nowEpoch
   let nowIso := formatEpochIso8601Utc nowSec
   let win := ((qParam? qMap "window").getD "24h").trimAscii.toString
@@ -1891,58 +1908,29 @@ def buildAiUsageSummaryJson (store : CoreStore) (qMap : Array (String × String)
   let topLimit := Nat.min 50 (Nat.max 1 (((qParam? qMap "top_limit").bind String.toNat?).getD 10))
   let winSecs? := parseWindowSeconds? win
   let winStartIso? := winSecs?.map (fun s => formatEpochIso8601Utc (if nowSec > s then nowSec - s else 0))
+  let scopeSql := callerUsageScope callerUserId effAdmin
   let sinceJv : JVal := match winStartIso? with | some s => .str s | none => .null
-  if !effAdmin then
-    let zeroTotals := mkTotalsJv 0 0 0 0 0 0 0
-    return .obj #[
-      ("window", .str win),
-      ("window_start", sinceJv),
-      ("since", sinceJv),
-      ("generated_at", .str nowIso),
-      ("totals", zeroTotals),
-      ("today", zeroTotals),
-      ("this_week", zeroTotals),
-      ("by_source", .arr #[]),
-      ("by_route", .arr #[]),
-      ("by_backend", .arr #[]),
-      ("by_provider", .arr #[]),
-      ("by_account", .arr #[]),
-      ("by_model", .arr #[]),
-      ("by_api_key", .arr #[]),
-      ("by_caller_kind", .arr #[]),
-      ("by_purpose", .arr #[]),
-      ("by_mission", .arr #[]),
-      ("by_root_mission", .arr #[]),
-      ("by_day", .arr #[]),
-      ("by_hour", .arr #[]),
-      ("recent", .arr #[]),
-      ("filters_available", .obj #[
-        ("backends", .arr #[.str "claudecode", .str "codex", .str "opencode", .str "antigravity"]),
-        ("providers", .arr #[]),
-        ("models", .arr #[]),
-        ("caller_kinds", .arr #[]),
-        ("api_keys", .arr #[])
-      ])
-    ]
   let dayStartSec := (nowSec / 86400) * 86400
   let todayIso := formatEpochIso8601Utc dayStartSec
   let weekIso := formatEpochIso8601Utc (if nowSec > 604800 then nowSec - 604800 else 0)
 
-  let totals ← queryTotalsSince store winStartIso?
-  let todayTotals ← queryTotalsSince store (some todayIso)
-  let weekTotals ← queryTotalsSince store (some weekIso)
-  let byProvider ← queryGroupedUsageBuckets store "COALESCE(NULLIF(provider,''),'unknown')" winStartIso? topLimit
-  let byModel ← queryModelUsageBuckets store winStartIso? topLimit
-  let byAccount ← queryGroupedUsageBuckets store "COALESCE(NULLIF(account_id,''),'unattributed')" winStartIso? topLimit
-  let byCaller ← queryGroupedUsageBuckets store "COALESCE(NULLIF(caller_kind,''),'mission')" winStartIso? topLimit
-  let byPurpose ← queryGroupedUsageBuckets store "COALESCE(NULLIF(purpose,''),'turn')" winStartIso? topLimit
+  let totals ← queryTotalsSince store winStartIso? scopeSql
+  let todayTotals ← queryTotalsSince store (some todayIso) scopeSql
+  let weekTotals ← queryTotalsSince store (some weekIso) scopeSql
+   let byProvider ← queryGroupedUsageBuckets store "COALESCE(NULLIF(provider,''),'unknown')" winStartIso? topLimit (scopeSql := scopeSql)
+  let byModel ← queryModelUsageBuckets store winStartIso? topLimit scopeSql
+   let byAccount ← queryGroupedUsageBuckets store "COALESCE(NULLIF(account_id,''),'unattributed')" winStartIso? topLimit (scopeSql := scopeSql)
+   let byCaller ← queryGroupedUsageBuckets store "COALESCE(NULLIF(caller_kind,''),'mission')" winStartIso? topLimit (scopeSql := scopeSql)
+   let byPurpose ← queryGroupedUsageBuckets store "COALESCE(NULLIF(purpose,''),'turn')" winStartIso? topLimit (scopeSql := scopeSql)
   let byMissionAll ← queryGroupedUsageBuckets store "COALESCE(NULLIF(mission_id,''),'')" winStartIso? 1000
-    (nullKeyVal := none) (nullLabelVal := none)
+    (nullKeyVal := none) (nullLabelVal := none) (scopeSql := scopeSql)
   let byMission := byMissionAll.toList.take topLimit |>.toArray
   let byRootMission ← rollupByRootMission store byMissionAll topLimit
 
-  let (wSql, dArgs) := match winStartIso? with | some s => ("WHERE timestamp >= ?1", #[s]) | none => ("", #[weekIso])
-  let effWhere := if winStartIso?.isSome then wSql else "WHERE timestamp >= ?1"
+  let (wSql, dArgs) := match winStartIso? with
+    | some s => (s!"WHERE timestamp >= ?1{scopeSql}", #[s])
+    | none => (if scopeSql.isEmpty then "" else s!"WHERE 1=1{scopeSql}", #[])
+  let effWhere := if winStartIso?.isSome then wSql else if scopeSql.isEmpty then "" else s!"WHERE 1=1{scopeSql}"
   let dayLimit : Nat :=
     match winSecs? with
     | some s => Nat.min 366 (Nat.max 1 ((s.toNat + 86399) / 86400 + 1))
@@ -2017,8 +2005,8 @@ def buildAiUsageSummaryJson (store : CoreStore) (qMap : Array (String × String)
           ("by_caller_kind", .obj ckPairs)
         ] ++ hourPairs))
     if let .ok rrs ← execParamQuery store.missionsDb
-        "SELECT timestamp, COALESCE(mission_id,''), COALESCE(provider,''), COALESCE(account_id,''), model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, reasoning_tokens, cost_cents, COALESCE(caller_kind,''), COALESCE(purpose,'') FROM proxy_usage ORDER BY id DESC LIMIT 25;"
-        #[] then
+        s!"SELECT timestamp, COALESCE(mission_id,''), COALESCE(provider,''), COALESCE(account_id,''), model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, reasoning_tokens, cost_cents, COALESCE(caller_kind,''), COALESCE(purpose,'') FROM proxy_usage {effWhere} ORDER BY id DESC LIMIT 25;"
+        dArgs then
       for i in [1:rrs.size] do
         let r := rrs[i]!
         let n (idx : Nat) := ((r[idx]?).bind String.toNat?).getD 0
@@ -2127,13 +2115,29 @@ def reconcileCliLoginCompletion
   if sess.status == "completed" || sess.status == "failed" then return sess
   let started := sess.completionStartedSec?.getD now
   let files ← scanCliProxyAuthFiles
-  let visible := files.any fun f =>
+  let providers ← loadHydratedProviders store workingDir
+  let target? := sess.targetProvId?.bind (fun id => providers.find? (fun hp => hp.id == id))
+  let targetTypeUnique (hp : HydratedProvider) : Bool :=
+    (files.filter (fun f => !f.disabled && !f.accessToken.isEmpty && providerTypeMatchesAuthType hp.providerType f.authType)).size == 1
+  let candidate (f : CliAuthFileInfo) : Bool :=
     f.authType == sess.authFileType && !f.disabled && !f.accessToken.isEmpty &&
-    !(sess.beforeFiles.contains (f.fileName, f.fingerprint))
+    !(sess.beforeFiles.contains (f.fileName, f.fingerprint)) &&
+    match target? with
+    | none => true
+    | some hp =>
+      let typeOk := providerTypeMatchesAuthType hp.providerType f.authType
+      let idOk := f.prefixId == hp.id || f.accountId == hp.id
+      let emailOk := !hp.accountEmail.isEmpty && !f.email.isEmpty && hp.accountEmail.toLower == f.email.toLower
+      let sidecarOk := targetTypeUnique hp &&
+        (f.prefixId == s!"cliproxyapi:{hp.providerType}" || f.accountId == s!"cliproxyapi:{hp.providerType}" ||
+          f.prefixId.isEmpty && f.accountId.isEmpty)
+      typeOk && (idOk || emailOk || sidecarOk)
+  let visible := files.any candidate
   let mut result := { sess with status := "completing", completionStartedSec? := some started }
   if visible then
-    let providers ← loadHydratedProviders store workingDir
-    let affected := providers.filter (fun hp => providerTypeMatchesAuthType hp.providerType sess.authFileType)
+    let affected := match target? with
+      | some hp => #[hp]
+      | none => providers.filter (fun hp => providerTypeMatchesAuthType hp.providerType sess.authFileType)
     let ids := affected.map (·.id)
     hub.mu.atomically do
       modify fun st => { st with
@@ -2503,7 +2507,7 @@ def dispatchProviderAndAiRoute
 
   -- 3. `GET /api/ai/usage/summary`, `GET /api/ai/proxy/health`, `GET /api/ai/proxy/timing`
   if method == "GET" && segs == ["api", "ai", "usage", "summary"] then
-    let summary ← buildAiUsageSummaryJson store qMap effAdmin
+    let summary ← buildAiUsageSummaryJson store qMap callerUserId effAdmin
     return some (jsonResp 200 summary)
 
   if method == "GET" && segs == ["api", "ai", "proxy", "health"] then
@@ -2513,7 +2517,10 @@ def dispatchProviderAndAiRoute
     let winSecs? := parseWindowSeconds? win
     let winStart? := winSecs?.map (fun s => formatEpochIso8601Utc (if nowSec > s then nowSec - s else 0))
     let sinceJv : JVal := match winStart? with | some s => .str s | none => .null
-    let (wSql, wArgs) := match winStart? with | some s => ("WHERE timestamp >= ?1", #[s]) | none => ("", #[])
+    let scopeSql := ""
+    let (wSql, wArgs) := match winStart? with
+      | some s => (s!"WHERE timestamp >= ?1{scopeSql}", #[s])
+      | none => (if scopeSql.isEmpty then "" else s!"WHERE 1=1{scopeSql}", #[])
     let mut totalReqs : Nat := 0
     let mut okReqs : Nat := 0
     let mut failReqs : Nat := 0
@@ -2707,13 +2714,15 @@ def dispatchProviderAndAiRoute
     ]))
 
   if method == "GET" && segs == ["api", "ai", "proxy", "timing"] then
-    let mins := Nat.min 10080 (Nat.max 1 (((qParam? qMap "minutes").bind String.toNat?).getD 60))
-    let zeroQuant : JVal := .obj #[("p50", JVal.nat 0), ("p95", JVal.nat 0), ("p99", JVal.nat 0), ("max", JVal.nat 0)]
+    if !isLegacyUnscoped && !callerUserId.isEmpty then
+      return some (jsonErr 403 "timing_unavailable_in_multi_user_mode")
+    let mins := Nat.min 1440 (Nat.max 1 (((qParam? qMap "minutes").bind String.toNat?).getD 60))
+    let zeroQuant : JVal := .obj #[("p50", .null), ("p95", .null), ("p99", .null), ("max", .null)]
     return some (jsonResp 200 (.obj #[
       ("window_seconds", JVal.nat (mins * 60)),
-      ("samples", JVal.nat 0),
+      ("samples", .null),
       ("overall", .obj #[
-        ("count", JVal.nat 0), ("errors", JVal.nat 0),
+        ("count", .null), ("errors", .null),
         ("auth_us", zeroQuant), ("resolve_ms", zeroQuant),
         ("connect_ms", zeroQuant), ("ttfb_ms", zeroQuant), ("total_ms", zeroQuant)
       ]),
@@ -2800,8 +2809,8 @@ def dispatchProviderAndAiRoute
           let wins := ((u.payload.field? "optimize").bind (fun o => o.fieldArr? "windows")).getD #[]
           match wins[0]?.bind (fun w => w.field? "pct_remaining") with
           | some v => v
-          | none => .num "100.0"
-        | none => .num "100.0"
+          | none => .null
+        | none => .null
       snaps := snaps.push (.obj #[
         ("account_id", .str hp.id),
         ("provider_id", .str hp.providerType),
@@ -2809,11 +2818,11 @@ def dispatchProviderAndAiRoute
         ("disabled", .bool (disabledByProvider || sidecarDisabled)),
         ("disabled_by_provider", .bool disabledByProvider),
         ("disabled_by_provider_message", if disabledByProvider then .str disabledMessage else .null),
-        ("is_healthy", .bool isHealthy),
+         ("is_healthy", if usageCached.any (fun u => u.providerId == hp.id) then .bool isHealthy else .null),
         ("is_degraded", .bool isDegraded),
         ("ewma_ttft_ms", .null),
         ("ewma_tps", .null),
-        ("remaining_quota_pct", remQuota),
+         ("remaining_quota_pct", remQuota),
         ("consecutive_failures", JVal.nat failCnt),
         ("cooldown_secs_remaining", JVal.uint64 cdRem),
         ("cooldown_remaining_secs", JVal.uint64 cdRem),
@@ -2823,7 +2832,7 @@ def dispatchProviderAndAiRoute
         ("login_status", if loginUnavailable then .str "needs_reauth" else .null),
         ("login_reason_code", JVal.nat ((matchedSidecar?.map (fun (f : SidecarAuthFileEntry) => f.loginReason)).getD 0).toNat),
         ("login_message", if loginUnavailable then .str "Sign in again" else .null),
-        ("sample_count", JVal.nat 0),
+         ("sample_count", if usageCached.any (fun u => u.providerId == hp.id) then JVal.nat 1 else .null),
         ("antigravity_refusal", .null)
       ])
     return some (jsonResp 200 (.arr snaps))

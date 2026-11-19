@@ -60,7 +60,7 @@ import { copyText } from "./clipboard";
 import type { ApprovalConfirmationPrompt } from "./tree/moves";
 const ApprovalTransferDialog = lazy(() => import("./ApprovalTransferDialog"));
 import { rememberLaunch, recalledLaunch, missionDestination, launchRefusal, isAdministrationNode, remoteLaunchPreflight, remoteGoalPreflight, remoteHarnessSupport, remoteLaunchUnconfirmed, missionGoal, type LaunchReceipt, type LaunchRefusal, type RemoteSupport } from "./missionLaunch";
-import { goalDraft, goalPrompt, planObjective, missionTitle, displayTitle, EMPTY_GOAL_ERROR } from "./goal";
+import { goalDraft, goalPrompt, planObjective, missionTitle, displayTitle, EMPTY_GOAL_ERROR, remoteGoalSupport, REMOTE_GOAL_UNSUPPORTED } from "./goal";
 import { chipToAttachment, type AttachChip } from "./attach";
 import { DEFAULT_PROJECT, ensureDefaultProject, projectChoices } from "./defaultProject";
 import { ProjectPicker, ProjectCreation } from "./ProjectPicker";
@@ -2270,6 +2270,7 @@ export default function App() {
                   tall
                   scope="new-agent"
                   uploadTarget={newMachine()}
+                  goalUnavailable={newMachine() !== "local" && newMachine() !== "core" && !remoteGoalSupport(remoteLaunch().capability, effectivePick(newMachine())?.backend) ? REMOTE_GOAL_UNSUPPORTED : undefined}
                   remoteSupport={remoteSupport}
                   harnessIds={newMachine() === "local" ? installedIds() : undefined}
                   projectSlug={liveProjects().some(project => project.slug === effectiveNewProject()) ? effectiveNewProject() : undefined}

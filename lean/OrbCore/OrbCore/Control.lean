@@ -834,7 +834,8 @@ def parseChainTargetsJson
     (providers : Array AIProviderRecord := #[])
     (hydratedProvs : Array HydratedProvider := #[])
     (cliProxyUrl : String := "")
-    (cliProxyKey : String := "") : Array ProviderTarget := Id.run do
+    (cliProxyKey : String := "")
+    (googleMaxConcurrency? : Option UInt32 := some 10) : Array ProviderTarget := Id.run do
   match OrbBin.Json.parse rawJson with
   | .ok (.arr items) =>
     let mut out : Array ProviderTarget := #[]
@@ -873,6 +874,9 @@ def parseChainTargetsJson
       let inlineMdlRpm? := (parseOptionalBoundedU32 it "model_rpm_limit" 1 100000).toOption.join
       let inlineMdlTpm? := (parseOptionalBoundedU64 it "model_tpm_limit" 1 1000000000).toOption.join
       let inlineMdlConc? := (parseOptionalBoundedU32 it "model_max_concurrency" 1 1024).toOption.join
+      let inlineContextLimit :=
+        (parseOptionalBoundedU32 it "context_limit" 1 1000000000).toOption.join
+          |>.orElse (fun _ => matchedModel?.bind (·.contextLimit?)) |>.getD 128000
 
       -- When `providers`/`hydratedProvs` are populated (live store hydration) and every matching account is disabled
       -- with no inline credentials, skip this unconfigured/disabled entry instead of emitting an unauthenticated dead target!
@@ -903,10 +907,12 @@ def parseChainTargetsJson
             apiKey                 := cliProxyKey
             modelId                := if isAg then mdl else OrbCore.ProxyModelRouting.cliProxyModelId effProvType mdl
             accountRpmLimit?       := inlineAcctRpm?.orElse (fun _ => matchedHydrated?.bind (·.rpmLimit?))
-            accountMaxConcurrency? := inlineAcctConc?.orElse (fun _ => matchedHydrated?.bind (·.maxConcurrency?))
+            accountMaxConcurrency? := (inlineAcctConc?.orElse (fun _ => matchedHydrated?.bind (·.maxConcurrency?))).orElse
+               (fun _ => if effProvType == "google" || effProvType == "antigravity" then googleMaxConcurrency? else none)
             modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
             modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
             modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
+            contextLimit          := inlineContextLimit
           }
         else
           let acct :=
@@ -932,10 +938,12 @@ def parseChainTargetsJson
               apiKey                 := cliProxyKey
               modelId                := if isAg then mdl else OrbCore.ProxyModelRouting.cliProxyModelId effProvType mdl
               accountRpmLimit?       := inlineAcctRpm?.orElse (fun _ => matchedProv?.bind (·.rpmLimit?))
-              accountMaxConcurrency? := inlineAcctConc?.orElse (fun _ => matchedProv?.bind (·.maxConcurrency?))
+              accountMaxConcurrency? := (inlineAcctConc?.orElse (fun _ => matchedProv?.bind (·.maxConcurrency?))).orElse
+                 (fun _ => if effProvType == "google" || effProvType == "antigravity" then googleMaxConcurrency? else none)
               modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
               modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
               modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
+              contextLimit          := inlineContextLimit
             }
           else
             out := out.push {
@@ -949,6 +957,7 @@ def parseChainTargetsJson
               modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
               modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
               modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
+              contextLimit          := inlineContextLimit
             }
     return out
   | _ => return #[]
@@ -960,6 +969,8 @@ def loadRoutingChainsFromStore (st : CoreStore) (workingDir : String := "") : IO
   let hydratedProvs ← loadHydratedProviders st effWorkDir
   let cliKey := ((← lookupEnvWithFiles? "CLI_PROXY_API_KEY").getD "").trimAscii.toString
   let cliUrl ← resolveCliProxyBaseUrl
+  let envGoogle := (((← IO.getEnv "PROXY_GOOGLE_MAX_CONCURRENCY").getD "10").trimAscii.toString.toNat?).getD 10
+  let googleMax := min 128 (max 1 envGoogle)
   let .ok rows ← execParamQuery st.missionsDb "SELECT id,name,models_json FROM model_routing_chains ORDER BY id ASC;" #[]
     | throw (IO.userError "routing_chain_store_unavailable")
   let mut out : Array RoutingChain := #[]
@@ -968,12 +979,12 @@ def loadRoutingChainsFromStore (st : CoreStore) (workingDir : String := "") : IO
     let cid := (r[0]?).getD ""
     let nm := (r[1]?).getD cid
     let mj := (r[2]?).getD "[]"
-    out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey }
+    out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey (some googleMax.toUInt32) }
   -- Immutable defaults are a derived view, not a second mutable config store.
   -- Persisted ids (even empty/unavailable chains) always win over stock entries.
   for (id, name, entries) in OrbCore.ProxyModelRouting.stockChains do
     if !out.any (fun c => c.id == id) then
-      out := out.push { id := id, name := name, targets := parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson entries) providers hydratedProvs cliUrl cliKey }
+      out := out.push { id := id, name := name, targets := parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson entries) providers hydratedProvs cliUrl cliKey (some googleMax.toUInt32) }
   return out
 
 private def optU32Json (v? : Option UInt32) : String :=
@@ -1039,8 +1050,10 @@ private def directRoutingChain? (st : CoreAppState) (chains : Array RoutingChain
   let hydrated ← loadHydratedProviders st.store st.cfg.workingDir
   let cliKey := ((← lookupEnvWithFiles? "CLI_PROXY_API_KEY").getD "").trimAscii.toString
   let cliUrl ← resolveCliProxyBaseUrl
+  let envGoogle := (((← IO.getEnv "PROXY_GOOGLE_MAX_CONCURRENCY").getD "10").trimAscii.toString.toNat?).getD 10
+  let googleMax := min 128 (max 1 envGoogle)
   let targets := (parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson #[(provider, model)])
-    providers hydrated cliUrl cliKey).filter (fun t => !t.apiKey.isEmpty)
+    providers hydrated cliUrl cliKey (some googleMax.toUInt32)).filter (fun t => !t.apiKey.isEmpty)
   -- Explicit in-memory chain snapshots can be the configured standard accounts
   -- (including hermetic transports). Do not resurrect them over disabled store rows.
   let hasConfiguredOwner := providers.any (fun p => p.providerType == provider || p.id == provider ||
@@ -1559,17 +1572,22 @@ private def stopMissionTurnForUnavailableChain
       let soonest := (soonestCooldown? cooling).getD
         { accountId := "", untilEpoch := nowEpochSec + 60, reason := .rateLimit, label := "" }
       let waitSecs := soonest.remainingSecs nowEpochSec
-      if waitSecs > 60 then
-        let returnIso := formatEpochIso8601Utc soonest.untilEpoch
-        match soonest.reason with
-        | .rateLimit | .usageLimit =>
+      let returnIso := formatEpochIso8601Utc soonest.untilEpoch
+      -- Transient refusals (rate limit, overload, server error) cool down for at
+      -- most `maxTransientCooldownSecs`: the harness retries and the turn goes on.
+      -- Only quota exhaustion and authentication failures stop running turns (R33).
+      match soonest.reason with
+      | .usageLimit =>
+        if waitSecs > 60 then
           (true, "remote_quota",
            s!"No eligible provider target in chain '{chainId}'; soonest target returns at {returnIso} (in {waitSecs}s). Stopping turn.")
-        | .authFailure | .overloaded | .serverError =>
+        else (false, "", "")
+      | .authFailure =>
+        if waitSecs > 60 then
           (true, "provider_unavailable",
            s!"Provider is unavailable in chain '{chainId}'; soonest target returns at {returnIso} (in {waitSecs}s). Stopping turn.")
-      else
-        (false, "", "")
+        else (false, "", "")
+      | .rateLimit | .overloaded | .serverError => (false, "", "")
   if !shouldStop then return ()
   let loginMessage? ← sidecarLoginFailureMessage st.store st.cfg.workingDir (cooling.map (·.accountId))
   let errMsg := loginMessage?.map (fun msg => s!"{msg} {errMsg}") |>.getD errMsg
@@ -1789,6 +1807,14 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     (authEvidence? := some authEvidence)
     (streamLimits? := st.proxyStreamLimits?)
     (bodyTimedOutRef? := some bodyTimedOutRef)
+  let selectedAccountAfterStream : IO String := do
+    match out.streamSelectedAccountRef? with
+    | some ref => ref.get
+    | none => pure out.selectedAccount
+  let attemptsAfterStream : IO Nat := do
+    match out.streamAttemptsRef? with
+    | some ref => ref.get
+    | none => pure out.attemptsUsed
   let prevSelectedStreak : UInt32 :=
     (prevStreaks.find? (fun (aid, _) => aid == out.selectedAccount)).map Prod.snd |>.getD 0
   let loginMessage? ← if out.status ≥ 400 then
@@ -1831,11 +1857,12 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   -- stream they run once the stream has ended.
   let accountBody : ByteArray → IO Unit := fun body => do
     if out.status ≥ 200 && out.status < 300 then
+      let selectedAccount ← selectedAccountAfterStream
       if let some ownerUid := proxyOwnerUserId? then
         let estCents := estimateProxyUsageCostCents out.headers body
         if estCents > 0 then
           discard <| addUserSpendCents st.store ownerUid utcDay estCents 0 s!"{nowEpochSec}"
-      let usedTarget? := dispatchChain.targets.find? (fun t => t.accountId == out.selectedAccount)
+      let usedTarget? := dispatchChain.targets.find? (fun t => t.accountId == selectedAccount)
       let usedMissionId := boundMid?.getD ""
       let callerKind ←
         if usedMissionId.isEmpty then pure "api"
@@ -1844,7 +1871,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
           pure (if parent.isEmpty then "mission" else "subagent")
       recordProxyUsage st.store nowEpochSec
         ((usedTarget?.map (·.modelId)).getD requestedModel) ((usedTarget?.map (·.provider)).getD "")
-        out.selectedAccount (execKey?.getD "") usedMissionId callerKind (extractProxyUsage body)
+        selectedAccount (execKey?.getD "") usedMissionId callerKind (extractProxyUsage body)
         (requestedModel := rawRequestedModel)
     if let (some program, some mid, some sel) := (expected?, boundMid?, selection?) then
       let text := String.fromUTF8? body |>.getD ""
@@ -1897,19 +1924,70 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
                  let copy ← streamCopyRef.get
                  let ok ← streamOkRef.get
                  let timedOut ← bodyTimedOutRef.get
+                 let finalAccount ← selectedAccountAfterStream
+                 let finalAttempts ← attemptsAfterStream
+                 let finalTarget? := dispatchChain.targets.find? (fun t => t.accountId == finalAccount)
+                 if let some oid := outcomeId? then
+                   if finalAccount != out.selectedAccount || finalAttempts != out.attemptsUsed then
+                     discard <| execParamQuery st.store.missionsDb
+                       ("UPDATE proxy_outcomes SET provider=?2,account_id=?3,model=?4,retries=?5 WHERE id=?1;")
+                       #[oid, (finalTarget?.map (·.provider)).getD "", finalAccount,
+                         (finalTarget?.map (·.modelId)).getD rawRequestedModel,
+                         toString (finalAttempts - 1)]
                  let streamStatus := classifyProxyStreamOutcome out.contentType wantsStreamReq copy ok timedOut
                  if streamStatus != "ok" then
                    if let some oid := outcomeId? then
                      discard <| execParamQuery st.store.missionsDb
                        "UPDATE proxy_outcomes SET status=?2 WHERE id=?1;" #[oid, streamStatus]
-                   if !out.selectedAccount.isEmpty then
+                   if !finalAccount.isEmpty then
                      if let some htr := st.healthTracker? then
-                       discard <| recordStreamCutHealth htr out.selectedAccount prevSelectedStreak nowEpochSec
+                       let finalPrevStreak :=
+                         (prevStreaks.find? (fun (aid, _) => aid == finalAccount)).map Prod.snd |>.getD prevSelectedStreak
+                       discard <| recordStreamCutHealth htr finalAccount finalPrevStreak nowEpochSec
                        let active ← snapshotActiveHealthCooldowns htr nowEpochSec
                        st.proxyCooldownsRef.set active }
   | none =>
     accountBody out.body
     return { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := diagHdrs, body := out.body }
+
+/-- Observe local harness processes independently of the HTTP accept loop. A
+    non-stopping run whose pid disappeared without a reader callback would
+    otherwise leave its mission `active` forever. The conditional database
+    update and receipt make the observation idempotent with the reader. -/
+def tickLocalHarnessSupervisor (st : CoreAppState) (nowIso : String) : IO Nat := do
+  let some mgr := st.warmMgr?
+    | return 0
+  let runs ← mgr.runsRef.get
+  let pids ← mgr.activePidsRef.get
+  let mut observed : Nat := 0
+  for (mid, runRef) in runs do
+    let run ← runRef.get
+    if run.done || run.stopping then continue
+    let pid? := (pids.find? (fun p => p.1 == mid)).map Prod.snd
+    let some pid := pid?
+      | continue
+    let alive ← (System.FilePath.mk s!"/proc/{pid}").pathExists
+    if alive then continue
+    let claim ← execParamQuery st.store.missionsDb
+        ("UPDATE missions SET status='interrupted', terminal_reason='local_harness_exited', " ++
+         "state_revision=state_revision+1, updated_at=?2 " ++
+         "WHERE id=?1 AND status='active' AND run_generation=CAST(?3 AS INTEGER) RETURNING id;")
+        #[mid, nowIso, s!"{run.generation}"]
+    let .ok claimRows := claim | continue
+    if claimRows.size <= 1 then continue
+    runRef.modify fun r => { r with done := true, error? := some "local_harness_exited" }
+    discard <| execParamQuery st.store.missionsDb
+      ("UPDATE mission_runs SET execution_state='terminal', terminal_reason='local_harness_exited', updated_at=?2 " ++
+       "WHERE mission_id=?1 AND generation=CAST(?3 AS INTEGER) AND execution_state NOT IN ('terminal','completed','failed','aborted');")
+      #[mid, nowIso, s!"{run.generation}"]
+    let payload := renderCompact (.obj #[
+      ("status", .str "interrupted"),
+      ("reason", .str "local_harness_exited"),
+      ("reattached", .bool false)
+    ])
+    discard <| appendMissionEvent st.store mid "recovery_receipt" payload nowIso
+    observed := observed + 1
+  return observed
 
 /-- Map structured `HarnessCallbacks` from `OrbBin.ClaudeControl` onto persisted `mission_events` rows
     and record pending `control_request` call IDs so `POST /api/control/tool_result` can route answers cleanly. -/
@@ -2852,6 +2930,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         (matchRoutePattern? "/api/workspaces/:id/shell" rawTarget).isSome) &&
        !wsCaller.isLegacyUnscoped && wsCaller.role != "admin" then
       return .ok (mkJson 403 "{\"error\":\"admin_required\"}")
+    -- Only the control sync socket is a real bidirectional live transport. The
+    -- other legacy upgrade paths have no session loop; answering 501 keeps the
+    -- client from believing it holds a stream that Core never pumps.
+    if cleanPath != "/api/control/sync" then
+      return .ok (mkJson 501 "{\"error\":\"websocket_transport_not_implemented\",\"supported\":\"/api/control/sync\"}")
     let negProto? := negotiateWsSubprotocol? req.headers
     match buildWebSocketUpgradeResponse? req negProto? with
     | some raw101 => return .error raw101
@@ -3195,6 +3278,35 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let some activeClaims := effClaims?
       | return .ok (mkJson 401 "{\"error\":\"unauthorized_mcp\"}")
 
+    if req.method == "GET" && cleanPath.startsWith "/api/mcp/requests/secret/" && cleanPath.endsWith "/wait" then
+      let routePrefix := "/api/mcp/requests/secret/"
+      let rawId := (cleanPath.drop routePrefix.length).dropEnd "/wait".length |>.toString
+      let some reqId := parseUuidCanonical? rawId
+        | return .ok (mkJson 400 "{\"error\":\"invalid_secret_request_id\"}")
+      let timeoutRaw := (parseQueryParams req.path).find? (fun (k, _) => k == "timeout_secs") |>.map Prod.snd
+      let timeoutSecs := (timeoutRaw.bind String.toNat?).getD 20 |>.min 25
+      let projectSlug := activeClaims.project
+      let callerSubject := if activeClaims.isExternal then
+        requesterSubject "" ("session:" ++ activeClaims.sessionId)
+      else ""
+      let mut onManagedNode := false
+      if !activeClaims.missionId.isEmpty then
+        if let .ok mRs ← execParamQuery st.store.missionsDb
+            "SELECT placement_kind FROM missions WHERE id=?1;" #[activeClaims.missionId] then
+          if mRs.size > 1 then
+            let pk := (mRs[1]?.bind (·[0]?)).getD ""
+            if pk == "managed_vm" || pk.startsWith "managed-" then onManagedNode := true
+        if !onManagedNode then
+          if let some mst := st.managedStore? then
+            if let .ok vmRs ← execParamQuery mst.db
+                ("SELECT 1 FROM managed_machines WHERE owner_mission=?1 AND status<>'destroyed' " ++
+                 "UNION ALL SELECT 1 FROM managed_vm_claims WHERE owner_mission=?1 AND phase_code=1 LIMIT 1;")
+                #[activeClaims.missionId] then
+              if vmRs.size > 1 then onManagedNode := true
+      let waited ← mcpSecretWait st.cfg.workingDir st.store.rootDir activeClaims.missionId
+        projectSlug reqId callerSubject onManagedNode timeoutSecs nowEpochSec
+      return .ok (mkJson 200 (renderCompact waited))
+
     if req.method == "GET" && cleanPath == "/api/mcp/capabilities" then
       return .ok (mkJson 200 (buildMcpCapabilitiesJson activeClaims))
 
@@ -3308,6 +3420,16 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             let (code, body) ← launchBtwSideAgent st { asker with userId := if asker.userId.isEmpty then owner else asker.userId }
               srcMid (.obj #[("side_question", .str question)]) idem nowEpochSec
             pure (if code < 300 then .ok body else .error body))
+          (some fun mid callId answers => do
+            match st.warmMgr? with
+            | none => pure (.error "warm harness manager unavailable")
+            | some mgr =>
+              let ok ← OrbBin.ClaudeControl.respondToControlRequest mgr mid callId
+                (.obj #[("action", .str "accept"), ("answers", answers)])
+              if ok then
+                if let some ref := st.pendingControlCallsRef? then
+                  ref.modify fun xs => xs.filter (fun p => p.1 != callId)
+              pure (.ok ok))
           st.cloudHub?
         return .ok (mkJson 200 outJson)
 
@@ -3817,11 +3939,18 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
         return .ok (mkJson cCode cBody)
       let nowIso := formatEpochIso8601Utc nowEpochSec
-      discard <| cancelActiveRemoteJobForMission st.store st.managedStore? st.relayHub? mid "Mission stopped on Core"
+      let remoteGoal := ((← getMission? st.store mid).map (·.goalMode)).getD false
+      if !remoteGoal then
+        discard <| cancelActiveRemoteJobForMission st.store st.managedStore? st.relayHub? mid "Mission stopped on Core"
       -- A stop request ends the session for its tethers and session-scoped grants even when no run is active.
       revokeSessionScopedMacTethersForMission st.store st.macTether? mid nowEpochSec
-      match ← hostedStop st.store mid nowIso with
+      match ← hostedStop st.store mid nowIso (if remoteGoal then "remote_goal_stopped" else "hosted_stop") with
       | .ok gen =>
+        if remoteGoal then
+          discard <| cancelActiveRemoteJobForMission st.store st.managedStore? st.relayHub? mid "Goal stopped on Core"
+          let payload := renderCompact (.obj #[("status", .str "stopped"), ("run_generation", JVal.uint64 gen)])
+          discard <| appendMissionEvent st.store mid "goal_status" payload nowIso
+          publishControlEvent st.broadcastHub? "goal_status" payload (some mid)
         discard <| OrbCore.SecretAndApproval.reapPrivilegeLeases st.store nowEpochSec
         return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"run_generation\":{gen}}")
       | .error "mission_not_found" => return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
@@ -4588,6 +4717,18 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let modelOverride := (JsonTape.lookupString? tape "model_override").getD ""
       let prompt? := JsonTape.lookupString? tape "prompt"
       let goalObjective? := prompt?.bind Cyber.parseGoalPrefix?
+      let remoteGoal := !clientPlaced && remoteNodeId?.isSome && goalObjective?.isSome
+      if remoteGoal then
+        let capability := if RemoteGoal.harnesses.contains backend && st.remoteSup?.isSome
+          then RemoteGoal.Capability.coreOpenCode else .unavailable
+        match RemoteGoal.admit capability false (goalObjective?.getD "") with
+        | .error .emptyObjective =>
+          abortIdem
+          return .ok (mkJson 400 "{\"error\":\"Goal mode requires a non-empty objective.\"}")
+        | .error _ =>
+          abortIdem
+          return .ok (mkJson 400 "{\"error\":\"remote_goal_unsupported: This remote harness cannot continue a Goal. Choose OpenCode or send a standard turn.\"}")
+        | .ok _ => pure ()
       let mut selectedSkills : Array SelectedSkill := #[]
       if !clientPlaced then
         if let some prompt := prompt? then
@@ -4656,10 +4797,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         project := projSlug, folder := normCreateFolder, createdAt := nowIso, updatedAt := nowIso, totalCostCents := 0,
         authorityMode := authMode, placementKind := placeKind, reservedDiskGib := diskGib,
         nodeBootEpoch := st.store.bootEpoch, tagsJson := initTagsJson, track := effTrack, repo := repo,
-         ownerUserId := caller.userId,
-         goalMode := goalObjective?.isSome,
-         goalObjective := goalObjective?.getD ""
-       }
+        ownerUserId := caller.userId,
+        goalMode := remoteGoal,
+        goalObjective := if remoteGoal then goalObjective?.getD "" else ""
+      }
       match ← insertNewMission st.store mRec with
       | .error "mission_already_exists" =>
         abortIdem
@@ -4704,6 +4845,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
                 effRemoteNodeId? := some resolvedNode
                 effTagsJson ← updateMissionBoundManagedNode st.store mid resolvedNode nowIso
               let deliv := if selectedSkills.isEmpty then rawPrompt else withDirective rawPrompt selectedSkills
+              let launchPrompt := if remoteGoal then
+                let goalPrompt := remoteGoalPrompt (goalObjective?.getD "")
+                if selectedSkills.isEmpty then goalPrompt else withDirective goalPrompt selectedSkills
+              else deliv
               discard <| appendMissionEvent st.store mid "user_message"
                 (renderCompact (.obj #[("type", .str "user_message"), ("content", .str deliv), ("mission_id", .str mid)])) nowIso
               if let some tSink := st.telemetrySink? then
@@ -4723,7 +4868,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
                 placementKind    := placeKind
                 reservedDiskGib  := diskGib
                 tagsJson         := effTagsJson
-                prompt           := deliv
+                prompt           := launchPrompt
                 sideQuestion     := isBtwReq
               }
               match ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec with
@@ -4900,12 +5045,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       nextProject     := projSlug
       nextFolder      := m.targetFolder
     }
-    let (allMoved, changedMoved) ← match ← batchSetMissionPlacementChecked st.store updates nowIso with
+    let (allMoved, changedMoved) ← match ← MissionSettings.commitPlacementWithRecovery st.store updates caller.userId nowIso
+      (pure (.ok ()))
+      { ids := crossProjIds, target := rawProjSlug, policy, epoch := nowEpochSec } with
       | .ok pair => pure pair
       | .error (code, msg) => return .ok (mkJson code s!"\{\"error\":{jsonEscape msg}}")
-    if !crossProjIds.isEmpty && (policy == "revoke" || policy == "keep") then
-      applyCrossProjectSecretPolicy st.store.rootDir crossProjIds rawProjSlug policy nowIso nowEpochSec
-    rebindMovedMissionMcpSessions st.store changedMoved
     let unscopeItem (it : MissionPlacementItem) : MissionPlacementItem :=
       if caller.isLegacyUnscoped then it
       else
@@ -5984,6 +6128,27 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
         return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
 
+  -- Collection cancel: clients should not have to know every queued id to
+  -- clear a mission's pending prefix. Item DELETE remains the single-item form.
+  if req.method == "DELETE" && cleanPath == "/api/control/queue" then
+    let missionId := ((parseQueryParams rawTarget).find? (fun p => p.1 == "mission_id")).map Prod.snd |>.getD ""
+    if missionId.isEmpty then
+      return .ok (mkJson 400 "{\"error\":\"missing_mission_id\"}")
+    if let some (cCode, cBody) := (← authorizeMissionOp st caller missionId false) then
+      return .ok (mkJson cCode cBody)
+    let qRows ← execParamQuery st.store.missionsDb
+      "SELECT message_id FROM remote_message_queue WHERE user_id='core' AND mission_id=?1 AND state='waiting' AND COALESCE(phase,0)=0 ORDER BY rowid ASC;"
+      #[missionId]
+    let .ok rs := qRows | return .ok (mkJson 500 "{\"error\":\"queue_read_failed\"}")
+    let mut cancelled : Nat := 0
+    for i in [1:rs.size] do
+      let messageId := (cell rs[i]! 0).trimAscii.toString
+      if messageId.isEmpty then continue
+      match ← stepQueueItem st.store "core" messageId 5 "0" s!"{st.store.bootEpoch}" "0" s!"{nowEpochSec}" 0 0 "" with
+      | .ok (.ok _) => cancelled := cancelled + 1
+      | _ => pure ()
+    return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape missionId},\"cancelled\":{cancelled}}")
+
   if let some params := matchRoutePattern? "/api/control/queue/:id/step" rawTarget then
     if req.method == "POST" then
       let messageId := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
@@ -6731,16 +6896,38 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | .ok body => return .ok (mkJson 200 body)
         | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       else if kind == "stream" && req.method == "GET" && arg.isEmpty then
-        match ← contextStreamEvent st.store proj with
-        | .ok ev =>
+        match ← contextManifestJson st.store proj with
+        | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+        | .ok firstBody =>
           return .ok {
             status := 200,
             contentType := "text/event-stream",
             corsOrigin? := reqOrigin?,
             extraHdrs := #[("Cache-Control", "no-cache"), ("X-Accel-Buffering", "no")],
-            body := ev.toUTF8
+            body := ByteArray.empty,
+            bodyStream? := some fun emit => do
+              if !(← emit s!"data: {firstBody}\n\n".toUTF8) then return false
+              let mut lastBody := firstBody
+              let mut lastEmitMs := ← IO.monoMsNow
+              let mut running := true
+              while running do
+                IO.sleep 1000
+                match ← contextManifestJson st.store proj with
+                | .ok body =>
+                  if body != lastBody then
+                    lastBody := body
+                    lastEmitMs ← IO.monoMsNow
+                    if !(← emit s!"data: {body}\n\n".toUTF8) then running := false
+                | .error e =>
+                  discard <| emit s!"event: error\ndata: \{\"error\":{jsonEscape e}}\n\n".toUTF8
+                  running := false
+                if running then
+                  let nowMs ← IO.monoMsNow
+                  if nowMs - lastEmitMs ≥ 15000 then
+                    lastEmitMs := nowMs
+                    if !(← emit ": keep-alive\n\n".toUTF8) then running := false
+              return true
           }
-        | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       else if kind == "blobs" && req.method == "POST" && arg.isEmpty then
         let qParams := parseQueryParams rawTarget
         let confirmedLarge :=
@@ -7647,14 +7834,19 @@ def handleClientConn (st : CoreAppState) (cfd : Fd) (allowKeepAlive : Bool := fa
           -- client that stopped reading must not hold a keep-alive slot.
           let wroteHead ← writeCoreHttpResponse responseWrite httpResp false
           let alive ← IO.mkRef wroteHead
-          let complete ← pump fun piece => do
-            if !(← alive.get) then return false
-            if piece.isEmpty then return true
-            let ok ← responseWrite (encodeHttpChunk piece)
-            alive.set ok
-            return ok
-          if complete && (← alive.get) then
-            discard <| responseWrite (encodeHttpChunk ByteArray.empty)
+          -- Always enter the pump once so it can close the upstream reader;
+          -- a refused head must be propagated as a refused empty callback.
+          if !wroteHead then
+            discard <| pump (fun _ => pure false)
+          else
+            let complete ← pump fun piece => do
+              if !(← alive.get) then return false
+              if piece.isEmpty then return true
+              let ok ← responseWrite (encodeHttpChunk piece)
+              alive.set ok
+              return ok
+            if complete && (← alive.get) then
+              discard <| responseWrite (encodeHttpChunk ByteArray.empty)
           keepGoing := false
       | .error rawUpgrade101 =>
         let wrote := (← writeAll cfd rawUpgrade101 false).isOk
@@ -7684,8 +7876,8 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       | .error storeErr =>
         IO.eprintln s!"[sandboxed-sh] FATAL: failed to open SQLite CoreStore at {dataRoot}: {storeErr}"
         return 1
-    let managedStore ← match ← openManagedComputeStore s!"{dataRoot}/managed_compute.db" with
-      | .ok ms => pure { ms with missionsDb? := some store.missionsDb }
+    let managedStore ← match ← openManagedComputeStore s!"{dataRoot}/managed_compute.db" (some store.missionsDb) with
+      | .ok ms => pure ms
       | .error msErr =>
         closeCoreStore store
         IO.eprintln s!"[sandboxed-sh] FATAL: failed to open managed_compute.db at {dataRoot}: {msErr}"
@@ -7831,11 +8023,22 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
         catch e =>
           IO.eprintln s!"[sandboxed-sh] remote job re-attach failed: {e}"
         while true do
-          try
-            discard <| tickContinuationScheduler store (some managedStore) (some relayHub) (some broadcastHub) remoteSup (some warmMgr) cfg.workingDir (some localWakeupLaunch)
-          catch e =>
-            IO.eprintln s!"[sandboxed-sh] wake-up scheduler pass failed: {e}"
+           try
+             discard <| tickContinuationScheduler store (some managedStore) (some relayHub) (some broadcastHub) remoteSup (some warmMgr) cfg.workingDir (some localWakeupLaunch)
+             let nowSec ← coreEpochSec
+             discard <| tickLocalHarnessSupervisor appState (formatEpochIso8601Utc nowSec)
+             discard <| reapOrphanedMissionRuns store.missionsDb (formatEpochIso8601Utc nowSec)
+             discard <| tickRemoteFollowupPump store (some managedStore) (some relayHub) (some broadcastHub) remoteSup cfg.workingDir nowSec
+           catch e =>
+             IO.eprintln s!"[sandboxed-sh] wake-up scheduler pass failed: {e}"
           IO.sleep 2000
+      discard <| IO.asTask (prio := .dedicated) do
+        while true do
+          try
+            monitorStaticNodeApis store
+            discard <| reconcileUncertainRemoteSubmissions store (some managedStore) (some relayHub) (some broadcastHub) remoteSup cfg.workingDir false
+          catch e => IO.eprintln s!"[sandboxed-sh] node API health check failed: {e}"
+          IO.sleep 30000
       discard <| IO.asTask (prio := .dedicated) do
         let mut lastInventory : UInt64 := 0
         let mut checkedDestroyed : Array String := #[]
@@ -7918,6 +8121,11 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
             if curSec ≥ lastWatchdogSec + wdIntervalSec then
               lastWatchdogSec := curSec
               discard <| sdNotifyRaw notifySock "WATCHDOG=1\n"
+          if maxRequests?.isNone then
+            let curSec ← coreEpochSec
+            if curSec ≥ lastTelFlushSec + 30 then
+              lastTelFlushSec := curSec
+              discard <| IO.asTask (prio := .dedicated) (do discard <| flushTelemetryOnce telemetrySink curSec)
         served := served + 1
     if !notifySock.isEmpty then
       discard <| sdNotifyRaw notifySock "STOPPING=1\n"

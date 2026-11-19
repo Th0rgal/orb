@@ -1,14 +1,14 @@
 /-
   A turn that ends with no output is a failure, retried a bounded number of
   times and then `failed`; a mission whose first turn cannot be dispatched is
-  not created `active`. No harness, node or network is used.
+  not created `active`. Remote dispatch uses a loopback node fixture.
 -/
 import OrbCore.Control
 
 namespace OrbCore.TurnOutcomeTests
 open OrbBin.Json OrbBin.Sqlite OrbBin.PosixExt
 open OrbCore.Store OrbCore.Control OrbCore.R7Core OrbCore.Proxy OrbCore.Managed
-open OrbCore.RemoteDispatch OrbCore.MemoryAndCloud
+open OrbCore.RemoteDispatch OrbCore.MemoryAndCloud OrbCore.QueueCont
 
 private def check (ok : Bool) (label : String) : IO Unit := do
   unless ok do throw (IO.userError s!"turn outcome: {label}")
@@ -267,6 +267,7 @@ def run : IO Unit := do
   try
     startupRecovery root
     let .ok store ← openCoreStore s!"{root}/.sandboxed-sh" | throw (IO.userError "turn outcome store open failed")
+    let sup ← newRemoteJobSupervisor "turn-outcome-fixture-secret" false
     try
       let cfg : CoreConfig := {
         workingDir := root
@@ -301,7 +302,6 @@ def run : IO Unit := do
       check ((← statusOf "m-empty") == "awaiting_user" && (← emptyErrors "m-empty") == "1") "the empty turn is reported as an error"
 
       -- The durable scheduler relaunches it; each relaunch that is empty again counts.
-      let sup ← newRemoteJobSupervisor "turn-outcome-fixture-secret" false
       let launches ← IO.mkRef (0 : Nat)
       let prompts ← IO.mkRef (#[] : Array String)
       let launch : MissionRecord → String → Option String → IO Bool := fun mr prompt _ => do
@@ -311,6 +311,71 @@ def run : IO Unit := do
         return true
       let tick := fun (now : UInt64) =>
         discard <| tickContinuationScheduler store none none none sup none root (some launch) (some now)
+      -- A committed Stop between turns revokes the otherwise due Goal intent.
+      newMission "m-goal" "[]"
+      discard <| execParamQuery db
+        "UPDATE missions SET backend='opencode',goal_mode=1,goal_objective='Ship it',placement_job_id='job-goal',terminal_reason='remote_node_job' WHERE id='m-goal';" #[]
+      let settled ← settleRemoteGoal store "m-goal" "job-goal" "Ship it" "One step done" 1 3 true
+      check (match settled with | .ok (some ("awaiting_user", "remote_goal_continuation", 1)) => true | _ => false)
+        "an unfinished Goal arms a durable continuation"
+      let replay ← settleRemoteGoal store "m-goal" "job-goal" "Ship it" "One step done" 1 4 true
+      check (match replay with | .ok none => true | _ => false) "repeat settlement does not arm again"
+      let stopped ← hostedStop store "m-goal" "2026-11-19T00:00:00Z" "remote_goal_stopped"
+      check stopped.isOk "Goal can stop between turns"
+      let late ← settleRemoteGoal store "m-goal" "job-goal" "Ship it" "<!-- GOAL_COMPLETE -->" 1 5 true
+      check (match late with | .ok none => true | _ => false) "late success cannot undo Stop"
+      discard <| tickContinuationScheduler store none none none sup none root (some launch) (some 10)
+      check ((← launches.get) == 0 && (← retries "m-goal") == "remote_goal/4" && (← statusOf "m-goal") == "interrupted")
+        "no automatic continuation dispatches after Stop"
+      newMission "m-goal-dispatch" "[\"remote-node:mockgoal\"]"
+      discard <| execParamQuery db
+        ("UPDATE missions SET backend='opencode',goal_mode=1,goal_objective='Ship it',session_id='ses_goal_fixture'," ++
+         "placement_job_id='first-goal-job',terminal_reason='remote_node_job' WHERE id='m-goal-dispatch';") #[]
+      let .ok (some _) ← settleRemoteGoal store "m-goal-dispatch" "first-goal-job" "Ship it" "Still working" 1 20 true
+        | throw (IO.userError "Goal dispatch fixture did not arm")
+      let .ok (fd, port) ← LeanSys.Posix.tcpListen "127.0.0.1" 0 8
+        | throw (IO.userError "Goal mock node listen failed")
+      let accepted ← IO.asTask do
+        let .ok conn ← LeanSys.Posix.tcpAcceptPoll fd 5000 | return false
+        try
+          let .ok req ← readCoreHttpRequestFromFd conn | return false
+          let body := "{\"accepted\":true}"
+          let response := s!"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\nConnection: close\r\n\r\n{body}"
+          let _ ← LeanSys.Posix.writeAll conn response.toUTF8
+          return req.method == "POST" && req.path == "/jobs" &&
+            ((String.fromUTF8? req.bodySlice.toByteArray).getD "").contains "--session 'ses_goal_fixture'"
+        finally
+          discard <| LeanSys.Posix.closeFd conn
+      setenvVar "SANDBOXED_REMOTE_NODES_ENABLED" "true"
+      setenvVar "SANDBOXED_REMOTE_NODES" s!"mockgoal=http://127.0.0.1:{port}|TURN_OUTCOME_MOCK_TOK"
+      setenvVar "TURN_OUTCOME_MOCK_TOK" "goal-mock-token"
+      setenvVar "SANDBOXED_PUBLIC_URL" "http://127.0.0.1:3000"
+      try
+        let .ok _ ← execParamQuery db
+          "INSERT INTO users(id,username,password_hash,role) VALUES('goal-test-admin','goal-test-admin','synthetic-hash','admin');" #[]
+          | throw (IO.userError "Goal admission fixture user")
+        let jwt := mintSessionTokenV2 cfg.jwtSecret "goal-test-admin" "goal-test-admin" 1 3600
+        let body := "{\"id\":\"unsupported-goal\",\"backend\":\"claudecode\",\"remote_node_id\":\"mockgoal\",\"prompt\":\"/goal Ship it\"}"
+        let request := s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+        let .ok req := LeanSys.Http.parseRequest request.toUTF8 none | throw (IO.userError "Goal admission fixture request")
+        let .ok rejected ← dispatchCoreRequest { app with remoteSup? := some sup } req 21
+          | throw (IO.userError "Goal admission fixture dispatch")
+        check (rejected.status == 400 && ((String.fromUTF8? rejected.body).getD "").contains "remote_goal_unsupported" &&
+          (← statusOf "unsupported-goal").isEmpty) "Core rejects unsupported direct Goal creation before inserting a mission"
+        let fired ← tickContinuationScheduler store none none none sup none root (some launch) (some 22)
+        check ((← IO.ofExcept accepted.get) && fired == 1 && (← launches.get) == 0 &&
+          (← statusOf "m-goal-dispatch") == "active") "Goal scheduler dispatches to the same OpenCode session"
+        let jobId ← cellOf db "SELECT placement_job_id FROM missions WHERE id='m-goal-dispatch';"
+        let gen ← cellOf db "SELECT run_generation FROM missions WHERE id='m-goal-dispatch';"
+        let completed ← settleRemoteGoal store "m-goal-dispatch" jobId "Ship it" "Done\n<!-- GOAL_COMPLETE -->" (gen.toNat?.getD 0).toUInt64 23 true
+        check (match completed with | .ok (some ("completed", "remote_goal_complete", _)) => true | _ => false)
+          "only the current Goal job can settle completion"
+      finally
+        discard <| LeanSys.Posix.closeFd fd
+        unsetenvVar "SANDBOXED_REMOTE_NODES_ENABLED"
+        unsetenvVar "SANDBOXED_REMOTE_NODES"
+        unsetenvVar "TURN_OUTCOME_MOCK_TOK"
+        unsetenvVar "SANDBOXED_PUBLIC_URL"
       tick 4000000000
       check ((← launches.get) == 1 && (← statusOf "m-empty") == "active") "the retry relaunches the turn"
       -- The retry is a NEW user turn for every backend: the conversation the harness
@@ -693,6 +758,13 @@ def run : IO Unit := do
         check (ref == String.ofList (List.replicate 20000 'r')) s!"complete reference {i} arrives"
     finally
       closeCoreStore store
+    -- The resume fixture shuts down its mock node without a terminal job reply.
+    -- The observer must release that job when the store closes.
+    let pollersIdle := sup.mu.atomically do return (← get).isEmpty
+    let deadline := (← IO.monoMsNow) + 5000
+    while !(← pollersIdle) && (← IO.monoMsNow) < deadline do
+      IO.sleep 10
+    check (← pollersIdle) "the mock resume poller exits after its store closes"
   finally
     IO.FS.removeDirAll root
 

@@ -11,6 +11,25 @@ object OrbRemoteGoal {
     }
 
     data class Projection(val phase: String, val objective: String, val iteration: Int, val detail: String? = null)
+
+    const val UNSUPPORTED = "Goal mode is unavailable for this remote harness because it cannot continue the objective safely. Choose OpenCode or send a standard turn."
+
+    fun phase(status: String?, reason: String?): String = when {
+        reason == "remote_goal_complete" -> "complete"
+        reason == "remote_goal_stopped" || status == "cancelled" -> "stopped"
+        status == "active" || status == "pending" || reason == "remote_goal_continuation" || reason == "awaiting_wakeup" -> "active"
+        status == "paused" -> "paused"
+        else -> "blocked"
+    }
+
+    fun label(phase: String, iteration: Int): String = when {
+        phase != "active" -> "Goal $phase"
+        iteration > 0 -> "Goal in progress · iteration $iteration"
+        else -> "Goal in progress"
+    }
+
+    fun supports(fleet: Map<String, Any?>, backend: String): Boolean =
+        ((fleet["remote_launch"] as? Map<*, *>)?.get("goal_harnesses") as? List<*>)?.contains(backend) == true
     fun apply(previous: Projection, value: Map<String, Any?>): Projection {
         val envelope = event(value) ?: return previous
         val data = envelope["data"] as? Map<*, *> ?: return previous

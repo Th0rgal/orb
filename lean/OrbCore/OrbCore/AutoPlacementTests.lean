@@ -75,6 +75,22 @@ private def gatewayTests (root : String) : IO Unit := do
       let err := (reply.field? "error").getD .null
       (err.fieldStr? "code", err.fieldStr? "message")
     let missionCount : IO Nat := do return (← sql "SELECT id FROM missions;").size - 1
+    -- R15: `writer:false` must be persisted as readonly at the MCP launch
+    -- boundary, rather than being inferred later from a tag or prompt.
+    let readonlyReply ← start "readonly-launch" #[
+      ("writer", .bool false)]
+    let some readonlyId := ((readonlyReply.field? "result").getD .null).fieldStr? "mission_id"
+      | throw (IO.userError "R15 start_mission(writer:false) did not create a mission")
+    let readonlyRows ← sql "SELECT authority_mode FROM missions WHERE id=?1;" #[readonlyId]
+    check ((readonlyRows[1]?.bind (·[0]?)).getD "" == "readonly")
+      "R15 writer:false launch is persisted readonly"
+    let readonlyClaims : McpSessionClaims := {
+      sessionId := "readonly-session", missionId := readonlyId, role := "executor", expiresAt := 2000 }
+    let refusedRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none fleet root readonlyClaims
+      "start_mission" (.obj #[("title", .str "forbidden child"), ("idempotency_key", .str "r15-readonly-child")]) now
+    let refused := (OrbBin.Json.parse refusedRaw).toOption.getD .null
+    check ((refused.field? "error" |>.bind (·.fieldStr? "code")) == some "read_only_mission")
+      "R15 readonly mission refuses mutating child launch"
     -- Unconstrained: ashur is idle (its only job finished), so it is the least busy node.
     let free ← tagsOf (← start "free")
     check (free.contains "remote-node:ashur") s!"least busy node is chosen: {free}"
@@ -104,6 +120,28 @@ private def gatewayTests (root : String) : IO Unit := do
     let legacy ← tagsOf (← start "legacy")
     check (legacy.contains "remote-node:ashur" && legacy.contains "fork-workspace:legacy")
       s!"children of a legacy auto parent stay with it: {legacy}"
+    -- R19: play two observations of the same incident through the durable
+    -- ledger, automatic placement and the actual MCP resume boundary.
+    discard <| sql "UPDATE remote_node_jobs SET mission_id='free' WHERE job_id='j1'"
+    discard <| sql "UPDATE remote_node_jobs SET mission_id='worker' WHERE job_id='j2'"
+    for n in #["ashur", "ur"] do -- healthy idle / healthy active
+      observeNodeApi store n "online" "t0" (throw (IO.userError "healthy API must not require ping"))
+    observeNodeApi store "babylon" "offline" "t0" (pure false)
+    check (← nodeApiHangCause? store "babylon").isNone "R19: unreachable host alone is not an API hang"
+    for t in #["t1", "t2"] do observeNodeApi store "babylon" "offline" t (pure true)
+    let (_, nodes) ← loadStaticRemoteNodes
+    let cs ← candidates store nodes
+    check (choose (cs.filter (·.id == "babylon")) #[] == none) "R19: pingable hung node excluded"
+    for n in #["ashur", "ur"] do
+      check (choose (cs.filter (·.id == n)) #[] == some n) "R19: healthy idle and active stay eligible"
+    let flags ← sql "SELECT mission_id FROM mission_events WHERE json_extract(payload,'$.reason')='hung_node'"
+    check (flags.size == 2 && cell flags[1]! 0 == "free") "R19: only affected mission flagged, exactly once"
+    let claims : McpSessionClaims := { sessionId := "r19", missionId := "free", role := "coordinator", expiresAt := 2000 }
+    let resume ← OrbCore.McpGateway.dispatchMcpToolCall store none none none fleet root claims "resume_mission"
+      (.obj #[("mission_id", .str "free"), ("idempotency_key", .str "r19-resume")]) now
+    check (resume.contains "babylon" && resume.contains "API is unresponsive") s!"R19: resume names the cause: {resume}"
+    observeNodeApi store "babylon" "online" "t3" (pure false)
+    check (← nodeApiHangCause? store "babylon").isNone "R19: healthy heartbeat clears the incident"
   finally
     OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODES_ENABLED"
     OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODES"

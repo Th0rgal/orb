@@ -167,26 +167,24 @@ private def runCmdCapture (prog : String) (args : Array String) (cwd? : Option S
   return (st.toNat, (String.fromUTF8? acc).getD "")
 
 /-- Execute `git` non-interactively (`GIT_TERMINAL_PROMPT=0`, batch SSH) and capture combined stdout+stderr. -/
-private def runGitCapture (args : Array String) (cwd? : Option String := none) : IO (Nat × String) := do
+def runGitCapture (args : Array String) (cwd? : Option String := none) : IO (Nat × String) := do
   let env ← environList
   let hasSshCmd := env.any (fun e => e.startsWith "GIT_SSH_COMMAND=")
   let envPrefix :=
     "GIT_TERMINAL_PROMPT=0 " ++
     (if hasSshCmd then "" else "GIT_SSH_COMMAND='ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new' ")
   let cdPrefix := match cwd? with | some dir => "cd " ++ shellSingleQuote dir ++ " && " | none => ""
-  let cmdLine := cdPrefix ++ envPrefix ++ "exec 'git'" ++
-    (if args.isEmpty then "" else " " ++ String.intercalate " " (args.toList.map shellSingleQuote)) ++ " 2>&1"
-  let sp ← spawnPgrp "/bin/sh" #["-c", cmdLine] env false false true
-  if sp.pid < 0 then return (127, "failed to spawn git")
-  let mut acc := ByteArray.empty
-  if sp.stdoutFd >= 0 then
-    let mut eof := false
-    while !eof && acc.size < 524288 do
-      let chunk ← readFdChunk sp.stdoutFd 8192
-      if chunk.isEmpty then eof := true else acc := acc ++ chunk
-    closeFdRaw sp.stdoutFd
-  let st ← waitpidBlock sp.pid
-  return (st.toNat, (String.fromUTF8? acc).getD "")
+  IO.FS.withTempFile fun output path => do
+    -- Redirect before cd so its diagnostic is captured too. File-backed capture
+    -- lets us wait for the child status independently of inherited stdio.
+    let cmdLine := "exec >" ++ shellSingleQuote path.toString ++ " 2>&1; " ++
+      cdPrefix ++ envPrefix ++ "exec 'git'" ++
+      (if args.isEmpty then "" else " " ++ String.intercalate " " (args.toList.map shellSingleQuote))
+    let sp ← spawnPgrp "/bin/sh" #["-c", cmdLine] env false true false
+    let status ← waitPgrpBounded sp.pid 30000
+    if status == 124 then return (status, "git command timed out")
+    let bytes ← output.read 524288
+    return (status, (String.fromUTF8? bytes).getD "")
 
 private def sanitizeRelPath? (raw : String) : Option String := Id.run do
   let norm := String.ofList (raw.toList.map (fun c => if c == '\\' then '/' else c))
@@ -1001,16 +999,24 @@ def resolveSoftwareStateDir : IO String := do
   let home := (← IO.getEnv "HOME").getD "/root"
   return s!"{home}/.local/state/agent-software"
 
+-- Inventory is best-effort. Host CLIs can block during startup or leave a
+-- descendant holding stdout, so don't wait for pipe EOF to get their version.
+def probeSoftwareVersion (binPath : String) : IO (Option String) := do
+  IO.FS.withTempFile fun output path => do
+    let sp ← spawnPgrp "/bin/sh"
+      #["-c", "exec \"$1\" --version >\"$2\"", "sh", binPath, path.toString]
+      (← environList) false true false
+    if (← waitPgrpBounded sp.pid 3000) != 0 then return none
+    let bytes ← output.read 8192
+    let line := (((String.fromUTF8? bytes).getD "").splitOn "\n").headD ""
+    let version := line.trimAscii.toString
+    return if version.isEmpty then none else some version
+
 private def probeComponentInventory (id name category binName : String) (unitName? : Option String) (updateMethod : String) : IO JVal := do
   let (rcWhich, whichOut) ← runCmdCapture "which" #[binName]
   let installed := rcWhich == 0
   let binPath := whichOut.trimAscii.toString
-  let mut ver : Option String := none
-  if installed && !binPath.isEmpty then
-    let (rcV, vOut) ← runCmdCapture binPath #["--version"]
-    if rcV == 0 then
-      let line1 := ((vOut.splitOn "\n").headD "").trimAscii.toString
-      if !line1.isEmpty then ver := some line1
+  let ver ← if installed && !binPath.isEmpty then probeSoftwareVersion binPath else pure none
   let mut svcJv : JVal := .null
   if let some unit := unitName? then
     let (rcAct, _) ← runCmdCapture "systemctl" #["is-active", "--quiet", unit]
@@ -1267,7 +1273,10 @@ def ensureLibraryRepo (libDir effRemote : String) (forceReinit : Bool := false) 
     if rcHead != 0 then
       if let some ref ← resolveRemoteTrackingRef libDir "main" then
         let targetBr := if ref.startsWith "origin/" then (ref.drop 7).toString else "main"
-        let _ ← runGitCapture #["checkout", "-B", targetBr, "--track", ref] (some libDir)
+        let (rcCo, outCo) ← runGitCapture #["checkout", "-B", targetBr, "--track", ref] (some libDir)
+        if rcCo != 0 then
+          let msg := outCo.trimAscii.toString
+          return .error (if msg.isEmpty then "git checkout failed" else msg)
     protectLibraryLocalState libDir
     return .ok true
   if !(← gitFp.pathExists) then
@@ -1309,7 +1318,10 @@ def ensureLibraryRepo (libDir effRemote : String) (forceReinit : Bool := false) 
       let br ← gitCurrentBranch libDir
       if let some ref ← resolveRemoteTrackingRef libDir br then
         let targetBr := if ref.startsWith "origin/" then (ref.drop 7).toString else br
-        let _ ← runGitCapture #["checkout", "-B", targetBr, "--track", ref] (some libDir)
+        let (rcCo, outCo) ← runGitCapture #["checkout", "-B", targetBr, "--track", ref] (some libDir)
+        if rcCo != 0 then
+          let msg := outCo.trimAscii.toString
+          return .error (if msg.isEmpty then "git checkout failed" else msg)
   return .ok true
 
 def buildLibraryStatusJson (libDir : String) (defaultRemote : String) (requireOwnRepo : Bool := false) : IO JVal := do
@@ -1613,6 +1625,15 @@ def handleLibraryRoute
     return if isOwner then status else status.setField "path" (.str "")
   let libFp := System.FilePath.mk libDir
   let gitFp := libFp / ".git"
+
+  -- A configured remote with no checkout must be initialized before any route
+  -- can report an empty/successful Library. Failed initialization is explicit.
+  if !effRemote.isEmpty && !(← libFp.pathExists) &&
+      !(segs == ["api", "library", "status"] ||
+        segs == ["api", "library", "sync"] || segs == ["api", "library", "force-sync"]) then
+    match ← ensureLibraryRepo libDir effRemote false with
+    | .ok _ => pure ()
+    | .error e => return some (jsonErr 502 s!"Failed to initialize Library repository: {e}")
 
   -- A transferred revision pins the next explicit synchronization. Importing
   -- configuration never copies Library files or resets a working checkout.
@@ -2944,26 +2965,34 @@ def dispatchResourcesAndSystemRoute
     if method == "POST" && segs.length == 5 && segs[2]? == some "queue" && segs[4]? == some "send-now" then
       let msgId := segs[3]!
       let qRows ← execParamQuery store.missionsDb
-        "SELECT mission_id, sequence FROM remote_message_queue WHERE user_id='core' AND message_id=?1 LIMIT 1;" #[msgId]
+        "SELECT mission_id, COALESCE(sequence,0), COALESCE(state,''), COALESCE(phase,0) FROM remote_message_queue WHERE user_id='core' AND message_id=?1 LIMIT 1;" #[msgId]
       let .ok rs := qRows | return some (jsonErr 500 "Queue query failed")
       if rs.size ≤ 1 then return some (jsonErr 404 "message not in queue")
       let qMid := (rs[1]![0]?).getD ""
       let allowed ← canAccessMission store qMid callerUserId bootstrapAdminId isLegacyUnscoped true
       if !allowed then return some (jsonErr 403 "Write access denied")
       let interrupt := ((qParam? qMap "interrupt").getD "false") == "true"
-      -- Promote queued message sequence to head of waiting items for this mission
+      if interrupt then
+        return some (jsonErr 409 "interrupt_not_supported")
+      let qState := (rs[1]![2]?).getD ""
+      let qPhase := ((rs[1]![3]?).bind String.toNat?).getD 0
+      if qState != "waiting" || qPhase != 0 then
+        return some (jsonErr 409 "already_claimed_or_delivered")
+      let mut promoted := false
+      -- `send-now` is an ordering promise, so success means this row is the head
+      -- of the mission's waiting prefix and the drainer orders by `sequence`.
       if let .ok minRows ← execParamQuery store.missionsDb
-          "SELECT COALESCE(MIN(sequence), 1) FROM remote_message_queue WHERE user_id='core' AND mission_id=?1 AND state='waiting';"
+          "SELECT COALESCE(MIN(sequence), 0) FROM remote_message_queue WHERE user_id='core' AND mission_id=?1 AND state='waiting' AND COALESCE(phase,0)=0;"
           #[qMid] then
         if minRows.size > 1 then
-          let minSeq := ((minRows[1]![0]?).bind String.toNat?).getD 1
-          if minSeq > 1 then
+          let minSeq := ((minRows[1]![0]?).bind String.toNat?).getD 0
+          let curSeq := ((rs[1]![1]?).bind String.toNat?).getD 0
+          if curSeq > minSeq then
             let _ ← execParamStmt store.missionsDb
               "UPDATE remote_message_queue SET sequence=?2 WHERE user_id='core' AND message_id=?1;"
-              #[msgId, toString (minSeq - 1)]
-      if interrupt then
-        return some (jsonResp 200 (.obj #[("ok", .bool true), ("delivered", .bool false), ("promoted", .bool true)]))
-      return some (jsonResp 200 (.obj #[("ok", .bool true), ("delivered", .bool false)]))
+              #[msgId, s!"{(minSeq : Int) - 1}"]
+            promoted := true
+      return some (jsonResp 200 (.obj #[("ok", .bool true), ("delivered", .bool false), ("promoted", .bool promoted)]))
 
   return none
 

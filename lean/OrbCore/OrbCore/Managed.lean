@@ -273,6 +273,7 @@ def deployUnitIsProd (systemdUnit : String) : Bool :=
     inherited bandwidth pools; without it a mission only sees its own pool. -/
 structure ManagedComputeStore where
   db : SqliteDb
+  coreDb? : Option SqliteDb := none
   instanceName : String := "prod"
   dailyCapCeilingCents : UInt64 := 500
   missionsDb? : Option SqliteDb := none
@@ -520,11 +521,11 @@ private def vmSliceOf (row : Array String) : VmSliceState :=
     deletableAt := cellU64 row 10
   }
 
-def openManagedComputeStore (path : String) : IO (Except String ManagedComputeStore) := do
+def openManagedComputeStore (path : String) (coreDb? : Option SqliteDb := none) : IO (Except String ManagedComputeStore) := do
   match ← openSqliteDb path managedComputeDdl managedAdditiveAlters false with
   | .error e => return .error e
   | .ok db => return .ok {
-      db := db, instanceName := ← currentManagedInstance,
+      db := db, coreDb? := coreDb?, instanceName := ← currentManagedInstance,
       dailyCapCeilingCents := devDailyCapCeiling (← IO.getEnv "ORB_DEV_DAILY_CAP_CENTS") }
 
 def closeManagedComputeStore (st : ManagedComputeStore) : IO Unit :=
@@ -1059,6 +1060,74 @@ private def admitManagedCostTx (st : ManagedComputeStore) (fleet : ManagedFleetS
   match ← admitMissionConcurrencyTx st provider missionId ownerUserId newSlot with
   | .ok () => pure ()
   | .error e => return .error e
+  if !missionId.isEmpty then
+    -- A child mission shares its ancestors' dollar pools. The managed DB does
+    -- not hold the mission tree, so walk it through Core's DB and then admit
+    -- against every ancestor budget that covers this lineage.
+    match st.coreDb? with
+    | some coreDb =>
+      let mut lineage : Array String := #[missionId]
+      let mut cursor := missionId
+      let mut depth := 0
+      while depth < 32 && !cursor.isEmpty do
+        depth := depth + 1
+        let .ok pRows ← execParamQuery coreDb
+            "SELECT COALESCE(parent_mission_id,'') FROM missions WHERE id=?1 LIMIT 1;" #[cursor]
+          | return .error "managed_mission_lineage_read_failed"
+        if pRows.size ≤ 1 then break
+        let parent := (cell pRows[1]! 0).trimAscii.toString
+        if parent.isEmpty || lineage.contains parent then break
+        lineage := lineage.push parent
+        cursor := parent
+      let placeholders := String.intercalate "," (List.replicate lineage.size "?")
+      let .ok bRows ← execParamQueryUnlocked st.db
+          s!"SELECT mission_id, COALESCE(budget_deci_milli_usd,-1) FROM mission_budgets WHERE mission_id IN ({placeholders});"
+          lineage
+        | return .error "managed_mission_budget_read_failed"
+      for i in [1:bRows.size] do
+        let ownerMid := (cell bRows[i]! 0).trimAscii.toString
+        let budgetUnits := ((cell bRows[i]! 1).trimAscii.toString.toInt?).getD (-1)
+        if budgetUnits < 0 then continue
+        let .ok spendRows ← execParamQueryUnlocked st.db
+            ("SELECT COALESCE(SUM(r.cents),0) FROM managed_cost_reservations r " ++
+             "JOIN managed_machines m ON m.id=r.machine_id WHERE m.owner_mission=?1;") #[ownerMid]
+          | return .error "managed_mission_budget_read_failed"
+        if spendRows.size ≤ 1 then return .error "managed_mission_budget_read_failed"
+        let spent := cellU64 spendRows[1]! 0
+        let requestedUnits := (spent + cost) * 100
+        if budgetUnits ≥ 0 && requestedUnits.toNat > budgetUnits.toNat then
+          return .error s!"mission_budget_exceeded:{ownerMid}"
+    | none => pure ()
+    let .ok budgetRows ← execParamQueryUnlocked st.db
+        "SELECT bandwidth_limits_json FROM mission_budgets WHERE mission_id=?1;" #[missionId]
+      | return .error "managed_bandwidth_read_failed"
+    if budgetRows.size > 1 then
+      let limits := (OrbBin.Json.parse (cell budgetRows[1]! 0)).toOption.getD (.obj #[])
+      let some shape := managedSizeSpec? provider size
+        | return .error "managed_bandwidth_shape_unknown"
+      let requestedCpu := shape.cpu
+      if let some cap := limits.fieldNat? "compute_vcpu_per_min" then
+        if requestedCpu > cap then return .error "managed_compute_vcpu_bandwidth_exceeded"
+      if let some cap := bandwidthRateCap limits then
+        if shape.milliCentsPerHour.toNat > cap then return .error "managed_compute_cost_bandwidth_exceeded"
+      let protectRoot := limits.fieldBool? "protect_root" |>.getD true
+      if !protectRoot && newSlot then
+        let .ok usageRows ← execParamQueryUnlocked st.db
+            ("SELECT provider,size FROM managed_machines m WHERE m.owner_mission=?1 AND " ++
+             "(m.phase_code IN (0,1) OR EXISTS(SELECT 1 FROM managed_resume_intents r WHERE r.machine_id=m.id AND r.state IN ('pending','aborting')));") #[missionId]
+          | return .error "managed_bandwidth_read_failed"
+        let mut cpu := requestedCpu
+        let mut rate := shape.milliCentsPerHour.toNat
+        for row in usageRows.extract 1 usageRows.size do
+          let some held := managedSizeSpec? (cell row 0) (cell row 1)
+            | return .error "managed_bandwidth_shape_unknown"
+          cpu := cpu + held.cpu
+          rate := rate + held.milliCentsPerHour.toNat
+        if let some cap := limits.fieldNat? "compute_vcpu_per_min" then
+          if cpu > cap then
+            return .error "managed_compute_vcpu_bandwidth_exceeded"
+        if let some cap := bandwidthRateCap limits then
+          if rate > cap then return .error "managed_compute_cost_bandwidth_exceeded"
   -- Instance cap on lean.ci machines. An explicit request beyond it is refused here;
   -- an unnamed one was already moved to the fallback by `chooseManagedProvider`.
   if newSlot && provider == "leanci" then

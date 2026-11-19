@@ -19,6 +19,7 @@ import OrbCore.ManagedProvisioningTests
 import OrbCore.ManagedResumeTests
 import OrbCore.WakeupRestartTests
 import OrbCore.TurnOutcomeTests
+import OrbCore.RemoteGoalTests
 import OrbCore.ManagedAccessTests
 import OrbCore.MissionSettingsTests
 import OrbCore.R17Tests
@@ -40,6 +41,7 @@ import OrbCore.LegacyMigrationTests
 import OrbCore.TenantIsolationTests
 import OrbCore.DevSpendingTests
 import OrbCore.ManagedBudgetTests
+import OrbCore.R18LivenessTests
 import OrbCore.DevOperatorTests
 import OrbCore.ApprovalSignatureTests
 import OrbCore.SettingsTransferTests
@@ -2638,7 +2640,6 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
    let history2Text := (history2Resp.map (·.body)).bind String.fromUTF8? |>.getD ""
    let historyArr := match OrbBin.Json.parse historyText with | .ok (.arr xs) => xs | _ => #[]
    let history2Arr := match OrbBin.Json.parse history2Text with | .ok (.arr xs) => xs | _ => #[]
-   let streamText := (streamResp.map (·.body)).bind String.fromUTF8? |>.getD ""
    let sameText := (sameResp.map (·.body)).bind String.fromUTF8? |>.getD ""
    let clashText := (clashResp.map (·.body)).bind String.fromUTF8? |>.getD ""
    if blobResp.map (·.status) != some 200 || !isSha256Hex hash ||
@@ -2670,7 +2671,7 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
       (history2Arr[1]?).bind (·.fieldNat? "revision") != some 2 ||
       streamResp.map (·.status) != some 200 ||
       streamResp.map (·.contentType) != some "text/event-stream" ||
-      !streamText.startsWith "data: {" || !streamText.endsWith "\n\n" ||
+      streamResp.map (fun r => r.bodyStream?.isSome) != some true ||
       (manifestText.splitOn "\"docs/a.txt\"").length < 2 ||
       (stl.splitOn "\"preferences\":1").length < 2 ||
       traversal.map (·.status) != some 400 || fiveMibStatus != some 200 || bigHttp != some 413 then
@@ -2776,11 +2777,22 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
    let rows ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM deploy_receipts;" #[]
    let nReceipts := match rows with | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD 0 | .error _ => 0
    closeCoreStore store
-   let cliNoLease ← IO.Process.output {
-     cmd := "./lean/OrbCore/.lake/build/bin/orb-core"
-     args := #["deploy", "--service", "sandboxed-sh-dev.service", "--dry-run"]
-     env := #[("WORKING_DIR", some r7Root), ("DEV_MODE", some "true")]
-   }
+   let runCli (root : String) (args : Array String) : IO (Nat × String) :=
+     IO.FS.withTempFile fun output path => do
+       let env ← OrbBin.PosixExt.environList
+       let env := env.filter fun e => !e.startsWith "WORKING_DIR=" && !e.startsWith "DEV_MODE="
+       let sp ← OrbBin.PosixExt.spawnPgrp "/bin/sh"
+         (#["-c", "out=$1; shift; exec \"$@\" >\"$out\" 2>&1", "sh", path.toString,
+            "./lean/OrbCore/.lake/build/bin/orb-core", "deploy", "--service", "sandboxed-sh-dev.service", "--dry-run"] ++ args)
+         (env ++ #[s!"WORKING_DIR={root}", "DEV_MODE=true"]) false true false
+       let status ← OrbBin.PosixExt.waitPgrpBounded sp.pid 30000
+       let bytes ← output.read 8192
+       return (status, (String.fromUTF8? bytes).getD "")
+   let (cliNoLease, noLeaseOutput) ← runCli r7Root #[]
+   if cliNoLease != 1 || (noLeaseOutput.splitOn "--lease is required").length < 2 then
+     IO.FS.removeDirAll r7Root
+     IO.eprintln s!"[orb-core-test] FAIL: CLI without lease: rc={cliNoLease} output={noLeaseOutput}"
+     return 1
    let cliSubRoot := s!"{r7Root}-cli"
    let .ok cliStore ← openCoreStore s!"{cliSubRoot}/.sandboxed-sh" | do IO.FS.removeDirAll r7Root; return 1
    let .ok () ← upsertPrivilegeLease cliStore {
@@ -2790,11 +2802,7 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
      sessionScoped := false
    } | do closeCoreStore cliStore; IO.FS.removeDirAll r7Root; return 1
    closeCoreStore cliStore
-   let cliWithLease ← IO.Process.output {
-     cmd := "./lean/OrbCore/.lake/build/bin/orb-core"
-     args := #["deploy", "--service", "sandboxed-sh-dev.service", "--dry-run", "--lease", "lease-r7-cli-01", "--force"]
-     env := #[("WORKING_DIR", some cliSubRoot), ("DEV_MODE", some "true")]
-   }
+   let (cliWithLease, leaseOutput) ← runCli cliSubRoot #["--lease", "lease-r7-cli-01", "--force"]
    IO.FS.removeDirAll cliSubRoot
    IO.FS.removeDirAll r7Root
    if       noLease.map (·.status) != some 403 ||
@@ -2819,11 +2827,11 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
       revokeRcpt.verdict != "reconciliation_required" || revokeRcpt.verdictCode != 516 ||
       revokeRcpt.restart || wasRevokeRestarted ||
       execFailRes.isOk || nExecFailed != 1 || nFalseAdmitted != 0 ||
-      cliNoLease.exitCode == 0 || cliWithLease.exitCode != 0 ||
+      cliWithLease != 0 || (leaseOutput.splitOn "dry_run_admitted").length < 2 ||
       nReceipts < 2 then
-    IO.eprintln s!"[orb-core-test] FAIL: guarded deploy / privilege bunker wire contract mismatch: hdr={hdrLeaseDeploy.map (·.status)}:{hdrLeaseText} revObs={revokeObs.leaseEpoch}->{postRevokeObs.leaseEpoch} revRcpt={revokeRcpt.verdict}:{revokeRcpt.verdictCode} cliNo={cliNoLease.exitCode} cliWith={cliWithLease.exitCode}:{cliWithLease.stderr} ok={privOkText} bunker={privBunkerText}"
+    IO.eprintln s!"[orb-core-test] FAIL: guarded deploy / privilege bunker wire contract mismatch: hdr={hdrLeaseDeploy.map (·.status)}:{hdrLeaseText} revObs={revokeObs.leaseEpoch}->{postRevokeObs.leaseEpoch} revRcpt={revokeRcpt.verdict}:{revokeRcpt.verdictCode} cliWith={cliWithLease}:{leaseOutput} ok={privOkText} bunker={privBunkerText}"
     return 1
-  return 0
+   return 0
 
 private def runR4dUnitTests (r4dRoot : String) (r4dChain : RoutingChain) : IO UInt32 := do
   -- (A) `OrbCore.Proxy`: sticky `firstByteCommitted` lock (`abortCommittedLock = 4` on mid-stream failure,
@@ -5459,6 +5467,18 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let some (stillReady, _) ← getManagedMachine? mStore parityId
     | return (← fail "foreign caller erased managed machine")
   if stillReady.status != "ready" then return (← fail "foreign caller changed managed machine")
+  let ownerExec ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
+    "exec_raw_managed_machine" (.obj #[("machine_id", .str parityId), ("command", .str "true")]) nowSec none app.managedProvisioningOverride?
+  let ownerExecJson := (OrbBin.Json.parse ownerExec).toOption.getD .null
+  let ownerExecError := (ownerExecJson.field? "error").getD .null
+  if ownerExecJson.fieldBool? "ok" != some false ||
+      ownerExecError.fieldStr? "code" != some "unsupported" ||
+      ownerExecError.fieldStr? "message" != some "raw execution is unavailable on managed machines" then
+    return (← fail s!"owned managed raw execution must be refused explicitly: {ownerExec}")
+  let some (stillReadyAfterOwnerExec, _) ← getManagedMachine? mStore parityId
+    | return (← fail "owned raw execution erased managed machine")
+  if stillReadyAfterOwnerExec.status != "ready" then
+    return (← fail "owned raw execution changed managed machine state")
   let mcpStopped ← dispatchMcpToolCall store (some mStore) none none mfBoot muRoot parityClaims
     "stop_managed_machine" (.obj #[("machine_id", .str parityId)]) nowSec none app.managedProvisioningOverride?
   let resumeArgs := OrbBin.Json.JVal.obj #[("machine_id", .str parityId), ("ttl_minutes", .nat 5),
@@ -6531,7 +6551,9 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
   if frSt != 200 || (frBody.splitOn "\"sources\"").length < 2 || fsSt != 200 || !fsBody.trimAscii.toString.startsWith "[" then
     return (← fail s!"file-resources / fs/list failed: fr={frSt}:{frBody} fs={fsSt}:{fsBody}")
 
+  IO.eprintln s!"{← IO.monoMsNow} START prod parity: GET /api/software"
   let (swSt, swBody) ← sendJson "GET" "/api/software" hsJwt ""
+  IO.eprintln s!"{← IO.monoMsNow} END prod parity: GET /api/software rc={swSt}"
   let (msSt, msBody) ← sendJson "GET" "/api/mesh/status" hsJwt ""
   let (ghSt, ghBody) ← sendJson "GET" "/api/integrations/github/status" hsJwt ""
   if swSt != 200 || (swBody.splitOn "\"node_name\":\"orb-core\"").length < 2 ||
@@ -7487,9 +7509,7 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
   return 0
 
 set_option maxHeartbeats 400000 in
-private def runLibraryGitAndSkillParityTests : IO UInt32 := do
-  let ts ← IO.monoNanosNow
-  let workRoot := s!"/tmp/orb_library_parity_{ts}"
+private def runLibraryGitAndSkillParityTests (workRoot : String) : IO UInt32 := do
   let dataRoot := s!"{workRoot}/.sandboxed-sh"
   let bareRepo := s!"{workRoot}/remote-library.git"
   let seedRepo := s!"{workRoot}/seed-library"
@@ -7501,18 +7521,36 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
   IO.FS.createDirAll (System.FilePath.mk s!"{seedRepo}/skill/orb-basics/tools")
   IO.FS.createDirAll (System.FilePath.mk s!"{seedRepo}/skill/proton-mail")
 
-  let shRun (cmd : String) : IO Nat := do
+  let shRun (cmd : String) (timeoutMs : Nat := 30000) : IO Nat := do
     let env ← OrbBin.PosixExt.environList
-    let sp ← OrbBin.PosixExt.spawnPgrp "/bin/sh" #["-c", cmd] env false false true
-    if sp.pid < 0 then return 127
-    if sp.stdoutFd >= 0 then
-      let mut eof := false
-      while !eof do
-        let chunk ← OrbBin.PosixExt.readFdChunk sp.stdoutFd 4096
-        if chunk.isEmpty then eof := true
-      OrbBin.PosixExt.closeFdRaw sp.stdoutFd
-    let st ← OrbBin.PosixExt.waitpidBlock sp.pid
-    return st.toNat
+    let sp ← OrbBin.PosixExt.spawnPgrp "/bin/sh" #["-c", cmd] env false true false
+    OrbBin.PosixExt.waitPgrpBounded sp.pid timeoutMs
+
+  -- A TERM-resistant descendant keeps its output open and must die on group KILL.
+  let ready := s!"{workRoot}/timeout-ready"
+  let timeoutProbeStart ← IO.monoMsNow
+  let probe ← OrbBin.PosixExt.spawnPgrp "/bin/sh"
+    #["-c", s!"(trap '' TERM; echo ready > '{ready}'; exec sleep 60) & wait"]
+    (← OrbBin.PosixExt.environList) false true true
+  let timeoutProbeRc ← OrbBin.PosixExt.waitPgrpBounded probe.pid 1000
+  let eof ← try
+      match ← OrbBin.PosixExt.readSocketTimed { raw := probe.stdoutFd.toUInt32 } 1 500 with
+      | .eof => pure true
+      | _ => pure false
+    finally OrbBin.PosixExt.closeFdRaw probe.stdoutFd
+  let timeoutProbeElapsedMs := (← IO.monoMsNow) - timeoutProbeStart
+  if timeoutProbeRc != 124 || !eof || !(← (System.FilePath.mk ready).pathExists) || timeoutProbeElapsedMs > 3000 then
+    IO.eprintln s!"[orb-core-test] FAIL (library-parity): bounded git helper regression failed: rc={timeoutProbeRc} elapsed_ms={timeoutProbeElapsedMs}"
+    return 1
+
+  -- Use a Git command that would succeed if the failed cd were ignored.
+  let missingCheckout := s!"{dataRoot}/library"
+  let (failedCdRc, failedCdOutput) ← runGitCapture #["--version"] (some missingCheckout)
+  if failedCdRc == 0 || failedCdRc == 124 ||
+      (failedCdOutput.splitOn missingCheckout).length < 2 ||
+      (failedCdOutput.splitOn "git version").length != 1 then
+    IO.eprintln s!"[orb-core-test] FAIL (library-parity): failed cd: rc={failedCdRc} output={failedCdOutput}"
+    return 1
 
   IO.FS.writeFile (System.FilePath.mk s!"{seedRepo}/skill/orb-basics/SKILL.md")
     "---\nname: orb-basics\ndescription: \"Orient an Orb agent to its environment.\"\nmetadata:\n  sandboxed:\n    audience: [mission, local]\n    scope: global\n---\n\n# Orb Basics\n\nFollow Core contracts.\n"
@@ -7700,8 +7738,28 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
   let oldestRev := (histArr.back?.bind (·.fieldStr? "rev")).getD ""
   let (revSt, revCtype, revBody) ← sendReq "GET" s!"/api/library/skill/orb-basics/history/{oldestRev}" hsJwt ""
   if putSkSt != 200 || cmtSt != 200 || pushSt != 200 || histSt != 200 || histArr.size < 2 ||
-     revSt != 200 || !(revCtype.startsWith "text/plain") || (revBody.splitOn "Follow Core contracts.").length != 2 then
+      revSt != 200 || !(revCtype.startsWith "text/plain") || (revBody.splitOn "Follow Core contracts.").length != 2 then
     return (← fail s!"commit/push/history roundtrip failed: put={putSkSt} cmt={cmtSt}:{cmtBody} push={pushSt}:{pushBody} hist={histBody} rev=({revSt},{revBody})")
+
+  -- Missing checkout regression: a failed `cd` must fail closed at the next
+  -- Library route, rather than reporting an empty successful catalog or
+  -- leaving the self-test blocked in a git child/pipe wait.
+  let libraryDirForMissing ← resolveLibraryDir workRoot dataRoot
+  discard <| (IO.FS.removeDirAll libraryDirForMissing).toBaseIO
+  let missingRemote := s!"{workRoot}/missing-after-push.git"
+  let (missingSetSt, _, _) ← sendReq "PUT" "/api/settings/library-remote" hsJwt
+    s!"\{\"library_remote\":{jsonEscape missingRemote}}"
+  let missingStarted ← IO.monoNanosNow
+  let (missingListSt, _, missingListBody) ← sendReq "GET" "/api/library/skill" hsJwt ""
+  let missingElapsedMs := ((← IO.monoNanosNow) - missingStarted) / 1000000
+  if missingSetSt != 200 || missingListSt != 502 ||
+      (missingListBody.splitOn "Failed to initialize Library repository").length < 2 ||
+      missingElapsedMs > 35000 then
+    return (← fail s!"missing Library checkout did not fail closed: set={missingSetSt} list={missingListSt}:{missingListBody} elapsed_ms={missingElapsedMs}")
+  let (restoreSt, _, restoreBody) ← sendReq "PUT" "/api/settings/library-remote" hsJwt
+    s!"\{\"library_remote\":{jsonEscape bareRepo},\"force_reinitialize\":true}"
+  if restoreSt != 200 || (restoreBody.splitOn "\"library_reinitialized\":true").length != 2 then
+    return (← fail s!"could not restore Library checkout after missing-directory regression: status={restoreSt} body={restoreBody}")
 
   -- 4. Diverged history (`409 DIVERGED_HISTORY`) on `sync`/`push` and recovery via `force-sync`
   let divergeRc ← shRun
@@ -7743,12 +7801,55 @@ private def runLibraryGitAndSkillParityTests : IO UInt32 := do
   discard <| (IO.FS.removeDirAll workRoot).toBaseIO
   return 0
 
+def runLibraryParityGroup : IO UInt32 := do
+  let previous ← IO.getEnv "LIBRARY_PATH"
+  let workRoot := s!"/tmp/orb_library_parity_{← IO.monoNanosNow}"
+  OrbBin.PosixExt.setenvVar "LIBRARY_PATH" s!"{workRoot}/.sandboxed-sh/library"
+  try runLibraryGitAndSkillParityTests workRoot
+  finally
+    match previous with
+    | some value => OrbBin.PosixExt.setenvVar "LIBRARY_PATH" value
+    | none => OrbBin.PosixExt.unsetenvVar "LIBRARY_PATH"
+
+def runSoftwareVersionProbeTest : IO UInt32 := do
+  IO.FS.withTempDir fun root => do
+    let cli := root / "version fixture"
+    let run (body : String) : IO (Option String) := do
+      IO.FS.writeFile cli ("#!/bin/sh\n[ \"$#:$1\" = '1:--version' ] || exit 77\n" ++ body ++ "\n")
+      let rc ← OrbBin.PosixExt.chmod cli.toString 0o700
+      if rc != 0 then throw (IO.userError "chmod version fixture failed")
+      probeSoftwareVersion cli.toString
+    if (← run "printf '  Hermes Agent fixture  \\nsecond line\\n'") != some "Hermes Agent fixture" ||
+       (← run "printf 'a banner is not a successful version\\n'; exit 2").isSome then
+      IO.eprintln "[orb-core-test] FAIL: software version probe exit status or first line"
+      return 1
+    let start ← IO.monoMsNow
+    -- The descendant inherits stdout. Make it resist TERM but exit on its own
+    -- as a backstop so a regression fails promptly even without an outer timeout.
+    let version ← run "(trap '' TERM; exec sleep 8) & wait; printf 'too late\\n'"
+    let elapsed := (← IO.monoMsNow) - start
+    if version.isSome || elapsed > 6000 then
+      IO.eprintln s!"[orb-core-test] FAIL: stalled software version probe returned {version} in {elapsed}ms"
+      return 1
+    return 0
+
+private def traceTest {α : Type} (name : String) (test : IO α) : IO α := do
+  IO.eprintln s!"{← IO.monoMsNow} START {name}"
+  try
+    let result ← test
+    IO.eprintln s!"{← IO.monoMsNow} END {name}"
+    return result
+  catch e =>
+    IO.eprintln s!"{← IO.monoMsNow} ERROR {name}"
+    throw e
+
 set_option maxHeartbeats 800000 in
 set_option maxRecDepth 4000 in
 def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   try
     OrbCore.WakeupRestartTests.run
     OrbCore.TurnOutcomeTests.run
+    OrbCore.RemoteGoalTests.run
   catch e =>
     IO.eprintln s!"[orb-core-test] FAIL: {e}"
     return 1
@@ -7834,11 +7935,13 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   let .ok store ← openCoreStore tmpRoot
     | do IO.eprintln "[orb-core-test] FAIL: openCoreStore failed"; return 1
   try
-    OrbCore.TenantIsolationTests.run tmpRoot
+    traceTest "TenantIsolationTests.run" (OrbCore.TenantIsolationTests.run tmpRoot)
     OrbCore.ManagedProvisioningTests.run tmpRoot
     OrbCore.ManagedResumeTests.run tmpRoot
     OrbCore.DevSpendingTests.run tmpRoot
     OrbCore.ManagedBudgetTests.run tmpRoot
+    OrbCore.R18LivenessTests.recoveryAndOrphanReaping s!"{tmpRoot}/r18-recovery"
+    OrbCore.R18LivenessTests.lineageMissionBudget s!"{tmpRoot}/r18-lineage"
     OrbCore.DevOperatorTests.run tmpRoot
     OrbCore.ApprovalSignatureTests.run tmpRoot
     OrbCore.ManagedAccessTests.run tmpRoot
@@ -8242,16 +8345,29 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   let wsAuthRaw := s!"GET /api/console/ws HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: jwt.{wsToken}\r\n\r\n".toUTF8
   let .ok wsAuthReq := parseRequest wsAuthRaw none | do closeCoreStore store; return 1
   match ← dispatchCoreRequest appSt wsAuthReq nowSec with
+  | .ok r =>
+    if r.status != 501 then
+      closeCoreStore store
+      IO.eprintln s!"[orb-core-test] FAIL: unsupported /api/console/ws returned HTTP {r.status}, expected 501"
+      return 1
+  | .error raw =>
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: unsupported /api/console/ws upgraded instead of 501: {String.fromUTF8! raw}"
+    return 1
+
+  let wsSyncRaw := s!"GET /api/control/sync HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: jwt.{wsToken}\r\n\r\n".toUTF8
+  let .ok wsSyncReq := parseRequest wsSyncRaw none | do closeCoreStore store; return 1
+  match ← dispatchCoreRequest appSt wsSyncReq nowSec with
   | .error raw101 =>
     let resp101 := String.fromUTF8! raw101
     if (resp101.splitOn "101 Switching Protocols").length != 2 ||
        (resp101.splitOn s!"Sec-WebSocket-Protocol: jwt.{wsToken}").length != 2 then
       closeCoreStore store
-      IO.eprintln s!"[orb-core-test] FAIL: authenticated /api/console/ws missing 101 or echoed subprotocol: {resp101}"
+      IO.eprintln s!"[orb-core-test] FAIL: /api/control/sync missing 101 or echoed subprotocol: {resp101}"
       return 1
   | .ok r =>
     closeCoreStore store
-    IO.eprintln s!"[orb-core-test] FAIL: authenticated /api/console/ws returned HTTP {r.status}"
+    IO.eprintln s!"[orb-core-test] FAIL: /api/control/sync returned HTTP {r.status}"
     return 1
 
   -- Durable queue edit (`GET /api/control/queue`, `PATCH /api/control/queue/:id`):
@@ -8353,6 +8469,39 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   if boundPatchResp.status != 409 then
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: job-bound PATCH returned {boundPatchResp.status}"
+    return 1
+
+  -- R18 FUP-02: `send-now` must actually move the waiting row to the head and
+  -- report promotion truthfully; `interrupt` is rejected rather than claimed.
+  let sendNowRaw := s!"POST /api/control/queue/q-3/send-now HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: 0\r\n\r\n".toUTF8
+  let .ok sendNowReq := parseRequest sendNowRaw none | do closeCoreStore store; return 1
+  let .ok sendNowResp ← dispatchCoreRequest appSt sendNowReq nowSec | do closeCoreStore store; return 1
+  let sendNowText := String.fromUTF8! sendNowResp.body
+  if sendNowResp.status != 200 || (sendNowText.splitOn "\"promoted\":true").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: send-now did not report promotion: {sendNowResp.status} {sendNowText}"
+    return 1
+  let .ok (_, qHeadBody) ← sendTestHttp appSt validJwt "GET" "/api/control/queue?mission_id=m-alpha" "" nowSec
+    | do closeCoreStore store; return 1
+  if !qHeadBody.startsWith "[{\"id\":\"q-3\"" then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: send-now did not put q-3 at the waiting head: {qHeadBody}"
+    return 1
+  let interruptRaw := s!"POST /api/control/queue/q-3/send-now?interrupt=true HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: 0\r\n\r\n".toUTF8
+  let .ok interruptReq := parseRequest interruptRaw none | do closeCoreStore store; return 1
+  let .ok interruptResp ← dispatchCoreRequest appSt interruptReq nowSec | do closeCoreStore store; return 1
+  let interruptText := String.fromUTF8! interruptResp.body
+  if interruptResp.status != 409 || (interruptText.splitOn "interrupt_not_supported").length < 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: interrupt send-now was not rejected truthfully ({interruptResp.status})"
+    return 1
+  -- R18 FUP-01: collection DELETE clears the mission's whole waiting prefix.
+  let clearQueueRaw := s!"DELETE /api/control/queue?mission_id=m-alpha HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\n\r\n".toUTF8
+  let .ok clearQueueReq := parseRequest clearQueueRaw none | do closeCoreStore store; return 1
+  let .ok clearQueueResp ← dispatchCoreRequest appSt clearQueueReq nowSec | do closeCoreStore store; return 1
+  if clearQueueResp.status != 200 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: collection queue DELETE returned {clearQueueResp.status}: {String.fromUTF8! clearQueueResp.body}"
     return 1
 
   -- 6b. Phase R2-B & R2-C regressions (`SM-01`, `SM-02`, `SM-08`, `SM-12`)
@@ -9011,14 +9160,14 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     IO.eprintln "[orb-core-test] FAIL: OrbCore.HostTests failed"
     return 1
   if (← runR5bManagedStoreTests prodValid) != 0 then return 1
-  if (← runR7CoreTests prodValid) != 0 then return 1
-  if (← runMultiUserCoreTests prodValid) != 0 then return 1
-  if (← runWarmClaudeControlAndCheckpointsCoreTests prodValid) != 0 then return 1
-  if (← runZeroWaitPerfAndSyncTests prodValid) != 0 then return 1
-  if (← runOrbUriCorsTests) != 0 then return 1
-  if (← runProdParityAndMissionMoveTests prodValid) != 0 then return 1
-  if (← runRemoteDispatchWakeupAndBtwTests prodValid) != 0 then return 1
-  if (← runLibraryGitAndSkillParityTests) != 0 then return 1
+  if (← traceTest "R7Core" (runR7CoreTests prodValid)) != 0 then return 1
+  if (← traceTest "MultiUserCore" (runMultiUserCoreTests prodValid)) != 0 then return 1
+  if (← traceTest "WarmClaudeControlAndCheckpoints" (runWarmClaudeControlAndCheckpointsCoreTests prodValid)) != 0 then return 1
+  if (← traceTest "ZeroWaitPerfAndSync" (runZeroWaitPerfAndSyncTests prodValid)) != 0 then return 1
+  if (← traceTest "OrbUriCors" runOrbUriCorsTests) != 0 then return 1
+  if (← traceTest "ProdParityAndMissionMove" (runProdParityAndMissionMoveTests prodValid)) != 0 then return 1
+  if (← traceTest "RemoteDispatchWakeupAndBtw" (runRemoteDispatchWakeupAndBtwTests prodValid)) != 0 then return 1
+  if (← traceTest "LibraryParity" runLibraryParityGroup) != 0 then return 1
 
   IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":11,\"harness_contracts\":10,\"host_tests\":99}"
   return 0
@@ -9072,6 +9221,12 @@ end OrbCore.SelfTest
 
 def main (args : List String) : IO UInt32 := do
   OrbBin.PosixExt.setenvVar "ORB_HERMETIC_TEST" "1"
+  if let some root := OrbCore.SelfTest.findFlag? args "--move-recovery-test-root" then
+    OrbCore.MissionSettingsTests.policyReplay root
+    OrbCore.MissionSettingsTests.moveRecovery root
+    OrbCore.MissionSettingsTests.routeRecovery root
+    OrbCore.MissionSettingsTests.missingDbRecovery root
+    return 0
   if args.contains "--cyber-skills-only" then
     return ← OrbCore.SelfTest.runCyberSkillGroup
   if args.contains "--queue-continuations-only" then
@@ -9080,9 +9235,14 @@ def main (args : List String) : IO UInt32 := do
     return ← OrbCore.SelfTest.runCyberSkillGroup false true
   if args.contains "--context-only" then
     return ← OrbCore.SelfTest.runCyberSkillGroup false false true
+  if args.contains "--library-parity-only" then
+    return ← OrbCore.SelfTest.runLibraryParityGroup
+  if args.contains "--software-version-only" then
+    return ← OrbCore.SelfTest.runSoftwareVersionProbeTest
   if args.contains "--prod-parity-only" then
     return ← OrbCore.SelfTest.runCyberSkillGroup false false false true
   OrbCore.SettingsDocumentTests.run
   OrbCore.LegacyMigrationTests.run
   OrbCore.SettingsTransferTests.run
+  if (← OrbCore.SelfTest.runSoftwareVersionProbeTest) != 0 then return 1
   OrbCore.SelfTest.runSuite (OrbCore.SelfTest.findFlag? args "--emit-evidence-log")

@@ -143,6 +143,14 @@ class ReconcileTest(unittest.TestCase):
         child["track"] = "roadmap-A2-c1234abcd"
         self.assertNotIn("A2", [a[1] for a in self.run_plan(missions=[child])])
 
+    def test_a_busy_model_overflows_to_the_next_and_none_means_no_start(self):
+        busy = [dict(mission(f"Z{i}", "active"), model=NS["MODELS"][0]) for i in range(NS["MAX_PER_MODEL"])]
+        self.run_plan(missions=busy)
+        self.assertEqual(self.models, [NS["MODELS"][1], NS["MODELS"][1]])
+        full = busy + [dict(mission(f"Y{i}", "active"), model=m) for m in NS["MODELS"][1:]
+                       for i in range(NS["MAX_PER_MODEL"])]
+        self.assertEqual([a for a in self.run_plan(missions=full) if a[0] == "start"], [])
+
     def test_each_attempt_uses_the_next_model(self):
         self.assertEqual(NS["MODELS"], ["openai/gpt-6.2-astra", "openai/gpt-6.2-sol",
                                         "anthropic/claude-fable-5-2"])

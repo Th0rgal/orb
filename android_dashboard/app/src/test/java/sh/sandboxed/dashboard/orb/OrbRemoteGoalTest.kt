@@ -27,6 +27,15 @@ class OrbRemoteGoalTest {
             val event = OrbJSON.dict(fixture["event"]) ?: error("Missing event")
             assertEquals(fixture["name"] as String, fixture["expected"], OrbRemoteGoal.event(event))
         }
+        val projections = root["projection_cases"] as List<*>
+        assertFalse(projections.isEmpty())
+        for (raw in projections) {
+            val fixture = OrbJSON.dict(raw) ?: error("Invalid projection case")
+            val name = fixture["name"] as String
+            val phase = OrbRemoteGoal.phase(fixture["status"] as String, fixture["reason"] as String)
+            assertEquals(name, fixture["phase"], phase)
+            assertEquals(name, fixture["label"], OrbRemoteGoal.label(phase, (fixture["iteration"] as Number).toInt()))
+        }
     }
 
     @Test

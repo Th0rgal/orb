@@ -112,6 +112,13 @@ struct OrbConversation: View {
     static let workingPhases: Set<String> = ["queued", "submitting", "running", "cancel_requested"]
     static let goalHarnesses: Set<String> = ["antigravity", "claudecode", "codex", "grok", "opencode"]
     var supportsMode: Bool { !isCloud && (selection.backend.isEmpty || Self.goalHarnesses.contains(selection.backend)) }
+    var remoteGoalTarget: Bool { !isCloud && !selection.node.isEmpty && selection.node != "core" }
+    @State var remoteGoalHarnesses: Set<String> = []
+    var offersGoal: Bool { !remoteGoalTarget || (id == nil && remoteGoalHarnesses.contains(selection.backend)) }
+    var remoteGoalPhase: OrbRemoteGoal.Phase? {
+        guard mission["goal_mode"].flag, mission["backend"].text == "opencode", remoteGoalTarget else { return nil }
+        return OrbRemoteGoal.phase(status: mission["status"].text, reason: mission["terminal_reason"].text)
+    }
     var handoffActive: Bool { OrbHandoff.pending(status: mission["status"].text, handoff: handoff) }
     var working: Bool { optimisticPrompt != nil || handoffActive || (isCloud ? turns.contains { Self.workingPhases.contains($0["phase"].text) } : (MissionState(rawValue: mission["status"].text)?.isActive ?? false)) }
 
@@ -387,7 +394,7 @@ struct OrbConversation: View {
     func handleTextChange(_ value: String) {
         // Absorb typed `/goal ` or `/plan ` prefix into the mode pill when supported.
         if supportsMode && mode == "Message" {
-            if value == "/goal " { mode = "Goal"; text = ""; return }
+            if value == "/goal " && offersGoal { mode = "Goal"; text = ""; return }
             if value == "/plan " { mode = "Plan"; text = ""; return }
         }
         if let active = OrbContextTagging.activeAtQuery(value) {

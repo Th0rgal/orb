@@ -1207,6 +1207,7 @@ export interface Mission {
   history: MissionHistoryEntry[];
   goal_mode?: boolean;
   goal_objective?: string | null;
+  goal_iteration?: number;
   remote_node_id?: string | null;
   terminal_reason?: string | null;
   status_message?: string | null;
@@ -3279,4 +3280,3 @@ export function getMissionResources(
     signal ? { signal } : undefined,
   );
 }
-
