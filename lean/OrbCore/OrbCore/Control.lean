@@ -1811,12 +1811,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     (authEvidence? := some authEvidence)
     (streamLimits? := st.proxyStreamLimits?)
     (bodyTimedOutRef? := some bodyTimedOutRef)
-    (resolveTransport := fun target => AccountVpnRoutes.resolve st.store.missionsDb target.accountId
-      (fun pref => do
-        let some pool := st.vpnPool? | return .error "vpn_coordinator_unavailable"
-        let some record ← getAIProvider? st.store target.accountId | return .error "vpn_credential_owner_unknown"
-        return ← AccountVpnPool.allocate pool st.store.rootDir st.vpnCoordinatorDir st.store.missionsDb
-          record.id record.providerType pref))
+    (resolveTransport := fun target => AccountVpnPool.resolve st.vpnPool? st.store st.vpnCoordinatorDir target.accountId)
   let selectedAccountAfterStream : IO String := do
     match out.streamSelectedAccountRef? with
     | some ref => ref.get
@@ -7982,12 +7977,14 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let broadcastHub ← newBroadcastHub
     let relayHub ← newRelayHub (if maxRequests?.isSome then 0 else 25000)
     let cloudHub ← newCloudRuntimeHub
-    let providerHub ← newProviderRuntimeHub
+    let baseProviderHub ← newProviderRuntimeHub
     let systemHub ← newSystemRuntimeHub
     let remoteSup ← newRemoteJobSupervisor (effectiveJwtSecret cfg) cfg.devMode (some telemetrySink)
     let macTetherRt ← startMacTetherRuntime store
     let vpnPool ← Std.Mutex.new ([] : List AccountVpnPool.Active)
     let vpnCoordinatorDir := (← IO.getEnv "ORB_AIRVPN_COORDINATOR_DIR").getD ""
+    let providerHub := { baseProviderHub with
+      resolveTransport? := some (AccountVpnPool.resolve (some vpnPool) store vpnCoordinatorDir) }
     let appState : CoreAppState := {
       cfg := cfg
       store := store

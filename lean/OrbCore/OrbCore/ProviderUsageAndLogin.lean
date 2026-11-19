@@ -86,6 +86,7 @@ structure ProviderHubState where
 structure ProviderRuntimeHub where
   mu : Std.Mutex ProviderHubState
   usageProbe? : Option (String → IO JVal) := none
+  resolveTransport? : Option (String → ResolveTransport) := none
 
 def newProviderRuntimeHub : IO ProviderRuntimeHub := do
   let mu ← Std.Mutex.new ({} : ProviderHubState)
@@ -1369,7 +1370,7 @@ def projectAntigravityAssist (aJv : JVal) : Option String × Bool := Id.run do
   let needsVerification := !hasProject && ineligible && !hasTierObj
   return (plan?, needsVerification)
 
-def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
+def fetchLiveProviderUsage (hp : HydratedProvider) (resolveTransport? : Option ResolveTransport := none) : IO JVal := do
   let nowSec ← nowEpoch
   let nowIso := formatEpochIso8601Utc nowSec
   let pType := hp.providerType.toLower
@@ -1393,7 +1394,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
   -- 1. OpenAI Codex OAuth (`wham/usage`) or OpenAI API Key rate-limit probe
   if pType == "openai" then
     if hp.hasOAuth && !hp.oauthToken.isEmpty then
-      if let .ok (code, _, some wham) ← sendJsonRequest "GET" "https://chatgpt.com/backend-api/wham/usage" (some hp.oauthToken) none #[] 6000 262144 then
+      if let .ok (code, _, some wham) ← sendJsonRequest (resolveTransport? := resolveTransport?) "GET" "https://chatgpt.com/backend-api/wham/usage" (some hp.oauthToken) none #[] 6000 262144 then
         if 200 ≤ code && code < 300 then
           let (fields, windows, primary) := projectCodexUsage wham
           extraFields := fields
@@ -1408,7 +1409,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
         ("max_tokens", JVal.nat 1),
         ("messages", .arr #[.obj #[("role", .str "user"), ("content", .str "hi")]])
       ])).toUTF8
-      if let .ok resp ← sendRequest "POST" "https://api.openai.com/v1/chat/completions" hdrs probeBody 6000 65536 then
+      if let .ok resp ← sendRequest (resolveTransport? := resolveTransport?) "POST" "https://api.openai.com/v1/chat/completions" hdrs probeBody 6000 65536 then
         extraFields := extraFields.push ("status_code", JVal.nat resp.status)
         if resp.status == 401 || resp.status == 403 then
           statusStr := "needs_reauth"
@@ -1442,7 +1443,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
           ("messages", .arr #[.obj #[("role", .str "user"), ("content", .str "hi")]])
         ]
       let probeBody := (renderCompact (.obj probeObj)).toUTF8
-      if let .ok resp ← sendRequest "POST" "https://api.anthropic.com/v1/messages" hdrs probeBody 6000 65536 then
+      if let .ok resp ← sendRequest (resolveTransport? := resolveTransport?) "POST" "https://api.anthropic.com/v1/messages" hdrs probeBody 6000 65536 then
         extraFields := extraFields.push ("status_code", JVal.nat resp.status)
         if resp.status == 401 || resp.status == 403 then
           statusStr := "needs_reauth"
@@ -1486,7 +1487,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
       -- Model-specific weekly limits (Opus, Sonnet, Fable, ...) are metered apart from the
       -- overall weekly limit and only reported by the OAuth usage endpoint.
       if !hp.oauthToken.isEmpty then
-        if let .ok (code, _, some uJv) ← sendJsonRequest "GET" "https://api.anthropic.com/api/oauth/usage"
+        if let .ok (code, _, some uJv) ← sendJsonRequest (resolveTransport? := resolveTransport?) "GET" "https://api.anthropic.com/api/oauth/usage"
             (some hp.oauthToken) none #[("anthropic-beta", "oauth-2025-04-20")] 6000 65536 then
           if 200 ≤ code && code < 300 then
             let wins := anthropicModelWindows uJv
@@ -1496,7 +1497,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
   else if pType == "kimi" then
     let tok := if !hp.oauthToken.isEmpty then hp.oauthToken else hp.apiKey
     if !tok.isEmpty then
-      if let .ok (code, _, body?) ← sendJsonRequest "GET" "https://api.kimi.com/coding/v1/usages" (some tok) none #[("User-Agent", "KimiCLI/1.5")] 5000 262144 then
+      if let .ok (code, _, body?) ← sendJsonRequest (resolveTransport? := resolveTransport?) "GET" "https://api.kimi.com/coding/v1/usages" (some tok) none #[("User-Agent", "KimiCLI/1.5")] 5000 262144 then
         if 200 ≤ code && code < 300 then
           if let some kJv := body? then
             let (fields, windows, primary) := projectKimiUsage kJv nowSec
@@ -1506,7 +1507,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
         else if code == 401 || code == 403 then
           statusStr := "needs_reauth"
     if !hp.apiKey.isEmpty then
-      if let .ok (bCode, _, some bJv) ← sendJsonRequest "GET" "https://api.moonshot.ai/v1/users/me/balance" (some hp.apiKey) none #[] 5000 65536 then
+      if let .ok (bCode, _, some bJv) ← sendJsonRequest (resolveTransport? := resolveTransport?) "GET" "https://api.moonshot.ai/v1/users/me/balance" (some hp.apiKey) none #[] 5000 65536 then
         if 200 ≤ bCode && bCode < 300 then
           let dObj := (bJv.field? "data").getD bJv
           if let some avail := (dObj.field? "available_balance").bind jvalNumRaw? then
@@ -1518,7 +1519,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
 
   -- 4. Z.ai Quota Monitor
   else if pType == "zai" && !hp.apiKey.isEmpty then
-    if let .ok (code, _, body?) ← sendJsonRequest "GET" "https://api.z.ai/api/monitor/usage/quota/limit" none none #[("Authorization", hp.apiKey)] 5000 262144 then
+    if let .ok (code, _, body?) ← sendJsonRequest (resolveTransport? := resolveTransport?) "GET" "https://api.z.ai/api/monitor/usage/quota/limit" none none #[("Authorization", hp.apiKey)] 5000 262144 then
       if 200 ≤ code && code < 300 then
         if let some zJv := body? then
           let (fields, windows, primary) := projectZaiUsage zJv
@@ -1532,7 +1533,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
   else if pType == "muse-code" then
     let tok := if !hp.oauthToken.isEmpty then hp.oauthToken else hp.apiKey
     if !tok.isEmpty then
-      match ← sendJsonRequest "POST" "https://api.meta.ai/muse-code/key" (some tok) (some (.obj #[])) #[] 5000 262144 with
+      match ← sendJsonRequest (resolveTransport? := resolveTransport?) "POST" "https://api.meta.ai/muse-code/key" (some tok) (some (.obj #[])) #[] 5000 262144 with
       | .ok (code, _, body?) =>
         if 200 ≤ code && code < 300 then
           if let some mJv := body? then
@@ -1556,10 +1557,10 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
     if !hp.oauthToken.isEmpty then
       let xHdrs := #[("x-xai-token-auth", "xai-grok-cli"), ("User-Agent", "grok-cli/0.1.0")]
       let mut settingsJv? : Option JVal := none
-      if let .ok (sCode, _, some sJv) ← sendJsonRequest "GET" "https://cli-chat-proxy.grok.com/v1/settings" (some hp.oauthToken) none xHdrs 5000 65536 then
+      if let .ok (sCode, _, some sJv) ← sendJsonRequest (resolveTransport? := resolveTransport?) "GET" "https://cli-chat-proxy.grok.com/v1/settings" (some hp.oauthToken) none xHdrs 5000 65536 then
         if 200 ≤ sCode && sCode < 300 then settingsJv? := some sJv
         else if sCode == 401 || sCode == 403 then statusStr := "needs_reauth"
-      if let .ok (bCode, _, body?) ← sendJsonRequest "GET" "https://cli-chat-proxy.grok.com/v1/billing?format=credits" (some hp.oauthToken) none xHdrs 5000 262144 then
+      if let .ok (bCode, _, body?) ← sendJsonRequest (resolveTransport? := resolveTransport?) "GET" "https://cli-chat-proxy.grok.com/v1/billing?format=credits" (some hp.oauthToken) none xHdrs 5000 262144 then
         if 200 ≤ bCode && bCode < 300 then
           if let some bJv := body? then
             let (fields, windows, primary) := projectXaiBillingUsage bJv settingsJv?
@@ -1569,7 +1570,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
         else if bCode == 401 || bCode == 403 then
           statusStr := "needs_reauth"
     if !hp.apiKey.isEmpty then
-      if let .ok (kCode, _, body?) ← sendJsonRequest "GET" "https://api.x.ai/v1/api-key" (some hp.apiKey) none #[] 5000 65536 then
+      if let .ok (kCode, _, body?) ← sendJsonRequest (resolveTransport? := resolveTransport?) "GET" "https://api.x.ai/v1/api-key" (some hp.apiKey) none #[] 5000 65536 then
         extraFields := extraFields.push ("status_code", JVal.nat kCode)
         if 200 ≤ kCode && kCode < 300 then
           if let some kJv := body? then
@@ -1586,7 +1587,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
   else if pType == "minimax" then
     let tok := if !hp.apiKey.isEmpty then hp.apiKey else hp.oauthToken
     if !tok.isEmpty then
-      if let .ok (code, _, body?) ← sendJsonRequest "GET" "https://www.minimax.io/v1/api/openplatform/coding_plan/remains" (some tok) none #[] 6000 262144 then
+      if let .ok (code, _, body?) ← sendJsonRequest (resolveTransport? := resolveTransport?) "GET" "https://www.minimax.io/v1/api/openplatform/coding_plan/remains" (some tok) none #[] 6000 262144 then
         if 200 ≤ code && code < 300 then
           if let some mJv := body? then
             let (fields, windows, primary) := projectMinimaxUsage mJv
@@ -1604,7 +1605,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
       ("max_tokens", JVal.nat 1),
       ("messages", .arr #[.obj #[("role", .str "user"), ("content", .str "hi")]])
     ])).toUTF8
-    if let .ok resp ← sendRequest "POST" "https://api.cerebras.ai/v1/chat/completions" hdrs probeBody 6000 65536 then
+    if let .ok resp ← sendRequest (resolveTransport? := resolveTransport?) "POST" "https://api.cerebras.ai/v1/chat/completions" hdrs probeBody 6000 65536 then
       extraFields := extraFields.push ("status_code", JVal.nat resp.status)
       if resp.status == 401 || resp.status == 403 then
         statusStr := "needs_reauth"
@@ -1626,7 +1627,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
     let ua := #[("User-Agent", "antigravity")]
     let assistBody : JVal := .obj #[("metadata", .obj #[
       ("ideType", .str "ANTIGRAVITY"), ("platform", .str "PLATFORM_UNSPECIFIED"), ("pluginType", .str "GEMINI")])]
-    if let .ok (code, _, some aJv) ← sendJsonRequest "POST" s!"{base}:loadCodeAssist" (some hp.oauthToken) (some assistBody) ua 10000 262144 then
+    if let .ok (code, _, some aJv) ← sendJsonRequest (resolveTransport? := resolveTransport?) "POST" s!"{base}:loadCodeAssist" (some hp.oauthToken) (some assistBody) ua 10000 262144 then
       if 200 ≤ code && code < 300 then
         let (plan?, needsVerif) := projectAntigravityAssist aJv
         if let some plan := plan? then
@@ -1641,12 +1642,12 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
         let quotaBody : JVal := if projStr.trimAscii.isEmpty then .obj #[] else .obj #[("project", .str projStr.trimAscii.toString)]
         let mut windows : Array JVal := #[]
         let mut unauthorized := false
-        if let .ok (c2, _, some sJv) ← sendJsonRequest "POST" s!"{base}:retrieveUserQuotaSummary" (some hp.oauthToken) (some quotaBody) ua 10000 1048576 then
+        if let .ok (c2, _, some sJv) ← sendJsonRequest (resolveTransport? := resolveTransport?) "POST" s!"{base}:retrieveUserQuotaSummary" (some hp.oauthToken) (some quotaBody) ua 10000 1048576 then
           if 200 ≤ c2 && c2 < 300 then windows := parseAntigravitySummary sJv
           else if c2 == 401 || c2 == 403 then unauthorized := true
         let hasGemini := windows.any fun w => ((w.fieldStr? "label").getD "").startsWith "Gemini"
         if !unauthorized && (windows.isEmpty || !hasGemini) then
-          if let .ok (c3, _, some qJv) ← sendJsonRequest "POST" s!"{base}:retrieveUserQuota" (some hp.oauthToken) (some quotaBody) ua 10000 1048576 then
+          if let .ok (c3, _, some qJv) ← sendJsonRequest (resolveTransport? := resolveTransport?) "POST" s!"{base}:retrieveUserQuota" (some hp.oauthToken) (some quotaBody) ua 10000 1048576 then
             if 200 ≤ c3 && c3 < 300 then
               if windows.isEmpty then windows := parseAntigravityQuota qJv
               else if let some g := antigravityGeminiWindow? qJv (← nowEpoch) then windows := #[g] ++ windows
@@ -1673,7 +1674,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) : IO JVal := do
 private def probeProviderUsage (hub : ProviderRuntimeHub) (hp : HydratedProvider) : IO JVal :=
   match hub.usageProbe? with
   | some probe => probe hp.id
-  | none => fetchLiveProviderUsage hp
+  | none => fetchLiveProviderUsage hp (hub.resolveTransport?.map (fun resolve => resolve hp.id))
 
 private def refreshProviderUsageAsync (hub : ProviderRuntimeHub) (hp : HydratedProvider) : IO Unit := do
   let generation ← hub.mu.atomically (do return (← get).usageGeneration)

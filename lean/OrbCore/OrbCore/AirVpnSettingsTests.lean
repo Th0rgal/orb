@@ -50,6 +50,14 @@ def run (root : String) : IO Unit := do
     let .ok released ← AccountVpnPool.lockExits root (cat "codex") [.v4 2] | throw (IO.userError "partial lease retained")
     released.forM fun fd => OrbBin.PosixExt.closeFdRaw fd.toInt32
   finally firstLocks.forM fun fd => OrbBin.PosixExt.closeFdRaw fd.toInt32
+  let reject : OrbBin.HttpClient.ResolveTransport := pure (.error "account_vpn_unavailable")
+  let denied ← OrbBin.HttpClient.sendJsonRequest "GET" "https://example.invalid/quota" none none #[] 50 4096
+    (resolveTransport? := some reject)
+  check (match denied with | .error e => e == "account_vpn_unavailable" | _ => false) "quota request requires verified transport"
+  let viaVpn : OrbBin.HttpClient.ResolveTransport := pure (.ok (some 30001))
+  let plain ← OrbBin.HttpClient.sendRequest "GET" "http://127.0.0.1:1/status"
+    (resolveTransport? := some viaVpn)
+  check (match plain with | .error e => e == "vpn_requires_tls" | _ => false) "plaintext quota bypass rejected"
   routeStorage root
   let parseIp := AirVpnObservation.parseExit?
   let v4 := Orb.AccountVpn.ExitAddress.v4 0x01020304

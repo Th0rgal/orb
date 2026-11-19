@@ -120,6 +120,13 @@ def allocate (pool : Pool) (root dir : String) (db : SqliteDb) (account provider
         failure := e
   return .error failure
 
+def resolve (pool? : Option Pool) (store : OrbCore.Store.CoreStore) (dir account : String) :
+    OrbBin.HttpClient.ResolveTransport :=
+  AccountVpnRoutes.resolve store.missionsDb account fun pref => do
+    let some pool := pool? | return .error "vpn_coordinator_unavailable"
+    let some record ← OrbCore.Store.getAIProvider? store account | return .error "vpn_credential_owner_unknown"
+    allocate pool store.rootDir dir store.missionsDb record.id record.providerType pref
+
 def shutdown (pool : Pool) : IO Unit := pool.atomically do
   for t in ← get do drain t
   set ([] : List Active)
