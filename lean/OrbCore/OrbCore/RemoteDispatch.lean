@@ -411,6 +411,13 @@ def missionHasManagedPlacement (store : CoreStore) (mc? : Option ManagedComputeS
         #[missionId] with
     | .error _ => return true
     | .ok rows => if rows.size > 1 then return true
+  -- A bound job is stronger evidence than a placement request such as `auto`.
+  -- In particular, the static fleet may have changed since dispatch.
+  if let .ok rows ← execParamQuery store.missionsDb
+      ("SELECT node_id FROM remote_node_jobs WHERE mission_id=?1 AND node_id<>'' " ++
+       "AND state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted') " ++
+       "ORDER BY updated_at DESC, rowid DESC LIMIT 1;") #[missionId] then
+    if ((rows[1]?.bind (·[0]?)).getD "").startsWith "managed-" then return true
   let some target ← resolveMissionRemoteNode? store mc? missionId | return false
   if target.startsWith "managed-" || target == "auto-managed" || target.startsWith "auto-managed:" then
     return true
