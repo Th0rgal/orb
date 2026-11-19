@@ -4874,7 +4874,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               }
               match ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec with
               | .ok _ =>
-                initStatus := if remoteGoal then ((← getMission? st.store mid).map (·.status)).getD "active" else "active"
+                initStatus ← if remoteGoal then pure (((← getMission? st.store mid).map (·.status)).getD "active") else pure "active"
               | .error dispErr =>
                 if remoteGoal && (dispErr == "remote_goal_dispatch_fenced" || dispErr.startsWith "remote_dispatch_uncertain:" ||
                     dispErr.startsWith "remote_accept_persist_failed:") then
