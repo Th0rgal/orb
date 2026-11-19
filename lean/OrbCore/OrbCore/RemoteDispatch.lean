@@ -1896,11 +1896,19 @@ end
 
 /-! ## Startup Re-Attachment of Live Remote Jobs -/
 
+/-- Run after acquiring listen ownership and before admitting any new work.
+    Mark all orphaned Goal submissions, including rows outside the probe limit. -/
+def fenceInterruptedGoalSubmissions (store : CoreStore) : IO (Except String Unit) := do
+  ensureDurableJobsTableLocal store
+  let result ← execParamQuery store.missionsDb
+    ("UPDATE remote_node_jobs SET state='uncertain' WHERE state='submitting' " ++
+     "AND instr(payload_json,'\"goal_generation\":null')=0 AND instr(payload_json,'\"goal_generation\":')>0;") #[]
+  return result.map (fun _ => ())
+
 /-- Probe remote submissions whose acceptance was never durably confirmed.
-    Only startup may demote Goal submissions left in `submitting` by a dead
-    Core; periodic probes must leave live POSTs alone. A found job is attached
-    to its original id; a missing job is settled; an unreachable Goal job stays
-    `uncertain` for the next pass. -/
+    Both startup and periodic probes leave live Goal POSTs alone. A found job
+    is attached to its original id; a missing job is settled; an unreachable
+    Goal job stays `uncertain` for the next pass. -/
 def reconcileUncertainRemoteSubmissions
     (store : CoreStore)
     (mc? : Option ManagedComputeStore)
@@ -1911,16 +1919,11 @@ def reconcileUncertainRemoteSubmissions
   ensureDurableJobsTableLocal store
   let nowSec ← nowEpoch
   let nowIso := formatEpochIso8601Utc nowSec
-  if startup then
-    -- Do this before the bounded scan, including rows outside its first page.
-    let .ok _ ← execParamQuery store.missionsDb
-      ("UPDATE remote_node_jobs SET state='uncertain' WHERE state='submitting' " ++
-       "AND instr(payload_json,'\"goal_generation\":null')=0 AND instr(payload_json,'\"goal_generation\":')>0;")
-      #[] | return 0
   let .ok rows ← execParamQuery store.missionsDb
       ("SELECT j.job_id, COALESCE(j.node_id,''), COALESCE(j.mission_id,''), COALESCE(j.payload_json,'{}') " ++
        "FROM remote_node_jobs j JOIN missions m ON m.id=j.mission_id " ++
-        "WHERE (j.state IN ('uncertain','submitting') AND ?1='1') OR " ++
+         "WHERE (j.state IN ('uncertain','submitting') AND ?1='1' " ++
+         "AND NOT (j.state='submitting' AND instr(j.payload_json,'\"goal_generation\":null')=0 AND instr(j.payload_json,'\"goal_generation\":')>0)) OR " ++
         "(j.state='uncertain' AND instr(j.payload_json,'\"goal_generation\":null')=0 AND instr(j.payload_json,'\"goal_generation\":')>0) " ++
         "ORDER BY j.updated_at ASC LIMIT 64;")
        #[if startup then "1" else "0"] | return 0

@@ -115,6 +115,7 @@ private def verifyGoalStartupRetry (store : CoreStore) (sup : RemoteJobSuperviso
   let reconcile := fun startup => reconcileUncertainRemoteSubmissions store none none none sup root startup
   check ((← reconcile false) == 0 && (← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jid]) == "submitting")
     "periodic reconciliation leaves an in-flight POST alone"
+  let .ok () ← fenceInterruptedGoalSubmissions store | throw (IO.userError "Goal startup fixture fence")
   let failedProbe ← IO.asTask do
     withMockNodeRequest fd fun _ req =>
       check (req.method == "GET" && req.path == s!"/jobs/{jid}") "startup probes original job before losing transport"
@@ -487,6 +488,11 @@ def run : IO Unit := do
            let jid := (jv.fieldStr? "job_id").getD ""
            check (req.method == "POST" && req.path == "/jobs" && !jid.isEmpty) "initial Goal POST received"
            postedJob.set jid
+           -- The synchronous boot fence has already run. A late background startup scan
+           -- can overlap this live request, but must not probe or demote its intent.
+           let startupAttached ← reconcileUncertainRemoteSubmissions store none none none sup root
+           check (startupAttached == 0 && (← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jid]) == "submitting")
+             "background startup scan leaves a live Goal POST owned by its submitter"
            let stopped ← send "/api/control/missions/m-initial-goal-stop/stop" "{}"
            check (stopped.status == 200) "Stop commits while initial remote POST is in flight"
            mockNodeReply conn "200 OK" "{\"accepted\":true}"

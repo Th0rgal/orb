@@ -7999,8 +7999,6 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       systemHub? := some systemHub
       remoteSup? := some remoteSup
     }
-    if maxRequests?.isNone then
-      startCloudSupervisorLoop cloudHub store (some broadcastHub) cfg.port
     let bindHost := if cfg.host == "localhost" then "127.0.0.1" else cfg.host
     let .ok (listenFd, boundPort) ← tcpListen bindHost cfg.port 128
       | do
@@ -8010,6 +8008,13 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
         IO.eprintln s!"[sandboxed-sh] FATAL: failed to bind {bindHost}:{cfg.port}"
         return 1
     remoteSup.boundPortRef.set boundPort
+    if let .error e ← fenceInterruptedGoalSubmissions store then
+      discard <| LeanSys.Posix.closeFd listenFd
+      stopMacTetherRuntime macTetherRt
+      closeManagedComputeStore managedStore
+      closeCoreStore store
+      IO.eprintln s!"[sandboxed-sh] FATAL: Goal submission startup fence failed: {e}"
+      return 1
     let lostTurns ← interruptTurnsLostToRestart store.missionsDb
     if lostTurns > 0 then
       IO.eprintln s!"[sandboxed-sh] {lostTurns} mission turn(s) lost to the restart marked interrupted"
@@ -8021,6 +8026,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       IO.eprintln s!"[sandboxed-sh] generic action recovery failed: {e}"
     IO.eprintln s!"[sandboxed-sh] listening on http://{bindHost}:{boundPort} (dev_mode={cfg.devMode})"
     if maxRequests?.isNone then
+      startCloudSupervisorLoop cloudHub store (some broadcastHub) cfg.port
       let localWakeupLaunch : MissionRecord → String → Option String → IO Bool :=
         fun mr prompt sid? => do
           match ← launchLocalCoreMissionTurn appState mr.id mr.backend mr.workingDirectory prompt mr.modelOverride mr.modelEffort "bypassPermissions" sid? "local" false with

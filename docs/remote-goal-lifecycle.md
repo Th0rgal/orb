@@ -25,8 +25,9 @@ Core records its job ID under that generation. A recovered continuation claim
 without a job intent can proceed; with an intent, Core probes that same job ID.
 Core cannot attach that job to the mission after Stop, and requests cancellation
 if the node accepted it. A committed Stop is not proof of remote process exit.
-On restart, Core marks unresolved Goal submissions uncertain before probing,
-so periodic reconciliation can retry even if the first probe fails.
+On restart, Core marks unresolved Goal submissions uncertain before admitting
+new work. Background probes leave live submissions alone and can retry an
+uncertain job even if the first probe fails.
 
 The sections below record the original baseline, pure policy and broader design
 requirements; they describe more than the X7 adapter implements.
