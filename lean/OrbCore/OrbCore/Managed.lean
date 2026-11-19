@@ -710,12 +710,7 @@ private def loadOrCreateMasterKey (rootDir : String) : IO (Except String ByteArr
     | .error e => return .error e
     | .ok () => return .ok k
 
-def sealProviderSecret (rootDir provider plaintext : String) : IO (Except String Unit) := do
-  if admitCoreReservedSecret false true != 257 then
-    return .error "core_reserved_secret_rejected"
-  let prov := canonicalizeProvider provider
-  if !isKnownProvider prov || plaintext.isEmpty then
-    return .error "invalid_provider_secret"
+private def sealReservedValue (rootDir prov plaintext : String) : IO (Except String Unit) := do
   match ← ensurePrivateDir0700 (managedSecretDir rootDir) with
   | .error e => return .error e
   | .ok () =>
@@ -734,14 +729,15 @@ def sealProviderSecret (rootDir provider plaintext : String) : IO (Except String
     finally
       closeFdRaw lock.toInt32
 
-def openProviderSecret (rootDir provider : String)
-    (callerOnManagedNode : Bool) (operatorBreakGlass : Bool := true) :
-    IO (Except String String) := do
-  if admitCoreReservedSecret callerOnManagedNode operatorBreakGlass != 257 then
+def sealProviderSecret (rootDir provider plaintext : String) : IO (Except String Unit) := do
+  if admitCoreReservedSecret false true != 257 then
     return .error "core_reserved_secret_rejected"
   let prov := canonicalizeProvider provider
-  if !isKnownProvider prov then
+  if !isKnownProvider prov || plaintext.isEmpty then
     return .error "invalid_provider_secret"
+  sealReservedValue rootDir prov plaintext
+
+private def openReservedValue (rootDir prov : String) : IO (Except String String) := do
   let .ok key ← readPrivate0600 (managedMasterKeyPath rootDir)
     | return .error "master_key_unavailable"
   if key.size != 32 then
@@ -756,6 +752,45 @@ def openProviderSecret (rootDir provider : String)
   match ← aeadOpen .aes256Gcm key nonce aad sealed with
   | .error e => return .error e
   | .ok pt => return .ok (String.fromUTF8? pt |>.getD "")
+
+def openProviderSecret (rootDir provider : String)
+    (callerOnManagedNode : Bool) (operatorBreakGlass : Bool := true) :
+    IO (Except String String) := do
+  if admitCoreReservedSecret callerOnManagedNode operatorBreakGlass != 257 then
+    return .error "core_reserved_secret_rejected"
+  let prov := canonicalizeProvider provider
+  if !isKnownProvider prov then
+    return .error "invalid_provider_secret"
+  openReservedValue rootDir prov
+
+/-- AirVPN uses the Core-only encrypted store, with names outside the
+managed-compute provider catalog. Untrusted path components never reach disk. -/
+inductive AirVpnSecret where
+  | apiKey
+  | device (id : String)
+
+private def AirVpnSecret.slot? : AirVpnSecret → Option String
+  | .apiKey => some "airvpn-api"
+  | .device id =>
+    if !id.isEmpty && id.length ≤ 64 && id.all (fun c =>
+        ('a' ≤ c && c ≤ 'z') || ('0' ≤ c && c ≤ '9') || c == '-') then
+      some ("airvpn-device-" ++ id)
+    else none
+
+def sealAirVpnSecret (rootDir : String) (secret : AirVpnSecret) (value : String) :
+    IO (Except String Unit) := do
+  let some slot := secret.slot? | return .error "invalid_airvpn_device"
+  if value.trimAscii.isEmpty then return .error "empty_airvpn_secret"
+  sealReservedValue rootDir slot value
+
+def openAirVpnSecret (rootDir : String) (secret : AirVpnSecret) :
+    IO (Except String String) := do
+  let some slot := secret.slot? | return .error "invalid_airvpn_device"
+  openReservedValue rootDir slot
+
+def airVpnSecretConfigured (rootDir : String) (secret : AirVpnSecret) : IO Bool := do
+  let some slot := secret.slot? | return false
+  (managedSecretPath rootDir slot).pathExists
 
 def observeManagedProviderCatalog (dataRoot : String) (catalog : JVal)
     (transport? : Option ManagedProvider.Transport := none)

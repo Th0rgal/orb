@@ -13,6 +13,7 @@ import OrbCore.ManagedProviderTests
 import OrbCore.ManagedProviderLeanciTests
 import OrbCore.ManagedProviderColabTests
 import OrbCore.ManagedProviderSealingTests
+import OrbCore.AirVpnSettingsTests
 import OrbCore.ManagedProviderAvailabilityTests
 import OrbCore.ManagedSpawnActionsTests
 import OrbCore.ManagedProvisioningTests
@@ -7964,6 +7965,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     OrbCore.PrivdNodeAuthTests.run tmpRoot
     OrbCore.ManagedSnapshotCatalogTests.run tmpRoot
     OrbCore.ManagedProviderSealingTests.run tmpRoot
+    OrbCore.AirVpnSettingsTests.run tmpRoot
     OrbCore.ManagedProviderAvailabilityTests.run tmpRoot
     OrbCore.ManagedSpawnActionsTests.run store
   catch e =>

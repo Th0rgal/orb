@@ -34,6 +34,7 @@ import OrbCore.LegacyHydrate
 import OrbCore.SecretAndApproval
 import OrbCore.RemoteFleetAndRelay
 import OrbCore.ManagedProviderSealing
+import OrbCore.AirVpnSettings
 import OrbCore.AutoPlacement
 import OrbCore.RemoteDispatch
 import OrbCore.ProjectFilesAndController
@@ -3511,6 +3512,15 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   let some caller ← resolveCallerPrincipal? st req.headers nowEpochSec
     | return .ok (mkJson 401 "{\"error\":\"unauthorized\"}")
   let utcDay := currentUtcDay nowEpochSec
+
+  if cleanPath == "/api/settings/airvpn" then
+    if let some (status, body) := requireAdminPrincipal caller then
+      return .ok (mkJson status body)
+    let token := (extractBearerToken? req.headers nowEpochSec).getD ""
+    unless token.startsWith "orb-jwt-v2:" && !st.cfg.devMode do
+      return .ok (mkJson 403 "{\"error\":\"operator_session_required\"}")
+    let (status, body) ← OrbCore.AirVpnSettings.settings st.store.rootDir req.method req.bodySlice.toByteArray
+    return .ok (mkJson status (renderCompact body))
 
   -- Explicit operator-triggered vault-to-Core sealing. Reauthenticate with dev
   -- bypass disabled: an open dev-mode API must not grant vault authority.
