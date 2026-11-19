@@ -6550,7 +6550,9 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
   if frSt != 200 || (frBody.splitOn "\"sources\"").length < 2 || fsSt != 200 || !fsBody.trimAscii.toString.startsWith "[" then
     return (← fail s!"file-resources / fs/list failed: fr={frSt}:{frBody} fs={fsSt}:{fsBody}")
 
+  IO.eprintln s!"{← IO.monoMsNow} START prod parity: GET /api/software"
   let (swSt, swBody) ← sendJson "GET" "/api/software" hsJwt ""
+  IO.eprintln s!"{← IO.monoMsNow} END prod parity: GET /api/software rc={swSt}"
   let (msSt, msBody) ← sendJson "GET" "/api/mesh/status" hsJwt ""
   let (ghSt, ghBody) ← sendJson "GET" "/api/integrations/github/status" hsJwt ""
   if swSt != 200 || (swBody.splitOn "\"node_name\":\"orb-core\"").length < 2 ||
@@ -7808,6 +7810,38 @@ def runLibraryParityGroup : IO UInt32 := do
     | some value => OrbBin.PosixExt.setenvVar "LIBRARY_PATH" value
     | none => OrbBin.PosixExt.unsetenvVar "LIBRARY_PATH"
 
+def runSoftwareVersionProbeTest : IO UInt32 := do
+  IO.FS.withTempDir fun root => do
+    let cli := root / "version fixture"
+    let run (body : String) : IO (Option String) := do
+      IO.FS.writeFile cli ("#!/bin/sh\n[ \"$#:$1\" = '1:--version' ] || exit 77\n" ++ body ++ "\n")
+      let rc ← OrbBin.PosixExt.chmod cli.toString 0o700
+      if rc != 0 then throw (IO.userError "chmod version fixture failed")
+      probeSoftwareVersion cli.toString
+    if (← run "printf '  Hermes Agent fixture  \\nsecond line\\n'") != some "Hermes Agent fixture" ||
+       (← run "printf 'a banner is not a successful version\\n'; exit 2").isSome then
+      IO.eprintln "[orb-core-test] FAIL: software version probe exit status or first line"
+      return 1
+    let start ← IO.monoMsNow
+    -- The descendant inherits stdout. Make it resist TERM but exit on its own
+    -- as a backstop so a regression fails promptly even without an outer timeout.
+    let version ← run "(trap '' TERM; exec sleep 8) & wait; printf 'too late\\n'"
+    let elapsed := (← IO.monoMsNow) - start
+    if version.isSome || elapsed > 6000 then
+      IO.eprintln s!"[orb-core-test] FAIL: stalled software version probe returned {version} in {elapsed}ms"
+      return 1
+    return 0
+
+private def traceTest (name : String) (test : IO α) : IO α := do
+  IO.eprintln s!"{← IO.monoMsNow} START {name}"
+  try
+    let result ← test
+    IO.eprintln s!"{← IO.monoMsNow} END {name}"
+    return result
+  catch e =>
+    IO.eprintln s!"{← IO.monoMsNow} ERROR {name}"
+    throw e
+
 set_option maxHeartbeats 800000 in
 set_option maxRecDepth 4000 in
 def runSuite (emitLogPath? : Option String) : IO UInt32 := do
@@ -7899,7 +7933,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   let .ok store ← openCoreStore tmpRoot
     | do IO.eprintln "[orb-core-test] FAIL: openCoreStore failed"; return 1
   try
-    OrbCore.TenantIsolationTests.run tmpRoot
+    traceTest "TenantIsolationTests.run" (OrbCore.TenantIsolationTests.run tmpRoot)
     OrbCore.ManagedProvisioningTests.run tmpRoot
     OrbCore.ManagedResumeTests.run tmpRoot
     OrbCore.DevSpendingTests.run tmpRoot
@@ -9124,14 +9158,14 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     IO.eprintln "[orb-core-test] FAIL: OrbCore.HostTests failed"
     return 1
   if (← runR5bManagedStoreTests prodValid) != 0 then return 1
-  if (← runR7CoreTests prodValid) != 0 then return 1
-  if (← runMultiUserCoreTests prodValid) != 0 then return 1
-  if (← runWarmClaudeControlAndCheckpointsCoreTests prodValid) != 0 then return 1
-  if (← runZeroWaitPerfAndSyncTests prodValid) != 0 then return 1
-  if (← runOrbUriCorsTests) != 0 then return 1
-  if (← runProdParityAndMissionMoveTests prodValid) != 0 then return 1
-  if (← runRemoteDispatchWakeupAndBtwTests prodValid) != 0 then return 1
-  if (← runLibraryParityGroup) != 0 then return 1
+  if (← traceTest "R7Core" (runR7CoreTests prodValid)) != 0 then return 1
+  if (← traceTest "MultiUserCore" (runMultiUserCoreTests prodValid)) != 0 then return 1
+  if (← traceTest "WarmClaudeControlAndCheckpoints" (runWarmClaudeControlAndCheckpointsCoreTests prodValid)) != 0 then return 1
+  if (← traceTest "ZeroWaitPerfAndSync" (runZeroWaitPerfAndSyncTests prodValid)) != 0 then return 1
+  if (← traceTest "OrbUriCors" runOrbUriCorsTests) != 0 then return 1
+  if (← traceTest "ProdParityAndMissionMove" (runProdParityAndMissionMoveTests prodValid)) != 0 then return 1
+  if (← traceTest "RemoteDispatchWakeupAndBtw" (runRemoteDispatchWakeupAndBtwTests prodValid)) != 0 then return 1
+  if (← traceTest "LibraryParity" runLibraryParityGroup) != 0 then return 1
 
   IO.println "{\"ok\":true,\"binary\":\"orb-core-test\",\"spec_gates\":11,\"harness_contracts\":10,\"host_tests\":99}"
   return 0
@@ -9195,9 +9229,12 @@ def main (args : List String) : IO UInt32 := do
     return ← OrbCore.SelfTest.runCyberSkillGroup false false true
   if args.contains "--library-parity-only" then
     return ← OrbCore.SelfTest.runLibraryParityGroup
+  if args.contains "--software-version-only" then
+    return ← OrbCore.SelfTest.runSoftwareVersionProbeTest
   if args.contains "--prod-parity-only" then
     return ← OrbCore.SelfTest.runCyberSkillGroup false false false true
   OrbCore.SettingsDocumentTests.run
   OrbCore.LegacyMigrationTests.run
   OrbCore.SettingsTransferTests.run
+  if (← OrbCore.SelfTest.runSoftwareVersionProbeTest) != 0 then return 1
   OrbCore.SelfTest.runSuite (OrbCore.SelfTest.findFlag? args "--emit-evidence-log")

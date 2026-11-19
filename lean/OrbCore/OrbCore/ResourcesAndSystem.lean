@@ -999,16 +999,24 @@ def resolveSoftwareStateDir : IO String := do
   let home := (← IO.getEnv "HOME").getD "/root"
   return s!"{home}/.local/state/agent-software"
 
+-- Inventory is best-effort. Host CLIs can block during startup or leave a
+-- descendant holding stdout, so don't wait for pipe EOF to get their version.
+def probeSoftwareVersion (binPath : String) : IO (Option String) := do
+  IO.FS.withTempFile fun output path => do
+    let sp ← spawnPgrp "/bin/sh"
+      #["-c", "exec \"$1\" --version >\"$2\"", "sh", binPath, path.toString]
+      (← environList) false true false
+    if (← waitPgrpBounded sp.pid 3000) != 0 then return none
+    let bytes ← output.read 8192
+    let line := (((String.fromUTF8? bytes).getD "").splitOn "\n").headD ""
+    let version := line.trimAscii.toString
+    return if version.isEmpty then none else some version
+
 private def probeComponentInventory (id name category binName : String) (unitName? : Option String) (updateMethod : String) : IO JVal := do
   let (rcWhich, whichOut) ← runCmdCapture "which" #[binName]
   let installed := rcWhich == 0
   let binPath := whichOut.trimAscii.toString
-  let mut ver : Option String := none
-  if installed && !binPath.isEmpty then
-    let (rcV, vOut) ← runCmdCapture binPath #["--version"]
-    if rcV == 0 then
-      let line1 := ((vOut.splitOn "\n").headD "").trimAscii.toString
-      if !line1.isEmpty then ver := some line1
+  let ver ← if installed && !binPath.isEmpty then probeSoftwareVersion binPath else pure none
   let mut svcJv : JVal := .null
   if let some unit := unitName? then
     let (rcAct, _) ← runCmdCapture "systemctl" #["is-active", "--quiet", unit]
