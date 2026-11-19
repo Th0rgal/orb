@@ -1,3 +1,4 @@
+import { AccountVpnSettings } from "./AccountVpnSettings";
 import { pollWhileVisible } from "./poll";
 import { cacheLoad, cachePeek, cachePeekArray, cachePut } from "./pageCache";
 import { swallow } from "./log";
@@ -1313,7 +1314,7 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
   };
   const email = () => a.account_email || p.usage?.account_email || a.name.match(/\(([^()]+@[^()]+)\)/)?.[1];
   const hasUsageDetails = () => hasProviderUsageDetails(p.usage, email());
-  const expandable = () => !!p.rank || resetSupported() || !!resetInfo() || status() === "out_of_credit" || status() === "auth_failed" || status() === "needs_verification" || status() === "disabled_by_provider" || a.provider_type === "antigravity" || (!!p.onEditKey && isKeyRow()) || (canReconnect() && needsAuth()) || mistralSubscription() || hasUsageDetails() || !!problem();
+  const expandable = () => isAdminUser() || !!p.rank || resetSupported() || !!resetInfo() || status() === "out_of_credit" || status() === "auth_failed" || status() === "needs_verification" || status() === "disabled_by_provider" || a.provider_type === "antigravity" || (!!p.onEditKey && isKeyRow()) || (canReconnect() && needsAuth()) || mistralSubscription() || hasUsageDetails() || !!problem();
   const plan = () => a.provider_type === "antigravity" ? p.usage?.antigravity_plan || "Subscription account"
     : a.provider_type === "google" ? (a.has_api_key && !a.has_oauth ? "API key" : "Model routing")
     : p.usage?.codex_plan_type || p.usage?.xai_plan || p.usage?.kimi_plan || p.usage?.zai_plan ? `${p.usage!.codex_plan_type || p.usage!.xai_plan || p.usage!.kimi_plan || p.usage!.zai_plan}`
@@ -1400,6 +1401,7 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
       <Show when={menu()}><Menu label="Actions" anchor={menuBtn} placement="bottom-end" width={196} class="popup-menu" onClose={() => setMenu(false)}><MenuList items={menuItems()} onPick={() => setMenu(false)} /></Menu></Show>
       <Show when={open() && expandable()}>
         <div class="p-acc-body">
+          <Show when={isAdminUser()}><AccountVpnSettings account={a.id} /></Show>
           <Show when={p.rank}>{r => <RankControls rank={r()} name={email() ?? a.name} title={title()} />}</Show>
           <Show when={mistralSubscription()}>
             <MistralUsageConnect a={a} usage={p.usage} onUsage={p.onUsage} />

@@ -267,6 +267,7 @@ struct OrbProvidersSettings: View {
                             Text("This login is disabled in CLIProxyAPI. Re-enable the Core provider to restore it.")
                                 .font(.caption).foregroundStyle(.orange)
                         }
+                        if isAdmin { OrbAccountVpnSettings(client: client, account: provider["id"].text).id(provider["id"].text) }
                         let manages = Self.canManageProvider(provider, isAdmin: isAdmin)
                         let unverified = detail["status"].text == "needs_verification"
                         if unverified && manages {
@@ -1127,5 +1128,63 @@ struct OrbCloudAccountsSettings: View {
         catch { self.error = "Cloud accounts unavailable."; loaded = true }
         do { usage = try await usageReq["accounts"] }
         catch { usage = .null }
+    }
+}
+
+
+private struct OrbAccountVpnSettings: View {
+    let client: OrbSettingsClient
+    let account: String
+    @State private var route: OrbJSON = .null
+    @State private var busy = false
+    @State private var error = ""
+
+    private func update(_ country: String? = nil) async {
+        guard !busy else { return }
+        busy = true
+        error = ""
+        defer { busy = false }
+        let path = "/api/ai/providers/\(OrbCore.escape(account))/vpn"
+        do {
+            if let country {
+                let fields: [String: OrbJSON] = country.isEmpty ? ["mode": .string("direct")] :
+                    ["mode": .string("vpn"), "country": .string(country)]
+                route = try await client.call(path, method: "PUT", body: .object(fields))
+            } else {
+                route = try await client.call(path)
+            }
+        } catch { self.error = error.localizedDescription }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading) {
+            if route != .null {
+                let selected = route["country"].text
+                let countries = Set(route["countries"].items.map(\.text) + [selected]).subtracting([""]).sorted()
+                Picker("Account connection", selection: Binding(get: { selected }, set: { value in
+                    Task { await update(value) }
+                })) {
+                    Text("Direct").tag("")
+                    ForEach(countries, id: \.self) { Text("AirVPN · " + $0).tag($0) }
+                }
+                .disabled(busy || !route["can_configure"].flag)
+                if !route["can_configure"].flag {
+                    Text("This credential’s connection is managed by the sidecar.").font(.caption)
+                } else if countries.isEmpty {
+                    Text("Import a named server profile in AirVPN Settings to enable VPN routing.").font(.caption)
+                }
+                if route["status"].text == "verified" {
+                    Text("Verified exit · " + route["server"].text + " · " + route["exits"].items.map(\.text).joined(separator: ", "))
+                } else if route["status"].text == "blocked" {
+                    Text(route["message"].text).font(.caption)
+                    Button("Retry verification") { Task { await update(selected) } }
+                        .disabled(busy || !route["can_configure"].flag)
+                }
+            }
+            if !error.isEmpty {
+                Text(error).font(.caption)
+                Button("Retry connection settings") { Task { await update() } }.disabled(busy)
+            }
+        }.task(id: account) { await update() }
     }
 }

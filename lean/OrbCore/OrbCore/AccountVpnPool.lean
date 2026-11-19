@@ -26,6 +26,7 @@ structure Active where
   tunnel : Tunnel
   evidence : VerifiedTunnel
   occupants : List Occupant
+  retiredLocks : List UInt32 := []
 
 abbrev Pool := Std.Mutex (List Active)
 
@@ -52,6 +53,25 @@ def lockExits (dir cat : String) (exits : List ExitAddress) : IO (Except String 
 private def drain (a : Active) : IO Unit := do
   a.tunnel.stop
   for o in a.occupants do unlock o.locks
+  unlock a.retiredLocks
+
+/-- On a shared transport, existing streams can outlive a preference change.
+Hold the old exit leases until the last occupant drains the transport. -/
+private def detach (active : List Active) (account : String) : IO (List Active) := do
+  let mut keep := []
+  for t in active do
+    let (leaving, others) := t.occupants.partition (fun o => o.binding.account == account)
+    if leaving.isEmpty then keep := t :: keep
+    else if others.isEmpty then drain t
+    else keep := { t with occupants := others, retiredLocks := t.retiredLocks ++ leaving.flatMap (·.locks) } :: keep
+  return keep.reverse
+
+def savePreference (pool : Pool) (db : SqliteDb) (account : String) (country? : Option String) :
+    IO (Except String Unit) := pool.atomically do
+  let .ok before ← AccountVpnRoutes.read db account | return .error "vpn_route_store_unavailable"
+  if let .error e ← AccountVpnRoutes.set db account country? then return .error e
+  if before.map (·.country) != country? then set (← detach (← get) account)
+  return .ok ()
 
 private def install (dir : String) (db : SqliteDb) (account cat : String) (pref : Preference)
     (t : Active) (others : List Active) : IO (Except String Active) := do
@@ -79,8 +99,10 @@ def allocate (pool : Pool) (root dir : String) (db : SqliteDb) (account provider
       if o.generation == pref.generation && o.binding.category == cat then
         if (← t.tunnel.verify root t.endpoint.server pref.country) == some t.evidence then
           return .ok t.tunnel.port
-      drain t
-      available := available.filter (fun a => a.tunnel.port != t.tunnel.port)
+        drain t
+        available := available.filter (fun a => a.tunnel.port != t.tunnel.port)
+      else
+        available ← detach available account
       set available
   let ready := available.flatMap (fun t => t.occupants.map (·.binding))
   let req : Request := ⟨account, cat, pref.country, some pref.preferredServer⟩
@@ -110,7 +132,7 @@ def allocate (pool : Pool) (root dir : String) (db : SqliteDb) (account provider
       if e == "airvpn_session_limit" || e == "vpn_coordinator_busy" then return .error e
       failure := e
     | .ok (tunnel, verified) =>
-      let active : Active := ⟨endpoint, tunnel, verified, []⟩
+      let active : Active := { endpoint, tunnel, evidence := verified, occupants := [] }
       match ← install dir db account cat pref active available with
       | .ok admitted =>
         set (admitted :: available)

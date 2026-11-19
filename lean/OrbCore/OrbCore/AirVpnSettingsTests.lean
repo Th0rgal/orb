@@ -1,6 +1,6 @@
 import OrbCore.AirVpnSettings
 import OrbCore.AirVpnTunnel
-import OrbCore.AccountVpnPool
+import OrbCore.AccountVpnApi
 
 namespace OrbCore.AirVpnSettingsTests
 
@@ -58,6 +58,20 @@ def run (root : String) : IO Unit := do
   let plain ← OrbBin.HttpClient.sendRequest "GET" "http://127.0.0.1:1/status"
     (resolveTransport? := some viaVpn)
   check (match plain with | .error e => e == "vpn_requires_tls" | _ => false) "plaintext quota bypass rejected"
+  let store ← IO.ofExcept (← OrbCore.Store.openCoreStore (root ++ "/vpn-api"))
+  try
+    let pool ← Std.Mutex.new ([] : List AccountVpnPool.Active)
+    let route := AccountVpnApi.route store (some pool) "" "a" "openai"
+    let payload := "{\"mode\":\"vpn\",\"country\":\"NL\"}".toUTF8
+    let (sidecar, _) ← route false "PUT" payload
+    check (sidecar == 409) "unsupported credential owner cannot enable VPN"
+    let (saved, state) ← route true "PUT" payload
+    check (saved == 200 && state.fieldStr? "mode" == some "vpn" &&
+      state.fieldStr? "status" == some "blocked" &&
+      state.fieldStr? "reason" == some "vpn_coordinator_unconfigured") "saved VPN reports blocked with reason"
+    let (_, direct) ← route true "PUT" "{\"mode\":\"direct\"}".toUTF8
+    check (direct.fieldStr? "mode" == some "direct" && (direct.field? "exits").isNone) "direct clears VPN selection"
+  finally OrbCore.Store.closeCoreStore store
   routeStorage root
   let parseIp := AirVpnObservation.parseExit?
   let v4 := Orb.AccountVpn.ExitAddress.v4 0x01020304

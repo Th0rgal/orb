@@ -35,7 +35,7 @@ import OrbCore.SecretAndApproval
 import OrbCore.RemoteFleetAndRelay
 import OrbCore.ManagedProviderSealing
 import OrbCore.AirVpnSettings
-import OrbCore.AccountVpnPool
+import OrbCore.AccountVpnApi
 import OrbCore.AutoPlacement
 import OrbCore.RemoteDispatch
 import OrbCore.ProjectFilesAndController
@@ -3516,6 +3516,22 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   let some caller ← resolveCallerPrincipal? st req.headers nowEpochSec
     | return .ok (mkJson 401 "{\"error\":\"unauthorized\"}")
   let utcDay := currentUtcDay nowEpochSec
+
+  if let ["", "api", "ai", "providers", encodedAccount, "vpn"] := cleanPath.splitOn "/" then
+    let some account := percentDecodeStrict encodedAccount
+      | return .ok (mkJson 400 "{\"error\":\"invalid_provider_id\"}")
+    if let some (status, body) := requireAdminPrincipal caller then return .ok (mkJson status body)
+    let token := (extractBearerToken? req.headers nowEpochSec).getD ""
+    unless token.startsWith "orb-jwt-v2:" && !st.cfg.devMode do
+      return .ok (mkJson 403 "{\"error\":\"operator_session_required\"}")
+    let providers ← loadHydratedProviders st.store st.cfg.workingDir
+    let some hp := providers.find? (fun p => p.id == account)
+      | return .ok (mkJson 404 "{\"error\":\"provider_not_found\"}")
+    let stored ← getAIProvider? st.store account
+    let coreOwned := !hp.hasOAuth && stored.any (fun p => !p.apiKey.isEmpty && p.apiKey != "cli-proxy-managed")
+    let (status, result) ← AccountVpnApi.route st.store st.vpnPool? st.vpnCoordinatorDir account hp.providerType
+      coreOwned req.method req.bodySlice.toByteArray
+    return .ok (mkJson status (renderCompact result))
 
   if cleanPath == "/api/settings/airvpn" then
     if let some (status, body) := requireAdminPrincipal caller then
