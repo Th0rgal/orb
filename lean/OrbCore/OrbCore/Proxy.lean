@@ -1496,6 +1496,24 @@ private def synthesizeToolCallClose (contentType : String) (head : ByteArray) : 
   else
     head ++ ("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n".toUTF8)
 
+/-- Byte boundary after the last complete answer-text event. Never flush a
+    coalesced tool-call suffix or wait for a split UTF-8 character in it. -/
+private def answerTextBoundary (body : ByteArray) : Nat := Id.run do
+  let mut start := 0
+  let mut boundary := 0
+  for i in [:body.size] do
+    if body[i]! != 10 then continue
+    if !(i ≥ 1 && body[i-1]! == 10 || i ≥ 2 && body[i-1]! == 13 && body[i-2]! == 10) then continue
+    let frame := (String.fromUTF8? (body.extract start (i+1))).getD ""
+    start := i+1
+    for line in frame.splitOn "\n" do
+      if !line.startsWith "data:" then continue
+      if let .ok j := OrbBin.Json.parse ((line.drop 5).toString.trimAscii.toString) then
+        if ((j.fieldArr? "choices").getD #[]).any (fun c =>
+          !(((c.fieldOrNull "delta").fieldStr? "content").getD "").isEmpty) then
+          boundary := start
+  return boundary
+
 private def recoverBufferedStream
     (contentType : String)
     (initial : BodyPump)
@@ -1547,6 +1565,13 @@ private def recoverBufferedStream
             downstreamOpenRef.set clientOpen
             return clientOpen
           let nextBuffer := buffered ++ piece
+          let boundary := answerTextBoundary nextBuffer
+          if boundary > 0 then
+            modeRef.set (some true)
+            bufferRef.set (nextBuffer.extract boundary nextBuffer.size)
+            let clientOpen ← recordEmit (nextBuffer.extract 0 boundary)
+            downstreamOpenRef.set clientOpen
+            return clientOpen
           bufferRef.set nextBuffer
           let text := (String.fromUTF8? nextBuffer).getD ""
           let model := containsSubstring text "\"choices\"" ||
@@ -1559,7 +1584,7 @@ private def recoverBufferedStream
             containsSubstring text "\"functionCall\""
           if model then
             modeRef.set (some true)
-          else if text.contains "\n\n" || text.contains "\r\n\r\n" then
+          else if (← modeRef.get).isNone && (text.contains "\n\n" || text.contains "\r\n\r\n") then
             -- An unrecognized complete SSE frame is safe to relay as-is. Holding
             -- only the first frame avoids replay while preserving event latency.
             modeRef.set (some false)
@@ -1583,7 +1608,10 @@ private def recoverBufferedStream
       discard <| recordEmit buffered
       result := some (← emittedRef.get, true)
       continue
-    let streamStatus := classifyProxyStreamOutcome contentType true buffered complete false
+    let emitted ← emittedRef.get
+    let committed := !emitted.isEmpty
+    let streamStatus := classifyProxyStreamOutcome contentType true
+      (emitted ++ buffered) complete false
     if complete && streamStatus == "ok" then
       discard <| recordEmit buffered
       result := some (← emittedRef.get, true)
@@ -1599,7 +1627,7 @@ private def recoverBufferedStream
         let clean := synthesizeToolCallClose contentType (buffered.extract 0 boundary)
         discard <| recordEmit clean
         result := some (← emittedRef.get, true)
-      else if (ending &&& 0xFF) == 4 then
+      else if committed || (ending &&& 0xFF) == 4 then
         discard <| recordEmit buffered
         result := some (← emittedRef.get, false)
       else
