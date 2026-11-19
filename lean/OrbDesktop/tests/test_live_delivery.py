@@ -35,7 +35,7 @@ def fixture():
     add(2, 'assistant_message_canonical', 'a', {'content': 'canonical'})
     for n in range(3, 24):
         add(n, 'user_message', 'a', {'content': 'PRIVATE', 'queued': True})
-    add(1, 'assistant_message', 'b', {'content': 'second'})
+    add(1, 'assistant_message', 'b', {'content': 'second\n\tλ🙂\x1e\x1f\n'})
     return db
 
 
@@ -188,7 +188,7 @@ class Delivery(unittest.TestCase):
         with patch.object(live, 'roster_rows', return_value=[('M','a','PRIVATE')]), patch.object(live, 'Connection', Connection), patch.object(live.time, 'sleep', side_effect=[None, KeyboardInterrupt]), contextlib.redirect_stdout(out):
             with self.assertRaises(KeyboardInterrupt):
                 live.poll('a', 'bound', {'a'})
-        self.assertEqual(out.getvalue().splitlines(), [json.dumps(['sample',['M:a'],['Title','active','Public']])])
+        self.assertEqual(out.getvalue(), 'B\tM:a\tTitle\tactive\tPublic\n')
 
     def test_rejects_foreign_projection(self):
         class Connection:

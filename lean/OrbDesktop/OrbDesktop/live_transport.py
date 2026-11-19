@@ -160,6 +160,14 @@ def poll(mid, binding, tracked=None):
         c.check()
         failures = 0
         if current != last:
-            print(json.dumps(current), flush=True)
+            # Projection strips control characters except transcript newlines
+            # and tabs. Reserve RS/US to encode those without a JSON runtime.
+            keys = '\x1f'.join(current[1])
+            if isinstance(current[2], list):
+                title, status, text = current[2]
+                fields = ('B', keys, title, status, text.replace('\n', '\x1e').replace('\t', '\x1f'))
+            else:
+                fields = ('R', keys)
+            print('\t'.join(fields), flush=True)
             last = current
         time.sleep(1)

@@ -1,5 +1,4 @@
 import OrbDesktop.State
-import Lean.Data.Json.Parser
 import Std.Sync.Mutex
 
 namespace OrbDesktop
@@ -88,11 +87,13 @@ private def subscribe (mission binding : String) (tracked : List MissionSummaryC
     try
       repeat
         let line ← child.stdout.getLine
-        let .ok (.arr #[.str "sample", .arr keys, payload]) := Lean.Json.parse line | break
-        let visible := keys.toList.filterMap (·.getStr?.toOption)
-        let bubble := match payload with
-          | .arr #[.str title, .str status, .str text] => some (title, status, text)
-          | _ => none
+        if !line.endsWith "\n" then break
+        let kind :: keys :: rest := splitTab (line.dropEnd 1).toString | break
+        let visible := if keys.isEmpty then [] else keys.splitOn "\x1f"
+        let bubble ← match kind, rest with
+          | "B", [title,status,text] => pure (some (title,status,(text.replace "\x1e" "\n").replace "\x1f" "\t"))
+          | "R", [] => pure none
+          | _, _ => break
         latest.atomically (set (some (LiveUpdate.sample visible bubble)))
     finally latest.atomically (set (some LiveUpdate.invalid))
   return { mission, binding, latest, stop := do

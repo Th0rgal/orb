@@ -617,6 +617,57 @@ private def changedBounds (vp : Rect) (old new : Scene) : Option Rect := Id.run 
           | some a => ⟨min a.x b.x, min a.y b.y, max a.right b.right - min a.x b.x, max a.bottom b.bottom - min a.y b.y⟩)
   return some (area.getD ⟨0,0,0,0⟩)
 
+-- Express paints in coordinates relative to a horizontal band. Equality includes
+-- paint order, all style/sampling parameters and the actually visible scissor.
+private def bandPaint (scene : Scene) (band : Rect) : Option (Array (Prim × Rect)) := Id.run do
+  let mut stack := [band]
+  let mut paints := #[]
+  let rel := fun (r : Rect) => { r with y := r.y - band.y }
+  for p in scene do
+    let clip := stack.head?.getD band
+    match p with
+    | .clipPush r => stack := intersectRect clip r :: stack
+    | .clipPop => if stack.length < 2 then return none else stack := stack.tail!
+    | _ =>
+      let some r := p.bounds | return none
+      let vis := intersectRect clip r
+      if !vis.isEmpty then
+        let v := rel vis
+        let key : Option Prim := match p with
+          | .quad b c rad w e => some (.quad (if rad == 0 && w == 0 then v else rel b) c rad w e)
+          | .rrect b c rad w e => some (.rrect (rel b) c rad w e)
+          | .glyph s d c k => if d.y < 0 then none else some (.glyph s (rel d) c k)
+          | .mask i s d c => if d.y < 0 then none else some (.mask i s (rel d) c)
+          | _ => none
+        let some k := key | return none
+        paints := paints.push (k,v)
+  return some paints
+
+-- A matching glyph proposes a displacement only. Accept the copy solely when
+-- the entire source and destination band have identical clipped paint programs.
+private def scrollBand (old new : Scene) (dirty vp : Rect) : Option (Rect × Nat) := Id.run do
+  if dirty.h < 160 || dirty.w < 128 then return none
+  let mut i := 0
+  while i < min old.size new.size && old[i]? == new[i]? do i := i + 1
+  let mut shift := 0
+  for j in [i:old.size] do
+    if let some (.glyph s a c k) := old[j]? then
+      if a.y > dirty.y + 64 && a.y < dirty.bottom then
+        for n in [max i (j-160):min new.size (j+64)] do
+          if let some (.glyph t b e l) := new[n]? then
+            if s == t && a.x == b.x && c == e && k == l && a.y > b.y && a.y-b.y ≤ 64 then
+              shift := (a.y-b.y).toNat
+              break
+        if shift > 0 then break
+  if shift == 0 then return none
+  let band := { dirty with h := dirty.h - max 96 (2 * (shift : Int)) }
+  let src := { band with y := band.y + shift }
+  if intersectRect vp src != src then return none
+  let some a := bandPaint old src | return none
+  let some b := bandPaint new band | return none
+  if a != b then return none
+  return some (band,shift)
+
 -- New glyph allocations may change unused texels. Prove that every old
 -- sampling command still sees the same bytes, or discard the framebuffer.
 private def samplesUnchanged (scene : Scene) (idx : Nat) (a b : Text.AtlasPageBuffer) : Bool := Id.run do
@@ -670,7 +721,15 @@ def renderFrameDamage (ctx : VulkanContext) (clearColor : Color) (atlas : Text.G
   -- timed separately from clearing and painting. Ordinary runs retain COW.
   let initial := if profile then ctx.framebuffer.copySlice 0 ByteArray.empty 0 ctx.framebuffer.size else ctx.framebuffer
   let t3 ← IO.monoNanosNow
-  let (fb, insts) := rasterizeSceneInto ctx.width ctx.height clearColor atlas (some initial) (some dirty) scene
+  let mut initial := initial
+  let mut paint := dirty
+  if let some (band, shift) := scrollBand prev.scene scene dirty vp then
+    for y in [band.y.toNat:band.bottom.toNat] do
+      initial := ctx.framebuffer.copySlice (((y+shift)*ctx.width+band.x.toNat)*4) initial
+        ((y*ctx.width+band.x.toNat)*4) (band.w.toNat*4)
+    paint := { dirty with y := band.bottom, h := dirty.bottom - band.bottom }
+    if profile then IO.eprintln s!"u7-scroll-reuse dy={shift} pixels={band.w*band.h}"
+  let (fb, insts) := rasterizeSceneInto ctx.width ctx.height clearColor atlas (some initial) (some paint) scene
   let t4 ← IO.monoNanosNow
   let _ ← stageInstances ctx insts
   if profile then IO.eprintln s!"u7-paint-ns {t1-t0} {t2-t1} {t3-t2} {t4-t3} {(← IO.monoNanosNow)-t4}"

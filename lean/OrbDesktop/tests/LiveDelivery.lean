@@ -57,7 +57,7 @@ def main (args : List String) : IO Unit := do
   try
     if args == ["page-two"] || args == ["null-retry"] then
       let st ← clickMission st b
-      let st ← awaitState slot st (fun s => streamedText s == "second")
+      let st ← awaitState slot st (fun s => streamedText s == "second\n\tλ🙂\n")
       unless st.openMission == some b.missionId && st.missionCards.length == 2 do throw (IO.userError "page displacement closed mission")
       return
     if args == ["idle-page-two"] then
@@ -103,7 +103,7 @@ def main (args : List String) : IO Unit := do
     let st ← clickMission st b
     unless st.openMission == some b.missionId && st.headerTitle == b.title && st.composer.text.isEmpty && st.composer.undoStack.isEmpty do
       throw (IO.userError "selection retained prior metadata or draft")
-    let st ← awaitState slot st (fun s => streamedText s == "second")
+    let st ← awaitState slot st (fun s => streamedText s == "second\n\tλ🙂\n")
     if args == ["revoke"] then
       let next ← awaitState slot st (·.openMission.isNone)
       unless next.hasLiveConnection && (streamedText next).isEmpty && next.missionCards.length == 1 &&
