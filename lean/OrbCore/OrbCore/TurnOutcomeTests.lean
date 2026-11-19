@@ -150,8 +150,6 @@ private def verifyRemoteWakeupRecovery (store : CoreStore) (sup : RemoteJobSuper
   let db := store.missionsDb
   let cid := s!"c-{mid}"
   let due ← nowEpoch
-  let .ok _ ← execParamQuery db "UPDATE missions SET status='awaiting_user',backend='opencode' WHERE id=?1;" #[mid]
-    | throw (IO.userError "remote wake-up mission setup")
   let .ok _ ← registerContinuation store
     { id := cid, missionId := mid, requestId := cid, prompt := "one remote delivery", reason := "test",
       source := "mcp", triggerKind := "time", dueEpoch := due } (due - 1) "t0"
@@ -457,7 +455,7 @@ def run : IO Unit := do
       -- The durable scheduler relaunches it; each relaunch that is empty again counts.
       let launches ← IO.mkRef (0 : Nat)
       let prompts ← IO.mkRef (#[] : Array String)
-       let launch : MissionRecord → String → Option String → WakeupClaim → IO Bool := fun mr prompt _ _ => do
+      let launch : MissionRecord → String → Option String → WakeupClaim → IO Bool := fun mr prompt _ _ => do
         launches.modify (· + 1)
         prompts.modify (·.push prompt)
         discard <| execParamQuery db "UPDATE missions SET status='active' WHERE id=?1;" #[mr.id]
@@ -573,8 +571,15 @@ def run : IO Unit := do
             setenvVar "SANDBOXED_REMOTE_NODES" s!"mockwakeup=http://127.0.0.1:{wakePort}|TURN_OUTCOME_MOCK_TOK"
             -- The found case starts a poller, so run it last on this listener.
             for (mid, found) in #[("m-remote-wakeup-missing", false), ("m-remote-wakeup-found", true)] do
-              newMission mid "[\"remote-node:mockwakeup\"]"
-              verifyRemoteWakeupRecovery store sup wakeFd root mid found
+              let .ok wakeStore ← openCoreStore s!"{root}/{mid}" | throw (IO.userError "remote wake-up fixture store")
+              try
+                let .ok _ ← execParamQuery wakeStore.missionsDb
+                  ("INSERT INTO missions(id,title,status,backend,placement_kind,tags,created_at,updated_at) " ++
+                   "VALUES(?1,'turn','awaiting_user','opencode','managed','[\"remote-node:mockwakeup\"]','t0','t0');") #[mid]
+                  | throw (IO.userError "remote wake-up fixture mission")
+                verifyRemoteWakeupRecovery wakeStore sup wakeFd root mid found
+              finally
+                closeCoreStore wakeStore
           finally
             discard <| LeanSys.Posix.closeFd wakeFd
             setenvVar "SANDBOXED_REMOTE_NODES" s!"mockgoalchecks=http://127.0.0.1:{checksPort}|TURN_OUTCOME_MOCK_TOK"
