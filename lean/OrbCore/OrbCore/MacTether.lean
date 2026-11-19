@@ -16,6 +16,7 @@ import OrbBin.Json
 import OrbBin.PosixExt
 import OrbNetLeaf.Crypto
 import OrbCore.Store
+import OrbCore.RemoteDispatch
 
 namespace OrbCore.MacTether
 
@@ -207,6 +208,7 @@ structure MacTetherRuntime where
   relayFd?       : Option Int32
   slotsMu        : Std.Mutex (Array RelayPairSlot)
   fwdMu          : Std.Mutex RelayForwardState
+  worker?        : Option (Task (Except IO.Error Unit)) := none
 
 private def readU32LEAt (b : ByteArray) (off : Nat) : UInt32 :=
   if off + 4 > b.size then 0
@@ -525,23 +527,39 @@ def startMacTetherRuntime (st : CoreStore) : IO MacTetherRuntime := do
   let rt : MacTetherRuntime := {
     gen, stoppedRef, relayEndpoint, relayPort := actualPort, relayFd? := fd?, slotsMu, fwdMu
   }
+  -- Status writers share the missions DB, but not necessarily this runtime. Observe
+  -- the transactional invalidation before using cached routes and wake daemon polls.
+  let readEpoch : IO (Option String) := do
+    let .ok rows ← queryMissionsDb st "SELECT epoch FROM tether_lifecycle_epoch WHERE id=1;" #[] | return none
+    return rows[1]?.bind (·[0]?)
+  let epoch ← IO.mkRef (← readEpoch)
   syncMacTetherRelaySlots st (some rt) (← coreEpochSec)
-  if let some fd := fd? then
-    let _ ← IO.asTask (prio := .dedicated) do
-      while !(← rt.stoppedRef.get) do
-        if let some pkt ← udpRecvFromPoll fd 250 2048 then
+  let refresh : IO Unit := do
+    let latest ← readEpoch
+    if latest.isNone || latest != (← epoch.get) then
+      syncMacTetherRelaySlots st (some rt) (← coreEpochSec)
+      discard <| bumpTetherGen (some rt)
+      epoch.set latest
+  let worker ← IO.asTask (prio := .dedicated) do
+    while !(← rt.stoppedRef.get) do
+      let pkt? ← match fd? with
+        | some fd => udpRecvFromPoll fd 250 2048
+        | none => do IO.sleep 250; pure none
+      refresh
+      if let some fd := fd? then
+        if let some pkt := pkt? then
           let nowSec ← coreEpochSec
           let slots ← rt.slotsMu.atomically get
           let dsts ← stepBlindRelayDatagram slots rt.fwdMu pkt nowSec
           for dst in dsts do
             let _ ← udpSendTo fd dst.ipHostOrder dst.port pkt.payload
-      -- The loop owns the socket: closing it elsewhere could hand a reused descriptor to `recvfrom`.
-      closeFdRaw fd
-  return rt
+    if let some fd := fd? then closeFdRaw fd
+  return {rt with worker? := some worker}
 
 /-- Ask the relay loop to stop; it closes its own socket within one poll interval. -/
-def stopMacTetherRuntime (rt : MacTetherRuntime) : IO Unit :=
+def stopMacTetherRuntime (rt : MacTetherRuntime) : IO Unit := do
   rt.stoppedRef.set true
+  if let some worker := rt.worker? then discard <| IO.wait worker
 
 def getMacTetherRequest? (st : CoreStore) (reqId : String) (nowSec : UInt64) : IO (Option MacTetherRequestRecord) := do
   let _ ← expireStaleMacTethers st nowSec
@@ -699,7 +717,12 @@ def approveMacTetherRequest
   let sealedPsk := ((body.fieldStr? "sealed_psk_b64").getD "").trimAscii.toString
   if !cur.agentKemPubkey.isEmpty && sealedPsk.isEmpty then
     return .error "`sealed_psk_b64` is required when `agent_kem_pubkey` is present"
-  let macDirectEp := ((body.fieldStr? "mac_direct_endpoint").getD "").trimAscii.toString
+  let placement := ((← getMission? st cur.missionId).map (·.placementKind)).getD ""
+  let remote := cur.isManagedVm || placement == "remote" || placement == "remote_node" ||
+    (← OrbCore.RemoteDispatch.resolveMissionRemoteNode? st none cur.missionId).isSome
+  -- Store the reachable direct candidate once; both agent and privd consume this lease.
+  let field := if remote then "mac_wan_endpoint" else "mac_direct_endpoint"
+  let macDirectEp := ((body.fieldStr? field).getD "").trimAscii.toString
   let reqOverlay := ((body.fieldStr? "overlay_ip").getD "").trimAscii.toString
   let overlayIp ←
     if !reqOverlay.isEmpty then

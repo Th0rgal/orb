@@ -195,6 +195,11 @@ def transferCleanupSql : String :=
   "  AND NOT EXISTS (SELECT 1 FROM missions WHERE missions.id = machine_transfers.mission_id);\n" ++
   "COMMIT;"
 
+private def revokeMissionTethersSql : String :=
+  "UPDATE mac_tether_requests SET state='revoked',lease_token='',revoked_at=unixepoch(),updated_at=unixepoch() " ++
+  "WHERE mission_id=OLD.id AND session_scoped=1 AND state IN ('pending','approved'); " ++
+  "UPDATE tether_lifecycle_epoch SET epoch=epoch+1 WHERE changes()>0;"
+
 def missionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS node_api_hangs(node_id TEXT PRIMARY KEY COLLATE NOCASE,incident_id TEXT NOT NULL);" ++
   "CREATE TABLE IF NOT EXISTS missions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'awaiting_user', backend TEXT NOT NULL DEFAULT 'codex', model_override TEXT, model_effort TEXT, working_directory TEXT NOT NULL DEFAULT '', project TEXT NOT NULL DEFAULT '', folder TEXT NOT NULL DEFAULT '', placement_revision INTEGER NOT NULL DEFAULT 0, parent_mission_id TEXT, created_at TEXT NOT NULL DEFAULT '', metadata_updated_at TEXT, short_description TEXT, github_pr TEXT, origin TEXT, origin_session_id TEXT, workspace_name TEXT, resumable INTEGER NOT NULL DEFAULT 0, requires_local_disk INTEGER NOT NULL DEFAULT 0, tags TEXT NOT NULL DEFAULT '[]', session_id TEXT, deferred_goal TEXT, goal_mode INTEGER NOT NULL DEFAULT 0, goal_objective TEXT NOT NULL DEFAULT '', workspace_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000', terminal_reason TEXT, updated_at TEXT NOT NULL DEFAULT '', opened_at TEXT, agent TEXT, config_profile TEXT, total_cost_cents INTEGER NOT NULL DEFAULT 0, history_json TEXT NOT NULL DEFAULT '[]', authority_mode TEXT NOT NULL DEFAULT 'writer' CHECK(authority_mode IN ('readonly','writer')), placement_kind TEXT NOT NULL DEFAULT 'managed', superseded_by_mission_id TEXT NOT NULL DEFAULT '', orphaned_at TEXT NOT NULL DEFAULT '', reserved_disk_gib INTEGER NOT NULL DEFAULT 0, state_revision INTEGER NOT NULL DEFAULT 1, owner_epoch INTEGER NOT NULL DEFAULT 1, run_generation INTEGER NOT NULL DEFAULT 1, node_boot_epoch INTEGER NOT NULL DEFAULT 1, track TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '', owner_user_id TEXT NOT NULL DEFAULT '');" ++
@@ -241,6 +246,13 @@ def missionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS mac_tether_requests (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL DEFAULT '', requester_label TEXT NOT NULL DEFAULT '', host_id TEXT NOT NULL DEFAULT '', is_managed_vm INTEGER NOT NULL DEFAULT 0, requested_scope TEXT NOT NULL DEFAULT 'sandbox_ssh', effective_scope TEXT NOT NULL DEFAULT '', effective_target TEXT NOT NULL DEFAULT 'sandbox', agent_ports_json TEXT NOT NULL DEFAULT '[]', mac_ports_json TEXT NOT NULL DEFAULT '[]', ttl_minutes INTEGER NOT NULL DEFAULT 60, session_scoped INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT '', agent_wg_pubkey TEXT NOT NULL DEFAULT '', agent_kem_pubkey TEXT NOT NULL DEFAULT '', agent_sign_pubkey_hex TEXT NOT NULL DEFAULT '', agent_ssh_pubkey TEXT NOT NULL DEFAULT '', agent_direct_endpoint TEXT NOT NULL DEFAULT '', mac_wg_pubkey TEXT NOT NULL DEFAULT '', mac_kem_pubkey TEXT NOT NULL DEFAULT '', mac_direct_endpoint TEXT NOT NULL DEFAULT '', relay_endpoint TEXT NOT NULL DEFAULT '', sealed_psk_b64 TEXT NOT NULL DEFAULT '', overlay_ip TEXT NOT NULL DEFAULT '', lease_token TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'pending', deny_reason TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL DEFAULT 0, revoked_at INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE INDEX IF NOT EXISTS idx_mac_tether_state ON mac_tether_requests(state, updated_at);" ++
   "CREATE INDEX IF NOT EXISTS idx_mac_tether_mission ON mac_tether_requests(mission_id, state);" ++
+  "CREATE TABLE IF NOT EXISTS tether_lifecycle_epoch (id INTEGER PRIMARY KEY CHECK(id=1), epoch INTEGER NOT NULL);" ++
+  "INSERT OR IGNORE INTO tether_lifecycle_epoch VALUES(1,0);" ++
+  "CREATE TRIGGER IF NOT EXISTS tether_ends_with_session AFTER UPDATE OF status,superseded_by_mission_id ON missions " ++
+  "WHEN (NEW.status<>OLD.status AND NEW.status IN ('completed','failed','cancelled','not_feasible','interrupted','blocked','paused','stopped','acknowledged','archived')) " ++
+  "OR (NEW.superseded_by_mission_id<>'' AND NEW.superseded_by_mission_id<>OLD.superseded_by_mission_id) BEGIN " ++
+  revokeMissionTethersSql ++ " END;" ++
+  "CREATE TRIGGER IF NOT EXISTS tether_ends_on_delete AFTER DELETE ON missions BEGIN " ++ revokeMissionTethersSql ++ " END;" ++
   "CREATE TABLE IF NOT EXISTS wg_relay_pairs (pair_id TEXT PRIMARY KEY, label TEXT NOT NULL DEFAULT '', peer_a_wg_pubkey TEXT NOT NULL, peer_b_wg_pubkey TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0);" ++
   transferSchemaSql ++ "\n" ++ transferCleanupSql
 
