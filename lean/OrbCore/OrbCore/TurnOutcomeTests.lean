@@ -155,7 +155,7 @@ private def verifyRemoteWakeupRecovery (store : CoreStore) (sup : RemoteJobSuper
       source := "mcp", triggerKind := "time", dueEpoch := due } (due - 1) "t0"
     | throw (IO.userError "remote wake-up registration")
   let tick := fun t => tickContinuationScheduler store none none none sup none root none (some t)
-  let reconcile := reconcileUncertainRemoteSubmissions store none none none sup root false
+  let reconcile := fun now => reconcileUncertainRemoteSubmissions store none none none sup root false (some now)
   let state := cellOf db "SELECT phase || ':' || error FROM mission_continuations WHERE id=?1;" #[cid]
   let launch ← IO.asTask (tick due)
   let posted ← IO.mkRef ""
@@ -170,14 +170,24 @@ private def verifyRemoteWakeupRecovery (store : CoreStore) (sup : RemoteJobSuper
     -- Lose the reply after the node has observed the POST.
   check ((← IO.ofExcept launch.get) == 0 && (← state) == "2:") "transport loss leaves a bound claim"
   let jid ← posted.get
+  let expiryText ← cellOf db
+    "SELECT json_extract(payload_json,'$.wakeup_lease_expires') FROM remote_node_jobs WHERE job_id=?1;" #[jid]
+  let some expiry := expiryText.toNat? | throw (IO.userError "missing remote wake-up submit lease expiry")
   let jobs := cellOf db "SELECT COUNT(*) FROM remote_node_jobs WHERE mission_id=?1;" #[mid]
   check ((← tick (due + 600)) == 0 && (← jobs) == "1") "scheduler cannot retry before reconciliation"
-  let probe ← IO.asTask reconcile
+  let probe ← IO.asTask (reconcile (due + 1))
   withMockNodeRequest fd fun _ req =>
     check (req.method == "GET" && req.path == s!"/jobs/{jid}") "unavailable probe uses the original job"
   check ((← IO.ofExcept probe.get) == 0 && (← state) == "2:" && (← jobs) == "1")
     "an unavailable probe cannot grant a retry"
-  let probe ← IO.asTask reconcile
+  if !found then
+    let early ← IO.asTask (reconcile (due + 60))
+    withMockNodeRequest fd fun conn req => do
+      check (req.method == "GET" && req.path == s!"/jobs/{jid}") "early negative probe uses the original job"
+      mockNodeReply conn "404 Not Found" "job not found"
+    check ((← IO.ofExcept early.get) == 0 && (← state) == "2:")
+      "absence while the original POST can still be admitted does not authorize another job"
+  let probe ← IO.asTask (reconcile (if found then due + 61 else expiry.toUInt64 + 31))
   withMockNodeRequest fd fun conn req => do
     check (req.method == "GET" && req.path == s!"/jobs/{jid}") "authoritative probe uses the original job"
     if found then mockNodeReply conn "200 OK" s!"\{\"job_id\":\"{jid}\",\"state\":\"running\"}"

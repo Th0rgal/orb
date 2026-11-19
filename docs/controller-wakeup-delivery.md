@@ -25,9 +25,9 @@ A remote wake-up binds the claimed occurrence to the original remote job ID
 in the same transaction that records the submit intent, before any POST. A
 lost reply keeps that claim bound. Reconciliation probes the original node and
 job; an accepted job is attached and the wake-up settled atomically, while a
-definite rejection or an authoritative not-found allows backoff. An unavailable
-probe cannot authorize another submission. The job that *triggers* a wake-up
-is independent of the job launched to deliver it.
+definite rejection or an authoritative not-found after the original submit lease
+expires allows backoff. An unavailable probe cannot authorize another submission.
+The job that *triggers* a wake-up is independent of the job launched to deliver it.
 
 Legacy automations are migrated only when Core recognizes their trigger and
 stop policy. The continuation and source retirement commit together. An

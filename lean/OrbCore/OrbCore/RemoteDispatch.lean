@@ -1829,7 +1829,8 @@ partial def submitRemoteMissionTurn
   let unixUser? :=
     ownerUser?.bind fun u =>
       (u.unixUsername?.map (·.trimAscii.toString)).filter (!·.isEmpty)
-  let leaseTok := signRemoteNodeLeaseToken nodeSecret spec.missionId leaseNodeId "job:submit" (nowSec + 900) (some jobId) spec.ownerUserId callerRole unixUser?
+  let leaseExpires := nowSec + 900
+  let leaseTok := signRemoteNodeLeaseToken nodeSecret spec.missionId leaseNodeId "job:submit" leaseExpires (some jobId) spec.ownerUserId callerRole unixUser?
   let envObj : JVal := .obj (prep.envPairs.map fun (k, v) => (k, .str v))
   let authArr : JVal := .arr (prep.managedAuth.map JVal.str)
   let compVal : JVal := match spec.companionOf? with | some c => .str c | none => .null
@@ -1870,6 +1871,7 @@ partial def submitRemoteMissionTurn
     ("wakeup_claim", spec.wakeupClaim?.map (fun c => .str c.id) |>.getD .null),
     ("wakeup_request", spec.wakeupClaim?.map (fun c => .str c.requestId) |>.getD .null),
     ("wakeup_generation", spec.wakeupClaim?.map (fun c => JVal.uint64 c.generation) |>.getD .null),
+    ("wakeup_lease_expires", if spec.wakeupClaim?.isSome then JVal.uint64 leaseExpires else .null),
     ("prompt_bytes", JVal.nat spec.prompt.utf8ByteSize)
   ])
   let intentRes ← match spec.goalDispatch? with
@@ -2051,9 +2053,9 @@ def reconcileUncertainRemoteSubmissions
     (relayHub? : Option RelayHub)
     (broadcastHub? : Option BroadcastHub)
     (sup : RemoteJobSupervisor)
-    (coreWorkDir : String) (startup : Bool := true) : IO Nat := do
+    (coreWorkDir : String) (startup : Bool := true) (nowOverride? : Option UInt64 := none) : IO Nat := do
   ensureDurableJobsTableLocal store
-  let nowSec ← nowEpoch
+  let nowSec ← match nowOverride? with | some t => pure t | none => nowEpoch
   let nowIso := formatEpochIso8601Utc nowSec
   let .ok rows ← execParamQuery store.missionsDb
       ("SELECT j.job_id, COALESCE(j.node_id,''), COALESCE(j.mission_id,''), COALESCE(j.payload_json,'{}') " ++
@@ -2090,8 +2092,11 @@ def reconcileUncertainRemoteSubmissions
     | .ok (status, response, view?, _, _) =>
       if status == 404 then
         if let some claim := wakeup? then
-          -- Ignore intermediary 404s. OrbNode's ledger lookup returns this receipt.
-          if response.trimAscii.toString == "job not found" then
+          -- A GET can overtake a delayed POST. Negative evidence is usable
+          -- only after the original submission's lease can no longer admit it.
+          -- The small grace period accommodates node clock skew.
+          if (metaJv.fieldUInt64? "wakeup_lease_expires").any (fun exp => nowSec > exp + 30) &&
+              response.trimAscii.toString == "job not found" then
             discard <| withImmediateTx store.missionsDb do
               let .ok changed ← execParamQueryUnlocked store.missionsDb
                 "UPDATE remote_node_jobs SET state='failed',updated_at=?2 WHERE job_id=?1 AND state='uncertain' RETURNING job_id;"
