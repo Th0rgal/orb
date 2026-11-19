@@ -22,6 +22,8 @@
 import Std.Sync.Mutex
 import Orb.ProviderLogin
 import OrbCore.ProviderCredentialIdentity
+import OrbCore.AccountVpnRoutes
+import OrbCore.AccountVpnSidecar
 import LeanSys.Auth
 import LeanSys.Http
 import OrbBin.Json
@@ -87,7 +89,8 @@ structure ProviderHubState where
 structure ProviderRuntimeHub where
   mu : Std.Mutex ProviderHubState
   usageProbe? : Option (String → IO JVal) := none
-  resolveTransport? : Option (String → ResolveTransport) := none
+  resolveTransport? : Option (String → String → ResolveTransport) := none
+  accountRelayUrl? : Option (String → String → Option String) := none
 
 def newProviderRuntimeHub : IO ProviderRuntimeHub := do
   let mu ← Std.Mutex.new ({} : ProviderHubState)
@@ -1647,7 +1650,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) (resolveTransport? : Option R
 private def probeProviderUsage (hub : ProviderRuntimeHub) (hp : HydratedProvider) : IO JVal :=
   match hub.usageProbe? with
   | some probe => probe hp.id
-  | none => fetchLiveProviderUsage hp (hub.resolveTransport?.map (fun resolve => resolve hp.id))
+  | none => fetchLiveProviderUsage hp (hub.resolveTransport?.map (fun resolve => resolve hp.providerType hp.id))
 
 private def refreshProviderUsageAsync (hub : ProviderRuntimeHub) (hp : HydratedProvider) : IO Unit := do
   let generation ← hub.mu.atomically (do return (← get).usageGeneration)
@@ -3018,7 +3021,25 @@ def dispatchProviderAndAiRoute
               if !(trow.createdByUserId == callerUserId && !callerUserId.isEmpty) then
                 return some (jsonErr 403 "not_account_owner")
         let beforeFiles := (← scanCliProxyAuthFiles).map (fun af => (af.fileName, af.fingerprint))
-        match ← sendJsonRequest "GET" s!"{mgmtBase}/v0/management/{slug}-auth-url" (some mgmtKey) none #[] 15000 262144 with
+        let mut routedRequest? : Option JVal := none
+        if let some account := targetProvId? then
+          let .ok pref ← AccountVpnRoutes.read store.missionsDb account
+            | return some (jsonErr 503 "VPN route storage unavailable")
+          if pref.isSome then
+            let accounts ← loadHydratedProviders store workingDir
+            let some hp := accounts.find? (fun p => p.id == account)
+              | return some (jsonErr 409 "VPN credential unavailable")
+            let some url := hub.accountRelayUrl?.bind (fun sign => sign hp.providerType hp.id)
+              | return some (jsonErr 503 "VPN relay unavailable")
+            unless providerTypeMatchesAuthType hp.providerType authType && !hp.oauthFile.isEmpty &&
+                AccountVpnSidecar.validManagement mgmtBase &&
+                (effAdmin || (!callerUserId.isEmpty && hp.createdByUserId == callerUserId)) do
+              return some (jsonErr 403 "VPN credential ownership could not be verified")
+            routedRequest? := some (.obj #[("provider", .str authType), ("name", .str hp.oauthFile), ("proxy_url", .str url)])
+        let login ← match routedRequest? with
+          | some data => sendJsonRequest "POST" s!"{mgmtBase}/v8/management/oauth/auth-url" (some mgmtKey) (some data) #[] 15000 262144
+          | none => sendJsonRequest "GET" s!"{mgmtBase}/v0/management/{slug}-auth-url" (some mgmtKey) none #[] 15000 262144
+        match login with
         | .ok (code, rawTxt, some uJv) =>
           if 200 ≤ code && code < 300 then
             let authUrl := (uJv.fieldStr? "url").getD ""
@@ -3049,6 +3070,8 @@ def dispatchProviderAndAiRoute
               ("instructions", .str instr)
             ]))
           else
+            if routedRequest?.isSome then
+              return some (jsonErr 502 "Sidecar could not start a VPN-bound OAuth exchange. A sidecar with per-login OAuth proxy support is required.")
             return some (jsonErr 502 s!"CLIProxy auth-url failed: {rawTxt}")
         | _ => return some (jsonErr 502 "Failed reaching CLIProxy management endpoint")
 

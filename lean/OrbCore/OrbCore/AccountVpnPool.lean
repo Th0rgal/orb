@@ -66,11 +66,18 @@ private def detach (active : List Active) (account : String) : IO (List Active) 
     else keep := { t with occupants := others, retiredLocks := t.retiredLocks ++ leaving.flatMap (·.locks) } :: keep
   return keep.reverse
 
-def savePreference (pool : Pool) (db : SqliteDb) (account : String) (country? : Option String) :
+def savePreference (pool : Pool) (db : SqliteDb) (account : String) (country? : Option String)
+    (configure? : Option (Bool → IO (Except String Unit)) := none) :
     IO (Except String Unit) := pool.atomically do
   let .ok before ← AccountVpnRoutes.read db account | return .error "vpn_route_store_unavailable"
+  if country?.isSome then
+    if let some configure := configure? then
+      if let .error e ← configure true then return .error e
   if let .error e ← AccountVpnRoutes.set db account country? then return .error e
   if before.map (·.country) != country? then set (← detach (← get) account)
+  if country?.isNone then
+    if let some configure := configure? then
+      if let .error e ← configure false then return .error e
   return .ok ()
 
 private def install (dir : String) (db : SqliteDb) (account cat : String) (pref : Preference)

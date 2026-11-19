@@ -820,11 +820,12 @@ private def r26SidecarToggleAndOrphanContract
     IO.FS.writeFile orphanPath
       "{\"type\":\"xai\",\"email\":\"orphan@fixture.invalid\",\"disabled\":true}"
     let listed := (← getJson app jwt "/api/ai/providers" now).asArr?.getD #[]
-    let orphan := (listed.find? (fun v => v.fieldStr? "id" == some "cliproxyapi:xai")).getD .null
+    let orphanId := "cliproxyapi:xai:fb5d024d63da95145145c8093f7628bf4ebfe247900470810378269f4cd6da00"
+    let orphan := (listed.find? (fun v => v.fieldStr? "id" == some orphanId)).getD .null
     if orphan.isNull then
       failures := failures.push "R26 sidecar: a disabled sidecar login with no Core row must be listed"
     let healthRows := (← getJson app jwt "/api/model-routing/health" now).asArr?.getD #[]
-    let orphanHealth := (healthRows.find? (fun v => v.fieldStr? "account_id" == some "cliproxyapi:xai")).getD .null
+    let orphanHealth := (healthRows.find? (fun v => v.fieldStr? "account_id" == some orphanId)).getD .null
     if orphanHealth.fieldStr? "account_state" != some "disabled" ||
        orphanHealth.fieldBool? "disabled" != some true ||
        (orphanHealth.fieldUInt64? "cooldown_secs_remaining").getD 0 != 0 then

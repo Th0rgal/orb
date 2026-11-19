@@ -68,11 +68,23 @@ def run (root : String) : IO Unit := do
     let payload := "{\"mode\":\"vpn\",\"country\":\"NL\"}".toUTF8
     let (sidecar, _) ← route false "PUT" payload
     check (sidecar == 409) "unsupported credential owner cannot enable VPN"
-    let (saved, state) ← route true "PUT" payload
+    let refuse : Bool → IO (Except String Unit) := fun (_ : Bool) => pure (.error "vpn_sidecar_update_failed" : Except String Unit)
+    let (failed, _) ← AccountVpnApi.route store (some pool) "" "a" "openai" true "PUT" payload (some refuse)
+    let (_, afterFailure) ← route true "GET" ByteArray.empty
+    check (failed == 503 && afterFailure.fieldStr? "mode" == some "direct")
+      "failed sidecar enable cannot commit the VPN preference"
+    let patched ← IO.mkRef false
+    let configure : Bool → IO (Except String Unit) := fun (enable : Bool) => do
+      let .ok none ← AccountVpnRoutes.read store.missionsDb "a" | return .error "unexpected_phase"
+      patched.set enable
+      return .ok ()
+    let (saved, state) ← AccountVpnApi.route store (some pool) "" "a" "openai" true "PUT" payload (some configure)
+    check (← patched.get) "sidecar bound before VPN admission"
     check (saved == 200 && state.fieldStr? "mode" == some "vpn" &&
       state.fieldStr? "status" == some "blocked" &&
       state.fieldStr? "reason" == some "vpn_coordinator_unconfigured") "saved VPN reports blocked with reason"
-    let (_, direct) ← route true "PUT" "{\"mode\":\"direct\"}".toUTF8
+    let (_, direct) ← AccountVpnApi.route store (some pool) "" "a" "openai" true "PUT" "{\"mode\":\"direct\"}".toUTF8 (some configure)
+    check (!(← patched.get)) "sidecar unbound after explicit Direct selection"
     check (direct.fieldStr? "mode" == some "direct" && (direct.field? "exits").isNone) "direct clears VPN selection"
   finally OrbCore.Store.closeCoreStore store
   let first : ProviderUsageAndLogin.CliAuthFileInfo := { (default : ProviderUsageAndLogin.CliAuthFileInfo) with

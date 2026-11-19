@@ -3531,8 +3531,17 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       | return .ok (mkJson 404 "{\"error\":\"provider_not_found\"}")
     let stored ← getAIProvider? st.store account
     let coreOwned := !hp.hasOAuth && stored.any (fun p => !p.apiKey.isEmpty && p.apiKey != "cli-proxy-managed")
+    let mut configure? : Option (Bool → IO (Except String Unit)) := none
+    if hp.hasOAuth && !hp.hasApiKey && providerTypeMatchesAuthType hp.providerType "codex" &&
+        !hp.oauthFile.isEmpty && (providers.filter (fun p => p.oauthFile == hp.oauthFile)).size == 1 then
+      if let some url := st.vpnRelayPort?.bind (fun port =>
+          AccountVpnRelay.proxyUrl (effectiveJwtSecret st.cfg) port hp.providerType hp.id) then
+        if let some key ← resolveCliProxyMgmtKey? then
+          let base ← resolveCliProxyBaseUrl
+          if AccountVpnSidecar.validManagement base then
+            configure? := some (AccountVpnSidecar.configure base key hp.oauthFile url)
     let (status, result) ← AccountVpnApi.route st.store st.vpnPool? st.vpnCoordinatorDir account hp.providerType
-      coreOwned req.method req.bodySlice.toByteArray
+      (coreOwned || configure?.isSome) req.method req.bodySlice.toByteArray configure?
     return .ok (mkJson status (renderCompact result))
 
   if cleanPath == "/api/settings/airvpn" then
@@ -8002,7 +8011,8 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let vpnPool ← Std.Mutex.new ([] : List AccountVpnPool.Active)
     let vpnCoordinatorDir := (← IO.getEnv "ORB_AIRVPN_COORDINATOR_DIR").getD ""
     let providerHub := { baseProviderHub with
-      resolveTransport? := some (AccountVpnPool.resolve (some vpnPool) store vpnCoordinatorDir) }
+      resolveTransport? := some (fun provider account => AccountVpnRoutes.resolve store.missionsDb account fun pref =>
+        AccountVpnPool.allocate vpnPool store.rootDir vpnCoordinatorDir store.missionsDb account provider pref) }
     let appState : CoreAppState := {
       cfg := cfg
       store := store
@@ -8061,7 +8071,9 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
         closeCoreStore store
         IO.eprintln s!"[sandboxed-sh] Failed to initialize the AirVPN account relay: {e}"
         return 1
-    let appState := { appState with vpnRelayPort? := vpnRelay?.map (·.port) }
+    let providerHub := { providerHub with accountRelayUrl? := vpnRelay?.map
+      (fun listener => AccountVpnRelay.proxyUrl (effectiveJwtSecret cfg) listener.port) }
+    let appState := { appState with vpnRelayPort? := vpnRelay?.map (·.port), providerHub? := some providerHub }
     let lostTurns ← interruptTurnsLostToRestart store.missionsDb
     if lostTurns > 0 then
       IO.eprintln s!"[sandboxed-sh] {lostTurns} mission turn(s) lost to the restart marked interrupted"
