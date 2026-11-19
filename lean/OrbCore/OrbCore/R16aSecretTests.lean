@@ -27,11 +27,12 @@ private def withFakeVault (root : System.FilePath) (run : IO Unit) : IO Unit := 
     " 'secret get') printf '%s' '{\"value\":\"r16a-inert-marker\"}';;\n" ++
     " *) exit 72;;\nesac\n")
   check ((← OrbBin.PosixExt.chmod bws.toString 0o700) == 0) "fake BWS executable"
-  let vars := #["PATH", "BWS_ACCESS_TOKEN"]
+  let vars := #["PATH", "BWS_ACCESS_TOKEN", "SANDBOXED_REMOTE_NODES"]
   let prior ← vars.mapM fun key => do return (← IO.getEnv key)
   try
     OrbBin.PosixExt.setenvVar "PATH" bin.toString
     OrbBin.PosixExt.setenvVar "BWS_ACCESS_TOKEN" "r16a-inert-vault-input"
+    OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODES"
     run
   finally
     for (key, value) in vars.zip prior do
@@ -49,7 +50,8 @@ private def exercise (root : System.FilePath) (store : CoreStore) (mc : ManagedC
       #[mid, project, root.toString]
   discard <| updateMissionBoundManagedNode store "bound" "managed-synthetic" (formatEpochIso8601Utc now)
   sql store.missionsDb "UPDATE missions SET tags='[\"btw-parent:bound\"]' WHERE id='inherited';"
-  sql store.missionsDb "INSERT INTO remote_node_jobs(job_id,mission_id,node_id) VALUES('fixture-job','ledger','managed-synthetic');"
+  discard <| interruptTurnsLostToRestart store.missionsDb
+  sql store.missionsDb "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state) VALUES('fixture-job','ledger','managed-synthetic','running');"
   sql store.missionsDb "UPDATE missions SET tags='[\"remote-node:synthetic\"]' WHERE id='alias';"
   sql store.missionsDb "UPDATE missions SET tags='[\"remote-node:auto-managed:boat:small\"]' WHERE id='automatic';"
   sql store.missionsDb "UPDATE missions SET placement_kind='managed_vm' WHERE id='pending';"
@@ -132,6 +134,7 @@ private def exercise (root : System.FilePath) (store : CoreStore) (mc : ManagedC
       if mid != "inherited" then
         let otherDir ← client.secretsDir
         check (!(← otherDir.pathExists)) "non-requesting companion received no file"
+    check (!(← (System.FilePath.mk store.rootDir / "GH_TOKEN").pathExists)) "Core did not materialize the value"
     let (_, host) ← call (← findClient "host") "R16A_HOST_ONLY"
     check (host.fieldStr? "status" == some "granted") "trusted host control permits the same non-allowlisted name"
   finally
