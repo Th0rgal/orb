@@ -17,7 +17,7 @@ lean_lib «LeanUISpec» where
   precompileModules := false
 
 lean_lib «LeanUIRuntime» where
-  roots := #[`LeanUI.FFI, `LeanUI.Wayland, `LeanUI.Text, `LeanUI.Vulkan, `LeanUI.Runtime, `LeanUI.Canary, `OrbDesktop.Core, `OrbDesktop.Main]
+  roots := #[`LeanUI.FFI, `LeanUI.Wayland, `LeanUI.Text, `LeanUI.Vulkan, `LeanUI.Runtime, `LeanUI.Canary, `OrbDesktop.Core, `OrbDesktop.RepaintCheck, `OrbDesktop.Main]
   precompileModules := false
 
 target lean_ui_wayland_o pkg : FilePath := do

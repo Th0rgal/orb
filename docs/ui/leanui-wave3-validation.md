@@ -55,6 +55,14 @@ both changes. First-frame CRC32 remained 2783534071.
 | `054155ae2` | 1731.32 | 2108.49 | 1260.88 | 1399.22 | 118.27 |
 | Shadow crop + integer square-root early exit | 854.04 | 1212.35 | 344.87 | 366.96 | 95.99 |
 | Plus rounded-box straight strips | 538.83 | 668.59 | 145.20 | 165.76 | 96.20 |
+| Plus changed visible bounds | 995.12 | 1231.57 | 73.60 | 159.91 | 87.78 |
+
+The visible-bounds run verified each of 20 successive stream framebuffers
+against a full repaint in a separate invocation (`--verify-repaint --bench 20
+--width 1470 --height 923`), plus clip changes and used/unused atlas texel
+changes. All 36 golden PNGs remained byte-identical. The last stream update
+needed zero draw primitives. The table uses the ordinary three-run benchmark
+without the reference renders; startup and transcript-open were slower in this run.
 
 The local gate still fails, including the 64 MiB hard RSS ceiling. There is
 no new on-device WebKit/m2air comparison.

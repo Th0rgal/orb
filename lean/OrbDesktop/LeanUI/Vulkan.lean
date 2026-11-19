@@ -46,6 +46,13 @@ def call6 (fn : USize) (a0 a1 a2 a3 a4 a5 : UInt64 := 0) : IO UInt64 := do
   args := pushU64LE args a5
   FFI.call fn args
 
+private structure PaintSnapshot where
+  scene : Scene
+  pages : Array Text.AtlasPageBuffer
+  clear : Color
+  width : Nat
+  height : Nat
+
 /-- Dynamic Vulkan 1.3 loader and scratch buffer context backed by `LeanUI.FFI`. -/
 structure VulkanContext where
   vkGetInstanceProcAddr : USize := 0
@@ -56,6 +63,7 @@ structure VulkanContext where
   width : Nat := 1280
   height : Nat := 800
   framebuffer : ByteArray := ByteArray.empty
+  previousPaint : Option PaintSnapshot := none
   /-- Number of visual primitives submitted by the last frame. -/
   lastDrawnPrims : Nat := 0
   /-- Number of device pixels cleared by the last frame's damage pass. -/
@@ -352,7 +360,7 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
       clipStack := intersectRect curClip r :: clipStack
     | .clipPop =>
       if let _ :: tail := clipStack then
-        clipStack := if tail.isEmpty then [fullClip] else tail
+        clipStack := if tail.isEmpty then [renderClip] else tail
     | .layerPush opacity =>
       let saved := fb
       fb := ByteArray.mk (Array.replicate totalBytes 0)
@@ -545,7 +553,11 @@ def renderFrame (ctx : VulkanContext) (clearColor : Color) (atlas : Text.GlyphAt
     (scene : Scene) : IO VulkanContext := do
   let (fb, insts) := rasterizeScene ctx.width ctx.height clearColor atlas scene
   let _ ← stageInstances ctx insts
-  return { ctx with framebuffer := fb, lastDrawnPrims := insts.size, lastDamagePixels := ctx.width * ctx.height }
+  return { ctx with
+    framebuffer := fb
+    lastDrawnPrims := insts.size
+    lastDamagePixels := ctx.width * ctx.height
+    previousPaint := some ⟨scene, atlas.pages, clearColor, ctx.width, ctx.height⟩ }
 
 /-- Backdrop blur samples the whole framebuffer and therefore cannot be safely clipped to a dirty
 rectangle. Such scenes use the full path; ordinary changed-node scenes reuse the old framebuffer. -/
@@ -554,13 +566,74 @@ def hasGlobalEffect (scene : Scene) : Bool :=
     | .backdropBlur _ | .layerPush _ | .layerPop => true
     | _ => false
 
+-- Diff the exact command stream. A structural edit can change the meaning of
+-- an identical suffix; never infer local damage across such an edit.
+private def changedBounds (vp : Rect) (old new : Scene) : Option Rect := Id.run do
+  let n := min old.size new.size
+  let mut pre := 0
+  while pre < n && old[pre]? == new[pre]? do pre := pre + 1
+  let mut suf := 0
+  while suf < n - pre && old[old.size-1-suf]? == new[new.size-1-suf]? do suf := suf + 1
+  let mut clips := [vp]
+  for i in [:pre] do
+    match old[i]? with
+    | some (.clipPush r) | some (.clipPushRounded r _) => clips := intersectRect (clips.head?.getD vp) r :: clips
+    | some .clipPop => clips := match clips with | _ :: _ :: _ => clips.tail! | _ => [vp]
+    | _ => pure ()
+  let clip := clips.head?.getD vp
+  let mut area : Option Rect := none
+  for cmds in #[old, new] do
+    for i in [pre:cmds.size-suf] do
+      let some p := cmds[i]? | return none
+      let some r := p.bounds | return none
+      let b := intersectRect clip r
+      if b.w > 0 && b.h > 0 then
+        area := some (match area with
+          | none => b
+          | some a => ⟨min a.x b.x, min a.y b.y, max a.right b.right - min a.x b.x, max a.bottom b.bottom - min a.y b.y⟩)
+  return some (area.getD ⟨0,0,0,0⟩)
+
+-- New glyph allocations may change unused texels. Prove that every old
+-- sampling command still sees the same bytes, or discard the framebuffer.
+private def samplesUnchanged (scene : Scene) (idx : Nat) (a b : Text.AtlasPageBuffer) : Bool := Id.run do
+  if a.atlas.width != b.atlas.width || a.atlas.height != b.atlas.height || a.rgba.size != b.rgba.size then return false
+  if a.rgba == b.rgba then return true
+  for p in scene do
+    let pair := match p with
+      | .glyph src dst _ _ => if idx == 0 then some (src,dst) else none
+      | .mask page src dst _ => if idx == page then some (src,dst) else none
+      | _ => none
+    if let some (src,dst) := pair then
+      for y in [src.y.toNat:min a.atlas.height (src.y.toNat + dst.h.toNat)] do
+        for x in [src.x.toNat:min a.atlas.width (src.x.toNat + dst.w.toNat)] do
+          let pos := (y * a.atlas.width + x) * 4
+          for k in [:4] do
+            if a.rgba[pos+k]? != b.rgba[pos+k]? then return false
+  return true
+
 /-- Render only a dirty rectangle, preserving pixels outside it and culling unchanged visual
 primitives. The scene remains authoritative: structural clip/layer commands are retained. -/
 def renderFrameDamage (ctx : VulkanContext) (clearColor : Color) (atlas : Text.GlyphAtlasCache)
     (dirty : Rect) (scene : Scene) : IO VulkanContext := do
   let fullDamage := dirty.x ≤ 0 && dirty.y ≤ 0 && dirty.right ≥ (ctx.width : Int) && dirty.bottom ≥ (ctx.height : Int)
-  if fullDamage || ctx.framebuffer.size != ctx.width * ctx.height * 4 || hasGlobalEffect scene then
+  let some prev := ctx.previousPaint | return ← renderFrame ctx clearColor atlas scene
+  if fullDamage || prev.width != ctx.width || prev.height != ctx.height || prev.clear != clearColor ||
+      ctx.framebuffer.size != ctx.width * ctx.height * 4 || hasGlobalEffect scene || hasGlobalEffect prev.scene then
     return ← renderFrame ctx clearColor atlas scene
+  let vp : Rect := ⟨0,0,ctx.width,ctx.height⟩
+  let some dirty := changedBounds vp prev.scene scene | return ← renderFrame ctx clearColor atlas scene
+  if prev.pages.size != atlas.pages.size then return ← renderFrame ctx clearColor atlas scene
+  for i in [:prev.pages.size] do
+    let a := prev.pages[i]!
+    let b := atlas.pages[i]!
+    if !samplesUnchanged prev.scene i a b then
+      return ← renderFrame ctx clearColor atlas scene
+  if dirty.w == 0 || dirty.h == 0 then
+    return { ctx with
+      previousPaint := some ⟨scene, atlas.pages, clearColor, ctx.width, ctx.height⟩
+      lastDamagePixels := 0
+      lastDrawnPrims := 0
+      partialFrames := ctx.partialFrames + 1 }
   let (fb, insts) := rasterizeSceneInto ctx.width ctx.height clearColor atlas (some ctx.framebuffer) (some dirty) scene
   let _ ← stageInstances ctx insts
   let clipped := intersectRect { x := 0, y := 0, w := (ctx.width : Int), h := (ctx.height : Int) } dirty
@@ -568,6 +641,7 @@ def renderFrameDamage (ctx : VulkanContext) (clearColor : Color) (atlas : Text.G
   return {
     ctx with
     framebuffer := fb
+    previousPaint := some ⟨scene, atlas.pages, clearColor, ctx.width, ctx.height⟩
     lastDrawnPrims := insts.size
     lastDamagePixels := pixels
     partialFrames := ctx.partialFrames + 1

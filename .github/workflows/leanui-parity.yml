@@ -177,6 +177,7 @@ jobs:
           python3 -m unittest -v scripts/test_leanui_tokens.py scripts/test_leanui_parity.py
           python3 -I scripts/test_leanui_window_effects.py
           scripts/leanui_window_smoke.sh target/native/orb-desktop-native
+          target/native/orb-desktop-native --verify-repaint --bench 20 --width 1470 --height 923
 
       - name: Run U7 native frame budget and stream damage benchmark
         run: |

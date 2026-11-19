@@ -14,6 +14,7 @@ import LeanUI.Wayland
 import LeanUI.Text
 import LeanUI.Vulkan
 import LeanUI.Runtime
+import OrbDesktop.RepaintCheck
 import OrbDesktop.State
 import OrbDesktop.Core
 import OrbDesktop.Chrome
@@ -43,6 +44,7 @@ structure DesktopCliConfig where
   headlessGoldenAllDir : Option System.FilePath := none
   screenOpt : Option ScreenId := none
   benchIterations : Option Nat := none
+  verifyRepaint : Bool := false
   selfTest : Bool := false
   deriving Repr, Inhabited
 
@@ -61,6 +63,7 @@ def parseDesktopArgs (args : List String) : DesktopCliConfig :=
       loop rest { cfg with screenOpt := ScreenId.parse? scrStr }
     | "--bench" :: nStr :: rest =>
       loop rest { cfg with benchIterations := some (max 1 (nStr.toNat?.getD 20)) }
+    | "--verify-repaint" :: rest => loop rest { cfg with verifyRepaint := true }
     | "--width" :: w :: rest =>
       loop rest { cfg with runtimeCfg := { cfg.runtimeCfg with width := w.toNat?.getD cfg.runtimeCfg.width } }
     | "--height" :: h :: rest =>
@@ -300,7 +303,8 @@ def fmtMs (us : Nat) : String :=
 an already-running control screen. Each measured update queues several stream deltas and flushes
 once into the transcript damage band, exercising changed-node rasterisation and the
 `Orb.Stream.Coalescer` frame boundary. `first_frame_crc32` ties the run to the transcript golden. -/
-def runDesktopBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) : IO UInt32 := do
+def runDesktopBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) (verifyRepaint := false) : IO UInt32 := do
+  if verifyRepaint then verifyRepaintEdges
   let iters := max 1 iterations
   let tStartNs ← IO.monoNanosNow
   let firstSt := DesktopState.forScreen .missionTranscript cfg.darkTheme cfg.scale120
@@ -333,7 +337,13 @@ def runDesktopBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) : IO UInt32
       | some d => Damage.add rt.damage d
     rt := { rt with app := nextSt, damage := nextDamage }
     let f0 ← IO.monoNanosNow
+    let reference ← if verifyRepaint then do
+      let ref ← Runtime.stepFrame rt.markFullDamage (desktopReducer rt) renderDesktopFrame
+      pure (some ref.vulkan.framebuffer)
+      else pure none
     rt ← Runtime.stepFrame rt (desktopReducer rt) renderDesktopFrame
+    if let some fb := reference then
+      if fb != rt.vulkan.framebuffer then throw <| IO.userError s!"stream frame {idx} differs from full repaint"
     let f1 ← IO.monoNanosNow
     frameTimesUs := frameTimesUs.push ((f1 - f0) / 1000)
     partialDrawnPrims := rt.vulkan.lastDrawnPrims
@@ -370,7 +380,7 @@ def main (args : List String) : IO UInt32 := do
   let dcfg := parseDesktopArgs args
   let rcfg := dcfg.runtimeCfg
   if let some iters := dcfg.benchIterations then
-    return (← runDesktopBench rcfg iters)
+    return (← runDesktopBench rcfg iters dcfg.verifyRepaint)
   if let some allDir := dcfg.headlessGoldenAllDir then
     return (← renderAll36Goldens rcfg.width rcfg.height allDir)
   if let some outPath := rcfg.headlessGolden then
