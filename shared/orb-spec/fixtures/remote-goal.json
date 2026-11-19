@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "cases": [
     {"name":"status-only","event":{"type":"goal_status","data":{"status":"active","revision":1}},"expected":{"type":"goal_status","data":{"status":"active","revision":1}}},
     {"name":"iteration","event":{"type":"goal_iteration","data":{"iteration":2,"objective":"Verify changes","revision":2}},"expected":{"type":"goal_iteration","data":{"iteration":2,"objective":"Verify changes","revision":2}}},
@@ -10,6 +10,14 @@
     {"name":"unknown-fields","event":{"type":"goal_status","data":{"status":"future_status","future":{"value":42},"content":""}},"expected":{"type":"goal_status","data":{"status":"future_status","future":{"value":42},"content":""}}},
     {"name":"unrelated","event":{"type":"text_delta","data":{"content":"hello"}},"expected":null},
     {"name":"missing-data","event":{"type":"goal_status"},"expected":null},
-    {"name":"array-data","event":{"type":"goal_status","data":[]},"expected":null}
+    {"name":"array-data","event":{"type":"goal_status","data":[]},"expected":null},
+    {"name":"active-iteration","event":{"type":"goal_iteration","data":{"status":"active","objective":"Ship it","iteration":2,"summary":"Progress"}},"expected":{"type":"goal_iteration","data":{"status":"active","objective":"Ship it","iteration":2,"summary":"Progress"}}}
+  ],
+  "projection_cases": [
+    {"name":"progress","status":"awaiting_user","reason":"remote_goal_continuation","iteration":2,"phase":"active","label":"Goal in progress · iteration 2"},
+    {"name":"completion","status":"completed","reason":"remote_goal_complete","iteration":2,"phase":"complete","label":"Goal complete"},
+    {"name":"process-success-alone","status":"completed","reason":"completed","iteration":2,"phase":"blocked","label":"Goal blocked"},
+    {"name":"stop-between-turns","status":"interrupted","reason":"remote_goal_stopped","iteration":2,"phase":"stopped","label":"Goal stopped"},
+    {"name":"budget","status":"awaiting_user","reason":"remote_goal_budget_limited","iteration":20,"phase":"blocked","label":"Goal blocked"}
   ]
 }

@@ -36,6 +36,9 @@ extension OrbConversation {
                 live.applyTextOp(data)
                 return
             }
+            if type == "goal_status" || type == "goal_iteration" {
+                Task { await refresh(force: true) }
+            }
             if type == "user_message" {
                 if (data["queued"] as? Bool) == true {
                     Task { await refresh(force: true) }
@@ -578,6 +581,13 @@ extension OrbConversation {
                     : (selection.cloud || selection.node.isEmpty ? "core" : selection.node)
                 let uploadTargetNode = OrbManaged.isAutoManagedTarget(rawTargetNode) ? "core" : rawTargetNode
                 let goalRequest = OrbCyberAccess.isGoal(prompt)
+                if goalRequest && rawTargetNode != "core" && !isCloud {
+                    guard id == nil else { throw OrbHTTPError(status: 400, detail: OrbRemoteGoal.unsupported) }
+                    let fleet = try await api.call("/api/remote-nodes")
+                    guard fleet["remote_launch"]["goal_harnesses"].items.contains(where: { $0.text == selection.backend }) else {
+                        throw OrbHTTPError(status: 400, detail: OrbRemoteGoal.unsupported)
+                    }
+                }
                 var followUpCyberAssertion: (mode: String, revision: String)? = nil
                 if !isCloud && (id != nil ? mission["backend"].text : selection.backend) == "codex" {
                     let effectiveModel = id != nil && selection.model.isEmpty ? mission["model_override"].text : selection.model

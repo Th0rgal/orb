@@ -1089,6 +1089,8 @@ export interface RemoteLaunchCapability {
   /** Harness ids that need the backend model proxy. Absent: claudecode and opencode only. */
   requires_proxy_harnesses?: string[];
   error_prefixes?: string[];
+  /** Structured remote Goal support; absent means the client must refuse Goal. */
+  goal_harnesses?: string[];
 }
 
 export interface ManagedComputeFleetSummary {
@@ -1205,6 +1207,7 @@ export interface Mission {
   history: MissionHistoryEntry[];
   goal_mode?: boolean;
   goal_objective?: string | null;
+  goal_iteration?: number;
   remote_node_id?: string | null;
   terminal_reason?: string | null;
   status_message?: string | null;
@@ -3277,5 +3280,3 @@ export function getMissionResources(
     signal ? { signal } : undefined,
   );
 }
-
-

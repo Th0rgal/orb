@@ -19,6 +19,7 @@ import OrbCore.ManagedProvisioningTests
 import OrbCore.ManagedResumeTests
 import OrbCore.WakeupRestartTests
 import OrbCore.TurnOutcomeTests
+import OrbCore.RemoteGoalTests
 import OrbCore.ManagedAccessTests
 import OrbCore.MissionSettingsTests
 import OrbCore.R17Tests
@@ -7849,6 +7850,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   try
     OrbCore.WakeupRestartTests.run
     OrbCore.TurnOutcomeTests.run
+    OrbCore.RemoteGoalTests.run
   catch e =>
     IO.eprintln s!"[orb-core-test] FAIL: {e}"
     return 1

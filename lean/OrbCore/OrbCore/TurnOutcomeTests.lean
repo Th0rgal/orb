@@ -1,14 +1,14 @@
 /-
   A turn that ends with no output is a failure, retried a bounded number of
   times and then `failed`; a mission whose first turn cannot be dispatched is
-  not created `active`. No harness, node or network is used.
+  not created `active`. Remote dispatch uses a loopback node fixture.
 -/
 import OrbCore.Control
 
 namespace OrbCore.TurnOutcomeTests
 open OrbBin.Json OrbBin.Sqlite OrbBin.PosixExt
 open OrbCore.Store OrbCore.Control OrbCore.R7Core OrbCore.Proxy OrbCore.Managed
-open OrbCore.RemoteDispatch OrbCore.MemoryAndCloud
+open OrbCore.RemoteDispatch OrbCore.MemoryAndCloud OrbCore.QueueCont
 
 private def check (ok : Bool) (label : String) : IO Unit := do
   unless ok do throw (IO.userError s!"turn outcome: {label}")
@@ -54,6 +54,96 @@ private def verifyReceiptWord (receipt : JVal) (transportDropped : Bool := false
 private def cellOf (db : SqliteDb) (sql : String) (params : Array String := #[]) : IO String := do
   let .ok rows ← execParamQuery db sql params | throw (IO.userError s!"query failed: {sql}")
   return (rows[1]?.bind (·[0]?)).getD ""
+
+private def mockNodeReply (fd : LeanSys.Posix.Fd) (status body : String) : IO Unit := do
+  let response := s!"HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\nConnection: close\r\n\r\n{body}"
+  let .ok _ ← LeanSys.Posix.writeAll fd response.toUTF8 | throw (IO.userError "Goal mock node reply failed")
+
+private def withMockNodeRequest (fd : LeanSys.Posix.Fd) (f : LeanSys.Posix.Fd → LeanSys.Http.HttpRequest → IO Unit) : IO Unit := do
+  let .ok conn ← LeanSys.Posix.tcpAcceptPoll fd 5000 | throw (IO.userError "Goal mock node accept failed")
+  try
+    let .ok req ← readCoreHttpRequestFromFd conn | throw (IO.userError "Goal mock node read failed")
+    f conn req
+  finally
+    discard <| LeanSys.Posix.closeFd conn
+
+private def verifyIncompleteGoalDrain (store : CoreStore) (sup : RemoteJobSupervisor)
+    (fd : LeanSys.Posix.Fd) (root mid : String) (capped : Bool) : IO Unit := do
+  let jid := s!"job-{mid}"
+  let .ok _ ← execParamQuery store.missionsDb
+    "UPDATE missions SET backend='opencode',goal_mode=1,goal_objective='Ship it',placement_job_id=?2,terminal_reason='remote_node_job' WHERE id=?1;"
+    #[mid, jid] | throw (IO.userError "Goal drain fixture setup failed")
+  let line := if capped then "Still working" else "<!-- GOAL_COMPLETE -->"
+  let chunk := s!"\{\"type\":\"text\",\"sessionID\":\"ses_goal_drain\",\"part\":\{\"type\":\"text\",\"text\":{jsonEscape line}}}\n"
+  let slice := fun (offset next len : Nat) (data : String) =>
+    s!"\{\"offset\":{offset},\"next_offset\":{next},\"log_len\":{len},\"data\":{jsonEscape data}}"
+  let responder ← IO.asTask do
+    withMockNodeRequest fd fun conn req => do
+      check (req.path.contains "/log?offset=0") "first Goal log read starts at zero"
+      mockNodeReply conn "200 OK" (slice 0 chunk.utf8ByteSize chunk.utf8ByteSize chunk)
+    withMockNodeRequest fd fun conn req => do
+      check (req.path == s!"/jobs/{jid}") "job status fetched before final drain"
+      mockNodeReply conn "200 OK" "{\"state\":\"succeeded\",\"exit_code\":0}"
+    if capped then
+      for i in [:8] do
+        withMockNodeRequest fd fun conn req => do
+          let off := chunk.utf8ByteSize + i
+          check (req.path.contains s!"/log?offset={off}&") "final drain advances one bounded slice at a time"
+          mockNodeReply conn "200 OK" (slice off (off + 1) (chunk.utf8ByteSize + 9) "\n")
+    else
+      withMockNodeRequest fd fun conn _ => mockNodeReply conn "503 Service Unavailable" "{}"
+  spawnRemoteJobPoller store none none none sup root mid "opencode" "mockgoalchecks" jid ""
+  IO.ofExcept responder.get
+  for _ in [:100] do
+    if (← cellOf store.missionsDb "SELECT status FROM missions WHERE id=?1;" #[mid]) != "active" then break
+    IO.sleep 20
+  check ((← cellOf store.missionsDb "SELECT status || ':' || terminal_reason FROM missions WHERE id=?1;" #[mid]) ==
+    "awaiting_user:remote_goal_evidence_incomplete" &&
+    (← cellOf store.missionsDb "SELECT COUNT(*) FROM mission_continuations WHERE mission_id=?1;" #[mid]) == "0")
+    "a failed or capped final read cannot complete or continue a Goal"
+
+private def verifyGoalStartupRetry (store : CoreStore) (sup : RemoteJobSupervisor)
+    (fd : LeanSys.Posix.Fd) (root mid : String) (stop : Bool) : IO Unit := do
+  let jid := s!"job-{mid}"
+  let db := store.missionsDb
+  let .ok _ ← execParamQuery db "UPDATE missions SET status='awaiting_user',backend='opencode',goal_mode=1 WHERE id=?1;" #[mid]
+    | throw (IO.userError "Goal startup fixture mission")
+  let .ok _ ← execParamQuery db
+    "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,payload_json,created_at,updated_at) VALUES(?1,?2,'mockgoalchecks','submitting',?3,'t0','t0');"
+    #[jid, mid, "{\"backend\":\"opencode\",\"goal_generation\":1,\"goal_claim\":\"\"}"]
+    | throw (IO.userError "Goal startup fixture job")
+  let reconcile := fun startup => reconcileUncertainRemoteSubmissions store none none none sup root startup
+  check ((← reconcile false) == 0 && (← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jid]) == "submitting")
+    "periodic reconciliation leaves an in-flight POST alone"
+  let .ok () ← fenceInterruptedGoalSubmissions store | throw (IO.userError "Goal startup fixture fence")
+  let failedProbe ← IO.asTask do
+    withMockNodeRequest fd fun _ req =>
+      check (req.method == "GET" && req.path == s!"/jobs/{jid}") "startup probes original job before losing transport"
+  let startupAttached ← reconcile true
+  IO.ofExcept failedProbe.get
+  check (startupAttached == 0 && (← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jid]) == "uncertain")
+    "startup leaves a failed probe eligible for retry"
+  if stop then
+    check (← (hostedStop store mid "2026-11-19T00:00:00Z" "remote_goal_stopped").map Except.isOk)
+      "Stop commits before the periodic probe"
+  let recovered ← IO.asTask do
+    withMockNodeRequest fd fun conn req => do
+      check (req.method == "GET" && req.path == s!"/jobs/{jid}") "periodic probe retries the original job"
+      mockNodeReply conn "200 OK" "{\"state\":\"running\"}"
+    if stop then
+      withMockNodeRequest fd fun conn req => do
+        check (req.method == "POST" && req.path == s!"/jobs/{jid}/cancel") "recovery cancels the same fenced job"
+        mockNodeReply conn "200 OK" "{}"
+  let attached ← reconcile false
+  IO.ofExcept recovered.get
+  let state ← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jid]
+  let status ← cellOf db "SELECT status FROM missions WHERE id=?1;" #[mid]
+  if stop then
+    check (attached == 0 && state == "cancelled" && status == "interrupted") "periodic recovery preserves Stop"
+  else
+    check (attached == 1 && state == "running" && status == "active" &&
+      (← cellOf db "SELECT placement_job_id FROM missions WHERE id=?1;" #[mid]) == jid)
+      "periodic recovery attaches the accepted job without another submission"
 
 def r24_lost_reply_is_uncertain_not_rejected : IO Unit := do
   let receipt := JVal.obj #[
@@ -311,6 +401,120 @@ def run : IO Unit := do
         return true
       let tick := fun (now : UInt64) =>
         discard <| tickContinuationScheduler store none none none sup none root (some launch) (some now)
+      -- A committed Stop between turns revokes the otherwise due Goal intent.
+      newMission "m-goal" "[]"
+      discard <| execParamQuery db
+        "UPDATE missions SET backend='opencode',goal_mode=1,goal_objective='Ship it',placement_job_id='job-goal',terminal_reason='remote_node_job' WHERE id='m-goal';" #[]
+      let settled ← settleRemoteGoal store "m-goal" "job-goal" "Ship it" "One step done" 1 3 true true
+      check (match settled with | .ok (some ("awaiting_user", "remote_goal_continuation", 1)) => true | _ => false)
+        "an unfinished Goal arms a durable continuation"
+      let replay ← settleRemoteGoal store "m-goal" "job-goal" "Ship it" "One step done" 1 4 true true
+      check (match replay with | .ok none => true | _ => false) "repeat settlement does not arm again"
+      let stopped ← hostedStop store "m-goal" "2026-11-19T00:00:00Z" "remote_goal_stopped"
+      check stopped.isOk "Goal can stop between turns"
+      let late ← settleRemoteGoal store "m-goal" "job-goal" "Ship it" "<!-- GOAL_COMPLETE -->" 1 5 true true
+      check (match late with | .ok none => true | _ => false) "late success cannot undo Stop"
+      discard <| tickContinuationScheduler store none none none sup none root (some launch) (some 10)
+      check ((← launches.get) == 0 && (← retries "m-goal") == "remote_goal/4" && (← statusOf "m-goal") == "interrupted")
+        "no automatic continuation dispatches after Stop"
+      newMission "m-goal-dispatch" "[\"remote-node:mockgoal\"]"
+      discard <| execParamQuery db
+        ("UPDATE missions SET backend='opencode',goal_mode=1,goal_objective='Ship it',session_id='ses_goal_fixture'," ++
+         "placement_job_id='first-goal-job',terminal_reason='remote_node_job' WHERE id='m-goal-dispatch';") #[]
+      let .ok (some _) ← settleRemoteGoal store "m-goal-dispatch" "first-goal-job" "Ship it" "Still working" 1 20 true true
+        | throw (IO.userError "Goal dispatch fixture did not arm")
+      discard <| execParamQuery db "UPDATE mission_continuations SET phase=2 WHERE mission_id='m-goal-dispatch';" #[]
+      let .ok (fd, port) ← LeanSys.Posix.tcpListen "127.0.0.1" 0 8
+        | throw (IO.userError "Goal mock node listen failed")
+      let accepted ← IO.asTask do
+        let .ok conn ← LeanSys.Posix.tcpAcceptPoll fd 5000 | return false
+        try
+          let .ok req ← readCoreHttpRequestFromFd conn | return false
+          let body := "{\"accepted\":true}"
+          let response := s!"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\nConnection: close\r\n\r\n{body}"
+          let _ ← LeanSys.Posix.writeAll conn response.toUTF8
+          return req.method == "POST" && req.path == "/jobs" &&
+            ((String.fromUTF8? req.bodySlice.toByteArray).getD "").contains "--session 'ses_goal_fixture'"
+        finally
+          discard <| LeanSys.Posix.closeFd conn
+      setenvVar "SANDBOXED_REMOTE_NODES_ENABLED" "true"
+      setenvVar "SANDBOXED_REMOTE_NODES" s!"mockgoal=http://127.0.0.1:{port}|TURN_OUTCOME_MOCK_TOK"
+      setenvVar "TURN_OUTCOME_MOCK_TOK" "goal-mock-token"
+      setenvVar "SANDBOXED_PUBLIC_URL" "http://127.0.0.1:3000"
+      let .ok (checksFd, checksPort) ← LeanSys.Posix.tcpListen "127.0.0.1" 0 8
+        | throw (IO.userError "Goal checks mock node listen failed")
+      try
+         let .ok _ ← execParamQuery db
+           "INSERT INTO users(id,username,password_hash,role) VALUES('goal-test-admin','goal-test-admin','synthetic-hash','admin');" #[]
+           | throw (IO.userError "Goal admission fixture user")
+         let jwt := mintSessionTokenV2 cfg.jwtSecret "goal-test-admin" "goal-test-admin" 1 3600
+         let send := fun (path body : String) => do
+           let request := s!"POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+           let .ok req := LeanSys.Http.parseRequest request.toUTF8 none | throw (IO.userError "Goal fixture REST request")
+           let .ok response ← dispatchCoreRequest { app with remoteSup? := some sup } req 24
+             | throw (IO.userError "Goal fixture REST dispatch")
+           return response
+         let rejected ← send "/api/control/missions" "{\"id\":\"unsupported-goal\",\"backend\":\"claudecode\",\"remote_node_id\":\"mockgoal\",\"prompt\":\"/goal Ship it\"}"
+         check (rejected.status == 400 && ((String.fromUTF8? rejected.body).getD "").contains "remote_goal_unsupported" &&
+           (← statusOf "unsupported-goal").isEmpty) "Core rejects unsupported direct Goal creation before inserting a mission"
+         newMission "m-nongoal-remote" "[\"remote-node:mockgoal\"]"
+         discard <| execParamQuery db "UPDATE missions SET owner_user_id='goal-test-admin' WHERE id='m-nongoal-remote';" #[]
+         let eventCount ← cellOf db "SELECT COUNT(*) FROM mission_events WHERE mission_id='m-nongoal-remote';" #[]
+         let rejected ← send "/api/control/message" "{\"mission_id\":\"m-nongoal-remote\",\"content\":\"/goal Ship it\"}"
+         let rejection := (String.fromUTF8? rejected.body).getD ""
+         check (rejected.status == 400 && rejection.contains "remote_goal_followup_unsupported" &&
+           (← cellOf db "SELECT COUNT(*) FROM remote_message_queue WHERE mission_id='m-nongoal-remote';" #[]) == "0" &&
+           (← cellOf db "SELECT COUNT(*) FROM mission_events WHERE mission_id='m-nongoal-remote';" #[]) == eventCount)
+           s!"Core rejects a remote Goal follow-up before appending or queueing (got {rejected.status}: {rejection})"
+         let fired ← tickContinuationScheduler store none none none sup none root (some launch) (some 22)
+         check ((← IO.ofExcept accepted.get) && fired == 1 && (← launches.get) == 0 &&
+           (← statusOf "m-goal-dispatch") == "active") "Goal scheduler recovers a claimed intent in the same OpenCode session"
+         let replayed ← tickContinuationScheduler store none none none sup none root (some launch) (some 22)
+         check (replayed == 0) "a recovered claim is not dispatched twice"
+         let jobId ← cellOf db "SELECT placement_job_id FROM missions WHERE id='m-goal-dispatch';"
+         let gen ← cellOf db "SELECT run_generation FROM missions WHERE id='m-goal-dispatch';"
+         let completed ← settleRemoteGoal store "m-goal-dispatch" jobId "Ship it" "Done\n<!-- GOAL_COMPLETE -->" (gen.toNat?.getD 0).toUInt64 23 true true
+         check (match completed with | .ok (some ("completed", "remote_goal_complete", _)) => true | _ => false)
+           "only the current Goal job can settle completion"
+         setenvVar "SANDBOXED_REMOTE_NODES" s!"mockgoalchecks=http://127.0.0.1:{checksPort}|TURN_OUTCOME_MOCK_TOK"
+         for (mid, capped) in #[("m-goal-log-failed", false), ("m-goal-log-capped", true)] do
+           newMission mid "[\"remote-node:mockgoalchecks\"]"
+           verifyIncompleteGoalDrain store sup checksFd root mid capped
+         let createBody := "{\"id\":\"m-initial-goal-stop\",\"backend\":\"opencode\",\"remote_node_id\":\"mockgoalchecks\",\"prompt\":\"/goal Ship it\"}"
+         let creating ← IO.asTask (send "/api/control/missions" createBody)
+         let postedJob ← IO.mkRef ""
+         withMockNodeRequest checksFd fun conn req => do
+           let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray | throw (IO.userError "Goal launch fixture body")
+           let jid := (jv.fieldStr? "job_id").getD ""
+           check (req.method == "POST" && req.path == "/jobs" && !jid.isEmpty) "initial Goal POST received"
+           postedJob.set jid
+           -- The synchronous boot fence has already run. A late background startup scan
+           -- can overlap this live request, but must not probe or demote its intent.
+           let startupAttached ← reconcileUncertainRemoteSubmissions store none none none sup root
+           check (startupAttached == 0 && (← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jid]) == "submitting")
+             "background startup scan leaves a live Goal POST owned by its submitter"
+           let stopped ← send "/api/control/missions/m-initial-goal-stop/stop" "{}"
+           check (stopped.status == 200) "Stop commits while initial remote POST is in flight"
+           mockNodeReply conn "200 OK" "{\"accepted\":true}"
+         withMockNodeRequest checksFd fun conn req => do
+           check (req.method == "POST" && req.path == s!"/jobs/{← postedJob.get}/cancel") "late initial acceptance cancels the same job"
+           mockNodeReply conn "200 OK" "{}"
+         let created ← IO.ofExcept creating.get
+         check (created.status == 201 && ((String.fromUTF8? created.body).getD "").contains "interrupted" &&
+           (← cellOf db "SELECT status || ':' || terminal_reason FROM missions WHERE id='m-initial-goal-stop';" #[]) == "interrupted:remote_goal_stopped" &&
+           (← cellOf db "SELECT COUNT(*) FROM mission_runs WHERE mission_id='m-initial-goal-stop';" #[]) == "0")
+           "late initial acceptance cannot undo Stop or erase the mission"
+         -- The attach case starts a poller, so run it last on this listener.
+         for (mid, stop) in #[("m-goal-startup-stop", true), ("m-goal-startup-attach", false)] do
+           newMission mid "[\"remote-node:mockgoalchecks\"]"
+           verifyGoalStartupRetry store sup checksFd root mid stop
+      finally
+        discard <| LeanSys.Posix.closeFd fd
+        discard <| LeanSys.Posix.closeFd checksFd
+        unsetenvVar "SANDBOXED_REMOTE_NODES_ENABLED"
+        unsetenvVar "SANDBOXED_REMOTE_NODES"
+        unsetenvVar "TURN_OUTCOME_MOCK_TOK"
+        unsetenvVar "SANDBOXED_PUBLIC_URL"
       tick 4000000000
       check ((← launches.get) == 1 && (← statusOf "m-empty") == "active") "the retry relaunches the turn"
       -- The retry is a NEW user turn for every backend: the conversation the harness

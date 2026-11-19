@@ -2,6 +2,29 @@
    Admission must reuse Cyber.parseGoalPrefix? and preserve native bindings. -/
 namespace OrbCore.RemoteGoal
 
+/-- The current emulated adapter contract, shared by admission and discovery. -/
+def harnesses : Array String := #["opencode"]
+
+def completionMarker := "<!-- GOAL_COMPLETE -->"
+
+/-- A standalone final marker is evidence only outside a Markdown code fence. -/
+def hasCompletionMarker (text : String) : Bool := Id.run do
+  let lines := (text.trimAsciiEnd.toString.splitOn "\n").toArray
+  let some last := lines.back? | return false
+  if last != completionMarker && last != completionMarker ++ "\r" then return false
+  let mut fence : Option (Char × Nat) := none
+  for line in lines.pop do
+    let chars := line.trimAsciiStart.toString.toList
+    for c in ['`', '~'] do
+      let size := (chars.takeWhile (· == c)).length
+      if size >= 3 then
+        match fence with
+        | none => fence := some (c, size)
+        | some (opener, width) =>
+          if c == opener && size >= width && (chars.drop size).all Char.isWhitespace then
+            fence := none
+  return fence.isNone
+
 inductive Capability where
   | unavailable | coreOpenCode | native
   deriving BEq, Repr

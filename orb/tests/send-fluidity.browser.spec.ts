@@ -71,7 +71,8 @@ test('6 · first prompt of a new mission',async({page})=>{
  expectFluid(await measure(page,'new-mission','Path six new mission',()=>page.locator('button[title="Send"]').first().click(),4000));
 });
 test('7 · /goal',async({page})=>{
- await ready(page,'/tests/smooth-send.html?idle');
+ // This measures an existing Core mission's native Goal follow-up.
+ await ready(page,'/tests/smooth-send.html?idle&core-goal');
  await composer(page).pressSequentially('/goal ');
  await page.keyboard.type('Reach the objective');
  expectFluid(await measure(page,'goal','Reach the objective',()=>page.keyboard.press('Enter')));

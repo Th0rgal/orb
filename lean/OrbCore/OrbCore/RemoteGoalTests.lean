@@ -14,6 +14,10 @@ private def progress : TurnEvidence := {
   finalText := "Implemented one step; verification remains.", madeProgress := true }
 
 def run : IO Unit := do
+  check (hasCompletionMarker "Verified.\r\n<!-- GOAL_COMPLETE -->\r\n\n") "standalone final marker"
+  for text in #["I read <!-- GOAL_COMPLETE -->", "<!-- GOAL_COMPLETE -->\nStill working",
+      "> <!-- GOAL_COMPLETE -->", "```html\n<!-- GOAL_COMPLETE -->\n```", "~~~html\n<!-- GOAL_COMPLETE -->"] do
+    check (!hasCompletionMarker text) "quoted, fenced or nonfinal marker ignored"
   check (match admit .unavailable false "objective" with | .error .unsupported => true | _ => false) "unavailable is fail closed"
   check (match admit .coreOpenCode true "objective" with | .error .nativeContinuityRequired => true | _ => false)
     "native binding cannot be converted to emulation"
