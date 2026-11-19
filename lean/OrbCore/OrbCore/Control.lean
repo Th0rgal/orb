@@ -2094,7 +2094,8 @@ private def launchLocalCoreMissionTurn
     (missionId harness cwd prompt model effort permMode : String)
     (sessionId? : Option String := none)
     (worktreeMode : String := "")
-    (appendUserEvent : Bool := false) : IO (Except String String) := do
+    (appendUserEvent : Bool := false)
+    (wakeup? : Option WakeupClaim := none) : IO (Except String String) := do
   let some mgr := st.warmMgr? | return .error "warm_harness_manager_unavailable"
   let effRawCwd := if cwd.trimAscii.toString.isEmpty then st.cfg.workingDir else cwd
   let safeCwd ← match ← confineWorkingDirectory st.cfg.workingDir effRawCwd with
@@ -2129,10 +2130,21 @@ private def launchLocalCoreMissionTurn
     match prevSt? with
     | some s => max (dbGen + 1) (s.generation + 1)
     | none => if sessionId?.isSome then dbGen + 1 else dbGen
-  carryArmedWakeupsForward (execParamQuery st.store.missionsDb) missionId nextGen.toNat ts
-  discard <| execParamQuery st.store.missionsDb
-    "UPDATE missions SET status='active', run_generation=CAST(?2 AS INTEGER), state_revision=state_revision+1, updated_at=?3 WHERE id=?1;"
-    #[missionId, s!"{nextGen}", ts]
+  let started ← withImmediateTx st.store.missionsDb do
+    let query := execParamQueryUnlocked st.store.missionsDb
+    if let some claim := wakeup? then
+      let .ok rows ← query
+        ("UPDATE mission_continuations SET run_generation=CAST(?5 AS INTEGER) " ++
+         "WHERE id=?1 AND request_id=?2 AND phase=2 AND mission_id=?3 AND run_generation=CAST(?4 AS INTEGER) " ++
+         "AND EXISTS(SELECT 1 FROM missions WHERE id=?3 AND run_generation=CAST(?4 AS INTEGER) " ++
+         "AND status NOT IN ('active','pending','waiting_background','completed','failed','cancelled','not_feasible')) RETURNING id;")
+        #[claim.id, claim.requestId, missionId, s!"{claim.generation}", s!"{nextGen}"]
+        | return .error "wakeup_claim_write_failed"
+      if rows.size ≤ 1 then return .error "wakeup_claim_fenced"
+    carryArmedWakeupsForward query missionId nextGen.toNat ts
+    query "UPDATE missions SET status='active', run_generation=CAST(?2 AS INTEGER), state_revision=state_revision+1, updated_at=?3 WHERE id=?1;"
+      #[missionId, s!"{nextGen}", ts]
+  if let .error e := started then return .error e
   let model? := if model.trimAscii.toString.isEmpty then none else some model.trimAscii.toString
   let effort? := if effort.trimAscii.toString.isEmpty then none else some effort.trimAscii.toString
   let parsedPerm := OrbBin.ClaudeControl.parsePermissionMode permMode
@@ -2197,6 +2209,11 @@ private def launchLocalCoreMissionTurn
         return .ok safeWt
     return .ok safeCwd
   | .error err => failLaunch err
+
+def launchLocalWakeup (st : CoreAppState) (mr : MissionRecord) (prompt : String)
+    (sid? : Option String) (claim : WakeupClaim) : IO Bool := do
+  return (← launchLocalCoreMissionTurn st mr.id mr.backend mr.workingDirectory prompt mr.modelOverride
+    mr.modelEffort "bypassPermissions" sid? "local" false (some claim)).isOk
 
 /-- Resolve or provision a concrete remote node when a control-plane mission turn targets
     `auto-managed[:provider][:size]`. Reuses any existing scoped ready machine for the mission/user;
@@ -8006,12 +8023,12 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
         IO.eprintln s!"[sandboxed-sh] FATAL: failed to bind {bindHost}:{cfg.port}"
         return 1
     remoteSup.boundPortRef.set boundPort
-    if let .error e ← fenceInterruptedGoalSubmissions store then
+    if let .error e ← fenceInterruptedRemoteSubmissions store then
       discard <| LeanSys.Posix.closeFd listenFd
       stopMacTetherRuntime macTetherRt
       closeManagedComputeStore managedStore
       closeCoreStore store
-      IO.eprintln s!"[sandboxed-sh] FATAL: Goal submission startup fence failed: {e}"
+      IO.eprintln s!"[sandboxed-sh] FATAL: remote submission startup fence failed: {e}"
       return 1
     let lostTurns ← interruptTurnsLostToRestart store.missionsDb
     if lostTurns > 0 then
@@ -8025,11 +8042,6 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     IO.eprintln s!"[sandboxed-sh] listening on http://{bindHost}:{boundPort} (dev_mode={cfg.devMode})"
     if maxRequests?.isNone then
       startCloudSupervisorLoop cloudHub store (some broadcastHub) cfg.port
-      let localWakeupLaunch : MissionRecord → String → Option String → IO Bool :=
-        fun mr prompt sid? => do
-          match ← launchLocalCoreMissionTurn appState mr.id mr.backend mr.workingDirectory prompt mr.modelOverride mr.modelEffort "bypassPermissions" sid? "local" false with
-          | .ok _ => return true
-          | .error _ => return false
       discard <| IO.asTask (prio := .dedicated) do
         -- An error in one pass must never end the scheduler for the life of the process.
         try
@@ -8040,7 +8052,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
           IO.eprintln s!"[sandboxed-sh] remote job re-attach failed: {e}"
         while true do
            try
-             discard <| tickContinuationScheduler store (some managedStore) (some relayHub) (some broadcastHub) remoteSup (some warmMgr) cfg.workingDir (some localWakeupLaunch)
+             discard <| tickContinuationScheduler store (some managedStore) (some relayHub) (some broadcastHub) remoteSup (some warmMgr) cfg.workingDir (some (launchLocalWakeup appState))
              let nowSec ← coreEpochSec
              discard <| tickLocalHarnessSupervisor appState (formatEpochIso8601Utc nowSec)
              discard <| reapOrphanedMissionRuns store.missionsDb (formatEpochIso8601Utc nowSec)
