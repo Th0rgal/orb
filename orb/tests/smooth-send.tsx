@@ -35,6 +35,7 @@ const conflict=new URLSearchParams(location.search).has('conflict');
 (core as any).conflicts=2;
 if(idle){
  core.mission={...core.mission,backend:'claudecode',status:'completed',remote_job:null};
+ if(new URLSearchParams(location.search).has('core-goal'))core.mission={...core.mission,backend:'codex',remote_node_id:null};
  core.rows=[];
  core.events=[...core.events,...Array.from({length:30},(_,i)=>({id:2+i,event_id:`a${i}`,sequence:2+i,event_type:'assistant_message',timestamp:'',content:`Paragraph ${i} of a long answer that wraps over a couple of lines in the transcript column.`,metadata:{success:true}}))];
 }

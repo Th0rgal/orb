@@ -1896,10 +1896,11 @@ end
 
 /-! ## Startup Re-Attachment of Live Remote Jobs -/
 
-/-- Probe remote submissions whose acceptance was never durably confirmed. This
-    runs only after exclusive listen ownership, so no live Core poller can race
-    it. A found job is attached to its original id; a missing job is settled;
-    an unreachable node stays `uncertain` for the next pass. -/
+/-- Probe remote submissions whose acceptance was never durably confirmed.
+    Only startup may demote Goal submissions left in `submitting` by a dead
+    Core; periodic probes must leave live POSTs alone. A found job is attached
+    to its original id; a missing job is settled; an unreachable Goal job stays
+    `uncertain` for the next pass. -/
 def reconcileUncertainRemoteSubmissions
     (store : CoreStore)
     (mc? : Option ManagedComputeStore)
@@ -1910,6 +1911,12 @@ def reconcileUncertainRemoteSubmissions
   ensureDurableJobsTableLocal store
   let nowSec ← nowEpoch
   let nowIso := formatEpochIso8601Utc nowSec
+  if startup then
+    -- Do this before the bounded scan, including rows outside its first page.
+    let .ok _ ← execParamQuery store.missionsDb
+      ("UPDATE remote_node_jobs SET state='uncertain' WHERE state='submitting' " ++
+       "AND instr(payload_json,'\"goal_generation\":null')=0 AND instr(payload_json,'\"goal_generation\":')>0;")
+      #[] | return 0
   let .ok rows ← execParamQuery store.missionsDb
       ("SELECT j.job_id, COALESCE(j.node_id,''), COALESCE(j.mission_id,''), COALESCE(j.payload_json,'{}') " ++
        "FROM remote_node_jobs j JOIN missions m ON m.id=j.mission_id " ++

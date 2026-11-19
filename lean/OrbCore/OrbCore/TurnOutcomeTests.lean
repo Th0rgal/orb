@@ -102,6 +102,48 @@ private def verifyIncompleteGoalDrain (store : CoreStore) (sup : RemoteJobSuperv
     (← cellOf store.missionsDb "SELECT COUNT(*) FROM mission_continuations WHERE mission_id=?1;" #[mid]) == "0")
     "a failed or capped final read cannot complete or continue a Goal"
 
+private def verifyGoalStartupRetry (store : CoreStore) (sup : RemoteJobSupervisor)
+    (fd : LeanSys.Posix.Fd) (root mid : String) (stop : Bool) : IO Unit := do
+  let jid := s!"job-{mid}"
+  let db := store.missionsDb
+  let .ok _ ← execParamQuery db "UPDATE missions SET status='awaiting_user',backend='opencode',goal_mode=1 WHERE id=?1;" #[mid]
+    | throw (IO.userError "Goal startup fixture mission")
+  let .ok _ ← execParamQuery db
+    "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,payload_json,created_at,updated_at) VALUES(?1,?2,'mockgoalchecks','submitting',?3,'t0','t0');"
+    #[jid, mid, "{\"backend\":\"opencode\",\"goal_generation\":1,\"goal_claim\":\"\"}"]
+    | throw (IO.userError "Goal startup fixture job")
+  let reconcile := fun startup => reconcileUncertainRemoteSubmissions store none none none sup root startup
+  check ((← reconcile false) == 0 && (← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jid]) == "submitting")
+    "periodic reconciliation leaves an in-flight POST alone"
+  let failedProbe ← IO.asTask do
+    withMockNodeRequest fd fun _ req =>
+      check (req.method == "GET" && req.path == s!"/jobs/{jid}") "startup probes original job before losing transport"
+  let startupAttached ← reconcile true
+  IO.ofExcept failedProbe.get
+  check (startupAttached == 0 && (← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jid]) == "uncertain")
+    "startup leaves a failed probe eligible for retry"
+  if stop then
+    check (← (hostedStop store mid "2026-11-19T00:00:00Z" "remote_goal_stopped").map Except.isOk)
+      "Stop commits before the periodic probe"
+  let recovered ← IO.asTask do
+    withMockNodeRequest fd fun conn req => do
+      check (req.method == "GET" && req.path == s!"/jobs/{jid}") "periodic probe retries the original job"
+      mockNodeReply conn "200 OK" "{\"state\":\"running\"}"
+    if stop then
+      withMockNodeRequest fd fun conn req => do
+        check (req.method == "POST" && req.path == s!"/jobs/{jid}/cancel") "recovery cancels the same fenced job"
+        mockNodeReply conn "200 OK" "{}"
+  let attached ← reconcile false
+  IO.ofExcept recovered.get
+  let state ← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jid]
+  let status ← cellOf db "SELECT status FROM missions WHERE id=?1;" #[mid]
+  if stop then
+    check (attached == 0 && state == "cancelled" && status == "interrupted") "periodic recovery preserves Stop"
+  else
+    check (attached == 1 && state == "running" && status == "active" &&
+      (← cellOf db "SELECT placement_job_id FROM missions WHERE id=?1;" #[mid]) == jid)
+      "periodic recovery attaches the accepted job without another submission"
+
 def r24_lost_reply_is_uncertain_not_rejected : IO Unit := do
   let receipt := JVal.obj #[
     ("action_id", .str "r24-lost"), ("state", .str "uncertain"),
@@ -456,6 +498,10 @@ def run : IO Unit := do
            (← cellOf db "SELECT status || ':' || terminal_reason FROM missions WHERE id='m-initial-goal-stop';" #[]) == "interrupted:remote_goal_stopped" &&
            (← cellOf db "SELECT COUNT(*) FROM mission_runs WHERE mission_id='m-initial-goal-stop';" #[]) == "0")
            "late initial acceptance cannot undo Stop or erase the mission"
+         -- The attach case starts a poller, so run it last on this listener.
+         for (mid, stop) in #[("m-goal-startup-stop", true), ("m-goal-startup-attach", false)] do
+           newMission mid "[\"remote-node:mockgoalchecks\"]"
+           verifyGoalStartupRetry store sup checksFd root mid stop
       finally
         discard <| LeanSys.Posix.closeFd fd
         discard <| LeanSys.Posix.closeFd checksFd
