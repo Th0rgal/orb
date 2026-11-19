@@ -58,7 +58,7 @@ login for Settings. Never include credentials in the receipt.
 The binary inspected on agent-core reports CLIProxyAPI 8.0.26, commit
 `a27799ec`; its SHA-256 is
 `65e5de542296ea80293711d91393b7dbd655d40eb64461e993cd46fd9865b31e`.
-In that revision, PATCH `/v0/management/auth-files/fields` sets
+In that revision, PATCH `/v8/management/credentials/fields` sets
 `proxy_url` on a named OAuth credential. The Codex executor passes that
 credential's proxy URL to its refresh client. Its WebSocket transport also
 honors a request-level override ahead of the credential setting. The OAuth
@@ -70,3 +70,14 @@ an independent receiver before enabling a routed ChatGPT account. The
 selected account's route must cover both flows. Core's display hydration can
 fall back to the first matching provider type; never use that fallback as
 authority to edit a particular credential.
+
+The fixture in `scripts/test_airvpn_sidecar.py` exercises that binary with
+three synthetic Codex credentials inside a loopback-only Linux network
+namespace. A TLS receiver recorded buffered inference as `fixture-a` from
+127.0.0.2 and streaming inference as `fixture-b` from 127.0.0.3. The
+management request for the Direct credential reached its receiver from
+127.0.0.1. After changing only account A to an unavailable SOCKS proxy, its
+management request and inference request failed. Run the fixture with
+`unshare -n sh -c 'ip link set lo up && python3 scripts/test_airvpn_sidecar.py /usr/local/bin/cli-proxy-api'`.
+The fixture covers per-file routing on this binary; reconnect, refresh,
+Orb-driven configuration and live AirVPN sessions require separate receipts.
