@@ -35,6 +35,7 @@ import OrbCore.SecretAndApproval
 import OrbCore.RemoteFleetAndRelay
 import OrbCore.ManagedProviderSealing
 import OrbCore.AirVpnSettings
+import OrbCore.AccountVpnRoutes
 import OrbCore.AutoPlacement
 import OrbCore.RemoteDispatch
 import OrbCore.ProjectFilesAndController
@@ -1808,6 +1809,8 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     (authEvidence? := some authEvidence)
     (streamLimits? := st.proxyStreamLimits?)
     (bodyTimedOutRef? := some bodyTimedOutRef)
+    (resolveTransport := fun target => AccountVpnRoutes.resolve st.store.missionsDb target.accountId
+      (fun _ => pure (.error "account_vpn_unavailable")))
   let selectedAccountAfterStream : IO String := do
     match out.streamSelectedAccountRef? with
     | some ref => ref.get

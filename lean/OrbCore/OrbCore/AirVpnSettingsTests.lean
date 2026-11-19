@@ -1,5 +1,6 @@
 import OrbCore.AirVpnSettings
 import OrbCore.AirVpnTunnel
+import OrbCore.AccountVpnRoutes
 
 namespace OrbCore.AirVpnSettingsTests
 
@@ -8,7 +9,35 @@ open OrbBin.Json OrbCore.Managed OrbCore.AirVpnSettings
 private def check (ok : Bool) (label : String) : IO Unit := do
   unless ok do throw (IO.userError s!"airvpn settings: {label}")
 
+private def routeStorage (root : String) : IO Unit := do
+  let path := root ++ "/vpn-prefs-test.db"
+  let openDb := OrbBin.Sqlite.openSqliteDb path OrbCore.Store.missionsSchemaSql #[]
+  let db ← IO.ofExcept (← openDb)
+  try
+    let blocked := fun (_ : AccountVpnRoutes.Preference) => pure (.error "unverified")
+    check ((← AccountVpnRoutes.resolve db "a" blocked).toOption == some none) "legacy Direct route"
+    check (← AccountVpnRoutes.set db "a" (some "NL")).isOk "enable VPN for one account"
+    let some first := (← AccountVpnRoutes.read db "a").toOption.join | throw (IO.userError "vpn preference missing")
+    check (← AccountVpnRoutes.rememberServer db "a" first "west").isOk "remember verified server"
+    check (← AccountVpnRoutes.set db "a" (some "NL")).isOk "retry preference save"
+    check ((← AccountVpnRoutes.resolve db "a" blocked).isOk == false &&
+      (← AccountVpnRoutes.resolve db "b" blocked).toOption == some none) "unavailable VPN scoped to selected account"
+    check (← AccountVpnRoutes.set db "a" none).isOk "switch to Direct"
+    check (← AccountVpnRoutes.set db "a" (some "NL")).isOk "switch back to VPN"
+    check (!(← AccountVpnRoutes.rememberServer db "a" first "stale").isOk) "stale observation after re-enable"
+    let some current := (← AccountVpnRoutes.read db "a").toOption.join | throw (IO.userError "current route missing")
+    check (← AccountVpnRoutes.rememberServer db "a" current "east").isOk "save new generation server"
+  finally discard <| OrbBin.Sqlite.sqliteCloseRaw db.handle
+  let .ok reopened ← openDb | throw (IO.userError "vpn db reopen")
+  try
+    let pref := (← AccountVpnRoutes.read reopened "a").toOption.join
+    check (pref.any (fun p => p.country == "NL" && p.preferredServer == "east")) "server survives restart"
+    check (!(← AccountVpnRoutes.resolve reopened "a" (fun _ => pure (.ok 0))).isOk)
+      "restart requires a live transport"
+  finally discard <| OrbBin.Sqlite.sqliteCloseRaw reopened.handle
+
 def run (root : String) : IO Unit := do
+  routeStorage root
   let parseIp := AirVpnObservation.parseExit?
   let v4 := Orb.AccountVpn.ExitAddress.v4 0x01020304
   check (parseIp "1.2.3.4" == some v4 && parseIp "::FFFF:0102:0304" == some v4 &&
