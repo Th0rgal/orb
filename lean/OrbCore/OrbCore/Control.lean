@@ -4768,14 +4768,14 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let remoteGoal := !clientPlaced && remoteNodeId?.isSome && goalObjective?.isSome
       if remoteGoal then
         let capability := if RemoteGoal.harnesses.contains backend && st.remoteSup?.isSome
-          then RemoteGoal.Capability.coreOpenCode else .unavailable
+          then RemoteGoal.Capability.coreEmulated else .unavailable
         match RemoteGoal.admit capability false (goalObjective?.getD "") with
         | .error .emptyObjective =>
           abortIdem
           return .ok (mkJson 400 "{\"error\":\"Goal mode requires a non-empty objective.\"}")
         | .error _ =>
           abortIdem
-          return .ok (mkJson 400 "{\"error\":\"remote_goal_unsupported: This remote harness cannot continue a Goal. Choose OpenCode or send a standard turn.\"}")
+          return .ok (mkJson 400 "{\"error\":\"remote_goal_unsupported: This remote harness cannot continue a Goal. Choose a Goal-capable harness or send a standard turn.\"}")
         | .ok _ => pure ()
       let mut selectedSkills : Array SelectedSkill := #[]
       if !clientPlaced then

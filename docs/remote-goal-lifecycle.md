@@ -1,17 +1,18 @@
 # Remote goal lifecycle
 
-## X7: Core-emulated remote OpenCode
+## Core-emulated remote OpenCode and Codex
 
-Core advertises OpenCode in `remote_launch.goal_harnesses` when the typed remote
+Core advertises OpenCode and Codex in `remote_launch.goal_harnesses` when the typed remote
 adapter is available. The mission-create endpoint independently rejects an empty
 Goal objective or an unsupported remote harness before creating a mission.
 Remote follow-ups steer the existing mission; `/goal` can only start a new
 remote mission. Rejected commands leave the transcript and queue untouched.
 
-After a successful OpenCode job drains, a standalone `<!-- GOAL_COMPLETE -->`
+After a successful Goal job drains, a standalone `<!-- GOAL_COMPLETE -->`
 on the final assistant line outside a fenced code block is completion evidence.
-An unfinished response can arm one durable continuation in the same OpenCode
-session. Core parks when that session is missing or the limit of 20 automatic
+An unfinished response can arm one durable continuation in the same harness
+session. OpenCode resumes its `ses_` session and Codex resumes the thread UUID
+reported by `codex exec --json`. Core parks when that session is missing or the limit of 20 automatic
 continuations is reached. Goal progress and the terminal reason are available
 in mission detail as well as in structured events.
 If the terminal log cannot be read through its confirmed end, Core parks the

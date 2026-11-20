@@ -104,6 +104,8 @@ test("an existing remote harness does not offer or send Goal follow-ups",async({
  await expect(page.getByRole("option",{name:"Goal",exact:true})).toHaveCount(0);
  await input.fill(prompt);
  await expect(page.getByText("Start a new Goal-capable mission to use /goal, or send a standard follow-up.", {exact:true})).toBeVisible();
+ await expect(page.locator(".composer + .composer-warning")).toBeVisible();
+ await expect(page.locator(".composer .send").last()).toBeDisabled();
  await input.press("Enter");
  await expect(input).toHaveValue(prompt);
  expect(followups).toEqual([]);
@@ -292,15 +294,16 @@ test("capability read failure refuses before POST and reports support as last kn
   await expect(page.getByRole("alert")).toHaveCount(0);
  });
 
- test("remote OpenCode Goal shows progress and can Stop between turns",async({page})=>{
-  const state=await setup(page,{remoteSuccess:true});
+ for (const [backend, label] of [["opencode", "OpenCode"], ["codex", "Codex"]]) test(`remote ${label} Goal shows progress and can Stop between turns`,async({page})=>{
+  const capability = {...typedCapability, harnesses: [...typedCapability.harnesses!, "codex"], goal_harnesses: ["codex", "opencode"]};
+  const state=await setup(page,{remoteSuccess:true,capability});
   await chooseRemote(page);
   await page.getByRole("button",{name:"Grok",exact:true}).click();
-  await page.getByRole("option",{name:/^OpenCode/}).click();
+  await page.getByRole("option",{name:new RegExp(`^${label}`)}).click();
   const input=composerInput(page);
   await input.fill(prompt);await expect(page.locator(".composer .mode-chip")).toContainText("Goal");
   await input.press("Enter");await expect.poll(()=>state.posts.length).toBe(1);
-  expect(state.posts[0]).toMatchObject({backend:"opencode",remote_node_id:"dgx-spark",prompt});
+  expect(state.posts[0]).toMatchObject({backend,remote_node_id:"dgx-spark",prompt});
   state.goalProgress();state.releasePost();state.releaseHistory();
   await expect(page.getByText("Goal in progress · iteration 2",{exact:true})).toBeVisible();
   await page.getByTitle("Stop",{exact:true}).click();

@@ -670,6 +670,7 @@ html[data-window-focused="false"] :is(.shimmer, .spin, .mermaid-skeleton span, .
 }
 .pill:hover, .pill.on { background: var(--bg-active); color: var(--fg); }
 .pill.round { width: 28px; padding: 0; justify-content: center; }
+.composer-warning { margin: 6px 0 0; padding-inline: 12px; color: var(--fg-2); font-size: 13px; overflow-wrap: anywhere; }
 .composer {
   position: relative;
   display: grid;

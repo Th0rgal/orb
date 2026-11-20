@@ -3,7 +3,7 @@
 namespace OrbCore.RemoteGoal
 
 /-- The current emulated adapter contract, shared by admission and discovery. -/
-def harnesses : Array String := #["opencode"]
+def harnesses : Array String := #["opencode", "codex"]
 
 def completionMarker := "<!-- GOAL_COMPLETE -->"
 
@@ -26,7 +26,7 @@ def hasCompletionMarker (text : String) : Bool := Id.run do
   return fence.isNone
 
 inductive Capability where
-  | unavailable | coreOpenCode | native
+  | unavailable | coreEmulated | native
   deriving BEq, Repr
 
 inductive AdmissionError where
@@ -38,7 +38,7 @@ inductive AdmissionError where
 def admit (capability : Capability) (nativeBound : Bool) (objective : String) :
     Except AdmissionError String :=
   if nativeBound then .error .nativeContinuityRequired
-  else if capability != .coreOpenCode then .error .unsupported
+  else if capability != .coreEmulated then .error .unsupported
   else if objective.trimAscii.toString.isEmpty then .error .emptyObjective
   else .ok objective
 
