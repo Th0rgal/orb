@@ -48,6 +48,7 @@ lean_exe «orb-core-test» where
 
 /-- Credential-owner integration fixture for scripts/test_airvpn_sidecar.py. -/
 lean_exe «orb-airvpn-sidecar-test» where
+  moreLinkArgs := if System.Platform.isOSX then #["-lssl", "-lcrypto"] else #["-lssl", "-lcrypto", "-lutil", "-ldl"]
   root := `OrbCore.AccountVpnSidecarTestMain
   supportInterpreter := false
 
