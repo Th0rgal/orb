@@ -365,7 +365,7 @@ def DesktopState.headerTitle (st : DesktopState) : String :=
 def resetSelection (st : DesktopState) (card : Option MissionSummaryCard) : DesktopState :=
   let mid := card.map (·.missionId)
   { st with
-    openMission := mid, missionMenu := none, writeError := "", stream := { shown := [], pending := [], renders := 1 }, scroll := {}
+    openMission := mid, missionMenu := none, stream := { shown := [], pending := [], renders := 1 }, scroll := {}
     composer := { isRunning := (card.map (·.status)) == some "active" || (card.map (·.status)) == some "running" }
     messageSent := false, missionStopped := false, missionArchived := false, sidePanelOpen := false
     sidebarRows := st.sidebarRows.map fun row => { row with selected := row.widgetId == (card.map (·.widgetId)).getD 101 } }
