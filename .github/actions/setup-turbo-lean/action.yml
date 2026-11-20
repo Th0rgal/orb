@@ -188,13 +188,20 @@ runs:
         chmod 755 "$RUNNER_TEMP/orb-cc/clang"
         {
           echo "LEAN_CC=$RUNNER_TEMP/orb-cc/clang"
-          echo "CCACHE_DIR=$HOME/.cache/orb-native-objects"
+          # lean.ci may serve a different cache partition on each runner.
+          # Restore the object cache alongside the matching Lean build, rather
+          # than depending on two independent fallback lookups there.
+          if [[ "$RUNNER_NAME" == boost-jit-* ]]; then
+            echo "CCACHE_DIR=$TURBO_LEAN_HOME/orb-native-objects"
+          else
+            echo "CCACHE_DIR=$HOME/.cache/orb-native-objects"
+          fi
           echo 'CCACHE_COMPILERCHECK=content'
           echo 'CCACHE_NODIRECT=1'
           echo 'CCACHE_MAXSIZE=512M'
         } >> "$GITHUB_ENV"
     - name: Restore native C compiler cache
-      if: env.CCACHE_DIR != ''
+      if: env.CCACHE_DIR != '' && !startsWith(runner.name, 'boost-jit-')
       uses: actions/cache@v5
       with:
         path: ~/.cache/orb-native-objects
