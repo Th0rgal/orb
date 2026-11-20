@@ -16,7 +16,13 @@ interface Route {
 export function AccountVpnSettings(p: { account: string }) {
   const source = () => [connectionVersion(), p.account] as const;
   const uri = (id: string) => `/api/ai/providers/${encodeURIComponent(id)}/vpn`;
-  const [route, { mutate, refetch }] = createResource(source, ([, id]) => api<Route>(uri(id)));
+  async function readRoute(id: string, options?: RequestInit) {
+    const result = await api<Route>(uri(id), options);
+    if (!result || !["vpn", "direct"].includes(result.mode) || !Array.isArray(result.countries))
+      throw new Error("Account connection settings are unavailable.");
+    return result;
+  }
+  const [route, { mutate, refetch }] = createResource(source, ([, id]) => readRoute(id));
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   const save = async (value: string) => {
@@ -25,7 +31,7 @@ export function AccountVpnSettings(p: { account: string }) {
     setBusy(true);
     setError("");
     try {
-      const result = await api<Route>(uri(id), { method: "PUT", body: JSON.stringify(
+      const result = await readRoute(id, { method: "PUT", body: JSON.stringify(
         value ? { mode: "vpn", country: value } : { mode: "direct" }
       ) });
       if (current()) mutate(result);

@@ -14,7 +14,12 @@ export function AirVpnSettings() {
 }
 
 function AirVpnForm() {
-  const [status, { refetch }] = createResource(() => api<AirVpnStatus>(path));
+  const [status, { refetch }] = createResource(async () => {
+    const result = await api<AirVpnStatus>(path);
+    if (!result || !Array.isArray(result.devices) || typeof result.api_key_configured !== "boolean")
+      throw new Error("AirVPN settings are unavailable.");
+    return result;
+  });
   const [saving, setSaving] = createSignal(false);
   const [message, setMessage] = createSignal("");
   let key!: HTMLInputElement;
