@@ -922,6 +922,7 @@ structure WarmHarnessManager where
   mu           : Std.Mutex Unit
   registration : Std.Mutex Unit
   stopEpochs : IO.Ref (Std.HashMap String Nat)
+  launchGenerations : IO.Ref (Std.HashMap String UInt64)
   runsRef      : IO.Ref (Array (String × IO.Ref LocalRunState))
   warmProcsRef : IO.Ref (Array (String × WarmClaudeEntry))
   activePidsRef : IO.Ref (Array (String × Int64))
@@ -933,6 +934,7 @@ def newWarmHarnessManager : IO WarmHarnessManager := do
     mu := ← Std.Mutex.new ()
     registration := ← Std.Mutex.new ()
     stopEpochs := ← IO.mkRef {}
+    launchGenerations := ← IO.mkRef {}
     runsRef := ← IO.mkRef #[]
     warmProcsRef := ← IO.mkRef #[]
     activePidsRef := ← IO.mkRef #[]
@@ -1056,7 +1058,7 @@ def stopHarnessRun (mgr : WarmHarnessManager) (id : String) : IO Unit := do
     if st == 0xFFFFFFFF then
       let _ ← killSig (-entry.pid) 9
       let _ ← waitpidBlock entry.pid
-    closeFdRaw entry.stdoutFd
+    -- The warm reader owns both pipe descriptors; Stop only signals and waits.
   if let some pid := oneShotPid? then
     let _ ← killSig (-pid) 15
     IO.sleep 80
@@ -1966,7 +1968,8 @@ def startHarnessTurn
   -- Such turns never reuse it: retire it and wait for its reader to finish *before* this
   -- turn's callbacks and state exist, so its end-of-stream handling cannot touch this turn.
   if harness == "claudecode" && !extraEnv.isEmpty then
-    let old? ← mgr.mu.atomically do
+    let old? ← mgr.registration.atomically <| mgr.mu.atomically do
+      if !(← launchAllowed) then return none
       let ws ← mgr.warmProcsRef.get
       mgr.warmProcsRef.set (ws.filter (fun (k, _) => k != id))
       pure ((ws.find? (fun (k, _) => k == id)).map Prod.snd)
@@ -1980,7 +1983,6 @@ def startHarnessTurn
         IO.sleep 50
         waitedMs := waitedMs + 50
 
-  setCallbacksFor mgr id callbacks
   let prevState? ← getRunState? mgr id
   let prevTurns := (prevState?.map (·.turnCount)).getD 0
   let effSid? := sessionId?.filter (!·.trimAscii.toString.isEmpty) |>.orElse (fun _ => prevState?.bind (·.sessionId?))
@@ -2005,7 +2007,18 @@ def startHarnessTurn
     turnCount := prevTurns
     model? := model?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
   }
-  let stRef ← upsertRunStateRef mgr id initState
+  let state? ← mgr.registration.atomically do
+    if !(← launchAllowed) then return none
+    setCallbacksFor mgr id callbacks
+    if harness == "claudecode" && extraEnv.isEmpty then
+      return some (← upsertRunStateRef mgr id initState)
+    -- One-shot readers and non-reusable warm processes retain their own state
+    -- until EOF; never reset the previous generation's ref in place.
+    let r ← IO.mkRef initState
+    mgr.mu.atomically do
+      mgr.runsRef.modify fun runs => (runs.filter (fun p => p.1 != id)).push (id, r)
+    return some r
+  let some stRef := state? | return .error "launch_fenced"
   callbacks.onOutputEvent (.obj #[("text", .str ""), ("reset", .bool true), ("activities", .arr #[])])
 
   if harness == "claudecode" then
@@ -2114,10 +2127,13 @@ def startHarnessTurn
         let cb ← getCallbacksFor mgr id
         cb.onStructuredEvent "text_delta" (.obj #[("content", .str fullText)])
         cb.onOutputEvent (.obj #[("text", .str emittedDelta), ("reset", .bool false)])
-    let finishTurn : UInt32 → IO Unit := fun code => do
-      mgr.mu.atomically do
+    let finishTurn : Int64 → UInt32 → IO Unit := fun pid code => do
+      let owned ← mgr.mu.atomically do
         let pids ← mgr.activePidsRef.get
-        mgr.activePidsRef.set (pids.filter (fun (k, _) => k != id))
+        if !pids.contains (id, pid) then return false
+        mgr.activePidsRef.set (pids.filter (· != (id, pid)))
+        return true
+      if !owned then return
       let postTurnIdx := prevTurns + 1
       discard <| captureCheckpoint effectiveCwd id postTurnIdx s!"post-{generation}" s!"Turn {postTurnIdx}"
       let priorErr? := (← stRef.get).error?
@@ -2156,7 +2172,7 @@ def startHarnessTurn
           catch e => do
             handleLine (renderCompact (.obj #[("type", .str "error"), ("error", .obj #[("message", .str s!"Failed to start opencode: {e}")])]))
             pure 1
-        finishTurn code
+        finishTurn sp.pid code
       return .ok (← stRef.get)
     let shArgs := #["-c", "cd \"$1\" && shift && exec \"$@\"", "sh", effectiveCwd, actualBin] ++ cliArgs
     let spawned ← match ← (spawnRegistered (spawnPgrp "/bin/sh" shArgs envStrs (pipeStdin := false) (nullStdio := true) (pipeStdout := true))).toBaseIO with
@@ -2179,7 +2195,7 @@ def startHarnessTurn
             for ln in lines do
               handleLine ln
       closeFdRaw spawned.stdoutFd
-      finishTurn (← waitpidBlock spawned.pid)
+      finishTurn spawned.pid (← waitpidBlock spawned.pid)
     return .ok (← stRef.get)
 
 end OrbBin.ClaudeControl

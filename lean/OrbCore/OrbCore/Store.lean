@@ -3378,7 +3378,8 @@ def restoreMissionStatus
     stopping it is the job of cancel/interrupt, and writing a status over a live run would leave the
     run without an owner. -/
 def setMissionStatusFromClient
-    (st : CoreStore) (missionId nextStatus updatedAt : String) : IO (Except String Bool) :=
+    (st : CoreStore) (missionId nextStatus updatedAt : String)
+    (fenceArchive : IO Bool := pure true) : IO (Except String Bool) :=
   withImmediateTx st.missionsDb do
     let q ← execParamQueryUnlocked st.missionsDb
       ("SELECT m.status, (SELECT COUNT(*) FROM mission_runs r WHERE r.mission_id=m.id AND " ++
@@ -3392,8 +3393,9 @@ def setMissionStatusFromClient
       let liveRuns := ((rows[1]?.bind (·[1]?)).bind String.toNat?).getD 0
       if liveRuns > 0 then return .error "mission_running"
       if curStatus == nextStatus then return .ok false
+      if nextStatus == "acknowledged" && !(← fenceArchive) then return .error "mission_running"
       let upd ← execParamQueryUnlocked st.missionsDb
-        "UPDATE missions SET status=?2,state_revision=state_revision+1,updated_at=?3 WHERE id=?1;"
+        "UPDATE missions SET status=?2,state_revision=state_revision+1,run_generation=run_generation+CASE WHEN ?2='acknowledged' THEN 1 ELSE 0 END,updated_at=?3 WHERE id=?1;"
         #[missionId, nextStatus, updatedAt]
       return upd.map (fun _ => true)
 

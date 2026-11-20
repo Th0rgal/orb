@@ -2025,11 +2025,13 @@ def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) : OrbBin.
     else
       discard <| appendMissionEvent st.store missionId evType (renderCompact payload) ts
   onTurnFinished := fun finalSnap => do
+    let some owner ← getMission? st.store missionId | return
+    if owner.runGeneration != finalSnap.generation || owner.status != "active" then return
     let nowSec ← coreEpochSec
     let ts := formatEpochIso8601Utc nowSec
     if let some sid := finalSnap.sessionId?.map (·.trimAscii.toString) |>.filter (!·.isEmpty) then
       discard <| execParamQuery st.store.missionsDb
-        "UPDATE missions SET session_id=?2, resumable=1 WHERE id=?1;" #[missionId, sid]
+        "UPDATE missions SET session_id=?2, resumable=1 WHERE id=?1 AND run_generation=CAST(?3 AS INTEGER);" #[missionId, sid, s!"{finalSnap.generation}"]
     let isErr := finalSnap.error?.isSome || (finalSnap.exitCode?.getD 0) != 0
     let mut armedWakeups : Nat := 0
     let mut isSideQ := false
@@ -2063,12 +2065,12 @@ def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) : OrbBin.
         discard <| appendMissionEvent st.store missionId "error" (renderCompact (.obj #[("content", .str errText)])) ts
     if let some (_, tReason) := transientVerdict? then
       discard <| execParamQuery st.store.missionsDb
-        "UPDATE missions SET status=?2,terminal_reason=?3,state_revision=state_revision+1,updated_at=?4 WHERE id=?1 AND status IN ('active','pending');"
-        #[missionId, nextStatus, tReason, ts]
+        "UPDATE missions SET status=?2,terminal_reason=?3,state_revision=state_revision+1,updated_at=?4 WHERE id=?1 AND run_generation=CAST(?5 AS INTEGER) AND status IN ('active','pending');"
+        #[missionId, nextStatus, tReason, ts, s!"{finalSnap.generation}"]
     else
       discard <| execParamQuery st.store.missionsDb
-        "UPDATE missions SET status=?2,state_revision=state_revision+1,updated_at=?3 WHERE id=?1 AND status IN ('active','pending');"
-        #[missionId, nextStatus, ts]
+        "UPDATE missions SET status=?2,state_revision=state_revision+1,updated_at=?3 WHERE id=?1 AND run_generation=CAST(?4 AS INTEGER) AND status IN ('active','pending');"
+        #[missionId, nextStatus, ts, s!"{finalSnap.generation}"]
     if let some tSink := st.telemetrySink? then
       let mRec? ← getMission? st.store missionId
       let bLow := finalSnap.harness.trimAscii.toString.toLower
@@ -2137,15 +2139,12 @@ private def launchLocalCoreMissionTurn
   if appendUserEvent then
     let userPl := renderCompact (.obj #[("content", .str prompt)])
     discard <| appendMissionEvent st.store missionId "user_message" userPl ts
-  let prevSt? ← OrbBin.ClaudeControl.getRunState? mgr missionId
   -- Capture before activation CAS. A Stop after CAS invalidates this cheap
   -- in-memory check under the registration lock, with no SQLite I/O there.
   let launchEpoch := (← mgr.stopEpochs.get).getD missionId 0
   let dbGen := admittedGeneration?.getD mission.runGeneration
-  let nextGen :=
-    match prevSt? with
-    | some s => max (dbGen + 1) (s.generation + 1)
-    | none => if sessionId?.isSome then dbGen + 1 else dbGen
+  if dbGen == 0xffffffffffffffff then return .error "run_generation_overflow"
+  let nextGen := dbGen + 1
   let started ← withImmediateTx st.store.missionsDb do
     let query := execParamQueryUnlocked st.store.missionsDb
     if let some claim := wakeup? then
@@ -2159,9 +2158,18 @@ private def launchLocalCoreMissionTurn
       if rows.size ≤ 1 then return .error "wakeup_claim_fenced"
     carryArmedWakeupsForward query missionId nextGen.toNat ts
     let changed ← query ("UPDATE missions SET status='active', run_generation=CAST(?2 AS INTEGER), state_revision=state_revision+1, updated_at=?3 " ++
-      "WHERE id=?1 AND run_generation=CAST(?4 AS INTEGER) RETURNING id;") #[missionId, s!"{nextGen}", ts, s!"{dbGen}"]
+      "WHERE id=?1 AND status!='acknowledged' AND run_generation=CAST(?4 AS INTEGER) RETURNING id;") #[missionId, s!"{nextGen}", ts, s!"{dbGen}"]
     if let .ok rows := changed then
       if rows.size ≤ 1 then return .error "launch_generation_fenced"
+    -- Publish the generation before the transaction releases the mission DB lock.
+    -- A registered one-shot must finish or be stopped, never be displaced.
+    if let .ok _ := changed then
+      let claimed ← mgr.registration.atomically do
+        if (← mgr.stopEpochs.get).getD missionId 0 != launchEpoch then return false
+        if (← mgr.activePidsRef.get).any (·.1 == missionId) then return false
+        mgr.launchGenerations.modify fun gs => gs.insert missionId nextGen
+        return true
+      if !claimed then return .error "local_run_busy_or_fenced"
     return changed
   if let .error e := started then return .error e
   let model? := if model.trimAscii.toString.isEmpty then none else some model.trimAscii.toString
@@ -2219,7 +2227,8 @@ private def launchLocalCoreMissionTurn
       pure ({ model := model? } : OrbCore.RemoteDispatch.HarnessProxySetup)
   match ← OrbBin.ClaudeControl.startHarnessTurn
       mgr missionId normHarness binOverride safeCwd prompt nextGen setup.model effort? sessionId? parsedPerm wtArg #[] cbs (some safeRoot)
-      setup.env setup.args (do return (← mgr.stopEpochs.get).getD missionId 0 == launchEpoch) with
+      setup.env setup.args (do return (← mgr.stopEpochs.get).getD missionId 0 == launchEpoch &&
+        (← mgr.launchGenerations.get).get? missionId == some nextGen) with
   | .ok runSt =>
     if runSt.cwd != safeCwd && !runSt.cwd.isEmpty then
       if let .ok safeWt ← confineWorkingDirectory st.cfg.workingDir runSt.cwd then
@@ -4025,7 +4034,15 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       if encodeRollbackStatus nextStatus == 255 then
         return .ok (mkJson 400 "{\"error\":\"unsupported_status\"}")
       let nowIso := formatEpochIso8601Utc nowEpochSec
-      match ← setMissionStatusFromClient st.store mid nextStatus nowIso with
+      let fenceArchive : IO Bool := do
+        let some mgr := st.warmMgr? | return true
+        mgr.registration.atomically do
+          if (← mgr.activePidsRef.get).any (·.1 == mid) then return false
+          if (← mgr.warmProcsRef.get).any (·.1 == mid) then
+            if (← OrbBin.ClaudeControl.getRunState? mgr mid).any (!·.done) then return false
+          mgr.launchGenerations.modify (·.erase mid)
+          return true
+      match ← setMissionStatusFromClient st.store mid nextStatus nowIso fenceArchive with
       | .ok changed =>
         if changed then
           -- An archived mission must not be woken again by its own reminders.
