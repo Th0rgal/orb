@@ -67,9 +67,10 @@ login handler constructs its exchange client from global configuration.
 A passing per-file PATCH therefore cannot activate a verified route on its
 own. Exercise a reconnect/token exchange and a request-level override against
 an independent receiver before enabling a routed ChatGPT account. The
-selected account's route must cover both flows. Core's display hydration can
-fall back to the first matching provider type; never use that fallback as
-authority to edit a particular credential.
+selected account's route must cover both flows. Core can display a legacy provider using the only matching file in its category.
+VPN configuration, pinned inference and targeted reconnects require an
+independently matched credential file. A display fallback or a stale legacy
+filename cannot authorize a sidecar operation.
 
 The fixture in `scripts/test_airvpn_sidecar.py` exercises that binary with
 three synthetic Codex credentials inside a loopback-only Linux network

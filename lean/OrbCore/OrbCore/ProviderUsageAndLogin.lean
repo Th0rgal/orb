@@ -353,6 +353,8 @@ structure HydratedProvider where
   hasOAuth        : Bool
   oauthToken      : String
   oauthFile       : String
+  /-- A credential matched to this account independently of legacy display fallbacks. -/
+  boundOauthFile  : String := ""
   accountEmail    : String
   enabled         : Bool
   isDefault       : Bool
@@ -428,7 +430,9 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
 
     let typed := authFiles.filter (fun f => !f.disabled && providerTypeMatchesAuthType p.providerType f.authType)
     let singleton := plainKey == "cli-proxy-managed" && (dbProvs.filter (fun r => r.providerType == p.providerType)).size == 1
-    let matchedAuth? := matchCredential? typed p.id memberAdded legAuthFile legRefreshFile legSandboxedId legEmail singleton
+    let matchFile := matchCredential? typed p.id memberAdded legAuthFile legRefreshFile legSandboxedId legEmail
+    let boundAuth? := matchFile false
+    let matchedAuth? := boundAuth?.orElse fun _ => if singleton then matchFile true else none
 
     let metaInfo := lookupProviderMeta p.providerType
     let envKeyVal ← match metaInfo.envVar? with
@@ -482,6 +486,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
       hasOAuth := hasOAuth
       oauthToken := effOauthTok
       oauthFile := effOauthFile
+      boundOauthFile := (boundAuth?.map (·.fileName)).getD ""
       modelPrefix := (matchedAuth?.map uniquePrefix).getD ""
       accountEmail := effEmail
       enabled := p.enabled
@@ -532,6 +537,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
         hasOAuth := hasOa
         oauthToken := (matchedAuth?.map (·.accessToken)).getD effLegTok
         oauthFile := (matchedAuth?.map (·.fileName)).getD refFile
+        boundOauthFile := (matchedAuth?.map (·.fileName)).getD ""
         modelPrefix := (matchedAuth?.map uniquePrefix).getD ""
         accountEmail := if !email.isEmpty then email else (matchedAuth?.map (·.email)).getD ""
         enabled := en
@@ -563,6 +569,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
         hasOAuth := true
         oauthToken := af.accessToken
         oauthFile := af.fileName
+        boundOauthFile := af.fileName
         modelPrefix := uniquePrefix af
         accountEmail := af.email
         enabled := !af.disabled
@@ -570,6 +577,11 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
         deviceToken := af.deviceToken
       }
   return out.qsort (fun a b => a.priority < b.priority)
+
+/-- Legacy rows can claim the same file. Only an unambiguous binding authorizes routing. -/
+def accountRoutingFile (accounts : Array HydratedProvider) (hp : HydratedProvider) : String :=
+  if !hp.boundOauthFile.isEmpty && (accounts.filter (fun p => p.oauthFile == hp.boundOauthFile)).size == 1
+    then hp.boundOauthFile else ""
 
 def memberProviderDisplayName (hps : Array HydratedProvider) (hp : HydratedProvider) : String := Id.run do
   let metaInfo := lookupProviderMeta hp.providerType
@@ -3311,11 +3323,12 @@ def dispatchProviderAndAiRoute
               | return some (jsonErr 409 "VPN credential unavailable")
             let some url := hub.accountRelayUrl?.bind (fun sign => sign hp.providerType hp.id)
               | return some (jsonErr 503 "VPN relay unavailable")
-            unless providerTypeMatchesAuthType hp.providerType authType && !hp.oauthFile.isEmpty &&
+            let file := accountRoutingFile accounts hp
+            unless providerTypeMatchesAuthType hp.providerType authType && !file.isEmpty &&
                 AccountVpnSidecar.validManagement mgmtBase &&
                 (effAdmin || (!callerUserId.isEmpty && hp.createdByUserId == callerUserId)) do
               return some (jsonErr 403 "VPN credential ownership could not be verified")
-            routedRequest? := some (.obj #[("provider", .str authType), ("name", .str hp.oauthFile), ("proxy_url", .str url)])
+            routedRequest? := some (.obj #[("provider", .str authType), ("name", .str file), ("proxy_url", .str url)])
         let login ← match routedRequest? with
           | some data => sendJsonRequest "POST" s!"{mgmtBase}/v8/management/oauth/auth-url" (some mgmtKey) (some data) #[] 15000 262144
           | none => sendJsonRequest "GET" s!"{mgmtBase}/v0/management/{slug}-auth-url" (some mgmtKey) none #[] 15000 262144

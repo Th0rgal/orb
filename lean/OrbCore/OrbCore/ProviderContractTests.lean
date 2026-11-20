@@ -1638,11 +1638,18 @@ def run : IO Unit := do
       unless (parseChainTargetsJson entry #[] #[a, { b with enabled := false }]).isEmpty do
         failures := failures.push "A disabled selected account must not resolve another login"
       let sidecarAccount := { b with hasApiKey := false, apiKey := "", hasOAuth := true,
-        oauthFile := "selected.json", modelPrefix := "selected" }
+        oauthFile := "selected.json", boundOauthFile := "selected.json", modelPrefix := "selected" }
       let viaOwner := (parseChainTargetsJson entry #[] #[a, sidecarAccount] "http://127.0.0.1:8317" "fixture-sidecar")[0]?
       unless viaOwner.any (fun t => t.modelId == "selected/gpt-5" &&
           t.sidecarCredential?.any (fun c => c.file == "selected.json" && c.modelPrefix == "selected")) do
         failures := failures.push "A pinned sidecar account must use the selected credential’s model namespace"
+      let duplicate := { sidecarAccount with id := "fixture-c" }
+      unless (accountRoutingFile #[sidecarAccount, duplicate] sidecarAccount).isEmpty do
+        failures := failures.push "Two accounts claiming one file must lose routing authority"
+      let legacy := { sidecarAccount with boundOauthFile := "" }
+      let viaDisplay := (parseChainTargetsJson entry #[] #[a, legacy] "http://127.0.0.1:8317" "fixture-sidecar")[0]?
+      unless viaDisplay.any (fun t => t.sidecarCredential?.any (fun c => c.file.isEmpty)) do
+        failures := failures.push "A display-only OAuth file must never authorize account VPN routing"
       let vpnSettings := "/api/settings/airvpn"
       let accountRoute := "/api/ai/providers/missing-account/vpn"
       for path in [vpnSettings, accountRoute] do
