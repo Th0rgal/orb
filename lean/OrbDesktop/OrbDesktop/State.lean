@@ -719,7 +719,8 @@ def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuR
     let archive := menu.targets.filter fun id => !restore.contains id
     let move : List MissionMenuRow := if st.sidebarRows.any (·.kind == "project") then
       [{ id := 711, label := s!"Move {menu.targets.length} agents to", icon := "folder" }] else []
-    return move ++ (if archive.isEmpty then [] else [{ id := 712, label := s!"Archive {archive.length} conversations", icon := "archive",
+    return move ++ (if archive.isEmpty then [] else [{
+      id := 712, label := s!"Archive {archive.length} conversations", icon := "archive",
       action := some (.bulk "archive" archive "") }]) ++ (if restore.isEmpty then [] else
       [{ id := 725, label := s!"Restore {restore.length} conversations", icon := "archive", action := some (.bulk "restore" restore "") }]) ++
       [{ id := 726, label := s!"Delete {menu.targets.length} agents…", icon := "close", separatorBefore := true }, clear]
