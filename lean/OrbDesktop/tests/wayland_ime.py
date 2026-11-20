@@ -13,7 +13,7 @@ def string(text):
     return struct.pack('=I', len(data)) + data + bytes(-len(data) % 4)
 
 
-def commit(text, env):
+def commit(text, env, preedit=''):
     with socket.socket(socket.AF_UNIX) as sock:
         sock.settimeout(10)
         sock.connect(os.path.join(env['XDG_RUNTIME_DIR'], env['WAYLAND_DISPLAY']))
@@ -56,6 +56,8 @@ def commit(text, env):
                     serial += 1
                     if active:
                         send(5, 0, string(text))
+                        if preedit:
+                            send(5, 1, string(preedit) + struct.pack('=ii', 0, 0))
                         send(5, 3, struct.pack('=I', serial))
                         send(1, 0, struct.pack('=I', 6))  # barrier before disconnect
                 elif op == 6:

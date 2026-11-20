@@ -12,11 +12,14 @@ import secrets
 import signal
 import socket
 import subprocess
+import select
+import sys
 import tempfile
 import time
 import urllib.request
 
 import wayland_ime
+import lost_reply
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -49,7 +52,7 @@ def process(args, env, cwd):
             child.wait()
 
 
-def run(tmp):
+def run(tmp, mode):
     with socket.socket() as s:
         s.bind(('127.0.0.1', 0))
         port = s.getsockname()[1]
@@ -68,7 +71,8 @@ def run(tmp):
     home = tmp / 'home'
     home.mkdir()
     harness = tmp / 'codex'
-    harness.write_text('#!/bin/sh\nexec sleep 120\n')
+    launches = tmp / 'launches'
+    harness.write_text(f'#!/bin/sh\necho $$ >> "{launches}"\nexec sleep 120\n')
     harness.chmod(0o700)
     env = dict(PATH=f'{tmp}:{os.environ["PATH"]}', HOME=str(home), HOST='127.0.0.1', PORT=str(port),
                LD_LIBRARY_PATH=os.getenv('LD_LIBRARY_PATH', ''), WORKING_DIR=str(tmp), DEV_MODE='true')
@@ -76,7 +80,8 @@ def run(tmp):
     with contextlib.ExitStack() as stack:
         server = stack.enter_context(process(core, env, tmp))
         token = wait('disposable Core login', login)
-        (tmp / 'connection.json').write_text(json.dumps({'api_url': base, 'token': token}))
+        endpoint, attempts = stack.enter_context(lost_reply.proxy(port)) if mode in ('retry', 'all') else (base, [])
+        (tmp / 'connection.json').write_text(json.dumps({'api_url': endpoint, 'token': token}))
         assert api('/api/control/missions') == []
         config = tmp / 'sway.conf'
         config.write_text('output * mode 1000x700\ndefault_border none\nxwayland disable\n')
@@ -103,7 +108,7 @@ def run(tmp):
         typed, committed = 'u6a ' + secrets.token_hex(5) + ' ', '日本語'
         time.sleep(.5)
         keys(*(['-k', 'Tab'] * 4), '-s', '300', typed)
-        wayland_ime.commit(committed, graphical)
+        wayland_ime.commit(committed, graphical, '未確定' if mode in ('preedit', 'all') else '')
         time.sleep(.25)
         keys('-k', 'Tab', '-k', 'Tab', '-k', 'Return')
 
@@ -114,9 +119,22 @@ def run(tmp):
                 return row, messages[0]
 
         active, message = wait('exact submitted text on active mission', observed)
+        pid = int(wait('one real launch', lambda: launches.exists() and launches.read_text().strip()))
+        pidfd = os.pidfd_open(pid)
+        stack.callback(os.close, pidfd)
+        exited = select.poll()
+        exited.register(pidfd, select.POLLIN)
+        assert not exited.poll(0), 'harness already exited before Stop'
         time.sleep(1.5)  # wait for the desktop status subscription
+        if mode in ('retry', 'all'):
+            if len(attempts) == 1:
+                keys('-k', 'Return')  # retry the unconfirmed submission
+            wait('same logical Send retried', lambda: len(attempts) >= 2, 4)
+            assert attempts == [message['event_id']] * 2, attempts
+            assert observed() and launches.read_text().splitlines() == [str(pid)], 'duplicate event or launch'
         keys('-k', 'Return')
         stopped = wait('hosted stop', lambda: (r if (r := api(path))['status'] == 'interrupted' else None))
+        assert exited.poll(3000), f'original harness {pid} still alive after Stop'
         time.sleep(1.5)
         keys('-k', 'Tab', '-k', 'Tab', '-k', 'Return')
         wait('archive', lambda: api(path)['status'] == 'acknowledged')
@@ -127,9 +145,9 @@ def run(tmp):
         archived = api(path)
         assert archived['id'] == stopped['id'] == active['id'] == mid and archived['status'] == 'acknowledged'
         print(json.dumps(dict(id=mid, submitted=message['content'], message_id=message['event_id'], running=active['status'], stopped=stopped['status'],
-                              after_restart=archived['status']), ensure_ascii=False))
+                              after_restart=archived['status'], exited_before_archive=pid, launches=launches.read_text().splitlines(), attempts=attempts), ensure_ascii=False))
 
 
 if __name__ == '__main__':
     with tempfile.TemporaryDirectory(prefix='orb-u6a-') as directory:
-        run(Path(directory))
+        run(Path(directory), sys.argv[1] if len(sys.argv) == 2 else 'all')
