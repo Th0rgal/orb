@@ -1347,7 +1347,7 @@ fun OrbProvidersSettingsPage(
                                                 .padding(top = 4.dp),
                                             verticalArrangement = Arrangement.spacedBy(10.dp)
                                         ) {
-                                            if (isAdmin) AccountVpnSettings(core, pid)
+                                            if (manages) AccountVpnSettings(core, pid)
                                             usageLimitStatus(detail)?.let { limit ->
                                                 Text(
                                                     text = limit.label,
