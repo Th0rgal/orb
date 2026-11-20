@@ -234,6 +234,21 @@ same node (then split or restate the node).
 
 Not on this roadmap: a macOS backend for LeanUI.
 
+#### U4 Linux trial: owners and acceptance
+
+Controller `f5e86c78` owns the rollout and records the decision. [#1977](https://github.com/Th0rgal/orb/pull/1977) (`codex/leanui-desktop-trial`, handoff `8d4af0c42409682c993de5079de1254eedc9730d`) is the sole trial source integrator. [#1971](https://github.com/Th0rgal/orb/pull/1971) stays with `9d411a91` and needs separate authorized approval of its exact head. Whichever lands second, both owners replay the standard and busy Sway cases plus menu/pointer checks on the combined merged SHA. A green predecessor is not that receipt.
+
+| Lane | Owner | Start condition and required receipt |
+| --- | --- | --- |
+| Cloud: isolated Core and compositor | `f5e86c78` owns verification; #1977 integrates fixes | Ready on the candidate, in parallel with renderer CI. Use a disposable Core and real client requests: keep mission A open, target B from a stale idle read, start B but delay its run record, then Archive B. Require an actual HTTP 409, visible error, B's row retained and A still open. Replay successful archive/restore/restart on the same A/B pair in both clients. |
+| Cloud: renderer and CI | `f5e86c78` owns verification; #1977 integrates fixes | Ready on the same candidate. Compare controlled stripes behind glass/blur in dark and light; capture a sequence for an active badge versus paused and unselected missions. Run renderer and packaged-client regressions. Cloud receipts complement physical display checks; they cannot establish displayed frames or compositor blur on m2air. |
+| Physical build and install | #1977 supplies the source; Thomas/device owner owns the installed artifact and receipts | Reuse the existing Spark build and m2air jobs; do not start copies. On verified install, read the **full SHA** in About, match it to the built candidate and notify Thomas with that SHA. Keep WebKit installed and Alt+O pointing to it. |
+| Physical acceptance | Thomas/device owner | On that install replay the same A/B stale rejection and archive/restore/restart in **both installed clients**. Exercise every menu, multiselect, focus/keyboard navigation and live composer settings. With the mouse select project, machine and harness; create, type and send exact IME text, scroll while streaming, stop, rename, move, archive, restore and reopen. From a separate Core client verify settings, exact text, target IDs/destination and final state. |
+| Physical visuals and timing | Thomas/device owner | On DP-1 at 1× dark and eDP-1 at 1.6× light, repeat the controlled-stripe glass/blur and active versus paused/unselected badge sequence. Record actual visible 60 fps on both displays and final startup/transcript-open medians against WebKit on the same m2air. Headless goldens, source alpha checks and submitted frame counts are not display evidence. |
+| Trial and decision | Thomas decides; `f5e86c78` records | After device gates pass, Thomas explicitly confirms a working day without fallback. Record the installed SHA, receipts and go/no-go before changing Alt+O or the default. Retain the WebKit rollback. No production Core deployment is part of this rollout. |
+
+**Handoff evidence, not final acceptance:** `c59a2d52a` was installed; on a 220-line transcript its startup/open medians were 180.9/115.8 ms versus WebKit 247.9/133.0 ms. DP-1 1× dark and eDP-1 1.6× light clipboard/crop checks and the Move destination were verified; screenshot tooling: [nixos-config#38](https://github.com/Th0rgal/nixos-config/pull/38) (`0d6a415cb9`), [omarchnix#63](https://github.com/Th0rgal/omarchnix/pull/63). `f7bec9812` measured 58.2/58.0 visible fps, below 60 on both displays. The later source alpha sweep does not replace installed glass or badge evidence.
+
 ### M. Multi-user
 
 | Id | Node | Needs | State | Done when |
@@ -381,3 +396,5 @@ Rows the reconciler dispatches, in order. A row leaves the queue by PR when it
 is done or dropped.
 
 `U5`, `U8`, `U6`, `U6a`, `U7`, `U3`, `R30`, `M3`, `L5`, `R17`, `R18`, `R19`, `R21`, `O3`, `O4`, `R21a`, `R31`
+
+**Already-owned Linux trial lanes:** follow the [U4 lane table](#u4-linux-trial-owners-and-acceptance). The controller's two cloud verification lanes can proceed in parallel with the existing Spark/m2air work. Source changes stay with #1977 and the separate #1971 owner. These are assignments, not additional automatic starts. Device acceptance gates only the trial and default decision; unrelated queued work keeps its order and capacity.
