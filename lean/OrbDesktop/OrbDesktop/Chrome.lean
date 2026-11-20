@@ -293,11 +293,6 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
   let rowW := innerW - pxToSub 12
   let footH := pxToSub 45
   let rowsSource := if useReferenceTree then referenceSidebarRows st.screen else st.visibleProjectRows
-  let rowsSource := if st.hasLiveConnection then
-      [{ widgetId := 805, rowId := "action:create", kind := "nav", title := "Create mission" }] ++
-      (if st.selectedCard.isSome && !st.composer.isRunning then
-        [{ widgetId := 106, rowId := "action:archive", kind := "nav", title := "Archive mission" }] else []) ++ rowsSource
-    else rowsSource
   let isNav (r : ChromeSidebarRow) : Bool := r.kind == "nav"
   let isFoot (r : ChromeSidebarRow) : Bool := r.kind == "footer"
   let navRows : List WidgetNode :=

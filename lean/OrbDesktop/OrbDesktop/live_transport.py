@@ -153,8 +153,13 @@ def mutate(binding, action, mid):
     if action.startswith('bulk-'):
         return bulk_write(c, action.removeprefix('bulk-'), key)
     if action == 'create':
-        values = sys.stdin.buffer.read().decode().split('\t')
+        values = sys.stdin.buffer.read().decode().split('\t', 6)
         body = {'title': 'New mission'}
+        if len(values) == 7:
+            prompt = values.pop()
+            if not prompt.strip():
+                raise ValueError('missing initial prompt')
+            body.update(prompt=prompt, title=' '.join(prompt.split())[:80])
         if values != ['']:
             if len(values) not in (5, 6):
                 raise ValueError('invalid launch settings')

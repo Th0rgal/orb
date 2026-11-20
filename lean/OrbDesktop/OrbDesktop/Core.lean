@@ -54,7 +54,7 @@ def loadLiveState (isDark := true) (scale120 := 120) : IO (Option DesktopState) 
   let machines := ns.toArray.mapIdx (fun i xs => machineCard i xs) |>.toList
   let missionRows : List ChromeSidebarRow := missions.map fun m =>
     { widgetId := m.widgetId, rowId := "mission:" ++ m.missionId, kind := "mission", title := m.title, status := m.status }
-  let sidebar := [{ widgetId := 101, rowId := "nav:control", kind := "nav", title := "Control Center", selected := true },
+  let sidebar := [{ widgetId := 101, rowId := "nav:new", kind := "nav", title := "New Agent", selected := true },
     { widgetId := 109, rowId := "section:missions", kind := "section", title := "Missions" }] ++ missionRows ++
     [{ widgetId := 108, rowId := "section:projects", kind := "section", title := "Projects" }] ++ projects
   return some { DesktopState.liveUnavailable isDark scale120 with
@@ -146,7 +146,7 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
     let st := { st with writeRequest := none, writeError := "" }
     let encode := fun (v : LaunchSettings) => String.intercalate "\t" [v.machine, v.backend, v.model, v.effort, v.permission]
     let (action, mid, text) := match request with
-      | .create => ("create", "", encode st.draftSettings ++ "\t" ++ st.draftProject)
+      | .create => ("create", "", encode st.draftSettings ++ "\t" ++ st.draftProject ++ "\t" ++ st.composer.text)
       | .send mid text => ("send", mid, text)
       | .stop mid => ("stop", mid, "")
       | .archive mid => ("archive", mid, "")

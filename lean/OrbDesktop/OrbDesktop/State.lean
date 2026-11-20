@@ -913,7 +913,7 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
     if let some menu := st.missionMenu then return stepMissionMenu st menu ev viewport
     match ev with
     | .text _ | .preedit .. | .imeBatch .. =>
-      if st.selectedCard.isNone then return (st, none)
+      if st.selectedCard.isNone && st.screen != .controlEmpty && st.screen != .controlPopulated then return (st, none)
     | _ => pure ()
     if let .activate id := ev then
       if id >= missionDisclosureId 0 then
@@ -935,7 +935,11 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
         return ({ next with sidebarRows := rows }, some viewport)
       if id == 914 then return ({ st with writeError := "" }, some viewport)
       if id == 730 then return ({ st with archivesOpen := !st.archivesOpen }, some viewport)
-      if id == 805 then return ({ st with writeRequest := some .create }, some viewport)
+      if id == 2 && st.selectedCard.isNone then
+        if (st.screen == .controlEmpty || st.screen == .controlPopulated) &&
+            !st.composer.text.trimAscii.isEmpty && st.composer.imePreeditText.isEmpty then
+          return ({ st with writeRequest := some .create }, none)
+        return (st, none)
       if id == 2 || id == 106 then
         let some card := st.selectedCard | return (st, none)
         let request := if id == 106 then

@@ -182,6 +182,23 @@ class Delivery(unittest.TestCase):
         models[1]['provider_id'] = 'local'
         self.assertEqual(list(live.visible_model_options('opencode', models, rules)), models[1:])
 
+    def test_new_agent_sends_the_first_prompt_in_the_create_request(self):
+        prompt = 'First line\tcontains a tab.\nSecond line.'
+        payload = '\t'.join(['core', 'codex', 'model', '', 'supervised', 'now', prompt])
+        with patch.object(live, 'Connection') as factory, patch.object(live.sys, 'stdin') as stdin:
+            stdin.buffer = io.BytesIO(payload.encode())
+            connection = factory.return_value
+            connection.binding = 'bound'
+            connection.request.return_value = dict(id='new-agent', title='First line', status='active')
+            with contextlib.redirect_stdout(io.StringIO()):
+                live.mutate('bound', 'create', '')
+            connection.request.assert_called_once()
+            request = connection.request.call_args
+            self.assertEqual(request.args, ('/api/control/missions',))
+            self.assertEqual(request.kwargs['body']['prompt'], prompt)
+            self.assertEqual(request.kwargs['body']['project'], 'now')
+            self.assertNotIn('remote_node_id', request.kwargs['body'])
+
     def test_child_precedes_parent_in_live_roster(self):
         child = dict(id='child', folder='notes/today', parent_mission_id='launch',
                      callback_parent_mission_id='callback', tags=['fork-of:source'],
