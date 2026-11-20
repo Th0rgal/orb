@@ -23,7 +23,16 @@ runs:
           echo "RAYON_NUM_THREADS=2" >> "$GITHUB_ENV"
         fi
         echo "TURBO_LEAN_MAX_MEMORY_MB=6144" >> "$GITHUB_ENV"
-        echo "TURBO_LEAN_HOME=$HOME/.cache/turbo-lean/cas" >> "$GITHUB_ENV"
+        cas="$HOME/.cache/turbo-lean/cas"
+        if [[ "${ORB_COLD_PROJECT:-0}" == 1 ]]; then
+          cas=$(mktemp -d "$RUNNER_TEMP/orb-cas-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-XXXXXX")
+          shopt -s globstar nullglob
+          for path in lean/**/.lake/build lean/**/.lake/packages target/debug docker/prebuilt; do
+            [[ ! -e "$path" ]] || { echo "Unexpected existing project output: $path"; exit 1; }
+          done
+          echo "Cold $GITHUB_JOB at $GITHUB_SHA: empty CAS $cas; no Lake builds, desktop binaries or Docker prebuilds"
+        fi
+        echo "TURBO_LEAN_HOME=$cas" >> "$GITHUB_ENV"
         os_name="$(uname -s)"
         arch_name="$(uname -m)"
         if [[ "$os_name" == "Linux" ]]; then
@@ -191,7 +200,7 @@ runs:
           # lean.ci may serve a different cache partition on each runner.
           # Restore the object cache alongside the matching Lean build, rather
           # than depending on two independent fallback lookups there.
-          if [[ "$RUNNER_NAME" == boost-jit-* ]]; then
+          if [[ "${ORB_COLD_PROJECT:-0}" == 1 || "$RUNNER_NAME" == boost-jit-* ]]; then
             echo "CCACHE_DIR=$TURBO_LEAN_HOME/orb-native-objects"
           else
             echo "CCACHE_DIR=$HOME/.cache/orb-native-objects"
@@ -201,14 +210,14 @@ runs:
           echo 'CCACHE_MAXSIZE=512M'
         } >> "$GITHUB_ENV"
     - name: Restore native C compiler cache
-      if: env.CCACHE_DIR != '' && !startsWith(runner.name, 'boost-jit-')
+      if: env.ORB_COLD_PROJECT != '1' && env.CCACHE_DIR != '' && !startsWith(runner.name, 'boost-jit-')
       uses: actions/cache@v5
       with:
         path: ~/.cache/orb-native-objects
         key: orb-cc-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision') }}-${{ github.sha }}
         restore-keys: orb-cc-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision') }}-
     - name: Restore Lean CAS and Lake artifacts (pull requests and read-only events)
-      if: (github.event_name != 'push' || github.ref != 'refs/heads/master') && !startsWith(runner.name, 'boost-jit-') && !(github.job == 'docker' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+      if: env.ORB_COLD_PROJECT != '1' && (github.event_name != 'push' || github.ref != 'refs/heads/master') && !startsWith(runner.name, 'boost-jit-') && !(github.job == 'docker' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
       uses: actions/cache/restore@v5
       with:
         path: |
@@ -223,7 +232,7 @@ runs:
     # build on the same-repository PR's merge ref; a later push can restore it
     # without publishing anything to master or trusting another PR's binaries.
     - name: Restore and save Lean CAS and Lake artifacts
-      if: (github.event_name == 'push' && github.ref == 'refs/heads/master') || startsWith(runner.name, 'boost-jit-') || (github.job == 'docker' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+      if: env.ORB_COLD_PROJECT != '1' && ((github.event_name == 'push' && github.ref == 'refs/heads/master') || startsWith(runner.name, 'boost-jit-') || (github.job == 'docker' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))
       uses: actions/cache@v5
       with:
         path: |
