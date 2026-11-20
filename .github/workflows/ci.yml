@@ -297,7 +297,7 @@ jobs:
       - run: pnpm test
 
   orb-browser:
-    name: Orb browser (${{ matrix.shard }}/8)
+    name: Orb browser (${{ matrix.shard }}/${{ strategy.job-total }})
     # Hosted only: container job; lean.ci guests have no Docker (docs/ci-lean-runners.md).
     runs-on: ubuntu-24.04
     # Version matches @playwright/test in orb/pnpm-lock.yaml. Contains browser
@@ -308,7 +308,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     defaults:
       run:
         working-directory: orb
@@ -336,7 +336,7 @@ jobs:
         with:
           name: orb-dist
           path: orb/dist
-      - run: pnpm test:browser --shard=${{ matrix.shard }}/8
+      - run: pnpm test:browser --shard=${{ matrix.shard }}/${{ strategy.job-total }}
       - name: Shared kernel startup and browser adapters
         if: matrix.shard == 1
         env:
@@ -584,7 +584,8 @@ jobs:
   # so those keep their own required checks until they move into this file.
   ci-ok:
     name: CI OK
-    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && github.repository == 'Th0rgal/orb' && ((github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) && 'lean-2vcpu-ubuntu-2604' || 'ubuntu-latest' }}
+    # Like Kernel OK, this short receipt job should not queue for a Lean runner.
+    runs-on: ubuntu-latest
     if: always() && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     needs: [plan, test, fmt, harness-contract, capability-matrix, policy-lint, orb-build, orb-unit, orb-browser, orb-performance, orb-desktop-shell, orb-macos-shell, docker]
     steps:
