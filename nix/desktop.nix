@@ -1,4 +1,4 @@
-{lib, stdenv, callPackage, clang, pkg-config, gtk3, webkitgtk_4_1, turbo-lean ? null}:
+{lib, stdenv, callPackage, clang, pkg-config, gtk3, webkitgtk_4_1, zenity, revision ? "local checkout", turbo-lean ? null}:
 
 let
   core = callPackage ./package.nix {inherit turbo-lean; buildDesktop = true;};
@@ -26,7 +26,7 @@ stdenv.mkDerivation {
     cat > "$out/bin/orb-desktop" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-# GTK/WebKit is the default; LeanUI is experimental (renders the parity screens only).
+# GTK/WebKit is the default; LeanUI is available as a separate trial launcher.
 if [[ "''${1:-}" == "--leanui" ]]; then
   shift
   exec "$(dirname "$0")/orb-desktop-native" "$@"
@@ -44,6 +44,21 @@ Terminal=false
 Type=Application
 Categories=Development;Utility;
 StartupWMClass=orb-desktop
+EOF
+    cat > "$out/share/applications/orb-leanui.desktop" <<EOF
+[Desktop Entry]
+Name=Orb LeanUI
+Comment=Native Orb desktop trial
+Exec=$out/bin/orb-desktop --leanui
+Terminal=false
+Type=Application
+Categories=Development;Utility;
+StartupWMClass=orb-desktop
+Actions=About;
+
+[Desktop Action About]
+Name=About Orb LeanUI
+Exec=${zenity}/bin/zenity --info --title="About Orb LeanUI" --text="Orb LeanUI · ${revision}"
 EOF
   '';
   meta = {

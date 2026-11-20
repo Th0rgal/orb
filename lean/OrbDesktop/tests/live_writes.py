@@ -89,7 +89,9 @@ def run(tmp):
         def sway(*args):
             return subprocess.check_output(['swaymsg', '-r', *args], env=graphical)
 
-        stack.enter_context(process([ROOT / 'scripts/orb_desktop_dev.sh', '--leanui'], graphical, ROOT))
+        binary = os.environ.get('ORB_LEANUI_TEST_BINARY')
+        client = [str(Path(binary).resolve(strict=True))] if binary else [ROOT / 'scripts/orb_desktop_dev.sh', '--leanui']
+        stack.enter_context(process(client, graphical, ROOT))
         wait('native window', lambda: b'"orb-desktop"' in sway('-t', 'get_tree'), 300)
         stack.enter_context(process(['wtype', '-k', 'Shift_L', '-s', '120000'], graphical, tmp))
         time.sleep(.5)
