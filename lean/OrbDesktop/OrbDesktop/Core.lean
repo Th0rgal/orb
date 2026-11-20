@@ -54,7 +54,8 @@ def loadLiveState (isDark := true) (scale120 := 120) : IO (Option DesktopState) 
   let machines := ns.toArray.mapIdx (fun i xs => machineCard i xs) |>.toList
   let missionRows : List ChromeSidebarRow := missions.map fun m =>
     { widgetId := m.widgetId, rowId := "mission:" ++ m.missionId, kind := "mission", title := m.title, status := m.status }
-  let sidebar := [{ widgetId := 101, rowId := "nav:new", kind := "nav", title := "New Agent", selected := true },
+  let sidebar := [{ widgetId := 101, rowId := "nav:new", kind := "nav", title := "New Agent", shortcut := "⌘N", selected := true },
+    { widgetId := 112, rowId := "nav:machines", kind := "nav", title := "Machines", shortcut := "⌘3" },
     { widgetId := 109, rowId := "section:missions", kind := "section", title := "Missions" }] ++ missionRows ++
     [{ widgetId := 108, rowId := "section:projects", kind := "section", title := "Projects" }] ++ projects
   return some { DesktopState.liveUnavailable isDark scale120 with
@@ -226,7 +227,9 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
   | .invalid => closeLiveSubscription slot; return invalidate
   | .sample visible bubble =>
     let cards := st.missionCards.filter fun m => visible.contains ("M:" ++ m.missionId)
-    let machines := st.fleetMachines.filter fun m => visible.contains ("N:" ++ m.machineId)
+    let fleetRows := visible.filterMap fun key =>
+      if key.startsWith "N:" then some ("N" :: (key.drop 2).toString.splitOn "\x1c") else none
+    let machines := fleetRows.toArray.mapIdx (fun i xs => machineCard i xs) |>.toList
     let rows := st.sidebarRows.filter fun r =>
       if r.kind == "mission" then cards.any (·.widgetId == r.widgetId)
       else if r.kind == "project" then visible.contains ("P:" ++ (r.rowId.drop 8).toString) else true
@@ -240,7 +243,7 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
     let rows := if changed then rows.map (fun r =>
       if r.kind == "mission" then { r with status := (statuses.get? ((r.rowId.drop 8).toString)).getD r.status }
       else r) else rows
-    let pruned := cards.length != st.missionCards.length || machines.length != st.fleetMachines.length || rows.length != st.sidebarRows.length
+    let pruned := cards.length != st.missionCards.length || machines != st.fleetMachines || rows.length != st.sidebarRows.length
     let menu := st.missionMenu.bind fun m =>
       if (m.mission.isEmpty || cards.any (·.missionId == m.mission)) && m.targets.all (fun id => cards.any (·.missionId == id))
       then some m else none

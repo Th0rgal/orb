@@ -274,6 +274,21 @@ class Delivery(unittest.TestCase):
                 live.poll('', 'bound', {'b'})
         self.assertEqual(out.getvalue().splitlines(), ['R\tM:b\x1fS:b:active', 'R\tM:b\x1fS:b:paused'])
 
+    def test_machine_status_updates_without_id_change(self):
+        conn = type('Connection', (), {'binding': 'bound', 'check': lambda self: None})
+        def rows(status):
+            return [('N', 'node', 'Name\twith separator', '', '', '', '', '', status, '', '', 0)]
+        out = io.StringIO()
+        with patch.object(live, 'Connection', conn), patch.object(
+                live, 'roster_rows', side_effect=[rows('online'), rows('offline')]), patch.object(
+                live.time, 'monotonic', side_effect=[0, 6, 6]), patch.object(
+                live.time, 'sleep', side_effect=[None, KeyboardInterrupt]), contextlib.redirect_stdout(out):
+            with self.assertRaises(KeyboardInterrupt):
+                live.poll('', 'bound', set())
+        records = [line.removeprefix('R\tN:').split('\x1c') for line in out.getvalue().strip().split('\n')]
+        self.assertEqual([(r[0], r[1], r[7]) for r in records],
+                         [('node', 'Name with separator', 'online'), ('node', 'Name with separator', 'offline')])
+
     def test_rejects_foreign_projection(self):
         class Connection:
             def get(self, path, cap):

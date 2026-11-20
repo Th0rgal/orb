@@ -266,6 +266,7 @@ inductive ActiveModal where
 
 def rosterViewportId : WidgetId := 970
 def transcriptViewportId : WidgetId := 971
+def fleetViewportId : WidgetId := 972
 
 structure LaunchSettings where
   machine : String := ""
@@ -323,6 +324,7 @@ structure DesktopState where
   scale120 : Nat := 120
   scroll : ScrollPolicyState := {}
   rosterTopSub : SubPx := 0
+  fleetTopSub : SubPx := 0
   stream : StreamCoalescer := Orb.Stream.Coalescer.empty
   liveData : Bool := false
   connectionBinding : String := ""
@@ -924,6 +926,17 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
     | .text _ | .preedit .. | .imeBatch .. =>
       if st.selectedCard.isNone && st.screen != .controlEmpty && st.screen != .controlPopulated then return (st, none)
     | _ => pure ()
+    let commandHeld := st.heldSelectionKeys.any fun key => [0xffe3,0xffe4,0xffeb,0xffec].contains key
+    let navId := match ev with
+      | .activate id => id
+      | .key key _ .pressed => if commandHeld && key == 0x33 then 112 else
+          if commandHeld && (key == 0x6e || key == 0x4e) then 101 else 0
+      | _ => 0
+    if navId == 112 then
+      let next := resetSelection { st with screen := .machinesFleet, draftProject := "", writeError := "" } none
+      return ({ next with sidebarRows := next.sidebarRows.map fun row => { row with selected := row.widgetId == navId } }, some viewport)
+    if navId == 101 then
+      return (resetSelection { st with screen := .controlEmpty, draftProject := "", writeError := "" } none, some viewport)
     if let .activate id := ev then
       if id >= missionDisclosureId 0 then
         if let some row := st.sidebarRows.find? (fun r => r.kind == "mission" && missionDisclosureId r.widgetId == id) then
@@ -933,8 +946,6 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       if let some row := st.sidebarRows.find? (fun r => r.widgetId == id && selectableRow r) then
         if !st.heldSelectionKeys.isEmpty then
           return (toggleSelection st row (st.heldSelectionKeys.any fun k => k == 0xffe1 || k == 0xffe2), some viewport)
-      if id == 101 then
-        return (resetSelection { st with screen := .controlEmpty, draftProject := "", writeError := "" } none, some viewport)
       if let some project := st.sidebarRows.find? (fun r => r.widgetId == id && r.kind == "project") then
         let slug := (project.rowId.drop 8).toString
         let expanded := if st.expandedProjects.contains slug then st.expandedProjects.erase slug else slug :: st.expandedProjects

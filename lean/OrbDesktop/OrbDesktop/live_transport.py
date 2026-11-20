@@ -364,7 +364,8 @@ def poll(mid, binding, tracked=None):
                             tracked.discard(missing)
                     except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError):
                         pass  # unknown for this ID, continue checking the others
-                visible = [kind + ':' + label(ident) for kind, ident, *_ in rows if kind in ('P','N')]
+                visible = ['P:' + label(ident) for kind, ident, *_ in rows if kind == 'P']
+                visible += ['N:' + '\x1c'.join(map(label, row[1:])) for row in rows if row[0] == 'N']
                 visible += ['M:' + i for i in sorted(tracked)]
                 # Project status for other visible rows too. The selected bubble
                 # carries a newer per-mission read and remains its own authority.

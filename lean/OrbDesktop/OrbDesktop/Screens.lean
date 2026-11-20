@@ -463,7 +463,7 @@ def buildMissionSplitDiffBody (st : DesktopState) (mainW bodyH : SubPx) : Widget
 
 /-- Build a `.s-row` inside a `.s-card` for `05_machines_fleet`. -/
 def buildMachineRow (theme : Theme) (w h : SubPx) (title desc rightText : String)
-    (hasBottomBorder : Bool := false) : WidgetNode :=
+    (hasBottomBorder : Bool := false) (showChevron : Bool := true) : WidgetNode :=
   let pal := theme.palette
   let bdr := theme.borderWidth
   WidgetNode.rrect
@@ -482,10 +482,32 @@ def buildMachineRow (theme : Theme) (w h : SubPx) (title desc rightText : String
         ]
     , WidgetNode.box
         (BoxStyle.row (pxToSub 8) |>.withAlign .center |>.withFixedSize (pxToSub 76) (pxToSub 18))
-        [ screenTextLine theme (pxToSub 52) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textSecondary rightText
-        , screenTextLine theme (pxToSub 16) (pxToSub 18) (pxToSub 14) (pxToSub 18) pal.textFaint "›"
-        ]
+        ([screenTextLine theme (pxToSub 52) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textSecondary rightText] ++
+        (if showChevron then [screenTextLine theme (pxToSub 16) (pxToSub 18) (pxToSub 14) (pxToSub 18) pal.textFaint "›"] else []))
     ]
+
+/-- Only materialize machine rows intersecting the viewport. A long fleet keeps
+    its full scroll extent while text shaping stays bounded by window height. -/
+private def buildLiveMachines (st : DesktopState) (width height : SubPx) : WidgetNode := Id.run do
+  let theme := st.theme
+  let pal := theme.palette
+  let colW := min (pxToSub 640) (width - pxToSub 24)
+  let rowH := pxToSub 60
+  let count := st.fleetMachines.length
+  if count == 0 then
+    return WidgetNode.box (BoxStyle.col 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize width height)
+      [screenTextLine theme colW (pxToSub 20) (pxToSub 13) (pxToSub 20) pal.textSecondary "No machines connected"]
+  let top := min st.fleetTopSub (count * rowH - height)
+  let first := top / rowH
+  let visible := (st.fleetMachines.drop first).take (height / rowH + 2)
+  let spacer := fun n => WidgetNode.box (BoxStyle.col 0 |>.withFixedSize colW (n * rowH)) []
+  let rows := visible.map fun m =>
+    let detail := String.intercalate " · " ([m.roleLabel, m.cpuRamSpec].filter (!·.isEmpty))
+    buildMachineRow theme colW rowH (if m.name.isEmpty then m.machineId else m.name) detail m.state true false
+  let content := WidgetNode.box (BoxStyle.col 0 |>.withAlign .center)
+    ([spacer first] ++ rows ++ [spacer (count - first - visible.length)])
+  return WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize width height)
+    { offsetY := top } content (some fleetViewportId)
 
 /-- Build the Compute Fleet screen (`05_machines_fleet`) matching the `640 px` SolidJS `.s-inner` column. -/
 def buildMachinesFleetBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
@@ -1015,7 +1037,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
       let bodyH := availH - headerH
       WidgetNode.box
         (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill)
-        [headerNode, buildMachinesFleetBody st mainW bodyH]
+        [headerNode, if st.hasLiveConnection then buildLiveMachines st mainW bodyH else buildMachinesFleetBody st mainW bodyH]
     | .settingsGeneral =>
       let bodyH := availH - headerH
       WidgetNode.box
