@@ -1671,10 +1671,9 @@ export function LiveProjectsSection(p: {
     return items;
   };
 
-  const changeArchiveState = async (mission: Mission, restore: boolean, reportError?: (message: string) => void) => {
+  const changeArchiveState = async (mission: Mission, restore: boolean, reportError: (message: string) => void = setActionError) => {
     const reject = (message: string) => {
-      setActionError(message);
-      reportError?.(message);
+      reportError(message);
       return false;
     };
     if (archiving.has(mission.id) || deletingIds().has(mission.id)) return reject("Another action is in progress for this mission.");
@@ -1750,9 +1749,13 @@ export function LiveProjectsSection(p: {
     if (!reqs?.length) return;
     p.onArchiveRequestsHandled?.(reqs.length);
     const version = connectionVersion();
-    for (const r of reqs) void changeArchiveState(r.mission, r.restore, message => p.onArchiveError?.(r.mission.id, r.restore, message)).then(() => {
-      if (currentConnection(version)) p.onArchiveSettled?.();
-    });
+    const onError = p.onArchiveError;
+    for (const r of reqs) {
+      const report = onError && ((message: string) => onError(r.mission.id, r.restore, message));
+      void changeArchiveState(r.mission, r.restore, report).then(() => {
+        if (currentConnection(version)) p.onArchiveSettled?.();
+      });
+    }
   }));
   const reopenConversation = (mission: Mission) => changeArchiveState(mission, true);
   const archiveSelection = async (id: string) => {
