@@ -54,9 +54,10 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
     def see(label, geometry=sidebar):
         return wait('visible ' + label, lambda: locate(label, geometry))
     def open_project():
-        if client_kind == 'webkit' and not locate(fixture['openMission'], sidebar):
+        if client_kind == 'webkit':
             _, y = see('Menu')
-            click(20, y)
+            if not locate(fixture['openMission'], sidebar):
+                click(20, y)
     def action_menu(expected, choose):
         x, y = see(fixture['contextMission'])
         click(x, y, 'button3')
