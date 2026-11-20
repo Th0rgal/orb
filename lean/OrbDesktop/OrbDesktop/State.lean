@@ -228,6 +228,10 @@ structure MissionSummaryCard where
   project : String
   track : String
   model : String
+  backend : String := ""
+  machine : String := ""
+  effort : String := ""
+  permissionMode : String := ""
   status : String       -- `"running"`, `"awaiting_approval"`, `"completed"`
   updatedLabel : String
   summaryText : String
@@ -256,6 +260,25 @@ inductive ActiveModal where
 def rosterViewportId : WidgetId := 970
 def transcriptViewportId : WidgetId := 971
 
+structure LaunchSettings where
+  machine : String := ""
+  backend : String := ""
+  model : String := ""
+  effort : String := ""
+  permission : String := "supervised"
+  deriving Repr, Inhabited, BEq
+
+structure CatalogModel where
+  backend : String
+  harnessName : String
+  model : String
+  modelName : String
+  deriving Repr, Inhabited, BEq
+
+inductive SettingField where
+  | machine | backend | model | effort | permission
+  deriving Repr, Inhabited, BEq
+
 inductive LiveWrite where
   | create
   | send (mission text : String)
@@ -265,17 +288,21 @@ inductive LiveWrite where
   | rename (mission title : String)
   | move (mission project : String)
   | copyId (mission : String)
+  | settings (mission : String) (field : SettingField) (values : LaunchSettings)
   deriving Repr, Inhabited, BEq
 
 inductive MissionMenuPage where
-  | actions | destinations | rename | settings
+  | actions | destinations | rename | settings | picker (field : SettingField)
   deriving BEq, Repr, Inhabited
 
 structure MissionMenu where
   mission : String
   x : Int
   y : Int
+  trigger : Nat := 0
   page : MissionMenuPage := .actions
+  first : Nat := 0
+  highlighted : Nat := 0
   draft : ComposerBuffer := {}
   deriving Repr, Inhabited
 
@@ -292,6 +319,8 @@ structure DesktopState where
   writeRequest : Option LiveWrite := none
   writeError : String := ""
   missionMenu : Option MissionMenu := none
+  draftSettings : LaunchSettings := {}
+  catalog : List CatalogModel := []
   openMission : Option String := none
   syncCursor : SyncCursorState := {}
   sidebarRows : List ChromeSidebarRow := []
@@ -611,12 +640,53 @@ structure MissionMenuRow where
   icon : String
   action : Option LiveWrite := none
   separatorBefore : Bool := false
+  value : String := ""
   deriving Repr, Inhabited
 
+def currentSettings (st : DesktopState) (mid : String) : LaunchSettings :=
+  match st.missionCards.find? (·.missionId == mid) with
+  | some c => { machine := c.machine, backend := c.backend, model := c.model, effort := c.effort,
+                permission := if c.permissionMode.isEmpty then "supervised" else c.permissionMode }
+  | none => st.draftSettings
+
+def settingChoices (st : DesktopState) (mid : String) (field : SettingField) : List (String × String) :=
+  let values := currentSettings st mid
+  match field with
+  | .machine => [("", "Default machine")] ++ st.fleetMachines.map fun m => (m.machineId, m.name)
+  | .backend => (st.catalog.map fun c => (c.backend, c.harnessName)).eraseDups
+  | .model => (st.catalog.filter (·.backend == values.backend)).map fun c => (c.model, c.modelName)
+  | .effort =>
+    let levels := if values.backend == "antigravity" then ["low", "medium", "high"]
+      else if ["claudecode", "codex"].contains values.backend then ["low", "medium", "high", "xhigh", "max"] else []
+    [("", "Default effort")] ++ levels.map fun l => (l,l)
+  | .permission => [("supervised","Supervised"), ("acceptEdits","Auto-edit"), ("auto","Auto"), ("bypassPermissions","Bypass permissions")]
+
+def settingTrigger (id : Nat) : Option SettingField :=
+  match id with
+  | 720 => some .machine | 721 => some .backend | 722 => some .model
+  | 723 => some .effort | 724 => some .permission | _ => none
+
+private def chooseSetting (st : DesktopState) (mid : String) (field : SettingField) (value : String) : DesktopState :=
+  let prev := currentSettings st mid
+  let next := match field with
+    | .machine => { prev with machine := value }
+    | .backend => { prev with backend := value, effort := "", permission := "supervised",
+                       model := ((st.catalog.find? (·.backend == value)).map (·.model)).getD "" }
+    | .model => { prev with model := value }
+    | .effort => { prev with effort := value }
+    | .permission => { prev with permission := value }
+  if mid.isEmpty then { st with missionMenu := none, draftSettings := next }
+  else { st with missionMenu := none, writeRequest := some (.settings mid field next) }
+
 def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuRow := Id.run do
+  if let .picker field := menu.page then
+    let choices := settingChoices st menu.mission field
+    if choices.isEmpty then return [{ id := 719, label := "No available choices", icon := "list" }]
+    return choices.mapIdx fun i (value, label) => { id := 2000000 + i, label, icon := "list", value }
   let some card := st.missionCards.find? (·.missionId == menu.mission) | return []
   let projects := st.sidebarRows.filter fun r => r.kind == "project" && r.rowId != "project:" ++ card.project
   match menu.page with
+  | .picker _ => return []
   | .actions =>
     return [{ id := 710, label := "Rename…", icon := "rename" }] ++
       (if projects.isEmpty then [] else [{ id := 711, label := "Move to", icon := "folder" }]) ++
@@ -636,21 +706,46 @@ def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuR
       { id := 717, label := "Project: " ++ card.project, icon := "folder" },
       { id := 718, label := "Model: " ++ card.model, icon := "s:models" }]
 
+def menuFocusChange (before after : DesktopState) : Option Nat :=
+  match before.missionMenu, after.missionMenu with
+  | some old, none => some old.trigger
+  | old, some menu =>
+    if old.any (fun m => m.page == menu.page && m.highlighted == menu.highlighted && m.trigger == menu.trigger) then none
+    else ((missionMenuRows after menu)[menu.highlighted]?).map (·.id)
+  | _, _ => none
+
 private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event) (viewport : Rect) :
     DesktopState × Damage := Id.run do
   let update := fun m => ({ st with missionMenu := some m }, some viewport)
   let close := ({ st with missionMenu := none }, some viewport)
+  let items := missionMenuRows st menu
   match ev with
-  | .key 0xff1b _ .pressed | .windowFocus false => return close
+  | .scroll _ _ _ dy =>
+    let index := if dy > 0 then min (items.length - 1) (menu.first + 1) else menu.first - 1
+    return update { menu with first := index, highlighted := index }
+  | .key key _ state =>
+    if state == .released then return (st, none)
+    if key == 0xff1b then return close
+    if key == 0xff52 || key == 0xff54 then
+      let i := if key == 0xff52 then menu.highlighted - 1 else min (items.length - 1) (menu.highlighted + 1)
+      return update { menu with highlighted := i, first := min i (max menu.first (i - 5)) }
+    if key == 0xff51 && menu.page == .destinations then return update { menu with page := .actions, first := 0, highlighted := 1 }
+    if key == 0xff53 && menu.page == .actions && (items[menu.highlighted]?.map (·.id)) == some 711 then
+      return update { menu with page := .destinations, first := 0, highlighted := 0 }
+    if key == 0xff08 && menu.page == .rename then return update { menu with draft := menu.draft.applyImeBatch 1 0 "" "" 0 0 }
+    return (st, none)
+  | .windowFocus false => return close
   | .activate 719 => return close
   | .activate 710 =>
     let title := (st.missionCards.find? (·.missionId == menu.mission)).map (·.title) |>.getD ""
-    return update { menu with page := .rename, draft := { text := title, cursorOffset := title.length } }
-  | .activate 711 => return update { menu with page := .destinations }
-  | .activate 714 => return update { menu with page := .settings }
-  | .activate 715 => return update { menu with page := .actions }
+    return update { menu with page := .rename, first := 0, highlighted := 0, draft := { text := title, cursorOffset := title.length } }
+  | .activate 711 => return update { menu with page := .destinations, first := 0, highlighted := 0 }
+  | .activate 714 => return update { menu with page := .settings, first := 0, highlighted := 0 }
+  | .activate 715 => return update { menu with page := .actions, first := 0, highlighted := 0 }
   | .activate id =>
-    let some action := ((missionMenuRows st menu).find? (·.id == id)).bind (·.action) | return (st, none)
+    let some row := (missionMenuRows st menu).find? (·.id == id) | return (st, none)
+    if let .picker field := menu.page then return (chooseSetting st menu.mission field row.value, some viewport)
+    let some action := row.action | return (st, none)
     if menu.page == .rename && (menu.draft.text.trimAscii.isEmpty || !menu.draft.imePreeditText.isEmpty) then return (st, none)
     return ({ st with missionMenu := none, writeRequest := some action }, some viewport)
   | _ =>
@@ -659,7 +754,6 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
       | .text text => menu.draft.insertText text
       | .imeBatch db da text preedit b e => menu.draft.applyImeBatch db da text preedit b e
       | .preedit text _ _ => menu.draft.setPreedit text
-      | .key 0xff08 _ .pressed => menu.draft.applyImeBatch 1 0 "" "" 0 0
       | _ => menu.draft
     if draft == menu.draft then return (st, none)
     return update { menu with draft }

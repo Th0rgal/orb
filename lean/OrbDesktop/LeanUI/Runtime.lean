@@ -228,12 +228,15 @@ end RuntimeState
    clear `rt.damage` to `none`. -/
 def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
     (onEvent : σ → Event → σ × Damage)
-    (view : RuntimeState σ → IO (FrameView × List ScrollRegion)) :
+    (view : RuntimeState σ → IO (FrameView × List ScrollRegion))
+    (focusChange : σ → σ → Option Nat := fun _ _ => none) :
     IO (RuntimeState σ) := do
   let (wl1, evs) ← Wayland.pumpEvents rt.wayland
   let mut st := { rt with wayland := wl1 }
   for ev in evs do
+    let before := st.app
     st := st.stepEvent onEvent ev
+    if let some target := focusChange before st.app then st := st.requestFocus target st.viewportDeviceRect
   if !needsRedraw st.damage then
     return { st with quiescentSkips := st.quiescentSkips + 1 }
   let (bw, bh) := st.wayland.deviceBufferSize
@@ -410,7 +413,8 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
     (onEvent : RuntimeState σ → σ → Event → σ × Damage)
     (view : RuntimeState σ → IO (FrameView × List ScrollRegion))
     (pollFrame : RuntimeState σ → IO (σ × Damage) := fun rt => pure (rt.app, none))
-    (hasProducer : σ → Bool := fun _ => false) :
+    (hasProducer : σ → Bool := fun _ => false)
+    (focusChange : σ → σ → Option Nat := fun _ _ => none) :
     IO (RuntimeState σ) := withWindowWait rt0 fun timedWait => do
   let mut rt := rt0
   while rt.running do
@@ -425,7 +429,7 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
       rt := { rt with app }
       if let some rect := damage then rt := rt.markDirty rect
       let rendered := rt.framesRendered
-      rt ← stepFrameWithRegions rt (onEvent rt) view
+      rt ← stepFrameWithRegions rt (onEvent rt) view focusChange
       let wl ← Wayland.syncTextFocus rt.wayland (rt.focus.owner == some 1 && rt.focusableOrder.contains 1)
       rt := { rt with wayland := wl }
       if rt.framesRendered != rendered then

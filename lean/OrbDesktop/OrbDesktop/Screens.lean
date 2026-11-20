@@ -979,7 +979,8 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
     | .missionTranscript =>
       let bodyH := availH - headerH - composerH
       let bodyNode := buildMissionTranscriptBody st mainW bodyH runs
-      let composerNode := buildComposerWidget theme mainW composerH st.composer
+      let composerNode := buildComposerWidget theme mainW composerH st.composer []
+        (if st.liveData then some (liveComposerControls st (min (pxToSub 748) (mainW - pxToSub 68))) else none)
       WidgetNode.box
         (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg pal.canvas)
         [headerNode, bodyNode, composerNode]
@@ -1019,8 +1020,9 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
       let bodyH := availH - headerH
       WidgetNode.box
         (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg pal.canvas)
-         [headerNode, if st.liveData then screenTextLine theme mainW (pxToSub 32) (pxToSub 13)
-           (pxToSub 21) pal.textMuted (if st.hasLiveConnection then "Select a mission" else "Core unavailable")
+         [headerNode, if st.hasLiveConnection then liveComposerControls st mainW
+           else if st.liveData then screenTextLine theme mainW (pxToSub 32) (pxToSub 13)
+           (pxToSub 21) pal.textMuted "Core unavailable"
            else buildNewAgentBody st mainW bodyH]
 
   let baseShell : WidgetNode :=

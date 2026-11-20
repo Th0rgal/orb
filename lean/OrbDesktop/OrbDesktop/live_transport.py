@@ -53,10 +53,10 @@ class Connection:
     def get(self, path, cap=4 << 20):
         return self.request(path, cap)
 
-    def request(self, path, cap=4 << 20, body=None, key=None):
+    def request(self, path, cap=4 << 20, body=None, key=None, method=None):
         self.check()
         base, token = self.creds
-        req = urllib.request.Request(base + path, headers={'Authorization': 'Bearer ' + token,
+        req = urllib.request.Request(base + path, method=method, headers={'Authorization': 'Bearer ' + token,
                                                            'Accept': 'application/json', 'Cache-Control': 'no-cache'})
         if body is not None:
             req.data = json.dumps(body).encode()
@@ -84,10 +84,18 @@ def mutate(binding, action, mid):
         raise ValueError('connection changed')
     key = str(uuid.uuid4())
     if action == 'create':
-        row = c.request('/api/control/missions', body={'title': 'New mission'}, key=key)
+        values = sys.stdin.buffer.read().decode().split('\t')
+        body = {'title': 'New mission'}
+        if values != ['']:
+            if len(values) != 5:
+                raise ValueError('invalid launch settings')
+            fields = ('remote_node_id', 'backend', 'model_override', 'model_effort', 'permission_mode')
+            body.update((k, v) for k, v in zip(fields, values) if v and
+                        (k != 'permission_mode' or values[1] == 'claudecode'))
+        row = c.request('/api/control/missions', body=body, key=key)
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', row['id']):
             raise ValueError('invalid mission')
-        print('\t'.join(map(label, [row['id'], 'New mission', row['status']])))
+        print('\t'.join(map(label, [row['id'], row.get('title') or 'New mission', row['status'], *mission_settings(row)])))
         return
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', mid):
         raise ValueError('invalid mission')
@@ -99,6 +107,18 @@ def mutate(binding, action, mid):
             raise ValueError('message not accepted')
     elif action == 'stop':
         c.request(path + '/cancel', body={}, key=key)
+    elif action == 'settings':
+        field, machine, backend, model, effort, permission = sys.stdin.buffer.read().decode().split('\t')
+        if field == 'permission':
+            c.request(path + '/permission-mode', body={'mode': permission}, key=key)
+        else:
+            patch = {'backend': {'backend': backend, 'model_override': model, 'model_effort': ''},
+                     'model': {'model_override': model}, 'effort': {'model_effort': effort}}[field]
+            c.request(path + '/settings', body={**patch, 'resume': False}, key=key, method='PATCH')
+        actual = c.get(path + '?include_history=false')
+        if actual['id'] != mid:
+            raise ValueError('unexpected mission')
+        print('\t'.join(map(label, mission_settings(actual))))
     elif action == 'rename':
         title = sys.stdin.buffer.read().decode().strip()
         if not title or len(title) > 200:
@@ -119,7 +139,7 @@ def mutate(binding, action, mid):
         c.request(path + '/status', body={'status': 'paused'}, key=key)
     elif action == 'copy-id':
         import subprocess
-        subprocess.run(['wl-copy', '--type', 'text/plain'], input=mid.encode(), check=True)
+        subprocess.run(['wl-copy', '--type', 'text/plain'], input=mid.encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
     elif action == 'archive':
         row = c.get(path + '?include_history=false')
         if row['id'] != mid or (row.get('execution') or {}).get('state') == 'running' or row['status'] not in (
@@ -134,6 +154,33 @@ def label(v):
     return ''.join(c if c.isprintable() else ' ' for c in str(v or '')[:512])
 
 
+def mission_settings(m):
+    return (m.get('remote_node_id') or (m.get('remote_job') or {}).get('node_id'),
+            m.get('backend'), m.get('model_override') or m.get('model'),
+            m.get('model_effort'), m.get('permission_mode') or 'supervised')
+
+
+def catalog_rows(c):
+    backends = c.get('/api/backends')
+    if isinstance(backends, dict):
+        backends = backends['backends']
+    models = c.get('/api/providers/backend-models')['backends']
+    chains = c.get('/api/model-routing/chains')
+    by_id = {b['id']: b.get('name') or b['id'] for b in backends}
+    chain_ids = {k for chain in chains for k in (chain['id'], chain['id'].removeprefix('builtin/'))}
+    for backend in ('claudecode', 'codex', 'grok', 'opencode', 'antigravity', 'vibe'):
+        if backend not in by_id:
+            continue
+        options = models.get(backend, [])
+        if backend == 'opencode':
+            options = ([{'value': chain['id'], 'label': 'Routing — ' + chain['name']} for chain in chains]
+                       + [m for m in options if m.get('value', '').removeprefix('builtin/') not in chain_ids
+                          and not m.get('label', '').startswith('Routing — ')])
+        for option in options:
+            if option.get('value'):
+                yield ('H', backend, by_id[backend], option['value'], option.get('label') or option['value'])
+
+
 def roster_rows(c):
     projects = c.get('/api/projects')['projects']
     missions = c.get('/api/control/missions?limit=200')
@@ -143,7 +190,7 @@ def roster_rows(c):
     rows = [('C', c.binding)]
     rows += [('P', p['slug'], p.get('title') or p['slug'], p.get('objective')) for p in projects]
     rows += [('M', *(m.get(k) for k in ('id','title','project','track','model','model_override',
-                                        'status','updated_at','created_at','short_description')))
+                                        'status','updated_at','created_at','short_description')), *mission_settings(m))
              for m in missions if re.fullmatch(r'[A-Za-z0-9_-]{1,128}', m['id'])]
     rows += [('N', *(m.get(k) for k in ('id','name','role','provider','cpu_ram','size','state',
                                         'status','expires_at','cost','active_missions'))) for m in machines]
@@ -152,7 +199,15 @@ def roster_rows(c):
 
 
 def roster():
-    for row in roster_rows(Connection()):
+    c = Connection()
+    rows = roster_rows(c)
+    try:
+        rows.extend(catalog_rows(c))
+    except (KeyError, TypeError, urllib.error.URLError, TimeoutError):
+        # A catalog outage must not prevent opening an existing mission.
+        pass
+    c.check()
+    for row in rows:
         print('\t'.join(map(label, row)))
 
 

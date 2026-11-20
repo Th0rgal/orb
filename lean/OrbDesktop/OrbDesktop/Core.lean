@@ -28,7 +28,8 @@ private def missionCard (idx : Nat) (xs : List String) : MissionSummaryCard :=
   { widgetId := 1001 + 3 * idx, missionId := col xs 1, title := col xs 2, project := col xs 3
     track := col xs 4, model := if (col xs 5).isEmpty then col xs 6 else col xs 5
     status := col xs 7, updatedLabel := if (col xs 8).isEmpty then col xs 9 else col xs 8
-    summaryText := col xs 10 }
+    summaryText := col xs 10, machine := col xs 11, backend := col xs 12,
+    effort := col xs 14, permissionMode := col xs 15 }
 
 private def machineCard (idx : Nat) (xs : List String) : FleetMachineCard :=
   { widgetId := 1002 + 3 * idx, machineId := col xs 1, name := col xs 2
@@ -43,6 +44,10 @@ def loadLiveState : IO (Option DesktopState) := do
   let ps := lines.filterMap (fun line => let xs := splitTab line; if col xs 0 == "P" then some xs else none)
   let ms := lines.filterMap (fun line => let xs := splitTab line; if col xs 0 == "M" then some xs else none)
   let ns := lines.filterMap (fun line => let xs := splitTab line; if col xs 0 == "N" then some xs else none)
+  let catalog : List CatalogModel := lines.filterMap fun line =>
+    match splitTab line with
+    | ["H", backend, harnessName, model, modelName] => some { backend, harnessName, model, modelName }
+    | _ => none
   let projects := ps.toArray.mapIdx (fun i xs => projectRow i xs) |>.toList
   let missions := ms.toArray.mapIdx (fun i xs => missionCard i xs) |>.toList
   let machines := ns.toArray.mapIdx (fun i xs => machineCard i xs) |>.toList
@@ -58,7 +63,7 @@ def loadLiveState : IO (Option DesktopState) := do
     stream := Orb.Stream.Coalescer.empty
     sidebarRows := sidebar
     missionCards := missions
-    fleetMachines := machines }
+    fleetMachines := machines, catalog }
 
 inductive LiveUpdate where
   | sample (visible : List String) (bubble : Option (String × String × String))
@@ -112,8 +117,9 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
   let active ← slot.get
   if let some request := st.writeRequest then
     let st := { st with writeRequest := none, writeError := "" }
+    let encode := fun (v : LaunchSettings) => String.intercalate "\t" [v.machine, v.backend, v.model, v.effort, v.permission]
     let (action, mid, text) := match request with
-      | .create => ("create", "", "")
+      | .create => ("create", "", encode st.draftSettings)
       | .send mid text => ("send", mid, text)
       | .stop mid => ("stop", mid, "")
       | .archive mid => ("archive", mid, "")
@@ -121,15 +127,20 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
       | .rename mid title => ("rename", mid, title)
       | .move mid project => ("move", mid, project)
       | .copyId mid => ("copy-id", mid, "")
+      | .settings mid field values =>
+        let key := match field with
+          | .machine => "machine" | .backend => "backend" | .model => "model"
+          | .effort => "effort" | .permission => "permission"
+        ("settings", mid, key ++ "\t" ++ encode values)
     try
       let r ← IO.Process.output { cmd := "python3", args := #["-I", "-c", transport ++ "\ntry: mutate(*sys.argv[1:])\nexcept Exception: sys.exit(1)", st.connectionBinding, action, mid] } (input? := some text)
       if r.exitCode != 0 then throw (IO.userError "write failed")
       closeLiveSubscription slot
       match request with
       | .create =>
-        let [id,title,status] := splitTab r.stdout.trimAscii.toString | throw (IO.userError "invalid mission")
+        let [id,title,status,machine,backend,model,effort,permissionMode] := splitTab (r.stdout.dropEnd 1).toString | throw (IO.userError "invalid mission")
         let wid := 1 + st.sidebarRows.foldl (fun n row => max n row.widgetId) 1000
-        let card := { (default : MissionSummaryCard) with widgetId := wid, missionId := id, title, status }
+        let card := { (default : MissionSummaryCard) with widgetId := wid, missionId := id, title, status, machine, backend, model, effort, permissionMode }
         let row := { (default : ChromeSidebarRow) with widgetId := wid, rowId := "mission:" ++ id, kind := "mission", title, status }
         return (resetSelection { st with screen := .missionTranscript, missionCards := card :: st.missionCards, sidebarRows := row :: st.sidebarRows } (some card), some viewport)
       | .archive _ =>
@@ -146,6 +157,11 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
         let moved := r.stdout.trimAscii.toString.splitOn "\n"
         return ({ st with missionCards := st.missionCards.map fun m => if moved.contains m.missionId then { m with project } else m }, some viewport)
       | .copyId _ => return (st, some viewport)
+      | .settings .. =>
+        let [machine,backend,model,effort,permissionMode] := splitTab (r.stdout.dropEnd 1).toString | throw (IO.userError "invalid settings response")
+        let cards := st.missionCards.map fun m =>
+          if m.missionId == mid then { m with machine, backend, model, effort, permissionMode } else m
+        return ({ st with missionCards := cards }, some viewport)
       | .send .. => return ({ st with composer := { isRunning := st.composer.isRunning } }, some viewport)
       | .stop _ => return (st, some viewport)
     catch _ => return ({ st with writeError := "Core did not confirm " ++ action }, some viewport)
