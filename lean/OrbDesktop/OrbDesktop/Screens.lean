@@ -977,12 +977,12 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
   let rightColumn : WidgetNode :=
     match st.screen with
     | .missionTranscript =>
-      let bodyH := availH - headerH - (if st.liveData then 0 else composerH)
+      let bodyH := availH - headerH - composerH
       let bodyNode := buildMissionTranscriptBody st mainW bodyH runs
       let composerNode := buildComposerWidget theme mainW composerH st.composer
       WidgetNode.box
         (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg pal.canvas)
-        ([headerNode, bodyNode] ++ (if st.liveData then [] else [composerNode]))
+        [headerNode, bodyNode, composerNode]
     | .missionSplitDiff =>
       let splitH := availH - headerH
       let leftW : SubPx := pxToSub 688

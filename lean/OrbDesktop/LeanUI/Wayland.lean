@@ -470,6 +470,7 @@ structure WindowHandles where
   seatVersion : UInt32 := 1
   pointer : USize := 0
   keyboard : USize := 0
+  textInput : USize := 0
   fnDispatch : USize := 0
   fnMmap : USize := 0
   fnMunmap : USize := 0
@@ -493,6 +494,8 @@ structure WaylandClient where
   pendingH : Nat := 923
   scale120 : Nat := 120
   ime : ImePending := {}
+  imeEntered : Bool := false
+  imeEnabled : Bool := false
   deriving Repr, Inhabited
 
 /-- Compute the device buffer dimensions `(bufW, bufH)` using `Kernel.bufferSize`. -/
@@ -570,7 +573,11 @@ def openWindow (title appId : String) (initW initH initScale120 : Nat) : IO Wayl
   let (wmBase, xdgVersion) ← bind "xdg_wm_base" ifaces.xdgWmBase 4 1 tagXdgWmBase true
   let (viewporter, _) ← bind "wp_viewporter" ifaces.wpViewporter 1 1 0 true
   let (scaleMgr, _) ← bind "wp_fractional_scale_manager_v1" ifaces.wpFractionalScaleManager 1 1 0 false
-  let (_, seatVersion) ← bind "wl_seat" ifaces.wlSeat 5 1 tagSeat false
+  let (seat, seatVersion) ← bind "wl_seat" ifaces.wlSeat 5 1 tagSeat false
+  let (manager, _) ← bind "zwp_text_input_manager_v3" ifaces.zwpTextInputManager 1 1 0 false
+  let textInput ← if seat != 0 && manager != 0 then
+    marshalRequest manager 1 ifaces.zwpTextInput 1 0 tagTextInput #[.newId, .obj seat]
+    else pure 0
   let surface ← marshalRequest compositor 0 ifaces.wlSurface 4 0 tagSurface #[.newId]
   let viewport ← marshalRequest viewporter 1 ifaces.wpViewport 1 0 0 #[.newId, .obj surface]
   if scaleMgr != 0 then
@@ -582,8 +589,15 @@ def openWindow (title appId : String) (initW initH initScale120 : Nat) : IO Wayl
   let _ ← marshalRequest surface 6 0 4 0 0 #[]
   return {
     headless := false, display := disp, ifaces
-    window := { surface, viewport, shmGlobal, seatVersion, fnDispatch, fnMmap, fnMunmap, fnClose, fnDisconnect }
+    window := { surface, viewport, shmGlobal, seatVersion, textInput, fnDispatch, fnMmap, fnMunmap, fnClose, fnDisconnect }
     pendingW := initW, pendingH := initH, scale120 := initScale120 }
+
+def syncTextFocus (c : WaylandClient) (focused : Bool) : IO WaylandClient := do
+  let enabled := c.imeEntered && focused
+  if enabled == c.imeEnabled then return c
+  discard <| marshalRequest c.window.textInput (if enabled then 1 else 2) 0 1 0 0 #[]
+  discard <| marshalRequest c.window.textInput 7 0 1 0 0 #[]
+  return { c with imeEnabled := enabled, ime := {} }
 
 /-- Flush requests and block until the compositor sends events; `pumpEvents` then returns them. -/
 def waitEvents (c : WaylandClient) : IO Unit := do
@@ -744,6 +758,9 @@ def stepWireEvent (c : WaylandClient) (ev : WlWireEvent) : IO (WaylandClient × 
         if st.xkbState != 0 then
           FFI.xkbModifiers st.xkbState dep lat lck grp
   else if ev.tag == tagTextInput then
+    if ev.opcode == 0 then return ({ st with imeEntered := true }, out)
+    if ev.opcode == 1 then return ({ st with imeEntered := false, imeEnabled := false, ime := {} }, out)
+    if !st.imeEnabled then return (st, out)
     if ev.opcode == 2 then
       let txt := match ev.arg? 0 with | some (WlWireArg.str (some s)) => s | _ => ""
       let cb := match ev.arg? 1 with | some (WlWireArg.int v) => v | _ => 0
