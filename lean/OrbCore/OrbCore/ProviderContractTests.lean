@@ -1644,8 +1644,12 @@ def run : IO Unit := do
           none none "2026-11-16T00:00:00Z"
         | throw (IO.userError "VPN settings member creation failed")
       let memberJwt := mintSessionTokenV2 cfg.jwtSecret member.id member.role member.sessionEpoch (now + 3600)
-      let a : HydratedProvider := { (default : HydratedProvider) with id := "fixture-a",
-        providerType := "openai", enabled := true, hasApiKey := true, apiKey := "synthetic-a" }
+      let a : HydratedProvider := { (default : HydratedProvider) with
+        id := "fixture-a"
+        providerType := "openai"
+        enabled := true
+        hasApiKey := true
+        apiKey := "synthetic-a" }
       let b := { a with id := "fixture-b", apiKey := "synthetic-b" }
       let entry := "[{\"provider_id\":\"openai\",\"account_id\":\"fixture-b\",\"model_id\":\"gpt-5\"}]"
       let target := (parseChainTargetsJson entry #[] #[a, b])[0]?
@@ -1653,8 +1657,13 @@ def run : IO Unit := do
         failures := failures.push "An explicitly selected account must supply its own credential"
       unless (parseChainTargetsJson entry #[] #[a, { b with enabled := false }]).isEmpty do
         failures := failures.push "A disabled selected account must not resolve another login"
-      let sidecarAccount := { b with hasApiKey := false, apiKey := "", hasOAuth := true,
-        oauthFile := "selected.json", boundOauthFile := "selected.json", modelPrefix := "selected" }
+      let sidecarAccount := { b with
+        hasApiKey := false
+        apiKey := ""
+        hasOAuth := true
+        oauthFile := "selected.json"
+        boundOauthFile := "selected.json"
+        modelPrefix := "selected" }
       let viaOwner := (parseChainTargetsJson entry #[] #[a, sidecarAccount] "http://127.0.0.1:8317" "fixture-sidecar")[0]?
       unless viaOwner.any (fun t => t.modelId == "selected/gpt-5" &&
           t.sidecarCredential?.any (fun c => c.file == "selected.json" && c.modelPrefix == "selected")) do
