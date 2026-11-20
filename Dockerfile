@@ -90,7 +90,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git curl jq sqlite3 libsqlite3-0 libssl3t64 zstd unzip openssh-client ca-certificates gnupg python3 python3-yaml caddy \
     # nspawn / container workspaces
-    systemd-container debootstrap \
+    systemd-container debootstrap util-linux \
     # Wayland app streaming and automation
     sway grim wtype wlrctl wf-recorder wayvnc cage imagemagick \
     tesseract-ocr at-spi2-core \
@@ -100,6 +100,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     # Add plucky (25.04) script for future Ubuntu releases
     && ln -sf gutsy /usr/share/debootstrap/scripts/plucky
+
+# Core starts a userspace WireGuard tunnel for each admitted AirVPN session.
+RUN set -eu; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) sha=e88c1d090740373fc606c1bafd81d9a5eadc642cce5667616e20e9d7a444f51c ;; \
+      arm64) sha=370e00bd2167960d1ecd1c3c1439715bbaa94a0a110a2040468670c9af6021b6 ;; \
+      *) echo "Unsupported wireproxy architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL --retry 3 "https://github.com/whyvl/wireproxy/releases/download/v1.1.3/wireproxy_linux_${arch}.tar.gz" -o /tmp/wireproxy.tar.gz; \
+    echo "$sha  /tmp/wireproxy.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/wireproxy.tar.gz -C /usr/local/bin wireproxy; \
+    rm /tmp/wireproxy.tar.gz; \
+    setpriv --pdeathsig KILL -- wireproxy --version
 
 # -- Node.js 20 (for Claude Code CLI & MCP servers) ----------------------------
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
