@@ -391,7 +391,7 @@ function MissionDock(p: {
             </button>
             <Show when={modelOpen()}>
               <Picker label="Models" searchLabel="Search models" placement="top-start" selected={modelId()}
-                items={modelPickerItems(models())}
+                items={modelPickerItems(models(), p.mission?.backend ?? "")}
                 onClose={() => setModelOpen(false)} onSelect={value => void pickModel(value)}/>
 
             </Show>
