@@ -161,3 +161,9 @@ Admin Settings serializes secret replacement with local tunnel admission.
 Changing a device profile retires every Orb connection using that profile.
 Changing the API key retires all local Orb tunnels for fresh verification.
 Invalid or identical edits preserve running tunnels.
+
+For a Google Antigravity OAuth file, the candidate sidecar fixture verifies
+buffered and streaming Gemini requests, catalog discovery, forced token
+refresh, and a targeted sign-in. The token exchange, user-info lookup and
+project lookup must traverse that credential’s Orb relay. Blocking the
+relay must prevent a subsequent inference request from reaching Google.

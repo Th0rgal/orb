@@ -3611,7 +3611,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let coreOwned := !hp.hasOAuth && stored.any (fun p => !p.apiKey.isEmpty && p.apiKey != "cli-proxy-managed")
     let mut configure? : Option (Bool → IO (Except String Unit)) := none
     let file := accountRoutingFile providers hp
-    if hp.hasOAuth && !hp.hasApiKey && ["codex", "claude"].any (providerTypeMatchesAuthType hp.providerType) &&
+    if hp.hasOAuth && !hp.hasApiKey && ["codex", "claude", "antigravity"].any (providerTypeMatchesAuthType hp.providerType) &&
         !file.isEmpty then
       if let some url := st.vpnRelayPort?.bind (fun port =>
           AccountVpnRelay.proxyUrl (effectiveJwtSecret st.cfg) port hp.providerType hp.id) then
