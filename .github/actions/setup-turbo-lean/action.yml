@@ -170,6 +170,43 @@ runs:
         key: turbo-lean-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/turbo-lean-revision') }}
 
     # Most hosted PR jobs are restore-only to bound GitHub cache usage.
+    # turbo-lean deliberately re-elaborates importers of local externs. Cache
+    # only the downstream C compilation, keyed by preprocessed input, compiler
+    # contents and flags. Never replace the Lean build or the executable link.
+    - name: Configure validated native object cache
+      if: runner.os == 'Linux' && (github.job == 'test' || github.job == 'docker' || github.job == 'orb-desktop-shell' || github.job == 'harness-contract')
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [[ ! -x /usr/bin/ccache || ! -x /usr/bin/clang ]]; then
+          ./scripts/ci_harden_ubuntu_apt.sh
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ccache clang
+        fi
+        mkdir -p "$RUNNER_TEMP/orb-cc"
+        printf '%s\n' '#!/bin/sh' 'exec /usr/bin/ccache /usr/bin/clang "$@"' > "$RUNNER_TEMP/orb-cc/clang"
+        chmod 755 "$RUNNER_TEMP/orb-cc/clang"
+        {
+          echo "LEAN_CC=$RUNNER_TEMP/orb-cc/clang"
+          # lean.ci may serve a different cache partition on each runner.
+          # Restore the object cache alongside the matching Lean build, rather
+          # than depending on two independent fallback lookups there.
+          if [[ "$RUNNER_NAME" == boost-jit-* ]]; then
+            echo "CCACHE_DIR=$TURBO_LEAN_HOME/orb-native-objects"
+          else
+            echo "CCACHE_DIR=$HOME/.cache/orb-native-objects"
+          fi
+          echo 'CCACHE_COMPILERCHECK=content'
+          echo 'CCACHE_NODIRECT=1'
+          echo 'CCACHE_MAXSIZE=512M'
+        } >> "$GITHUB_ENV"
+    - name: Restore native C compiler cache
+      if: env.CCACHE_DIR != '' && !startsWith(runner.name, 'boost-jit-')
+      uses: actions/cache@v5
+      with:
+        path: ~/.cache/orb-native-objects
+        key: orb-cc-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision') }}-${{ github.sha }}
+        restore-keys: orb-cc-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision') }}-
     - name: Restore Lean CAS and Lake artifacts (pull requests and read-only events)
       if: (github.event_name != 'push' || github.ref != 'refs/heads/master') && !startsWith(runner.name, 'boost-jit-') && !(github.job == 'docker' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
       uses: actions/cache/restore@v5
@@ -193,8 +230,18 @@ runs:
           ~/.cache/turbo-lean/cas
           lean/**/.lake/build
           lean/**/.lake/packages
-        key: lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-${{ github.job }}-${{ hashFiles('lean/**/*.lean', 'lean/**/*.c', 'c/**/*.c', 'c/**/*.h') }}
+        key: lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-${{ github.job }}-${{ startsWith(runner.name, 'boost-jit-') && env.CCACHE_DIR != '' && 'cc1-' || '' }}${{ hashFiles('lean/**/*.lean', 'lean/**/*.c', 'c/**/*.c', 'c/**/*.h') }}
         restore-keys: |
+          lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-${{ github.job }}-${{ startsWith(runner.name, 'boost-jit-') && env.CCACHE_DIR != '' && 'cc1-' || '' }}
           lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-${{ github.job }}-
-          lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-${{ hashFiles('lean/**/*.lean', 'lean/**/*.c', 'c/**/*.c', 'c/**/*.h') }}-
-          lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-
+          ${{ github.job != 'test' && format('lean-build-{0}-{1}-{2}-', runner.os, runner.arch, hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json')) || '' }}
+    - name: Report Test archive contents before compilation
+      if: github.job == 'test' && env.CCACHE_DIR != ''
+      shell: bash
+      run: |
+        echo "ref=$GITHUB_REF runner=$RUNNER_NAME compiler=$(clang --version | head -1)"
+        for path in lean/OrbCore/.lake/build/bin/orb-core-test lean/OrbCore/.lake/build/ir/OrbCore/{Control,CliMain,SelfTest}.c.o.export; do
+          if [[ -f "$path" ]]; then stat --printf='restored %n (%s bytes)\n' "$path"; else echo "absent $path"; fi
+        done
+        python3 -c 'import os,pathlib; r=list(pathlib.Path(os.environ["CCACHE_DIR"]).glob("*/*/*R")); print(f"ccache result files={len(r)} bytes={sum(p.stat().st_size for p in r)}")'
+        ccache --zero-stats

@@ -97,7 +97,7 @@ jobs:
 
   test:
     name: Test
-    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && github.repository == 'Th0rgal/orb' && ((github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) && 'lean-4vcpu-ubuntu-2604' || 'ubuntu-latest' }}
+    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && github.repository == 'Th0rgal/orb' && ((github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) && 'lean-8vcpu-ubuntu-2604' || 'ubuntu-latest' }}
     # Skip CI on draft PRs unless explicitly requested
     needs: plan
     if: (needs.plan.outputs.run_test == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
@@ -117,6 +117,7 @@ jobs:
           # One turbo-lean run per package builds its binaries and tests together, then
           # the tests run; building the test targets separately rebuilt each package.
           ./scripts/build_orb_bins.sh --ensure-lean --with-tests --out-dir target/debug
+          ccache --show-stats --verbose
           for bin in fido-agent-proxy orb-privd orb-sudo lean-mesh palomactl sandboxed-mcp workspace-mcp desktop-mcp automation-manager-mcp sandboxed-node orb-core orb-locald; do
             test -x "target/debug/$bin"
             elab_syms=$(nm -u "target/debug/$bin" | grep -c lean_elab || true)
@@ -435,14 +436,24 @@ jobs:
           run-id: ${{ needs.plan.outputs.desktop_run_id }}
       - if: steps.promoted-desktop.outcome == 'success'
         run: tar -xf .ci/desktop/bins.tar
+      # APT still resolves versions and authenticates packages against the
+      # current signed indexes. Cache downloads only, never installed files.
+      - uses: actions/cache@v5
+        if: needs.plan.outputs.run_orb_desktop_shell == 'true'
+        with:
+          path: ~/orb-desktop-debs
+          key: desktop-debs-ubuntu24-${{ runner.arch }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: desktop-debs-ubuntu24-${{ runner.arch }}-
       - name: Install WebKitGTK and Lean build deps
         if: needs.plan.outputs.run_orb_desktop_shell == 'true' || (steps.desktop-bins.outputs.cache-hit != 'true' && steps.promoted-desktop.outcome != 'success')
         run: |
           ./scripts/ci_harden_ubuntu_apt.sh
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+          mkdir -p "$HOME/orb-desktop-debs"
+          sudo apt-get -o Dir::Cache::archives="$HOME/orb-desktop-debs" install -y --no-install-recommends libwebkit2gtk-4.1-dev \
             libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libssl-dev libsqlite3-dev zstd \
             libwayland-dev libxkbcommon-dev libfreetype-dev libharfbuzz-dev libfontconfig-dev
+          sudo rm -rf "$HOME/orb-desktop-debs/partial" "$HOME/orb-desktop-debs/lock"
       - name: Build orb-locald + sandboxed-mcp
         if: steps.desktop-bins.outputs.cache-hit != 'true' && steps.promoted-desktop.outcome != 'success'
         run: ./scripts/build_orb_bins.sh --ensure-lean --out-dir target/debug --only orb-locald --only sandboxed-mcp
