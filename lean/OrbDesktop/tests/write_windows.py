@@ -3,6 +3,7 @@ import concurrent.futures
 import contextlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import select
@@ -44,7 +45,8 @@ def check(tmp, mode):
                LD_LIBRARY_PATH=os.getenv('LD_LIBRARY_PATH', ''), WORKING_DIR=str(tmp), DEV_MODE='true')
     with contextlib.ExitStack() as stack:
         def start():
-            return stack.enter_context(process([ROOT / 'target/release/orb-core'], env, tmp))
+            trace = ['strace', '-f', '-yy', '-e', 'trace=close', '-o', str(tmp / 'closes')] if mode == 'fd' else []
+            return stack.enter_context(process(trace + [ROOT / 'target/release/orb-core'], env, tmp))
         def reap():
             for pid in launches.read_text().splitlines() if launches.exists() else []:
                 with contextlib.suppress(ProcessLookupError):
@@ -52,13 +54,13 @@ def check(tmp, mode):
         stack.callback(reap)
         server = start()
         token = wait('login', login)
-        mid = api('/api/control/missions', {'title': 'write-window', 'backend': 'claudecode' if mode == 'pipe' else 'codex'})['id']
+        mid = api('/api/control/missions', {'title': 'write-window', 'backend': 'claudecode' if mode in ('pipe','fd') else 'codex'})['id']
         path = '/api/control/missions/' + mid
         key = str(uuid.uuid4())
         def send():
             return api('/api/control/message', {'mission_id': mid, 'client_message_id': key,
-                       'content': 'window' * (50000 if mode == 'pipe' else 1), 'queue_followup': True})
-        if mode == 'pipe':
+                       'content': 'window' * (50000 if mode in ('pipe','fd') else 1), 'queue_followup': True})
+        if mode in ('pipe','fd'):
             import sys
             (tmp / 'git').unlink()
             entered.unlink(missing_ok=True)
@@ -75,6 +77,12 @@ def check(tmp, mode):
                     wait('unread prompt in bounded pipe', entered.exists)
                     assert not sent.done()
                     pidfd = os.pidfd_open(int(launches.read_text()))
+                    stdout = os.readlink(f'/proc/{int(launches.read_text())}/fd/1')
+                    if mode == 'fd':
+                        traced, = Path(f'/proc/{server.pid}/task/{server.pid}/children').read_text().split()
+                        corefds = Path('/proc') / traced / 'fd'
+                        number, = [f.name for f in corefds.iterdir() if os.path.realpath(f).endswith(stdout)]
+                        before = len((tmp / 'closes').read_bytes())
                     stack.callback(os.close, pidfd)
                     poll = select.poll(); poll.register(pidfd, select.POLLIN)
                     assert not poll.poll(0)
@@ -84,8 +92,33 @@ def check(tmp, mode):
                     reap()
                 sent.result(timeout=5)
             assert api(path)['status'] == 'interrupted'
-        elif mode in ('stop', 'activation'):
-            if mode == 'activation':
+            if mode == 'fd':
+                trace = (tmp / 'closes').read_bytes()[before:].decode(errors='replace')
+                assert f'close({number}<{stdout}>' in trace, 'missing reader close'
+                assert not re.search(rf'close\({number}\)\s+= -1 EBADF', trace), 'Stop and reader both closed warm stdout'
+        elif mode == 'completion':
+            send()
+            old = int(wait('old launch', lambda: launches.exists() and launches.read_text().strip()))
+            entered.unlink(missing_ok=True)
+            gate.unlink()
+            try:
+                os.kill(old, 15)
+                wait('old completion at post-turn checkpoint', entered.exists)
+                (tmp / 'git').unlink()
+                api('/api/control/message', {'mission_id': mid, 'content': 'replacement', 'client_message_id': str(uuid.uuid4())})
+                wait('replacement PID', lambda: len(launches.read_text().splitlines()) == 2)
+                fd = os.pidfd_open(int(launches.read_text().splitlines()[1])); stack.callback(os.close, fd)
+                exited = select.poll(); exited.register(fd, select.POLLIN)
+            finally:
+                gate.touch()
+            import time
+            until = time.monotonic() + 2
+            while time.monotonic() < until:
+                assert api(path)['status'] == 'active' and not exited.poll(0)
+                time.sleep(.05)
+            assert api(path + '/cancel', {})['ok'] and exited.poll(1000)
+        elif mode in ('stop', 'activation', 'archive-activation', 'archive-registration', 'supersede'):
+            if mode in ('activation', 'archive-activation'):
                 skill = tmp / 'library/skills/check-window'
                 skill.mkdir(parents=True)
                 (skill / 'SKILL.md').write_text('---\nname: check-window\naudience: mission\n---\nfixture\n')
@@ -102,11 +135,27 @@ def check(tmp, mode):
                     assert not launches.exists()
                     assert any(m['event_type'] == 'user_message' for m in api(path + '/events'))
                     if mode == 'stop': assert api(path)['status'] == 'active'
-                    assert api(path + '/cancel', {})['ok']
-                    api(path + '/status', {'status': 'acknowledged'})
+                    if mode == 'supersede':
+                        # First git invocation is already paused in the wrapper;
+                        # later checkpoints resolve the real git executable.
+                        (tmp / 'git').unlink()
+                        api('/api/control/message', {'mission_id': mid, 'client_message_id': str(uuid.uuid4()), 'content': 'new generation'})
+                        child = int(wait('new generation launched', lambda: launches.exists() and launches.read_text().strip()))
+                        fd = os.pidfd_open(child); stack.callback(os.close, fd)
+                        exited = select.poll(); exited.register(fd, select.POLLIN)
+                        assert not exited.poll(0)
+                    else:
+                        if not mode.startswith('archive-'):
+                            assert api(path + '/cancel', {})['ok']
+                        api(path + '/status', {'status': 'acknowledged'})
                 finally:
                     gate.touch()
                 sent.result(timeout=15)
+            if mode == 'supersede':
+                assert api(path + '/cancel', {})['ok']
+                assert exited.poll(1000) and launches.read_text().splitlines() == [str(child)], 'wrong generation owned PID'
+                print(f'{mode}: PASS {mid}', flush=True)
+                return
             # The shell can exec the CLI just after the HTTP send returns.
             # A late child remains observable even if its parent has returned.
             import time
@@ -142,6 +191,6 @@ def check(tmp, mode):
 
 if __name__ == '__main__':
     import sys
-    for mode in sys.argv[1:] or ('stop', 'receipt', 'activation', 'pipe'):
+    for mode in sys.argv[1:] or ('stop', 'receipt', 'activation', 'pipe', 'archive-activation', 'archive-registration', 'supersede', 'completion', 'fd'):
         with tempfile.TemporaryDirectory(prefix='orb-write-window-') as d:
             check(Path(d), mode)
