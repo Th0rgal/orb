@@ -72,7 +72,7 @@ structure CliLoginSession where
   createdSec    : UInt64
   beforeFiles   : Array (String × UInt64)
   routedFile? : Option String := none
-  vpnGeneration? : Option Nat := none
+  routeGeneration : Nat := 0
   completionStartedSec? : Option UInt64 := none
   status        : String := "pending"
   message?      : Option String := none
@@ -2500,7 +2500,7 @@ def reconcileCliLoginCompletion
 private def changedLoginRoute? (store : CoreStore) (sess : CliLoginSession) :
     IO (Option (Nat × String × ByteArray)) := do
   let some account := sess.targetProvId? | return none
-  match ← AccountVpnRoutes.checkGeneration store.missionsDb account sess.vpnGeneration? with
+  match ← AccountVpnRoutes.checkGeneration store.missionsDb account sess.routeGeneration with
   | .ok () => return none
   | .error "vpn_route_changed" => return some (jsonErr 409 "The account connection changed. Start sign-in again.")
   | .error _ => return some (jsonErr 503 "VPN route storage unavailable")
@@ -3315,12 +3315,12 @@ def dispatchProviderAndAiRoute
                 return some (jsonErr 403 "not_account_owner")
         let beforeFiles := (← scanCliProxyAuthFiles).map (fun af => (af.fileName, af.fingerprint))
         let mut routedRequest? : Option JVal := none
-        let mut vpnGeneration? : Option Nat := none
+        let mut routeGeneration : Nat := 0
         if let some account := targetProvId? then
-          let .ok pref ← AccountVpnRoutes.read store.missionsDb account
+          let .ok route ← AccountVpnRoutes.snapshot store.missionsDb account
             | return some (jsonErr 503 "VPN route storage unavailable")
-          if let some selected := pref then
-            vpnGeneration? := some selected.generation
+          routeGeneration := route.generation
+          if let .vpn _ := route then
             let accounts ← loadHydratedProviders store workingDir
             let some hp := accounts.find? (fun p => p.id == account)
               | return some (jsonErr 409 "VPN credential unavailable")
@@ -3349,7 +3349,7 @@ def dispatchProviderAndAiRoute
             let nowSec ← nowEpoch
             let sess : CliLoginSession := {
               sessionId := sid, providerSlug := slug, authFileType := authType,
-              targetProvId? := targetProvId?, routedFile? := routedFile?, vpnGeneration? := vpnGeneration?, stateToken := stTok, authUrl := authUrl,
+              targetProvId? := targetProvId?, routedFile? := routedFile?, routeGeneration := routeGeneration, stateToken := stTok, authUrl := authUrl,
               flow := flow, createdSec := nowSec, beforeFiles := beforeFiles,
               userId := callerUserId
             }

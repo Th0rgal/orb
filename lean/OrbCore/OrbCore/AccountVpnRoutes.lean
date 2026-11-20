@@ -13,34 +13,48 @@ structure Preference where
 def validCountry (country : String) : Bool :=
   country.length == 2 && country.toList.all (fun c => 'A' ≤ c && c ≤ 'Z')
 
+inductive Route where
+  | direct (revision : Nat)
+  | vpn (preference : Preference)
+
+def Route.generation : Route → Nat
+  | .direct n => n
+  | .vpn p => p.generation
+
 /-- An absent row is a legacy Direct account. A failed read or malformed
 record must block dispatch because it could conceal an enabled VPN. -/
-def read (db : SqliteDb) (account : String) : IO (Except String (Option Preference)) := do
+def snapshot (db : SqliteDb) (account : String) : IO (Except String Route) := do
   let .ok rows ← execParamQuery db
     "SELECT country,CAST(generation AS TEXT),preferred_server FROM account_vpn_routes WHERE account_id=?1;" #[account]
     | return .error "vpn_route_store_unavailable"
-  if rows.size ≤ 1 then return .ok none
+  if rows.size ≤ 1 then return .ok (.direct 0)
   let #[country, generation, server] := rows[1]! | return .error "vpn_route_store_invalid"
   let some n := generation.toNat? | return .error "vpn_route_store_invalid"
   if n == 0 then return .error "vpn_route_store_invalid"
-  if country.isEmpty then return .ok none
+  if country.isEmpty then return .ok (.direct n)
   if !validCountry country then return .error "vpn_route_store_invalid"
-  return .ok (some ⟨country, n, server⟩)
+  return .ok (.vpn ⟨country, n, server⟩)
+
+def read (db : SqliteDb) (account : String) : IO (Except String (Option Preference)) := do
+  return (← snapshot db account).map fun
+    | .direct _ => none
+    | .vpn p => some p
 
 /-- An OAuth callback belongs to the route from which its login was started.
 A route change can require another authenticated exchange. -/
-def checkGeneration (db : SqliteDb) (account : String) (expected : Option Nat) : IO (Except String Unit) := do
-  match ← read db account with
+def checkGeneration (db : SqliteDb) (account : String) (expected : Nat) : IO (Except String Unit) := do
+  match ← snapshot db account with
   | .error e => return .error e
   | .ok current =>
-    if current.map (·.generation) == expected then return .ok ()
+    if current.generation == expected then return .ok ()
     return .error "vpn_route_changed"
 
 /-- Persist the desired country. Direct uses an empty country so turning a VPN
 off and on again cannot accidentally reuse an older admission generation. -/
 def set (db : SqliteDb) (account : String) (country? : Option String) : IO (Except String Unit) := do
   if account.isEmpty || country?.any (fun c => !validCountry c) then return .error "invalid_vpn_preference"
-  let sql := "INSERT INTO account_vpn_routes(account_id,country) VALUES(?1,?2) " ++
+  let sql := "INSERT INTO account_vpn_routes(account_id,country) SELECT ?1,?2 " ++
+    "WHERE ?2<>'' OR EXISTS (SELECT 1 FROM account_vpn_routes WHERE account_id=?1) " ++
     "ON CONFLICT(account_id) DO UPDATE SET country=excluded.country, generation=generation+1, preferred_server='' " ++
     "WHERE account_vpn_routes.country<>excluded.country;"
   let r ← execParamQuery db sql #[account, country?.getD ""]

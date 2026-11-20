@@ -158,8 +158,10 @@ The cross-category sidecar fixture uses a synthetic Claude credential with
 the same gateway as ChatGPT A. The independent TLS receiver checks the
 messages request and OAuth refresh and authorization-code exchanges. Claude
 continues to use that gateway when the relay refuses ChatGPT A. Orb checks
-the account’s saved VPN generation before accepting a targeted login callback
-or reconciling an unfinished login.
+the account’s saved route revision before accepting a targeted login callback
+or reconciling an unfinished login. A Direct → VPN → Direct round trip
+invalidates an earlier Direct login. Retrying the same saved mode and country
+preserves its revision.
 
 On Linux, run `python3 scripts/test_airvpn_wireguard.py /path/to/orb-airvpn-sidecar-test`
 with `wireproxy`, `setpriv` (util-linux), `wg`, `ip`, `iptables`, `ip6tables`, `mount`, `unshare`, and OpenSSL on PATH.

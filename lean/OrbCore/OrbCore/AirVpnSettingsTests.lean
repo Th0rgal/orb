@@ -18,20 +18,27 @@ private def routeStorage (root : String) : IO Unit := do
   try
     let blocked := fun (_ : AccountVpnRoutes.Preference) => pure (.error "unverified")
     check ((← AccountVpnRoutes.resolve db "a" blocked).toOption == some none) "legacy Direct route"
+    check (← AccountVpnRoutes.set db "a" none).isOk "explicit Direct on legacy account"
+    check (← AccountVpnRoutes.checkGeneration db "a" 0).isOk "unchanged legacy Direct exchange remains valid"
     check (← AccountVpnRoutes.set db "a" (some "NL")).isOk "enable VPN for one account"
     let some first := (← AccountVpnRoutes.read db "a").toOption.join | throw (IO.userError "vpn preference missing")
-    check (!(← AccountVpnRoutes.checkGeneration db "a" none).isOk &&
-      (← AccountVpnRoutes.checkGeneration db "a" (some first.generation)).isOk)
+    check (!(← AccountVpnRoutes.checkGeneration db "a" 0).isOk &&
+      (← AccountVpnRoutes.checkGeneration db "a" first.generation).isOk)
       "a pending Direct exchange must restart after enabling VPN"
     check (← AccountVpnRoutes.rememberServer db "a" first "west").isOk "remember verified server"
     check (← AccountVpnRoutes.set db "a" (some "NL")).isOk "retry preference save"
     check ((← AccountVpnRoutes.resolve db "a" blocked).isOk == false &&
       (← AccountVpnRoutes.resolve db "b" blocked).toOption == some none) "unavailable VPN scoped to selected account"
     check (← AccountVpnRoutes.set db "a" none).isOk "switch to Direct"
+    check (!(← AccountVpnRoutes.checkGeneration db "a" 0).isOk)
+      "a Direct OAuth callback cannot survive a Direct to VPN to Direct cycle"
+    let .ok (.direct revision) ← AccountVpnRoutes.snapshot db "a" | throw (IO.userError "Direct revision missing")
+    check (← AccountVpnRoutes.set db "a" none).isOk "retry Direct"
+    check (← AccountVpnRoutes.checkGeneration db "a" revision).isOk "unchanged Direct exchange remains valid"
     check (← AccountVpnRoutes.set db "a" (some "NL")).isOk "switch back to VPN"
     check (!(← AccountVpnRoutes.rememberServer db "a" first "stale").isOk) "stale observation after re-enable"
     let pool ← Std.Mutex.new ({} : AccountVpnPool.PoolState)
-    check (!(← AccountVpnRoutes.checkGeneration db "a" (some first.generation)).isOk)
+    check (!(← AccountVpnRoutes.checkGeneration db "a" first.generation).isOk)
       "a pending VPN exchange cannot use a replacement route generation"
     let stale ← AccountVpnPool.allocate pool root root db "a" "openai" first
     check (match stale with | .error "vpn_route_changed" => true | _ => false)
