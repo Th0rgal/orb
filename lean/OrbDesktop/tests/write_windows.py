@@ -54,13 +54,57 @@ def check(tmp, mode):
         stack.callback(reap)
         server = start()
         token = wait('login', login)
-        mid = api('/api/control/missions', {'title': 'write-window', 'backend': 'claudecode' if mode in ('pipe','fd') else 'codex'})['id']
+        mid = api('/api/control/missions', {'title': 'write-window', 'backend': 'claudecode' if mode in ('pipe','fd','retire') else 'codex'})['id']
         path = '/api/control/missions/' + mid
         key = str(uuid.uuid4())
         def send():
             return api('/api/control/message', {'mission_id': mid, 'client_message_id': key,
                        'content': 'window' * (50000 if mode in ('pipe','fd') else 1), 'queue_followup': True})
-        if mode in ('pipe','fd'):
+        def refused(call, error):
+            try:
+                call()
+            except urllib.error.HTTPError as e:
+                body = json.load(e)
+                assert e.code == 409 and body['error'] == error, body
+                return body
+            raise AssertionError('expected refusal: ' + error)
+
+        if mode == 'busy':
+            send()
+            wait('first PID', lambda: launches.exists() and launches.stat().st_size)
+            key = str(uuid.uuid4())
+            refusal = refused(send, 'local_run_busy')
+            assert refusal['id'] == key and refusal['message_accepted'] is False and refusal['queued'] is False
+            api(path + '/cancel', {})
+            assert refused(send, 'local_run_busy') == refusal
+            assert len(launches.read_text().splitlines()) == 1
+            assert len([e for e in api(path + '/events') if e['event_type'] == 'user_message']) == 1
+        elif mode == 'retire':
+            claude = tmp / 'claude'
+            # Signal handler proves retirement has started, while the same pidfd
+            # remains live until the test releases the child.
+            entered.unlink(missing_ok=True)
+            gate.unlink()
+            (tmp / 'git').unlink()
+            claude.write_text(f'#!/bin/sh\ntrap \'touch "{entered}"; while test ! -e "{gate}"; do sleep .05; done; exit 0\' TERM\necho $$ >> "{launches}"\nwhile :; do sleep .05; done\n')
+            claude.chmod(0o700)
+            send()
+            pid = int(wait('warm PID', lambda: launches.exists() and launches.read_text().strip()))
+            fd = os.pidfd_open(pid); stack.callback(os.close, fd)
+            exited = select.poll(); exited.register(fd, select.POLLIN)
+            key = str(uuid.uuid4())
+            with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                replacement = pool.submit(send)
+                try:
+                    wait('TERM delivered', entered.exists)
+                    refused(lambda: api(path + '/status', {'status':'acknowledged'}), 'mission_running')
+                    assert not exited.poll(0) and api(path)['status'] != 'acknowledged'
+                finally:
+                    gate.touch()
+                replacement.result(timeout=10)
+            assert exited.poll(1000)
+            api(path + '/cancel', {})
+        elif mode in ('pipe','fd'):
             import sys
             (tmp / 'git').unlink()
             entered.unlink(missing_ok=True)
@@ -90,7 +134,7 @@ def check(tmp, mode):
                     assert poll.poll(1000), 'Stop acknowledged with live warm child'
                 finally:
                     reap()
-                sent.result(timeout=5)
+                refused(lambda: sent.result(timeout=5), 'local_delivery_not_confirmed')
             assert api(path)['status'] == 'interrupted'
             if mode == 'fd':
                 trace = (tmp / 'closes').read_bytes()[before:].decode(errors='replace')
@@ -116,6 +160,7 @@ def check(tmp, mode):
             while time.monotonic() < until:
                 assert api(path)['status'] == 'active' and not exited.poll(0)
                 time.sleep(.05)
+            assert not any(e['event_type'] == 'error' for e in api(path + '/events')), 'obsolete completion appended a transcript error'
             assert api(path + '/cancel', {})['ok'] and exited.poll(1000)
         elif mode in ('stop', 'activation', 'archive-activation', 'archive-registration', 'supersede'):
             if mode in ('activation', 'archive-activation'):
@@ -150,7 +195,7 @@ def check(tmp, mode):
                         api(path + '/status', {'status': 'acknowledged'})
                 finally:
                     gate.touch()
-                sent.result(timeout=15)
+                refused(lambda: sent.result(timeout=15), 'local_delivery_not_confirmed')
             if mode == 'supersede':
                 assert api(path + '/cancel', {})['ok']
                 assert exited.poll(1000) and launches.read_text().splitlines() == [str(child)], 'wrong generation owned PID'
@@ -191,6 +236,6 @@ def check(tmp, mode):
 
 if __name__ == '__main__':
     import sys
-    for mode in sys.argv[1:] or ('stop', 'receipt', 'activation', 'pipe', 'archive-activation', 'archive-registration', 'supersede', 'completion', 'fd'):
+    for mode in sys.argv[1:] or ('stop', 'receipt', 'activation', 'pipe', 'archive-activation', 'archive-registration', 'supersede', 'completion', 'fd', 'busy', 'retire'):
         with tempfile.TemporaryDirectory(prefix='orb-write-window-') as d:
             check(Path(d), mode)

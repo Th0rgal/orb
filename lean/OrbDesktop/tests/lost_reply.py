@@ -7,7 +7,7 @@ import threading
 
 
 @contextmanager
-def proxy(port):
+def proxy(port, before_first=None):
     attempts = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -18,12 +18,14 @@ def proxy(port):
             data = self.rfile.read(int(self.headers.get('Content-Length', 0)))
             upstream = HTTPConnection('127.0.0.1', port, timeout=8)
             try:
+                if before_first and not attempts and self.command == 'POST' and self.path == '/api/control/message':
+                    before_first(json.loads(data)['mission_id'])
                 upstream.request(self.command, self.path, data or None, dict(self.headers))
                 response = upstream.getresponse()
                 payload = response.read()
-                if self.command == 'POST' and self.path == '/api/control/message' and response.status == 200:
+                if self.command == 'POST' and self.path == '/api/control/message' and (response.status == 200 or before_first):
                     attempts.append(json.loads(data)['client_message_id'])
-                    if len(attempts) == 1:
+                    if len(attempts) == 1 and not before_first:
                         return  # no headers or body reach the desktop
                 self.send_response(response.status)
                 self.send_header('Content-Length', str(len(payload)))

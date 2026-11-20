@@ -80,7 +80,10 @@ def run(tmp, mode):
     with contextlib.ExitStack() as stack:
         server = stack.enter_context(process(core, env, tmp))
         token = wait('disposable Core login', login)
-        endpoint, attempts = stack.enter_context(lost_reply.proxy(port)) if mode in ('retry', 'all') else (base, [])
+        def occupy(mid):
+            api('/api/control/message', {'mission_id': mid, 'content': 'other client'})
+            wait('other child registered', lambda: launches.exists() and launches.read_text().strip())
+        endpoint, attempts = stack.enter_context(lost_reply.proxy(port, occupy if mode == 'busy' else None)) if mode in ('retry', 'all', 'busy') else (base, [])
         (tmp / 'connection.json').write_text(json.dumps({'api_url': endpoint, 'token': token}))
         assert api('/api/control/missions') == []
         config = tmp / 'sway.conf'
@@ -111,6 +114,20 @@ def run(tmp, mode):
         wayland_ime.commit(committed, graphical, '未確定' if mode in ('preedit', 'all') else '')
         time.sleep(.25)
         keys('-k', 'Tab', '-k', 'Tab', '-k', 'Return')
+
+        if mode == 'busy':
+            wait('desktop received busy refusal', lambda: len(attempts) == 1)
+            assert [m['content'] for m in api(path + '/events') if m['event_type'] == 'user_message'] == ['other client']
+            api(path + '/cancel', {})
+            time.sleep(2)  # let the desktop reconcile the idle status
+            keys('-k', 'Return')  # unchanged draft; no typing or editing after refusal
+            wait('retained draft delivered', lambda: len(attempts) == 2)
+            assert attempts[0] != attempts[1]
+            assert [m['content'] for m in api(path + '/events') if m['event_type'] == 'user_message'] == ['other client', typed + committed]
+            assert len(launches.read_text().splitlines()) == 2
+            api(path + '/cancel', {})
+            print('busy draft retained and submitted without retyping:', mid)
+            return
 
         def observed():
             row = api(path)
