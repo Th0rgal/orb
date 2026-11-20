@@ -128,7 +128,7 @@ the account’s saved VPN generation before accepting a targeted login callback
 or reconciling an unfinished login.
 
 On Linux, run `python3 scripts/test_airvpn_wireguard.py /path/to/orb-airvpn-sidecar-test`
-with `wireproxy`, `setpriv` (util-linux), `wg`, `ip`, `iptables`, `mount`, `unshare`, and OpenSSL on PATH.
+with `wireproxy`, `setpriv` (util-linux), `wg`, `ip`, `iptables`, `ip6tables`, `mount`, `unshare`, and OpenSSL on PATH.
 The test creates private network and mount namespaces, generates ephemeral
 WireGuard keys, and starts three kernel peers. The AirVPN userinfo fixture
 counts three external sessions plus each connected test peer. Independent
@@ -147,11 +147,11 @@ the current account-wide session count under the reservation lock. Restarting
 the child discards its session metadata.
 
 The WireGuard test changes the actual source address using SNAT inside the
-test namespace. When one ChatGPT tunnel acquires the other account’s exit,
-the receiver sees the next provider request arrive from a verified third
-address. When all three peers share the same exit, the receiver sees zero
-provider requests for the displaced account. The other account continues
-through its original exit.
+test namespace. Each tunnel has IPv4 and IPv6 addresses. An IPv6-only
+collision forces one ChatGPT account onto a verified third peer even though
+its original IPv4 address is still unique. A subsequent IPv4 collision on
+the third peer leaves no compatible candidate. The provider receives zero
+requests for that account while the other account retains its original exit.
 
 Custom model discovery resolves the owning account’s transport before sending
 its API key to the configured models endpoint. If routing fails, catalog

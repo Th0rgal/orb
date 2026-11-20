@@ -39,6 +39,8 @@ def run(driver, parent_mount):
     command("ip", "link", "set", "lo", "up")
     receiver = "192.0.2.80"
     command("ip", "addr", "add", receiver + "/32", "dev", "lo")
+    receiver6 = "fd77::80"
+    command("ip", "-6", "addr", "add", receiver6 + "/128", "dev", "lo")
     with tempfile.TemporaryDirectory() as path:
         root = Path(path)
         hosts = root / "hosts"
@@ -49,37 +51,48 @@ def run(driver, parent_mount):
         assert socket.gethostbyname("airvpn.org") == "127.0.0.1"
         cert, tls_key = root / "cert.pem", root / "tls.key"
         command("openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048", "-days", "1",
-                "-subj", "/CN=provider.test", "-addext", "subjectAltName=DNS:airvpn.org,DNS:api.ipify.org,DNS:provider.test",
+                "-subj", "/CN=provider.test", "-addext", "subjectAltName=DNS:airvpn.org,DNS:api.ipify.org,DNS:api6.ipify.org,DNS:provider.test",
                 "-out", str(cert), "-keyout", str(tls_key))
         settings = [{"api_key": "fixture-only"}]
         peers = {}
+        ipv6 = {}
         for idx in range(1, 4):
             name = f"wg{idx}"
             server_ip, client_ip = f"10.77.{idx}.1", f"10.77.{idx}.2"
+            client6 = f"fd77:{idx}::2"
+            ipv6[client_ip] = client6
             port = 51000 + idx
             server_key, client_key = command("wg", "genkey"), command("wg", "genkey")
             server_pub = command("wg", "pubkey", data=server_key + "\n")
             client_pub = command("wg", "pubkey", data=client_key + "\n")
             command("ip", "link", "add", name, "type", "wireguard")
             command("wg", "set", name, "listen-port", str(port), "private-key", "/dev/stdin",
-                    "peer", client_pub, "allowed-ips", client_ip + "/32", data=server_key + "\n")
+                    "peer", client_pub, "allowed-ips", f"{client_ip}/32,{client6}/128", data=server_key + "\n")
             command("ip", "addr", "add", server_ip + "/24", "dev", name)
+            command("ip", "-6", "addr", "add", f"fd77:{idx}::1/64", "dev", name, "nodad")
             command("ip", "link", "set", name, "up")
             peers[name] = client_ip
             settings.append({"device_id": name, "country": "NL", "server": name,
-                             "profile": f"[Interface]\nAddress = {client_ip}/32\nDNS = {receiver}\nPrivateKey = {client_key}\n"
-                                        f"[Peer]\nPublicKey = {server_pub}\nEndpoint = 127.0.0.1:{port}\nAllowedIPs = 0.0.0.0/0\n"})
+                             "profile": f"[Interface]\nAddress = {client_ip}/32, {client6}/128\nDNS = {receiver}\nPrivateKey = {client_key}\n"
+                                        f"[Peer]\nPublicKey = {server_pub}\nEndpoint = 127.0.0.1:{port}\nAllowedIPs = 0.0.0.0/0, ::/0\n"})
         class DNS(socketserver.BaseRequestHandler):
             def handle(self):
                 packet, sock = self.request
                 end = packet.index(b"\x00", 12) + 1
                 qtype, = struct.unpack_from("!H", packet, end)
-                answer = (b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 30, 4) + socket.inet_aton(receiver)) if qtype == 1 else b""
+                v6_probe = packet[12:end].lower() == b"\x04api6\x05ipify\x03org\x00"
+                address = b""
+                if v6_probe and qtype == 28:
+                    address = socket.inet_pton(socket.AF_INET6, receiver6)
+                elif not v6_probe and qtype == 1:
+                    address = socket.inet_aton(receiver)
+                answer = b"\xc0\x0c" + struct.pack("!HHIH", qtype, 1, 30, len(address)) + address if address else b""
                 sock.sendto(packet[:2] + struct.pack("!HHHHH", 0x8180, 1, int(bool(answer)), 0, 0) + packet[12:end+4] + answer, self.client_address)
 
         observed = []
         max_sessions = []
         exit_probes = []
+        ipv6_probes = []
         translated = {}
         class Receiver(http.server.BaseHTTPRequestHandler):
             def reply(self, body):
@@ -93,6 +106,8 @@ def run(driver, parent_mount):
                     observed.append(self.client_address[0])
                 elif self.headers.get("Host", "").split(":")[0] == "api.ipify.org":
                     exit_probes.append(self.client_address[0])
+                elif self.headers.get("Host", "").split(":")[0] == "api6.ipify.org":
+                    ipv6_probes.append(self.client_address[0])
                 self.reply(self.client_address[0].encode())
 
             def do_POST(self):
@@ -117,9 +132,15 @@ def run(driver, parent_mount):
 
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(cert, tls_key)
-        with socketserver.UDPServer((receiver, 53), DNS) as dns, http.server.ThreadingHTTPServer(("0.0.0.0", 443), Receiver) as receiver_server:
-            receiver_server.socket = context.wrap_socket(receiver_server.socket, server_side=True)
-            for service in (dns, receiver_server):
+        class IPv6Server(http.server.ThreadingHTTPServer):
+            address_family = socket.AF_INET6
+
+        with (socketserver.UDPServer((receiver, 53), DNS) as dns,
+              http.server.ThreadingHTTPServer(("0.0.0.0", 443), Receiver) as receiver_server,
+              IPv6Server((receiver6, 443), Receiver) as receiver_server6):
+            for server in (receiver_server, receiver_server6):
+                server.socket = context.wrap_socket(server.socket, server_side=True)
+            for service in (dns, receiver_server, receiver_server6):
                 threading.Thread(target=service.serve_forever, daemon=True).start()
             result = subprocess.run([driver, "wireguard", str(root / "store")], text=True, capture_output=True,
                                     input="".join(json.dumps(item) + "\n" for item in settings),
@@ -194,9 +215,12 @@ def run(driver, parent_mount):
                     assert set(proxy_pids()) == original_pids
                     before = len(observed)
                     probes = len(exit_probes)
-                    change_exit(original, other)
+                    probes6 = len(ipv6_probes)
+                    command("ip6tables", "-t", "nat", "-A", "INPUT", "-s", ipv6[original], "-d", receiver6,
+                            "-p", "tcp", "--dport", "443", "-j", "SNAT", "--to-source", ipv6[other])
                     assert request("repeat") == replacement
-                    assert exit_probes[probes] == other and exit_probes[-1] == replacement
+                    assert exit_probes[probes] == original and exit_probes[-1] == replacement
+                    assert ipv6_probes[probes6] == ipv6[other] and ipv6_probes[-1] == ipv6[replacement]
                     assert observed[before:] == [replacement], "provider reached before replacement verification"
                     change_exit(replacement, other)
                     assert request("expect-blocked") == "blocked"
@@ -218,7 +242,7 @@ def run(driver, parent_mount):
                         resumed.kill()
                         resumed.wait()
             assert max(max_sessions) == 5
-            print(json.dumps(routes), "maximum sessions:", max(max_sessions), "both exits restored after SIGKILL; verified replacement:", replacement, "all-collision request blocked")
+            print(json.dumps(routes), "maximum sessions:", max(max_sessions), "both exits restored after SIGKILL; verified replacement:", replacement, "mixed IPv4/IPv6 collisions blocked")
 
 
 if __name__ == "__main__":
