@@ -984,7 +984,7 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
 in `SubPx`, and optional pre-shaped `ShapedScreenRuns`. `windowEffects` is enabled only by the
 live Wayland runtime so deterministic golden renders retain the opaque parity palette. -/
 def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
-    (runs : ShapedScreenRuns := {}) (windowEffects : Bool := false) : WidgetNode :=
+    (runs : ShapedScreenRuns := {}) (windowEffects : Bool := false) (hoverRow : Option WidgetId := none) : WidgetNode :=
   let st := if windowEffects then { st with theme := Theme.withWindowEffects st.theme } else st
   let theme := st.theme
   let pal := theme.palette
@@ -998,7 +998,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
   let composerH := chromeComposerHeightSub
   let mainW : SubPx := availW - sidebarW
   let useRefSidebar := !st.liveData && !runs.headerTitleRuns.isEmpty
-  let sidebarNode := buildSidebarChrome st availH useRefSidebar
+  let sidebarNode := buildSidebarChrome st availH useRefSidebar hoverRow
   let headerNode := buildHeaderChrome st mainW runs.headerTitleRuns
 
   let rightColumn : WidgetNode :=

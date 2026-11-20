@@ -278,7 +278,7 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
     diffAddRuns := addRuns
   }
 
-  let widgetRootRaw := buildDesktopScreen st availW availH shapedRuns liveWindow
+  let widgetRootRaw := buildDesktopScreen st availW availH shapedRuns liveWindow (st.sidebarHoverRow rt.hoveredEntity)
   let (ac6, widgetRoot) ← shapeWidgetTree ac5 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc widgetRootRaw
   let layoutRoot := widgetRoot.toLayoutNode
   let t1 ← IO.monoNanosNow
@@ -332,6 +332,10 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
   let scale := rt.wayland.scale120
   let viewport := rt.viewportDeviceRect
   fun st ev => Id.run do
+    if let .pointerMove x y := ev then
+      return (st, st.sidebarHoverDamage rt.hitRegions scale rt.hoveredEntity (hitTest rt.hitRegions x y))
+    if let .pointerLeave := ev then
+      return (st, st.sidebarHoverDamage rt.hitRegions scale rt.hoveredEntity none)
     if let .activate id := ev then
       if st.hasLiveConnection && st.missionMenu.isNone && st.writeRequest.isNone then
         if let some field := settingTrigger id then

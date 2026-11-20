@@ -707,6 +707,28 @@ def missionDisclosureId (widgetId : Nat) : Nat := 4000000 + widgetId
 
 def projectNewAgentId (widgetId : Nat) : Nat := 5000000 + widgetId
 
+/-- A disclosure shares its row's hover background. Section headings and
+the scroll container have no hover background. -/
+def DesktopState.sidebarHoverRow (st : DesktopState) (hit : Option WidgetId) : Option WidgetId := do
+  let id ← hit
+  let rowId := if id >= projectNewAgentId 0 then id - projectNewAgentId 0
+    else if id >= missionDisclosureId 0 then id - missionDisclosureId 0 else id
+  let row ← st.sidebarRows.find? (·.widgetId == rowId)
+  if ["nav", "project", "mission", "footer"].contains row.kind then some rowId else none
+
+def DesktopState.sidebarHoverDamage (st : DesktopState) (regions : List (WidgetId × Rect)) (scale : Nat)
+    (previous next : Option WidgetId) : Damage := Id.run do
+  if previous == next then return none
+  let a := st.sidebarHoverRow previous
+  let b := st.sidebarHoverRow next
+  if a == b then return none
+  let mut damage : Damage := none
+  for id in [a, b] do
+    if let some widget := id then
+      if let some (_, rect) := regions.find? (·.1 == widget) then
+        damage := Damage.add damage (roundRectOut scale rect)
+  return damage
+
 private def missionBranchRows (rows : Array ChromeSidebarRow)
     (cards : Std.HashMap Nat MissionSummaryCard) (expanded : List String)
     (initialDepth : Nat) : Array ChromeSidebarRow := Id.run do

@@ -18,6 +18,16 @@ private def hierarchyFixture : DesktopState := {
 #guard (({ hierarchyFixture with expandedProjects := ["now"] } : DesktopState).visibleProjectRows.map
   (fun r => (r.rowId, r.depth))) == [("project:now", 0), ("mission:m", 1)]
 
+private def hoverRegions : List (WidgetId × Rect) :=
+  [(1001, { x := 0, y := 64, w := 640, h := 192 }), (1000, { x := 0, y := 256, w := 640, h := 192 })]
+
+#guard hierarchyFixture.sidebarHoverRow (some (projectNewAgentId 1000)) == some 1000
+#guard hierarchyFixture.sidebarHoverDamage hoverRegions 120 (some 1001) (some (missionDisclosureId 1001)) == none
+#guard hierarchyFixture.sidebarHoverDamage hoverRegions 120 none (some 1000) ==
+  some (roundRectOut 120 hoverRegions[1]!.2)
+#guard hierarchyFixture.sidebarHoverDamage hoverRegions 192 (some 1001) none ==
+  some (roundRectOut 192 hoverRegions[0]!.2)
+
 private def controllerFixture : DesktopState :=
   let child := { (default : MissionSummaryCard) with widgetId := 1004, missionId := "child", project := "now", callbackParentMissionId := "m" }
   { hierarchyFixture with

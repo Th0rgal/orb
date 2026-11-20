@@ -157,7 +157,7 @@ def chromeLabel (lineH : SubPx) (runs : List InlineRun) (grow : Nat := 0) : Widg
 tall with `6 px` corners, a `16 px` icon slot (`18 px` for a mission, holding its status dot),
  the label, and an optional count pill and shortcut hint. -/
 def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarRow)
-    (margin : Edges := {}) (livePhase : Option Nat := none) (expanded : Bool := false) : WidgetNode :=
+    (margin : Edges := {}) (livePhase : Option Nat := none) (expanded : Bool := false) (hovered : Bool := false) : WidgetNode :=
   let pal := theme.palette
   let small := Theme.mutedText theme
   if row.kind == "section" then
@@ -234,7 +234,8 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
           |>.withPadding (Edges.trbl 0 padRight 0 padLeft)
           |>.withMargin margin
           |>.withFixedSize innerW (if isFooter then pxToSub 32 else pxToSub 30))
-        (if row.selected && !isFooter then pal.rowActive else 0x00000000)
+        (if row.selected && !isFooter then pal.rowActive
+         else if hovered then (pal.textPrimary &&& 0xFFFFFF00) ||| 0x0C else 0x00000000)
         (CornerRadii.uniform (if isFooter then pxToSub 8 else pxToSub 6))
         BorderStyle.none
         ([lead, if isMission then
@@ -296,7 +297,7 @@ def referenceSidebarRows (scr : ScreenId) : List ChromeSidebarRow :=
 /-- Build the left sidebar (`aside.sidebar`, `--sb-w` wide with a `1 px` right border): an empty
 band as tall as the title row, the navigation rows on a `31 px` pitch, the section label and
 project tree, and the settings button in a `45 px` footer. -/
-def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : Bool := false) : WidgetNode :=
+def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : Bool := false) (hoverRow : Option WidgetId := none) : WidgetNode :=
   let theme := st.theme
   let pal := theme.palette
   let border := theme.borderWidth
@@ -312,7 +313,7 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
         if i == 0 then (if st.screen == .settingsGeneral then pxToSub 4 else 0)
         else if st.screen == .settingsGeneral && i == 1 then pxToSub 10
         else pxToSub 1
-      buildSidebarRowWidget theme rowW r (Edges.trbl topM 0 0 0)
+      buildSidebarRowWidget theme rowW r (Edges.trbl topM 0 0 0) (hovered := hoverRow == some r.widgetId)
   let archived := fun (r : ChromeSidebarRow) => st.liveData && r.kind == "mission" && r.status == "acknowledged"
   let archiveRows := rowsSource.filter archived
   let archiveGroup : List ChromeSidebarRow := if !st.hasLiveConnection then [] else
@@ -333,9 +334,9 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
           (if r.kind == "section" then Edges.trbl (pxToSub 14) 0 (pxToSub 4) 0
            else Edges.trbl 0 0 (pxToSub 1) 0) (if st.liveData then some st.badgePhase else none) (if r.rowId == "section:archives" then st.archivesOpen
             else if r.kind == "project" then st.expandedProjects.contains (r.rowId.drop 8).toString
-            else st.expandedMissions.contains r.rowId)
+            else st.expandedMissions.contains r.rowId) (hovered := hoverRow == some r.widgetId)
   let footRows : List WidgetNode :=
-    (rowsSource.filter isFoot).map fun r => buildSidebarRowWidget theme rowW r
+    (rowsSource.filter isFoot).map fun r => buildSidebarRowWidget theme rowW r (hovered := hoverRow == some r.widgetId)
   let rosterH := availH - chromeHeaderHeightSub - footH
   let rosterStyle := BoxStyle.col 0
     |>.withPadding (Edges.trbl 0 (pxToSub 6) (pxToSub 12) (pxToSub 6))
