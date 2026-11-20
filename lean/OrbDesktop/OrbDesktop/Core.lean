@@ -117,6 +117,10 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
       | .send mid text => ("send", mid, text)
       | .stop mid => ("stop", mid, "")
       | .archive mid => ("archive", mid, "")
+      | .restore mid => ("restore", mid, "")
+      | .rename mid title => ("rename", mid, title)
+      | .move mid project => ("move", mid, project)
+      | .copyId mid => ("copy-id", mid, "")
     try
       let r ← IO.Process.output { cmd := "python3", args := #["-I", "-c", transport ++ "\ntry: mutate(*sys.argv[1:])\nexcept Exception: sys.exit(1)", st.connectionBinding, action, mid] } (input? := some text)
       if r.exitCode != 0 then throw (IO.userError "write failed")
@@ -129,7 +133,19 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
         let row := { (default : ChromeSidebarRow) with widgetId := wid, rowId := "mission:" ++ id, kind := "mission", title, status }
         return (resetSelection { st with screen := .missionTranscript, missionCards := card :: st.missionCards, sidebarRows := row :: st.sidebarRows } (some card), some viewport)
       | .archive _ =>
-        return (resetSelection { st with screen := .controlEmpty, missionCards := st.missionCards.filter (·.missionId != mid), sidebarRows := st.sidebarRows.filter (·.rowId != "mission:" ++ mid) } none, some viewport)
+        let next := { st with missionCards := st.missionCards.filter (·.missionId != mid),
+          sidebarRows := st.sidebarRows.filter (·.rowId != "mission:" ++ mid) }
+        return (if st.openMission == some mid then resetSelection { next with screen := .controlEmpty } none else next, some viewport)
+      | .restore _ =>
+        return ({ st with missionCards := st.missionCards.map fun m => if m.missionId == mid then { m with status := "paused" } else m,
+                          sidebarRows := st.sidebarRows.map fun row => if row.rowId == "mission:" ++ mid then { row with status := "paused" } else row }, some viewport)
+      | .rename _ title =>
+        return ({ st with missionCards := st.missionCards.map fun m => if m.missionId == mid then { m with title } else m,
+                          sidebarRows := st.sidebarRows.map fun row => if row.rowId == "mission:" ++ mid then { row with title } else row }, some viewport)
+      | .move _ project =>
+        let moved := r.stdout.trimAscii.toString.splitOn "\n"
+        return ({ st with missionCards := st.missionCards.map fun m => if moved.contains m.missionId then { m with project } else m }, some viewport)
+      | .copyId _ => return (st, some viewport)
       | .send .. => return ({ st with composer := { isRunning := st.composer.isRunning } }, some viewport)
       | .stop _ => return (st, some viewport)
     catch _ => return ({ st with writeError := "Core did not confirm " ++ action }, some viewport)

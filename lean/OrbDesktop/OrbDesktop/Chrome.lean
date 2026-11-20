@@ -41,6 +41,10 @@ def chromeIconPaths (name : String) : List (List (Int × Int)) :=
   | "s:notifs" => [[(80,26),(60,32),(48,58),(48,79),(32,104),(128,104),(112,79),(112,58),(100,32),(80,26)],[(64,124),(70,135),(90,135),(96,124)]]
   | "s:agents" => [[(80,20),(140,50),(80,80),(20,50),(80,20)],[(20,80),(80,110),(140,80)],[(20,110),(80,140),(140,110)]]
   | "mission" => [[(40,55),(120,55),(130,65),(130,115),(30,115),(30,65),(40,55)],[(80,55),(80,30),(60,30)],[(55,75),(55,90)],[(105,75),(105,90)],[(10,75),(10,95)],[(150,75),(150,95)]]
+  | "rename" => [[(28,112),(25,136),(49,130),(133,46),(114,27),(28,112)],[(101,41),(120,60)]]
+  | "archive" => [[(22,32),(138,32),(138,58),(22,58),(22,32)],[(32,59),(32,132),(128,132),(128,59)],[(61,82),(99,82)]]
+  | "copy" => [[(56,56),(136,56),(136,138),(56,138),(56,56)],[(40,106),(24,106),(24,22),(106,22),(106,40)]]
+  | "check" => [[(22,80),(60,118),(138,40)]]
   | "plus" => [[(40,80),(120,80)],[(80,40),(80,120)]]
   | "close" => [[(45,45),(115,115)],[(115,45),(45,115)]]
   | "chevron-down" => WidgetNode.downChevronPaths
@@ -55,6 +59,24 @@ def chromeIconPaths (name : String) : List (List (Int × Int)) :=
 def chromeIcon (name : String) (color : Color) (size : Nat := 16) : WidgetNode :=
   .mk none false false (BoxStyle.row 0 |>.withFixedSize (pxToSub size) (pxToSub size))
     (.vectorIcon (chromeIconPaths name) color) []
+
+def buildMissionMenu (st : DesktopState) (menu : MissionMenu) (width : SubPx) : WidgetNode :=
+  let pal := st.theme.palette
+  let rows := (missionMenuRows st menu).map fun item =>
+    let label := WidgetNode.text { BoxStyle.row 0 with grow := 1 } (pxToSub 18)
+      [overlaySynthRun (Theme.bodyText st.theme) item.label]
+    let row := WidgetNode.focusable item.id <| WidgetNode.box
+      (BoxStyle.row (pxToSub 9) |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 8) 0)
+        |>.withFixedSize (width - pxToSub 12) (pxToSub 30))
+      ([chromeIcon item.icon pal.textMuted 14, label] ++
+        (if item.id == 711 then [chromeIcon "chevron-right" pal.textMuted 12] else []))
+    if item.separatorBefore then
+      [WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (width - pxToSub 12) (pxToSub 1) |>.withBg pal.border) [], row]
+    else [row]
+  WidgetNode.box
+    (BoxStyle.col 0 |>.withPadding (Edges.all (pxToSub 6)) |>.withRadius (pxToSub 10)
+      |>.withBorder st.theme.borderWidth pal.border |>.withBg pal.elevatedSurface)
+    rows.flatten
 
 /-- Semantic status indicator color for a sidebar row or mission status string. -/
 @[inline] def statusBadgeColor (pal : Palette) (status : String) : Color :=

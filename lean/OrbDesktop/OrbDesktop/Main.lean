@@ -287,6 +287,18 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
   -- This backend diffs paint commands; it does not consume per-node fingerprints.
   let sceneOut := buildSceneFromLayout sc rt.focus theme widgetRoot rootBox (recordNodes := false)
   if profile then IO.eprintln s!"u7-view-ns {t1-t0} {t2-t1} {(← IO.monoNanosNow)-t2}"
+  if let some menu := st.missionMenu then
+    let w := min availW (pxToSub 228)
+    let h := min availH (pxToSub (14 + 30 * (missionMenuRows st menu).length))
+    let left := max 0 (min menu.x (availW - w : Nat))
+    let top := max 0 (min menu.y (availH - h : Nat))
+    let raw := buildMissionMenu st menu w
+    let (ac7, widget) ← shapeWidgetTree ac6 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc raw
+    let box := layoutNode sc rt.focus.owner pal.focusRing left top w h widget.toLayoutNode
+    let overlay := buildSceneFromLayout sc rt.focus theme widget box (recordNodes := false)
+    let outside : Rect := { x := 0, y := 0, w := availW, h := availH }
+    return ((ac7.finishUploads, if liveWindow then 0 else pal.canvas, sceneOut.prims ++ overlay.prims,
+      (719, outside) :: overlay.hitRegionsSub, overlay.focusableOrder), [])
   if st.screen == .searchDialog then
     let overRaw := buildSearchModalOverlay theme availW availH
     let (ac7, overWidget) ← shapeWidgetTree ac6 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc overRaw
@@ -309,6 +321,11 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
   let scale := rt.wayland.scale120
   let viewport := rt.viewportDeviceRect
   fun st ev => Id.run do
+    if let .pointerButton x y 0x111 true := ev then
+      if st.hasLiveConnection && st.writeRequest.isNone then
+        let some id := hitTest rt.hitRegions x y | return (st, none)
+        let some card := st.missionCards.find? (·.widgetId == id) | return (st, none)
+        return ({ st with missionMenu := some { mission := card.missionId, x, y } }, some viewport)
     if let .scroll x y _ dy := ev then
       if st.liveData then
         let some r := regions.find? (fun r => r.bounds.contains x y) | return (st, none)

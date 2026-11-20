@@ -28,4 +28,14 @@ private def step (s : DesktopState) (e : Event) : DesktopState :=
 #guard (step { base with screen := .controlEmpty } (.activate 103)).screen == .settingsGeneral
 #guard (step (step base (.preedit "ni" 0 2)) (.imeBatch 0 0 "你" "" 0 0)).composer.text == "你"
 
+private def menuState : DesktopState :=
+  { base with liveData := true, connectionBinding := "local-test", openMission := some "a",
+    missionCards := [{ (default : MissionSummaryCard) with widgetId := 1001, missionId := "a" },
+                     { (default : MissionSummaryCard) with widgetId := 1004, missionId := "b" }],
+    missionMenu := some { mission := "b", x := 20, y := 40 } }
+
+#guard (step menuState (.activate 712)).writeRequest == some (.archive "b")
+#guard (step menuState (.activate 712)).openMission == some "a"
+#guard (step menuState (.key 0xff1b 0 .pressed)).missionMenu.isNone
+
 end OrbDesktop.Spec

@@ -99,6 +99,27 @@ def mutate(binding, action, mid):
             raise ValueError('message not accepted')
     elif action == 'stop':
         c.request(path + '/cancel', body={}, key=key)
+    elif action == 'rename':
+        title = sys.stdin.buffer.read().decode().strip()
+        if not title or len(title) > 200:
+            raise ValueError('invalid title')
+        c.request(path + '/title', body={'title': title}, key=key)
+    elif action == 'move':
+        project = sys.stdin.buffer.read().decode()
+        receipt = c.request('/api/control/missions/move', body={'mission_ids': [mid],
+                            'project': project, 'folder': '', 'approval_policy': 'check'}, key=key)
+        moved = [r['mission_id'] for r in receipt['moved'] if r['project'] == project]
+        if mid not in moved:
+            raise ValueError('placement not confirmed')
+        print('\n'.join(moved))
+    elif action == 'restore':
+        row = c.get(path + '?include_history=false')
+        if row['id'] != mid or row['status'] != 'acknowledged' or (row.get('execution') or {}).get('state') == 'running':
+            raise ValueError('mission not archived')
+        c.request(path + '/status', body={'status': 'paused'}, key=key)
+    elif action == 'copy-id':
+        import subprocess
+        subprocess.run(['wl-copy', '--type', 'text/plain'], input=mid.encode(), check=True)
     elif action == 'archive':
         row = c.get(path + '?include_history=false')
         if row['id'] != mid or (row.get('execution') or {}).get('state') == 'running' or row['status'] not in (
