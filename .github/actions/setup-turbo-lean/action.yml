@@ -169,11 +169,9 @@ runs:
           audit-results/turbo-lean-provenance.json
         key: turbo-lean-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/turbo-lean-revision') }}
 
-    # GitHub-hosted runners only restore outside master: their 10 GB cache quota cannot hold
-    # ~2 GB per job and branch. lean.ci runners (boost-jit-*) save on every run; a PR's caches
-    # stay scoped to its branch, so a second push to the same PR starts warm.
+    # Most hosted PR jobs are restore-only to bound GitHub cache usage.
     - name: Restore Lean CAS and Lake artifacts (pull requests and read-only events)
-      if: (github.event_name != 'push' || github.ref != 'refs/heads/master') && !startsWith(runner.name, 'boost-jit-')
+      if: (github.event_name != 'push' || github.ref != 'refs/heads/master') && !startsWith(runner.name, 'boost-jit-') && !(github.job == 'docker' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
       uses: actions/cache/restore@v5
       with:
         path: |
@@ -184,15 +182,19 @@ runs:
         restore-keys: |
           lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-${{ hashFiles('lean/**/*.lean', 'lean/**/*.c', 'c/**/*.c', 'c/**/*.h') }}-
           lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-
-    - name: Restore and save Lean CAS and Lake artifacts (master and lean.ci runners)
-      if: (github.event_name == 'push' && github.ref == 'refs/heads/master') || startsWith(runner.name, 'boost-jit-')
+    # Hosted Docker cannot use lean.ci's cache service. Keep its latest native
+    # build on the same-repository PR's merge ref; a later push can restore it
+    # without publishing anything to master or trusting another PR's binaries.
+    - name: Restore and save Lean CAS and Lake artifacts
+      if: (github.event_name == 'push' && github.ref == 'refs/heads/master') || startsWith(runner.name, 'boost-jit-') || (github.job == 'docker' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
       uses: actions/cache@v5
       with:
         path: |
           ~/.cache/turbo-lean/cas
           lean/**/.lake/build
           lean/**/.lake/packages
-        key: lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-${{ hashFiles('lean/**/*.lean', 'lean/**/*.c', 'c/**/*.c', 'c/**/*.h') }}-${{ github.job }}
+        key: lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-${{ github.job }}-${{ hashFiles('lean/**/*.lean', 'lean/**/*.c', 'c/**/*.c', 'c/**/*.h') }}
         restore-keys: |
+          lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-${{ github.job }}-
           lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-${{ hashFiles('lean/**/*.lean', 'lean/**/*.c', 'c/**/*.c', 'c/**/*.h') }}-
           lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-
