@@ -89,3 +89,5 @@ When a live mission list arrives before its project folders, the sidebar shows e
   `orb/tests/orb-actions.browser.spec.ts` verify in WebKit/Chromium that right-click
   **Copy mission ID** (and `Escape` dismissal) on mission B while viewing mission A
   highlights B only while the menu is open and restores selection to A once closed.
+
+A delegated mission follows its visible controller when a move or partial update leaves the child with an older project slug. The controller keeps its descendant count while collapsed. Expanding it reveals the child once, beneath that controller.

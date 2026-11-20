@@ -730,8 +730,7 @@ def DesktopState.sidebarHoverDamage (st : DesktopState) (regions : List (WidgetI
   return damage
 
 private def missionBranchRows (rows : Array ChromeSidebarRow)
-    (cards : Std.HashMap Nat MissionSummaryCard) (expanded : List String)
-    (initialDepth : Nat) : Array ChromeSidebarRow := Id.run do
+    (cards : Std.HashMap Nat MissionSummaryCard) (expanded : List String) : Array ChromeSidebarRow := Id.run do
   let mut parents : Std.HashMap String String := {}
   let ids := rows.foldl (fun (acc : Std.HashSet String) row => acc.insert row.rowId) {}
   for row in rows do
@@ -740,22 +739,32 @@ private def missionBranchRows (rows : Array ChromeSidebarRow)
       let parent := "mission:" ++ (if launch.isEmpty then card.callbackParentMissionId else launch)
       if ids.contains parent && parent != row.rowId then
         parents := parents.insert row.rowId parent
+  -- Detach every member of a legacy cycle. Once a path has been checked,
+  -- another branch can stop there even when a long chain shares that path.
+  let mut checked : Std.HashSet String := {}
+  for row in rows do
+    if !checked.contains row.rowId then
+      let mut path : Array String := #[]
+      let mut positions : Std.HashMap String Nat := {}
+      let mut id := row.rowId
+      for _ in [:rows.size + 1] do
+        if id.isEmpty || checked.contains id then break
+        if let some start := positions.get? id then
+          for member in path.extract start path.size do
+            parents := parents.erase member
+          break
+        positions := positions.insert id path.size
+        path := path.push id
+        id := parents.getD id ""
+      for member in path do checked := checked.insert member
   let mut children : Std.HashMap String (Array ChromeSidebarRow) := {}
   for row in rows do
-    let mut parent := (parents.get? row.rowId).getD ""
-    -- Old or imported cyclic relationships cannot hide a whole branch.
-    let mut ancestor := parent
-    for _ in [:rows.size] do
-      if ancestor.isEmpty then break
-      if ancestor == row.rowId then
-        parent := ""
-        break
-      ancestor := (parents.get? ancestor).getD ""
+    let parent := parents.getD row.rowId ""
     children := children.insert parent ((children.getD parent #[]).push row)
   -- Walk the forest once. Hidden descendants still contribute to a closed
   -- controller's launched-work count, as they do in the WebKit tree.
   let mut bottomUp := []
-  let mut pending := (children.getD "" #[]).toList.map (fun row => (row, "", initialDepth, true))
+  let mut pending := (children.getD "" #[]).toList.map (fun row => (row, "", 0, true))
   for _ in [:rows.size] do
     let (row, parent, depth, shown) :: rest := pending | break
     bottomUp := (row, parent, depth, shown) :: bottomUp
@@ -780,30 +789,30 @@ def DesktopState.visibleProjectRows (st : DesktopState) : List ChromeSidebarRow 
   let cards := st.missionCards.foldl (fun (index : Std.HashMap Nat MissionSummaryCard) card =>
     index.insert card.widgetId card) {}
   let projectOf := fun id => ((cards.get? id).map (·.project)).getD ""
-  let mut grouped : Std.HashMap String (Array ChromeSidebarRow) := {}
+  let mut active := #[]
   let mut archived := #[]
   for row in st.sidebarRows do
     if row.kind == "mission" then
-      if row.status == "acknowledged" then
-        archived := archived.push row
-      else
-        let slug := projectOf row.widgetId
-        grouped := grouped.insert slug ((grouped.getD slug #[]).push row)
+      if row.status == "acknowledged" then archived := archived.push row
+      else active := active.push row
+  let mut grouped : Std.HashMap String (Array ChromeSidebarRow) := {}
+  let projectKeys := Std.HashSet.ofList (projects.map (fun row => (row.rowId.drop 8).toString))
+  let mut unassigned := #[]
+  let mut slug := ""
+  for row in missionBranchRows active cards st.expandedMissions do
+    if row.depth == 0 then slug := projectOf row.widgetId
+    if projectKeys.contains slug then
+      grouped := grouped.insert slug ((grouped.getD slug #[]).push { row with depth := row.depth + 1 })
+    else
+      unassigned := unassigned.push row
   let mut visible := (st.sidebarRows.filter (fun row =>
     row.kind != "project" && row.kind != "mission" && row.rowId != "section:missions")).toArray
   for project in projects do
-    let slug := (project.rowId.drop 8).toString
+    let key := (project.rowId.drop 8).toString
     visible := visible.push project
-    if st.expandedProjects.contains slug then
-      visible := visible ++ missionBranchRows (grouped.getD slug #[]) cards st.expandedMissions 1
-    grouped := grouped.erase slug
-  -- A project omitted by a partial project response must not hide its missions.
-  for row in st.sidebarRows do
-    if row.kind == "mission" && row.status != "acknowledged" then
-      let slug := projectOf row.widgetId
-      if let some branch := grouped.get? slug then
-        visible := visible ++ missionBranchRows branch cards st.expandedMissions 0
-        grouped := grouped.erase slug
+    if st.expandedProjects.contains key then
+      visible := visible ++ grouped.getD key #[]
+  visible := visible ++ unassigned
   return (visible ++ archived).toList
 
 def toggleSelection (st : DesktopState) (row : ChromeSidebarRow) (extend : Bool) : DesktopState := Id.run do

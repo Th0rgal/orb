@@ -40,6 +40,22 @@ private def controllerFixture : DesktopState :=
 #guard (({ controllerFixture with expandedMissions := ["mission:m"] } : DesktopState).visibleProjectRows.map
   (fun r => (r.rowId, r.depth))) == [("project:now", 0), ("mission:m", 1), ("mission:child", 2)]
 
+-- The controller's move can reach the client before its child's metadata.
+private def movedControllerFixture : DesktopState :=
+  { controllerFixture with missionCards := controllerFixture.missionCards.map fun card =>
+      if card.missionId == "child" then { card with project := "old-project" } else card }
+
+#guard movedControllerFixture.visibleProjectRows == controllerFixture.visibleProjectRows
+#guard (({ movedControllerFixture with expandedMissions := ["mission:m"] } : DesktopState).visibleProjectRows.map
+  (fun row => (row.rowId, row.depth))) == [("project:now", 0), ("mission:m", 1), ("mission:child", 2)]
+
+private def cyclicControllerFixture : DesktopState :=
+  { controllerFixture with missionCards := controllerFixture.missionCards.map fun card =>
+      if card.missionId == "m" then { card with parentMissionId := "child" } else card }
+
+#guard (cyclicControllerFixture.visibleProjectRows.map (fun row => (row.rowId, row.depth, row.badge))) ==
+  [("project:now", 0, 0), ("mission:child", 1, 0), ("mission:m", 1, 0)]
+
 -- A mission snapshot can arrive before its project. Keep its controller
 -- disclosure functional until the folder becomes available.
 private def missingProjectFixture : DesktopState :=
