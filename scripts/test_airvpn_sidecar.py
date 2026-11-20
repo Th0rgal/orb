@@ -208,7 +208,10 @@ def run(binary, reconnect=False, orb_configure=None):
                         token, = fields["refresh_token"]
                         refresh_hits.append((self.client_address[0], token))
                         reply = {"access_token": "renewed-" + token, "refresh_token": token}
-                    data = json.dumps(dict(reply, token_type="Bearer", expires_in=3600)).encode()
+                    # Codex refreshes credentials four days before expiry. Keep freshly
+                    # issued grants outside that window so only the explicit refresh under
+                    # test rotates them while we check targeted OAuth adoption.
+                    data = json.dumps(dict(reply, token_type="Bearer", expires_in=7 * 24 * 3600)).encode()
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(data)))
