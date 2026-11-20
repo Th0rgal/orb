@@ -1400,6 +1400,12 @@ private def customDiscoveryContract (app : CoreAppState) (jwt : String) (now : U
         ("provider_type", .str "custom"), ("base_url", .str s!"http://127.0.0.1:{port}/v1/"),
         ("api_key", .str "discovery-fixture-key"), ("enabled", .bool true),
         ("custom_models", .arr #[.obj #[("id", .str "glm-5.3")], .obj #[("id", .str "glm-5.3-flash")]])])) now
+    let backendCatalog ← getJson app jwt "/api/providers/backend-models" now
+    let options := ((backendCatalog.fieldOrNull "backends").fieldArr? "opencode").getD #[]
+    let overrides := options.filterMap (·.fieldStr? "value")
+    if !overrides.contains "ethereumfoundation/glm-5.3-flash" || overrides.contains "ethereumfoundation/glm-5.3" ||
+        overrides.contains "prov-eth-x4/glm-5.3-flash" then
+      failures := failures.push "OpenCode must advertise routable allowed custom provider IDs"
     let ethCat ← getJson app jwt "/api/providers/catalog" now
     let ethProv := (((ethCat.fieldArr? "providers").getD #[]).find? (fun p => p.fieldStr? "id" == some "prov-eth-x4")).getD .null
     let ethIds := ((ethProv.fieldArr? "models").getD #[]).filterMap (·.fieldStr? "id")

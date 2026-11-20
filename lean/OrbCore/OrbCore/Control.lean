@@ -5628,7 +5628,6 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
 
   if req.method == "GET" && cleanPath == "/api/providers/backend-models" then
     let isAdm := caller.isLegacyUnscoped || caller.role == "admin"
-    let uPrefs ← if caller.isLegacyUnscoped then pure #[] else getUserProviderPrefs st.store caller.userId
     let mkOpt (val lbl desc : String) : String :=
       if desc.isEmpty then
         s!"\{\"value\":{jsonEscape val},\"label\":{jsonEscape lbl}}"
@@ -5675,16 +5674,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       mkOpt "muse/muse-spark-1.3-contributor" "Meta Muse — Muse Spark 1.3 Contributor" "",
       mkOpt "muse/muse-spark-1.3" "Meta Muse — Muse Spark 1.3" ""
     ]
-    let dbProviders ← listAIProviders st.store
-    for p in dbProviders do
-      let effEn := if caller.isLegacyUnscoped then p.enabled else (p.enabled && (isAdm || !p.apiKey.isEmpty) && isUserProviderEnabled uPrefs p.id)
-      if effEn then
-        for cm in p.customModels do
-          let mid := cm.id.trimAscii.toString
-          if !mid.isEmpty then
-            let rawLbl := (cm.name?.getD "").trimAscii.toString
-            let mlbl := if rawLbl.isEmpty then mid else rawLbl
-            opencodeModels := opencodeModels.push (mkOpt s!"{p.id}/{mid}" s!"{p.name} — {mlbl}" "")
+    let configured ← configuredOpenCodeOptions st.store caller.userId isAdm
+    opencodeModels := opencodeModels ++ configured.map renderCompact
     let mut agyModels : Array String := #[]
     if isAdm then
       let pHub ← match st.providerHub? with | some h => pure h | none => newProviderRuntimeHub
