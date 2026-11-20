@@ -11,33 +11,53 @@ structure Tunnel where
   child : Child
   port : UInt16
   addresses : List ExitAddress
+  release : IO.Promise Unit
+  owner : Task (Except IO.Error Unit)
 
 def Tunnel.stop (t : Tunnel) : IO Unit := do
-  if (← t.child.tryWait).isNone then
-    t.child.kill
-    discard t.child.wait
+  try
+    if (← t.child.tryWait).isNone then
+      t.child.kill
+      discard t.child.wait
+  finally
+    t.release.resolve ()
+    discard <| IO.wait t.owner
 
-/-- Start an isolated userspace WireGuard stack. Only the generated loopback
-listener is published. The secret configuration passes over an anonymous pipe. -/
-private def start (profile : DeviceProfile) (port : UInt16) : IO (Except String Tunnel) := do
-  if port == 0 then return .error "invalid_vpn_listener"
+private def launch (profile : DeviceProfile) (port : UInt16) : IO (Except String Child) := do
   let cfg := profile.config ++ s!"\n[Socks5]\nBindAddress = 127.0.0.1:{port}\n"
+  let mut cmd := "wireproxy"
+  let mut argv := #["-c", "/dev/stdin"]
+  if System.Platform.isLinux then
+    -- Check the parent after arming the signal to cover death before setpriv runs.
+    let pid ← IO.Process.getPID
+    cmd := "setpriv"
+    argv := #["--pdeathsig", "KILL", "--", "sh", "-c",
+      "[ \"$PPID\" = \"$1\" ] || exit 1; shift; exec wireproxy \"$@\"", "orb-wireproxy", toString pid] ++ argv
   let args : IO.Process.SpawnArgs := {
-    cmd := "wireproxy"
-    args := #["-c", "/dev/stdin"]
-    stdin := .piped
-    stdout := .null
-    stderr := .null }
+    cmd, args := argv, stdin := .piped, stdout := .null, stderr := .null }
   let child ← try IO.Process.spawn args catch _ => return .error "vpn_process_unavailable"
   let (input, running) ← child.takeStdin
-  let tunnel : Tunnel := ⟨running, port, profile.addresses⟩
   try
     input.putStr cfg
     input.flush
   catch _ =>
-    tunnel.stop
+    if (← running.tryWait).isNone then running.kill
+    discard running.wait
     return .error "vpn_config_transfer_failed"
-  return .ok tunnel
+  return .ok running
+
+/-- Linux delivers the parent-death signal when the spawning thread exits.
+Keep that thread alive until the verified child is stopped and reaped. -/
+private def start (profile : DeviceProfile) (port : UInt16) : IO (Except String Tunnel) := do
+  if port == 0 then return .error "invalid_vpn_listener"
+  let started ← IO.Promise.new
+  let release ← IO.Promise.new
+  let owner ← IO.asTask (prio := .dedicated) do
+    let result ← try launch profile port catch _ => pure (.error "vpn_start_failed")
+    started.resolve result
+    if result.isOk then discard <| IO.wait release.result?
+  let some result ← IO.wait started.result? | return .error "vpn_start_failed"
+  return result.map fun child => ⟨child, port, profile.addresses, release, owner⟩
 
 private def ownsSession (addresses : List ExitAddress) (session : JVal) : Bool :=
   ((session.fieldStr? "vpn_ip").bind AirVpnObservation.parseExit?).any addresses.contains

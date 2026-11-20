@@ -6,7 +6,7 @@ open OrbCore OrbBin.HttpClient OrbBin.Json
 
 /-- The Python fixture supplies temporary device profiles and TLS receivers
 in a private network namespace. This driver calls the production allocator. -/
-def run (root : String) (resume : Bool) : IO UInt32 := do
+def run (root : String) (resume : Bool) (hold := false) : IO UInt32 := do
   let store ← IO.ofExcept (← Store.openCoreStore root)
   let pool ← Std.Mutex.new ({} : AccountVpnPool.PoolState)
   try
@@ -24,7 +24,10 @@ def run (root : String) (resume : Bool) : IO UInt32 := do
     if resume then
       let b ← source "b" "codex"
       let a ← source "a" "chatgpt"
-      IO.println (renderCompact (.obj #[("a", .str a), ("b", .str b)]))
+      let out ← IO.getStdout
+      out.putStrLn (renderCompact (.obj #[("a", .str a), ("b", .str b)]))
+      out.flush
+      if hold then discard (← IO.getStdin).getLine
       return 0
     for account in ["a", "b", "c", "extra"] do
       IO.ofExcept (← AccountVpnPool.savePreference pool store.missionsDb account (some "NL"))

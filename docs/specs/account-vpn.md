@@ -126,11 +126,14 @@ the account’s saved VPN generation before accepting a targeted login callback
 or reconciling an unfinished login.
 
 On Linux, run `python3 scripts/test_airvpn_wireguard.py /path/to/orb-airvpn-sidecar-test`
-with `wireproxy`, `wg`, `ip`, `mount`, `unshare`, and OpenSSL on PATH.
+with `wireproxy`, `setpriv` (util-linux), `wg`, `ip`, `mount`, `unshare`, and OpenSSL on PATH.
 The test creates private network and mount namespaces, generates ephemeral
 WireGuard keys, and starts three kernel peers. The AirVPN userinfo fixture
 counts three external sessions plus each connected test peer. Independent
 HTTPS requests traverse the production SOCKS and WireGuard transport. The
 receiver checks distinct ChatGPT source addresses, sharing with Claude,
 Direct traffic, refusal at capacity, and restoration of both addresses
-after the test driver exits and reopens the store in reverse account order.
+after both orderly shutdown and SIGKILL. The crash test checks that both
+wireproxy processes exit before a new Core process opens the same store in
+reverse account order. Linux Core uses util-linux `setpriv --pdeathsig` to
+release its tunnels even when systemd signals only the main process.

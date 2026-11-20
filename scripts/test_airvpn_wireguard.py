@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import socket
 import socketserver
+import select
+import time
 import ssl
 import struct
 import sys
@@ -16,6 +18,18 @@ import threading
 
 def command(*args, data=None):
     return subprocess.run(args, input=data, text=True, capture_output=True, check=True).stdout.strip()
+
+
+def proxy_pids():
+    live = []
+    for stat in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            fields = stat.read_text().split()
+        except (ProcessLookupError, FileNotFoundError):
+            continue
+        if fields[1:2] == ["(wireproxy)"] and fields[2] != "Z":
+            live.append(stat.parent.name)
+    return live
 
 
 def run(driver, parent_mount):
@@ -110,17 +124,36 @@ def run(driver, parent_mount):
                 raise RuntimeError(f"session snapshots {max_sessions}, observed {observed}: {result.stderr}")
             routes = json.loads(result.stdout)
             assert {routes["a"], routes["b"]} <= set(peers.values())
+            assert routes["a"] != routes["b"]
+            assert routes["c"] in (routes["a"], routes["b"])
             assert routes["direct"] == "127.0.0.1"
             assert observed[:2] == [routes["a"], routes["b"]] or observed[:2] == [routes["b"], routes["a"]]
             assert observed[2:] == [routes["c"], routes["direct"], routes["a"], routes["b"]]
             assert max(max_sessions) == 5
+            driver_env = {**os.environ, "SSL_CERT_FILE": str(cert)}
+            with subprocess.Popen([driver, "wireguard-hold", str(root / "store")], text=True, stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, env=driver_env) as held:
+                try:
+                    if not select.select([held.stdout], [], [], 90)[0]:
+                        raise RuntimeError("Timed out waiting for crash fixture tunnels")
+                    assert json.loads(held.stdout.readline()) == {"a": routes["a"], "b": routes["b"]}
+                    assert len(proxy_pids()) == 2
+                finally:
+                    held.kill()
+                    held.wait(timeout=5)
+            for _ in range(50):
+                if not proxy_pids():
+                    break
+                time.sleep(.1)
+            assert not proxy_pids(), "wireproxy survived Core SIGKILL"
             resumed = subprocess.run([driver, "wireguard-resume", str(root / "store")], text=True, capture_output=True,
                                      env={**os.environ, "SSL_CERT_FILE": str(cert)}, timeout=90)
             if resumed.returncode:
                 raise RuntimeError(resumed.stderr)
             assert json.loads(resumed.stdout) == {"a": routes["a"], "b": routes["b"]}
             assert observed[-2:] == [routes["b"], routes["a"]]
-            print(json.dumps(routes), "maximum sessions:", max(max_sessions), "both exits restored after restart")
+            assert max(max_sessions) == 5
+            print(json.dumps(routes), "maximum sessions:", max(max_sessions), "both exits restored after SIGKILL")
 
 
 if __name__ == "__main__":
@@ -131,5 +164,5 @@ if __name__ == "__main__":
     if args.parent_mount:
         run(str(args.driver.resolve()), args.parent_mount)
     else:
-        subprocess.run(["unshare", "-Urmn", sys.executable, __file__, str(args.driver.resolve()),
+        subprocess.run(["unshare", "-Urmn", "--pid", "--fork", "--mount-proc", sys.executable, __file__, str(args.driver.resolve()),
                         "--parent-mount", os.readlink("/proc/self/ns/mnt")], check=True)
