@@ -26,7 +26,7 @@ private def projectRow (idx : Nat) (xs : List String) : ChromeSidebarRow :=
 
 private def missionCard (idx : Nat) (xs : List String) : MissionSummaryCard :=
   { widgetId := 1001 + 3 * idx, missionId := col xs 1, title := col xs 2, project := col xs 3
-    track := col xs 4, model := if (col xs 5).isEmpty then col xs 6 else col xs 5
+    track := col xs 4, model := col xs 13
     status := col xs 7, updatedLabel := if (col xs 8).isEmpty then col xs 9 else col xs 8
     summaryText := col xs 10, machine := col xs 11, backend := col xs 12,
     effort := col xs 14, permissionMode := col xs 15 }

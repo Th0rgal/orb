@@ -732,7 +732,7 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
     if key == 0xff51 && menu.page == .destinations then return update { menu with page := .actions, first := 0, highlighted := 1 }
     if key == 0xff53 && menu.page == .actions && (items[menu.highlighted]?.map (·.id)) == some 711 then
       return update { menu with page := .destinations, first := 0, highlighted := 0 }
-    if key == 0xff08 && menu.page == .rename then return update { menu with draft := menu.draft.applyImeBatch 1 0 "" "" 0 0 }
+    if key == 0xff08 && menu.page == .rename then return update { menu with draft := menu.draft.applyImeBatch 1 0 "" "" }
     return (st, none)
   | .windowFocus false => return close
   | .activate 719 => return close
@@ -752,7 +752,7 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
     if menu.page != .rename then return (st, none)
     let draft := match ev with
       | .text text => menu.draft.insertText text
-      | .imeBatch db da text preedit b e => menu.draft.applyImeBatch db da text preedit b e
+      | .imeBatch db da text preedit _ _ => menu.draft.applyImeBatch db da text preedit
       | .preedit text _ _ => menu.draft.setPreedit text
       | _ => menu.draft
     if draft == menu.draft then return (st, none)

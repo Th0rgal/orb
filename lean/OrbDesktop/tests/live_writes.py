@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import secrets
 import signal
+import sys
 import socket
 import subprocess
 import tempfile
@@ -49,7 +50,7 @@ def process(args, env, cwd):
             child.wait()
 
 
-def run(tmp):
+def run(tmp, mouse=False):
     with socket.socket() as s:
         s.bind(('127.0.0.1', 0))
         port = s.getsockname()[1]
@@ -78,6 +79,8 @@ def run(tmp):
         token = wait('disposable Core login', login)
         (tmp / 'connection.json').write_text(json.dumps({'api_url': base, 'token': token}))
         assert api('/api/control/missions') == []
+        if mouse:
+            api('/api/projects', {'slug': 'menu-test', 'title': 'Menu test'})
         config = tmp / 'sway.conf'
         config.write_text('output * mode 1000x700\ndefault_border none\nxwayland disable\n')
         graphical = dict(os.environ, XDG_RUNTIME_DIR=str(tmp), WLR_BACKENDS='headless', WLR_RENDERER='pixman',
@@ -97,17 +100,33 @@ def run(tmp):
         time.sleep(.5)
         def keys(*args):
             subprocess.run(['wtype', '-s', '200', *args], check=True, env=graphical)
-        keys('-k', 'Tab', '-s', '200', '-k', 'Return')
+        def click(x, y, button='button1'):
+            for command in (f'set {x} {y}', f'press {button}', f'release {button}'):
+                result = json.loads(sway(f'seat seat0 cursor {command}'))
+                assert all(reply.get('success') for reply in result), result
+                time.sleep(.08)
+
+        if mouse:
+            click(80, 50)  # Create mission in the sidebar
+        else:
+            keys('-k', 'Tab', '-s', '200', '-k', 'Return')
         created = wait('created mission', lambda: api('/api/control/missions'))
         assert len(created) == 1
         mid = created[0]['id']
         path = '/api/control/missions/' + mid
         typed, committed = 'u6a ' + secrets.token_hex(5) + ' ', '日本語'
         time.sleep(.5)
-        keys(*(['-k', 'Tab'] * 4), '-s', '300', typed)
+        if mouse:
+            click(540, 626)
+            keys(typed)
+        else:
+            keys(*(['-k', 'Tab'] * 4), '-s', '300', typed)
         wayland_ime.commit(committed, graphical)
         time.sleep(.25)
-        keys('-k', 'Tab', '-k', 'Tab', '-k', 'Return')
+        if mouse:
+            click(946, 626)
+        else:
+            keys('-k', 'Tab', '-k', 'Tab', '-k', 'Return')
 
         def observed():
             row = api(path)
@@ -117,10 +136,31 @@ def run(tmp):
 
         active, message = wait('exact submitted text on active mission', observed)
         time.sleep(1.5)  # wait for the desktop status subscription
-        keys('-k', 'Return')
+        if mouse:
+            click(946, 626)
+        else:
+            keys('-k', 'Return')
         stopped = wait('hosted stop', lambda: (r if (r := api(path))['status'] == 'interrupted' else None))
         time.sleep(1.5)
-        keys('-k', 'Tab', '-k', 'Tab', '-k', 'Return')
+        if mouse:
+            # The newly created row precedes the original roster. The anchored
+            # menu opens at the secondary click, independent of transcript focus.
+            click(75, 143, 'button3')
+            click(128, 164)
+            keys('-k', 'End', ' renamed')
+            click(128, 194)
+            wait('renamed mission', lambda: api(path)['title'].endswith(' renamed'))
+            click(75, 143, 'button3')
+            click(128, 194)
+            click(128, 194)
+            wait('moved mission', lambda: api(path).get('project') == 'menu-test')
+            click(75, 143, 'button3')
+            # Moving to the only project removes the destination submenu.
+            click(128, 194)
+        else:
+            backend = stopped.get('backend')
+            selector_count = 2 + int(backend in ('codex', 'antigravity', 'claudecode')) + int(backend == 'claudecode')
+            keys(*(['-k', 'Tab'] * (2 + selector_count)), '-k', 'Return')
         wait('archive', lambda: api(path)['status'] == 'acknowledged')
         server.terminate()
         server.wait(8)
@@ -134,4 +174,4 @@ def run(tmp):
 
 if __name__ == '__main__':
     with tempfile.TemporaryDirectory(prefix='orb-u6a-') as directory:
-        run(Path(directory))
+        run(Path(directory), mouse="--mouse" in sys.argv)
