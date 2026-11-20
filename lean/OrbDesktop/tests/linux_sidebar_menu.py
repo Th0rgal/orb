@@ -83,13 +83,13 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
         x, y = see(fixture['contextMission'], target_region)
         click(x, y, 'button3')
         if client_kind == 'leanui':
-            geo = f'{x+20},{min(y,535)} 165x175'
+            regions = [f'{x+20},{min(y,535)} 165x175']
         else:
-            # Keep the entire popup, including its right edge, in the OCR crop.
-            geo = f'{max(0,x-12)},{min(y-8,510)} 220x185'
+            # WebKit opens its menu at the pointer. The GTK popover can open above the row.
+            regions = [f'{max(0,x-12)},{min(y-8,510)} 220x185', f'{max(0,x-38)},{max(0,y-207)} 170x185']
         labels = {'rename':'rename', 'move':'move', 'archive':'archive', 'restore':'restore',
                   'copy-id':'copy', 'settings':'settings'}
-        def rows():
+        def actions_in(geo):
             visible = words(geo)
             first = next((i for i, (word, _, _) in enumerate(visible) if word == 'rename'), None)
             if first is None:
@@ -97,7 +97,8 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
             hits = {}
             last_y = None
             for action in expected:
-                match = next((i for i in range(first,len(visible)) if visible[i][0] == labels[action]), None)
+                match = next((i for i in range(first,len(visible)) if visible[i][0] == labels[action] or
+                              (action == 'move' and visible[i][0] == 'moveto')), None)
                 if match is None:
                     return None
                 _, x, y = visible[match]
@@ -107,6 +108,8 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
                 last_y = y
                 first = match + 1
             return hits
+        def rows():
+            return next((hits for region in regions if (hits := actions_in(region))), None)
         hits = wait('ordered context actions ' + ', '.join(expected), rows)
         click(*hits[choose])
     open_project()
