@@ -117,12 +117,6 @@ done
 
 if [[ -n "${LEAN_CC:-}" && -x "${LEAN_CC}" ]]; then
   export PATH="$(dirname "${LEAN_CC}"):$PATH"
-  if command -v lean >/dev/null 2>&1; then
-    lean_prefix="$(lean --print-prefix 2>/dev/null || true)"
-    if [[ -n "$lean_prefix" && -d "$lean_prefix/lib" ]]; then
-      export LIBRARY_PATH="$lean_prefix/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
-    fi
-  fi
 fi
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -290,6 +284,13 @@ run_lean_pkg_build() {
   ensure_lean_sys_pkg "$pkg_dir"
   (
     cd "$pkg_dir"
+    # LIBRARY_PATH is a compiler search path here, but Orb's runtime reads it
+    # as the Library checkout. Do not leak the linker's value to self-tests.
+    if [[ -n "${LEAN_CC:-}" ]] && command -v lean >/dev/null 2>&1; then
+      local lean_prefix
+      lean_prefix="$(lean --print-prefix)"
+      export LIBRARY_PATH="$lean_prefix/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+    fi
     if [[ "${ORB_SKIP_TURBO_LEAN:-0}" != "1" ]] && command -v turbo-lean >/dev/null 2>&1; then
       local -a tl_flags=(--max-memory-mb "${ORB_TURBO_LEAN_MAX_MB:-6144}")
       if [[ -n "${TURBO_LEAN_HOME:-}" ]]; then
@@ -351,12 +352,6 @@ if [[ ${#ORB_DESKTOP_TARGETS[@]} -gt 0 ]]; then
     cd "$ROOT_DIR/lean/OrbDesktop"
     if [[ -z "${LEAN_CC:-}" && -x /usr/bin/clang ]]; then
       export LEAN_CC=/usr/bin/clang
-    fi
-    if command -v lean >/dev/null 2>&1; then
-      lean_prefix="$(lean --print-prefix 2>/dev/null || true)"
-      if [[ -n "$lean_prefix" && -d "$lean_prefix/lib" ]]; then
-        export LIBRARY_PATH="$lean_prefix/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
-      fi
     fi
     run_lean_pkg_build "$ROOT_DIR/lean/OrbDesktop" "${ORB_DESKTOP_TARGETS[@]}"
   )
