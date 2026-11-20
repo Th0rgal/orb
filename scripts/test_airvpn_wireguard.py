@@ -176,6 +176,17 @@ def run(driver, parent_mount):
                     repeat()
                     assert len(max_sessions) == queries + 1, "expired session evidence must be refreshed"
                     assert exit_probes[probes:] == [routes["a"], routes["a"]]
+
+                    # An independent Core has an empty in-memory pool. It must
+                    # count the other process's two sessions before dialing.
+                    workers = set(proxy_pids())
+                    before, queries = len(observed), len(max_sessions)
+                    contender = subprocess.run([driver, "wireguard-resume", str(root / "store")],
+                                               capture_output=True, text=True, env=driver_env, timeout=45)
+                    assert contender.returncode != 0 and "airvpn_session_limit" in contender.stderr, contender.stderr
+                    assert max_sessions[queries:] and all(n == 5 for n in max_sessions[queries:])
+                    assert len(observed) == before and set(proxy_pids()) == workers
+                    repeat()
                 finally:
                     held.kill()
                     held.wait(timeout=5)
