@@ -108,7 +108,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           ./scripts/ci_harden_ubuntu_apt.sh
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev libsqlite3-dev zstd wireguard-tools iproute2 iptables
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev libsqlite3-dev zstd iproute2
 
       - name: Build all 12 native Lean binaries and run all self-test suites
         run: |
@@ -125,18 +125,6 @@ jobs:
 
       - name: Verify Core-owned catalog requests through independent TLS receivers
         run: python3 scripts/test_account_vpn_transport.py --discovery lean/OrbCore/.lake/build/bin/orb-core-test --probe-model-discovery
-
-      - name: Verify WireGuard allocation, restart and exit collisions
-        run: |
-          set -euo pipefail
-          fixture=$(mktemp -d)
-          ./scripts/install_wireproxy.sh "$fixture"
-          # The root-mapped test namespace cannot traverse the runner's private home.
-          install -m 0644 scripts/test_airvpn_wireguard.py "$fixture/"
-          install -m 0755 lean/OrbCore/.lake/build/bin/orb-airvpn-sidecar-test "$fixture/"
-          chmod 0755 "$fixture"
-          cd "$fixture"
-          sudo env PATH="$fixture:/usr/sbin:/usr/bin:/sbin:/bin" python3 ./test_airvpn_wireguard.py ./orb-airvpn-sidecar-test
 
       - name: Verify per-account OAuth and inference egress with the released sidecar
         run: |
@@ -546,10 +534,24 @@ jobs:
       - name: Build native Lean binaries for Docker via cached turbo-lean
         run: |
           ./scripts/ci_harden_ubuntu_apt.sh
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev libsqlite3-dev
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev libsqlite3-dev wireguard-tools iproute2 iptables
+          sudo modprobe wireguard
+          sudo unshare --net sh -ec 'ip link add wg-probe type wireguard; iptables -t nat -S >/dev/null; ip6tables -t nat -S >/dev/null'
           ./scripts/build_orb_bins.sh --out-dir docker/prebuilt \
             --only orb-core --only desktop-mcp --only workspace-mcp \
-            --only automation-manager-mcp --only sandboxed-mcp
+            --only automation-manager-mcp --only sandboxed-mcp --only orb-airvpn-sidecar-test
+      - name: Verify WireGuard allocation, restart and exit collisions
+        run: |
+          set -euo pipefail
+          fixture=$(mktemp -d)
+          ./scripts/install_wireproxy.sh "$fixture"
+          # The root-mapped test namespace cannot traverse the runner's private home.
+          install -m 0644 scripts/test_airvpn_wireguard.py "$fixture/"
+          mv docker/prebuilt/orb-airvpn-sidecar-test "$fixture/"
+          chmod 0755 "$fixture"
+          cd "$fixture"
+          sudo env PATH="$fixture:/usr/sbin:/usr/bin:/sbin:/bin" python3 ./test_airvpn_wireguard.py ./orb-airvpn-sidecar-test
+
       - uses: docker/setup-buildx-action@v3
         with:
           buildkitd-config-inline: |
