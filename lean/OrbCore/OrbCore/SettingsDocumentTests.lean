@@ -53,12 +53,11 @@ def run : IO Unit := do
   IO.println "[PASS] SettingsDocumentTests: library revisions require a full lowercase commit"
   check (!(validate (fixture.setField "fleet" ((fixture.fieldOrNull "fleet").setField "spent_today_cents" (.num "0")))).isOk)
     "spending counters never transfer"
-  check (!(validate (fixture.setField "fleet" ((fixture.fieldOrNull "fleet").setField "daily_cap_cents" (.num "18446744073709551616")))).isOk)
-    "caps cannot overflow SQLite integers"
   let withCap := fun amount => fixture.setField "fleet"
     ((fixture.fieldOrNull "fleet").setField "daily_cap_cents" (.num amount))
   check (validate (withCap "9223372036854775807")).isOk "maximum signed SQLite cap accepted"
-  check (!(validate (withCap "9223372036854775808")).isOk) "first out-of-range signed cap rejected"
+  for invalid in #["-1", "9223372036854775808", "18446744073709551616"] do
+    check (!(validate (withCap invalid)).isOk) "negative or overflowing SQLite cap rejected"
   IO.println "[PASS] SettingsDocumentTests: fleet cap respects the signed SQLite boundary"
   check (!(validate (fixture.setField "routing_chains" (.arr #[chain, chain]))).isOk) "duplicate identifiers rejected"
   check (!(validate (fixture.setField "global" (.obj #[("library_remote", .str "https://user:secret-marker@github.com/repo")]))).isOk)
