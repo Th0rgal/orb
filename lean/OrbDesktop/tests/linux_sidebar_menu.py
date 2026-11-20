@@ -9,10 +9,12 @@ import json
 import os
 from pathlib import Path
 import socket
+import sqlite3
 import subprocess
-import sys
 import tempfile
 import uuid
+
+from archive_race import archive_relay
 
 
 def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind):
@@ -38,6 +40,10 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
             sock.bind(('127.0.0.1', 0))
             env = dict(graphical, ORB_LOCALD_PORT=str(sock.getsockname()[1]))
         client.enter_context(process(cmd, env, tmp))
+    config_path = tmp / 'connection.json'
+    config = json.loads(config_path.read_text())
+    config['api_url'], gate = stack.enter_context(archive_relay(config['api_url'], b))
+    config_path.write_text(json.dumps(config))
     launch()
     sidebar = '10,100 200x560'
     header = '220,0 630x43'
@@ -109,30 +115,38 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
     wait('context mission restored', lambda: status(b) == 'paused')
     see(fixture['openMission'], header)
     assert status(a) == 'awaiting_user'
-    idle_snapshot = api('/api/control/missions/' + b + '?include_history=false')
-    api('/api/control/message', {'mission_id': b, 'content': 'disposable refusal check',
-                                 'client_message_id': str(uuid.uuid4())})
-    wait('context mission running', lambda: status(b) == 'active')
-    # Replay the race between the client reading an idle row and posting Archive.
-    # Use the old snapshot for the read and send the real write to this Core.
-    from unittest.mock import patch
-    sys.path.insert(0, str(root / "lean/OrbDesktop/OrbDesktop"))
-    from live_transport import Connection, MissionNotIdle, change_status
-    with patch.dict(os.environ, {'ORB_STATE_DIR':str(tmp)}):
-        connection = Connection()
-        with patch.object(connection, 'get', return_value=idle_snapshot):
-            try:
-                change_status(connection, 'archive', b, str(uuid.uuid4()))
-            except MissionNotIdle as error:
-                assert error.__cause__.code == 409
-            else:
-                raise AssertionError('Core accepted an archive over a live run')
+    # The client has already read B as idle when its Archive POST reaches
+    # the relay. Activate B directly through Core before forwarding that POST.
+    db_path, = tmp.rglob('missions.db')
+    receipt = {}
+    def snapshot():
+        with contextlib.closing(sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True)) as db:
+            return db.execute('SELECT status, (SELECT count(*) FROM mission_runs WHERE mission_id=m.id) '
+                              'FROM missions m WHERE id=?', (b,)).fetchone()
+    def before_archive():
+        assert snapshot() == ('paused', 0)
+        api('/api/control/message', {'mission_id': b, 'content': 'disposable refusal check',
+                                     'client_message_id': str(uuid.uuid4())})
+        receipt['before_guard'] = snapshot()
+        assert receipt['before_guard'] == ('active', 0), receipt
+    def after_archive(code, payload, key):
+        receipt.update(status=code, error=json.loads(payload).get('error'), idempotency_key=key,
+                       after_guard=snapshot())
+    gate.arm(before_archive, after_archive)
     action_menu(fixture['activeActions'], 'archive')
+    gate.result()
+    assert receipt['idempotency_key'] and receipt['status'] == 409, receipt
+    assert receipt['error'] == 'mission_running' and receipt['after_guard'] == ('active', 0), receipt
+    print(json.dumps({'client': client_kind, 'viewed': a, 'target': b, 'ui_archive': receipt}), flush=True)
     # In the 1000x700 test output LeanUI places its 440x40 warning just
     # above the 104px composer. Isolate it from the streaming transcript.
     refusal_region = '552,548 440x40' if client_kind == 'leanui' else '0,0 1000x700'
+    # WebKit renders the Core conflict detail, LeanUI its native refusal.
+    expected = 'before archiving' if client_kind == 'leanui' else 'before changing'
+    def refusal_visible():
+        return expected in ' '.join(word for word, _, _ in words(refusal_region))
     try:
-        see('archiving', refusal_region)
+        wait('visible refusal: ' + expected, refusal_visible)
     except TimeoutError as error:
         # Keep the disposable compositor's pixels after the fixture cleans up.
         with tempfile.NamedTemporaryFile(prefix=f'orb-{client_kind}-refusal-', suffix='.png',
@@ -144,4 +158,4 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
     see(fixture['contextMission'])
     assert status(b) == 'active' and status(a) == 'awaiting_user'
     print(json.dumps({'client': client_kind, 'viewed': a, 'target': b,
-                      'archive': 'acknowledged', 'restore': 'paused', 'refusal': 'active'}))
+                      'archive': 'acknowledged', 'restore': 'paused', 'refusal': 'active', 'ui_archive': receipt}))
