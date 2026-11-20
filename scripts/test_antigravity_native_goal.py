@@ -31,12 +31,21 @@ def run():
                 pass
 
             def do_POST(self):
-                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
                 if ":streamGenerateContent" not in self.path:
                     self.send_error(404)
                     return
-                requests.append(self.path.split("?")[0])
-                if len(requests) == 1:
+                can_write = any(
+                    function.get("name") == "write_file"
+                    for tool in body.get("tools", [])
+                    for function in tool.get("functionDeclarations", tool.get("function_declarations", []))
+                )
+                if can_write:
+                    requests.append(self.path.split("?")[0])
+                if not can_write:
+                    # Some agy versions run a lightweight auxiliary model first.
+                    part = {"text": "fixture"}
+                elif len(requests) == 1:
                     part = {"functionCall": {"name": "write_file", "args": {
                         "Path": str(output), "Content": "fixture proof"}}}
                 else:
