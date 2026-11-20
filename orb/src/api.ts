@@ -492,7 +492,7 @@ export async function bootstrapDesktopRuntime(): Promise<void> {
       const prefsApplied = await applyBootstrappedDesktopPrefs(boot.prefs).catch(() => false);
       if (!prefsApplied) await initDesktopPrefs().catch(() => null);
       const cleanUrl = getApiUrl().trim().replace(/\/+$/, "");
-      if (boot.transport && (!cleanUrl.startsWith("https://") || boot.transport.configured_target === cleanUrl)) {
+      if (boot.transport && cleanUrl.toLowerCase().startsWith("https://") && boot.transport.configured_target === cleanUrl) {
         applyTransportBridgeInfo(cleanUrl, boot.transport);
       } else {
         await resolveTransportBase(cleanUrl).catch(() => null);

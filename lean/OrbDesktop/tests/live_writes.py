@@ -1,7 +1,7 @@
 """Run from the checkout: python3 lean/OrbDesktop/tests/live_writes.py
 
-Requires scripts/build_orb_bins.sh --only orb-core, the native desktop build dependencies,
-Sway and wtype. Only the external model harness is replaced (a waiting child
+Use orb-core from the same revision as the client (scripts/build_orb_bins.sh --only orb-core).
+The test uses Sway and wtype, plus grim to observe the composer in the mouse workflow. Only the external model harness is replaced (a waiting child
 process); all mission writes go through the launched desktop and real Core.
 """
 import contextlib
@@ -105,7 +105,11 @@ def run(tmp, mouse=False):
         time.sleep(.5)
         def keys(*args):
             subprocess.run(['wtype', '-s', '200', *args], check=True, env=graphical)
+        def composer_frame():
+            return subprocess.check_output(['grim', '-t', 'ppm', '-g', '700,615 24x24', '-'], env=graphical)
+
         if mouse:
+            empty_frame = composer_frame()
             click(80, 50)  # Create mission in the sidebar
         else:
             keys('-k', 'Tab', '-s', '200', '-k', 'Return')
@@ -116,6 +120,7 @@ def run(tmp, mouse=False):
         typed, committed = 'u6a ' + secrets.token_hex(5) + ' ', '日本語'
         time.sleep(.5)
         if mouse:
+            wait('visible composer', lambda: composer_frame() != empty_frame)
             click(540, 626)
             keys(typed)
         else:
