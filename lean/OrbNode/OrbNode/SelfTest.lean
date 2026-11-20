@@ -2233,6 +2233,25 @@ def runTests : IO UInt32 := do
   let _ ← chmod fakeAgHome.toString 0o700
   IO.FS.writeFile (fakeAgHome / "antigravity-oauth-token") "{\"access_token\":\"ADMIN_SECRET_OAUTH\"}\n"
   let _ ← chmod (fakeAgHome / "antigravity-oauth-token").toString 0o600
+  let agBindingConfig := { rt.cfg.managedAuth with antigravityHome? := some fakeAgHome.toString }
+  let agWorkspace := System.FilePath.mk tmpRoot / "agy-profile-binding"
+  IO.FS.createDirAll agWorkspace
+  IO.FS.writeFile (agWorkspace / ".gemini") "conflict"
+  let deniedBinding ← prepareManagedAuthWorkspace agBindingConfig #["antigravity"] agWorkspace.toString
+  assertTrue "Antigravity workspace conflict fails before launching the CLI" (!deniedBinding.isOk)
+  IO.FS.removeFile (agWorkspace / ".gemini")
+  if !fixtureRoot then
+    let linkParent := agWorkspace / ".gemini"
+    IO.FS.createDirAll linkParent
+    let _ ← chmod linkParent.toString 0o500
+    try
+      let deniedLink ← prepareManagedAuthWorkspace agBindingConfig #["antigravity"] agWorkspace.toString
+      assertTrue "Antigravity refuses launch when the profile link cannot be written" (!deniedLink.isOk)
+    finally
+      let _ ← chmod linkParent.toString 0o700
+      pure ()
+  let readyBinding ← prepareManagedAuthWorkspace agBindingConfig #["antigravity"] agWorkspace.toString
+  assertTrue "Antigravity workspace profile is readable after attachment" readyBinding.isOk
   setenvVar "ORB_PRIVD_ALLOW_NONROOT_TEST" "1"
   setenvVar "ORB_PRIVD_HOME_ROOT" privdHomes.toString
   setenvVar "ORB_PRIVD_STATE_DIR" privdState.toString

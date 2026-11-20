@@ -966,12 +966,17 @@ def prepareManagedAuthWorkspace
       let gemini := System.FilePath.mk cwd / ".gemini"
       let gst ← statPath gemini.toString
       if gst.isSymlink then return .error "Job .gemini must not be a symlink"
-      IO.FS.createDirAll gemini
+      if let .error _ ← (IO.FS.createDirAll gemini).toBaseIO then
+        return .error "Cannot create the Antigravity profile directory in the mission workspace"
       let link := gemini / "antigravity-cli"
       let lst ← statPath link.toString
       if lst.exists_ && !lst.isSymlink then
         return .error "Job Antigravity home conflicts with node-managed profile"
-      let _ ← IO.Process.output { cmd := "ln", args := #["-sfn", target, link.toString] }
+      let linkResult ← (IO.Process.output { cmd := "ln", args := #["-sfn", target, link.toString] }).toBaseIO
+      unless (linkResult.toOption.map (·.exitCode)) == some 0 do
+        return .error "Cannot attach the selected Antigravity profile to this mission. Check workspace permissions."
+      unless ← privateFileReadable (link / "antigravity-oauth-token") do
+        return .error "The attached Antigravity profile has no private login readable by the node"
   return .ok extraEnv
 
 def installAntigravityAuth
