@@ -357,8 +357,7 @@ def DesktopState.selectedCard (st : DesktopState) : Option MissionSummaryCard :=
 def DesktopState.hasLiveConnection (st : DesktopState) : Bool := st.liveData && !st.connectionBinding.isEmpty
 
 def DesktopState.headerTitle (st : DesktopState) : String :=
-  if !st.writeError.isEmpty then st.writeError
-  else if st.liveData && !st.hasLiveConnection then "Core unavailable"
+  if st.liveData && !st.hasLiveConnection then "Core unavailable"
   else if st.openMission.isNone && !st.draftProject.isEmpty then
     ((st.sidebarRows.find? (·.rowId == "project:" ++ st.draftProject)).map (·.title)).getD st.draftProject
   else (st.selectedCard.map (·.title)).getD st.screen.headerTitle
@@ -366,7 +365,7 @@ def DesktopState.headerTitle (st : DesktopState) : String :=
 def resetSelection (st : DesktopState) (card : Option MissionSummaryCard) : DesktopState :=
   let mid := card.map (·.missionId)
   { st with
-    openMission := mid, missionMenu := none, stream := { shown := [], pending := [], renders := 1 }, scroll := {}
+    openMission := mid, missionMenu := none, writeError := "", stream := { shown := [], pending := [], renders := 1 }, scroll := {}
     composer := { isRunning := (card.map (·.status)) == some "active" || (card.map (·.status)) == some "running" }
     messageSent := false, missionStopped := false, missionArchived := false, sidePanelOpen := false
     sidebarRows := st.sidebarRows.map fun row => { row with selected := row.widgetId == (card.map (·.widgetId)).getD 101 } }
@@ -848,6 +847,7 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
         let next := resetSelection { st with screen := .controlEmpty, draftProject := (project.rowId.drop 8).toString, writeError := "" } none
         let rows := next.sidebarRows.map fun row => { row with selected := row.widgetId == id }
         return ({ next with sidebarRows := rows }, some viewport)
+      if id == 914 then return ({ st with writeError := "" }, some viewport)
       if id == 730 then return ({ st with archivesOpen := !st.archivesOpen }, some viewport)
       if id == 805 then return ({ st with writeRequest := some .create }, some viewport)
       if id == 2 || id == 106 then

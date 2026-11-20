@@ -46,4 +46,9 @@ private def group : DesktopState :=
 #guard (contextSelection group "mission:b").selectionAnchor.isNone
 #guard (contextSelection group "mission:b").openMission == some "a"
 
+private def refused := { menuState with missionMenu := none, writeError := "Stop or finish this agent before archiving it." }
+#guard refused.headerTitle == menuState.headerTitle
+#guard (step refused (.activate 914)).writeError.isEmpty
+#guard (step refused (.activate 914)).openMission == some "a"
+
 end OrbDesktop.Spec

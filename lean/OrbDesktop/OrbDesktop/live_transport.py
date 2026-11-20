@@ -79,13 +79,19 @@ class Connection:
         return json.loads(data) if data or body is None else None
 
 
+class MissionNotIdle(ValueError):
+    pass
+
+
 def change_status(c, action, mid, key):
     path = '/api/control/missions/' + mid
     if action == 'archive':
         row = c.get(path + '?include_history=false')
-        if row['id'] != mid or (row.get('execution') or {}).get('state') == 'running' or row['status'] not in (
+        if row['id'] != mid:
+            raise ValueError('unexpected mission')
+        if (row.get('execution') or {}).get('state') == 'running' or row['status'] not in (
                 'awaiting_user', 'completed', 'interrupted', 'failed', 'blocked', 'paused', 'cancelled'):
-            raise ValueError('mission not idle')
+            raise MissionNotIdle('mission not idle')
         c.request(path + '/status', body={'status': 'acknowledged'}, key=key)
     elif action == 'restore':
         row = c.get(path + '?include_history=false')

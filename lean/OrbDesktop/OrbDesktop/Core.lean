@@ -156,7 +156,9 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
           | .effort => "effort" | .permission => "permission"
         ("settings", mid, key ++ "\t" ++ encode values)
     try
-      let r ← IO.Process.output { cmd := "python3", args := #["-I", "-c", transport ++ "\ntry: mutate(*sys.argv[1:])\nexcept Exception: sys.exit(1)", st.connectionBinding, action, mid] } (input? := some text)
+      let r ← IO.Process.output { cmd := "python3", args := #["-I", "-c", transport ++ "\ntry: mutate(*sys.argv[1:])\nexcept MissionNotIdle: sys.exit(2)\nexcept Exception: sys.exit(1)", st.connectionBinding, action, mid] } (input? := some text)
+      if action == "archive" && r.exitCode == 2 then
+        return ({ st with writeError := "Stop or finish this agent before archiving it." }, some viewport)
       if r.exitCode != 0 then throw (IO.userError "write failed")
       closeLiveSubscription slot
       match request with
