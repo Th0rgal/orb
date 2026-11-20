@@ -230,6 +230,7 @@ allow = [
   "LeanUI.FFI=LeanUI.FFI.iconMask=lean_ui_icon_mask",
   "LeanUI.FFI=LeanUI.FFI.boxAxis=lean_ui_box_axis",
   "LeanUI.FFI=LeanUI.FFI.sameRows=lean_ui_same_rows",
+  "LeanUI.FFI=LeanUI.FFI.blendRect=lean_ui_blend_rect",
   "LeanUI.FFI=LeanUI.FFI.scrollRows=lean_ui_scroll_rows",
   "LeanUI.FFI=LeanUI.FFI.blitGlyph=lean_ui_blit_glyph",
   "LeanUI.FFI=LeanUI.FFI.wlConnect=lean_ui_wl_connect",

@@ -12,6 +12,9 @@ opaque boxAxis (src : @& ByteArray) (w h radius : USize) (horizontal : Bool) : B
 @[extern "lean_ui_same_rows"]
 opaque sameRows (a b : @& ByteArray) (off stride bytes rows : USize) : Bool
 
+@[extern "lean_ui_blend_rect"]
+opaque blendRect (fb : ByteArray) (off pitch width height : USize) (color : UInt32) : ByteArray
+
 @[extern "lean_ui_scroll_rows"]
 opaque scrollRows (fb : ByteArray) (off stride bytes rows shift : USize) : ByteArray
 
