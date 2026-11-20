@@ -6,6 +6,16 @@ open LeanUI
 
 /-- Differential fixtures for invalidations that the stream benchmark does not force. -/
 def verifyRepaintEdges : IO Unit := do
+  -- A half-transparent colored pixel reaches wl_shm premultiplied exactly once.
+  let clear : ByteArray := ⟨#[0,0,0,0]⟩
+  let rgba := FFI.blendRect clear 0 1 1 1 0xF0783C80
+  let ptr ← FFI.memAlloc 4
+  if ptr == 0 then throw <| IO.userError "cannot allocate Wayland test pixel"
+  try
+    FFI.presentArgb ptr rgba
+    unless (← FFI.memRead ptr 4).data == #[30,60,120,128] do
+      throw <| IO.userError "Wayland presentation changed premultiplied color or alpha"
+  finally FFI.memFree ptr
   let dest : ByteArray := ⟨#[1,2,3,4, 0,50,100,200, 5,6,7,8]⟩
   let src : ByteArray := ⟨#[80,120,160,128]⟩
   for (colored, rgb) in [(true, #[20,68,115]), (false, #[50,63,75])] do
