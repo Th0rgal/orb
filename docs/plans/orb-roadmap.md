@@ -249,6 +249,8 @@ Controller `f5e86c78-23ef-4745-9ea2-82e6a02e3188` owns the rollout and records t
 
 The prior Antigravity workers, Carbon (`66afbdca-c610-4e6c-ad59-4eba0402d288`, Archive) and Neon (`542482e4-fa72-4844-a3ee-8f764a722256`, renderer), both exited with code 2 without producing verification evidence. Their successors use the same VMs; the Archive lane's earlier lean.ci bootstrap was rejected.
 
+**Physical receipts by revision:** Spark built `f7bec9812` and `8d4af0c42`. The `8d4af0c42` package was hash-verified and staged, **not installed**; it has no installed About receipt. The packaged `f7bec9812` mouse, keyboard and IME checks passed. Installed WebKit against the `f7bec9812` disposable Core passed the full two-mission archive/restore/restart replay, including refusal on HTTP 409. LeanUI also received the real 409, but OCR timed out while checking the busy-Archive error. Visible refusal in LeanUI remains unverified. Source diagnosis stays with the #1977 integrator (`97a2007b`); keep this gate with the existing device lane.
+
 **Handoff evidence, not final acceptance:** `c59a2d52a` was installed; on a 220-line transcript its startup/open medians were 180.9/115.8 ms versus WebKit 247.9/133.0 ms. DP-1 1× dark and eDP-1 1.6× light clipboard/crop checks and the Move destination were verified; screenshot tooling: [nixos-config#38](https://github.com/Th0rgal/nixos-config/pull/38) (`0d6a415cb9`), [omarchnix#63](https://github.com/Th0rgal/omarchnix/pull/63). `f7bec9812` measured 58.2/58.0 visible fps, below 60 on both displays. The later source alpha sweep does not replace installed glass or badge evidence.
 
 ### M. Multi-user
