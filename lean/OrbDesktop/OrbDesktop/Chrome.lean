@@ -156,7 +156,7 @@ def chromeLabel (lineH : SubPx) (runs : List InlineRun) (grow : Nat := 0) : Widg
 tall with `6 px` corners, a `16 px` icon slot (`18 px` for a mission, holding its status dot),
  the label, and an optional count pill and shortcut hint. -/
 def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarRow)
-    (margin : Edges := {}) (livePhase : Option Nat := none) : WidgetNode :=
+    (margin : Edges := {}) (livePhase : Option Nat := none) (expanded : Bool := false) : WidgetNode :=
   let pal := theme.palette
   let small := Theme.mutedText theme
   if row.kind == "section" then
@@ -195,6 +195,13 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
     let labelStyle := { (chromeText theme labelColor) with lineHeightSub := pxToSub 17 }
     let badge : List WidgetNode :=
       if row.badge == 0 then []
+      else if isMission && livePhase.isSome then
+        let id := missionDisclosureId row.widgetId
+        [WidgetNode.focusable id <| WidgetNode.box
+          (BoxStyle.row (pxToSub 4) |>.withAlign .center |>.withJustify .center
+            |>.withFixedSize (pxToSub 38) (pxToSub 26))
+          [chromeLabel small.lineHeightSub [overlaySynthRun small (toString row.badge)],
+           chromeIcon (if expanded then "chevron-down" else "chevron-right") pal.textFaint 12] (some id)]
       else
         [WidgetNode.rrect
           { BoxStyle.row 0 with
@@ -221,7 +228,7 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
         BorderStyle.none
         ([lead, if isMission then
             WidgetNode.text
-              { (BoxStyle.row 0 |>.withFixedSize (innerW - padLeft - padRight - leadSize - pxToSub 8) labelStyle.lineHeightSub) with clip := true }
+              { (BoxStyle.row 0 |>.withFixedSize (innerW - padLeft - padRight - leadSize - pxToSub 8 - (if badge.isEmpty then 0 else pxToSub 46)) labelStyle.lineHeightSub) with clip := true }
               labelStyle.lineHeightSub [overlaySynthRun labelStyle row.title]
           else chromeLabel labelStyle.lineHeightSub [overlaySynthRun labelStyle row.title] 1]
           ++ badge ++ shortcut)
@@ -318,7 +325,7 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
       else
         buildSidebarRowWidget theme rowW { r with selected := r.selected || st.multiRows.contains r.rowId }
           (if r.kind == "section" then Edges.trbl (pxToSub 14) 0 (pxToSub 4) 0
-           else Edges.trbl 0 0 (pxToSub 1) 0) (if st.liveData then some st.badgePhase else none)
+           else Edges.trbl 0 0 (pxToSub 1) 0) (if st.liveData then some st.badgePhase else none) (st.expandedMissions.contains r.rowId)
   let footRows : List WidgetNode :=
     (rowsSource.filter isFoot).map fun r => buildSidebarRowWidget theme rowW r
   let rosterH := availH - chromeHeaderHeightSub - footH

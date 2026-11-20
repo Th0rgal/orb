@@ -18,6 +18,18 @@ private def hierarchyFixture : DesktopState := {
 #guard (({ hierarchyFixture with expandedProjects := ["now"] } : DesktopState).visibleProjectRows.map
   (fun r => (r.rowId, r.depth))) == [("project:now", 0), ("mission:m", 1)]
 
+private def controllerFixture : DesktopState :=
+  let child := { (default : MissionSummaryCard) with widgetId := 1004, missionId := "child", project := "now", callbackParentMissionId := "m" }
+  { hierarchyFixture with
+    expandedProjects := ["now"]
+    missionCards := child :: hierarchyFixture.missionCards
+    sidebarRows := { widgetId := child.widgetId, rowId := "mission:child", kind := "mission", title := "Worker" } :: hierarchyFixture.sidebarRows }
+
+#guard (controllerFixture.visibleProjectRows.map (fun r => (r.rowId, r.badge))) ==
+  [("project:now", 0), ("mission:m", 1)]
+#guard (({ controllerFixture with expandedMissions := ["mission:m"] } : DesktopState).visibleProjectRows.map
+  (fun r => (r.rowId, r.depth))) == [("project:now", 0), ("mission:m", 1), ("mission:child", 2)]
+
 /-- Use the live screen with a populated header run, as in a shaped window.
 Obtain the target from the lowered scene, never by injecting an activate event. -/
 private def clickMission (st : DesktopState) (card : MissionSummaryCard) : IO DesktopState := do

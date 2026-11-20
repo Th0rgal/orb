@@ -1,4 +1,5 @@
 import Std.Data.HashMap
+import Std.Data.HashSet
 import Orb.Kernel
 import Orb.Scroll
 import Orb.Stream
@@ -333,6 +334,7 @@ structure DesktopState where
   catalog : List CatalogModel := []
   catalogLoading : Bool := false
   expandedProjects : List String := []
+  expandedMissions : List String := []
   archivesOpen : Bool := false
   multiRows : List String := []
   selectionAnchor : Option String := none
@@ -699,13 +701,50 @@ private def chooseSetting (st : DesktopState) (mid : String) (field : SettingFie
 
 private def selectableRow (r : ChromeSidebarRow) := r.kind == "mission" || r.kind == "project"
 
+def missionDisclosureId (widgetId : Nat) : Nat := 4000000 + widgetId
+
+private def missionBranchRows (rows : Array ChromeSidebarRow)
+    (cards : Std.HashMap Nat MissionSummaryCard) (expanded : List String)
+    (initialDepth : Nat) : Array ChromeSidebarRow := Id.run do
+  let mut parents : Std.HashMap String String := {}
+  let ids := rows.foldl (fun (acc : Std.HashSet String) row => acc.insert row.rowId) {}
+  for row in rows do
+    if let some card := cards.get? row.widgetId then
+      let launch := if card.parentMissionId == card.forkSource then "" else card.parentMissionId
+      let parent := "mission:" ++ (if launch.isEmpty then card.callbackParentMissionId else launch)
+      if ids.contains parent && parent != row.rowId then
+        parents := parents.insert row.rowId parent
+  let mut children : Std.HashMap String (Array ChromeSidebarRow) := {}
+  for row in rows do
+    let mut parent := (parents.get? row.rowId).getD ""
+    -- Old or imported cyclic relationships cannot hide a whole branch.
+    let mut ancestor := parent
+    for _ in [:rows.size] do
+      if ancestor.isEmpty then break
+      if ancestor == row.rowId then
+        parent := ""
+        break
+      ancestor := (parents.get? ancestor).getD ""
+    children := children.insert parent ((children.getD parent #[]).push row)
+  let mut result := #[]
+  let mut pending := (children.getD "" #[]).toList.map (fun row => (row, initialDepth))
+  for _ in [:rows.size] do
+    let (row, depth) :: rest := pending | break
+    let nested := children.getD row.rowId #[]
+    result := result.push { row with depth, badge := nested.size }
+    pending := if expanded.contains row.rowId then
+        nested.toList.map (fun child => (child, depth + 1)) ++ rest
+      else rest
+  return result
+
 /-- Keep the complete roster for updates and context actions. Only the visible
     projection participates in rendering and shift-range selection. -/
 def DesktopState.visibleProjectRows (st : DesktopState) : List ChromeSidebarRow := Id.run do
   let projects := st.sidebarRows.filter (·.kind == "project")
   if !st.hasLiveConnection || projects.isEmpty then return st.sidebarRows
-  let byWidget := st.missionCards.foldl (fun (index : Std.HashMap Nat String) card =>
-    index.insert card.widgetId card.project) {}
+  let cards := st.missionCards.foldl (fun (index : Std.HashMap Nat MissionSummaryCard) card =>
+    index.insert card.widgetId card) {}
+  let projectOf := fun id => ((cards.get? id).map (·.project)).getD ""
   let mut grouped : Std.HashMap String (Array ChromeSidebarRow) := {}
   let mut archived := #[]
   for row in st.sidebarRows do
@@ -713,7 +752,7 @@ def DesktopState.visibleProjectRows (st : DesktopState) : List ChromeSidebarRow 
       if row.status == "acknowledged" then
         archived := archived.push row
       else
-        let slug := byWidget.getD row.widgetId ""
+        let slug := projectOf row.widgetId
         grouped := grouped.insert slug ((grouped.getD slug #[]).push row)
   let mut visible := (st.sidebarRows.filter (fun row =>
     row.kind != "project" && row.kind != "mission" && row.rowId != "section:missions")).toArray
@@ -721,13 +760,12 @@ def DesktopState.visibleProjectRows (st : DesktopState) : List ChromeSidebarRow 
     let slug := (project.rowId.drop 8).toString
     visible := visible.push project
     if st.expandedProjects.contains slug then
-      for row in grouped.getD slug #[] do
-        visible := visible.push { row with depth := 1 }
+      visible := visible ++ missionBranchRows (grouped.getD slug #[]) cards st.expandedMissions 1
     grouped := grouped.erase slug
   -- A project omitted by a partial project response must not hide its missions.
   for row in st.sidebarRows do
     if row.kind == "mission" && row.status != "acknowledged" &&
-        grouped.contains (byWidget.getD row.widgetId "") then
+        grouped.contains (projectOf row.widgetId) then
       visible := visible.push row
   return (visible ++ archived).toList
 
@@ -878,6 +916,11 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       if st.selectedCard.isNone then return (st, none)
     | _ => pure ()
     if let .activate id := ev then
+      if id >= missionDisclosureId 0 then
+        if let some row := st.sidebarRows.find? (fun r => r.kind == "mission" && missionDisclosureId r.widgetId == id) then
+          let expanded := if st.expandedMissions.contains row.rowId then
+              st.expandedMissions.erase row.rowId else row.rowId :: st.expandedMissions
+          return ({ st with expandedMissions := expanded }, some viewport)
       if let some row := st.sidebarRows.find? (fun r => r.widgetId == id && selectableRow r) then
         if !st.heldSelectionKeys.isEmpty then
           return (toggleSelection st row (st.heldSelectionKeys.any fun k => k == 0xffe1 || k == 0xffe2), some viewport)
