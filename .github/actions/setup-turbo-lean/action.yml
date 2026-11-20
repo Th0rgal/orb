@@ -234,5 +234,14 @@ runs:
         restore-keys: |
           lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-${{ github.job }}-${{ startsWith(runner.name, 'boost-jit-') && env.CCACHE_DIR != '' && 'cc1-' || '' }}
           lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-${{ github.job }}-
-          lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-${{ hashFiles('lean/**/*.lean', 'lean/**/*.c', 'c/**/*.c', 'c/**/*.h') }}-
-          lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-
+          ${{ github.job != 'test' && format('lean-build-{0}-{1}-{2}-', runner.os, runner.arch, hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json')) || '' }}
+    - name: Report Test archive contents before compilation
+      if: github.job == 'test' && env.CCACHE_DIR != ''
+      shell: bash
+      run: |
+        echo "ref=$GITHUB_REF runner=$RUNNER_NAME compiler=$(clang --version | head -1)"
+        for path in lean/OrbCore/.lake/build/bin/orb-core-test lean/OrbCore/.lake/build/ir/OrbCore/{Control,CliMain,SelfTest}.c.o.export; do
+          if [[ -f "$path" ]]; then stat --printf='restored %n (%s bytes)\n' "$path"; else echo "absent $path"; fi
+        done
+        python3 -c 'import os,pathlib; r=list(pathlib.Path(os.environ["CCACHE_DIR"]).glob("*/*/*R")); print(f"ccache result files={len(r)} bytes={sum(p.stat().st_size for p in r)}")'
+        ccache --zero-stats
