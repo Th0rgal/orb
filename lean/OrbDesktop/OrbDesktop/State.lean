@@ -1,3 +1,4 @@
+import Std.Data.HashMap
 import Orb.Kernel
 import Orb.Scroll
 import Orb.Stream
@@ -331,6 +332,7 @@ structure DesktopState where
   draftProject : String := ""
   catalog : List CatalogModel := []
   catalogLoading : Bool := false
+  expandedProjects : List String := []
   archivesOpen : Bool := false
   multiRows : List String := []
   selectionAnchor : Option String := none
@@ -697,8 +699,40 @@ private def chooseSetting (st : DesktopState) (mid : String) (field : SettingFie
 
 private def selectableRow (r : ChromeSidebarRow) := r.kind == "mission" || r.kind == "project"
 
+/-- Keep the complete roster for updates and context actions. Only the visible
+    projection participates in rendering and shift-range selection. -/
+def DesktopState.visibleProjectRows (st : DesktopState) : List ChromeSidebarRow := Id.run do
+  let projects := st.sidebarRows.filter (·.kind == "project")
+  if !st.hasLiveConnection || projects.isEmpty then return st.sidebarRows
+  let byWidget := st.missionCards.foldl (fun (index : Std.HashMap Nat String) card =>
+    index.insert card.widgetId card.project) {}
+  let mut grouped : Std.HashMap String (Array ChromeSidebarRow) := {}
+  let mut archived := #[]
+  for row in st.sidebarRows do
+    if row.kind == "mission" then
+      if row.status == "acknowledged" then
+        archived := archived.push row
+      else
+        let slug := byWidget.getD row.widgetId ""
+        grouped := grouped.insert slug ((grouped.getD slug #[]).push row)
+  let mut visible := (st.sidebarRows.filter (fun row =>
+    row.kind != "project" && row.kind != "mission" && row.rowId != "section:missions")).toArray
+  for project in projects do
+    let slug := (project.rowId.drop 8).toString
+    visible := visible.push project
+    if st.expandedProjects.contains slug then
+      for row in grouped.getD slug #[] do
+        visible := visible.push { row with depth := 1 }
+    grouped := grouped.erase slug
+  -- A project omitted by a partial project response must not hide its missions.
+  for row in st.sidebarRows do
+    if row.kind == "mission" && row.status != "acknowledged" &&
+        grouped.contains (byWidget.getD row.widgetId "") then
+      visible := visible.push row
+  return (visible ++ archived).toList
+
 def toggleSelection (st : DesktopState) (row : ChromeSidebarRow) (extend : Bool) : DesktopState := Id.run do
-  let ids := (st.sidebarRows.filter selectableRow).map (·.rowId)
+  let ids := (st.visibleProjectRows.filter (fun r => selectableRow r && (st.archivesOpen || r.status != "acknowledged"))).map (·.rowId)
   if extend then
     if let some anchor := st.selectionAnchor then
       let a := ids.idxOf anchor
@@ -850,7 +884,10 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       if id == 101 then
         return (resetSelection { st with screen := .controlEmpty, draftProject := "", writeError := "" } none, some viewport)
       if let some project := st.sidebarRows.find? (fun r => r.widgetId == id && r.kind == "project") then
-        let next := resetSelection { st with screen := .controlEmpty, draftProject := (project.rowId.drop 8).toString, writeError := "" } none
+        let slug := (project.rowId.drop 8).toString
+        let expanded := if st.expandedProjects.contains slug then st.expandedProjects.erase slug else slug :: st.expandedProjects
+        if st.selectedCard.isSome then return ({ st with expandedProjects := expanded }, some viewport)
+        let next := resetSelection { st with screen := .controlEmpty, draftProject := slug, expandedProjects := expanded, writeError := "" } none
         let rows := next.sidebarRows.map fun row => { row with selected := row.widgetId == id }
         return ({ next with sidebarRows := rows }, some viewport)
       if id == 914 then return ({ st with writeError := "" }, some viewport)

@@ -6,6 +6,18 @@ open OrbDesktop LeanUI
 
 private def vp : Rect := { x := 0, y := 0, w := 800, h := 600 }
 
+private def hierarchyFixture : DesktopState := {
+  DesktopState.liveUnavailable with
+  connectionBinding := "fixture"
+  missionCards := [{ (default : MissionSummaryCard) with widgetId := 1001, missionId := "m", project := "now" }]
+  sidebarRows := [
+    { widgetId := 1001, rowId := "mission:m", kind := "mission", title := "Mission" },
+    { widgetId := 1000, rowId := "project:now", kind := "project", title := "Now" }] }
+
+#guard (hierarchyFixture.visibleProjectRows.map (·.rowId)) == ["project:now"]
+#guard (({ hierarchyFixture with expandedProjects := ["now"] } : DesktopState).visibleProjectRows.map
+  (fun r => (r.rowId, r.depth))) == [("project:now", 0), ("mission:m", 1)]
+
 /-- Use the live screen with a populated header run, as in a shaped window.
 Obtain the target from the lowered scene, never by injecting an activate event. -/
 private def clickMission (st : DesktopState) (card : MissionSummaryCard) : IO DesktopState := do
