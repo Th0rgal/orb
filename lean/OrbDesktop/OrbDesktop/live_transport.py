@@ -92,7 +92,14 @@ def change_status(c, action, mid, key):
         if (row.get('execution') or {}).get('state') == 'running' or row['status'] not in (
                 'awaiting_user', 'completed', 'interrupted', 'failed', 'blocked', 'paused', 'cancelled'):
             raise MissionNotIdle('mission not idle')
-        c.request(path + '/status', body={'status': 'acknowledged'}, key=key)
+        try:
+            c.request(path + '/status', body={'status': 'acknowledged'}, key=key)
+        except urllib.error.HTTPError as error:
+            # The status endpoint returns 409 when a run starts after our read.
+            if error.code == 409:
+                error.close()
+                raise MissionNotIdle('mission started before archive') from error
+            raise
     elif action == 'restore':
         row = c.get(path + '?include_history=false')
         if row['id'] != mid or row['status'] != 'acknowledged' or (row.get('execution') or {}).get('state') == 'running':

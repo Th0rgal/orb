@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+import sys
 import uuid
 
 
@@ -107,9 +108,24 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
     wait('context mission restored', lambda: status(b) == 'paused')
     see(fixture['openMission'], header)
     assert status(a) == 'awaiting_user'
+    idle_snapshot = api('/api/control/missions/' + b + '?include_history=false')
     api('/api/control/message', {'mission_id': b, 'content': 'disposable refusal check',
                                  'client_message_id': str(uuid.uuid4())})
     wait('context mission running', lambda: status(b) == 'active')
+    # Replay the race between the client reading an idle row and posting Archive.
+    # Use the old snapshot for the read and send the real write to this Core.
+    from unittest.mock import patch
+    sys.path.insert(0, str(root / "lean/OrbDesktop/OrbDesktop"))
+    from live_transport import Connection, MissionNotIdle, change_status
+    with patch.dict(os.environ, {'ORB_STATE_DIR':str(tmp)}):
+        connection = Connection()
+        with patch.object(connection, 'get', return_value=idle_snapshot):
+            try:
+                change_status(connection, 'archive', b, str(uuid.uuid4()))
+            except MissionNotIdle as error:
+                assert error.__cause__.code == 409
+            else:
+                raise AssertionError('Core accepted an archive over a live run')
     action_menu(fixture['activeActions'], 'archive')
     see('archiving', '0,0 1000x700')
     see(fixture['openMission'], header)
