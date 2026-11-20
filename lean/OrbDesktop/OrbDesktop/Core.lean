@@ -119,7 +119,7 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
     let st := { st with writeRequest := none, writeError := "" }
     let encode := fun (v : LaunchSettings) => String.intercalate "\t" [v.machine, v.backend, v.model, v.effort, v.permission]
     let (action, mid, text) := match request with
-      | .create => ("create", "", encode st.draftSettings)
+      | .create => ("create", "", encode st.draftSettings ++ "\t" ++ st.draftProject)
       | .send mid text => ("send", mid, text)
       | .stop mid => ("stop", mid, "")
       | .archive mid => ("archive", mid, "")
@@ -139,9 +139,9 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
       closeLiveSubscription slot
       match request with
       | .create =>
-        let [id,title,status,machine,backend,model,effort,permissionMode] := splitTab (r.stdout.dropEnd 1).toString | throw (IO.userError "invalid mission")
+        let [id,title,status,machine,backend,model,effort,permissionMode,project] := splitTab (r.stdout.dropEnd 1).toString | throw (IO.userError "invalid mission")
         let wid := 1 + st.sidebarRows.foldl (fun n row => max n row.widgetId) 1000
-        let card := { (default : MissionSummaryCard) with widgetId := wid, missionId := id, title, status, machine, backend, model, effort, permissionMode }
+        let card := { (default : MissionSummaryCard) with widgetId := wid, missionId := id, title, status, machine, backend, model, effort, permissionMode, project }
         let row := { (default : ChromeSidebarRow) with widgetId := wid, rowId := "mission:" ++ id, kind := "mission", title, status }
         return (resetSelection { st with screen := .missionTranscript, missionCards := card :: st.missionCards, sidebarRows := row :: st.sidebarRows } (some card), some viewport)
       | .archive _ =>

@@ -323,6 +323,7 @@ structure DesktopState where
   writeError : String := ""
   missionMenu : Option MissionMenu := none
   draftSettings : LaunchSettings := {}
+  draftProject : String := ""
   catalog : List CatalogModel := []
   archivesOpen : Bool := false
   multiRows : List String := []
@@ -357,6 +358,8 @@ def DesktopState.hasLiveConnection (st : DesktopState) : Bool := st.liveData && 
 def DesktopState.headerTitle (st : DesktopState) : String :=
   if !st.writeError.isEmpty then st.writeError
   else if st.liveData && !st.hasLiveConnection then "Core unavailable"
+  else if st.openMission.isNone && !st.draftProject.isEmpty then
+    ((st.sidebarRows.find? (·.rowId == "project:" ++ st.draftProject)).map (·.title)).getD st.draftProject
   else (st.selectedCard.map (·.title)).getD st.screen.headerTitle
 
 def resetSelection (st : DesktopState) (card : Option MissionSummaryCard) : DesktopState :=
@@ -822,6 +825,12 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       if let some row := st.sidebarRows.find? (fun r => r.widgetId == id && selectableRow r) then
         if !st.heldSelectionKeys.isEmpty then
           return (toggleSelection st row (st.heldSelectionKeys.any fun k => k == 0xffe1 || k == 0xffe2), some viewport)
+      if id == 101 then
+        return (resetSelection { st with screen := .controlEmpty, draftProject := "", writeError := "" } none, some viewport)
+      if let some project := st.sidebarRows.find? (fun r => r.widgetId == id && r.kind == "project") then
+        let next := resetSelection { st with screen := .controlEmpty, draftProject := (project.rowId.drop 8).toString, writeError := "" } none
+        let rows := next.sidebarRows.map fun row => { row with selected := row.widgetId == id }
+        return ({ next with sidebarRows := rows }, some viewport)
       if id == 730 then return ({ st with archivesOpen := !st.archivesOpen }, some viewport)
       if id == 805 then return ({ st with writeRequest := some .create }, some viewport)
       if id == 2 || id == 106 then

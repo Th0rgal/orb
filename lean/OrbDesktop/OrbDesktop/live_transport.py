@@ -138,15 +138,15 @@ def mutate(binding, action, mid):
         values = sys.stdin.buffer.read().decode().split('\t')
         body = {'title': 'New mission'}
         if values != ['']:
-            if len(values) != 5:
+            if len(values) not in (5, 6):
                 raise ValueError('invalid launch settings')
-            fields = ('remote_node_id', 'backend', 'model_override', 'model_effort', 'permission_mode')
+            fields = ('remote_node_id', 'backend', 'model_override', 'model_effort', 'permission_mode', 'project')
             body.update((k, v) for k, v in zip(fields, values) if v and
                         (k != 'permission_mode' or values[1] == 'claudecode'))
         row = c.request('/api/control/missions', body=body, key=key)
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', row['id']):
             raise ValueError('invalid mission')
-        print('\t'.join(map(label, [row['id'], row.get('title') or 'New mission', row['status'], *mission_settings(row)])))
+        print('\t'.join(map(label, [row['id'], row.get('title') or 'New mission', row['status'], *mission_settings(row), row.get('project')])))
         return
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', mid):
         raise ValueError('invalid mission')
