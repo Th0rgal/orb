@@ -10,6 +10,8 @@ golden paths never call this module and remain deterministic fixtures. -/
 /-- Embedded connection-bound HTTP reader and writer. -/
 private def transport : String := include_str "live_transport.py"
 
+private def modelCatalogRules : String := include_str "../../../orb/src/modelSuccessors.json"
+
 private def splitTab (line : String) : List String :=
   line.splitOn "\t"
 
@@ -66,7 +68,7 @@ def withLiveCatalog {α : Type} (binding : String) (notify : IO Unit)
     (k : IO (Option (List CatalogModel)) → IO α) : IO α := do
   if binding.isEmpty then return ← k (pure none)
   let child ← IO.Process.spawn {
-    cmd := "python3", args := #["-I", "-c", transport ++ "\ncatalog(sys.argv[1])", binding]
+    cmd := "python3", args := #["-I", "-c", transport ++ "\ncatalog(sys.argv[1], json.loads(sys.argv[2]))", binding, modelCatalogRules]
     stdout := .piped, stderr := .null }
   let mailbox ← Std.Mutex.new (none : Option (List CatalogModel))
   let reader ← IO.asTask (prio := .dedicated) do

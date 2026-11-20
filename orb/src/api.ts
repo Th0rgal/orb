@@ -1,3 +1,4 @@
+import modelCatalogRules from "./modelSuccessors.json";
 import { nativeInvoke } from "./native";
 import { missionNode } from "./machines/nodes";
 import { harnessRank, isHarness } from "./harnesses";
@@ -1401,21 +1402,8 @@ export function modelLabelGroup(label: string): string | undefined {
 }
 
 // Direct harness IDs and OpenCode provider-qualified IDs use the same catalog rules.
-const modelSuccessors: Record<string, Record<string, string>> = {
-  openai: {
-    "gpt-6-sol": "gpt-6.2-sol",
-    "gpt-6.1-sol": "gpt-6.2-sol",
-    "gpt-6-astra": "gpt-6.2-astra",
-  },
-  anthropic: {
-    "claude-opus-5": "claude-opus-5-5",
-    "claude-sonnet-4-6": "claude-sonnet-5-5",
-    "claude-fable-5": "claude-fable-5-2",
-    "claude-fable-5-1": "claude-fable-5-2",
-  },
-  xai: { "grok-4.6": "grok-4.7" },
-};
-const harnessProvider: Record<string, string> = { codex: "openai", claudecode: "anthropic", grok: "xai" };
+const modelSuccessors: Record<string, Record<string, string>> = modelCatalogRules.modelSuccessors;
+const harnessProvider: Record<string, string> = modelCatalogRules.harnessProvider;
 
 export function availableModelSuccessor(backend: string, value: string, models: BackendModelOption[], providerId?: string): string | undefined {
   const slash = value.indexOf("/");

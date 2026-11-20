@@ -212,7 +212,21 @@ def mission_settings(m):
             m.get('model_effort'), m.get('permission_mode') or 'supervised')
 
 
-def catalog_rows(c):
+def visible_model_options(backend, options, rules):
+    available = {(m.get('value'), m.get('provider_id')) for m in options}
+    for option in options:
+        value = option.get('value') or ''
+        namespace, slash, model = value.partition('/')
+        provider = namespace if backend == 'opencode' and slash else rules['harnessProvider'].get(backend)
+        successor = rules['modelSuccessors'].get(provider, {}).get(model if slash else value)
+        if successor and (not slash or namespace == provider):
+            candidate = namespace + '/' + successor if slash else successor
+            if (candidate, option.get('provider_id')) in available:
+                continue
+        yield option
+
+
+def catalog_rows(c, rules):
     backends = c.get('/api/backends')
     if isinstance(backends, dict):
         backends = backends['backends']
@@ -228,7 +242,7 @@ def catalog_rows(c):
             options = ([{'value': chain['id'], 'label': 'Routing — ' + chain['name']} for chain in chains]
                        + [m for m in options if m.get('value', '').removeprefix('builtin/') not in chain_ids
                           and not m.get('label', '').startswith('Routing — ')])
-        for option in options:
+        for option in visible_model_options(backend, options, rules):
             if option.get('value'):
                 yield ('H', backend, by_id[backend], option['value'], option.get('label') or option['value'])
 
@@ -265,11 +279,11 @@ def roster():
         print('\t'.join(map(label, row)))
 
 
-def catalog(binding):
+def catalog(binding, rules):
     c = Connection()
     if c.binding != binding:
         return
-    rows = list(catalog_rows(c))
+    rows = list(catalog_rows(c, rules))
     c.check()
     for row in rows:
         print('\t'.join(map(label, row)))

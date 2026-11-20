@@ -174,6 +174,14 @@ class Delivery(unittest.TestCase):
     def test_failed_bootstrap_and_redirect(self):
         self.run_wire('unavailable')
 
+    def test_model_successor_requires_the_same_provider(self):
+        rules = json.loads((PKG.parents[1]/'orb/src/modelSuccessors.json').read_text())
+        models = [{'value':'openai/gpt-6-sol', 'provider_id':'local'},
+                  {'value':'openai/gpt-6.2-sol', 'provider_id':'other'}]
+        self.assertEqual(list(live.visible_model_options('opencode', models, rules)), models)
+        models[1]['provider_id'] = 'local'
+        self.assertEqual(list(live.visible_model_options('opencode', models, rules)), models[1:])
+
     def test_coalesces_before_ipc(self):
         class Connection:
             binding = 'bound'
