@@ -2784,6 +2784,21 @@ def runTests : IO UInt32 := do
     ("refresh_token", .str "tok-r"),
     ("expires_at", JVal.int 1900000000000)
   ])
+  let (_, slotOnly) ← handleRequest rt {
+    method := "PUT", rawPath := "/managed-auth/antigravity?slot=slot1&default=false",
+    path := "/managed-auth/antigravity",
+    query := #[("slot", "slot1"), ("default", "false")], headers := authHdrs, body := agCred.toUTF8
+  }
+  let .ok slotJson := OrbBin.Json.parse (String.fromUTF8! slotOnly.body)
+    | throw (IO.userError "invalid slot-only response")
+  check "First private Antigravity slot never seeds the shared default"
+    (slotOnly.status == 200 && slotJson.fieldArr? "managed_auth" == some #[.str "antigravity:slot1"] &&
+     !(← (System.FilePath.mk agHome / "antigravity-oauth-token").pathExists))
+  let (_, noTarget) ← handleRequest rt {
+    method := "PUT", rawPath := "/managed-auth/antigravity?default=false",
+    path := "/managed-auth/antigravity", query := #[("default", "false")], headers := authHdrs, body := agCred.toUTF8
+  }
+  check "Antigravity upload with neither a slot nor a default target is rejected" (noTarget.status == 400)
   let (rt20, rAg) ← handleRequest rt {
     method := "PUT", rawPath := "/managed-auth/antigravity?slot=slot1",
     path := "/managed-auth/antigravity",
