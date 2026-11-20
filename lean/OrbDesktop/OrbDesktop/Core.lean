@@ -127,6 +127,8 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
     let st := if action == "send" then { st with unconfirmedSend := some (key, text) } else st
     try
       let r ← IO.Process.output { cmd := "python3", args := #["-I", "-c", transport ++ "\ntry: mutate(*sys.argv[1:])\nexcept Exception: sys.exit(1)", st.connectionBinding, action, mid, key] } (input? := some text)
+      if action == "send" && r.exitCode == 2 then
+        return ({ st with unconfirmedSend := none, writeError := "Mission busy — draft kept. Send again when idle." }, some viewport)
       if r.exitCode != 0 then throw (IO.userError "write failed")
       closeLiveSubscription slot
       match request with

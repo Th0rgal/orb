@@ -93,8 +93,15 @@ def mutate(binding, action, mid, message_id):
         raise ValueError('invalid mission')
     path = '/api/control/missions/' + mid
     if action == 'send':
-        receipt = c.request('/api/control/message', body={'mission_id': mid, 'content': sys.stdin.buffer.read().decode(),
-                            'queue_followup': True, 'client_message_id': key}, key='msg:' + mid + ':' + key)
+        try:
+            receipt = c.request('/api/control/message', body={'mission_id': mid, 'content': sys.stdin.buffer.read().decode(),
+                                'queue_followup': True, 'client_message_id': key}, key='msg:' + mid + ':' + key)
+        except urllib.error.HTTPError as e:
+            if e.code == 409:
+                refusal = json.loads(e.read(4096))
+                if refusal.get('id') == key and refusal.get('message_accepted') is False and refusal.get('error') == 'local_run_busy':
+                    sys.exit(2)
+            raise
         if receipt.get('id') != key or receipt.get('message_accepted') is False:
             raise ValueError('message not accepted')
     elif action == 'stop':

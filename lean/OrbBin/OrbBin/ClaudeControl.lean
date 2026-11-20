@@ -1971,8 +1971,9 @@ def startHarnessTurn
     let old? ← mgr.registration.atomically <| mgr.mu.atomically do
       if !(← launchAllowed) then return none
       let ws ← mgr.warmProcsRef.get
-      mgr.warmProcsRef.set (ws.filter (fun (k, _) => k != id))
-      pure ((ws.find? (fun (k, _) => k == id)).map Prod.snd)
+      let old? := (ws.find? (fun (k, _) => k == id)).map Prod.snd
+      if let some old := old? then old.aliveRef.set false
+      return old?
     if let some old := old? then
       old.aliveRef.set false
       let _ ← killSig (-old.pid) 15
@@ -1982,6 +1983,7 @@ def startHarnessTurn
           let _ ← killSig (-old.pid) 9
         IO.sleep 50
         waitedMs := waitedMs + 50
+      if !(← old.readerExitedRef.get) then return .error "warm_retirement_unconfirmed"
 
   let prevState? ← getRunState? mgr id
   let prevTurns := (prevState?.map (·.turnCount)).getD 0
@@ -2136,6 +2138,7 @@ def startHarnessTurn
       if !owned then return
       let postTurnIdx := prevTurns + 1
       discard <| captureCheckpoint effectiveCwd id postTurnIdx s!"post-{generation}" s!"Turn {postTurnIdx}"
+      if !(← launchAllowed) then return
       let priorErr? := (← stRef.get).error?
       let err? := priorErr?.orElse (fun _ => if code == 0 then none else some s!"{harness} exited with code {code}")
       stRef.modify fun s => {
@@ -2146,7 +2149,7 @@ def startHarnessTurn
         turnCount := s.turnCount + 1
       }
       let finalSnap ← stRef.get
-      let cb ← getCallbacksFor mgr id
+      let cb := callbacks
       if !finalSnap.text.isEmpty && err?.isNone then
         cb.onStructuredEvent "assistant_message" (.obj #[("content", .str finalSnap.text)])
       if let some em := err? then

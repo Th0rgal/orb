@@ -4479,7 +4479,8 @@ def registerMissionEventListener
     asynchronously on a single ordered dispatcher task so callers never block on listener or
     socket backpressure while committed `seq` order is strictly preserved. -/
 def appendMissionEvent
-    (st : CoreStore) (missionId eventType payloadJson createdAt : String) : IO (Except String UInt64) := do
+    (st : CoreStore) (missionId eventType payloadJson createdAt : String)
+    (generation? : Option UInt64 := none) : IO (Except String UInt64) := do
   let enqueueNotice (n : PendingMissionEventNotice) : IO Bool :=
     match st.eventDispatchState? with
     | none => pure false
@@ -4497,6 +4498,12 @@ def appendMissionEvent
     match ← sqliteExecRaw st.missionsDb.handle "BEGIN IMMEDIATE;" with
     | .error e => return .error s!"tx_begin_failed:{e}"
     | .ok () =>
+      if let some generation := generation? then
+        let owner ← execParamQueryUnlocked st.missionsDb
+          "SELECT 1 FROM missions WHERE id=?1 AND run_generation=CAST(?2 AS INTEGER) AND status='active';" #[missionId, s!"{generation}"]
+        unless owner.toOption.any (·.size > 1) do
+          discard <| sqliteExecRaw st.missionsDb.handle "ROLLBACK;"
+          return .error "event_generation_fenced"
       let seqRes ← execParamQueryUnlocked st.missionsDb
         "SELECT COALESCE(MAX(CASE WHEN COALESCE(seq,0)>=COALESCE(sequence,0) THEN COALESCE(seq,0) ELSE COALESCE(sequence,0) END), 0) + 1 FROM mission_events WHERE mission_id=?1;" #[missionId]
       let .ok srs := seqRes
