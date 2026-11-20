@@ -378,4 +378,4 @@ Only these. Each one names what it unblocks.
 Rows the reconciler dispatches, in order. A row leaves the queue by PR when it
 is done or dropped.
 
-`U5`, `U8`, `U6`, `U7`, `U3`, `X7`, `R30`, `M3`, `L5`, `R16`, `R17`, `R18`, `R19`, `R21`, `O3`, `O4`, `X3`, `R30a`, `R18a`, `R16a`, `R21a`, `C7`, `C8`, `R31`
+`U5`, `U8`, `U6`, `U7`, `U3`, `R30`, `M3`, `L5`, `R17`, `R18`, `R19`, `R21`, `O3`, `O4`, `R21a`, `C7`, `C7a`, `R31`
