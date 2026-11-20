@@ -102,18 +102,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf gutsy /usr/share/debootstrap/scripts/plucky
 
 # Core starts a userspace WireGuard tunnel for each admitted AirVPN session.
-RUN set -eu; \
-    arch="$(dpkg --print-architecture)"; \
-    case "$arch" in \
-      amd64) sha=e88c1d090740373fc606c1bafd81d9a5eadc642cce5667616e20e9d7a444f51c ;; \
-      arm64) sha=370e00bd2167960d1ecd1c3c1439715bbaa94a0a110a2040468670c9af6021b6 ;; \
-      *) echo "Unsupported wireproxy architecture: $arch" >&2; exit 1 ;; \
-    esac; \
-    curl -fsSL --retry 3 "https://github.com/whyvl/wireproxy/releases/download/v1.1.3/wireproxy_linux_${arch}.tar.gz" -o /tmp/wireproxy.tar.gz; \
-    echo "$sha  /tmp/wireproxy.tar.gz" | sha256sum -c -; \
-    tar -xzf /tmp/wireproxy.tar.gz -C /usr/local/bin wireproxy; \
-    rm /tmp/wireproxy.tar.gz; \
-    setpriv --pdeathsig KILL -- wireproxy --version
+COPY scripts/install_wireproxy.sh /tmp/install_wireproxy.sh
+RUN /tmp/install_wireproxy.sh /usr/local/bin && rm /tmp/install_wireproxy.sh
 
 # -- Node.js 20 (for Claude Code CLI & MCP servers) ----------------------------
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \

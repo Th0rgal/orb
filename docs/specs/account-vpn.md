@@ -60,7 +60,9 @@ login for Settings. Never include credentials in the receipt.
    service paths. Identify the qBittorrent session by its server, exit and
    connection start time in AirVPN. Record these in a restricted receipt so a
    later check can distinguish a surviving connection from a reconnect.
-2. On the native Core host, check that each service user can execute
+2. On the native Core host, provision the pinned WireGuard proxy with
+   `scripts/install_wireproxy.sh <bin-directory>` from the candidate revision.
+   Choose a directory on the Core service’s PATH. Check each service user can execute
    `setpriv --pdeathsig KILL -- wireproxy --version`. Configure one stable
    loopback relay port per Core instance and one shared, writable
    `ORB_AIRVPN_COORDINATOR_DIR` for all instances using this subscription

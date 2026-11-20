@@ -108,7 +108,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           ./scripts/ci_harden_ubuntu_apt.sh
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev libsqlite3-dev zstd
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev libsqlite3-dev zstd wireguard-tools iproute2 iptables
 
       - name: Build all 12 native Lean binaries and run all self-test suites
         run: |
@@ -125,6 +125,13 @@ jobs:
 
       - name: Verify Core-owned catalog requests through independent TLS receivers
         run: python3 scripts/test_account_vpn_transport.py --discovery lean/OrbCore/.lake/build/bin/orb-core-test --probe-model-discovery
+
+      - name: Verify WireGuard allocation, restart and exit collisions
+        run: |
+          set -euo pipefail
+          fixture=$(mktemp -d)
+          ./scripts/install_wireproxy.sh "$fixture"
+          sudo env PATH="$fixture:/usr/sbin:/usr/bin:/sbin:/bin" python3 scripts/test_airvpn_wireguard.py lean/OrbCore/.lake/build/bin/orb-airvpn-sidecar-test
 
       - name: Verify per-account OAuth and inference egress with the released sidecar
         run: |
