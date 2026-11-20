@@ -926,11 +926,13 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
     | .text _ | .preedit .. | .imeBatch .. =>
       if st.selectedCard.isNone && st.screen != .controlEmpty && st.screen != .controlPopulated then return (st, none)
     | _ => pure ()
-    let commandHeld := st.heldSelectionKeys.any fun key => [0xffe3,0xffe4,0xffeb,0xffec].contains key
     let navId := match ev with
       | .activate id => id
-      | .key key _ .pressed => if commandHeld && key == 0x33 then 112 else
-          if commandHeld && (key == 0x6e || key == 0x4e) then 101 else 0
+      | .key key mods .pressed =>
+        -- XKB reports modifiers even when the key was held before this window gained focus.
+        if mods &&& 0x0a == 0 then 0
+        else if key == 0x33 then 112
+        else if key == 0x6e || key == 0x4e then 101 else 0
       | _ => 0
     if navId == 112 then
       let next := resetSelection { st with screen := .machinesFleet, draftProject := "", writeError := "" } none

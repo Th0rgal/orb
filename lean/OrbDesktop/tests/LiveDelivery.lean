@@ -43,8 +43,9 @@ private def nestedControllerFixture : DesktopState :=
   (fun r => (r.rowId, r.badge))) == [("project:now", 0), ("mission:m", 2), ("mission:child", 1)]
 
 #guard (stepDesktopEvent 120 vp hierarchyFixture (.activate 112)).1.screen == .machinesFleet
-#guard (stepDesktopEvent 120 vp { hierarchyFixture with heldSelectionKeys := [0xffe3] }
-  (.key 0x33 0 .pressed)).1.screen == .machinesFleet
+#guard (stepDesktopEvent 120 vp hierarchyFixture (.key 0x33 2 .pressed)).1.screen == .machinesFleet
+#guard (stepDesktopEvent 120 vp hierarchyFixture (.key 0x33 8 .pressed)).1.screen == .machinesFleet
+#guard (stepDesktopEvent 120 vp hierarchyFixture (.key 0x33 0 .pressed)).1.screen != .machinesFleet
 
 /-- Use the live screen with a populated header run, as in a shaped window.
 Obtain the target from the lowered scene, never by injecting an activate event. -/
