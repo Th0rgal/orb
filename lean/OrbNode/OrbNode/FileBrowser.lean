@@ -991,6 +991,8 @@ def installAntigravityAuth
   if access.isEmpty || refresh.isEmpty then
     return .error "bad_request:Antigravity credential is incomplete"
   let cleanSlot? := slot?.map (·.trimAscii.toString) |>.filter (fun s => !s.isEmpty)
+  if !updateDefault && cleanSlot?.isNone then
+    return .error "bad_request:A named Antigravity slot is required when the default is excluded"
   if let some sl := cleanSlot? then
     if !validAntigravitySlot sl then
       return .error "bad_request:Invalid Antigravity slot identifier"
@@ -1013,9 +1015,8 @@ def installAntigravityAuth
     return .error e
   IO.FS.createDirAll (homePath / "conversations")
   IO.FS.createDirAll (homePath / "brain")
-  let defaultMissing := !(← privateFileReadable (homePath / "antigravity-oauth-token"))
   let mut changed := false
-  if cleanSlot?.isNone || updateDefault || defaultMissing then
+  if updateDefault then
     if let .error e ← writeAtomicPrivate0600 (homePath / "antigravity-oauth-token") nativeDoc.toUTF8 then
       return .error e
     changed := true
