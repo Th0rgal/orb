@@ -105,6 +105,9 @@ private def subscribe (mission binding : String) (tracked : List MissionSummaryC
 def closeLiveSubscription (slot : IO.Ref (Option LiveSubscription)) : IO Unit := do
   if let some sub ← slot.swap none then sub.stop
 
+private def freshMessageId : IO String := do
+  return (← IO.FS.readFile "/proc/sys/kernel/random/uuid").trimAscii.toString
+
 /-- The window thread owns selection and damage. Each reader owns a fresh,
 single-value mailbox, so a retired subscription cannot update a new mission. -/
 def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewport : LeanUI.Rect)
@@ -117,8 +120,13 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
       | .send mid text => ("send", mid, text)
       | .stop mid => ("stop", mid, "")
       | .archive mid => ("archive", mid, "")
+    let key ← if action != "send" then pure "" else
+      match st.unconfirmedSend with
+      | some (id, draft) => if draft == text then pure id else freshMessageId
+      | none => freshMessageId
+    let st := if action == "send" then { st with unconfirmedSend := some (key, text) } else st
     try
-      let r ← IO.Process.output { cmd := "python3", args := #["-I", "-c", transport ++ "\ntry: mutate(*sys.argv[1:])\nexcept Exception: sys.exit(1)", st.connectionBinding, action, mid] } (input? := some text)
+      let r ← IO.Process.output { cmd := "python3", args := #["-I", "-c", transport ++ "\ntry: mutate(*sys.argv[1:])\nexcept Exception: sys.exit(1)", st.connectionBinding, action, mid, key] } (input? := some text)
       if r.exitCode != 0 then throw (IO.userError "write failed")
       closeLiveSubscription slot
       match request with
@@ -130,9 +138,9 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
         return (resetSelection { st with screen := .missionTranscript, missionCards := card :: st.missionCards, sidebarRows := row :: st.sidebarRows } (some card), some viewport)
       | .archive _ =>
         return (resetSelection { st with screen := .controlEmpty, missionCards := st.missionCards.filter (·.missionId != mid), sidebarRows := st.sidebarRows.filter (·.rowId != "mission:" ++ mid) } none, some viewport)
-      | .send .. => return ({ st with composer := { isRunning := st.composer.isRunning } }, some viewport)
+      | .send .. => return ({ st with unconfirmedSend := none, composer := { isRunning := st.composer.isRunning } }, some viewport)
       | .stop _ => return (st, some viewport)
-    catch _ => return ({ st with writeError := "Core did not confirm " ++ action }, some viewport)
+    catch _ => return ({ st with writeError := if action == "send" then "Send unconfirmed — activate Send to retry" else "Core did not confirm " ++ action }, some viewport)
   let invalidate := ({ DesktopState.liveUnavailable with theme := st.theme, scale120 := scale }, some viewport)
   let target := if st.hasLiveConnection then some (st.openMission.getD "") else none
   if active.map (·.mission) != target || active.any (·.binding != st.connectionBinding) then

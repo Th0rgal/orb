@@ -78,11 +78,11 @@ class Connection:
         return json.loads(data) if data or body is None else None
 
 
-def mutate(binding, action, mid):
+def mutate(binding, action, mid, message_id):
     c = Connection()
     if c.binding != binding:
         raise ValueError('connection changed')
-    key = str(uuid.uuid4())
+    key = str(uuid.UUID(message_id)) if action == 'send' else str(uuid.uuid4())
     if action == 'create':
         row = c.request('/api/control/missions', body={'title': 'New mission'}, key=key)
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', row['id']):
@@ -95,7 +95,7 @@ def mutate(binding, action, mid):
     if action == 'send':
         receipt = c.request('/api/control/message', body={'mission_id': mid, 'content': sys.stdin.buffer.read().decode(),
                             'queue_followup': True, 'client_message_id': key}, key='msg:' + mid + ':' + key)
-        if not receipt.get('id') or receipt.get('message_accepted') is False:
+        if receipt.get('id') != key or receipt.get('message_accepted') is False:
             raise ValueError('message not accepted')
     elif action == 'stop':
         c.request(path + '/cancel', body={}, key=key)

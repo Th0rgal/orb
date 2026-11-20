@@ -3994,6 +3994,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       revokeSessionScopedMacTethersForMission st.store st.macTether? mid nowEpochSec
       match ← hostedStop st.store mid nowIso (if remoteGoal then "remote_goal_stopped" else "hosted_stop") with
       | .ok gen =>
+        if let some mgr := st.warmMgr? then
+          OrbBin.ClaudeControl.stopHarnessRun mgr mid
         if remoteGoal then
           discard <| cancelActiveRemoteJobForMission st.store st.managedStore? st.relayHub? mid "Goal stopped on Core"
           let payload := renderCompact (.obj #[("status", .str "stopped"), ("run_generation", JVal.uint64 gen)])
@@ -6460,6 +6462,16 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let delivContent := if selectedSkills.isEmpty then content else withDirective content selectedSkills
     let mut queued := false
     let mut dispatchedRemote := false
+    -- Reserve before enqueue, append or spawn. Never release an uncertain claim
+    -- once dispatch begins. The authorized retry gets the original receipt.
+    let receiptScope := renderCompact (.arr #[.str "control_message", .str caller.userId, .str (mid?.getD "")])
+    let keyed := mid?.isSome && (bodyJv.fieldStr? "client_message_id").any (!·.isEmpty)
+    if keyed then
+      match ← claimIdempotencySlot st.store receiptScope msgId nowIso with
+      | .error _ => return .ok (mkJson 500 "{\"error\":\"message_claim_failed\"}")
+      | .ok .InFlight => return .ok (mkJson 409 "{\"error\":\"message_in_flight\"}")
+      | .ok (.Replayed rec) => return .ok (mkJson rec.statusCode rec.bodyJson)
+      | .ok .Claimed => pure ()
     if let some mid := mid? then
       let evPayload :=
         s!"\{\"type\":\"user_message\",\"id\":{jsonEscape msgId},\"content\":{jsonEscape content}," ++
@@ -6507,7 +6519,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           if let .error dispErr ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec then
             return .ok (mkJson 502 s!"\{\"error\":{jsonEscape dispErr}}")
       else
-        let _ ← appendMissionEvent st.store mid "user_message" evPayload nowIso
+        if let .error _ ← appendMissionEvent st.store mid "user_message" evPayload nowIso then
+          if keyed then discard <| abortIdempotencySlot st.store receiptScope msgId
+          return .ok (mkJson 500 "{\"error\":\"message_append_failed\"}")
       if !queued && !dispatchedRemote then
         if let some tSink := st.telemetrySink? then
           let actorUid? := if caller.isLegacyUnscoped || caller.userId.isEmpty then none else some caller.userId
@@ -6533,9 +6547,13 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             discard <| launchLocalCoreMissionTurn st mid m.backend m.workingDirectory delivContent m.modelOverride m.modelEffort permMode sid? "local" false
           else
             discard <| maybeSpawnWarmHarnessTurn st caller m.placementKind mid m.backend m.workingDirectory delivContent m.modelOverride m.modelEffort permMode "" false
-    return .ok (mkJson 200 (
+    let receipt :=
       s!"\{\"id\":{jsonEscape msgId},\"queued\":{if queued then "true" else "false"},\"message_accepted\":true," ++
-      s!"\"sender_user_id\":{jsonEscape caller.userId},\"sender_username\":{jsonEscape caller.username}{deliveredField}}"))
+      s!"\"sender_user_id\":{jsonEscape caller.userId},\"sender_username\":{jsonEscape caller.username}{deliveredField}}"
+    if keyed then
+      if let .error _ ← recordOrReplayIdempotency st.store receiptScope msgId 200 receipt nowIso then
+        return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
+    return .ok (mkJson 200 receipt)
 
   -- Mission Resume (`POST /api/control/missions/:id/resume`)
   if let some params := matchRoutePattern? "/api/control/missions/:id/resume" rawTarget then
