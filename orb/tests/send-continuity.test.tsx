@@ -539,6 +539,8 @@ it('reconciles missing final output on mount and status poll when reopening a se
    pollView.unmount();
   }finally{
    vi.useRealTimers();
+   // Advancing the poll clock also starts MissionView's lazy machine-destination preload.
+   await vi.dynamicImportSettled();
   }
  }finally{
   setMultiplexSyncEnabledForTest(false);
