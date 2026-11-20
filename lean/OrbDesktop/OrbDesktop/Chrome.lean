@@ -89,7 +89,7 @@ def buildMissionMenu (st : DesktopState) (menu : MissionMenu) (width : SubPx) (v
         |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 8) 0)
         |>.withFixedSize (width - pxToSub 12) (pxToSub 30))
       ([chromeIcon item.icon pal.textMuted 14, label] ++
-        (if item.id == 711 then [chromeIcon "chevron-right" pal.textMuted 12] else []))
+        (if item.id == 711 || (menu.page == .settings && (settingTrigger item.id).isSome) then [chromeIcon "chevron-right" pal.textMuted 12] else []))
     if item.separatorBefore then
       [WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (width - pxToSub 12) (pxToSub 1) |>.withBg pal.border) [], row]
     else [row]

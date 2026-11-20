@@ -750,8 +750,13 @@ def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuR
       { id := 716, label := "Save", icon := "check", action := some (.rename card.missionId menu.draft.text) }]
   | .settings =>
     return [{ id := 715, label := "Mission settings", icon := "back" },
-      { id := 717, label := "Project: " ++ card.project, icon := "folder" },
-      { id := 718, label := "Model: " ++ card.model, icon := "s:models" }]
+      { id := 721, label := "Harness · " ++ card.backend, icon := "list" },
+      { id := 722, label := "Model · " ++ (if card.model.isEmpty then "Default" else card.model), icon := "s:models" }] ++
+      (if ["codex", "antigravity", "claudecode"].contains card.backend then
+        [{ id := 723, label := "Effort · " ++ (if card.effort.isEmpty then "Default" else card.effort), icon := "list" }] else []) ++
+      (if card.backend == "claudecode" then
+        [{ id := 724, label := "Permissions · " ++ (currentSettings st menu.mission).permission, icon := "nav:settings" }] else []) ++
+      (if projects.isEmpty then [] else [{ id := 711, label := "Move to", icon := "folder", separatorBefore := true }])
 
 def menuFocusChange (before after : DesktopState) : Option Nat :=
   match before.missionMenu, after.missionMenu with
@@ -794,6 +799,9 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
   | .activate 715 => return update { menu with page := .actions, first := 0, highlighted := 0 }
   | .activate id =>
     let some row := (missionMenuRows st menu).find? (·.id == id) | return (st, none)
+    if menu.page == .settings then
+      if let some field := settingTrigger id then
+        return update { menu with page := .picker field, first := 0, highlighted := 0 }
     if let .picker field := menu.page then return (chooseSetting st menu.mission field row.value, some viewport)
     let some action := row.action | return (st, none)
     if menu.page == .rename && (menu.draft.text.trimAscii.isEmpty || !menu.draft.imePreeditText.isEmpty) then return (st, none)
