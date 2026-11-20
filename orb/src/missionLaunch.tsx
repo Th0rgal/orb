@@ -61,7 +61,7 @@ export function missionDestination(mission: Mission | null, receipt?: LaunchRece
   // over workspace_name, which can still name the host's bookkeeping workspace.
   const node = missionNode(mission);
   if (node && mission?.id) rememberMissionNode(mission.id, node);
-  return nodeLabel(node ?? receipt?.nodeId ?? lastMissionNode(mission?.id) ?? mission?.workspace_name ?? "selected machine");
+  return nodeLabel(node ?? receipt?.nodeId ?? lastMissionNode(mission?.id) ?? (mission?.workspace_name?.trim() || (mission ? "core" : "Loading machine…")));
 }
 export function initialPrompt(mission: Mission | null, receipt?: LaunchReceipt): string | undefined {
   if (receipt?.prompt) return receipt.prompt;

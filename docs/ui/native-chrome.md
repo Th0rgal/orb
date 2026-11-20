@@ -57,6 +57,8 @@ routes through the verified unboxed kernel functions in `Orb.Kernel`:
   `orb:mission-archived` and after native actions) and `OrbLocald` lists their roots,
   newest first, under the `archive` row, collapsed unless a selected conversation is in it.
   An archived root that still has a live descendant stays in its project.
+- Core’s live roster supplies project headings. Live missions whose project leaves the roster appear under the catch-all project. Loading archived history alone never adds a heading.
+- Right-clicking a Linux project row opens the shared desktop project actions menu beside the sidebar.
 - Right-clicking a mission row opens a native menu (`linux_shell/gtk_menu.c`): Rename…,
   Move to ▸ project, Archive/Restore, Copy mission ID, Mission settings. Each item calls
   `window.__ORB_NATIVE_MISSION_ACTION__(action, id, arg)`, which reuses the HTML sidebar's

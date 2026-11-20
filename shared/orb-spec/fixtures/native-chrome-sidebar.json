@@ -195,8 +195,8 @@
         { "id": "m-live", "title": "Live core mission", "status": "completed", "project": "core", "updated_at_ms": 1500 }
       ],
       "archived_missions": [
-        { "id": "m-old", "title": "Old archived session", "status": "acknowledged", "project": "core", "updated_at_ms": 500 },
-        { "id": "m-old-child", "title": "Archived worker", "status": "acknowledged", "project": "core", "parent_mission_id": "m-old", "updated_at_ms": 400 },
+        { "id": "m-old", "title": "Old archived session", "status": "acknowledged", "project": "retired-project", "updated_at_ms": 500 },
+        { "id": "m-old-child", "title": "Archived worker", "status": "acknowledged", "project": "retired-project", "parent_mission_id": "m-old", "updated_at_ms": 400 },
         { "id": "m-live-worker", "title": "Archived worker of a live parent", "status": "acknowledged", "project": "core", "parent_mission_id": "m-live", "updated_at_ms": 300 }
       ]
     },
