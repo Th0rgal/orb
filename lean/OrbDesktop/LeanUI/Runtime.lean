@@ -161,8 +161,9 @@ def stepEvent (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage) (
       { rt with hoveredEntity := hit }
     | .pointerLeave =>
       { rt with hoveredEntity := none }
-    | .pointerButton px py _btn down =>
-      if down then
+    | .pointerButton px py button down =>
+      if button != 0x110 then rt
+      else if down then
         match hitTest rt.hitRegions px py with
         | some id =>
           let r := (rt.hitRegions.find? (·.1 == id)).map (·.2) |>.getD rt.viewportDeviceRect
@@ -227,12 +228,15 @@ end RuntimeState
    clear `rt.damage` to `none`. -/
 def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
     (onEvent : σ → Event → σ × Damage)
-    (view : RuntimeState σ → IO (FrameView × List ScrollRegion)) :
+    (view : RuntimeState σ → IO (FrameView × List ScrollRegion))
+    (focusChange : σ → σ → Option Nat := fun _ _ => none) :
     IO (RuntimeState σ) := do
   let (wl1, evs) ← Wayland.pumpEvents rt.wayland
   let mut st := { rt with wayland := wl1 }
   for ev in evs do
+    let before := st.app
     st := st.stepEvent onEvent ev
+    if let some target := focusChange before st.app then st := st.requestFocus target st.viewportDeviceRect
   if !needsRedraw st.damage then
     return { st with quiescentSkips := st.quiescentSkips + 1 }
   let (bw, bh) := st.wayland.deviceBufferSize
@@ -385,22 +389,53 @@ def openWindowRuntime {σ : Type} (cfg : RuntimeConfig) (appId : String) (initia
   let wl ← Wayland.openWindow cfg.title appId cfg.width cfg.height cfg.scale120
   initRuntimeOn cfg wl initialApp
 
+private def callArgs (a b c : UInt64) :=
+  [a,b,c,0,0,0].foldl Wayland.pushU64LE ByteArray.empty
+
+/-- A notification remains readable if the reader publishes before the window enters poll.
+The caller joins its reader inside this scope, before the descriptor can be reused. -/
+def withProducerWake {α : Type} (k : UInt32 → IO Unit → IO α) : IO α := do
+  let create ← FFI.dlSym "" "eventfd"
+  let signal ← FFI.dlSym "" "eventfd_write"
+  let closeFd ← FFI.dlSym "" "close"
+  if create == 0 || signal == 0 || closeFd == 0 then throw (IO.userError "window eventfd unavailable")
+  -- Linux EFD_CLOEXEC | EFD_NONBLOCK, so children cannot inherit the descriptor.
+  let fd := (← FFI.call create (callArgs 0 0x80800 0)).toUInt32
+  if fd == 0xffffffff then throw (IO.userError "window eventfd allocation failed")
+  try k fd (discard <| FFI.call signal (callArgs fd.toUInt64 1 0))
+  finally discard <| FFI.call closeFd (callArgs fd.toUInt64 0 0)
+
 /-- On Linux, poll the compositor fd with a timeout only when the app has a
 background producer. Wayland input wakes immediately; the timeout samples the
 mailbox without a frame-rate idle timer. `pumpEvents` owns actual dispatch. -/
-private def withWindowWait {α σ : Type} (rt : RuntimeState σ) (k : IO Unit → IO α) : IO α := do
-  if rt.wayland.display == 0 then return ← k (IO.sleep 500)
+private def withWindowWait {α σ : Type} (rt : RuntimeState σ) (wakeFd : Option UInt32) (k : (UInt64 → IO Unit) → IO α) : IO α := do
+  if rt.wayland.display == 0 then return ← k (fun _ => IO.sleep 500)
   let getFd ← FFI.dlSym "libwayland-client.so.0" "wl_display_get_fd"
   let pollFn ← FFI.dlSym "" "poll"
-  if getFd == 0 || pollFn == 0 then throw (IO.userError "window poll unavailable")
-  let args (a b c : UInt64) := [a,b,c,0,0,0].foldl Wayland.pushU64LE ByteArray.empty
-  let fd ← FFI.call getFd (args rt.wayland.display.toUInt64 0 0)
-  let p ← FFI.memAlloc 8
+  let flush ← FFI.dlSym "libwayland-client.so.0" "wl_display_flush"
+  if getFd == 0 || pollFn == 0 || flush == 0 then throw (IO.userError "window poll unavailable")
+  let fd ← FFI.call getFd (callArgs rt.wayland.display.toUInt64 0 0)
+  let drain ← FFI.dlSym "" "eventfd_read"
+  if wakeFd.isSome && drain == 0 then throw (IO.userError "window eventfd read unavailable")
+  let p ← FFI.memAlloc 24
   if p == 0 then throw (IO.userError "window poll allocation failed")
   try
     -- Linux struct pollfd { int fd; short events; short revents; }, POLLIN=1.
-    FFI.memWrite p (Wayland.pushU32LE (Wayland.pushU32LE ByteArray.empty fd.toUInt32) 1)
-    k (discard <| FFI.call pollFn (args p.toUInt64 1 500))
+    let wait := fun count timeout => do
+      -- Dispatch can queue seat and IME requests after the event pump flushed.
+      -- Wake on writability as well if the outgoing socket was full.
+      let result ← FFI.call flush (callArgs rt.wayland.display.toUInt64 0 0)
+      let events := if result.toUInt32 == 0xffffffff then 5 else 1
+      FFI.memWrite p (Wayland.pushU32LE (Wayland.pushU32LE ByteArray.empty fd.toUInt32) events)
+      discard <| FFI.call pollFn (callArgs p.toUInt64 count timeout)
+    match wakeFd with
+    | none => k (fun ms => wait 1 (min 500 ms))
+    | some wake =>
+      FFI.memWrite (p + 8) (Wayland.pushU32LE (Wayland.pushU32LE ByteArray.empty wake) 1)
+      k (fun ms => do
+        wait 2 ms
+        -- Nonblocking read coalesces notices. A compositor-only wake returns EAGAIN.
+        discard <| FFI.call drain (callArgs wake.toUInt64 (p + 16).toUInt64 0))
   finally FFI.memFree p
 
 /-- Run the window until it is closed: render and present when there is damage, otherwise
@@ -409,8 +444,10 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
     (onEvent : RuntimeState σ → σ → Event → σ × Damage)
     (view : RuntimeState σ → IO (FrameView × List ScrollRegion))
     (pollFrame : RuntimeState σ → IO (σ × Damage) := fun rt => pure (rt.app, none))
-    (hasProducer : σ → Bool := fun _ => false) :
-    IO (RuntimeState σ) := withWindowWait rt0 fun timedWait => do
+    (hasProducer : σ → Bool := fun _ => false)
+    (focusChange : σ → σ → Option Nat := fun _ _ => none)
+    (wakeFd : Option UInt32 := none) (workPending : σ → Bool := fun _ => false)
+    (animationVisible : RuntimeState σ → Bool := fun _ => false) : IO (RuntimeState σ) := withWindowWait rt0 wakeFd fun timedWait => do
   let mut rt := rt0
   while rt.running do
     if !rt.wayland.configured then
@@ -424,14 +461,15 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
       rt := { rt with app }
       if let some rect := damage then rt := rt.markDirty rect
       let rendered := rt.framesRendered
-      rt ← stepFrameWithRegions rt (onEvent rt) view
+      rt ← stepFrameWithRegions rt (onEvent rt) view focusChange
       let wl ← Wayland.syncTextFocus rt.wayland (rt.focus.owner == some 1 && rt.focusableOrder.contains 1)
       rt := { rt with wayland := wl }
       if rt.framesRendered != rendered then
         let wl ← Wayland.present rt.wayland rt.vulkan.framebuffer
         rt := { rt with wayland := wl }
-      else if rt.running then
-        if hasProducer rt.app then timedWait else Wayland.waitEvents rt.wayland
+      else if rt.running && !workPending rt.app then
+        if animationVisible rt then timedWait (100 - (← IO.monoMsNow) % 100).toUInt64
+        else if hasProducer rt.app then timedWait 0xffffffff else Wayland.waitEvents rt.wayland
   return rt
 
 /-- Cleanly release font and Vulkan scratch resources owned by `RuntimeState`. -/

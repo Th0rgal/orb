@@ -1,5 +1,6 @@
 import OrbDesktop.State
 import Std.Sync.Mutex
+import Std.Data.HashMap
 
 namespace OrbDesktop
 
@@ -9,6 +10,8 @@ golden paths never call this module and remain deterministic fixtures. -/
 
 /-- Embedded connection-bound HTTP reader and writer. -/
 private def transport : String := include_str "live_transport.py"
+
+private def modelCatalogRules : String := include_str "../../../orb/src/modelSuccessors.json"
 
 private def splitTab (line : String) : List String :=
   line.splitOn "\t"
@@ -26,9 +29,10 @@ private def projectRow (idx : Nat) (xs : List String) : ChromeSidebarRow :=
 
 private def missionCard (idx : Nat) (xs : List String) : MissionSummaryCard :=
   { widgetId := 1001 + 3 * idx, missionId := col xs 1, title := col xs 2, project := col xs 3
-    track := col xs 4, model := if (col xs 5).isEmpty then col xs 6 else col xs 5
+    track := col xs 4, model := col xs 13
     status := col xs 7, updatedLabel := if (col xs 8).isEmpty then col xs 9 else col xs 8
-    summaryText := col xs 10 }
+    summaryText := col xs 10, machine := col xs 11, backend := col xs 12,
+    effort := col xs 14, permissionMode := col xs 15 }
 
 private def machineCard (idx : Nat) (xs : List String) : FleetMachineCard :=
   { widgetId := 1002 + 3 * idx, machineId := col xs 1, name := col xs 2
@@ -37,7 +41,7 @@ private def machineCard (idx : Nat) (xs : List String) : FleetMachineCard :=
     state := if (col xs 7).isEmpty then col xs 8 else col xs 7
     ttlLabel := col xs 9, costLabel := col xs 10, activeMissions := (col xs 11).toNat?.getD 0 }
 
-def loadLiveState : IO (Option DesktopState) := do
+def loadLiveState (isDark := true) (scale120 := 120) : IO (Option DesktopState) := do
   let some (header :: lines) ← (try runProjection catch _ => pure none) | return none
   let ["C", binding] := splitTab header | return none
   let ps := lines.filterMap (fun line => let xs := splitTab line; if col xs 0 == "P" then some xs else none)
@@ -51,14 +55,37 @@ def loadLiveState : IO (Option DesktopState) := do
   let sidebar := [{ widgetId := 101, rowId := "nav:control", kind := "nav", title := "Control Center", selected := true },
     { widgetId := 109, rowId := "section:missions", kind := "section", title := "Missions" }] ++ missionRows ++
     [{ widgetId := 108, rowId := "section:projects", kind := "section", title := "Projects" }] ++ projects
-  return some { DesktopState.liveUnavailable with
+  return some { DesktopState.liveUnavailable isDark scale120 with
     screen := if missions.isEmpty then .controlEmpty else .controlPopulated
     syncCursor := { epoch := 0, seq := 0 }
     connectionBinding := binding
     stream := Orb.Stream.Coalescer.empty
     sidebarRows := sidebar
     missionCards := missions
-    fleetMachines := machines }
+    fleetMachines := machines, catalogLoading := true }
+
+/-- Load selector choices separately so a cold provider catalog cannot delay the sidebar. -/
+def withLiveCatalog {α : Type} (binding : String) (notify : IO Unit)
+    (k : IO (Option (List CatalogModel)) → IO α) : IO α := do
+  if binding.isEmpty then return ← k (pure none)
+  let child ← IO.Process.spawn {
+    cmd := "python3", args := #["-I", "-c", transport ++ "\ncatalog(sys.argv[1], json.loads(sys.argv[2]))", binding, modelCatalogRules]
+    stdout := .piped, stderr := .null }
+  let mailbox ← Std.Mutex.new (none : Option (List CatalogModel))
+  let reader ← IO.asTask (prio := .dedicated) do
+    let out ← try child.stdout.readToEnd catch _ => pure ""
+    let models := (out.splitOn "\n").filterMap fun line =>
+      match splitTab line with
+      | ["H", backend, harnessName, model, modelName] =>
+        some ({ backend, harnessName, model, modelName } : CatalogModel)
+      | _ => none
+    mailbox.atomically (set (some models))
+    notify
+  try k (mailbox.atomically (modifyGet fun rows => (rows, none)))
+  finally
+    try child.kill catch _ => pure ()
+    discard child.wait
+    discard (IO.wait reader)
 
 inductive LiveUpdate where
   | sample (visible : List String) (bubble : Option (String × String × String))
@@ -70,7 +97,7 @@ structure LiveSubscription where
   latest : Std.Mutex (Option LiveUpdate)
   stop : IO Unit
 
-private def subscribe (mission binding : String) (tracked : List MissionSummaryCard) : IO LiveSubscription := do
+private def subscribe (mission binding : String) (tracked : List MissionSummaryCard) (notify : IO Unit) : IO LiveSubscription := do
   let child ← IO.Process.spawn {
     cmd := "python3", args := #["-I", "-c", transport ++ "\npoll(*sys.argv[1:])", mission, binding]
     stdin := .piped, stdout := .piped, stderr := .null }
@@ -96,7 +123,10 @@ private def subscribe (mission binding : String) (tracked : List MissionSummaryC
           | "R", [] => pure none
           | _, _ => break
         latest.atomically (set (some (LiveUpdate.sample visible bubble)))
-    finally latest.atomically (set (some LiveUpdate.invalid))
+        notify
+    finally
+      latest.atomically (set (some LiveUpdate.invalid))
+      notify
   return { mission, binding, latest, stop := do
     try child.kill catch _ => pure ()
     discard child.wait
@@ -108,28 +138,77 @@ def closeLiveSubscription (slot : IO.Ref (Option LiveSubscription)) : IO Unit :=
 /-- The window thread owns selection and damage. Each reader owns a fresh,
 single-value mailbox, so a retired subscription cannot update a new mission. -/
 def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewport : LeanUI.Rect)
-    (st : DesktopState) : IO (DesktopState × LeanUI.Damage) := do
+    (st : DesktopState) (notify : IO Unit := pure ()) : IO (DesktopState × LeanUI.Damage) := do
   let active ← slot.get
   if let some request := st.writeRequest then
     let st := { st with writeRequest := none, writeError := "" }
+    let encode := fun (v : LaunchSettings) => String.intercalate "\t" [v.machine, v.backend, v.model, v.effort, v.permission]
     let (action, mid, text) := match request with
-      | .create => ("create", "", "")
+      | .create => ("create", "", encode st.draftSettings ++ "\t" ++ st.draftProject)
       | .send mid text => ("send", mid, text)
       | .stop mid => ("stop", mid, "")
       | .archive mid => ("archive", mid, "")
+      | .restore mid => ("restore", mid, "")
+      | .rename mid title => ("rename", mid, title)
+      | .move mid project => ("move", mid, project)
+      | .copyId mid => ("copy-id", mid, "")
+      | .bulk kind mids project => ("bulk-" ++ kind, "", String.intercalate "\n" (project :: mids))
+      | .settings mid field values =>
+        let key := match field with
+          | .machine => "machine" | .backend => "backend" | .model => "model"
+          | .effort => "effort" | .permission => "permission"
+        ("settings", mid, key ++ "\t" ++ encode values)
     try
-      let r ← IO.Process.output { cmd := "python3", args := #["-I", "-c", transport ++ "\ntry: mutate(*sys.argv[1:])\nexcept Exception: sys.exit(1)", st.connectionBinding, action, mid] } (input? := some text)
+      let r ← IO.Process.output { cmd := "python3", args := #["-I", "-c", transport ++ "\ntry: mutate(*sys.argv[1:])\nexcept MissionNotIdle: sys.exit(2)\nexcept Exception: sys.exit(1)", st.connectionBinding, action, mid] } (input? := some text)
+      if action == "archive" && r.exitCode == 2 then
+        return ({ st with writeError := "Stop or finish this agent before archiving it." }, some viewport)
       if r.exitCode != 0 then throw (IO.userError "write failed")
       closeLiveSubscription slot
       match request with
       | .create =>
-        let [id,title,status] := splitTab r.stdout.trimAscii.toString | throw (IO.userError "invalid mission")
+        let [id,title,status,machine,backend,model,effort,permissionMode,project] := splitTab (r.stdout.dropEnd 1).toString | throw (IO.userError "invalid mission")
         let wid := 1 + st.sidebarRows.foldl (fun n row => max n row.widgetId) 1000
-        let card := { (default : MissionSummaryCard) with widgetId := wid, missionId := id, title, status }
+        let card := { (default : MissionSummaryCard) with widgetId := wid, missionId := id, title, status, machine, backend, model, effort, permissionMode, project }
         let row := { (default : ChromeSidebarRow) with widgetId := wid, rowId := "mission:" ++ id, kind := "mission", title, status }
         return (resetSelection { st with screen := .missionTranscript, missionCards := card :: st.missionCards, sidebarRows := row :: st.sidebarRows } (some card), some viewport)
       | .archive _ =>
-        return (resetSelection { st with screen := .controlEmpty, missionCards := st.missionCards.filter (·.missionId != mid), sidebarRows := st.sidebarRows.filter (·.rowId != "mission:" ++ mid) } none, some viewport)
+        let next := { st with
+          missionCards := st.missionCards.map fun m => if m.missionId == mid then { m with status := "acknowledged" } else m,
+          sidebarRows := st.sidebarRows.map fun row => if row.rowId == "mission:" ++ mid then { row with status := "acknowledged" } else row }
+        return (if st.openMission == some mid then resetSelection { next with screen := .controlEmpty } none else next, some viewport)
+      | .restore _ =>
+        return ({ st with
+                          missionCards := st.missionCards.map fun m => if m.missionId == mid then { m with status := "paused" } else m,
+                          sidebarRows := st.sidebarRows.map fun row => if row.rowId == "mission:" ++ mid then { row with status := "paused" } else row }, some viewport)
+      | .rename _ title =>
+        return ({ st with
+                          missionCards := st.missionCards.map fun m => if m.missionId == mid then { m with title } else m,
+                          sidebarRows := st.sidebarRows.map fun row => if row.rowId == "mission:" ++ mid then { row with title } else row }, some viewport)
+      | .move _ project =>
+        let moved := r.stdout.trimAscii.toString.splitOn "\n"
+        return ({ st with missionCards := st.missionCards.map fun m => if moved.contains m.missionId then { m with project } else m }, some viewport)
+      | .bulk kind _ project =>
+        let receipts := (r.stdout.splitOn "\n").map splitTab
+        let changed := receipts.filterMap fun xs => if col xs 0 == "ok" then some (col xs 1) else none
+        let failed := receipts.filterMap fun xs => if col xs 0 == "failed" then some (col xs 1) else none
+        let remove := kind == "delete"
+        let status := if kind == "archive" then "acknowledged" else "paused"
+        let cards := st.missionCards.filterMap fun m =>
+          if !changed.contains m.missionId then some m
+          else if remove then none else if kind == "move" then some { m with project } else some { m with status }
+        let rows := st.sidebarRows.filterMap fun row =>
+          if !changed.contains (row.rowId.drop 8).toString || row.kind != "mission" then some row
+          else if remove then none else if kind == "move" then some row else some { row with status }
+        let next := { st with
+          missionCards := cards, sidebarRows := rows, multiRows := failed.map ("mission:" ++ ·),
+          selectionAnchor := none, writeError := if failed.isEmpty then "" else s!"Core did not confirm {kind} for {failed.length} missions" }
+        return (if (remove || kind == "archive") && next.openMission.any changed.contains then resetSelection { next with screen := .controlEmpty } none else next, some viewport)
+      | .copyId _ => return (st, some viewport)
+      | .settings .. =>
+        let [machine,backend,model,effort,permissionMode] := splitTab (r.stdout.dropEnd 1).toString | throw (IO.userError "invalid settings response")
+        let cards := st.missionCards.map fun m =>
+          if m.missionId == mid then { m with machine, backend, model, effort, permissionMode } else m
+        return ({ st with missionCards := cards }, some viewport)
       | .send .. => return ({ st with composer := { isRunning := st.composer.isRunning } }, some viewport)
       | .stop _ => return (st, some viewport)
     catch _ => return ({ st with writeError := "Core did not confirm " ++ action }, some viewport)
@@ -138,7 +217,7 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
   if active.map (·.mission) != target || active.any (·.binding != st.connectionBinding) then
     closeLiveSubscription slot
     if let some mission := target then
-      try slot.set (some (← subscribe mission st.connectionBinding st.missionCards)) catch _ => return invalidate
+      try slot.set (some (← subscribe mission st.connectionBinding st.missionCards notify)) catch _ => return invalidate
   let some sub ← slot.get | return (st, none)
   let some update ← sub.latest.atomically (modifyGet (fun v => (v, none))) | return (st, none)
   match update with
@@ -149,8 +228,23 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
     let rows := st.sidebarRows.filter fun r =>
       if r.kind == "mission" then cards.any (·.widgetId == r.widgetId)
       else if r.kind == "project" then visible.contains ("P:" ++ (r.rowId.drop 8).toString) else true
+    let statuses := visible.foldl (fun (acc : Std.HashMap String String) key =>
+      match key.splitOn ":" with
+      | ["S", id, status] => acc.insert id status
+      | _ => acc) {}
+    let changed := cards.any fun c => (statuses.get? c.missionId).any (· != c.status)
+    let cards := if changed then cards.map (fun c =>
+      { c with status := (statuses.get? c.missionId).getD c.status }) else cards
+    let rows := if changed then rows.map (fun r =>
+      if r.kind == "mission" then { r with status := (statuses.get? ((r.rowId.drop 8).toString)).getD r.status }
+      else r) else rows
     let pruned := cards.length != st.missionCards.length || machines.length != st.fleetMachines.length || rows.length != st.sidebarRows.length
-    let st := { st with missionCards := cards, sidebarRows := rows, fleetMachines := machines }
+    let menu := st.missionMenu.bind fun m =>
+      if (m.mission.isEmpty || cards.any (·.missionId == m.mission)) && m.targets.all (fun id => cards.any (·.missionId == id))
+      then some m else none
+    let st := { st with
+      missionCards := cards, sidebarRows := rows, fleetMachines := machines, missionMenu := menu,
+      multiRows := st.multiRows.filter fun id => rows.any (·.rowId == id) }
     if st.openMission.isSome && st.selectedCard.isNone then
       closeLiveSubscription slot
       let (st, _) := stepDesktopEvent scale viewport st (.activate 101)
@@ -158,10 +252,10 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
     let some (title,status,text) := bubble | do
       -- No bubble (roster-only or malformed response): never discard other missions.
       let (next, damage) := applyLiveText scale viewport st sub.mission ""
-      return (next, if pruned then some viewport else damage)
+      return (next, if pruned || changed then some viewport else damage)
     let (next, damage) := applyLiveText scale viewport st sub.mission text
     let some card := next.selectedCard | return invalidate
-    if title == card.title && status == card.status then return (next, if pruned then some viewport else damage)
+    if title == card.title && status == card.status then return (next, if pruned || changed then some viewport else damage)
     return ({ next with
       composer := { next.composer with isRunning := status == "active" || status == "running" }
       missionCards := next.missionCards.map fun m => if m.missionId == sub.mission then { m with title, status } else m

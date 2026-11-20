@@ -329,7 +329,7 @@
 
   leanDesktop = mkLeanLayer {
     pname = "orb-lean-desktop";
-    src = leanSource [../lean/OrbDesktop];
+    src = leanSource [../lean/OrbDesktop ../orb/src/modelSuccessors.json];
     bins = ["orb-desktop-native"];
     deps = [leanBase];
   };
