@@ -1400,10 +1400,39 @@ export function modelLabelGroup(label: string): string | undefined {
   return head || undefined;
 }
 
-export function modelPickerItems(models: BackendModelOption[]): { id: string; label: string; description?: string; group?: string }[] {
-  const groups = new Set(models.map(m => modelLabelGroup(m.label)).filter((g): g is string => !!g));
+// Direct harness IDs and OpenCode provider-qualified IDs use the same catalog rules.
+const modelSuccessors: Record<string, Record<string, string>> = {
+  openai: {
+    "gpt-6-sol": "gpt-6.2-sol",
+    "gpt-6.1-sol": "gpt-6.2-sol",
+    "gpt-6-astra": "gpt-6.2-astra",
+  },
+  anthropic: {
+    "claude-opus-5": "claude-opus-5-5",
+    "claude-sonnet-4-6": "claude-sonnet-5-5",
+    "claude-fable-5": "claude-fable-5-2",
+    "claude-fable-5-1": "claude-fable-5-2",
+  },
+  xai: { "grok-4.6": "grok-4.7" },
+};
+const harnessProvider: Record<string, string> = { codex: "openai", claudecode: "anthropic", grok: "xai" };
+
+export function availableModelSuccessor(backend: string, value: string, models: BackendModelOption[], providerId?: string): string | undefined {
+  const slash = value.indexOf("/");
+  const namespace = slash < 0 ? "" : value.slice(0, slash + 1);
+  const provider = backend === "opencode" ? namespace.slice(0, -1) : harnessProvider[backend];
+  if (!provider || (namespace && namespace !== provider + "/")) return;
+  const successor = modelSuccessors[provider]?.[value.slice(namespace.length)];
+  if (typeof successor !== "string") return;
+  const candidate = namespace + successor;
+  return models.some(m => m.value === candidate && m.provider_id === providerId) ? candidate : undefined;
+}
+
+export function modelPickerItems(models: BackendModelOption[], backend: string): { id: string; label: string; description?: string; group?: string }[] {
+  const visible = models.filter(m => !availableModelSuccessor(backend, m.value, models, m.provider_id));
+  const groups = new Set(visible.map(m => modelLabelGroup(m.label)).filter((g): g is string => !!g));
   const showGroups = groups.size > 1;
-  return models.map(m => ({
+  return visible.map(m => ({
     id: m.value,
     label: shortModelLabel(m.label),
     ...(m.description ? { description: m.description } : {}),
