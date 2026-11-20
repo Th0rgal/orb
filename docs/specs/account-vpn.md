@@ -218,3 +218,11 @@ the account relay, checks adoption into the original credential file, and
 observes token refresh, buffered inference and streaming inference. When the
 relay refuses Kimi, the mock vendor receives neither the inference request
 nor a new device authorization request.
+
+## Alternative router access for native Antigravity accounts
+
+An administrator or the member who added an Antigravity account can choose whether alternative routers may use that credential for inference. Account connection and alternative router access are independent settings. The native agy harness retains its native login and account connection. Other credentials keep their own routing choices.
+
+Core resolves the account to a single credential before reading or changing its exclusions through the sidecar management API. Disabling alternative routers adds the wildcard model exclusion. Enabling them removes only the wildcard and keeps model-specific exclusions. A successful update requires a readback. An unavailable sidecar or an ambiguous credential binding leaves the control unavailable.
+
+The isolated sidecar test sends buffered and streaming requests before restricting the account. It then requests the model by its account prefix and its unqualified ID, checks that neither request reaches the simulated Google generation endpoint, and checks another provider during the restriction. Refresh and targeted reconnect must preserve the exclusion before the operator can restore access.

@@ -234,7 +234,7 @@ def run(binary, reconnect=False, orb_configure=None):
         (auth / "e.json").write_text(json.dumps({"type": "kimi", "access_token": "fixture-e", "prefix": "e",
                                                 "domain": "kimi.com", "expired": "2099-01-01T00:00:00Z"}))
         (auth / "d.json").write_text(json.dumps({"type": "antigravity", "access_token": "fixture-d", "prefix": "d",
-                                                "project_id": "fixture-project", "email": "d@example.invalid", "expired": "2099-01-01T00:00:00Z"}))
+                                                "project_id": "fixture-project", "excluded_models": ["fixture-retired-*"], "email": "d@example.invalid", "expired": "2099-01-01T00:00:00Z"}))
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             port = listener.getsockname()[1]
@@ -342,6 +342,39 @@ def run(binary, reconnect=False, orb_configure=None):
                     count = len([kind for kind, _ in google_hits if kind in ("generateContent", "streamGenerateContent")])
                     chat_inference(google_models[0], stream, b"fixture-google")
                     assert len([kind for kind, _ in google_hits if kind in ("generateContent", "streamGenerateContent")]) > count
+                # A native-only account must also disappear from the sidecar's
+                # unqualified model pool. Exercise the released binary and a
+                # real HTTP inference request before and after the restriction.
+                def set_google_exclusions(exclusions, visible):
+                    if orb_configure:
+                        action = "allow" if visible else "restrict"
+                        subprocess.run([orb_configure, "routers", f"http://127.0.0.1:{port}", "d.json", action],
+                                       input=key + "\n", text=True, check=True, timeout=15)
+                    else:
+                        api("PATCH", "credentials/fields", {"name": "d.json", "excluded_models": exclusions})
+                    saved = api("GET", "credentials/download?name=d.json")
+                    assert saved.get("excluded_models", []) == exclusions
+                    for _ in range(60):
+                        with urllib.request.urlopen(listing, timeout=3) as response:
+                            advertised = {m["id"] for m in json.load(response)["data"]}
+                        if (google_models[0] in advertised) == visible:
+                            return
+                        time.sleep(.2)
+                    raise AssertionError("sidecar catalog did not apply the Antigravity account policy")
+
+                set_google_exclusions(["fixture-retired-*", "*"], False)
+                def generation_hits():
+                    return sum(k in ("generateContent", "streamGenerateContent") for k, _ in google_hits)
+                before = generation_hits()
+                for model in (google_models[0], google_models[0].split("/", 1)[1]):
+                    try:
+                        chat_inference(model, False, b"fixture-google")
+                    except urllib.error.HTTPError as error:
+                        assert 400 <= error.code < 600
+                    else:
+                        raise AssertionError("native-only account served alternative-router inference")
+                assert generation_hits() == before
+                claude_inference()  # another provider remains available during the restriction
                 kimi_model = next(m for m in models if m.startswith("e/kimi-"))
                 for stream in (False, True):
                     chat_inference(kimi_model, stream, b"fixture-kimi")
@@ -374,6 +407,10 @@ def run(binary, reconnect=False, orb_configure=None):
                     assert reconnect_hits == [("127.0.0.2", "a"), ("127.0.0.3", "b")], reconnect_hits
                     assert ("authorization_code", "127.0.0.2") in claude_oauth, claude_oauth
                     print("Targeted OAuth reconnect passed for two ChatGPT fixtures, Claude, Google Antigravity and Kimi.")
+                saved_google = api("GET", "credentials/download?name=d.json")
+                assert saved_google.get("excluded_models") == ["fixture-retired-*", "*"], "refresh or reconnect lost router restriction"
+                set_google_exclusions(["fixture-retired-*"], True)
+                chat_inference(google_models[0], False, b"fixture-google")
                 assert ("refresh_token", "127.0.0.2") in claude_oauth, claude_oauth
                 assert all(ip == "127.0.0.2" for _, ip in claude_oauth), claude_oauth
                 with socket.socket() as unavailable:

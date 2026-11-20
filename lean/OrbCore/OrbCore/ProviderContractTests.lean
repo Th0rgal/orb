@@ -1716,7 +1716,7 @@ def run : IO Unit := do
         failures := failures.push "A display-only OAuth file must never authorize account VPN routing"
       let vpnSettings := "/api/settings/airvpn"
       let accountRoute := "/api/ai/providers/missing-account/vpn"
-      for path in [vpnSettings, accountRoute] do
+      for path in [vpnSettings, accountRoute, "/api/ai/providers/missing-account/alternative-routers"] do
         let (anonymous, _) ← putJson app "" path "{}" now
         let (memberCode, _) ← putJson app memberJwt path "{}" now
         if anonymous != 401 || memberCode != 403 then
@@ -1729,6 +1729,9 @@ def run : IO Unit := do
         createdByUserId := member.id
       }
       IO.ofExcept (← upsertAIProvider store ownerRow)
+      let (wrongType, _) ← putJson app memberJwt s!"/api/ai/providers/{ownerRow.id}/alternative-routers"
+        "{\"allowed\":false}" now
+      if wrongType != 409 then failures := failures.push "Router access cannot edit an unrelated provider type"
       let ownerRoute := s!"/api/ai/providers/{ownerRow.id}/vpn"
       let ownRoute ← getJson app memberJwt ownerRoute now
       unless ownRoute.fieldBool? "can_configure" == some true do
