@@ -160,14 +160,19 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
   let pal := theme.palette
   let small := Theme.mutedText theme
   if row.kind == "section" then
-    WidgetNode.box
+    let isArchives := row.rowId == "section:archives"
+    let icon := if isArchives then (if expanded then "chevron-down" else "chevron-right")
+      else if row.rowId == "section:archived" then "chevron-right" else "plus"
+    let section := WidgetNode.box
       (BoxStyle.row 0
         |>.withAlign .center
         |>.withPadding (Edges.trbl 0 (pxToSub 8) 0 (pxToSub 10))
         |>.withMargin margin
         |>.withFixedSize innerW (pxToSub 18))
        [chromeLabel small.lineHeightSub [overlaySynthRun small row.title] 1,
-        chromeIcon (if row.rowId == "section:archived" then "chevron-right" else "plus") pal.textFaint 14]
+        chromeIcon icon pal.textFaint 14]
+       (if isArchives then some row.widgetId else none)
+    if isArchives then WidgetNode.focusable row.widgetId section else section
   else
     let isFooter := row.kind == "footer"
     let isMission := row.kind == "mission"
@@ -304,8 +309,8 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
       buildSidebarRowWidget theme rowW r (Edges.trbl topM 0 0 0)
   let archived := fun (r : ChromeSidebarRow) => st.liveData && r.kind == "mission" && r.status == "acknowledged"
   let archiveRows := rowsSource.filter archived
-  let archiveGroup : List ChromeSidebarRow := if archiveRows.isEmpty then [] else
-    [{ widgetId := 730, rowId := "section:archives", kind := "nav", title := "Archived", badge := archiveRows.length }] ++
+  let archiveGroup : List ChromeSidebarRow := if !st.hasLiveConnection then [] else
+    [{ widgetId := 730, rowId := "section:archives", kind := "section", title := "Archived" }] ++
     (if st.archivesOpen then archiveRows else [])
   let treeRows : List WidgetNode :=
     ((rowsSource.filter fun r => !isNav r && !isFoot r && !archived r) ++ archiveGroup).map fun r =>
@@ -320,7 +325,7 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
       else
         buildSidebarRowWidget theme rowW { r with selected := r.selected || st.multiRows.contains r.rowId }
           (if r.kind == "section" then Edges.trbl (pxToSub 14) 0 (pxToSub 4) 0
-           else Edges.trbl 0 0 (pxToSub 1) 0) (if st.liveData then some st.badgePhase else none) (st.expandedMissions.contains r.rowId)
+           else Edges.trbl 0 0 (pxToSub 1) 0) (if st.liveData then some st.badgePhase else none) (if r.rowId == "section:archives" then st.archivesOpen else st.expandedMissions.contains r.rowId)
   let footRows : List WidgetNode :=
     (rowsSource.filter isFoot).map fun r => buildSidebarRowWidget theme rowW r
   let rosterH := availH - chromeHeaderHeightSub - footH
