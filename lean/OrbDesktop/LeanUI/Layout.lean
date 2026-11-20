@@ -33,7 +33,7 @@ structure InlineRun where
 namespace InlineRun
 
 @[inline] def advance (r : InlineRun) : SubPx :=
-  (r.glyphs.map (·.xAdvance)).sum
+  r.glyphs.foldl (fun x g => x + g.xAdvance) 0
 
 end InlineRun
 
@@ -209,6 +209,9 @@ end LayoutNode
 /-- Intrinsic content measurement `(widthSub, heightSub)` (including padding & margins) for a `LayoutNode`. -/
 def measureNode (availWidthSub : SubPx) : LayoutNode → SubPx × SubPx
   | .box _ s children =>
+    if s.minWidth == s.maxWidth && s.minHeight == s.maxHeight then
+      (s.minWidth + s.margin.horizontal, s.minHeight + s.margin.vertical)
+    else
     let padW := s.padding.horizontal
     let padH := s.padding.vertical
     let marW := s.margin.horizontal
@@ -233,18 +236,28 @@ def measureNode (availWidthSub : SubPx) : LayoutNode → SubPx × SubPx
     let clampedH := clampNat s.minHeight s.maxHeight rawH
     (clampedW + marW, clampedH + marH)
   | .text _ s lineHeightSub runs =>
+    if s.minWidth == s.maxWidth && s.minHeight == s.maxHeight then
+      (s.minWidth + s.margin.horizontal, s.minHeight + s.margin.vertical)
+    else
     let padW := s.padding.horizontal
     let padH := s.padding.vertical
     let marW := s.margin.horizontal
     let marH := s.margin.vertical
     let innerAvailW := availWidthSub - (padW + marW)
-    let (_, textW, textH) := wrapInlineRuns innerAvailW lineHeightSub runs
+    -- A single run starts at x=0, so it never wraps internally. Intrinsic
+    -- measurement only needs its extent, not a freshly positioned glyph list.
+    let (textW, textH) := match runs with
+      | [r] => (r.advance, if r.glyphs.isEmpty && !r.hardBreakAfter then 0 else max r.style.lineHeightSub lineHeightSub)
+      | _ => let (_, w, h) := wrapInlineRuns innerAvailW lineHeightSub runs; (w, h)
     let rawW := max s.basis (textW + padW)
     let rawH := max (textH + padH) s.minHeight
     let clampedW := clampNat s.minWidth s.maxWidth rawW
     let clampedH := clampNat s.minHeight s.maxHeight rawH
     (clampedW + marW, clampedH + marH)
   | .scroll _ s _ child =>
+    if s.minWidth == s.maxWidth && s.minHeight == s.maxHeight then
+      (s.minWidth + s.margin.horizontal, s.minHeight + s.margin.vertical)
+    else
     let padW := s.padding.horizontal
     let padH := s.padding.vertical
     let marW := s.margin.horizontal

@@ -1496,9 +1496,11 @@ private def routingChainProbeContract (app : CoreAppState) (jwt : String) (now :
           s!"HTTP/1.1 {code} Result\r\nContent-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\nConnection: close\r\n\r\n{body}".toUTF8
         discard <| LeanSys.Posix.closeFd client
   try
-    let (_, doc) ← postJson app jwt "/api/model-routing/chains/builtin/smart/test" "{}" now
-    if doc.fieldBool? "ok" != some true || !(← reached.get) then
-      failures := failures.push s!"authenticated builtin/smart test must reach upstream: {renderCompact doc}"
+    for pathId in ["builtin/smart", "builtin%2Fsmart", "smart"] do
+      reached.set false
+      let (_, doc) ← postJson app jwt s!"/api/model-routing/chains/{pathId}/test" "{}" now
+      if doc.fieldBool? "ok" != some true || !(← reached.get) then
+        failures := failures.push s!"authenticated {pathId} test must reach upstream: {renderCompact doc}"
     if ← authenticateProxyRequest app #[] now then
       failures := failures.push "proxy must still reject missing credentials"
   finally
@@ -1508,6 +1510,77 @@ private def routingChainProbeContract (app : CoreAppState) (jwt : String) (now :
   return failures
 
 /-- Replay the production renderers and HTTP dispatch, never a live usage fetch. -/
+private def r21aGoogleAcquisition : IO Unit := do
+  let targets := parseChainTargetsJson
+    "[{\"provider_id\":\"google\",\"account_id\":\"one\",\"model_id\":\"a\"},{\"provider_id\":\"google\",\"account_id\":\"one\",\"model_id\":\"b\"},{\"provider_id\":\"google\",\"account_id\":\"two\",\"model_id\":\"a\"}]"
+    #[] #[] "" "" (some (effectiveGoogleMaxConcurrency (some 1) (some "9")))
+  let #[a,b,c] := targets | throw (IO.userError "r21aGoogleAcquisition: missing targets")
+  let tracker ← newProxyPacingTracker
+  unless ← tryAcquireTargetSlot tracker a 1 do throw (IO.userError "r21aGoogleAcquisition: first slot")
+  if ← tryAcquireTargetSlot tracker b 2 then throw (IO.userError "r21aGoogleAcquisition: second model exceeded account cap")
+  unless ← tryAcquireTargetSlot tracker c 2 do throw (IO.userError "r21aGoogleAcquisition: unrelated account blocked")
+  releaseTargetSlot tracker a
+  unless ← tryAcquireTargetSlot tracker b 3 do throw (IO.userError "r21aGoogleAcquisition: release did not restore slot")
+
+private def r21aAdapterReplays (store : CoreStore) (root : String) : IO Unit := do
+  let reply (raw : String) := Except.ok (200, "", (OrbBin.Json.parse raw).toOption)
+  let hp := { (default : HydratedProvider) with providerType := "antigravity", hasOAuth := true, oauthToken := "fixture-google" }
+  let google : UsageHttp := fun method url bearer body _ _ _ => do
+    unless method == "POST" && bearer == some "fixture-google" do throw (IO.userError "r21aGoogleQuota: wrong credential")
+    if url.endsWith ":loadCodeAssist" then return reply "{\"cloudaicompanionProject\":\"fixture-project\"}"
+    if url.endsWith ":retrieveUserQuotaSummary" && (body.bind (·.fieldStr? "project")) == some "fixture-project" then
+      return reply "{\"groups\":[{\"displayName\":\"Gemini models\",\"buckets\":[{\"window\":\"weekly\",\"remainingFraction\":0.25}]}]}"
+    throw (IO.userError "r21aGoogleQuota: unexpected request")
+  let quota ← fetchLiveProviderUsage hp google
+  let windows := (quota.fieldArr? "antigravity_windows").getD #[]
+  unless windows.size == 1 && windows[0]!.fieldStr? "label" == some "Gemini · Weekly" &&
+      windows[0]!.field? "used_percent" == some (.num "75.0") do
+    throw (IO.userError "r21aGoogleQuota: missing weekly quota")
+  let denied ← fetchLiveProviderUsage hp fun _ url _ _ _ _ _ => do
+    unless url.endsWith ":loadCodeAssist" do throw (IO.userError "r21aGoogleEligibility: quota read after refusal")
+    return reply "{\"ineligibleTiers\":[{\"reasonCode\":\"VALIDATION_REQUIRED\",\"validationUrl\":\"https://fixture.invalid/verify\"}]}"
+  unless denied.fieldStr? "status" == some "needs_verification" && denied.fieldStr? "verification_url" == some "https://fixture.invalid/verify" &&
+      (projectMemberProviderUsageJv denied "Google").field? "verification_url" == none do
+    throw (IO.userError "r21aGoogleEligibility: verification link or member redaction")
+  let kimiFile := s!"{root}/auth-empty/kimi-fixture.json"
+  let museFile := s!"{root}/auth-empty/meta-fixture.json"
+  IO.FS.writeFile museFile "{\"type\":\"meta\",\"access_token\":\"fixture-minted\",\"dca_token\":\"fixture-device\"}"
+  IO.FS.writeFile kimiFile "{\"type\":\"kimi\",\"access_token\":\"fixture-expired\"}"
+  IO.FS.writeFile s!"{root}/.sandboxed-sh/ai_providers.json"
+    "[{\"id\":\"fixture-muse\",\"name\":\"Muse\",\"provider_type\":\"muse-code\",\"api_key\":\"fixture-api\",\"oauth\":{\"refresh_token\":\"meta-fixture.json\"}}]"
+  let some muse := (← loadHydratedProviders store root).find? (·.id == "fixture-muse")
+    | throw (IO.userError "r21aMuseCredential: hydration")
+  let fetchMuse : UsageHttp := fun method url bearer _ _ _ _ => do
+    unless method == "POST" && url == "https://api.meta.ai/muse-code/key" && bearer == some "fixture-device" do
+      throw (IO.userError "r21aMuseCredential: wrong credential role")
+    return reply "{\"subs_tier_name\":\"Fixture Team\",\"key\":\"fixture-secret-mint\"}"
+  let m ← fetchLiveProviderUsage muse fetchMuse
+  unless m.fieldStr? "muse_plan" == some "Fixture Team" && !(renderCompact m).contains "fixture-secret-mint" do
+    throw (IO.userError "r21aMuseCredential: plan or minted-key disclosure")
+  discard <| fetchLiveProviderUsage { muse with deviceToken := "" } fun _ _ _ _ _ _ _ =>
+    throw (IO.userError "r21aMuseCredential: fell back to minted/API key")
+  let calls ← IO.mkRef (#[] : Array String)
+  let base ← newProviderRuntimeHub
+  let hub := { base with usageHttp := fun method url bearer _ _ _ _ => do
+    calls.modify (·.push (bearer.getD ""))
+    unless method == "GET" && url == "https://api.kimi.com/coding/v1/usages" do throw (IO.userError "r21aUpkeep: unexpected vendor")
+    if bearer == some "fixture-expired" then return .ok (401, "", none)
+    return reply "{\"data\":[{\"name\":\"5h\",\"limit\":20,\"used\":5},{\"model_name\":\"all\",\"limit\":100,\"remaining\":40},{\"name\":\"bonus\",\"remaining\":2}]}" }
+  let first ← runProviderUsageUpkeepPass hub store root 0
+  let cached := fun () => hub.mu.atomically (do return ((← get).usageEntries[0]?).map (·.payload) |>.getD .null)
+  unless first == #["cliproxyapi:kimi"] && (← cached ()).fieldStr? "status" == some "needs_reauth" do
+    throw (IO.userError "r21aUpkeep: rejected login not observed")
+  unless (← runProviderUsageUpkeepPass hub store root 0).isEmpty do throw (IO.userError "r21aUpkeep: fresh entry re-polled")
+  -- The external owner has already rotated the file. This tests consumption, not renewal.
+  IO.FS.writeFile kimiFile "{\"type\":\"kimi\",\"access_token\":\"fixture-rotated\"}"
+  discard <| runProviderUsageUpkeepPass hub store root 0 0
+  let k ← cached ()
+  unless (← calls.get) == #["fixture-expired", "fixture-rotated"] && k.fieldStr? "status" == some "connected" &&
+      k.fieldOrNull "kimi_5h_used_percent" == .num "25" && k.fieldOrNull "kimi_weekly_used_percent" == .num "60" &&
+      ((k.fieldArr? "kimi_windows").getD #[]).size == 3 do throw (IO.userError "r21aKimiRotatedTokenAndDataWindows")
+  IO.FS.removeFile kimiFile
+  IO.FS.removeFile museFile
+
 def run : IO Unit := do
   let fixtureRaw ← IO.FS.readFile "shared/orb-spec/fixtures/provider-response-contract.json"
   let .ok fixture := OrbBin.Json.parse fixtureRaw
@@ -1523,6 +1596,8 @@ def run : IO Unit := do
     let .ok store ← openCoreStore s!"{root}/.sandboxed-sh"
       | throw (IO.userError "provider contract store open failed")
     try
+      r21aGoogleAcquisition
+      r21aAdapterReplays store root
       IO.FS.writeFile s!"{root}/.sandboxed-sh/ai_providers.json"
         (renderCompact (.arr (cases.map (·.fieldOrNull "provider"))))
       let baseHub ← newProviderRuntimeHub

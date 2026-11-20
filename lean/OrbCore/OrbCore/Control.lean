@@ -973,7 +973,8 @@ def parseChainTargetsJson
               apiKey                 := key
               modelId                := mdl
               accountRpmLimit?       := inlineAcctRpm?.orElse (fun _ => matchedProv?.bind (·.rpmLimit?))
-              accountMaxConcurrency? := inlineAcctConc?.orElse (fun _ => matchedProv?.bind (·.maxConcurrency?))
+              accountMaxConcurrency? := (inlineAcctConc?.orElse (fun _ => matchedProv?.bind (·.maxConcurrency?))).orElse
+                (fun _ => if effProvType == "google" || effProvType == "antigravity" then googleMaxConcurrency? else none)
               modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
               modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
               modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
@@ -982,6 +983,23 @@ def parseChainTargetsJson
     return out
   | _ => return #[]
 
+/-- Per-account concurrency cap of Google and Antigravity targets: the saved
+    `google_max_concurrency` setting when it is at least 1, else a positive
+    `PROXY_GOOGLE_MAX_CONCURRENCY`, else 10; never above 128. -/
+def effectiveGoogleMaxConcurrency (setting? : Option Nat) (env? : Option String) : UInt32 :=
+  let chosen :=
+    match setting?.filter (· ≥ 1) with
+    | some n => n
+    | none => ((env?.bind (·.trimAscii.toString.toNat?)).filter (· > 0)).getD 10
+  (min 128 chosen).toUInt32
+
+/-- The cap in force now, read from the settings file and the environment. Every routing
+    target is built with this value; nothing else reads either source. -/
+def resolveGoogleMaxConcurrency (dataRoot : String) : IO UInt32 := do
+  let settings ← readSettingsJson dataRoot
+  return effectiveGoogleMaxConcurrency (settings.fieldNat? "google_max_concurrency")
+    (← IO.getEnv "PROXY_GOOGLE_MAX_CONCURRENCY")
+
 /-- Hydrate `RoutingChain` table from `missions.db` (`model_routing_chains` + `ai_providers` + decrypted `.sandboxed-sh/ai_providers.json` + CLIProxyAPI). -/
 def loadRoutingChainsFromStore (st : CoreStore) (workingDir : String := "") : IO (Array RoutingChain) := do
   let providers ← listAIProviders st
@@ -989,8 +1007,7 @@ def loadRoutingChainsFromStore (st : CoreStore) (workingDir : String := "") : IO
   let hydratedProvs ← loadHydratedProviders st effWorkDir
   let cliKey := ((← lookupEnvWithFiles? "CLI_PROXY_API_KEY").getD "").trimAscii.toString
   let cliUrl ← resolveCliProxyBaseUrl
-  let envGoogle := (((← IO.getEnv "PROXY_GOOGLE_MAX_CONCURRENCY").getD "10").trimAscii.toString.toNat?).getD 10
-  let googleMax := min 128 (max 1 envGoogle)
+  let googleMax ← resolveGoogleMaxConcurrency st.rootDir
   let .ok rows ← execParamQuery st.missionsDb "SELECT id,name,models_json FROM model_routing_chains ORDER BY id ASC;" #[]
     | throw (IO.userError "routing_chain_store_unavailable")
   let mut out : Array RoutingChain := #[]
@@ -999,12 +1016,12 @@ def loadRoutingChainsFromStore (st : CoreStore) (workingDir : String := "") : IO
     let cid := (r[0]?).getD ""
     let nm := (r[1]?).getD cid
     let mj := (r[2]?).getD "[]"
-    out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey (some googleMax.toUInt32) }
+    out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey (some googleMax) }
   -- Immutable defaults are a derived view, not a second mutable config store.
   -- Persisted ids (even empty/unavailable chains) always win over stock entries.
   for (id, name, entries) in OrbCore.ProxyModelRouting.stockChains do
     if !out.any (fun c => c.id == id) then
-      out := out.push { id := id, name := name, targets := parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson entries) providers hydratedProvs cliUrl cliKey (some googleMax.toUInt32) }
+      out := out.push { id := id, name := name, targets := parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson entries) providers hydratedProvs cliUrl cliKey (some googleMax) }
   return out
 
 private def optU32Json (v? : Option UInt32) : String :=
@@ -1070,10 +1087,9 @@ private def directRoutingChain? (st : CoreAppState) (chains : Array RoutingChain
   let hydrated ← loadHydratedProviders st.store st.cfg.workingDir
   let cliKey := ((← lookupEnvWithFiles? "CLI_PROXY_API_KEY").getD "").trimAscii.toString
   let cliUrl ← resolveCliProxyBaseUrl
-  let envGoogle := (((← IO.getEnv "PROXY_GOOGLE_MAX_CONCURRENCY").getD "10").trimAscii.toString.toNat?).getD 10
-  let googleMax := min 128 (max 1 envGoogle)
+  let googleMax ← resolveGoogleMaxConcurrency st.store.rootDir
   let targets := (parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson #[(provider, model)])
-    providers hydrated cliUrl cliKey (some googleMax.toUInt32)).filter (fun t => !t.apiKey.isEmpty)
+    providers hydrated cliUrl cliKey (some googleMax)).filter (fun t => !t.apiKey.isEmpty)
   -- Explicit in-memory chain snapshots can be the configured standard accounts
   -- (including hermetic transports). Do not resurrect them over disabled store rows.
   let hasConfiguredOwner := providers.any (fun p => p.providerType == provider || p.id == provider ||
@@ -2129,7 +2145,8 @@ private def launchLocalCoreMissionTurn
     (missionId harness cwd prompt model effort permMode : String)
     (sessionId? : Option String := none)
     (worktreeMode : String := "")
-    (appendUserEvent : Bool := false) : IO (Except String String) := do
+    (appendUserEvent : Bool := false)
+    (wakeup? : Option WakeupClaim := none) : IO (Except String String) := do
   let some mgr := st.warmMgr? | return .error "warm_harness_manager_unavailable"
   let effRawCwd := if cwd.trimAscii.toString.isEmpty then st.cfg.workingDir else cwd
   let safeCwd ← match ← confineWorkingDirectory st.cfg.workingDir effRawCwd with
@@ -2164,10 +2181,21 @@ private def launchLocalCoreMissionTurn
     match prevSt? with
     | some s => max (dbGen + 1) (s.generation + 1)
     | none => if sessionId?.isSome then dbGen + 1 else dbGen
-  carryArmedWakeupsForward (execParamQuery st.store.missionsDb) missionId nextGen.toNat ts
-  discard <| execParamQuery st.store.missionsDb
-    "UPDATE missions SET status='active', run_generation=CAST(?2 AS INTEGER), state_revision=state_revision+1, updated_at=?3 WHERE id=?1;"
-    #[missionId, s!"{nextGen}", ts]
+  let started ← withImmediateTx st.store.missionsDb do
+    let query := execParamQueryUnlocked st.store.missionsDb
+    if let some claim := wakeup? then
+      let .ok rows ← query
+        ("UPDATE mission_continuations SET run_generation=CAST(?5 AS INTEGER) " ++
+         "WHERE id=?1 AND request_id=?2 AND phase=2 AND mission_id=?3 AND run_generation=CAST(?4 AS INTEGER) " ++
+         "AND EXISTS(SELECT 1 FROM missions WHERE id=?3 AND run_generation=CAST(?4 AS INTEGER) " ++
+         "AND status NOT IN ('active','pending','waiting_background','completed','failed','cancelled','not_feasible')) RETURNING id;")
+        #[claim.id, claim.requestId, missionId, s!"{claim.generation}", s!"{nextGen}"]
+        | return .error "wakeup_claim_write_failed"
+      if rows.size ≤ 1 then return .error "wakeup_claim_fenced"
+    carryArmedWakeupsForward query missionId nextGen.toNat ts
+    query "UPDATE missions SET status='active', run_generation=CAST(?2 AS INTEGER), state_revision=state_revision+1, updated_at=?3 WHERE id=?1;"
+      #[missionId, s!"{nextGen}", ts]
+  if let .error e := started then return .error e
   let model? := if model.trimAscii.toString.isEmpty then none else some model.trimAscii.toString
   let effort? := if effort.trimAscii.toString.isEmpty then none else some effort.trimAscii.toString
   let parsedPerm := OrbBin.ClaudeControl.parsePermissionMode permMode
@@ -2232,6 +2260,11 @@ private def launchLocalCoreMissionTurn
         return .ok safeWt
     return .ok safeCwd
   | .error err => failLaunch err
+
+def launchLocalWakeup (st : CoreAppState) (mr : MissionRecord) (prompt : String)
+    (sid? : Option String) (claim : WakeupClaim) : IO Bool := do
+  return (← launchLocalCoreMissionTurn st mr.id mr.backend mr.workingDirectory prompt mr.modelOverride
+    mr.modelEffort "bypassPermissions" sid? "local" false (some claim)).isOk
 
 /-- Resolve or provision a concrete remote node when a control-plane mission turn targets
     `auto-managed[:provider][:size]`. Reuses any existing scoped ready machine for the mission/user;
@@ -2557,6 +2590,23 @@ private def dispatchMissionControlAndGitRoutes?
     jsonResponse code bodyStr #[] reqOrigin?
   let mkJsonHdr (code : Nat) (bodyStr : String) (hdrs : Array (String × String)) : CoreHttpResponse :=
     jsonResponse code bodyStr hdrs reqOrigin?
+
+  if req.method == "GET" then
+    if let some params := matchRoutePattern? "/api/control/missions/:id/current-bubble" rawTarget then
+      let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      if !isSafeMissionId mid then return some (.ok (mkJson 400 "{\"error\":\"invalid_mission_id\"}"))
+      if let some (code, body) ← authorizeMissionOp st caller mid false then
+        return some (.ok (mkJson code body))
+      let presence := ((parseQueryParams rawTarget).find? (fun p => p.1 == "presence")).map Prod.snd == some "1"
+      let .ok rows ← execParamQuery st.store.missionsDb (include_str "current_bubble.sql")
+          #[mid, if caller.isLegacyUnscoped then "1" else "0", caller.userId, if presence then "1" else "0"]
+        | return some (.ok (mkJson 500 "{\"error\":\"projection_failed\"}"))
+      let some r := rows[1]? | return some (.ok (mkJson 404 "{\"error\":\"mission_not_found\"}"))
+      let content := r[2]?.getD ""
+      let text := if content.length > 65536 then (content.take 65536).toString ++ "…" else content
+      let body := renderCompact (.obj #[("id", .str mid), ("title", .str (r[0]?.getD "")),
+        ("status", .str (r[1]?.getD "")), ("text", .str text)])
+      return some (.ok (mkJsonHdr 200 body #[("Cache-Control", "no-store")]))
 
   if let some params := matchRoutePattern? "/api/control/missions/:id/events" rawTarget then
     if req.method == "GET" then
@@ -7190,6 +7240,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | _, _ => curSettings
       if let .error e ← writeSettingsJson st.store.rootDir merged (some curSettings) then
         return .ok (mkJson (OrbCore.SettingsFile.errorStatus e) s!"\{\"error\":{jsonEscape e}}")
+      -- The Google cap is part of every published routing target: a change applies now, not at
+      -- the next restart.
+      if merged.fieldOrNull "google_max_concurrency" != curSettings.fieldOrNull "google_max_concurrency" then
+        discard <| publishRoutingChainsUpdate st (← loadRoutingChainsFromStore st.store st.cfg.workingDir) (forceBump := false)
       let scopedSettings ← scopeLibrarySettingsResponse st.store.rootDir st.cfg.workingDir caller.userId st.bootstrapAdminId merged
       return .ok (mkJson 200 (renderCompact (redactSettingsSecrets scopedSettings)))
 
@@ -8082,12 +8136,12 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
         IO.eprintln s!"[sandboxed-sh] FATAL: failed to bind {bindHost}:{cfg.port}"
         return 1
     remoteSup.boundPortRef.set boundPort
-    if let .error e ← fenceInterruptedGoalSubmissions store then
+    if let .error e ← fenceInterruptedRemoteSubmissions store then
       discard <| LeanSys.Posix.closeFd listenFd
       stopMacTetherRuntime macTetherRt
       closeManagedComputeStore managedStore
       closeCoreStore store
-      IO.eprintln s!"[sandboxed-sh] FATAL: Goal submission startup fence failed: {e}"
+      IO.eprintln s!"[sandboxed-sh] FATAL: remote submission startup fence failed: {e}"
       return 1
     let vpnRelay? ← match ← AccountVpnRelay.configured (← IO.getEnv "ORB_AIRVPN_RELAY_PORT")
         (effectiveJwtSecret cfg) vpnCoordinatorDir (!cfg.devMode) vpnPool store with
@@ -8114,11 +8168,6 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     IO.eprintln s!"[sandboxed-sh] listening on http://{bindHost}:{boundPort} (dev_mode={cfg.devMode})"
     if maxRequests?.isNone then
       startCloudSupervisorLoop cloudHub store (some broadcastHub) cfg.port
-      let localWakeupLaunch : MissionRecord → String → Option String → IO Bool :=
-        fun mr prompt sid? => do
-          match ← launchLocalCoreMissionTurn appState mr.id mr.backend mr.workingDirectory prompt mr.modelOverride mr.modelEffort "bypassPermissions" sid? "local" false with
-          | .ok _ => return true
-          | .error _ => return false
       discard <| IO.asTask (prio := .dedicated) do
         -- An error in one pass must never end the scheduler for the life of the process.
         try
@@ -8129,7 +8178,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
           IO.eprintln s!"[sandboxed-sh] remote job re-attach failed: {e}"
         while true do
            try
-             discard <| tickContinuationScheduler store (some managedStore) (some relayHub) (some broadcastHub) remoteSup (some warmMgr) cfg.workingDir (some localWakeupLaunch)
+             discard <| tickContinuationScheduler store (some managedStore) (some relayHub) (some broadcastHub) remoteSup (some warmMgr) cfg.workingDir (some (launchLocalWakeup appState))
              let nowSec ← coreEpochSec
              discard <| tickLocalHarnessSupervisor appState (formatEpochIso8601Utc nowSec)
              discard <| reapOrphanedMissionRuns store.missionsDb (formatEpochIso8601Utc nowSec)
@@ -8137,6 +8186,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
            catch e =>
              IO.eprintln s!"[sandboxed-sh] wake-up scheduler pass failed: {e}"
           IO.sleep 2000
+      discard <| IO.asTask (prio := .dedicated) (providerUsageUpkeepLoop providerHub store cfg.workingDir)
       discard <| IO.asTask (prio := .dedicated) do
         while true do
           try

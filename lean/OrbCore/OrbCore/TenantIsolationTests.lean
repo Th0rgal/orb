@@ -783,6 +783,17 @@ def run (root : String) : IO Unit := do
       let .ok request := parseRequest wire.toUTF8 none | throw (IO.userError "isolation request")
       let .ok response ← dispatchCoreRequest app request now | throw (IO.userError "isolation dispatch")
       return (response.status, (parseBytes response.body).toOption.getD .null)
+    -- The desktop's bounded read must pass the same mission guard as /events,
+    -- including zero-oracle denial to an unrelated administrator.
+    let bubblePath := "/api/control/missions/member-other/current-bubble"
+    let (ownerCode, projection) ← send "GET" bubblePath member
+    let (foreignCode, denied) ← send "GET" bubblePath admin
+    let (missingCode, missing) ← send "GET" "/api/control/missions/no-such-mission/current-bubble" admin
+    let (anonCode, _) ← send "GET" bubblePath "invalid"
+    check (ownerCode == 200 && projection.fieldStr? "id" == some "member-other" &&
+      projection.fieldStr? "text" == some "" && (projection.field? "history").isNone &&
+      anonCode == 401 && foreignCode == 404 && missingCode == 404 && renderCompact denied == renderCompact missing)
+      "current bubble requires an authenticated mission reader"
     for method in #["GET", "POST"] do
       let route := "/api/workspaces/member-workspace/resources"
       let body := JVal.obj #[("memory_max", .str "1G"), ("cpu_quota", .str "50%")]

@@ -13,6 +13,7 @@ structure CliAuthFileInfo where
   disabled    : Bool
   mtimeSec    : UInt64
   fingerprint : UInt64 := 0
+  deviceToken : String := ""
   deriving Repr, Inhabited
 
 def providerTypeMatchesAuthType (provType authType : String) : Bool :=

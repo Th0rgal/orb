@@ -344,6 +344,7 @@ def idempotencySchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS idempotency_keys (scope TEXT NOT NULL, request_key TEXT NOT NULL, response_json TEXT NOT NULL, status_code INTEGER NOT NULL DEFAULT 200, committed_oversize INTEGER NOT NULL DEFAULT 0, body_bytes INTEGER NOT NULL DEFAULT 0, phase TEXT NOT NULL DEFAULT 'committed', created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(scope, request_key));"
 
 def missionsAdditiveAlters : Array String := #[
+  "ALTER TABLE mission_continuations ADD COLUMN dispatch_job_id TEXT NOT NULL DEFAULT '';",
   -- NULL means "never set": the stock default applies (see `chainResponse`).
   "ALTER TABLE model_routing_chains ADD COLUMN is_default INTEGER;",
   "ALTER TABLE model_routing_chains ADD COLUMN strip_thinking INTEGER;",
@@ -444,6 +445,7 @@ def missionsAdditiveAlters : Array String := #[
   "CREATE INDEX IF NOT EXISTS idx_missions_owner ON missions(owner_user_id);",
   "CREATE INDEX IF NOT EXISTS idx_missions_project_folder ON missions(project, folder);",
   "CREATE INDEX IF NOT EXISTS idx_events_mission ON mission_events(mission_id, sequence);",
+  "CREATE INDEX IF NOT EXISTS idx_current_bubble ON mission_events(mission_id,(CASE WHEN seq > 0 THEN seq ELSE COALESCE(sequence,0) END) DESC,id DESC) WHERE event_type IN ('user_message','text_delta','assistant_message','assistant_message_canonical');",
   "CREATE INDEX IF NOT EXISTS idx_mission_events_mission_seq ON mission_events(mission_id, seq) WHERE seq > 0;",
   "CREATE INDEX IF NOT EXISTS idx_mission_events_mission_type_seq ON mission_events(mission_id, event_type, seq) WHERE seq > 0;",
   "CREATE INDEX IF NOT EXISTS idx_missions_updated_at ON missions(updated_at DESC);",

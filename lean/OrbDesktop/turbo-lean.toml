@@ -2,6 +2,11 @@
 # OrbDesktop's own C shims, admitted by turbo-lean's kernel gate as trusted FFI.
 [ffi]
 allow = [
+  "LeanUI.FFI=LeanUI.FFI.iconMask=lean_ui_icon_mask",
+  "LeanUI.FFI=LeanUI.FFI.boxAxis=lean_ui_box_axis",
+  "LeanUI.FFI=LeanUI.FFI.sameRows=lean_ui_same_rows",
+  "LeanUI.FFI=LeanUI.FFI.scrollRows=lean_ui_scroll_rows",
+  "LeanUI.FFI=LeanUI.FFI.blitGlyph=lean_ui_blit_glyph",
   "LeanUI.FFI=LeanUI.FFI.wlConnect=lean_ui_wl_connect",
   "LeanUI.FFI=LeanUI.FFI.wlFd=lean_ui_wl_fd",
   "LeanUI.FFI=LeanUI.FFI.wlCoreInterface=lean_ui_wl_core_interface",

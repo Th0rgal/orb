@@ -863,6 +863,13 @@ inductive ContinuationActOutcome where
   | superseded
   deriving Repr
 
+/-- The exact scheduler occurrence admitted for a launch, not just a mission ID. -/
+structure WakeupClaim where
+  id : String
+  requestId : String
+  generation : UInt64
+  deriving Repr
+
 /-- A new turn is starting at `nextGen`. "An ordinary follow-up does not cancel the next
     wake-up" (docs/SCHEDULED_CONTINUATIONS.md): wake-ups armed at the mission's current
     generation move to the new one. Wake-ups from an older generation stay fenced and are

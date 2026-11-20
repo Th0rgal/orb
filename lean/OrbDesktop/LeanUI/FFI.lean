@@ -3,6 +3,22 @@
 -/
 namespace LeanUI.FFI
 
+@[extern "lean_ui_icon_mask"]
+opaque iconMask (segments : @& ByteArray) (size : USize) : ByteArray
+
+@[extern "lean_ui_box_axis"]
+opaque boxAxis (src : @& ByteArray) (w h radius : USize) (horizontal : Bool) : ByteArray
+
+@[extern "lean_ui_same_rows"]
+opaque sameRows (a b : @& ByteArray) (off stride bytes rows : USize) : Bool
+
+@[extern "lean_ui_scroll_rows"]
+opaque scrollRows (fb : ByteArray) (off stride bytes rows shift : USize) : ByteArray
+
+@[extern "lean_ui_blit_glyph"]
+opaque blitGlyph (fb : ByteArray) (atlas : @& ByteArray) (dst src stride pitch width height : USize)
+    (color : UInt32) (colored : Bool) : ByteArray
+
 /-- Connect to `$WAYLAND_DISPLAY`. Returns `wl_display*` as `USize` (`0` = null). -/
 @[extern "lean_ui_wl_connect"]
 opaque wlConnect : IO USize

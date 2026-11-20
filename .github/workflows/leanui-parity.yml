@@ -1,6 +1,7 @@
 name: LeanUI parity
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - fix/leanui-pixel-parity
@@ -9,10 +10,26 @@ on:
     paths:
       - 'lean/LeanUI/**'
       - 'lean/OrbDesktop/**'
+      - 'lean/OrbCore/OrbCore/current_bubble.sql'
       - 'scripts/build_orb_bins.sh'
       - 'scripts/orb_desktop_dev.sh'
       - 'scripts/leanui_parity.py'
       - 'scripts/test_leanui_*.py'
+      - 'docs/ui/**'
+      - 'orb/tests/leanui-reference.capture.ts'
+      - 'orb/playwright.leanui-reference.config.ts'
+      - '.github/workflows/leanui-parity.yml'
+  pull_request:
+    branches: [master, main]
+    paths:
+      - 'lean/LeanUI/**'
+      - 'lean/OrbDesktop/**'
+      - 'lean/OrbCore/OrbCore/current_bubble.sql'
+      - 'scripts/build_orb_bins.sh'
+      - 'scripts/orb_desktop_dev.sh'
+      - 'scripts/leanui_parity.py'
+      - 'scripts/test_leanui_*.py'
+      - 'scripts/bench_desktop.sh'
       - 'docs/ui/**'
       - 'orb/tests/leanui-reference.capture.ts'
       - 'orb/playwright.leanui-reference.config.ts'
@@ -104,14 +121,30 @@ jobs:
             | tee -a "$GITHUB_WORKSPACE/.ci/leanui/reference-hashes.txt"
           exit "$hash_status"
 
-      - name: Run U2 native script under Weston
+      - name: Build native desktop
         if: ${{ !cancelled() }}
-        env:
-          FONTCONFIG_FILE: ${{ github.workspace }}/.ci/leanui/fontconfig/fonts.conf
+        id: native_build
         run: |
           set -euo pipefail
           unset ORB_ALLOW_RAW_LAKE_FALLBACK ORB_SKIP_TURBO_LEAN
           scripts/build_orb_bins.sh --only orb-desktop-native --out-dir "$PWD/target/native"
+
+      - name: Check U5 bootstrap, rendered mission selection and live delivery
+        if: ${{ !cancelled() && steps.native_build.outcome == 'success' }}
+        working-directory: lean/OrbDesktop
+        run: |
+          set -euo pipefail
+          python3 -IB ../../scripts/test_leanui_local_core_u5.py
+          # Resolve absolute package and orb-spec import paths from this checkout's
+          # manifest. Use the already built modules, not another native build.
+          lake env python3 -IB tests/test_live_delivery.py -v
+
+      - name: Run U2 native script under Weston
+        if: ${{ !cancelled() && steps.native_build.outcome == 'success' }}
+        env:
+          FONTCONFIG_FILE: ${{ github.workspace }}/.ci/leanui/fontconfig/fonts.conf
+        run: |
+          set -euo pipefail
           mkdir -p .ci/leanui/weston .ci/leanui/u2
           chmod 700 .ci/leanui/weston
           export XDG_RUNTIME_DIR="$PWD/.ci/leanui/weston"
@@ -162,6 +195,12 @@ jobs:
           python3 -m unittest -v scripts/test_leanui_tokens.py scripts/test_leanui_parity.py
           python3 -I scripts/test_leanui_window_effects.py
           scripts/leanui_window_smoke.sh target/native/orb-desktop-native
+          target/native/orb-desktop-native --verify-repaint --bench 20 --width 1470 --height 923
+
+      - name: Run U7 native frame budget and stream damage benchmark
+        run: |
+          scripts/bench_desktop.sh --bin target/native/orb-desktop-native \
+            --label leanui-u7 --runs 3 --out .ci/leanui/u7-benchmark.json
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -176,6 +215,7 @@ jobs:
             .ci/leanui/parity-diff
             .ci/leanui/ref
             .ci/leanui/reference-hashes.txt
+            .ci/leanui/u7-benchmark.json
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14

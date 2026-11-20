@@ -1,12 +1,13 @@
 /-
   A scheduled wake-up must survive a Core restart and a failed launch:
-  it fires late, never not at all. No node, harness or network is used.
+  it fires late, never not at all. All state and launcher inputs are isolated.
 -/
 import OrbCore.Control
 
 namespace OrbCore.WakeupRestartTests
 open OrbBin.Sqlite OrbBin.PosixExt
 open OrbCore.Store OrbCore.RemoteDispatch
+open OrbCore.QueueCont OrbCore.Control
 
 private def check (ok : Bool) (label : String) : IO Unit := do
   unless ok do throw (IO.userError s!"wakeup restart: {label}")
@@ -14,6 +15,64 @@ private def check (ok : Bool) (label : String) : IO Unit := do
 private def cellOf (db : SqliteDb) (sql : String) (params : Array String) : IO String := do
   let .ok rows ← execParamQuery db sql params | throw (IO.userError s!"query failed: {sql}")
   return (rows[1]?.bind (·[0]?)).getD ""
+
+private def sql (db : SqliteDb) (stmt : String) (params : Array String := #[]) : IO Unit := do
+  let .ok _ ← execParamQuery db stmt params | throw (IO.userError s!"fixture setup failed: {stmt}")
+
+private def verifyLegacyMigration (store : CoreStore) (now : UInt64) : IO Unit := do
+  let db := store.missionsDb
+  sql db ("CREATE TABLE automations(id TEXT PRIMARY KEY,mission_id TEXT,command_source_data TEXT, " ++
+    "trigger_type TEXT,trigger_data TEXT,stop_policy TEXT,active INTEGER);")
+  for (aid, kind, payload, policy) in #[
+      ("unknown", "future_trigger", "{\"job_id\":\"unrelated\"}", "never"),
+      ("cron", "cron", "{\"expression\":\"0 0 * * *\"}", "after_first_fire"),
+      ("policy", "interval", "{\"seconds\":300}", "consecutive_failures:2"),
+      ("bad-insert", "interval", "{\"seconds\":300}", "after_first_fire"),
+      ("bad-retire", "interval", "{\"seconds\":300}", "after_first_fire"),
+      ("valid", "interval", "{\"seconds\":300}", "after_first_fire")] do
+    sql db "INSERT INTO missions(id,title,status,backend,created_at,updated_at) VALUES(?1,'legacy','completed','claudecode','t0','t0');" #[s!"m-legacy-{aid}"]
+    sql db "INSERT INTO automations VALUES(?1,?2,'{\"content\":\"legacy intent\"}',?3,?4,?5,1);"
+      #[aid, s!"m-legacy-{aid}", kind, payload, policy]
+  sql db ("CREATE TRIGGER reject_legacy_insert BEFORE INSERT ON mission_continuations " ++
+    "WHEN NEW.id='leg-auto-bad-insert' BEGIN SELECT RAISE(ABORT,'fixture insert failure'); END;")
+  sql db ("CREATE TRIGGER reject_legacy_retirement BEFORE UPDATE ON automations " ++
+    "WHEN OLD.id='bad-retire' BEGIN SELECT RAISE(IGNORE); END;")
+  check ((← migrateLegacyAutomations store now) == 1 && (← migrateLegacyAutomations store now) == 0)
+    "only the supported, fully written source migrates, once"
+  check ((← cellOf db "SELECT COUNT(*) FROM automations WHERE active=1 AND id<>'valid';" #[]) == "5")
+    "unsupported intent and both failed writes retain their active source"
+  check ((← cellOf db "SELECT COUNT(*) FROM missions WHERE id LIKE 'm-legacy-%' AND status='completed';" #[]) == "5")
+    "failed writes do not park the owning missions"
+  check ((← cellOf db "SELECT group_concat(id || ':' || prompt || ':' || stop_after_first) FROM mission_continuations WHERE source='legacy-automations-migration';" #[]) ==
+    "leg-auto-valid:legacy intent:1") "valid legacy after_first_fire stays one-shot"
+
+private def verifyProductionLocalFailure (store : CoreStore) (sup : RemoteJobSupervisor)
+    (root : String) (due : UInt64) : IO Unit := do
+  let db := store.missionsDb
+  -- A stored native session makes the real launcher advance the generation
+  -- before it discovers the deliberately missing CLI.
+  sql db ("INSERT INTO missions(id,title,status,backend,session_id,run_generation,created_at,updated_at) " ++
+    "VALUES('m-real-local','wakeup','interrupted',?1,'old-fixture-session',1,'t0','t0');") #[s!"missing-cli-{← newUuidV4}"]
+  let .ok _ ← registerContinuation store
+    { id := "c-real-local", missionId := "m-real-local", requestId := "real-local", prompt := "retry me",
+      reason := "test", source := "mcp", triggerKind := "time", dueEpoch := due } (due - 1) "t0"
+    | throw (IO.userError "production local continuation registration")
+  let app : CoreAppState := {
+    cfg := { workingDir := root }, store, searchIdx? := none, managedRef := ← IO.mkRef {},
+    chainsRef := ← IO.mkRef #[], proxyCooldownsRef := ← IO.mkRef #[], seqRef := ← IO.mkRef 0,
+    warmMgr? := some (← OrbBin.ClaudeControl.newWarmHarnessManager) }
+  let tick := fun now => tickContinuationScheduler store none none none sup none root (some (launchLocalWakeup app)) (some now)
+  let state := cellOf db ("SELECT c.phase||':'||c.run_generation||':'||c.error||':'||m.status||':'||m.run_generation " ++
+    "FROM mission_continuations c JOIN missions m ON m.id=c.mission_id WHERE c.id='c-real-local';") #[]
+  discard <| tick due
+  check ((← state) == "1:2:launch_retry:1:interrupted:2") "real failed launch advances the generation and re-arms once"
+  discard <| tick (due + 59)
+  check ((← state) == "1:2:launch_retry:1:interrupted:2") "real retry respects its deadline"
+  discard <| tick (due + 60)
+  discard <| tick (due + 60)
+  check ((← state) == "1:3:launch_retry:2:interrupted:3") "the real launcher retries once at the deadline"
+  check ((← cellOf db "SELECT COUNT(*) FROM mission_events WHERE mission_id='m-real-local' AND event_type='user_message';" #[]) == "1")
+    "real retries do not duplicate the wake-up prompt"
 
 def run : IO Unit := do
   let root := s!"/tmp/orb-wakeup-restart-{← newUuidV4}"
@@ -50,7 +109,7 @@ def run : IO Unit := do
       let sup ← newRemoteJobSupervisor "wakeup-restart-fixture-secret" false
       let launches ← IO.mkRef (#[] : Array String)
       let succeed ← IO.mkRef false
-      let launch : MissionRecord → String → Option String → IO Bool := fun mr _ _ => do
+      let launch : MissionRecord → String → Option String → WakeupClaim → IO Bool := fun mr _ _ _ => do
         launches.modify (·.push mr.id)
         succeed.get
       let tick := fun (now : UInt64) =>
@@ -165,7 +224,7 @@ def run : IO Unit := do
           | throw (IO.userError "fault continuation registration")
         let attempts ← IO.mkRef (0 : Nat)
         let acceptedInputs ← IO.mkRef (#[] : Array String)
-        let faultyLaunch : MissionRecord → String → Option String → IO Bool := fun _ prompt _ => do
+        let faultyLaunch : MissionRecord → String → Option String → WakeupClaim → IO Bool := fun _ prompt _ _ => do
           check ((← cellOf store.missionsDb "SELECT phase FROM mission_continuations WHERE id=?1;" #[cid]) == "2")
             "fault injection must occur after durable claim"
           attempts.modify (· + 1)
@@ -201,7 +260,7 @@ def run : IO Unit := do
       let .ok _ ← register "snapshot-b" "m-snapshot-b" "old" "durable_job_terminal" "job-done" (now + 86400)
         | throw (IO.userError "snapshot B registration")
       let delivered ← IO.mkRef (#[] : Array String)
-      let replaceDuringLaunch : MissionRecord → String → Option String → IO Bool := fun mr prompt _ => do
+      let replaceDuringLaunch : MissionRecord → String → Option String → WakeupClaim → IO Bool := fun mr prompt _ _ => do
         if mr.id == "m-snapshot-a" then
           let .ok _ ← register "snapshot-b-new" "m-snapshot-b" "replacement" "durable_job_terminal" "job-done" (now + 86400)
             | throw (IO.userError "replace B during A launch")
@@ -221,7 +280,7 @@ def run : IO Unit := do
       let .ok _ ← register "stop-retry" "m-stop-retry" "stop me" "time" "" now
         | throw (IO.userError "stop retry registration")
       let stoppedLaunches ← IO.mkRef (0 : Nat)
-      let stopDuringLaunch : MissionRecord → String → Option String → IO Bool := fun mr _ _ => do
+      let stopDuringLaunch : MissionRecord → String → Option String → WakeupClaim → IO Bool := fun mr _ _ _ => do
         stoppedLaunches.modify (· + 1)
         let .ok _ ← OrbCore.QueueCont.hostedStop store mr.id "t-stop"
           | throw (IO.userError "stop during failed launch")
@@ -231,6 +290,8 @@ def run : IO Unit := do
       check ((← stoppedLaunches.get) == 1) "Stop must fence a failed launch retry"
       check ((← cellOf store.missionsDb "SELECT COUNT(*) FROM mission_continuations WHERE mission_id='m-stop-retry' AND phase=1;" #[]) == "0")
         "Stop must leave no rearmed wake-up"
+      verifyProductionLocalFailure store sup root (now + 5000)
+      verifyLegacyMigration store (now + 10000)
     finally
       closeCoreStore store
   finally

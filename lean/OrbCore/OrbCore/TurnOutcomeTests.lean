@@ -115,7 +115,7 @@ private def verifyGoalStartupRetry (store : CoreStore) (sup : RemoteJobSuperviso
   let reconcile := fun startup => reconcileUncertainRemoteSubmissions store none none none sup root startup
   check ((← reconcile false) == 0 && (← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jid]) == "submitting")
     "periodic reconciliation leaves an in-flight POST alone"
-  let .ok () ← fenceInterruptedGoalSubmissions store | throw (IO.userError "Goal startup fixture fence")
+   let .ok () ← fenceInterruptedRemoteSubmissions store | throw (IO.userError "Goal startup fixture fence")
   let failedProbe ← IO.asTask do
     withMockNodeRequest fd fun _ req =>
       check (req.method == "GET" && req.path == s!"/jobs/{jid}") "startup probes original job before losing transport"
@@ -144,6 +144,77 @@ private def verifyGoalStartupRetry (store : CoreStore) (sup : RemoteJobSuperviso
     check (attached == 1 && state == "running" && status == "active" &&
       (← cellOf db "SELECT placement_job_id FROM missions WHERE id=?1;" #[mid]) == jid)
       "periodic recovery attaches the accepted job without another submission"
+
+private def verifyRemoteWakeupRecovery (store : CoreStore) (sup : RemoteJobSupervisor)
+    (fd : LeanSys.Posix.Fd) (root mid : String) (found : Bool) : IO Unit := do
+  let db := store.missionsDb
+  let cid := s!"c-{mid}"
+  let due ← nowEpoch
+  let .ok _ ← registerContinuation store
+    { id := cid, missionId := mid, requestId := cid, prompt := "one remote delivery", reason := "test",
+      source := "mcp", triggerKind := "time", dueEpoch := due } (due - 1) "t0"
+    | throw (IO.userError "remote wake-up registration")
+  let tick := fun t => tickContinuationScheduler store none none none sup none root none (some t)
+  let reconcile := fun now => reconcileUncertainRemoteSubmissions store none none none sup root false (some now)
+  let state := cellOf db "SELECT phase || ':' || error FROM mission_continuations WHERE id=?1;" #[cid]
+  let launch ← IO.asTask (tick due)
+  let posted ← IO.mkRef ""
+  withMockNodeRequest fd fun _ req => do
+    let .ok body := OrbBin.Json.parseBytes req.bodySlice.toByteArray | throw (IO.userError "remote wake-up POST body")
+    let jid := (body.fieldStr? "job_id").getD ""
+    check (req.method == "POST" && req.path == "/jobs" && !jid.isEmpty) "real remote scheduler submits the wake-up"
+    check ((← cellOf db "SELECT dispatch_job_id FROM mission_continuations WHERE id=?1;" #[cid]) == jid &&
+      (← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jid]) == "submitting")
+      "the occurrence and original job are bound before the POST can be accepted"
+    posted.set jid
+    -- Lose the reply after the node has observed the POST.
+  check ((← IO.ofExcept launch.get) == 0 && (← state) == "2:") "transport loss leaves a bound claim"
+  let jid ← posted.get
+  let expiryText ← cellOf db
+    "SELECT json_extract(payload_json,'$.wakeup_lease_expires') FROM remote_node_jobs WHERE job_id=?1;" #[jid]
+  let some expiry := expiryText.toNat? | throw (IO.userError "missing remote wake-up submit lease expiry")
+  let jobs := cellOf db "SELECT COUNT(*) FROM remote_node_jobs WHERE mission_id=?1;" #[mid]
+  check ((← tick (due + 600)) == 0 && (← jobs) == "1") "scheduler cannot retry before reconciliation"
+  let probe ← IO.asTask (reconcile (due + 1))
+  withMockNodeRequest fd fun _ req =>
+    check (req.method == "GET" && req.path == s!"/jobs/{jid}") "unavailable probe uses the original job"
+  check ((← IO.ofExcept probe.get) == 0 && (← state) == "2:" && (← jobs) == "1")
+    "an unavailable probe cannot grant a retry"
+  if !found then
+    let early ← IO.asTask (reconcile (due + 60))
+    withMockNodeRequest fd fun conn req => do
+      check (req.method == "GET" && req.path == s!"/jobs/{jid}") "early negative probe uses the original job"
+      mockNodeReply conn "404 Not Found" "job not found"
+    check ((← IO.ofExcept early.get) == 0 && (← state) == "2:")
+      "absence while the original POST can still be admitted does not authorize another job"
+  let probe ← IO.asTask (reconcile (if found then due + 61 else expiry.toUInt64 + 31))
+  withMockNodeRequest fd fun conn req => do
+    check (req.method == "GET" && req.path == s!"/jobs/{jid}") "authoritative probe uses the original job"
+    if found then mockNodeReply conn "200 OK" s!"\{\"job_id\":\"{jid}\",\"state\":\"running\"}"
+    else mockNodeReply conn "404 Not Found" "job not found"
+  let attached ← IO.ofExcept probe.get
+  if found then
+    check (attached == 1 && (← state) == "4:" && (← jobs) == "1" &&
+      (← cellOf db "SELECT placement_job_id FROM missions WHERE id=?1;" #[mid]) == jid)
+      "reconciliation adopts acceptance and retires the original occurrence"
+    check ((← tick (due + 600)) == 0 && (← jobs) == "1") "accepted wake-up never creates a second job"
+  else
+    check (attached == 0 && (← state) == "1:launch_retry:1" && (← jobs) == "1")
+      "authoritative absence re-arms the same occurrence"
+    let deadline := (← cellOf db "SELECT due_epoch FROM mission_continuations WHERE id=?1;" #[cid]).toNat?.getD 0
+    check (deadline > 0 && (← tick (deadline.toUInt64 - 1)) == 0 && (← jobs) == "1") "remote retry waits for backoff"
+    let retry ← IO.asTask (tick deadline.toUInt64)
+    withMockNodeRequest fd fun conn req => do
+      let .ok body := OrbBin.Json.parseBytes req.bodySlice.toByteArray | throw (IO.userError "remote wake-up retry body")
+      check (req.method == "POST" && req.path == "/jobs" && body.fieldStr? "job_id" != some jid)
+        "only after a negative receipt can a later attempt mint another job"
+      mockNodeReply conn "422 Unprocessable Entity" "fixture rejection"
+    check ((← IO.ofExcept retry.get) == 0 && (← jobs) == "2" && (← state) == "1:launch_retry:2")
+      "one definite failure schedules one later attempt"
+    -- Remove the fixture's next retry before the rest of this suite advances the clock.
+    discard <| hostedStop store mid "t-stop"
+  check ((← cellOf db "SELECT COUNT(*) FROM mission_events WHERE mission_id=?1 AND event_type='user_message';" #[mid]) == "1")
+    "remote retries record the wake-up prompt once"
 
 def r24_lost_reply_is_uncertain_not_rejected : IO Unit := do
   let receipt := JVal.obj #[
@@ -394,7 +465,7 @@ def run : IO Unit := do
       -- The durable scheduler relaunches it; each relaunch that is empty again counts.
       let launches ← IO.mkRef (0 : Nat)
       let prompts ← IO.mkRef (#[] : Array String)
-      let launch : MissionRecord → String → Option String → IO Bool := fun mr prompt _ => do
+      let launch : MissionRecord → String → Option String → WakeupClaim → IO Bool := fun mr prompt _ _ => do
         launches.modify (· + 1)
         prompts.modify (·.push prompt)
         discard <| execParamQuery db "UPDATE missions SET status='active' WHERE id=?1;" #[mr.id]
@@ -504,7 +575,25 @@ def run : IO Unit := do
            (← cellOf db "SELECT status || ':' || terminal_reason FROM missions WHERE id='m-initial-goal-stop';" #[]) == "interrupted:remote_goal_stopped" &&
            (← cellOf db "SELECT COUNT(*) FROM mission_runs WHERE mission_id='m-initial-goal-stop';" #[]) == "0")
            "late initial acceptance cannot undo Stop or erase the mission"
-         -- The attach case starts a poller, so run it last on this listener.
+          let .ok (wakeFd, wakePort) ← LeanSys.Posix.tcpListen "127.0.0.1" 0 8
+            | throw (IO.userError "remote wake-up mock node listen failed")
+          try
+            setenvVar "SANDBOXED_REMOTE_NODES" s!"mockwakeup=http://127.0.0.1:{wakePort}|TURN_OUTCOME_MOCK_TOK"
+            -- The found case starts a poller, so run it last on this listener.
+            for (mid, found) in #[("m-remote-wakeup-missing", false), ("m-remote-wakeup-found", true)] do
+              let .ok wakeStore ← openCoreStore s!"{root}/{mid}" | throw (IO.userError "remote wake-up fixture store")
+              try
+                let .ok _ ← execParamQuery wakeStore.missionsDb
+                  ("INSERT INTO missions(id,title,status,backend,placement_kind,tags,created_at,updated_at) " ++
+                   "VALUES(?1,'turn','awaiting_user','opencode','managed','[\"remote-node:mockwakeup\"]','t0','t0');") #[mid]
+                  | throw (IO.userError "remote wake-up fixture mission")
+                verifyRemoteWakeupRecovery wakeStore sup wakeFd root mid found
+              finally
+                closeCoreStore wakeStore
+          finally
+            discard <| LeanSys.Posix.closeFd wakeFd
+            setenvVar "SANDBOXED_REMOTE_NODES" s!"mockgoalchecks=http://127.0.0.1:{checksPort}|TURN_OUTCOME_MOCK_TOK"
+          -- The attach case starts a poller, so run it last on this listener.
          for (mid, stop) in #[("m-goal-startup-stop", true), ("m-goal-startup-attach", false)] do
            newMission mid "[\"remote-node:mockgoalchecks\"]"
            verifyGoalStartupRetry store sup checksFd root mid stop
