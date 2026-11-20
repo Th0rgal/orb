@@ -290,6 +290,8 @@ jobs:
           python3 -m unittest -v scripts/test_spec_audit.py
           ./scripts/turbo_lean.sh --json audit-spec lean/Orb/Spec.lean > audit-results/spec-audit.json
           python3 scripts/check_spec_audit.py audit-results/spec-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/Orb/AccountVpn.lean > audit-results/account-vpn-audit.json
+          python3 scripts/check_spec_audit.py audit-results/account-vpn-audit.json
           ./scripts/turbo_lean.sh --json audit-spec lean/Orb/MutantSuite.lean > audit-results/mutant-audit.json
           python3 scripts/check_spec_audit.py audit-results/mutant-audit.json
           ./scripts/turbo_lean.sh --json audit-spec lean/Orb/StatefulMutantSuite.lean > audit-results/stateful-mutant-audit.json
