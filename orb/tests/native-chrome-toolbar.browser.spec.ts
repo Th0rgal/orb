@@ -106,3 +106,25 @@ test("native sidebar + buttons open New project and New agent in a project or fo
   await expect(folder).toHaveCount(0);
   await expect(composer).toBeVisible();
 });
+
+test("native project menu confirms deletion before retiring the project", async ({ page }) => {
+  await openHybridApp(page);
+  const writes: unknown[] = [];
+  await page.route("**/api/projects/verity/action", route => {
+    writes.push(route.request().postDataJSON());
+    return route.fulfill({ json: { ok: true } });
+  });
+  await expect(async () => {
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent("orb:native-project-menu", {
+      detail: { slug: "verity", y: 80 },
+    })));
+    await expect(page.getByRole("menuitem", { name: "Delete project…" })).toBeVisible({ timeout: 500 });
+  }).toPass();
+  await page.getByRole("menuitem", { name: "Delete project…" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("Delete Verity?");
+  expect(writes).toEqual([]);
+  await dialog.getByRole("button", { name: "Delete project" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(writes).toEqual([{ action: "delete" }]);
+});

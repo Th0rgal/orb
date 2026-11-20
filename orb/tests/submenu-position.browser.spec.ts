@@ -2,8 +2,8 @@ import {eventPage} from "./eventPageFixture";
 import { test, expect, type Page, type Locator } from "@playwright/test";
 
 /** Nested menus must open beside the row that opened them, never at the window origin. */
-async function setup(page: Page) {
-  const source = { id: "original", title: "Original work", status: "active", backend: "grok", model_override: "grok-4.6", project: "test", history: [], created_at: "", updated_at: "" };
+async function setup(page: Page, remoteNode?: string) {
+  const source = { remote_node_id: remoteNode, id: "original", title: "Original work", status: "active", backend: "grok", model_override: "grok-4.6", project: "test", history: [], created_at: "", updated_at: "" };
   await page.addInitScript(() => { localStorage.setItem("orb.apiUrl", location.origin); localStorage.setItem("orb.jwt", "test"); localStorage.setItem("orb-theme", "dark"); });
   await page.route("**/api/**", async route => {
     const req = route.request(), path = new URL(req.url()).pathname;
@@ -90,7 +90,7 @@ test("transfer submenu stays beside its row when the harness rows re-render", as
 
 test("transfer submenu flips left and up inside a small window", async ({ page }) => {
   await page.setViewportSize({ width: 800, height: 480 });
-  await setup(page);
+  await setup(page, "integration-runner");
   const {row, models} = await openOpenCode(page);
   const {r, m} = await expectBeside(page, row, models);
   expect(Math.abs(m.x + m.width - r.x)).toBeLessThanOrEqual(12); // no room on the right: flips left

@@ -189,6 +189,7 @@ it("keeps the last remote node between two jobs instead of showing the host work
   expect(running).not.toBe("host");
   expect(missionDestination(mission({id:"between-jobs",status:"active",workspace_name:"host",remote_job:null}))).toBe(running);
   expect(missionDestination(mission({id:"never-remote",workspace_name:"host"}))).toBe("host");
+  expect(missionDestination(mission({id:"core-monitor",workspace_name:null}))).toBe("Core");
 });
 it("refuses launches onto a node quarantined for the selected harness while allowing unaffected harnesses", () => {
   const cap: RemoteLaunchCapability = { typed: true, harnesses: ["antigravity", "codex"], raw_command: true, proxy_url_configured: true };

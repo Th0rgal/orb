@@ -1,7 +1,4 @@
-/* linux_shell/gtk_menu.c — Native Chrome sidebar context menu for mission rows (<= 220 LOC).
- * The menu mirrors the HTML sidebar's mission menu (`missionMenuItems` in orb/src/ProjectFiles.tsx)
- * and runs every action in the WebView through `window.__ORB_NATIVE_MISSION_ACTION__`, so the
- * API calls, optimistic updates and error toasts stay in one place. */
+/* Native sidebar menus forward actions to the WebView. */
 #define _POSIX_C_SOURCE 200809L
 #include "gtk_menu.h"
 #include "gtk_chrome.h"
@@ -177,6 +174,20 @@ gboolean orb_gtk_row_context_menu(GtkWidget *wv, GtkWidget *list, GtkWidget *row
         g_signal_connect(menu, "deactivate", G_CALLBACK(on_menu_done), NULL); gtk_widget_show_all(menu); gtk_menu_popup_at_pointer(GTK_MENU(menu), ev); return TRUE;
     }
     const char *kind = g_object_get_data(G_OBJECT(row), "orb-kind"), *target = g_object_get_data(G_OBJECT(row), "orb-target");
+    const char *slug = orb_menu_project_slug(target);
+    if (wv && slug && g_strcmp0(kind, "project") == 0) {
+        gint origin_x, origin_y;
+        gdk_window_get_origin(gtk_widget_get_window(wv), &origin_x, &origin_y);
+        gdouble root_x, root_y;
+        gdk_event_get_root_coords(ev, &root_x, &root_y);
+        char *quoted = orb_json_escape_string(slug);
+        if (!quoted) return FALSE;
+        char *js = g_strdup_printf("window.dispatchEvent(new CustomEvent('orb:native-project-menu',{detail:{slug:%s,y:%d}}))", quoted, (int)(root_y - origin_y));
+        webkit_web_view_evaluate_javascript(WEBKIT_WEB_VIEW(wv), js, -1, NULL, NULL, NULL, NULL, NULL);
+        free(quoted);
+        g_free(js);
+        return TRUE;
+    }
     if (!wv || !kind || strcmp(kind, "mission") != 0 || !target || strncmp(target, "m:", 2) != 0 || !target[2]) {
         return FALSE;
     }
