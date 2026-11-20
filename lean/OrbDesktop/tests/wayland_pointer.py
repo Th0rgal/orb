@@ -61,5 +61,12 @@ class Pointer:
             self.send(5, 4)  # frame
             time.sleep(.08)
 
+    def scroll(self, x, y, distance):
+        ms = int(time.monotonic() * 1000) & 0xffffffff
+        self.send(5, 1, struct.pack('=IIIII', ms, x, y, 1000, 700))
+        self.send(5, 4)
+        self.send(5, 3, struct.pack('=IIi', ms, 0, distance * 256))
+        self.send(5, 4)
+
     def close(self):
         self.sock.close()

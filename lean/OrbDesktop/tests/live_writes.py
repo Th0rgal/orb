@@ -1,8 +1,7 @@
 """Run from the checkout: python3 lean/OrbDesktop/tests/live_writes.py
 
 Use orb-core from the same revision as the client (scripts/build_orb_bins.sh --only orb-core).
-The test uses Sway and wtype, plus grim to observe the composer in the mouse workflow. Only the external model harness is replaced (a waiting child
-process); all mission writes go through the launched desktop and real Core.
+The test uses Sway and wtype, plus grim to observe the composer in the mouse workflow. Only the external model harness is replaced with a deterministic transcript producer; all mission writes go through the launched desktop and real Core.
 """
 import contextlib
 import json
@@ -70,7 +69,15 @@ def run(tmp, mouse=False):
     home = tmp / 'home'
     home.mkdir()
     harness = tmp / 'codex'
-    harness.write_text('#!/bin/sh\nexec sleep 120\n')
+    harness.write_text(f"#!{sys.executable}\n" + r"""import json
+import time
+
+for i in range(300):
+    text = "Transcript line %03d " % i + ("steady output " * 5)
+    item = {"id": str(i), "type": "agent_message", "text": text + "\n"}
+    print(json.dumps({"type": "item.completed", "item": item}), flush=True)
+    time.sleep(.12)
+""")
     harness.chmod(0o700)
     env = dict(PATH=f'{tmp}:{os.environ["PATH"]}', HOME=str(home), HOST='127.0.0.1', PORT=str(port),
                LD_LIBRARY_PATH=os.getenv('LD_LIBRARY_PATH', ''), WORKING_DIR=str(tmp), DEV_MODE='true')
@@ -100,7 +107,9 @@ def run(tmp, mouse=False):
             click = pointer.click
         binary = os.environ.get('ORB_LEANUI_TEST_BINARY')
         client = [str(Path(binary).resolve(strict=True))] if binary else [ROOT / 'scripts/orb_desktop_dev.sh', '--leanui']
-        stack.enter_context(process(client, graphical, ROOT))
+        if binary and Path(binary).name == 'orb-desktop':
+            client.append('--leanui')
+        desktop = stack.enter_context(process(client, graphical, ROOT))
         wait('native window', lambda: b'"orb-desktop"' in sway('-t', 'get_tree'), 300)
         stack.enter_context(process(['wtype', '-k', 'Shift_L', '-s', '120000'], graphical, tmp))
         time.sleep(.5)
@@ -150,6 +159,24 @@ def run(tmp, mouse=False):
                 return row, messages[0]
 
         active, message = wait('exact submitted text on active mission', observed)
+        def streamed_events():
+            return [e for e in api(path + '/events') if e['event_type'] == 'text_delta' and
+                    e['mission_id'] == mid and (e.get('content') or '').startswith('Transcript line')]
+
+        if mouse:
+            def transcript_frame():
+                return subprocess.check_output(['grim', '-t', 'ppm', '-g', '300,110 300x155', '-'], env=graphical)
+
+            wait('assistant output reached Core', lambda: len(streamed_events()) >= 45)
+            time.sleep(1.5)
+            bottom = transcript_frame()
+            pointer.scroll(620, 330, -10000)
+            top = wait('wheel scrolled transcript', lambda: frame if (frame := transcript_frame()) != bottom else None)
+            initial = len(streamed_events())
+            wait('assistant continued during reader scroll', lambda: len(streamed_events()) >= initial + 18)
+            assert transcript_frame() == top, 'reader position jumped while new assistant text arrived'
+            pointer.scroll(620, 330, 10000)
+            wait('wheel returned to live output', lambda: transcript_frame() != top)
         time.sleep(1.5)  # wait for the desktop status subscription
         if mouse:
             click(946, 626)
@@ -182,8 +209,20 @@ def run(tmp, mouse=False):
         token = wait('Core restart', login)
         archived = api(path)
         assert archived['id'] == stopped['id'] == active['id'] == mid and archived['status'] == 'acknowledged'
+        restored = None
+        if mouse:
+            desktop.terminate()
+            desktop.wait(5)
+            stack.enter_context(process(client, graphical, ROOT))
+            wait('reopened native window', lambda: b'"orb-desktop"' in sway('-t', 'get_tree'))
+            time.sleep(1.5)
+            click(75, 245)  # Archived group in the otherwise empty roster
+            click(75, 277, 'button3')
+            click(128, 358)  # Restore follows Rename and Move to
+            wait('restored archived mission after desktop restart', lambda: api(path)['status'] == 'paused')
+            restored = api(path)['status']
         print(json.dumps(dict(id=mid, submitted=message['content'], message_id=message['event_id'], running=active['status'], stopped=stopped['status'],
-                              after_restart=archived['status']), ensure_ascii=False))
+                              after_restart=archived['status'], restored=restored), ensure_ascii=False))
 
 
 if __name__ == '__main__':
