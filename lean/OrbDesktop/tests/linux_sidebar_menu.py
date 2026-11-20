@@ -85,7 +85,8 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
         if client_kind == 'leanui':
             geo = f'{x+20},{min(y,535)} 165x175'
         else:
-            geo = '20,42 195x600'
+            # Keep the entire popup, including its right edge, in the OCR crop.
+            geo = f'{max(0,x-12)},{min(y-8,510)} 220x185'
         labels = {'rename':'rename', 'move':'move', 'archive':'archive', 'restore':'restore',
                   'copy-id':'copy', 'settings':'settings'}
         def rows():
