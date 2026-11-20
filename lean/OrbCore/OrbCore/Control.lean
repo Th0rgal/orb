@@ -1847,7 +1847,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
       let some owner := target.sidecarCredential? |
         return ← AccountVpnPool.resolve st.vpnPool? st.store st.vpnCoordinatorDir target.accountId
       let .ok pref ← AccountVpnRoutes.read st.store.missionsDb target.accountId | return .error "vpn_route_store_unavailable"
-      if pref.isNone then return .ok none
+      let some selected := pref | return .ok none
       unless !owner.modelPrefix.isEmpty && target.modelId.startsWith (owner.modelPrefix ++ "/") do
         return .error "vpn_sidecar_binding_unavailable"
       let base ← resolveCliProxyBaseUrl
@@ -1857,6 +1857,10 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
         AccountVpnRelay.proxyUrl (effectiveJwtSecret st.cfg) port owner.provider target.accountId)
         | return .error "vpn_sidecar_unavailable"
       if let .error e ← AccountVpnSidecar.confirm base key owner.file url owner.modelPrefix then return .error e
+      -- A sidecar can reuse an upstream connection without opening another SOCKS session.
+      let some pool := st.vpnPool? | return .error "vpn_coordinator_unavailable"
+      if let .error e ← AccountVpnPool.allocate pool st.store.rootDir st.vpnCoordinatorDir st.store.missionsDb
+          target.accountId owner.provider selected then return .error e
       return .ok none)
   let selectedAccountAfterStream : IO String := do
     match out.streamSelectedAccountRef? with
