@@ -19,11 +19,11 @@ def run : IO Unit := do
       "> <!-- GOAL_COMPLETE -->", "```html\n<!-- GOAL_COMPLETE -->\n```", "~~~html\n<!-- GOAL_COMPLETE -->"] do
     check (!hasCompletionMarker text) "quoted, fenced or nonfinal marker ignored"
   check (match admit .unavailable false "objective" with | .error .unsupported => true | _ => false) "unavailable is fail closed"
-  check (match admit .coreOpenCode true "objective" with | .error .nativeContinuityRequired => true | _ => false)
+  check (match admit .coreEmulated true "objective" with | .error .nativeContinuityRequired => true | _ => false)
     "native binding cannot be converted to emulation"
-  check (match admit .coreOpenCode false " \n" with | .error .emptyObjective => true | _ => false) "empty objective refused"
+  check (match admit .coreEmulated false " \n" with | .error .emptyObjective => true | _ => false) "empty objective refused"
   let exactObjective := "  Preserve quotes ' and \" and \\ plus Unicode λ\nfull objective  "
-  check (match admit .coreOpenCode false exactObjective with | .ok s => s == exactObjective | _ => false) "objective preserved exactly"
+  check (match admit .coreEmulated false exactObjective with | .ok s => s == exactObjective | _ => false) "objective preserved exactly"
   let next := decide initial progress {}
   check (next.effect == .requestContinuation) "plain successful turn continues"
   check ((decide next.state progress {}).effect == .none) "duplicate terminal ignored"

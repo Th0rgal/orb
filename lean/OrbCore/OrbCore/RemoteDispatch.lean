@@ -861,6 +861,12 @@ private def emitMissionEventAndBroadcast
   discard <| appendMissionEvent store missionId evType payloadJson nowIso
   publishControlEvent broadcastHub? evType payloadJson (some missionId)
 
+private def resumableGoalSession (backend sid : String) : Bool :=
+  match backend with
+  | "codex" => parseUuidCanonical? sid == some sid
+  | "opencode" => sid.startsWith "ses_"
+  | _ => false
+
 def remoteGoalPrompt (objective : String) : String :=
   s!"[Goal mode]\nObjective: {objective}\n\nTake the next concrete step and report progress. If the objective is fully achieved, end your reply with {RemoteGoal.completionMarker} on its own final line."
 
@@ -1697,7 +1703,7 @@ partial def spawnRemoteJobPoller
                 if jState == "succeeded" then
                   if let some goal := (mRec?.filter (·.goalMode)).map (·.goalObjective) then
                     match ← settleRemoteGoal store missionId jobId goal finalText capturedGen nowSec
-                      (curSid?.any (·.startsWith "ses_")) finalDrained with
+                      (curSid?.any (resumableGoalSession backend)) finalDrained with
                     | .ok (some (status, reason, iteration)) =>
                       let phase := if reason == "remote_goal_complete" then "complete"
                         else if reason == "remote_goal_continuation" || reason == "awaiting_wakeup" then "active"
@@ -2593,7 +2599,7 @@ def tickContinuationScheduler
                 goalDispatch?    := if reason == "remote_goal" then some (cid, cGen) else none
                 wakeupClaim?     := if reason == "remote_goal" then none else some claim
               }
-              let result ← if reason == "remote_goal" && !(resumeSid?.any (·.startsWith "ses_")) then pure (.error "remote_goal_session_missing")
+              let result ← if reason == "remote_goal" && !(resumeSid?.any (resumableGoalSession mr.backend)) then pure (.error "remote_goal_session_missing")
                 else submitRemoteMissionTurn store mc? relayHub? broadcastHub? sup coreWorkDir spec nowSec
               match result with
               | .ok _ =>
