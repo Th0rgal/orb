@@ -212,6 +212,11 @@ for i in range(300):
             click(128, 194)
             wait('moved mission', lambda: api(path).get('project') == 'menu-test')
             open_actions()
+            click(128, 284)  # Mission settings
+            click(128, 254)  # Effort
+            click(128, 194)  # Low
+            wait('mission effort saved through context menu', lambda: api(path).get('model_effort') == 'low')
+            open_actions()
             click(128, 224)  # Archive follows Move to
         else:
             backend = stopped.get('backend')
