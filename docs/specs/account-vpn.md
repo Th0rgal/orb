@@ -138,3 +138,9 @@ after both orderly shutdown and SIGKILL. The crash test checks that both
 wireproxy processes exit before a new Core process opens the same store in
 reverse account order. Linux Core uses util-linux `setpriv --pdeathsig` to
 release its tunnels even when systemd signals only the main process.
+
+A running WireGuard child may reuse its matching AirVPN session metadata for
+ten seconds from the successful lookup. Each reuse independently probes the
+public exit addresses through that child. Opening a new tunnel always reads
+the current account-wide session count under the reservation lock. Restarting
+the child discards its session metadata.

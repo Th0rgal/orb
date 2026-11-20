@@ -11,6 +11,7 @@ structure Tunnel where
   child : Child
   port : UInt16
   addresses : List ExitAddress
+  sessionEvidence : IO.Ref (Option (Nat × Array JVal))
   release : IO.Promise Unit
   owner : Task (Except IO.Error Unit)
 
@@ -57,7 +58,8 @@ private def start (profile : DeviceProfile) (port : UInt16) : IO (Except String 
     started.resolve result
     if result.isOk then discard <| IO.wait release.result?
   let some result ← IO.wait started.result? | return .error "vpn_start_failed"
-  return result.map fun child => ⟨child, port, profile.addresses, release, owner⟩
+  let sessionEvidence ← IO.mkRef none
+  return result.map fun child => ⟨child, port, profile.addresses, sessionEvidence, release, owner⟩
 
 private def ownsSession (addresses : List ExitAddress) (session : JVal) : Bool :=
   ((session.fieldStr? "vpn_ip").bind AirVpnObservation.parseExit?).any addresses.contains
@@ -66,10 +68,19 @@ private def ownsSession (addresses : List ExitAddress) (session : JVal) : Bool :
 with a live generation and publishing the admitted binding. -/
 def Tunnel.verify (t : Tunnel) (root server country : String) : IO (Option VerifiedTunnel) := do
   if (← t.child.tryWait).isSome then return none
-  let .ok sessions ← activeSessions root | return none
+  let now ← IO.monoMsNow
+  -- Keep only this child's matching session rows. Every dispatch still probes
+  -- the actual exit, and a replacement child starts with an empty cache.
+  let recent := (← t.sessionEvidence.get).filter fun (checked, _) => now >= checked && now - checked < 10000
+  let sessions ← match recent with
+    | some (_, rows) => pure rows
+    | none =>
+      let .ok all ← activeSessions root | return none
+      pure (all.filter (ownsSession t.addresses))
   let ipv6 := t.addresses.any fun | .v6 .. => true | _ => false
-  let evidence ← AirVpnObservation.observe t.port ipv6 server country (sessions.filter (ownsSession t.addresses))
+  let evidence ← AirVpnObservation.observe t.port ipv6 server country sessions
   if (← t.child.tryWait).isSome then return none
+  if evidence.isSome && recent.isNone then t.sessionEvidence.set (some (now, sessions))
   return evidence
 
 def checkReservation (addresses : List ExitAddress) (sessions : Array JVal) : Except String Unit := do

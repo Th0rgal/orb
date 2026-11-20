@@ -79,6 +79,7 @@ def run(driver, parent_mount):
 
         observed = []
         max_sessions = []
+        exit_probes = []
         class Receiver(http.server.BaseHTTPRequestHandler):
             def reply(self, body):
                 self.send_response(200)
@@ -89,6 +90,8 @@ def run(driver, parent_mount):
             def do_GET(self):
                 if self.path == "/source":
                     observed.append(self.client_address[0])
+                elif self.headers.get("Host", "").split(":")[0] == "api.ipify.org":
+                    exit_probes.append(self.client_address[0])
                 self.reply(self.client_address[0].encode())
 
             def do_POST(self):
@@ -138,6 +141,19 @@ def run(driver, parent_mount):
                         raise RuntimeError("Timed out waiting for crash fixture tunnels")
                     assert json.loads(held.stdout.readline()) == {"a": routes["a"], "b": routes["b"]}
                     assert len(proxy_pids()) == 2
+                    queries, probes = len(max_sessions), len(exit_probes)
+                    def repeat():
+                        held.stdin.write("repeat\n")
+                        held.stdin.flush()
+                        assert select.select([held.stdout], [], [], 15)[0]
+                        assert held.stdout.readline().strip() == routes["a"]
+                    repeat()
+                    assert len(max_sessions) == queries, "repeated request polled AirVPN again"
+                    assert exit_probes[probes:] == [routes["a"]], "repeat must independently verify its exit"
+                    time.sleep(10.1)
+                    repeat()
+                    assert len(max_sessions) == queries + 1, "expired session evidence must be refreshed"
+                    assert exit_probes[probes:] == [routes["a"], routes["a"]]
                 finally:
                     held.kill()
                     held.wait(timeout=5)

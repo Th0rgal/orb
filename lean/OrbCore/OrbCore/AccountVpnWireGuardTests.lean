@@ -27,7 +27,12 @@ def run (root : String) (resume : Bool) (hold := false) : IO UInt32 := do
       let out ← IO.getStdout
       out.putStrLn (renderCompact (.obj #[("a", .str a), ("b", .str b)]))
       out.flush
-      if hold then discard (← IO.getStdin).getLine
+      if hold then
+        let input ← IO.getStdin
+        while (← input.getLine).trimAscii == "repeat" do
+          let again ← source "a" "chatgpt"
+          out.putStrLn again
+          out.flush
       return 0
     for account in ["a", "b", "c", "extra"] do
       IO.ofExcept (← AccountVpnPool.savePreference pool store.missionsDb account (some "NL"))
