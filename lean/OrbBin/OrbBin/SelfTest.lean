@@ -1027,6 +1027,11 @@ def runOpenCodeAcpTests : IO Unit := do
   IO.FS.removeDirAll tmpDir
 
 def runAllTests : IO UInt32 := do
+  let prompt := "--model is part of this prompt\nwith 'quotes' and a trailing newline\n"
+  assertEq "Antigravity delivers a flag-shaped prompt verbatim alongside model, effort and resume"
+    (OrbBin.ClaudeControl.buildOneShotHarnessArgs "antigravity" prompt (some "custom-model") (some "high") (some "session"))
+    #["--model", "custom-model", "--effort", "high", "--conversation", "session", "--print=" ++ prompt]
+
   runOpenCodeAcpTests
   IO.println "=== OrbBin Wave 1 Companion Binaries Self-Test ==="
 

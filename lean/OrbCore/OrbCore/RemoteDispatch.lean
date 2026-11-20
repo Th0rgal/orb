@@ -817,21 +817,14 @@ private def prepareRemoteHarnessCommand
     return .ok { command := cmd, envPairs := envs, managedAuth := #["grok"], proxyToken := "" }
 
   else if harness == "antigravity" then
-    let rawModel := spec.modelOverride.trimAscii.toString
-    let effOpt := if spec.modelEffort.trimAscii.toString.isEmpty then none else some spec.modelEffort.trimAscii.toString
-    let (modelArg, effArg) :=
-      if rawModel.isEmpty then
-        let ea := match effOpt with | some e => s!" --effort {shellSingleQuote e}" | none => ""
-        ("", ea)
-      else
-        let (fullM, remEff?) := OrbBin.ClaudeControl.normalizeAntigravityCliModel rawModel effOpt
-        let ea := match remEff? with | some e => s!" --effort {shellSingleQuote e}" | none => ""
-        (s!" --model {shellSingleQuote fullM}", ea)
-    let resArg := match resumeSid? with | some sid => s!" --resume {shellSingleQuote sid}" | none => ""
-    let inner := s!"agy --print{modelArg}{effArg}{resArg} \"$(cat <&3)\""
+    let options := OrbBin.ClaudeControl.antigravityCliOptions spec.modelOverride (some spec.modelEffort) resumeSid?
+    let argv := String.intercalate " " (options.toList.map shellSingleQuote)
+    -- A sentinel preserves trailing newlines across shell command substitution.
+    let inner := "agy " ++ argv ++ " --print=\"${agy_prompt%.}\""
     let cmd :=
       wsPrefix ++ skillPrelude ++ fd3Prelude ++
       "command -v agy >/dev/null 2>&1 || { echo 'agy is not installed on this node' >&2; exit 127; }; " ++
+      "agy_prompt=\"$(cat <&3 && printf .)\" || exit 1; " ++
       wrapWithRemoteMcp "antigravity" inner
     let envs := skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[("NO_COLOR", "1")]
     return .ok { command := cmd, envPairs := envs, managedAuth := #["antigravity"], proxyToken := "" }
