@@ -54,6 +54,39 @@ restricted deployment receipt. Exercise cross-category sharing with a fixture
 until a live account in another category is designated. Use the existing admin
 login for Settings. Never include credentials in the receipt.
 
+### Live rollout and rollback
+
+1. Capture the current dev and production Core revisions, sidecar versions and
+   service paths. Identify the qBittorrent session by its server, exit and
+   connection start time in AirVPN. Record these in a restricted receipt so a
+   later check can distinguish a surviving connection from a reconnect.
+2. On the native Core host, check that each service user can execute
+   `setpriv --pdeathsig KILL -- wireproxy --version`. Configure one stable
+   loopback relay port per Core instance and one shared, writable
+   `ORB_AIRVPN_COORDINATOR_DIR` for all instances using this subscription
+   on the host. Each sidecar must reach its own Core on loopback. Confirm that
+   dev and production have separate writable auth-file directories before
+   changing a dev credential’s proxy or model prefix.
+3. Run `orb-deploy --detach <full-sha> --dev-only` and verify the build in
+   dev’s `/api/health`. Use admin Settings on that instance to import the key
+   and profiles. Test the saved key, enable two designated ChatGPT accounts
+   concurrently, exercise the request matrix above, and compare observed
+   addresses with the selected accounts in Settings. Recheck the media session
+   and one Direct account after the tunnel interruption and Core restart.
+4. Promote the verified revision through the normal production deploy gate.
+   Enable VPN on the designated canary account first. Record the observed exit,
+   results of a provider request and a Direct control request, and whether the
+   media session retained its connection start time. Keep promotion pending if
+   the canary exits directly, another account changes exit unexpectedly, or the
+   media session reconnects.
+5. On regression, stop admission and drain requests for the affected credential
+   at every owner, including sidecar background refresh. Before restoring a
+   Core revision that predates account routing, take protected credentials out
+   of service. An older Core can ignore saved VPN preferences. Restore the
+   recorded Core and sidecar revisions through the deployment procedure, verify
+   Direct and media traffic, and resume protected accounts only after their
+   routes pass an independent exit check.
+
 ### Sidecar version and reconnect acceptance
 
 The binary inspected on agent-core reports CLIProxyAPI 8.0.26, commit
