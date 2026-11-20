@@ -267,8 +267,8 @@ struct OrbProvidersSettings: View {
                             Text("This login is disabled in CLIProxyAPI. Re-enable the Core provider to restore it.")
                                 .font(.caption).foregroundStyle(.orange)
                         }
-                        if isAdmin { OrbAccountVpnSettings(client: client, account: provider["id"].text).id(provider["id"].text) }
                         let manages = Self.canManageProvider(provider, isAdmin: isAdmin)
+                        if manages { OrbAccountVpnSettings(client: client, account: provider["id"].text).id(provider["id"].text) }
                         let unverified = detail["status"].text == "needs_verification"
                         if unverified && manages {
                             // Google refuses this login until its owner verifies it; the
