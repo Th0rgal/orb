@@ -7,6 +7,10 @@ on:
         description: Use lean.ci runners (also requires ORB_LEAN_RUNNERS=true)
         type: boolean
         default: false
+      cold_project:
+        description: Measure a full run without restoring or publishing project build caches
+        type: boolean
+        default: false
   push:
     branches: [master, main, "release/*"]
     # Roadmap/docs pushes must not queue behind (and so cancel) pending master runs.
@@ -48,6 +52,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  ORB_COLD_PROJECT: ${{ inputs.cold_project && '1' || '0' }}
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -234,6 +239,7 @@ jobs:
         run: pnpm install --frozen-lockfile
       - uses: actions/cache@v5
         id: dist
+        if: env.ORB_COLD_PROJECT != '1'
         with:
           path: orb/dist
           key: orb-dist-v1-${{ runner.os }}-${{ runner.arch }}-node22-${{ needs.plan.outputs.orb_build_hash }}
@@ -242,13 +248,16 @@ jobs:
       - uses: actions/download-artifact@v4
         id: promoted-dist
         continue-on-error: true
-        if: steps.dist.outputs.cache-hit != 'true' && needs.plan.outputs.dist_run_id != ''
+        if: env.ORB_COLD_PROJECT != '1' && steps.dist.outputs.cache-hit != 'true' && needs.plan.outputs.dist_run_id != ''
         with:
           name: orb-dist
           path: orb/dist
           github-token: ${{ github.token }}
           run-id: ${{ needs.plan.outputs.dist_run_id }}
-      - if: steps.dist.outputs.cache-hit != 'true' && (needs.plan.outputs.dist_run_id == '' || steps.promoted-dist.outcome == 'failure')
+      - name: Verify cold web output before build
+        if: env.ORB_COLD_PROJECT == '1'
+        run: test ! -e dist && echo 'orb/dist absent'
+      - if: env.ORB_COLD_PROJECT == '1' || (steps.dist.outputs.cache-hit != 'true' && (needs.plan.outputs.dist_run_id == '' || steps.promoted-dist.outcome == 'failure'))
         env:
           ORB_BUILD_ID: ${{ needs.plan.outputs.orb_build_hash }}
         run: pnpm build
@@ -420,6 +429,7 @@ jobs:
       # exact inputs, but always compile/test the shell and replay wakeup tests.
       - uses: actions/cache@v5
         id: desktop-bins
+        if: env.ORB_COLD_PROJECT != '1'
         with:
           path: |
             target/debug/orb-locald
@@ -428,7 +438,7 @@ jobs:
       - uses: actions/download-artifact@v4
         id: promoted-desktop
         continue-on-error: true
-        if: steps.desktop-bins.outputs.cache-hit != 'true' && needs.plan.outputs.desktop_run_id != ''
+        if: env.ORB_COLD_PROJECT != '1' && steps.desktop-bins.outputs.cache-hit != 'true' && needs.plan.outputs.desktop_run_id != ''
         with:
           name: desktop-bins
           path: .ci/desktop
@@ -546,8 +556,9 @@ jobs:
           push: false
           load: true
           tags: orb-ci:local
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          no-cache: ${{ inputs.cold_project == true }}
+          cache-from: ${{ !inputs.cold_project && 'type=gha' || '' }}
+          cache-to: ${{ !inputs.cold_project && 'type=gha,mode=max' || '' }}
 
       - name: Check fail-closed auth defaults and API proxy on default/custom backend ports
         run: |
@@ -622,6 +633,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
       - uses: actions/cache/save@v5
+        if: env.ORB_COLD_PROJECT != '1'
         with:
           path: .ci/verified.json
           key: ci-verified-tree-${{ needs.plan.outputs.tree_hash }}
