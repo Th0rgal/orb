@@ -50,7 +50,7 @@ def process(args, env, cwd):
             child.wait()
 
 
-def run(tmp, mouse=False):
+def run(tmp, mouse=False, menu_client=None):
     with socket.socket() as s:
         s.bind(('127.0.0.1', 0))
         port = s.getsockname()[1]
@@ -87,7 +87,7 @@ for i in range(300):
         token = wait('disposable Core login', login)
         (tmp / 'connection.json').write_text(json.dumps({'api_url': base, 'token': token}))
         assert api('/api/control/missions') == []
-        if mouse:
+        if mouse and menu_client is None:
             api('/api/projects', {'slug': 'menu-test', 'title': 'Menu test'})
             api('/api/projects', {'slug': 'source', 'title': 'Source project'})
         config = tmp / 'sway.conf'
@@ -105,6 +105,9 @@ for i in range(300):
             pointer = Pointer(graphical)
             stack.callback(pointer.close)
             click = pointer.click
+        if menu_client is not None:
+            from linux_sidebar_menu import exercise
+            return exercise(ROOT, tmp, api, graphical, click, process, wait, stack, menu_client)
         binary = os.environ.get('ORB_LEANUI_TEST_BINARY')
         client = [str(Path(binary).resolve(strict=True))] if binary else [ROOT / 'scripts/orb_desktop_dev.sh', '--leanui']
         if binary and Path(binary).name == 'orb-desktop':
@@ -247,4 +250,9 @@ for i in range(300):
 
 if __name__ == '__main__':
     with tempfile.TemporaryDirectory(prefix='orb-u6a-') as directory:
-        run(Path(directory), mouse="--mouse" in sys.argv)
+        if sys.argv[1:2] == ['--sidebar-menu']:
+            if sys.argv[2:] not in (['webkit'], ['leanui']):
+                raise SystemExit("usage: live_writes.py --sidebar-menu {webkit,leanui}")
+            run(Path(directory), mouse=True, menu_client=sys.argv[2])
+        else:
+            run(Path(directory), mouse="--mouse" in sys.argv)
