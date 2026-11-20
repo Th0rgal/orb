@@ -1609,13 +1609,17 @@ private def r21aAdapterReplays (store : CoreStore) (root : String) : IO Unit := 
     if bearer == some "fixture-expired" then return .ok (401, "", none)
     return reply "{\"data\":[{\"name\":\"5h\",\"limit\":20,\"used\":5},{\"model_name\":\"all\",\"limit\":100,\"remaining\":40},{\"name\":\"bonus\",\"remaining\":2}]}" }
   let first ← runProviderUsageUpkeepPass hub store root 0
-  let cached := fun () => hub.mu.atomically (do return ((← get).usageEntries[0]?).map (·.payload) |>.getD .null)
-  unless first == #["cliproxyapi:kimi"] && (← cached ()).fieldStr? "status" == some "needs_reauth" do
+  let account := fileAccountId "kimi" "kimi-fixture.json"
+  let cached := fun () => hub.mu.atomically do
+    let entry := (← get).usageEntries.find? (fun e => e.providerId == account)
+    return (entry.map (·.payload)).getD .null
+  unless first == #[account] && (← cached ()).fieldStr? "status" == some "needs_reauth" do
     throw (IO.userError "r21aUpkeep: rejected login not observed")
   unless (← runProviderUsageUpkeepPass hub store root 0).isEmpty do throw (IO.userError "r21aUpkeep: fresh entry re-polled")
   -- The external owner has already rotated the file. This tests consumption, not renewal.
   IO.FS.writeFile kimiFile "{\"type\":\"kimi\",\"access_token\":\"fixture-rotated\"}"
-  discard <| runProviderUsageUpkeepPass hub store root 0 0
+  unless (← runProviderUsageUpkeepPass hub store root 0 0) == #[account] do
+    throw (IO.userError "r21aUpkeep: token rotation changed the account identity")
   let k ← cached ()
   unless (← calls.get) == #["fixture-expired", "fixture-rotated"] && k.fieldStr? "status" == some "connected" &&
       k.fieldOrNull "kimi_5h_used_percent" == .num "25" && k.fieldOrNull "kimi_weekly_used_percent" == .num "60" &&
