@@ -1,12 +1,18 @@
 # Remote goal lifecycle
 
-## Core-emulated remote OpenCode and Codex
+## Core-emulated remote OpenCode, Codex and Antigravity
 
-Core advertises OpenCode and Codex in `remote_launch.goal_harnesses` when the typed remote
+Core advertises OpenCode, Codex and Antigravity in `remote_launch.goal_harnesses` when the typed remote
 adapter is available. The mission-create endpoint independently rejects an empty
 Goal objective or an unsupported remote harness before creating a mission.
 Remote follow-ups steer the existing mission; `/goal` can only start a new
 remote mission. Rejected commands leave the transcript and queue untouched.
+
+Antigravity runs in stream-json mode. Its init event binds the mission to a native
+conversation UUID. A continuation passes that UUID to `agy --conversation`.
+Agent response deltas supply the text used by Goal settlement. Tool events and
+usage records do not contribute completion text. The final response supplies
+the text if no deltas arrived. A terminal provider error remains a failed turn.
 
 After a successful Goal job drains, a standalone `<!-- GOAL_COMPLETE -->`
 on the final assistant line outside a fenced code block is completion evidence.
