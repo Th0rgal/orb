@@ -140,6 +140,9 @@ def mutate(binding, action, mid):
         if values != ['']:
             if len(values) not in (5, 6):
                 raise ValueError('invalid launch settings')
+            # Core runs locally. A remote-node tag would queue this turn for a nonexistent worker.
+            if values[0] == 'core':
+                values[0] = ''
             fields = ('remote_node_id', 'backend', 'model_override', 'model_effort', 'permission_mode', 'project')
             body.update((k, v) for k, v in zip(fields, values) if v and
                         (k != 'permission_mode' or values[1] == 'claudecode'))
@@ -197,7 +200,8 @@ def label(v):
 
 
 def mission_settings(m):
-    return (m.get('remote_node_id') or (m.get('remote_job') or {}).get('node_id'),
+    return (m.get('remote_node_id') or (m.get('remote_job') or {}).get('node_id') or
+            next((t.removeprefix('remote-node:') for t in m.get('tags', []) if t.startswith('remote-node:')), 'core'),
             m.get('backend'), m.get('model_override') or m.get('model'),
             m.get('model_effort'), m.get('permission_mode') or 'supervised')
 

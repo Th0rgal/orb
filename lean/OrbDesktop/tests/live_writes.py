@@ -82,6 +82,7 @@ def run(tmp, mouse=False):
         assert api('/api/control/missions') == []
         if mouse:
             api('/api/projects', {'slug': 'menu-test', 'title': 'Menu test'})
+            api('/api/projects', {'slug': 'source', 'title': 'Source project'})
         config = tmp / 'sway.conf'
         config.write_text('output * mode 1000x700\ndefault_border none\nxwayland disable\n')
         graphical = dict(os.environ, XDG_RUNTIME_DIR=str(tmp), WLR_BACKENDS='headless', WLR_RENDERER='pixman',
@@ -110,6 +111,11 @@ def run(tmp, mouse=False):
 
         if mouse:
             empty_frame = composer_frame()
+            click(74, 214)   # open Source project
+            click(264, 53)   # choose the Core machine explicitly
+            click(302, 114)
+            click(348, 53)   # select Codex from the live catalog
+            click(360, 114)
             click(80, 50)  # Create mission in the sidebar
         else:
             keys('-k', 'Tab', '-s', '200', '-k', 'Return')
@@ -117,6 +123,11 @@ def run(tmp, mouse=False):
         assert len(created) == 1
         mid = created[0]['id']
         path = '/api/control/missions/' + mid
+        if mouse:
+            mission = api(path)
+            assert mission['project'] == 'source' and mission['backend'] == 'codex', mission['id']
+            assert not mission.get('remote_job') and not any(t.startswith('remote-node:') for t in mission['tags'])
+            assert api('/api/machines')[0]['id'] == 'core'
         typed, committed = 'u6a ' + secrets.token_hex(5) + ' ', '日本語'
         time.sleep(.5)
         if mouse:
@@ -159,8 +170,7 @@ def run(tmp, mouse=False):
             click(128, 194)
             wait('moved mission', lambda: api(path).get('project') == 'menu-test')
             click(75, 143, 'button3')
-            # Moving to the only project removes the destination submenu.
-            click(128, 194)
+            click(128, 224)  # Archive follows Move to
         else:
             backend = stopped.get('backend')
             selector_count = 2 + int(backend in ('codex', 'antigravity', 'claudecode')) + int(backend == 'claudecode')
