@@ -16,20 +16,12 @@ Safety invariants:
 - Never prints or logs tokens, passwords, secret values, or raw response bodies.
 - Local/dev runs verify full two-actor (admin + `ben`) isolation against an
   explicit disposable or dev endpoint.
-- `prod-readonly` walks production (`https://orbcore.thomas.md`) with an
-  existing member bearer: non-GET/non-read requests are refused before network
-  dispatch, and missing credentials report `BLOCKED` without claiming source
-  tests prove prod.
-- `prod-full` is the same two-actor matrix as `dev` against production. It is
-  refused unless the caller also passes `--confirm-prod-mutations` and the
-  exact 40-character `--sha`; the bearer must be an admin. It creates only
-  zero-spend temporary fixtures, never touches an existing member, and removes
-  every fixture in `finally`.
+- Production network dispatch is disabled. For M3 use the offline visibility
+  receipt checker described in docs/operations/ben-visibility.md.
 """
 import argparse
 import json
 import os
-from pathlib import Path
 import re
 import secrets
 import stat
@@ -37,6 +29,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from pathlib import Path
 
 SURFACES = (
     "missions",
@@ -139,17 +132,10 @@ class Api:
         self.opener = urllib.request.build_opener(NoRedirect)
 
     def call(self, method, path, token="", body=None):
+        if self.mode != "dev":
+            raise IsolationError("production dispatch disabled; use the M3 visibility receipt checker")
         if not path.startswith("/api/") or "\r" in path or "\n" in path:
             raise IsolationError("invalid API path")
-        if self.mode == "prod-readonly":
-            if method == "GET":
-                pass
-            elif method == "POST" and path == "/api/mcp/call":
-                tool = body.get("name", "") if isinstance(body, dict) else ""
-                if tool not in READONLY_MCP_TOOLS:
-                    raise IsolationError("non-readonly MCP tool refused in prod-readonly mode: " + str(tool))
-            else:
-                raise IsolationError("mutating HTTP method refused in prod-readonly mode: " + method + " " + path)
         data = None if body is None else json.dumps(body).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if token:
