@@ -26,6 +26,7 @@ def run(binary, reconnect=False, orb_configure=None):
     if interfaces != {"lo"}:
         raise RuntimeError("Run in a fresh network namespace with only loopback enabled")
     hits = []
+    kimi_hosts = {"auth.kimi.com", "api.kimi.com"}
     google_hosts = {"oauth2.googleapis.com", "www.googleapis.com", "daily-cloudcode-pa.googleapis.com", "cloudcode-pa.googleapis.com"}
 
     class Receiver(http.server.BaseHTTPRequestHandler):
@@ -59,7 +60,7 @@ def run(binary, reconnect=False, orb_configure=None):
                 if host in {"127.0.0.1", "receiver.example.invalid"} and port == receiver:
                     destination = receiver
                 else:
-                    assert host in {"chatgpt.com", "auth.openai.com", "api.anthropic.com", "platform.claude.com"} | google_hosts and port == 443
+                    assert host in {"chatgpt.com", "auth.openai.com", "api.anthropic.com", "platform.claude.com"} | google_hosts | kimi_hosts and port == 443
                     destination = model_port
                 with socket.create_connection(("127.0.0.1", destination), 4, (source_ip, 0)) as dest:
                     sock.sendall(bytes([5, 0, 0, 1, 127, 0, 0, 1, 0, 0]))
@@ -81,7 +82,7 @@ def run(binary, reconnect=False, orb_configure=None):
         root = Path(temp)
         cert, tls_key = root / "cert.pem", root / "key.pem"
         subprocess.run(["openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048", "-days", "1",
-                        "-subj", "/CN=chatgpt.com", "-addext", "subjectAltName=DNS:chatgpt.com,DNS:auth.openai.com,DNS:api.anthropic.com,DNS:platform.claude.com," + ",".join("DNS:" + h for h in sorted(google_hosts)),
+                        "-subj", "/CN=chatgpt.com", "-addext", "subjectAltName=DNS:chatgpt.com,DNS:auth.openai.com,DNS:api.anthropic.com,DNS:platform.claude.com," + ",".join("DNS:" + h for h in sorted(google_hosts | kimi_hosts)),
                         "-out", cert, "-keyout", tls_key], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls.load_cert_chain(cert, tls_key)
@@ -89,6 +90,7 @@ def run(binary, reconnect=False, orb_configure=None):
         claude_hits = []
         claude_oauth = []
         google_hits = []
+        kimi_hits = []
         refresh_hits = []
         reconnect_hits = []
         class Model(Receiver):
@@ -113,6 +115,34 @@ def run(binary, reconnect=False, orb_configure=None):
                                 "organization": {"uuid": "org-c", "name": "Fixture"}})
             def do_POST(self):
                 body = self.rfile.read(int(self.headers["Content-Length"]))
+                host = self.headers.get("Host", "").split(":")[0]
+                if host in kimi_hosts:
+                    if self.path == "/api/oauth/device_authorization":
+                        kimi_hits.append(("authorize", self.client_address[0]))
+                        self.send_json({"device_code": "fixture-device", "user_code": "fixture-user", "expires_in": 90,
+                                        "verification_uri": "https://example.invalid/verify", "interval": 5})
+                    elif self.path == "/api/oauth/token":
+                        grant, = urllib.parse.parse_qs(body.decode())["grant_type"]
+                        kimi_hits.append((grant, self.client_address[0]))
+                        self.send_json({"access_token": "fixture-e", "refresh_token": "rotated-e", "expires_in": 3600, "token_type": "Bearer"})
+                    else:
+                        assert self.path.endswith("/chat/completions"), self.path
+                        assert self.headers.get("Authorization") == "Bearer fixture-e"
+                        stream = json.loads(body).get("stream", False)
+                        kimi_hits.append(("stream" if stream else "inference", self.client_address[0]))
+                        message = {"role": "assistant", "content": "fixture-kimi"}
+                        frame = {"id": "kimi-fixture", "object": "chat.completion.chunk" if stream else "chat.completion",
+                                 "model": "kimi-k2", "choices": [{"index": 0, "delta" if stream else "message": message, "finish_reason": "stop"}]}
+                        if stream:
+                            data = ("data: " + json.dumps(frame) + "\n\ndata: [DONE]\n\n").encode()
+                            self.send_response(200)
+                            self.send_header("Content-Type", "text/event-stream")
+                            self.send_header("Content-Length", str(len(data)))
+                            self.end_headers()
+                            self.wfile.write(data)
+                        else:
+                            self.send_json(frame)
+                    return
                 method = self.path.split("?")[0].split(":")[-1]
                 if method == "fetchAvailableModels":
                     google_hits.append((method, self.client_address[0]))
@@ -201,6 +231,8 @@ def run(binary, reconnect=False, orb_configure=None):
             (auth / f"{name}.json").write_text(json.dumps({"type": "codex", "access_token": "fixture-" + name, "prefix": "" if orb_configure and name == "a" else name, "account_id": "acct-" + name, "expired": "2099-01-01T00:00:00Z", "email": name + "@example.invalid"}))
         (auth / "c.json").write_text(json.dumps({"type": "claude", "access_token": "fixture-c", "prefix": "c",
                                                 "email": "c@example.invalid", "account_uuid": "acct-c", "expired": "2099-01-01T00:00:00Z"}))
+        (auth / "e.json").write_text(json.dumps({"type": "kimi", "access_token": "fixture-e", "prefix": "e",
+                                                "domain": "kimi.com", "expired": "2099-01-01T00:00:00Z"}))
         (auth / "d.json").write_text(json.dumps({"type": "antigravity", "access_token": "fixture-d", "prefix": "d",
                                                 "project_id": "fixture-project", "email": "d@example.invalid", "expired": "2099-01-01T00:00:00Z"}))
         with socket.socket() as listener:
@@ -215,7 +247,7 @@ def run(binary, reconnect=False, orb_configure=None):
                                              headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
             with urllib.request.urlopen(request, timeout=8) as response:
                 return json.load(response)
-        routes = {"a": f"socks5://127.0.0.1:{a}", "b": f"socks5://127.0.0.1:{b}", "c": f"socks5://127.0.0.1:{a}", "d": f"socks5://127.0.0.1:{b}"}
+        routes = {"a": f"socks5://127.0.0.1:{a}", "b": f"socks5://127.0.0.1:{b}", "c": f"socks5://127.0.0.1:{a}", "d": f"socks5://127.0.0.1:{b}", "e": f"socks5://127.0.0.1:{a}"}
         orb_relay = None
         proc = subprocess.Popen([binary, "-config", str(config)], cwd=root,
                                 env={"HOME": temp, "PATH": os.defpath, "SSL_CERT_FILE": str(cert)}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -231,7 +263,7 @@ def run(binary, reconnect=False, orb_configure=None):
             for _ in range(100):
                 try:
                     files = api("GET", "credentials")["files"]
-                    if len(files) == 5:
+                    if len(files) == 6:
                         break
                 except urllib.error.URLError:
                     pass
@@ -299,29 +331,33 @@ def run(binary, reconnect=False, orb_configure=None):
                 claude_inference()
                 google_models = [model for model in models if model.startswith("d/gemini-")]
                 assert google_models, [model for model in models if model.startswith("d/")]
-                def google_inference(stream):
-                    wire = json.dumps({"model": google_models[0], "stream": stream,
+                def chat_inference(model, stream, expected):
+                    wire = json.dumps({"model": model, "stream": stream,
                                        "messages": [{"role": "user", "content": "synthetic"}]}).encode()
                     req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions", data=wire,
                                                  headers={"Authorization": "Bearer fixture-client", "Content-Type": "application/json"})
                     with urllib.request.urlopen(req, timeout=15) as response:
-                        assert b"fixture-google" in response.read()
+                        assert expected in response.read()
                 for stream in (False, True):
                     count = len([kind for kind, _ in google_hits if kind in ("generateContent", "streamGenerateContent")])
-                    google_inference(stream)
+                    chat_inference(google_models[0], stream, b"fixture-google")
                     assert len([kind for kind, _ in google_hits if kind in ("generateContent", "streamGenerateContent")]) > count
-                for name in ("a", "b", "c", "d"):
+                kimi_model = next(m for m in models if m.startswith("e/kimi-"))
+                for stream in (False, True):
+                    chat_inference(kimi_model, stream, b"fixture-kimi")
+                for name in ("a", "b", "c", "d", "e"):
                     api("PATCH", "credentials/fields", {"name": name + ".json", "refresh_token": "refresh-" + name})
                     api("POST", "credentials/refresh", {"name": name + ".json"})
                 assert set(refresh_hits) == {("127.0.0.2", "refresh-a"), ("127.0.0.3", "refresh-b")}, refresh_hits
                 if reconnect:
                     for name, url in routes.items():
-                        provider = {"a": "codex", "b": "codex", "c": "claude", "d": "antigravity"}[name]
+                        provider = {"a": "codex", "b": "codex", "c": "claude", "d": "antigravity", "e": "kimi"}[name]
                         filename = name + ".json"
                         session = api("POST", "oauth/auth-url", {"provider": provider, "name": filename, "proxy_url": url})
                         assert session["target_auth_id"] == filename
                         state = session["state"]
-                        api("POST", "oauth/callback", {"provider": provider, "code": name, "state": state})
+                        if provider != "kimi":
+                            api("POST", "oauth/callback", {"provider": provider, "code": name, "state": state})
                         for _ in range(80):
                             status = api("GET", "oauth/status?state=" + urllib.parse.quote(state))
                             if status["status"] != "wait":
@@ -331,28 +367,40 @@ def run(binary, reconnect=False, orb_configure=None):
                         saved = api("GET", "credentials/download?name=" + filename)
                         assert saved.get("prefix") == prefixes[name]
                         assert saved["refresh_token"] == "rotated-" + name and saved["proxy_url"] == url
+                    assert {"inference", "stream", "refresh_token", "authorize", "urn:ietf:params:oauth:grant-type:device_code"} <= {kind for kind, _ in kimi_hits}, kimi_hits
+                    assert all(ip == "127.0.0.2" for _, ip in kimi_hits), kimi_hits
                     assert {"authorization_code", "refresh_token", "userinfo", "project", "fetchAvailableModels"} <= {kind for kind, _ in google_hits}, google_hits
                     assert all(ip == "127.0.0.3" for _, ip in google_hits), google_hits
                     assert reconnect_hits == [("127.0.0.2", "a"), ("127.0.0.3", "b")], reconnect_hits
                     assert ("authorization_code", "127.0.0.2") in claude_oauth, claude_oauth
-                    print("Targeted OAuth reconnect passed for two ChatGPT fixtures, Claude and Google Antigravity.")
+                    print("Targeted OAuth reconnect passed for two ChatGPT fixtures, Claude, Google Antigravity and Kimi.")
                 assert ("refresh_token", "127.0.0.2") in claude_oauth, claude_oauth
                 assert all(ip == "127.0.0.2" for _, ip in claude_oauth), claude_oauth
                 with socket.socket() as unavailable:
                     unavailable.bind(("127.0.0.1", 0))
                     if orb_relay:
-                        orb_relay.stdin.write("drop-a-d\n")
+                        orb_relay.stdin.write("drop-a-d-e\n")
                         orb_relay.stdin.flush()
                         assert orb_relay.stdout.readline().strip() == "blocked"
                         assert request("b")["body"] == "127.0.0.3"
                         claude_inference()
-                        before = list(google_hits)
-                        try:
-                            google_inference(False)
-                            raise AssertionError("Antigravity used an unavailable account route")
-                        except urllib.error.HTTPError as e:
-                            assert 400 <= e.code <= 599
-                        assert google_hits == before
+                        for model, content, recorded in [(google_models[0], b"fixture-google", google_hits),
+                                                         (kimi_model, b"fixture-kimi", kimi_hits)]:
+                            before = len(recorded)
+                            try:
+                                chat_inference(model, False, content)
+                                raise AssertionError("inference used an unavailable account route")
+                            except urllib.error.HTTPError as e:
+                                assert 400 <= e.code <= 599
+                            assert len(recorded) == before
+                        if reconnect:
+                            before = list(kimi_hits)
+                            try:
+                                api("POST", "oauth/auth-url", {"provider": "kimi", "name": "e.json", "proxy_url": routes["e"]})
+                                raise AssertionError("device authorization used an unavailable account route")
+                            except urllib.error.HTTPError as e:
+                                assert 400 <= e.code <= 599
+                            assert kimi_hits == before
                     else:
                         api("PATCH", "credentials/fields", {"name": "a.json", "proxy_url": f"socks5://127.0.0.1:{unavailable.getsockname()[1]}"})
                     try:

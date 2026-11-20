@@ -20,15 +20,16 @@ def main (args : List String) : IO UInt32 := do
       | "openai", "a" => return if ← unavailable.get then .error "vpn_exit_unverified" else .ok a.toUInt16
       | "openai", "b" => return .ok b.toUInt16
       | "anthropic", "c" => return .ok a.toUInt16
+      | "kimi", "e" => return if ← unavailable.get then .error "vpn_exit_unverified" else .ok a.toUInt16
       | "antigravity", "d" => return if ← unavailable.get then .error "vpn_exit_unverified" else .ok b.toUInt16
       | _, _ => return .error "unknown_account")
     try
       let out ← IO.getStdout
-      for (provider, account) in [("openai", "a"), ("openai", "b"), ("anthropic", "c"), ("antigravity", "d")] do
+      for (provider, account) in [("openai", "a"), ("openai", "b"), ("anthropic", "c"), ("antigravity", "d"), ("kimi", "e")] do
         let some url := OrbCore.AccountVpnRelay.proxyUrl key listener.port provider account | return 1
         out.putStrLn url
       out.flush
-      if (← input.getLine).trimAscii == "drop-a-d" then
+      if (← input.getLine).trimAscii == "drop-a-d-e" then
         unavailable.set true
         out.putStrLn "blocked"
         out.flush

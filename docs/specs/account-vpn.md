@@ -167,3 +167,9 @@ buffered and streaming Gemini requests, catalog discovery, forced token
 refresh, and a targeted sign-in. The token exchange, user-info lookup and
 project lookup must traverse that credential’s Orb relay. Blocking the
 relay must prevent a subsequent inference request from reaching Google.
+
+For Kimi Code, the fixture exercises device authorization and polling through
+the account relay, checks adoption into the original credential file, and
+observes token refresh, buffered inference and streaming inference. When the
+relay refuses Kimi, the mock vendor receives neither the inference request
+nor a new device authorization request.
