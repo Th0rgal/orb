@@ -35,6 +35,22 @@ lean_obj_res lean_ui_blit_glyph(lean_obj_arg fb, b_lean_obj_arg atlas, size_t ds
   return fb;
 }
 
+/* Full-coverage interior of a clipped box. Edges still use signed distance coverage. */
+lean_obj_res lean_ui_blend_rect(lean_obj_arg fb, size_t off, size_t pitch, size_t w, size_t h, uint32_t color) {
+  unsigned alpha = color & 255, inv = 255-alpha;
+  if (!alpha || !fits_rows(lean_sarray_size(fb)/4,off,pitch,w,h)) return fb;
+  unsigned red = (color>>24)*alpha, green = ((color>>16)&255)*alpha, blue = ((color>>8)&255)*alpha;
+  fb = lean_sarray_ensure_exclusive(fb);
+  for (size_t y=0; y<h; ++y) {
+    uint8_t *d = lean_sarray_cptr(fb) + 4*(off+y*pitch);
+    for (size_t x=0; x<w; ++x,d+=4) {
+      d[0]=(red+d[0]*inv+127)/255; d[1]=(green+d[1]*inv+127)/255;
+      d[2]=(blue+d[2]*inv+127)/255; d[3]=alpha+(d[3]*inv+127)/255;
+    }
+  }
+  return fb;
+}
+
 lean_obj_res lean_ui_scroll_rows(lean_obj_arg fb, size_t off, size_t stride, size_t w,
                                 size_t h, size_t shift) {
   size_t len = lean_sarray_size(fb);
