@@ -44,6 +44,13 @@ def run : IO Unit := do
   check (!(validate (fixture.setField "user_preferences" (.arr #[prefs, prefs.setField "username" (.str "ADMIN")]))).isOk)
     "case-insensitive usernames cannot alias the same target"
   check (!(validate (fixture.setField "version" (.num "2"))).isOk) "unknown schema version rejected"
+  let withRevision := fun revision => fixture.setField "global"
+    ((fixture.fieldOrNull "global").setField "library_revision" (.str revision))
+  let pin := "0123456789abcdef0123456789abcdef01234567"
+  check (validate (withRevision pin)).isOk "full lowercase library commit accepted"
+  for invalid in #[pin.toUpper, pin.dropEnd 1 |>.toString, pin ++ "0", "master"] do
+    check (!(validate (withRevision invalid)).isOk) "noncanonical library revision rejected"
+  IO.println "[PASS] SettingsDocumentTests: library revisions require a full lowercase commit"
   check (!(validate (fixture.setField "fleet" ((fixture.fieldOrNull "fleet").setField "spent_today_cents" (.num "0")))).isOk)
     "spending counters never transfer"
   check (!(validate (fixture.setField "fleet" ((fixture.fieldOrNull "fleet").setField "daily_cap_cents" (.num "18446744073709551616")))).isOk)
