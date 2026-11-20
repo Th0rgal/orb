@@ -11,6 +11,7 @@ from pathlib import Path
 import socket
 import subprocess
 import sys
+import tempfile
 import uuid
 
 
@@ -127,7 +128,18 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
             else:
                 raise AssertionError('Core accepted an archive over a live run')
     action_menu(fixture['activeActions'], 'archive')
-    see('archiving', '0,0 1000x700')
+    # In the 1000x700 test output LeanUI places its 440x40 warning just
+    # above the 104px composer. Isolate it from the streaming transcript.
+    refusal_region = '552,548 440x40' if client_kind == 'leanui' else '0,0 1000x700'
+    try:
+        see('archiving', refusal_region)
+    except TimeoutError as error:
+        # Keep the disposable compositor's pixels after the fixture cleans up.
+        with tempfile.NamedTemporaryFile(prefix=f'orb-{client_kind}-refusal-', suffix='.png',
+                                         delete=False) as frame:
+            subprocess.run(['grim', '-t', 'png', '-'], env=graphical, stdout=frame, check=True)
+        observed = [word for word, _, _ in words(refusal_region)]
+        raise AssertionError(f'Refusal OCR in {refusal_region}: {observed!r}; frame {frame.name}') from error
     see(fixture['openMission'], header)
     see(fixture['contextMission'])
     assert status(b) == 'active' and status(a) == 'awaiting_user'
