@@ -132,7 +132,9 @@ export function LiveProjectsSection(p: {
    *  (optimistic status, in-flight guard, rollback). Consumed then acknowledged. */
   archiveRequests?: readonly { mission: Mission; restore: boolean }[];
   onArchiveRequestsHandled?: (count: number) => void;
-  onArchiveSettled?: (id: string, ok: boolean) => void;
+  onArchiveStatus?: (rows: Mission[]) => void;
+  onArchiveError?: (id: string, restore: boolean, message: string) => void;
+  onArchiveSettled?: () => void;
   onDeleteRequestHandled?: () => void;
   activityMissions?: Mission[];
   /** Details from the open conversation, including restored/local sessions. */
@@ -1651,13 +1653,18 @@ export function LiveProjectsSection(p: {
     return items;
   };
 
-  const changeArchiveState = async (mission: Mission, restore: boolean) => {
-    if (archiving.has(mission.id) || deletingIds().has(mission.id)) return false;
+  const changeArchiveState = async (mission: Mission, restore: boolean, reportError?: (message: string) => void) => {
+    const reject = (message: string) => {
+      setActionError(message);
+      reportError?.(message);
+      return false;
+    };
+    if (archiving.has(mission.id) || deletingIds().has(mission.id)) return reject("Another action is in progress for this mission.");
     const known = allKnownMissions();
-    if (missionSubtree(known, [mission.id]).some(m => deletingIds().has(m.id))) return false;
+    if (missionSubtree(known, [mission.id]).some(m => deletingIds().has(m.id))) return reject("A mission in this conversation is being deleted.");
     let targets: Mission[];
     try { targets = archiveStateTargets(mission, known, restore, id => archiving.has(id)); }
-    catch (e) { setActionError(e instanceof Error ? e.message : String(e)); return false; }
+    catch (e) { return reject(e instanceof Error ? e.message : String(e)); }
     if (!targets.length) return true;
     const id = mission.id, version = connectionVersion();
     const status = restore ? "paused" : "acknowledged";
@@ -1667,6 +1674,7 @@ export function LiveProjectsSection(p: {
     missionRevision++;
     setActionError(null);
     const updateStatus = (statusFor: (m: Mission) => string) => batch(() => {
+      p.onArchiveStatus?.(targets.map(t => ({ ...t, status: statusFor(t) })));
       for (const slug of Object.keys(missions)) {
         setMissions(slug, m => targetIds.has(m.id), m => ({ ...m, status: statusFor(m) }));
         p.onProjectMissions?.(slug, missions[slug] ?? []);
@@ -1714,7 +1722,7 @@ export function LiveProjectsSection(p: {
     } catch (e) {
       if (currentConnection(version)) {
         updateStatus(m => previous.get(m.id) ?? m.status);
-        setActionError(e instanceof Error ? e.message : String(e));
+        return reject(e instanceof Error ? e.message : String(e));
       }
       return false;
     } finally { for (const t of targets) archiving.delete(t.id); missionRevision++; }
@@ -1723,7 +1731,10 @@ export function LiveProjectsSection(p: {
   createEffect(on(() => p.archiveRequests, reqs => {
     if (!reqs?.length) return;
     p.onArchiveRequestsHandled?.(reqs.length);
-    for (const r of reqs) void changeArchiveState(r.mission, r.restore).then(ok => p.onArchiveSettled?.(r.mission.id, ok !== false));
+    const version = connectionVersion();
+    for (const r of reqs) void changeArchiveState(r.mission, r.restore, message => p.onArchiveError?.(r.mission.id, r.restore, message)).then(() => {
+      if (currentConnection(version)) p.onArchiveSettled?.();
+    });
   }));
   const reopenConversation = (mission: Mission) => changeArchiveState(mission, true);
   const archiveSelection = async (id: string) => {
