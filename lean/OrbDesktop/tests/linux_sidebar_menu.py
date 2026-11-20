@@ -68,18 +68,17 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
     def see(label, geometry=sidebar):
         return wait('visible ' + label, lambda: locate(label, geometry))
     def open_project():
-        if client_kind == 'webkit':
-            def reveal():
-                if locate(fixture['openMission'], sidebar):
-                    return True
-                project = locate('menu', sidebar)
-                if project:
-                    click(20, project[1])
-                    try:
-                        return wait('expanded project roster', lambda: locate(fixture['openMission'], sidebar), 3)
-                    except TimeoutError:
-                        return False
-            wait('visible open mission in project', reveal)
+        def reveal():
+            if locate(fixture['openMission'], sidebar):
+                return True
+            project = locate('menu', sidebar)
+            if project:
+                click(20, project[1])
+                try:
+                    return wait('expanded project roster', lambda: locate(fixture['openMission'], sidebar), 3)
+                except TimeoutError:
+                    return False
+        wait('visible open mission in project', reveal)
     def action_menu(expected, choose, target_region=sidebar):
         x, y = see(fixture['contextMission'], target_region)
         click(x, y, 'button3')
