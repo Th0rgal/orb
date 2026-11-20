@@ -47,7 +47,7 @@ import {
   peekCachedProjects,
   updateProject,
   renameMission,
-  archiveProject,
+  retireProject,
   bumpProjects,
   mkdirProjectFile,
   deleteProjectFile,
@@ -225,6 +225,8 @@ export function LiveProjectsSection(p: {
   const [dirErrors, setDirErrors] = createStore<Record<string, string | null>>({});
   const [dirs, setDirs] = createStore<Record<string, ProjectFileEntry[]>>({});
   const [actionMenu, setActionMenu] = createSignal<{ x: number; y: number; slug: string; path: string } | null>(null);
+  const [deleteProjectSlug, setDeleteProjectSlug] = createSignal<string | null>(null);
+  const [projectDeleteBusy, setProjectDeleteBusy] = createSignal(false);
   const [newFolder, setNewFolder] = createSignal<{ slug: string; path: string } | null>(null);
   const [folderName, setFolderName] = createSignal("");
   const [folderError, setFolderError] = createSignal<string | null>(null);
@@ -869,6 +871,7 @@ export function LiveProjectsSection(p: {
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined; }
     deletedInSession.clear(); deleteQueue.length = 0; queuedDeletes.clear(); deletingDescendants.clear(); deleteFailures.length = 0; pendingRemoved = new Set(); pendingUnmark = new Set();
     setDeletingIds(new Set<string>());
+    setDeleteProjectSlug(null); setProjectDeleteBusy(false);
     setRename(null); setActionMenu(null); setFileMenu(null); setFileAction(null); setFileClipboard(""); setArchiveMenu(null);
       setMultiSelectMenu(null);
     setSelectionActive(false); setSelectedAgents([]); setSelectionAnchor(null); setPendingMoves([]); setDeleteTargets([]); setMissionMenu(null);
@@ -1071,9 +1074,17 @@ export function LiveProjectsSection(p: {
         }
       }
     };
+    const onNativeProjectMenu = (event: Event) => {
+      const { slug, y } = (event as CustomEvent<{ slug: string; y: number }>).detail;
+      if (!p.headless || !slug) return;
+      setActionFocus(true);
+      setActionMenu({ x: 4, y, slug, path: "" });
+    };
+    window.addEventListener("orb:native-project-menu", onNativeProjectMenu);
     window.addEventListener("orb:native-expand", onNativeExpand);
     onCleanup(() => {
       stop();
+      window.removeEventListener("orb:native-project-menu", onNativeProjectMenu);
       window.removeEventListener("orb:native-expand", onNativeExpand);
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("orb:project-created", onProjectCreated);
@@ -1382,16 +1393,22 @@ export function LiveProjectsSection(p: {
       }, swallow("projectFiles.renameProject", { slug: target.slug }));
     }
   };
-  const archive = async (slug: string) => {
+  const removeProject = async (slug: string, action: "archive" | "delete") => {
+    const version = connectionVersion();
+    if (action === "delete") setProjectDeleteBusy(true);
     setActionError(null);
     try {
-      await archiveProject(slug);
+      await retireProject(slug, action);
+      if (!currentConnection(version)) return;
+      if (action === "delete") setDeleteProjectSlug(null);
       setProjects((list) => list.filter((x) => x.slug !== slug));
       bumpProjects();
       const sel = p.selected();
       if (sel === `ps:${slug}` || sel?.startsWith(`pf:${slug}:`)) p.open(null);
     } catch (e) {
-      setActionError(e instanceof Error ? e.message : String(e));
+      if (currentConnection(version)) setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (action === "delete" && currentConnection(version)) setProjectDeleteBusy(false);
     }
   };
   const findNodeById = (id: string, nodes: Node[] = [...tree(), ...(archivesOpen() ? archiveNodes() : [])]): RowData | undefined => {
@@ -1648,7 +1665,8 @@ export function LiveProjectsSection(p: {
       { kind: "sep" },
       { kind: "item", label: "Project settings", icon: Ic.SlidersIcon, onClick: () => { setActionMenu(null); p.open(`ps:${slug}`); } },
       { kind: "item", label: "Rename", icon: Ic.PencilIcon, onClick: () => beginRename(slug) },
-      { kind: "item", label: "Archive", icon: Ic.ArchiveIcon, onClick: () => void archive(slug) },
+      { kind: "item", label: "Archive", icon: Ic.ArchiveIcon, onClick: () => void removeProject(slug, "archive") },
+      { kind: "item", label: "Delete project…", icon: Ic.TrashIcon, danger: true, onClick: () => { setActionError(null); setDeleteProjectSlug(slug); } },
     );
     return items;
   };
@@ -2431,7 +2449,7 @@ export function LiveProjectsSection(p: {
 
   return (
     <>
-      <ErrorToast error={!deleteTargets().length ? actionError() : null} title="This action couldn’t be completed" onDismiss={() => setActionError(null)} />
+      <ErrorToast error={!deleteTargets().length && !deleteProjectSlug() ? actionError() : null} title="This action couldn’t be completed" onDismiss={() => setActionError(null)} />
       <Show when={!p.headless}>
       <Show when={sharedWithMeMissions().length > 0}>
         <div class="section" data-testid="shared-with-me-section">Shared with me</div>
@@ -2537,6 +2555,12 @@ export function LiveProjectsSection(p: {
         </div>
       </Show>
       </Show>
+      <Show when={deleteProjectSlug()}>{slug => (
+        <ConfirmDialog title={`Delete ${projects().find(project => project.slug === slug())?.title || slug()}?`}
+          description="This removes the project from the roster. Its conversations are kept."
+          action="Delete project" destructive busy={projectDeleteBusy()} error={actionError()}
+          onConfirm={() => void removeProject(slug(), "delete")} onClose={() => { setDeleteProjectSlug(null); setActionError(null); }} />
+      )}</Show>
       <Show when={stopPrompt()}>{prompt => (
         <ConfirmDialog title={`${prompt().workers} worker${prompt().workers === 1 ? " is" : "s are"} still running`} destructive action="Stop and delete"
           description={`Stop ${prompt().workers === 1 ? "it" : "them"} and delete ${prompt().roots.length === 1 ? "the conversation" : `the ${prompt().roots.length} conversations`}? Stopping ends the running work. ${descendantsSentence(deleteList(prompt().roots))} Their history is deleted too.`}

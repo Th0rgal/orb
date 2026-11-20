@@ -11,6 +11,8 @@ int orb_gtk_icons_self_test(void);
 #include <gtk/gtk.h>
 typedef struct { GPtrArray *spinning; guint src; int step; } OrbIconSpinner;
 void orb_spinner_stop(OrbIconSpinner *sp);
+GtkWidget *orb_menu_row(GtkWidget *page, const char *label, const char *icon);
+void orb_menu_separator(GtkWidget *page);
 void orb_add_menu_icon(GtkWidget *button, const char *icon);
 GtkWidget *orb_make_icon_widget(OrbIconSpinner *sp, const char *icon, const char *color, const char *status);
 void orb_gtk_bind_pointer_cursor(GtkWidget *w);

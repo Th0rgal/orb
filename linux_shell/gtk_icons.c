@@ -96,6 +96,16 @@ static gboolean on_draw_icon(GtkWidget *w, cairo_t *cr, gpointer ud) {
 }
 /* A model button normally chooses between its text and icon. Keep the
  * native submenu indicator and add the leading glyph beside its label. */
+GtkWidget *orb_menu_row(GtkWidget *page, const char *label, const char *icon) {
+    GtkWidget *button = gtk_model_button_new();
+    g_object_set(button, "text", label, NULL);
+    if (icon) { orb_add_menu_icon(button, icon); }
+    gtk_box_pack_start(GTK_BOX(page), button, FALSE, FALSE, 0);
+    return button;
+}
+void orb_menu_separator(GtkWidget *page) {
+    gtk_box_pack_start(GTK_BOX(page), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 3);
+}
 void orb_add_menu_icon(GtkWidget *button, const char *icon) {
     GtkBox *content = GTK_BOX(gtk_bin_get_child(GTK_BIN(button)));
     GtkWidget *image = gtk_image_new_from_icon_name(icon, GTK_ICON_SIZE_MENU);

@@ -2,6 +2,7 @@ import LeanSys
 import Orb.Kernel
 import OrbBin.Json
 import Std.Data.HashMap
+import Std.Data.HashSet
 
 /-
   OrbLocald.NativeChrome — Canonical single-owner sidebar row projection & `Cmd+K` palette
@@ -882,25 +883,16 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
     let effFolder := if !cur.folder.isEmpty then cur.folder else start.folder
     (effProj, effFolder)
 
-  -- A mission Core filed under no project belongs to the catch-all Default project
-  -- (`DEFAULT_PROJECT` in `orb/src/defaultProject.ts`), never at the sidebar root.
+  -- Use the live project roster for headings. Missions whose old project has
+  -- left the roster remain accessible under the catch-all project.
+  let projectSlugs := Std.HashSet.ofList (st.projects.toList.map (·.slug))
   let placedMerged := merged.map fun m =>
     let (ep, ef) := resolveEffectivePlacement m
-    { m with project := if ep.isEmpty then defaultProjectSlug else ep, folder := ef }
+    { m with project := if projectSlugs.contains ep then ep else defaultProjectSlug, folder := ef }
 
   let mut placedById : Std.HashMap String ChromeMissionInput := {}
   for m in placedMerged do
     placedById := placedById.insert m.id m
-
-  -- Discover any implicit projects referenced by missions that aren't in `st.projects`
-  let mut projects := st.projects
-  let mut projSeen : Std.HashMap String Bool := {}
-  for p in projects do
-    projSeen := projSeen.insert p.slug true
-  for m in placedMerged do
-    if !m.project.isEmpty && !projSeen.contains m.project then
-      projSeen := projSeen.insert m.project true
-      projects := projects.push { slug := m.project, name := if m.project == defaultProjectSlug then "Default" else m.project }
 
   -- Compute `directMatchSet` and bottom-up `visDescSet` in O(N):
   let mut directMatchSet : Std.HashMap String Bool := {}
@@ -938,6 +930,11 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
     let visWord := Orb.Kernel.sidebarVisibility mf hvd ack 0 0 0
     if (visWord &&& 1) != 0 then
       retainedMissions := retainedMissions.push m
+
+  let projects :=
+    if !projectSlugs.contains defaultProjectSlug && retainedMissions.any (·.project == defaultProjectSlug) then
+      st.projects.push { slug := defaultProjectSlug, name := "Default" }
+    else st.projects
 
   -- Index retained children by parent id and root/project missions by project slug in O(N):
   let mut childrenByParent : Std.HashMap String (Array ChromeMissionInput) := {}

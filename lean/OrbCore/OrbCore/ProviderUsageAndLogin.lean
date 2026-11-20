@@ -1565,7 +1565,7 @@ private def fetchSidecarAuthFiles (http : UsageHttp := liveUsageHttp) : IO (Arra
           provider := prov
           email := email
           disabled := disabled
-          needsReauth := loginReason != 0
+          needsReauth := !disabled && loginReason != 0
           loginReason := loginReason
           remainingSecs := bestRem
           retryAt? := bestRetry?
@@ -2553,7 +2553,7 @@ def sidecarLoginFailureMessage (store : CoreStore) (workingDir : String)
     (matchSidecarFileForProvider? hps files hp (includeDisabled := true)).bind fun file =>
       if file.email.trimAscii.toString.isEmpty then none else some file.email.trimAscii.toString
   let identity := if emails.isEmpty then "the provider login" else String.intercalate ", " emails.toList
-  return some s!"Sign in again for {identity}: the login is refresh-failed, disabled, expired or quota-exhausted. See Providers for the sidecar's reported reset."
+  return some s!"Sign in again for {identity}: the login is refresh-failed, expired or quota-exhausted. See Providers for the sidecar's reported reset."
 
 /-- Clear a matched sidecar auth file's parked state by toggling `disabled: true` then `disabled: false`
     via `PATCH /v0/management/auth-files/status` (2-second timeout per call).

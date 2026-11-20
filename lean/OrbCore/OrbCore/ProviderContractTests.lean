@@ -443,12 +443,15 @@ private def sidecarParkedHealthContract
       let detail ← getJson app jwt s!"/api/ai/providers/{oauthOnly}" now
       let listed := (← getJson app jwt "/api/ai/providers" now).asArr?.getD #[]
       let listedRow := (listed.find? (fun v => v.fieldStr? "id" == some oauthOnly)).getD .null
-      if statusOf detail != some "needs_reauth" || statusOf listedRow != some "needs_reauth" then
-        failures := failures.push "r32_login_reporting_fixture_and_fresh_login: list/detail must report needs_reauth"
+      let disabled := (file.fieldBool? "disabled").getD false
+      let expectedStatus := if disabled then "connected" else "needs_reauth"
+      if statusOf detail != some expectedStatus || statusOf listedRow != some expectedStatus then
+        failures := failures.push s!"provider list/detail must report credential status {expectedStatus}"
       let health := (← getJson app jwt "/api/model-routing/health" now).asArr?.getD #[]
       let row := (health.find? (fun v => v.fieldStr? "account_id" == some oauthOnly)).getD .null
-       if row.fieldStr? "login_message" != some "Sign in again" then
-         failures := failures.push "r32_login_reporting_fixture_and_fresh_login: health must report Sign in again"
+      if row.fieldStr? "login_message" != (if disabled then none else some "Sign in again") ||
+          (disabled && row.fieldStr? "account_state" != some "disabled") then
+        failures := failures.push "disabled health must be distinguished from a login that requires sign-in"
       if file.fieldStr? "name" == some "quota.json" &&
           row.fieldStr? "parked_until" != some "2026-11-18T12:00:00Z" then
         failures := failures.push "r32_login_reporting_fixture_and_fresh_login: reported reset changed"

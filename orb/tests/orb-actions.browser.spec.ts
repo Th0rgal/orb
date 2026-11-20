@@ -247,7 +247,7 @@ test("the project root offers agents first and never file creation", async ({ pa
   await page.getByRole("button", { name: "Project actions for Test" }).click();
   const menu = page.getByRole("menu");
   await expect(menu.getByRole("menuitem")).toHaveText([
-    "New agent", "Cloud agent", "New folder", "Project settings", "Rename", "Archive",
+    "New agent", "Cloud agent", "New folder", "Project settings", "Rename", "Archive", "Delete project…",
   ]);
   await expect(menu.getByRole("menuitem", { name: "New file" })).toHaveCount(0);
   expect(writes).toEqual([]);

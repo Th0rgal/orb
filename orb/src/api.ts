@@ -1780,12 +1780,12 @@ export const updateProject = createProject;
 
 const archivedSlugs = new Set<string>();
 
-/** Board archive. The roster row stays; the project leaves the live list. */
-export async function archiveProject(slug: string): Promise<void> {
+/** Retire a project from the live roster without deleting its conversations. */
+export async function retireProject(slug: string, action: "archive" | "delete"): Promise<void> {
   await api(`/api/projects/${encodeURIComponent(slug)}/action`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "archive" }),
+    body: JSON.stringify({ action }),
   });
   archivedSlugs.add(slug);
 }
