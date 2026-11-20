@@ -203,7 +203,7 @@ same node (then split or restate the node).
 | C6 | Set `ORB_LEAN_RUNNERS=true`; one master run green on lean.ci labels | C4, C5, C9 | done | Run URL with lean labels on the jobs |
 | C7 | Measure web-only PR, warm Lean PR and cold full CI (receipts below) | C6 | verify | Web and warm measured; full run missed even with some warm artifacts. C7c owns the fully cold confirmation. |
 | C7a | Reduce the web PR critical path: inspect the 6m36s between the last browser shard and the start of CI OK | — | done (#1965; [web-only #1966, 4m42s](https://github.com/Th0rgal/orb/actions/runs/44651620270)) | A web-only PR builds and tests the changed web inputs and reaches CI OK in <5 min from run creation |
-| C7b | Profile Docker (17m04s) and Test (15m02s) on a warm Lean PR; reduce both critical paths | — | ready | A Lean PR with a logged build-cache restore runs the affected tests and reaches CI OK in <10 min |
+| C7b | Profile Docker (17m04s) and Test (15m02s) on a warm Lean PR; reduce both critical paths | — | done ([warm #1970, 9m04s](https://github.com/Th0rgal/orb/actions/runs/44687620634)) | A Lean PR with a logged build-cache restore runs the affected tests and reaches CI OK in <10 min |
 | C7c | Measure full CI with isolated empty project-build caches (including desktop binaries, web dist and Docker layers); separate runner wait from cold build time | — | ready | All planned jobs execute, logs establish cold project outputs without evicting shared caches, and CI OK finishes in <20 min |
 | C8 | Every Orb binary builds through turbo-lean with no raw-Lake fallback, locally and in CI. **C8a:** `nix/package.nix:220-224` sets `ORB_SKIP_TURBO_LEAN` and `ORB_ALLOW_RAW_LAKE_FALLBACK`, and no workflow builds Nix. **C8b:** `scripts/build_orb_bins.sh:309-320` fails closed when turbo-lean is absent unless `ORB_ALLOW_RAW_LAKE_FALLBACK=1` (fixed in #1836) | — | ready | `scripts/build_orb_bins.sh` builds all 12 binaries with the fallback variable unset; the Nix build no longer needs either variable |
 | C9 | The lean.ci runner image has the tools the workflows use. With `ORB_LEAN_RUNNERS=true` (16 Nov, 11:56Z to 12:29Z) the master runs of 12951704 failed on `lean-16vcpu-ubuntu-2604` and `lean-32vcpu-ubuntu-2604` runners: `cargo: command not found` in `setup-turbo-lean`, `docker: command not found` at job setup | — | ready | A master run on lean labels passes `setup-turbo-lean` and one job that needs docker |
@@ -379,4 +379,4 @@ Only these. Each one names what it unblocks.
 Rows the reconciler dispatches, in order. A row leaves the queue by PR when it
 is done or dropped.
 
-`U5`, `U8`, `U6`, `U6a`, `U7`, `U3`, `R30`, `M3`, `L5`, `R17`, `R18`, `R19`, `R21`, `O3`, `O4`, `R21a`, `C7`, `C7b`, `R31`
+`U5`, `U8`, `U6`, `U6a`, `U7`, `U3`, `R30`, `M3`, `L5`, `R17`, `R18`, `R19`, `R21`, `O3`, `O4`, `R21a`, `C7`, `C7c`, `R31`
