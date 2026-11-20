@@ -412,7 +412,8 @@ private def withWindowWait {α σ : Type} (rt : RuntimeState σ) (wakeFd : Optio
   if rt.wayland.display == 0 then return ← k (IO.sleep 500)
   let getFd ← FFI.dlSym "libwayland-client.so.0" "wl_display_get_fd"
   let pollFn ← FFI.dlSym "" "poll"
-  if getFd == 0 || pollFn == 0 then throw (IO.userError "window poll unavailable")
+  let flush ← FFI.dlSym "libwayland-client.so.0" "wl_display_flush"
+  if getFd == 0 || pollFn == 0 || flush == 0 then throw (IO.userError "window poll unavailable")
   let fd ← FFI.call getFd (callArgs rt.wayland.display.toUInt64 0 0)
   let drain ← FFI.dlSym "" "eventfd_read"
   if wakeFd.isSome && drain == 0 then throw (IO.userError "window eventfd read unavailable")
@@ -420,13 +421,19 @@ private def withWindowWait {α σ : Type} (rt : RuntimeState σ) (wakeFd : Optio
   if p == 0 then throw (IO.userError "window poll allocation failed")
   try
     -- Linux struct pollfd { int fd; short events; short revents; }, POLLIN=1.
-    FFI.memWrite p (Wayland.pushU32LE (Wayland.pushU32LE ByteArray.empty fd.toUInt32) 1)
+    let wait := fun count timeout => do
+      -- Dispatch can queue seat and IME requests after the event pump flushed.
+      -- Wake on writability as well if the outgoing socket was full.
+      let result ← FFI.call flush (callArgs rt.wayland.display.toUInt64 0 0)
+      let events := if result.toUInt32 == 0xffffffff then 5 else 1
+      FFI.memWrite p (Wayland.pushU32LE (Wayland.pushU32LE ByteArray.empty fd.toUInt32) events)
+      discard <| FFI.call pollFn (callArgs p.toUInt64 count timeout)
     match wakeFd with
-    | none => k (discard <| FFI.call pollFn (callArgs p.toUInt64 1 500))
+    | none => k (wait 1 500)
     | some wake =>
       FFI.memWrite (p + 8) (Wayland.pushU32LE (Wayland.pushU32LE ByteArray.empty wake) 1)
       k (do
-        discard <| FFI.call pollFn (callArgs p.toUInt64 2 0xffffffff)
+        wait 2 0xffffffff
         -- Nonblocking read coalesces notices. A compositor-only wake returns EAGAIN.
         discard <| FFI.call drain (callArgs wake.toUInt64 (p + 16).toUInt64 0))
   finally FFI.memFree p
