@@ -18,6 +18,7 @@ import time
 import urllib.request
 
 import wayland_ime
+from wayland_pointer import Pointer
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -92,6 +93,10 @@ def run(tmp, mouse=False):
         def sway(*args):
             return subprocess.check_output(['swaymsg', '-r', *args], env=graphical)
 
+        if mouse:
+            pointer = Pointer(graphical)
+            stack.callback(pointer.close)
+            click = pointer.click
         binary = os.environ.get('ORB_LEANUI_TEST_BINARY')
         client = [str(Path(binary).resolve(strict=True))] if binary else [ROOT / 'scripts/orb_desktop_dev.sh', '--leanui']
         stack.enter_context(process(client, graphical, ROOT))
@@ -100,12 +105,6 @@ def run(tmp, mouse=False):
         time.sleep(.5)
         def keys(*args):
             subprocess.run(['wtype', '-s', '200', *args], check=True, env=graphical)
-        def click(x, y, button='button1'):
-            for command in (f'set {x} {y}', f'press {button}', f'release {button}'):
-                result = json.loads(sway(f'seat seat0 cursor {command}'))
-                assert all(reply.get('success') for reply in result), result
-                time.sleep(.08)
-
         if mouse:
             click(80, 50)  # Create mission in the sidebar
         else:
