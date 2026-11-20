@@ -705,6 +705,8 @@ private def selectableRow (r : ChromeSidebarRow) := r.kind == "mission" || r.kin
 
 def missionDisclosureId (widgetId : Nat) : Nat := 4000000 + widgetId
 
+def projectNewAgentId (widgetId : Nat) : Nat := 5000000 + widgetId
+
 private def missionBranchRows (rows : Array ChromeSidebarRow)
     (cards : Std.HashMap Nat MissionSummaryCard) (expanded : List String)
     (initialDepth : Nat) : Array ChromeSidebarRow := Id.run do
@@ -951,10 +953,11 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       if let some project := st.sidebarRows.find? (fun r => r.widgetId == id && r.kind == "project") then
         let slug := (project.rowId.drop 8).toString
         let expanded := if st.expandedProjects.contains slug then st.expandedProjects.erase slug else slug :: st.expandedProjects
-        if st.selectedCard.isSome then return ({ st with expandedProjects := expanded }, some viewport)
-        let next := resetSelection { st with screen := .controlEmpty, draftProject := slug, expandedProjects := expanded, writeError := "" } none
-        let rows := next.sidebarRows.map fun row => { row with selected := row.widgetId == id }
-        return ({ next with sidebarRows := rows }, some viewport)
+        return ({ st with expandedProjects := expanded }, some viewport)
+      if id >= projectNewAgentId 0 then
+        if let some project := st.sidebarRows.find? (fun r => r.kind == "project" && projectNewAgentId r.widgetId == id) then
+          let next := resetSelection { st with screen := .controlEmpty, draftProject := (project.rowId.drop 8).toString, writeError := "" } none
+          return (next, some viewport)
       if id == 914 then return ({ st with writeError := "" }, some viewport)
       if id == 730 then return ({ st with archivesOpen := !st.archivesOpen }, some viewport)
       if id == 2 && st.selectedCard.isNone then

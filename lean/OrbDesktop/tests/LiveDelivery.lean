@@ -42,6 +42,14 @@ private def nestedControllerFixture : DesktopState :=
 #guard (({ nestedControllerFixture with expandedMissions := ["mission:m"] } : DesktopState).visibleProjectRows.map
   (fun r => (r.rowId, r.badge))) == [("project:now", 0), ("mission:m", 2), ("mission:child", 1)]
 
+private def unsentDraft : DesktopState :=
+  { hierarchyFixture with composer := { text := "Keep this draft" }, draftProject := "other" }
+
+private def openedProject := (stepDesktopEvent 120 vp unsentDraft (.activate 1000)).1
+#guard openedProject.composer.text == unsentDraft.composer.text && openedProject.draftProject == "other"
+#guard openedProject.expandedProjects == ["now"]
+#guard (stepDesktopEvent 120 vp openedProject (.activate (projectNewAgentId 1000))).1.draftProject == "now"
+
 #guard (stepDesktopEvent 120 vp hierarchyFixture (.activate 112)).1.screen == .machinesFleet
 #guard (stepDesktopEvent 120 vp hierarchyFixture (.key 0x33 2 .pressed)).1.screen == .machinesFleet
 #guard (stepDesktopEvent 120 vp hierarchyFixture (.key 0x33 8 .pressed)).1.screen == .machinesFleet

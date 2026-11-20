@@ -23,6 +23,10 @@ the open conversation:
 
 ## Live native desktop hierarchy
 
+Opening or closing a project changes the tree disclosure. The current view,
+draft text, and draft destination survive either gesture. The open folder icon
+identifies an expanded project. Its plus button starts a new draft in that project.
+
 A roster refresh must retain the project, folder, launch parent, callback
 parent, and fork source of each mission. A child arriving before its controller
 keeps its parent identity across the refresh. Opening a project must use its

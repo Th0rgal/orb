@@ -53,6 +53,7 @@ def chromeIconPaths (name : String) : List (List (Int × Int)) :=
   | "folder" => [[(20,48),(20,38),(28,30),(61,30),(76,46),(122,46),(140,64),(140,114),(132,132),(38,132),(20,114),(20,48)]]
   | "chat" => [[(30,110),(20,140),(60,120),(100,120),(130,100),(140,70),(130,40),(100,20),(60,20),(30,40),(20,70),(30,110)],[(50,60),(110,60)],[(50,85),(90,85)]]
   | "list" => [[(30,40),(130,40)],[(30,80),(100,80)],[(30,120),(130,120)]]
+  | "project-folder-open" => [[(40,93),(50,74),(61,67),(133,67),(146,71),(147,83),(136,123),(129,133),(26,133),(13,120),(13,33),(26,20),(53,20),(65,27),(74,40),(120,40),(133,53),(133,67)]]
   | "project-folder" => [[(133,133),(143,129),(147,120),(147,53),(143,44),(133,40),(81,40),(74,38),(69,34),(64,26),(59,22),(53,20),(27,20),(17,24),(13,33),(13,120),(17,129),(27,133),(133,133)]]
   | _ => [[(20,48),(20,38),(28,30),(61,30),(76,46),(122,46),(140,64),(140,114),(132,132),(38,132),(20,114),(20,48)]]
 
@@ -189,7 +190,7 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
         (.treeDecoration isMission row.selected pal.borderSubtle
           (if isMission && livePhase.isNone then statusBadgeColor pal row.status else if projectRunning && livePhase.isNone then pal.accent else 0)
           (if row.selected then pal.rowActive else pal.sidebar))
-        [if isMission && livePhase.isSome then liveMissionLead theme row.status (livePhase.getD 0) else chromeIcon (if isMission then "mission" else if row.kind == "project" then "project-folder" else row.rowId) pal.textMuted]
+        [if isMission && livePhase.isSome then liveMissionLead theme row.status (livePhase.getD 0) else chromeIcon (if isMission then "mission" else if row.kind == "project" then (if expanded then "project-folder-open" else "project-folder") else row.rowId) pal.textMuted]
     let labelColor : Color :=
       if isFooter then (if row.selected then pal.textPrimary else pal.textSecondary)
       else if row.selected then pal.textStrong
@@ -217,7 +218,12 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
           BorderStyle.none
           [chromeLabel small.lineHeightSub [overlaySynthRun small (toString row.badge)]]]
     let shortcut : List WidgetNode :=
-      if row.shortcut.isEmpty || isMission then []
+      if row.kind == "project" && expanded && livePhase.isSome then
+        let id := projectNewAgentId row.widgetId
+        [WidgetNode.focusable id <| WidgetNode.box
+          (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 26) (pxToSub 26))
+          [chromeIcon "plus" pal.textMuted 13] (some id)]
+      else if row.shortcut.isEmpty || isMission then []
       else
         [chromeLabel small.lineHeightSub
           [overlaySynthRun { small with color := pal.textFaint } row.shortcut]]
@@ -325,7 +331,9 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
       else
         buildSidebarRowWidget theme rowW { r with selected := r.selected || st.multiRows.contains r.rowId }
           (if r.kind == "section" then Edges.trbl (pxToSub 14) 0 (pxToSub 4) 0
-           else Edges.trbl 0 0 (pxToSub 1) 0) (if st.liveData then some st.badgePhase else none) (if r.rowId == "section:archives" then st.archivesOpen else st.expandedMissions.contains r.rowId)
+           else Edges.trbl 0 0 (pxToSub 1) 0) (if st.liveData then some st.badgePhase else none) (if r.rowId == "section:archives" then st.archivesOpen
+            else if r.kind == "project" then st.expandedProjects.contains (r.rowId.drop 8).toString
+            else st.expandedMissions.contains r.rowId)
   let footRows : List WidgetNode :=
     (rowsSource.filter isFoot).map fun r => buildSidebarRowWidget theme rowW r
   let rosterH := availH - chromeHeaderHeightSub - footH
