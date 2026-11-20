@@ -163,7 +163,7 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
     let isArchives := row.rowId == "section:archives"
     let icon := if isArchives then (if expanded then "chevron-down" else "chevron-right")
       else if row.rowId == "section:archived" then "chevron-right" else "plus"
-    let section := WidgetNode.box
+    let sectionRow := WidgetNode.box
       (BoxStyle.row 0
         |>.withAlign .center
         |>.withPadding (Edges.trbl 0 (pxToSub 8) 0 (pxToSub 10))
@@ -172,7 +172,7 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
        [chromeLabel small.lineHeightSub [overlaySynthRun small row.title] 1,
         chromeIcon icon pal.textFaint 14]
        (if isArchives then some row.widgetId else none)
-    if isArchives then WidgetNode.focusable row.widgetId section else section
+    if isArchives then WidgetNode.focusable row.widgetId sectionRow else sectionRow
   else
     let isFooter := row.kind == "footer"
     let isMission := row.kind == "mission"
