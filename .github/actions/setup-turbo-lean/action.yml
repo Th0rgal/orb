@@ -18,6 +18,15 @@ runs:
         if [[ "${RUNNER_NAME:-}" == boost-jit-* ]]; then
           echo "LEAN_NUM_THREADS=$(nproc)" >> "$GITHUB_ENV"
           echo "RAYON_NUM_THREADS=$(nproc)" >> "$GITHUB_ENV"
+        elif [[ "${ORB_COLD_PROJECT:-0}" == 1 && ( "$GITHUB_JOB" == test || "$GITHUB_JOB" == docker ) ]]; then
+          # Cold native builds spend minutes both elaborating and building Lake
+          # executable targets. Let those stages use the hosted runner's cores.
+          jobs=$(nproc)
+          (( jobs <= 4 )) || jobs=4
+          echo "LEAN_NUM_THREADS=$jobs" >> "$GITHUB_ENV"
+          echo "ORB_TURBO_LEAN_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "RAYON_NUM_THREADS=$jobs" >> "$GITHUB_ENV"
+          echo "Cold native build concurrency: $jobs (6144 MiB build budget)"
         else
           echo "LEAN_NUM_THREADS=1" >> "$GITHUB_ENV"
           echo "RAYON_NUM_THREADS=2" >> "$GITHUB_ENV"
