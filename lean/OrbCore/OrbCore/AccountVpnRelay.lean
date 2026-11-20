@@ -64,24 +64,24 @@ private def pump (client upstream : Fd) (stopping : IO Bool) : IO Unit := do
     if !ready.isEmpty then lastByte ← IO.monoMsNow
     for idx in ready do
       let chunk ← readStreamChunk fds[idx]! 16384
-      if chunk.isEmpty then return
+      if chunk.isEmpty || (← stopping) then return
       unless (← writeAll fds[1 - idx]! chunk).isOk do return
 
 /-- The relay has only one outbound entry point: a verified loopback SOCKS
 listener. Network destinations are resolved by the WireGuard transport. -/
 def serve (fd : Fd) (key : String)
-    (resolve : String → String → IO (Except String UInt16)) (stopping : IO Bool := pure false) : IO Unit := do
+    (resolve : String → String → IO (Except String AccountVpnPool.Gateway)) (stopping : IO Bool := pure false) : IO Unit := do
   let deadline := (← IO.monoMsNow) + 10000
   let some (provider, account) ← auth? fd key deadline | return
   let some (host, port) ← destination? fd deadline | discard <| reply fd 8; return
   let .ok gateway ← resolve provider account | discard <| reply fd 2; return
-  if gateway == 0 then discard <| reply fd 2; return
-  let .ok upstream ← tcpConnectTimed "127.0.0.1" gateway 5000 | discard <| reply fd 5; return
+  if gateway.port == 0 || (← gateway.revoked.get) then discard <| reply fd 2; return
+  let .ok upstream ← tcpConnectTimed "127.0.0.1" gateway.port 5000 | discard <| reply fd 5; return
   try
     unless ← negotiateSocks upstream host port ((← IO.monoMsNow) + 10000) do
       discard <| reply fd 5
       return
-    if ← reply fd 0 then pump fd upstream stopping
+    if ← reply fd 0 then pump fd upstream (do return (← gateway.revoked.get) || (← stopping))
   finally discard <| closeFd upstream
 
 structure Listener where
@@ -89,7 +89,7 @@ structure Listener where
   stopping : IO.Ref Bool
   work : Task (Except IO.Error Unit)
 
-def start (port : UInt16) (key : String) (resolve : String → String → IO (Except String UInt16)) :
+def start (port : UInt16) (key : String) (resolve : String → String → IO (Except String AccountVpnPool.Gateway)) :
     IO (Except String Listener) := do
   if key.isEmpty then return .error "vpn_relay_key_unavailable"
   let .ok (fd, bound) ← tcpListen "127.0.0.1" port 64 | return .error "vpn_relay_bind_failed"
@@ -122,7 +122,7 @@ def configured (rawPort? : Option String) (operatorKey dir : String) (secure : B
     return .error "invalid_airvpn_relay_configuration"
   let listener ← start n.toUInt16 operatorKey fun provider account => do
     let .ok (some pref) ← AccountVpnRoutes.read store.missionsDb account | return .error "vpn_route_unavailable"
-    AccountVpnPool.allocate pool store.rootDir dir store.missionsDb account provider pref
+    AccountVpnPool.allocateGateway pool store.rootDir dir store.missionsDb account provider pref
   return listener.map some
 
 def Listener.stop (listener : Listener) : IO Unit := do

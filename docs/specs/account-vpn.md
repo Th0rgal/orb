@@ -192,6 +192,11 @@ its API key to the configured models endpoint. If routing fails, catalog
 refresh records the failure and retains the previous successful model list.
 
 Admin Settings serializes secret replacement with local tunnel admission.
+Each admitted account has its own revocation flag, including accounts on a
+shared tunnel. Changing the account’s country or switching to Direct revokes
+its existing relay connections. A sidecar with a pooled connection must
+connect again. Other accounts can continue using the same tunnel.
+
 Changing a device profile retires every Orb connection using that profile.
 Changing the API key retires all local Orb tunnels for fresh verification.
 Invalid or identical edits preserve running tunnels.

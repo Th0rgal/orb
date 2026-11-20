@@ -22,9 +22,10 @@ def run : IO Unit := do
   let user := "openai/acct"
   let mac := password key user
   let calls ← IO.mkRef 0
+  let revoked ← IO.mkRef false
   let listener ← IO.ofExcept (← start 0 key fun provider account => do
     calls.modify (· + 1)
-    if provider == "openai" && account == "acct" then return .ok port
+    if provider == "openai" && account == "acct" then return .ok ⟨port, revoked⟩
     return .error "no_binding")
   let request := ⟨#[5, 1, 0, 3, 4]⟩ ++ "test".toUTF8 ++ ⟨#[1, 187]⟩
   let accepted : ByteArray := ⟨#[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]⟩
@@ -54,6 +55,8 @@ def run : IO Unit := do
         write fd accepted
         expect fd "client".toUTF8
         write fd "server".toUTF8
+        let trailing ← readSocksBytes fd 1 ((← IO.monoMsNow) + 4000)
+        if trailing.isSome then throw (IO.userError "revoked relay forwarded bytes")
       finally discard <| closeFd fd
     let good ← connect
     try
@@ -63,6 +66,11 @@ def run : IO Unit := do
       expect good accepted
       write good "client".toUTF8
       expect good "server".toUTF8
+      revoked.set true
+      discard <| writeAll good "after".toUTF8
+      let .ok ready ← pollFdSet #[good] 3000 | throw (IO.userError "relay poll failed")
+      unless !ready.isEmpty && (← readStreamChunk good 1).isEmpty do
+        throw (IO.userError "revoked relay connection stayed open")
     finally discard <| closeFd good
     IO.ofExcept (← IO.wait peer)
   finally

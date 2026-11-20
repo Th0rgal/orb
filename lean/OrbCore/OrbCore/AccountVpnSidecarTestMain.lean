@@ -15,13 +15,14 @@ def main (args : List String) : IO UInt32 := do
     let input ← IO.getStdin
     let key := (← input.getLine).trimAscii.toString
     let unavailable ← IO.mkRef false
+    let live ← IO.mkRef false
     let listener ← IO.ofExcept (← OrbCore.AccountVpnRelay.start 0 key fun provider account => do
       match provider, account with
-      | "openai", "a" => return if ← unavailable.get then .error "vpn_exit_unverified" else .ok a.toUInt16
-      | "openai", "b" => return .ok b.toUInt16
-      | "anthropic", "c" => return .ok a.toUInt16
-      | "kimi", "e" => return if ← unavailable.get then .error "vpn_exit_unverified" else .ok a.toUInt16
-      | "antigravity", "d" => return if ← unavailable.get then .error "vpn_exit_unverified" else .ok b.toUInt16
+      | "openai", "a" => return if ← unavailable.get then .error "vpn_exit_unverified" else .ok ⟨a.toUInt16, unavailable⟩
+      | "openai", "b" => return .ok ⟨b.toUInt16, live⟩
+      | "anthropic", "c" => return .ok ⟨a.toUInt16, live⟩
+      | "kimi", "e" => return if ← unavailable.get then .error "vpn_exit_unverified" else .ok ⟨a.toUInt16, unavailable⟩
+      | "antigravity", "d" => return if ← unavailable.get then .error "vpn_exit_unverified" else .ok ⟨b.toUInt16, unavailable⟩
       | _, _ => return .error "unknown_account")
     try
       let out ← IO.getStdout

@@ -7,10 +7,15 @@ open Orb.AccountVpn OrbCore.AirVpnSettings OrbCore.AirVpnTunnel
 open OrbCore.AccountVpnRoutes (Preference)
 open OrbBin.PosixExt OrbBin.Sqlite
 
+structure Gateway where
+  port : UInt16
+  revoked : IO.Ref Bool
+
 structure Occupant where
   binding : Binding
   generation : Nat
   locks : List UInt32
+  gateway : Gateway
 
 structure Active where
   endpoint : Endpoint
@@ -46,6 +51,7 @@ def lockExits (dir cat : String) (exits : List ExitAddress) : IO (Except String 
   return .ok locks
 
 private def drain (a : Active) : IO Unit := do
+  for o in a.occupants do o.gateway.revoked.set true
   a.tunnel.stop
   for o in a.occupants do unlock o.locks
   unlock a.retiredLocks
@@ -70,6 +76,7 @@ private def detach (active : List Active) (account : String) : IO (List Active) 
   let mut keep := []
   for t in active do
     let (leaving, others) := t.occupants.partition (fun o => o.binding.account == account)
+    for o in leaving do o.gateway.revoked.set true
     if leaving.isEmpty then keep := t :: keep
     else if others.isEmpty then drain t
     else keep := { t with occupants := others, retiredLocks := t.retiredLocks ++ leaving.flatMap (·.locks) } :: keep
@@ -92,7 +99,7 @@ def savePreference (pool : Pool) (db : SqliteDb) (account : String) (country? : 
   return .ok ()
 
 private def install (dir : String) (db : SqliteDb) (account cat : String) (pref : Preference)
-    (t : Active) (others : List Active) : IO (Except String Active) := do
+    (t : Active) (others : List Active) : IO (Except String (Active × Gateway)) := do
   let ready := (t :: others).flatMap (fun a => a.occupants.map (·.binding))
   let binding : Binding := ⟨account, cat, t.evidence.country, t.evidence.exits⟩
   if (admit pref.country binding ready).isNone then return .error "vpn_exit_in_use"
@@ -102,12 +109,13 @@ private def install (dir : String) (db : SqliteDb) (account cat : String) (pref 
   if let .error e ← AccountVpnRoutes.rememberServer db account pref t.evidence.server then
     unlock locks
     return .error e
-  return .ok { t with occupants := ⟨binding, pref.generation, locks⟩ :: t.occupants }
+  let gateway : Gateway := ⟨t.tunnel.port, ← IO.mkRef false⟩
+  return .ok ({ t with occupants := ⟨binding, pref.generation, locks, gateway⟩ :: t.occupants }, gateway)
 
 /-- Recheck the credential's saved generation while serializing local admission.
 Each selected listener belongs to a running process with fresh exit evidence. -/
 private def allocateLocked (root dir : String) (db : SqliteDb) (account provider : String)
-    (pref : Preference) : Std.AtomicT PoolState IO (Except String UInt16) := do
+    (pref : Preference) : Std.AtomicT PoolState IO (Except String Gateway) := do
   let .ok current ← AccountVpnRoutes.read db account | return .error "vpn_route_store_unavailable"
   let some current := current | return .error "vpn_route_changed"
   if current.generation != pref.generation || current.country != pref.country then
@@ -120,7 +128,7 @@ private def allocateLocked (root dir : String) (db : SqliteDb) (account provider
     if let some o := t.occupants.find? (fun o => o.binding.account == account) then
       if o.generation == pref.generation && o.binding.category == cat then
         if (← t.tunnel.verify root t.endpoint.server pref.country) == some t.evidence then
-          return .ok t.tunnel.port
+          return .ok o.gateway
         drain t
         available := available.filter (fun a => a.tunnel.port != t.tunnel.port)
       else
@@ -140,9 +148,9 @@ private def allocateLocked (root dir : String) (db : SqliteDb) (account provider
       let others := available.filter (fun a => a.tunnel.port != t.tunnel.port)
       if (← t.tunnel.verify root endpoint.server pref.country) == some t.evidence then
         match ← install dir db account cat pref t others with
-        | .ok active =>
+        | .ok (active, gateway) =>
           modify fun state => { state with active := active :: others }
-          return .ok t.tunnel.port
+          return .ok gateway
         | .error e => failure := e
         continue
       drain t
@@ -159,9 +167,9 @@ private def allocateLocked (root dir : String) (db : SqliteDb) (account provider
     | .ok (tunnel, verified) =>
       let active : Active := { endpoint, tunnel, evidence := verified, occupants := [] }
       match ← install dir db account cat pref active available with
-      | .ok admitted =>
+      | .ok (admitted, gateway) =>
         modify fun state => { state with active := admitted :: available }
-        return .ok port
+        return .ok gateway
       | .error e =>
         tunnel.stop
         failure := e
@@ -169,8 +177,8 @@ private def allocateLocked (root dir : String) (db : SqliteDb) (account provider
 
 /-- Keep the last verification outcome with the live pool. It expires when a
 preference changes or Core restarts. A delayed request cannot replace a newer outcome. -/
-def allocate (pool : Pool) (root dir : String) (db : SqliteDb) (account provider : String)
-    (pref : Preference) : IO (Except String UInt16) := pool.atomically do
+def allocateGateway (pool : Pool) (root dir : String) (db : SqliteDb) (account provider : String)
+    (pref : Preference) : IO (Except String Gateway) := pool.atomically do
   let result ← allocateLocked root dir db account provider pref
   match result with
   | .ok _ => modify fun state => { state with failures := state.failures.erase account }
@@ -178,6 +186,10 @@ def allocate (pool : Pool) (root dir : String) (db : SqliteDb) (account provider
   | .error reason =>
     modify fun state => { state with failures := state.failures.insert account (pref.generation, reason) }
   return result
+
+def allocate (pool : Pool) (root dir : String) (db : SqliteDb) (account provider : String)
+    (pref : Preference) : IO (Except String UInt16) := do
+  return (← allocateGateway pool root dir db account provider pref).map (·.port)
 
 def resolve (pool? : Option Pool) (store : OrbCore.Store.CoreStore) (dir account : String) :
     OrbBin.HttpClient.ResolveTransport :=
