@@ -80,6 +80,7 @@ def run(driver, parent_mount):
         observed = []
         max_sessions = []
         exit_probes = []
+        translated = {}
         class Receiver(http.server.BaseHTTPRequestHandler):
             def reply(self, body):
                 self.send_response(200)
@@ -107,7 +108,7 @@ def run(driver, parent_mount):
                 for name, ip in peers.items():
                     endpoint = command("wg", "show", name, "endpoints").split()[-1]
                     if endpoint != "(none)" and int(endpoint.rsplit(":", 1)[-1]) in sockets:
-                        sessions.append({"vpn_ip": ip, "exit_ip": ip, "server_name": name, "server_country_code": "NL"})
+                        sessions.append({"vpn_ip": ip, "exit_ip": translated.get(ip, ip), "server_name": name, "server_country_code": "NL"})
                 max_sessions.append(len(sessions))
                 self.reply(json.dumps({"result": "ok", "sessions": sessions}).encode())
 
@@ -162,14 +163,46 @@ def run(driver, parent_mount):
                     break
                 time.sleep(.1)
             assert not proxy_pids(), "wireproxy survived Core SIGKILL"
-            resumed = subprocess.run([driver, "wireguard-resume", str(root / "store")], text=True, capture_output=True,
-                                     env={**os.environ, "SSL_CERT_FILE": str(cert)}, timeout=90)
-            if resumed.returncode:
-                raise RuntimeError(resumed.stderr)
-            assert json.loads(resumed.stdout) == {"a": routes["a"], "b": routes["b"]}
-            assert observed[-2:] == [routes["b"], routes["a"]]
+            with subprocess.Popen([driver, "wireguard-hold", str(root / "store")], text=True, stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, env=driver_env) as resumed:
+                try:
+                    assert select.select([resumed.stdout], [], [], 90)[0]
+                    assert json.loads(resumed.stdout.readline()) == {"a": routes["a"], "b": routes["b"]}
+                    assert observed[-2:] == [routes["b"], routes["a"]]
+
+                    def change_exit(source, new_exit):
+                        command("iptables", "-t", "nat", "-A", "INPUT", "-s", source, "-d", receiver,
+                                "-p", "tcp", "--dport", "443", "-j", "SNAT", "--to-source", new_exit)
+                        translated[source] = new_exit
+
+                    def request(action):
+                        resumed.stdin.write(action + "\n")
+                        resumed.stdin.flush()
+                        assert select.select([resumed.stdout], [], [], 60)[0]
+                        return resumed.stdout.readline().strip()
+
+                    original = routes["a"]
+                    other = routes["b"]
+                    replacement, = set(peers.values()) - {original, other}
+                    before = len(observed)
+                    probes = len(exit_probes)
+                    change_exit(original, other)
+                    assert request("repeat") == replacement
+                    assert exit_probes[probes] == other and exit_probes[-1] == replacement
+                    assert observed[before:] == [replacement], "provider reached before replacement verification"
+                    change_exit(replacement, other)
+                    assert request("expect-blocked") == "blocked"
+                    assert observed[before:] == [replacement], "provider reached during exit collision"
+                    assert request("other") == other
+                    assert observed[before:] == [replacement, other]
+                    resumed.stdin.close()
+                    assert resumed.wait(timeout=10) == 0
+                finally:
+                    if resumed.poll() is None:
+                        resumed.kill()
+                        resumed.wait()
             assert max(max_sessions) == 5
-            print(json.dumps(routes), "maximum sessions:", max(max_sessions), "both exits restored after SIGKILL")
+            print(json.dumps(routes), "maximum sessions:", max(max_sessions), "both exits restored after SIGKILL; verified replacement:", replacement, "all-collision request blocked")
 
 
 if __name__ == "__main__":

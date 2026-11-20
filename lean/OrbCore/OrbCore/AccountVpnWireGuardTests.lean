@@ -29,9 +29,15 @@ def run (root : String) (resume : Bool) (hold := false) : IO UInt32 := do
       out.flush
       if hold then
         let input ← IO.getStdin
-        while (← input.getLine).trimAscii == "repeat" do
-          let again ← source "a" "chatgpt"
-          out.putStrLn again
+        repeat
+          match (← input.getLine).trimAscii.toString with
+          | "repeat" => out.putStrLn (← source "a" "chatgpt")
+          | "other" => out.putStrLn (← source "b" "codex")
+          | "expect-blocked" =>
+            let response ← sendRequest "GET" "https://provider.test/source" (resolveTransport? := some (route "a" "chatgpt"))
+            if response.isOk then throw (IO.userError "colliding exit admitted")
+            out.putStrLn "blocked"
+          | _ => break
           out.flush
       return 0
     for account in ["a", "b", "c", "extra"] do
