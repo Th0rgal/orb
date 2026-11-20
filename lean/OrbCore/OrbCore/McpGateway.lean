@@ -1577,14 +1577,18 @@ def dispatchMcpToolCall
 
   -- Compute Fleet & Managed Machines
   | "get_compute_fleet" =>
+    let models ← if tenantScoped || userIsAdmin || legacyOwner then
+        OrbCore.ProviderUsageAndLogin.configuredOpenCodeOptions store callerUserId (userIsAdmin || legacyOwner)
+      else pure #[]
+    let overrides := JVal.arr (models.filterMap (·.field? "value"))
     let some mc := mc?
-      | return mcpOk (.obj #[("nodes", .arr #[]), ("managed_nodes", .arr #[]), ("static_nodes", .arr #[])])
+      | return mcpOk (.obj #[("opencode_model_overrides", overrides), ("nodes", .arr #[]), ("managed_nodes", .arr #[]), ("static_nodes", .arr #[])])
     let fleet ← match ← loadManagedFleet mc defaultFleet.enabled defaultFleet.boatEnabled
         defaultFleet.dailyCapCents defaultFleet.spentTodayCents defaultFleet.maxConcurrent with
       | .ok f => pure f
       | .error _ => pure defaultFleet
     let fv ← buildComputeFleetJVal relayHub? mc fleet scopedUid? userComputeSpent userCap? store.rootDir nowIso (some store)
-    return mcpOk fv
+    return mcpOk (fv.setField "opencode_model_overrides" overrides)
 
   | "list_managed_machines" =>
     let some mc := mc?

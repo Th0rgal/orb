@@ -4833,7 +4833,7 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
      (bmBody.splitOn "claude-fable-5-1").length != 1 ||
      (bmBody.splitOn "muse/muse-wonder-1.0").length < 2 ||
      (bmBody.splitOn "muse/muse-ember-1.0").length < 2 ||
-     (alBmBody.splitOn "cust-vllm/qwen3-coder").length < 2 ||
+     (alBmBody.splitOn "internalvllm/qwen3-coder").length < 2 ||
      (alBmBody.splitOn "vllm-internal.corp.local").length != 1 ||
      (alBmDisabledBody.splitOn "qwen3-coder").length != 1 ||
      catSt != 200 || (catBody.splitOn "muse-wonder-1.0").length < 2 ||

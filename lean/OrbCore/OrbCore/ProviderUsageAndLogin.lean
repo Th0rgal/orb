@@ -48,6 +48,23 @@ open OrbCore.ProxyModelRouting
 open OrbCore.R7Core
 open OrbCore.LegacyHydrate
 
+/-- Caller-visible model overrides configured on provider accounts. Custom routes
+    use the provider name understood by directEntry?, rather than the account UUID. -/
+def configuredOpenCodeOptions (store : CoreStore) (userId : String) (admin : Bool) : IO (Array JVal) := do
+  let prefs ← getUserProviderPrefs store userId
+  let mut options : Array JVal := #[]
+  for p in ← listAIProviders store do
+    if p.enabled && (admin || !p.apiKey.isEmpty) && isUserProviderEnabled prefs p.id then
+      let provider := if p.providerType == "custom" then customProviderName p.name else p.id
+      for cm in p.customModels do
+        let mid := cm.id.trimAscii.toString
+        if !provider.isEmpty && !mid.isEmpty && customProviderModelAllowed provider p.baseUrl mid then
+          let value := s!"{provider}/{mid}"
+          unless options.any (fun opt => opt.fieldStr? "value" == some value) do
+            let label := (cm.name?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)).getD mid
+            options := options.push (.obj #[("value", .str value), ("label", .str s!"{p.name} — {label}")])
+  return options
+
 /-! ## Runtime Caches (`ProviderRuntimeHub`) -/
 
 structure CachedUsageEntry where
