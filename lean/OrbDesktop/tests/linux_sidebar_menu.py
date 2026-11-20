@@ -63,16 +63,24 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
         return wait('visible ' + label, lambda: locate(label, geometry))
     def open_project():
         if client_kind == 'webkit':
-            _, y = see('Menu')
-            if not locate(fixture['openMission'], sidebar):
-                click(20, y)
-    def action_menu(expected, choose):
-        x, y = see(fixture['contextMission'])
+            def reveal():
+                if locate(fixture['openMission'], sidebar):
+                    return True
+                project = locate('menu', sidebar)
+                if project:
+                    click(20, project[1])
+                    try:
+                        return wait('expanded project roster', lambda: locate(fixture['openMission'], sidebar), 3)
+                    except TimeoutError:
+                        return False
+            wait('visible open mission in project', reveal)
+    def action_menu(expected, choose, target_region=sidebar):
+        x, y = see(fixture['contextMission'], target_region)
         click(x, y, 'button3')
         if client_kind == 'leanui':
             geo = f'{x+20},{min(y,535)} 165x175'
         else:
-            geo = '68,42 127x600'
+            geo = '20,42 195x600'
         labels = {'rename':'rename', 'move':'move', 'archive':'archive', 'restore':'restore',
                   'copy-id':'copy', 'settings':'settings'}
         def rows():
@@ -98,23 +106,6 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
     open_project()
     click(*see(fixture['openMission']))
     see(fixture['openMission'], header)
-    action_menu(fixture['activeActions'], 'archive')
-    wait('context mission archived', lambda: status(b) == 'acknowledged')
-    see(fixture['openMission'], header)
-    assert status(a) == 'awaiting_user'
-    wait('context mission left active roster', lambda: locate(fixture['contextMission'], sidebar) is None)
-    client.close()
-    launch()
-    open_project()
-    click(*see(fixture['openMission']))
-    archived = see('Archived')
-    assert status(b) == 'acknowledged'
-    click(*archived)
-    assert see(fixture['contextMission'])[1] > archived[1]
-    action_menu(fixture['archivedActions'], 'restore')
-    wait('context mission restored', lambda: status(b) == 'paused')
-    see(fixture['openMission'], header)
-    assert status(a) == 'awaiting_user'
     # The client has already read B as idle when its Archive POST reaches
     # the relay. Activate B directly through Core before forwarding that POST.
     db_path, = tmp.rglob('missions.db')
@@ -124,7 +115,7 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
             return db.execute('SELECT status, (SELECT count(*) FROM mission_runs WHERE mission_id=m.id) '
                               'FROM missions m WHERE id=?', (b,)).fetchone()
     def before_archive():
-        assert snapshot() == ('paused', 0)
+        assert snapshot() == ('awaiting_user', 0)
         api('/api/control/message', {'mission_id': b, 'content': 'disposable refusal check',
                                      'client_message_id': str(uuid.uuid4())})
         receipt['before_guard'] = snapshot()
@@ -144,9 +135,10 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
     # WebKit renders the Core conflict detail, LeanUI its native refusal.
     expected = 'before archiving' if client_kind == 'leanui' else 'before changing'
     def refusal_visible():
-        return expected in ' '.join(word for word, _, _ in words(refusal_region))
+        line = ' '.join(word for word, _, _ in words(refusal_region))
+        return expected if expected in line else None
     try:
-        wait('visible refusal: ' + expected, refusal_visible)
+        rendered = wait('visible refusal: ' + expected, refusal_visible)
     except TimeoutError as error:
         # Keep the disposable compositor's pixels after the fixture cleans up.
         with tempfile.NamedTemporaryFile(prefix=f'orb-{client_kind}-refusal-', suffix='.png',
@@ -157,5 +149,30 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
     see(fixture['openMission'], header)
     see(fixture['contextMission'])
     assert status(b) == 'active' and status(a) == 'awaiting_user'
+    print(json.dumps({'client': client_kind, 'viewed': a, 'target': b,
+                      'visible_refusal': rendered, 'target_status': 'active'}), flush=True)
+    api('/api/control/missions/' + b + '/cancel', {})
+    wait('context mission stopped', lambda: status(b) == 'interrupted')
+    gate.armed.clear()
+    action_menu(fixture['activeActions'], 'archive')
+    wait('context mission archived', lambda: status(b) == 'acknowledged')
+    see(fixture['openMission'], header)
+    assert status(a) == 'awaiting_user'
+    wait('context mission left active roster', lambda: locate(fixture['contextMission'], sidebar) is None)
+    client.close()
+    launch()
+    see('Archived')
+    if not locate(fixture['openMission'], header):
+        open_project()
+        click(*see(fixture['openMission']))
+    see(fixture['openMission'], header)
+    archived = see('Archived')
+    assert status(b) == 'acknowledged'
+    click(*archived)
+    below_archive = f'10,{archived[1]+10} 200x{660-archived[1]-10}'
+    action_menu(fixture['archivedActions'], 'restore', below_archive)
+    wait('context mission restored', lambda: status(b) == 'paused')
+    see(fixture['openMission'], header)
+    assert status(a) == 'awaiting_user'
     print(json.dumps({'client': client_kind, 'viewed': a, 'target': b,
                       'archive': 'acknowledged', 'restore': 'paused', 'refusal': 'active', 'ui_archive': receipt}))
