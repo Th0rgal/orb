@@ -187,11 +187,11 @@ lean_obj_res lean_ui_present_argb(size_t ptr, b_lean_obj_arg bytes, lean_obj_arg
   size_t n = lean_sarray_size(bytes);
   if (n % 4) return io_err("invalid RGBA frame size");
   for (size_t i = 0; i < n; i += 4) {
-    unsigned alpha = src[i+3];
-    dst[i]   = (src[i+2] * alpha + 127) / 255;
-    dst[i+1] = (src[i+1] * alpha + 127) / 255;
-    dst[i+2] = (src[i]   * alpha + 127) / 255;
-    dst[i+3] = alpha;
+    /* Raster source-over already produced premultiplied RGBA. */
+    dst[i]   = src[i+2];
+    dst[i+1] = src[i+1];
+    dst[i+2] = src[i];
+    dst[i+3] = src[i+3];
   }
   return lean_io_result_mk_ok(lean_box(0));
 }

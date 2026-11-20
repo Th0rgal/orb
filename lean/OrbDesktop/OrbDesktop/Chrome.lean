@@ -108,6 +108,35 @@ def buildMissionMenu (st : DesktopState) (menu : MissionMenu) (width : SubPx) (v
   | "failed"            => pal.danger
   | _                   => pal.textMuted
 
+/-- Live rows use the same status vocabulary and badge tones as MissionGlyph. -/
+def liveBadgeKind (status : String) : String :=
+  match status with
+  | "active" | "running" | "starting" | "resuming" | "working" | "in_progress" | "processing" | "streaming" => "loader"
+  | "pending" | "queued" | "awaiting_wakeup" | "waiting_background" => "clock"
+  | "paused" | "interrupted" | "cancelled" => "pause"
+  | "completed" | "succeeded" => "check"
+  | "blocked" | "failed" | "error" | "errored" | "not_feasible" | "timed_out" => "alert"
+  | _ => ""
+
+private def liveMissionLead (theme : Theme) (status : String) (phase : Nat) : WidgetNode :=
+  let pal := theme.palette
+  let bot := chromeIcon "mission" pal.textMuted
+  let kind := liveBadgeKind status
+  if kind.isEmpty then bot else
+    let ring : List (Int × Int) := [(80,15),(112,24),(136,48),(145,80),(136,112),(112,136),
+      (80,145),(48,136),(24,112),(15,80),(24,48),(48,24)]
+    let circle := ring ++ ring.take 1
+    let paths := match kind with
+      | "loader" => [((ring.drop (phase % 12)) ++ (ring.take (phase % 12))).take 10]
+      | "clock" => [circle, [(80,40),(80,80),(105,93)]]
+      | "pause" => [[(55,36),(55,125)],[(105,36),(105,125)]]
+      | "alert" => [circle,[(80,43),(80,86)],[(80,107),(80,111)]]
+      | _ => [circle,[(43,81),(69,105),(116,56)]]
+    let tone := if kind == "loader" || status == "waiting_background" then pal.accent
+      else if kind == "alert" then pal.warning else if kind == "check" then pal.success else pal.textMuted
+    .mk none false false (BoxStyle.row 0 |>.withAlign .center |>.withFixedSize (pxToSub 18) (pxToSub 18))
+      (.vectorIcon paths tone (some (pal.sidebar ||| 255))) [bot]
+
 /-- Body text of the SolidJS chrome (`13px/1.4`), laid out on an `18 px` line. -/
 def chromeText (theme : Theme) (color : Color) : TextStyle :=
   { (Theme.bodyText theme) with sizeSub := pxToSub 13, lineHeightSub := pxToSub 18, color := color }
@@ -127,7 +156,7 @@ def chromeLabel (lineH : SubPx) (runs : List InlineRun) (grow : Nat := 0) : Widg
 tall with `6 px` corners, a `16 px` icon slot (`18 px` for a mission, holding its status dot),
  the label, and an optional count pill and shortcut hint. -/
 def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarRow)
-    (margin : Edges := {}) : WidgetNode :=
+    (margin : Edges := {}) (livePhase : Option Nat := none) : WidgetNode :=
   let pal := theme.palette
   let small := Theme.mutedText theme
   if row.kind == "section" then
@@ -153,9 +182,9 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
       .mk none false false
         (BoxStyle.row 0 |>.withAlign .center |>.withFixedSize leadSize leadSize)
         (.treeDecoration isMission row.selected pal.borderSubtle
-          (if isMission then statusBadgeColor pal row.status else if projectRunning then pal.accent else 0)
+          (if isMission && livePhase.isNone then statusBadgeColor pal row.status else if projectRunning && livePhase.isNone then pal.accent else 0)
           (if row.selected then pal.rowActive else pal.sidebar))
-        [chromeIcon (if isMission then "mission" else if row.kind == "project" then "project-folder" else row.rowId) pal.textMuted]
+        [if isMission && livePhase.isSome then liveMissionLead theme row.status (livePhase.getD 0) else chromeIcon (if isMission then "mission" else if row.kind == "project" then "project-folder" else row.rowId) pal.textMuted]
     let labelColor : Color :=
       if isFooter then (if row.selected then pal.textPrimary else pal.textSecondary)
       else if row.selected then pal.textStrong
@@ -289,7 +318,7 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
       else
         buildSidebarRowWidget theme rowW { r with selected := r.selected || st.multiRows.contains r.rowId }
           (if r.kind == "section" then Edges.trbl (pxToSub 14) 0 (pxToSub 4) 0
-           else Edges.trbl 0 0 (pxToSub 1) 0)
+           else Edges.trbl 0 0 (pxToSub 1) 0) (if st.liveData then some st.badgePhase else none)
   let footRows : List WidgetNode :=
     (rowsSource.filter isFoot).map fun r => buildSidebarRowWidget theme rowW r
   let rosterH := availH - chromeHeaderHeightSub - footH

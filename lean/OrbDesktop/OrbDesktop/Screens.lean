@@ -966,6 +966,11 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
   let st := if windowEffects then { st with theme := Theme.withWindowEffects st.theme } else st
   let theme := st.theme
   let pal := theme.palette
+  -- Paint each window surface once. Nested canvas fills otherwise obscure the compositor backdrop.
+  let mainFill := pal.canvas
+  let st := if windowEffects then
+      { st with theme := { theme with palette := { pal with canvas := 0, header := 0 } } }
+    else st
   let sidebarW := chromeSidebarWidthSub
   let headerH := chromeHeaderHeightSub
   let composerH := chromeComposerHeightSub
@@ -982,7 +987,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
       let composerNode := buildComposerWidget theme mainW composerH st.composer []
         (if st.liveData then some (liveComposerControls st (min (pxToSub 748) (mainW - pxToSub 68))) else none)
       WidgetNode.box
-        (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg pal.canvas)
+        (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill)
         [headerNode, bodyNode, composerNode]
     | .missionSplitDiff =>
       let splitH := availH - headerH
@@ -994,32 +999,32 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
       let leftPane : WidgetNode :=
         WidgetNode.rrect
           (BoxStyle.col 0 |>.withFixedSize leftW splitH)
-          pal.canvas
+          st.theme.palette.canvas
           CornerRadii.zero
           { widths := Edges.trbl 0 theme.borderWidth 0 0, color := pal.borderSubtle }
           [leftTranscript, leftComposer]
       let rightPane := buildSplitDiffRightPane theme rightW splitH runs.diffDelRuns runs.diffAddRuns
       let splitBody : WidgetNode :=
         WidgetNode.box
-          (BoxStyle.row 0 |>.withFixedSize mainW splitH |>.withBg pal.canvas)
+          (BoxStyle.row 0 |>.withFixedSize mainW splitH |>.withBg st.theme.palette.canvas)
           [leftPane, rightPane]
       WidgetNode.box
-        (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg pal.canvas)
+        (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill)
         [headerNode, splitBody]
     | .machinesFleet =>
       let bodyH := availH - headerH
       WidgetNode.box
-        (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg pal.canvas)
+        (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill)
         [headerNode, buildMachinesFleetBody st mainW bodyH]
     | .settingsGeneral =>
       let bodyH := availH - headerH
       WidgetNode.box
-        (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg pal.canvas)
+        (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill)
         [headerNode, buildSettingsGeneralBody st mainW bodyH]
     | _ =>
       let bodyH := availH - headerH
       WidgetNode.box
-        (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg pal.canvas)
+        (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill)
          [headerNode, if st.hasLiveConnection then liveComposerControls st mainW
            else if st.liveData then screenTextLine theme mainW (pxToSub 32) (pxToSub 13)
            (pxToSub 21) pal.textMuted "Core unavailable"
@@ -1027,7 +1032,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
 
   let baseShell : WidgetNode :=
     WidgetNode.box
-      (BoxStyle.row 0 |>.withFixedSize availW availH |>.withBg pal.canvas)
+      (BoxStyle.row 0 |>.withFixedSize availW availH |>.withBg (if windowEffects then 0 else pal.canvas))
       [sidebarNode, rightColumn]
 
   if windowEffects then

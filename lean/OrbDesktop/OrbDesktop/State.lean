@@ -332,6 +332,7 @@ structure DesktopState where
   heldSelectionKeys : List UInt32 := []
   openMission : Option String := none
   syncCursor : SyncCursorState := {}
+  badgePhase : Nat := 0
   sidebarRows : List ChromeSidebarRow := []
   missionCards : List MissionSummaryCard := []
   fleetMachines : List FleetMachineCard := []

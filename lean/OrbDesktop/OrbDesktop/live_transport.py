@@ -334,6 +334,11 @@ def poll(mid, binding, tracked=None):
                         pass  # unknown for this ID, continue checking the others
                 visible = [kind + ':' + label(ident) for kind, ident, *_ in rows if kind in ('P','N')]
                 visible += ['M:' + i for i in sorted(tracked)]
+                # Project status for other visible rows too. The selected bubble
+                # carries a newer per-mission read and remains its own authority.
+                visible += ['S:' + r[1] + ':' + r[7] for r in rows if r[0] == 'M'
+                            and r[1] in tracked and r[1] != mid and len(r) > 7
+                            and isinstance(r[7], str) and re.fullmatch(r'[a-z_]+', r[7])]
                 checked = time.monotonic()
             current = ['sample', visible.copy(), None]
             if mid and 'M:' + mid in visible:

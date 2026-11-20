@@ -608,19 +608,6 @@ def waitEvents (c : WaylandClient) : IO Unit := do
 /-- `wl_shm` format code for premultiplied ARGB8888 (little-endian bytes B, G, R, A). -/
 def wlShmFormatArgb8888 : UInt32 := 0
 
-/-- Convert a straight-alpha RGBA8 framebuffer to premultiplied
-`WL_SHM_FORMAT_ARGB8888` (little-endian bytes B, G, R, A). -/
-def rgbaToArgb (rgba : ByteArray) : ByteArray := Id.run do
-  let mut out := rgba
-  for i in [0:rgba.size / 4] do
-    let o := i * 4
-    let a := (rgba.get! (o + 3)).toNat
-    let pm (c : UInt8) : UInt8 := ((c.toNat * a + 127) / 255).toUInt8
-    out := (out.set! o (pm (rgba.get! (o + 2))))
-      |>.set! (o + 1) (pm (rgba.get! (o + 1)))
-      |>.set! (o + 2) (pm (rgba.get! o))
-  return out
-
 private def releaseShm (c : WaylandClient) : IO Unit := do
   let s := c.shm
   if s.pool == 0 then return

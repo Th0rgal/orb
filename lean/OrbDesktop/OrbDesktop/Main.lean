@@ -183,15 +183,15 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
     let mut curAc := ac
     let newPayload ←
       match payload with
-      | .vectorIcon paths color =>
-        let size := scaleSubPx scale120 style.minWidth
+      | .vectorIcon paths color badgeBg =>
+        let size := scaleSubPx scale120 (if badgeBg.isSome then pxToSub 10 else style.minWidth)
         let key : GlyphKey := { font := 0xFFFF, glyph := hash paths |>.toNat, sizeSub := size, subpx := 0 }
         let (ac', entry) :=
           match curAc.cache.lookup Text.hashGlyphKey key with
           | some entry => ({ curAc with hits := curAc.hits + 1 }, entry)
           | none => curAc.insertRasterized key (Text.rasterizeIcon paths size)
         curAc := ac'
-        pure (WidgetPayload.iconMask entry.page entry.uv color)
+        pure (WidgetPayload.iconMask entry.page entry.uv color badgeBg)
       | .text lineHeightSub runs =>
         let mut shapedRuns : Array InlineRun := #[]
         for r in runs do
@@ -552,6 +552,13 @@ def runSelfTest (cfg : Runtime.RuntimeConfig) (initSt : DesktopState) : IO UInt3
   return 0
 
 /-- Main entry point for `OrbDesktop`. -/
+private def runningBadgeDamage (rt : Runtime.RuntimeState DesktopState) : Damage :=
+  rt.app.sidebarRows.foldl (fun damage row =>
+    if row.kind != "mission" || liveBadgeKind row.status != "loader" then damage else
+      match rt.hitRegions.find? (·.1 == row.widgetId) with
+      | none => damage
+      | some (_, rect) => Damage.add damage (roundRect rt.wayland.scale120 rect)) none
+
 def main (args : List String) : IO UInt32 := do
   let dcfg := parseDesktopArgs args
   let rcfg := dcfg.runtimeCfg
@@ -573,6 +580,10 @@ def main (args : List String) : IO UInt32 := do
   if dcfg.selfTest then
     return (← runSelfTest rcfg initSt)
   try
+    let animations ← try
+      let pref ← IO.Process.output { cmd := "gsettings", args := #["get", "org.gnome.desktop.interface", "enable-animations"] }
+      pure (pref.stdout.trimAscii != "false")
+    catch _ => pure true
     let rt0 ← Runtime.openWindowRuntime rcfg "orb-desktop" initSt
     let slot ← IO.mkRef (none : Option LiveSubscription)
     let rt ← Runtime.withProducerWake fun wakeFd notify => do
@@ -582,10 +593,15 @@ def main (args : List String) : IO UInt32 := do
             (fun rt => do
               let vp := rt.viewportDeviceRect
               let (st, damage) ← readLiveFrame slot rt.wayland.scale120 vp rt.app notify
+              let phase := ((← IO.monoMsNow) / 100) % 12
+              let spin := animations && phase != st.badgePhase
+              let damage := if spin then (runningBadgeDamage rt).elim damage (Damage.add damage) else damage
+              let st := if spin then { st with badgePhase := phase } else st
               let some models ← takeCatalog | return (st, damage)
               if st.connectionBinding != initSt.connectionBinding then return (st, damage)
               return ({ st with catalog := models, catalogLoading := false }, some vp))
             DesktopState.hasLiveConnection menuFocusChange (some wakeFd) (·.writeRequest.isSome)
+            (fun rt => animations && (runningBadgeDamage rt).isSome)
         finally closeLiveSubscription slot
     Runtime.shutdownRuntime rt
     return 0

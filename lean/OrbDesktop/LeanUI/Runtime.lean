@@ -408,8 +408,8 @@ def withProducerWake {α : Type} (k : UInt32 → IO Unit → IO α) : IO α := d
 /-- On Linux, poll the compositor fd with a timeout only when the app has a
 background producer. Wayland input wakes immediately; the timeout samples the
 mailbox without a frame-rate idle timer. `pumpEvents` owns actual dispatch. -/
-private def withWindowWait {α σ : Type} (rt : RuntimeState σ) (wakeFd : Option UInt32) (k : IO Unit → IO α) : IO α := do
-  if rt.wayland.display == 0 then return ← k (IO.sleep 500)
+private def withWindowWait {α σ : Type} (rt : RuntimeState σ) (wakeFd : Option UInt32) (k : (UInt64 → IO Unit) → IO α) : IO α := do
+  if rt.wayland.display == 0 then return ← k (fun _ => IO.sleep 500)
   let getFd ← FFI.dlSym "libwayland-client.so.0" "wl_display_get_fd"
   let pollFn ← FFI.dlSym "" "poll"
   let flush ← FFI.dlSym "libwayland-client.so.0" "wl_display_flush"
@@ -429,11 +429,11 @@ private def withWindowWait {α σ : Type} (rt : RuntimeState σ) (wakeFd : Optio
       FFI.memWrite p (Wayland.pushU32LE (Wayland.pushU32LE ByteArray.empty fd.toUInt32) events)
       discard <| FFI.call pollFn (callArgs p.toUInt64 count timeout)
     match wakeFd with
-    | none => k (wait 1 500)
+    | none => k (fun ms => wait 1 (min 500 ms))
     | some wake =>
       FFI.memWrite (p + 8) (Wayland.pushU32LE (Wayland.pushU32LE ByteArray.empty wake) 1)
-      k (do
-        wait 2 0xffffffff
+      k (fun ms => do
+        wait 2 ms
         -- Nonblocking read coalesces notices. A compositor-only wake returns EAGAIN.
         discard <| FFI.call drain (callArgs wake.toUInt64 (p + 16).toUInt64 0))
   finally FFI.memFree p
@@ -446,7 +446,8 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
     (pollFrame : RuntimeState σ → IO (σ × Damage) := fun rt => pure (rt.app, none))
     (hasProducer : σ → Bool := fun _ => false)
     (focusChange : σ → σ → Option Nat := fun _ _ => none)
-    (wakeFd : Option UInt32 := none) (workPending : σ → Bool := fun _ => false) : IO (RuntimeState σ) := withWindowWait rt0 wakeFd fun timedWait => do
+    (wakeFd : Option UInt32 := none) (workPending : σ → Bool := fun _ => false)
+    (animationVisible : RuntimeState σ → Bool := fun _ => false) : IO (RuntimeState σ) := withWindowWait rt0 wakeFd fun timedWait => do
   let mut rt := rt0
   while rt.running do
     if !rt.wayland.configured then
@@ -467,7 +468,8 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
         let wl ← Wayland.present rt.wayland rt.vulkan.framebuffer
         rt := { rt with wayland := wl }
       else if rt.running && !workPending rt.app then
-        if hasProducer rt.app then timedWait else Wayland.waitEvents rt.wayland
+        if animationVisible rt then timedWait (100 - (← IO.monoMsNow) % 100).toUInt64
+        else if hasProducer rt.app then timedWait 0xffffffff else Wayland.waitEvents rt.wayland
   return rt
 
 /-- Cleanly release font and Vulkan scratch resources owned by `RuntimeState`. -/

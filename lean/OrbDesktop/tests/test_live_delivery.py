@@ -198,6 +198,21 @@ class Delivery(unittest.TestCase):
                 live.poll('a', 'bound', {'a'})
         self.assertEqual(out.getvalue(), 'B\tM:a\tTitle\tactive\tPublic\n')
 
+    def test_unselected_status_changes_reach_sidebar(self):
+        class Connection:
+            binding = 'bound'
+            def check(self):
+                pass
+
+        def rows(status):
+            return [('M', 'b', 'Title', '', '', '', '', status)]
+
+        out = io.StringIO()
+        with patch.object(live, 'Connection', Connection), patch.object(live, 'roster_rows', side_effect=[rows('active'), rows('paused')]), patch.object(live.time, 'monotonic', side_effect=[0, 6, 6]), patch.object(live.time, 'sleep', side_effect=[None, KeyboardInterrupt]), contextlib.redirect_stdout(out):
+            with self.assertRaises(KeyboardInterrupt):
+                live.poll('', 'bound', {'b'})
+        self.assertEqual(out.getvalue().splitlines(), ['R\tM:b\x1fS:b:active', 'R\tM:b\x1fS:b:paused'])
+
     def test_rejects_foreign_projection(self):
         class Connection:
             def get(self, path, cap):

@@ -1,5 +1,6 @@
 import OrbDesktop.State
 import Std.Sync.Mutex
+import Std.Data.HashMap
 
 namespace OrbDesktop
 
@@ -227,6 +228,16 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
     let rows := st.sidebarRows.filter fun r =>
       if r.kind == "mission" then cards.any (·.widgetId == r.widgetId)
       else if r.kind == "project" then visible.contains ("P:" ++ (r.rowId.drop 8).toString) else true
+    let statuses := visible.foldl (fun (acc : Std.HashMap String String) key =>
+      match key.splitOn ":" with
+      | ["S", id, status] => acc.insert id status
+      | _ => acc) {}
+    let changed := cards.any fun c => (statuses.get? c.missionId).any (· != c.status)
+    let cards := if changed then cards.map (fun c =>
+      { c with status := (statuses.get? c.missionId).getD c.status }) else cards
+    let rows := if changed then rows.map (fun r =>
+      if r.kind == "mission" then { r with status := (statuses.get? ((r.rowId.drop 8).toString)).getD r.status }
+      else r) else rows
     let pruned := cards.length != st.missionCards.length || machines.length != st.fleetMachines.length || rows.length != st.sidebarRows.length
     let menu := st.missionMenu.bind fun m =>
       if (m.mission.isEmpty || cards.any (·.missionId == m.mission)) && m.targets.all (fun id => cards.any (·.missionId == id))
@@ -241,10 +252,10 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
     let some (title,status,text) := bubble | do
       -- No bubble (roster-only or malformed response): never discard other missions.
       let (next, damage) := applyLiveText scale viewport st sub.mission ""
-      return (next, if pruned then some viewport else damage)
+      return (next, if pruned || changed then some viewport else damage)
     let (next, damage) := applyLiveText scale viewport st sub.mission text
     let some card := next.selectedCard | return invalidate
-    if title == card.title && status == card.status then return (next, if pruned then some viewport else damage)
+    if title == card.title && status == card.status then return (next, if pruned || changed then some viewport else damage)
     return ({ next with
       composer := { next.composer with isRunning := status == "active" || status == "running" }
       missionCards := next.missionCards.map fun m => if m.missionId == sub.mission then { m with title, status } else m
