@@ -36,8 +36,8 @@ def wait(label, check, seconds=20):
 
 
 @contextlib.contextmanager
-def process(args, env, cwd):
-    child = subprocess.Popen(args, cwd=cwd, env=env, start_new_session=True)
+def process(args, env, cwd, stdin=None):
+    child = subprocess.Popen(args, cwd=cwd, env=env, stdin=stdin, start_new_session=True)
     try:
         yield child
     finally:
@@ -205,10 +205,17 @@ for i in range(300):
                 before = crop(action_row)
                 click(75, 143, 'button3')
                 rendered = wait('visible mission actions', lambda: frame if (frame := crop(action_row)) != before else None)
-            open_actions()
-            click(128, 164)
-            keys('-k', 'End', ' renamed')
-            click(128, 194)
+            # Keep the same virtual keyboard while the popup owns focus.
+            # Connecting another keyboard inside the popup sends a focus leave.
+            with process(['wtype', '-k', 'Shift_L', '-', '-k', 'End', ' renamed', '-s', '120000'],
+                         graphical, tmp, stdin=subprocess.PIPE) as keyboard:
+                with keyboard.stdin:
+                    open_actions()
+                    click(128, 164)
+                    original_title = crop('100,151 176x26')
+                # EOF releases wtype's stdin barrier with its existing keymap.
+                wait('edited rename field', lambda: crop('100,151 176x26') != original_title)
+                click(128, 194)
             wait('renamed mission', lambda: api(path)['title'].endswith(' renamed'))
             open_actions()
             click(128, 194)
