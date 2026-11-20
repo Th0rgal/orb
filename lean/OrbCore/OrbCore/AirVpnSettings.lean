@@ -116,7 +116,10 @@ def endpoints (root : String) : IO (List Endpoint) := do
     if let some (endpoint, _) ← readEndpoint root device then all := endpoint :: all
   return all.reverse
 
-def settings (root method : String) (payload : ByteArray) : IO (Nat × JVal) := do
+abbrev SaveSecret := String → AirVpnSecret → String → IO (Except String Unit)
+
+def settings (root method : String) (payload : ByteArray)
+    (save : SaveSecret := sealAirVpnSecret) : IO (Nat × JVal) := do
   let err := fun (status : Nat) (code : String) => (status, JVal.obj #[("error", .str code)])
   if method == "GET" then
     let profiles ← deviceNames root
@@ -147,7 +150,7 @@ def settings (root method : String) (payload : ByteArray) : IO (Nat × JVal) := 
           ("server", .str server), ("profile", .str profile)]))
       | _, _ => return err 400 "expected_country_and_server"
     | _, _, _ => return err 400 "expected_api_key_or_device_profile"
-  match ← sealAirVpnSecret root secret value with
+  match ← save root secret value with
   | .ok () => return (200, .obj #[("saved", .bool true)])
   | .error "invalid_airvpn_device" => return err 400 "invalid_airvpn_device"
   | .error "managed_secret_seal_busy" => return err 409 "secret_store_busy"

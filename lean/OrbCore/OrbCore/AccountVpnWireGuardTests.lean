@@ -13,7 +13,7 @@ def run (root : String) (resume : Bool) (hold := false) : IO UInt32 := do
     unless resume do
       let input ← IO.getStdin
       for _ in [:4] do
-        let (status, _) ← AirVpnSettings.settings root "PUT" (← input.getLine).toUTF8
+        let (status, _) ← AirVpnSettings.settings root "PUT" (← input.getLine).toUTF8 (AccountVpnPool.saveSecret pool)
         unless status == 200 do throw (IO.userError "fixture settings rejected")
     let route := fun (account provider : String) => AccountVpnRoutes.resolve store.missionsDb account fun pref =>
       AccountVpnPool.allocate pool root root store.missionsDb account provider pref
@@ -33,6 +33,9 @@ def run (root : String) (resume : Bool) (hold := false) : IO UInt32 := do
           match (← input.getLine).trimAscii.toString with
           | "repeat" => out.putStrLn (← source "a" "chatgpt")
           | "other" => out.putStrLn (← source "b" "codex")
+          | "save" =>
+            let (status, _) ← AirVpnSettings.settings root "PUT" (← input.getLine).toUTF8 (AccountVpnPool.saveSecret pool)
+            out.putStrLn (toString status)
           | "expect-blocked" =>
             let response ← sendRequest "GET" "https://provider.test/source" (resolveTransport? := some (route "a" "chatgpt"))
             if response.isOk then throw (IO.userError "colliding exit admitted")

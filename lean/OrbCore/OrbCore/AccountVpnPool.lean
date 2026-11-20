@@ -50,6 +50,20 @@ private def drain (a : Active) : IO Unit := do
   for o in a.occupants do unlock o.locks
   unlock a.retiredLocks
 
+/-- Commit an admin credential change under the admission lock and retire
+the children using the previous secret before accepting another request. -/
+def saveSecret (pool : Pool) : SaveSecret := fun root secret value => pool.atomically do
+  let active := (← get).active
+  let (affected, keep) := active.partition fun t => match secret with
+    | .apiKey => true
+    | .device device => t.endpoint.device == device
+  if !affected.isEmpty && (← OrbCore.Managed.openAirVpnSecret root secret).toOption == some value then
+    return .ok ()
+  if let .error e ← OrbCore.Managed.sealAirVpnSecret root secret value then return .error e
+  for t in affected do drain t
+  modify fun state => { state with active := keep }
+  return .ok ()
+
 /-- On a shared transport, existing streams can outlive a preference change.
 Hold the old exit leases until the last occupant drains the transport. -/
 private def detach (active : List Active) (account : String) : IO (List Active) := do

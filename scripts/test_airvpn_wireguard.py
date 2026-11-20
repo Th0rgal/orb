@@ -181,9 +181,17 @@ def run(driver, parent_mount):
                         assert select.select([resumed.stdout], [], [], 60)[0]
                         return resumed.stdout.readline().strip()
 
+                    def save_profile(profile):
+                        return request("save\n" + json.dumps(profile))
+
                     original = routes["a"]
                     other = routes["b"]
                     replacement, = set(peers.values()) - {original, other}
+                    spare = next(p for p in settings[1:] if peers[p["device_id"]] == replacement)
+                    original_pids = set(proxy_pids())
+                    assert save_profile({**spare, "country": "US"}) == "200"
+                    assert save_profile(spare) == "200"
+                    assert set(proxy_pids()) == original_pids
                     before = len(observed)
                     probes = len(exit_probes)
                     change_exit(original, other)
@@ -195,6 +203,14 @@ def run(driver, parent_mount):
                     assert observed[before:] == [replacement], "provider reached during exit collision"
                     assert request("other") == other
                     assert observed[before:] == [replacement, other]
+                    live = proxy_pids()
+                    assert len(live) == 1
+                    other_profile = next(p for p in settings[1:] if peers[p["device_id"]] == other)
+                    assert save_profile({**other_profile, "profile": "[Interface]"}) == "400"
+                    assert save_profile(other_profile) == "200"
+                    assert proxy_pids() == live
+                    assert save_profile({**other_profile, "country": "US"}) == "200"
+                    assert not proxy_pids(), "saved replacement left previous WireGuard child running"
                     resumed.stdin.close()
                     assert resumed.wait(timeout=10) == 0
                 finally:

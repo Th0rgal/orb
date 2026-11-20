@@ -3629,7 +3629,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let token := (extractBearerToken? req.headers nowEpochSec).getD ""
     unless token.startsWith "orb-jwt-v2:" && !st.cfg.devMode do
       return .ok (mkJson 403 "{\"error\":\"operator_session_required\"}")
+    let save := st.vpnPool?.map AccountVpnPool.saveSecret
     let (status, body) ← OrbCore.AirVpnSettings.settings st.store.rootDir req.method req.bodySlice.toByteArray
+      (save.getD OrbCore.Managed.sealAirVpnSecret)
     return .ok (mkJson status (renderCompact body))
 
   -- Explicit operator-triggered vault-to-Core sealing. Reauthenticate with dev
