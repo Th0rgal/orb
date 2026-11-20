@@ -182,6 +182,19 @@ class Delivery(unittest.TestCase):
         models[1]['provider_id'] = 'local'
         self.assertEqual(list(live.visible_model_options('opencode', models, rules)), models[1:])
 
+    def test_child_precedes_parent_in_live_roster(self):
+        child = dict(id='child', folder='notes/today', parent_mission_id='launch',
+                     callback_parent_mission_id='callback', tags=['fork-of:source'],
+                     superseded_by_mission_id='next')
+        pages = {'/api/projects': {'projects': []}, '/api/machines': [],
+                 '/api/control/missions?limit=200': [child]}
+        connection = type('Fixture', (), {'binding': 'bound', 'check': lambda _: None,
+                                          'get': lambda _, path: pages[path]})()
+        for missions in ([child], [child, dict(id='launch')]):
+            pages['/api/control/missions?limit=200'] = missions
+            projected = next(row for row in live.roster_rows(connection) if row[0] == 'M')
+            self.assertEqual(projected[16:], ('notes/today', 'launch', 'callback', 'source', 'next'))
+
     def test_live_reader_accepts_both_full_roster_pages(self):
         ids = [str(i).zfill(128) for i in range(300)]
         rows = [('M', mid) for mid in ids]

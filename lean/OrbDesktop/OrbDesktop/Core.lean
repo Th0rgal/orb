@@ -32,7 +32,9 @@ private def missionCard (idx : Nat) (xs : List String) : MissionSummaryCard :=
     track := col xs 4, model := col xs 13
     status := col xs 7, updatedLabel := if (col xs 8).isEmpty then col xs 9 else col xs 8
     summaryText := col xs 10, machine := col xs 11, backend := col xs 12,
-    effort := col xs 14, permissionMode := col xs 15 }
+    effort := col xs 14, permissionMode := col xs 15,
+    folder := col xs 16, parentMissionId := col xs 17, callbackParentMissionId := col xs 18,
+    forkSource := col xs 19, supersededBy := col xs 20 }
 
 private def machineCard (idx : Nat) (xs : List String) : FleetMachineCard :=
   { widgetId := 1002 + 3 * idx, machineId := col xs 1, name := col xs 2

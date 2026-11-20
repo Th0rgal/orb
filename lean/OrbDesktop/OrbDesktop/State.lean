@@ -235,6 +235,11 @@ structure MissionSummaryCard where
   status : String       -- `"running"`, `"awaiting_approval"`, `"completed"`
   updatedLabel : String
   summaryText : String
+  folder : String := ""
+  parentMissionId : String := ""
+  callbackParentMissionId : String := ""
+  forkSource : String := ""
+  supersededBy : String := ""
   deriving DecidableEq, Repr, Inhabited
 
 /-- Managed VM or static compute node entry for `05_machines_fleet`. -/

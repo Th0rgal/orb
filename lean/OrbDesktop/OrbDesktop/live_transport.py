@@ -224,6 +224,15 @@ def mission_settings(m):
             m.get('model_effort'), m.get('permission_mode') or 'supervised')
 
 
+def mission_hierarchy(m):
+    tags = m.get('tags') or []
+    fork = next((tag[8:] for tag in tags if tag.startswith('fork-of:')), '')
+    if not fork and (m.get('title') or '').lower().endswith(' · fork'):
+        fork = m.get('parent_mission_id')
+    return (m.get('folder'), m.get('parent_mission_id'), m.get('callback_parent_mission_id'),
+            fork, m.get('superseded_by_mission_id'))
+
+
 def visible_model_options(backend, options, rules):
     available = {(m.get('value'), m.get('provider_id')) for m in options}
     for option in options:
@@ -276,7 +285,7 @@ def roster_rows(c, include_archived=False):
     rows = [('C', c.binding)]
     rows += [('P', p['slug'], p.get('title') or p['slug'], p.get('objective')) for p in projects]
     rows += [('M', *(m.get(k) for k in ('id','title','project','track','model','model_override',
-                                        'status','updated_at','created_at','short_description')), *mission_settings(m))
+                                        'status','updated_at','created_at','short_description')), *mission_settings(m), *mission_hierarchy(m))
              for m in missions if re.fullmatch(r'[A-Za-z0-9_-]{1,128}', m['id'])]
     rows += [('N', *(m.get(k) for k in ('id','name','role','provider','cpu_ram','size','state',
                                         'status','expires_at','cost','active_missions'))) for m in machines]
