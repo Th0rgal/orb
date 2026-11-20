@@ -87,6 +87,9 @@ opaque memAlloc (size : USize) : IO USize
 opaque memFree (ptr : USize) : IO Unit
 
 /-- Copy `bytes` into native memory at `ptr`. -/
+@[extern "lean_ui_present_argb"]
+opaque presentArgb (ptr : USize) (bytes : @& ByteArray) : IO Unit
+
 @[extern "lean_ui_mem_write"]
 opaque memWrite (ptr : USize) (bytes : @& ByteArray) : IO Unit
 

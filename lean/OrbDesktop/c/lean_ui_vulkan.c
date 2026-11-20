@@ -162,6 +162,24 @@ lean_obj_res lean_ui_mem_free(size_t ptr, lean_obj_arg w) {
   return lean_io_result_mk_ok(lean_box(0));
 }
 
+/* Convert directly into the compositor's back buffer, without cloning the frame. */
+lean_obj_res lean_ui_present_argb(size_t ptr, b_lean_obj_arg bytes, lean_obj_arg w) {
+  (void)w;
+  if (!ptr) return io_err("null presentation buffer");
+  const uint8_t *restrict src = lean_sarray_cptr(bytes);
+  uint8_t *restrict dst = (uint8_t *)ptr;
+  size_t n = lean_sarray_size(bytes);
+  if (n % 4) return io_err("invalid RGBA frame size");
+  for (size_t i = 0; i < n; i += 4) {
+    unsigned alpha = src[i+3];
+    dst[i]   = (src[i+2] * alpha + 127) / 255;
+    dst[i+1] = (src[i+1] * alpha + 127) / 255;
+    dst[i+2] = (src[i]   * alpha + 127) / 255;
+    dst[i+3] = alpha;
+  }
+  return lean_io_result_mk_ok(lean_box(0));
+}
+
 lean_obj_res lean_ui_mem_write(size_t ptr, b_lean_obj_arg bytes, lean_obj_arg w) {
   (void)w;
   size_t sz = lean_sarray_size(bytes);

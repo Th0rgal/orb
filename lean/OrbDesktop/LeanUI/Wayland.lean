@@ -655,7 +655,7 @@ def present (c : WaylandClient) (fb : ByteArray) : IO WaylandClient := do
     allocShm c bw bh
   let toB := !shm.frontIsB
   let (buf, offset) := if toB then (shm.bufB, bw * bh * 4) else (shm.bufA, 0)
-  FFI.memWrite (shm.ptr + offset.toUSize) (rgbaToArgb fb)
+  FFI.presentArgb (shm.ptr + offset.toUSize) fb
   let surface := c.window.surface
   let _ ← marshalRequest surface 1 0 4 0 0 #[.obj buf, .int 0, .int 0]
   let _ ← marshalRequest c.window.viewport 2 0 1 0 0 #[.int c.pendingW, .int c.pendingH]

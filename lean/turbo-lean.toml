@@ -248,6 +248,7 @@ allow = [
   "LeanUI.FFI=LeanUI.FFI.call=lean_ui_call",
   "LeanUI.FFI=LeanUI.FFI.memAlloc=lean_ui_mem_alloc",
   "LeanUI.FFI=LeanUI.FFI.memFree=lean_ui_mem_free",
+  "LeanUI.FFI=LeanUI.FFI.presentArgb=lean_ui_present_argb",
   "LeanUI.FFI=LeanUI.FFI.memWrite=lean_ui_mem_write",
   "LeanUI.FFI=LeanUI.FFI.memRead=lean_ui_mem_read",
   "LeanUI.FFI=LeanUI.FFI.fontOpen=lean_ui_font_open",
