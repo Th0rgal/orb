@@ -161,8 +161,9 @@ def stepEvent (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage) (
       { rt with hoveredEntity := hit }
     | .pointerLeave =>
       { rt with hoveredEntity := none }
-    | .pointerButton px py _btn down =>
-      if down then
+    | .pointerButton px py button down =>
+      if button != 0x110 then rt
+      else if down then
         match hitTest rt.hitRegions px py with
         | some id =>
           let r := (rt.hitRegions.find? (·.1 == id)).map (·.2) |>.getD rt.viewportDeviceRect

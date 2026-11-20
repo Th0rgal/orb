@@ -93,6 +93,9 @@ namespace WidgetNode
     (id : Option WidgetId := none) : WidgetNode :=
   .mk id false id.isSome style (.iconMask page src color) []
 
+/-- Chevron used by dropdown controls in the desktop chrome and composer. -/
+def downChevronPaths : List (List (Int × Int)) := [[(50,65),(80,95),(110,65)]]
+
 /-- Declarative RGBA texture image widget builder. -/
 @[inline] def image (style : BoxStyle) (tex : Nat) (src : Rect) (radius : SubPx := 0)
     (id : Option WidgetId := none) : WidgetNode :=

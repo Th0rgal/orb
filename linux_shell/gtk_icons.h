@@ -2,6 +2,7 @@
 #ifndef ORB_GTK_ICONS_H
 #define ORB_GTK_ICONS_H
 
+const char *orb_menu_icon_name(const char *action);
 int orb_status_badge_kind(const char *status);
 extern int orb_icons_light; /* status badge disc follows the light theme */
 int orb_gtk_icons_self_test(void);
@@ -10,6 +11,7 @@ int orb_gtk_icons_self_test(void);
 #include <gtk/gtk.h>
 typedef struct { GPtrArray *spinning; guint src; int step; } OrbIconSpinner;
 void orb_spinner_stop(OrbIconSpinner *sp);
+void orb_add_menu_icon(GtkWidget *button, const char *icon);
 GtkWidget *orb_make_icon_widget(OrbIconSpinner *sp, const char *icon, const char *color, const char *status);
 void orb_gtk_bind_pointer_cursor(GtkWidget *w);
 /* Starts a compositor-driven move of `w`'s toplevel with the primary button held. */

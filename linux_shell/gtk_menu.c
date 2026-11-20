@@ -1,18 +1,14 @@
-/* linux_shell/gtk_menu.c — Native Chrome sidebar context menu for mission rows (<= 220 LOC).
- * The menu mirrors the HTML sidebar's mission menu (`missionMenuItems` in orb/src/ProjectFiles.tsx)
- * and runs every action in the WebView through `window.__ORB_NATIVE_MISSION_ACTION__`, so the
- * API calls, optimistic updates and error toasts stay in one place. */
+/* Anchored sidebar menu. The WebView owns mission actions and optimistic updates. */
 #define _POSIX_C_SOURCE 200809L
 #include "gtk_menu.h"
 #include "gtk_chrome.h"
+#include "gtk_icons.h"
 #include <stdlib.h>
 #include <string.h>
 #if defined(ORB_HAS_WEBKITGTK)
 #include <webkit2/webkit2.h>
 #endif
-
 const char *orb_menu_project_slug(const char *target) { return (!target || strncmp(target, "project:", 8) != 0 || !target[8]) ? NULL : target + 8; }
-
 #if defined(ORB_HAS_WEBKITGTK)
 typedef struct { GtkWidget *wv; const char *action; char *id, *arg; } MenuAct;
 static void free_act(gpointer p, GClosure *cl) { (void)cl; MenuAct *a = p; g_free(a->id); g_free(a->arg); g_free(a); }
@@ -47,7 +43,7 @@ static void prompt_rename(GtkWidget *wv, const char *id, const char *title) {
 }
 
 static GtkWidget *sel_list;
-static void on_item(GtkMenuItem *mi, gpointer ud) {
+static void on_item(GtkButton *mi, gpointer ud) {
     (void)mi;
     MenuAct *a = ud;
     if (strcmp(a->action, "rename") == 0) {
@@ -68,20 +64,33 @@ static void on_item(GtkMenuItem *mi, gpointer ud) {
     }
 }
 
+static GtkWidget *menu_row(GtkWidget *page, const char *label, const char *icon) {
+    GtkWidget *button = gtk_model_button_new();
+    g_object_set(button, "text", label, NULL);
+    if (icon) { orb_add_menu_icon(button, icon); }
+    gtk_box_pack_start(GTK_BOX(page), button, FALSE, FALSE, 0);
+    return button;
+}
+static void separator(GtkWidget *page) {
+    gtk_box_pack_start(GTK_BOX(page), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 3);
+}
+static void move_page(GtkWidget *page, GtkWidget *moves, const char *label) {
+    GtkWidget *popup = gtk_widget_get_ancestor(page, GTK_TYPE_POPOVER_MENU);
+    gtk_container_add(GTK_CONTAINER(popup), moves);
+    gtk_container_child_set(GTK_CONTAINER(popup), moves, "submenu", "destinations", NULL);
+    g_object_set(menu_row(page, label, "folder-symbolic"), "menu-name", "destinations", NULL);
+}
 static void add_item(GtkWidget *menu, const char *label, GtkWidget *wv, const char *action, const char *id, const char *arg) {
-    GtkWidget *it = gtk_menu_item_new_with_mnemonic(label);
+    GtkWidget *it = menu_row(menu, label, orb_menu_icon_name(action));
     MenuAct *a = g_new0(MenuAct, 1); a->wv = wv; a->action = action; a->id = g_strdup(id); a->arg = g_strdup(arg ? arg : "");
-    g_signal_connect_data(it, "activate", G_CALLBACK(on_item), a, free_act, 0);
-    gtk_menu_shell_append(GTK_MENU_SHELL(menu), it);
+    g_signal_connect_data(it, "clicked", G_CALLBACK(on_item), a, free_act, 0);
 }
 
-static gboolean destroy_later(gpointer w) { gtk_widget_destroy(GTK_WIDGET(w)); return G_SOURCE_REMOVE; }
-
-/* Activation fires after "deactivate"; destroy on idle so the item's handler runs first. */
-static void on_menu_done(GtkMenuShell *m, gpointer ud) { (void)ud; g_idle_add(destroy_later, m); }
-
+static gboolean destroy_later(gpointer w) { gtk_widget_destroy(GTK_WIDGET(w)); g_object_unref(w); return G_SOURCE_REMOVE; }
+static void closed(GtkPopover *popup, gpointer data) { (void)data; g_idle_add(destroy_later, g_object_ref(popup)); }
 static GtkWidget *move_submenu(GtkWidget *wv, GtkWidget *list, const char *id, const char *current) {
-    GtkWidget *sub = gtk_menu_new();
+    GtkWidget *sub = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    g_object_set(menu_row(sub, "_Move to", NULL), "menu-name", "main", "inverted", TRUE, NULL);
     int n = 0;
     GList *rows = gtk_container_get_children(GTK_CONTAINER(list));
     for (GList *l = rows; l; l = l->next) {
@@ -158,47 +167,48 @@ static void bulk_menu(GtkWidget *wv, GtkWidget *list, GtkWidget *menu) {
     int n, others, archived; char *ids = sel_missions(&n, &others, &archived), label[96];
     if (!ids || others) {
         snprintf(label, sizeof(label), "%u items selected \xE2\x80\x94 no shared actions", sel ? g_hash_table_size(sel) : 0);
-        GtkWidget *info = gtk_menu_item_new_with_label(label); gtk_widget_set_sensitive(info, FALSE); gtk_menu_shell_append(GTK_MENU_SHELL(menu), info);
+        gtk_widget_set_sensitive(menu_row(menu, label, NULL), FALSE);
     } else {
         GtkWidget *moves = move_submenu(wv, list, ids, NULL);
-        if (moves) { snprintf(label, sizeof(label), "_Move %d agents to", n); GtkWidget *mv = gtk_menu_item_new_with_mnemonic(label); gtk_menu_item_set_submenu(GTK_MENU_ITEM(mv), moves); gtk_menu_shell_append(GTK_MENU_SHELL(menu), mv); }
+        if (moves) { snprintf(label, sizeof(label), "_Move %d agents to", n); move_page(menu, moves, label); }
         if (archived < n) { snprintf(label, sizeof(label), "_Archive %d conversations", n - archived); add_item(menu, label, wv, "archive", ids, NULL); }
         if (archived > 0) { snprintf(label, sizeof(label), "R_estore %d conversations", archived); add_item(menu, label, wv, "restore", ids, NULL); }
-        gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
+        separator(menu);
         snprintf(label, sizeof(label), "_Delete %d agents\xE2\x80\xA6", n); add_item(menu, label, wv, "delete", ids, ids);
     }
-    gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new()); add_item(menu, "_Clear selection", wv, "clear", "", NULL);
+    separator(menu); add_item(menu, "_Clear selection", wv, "clear", "", NULL);
     g_free(ids);
 }
 
 gboolean orb_gtk_row_context_menu(GtkWidget *wv, GtkWidget *list, GtkWidget *row, const GdkEvent *ev) {
-    if (wv && sel && g_hash_table_size(sel) > 1 && row_id(row) && g_hash_table_contains(sel, row_id(row))) {
-        GtkWidget *menu = gtk_menu_new(); bulk_menu(wv, list, menu); gtk_menu_attach_to_widget(GTK_MENU(menu), list, NULL);
-        g_signal_connect(menu, "deactivate", G_CALLBACK(on_menu_done), NULL); gtk_widget_show_all(menu); gtk_menu_popup_at_pointer(GTK_MENU(menu), ev); return TRUE;
-    }
+    (void)ev;
+    gboolean bulk = wv && sel && g_hash_table_size(sel) > 1 && row_id(row) && g_hash_table_contains(sel, row_id(row));
     const char *kind = g_object_get_data(G_OBJECT(row), "orb-kind"), *target = g_object_get_data(G_OBJECT(row), "orb-target");
-    if (!wv || !kind || strcmp(kind, "mission") != 0 || !target || strncmp(target, "m:", 2) != 0 || !target[2]) {
+    if (!bulk && (!wv || !kind || strcmp(kind, "mission") != 0 || !target || strncmp(target, "m:", 2) != 0 || !target[2])) {
         return FALSE;
     }
-    const char *id = target + 2, *title = g_object_get_data(G_OBJECT(row), "orb-title");
-    const char *status = g_object_get_data(G_OBJECT(row), "orb-status"), *project = g_object_get_data(G_OBJECT(row), "orb-project");
-    gboolean archived = g_strcmp0(status, "acknowledged") == 0 || g_strcmp0(status, "archived") == 0;
-    GtkWidget *menu = gtk_menu_new(), *moves = move_submenu(wv, list, id, project);
-    gtk_style_context_add_class(gtk_widget_get_style_context(menu), "orb-ctx");
-    add_item(menu, "_Rename\xE2\x80\xA6", wv, "rename", id, title);
-    if (moves) {
-        GtkWidget *mv = gtk_menu_item_new_with_mnemonic("_Move to");
-        gtk_menu_item_set_submenu(GTK_MENU_ITEM(mv), moves);
-        gtk_menu_shell_append(GTK_MENU_SHELL(menu), mv);
+    GtkWidget *pop = gtk_popover_menu_new(), *menu = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_popover_set_relative_to(GTK_POPOVER(pop), row);
+    gtk_popover_set_constrain_to(GTK_POPOVER(pop), GTK_POPOVER_CONSTRAINT_WINDOW);
+    gtk_container_add(GTK_CONTAINER(pop), menu);
+    gtk_container_child_set(GTK_CONTAINER(pop), menu, "submenu", "main", NULL);
+    gtk_style_context_add_class(gtk_widget_get_style_context(pop), "orb-ctx");
+    if (bulk) { bulk_menu(wv, list, menu); }
+    else {
+        const char *id = target + 2, *title = g_object_get_data(G_OBJECT(row), "orb-title");
+        const char *status = g_object_get_data(G_OBJECT(row), "orb-status"), *project = g_object_get_data(G_OBJECT(row), "orb-project");
+        gboolean archived = g_strcmp0(status, "acknowledged") == 0 || g_strcmp0(status, "archived") == 0;
+        GtkWidget *moves = move_submenu(wv, list, id, project);
+        add_item(menu, "_Rename\xE2\x80\xA6", wv, "rename", id, title);
+        if (moves) { move_page(menu, moves, "_Move to"); }
+        add_item(menu, archived ? "R_estore" : "_Archive", wv, archived ? "restore" : "archive", id, NULL);
+        separator(menu);
+        add_item(menu, "_Copy mission ID", wv, "copy-id", id, NULL);
+        add_item(menu, "Mission _settings", wv, "settings", id, NULL);
     }
-    add_item(menu, archived ? "R_estore" : "_Archive", wv, archived ? "restore" : "archive", id, NULL);
-    gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
-    add_item(menu, "_Copy mission ID", wv, "copy-id", id, NULL);
-    add_item(menu, "Mission _settings", wv, "settings", id, NULL);
-    gtk_menu_attach_to_widget(GTK_MENU(menu), list, NULL);
-    g_signal_connect(menu, "deactivate", G_CALLBACK(on_menu_done), NULL);
-    gtk_widget_show_all(menu);
-    gtk_menu_popup_at_pointer(GTK_MENU(menu), ev);
+    g_signal_connect(pop, "closed", G_CALLBACK(closed), NULL);
+    gtk_widget_show_all(pop);
+    gtk_popover_popup(GTK_POPOVER(pop));
     return TRUE;
 }
 #endif

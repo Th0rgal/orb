@@ -68,7 +68,7 @@ private def verifyFocusTransfer : IO Unit := do
   let some (_, target) := first.hitRegionsSub.find? (·.1 == 2)
     | throw <| IO.userError "focus: missing target"
   let clicked := rt.stepEvent (fun s _ => (s, none))
-    (.pointerButton (target.x + target.w/2) (target.y + target.h/2) 1 true)
+    (.pointerButton (target.x + target.w/2) (target.y + target.h/2) 0x110 true)
   unless clicked.focus.owner == some 2 do throw <| IO.userError "focus: transfer failed"
   let base ← Vulkan.renderFrame { width := 80, height := 24 } theme.palette.canvas {} first.prims
   let got ← checkPartial "focus transfer" base clicked.damage {} theme.palette.canvas (view clicked.focus).prims

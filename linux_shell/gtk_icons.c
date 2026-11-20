@@ -6,6 +6,13 @@
 #include <math.h>
 #include <string.h>
 
+const char *orb_menu_icon_name(const char *action) {
+    return !strcmp(action, "rename") ? "document-edit-symbolic" :
+        !strcmp(action, "archive") ? "package-x-generic-symbolic" : !strcmp(action, "restore") ? "edit-undo-symbolic" :
+        !strcmp(action, "settings") ? "preferences-system-symbolic" : !strcmp(action, "clear") ? "edit-clear-symbolic" :
+        !strcmp(action, "delete") ? "user-trash-symbolic" : !strcmp(action, "move") ? "folder-symbolic" : "edit-copy-symbolic";
+}
+
 int orb_status_badge_kind(const char *status) {
     if (!status || !*status) { return 0; }
     char s[48]; size_t i = 0; for (; status[i] && i + 1 < sizeof(s); ++i) { s[i] = (char)tolower((unsigned char)status[i]); } s[i] = '\0';
@@ -87,6 +94,16 @@ static gboolean on_draw_icon(GtkWidget *w, cairo_t *cr, gpointer ud) {
     if (bk > 0) { draw_status_badge(cr, bk, sp ? sp->step : 0); }
     return FALSE;
 }
+/* A model button normally chooses between its text and icon. Keep the
+ * native submenu indicator and add the leading glyph beside its label. */
+void orb_add_menu_icon(GtkWidget *button, const char *icon) {
+    GtkBox *content = GTK_BOX(gtk_bin_get_child(GTK_BIN(button)));
+    GtkWidget *image = gtk_image_new_from_icon_name(icon, GTK_ICON_SIZE_MENU);
+    gtk_widget_set_margin_end(image, 7);
+    gtk_box_pack_start(content, image, FALSE, FALSE, 0);
+    gtk_box_reorder_child(content, image, 0);
+}
+
 GtkWidget *orb_make_icon_widget(OrbIconSpinner *sp, const char *icon, const char *color, const char *status) {
     int is_bot = icon && strcmp(icon, "bot") == 0, bk = is_bot ? orb_status_badge_kind(status) : 0;
     GtkWidget *da = gtk_drawing_area_new(); gtk_widget_set_size_request(da, is_bot ? 20 : 16, is_bot ? 20 : 16);

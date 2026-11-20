@@ -476,7 +476,7 @@ def liveViewportRegression : Bool := Id.run do
   let some down := wheel start rosterViewportId 999999 | return false
   let (scrolled, _) := frame down
   let some (_, row) := scrolled.hitRegions.find? (fun (p : EntityId × Rect) => p.1 == last.widgetId) | return false
-  let click := fun pressed => Event.pointerButton (row.x + row.w/2) (row.y + row.h/2) 1 pressed
+  let click := fun pressed => Event.pointerButton (row.x + row.w/2) (row.y + row.h/2) 0x110 pressed
   let press := scrolled.stepEvent (desktopReducer scrolled) (click true)
   let selected := (press.stepEvent (desktopReducer press) (click false)).app
   if selected.openMission != some last.missionId then return false

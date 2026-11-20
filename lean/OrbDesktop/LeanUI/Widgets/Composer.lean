@@ -299,7 +299,8 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
   let selector (text : String) (width : Nat) : WidgetNode :=
     WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center
       |>.withFixedSize (pxToSub (width + 14)) (pxToSub 18))
-      [metaText text (pxToSub width), metaText "⌄" (pxToSub 10)]
+      [metaText text (pxToSub width), .mk none false false (BoxStyle.row 0 |>.withFixedSize (pxToSub 10) (pxToSub 10))
+        (.vectorIcon WidgetNode.downChevronPaths pal.textMuted) []]
   let sep := metaText "·" (pxToSub 3)
   let underRow : WidgetNode :=
     WidgetNode.box

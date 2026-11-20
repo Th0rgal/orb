@@ -23,6 +23,9 @@ private def clickMission (st : DesktopState) (card : MissionSummaryCard) : IO De
     throw (IO.userError "mission row is not visible in the sidebar")
   let rt : Runtime.RuntimeState DesktopState := { app := st, focus, hitRegions := scene.hitRegionsSub }
   let reduce := stepDesktopEvent 120 vp
+  let secondary := (rt.stepEvent reduce (.pointerButton x y 0x111 true)).stepEvent reduce (.pointerButton x y 0x111 false)
+  unless secondary.app.openMission == st.openMission && secondary.pressedEntity.isNone do
+    throw (IO.userError "secondary click unexpectedly opened the clicked mission")
   let down := rt.stepEvent reduce (.pointerButton x y 0x110 true)
   unless down.pressedEntity == some card.widgetId && down.app.openMission == st.openMission do
     throw (IO.userError "pointer press missed or selected before release")
