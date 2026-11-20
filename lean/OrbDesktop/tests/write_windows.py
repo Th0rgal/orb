@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import select
 import socket
 import sqlite3
 import tempfile
@@ -51,20 +52,56 @@ def check(tmp, mode):
         stack.callback(reap)
         server = start()
         token = wait('login', login)
-        mid = api('/api/control/missions', {'title': 'write-window'})['id']
+        mid = api('/api/control/missions', {'title': 'write-window', 'backend': 'claudecode' if mode == 'pipe' else 'codex'})['id']
         path = '/api/control/missions/' + mid
         key = str(uuid.uuid4())
         def send():
             return api('/api/control/message', {'mission_id': mid, 'client_message_id': key,
-                       'content': 'window', 'queue_followup': True})
-        if mode == 'stop':
+                       'content': 'window' * (50000 if mode == 'pipe' else 1), 'queue_followup': True})
+        if mode == 'pipe':
+            import sys
+            (tmp / 'git').unlink()
+            entered.unlink(missing_ok=True)
+            claude = tmp / 'claude'
+            claude.write_text(f'#!{sys.executable}\nimport array, fcntl, os, termios, time\n'
+                              f'open({str(launches)!r}, "w").write(str(os.getpid()))\n'
+                              'capacity = fcntl.fcntl(0, fcntl.F_GETPIPE_SZ)\n'
+                              'while True:\n n = array.array("i", [0]); fcntl.ioctl(0, termios.FIONREAD, n)\n'
+                              f' if n[0] >= capacity - 4096: open({str(entered)!r}, "w").close()\n time.sleep(.02)\n')
+            claude.chmod(0o700)
+            with concurrent.futures.ThreadPoolExecutor(2) as pool:
+                sent = pool.submit(send)
+                try:
+                    wait('unread prompt in bounded pipe', entered.exists)
+                    assert not sent.done()
+                    pidfd = os.pidfd_open(int(launches.read_text()))
+                    stack.callback(os.close, pidfd)
+                    poll = select.poll(); poll.register(pidfd, select.POLLIN)
+                    assert not poll.poll(0)
+                    assert pool.submit(api, path + '/cancel', {}).result(timeout=5)['ok']
+                    assert poll.poll(1000), 'Stop acknowledged with live warm child'
+                finally:
+                    reap()
+                sent.result(timeout=5)
+            assert api(path)['status'] == 'interrupted'
+        elif mode in ('stop', 'activation'):
+            if mode == 'activation':
+                skill = tmp / 'library/skills/check-window'
+                skill.mkdir(parents=True)
+                (skill / 'SKILL.md').write_text('---\nname: check-window\naudience: mission\n---\nfixture\n')
+                tool = tmp / 'base64'
+                tool.write_text(f'#!/bin/sh\ntouch "{entered}"\nwhile test ! -e "{gate}"; do sleep .05; done\nexec /usr/bin/base64 "$@"\n')
+                tool.chmod(0o700)
+                (tmp / 'git').unlink()
             entered.unlink(missing_ok=True)
             gate.unlink()
             with concurrent.futures.ThreadPoolExecutor(1) as pool:
                 sent = pool.submit(send)
                 try:
                     wait('checkpoint before pid registration', entered.exists)
-                    assert not launches.exists() and api(path)['status'] == 'active'
+                    assert not launches.exists()
+                    assert any(m['event_type'] == 'user_message' for m in api(path + '/events'))
+                    if mode == 'stop': assert api(path)['status'] == 'active'
                     assert api(path + '/cancel', {})['ok']
                     api(path + '/status', {'status': 'acknowledged'})
                 finally:
@@ -105,6 +142,6 @@ def check(tmp, mode):
 
 if __name__ == '__main__':
     import sys
-    for mode in sys.argv[1:] or ('stop', 'receipt'):
+    for mode in sys.argv[1:] or ('stop', 'receipt', 'activation', 'pipe'):
         with tempfile.TemporaryDirectory(prefix='orb-write-window-') as d:
             check(Path(d), mode)
