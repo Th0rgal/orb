@@ -101,8 +101,9 @@ the source address for each account. It also checks the adopted credential
 ID, rotated refresh token and retained proxy URL for each file. This test
 uses synthetic identities and the released aarch64 Linux binary.
 
-Build the optional `orb-airvpn-sidecar-test` executable in the OrbCore Lean
-package and pass its absolute path with `--orb-configure` to the fixture above.
+Build the driver with `scripts/build_orb_bins.sh --only orb-airvpn-sidecar-test`
+and pass its absolute path with `--orb-configure` to the fixture above. The CI
+Test job runs this exchange in a fresh loopback-only network namespace.
 This runs Core’s credential configuration client and authenticated relay against
 the real sidecar. Only the verified gateway lookup and the upstream services
 are fixtures. The independent receiver checks both accounts through the relay,

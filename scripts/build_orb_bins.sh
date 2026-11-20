@@ -226,7 +226,7 @@ for bin in "${BINS_TO_STAGE[@]}"; do
     ORB_NODE_TARGETS+=("orb-node")
   elif [[ "$bin" == "orb-node-test" ]]; then
     ORB_NODE_TARGETS+=("orb-node-test")
-  elif [[ "$bin" == "orb-core" || "$bin" == "orb-core-test" || "$bin" == "orb-spec-runner" ]]; then
+  elif [[ "$bin" == "orb-core" || "$bin" == "orb-core-test" || "$bin" == "orb-spec-runner" || "$bin" == "orb-airvpn-sidecar-test" ]]; then
     ORB_CORE_TARGETS+=("$bin")
   elif [[ "$bin" == "orb-locald" || "$bin" == "orb-locald-test" ]]; then
     ORB_LOCALD_TARGETS+=("$bin")
@@ -326,7 +326,7 @@ run_lean_pkg_build() {
 if [[ "$WITH_TESTS" == "1" ]]; then
   ORB_BIN_TARGETS+=("orb-bin-test")
   ORB_NODE_TARGETS+=("orb-node-test")
-  ORB_CORE_TARGETS+=("orb-core-test" "orb-spec-runner")
+  ORB_CORE_TARGETS+=("orb-core-test" "orb-spec-runner" "orb-airvpn-sidecar-test")
   ORB_LOCALD_TARGETS+=("orb-locald-test")
 fi
 
@@ -377,7 +377,7 @@ for out_dir in "${OUT_DIRS[@]}"; do
   for bin in "${BINS_TO_STAGE[@]}"; do
     if [[ "$bin" == "sandboxed-node" || "$bin" == "orb-node-test" ]]; then
       src="$LAKE_NODE_BIN_DIR/$bin"
-    elif [[ "$bin" == "orb-core" || "$bin" == "orb-core-test" || "$bin" == "orb-spec-runner" ]]; then
+    elif [[ "$bin" == "orb-core" || "$bin" == "orb-core-test" || "$bin" == "orb-spec-runner" || "$bin" == "orb-airvpn-sidecar-test" ]]; then
       src="$LAKE_CORE_BIN_DIR/$bin"
     elif [[ "$bin" == "orb-locald" || "$bin" == "orb-locald-test" ]]; then
       src="$LAKE_LOCALD_BIN_DIR/$bin"
