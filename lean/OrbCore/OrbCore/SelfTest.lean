@@ -5016,7 +5016,7 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let (shCreateSt, shCreateBody, _) ← sendReq "POST" s!"/api/control/missions/{alMisId}/shares" aliceTok "{\"username\":\"bob\"}"
   let (bobGetSt, bobGetBody, _) ← sendReq "GET" s!"/api/control/missions/{alMisId}" bobTok ""
   let (bobMsgSt, _, _) ← sendReq "POST" "/api/control/message" bobTok
-    s!"\{\"mission_id\":{jsonEscape alMisId},\"content\":\"Hi Alice from Bob\"}"
+    s!"\{\"mission_id\":{jsonEscape alMisId},\"spawn_harness\":false,\"content\":\"Hi Alice from Bob\"}"
   let (_, alEvsBody, _) ← sendReq "GET" s!"/api/control/missions/{alMisId}/events" aliceTok ""
   let (bobCancelSt, _, _) ← sendReq "POST" s!"/api/control/missions/{alMisId}/cancel" bobTok "{}"
   -- Mission budget & reset cadence (`#1565`): owner `PUT` sets daily budget + `inference_usd_per_hour`, shared `participant` can `GET` (`200`) and is denied `PUT` (`403`)
@@ -5601,11 +5601,11 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
     "{\"events\":[{\"schema\":\"orb.page.v1\",\"event_id\":\"evt-al-1\",\"client\":\"desktop\",\"screen\":\"mission\",\"surface\":\"screen\",\"dwell_ms\":1200,\"username\":\"admin\",\"user_id\":\"spoof-admin\",\"secret\":\"drop-me\"}]}"
   let (admEvPostSt, _, _) ← sendReq "POST" "/api/usage-telemetry/events" adminTok
     "{\"events\":[{\"schema\":\"orb.action.v1\",\"event_id\":\"evt-adm-1\",\"client\":\"ios\",\"action\":\"fork\",\"count\":1}]}"
-  let _ ← sendReq "POST" "/api/control/message" aliceTok
-    s!"\{\"mission_id\":{jsonEscape alMisId},\"content\":\"Alice private prompt sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv\"}"
-  let _ ← sendReq "POST" "/api/control/message" adminTok
-    "{\"mission_id\":\"m-legacy-boot\",\"content\":\"Admin prompt with token tl_live_9999888877776666\"}"
-  if alEvPostSt != 202 || admEvPostSt != 202 || (alEvPostBody.splitOn "\"accepted\":1").length < 2 then
+  let (alicePromptSt, _, _) ← sendReq "POST" "/api/control/message" aliceTok
+    s!"\{\"mission_id\":{jsonEscape alMisId},\"spawn_harness\":false,\"content\":\"Alice private prompt sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv\"}"
+  let (adminPromptSt, _, _) ← sendReq "POST" "/api/control/message" adminTok
+    "{\"mission_id\":\"m-legacy-boot\",\"spawn_harness\":false,\"content\":\"Admin prompt with token tl_live_9999888877776666\"}"
+  if alicePromptSt != 200 || adminPromptSt != 200 || alEvPostSt != 202 || admEvPostSt != 202 || (alEvPostBody.splitOn "\"accepted\":1").length < 2 then
     discard <| closeFd mockHubFd
     return (← fail s!"POST /api/usage-telemetry/events failed: al={alEvPostSt}:{alEvPostBody} adm={admEvPostSt}")
 
@@ -5658,7 +5658,7 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   } none none nowSec
   -- Resend the exact same prompt on `m-legacy-boot` and finish with `interrupted=true`
   let _ ← sendReq "POST" "/api/control/message" adminTok
-    "{\"mission_id\":\"m-legacy-boot\",\"content\":\"Admin prompt with token tl_live_9999888877776666\"}"
+    "{\"mission_id\":\"m-legacy-boot\",\"spawn_harness\":false,\"content\":\"Admin prompt with token tl_live_9999888877776666\"}"
   observeControlTurnFinished telSink "m-legacy-boot" {
     harness := "claudecode"
     model? := some "claude-opus-5-5"
