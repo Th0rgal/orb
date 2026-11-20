@@ -1712,8 +1712,13 @@ def run : IO Unit := do
         let (memberCode, _) ← putJson app memberJwt path "{}" now
         if anonymous != 401 || memberCode != 403 then
           failures := failures.push s!"VPN settings authority {path}: anonymous={anonymous}, member={memberCode}"
-      let ownerRow : AIProviderRecord := { id := "vpn-owner-fixture", name := "Owner fixture",
-        providerType := "openai", apiKey := "fixture-only", createdByUserId := member.id }
+      let ownerRow : AIProviderRecord := {
+        id := "vpn-owner-fixture"
+        name := "Owner fixture"
+        providerType := "openai"
+        apiKey := "fixture-only"
+        createdByUserId := member.id
+      }
       IO.ofExcept (← upsertAIProvider store ownerRow)
       let ownerRoute := s!"/api/ai/providers/{ownerRow.id}/vpn"
       let ownRoute ← getJson app memberJwt ownerRoute now
