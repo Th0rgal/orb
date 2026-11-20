@@ -35,7 +35,7 @@ it("ignores an unreadable stored pick", async () => {
   expect(pick.effectivePick()).toEqual({ backend: "claudecode", model: "fable" });
 });
 
-it("migrates retired claude-fable-5-1 stored picks to the harness default while keeping explicit Fable 5.2 / Mythos 5.2 picks", async () => {
+it("migrates retired claude-fable-5-1 stored picks to the available Fable successor while keeping explicit Fable 5.2 / Mythos 5.2 picks", async () => {
   const apiMod = await import("../src/api");
   vi.mocked(apiMod.listHarnessChoices).mockResolvedValueOnce([
     {
@@ -50,7 +50,7 @@ it("migrates retired claude-fable-5-1 stored picks to the harness default while 
   localStorage.setItem("orb.harnessPick", JSON.stringify({ backend: "claudecode", model: "claude-fable-5-1", effort: "xhigh" }));
   const pick = await import("../src/harnessPick");
   await pick.refreshHarnessChoices();
-  expect(pick.effectivePick()).toEqual({ backend: "claudecode", model: "claude-opus-5-5", effort: "xhigh" });
+  expect(pick.effectivePick()).toEqual({ backend: "claudecode", model: "claude-fable-5-2", effort: "xhigh" });
 
   pick.setHarnessPick({ backend: "claudecode", model: "claude-fable-5-2", effort: "max" });
   expect(pick.effectivePick()).toEqual({ backend: "claudecode", model: "claude-fable-5-2", effort: "max" });
@@ -129,4 +129,21 @@ it("maps Core-scoped OpenCode model picks (e.g. builtin/fast) to local provider 
   expect(pick.effectivePick("core")).toEqual({ backend: "opencode", model: "builtin/smart", effort: undefined });
   expect(pick.effectivePick("ashur")).toEqual({ backend: "opencode", model: "builtin/smart", effort: undefined });
   delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+});
+
+it("hides replaced models and upgrades new picks only on destinations offering the successor", async () => {
+  const { modelPickerItems } = await import("../src/api");
+  const pick = await import("../src/harnessPick");
+  const models = ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6.2-sol"].map(value => ({ value, label: value }));
+  const backend = { id: "codex", name: "Codex" };
+  pick.setHarnessPick({ backend: "codex", model: models[0].value, effort: "high" });
+  pick.setRemoteHarnessChoices([{ backend, models }]);
+  expect(modelPickerItems(models, "codex").map(m => m.id)).toEqual(["gpt-6.1-terra", "gpt-6.2-sol"]);
+  expect(pick.effectivePick()).toMatchObject({ model: "gpt-6.2-sol", effort: "high" });
+  pick.setRemoteHarnessChoices([{ backend, models: models.slice(0, 2) }]);
+  expect(pick.effectivePick()?.model).toBe("gpt-6.1-sol");
+  const qualified = ["anthropic/claude-opus-5", "custom/claude-opus-5-5", "builtin/fast"];
+  const items = (ids: string[]) => modelPickerItems(ids.map(value => ({ value, label: value })), "opencode").map(m => m.id);
+  expect(items(qualified)).toEqual(qualified);
+  expect(items([...qualified, "anthropic/claude-opus-5-5"])).toEqual([...qualified.slice(1), "anthropic/claude-opus-5-5"]);
 });

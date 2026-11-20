@@ -946,7 +946,7 @@ export function Composer(p: {
                   const c = harnessChoices(p.uploadTarget).find(c => c.backend.id === id);
                   if (c && id !== pick()?.backend) {
                     const effort = normalizeEffort(pick()?.effort, id);
-                    setHarnessPick({backend:id,model:c.models[0].value,...(effort ? {effort} : {})});
+                    setHarnessPick({backend:id,model:modelPickerItems(c.models, id)[0].id,...(effort ? {effort} : {})});
                   }
                   setWhich(null);
                 }}/>
@@ -964,7 +964,7 @@ export function Composer(p: {
             </button>
             <Show when={which() === "model"}>
               <Picker label="Models" searchLabel="Search models" selected={pick()?.model}
-                items={modelPickerItems(choice()?.models ?? [])}
+                items={modelPickerItems(choice()?.models ?? [], choice()?.backend.id ?? "")}
                 onClose={() => setWhich(null)} onSelect={value => {
                   const backend = choice()!.backend.id;
                   const effort = normalizeEffort(pick()?.effort, backend);

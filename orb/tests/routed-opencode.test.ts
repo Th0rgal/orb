@@ -22,7 +22,7 @@ it('combines routing chains first with direct configured OpenCode models, dedupl
  const choices = await listHarnessChoices();
  expect(choices.map(c=>c.backend.id)).toEqual(['codex','opencode']);
  expect(choices[1].models.map(m=>m.value)).toEqual([...chains.map(c=>c.id),'openrouter/google/gemini','xai/grok-4.6']);
- expect(modelPickerItems(choices[1].models)).toEqual([
+ expect(modelPickerItems(choices[1].models, choices[1].backend.id)).toEqual([
   {id:'builtin/smart',label:'Smart',group:'Routing'},
   {id:'reviewer',label:'Reviewer',group:'Routing'},
   {id:'team/custom',label:'Custom',group:'Routing'},
@@ -30,7 +30,7 @@ it('combines routing chains first with direct configured OpenCode models, dedupl
   {id:'xai/grok-4.6',label:'Grok 4.6',group:'xAI'},
  ]);
  expect(choices[0].models).toEqual([{value:'gpt',label:'GPT'}]);
- expect(modelPickerItems(choices[0].models)).toEqual([{id:'gpt',label:'GPT'}]);
+ expect(modelPickerItems(choices[0].models, choices[0].backend.id)).toEqual([{id:'gpt',label:'GPT'}]);
 });
 it('restores routed choices from the same connection cache when offline', async () => {
  server(); const choices = await listHarnessChoices();
