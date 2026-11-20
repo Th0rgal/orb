@@ -921,6 +921,7 @@ structure WarmClaudeEntry where
 structure WarmHarnessManager where
   mu           : Std.Mutex Unit
   registration : Std.Mutex Unit
+  stopEpochs : IO.Ref (Std.HashMap String Nat)
   runsRef      : IO.Ref (Array (String × IO.Ref LocalRunState))
   warmProcsRef : IO.Ref (Array (String × WarmClaudeEntry))
   activePidsRef : IO.Ref (Array (String × Int64))
@@ -931,6 +932,7 @@ def newWarmHarnessManager : IO WarmHarnessManager := do
   return {
     mu := ← Std.Mutex.new ()
     registration := ← Std.Mutex.new ()
+    stopEpochs := ← IO.mkRef {}
     runsRef := ← IO.mkRef #[]
     warmProcsRef := ← IO.mkRef #[]
     activePidsRef := ← IO.mkRef #[]
@@ -1033,6 +1035,7 @@ def setSessionPermissionMode
 /-- Stop any active run or warm Claude process for `id`, signalling the entire process group (`SIGTERM` then `SIGKILL`). -/
 def stopHarnessRun (mgr : WarmHarnessManager) (id : String) : IO Unit := do
   let (warm?, oneShotPid?, stateRef?) ← mgr.registration.atomically <| mgr.mu.atomically do
+    mgr.stopEpochs.modify fun epochs => epochs.insert id (epochs.getD id 0 + 1)
     let ws ← mgr.warmProcsRef.get
     let w? := (ws.find? (fun (k, _) => k == id)).map Prod.snd
     mgr.warmProcsRef.set (ws.filter (fun (k, _) => k != id))
@@ -1047,7 +1050,6 @@ def stopHarnessRun (mgr : WarmHarnessManager) (id : String) : IO Unit := do
       if s.done then s else { s with stopping := true, done := true, exitCode? := some 143 }
   if let some entry := warm? then
     entry.aliveRef.set false
-    closeFdRaw entry.stdinFd
     let _ ← killSig (-entry.pid) 15
     IO.sleep 80
     let st ← waitpidWnohang entry.pid
@@ -1219,7 +1221,7 @@ private def launchOrReuseWarmClaude
     (permMode : ClaudePermissionMode)
     (imagePaths : Array String)
     (stRef : IO.Ref LocalRunState)
-    (extraEnv : Array (String × String) := #[]) : IO (Except String Unit) := do
+    (extraEnv : Array (String × String) := #[]) (launchAllowed : IO Bool := pure true) : IO (Except String Unit) := do
   -- Plan prefix (`/plan ...`) automatically activates Claude's `plan` permission mode
   let trimmed := prompt.trimAscii.toString
   let (effectiveMode, effectivePrompt) :=
@@ -1229,7 +1231,8 @@ private def launchOrReuseWarmClaude
   stRef.modify fun s => { s with permissionMode := effectiveMode }
 
   let imgBlocks ← loadClaudeImageBlocks imagePaths
-  let existingWarm? ← mgr.mu.atomically do
+  let existingWarm? ← mgr.registration.atomically do
+    if !(← launchAllowed) then return none
     let ws ← mgr.warmProcsRef.get
     pure ((ws.find? (fun (k, _) => k == missionId)).map Prod.snd)
 
@@ -1248,12 +1251,7 @@ private def launchOrReuseWarmClaude
       if ok then
         return .ok ()
       -- Warm pipe closed; clean up and respawn seamlessly with `--resume`
-      mgr.mu.atomically do
-        let ws ← mgr.warmProcsRef.get
-        mgr.warmProcsRef.set (ws.filter (fun (k, _) => k != missionId))
-      closeFdRaw entry.stdinFd
-      closeFdRaw entry.stdoutFd
-      let _ ← waitpidWnohang entry.pid
+      -- The reader owns both descriptors. Stop may already have removed this entry.
 
   -- Case 2: Spawn a fresh warm Claude process (`sh -c 'cd "$1" && exec "$2" ...'`)
   let (sid, isResume) ← match sessionId?.map (·.trimAscii.toString) |>.filter (!·.isEmpty) with
@@ -1275,17 +1273,13 @@ private def launchOrReuseWarmClaude
   -- Keep Claude's stderr (otherwise discarded) so a startup failure has a visible reason.
   let stderrPath := s!"/tmp/orb-claude-{missionId}.stderr"
   let shArgs := #["-c", "umask 077; f=\"$1\"; shift; cd \"$1\" && shift && exec \"$@\" 2>\"$f\"", "sh", stderrPath, cwd, binPath] ++ claudeArgs
-  let spawned ← match ← (spawnPgrp "/bin/sh" shArgs envStrs (pipeStdin := true) (nullStdio := true) (pipeStdout := true)).toBaseIO with
-    | .error e => return .error s!"Failed to start Claude Code: {e}"
-    | .ok sp => pure sp
-
   let writeMu ← Std.Mutex.new ()
   let readerExitedRef ← IO.mkRef false
   let aliveRef ← IO.mkRef true
   let pendingReqsRef ← IO.mkRef (#[] : Array PendingControlRequest)
   let implementPlanRef ← IO.mkRef false
   let permModeRef ← IO.mkRef effectiveMode
-  let entry : WarmClaudeEntry := {
+  let makeEntry := fun (spawned : SpawnedPgrp) => ({
     missionId := missionId
     binPath := binPath
     cwd := cwd
@@ -1298,17 +1292,18 @@ private def launchOrReuseWarmClaude
     implementPlanRef := implementPlanRef
     permissionModeRef := permModeRef
     readerExitedRef := readerExitedRef
-  }
-  mgr.mu.atomically do
-    let ws ← mgr.warmProcsRef.get
-    let filtered := ws.filter (fun (k, _) => k != missionId)
-    mgr.warmProcsRef.set (filtered.push (missionId, entry))
-
-  -- Send initial `initialize` + first user turn over warm stdin
-  let _ ← writeWarmStdinLine entry (encodeInitializeRequest "orb-init")
-  let sentOk ← writeWarmStdinLine entry (encodeClaudeUserTurn effectivePrompt imgBlocks)
-  if !sentOk then
-    return .error "Claude Code closed stdin before receiving prompt"
+  } : WarmClaudeEntry)
+  let registered : Except String WarmClaudeEntry ← mgr.registration.atomically do
+    if !(← launchAllowed) then return .error "launch_fenced"
+    match ← (spawnPgrp "/bin/sh" shArgs envStrs (pipeStdin := true) (nullStdio := true) (pipeStdout := true)).toBaseIO with
+    | .error e => return .error s!"Failed to start Claude Code: {e}"
+    | .ok sp =>
+      let entry := makeEntry sp
+      mgr.mu.atomically do
+        let ws ← mgr.warmProcsRef.get
+        mgr.warmProcsRef.set ((ws.filter (fun (k, _) => k != missionId)).push (missionId, entry))
+      return .ok entry
+  let .ok entry := registered | return registered.map fun _ => ()
 
   -- Background stdout NDJSON stream reader for the lifetime of this warm process
   discard <| IO.asTask (prio := .dedicated) do
@@ -1384,12 +1379,14 @@ private def launchOrReuseWarmClaude
                       cb.onTurnFinished doneSnap
     -- EOF on stdout: reap child process and mark current turn done if still active
     entry.aliveRef.set false
+    closeFdRaw entry.stdoutFd
+    -- Keep the PID visible to Stop until exit: closing stdout doesn't imply
+    -- the child exited or that a writer blocked on its stdin can finish.
+    let rawExit ← waitpidBlock entry.pid
+    entry.writeMu.atomically do closeFdRaw entry.stdinFd
     mgr.mu.atomically do
       let ws ← mgr.warmProcsRef.get
-      mgr.warmProcsRef.set (ws.filter (fun (k, _) => k != missionId))
-    closeFdRaw entry.stdinFd
-    closeFdRaw entry.stdoutFd
-    let rawExit ← waitpidBlock entry.pid
+      mgr.warmProcsRef.set (ws.filter (fun (k, e) => k != missionId || e.pid != entry.pid))
     let curSnap ← stRef.get
     if !curSnap.done then
       let exitInt : Int := Int.ofNat rawExit.toNat
@@ -1413,6 +1410,10 @@ private def launchOrReuseWarmClaude
       ])
       cb.onTurnFinished finalSnap
     entry.readerExitedRef.set true
+  -- Stop can now see and kill the child even if the peer never drains stdin.
+  let _ ← writeWarmStdinLine entry (encodeInitializeRequest "orb-init")
+  if !(← writeWarmStdinLine entry (encodeClaudeUserTurn effectivePrompt imgBlocks)) then
+    return .error "Claude Code closed stdin before receiving prompt"
   return .ok ()
 
 /-- Normalize an Antigravity model + optional effort for `agy` CLI 1.5+ (where Carbon and Argon
@@ -2008,9 +2009,7 @@ def startHarnessTurn
   callbacks.onOutputEvent (.obj #[("text", .str ""), ("reset", .bool true), ("activities", .arr #[])])
 
   if harness == "claudecode" then
-    let result ← mgr.registration.atomically do
-      if !(← launchAllowed) then return .error "launch_fenced"
-      launchOrReuseWarmClaude mgr id actualBin effectiveCwd prompt model? effort? effSid? permissionMode imagePaths stRef extraEnv
+    let result ← launchOrReuseWarmClaude mgr id actualBin effectiveCwd prompt model? effort? effSid? permissionMode imagePaths stRef extraEnv launchAllowed
     match result with
     | .error e =>
       stRef.modify fun s => { s with done := true, exitCode? := some 1, error? := some e }

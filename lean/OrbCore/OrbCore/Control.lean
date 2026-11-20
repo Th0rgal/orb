@@ -2111,7 +2111,7 @@ private def launchLocalCoreMissionTurn
     (sessionId? : Option String := none)
     (worktreeMode : String := "")
     (appendUserEvent : Bool := false)
-    (wakeup? : Option WakeupClaim := none) : IO (Except String String) := do
+    (wakeup? : Option WakeupClaim := none) (admittedGeneration? : Option UInt64 := none) : IO (Except String String) := do
   let some mgr := st.warmMgr? | return .error "warm_harness_manager_unavailable"
   let effRawCwd := if cwd.trimAscii.toString.isEmpty then st.cfg.workingDir else cwd
   let safeCwd ← match ← confineWorkingDirectory st.cfg.workingDir effRawCwd with
@@ -2138,10 +2138,10 @@ private def launchLocalCoreMissionTurn
     let userPl := renderCompact (.obj #[("content", .str prompt)])
     discard <| appendMissionEvent st.store missionId "user_message" userPl ts
   let prevSt? ← OrbBin.ClaudeControl.getRunState? mgr missionId
-  let mut dbGen : UInt64 := 1
-  if let .ok gRows ← execParamQuery st.store.missionsDb
-      "SELECT COALESCE(run_generation,1) FROM missions WHERE id=?1;" #[missionId] then
-    if gRows.size > 1 then dbGen := (Nat.max 1 (((gRows[1]?.bind (·[0]?)).bind String.toNat?).getD 1)).toUInt64
+  -- Capture before activation CAS. A Stop after CAS invalidates this cheap
+  -- in-memory check under the registration lock, with no SQLite I/O there.
+  let launchEpoch := (← mgr.stopEpochs.get).getD missionId 0
+  let dbGen := admittedGeneration?.getD mission.runGeneration
   let nextGen :=
     match prevSt? with
     | some s => max (dbGen + 1) (s.generation + 1)
@@ -2158,8 +2158,11 @@ private def launchLocalCoreMissionTurn
         | return .error "wakeup_claim_write_failed"
       if rows.size ≤ 1 then return .error "wakeup_claim_fenced"
     carryArmedWakeupsForward query missionId nextGen.toNat ts
-    query "UPDATE missions SET status='active', run_generation=CAST(?2 AS INTEGER), state_revision=state_revision+1, updated_at=?3 WHERE id=?1;"
-      #[missionId, s!"{nextGen}", ts]
+    let changed ← query ("UPDATE missions SET status='active', run_generation=CAST(?2 AS INTEGER), state_revision=state_revision+1, updated_at=?3 " ++
+      "WHERE id=?1 AND run_generation=CAST(?4 AS INTEGER) RETURNING id;") #[missionId, s!"{nextGen}", ts, s!"{dbGen}"]
+    if let .ok rows := changed then
+      if rows.size ≤ 1 then return .error "launch_generation_fenced"
+    return changed
   if let .error e := started then return .error e
   let model? := if model.trimAscii.toString.isEmpty then none else some model.trimAscii.toString
   let effort? := if effort.trimAscii.toString.isEmpty then none else some effort.trimAscii.toString
@@ -2216,11 +2219,7 @@ private def launchLocalCoreMissionTurn
       pure ({ model := model? } : OrbCore.RemoteDispatch.HarnessProxySetup)
   match ← OrbBin.ClaudeControl.startHarnessTurn
       mgr missionId normHarness binOverride safeCwd prompt nextGen setup.model effort? sessionId? parsedPerm wtArg #[] cbs (some safeRoot)
-      setup.env setup.args (do
-        let .ok rows ← execParamQuery st.store.missionsDb
-          "SELECT id FROM missions WHERE id=?1 AND status='active' AND run_generation=CAST(?2 AS INTEGER);" #[missionId, s!"{nextGen}"]
-          | return false
-        return rows.size > 1) with
+      setup.env setup.args (do return (← mgr.stopEpochs.get).getD missionId 0 == launchEpoch) with
   | .ok runSt =>
     if runSt.cwd != safeCwd && !runSt.cwd.isEmpty then
       if let .ok safeWt ← confineWorkingDirectory st.cfg.workingDir runSt.cwd then
@@ -2530,7 +2529,7 @@ private def maybeSpawnWarmHarnessTurn
     (placementKind : String)
     (missionId harness cwd prompt model effort permMode : String)
     (worktreeMode : String := "")
-    (appendUserEvent : Bool := true) : IO (Option String) := do
+    (appendUserEvent : Bool := true) (admittedGeneration? : Option UInt64 := none) : IO (Option String) := do
   if !(caller.isLegacyUnscoped || caller.role == "admin") then return none
   if placementKind != "managed" && placementKind != "local" then return none
   let mut sid? : Option String := none
@@ -2538,7 +2537,7 @@ private def maybeSpawnWarmHarnessTurn
     if sRows.size > 1 then
       let s := (cell sRows[1]! 0).trimAscii.toString
       if !s.isEmpty then sid? := some s
-  match ← launchLocalCoreMissionTurn st missionId harness cwd prompt model effort permMode sid? worktreeMode appendUserEvent with
+  match ← launchLocalCoreMissionTurn st missionId harness cwd prompt model effort permMode sid? worktreeMode appendUserEvent (admittedGeneration? := admittedGeneration?) with
   | .ok dir => return some dir
   | .error err =>
     if st.warmMgr?.isSome then
@@ -6548,9 +6547,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               if sRows.size > 1 then
                 let s := (cell sRows[1]! 0).trimAscii.toString
                 if !s.isEmpty then sid? := some s
-            discard <| launchLocalCoreMissionTurn st mid m.backend m.workingDirectory delivContent m.modelOverride m.modelEffort permMode sid? "local" false
+            discard <| launchLocalCoreMissionTurn st mid m.backend m.workingDirectory delivContent m.modelOverride m.modelEffort permMode sid? "local" false (admittedGeneration? := some m.runGeneration)
           else
-            discard <| maybeSpawnWarmHarnessTurn st caller m.placementKind mid m.backend m.workingDirectory delivContent m.modelOverride m.modelEffort permMode "" false
+            discard <| maybeSpawnWarmHarnessTurn st caller m.placementKind mid m.backend m.workingDirectory delivContent m.modelOverride m.modelEffort permMode "" false (some m.runGeneration)
     let receipt :=
       s!"\{\"id\":{jsonEscape msgId},\"queued\":{if queued then "true" else "false"},\"message_accepted\":true," ++
       s!"\"sender_user_id\":{jsonEscape caller.userId},\"sender_username\":{jsonEscape caller.username}{deliveredField}}"
