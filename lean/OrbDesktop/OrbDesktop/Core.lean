@@ -38,7 +38,7 @@ private def machineCard (idx : Nat) (xs : List String) : FleetMachineCard :=
     state := if (col xs 7).isEmpty then col xs 8 else col xs 7
     ttlLabel := col xs 9, costLabel := col xs 10, activeMissions := (col xs 11).toNat?.getD 0 }
 
-def loadLiveState : IO (Option DesktopState) := do
+def loadLiveState (isDark := true) (scale120 := 120) : IO (Option DesktopState) := do
   let some (header :: lines) ← (try runProjection catch _ => pure none) | return none
   let ["C", binding] := splitTab header | return none
   let ps := lines.filterMap (fun line => let xs := splitTab line; if col xs 0 == "P" then some xs else none)
@@ -56,7 +56,7 @@ def loadLiveState : IO (Option DesktopState) := do
   let sidebar := [{ widgetId := 101, rowId := "nav:control", kind := "nav", title := "Control Center", selected := true },
     { widgetId := 109, rowId := "section:missions", kind := "section", title := "Missions" }] ++ missionRows ++
     [{ widgetId := 108, rowId := "section:projects", kind := "section", title := "Projects" }] ++ projects
-  return some { DesktopState.liveUnavailable with
+  return some { DesktopState.liveUnavailable isDark scale120 with
     screen := if missions.isEmpty then .controlEmpty else .controlPopulated
     syncCursor := { epoch := 0, seq := 0 }
     connectionBinding := binding
