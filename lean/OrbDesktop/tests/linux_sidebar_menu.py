@@ -49,7 +49,12 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
     header = '220,0 630x43'
     def words(geometry):
         image = subprocess.check_output(['grim', '-t', 'ppm', '-g', geometry, '-'], env=graphical)
-        png = subprocess.check_output(['magick', 'ppm:-', '-colorspace', 'gray', '-auto-level',
+        return read_words(image, geometry)
+
+    def read_words(image, geometry, full_frame=False):
+        origin, size = geometry.split()
+        crop = ['-crop', size + '+' + origin.replace(',', '+'), '+repage'] if full_frame else []
+        png = subprocess.check_output(['magick', '-', *crop, '-colorspace', 'gray', '-auto-level',
                                        '-resize', '300%', 'png:-'], input=image)
         result = subprocess.check_output(['tesseract', 'stdin', 'stdout', '--psm', '11', 'tsv'],
                                          input=png, stderr=subprocess.DEVNULL, text=False)
@@ -133,24 +138,32 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
     # above the 104px composer. Isolate it from the streaming transcript.
     refusal_region = '552,548 440x40' if client_kind == 'leanui' else '0,0 1000x700'
     # WebKit renders the Core conflict detail, LeanUI its native refusal.
-    expected = 'before archiving' if client_kind == 'leanui' else 'before changing'
-    def refusal_visible():
-        line = ' '.join(word for word, _, _ in words(refusal_region))
-        return expected if expected in line else None
-    try:
-        rendered = wait('visible refusal: ' + expected, refusal_visible)
-    except TimeoutError as error:
-        # Keep the disposable compositor's pixels after the fixture cleans up.
-        with tempfile.NamedTemporaryFile(prefix=f'orb-{client_kind}-refusal-', suffix='.png',
-                                         delete=False) as frame:
-            subprocess.run(['grim', '-t', 'png', '-'], env=graphical, stdout=frame, check=True)
-        observed = [word for word, _, _ in words(refusal_region)]
-        raise AssertionError(f'Refusal OCR in {refusal_region}: {observed!r}; frame {frame.name}') from error
+    expected = 'stop or finish this agent before archiving it' if client_kind == 'leanui' else 'before changing'
+    observed = {}
+    with tempfile.NamedTemporaryFile(prefix=f'orb-{client_kind}-refusal-', suffix='.png',
+                                     delete=False) as frame:
+        def refusal_visible():
+            pixels = subprocess.check_output(['grim', '-s', '1', '-t', 'png', '-'], env=graphical)
+            frame.seek(0)
+            frame.write(pixels)
+            frame.truncate()
+            frame.flush()
+            observed.clear()
+            for region, phrase in [(refusal_region, expected), (header, fixture['openMission'].lower()),
+                                   (sidebar, fixture['contextMission'].lower())]:
+                observed[region] = ' '.join(word for word, _, _ in read_words(pixels, region, full_frame=True))
+                if phrase not in observed[region]:
+                    return False
+            return True
+        try:
+            wait('visible refusal: ' + expected, refusal_visible)
+        except TimeoutError as error:
+            raise AssertionError(f'Refusal OCR in {refusal_region}: {observed!r}; frame {frame.name}') from error
     see(fixture['openMission'], header)
     see(fixture['contextMission'])
     assert status(b) == 'active' and status(a) == 'awaiting_user'
     print(json.dumps({'client': client_kind, 'viewed': a, 'target': b,
-                      'visible_refusal': rendered, 'target_status': 'active'}), flush=True)
+                      'visible_refusal': expected, 'frame': frame.name, 'target_status': 'active'}), flush=True)
     api('/api/control/missions/' + b + '/cancel', {})
     wait('context mission stopped', lambda: status(b) == 'interrupted')
     gate.armed.clear()
