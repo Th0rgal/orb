@@ -8153,8 +8153,8 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
         closeCoreStore store
         IO.eprintln s!"[sandboxed-sh] Failed to initialize the AirVPN account relay: {e}"
         return 1
-    let providerHub := { providerHub with accountRelayUrl? := vpnRelay?.map
-      (fun listener => AccountVpnRelay.proxyUrl (effectiveJwtSecret cfg) listener.port) }
+    let relayUrl? := vpnRelay?.map fun listener => AccountVpnRelay.proxyUrl (effectiveJwtSecret cfg) listener.port
+    let providerHub := { providerHub with accountRelayUrl? := relayUrl? }
     let appState := { appState with vpnRelayPort? := vpnRelay?.map (·.port), providerHub? := some providerHub }
     let lostTurns ← interruptTurnsLostToRestart store.missionsDb
     if lostTurns > 0 then
