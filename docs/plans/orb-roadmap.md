@@ -234,6 +234,31 @@ same node (then split or restate the node).
 
 Not on this roadmap: a macOS backend for LeanUI.
 
+#### U4 Linux trial: owners and acceptance
+
+Controller `f5e86c78-23ef-4745-9ea2-82e6a02e3188` owns the rollout and records the decision. Codex Astra (`97a2007b-929f-4318-a188-1515d0596e0e`, ashur) is the sole trial source integrator on [#1977](https://github.com/Th0rgal/orb/pull/1977) (`codex/leanui-desktop-trial`, handoff `8d4af0c42409682c993de5079de1254eedc9730d`). [#1971](https://github.com/Th0rgal/orb/pull/1971) stays with `9d411a91` and needs separate authorized approval of its exact head. Whichever lands second, both owners replay the standard and busy Sway cases plus menu/pointer checks on the combined merged SHA. A green predecessor is not that receipt.
+
+| Lane | Owner | Start condition and required receipt |
+| --- | --- | --- |
+| Cloud: isolated Core and compositor | Codex Astra (`ea82693d-c8da-4915-b10f-c70a677ce70b`, reused Boat xlarge) | Ready on the candidate, in parallel with renderer CI. Use a disposable Core and real client requests: keep mission A open, target B from a stale idle read, start B but delay its run record, then Archive B. Require an actual HTTP 409, visible error, B's row retained and A still open. Replay successful archive/restore/restart on the same A/B pair in both clients. |
+| Cloud: renderer and CI | Codex Astra (`e870b9fe-628a-4dfa-938c-37a6068169d5`, reused Boat large) | Ready on the same candidate. Compare controlled stripes behind glass/blur in dark and light; capture a sequence for an active badge versus paused and unselected missions. Run renderer and packaged-client regressions. Cloud receipts complement physical display checks; they cannot establish displayed frames or compositor blur on m2air. |
+| Physical build and install | #1977 supplies the source; Thomas owns install and receipts on the existing m2air runner | Reuse the existing Spark build and m2air jobs; do not start copies. On verified install, read the **full SHA** in About, match it to the built candidate and notify Thomas with that SHA. Keep WebKit installed and Alt+O pointing to it. |
+| Physical acceptance | Thomas/device owner | On that install replay the same A/B stale rejection and archive/restore/restart in **both installed clients**. Exercise every menu, multiselect, focus/keyboard navigation and live composer settings. With the mouse select project, machine and harness; create, type and send exact IME text, scroll while streaming, stop, rename, move, archive, restore and reopen. From a separate Core client verify settings, exact text, target IDs/destination and final state. |
+| Physical visuals and timing | Thomas/device owner | On DP-1 at 1× dark and eDP-1 at 1.6× light, repeat the controlled-stripe glass/blur and active versus paused/unselected badge sequence. Record actual visible 60 fps on both displays and final startup/transcript-open medians against WebKit on the same m2air. Headless goldens, source alpha checks and submitted frame counts are not display evidence. |
+| Trial and decision | Thomas decides; `f5e86c78` records | After device gates pass, Thomas explicitly confirms a working day without fallback. Record the installed SHA, receipts and go/no-go before changing Alt+O or the default. Retain the WebKit rollback. No production Core deployment is part of this rollout. |
+
+The prior Antigravity workers, Carbon (`66afbdca-c610-4e6c-ad59-4eba0402d288`, Archive) and Neon (`542482e4-fa72-4844-a3ee-8f764a722256`, renderer), both exited with code 2 without producing verification evidence. Their successors use the same VMs; the Archive lane's earlier lean.ci bootstrap was rejected.
+
+**Packaged device evidence:** Spark built `f7bec9812` and `8d4af0c42409682c993de5079de1254eedc9730d`. The latter was hash-verified and staged; the installed LeanUI launcher remains `c59a2d52a` and Alt+O still launches WebKit. Packaged `f7bec9812` passed mouse, keyboard and IME checks. On staged `8d4af0c42`, live mouse and IME passed in both themes; keyboard and repaint checks also passed. On DP-1 at 1×, the controlled-stripe check passed in both themes: dark 21.5% transmission / 0.020 relative contrast; light 27.3% / 0.015. Each theme yielded 12 distinct blue active-badge captures and one stationary paused frame. These captures do not establish the eDP-1 1.6× result, visible 60 fps or unselected-badge behavior; each needs its own receipt.
+
+**Staged `8d4af0c42` timing on m2air:** Across three launches per client, median visible startup / transcript-open was 134.8 / 116.7 ms for LeanUI versus 293.7 / 151.1 ms for WebKit. On DP-1 (59.973 Hz), capture covered all 240 refreshes in 4 s and found 235 distinct changes (58.75/s). On eDP-1 (60 Hz), capture acquired only 165 frames in 4 s, 156 distinct (39 changes/s observed). The incomplete laptop capture measures neither actual panel cadence nor renderer fps. Require a calibrated physical repeat before promotion; neither sample establishes visible 60 fps. Device receipts under `~/.local/state/orb-launchers/evidence/`: `8d4af0c42-comparison.jsonl`, `8d4af0c42-DP-1-fps.jsonl`, `8d4af0c42-eDP-1-fps.jsonl`.
+
+**Busy Archive: both client gates remain open.** The installed GTK/WebKit receipt covers the ordinary idle menu and a separate helper request that returned HTTP 409. It does not show a stale Archive initiated from the UI. On LeanUI `f7bec9812` and `8d4af0c42`, the separate HTTP 409 and the OCR timeout reading “archiving” likewise do not prove visible UI refusal.
+
+In #1977's [corrected shared fixture](https://github.com/Th0rgal/orb/commit/2e1ef91095e4328ae3d1169a0e8dc5179cd99568), the older Core `483fb351` negative control returned HTTP 200 and archived active B while B had zero run rows. The guarded result is pending. For each client, require the **UI's own** stale Archive request to return 409, a visible refusal, B retained and A still open. The #1977 integrator (`97a2007b`) owns diagnosis; the existing device lane owns the installed-client receipts.
+
+**Handoff evidence, not final acceptance:** `c59a2d52a` was installed; on a 220-line transcript its startup/open medians were 180.9/115.8 ms versus WebKit 247.9/133.0 ms. DP-1 1× dark and eDP-1 1.6× light clipboard/crop checks and the Move destination were verified; screenshot tooling: [nixos-config#38](https://github.com/Th0rgal/nixos-config/pull/38) (`0d6a415cb9`), [omarchnix#63](https://github.com/Th0rgal/omarchnix/pull/63). `f7bec9812` measured 58.2/58.0 visible fps, below 60 on both displays. The later source alpha sweep does not replace installed glass or badge evidence.
+
 ### M. Multi-user
 
 | Id | Node | Needs | State | Done when |
@@ -381,3 +406,5 @@ Rows the reconciler dispatches, in order. A row leaves the queue by PR when it
 is done or dropped.
 
 `U5`, `U8`, `U6`, `U6a`, `U7`, `U3`, `R30`, `M3`, `L5`, `R17`, `R18`, `R19`, `R21`, `O3`, `O4`, `R21a`, `R31`
+
+**Already-owned Linux trial lanes:** follow the [U4 lane table](#u4-linux-trial-owners-and-acceptance). The controller's two cloud verification lanes can proceed in parallel with the existing Spark/m2air work. Source changes stay with #1977 and the separate #1971 owner. These are assignments, not additional automatic starts. Device acceptance gates only the trial and default decision; unrelated queued work keeps its order and capacity.
