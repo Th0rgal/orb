@@ -97,7 +97,7 @@ jobs:
 
   test:
     name: Test
-    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && github.repository == 'Th0rgal/orb' && ((github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) && 'lean-4vcpu-ubuntu-2604' || 'ubuntu-latest' }}
+    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && github.repository == 'Th0rgal/orb' && ((github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) && 'lean-8vcpu-ubuntu-2604' || 'ubuntu-latest' }}
     # Skip CI on draft PRs unless explicitly requested
     needs: plan
     if: (needs.plan.outputs.run_test == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
