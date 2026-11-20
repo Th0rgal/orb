@@ -573,7 +573,7 @@ def main (args : List String) : IO UInt32 := do
               let some models ← takeCatalog | return (st, damage)
               if st.connectionBinding != initSt.connectionBinding then return (st, damage)
               return ({ st with catalog := models, catalogLoading := false }, some vp))
-            DesktopState.hasLiveConnection menuFocusChange (some wakeFd)
+            DesktopState.hasLiveConnection menuFocusChange (some wakeFd) (·.writeRequest.isSome)
         finally closeLiveSubscription slot
     Runtime.shutdownRuntime rt
     return 0

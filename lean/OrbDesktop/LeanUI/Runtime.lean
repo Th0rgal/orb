@@ -439,7 +439,7 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
     (pollFrame : RuntimeState σ → IO (σ × Damage) := fun rt => pure (rt.app, none))
     (hasProducer : σ → Bool := fun _ => false)
     (focusChange : σ → σ → Option Nat := fun _ _ => none)
-    (wakeFd : Option UInt32 := none) : IO (RuntimeState σ) := withWindowWait rt0 wakeFd fun timedWait => do
+    (wakeFd : Option UInt32 := none) (workPending : σ → Bool := fun _ => false) : IO (RuntimeState σ) := withWindowWait rt0 wakeFd fun timedWait => do
   let mut rt := rt0
   while rt.running do
     if !rt.wayland.configured then
@@ -459,7 +459,7 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
       if rt.framesRendered != rendered then
         let wl ← Wayland.present rt.wayland rt.vulkan.framebuffer
         rt := { rt with wayland := wl }
-      else if rt.running then
+      else if rt.running && !workPending rt.app then
         if hasProducer rt.app then timedWait else Wayland.waitEvents rt.wayland
   return rt
 

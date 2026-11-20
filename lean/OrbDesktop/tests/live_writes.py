@@ -115,15 +115,20 @@ for i in range(300):
         time.sleep(.5)
         def keys(*args):
             subprocess.run(['wtype', '-s', '200', *args], check=True, env=graphical)
+        def crop(geometry):
+            return subprocess.check_output(['grim', '-t', 'ppm', '-g', geometry, '-'], env=graphical)
+
         def composer_frame():
-            return subprocess.check_output(['grim', '-t', 'ppm', '-g', '700,615 24x24', '-'], env=graphical)
+            return crop('700,615 24x24')
 
         if mouse:
             empty_frame = composer_frame()
             click(74, 214)   # open Source project
             click(264, 53)   # choose the Core machine explicitly
             click(302, 114)
+            empty_choice_row = crop('366,106 56x16')
             click(348, 53)   # select Codex from the live catalog
+            wait('live harness choices', lambda: crop('366,106 56x16') != empty_choice_row)
             click(360, 114)
             click(80, 50)  # Create mission in the sidebar
         else:
@@ -187,16 +192,26 @@ for i in range(300):
         if mouse:
             # The newly created row precedes the original roster. The anchored
             # menu opens at the secondary click, independent of transcript focus.
-            click(75, 143, 'button3')
+            action_row = '89,152 72x23'
+            rendered = None
+
+            def open_actions():
+                nonlocal rendered
+                if rendered is not None:
+                    wait('previous menu dismissed', lambda: crop(action_row) != rendered)
+                before = crop(action_row)
+                click(75, 143, 'button3')
+                rendered = wait('visible mission actions', lambda: frame if (frame := crop(action_row)) != before else None)
+            open_actions()
             click(128, 164)
             keys('-k', 'End', ' renamed')
             click(128, 194)
             wait('renamed mission', lambda: api(path)['title'].endswith(' renamed'))
-            click(75, 143, 'button3')
+            open_actions()
             click(128, 194)
             click(128, 194)
             wait('moved mission', lambda: api(path).get('project') == 'menu-test')
-            click(75, 143, 'button3')
+            open_actions()
             click(128, 224)  # Archive follows Move to
         else:
             backend = stopped.get('backend')
