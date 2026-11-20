@@ -1347,6 +1347,7 @@ fun OrbProvidersSettingsPage(
                                                 .padding(top = 4.dp),
                                             verticalArrangement = Arrangement.spacedBy(10.dp)
                                         ) {
+                                            if (isAdmin) AccountVpnSettings(core, pid)
                                             usageLimitStatus(detail)?.let { limit ->
                                                 Text(
                                                     text = limit.label,
@@ -2204,5 +2205,67 @@ private fun OrbQuotaPoolRow(pool: String, windows: List<Pair<String, Double>>) {
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun AccountVpnSettings(core: OrbCore, account: String) {
+    val scope = rememberCoroutineScope()
+    var route by remember(core, account) { mutableStateOf<OrbDict?>(null) }
+    var busy by remember(core, account) { mutableStateOf(false) }
+    var error by remember(core, account) { mutableStateOf("") }
+    var menu by remember(core, account) { mutableStateOf(false) }
+    suspend fun update(country: String? = null) {
+        if (busy) return
+        busy = true
+        error = ""
+        val path = "/api/ai/providers/${core.encodeComponent(account)}/vpn"
+        try {
+            route = if (country == null) core.fetchDict(path) else {
+                val fields = if (country.isEmpty()) mapOf("mode" to "direct")
+                    else mapOf("mode" to "vpn", "country" to country)
+                OrbJSON.dict(core.request(path, method = "PUT", body = fields))
+            }
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            error = e.localizedMessage ?: "Connection settings unavailable."
+        } finally { busy = false }
+    }
+    LaunchedEffect(core, account) { update() }
+    route?.let { current ->
+        val selected = current["country"] as? String ?: ""
+        val editable = current["can_configure"] == true
+        val countries = (current["countries"] as? List<*>)?.filterIsInstance<String>().orEmpty()
+        Box {
+            TextButton(enabled = editable && !busy, onClick = { menu = true }) {
+                Text("Account connection · " + if (selected.isEmpty()) "Direct" else "AirVPN · $selected")
+            }
+            androidx.compose.material3.DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                (listOf("", selected) + countries).distinct().forEach { country ->
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text(if (country.isEmpty()) "Direct" else "AirVPN · $country") },
+                        onClick = { menu = false; scope.launch { update(country) } }
+                    )
+                }
+            }
+        }
+        if (!editable) Text("This credential’s connection is managed by the sidecar.")
+        else if (countries.isEmpty()) Text("Import a named server profile in AirVPN Settings to enable VPN routing.")
+        when (current["status"]) {
+            "verified" -> {
+                val exits = (current["exits"] as? List<*>)?.filterIsInstance<String>().orEmpty().joinToString(", ")
+                Text("Verified exit · ${current["server"]} · $exits")
+            }
+            "blocked" -> {
+                Text(current["message"] as? String ?: "The VPN route is unavailable.")
+                TextButton(enabled = editable && !busy, onClick = { scope.launch { update(selected) } }) {
+                    Text("Retry verification")
+                }
+            }
+        }
+    }
+    if (error.isNotEmpty()) {
+        Text(error)
+        TextButton(enabled = !busy, onClick = { scope.launch { update() } }) { Text("Retry connection settings") }
     }
 }

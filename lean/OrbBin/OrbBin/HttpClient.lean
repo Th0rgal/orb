@@ -102,18 +102,27 @@ def urlEncodeComponent (s : String) : String := Id.run do
       out := out.push (hex[b.toNat % 16]!)
   return String.ofList out.toList
 
+abbrev ResolveTransport := IO (Except String (Option UInt16))
+
 /-- Execute a single HTTP/1.1 or HTTPS request (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`). -/
 def sendRequest
     (method rawUrl : String)
     (headers : Array (String × String) := #[])
     (body : ByteArray := ByteArray.empty)
     (timeoutMs : UInt32 := 30000)
-    (maxRespBytes : Nat := 16777216) : IO (Except String HttpsResponse) := do
+    (maxRespBytes : Nat := 16777216) (resolveTransport? : Option ResolveTransport := none) : IO (Except String HttpsResponse) := do
   let parsed ← match parseUrl rawUrl with
     | .ok p => pure p
     | .error e => return .error e
+  let socksPort? ← match resolveTransport? with
+    | none => pure none
+    | some resolve =>
+      match ← resolve with
+      | .ok port => pure port
+      | .error e => return .error e
   if parsed.isHttps then
-    httpsRequest method parsed.host parsed.port parsed.pathQuery headers body maxRespBytes true timeoutMs
+    httpsRequest method parsed.host parsed.port parsed.pathQuery headers body maxRespBytes true timeoutMs socksPort?
+  else if socksPort?.isSome then return .error "vpn_requires_tls"
   else
     let reqWire ← match buildOutboundHttp11Request method parsed.hostHeader parsed.pathQuery headers body with
       | .ok w => pure w
@@ -284,7 +293,7 @@ def sendJsonRequest
     (jsonBody : Option JVal := none)
     (extraHeaders : Array (String × String) := #[])
     (timeoutMs : UInt32 := 30000)
-    (maxRespBytes : Nat := 16777216) : IO (Except String (Nat × String × Option JVal)) := do
+    (maxRespBytes : Nat := 16777216) (resolveTransport? : Option ResolveTransport := none) : IO (Except String (Nat × String × Option JVal)) := do
   let mut hdrs := extraHeaders
   if let some tok := bearerToken then
     if !tok.isEmpty then
@@ -294,7 +303,7 @@ def sendJsonRequest
       hdrs := hdrs.push ("Content-Type", "application/json")
       pure (renderCompact j).toUTF8
     | none => pure ByteArray.empty
-  match (← sendRequest method rawUrl hdrs bodyBytes timeoutMs maxRespBytes) with
+  match (← sendRequest method rawUrl hdrs bodyBytes timeoutMs maxRespBytes resolveTransport?) with
   | .error e => return .error e
   | .ok resp =>
     let text := (String.fromUTF8? resp.body).getD ""

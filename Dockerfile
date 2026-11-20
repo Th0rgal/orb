@@ -90,7 +90,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git curl jq sqlite3 libsqlite3-0 libssl3t64 zstd unzip openssh-client ca-certificates gnupg python3 python3-yaml caddy \
     # nspawn / container workspaces
-    systemd-container debootstrap \
+    systemd-container debootstrap util-linux \
     # Wayland app streaming and automation
     sway grim wtype wlrctl wf-recorder wayvnc cage imagemagick \
     tesseract-ocr at-spi2-core \
@@ -100,6 +100,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     # Add plucky (25.04) script for future Ubuntu releases
     && ln -sf gutsy /usr/share/debootstrap/scripts/plucky
+
+# Core starts a userspace WireGuard tunnel for each admitted AirVPN session.
+COPY scripts/install_wireproxy.sh /tmp/install_wireproxy.sh
+RUN /tmp/install_wireproxy.sh /usr/local/bin && rm /tmp/install_wireproxy.sh
 
 # -- Node.js 20 (for Claude Code CLI & MCP servers) ----------------------------
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \

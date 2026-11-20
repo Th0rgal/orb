@@ -263,6 +263,7 @@ allow = [
   "OrbNetLeaf.Pty=OrbNetLeaf.Pty.rawOpenPty=orb_net_leaf_openpty",
   "OrbNetLeaf.Pty=OrbNetLeaf.Pty.rawPtyResize=orb_net_leaf_pty_resize",
   "OrbNetLeaf.TlsHttp=OrbNetLeaf.TlsHttp.rawTlsOpen=orb_net_leaf_tls_open",
+  "OrbNetLeaf.TlsHttp=OrbNetLeaf.TlsHttp.rawTlsOpenTunnel=orb_net_leaf_tls_open_tunnel",
   "OrbNetLeaf.TlsHttp=OrbNetLeaf.TlsHttp.rawTlsWrite=orb_net_leaf_tls_write",
   "OrbNetLeaf.TlsHttp=OrbNetLeaf.TlsHttp.rawTlsRead=orb_net_leaf_tls_read",
   "OrbNetLeaf.TlsHttp=OrbNetLeaf.TlsHttp.rawTlsClose=orb_net_leaf_tls_close",

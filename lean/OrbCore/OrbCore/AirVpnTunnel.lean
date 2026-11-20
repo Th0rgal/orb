@@ -1,0 +1,123 @@
+import OrbCore.AirVpnObservation
+import OrbCore.AirVpnSettings
+
+namespace OrbCore.AirVpnTunnel
+
+open OrbBin.PosixExt OrbBin.Json Orb.AccountVpn OrbCore.Managed OrbCore.AirVpnSettings
+
+abbrev Child := IO.Process.Child { stdin := .null, stdout := .null, stderr := .null }
+
+structure Tunnel where
+  child : Child
+  port : UInt16
+  addresses : List ExitAddress
+  sessionEvidence : IO.Ref (Option (Nat × Array JVal))
+  release : IO.Promise Unit
+  owner : Task (Except IO.Error Unit)
+
+def Tunnel.stop (t : Tunnel) : IO Unit := do
+  try
+    if (← t.child.tryWait).isNone then
+      t.child.kill
+      discard t.child.wait
+  finally
+    t.release.resolve ()
+    discard <| IO.wait t.owner
+
+private def launch (profile : DeviceProfile) (port : UInt16) : IO (Except String Child) := do
+  let cfg := profile.config ++ s!"\n[Socks5]\nBindAddress = 127.0.0.1:{port}\n"
+  let mut cmd := "wireproxy"
+  let mut argv := #["-c", "/dev/stdin"]
+  if System.Platform.isLinux then
+    -- Check the parent after arming the signal to cover death before setpriv runs.
+    let pid ← IO.Process.getPID
+    cmd := "setpriv"
+    argv := #["--pdeathsig", "KILL", "--", "sh", "-c",
+      "[ \"$PPID\" = \"$1\" ] || exit 1; shift; exec wireproxy \"$@\"", "orb-wireproxy", toString pid] ++ argv
+  let args : IO.Process.SpawnArgs := {
+    cmd, args := argv, stdin := .piped, stdout := .null, stderr := .null }
+  let child ← try IO.Process.spawn args catch _ => return .error "vpn_process_unavailable"
+  let (input, running) ← child.takeStdin
+  try
+    input.putStr cfg
+    input.flush
+  catch _ =>
+    if (← running.tryWait).isNone then running.kill
+    discard running.wait
+    return .error "vpn_config_transfer_failed"
+  return .ok running
+
+/-- Linux delivers the parent-death signal when the spawning thread exits.
+Keep that thread alive until the verified child is stopped and reaped. -/
+private def start (profile : DeviceProfile) (port : UInt16) : IO (Except String Tunnel) := do
+  if port == 0 then return .error "invalid_vpn_listener"
+  let started ← IO.Promise.new
+  let release ← IO.Promise.new
+  let owner ← IO.asTask (prio := .dedicated) do
+    let result ← try launch profile port catch _ => pure (.error "vpn_start_failed")
+    started.resolve result
+    if result.isOk then discard <| IO.wait release.result?
+  let some result ← IO.wait started.result? | return .error "vpn_start_failed"
+  let sessionEvidence ← IO.mkRef none
+  return result.map fun child => ⟨child, port, profile.addresses, sessionEvidence, release, owner⟩
+
+private def ownsSession (addresses : List ExitAddress) (session : JVal) : Bool :=
+  ((session.fieldStr? "vpn_ip").bind AirVpnObservation.parseExit?).any addresses.contains
+
+/-- The caller must hold the allocation lock while associating this observation
+with a live generation and publishing the admitted binding. -/
+def Tunnel.verify (t : Tunnel) (root server country : String) : IO (Option VerifiedTunnel) := do
+  if (← t.child.tryWait).isSome then return none
+  let now ← IO.monoMsNow
+  -- Keep only this child's matching session rows. Every dispatch still probes
+  -- the actual exit, and a replacement child starts with an empty cache.
+  let recent := (← t.sessionEvidence.get).filter fun (checked, _) => now >= checked && now - checked < 10000
+  let sessions ← match recent with
+    | some (_, rows) => pure rows
+    | none =>
+      let .ok all ← activeSessions root | return none
+      pure (all.filter (ownsSession t.addresses))
+  let ipv6 := t.addresses.any fun | .v6 .. => true | _ => false
+  let evidence ← AirVpnObservation.observe t.port ipv6 server country sessions
+  if (← t.child.tryWait).isSome then return none
+  if evidence.isSome && recent.isNone then t.sessionEvidence.set (some (now, sessions))
+  return evidence
+
+def checkReservation (addresses : List ExitAddress) (sessions : Array JVal) : Except String Unit := do
+  if (reserve 5 sessions.size 0).isNone then throw "airvpn_session_limit"
+  if addresses.isEmpty || sessions.any (fun s => ((s.fieldStr? "vpn_ip").bind AirVpnObservation.parseExit?).isNone) then
+    throw "airvpn_session_evidence_unavailable"
+  if sessions.any (ownsSession addresses) then throw "airvpn_device_in_use"
+
+/-- Dev and production use the same operator-owned directory. Hold the lock
+through the handshake until AirVPN lists the session, so the next reservation
+sees it. A device already in use cannot replace another consumer's session. -/
+def startVerified (root sharedDir device server country : String) (port : UInt16) :
+    IO (Except String (Tunnel × VerifiedTunnel)) := do
+  if sharedDir.isEmpty then return .error "vpn_coordinator_unconfigured"
+  let lock ← flockExclusiveNb ((System.FilePath.mk sharedDir) / "airvpn.lock").toString
+  if lock == 0xFFFFFFFE then return .error "vpn_coordinator_busy"
+  if lock == 0xFFFFFFFF then return .error "vpn_coordinator_unavailable"
+  try
+    let some (endpoint, profile) ← readEndpoint root device | return .error "vpn_profile_unavailable"
+    if endpoint.country != country || endpoint.server != server then return .error "vpn_profile_changed"
+    let .ok sessions ← activeSessions root | return .error "airvpn_session_evidence_unavailable"
+    if let .error e := checkReservation profile.addresses sessions then return .error e
+    let t ← match ← start profile port with
+      | .ok t => pure t
+      | .error e => return .error e
+    let checked ← try
+      let mut evidence := none
+      for _ in [:6] do
+        IO.sleep 1000
+        if (← t.child.tryWait).isSome then break
+        evidence ← t.verify root server country
+        if evidence.isSome then break
+      pure evidence
+    catch _ => pure none
+    if let some verified := checked then return .ok (t, verified)
+    t.stop
+    return .error "vpn_exit_unverified"
+  finally closeFdRaw lock.toInt32
+
+end OrbCore.AirVpnTunnel

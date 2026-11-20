@@ -13,6 +13,7 @@ import OrbCore.ManagedProviderTests
 import OrbCore.ManagedProviderLeanciTests
 import OrbCore.ManagedProviderColabTests
 import OrbCore.ManagedProviderSealingTests
+import OrbCore.AirVpnSettingsTests
 import OrbCore.ManagedProviderAvailabilityTests
 import OrbCore.ManagedSpawnActionsTests
 import OrbCore.ManagedProvisioningTests
@@ -7964,6 +7965,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     OrbCore.PrivdNodeAuthTests.run tmpRoot
     OrbCore.ManagedSnapshotCatalogTests.run tmpRoot
     OrbCore.ManagedProviderSealingTests.run tmpRoot
+    OrbCore.AirVpnSettingsTests.run tmpRoot
     OrbCore.ManagedProviderAvailabilityTests.run tmpRoot
     OrbCore.ManagedSpawnActionsTests.run store
   catch e =>
@@ -9223,6 +9225,11 @@ end OrbCore.SelfTest
 
 def main (args : List String) : IO UInt32 := do
   OrbBin.PosixExt.setenvVar "ORB_HERMETIC_TEST" "1"
+  if let ["--probe-model-discovery", root, url, rawPort] := args then
+    let some port := rawPort.toNat? | return 2
+    if port == 0 || port > 65535 then return 2
+    OrbCore.ProviderContractTests.checkDiscovery root url port.toUInt16
+    return 0
   if let some root := OrbCore.SelfTest.findFlag? args "--move-recovery-test-root" then
     OrbCore.MissionSettingsTests.policyReplay root
     OrbCore.MissionSettingsTests.moveRecovery root
