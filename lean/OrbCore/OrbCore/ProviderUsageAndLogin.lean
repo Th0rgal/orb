@@ -2643,7 +2643,7 @@ def customModelsUrl (baseUrl : String) : String := Id.run do
 
 /-- Refresh only server-owned custom credentials. Persist allowlisted model metadata,
     retaining the last successful observation when an upstream is unavailable. -/
-def refreshCustomModelDiscovery (store : CoreStore) (workingDir : String) : IO Unit := do
+def refreshCustomModelDiscovery (store : CoreStore) (workingDir : String) (hub : ProviderRuntimeHub) : IO Unit := do
   let old ← readDataJsonFile workingDir store.rootDir "model-discovery.json"
   let mut connections := (old.fieldArr? "connections").getD #[]
   let stamp := formatEpochIso8601Utc (← nowEpoch)
@@ -2656,7 +2656,10 @@ def refreshCustomModelDiscovery (store : CoreStore) (workingDir : String) : IO U
         |>.setField "checked_at" (.str stamp)
         |>.setField "status" (.str "failed")
         |>.setField "source" (.str "stale_discovery")
-      match ← sendJsonRequest "GET" (customModelsUrl hp.baseUrl) (some hp.apiKey) none #[] 5000 1048576 with
+      let resolve := match hub.resolveTransport? with
+        | some transport => transport hp.providerType hp.id
+        | none => AccountVpnRoutes.resolve store.missionsDb hp.id fun _ => pure (.error "vpn_coordinator_unavailable")
+      match ← sendJsonRequest "GET" (customModelsUrl hp.baseUrl) (some hp.apiKey) none #[] 5000 1048576 (some resolve) with
       | .ok (code, _, some doc) =>
         if 200 ≤ code && code < 300 then
           if let some rows := doc.fieldArr? "data" then
@@ -2763,7 +2766,7 @@ def dispatchProviderAndAiRoute
 
   if segs == ["api", "providers", "catalog", "refresh"] && method == "POST" then
     if !effAdmin then return some (jsonErr 403 "admin_required")
-    refreshCustomModelDiscovery store workingDir
+    refreshCustomModelDiscovery store workingDir hub
     let _ ← getCachedAntigravityModels hub true
     let nowSec ← nowEpoch
     hub.mu.atomically do

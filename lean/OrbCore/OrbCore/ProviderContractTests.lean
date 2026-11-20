@@ -1357,11 +1357,13 @@ private def customDiscoveryContract (app : CoreAppState) (jwt : String) (now : U
   let (fd, port) ← IO.ofExcept (← LeanSys.Posix.tcpListen "127.0.0.1" 0 8)
   let stop ← IO.mkRef false
   let authorized ← IO.mkRef false
+  let requests ← IO.mkRef (0 : Nat)
   let server ← IO.asTask (prio := .dedicated) do
     while !(← stop.get) do
       match ← LeanSys.Posix.tcpAcceptPoll fd 100 with
       | .error _ => pure ()
       | .ok client =>
+        requests.modify (· + 1)
         let raw := String.fromUTF8! (← LeanSys.Posix.readStreamChunk client 8192)
         authorized.set (raw.startsWith "GET /v1/models " && (raw.splitOn "Bearer discovery-fixture-key").length == 2)
         let body := "{\"data\":[{\"id\":\"gpt-6-astra\"},{\"id\":\"gemini-4-argon\"},{\"id\":\"gpt-6-astra\"}]}"
@@ -1385,6 +1387,20 @@ private def customDiscoveryContract (app : CoreAppState) (jwt : String) (now : U
       failures := failures.push "custom discovery must be present on discovery endpoint"
     if ((renderCompact cat ++ renderCompact disc).splitOn "discovery-fixture-key").length != 1 then
       failures := failures.push "custom discovery must never return API key"
+    let some hp := (← loadHydratedProviders app.store app.cfg.workingDir).find? (fun row => row.name == "Surplus Intelligence")
+      | throw (IO.userError "custom discovery account missing")
+    IO.ofExcept (← AccountVpnRoutes.set app.store.missionsDb hp.id (some "NL"))
+    try
+      let before ← requests.get
+      discard <| postJson app jwt "/api/providers/catalog/refresh" "{}" now
+      let metadata ← readDataJsonFile app.cfg.workingDir app.store.rootDir "model-discovery.json"
+      let refreshed := (metadata.fieldArr? "connections").getD #[]
+      let observation := refreshed.find? (fun c => c.fieldStr? "provider_id" == some s!"custom:{hp.id}")
+      if (← requests.get) != before || !(observation.any (fun c => c.fieldStr? "status" == some "failed" &&
+          c.field? "last_success" != none)) then
+        failures := failures.push "A blocked discovery must preserve the previous model list and withhold the provider credential"
+    finally
+      IO.ofExcept (← AccountVpnRoutes.set app.store.missionsDb hp.id none)
     -- Node X4: plain `ethereumfoundation/glm-5.3` is rejected upstream while flash variants work;
     -- discovery, catalog, direct routing, and chain entries must drop plain `glm-5.3` and keep flash variants.
     if OrbCore.ProxyModelRouting.customProviderModelAllowed "Ethereum Foundation" "https://inference.ethereum.foundation/v1" "glm-5.3" ||

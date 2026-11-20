@@ -151,3 +151,7 @@ the receiver sees the next provider request arrive from a verified third
 address. When all three peers share the same exit, the receiver sees zero
 provider requests for the displaced account. The other account continues
 through its original exit.
+
+Custom model discovery resolves the owning account’s transport before sending
+its API key to the configured models endpoint. If routing fails, catalog
+refresh records the failure and retains the previous successful model list.
