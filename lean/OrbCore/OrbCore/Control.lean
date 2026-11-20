@@ -6541,14 +6541,18 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           if let .error dispErr ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec then
             return .ok (mkJson 502 s!"\{\"error\":{jsonEscape dispErr}}")
       else
-        if let (some mgr, some m) := (st.warmMgr?, mission?) then
+        if let some m := mission? then
           let localSend := (bodyJv.fieldBool? "spawn_harness").getD (m.placementKind == "managed" && !isCloudBackendName m.backend)
-          if localSend && (← mgr.activePidsRef.get).any (·.1 == mid) then
-            let refusal := s!"\{\"id\":{jsonEscape msgId},\"error\":\"local_run_busy\",\"message_accepted\":false,\"queued\":false}"
-            if keyed then
-              if let .error _ ← recordOrReplayIdempotency st.store receiptScope msgId 409 refusal nowIso then
-                return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
-            return .ok (mkJson 409 refusal)
+          if localSend then
+            let refusal? ← match st.warmMgr? with
+              | none => pure (some (503, "local_launcher_unavailable"))
+              | some mgr => pure (if (← mgr.activePidsRef.get).any (·.1 == mid) then some (409, "local_run_busy") else none)
+            if let some (status, reason) := refusal? then
+              let refusal := s!"\{\"id\":{jsonEscape msgId},\"error\":{jsonEscape reason},\"message_accepted\":false,\"queued\":false}"
+              if keyed then
+                if let .error _ ← recordOrReplayIdempotency st.store receiptScope msgId status refusal nowIso then
+                  return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
+              return .ok (mkJson status refusal)
         if let .error _ ← appendMissionEvent st.store mid "user_message" evPayload nowIso then
           if keyed then discard <| abortIdempotencySlot st.store receiptScope msgId
           return .ok (mkJson 500 "{\"error\":\"message_append_failed\"}")

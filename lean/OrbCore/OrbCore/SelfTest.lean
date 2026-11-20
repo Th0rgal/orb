@@ -2122,7 +2122,8 @@ private def runCyberAndSkillDeliveryTests
   let undelivMsgRaw := s!"POST /api/control/message HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {undelivMsgBody.utf8ByteSize}\r\n\r\n{undelivMsgBody}".toUTF8
   let .ok undelivMsgReq := parseRequest undelivMsgRaw none | do closeCoreStore store; return 1
   let .ok undelivMsgResp ← dispatchCoreRequest appSt undelivMsgReq nowSec | do closeCoreStore store; return 1
-  let delivMsgBody := s!"\{\"mission_id\":\"m-cyber-ok\",\"content\":\"run /skill:lean-audit now\",\"cyber_access\":\"daybreak\",\"cyber_revision\":\"{cyberRev}\"}"
+  -- Exercise directive construction only; TenantIsolationTests runs the actual child.
+  let delivMsgBody := s!"\{\"mission_id\":\"m-cyber-ok\",\"spawn_harness\":false,\"content\":\"run /skill:lean-audit now\",\"cyber_access\":\"daybreak\",\"cyber_revision\":\"{cyberRev}\"}"
   let delivMsgRaw := s!"POST /api/control/message HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {delivMsgBody.utf8ByteSize}\r\n\r\n{delivMsgBody}".toUTF8
   let .ok delivMsgReq := parseRequest delivMsgRaw none | do closeCoreStore store; return 1
   let .ok delivMsgResp ← dispatchCoreRequest appSt delivMsgReq nowSec | do closeCoreStore store; return 1
@@ -6311,7 +6312,7 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
   let (msgGetSt, msgGetBody) ← sendJson "GET" "/api/control/missions/8a349331-41cf-4223-a25f-459c00cd0d98/messages" hsJwt ""
   let replayRes ← queryMissionSyncReplayFrames store "8a349331-41cf-4223-a25f-459c00cd0d98" (some 0)
   let (postMsgSt, _) ← sendJson "POST" "/api/control/message" hsJwt
-    "{\"mission_id\":\"8a349331-41cf-4223-a25f-459c00cd0d98\",\"content\":\"Follow-up on Pareto\"}"
+    "{\"mission_id\":\"8a349331-41cf-4223-a25f-459c00cd0d98\",\"spawn_harness\":false,\"content\":\"Follow-up on Pareto\"}"
   let replayOk := match replayRes with
     | .ok (frames, maxSeq, false) => frames.size == 1 && maxSeq == 1
     | _ => false

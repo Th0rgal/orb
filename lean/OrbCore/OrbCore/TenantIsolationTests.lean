@@ -900,10 +900,12 @@ def run (root : String) : IO Unit := do
       let prelude ← OrbCore.Skills.remoteInstallPrelude path none "codex" path "member" "admin"
       check ((prelude.splitOn "owner-only-skill").length == 1 && (prelude.splitOn "member-only-skill").length > 1)
         "library 5: member remote install"
+      let missionDir := System.FilePath.mk path / "library-mission-workspace"
+      IO.FS.createDirAll missionDir
       let .ok () ← upsertMission store {
         id := "library-mission", ownerUserId := "member",
-        title := "library fixture", status := "awaiting_user", backend := "opencode", modelOverride := "",
-        workingDirectory := path, updatedAt := "2026-11-14T00:00:00Z" }
+        title := "library fixture", status := "awaiting_user", backend := "codex", modelOverride := "",
+        workingDirectory := missionDir.toString, updatedAt := "2026-11-14T00:00:00Z" }
         | throw (IO.userError "library mission fixture")
       let installWorkspace := System.FilePath.mk path / "member-installed-workspace"
       IO.FS.createDirAll installWorkspace
@@ -914,9 +916,27 @@ def run (root : String) : IO Unit := do
         "library 5: actual member workspace contains only member skills"
       -- 6. Coordinator steers another owner's mission; selection follows the mission.
       sql store.missionsDb "INSERT INTO mission_shares(mission_id,user_id,granted_by) VALUES('library-mission','admin','member');"
-      let (steerCode, _) ← send "POST" "/api/control/message" admin
-        (.obj #[("mission_id", .str "library-mission"), ("content", .str "/skill:member-only-skill continue")])
-      check (steerCode == 200) "library 6: coordinator selects member mission skills"
+      let steer := JVal.obj #[("mission_id", .str "library-mission"), ("content", .str "/skill:member-only-skill continue")]
+      let (unavailable, deniedLaunch) ← send "POST" "/api/control/message" admin steer
+      check (unavailable == 503 && deniedLaunch.fieldStr? "error" == some "local_launcher_unavailable" &&
+        deniedLaunch.fieldBool? "message_accepted" == some false && deniedLaunch.fieldBool? "queued" == some false)
+        "library 6: missing local launcher refuses delivery, distinctly from busy"
+      let launcher := System.FilePath.mk path / "library-fixture-codex"
+      IO.FS.writeFile launcher "#!/bin/sh\nset -eu\nfor prompt do :; done\ncat .agents/skills/member-only-skill/SKILL.md > selected-skill\ntest ! -e .agents/skills/owner-only-skill/SKILL.md\nprintf %s \"$prompt\" > captured.tmp\nmv captured.tmp captured-prompt\n"
+      let chmod ← IO.Process.output { cmd := "chmod", args := #["700", launcher.toString] }
+      check (chmod.exitCode == 0) "library 6: prepare disposable launcher"
+      let app := { st with warmMgr? := some (← OrbBin.ClaudeControl.newWarmHarnessManager), warmHarnessBinOverride? := some launcher.toString }
+      let (steerCode, delivery) ← send "POST" "/api/control/message" admin steer app
+      check (steerCode == 200 && delivery.fieldBool? "message_accepted" == some true) "library 6: coordinator selects member mission skills"
+      let captured := missionDir / "captured-prompt"
+      for _ in [0:200] do
+        if ← captured.pathExists then break
+        IO.sleep 10
+      let prompt ← IO.FS.readFile captured
+      check (delivery.fieldStr? "delivered_prompt" == some prompt && prompt.contains ".agents/skills/member-only-skill/SKILL.md" &&
+        !prompt.contains "owner-only-skill" && (← IO.FS.readFile (missionDir / "selected-skill")) ==
+          (← IO.FS.readFile (System.FilePath.mk memberLibrary / "skill/member-only-skill/SKILL.md")))
+        "library 6: launched member workspace received the selected directive and exact member skill"
       let .ok turn ← OrbCore.RemoteDispatch.bindRemoteTurnOwner store (some mc)
         { missionId := "library-mission", targetNodeId := "dedicated", backend := "codex", prompt := "coordinator turn" }
         "dedicated" #[{ id := "dedicated", baseUrl := "https://unused.invalid", tokenEnv := "SYNTHETIC_UNUSED_NODE_TOKEN" }]
