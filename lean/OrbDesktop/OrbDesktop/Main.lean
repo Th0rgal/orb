@@ -452,7 +452,7 @@ def liveViewportRegression : Bool := Id.run do
     widgetId := 1001 + i, missionId := s!"m{i}", title := s!"Mission {i}" }
   let rows := cards.map fun c => { (default : ChromeSidebarRow) with
     widgetId := c.widgetId, rowId := c.missionId, kind := "mission", title := c.title }
-  let initial := { DesktopState.liveUnavailable with sidebarRows := rows, missionCards := cards }
+  let initial := { DesktopState.liveUnavailable with sidebarRows := rows, missionCards := cards, connectionBinding := "test" }
   let w := pxToSub 800
   let h := pxToSub 320
   -- Give the last line a distinct atlas rectangle so we check its paint position.
@@ -489,7 +489,7 @@ def liveViewportRegression : Bool := Id.run do
     | .glyph src dst .. => src == marker && (roundRectOut 120 pane.bounds).contains dst.x dst.y
     | _ => false
   return !before.any visible && after.any visible && bottom.rosterTopSub == down.rosterTopSub &&
-    !atBottom.hitRegions.any (·.1 == 2)
+    atBottom.hitRegions.any (·.1 == 2)
 
 /-- `--self-test`: check live viewports and quiescent rendering. -/
 def runSelfTest (cfg : Runtime.RuntimeConfig) (initSt : DesktopState) : IO UInt32 := do

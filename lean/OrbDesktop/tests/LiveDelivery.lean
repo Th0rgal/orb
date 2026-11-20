@@ -91,9 +91,8 @@ def main (args : List String) : IO Unit := do
     let (stopped, damage) := stepDesktopEvent 120 vp st (.activate 2)
     unless damage.isNone && stopped.composer == st.composer && !stopped.missionStopped do
       throw (IO.userError "live stop fabricated an effect")
-    let st := { st with composer := st.composer.insertText "draft A" }
-    let (typed, damage) := stepDesktopEvent 120 vp st (.text "must not append")
-    unless damage.isNone && typed.composer == st.composer do throw (IO.userError "read-only typing changed draft")
+    let (st, damage) := stepDesktopEvent 120 vp st (.text "draft A")
+    unless damage.isSome && st.composer.text == "draft A" do throw (IO.userError "live typing lost draft")
     let (sent, damage) := stepDesktopEvent 120 vp st (.activate 2)
     unless damage.isNone && sent.composer == st.composer && !sent.messageSent do
       throw (IO.userError "live send consumed draft")

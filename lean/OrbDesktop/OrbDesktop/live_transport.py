@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -50,10 +51,17 @@ class Connection:
             raise ValueError('connection changed')
 
     def get(self, path, cap=4 << 20):
+        return self.request(path, cap)
+
+    def request(self, path, cap=4 << 20, body=None, key=None):
         self.check()
         base, token = self.creds
         req = urllib.request.Request(base + path, headers={'Authorization': 'Bearer ' + token,
                                                            'Accept': 'application/json', 'Cache-Control': 'no-cache'})
+        if body is not None:
+            req.data = json.dumps(body).encode()
+            req.add_header('Content-Type', 'application/json')
+            req.add_header('Idempotency-Key', key)
         # A socket timeout alone is an idle timeout. Also bound total wall time
         # for DNS / continuously trickling responses. This helper is standalone.
         previous = signal.signal(signal.SIGALRM, request_timeout)
@@ -67,7 +75,38 @@ class Connection:
         self.check()
         if len(data) > cap:
             raise ValueError('response too large')
-        return json.loads(data)
+        return json.loads(data) if data or body is None else None
+
+
+def mutate(binding, action, mid):
+    c = Connection()
+    if c.binding != binding:
+        raise ValueError('connection changed')
+    key = str(uuid.uuid4())
+    if action == 'create':
+        row = c.request('/api/control/missions', body={'title': 'New mission'}, key=key)
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', row['id']):
+            raise ValueError('invalid mission')
+        print('\t'.join(map(label, [row['id'], 'New mission', row['status']])))
+        return
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', mid):
+        raise ValueError('invalid mission')
+    path = '/api/control/missions/' + mid
+    if action == 'send':
+        receipt = c.request('/api/control/message', body={'mission_id': mid, 'content': sys.stdin.buffer.read().decode(),
+                            'queue_followup': True, 'client_message_id': key}, key='msg:' + mid + ':' + key)
+        if not receipt.get('id') or receipt.get('message_accepted') is False:
+            raise ValueError('message not accepted')
+    elif action == 'stop':
+        c.request(path + '/cancel', body={}, key=key)
+    elif action == 'archive':
+        row = c.get(path + '?include_history=false')
+        if row['id'] != mid or (row.get('execution') or {}).get('state') == 'running' or row['status'] not in (
+                'awaiting_user', 'completed', 'interrupted', 'failed', 'blocked', 'paused', 'cancelled'):
+            raise ValueError('mission not idle')
+        c.request(path + '/status', body={'status': 'acknowledged'}, key=key)
+    else:
+        raise ValueError('unknown action')
 
 
 def label(v):

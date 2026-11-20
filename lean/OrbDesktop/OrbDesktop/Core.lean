@@ -7,6 +7,7 @@ namespace OrbDesktop
 projection rather than passing credentials through the UI state.  `--headless`
 golden paths never call this module and remain deterministic fixtures. -/
 
+/-- Embedded connection-bound HTTP reader and writer. -/
 private def transport : String := include_str "live_transport.py"
 
 private def splitTab (line : String) : List String :=
@@ -109,6 +110,29 @@ single-value mailbox, so a retired subscription cannot update a new mission. -/
 def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewport : LeanUI.Rect)
     (st : DesktopState) : IO (DesktopState × LeanUI.Damage) := do
   let active ← slot.get
+  if let some request := st.writeRequest then
+    let st := { st with writeRequest := none, writeError := "" }
+    let (action, mid, text) := match request with
+      | .create => ("create", "", "")
+      | .send mid text => ("send", mid, text)
+      | .stop mid => ("stop", mid, "")
+      | .archive mid => ("archive", mid, "")
+    try
+      let r ← IO.Process.output { cmd := "python3", args := #["-I", "-c", transport ++ "\ntry: mutate(*sys.argv[1:])\nexcept Exception: sys.exit(1)", st.connectionBinding, action, mid] } (input? := some text)
+      if r.exitCode != 0 then throw (IO.userError "write failed")
+      closeLiveSubscription slot
+      match request with
+      | .create =>
+        let [id,title,status] := splitTab r.stdout.trimAscii.toString | throw (IO.userError "invalid mission")
+        let wid := 1 + st.sidebarRows.foldl (fun n row => max n row.widgetId) 1000
+        let card := { (default : MissionSummaryCard) with widgetId := wid, missionId := id, title, status }
+        let row := { (default : ChromeSidebarRow) with widgetId := wid, rowId := "mission:" ++ id, kind := "mission", title, status }
+        return (resetSelection { st with screen := .missionTranscript, missionCards := card :: st.missionCards, sidebarRows := row :: st.sidebarRows } (some card), some viewport)
+      | .archive _ =>
+        return (resetSelection { st with screen := .controlEmpty, missionCards := st.missionCards.filter (·.missionId != mid), sidebarRows := st.sidebarRows.filter (·.rowId != "mission:" ++ mid) } none, some viewport)
+      | .send .. => return ({ st with composer := { isRunning := st.composer.isRunning } }, some viewport)
+      | .stop _ => return (st, some viewport)
+    catch _ => return ({ st with writeError := "Core did not confirm " ++ action }, some viewport)
   let invalidate := ({ DesktopState.liveUnavailable with theme := st.theme, scale120 := scale }, some viewport)
   let target := if st.hasLiveConnection then some (st.openMission.getD "") else none
   if active.map (·.mission) != target || active.any (·.binding != st.connectionBinding) then

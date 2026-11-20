@@ -256,6 +256,13 @@ inductive ActiveModal where
 def rosterViewportId : WidgetId := 970
 def transcriptViewportId : WidgetId := 971
 
+inductive LiveWrite where
+  | create
+  | send (mission text : String)
+  | stop (mission : String)
+  | archive (mission : String)
+  deriving Repr, Inhabited, BEq
+
 /-- Complete single-owner pure state of the Orb Desktop shell. -/
 structure DesktopState where
   screen : ScreenId := .missionTranscript
@@ -266,6 +273,8 @@ structure DesktopState where
   stream : StreamCoalescer := Orb.Stream.Coalescer.empty
   liveData : Bool := false
   connectionBinding : String := ""
+  writeRequest : Option LiveWrite := none
+  writeError : String := ""
   openMission : Option String := none
   syncCursor : SyncCursorState := {}
   sidebarRows : List ChromeSidebarRow := []
@@ -293,10 +302,11 @@ def DesktopState.selectedCard (st : DesktopState) : Option MissionSummaryCard :=
 def DesktopState.hasLiveConnection (st : DesktopState) : Bool := st.liveData && !st.connectionBinding.isEmpty
 
 def DesktopState.headerTitle (st : DesktopState) : String :=
-  if st.liveData && !st.hasLiveConnection then "Core unavailable"
+  if !st.writeError.isEmpty then st.writeError
+  else if st.liveData && !st.hasLiveConnection then "Core unavailable"
   else (st.selectedCard.map (·.title)).getD st.screen.headerTitle
 
-private def resetSelection (st : DesktopState) (card : Option MissionSummaryCard) : DesktopState :=
+def resetSelection (st : DesktopState) (card : Option MissionSummaryCard) : DesktopState :=
   let mid := card.map (·.missionId)
   { st with
     openMission := mid, stream := { shown := [], pending := [], renders := 1 }, scroll := {}
@@ -580,11 +590,22 @@ private def stepDesktopInput (scale120 : Nat) (viewport : Rect) (st : DesktopSta
 def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev : Event) :
     DesktopState × Damage := Id.run do
   if st.liveData then
+    if !st.hasLiveConnection || st.writeRequest.isSome then return (st, none)
     match ev with
-    | .text _ | .preedit .. | .imeBatch .. => return (st, none)
+    | .text _ | .preedit .. | .imeBatch .. =>
+      if st.selectedCard.isNone then return (st, none)
     | _ => pure ()
     if let .activate id := ev then
-      if id == 2 then return (st, none) -- native Send/Stop have no authorized effect implementation
+      if id == 805 then return ({ st with writeRequest := some .create }, some viewport)
+      if id == 2 || id == 106 then
+        let some card := st.selectedCard | return (st, none)
+        let request := if id == 106 then
+            if st.composer.isRunning then none else some (.archive card.missionId)
+          else if st.composer.isRunning then some (.stop card.missionId)
+          else if st.composer.imePreeditText.isEmpty && !st.composer.text.isEmpty then
+            some (.send card.missionId st.composer.text)
+          else none
+        return ({ st with writeRequest := request }, none)
       if let some card := st.missionCards.find? (·.widgetId == id) then
         if st.openMission == some card.missionId then return (st, none)
         return (resetSelection { st with screen := .missionTranscript } (some card), some viewport)
@@ -592,10 +613,10 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
 
 /-- Device-pixel band occupied by the live transcript. Stream deltas repaint this band only; the
 sidebar, header and composer retain their framebuffer pixels. -/
-def transcriptDamageRect (scale120 : Nat) (viewport : Rect) (live := false) : Rect :=
+def transcriptDamageRect (scale120 : Nat) (viewport : Rect) : Rect :=
   let x0 := floorDev scale120 (Int.ofNat chromeSidebarWidthSub)
   let y0 := ceilDev scale120 (Int.ofNat chromeHeaderHeightSub)
-  let bottom := viewport.bottom - (if live then 0 else ceilDev scale120 (Int.ofNat chromeComposerHeightSub))
+  let bottom := viewport.bottom - ceilDev scale120 (Int.ofNat chromeComposerHeightSub)
   { x := viewport.x + x0, y := viewport.y + y0, w := viewport.w - x0, h := max 0 (bottom - (viewport.y + y0)) }
 
 /-- Queue a streamed text delta without requesting a redraw. The next display tick flushes all
@@ -617,7 +638,7 @@ def flushStreamFrame (scale120 : Nat) (viewport : Rect) (st : DesktopState) : De
   if stream'.renders == st.stream.renders then
     (st, none)
   else
-    ({ st with stream := stream' }, Damage.add none (transcriptDamageRect scale120 viewport st.liveData))
+    ({ st with stream := stream' }, Damage.add none (transcriptDamageRect scale120 viewport))
 
 /-- Queue and flush a batch at the display boundary. This is the native adapter for the
 `Orb.Stream.Coalescer` contract: N deltas become one visible frame. -/

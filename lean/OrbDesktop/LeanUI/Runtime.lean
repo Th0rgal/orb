@@ -208,6 +208,10 @@ def stepEvent (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage) (
         else rt
       else rt
     | _ => rt
+  let isText := match ev with
+    | .text _ | .preedit .. | .imeBatch .. => true
+    | _ => false
+  if isText && rt1.focus.owner != some 1 then rt1 else
   let (app', appDmg) := onEvent rt1.app ev
   let finalDmg := match appDmg with
     | none => rt1.damage
@@ -421,6 +425,8 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
       if let some rect := damage then rt := rt.markDirty rect
       let rendered := rt.framesRendered
       rt ← stepFrameWithRegions rt (onEvent rt) view
+      let wl ← Wayland.syncTextFocus rt.wayland (rt.focus.owner == some 1 && rt.focusableOrder.contains 1)
+      rt := { rt with wayland := wl }
       if rt.framesRendered != rendered then
         let wl ← Wayland.present rt.wayland rt.vulkan.framebuffer
         rt := { rt with wayland := wl }
