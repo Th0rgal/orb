@@ -101,7 +101,7 @@ private def subscribe (mission binding : String) (tracked : List MissionSummaryC
   let child ← IO.Process.spawn {
     cmd := "python3", args := #["-I", "-c", transport ++ "\npoll(*sys.argv[1:])", mission, binding]
     stdin := .piped, stdout := .piped, stderr := .null }
-  -- Bootstrap tracks at most 200 validated ASCII mission IDs. Do not expose
+  -- Bootstrap tracks validated IDs from both current and archived pages. Do not expose
   -- the roster in the process list; a new reader gets the current tracked set.
   try
     child.stdin.putStrLn (String.intercalate "," (tracked.map (·.missionId)))
