@@ -704,6 +704,11 @@ def toggleSelection (st : DesktopState) (row : ChromeSidebarRow) (extend : Bool)
   let rows := if st.multiRows.contains row.rowId then st.multiRows.filter (· != row.rowId) else row.rowId :: st.multiRows
   return { st with multiRows := rows, selectionAnchor := some row.rowId }
 
+/-- Context-clicks outside an explicit selection discard its targets and range anchor. -/
+def contextSelection (st : DesktopState) (rowId : String) : DesktopState :=
+  if st.multiRows.isEmpty || st.multiRows.contains rowId then st
+  else { st with multiRows := [], selectionAnchor := none }
+
 def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuRow := Id.run do
   if let .picker field := menu.page then
     let choices := settingChoices st menu.mission field

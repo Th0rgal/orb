@@ -38,4 +38,12 @@ private def menuState : DesktopState :=
 #guard (step menuState (.activate 712)).openMission == some "a"
 #guard (step menuState (.key 0xff1b 0 .pressed)).missionMenu.isNone
 
+private def group : DesktopState :=
+  { menuState with multiRows := ["mission:a", "mission:c"], selectionAnchor := some "mission:a" }
+
+#guard (contextSelection group "mission:a").multiRows == group.multiRows
+#guard (contextSelection group "mission:b").multiRows.isEmpty
+#guard (contextSelection group "mission:b").selectionAnchor.isNone
+#guard (contextSelection group "mission:b").openMission == some "a"
+
 end OrbDesktop.Spec

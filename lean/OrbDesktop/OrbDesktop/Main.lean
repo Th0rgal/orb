@@ -333,9 +333,11 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
       if st.hasLiveConnection && st.writeRequest.isNone then
         let some id := hitTest rt.hitRegions x y | return (st, none)
         let some row := st.sidebarRows.find? (·.widgetId == id) | return (st, none)
+        let previous := st
+        let st := contextSelection st row.rowId
         let group := st.multiRows.length > 1 && st.multiRows.contains row.rowId
         let mixed := group && st.multiRows.any fun r => !r.startsWith "mission:"
-        if row.kind != "mission" && !mixed then return (st, none)
+        if row.kind != "mission" && !mixed then return (st, if previous.multiRows == st.multiRows then none else some viewport)
         let mid := (row.rowId.drop 8).toString
         let targets := if group then
             st.multiRows.filterMap fun r => if r.startsWith "mission:" then some (r.drop 8).toString else none

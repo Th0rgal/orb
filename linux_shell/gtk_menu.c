@@ -21,7 +21,6 @@ static void run_action(GtkWidget *wv, const char *action, const char *id, const 
     }
     free(a); free(i); free(g);
 }
-
 static void prompt_rename(GtkWidget *wv, const char *id, const char *title) {
     GtkWidget *top = gtk_widget_get_toplevel(wv);
     GtkWidget *dlg = gtk_dialog_new_with_buttons("Rename conversation", GTK_IS_WINDOW(top) ? GTK_WINDOW(top) : NULL,
@@ -169,7 +168,8 @@ static void bulk_menu(GtkWidget *wv, GtkWidget *list, GtkWidget *menu) {
     g_free(ids);
 }
 gboolean orb_gtk_row_context_menu(GtkWidget *wv, GtkWidget *list, GtkWidget *row, const GdkEvent *ev) {
-    gboolean bulk = wv && sel && g_hash_table_size(sel) > 1 && row_id(row) && g_hash_table_contains(sel, row_id(row));
+    if (sel && g_hash_table_size(sel) && (!row_id(row) || !g_hash_table_contains(sel, row_id(row)))) { orb_sel_clear(list); }
+    gboolean bulk = wv && sel && g_hash_table_size(sel) > 1;
     const char *kind = g_object_get_data(G_OBJECT(row), "orb-kind"), *target = g_object_get_data(G_OBJECT(row), "orb-target");
     const char *slug = orb_menu_project_slug(target);
     if (!bulk && wv && slug && g_strcmp0(kind, "project") == 0) {
