@@ -968,15 +968,41 @@ def prepareManagedAuthWorkspace
       if gst.isSymlink then return .error "Job .gemini must not be a symlink"
       if let .error _ ← (IO.FS.createDirAll gemini).toBaseIO then
         return .error "Cannot create the Antigravity profile directory in the mission workspace"
-      let link := gemini / "antigravity-cli"
-      let lst ← statPath link.toString
-      if lst.exists_ && !lst.isSymlink then
-        return .error "Job Antigravity home conflicts with node-managed profile"
-      let linkResult ← (IO.Process.output { cmd := "ln", args := #["-sfn", target, link.toString] }).toBaseIO
+      let cli := gemini / "antigravity-cli"
+      let legacy ← statPath cli.toString
+      if legacy.isSymlink then
+        -- Previous nodes attached the whole profile. Detach only the link;
+        -- shared history cannot be attributed to a single mission.
+        let .ok old ← (IO.FS.realPath cli).toBaseIO | return .error "Unrecognized Antigravity profile link"
+        let base ← IO.FS.realPath (System.FilePath.mk ah)
+        unless old == base || (old.parent == some (base / "accounts") && validAntigravitySlot (old.fileName.getD "")) do
+          return .error "Unrecognized Antigravity profile link"
+        IO.FS.removeFile cli
+      if let .error _ ← (IO.FS.createDirAll cli).toBaseIO then
+        return .error "Cannot create the Antigravity home in the mission workspace"
+      let cliState ← statPath cli.toString
+      unless cliState.isDir && !cliState.isSymlink && cliState.ownedByEuid do
+        return .error "Mission Antigravity home must be an owned directory"
+      if (← chmod cli.toString 0o700) != 0 then return .error "Cannot make the mission Antigravity home private"
+      for name in ["conversations", "brain"] do
+        let dir := cli / name
+        if (← statPath dir.toString).isSymlink then return .error "Mission Antigravity history must be local"
+        if let .error _ ← (IO.FS.createDirAll dir).toBaseIO then
+          return .error "Cannot create mission Antigravity history"
+      let token := cli / "antigravity-oauth-token"
+      let source := System.FilePath.mk target / "antigravity-oauth-token"
+      let managed := cli / ".orb-managed-token"
+      let existing ← statPath token.toString
+      if existing.exists_ && !existing.isSymlink && !(← privateFileReadable managed) then
+        return .error "Job Antigravity login conflicts with node-managed profile"
+      if !(← privateFileReadable managed) then
+        if let .error _ ← writeAtomicPrivate0600 managed "1".toUTF8 then
+          return .error "Cannot mark the mission Antigravity login as managed"
+      let linkResult ← (IO.Process.output { cmd := "ln", args := #["-sfnT", source.toString, token.toString] }).toBaseIO
       unless (linkResult.toOption.map (·.exitCode)) == some 0 do
-        return .error "Cannot attach the selected Antigravity profile to this mission. Check workspace permissions."
-      unless ← privateFileReadable (link / "antigravity-oauth-token") do
-        return .error "The attached Antigravity profile has no private login readable by the node"
+        return .error "Cannot attach the selected Antigravity login to this mission"
+      unless ← privateFileReadable source do
+        return .error "The selected Antigravity login is no longer available"
   return .ok extraEnv
 
 def installAntigravityAuth
@@ -1013,8 +1039,6 @@ def installAntigravityAuth
   let homePath := System.FilePath.mk ah
   if let .error e ← ensurePrivateDir0700 homePath then
     return .error e
-  IO.FS.createDirAll (homePath / "conversations")
-  IO.FS.createDirAll (homePath / "brain")
   let mut changed := false
   if updateDefault then
     if let .error e ← writeAtomicPrivate0600 (homePath / "antigravity-oauth-token") nativeDoc.toUTF8 then
@@ -1024,8 +1048,6 @@ def installAntigravityAuth
     let slotDir := homePath / "accounts" / sl
     if let .error e ← ensurePrivateDir0700 slotDir then
       return .error e
-    let _ ← IO.Process.output { cmd := "ln", args := #["-sfn", (homePath / "conversations").toString, (slotDir / "conversations").toString] }
-    let _ ← IO.Process.output { cmd := "ln", args := #["-sfn", (homePath / "brain").toString, (slotDir / "brain").toString] }
     if let .error e ← writeAtomicPrivate0600 (slotDir / "antigravity-oauth-token") nativeDoc.toUTF8 then
       return .error e
     changed := true

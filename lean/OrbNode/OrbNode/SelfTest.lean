@@ -2252,6 +2252,28 @@ def runTests : IO UInt32 := do
       pure ()
   let readyBinding ← prepareManagedAuthWorkspace agBindingConfig #["antigravity"] agWorkspace.toString
   assertTrue "Antigravity workspace profile is readable after attachment" readyBinding.isOk
+  let cli := agWorkspace / ".gemini" / "antigravity-cli"
+  let tokenName := "antigravity-oauth-token"
+  let sibling := System.FilePath.mk tmpRoot / "agy-profile-sibling"
+  let otherCli := sibling / ".gemini" / "antigravity-cli"
+  IO.FS.createDirAll (sibling / ".gemini")
+  let oldLink ← IO.Process.output { cmd := "ln", args := #["-s", fakeAgHome.toString, otherCli.toString] }
+  assertTrue "legacy profile attached for migration" (oldLink.exitCode == 0)
+  IO.FS.writeFile (cli / "conversations" / "private-session") "mission one"
+  IO.FS.createDirAll (fakeAgHome / "brain")
+  IO.FS.writeFile (fakeAgHome / "brain" / "legacy-shared") "old shared history"
+  let migrated ← prepareManagedAuthWorkspace agBindingConfig #["antigravity"] sibling.toString
+  assertTrue "legacy shared profile detached without importing another mission's history"
+    (migrated.isOk && !(← (otherCli / "brain" / "legacy-shared").pathExists) &&
+     !(← (otherCli / "conversations" / "private-session").pathExists) &&
+     (← (fakeAgHome / "brain" / "legacy-shared").pathExists))
+  let renewed := "fixture-rotated-login".toUTF8
+  assertTrue "node rotates selected credential"
+    (← writeAtomicPrivate0600 (fakeAgHome / tokenName) renewed).isOk
+  let repeated ← prepareManagedAuthWorkspace agBindingConfig #["antigravity"] agWorkspace.toString
+  assertTrue "mission retains its conversation and observes credential renewal"
+    (repeated.isOk && (← (cli / "conversations" / "private-session").pathExists) &&
+     (← IO.FS.readBinFile (cli / tokenName)) == renewed && (← IO.FS.readBinFile (otherCli / tokenName)) == renewed)
   setenvVar "ORB_PRIVD_ALLOW_NONROOT_TEST" "1"
   setenvVar "ORB_PRIVD_HOME_ROOT" privdHomes.toString
   setenvVar "ORB_PRIVD_STATE_DIR" privdState.toString
