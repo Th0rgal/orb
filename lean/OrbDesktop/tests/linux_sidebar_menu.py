@@ -12,6 +12,7 @@ import socket
 import sqlite3
 import subprocess
 import tempfile
+import time
 import uuid
 
 from archive_race import archive_relay
@@ -115,19 +116,26 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
     # the relay. Activate B directly through Core before forwarding that POST.
     db_path, = tmp.rglob('missions.db')
     receipt = {}
-    def snapshot():
+    def snapshot(label):
         with contextlib.closing(sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True)) as db:
-            return db.execute('SELECT status, (SELECT count(*) FROM mission_runs WHERE mission_id=m.id) '
+            started = time.time_ns()
+            row = db.execute('SELECT status, (SELECT count(*) FROM mission_runs WHERE mission_id=m.id) '
                               'FROM missions m WHERE id=?', (b,)).fetchone()
+            receipt[label + '_read_unix_ns'] = [started, time.time_ns()]
+            receipt[label] = row
     def before_archive():
-        assert snapshot() == ('awaiting_user', 0)
+        receipt['post_held_unix_ns'] = time.time_ns()
+        snapshot('idle')
+        assert receipt['idle'] == ('awaiting_user', 0), receipt
         api('/api/control/message', {'mission_id': b, 'content': 'disposable refusal check',
                                      'client_message_id': str(uuid.uuid4())})
-        receipt['before_guard'] = snapshot()
+        snapshot('before_guard')
         assert receipt['before_guard'] == ('active', 0), receipt
+        receipt['post_released_unix_ns'] = time.time_ns()
     def after_archive(code, payload, key):
-        receipt.update(status=code, error=json.loads(payload).get('error'), idempotency_key=key,
-                       after_guard=snapshot())
+        receipt['reply_read_unix_ns'] = time.time_ns()
+        receipt.update(status=code, error=json.loads(payload).get('error'), idempotency_key=key)
+        snapshot('after_guard')
     gate.arm(before_archive, after_archive)
     action_menu(fixture['activeActions'], 'archive')
     gate.result()
