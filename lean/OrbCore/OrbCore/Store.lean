@@ -1278,7 +1278,10 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) (singleTenantUser
   let .ok iDb := iRes | do
     sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; sqliteCloseRaw aDb.handle
     return .error (match iRes with | .error e => e | .ok _ => "err")
-  if let .error cleanErr ← iDb.mu.atomically (sqliteExecRaw iDb.handle "DELETE FROM idempotency_keys WHERE phase='in_progress';") then
+  -- A native Send may already have appended or dispatched. Keep its original
+  -- reservation even if receipt writes remain unavailable across restart.
+  let recoverySql := "DELETE FROM idempotency_keys WHERE phase='in_progress' AND instr(scope,'[\"control_message\",')!=1;"
+  if let .error cleanErr ← iDb.mu.atomically (sqliteExecRaw iDb.handle recoverySql) then
     sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; sqliteCloseRaw aDb.handle; sqliteCloseRaw iDb.handle
     return .error s!"core_store_idempotency_recovery_failed:{cleanErr}"
   match ← recoverDispatchLeases mDb pDb effBoot with

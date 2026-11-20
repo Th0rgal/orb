@@ -2216,7 +2216,11 @@ private def launchLocalCoreMissionTurn
       pure ({ model := model? } : OrbCore.RemoteDispatch.HarnessProxySetup)
   match ← OrbBin.ClaudeControl.startHarnessTurn
       mgr missionId normHarness binOverride safeCwd prompt nextGen setup.model effort? sessionId? parsedPerm wtArg #[] cbs (some safeRoot)
-      setup.env setup.args with
+      setup.env setup.args (do
+        let .ok rows ← execParamQuery st.store.missionsDb
+          "SELECT id FROM missions WHERE id=?1 AND status='active' AND run_generation=CAST(?2 AS INTEGER);" #[missionId, s!"{nextGen}"]
+          | return false
+        return rows.size > 1) with
   | .ok runSt =>
     if runSt.cwd != safeCwd && !runSt.cwd.isEmpty then
       if let .ok safeWt ← confineWorkingDirectory st.cfg.workingDir runSt.cwd then
@@ -6469,7 +6473,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     if keyed then
       match ← claimIdempotencySlot st.store receiptScope msgId nowIso with
       | .error _ => return .ok (mkJson 500 "{\"error\":\"message_claim_failed\"}")
-      | .ok .InFlight => return .ok (mkJson 409 "{\"error\":\"message_in_flight\"}")
+      | .ok .InFlight => return .ok (mkJson 409 "{\"error\":\"message_outcome_uncertain\"}")
       | .ok (.Replayed rec) => return .ok (mkJson rec.statusCode rec.bodyJson)
       | .ok .Claimed => pure ()
     if let some mid := mid? then

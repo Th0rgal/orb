@@ -920,6 +920,7 @@ structure WarmClaudeEntry where
 /-- Shared manager supervising warm Claude Code processes and active one-shot CLI runs (`codex`, `opencode`, `antigravity`, `grok`, `vibe`). -/
 structure WarmHarnessManager where
   mu           : Std.Mutex Unit
+  registration : Std.Mutex Unit
   runsRef      : IO.Ref (Array (String × IO.Ref LocalRunState))
   warmProcsRef : IO.Ref (Array (String × WarmClaudeEntry))
   activePidsRef : IO.Ref (Array (String × Int64))
@@ -929,6 +930,7 @@ structure WarmHarnessManager where
 def newWarmHarnessManager : IO WarmHarnessManager := do
   return {
     mu := ← Std.Mutex.new ()
+    registration := ← Std.Mutex.new ()
     runsRef := ← IO.mkRef #[]
     warmProcsRef := ← IO.mkRef #[]
     activePidsRef := ← IO.mkRef #[]
@@ -1030,7 +1032,7 @@ def setSessionPermissionMode
 
 /-- Stop any active run or warm Claude process for `id`, signalling the entire process group (`SIGTERM` then `SIGKILL`). -/
 def stopHarnessRun (mgr : WarmHarnessManager) (id : String) : IO Unit := do
-  let (warm?, oneShotPid?, stateRef?) ← mgr.mu.atomically do
+  let (warm?, oneShotPid?, stateRef?) ← mgr.registration.atomically <| mgr.mu.atomically do
     let ws ← mgr.warmProcsRef.get
     let w? := (ws.find? (fun (k, _) => k == id)).map Prod.snd
     mgr.warmProcsRef.set (ws.filter (fun (k, _) => k != id))
@@ -1810,10 +1812,16 @@ def acpConfigSteps (turn : OpenCodeAcpTurn) : List (String × String) :=
     unchanged; the session id is reported as `{"type":"acp_session","sessionId":…}` and a
     failed request as `{"type":"error",…}`, so `parseOneShotHarnessEvent "opencode"` reads
     all of it. Returns the process exit code (non-zero when the turn failed). -/
-def runOpenCodeAcpTurn (bin : String) (env : Array String) (turn : OpenCodeAcpTurn)
-    (onLine : String → IO Unit) (onSpawn : Int64 → IO Unit := fun _ => pure ()) : IO UInt32 := do
+private def spawnAcp (bin : String) (env : Array String) (turn : OpenCodeAcpTurn) : IO SpawnedPgrp := do
   let shArgs := #["-c", "cd \"$1\" && shift && exec \"$@\"", "sh", turn.cwd, bin, "acp"]
-  let sp ← spawnPgrp "/bin/sh" shArgs env (pipeStdin := true) (nullStdio := true) (pipeStdout := true)
+  spawnPgrp "/bin/sh" shArgs env (pipeStdin := true) (nullStdio := true) (pipeStdout := true)
+
+def runOpenCodeAcpTurn (bin : String) (env : Array String) (turn : OpenCodeAcpTurn)
+    (onLine : String → IO Unit) (onSpawn : Int64 → IO Unit := fun _ => pure ())
+    (spawned? : Option SpawnedPgrp := none) : IO UInt32 := do
+  let sp ← match spawned? with
+    | some sp => pure sp
+    | none => spawnAcp bin env turn
   onSpawn sp.pid
   let send := fun (b : ByteArray) => do discard <| writeFdAll sp.stdinFd b
   let cwdJ := JVal.str turn.cwd
@@ -1928,7 +1936,7 @@ def startHarnessTurn
     -- Set by Core for turns it runs itself: proxy environment and CLI arguments
     -- (see `OrbCore.RemoteDispatch.harnessProxySetup`). The model is then used as given.
     (extraEnv : Array (String × String) := #[])
-    (extraArgs : Array String := #[]) : IO (Except String LocalRunState) := do
+    (extraArgs : Array String := #[]) (launchAllowed : IO Bool := pure true) : IO (Except String LocalRunState) := do
   let resolvedBin? ←
     if !binPath.trimAscii.toString.isEmpty && (← System.FilePath.pathExists binPath.trimAscii.toString) then
       pure (some binPath.trimAscii.toString)
@@ -2000,7 +2008,10 @@ def startHarnessTurn
   callbacks.onOutputEvent (.obj #[("text", .str ""), ("reset", .bool true), ("activities", .arr #[])])
 
   if harness == "claudecode" then
-    match ← launchOrReuseWarmClaude mgr id actualBin effectiveCwd prompt model? effort? effSid? permissionMode imagePaths stRef extraEnv with
+    let result ← mgr.registration.atomically do
+      if !(← launchAllowed) then return .error "launch_fenced"
+      launchOrReuseWarmClaude mgr id actualBin effectiveCwd prompt model? effort? effSid? permissionMode imagePaths stRef extraEnv
+    match result with
     | .error e =>
       stRef.modify fun s => { s with done := true, exitCode? := some 1, error? := some e }
       return .error e
@@ -2045,6 +2056,11 @@ def startHarnessTurn
     let registerPid := fun (pid : Int64) => mgr.mu.atomically do
       let pids ← mgr.activePidsRef.get
       mgr.activePidsRef.set ((pids.filter (fun (k, _) => k != id)).push (id, pid))
+    let spawnRegistered : IO SpawnedPgrp → IO SpawnedPgrp := fun spawn => mgr.registration.atomically do
+      if !(← launchAllowed) then throw <| IO.userError "launch_fenced"
+      let sp ← spawn
+      registerPid sp.pid
+      return sp
     let handleLine : String → IO Unit := fun ln => do
       let parsed := parseOneShotHarnessEvent harness ln
       if let some sid := parsed.sessionId? then
@@ -2134,20 +2150,21 @@ def startHarnessTurn
       let turn : OpenCodeAcpTurn := {
         cwd := effectiveCwd, prompt := delivered, model? := resolvedModel?, effort? := effort?,
         sessionId? := effSid?, plan := permissionMode == .plan || isPlanPrompt }
+      let .ok sp ← (spawnRegistered (spawnAcp actualBin envStrs turn)).toBaseIO
+        | return .error "acp_launch_failed_or_fenced"
       discard <| IO.asTask (prio := .dedicated) do
-        let code ← try runOpenCodeAcpTurn actualBin envStrs turn handleLine registerPid
+        let code ← try runOpenCodeAcpTurn actualBin envStrs turn handleLine (spawned? := some sp)
           catch e => do
             handleLine (renderCompact (.obj #[("type", .str "error"), ("error", .obj #[("message", .str s!"Failed to start opencode: {e}")])]))
             pure 1
         finishTurn code
       return .ok (← stRef.get)
     let shArgs := #["-c", "cd \"$1\" && shift && exec \"$@\"", "sh", effectiveCwd, actualBin] ++ cliArgs
-    let spawned ← match ← (spawnPgrp "/bin/sh" shArgs envStrs (pipeStdin := false) (nullStdio := true) (pipeStdout := true)).toBaseIO with
+    let spawned ← match ← (spawnRegistered (spawnPgrp "/bin/sh" shArgs envStrs (pipeStdin := false) (nullStdio := true) (pipeStdout := true))).toBaseIO with
       | .error e =>
         stRef.modify fun s => { s with done := true, exitCode? := some 1, error? := some s!"{e}" }
         return .error s!"Failed to start {harness}: {e}"
       | .ok sp => pure sp
-    registerPid spawned.pid
 
     discard <| IO.asTask (prio := .dedicated) do
       let mut buf := ByteArray.empty
