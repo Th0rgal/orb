@@ -255,14 +255,15 @@ def roster_rows(c, include_archived=False):
 def roster():
     c = Connection()
     rows = roster_rows(c, include_archived=True)
-    try:
-        rows.extend(catalog_rows(c))
-    except urllib.error.HTTPError as error:
-        if error.code == 401:
-            raise
-    except (KeyError, TypeError, urllib.error.URLError, TimeoutError):
-        # A catalog outage must not prevent opening an existing mission.
-        pass
+    for row in rows:
+        print('\t'.join(map(label, row)))
+
+
+def catalog(binding):
+    c = Connection()
+    if c.binding != binding:
+        return
+    rows = list(catalog_rows(c))
     c.check()
     for row in rows:
         print('\t'.join(map(label, row)))

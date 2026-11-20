@@ -325,6 +325,7 @@ structure DesktopState where
   draftSettings : LaunchSettings := {}
   draftProject : String := ""
   catalog : List CatalogModel := []
+  catalogLoading : Bool := false
   archivesOpen : Bool := false
   multiRows : List String := []
   selectionAnchor : Option String := none
@@ -706,6 +707,8 @@ def toggleSelection (st : DesktopState) (row : ChromeSidebarRow) (extend : Bool)
 def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuRow := Id.run do
   if let .picker field := menu.page then
     let choices := settingChoices st menu.mission field
+    if st.catalogLoading && (field == .backend || field == .model) then
+      return [{ id := 729, label := "Loading choices…", icon := "list" }]
     if choices.isEmpty then return [{ id := 719, label := "No available choices", icon := "list" }]
     return choices.mapIdx fun i (value, label) => { id := 2000000 + i, label, icon := "list", value }
   let clear : MissionMenuRow := { id := 727, label := "Clear selection", icon := "close", separatorBefore := true }
@@ -754,7 +757,7 @@ def menuFocusChange (before after : DesktopState) : Option Nat :=
   match before.missionMenu, after.missionMenu with
   | some old, none => some old.trigger
   | old, some menu =>
-    if old.any (fun m => m.page == menu.page && m.highlighted == menu.highlighted && m.trigger == menu.trigger) then none
+    if before.catalogLoading == after.catalogLoading && old.any (fun m => m.page == menu.page && m.highlighted == menu.highlighted && m.trigger == menu.trigger) then none
     else ((missionMenuRows after menu)[menu.highlighted]?).map (·.id)
   | _, _ => none
 
@@ -779,6 +782,7 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
     if key == 0xff08 && menu.page == .rename then return update { menu with draft := menu.draft.applyImeBatch 1 0 "" "" }
     return (st, none)
   | .windowFocus false => return close
+  | .activate 729 => return (st, none)
   | .activate 719 => return close
   | .activate 727 => return ({ st with missionMenu := none, multiRows := [], selectionAnchor := none }, some viewport)
   | .activate 726 => return update { menu with page := .confirmDelete, first := 0, highlighted := 0 }

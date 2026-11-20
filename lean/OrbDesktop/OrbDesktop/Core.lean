@@ -44,10 +44,6 @@ def loadLiveState (isDark := true) (scale120 := 120) : IO (Option DesktopState) 
   let ps := lines.filterMap (fun line => let xs := splitTab line; if col xs 0 == "P" then some xs else none)
   let ms := lines.filterMap (fun line => let xs := splitTab line; if col xs 0 == "M" then some xs else none)
   let ns := lines.filterMap (fun line => let xs := splitTab line; if col xs 0 == "N" then some xs else none)
-  let catalog : List CatalogModel := lines.filterMap fun line =>
-    match splitTab line with
-    | ["H", backend, harnessName, model, modelName] => some { backend, harnessName, model, modelName }
-    | _ => none
   let projects := ps.toArray.mapIdx (fun i xs => projectRow i xs) |>.toList
   let missions := ms.toArray.mapIdx (fun i xs => missionCard i xs) |>.toList
   let machines := ns.toArray.mapIdx (fun i xs => machineCard i xs) |>.toList
@@ -63,7 +59,30 @@ def loadLiveState (isDark := true) (scale120 := 120) : IO (Option DesktopState) 
     stream := Orb.Stream.Coalescer.empty
     sidebarRows := sidebar
     missionCards := missions
-    fleetMachines := machines, catalog }
+    fleetMachines := machines, catalogLoading := true }
+
+/-- Load selector choices separately so a cold provider catalog cannot delay the sidebar. -/
+def withLiveCatalog {α : Type} (binding : String) (notify : IO Unit)
+    (k : IO (Option (List CatalogModel)) → IO α) : IO α := do
+  if binding.isEmpty then return ← k (pure none)
+  let child ← IO.Process.spawn {
+    cmd := "python3", args := #["-I", "-c", transport ++ "\ncatalog(sys.argv[1])", binding]
+    stdout := .piped, stderr := .null }
+  let mailbox ← Std.Mutex.new (none : Option (List CatalogModel))
+  let reader ← IO.asTask (prio := .dedicated) do
+    let out ← try child.stdout.readToEnd catch _ => pure ""
+    let models := (out.splitOn "\n").filterMap fun line =>
+      match splitTab line with
+      | ["H", backend, harnessName, model, modelName] =>
+        some ({ backend, harnessName, model, modelName } : CatalogModel)
+      | _ => none
+    mailbox.atomically (set (some models))
+    notify
+  try k (mailbox.atomically (modifyGet fun rows => (rows, none)))
+  finally
+    try child.kill catch _ => pure ()
+    discard child.wait
+    discard (IO.wait reader)
 
 inductive LiveUpdate where
   | sample (visible : List String) (bubble : Option (String × String × String))

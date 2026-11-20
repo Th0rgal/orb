@@ -564,11 +564,17 @@ def main (args : List String) : IO UInt32 := do
     let rt0 ← Runtime.openWindowRuntime rcfg "orb-desktop" initSt
     let slot ← IO.mkRef (none : Option LiveSubscription)
     let rt ← Runtime.withProducerWake fun wakeFd notify => do
-      try
-        Runtime.runWindow { rt0 with focus := initSt.initialFocusState } desktopReducer renderDesktopView
-          (fun rt => readLiveFrame slot rt.wayland.scale120 rt.viewportDeviceRect rt.app notify)
-          DesktopState.hasLiveConnection menuFocusChange (some wakeFd)
-      finally closeLiveSubscription slot
+      withLiveCatalog initSt.connectionBinding notify fun takeCatalog => do
+        try
+          Runtime.runWindow { rt0 with focus := initSt.initialFocusState } desktopReducer renderDesktopView
+            (fun rt => do
+              let vp := rt.viewportDeviceRect
+              let (st, damage) ← readLiveFrame slot rt.wayland.scale120 vp rt.app notify
+              let some models ← takeCatalog | return (st, damage)
+              if st.connectionBinding != initSt.connectionBinding then return (st, damage)
+              return ({ st with catalog := models, catalogLoading := false }, some vp))
+            DesktopState.hasLiveConnection menuFocusChange (some wakeFd)
+        finally closeLiveSubscription slot
     Runtime.shutdownRuntime rt
     return 0
   catch e =>
