@@ -1,6 +1,6 @@
 """Run from the checkout: python3 lean/OrbDesktop/tests/live_writes.py
 
-Use orb-core from the same revision as the client (scripts/build_orb_bins.sh --only orb-core).
+Use orb-core from the same revision as the client. Set ORB_CORE_TEST_BINARY to the packaged Core or build it with scripts/build_orb_bins.sh --only orb-core.
 The test uses Sway and wtype, plus grim to observe the composer in the mouse workflow. Only the external model harness is replaced with a deterministic transcript producer; all mission writes go through the launched desktop and real Core.
 """
 import contextlib
@@ -81,7 +81,7 @@ for i in range(300):
     harness.chmod(0o700)
     env = dict(PATH=f'{tmp}:{os.environ["PATH"]}', HOME=str(home), HOST='127.0.0.1', PORT=str(port),
                LD_LIBRARY_PATH=os.getenv('LD_LIBRARY_PATH', ''), WORKING_DIR=str(tmp), DEV_MODE='true')
-    core = [ROOT / 'target/release/orb-core']
+    core = [Path(os.environ.get('ORB_CORE_TEST_BINARY', ROOT / 'target/release/orb-core')).resolve(strict=True)]
     with contextlib.ExitStack() as stack:
         server = stack.enter_context(process(core, env, tmp))
         token = wait('disposable Core login', login)
