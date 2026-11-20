@@ -462,7 +462,12 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
       if let some rect := damage then rt := rt.markDirty rect
       let rendered := rt.framesRendered
       rt ← stepFrameWithRegions rt (onEvent rt) view focusChange
-      let wl ← Wayland.syncTextFocus rt.wayland (rt.focus.owner == some 1 && rt.focusableOrder.contains 1)
+      let shape : UInt32 := match rt.hoveredEntity with
+        | some 1 => 9  -- text in the composer
+        | some id => if rt.focusableOrder.contains id then 4 else 1
+        | none => 1
+      let wl ← Wayland.syncCursor rt.wayland shape
+      let wl ← Wayland.syncTextFocus wl (rt.focus.owner == some 1 && rt.focusableOrder.contains 1)
       rt := { rt with wayland := wl }
       if rt.framesRendered != rendered then
         let wl ← Wayland.present rt.wayland rt.vulkan.framebuffer

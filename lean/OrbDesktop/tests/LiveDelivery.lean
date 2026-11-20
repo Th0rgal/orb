@@ -117,6 +117,14 @@ private def awaitState (slot : IO.Ref (Option LiveSubscription)) (st : DesktopSt
   throw (IO.userError "poll timed out")
 
 def main (args : List String) : IO Unit := do
+  let enter : Wayland.WlWireEvent := {
+    tag := Wayland.tagPointer, proxy := 0, opcode := 0,
+    args := #[.uint 417, .obj 0, .fixed 256, .fixed 512] }
+  let (entered, _) ← Wayland.stepWireEvent { appliedCursor := some 4 } enter
+  unless entered.enterSerial == some 417 && entered.appliedCursor.isNone do
+    throw (IO.userError "pointer entry must use its own serial even when returning to the same row")
+  let (left, _) ← Wayland.stepWireEvent entered { enter with opcode := 1, args := #[] }
+  unless left.enterSerial.isNone do throw (IO.userError "cursor retained a serial after surface leave")
   let boot ← loadLiveState
   if args == ["unavailable"] then
     unless boot.isNone do throw (IO.userError "failed bootstrap appeared successful")
