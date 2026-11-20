@@ -73,11 +73,16 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
             if first is None:
                 return None
             hits = {}
+            last_y = None
             for action in expected:
                 match = next((i for i in range(first,len(visible)) if visible[i][0] == labels[action]), None)
                 if match is None:
                     return None
-                hits[action] = visible[match][1:]
+                _, x, y = visible[match]
+                if last_y is not None and not 12 <= y - last_y <= 54:
+                    return None
+                hits[action] = (x, y)
+                last_y = y
                 first = match + 1
             return hits
         hits = wait('ordered context actions ' + ', '.join(expected), rows)
