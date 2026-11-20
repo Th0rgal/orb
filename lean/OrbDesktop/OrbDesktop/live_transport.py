@@ -61,6 +61,7 @@ class Connection:
         if body is not None:
             req.data = json.dumps(body).encode()
             req.add_header('Content-Type', 'application/json')
+        if key:
             req.add_header('Idempotency-Key', key)
         # A socket timeout alone is an idle timeout. Also bound total wall time
         # for DNS / continuously trickling responses. This helper is standalone.
@@ -78,11 +79,61 @@ class Connection:
         return json.loads(data) if data or body is None else None
 
 
+def change_status(c, action, mid, key):
+    path = '/api/control/missions/' + mid
+    if action == 'archive':
+        row = c.get(path + '?include_history=false')
+        if row['id'] != mid or (row.get('execution') or {}).get('state') == 'running' or row['status'] not in (
+                'awaiting_user', 'completed', 'interrupted', 'failed', 'blocked', 'paused', 'cancelled'):
+            raise ValueError('mission not idle')
+        c.request(path + '/status', body={'status': 'acknowledged'}, key=key)
+    elif action == 'restore':
+        row = c.get(path + '?include_history=false')
+        if row['id'] != mid or row['status'] != 'acknowledged' or (row.get('execution') or {}).get('state') == 'running':
+            raise ValueError('mission not archived')
+        c.request(path + '/status', body={'status': 'paused'}, key=key)
+
+
+def bulk_write(c, kind, key):
+    project, *ids = sys.stdin.buffer.read().decode().split('\n')
+    if not ids or len(set(ids)) != len(ids) or not all(re.fullmatch(r'[A-Za-z0-9_-]{1,128}', i) for i in ids):
+        raise ValueError('invalid mission selection')
+    if kind == 'move':
+        receipt = c.request('/api/control/missions/move', body={'mission_ids': ids, 'project': project,
+                            'folder': '', 'approval_policy': 'check'}, key=key)
+        moved = {r['mission_id'] for r in receipt['moved'] if r['project'] == project}
+        if not set(ids) <= moved:
+            raise ValueError('incomplete placement receipt')
+        for mid in moved:
+            print('ok\t' + mid)
+        return
+    if kind not in ('archive', 'restore', 'delete'):
+        raise ValueError('unknown bulk action')
+    for mid in ids:
+        try:
+            if kind == 'delete':
+                # Core must explicitly refuse deletion when a selected root has
+                # unconfirmed descendants or a running turn.
+                result = c.request('/api/control/missions/' + mid, method='DELETE', key=key + '-' + mid)
+                deleted = result.get('deleted_ids', [])
+                if mid not in deleted:
+                    raise ValueError('unconfirmed deletion')
+            else:
+                change_status(c, kind, mid, key + '-' + mid)
+                deleted = [mid]
+            for ident in deleted:
+                print('ok\t' + ident)
+        except (urllib.error.HTTPError, urllib.error.URLError, ValueError, TimeoutError):
+            print('failed\t' + mid)
+
+
 def mutate(binding, action, mid):
     c = Connection()
     if c.binding != binding:
         raise ValueError('connection changed')
     key = str(uuid.uuid4())
+    if action.startswith('bulk-'):
+        return bulk_write(c, action.removeprefix('bulk-'), key)
     if action == 'create':
         values = sys.stdin.buffer.read().decode().split('\t')
         body = {'title': 'New mission'}
@@ -132,20 +183,11 @@ def mutate(binding, action, mid):
         if mid not in moved:
             raise ValueError('placement not confirmed')
         print('\n'.join(moved))
-    elif action == 'restore':
-        row = c.get(path + '?include_history=false')
-        if row['id'] != mid or row['status'] != 'acknowledged' or (row.get('execution') or {}).get('state') == 'running':
-            raise ValueError('mission not archived')
-        c.request(path + '/status', body={'status': 'paused'}, key=key)
     elif action == 'copy-id':
         import subprocess
         subprocess.run(['wl-copy', '--type', 'text/plain'], input=mid.encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-    elif action == 'archive':
-        row = c.get(path + '?include_history=false')
-        if row['id'] != mid or (row.get('execution') or {}).get('state') == 'running' or row['status'] not in (
-                'awaiting_user', 'completed', 'interrupted', 'failed', 'blocked', 'paused', 'cancelled'):
-            raise ValueError('mission not idle')
-        c.request(path + '/status', body={'status': 'acknowledged'}, key=key)
+    elif action in ('archive', 'restore'):
+        change_status(c, action, mid, key)
     else:
         raise ValueError('unknown action')
 
@@ -181,12 +223,20 @@ def catalog_rows(c):
                 yield ('H', backend, by_id[backend], option['value'], option.get('label') or option['value'])
 
 
-def roster_rows(c):
+def roster_rows(c, include_archived=False):
     projects = c.get('/api/projects')['projects']
     missions = c.get('/api/control/missions?limit=200')
     machines = c.get('/api/machines')
     if not all(isinstance(x, list) for x in (projects, missions, machines)):
         raise ValueError('invalid roster')
+    if include_archived:
+        try:
+            archived = c.get('/api/control/missions?status=acknowledged&limit=100')
+            known = {r['id'] for r in missions}
+            missions += [r for r in archived if r.get('status') == 'acknowledged' and r['id'] not in known]
+        except urllib.error.HTTPError as error:
+            if error.code != 404:
+                raise
     rows = [('C', c.binding)]
     rows += [('P', p['slug'], p.get('title') or p['slug'], p.get('objective')) for p in projects]
     rows += [('M', *(m.get(k) for k in ('id','title','project','track','model','model_override',
@@ -200,9 +250,12 @@ def roster_rows(c):
 
 def roster():
     c = Connection()
-    rows = roster_rows(c)
+    rows = roster_rows(c, include_archived=True)
     try:
         rows.extend(catalog_rows(c))
+    except urllib.error.HTTPError as error:
+        if error.code == 401:
+            raise
     except (KeyError, TypeError, urllib.error.URLError, TimeoutError):
         # A catalog outage must not prevent opening an existing mission.
         pass

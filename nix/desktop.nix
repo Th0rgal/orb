@@ -1,4 +1,4 @@
-{lib, stdenv, callPackage, clang, pkg-config, gtk3, webkitgtk_4_1, zenity, revision ? "local checkout", turbo-lean ? null}:
+{lib, stdenv, callPackage, clang, pkg-config, gtk3, webkitgtk_4_1, makeBinaryWrapper, python3, wl-clipboard, zenity, revision ? "local checkout", turbo-lean ? null}:
 
 let
   core = callPackage ./package.nix {inherit turbo-lean; buildDesktop = true;};
@@ -8,7 +8,7 @@ stdenv.mkDerivation {
   version = core.version;
   src = ../.;
   dontConfigure = true;
-  nativeBuildInputs = [clang pkg-config];
+  nativeBuildInputs = [clang pkg-config makeBinaryWrapper];
   buildInputs = [gtk3 webkitgtk_4_1];
   buildPhase = ''
     runHook preBuild
@@ -20,7 +20,8 @@ stdenv.mkDerivation {
   '';
   installPhase = ''
     mkdir -p "$out/bin" "$out/share/applications" "$out/share/orb-desktop"
-    install -m 0755 "${core}/bin/orb-desktop-native" "$out/bin/orb-desktop-native"
+    makeBinaryWrapper "${core}/bin/orb-desktop-native" "$out/bin/orb-desktop-native" \
+      --prefix PATH : "${lib.makeBinPath [python3 wl-clipboard]}"
     install -m 0755 orb-webkit "$out/bin/orb-webkit"
     install -m 0644 "$src/nix/orb-desktop.hyprland.conf" "$out/share/orb-desktop/hyprland.conf"
     cat > "$out/bin/orb-desktop" <<'SH'

@@ -326,13 +326,21 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
       if st.hasLiveConnection && st.missionMenu.isNone && st.writeRequest.isNone then
         if let some field := settingTrigger id then
           let some (_, r) := rt.hitRegions.find? (·.1 == id) | return (st, none)
-          return ({ st with missionMenu := some { mission := st.openMission.getD "", x := r.x, y := r.bottom, trigger := id,
+          return ({ st with missionMenu := some {
+            mission := st.openMission.getD "", x := r.x, y := r.bottom, trigger := id,
             page := .picker field } }, some viewport)
     if let .pointerButton x y 0x111 true := ev then
       if st.hasLiveConnection && st.writeRequest.isNone then
         let some id := hitTest rt.hitRegions x y | return (st, none)
-        let some card := st.missionCards.find? (·.widgetId == id) | return (st, none)
-        return ({ st with missionMenu := some { mission := card.missionId, x, y, trigger := id } }, some viewport)
+        let some row := st.sidebarRows.find? (·.widgetId == id) | return (st, none)
+        let group := st.multiRows.length > 1 && st.multiRows.contains row.rowId
+        let mixed := group && st.multiRows.any fun r => !r.startsWith "mission:"
+        if row.kind != "mission" && !mixed then return (st, none)
+        let mid := (row.rowId.drop 8).toString
+        let targets := if group then
+            st.multiRows.filterMap fun r => if r.startsWith "mission:" then some (r.drop 8).toString else none
+          else [mid]
+        return ({ st with missionMenu := some { mission := mid, x, y, trigger := id, targets, mixed } }, some viewport)
     if let .scroll x y _ dy := ev then
       if st.missionMenu.isNone && st.liveData then
         let some r := regions.find? (fun r => r.bounds.contains x y) | return (st, none)

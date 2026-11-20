@@ -488,6 +488,7 @@ structure WaylandClient where
   /-- Set by the first `xdg_surface.configure`; no buffer may be attached before it. -/
   configured : Bool := false
   xkbState : USize := 0
+  pressedKeysyms : List (UInt32 × UInt32) := []
   pointerXSub : Int := 0
   pointerYSub : Int := 0
   pendingW : Nat := 1470
@@ -738,6 +739,7 @@ def stepWireEvent (c : WaylandClient) (ev : WlWireEvent) : IO (WaylandClient × 
     else if ev.opcode == 1 then
       out := out.push (.windowFocus true)
     else if ev.opcode == 2 then
+      st := { st with pressedKeysyms := [] }
       out := out.push (.windowFocus false)
     else if ev.opcode == 3 then
       if let (some (WlWireArg.uint ms), some (WlWireArg.uint key), some (WlWireArg.uint kst)) := (ev.arg? 1, ev.arg? 2, ev.arg? 3) then
@@ -747,11 +749,15 @@ def stepWireEvent (c : WaylandClient) (ev : WlWireEvent) : IO (WaylandClient × 
         if st.xkbState != 0 && (keyState == .pressed || keyState == .repeated) then
           let raw ← try FFI.xkbKey st.xkbState key catch _ => pure ByteArray.empty
           let pkt := decodeXkbKeyPacket raw
+          if keyState == .pressed then
+            st := { st with pressedKeysyms := (key, pkt.keysym) :: st.pressedKeysyms.filter (·.1 != key) }
           out := out.push (.key pkt.keysym pkt.mods keyState)
           if !pkt.utf8.isEmpty && pkt.composeStatus != 1 && isPrintableKeyText pkt.mods pkt.utf8 then
             out := out.push (.text pkt.utf8)
         else
-          out := out.push (.key key 0 keyState)
+          let sym := ((st.pressedKeysyms.find? (·.1 == key)).map (·.2)).getD key
+          st := { st with pressedKeysyms := st.pressedKeysyms.filter (·.1 != key) }
+          out := out.push (.key sym 0 keyState)
     else if ev.opcode == 4 then
       if let (some (WlWireArg.uint dep), some (WlWireArg.uint lat), some (WlWireArg.uint lck), some (WlWireArg.uint grp)) :=
           (ev.arg? 1, ev.arg? 2, ev.arg? 3, ev.arg? 4) then

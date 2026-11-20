@@ -127,6 +127,7 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
       | .rename mid title => ("rename", mid, title)
       | .move mid project => ("move", mid, project)
       | .copyId mid => ("copy-id", mid, "")
+      | .bulk kind mids project => ("bulk-" ++ kind, "", String.intercalate "\n" (project :: mids))
       | .settings mid field values =>
         let key := match field with
           | .machine => "machine" | .backend => "backend" | .model => "model"
@@ -144,18 +145,37 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
         let row := { (default : ChromeSidebarRow) with widgetId := wid, rowId := "mission:" ++ id, kind := "mission", title, status }
         return (resetSelection { st with screen := .missionTranscript, missionCards := card :: st.missionCards, sidebarRows := row :: st.sidebarRows } (some card), some viewport)
       | .archive _ =>
-        let next := { st with missionCards := st.missionCards.filter (·.missionId != mid),
-          sidebarRows := st.sidebarRows.filter (·.rowId != "mission:" ++ mid) }
+        let next := { st with
+          missionCards := st.missionCards.map fun m => if m.missionId == mid then { m with status := "acknowledged" } else m,
+          sidebarRows := st.sidebarRows.map fun row => if row.rowId == "mission:" ++ mid then { row with status := "acknowledged" } else row }
         return (if st.openMission == some mid then resetSelection { next with screen := .controlEmpty } none else next, some viewport)
       | .restore _ =>
-        return ({ st with missionCards := st.missionCards.map fun m => if m.missionId == mid then { m with status := "paused" } else m,
+        return ({ st with
+                          missionCards := st.missionCards.map fun m => if m.missionId == mid then { m with status := "paused" } else m,
                           sidebarRows := st.sidebarRows.map fun row => if row.rowId == "mission:" ++ mid then { row with status := "paused" } else row }, some viewport)
       | .rename _ title =>
-        return ({ st with missionCards := st.missionCards.map fun m => if m.missionId == mid then { m with title } else m,
+        return ({ st with
+                          missionCards := st.missionCards.map fun m => if m.missionId == mid then { m with title } else m,
                           sidebarRows := st.sidebarRows.map fun row => if row.rowId == "mission:" ++ mid then { row with title } else row }, some viewport)
       | .move _ project =>
         let moved := r.stdout.trimAscii.toString.splitOn "\n"
         return ({ st with missionCards := st.missionCards.map fun m => if moved.contains m.missionId then { m with project } else m }, some viewport)
+      | .bulk kind _ project =>
+        let receipts := (r.stdout.splitOn "\n").map splitTab
+        let changed := receipts.filterMap fun xs => if col xs 0 == "ok" then some (col xs 1) else none
+        let failed := receipts.filterMap fun xs => if col xs 0 == "failed" then some (col xs 1) else none
+        let remove := kind == "delete"
+        let status := if kind == "archive" then "acknowledged" else "paused"
+        let cards := st.missionCards.filterMap fun m =>
+          if !changed.contains m.missionId then some m
+          else if remove then none else if kind == "move" then some { m with project } else some { m with status }
+        let rows := st.sidebarRows.filterMap fun row =>
+          if !changed.contains (row.rowId.drop 8).toString || row.kind != "mission" then some row
+          else if remove then none else if kind == "move" then some row else some { row with status }
+        let next := { st with
+          missionCards := cards, sidebarRows := rows, multiRows := failed.map ("mission:" ++ ·),
+          selectionAnchor := none, writeError := if failed.isEmpty then "" else s!"Core did not confirm {kind} for {failed.length} missions" }
+        return (if (remove || kind == "archive") && next.openMission.any changed.contains then resetSelection { next with screen := .controlEmpty } none else next, some viewport)
       | .copyId _ => return (st, some viewport)
       | .settings .. =>
         let [machine,backend,model,effort,permissionMode] := splitTab (r.stdout.dropEnd 1).toString | throw (IO.userError "invalid settings response")
@@ -182,7 +202,12 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
       if r.kind == "mission" then cards.any (·.widgetId == r.widgetId)
       else if r.kind == "project" then visible.contains ("P:" ++ (r.rowId.drop 8).toString) else true
     let pruned := cards.length != st.missionCards.length || machines.length != st.fleetMachines.length || rows.length != st.sidebarRows.length
-    let st := { st with missionCards := cards, sidebarRows := rows, fleetMachines := machines }
+    let menu := st.missionMenu.bind fun m =>
+      if (m.mission.isEmpty || cards.any (·.missionId == m.mission)) && m.targets.all (fun id => cards.any (·.missionId == id))
+      then some m else none
+    let st := { st with
+      missionCards := cards, sidebarRows := rows, fleetMachines := machines, missionMenu := menu,
+      multiRows := st.multiRows.filter fun id => rows.any (·.rowId == id) }
     if st.openMission.isSome && st.selectedCard.isNone then
       closeLiveSubscription slot
       let (st, _) := stepDesktopEvent scale viewport st (.activate 101)
