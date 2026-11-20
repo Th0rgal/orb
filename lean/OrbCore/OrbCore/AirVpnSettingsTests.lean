@@ -49,7 +49,7 @@ private def routeStorage (root : String) : IO Unit := do
 
 def run (root : String) : IO Unit := do
   AccountVpnRelayTests.run
-  let cat := AccountVpnPool.category
+  let cat := Orb.AccountVpn.canonicalCategory
   check (cat "ChatGPT" == cat " Codex " && cat "Gemini" == cat "google" &&
     cat "Claude" != cat "ChatGPT") "credential category aliases"
   let exits := [Orb.AccountVpn.ExitAddress.v4 1, .v6 0 42]

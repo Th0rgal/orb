@@ -7,15 +7,6 @@ open Orb.AccountVpn OrbCore.AirVpnSettings OrbCore.AirVpnTunnel
 open OrbCore.AccountVpnRoutes (Preference)
 open OrbBin.PosixExt OrbBin.Sqlite
 
-def category (provider : String) : String :=
-  match provider.trimAscii.toString.toLower with
-  | "openai" | "chatgpt" | "codex" => "openai"
-  | "anthropic" | "claude" => "anthropic"
-  | "google" | "gemini" | "antigravity" | "gemini-cli" => "google"
-  | "grok" | "xai" => "xai"
-  | "meta" | "muse-code" => "meta"
-  | other => other
-
 structure Occupant where
   binding : Binding
   generation : Nat
@@ -108,7 +99,7 @@ private def allocateLocked (root dir : String) (db : SqliteDb) (account provider
   if current.generation != pref.generation || current.country != pref.country then
     return .error "vpn_route_changed"
   if dir.isEmpty then return .error "vpn_coordinator_unconfigured"
-  let cat := category provider
+  let cat := canonicalCategory provider
   let mut available := (← get).active
   -- Reusing a socket after its binding changed would also keep old streams alive.
   for t in available do

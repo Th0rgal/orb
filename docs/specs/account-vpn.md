@@ -17,8 +17,9 @@ restart. Persisted server preference is safe to reuse after fresh verification.
 | Obligation | Evidence |
 | --- | --- |
 | Each ready account occurs once. Within a category, each pair has disjoint public exit addresses. | `admission_preserves_isolation` preserves the invariant across a successful admission from a valid starting state. |
+| One overlapping observed address rejects a candidate in the same canonical category. Distinct accounts in other categories may share all addresses of a verified tunnel. | `shared_exit_rejects_admission` and `other_categories_allow_sharing` quantify over the entire ready list and both address families. |
 | Every admitted candidate has exit evidence and the requested country. | `admission_country_and_evidence`. |
-| Admitting a handshake reservation fits the configured account-wide session limit. | `reservation_within_budget`, conditional on accurate occupied and pending counts and atomic use by the caller. |
+| Admitting a handshake reservation fits the configured account-wide session limit. | `reservation_within_budget` and `reservation_refused_iff_full`, conditional on accurate occupied and pending counts and atomic use by the caller. |
 | Selection prefers the saved server and reuses a compatible verified exit. | Checked selection examples cover reordered inventory, shared IPv6 across servers, compatible different categories, unavailable exits and saturation. |
 
 For example, a first OpenAI login uses a Dutch server with two observed

@@ -7,6 +7,16 @@ inductive ExitAddress where
   | v6 (high low : UInt64)
   deriving DecidableEq, Repr
 
+/-- Provider account types that share an upstream identity namespace compete for exits. -/
+def canonicalCategory (provider : String) : String :=
+  match provider.trimAscii.toString.toLower with
+  | "openai" | "chatgpt" | "codex" => "openai"
+  | "anthropic" | "claude" => "anthropic"
+  | "google" | "gemini" | "antigravity" | "gemini-cli" => "google"
+  | "grok" | "xai" => "xai"
+  | "meta" | "muse-code" => "meta"
+  | other => other
+
 structure Binding where
   account : String
   category : String
@@ -52,6 +62,32 @@ theorem admission_country_and_evidence {requested : String} {candidate : Binding
   next h => exact ⟨h.2.2.2.1, h.2.2.2.2.1⟩
   next => contradiction
 
+/-- Even when different servers or provider aliases were selected, one shared
+address is sufficient to refuse the whole candidate. -/
+theorem shared_exit_rejects_admission {requested : String} {candidate existing : Binding}
+    {ready : List Binding} {ip : ExitAddress} (live : existing ∈ ready)
+    (sameCategory : candidate.category = existing.category)
+    (candidateExit : ip ∈ candidate.exits) (existingExit : ip ∈ existing.exits) :
+    admit requested candidate ready = none := by
+  unfold admit
+  split
+  next h => exact False.elim ((h.2.2.2.2.2 existing live).2 sameCategory ip candidateExit existingExit)
+  next => rfl
+
+/-- A healthy candidate may reuse every address of an occupied tunnel when
+the other accounts belong to different canonical categories. -/
+theorem other_categories_allow_sharing {candidate : Binding} {ready : List Binding}
+    (account : candidate.account ≠ "") (category : candidate.category ≠ "")
+    (country : candidate.country ≠ "") (observed : candidate.exits ≠ [])
+    (others : ∀ b ∈ ready, candidate.account ≠ b.account ∧ candidate.category ≠ b.category) :
+    admit candidate.country candidate ready = some (candidate :: ready) := by
+  unfold admit
+  apply ite_eq_left
+  refine ⟨account, category, country, rfl, observed, ?_⟩
+  intro b hb
+  obtain ⟨distinct, different⟩ := others b hb
+  exact ⟨distinct, fun same => False.elim (different same)⟩
+
 /-- Occupied includes external sessions. Pending counts Orb reservations
 whose handshakes are not yet represented in the occupied snapshot. -/
 def reserve (limit occupied pending : Nat) : Option Nat :=
@@ -66,6 +102,11 @@ theorem reservation_within_budget {limit occupied pending after : Nat}
     cases step
     omega
   next => contradiction
+
+theorem reservation_refused_iff_full (limit occupied pending : Nat) :
+    reserve limit occupied pending = none ↔ limit ≤ occupied + pending := by
+  unfold reserve
+  split <;> simp_all
 
 /-- Each observation certifies a running tunnel for the current transport
 generation. The I/O owner expires it on reconnect, expiry, or endpoint change. -/
