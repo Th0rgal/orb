@@ -13,6 +13,32 @@ open OrbBin.Json OrbBin.PosixExt
 open OrbCore.Store OrbCore.Control OrbCore.R7Core OrbCore.Proxy OrbCore.Managed
 open OrbCore.ProviderUsageAndLogin
 
+def checkDiscovery (root url : String) (port : UInt16) : IO Unit := do
+  let st ← IO.ofExcept (← openCoreStore root)
+  try
+    let hp : AIProviderRecord := { id := "fixture", providerType := "custom", name := "Fixture", baseUrl := url, apiKey := "fixture-only" }
+    IO.ofExcept (← upsertAIProvider st hp)
+    let hub ← newProviderRuntimeHub
+    let verify := fun (hub : ProviderRuntimeHub) (expected : String) => do
+      refreshCustomModelDiscovery st root hub
+      let metadata ← readDataJsonFile root root "model-discovery.json"
+      let row := ((metadata.fieldArr? "connections").getD #[])[0]!
+      unless row.fieldStr? "status" == some expected && (row.field? "last_success").isSome do
+        throw (IO.userError "unexpected discovery status")
+    verify hub "discovered"
+    IO.ofExcept (← AccountVpnRoutes.set st.missionsDb hp.id (some "NL"))
+    let routed := fun (provider account : String) => pure <|
+      if provider == "custom" && account == hp.id then .ok (some port) else .error "wrong_account"
+    verify { hub with resolveTransport? := some routed } "discovered"
+    verify hub "failed"
+    let seen ← IO.mkRef false
+    let resolver := fun (provider account : String) => do
+      seen.set (provider == "custom" && account == hp.id)
+      pure (.error "fixture_unavailable" : Except String (Option UInt16))
+    verify { hub with resolveTransport? := some resolver } "failed"
+    unless ← seen.get do throw (IO.userError "wrong account passed to discovery resolver")
+  finally closeCoreStore st
+
 private def getJson (app : CoreAppState) (jwt target : String) (now : UInt64) : IO JVal := do
   let raw := s!"GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
   let .ok req := parseRequest raw.toUTF8 none

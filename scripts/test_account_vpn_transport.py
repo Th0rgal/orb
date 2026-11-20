@@ -35,7 +35,7 @@ def exact(sock, size):
     return bytes(result)
 
 
-def run(probe):
+def run(probe, discovery=False):
     with tempfile.TemporaryDirectory() as temp:
         cert = str(Path(temp) / "cert.pem")
         key = str(Path(temp) / "key.pem")
@@ -53,10 +53,15 @@ def run(probe):
                     with ctx.wrap_socket(self.request, server_side=True) as conn:
                         conn.settimeout(5)
                         with conn.makefile("rb") as req:
+                            request_line = req.readline(4096)
+                            headers = []
                             while (line := req.readline(4096)) and line != b"\r\n":
-                                pass
+                                headers.append(line.strip().lower())
+                            if discovery:
+                                assert request_line.startswith(b"GET /v1/models ")
+                                assert b"authorization: bearer fixture-only" in headers
                         hits.append(self.client_address[0])
-                        body = self.client_address[0].encode()
+                        body = b'{"data":[{"id":"fixture-model"}]}' if discovery else self.client_address[0].encode()
                         conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: " +
                                      str(len(body)).encode() + b"\r\n\r\n" + body)
                 except ssl.SSLError:
@@ -70,7 +75,7 @@ def run(probe):
                 local.sendall(bytes([5, 0]))
                 assert exact(local, 4) == bytes([5, 1, 0, 3])
                 name = exact(local, exact(local, 1)[0])
-                assert name in (b"vpn-probe.invalid", b"wrong-name.invalid")
+                assert name in ((b"127.0.0.1",) if discovery else (b"vpn-probe.invalid", b"wrong-name.invalid"))
                 assert int.from_bytes(exact(local, 2), "big") == destination
                 with socket.socket() as upstream:
                     upstream.bind(("127.0.0.2", 0))
@@ -97,6 +102,11 @@ def run(probe):
                 raise AssertionError((host, port, expect, result.stdout, result.stderr))
 
         with serve(Receiver) as destination, serve(Proxy) as proxy:
+            if discovery:
+                subprocess.run([*probe, temp, f"https://127.0.0.1:{destination}/v1", str(proxy)],
+                               env={**os.environ, "SSL_CERT_FILE": cert}, check=True, timeout=30)
+                assert hits == ["127.0.0.1", "127.0.0.2"], hits
+                return
             request("127.0.0.1", 0, "127.0.0.1")
             request("vpn-probe.invalid", proxy, "127.0.0.2")
             request("wrong-name.invalid", proxy, "failed")
@@ -107,4 +117,5 @@ def run(probe):
 
 
 if __name__ == "__main__":
-    run(sys.argv[1:])
+    discovery = sys.argv[1:2] == ["--discovery"]
+    run(sys.argv[2:] if discovery else sys.argv[1:], discovery=discovery)

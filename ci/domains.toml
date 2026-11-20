@@ -79,6 +79,7 @@ paths = [
   "c/lean_ui*",
   "shaders/scene_sdf.glsl",
   "scripts/test_account_vpn_transport.py",
+  "scripts/test_airvpn_sidecar.py",
   "scripts/build_orb_bins.sh",
   "scripts/turbo_lean.sh",
   "scripts/ci_harden_ubuntu_apt.sh",
