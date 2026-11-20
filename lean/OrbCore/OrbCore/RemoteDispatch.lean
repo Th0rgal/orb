@@ -1137,8 +1137,7 @@ private def ingestClaudeStreamLine
       if dty == "text_delta" then
         let piece := (delta.fieldStr? "text").getD ""
         if !piece.isEmpty then
-          if piece.isEmpty then return next
-      let full := next.text ++ piece
+          let full := next.text ++ piece
           next := { next with text := full, sawPartialDeltas := true }
           emitMissionEventAndBroadcast store broadcastHub? missionId "text_delta"
             (renderCompact (.obj #[("content", .str full)])) nowIso
