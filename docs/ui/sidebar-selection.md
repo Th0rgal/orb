@@ -27,7 +27,9 @@ A roster refresh must retain the project, folder, launch parent, callback
 parent, and fork source of each mission. A child arriving before its controller
 keeps its parent identity across the refresh. Opening a project must use its
 project-scoped roster: a global recent-missions page cannot establish either
-a complete child count or the absence of an older controller. Archives stay
+a complete child count or the absence of an older controller. The launched-work
+badge counts descendants at every depth, including those inside collapsed rows.
+Expanding a row changes visibility while preserving its count. Archives stay
 in their disclosure. Opening a child selects the same mission across refreshes.
 
 ## Press-and-hold & drag-move gestures (`lean/Orb/Kernel.lean`, `orb/src/tree/rowDrag.ts`)

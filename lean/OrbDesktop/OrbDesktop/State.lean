@@ -726,16 +726,25 @@ private def missionBranchRows (rows : Array ChromeSidebarRow)
         break
       ancestor := (parents.get? ancestor).getD ""
     children := children.insert parent ((children.getD parent #[]).push row)
-  let mut result := #[]
-  let mut pending := (children.getD "" #[]).toList.map (fun row => (row, initialDepth))
+  -- Walk the forest once. Hidden descendants still contribute to a closed
+  -- controller's launched-work count, as they do in the WebKit tree.
+  let mut bottomUp := []
+  let mut pending := (children.getD "" #[]).toList.map (fun row => (row, "", initialDepth, true))
   for _ in [:rows.size] do
-    let (row, depth) :: rest := pending | break
+    let (row, parent, depth, shown) :: rest := pending | break
+    bottomUp := (row, parent, depth, shown) :: bottomUp
+    let showChildren := shown && expanded.contains row.rowId
     let nested := children.getD row.rowId #[]
-    result := result.push { row with depth, badge := nested.size }
-    pending := if expanded.contains row.rowId then
-        nested.toList.map (fun child => (child, depth + 1)) ++ rest
-      else rest
-  return result
+    pending := nested.toList.map (fun child => (child, row.rowId, depth + 1, showChildren)) ++ rest
+  let mut totals : Std.HashMap String Nat := {}
+  let mut visible := []
+  for (row, parent, depth, shown) in bottomUp do
+    let launched := totals.getD row.rowId 0
+    if !parent.isEmpty then
+      totals := totals.insert parent (totals.getD parent 0 + launched + 1)
+    if shown then
+      visible := { row with depth, badge := launched } :: visible
+  return visible.toArray
 
 /-- Keep the complete roster for updates and context actions. Only the visible
     projection participates in rendering and shift-range selection. -/

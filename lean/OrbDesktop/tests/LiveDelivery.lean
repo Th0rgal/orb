@@ -30,6 +30,18 @@ private def controllerFixture : DesktopState :=
 #guard (({ controllerFixture with expandedMissions := ["mission:m"] } : DesktopState).visibleProjectRows.map
   (fun r => (r.rowId, r.depth))) == [("project:now", 0), ("mission:m", 1), ("mission:child", 2)]
 
+private def nestedControllerFixture : DesktopState :=
+  let grandchild := { (default : MissionSummaryCard) with
+    widgetId := 1007, missionId := "grandchild", project := "now", parentMissionId := "child" }
+  { controllerFixture with
+    missionCards := grandchild :: controllerFixture.missionCards
+    sidebarRows := { widgetId := grandchild.widgetId, rowId := "mission:grandchild", kind := "mission", title := "Worker child" } :: controllerFixture.sidebarRows }
+
+#guard (nestedControllerFixture.visibleProjectRows.map (fun r => (r.rowId, r.badge))) ==
+  [("project:now", 0), ("mission:m", 2)]
+#guard (({ nestedControllerFixture with expandedMissions := ["mission:m"] } : DesktopState).visibleProjectRows.map
+  (fun r => (r.rowId, r.badge))) == [("project:now", 0), ("mission:m", 2), ("mission:child", 1)]
+
 /-- Use the live screen with a populated header run, as in a shaped window.
 Obtain the target from the lowered scene, never by injecting an activate event. -/
 private def clickMission (st : DesktopState) (card : MissionSummaryCard) : IO DesktopState := do
