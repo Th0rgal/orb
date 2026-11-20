@@ -389,22 +389,46 @@ def openWindowRuntime {σ : Type} (cfg : RuntimeConfig) (appId : String) (initia
   let wl ← Wayland.openWindow cfg.title appId cfg.width cfg.height cfg.scale120
   initRuntimeOn cfg wl initialApp
 
+private def callArgs (a b c : UInt64) :=
+  [a,b,c,0,0,0].foldl Wayland.pushU64LE ByteArray.empty
+
+/-- A notification remains readable if the reader publishes before the window enters poll.
+The caller joins its reader inside this scope, before the descriptor can be reused. -/
+def withProducerWake {α : Type} (k : UInt32 → IO Unit → IO α) : IO α := do
+  let create ← FFI.dlSym "" "eventfd"
+  let signal ← FFI.dlSym "" "eventfd_write"
+  let closeFd ← FFI.dlSym "" "close"
+  if create == 0 || signal == 0 || closeFd == 0 then throw (IO.userError "window eventfd unavailable")
+  -- Linux EFD_CLOEXEC | EFD_NONBLOCK, so children cannot inherit the descriptor.
+  let fd := (← FFI.call create (callArgs 0 0x80800 0)).toUInt32
+  if fd == 0xffffffff then throw (IO.userError "window eventfd allocation failed")
+  try k fd (discard <| FFI.call signal (callArgs fd.toUInt64 1 0))
+  finally discard <| FFI.call closeFd (callArgs fd.toUInt64 0 0)
+
 /-- On Linux, poll the compositor fd with a timeout only when the app has a
 background producer. Wayland input wakes immediately; the timeout samples the
 mailbox without a frame-rate idle timer. `pumpEvents` owns actual dispatch. -/
-private def withWindowWait {α σ : Type} (rt : RuntimeState σ) (k : IO Unit → IO α) : IO α := do
+private def withWindowWait {α σ : Type} (rt : RuntimeState σ) (wakeFd : Option UInt32) (k : IO Unit → IO α) : IO α := do
   if rt.wayland.display == 0 then return ← k (IO.sleep 500)
   let getFd ← FFI.dlSym "libwayland-client.so.0" "wl_display_get_fd"
   let pollFn ← FFI.dlSym "" "poll"
   if getFd == 0 || pollFn == 0 then throw (IO.userError "window poll unavailable")
-  let args (a b c : UInt64) := [a,b,c,0,0,0].foldl Wayland.pushU64LE ByteArray.empty
-  let fd ← FFI.call getFd (args rt.wayland.display.toUInt64 0 0)
-  let p ← FFI.memAlloc 8
+  let fd ← FFI.call getFd (callArgs rt.wayland.display.toUInt64 0 0)
+  let drain ← FFI.dlSym "" "eventfd_read"
+  if wakeFd.isSome && drain == 0 then throw (IO.userError "window eventfd read unavailable")
+  let p ← FFI.memAlloc 24
   if p == 0 then throw (IO.userError "window poll allocation failed")
   try
     -- Linux struct pollfd { int fd; short events; short revents; }, POLLIN=1.
     FFI.memWrite p (Wayland.pushU32LE (Wayland.pushU32LE ByteArray.empty fd.toUInt32) 1)
-    k (discard <| FFI.call pollFn (args p.toUInt64 1 500))
+    match wakeFd with
+    | none => k (discard <| FFI.call pollFn (callArgs p.toUInt64 1 500))
+    | some wake =>
+      FFI.memWrite (p + 8) (Wayland.pushU32LE (Wayland.pushU32LE ByteArray.empty wake) 1)
+      k (do
+        discard <| FFI.call pollFn (callArgs p.toUInt64 2 0xffffffff)
+        -- Nonblocking read coalesces notices. A compositor-only wake returns EAGAIN.
+        discard <| FFI.call drain (callArgs wake.toUInt64 (p + 16).toUInt64 0))
   finally FFI.memFree p
 
 /-- Run the window until it is closed: render and present when there is damage, otherwise
@@ -414,8 +438,8 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
     (view : RuntimeState σ → IO (FrameView × List ScrollRegion))
     (pollFrame : RuntimeState σ → IO (σ × Damage) := fun rt => pure (rt.app, none))
     (hasProducer : σ → Bool := fun _ => false)
-    (focusChange : σ → σ → Option Nat := fun _ _ => none) :
-    IO (RuntimeState σ) := withWindowWait rt0 fun timedWait => do
+    (focusChange : σ → σ → Option Nat := fun _ _ => none)
+    (wakeFd : Option UInt32 := none) : IO (RuntimeState σ) := withWindowWait rt0 wakeFd fun timedWait => do
   let mut rt := rt0
   while rt.running do
     if !rt.wayland.configured then

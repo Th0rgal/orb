@@ -563,10 +563,12 @@ def main (args : List String) : IO UInt32 := do
   try
     let rt0 ← Runtime.openWindowRuntime rcfg "orb-desktop" initSt
     let slot ← IO.mkRef (none : Option LiveSubscription)
-    let rt ← try
-      Runtime.runWindow { rt0 with focus := initSt.initialFocusState } desktopReducer renderDesktopView
-        (fun rt => readLiveFrame slot rt.wayland.scale120 rt.viewportDeviceRect rt.app) DesktopState.hasLiveConnection menuFocusChange
-    finally closeLiveSubscription slot
+    let rt ← Runtime.withProducerWake fun wakeFd notify => do
+      try
+        Runtime.runWindow { rt0 with focus := initSt.initialFocusState } desktopReducer renderDesktopView
+          (fun rt => readLiveFrame slot rt.wayland.scale120 rt.viewportDeviceRect rt.app notify)
+          DesktopState.hasLiveConnection menuFocusChange (some wakeFd)
+      finally closeLiveSubscription slot
     Runtime.shutdownRuntime rt
     return 0
   catch e =>

@@ -75,7 +75,7 @@ structure LiveSubscription where
   latest : Std.Mutex (Option LiveUpdate)
   stop : IO Unit
 
-private def subscribe (mission binding : String) (tracked : List MissionSummaryCard) : IO LiveSubscription := do
+private def subscribe (mission binding : String) (tracked : List MissionSummaryCard) (notify : IO Unit) : IO LiveSubscription := do
   let child ← IO.Process.spawn {
     cmd := "python3", args := #["-I", "-c", transport ++ "\npoll(*sys.argv[1:])", mission, binding]
     stdin := .piped, stdout := .piped, stderr := .null }
@@ -101,7 +101,10 @@ private def subscribe (mission binding : String) (tracked : List MissionSummaryC
           | "R", [] => pure none
           | _, _ => break
         latest.atomically (set (some (LiveUpdate.sample visible bubble)))
-    finally latest.atomically (set (some LiveUpdate.invalid))
+        notify
+    finally
+      latest.atomically (set (some LiveUpdate.invalid))
+      notify
   return { mission, binding, latest, stop := do
     try child.kill catch _ => pure ()
     discard child.wait
@@ -113,7 +116,7 @@ def closeLiveSubscription (slot : IO.Ref (Option LiveSubscription)) : IO Unit :=
 /-- The window thread owns selection and damage. Each reader owns a fresh,
 single-value mailbox, so a retired subscription cannot update a new mission. -/
 def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewport : LeanUI.Rect)
-    (st : DesktopState) : IO (DesktopState × LeanUI.Damage) := do
+    (st : DesktopState) (notify : IO Unit := pure ()) : IO (DesktopState × LeanUI.Damage) := do
   let active ← slot.get
   if let some request := st.writeRequest then
     let st := { st with writeRequest := none, writeError := "" }
@@ -190,7 +193,7 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
   if active.map (·.mission) != target || active.any (·.binding != st.connectionBinding) then
     closeLiveSubscription slot
     if let some mission := target then
-      try slot.set (some (← subscribe mission st.connectionBinding st.missionCards)) catch _ => return invalidate
+      try slot.set (some (← subscribe mission st.connectionBinding st.missionCards notify)) catch _ => return invalidate
   let some sub ← slot.get | return (st, none)
   let some update ← sub.latest.atomically (modifyGet (fun v => (v, none))) | return (st, none)
   match update with
