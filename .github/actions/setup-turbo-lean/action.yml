@@ -230,8 +230,9 @@ runs:
           ~/.cache/turbo-lean/cas
           lean/**/.lake/build
           lean/**/.lake/packages
-        key: lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-${{ github.job }}-${{ hashFiles('lean/**/*.lean', 'lean/**/*.c', 'c/**/*.c', 'c/**/*.h') }}
+        key: lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-${{ github.job }}-${{ startsWith(runner.name, 'boost-jit-') && env.CCACHE_DIR != '' && 'cc1-' || '' }}${{ hashFiles('lean/**/*.lean', 'lean/**/*.c', 'c/**/*.c', 'c/**/*.h') }}
         restore-keys: |
+          lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-${{ github.job }}-${{ startsWith(runner.name, 'boost-jit-') && env.CCACHE_DIR != '' && 'cc1-' || '' }}
           lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-${{ github.job }}-
           lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-${{ hashFiles('lean/**/*.lean', 'lean/**/*.c', 'c/**/*.c', 'c/**/*.h') }}-
           lean-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean/lean-toolchain', 'lean/turbo-lean-revision', 'lean/**/lakefile.lean', 'lean/**/lake-manifest.json') }}-
