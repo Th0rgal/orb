@@ -11,7 +11,6 @@ package «orb-core» where
 -- These libraries are needed by the final executable link. Putting the flags
 -- on the package also marks every library module as having a custom linker
 -- configuration, preventing turbo-lean from reusing its verified Lake trace.
-private def nativeLinkArgs := if System.Platform.isOSX then #["-lssl", "-lcrypto"] else #["-lssl", "-lcrypto", "-lutil", "-ldl"]
 
 require «orb-spec» from ".."
 require «orb-net-leaf» from "../OrbNetLeaf"
@@ -36,30 +35,30 @@ lean_lib «OrbCore» where
 
 @[default_target]
 lean_exe «orb-core» where
-  moreLinkArgs := nativeLinkArgs
+  moreLinkArgs := if System.Platform.isOSX then #["-lssl", "-lcrypto"] else #["-lssl", "-lcrypto", "-lutil", "-ldl"]
   exeName := "orb-core"
   root := `OrbCore.CliMain
   supportInterpreter := false
 
 @[default_target]
 lean_exe «orb-core-test» where
-  moreLinkArgs := nativeLinkArgs
+  moreLinkArgs := if System.Platform.isOSX then #["-lssl", "-lcrypto"] else #["-lssl", "-lcrypto", "-lutil", "-ldl"]
   root := `OrbCore.SelfTest
   supportInterpreter := false
 
 /-- Focused inner loop; reuses the tests in orb-core-test without compiling Control. -/
 lean_exe «orb-managed-provider-test» where
-  moreLinkArgs := nativeLinkArgs
+  moreLinkArgs := if System.Platform.isOSX then #["-lssl", "-lcrypto"] else #["-lssl", "-lcrypto", "-lutil", "-ldl"]
   root := `OrbCore.ManagedProviderTestMain
   supportInterpreter := false
 
 @[default_target]
 lean_exe «orb-spec-runner» where
-  moreLinkArgs := nativeLinkArgs
+  moreLinkArgs := if System.Platform.isOSX then #["-lssl", "-lcrypto"] else #["-lssl", "-lcrypto", "-lutil", "-ldl"]
   root := `OrbCore.SpecRunnerMain
   supportInterpreter := false
 
 lean_exe «r24-focused» where
-  moreLinkArgs := nativeLinkArgs
+  moreLinkArgs := if System.Platform.isOSX then #["-lssl", "-lcrypto"] else #["-lssl", "-lcrypto", "-lutil", "-ldl"]
   root := `R24Focused
   supportInterpreter := false
