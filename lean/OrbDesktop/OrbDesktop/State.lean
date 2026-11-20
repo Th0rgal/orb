@@ -754,7 +754,7 @@ private def missionBranchRows (rows : Array ChromeSidebarRow)
     projection participates in rendering and shift-range selection. -/
 def DesktopState.visibleProjectRows (st : DesktopState) : List ChromeSidebarRow := Id.run do
   let projects := st.sidebarRows.filter (·.kind == "project")
-  if !st.hasLiveConnection || projects.isEmpty then return st.sidebarRows
+  if !st.hasLiveConnection then return st.sidebarRows
   let cards := st.missionCards.foldl (fun (index : Std.HashMap Nat MissionSummaryCard) card =>
     index.insert card.widgetId card) {}
   let projectOf := fun id => ((cards.get? id).map (·.project)).getD ""
@@ -777,9 +777,11 @@ def DesktopState.visibleProjectRows (st : DesktopState) : List ChromeSidebarRow 
     grouped := grouped.erase slug
   -- A project omitted by a partial project response must not hide its missions.
   for row in st.sidebarRows do
-    if row.kind == "mission" && row.status != "acknowledged" &&
-        grouped.contains (projectOf row.widgetId) then
-      visible := visible.push row
+    if row.kind == "mission" && row.status != "acknowledged" then
+      let slug := projectOf row.widgetId
+      if let some branch := grouped.get? slug then
+        visible := visible ++ missionBranchRows branch cards st.expandedMissions 0
+        grouped := grouped.erase slug
   return (visible ++ archived).toList
 
 def toggleSelection (st : DesktopState) (row : ChromeSidebarRow) (extend : Bool) : DesktopState := Id.run do

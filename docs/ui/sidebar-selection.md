@@ -78,6 +78,8 @@ In both Linux renderers, Ctrl-clicking A and C followed by right-clicking B clea
 
 Archive admission is checked in the same Core transaction as the status update. If B starts a turn after the client reads B as idle, Archive returns HTTP 409 and preserves B’s status even before its run record exists. The client reports the refusal and keeps A open.
 
+When a live mission list arrives before its project folders, the sidebar shows each controller at the root with its worker count. Expanding the controller reveals its workers. When its project arrives, the same controller and descendants use the project’s expansion state.
+
 ## Regression coverage
 
 - `orb/tests/sidebar-selection.test.ts` exercises the `createTreeSelection` state

@@ -30,6 +30,16 @@ private def controllerFixture : DesktopState :=
 #guard (({ controllerFixture with expandedMissions := ["mission:m"] } : DesktopState).visibleProjectRows.map
   (fun r => (r.rowId, r.depth))) == [("project:now", 0), ("mission:m", 1), ("mission:child", 2)]
 
+-- A mission snapshot can arrive before its project. Keep its controller
+-- disclosure functional until the folder becomes available.
+private def missingProjectFixture : DesktopState :=
+  { controllerFixture with sidebarRows := controllerFixture.sidebarRows.filter (·.kind != "project") }
+
+#guard (missingProjectFixture.visibleProjectRows.map (fun r => (r.rowId, r.depth, r.badge))) ==
+  [("mission:m", 0, 1)]
+#guard (({ missingProjectFixture with expandedMissions := ["mission:m"] } : DesktopState).visibleProjectRows.map
+  (fun r => (r.rowId, r.depth))) == [("mission:m", 0), ("mission:child", 1)]
+
 private def nestedControllerFixture : DesktopState :=
   let grandchild := { (default : MissionSummaryCard) with
     widgetId := 1007, missionId := "grandchild", project := "now", parentMissionId := "child" }
