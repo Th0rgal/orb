@@ -40,6 +40,26 @@ def fixture():
 
 
 class Delivery(unittest.TestCase):
+    def test_bootstrap_recovers_after_initial_timeout(self):
+        snapshot = [('C', 'binding'), ('P', 'source', 'Source', '')]
+        with patch.object(live, 'Connection') as connection, patch.object(
+                live, 'roster_rows', side_effect=[TimeoutError(), snapshot]) as read, patch.object(
+                live.time, 'sleep'), contextlib.redirect_stdout(io.StringIO()) as output:
+            live.roster()
+        self.assertEqual(output.getvalue().splitlines(), ['C\tbinding', 'P\tsource\tSource\t'])
+        self.assertEqual(read.call_count, 2)
+        for call in read.call_args_list:
+            self.assertEqual(call.args, (connection.return_value,))
+            self.assertEqual(call.kwargs, {'include_archived': True})
+
+    def test_bootstrap_rejects_expired_login_without_retry(self):
+        denied = live.urllib.error.HTTPError('http://localhost', 401, 'Unauthorized', {}, None)
+        self.addCleanup(denied.close)
+        with patch.object(live, 'Connection'), patch.object(
+                live, 'roster_rows', side_effect=denied) as read, self.assertRaises(live.urllib.error.HTTPError):
+            live.roster()
+        read.assert_called_once()
+
     def run_wire(self, mode):
         paths, tokens = [], []
         db = fixture()

@@ -300,7 +300,17 @@ def roster_rows(c, include_archived=False):
 
 def roster():
     c = Connection()
-    rows = roster_rows(c, include_archived=True)
+    # Retry the initial snapshot once. The subscription that handles later
+    # network interruptions starts only after this snapshot succeeds.
+    try:
+        rows = roster_rows(c, include_archived=True)
+    except (urllib.error.URLError, TimeoutError) as error:
+        if isinstance(error, urllib.error.HTTPError):
+            if error.code not in (408, 429, 502, 503, 504):
+                raise
+            error.close()
+        time.sleep(1)
+        rows = roster_rows(c, include_archived=True)
     for row in rows:
         print('\t'.join(map(label, row)))
 
