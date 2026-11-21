@@ -75,27 +75,31 @@ def liveComposerControls (st : DesktopState) (width : SubPx) : WidgetNode :=
       ([text] ++ (if interactive then [chromeIcon "chevron-down" st.theme.palette.textMuted 10] else []))
     if interactive then WidgetNode.focusable id raw else raw
   let display := fun (s fallback : String) => if s.isEmpty then fallback else s
-  let machine := ((st.fleetMachines.find? (·.machineId == v.machine)).map (·.name)).getD v.machine
+  let machine := ((st.launchMachines.getD []).lookup v.machine).getD <| ((st.fleetMachines.find? (·.machineId == v.machine)).map (·.name)).getD v.machine
   let harness := ((st.catalog.find? (·.backend == v.backend)).map (·.harnessName)).getD v.backend
   let model := ((st.catalog.find? fun c => c.backend == v.backend && c.model == v.model).map (·.modelName)).getD v.model
-  let children := [control 720 (display machine "Default machine") mid.isEmpty,
+  let machineHint := if st.fleetMachines.any (·.machineId == "core") then "Default machine" else "Choose machine"
+  let children := [control 720 (display machine machineHint) mid.isEmpty,
     control 721 (display harness "Harness") true, control 722 (display model "Model") true] ++
     (if ["codex","antigravity","claudecode"].contains v.backend then [control 723 (display v.effort "Default effort") true] else []) ++
     (if v.backend == "claudecode" then [control 724 v.permission true] else [])
   WidgetNode.box (BoxStyle.row (pxToSub 12) |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 12) 0)
-    |>.withFixedSize width (pxToSub 36)) children
+    |>.withFixedSize width (pxToSub 36)) (if width < pxToSub 520 then [control 714 "Mission settings" true] else children)
 
 def buildMissionMenu (st : DesktopState) (menu : MissionMenu) (width : SubPx) (visibleCount : Nat) : WidgetNode :=
   let pal := st.theme.palette
   let rows := (((missionMenuRows st menu).drop menu.first).take visibleCount).mapIdx fun i item =>
-    let label := WidgetNode.text { BoxStyle.row 0 with grow := 1 } (pxToSub 18)
+    let hasChevron := item.id == 711 || (menu.page == .settings && (settingTrigger item.id).isSome)
+    -- Keep every visible glyph inside the row that receives the click.
+    let labelWidth := width - pxToSub (12 + 16 + 14 + 9 + (if hasChevron then 21 else 0))
+    let label := WidgetNode.text { (BoxStyle.row 0 |>.withFixedSize labelWidth (pxToSub 18)) with clip := true } (pxToSub 18)
       [overlaySynthRun (Theme.bodyText st.theme) item.label]
     let row := WidgetNode.focusable item.id <| WidgetNode.box
       (BoxStyle.row (pxToSub 9) |>.withBg (if menu.first + i == menu.highlighted then pal.accentMuted else pal.elevatedSurface)
         |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 8) 0)
         |>.withFixedSize (width - pxToSub 12) (pxToSub 30))
       ([chromeIcon item.icon pal.textMuted 14, label] ++
-        (if item.id == 711 || (menu.page == .settings && (settingTrigger item.id).isSome) then [chromeIcon "chevron-right" pal.textMuted 12] else []))
+        (if hasChevron then [chromeIcon "chevron-right" pal.textMuted 12] else []))
     if item.separatorBefore then
       [WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (width - pxToSub 12) (pxToSub 1) |>.withBg pal.border) [], row]
     else [row]

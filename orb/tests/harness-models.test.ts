@@ -20,7 +20,8 @@ describe("destination account models", () => {
   });
   it("keeps Core's connected Antigravity catalog on Core and fleet nodes until machine discovery resolves", () => {
     for (const machine of ["core", "nimrud"]) {
-      const pending = destinationHarnessChoices(core, machine, []);
+      const pending = destinationHarnessChoices(core, machine, undefined);
+      expect(destinationHarnessChoices(core, machine, [])).toEqual([]);
       expect(pending[0].backend).toEqual({ id: "antigravity", name: "Antigravity CLI", native_plan: true });
       expect(pending[0].models.map(m => m.value)).toEqual(["agy-model"]);
       expect(destinationHarnessChoices(core, machine, [["agy-demo", "Gemini 4 Argon"]])[0].models.map(m => m.value)).toEqual(["agy-demo"]);
@@ -29,7 +30,7 @@ describe("destination account models", () => {
   it("sorts Antigravity in composer harness order alongside other harnesses", () => {
     const codex = {backend:{id:"codex",name:"Codex"},models:[{value:"model",label:"Model"}]};
     const vibe = {backend:{id:"vibe",name:"Mistral Vibe"},models:[{value:"mistral/devstral",label:"Devstral"}]};
-    expect(destinationHarnessChoices([...core,codex,vibe],"core",[]).map(c=>c.backend.id)).toEqual(["codex","antigravity","vibe"]);
+    expect(destinationHarnessChoices([...core,codex,vibe],"core",undefined).map(c=>c.backend.id)).toEqual(["codex","antigravity","vibe"]);
   });
   it("supports a node-only installation without Core having the CLI", () => {
     expect(destinationHarnessChoices([],"old-agent",[["agy-demo","Gemini 4 Argon"]])[0].backend.id).toBe("antigravity");

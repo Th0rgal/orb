@@ -391,6 +391,8 @@ structure DesktopState where
   sidebarRows : List ChromeSidebarRow := []
   missionCards : List MissionSummaryCard := []
   fleetMachines : List FleetMachineCard := []
+  launchMachines : Option (List (String × String)) := none
+  launchMachinesFailed : Bool := false
   toasts : List ToastSpec := []
   modal : ActiveModal := .none
   composer : ComposerBuffer := {}
@@ -727,7 +729,9 @@ def currentSettings (st : DesktopState) (mid : String) : LaunchSettings :=
 def settingChoices (st : DesktopState) (mid : String) (field : SettingField) : List (String × String) :=
   let values := currentSettings st mid
   match field with
-  | .machine => [("", "Default machine")] ++ st.fleetMachines.map fun m => (m.machineId, m.name)
+  | .machine =>
+    let localMachines := st.fleetMachines.filter (·.machineId == "core")
+    (if localMachines.isEmpty then [] else [("", "Default machine")]) ++ (localMachines.map fun m => (m.machineId, m.name)) ++ st.launchMachines.getD []
   | .backend => (st.catalog.map fun c => (c.backend, c.harnessName)).eraseDups
   | .model => (st.catalog.filter (·.backend == values.backend)).map fun c => (c.model, c.modelName)
   | .effort =>
@@ -894,8 +898,11 @@ def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuR
     let choices := settingChoices st menu.mission field
     if st.catalogLoading && (field == .backend || field == .model) then
       return [{ id := 729, label := "Loading choices…", icon := "list" }]
-    if choices.isEmpty then return [{ id := 719, label := "No available choices", icon := "list" }]
-    return choices.mapIdx fun i (value, label) => { id := 2000000 + i, label, icon := "list", value }
+    let rows : List MissionMenuRow := choices.mapIdx fun i (value, label) => { id := 2000000 + i, label, icon := "list", value }
+    if field == .machine && st.launchMachines.isNone then
+      return rows ++ [{ id := 729, label := if st.launchMachinesFailed then "Could not load remote machines. Reopen to retry." else "Loading remote machines…", icon := "list" }]
+    if rows.isEmpty then return [{ id := 719, label := "No available choices", icon := "list" }]
+    return rows
   let clear : MissionMenuRow := { id := 727, label := "Clear selection", icon := "close", separatorBefore := true }
   if menu.mixed then return [{ id := 729, label := "No shared actions", icon := "list" }, clear]
   if menu.targets.length > 1 then
@@ -915,8 +922,23 @@ def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuR
       action := some (.bulk "archive" archive "") }]) ++ (if restore.isEmpty then [] else
       [{ id := 725, label := s!"Restore {restore.length} conversations", icon := "archive", action := some (.bulk "restore" restore "") }]) ++
       [{ id := 726, label := s!"Delete {menu.targets.length} agents…", icon := "close", separatorBefore := true }, clear]
-  let some card := st.missionCards.find? (·.missionId == menu.mission) | return []
-  let projects := st.sidebarRows.filter fun r => r.kind == "project" && r.rowId != "project:" ++ card.project
+  let card? := st.missionCards.find? (·.missionId == menu.mission)
+  let currentProject := (card?.map (·.project)).getD ""
+  let projects := st.sidebarRows.filter fun r => r.kind == "project" && r.rowId != "project:" ++ currentProject
+  if menu.page == .settings then
+    let v := currentSettings st menu.mission
+    let navigation : List MissionMenuRow := if menu.trigger == 714 then [] else [{ id := 715, label := "Mission settings", icon := "back" }]
+    let machine : List MissionMenuRow := if menu.mission.isEmpty then
+      [{ id := 720, label := "Machine · " ++ (if v.machine.isEmpty then "Choose machine" else v.machine), icon := "nav:machines" }] else []
+    return navigation ++ machine ++ [
+      { id := 721, label := "Harness · " ++ v.backend, icon := "list" },
+      { id := 722, label := "Model · " ++ (if v.model.isEmpty then "Default" else v.model), icon := "s:models" }] ++
+      (if ["codex", "antigravity", "claudecode"].contains v.backend then
+        [{ id := 723, label := "Effort · " ++ (if v.effort.isEmpty then "Default" else v.effort), icon := "list" }] else []) ++
+      (if v.backend == "claudecode" then
+        [{ id := 724, label := "Permissions · " ++ v.permission, icon := "nav:settings" }] else []) ++
+      (if menu.trigger == 714 || projects.isEmpty then [] else [{ id := 711, label := "Move to", icon := "folder", separatorBefore := true }])
+  let some card := card? | return []
   match menu.page with
   | .picker _ | .confirmDelete => return []
   | .actions =>
@@ -933,21 +955,14 @@ def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuR
   | .rename =>
     return [{ id := 1, label := menu.draft.text ++ menu.draft.imePreeditText, icon := "rename" },
       { id := 716, label := "Save", icon := "check", action := some (.rename card.missionId menu.draft.text) }]
-  | .settings =>
-    return [{ id := 715, label := "Mission settings", icon := "back" },
-      { id := 721, label := "Harness · " ++ card.backend, icon := "list" },
-      { id := 722, label := "Model · " ++ (if card.model.isEmpty then "Default" else card.model), icon := "s:models" }] ++
-      (if ["codex", "antigravity", "claudecode"].contains card.backend then
-        [{ id := 723, label := "Effort · " ++ (if card.effort.isEmpty then "Default" else card.effort), icon := "list" }] else []) ++
-      (if card.backend == "claudecode" then
-        [{ id := 724, label := "Permissions · " ++ (currentSettings st menu.mission).permission, icon := "nav:settings" }] else []) ++
-      (if projects.isEmpty then [] else [{ id := 711, label := "Move to", icon := "folder", separatorBefore := true }])
+  | .settings => return []
 
 def menuFocusChange (before after : DesktopState) : Option Nat :=
   match before.missionMenu, after.missionMenu with
   | some old, none => some old.trigger
   | old, some menu =>
-    if before.catalogLoading == after.catalogLoading && old.any (fun m => m.page == menu.page && m.highlighted == menu.highlighted && m.trigger == menu.trigger) then none
+    let fleetLoaded := menu.page == .picker .machine && before.launchMachines.isNone && after.launchMachines.isSome
+    if !fleetLoaded && before.catalogLoading == after.catalogLoading && old.any (fun m => m.page == menu.page && m.highlighted == menu.highlighted && m.trigger == menu.trigger) then none
     else ((missionMenuRows after menu)[menu.highlighted]?).map (·.id)
   | _, _ => none
 
@@ -1002,7 +1017,9 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
     let some row := (missionMenuRows st menu).find? (·.id == id) | return (st, none)
     if menu.page == .settings then
       if let some field := settingTrigger id then
-        return update { menu with page := .picker field, first := 0, highlighted := 0 }
+        let next := { menu with page := .picker field, first := 0, highlighted := 0 }
+        if field == .machine then return ({ st with missionMenu := some next, launchMachines := none, launchMachinesFailed := false }, some viewport)
+        return update next
     if let .picker field := menu.page then return (chooseSetting st menu.mission field row.value, some viewport)
     let some action := row.action | return (st, none)
     if menu.page == .rename && (menu.draft.text.trimAscii.isEmpty || !menu.draft.imePreeditText.isEmpty) then return (st, none)

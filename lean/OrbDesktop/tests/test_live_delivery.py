@@ -60,6 +60,28 @@ class Delivery(unittest.TestCase):
             live.roster()
         read.assert_called_once()
 
+    def test_launchable_remote_nodes_are_independent_of_personal_vms(self):
+        def node(ident, **fields):
+            return {'id': ident, 'status': 'online', **fields}
+        fleet = {'enabled': True, 'remote_launch': {'typed': True}, 'nodes': [
+            node('uruk', display_name='Uruk'), node('core'), node('admin', labels=['admin-only']),
+            node('maintenance', cordoned=True), node('down', status='offline'),
+            node('quarantined', quarantined_harnesses=['codex']),
+            node('dgx-spark-admin', cordoned=True, labels=['manual-only', 'administration'])]}
+        with patch.object(live, 'Connection') as conn, contextlib.redirect_stdout(io.StringIO()) as output:
+            c = conn.return_value
+            c.binding = 'ben'
+            c.request.return_value = fleet
+            live.launch_machines('thomas', 'admin', 'codex')
+            c.request.assert_not_called()
+            live.launch_machines('ben', 'member', 'codex')
+            c.request.assert_called_once_with('/api/remote-nodes', deadline=15)
+            c.check.assert_called_once()
+        self.assertEqual(output.getvalue().splitlines(), ['machines', 'R\turuk\tUruk'])
+        permitted = [r[1] for r in live.launch_machine_rows(fleet, True, 'codex')]
+        self.assertEqual(permitted, ['uruk', 'admin', 'dgx-spark-admin'])
+        self.assertEqual(list(live.launch_machine_rows({**fleet, 'remote_launch': {}}, True, '')), [])
+
     def test_provider_inventory_projects_only_the_current_users_display_fields(self):
         accounts = [{'id': 'test-member', 'name': 'Gemini', 'label': 'Work', 'provider_type_name': 'Google',
                      'enabled': True, 'user_enabled': False, 'account_email': 'private@example.test',

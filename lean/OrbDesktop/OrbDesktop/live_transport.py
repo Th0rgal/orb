@@ -95,11 +95,13 @@ def run_mutation(binding, action, mid):
         return 2
     except urllib.error.HTTPError as error:
         with error:
-            if action in ('create', 'send') and error.code == 400:
+            if action in ('create', 'send') and error.code in (400, 403):
                 try:
                     detail = json.loads(error.read(4096)).get('error')
                 except (ValueError, AttributeError):
                     detail = None
+                if action == 'create' and error.code == 403 and detail == 'core_target_forbidden_for_member':
+                    return 5
                 if isinstance(detail, str) and detail.partition(':')[0] in (
                         'remote_goal_unsupported', 'remote_goal_followup_unsupported'):
                     return 3 if action == 'create' else 4
@@ -404,6 +406,36 @@ def catalog_rows(c, rules):
         for option in visible_model_options(backend, options, rules):
             if option.get('value'):
                 yield ('H', backend, by_id[backend], option['value'], option.get('label') or option['value'])
+
+
+def launch_machine_rows(fleet, administrative, harness):
+    if fleet['enabled'] is not True or (fleet.get('remote_launch') or {}).get('typed') is not True:
+        return
+    for node in fleet['nodes']:
+        ident = node['id']
+        if not isinstance(ident, str) or not ident or label(ident) != ident:
+            raise ValueError('invalid node identifier')
+        labels = {v.strip().lower() for v in node.get('labels', [])}
+        admin_only = (node.get('admin_only') or node.get('core_colocated') or 'admin-only' in labels or
+                      ident in ('core', 'agent-core', 'dgx-spark-admin'))
+        manual_admin = administrative and ident == 'dgx-spark-admin' and {'administration', 'manual-only'} <= labels
+        if (admin_only and not administrative) or (node.get('cordoned') and not manual_admin):
+            continue
+        if node['status'] not in ('online', 'degraded') or harness in (node.get('quarantined_harnesses') or []):
+            continue
+        if ident != 'core':
+            yield ('R', ident, node.get('display_name') or ident)
+
+
+def launch_machines(binding, role, harness):
+    c = Connection()
+    if c.binding != binding:
+        return
+    rows = list(launch_machine_rows(c.request('/api/remote-nodes', deadline=15), role == 'admin', harness))
+    c.check()
+    print('machines')
+    for row in rows:
+        print('\t'.join(map(label, row)))
 
 
 def provider_inventory(binding):
