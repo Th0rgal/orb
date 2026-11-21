@@ -188,6 +188,22 @@ end ComposerBuffer
     }
   { glyphs := glyphs, style := style, allowBreakAfter := true, hardBreakAfter := false }
 
+/-- Keep explicit line breaks and word boundaries through native font shaping. -/
+private def composerTextRuns (style : TextStyle) (text : String) : List InlineRun := Id.run do
+  let mut out := #[]
+  let mut word := ""
+  for ch in text.toList do
+    if ch == '\n' then
+      out := out.push { (composerSynthRun style word) with hardBreakAfter := true }
+      word := ""
+    else
+      word := word.push ch
+      if ch == ' ' then
+        out := out.push (composerSynthRun style word)
+        word := ""
+  if !word.isEmpty then out := out.push (composerSynthRun style word)
+  return out.toList
+
 /-- Build styled `InlineRun`s for a `ComposerBuffer`, highlighting the active IME preedit span
 with an underline and accent color when `imePreeditLen > 0`. -/
 def buildComposerInlineRuns (theme : Theme) (buf : ComposerBuffer)
@@ -210,11 +226,11 @@ def buildComposerInlineRuns (theme : Theme) (buf : ComposerBuffer)
         color := pal.accent
         underline := true
       }
-      let beforeRun := if beforeStr.isEmpty then [] else [composerSynthRun bodyStyle beforeStr]
+      let beforeRun := composerTextRuns bodyStyle beforeStr
       let preeditRun :=
         if buf.imePreeditText.isEmpty then []
         else [composerSynthRun preeditStyle buf.imePreeditText]
-      let afterRun := if afterStr.isEmpty then [] else [composerSynthRun bodyStyle afterStr]
+      let afterRun := composerTextRuns bodyStyle afterStr
       beforeRun ++ preeditRun ++ afterRun
 
 /-- Build an attachment chip widget for a single `ComposerAttachment`. -/
@@ -276,17 +292,19 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
   let hasText := !buf.text.isEmpty || !buf.imePreeditText.isEmpty
   -- Two 24px buttons, two 8px gaps, pill padding, text inset and border.
   let placeholderWidth := colW - pxToSub (48 + 16 + 22 + 2) - 2 * theme.borderWidth
+  let runs := buildComposerInlineRuns theme buf overrideRuns
+  let editH := if tall then max (pxToSub 48) (min (pxToSub 180) (wrapInlineRuns (colW - pxToSub 26) (pxToSub 18) runs).2.2) else pxToSub 18
   let textNode : WidgetNode :=
     WidgetNode.text
       { BoxStyle.row 0 with
         grow := 1
-        clip := tall || !hasText
+        clip := !hasText
         maxWidth := if tall then colW - pxToSub 26 else if hasText then (BoxStyle.row 0).maxWidth else placeholderWidth
-        minHeight := pxToSub (if tall then 48 else 18)
-        maxHeight := pxToSub (if tall then 48 else 18)
+        minHeight := editH
+        maxHeight := editH
         padding := Edges.trbl 0 0 0 (pxToSub 2) }
       (pxToSub 18)
-      (buildComposerInlineRuns theme buf overrideRuns)
+      runs
   let sendBgCol := if hasText || isRunning then pal.sendBg else ((pal.sendBg &&& 0xFFFFFF00) ||| 0x47)
   let glyph : WidgetNode := if isRunning then
       WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 6) (pxToSub 6)) pal.sendFg
@@ -347,7 +365,7 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
       ([attachBtn] ++ controls.toList ++ [sendBtn])
     let card := WidgetNode.focusable buf.composerWidgetId <| WidgetNode.box
       (BoxStyle.col (pxToSub 6) |>.withPadding (Edges.trbl (pxToSub 10) (pxToSub 12) (pxToSub 8) (pxToSub 12))
-        |>.withFixedSize colW (pxToSub 98 + (if hasChips then chipRowH else 0))
+        |>.withFixedSize colW (pxToSub 50 + editH + (if hasChips then chipRowH else 0))
         |>.withBg pillBg |>.withRadius (pxToSub 12) |>.withBorder theme.borderWidth borderCol)
       (chipBar ++ [textNode, toolbar])
     WidgetNode.box (BoxStyle.col (pxToSub 10) |>.withAlign .center) [header, card]
