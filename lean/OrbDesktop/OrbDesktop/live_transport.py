@@ -498,6 +498,38 @@ def launch_machines(binding, role, harness):
         print('\t'.join(map(label, row)))
 
 
+def resource_inventory(binding, window):
+    c = Connection()
+    if c.binding != binding:
+        return
+    overview = c.get('/api/resources/overview?' + urllib.parse.urlencode({'range': window}))
+    rows = []
+    for kind, items in (('Inference', overview['inference']['pools']),
+                        ('Compute', overview['compute']['sources']),
+                        ('Mission', overview['missions'])):
+        if not isinstance(items, list):
+            raise ValueError('invalid resource inventory')
+        for item in items:
+            mission = ''
+            if kind == 'Mission':
+                mission = item['id']
+                if not mission or label(mission) != mission:
+                    raise ValueError('invalid mission identifier')
+                name = item['title'] or mission
+                usage = f"{item['status']} · {item['vcpu']:g} vCPU · {item['b_tok_per_h']:g} B tok/h"
+            elif kind == 'Compute':
+                name = item['label']
+                usage = f"{item['active_vcpu']:g}/{item['total_vcpu']:g} vCPU · ${item['est_usd_per_h']:g}/h"
+            else:
+                name = item['label']
+                usage = f"{item['current_b_tok_per_h']:g} B tok/h · ${item['est_usd_per_h']:g}/h"
+            rows.append(('R', mission, f'{kind} · {name}', usage))
+    c.check()
+    print('resources')
+    for row in rows:
+        print('\t'.join(map(label, row)))
+
+
 def provider_inventory(binding):
     c = Connection()
     if c.binding != binding:
