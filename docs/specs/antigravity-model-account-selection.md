@@ -164,3 +164,55 @@ requires port 443 in the guest, rejects every identity request, and checks
 the actual CLI terminal result and zero generation requests. Google's
 headless CLI documentation describes using cached credentials after sign-in.
 [Headless mode](https://antigravity.google/docs/cli/headless/)
+
+### Running the signed-in CLI in a trusted per-account service
+
+A service could keep the genuine native login and all Google traffic inside the
+selected account's VPN. The remaining boundary is between that service and
+mission-controlled workspace operations. On Linux agy 1.5.13 and 1.5.14, we
+found no documented mode that assigns those operations exclusively to a
+separately authenticated workspace executor.
+
+* The terminal sandbox uses OS namespaces and permission-derived mounts for
+  shell commands. Google documents that `--sandbox` has no effect when the
+  sandbox is unavailable and describes execution outside it. The option
+  specifies neither a mandatory remote runner nor the identity for other
+  workspace subprocesses. Hooks can run scripts and stdio MCP servers have their
+  own executable configuration. Mounting the remote checkout into the service
+  solves file visibility alone.
+  [Terminal sandbox](https://antigravity.google/docs/sandbox/)
+  · [Hooks](https://antigravity.google/docs/hooks/)
+  · [MCP transports](https://antigravity.google/docs/mcp/)
+* ACP carries permission decisions and session state. In a loopback-only
+  guest with an empty HOME, both binaries completed ACP v1 `initialize` with
+  client terminal and file capabilities enabled. Both advertised session
+  load and resume; `--process-per-session` added HTTP MCP capability. That
+  handshake exercises capability negotiation only. The documented per-session
+  process flag does not select an OS principal for tools. IDE MCP adds host
+  tools; the documentation provides no exclusive client-execution contract
+  for native commands, filesystem operations, or workspace integrations.
+  [ACP interface and flags](https://antigravity.google/docs/ide/extensions/acp/)
+* Remote Control attaches to the machine running the agent. Remote Agents use
+  Google-managed environments and project resources. The App's SSH mode runs
+  tools and saves the Google login on the SSH host. None documents a headless
+  service option to bind a session to an existing Orb worker for tool execution.
+  [Remote Control](https://antigravity.google/docs/remote-control/)
+  · [Remote Agents](https://antigravity.google/docs/remote-agents/)
+  · [SSH](https://antigravity.google/docs/ssh/)
+
+**Minimal upstream request.** Add a mandatory workspace-executor mode to
+`agy acp`. Let the authenticated service bind a session to a caller-supplied
+executor for all workspace file access and process execution, including
+terminal commands, hooks, and stdio MCP. Unsupported local integrations must
+be disabled in that mode. Apply native tool approvals before dispatch; if the
+executor disconnects, fail the operation without local fallback. The executor
+receives mission-scoped authority only. OAuth, eligibility, inference and
+native conversation state stay in the service.
+
+Orb could then persist the selected account, mission, stable workspace
+identity and native conversation ID together, verify that binding on resume,
+and reconnect the same worker workspace. Acceptance would require a ledger
+edit and resume on that worker, denial before dispatch, and a disconnected
+executor producing zero local executions. The CLI scopes its local conversation
+history by working directory.
+[Conversation scoping](https://antigravity.google/docs/cli/conversations/)
