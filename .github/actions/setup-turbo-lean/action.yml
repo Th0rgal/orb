@@ -192,7 +192,7 @@ runs:
     # only the downstream C compilation, keyed by preprocessed input, compiler
     # contents and flags. Never replace the Lean build or the executable link.
     - name: Configure validated native object cache
-      if: runner.os == 'Linux' && (github.job == 'test' || github.job == 'docker' || github.job == 'orb-desktop-shell' || github.job == 'harness-contract')
+      if: runner.os == 'Linux' && (github.job == 'test' || github.job == 'docker' || github.job == 'orb-desktop-shell' || github.job == 'harness-contract' || (github.job == 'policy-lint' && startsWith(runner.name, 'boost-jit-')))
       shell: bash
       run: |
         set -euo pipefail
@@ -206,7 +206,7 @@ runs:
         chmod 755 "$RUNNER_TEMP/orb-cc/clang"
         {
           echo "LEAN_CC=$RUNNER_TEMP/orb-cc/clang"
-          if [[ "$GITHUB_JOB" == test && "$RUNNER_NAME" == boost-jit-* ]]; then
+          if [[ ( "$GITHUB_JOB" == test || "$GITHUB_JOB" == policy-lint ) && "$RUNNER_NAME" == boost-jit-* ]]; then
             # Lake fans out native object builds independently of turbo-lean's
             # module budget. Serialize cache misses; hits still run in parallel.
             printf '%s\n' '#!/bin/sh' 'exec flock -F "$RUNNER_TEMP/orb-cc/compile.lock" "$@"' > "$RUNNER_TEMP/orb-cc/compile-one"
