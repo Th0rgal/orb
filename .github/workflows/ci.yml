@@ -182,8 +182,7 @@ jobs:
 
   policy-lint:
     name: Policy Lint
-    # The native MCP test companion needs a stable build runner.
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && github.repository == 'Th0rgal/orb' && ((github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) && 'lean-4vcpu-ubuntu-2604' || 'ubuntu-latest' }}
     # Skip CI on draft PRs unless explicitly requested
     needs: plan
     if: (needs.plan.outputs.run_policy_lint == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
@@ -201,6 +200,9 @@ jobs:
       # example.invalid, unified-MCP tests use a 127.0.0.1 server. Build the native
       # Lean sandboxed-mcp companion first so test_unified_mcp_runtime.py runs.
       - name: Build native Lean sandboxed-mcp companion for runtime tests
+        env:
+          LEAN_NUM_THREADS: '1'
+          ORB_TURBO_LEAN_JOBS: '1'
         run: |
           ./scripts/ci_harden_ubuntu_apt.sh
           sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev zstd
