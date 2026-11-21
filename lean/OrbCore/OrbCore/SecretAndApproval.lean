@@ -29,12 +29,15 @@ private def secretRequestMatches (r : JVal) (missionId projectSlug secretName ca
   (r.fieldStr? "project").getD "" == projectSlug &&
   (callerSubject.isEmpty || (r.fieldStr? "requester_subject").getD "" == callerSubject)
 
+private def secretRequestStatusAt (r : JVal) (nowEpochSec : UInt64)
+    (fallback : Option String := none) : Option String := do
+  let status ← ((r.fieldStr? "status").orElse (fun _ => r.fieldStr? "state")).orElse (fun _ => fallback)
+  if status == "pending" && (r.fieldUInt64? "expires_at_epoch").any (· ≤ nowEpochSec) then
+    return "expired"
+  return status
+
 private def secretRequestIsLive (r : JVal) (nowEpochSec : UInt64) : Bool :=
-  let status := (r.fieldStr? "status").getD "pending"
-  status == "pending" &&
-    match r.fieldUInt64? "expires_at_epoch" with
-    | some exp => nowEpochSec < exp
-    | none => true
+  secretRequestStatusAt r nowEpochSec == some "pending"
 
 private def secretApprovalIsLive (r : JVal) (nowEpochSec : UInt64) : Bool :=
   (r.fieldStr? "status").getD "" == "approved" &&
@@ -467,7 +470,8 @@ def mcpSecretGet
   if !allowed && !approvedRequest then
     let reqs := (broker.fieldArr? "requests").getD #[]
     if let some existing := reqs.find? (fun r =>
-        secretRequestMatches r missionId projectSlug secretName callerSubject && secretRequestIsLive r nowEpochSec) then
+        secretRequestMatches r missionId projectSlug secretName callerSubject &&
+        secretRequestStatusAt r nowEpochSec (some "pending") == some "pending") then
       return .obj #[
         ("status", .str "pending"),
         ("request_id", .str ((existing.fieldStr? "id").getD "")),
@@ -1260,7 +1264,7 @@ def dispatchSecretAndApprovalRoutes?
       let mAcc ← readDataJsonObj dataRoot "mission_access.json"
       let pSummary ← mcpListPrivilegedAccess st dataRoot "" nowEpochSec
       let secPendingRaw := ((broker.fieldArr? "requests").getD #[]).filter (fun r =>
-        ((r.fieldStr? "status").orElse (fun _ => r.fieldStr? "state") |>.getD "") == "pending")
+        secretRequestIsLive r nowEpochSec)
       let maPendingRaw := ((mAcc.fieldArr? "requests").getD #[]).filter (fun r =>
         ((r.fieldStr? "state").orElse (fun _ => r.fieldStr? "status") |>.getD "") == "pending")
       let paPendingNorm := ((pSummary.fieldArr? "requests").getD #[]).filter (fun r =>
@@ -1285,7 +1289,7 @@ def dispatchSecretAndApprovalRoutes?
       let mAcc ← readDataJsonObj dataRoot "mission_access.json"
       let pSummary ← mcpListPrivilegedAccess st dataRoot "" nowEpochSec
       let secPending := ((broker.fieldArr? "requests").getD #[]).filter (fun r =>
-        ((r.fieldStr? "status").orElse (fun _ => r.fieldStr? "state") |>.getD "") == "pending") |>.map buildSecretApprovalItem
+        secretRequestIsLive r nowEpochSec) |>.map buildSecretApprovalItem
       let maPending := ((mAcc.fieldArr? "requests").getD #[]).filter (fun r =>
         ((r.fieldStr? "state").orElse (fun _ => r.fieldStr? "status") |>.getD "") == "pending") |>.map (fun r => buildMissionAccessApprovalItem r nowIso)
       let paPending := ((pSummary.fieldArr? "requests").getD #[]).filter (fun r =>
@@ -1447,7 +1451,11 @@ def dispatchSecretAndApprovalRoutes?
       | .error e => return okJson 200 (renderCompact (.obj #[("secrets", .arr #[]), ("error", .str e)]))
     if method == "GET" && cleanPath == "/api/bitwarden/broker" then
       let broker ← readDataJsonObj dataRoot "secret_broker.json"
-      let safeReqs := (((broker.fieldArr? "requests").getD #[])).map (fun r => (r.removeField "encrypted_value").removeField "value")
+      let safeReqs := ((broker.fieldArr? "requests").getD #[]).map fun r =>
+        let safe := (r.removeField "encrypted_value").removeField "value"
+        match secretRequestStatusAt r nowEpochSec with
+        | some status => safe.setField "status" (.str status)
+        | none => safe
       let safeBroker := broker.setField "requests" (.arr safeReqs)
       return okJson 200 (renderCompact safeBroker)
     if method == "POST" && cleanPath.startsWith "/api/bitwarden/requests/" && cleanPath.endsWith "/approve" then
@@ -1456,6 +1464,8 @@ def dispatchSecretAndApprovalRoutes?
       let reqs := (broker.fieldArr? "requests").getD #[]
       let some targetReq := reqs.find? (fun r => (r.fieldStr? "id").getD "" == reqId)
         | return okJson 404 "{\"error\":\"request_not_found\"}"
+      if secretRequestStatusAt targetReq nowEpochSec == some "expired" then
+        return okJson 409 "{\"error\":\"approval_not_pending\"}"
       if normalizeSecretTier ((targetReq.fieldStr? "kind").getD "read") != "read" then
         return okJson 409 "{\"error\":\"unsupported\",\"message\":\"Only read secret requests can be approved; the intended write/delete/move effect is not supported.\"}"
       let grants := (broker.fieldArr? "grants").getD #[]

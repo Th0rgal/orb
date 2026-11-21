@@ -21,7 +21,7 @@ inductive WidgetPayload where
   /-- Round-capped polylines in a 16px view box, coordinates in tenths of a pixel. -/
   | vectorIcon (paths : List (List (Int × Int))) (color : Color) (badgeBg : Option Color := none)
   /-- Tree branch behind an icon, with its small bottom-right status ring. -/
-  | treeDecoration (branch : Bool) (last : Bool) (stroke status background : Color)
+  | treeDecoration (branch last children : Bool) (rails : List Nat) (stroke status background : Color)
   | image (tex : Nat) (src : Rect) (radius : SubPx)
   | scrollClip (scroll : ScrollSpec)
   | roundedClip (radii : CornerRadii)
@@ -103,8 +103,8 @@ def downChevronPaths : List (List (Int × Int)) := [[(50,65),(80,95),(110,65)]]
 
 /-- Declarative scrollable clip region widget builder. -/
 @[inline] def scrollClip (style : BoxStyle) (scroll : ScrollSpec) (child : WidgetNode)
-    (id : Option WidgetId := none) : WidgetNode :=
-  .mk id false true ({ style with clip := true }) (.scrollClip scroll) [child]
+    (id : Option WidgetId := none) (hitTestable := true) : WidgetNode :=
+  .mk id false hitTestable ({ style with clip := true }) (.scrollClip scroll) [child]
 
 /-- Declarative rounded scissor clip region widget builder. -/
 @[inline] def roundedClip (style : BoxStyle) (radii : CornerRadii)
@@ -228,15 +228,20 @@ def emitPayloadPrims (scale120 : Nat) (box : ComputedBox) : WidgetPayload → Li
     [.quad disc bg (scaleSubPx scale120 (pxToSub 6)) 0 0,
      .mask page src { x := disc.x + p 1, y := disc.y + p 1, w := p 10, h := p 10 } color]
   | .vectorIcon _ _ _ => [] -- Rasterized into the shared atlas before layout.
-  | .treeDecoration branch last stroke status background =>
+  | .treeDecoration branch last children rails stroke status background =>
     let r := box.rectDev
     let p (n : Nat) := Int.ofNat (scaleSubPx scale120 (pxToSub n))
     let x := r.x - p 8
     let y := r.y + p 8
-    (if branch then
-       [Prim.quad { x := x, y := r.y - p 7, w := p 1, h := if last then p 15 else p 31 } stroke 0 0 0,
-        Prim.quad { x := x, y := y, w := p 9, h := p 1 } stroke 0 0 0]
-     else []) ++
+    let top := r.y - p 7
+    let rail := fun offset => Prim.quad { x := x - p (16 * offset), y := top, w := p 1, h := p 32 } stroke 0 0 0
+    let childLink := if children then
+      [Prim.quad { x := r.x + p 8, y := r.bottom, w := p 1, h := p 9 } stroke 0 0 0] else []
+    rails.map rail ++ childLink ++
+    (if !branch then [] else if last then
+       [Prim.rrect { x, y := top, w := p 9, h := y - top + p 1 } 0 (0, 0, 0, (p 4).toNat)
+         (0, 0, (p 1).toNat, (p 1).toNat) stroke]
+     else [rail 0, Prim.quad { x, y, w := p 9, h := p 1 } stroke 0 0 0]) ++
     (if status == 0 then [] else
        [Prim.quad { x := r.x + p 10, y := r.y + p 10, w := p 8, h := p 8 }
          background (scaleSubPx scale120 (pxToSub 4)) (scaleSubPx scale120 (pxToSub 1)) status])

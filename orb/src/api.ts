@@ -1,3 +1,4 @@
+import projectHistoryRules from "./projectHistoryRules.json";
 import modelCatalogRules from "./modelSuccessors.json";
 import { nativeInvoke } from "./native";
 import { missionNode } from "./machines/nodes";
@@ -453,19 +454,26 @@ export const [connectionVersion, bumpConnectionVersion] = createSignal(0);
 let connectionSave = Promise.resolve();
 let connectionSavesInFlight = 0;
 export const isDesktopConnectionSaving = (): boolean => connectionSavesInFlight > 0;
-function persistDesktopConnection(connection: {api_url:string;token:string}|null) {
-  const invoke=nativeInvoke();
-  if(!invoke)return;
+type DesktopCredential = { api_url: string; token: string };
+export const accountHandoff = () => !!nativeInvoke() && window.location.hash === "#account-settings";
+function persistDesktopConnection(connection: DesktopCredential | null, expected?: DesktopCredential) {
+  const invoke = nativeInvoke();
+  if (!invoke) return Promise.resolve();
   connectionSavesInFlight++;
-  connectionSave=connectionSave.catch(()=>{}).then(()=>invoke('desktop_connection_save',{connection})).catch(swallow("api.connectionSave")).finally(()=>{connectionSavesInFlight--;});
+  const args = expected ? { connection, expected } : { connection };
+  const write = connectionSave.then(() => invoke<void>("desktop_connection_save", args))
+    .finally(() => { connectionSavesInFlight--; });
+  connectionSave = write.catch(swallow("api.connectionSave"));
+  return write;
 }
 export async function restoreDesktopConnection() {
   const invoke=nativeInvoke();
   if(!invoke)return;
   // Migrate an existing web-origin login before consulting the desktop store.
-  if(getJwt()){persistDesktopConnection({api_url:getApiUrl(),token:getJwt()!});return;}
+  if(!accountHandoff() && getJwt()){persistDesktopConnection({api_url:getApiUrl(),token:getJwt()!});return;}
   const saved=await invoke('desktop_connection_load').catch(()=>null);
   if(saved?.api_url&&saved?.token)setConnection(saved.api_url,saved.token,{persist:false});
+  else if(accountHandoff())clearConnection({persist:false});
 }
 
 /** Single-IPC desktop cold-start bootstrap (`desktop_bootstrap`) consolidating
@@ -485,10 +493,12 @@ export async function bootstrapDesktopRuntime(): Promise<void> {
       transport?: TransportBridgeInfo;
     }>("desktop_bootstrap", getJwt() ? { apiUrl: getApiUrl() } : {});
     if (boot && typeof boot === "object" && ("connection" in boot || "prefs" in boot || "transport" in boot)) {
-      if (getJwt()) {
+      if (!accountHandoff() && getJwt()) {
         persistDesktopConnection({ api_url: getApiUrl(), token: getJwt()! });
       } else if (boot.connection?.api_url && boot.connection?.token) {
         setConnection(boot.connection.api_url, boot.connection.token, { persist: false });
+      } else if (accountHandoff()) {
+        clearConnection({persist:false});
       }
       const prefsApplied = await applyBootstrappedDesktopPrefs(boot.prefs).catch(() => false);
       if (!prefsApplied) await initDesktopPrefs().catch(() => null);
@@ -512,15 +522,19 @@ export async function bootstrapDesktopRuntime(): Promise<void> {
 
 function disconnectNativeSync(){
   const invoke=nativeInvoke();
-  if(!invoke||!getJwt())return;
+  if(!invoke||!getJwt()||accountHandoff())return;
   void invoke("project_context_disconnect",{request:{endpoint:getApiUrl(),token:getJwt(),project:"disconnect"}}).catch(swallow("api.disconnect.projectContext"));
   void invoke("local_origin_disconnect",{connection:{api_url:getApiUrl(),token:getJwt()}}).catch(swallow("api.disconnect.localOrigin"));
 }
-export function setConnection(url: string, token: string, options?: { persist?: boolean }) {
+export function setConnection(url: string, token: string, options?: { persist?: boolean }): void | Promise<void> {
+  if (options?.persist !== false && accountHandoff()) {
+    return persistDesktopConnection({ api_url: url.trim().replace(/\/+$/, ""), token })
+      .then(() => setConnection(url, token, { persist: false }));
+  }
   const hadJwt = !!getJwt();
   const changed = url.replace(/\/+$/,"")!==getApiUrl() || token!==getJwt();
-  if(hadJwt && changed)disconnectNativeSync();
-  if(changed){resetMissionHierarchy();ancestorCache.clear();if(hadJwt)void clearPersistentCache();resetCurrentUserState();}
+  if(hadJwt && changed && options?.persist !== false)disconnectNativeSync();
+  if(changed){resetMissionHierarchy();ancestorCache.clear();if(hadJwt && !accountHandoff())void clearPersistentCache();resetCurrentUserState();}
   resetNetworkHealth();
   setApiUrl(url);
   localStorage.setItem(JWT_KEY, token);
@@ -532,13 +546,22 @@ export function setConnection(url: string, token: string, options?: { persist?: 
   bumpConnectionVersion(v => v + 1);
 }
 
-export function clearConnection(options?: { persist?: boolean }) {
-  disconnectNativeSync();
+export function clearConnection(options?: { persist?: boolean }): void | Promise<void> {
+  const token = getJwt();
+  const expected = token ? { api_url: getApiUrl(), token } : undefined;
+  if (expected && options?.persist !== false && accountHandoff()) {
+    return persistDesktopConnection(null, expected).then(() => {
+      if (getApiUrl() === expected.api_url && getJwt() === expected.token) {
+        clearConnection({ persist: false });
+      }
+    });
+  }
+  if(options?.persist !== false)disconnectNativeSync();
   resetMissionHierarchy();
   ancestorCache.clear();
   resetNetworkHealth();
   resetCurrentUserState();
-  void clearPersistentCache();
+  if (!accountHandoff()) void clearPersistentCache();
   const hadConnection = connected() || !!getJwt();
   localStorage.removeItem(JWT_KEY);
   try {
@@ -547,7 +570,7 @@ export function clearConnection(options?: { persist?: boolean }) {
       if (k && k.startsWith("orb.catalog:")) localStorage.removeItem(k);
     }
   } catch { /* ignore storage errors */ }
-  if(options?.persist!==false)persistDesktopConnection(null);
+  if(options?.persist!==false && expected)persistDesktopConnection(null, expected);
   setConnected(false);
   catalogMemory.clear();
   if (!hadConnection) return;
@@ -775,7 +798,7 @@ export async function login(password: string, username?: string): Promise<void> 
   }
   const data = (await res.json()) as { token?: string };
   if (!data.token) throw new Error("Login response did not include a token");
-  setConnection(getApiUrl(), data.token);
+  await setConnection(getApiUrl(), data.token);
 }
 
 import { classifyConflictError, parseConflictCodeFromDetail } from "./conflictClassification";
@@ -984,8 +1007,19 @@ async function sendRequestOnce<T>(
     if (path === "/api/auth/change-password" && /current password/i.test(detail)) {
       throw new ApiError(401, detail);
     }
-    if (connectionVersion() === version) clearConnection();
-    throw new Error("401 Unauthorized — reconnect in Settings → Backend");
+    const currentSession = jwt && connectionVersion() === version && getJwt() === jwt &&
+      normalizeEndpointKey(explicitBase) === normalizeEndpointKey() &&
+      headerValue(headers, "Authorization") === `Bearer ${jwt}`;
+    if (currentSession) {
+      if (path === "/api/auth/me") {
+        clearConnection(accountHandoff() ? { persist: false } : undefined);
+        throw new Error("401 Unauthorized — reconnect in Settings → Backend");
+      }
+      // Providers can reject their own credentials while Core still accepts the session.
+      // Concurrent requests share this identity check, which also guards account changes.
+      await api<AuthMeResponse>("/api/auth/me").catch(() => undefined);
+    }
+    throw new ApiError(401, detail || "Unauthorized");
   }
   const observedBuildHeader = res.headers?.get?.("x-orb-server-build") ?? res.headers?.get?.("x-orb-version");
   if (observedBuildHeader && connectionVersion() === version) {
@@ -1344,12 +1378,12 @@ function catalogStorageKey(path: string, token = getJwt()): string {
 }
 
 /** Small read-only catalogs keep local launch available across offline restarts. */
-async function cachedCatalog<T>(path:string, valid?: (value: unknown) => boolean, force = false):Promise<T>{
+async function cachedCatalog<T>(path:string, valid?: (value: unknown) => boolean, force = false, allowCachedFallback = true):Promise<T>{
  const version=connectionVersion(),token=getJwt();
  const key=catalogStorageKey(path,token);
  try{const value=await api<T>(path,force?{method:"GET"}:undefined);if(valid && !valid(value))throw new Error("Couldn’t load projects. The server returned an invalid response.");if(version===connectionVersion()){catalogMemory.set(key,value);try{localStorage.setItem(key,JSON.stringify(value));}catch{}}return value;}
  catch(error){
-  if(version!==connectionVersion()||getJwt()!==token||error instanceof ApiError)throw error;
+  if(!allowCachedFallback||version!==connectionVersion()||getJwt()!==token||error instanceof ApiError)throw error;
   if(catalogMemory.has(key)){const mem=catalogMemory.get(key);if(!valid || valid(mem))return mem as T;}
   const stored=localStorage.getItem(key);if(stored){try{const value=JSON.parse(stored);if(!valid || valid(value)){catalogMemory.set(key,value);return value as T;}}catch{}}
   throw error;
@@ -1834,12 +1868,12 @@ export function peekCachedProjects(): ProjectSummary[] | null {
   }
 }
 
-export async function listProjects(force = false): Promise<ProjectSummary[]> {
+export async function listProjects(force = false, allowCachedFallback = true): Promise<ProjectSummary[]> {
   const fetchedAt = Date.now(), url = getApiUrl();
   const data = await cachedCatalog<{ projects: ProjectSummary[] }>("/api/projects",
     value => !!value && typeof value === "object" && Array.isArray((value as {projects?: unknown}).projects)
       && (value as {projects: unknown[]}).projects.every(project => !!project && typeof project === "object" && typeof (project as {slug?: unknown}).slug === "string"),
-    force);
+    force, allowCachedFallback);
   // Colors ride on the roster; applying them never fails the list.
   try { void applyProjectRoster(data.projects ?? [], fetchedAt, url).catch(swallow("api.projectRoster")); } catch { /* keep the local colors */ }
   return (data.projects ?? []).filter(
@@ -1968,26 +2002,45 @@ async function includeAncestors(rows: Mission[], project?: string): Promise<Miss
  * older than that page that still matter (`openBeyondPage`): a page of recent
  * history alone drops live missions that newer (often archived) ones pushed off. */
 async function projectRows(slug: string, priority?: RequestPriority): Promise<Mission[]> {
+  const { pageSize, openLimit } = projectHistoryRules;
   const project = encodeURIComponent(slug);
   const [history, firstLive] = await Promise.all([
-    api<Mission[]>(`/api/control/missions?project=${project}&limit=200&all=true`, undefined, undefined, priority),
-    api<Mission[]>(`/api/control/missions?project=${project}&limit=200`, undefined, undefined, priority),
+    api<Mission[]>(`/api/control/missions?project=${project}&limit=${pageSize}&all=true`, undefined, undefined, priority),
+    api<Mission[]>(`/api/control/missions?project=${project}&limit=${pageSize}`, undefined, undefined, priority),
   ]);
   const live: Mission[][] = [firstLive];
-  for (let offset = 200; live[live.length - 1].length === 200 && offset < 1000; offset += 200)
-    live.push(await api<Mission[]>(`/api/control/missions?project=${project}&limit=200&offset=${offset}`, undefined, undefined, priority));
+  for (let offset = pageSize; live[live.length - 1].length === pageSize && offset < openLimit; offset += pageSize)
+    live.push(await api<Mission[]>(`/api/control/missions?project=${project}&limit=${pageSize}&offset=${offset}`, undefined, undefined, priority));
   const byId = new Map<string, Mission>();
   for (const row of [...history, ...openBeyondPage(history, live.flat())]) if (!byId.has(row.id)) byId.set(row.id, row);
   const at = (m: Mission) => Date.parse(m.updated_at || m.created_at || "") || 0;
   return [...byId.values()].sort((a, b) => at(b) - at(a));
 }
+function checkMissionRead(version: number): void {
+  if (version !== connectionVersion()) throw new Error("The backend changed. Try again; your draft is kept.");
+}
+
 /** Missions tagged with this project (exact slug match on the backend). */
 export async function listProjectMissions(slug: string, opts?: { background?: boolean }): Promise<Mission[]> {
-  const origins=await import("./localOrigins"),observedAt=origins.observe();
-  const remotePromise=projectRows(slug, opts?.background ? "p2" : undefined).then(rows=>includeAncestors(rows,slug));
-  remotePromise.catch(()=>{});
-  const local=excludeBtwMissions(await origins.localOrigins()).filter(m=>m.project===slug);
-  try{const remote=await remotePromise;await origins.rememberCoreState(local,remote,observedAt);const pending=excludeBtwMissions(local.filter(origins.localPending).map(row=>stickHierarchy(origins.withCoreEffort(row,remote.find(m=>m.id===row.id)))));return [...pending,...excludeBtwMissions(remote).filter(m=>!pending.some(l=>l.id===m.id))];}catch(error){if(local.length)return partialList(local);throw error;}
+  const version = connectionVersion();
+  const origins = await import("./localOrigins");
+  checkMissionRead(version);
+  const observedAt = origins.observe();
+  const remotePromise = projectRows(slug, opts?.background ? "p2" : undefined).then(rows => includeAncestors(rows, slug));
+  remotePromise.catch(() => {});
+  const local = excludeBtwMissions(await origins.localOrigins()).filter(m => m.project === slug);
+  try {
+    const remote = await remotePromise;
+    checkMissionRead(version);
+    await origins.rememberCoreState(local, remote, observedAt);
+    checkMissionRead(version);
+    const pending = excludeBtwMissions(local.filter(origins.localPending).map(row => stickHierarchy(origins.withCoreEffort(row, remote.find(m => m.id === row.id)))));
+    return [...pending, ...excludeBtwMissions(remote).filter(m => !pending.some(l => l.id === m.id))];
+  } catch (error) {
+    checkMissionRead(version);
+    if (local.length) return partialList(local);
+    throw error;
+  }
 }
 
 export async function listProjectFiles(
@@ -2166,7 +2219,9 @@ export function recordMissionSyncCursor(rows: readonly Mission[], fullSync: bool
 }
 
 export async function listMissions(limit = 200, options?: { updatedSince?: string }): Promise<Mission[]> {
+  const version = connectionVersion();
   const origins = await import("./localOrigins"), observedAt = origins.observe();
+  checkMissionRead(version);
   const isDelta = Boolean(options?.updatedSince);
   const params = new URLSearchParams();
   if (options?.updatedSince) {
@@ -2180,17 +2235,22 @@ export async function listMissions(limit = 200, options?: { updatedSince?: strin
   const local = excludeBtwMissions(await origins.localOrigins());
   try {
     const remote = await remotePromise;
+    checkMissionRead(version);
     recordMissionSyncCursor(remote, !isDelta);
     if (!isDelta) {
-      await origins.rememberCoreState(local, [...remote, ...await origins.unlistedCoreState(local, remote, id => api<Mission>(`/api/control/missions/${id}`))], observedAt);
+      const unlisted = await origins.unlistedCoreState(local, remote, id => api<Mission>(`/api/control/missions/${id}`));
+      checkMissionRead(version);
+      await origins.rememberCoreState(local, [...remote, ...unlisted], observedAt);
     } else if (remote.length) {
       await origins.rememberCoreState(local, remote, observedAt);
     }
+    checkMissionRead(version);
     const pending = excludeBtwMissions(local.filter(origins.localPending).map(row => stickHierarchy(origins.withCoreEffort(row, remote.find(m => m.id === row.id)))));
     const merged = [...pending, ...excludeBtwMissions(remote).filter(row => !pending.some(item => item.id === row.id))];
     void flushDurableWriteOutbox();
     return isDelta ? partialList(merged) : merged;
   } catch (error) {
+    checkMissionRead(version);
     if (local.length) return partialList(local);
     throw error;
   }
@@ -2241,6 +2301,7 @@ export function seedCachedMission(mission: Mission | null | undefined, fetchedAt
 /** `coreOnly` skips the local-origin fallback: callers that need Core's
  * placement must not see a journal row that predates a machine transfer. */
 export async function getMission(id: string, options: { coreOnly?: boolean; fresh?: boolean; includeHistory?: boolean; priority?: RequestPriority } = {}): Promise<Mission> {
+  const version = connectionVersion();
   if (options.fresh) {
     seededOpenMissions.delete(id);
   } else {
@@ -2250,11 +2311,13 @@ export async function getMission(id: string, options: { coreOnly?: boolean; fres
       if (options.coreOnly) return seeded.mission;
       const origins = await import("./localOrigins");
       const local = (await origins.localOrigins(id)).find((row) => row.id === id);
+      checkMissionRead(version);
       if (local && origins.localPending(local)) return origins.withCoreEffort(local, seeded.mission);
       return seeded.mission;
     }
   }
   const origins = await import("./localOrigins"), observedAt = origins.observe();
+  checkMissionRead(version);
   const path = options.includeHistory === false
     ? `/api/control/missions/${id}?include_history=false`
     : `/api/control/missions/${id}`;
@@ -2277,10 +2340,16 @@ export async function getMission(id: string, options: { coreOnly?: boolean; fres
   const local = options.coreOnly ? undefined : (await origins.localOrigins(id)).find(row=>row.id===id);
   try{
     const remote = await remotePromise;
+    checkMissionRead(version);
     if(local && origins.localPending(local))return origins.withCoreEffort(local,remote);
     if(local)await origins.rememberCoreState([local],[remote],observedAt);
+    checkMissionRead(version);
     return remote;
-  }catch(error){if(local)return local;throw error;}
+  } catch (error) {
+    checkMissionRead(version);
+    if (local) return local;
+    throw error;
+  }
 }
 
 export async function createMission(body: CreateMissionBody): Promise<Mission> {
@@ -2899,7 +2968,12 @@ export function completeProviderOAuth(id: string, code: string) {
 
 /** Account-entitled models from the selected execution destination, fetched independently. */
 export async function listNodeAntigravityModels(nodeId: string): Promise<[string,string][]> {
- return api(`/api/providers/antigravity-models${nodeId === "core" ? "" : `?node_id=${encodeURIComponent(nodeId)}`}`, {signal: AbortSignal.timeout(20000)});
+  const models = await api<unknown>(`/api/providers/antigravity-models${nodeId === "core" ? "" : `?node_id=${encodeURIComponent(nodeId)}`}`, {signal: AbortSignal.timeout(20000)});
+  if (!Array.isArray(models) || !models.every((row): row is [string, string] =>
+    Array.isArray(row) && row.length === 2 && typeof row[0] === "string" && row[0].length > 0 && typeof row[1] === "string")) {
+    throw new Error("Invalid Antigravity model catalog");
+  }
+  return models;
 }
 
 export interface LibrarySkillSummary {

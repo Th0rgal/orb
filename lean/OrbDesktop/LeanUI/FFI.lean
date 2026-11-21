@@ -122,4 +122,7 @@ opaque shape (face : USize) (size64 : UInt32) (text : @& String)
 opaque rasterize (face : USize) (size64 : UInt32) (glyph : UInt32)
     (subpx : UInt32) : IO ByteArray
 
+@[extern "lean_ui_sidebar_host"]
+opaque sidebarHost (path : @& String) (paint : @& (String → IO (String × ByteArray))) : IO UInt32
+
 end LeanUI.FFI

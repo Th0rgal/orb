@@ -8,7 +8,7 @@ import { harnessRank } from "./harnesses";
 export function destinationHarnessChoices(
   core: HarnessChoice[],
   machine: string,
-  accountModels: [string, string][],
+  accountModels: [string, string][] | undefined,
   localVibeInstalled = false,
   localClaudeModels: [string, string][] = [],
   localOpenCodeModels: [string, string][] = [],
@@ -43,7 +43,7 @@ export function destinationHarnessChoices(
       models: [{ value: "mistral/mistral-vibe-cli-latest", label: "Mistral Vibe", description: "Uses this computer's native Vibe account" }],
     });
   }
-  const antigravityModels = accountModels.length
+  const antigravityModels = accountModels !== undefined
     ? accountModels.map(([value, label]) => ({ value, label }))
     : machine !== "local" && coreAntigravity?.models.length
       ? coreAntigravity.models

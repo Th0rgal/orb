@@ -210,8 +210,9 @@ function MachinesPage() {
   );
   const [fleetGroupOpen, setFleetGroupOpen] = createSignal<Readonly<Record<string, boolean>>>({});
   // Enabled providers get a group even before their first machine exists.
-  const [managedProviders] = createResource(() => isConnected(), on => on ? listManagedProviders() : null);
-  const enabledManagedProviders = createMemo(() => (managedProviders() ?? [])
+  const [managedProviders] = createResource(isConnected, listManagedProviders, { initialValue: [] });
+  // The catalog adds empty provider groups. Local machines and heartbeats render independently.
+  const enabledManagedProviders = createMemo(() => (managedProviders.error ? [] : managedProviders.latest ?? [])
     .filter(p => p.configured && (p.effective_enabled ?? p.enabled)).map(p => p.provider));
   const managedFleetGroups = createMemo(() => groupManagedNodesByProvider(nodes() ?? [], enabledManagedProviders()));
   const destroyedNodes = new Set<string>();

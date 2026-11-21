@@ -67,7 +67,7 @@ export const harnessChoices = (machine = "core"): HarnessChoice[] => {
   const version = connectionVersion(), nodeModels = nodeAntigravityModels();
   const models = machine === "local"
     ? (localInstalled().find(row => row.id === "antigravity")?.models ?? [])
-    : (nodeModels[`${version}:${machine}`]?.length ? nodeModels[`${version}:${machine}`] : (nodeModels[`${version}:core`] ?? []));
+    : (nodeModels[`${version}:${machine}`] ?? nodeModels[`${version}:core`]);
   const claude = machine === "local" ? (localInstalled().find(row => row.id === "claudecode")?.models ?? []) : [];
   const opencode = machine === "local" ? (localInstalled().find(row => row.id === "opencode")?.models ?? []) : [];
   return destinationHarnessChoices(remoteHarnessChoices(), machine, models, localInstalled().some(row => row.id === "vibe" && row.installed), claude, opencode);

@@ -3298,13 +3298,24 @@ def dispatchProviderAndAiRoute
 
   -- 5. `/api/ai/providers*` Sub-Routes & Rich List/Get
   if segs.length >= 3 && segs[0]? == some "api" && segs[1]? == some "ai" && segs[2]? == some "providers" then
-    -- 5a. `GET /api/ai/providers` (Hydrated rich `ProviderResponse[]` when legacy `.sandboxed-sh/ai_providers.json` or CLIProxy auth files exist!)
-    if method == "GET" && segs.length == 3 then
-      let hasLegacyJson ← (System.FilePath.mk s!"{workingDir}/.sandboxed-sh/ai_providers.json").pathExists
-      let hasStoreJson ← (System.FilePath.mk s!"{store.rootDir}/ai_providers.json").pathExists
-      let authFiles ← scanCliProxyAuthFiles
-      if isLegacyUnscoped && !hasLegacyJson && !hasStoreJson && authFiles.isEmpty then
-        return none
+    let reorder := method == "POST" && segs == ["api", "ai", "providers", "reorder"]
+    if reorder then
+      let .ok reqJv := OrbBin.Json.parseBytes bodyBytes
+        | return some (jsonErr 400 "Invalid JSON")
+      let ids := ((reqJv.fieldArr? "ids").getD #[]).filterMap JVal.asStr?
+      for idx in [0:ids.size] do
+        let _ ← execParamStmt store.missionsDb
+          "UPDATE ai_providers SET sort_order=?2 WHERE id=?1;" #[ids[idx]!, toString idx]
+      appendProviderAuditLog store callerUserId (if effAdmin then "admin" else "member") "reorder" "" #["sort_order"]
+        (formatEpochIso8601Utc (← nowEpoch))
+
+    -- A reorder returns the same account inventory as a fresh list request.
+    if reorder || (method == "GET" && segs.length == 3) then
+      if isLegacyUnscoped && !reorder then
+        let hasLegacyJson ← (System.FilePath.mk s!"{workingDir}/.sandboxed-sh/ai_providers.json").pathExists
+        let hasStoreJson ← (System.FilePath.mk s!"{store.rootDir}/ai_providers.json").pathExists
+        if !hasLegacyJson && !hasStoreJson && (← scanCliProxyAuthFiles).isEmpty then
+          return none
       let hps ← loadHydratedProviders store workingDir
       let uPrefs ← if isLegacyUnscoped then pure #[] else getUserProviderPrefs store callerUserId
       let usernames ← listUsernamesById store
@@ -3364,21 +3375,6 @@ def dispatchProviderAndAiRoute
           ("env_var", match m.envVar? with | some ev => .str ev | none => .null)
         ]
       return some (jsonResp 200 (.arr arr))
-
-    -- 5d. `POST /api/ai/providers/reorder`
-    if method == "POST" && segs == ["api", "ai", "providers", "reorder"] then
-      let .ok reqJv := OrbBin.Json.parseBytes bodyBytes
-        | return some (jsonErr 400 "Invalid JSON")
-      let ids := ((reqJv.fieldArr? "ids").getD #[]).filterMap JVal.asStr?
-      for idx in [0:ids.size] do
-        let _ ← execParamStmt store.missionsDb
-          "UPDATE ai_providers SET sort_order=?2 WHERE id=?1;" #[ids[idx]!, toString idx]
-      appendProviderAuditLog store callerUserId (if effAdmin then "admin" else "member") "reorder" "" #["sort_order"]
-        (formatEpochIso8601Utc (← nowEpoch))
-      let hps ← loadHydratedProviders store workingDir
-      let usernames ← listUsernamesById store
-      let visible := hps.filter (fun hp => providerVisibleTo hp effAdmin callerUserId)
-      return some (jsonResp 200 (.arr (visible.map (fun hp => renderHydratedProviderForCaller hps hp effAdmin callerUserId usernames))))
 
     -- 5e. `GET /api/ai/providers/for-backend/:backend_id`
     if method == "GET" && segs.length == 5 && segs[3]? == some "for-backend" then
@@ -3618,7 +3614,7 @@ def dispatchProviderAndAiRoute
       if method == "GET" && segs.length == 4 then
         let some hp := matchedProv?
           | return some (jsonErr 404 "Provider not found")
-        if !providerVisibleTo hp effAdmin callerUserId then
+        if !providerListedFor hp effAdmin callerUserId then
           return some (jsonErr 404 "Provider not found")
         let rejected ← loginRejectedFor hub store hp
         let sidecarFiles ← fetchSidecarAuthFiles
