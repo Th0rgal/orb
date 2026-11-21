@@ -3604,12 +3604,15 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   if let ["", "api", "ai", "providers", encodedAccount, "vpn"] := cleanPath.splitOn "/" then
     let some account := percentDecodeStrict encodedAccount
       | return .ok (mkJson 400 "{\"error\":\"invalid_provider_id\"}")
-    if let some (status, body) := requireAdminPrincipal caller then return .ok (mkJson status body)
+    if caller.disabled then return .ok (mkJson 403 "{\"error\":\"account_disabled\"}")
     let token := (extractBearerToken? req.headers nowEpochSec).getD ""
     unless token.startsWith "orb-jwt-v2:" && !st.cfg.devMode do
       return .ok (mkJson 403 "{\"error\":\"operator_session_required\"}")
     let providers ← loadHydratedProviders st.store st.cfg.workingDir
-    let some hp := providers.find? (fun p => p.id == account)
+    let selected := providers.find? (fun p => p.id == account)
+    if caller.role != "admin" && !selected.any (fun p => providerVisibleTo p false caller.userId) then
+      return .ok (mkJson 403 "{\"error\":\"provider_not_visible\"}")
+    let some hp := selected
       | return .ok (mkJson 404 "{\"error\":\"provider_not_found\"}")
     let stored ← getAIProvider? st.store account
     let coreOwned := !hp.hasOAuth && stored.any (fun p => !p.apiKey.isEmpty && p.apiKey != "cli-proxy-managed")

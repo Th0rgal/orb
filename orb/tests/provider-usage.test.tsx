@@ -272,7 +272,7 @@ it("renders banked subscription resets, confirms manual redemption, and toggles 
   await waitFor(() => expect(ui.queryByTestId("subscription-reset-hint")).toBeNull());
 });
 
-it("hides expand chevrons for members on healthy connection rows without details", async () => {
+it("opens shared account connections for members even without usage details", async () => {
   expect(hasProviderUsageDetails({ provider_type: "xai", xai_plan: "SuperGrok", xai_prepaid_usd: 0, xai_on_demand_used: 0, xai_on_demand_cap: 0 })).toBe(false);
   expect(hasProviderUsageDetails({ provider_type: "kimi", kimi_plan: "Moderato", account_email: "user@example.com" }, "user@example.com")).toBe(false);
   expect(hasProviderUsageDetails({ provider_type: "kimi", account_email: "user@example.com" })).toBe(true);
@@ -291,14 +291,19 @@ it("hides expand chevrons for members on healthy connection rows without details
   vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(
     url.endsWith("/providers") ? rows
     : url.endsWith("/providers/usage") ? { entries: usages }
+    : url.endsWith("/kimi-oauth/vpn") ? { mode: "direct", countries: ["NL"], can_configure: true }
     : url.endsWith("/kimi-oauth/usage") ? usages["kimi-oauth"]
     : {}
   ))));
   const { container } = render(() => <Providers />);
   await waitFor(() => expect(container.textContent).toContain("Moderato"));
   expect(container.textContent).toContain("Gemini model access");
-  expect(container.querySelectorAll(".p-acc-chev")).toHaveLength(0);
-  expect(container.querySelectorAll(".p-acc-btn")).toHaveLength(0);
+  const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>(".p-acc-btn"));
+  expect(buttons).toHaveLength(2);
+  const kimi = buttons.find(button => button.textContent?.includes("Kimi"));
+  expect(kimi).toBeDefined();
+  kimi!.click();
+  await waitFor(() => expect(container.querySelector<HTMLSelectElement>('select[aria-label="Account connection"]')?.value).toBe(""));
 });
 
 

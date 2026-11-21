@@ -4,7 +4,7 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
   const changes: Array<[string, unknown]> = [];
   const accounts = ["a", "b"].map(id => ({
     id, name: "ChatGPT " + id, provider_type: "openai", account_email: id + "@example.invalid",
-    uses_oauth: true, has_oauth: true, credential_owner: "cli_proxy", status: { type: "connected" },
+    added_by_me: id === "b", uses_oauth: true, has_oauth: true, credential_owner: "cli_proxy", status: { type: "connected" },
   }));
   const direct = { mode: "direct", status: "direct", countries: ["NL", "US"], can_configure: true };
   await page.addInitScript(theme => {
@@ -14,6 +14,8 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
   }, theme);
   await page.route("**/api/**", route => {
     const path = new URL(route.request().url()).pathname;
+    if (path === "/api/auth/me") return route.fulfill({ json: { auth_mode: "multi_user",
+      user: { id: "member", username: "member", role: "member" } } });
     if (path === "/api/ai/providers") return route.fulfill({ json: accounts });
     if (path.endsWith("/vpn")) {
       if (route.request().method() === "GET") return route.fulfill({ json: direct });
@@ -33,7 +35,8 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
   const group = page.locator(".p-group-head");
   await expect(group).toHaveCount(1);
   if (await group.getAttribute("aria-expanded") === "false") await group.click();
-  await page.locator(".p-acc-btn").filter({ hasText: "b@example.invalid" }).click();
+  const shared = page.locator(".p-acc-btn").filter({ hasText: "a@example.invalid" });
+  await shared.click();
   const select = page.getByLabel("Account connection", { exact: true });
   await expect(select).toHaveValue("");
   await select.selectOption("NL");
@@ -43,7 +46,7 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
   await expect(verified).toBeVisible();
   await select.selectOption("");
   await expect(verified).toHaveCount(0);
-  const path = "/api/ai/providers/b/vpn";
+  const path = "/api/ai/providers/a/vpn";
   expect(changes).toEqual([[path, { mode: "vpn", country: "NL" }], [path, { mode: "vpn", country: "NL" }], [path, { mode: "direct" }]]);
 });
 
