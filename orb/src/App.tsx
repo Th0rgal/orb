@@ -174,7 +174,7 @@ const UsageTelemetrySettings = lazy(() => import("./UsageTelemetrySettings").the
 const BitwardenSettings = lazy(() => import("./BitwardenSettings").then(module => ({ default: module.BitwardenSettings })));
 const InboxPage = lazy(() => import("./Inbox").then(module => ({ default: module.InboxPage })));
 import { requestInboxDigest } from "./inboxDigest";
-import { countUnreadInboxMissions, inboxMissionUnion, listUnreadInboxCandidates } from "./inboxUnread";
+import { inboxMissionUnion, listUnreadInboxCandidates } from "./inboxUnread";
 import { inboxConfig } from "./inboxSettings";
 const InboxSettings = lazy(() => import("./InboxSettingsPanels").then(module => ({ default: module.InboxSettings })));
 const InboxSummariesSettings = lazy(() => import("./InboxSettingsPanels").then(module => ({ default: module.InboxSummariesSettings })));
@@ -721,19 +721,26 @@ export default function App() {
     const found = findKnownMission(id);
     return found ?? (previous?.id === id ? previous : null);
   }, null);
-  const inboxCount = createMemo(() => {
+  const inboxBadgeIds = createMemo(() => {
     transcriptVersion();
     unreadVersion();
     const cfg = inboxConfig();
-    if (!cfg.inboxEnabled || !isConnected()) return 0;
-    return countUnreadInboxMissions(
+    if (!cfg.inboxEnabled || !isConnected()) return [];
+    return listUnreadInboxCandidates(
       inboxMissions(),
       liveProjects(),
       (id) => peekReadyTranscript(id)?.items,
       pendingMissionInteraction,
       currentMissionId(),
       cfg,
-    );
+    ).map(item => item.id);
+  });
+  const inboxCount = () => inboxBadgeIds().length;
+  onMount(() => {
+    // Web Inspector can read the actual badge inputs without opening a mission or fetching a transcript.
+    const inspector = window as Window & { orbInboxBadgeIds?: () => string[] };
+    inspector.orbInboxBadgeIds = () => [...inboxBadgeIds()];
+    onCleanup(() => { delete inspector.orbInboxBadgeIds; });
   });
   createEffect(() => {
     if (!inboxConfig().inboxEnabled && selected() === "inbox") open(null);

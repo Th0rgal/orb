@@ -141,8 +141,11 @@ The live navigation badge and Inbox items use the same user-scoped snapshot.
 After sidebar bootstrap, the native reader combines the same Core sources as a
 refreshed GTK sidebar: loaded project history and eligible older open missions,
 the latest 100 completed missions, and the current 200 missions with their
-ancestors. A full collection lookup can resolve a missing ancestor without
-reading a transcript. Other lookup rows do not enter the Inbox. An off-page
+ancestors. The reader takes these windows locally from the ordered summary collection.
+Each background refresh reads the current user's Inbox state and at most one
+page of 1000 summaries, with a shared four-second HTTP deadline. A full page
+resumes at its next offset on a subsequent refresh. Only a completed scan
+replaces the previous badge. An off-page
 item carries the summary needed to open its transcript. Opening Inbox leaves receipts untouched. Opening an item or choosing
 Mark read acknowledges only its displayed response timestamp and observed Core
 entry version. Another user can still see the same shared mission as unread.
@@ -156,7 +159,13 @@ client placement, BTW ancestry, scheduled recovery and unread child failure
 rules. A completed mission carrying only an `archived` tag remains eligible
 under Solid's unread classifier. An acknowledged mission is ineligible.
 
-The parity test calls the GTK data loaders and Inbox union, then replays their
-Core responses in the native reader and compares ordered IDs. Web also uses local pending missions, cached hierarchy links and
+The parity test calls the GTK data loaders and Inbox union, gives the native
+reader the same underlying collection, and compares the ordered IDs. Web also uses local pending missions, cached hierarchy links and
 observed transcript interactions, and offers digest previews. LeanUI opens the mission transcript
 directly and writes the per-user seen receipt.
+
+To capture the IDs of the visible badges for a read-only comparison, evaluate
+`window.orbInboxBadgeIds()` in the GTK Web Inspector and launch the LeanUI
+trial with `ORB_TRACE_INBOX_IDS=1`. Its stderr prints `Inbox badge IDs:` when
+the displayed snapshot changes. Capture both for the same account and selected
+mission. Opening an unread conversation changes the receipt being compared.

@@ -293,9 +293,11 @@ private def mergeRoster (st : DesktopState) (records : List String) : DesktopSta
     | "N" => machines := machines.push (machineCard machines.size xs)
     | _ => continue
   let inboxItems := records.filterMap fun r => inboxItem (r.splitOn "\x1c")
-  let inboxAvailable := records.any (·.startsWith "I\x1c")
-  let inboxEnabled := if inboxAvailable then !records.contains "I\x1cdisabled" else st.inboxEnabled
-  let inboxItems := if inboxAvailable then inboxItems else st.inboxItems
+  let refreshing := records.contains "I\x1crefreshing" || records.head? == some "partial-projects"
+  let finished := records.contains "I\x1cenabled" || records.contains "I\x1cdisabled"
+  let inboxAvailable := finished || (refreshing && st.inboxAvailable)
+  let inboxEnabled := if finished then !records.contains "I\x1cdisabled" else st.inboxEnabled
+  let inboxItems := if finished then inboxItems else st.inboxItems
   let inboxIndex := (st.currentInboxItem.bind fun item => inboxItems.findIdx? (·.mission == item.mission)).getD
     (min st.inboxIndex (inboxItems.length - 1))
   let updated := { st with inboxItems, inboxEnabled, inboxIndex, inboxAvailable, missionCards := cards.toList, sidebarRows := rows.toList, fleetMachines := machines.toList }

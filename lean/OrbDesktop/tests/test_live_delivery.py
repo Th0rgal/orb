@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
@@ -53,7 +54,7 @@ class Delivery(unittest.TestCase):
             def do_GET(self):
                 if self.path == live.INBOX_PATH:
                     self.reply(states[self.headers['Authorization'].split()[1]])
-                elif self.path == '/api/control/missions?status=completed&limit=100':
+                elif self.path == '/api/control/missions?all=true&limit=1000&offset=0':
                     self.reply([mission])
                 elif self.path == '/api/projects':
                     self.reply({'projects': []})
@@ -110,28 +111,80 @@ class Delivery(unittest.TestCase):
                     self.assertEqual(states[user]['seen:shared'], 1767225660000)
             server.shutdown()
 
-    def test_inbox_paging_is_deferred_and_partial_pages_do_not_publish_a_badge(self):
-        paths = []
-        class Core:
-            binding = 'fixture'
-            def check(self):
+    def test_inbox_io_bound_and_paging(self):
+        projects = [{'slug': str(i)} for i in range(7)]
+        def summaries(n):
+            return [dict(id=str(i), project=str(i % 7), status='completed') for i in range(n)]
+        for n in (6, 881, 1001):
+            pages = summaries(n)
+            calls = []
+            class Core:
+                def get(self, path, cap, *, deadline):
+                    calls.append((path, deadline))
+                    if path == live.INBOX_PATH:
+                        return {}
+                    offset = (len(calls) // 2 - 1) * 1000
+                    expected_path = f'/api/control/missions?all=true&limit=1000&offset={offset}'
+                    assert path == expected_path
+                    return pages[offset:offset + 1000]
+            scan = live.InboxScan()
+            self.assertEqual(live.INBOX_READ_SECONDS, 4)
+            with patch.object(live.time, 'monotonic', side_effect=[0, 0, 1.5] * 2):
+                result = live.inbox_snapshot(Core(), projects, '', scan)
+                self.assertEqual([budget for _, budget in calls], [4, 2.5])
+                if n == 1001:
+                    self.assertEqual(result, [('I', 'refreshing')])
+                    result = live.inbox_snapshot(Core(), projects, '', scan)
+            self.assertEqual(sum(r[0] == 'U' for r in result), n)
+            self.assertEqual(scan.offset, 0)
+            self.assertFalse(scan.rows)
+
+    def test_slow_or_oversize_page_retries_same_offset_on_next_refresh(self):
+        scan = live.InboxScan()
+        with patch.object(live, 'Connection') as client:
+            c = client.return_value
+            c.get.side_effect = [{}, live.ResponseTooLarge(), {}, []]
+            with self.assertRaises(live.ResponseTooLarge):
+                live.inbox_snapshot(c, [], '', scan)
+            self.assertEqual(c.get.call_count, 2)
+            self.assertEqual(live.inbox_snapshot(c, [], '', scan), [('I', 'enabled')])
+            self.assertEqual(c.get.call_args.args[0], '/api/control/missions?all=true&limit=500&offset=0')
+
+    def test_slow_inbox_http_response_respects_shared_deadline(self):
+        entered = threading.Event()
+        release = threading.Event()
+        class Core(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                if self.path == live.INBOX_PATH:
+                    self.wfile.write(b'{}')
+                else:
+                    entered.set()
+                    release.wait(3)
+            def log_message(self, *_):
                 pass
-            def get(self, path):
-                paths.append(path)
-                if path == '/api/projects':
-                    return {'projects': [{'slug': 'live'}]}
-                if path == live.INBOX_PATH:
-                    return {}
-                if path.endswith('project=live&limit=200'):
-                    return [dict(id=str(i), status='completed') for i in range(200)]
-                if path.endswith('offset=200'):
-                    raise TimeoutError()
-                return []
-        c = Core()
-        boot = live.roster_rows(c, include_archived=True)
-        self.assertFalse(any(p == live.INBOX_PATH or 'offset=' in p for p in paths))
-        self.assertEqual(live.roster_rows(c, include_archived=True, inbox_for=''), boot)
-        self.assertTrue(paths[-1].endswith('offset=200'))
+        with ThreadingHTTPServer(('127.0.0.1', 0), Core) as server:
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            creds = (f'http://127.0.0.1:{server.server_port}', 'fixture')
+            try:
+                with patch.object(live, 'credentials', return_value=creds), patch.object(live, 'INBOX_READ_SECONDS', 0.4):
+                    start = time.monotonic()
+                    with self.assertRaises(TimeoutError):
+                        live.inbox_snapshot(live.Connection(), [], '')
+                    self.assertTrue(entered.is_set())
+                    self.assertLess(time.monotonic() - start, 1.5)
+            finally:
+                release.set()
+                server.shutdown()
+
+    def test_inbox_deadline_expires_before_second_get(self):
+        with patch.object(live, 'Connection') as client, patch.object(
+                live.time, 'monotonic', side_effect=[100, 100, 104]):
+            client.return_value.get.return_value = {}
+            with self.assertRaises(TimeoutError):
+                live.inbox_snapshot(client.return_value, [], '')
+            client.return_value.get.assert_called_once()
 
     def test_inbox_preferences_response_time_and_order(self):
         base = dict(status='completed', updated_at='2026-01-01T00:00:00Z')

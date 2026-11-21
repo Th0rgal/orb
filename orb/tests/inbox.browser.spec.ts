@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
 import { privilegeSnapshot } from "./privilegeAccessFixture";
 
@@ -241,6 +242,22 @@ test(`Inbox surfaces Needs You and Ready for Review while keeping working agents
   const inboxNav = page.locator("#orb-sidebar").getByRole("button", { name: /Inbox/ });
   await expect(inboxNav).toBeVisible({ timeout: 15000 });
   await expect(inboxNav.locator(".inbox-sb-badge")).toHaveText("4");
+  const gtkIds = await page.evaluate(() =>
+    (window as Window & { orbInboxBadgeIds: () => string[] }).orbInboxBadgeIds().sort());
+  expect(gtkIds).toEqual(["m-done", "m-failed", "m-perm", "m-question"]);
+  // The pending permission is available to the mounted WebView through its observed
+  // transcript. The same Core summaries alone carry no such signal on m-perm.
+  const nativeIds: string[] = JSON.parse(execFileSync("python3", ["-I", "-c", `
+import json, sys
+sys.path.insert(0, '../lean/OrbDesktop/OrbDesktop')
+from live_transport import project_inbox
+rows = {m['id']: m for m in json.load(sys.stdin)}
+items = project_inbox(rows, {}, [{'slug': 'orb'}, {'slug': 'paloma'}], '')
+print(json.dumps([r[1] for r in items if r[0] == 'U']))
+`], { input: JSON.stringify(missions), encoding: "utf8" }));
+  expect(nativeIds.sort()).toEqual(["m-done", "m-failed", "m-question"]);
+  expect(gtkIds.filter(id => !nativeIds.includes(id))).toEqual(["m-perm"]);
+
 
   // Open Inbox via ⌘I shortcut
   await page.keyboard.press("Meta+KeyI");

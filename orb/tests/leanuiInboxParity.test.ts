@@ -43,21 +43,22 @@ const missions = [
   mission("retired", { superseded_by_mission_id: "early" }),
 ];
 
-// Replay the exact GET responses requested by the GTK data sources in the native reader.
+// The native reader gets one summary collection over the same rows used by the GTK loaders.
 const native = `
 import json, sys
 sys.path.insert(0, '../lean/OrbDesktop/OrbDesktop')
 import live_transport as live
 f = json.load(sys.stdin)
 class Core:
-    def get(self, path):
+    def get(self, path, cap, *, deadline):
+        assert 0 < deadline <= 4
         if path == live.INBOX_PATH:
             return f['state']
-        prefix = '/api/control/missions?all=true&limit=200&offset='
-        if path.startswith(prefix):  # history-free ancestor lookup on the identical fixture
+        prefix = '/api/control/missions?all=true&limit=1000&offset='
+        if path.startswith(prefix):
             start = int(path[len(prefix):])
-            return f['missions'][start:start+200]
-        return f['responses'][path]
+            return f['missions'][start:start+1000]
+        raise AssertionError(path)
 rows = live.inbox_snapshot(Core(), f['projects'], f['selected'])
 print(json.dumps([r[1] for r in rows if r[0] == 'U']))
 `;
@@ -65,7 +66,6 @@ print(json.dumps([r[1] for r in rows if r[0] == 'U']))
 afterEach(() => { clearConnection(); vi.unstubAllGlobals(); });
 
 async function gtkSnapshot(user: string, input = missions) {
-  const responses: Record<string, unknown> = {};
   setConnection("https://fixture.test", user);
   vi.stubGlobal("fetch", async (raw: string, init?: RequestInit) => {
     const url = new URL(raw);
@@ -84,7 +84,6 @@ async function gtkSnapshot(user: string, input = missions) {
       result = input.find(m => url.pathname === "/api/control/missions/" + m.id);
       expect(result).toBeDefined();
     }
-    responses[url.pathname + url.search] = result;
     return Response.json(result);
   });
   const live = await listProjects(true);
@@ -92,7 +91,7 @@ async function gtkSnapshot(user: string, input = missions) {
   const completed = await listCompletedMissions(100);
   const byProject: Record<string, Mission[]> = {};
   for (const p of live) byProject[p.slug] = await listProjectMissions(p.slug);
-  return { live, rows: inboxMissionUnion(byProject, completed!, current, () => false), responses };
+  return { live, rows: inboxMissionUnion(byProject, completed!, current, () => false) };
 }
 
 describe("LeanUI and Solid Inbox candidate IDs", () => {
@@ -118,7 +117,7 @@ describe("LeanUI and Solid Inbox candidate IDs", () => {
       const ids = solid.map(row => row.id);
       expect(ids).toEqual(expected);
       const output = execFileSync("python3", ["-I", "-c", native], {
-        input: JSON.stringify({ responses: gtk.responses, missions, projects, state, selected: "selected" }), encoding: "utf8",
+        input: JSON.stringify({ missions, projects, state, selected: "selected" }), encoding: "utf8",
       });
       expect(JSON.parse(output)).toEqual(ids);
     });
@@ -135,7 +134,7 @@ describe("LeanUI and Solid Inbox candidate IDs", () => {
     const ids = listUnreadInboxCandidates(gtk.rows, gtk.live).map(row => row.id);
     expect(ids).toEqual(["belongs"]);
     const output = execFileSync("python3", ["-I", "-c", native], {
-      input: JSON.stringify({ responses: gtk.responses, missions: input, projects, state, selected: "" }), encoding: "utf8",
+      input: JSON.stringify({ missions: input, projects, state, selected: "" }), encoding: "utf8",
     });
     expect(JSON.parse(output)).toEqual(ids);
   });

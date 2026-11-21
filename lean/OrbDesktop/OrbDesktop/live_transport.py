@@ -45,6 +45,10 @@ def credentials():
     return base, token
 
 
+class ResponseTooLarge(ValueError):
+    pass
+
+
 class Connection:
     def __init__(self):
         self.creds = credentials()
@@ -55,8 +59,8 @@ class Connection:
         if credentials() != self.creds:
             raise ValueError('connection changed')
 
-    def get(self, path, cap=4 << 20):
-        return self.request(path, cap)
+    def get(self, path, cap=4 << 20, *, deadline=6):
+        return self.request(path, cap, deadline=deadline)
 
     def request(self, path, cap=4 << 20, body=None, key=None, method=None, deadline=6):
         self.check()
@@ -71,7 +75,7 @@ class Connection:
         # A socket timeout alone is an idle timeout. Also bound total wall time
         # for DNS / continuously trickling responses. This helper is standalone.
         previous = signal.signal(signal.SIGALRM, request_timeout)
-        signal.alarm(deadline)
+        signal.setitimer(signal.ITIMER_REAL, deadline)
         try:
             with self.opener.open(req, timeout=deadline if deadline > 6 else 4) as response:
                 data = response.read(cap + 1)
@@ -80,7 +84,7 @@ class Connection:
             signal.signal(signal.SIGALRM, previous)
         self.check()
         if len(data) > cap:
-            raise ValueError('response too large')
+            raise ResponseTooLarge('response too large')
         return json.loads(data) if data or body is None else None
 
 
@@ -628,36 +632,23 @@ def inbox_parent(m):
     return (parent if parent != fork else None) or callback
 
 
-class InboxSources:
-    def __init__(self, c):
-        self.connection = c
-        self.observed = {}
-        self.lookup = {}
-        self.next_offset = 0
-
-    def page(self, query):
-        rows = self.connection.get('/api/control/missions?' + query)
-        if not isinstance(rows, list):
-            raise ValueError('invalid inbox page')
-        self.observed.update((m['id'], m) for m in rows)
-        return rows
-
-    def ancestor(self, mid):
-        # Core's single-mission detail can embed history even for include_history=false.
-        # Unlisted rows from this lookup supply ancestry only, never candidate membership.
-        while mid not in self.observed and mid not in self.lookup and self.next_offset is not None:
-            rows = self.connection.get(f'/api/control/missions?all=true&limit=200&offset={self.next_offset}')
-            if not isinstance(rows, list):
-                raise ValueError('invalid ancestor page')
-            self.lookup.update((m['id'], m) for m in rows)
-            self.next_offset = self.next_offset + len(rows) if len(rows) == 200 else None
-        row = self.observed.get(mid) or self.lookup.get(mid)
-        if row:
-            self.observed[mid] = row
-        return row
+INBOX_PAGE_SIZE = 1000  # Maximum accepted by Core's mission collection.
+INBOX_READ_SECONDS = 4
 
 
-def inbox_with_ancestors(sources, rows):
+class InboxScan:
+    """One subscription owns this buffer. Publish only after receiving the last page."""
+    def __init__(self):
+        self.rows = {}
+        self.offset = 0
+        self.page_size = INBOX_PAGE_SIZE
+
+    def reset(self):
+        self.rows.clear()
+        self.offset = 0
+
+
+def inbox_with_ancestors(by_id, rows):
     """Match withAncestors: insert fetched parents immediately before their first child."""
     listed = {m['id'] for m in rows}
     fetched = {}
@@ -668,7 +659,7 @@ def inbox_with_ancestors(sources, rows):
         for mid in wanted:
             if not mid or mid in listed or mid in fetched:
                 continue
-            ancestor = sources.ancestor(mid)
+            ancestor = by_id.get(mid)
             if ancestor:
                 fetched[mid] = ancestor
                 frontier.append(ancestor)
@@ -685,15 +676,9 @@ def inbox_with_ancestors(sources, rows):
     return ordered.values()
 
 
-def inbox_project_page(sources, slug, now_ms):
-    path = 'project=' + urllib.parse.quote(slug, safe='') + '&limit=200'
-    history = sources.page(path + '&all=true')
-    live = []
-    for offset in range(0, 1000, 200):
-        page = sources.page(path + (f'&offset={offset}' if offset else ''))
-        live.extend(page)
-        if len(page) < 200:
-            break
+def inbox_project_page(by_id, slug, project_rows, now_ms):
+    history = project_rows[:200]
+    live = [m for m in project_rows if m.get('status') not in ('acknowledged', 'archived')][:1000]
     known = {m['id'] for m in history}
     hidden = btw_ids({m['id']: m for m in [*history, *live]})
     always = {'active', 'running', 'pending', 'queued', 'awaiting_user', 'resuming', 'starting', 'waiting_background'}
@@ -708,23 +693,61 @@ def inbox_project_page(sources, slug, now_ms):
         parent = m.get('parent_mission_id') or m.get('callback_parent_mission_id')
         if not parent or m['status'] in always or parent in listed:
             rows.setdefault(m['id'], m)
-    expanded = inbox_with_ancestors(sources, sorted(rows.values(), key=at, reverse=True))
+    expanded = inbox_with_ancestors(by_id, sorted(rows.values(), key=at, reverse=True))
     hidden = btw_ids({m['id']: m for m in expanded})
     return [m for m in expanded if m['id'] not in hidden and (m['id'] in rows or m.get('project') == slug)]
 
 
-def inbox_snapshot(c, projects, selected):
-    state = c.get(INBOX_PATH)
+def inbox_snapshot(c, projects, selected, scan=None):
+    scan = scan if scan is not None else InboxScan()
+    end = time.monotonic() + INBOX_READ_SECONDS
+
+    def read(path, cap):
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('inbox read deadline')
+        return c.get(path, cap, deadline=remaining)
+
+    state = read(INBOX_PATH, 4 << 20)
     if (state.get('preferences') or {}).get('inboxEnabled') is False:
+        scan.reset()
         return [('I', 'disabled')]
+    try:
+        page = read(f'/api/control/missions?all=true&limit={scan.page_size}&offset={scan.offset}', 8 << 20)
+    except (TimeoutError, ResponseTooLarge):
+        # Retry the same offset in a later cycle, with less work per request.
+        scan.page_size = max(1, scan.page_size // 2)
+        raise
+    if not isinstance(page, list) or len(page) > scan.page_size:
+        raise ValueError('invalid inbox summary page')
+    scan.rows.update((m['id'], m) for m in page)
+    if len(page) == scan.page_size:
+        scan.offset += len(page)
+        return [('I', 'refreshing')]
+    try:
+        return project_inbox(scan.rows, state, projects, selected)
+    finally:
+        scan.reset()
+
+
+def project_inbox(summaries, state, projects, selected):
+    # Core orders both global and project pages by updated_at DESC, id ASC.
+    # Preserve that order when taking GTK's windows from the same summary collection.
     projects = [p for p in projects if p.get('status') not in ('archived', 'deleted')]
-    reader = InboxSources(c)
-    current = reader.page('limit=200')
-    completed = reader.page('status=completed&limit=100')
+    groups = {p['slug']: [] for p in projects}
+    current, completed = [], []
+    for m in summaries.values():
+        status = m.get('status')
+        if len(current) < 200 and status not in ('acknowledged', 'archived'):
+            current.append(m)
+        if len(completed) < 100 and status == 'completed':
+            completed.append(m)
+        if m.get('project') in groups:
+            groups[m['project']].append(m)
     now_ms = int(time.time() * 1000)
-    sources = [inbox_project_page(reader, p['slug'], now_ms) for p in projects]
-    sources.extend([completed, inbox_with_ancestors(reader, current)])
-    hidden = btw_ids(reader.observed)
+    sources = [inbox_project_page(summaries, slug, rows, now_ms) for slug, rows in groups.items() if rows]
+    sources.extend([completed, inbox_with_ancestors(summaries, current)])
+    hidden = btw_ids(summaries)
     by_id = {}
     for source in sources:
         for m in source:
@@ -746,7 +769,7 @@ def mission_row(m):
             *mission_settings(m), *mission_hierarchy(m))
 
 
-def roster_rows(c, include_archived=False, inbox_for=None):
+def roster_rows(c, include_archived=False, inbox_for=None, inbox_scan=None):
     projects = c.get('/api/projects')['projects']
     missions = c.get(f'/api/control/missions?limit={CURRENT_MISSION_LIMIT}&include_ancestors=true')
     machines = c.get('/api/machines')
@@ -763,7 +786,7 @@ def roster_rows(c, include_archived=False, inbox_for=None):
     rows = [('C', c.binding)]
     if inbox_for is not None:
         try:
-            rows += inbox_snapshot(c, projects, inbox_for)
+            rows += inbox_snapshot(c, projects, inbox_for, inbox_scan)
         except urllib.error.HTTPError as error:
             if error.code in (401, 403):
                 raise
@@ -846,11 +869,12 @@ def poll(mid, binding, tracked=None):
         return  # EOF invalidates the old roster; never request with a new identity
     last, failures, checked = None, 0, None
     visible = []
+    inbox_scan = InboxScan()
     while True:
         c.check()
         try:
             if checked is None or time.monotonic() - checked >= 5:
-                rows = roster_rows(c, include_archived=True, inbox_for=mid)
+                rows = roster_rows(c, include_archived=True, inbox_for=mid, inbox_scan=inbox_scan)
                 found = {r[1] for r in rows if r[0] == 'M'}
                 # A sorted, limited list is positive evidence only. For every
                 # absent tracked ID require an explicit per-mission denial.
