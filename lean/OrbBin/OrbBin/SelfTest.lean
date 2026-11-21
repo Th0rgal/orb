@@ -1027,6 +1027,39 @@ def runOpenCodeAcpTests : IO Unit := do
   IO.FS.removeDirAll tmpDir
 
 def runAllTests : IO UInt32 := do
+  let prompt := "--model is part of this prompt\nwith 'quotes' and a trailing newline\n"
+  assertEq "Antigravity delivers a flag-shaped prompt verbatim alongside model, effort and resume"
+    (OrbBin.ClaudeControl.buildOneShotHarnessArgs "antigravity" prompt (some "custom-model") (some "high") (some "session"))
+    #["--model", "custom-model", "--effort", "high", "--conversation", "session", "--output-format", "stream-json", "--print=" ++ prompt]
+
+  let agEvent := OrbBin.ClaudeControl.parseOneShotHarnessEvent "antigravity"
+  let sid := "a0d4056b-b8c8-476b-937e-e87917513ec0"
+  let init := agEvent (renderCompact (.obj #[("event", .str "init"), ("conversation_id", .str sid)]))
+  assertEq "Antigravity init binds native conversation" init.sessionId? (some sid)
+  let chunk := agEvent "{\"event\":\"step_update\",\"step_update\":{\"step_type\":\"agent_response\",\"text_delta\":\"answer\"}}"
+  assertEq "Antigravity response delta" chunk.textDelta "answer"
+  let finalEvent := agEvent "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"answer\",\"usage\":{\"input_tokens\":3}}}"
+  assertEq "Antigravity terminal response is not repeated"
+    (OrbBin.ClaudeControl.joinHarnessText "antigravity" chunk.textDelta none finalEvent).1 ""
+  assertEq "Antigravity result-only response remains visible"
+    (OrbBin.ClaudeControl.joinHarnessText "antigravity" "" none finalEvent).1 "answer"
+  assertEq "Antigravity usage comes from the final event" finalEvent.inputTokens? (some 3)
+  let toolStep := fun phase => agEvent (renderCompact (.obj #[("event", .str "step_update"), ("step_update",
+    .obj #[("conversation_id", .str sid), ("step_index", .nat 2), ("tool_name", .str "write_file"), ("state", .str phase)])]))
+  let began := (toolStep "ACTIVE").activity?
+  let ended := (toolStep "DONE").activity?
+  assertEq "Antigravity tool event retains its step id" (began.map (·.id)) (some s!"agy-{sid}-2")
+  assertEq "Antigravity tool end settles the same card" (ended.map (fun t => (t.id, t.done))) (some (s!"agy-{sid}-2", true))
+  let failure := agEvent "{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"error\":\"fixture refusal\"}}"
+  assertEq "Antigravity reports terminal inference error" failure.errorMsg? (some "fixture refusal")
+  assertEq "Antigravity diagnostics are not displayed as assistant text" (agEvent "diagnostic").textDelta ""
+  let authLine := "Authentication required. Please visit the URL to log in: https://accounts.google.com/o/oauth2/auth?state=test-marker"
+  let authMessage := (agEvent authLine).errorMsg?
+  assertEq "Antigravity login challenge gives an actionable, redacted error"
+    (authMessage.any fun m => m.contains "native Google sign-in" && !m.contains "test-marker") true
+  let authFailure := agEvent (renderCompact (.obj #[("event", .str "result"),
+    ("result", .obj #[("status", .str "ERROR"), ("error", .str authLine)])]))
+  assertEq "Structured Antigravity login failures use the same diagnostic" authFailure.errorMsg? authMessage
   runOpenCodeAcpTests
   IO.println "=== OrbBin Wave 1 Companion Binaries Self-Test ==="
 

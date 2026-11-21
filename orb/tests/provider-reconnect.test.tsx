@@ -71,8 +71,7 @@ it("removes an API key provider from its actions menu", async () => {
   expect(changed).toHaveBeenCalledTimes(1);
 });
 
-it("feeds a Claude authorization code to CLIProxyAPI while preserving the reconnect UUID", async () => {
-  const id = "3be8246a-6fa4-41a5-948c-f0d333e6e247";
+it.each(["3be8246a-6fa4-41a5-948c-f0d333e6e247", "subscription-work"])("preserves reconnect account %s throughout the CLIProxy callback", async (id) => {
   setConnection("http://core.test", "test-token");
   vi.spyOn(window, "open").mockReturnValue(null);
   const fetch = vi.fn(async (url: string, options?: RequestInit) => {

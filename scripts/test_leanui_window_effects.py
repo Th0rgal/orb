@@ -14,10 +14,8 @@ RULES = (ROOT / "nix/orb-desktop.hyprland.conf").read_text()
 
 def main() -> None:
     assert "def wlShmFormatArgb8888 : UInt32 := 0" in WAYLAND
-    assert "def rgbaToArgb" in WAYLAND
-    assert "pm (c : UInt8)" in WAYLAND
     assert ".uint wlShmFormatArgb8888" in WAYLAND
-    assert "rgbaToArgb fb" in WAYLAND
+    assert "FFI.presentArgb (shm.ptr + offset.toUSize) fb" in WAYLAND
 
     assert "def withWindowEffects" in STYLE
     assert "mainAlpha : UInt32 := if t.isDark then 240 else 244" in STYLE

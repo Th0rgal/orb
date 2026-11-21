@@ -480,12 +480,15 @@ private def sidecarParkedHealthContract
       let detail ← getJson app jwt s!"/api/ai/providers/{oauthOnly}" now
       let listed := (← getJson app jwt "/api/ai/providers" now).asArr?.getD #[]
       let listedRow := (listed.find? (fun v => v.fieldStr? "id" == some oauthOnly)).getD .null
-      if statusOf detail != some "needs_reauth" || statusOf listedRow != some "needs_reauth" then
-        failures := failures.push "r32_login_reporting_fixture_and_fresh_login: list/detail must report needs_reauth"
+      let disabled := (file.fieldBool? "disabled").getD false
+      let expectedStatus := if disabled then "connected" else "needs_reauth"
+      if statusOf detail != some expectedStatus || statusOf listedRow != some expectedStatus then
+        failures := failures.push s!"provider list/detail must report credential status {expectedStatus}"
       let health := (← getJson app jwt "/api/model-routing/health" now).asArr?.getD #[]
       let row := (health.find? (fun v => v.fieldStr? "account_id" == some oauthOnly)).getD .null
-       if row.fieldStr? "login_message" != some "Sign in again" then
-         failures := failures.push "r32_login_reporting_fixture_and_fresh_login: health must report Sign in again"
+      if row.fieldStr? "login_message" != (if disabled then none else some "Sign in again") ||
+          (disabled && row.fieldStr? "account_state" != some "disabled") then
+        failures := failures.push "disabled health must be distinguished from a login that requires sign-in"
       if file.fieldStr? "name" == some "quota.json" &&
           row.fieldStr? "parked_until" != some "2026-11-18T12:00:00Z" then
         failures := failures.push "r32_login_reporting_fixture_and_fresh_login: reported reset changed"
@@ -1451,6 +1454,12 @@ private def customDiscoveryContract (app : CoreAppState) (jwt : String) (now : U
         ("provider_type", .str "custom"), ("base_url", .str s!"http://127.0.0.1:{port}/v1/"),
         ("api_key", .str "discovery-fixture-key"), ("enabled", .bool true),
         ("custom_models", .arr #[.obj #[("id", .str "glm-5.3")], .obj #[("id", .str "glm-5.3-flash")]])])) now
+    let backendCatalog ← getJson app jwt "/api/providers/backend-models" now
+    let options := ((backendCatalog.fieldOrNull "backends").fieldArr? "opencode").getD #[]
+    let overrides := options.filterMap (·.fieldStr? "value")
+    if !overrides.contains "ethereumfoundation/glm-5.3-flash" || overrides.contains "ethereumfoundation/glm-5.3" ||
+        overrides.contains "prov-eth-x4/glm-5.3-flash" then
+      failures := failures.push "OpenCode must advertise routable allowed custom provider IDs"
     let ethCat ← getJson app jwt "/api/providers/catalog" now
     let ethProv := (((ethCat.fieldArr? "providers").getD #[]).find? (fun p => p.fieldStr? "id" == some "prov-eth-x4")).getD .null
     let ethIds := ((ethProv.fieldArr? "models").getD #[]).filterMap (·.fieldStr? "id")

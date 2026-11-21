@@ -685,8 +685,9 @@ export function reconcileMissionList<M extends HierarchyFields>(prev: readonly M
   });
   for (const m of prev) {
     if (fresh.has(m.id)) continue;
+    if (partial) { out.push(m); continue; }
     const miss = misses.get(m.id) ?? { n: 0, since: now };
-    if (!partial) miss.n++;
+    miss.n++;
     if (miss.n >= MISSES_TO_REMOVE && now - miss.since >= MISS_WINDOW_MS) { misses.delete(m.id); continue; }
     misses.set(m.id, miss);
     out.push(m);

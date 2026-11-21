@@ -1,5 +1,11 @@
 # Projects and controller missions
 
+For OpenCode workers, `get_compute_fleet.opencode_model_overrides` lists configured
+provider routes visible to the caller. Pass a returned ID verbatim as
+`start_mission.model_override`. A worker's local `opencode models` command
+reflects that CLI's configuration and can omit routes supplied by Core.
+
+
 A project is a label and one controller mission. It retains title, objective,
 status, color, skills, files, and appearance. Missions use the project label to
 share context and organize work.

@@ -4747,7 +4747,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       if !isSafeMissionId mid then
         abortIdem
         return .ok (mkJson 400 "{\"error\":\"invalid_mission_id\"}")
-      let title := (JsonTape.lookupString? tape "title").getD "New Mission"
+      let title := (bodyVal?.bind (·.fieldStr? "title")).getD "New Mission"
       let backend := (JsonTape.lookupString? tape "backend").getD "codex"
       let rawEffort := (JsonTape.lookupString? tape "model_effort").getD ""
       let normEffort ←
@@ -4842,19 +4842,19 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | do abortIdem; return .ok (mkJson 400 "{\"error\":\"contradictory_authority_tags\"}")
       let bodyJv := bodyVal?.getD (.obj #[])
       let modelOverride := (JsonTape.lookupString? tape "model_override").getD ""
-      let prompt? := JsonTape.lookupString? tape "prompt"
+      let prompt? := bodyJv.fieldStr? "prompt"
       let goalObjective? := prompt?.bind Cyber.parseGoalPrefix?
       let remoteGoal := !clientPlaced && remoteNodeId?.isSome && goalObjective?.isSome
       if remoteGoal then
         let capability := if RemoteGoal.harnesses.contains backend && st.remoteSup?.isSome
-          then RemoteGoal.Capability.coreOpenCode else .unavailable
+          then RemoteGoal.Capability.coreEmulated else .unavailable
         match RemoteGoal.admit capability false (goalObjective?.getD "") with
         | .error .emptyObjective =>
           abortIdem
           return .ok (mkJson 400 "{\"error\":\"Goal mode requires a non-empty objective.\"}")
         | .error _ =>
           abortIdem
-          return .ok (mkJson 400 "{\"error\":\"remote_goal_unsupported: This remote harness cannot continue a Goal. Choose OpenCode or send a standard turn.\"}")
+          return .ok (mkJson 400 "{\"error\":\"remote_goal_unsupported: This remote harness cannot continue a Goal. Choose a Goal-capable harness or send a standard turn.\"}")
         | .ok _ => pure ()
       let mut selectedSkills : Array SelectedSkill := #[]
       if !clientPlaced then
@@ -5045,13 +5045,12 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             discard <| writeBinding st.cfg.workingDir mid {
               revision := rev, key := s!"remote-launch:{mid}", model := effModel
             }
+        let mut response := mkJson 201 respBody
         if !idemKey.isEmpty then
           match ← recordOrReplayIdempotency st.store createScope idemKey 201 respBody s!"{nowEpochSec}" with
           | .ok rec =>
-            persistInitialCyber
-            if let some sIdx := st.searchIdx? then
-              discard <| indexConversation sIdx mid title
-            return .ok (mkJson rec.statusCode rec.bodyJson)
+            response := mkJson rec.statusCode rec.bodyJson
+            if rec.replayed then return .ok response
           | .error e =>
             if !leaseReservationId.isEmpty then
               discard <| releaseDispatchTrackLease st.store leaseReservationId s!"{nowEpochSec}"
@@ -5079,7 +5078,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               discard <| maybeSpawnWarmHarnessTurn st caller placeKind mid backend safeWorkDir deliv modelOverride normEffort permMode wtMode true
         if let some sIdx := st.searchIdx? then
           discard <| indexConversation sIdx mid title
-        return .ok (mkJson 201 respBody)
+        return .ok response
 
   -- Mission Search (`GET /api/control/missions/search`)
   if req.method == "GET" && cleanPath == "/api/control/missions/search" then
@@ -5707,7 +5706,6 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
 
   if req.method == "GET" && cleanPath == "/api/providers/backend-models" then
     let isAdm := caller.isLegacyUnscoped || caller.role == "admin"
-    let uPrefs ← if caller.isLegacyUnscoped then pure #[] else getUserProviderPrefs st.store caller.userId
     let mkOpt (val lbl desc : String) : String :=
       if desc.isEmpty then
         s!"\{\"value\":{jsonEscape val},\"label\":{jsonEscape lbl}}"
@@ -5754,16 +5752,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       mkOpt "muse/muse-spark-1.3-contributor" "Meta Muse — Muse Spark 1.3 Contributor" "",
       mkOpt "muse/muse-spark-1.3" "Meta Muse — Muse Spark 1.3" ""
     ]
-    let dbProviders ← listAIProviders st.store
-    for p in dbProviders do
-      let effEn := if caller.isLegacyUnscoped then p.enabled else (p.enabled && (isAdm || !p.apiKey.isEmpty) && isUserProviderEnabled uPrefs p.id)
-      if effEn then
-        for cm in p.customModels do
-          let mid := cm.id.trimAscii.toString
-          if !mid.isEmpty then
-            let rawLbl := (cm.name?.getD "").trimAscii.toString
-            let mlbl := if rawLbl.isEmpty then mid else rawLbl
-            opencodeModels := opencodeModels.push (mkOpt s!"{p.id}/{mid}" s!"{p.name} — {mlbl}" "")
+    let configured ← configuredOpenCodeOptions st.store caller.userId isAdm
+    opencodeModels := opencodeModels ++ configured.map renderCompact
     let mut agyModels : Array String := #[]
     if isAdm then
       let pHub ← match st.providerHub? with | some h => pure h | none => newProviderRuntimeHub

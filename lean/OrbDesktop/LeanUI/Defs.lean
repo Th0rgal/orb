@@ -136,6 +136,8 @@ inductive Event where
   | pointerLeave
   /-- Activation emitted by the runtime after a pointer release or keyboard accept. -/
   | activate (entityId : EntityId)
+  /-- Enter in the focused editor. Shift requests a line break. -/
+  | composerReturn (shift : Bool)
   /-- One atomic text-input-v3 `done` batch, applied in protocol order: delete
   `delBefore`/`delAfter` bytes around the cursor, insert `commit`, then show `preedit`. -/
   | imeBatch (delBefore delAfter : Nat) (commit : String) (preedit : String)

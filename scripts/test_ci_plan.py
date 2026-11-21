@@ -133,10 +133,9 @@ class RunnerSelectionTest(unittest.TestCase):
     # on hosted runners: lean.ci guests have no Docker daemon. The desktop shell
     # builds release binaries against Ubuntu 24.04 system libraries.
     DOCKER_JOBS = {"ci.yml": {"orb-browser", "orb-performance", "docker"}, "kernel-abi.yml": set()}
-    HOSTED_ONLY = {"ci.yml": DOCKER_JOBS["ci.yml"] | {"orb-desktop-shell"}, "kernel-abi.yml": set()}
+    HOSTED_ONLY = {"ci.yml": DOCKER_JOBS["ci.yml"] | {"orb-desktop-shell", "ci-ok"}, "kernel-abi.yml": set()}
 
     def test_docker_jobs_are_hosted_only(self):
-        self.assertEqual(self.HOSTED_ONLY["ci.yml"] - self.DOCKER_JOBS["ci.yml"], {"orb-desktop-shell"})
         for workflow, hosted in self.DOCKER_JOBS.items():
             text = (ROOT / ".github/workflows" / workflow).read_text().split("\njobs:\n", 1)[1]
             blocks = dict(zip(*[iter(re.split(r"(?m)^  ([a-z0-9-]+):\n", text)[1:])] * 2))
@@ -180,7 +179,9 @@ class RunnerSelectionTest(unittest.TestCase):
                            and (trusted or same_repo_pr))
                 for job, fallback in fallbacks.items():
                     # lean.ci labels are minimums; idle engines burst them larger.
-                    size = 2 if job in {"plan", "fmt", "capability-matrix", "ci-ok"} else 4
+                    size = 2 if job in {"plan", "fmt", "capability-matrix"} else 4
+                    if job == "test":
+                        size = 8
                     routed = enabled and job not in self.HOSTED_ONLY[workflow]
                     expected = f"lean-{size}vcpu-ubuntu-2604" if routed else fallback
                     with self.subTest(workflow=workflow, job=job, **context):

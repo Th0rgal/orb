@@ -36,7 +36,10 @@
     } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
       # `turbo-lean` must come from the let above: a `rec` set does not reach
       # across `//`, which left this attribute undefined (U4).
-      orb-desktop = pkgs.callPackage ./nix/desktop.nix {inherit turbo-lean;};
+      orb-desktop = pkgs.callPackage ./nix/desktop.nix {
+        inherit turbo-lean;
+        revision = self.rev or (self.dirtyRev or "local checkout");
+      };
     });
 
     devShells = forAllSystems (pkgs: let

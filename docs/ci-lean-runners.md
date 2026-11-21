@@ -37,7 +37,10 @@ performance and Docker image always run on hosted runners, because they need
 Docker (a `container:` image or `docker build`/`run`) and lean.ci guests have no
 Docker daemon (first lean.ci master run, 16 Nov). Orb Desktop Shell also stays hosted: it builds the
 Linux desktop release binaries, which must link against Ubuntu 24.04 system
-libraries, and lean.ci guests are Ubuntu 26.04. lean.ci guests also ship
+libraries, and lean.ci guests are Ubuntu 26.04. Both aggregators stay hosted:
+in [web PR CI](https://github.com/Th0rgal/orb/actions/runs/44278806268), CI OK
+waited 6m36s for a Lean runner after its dependencies finished, then ran for 10s.
+lean.ci guests also ship
 without Rust: on a turbo-lean cache miss, `setup-turbo-lean` installs a pinned
 minimal Rust 1.99.1 through `rustup-init`. Fork pull requests, fork repositories,
 other non-default-branch events, tags, other events, and unset/false variables preserve

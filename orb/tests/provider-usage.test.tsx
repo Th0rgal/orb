@@ -301,3 +301,20 @@ it("hides expand chevrons for members on healthy connection rows without details
   expect(container.querySelectorAll(".p-acc-btn")).toHaveLength(0);
 });
 
+
+it("keeps a disabled account's quota visible without showing cached login errors", async () => {
+  setConnection("http://core.test", "test-token");
+  const message = "Sign in again: the provider rejected this login";
+  const disabled = { ...account("disabled"), enabled: false, status: { type: "needs_reauth", message } };
+  const staleUsage = { ...usage(40), status: "needs_reauth", error: message };
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(
+    url.endsWith("/providers") ? [disabled] : url.endsWith("/providers/usage") ? { entries: { disabled: staleUsage } } : {},
+  ))));
+  const { container } = render(() => <Providers />);
+  await waitFor(() => expect(container.querySelector("button.p-acc-btn")).not.toBeNull());
+  (container.querySelector("button.p-acc-btn") as HTMLButtonElement).click();
+  await waitFor(() => expect(container.querySelector(".p-acc-body")).not.toBeNull());
+  await waitFor(() => expect(container.textContent).toContain("40%"));
+  expect(container.textContent).not.toContain("provider rejected");
+  expect(container.textContent).not.toContain("Reconnect this account");
+});

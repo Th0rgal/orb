@@ -172,12 +172,15 @@ test("a failed, empty or partial list never removes rows; two full misses over t
   shown = reconcileMissionList(shown, [], misses, false, 2000);
   shown = reconcileMissionList(shown, [], misses, false, 2100);
   expect(shown.map(m => m.id).sort()).toEqual(["h1", "h2", "local"]);
+  // Crossing the miss window on a journal-only answer cannot evict a row.
+  shown = reconcileMissionList(shown, partialList([]), misses, undefined, 8000);
+  expect(shown.map(m => m.id).sort()).toEqual(["h1", "h2", "local"]);
   // A full answer that lists them resets the count.
-  shown = reconcileMissionList(shown, h, misses, false, 3000);
-  shown = reconcileMissionList(shown, [h[0]], misses, false, 4000);
+  shown = reconcileMissionList(shown, h, misses, false, 9000);
+  shown = reconcileMissionList(shown, [h[0]], misses, false, 10000);
   expect(shown.map(m => m.id)).toContain("h2");
   // Omitted by full answers over the window: gone.
-  shown = reconcileMissionList(shown, [h[0]], misses, false, 9500);
+  shown = reconcileMissionList(shown, [h[0]], misses, false, 15500);
   expect(shown.map(m => m.id)).toEqual(["h1"]);
 });
 

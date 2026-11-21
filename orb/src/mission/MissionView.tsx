@@ -391,7 +391,7 @@ function MissionDock(p: {
             </button>
             <Show when={modelOpen()}>
               <Picker label="Models" searchLabel="Search models" placement="top-start" selected={modelId()}
-                items={modelPickerItems(models())}
+                items={modelPickerItems(models(), p.mission?.backend ?? "")}
                 onClose={() => setModelOpen(false)} onSelect={value => void pickModel(value)}/>
 
             </Show>
@@ -1195,7 +1195,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
   });
   const remoteGoal = createMemo(() => {
     const m = mission();
-    if (!m?.goal_mode || clientPlaced() || m.backend !== "opencode") return;
+    if (!m?.goal_mode || clientPlaced() || !(m.remote_node_id || m.remote_job?.node_id)) return;
     const phase = remoteGoalPhase(m.status, m.terminal_reason);
     const live = liveGoal();
     return { phase: phase === "active" ? live?.phase ?? phase : phase, objective: m.goal_objective ?? "", iteration: Math.max(m.goal_iteration ?? 0, live?.iteration ?? 0) };

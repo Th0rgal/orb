@@ -8,7 +8,7 @@ import { remoteContinuation } from "./remoteContinuation";
 import { ErrorNotice, isNonResumableError } from "./ErrorNotice";
 import { Show, Suspense, lazy } from "solid-js";
 import { ApiError, getApiUrl, isClientPlacement, type Mission, type RemoteLaunchCapability, type RemoteNodesResponse } from "./api";
-import { goalObjective, GoalTag } from "./goal";
+import { goalObjective, GoalTag, remoteGoalSupport, REMOTE_GOAL_UNSUPPORTED } from "./goal";
 import type { StreamItem } from "./Transcript";
 
 const LazyQuotaResetAction = lazy(() => import("./SubscriptionResetDialog").then(m => ({ default: m.QuotaResetAction })));
@@ -61,7 +61,7 @@ export function missionDestination(mission: Mission | null, receipt?: LaunchRece
   // over workspace_name, which can still name the host's bookkeeping workspace.
   const node = missionNode(mission);
   if (node && mission?.id) rememberMissionNode(mission.id, node);
-  return nodeLabel(node ?? receipt?.nodeId ?? lastMissionNode(mission?.id) ?? mission?.workspace_name ?? "selected machine");
+  return nodeLabel(node ?? receipt?.nodeId ?? lastMissionNode(mission?.id) ?? (mission?.workspace_name?.trim() || (mission ? "core" : "Loading machine…")));
 }
 export function initialPrompt(mission: Mission | null, receipt?: LaunchReceipt): string | undefined {
   if (receipt?.prompt) return receipt.prompt;
@@ -163,11 +163,7 @@ export function remoteLaunchPreflight(fleet: RemoteNodesResponse, nodeId: string
 
 export function remoteGoalPreflight(fleet: RemoteNodesResponse, nodeId: string, backend: string): string | null {
   if (!isAutoManagedTarget(nodeId) && !fleet.nodes?.some(n => n.id === nodeId)) return "The selected remote node is unavailable. Your draft is kept.";
-  const supported = fleet.remote_launch?.goal_harnesses;
-  if (!Array.isArray(supported) || !supported.includes(backend)) {
-    return `Goal mode is unavailable for ${backend} on ${nodeLabel(nodeId)} because this remote harness cannot continue the objective safely. Choose OpenCode on a Goal-capable remote node, or use a standard turn.`;
-  }
-  return null;
+  return remoteGoalSupport(fleet.remote_launch, backend) ? null : REMOTE_GOAL_UNSUPPORTED;
 }
 /** Native Grok uses managed OAuth and does not need the model proxy. Claude Code and OpenCode do, unless the server lists `requires_proxy_harnesses`. */
 export function remoteHarnessNeedsProxy(capability: RemoteLaunchCapability, backend: string): boolean {

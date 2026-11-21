@@ -3,10 +3,12 @@
 ## Contract
 
 Core owns the interpretation of CLIProxyAPI login health. A refresh-failed
-(`invalid_refresh_token`), disabled, expired, or quota-exhausted login with a
+(`invalid_refresh_token`), expired, or quota-exhausted login with a
 reported reset is represented as `needs_reauth`, with the user-facing action
 **Sign in again**. Desktop, iOS and Android Providers cards and mission errors
 must preserve that classification rather than reporting generic overload.
+
+A disabled sidecar login has account state `disabled`. Disabling it does not supply evidence of login rejection or require signing in again.
 
 The kernel assigns a distinct login-unavailable reporting reason code. Login
 failure is not a transient server failure. Health reporting records the
@@ -27,7 +29,7 @@ logins, but clearing a cooldown must never re-enable a disabled login.
 Use a shared fixture containing a refresh-failed login, a quota-exhausted login
 with a reset and a disabled login. Named tests must verify:
 
-1. All three clients display **Sign in again**.
+1. Clients display **Sign in again** for a login requiring reauthentication and **Disabled** for an intentionally disabled account.
 2. Mission failure exposes the same actionable classification.
 3. Reported parking follows the sidecar reset exactly, including resets beyond an hour.
 4. Repeated observations produce one monitor alert.
