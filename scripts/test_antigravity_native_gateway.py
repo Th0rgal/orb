@@ -39,6 +39,7 @@ class Subscription(BaseHTTPRequestHandler):
         if self.headers.get("Authorization") != "Bearer fixture-vendor-token":
             self.send_error(401)
             return
+        self.server.calls += 1
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         method = self.path.split("?", 1)[0].split(":")[-1]
         content_type = "application/json"
@@ -99,6 +100,7 @@ def start_subscription(stack, root, workspace):
     server.workspace = workspace
     server.requests = dict.fromkeys(MODELS, 0)
     server.admin_controls = {}
+    server.calls = 0
     threading.Thread(target=server.serve_forever, daemon=True).start()
     stack.callback(server.shutdown)
     return server, cert
@@ -197,6 +199,16 @@ def run(core, agy):
             vendor.admin_controls = {"mcpSetting": {"mcpConfigJson": "private-fixture-config"}}
             assert rpc("fetchAdminControls")[0] == 403
             vendor.admin_controls = {}
+            # A reachable Direct upstream must receive nothing when this account
+            # requires a VPN and no verified tunnel can be established.
+            before = vendor.calls
+            with db:
+                db.execute("INSERT INTO account_vpn_routes(account_id,country) VALUES(?,'NL') "
+                           "ON CONFLICT(account_id) DO UPDATE SET country='NL',generation=generation+1", (ACCOUNT,))
+            assert rpc("fetchAvailableModels")[0] == 503
+            assert vendor.calls == before
+            with db:
+                db.execute("UPDATE account_vpn_routes SET country='',generation=generation+1 WHERE account_id=?", (ACCOUNT,))
             conversation = native_turn(agy, workspace, base, grant, selected)
             assert (workspace / selected).read_text().strip() == "native receipt"
             assert native_turn(agy, workspace, base, grant, selected, conversation) == conversation
@@ -208,7 +220,7 @@ def run(core, agy):
                 db.execute("UPDATE remote_node_jobs SET state='succeeded' WHERE job_id=?", (job,))
             assert rpc("fetchAvailableModels")[0] == 401
             print(json.dumps({"model": selected, "conversation": conversation, "workspace_write": True,
-                              "resume": True, "usage": usage, "terminal_http": 401}), flush=True)
+                              "resume": True, "usage": usage, "unavailable_vpn_http": 503, "direct_fallback_calls": 0, "terminal_http": 401}), flush=True)
 
 
 if __name__ == "__main__":
