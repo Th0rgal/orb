@@ -90,6 +90,18 @@ private def unsentDraft : DesktopState :=
 
 private def projectDraft : DesktopState := { unsentDraft with screen := .controlEmpty, draftProject := "now" }
 private def inferencePage := (stepDesktopEvent 120 vp projectDraft (.activate 113)).1
+private def sharedAccount : ProviderAccount := {
+  id := "shared", name := "Shared", category := "Google", globallyEnabled := true, userEnabled := false }
+private def providerPage : DesktopState := { inferencePage with providers := some [sharedAccount] }
+private def routePage := (stepDesktopEvent 120 vp providerPage (.activate (providerRouteButton 0))).1
+#guard routePage.routeAccount == some sharedAccount && routePage.writeRequest.isNone
+private def countryPage : DesktopState := { routePage with
+  providerRoute := some { selected := "direct", status := "direct", countries := ["NL"], editable := true } }
+private def verifyingRoute := (stepDesktopEvent 120 vp countryPage (.activate (providerRouteOption 1))).1
+#guard verifyingRoute.routeOperation == "NL" && verifyingRoute.providerRoute.isNone
+#guard verifyingRoute.providers == some [sharedAccount]
+#guard (stepDesktopEvent 120 vp verifyingRoute (.activate providerRouteBack)).1.routeAccount.isNone
+
 private def machinesPage := (stepDesktopEvent 120 vp inferencePage (.activate 112)).1
 private def returnedDraft := (stepDesktopEvent 120 vp machinesPage (.activate 101)).1
 

@@ -109,6 +109,28 @@ class Delivery(unittest.TestCase):
         self.assertEqual(output.getvalue().splitlines(), [
             'accounts', 'A\ttest-member\tWork\tGoogle\t0\t1', 'A\tsecond\tCloud\tcustom\t1\t0'])
 
+    def test_shared_route_round_trip_keeps_skip_preference_independent(self):
+        responses = {'mode': 'vpn', 'country': 'NL', 'status': 'verified', 'server': 'test',
+                     'exits': ['192.0.2.35'], 'can_configure': True, 'countries': ['NL', 'DE']}
+        with patch.object(live, 'Connection') as conn, contextlib.redirect_stdout(io.StringIO()) as out:
+            client = conn.return_value
+            client.binding = 'ben'
+            client.request.return_value = responses
+            live.provider_route('ben', 'shared/account', 'NL')
+            client.request.assert_called_once_with('/api/ai/providers/shared%2Faccount/vpn',
+                method='PUT', body={'mode': 'vpn', 'country': 'NL'}, deadline=45)
+            written = out.getvalue()
+            client.binding = 'thomas'
+            client.get.return_value = responses
+            live.provider_route('thomas', 'shared/account', 'read')
+            self.assertEqual(out.getvalue(), written * 2)
+            self.assertIn('verified · test · 192.0.2.35', written)
+            self.assertIn('C\tDE', written)
+            with self.assertRaises(ValueError):
+                live.provider_route('thomas', 'shared/account', 'direct')
+            with self.assertRaises(ValueError):
+                live.provider_route('ben', 'shared/account', 'NL')
+
     def test_provider_toggle_requires_the_selected_account_receipt(self):
         with patch.object(live, 'Connection') as conn:
             conn.return_value.binding = 'ben'

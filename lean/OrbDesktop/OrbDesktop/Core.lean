@@ -70,6 +70,7 @@ private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale
 
 private inductive ReadKind where
   | roster | recover | catalog (revision : Nat) | providers
+  | providerRoute (account operation : String)
   | nativeModels (machine : String)
   | launchMachines (admin : Bool) (harness : String)
   deriving BEq
@@ -86,6 +87,7 @@ private def startLiveRead (binding : String) (kind : ReadKind) (notify : IO Unit
     | .recover => #["-I", "-c", transport ++ "\nrecover_roster()"]
     | .nativeModels machine => #["-I", "-c", transport ++ "\nnative_models(*sys.argv[1:])", binding, machine]
     | .launchMachines admin harness => #["-I", "-c", transport ++ "\nlaunch_machines(*sys.argv[1:])", binding, if admin then "admin" else "member", harness]
+    | .providerRoute account operation => #["-I", "-c", transport ++ "\nprovider_route(*sys.argv[1:])", binding, account, operation]
     | .providers => #["-I", "-c", transport ++ "\nprovider_inventory(sys.argv[1])", binding]
     | .catalog _ => #["-I", "-c", transport ++ "\ncatalog(sys.argv[1], json.loads(sys.argv[2]))", binding, modelCatalogRules]
   let child ← IO.Process.spawn { cmd := "python3", args, stdout := .piped, stderr := .null }
@@ -115,8 +117,17 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
         else if st.missionMenu.any (·.page == .picker .machine) && st.launchMachines.isNone && !st.launchMachinesFailed then
           some (.launchMachines (st.fleetMachines.any (·.machineId == "core")) st.draftSettings.backend)
         else if st.screen == .inference && st.providers.isNone && !st.providerReadFailed then some .providers
+        else if st.screen == .inference && st.routeAccount.isSome && st.providerRoute.isNone && !st.routeFailed then
+          st.routeAccount.map fun account => .providerRoute account.id st.routeOperation
         else if st.catalogLoading then some (.catalog st.catalogRevision)
         else (nativeCatalogRequest st).map ReadKind.nativeModels
+      -- Navigating away can retire a read. Finish a submitted route update once,
+      -- then let the visible page request its own authoritative projection.
+      if let some source := current then
+        if let .providerRoute _ operation := source.kind then
+          if operation != "read" && source.binding == st.connectionBinding && some source.kind != kind then
+            if (← source.take).isNone then return none
+            close
       if current.any (fun r => r.binding != st.connectionBinding || some r.kind != kind) then close
       let some kind := kind | return none
       let source ← match ← slot.get with
@@ -144,6 +155,15 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
           | ["R", id, title] => some (id, title)
           | _ => none
         return some { st with launchMachines := some nodes }
+      if let .providerRoute .. := source.kind then
+        let failed := { st with routeFailed := true }
+        let some line := lines[1]? | return some failed
+        let ["R", selected, status, editable] := splitTab line | return some failed
+        if lines.head? != some "route" then return some failed
+        let countries := lines.filterMap fun l => match splitTab l with
+          | ["C", country] => some country
+          | _ => none
+        return some { st with providerRoute := some { selected, status, editable := editable == "1", countries } }
       if source.kind == .providers then
         if lines.head? != some "accounts" then return some { st with providerReadFailed := true }
         let rows := lines.filterMap fun line =>

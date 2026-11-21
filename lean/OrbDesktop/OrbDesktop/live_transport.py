@@ -363,6 +363,36 @@ def launch_machines(binding, role, harness):
         print('\t'.join(map(label, row)))
 
 
+def provider_route(binding, account, selection):
+    c = Connection()
+    if c.binding != binding or not account or account in ('.', '..'):
+        raise ValueError('invalid account or session')
+    path = '/api/ai/providers/' + urllib.parse.quote(account, safe='') + '/vpn'
+    if selection == 'read':
+        row = c.get(path)
+    else:
+        if selection != 'direct' and not re.fullmatch('[A-Z]{2}', selection):
+            raise ValueError('invalid country')
+        body = {'mode': 'direct'} if selection == 'direct' else {'mode': 'vpn', 'country': selection}
+        row = c.request(path, method='PUT', body=body, deadline=45)
+        if any(row.get(k) != v for k, v in body.items()):
+            raise ValueError('unconfirmed account route')
+    mode = row['mode']
+    countries = row['countries']
+    country = row.get('country', '')
+    if (mode not in ('direct', 'vpn') or not isinstance(row['can_configure'], bool)
+            or mode == 'vpn' and not re.fullmatch('[A-Z]{2}', country)
+            or not isinstance(countries, list) or not all(re.fullmatch('[A-Z]{2}', x) for x in countries)):
+        raise ValueError('invalid account route')
+    status = row['status']
+    detail = row.get('message') or ' · '.join(filter(None, [status, row.get('server'), ', '.join(row.get('exits', []))]))
+    c.check()
+    print('route')
+    print('\t'.join(map(label, ['R', country if mode == 'vpn' else 'direct', detail, str(int(row['can_configure']))])))
+    for option in dict.fromkeys(countries):
+        print('C\t' + option)
+
+
 def provider_inventory(binding):
     c = Connection()
     if c.binding != binding:

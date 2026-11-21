@@ -303,6 +303,17 @@ structure ProviderAccount where
 
 def providerWidgetId (index : Nat) : WidgetId := 6000000 + index
 
+structure ProviderRoute where
+  selected : String
+  status : String
+  editable : Bool
+  countries : List String
+  deriving BEq, Repr, Inhabited
+
+def providerRouteButton (index : Nat) : WidgetId := 7000000 + index
+def providerRouteBack : WidgetId := 5900000
+def providerRouteOption (index : Nat) : WidgetId := 8000000 + index
+
 inductive LiveWrite where
   | providerPreference (account : String) (enabled : Bool)
   | create
@@ -360,6 +371,10 @@ structure DesktopState where
   catalogRevision : Nat := 0
   providers : Option (List ProviderAccount) := none
   providerReadFailed : Bool := false
+  routeAccount : Option ProviderAccount := none
+  providerRoute : Option ProviderRoute := none
+  routeOperation : String := "read"
+  routeFailed : Bool := false
   expandedProjects : List String := []
   expandedMissions : List String := []
   archivesOpen : Bool := false
@@ -1075,9 +1090,26 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       let next := if st.openMission.isNone then
           { next with composer := { st.composer with imePreeditText := "" } }
         else { next with draftProject := "" }
-      let next := if navId == 113 then { next with providers := none, providerReadFailed := false } else next
+      let next := if navId == 113 then { next with providers := none, providerReadFailed := false, routeAccount := none } else next
       return ({ next with sidebarRows := next.sidebarRows.map fun row => { row with selected := row.widgetId == navId } }, some viewport)
-    if st.screen == .inference && navId >= providerWidgetId 0 then
+    if st.screen == .inference then
+      if st.routeAccount.isSome then
+        if navId == providerRouteBack || (ev matches .key 0xff1b _ .pressed) then
+          return ({ st with routeAccount := none, fleetTopSub := 0 }, some viewport)
+        if navId >= providerRouteOption 0 then
+          if st.routeFailed then
+            return ({ st with routeFailed := false, routeOperation := "read" }, some viewport)
+          if let some route := st.providerRoute then
+            if route.editable then
+              if let some country := ("direct" :: route.countries)[navId - providerRouteOption 0]? then
+                return ({ st with providerRoute := none, routeOperation := country }, some viewport)
+          return (st, none)
+      else if navId >= providerRouteButton 0 then
+        if let some account := (st.providers.getD [])[navId - providerRouteButton 0]? then
+          return ({ st with
+            routeAccount := some account, providerRoute := none, routeFailed := false
+            routeOperation := "read", fleetTopSub := 0 }, some viewport)
+    if st.screen == .inference && st.routeAccount.isNone && navId >= providerWidgetId 0 then
       if let some account := (st.providers.getD [])[navId - providerWidgetId 0]? then
         return ({ st with writeRequest := some (.providerPreference account.id (!account.userEnabled)) }, none)
     if let .composerReturn shift := ev then

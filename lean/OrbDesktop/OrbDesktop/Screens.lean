@@ -493,6 +493,23 @@ private def buildLiveInventory (st : DesktopState) (width height : SubPx) : Widg
   let rowH := pxToSub 60
   let providers := st.screen == .inference
   let accounts := st.providers.getD []
+  if providers then
+    if let some account := st.routeAccount then
+      let action := fun (id : WidgetId) (title desc value : String) =>
+        WidgetNode.focusable id <| WidgetNode.box (BoxStyle.col 0 |>.withFixedSize colW rowH)
+          [buildMachineRow theme colW rowH title desc value true false] (some id)
+      let back := action providerRouteBack "Accounts" account.name "Back"
+      let rows := match st.providerRoute with
+        | none => if st.routeFailed then [action (providerRouteOption 0) "Could not confirm the account connection" "Reload its saved route" "Retry"]
+          else [buildMachineRow theme colW rowH (if st.routeOperation == "read" then "Loading connection…" else "Verifying connection…") "" ""]
+        | some route =>
+          let label := fun s => if s == "direct" then "Direct" else s
+          let summary := buildMachineRow theme colW rowH ("Connection · " ++ label route.selected) route.status ""
+          summary :: (if !route.editable then [] else ("direct" :: route.countries).mapIdx fun i country =>
+            action (providerRouteOption i) (label country) "" (if country == route.selected then "Selected" else ""))
+      let content := WidgetNode.box (BoxStyle.col 0 |>.withAlign .center) (back :: rows)
+      return WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize width height)
+        { offsetY := min st.fleetTopSub ((rows.length + 1) * rowH - height) } content (some fleetViewportId)
   let count := if providers then accounts.length else st.fleetMachines.length
   if count == 0 then
     let message := if !providers then "No machines connected"
@@ -511,8 +528,14 @@ private def buildLiveInventory (st : DesktopState) (width height : SubPx) : Widg
       let detail := if account.category.isEmpty || account.category == account.name then availability
         else account.category ++ " · " ++ availability
       let preference := if account.userEnabled then "Using" else "Skipped"
-      WidgetNode.focusable id <| WidgetNode.box (BoxStyle.col 0 |>.withFixedSize colW rowH)
-        [buildMachineRow theme colW rowH account.name detail preference true false] (some id)
+      let routeId := providerRouteButton (first + i)
+      let routeW := min (pxToSub 100) (colW / 3)
+      WidgetNode.box (BoxStyle.row 0 |>.withAlign .center |>.withFixedSize colW rowH)
+        [WidgetNode.focusable id <| WidgetNode.box (BoxStyle.col 0 |>.withFixedSize (colW - routeW) rowH)
+           [buildMachineRow theme (colW - routeW) rowH account.name detail preference true false] (some id),
+         WidgetNode.focusable routeId <| WidgetNode.box
+           (BoxStyle.col 0 |>.withJustify .center |>.withFixedSize routeW rowH)
+           [screenTextLine theme routeW (pxToSub 20) (pxToSub 13) (pxToSub 20) theme.palette.textPrimary "Connection ›"] (some routeId)]
     else ((st.fleetMachines.drop first).take limit).map fun m =>
       let detail := String.intercalate " · " ([m.roleLabel, m.cpuRamSpec].filter (!·.isEmpty))
       buildMachineRow theme colW rowH (if m.name.isEmpty then m.machineId else m.name) detail m.state true false
