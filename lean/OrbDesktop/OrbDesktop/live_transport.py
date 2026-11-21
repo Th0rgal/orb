@@ -12,6 +12,11 @@ import urllib.request
 import uuid
 
 
+CURRENT_MISSION_LIMIT = 200
+ARCHIVED_MISSION_LIMIT = 100
+TRACKED_MISSION_LIMIT = CURRENT_MISSION_LIMIT + ARCHIVED_MISSION_LIMIT
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args):
         return None
@@ -256,13 +261,13 @@ def catalog_rows(c, rules):
 
 def roster_rows(c, include_archived=False):
     projects = c.get('/api/projects')['projects']
-    missions = c.get('/api/control/missions?limit=200')
+    missions = c.get(f'/api/control/missions?limit={CURRENT_MISSION_LIMIT}')
     machines = c.get('/api/machines')
     if not all(isinstance(x, list) for x in (projects, missions, machines)):
         raise ValueError('invalid roster')
     if include_archived:
         try:
-            archived = c.get('/api/control/missions?status=acknowledged&limit=100')
+            archived = c.get(f'/api/control/missions?status=acknowledged&limit={ARCHIVED_MISSION_LIMIT}')
             known = {r['id'] for r in missions}
             missions += [r for r in archived if r.get('status') == 'acknowledged' and r['id'] not in known]
         except urllib.error.HTTPError as error:
@@ -307,8 +312,11 @@ def projection(c, mid, presence=False):
 def poll(mid, binding, tracked=None):
     c = Connection()
     if tracked is None:
-        tracked = set(filter(None, sys.stdin.readline(26001).strip().split(',')))
-    if len(tracked) > 200 or not all(re.fullmatch(r'[A-Za-z0-9_-]{1,128}', i) for i in tracked):
+        line = sys.stdin.readline(TRACKED_MISSION_LIMIT * 129 + 1)
+        if not line.endswith('\n'):
+            return
+        tracked = set(filter(None, line.rstrip('\n').split(',')))
+    if len(tracked) > TRACKED_MISSION_LIMIT or not all(re.fullmatch(r'[A-Za-z0-9_-]{1,128}', i) for i in tracked):
         return
     if c.binding != binding or (mid and not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', mid)):
         return  # EOF invalidates the old roster; never request with a new identity
@@ -318,7 +326,7 @@ def poll(mid, binding, tracked=None):
         c.check()
         try:
             if checked is None or time.monotonic() - checked >= 5:
-                rows = roster_rows(c)
+                rows = roster_rows(c, include_archived=True)
                 found = {r[1] for r in rows if r[0] == 'M'}
                 # A sorted, limited list is positive evidence only. For every
                 # absent tracked ID require an explicit per-mission denial.

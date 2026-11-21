@@ -182,6 +182,17 @@ class Delivery(unittest.TestCase):
         models[1]['provider_id'] = 'local'
         self.assertEqual(list(live.visible_model_options('opencode', models, rules)), models[1:])
 
+    def test_live_reader_accepts_both_full_roster_pages(self):
+        ids = [str(i).zfill(128) for i in range(300)]
+        rows = [('M', mid) for mid in ids]
+        conn = type('Connection', (), {'binding': 'bound', 'check': lambda self: None})
+        out = io.StringIO()
+        with patch.object(live, 'Connection', conn), patch.object(live, 'roster_rows', return_value=rows) as roster, patch.object(live.sys, 'stdin', io.StringIO(','.join(ids) + '\n')), patch.object(live.time, 'sleep', side_effect=KeyboardInterrupt), contextlib.redirect_stdout(out):
+            with self.assertRaises(KeyboardInterrupt):
+                live.poll('', 'bound')
+        self.assertTrue(roster.call_args.kwargs['include_archived'])
+        self.assertEqual(set(out.getvalue().strip().split('\t')[1].split('\x1f')), {'M:' + mid for mid in ids})
+
     def test_coalesces_before_ipc(self):
         class Connection:
             binding = 'bound'
