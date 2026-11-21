@@ -338,6 +338,9 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
           if menu.page == .rename || menu.page == .draftDirectory then
             if let some draft := menu.draft.editKey? key mods then
               return ({ st with missionMenu := some { menu with draft } }, if draft == menu.draft then none else some viewport)
+        else if st.cloudCanCreate || st.cloudAllows "send" then
+          if let some draft := st.cloudDraft.editKey? key mods then
+            return ({ st with cloudDraft := draft, cloudAttempt := if draft.text == st.cloudDraft.text then st.cloudAttempt else "" }, some viewport)
         else if st.openMission.isSome || st.screen == .controlEmpty || st.screen == .controlPopulated then
           if let some composer := st.composer.editKey? key mods then
             return ({ st with composer }, if composer == st.composer then none else some viewport)
