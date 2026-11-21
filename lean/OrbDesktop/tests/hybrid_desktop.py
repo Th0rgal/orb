@@ -210,6 +210,15 @@ def run():
                 click('back')
                 if not check('project', lambda: row('orchard'))['expanded']:
                     click('orchard')
+                if mode == 'hybrid':
+                    check('expanded project', lambda: row('orchard')['expanded'])
+                    click('orchard')
+                    check('collapsed project with native focus', lambda: not row('orchard')['expanded'])
+                    subprocess.run(['wtype', '-k', 'Return'], env=env, check=True)
+                    check('keyboard project activation', lambda: row('orchard')['expanded'])
+                    subprocess.run(['wtype','-M','ctrl','-M','shift','-k','f','-m','shift','-m','ctrl'], env=env, check=True)
+                    see('search')
+                    subprocess.run(['wtype', '-k', 'Escape'], env=env, check=True)
                 click('copper')
                 see('earlier')
                 see('latest')
