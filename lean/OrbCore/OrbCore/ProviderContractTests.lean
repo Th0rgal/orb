@@ -1744,7 +1744,7 @@ def run : IO Unit := do
         let rows := (← getJson app session "/api/ai/providers" now).asArr?.getD #[]
         pure ((rows.find? (·.fieldStr? "id" == some ownerRow.id)).getD .null)
       let inChooser : String → IO Bool := fun session => do
-        let catalog ← getJson app session "/api/providers/catalog" now
+        let catalog ← getJson app session "/api/providers" now
         pure (((catalog.fieldArr? "configured_ids").getD #[]).contains (.str ownerRow.id))
       let (prefCode, _) ← putJson app memberJwt (s!"/api/ai/providers/{ownerRow.id}/preference")
         "{\"enabled\":false}" now
