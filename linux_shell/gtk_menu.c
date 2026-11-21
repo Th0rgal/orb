@@ -21,35 +21,37 @@ static void run_action(GtkWidget *wv, const char *action, const char *id, const 
     }
     free(a); free(i); free(g);
 }
+static gboolean rename_key(GtkWidget *dialog, GdkEventKey *event, gpointer data) {
+    (void)data;
+    if (event->keyval != GDK_KEY_Escape) return FALSE;
+    gtk_dialog_response(GTK_DIALOG(dialog), GTK_RESPONSE_CANCEL);
+    return TRUE;
+}
 static void prompt_rename(GtkWidget *wv, const char *id, const char *title) {
     GtkWidget *top = gtk_widget_get_toplevel(wv);
     GtkWidget *dlg = gtk_dialog_new_with_buttons("Rename conversation", GTK_IS_WINDOW(top) ? GTK_WINDOW(top) : NULL,
                                                  GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
                                                  "_Cancel", GTK_RESPONSE_CANCEL, "_Rename", GTK_RESPONSE_ACCEPT, NULL);
     GtkWidget *entry = gtk_entry_new(), *area = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
+    g_signal_connect(dlg, "key-press-event", G_CALLBACK(rename_key), NULL);
     gtk_entry_set_text(GTK_ENTRY(entry), title ? title : ""); gtk_entry_set_max_length(GTK_ENTRY(entry), 200); gtk_entry_set_activates_default(GTK_ENTRY(entry), TRUE);
     gtk_dialog_set_default_response(GTK_DIALOG(dlg), GTK_RESPONSE_ACCEPT); gtk_container_set_border_width(GTK_CONTAINER(area), 12);
     gtk_box_pack_start(GTK_BOX(area), entry, TRUE, TRUE, 0); gtk_widget_set_size_request(dlg, 380, -1); gtk_widget_show_all(dlg);
     if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT) {
-        char *next = g_strstrip(g_strdup(gtk_entry_get_text(GTK_ENTRY(entry))));
-        if (*next && g_strcmp0(next, title) != 0) {
-            run_action(wv, "rename", id, next);
-        }
-        g_free(next);
+        g_autofree char *next = g_strdup(gtk_entry_get_text(GTK_ENTRY(entry)));
+        if (*g_strstrip(next) && g_strcmp0(next, title) != 0) run_action(wv, "rename", id, next);
     }
     gtk_widget_destroy(dlg);
 }
-
 static GtkWidget *sel_list;
 static void on_item(GtkButton *mi, gpointer ud) {
     (void)mi;
     MenuAct *a = ud;
     if (strcmp(a->action, "rename") == 0) {
         /* The dialog spins a nested loop; the menu (and `a`) may be freed meanwhile. */
-        char *id = g_strdup(a->id), *title = g_strdup(a->arg);
+        g_autofree char *id = g_strdup(a->id);
+        g_autofree char *title = g_strdup(a->arg);
         prompt_rename(a->wv, id, title);
-        g_free(id);
-        g_free(title);
     } else if (strcmp(a->action, "clear") == 0) {
         if (sel_list) { orb_sel_clear(sel_list); }
     } else if (strcmp(a->action, "delete") == 0 || strcmp(a->action, "move") == 0) {
@@ -61,7 +63,6 @@ static void on_item(GtkButton *mi, gpointer ud) {
         g_strfreev(ids);
     }
 }
-
 static void move_page(GtkWidget *page, GtkWidget *moves, const char *label) {
     GtkWidget *popup = gtk_widget_get_ancestor(page, GTK_TYPE_POPOVER_MENU);
     gtk_container_add(GTK_CONTAINER(popup), moves);
@@ -73,7 +74,6 @@ static void add_item(GtkWidget *menu, const char *label, GtkWidget *wv, const ch
     MenuAct *a = g_new0(MenuAct, 1); a->wv = wv; a->action = action; a->id = g_strdup(id); a->arg = g_strdup(arg ? arg : "");
     g_signal_connect_data(it, "clicked", G_CALLBACK(on_item), a, free_act, 0);
 }
-
 static gboolean destroy_later(gpointer w) { gtk_widget_destroy(GTK_WIDGET(w)); g_object_unref(w); return G_SOURCE_REMOVE; }
 static void closed(GtkPopover *popup, gpointer data) { (void)data; g_idle_add(destroy_later, g_object_ref(popup)); }
 static GtkWidget *move_submenu(GtkWidget *wv, GtkWidget *list, const char *id, const char *current) {

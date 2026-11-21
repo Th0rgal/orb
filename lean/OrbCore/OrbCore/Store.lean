@@ -2255,6 +2255,7 @@ structure MissionListFilter where
   updatedSince?    : Option String := none
   status?          : Option String := none
   statusesFilter   : Array String := #[]
+  includeAncestors : Bool := false
   includeArchived  : Bool := true
   bootstrapAdminId : String := ""
   project?         : Option String := none
@@ -2281,10 +2282,10 @@ def listMissionsJson
   let nodeBootEpoch := nodeBootEpoch?.getD st.bootEpoch
   let mut conds : Array String := #[]
   let mut params : Array String := #[]
+  let viewerScope := "(m.owner_user_id = ?1 OR EXISTS (SELECT 1 FROM mission_shares s WHERE s.mission_id = m.id AND s.user_id = ?1))"
   if let some uid := callerUserId? then
     params := params.push uid
-    let pIdx := params.size
-    conds := conds.push s!"(m.owner_user_id = ?{pIdx} OR EXISTS (SELECT 1 FROM mission_shares s WHERE s.mission_id = m.id AND s.user_id = ?{pIdx}))"
+    conds := conds.push viewerScope
   let mut hasUpdatedSince := false
   if let some rawSince := filter.updatedSince? then
     let cleanSince := rawSince.trimAscii.toString
@@ -2375,8 +2376,18 @@ def listMissionsJson
       if off > 0 then
         params := params.push s!"{off}"
         tailClause := tailClause ++ s!" LIMIT -1 OFFSET CAST(?{params.size} AS INTEGER)"
-  tailClause := tailClause ++ ";"
-  let sql :=
+  -- Ancestors are context outside the requested page. Recheck the same viewer
+  -- scope at every link, before reading the next parent of a shared mission.
+  let (prefixSql, selection) :=
+    if filter.includeAncestors && filter.limit?.isSome && !hasUpdatedSince && filter.tag?.isNone then
+      let scope := if callerUserId?.isSome then " AND " ++ viewerScope else ""
+      let prefixSql := "WITH RECURSIVE page(id,parent) AS (SELECT m.id,m.parent_mission_id FROM missions m " ++
+        whereClause ++ tailClause ++ "), lineage(id,parent,depth) AS (SELECT id,parent,0 FROM page UNION " ++
+        "SELECT m.id,m.parent_mission_id,l.depth+1 FROM lineage l JOIN missions m ON m.id=l.parent " ++
+        "WHERE l.depth<8" ++ scope ++ ") "
+      (prefixSql, "WHERE m.id IN (SELECT id FROM lineage) ORDER BY m.updated_at DESC, m.id ASC;")
+    else ("", whereClause ++ tailClause ++ ";")
+  let sql := prefixSql ++
     "SELECT m.id,m.title,m.status,m.backend,COALESCE(m.model_override,'') AS model_override," ++
     "COALESCE(m.model_effort,'') AS model_effort,m.working_directory,m.updated_at,m.total_cost_cents," ++
     "m.authority_mode,m.placement_kind,m.superseded_by_mission_id,m.orphaned_at,m.reserved_disk_gib," ++
@@ -2407,8 +2418,7 @@ def listMissionsJson
     "COALESCE(m.resumable,0) AS resumable," ++
     liveChildrenCountSql ++ " AS live_children_count " ++
     "FROM missions m LEFT JOIN mission_terminal_evidence e ON e.mission_id = m.id " ++
-    whereClause ++
-    tailClause
+    selection
   let rows ← execParamQuery st.missionsDb sql params
   let .ok rs := rows | return .error (match rows with | .error e => e | .ok _ => "missions_query_failed")
   if rs.size ≤ 1 then
@@ -2416,7 +2426,9 @@ def listMissionsJson
   let mut returnedMids : Array String := Array.mkEmpty (rs.size - 1)
   for i in [1:rs.size] do
     returnedMids := returnedMids.push (rs[i]![0]?.getD "")
-  let useScopedIn := returnedMids.size ≤ 200
+  -- An ancestor-expanded page can exceed 200. Keep metadata reads scoped up
+  -- to SQLite’s portable 999-parameter limit.
+  let useScopedIn := returnedMids.size ≤ 999
   let inPlaceholders :=
     if useScopedIn then
       String.intercalate "," ((List.range returnedMids.size).map (fun k => s!"?{k + 1}"))
@@ -3261,7 +3273,8 @@ def getAIProvider? (st : CoreStore) (pid : String) : IO (Option AIProviderRecord
     return some (rowToAIProviderRecord rows[1]!)
 
 /-- Validate and upsert an `AIProviderRecord` into `missions.db`. -/
-def upsertAIProvider (st : CoreStore) (p : AIProviderRecord) (memberEdit : Bool := false) : IO (Except String Unit) := do
+def upsertAIProvider (st : CoreStore) (p : AIProviderRecord) (memberEdit : Bool := false)
+    (credentialOwner : Bool := false) : IO (Except String Unit) := do
   match validateAIProviderRecord p with
   | .error e => return .error e
   | .ok () =>
@@ -3274,7 +3287,9 @@ def upsertAIProvider (st : CoreStore) (p : AIProviderRecord) (memberEdit : Bool 
       let res ← execParamQuery st.missionsDb
         ("UPDATE ai_providers SET name=?3,base_url=?5,api_key=?6,rpm_limit=NULLIF(?7,'')," ++
          "max_concurrency=NULLIF(?8,''),custom_models_json=?9,updated_at=?10 " ++
-         "WHERE id=?1 AND provider_type=?2 AND enabled=?4 AND created_by_user_id=?11 RETURNING id;") params
+         "WHERE id=?1 AND provider_type=?2 AND enabled=?4 AND created_by_user_id=?11 " ++
+         "AND (?12='1' OR (base_url=?5 AND api_key=?6)) RETURNING id;")
+        (params.push (if credentialOwner then "1" else "0"))
       return res.bind fun rows => if rows.size == 2 then .ok () else .error "provider_changed"
     let res ← execParamQuery st.missionsDb
       "INSERT INTO ai_providers(id,provider_type,name,enabled,base_url,api_key,rpm_limit,max_concurrency,custom_models_json,updated_at,created_by_user_id) VALUES(?1,?2,?3,?4,?5,?6,NULLIF(?7,''),NULLIF(?8,''),?9,?10,?11) ON CONFLICT(id) DO UPDATE SET provider_type=excluded.provider_type,name=excluded.name,enabled=excluded.enabled,base_url=excluded.base_url,api_key=excluded.api_key,rpm_limit=excluded.rpm_limit,max_concurrency=excluded.max_concurrency,custom_models_json=excluded.custom_models_json,updated_at=excluded.updated_at;" params

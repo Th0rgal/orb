@@ -1926,6 +1926,10 @@ def run : IO Unit := do
         failures := failures.push "An explicitly selected account must supply its own credential"
       unless (parseChainTargetsJson entry #[] #[a, { b with enabled := false }]).isEmpty do
         failures := failures.push "A disabled selected account must not resolve another login"
+      let inlineEntry := renderCompact (.arr #[.obj #[("provider_id", .str "openai"),
+        ("account_id", .str b.id), ("model_id", .str "fixture-model"), ("api_key", .str "synthetic-inline")]])
+      unless (parseChainTargetsJson inlineEntry #[] #[a, { b with enabled := false }]).isEmpty do
+        failures := failures.push "Inline chain settings cannot override a disabled account pin"
       let sidecarAccount := { b with
         hasApiKey := false
         apiKey := ""
@@ -2002,6 +2006,9 @@ def run : IO Unit := do
           (← listRow jwt).fieldBool? "user_enabled" == some true &&
           !(← inChooser memberJwt) && (← inChooser jwt) do
         failures := failures.push "Personal preference persists on list reload and filters only the member's chooser"
+      IO.ofExcept (← upsertAIProvider store { ownerRow with apiKey := "synthetic-rotated" })
+      if (← upsertAIProvider store ownerRow (memberEdit := true)).isOk then
+        failures := failures.push "A concurrent shared settings edit cannot restore an owner credential"
       IO.ofExcept (← upsertAIProvider store { ownerRow with enabled := false })
       if (← upsertAIProvider store ownerRow (memberEdit := true)).isOk then
         failures := failures.push "A stale member edit cannot restore the previous global state"

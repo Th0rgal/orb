@@ -104,6 +104,9 @@ if pgrep -x lake >/dev/null; then say "a lake build is already running on this h
 
 cd "$TREE"
 git fetch --quiet origin master
+if [[ $DEV_ONLY == 1 && "$REF" =~ ^[0-9a-f]{40}$ ]] && ! git cat-file -e "$REF^{commit}" 2>/dev/null; then
+  git fetch --quiet --no-tags origin "$REF"
+fi
 [[ "$REF" == "master" ]] && REF=origin/master
 SHA="$(git rev-parse --verify "$REF^{commit}")"
 say "deploy $SHA (dev${DEV_ONLY:+ only=$DEV_ONLY})"

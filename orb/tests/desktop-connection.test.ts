@@ -5,7 +5,7 @@ it('restores the same desktop connection into an empty dev origin',async()=>{
  (window as any).__TAURI__={core:{invoke}};
  const api=await import('../src/api');await api.restoreDesktopConnection();
  expect(api.getApiUrl()).toBe('https://core.example');expect(api.getJwt()).toBe('fixture-token');expect(api.isConnected()).toBe(true);
- api.clearConnection();await vi.waitFor(()=>expect(invoke).toHaveBeenCalledWith('desktop_connection_save',{connection:null}));
+ api.clearConnection();await vi.waitFor(()=>expect(invoke).toHaveBeenCalledWith('desktop_connection_save',{connection:null,expected:{api_url:'https://core.example',token:'fixture-token'}}));
 });
 it('preserves an explicit existing login rather than switching accounts on startup',async()=>{
  localStorage.setItem('orb.jwt','existing');localStorage.setItem('orb.apiUrl','https://other.example');

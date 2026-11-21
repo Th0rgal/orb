@@ -24,6 +24,8 @@ structure ShapedGlyph where
 
 /-- A contiguous inline word/segment made of shaped glyphs. -/
 structure InlineRun where
+  /-- Scalar offset of a run in an editable text child. -/
+  editorStart : Option Nat := none
   glyphs : List ShapedGlyph := []
   style : TextStyle := {}
   allowBreakAfter : Bool := true
@@ -47,6 +49,7 @@ structure PositionedGlyph where
 
 /-- One wrapped line of positioned glyphs. -/
 structure WrappedLine where
+  hardBreakAfter : Bool := false
   glyphs : List PositionedGlyph := []
   widthSub : SubPx := 0
   heightSub : SubPx := 0
@@ -79,7 +82,7 @@ def wrapInlineRunsAux (maxWidthSub defaultLineHeight : SubPx)
       let (placed, nextX) := placeGlyphs 0 nextY r.style.color r.glyphs
       if r.hardBreakAfter then
         let hardLine : WrappedLine :=
-          { glyphs := placed, widthSub := nextX, heightSub := runH, ySub := nextY }
+          { hardBreakAfter := true, glyphs := placed, widthSub := nextX, heightSub := runH, ySub := nextY }
         completedLine :: hardLine :: wrapInlineRunsAux maxWidthSub defaultLineHeight [] 0 0 (nextY + runH) rs
       else
         completedLine :: wrapInlineRunsAux maxWidthSub defaultLineHeight placed nextX runH nextY rs
@@ -89,7 +92,7 @@ def wrapInlineRunsAux (maxWidthSub defaultLineHeight : SubPx)
       let merged := curGlyphs ++ placed
       if r.hardBreakAfter then
         let hardLine : WrappedLine :=
-          { glyphs := merged, widthSub := nextX, heightSub := lineH', ySub := curY }
+          { hardBreakAfter := true, glyphs := merged, widthSub := nextX, heightSub := lineH', ySub := curY }
         hardLine :: wrapInlineRunsAux maxWidthSub defaultLineHeight [] 0 0 (curY + lineH') rs
       else
         wrapInlineRunsAux maxWidthSub defaultLineHeight merged nextX lineH' curY rs
@@ -104,12 +107,40 @@ def wrapInlineRuns (maxWidthSub defaultLineHeight : SubPx) (runs : List InlineRu
     | some last => last.ySub + last.heightSub
   (lines, maxW, totalH)
 
+/-- Insertion stops of a displayed editor row, in logical scalar and pixel coordinates. -/
+structure EditorRow where
+  start : Nat
+  stops : List (Nat × SubPx)
+  top : SubPx
+  height : SubPx
+  deriving Inhabited
+
+/-- Resolve empty lines and soft-wrap boundaries against the displayed glyph clusters.
+A shared boundary belongs to the start of the following wrapped row. -/
+def editorRows (lines : List WrappedLine) (length : Nat) : List EditorRow := Id.run do
+  let mut rows := []
+  let mut next := length
+  for line in lines.reverse do
+    let last := rows.isEmpty
+    let stop := next - (if !last && line.hardBreakAfter then 1 else 0)
+    let ends := if last || line.hardBreakAfter then [(stop, line.widthSub)] else []
+    let stops := line.glyphs.map (fun g => (g.glyph.cluster, g.relX)) ++ ends
+    let first := stops.foldl (fun n p => min n p.1) stop
+    rows := { start := first, stops, top := line.ySub, height := line.heightSub } :: rows
+    next := first
+  return rows
+
+def editorRowIndex (rows : List EditorRow) (caret : Nat) : Nat :=
+  (rows.takeWhile (·.start ≤ caret)).length - 1
+
 /-- Scroll state for a 2D or vertical scroll container in `SubPx`. -/
 structure ScrollSpec where
   offsetX : SubPx := 0
   offsetY : SubPx := 0
   contentWidth : SubPx := 0
   contentHeight : SubPx := 0
+  /-- Scalar caret and displayed text length, when following an editor insertion point. -/
+  revealCaret : Option (Nat × Nat) := none
   deriving DecidableEq, Repr, Inhabited
 
 namespace ScrollSpec
@@ -262,7 +293,8 @@ def measureNode (availWidthSub : SubPx) : LayoutNode → SubPx × SubPx
     let padH := s.padding.vertical
     let marW := s.margin.horizontal
     let marH := s.margin.vertical
-    let (cw, ch) := measureNode (availWidthSub - (padW + marW)) child
+    let viewportW := clampNat s.minWidth s.maxWidth (availWidthSub - marW)
+    let (cw, ch) := measureNode (viewportW - padW) child
     let rawW := max s.basis (cw + padW)
     let rawH := max (if s.axis == Axis.column then s.basis else 0) (ch + padH)
     let clampedW := clampNat s.minWidth s.maxWidth rawW
@@ -407,10 +439,18 @@ def layoutNode (scale120 : Nat) (focusOwner : Option EntityId) (focusColor : Col
     let (measW, measH) := measureNode vpW child
     let contentW := max sc.contentWidth (max vpW measW)
     let contentH := max sc.contentHeight (max vpH measH)
+    let requestedY := match sc.revealCaret, child with
+      | some (caret, length), .text _ textStyle lineH runs =>
+        let lines := (wrapInlineRuns (contentW - textStyle.padding.horizontal) lineH runs).1
+        let rows := editorRows lines length
+        match rows[editorRowIndex rows caret]? with
+        | some row => max (min sc.offsetY row.top) (row.top + row.height - vpH)
+        | none => sc.offsetY
+      | _, _ => sc.offsetY
     let limX := scrollLimit contentW vpW
     let limY := scrollLimit contentH vpH
     let clampedOffX := scrollStep contentW vpW (min sc.offsetX limX) 0
-    let clampedOffY := scrollStep contentH vpH (min sc.offsetY limY) 0
+    let clampedOffY := scrollStep contentH vpH (min requestedY limY) 0
     let childX : Int := vpX - Int.ofNat clampedOffX
     let childY : Int := vpY - Int.ofNat clampedOffY
     let laidChild := layoutNode scale120 focusOwner focusColor childX childY contentW contentH child
@@ -488,7 +528,7 @@ def hashLayoutNode : LayoutNode → UInt64
     let h1 := mixU64 h0 sc.offsetX.toUInt64
     let h2 := mixU64 h1 sc.offsetY.toUInt64
     let h3 := mixU64 h2 s.basis.toUInt64
-    mixU64 h3 (hashLayoutNode child)
+    mixU64 (mixU64 h3 (hash sc.revealCaret)) (hashLayoutNode child)
 where
   hashLayoutNodeList (acc : UInt64) : List LayoutNode → UInt64
     | [] => acc

@@ -25,6 +25,11 @@ on:
       - 'scripts/ensure_lean_sys.sh'
       - 'orb/package.json'
   workflow_dispatch:
+    inputs:
+      hybrid_desktop:
+        description: Build and exercise the aarch64 Linux desktop package
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -36,7 +41,7 @@ concurrency:
 jobs:
   build:
     name: Build Orb with Nix
-    if: github.event.pull_request.draft != true
+    if: github.event.pull_request.draft != true && !inputs.hybrid_desktop
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
@@ -51,3 +56,29 @@ jobs:
             test -x "$out/bin/$bin"
           done
           test "$(readlink "$out/bin/sandboxed-sh")" = orb-core
+
+  hybrid-desktop:
+    if: github.event_name == 'workflow_dispatch' && inputs.hybrid_desktop
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - name: Build the packaged launchers on aarch64
+        run: nix build .#orb-desktop --max-jobs 1 --cores 2 -L
+      - name: Exercise Classic and hybrid in a private Wayland session
+        env:
+          ORB_TEST_SCREENSHOT: ${{ runner.temp }}/hybrid-desktop.png
+        run: |
+          nix shell --inputs-from . nixpkgs#sway nixpkgs#grim nixpkgs#wtype nixpkgs#imagemagick nixpkgs#tesseract --command bash -euc '
+            export ORB_WEBKIT_TEST_BINARY="$PWD/result/bin/orb-desktop"
+            export ORB_HYBRID_TEST_BINARY="$PWD/result/bin/orb-desktop-hybrid"
+            export ORB_DIST_DIR="$(nix build .#orb-desktop.webUi --no-link --print-out-paths)"
+            python3 -B lean/OrbDesktop/tests/hybrid_desktop.py
+          '
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: hybrid-desktop-screenshot
+          path: ${{ runner.temp }}/hybrid-desktop.png
+          if-no-files-found: ignore

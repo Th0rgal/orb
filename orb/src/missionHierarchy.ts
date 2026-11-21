@@ -1,3 +1,4 @@
+import projectHistoryRules from "./projectHistoryRules.json";
 /**
  * Sticky mission hierarchy. Spec: orb/docs/specs/sidebar-hierarchy.md.
  *
@@ -699,10 +700,10 @@ export function reconcileMissionList<M extends HierarchyFields>(prev: readonly M
 // Open missions beyond the history page (sidebar-hierarchy.md, M2).
 
 /** Running or waiting on the user: always worth showing, however old. */
-export const LIVE_OPEN = new Set(["active", "running", "pending", "queued", "awaiting_user", "resuming", "starting", "waiting_background"]);
+export const LIVE_OPEN = new Set(projectHistoryRules.live);
 /** Stopped but maybe still wanted: shown beyond the page only while recent. */
-export const RECENT_OPEN = new Set(["interrupted", "failed", "paused", "blocked"]);
-export const RECENT_OPEN_MS = 7 * 24 * 60 * 60 * 1000;
+export const RECENT_OPEN = new Set(projectHistoryRules.recent);
+export const RECENT_OPEN_MS = projectHistoryRules.recentDays * 24 * 60 * 60 * 1000;
 
 type OpenRow = HierarchyFields & { status: string; updated_at?: string | null; created_at?: string | null };
 /**

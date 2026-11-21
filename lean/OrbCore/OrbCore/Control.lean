@@ -862,6 +862,9 @@ def parseChainTargetsJson
         hydratedProvs.any (fun hp => hp.id == acctRaw))
       let eligibleRows := if pinned then providers.filter (fun p => p.id == acctRaw) else providers
       let eligibleHydrated := if pinned then hydratedProvs.filter (fun p => p.id == acctRaw) else hydratedProvs
+      -- Inline chain settings cannot override the global switch of a known account.
+      if pinned && (eligibleRows.any (fun p => !p.enabled) ||
+          eligibleHydrated.any (fun hp => !hp.enabled)) then continue
       -- A stored restriction also rules out explicit chains and generic pool
       -- fallbacks when there is no remaining alternative-router credential.
       if pinned && eligibleHydrated.any (·.nativeOnly) then continue
@@ -4842,6 +4845,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         offset?          := (qLookup "offset").bind String.toNat?
         updatedSince?    := (qLookup "updated_since").orElse (fun _ => qLookup "since_updated_at")
         statusesFilter   := statusesArr
+        includeAncestors := qLookup "include_ancestors" == some "true"
         includeArchived  := includeArchived
         bootstrapAdminId := st.bootstrapAdminId
         project?         := if unassignedOnly then none else rawProjF?.filter (!·.isEmpty)
@@ -5772,7 +5776,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           rpmLimit? := rpm?, maxConcurrency? := conc?, customModels := cModels,
           updatedAt := s!"{nowEpochSec}"
         }
-        match ← upsertAIProvider st.store updated (memberEdit := !isAdm) with
+        match ← upsertAIProvider st.store updated (memberEdit := !isAdm) (credentialOwner := own) with
         | .error "provider_changed" => return .ok (mkJson 409 "{\"error\":\"provider_changed\"}")
         | .error e => return .ok (mkJson 400 s!"\{\"error\":\"invalid_provider_limits\",\"detail\":{jsonEscape e}}")
         | .ok () =>
