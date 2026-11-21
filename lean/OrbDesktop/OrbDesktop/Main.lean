@@ -18,6 +18,7 @@ import OrbDesktop.RepaintCheck
 import OrbDesktop.State
 import OrbDesktop.Voice
 import OrbDesktop.Core
+import OrbDesktop.EmbeddedSidebar
 import OrbDesktop.Chrome
 import OrbDesktop.Screens
 /-!
@@ -625,6 +626,8 @@ private def runningBadgeDamage (rt : Runtime.RuntimeState DesktopState) : Damage
       | some (_, rect) => Damage.add damage (roundRect rt.wayland.scale120 rect)) none
 
 def main (args : List String) : IO UInt32 := do
+  if let ["--gtk-sidebar-host", path] := args then
+    return ← runEmbeddedSidebar path shapeWidgetTree
   let dcfg := parseDesktopArgs args
   let rcfg := dcfg.runtimeCfg
   if let some iters := dcfg.benchIterations then

@@ -16,6 +16,12 @@
 #include <gtk/gtk.h>
 #include <webkit2/webkit2.h>
 #endif
+char *orb_json_escape_string(const char *s) {
+    if (!s) { s = ""; }
+    size_t len = strlen(s), j = 0; char *out = len <= 4096 ? malloc(len * 6 + 4) : NULL; if (!out) { return NULL; }
+    out[j++] = '"'; for (size_t i = 0; i < len; ++i) { unsigned char c = (unsigned char)s[i]; if (c == '"' || c == '\\') { out[j++] = '\\'; out[j++] = (char)c; } else if (c < 0x20 || c == 0x7F) { j += (size_t)snprintf(out + j, 8, "\\u%04x", c); } else { out[j++] = (char)c; } }
+    return out[j++] = '"', out[j] = '\0', out;
+}
 static int parse_valid_port(const char *s, unsigned *out_port) {
     if (!s || !*s) return 0;
     unsigned v = 0;
@@ -128,7 +134,12 @@ static gboolean on_decide_policy(WebKitWebView *wv, WebKitPolicyDecision *dec, W
 int main(int argc, char **argv) {
     unsigned port = 19479; const char *port_env = getenv("ORB_LOCALD_PORT"), *nc_env = getenv("ORB_NATIVE_CHROME");
     const int account_form = argc > 1 && !strcmp(argv[1], "--account-settings");
+#ifdef ORB_LEANUI_HOST
+    const int native_chrome = 1;
+    (void)nc_env;
+#else
     const int native_chrome = !account_form && (!nc_env || (strcmp(nc_env, "0") != 0 && strcmp(nc_env, "false") != 0));
+#endif
     if (port_env && *port_env && !parse_valid_port(port_env, &port)) return fprintf(stderr, "orb-linux-shell: invalid ORB_LOCALD_PORT\n"), 1;
     if (account_form && !(port = account_rpc_port())) return 1;
     char eph_tok[65], *init_js = NULL; const char *token = account_form ? NULL : getenv("ORB_LOCALD_TOKEN");

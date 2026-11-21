@@ -1146,6 +1146,7 @@ export default function App() {
     const disposeHandlers = installNativeChromeWindowHandlers({
       open: (target) => open(target),
       leaveSettings,
+      openSearch,
       navHistory: (delta) => nav(delta),
       getSidebarOpen: () => sidebar(),
       setSidebarOpen: setSidebarWithNative,

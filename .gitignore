@@ -12,6 +12,7 @@ reports/**
 /target/
 /linux_shell/build/
 /linux_shell/orb-desktop
+/linux_shell/orb-sidebar-host.so
 /macos_shell/build/
 /macos_shell/gen/
 /macos_shell/orb-desktop

@@ -8,6 +8,31 @@ to fall back to the WebView-rendered sidebar, exposed to the WebView as
 navigation tree and `Cmd+K` / `Ctrl+K` quick-switcher natively, while the WebView
 renders transcripts, Markdown, diffs, KaTeX, Mermaid, PDFs, and the composer.
 
+## Opt-in LeanUI sidebar on Linux
+
+Hovering a clickable sidebar control shows the GTK hand cursor. Leaving the control restores the cursor for the next surface. Returning to a sidebar row shows the hand again.
+
+Build the desktop package with `nix build .#orb-desktop` and run
+`./result/bin/orb-desktop-hybrid`. On m2air the flake selects `aarch64-linux`.
+The regular `orb-desktop` launcher uses Classic GTK. Close Classic before starting
+hybrid if both use the default locald port.
+
+The hybrid launcher loads the GTK/WebKit host into the Lean desktop process.
+LeanUI shapes and paints `buildSidebarChrome` at the allocated pane width and GTK
+device scale. GTK places transparent input widgets at the returned layout
+rectangles, preserving keyboard focus, accessible names and the existing menus.
+The split view and WebKit profile, origin, account bootstrap and navigation
+handlers come from the Classic shell. Locald supplies the same scoped rows and
+selection to either sidebar. The standalone native content projection does not
+participate in the hybrid launch.
+
+The private Sway replay in `lean/OrbDesktop/tests/hybrid_desktop.py` compares the
+two launchers with one member account, two project missions and a configured
+machine provider. Returning to a mission waiting for the user must show the earlier
+and latest turns. The raw lifecycle value must stay out of the visible transcript.
+The Nix workflow's `hybrid_desktop` dispatch runs it against
+the packaged clients on a native aarch64 runner.
+
 ## Single Owner & Cold-Start Hydration (`AGENTS.md` Principle 3)
 
 `OrbLocald.NativeChrome` (`lean/OrbLocald/OrbLocald/NativeChrome.lean`, `0 import Lean`,
