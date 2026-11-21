@@ -20,7 +20,7 @@ from urllib.parse import unquote, urlsplit
 
 from antigravity_fixture_node import NODE_ID, request
 from test_native_owner_core import core
-from native_job_relay.transport import Destination, copy, first_completed
+from native_job_relay.transport import Destination, admission, copy, first_completed
 
 HOST = Destination.DAILY_CLOUD_CODE.value
 BRIDGE = Path(__file__).parent / "native_job_relay/transport.py"
@@ -65,15 +65,22 @@ def account_listener(driver, gateway):
         proc.wait(timeout=10)
 
 
-async def exercise(args, root, db, core_port, claim, operator, mission, short_grant):
-    db.execute("INSERT INTO users(id,username,password_hash,role) VALUES(?,'ledger-owner','fixture','member')",
-               (claim["owner"],))
+async def exercise(args, root, db, core_port, claim, mission, short_grant):
+    password = secrets.token_hex(20)
+    salt = secrets.token_hex(16)
+    verifier = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100000).hex()
+    db.execute("INSERT INTO users(id,username,password_hash,role) VALUES(?,'ledger-owner',?,'member')",
+               (claim["owner"], f"pbkdf2-sha256$100000${salt}${verifier}"))
     db.execute("INSERT INTO missions(id,project,status,backend,owner_user_id,placement_job_id) VALUES(?,'tests','active','antigravity',?,?)",
                (mission, claim["owner"], claim["job"]))
     db.execute("INSERT INTO remote_node_jobs(job_id,node_id,mission_id,state) VALUES(?,?,?,'running')",
                (claim["job"], NODE_ID, mission))
     db.commit()
+    status, body = request(core_port, "", "POST", "/api/auth/login", {"username": "ledger-owner", "password": password})
+    assert status == 200
+    operator = json.loads(body)["token"]
     origin_hits = []
+    origin_sni = []
     relay_hits = []
     direct_hits = []
     async def direct(r, w):
@@ -88,7 +95,10 @@ async def exercise(args, root, db, core_port, claim, operator, mission, short_gr
             if line.startswith(b"GET /live "):
                 w.write(b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\n\r\nx")
                 await w.drain()
-                await r.read()
+                if await r.read(1) == b"!":
+                    w.write(b"y")
+                    await w.drain()
+                    await r.read()
             else:
                 payload = {"candidates":[{"index":0, "finishReason":"STOP",
                             "content":{"role":"model", "parts":[{"text":"ledger complete"}]}}]}
@@ -103,6 +113,7 @@ async def exercise(args, root, db, core_port, claim, operator, mission, short_gr
 
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls.load_cert_chain(args.cert, args.key)
+    tls.set_servername_callback(lambda _sock, name, _ctx: origin_sni.append(name))
     model = await asyncio.start_server(origin, "127.0.0.1", 0, ssl=tls)
     trap = await asyncio.start_server(direct, "127.0.0.2", 443)
     async def account_relay(r, w):
@@ -170,15 +181,19 @@ async def exercise(args, root, db, core_port, claim, operator, mission, short_gr
                 assert not relay_hits
                 reader, writer = await socks_request(HOST, 443)
                 assert len(await reader.readexactly(10)) == 10
+                # Accept the fixture origin certificate even for the wrong name here.
+                # The transport itself must stop these bytes before the origin.
+                negative_ca = ssl.create_default_context(cafile=args.cert)
+                negative_ca.check_hostname = False
                 try:
-                    await writer.start_tls(ca, server_hostname="unlisted.invalid")
+                    await writer.start_tls(negative_ca, server_hostname="unlisted.invalid")
                 except (ConnectionError, ssl.SSLError):
                     pass
                 else:
                     raise AssertionError("unlisted SNI completed a handshake")
                 finally:
                     writer.close()
-                assert not origin_hits
+                assert not origin_sni and not origin_hits
                 print("unlisted SOCKS host, port 80 and mismatched inner TLS SNI denied", flush=True)
                 profile = Path(root) / "empty-profile"
                 profile.mkdir()
@@ -189,13 +204,13 @@ async def exercise(args, root, db, core_port, claim, operator, mission, short_gr
                            GOOGLE_GEMINI_BASE_URL="https://" + HOST, GEMINI_API_KEY="fixture",
                            HTTPS_PROXY=f"socks5://127.0.0.1:{local}", HTTP_PROXY=f"socks5://127.0.0.1:{local}",
                            TERM="dumb", NO_PROXY="")
-                async def native_turn():
+                async def native_turn(timeout):
                     proc = await asyncio.create_subprocess_exec(
                         args.agy, "--model", "gemini-4-carbon-high", "--output-format", "stream-json",
-                        "--print=Read the disposable ledger", cwd=profile, env=env,
+                        "--print-timeout", f"{timeout}s", "--print=Read the disposable ledger", cwd=profile, env=env,
                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
                     try:
-                        events, _ = await asyncio.wait_for(proc.communicate(), 50)
+                        events, _ = await asyncio.wait_for(proc.communicate(), timeout + 15)
                     finally:
                         if proc.returncode is None:
                             proc.kill()
@@ -203,7 +218,7 @@ async def exercise(args, root, db, core_port, claim, operator, mission, short_gr
                     return [json.loads(line)["result"]["status"] for line in events.splitlines()
                             if "result" in json.loads(line)]
 
-                assert await native_turn() == ["SUCCESS"]
+                assert await native_turn(30) == ["SUCCESS"]
                 assert any(b":streamGenerateContent" in hit for hit in origin_hits)
                 assert relay_hits and not direct_hits
                 print("native agy 1.5.14 Carbon SUCCESS; verified provider TLS through assigned account relay; direct hits=0", flush=True)
@@ -235,15 +250,25 @@ async def exercise(args, root, db, core_port, claim, operator, mission, short_gr
                 relay.close()
                 before = len(origin_hits)
                 await attempt({})
-                assert await native_turn() == ["ERROR"]
+                blocked = await native_turn(12)
+                assert blocked in (["ERROR"], ["CANCELLED"]), blocked
                 assert len(origin_hits) == before and not direct_hits
-                print("assigned VPN gateway unavailable with live grant; native agy ERROR; origin delta=0; direct hits=0", flush=True)
+                print(f"assigned VPN gateway unavailable with live grant; native agy {blocked[0]}; origin delta=0; direct hits=0", flush=True)
+                w.write(b"!")
+                await w.drain()
+                assert await asyncio.wait_for(r.readexactly(1), 3) == b"y"
                 status, body = await asyncio.to_thread(request, core_port, operator, "POST",
                                                        "/api/control/missions/" + mission + "/cancel", {})
                 assert status == 200, (status, body)
                 assert await asyncio.wait_for(r.read(1), 3) == b""
                 w.close()
                 await attempt({})
+                try:
+                    await asyncio.to_thread(admission, core_port, claim)
+                except PermissionError:
+                    pass
+                else:
+                    raise AssertionError("cancelled grant still admitted by Core")
                 print("Core cancellation closed established TLS; reconnect denied", flush=True)
                 assert not direct_hits
 
@@ -270,9 +295,8 @@ def main():
                    SANDBOXED_REMOTE_NODES=json.dumps([dict(id=NODE_ID,base_url="http://127.0.0.2:1",
                         token_env="FIXTURE_NODE_TOKEN",dedicated_owner_id=claim["owner"])]))
         with core(args.core,env), sqlite3.connect(Path(root)/".sandboxed-sh/missions.db") as db:
-            status, body = request(target, "", "POST", "/api/auth/login", {"username":"admin","password":env["DASHBOARD_PASSWORD"]})
-            assert status == 200
-            asyncio.run(exercise(args,root,db,target,claim,json.loads(body)["token"],mission,short_grant))
+            asyncio.run(exercise(args, root, db, target, claim, mission, short_grant))
+
 
 if __name__=="__main__":
     main()

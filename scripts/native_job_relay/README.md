@@ -45,3 +45,22 @@ python3 scripts/test_native_owner_node.py /bin/sandboxed-node
 ```
 
 The test creates a fresh Core store using the real enrollment and grant issuers, then seeds a synthetic running job and placement. It runs both adapters, the genuine agy CLI, the Core HTTP admission and cancellation endpoints, and Orb’s authenticated account relay backed by a disposable SOCKS gateway and Google TLS peer. The separate node control exercises ordinary signed job execution. The fixture does not enable owner-profile dispatch or use a subscription.
+
+## Disposable Linux run, 2026-11-21
+
+The guest had only the loopback interface. The guest runner recorded the following output and exit statuses.
+
+```text
+9 rejected requests; account-relay connects=0
+old grant with updated enrollment revision denied
+unlisted SOCKS host, port 80 and mismatched inner TLS SNI denied
+native agy 1.5.14 Carbon SUCCESS; verified provider TLS through assigned account relay; direct hits=0
+grant expiry closed established TLS; reconnect denied
+assigned VPN gateway unavailable with live grant; native agy ERROR; origin delta=0; direct hits=0
+Core cancellation closed established TLS; reconnect denied
+transport exit=0
+reserved node: signed owner and other-user jobs 403; unauthenticated job 401; workspace absent
+restart with missing or changed owner binding: refused before listening
+ordinary node: valid signed job admitted and succeeded
+ordinary and reserved node controls exit=0
+```
