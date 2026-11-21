@@ -53,7 +53,7 @@ On worker nodes and ephemeral VMs, `orb-node.service` runs as unprivileged `sand
 
 ## 4. Credential Non-Leakage (`mission_proxy_token`)
 
-When executing a `member` job (`unixUsername.isSome`), `OrbNode/Runner.lean` never copies host/admin OAuth files (`.claude/.credentials.json`, `~/.codex/auth.json`, Antigravity login, or fleet SSH keys) into `/home/<unix_username>`. Instead, Core mints a short-lived `mission_proxy_token` (`orb-mpt-v1_<random>`, stored as SHA-256 in `mission_proxy_tokens` bound to `(mission_id, owner_user_id)`) and points harnesses at `<core_url>/v1`. `OrbCore/Proxy.lean` resolves `owner_user_id` from the proxy token, filters candidate providers by `user_provider_prefs`, checks and meters `user_daily_spend` via `orb_user_spend_cap_step`, and attaches upstream credentials solely inside Core. Across `/api/ai/providers*`, a `member` sees only each active provider's `id`, type, indexed type display name (e.g. `Anthropic` or `Anthropic 1`), credential/OAuth flags, personal preference toggle, connection status without account identity, custom models, and anonymous quota windows—never the owner's stored provider name, account email, organization, base URL, Google project ID, or rate limits.
+When executing a `member` job (`unixUsername.isSome`), `OrbNode/Runner.lean` never copies host/admin OAuth files (`.claude/.credentials.json`, `~/.codex/auth.json`, Antigravity login, or fleet SSH keys) into `/home/<unix_username>`. Instead, Core mints a short-lived `mission_proxy_token` (`orb-mpt-v1_<random>`, stored as SHA-256 in `mission_proxy_tokens` bound to `(mission_id, owner_user_id)`) and points harnesses at `<core_url>/v1`. `OrbCore/Proxy.lean` resolves `owner_user_id` from the proxy token, filters candidate providers by `user_provider_prefs`, checks and meters `user_daily_spend` via `orb_user_spend_cap_step`, and attaches upstream credentials solely inside Core. Across `/api/ai/providers*`, a `member` sees only each visible provider's `id`, type, indexed type display name (e.g. `Anthropic` or `Anthropic 1`), credential/OAuth flags, personal preference toggle, connection status without account identity, custom models, and anonymous quota windows—never the owner's stored provider name, account email, organization, base URL, Google project ID, or rate limits.
 
 ## 5. Shared Inference Providers (owner decision 2026-11-14)
 
@@ -64,7 +64,8 @@ it serves every user's missions through routing exactly like the operator's acco
 | --- | --- | --- |
 | Add an API-key account (`POST /api/ai/providers`) | yes | yes; Core picks the id (a client `id` is ignored, so an existing account is never overwritten) |
 | Start / poll / complete / cancel a subscription login (`/api/ai/providers/cli-proxy-login*`) | yes | yes; a login session is visible only to the user who started it (`404` otherwise); re-login with `provider_id` only for accounts they added (`403 not_account_owner`) |
-| Edit name, models, limits, global `enabled` (`PUT /api/ai/providers/:id`) | any account | any account |
+| Edit name, models, limits (`PUT /api/ai/providers/:id`) | any account | any account |
+| Change global `enabled` | yes | no |
 | Replace the API key | any account | only accounts they added (`403 not_account_owner`) |
 | Set `base_url` | any account | only on `custom` accounts they added, public `https://` hosts only (no loopback, private, link-local, `.local`, `.internal`; `403 base_url_not_allowed`) |
 | Reorder (`POST /api/ai/providers/reorder`) | yes | yes |
@@ -72,6 +73,8 @@ it serves every user's missions through routing exactly like the operator's acco
 | Read an API key, OAuth access or refresh token | never | never (write-only for everyone) |
 | Default provider, usage reset, Antigravity recheck, health clear, chain tests, routing chains, `/api/settings` | yes | no (`403 admin_required`) |
 | Read the audit log (`GET /api/ai/providers/audit`) | yes | no |
+
+Configured accounts appear in the shared inventory even when globally disabled. Global disable excludes an account from inference for everyone. Personal preferences are stored separately per user. A row without credentials is a setup placeholder visible to admins and its creator. Other members can discover the provider type through the type catalog.
 
 Rules:
 
