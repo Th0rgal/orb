@@ -339,7 +339,7 @@ inductive LiveWrite where
   deriving Repr, Inhabited, BEq
 
 inductive MissionMenuPage where
-  | actions | destinations | rename | settings | confirmDelete | picker (field : SettingField)
+  | actions | destinations | draftProject | rename | settings | confirmDelete | picker (field : SettingField)
   deriving BEq, Repr, Inhabited
 
 structure MissionMenu where
@@ -762,6 +762,8 @@ private def selectableRow (r : ChromeSidebarRow) := r.kind == "mission" || r.kin
 
 def missionDisclosureId (widgetId : Nat) : Nat := 4000000 + widgetId
 
+def draftProjectPickerId : Nat := 738
+
 def projectNewAgentId (widgetId : Nat) : Nat := 5000000 + widgetId
 
 /-- A disclosure shares its row's hover background. Section headings and
@@ -894,6 +896,10 @@ def contextSelection (st : DesktopState) (rowId : String) : DesktopState :=
   else { st with multiRows := [], selectionAnchor := none }
 
 def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuRow := Id.run do
+  if menu.page == .draftProject then
+    return (st.sidebarRows.filter (·.kind == "project")).mapIdx fun i p =>
+      { id := 2000000 + i, label := p.title, value := (p.rowId.drop 8).toString,
+        icon := if p.rowId == "project:" ++ st.draftProject then "check" else "folder" }
   if let .picker field := menu.page then
     let choices := settingChoices st menu.mission field
     if st.catalogLoading && (field == .backend || field == .model) then
@@ -940,7 +946,7 @@ def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuR
       (if menu.trigger == 714 || projects.isEmpty then [] else [{ id := 711, label := "Move to", icon := "folder", separatorBefore := true }])
   let some card := card? | return []
   match menu.page with
-  | .picker _ | .confirmDelete => return []
+  | .picker _ | .confirmDelete | .draftProject => return []
   | .actions =>
     return [{ id := 710, label := "Rename…", icon := "rename" }] ++
       (if projects.isEmpty then [] else [{ id := 711, label := "Move to", icon := "folder" }]) ++
@@ -1015,6 +1021,8 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
   | .activate 715 => return update { menu with page := .actions, first := 0, highlighted := 0 }
   | .activate id =>
     let some row := (missionMenuRows st menu).find? (·.id == id) | return (st, none)
+    if menu.page == .draftProject then
+      return ({ st with draftProject := row.value, missionMenu := none }, some viewport)
     if menu.page == .settings then
       if let some field := settingTrigger id then
         let next := { menu with page := .picker field, first := 0, highlighted := 0 }

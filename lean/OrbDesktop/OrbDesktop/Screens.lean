@@ -1112,11 +1112,14 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
            let v := currentSettings st ""
            let machine := ((st.launchMachines.getD []).lookup v.machine).getD <|
              ((st.fleetMachines.find? (·.machineId == v.machine)).map (·.name)).getD (if v.machine.isEmpty then "Choose machine" else v.machine)
+           let projectPicker := WidgetNode.focusable draftProjectPickerId <| WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center)
+             [chromeLabel (pxToSub 18) [overlaySynthRun (Theme.mutedText theme) project],
+              chromeIcon "chevron-down" pal.textMuted 10] (some draftProjectPickerId)
            let destination := WidgetNode.focusable 720 <| WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center)
              [chromeIcon "server" pal.textMuted 14, chromeLabel (pxToSub 18) [overlaySynthRun (Theme.mutedText theme) machine],
               chromeIcon "chevron-down" pal.textMuted 10] (some 720)
            let header := WidgetNode.box (BoxStyle.row (pxToSub 16) |>.withAlign .center |>.withFixedSize width (pxToSub 24))
-             [chromeLabel (pxToSub 18) [overlaySynthRun (Theme.mutedText theme) project], destination]
+             [projectPicker, destination]
            WidgetNode.box (BoxStyle.col 0 |>.withJustify .center |>.withAlign .center |>.withFixedSize mainW bodyH)
              [buildComposerWidget theme mainW composerH { st.composer with placeholder := "Describe a task, / for commands, @ for context" } [] (some (liveComposerControls st (width - pxToSub 90) true)) (some header)]
            else if st.initialRosterPending then
