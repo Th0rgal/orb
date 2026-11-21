@@ -8,6 +8,7 @@ import LeanSys.Posix
 import Orb.Kernel
 import OrbBin.PosixExt
 import OrbBin.Json
+import OrbBin.WorkspaceFilePolicy
 import OrbNode.Posix
 import OrbNode.Spec
 
@@ -18,14 +19,6 @@ open OrbBin.PosixExt
 open OrbBin.Json
 
 /-! ### 1. Confined Read-Only `file_browser` (`roots`, `resolve`, `search`, `list`, `read`, `download`) -/
-
-def isDeniedBrowserSegment (raw : String) : Bool :=
-  let n := raw.toLower
-  n == ".env" || n.startsWith ".env." ||
-  n == ".ssh" || n == ".aws" || n == ".gnupg" || n == ".git" ||
-  n == "credentials.json" || n == ".credentials.json" || n == "auth.json" ||
-  n == "id_rsa" || n == "id_ed25519" || n == ".git-credentials" ||
-  n.endsWith ".pem" || n.endsWith ".key"
 
 def resolveBrowserPath (root : System.FilePath) (raw : String) : IO (Except String (System.FilePath × List String)) := do
   let rst ← statPath root.toString
@@ -43,7 +36,7 @@ def resolveBrowserPath (root : System.FilePath) (raw : String) : IO (Except Stri
     else
       pure raw
   let segs := (relRaw.splitOn "/").filter (fun s => !s.isEmpty && s != ".")
-  if relRaw.contains '\\' || segs.any (fun s => s == ".." || isDeniedBrowserSegment s) then
+  if relRaw.contains '\\' || segs.any (fun s => s == ".." || OrbBin.WorkspaceFilePolicy.deniedSegment s) then
     return .error "File is not available in this source"
   let mut cur := root
   for seg in segs do
@@ -54,7 +47,7 @@ def resolveBrowserPath (root : System.FilePath) (raw : String) : IO (Except Stri
   return .ok (cur, segs)
 
 private def browserEntry? (full : System.FilePath) (relSegs : List String) : IO (Option JVal) := do
-  if relSegs.isEmpty || relSegs.any isDeniedBrowserSegment then return none
+  if relSegs.isEmpty || relSegs.any OrbBin.WorkspaceFilePolicy.deniedSegment then return none
   let st ← statPath full.toString
   if !st.exists_ || st.isSymlink || (!st.isDir && !st.isReg) then return none
   let sz ← if st.isDir then pure 0 else
@@ -126,7 +119,7 @@ def executeFileBrowser (rootDir : String) (reqJson : JVal) : IO (Except String J
             matchesArr := #[ent]
       | .error _ => pure ()
       if matchesArr.isEmpty && !p.startsWith "/" && !(p.splitOn "..").tail.isEmpty == false &&
-         !(p.splitOn "/").any isDeniedBrowserSegment then
+         !(p.splitOn "/").any OrbBin.WorkspaceFilePolicy.deniedSegment then
         let idx ← match index? with
           | some xs => pure xs
           | none =>
@@ -968,15 +961,41 @@ def prepareManagedAuthWorkspace
       if gst.isSymlink then return .error "Job .gemini must not be a symlink"
       if let .error _ ← (IO.FS.createDirAll gemini).toBaseIO then
         return .error "Cannot create the Antigravity profile directory in the mission workspace"
-      let link := gemini / "antigravity-cli"
-      let lst ← statPath link.toString
-      if lst.exists_ && !lst.isSymlink then
-        return .error "Job Antigravity home conflicts with node-managed profile"
-      let linkResult ← (IO.Process.output { cmd := "ln", args := #["-sfn", target, link.toString] }).toBaseIO
+      let cli := gemini / "antigravity-cli"
+      let legacy ← statPath cli.toString
+      if legacy.isSymlink then
+        -- Previous nodes attached the whole profile. Detach only the link;
+        -- shared history cannot be attributed to a single mission.
+        let .ok old ← (IO.FS.realPath cli).toBaseIO | return .error "Unrecognized Antigravity profile link"
+        let base ← IO.FS.realPath (System.FilePath.mk ah)
+        unless old == base || (old.parent == some (base / "accounts") && validAntigravitySlot (old.fileName.getD "")) do
+          return .error "Unrecognized Antigravity profile link"
+        IO.FS.removeFile cli
+      if let .error _ ← (IO.FS.createDirAll cli).toBaseIO then
+        return .error "Cannot create the Antigravity home in the mission workspace"
+      let cliState ← statPath cli.toString
+      unless cliState.isDir && !cliState.isSymlink && cliState.ownedByEuid do
+        return .error "Mission Antigravity home must be an owned directory"
+      if (← chmod cli.toString 0o700) != 0 then return .error "Cannot make the mission Antigravity home private"
+      for name in ["conversations", "brain"] do
+        let dir := cli / name
+        if (← statPath dir.toString).isSymlink then return .error "Mission Antigravity history must be local"
+        if let .error _ ← (IO.FS.createDirAll dir).toBaseIO then
+          return .error "Cannot create mission Antigravity history"
+      let token := cli / "antigravity-oauth-token"
+      let source := System.FilePath.mk target / "antigravity-oauth-token"
+      let managed := cli / ".orb-managed-token"
+      let existing ← statPath token.toString
+      if existing.exists_ && !existing.isSymlink && !(← privateFileReadable managed) then
+        return .error "Job Antigravity login conflicts with node-managed profile"
+      if !(← privateFileReadable managed) then
+        if let .error _ ← writeAtomicPrivate0600 managed "1".toUTF8 then
+          return .error "Cannot mark the mission Antigravity login as managed"
+      let linkResult ← (IO.Process.output { cmd := "ln", args := #["-sfnT", source.toString, token.toString] }).toBaseIO
       unless (linkResult.toOption.map (·.exitCode)) == some 0 do
-        return .error "Cannot attach the selected Antigravity profile to this mission. Check workspace permissions."
-      unless ← privateFileReadable (link / "antigravity-oauth-token") do
-        return .error "The attached Antigravity profile has no private login readable by the node"
+        return .error "Cannot attach the selected Antigravity login to this mission"
+      unless ← privateFileReadable source do
+        return .error "The selected Antigravity login is no longer available"
   return .ok extraEnv
 
 def installAntigravityAuth
@@ -1013,8 +1032,6 @@ def installAntigravityAuth
   let homePath := System.FilePath.mk ah
   if let .error e ← ensurePrivateDir0700 homePath then
     return .error e
-  IO.FS.createDirAll (homePath / "conversations")
-  IO.FS.createDirAll (homePath / "brain")
   let mut changed := false
   if updateDefault then
     if let .error e ← writeAtomicPrivate0600 (homePath / "antigravity-oauth-token") nativeDoc.toUTF8 then
@@ -1024,8 +1041,6 @@ def installAntigravityAuth
     let slotDir := homePath / "accounts" / sl
     if let .error e ← ensurePrivateDir0700 slotDir then
       return .error e
-    let _ ← IO.Process.output { cmd := "ln", args := #["-sfn", (homePath / "conversations").toString, (slotDir / "conversations").toString] }
-    let _ ← IO.Process.output { cmd := "ln", args := #["-sfn", (homePath / "brain").toString, (slotDir / "brain").toString] }
     if let .error e ← writeAtomicPrivate0600 (slotDir / "antigravity-oauth-token") nativeDoc.toUTF8 then
       return .error e
     changed := true

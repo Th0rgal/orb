@@ -2252,6 +2252,28 @@ def runTests : IO UInt32 := do
       pure ()
   let readyBinding ← prepareManagedAuthWorkspace agBindingConfig #["antigravity"] agWorkspace.toString
   assertTrue "Antigravity workspace profile is readable after attachment" readyBinding.isOk
+  let cli := agWorkspace / ".gemini" / "antigravity-cli"
+  let tokenName := "antigravity-oauth-token"
+  let sibling := System.FilePath.mk tmpRoot / "agy-profile-sibling"
+  let otherCli := sibling / ".gemini" / "antigravity-cli"
+  IO.FS.createDirAll (sibling / ".gemini")
+  let oldLink ← IO.Process.output { cmd := "ln", args := #["-s", fakeAgHome.toString, otherCli.toString] }
+  assertTrue "legacy profile attached for migration" (oldLink.exitCode == 0)
+  IO.FS.writeFile (cli / "conversations" / "private-session") "mission one"
+  IO.FS.createDirAll (fakeAgHome / "brain")
+  IO.FS.writeFile (fakeAgHome / "brain" / "legacy-shared") "old shared history"
+  let migrated ← prepareManagedAuthWorkspace agBindingConfig #["antigravity"] sibling.toString
+  assertTrue "legacy shared profile detached without importing another mission's history"
+    (migrated.isOk && !(← (otherCli / "brain" / "legacy-shared").pathExists) &&
+     !(← (otherCli / "conversations" / "private-session").pathExists) &&
+     (← (fakeAgHome / "brain" / "legacy-shared").pathExists))
+  let renewed := "fixture-rotated-login".toUTF8
+  assertTrue "node rotates selected credential"
+    (← writeAtomicPrivate0600 (fakeAgHome / tokenName) renewed).isOk
+  let repeated ← prepareManagedAuthWorkspace agBindingConfig #["antigravity"] agWorkspace.toString
+  assertTrue "mission retains its conversation and observes credential renewal"
+    (repeated.isOk && (← (cli / "conversations" / "private-session").pathExists) &&
+     (← IO.FS.readBinFile (cli / tokenName)) == renewed && (← IO.FS.readBinFile (otherCli / tokenName)) == renewed)
   setenvVar "ORB_PRIVD_ALLOW_NONROOT_TEST" "1"
   setenvVar "ORB_PRIVD_HOME_ROOT" privdHomes.toString
   setenvVar "ORB_PRIVD_STATE_DIR" privdState.toString
@@ -2458,7 +2480,6 @@ def runTests : IO UInt32 := do
   let mDir := System.FilePath.mk tmpRoot / missionId
   IO.FS.createDirAll mDir
   IO.FS.writeFile (mDir / "visible.txt") "hello-browser"
-  IO.FS.writeFile (mDir / ".env") "SECRET=1"
   let _ ← IO.Process.output { cmd := "ln", args := #["-sfn", "/etc/hosts", (mDir / "sym.txt").toString] }
 
   let (rt7, rFbOk) ← handleRequest rt {
@@ -2472,13 +2493,15 @@ def runTests : IO UInt32 := do
   check "file_browser reads confined regular file"
     (rFbOk.status == 200 && fbOkJson.fieldStr? "content" == some "hello-browser")
 
-  let (rt8, rFbEnv) ← handleRequest rt {
-    method := "POST", rawPath := s!"/jobs/{jobId}/files", path := s!"/jobs/{jobId}/files",
-    query := #[], headers := authHdrs,
-    body := (renderCompact (.obj #[("action", .str "read"), ("path", .str ".env")])).toUTF8
-  }
-  rt := rt8
-  check "file_browser rejects .env secret file with 400" (rFbEnv.status == 400)
+  for credential in [".env", "antigravity-oauth-token"] do
+    IO.FS.writeFile (mDir / credential) "fixture-private"
+    let (next, response) ← handleRequest rt {
+      method := "POST", rawPath := s!"/jobs/{jobId}/files", path := s!"/jobs/{jobId}/files",
+      query := #[], headers := authHdrs,
+      body := (renderCompact (.obj #[("action", .str "read"), ("path", .str credential)])).toUTF8
+    }
+    rt := next
+    check s!"file_browser rejects private file {credential}" (response.status == 400)
 
   let (rt9, rFbSym) ← handleRequest rt {
     method := "POST", rawPath := s!"/jobs/{jobId}/files", path := s!"/jobs/{jobId}/files",
