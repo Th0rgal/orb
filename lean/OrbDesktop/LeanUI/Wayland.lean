@@ -791,7 +791,7 @@ def stepWireEvent (c : WaylandClient) (ev : WlWireEvent) : IO (WaylandClient × 
           FFI.xkbModifiers st.xkbState dep lat lck grp
   else if ev.tag == tagTextInput then
     if ev.opcode == 0 then return ({ st with imeEntered := true }, out)
-    if ev.opcode == 1 then return ({ st with imeEntered := false, imeEnabled := false, ime := {} }, out)
+    if ev.opcode == 1 then return ({ st with imeEntered := false, imeEnabled := false, ime := {} }, out.push (.preedit "" 0 0))
     if !st.imeEnabled then return (st, out)
     if ev.opcode == 2 then
       let txt := match ev.arg? 0 with | some (WlWireArg.str (some s)) => s | _ => ""

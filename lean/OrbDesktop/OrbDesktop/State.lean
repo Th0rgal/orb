@@ -348,6 +348,8 @@ structure DesktopState where
   initialRosterPending : Bool := false
   connectionBinding : String := ""
   writeRequest : Option LiveWrite := none
+  /-- Key and exact submitted draft until Core confirms it, scoped to this selection. -/
+  unconfirmedSend : Option (String × String) := none
   writeError : String := ""
   missionMenu : Option MissionMenu := none
   draftSettings : LaunchSettings := {}
@@ -403,7 +405,7 @@ def MissionSummaryCard.isRunning (card : MissionSummaryCard) : Bool :=
 def resetSelection (st : DesktopState) (card : Option MissionSummaryCard) : DesktopState :=
   let mid := card.map (·.missionId)
   { st with
-    openMission := mid, missionMenu := none, stream := { shown := [], pending := [], renders := 1 }, scroll := {}
+    openMission := mid, missionMenu := none, unconfirmedSend := none, writeError := "", stream := { shown := [], pending := [], renders := 1 }, scroll := {}
     composer := { isRunning := card.any (·.isRunning) }
     messageSent := false, missionStopped := false, missionArchived := false, sidePanelOpen := false
     sidebarRows := st.sidebarRows.map fun row => { row with selected := row.widgetId == (card.map (·.widgetId)).getD 101 } }
@@ -1067,6 +1069,8 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
         let some card := st.selectedCard | return (st, none)
         let request := if id == 106 then
             if st.composer.isRunning then none else some (.archive card.missionId)
+          else if st.unconfirmedSend.any (·.2 == st.composer.text) && st.composer.imePreeditText.isEmpty then
+            some (.send card.missionId st.composer.text)
           else if st.composer.isRunning then some (.stop card.missionId)
           else if st.composer.imePreeditText.isEmpty && !st.composer.text.isEmpty then
             some (.send card.missionId st.composer.text)

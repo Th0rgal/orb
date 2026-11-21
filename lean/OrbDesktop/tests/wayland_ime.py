@@ -70,7 +70,7 @@ def session(env):
             while receive() != callback:
                 pass
 
-        def edit(batches):
+        def edit(batches, preedit=''):
             # Drain focus changes from the previous field before editing this one.
             sync()
             while not active:
@@ -79,6 +79,8 @@ def session(env):
                 if before or after:
                     send(5, 2, struct.pack('=II', before, after))
                 send(5, 0, string(text))
+                if preedit:
+                    send(5, 1, string(preedit) + struct.pack('=ii', 0, 0))
                 send(5, 3, struct.pack('=I', serial))
                 sync()
 

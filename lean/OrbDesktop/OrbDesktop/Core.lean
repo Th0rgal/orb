@@ -253,8 +253,16 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
           | .machine => "machine" | .backend => "backend" | .model => "model"
           | .effort => "effort" | .permission => "permission"
         ("settings", mid, key ++ "\t" ++ encode values)
+    let freshKey := do return (← IO.FS.readFile "/proc/sys/kernel/random/uuid").trimAscii.toString
+    let key ← if action != "send" then pure "" else
+      match st.unconfirmedSend with
+      | some (id, draft) => if draft == text then pure id else freshKey
+      | none => freshKey
+    let st := if action == "send" then { st with unconfirmedSend := some (key, text) } else st
     try
-      let r ← IO.Process.output { cmd := "python3", args := #["-I", "-c", transport ++ "\nsys.exit(run_mutation(*sys.argv[1:]))", st.connectionBinding, action, mid] } (input? := some text)
+      let r ← IO.Process.output { cmd := "python3", args := #["-I", "-c", transport ++ "\nsys.exit(run_mutation(*sys.argv[1:]))", st.connectionBinding, action, mid, key] } (input? := some text)
+      if action == "send" && r.exitCode == 2 then
+        return ({ st with unconfirmedSend := none, writeError := "Mission busy — draft kept. Send again when idle." }, some viewport)
       if action == "archive" && r.exitCode == 2 then
         return ({ st with writeError := "Stop or finish this agent before archiving it." }, some viewport)
       if r.exitCode == 3 then
@@ -314,9 +322,9 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
         let cards := st.missionCards.map fun m =>
           if m.missionId == mid then { m with machine, backend, model, effort, permissionMode } else m
         return ({ st with missionCards := cards }, some viewport)
-      | .send .. => return ({ st with composer := { isRunning := st.composer.isRunning } }, some viewport)
+      | .send .. => return ({ st with unconfirmedSend := none, composer := { isRunning := st.composer.isRunning } }, some viewport)
       | .stop _ => return (st, some viewport)
-    catch _ => return ({ st with writeError := "Core did not confirm " ++ action }, some viewport)
+    catch _ => return ({ st with writeError := if action == "send" then "Send unconfirmed — activate Send to retry" else "Core did not confirm " ++ action }, some viewport)
   let invalidate := ({ DesktopState.liveUnavailable with theme := st.theme, scale120 := scale }, some viewport)
   let target := if st.hasLiveConnection then some (st.openMission.getD "") else none
   if active.map (·.mission) != target || active.any (·.binding != st.connectionBinding) then
