@@ -535,6 +535,7 @@ APP_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")/.." && pwd)"
 export PATH="\$APP_DIR/bin:/etc/profiles/per-user/\${USER:-\$(id -un)}/bin:/run/current-system/sw/bin:\$PATH"
 export ORB_LOCALD_BIN="\$APP_DIR/bin/orb-locald"
 export ORB_SIGNER_BIN="\$APP_DIR/bin/orb-signer"
+export ORB_ACCOUNT_LAUNCHER="\$APP_DIR/bin/orb"
 if [[ -d /run/opengl-driver/share ]]; then
   export XDG_DATA_DIRS="/run/opengl-driver/share:\${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 fi
