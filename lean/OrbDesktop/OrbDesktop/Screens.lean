@@ -1062,6 +1062,21 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
 
   let rightColumn : WidgetNode :=
     match st.screen with
+    | .inbox => Id.run do
+      let line := fun (w : SubPx) (text : String) => screenTextLine theme w (pxToSub 32) (pxToSub 14) (pxToSub 24) pal.textPrimary text
+      let button := fun (id : Nat) (width : SubPx) (title : String) =>
+        WidgetNode.focusable id <| WidgetNode.box (BoxStyle.row 0) [line width title] (some id)
+      let content := if !st.inboxAvailable then [line mainW "Inbox unavailable. Retrying…"] else match st.currentInboxItem with
+        | none => [line mainW "No unread items"]
+        | some item =>
+          let title := ((st.missionCards.find? (·.missionId == item.mission)).map (·.title)).getD item.mission
+          let index := min st.inboxIndex (st.inboxItems.length - 1)
+          [line mainW s!"{index + 1} of {st.inboxItems.length}",
+           button 940 mainW ("Open · " ++ title),
+           WidgetNode.box (BoxStyle.row (pxToSub 12))
+             ([button 941 (pxToSub 96) "Mark read"] ++ (if index > 0 then [button 942 (pxToSub 80) "Previous"] else []) ++
+              (if index + 1 < st.inboxItems.length then [button 943 (pxToSub 64) "Next"] else []))]
+      return WidgetNode.box (BoxStyle.col 0 |>.withFixedSize mainW availH) (headerNode :: content)
     | .missionTranscript =>
       let bodyH := availH - headerH - composerH
       let bodyNode := buildMissionTranscriptBody st mainW bodyH runs

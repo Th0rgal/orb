@@ -35,6 +35,7 @@ inductive ScreenId where
   | missionTranscript   -- `03_mission_transcript` (`/?screen=mission&id=m-active`)
   | missionSplitDiff    -- `04_mission_split_diff` (`/?screen=mission&id=m-diff&mode=split`)
   | machinesFleet       -- `05_machines_fleet` (`/?screen=machines`)
+  | inbox               -- authenticated unread responses
   | inference           -- authenticated provider accounts
   | settingsGeneral     -- `06_settings_general` (`/?screen=settings&tab=general`)
   | searchDialog        -- `07_search_dialog` (`/?screen=control&modal=search`)
@@ -64,6 +65,7 @@ def fileStem : ScreenId → String
   | .missionTranscript  => "03_mission_transcript"
   | .missionSplitDiff   => "04_mission_split_diff"
   | .machinesFleet      => "05_machines_fleet"
+  | .inbox              => "live-inbox"
   | .inference          => "inference"
   | .settingsGeneral    => "06_settings_general"
   | .searchDialog       => "07_search_dialog"
@@ -77,6 +79,7 @@ def w0Alias : ScreenId → String
   | .missionTranscript  => "transcript"
   | .missionSplitDiff   => "diff"
   | .machinesFleet      => "streaming"
+  | .inbox              => "live-inbox"
   | .inference          => "providers"
   | .settingsGeneral    => "settings"
   | .searchDialog       => "search"
@@ -90,6 +93,7 @@ def routeQuery : ScreenId → String
   | .missionTranscript  => "/?screen=mission&id=m-active"
   | .missionSplitDiff   => "/?screen=mission&id=m-diff&mode=split"
   | .machinesFleet      => "/?screen=machines"
+  | .inbox              => "/?screen=inbox"
   | .inference          => "/?screen=inference"
   | .settingsGeneral    => "/?screen=settings&tab=general"
   | .searchDialog       => "/?screen=control&modal=search"
@@ -103,6 +107,7 @@ def headerTitle : ScreenId → String
   | .missionTranscript  => "Long mission"
   | .missionSplitDiff   => "Long mission"
   | .machinesFleet      => "Machines"
+  | .inbox              => "Inbox"
   | .inference          => "Inference"
   | .settingsGeneral    => "Settings"
   | .searchDialog       => "New Agent"
@@ -324,7 +329,14 @@ structure AccountRoutePage where
   failed : Bool := false
   deriving BEq, Repr, Inhabited
 
+structure InboxItem where
+  mission : String
+  stamp : Nat
+  version : Nat
+  deriving BEq, Repr, Inhabited
+
 inductive LiveWrite where
+  | inboxRead (item : InboxItem) (openItem : Bool)
   | providerPreference (account : String) (enabled : Bool)
   | create
   | send (mission text : String)
@@ -396,6 +408,10 @@ structure DesktopState where
   syncCursor : SyncCursorState := {}
   badgePhase : Nat := 0
   sidebarRows : List ChromeSidebarRow := []
+  inboxItems : List InboxItem := []
+  inboxAvailable : Bool := false
+  inboxEnabled : Bool := true
+  inboxIndex : Nat := 0
   missionCards : List MissionSummaryCard := []
   fleetMachines : List FleetMachineCard := []
   launchMachines : Option (List (String × String)) := none
@@ -420,6 +436,9 @@ def DesktopState.selectedCard (st : DesktopState) : Option MissionSummaryCard :=
   st.openMission.bind fun mid => st.missionCards.find? (·.missionId == mid)
 
 def DesktopState.hasLiveConnection (st : DesktopState) : Bool := st.liveData && !st.connectionBinding.isEmpty
+
+def DesktopState.currentInboxItem (st : DesktopState) : Option InboxItem :=
+  st.inboxItems[min st.inboxIndex (st.inboxItems.length - 1)]?
 
 def DesktopState.headerTitle (st : DesktopState) : String :=
   if st.initialRosterPending then "Connecting to Core…"
@@ -906,8 +925,11 @@ def DesktopState.visibleProjectRows (st : DesktopState) : List ChromeSidebarRow 
       grouped := grouped.insert slug ((grouped.getD slug #[]).push { row with depth := row.depth + 1 })
     else
       unassigned := unassigned.push row
-  let mut visible := (st.sidebarRows.filter (fun row =>
-    row.kind != "project" && row.kind != "mission" && row.rowId != "section:missions")).toArray
+  let mut visible := (st.sidebarRows.filterMap fun row =>
+    if row.rowId == "nav:inbox" then
+      if st.inboxEnabled then some { row with badge := st.inboxItems.length } else none
+    else if row.kind == "project" || row.kind == "mission" || row.rowId == "section:missions" then none
+    else some row).toArray
   for project in projects do
     let key := (project.rowId.drop 8).toString
     visible := visible.push project
@@ -1052,6 +1074,7 @@ def desktopFocusChange (before after : DesktopState) (ev : Event) : Option Nat :
     | none, some _ => some providersBackId
     | some page, none => ((after.providers.getD []).findIdx? (·.id == page.account.id)).map providerSettingsId
     | _, _ => none
+  else if after.screen == .inbox && before.screen != .inbox then some (if after.inboxItems.isEmpty then 102 else 940)
   else if after.hasLiveConnection && after.missionMenu.isNone && after.screen == .controlEmpty then
     let shortcut := match ev with
       | .key key mods .pressed => (key == 0x6e || key == 0x4e) && mods &&& 0x0a != 0
@@ -1145,12 +1168,14 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       | .key key mods .pressed =>
         -- XKB reports modifiers even when the key was held before this window gained focus.
         if mods &&& 0x0a == 0 then 0
+        else if key == 0x69 || key == 0x49 then 102
         else if key == 0x34 then 113
         else if key == 0x33 then 112
         else if key == 0x6e || key == 0x4e then 101 else 0
       | _ => 0
-    if [101, 112, 113].contains navId then
-      let screen := if navId == 113 then ScreenId.inference else if navId == 112 then .machinesFleet else .controlEmpty
+    if navId == 102 && !st.inboxEnabled then return (st, none)
+    if [101, 102, 112, 113].contains navId then
+      let screen := if navId == 102 then ScreenId.inbox else if navId == 113 then .inference else if navId == 112 then .machinesFleet else .controlEmpty
       let next := resetSelection { st with screen, fleetTopSub := 0, writeError := "", accountRoutePage := none } none
       -- These pages share the New Agent draft. A mission follow-up belongs only to its transcript.
       let next := if st.openMission.isNone then
@@ -1173,6 +1198,19 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       else if navId >= providerSettingsId 0 then
         if let some account := (st.providers.getD [])[navId - providerSettingsId 0]? then
           return ({ st with accountRoutePage := some { account, previousTop := st.fleetTopSub }, fleetTopSub := 0, writeError := "" }, some viewport)
+    if st.screen == .inbox then
+      let index := min st.inboxIndex (st.inboxItems.length - 1)
+      if navId == 942 || (ev matches .key 0xff52 _ .pressed) then
+        return ({ st with inboxIndex := index - 1 }, some viewport)
+      if navId == 943 || (ev matches .key 0xff54 _ .pressed) then
+        return ({ st with inboxIndex := min (index + 1) (st.inboxItems.length - 1) }, some viewport)
+      if navId == 940 || navId == 941 then
+        if !st.inboxAvailable then return (st, none)
+        let some item := st.currentInboxItem | return (st, none)
+        return ({ st with writeRequest := some (.inboxRead item (navId == 940)) }, none)
+      match ev with
+      | .text _ | .imeBatch .. | .preedit .. | .composerReturn .. => return (st, none)
+      | _ => pure ()
     if st.screen == .inference && st.accountRoutePage.isNone && navId >= providerWidgetId 0 then
       if let some account := (st.providers.getD [])[navId - providerWidgetId 0]? then
         return ({ st with writeRequest := some (.providerPreference account.id (!account.userEnabled)) }, none)

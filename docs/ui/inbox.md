@@ -134,3 +134,19 @@ An ordinary Inbox fixture uses state 0. The triage regression also runs with sta
 Undo toast. Assertions identify the intended toast by its action text, without
 assuming the global toast collection has only one item or dismissing security
 warnings to make the test pass.
+
+### LeanUI trial
+
+The live navigation badge and Inbox items use the same connection-bound roster
+snapshot. Opening Inbox leaves receipts untouched. Opening an item or choosing
+Mark read acknowledges only its displayed response timestamp and observed Core
+entry version. Another user can still see the same shared mission as unread.
+A newer response becomes unread again. Ctrl/Cmd+I opens Inbox, Up/Down moves
+between items, and Tab and Enter activate the displayed controls.
+
+GTK receives its badge from the Web Inbox projection. Web and LeanUI both
+prioritize replies needing attention over ready results and honor the user's
+Inbox preferences and signed seen timestamps. The trial operates on the current
+Core mission roster. Web also considers pending interactions observed in the
+transcript and offers digest previews. LeanUI opens the mission transcript
+directly and writes the per-user seen receipt.

@@ -19,6 +19,10 @@ private def splitTab (line : String) : List String :=
 
 private def col (xs : List String) (n : Nat) : String := xs.getD n ""
 
+private def inboxItem (xs : List String) : Option InboxItem := do
+  guard (col xs 0 == "U")
+  return { mission := col xs 1, stamp := ← (col xs 2).toNat?, version := ← (col xs 3).toNat? }
+
 private def projectRow (idx : Nat) (xs : List String) : ChromeSidebarRow :=
   { widgetId := 1000 + 3 * idx, rowId := "project:" ++ col xs 1, kind := "project"
     title := col xs 2, subtitle := col xs 3
@@ -52,6 +56,7 @@ private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale
   let missionRows : List ChromeSidebarRow := missions.map fun m =>
     { widgetId := m.widgetId, rowId := "mission:" ++ m.missionId, kind := "mission", title := m.title, status := m.status }
   let sidebar := [{ widgetId := 101, rowId := "nav:new", kind := "nav", title := "New Agent", shortcut := "⌘N", selected := true },
+    { widgetId := 102, rowId := "nav:inbox", kind := "nav", title := "Inbox", shortcut := "⌘I" },
     { widgetId := 112, rowId := "nav:machines", kind := "nav", title := "Machines", shortcut := "⌘3" },
     { widgetId := 113, rowId := "nav:inference", kind := "nav", title := "Inference", shortcut := "⌘4" },
     { widgetId := 109, rowId := "section:missions", kind := "section", title := "Missions" }] ++ missionRows ++
@@ -65,6 +70,9 @@ private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale
       | [onlyProject] => [(onlyProject.rowId.drop 8).toString]
       | _ => []
     sidebarRows := sidebar
+    inboxItems := lines.filterMap (fun line => inboxItem (splitTab line))
+    inboxAvailable := lines.any (·.startsWith "I\t")
+    inboxEnabled := !lines.contains "I\tdisabled"
     missionCards := missions
     fleetMachines := machines, catalogLoading := true }
 
@@ -283,7 +291,13 @@ private def mergeRoster (st : DesktopState) (records : List String) : DesktopSta
       rows := rows.push { row with title := card.title, status := card.status }
     | "N" => machines := machines.push (machineCard machines.size xs)
     | _ => continue
-  let updated := { st with missionCards := cards.toList, sidebarRows := rows.toList, fleetMachines := machines.toList }
+  let inboxItems := records.filterMap fun r => inboxItem (r.splitOn "\x1c")
+  let inboxAvailable := records.any (·.startsWith "I\x1c")
+  let inboxEnabled := if inboxAvailable then !records.contains "I\x1cdisabled" else st.inboxEnabled
+  let inboxItems := if inboxAvailable then inboxItems else st.inboxItems
+  let inboxIndex := (st.currentInboxItem.bind fun item => inboxItems.findIdx? (·.mission == item.mission)).getD
+    (min st.inboxIndex (inboxItems.length - 1))
+  let updated := { st with inboxItems, inboxEnabled, inboxIndex, inboxAvailable, missionCards := cards.toList, sidebarRows := rows.toList, fleetMachines := machines.toList }
   let some selected := updated.selectedCard | return updated
   return { updated with composer := { updated.composer with isRunning := selected.isRunning } }
 
@@ -296,6 +310,7 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
     let st := { st with writeRequest := none, writeError := "" }
     let encode := fun (v : LaunchSettings) => String.intercalate "\t" [v.machine, v.backend, v.model, v.effort, v.permission]
     let (action, mid, text) := match request with
+      | .inboxRead item _ => ("inbox-read", item.mission, s!"{item.stamp} {item.version}")
       | .providerPreference account enabled => (if enabled then "use-provider" else "skip-provider", account, "")
       | .create => ("create", "", st.draftDirectory ++ String.singleton (Char.ofNat 0) ++ encode st.draftSettings ++ "\t" ++ st.draftProject ++ "\t" ++ st.composer.text)
       | .send mid text => ("send", mid, text)
@@ -326,6 +341,12 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
       | .providerPreference .. => pure ()
       | _ => closeLiveSubscription slot
       match request with
+      | .inboxRead item openItem =>
+        let next := { st with inboxItems := st.inboxItems.filter (· != item) }
+        if openItem then
+          if let some card := st.missionCards.find? (·.missionId == item.mission) then
+            return (resetSelection { next with screen := .missionTranscript } (some card), some viewport)
+        return (next, some viewport)
       | .providerPreference account enabled =>
         let providers := st.providers.map fun rows =>
           rows.map fun p => if p.id == account then { p with userEnabled := enabled } else p
@@ -376,7 +397,10 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
         return ({ st with missionCards := cards }, some viewport)
       | .send .. => return ({ st with composer := { isRunning := st.composer.isRunning } }, some viewport)
       | .stop _ => return (st, some viewport)
-    catch _ => return ({ st with writeError := "Core did not confirm " ++ action }, some viewport)
+    catch _ =>
+      let message := if action == "inbox-read" then "Couldn't mark this item read. Check the Inbox and try again."
+        else "Core did not confirm " ++ action
+      return ({ st with writeError := message }, some viewport)
   let invalidate := ({ DesktopState.liveUnavailable with theme := st.theme, scale120 := scale }, some viewport)
   let target := if st.hasLiveConnection then some (st.openMission.getD "") else none
   if active.map (·.mission) != target || active.any (·.binding != st.connectionBinding) then
@@ -390,6 +414,7 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
   | .sample roster bubble =>
     let updated := roster.elim st (mergeRoster st)
     let changed := roster.isSome && (updated.missionCards != st.missionCards ||
+      updated.inboxItems != st.inboxItems || updated.inboxEnabled != st.inboxEnabled || updated.inboxAvailable != st.inboxAvailable ||
       updated.sidebarRows != st.sidebarRows || updated.fleetMachines != st.fleetMachines)
     let st := updated
     let cards := st.missionCards
