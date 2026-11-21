@@ -607,7 +607,7 @@ def main (args : List String) : IO UInt32 := do
               let st := if spin then { st with badgePhase := phase } else st
               let some updated ← readSources st | return (st, damage)
               return (updated, some vp))
-            (·.liveData) menuFocusChange (some wakeFd) (·.writeRequest.isSome)
+            (·.liveData) desktopFocusChange (some wakeFd) (·.writeRequest.isSome)
             (fun rt => animations && (runningBadgeDamage rt).isSome)
         finally closeLiveSubscription slot
     Runtime.shutdownRuntime rt

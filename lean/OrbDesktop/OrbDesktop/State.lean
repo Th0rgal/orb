@@ -901,6 +901,17 @@ def menuFocusChange (before after : DesktopState) : Option Nat :=
     else ((missionMenuRows after menu)[menu.highlighted]?).map (·.id)
   | _, _ => none
 
+/-- Opening a live draft gives the editor keyboard focus even when New Agent
+    was invoked while the empty draft screen was already visible. -/
+def desktopFocusChange (before after : DesktopState) (ev : Event) : Option Nat :=
+  if let some target := menuFocusChange before after then some target
+  else if after.hasLiveConnection && after.missionMenu.isNone && after.screen == .controlEmpty then
+    let shortcut := match ev with
+      | .key key mods .pressed => (key == 0x6e || key == 0x4e) && mods &&& 0x0a != 0
+      | _ => false
+    if shortcut || before.screen != after.screen || before.draftProject != after.draftProject then some 1 else none
+  else none
+
 private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event) (viewport : Rect) :
     DesktopState × Damage := Id.run do
   let update := fun m => ({ st with missionMenu := some m }, some viewport)

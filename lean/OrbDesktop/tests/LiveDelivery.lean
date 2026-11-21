@@ -88,6 +88,10 @@ private def unsentDraft : DesktopState :=
 #guard (stepDesktopEvent 120 vp { unsentDraft with composer := { unsentDraft.composer with isRunning := true } }
   (.composerReturn false)).1.writeRequest.isNone
 
+private def blankDraft : DesktopState := { hierarchyFixture with screen := .controlEmpty }
+#guard desktopFocusChange blankDraft blankDraft (.key 0x6e 2 .pressed) == some 1
+#guard desktopFocusChange blankDraft blankDraft (.key 0x6e 0 .pressed) == none
+
 private def collapsed := (stepDesktopEvent 120 vp unsentDraft (.activate sidebarToggleId)).1
 #guard collapsed.sidebarWidth == 0 && collapsed.composer.text == unsentDraft.composer.text
 #guard (stepDesktopEvent 120 vp collapsed (.key 0x62 2 .pressed)).1.sidebarWidth == chromeSidebarWidthSub
