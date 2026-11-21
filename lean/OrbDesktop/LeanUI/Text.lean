@@ -265,6 +265,13 @@ structure ResolvedRun where
   style : TextStyle
   run : InlineRun
 
+/-- Loaded FreeType + HarfBuzz font handle and its stable `fontId`. -/
+structure FontHandle where
+  fontId : Nat
+  facePtr : USize
+  pattern : String
+  deriving Repr, Inhabited
+
 /-- Multi-page shelf-packed glyph atlas and bounded font/label caches. -/
 structure GlyphAtlasCache where
   pageWidth : Nat := 1024
@@ -277,6 +284,8 @@ structure GlyphAtlasCache where
   cache : HashCache AtlasGlyphEntry := {}
   /-- Shaping results reused across frames; glyph rasterization is cached separately below. -/
   shapeCache : Array ShapeCacheEntry := #[]
+  fallbackFonts : Array FontHandle := #[]
+  missingCharsets : Array String := #[]
   resolved : Array ResolvedRun := #[]
   hits : Nat := 0
   misses : Nat := 0
@@ -355,13 +364,6 @@ def insertRasterized (ac : GlyphAtlasCache) (key : GlyphKey) (rg : RasterizedGly
 
 end GlyphAtlasCache
 
-/-- Loaded FreeType + HarfBuzz font handle and its stable `fontId`. -/
-structure FontHandle where
-  fontId : Nat
-  facePtr : USize
-  pattern : String
-  deriving Repr, Inhabited
-
 /-- Open a font face via Fontconfig (`FFI.fontOpen`). -/
 def openFont (fontId : Nat) (pattern : String := "sans-serif") : IO FontHandle := do
   let ptr ← FFI.fontOpen pattern
@@ -400,6 +402,54 @@ def shapeTextCached (ac : GlyphAtlasCache) (f : FontHandle) (size64 : UInt32) (t
     let bounded := if next.size > 64 then next.extract (next.size - 64) next.size else next
     return ({ ac with shapeCache := bounded }, shaped)
 
+/-- Resolve missing HarfBuzz clusters against installed fonts without changing the
+shaping of adjacent glyphs. Cluster offsets remain relative to the original string. -/
+def shapeWithFallback (ac : GlyphAtlasCache) (primary : FontHandle) (size64 : UInt32)
+    (text : String) (features : String := "") :
+    IO (GlyphAtlasCache × Array (FontHandle × ShapedGlyph)) := do
+  let (initial, shaped) ← shapeTextCached ac primary size64 text features
+  if !shaped.any (·.glyphId == 0) then return (initial, shaped.map (primary, ·))
+  let bytes := text.toUTF8
+  let mut state := initial
+  let mut out := #[]
+  let mut i := 0
+  while i < shaped.size do
+    let start := shaped[i]!.cluster
+    let mut j := i + 1
+    while j < shaped.size && shaped[j]!.cluster == start do j := j + 1
+    let group := shaped.extract i j
+    let mut face := primary
+    let mut glyphs := group
+    if group.any (·.glyphId == 0) then
+      -- HarfBuzz clusters are monotone in either direction.
+      let stop := if j < shaped.size && shaped[j]!.cluster > start then shaped[j]!.cluster.toNat
+        else if i > 0 && shaped[i-1]!.cluster > start then shaped[i-1]!.cluster.toNat else bytes.size
+      if let some piece := String.fromUTF8? (bytes.extract start.toNat stop) then
+        let charset := String.intercalate " " (piece.toList.map fun c => String.ofList (Nat.toDigits 16 c.toNat))
+        let pattern := "sans-serif:charset=" ++ charset
+        let choices := state.fallbackFonts
+        for candidate in choices do
+          let (next, trial) ← shapeTextCached state candidate size64 piece features
+          state := next
+          if !trial.isEmpty && trial.all (·.glyphId != 0) then
+            face := candidate
+            glyphs := trial.map fun g => { g with cluster := start }
+            break
+        if face.facePtr == primary.facePtr && choices.size < 16 && !state.missingCharsets.contains pattern then
+          if let .ok candidate ← (openFont (16 + choices.size) pattern).toBaseIO then
+            let trial ← shapeText candidate size64 piece features
+            if !trial.isEmpty && trial.all (·.glyphId != 0) then
+              state := { state with fallbackFonts := choices.push candidate }
+              face := candidate
+              glyphs := trial.map fun g => { g with cluster := start }
+            else
+              closeFont candidate
+              let missing := state.missingCharsets.push pattern
+              state := { state with missingCharsets := missing.extract (missing.size - 64) missing.size }
+    out := out ++ glyphs.map (face, ·)
+    i := j
+  return (state, out)
+
 /-- Rasterize a single glyph at `(size64, subpx)` or return it from `GlyphAtlasCache` on hit. -/
 def getOrRasterizeGlyph (ac : GlyphAtlasCache) (f : FontHandle) (glyphId : UInt32)
     (size64 : UInt32) (subpx : UInt32) : IO (GlyphAtlasCache × AtlasGlyphEntry) := do
@@ -418,18 +468,18 @@ def layoutTextRun (ac : GlyphAtlasCache) (f : FontHandle) (sizeSub : Nat) (scale
     (xSub ySub : Int) (color : Color) (text : String) (features : String := "") :
     IO (GlyphAtlasCache × Int × Array Prim) := do
   let devSize64 : UInt32 := ((sizeSub * scale120 + scaleDen / 2) / scaleDen).toUInt32
-  let shaped ← shapeText f devSize64 text features
-  let mut curAc := ac
+  let (initial, shaped) ← shapeWithFallback ac f devSize64 text features
+  let mut curAc := initial
   let mut penDev64 : Int := (xSub * (scale120 : Int)) / (scaleDen : Int)
   let baseDevPx : Int := roundDev scale120 ySub
   let mut prims : Array Prim := #[]
-  for sg in shaped do
+  for (face, sg) in shaped do
     let gx64 := penDev64 + sg.xOffset64
     let gy64 := sg.yOffset64
     let wholeX : Int := gx64 / 64
     let remX : Int := gx64 % 64
     let subpxBin : UInt32 := ((if remX < 0 then remX + 64 else remX).toNat / 16).toUInt32
-    let (ac', entry) ← getOrRasterizeGlyph curAc f sg.glyphId devSize64 subpxBin
+    let (ac', entry) ← getOrRasterizeGlyph curAc face sg.glyphId devSize64 subpxBin
     curAc := ac'
     if entry.uv.w > 0 && entry.uv.h > 0 then
       let dst : Rect :=

@@ -31,3 +31,5 @@ and no `hyprctl`/Hyprland process. Therefore the required side-by-side Hyprland
 screenshots could not be captured here. The PR records the exact compositor rule,
 window protocol format, class, and focused source evidence; visual parity still
 requires running the packaged clients in a Hyprland session.
+
+When a saved Core session expires, the live window clears the previous account's roster. It retries in the background with bounded backoff. Saving a valid session restores the project list and reloads its model catalog in the same window.

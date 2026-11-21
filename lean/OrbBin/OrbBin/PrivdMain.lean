@@ -4,6 +4,7 @@
   enforces `Orb.Kernel.privdCommandStep`, verifies biometric JIT leases against Core
   `POST /api/privilege-access/verify-and-log`, and logs pre/post execution SHA-256 digests.
 -/
+import OrbBin.WorkspaceFilePolicy
 import LeanSys.Posix
 import LeanSys.Auth
 import OrbBin.Spec
@@ -370,14 +371,6 @@ def handleUpdateHarness (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : Pee
     replyError cfd s!"Harness update failed: {e}" 1
 
 /-! ### Multi-User Confined Execution Broker (`ensure_mission_user`, `spawn_user_job`, `control_user_job`, `user_fs_op`) -/
-
-private def isDeniedUserFsSegment (raw : String) : Bool :=
-  let n := raw.toLower
-  n == ".env" || n.startsWith ".env." ||
-  n == ".ssh" || n == ".aws" || n == ".gnupg" || n == ".git" ||
-  n == "credentials.json" || n == ".credentials.json" || n == "auth.json" ||
-  n == "id_rsa" || n == "id_ed25519" || n == ".git-credentials" ||
-  n.endsWith ".pem" || n.endsWith ".key"
 
 private def resolveAllowedNodePeer (peer : PeerCred) : IO Bool := do
   let allowNonRoot := (← getEnvNonEmpty "ORB_PRIVD_ALLOW_NONROOT_TEST") == some "1"
@@ -920,7 +913,7 @@ def handleUserFsOp (cfd : LeanSys.Posix.Fd) (_cfg : PrivdConfig) (peer : PeerCre
     "  os.setuid(int(req['uid']))\n" ++
     "os.umask(0o077)\n" ++
     "root = req['mission_cwd']\n" ++
-    "DENIED = {'.env', '.ssh', '.aws', '.gnupg', '.git', 'credentials.json', '.credentials.json', 'auth.json', 'id_rsa', 'id_ed25519', '.git-credentials'}\n" ++
+    "DENIED = set(req['private_names'])\n" ++
     "def bad_seg(s):\n" ++
     "  low = s.lower()\n" ++
     "  return low in DENIED or low.startswith('.env.') or low.endswith('.pem') or low.endswith('.key')\n" ++
@@ -1037,6 +1030,7 @@ def handleUserFsOp (cfd : LeanSys.Posix.Fd) (_cfg : PrivdConfig) (peer : PeerCre
     "except Exception as exc:\n" ++
     "  print(json.dumps({'ok': False, 'stderr': str(exc)}))\n"
   let fsInput := renderCompact <| JVal.obj #[
+    ("private_names", .arr (OrbBin.WorkspaceFilePolicy.privateNames.map .str)),
     ("nonroot", .bool isNonRootTest),
     ("uid", .nat uid.toNat),
     ("gid", .nat gid.toNat),

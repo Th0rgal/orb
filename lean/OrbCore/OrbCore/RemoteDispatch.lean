@@ -820,12 +820,18 @@ private def prepareRemoteHarnessCommand
     let options := OrbBin.ClaudeControl.antigravityCliOptions spec.modelOverride (some spec.modelEffort) resumeSid?
     let argv := String.intercalate " " (options.toList.map shellSingleQuote)
     -- A sentinel preserves trailing newlines across shell command substitution.
-    let inner := "agy " ++ argv ++ " --print=\"${agy_prompt%.}\""
+    let goalSettings := include_str "antigravity_goal_settings.json"
+    let goalFlags := if spec.goalDispatch?.isSome then " --settings " ++ shellSingleQuote goalSettings else ""
+    let inner := "agy " ++ argv ++ goalFlags ++ " --print=\"${agy_prompt%.}\""
+    -- Permission to call the Orb tools applies only with the mission-scoped server installed.
+    let launch := if spec.goalDispatch?.isSome then
+        "/usr/local/bin/sandboxed-mcp launch --harness antigravity -- " ++ inner
+      else wrapWithRemoteMcp "antigravity" inner
     let cmd :=
       wsPrefix ++ skillPrelude ++ fd3Prelude ++
       "command -v agy >/dev/null 2>&1 || { echo 'agy is not installed on this node' >&2; exit 127; }; " ++
       "agy_prompt=\"$(cat <&3 && printf .)\" || exit 1; " ++
-      wrapWithRemoteMcp "antigravity" inner
+      launch
     let envs := skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[("NO_COLOR", "1")]
     return .ok { command := cmd, envPairs := envs, managedAuth := #["antigravity"], proxyToken := "" }
 
@@ -856,7 +862,7 @@ private def emitMissionEventAndBroadcast
 
 private def resumableGoalSession (backend sid : String) : Bool :=
   match backend with
-  | "codex" => parseUuidCanonical? sid == some sid
+  | "codex" | "antigravity" => parseUuidCanonical? sid == some sid
   | "opencode" => sid.startsWith "ses_"
   | _ => false
 
@@ -1253,11 +1259,18 @@ private def ingestRemoteHarnessLine
       emitMissionEventAndBroadcast store broadcastHub? missionId evTy (renderCompact pl) nowIso
     if !parsed.textDelta.isEmpty then
       let (piece, lastMsg?) := OrbBin.ClaudeControl.joinHarnessText harness next.text next.lastMessageId? parsed
+      if piece.isEmpty then return next
       let full := next.text ++ piece
       next := { next with text := full, lastMessageId? := lastMsg? }
       emitMissionEventAndBroadcast store broadcastHub? missionId "text_delta"
         (renderCompact (.obj #[("content", .str full)])) nowIso
     return next
+
+/-- Only protocol events are assistant output for native agy. Its raw log can contain an
+    interactive login URL or a partial JSON line when bounded by the node's tail limit. -/
+private def missionLogTail (backend raw : String) : String :=
+  if backend == "antigravity" then (OrbBin.ClaudeControl.antigravitySignInError? raw).getD ""
+  else raw.trimAscii.toString
 
 private def splitCompleteLines (buf : String) : Array String × String := Id.run do
   let parts := buf.splitOn "\n"
@@ -1549,7 +1562,7 @@ partial def spawnRemoteJobPoller
               discard <| callRemoteNodeHttpOpt relayHub? mc? effNodeId "POST" s!"/jobs/{jobId}/cancel" (some (.obj #[])) hdrs 8000
               if !proxyTok.isEmpty then revokeSingleMissionProxyToken store proxyTok
               let reason := "harness_no_output"
-              let logTail := ((jv.fieldStr? "log_tail").getD "").trimAscii.toString
+              let logTail := missionLogTail backend ((jv.fieldStr? "log_tail").getD "")
               let detail := acc.lastError?.getD (if logTail.isEmpty then "" else (logTail.takeEnd 600).toString)
               discard <| execParamQuery store.missionsDb
                 "UPDATE remote_node_jobs SET state='cancelled', updated_at=?2 WHERE job_id=?1;"
@@ -1599,13 +1612,14 @@ partial def spawnRemoteJobPoller
               keepRunning := false
               if !proxyTok.isEmpty then
                 revokeSingleMissionProxyToken store proxyTok
-              let nodeErr? := (jv.fieldStr? "error").filter (!·.trimAscii.toString.isEmpty)
-              let logTail := (jv.fieldStr? "log_tail").getD ""
+              let nodeErr? := ((jv.fieldStr? "error").filter (!·.trimAscii.toString.isEmpty)).map fun msg =>
+                if backend == "antigravity" then (OrbBin.ClaudeControl.antigravitySignInError? msg).getD msg else msg
+              let logTail := missionLogTail backend ((jv.fieldStr? "log_tail").getD "")
               let exitCode := (jv.fieldInt? "exit_code").getD (if jState == "succeeded" then 0 else 1)
               let finalText :=
                 if !acc.text.trimAscii.toString.isEmpty then acc.text
                 else if jState == "succeeded" && !logTail.trimAscii.toString.isEmpty &&
-                        backend != "opencode" && backend != "claudecode" && backend != "claude" && backend != "codex" then
+                        backend != "opencode" && backend != "claudecode" && backend != "claude" && backend != "codex" && backend != "antigravity" then
                   logTail.trimAscii.toString
                 else ""
               if jState == "succeeded" && !finalText.isEmpty then

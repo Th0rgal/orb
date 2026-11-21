@@ -5,6 +5,7 @@ struct OrbProviderLogin: Identifiable {
     let name: String
     let type: String
     let proxy: Bool
+    let isNew: Bool
 }
 
 struct OrbResetPrompt: Identifiable {
@@ -421,7 +422,7 @@ struct OrbProvidersSettings: View {
         return type == "anthropic" || type == "openai"
     }
     static func subscriptionLogin(_ type: String) -> OrbProviderLogin {
-        OrbProviderLogin(id: type, name: type.capitalized, type: type, proxy: type != "google")
+        OrbProviderLogin(id: type, name: type.capitalized, type: type, proxy: type != "google", isNew: true)
     }
     static func loginSpec(_ provider: OrbJSON, isAdmin: Bool = OrbCore.shared.isAdminUser) -> OrbProviderLogin? {
         guard canManageProvider(provider, isAdmin: isAdmin), provider["uses_oauth"].flag else { return nil }
@@ -429,7 +430,7 @@ struct OrbProvidersSettings: View {
         let proxy = type != "google" && (owner == "cli_proxy" || (owner.isEmpty && subscriptionTypes.contains(type)))
         guard isAdmin || proxy else { return nil }
         guard type == "kimi" || proxy || (owner.isEmpty && type == "google") || (owner == "sandboxed_sh" && ["anthropic", "openai", "google"].contains(type)) else { return nil }
-        return OrbProviderLogin(id: provider["id"].text, name: provider["name"].text, type: type, proxy: proxy)
+        return OrbProviderLogin(id: provider["id"].text, name: provider["name"].text, type: type, proxy: proxy, isNew: false)
     }
     static func splitDisplayName(_ p: OrbJSON) -> (title: String, account: String) {
         let raw = p["name"].text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1050,7 +1051,7 @@ struct OrbProviderLoginView: View {
     }
     private func startAndPoll() async {
         do {
-            let value = try await client.call(spec.proxy ? "/api/ai/providers/cli-proxy-login" : "/api/ai/providers/\(OrbCore.escape(spec.id))/oauth/authorize", method: "POST", body: spec.proxy ? .object(UUID(uuidString: spec.id) == nil ? ["provider": .string(spec.type)] : ["provider": .string(spec.type), "provider_id": .string(spec.id)]) : .object(["method_index": .number(0)]))
+            let value = try await client.call(spec.proxy ? "/api/ai/providers/cli-proxy-login" : "/api/ai/providers/\(OrbCore.escape(spec.id))/oauth/authorize", method: "POST", body: spec.proxy ? .object(spec.isNew ? ["provider": .string(spec.type)] : ["provider": .string(spec.type), "provider_id": .string(spec.id)]) : .object(["method_index": .number(0)]))
             session = spec.proxy ? value["session_id"].text : spec.id
             let link = value[spec.proxy ? "auth_url" : "url"].text
             guard let parsed = URL(string: link), ["https", "http"].contains(parsed.scheme ?? ""), parsed.host != nil, !session.isEmpty else { throw URLError(.badServerResponse) }

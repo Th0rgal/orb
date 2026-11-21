@@ -42,6 +42,10 @@ def recoveryAndOrphanReaping (root : String) : IO Unit := do
     missionSql store.missionsDb "m-done" "completed" "managed" 1
     addRun store.missionsDb "r-live" "m-live" "1" "running"
     addRun store.missionsDb "r-done" "m-done" "1" "running"
+    let archive ← setMissionStatusFromClient store "m-lost" "acknowledged" "2026-01-01T00:00:01Z"
+    match archive with
+    | .error e => check (e == "mission_running") "archive refuses an activated mission before its run is recorded"
+    | .ok _ => throw (IO.userError "archive overwrote a live mission before run insertion")
     let lost ← interruptTurnsLostToRestart store.missionsDb
     check (lost == 1) "restart marks exactly one ownerless active mission"
     let receipts ← count store.missionsDb

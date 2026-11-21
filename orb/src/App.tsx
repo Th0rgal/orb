@@ -1113,7 +1113,6 @@ export default function App() {
         // targeting, optimistic status, in-flight guard and rollback. The Archived list moves now too.
         const restore = action === "restore";
         if (restore !== (mission.status === "acknowledged")) return false; // bulk: skip rows already in that state
-        setNativeArchived(rows => restore ? rows.filter(m => m.id !== id) : [{ ...mission, status: "acknowledged" }, ...rows.filter(m => m.id !== id)]);
         setArchiveRequests(q => [...q, { mission, restore }]);
         return true;
       }
@@ -1692,6 +1691,13 @@ export default function App() {
       deleteRequest={deleteMissionRequest()}
       archiveRequests={archiveRequests()}
       onArchiveRequestsHandled={n => setArchiveRequests(q => q.slice(n))}
+      onArchiveStatus={headless ? changed => {
+        const ids = new Set(changed.map(m => m.id));
+        setNativeArchived(rows => [...changed.filter(m => m.status === "acknowledged"), ...rows.filter(m => !ids.has(m.id))]);
+      } : undefined}
+      onArchiveError={(id, restore, message) => notify({
+        kind: "error", key: `native-archive:${id}`, title: restore ? "Couldn’t restore mission" : "Couldn’t archive mission", message,
+      })}
       onArchiveSettled={() => { void refreshMissions(); loadNativeArchived(); }}
       onDeleteRequestHandled={() => setDeleteMissionRequest(null)}
       activityMissions={missions()}

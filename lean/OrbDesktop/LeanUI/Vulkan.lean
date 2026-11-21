@@ -264,18 +264,18 @@ private def drawRoundedBox (vw vh : Nat) (fb : ByteArray) (curClip r : Rect)
   let margin : Int := max (max tl tr) (max brR blR)
   let spanL := min x1 (max x0 (max (r.x + margin) (if hasBorder then innerRect.x + margin else x0)))
   let spanR := max spanL (min x1 (min (r.right - margin) (if hasBorder then innerRect.right - margin else x1)))
-  let bulk := fa == 255 && spanR - spanL ≥ 16
-  let mut strip := ByteArray.empty
+  let top := if hasBorder then max y0 innerRect.y else y0
+  let bottom := if hasBorder then min y1 innerRect.bottom else y1
+  let bulk := spanR - spanL ≥ 16 && top < bottom
   if bulk then
-    strip := ByteArray.emptyWithCapacity ((spanR-spanL).toNat * 4)
-    for _ in [:(spanR-spanL).toNat] do strip := strip.push fr |>.push fg |>.push fbC |>.push fa
+    out := FFI.blendRect out (top.toNat * vw + spanL.toNat).toUSize vw.toUSize
+      (spanR-spanL).toNat.toUSize (bottom-top).toNat.toUSize fill
   for py in [y0.toNat : y1.toNat] do
     let y : Int := py
     let straightRow := y ≥ r.y + margin && y < r.bottom - margin
     let innerRow := y ≥ innerRect.y && y < innerRect.bottom
     let straightInnerRow := y ≥ innerRect.y + margin && y < innerRect.bottom - margin
     let useStrip := bulk && (!hasBorder || innerRow)
-    if useStrip then out := strip.copySlice 0 out ((py * vw + spanL.toNat) * 4) strip.size
     let skip := if useStrip then (spanR-spanL).toNat else 0
     for edgeX in [x0.toNat : x1.toNat - skip] do
       let px := if useStrip && edgeX ≥ spanL.toNat then edgeX + skip else edgeX

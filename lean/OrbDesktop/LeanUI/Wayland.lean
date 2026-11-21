@@ -272,6 +272,8 @@ structure ProtocolInterfaces where
   wpFractionalScaleManager : USize := 0
   wpFractionalScale : USize := 0
   wpViewporter : USize := 0
+  wpCursorShapeManager : USize := 0
+  wpCursorShapeDevice : USize := 0
   wpViewport : USize := 0
   zwpTextInputManager : USize := 0
   zwpTextInput : USize := 0
@@ -294,6 +296,22 @@ def initProtocolInterfaces (loadCore : Bool := true) : IO ProtocolInterfaces := 
   let wlCallback ← core "wl_callback_interface"
   let wlShmPool ← core "wl_shm_pool_interface"
   let wlBuffer ← core "wl_buffer_interface"
+  let wpCursorShapeDevice ← makeInterface {
+    name := "wp_cursor_shape_device_v1"
+    version := 1
+    methods := #[{ name := "destroy", signature := "" }, { name := "set_shape", signature := "uu" }]
+    events := #[]
+  }
+  let wpCursorShapeManager ← makeInterface {
+    name := "wp_cursor_shape_manager_v1"
+    version := 1
+    methods := #[
+      { name := "destroy", signature := "" },
+      { name := "get_pointer", signature := "no", types := #[wpCursorShapeDevice, wlPointer] },
+      { name := "get_tablet_tool_v2", signature := "no", types := #[wpCursorShapeDevice, 0] }
+    ]
+    events := #[]
+  }
   let xdgToplevel ← makeInterface {
     name := "xdg_toplevel"
     version := 4
@@ -408,7 +426,7 @@ def initProtocolInterfaces (loadCore : Bool := true) : IO ProtocolInterfaces := 
   }
   return {
     wlRegistry, wlCompositor, wlSurface, wlShm, wlSeat, wlPointer, wlKeyboard, wlCallback,
-    wlShmPool, wlBuffer,
+    wlShmPool, wlBuffer, wpCursorShapeManager, wpCursorShapeDevice,
     xdgWmBase, xdgSurface, xdgToplevel, wpFractionalScaleManager, wpFractionalScale,
     wpViewporter, wpViewport, zwpTextInputManager, zwpTextInput
   }
@@ -467,10 +485,13 @@ structure WindowHandles where
   surface : USize := 0
   viewport : USize := 0
   shmGlobal : USize := 0
+  cursorManager : USize := 0
+  cursorDevice : USize := 0
   seatVersion : UInt32 := 1
   pointer : USize := 0
   keyboard : USize := 0
   textInput : USize := 0
+  fnFlush : USize := 0
   fnDispatch : USize := 0
   fnMmap : USize := 0
   fnMunmap : USize := 0
@@ -488,6 +509,9 @@ structure WaylandClient where
   /-- Set by the first `xdg_surface.configure`; no buffer may be attached before it. -/
   configured : Bool := false
   xkbState : USize := 0
+  pressedKeysyms : List (UInt32 × UInt32) := []
+  enterSerial : Option UInt32 := none
+  appliedCursor : Option UInt32 := none
   pointerXSub : Int := 0
   pointerYSub : Int := 0
   pendingW : Nat := 1470
@@ -545,6 +569,7 @@ def openWindow (title appId : String) (initW initH initScale120 : Nat) : IO Wayl
   let disp ← FFI.wlConnect
   let wl := "libwayland-client.so.0"
   let fnRoundtrip ← requireSym wl "wl_display_roundtrip"
+  let fnFlush ← requireSym wl "wl_display_flush"
   let fnDispatch ← requireSym wl "wl_display_dispatch"
   let fnDisconnect ← requireSym wl "wl_display_disconnect"
   let fnMmap ← requireSym "" "mmap"
@@ -573,6 +598,7 @@ def openWindow (title appId : String) (initW initH initScale120 : Nat) : IO Wayl
   let (wmBase, xdgVersion) ← bind "xdg_wm_base" ifaces.xdgWmBase 4 1 tagXdgWmBase true
   let (viewporter, _) ← bind "wp_viewporter" ifaces.wpViewporter 1 1 0 true
   let (scaleMgr, _) ← bind "wp_fractional_scale_manager_v1" ifaces.wpFractionalScaleManager 1 1 0 false
+  let (cursorManager, _) ← bind "wp_cursor_shape_manager_v1" ifaces.wpCursorShapeManager 1 1 0 false
   let (seat, seatVersion) ← bind "wl_seat" ifaces.wlSeat 5 1 tagSeat false
   let (manager, _) ← bind "zwp_text_input_manager_v3" ifaces.zwpTextInputManager 1 1 0 false
   let textInput ← if seat != 0 && manager != 0 then
@@ -589,8 +615,16 @@ def openWindow (title appId : String) (initW initH initScale120 : Nat) : IO Wayl
   let _ ← marshalRequest surface 6 0 4 0 0 #[]
   return {
     headless := false, display := disp, ifaces
-    window := { surface, viewport, shmGlobal, seatVersion, textInput, fnDispatch, fnMmap, fnMunmap, fnClose, fnDisconnect }
+    window := { surface, viewport, shmGlobal, cursorManager, seatVersion, textInput, fnFlush, fnDispatch, fnMmap, fnMunmap, fnClose, fnDisconnect }
     pendingW := initW, pendingH := initH, scale120 := initScale120 }
+
+/-- Cursor shape requests are valid only for the most recent enter on this surface. -/
+def syncCursor (c : WaylandClient) (shape : UInt32) : IO WaylandClient := do
+  let some serial := c.enterSerial | return c
+  if c.window.cursorDevice == 0 || c.appliedCursor == some shape then return c
+  discard <| marshalRequest c.window.cursorDevice 1 0 1 0 0 #[.uint serial, .uint shape]
+  let _ ← nativeCall c.window.fnFlush c.display.toUInt64
+  return { c with appliedCursor := some shape }
 
 def syncTextFocus (c : WaylandClient) (focused : Bool) : IO WaylandClient := do
   let enabled := c.imeEntered && focused
@@ -606,19 +640,6 @@ def waitEvents (c : WaylandClient) : IO Unit := do
 
 /-- `wl_shm` format code for premultiplied ARGB8888 (little-endian bytes B, G, R, A). -/
 def wlShmFormatArgb8888 : UInt32 := 0
-
-/-- Convert a straight-alpha RGBA8 framebuffer to premultiplied
-`WL_SHM_FORMAT_ARGB8888` (little-endian bytes B, G, R, A). -/
-def rgbaToArgb (rgba : ByteArray) : ByteArray := Id.run do
-  let mut out := rgba
-  for i in [0:rgba.size / 4] do
-    let o := i * 4
-    let a := (rgba.get! (o + 3)).toNat
-    let pm (c : UInt8) : UInt8 := ((c.toNat * a + 127) / 255).toUInt8
-    out := (out.set! o (pm (rgba.get! (o + 2))))
-      |>.set! (o + 1) (pm (rgba.get! (o + 1)))
-      |>.set! (o + 2) (pm (rgba.get! o))
-  return out
 
 private def releaseShm (c : WaylandClient) : IO Unit := do
   let s := c.shm
@@ -654,7 +675,7 @@ def present (c : WaylandClient) (fb : ByteArray) : IO WaylandClient := do
     allocShm c bw bh
   let toB := !shm.frontIsB
   let (buf, offset) := if toB then (shm.bufB, bw * bh * 4) else (shm.bufA, 0)
-  FFI.memWrite (shm.ptr + offset.toUSize) (rgbaToArgb fb)
+  FFI.presentArgb (shm.ptr + offset.toUSize) fb
   let surface := c.window.surface
   let _ ← marshalRequest surface 1 0 4 0 0 #[.obj buf, .int 0, .int 0]
   let _ ← marshalRequest c.window.viewport 2 0 1 0 0 #[.int c.pendingW, .int c.pendingH]
@@ -685,7 +706,10 @@ def stepWireEvent (c : WaylandClient) (ev : WlWireEvent) : IO (WaylandClient × 
     if let some (WlWireArg.uint caps) := ev.arg? 0 then
       if caps &&& 1 != 0 && st.window.pointer == 0 then
         let p ← marshalRequest ev.proxy 0 st.ifaces.wlPointer st.window.seatVersion 0 tagPointer #[.newId]
-        st := { st with window := { st.window with pointer := p } }
+        let cursorDevice ← if st.window.cursorManager != 0 then
+          marshalRequest st.window.cursorManager 1 st.ifaces.wpCursorShapeDevice 1 0 0 #[.newId, .obj p]
+        else pure 0
+        st := { st with window := { st.window with pointer := p, cursorDevice } }
       if caps &&& 2 != 0 && st.window.keyboard == 0 then
         let k ← marshalRequest ev.proxy 1 st.ifaces.wlKeyboard st.window.seatVersion 0 tagKeyboard #[.newId]
         st := { st with window := { st.window with keyboard := k } }
@@ -704,12 +728,15 @@ def stepWireEvent (c : WaylandClient) (ev : WlWireEvent) : IO (WaylandClient × 
       out := out.push (.scale sc)
   else if ev.tag == tagPointer then
     if ev.opcode == 0 then
+      if let some (WlWireArg.uint serial) := ev.arg? 0 then
+        st := { st with enterSerial := some serial, appliedCursor := none }
       if let (some (WlWireArg.fixed sx), some (WlWireArg.fixed sy)) := (ev.arg? 2, ev.arg? 3) then
         let px := wlFixedToSub sx
         let py := wlFixedToSub sy
         st := { st with pointerXSub := px, pointerYSub := py }
         out := out.push (.pointerMove px py)
     else if ev.opcode == 1 then
+      st := { st with enterSerial := none, appliedCursor := none }
       out := out.push .pointerLeave
     else if ev.opcode == 2 then
       if let (some (WlWireArg.uint ms), some (WlWireArg.fixed sx), some (WlWireArg.fixed sy)) := (ev.arg? 0, ev.arg? 1, ev.arg? 2) then
@@ -738,6 +765,7 @@ def stepWireEvent (c : WaylandClient) (ev : WlWireEvent) : IO (WaylandClient × 
     else if ev.opcode == 1 then
       out := out.push (.windowFocus true)
     else if ev.opcode == 2 then
+      st := { st with pressedKeysyms := [] }
       out := out.push (.windowFocus false)
     else if ev.opcode == 3 then
       if let (some (WlWireArg.uint ms), some (WlWireArg.uint key), some (WlWireArg.uint kst)) := (ev.arg? 1, ev.arg? 2, ev.arg? 3) then
@@ -747,11 +775,15 @@ def stepWireEvent (c : WaylandClient) (ev : WlWireEvent) : IO (WaylandClient × 
         if st.xkbState != 0 && (keyState == .pressed || keyState == .repeated) then
           let raw ← try FFI.xkbKey st.xkbState key catch _ => pure ByteArray.empty
           let pkt := decodeXkbKeyPacket raw
+          if keyState == .pressed then
+            st := { st with pressedKeysyms := (key, pkt.keysym) :: st.pressedKeysyms.filter (·.1 != key) }
           out := out.push (.key pkt.keysym pkt.mods keyState)
           if !pkt.utf8.isEmpty && pkt.composeStatus != 1 && isPrintableKeyText pkt.mods pkt.utf8 then
             out := out.push (.text pkt.utf8)
         else
-          out := out.push (.key key 0 keyState)
+          let sym := ((st.pressedKeysyms.find? (·.1 == key)).map (·.2)).getD key
+          st := { st with pressedKeysyms := st.pressedKeysyms.filter (·.1 != key) }
+          out := out.push (.key sym 0 keyState)
     else if ev.opcode == 4 then
       if let (some (WlWireArg.uint dep), some (WlWireArg.uint lat), some (WlWireArg.uint lck), some (WlWireArg.uint grp)) :=
           (ev.arg? 1, ev.arg? 2, ev.arg? 3, ev.arg? 4) then

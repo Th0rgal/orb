@@ -68,13 +68,20 @@ it("uses node evidence for queued/running and preserves terminal failures",()=>{
  expect(missionPhase(m,true)).toMatchObject({label:"Interrupted",detail:"The run was stopped. Send a follow-up or click Resume to continue."});
 });
 
-import { remoteLaunchPreflight, remoteHarnessSupport, remoteHarnessNeedsProxy, remoteLaunchUnconfirmed, TYPED_LAUNCH_UNSUPPORTED } from "../src/missionLaunch";
+import { remoteGoalPreflight, remoteLaunchPreflight, remoteHarnessSupport, remoteHarnessNeedsProxy, remoteLaunchUnconfirmed, TYPED_LAUNCH_UNSUPPORTED } from "../src/missionLaunch";
 import type { RemoteNodesResponse, RemoteLaunchCapability } from "../src/api";
 const node={id:"dgx-spark",base_url:"",token_env:"",status:"online",labels:[],version:null,capacity_total:null,capacity_available:null,active_jobs:null,queued_jobs:null,last_seen:null,error:null,cordoned:false};
 const fleet=(remote_launch?:RemoteLaunchCapability|null,extra:Partial<RemoteNodesResponse>={}):RemoteNodesResponse=>({enabled:true,nodes:[node],...(remote_launch===undefined?{}:{remote_launch}),...extra});
 const typed:RemoteLaunchCapability={typed:true,harnesses:["claudecode","opencode"],raw_command:true,proxy_url_configured:true};
 const names=(id:string)=>({claudecode:"Claude Code",opencode:"OpenCode",grok:"Grok"} as Record<string,string>)[id]??id;
 describe("remote launch preflight follows the server-advertised capability",()=>{
+ it("uses the advertised Goal harnesses when submitting a typed command",()=>{
+  const remote = fleet({...typed,goal_harnesses:["antigravity","codex"]});
+  expect(remoteGoalPreflight(remote,node.id,"antigravity")).toBeNull();
+  expect(remoteGoalPreflight(remote,node.id,"codex")).toBeNull();
+  expect(remoteGoalPreflight(remote,node.id,"opencode")).toContain("remove /goal");
+  expect(remoteGoalPreflight(remote,node.id,"opencode")).not.toContain("Choose OpenCode");
+ });
  it("requires the model proxy for advertised remote Codex",()=>{
   const codex={...typed,harnesses:["codex"],proxy_url_configured:false};
   expect(remoteLaunchPreflight(fleet(codex),"dgx-spark",{backend:"codex",model:"gpt-6-astra"})).toContain("model proxy");

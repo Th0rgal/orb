@@ -1,0 +1,8 @@
+{
+  "project": {"slug": "menu-test", "title": "Menu test"},
+  "destination": {"slug": "destination", "title": "Destination"},
+  "openMission": "Indigo",
+  "contextMission": "Orchid",
+  "activeActions": ["rename", "move", "archive", "copy-id", "settings"],
+  "archivedActions": ["rename", "move", "restore", "copy-id", "settings"]
+}
