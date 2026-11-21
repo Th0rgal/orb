@@ -69,7 +69,7 @@ private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale
     fleetMachines := machines, catalogLoading := true }
 
 private inductive ReadKind where
-  | roster | recover | catalog (revision : Nat) | providers
+  | roster (previous : String) | catalog (revision : Nat) | providers
   | nativeModels (machine : String)
   | accountRoutes (account provider action value : String)
   | directories (machine path : String)
@@ -84,8 +84,7 @@ private structure LiveRead where
 
 private def startLiveRead (binding : String) (kind : ReadKind) (notify : IO Unit) : IO LiveRead := do
   let args := match kind with
-    | .roster => #["-I", "-c", transport ++ "\ntry: roster()\nexcept Exception: sys.exit(1)"]
-    | .recover => #["-I", "-c", transport ++ "\nrecover_roster()"]
+    | .roster previous => #["-I", "-c", transport ++ "\nrecover_roster(sys.argv[1])", previous]
     | .nativeModels machine => #["-I", "-c", transport ++ "\nnative_models(*sys.argv[1:])", binding, machine]
     | .accountRoutes account provider action value => #["-I", "-c", transport ++ "\naccount_routes(*sys.argv[1:])", binding, account, provider, action, value]
     | .directories machine path => #["-I", "-c", transport ++ "\nlist_directories(*sys.argv[1:])", binding, machine, path]
@@ -115,7 +114,7 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
       if !st.liveData then return none
       let current ← slot.get
       let kind : Option ReadKind := if !st.hasLiveConnection then
-          some (if st.initialRosterPending then .roster else .recover)
+          some (.roster (if st.initialRosterPending then "" else st.connectionIssue.code))
         else if st.missionMenu.any (·.page == .picker .machine) && st.launchMachines.isNone && !st.launchMachinesFailed then
           some (.launchMachines (st.fleetMachines.any (·.machineId == "core")) st.draftSettings.backend)
         else if st.missionMenu.any (fun m => m.page == .draftDirectory && m.directoryRows.isNone && !m.listingFailed) &&
@@ -148,7 +147,14 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
       close
       if source.binding.isEmpty then
         if let some ready := liveStateFromProjection lines isDark st.scale120 then return some ready
-        return if st.initialRosterPending then some { st with initialRosterPending := false } else none
+        let issue : ConnectionIssue := match lines.head? with
+          | some "F\tmissing" => .missing
+          | some "F\tsignin" => .signin
+          | some "F\tdenied" => .denied
+          | some "F\tinvalid" => .invalid
+          | _ => .unavailable
+        return if st.initialRosterPending || issue != st.connectionIssue then
+          some { st with initialRosterPending := false, connectionIssue := issue } else none
       if let .nativeModels machine := source.kind then
         let ok := lines.head? == some "native-models"
         let menu := st.missionMenu.map fun m => { m with nativeCatalogResult := some ok }

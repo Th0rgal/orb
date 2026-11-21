@@ -44,9 +44,16 @@ def credentials():
     return base, token
 
 
+class InvalidConnection(ValueError):
+    pass
+
+
 class Connection:
     def __init__(self):
-        self.creds = credentials()
+        try:
+            self.creds = credentials()
+        except (ValueError, KeyError, StopIteration, TypeError, AttributeError) as error:
+            raise InvalidConnection() from error
         self.binding = hashlib.sha256(json.dumps(self.creds).encode()).hexdigest()
         self.opener = urllib.request.build_opener(NoRedirect())
 
@@ -564,14 +571,25 @@ def roster():
         print('\t'.join(map(label, row)))
 
 
-def recover_roster():
+def recover_roster(previous):
     """Wait for a valid saved session and a complete roster after disconnection."""
     delay = 1
     while True:
         try:
             roster()
             return
-        except (OSError, ValueError, KeyError, StopIteration, TypeError):
+        except (OSError, ValueError, KeyError, StopIteration, TypeError) as error:
+            reason = 'unavailable'
+            if isinstance(error, FileNotFoundError):
+                reason = 'missing'
+            elif isinstance(error, InvalidConnection):
+                reason = 'invalid'
+            elif isinstance(error, urllib.error.HTTPError):
+                reason = {401: 'signin', 403: 'denied'}.get(error.code, reason)
+                error.close()
+            if reason != previous:
+                print('F\t' + reason)
+                return
             time.sleep(delay)
             delay = min(30, 2 * delay)
 

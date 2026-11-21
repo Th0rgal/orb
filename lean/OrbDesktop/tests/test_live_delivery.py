@@ -229,6 +229,24 @@ class Delivery(unittest.TestCase):
     def test_stop_appears_when_the_roster_and_bubble_both_report_active(self):
         self.run_wire('start-running')
 
+    def test_recovery_reports_changed_reason_without_server_details(self):
+        denied = live.urllib.error.HTTPError('http://localhost', 401, 'private response', {}, None)
+        with patch.object(live, 'roster', side_effect=[FileNotFoundError(), denied]), patch.object(
+                live.time, 'sleep') as sleep, contextlib.redirect_stdout(io.StringIO()) as out:
+            live.recover_roster('missing')
+        sleep.assert_called_once_with(1)
+        self.assertEqual(out.getvalue(), 'F\tsignin\n')
+
+    def test_invalid_saved_session_is_reported_without_echoing_contents(self):
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, ORB_STATE_DIR=home):
+            Path(home, 'connection.json').write_text('["private"]')
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                live.recover_roster('')
+            self.assertEqual(out.getvalue(), 'F\tinvalid\n')
+
+    def test_denied_account_has_its_own_window_state(self):
+        self.run_wire('denied')
+
     def test_saved_session_recovers_inside_the_window(self):
         self.run_wire('reconnect')
 
@@ -243,6 +261,9 @@ class Delivery(unittest.TestCase):
                 path = self.path
                 paths.append(path)
                 tokens.append(self.headers.get('Authorization'))
+                if mode == 'denied':
+                    self.send_error(403)
+                    return
                 if mode == 'reconnect' and tokens[-1] == 'Bearer fixture':
                     self.send_error(401)
                     return
@@ -323,7 +344,7 @@ class Delivery(unittest.TestCase):
                     self.assertNotIn(b + events, paths)
                 elif mode in ('page-two', 'null-retry', 'start-running'):
                     self.assertIn(b + events, paths)
-                elif mode in ('idle-identity', 'before-open', 'unavailable', 'idle-session'):
+                elif mode in ('idle-identity', 'before-open', 'unavailable', 'denied', 'idle-session'):
                     self.assertFalse(any(p.startswith(a) or p.startswith(b) for p in paths))
                 else:
                     # Scheduling can allow an extra valid sample on slow CI.

@@ -224,6 +224,12 @@ def main (args : List String) : IO Unit := do
     for _ in [:1000] do
       if let some next ← readSources pending then
         if next.initialRosterPending then throw (IO.userError "initial read failed to settle")
+        if args == ["reconnect"] && next.headerTitle != "Sign in to Core" then
+          throw (IO.userError "rejected session reported as an outage")
+        if args == ["denied"] && next.headerTitle != "Access denied" then
+          throw (IO.userError "account denial reported as an outage")
+        if args == ["unavailable"] && next.headerTitle != "Core unavailable" then
+          throw (IO.userError "invalid Core response reported as an authentication failure")
         return if next.hasLiveConnection then some next else none
       IO.sleep 20
     throw (IO.userError "initial roster did not finish")
@@ -242,7 +248,7 @@ def main (args : List String) : IO Unit := do
         IO.sleep 20
       throw (IO.userError "window failed to recover the new session and reload its catalog")
     return
-  if args == ["unavailable"] then
+  if args == ["unavailable"] || args == ["denied"] then
     unless boot.isNone do throw (IO.userError "failed bootstrap appeared successful")
     return
   let some st := boot | throw (IO.userError "bootstrap failed")
