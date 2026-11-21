@@ -360,7 +360,8 @@ class Delivery(unittest.TestCase):
 
     def test_new_agent_sends_the_first_prompt_in_the_create_request(self):
         prompt = 'First line\tcontains a tab.\nSecond line.'
-        payload = '\t'.join(['core', 'codex', 'model', '', 'supervised', 'now', prompt])
+        directory = '/home/ben/work/Project With Spaces'
+        payload = directory + '\0' + '\t'.join(['core', 'codex', 'model', '', 'supervised', 'now', prompt])
         with patch.object(live, 'Connection') as factory, patch.object(live.sys, 'stdin') as stdin:
             stdin.buffer = io.BytesIO(payload.encode())
             connection = factory.return_value
@@ -373,6 +374,7 @@ class Delivery(unittest.TestCase):
             self.assertEqual(request.args, ('/api/control/missions',))
             self.assertEqual(request.kwargs['body']['prompt'], prompt)
             self.assertEqual(request.kwargs['body']['project'], 'now')
+            self.assertEqual(request.kwargs['body']['working_directory'], directory)
             self.assertNotIn('remote_node_id', request.kwargs['body'])
 
     def test_child_precedes_parent_in_live_roster(self):

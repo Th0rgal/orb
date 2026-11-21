@@ -1118,8 +1118,11 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
            let destination := WidgetNode.focusable 720 <| WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center)
              [chromeIcon "server" pal.textMuted 14, chromeLabel (pxToSub 18) [overlaySynthRun (Theme.mutedText theme) machine],
               chromeIcon "chevron-down" pal.textMuted 10] (some 720)
+           let folderLabel := ((st.draftDirectory.splitOn "/").filter (!·.isEmpty)).getLast?.getD (if st.draftDirectory.isEmpty then "Folder" else "/")
+           let folderPicker := WidgetNode.focusable draftDirectoryPickerId <| WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center)
+             [chromeIcon "folder" pal.textMuted 14, chromeLabel (pxToSub 18) [overlaySynthRun (Theme.mutedText theme) folderLabel]] (some draftDirectoryPickerId)
            let header := WidgetNode.box (BoxStyle.row (pxToSub 16) |>.withAlign .center |>.withFixedSize width (pxToSub 24))
-             [projectPicker, destination]
+             ([projectPicker, destination] ++ if v.machine.startsWith "auto-managed" then [] else [folderPicker])
            WidgetNode.box (BoxStyle.col 0 |>.withJustify .center |>.withAlign .center |>.withFixedSize mainW bodyH)
              [buildComposerWidget theme mainW composerH { st.composer with placeholder := "Describe a task, / for commands, @ for context" } [] (some (liveComposerControls st (width - pxToSub 90) true)) (some header)]
            else if st.initialRosterPending then

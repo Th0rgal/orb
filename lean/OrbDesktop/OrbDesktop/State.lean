@@ -339,7 +339,7 @@ inductive LiveWrite where
   deriving Repr, Inhabited, BEq
 
 inductive MissionMenuPage where
-  | actions | destinations | draftProject | rename | settings | confirmDelete | picker (field : SettingField)
+  | actions | destinations | draftProject | draftDirectory | rename | settings | confirmDelete | picker (field : SettingField)
   deriving BEq, Repr, Inhabited
 
 structure MissionMenu where
@@ -373,6 +373,7 @@ structure DesktopState where
   missionMenu : Option MissionMenu := none
   draftSettings : LaunchSettings := {}
   draftProject : String := ""
+  draftDirectory : String := ""
   catalog : List CatalogModel := []
   catalogLoading : Bool := false
   catalogRevision : Nat := 0
@@ -755,7 +756,9 @@ private def chooseSetting (st : DesktopState) (mid : String) (field : SettingFie
     | .model => { prev with model := value }
     | .effort => { prev with effort := value }
     | .permission => { prev with permission := value }
-  if mid.isEmpty then { st with missionMenu := none, draftSettings := next }
+  if mid.isEmpty then
+    { st with missionMenu := none, draftSettings := next,
+              draftDirectory := if prev.machine == next.machine then st.draftDirectory else "" }
   else { st with missionMenu := none, writeRequest := some (.settings mid field next) }
 
 private def selectableRow (r : ChromeSidebarRow) := r.kind == "mission" || r.kind == "project"
@@ -763,6 +766,7 @@ private def selectableRow (r : ChromeSidebarRow) := r.kind == "mission" || r.kin
 def missionDisclosureId (widgetId : Nat) : Nat := 4000000 + widgetId
 
 def draftProjectPickerId : Nat := 738
+def draftDirectoryPickerId : Nat := 739
 
 def projectNewAgentId (widgetId : Nat) : Nat := 5000000 + widgetId
 
@@ -896,6 +900,11 @@ def contextSelection (st : DesktopState) (rowId : String) : DesktopState :=
   else { st with multiRows := [], selectionAnchor := none }
 
 def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuRow := Id.run do
+  if menu.page == .draftDirectory then
+    let path := menu.draft.text ++ menu.draft.imePreeditText
+    let valid := path.isEmpty || path.startsWith "/"
+    return [{ id := 1, label := if path.isEmpty then "Absolute folder path" else path, icon := "folder" },
+      { id := if valid then 716 else 729, label := if path.isEmpty then "Use default folder" else if valid then "Use this folder" else "Enter an absolute path", icon := "check" }]
   if menu.page == .draftProject then
     return (st.sidebarRows.filter (·.kind == "project")).mapIdx fun i p =>
       { id := 2000000 + i, label := p.title, value := (p.rowId.drop 8).toString,
@@ -946,7 +955,7 @@ def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuR
       (if menu.trigger == 714 || projects.isEmpty then [] else [{ id := 711, label := "Move to", icon := "folder", separatorBefore := true }])
   let some card := card? | return []
   match menu.page with
-  | .picker _ | .confirmDelete | .draftProject => return []
+  | .picker _ | .confirmDelete | .draftProject | .draftDirectory => return []
   | .actions =>
     return [{ id := 710, label := "Rename…", icon := "rename" }] ++
       (if projects.isEmpty then [] else [{ id := 711, label := "Move to", icon := "folder" }]) ++
@@ -1006,7 +1015,7 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
     if key == 0xff51 && menu.page == .destinations then return update { menu with page := .actions, first := 0, highlighted := 1 }
     if key == 0xff53 && menu.page == .actions && (items[menu.highlighted]?.map (·.id)) == some 711 then
       return update { menu with page := .destinations, first := 0, highlighted := 0 }
-    if key == 0xff08 && menu.page == .rename then return update { menu with draft := menu.draft.deleteAroundCursor 1 0 }
+    if key == 0xff08 && (menu.page == .rename || menu.page == .draftDirectory) then return update { menu with draft := menu.draft.deleteAroundCursor 1 0 }
     return (st, none)
   | .windowFocus false => return close
   | .activate 729 => return (st, none)
@@ -1021,6 +1030,8 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
   | .activate 715 => return update { menu with page := .actions, first := 0, highlighted := 0 }
   | .activate id =>
     let some row := (missionMenuRows st menu).find? (·.id == id) | return (st, none)
+    if menu.page == .draftDirectory && id == 716 && menu.draft.imePreeditText.isEmpty then
+      return ({ st with draftDirectory := menu.draft.text, missionMenu := none }, some viewport)
     if menu.page == .draftProject then
       return ({ st with draftProject := row.value, missionMenu := none }, some viewport)
     if menu.page == .settings then
@@ -1033,7 +1044,7 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
     if menu.page == .rename && (menu.draft.text.trimAscii.isEmpty || !menu.draft.imePreeditText.isEmpty) then return (st, none)
     return ({ st with missionMenu := none, writeRequest := some action }, some viewport)
   | _ =>
-    if menu.page != .rename then return (st, none)
+    if menu.page != .rename && menu.page != .draftDirectory then return (st, none)
     let draft := match ev with
       | .text text => menu.draft.insertText text
       | .imeBatch db da text preedit _ _ => menu.draft.applyImeBatch db da text preedit

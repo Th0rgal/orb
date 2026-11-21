@@ -288,8 +288,14 @@ def mutate(binding, action, mid):
     if action.startswith('bulk-'):
         return bulk_write(c, action.removeprefix('bulk-'), key)
     if action == 'create':
-        values = sys.stdin.buffer.read().decode().split('\t', 6)
+        payload = sys.stdin.buffer.read().decode()
+        directory, separator, settings = payload.partition('\0')
+        values = (settings if separator else payload).split('\t', 6)
         body = {'title': 'New mission'}
+        if separator and directory:
+            if not directory.startswith('/'):
+                raise ValueError('expected an absolute working directory')
+            body['working_directory'] = directory
         if len(values) == 7:
             prompt = values.pop()
             if not prompt.strip():
