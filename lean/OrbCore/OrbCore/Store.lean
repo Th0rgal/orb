@@ -2424,7 +2424,9 @@ def listMissionsJson
   let mut returnedMids : Array String := Array.mkEmpty (rs.size - 1)
   for i in [1:rs.size] do
     returnedMids := returnedMids.push (rs[i]![0]?.getD "")
-  let useScopedIn := returnedMids.size ≤ 200
+  -- An ancestor-expanded page can exceed 200. Keep metadata reads scoped up
+  -- to SQLite’s portable 999-parameter limit.
+  let useScopedIn := returnedMids.size ≤ 999
   let inPlaceholders :=
     if useScopedIn then
       String.intercalate "," ((List.range returnedMids.size).map (fun k => s!"?{k + 1}"))
