@@ -40,6 +40,91 @@ def fixture():
 
 
 class Delivery(unittest.TestCase):
+    def test_shared_mission_distinct_read_state(self):
+        states = {u: {'_versions': {}} for u in ('alice', 'bob')}
+        mission = dict(id='shared', title='Result', status='completed', updated_at='2026-01-01T00:00:00Z')
+
+        class Core(BaseHTTPRequestHandler):
+            def reply(self, body, code=200):
+                self.send_response(code)
+                self.end_headers()
+                self.wfile.write(json.dumps(body).encode())
+
+            def do_GET(self):
+                if self.path == live.INBOX_PATH:
+                    self.reply(states[self.headers['Authorization'].split()[1]])
+                elif self.path.startswith('/api/control/missions?limit='):
+                    self.reply([mission])
+                elif self.path == '/api/projects':
+                    self.reply({'projects': []})
+                else:
+                    self.reply([])
+
+            def do_PUT(self):
+                if self.path != live.INBOX_PATH + '/seen/shared':
+                    self.send_error(404)
+                    return
+                state = states[self.headers['Authorization'].split()[1]]
+                data = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                version = state['_versions'].get('seen:shared', 0)
+                if version != data['expectedVersion']:
+                    self.reply({}, 409)
+                    return
+                state.update({'seen:shared': data['stamp'], '_versions': {'seen:shared': version + 1}})
+                self.reply({'ok': True})
+
+            def log_message(self, *_):
+                pass
+
+        with ThreadingHTTPServer(('127.0.0.1', 0), Core) as server:
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            url = f'http://127.0.0.1:{server.server_port}'
+            def rows():
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    live.roster()
+                return [r.split('\t') for r in out.getvalue().splitlines() if r.startswith('U\t')]
+            with patch.object(live, 'credentials', return_value=(url, 'alice')) as creds:
+                alice = live.Connection().binding
+                entry, = rows()
+                self.assertEqual(entry, ['U', 'shared', '1767225600000', '0'])
+                with patch.object(sys, 'stdin', io.StringIO('1767225600000 0')):
+                    self.assertEqual(live.run_mutation(alice, 'inbox-read', 'shared'), 0)
+                self.assertEqual(rows(), [])
+                creds.return_value = (url, 'bob')
+                self.assertEqual(rows(), [entry])
+                self.assertEqual(live.run_mutation(alice, 'inbox-read', 'shared'), 1)
+                self.assertEqual(states['bob'], {'_versions': {}})
+                creds.return_value = (url, 'alice')
+                mission['updated_at'] = '2026-01-01T00:01:00Z'
+                self.assertEqual(rows(), [['U', 'shared', '1767225660000', '1']])
+                with patch.object(sys, 'stdin', io.StringIO('1767225600000 0')):
+                    self.assertEqual(live.run_mutation(alice, 'inbox-read', 'shared'), 1)
+                self.assertEqual(len(rows()), 1)
+            # Exercise the actual Lean bootstrap, rendered focus order and embedded writer.
+            states['alice'] = {'_versions': {}}
+            with tempfile.TemporaryDirectory() as root:
+                for user, action in [('alice', 'read'), ('bob', 'open')]:
+                    (Path(root) / 'connection.json').write_text(json.dumps(dict(api_url=url, token=user)))
+                    subprocess.run(['lean', '--run', 'tests/LiveDelivery.lean', 'inbox', action],
+                                   cwd=Path(__file__).resolve().parents[1], check=True, timeout=30,
+                                   env={**os.environ, 'ORB_STATE_DIR': root})
+                    self.assertEqual(states[user]['seen:shared'], 1767225660000)
+            server.shutdown()
+
+    def test_inbox_preferences_response_time_and_order(self):
+        base = dict(status='completed', updated_at='2026-01-01T00:00:00Z')
+        missions = [dict(base, id='ready'), dict(base, id='question', status='waiting_user'),
+                    dict(base, id='worker', parent_mission_id='ready'),
+                    dict(base, id='later', last_output_at='2026-01-01T00:01:00Z'),
+                    dict(base, id='viewed', first_viewed_at=base['updated_at'])]
+        def ids(state):
+            return [row[1] for row in live.inbox_rows(missions, state) if row[0] == 'U']
+        self.assertEqual(ids({}), ['question', 'later', 'ready'])
+        self.assertIn('worker', ids({'preferences': {'includeAutonomous': True}}))
+        self.assertIn('viewed', ids({'seen:viewed': -1767225600000}))
+        self.assertEqual(ids({'preferences': {'inboxEnabled': False}}), [])
+
     def test_bootstrap_recovers_after_initial_timeout(self):
         snapshot = [('C', 'binding'), ('P', 'source', 'Source', '')]
         with patch.object(live, 'Connection') as connection, patch.object(
@@ -291,6 +376,8 @@ class Delivery(unittest.TestCase):
                     if mode == 'null-retry' and paths.count(path) == 3:
                         self.send_error(503)
                         return
+                elif path == live.INBOX_PATH:
+                    result = {'_versions': {}}
                 elif mode == 'project-lag' and path.startswith('/api/control/missions?project=p&'):
                     project_started.set()
                     release_project.wait(8)
@@ -481,7 +568,7 @@ class Delivery(unittest.TestCase):
         old = row('old', 'completed')
         child = row('child', 'active', parent_mission_id='controller')
         history = [row('new', 'completed'), row('archived', 'acknowledged')]
-        pages = {query + '&all=true': history, query: [history[0], old],
+        pages = {live.INBOX_PATH: {}, query + '&all=true': history, query: [history[0], old],
                  query + '&offset=2': [child, row('side', 'active', tags=['btw-parent:child'])],
                  query + '&offset=4': [], '/api/control/missions/controller?include_history=false': row('controller', 'completed'),
                  '/api/projects': {'projects': [{'slug': 'p'}]}, '/api/machines': [],
@@ -502,7 +589,7 @@ class Delivery(unittest.TestCase):
         child = dict(id='child', folder='notes/today', parent_mission_id='launch',
                      callback_parent_mission_id='callback', tags=['fork-of:source', 'archived'],
                      superseded_by_mission_id='next')
-        pages = {'/api/projects': {'projects': []}, '/api/machines': [],
+        pages = {live.INBOX_PATH: {}, '/api/projects': {'projects': []}, '/api/machines': [],
                  '/api/control/missions?limit=200&include_ancestors=true': [child]}
         connection = type('Fixture', (), {'binding': 'bound', 'check': lambda _: None,
                                           'get': lambda _, path: pages[path]})()
