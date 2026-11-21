@@ -292,3 +292,8 @@ private def compactSettings (mid : String) : MissionMenu :=
 
 #guard ((missionMenuRows hierarchyFixture (compactSettings "")).map (·.id)) == [720, 721, 722]
 #guard !(missionMenuRows hierarchyFixture (compactSettings "m")).any (·.id == 720)
+
+-- Replace focus on the loading placeholder when a member's remote nodes arrive.
+private def waitingForNodes : DesktopState :=
+  { hierarchyFixture with missionMenu := some { compactSettings "" with page := .picker .machine } }
+#guard menuFocusChange waitingForNodes { waitingForNodes with launchMachines := some [("babylon", "Babylon")] } == some 2000000

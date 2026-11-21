@@ -935,7 +935,8 @@ def menuFocusChange (before after : DesktopState) : Option Nat :=
   match before.missionMenu, after.missionMenu with
   | some old, none => some old.trigger
   | old, some menu =>
-    if before.catalogLoading == after.catalogLoading && old.any (fun m => m.page == menu.page && m.highlighted == menu.highlighted && m.trigger == menu.trigger) then none
+    let fleetLoaded := menu.page == .picker .machine && before.launchMachines.isNone && after.launchMachines.isSome
+    if !fleetLoaded && before.catalogLoading == after.catalogLoading && old.any (fun m => m.page == menu.page && m.highlighted == menu.highlighted && m.trigger == menu.trigger) then none
     else ((missionMenuRows after menu)[menu.highlighted]?).map (·.id)
   | _, _ => none
 
