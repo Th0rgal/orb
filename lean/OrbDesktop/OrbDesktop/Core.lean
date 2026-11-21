@@ -330,6 +330,7 @@ private def mergeRoster (st : DesktopState) (records : List String) : DesktopSta
     | "N" => machines := machines.push (machineCard machines.size xs)
     | _ => continue
   let inboxItems := records.filterMap fun r => inboxItem (r.splitOn "\x1c")
+  -- An unfinished project or ancestor window keeps the last complete badge and items.
   let refreshing := records.contains "I\x1crefreshing" || records.head? == some "partial-projects"
   let finished := records.contains "I\x1cenabled" || records.contains "I\x1cdisabled"
   let inboxAvailable := finished || (refreshing && st.inboxAvailable)

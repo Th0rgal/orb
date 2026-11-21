@@ -85,6 +85,9 @@ class Connection:
         signal.setitimer(signal.ITIMER_REAL, deadline)
         try:
             with self.opener.open(req, timeout=deadline if deadline > 6 else 4) as response:
+                if response.status == 206 and (path == INBOX_PATH or path.startswith('/api/control/missions?')
+                                               or path.endswith('?include_history=false')):
+                    raise ValueError('incomplete Core summary response')
                 data = response.read(cap + 1)
         finally:
             signal.alarm(0)
@@ -643,24 +646,24 @@ def inbox_parent(m):
     return (parent if parent != fork else None) or callback
 
 
-INBOX_PAGE_SIZE = 1000  # Maximum accepted by Core's mission collection.
 INBOX_READ_SECONDS = 4
+INBOX_PROJECT_REFRESH_SECONDS = 30
+MISSING_ANCESTOR = object()
 
 
-class InboxScan:
-    """One subscription owns this buffer. Publish only after receiving the last page."""
+class InboxWindows:
+    """One subscription owns the staged reads and its last complete project windows."""
     def __init__(self):
-        self.rows = {}
-        self.offset = 0
-        self.page_size = INBOX_PAGE_SIZE
-
-    def reset(self):
-        self.rows.clear()
-        self.offset = 0
+        self.last_progress = 0
+        self.scope = None
+        self.pages = {}
+        self.project_sources = None
+        self.project_refresh_at = 0
 
 
-def inbox_with_ancestors(by_id, rows):
+def inbox_with_ancestors(get, rows, known):
     """Match withAncestors: insert fetched parents immediately before their first child."""
+    known.update((m['id'], m) for m in rows)
     listed = {m['id'] for m in rows}
     fetched = {}
     frontier = rows
@@ -670,7 +673,21 @@ def inbox_with_ancestors(by_id, rows):
         for mid in wanted:
             if not mid or mid in listed or mid in fetched:
                 continue
-            ancestor = by_id.get(mid)
+            if mid not in known:
+                try:
+                    ancestor = get('/api/control/missions/' + urllib.parse.quote(mid, safe='') + '?include_history=false')
+                except urllib.error.HTTPError as error:
+                    if error.code not in (403, 404):
+                        raise
+                    error.close()
+                    ancestor = None
+                else:
+                    if ancestor is MISSING_ANCESTOR:
+                        ancestor = None
+                    elif not isinstance(ancestor, dict) or ancestor.get('id') != mid:
+                        raise ValueError('invalid mission ancestor')
+                known[mid] = ancestor
+            ancestor = known[mid]
             if ancestor:
                 fetched[mid] = ancestor
                 frontier.append(ancestor)
@@ -687,78 +704,74 @@ def inbox_with_ancestors(by_id, rows):
     return ordered.values()
 
 
-def inbox_project_page(by_id, slug, project_rows, now_ms):
-    history = project_rows[:200]
-    live = [m for m in project_rows if m.get('status') not in ('acknowledged', 'archived')][:1000]
-    known = {m['id'] for m in history}
-    hidden = btw_ids({m['id']: m for m in [*history, *live]})
-    always = {'active', 'running', 'pending', 'queued', 'awaiting_user', 'resuming', 'starting', 'waiting_background'}
-    recent = {'interrupted', 'failed', 'paused', 'blocked'}
-    def at(m):
-        return timestamp_ms(m.get('updated_at') or m.get('created_at')) or 0
-    wanted = [m for m in live if m['id'] not in known and m['id'] not in hidden and
-              (m['status'] in always or (m['status'] in recent and now_ms - at(m) <= 7 * 86400000))]
-    listed = known.union(m['id'] for m in wanted)
-    rows = {m['id']: m for m in history}
-    for m in wanted:
-        parent = m.get('parent_mission_id') or m.get('callback_parent_mission_id')
-        if not parent or m['status'] in always or parent in listed:
-            rows.setdefault(m['id'], m)
-    expanded = inbox_with_ancestors(by_id, sorted(rows.values(), key=at, reverse=True))
-    hidden = btw_ids({m['id']: m for m in expanded})
-    return [m for m in expanded if m['id'] not in hidden and (m['id'] in rows or m.get('project') == slug)]
+def inbox_snapshot(c, projects, selected, rules=None, windows=None, roster=None):
+    windows = windows or InboxWindows()
+    projects = [p for p in projects if p.get('status') not in ('archived', 'deleted')]
+    scope = tuple(p['slug'] for p in projects)
+    now = time.monotonic()
+    if scope != windows.scope or now - windows.last_progress >= 60:
+        windows.pages.clear()
+        windows.project_sources = None
+        windows.scope = scope
+        windows.last_progress = now
+    end = now + INBOX_READ_SECONDS
 
-
-def inbox_snapshot(c, projects, selected, scan=None):
-    scan = scan if scan is not None else InboxScan()
-    end = time.monotonic() + INBOX_READ_SECONDS
-
-    def read(path, cap):
+    def read(path):
         remaining = end - time.monotonic()
         if remaining <= 0:
             raise TimeoutError('inbox read deadline')
-        return c.get(path, cap, deadline=remaining)
+        return c.get(path, 8 << 20, deadline=remaining)
 
-    state = read(INBOX_PATH, 4 << 20)
+    def source_read(path):
+        if path not in windows.pages:
+            collection = path.startswith('/api/control/missions?')
+            try:
+                data = read(path)
+            except urllib.error.HTTPError as error:
+                if collection or error.code not in (403, 404):
+                    raise
+                error.close()
+                data = MISSING_ANCESTOR
+            else:
+                if collection:
+                    if not isinstance(data, list) or any(not isinstance(m, dict) or not m.get('id') for m in data):
+                        raise ValueError('invalid inbox window')
+                elif not isinstance(data, dict) or data.get('id') != urllib.parse.unquote(path.split('?')[0].rsplit('/', 1)[-1]):
+                    raise ValueError('invalid mission ancestor')
+            windows.pages[path] = data
+            windows.last_progress = time.monotonic()
+        return windows.pages[path]
+
+    state = read(INBOX_PATH)
+    if (not isinstance(state, dict) or not isinstance(state.get('_versions', {}), dict)
+            or not isinstance(state.get('preferences') or {}, dict)):
+        raise ValueError('invalid inbox state')
     if (state.get('preferences') or {}).get('inboxEnabled') is False:
-        scan.reset()
+        windows.pages.clear()
+        windows.project_sources = None
         return [('I', 'disabled')]
-    try:
-        page = read(f'/api/control/missions?all=true&limit={scan.page_size}&offset={scan.offset}', 8 << 20)
-    except (TimeoutError, ResponseTooLarge):
-        # Retry the same offset in a later cycle, with less work per request.
-        scan.page_size = max(1, scan.page_size // 2)
-        raise
-    if not isinstance(page, list) or len(page) > scan.page_size:
-        raise ValueError('invalid inbox summary page')
-    scan.rows.update((m['id'], m) for m in page)
-    if len(page) == scan.page_size:
-        scan.offset += len(page)
-        return [('I', 'refreshing')]
-    try:
-        return project_inbox(scan.rows, state, projects, selected)
-    finally:
-        scan.reset()
+    refresh_projects = windows.project_sources is None or now >= windows.project_refresh_at
+    if refresh_projects:
+        hidden = set()
+        project_rows = [project_history(source_read, slug, rules, inbox_hidden=hidden) for slug in scope]
+    else:
+        project_rows, hidden = windows.project_sources
+    completed = source_read('/api/control/missions?status=completed&limit=100')
+    # Core sorts the page and its context together. Its first 200 non-archived
+    # rows are the original page; the other rows can satisfy ancestor lookups.
+    known = {m['id']: m for m in roster} if roster is not None else {}
+    current = (source_read(f'/api/control/missions?limit={CURRENT_MISSION_LIMIT}') if roster is None else
+               [m for m in roster if m.get('status') not in ('acknowledged', 'archived')][:CURRENT_MISSION_LIMIT])
+    current = inbox_with_ancestors(source_read, current, known)
+    result = project_inbox([*project_rows, completed, current], state, projects, selected, hidden)
+    if refresh_projects:
+        windows.project_sources = (project_rows, hidden)
+        windows.project_refresh_at = time.monotonic() + INBOX_PROJECT_REFRESH_SECONDS
+    windows.pages.clear()
+    return result
 
 
-def project_inbox(summaries, state, projects, selected):
-    # Core orders both global and project pages by updated_at DESC, id ASC.
-    # Preserve that order when taking GTK's windows from the same summary collection.
-    projects = [p for p in projects if p.get('status') not in ('archived', 'deleted')]
-    groups = {p['slug']: [] for p in projects}
-    current, completed = [], []
-    for m in summaries.values():
-        status = m.get('status')
-        if len(current) < 200 and status not in ('acknowledged', 'archived'):
-            current.append(m)
-        if len(completed) < 100 and status == 'completed':
-            completed.append(m)
-        if m.get('project') in groups:
-            groups[m['project']].append(m)
-    now_ms = int(time.time() * 1000)
-    sources = [inbox_project_page(summaries, slug, rows, now_ms) for slug, rows in groups.items() if rows]
-    sources.extend([completed, inbox_with_ancestors(summaries, current)])
-    hidden = btw_ids(summaries)
+def project_inbox(sources, state, projects, selected, hidden=()):
     by_id = {}
     for source in sources:
         for m in source:
@@ -780,11 +793,11 @@ def mission_row(m):
             *mission_settings(m), *mission_hierarchy(m), str(int('archived' in (m.get('tags') or []))))
 
 
-def project_history(c, slug, rules):
+def project_history(get, slug, rules, *, inbox_hidden=None):
     """Project history plus older open work under the shared desktop policy."""
     page_size = rules['pageSize']
     query = '/api/control/missions?project=' + urllib.parse.quote(slug, safe='') + f'&limit={page_size}'
-    history = c.get(query + '&all=true')
+    history = get(query + '&all=true')
     if not isinstance(history, list):
         raise ValueError('invalid project history')
     known = {row['id']: row for row in history}
@@ -792,7 +805,7 @@ def project_history(c, slug, rules):
     candidates = {}
     cutoff = time.time() - rules['recentDays'] * 86400
     for offset in range(0, rules['openLimit'], page_size):
-        page = c.get(query + (f'&offset={offset}' if offset else ''))
+        page = get(query + (f'&offset={offset}' if offset else ''))
         if not isinstance(page, list):
             raise ValueError('invalid project page')
         for row in page:
@@ -817,6 +830,12 @@ def project_history(c, slug, rules):
         parent = row.get('parent_mission_id') or row.get('callback_parent_mission_id')
         if not parent or parent in members or parent in candidates or row.get('status') in rules['live']:
             members[mid] = row
+    if inbox_hidden is not None:
+        ordered = sorted(members.values(), key=lambda m: timestamp_ms(m.get('updated_at') or m.get('created_at')) or 0,
+                         reverse=True)
+        expanded = inbox_with_ancestors(get, ordered, known)
+        inbox_hidden.update(btw_ids({mid: m for mid, m in known.items() if m is not None}))
+        return [m for m in expanded if m['id'] in members or m.get('project') == slug]
     unavailable = set()
     for row in list(members.values()):
         current = row
@@ -829,7 +848,7 @@ def project_history(c, slug, rules):
             visited.add(parent)
             if parent not in known:
                 try:
-                    ancestor = c.get('/api/control/missions/' + urllib.parse.quote(parent, safe='') + '?include_history=false')
+                    ancestor = get('/api/control/missions/' + urllib.parse.quote(parent, safe='') + '?include_history=false')
                 except urllib.error.HTTPError as error:
                     if error.code not in (403, 404):
                         raise
@@ -854,12 +873,13 @@ def project_history(c, slug, rules):
     return [row for row in members.values() if visible(row) and row.get('viewer_role') != 'participant']
 
 
-def roster_rows(c, include_archived=False, expanded=(), rules=None, *, inbox_for=None, inbox_scan=None):
+def roster_rows(c, include_archived=False, expanded=(), rules=None, *, inbox_for=None, inbox_windows=None):
     projects = c.get('/api/projects')['projects']
     missions = c.get(f'/api/control/missions?limit={CURRENT_MISSION_LIMIT}&include_ancestors=true')
     machines = c.get('/api/machines')
     if not all(isinstance(x, list) for x in (projects, missions, machines)):
         raise ValueError('invalid roster')
+    current = list(missions)
     if include_archived:
         try:
             archived = c.get(f'/api/control/missions?status=acknowledged&limit={ARCHIVED_MISSION_LIMIT}')
@@ -871,21 +891,22 @@ def roster_rows(c, include_archived=False, expanded=(), rules=None, *, inbox_for
     rows = [('C', c.binding)]
     if inbox_for is not None:
         try:
-            rows += inbox_snapshot(c, projects, inbox_for, inbox_scan)
+            rows += inbox_snapshot(c, projects, inbox_for, rules, inbox_windows, current)
         except urllib.error.HTTPError as error:
             if error.code in (401, 403):
                 raise
             error.close()
-        except (urllib.error.URLError, TimeoutError, ValueError):
-            pass  # Never publish a partial Inbox as a complete snapshot.
+            rows.append(('I', 'refreshing'))
+        except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError):
+            rows.append(('I', 'refreshing'))
     if expanded:
         by_id = {m['id']: m for m in missions}
         for slug in expanded:
             if not any(p.get('slug') == slug for p in projects):
                 continue
-            members = project_history(c, slug, rules)
+            members = project_history(c.get, slug, rules)
             if slug == 'default':
-                members += project_history(c, '__unassigned__', rules)
+                members += project_history(c.get, '__unassigned__', rules)
             listed = []
             for member in members:
                 if (member.get('project') or 'default') != slug:
@@ -1011,13 +1032,13 @@ def poll(mid, binding, tracked=None, rules=None):
         return  # EOF invalidates the old roster; never request with a new identity
     last, failures, checked = None, 0, None
     visible = []
-    inbox_scan = InboxScan()
+    inbox_windows = InboxWindows()
     while True:
         c.check()
         try:
             if checked is None or time.monotonic() - checked >= 5:
                 rows = roster_rows(c, include_archived=True, expanded=expanded, rules=rules,
-                                   inbox_for=mid, inbox_scan=inbox_scan)
+                                   inbox_for=mid, inbox_windows=inbox_windows)
                 found = {r[1] for r in rows if r[0] == 'M'}
                 # A sorted, limited list is positive evidence only. For every
                 # absent tracked ID require an explicit per-mission denial.

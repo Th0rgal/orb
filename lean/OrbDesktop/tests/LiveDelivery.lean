@@ -274,24 +274,33 @@ def main (args : List String) : IO Unit := do
   if let ["inbox", action] := args then
     unless !st.inboxAvailable && st.missionCards.isEmpty do throw (IO.userError "bootstrap waited for Inbox history")
     let slot ← IO.mkRef none
-    let st ← awaitState slot st (·.inboxAvailable)
-    let page := (stepDesktopEvent 120 vp st (.key 0x69 2 .pressed)).1
-    let tree := buildDesktopScreen page (pxToSub 800) (pxToSub 600)
-    let (_, scene) := renderWidgetTree 120 (pxToSub 800) (pxToSub 600) page.initialFocusState page.theme tree
-    unless page.screen == .inbox && page.inboxAvailable &&
-        page.visibleProjectRows.any (fun r => r.rowId == "nav:inbox" && r.badge == 1) &&
-        [940, 941].all scene.focusableOrder.contains do throw (IO.userError "missing unread item or controls")
-    let rt : Runtime.RuntimeState DesktopState := {
-      app := page, focus := page.initialFocusState.request 940
-      focusableOrder := scene.focusableOrder }
-    let reduce := stepDesktopEvent 120 vp
-    let rt := if action == "read" then rt.stepEvent reduce (.key 0xff09 0 .pressed) else rt
-    let rt := rt.stepEvent reduce (.key 0xff0d 0 .pressed)
-    let (next, _) ← readLiveFrame slot 120 vp rt.app
-    unless next.visibleProjectRows.any (fun r => r.rowId == "nav:inbox" && r.badge == 0) && next.writeError.isEmpty &&
-        next.openMission == (if action == "open" then some "shared" else none) do
-      throw (IO.userError "keyboard activation did not acknowledge the item")
-    return
+    try
+      let st ← awaitState slot st (·.inboxAvailable)
+      let page := (stepDesktopEvent 120 vp st (.key 0x69 2 .pressed)).1
+      let tree := buildDesktopScreen page (pxToSub 800) (pxToSub 600)
+      let (_, scene) := renderWidgetTree 120 (pxToSub 800) (pxToSub 600) page.initialFocusState page.theme tree
+      unless page.screen == .inbox && page.inboxAvailable &&
+          page.visibleProjectRows.any (fun r => r.rowId == "nav:inbox" && r.badge == 1) &&
+          [940, 941].all scene.focusableOrder.contains do throw (IO.userError "missing unread item or controls")
+      if action == "partial" then
+        let next ← awaitState slot st fun s => s.missionCards.any (·.missionId == "next-roster")
+        unless next.inboxAvailable && next.inboxItems == st.inboxItems &&
+            next.visibleProjectRows.any (fun r => r.rowId == "nav:inbox" && r.badge == 1) do
+          throw (IO.userError "partial Core response replaced the last complete Inbox")
+        return
+      let rt : Runtime.RuntimeState DesktopState := {
+        app := page, focus := page.initialFocusState.request 940
+        focusableOrder := scene.focusableOrder }
+      let reduce := stepDesktopEvent 120 vp
+      let rt := if action == "read" then rt.stepEvent reduce (.key 0xff09 0 .pressed) else rt
+      let rt := rt.stepEvent reduce (.key 0xff0d 0 .pressed)
+      let (next, _) ← readLiveFrame slot 120 vp rt.app
+      unless next.visibleProjectRows.any (fun r => r.rowId == "nav:inbox" && r.badge == 0) && next.writeError.isEmpty &&
+          next.openMission == (if action == "open" then some "shared" else none) do
+        throw (IO.userError "keyboard activation did not acknowledge the item")
+      return
+    finally
+      closeLiveSubscription slot
   let [a,b] := st.missionCards | throw (IO.userError "bad roster")
   unless st.sidebarRows.any (fun r => r.title == "Project title" && r.subtitle == "Objective" && r.iconColor == some 0x8aaed4ff) do
     throw (IO.userError "wrong project fields")

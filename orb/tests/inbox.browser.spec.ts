@@ -252,7 +252,7 @@ import json, sys
 sys.path.insert(0, '../lean/OrbDesktop/OrbDesktop')
 from live_transport import project_inbox
 rows = {m['id']: m for m in json.load(sys.stdin)}
-items = project_inbox(rows, {}, [{'slug': 'orb'}, {'slug': 'paloma'}], '')
+items = project_inbox([rows.values()], {}, [{'slug': 'orb'}, {'slug': 'paloma'}], '')
 print(json.dumps([r[1] for r in items if r[0] == 'U']))
 `], { input: JSON.stringify(missions), encoding: "utf8" }));
   expect(nativeIds.sort()).toEqual(["m-done", "m-failed", "m-question"]);

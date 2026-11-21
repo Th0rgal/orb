@@ -141,11 +141,13 @@ The live navigation badge and Inbox items use the same user-scoped snapshot.
 After sidebar bootstrap, the native reader combines the same Core sources as a
 refreshed GTK sidebar: loaded project history and eligible older open missions,
 the latest 100 completed missions, and the current 200 missions with their
-ancestors. The reader takes these windows locally from the ordered summary collection.
-Each background refresh reads the current user's Inbox state and at most one
-page of 1000 summaries, with a shared four-second HTTP deadline. A full page
-resumes at its next offset on a subsequent refresh. Only a completed scan
-replaces the previous badge. An off-page
+ancestors. Core bounds each collection before returning it. Each project contributes
+its recent history and eligible older open work under the shared project-history rules.
+Missing ancestors are fetched as summaries. A refresh has a four-second HTTP
+budget and can resume validated windows on the next poll. Only a complete
+set of sources replaces the previous badge. Within a subscription the reader reuses
+completed project windows for up to 30 seconds. It refreshes current missions, recent
+completions and user receipts on each poll. An off-page
 item carries the summary needed to open its transcript. Opening Inbox leaves receipts untouched. Opening an item or choosing
 Mark read acknowledges only its displayed response timestamp and observed Core
 entry version. Another user can still see the same shared mission as unread.

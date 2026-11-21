@@ -14,7 +14,7 @@ const time = "2026-11-01T00:00:00Z";
 const stamp = Date.parse(time);
 const mission = (id: string, fields: Partial<Mission> = {}): Mission =>
   ({ id, title: id, status: "completed", project: "live", created_at: time, ...fields } as Mission);
-const projects = [{ slug: "live" }, { slug: "retired-project", status: "archived" }] as ProjectSummary[];
+const projects = [{ slug: "live" }, { slug: "quiet" }, { slug: "retired-project", status: "archived" }] as ProjectSummary[];
 const missions = [
   mission("early"),
   mission("tagged", { tags: ["archived"] }),
@@ -34,6 +34,8 @@ const missions = [
   mission("new-output", { last_output_at: "2026-11-02T00:00:00Z" }),
   mission("selected"),
   ...Array.from({ length: 390 }, (_, i) => mission("working-" + i, { status: "active" })),
+  mission("completed-btw-child", { project: "quiet", parent_mission_id: "hidden-cross-project" }),
+  mission("hidden-cross-project", { project: "orphan", status: "acknowledged", tags: ["btw-subagent"] }),
   mission("old-question", { status: "awaiting_user" }),
   mission("old-waiting", { status: "waiting_user" }),
   mission("btw-child", { callback_parent_mission_id: "btw-root" }),
@@ -43,9 +45,9 @@ const missions = [
   mission("retired", { superseded_by_mission_id: "early" }),
 ];
 
-// The native reader gets one summary collection over the same rows used by the GTK loaders.
+// Serve the same ordered, bounded Core windows to the native and GTK loaders.
 const native = `
-import json, sys
+import json, sys, urllib.parse
 sys.path.insert(0, '../lean/OrbDesktop/OrbDesktop')
 import live_transport as live
 f = json.load(sys.stdin)
@@ -54,12 +56,18 @@ class Core:
         assert 0 < deadline <= 4
         if path == live.INBOX_PATH:
             return f['state']
-        prefix = '/api/control/missions?all=true&limit=1000&offset='
-        if path.startswith(prefix):
-            start = int(path[len(prefix):])
-            return f['missions'][start:start+1000]
-        raise AssertionError(path)
-rows = live.inbox_snapshot(Core(), f['projects'], f['selected'])
+        url = urllib.parse.urlsplit(path)
+        q = urllib.parse.parse_qs(url.query)
+        if url.path == '/api/control/missions':
+            rows = [m for m in f['missions'] if
+                    ('project' not in q or m.get('project') == q['project'][0]) and
+                    (m['status'] == q['status'][0] if 'status' in q else 'all' in q or m['status'] != 'acknowledged')]
+            offset = int(q.get('offset', [0])[0])
+            return rows[offset:offset + int(q['limit'][0])]
+        assert q == {'include_history': ['false']}
+        return next(m for m in f['missions'] if url.path.endswith('/' + m['id']))
+with open('src/projectHistoryRules.json') as rules:
+    rows = live.inbox_snapshot(Core(), f['projects'], f['selected'], json.load(rules))
 print(json.dumps([r[1] for r in rows if r[0] == 'U']))
 `;
 
