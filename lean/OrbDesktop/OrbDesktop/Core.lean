@@ -71,6 +71,7 @@ private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale
 private inductive ReadKind where
   | roster | recover | catalog (revision : Nat) | providers
   | accountRoutes (account provider action value : String)
+  | directories (machine path : String)
   | launchMachines (admin : Bool) (harness : String)
   deriving BEq
 
@@ -85,6 +86,7 @@ private def startLiveRead (binding : String) (kind : ReadKind) (notify : IO Unit
     | .roster => #["-I", "-c", transport ++ "\ntry: roster()\nexcept Exception: sys.exit(1)"]
     | .recover => #["-I", "-c", transport ++ "\nrecover_roster()"]
     | .accountRoutes account provider action value => #["-I", "-c", transport ++ "\naccount_routes(*sys.argv[1:])", binding, account, provider, action, value]
+    | .directories machine path => #["-I", "-c", transport ++ "\nlist_directories(*sys.argv[1:])", binding, machine, path]
     | .launchMachines admin harness => #["-I", "-c", transport ++ "\nlaunch_machines(*sys.argv[1:])", binding, if admin then "admin" else "member", harness]
     | .providers => #["-I", "-c", transport ++ "\nprovider_inventory(sys.argv[1])", binding]
     | .catalog _ => #["-I", "-c", transport ++ "\ncatalog(sys.argv[1], json.loads(sys.argv[2]))", binding, modelCatalogRules]
@@ -114,6 +116,10 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
           some (if st.initialRosterPending then .roster else .recover)
         else if st.missionMenu.any (·.page == .picker .machine) && st.launchMachines.isNone && !st.launchMachinesFailed then
           some (.launchMachines (st.fleetMachines.any (·.machineId == "core")) st.draftSettings.backend)
+        else if st.missionMenu.any (fun m => m.page == .draftDirectory && m.directoryRows.isNone && !m.listingFailed) &&
+            (!st.draftSettings.machine.isEmpty || st.fleetMachines.any (·.machineId == "core")) then
+          let machine := if st.draftSettings.machine.isEmpty then "core" else st.draftSettings.machine
+          some (.directories machine ((st.missionMenu.map (·.browsePath)).getD ""))
         else if st.screen == .inference && st.providers.isNone && !st.providerReadFailed then some .providers
         else if let some page := st.accountRoutePage then
           if st.screen == .inference && !page.failed && (page.options.isNone || page.pending.isSome) then
@@ -154,6 +160,12 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
                               catalogLoading := st.catalogLoading || changed
                               catalogRevision := st.catalogRevision + (if changed then 1 else 0)
                               writeError := if lines.head? == some "unconfirmed" then "Core could not confirm the change. Check the current setting." else "" }
+      if let .directories .. := source.kind then
+        let entries := lines.filterMap fun line => match splitTab line with
+          | ["D", path, title] => some (path, title)
+          | _ => none
+        let menu := st.missionMenu.map fun m => { m with directoryRows := some entries, listingFailed := lines.head? != some "directories" }
+        return some { st with missionMenu := menu }
       if let .launchMachines .. := source.kind then
         if lines.head? != some "machines" then return some { st with launchMachinesFailed := true }
         let nodes := lines.filterMap fun line => match splitTab line with
@@ -275,7 +287,7 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
     let encode := fun (v : LaunchSettings) => String.intercalate "\t" [v.machine, v.backend, v.model, v.effort, v.permission]
     let (action, mid, text) := match request with
       | .providerPreference account enabled => (if enabled then "use-provider" else "skip-provider", account, "")
-      | .create => ("create", "", encode st.draftSettings ++ "\t" ++ st.draftProject ++ "\t" ++ st.composer.text)
+      | .create => ("create", "", st.draftDirectory ++ String.singleton (Char.ofNat 0) ++ encode st.draftSettings ++ "\t" ++ st.draftProject ++ "\t" ++ st.composer.text)
       | .send mid text => ("send", mid, text)
       | .stop mid => ("stop", mid, "")
       | .archive mid => ("archive", mid, "")

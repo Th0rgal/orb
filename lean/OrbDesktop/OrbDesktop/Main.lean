@@ -338,9 +338,14 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
       return (st, st.sidebarHoverDamage rt.hitRegions scale rt.hoveredEntity none)
     if let .activate id := ev then
       if st.hasLiveConnection && st.missionMenu.isNone && st.writeRequest.isNone then
-        if id == 714 then
+        if id == draftDirectoryPickerId && st.openMission.isNone then
           let some (_, r) := rt.hitRegions.find? (fun (entry : EntityId × Rect) => entry.1 == id) | return (st, none)
-          return ({ st with missionMenu := some { mission := st.openMission.getD "", x := r.x, y := r.bottom, trigger := id, page := .settings } }, some viewport)
+          let draft : Widgets.ComposerBuffer := { text := st.draftDirectory, cursorOffset := st.draftDirectory.length }
+          let menu : MissionMenu := { mission := "", x := r.x, y := r.bottom, trigger := id, page := .draftDirectory, draft, browsePath := st.draftDirectory }
+          return ({ st with missionMenu := some menu }, some viewport)
+        if id == 714 || (id == draftProjectPickerId && st.openMission.isNone) then
+          let some (_, r) := rt.hitRegions.find? (fun (entry : EntityId × Rect) => entry.1 == id) | return (st, none)
+          return ({ st with missionMenu := some { mission := st.openMission.getD "", x := r.x, y := r.bottom, trigger := id, page := if id == draftProjectPickerId then .draftProject else .settings } }, some viewport)
         if let some field := settingTrigger id then
           let some (_, r) := rt.hitRegions.find? (fun (entry : EntityId × Rect) => entry.1 == id) | return (st, none)
           let st := if field == .machine then { st with launchMachines := none, launchMachinesFailed := false } else st
