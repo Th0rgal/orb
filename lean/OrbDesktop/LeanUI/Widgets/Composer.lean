@@ -106,13 +106,28 @@ def setPreedit (buf : ComposerBuffer) (preedit : String) : ComposerBuffer :=
     imePreeditLen := preedit.length
     imePreeditText := preedit }
 
+/-- Number of complete Unicode scalars covered by a Wayland UTF-8 byte count. -/
+private def coveredChars (bytes : Nat) (chars : List Char) : Nat := Id.run do
+  let mut remaining := bytes
+  let mut count := 0
+  for c in chars do
+    if remaining < c.utf8Size then break
+    remaining := remaining - c.utf8Size
+    count := count + 1
+    if remaining == 0 then break
+  return count
+
 /-- Apply an atomic `zwp-text-input-v3` `done` batch in protocol order:
 1. Delete `delBefore` / `delAfter` around cursor
 2. Commit `commitStr`
 3. Show `preeditStr` at the updated cursor position. -/
 def applyImeBatch (buf : ComposerBuffer) (delBefore delAfter : Nat)
     (commitStr preeditStr : String) : ComposerBuffer :=
-  let b1 := buf.deleteAroundCursor delBefore delAfter
+  let b1 := if delBefore == 0 && delAfter == 0 then buf else
+    let chars := buf.text.toList
+    let cur := clampCursor buf.text buf.cursorOffset
+    buf.deleteAroundCursor (coveredChars delBefore (chars.take cur).reverse)
+      (coveredChars delAfter (chars.drop cur))
   let b2 := b1.insertText commitStr
   b2.setPreedit preeditStr
 
@@ -268,15 +283,19 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
       (buildComposerInlineRuns theme buf overrideRuns)
   let hasText := !buf.text.isEmpty || !buf.imePreeditText.isEmpty
   let sendBgCol := if hasText || isRunning then pal.sendBg else ((pal.sendBg &&& 0xFFFFFF00) ||| 0x47)
+  let glyph : WidgetNode := if isRunning then
+      WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 6) (pxToSub 6)) pal.sendFg
+        (CornerRadii.uniform (pxToSub 1))
+    else
+      .mk none false false (BoxStyle.row 0 |>.withFixedSize (pxToSub 14) (pxToSub 14))
+        (.vectorIcon [[(80,130),(80,30)], [(35,75),(80,30),(125,75)]] pal.sendFg) []
   let sendBtn : WidgetNode :=
     withId buf.sendButtonId <|
       WidgetNode.box
         (buttonStyle
           |>.withBg sendBgCol
           |>.withRadius (if isRunning then theme.radiusMd else pxToSub 12))
-        [WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 6) (pxToSub 6)) pal.sendFg
-          (CornerRadii.uniform (pxToSub 1))]
-        buf.sendButtonId
+        [glyph] buf.sendButtonId
   -- The native three-box blur at 16 px matches the falloff of the browser's
   -- `.dock .composer` 18 px CSS shadow; retain its 4 px offset and 8% opacity.
   let pill : WidgetNode :=

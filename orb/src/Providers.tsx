@@ -914,7 +914,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
   const beginLogin = () => {
     setPhase("starting"); setError(null); setPaste("");
     const start = polledLogin
-      ? startSubscriptionLogin(p.provider.provider_type, /^[0-9a-f-]{36}$/i.test(p.provider.id) ? p.provider.id : undefined).then(s => ({ id: s.session_id, url: s.auth_url, flow: s.flow, instructions: s.instructions }))
+      ? startSubscriptionLogin(p.provider.provider_type, p.provider.id || undefined).then(s => ({ id: s.session_id, url: s.auth_url, flow: s.flow, instructions: s.instructions }))
       : startProviderOAuth(p.provider.id).then(s => ({ id: p.provider.id, url: s.url, flow: s.method, instructions: s.instructions }));
     start
       .then((s) => {

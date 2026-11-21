@@ -1606,12 +1606,21 @@ def parseOpenCodeAcpUpdate (u : JVal) : OneShotLineParsed :=
         } }
   else {}
 
+/-- A noninteractive mission cannot complete the CLI's browser challenge. Keep its
+    OAuth state and authorization URL out of the mission's error message. -/
+def antigravitySignInError? (diagnostic : String) : Option String :=
+  if ["Authentication required. Please visit", "Waiting for authentication (timeout",
+      "paste the authorization code here", "authentication timed out", "authentication failed or timed out",
+      "accounts.google.com/o/oauth2/auth"].any (fun marker => diagnostic.contains marker) then
+    some "Antigravity needs a native Google sign-in for the account on this machine. Check its connection in Inference before retrying."
+  else none
+
 /-- Extract session ID, assistant text, tool activities, thinking, and structured JSON errors from a single stdout line. -/
 def parseOneShotHarnessEvent (harness : String) (rawLine : String) : OneShotLineParsed := Id.run do
   let trimmed := rawLine.trimAscii.toString
   if trimmed.isEmpty then return {}
   if harness == "antigravity" then
-    let .ok event := OrbBin.Json.parse trimmed | return {}
+    let .ok event := OrbBin.Json.parse trimmed | return { errorMsg? := antigravitySignInError? trimmed }
     match event.fieldStr? "event" with
     | some "init" =>
       return { sessionId? := event.fieldStr? "conversation_id" >>= parseUuidCanonical? }
@@ -1632,11 +1641,12 @@ def parseOneShotHarnessEvent (harness : String) (rawLine : String) : OneShotLine
       let result := event.fieldOrNull "result"
       let ok := result.fieldStr? "status" == some "SUCCESS"
       let usage := result.fieldOrNull "usage"
+      let diagnostic := (result.fieldStr? "error").getD "Antigravity turn failed"
       return {
         sessionId? := result.fieldStr? "conversation_id" >>= parseUuidCanonical?
         textDelta := if ok then (result.fieldStr? "response").getD "" else ""
         finalTextFallback := true
-        errorMsg? := if ok then none else some ((result.fieldStr? "error").getD "Antigravity turn failed" |>.take 500 |>.toString)
+        errorMsg? := if ok then none else some ((antigravitySignInError? diagnostic).getD (diagnostic.take 500).toString)
         inputTokens? := usage.fieldUInt64? "input_tokens", outputTokens? := usage.fieldUInt64? "output_tokens",
         cacheReadTokens? := usage.fieldUInt64? "cache_read_tokens" }
     | _ => return {}

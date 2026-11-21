@@ -430,3 +430,15 @@ constant surfaces, empty images, and zero sigma. The native package owns both
 default package-local source directory. Use the pinned turbo-lean revision in
 `lean/turbo-lean-revision`. No raw-Lake fallback or cache reset is needed after
 LeanUI edits.
+
+### Opening the window with a slow Core
+
+The native window maps immediately with its title bar and a composer placeholder while the first roster request runs. A successful response populates the same window. A failed first read shows the connection hint and starts background recovery. A replaced session must discard the previous identity’s roster before showing the new one.
+
+### Changes from a second client
+
+An open sidebar must pick up missions and projects created in another client, including a child whose parent was already visible. A new roster page updates titles, placement and archive status. Rows retain their widget identity across a reorder. A mission displaced from a limited page stays visible while its individual presence check remains authorized. Session revocation clears the previous account’s data.
+
+When a selected mission advances from pending to active, the composer shows Stop on the same update as the active sidebar row. A roster snapshot and bubble that both report active must give the same button as a bubble arriving before the roster. Preserve the draft across that transition.
+
+Inference loads the signed-in user's provider inventory when opened. Each account shows its personal routing preference and any global disablement. Clicking a row changes only the signed-in user's preference. The confirmed response must name that account and return the requested preference. Reopening Inference reads the setting from Core, and a change invalidates any in-flight model catalog from before the update.

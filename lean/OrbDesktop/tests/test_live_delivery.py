@@ -40,6 +40,69 @@ def fixture():
 
 
 class Delivery(unittest.TestCase):
+    def test_bootstrap_recovers_after_initial_timeout(self):
+        snapshot = [('C', 'binding'), ('P', 'source', 'Source', '')]
+        with patch.object(live, 'Connection') as connection, patch.object(
+                live, 'roster_rows', side_effect=[TimeoutError(), snapshot]) as read, patch.object(
+                live.time, 'sleep'), contextlib.redirect_stdout(io.StringIO()) as output:
+            live.roster()
+        self.assertEqual(output.getvalue().splitlines(), ['C\tbinding', 'P\tsource\tSource\t'])
+        self.assertEqual(read.call_count, 2)
+        for call in read.call_args_list:
+            self.assertEqual(call.args, (connection.return_value,))
+            self.assertEqual(call.kwargs, {'include_archived': True})
+
+    def test_bootstrap_rejects_expired_login_without_retry(self):
+        denied = live.urllib.error.HTTPError('http://localhost', 401, 'Unauthorized', {}, None)
+        self.addCleanup(denied.close)
+        with patch.object(live, 'Connection'), patch.object(
+                live, 'roster_rows', side_effect=denied) as read, self.assertRaises(live.urllib.error.HTTPError):
+            live.roster()
+        read.assert_called_once()
+
+    def test_provider_inventory_projects_only_the_current_users_display_fields(self):
+        accounts = [{'id': 'test-member', 'name': 'Gemini', 'label': 'Work', 'provider_type_name': 'Google',
+                     'enabled': True, 'user_enabled': False, 'account_email': 'private@example.test',
+                     'credential': 'PRIVATE'}, {'id': 'second', 'name': 'Cloud', 'provider_type': 'custom',
+                     'enabled': False, 'user_enabled': True}]
+        with patch.object(live, 'Connection') as conn, contextlib.redirect_stdout(io.StringIO()) as output:
+            conn.return_value.binding = 'ben'
+            conn.return_value.get.return_value = {'providers': accounts}
+            live.provider_inventory('thomas')
+            conn.return_value.get.assert_not_called()
+            live.provider_inventory('ben')
+        self.assertEqual(output.getvalue().splitlines(), [
+            'accounts', 'A\ttest-member\tWork\tGoogle\t0\t1', 'A\tsecond\tCloud\tcustom\t1\t0'])
+
+    def test_provider_toggle_requires_the_selected_account_receipt(self):
+        with patch.object(live, 'Connection') as conn:
+            conn.return_value.binding = 'ben'
+            request = conn.return_value.request
+            request.return_value = {'id': 'other', 'user_enabled': False}
+            with self.assertRaises(ValueError):
+                live.mutate('ben', 'skip-provider', 'gemini-work')
+            request.return_value = {'id': 'gemini-work', 'user_enabled': False}
+            live.mutate('ben', 'skip-provider', 'gemini-work')
+            request.assert_called_with('/api/ai/providers/gemini-work/preference',
+                                       body={'enabled': False}, method='PUT')
+
+    def test_catalog_recovers_without_reopening_the_window(self):
+        denied = live.urllib.error.HTTPError('http://localhost', 503, 'Unavailable', {}, None)
+        rows = [('H', 'antigravity', 'Antigravity', 'gemini-4-neon', 'Neon')]
+        with patch.object(live, 'Connection') as conn, patch.object(
+                live, 'catalog_rows', side_effect=[denied, TimeoutError(), rows]), patch.object(
+                live.time, 'sleep') as sleep, contextlib.redirect_stdout(io.StringIO()) as output:
+            conn.return_value.binding = 'binding'
+            live.catalog('binding', {})
+        self.assertEqual(output.getvalue().splitlines(), ['\t'.join(rows[0])])
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2])
+
+    def test_stop_appears_when_the_roster_and_bubble_both_report_active(self):
+        self.run_wire('start-running')
+
+    def test_saved_session_recovers_inside_the_window(self):
+        self.run_wire('reconnect')
+
     def run_wire(self, mode):
         paths, tokens = [], []
         db = fixture()
@@ -51,8 +114,11 @@ class Delivery(unittest.TestCase):
                 path = self.path
                 paths.append(path)
                 tokens.append(self.headers.get('Authorization'))
+                if mode == 'reconnect' and tokens[-1] == 'Bearer fixture':
+                    self.send_error(401)
+                    return
                 if path == '/api/projects':
-                    result = {'projects': [dict(slug='p', title='Project title', objective='Objective')]}
+                    result = {'projects': [dict(slug='p', title='Project title', objective='Objective', color='blue')]}
                 elif path == '/api/control/missions?limit=200':
                     if mode == 'unavailable':
                         self.send_response(302)
@@ -66,6 +132,8 @@ class Delivery(unittest.TestCase):
                     if mode in ('page-two', 'idle-page-two') and paths.count(path) > 1:
                         ids = ['a'] + [f'new-{i}' for i in range(199)]
                     result = [dict(id=m, title=m, status='active') for m in ids]
+                    if mode == 'start-running' and paths.count(path) == 1:
+                        result[-1]['status'] = 'pending'
                     if mode == 'null-retry' and paths.count(path) == 2:
                         result = None
                     if mode == 'null-retry' and paths.count(path) == 3:
@@ -112,6 +180,11 @@ class Delivery(unittest.TestCase):
                         api_url='', apiUrl=f'http://127.0.0.1:{server.server_port}', token=token)))
                 subprocess.run(['lean', '-j', '1', '-M', '1024', '--run', 'tests/LiveDelivery.lean', mode],
                                cwd=PKG, env={**os.environ, 'ORB_STATE_DIR': root}, check=True, timeout=20)
+                if mode == 'reconnect':
+                    first = tokens.index('Bearer changed')
+                    self.assertGreater(first, 0)
+                    self.assertTrue(all(t == 'Bearer changed' for t in tokens[first:]))
+                    return
                 self.assertTrue(all(t == 'Bearer fixture' for t in tokens))
                 self.assertNotIn('/redirect', paths)
                 self.assertNotIn(a, paths)
@@ -119,7 +192,7 @@ class Delivery(unittest.TestCase):
                 if mode in ('idle-share', 'idle-page-two'):
                     self.assertIn(b + events + '?presence=1', paths)
                     self.assertNotIn(b + events, paths)
-                elif mode in ('page-two', 'null-retry'):
+                elif mode in ('page-two', 'null-retry', 'start-running'):
                     self.assertIn(b + events, paths)
                 elif mode in ('idle-identity', 'before-open', 'unavailable', 'idle-session'):
                     self.assertFalse(any(p.startswith(a) or p.startswith(b) for p in paths))
@@ -182,6 +255,47 @@ class Delivery(unittest.TestCase):
         models[1]['provider_id'] = 'local'
         self.assertEqual(list(live.visible_model_options('opencode', models, rules)), models[1:])
 
+    def test_goal_refusals_keep_server_text_out_of_the_notice(self):
+        for action, reason, expected in [
+                ('create', 'remote_goal_unsupported: detail', 3),
+                ('send', 'remote_goal_followup_unsupported: detail', 4),
+                ('create', 'unrelated error', 1),
+                ('rename', 'remote_goal_unsupported: detail', 1)]:
+            body = io.BytesIO(json.dumps({'error': reason}).encode())
+            error = live.urllib.error.HTTPError('http://localhost', 400, '', {}, body)
+            with self.subTest(action=action, reason=reason), patch.object(live, 'mutate', side_effect=error):
+                self.assertEqual(live.run_mutation('binding', action, 'm'), expected)
+
+    def test_new_agent_sends_the_first_prompt_in_the_create_request(self):
+        prompt = 'First line\tcontains a tab.\nSecond line.'
+        payload = '\t'.join(['core', 'codex', 'model', '', 'supervised', 'now', prompt])
+        with patch.object(live, 'Connection') as factory, patch.object(live.sys, 'stdin') as stdin:
+            stdin.buffer = io.BytesIO(payload.encode())
+            connection = factory.return_value
+            connection.binding = 'bound'
+            connection.request.return_value = dict(id='new-agent', title='First line', status='active')
+            with contextlib.redirect_stdout(io.StringIO()):
+                live.mutate('bound', 'create', '')
+            connection.request.assert_called_once()
+            request = connection.request.call_args
+            self.assertEqual(request.args, ('/api/control/missions',))
+            self.assertEqual(request.kwargs['body']['prompt'], prompt)
+            self.assertEqual(request.kwargs['body']['project'], 'now')
+            self.assertNotIn('remote_node_id', request.kwargs['body'])
+
+    def test_child_precedes_parent_in_live_roster(self):
+        child = dict(id='child', folder='notes/today', parent_mission_id='launch',
+                     callback_parent_mission_id='callback', tags=['fork-of:source'],
+                     superseded_by_mission_id='next')
+        pages = {'/api/projects': {'projects': []}, '/api/machines': [],
+                 '/api/control/missions?limit=200': [child]}
+        connection = type('Fixture', (), {'binding': 'bound', 'check': lambda _: None,
+                                          'get': lambda _, path: pages[path]})()
+        for missions in ([child], [child, dict(id='launch')]):
+            pages['/api/control/missions?limit=200'] = missions
+            projected = next(row for row in live.roster_rows(connection) if row[0] == 'M')
+            self.assertEqual(projected[16:], ('notes/today', 'launch', 'callback', 'source', 'next'))
+
     def test_live_reader_accepts_both_full_roster_pages(self):
         ids = [str(i).zfill(128) for i in range(300)]
         rows = [('M', mid) for mid in ids]
@@ -191,7 +305,7 @@ class Delivery(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 live.poll('', 'bound')
         self.assertTrue(roster.call_args.kwargs['include_archived'])
-        self.assertEqual(set(out.getvalue().strip().split('\t')[1].split('\x1f')), {'M:' + mid for mid in ids})
+        self.assertEqual(set(out.getvalue().strip().split('\t')[1].removeprefix('+').split('\x1f')), {'M\x1c' + mid for mid in ids})
 
     def test_coalesces_before_ipc(self):
         class Connection:
@@ -204,10 +318,10 @@ class Delivery(unittest.TestCase):
                 return dict(id='a', title='Title', status='active', text='Public')
 
         out = io.StringIO()
-        with patch.object(live, 'roster_rows', return_value=[('M','a','PRIVATE')]), patch.object(live, 'Connection', Connection), patch.object(live.time, 'sleep', side_effect=[None, KeyboardInterrupt]), contextlib.redirect_stdout(out):
+        with patch.object(live, 'roster_rows', return_value=[('M','a','Title')]), patch.object(live, 'Connection', Connection), patch.object(live.time, 'sleep', side_effect=[None, KeyboardInterrupt]), contextlib.redirect_stdout(out):
             with self.assertRaises(KeyboardInterrupt):
                 live.poll('a', 'bound', {'a'})
-        self.assertEqual(out.getvalue(), 'B\tM:a\tTitle\tactive\tPublic\n')
+        self.assertEqual(out.getvalue(), 'B\t+M\x1ca\x1cTitle\tTitle\tactive\tPublic\n')
 
     def test_unselected_status_changes_reach_sidebar(self):
         class Connection:
@@ -222,7 +336,23 @@ class Delivery(unittest.TestCase):
         with patch.object(live, 'Connection', Connection), patch.object(live, 'roster_rows', side_effect=[rows('active'), rows('paused')]), patch.object(live.time, 'monotonic', side_effect=[0, 6, 6]), patch.object(live.time, 'sleep', side_effect=[None, KeyboardInterrupt]), contextlib.redirect_stdout(out):
             with self.assertRaises(KeyboardInterrupt):
                 live.poll('', 'bound', {'b'})
-        self.assertEqual(out.getvalue().splitlines(), ['R\tM:b\x1fS:b:active', 'R\tM:b\x1fS:b:paused'])
+        self.assertEqual(out.getvalue().rstrip('\n').split('\n'),
+                         ['R\t+' + '\x1c'.join(rows(status)[0]) for status in ('active', 'paused')])
+
+    def test_machine_status_updates_without_id_change(self):
+        conn = type('Connection', (), {'binding': 'bound', 'check': lambda self: None})
+        def rows(status):
+            return [('N', 'node', 'Name\twith separator', '', '', '', '', '', status, '', '', 0)]
+        out = io.StringIO()
+        with patch.object(live, 'Connection', conn), patch.object(
+                live, 'roster_rows', side_effect=[rows('online'), rows('offline')]), patch.object(
+                live.time, 'monotonic', side_effect=[0, 6, 6]), patch.object(
+                live.time, 'sleep', side_effect=[None, KeyboardInterrupt]), contextlib.redirect_stdout(out):
+            with self.assertRaises(KeyboardInterrupt):
+                live.poll('', 'bound', set())
+        records = [line.removeprefix('R\t+N\x1c').split('\x1c') for line in out.getvalue().strip().split('\n')]
+        self.assertEqual([(r[0], r[1], r[7]) for r in records],
+                         [('node', 'Name with separator', 'online'), ('node', 'Name with separator', 'offline')])
 
     def test_rejects_foreign_projection(self):
         class Connection:

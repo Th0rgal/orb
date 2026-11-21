@@ -4,7 +4,6 @@ Run live_writes.py --sidebar-menu leanui or --sidebar-menu webkit. OCR reads the
 private compositor's pixels so the check also exercises the actual menu layout.
 """
 import contextlib
-import csv
 import json
 import os
 from pathlib import Path
@@ -16,6 +15,7 @@ import time
 import uuid
 
 from archive_race import archive_relay
+from wayland_ocr import read_words
 
 
 def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind):
@@ -44,7 +44,8 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
     config_path = tmp / 'connection.json'
     config = json.loads(config_path.read_text())
     config['api_url'], gate = stack.enter_context(archive_relay(config['api_url'], b))
-    config_path.write_text(json.dumps(config))
+    initial = dict(config, token="expired") if client_kind == "leanui" else config
+    config_path.write_text(json.dumps(initial))
     launch()
     sidebar = '10,100 200x560'
     header = '220,0 630x43'
@@ -52,44 +53,33 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
         image = subprocess.check_output(['grim', '-t', 'ppm', '-g', geometry, '-'], env=graphical)
         return read_words(image, geometry)
 
-    def read_words(image, geometry, full_frame=False):
-        origin, size = geometry.split()
-        crop = ['-crop', size + '+' + origin.replace(',', '+'), '+repage'] if full_frame else []
-        png = subprocess.check_output(['magick', '-', *crop, '-colorspace', 'gray', '-auto-level',
-                                       '-resize', '300%', 'png:-'], input=image)
-        result = subprocess.check_output(['tesseract', 'stdin', 'stdout', '--psm', '11', 'tsv'],
-                                         input=png, stderr=subprocess.DEVNULL, text=False)
-        ox, oy = map(int, geometry.split(' ')[0].split(','))
-        return [(r['text'].strip('.,:|…').lower(), ox+(int(r['left'])+int(r['width'])//2)//3,
-                 oy+(int(r['top'])+int(r['height'])//2)//3) for r in
-                csv.DictReader(result.decode().splitlines(), delimiter='\t') if r['text'].strip()]
     def locate(label, geometry):
         return next(((x, y) for word, x, y in words(geometry) if word == label.lower()), None)
     def see(label, geometry=sidebar):
         return wait('visible ' + label, lambda: locate(label, geometry))
     def open_project():
-        if client_kind == 'webkit':
-            def reveal():
-                if locate(fixture['openMission'], sidebar):
-                    return True
-                project = locate('menu', sidebar)
-                if project:
-                    click(20, project[1])
-                    try:
-                        return wait('expanded project roster', lambda: locate(fixture['openMission'], sidebar), 3)
-                    except TimeoutError:
-                        return False
-            wait('visible open mission in project', reveal)
+        def reveal():
+            if locate(fixture['openMission'], sidebar):
+                return True
+            project = locate('menu', sidebar)
+            if project:
+                click(20, project[1])
+                try:
+                    return wait('expanded project roster', lambda: locate(fixture['openMission'], sidebar), 3)
+                except TimeoutError:
+                    return False
+        wait('visible open mission in project', reveal)
     def action_menu(expected, choose, target_region=sidebar):
         x, y = see(fixture['contextMission'], target_region)
         click(x, y, 'button3')
         if client_kind == 'leanui':
-            geo = f'{x+20},{min(y,535)} 165x175'
+            regions = [f'{x+20},{min(y,535)} 165x175']
         else:
-            geo = '20,42 195x600'
+            # WebKit opens its menu at the pointer. The GTK popover can open above the row.
+            regions = [f'{max(0,x-12)},{min(y-8,510)} 220x185', f'{max(0,x-38)},{max(0,y-207)} 170x185']
         labels = {'rename':'rename', 'move':'move', 'archive':'archive', 'restore':'restore',
                   'copy-id':'copy', 'settings':'settings'}
-        def rows():
+        def actions_in(geo):
             visible = words(geo)
             first = next((i for i, (word, _, _) in enumerate(visible) if word == 'rename'), None)
             if first is None:
@@ -97,7 +87,8 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
             hits = {}
             last_y = None
             for action in expected:
-                match = next((i for i in range(first,len(visible)) if visible[i][0] == labels[action]), None)
+                match = next((i for i in range(first,len(visible)) if visible[i][0] == labels[action] or
+                              (action == 'move' and visible[i][0] == 'moveto')), None)
                 if match is None:
                     return None
                 _, x, y = visible[match]
@@ -107,11 +98,26 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
                 last_y = y
                 first = match + 1
             return hits
+        def rows():
+            return next((hits for region in regions if (hits := actions_in(region))), None)
         hits = wait('ordered context actions ' + ', '.join(expected), rows)
         click(*hits[choose])
+    if client_kind == "leanui":
+        see("unavailable", header)
+        replacement = tmp / "reconnected.json"
+        replacement.write_text(json.dumps(config))
+        replacement.replace(config_path)
     open_project()
     click(*see(fixture['openMission']))
     see(fixture['openMission'], header)
+    if client_kind == 'leanui':
+        # The selected mission moves into the freed sidebar space.
+        click(26, 20)
+        see(fixture['openMission'], '0,0 220x43')
+        assert locate(fixture['contextMission'], sidebar) is None
+        subprocess.run(['wtype', '-M', 'ctrl', '-k', 'b', '-m', 'ctrl'], env=graphical, check=True)
+        see(fixture['openMission'], header)
+        see(fixture['contextMission'], sidebar)
     # The client has already read B as idle when its Archive POST reaches
     # the relay. Activate B directly through Core before forwarding that POST.
     db_path, = tmp.rglob('missions.db')

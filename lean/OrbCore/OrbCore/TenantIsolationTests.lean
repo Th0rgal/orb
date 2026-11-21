@@ -1784,6 +1784,11 @@ def run (root : String) : IO Unit := do
           discard <| LeanSys.Posix.closeFd client
         | .error _ => pure ()
     try
+      for id in #["iso-claude-oauth", "missing-provider"] do
+        let (status, body) ← send "POST" "/api/ai/providers/cli-proxy-login" member
+          (.obj #[("provider", .str "anthropic"), ("provider_id", .str id)]) stWithProviders
+        check (status == 403 && body.fieldStr? "error" == some "not_account_owner")
+          "targeted reconnect requires a registered account owned by the caller"
       for (roleLbl, bearer) in #[("admin", admin), ("member", member)] do
         let (hSt, hDoc) ← send "GET" "/api/model-routing/health" bearer (.obj #[]) stWithProviders
         let hRaw := renderCompact hDoc
