@@ -1,9 +1,10 @@
 import { For, Show, createResource, createSignal } from "solid-js";
 import { api, connectionVersion } from "./api";
+import { nativeLaunchWarning } from "./missionLaunch";
 import { SettingsRow } from "./SettingsCard";
 
 const path = "/api/native-owner-enrollments";
-type Enrollment = { account_id: string; revision: number };
+type Enrollment = { account_id: string; revision: number; launch_block?: string };
 
 function OwnerNode(p: { node: string; account: string }) {
   const uri = () => path + "/" + encodeURIComponent(p.node);
@@ -30,7 +31,8 @@ function OwnerNode(p: { node: string; account: string }) {
   }
   return <SettingsRow title={p.node} stack>
     <Show when={record()}>{r => <>
-      <span>{bound() ? "This account is enrolled." : r().account_id ? "Another account is enrolled." : "No enrolled account."} Native execution is reserved.</span>
+      <span>{bound() ? "This account is enrolled." : r().account_id ? "Another account is enrolled." : "No enrolled account."}</span>
+      <Show when={bound() && nativeLaunchWarning(r().launch_block)}>{reason => <span role="status">{reason()}</span>}</Show>
       <button class="s-btn" disabled={busy()} onClick={() => void save()}>
         {bound() ? "Remove enrollment" : r().account_id ? "Replace enrolled account" : "Enroll this account"}
       </button>

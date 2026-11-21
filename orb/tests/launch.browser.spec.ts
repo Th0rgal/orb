@@ -11,16 +11,16 @@ const node={id:"dgx-spark",status:"online",cordoned:false};
 // backend that supports native Grok remote launches says so.
 type Capability={typed?:boolean;harnesses?:string[];goal_harnesses?:string[];raw_command?:boolean;proxy_url_configured?:boolean;requires_proxy_harnesses?:string[]};
 const typedCapability:Capability={typed:true,harnesses:["claudecode","opencode"],goal_harnesses:["opencode"],raw_command:true,proxy_url_configured:true};
-async function setup(page:Page, options:{cyberRefusal?:boolean;reject?:boolean;legacy?:boolean;remoteSuccess?:boolean;missing?:boolean;failed?:boolean;remoteJob?:{phase:string;node_state?:string};emptyStatus?:string;capability?:Capability|null;fleetFailAfterFirst?:boolean;files?:{name:string;kind:string}[];emptyContext?:boolean}={}){
+async function setup(page:Page, options:{nativeOwner?:boolean;cyberRefusal?:boolean;reject?:boolean;legacy?:boolean;remoteSuccess?:boolean;missing?:boolean;failed?:boolean;remoteJob?:{phase:string;node_state?:string};emptyStatus?:string;capability?:Capability|null;fleetFailAfterFirst?:boolean;files?:{name:string;kind:string}[];emptyContext?:boolean}={}){
  let attachmentReads:string[]=[];
  let posts:any[]=[], releasePost!:()=>void,releaseHistory!:()=>void, stops=0;
  const postGate=new Promise<void>(resolve=>releasePost=resolve),historyGate=new Promise<void>(resolve=>releaseHistory=resolve);
  let fail=!!options.reject;let fleetReads=0;let listReads=0;let fleetChanged=false;
  const capability=options.capability===undefined?typedCapability:options.capability;
  const m={...base,...(options.remoteSuccess?{status:"active",remote_job:{job_id:"job-123",node_id:"dgx-spark",phase:"observed"},execution:{state:"waiting_remote_job"}}:{}),...(options.remoteJob?{remote_job:{job_id:"job-123",node_id:"dgx-spark",...options.remoteJob},execution:{state:"waiting_remote_job"}}:{}),...(options.failed?{status:options.emptyStatus??"interrupted",goal_mode:true,goal_objective:"Original saved objective",terminal_reason:"orphan_no_runner",remote_node_id:"dgx-spark"}:{})};
- await page.addInitScript(()=>{
+ await page.addInitScript((nativeOwner)=>{
   localStorage.setItem("orb.apiUrl",location.origin);localStorage.setItem("orb.jwt","test");localStorage.setItem("orb-theme","dark");
-  localStorage.setItem("orb.harnessPick",JSON.stringify({backend:"grok",model:"grok-4.6"}));
+  localStorage.setItem("orb.harnessPick",JSON.stringify(nativeOwner ? {backend:"antigravity",model:"gemini-4-carbon-high"} : {backend:"grok",model:"grok-4.6"}));
   const timing:any={};(window as any).launchTiming=timing;
   document.addEventListener("keydown",event=>{if(event.key==="Enter"&&event.target instanceof HTMLTextAreaElement&&!timing.start)timing.start=performance.now();},true);
   new MutationObserver(()=>{
@@ -29,7 +29,7 @@ async function setup(page:Page, options:{cyberRefusal?:boolean;reject?:boolean;l
    if(timing.response&&document.querySelector('textarea[placeholder$="Send follow-up"]')&&!timing.acceptedView)timing.acceptedView=performance.now()-timing.response;
   }).observe(document,{subtree:true,childList:true,attributes:true});
   const fetcher=window.fetch.bind(window);window.fetch=async(input,init)=>{const response=await fetcher(input,init);if(String(input).endsWith("/api/control/missions")&&init?.method==="POST"&&response.ok){timing.response=performance.now();if(document.querySelector('textarea[placeholder$="Send follow-up"]'))timing.acceptedView=0;}return response;};
- });
+ }, !!options.nativeOwner);
  await page.route("**/api/**",async route=>{
   const request=route.request(),url=new URL(request.url()),path=url.pathname;
     if(path === "/api/model-routing/chains") return route.fulfill({json:[{id:"builtin/smart",name:"Smart (Default)"}]});
@@ -57,7 +57,7 @@ async function setup(page:Page, options:{cyberRefusal?:boolean;reject?:boolean;l
   if(path==="/api/remote-nodes"){
    fleetReads++;
    if(options.fleetFailAfterFirst&&fleetChanged)return route.fulfill({status:503,body:"fleet monitor unavailable"});
-   return route.fulfill({json:{enabled:true,nodes:options.missing&&fleetChanged?[]:[node],...(capability?{remote_launch:capability}:{})}});
+   return route.fulfill({json:{enabled:true,nodes:options.missing&&fleetChanged?[]:[options.nativeOwner ? {...node,launch_block:"native_owner_executor_unavailable"} : node],...(capability?{remote_launch:capability}:{})}});
   }
   if(path.endsWith("/files") || path.includes("/controller")) {
    attachmentReads.push(path);
@@ -66,13 +66,13 @@ async function setup(page:Page, options:{cyberRefusal?:boolean;reject?:boolean;l
   }
   const filePath=url.searchParams.get("path")||"";
   if(path==="/api/control/cyber-capabilities")return route.fulfill({json:{version:2,route_supported:!options.cyberRefusal,refusal:options.cyberRefusal?"unsupported_access_program: Choose Automatic explicitly. No mission was launched.":null}});
- const json=path==="/api/projects"?{projects:[{slug:"test",title:"Test"}]}:path==="/api/backends"?[{id:"grok",name:"Grok"},{id:"codex",name:"Codex"},{id:"opencode",name:"OpenCode"},{id:"claudecode",name:"Claude Code"}]:path==="/api/providers/backend-models"?{backends:{grok:[{value:"grok-4.6",label:"Grok 4.6"}],codex:[{value:"codex-model",label:"Codex model"}],opencode:[{value:"xai/grok-4.6",label:"Grok 4.6"}],claudecode:[{value:"claude-sonnet-4-6",label:"Claude Sonnet 4.6"}]}}:path==="/api/control/missions"?options.failed?[m]:[]:path.endsWith("/files")?{entries:filePath==="notes"?[{name:"foo.md",kind:"file"}]:(options.files??[])}:path.endsWith("/crons")?{jobs:[]}:{job:path.includes("/controller")?{id:"ctrl-1",name:"Test controller",enabled:true,state:"scheduled"}:null,runs:[]};
+ const json=path==="/api/projects"?{projects:[{slug:"test",title:"Test"}]}:path==="/api/backends"?[...(options.nativeOwner?[{id:"antigravity",name:"Antigravity CLI"}]:[]),{id:"grok",name:"Grok"},{id:"codex",name:"Codex"},{id:"opencode",name:"OpenCode"},{id:"claudecode",name:"Claude Code"}]:path==="/api/providers/backend-models"?{backends:{antigravity:[{value:"gemini-4-carbon-high",label:"Carbon"}],grok:[{value:"grok-4.6",label:"Grok 4.6"}],codex:[{value:"codex-model",label:"Codex model"}],opencode:[{value:"xai/grok-4.6",label:"Grok 4.6"}],claudecode:[{value:"claude-sonnet-4-6",label:"Claude Sonnet 4.6"}]}}:path==="/api/control/missions"?options.failed?[m]:[]:path.endsWith("/files")?{entries:filePath==="notes"?[{name:"foo.md",kind:"file"}]:(options.files??[])}:path.endsWith("/crons")?{jobs:[]}:{job:path.includes("/controller")?{id:"ctrl-1",name:"Test controller",enabled:true,state:"scheduled"}:null,runs:[]};
   return route.fulfill({json});
  });
  await page.goto("/");
  // The first page has to load the cold Vite module graph before the timing
  // assertions below begin measuring the launch itself.
- await expect(page.getByRole("button",{name:"Grok",exact:true})).toBeVisible({timeout:15_000});
+ await expect(page.getByRole("button",{name:options.nativeOwner?/Antigravity/: "Grok",exact:true})).toBeVisible({timeout:15_000});
  // These scenarios exercise the named project's context; new sessions now default to Default.
  if (!options.failed) {
   await page.getByRole("button",{name:"Choose project",exact:true}).click();
@@ -528,4 +528,32 @@ test("unsupported Cyber route keeps the draft and never submits a remote mission
  await expect(page.getByRole("menuitemradio",{name:/Automatic/})).toBeEnabled();
  await page.getByRole("menuitemradio",{name:/Automatic/}).click();await input.press("Enter");
  await expect.poll(()=>state.posts.length).toBe(1);expect(state.posts[0].cyber_access).toBe("automatic");
+});
+
+test("enrolled native node reports the isolated executor before send and after reopening", async ({page}) => {
+  const state = await setup(page, {nativeOwner:true, capability:{...typedCapability,
+    harnesses:["antigravity"], goal_harnesses:["antigravity"]}});
+  await chooseRemote(page);
+  const input = composerInput(page);
+  await input.fill(plainPrompt);
+  const warning = page.locator(".composer-warning");
+  await expect(warning).toContainText("isolated workspace executor");
+  await expect(page.locator(".composer .send").last()).toBeDisabled();
+  await input.press("Enter");
+  await expect(input).toHaveValue(plainPrompt);
+  await page.getByRole("button",{name:"Inference",exact:true}).click();
+  await expect(input).toHaveCount(0);
+  await page.getByRole("button",{name:/New Agent/}).first().click();
+  await chooseRemote(page);
+  await input.fill(prompt);
+  await expect(warning).toContainText("isolated workspace executor");
+  await input.press("Enter");
+  expect(state.posts).toHaveLength(0);
+  await page.getByRole("button",{name:/^DGX Spark$/}).click();
+  await page.getByRole("button",{name:"Core agent-core"}).click();
+  await expect(warning).toHaveCount(0);
+  await input.press("Enter");
+  await expect.poll(() => state.posts.length).toBe(1);
+  expect(state.posts[0]).toMatchObject({backend:"antigravity",prompt});
+  state.releasePost(); state.releaseHistory();
 });

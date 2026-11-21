@@ -1045,6 +1045,7 @@ async function sendRequestOnce<T>(
 }
 
 export interface RemoteNodeView {
+  launch_block?: string;
   resource_history?: { time: number; memory?: number | null; cpu?: number | null; gpu?: number | null }[];
   cpu_total?: number | null;
   mem_total_bytes?: number | null;

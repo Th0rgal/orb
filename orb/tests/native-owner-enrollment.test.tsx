@@ -18,10 +18,11 @@ it("uses the revision shown to the owner for enrollment and removal", async () =
       account = update.account_id;
       revision++;
     }
-    return { account_id: account, revision };
+    return { account_id: account, revision, launch_block: "native_owner_executor_unavailable" };
   });
   const ui = render(() => <NativeOwnerEnrollment account="ledger-account" />);
   fireEvent.click(await ui.findByRole("button", { name: "Enroll this account" }));
+  expect((await ui.findByRole("status")).textContent).toContain("isolated workspace executor");
   fireEvent.click(await ui.findByRole("button", { name: "Remove enrollment" }));
   await waitFor(() => expect(writes).toEqual([
     { account_id: "ledger-account", expected_revision: 3 },

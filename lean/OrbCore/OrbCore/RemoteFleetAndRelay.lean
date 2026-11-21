@@ -354,6 +354,10 @@ def hasCurrentNativeEnrollment (st : CoreStore) (node owner : String) : IO Bool 
     | return false
   return rows.size > 1
 
+def nativeOwnerLaunchBlock (store : CoreStore) (node owner : String) : IO String := do
+  if ← hasCurrentNativeEnrollment store node owner then return "native_owner_executor_unavailable"
+  return "native_owner_enrollment_required"
+
 def resolveStaticNodeToken? (node : StaticRemoteNode) : IO (Option String) := do
   if let some v ← IO.getEnv node.tokenEnv then
     let t := v.trimAscii.toString
@@ -821,7 +825,14 @@ def buildComputeFleetJVal
   let probed ← probeAllStaticNodesParallel staticNodes persistedCordons effIso probeDeadlineMs isAdmin
   -- A node that did not answer keeps what its last heartbeat reported.
   let heartbeatCache ← loadNodeHeartbeatCache dataRoot
-  let staticItems := probed.map (NodeLiveness.applyCache heartbeatCache)
+  let staticItems ← probed.mapM fun sample => do
+    let item := NodeLiveness.applyCache heartbeatCache sample
+    let id := (item.fieldStr? "id").getD ""
+    if let some owner := (staticNodes.find? (fun n => n.id == id)).bind (·.dedicatedOwner?) then
+      if callerUserId? == some owner then
+        if let some store := store? then
+          return item.setField "launch_block" (.str (← nativeOwnerLaunchBlock store id owner))
+    return item
   saveNodeHeartbeatCache dataRoot heartbeatCache (NodeLiveness.updateCache heartbeatCache probed)
   let jobLoad ← match store? with
     | some store => activeJobsByNode store

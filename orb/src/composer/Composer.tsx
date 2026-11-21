@@ -70,6 +70,7 @@ export function Composer(p: {
   onSend: (t: string, images: DraftImage[], files?: UploadedFile[]) => void | boolean | Promise<void | boolean>;
   onStop?: () => void;
   keepStopVisible?: boolean;
+  launchUnavailable?: string;
   goalUnavailable?: string;
   textOnly?: boolean;
   imagesOnly?: boolean;
@@ -717,9 +718,9 @@ export function Composer(p: {
     ta.setSelectionRange(next.caret, next.caret);
     setCaret(next.caret);
   };
-  const goalBlocked = () => p.goalUnavailable && (mode() === "goal" || goalDraft(text()).kind !== "none");
+  const sendWarning = () => p.launchUnavailable || ((mode() === "goal" || goalDraft(text()).kind !== "none") ? p.goalUnavailable : undefined);
   const send = async () => {
-    if (goalBlocked()) return;
+    if (sendWarning()) return;
     // A direct upload stays attached even if its token was edited out of the draft.
     const missingTokens = p.directFileUpload ? uploaded.map(file => uploadToken(file.path)).filter(token => !text().includes(token)) : [];
     const original = missingTokens.length ? `${text().trimEnd()}${text().trim() ? "\n\n" : ""}${missingTokens.join(" ")}` : text();
@@ -1016,7 +1017,7 @@ export function Composer(p: {
   const sendBtn = (
     <div class="send-slot">
       <Show when={(text().trim() || images().length) && !slash() && !voiceActive()}>
-        <button class="send" disabled={p.disabled || !!goalBlocked() || uploading() || sendingLocked() || readingImages()} onClick={send} aria-label={p.sendLabel} title={mode()==="btw" ? "Ask side question" : p.busy ? "Queue for next turn" : p.sendLabel ?? "Send"}>
+        <button class="send" disabled={p.disabled || !!sendWarning() || uploading() || sendingLocked() || readingImages()} onClick={send} aria-label={p.sendLabel} title={mode()==="btw" ? "Ask side question" : p.busy ? "Queue for next turn" : p.sendLabel ?? "Send"}>
           <Ic.ArrowUpIcon size={14} />
         </button>
       </Show>
@@ -1243,7 +1244,7 @@ export function Composer(p: {
       {voice}
       {sendBtn}
     </div>
-    <Show when={goalBlocked()}><p class="composer-warning" role="status">{p.goalUnavailable}</p></Show>
+    <Show when={sendWarning()}><p class="composer-warning" role="status">{sendWarning()}</p></Show>
   </>);
 }
 

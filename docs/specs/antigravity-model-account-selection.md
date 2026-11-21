@@ -429,6 +429,13 @@ first binding. An empty account ID removes the binding. Rebinding or removal
 revokes existing native RPC grants associated with jobs on that node in the
 same transaction. Other nodes retain their grants.
 
+The owner’s fleet row and enrollment detail expose Core’s `launch_block` reason.
+New Agent shows that reason before a standard or Goal send, including after reopening.
+A fresh fleet read also checks the reason at submit time. The owner can select a
+different machine and send the same draft. Desktop provider settings show the
+same reason alongside the enrolled account. The native iOS and Android clients
+currently lack the dedicated-account enrollment screen and this pre-send warning.
+
 This increment reserves the node. A signed job for another owner fails node
 admission. A matching owner also receives a refusal because execution under
 the account profile requires a private job-lifetime tunnel and an isolated

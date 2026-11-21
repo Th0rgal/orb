@@ -1838,9 +1838,7 @@ partial def submitRemoteMissionTurn
     | .error error => return .error error
   if let some owner ← nativeNodeOwner? store staticNodes effTarget then
     if owner.isEmpty || spec.ownerUserId != owner then return .error "node_owner_required"
-    unless ← hasCurrentNativeEnrollment store effTarget owner do return .error "native_owner_enrollment_required"
-    -- A generic job cannot consume an owner profile while the lifetime relay is unavailable.
-    return .error "native_owner_executor_unavailable"
+    return .error (← nativeOwnerLaunchBlock store effTarget owner)
   let (leaseNodeId, nodeSecret) ← do
     if let some sn := staticNodes.find? (fun n => n.id == effTarget) then
       let some tok ← resolveStaticNodeToken? sn

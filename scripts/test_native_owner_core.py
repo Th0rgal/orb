@@ -78,7 +78,8 @@ def run(binary, root):
         path = "/api/native-owner-enrollments/" + NODE_ID
         assert request(port, bob, "GET", path)[0] == 403
         status, body = request(port, alice, "GET", path)
-        assert status == 200 and json.loads(body) == {"account_id": "", "revision": 0}
+        assert status == 200 and json.loads(body) == {"account_id": "", "revision": 0,
+                                                     "launch_block": "native_owner_enrollment_required"}
         status, body = request(port, alice, "POST", "/api/control/missions", {
             "backend": "antigravity", "remote_node_id": NODE_ID, "project": "tests",
             "prompt": "Read the disposable ledger.", "writer": False
@@ -88,6 +89,12 @@ def run(binary, root):
         enroll(alice, "bob", 0, 403)
         assert enroll(alice, "alice", 0, 200)["revision"] == 1
         assert enroll(alice, "alice", 1, 200)["revision"] == 1
+        assert json.loads(request(port, alice, "GET", path)[1])["launch_block"] == "native_owner_executor_unavailable"
+        for token in (alice, bob):
+            status, body = request(port, token, "GET", "/api/remote-nodes")
+            assert status == 200
+            node, = json.loads(body)["nodes"]
+            assert node.get("launch_block") == ("native_owner_executor_unavailable" if token == alice else None)
         native_route = "/api/native/antigravity/v1internal:fetchUserInfo"
         grants = {}
         for token, expected in ((alice, 503), (bob, 403), (login("admin"), 403)):

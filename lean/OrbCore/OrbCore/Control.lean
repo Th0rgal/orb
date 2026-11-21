@@ -3767,7 +3767,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let row := rows[1]?.getD #[]
       let revision := ((row[1]?.getD "0").toNat?).getD 0
       return .ok (mkJson 200 (renderCompact (.obj #[
-        ("account_id", .str (row[0]?.getD "")), ("revision", JVal.uint64 revision.toUInt64)])))
+        ("account_id", .str (row[0]?.getD "")), ("revision", JVal.uint64 revision.toUInt64),
+        ("launch_block", .str (← nativeOwnerLaunchBlock st.store node caller.userId))])))
     unless req.method == "PUT" do return .ok (mkJson 405 "{}")
     let body := req.bodySlice.toByteArray
     if body.size > 2048 then return .ok (mkJson 413 "{}")
