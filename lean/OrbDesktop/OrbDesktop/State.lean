@@ -360,14 +360,17 @@ structure MissionMenu where
   deriving Repr, Inhabited
 
 inductive VoicePhase where
-  | idle | recording | finishing
+  | idle | recording | finishing | choosing
   deriving BEq, Repr, Inhabited
 
+def voiceLanguageId : Nat := 747
 def voiceButtonId : Nat := 745
 def voiceCancelId : Nat := 746
 
 /-- Complete single-owner pure state of the Orb Desktop shell. -/
 structure DesktopState where
+  voiceLanguage : String := ""
+  voicePicker : Bool := false
   voiceAvailable : Bool := false
   voiceBinding : String := ""
   voiceGeneration : Nat := 0
@@ -827,7 +830,7 @@ def DesktopState.sidebarHoverRow (st : DesktopState) (hit : Option WidgetId) : O
   if ["nav", "project", "mission", "footer"].contains row.kind then some rowId else none
 
 def DesktopState.hoverTarget (st : DesktopState) (hit : Option WidgetId) : Option WidgetId := do
-  if hit == some voiceButtonId || hit == some voiceCancelId then return ← hit
+  if hit == some voiceLanguageId || hit == some voiceButtonId || hit == some voiceCancelId then return ← hit
   let id ← hit
   if st.screen == .inference && id >= providersBackId then some id else st.sidebarHoverRow hit
 
@@ -1141,10 +1144,13 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       if let .activate id := ev then
         if id == voiceCancelId && st.voicePhase != .idle then
           return ({ st with voicePhase := .idle }, some viewport)
+        if id == voiceLanguageId && st.voicePicker && st.voicePhase == .idle then
+          return ({ st with voicePhase := .choosing, voiceBinding := st.connectionBinding, voiceGeneration := st.voiceGeneration + 1 }, some viewport)
         if id == voiceButtonId then
           match st.voicePhase with
           | .idle => return ({ st with voicePhase := .recording, voiceBinding := st.connectionBinding, voiceGeneration := st.voiceGeneration + 1 }, some viewport)
           | .recording => return ({ st with voicePhase := .finishing }, some viewport)
+          | .choosing => return (st, none)
           | .finishing => return ({ st with voicePhase := .idle }, some viewport)
       if let .key 0xff1b _ .pressed := ev then
         if st.voicePhase != .idle then return ({ st with voicePhase := .idle }, some viewport)

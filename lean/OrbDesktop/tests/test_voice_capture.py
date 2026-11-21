@@ -1,4 +1,5 @@
 """Exercise native capture with a synthetic PCM source and Orb's fake worker."""
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -56,6 +57,56 @@ time.sleep(10)
 
     def test_finish_transcribes_local_pcm(self):
         self.assertIn(b"[fake en]", self.record(b"F"))
+
+    def run_adapter(self, mode, *args):
+        return subprocess.run([sys.executable, str(ADAPTER), mode, *args], env=self.env,
+                              capture_output=True, text=True, timeout=5)
+
+    def test_french_desktop_locale(self):
+        self.env.update(LANGUAGE="sv_SE:fr_CA.UTF-8", LANG="en_US.UTF-8")
+        self.assertIn(b"[fake fr]", self.record(b"F"))
+
+    def test_saved_language_overrides_locale(self):
+        prefs = self.root / ".orb/ui-prefs.json"
+        prefs.parent.mkdir()
+        prefs.write_text(json.dumps({"orb.voiceLang": "en", "orb-theme": "dark"}))
+        self.env["LANG"] = "fr_FR.UTF-8"
+        self.assertIn(b"[fake en]", self.record(b"F"))
+        self.assertEqual(json.loads(prefs.read_text())["orb.voiceLang"], "en")
+
+    def test_picker_saves_language_and_cancel_preserves_it(self):
+        prefs = self.root / ".orb/ui-prefs.json"
+        prefs.parent.mkdir()
+        prefs.write_text('{"orb-theme":"light"}')
+        picker = self.root / "zenity"
+        picker.write_text(f"#!{sys.executable}\nimport sys\nassert 'Français' in sys.argv\nprint('fr')\n")
+        picker.chmod(0o755)
+        self.assertEqual(self.run_adapter("choose").stdout.strip(), "fr")
+        picker.write_text(f"#!{sys.executable}\nraise SystemExit(1)\n")
+        self.assertEqual(self.run_adapter("choose").stdout.strip(), "fr")
+        self.assertEqual(json.loads(prefs.read_text()), {"orb-theme": "light", "orb.voiceLang": "fr"})
+        self.assertFalse(self.marker.exists())
+        self.assertIn(b"[fake fr]", self.record(b"F"))
+
+    def test_model_languages_and_readiness_gate_capture(self):
+        worker = self.root / "worker.py"
+        self.env["ORB_VOICE_WORKER"] = str(worker)
+        catalog = (PKG.parents[1] / "orb/src/voiceLanguages.json").read_text()
+        prefs = self.root / ".orb/ui-prefs.json"
+        prefs.parent.mkdir()
+        prefs.write_text('{"orb.voiceLang":"fr"}')
+        for languages, present, expected in [(["en"], True, "en"), (["fr"], True, "fr"),
+                                             (["xx"], True, ""), (["fr"], False, "")]:
+            capability = dict(protocol=1, backend="fixture", languages=languages, model_present=present)
+            response = json.dumps(dict(id=1, ok=True, result=capability))
+            worker.write_text(f"import json, sys\nassert json.loads(sys.stdin.readline())['op'] == 'hello'\nprint({response!r})")
+            result = self.run_adapter("probe")
+            self.assertEqual(result.returncode == 0, bool(expected))
+            if expected:
+                self.assertEqual(result.stdout.split()[0], expected)
+            self.assertNotEqual(self.run_adapter("record", catalog, "de").returncode, 0)
+            self.assertFalse(self.marker.exists())
+            self.assertEqual(json.loads(prefs.read_text())["orb.voiceLang"], "fr")
 
     def test_cancel_discards_audio(self):
         self.assertEqual(self.record(b""), b"")

@@ -6,7 +6,7 @@ open OrbDesktop LeanUI
 
 private def draft : DesktopState := {
   DesktopState.liveUnavailable with
-  connectionBinding := "fixture", voiceAvailable := true
+  connectionBinding := "fixture", voiceAvailable := true, voiceLanguage := "fr", voicePicker := true
   composer := { text := "A猫Z", cursorOffset := 2 } }
 
 private def step (st : DesktopState) (event : Event) :=
@@ -14,6 +14,9 @@ private def step (st : DesktopState) (event : Event) :=
 
 private def recording := step draft (.activate voiceButtonId)
 private def finishing := step recording (.activate voiceButtonId)
+#guard (step draft (.activate voiceLanguageId)).voicePhase == .choosing
+#guard (step (step draft (.activate voiceLanguageId)) (.activate voiceButtonId)).voicePhase == .choosing
+#guard (step { draft with voicePicker := false } (.activate voiceLanguageId)).voicePhase == .idle
 #guard recording.voicePhase == .recording
 #guard finishing.voicePhase == .finishing
 #guard (step recording (.key 0xff1b 0 .pressed)).voicePhase == .idle
@@ -28,7 +31,8 @@ private def deliver (st : DesktopState) : IO DesktopState := do
     binding := "fixture", generation := recording.voiceGeneration
     stop := pure (), finish := pure (), result := pure (some (some "語")) }
   let slot ← IO.mkRef (some session)
-  pollVoice slot true st (pure ())
+  let capability ← IO.mkRef ({ language := "en", picker := true } : VoiceCapability)
+  pollVoice slot capability st (pure ())
 
 def main : IO Unit := do
   let w := pxToSub 960

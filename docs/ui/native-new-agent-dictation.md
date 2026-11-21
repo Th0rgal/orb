@@ -5,6 +5,18 @@ packaged Python interpreter, worker script and PulseAudio-compatible capture
 utility are available. Opening the window, probing availability, focusing the
 button and hovering over it must never start capture.
 
+The worker's protocol-v1 `hello` supplies model readiness and supported
+language codes. The client intersects those codes with Orb’s voice language
+catalog. It prefers the shared `orb.voiceLang` setting, then the first
+supported desktop locale, then English. If the model lacks English it uses
+the first compatible catalog entry. A fallback never overwrites a saved choice.
+
+The language code beside the microphone opens a GTK radio list when Zenity
+is available. Confirming a choice updates only `orb.voiceLang` in the shared
+desktop preferences. Closing the list keeps the current preference. Each
+recording rechecks the selected language against the current model before
+opening audio.
+
 Click the microphone or focus it with Tab and press Enter or Space to record.
 The check button finishes capture. The close button and Escape discard a
 recording or pending transcription. Leaving the draft or changing connections
