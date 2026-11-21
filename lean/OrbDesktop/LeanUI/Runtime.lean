@@ -190,17 +190,22 @@ def stepEvent (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage) (
       else { (rt.markFullDamage) with scrollOffsetSub := nextOff }
     | .closeRequested =>
       { rt with running := false }
-    | .key keysym _mods state =>
+    | .key keysym mods state =>
       if state == .pressed || state == .repeated then
         -- Tab is handled here so every screen shares one focus traversal policy.
         if keysym == 0xff09 then
           let focus' := cycleFocusRuntime rt.focus rt.focusableOrder
           let dmg' := if focus'.owner == rt.focus.owner then rt.damage else Damage.add rt.damage rt.viewportDeviceRect
           { rt with focus := focus', damage := dmg' }
-        else if keysym == 0xff0d || keysym == 0x20 then
+        else if keysym == 0xff0d || keysym == 0xff8d || keysym == 0x20 then
           match rt.focus.owner with
           | some id =>
-            let (app', appDmg) := onEvent rt.app (.activate id)
+            let editorReturn := id == 1 && keysym != 0x20
+            if editorReturn && state == .repeated then rt else
+            let action := if editorReturn then
+                Event.composerReturn (mods &&& 1 != 0)
+              else Event.activate id
+            let (app', appDmg) := onEvent rt.app action
             let finalDmg := match appDmg with
               | none => rt.damage
               | some r => Damage.add rt.damage r

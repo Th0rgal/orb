@@ -987,7 +987,15 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       return ({ next with sidebarRows := next.sidebarRows.map fun row => { row with selected := row.widgetId == navId } }, some viewport)
     if navId == 101 then
       return (resetSelection { st with screen := .controlEmpty, draftProject := "", writeError := "" } none, some viewport)
-    if let .activate id := ev then
+    if let .composerReturn shift := ev then
+      if !st.composer.imePreeditText.isEmpty then return (st, none)
+      if shift then return stepDesktopInput scale120 viewport st (.text "\n")
+      if st.composer.isRunning then return (st, none)
+    let activation := match ev with
+      | .activate id => some id
+      | .composerReturn false => some 2
+      | _ => none
+    if let some id := activation then
       if id >= missionDisclosureId 0 then
         if let some row := st.sidebarRows.find? (fun r => r.kind == "mission" && missionDisclosureId r.widgetId == id) then
           let expanded := if st.expandedMissions.contains row.rowId then

@@ -81,6 +81,13 @@ private def nestedControllerFixture : DesktopState :=
 private def unsentDraft : DesktopState :=
   { hierarchyFixture with composer := { text := "Keep this draft" }, draftProject := "other" }
 
+#guard (stepDesktopEvent 120 vp { unsentDraft with screen := .controlEmpty } (.composerReturn false)).1.writeRequest == some .create
+#guard (stepDesktopEvent 120 vp unsentDraft (.composerReturn true)).1.composer.text == "\nKeep this draft"
+#guard (stepDesktopEvent 120 vp { unsentDraft with composer := { unsentDraft.composer with imePreeditText := "か" } }
+  (.composerReturn false)).1.writeRequest.isNone
+#guard (stepDesktopEvent 120 vp { unsentDraft with composer := { unsentDraft.composer with isRunning := true } }
+  (.composerReturn false)).1.writeRequest.isNone
+
 private def collapsed := (stepDesktopEvent 120 vp unsentDraft (.activate sidebarToggleId)).1
 #guard collapsed.sidebarWidth == 0 && collapsed.composer.text == unsentDraft.composer.text
 #guard (stepDesktopEvent 120 vp collapsed (.key 0x62 2 .pressed)).1.sidebarWidth == chromeSidebarWidthSub

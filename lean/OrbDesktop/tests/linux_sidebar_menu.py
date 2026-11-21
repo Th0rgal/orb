@@ -121,6 +121,14 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
     open_project()
     click(*see(fixture['openMission']))
     see(fixture['openMission'], header)
+    if client_kind == 'leanui':
+        # The selected mission moves into the freed sidebar space.
+        click(26, 20)
+        see(fixture['openMission'], '0,0 220x43')
+        assert locate(fixture['contextMission'], sidebar) is None
+        subprocess.run(['wtype', '-M', 'ctrl', '-k', 'b', '-m', 'ctrl'], env=graphical, check=True)
+        see(fixture['openMission'], header)
+        see(fixture['contextMission'], sidebar)
     # The client has already read B as idle when its Archive POST reaches
     # the relay. Activate B directly through Core before forwarding that POST.
     db_path, = tmp.rglob('missions.db')
