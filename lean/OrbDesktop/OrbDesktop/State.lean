@@ -222,6 +222,7 @@ structure ChromeSidebarRow where
   subtitle : String := ""
   iconColor : Option Color := none
   status : String := "" -- `"running"`, `"completed"`, `"attention"`, `""`
+  archiveOnly : Bool := false
   shortcut : String := ""
   badge : Nat := 0
   selected : Bool := false
@@ -248,6 +249,7 @@ structure MissionSummaryCard where
   callbackParentMissionId : String := ""
   forkSource : String := ""
   supersededBy : String := ""
+  archiveTag : Bool := false
   deriving DecidableEq, Repr, Inhabited
 
 /-- Managed VM or static compute node entry for `05_machines_fleet`. -/
@@ -386,6 +388,7 @@ structure DesktopState where
   providers : Option (List ProviderAccount) := none
   providerReadFailed : Bool := false
   accountRoutePage : Option AccountRoutePage := none
+  projectMemberships : List (String × List String) := []
   expandedProjects : List String := []
   expandedMissions : List String := []
   archivesOpen : Bool := false
@@ -427,6 +430,12 @@ def DesktopState.headerTitle (st : DesktopState) : String :=
   else if (st.screen == .controlEmpty || st.screen == .controlPopulated) && st.openMission.isNone && !st.draftProject.isEmpty then
     ((st.sidebarRows.find? (·.rowId == "project:" ++ st.draftProject)).map (·.title)).getD st.draftProject
   else (st.selectedCard.map (·.title)).getD st.screen.headerTitle
+
+def MissionSummaryCard.isArchived (card : MissionSummaryCard) : Bool :=
+  card.archiveTag || card.status == "acknowledged"
+
+def restoredExecutionStatus (status : String) : String :=
+  if status == "acknowledged" then "paused" else status
 
 def MissionSummaryCard.isRunning (card : MissionSummaryCard) : Bool :=
   card.status == "active" || card.status == "running"
@@ -874,6 +883,11 @@ private def missionBranchRows (rows : Array ChromeSidebarRow)
   let mut visible := []
   for (row, parent, depth, shown) in bottomUp do
     let launched := totals.getD row.rowId 0
+    let card := cards.get? row.widgetId
+    let archived := row.status == "acknowledged" || card.any (·.archiveTag)
+    if archived && launched == 0 then
+      visible := { row with archiveOnly := true } :: visible
+      continue
     if !parent.isEmpty then
       totals := totals.insert parent (totals.getD parent 0 + launched + 1)
     if shown then
@@ -890,15 +904,23 @@ def DesktopState.visibleProjectRows (st : DesktopState) : List ChromeSidebarRow 
   let projectOf := fun id => ((cards.get? id).map (·.project)).getD ""
   let mut active := #[]
   let mut archived := #[]
+  let memberships := Std.HashMap.ofList (st.projectMemberships.map fun (slug, ids) => (slug, Std.HashSet.ofList ids))
   for row in st.sidebarRows do
     if row.kind == "mission" then
-      if row.status == "acknowledged" then archived := archived.push row
-      else active := active.push row
+      let project := projectOf row.widgetId
+      let membership := memberships.get? (if project.isEmpty then "default" else project)
+      let mid := (row.rowId.drop 8).toString
+      if st.openMission == some mid || membership.all (·.contains mid) then active := active.push row
+      else if row.status == "acknowledged" || (cards.get? row.widgetId).any (·.archiveTag) then
+        archived := archived.push { row with archiveOnly := true }
   let mut grouped : Std.HashMap String (Array ChromeSidebarRow) := {}
   let projectKeys := Std.HashSet.ofList (projects.map (fun row => (row.rowId.drop 8).toString))
   let mut unassigned := #[]
   let mut slug := ""
   for row in missionBranchRows active cards st.expandedMissions do
+    if row.archiveOnly then
+      archived := archived.push row
+      continue
     if row.depth == 0 then
       let project := projectOf row.widgetId
       slug := if project.isEmpty then "default" else project
@@ -937,7 +959,7 @@ def sidebarTreeBranches (rows : List ChromeSidebarRow) :
   return result.toList
 
 def toggleSelection (st : DesktopState) (row : ChromeSidebarRow) (extend : Bool) : DesktopState := Id.run do
-  let ids := (st.visibleProjectRows.filter (fun r => selectableRow r && (st.archivesOpen || r.status != "acknowledged"))).map (·.rowId)
+  let ids := (st.visibleProjectRows.filter (fun r => selectableRow r && (st.archivesOpen || !r.archiveOnly))).map (·.rowId)
   if extend then
     if let some anchor := st.selectionAnchor then
       let a := ids.idxOf anchor
@@ -989,7 +1011,7 @@ def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuR
     if menu.page == .destinations then
       return [{ id := 715, label := "Move to", icon := "back" }] ++ (st.sidebarRows.filter (·.kind == "project")).mapIdx fun i p =>
         { id := 2000000 + i, label := p.title, icon := "folder", action := some (.bulk "move" menu.targets (p.rowId.drop 8).toString) }
-    let archived := st.missionCards.filter fun c => menu.targets.contains c.missionId && c.status == "acknowledged"
+    let archived := st.missionCards.filter fun c => menu.targets.contains c.missionId && c.isArchived
     let restore := archived.map (·.missionId)
     let archive := menu.targets.filter fun id => !restore.contains id
     let move : List MissionMenuRow := if st.sidebarRows.any (·.kind == "project") then
@@ -1021,8 +1043,8 @@ def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuR
   | .actions =>
     return [{ id := 710, label := "Rename…", icon := "rename" }] ++
       (if projects.isEmpty then [] else [{ id := 711, label := "Move to", icon := "folder" }]) ++
-      [{ id := 712, label := if card.status == "acknowledged" then "Restore" else "Archive", icon := "archive",
-         action := some (if card.status == "acknowledged" then .restore card.missionId else .archive card.missionId) },
+      [{ id := 712, label := if card.isArchived then "Restore" else "Archive", icon := "archive",
+         action := some (if card.isArchived then .restore card.missionId else .archive card.missionId) },
        { id := 713, label := "Copy mission ID", icon := "copy", action := some (.copyId card.missionId), separatorBefore := true },
        { id := 714, label := "Mission settings", icon := "nav:settings" }]
   | .destinations =>

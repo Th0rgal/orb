@@ -12,6 +12,7 @@ golden paths never call this module and remain deterministic fixtures. -/
 /-- Embedded connection-bound HTTP reader and writer. -/
 private def transport : String := include_str "live_transport.py"
 
+private def projectHistoryRules : String := include_str "../../../orb/src/projectHistoryRules.json"
 private def modelCatalogRules : String := include_str "../../../orb/src/modelSuccessors.json"
 
 private def splitTab (line : String) : List String :=
@@ -31,7 +32,7 @@ private def missionCard (idx : Nat) (xs : List String) : MissionSummaryCard :=
     summaryText := col xs 10, machine := col xs 11, backend := col xs 12,
     effort := col xs 14, permissionMode := col xs 15,
     folder := col xs 16, parentMissionId := col xs 17, callbackParentMissionId := col xs 18,
-    forkSource := col xs 19, supersededBy := col xs 20 }
+    forkSource := col xs 19, supersededBy := col xs 20, archiveTag := col xs 21 == "1" }
 
 private def machineCard (idx : Nat) (xs : List String) : FleetMachineCard :=
   { widgetId := 1002 + 3 * idx, machineId := col xs 1, name := col xs 2
@@ -198,56 +199,84 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
       return some { st with catalog := models, catalogLoading := false, nativeHarnessAvailable := lines.contains "native-antigravity" }
   finally close
 
+inductive BubbleUpdate where
+  | text (title status value : String)
+  | unavailable
+  | revoked
+
 inductive LiveUpdate where
-  | sample (roster : Option (List String)) (bubble : Option (String × String × String))
+  | sample (roster : Option (List String)) (bubble : Option BubbleUpdate)
   | invalid
 
 structure LiveSubscription where
+  projects : List String
   mission : String
   binding : String
   latest : Std.Mutex (Option LiveUpdate)
+  lastBubble : IO.Ref (Option BubbleUpdate)
   stop : IO Unit
 
-private def subscribe (mission binding : String) (tracked : List MissionSummaryCard) (notify : IO Unit) : IO LiveSubscription := do
-  let child ← IO.Process.spawn {
-    cmd := "python3", args := #["-I", "-c", transport ++ "\npoll(*sys.argv[1:])", mission, binding]
-    stdin := .piped, stdout := .piped, stderr := .null }
-  -- Bootstrap tracks validated IDs from both current and archived pages. Do not expose
-  -- the roster in the process list; a new reader gets the current tracked set.
+private def readSample (line : String) : Option LiveUpdate := do
+  match splitTab line with
+  | ["R", keys] =>
+    guard (keys.startsWith "+")
+    let encoded := (keys.drop 1).toString
+    return .sample (some (if encoded.isEmpty then [] else encoded.splitOn "\x1f")) none
+  | ["B", title, status, text] =>
+    return .sample none (some (.text title status ((text.replace "\x1e" "\n").replace "\x1f" "\t")))
+  | ["X"] => return .sample none (some .unavailable)
+  | ["D"] => return .sample none (some .revoked)
+  | _ => none
+
+/-- Each process owns its HTTP deadlines. A pending roster and a pending bubble
+    coalesce independently, and neither can supersede session invalidation. -/
+private def liveReader (args : Array String) (input : String)
+    (latest : Std.Mutex (Option LiveUpdate)) (notify : IO Unit) : IO (IO Unit) := do
+  let child ← IO.Process.spawn { cmd := "python3", args, stdin := .piped, stdout := .piped, stderr := .null }
   try
-    child.stdin.putStrLn (String.intercalate "," (tracked.map (·.missionId)))
-    child.stdin.flush
+    if !input.isEmpty then child.stdin.putStr input; child.stdin.flush
   catch err =>
     try child.kill catch _ => pure ()
     discard child.wait
     throw err
-  let latest ← Std.Mutex.new (none : Option LiveUpdate)
   let reader ← IO.asTask (prio := .dedicated) do
     try
       repeat
         let line ← child.stdout.getLine
+        let some (.sample rows bubble) := readSample (line.dropEnd 1).toString | break
         if !line.endsWith "\n" then break
-        let kind :: keys :: rest := splitTab (line.dropEnd 1).toString | break
-        if keys != "=" && !keys.startsWith "+" then break
-        let encoded := (keys.drop 1).toString
-        let roster := if keys == "=" then none else some (if encoded.isEmpty then [] else encoded.splitOn "\x1f")
-        let bubble ← match kind, rest with
-          | "B", [title,status,text] => pure (some (title,status,(text.replace "\x1e" "\n").replace "\x1f" "\t"))
-          | "R", [] => pure none
-          | _, _ => break
-        latest.atomically (modify fun pending =>
-          let previous := match pending with
-            | some (.sample rows _) => rows
-            | _ => none
-          some (.sample (roster.orElse fun _ => previous) bubble))
+        latest.atomically (modify fun previous => match previous with
+          | some .invalid => previous
+          | some (.sample _ (some .revoked)) => previous
+          | some (.sample oldRows oldBubble) =>
+            some (.sample (rows.orElse fun _ => oldRows) (bubble.orElse fun _ => oldBubble))
+          | none => some (.sample rows bubble))
         notify
-    finally
-      latest.atomically (set (some LiveUpdate.invalid))
-      notify
-  return { mission, binding, latest, stop := do
+        if let some .revoked := bubble then return
+    catch _ => pure ()
+    latest.atomically (set (some LiveUpdate.invalid))
+    notify
+  return do
     try child.kill catch _ => pure ()
     discard child.wait
-    discard (IO.wait reader) }
+    discard (IO.wait reader)
+
+private def subscribe (mission binding : String) (tracked : List MissionSummaryCard) (projects : List String)
+    (notify : IO Unit) : IO LiveSubscription := do
+  let latest ← Std.Mutex.new (none : Option LiveUpdate)
+  let rosterArgs := #["-I", "-c", transport ++ "\npoll(sys.argv[1], sys.argv[2], rules=json.loads(sys.argv[3]))",
+    mission, binding, projectHistoryRules]
+  let input := String.intercalate "," (tracked.map (·.missionId)) ++ "\n" ++ String.intercalate "\t" projects ++ "\n"
+  let stopRoster ← liveReader rosterArgs input latest notify
+  let stop ← try
+    if mission.isEmpty then pure stopRoster else do
+      let stopBubble ← liveReader #["-I", "-c", transport ++ "\npoll_bubble(*sys.argv[1:])", mission, binding] "" latest notify
+      pure (do stopBubble; stopRoster)
+  catch err =>
+    stopRoster
+    throw err
+  let lastBubble ← IO.mkRef none
+  return { mission, binding, projects, latest, lastBubble, stop }
 
 def closeLiveSubscription (slot : IO.Ref (Option LiveSubscription)) : IO Unit := do
   if let some sub ← slot.swap none then sub.stop
@@ -261,6 +290,7 @@ private def mergeRoster (st : DesktopState) (records : List String) : DesktopSta
   let mut cards := #[]
   let mut rows := (st.sidebarRows.filter (fun row => row.kind != "project" && row.kind != "mission")).toArray
   let mut machines := #[]
+  let mut memberships := st.projectMemberships
   for record in records do
     let xs := record.splitOn "\x1c"
     let id := col xs 1
@@ -281,9 +311,10 @@ private def mergeRoster (st : DesktopState) (records : List String) : DesktopSta
       let row := (oldRows.get? key).getD { widgetId := card.widgetId, rowId := key, kind := "mission", title := card.title }
       cards := cards.push card
       rows := rows.push { row with title := card.title, status := card.status }
+    | "G" => memberships := (id, xs.drop 2) :: memberships.filter (·.1 != id)
     | "N" => machines := machines.push (machineCard machines.size xs)
     | _ => continue
-  let updated := { st with missionCards := cards.toList, sidebarRows := rows.toList, fleetMachines := machines.toList }
+  let updated := { st with projectMemberships := memberships, missionCards := cards.toList, sidebarRows := rows.toList, fleetMachines := machines.toList }
   let some selected := updated.selectedCard | return updated
   return { updated with composer := { updated.composer with isRunning := selected.isRunning } }
 
@@ -343,8 +374,8 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
         return (if st.openMission == some mid then resetSelection { next with screen := .controlEmpty } none else next, some viewport)
       | .restore _ =>
         return ({ st with
-                          missionCards := st.missionCards.map fun m => if m.missionId == mid then { m with status := "paused" } else m,
-                          sidebarRows := st.sidebarRows.map fun row => if row.rowId == "mission:" ++ mid then { row with status := "paused" } else row }, some viewport)
+                          missionCards := st.missionCards.map fun m => if m.missionId == mid then { m with status := restoredExecutionStatus m.status, archiveTag := false } else m,
+                          sidebarRows := st.sidebarRows.map fun row => if row.rowId == "mission:" ++ mid then { row with status := restoredExecutionStatus row.status } else row }, some viewport)
       | .rename _ title =>
         return ({ st with
                           missionCards := st.missionCards.map fun m => if m.missionId == mid then { m with title } else m,
@@ -357,13 +388,13 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
         let changed := receipts.filterMap fun xs => if col xs 0 == "ok" then some (col xs 1) else none
         let failed := receipts.filterMap fun xs => if col xs 0 == "failed" then some (col xs 1) else none
         let remove := kind == "delete"
-        let status := if kind == "archive" then "acknowledged" else "paused"
+        let nextStatus := fun previous => if kind == "archive" then "acknowledged" else restoredExecutionStatus previous
         let cards := st.missionCards.filterMap fun m =>
           if !changed.contains m.missionId then some m
-          else if remove then none else if kind == "move" then some { m with project } else some { m with status }
+          else if remove then none else if kind == "move" then some { m with project } else some { m with status := nextStatus m.status, archiveTag := kind == "archive" && m.archiveTag }
         let rows := st.sidebarRows.filterMap fun row =>
           if !changed.contains (row.rowId.drop 8).toString || row.kind != "mission" then some row
-          else if remove then none else if kind == "move" then some row else some { row with status }
+          else if remove then none else if kind == "move" then some row else some { row with status := nextStatus row.status }
         let next := { st with
           missionCards := cards, sidebarRows := rows, multiRows := failed.map ("mission:" ++ ·),
           selectionAnchor := none, writeError := if failed.isEmpty then "" else s!"Core did not confirm {kind} for {failed.length} missions" }
@@ -379,18 +410,22 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
     catch _ => return ({ st with writeError := "Core did not confirm " ++ action }, some viewport)
   let invalidate := ({ DesktopState.liveUnavailable with theme := st.theme, scale120 := scale }, some viewport)
   let target := if st.hasLiveConnection then some (st.openMission.getD "") else none
-  if active.map (·.mission) != target || active.any (·.binding != st.connectionBinding) then
+  if active.map (·.mission) != target || active.any (fun sub => sub.binding != st.connectionBinding || sub.projects != st.expandedProjects) then
     closeLiveSubscription slot
     if let some mission := target then
-      try slot.set (some (← subscribe mission st.connectionBinding st.missionCards notify)) catch _ => return invalidate
+      try slot.set (some (← subscribe mission st.connectionBinding st.missionCards st.expandedProjects notify)) catch _ => return invalidate
   let some sub ← slot.get | return (st, none)
   let some update ← sub.latest.atomically (modifyGet (fun v => (v, none))) | return (st, none)
   match update with
   | .invalid => closeLiveSubscription slot; return invalidate
   | .sample roster bubble =>
+    -- The roster can finish after a newer transcript read. Keep the selected
+    -- conversation's title, status and text together across that arrival.
+    if bubble.isSome then sub.lastBubble.set bubble
+    let bubble ← sub.lastBubble.get
     let updated := roster.elim st (mergeRoster st)
     let changed := roster.isSome && (updated.missionCards != st.missionCards ||
-      updated.sidebarRows != st.sidebarRows || updated.fleetMachines != st.fleetMachines)
+      updated.sidebarRows != st.sidebarRows || updated.fleetMachines != st.fleetMachines || updated.projectMemberships != st.projectMemberships)
     let st := updated
     let cards := st.missionCards
     let rows := st.sidebarRows
@@ -404,10 +439,16 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
       closeLiveSubscription slot
       let (st, _) := stepDesktopEvent scale viewport st (.activate 101)
       return (st, some viewport)
-    let some (title,status,text) := bubble | do
-      -- No bubble (roster-only or malformed response): never discard other missions.
+    if let some .revoked := bubble then
+      closeLiveSubscription slot
+      let next := { st with
+        missionCards := cards.filter (·.missionId != sub.mission)
+        sidebarRows := rows.filter (·.rowId != "mission:" ++ sub.mission) }
+      return ((stepDesktopEvent scale viewport next (.activate 101)).1, some viewport)
+    if let some .unavailable := bubble then
       let (next, damage) := applyLiveText scale viewport st sub.mission ""
       return (next, if changed then some viewport else damage)
+    let some (.text title status text) := bubble | return (st, if changed then some viewport else none)
     let (next, damage) := applyLiveText scale viewport st sub.mission text
     let some card := next.selectedCard | return invalidate
     if title == card.title && status == card.status then return (next, if changed then some viewport else damage)
