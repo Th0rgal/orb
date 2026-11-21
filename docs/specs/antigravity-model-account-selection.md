@@ -257,3 +257,61 @@ trusting the checkout, its tools and its integrations as that owner. It is not
 a deployment for untrusted Orb mission workspaces.
 [Headless login](https://antigravity.google/docs/cli/headless/)
 · [CLI proxy settings](https://antigravity.google/docs/settings/)
+
+#### Whole-process account egress fixture
+
+A supervisor creates an empty Linux network namespace, brings up only its
+loopback interface, and puts the complete native job there before dropping to
+UID 16001 with no supplementary groups and `no_new_privs`. The native CLI and
+its shell inherit the namespace. The supervisor binds one TCP listener inside
+it. Behind that listener it forwards bytes only to a fixed account relay socket
+in the outer namespace. The listener survives relay loss and cannot choose a
+different upstream. Changing proxy environment variables cannot create a route.
+
+The fixture uses the existing Orb account relay's SOCKS5 username/password
+and hostname CONNECT protocol with disposable values. The upstream sees
+`127.0.0.3` on the relayed route and `127.0.0.1` on the direct control.
+Only the local HTTPS origin holds the TLS private key. The test uses a
+synthetic Gemini API-key model response, a native `run_command` ledger probe,
+and the real CLI's conversation ID. Orb's VPN selection, Google OAuth, and
+live WireGuard transport are outside this fixture. Core's verified VPN
+transport has a separate integration test. [Account VPN](account-vpn.md)
+
+**Reproduce in a disposable NIC-free Linux VM** as root with Python 3.12 or
+later, network namespaces enabled, `ip`, OpenSSL, a mounted `/proc` and
+`/dev/pts`, Bash, and native agy 1.5.14. Use a fresh guest with only loopback,
+a free UDP port 53, and no local proxy, resolver service, or host service
+sockets mounted into it. Place the checkout and CLI at paths readable by UID
+16001. Inside the guest, run:
+
+```sh
+ip link set lo up
+printf '127.0.0.2 ledger.test\n' >> /etc/hosts
+printf 'nameserver 127.0.0.2\noptions timeout:1 attempts:1\n' > /etc/resolv.conf
+mkdir -p /run/ledger-fixture
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=ledger.test \
+  -addext subjectAltName=DNS:ledger.test -keyout /run/ledger-fixture/key.pem \
+  -out /run/ledger-fixture/cert.pem
+chmod 600 /run/ledger-fixture/key.pem
+chmod 644 /run/ledger-fixture/cert.pem
+python3 scripts/test_antigravity_job_egress.py --agy "$(command -v agy)" \
+  --cert /run/ledger-fixture/cert.pem --key /run/ledger-fixture/key.pem
+```
+
+The test first reaches the direct TLS and DNS listeners from the outer
+namespace. Inside the job, the native shell probes direct TCP, sends a DNS
+query to the same listener, and exercises the system resolver. It records the
+kernel namespace identity in the ledger receipt. The supervisor then kills
+the account relay with SIGKILL while a job-side TLS tunnel is open. It checks
+that the tunnel closes, a native resume reports a transport error within its
+print deadline, and neither upstream receives fallback traffic. Restarting
+only the relay must allow the same native conversation to finish through it.
+
+Observed fixture stdout (exit 0, Linux amd64 agy 1.5.14):
+
+```text
+direct controls: TLS=204 DNS=NXDOMAIN
+relay up: native turn=SUCCESS shell namespace=job direct TCP/DNS=blocked
+relay down: established TLS closed native resume=ERROR upstream delta=0 direct TCP/DNS=blocked
+relay restored: native resume=SUCCESS same conversation=true direct model calls=0 job DNS packets=0
+```
