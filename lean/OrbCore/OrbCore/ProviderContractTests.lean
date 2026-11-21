@@ -1638,6 +1638,10 @@ def run : IO Unit := do
         failures := failures.push "An explicitly selected account must supply its own credential"
       unless (parseChainTargetsJson entry #[] #[a, { b with enabled := false }]).isEmpty do
         failures := failures.push "A disabled selected account must not resolve another login"
+      let inlineEntry := renderCompact (.arr #[.obj #[("provider_id", .str "openai"),
+        ("account_id", .str b.id), ("model_id", .str "fixture-model"), ("api_key", .str "synthetic-inline")]])
+      unless (parseChainTargetsJson inlineEntry #[] #[a, { b with enabled := false }]).isEmpty do
+        failures := failures.push "Inline chain settings cannot override a disabled account pin"
       let ownerRow : AIProviderRecord := {
         id := "inventory-owner-fixture"
         name := "Owner fixture"

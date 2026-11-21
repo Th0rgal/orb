@@ -856,6 +856,9 @@ def parseChainTargetsJson
         hydratedProvs.any (fun hp => hp.id == acctRaw))
       let eligibleRows := if pinned then providers.filter (fun p => p.id == acctRaw) else providers
       let eligibleHydrated := if pinned then hydratedProvs.filter (fun p => p.id == acctRaw) else hydratedProvs
+      -- Inline chain settings cannot override the global switch of a known account.
+      if pinned && (eligibleRows.any (fun p => !p.enabled) ||
+          eligibleHydrated.any (fun hp => !hp.enabled)) then continue
       let matchedHydrated? := eligibleHydrated.find? fun hp =>
         hp.enabled && (hp.hasApiKey || hp.hasOAuth) && (
           hp.id == acctRaw ||
@@ -890,8 +893,8 @@ def parseChainTargetsJson
         (!providers.isEmpty || !hydratedProvs.isEmpty) &&
         inlineKey?.isNone && inlineUrl?.isNone &&
         matchedHydrated?.isNone && matchedProv?.isNone &&
-        ((anyCfgProv?.map (!·.enabled) |>.getD false) ||
-          (pinned && eligibleHydrated.any (fun hp => !hp.enabled))) && (!isAg || pinned)
+        (anyCfgProv?.map (!·.enabled) |>.getD false) &&
+        !isAg
       if !explicitlyDisabledInStore then
         let useCliProxy :=
           !cliProxyKey.isEmpty && !cliProxyUrl.isEmpty && inlineKey?.isNone && inlineUrl?.isNone && (
