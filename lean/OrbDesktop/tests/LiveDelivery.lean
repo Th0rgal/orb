@@ -88,6 +88,19 @@ private def unsentDraft : DesktopState :=
 #guard (stepDesktopEvent 120 vp { unsentDraft with composer := { unsentDraft.composer with isRunning := true } }
   (.composerReturn false)).1.writeRequest.isNone
 
+private def projectDraft : DesktopState := { unsentDraft with screen := .controlEmpty, draftProject := "now" }
+private def inferencePage := (stepDesktopEvent 120 vp projectDraft (.activate 113)).1
+private def machinesPage := (stepDesktopEvent 120 vp inferencePage (.activate 112)).1
+private def returnedDraft := (stepDesktopEvent 120 vp machinesPage (.activate 101)).1
+
+#guard inferencePage.headerTitle == "Inference"
+#guard machinesPage.headerTitle == "Machines"
+#guard returnedDraft.headerTitle == "Now" && returnedDraft.composer.text == projectDraft.composer.text
+#guard (stepDesktopEvent 120 vp inferencePage (.composerReturn true)).1.composer.text == projectDraft.composer.text
+#guard (stepDesktopEvent 120 vp machinesPage (.composerReturn false)).1.writeRequest.isNone
+#guard (stepDesktopEvent 120 vp { projectDraft with openMission := some "m", screen := .missionTranscript }
+  (.activate 113)).1.composer.text.isEmpty
+
 private def blankDraft : DesktopState := { hierarchyFixture with screen := .controlEmpty }
 #guard desktopFocusChange blankDraft blankDraft (.key 0x6e 2 .pressed) == some 1
 #guard desktopFocusChange blankDraft blankDraft (.key 0x6e 0 .pressed) == none

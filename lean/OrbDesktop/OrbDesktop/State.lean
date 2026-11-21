@@ -393,7 +393,7 @@ def DesktopState.hasLiveConnection (st : DesktopState) : Bool := st.liveData && 
 def DesktopState.headerTitle (st : DesktopState) : String :=
   if st.initialRosterPending then "Connecting to Core…"
   else if st.liveData && !st.hasLiveConnection then "Core unavailable"
-  else if st.openMission.isNone && !st.draftProject.isEmpty then
+  else if (st.screen == .controlEmpty || st.screen == .controlPopulated) && st.openMission.isNone && !st.draftProject.isEmpty then
     ((st.sidebarRows.find? (·.rowId == "project:" ++ st.draftProject)).map (·.title)).getD st.draftProject
   else (st.selectedCard.map (·.title)).getD st.screen.headerTitle
 
@@ -1018,19 +1018,20 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
         else if key == 0x33 then 112
         else if key == 0x6e || key == 0x4e then 101 else 0
       | _ => 0
-    if navId == 113 then
-      let next := resetSelection { st with
-        screen := .inference, providers := none, providerReadFailed := false, fleetTopSub := 0, writeError := "" } none
+    if [101, 112, 113].contains navId then
+      let screen := if navId == 113 then ScreenId.inference else if navId == 112 then .machinesFleet else .controlEmpty
+      let next := resetSelection { st with screen, fleetTopSub := 0, writeError := "" } none
+      -- These pages share the New Agent draft. A mission follow-up belongs only to its transcript.
+      let next := if st.openMission.isNone then
+          { next with composer := { st.composer with imePreeditText := "" } }
+        else { next with draftProject := "" }
+      let next := if navId == 113 then { next with providers := none, providerReadFailed := false } else next
       return ({ next with sidebarRows := next.sidebarRows.map fun row => { row with selected := row.widgetId == navId } }, some viewport)
     if st.screen == .inference && navId >= providerWidgetId 0 then
       if let some account := (st.providers.getD [])[navId - providerWidgetId 0]? then
         return ({ st with writeRequest := some (.providerPreference account.id (!account.userEnabled)) }, none)
-    if navId == 112 then
-      let next := resetSelection { st with screen := .machinesFleet, fleetTopSub := 0, draftProject := "", writeError := "" } none
-      return ({ next with sidebarRows := next.sidebarRows.map fun row => { row with selected := row.widgetId == navId } }, some viewport)
-    if navId == 101 then
-      return (resetSelection { st with screen := .controlEmpty, draftProject := "", writeError := "" } none, some viewport)
     if let .composerReturn shift := ev then
+      if st.screen == .inference || st.screen == .machinesFleet then return (st, none)
       if !st.composer.imePreeditText.isEmpty then return (st, none)
       if shift then return stepDesktopInput scale120 viewport st (.text "\n")
       if st.composer.isRunning then return (st, none)

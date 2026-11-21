@@ -93,3 +93,8 @@ When a live mission list arrives before its project folders, the sidebar shows e
   highlights B only while the menu is open and restores selection to A once closed.
 
 A delegated mission follows its visible controller when a move or partial update leaves the child with an older project slug. The controller keeps its descendant count while collapsed. Expanding it reveals the child once, beneath that controller.
+
+In LeanUI, visiting Inference or Machines while composing a new agent keeps the
+committed draft text and its project. Each page shows its own title. Returning
+to New Agent restores the project title and draft. Composer shortcuts are inactive
+on the intervening pages. Text entered for an existing mission stays scoped to it.
