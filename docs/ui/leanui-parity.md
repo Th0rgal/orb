@@ -321,6 +321,8 @@ light, 2x: [SolidJS](crops/04_mission_split_diff_light_2x_ref_crop.png) → [Lea
 
 ### 05_machines_fleet
 
+The Local and Remote sections appear as soon as Machines opens. A pending or unavailable managed-provider catalog leaves existing machines visible. Configured providers without a machine get their group when the catalog arrives.
+
 <!-- parity:crop 05_machines_fleet_dark_1x 540 180 50 16 -->
 dark, 1x: [SolidJS](crops/05_machines_fleet_dark_1x_ref_crop.png) → [LeanUI](crops/05_machines_fleet_dark_1x_leanui_crop.png).
 
