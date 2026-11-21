@@ -1864,9 +1864,11 @@ def run : IO Unit := do
         apiKey := "fixture-only"
       }
       IO.ofExcept (← upsertAIProvider store ownerRow)
-      let (wrongType, _) ← putJson app memberJwt s!"/api/ai/providers/{ownerRow.id}/alternative-routers"
-        "{\"allowed\":false}" now
-      if wrongType != 409 then failures := failures.push "Router access cannot edit an unrelated provider type"
+      let routerRoute := s!"/api/ai/providers/{ownerRow.id}/alternative-routers"
+      let (notOwner, _) ← putJson app memberJwt routerRoute "{\"allowed\":false}" now
+      if notOwner != 403 then failures := failures.push s!"A shared VPN does not confer router ownership: {notOwner}"
+      let (wrongType, _) ← putJson app jwt routerRoute "{\"allowed\":false}" now
+      if wrongType != 409 then failures := failures.push s!"Router access rejects an authorized write for an unrelated provider type: {wrongType}"
       let ownerRoute := s!"/api/ai/providers/{ownerRow.id}/vpn"
       let ownRoute ← getJson app memberJwt ownerRoute now
       unless ownRoute.fieldBool? "can_configure" == some true do
