@@ -862,8 +862,14 @@ def parseChainTargetsJson
         hydratedProvs.any (fun hp => hp.id == acctRaw))
       let eligibleRows := if pinned then providers.filter (fun p => p.id == acctRaw) else providers
       let eligibleHydrated := if pinned then hydratedProvs.filter (fun p => p.id == acctRaw) else hydratedProvs
+      -- A stored restriction also rules out explicit chains and generic pool
+      -- fallbacks when there is no remaining alternative-router credential.
+      if pinned && eligibleHydrated.any (·.nativeOnly) then continue
+      if provRaw == "antigravity" || provRaw.startsWith "antigravity:" then
+        let pool := eligibleHydrated.filter (fun hp => hp.providerType == "antigravity" && hp.enabled)
+        if !pool.isEmpty && pool.all (·.nativeOnly) then continue
       let matchedHydrated? := eligibleHydrated.find? fun hp =>
-        hp.enabled && (hp.hasApiKey || hp.hasOAuth) && (
+        hp.enabled && !hp.nativeOnly && (hp.hasApiKey || hp.hasOAuth) && (
           hp.id == acctRaw ||
           hp.id == strippedProv ||
           (!provRaw.startsWith "custom:" && hp.providerType == provRaw) ||
@@ -3601,34 +3607,51 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     | return .ok (mkJson 401 "{\"error\":\"unauthorized\"}")
   let utcDay := currentUtcDay nowEpochSec
 
-  if let ["", "api", "ai", "providers", encodedAccount, "vpn"] := cleanPath.splitOn "/" then
-    let some account := percentDecodeStrict encodedAccount
-      | return .ok (mkJson 400 "{\"error\":\"invalid_provider_id\"}")
-    if caller.disabled then return .ok (mkJson 403 "{\"error\":\"account_disabled\"}")
-    let token := (extractBearerToken? req.headers nowEpochSec).getD ""
-    unless token.startsWith "orb-jwt-v2:" && !st.cfg.devMode do
-      return .ok (mkJson 403 "{\"error\":\"operator_session_required\"}")
-    let providers ← loadHydratedProviders st.store st.cfg.workingDir
-    let selected := providers.find? (fun p => p.id == account)
-    if caller.role != "admin" && !selected.any (fun p => providerVisibleTo p false caller.userId) then
-      return .ok (mkJson 403 "{\"error\":\"provider_not_visible\"}")
-    let some hp := selected
-      | return .ok (mkJson 404 "{\"error\":\"provider_not_found\"}")
-    let stored ← getAIProvider? st.store account
-    let coreOwned := !hp.hasOAuth && stored.any (fun p => !p.apiKey.isEmpty && p.apiKey != "cli-proxy-managed")
-    let mut configure? : Option (Bool → IO (Except String Unit)) := none
-    let file := accountRoutingFile providers hp
-    if hp.hasOAuth && !hp.hasApiKey && ["codex", "claude", "antigravity", "kimi"].any (providerTypeMatchesAuthType hp.providerType) &&
-        !file.isEmpty then
-      if let some url := st.vpnRelayPort?.bind (fun port =>
-          AccountVpnRelay.proxyUrl (effectiveJwtSecret st.cfg) port hp.providerType hp.id) then
-        if let some key ← resolveCliProxyMgmtKey? then
-          let base ← resolveCliProxyBaseUrl
-          if AccountVpnSidecar.validManagement base then
-            configure? := some (AccountVpnSidecar.configure base key file url)
-    let (status, result) ← AccountVpnApi.route st.store st.vpnPool? st.vpnCoordinatorDir account hp.providerType
-      (coreOwned || configure?.isSome) req.method req.bodySlice.toByteArray configure?
-    return .ok (mkJson status (renderCompact result))
+  if let ["", "api", "ai", "providers", encodedAccount, setting] := cleanPath.splitOn "/" then
+    if setting == "vpn" || setting == "alternative-routers" then
+      let some account := percentDecodeStrict encodedAccount
+        | return .ok (mkJson 400 "{\"error\":\"invalid_provider_id\"}")
+      if caller.disabled then return .ok (mkJson 403 "{\"error\":\"account_disabled\"}")
+      let token := (extractBearerToken? req.headers nowEpochSec).getD ""
+      unless token.startsWith "orb-jwt-v2:" && !st.cfg.devMode do
+        return .ok (mkJson 403 "{\"error\":\"operator_session_required\"}")
+      let providers ← loadHydratedProviders st.store st.cfg.workingDir
+      let selected := providers.find? (fun p => p.id == account)
+      if caller.role != "admin" && !selected.any (fun p =>
+          if setting == "vpn" then providerVisibleTo p false caller.userId else providerAddedBy p caller.userId) then
+        return .ok (mkJson 403 "{\"error\":\"provider_access_denied\"}")
+      let some hp := selected
+        | return .ok (mkJson 404 "{\"error\":\"provider_not_found\"}")
+      let file := accountRoutingFile providers hp
+      if setting == "alternative-routers" then
+        unless hp.providerType == "antigravity" && !file.isEmpty do
+          return .ok (mkJson 409 "{\"error\":\"antigravity_credential_unavailable\"}")
+        let mut allowed? := none
+        if req.method == "PUT" then
+          let body := req.bodySlice.toByteArray
+          if body.size > 1024 then return .ok (mkJson 413 "{\"error\":\"request_too_large\"}")
+          let some allowed := (OrbBin.Json.parseBytes body).toOption.bind (fun j => j.fieldBool? "allowed")
+            | return .ok (mkJson 400 "{\"error\":\"invalid_router_access\"}")
+          allowed? := some allowed
+        else if req.method != "GET" then return .ok (mkJson 405 "{\"error\":\"method_not_allowed\"}")
+        let some key ← resolveCliProxyMgmtKey? | return .ok (mkJson 503 "{\"error\":\"router_access_unavailable\"}")
+        match ← AccountVpnSidecar.alternativeRouterAccess (← resolveCliProxyBaseUrl) key file allowed? with
+        | .ok allowed => return .ok (mkJson 200 (renderCompact (.obj #[("allowed", .bool allowed)])))
+        | .error reason => return .ok (mkJson 503 (renderCompact (.obj #[("error", .str reason)])))
+      let stored ← getAIProvider? st.store account
+      let coreOwned := !hp.hasOAuth && stored.any (fun p => !p.apiKey.isEmpty && p.apiKey != "cli-proxy-managed")
+      let mut configure? : Option (Bool → IO (Except String Unit)) := none
+      if hp.hasOAuth && !hp.hasApiKey && ["codex", "claude", "antigravity", "kimi"].any (providerTypeMatchesAuthType hp.providerType) &&
+          !file.isEmpty then
+        if let some url := st.vpnRelayPort?.bind (fun port =>
+            AccountVpnRelay.proxyUrl (effectiveJwtSecret st.cfg) port hp.providerType hp.id) then
+          if let some key ← resolveCliProxyMgmtKey? then
+            let base ← resolveCliProxyBaseUrl
+            if AccountVpnSidecar.validManagement base then
+              configure? := some (AccountVpnSidecar.configure base key file url)
+      let (status, result) ← AccountVpnApi.route st.store st.vpnPool? st.vpnCoordinatorDir account hp.providerType
+        (coreOwned || configure?.isSome) req.method req.bodySlice.toByteArray configure?
+      return .ok (mkJson status (renderCompact result))
 
   if cleanPath == "/api/settings/airvpn" then
     if let some (status, body) := requireAdminPrincipal caller then

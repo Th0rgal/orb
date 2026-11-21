@@ -12,6 +12,7 @@ structure CliAuthFileInfo where
   prefixId    : String
   disabled    : Bool
   mtimeSec    : UInt64
+  nativeOnly : Bool := false
   fingerprint : UInt64 := 0
   deviceToken : String := ""
   deriving Repr, Inhabited
