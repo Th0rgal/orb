@@ -579,13 +579,13 @@ export default function App() {
   });
   const listMisses: Misses = new Map();
   let missionRefreshRevision = 0, missionAppliedRevision = 0;
-  let initialFullMissionSyncDone = false;
-  createEffect(on(connectionVersion, () => { initialFullMissionSyncDone = false; }, { defer: true }));
+  const [fullMissionVersion, setFullMissionVersion] = createSignal<number>();
+  const [projectWindowsVersion, setProjectWindowsVersion] = createSignal<number>();
   const refreshMissions = async (forceFull = false) => {
     const revision = ++missionRefreshRevision, connection = connectionVersion();
     try {
       const prev = missions().filter(m => !isMissionDeleting(m.id));
-      const syncCursor = !forceFull && initialFullMissionSyncDone ? readMissionSyncCursor() : null;
+      const syncCursor = !forceFull && fullMissionVersion() === connection ? readMissionSyncCursor() : null;
       const useDelta = Boolean(syncCursor && syncCursor.polls < 20 && Date.now() - syncCursor.syncedAt < 10 * 60_000);
       const [rawFresh, rawCompleted] = await Promise.all([
         listMissions(200, useDelta ? { updatedSince: syncCursor!.cursor } : undefined),
@@ -593,7 +593,6 @@ export default function App() {
       ]);
       if (revision < missionAppliedRevision || connection !== connectionVersion()) return;
       missionAppliedRevision = revision;
-      if (!useDelta) initialFullMissionSyncDone = true;
       const partial = isPartialList(rawFresh);
       const fresh = rawFresh.filter(m => !isMissionDeleting(m.id));
       // No answer keeps the completed list on screen; it never empties it.
@@ -603,6 +602,7 @@ export default function App() {
       // Reconcile, never replace: a short answer during a restart keeps what is on screen.
       const nextMissions = applyPendingMoves(mergeById(missions(), reconcileMissionList(missions().filter(m => !isMissionDeleting(m.id)), fresh, listMisses, partial)));
       setMissions(nextMissions);
+      if (!useDelta && !partial && rawCompleted !== null) setFullMissionVersion(connection);
       const liveIds = selectLivePrefetchIds(nextMissions, isLive);
       noteLiveMissionIds(liveIds);
       for (const id of liveIds) prefetchTranscript(id);
@@ -617,6 +617,7 @@ export default function App() {
         for (const slug of slugs) {
           void listProjectMissions(slug, { background: true })
             .then(rows => {
+              if (connection !== connectionVersion()) return;
               const clean = rows.filter(m => !isMissionDeleting(m.id));
               setProjectMissions(cur => ({ ...cur, [slug]: clean }));
             })
@@ -626,7 +627,7 @@ export default function App() {
           if (!m.project?.trim()) {
             void getMission(m.id, { includeHistory: false })
               .then(updated => {
-                if (isMissionDeleting(updated.id) || isBtwMission(updated)) return;
+                if (connection !== connectionVersion() || isMissionDeleting(updated.id) || isBtwMission(updated)) return;
                 const slug = updated.project?.trim() || DEFAULT_PROJECT.slug;
                 setProjectMissions(cur => {
                   const existing = cur[slug] ?? [];
@@ -737,9 +738,8 @@ export default function App() {
           if (state) {
             applySharedInboxSeen(state);
             applySharedInboxPreferences(state.preferences);
+            setInboxStateVersion(version);
           }
-          // A failed read falls back to this account's cache until the next poll.
-          setInboxStateVersion(version);
         });
       } finally {
         reading = false;
@@ -753,7 +753,9 @@ export default function App() {
     transcriptVersion();
     unreadVersion();
     const cfg = inboxConfig();
-    if (!cfg.inboxEnabled || !isConnected() || inboxStateVersion() !== connectionVersion()) return [];
+    const version = connectionVersion();
+    if (!cfg.inboxEnabled || !isConnected() || inboxStateVersion() !== version ||
+        fullMissionVersion() !== version || projectWindowsVersion() !== version) return [];
     return listUnreadInboxCandidates(
       inboxMissions(),
       liveProjects(),
@@ -903,6 +905,7 @@ export default function App() {
       });
       listProjects()
         .then((projects) => {
+          if (ver !== connectionVersion()) return;
           setLiveProjects(projects);
           scheduleSavePersistedSidebar(historyScope(), {
             missions: rawMissions(),
@@ -1694,6 +1697,10 @@ export default function App() {
   const renderLiveProjectsSection = (headless: boolean) => (
     <LiveProjectsSection
       headless={headless}
+      onInitialProjectWindows={projects => batch(() => {
+        setLiveProjects(projects);
+        setProjectWindowsVersion(connectionVersion());
+      })}
       active={() => !onSettings()}
       deleteRequest={deleteMissionRequest()}
       archiveRequests={archiveRequests()}

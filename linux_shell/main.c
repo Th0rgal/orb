@@ -1,6 +1,8 @@
 /* linux_shell/main.c — Hardened GTK3 + WebKitGTK 4.1 shell for Orb (<= 220 LOC). */
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
@@ -25,6 +27,17 @@ static int parse_valid_port(const char *s, unsigned *out_port) {
     unsigned v = 0;
     for (const char *p = s; *p; ++p) if (*p < '0' || *p > '9' || (v = v * 10u + (unsigned)(*p - '0')) > 65535u) return 0;
     return v >= 1024u ? (*out_port = v, 1) : 0;
+}
+/* Each account window owns its loopback daemon and per-launch secret. */
+static unsigned account_rpc_port(void) {
+    struct sockaddr_in addr = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    socklen_t len = sizeof(addr);
+    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return 0;
+    int ok = bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 &&
+             getsockname(fd, (struct sockaddr *)&addr, &len) == 0;
+    close(fd);
+    return ok ? ntohs(addr.sin_port) : 0;
 }
 static int gen_csprng_hex(char out_hex[65]) {
     unsigned char raw[32]; int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC); if (fd < 0) return -1;
@@ -120,14 +133,16 @@ static gboolean on_decide_policy(WebKitWebView *wv, WebKitPolicyDecision *dec, W
 #endif
 int main(int argc, char **argv) {
     unsigned port = 19479; const char *port_env = getenv("ORB_LOCALD_PORT"), *nc_env = getenv("ORB_NATIVE_CHROME");
+    const int account_form = argc > 1 && !strcmp(argv[1], "--account-settings");
 #ifdef ORB_LEANUI_HOST
-    const int native_chrome = 1;
+    const int native_chrome = !account_form;
     (void)nc_env;
 #else
-    const int native_chrome = !nc_env || (strcmp(nc_env, "0") != 0 && strcmp(nc_env, "false") != 0);
+    const int native_chrome = !account_form && (!nc_env || (strcmp(nc_env, "0") != 0 && strcmp(nc_env, "false") != 0));
 #endif
     if (port_env && *port_env && !parse_valid_port(port_env, &port)) return fprintf(stderr, "orb-linux-shell: invalid ORB_LOCALD_PORT\n"), 1;
-    char eph_tok[65], *init_js = NULL; const char *token = getenv("ORB_LOCALD_TOKEN");
+    if (account_form && !(port = account_rpc_port())) return 1;
+    char eph_tok[65], *init_js = NULL; const char *token = account_form ? NULL : getenv("ORB_LOCALD_TOKEN");
     if (!token || strlen(token) < 32 || strcmp(token, "orb-locald-default-token") == 0) { if (gen_csprng_hex(eph_tok) != 0) return 1; token = eph_tok; }
     if (!(init_js = build_init_script(port, token, native_chrome))) return 1;
     if (argc > 1 && strcmp(argv[1], "--self-test") == 0) {
@@ -154,7 +169,7 @@ int main(int argc, char **argv) {
     if (rgba) { gtk_widget_set_visual(win, rgba); gtk_widget_set_app_paintable(win, TRUE); GtkCssProvider *wc = gtk_css_provider_new(); gtk_css_provider_load_from_data(wc, "window,window.background{background-color:rgba(0,0,0,0);background-image:none;}", -1, NULL); gtk_style_context_add_provider_for_screen(scr, GTK_STYLE_PROVIDER(wc), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION); g_object_unref(wc); }
     GdkGeometry geom = { .min_width = 720, .min_height = 480 }; gtk_window_set_geometry_hints(GTK_WINDOW(win), NULL, &geom, GDK_HINT_MIN_SIZE); g_signal_connect(win, "destroy", G_CALLBACK(gtk_main_quit), NULL);
     WebKitMemoryPressureSettings *mp = webkit_memory_pressure_settings_new(); webkit_memory_pressure_settings_set_memory_limit(mp, 512); webkit_memory_pressure_settings_set_conservative_threshold(mp, 0.35); webkit_memory_pressure_settings_set_strict_threshold(mp, 0.60); webkit_memory_pressure_settings_set_kill_threshold(mp, 0.0); webkit_website_data_manager_set_memory_pressure_settings(mp);
-    WebKitWebContext *ctx = g_object_new(WEBKIT_TYPE_WEB_CONTEXT, "memory-pressure-settings", mp, NULL); webkit_memory_pressure_settings_free(mp); webkit_web_context_set_cache_model(ctx, WEBKIT_CACHE_MODEL_DOCUMENT_BROWSER);
+    WebKitWebContext *ctx = account_form ? webkit_web_context_new_ephemeral() : g_object_new(WEBKIT_TYPE_WEB_CONTEXT, "memory-pressure-settings", mp, NULL); webkit_memory_pressure_settings_free(mp); webkit_web_context_set_cache_model(ctx, WEBKIT_CACHE_MODEL_DOCUMENT_BROWSER);
     WebKitSecurityManager *sm = webkit_web_context_get_security_manager(ctx);
     for (int i = 0; i < 2; ++i) { const char *sc = i ? "orb" : "tauri"; webkit_web_context_register_uri_scheme(ctx, sc, on_uri_scheme, dist, NULL); webkit_security_manager_register_uri_scheme_as_secure(sm, sc); webkit_security_manager_register_uri_scheme_as_cors_enabled(sm, sc); }
     static const gchar *const allow_list[] = { "http://127.0.0.1/*", "http://localhost/*", "orb://localhost/*", "tauri://localhost/*", "file:///*", NULL };
@@ -169,7 +184,8 @@ int main(int argc, char **argv) {
     gtk_container_add(GTK_CONTAINER(win), native_chrome ? orb_gtk_chrome_wrap(win, wv, ucm, port, token) : wv); g_object_unref(ucm);
     const char *url = getenv("ORB_DEV_URL"), *scheme = getenv("ORB_URI_SCHEME");
     const char *start_uri = (url && is_confined_shell_uri(url)) ? url : (dist[0] ? ((scheme && strcmp(scheme, "orb") == 0) ? "orb://localhost/" : "tauri://localhost/") : "http://127.0.0.1:1430");
-    webkit_web_view_load_uri(WEBKIT_WEB_VIEW(wv), start_uri); gtk_widget_show_all(win); gtk_main();
+    g_autofree char *account_uri = account_form ? g_strconcat(start_uri, "#account-settings", NULL) : NULL;
+    webkit_web_view_load_uri(WEBKIT_WEB_VIEW(wv), account_uri ? account_uri : start_uri); gtk_widget_show_all(win); gtk_main();
 #else
     (void)argc; (void)argv;
 #endif

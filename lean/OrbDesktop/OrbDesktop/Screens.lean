@@ -1184,7 +1184,19 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
       let bodyH := availH - headerH
       WidgetNode.box
         (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill)
-        [headerNode, buildSettingsGeneralBody st mainW bodyH]
+        [headerNode, if st.liveData then
+          let width := min (pxToSub 584) (max 0 (mainW - pxToSub 24))
+          let line := fun text color => screenTextLine theme width (pxToSub 28) (pxToSub 14) (pxToSub 20) color text
+          let status := if st.initialRosterPending then "Connecting to Core…"
+            else if st.hasLiveConnection then "Connected" else st.connectionIssue.title
+          WidgetNode.box (BoxStyle.col (pxToSub 4) |>.withPadding (Edges.all (pxToSub 12)))
+            ([line "Account" pal.textPrimary, line status pal.textPrimary] ++
+             (if st.accountEndpoint.isEmpty then [] else [line st.accountEndpoint pal.textSecondary]) ++
+             (if st.accountUsername.isEmpty then [] else [line ("@" ++ st.accountUsername) pal.textPrimary]) ++
+             [inventoryTarget theme hoverRow accountFormId width (pxToSub 40)
+                (line (if st.hasLiveConnection then "Manage account…" else "Open sign-in form…") pal.textPrimary)] ++
+             (if st.writeError.isEmpty then [] else [line st.writeError pal.textSecondary]))
+         else buildSettingsGeneralBody st mainW bodyH]
     | _ =>
       let bodyH := availH - headerH
       WidgetNode.box
