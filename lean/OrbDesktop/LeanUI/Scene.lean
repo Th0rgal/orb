@@ -103,8 +103,8 @@ def downChevronPaths : List (List (Int × Int)) := [[(50,65),(80,95),(110,65)]]
 
 /-- Declarative scrollable clip region widget builder. -/
 @[inline] def scrollClip (style : BoxStyle) (scroll : ScrollSpec) (child : WidgetNode)
-    (id : Option WidgetId := none) : WidgetNode :=
-  .mk id false true ({ style with clip := true }) (.scrollClip scroll) [child]
+    (id : Option WidgetId := none) (hitTestable := true) : WidgetNode :=
+  .mk id false hitTestable ({ style with clip := true }) (.scrollClip scroll) [child]
 
 /-- Declarative rounded scissor clip region widget builder. -/
 @[inline] def roundedClip (style : BoxStyle) (radii : CornerRadii)
