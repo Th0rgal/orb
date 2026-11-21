@@ -150,7 +150,7 @@ export async function changeServerPassword(
     }),
   });
   if (res && typeof res.token === "string" && res.token.trim()) {
-    setConnection(getApiUrl(), res.token.trim());
+    await setConnection(getApiUrl(), res.token.trim());
   }
 }
 

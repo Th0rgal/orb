@@ -34,6 +34,8 @@ def credentials():
     if len(raw) > 65536:
         raise ValueError('invalid connection')
     config = json.loads(raw)
+    if config is None:
+        raise FileNotFoundError("no saved connection")
     base = next(v.strip().rstrip('/') for k in ('api_url', 'apiUrl', 'endpoint')
                 if isinstance(v := config.get(k), str) and v.strip())
     url = urllib.parse.urlsplit(base)
@@ -1023,9 +1025,36 @@ def read_snapshot(read, attempts=None):
             delay = min(30, 2 * delay)
 
 
+def account_identity(c):
+    try:
+        me = c.get('/api/auth/me')
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise
+        error.close()
+        me = c.get('/api/auth/status')
+    if not isinstance(me, dict) or not isinstance(me.get('user') or {}, dict):
+        raise ValueError('invalid account response')
+    if me.get('authenticated') is False and me.get('auth_required', True):
+        raise urllib.error.HTTPError(c.creds[0], 401, 'Sign in required', {}, None)
+    return ('A', c.creds[0], (me.get('user') or {}).get('username', ''))
+
+
+def observe_account(binding):
+    # A selected Settings page also detects outages when the roster is retrying.
+    time.sleep(3)
+    c = Connection()
+    if c.binding == binding:
+        row = account_identity(c)
+        c.check()
+        print('\t'.join(map(label, row)))
+
+
 def roster():
     c = Connection()
     rows = read_snapshot(lambda: roster_rows(c, include_archived=True), attempts=2)
+    rows.append(account_identity(c))
+    c.check()
     for row in rows:
         print('\t'.join(map(label, row)))
 

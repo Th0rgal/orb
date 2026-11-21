@@ -1342,6 +1342,14 @@ private def resolveOrbStateDir (st : LocaldState) : Option System.FilePath :=
   let raw := st.orbStateDir.trimAscii.toString
   if raw.isEmpty then none else some (System.FilePath.mk raw)
 
+/-- Normalize supported desktop connection files at the RPC boundary without rewriting them. -/
+private def canonicalDesktopConnection (value : JVal) : JVal := Id.run do
+  let some token := value.fieldStr? "token" | return value
+  for field in ["api_url", "apiUrl", "endpoint"] do
+    if let some raw := value.fieldStr? field then
+      if !raw.trimAscii.isEmpty then return .obj #[("api_url", .str raw), ("token", .str token)]
+  return value
+
 private def connectionFilePath? (st : LocaldState) : Option System.FilePath :=
   (resolveOrbStateDir st).map (· / "connection.json")
 
@@ -4969,6 +4977,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
               pure jv
             | .error _ => pure st.connectionJson
           catch _ => pure st.connectionJson
+    let connVal := canonicalDesktopConnection connVal
     let sinceRev? := args.fieldStr? "since_rev"
     let prefsRes ← uiPrefsMutex.atomically do
       readUiPrefsFromDisk (uiPrefsFilePath? st)
@@ -5034,36 +5043,46 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     return .ok evs
   | "desktop_connection_load" =>
     match connectionFilePath? st with
-    | none => return .ok st.connectionJson
+    | none => return .ok (canonicalDesktopConnection st.connectionJson)
     | some path =>
       if !(← path.pathExists) then
-        return .ok st.connectionJson
+        return .ok (canonicalDesktopConnection st.connectionJson)
       try
         let raw ← IO.FS.readFile path
         match OrbBin.Json.parse raw.trimAscii.toString with
         | .ok jv =>
           stRef.modify fun s => { s with connectionJson := jv, connectionGeneration := s.connectionGeneration + (if renderCompact s.connectionJson == renderCompact jv then 0 else 1) }
-          return .ok jv
+          return .ok (canonicalDesktopConnection jv)
         | .error _ => return .error "Invalid saved connection"
       catch _ =>
         return .error "Cannot read saved connection"
   | "desktop_connection_save" =>
-    let rawConn := (args.field? "connection").getD args
-    let connVal : JVal :=
-      match rawConn with
-      | .null => st.connectionJson
-      | _ =>
-        let url := ((rawConn.fieldStr? "api_url").orElse (fun _ => rawConn.fieldStr? "apiUrl")).getD ""
-        let tok := (rawConn.fieldStr? "token").getD ""
-        if url.isEmpty && tok.isEmpty then st.connectionJson
-        else .obj #[("api_url", .str url), ("token", .str tok)]
-    if renderCompact connVal != renderCompact st.connectionJson then
-      stRef.modify fun s => { s with connectionJson := connVal, connectionGeneration := s.connectionGeneration + 1 }
-      if let some path := connectionFilePath? st then
-        let payload := (renderCompact connVal ++ "\n").toUTF8
-        if let .error e ← OrbBin.PosixExt.writeAtomicPrivate0600 path payload then
+    let path? := connectionFilePath? st
+    withUiPrefsLock path? do
+      let rawConn := (args.field? "connection").getD args
+      let target := if rawConn == .null then args.field? "expected" else some rawConn
+      let some target := target | return .ok .null
+      let target := canonicalDesktopConnection target
+      let url := (target.fieldStr? "api_url").getD ""
+      let some token := target.fieldStr? "token" | return .ok .null
+      if url.isEmpty || token.isEmpty then return .ok .null
+      if rawConn == .null then
+        let mut current := (← stRef.get).connectionJson
+        if let some path := path? then
+          if !(← path.pathExists) then return .ok .null
+          let .ok saved := OrbBin.Json.parse (← IO.FS.readFile path) | return .error "Invalid saved connection"
+          current := saved
+        let saved := canonicalDesktopConnection current
+        if (saved.fieldStr? "api_url").map normalizeEndpointKey != some (normalizeEndpointKey url) ||
+            saved.fieldStr? "token" != some token then
+          return .ok .null
+      let next : JVal := if rawConn == .null then .null else .obj #[("api_url", .str url), ("token", .str token)]
+      if let some path := path? then
+        if let .error e ← OrbBin.PosixExt.writeAtomicPrivate0600 path (renderCompact next ++ "\n").toUTF8 then
           return .error e
-    return .ok .null
+      stRef.modify fun s => { s with connectionJson := next, connectionGeneration :=
+        s.connectionGeneration + (if renderCompact s.connectionJson == renderCompact next then 0 else 1) }
+      return .ok .null
   | "desktop_prefs_load" =>
     let sinceRev? := args.fieldStr? "since_rev"
     uiPrefsMutex.atomically do

@@ -604,7 +604,7 @@ function LocalAgentsCard() {
   );
 }
 
-function BackendTab() {
+export function BackendTab(p: { standalone?: boolean } = {}) {
   const [url, setUrl] = createSignal(getApiUrl());
   const [username, setUsername] = createSignal("");
   const [password, setPassword] = createSignal("");
@@ -677,9 +677,9 @@ function BackendTab() {
     }
     setGithubBusy(true);
     void verifyIssuedAuthToken(verified.baseUrl, verified.token)
-      .then(() => {
+      .then(async () => {
         setUrl(verified.baseUrl);
-        setConnection(verified.baseUrl, verified.token);
+        await setConnection(verified.baseUrl, verified.token);
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setGithubBusy(false));
@@ -703,7 +703,7 @@ function BackendTab() {
     setNotice(null);
     try {
       if (authNotRequired() && !password().trim()) {
-        setConnection(url(), "dev-mode");
+        await setConnection(url(), "dev-mode");
       } else {
         await login(password(), isMultiUser() ? username() : undefined);
         setPassword("");
@@ -731,6 +731,18 @@ function BackendTab() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setGithubBusy(false);
+    }
+  };
+
+  const disconnect = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await clearConnection();
+    } catch {
+      setError("Could not disconnect the saved account. Check the account and try again.");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -802,6 +814,8 @@ function BackendTab() {
             <input
               class="s-input"
               type="password"
+              aria-label="Password"
+              autocomplete="current-password"
               value={password()}
               onInput={(e) => setPassword(e.currentTarget.value)}
               onKeyDown={(e) => e.key === "Enter" && void connect()}
@@ -827,7 +841,7 @@ function BackendTab() {
               </>
             }
           >
-            <button class="s-btn" onClick={() => clearConnection()}>
+            <button class="s-btn" disabled={busy()} onClick={() => void disconnect()}>
               Disconnect
             </button>
           </Show>
@@ -845,7 +859,7 @@ function BackendTab() {
                 .filter(Boolean)
                 .join(" · ")}
             >
-              <Show when={isAdminUser()}>
+              <Show when={isAdminUser() && !p.standalone}>
                 <button
                   type="button"
                   class="s-btn"

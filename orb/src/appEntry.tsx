@@ -1,5 +1,5 @@
-import { bootstrapDesktopRuntime, getJwt, setTransportBridgeEnabled } from "./api";
-import { Suspense, lazy } from "solid-js";
+import { accountHandoff, bootstrapDesktopRuntime, connectionVersion, refreshCurrentUser, getJwt, setTransportBridgeEnabled } from "./api";
+import { Show, Suspense, createEffect, lazy, on } from "solid-js";
 import { render } from "solid-js/web";
 import App from "./App";
 import { Toaster } from "./toast";
@@ -45,6 +45,21 @@ export async function mountApp(root: HTMLElement): Promise<void> {
   guardViewportPinchZoom();
   startDiagnostics();
   setTransportBridgeEnabled(true);
+  if (accountHandoff()) {
+    await bootstrapDesktopRuntime();
+    const { BackendTab } = await import("./Settings");
+    root.replaceChildren();
+    render(() => {
+      createEffect(on(connectionVersion, () => { void refreshCurrentUser(true); }));
+      return <main class="s-body settings-body">
+        <div class="s-inner"><h2>Account</h2>
+          <Show when={connectionVersion() + 1} keyed>{(_version) => <BackendTab standalone />}</Show>
+        </div>
+        <Toaster />
+      </main>;
+    }, root);
+    return;
+  }
   // Preload IndexedDB in parallel when web credentials are already in localStorage,
   // then ensure any connection restored from `desktop_bootstrap` also hydrates frame-0 cache.
   await Promise.all([bootstrapDesktopRuntime(), preloadFrameZeroCache()]);

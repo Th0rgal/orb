@@ -200,12 +200,21 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
           let isSynth := !r.glyphs.isEmpty && r.glyphs.all (fun g => g.sizePx.1 == 0 && g.sizePx.2 == 0)
           if isSynth then
             let txt := String.ofList (r.glyphs.map (fun g => Char.ofNat g.glyphId))
-            let (ac', rs) ← shapeDesktopRuns curAc (if r.style.monospace then mono else if r.style.weight >= 700 then bold else if r.style.weight >= 600 then semibold else if r.style.weight >= 500 then medium else font) scale120 r.style txt
+            let face := if r.style.monospace then mono else if r.style.weight >= 700 then bold else if r.style.weight >= 600 then semibold else if r.style.weight >= 500 then medium else font
+            let (ac', rs) ← shapeDesktopRuns curAc face scale120 r.style txt
             curAc := ac'
-            let rsAdjusted := rs.map (fun sr =>
-              { sr with allowBreakAfter := r.allowBreakAfter, hardBreakAfter := r.hardBreakAfter })
-            for sr in rsAdjusted do
-              shapedRuns := shapedRuns.push sr
+            -- HarfBuzz clusters are UTF-8 byte offsets within this shaped run.
+            -- Editor navigation and IME both address the draft in Unicode scalars.
+            let scalarAtByte := if r.editorStart.isSome && face.facePtr != 0 then
+                (txt.toList.mapIdx fun i c => List.replicate c.utf8Size i).flatten.toArray else #[]
+            for sr in rs do
+              let glyphs := match r.editorStart with
+                | none => sr.glyphs
+                | some start => sr.glyphs.map fun g =>
+                  { g with cluster := start + scalarAtByte[g.cluster]?.getD g.cluster }
+              shapedRuns := shapedRuns.push { sr with
+                glyphs, editorStart := r.editorStart
+                allowBreakAfter := r.allowBreakAfter, hardBreakAfter := r.hardBreakAfter }
           else
             shapedRuns := shapedRuns.push r
         -- A fixed-width clipped label is a CSS single-line ellipsis label.
@@ -236,7 +245,9 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
 
 private partial def scrollRegionsOf (b : ComputedBox) : List Runtime.ScrollRegion :=
   match b.id, b.scrollLimitXY with
-  | some id, some (_, lim) => [⟨id, b.contentRectSub, lim⟩]
+  | some id, some (_, limitY) =>
+    let lines := (b.children.head?.map (·.lines)).getD []
+    [{ id, bounds := b.contentRectSub, limitY, offsetY := (b.scrollOffset.getD (0, 0)).2, textLines := lines }]
   | _, _ => b.children.flatMap scrollRegionsOf
 
 /-- Render one frame of `DesktopState` via `OrbDesktop.buildDesktopScreen`, `Layout.layoutNode`,
@@ -344,7 +355,12 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
           if let some draft := st.cloudDraft.editKey? key mods then
             return ({ st with cloudDraft := draft, cloudAttempt := if draft.text == st.cloudDraft.text then st.cloudAttempt else "" }, some viewport)
         else if st.openMission.isSome || st.screen == .controlEmpty || st.screen == .controlPopulated then
-          if let some composer := st.composer.editKey? key mods then
+          let rows := if key == 0xff52 || key == 0xff54 then
+              match regions.find? (·.id == Widgets.composerViewportId) with
+              | some r => editorRows r.textLines st.composer.text.length
+              | none => []
+            else []
+          if let some composer := st.composer.editKey? key mods rows then
             return ({ st with composer }, if composer == st.composer then none else some viewport)
     if let .pointerMove x y := ev then
       return (st, st.sidebarHoverDamage rt.hitRegions scale rt.hoveredEntity (hitTest rt.hitRegions x y))
@@ -394,6 +410,11 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
         let h := r.bounds.h.toNat
         let content := r.limitY + h
         let damage := some (roundRectOut scale r.bounds)
+        if r.id == Widgets.composerViewportId then
+          let current := st.composer.wheelTop.getD r.offsetY
+          let top := scrollStep content h current dy
+          if top == current then return (st, none)
+          return ({ st with composer := { st.composer with wheelTop := some top } }, damage)
         if r.id == rosterViewportId then
           let top := scrollStep content h (min r.limitY st.rosterTopSub) dy
           if top == st.rosterTopSub then return (st, none)
