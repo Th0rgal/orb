@@ -271,7 +271,7 @@ def buildAttachmentChipWidget (theme : Theme) (att : ComposerAttachment) : Widge
 editor centred in a column of at most `748 px`, as `.dock > .col > .composer` in the SolidJS
 desktop. The pill holds the round attach button, the text and the send button. -/
 def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
-    (buf : ComposerBuffer) (overrideRuns : List InlineRun := []) (controls : Option WidgetNode := none) (newAgentHeader : Option WidgetNode := none) : WidgetNode :=
+    (buf : ComposerBuffer) (overrideRuns : List InlineRun := []) (controls : Option WidgetNode := none) (newAgentHeader : Option WidgetNode := none) (voice : Option WidgetNode := none) : WidgetNode :=
   let pal := theme.palette
   let tall := newAgentHeader.isSome
   let colW : SubPx := if tall then min (pxToSub 608) (availW - pxToSub 32) else min (pxToSub 748) (availW - pxToSub 68)
@@ -372,7 +372,7 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
     else []
   if let some header := newAgentHeader then
     let toolbar := WidgetNode.box (BoxStyle.row (pxToSub 8) |>.withAlign .center |>.withFixedSize (colW - pxToSub 26) (pxToSub 24))
-      ([attachBtn] ++ controls.toList ++ [sendBtn])
+      ([attachBtn] ++ controls.toList ++ voice.toList ++ [sendBtn])
     let card := WidgetNode.focusable buf.composerWidgetId <| WidgetNode.box
       (BoxStyle.col (pxToSub 6) |>.withPadding (Edges.trbl (pxToSub 10) (pxToSub 12) (pxToSub 8) (pxToSub 12))
         |>.withFixedSize colW (pxToSub 50 + editH + (if hasChips then chipRowH else 0))

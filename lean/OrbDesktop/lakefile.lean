@@ -8,7 +8,7 @@ package «orb-desktop-native» where
 require «orb-spec» from ".."
 
 lean_lib «LeanUI» where
-  roots := #[`LeanUI, `OrbDesktop.State, `OrbDesktop.Core, `OrbDesktop.Chrome, `OrbDesktop.Screens]
+  roots := #[`LeanUI, `OrbDesktop.State, `OrbDesktop.Core, `OrbDesktop.Voice, `OrbDesktop.Chrome, `OrbDesktop.Screens]
   precompileModules := false
 
 /-- Proof shards and replayed-event checks. Built by `scripts/build_orb_bins.sh` with the binary. -/
