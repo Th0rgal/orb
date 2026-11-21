@@ -363,6 +363,23 @@ def label(v):
     return ''.join(c if c.isprintable() else ' ' for c in str(v or '')[:512])
 
 
+def list_directories(binding, machine, path):
+    c = Connection()
+    if c.binding != binding:
+        raise ValueError('connection changed')
+    quote = urllib.parse.quote
+    prefix = '/api' if machine == 'core' else '/api/remote-nodes/' + quote(machine, safe='')
+    rows = c.request(prefix + '/fs/list?' + urllib.parse.urlencode({'path': path or '.'}), deadline=18)
+    if not isinstance(rows, list):
+        raise ValueError('invalid folder list')
+    print('directories')
+    for row in sorted(rows, key=lambda item: str(item.get('name', '')).casefold()):
+        name, full = row.get('name'), row.get('path')
+        if (row.get('kind') == 'dir' and name and name not in ('.', '..') and isinstance(full, str)
+                and full.startswith('/') and full.isprintable()):
+            print('D', full, label(name), sep='\t')
+
+
 def mission_settings(m):
     return (m.get('remote_node_id') or (m.get('remote_job') or {}).get('node_id') or
             next((t.removeprefix('remote-node:') for t in m.get('tags', []) if t.startswith('remote-node:')), 'core'),

@@ -353,6 +353,9 @@ structure MissionMenu where
   first : Nat := 0
   highlighted : Nat := 0
   draft : ComposerBuffer := {}
+  browsePath : String := ""
+  directoryRows : Option (List (String × String)) := none
+  listingFailed : Bool := false
   deriving Repr, Inhabited
 
 /-- Complete single-owner pure state of the Orb Desktop shell. -/
@@ -903,8 +906,12 @@ def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuR
   if menu.page == .draftDirectory then
     let path := menu.draft.text ++ menu.draft.imePreeditText
     let valid := path.isEmpty || path.startsWith "/"
+    let children : List MissionMenuRow := (menu.directoryRows.getD []).mapIdx fun i (full, name) =>
+      { id := 2000000 + i, label := name, value := full, icon := "folder" }
+    let notice : List MissionMenuRow := if menu.listingFailed then
+      [{ id := 729, label := "Folder listing unavailable", icon := "folder" }] else []
     return [{ id := 1, label := if path.isEmpty then "Absolute folder path" else path, icon := "folder" },
-      { id := if valid then 716 else 729, label := if path.isEmpty then "Use default folder" else if valid then "Use this folder" else "Enter an absolute path", icon := "check" }]
+      { id := if valid then 716 else 729, label := if path.isEmpty then "Use default folder" else if valid then "Use this folder" else "Enter an absolute path", icon := "check" }] ++ children ++ notice
   if menu.page == .draftProject then
     return (st.sidebarRows.filter (·.kind == "project")).mapIdx fun i p =>
       { id := 2000000 + i, label := p.title, value := (p.rowId.drop 8).toString,
@@ -1030,6 +1037,9 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
   | .activate 715 => return update { menu with page := .actions, first := 0, highlighted := 0 }
   | .activate id =>
     let some row := (missionMenuRows st menu).find? (·.id == id) | return (st, none)
+    if menu.page == .draftDirectory && id >= 2000000 then
+      return update { menu with browsePath := row.value, first := 0, highlighted := 1, directoryRows := none,
+                                draft := { text := row.value, cursorOffset := row.value.length } }
     if menu.page == .draftDirectory && id == 716 && menu.draft.imePreeditText.isEmpty then
       return ({ st with draftDirectory := menu.draft.text, missionMenu := none }, some viewport)
     if menu.page == .draftProject then
