@@ -1537,7 +1537,7 @@ fun OrbProvidersSettingsPage(
                                                         moveProvider(idx, idx + 1)
                                                     }
                                                 }
-                                                Box(
+                                                if (isAdmin) Box(
                                                     modifier = Modifier
                                                         .clip(CircleShape)
                                                         .background(OrbStyle.card)

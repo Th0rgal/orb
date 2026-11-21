@@ -3271,16 +3271,23 @@ def getAIProvider? (st : CoreStore) (pid : String) : IO (Option AIProviderRecord
     return some (rowToAIProviderRecord rows[1]!)
 
 /-- Validate and upsert an `AIProviderRecord` into `missions.db`. -/
-def upsertAIProvider (st : CoreStore) (p : AIProviderRecord) : IO (Except String Unit) := do
+def upsertAIProvider (st : CoreStore) (p : AIProviderRecord) (memberEdit : Bool := false) : IO (Except String Unit) := do
   match validateAIProviderRecord p with
   | .error e => return .error e
   | .ok () =>
     let rpmParam := match p.rpmLimit? with | some v => s!"{v}" | none => ""
     let concParam := match p.maxConcurrency? with | some v => s!"{v}" | none => ""
+    let params := #[p.id, p.providerType, p.name, if p.enabled then "1" else "0", p.baseUrl, p.apiKey,
+      rpmParam, concParam, renderCustomModelsJson p.customModels, p.updatedAt, p.createdByUserId]
+    if memberEdit then
+      -- A stale settings edit must never restore an account disabled or deleted since authorization.
+      let res ← execParamQuery st.missionsDb
+        ("UPDATE ai_providers SET name=?3,base_url=?5,api_key=?6,rpm_limit=NULLIF(?7,'')," ++
+         "max_concurrency=NULLIF(?8,''),custom_models_json=?9,updated_at=?10 " ++
+         "WHERE id=?1 AND provider_type=?2 AND enabled=?4 AND created_by_user_id=?11 RETURNING id;") params
+      return res.bind fun rows => if rows.size == 2 then .ok () else .error "provider_changed"
     let res ← execParamQuery st.missionsDb
-      "INSERT INTO ai_providers(id,provider_type,name,enabled,base_url,api_key,rpm_limit,max_concurrency,custom_models_json,updated_at,created_by_user_id) VALUES(?1,?2,?3,?4,?5,?6,NULLIF(?7,''),NULLIF(?8,''),?9,?10,?11) ON CONFLICT(id) DO UPDATE SET provider_type=excluded.provider_type,name=excluded.name,enabled=excluded.enabled,base_url=excluded.base_url,api_key=excluded.api_key,rpm_limit=excluded.rpm_limit,max_concurrency=excluded.max_concurrency,custom_models_json=excluded.custom_models_json,updated_at=excluded.updated_at;"
-      #[p.id, p.providerType, p.name, if p.enabled then "1" else "0", p.baseUrl, p.apiKey,
-        rpmParam, concParam, renderCustomModelsJson p.customModels, p.updatedAt, p.createdByUserId]
+      "INSERT INTO ai_providers(id,provider_type,name,enabled,base_url,api_key,rpm_limit,max_concurrency,custom_models_json,updated_at,created_by_user_id) VALUES(?1,?2,?3,?4,?5,?6,NULLIF(?7,''),NULLIF(?8,''),?9,?10,?11) ON CONFLICT(id) DO UPDATE SET provider_type=excluded.provider_type,name=excluded.name,enabled=excluded.enabled,base_url=excluded.base_url,api_key=excluded.api_key,rpm_limit=excluded.rpm_limit,max_concurrency=excluded.max_concurrency,custom_models_json=excluded.custom_models_json,updated_at=excluded.updated_at;" params
     return res.map (fun _ => ())
 
 /-- Append a provider-account audit entry. `fields` names the changed fields only; values

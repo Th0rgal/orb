@@ -605,7 +605,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
 
 def memberProviderDisplayName (hps : Array HydratedProvider) (hp : HydratedProvider) : String := Id.run do
   let metaInfo := lookupProviderMeta hp.providerType
-  let sameType := hps.filter (fun p => p.enabled && (p.hasApiKey || p.hasOAuth) && p.providerType.toLower == hp.providerType.toLower)
+  let sameType := hps.filter (fun p => (p.hasApiKey || p.hasOAuth) && p.providerType.toLower == hp.providerType.toLower)
   if sameType.size ≤ 1 then
     return metaInfo.name
   let idx := (sameType.findIdx? (fun p => p.id == hp.id)).getD 0
@@ -647,7 +647,9 @@ def renderMemberHydratedProviderJv (hp : HydratedProvider) (displayName : String
     ("has_oauth", .bool hp.hasOAuth),
     ("uses_oauth", .bool metaInfo.usesOAuth),
     ("status", statusObj),
-    ("custom_models", .arr hp.customModels)
+    ("custom_models", .arr (hp.customModels.map fun model =>
+      .obj ((#["id", "name", "context_limit", "output_limit"] : Array String).filterMap fun key =>
+        (model.field? key).map fun value => (key, value))))
   ]
 
 def projectMemberProviderUsageJv (jv : JVal) (displayName : String) : JVal :=
@@ -731,6 +733,10 @@ def renderHydratedProviderJv (hp : HydratedProvider) (userEnabled? : Option Bool
 /-- Whether `callerUserId` added `hp` (never true for operator/legacy rows with no creator). -/
 def providerAddedBy (hp : HydratedProvider) (callerUserId : String) : Bool :=
   !hp.createdByUserId.isEmpty && hp.createdByUserId == callerUserId
+
+/-- Configured accounts remain in inventory when globally disabled. -/
+def providerListedFor (hp : HydratedProvider) (effAdmin : Bool) (callerUserId : String) : Bool :=
+  effAdmin || providerAddedBy hp callerUserId || hp.hasApiKey || hp.hasOAuth
 
 /-- Render one provider for the caller: admins and the member who added the account get the
     full (credential-free) view plus who added it; other members get the reduced view. -/
@@ -3176,7 +3182,7 @@ def dispatchProviderAndAiRoute
       let hasLegacyJson ← (System.FilePath.mk s!"{workingDir}/.sandboxed-sh/ai_providers.json").pathExists
       let hasStoreJson ← (System.FilePath.mk s!"{store.rootDir}/ai_providers.json").pathExists
       let authFiles ← scanCliProxyAuthFiles
-      if !hasLegacyJson && !hasStoreJson && authFiles.isEmpty then
+      if isLegacyUnscoped && !hasLegacyJson && !hasStoreJson && authFiles.isEmpty then
         return none
       let hps ← loadHydratedProviders store workingDir
       let uPrefs ← if isLegacyUnscoped then pure #[] else getUserProviderPrefs store callerUserId
@@ -3184,7 +3190,7 @@ def dispatchProviderAndAiRoute
       let sidecarFiles ← fetchSidecarAuthFiles
       let mut arr : Array JVal := #[]
       for hp in hps do
-        if effAdmin || providerAddedBy hp callerUserId || (hp.enabled && (hp.hasApiKey || hp.hasOAuth)) then
+        if providerListedFor hp effAdmin callerUserId then
           let uEn? := if isLegacyUnscoped then none else some (isUserProviderEnabled uPrefs hp.id)
           let rejected ← loginRejectedFor hub store hp
           let rejected := rejected ||
@@ -3192,7 +3198,11 @@ def dispatchProviderAndAiRoute
           let obs? ← match pacingTracker? with
             | some tr => if effAdmin then lookupObservedKeyRpm? tr hp.id else pure none
             | none => pure none
-          arr := arr.push (renderHydratedProviderForCaller hps hp effAdmin callerUserId usernames uEn? obs? rejected)
+          let row := renderHydratedProviderForCaller hps hp effAdmin callerUserId usernames uEn? obs? rejected
+          let row := match uEn? with
+            | some ue => (row.setField "globally_enabled" (.bool hp.enabled)).setField "effective_enabled" (.bool (hp.enabled && ue))
+            | none => row
+          arr := arr.push row
       return some (jsonResp 200 (.arr arr))
 
     -- 5b. `GET /api/ai/providers/usage`

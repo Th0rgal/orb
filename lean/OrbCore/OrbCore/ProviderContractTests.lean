@@ -1621,6 +1621,83 @@ def run : IO Unit := do
         | throw (IO.userError "provider contract admin creation failed")
       let jwt := mintSessionTokenV2 cfg.jwtSecret admin.id admin.role admin.sessionEpoch (now + 3600)
       let mut failures : Array String := #[]
+      let .ok member ← createUserRecord store "inventory-member" "inventory-fixture-password" "member"
+          none none "2026-11-16T00:00:00Z"
+        | throw (IO.userError "Inventory member creation failed")
+      let memberJwt := mintSessionTokenV2 cfg.jwtSecret member.id member.role member.sessionEpoch (now + 3600)
+      let a : HydratedProvider := { (default : HydratedProvider) with
+        id := "fixture-a"
+        providerType := "openai"
+        enabled := true
+        hasApiKey := true
+        apiKey := "synthetic-a" }
+      let b := { a with id := "fixture-b", apiKey := "synthetic-b" }
+      let entry := "[{\"provider_id\":\"openai\",\"account_id\":\"fixture-b\",\"model_id\":\"gpt-5\"}]"
+      let target := (parseChainTargetsJson entry #[] #[a, b])[0]?
+      unless target.any (fun t => t.accountId == b.id && t.apiKey == b.apiKey) do
+        failures := failures.push "An explicitly selected account must supply its own credential"
+      unless (parseChainTargetsJson entry #[] #[a, { b with enabled := false }]).isEmpty do
+        failures := failures.push "A disabled selected account must not resolve another login"
+      let ownerRow : AIProviderRecord := {
+        id := "inventory-owner-fixture"
+        name := "Owner fixture"
+        providerType := "openai"
+        apiKey := "fixture-only"
+      }
+      IO.ofExcept (← upsertAIProvider store ownerRow)
+      let configuredIdentities := fun (session : String) => do
+        let rows := (← getJson app session "/api/ai/providers" now).asArr?.getD #[]
+        return (rows.filter (·.fieldBool? "has_credentials" == some true)).map fun row =>
+          (row.fieldStr? "id", row.fieldStr? "provider_type", row.fieldBool? "enabled",
+           (row.fieldOrNull "status").fieldStr? "type")
+      unless (← configuredIdentities memberJwt) == (← configuredIdentities jwt) do
+        failures := failures.push "Both sessions list the same configured IDs, types, global state and credential status"
+      let listRow : String → IO JVal := fun session => do
+        let rows := (← getJson app session "/api/ai/providers" now).asArr?.getD #[]
+        pure ((rows.find? (·.fieldStr? "id" == some ownerRow.id)).getD .null)
+      let inChooser : String → IO Bool := fun session => do
+        let catalog ← getJson app session "/api/providers" now
+        pure (((catalog.fieldArr? "configured_ids").getD #[]).contains (.str ownerRow.id))
+      let (prefCode, _) ← putJson app memberJwt (s!"/api/ai/providers/{ownerRow.id}/preference")
+        "{\"enabled\":false}" now
+      unless prefCode == 200 && (← listRow memberJwt).fieldBool? "user_enabled" == some false &&
+          (← listRow jwt).fieldBool? "user_enabled" == some true &&
+          !(← inChooser memberJwt) && (← inChooser jwt) do
+        failures := failures.push "Personal preference persists on list reload and filters only the member's chooser"
+      IO.ofExcept (← upsertAIProvider store { ownerRow with enabled := false })
+      if (← upsertAIProvider store ownerRow (memberEdit := true)).isOk then
+        failures := failures.push "A stale member edit cannot restore the previous global state"
+      let disabledMember ← listRow memberJwt
+      let disabledAdmin ← listRow jwt
+      unless disabledMember.fieldStr? "id" == some ownerRow.id &&
+          disabledAdmin.fieldStr? "id" == some ownerRow.id &&
+          disabledMember.fieldBool? "enabled" == some false &&
+          disabledAdmin.fieldBool? "effective_enabled" == some false &&
+          (disabledMember.fieldOrNull "status").fieldStr? "type" == some "connected" &&
+          (disabledMember.field? "base_url").isNone do
+        failures := failures.push "Both sessions retain the disabled configured account"
+      let legacyFile := s!"{root}/.sandboxed-sh/ai_providers.json"
+      IO.FS.rename legacyFile (legacyFile ++ ".saved")
+      try
+        let dbMember ← listRow memberJwt
+        let dbAdmin ← listRow jwt
+        unless dbMember.fieldStr? "id" == some ownerRow.id &&
+            dbMember.fieldBool? "user_enabled" == some false && dbAdmin.fieldBool? "user_enabled" == some true &&
+            dbMember.fieldBool? "globally_enabled" == some false && (dbMember.field? "base_url").isNone do
+          failures := failures.push "Database-only list retains disabled accounts with the same redaction and preferences"
+      finally
+        IO.FS.rename (legacyFile ++ ".saved") legacyFile
+      let (enableCode, _) ← putJson app memberJwt s!"/api/ai/providers/{ownerRow.id}" "{\"enabled\":true}" now
+      let pinned := renderCompact (.arr #[.obj #[("provider_id", .str "openai"),
+        ("account_id", .str ownerRow.id), ("model_id", .str "fixture-model")]])
+      unless enableCode == 403 && !(← inChooser jwt) &&
+          (parseChainTargetsJson pinned (← listAIProviders store) (← loadHydratedProviders store root)).isEmpty do
+        failures := failures.push "Global disable excludes pinned inference targets and chooser options"
+      IO.ofExcept (← upsertAIProvider store { ownerRow with enabled := false, apiKey := "", providerType := "custom" })
+      unless (← listRow memberJwt) == .null &&
+          (← listRow jwt).fieldBool? "has_credentials" == some false do
+        failures := failures.push "Only the operator sees this unconfigured placeholder"
+      IO.ofExcept (← deleteAIProvider store ownerRow.id)
       let listed ← getJson app jwt "/api/ai/providers" now
       let items := listed.asArr?.getD #[]
       if items.size != cases.size then failures := failures.push "provider list row count"
