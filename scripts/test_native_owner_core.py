@@ -58,7 +58,7 @@ def run(binary, root):
                                    dict(username=username, password=password, role="member"))
             assert status == 201, status
             users[username] = json.loads(body)["id"]
-    env["SANDBOXED_REMOTE_NODES"] = json.dumps([dict(id=NODE_ID, base_url="http://127.0.0.1:1",
+    env["SANDBOXED_REMOTE_NODES"] = json.dumps([dict(id=NODE_ID, base_url="http://127.0.0.2:1",
                                                      dedicated_owner_id=users["alice"])])
     with core(binary, env), sqlite3.connect(Path(root) / ".sandboxed-sh/missions.db") as db:
         for name, owner in users.items():
@@ -73,16 +73,31 @@ def run(binary, root):
             assert status == expected, (status, body)
             return json.loads(body)
 
+        path = "/api/native-owner-enrollments/" + NODE_ID
+        assert request(port, bob, "GET", path)[0] == 403
+        status, body = request(port, alice, "GET", path)
+        assert status == 200 and json.loads(body) == {"account_id": "", "revision": 0}
+        status, body = request(port, alice, "POST", "/api/control/missions", {
+            "backend": "antigravity", "remote_node_id": NODE_ID, "project": "tests",
+            "prompt": "Read the disposable ledger.", "writer": False
+        })
+        assert (status, json.loads(body).get("error")) == (502, "native_owner_enrollment_required"), (status, body)
+        enroll(bob, "bob", 0, 403)
+        enroll(alice, "bob", 0, 403)
+        assert enroll(alice, "alice", 0, 200)["revision"] == 1
+        assert enroll(alice, "alice", 1, 200)["revision"] == 1
+        native_route = "/api/native/antigravity/v1internal:fetchUserInfo"
+        grants = {}
         for token, expected in ((alice, 503), (bob, 403), (login("admin"), 403)):
             assert request(port, token, "GET", "/api/providers/antigravity-models?node_id=" + NODE_ID)[0] == expected
         for token, reason in ((alice, "native_owner_executor_unavailable"), (bob, "node_owner_required")):
-            status, body = request(port, token, "POST", "/api/missions", {
+            status, body = request(port, token, "POST", "/api/control/missions", {
                 "backend": "antigravity", "remote_node_id": NODE_ID, "project": "tests",
                 "prompt": "Read the disposable ledger.", "writer": False,
                 "model_override": "gemini-4-carbon",
             })
             assert (status, json.loads(body).get("error")) == (502, reason), (status, body)
-        status, body = request(port, alice, "POST", "/api/missions", {
+        status, body = request(port, alice, "POST", "/api/control/missions", {
             "backend": "antigravity", "remote_node_id": NODE_ID, "project": "tests", "writer": False
         })
         assert status in (200, 201), (status, body)
@@ -94,16 +109,6 @@ def run(binary, root):
         })
         assert (status, json.loads(body).get("error")) == (502, "native_owner_executor_unavailable"), (status, body)
         assert db.execute("SELECT count(*) FROM remote_node_jobs").fetchone() == (0,)
-        path = "/api/native-owner-enrollments/" + NODE_ID
-        assert request(port, bob, "GET", path)[0] == 403
-        status, body = request(port, alice, "GET", path)
-        assert status == 200 and json.loads(body) == {"account_id": "", "revision": 0}
-        enroll(bob, "bob", 0, 403)
-        enroll(alice, "bob", 0, 403)
-        assert enroll(alice, "alice", 0, 200)["revision"] == 1
-        assert enroll(alice, "alice", 1, 200)["revision"] == 1
-        native_route = "/api/native/antigravity/v1internal:fetchUserInfo"
-        grants = {}
         for node in (NODE_ID, "ordinary"):
             grants[node] = "orb-agy-v1_" + secrets.token_hex(24)
             digest = hashlib.sha256(grants[node].encode()).hexdigest()

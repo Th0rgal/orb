@@ -335,6 +335,17 @@ def loadStaticRemoteNodes : IO (Bool × Array StaticRemoteNode) := do
   let parsed := parseStaticRemoteNodesRaw raw
   return (enabled || !parsed.isEmpty, parsed)
 
+/-- Return only a current owner/account binding. Provider metadata and preferences
+    are checked without reading the provider credential. -/
+def hasCurrentNativeEnrollment (st : CoreStore) (node owner : String) : IO Bool := do
+  let .ok rows ← execParamQuery st.missionsDb
+      ("SELECT 1 FROM native_owner_enrollments e JOIN ai_providers p ON p.id=e.account_id " ++
+       "LEFT JOIN user_provider_prefs pref ON pref.user_id=e.owner_id AND pref.provider_id=p.id " ++
+       "WHERE e.node_id=?1 AND e.owner_id=?2 AND p.created_by_user_id=e.owner_id " ++
+       "AND p.provider_type='antigravity' AND p.enabled=1 AND COALESCE(pref.enabled,1)=1;") #[node,owner]
+    | return false
+  return rows.size > 1
+
 def resolveStaticNodeToken? (node : StaticRemoteNode) : IO (Option String) := do
   if let some v ← IO.getEnv node.tokenEnv then
     let t := v.trimAscii.toString

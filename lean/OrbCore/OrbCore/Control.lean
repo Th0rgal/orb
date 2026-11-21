@@ -5856,10 +5856,13 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
 
   if req.method == "GET" && ["/api/providers/antigravity-models", "/api/antigravity-models",
       "/api/providers/backend-models"].contains cleanPath then
-    if let some (_, node) := (parseQueryParams rawTarget).find? (fun p => p.1 == "node_id") then
+    if let some (_, rawNode) := (parseQueryParams rawTarget).find? (fun p => p.1 == "node_id") then
+      let some node := percentDecodeStrict rawNode | return .ok (mkJson 400 "{}")
       let (_, nodes) ← loadStaticRemoteNodes
       if let some owner := (nodes.find? (fun n => n.id == node)).bind (·.dedicatedOwner?) then
         if owner.isEmpty || caller.userId != owner then return .ok (mkJson 403 "{\"error\":\"node_owner_required\"}")
+        unless ← hasCurrentNativeEnrollment st.store node owner do
+          return .ok (mkJson 409 "{\"error\":\"native_owner_enrollment_required\"}")
         return .ok (mkJson 503 "{\"error\":\"native_owner_executor_unavailable\"}")
 
   if cleanPath.startsWith "/api/providers/" || cleanPath == "/api/antigravity-models" then
