@@ -137,6 +137,12 @@ def run(binary, root):
         print("targeted catalog: owner 503, other user and admin 403")
         print("other node owner 403; other account owner 403; owner revision 1; stale revision 409")
         print("rebind revision 2; old grant 401; unrelated grant active; restore original account at revision 4: old grant 401")
+    env["SANDBOXED_REMOTE_NODES"] = json.dumps([dict(id=NODE_ID, base_url="http://127.0.0.2:1")])
+    with core(binary, env):
+        alice = login("alice")
+        status, body = request(port, alice, "GET", "/api/providers/antigravity-models?node_id=" + NODE_ID)
+        assert (status, json.loads(body)["error"]) == (403, "node_owner_required")
+        print("restart without roster owner: persisted reservation refused catalog access")
 
 
 if __name__ == "__main__":

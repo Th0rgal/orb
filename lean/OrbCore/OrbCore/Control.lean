@@ -5859,7 +5859,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     if let some (_, rawNode) := (parseQueryParams rawTarget).find? (fun p => p.1 == "node_id") then
       let some node := percentDecodeStrict rawNode | return .ok (mkJson 400 "{}")
       let (_, nodes) ← loadStaticRemoteNodes
-      if let some owner := (nodes.find? (fun n => n.id == node)).bind (·.dedicatedOwner?) then
+      if let some owner ← nativeNodeOwner? st.store nodes node then
         if owner.isEmpty || caller.userId != owner then return .ok (mkJson 403 "{\"error\":\"node_owner_required\"}")
         unless ← hasCurrentNativeEnrollment st.store node owner do
           return .ok (mkJson 409 "{\"error\":\"native_owner_enrollment_required\"}")

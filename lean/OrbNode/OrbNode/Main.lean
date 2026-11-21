@@ -131,6 +131,19 @@ def runCli (args : List String) : IO UInt32 := do
       IO.eprintln s!"failed to open OrbNode ledger: {msg}"
       return 1
     | .ok ledger =>
+      let key := "native-owner/reservation"
+      let mut ledger := ledger
+      if let some old := ledger.store.kv[key]? then
+        unless cfg.dedicatedOwner?.any (fun owner => !owner.isEmpty && old == owner.toUTF8) do
+          IO.eprintln "dedicated owner binding missing or changed"
+          return 1
+      else if let some owner := cfg.dedicatedOwner? then
+        if owner.isEmpty || !ledger.jobs.isEmpty then
+          IO.eprintln "dedicated owner reservation requires an owner and a fresh job ledger"
+          return 1
+        let .ok store ← LeanSys.Store.putString ledger.store key owner
+          | do IO.eprintln "failed to persist dedicated owner reservation"; return 1
+        ledger := { ledger with store }
       reapPreviousScopesOnStart cfg
       let rt : NodeRuntime := { cfg := cfg, ledger := ledger }
       runServerLoop rt dialCred?

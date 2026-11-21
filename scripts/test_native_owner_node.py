@@ -58,6 +58,15 @@ def run(binary, dedicated):
         finally:
             proc.terminate()
             proc.wait(timeout=10)
+        if dedicated:
+            for owner in (None, str(uuid4())):
+                if owner is None:
+                    env.pop("ORB_NODE_DEDICATED_OWNER_ID")
+                else:
+                    env["ORB_NODE_DEDICATED_OWNER_ID"] = owner
+                restart = subprocess.run([binary], env=env, cwd=root, capture_output=True, timeout=10)
+                assert restart.returncode == 1 and b"dedicated owner binding missing or changed" in restart.stderr
+            print("restart with missing or changed owner binding: refused before listening")
 
 
 if __name__ == "__main__":

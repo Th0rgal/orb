@@ -335,6 +335,14 @@ def loadStaticRemoteNodes : IO (Bool × Array StaticRemoteNode) := do
   let parsed := parseStaticRemoteNodesRaw raw
   return (enabled || !parsed.isEmpty, parsed)
 
+/-- A previously enrolled node cannot fall back to generic dispatch when its
+    roster owner is removed. An empty owner reserves it against every caller. -/
+def nativeNodeOwner? (store : CoreStore) (nodes : Array StaticRemoteNode) (node : String) : IO (Option String) := do
+  if let some owner := (nodes.find? (fun n => n.id == node)).bind (·.dedicatedOwner?) then return some owner
+  let .ok rows ← execParamQuery store.missionsDb
+      "SELECT 1 FROM native_owner_enrollments WHERE node_id=?1;" #[node] | return some ""
+  return if rows.size > 1 then some "" else none
+
 /-- Return only a current owner/account binding. Provider metadata and preferences
     are checked without reading the provider credential. -/
 def hasCurrentNativeEnrollment (st : CoreStore) (node owner : String) : IO Bool := do
