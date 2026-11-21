@@ -1,5 +1,6 @@
 #include "gtk_leanui_private.h"
 #include "gtk_menu.h"
+#include "gtk_icons.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -59,6 +60,7 @@ static GtkWidget *button(OrbSidebar *s, const char *action, const char *rid, con
     GtkWidget *b = g_hash_table_lookup(s->buttons, key);
     if (!b) {
         b = gtk_button_new();
+        orb_gtk_bind_pointer_cursor(b);
         gtk_widget_set_no_show_all(b, TRUE);
         g_object_set_data_full(G_OBJECT(b), "orb-action", g_strdup(action), g_free);
         g_signal_connect(b, "clicked", G_CALLBACK(activate), s);
