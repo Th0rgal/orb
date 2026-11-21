@@ -53,6 +53,7 @@ private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale
     { widgetId := m.widgetId, rowId := "mission:" ++ m.missionId, kind := "mission", title := m.title, status := m.status }
   let sidebar := [{ widgetId := 101, rowId := "nav:new", kind := "nav", title := "New Agent", shortcut := "⌘N", selected := true },
     { widgetId := 112, rowId := "nav:machines", kind := "nav", title := "Machines", shortcut := "⌘3" },
+    { widgetId := 113, rowId := "nav:inference", kind := "nav", title := "Inference", shortcut := "⌘4" },
     { widgetId := 109, rowId := "section:missions", kind := "section", title := "Missions" }] ++ missionRows ++
     [{ widgetId := 108, rowId := "section:projects", kind := "section", title := "Projects" }] ++ projects
   return { DesktopState.liveUnavailable isDark scale120 with
@@ -67,22 +68,29 @@ private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale
     missionCards := missions
     fleetMachines := machines, catalogLoading := true }
 
+private inductive ReadKind where
+  | roster | recover | catalog (revision : Nat) | providers
+  deriving BEq
+
 private structure LiveRead where
   binding : String
+  kind : ReadKind
   take : IO (Option (List String))
   stop : IO Unit
 
-private def startLiveRead (binding : String) (initial : Bool) (notify : IO Unit) : IO LiveRead := do
-  let args := if initial then #["-I", "-c", transport ++ "\ntry: roster()\nexcept Exception: sys.exit(1)"]
-    else if binding.isEmpty then #["-I", "-c", transport ++ "\nrecover_roster()"]
-    else #["-I", "-c", transport ++ "\ncatalog(sys.argv[1], json.loads(sys.argv[2]))", binding, modelCatalogRules]
+private def startLiveRead (binding : String) (kind : ReadKind) (notify : IO Unit) : IO LiveRead := do
+  let args := match kind with
+    | .roster => #["-I", "-c", transport ++ "\ntry: roster()\nexcept Exception: sys.exit(1)"]
+    | .recover => #["-I", "-c", transport ++ "\nrecover_roster()"]
+    | .providers => #["-I", "-c", transport ++ "\nprovider_inventory(sys.argv[1])", binding]
+    | .catalog _ => #["-I", "-c", transport ++ "\ncatalog(sys.argv[1], json.loads(sys.argv[2]))", binding, modelCatalogRules]
   let child ← IO.Process.spawn { cmd := "python3", args, stdout := .piped, stderr := .null }
   let mailbox ← Std.Mutex.new (none : Option (List String))
   let reader ← IO.asTask (prio := .dedicated) do
     let out ← try child.stdout.readToEnd catch _ => pure ""
     mailbox.atomically (set (some (out.splitOn "\n")))
     notify
-  return { binding, take := mailbox.atomically (modifyGet fun rows => (rows, none)), stop := do
+  return { binding, kind, take := mailbox.atomically (modifyGet fun rows => (rows, none)), stop := do
     try child.kill catch _ => pure ()
     discard child.wait
     discard (IO.wait reader) }
@@ -98,12 +106,17 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
     k fun st => do
       if !st.liveData then return none
       let current ← slot.get
-      if current.any (·.binding != st.connectionBinding) then close
-      if st.hasLiveConnection && !st.catalogLoading then return none
+      let kind : Option ReadKind := if !st.hasLiveConnection then
+          some (if st.initialRosterPending then .roster else .recover)
+        else if st.screen == .inference && st.providers.isNone && !st.providerReadFailed then some .providers
+        else if st.catalogLoading then some (.catalog st.catalogRevision)
+        else none
+      if current.any (fun r => r.binding != st.connectionBinding || some r.kind != kind) then close
+      let some kind := kind | return none
       let source ← match ← slot.get with
         | some r => pure r
         | none => do
-          let r ← startLiveRead st.connectionBinding st.initialRosterPending notify
+          let r ← startLiveRead st.connectionBinding kind notify
           slot.set (some r)
           pure r
       let some lines ← source.take | return none
@@ -111,6 +124,14 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
       if source.binding.isEmpty then
         if let some ready := liveStateFromProjection lines isDark st.scale120 then return some ready
         return if st.initialRosterPending then some { st with initialRosterPending := false } else none
+      if source.kind == .providers then
+        if lines.head? != some "accounts" then return some { st with providerReadFailed := true }
+        let rows := lines.filterMap fun line =>
+          match splitTab line with
+          | ["A", id, name, category, personal, globalFlag] =>
+            some ({ id, name, category, userEnabled := personal == "1", globallyEnabled := globalFlag == "1" } : ProviderAccount)
+          | _ => none
+        return some { st with providers := some rows }
       let models := lines.filterMap fun line =>
         match splitTab line with
         | ["H", backend, harnessName, model, modelName] =>
@@ -217,6 +238,7 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
     let st := { st with writeRequest := none, writeError := "" }
     let encode := fun (v : LaunchSettings) => String.intercalate "\t" [v.machine, v.backend, v.model, v.effort, v.permission]
     let (action, mid, text) := match request with
+      | .providerPreference account enabled => (if enabled then "use-provider" else "skip-provider", account, "")
       | .create => ("create", "", encode st.draftSettings ++ "\t" ++ st.draftProject ++ "\t" ++ st.composer.text)
       | .send mid text => ("send", mid, text)
       | .stop mid => ("stop", mid, "")
@@ -240,8 +262,14 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
       if r.exitCode == 4 then
         return ({ st with writeError := "Start a new Goal mission or remove /goal." }, some viewport)
       if r.exitCode != 0 then throw (IO.userError "write failed")
-      closeLiveSubscription slot
       match request with
+      | .providerPreference .. => pure ()
+      | _ => closeLiveSubscription slot
+      match request with
+      | .providerPreference account enabled =>
+        let providers := st.providers.map fun rows =>
+          rows.map fun p => if p.id == account then { p with userEnabled := enabled } else p
+        return ({ st with providers, catalogLoading := true, catalogRevision := st.catalogRevision + 1 }, some viewport)
       | .create =>
         let [id,title,status,machine,backend,model,effort,permissionMode,project] := splitTab (r.stdout.dropEnd 1).toString | throw (IO.userError "invalid mission")
         let wid := 1001 + 3 * (1 + (st.sidebarRows.foldl (fun n row => max n row.widgetId) 1000 - 1000) / 3)

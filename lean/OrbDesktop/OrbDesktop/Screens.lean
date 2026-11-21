@@ -486,26 +486,38 @@ def buildMachineRow (theme : Theme) (w h : SubPx) (title desc rightText : String
         (if showChevron then [screenTextLine theme (pxToSub 16) (pxToSub 18) (pxToSub 14) (pxToSub 18) pal.textFaint "›"] else []))
     ]
 
-/-- Only materialize machine rows intersecting the viewport. A long fleet keeps
-    its full scroll extent while text shaping stays bounded by window height. -/
-private def buildLiveMachines (st : DesktopState) (width height : SubPx) : WidgetNode := Id.run do
+/-- Give long inventories their full scroll extent while shaping only visible rows. -/
+private def buildLiveInventory (st : DesktopState) (width height : SubPx) : WidgetNode := Id.run do
   let theme := st.theme
-  let pal := theme.palette
   let colW := min (pxToSub 640) (width - pxToSub 24)
   let rowH := pxToSub 60
-  let count := st.fleetMachines.length
+  let providers := st.screen == .inference
+  let accounts := st.providers.getD []
+  let count := if providers then accounts.length else st.fleetMachines.length
   if count == 0 then
+    let message := if !providers then "No machines connected"
+      else if st.providerReadFailed then "Could not load accounts. Open Inference to retry."
+      else if st.providers.isNone then "Loading accounts…"
+      else "No provider accounts"
     return WidgetNode.box (BoxStyle.col 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize width height)
-      [screenTextLine theme colW (pxToSub 20) (pxToSub 13) (pxToSub 20) pal.textSecondary "No machines connected"]
+      [screenTextLine theme colW (pxToSub 20) (pxToSub 13) (pxToSub 20) theme.palette.textSecondary message]
   let top := min st.fleetTopSub (count * rowH - height)
   let first := top / rowH
-  let visible := (st.fleetMachines.drop first).take (height / rowH + 2)
+  let limit := height / rowH + 2
   let spacer := fun n => WidgetNode.box (BoxStyle.col 0 |>.withFixedSize colW (n * rowH)) []
-  let rows := visible.map fun m =>
-    let detail := String.intercalate " · " ([m.roleLabel, m.cpuRamSpec].filter (!·.isEmpty))
-    buildMachineRow theme colW rowH (if m.name.isEmpty then m.machineId else m.name) detail m.state true false
+  let rows := if providers then ((accounts.drop first).take limit).mapIdx fun i account =>
+      let id := providerWidgetId (first + i)
+      let availability := if account.globallyEnabled then "Use for my missions" else "Disabled globally"
+      let detail := if account.category.isEmpty || account.category == account.name then availability
+        else account.category ++ " · " ++ availability
+      let preference := if account.userEnabled then "Using" else "Skipped"
+      WidgetNode.focusable id <| WidgetNode.box (BoxStyle.col 0 |>.withFixedSize colW rowH)
+        [buildMachineRow theme colW rowH account.name detail preference true false] (some id)
+    else ((st.fleetMachines.drop first).take limit).map fun m =>
+      let detail := String.intercalate " · " ([m.roleLabel, m.cpuRamSpec].filter (!·.isEmpty))
+      buildMachineRow theme colW rowH (if m.name.isEmpty then m.machineId else m.name) detail m.state true false
   let content := WidgetNode.box (BoxStyle.col 0 |>.withAlign .center)
-    ([spacer first] ++ rows ++ [spacer (count - first - visible.length)])
+    ([spacer first] ++ rows ++ [spacer (count - first - rows.length)])
   return WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize width height)
     { offsetY := top } content (some fleetViewportId)
 
@@ -1033,11 +1045,11 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
       WidgetNode.box
         (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill)
         [headerNode, splitBody]
-    | .machinesFleet =>
+    | .machinesFleet | .inference =>
       let bodyH := availH - headerH
       WidgetNode.box
         (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill)
-        [headerNode, if st.hasLiveConnection then buildLiveMachines st mainW bodyH else buildMachinesFleetBody st mainW bodyH]
+        [headerNode, if st.hasLiveConnection then buildLiveInventory st mainW bodyH else buildMachinesFleetBody st mainW bodyH]
     | .settingsGeneral =>
       let bodyH := availH - headerH
       WidgetNode.box

@@ -170,6 +170,15 @@ def mutate(binding, action, mid):
     if c.binding != binding:
         raise ValueError('connection changed')
     key = str(uuid.uuid4())
+    if action in ('use-provider', 'skip-provider'):
+        enabled = action == 'use-provider'
+        if not mid or mid in ('.', '..') or len(mid) > 256:
+            raise ValueError('missing provider account')
+        path = '/api/ai/providers/' + urllib.parse.quote(mid, safe='') + '/preference'
+        row = c.request(path, body={'enabled': enabled}, method='PUT')
+        if row.get('id') != mid or row.get('user_enabled') is not enabled:
+            raise ValueError('unconfirmed provider preference')
+        return
     if action.startswith('bulk-'):
         return bulk_write(c, action.removeprefix('bulk-'), key)
     if action == 'create':
@@ -291,6 +300,30 @@ def catalog_rows(c, rules):
         for option in visible_model_options(backend, options, rules):
             if option.get('value'):
                 yield ('H', backend, by_id[backend], option['value'], option.get('label') or option['value'])
+
+
+def provider_inventory(binding):
+    c = Connection()
+    if c.binding != binding:
+        return
+    accounts = read_snapshot(lambda: c.get('/api/ai/providers'))
+    if isinstance(accounts, dict):
+        accounts = accounts['providers']
+    if not isinstance(accounts, list):
+        raise ValueError('invalid providers')
+    rows = []
+    for account in accounts:
+        ident = account['id']
+        if not isinstance(ident, str) or not ident or label(ident) != ident:
+            raise ValueError('invalid account identifier')
+        name = account.get('label') or account.get('name') or ident
+        category = account.get('provider_type_name') or account.get('provider_type')
+        rows.append(('A', ident, name, category, str(int(account.get('user_enabled', True))),
+                     str(int(account.get('globally_enabled', account['enabled'])))))
+    c.check()
+    print('accounts')
+    for row in rows:
+        print('\t'.join(map(label, row)))
 
 
 def roster_rows(c, include_archived=False):

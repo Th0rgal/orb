@@ -375,7 +375,7 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
           let top := scrollStep content h (min r.limitY st.rosterTopSub) dy
           if top == st.rosterTopSub then return (st, none)
           return ({ st with rosterTopSub := top }, damage)
-        if r.id == fleetViewportId && st.screen == .machinesFleet then
+        if r.id == fleetViewportId && (st.screen == .machinesFleet || st.screen == .inference) then
           let top := scrollStep content h (min r.limitY st.fleetTopSub) dy
           if top == st.fleetTopSub then return (st, none)
           return ({ st with fleetTopSub := top }, damage)

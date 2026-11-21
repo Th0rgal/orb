@@ -51,7 +51,7 @@ def process(args, env, cwd, stdin=None):
             child.wait()
 
 
-def run(tmp, mouse=False, menu_client=None):
+def run(tmp, mouse=False, menu_client=None, providers=False):
     with socket.socket() as s:
         s.bind(('127.0.0.1', 0))
         port = s.getsockname()[1]
@@ -86,9 +86,16 @@ for i in range(300):
     with contextlib.ExitStack() as stack:
         server = stack.enter_context(process(core, env, tmp))
         token = wait('disposable Core login', login)
+        if providers:
+            admin = token
+            password = secrets.token_urlsafe(24)
+            api('/api/admin/users', {'username': 'provider-fixture', 'password': password, 'role': 'member'})
+            account = api('/api/ai/providers', {'provider_type': 'custom', 'name': 'Indigo',
+                          'base_url': base, 'api_key': 'fixture-key', 'enabled': True})['id']
+            token = api('/api/auth/login', {'username': 'provider-fixture', 'password': password})['token']
         (tmp / 'connection.json').write_text(json.dumps({'api_url': base, 'token': token}))
         assert api('/api/control/missions') == []
-        if menu_client is None:
+        if menu_client is None and not providers:
             api('/api/projects', {'slug': 'menu-test', 'title': 'Menu test'})
             api('/api/projects', {'slug': 'source', 'title': 'Source project'})
         config = tmp / 'sway.conf'
@@ -111,7 +118,7 @@ for i in range(300):
             return exercise(ROOT, tmp, api, graphical, click, process, wait, stack, menu_client)
         binary = os.environ.get('ORB_LEANUI_TEST_BINARY')
         client = [str(Path(binary).resolve(strict=True))] if binary else [ROOT / 'scripts/orb_desktop_dev.sh', '--leanui']
-        if binary and Path(binary).name == 'orb-desktop':
+        if binary and Path(binary).name in ('orb', 'orb-desktop'):
             client.append('--leanui')
         desktop = stack.enter_context(process(client, graphical, ROOT))
         wait('native window', lambda: b'"orb-desktop"' in sway('-t', 'get_tree'), 300)
@@ -122,11 +129,35 @@ for i in range(300):
         def crop(geometry):
             return subprocess.check_output(['grim', '-t', 'ppm', '-g', geometry, '-'], env=graphical)
 
+        def widget(label, region):
+            return next(((x,y) for word,x,y in read_words(crop(region), region) if word == label), None)
+        if providers:
+            def preference():
+                data = api('/api/ai/providers')
+                rows = data['providers'] if isinstance(data, dict) else data
+                return next(r for r in rows if r['id'] == account).get('user_enabled', True)
+            sidebar, area = '10,30 195x160', '225,32 755x480'
+            click(*wait('Inference navigation', lambda: widget('inference', sidebar)))
+            click(*wait('provider account', lambda: widget('using', area)))
+            wait('skip acknowledged by Core', lambda: preference() is False)
+            wait('skip displayed', lambda: widget('skipped', area))
+            member = token
+            try:
+                token = admin
+                assert preference() is True
+            finally:
+                token = member
+            keys('-M', 'ctrl', '-k', 'n', '-m', 'ctrl')
+            keys('-M', 'ctrl', '-k', '4', '-m', 'ctrl')
+            click(*wait('persisted preference', lambda: widget('skipped', area)))
+            wait('use acknowledged by Core', preference)
+            return
         edit = stack.enter_context(wayland_ime.session(graphical))
         typed, committed = 'Indigo ' + secrets.token_hex(5) + ' ', '日本語'
         if mouse:
-            click(74, 178)   # Source project disclosure
-            click(195, 178)  # Start a draft in that project
+            source = wait('Source project', lambda: widget('source', '10,110 195x220'))
+            click(*source)
+            click(195, source[1])  # Start a draft in that project
             click(315, 388)  # Machine, then the local Core
             click(326, 447)
             click(353, 388)  # Harness, then Codex below the default choice
@@ -204,8 +235,13 @@ for i in range(300):
             select('move', region)
             select('menu', region)
             wait('moved mission', lambda: api(path).get('project') == 'menu-test')
-            if not locate('indigo', sidebar_region):
-                select('menu', sidebar_region)
+            # The Core receipt can arrive while the source still shows its old row.
+            # Wait for the collapsed destination and both project labels in one frame.
+            def moved_out_of_source():
+                labels = {word for word, _, _ in read_words(crop(sidebar_region), sidebar_region)}
+                return {'menu', 'source'} <= labels and 'indigo' not in labels
+            wait('source row removed after move', moved_out_of_source)
+            select('menu', sidebar_region)
             region = open_actions()
             select('settings', region)
             select('effort', region)
@@ -252,5 +288,7 @@ if __name__ == '__main__':
             if sys.argv[2:] not in (['webkit'], ['leanui']):
                 raise SystemExit("usage: live_writes.py --sidebar-menu {webkit,leanui}")
             run(Path(directory), mouse=True, menu_client=sys.argv[2])
+        elif sys.argv[1:] == ["--providers"]:
+            run(Path(directory), mouse=True, providers=True)
         else:
             run(Path(directory), mouse="--mouse" in sys.argv)

@@ -35,6 +35,7 @@ inductive ScreenId where
   | missionTranscript   -- `03_mission_transcript` (`/?screen=mission&id=m-active`)
   | missionSplitDiff    -- `04_mission_split_diff` (`/?screen=mission&id=m-diff&mode=split`)
   | machinesFleet       -- `05_machines_fleet` (`/?screen=machines`)
+  | inference           -- authenticated provider accounts
   | settingsGeneral     -- `06_settings_general` (`/?screen=settings&tab=general`)
   | searchDialog        -- `07_search_dialog` (`/?screen=control&modal=search`)
   | newMissionDialog    -- `08_new_mission_dialog` (`/?screen=control&modal=new-mission`)
@@ -63,6 +64,7 @@ def fileStem : ScreenId → String
   | .missionTranscript  => "03_mission_transcript"
   | .missionSplitDiff   => "04_mission_split_diff"
   | .machinesFleet      => "05_machines_fleet"
+  | .inference          => "inference"
   | .settingsGeneral    => "06_settings_general"
   | .searchDialog       => "07_search_dialog"
   | .newMissionDialog   => "08_new_mission_dialog"
@@ -75,6 +77,7 @@ def w0Alias : ScreenId → String
   | .missionTranscript  => "transcript"
   | .missionSplitDiff   => "diff"
   | .machinesFleet      => "streaming"
+  | .inference          => "providers"
   | .settingsGeneral    => "settings"
   | .searchDialog       => "search"
   | .newMissionDialog   => "math-mermaid"
@@ -87,6 +90,7 @@ def routeQuery : ScreenId → String
   | .missionTranscript  => "/?screen=mission&id=m-active"
   | .missionSplitDiff   => "/?screen=mission&id=m-diff&mode=split"
   | .machinesFleet      => "/?screen=machines"
+  | .inference          => "/?screen=inference"
   | .settingsGeneral    => "/?screen=settings&tab=general"
   | .searchDialog       => "/?screen=control&modal=search"
   | .newMissionDialog   => "/?screen=control&modal=new-mission"
@@ -99,6 +103,7 @@ def headerTitle : ScreenId → String
   | .missionTranscript  => "Long mission"
   | .missionSplitDiff   => "Long mission"
   | .machinesFleet      => "Machines"
+  | .inference          => "Inference"
   | .settingsGeneral    => "Settings"
   | .searchDialog       => "New Agent"
   | .newMissionDialog   => "New Agent"
@@ -288,7 +293,18 @@ inductive SettingField where
   | machine | backend | model | effort | permission
   deriving Repr, Inhabited, BEq
 
+structure ProviderAccount where
+  id : String
+  name : String
+  category : String
+  userEnabled : Bool
+  globallyEnabled : Bool
+  deriving BEq, Repr, Inhabited
+
+def providerWidgetId (index : Nat) : WidgetId := 6000000 + index
+
 inductive LiveWrite where
+  | providerPreference (account : String) (enabled : Bool)
   | create
   | send (mission text : String)
   | stop (mission : String)
@@ -338,6 +354,9 @@ structure DesktopState where
   draftProject : String := ""
   catalog : List CatalogModel := []
   catalogLoading : Bool := false
+  catalogRevision : Nat := 0
+  providers : Option (List ProviderAccount) := none
+  providerReadFailed : Bool := false
   expandedProjects : List String := []
   expandedMissions : List String := []
   archivesOpen : Bool := false
@@ -995,11 +1014,19 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       | .key key mods .pressed =>
         -- XKB reports modifiers even when the key was held before this window gained focus.
         if mods &&& 0x0a == 0 then 0
+        else if key == 0x34 then 113
         else if key == 0x33 then 112
         else if key == 0x6e || key == 0x4e then 101 else 0
       | _ => 0
+    if navId == 113 then
+      let next := resetSelection { st with
+        screen := .inference, providers := none, providerReadFailed := false, fleetTopSub := 0, writeError := "" } none
+      return ({ next with sidebarRows := next.sidebarRows.map fun row => { row with selected := row.widgetId == navId } }, some viewport)
+    if st.screen == .inference && navId >= providerWidgetId 0 then
+      if let some account := (st.providers.getD [])[navId - providerWidgetId 0]? then
+        return ({ st with writeRequest := some (.providerPreference account.id (!account.userEnabled)) }, none)
     if navId == 112 then
-      let next := resetSelection { st with screen := .machinesFleet, draftProject := "", writeError := "" } none
+      let next := resetSelection { st with screen := .machinesFleet, fleetTopSub := 0, draftProject := "", writeError := "" } none
       return ({ next with sidebarRows := next.sidebarRows.map fun row => { row with selected := row.widgetId == navId } }, some viewport)
     if navId == 101 then
       return (resetSelection { st with screen := .controlEmpty, draftProject := "", writeError := "" } none, some viewport)
