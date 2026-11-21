@@ -1123,8 +1123,20 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
              [chromeIcon "folder" pal.textMuted 14, chromeLabel (pxToSub 18) [overlaySynthRun (Theme.mutedText theme) folderLabel]] (some draftDirectoryPickerId)
            let header := WidgetNode.box (BoxStyle.row (pxToSub 16) |>.withAlign .center |>.withFixedSize width (pxToSub 24))
              ([projectPicker, destination] ++ if v.machine.startsWith "auto-managed" then [] else [folderPicker])
+           let voiceButton (id : Nat) (icon : String) :=
+             WidgetNode.focusable id <| WidgetNode.box
+               (BoxStyle.row 0 |>.withFixedSize (pxToSub 24) (pxToSub 24) |>.withJustify .center |>.withAlign .center
+                 |>.withRadius (pxToSub 12) |>.withBg (if hoverRow == some id then pal.plusBg else pal.elevatedSurface))
+               [chromeIcon icon pal.textPrimary 16] (some id)
+           let mic := if st.voiceAvailable && st.voiceDraft then some <|
+             match st.voicePhase with
+             | .idle => voiceButton voiceButtonId "microphone"
+             | .recording => WidgetNode.box (BoxStyle.row (pxToSub 4))
+                 [voiceButton voiceCancelId "close", voiceButton voiceButtonId "check"]
+             | .finishing => voiceButton voiceButtonId "close"
+             else none
            WidgetNode.box (BoxStyle.col 0 |>.withJustify .center |>.withAlign .center |>.withFixedSize mainW bodyH)
-             [buildComposerWidget theme mainW composerH { st.composer with placeholder := "Describe a task, / for commands, @ for context" } [] (some (liveComposerControls st (width - pxToSub 90) true)) (some header)]
+             [buildComposerWidget theme mainW composerH { st.composer with placeholder := "Describe a task, / for commands, @ for context" } [] (some (liveComposerControls st (width - pxToSub (if mic.isNone then 90 else if st.voicePhase == .recording then 150 else 122)) true)) (some header) mic]
            else if st.initialRosterPending then
              WidgetNode.box (BoxStyle.col 0 |>.withJustify .center |>.withAlign .center |>.withFixedSize mainW bodyH)
                [WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (min (pxToSub 748) (mainW - pxToSub 68)) (pxToSub 42))
