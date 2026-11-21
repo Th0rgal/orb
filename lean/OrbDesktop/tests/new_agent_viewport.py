@@ -24,7 +24,11 @@ def replay(binary, tmp, stack):
             self.wfile.write(json.dumps(data).encode())
 
         def do_GET(self):
-            if self.path == '/api/projects':
+            if self.path == '/api/auth/me':
+                if self.headers.get('Authorization') != 'Bearer fixture':
+                    return self.send_error(401)
+                self.reply({'user': {'username': 'fixture', 'role': 'member'}})
+            elif self.path == '/api/projects':
                 self.reply({'projects': []})
             elif self.path.startswith('/api/control/missions?') or self.path == '/api/machines':
                 self.reply([])
