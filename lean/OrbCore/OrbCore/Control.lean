@@ -4037,6 +4037,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let fenceArchive : IO Bool := do
         let some mgr := st.warmMgr? | return true
         mgr.registration.atomically do
+          if (← mgr.stoppingPidsRef.get).any (·.1 == mid) then return false
           if (← mgr.activePidsRef.get).any (·.1 == mid) then return false
           if let some (_, entry) := (← mgr.warmProcsRef.get).find? (·.1 == mid) then
             if !(← entry.aliveRef.get) then return false

@@ -54,7 +54,7 @@ def check(tmp, mode):
         stack.callback(reap)
         server = start()
         token = wait('login', login)
-        mid = api('/api/control/missions', {'title': 'write-window', 'backend': 'claudecode' if mode in ('pipe','fd','retire') else 'codex'})['id']
+        mid = api('/api/control/missions', {'title': 'write-window', 'backend': 'claudecode' if mode in ('pipe','fd','retire','stop-archive') else 'codex'})['id']
         path = '/api/control/missions/' + mid
         key = str(uuid.uuid4())
         def send():
@@ -79,19 +79,41 @@ def check(tmp, mode):
             assert refused(send, 'local_run_busy') == refusal
             assert len(launches.read_text().splitlines()) == 1
             assert len([e for e in api(path + '/events') if e['event_type'] == 'user_message']) == 1
-        elif mode == 'retire':
+        elif mode in ('retire', 'stop-archive'):
             claude = tmp / 'claude'
             # Signal handler proves retirement has started, while the same pidfd
             # remains live until the test releases the child.
             entered.unlink(missing_ok=True)
             gate.unlink()
             (tmp / 'git').unlink()
-            claude.write_text(f'#!/bin/sh\ntrap \'touch "{entered}"; while test ! -e "{gate}"; do sleep .05; done; exit 0\' TERM\necho $$ >> "{launches}"\nwhile :; do sleep .05; done\n')
+            import sys
+            claude.write_text(f'#!{sys.executable}\nimport os, signal, time\nfrom pathlib import Path\n'
+                              f'def retiring(*_):\n Path({str(entered)!r}).touch()\n'
+                              f' while not Path({str(gate)!r}).exists(): time.sleep(.001)\n raise SystemExit\n'
+                              f'signal.signal(signal.SIGTERM, retiring)\nwith open({str(launches)!r}, "a") as f: print(os.getpid(), file=f)\nsignal.pause()\n')
             claude.chmod(0o700)
             send()
             pid = int(wait('warm PID', lambda: launches.exists() and launches.read_text().strip()))
             fd = os.pidfd_open(pid); stack.callback(os.close, fd)
             exited = select.poll(); exited.register(fd, select.POLLIN)
+            if mode == 'stop-archive':
+                import time
+                db_path, = tmp.rglob('missions.db')
+                with contextlib.closing(sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True)) as db, concurrent.futures.ThreadPoolExecutor(1) as pool:
+                    stopped = pool.submit(api, path + '/cancel', {})
+                    try:
+                        deadline = time.monotonic() + 5
+                        while not entered.exists() and time.monotonic() < deadline: time.sleep(.001)
+                        assert entered.exists() and not exited.poll(0)
+                        assert db.execute('SELECT status FROM missions WHERE id=?', (mid,)).fetchone() == ('interrupted',)
+                        refused(lambda: api(path + '/status', {'status':'acknowledged'}), 'mission_running')
+                        assert not exited.poll(0), 'Archive reply did not bracket a live child'
+                    finally:
+                        gate.touch()
+                    assert stopped.result(timeout=5)['ok'] and exited.poll(1000)
+                assert api(path + '/status', {'status':'acknowledged'})['ok']
+                print(f'{mode}: PASS {mid}', flush=True)
+                return
             key = str(uuid.uuid4())
             with concurrent.futures.ThreadPoolExecutor(1) as pool:
                 replacement = pool.submit(send)
@@ -190,6 +212,14 @@ def check(tmp, mode):
                         exited = select.poll(); exited.register(fd, select.POLLIN)
                         assert not exited.poll(0)
                     else:
+                        if mode == 'archive-registration':
+                            db_path, = tmp.rglob('missions.db')
+                            with contextlib.closing(sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True)) as db:
+                                query = 'SELECT status,(SELECT count(*) FROM mission_runs WHERE mission_id=m.id) FROM missions m WHERE id=?'
+                                assert db.execute(query, (mid,)).fetchone() == ('active', 0)
+                                refused(lambda: api(path + '/status', {'status':'acknowledged'}), 'mission_running')
+                                assert db.execute(query, (mid,)).fetchone() == ('active', 0)
+                            assert api(path + '/cancel', {})['ok']
                         if not mode.startswith('archive-'):
                             assert api(path + '/cancel', {})['ok']
                         api(path + '/status', {'status': 'acknowledged'})
@@ -236,6 +266,6 @@ def check(tmp, mode):
 
 if __name__ == '__main__':
     import sys
-    for mode in sys.argv[1:] or ('stop', 'receipt', 'activation', 'pipe', 'archive-activation', 'archive-registration', 'supersede', 'completion', 'fd', 'busy', 'retire'):
+    for mode in sys.argv[1:] or ('stop', 'receipt', 'activation', 'pipe', 'archive-activation', 'archive-registration', 'supersede', 'completion', 'fd', 'busy', 'retire', 'stop-archive'):
         with tempfile.TemporaryDirectory(prefix='orb-write-window-') as d:
             check(Path(d), mode)

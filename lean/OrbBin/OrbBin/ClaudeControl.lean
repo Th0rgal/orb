@@ -926,6 +926,8 @@ structure WarmHarnessManager where
   runsRef      : IO.Ref (Array (String × IO.Ref LocalRunState))
   warmProcsRef : IO.Ref (Array (String × WarmClaudeEntry))
   activePidsRef : IO.Ref (Array (String × Int64))
+  /-- Children claimed by Stop but not yet reaped. Protected by `registration`. -/
+  stoppingPidsRef : IO.Ref (Array (String × Int64))
   callbacksRef : IO.Ref (Array (String × HarnessCallbacks))
 
 /-- Create a fresh `WarmHarnessManager`. -/
@@ -938,6 +940,7 @@ def newWarmHarnessManager : IO WarmHarnessManager := do
     runsRef := ← IO.mkRef #[]
     warmProcsRef := ← IO.mkRef #[]
     activePidsRef := ← IO.mkRef #[]
+    stoppingPidsRef := ← IO.mkRef #[]
     callbacksRef := ← IO.mkRef #[]
   }
 
@@ -1036,36 +1039,33 @@ def setSessionPermissionMode
 
 /-- Stop any active run or warm Claude process for `id`, signalling the entire process group (`SIGTERM` then `SIGKILL`). -/
 def stopHarnessRun (mgr : WarmHarnessManager) (id : String) : IO Unit := do
-  let (warm?, oneShotPid?, stateRef?) ← mgr.registration.atomically <| mgr.mu.atomically do
+  let (stoppingPids, stateRef?) ← mgr.registration.atomically <| mgr.mu.atomically do
     mgr.stopEpochs.modify fun epochs => epochs.insert id (epochs.getD id 0 + 1)
     let ws ← mgr.warmProcsRef.get
     let w? := (ws.find? (fun (k, _) => k == id)).map Prod.snd
+    if let some entry := w? then entry.aliveRef.set false
     mgr.warmProcsRef.set (ws.filter (fun (k, _) => k != id))
     let pids ← mgr.activePidsRef.get
     let p? := (pids.find? (fun (k, _) => k == id)).map Prod.snd
     mgr.activePidsRef.set (pids.filter (fun (k, _) => k != id))
     let runs ← mgr.runsRef.get
     let r? := (runs.find? (fun (k, _) => k == id)).map Prod.snd
-    pure (w?, p?, r?)
+    let claimed := (w?.map (·.pid)).toList ++ p?.toList
+    mgr.stoppingPidsRef.modify fun pending => pending ++ (claimed.map fun pid => (id, pid)).toArray
+    pure (claimed, r?)
   if let some stRef := stateRef? then
     stRef.modify fun s =>
       if s.done then s else { s with stopping := true, done := true, exitCode? := some 143 }
-  if let some entry := warm? then
-    entry.aliveRef.set false
-    let _ ← killSig (-entry.pid) 15
-    IO.sleep 80
-    let st ← waitpidWnohang entry.pid
-    if st == 0xFFFFFFFF then
-      let _ ← killSig (-entry.pid) 9
-      let _ ← waitpidBlock entry.pid
-    -- The warm reader owns both pipe descriptors; Stop only signals and waits.
-  if let some pid := oneShotPid? then
+  -- The warm reader owns both pipe descriptors; Stop only signals and waits.
+  for pid in stoppingPids do
     let _ ← killSig (-pid) 15
     IO.sleep 80
     let st ← waitpidWnohang pid
     if st == 0xFFFFFFFF then
       let _ ← killSig (-pid) 9
       let _ ← waitpidBlock pid
+    mgr.registration.atomically do
+      mgr.stoppingPidsRef.modify fun pending => pending.filter (· != (id, pid))
   if let some stRef := stateRef? then
     let finalSt ← stRef.get
     let cb ← getCallbacksFor mgr id
