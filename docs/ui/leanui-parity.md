@@ -442,3 +442,7 @@ An open sidebar must pick up missions and projects created in another client, in
 When a selected mission advances from pending to active, the composer shows Stop on the same update as the active sidebar row. A roster snapshot and bubble that both report active must give the same button as a bubble arriving before the roster. Preserve the draft across that transition.
 
 Inference loads the signed-in user's provider inventory when opened. Each account shows its personal routing preference and any global disablement. Clicking a row changes only the signed-in user's preference. The confirmed response must name that account and return the requested preference. Reopening Inference reads the setting from Core, and a change invalidates any in-flight model catalog from before the update.
+
+Opening the New Agent machine picker reads the connected user's current remote-node inventory. A member with zero personal VMs can choose an available shared worker such as uruk. Core remains available to callers whose machine inventory includes Core. The picker checks the typed-launch capability, node availability, administrative scope and harness quarantine. Closing or reopening the picker retires its pending read.
+
+Picker labels stay inside the clickable row. The model picker accommodates provider-qualified names and elides overflow at narrow viewport widths. Clicking the Astra suffix selects Astra, including when Sol was previously selected.
