@@ -57,8 +57,11 @@ routes through the verified unboxed kernel functions in `Orb.Kernel`:
   `orb:mission-archived` and after native actions) and `OrbLocald` lists their roots,
   newest first, under the `archive` row, collapsed unless a selected conversation is in it.
   An archived root that still has a live descendant stays in its project.
-- Right-clicking a mission row opens a native menu (`linux_shell/gtk_menu.c`): Rename…,
-  Move to ▸ project, Archive/Restore, Copy mission ID, Mission settings. Each item calls
+- Core’s live roster supplies project headings. Live missions whose project leaves the roster appear under the catch-all project. Loading archived history alone never adds a heading.
+- Right-clicking a Linux project row opens the shared desktop project actions menu beside the sidebar.
+- Archiving B while A is open keeps A selected. A rejected Archive restores B’s prior sidebar status and shows the reason in the visible desktop, including when the project tree runs headless.
+- Right-clicking a Linux mission row anchors an in-window menu to that row. The open transcript stays selected. Both Linux renderers use leading action icons and a trailing destination arrow. The single-mission actions are Rename…,
+  Move to ▸ project, Archive/Restore, Copy mission ID, Mission settings. In GTK each item calls
   `window.__ORB_NATIVE_MISSION_ACTION__(action, id, arg)`, which reuses the HTML sidebar's
   API calls (`renameOptimistically`, `moveMission`, `archiveMission`, `reopenMission`), so
   optimistic updates and error toasts have one implementation. macOS (`NSTableView`) does

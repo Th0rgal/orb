@@ -144,3 +144,25 @@ it("keeps an open mission only at its moved destination across delayed lists and
   const projects = view.container.querySelectorAll('.row.project.contains-current');
   expect([...projects].map(el=>el.getAttribute('data-drop-project'))).toEqual(['other']);
 });
+
+it("rolls back a rejected native Archive on B and keeps A open", async () => {
+  const target = { ...mission, id: "other", title: "Other conversation" };
+  listed = [mission, target];
+  const fetchFixture = globalThis.fetch;
+  vi.stubGlobal("fetch", async (input: string, init?: RequestInit) => {
+    if (new URL(input).pathname.endsWith("/other/status") && init?.method === "POST")
+      return new Response(JSON.stringify({ error: "Archive refused by Core" }), { status: 409 });
+    return fetchFixture(input, init);
+  });
+  const open = vi.fn(), status = vi.fn(), error = vi.fn();
+  const [requests, setRequests] = createSignal<{ mission: Mission; restore: boolean }[]>([]);
+  render(() => <LiveProjectsSection headless currentMission={mission} activityMissions={listed}
+    selected={() => "m:" + mission.id} open={open} harnessChoices={[]} onFork={() => {}}
+    onNewAgent={() => {}} onNewProject={() => {}} archiveRequests={requests()}
+    onArchiveRequestsHandled={() => setRequests([])} onArchiveError={error} onArchiveStatus={status} />);
+  setRequests([{ mission: target, restore: false }]);
+  await waitFor(() => expect(error).toHaveBeenCalledWith(target.id, false, expect.any(String)));
+  expect(status.mock.calls.map(([rows]) => rows.map((row: Mission) => [row.id, row.status])))
+    .toEqual([[[target.id, "acknowledged"]], [[target.id, target.status]]]);
+  expect(open).not.toHaveBeenCalled();
+});

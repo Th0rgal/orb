@@ -9,6 +9,7 @@ import {
 } from "./localAgents";
 import {
   ApiError,
+  availableModelSuccessor,
   listHarnessChoices,
   type HarnessChoice,
   connectionVersion,
@@ -21,12 +22,6 @@ import {
  * harness does not accept that level (see `effort.ts`). */
 export type HarnessPick = { backend: string; model: string; effort?: string; service_tier?: CodexServiceTier };
 const PICK_KEY = "orb.harnessPick";
-const RETIRED_DEFAULT_MODELS = new Set([
-  "claude-fable-5-1",
-  "anthropic/claude-fable-5-1",
-  "claude-fable-5",
-  "anthropic/claude-fable-5",
-]);
 export const [remoteHarnessChoices, setRemoteHarnessChoices] = createSignal<HarnessChoice[]>([]);
 export const [nodeAntigravityModels, setNodeAntigravityModels] = createSignal<Record<string, [string,string][]>>({});
 const nodeModelRequests = new Set<string>();
@@ -88,12 +83,9 @@ export const effectivePick = (machine = "core"): HarnessPick | null => {
   if (stored) {
     const effort = normalizeEffort(stored.effort, stored.backend);
     const choice = choices.find((c) => c.backend.id === stored.backend);
-    if (RETIRED_DEFAULT_MODELS.has(stored.model)) {
-      const fallback = choice?.models[0]?.value;
-      if (fallback && !RETIRED_DEFAULT_MODELS.has(fallback)) {
-        return { ...stored, model: fallback, effort: effort ?? undefined };
-      }
-    }
+    const options = choice?.models ?? [];
+    const successor = availableModelSuccessor(stored.backend, stored.model, options, options.find(m => m.value === stored.model)?.provider_id);
+    if (successor) return { ...stored, model: successor, effort: effort ?? undefined };
     // On this computer, Core-scoped OpenCode IDs (e.g. `builtin/fast`) map to
     // the local OpenCode provider namespace (e.g. `orbrouter/builtin/fast`) or
     // the user's configured default local OpenCode model.
@@ -131,7 +123,7 @@ export const effectivePick = (machine = "core"): HarnessPick | null => {
     return { ...stored, effort: effort ?? undefined };
   }
   const first = choices.find((c) => c.backend.id === "claudecode") ?? choices[0];
-  return { backend: first.backend.id, model: first.models[0].value };
+  return { backend: first.backend.id, model: availableModelSuccessor(first.backend.id, first.models[0].value, first.models, first.models[0].provider_id) ?? first.models[0].value };
 };
 export async function refreshHarnessChoices() {
   try {

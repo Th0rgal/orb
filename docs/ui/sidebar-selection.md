@@ -21,6 +21,23 @@ the open conversation:
    `aria-selected="true"`) while the menu or picker remains open, without mutating
    `selectionActive` or opening the row.
 
+## Live native desktop hierarchy
+
+On the first live roster, a sole project opens automatically. Its folder icon uses the project color from Core, with the theme’s muted icon color for a missing or unknown value. Multiple projects start collapsed when no mission is selected.
+
+Opening or closing a project changes the tree disclosure. The current view,
+draft text, and draft destination survive either gesture. The open folder icon
+identifies an expanded project. Its plus button starts a new draft in that project.
+
+A roster refresh must retain the project, folder, launch parent, callback
+parent, and fork source of each mission. A child arriving before its controller
+keeps its parent identity across the refresh. Opening a project must use its
+project-scoped roster: a global recent-missions page cannot establish either
+a complete child count or the absence of an older controller. The launched-work
+badge counts descendants at every depth, including those inside collapsed rows.
+Expanding a row changes visibility while preserving its count. Archives stay
+in their disclosure. Opening a child selects the same mission across refreshes.
+
 ## Press-and-hold & drag-move gestures (`lean/Orb/Kernel.lean`, `orb/src/tree/rowDrag.ts`)
 
 Pure gesture phase transitions, timers, auto-scroll velocity math, and move-target
@@ -59,6 +76,12 @@ in `lean/Orb/Kernel.lean`, proved in `lean/Orb/Spec.lean`):
   multi-selection back to the committed item and highlights only the right-clicked
   row for the lifetime of the menu.
 
+In both Linux renderers, Ctrl-clicking A and C followed by right-clicking B clears A and C from the command targets. Escape dismisses B’s menu and leaves the previously opened conversation in place. Right-clicking C directly after selecting A and C retains both targets.
+
+Archive admission is checked in the same Core transaction as the status update. If B starts a turn after the client reads B as idle, Archive returns HTTP 409 and preserves B’s status even before its run record exists. The client reports the refusal and keeps A open.
+
+When a live mission list arrives before its project folders, the sidebar shows each controller at the root with its worker count. Expanding the controller reveals its workers. When its project arrives, the same controller and descendants use the project’s expansion state.
+
 ## Regression coverage
 
 - `orb/tests/sidebar-selection.test.ts` exercises the `createTreeSelection` state
@@ -68,3 +91,10 @@ in `lean/Orb/Kernel.lean`, proved in `lean/Orb/Spec.lean`):
   `orb/tests/orb-actions.browser.spec.ts` verify in WebKit/Chromium that right-click
   **Copy mission ID** (and `Escape` dismissal) on mission B while viewing mission A
   highlights B only while the menu is open and restores selection to A once closed.
+
+A delegated mission follows its visible controller when a move or partial update leaves the child with an older project slug. The controller keeps its descendant count while collapsed. Expanding it reveals the child once, beneath that controller.
+
+In LeanUI, visiting Inference or Machines while composing a new agent keeps the
+committed draft text and its project. Each page shows its own title. Returning
+to New Agent restores the project title and draft. Composer shortcuts are inactive
+on the intervening pages. Text entered for an existing mission stays scoped to it.
