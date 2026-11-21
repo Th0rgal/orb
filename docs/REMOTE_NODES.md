@@ -639,6 +639,11 @@ no prompt, no run and no record of the outcome).
   the ordinary `orphan_no_runner` repair. An unreadable ledger defers the
   decision. Remote *build* leases (`remote-build:*`) keep their existing
   protection; a `remote-job:*` lease without a ledger handle is not liveness.
+- **Provider-confirmed worker loss.** When Core cannot read a managed job, a completed
+  expiry receipt for the current provider ID and boot can confirm that the VM was reaped,
+  deleted, destroyed or is absent. With no outstanding resume, the poller closes the
+  job as lost and interrupts its current mission turn with reason `managed_worker_lost`.
+  A transient transport error, pending cleanup, or an archived disk keeps the job owned.
 - **Restart.** Startup recovery skips missions that hold an accepted
   `mission` handle instead of marking them `server_shutdown`; the remote job
   reconciler re-attaches the poll loop, which rebuilds the lease. If the

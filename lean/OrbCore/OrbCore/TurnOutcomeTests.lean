@@ -67,6 +67,68 @@ private def withMockNodeRequest (fd : LeanSys.Posix.Fd) (f : LeanSys.Posix.Fd �
   finally
     discard <| LeanSys.Posix.closeFd conn
 
+/-- A missing enrollment token can mean a transient failure. Both ledgers
+    and the turn stay owned until the current boot has a definitive loss receipt. -/
+def verifyManagedWorkerLoss (root : String) : IO Unit := do
+  let .ok store ← openCoreStore s!"{root}/loss-core" | throw (IO.userError "managed loss core fixture")
+  let sup ← newRemoteJobSupervisor "managed-loss-test" false
+  let .ok mc ← openManagedComputeStore s!"{root}/remote-loss.db" | throw (IO.userError "managed loss fixture")
+  try
+    let machineId := "missing-worker"
+    let node := s!"managed-{machineId}"
+    discard <| fenceInterruptedRemoteSubmissions store
+    let mid := "managed-loss-mission"
+    let job := "managed-loss-job"
+    let insert := fun db sql args => do
+      if let .error reason ← execParamQuery db sql args then throw (IO.userError s!"managed loss fixture insert: {reason}")
+    insert mc.db
+      ("INSERT INTO managed_machines(id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents," ++
+       "cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,provider_id) " ++
+       "VALUES(?1,'worker','leanci','small','stopped',?2,10,0,0,2,0,'mission',?2,2,0,'provider-worker');") #[machineId,mid]
+    insert store.missionsDb
+      "INSERT INTO missions(id,status,run_generation,placement_job_id,placement_kind) VALUES(?1,'active',3,?2,'managed');" #[mid,job]
+    let .ok _ ← store.missionsDb.mu.atomically do
+      insertMissionRunUnlocked store.missionsDb "loss-run" mid "3" "running" "" job "t0" true job node
+      | throw (IO.userError "managed loss fixture run")
+    insert store.missionsDb
+      "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,updated_at) VALUES(?1,?2,?3,'unreachable','t0');" #[job,mid,node]
+    insert store.projectsDb
+      "INSERT INTO remote_jobs(job_id,mission_id,node_id,kind,state,started_at,updated_at) VALUES(?1,?2,?3,'mission','unreachable','t0','t0');" #[job,mid,node]
+    let receipt := fun epoch state observed => insert mc.db
+      ("INSERT OR REPLACE INTO managed_expirations(machine_id,boot_epoch,provider_id,expires_at_sec,state,observed_state) " ++
+       "VALUES(?1,?2,'provider-worker',100,?3,?4);") #[machineId,epoch,state,observed]
+    receipt "1" "completed" "reaped"
+    receipt "2" "pending" "reaped"
+    spawnRemoteJobPoller store (some mc) none none sup root mid "codex" node job ""
+    IO.sleep 900
+    check ((← cellOf store.missionsDb "SELECT status FROM missions WHERE id=?1;" #[mid]) == "active")
+      "stale boot and unverified loss preserve the turn"
+    receipt "2" "completed" "archived"
+    IO.sleep 600
+    check ((← cellOf store.missionsDb "SELECT status FROM missions WHERE id=?1;" #[mid]) == "active")
+      "recoverable archived disk keeps the job"
+    receipt "2" "completed" "reaped"
+    for _ in [:100] do
+      if (← cellOf store.missionsDb "SELECT status FROM missions WHERE id=?1;" #[mid]) == "interrupted" then break
+      IO.sleep 50
+    check ((← cellOf store.missionsDb "SELECT terminal_reason FROM missions WHERE id=?1;" #[mid]) == "managed_worker_lost" &&
+      (← cellOf store.missionsDb "SELECT execution_state FROM mission_runs WHERE mission_id=?1;" #[mid]) == "terminal" &&
+      (← cellOf store.missionsDb "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[job]) == "lost" &&
+      (← cellOf store.projectsDb "SELECT state FROM remote_jobs WHERE job_id=?1;" #[job]) == "lost")
+      "confirmed managed worker loss settles its job, run and owner"
+    -- Re-adopt the old observer while another placement owns a newer turn.
+    insert store.missionsDb
+      "UPDATE missions SET status='active',run_generation=4,placement_job_id='replacement' WHERE id=?1;" #[mid]
+    let revision ← cellOf store.missionsDb "SELECT state_revision FROM missions WHERE id=?1;" #[mid]
+    spawnRemoteJobPoller store (some mc) none none sup root mid "codex" node job ""
+    IO.sleep 900
+    check ((← cellOf store.missionsDb "SELECT status FROM missions WHERE id=?1;" #[mid]) == "active" &&
+      (← cellOf store.missionsDb "SELECT state_revision FROM missions WHERE id=?1;" #[mid]) == revision)
+      "old loss cannot interrupt the replacement turn"
+  finally
+    closeCoreStore store
+    closeManagedComputeStore mc
+
 private def verifyIncompleteGoalDrain (store : CoreStore) (sup : RemoteJobSupervisor)
     (fd : LeanSys.Posix.Fd) (root mid : String) (capped : Bool) : IO Unit := do
   let jid := s!"job-{mid}"
@@ -426,6 +488,7 @@ def run : IO Unit := do
   let root := s!"/tmp/orb-turn-outcome-{← newUuidV4}"
   IO.FS.createDirAll s!"{root}/.sandboxed-sh"
   try
+    verifyManagedWorkerLoss root
     startupRecovery root
     let .ok store ← openCoreStore s!"{root}/.sandboxed-sh" | throw (IO.userError "turn outcome store open failed")
     let sup ← newRemoteJobSupervisor "turn-outcome-fixture-secret" false
