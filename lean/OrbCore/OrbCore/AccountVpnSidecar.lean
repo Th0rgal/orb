@@ -70,6 +70,17 @@ def credentialModelExclusions? (credential : JVal) : Option (Array String) := do
   | some (.arr values) => values.mapM JVal.asStr?
   | _ => none
 
+/-- Older sidecars persist the wildcard but can keep serving their registered
+models. Check the live registry of this account before confirming native-only. -/
+private def confirmRouterAccess (base key file : String) (allowed : Bool) : IO (Except String Bool) := do
+  if allowed then return .ok true
+  let url := base ++ "/v8/management/credentials/models?name=" ++ urlEncodeComponent file
+  let .ok (200, _, some response) ← sendJsonRequest "GET" url (some key) none #[] 4000 262144
+    | return .error "router_access_readback_failed"
+  let some (.arr models) := response.field? "models" | return .error "router_access_readback_failed"
+  if models.isEmpty then return .ok false
+  return .error "router_access_models_still_registered"
+
 def alternativeRouterAccess (base key file : String) (allowed? : Option Bool) : IO (Except String Bool) := do
   let unavailable := "router_access_unavailable"
   if !validManagement base || key.isEmpty || !file.endsWith ".json" || file.contains '/' || file.contains '\\' then
@@ -78,8 +89,8 @@ def alternativeRouterAccess (base key file : String) (allowed? : Option Bool) : 
   unless credential.fieldStr? "type" == some "antigravity" do return .error unavailable
   let some before := credentialModelExclusions? credential | return .error unavailable
   let allowed := !before.contains "*"
-  let some next := allowed? | return .ok allowed
-  if next == allowed then return .ok allowed
+  let some next := allowed? | return ← confirmRouterAccess base key file allowed
+  if next == allowed then return ← confirmRouterAccess base key file allowed
   let after := if next then before.filter (· != "*") else before.push "*"
   let patch := JVal.obj #[("name", .str file), ("excluded_models", .arr (after.map JVal.str))]
   let .ok (200, _, some ack) ← sendJsonRequest "PATCH" (base ++ "/v8/management/credentials/fields")
@@ -87,6 +98,6 @@ def alternativeRouterAccess (base key file : String) (allowed? : Option Bool) : 
   unless ack.fieldStr? "status" == some "ok" do return .error unavailable
   let .ok updated ← readCredential base key file | return .error unavailable
   if credentialModelExclusions? updated != some after then return .error "router_access_readback_failed"
-  return .ok next
+  confirmRouterAccess base key file next
 
 end OrbCore.AccountVpnSidecar

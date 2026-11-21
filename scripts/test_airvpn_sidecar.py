@@ -21,10 +21,39 @@ import urllib.parse
 from test_account_vpn_transport import exact, serve
 
 
+def check_stale_registry(driver):
+    class StaleRegistry(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_GET(self):
+            fixtures = {
+                "/v8/management/credentials/download?name=selected.json":
+                    {"type": "antigravity", "excluded_models": ["*"]},
+                "/v8/management/credentials/models?name=selected.json":
+                    {"models": [{"id": "still-available"}]},
+            }
+            if self.path not in fixtures:
+                self.send_error(404)
+                return
+            data = json.dumps(fixtures[self.path]).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    with serve(StaleRegistry) as port:
+        result = subprocess.run([driver, "routers", f"http://127.0.0.1:{port}", "selected.json", "restrict"],
+                                input="fixture-management-key\n", text=True, capture_output=True, timeout=10)
+        assert result.returncode == 1, "a stored wildcard was reported as enforced despite a live model"
+
+
 def run(binary, reconnect=False, orb_configure=None):
     interfaces = {line.split(":")[0].strip() for line in Path("/proc/net/dev").read_text().splitlines()[2:]}
     if interfaces != {"lo"}:
         raise RuntimeError("Run in a fresh network namespace with only loopback enabled")
+    if orb_configure:
+        check_stale_registry(orb_configure)
     hits = []
     kimi_hosts = {"auth.kimi.com", "api.kimi.com"}
     google_hosts = {"oauth2.googleapis.com", "www.googleapis.com", "daily-cloudcode-pa.googleapis.com", "cloudcode-pa.googleapis.com"}
@@ -365,7 +394,9 @@ def run(binary, reconnect=False, orb_configure=None):
                         time.sleep(.2)
                     raise AssertionError("sidecar catalog did not apply the Antigravity account policy")
 
+                assert api("GET", "credentials/models?name=d.json")["models"]
                 set_google_exclusions(["fixture-retired-*", "*"], False)
+                assert api("GET", "credentials/models?name=d.json")["models"] == []
                 def generation_hits():
                     return sum(k in ("generateContent", "streamGenerateContent") for k, _ in google_hits)
                 before = generation_hits()
