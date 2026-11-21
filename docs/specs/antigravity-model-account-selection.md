@@ -406,3 +406,45 @@ relay restored: native resume=SUCCESS same conversation=true direct model calls=
 The two HTTP 400s exercise the existing node-ID check. They do not demonstrate
 a trusted owner/profile admission check. The latter has no enrollment record
 or signed claim in this protocol.
+
+### Dev owner enrollment increment
+
+In the dev candidate, Core's static roster entry accepts `dedicated_owner_id`
+(the Orb user ID). The corresponding disposable Linux node sets
+`ORB_NODE_DEDICATED_OWNER_ID` to that same ID. Use a fresh node work directory.
+Enrollment uses a real owner session on the authenticated dev instance
+(`ORB_INSTANCE=dev`, `DEV_MODE=false`). Open **Inference**, expand the
+Antigravity account added by that user, find the named node and select
+**Enroll this account**. **Remove enrollment** clears the account and advances
+the stored revision. The Core endpoint checks the enabled provider's ownership
+using database metadata. The response contains the revision. Neither input nor
+output contains Google credentials. The account's VPN setting remains a
+separate owner action.
+
+The corresponding HTTP operations are `GET /api/native-owner-enrollments`,
+`GET /api/native-owner-enrollments/<node>` and
+`PUT /api/native-owner-enrollments/<node>`. The PUT body has `account_id`
+and `expected_revision`. Use the revision from GET, including zero for the
+first binding. An empty account ID removes the binding. Rebinding or removal
+revokes existing native RPC grants associated with jobs on that node in the
+same transaction. Other nodes retain their grants.
+
+This increment reserves the node. A signed job for another owner fails node
+admission. A matching owner also receives a refusal because execution under
+the account profile requires a private job-lifetime tunnel and an isolated
+workspace executor. The initial and resumed Core paths reach this refusal
+before credential discovery. Neither the enrollment record nor the UI
+indicates readiness for Google login. A node-local native profile identity
+and revocable per-job transport have yet to be bound to a signed lease.
+The two-UID evidence above still applies to direct native writes and stdio
+MCP. The public CLI's native login step belongs after those boundaries exist.
+
+Run the focused fixtures in a disposable Linux environment using synthetic
+identities and loopback networking:
+
+```sh
+scripts/build_orb_bins.sh --only orb-core --only sandboxed-node
+python3 scripts/test_native_owner_core.py lean/OrbCore/.lake/build/bin/orb-core
+python3 scripts/test_native_owner_node.py lean/OrbNode/.lake/build/bin/sandboxed-node
+(cd orb && pnpm exec vitest run tests/native-owner-enrollment.test.tsx)
+```

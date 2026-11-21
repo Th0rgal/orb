@@ -64,6 +64,8 @@ def run(binary, root):
         for name, owner in users.items():
             db.execute("INSERT INTO ai_providers(id,name,provider_type,created_by_user_id) VALUES(?,?,'antigravity',?)",
                        (name, name, owner))
+        db.execute("INSERT INTO ai_providers(id,name,provider_type,created_by_user_id) VALUES('second','Second','antigravity',?)",
+                   (users["alice"],))
         db.commit()
         alice, bob = login("alice"), login("bob")
 
@@ -122,14 +124,19 @@ def run(binary, root):
             status, body = request(port, token, "POST", native_route)
             assert (status, json.loads(body)["error"]) == (403, "native_mission_unavailable")
         enroll(alice, "", 0, 409)
-        assert enroll(alice, "", 1, 200)["revision"] == 2
+        assert enroll(alice, "second", 1, 200)["revision"] == 2
         status, body = request(port, grants[NODE_ID], "POST", native_route)
         assert (status, json.loads(body)["error"]) == (401, "invalid_native_grant")
         status, body = request(port, grants["ordinary"], "POST", native_route)
         assert (status, json.loads(body)["error"]) == (403, "native_mission_unavailable")
         enroll(alice, "alice", 1, 409)
+        assert enroll(alice, "", 2, 200)["revision"] == 3
+        assert enroll(alice, "alice", 3, 200)["revision"] == 4
+        assert request(port, grants[NODE_ID], "POST", native_route)[0] == 401
+        print("initial and resumed mission dispatch denied; zero node jobs")
+        print("targeted catalog: owner 503, other user and admin 403")
         print("other node owner 403; other account owner 403; owner revision 1; stale revision 409")
-        print("unbind revision 2; dedicated grant revoked; unrelated grant active")
+        print("rebind revision 2; old grant 401; unrelated grant active; restore original account at revision 4: old grant 401")
 
 
 if __name__ == "__main__":
