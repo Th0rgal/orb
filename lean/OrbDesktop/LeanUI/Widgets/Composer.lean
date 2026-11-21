@@ -272,16 +272,20 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
           , WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 10) (pxToSub 2)) pal.textMuted CornerRadii.zero
           , WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 2) (pxToSub 4)) pal.textMuted CornerRadii.zero ]]
         buf.attachButtonId
+  let hasText := !buf.text.isEmpty || !buf.imePreeditText.isEmpty
+  -- Two 24px buttons, two 8px gaps, pill padding, text inset and border.
+  let placeholderWidth := colW - pxToSub (48 + 16 + 22 + 2) - 2 * theme.borderWidth
   let textNode : WidgetNode :=
     WidgetNode.text
       { BoxStyle.row 0 with
         grow := 1
+        clip := !hasText
+        maxWidth := if hasText then (BoxStyle.row 0).maxWidth else placeholderWidth
         minHeight := pxToSub 18
         maxHeight := pxToSub 18
         padding := Edges.trbl 0 0 0 (pxToSub 2) }
       (pxToSub 18)
       (buildComposerInlineRuns theme buf overrideRuns)
-  let hasText := !buf.text.isEmpty || !buf.imePreeditText.isEmpty
   let sendBgCol := if hasText || isRunning then pal.sendBg else ((pal.sendBg &&& 0xFFFFFF00) ||| 0x47)
   let glyph : WidgetNode := if isRunning then
       WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 6) (pxToSub 6)) pal.sendFg

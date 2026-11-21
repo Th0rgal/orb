@@ -285,3 +285,10 @@ def main (args : List String) : IO Unit := do
     unless st.openMission.isNone && st.missionCards.isEmpty && st.sidebarRows.isEmpty &&
         (streamedText st).isEmpty && (← slot.get).isNone do throw (IO.userError "invalidation leaked state")
   finally closeLiveSubscription slot
+
+-- Compact chrome opens the same picker flow for a new draft and an existing mission.
+private def compactSettings (mid : String) : MissionMenu :=
+  { mission := mid, trigger := 714, page := .settings, x := 0, y := 0 }
+
+#guard ((missionMenuRows hierarchyFixture (compactSettings "")).map (·.id)) == [720, 721, 722]
+#guard !(missionMenuRows hierarchyFixture (compactSettings "m")).any (·.id == 720)
