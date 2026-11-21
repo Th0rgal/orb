@@ -1,5 +1,5 @@
 """Embedded native client. stdout is private projection IPC, never diagnostics."""
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -46,6 +46,10 @@ def credentials():
     return base, token
 
 
+class ResponseTooLarge(ValueError):
+    pass
+
+
 class InvalidConnection(ValueError):
     pass
 
@@ -63,8 +67,8 @@ class Connection:
         if credentials() != self.creds:
             raise ValueError('connection changed')
 
-    def get(self, path, cap=4 << 20):
-        return self.request(path, cap)
+    def get(self, path, cap=4 << 20, *, deadline=6):
+        return self.request(path, cap, deadline=deadline)
 
     def request(self, path, cap=4 << 20, body=None, key=None, method=None, deadline=6):
         self.check()
@@ -79,16 +83,19 @@ class Connection:
         # A socket timeout alone is an idle timeout. Also bound total wall time
         # for DNS / continuously trickling responses. This helper is standalone.
         previous = signal.signal(signal.SIGALRM, request_timeout)
-        signal.alarm(deadline)
+        signal.setitimer(signal.ITIMER_REAL, deadline)
         try:
             with self.opener.open(req, timeout=deadline if deadline > 6 else 4) as response:
+                if response.status == 206 and (path == INBOX_PATH or path.startswith('/api/control/missions?')
+                                               or path.endswith('?include_history=false')):
+                    raise ValueError('incomplete Core summary response')
                 data = response.read(cap + 1)
         finally:
             signal.alarm(0)
             signal.signal(signal.SIGALRM, previous)
         self.check()
         if len(data) > cap:
-            raise ValueError('response too large')
+            raise ResponseTooLarge('response too large')
         return json.loads(data) if data or body is None else None
 
 
@@ -591,54 +598,260 @@ def provider_inventory(binding):
 INBOX_PATH = '/api/control/inbox-state'
 NEEDS_ATTENTION = {'awaiting_user', 'waiting_user', 'failed', 'blocked', 'not_feasible'}
 READY = {'completed', 'succeeded', 'paused', 'interrupted'}
+MILLISECOND = timedelta(milliseconds=1)
 
 
 def timestamp_ms(value):
-    if not value:
-        return 0
+    if not isinstance(value, str) or not value:
+        return None
     try:
-        return int(datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp() * 1000)
-    except (TypeError, ValueError):
-        return 0
+        instant = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        elapsed = instant.astimezone(timezone.utc) - datetime(1970, 1, 1, tzinfo=timezone.utc)
+        return elapsed // MILLISECOND
+    except (OverflowError, ValueError):
+        return None
 
 
-def inbox_rows(missions, state):
+def response_stamp(m):
+    return max(timestamp_ms(m.get(k)) or 0 for k in ('updated_at', 'created_at', 'last_output_at'))
+
+
+def response_unread(m, state, selected, stamp):
+    if selected == m['id']:
+        return False
+    seen = state.get('seen:' + m['id'])
+    if seen is not None and seen < 0 and stamp <= -seen + 1000:
+        return True
+    if m.get('first_viewed_at'):
+        viewed = timestamp_ms(m['first_viewed_at'])
+        if viewed is None or stamp <= 0 or viewed + 2000 >= stamp:
+            return False
+    return seen is None or seen < 0 or seen < stamp
+
+
+def client_placement(m):
+    kind = (m.get('placement_kind') or '').strip()
+    if kind:
+        return kind == 'client' or kind.startswith('client:')
+    return m.get('origin') == 'orb-client' or 'placement:client' in (m.get('tags') or [])
+
+
+def btw_ids(by_id):
+    """Resolve archived or later-page ancestors once, including cyclic legacy links."""
+    known = {}
+    for mid in by_id:
+        path = set()
+        current = mid
+        while current in by_id and current not in known and current not in path:
+            m = by_id[current]
+            path.add(current)
+            tags = m.get('tags') or []
+            if any(t.startswith('btw-parent:') or t == 'btw-subagent' for t in tags):
+                known[current] = True
+                break
+            parent = m.get('parent_mission_id')
+            # Core rows have already passed stickHierarchy in the GTK client.
+            # isBtwMission falls back to that observed parent even for a fork.
+            fork = next((t[8:] for t in tags if t.startswith('fork-of:')), None)
+            current = (parent if parent != fork else None) or m.get('callback_parent_mission_id') or parent
+        known.update(dict.fromkeys(path, known.get(current, False)))
+    return {mid for mid, excluded in known.items() if excluded}
+
+
+def inbox_rows(missions, state, projects=(), selected=''):
     prefs = state.get('preferences') or {}
     if prefs.get('inboxEnabled') is False:
         return [('I', 'disabled')]
+    excluded = btw_ids({m['id']: m for m in missions})
+    slugs = {'default', *(p['slug'] for p in projects)}
+    failed_parents = set()
     rows = []
     for m in missions:
         mid, status = m['id'], m.get('status')
-        if status not in NEEDS_ATTENTION | READY or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', mid):
+        if mid in excluded or status not in NEEDS_ATTENTION | READY or (m.get('superseded_by_mission_id') or '').strip():
             continue
-        if status == 'interrupted' and m.get('terminal_reason') == 'usage_limit_wait' and m.get('recovery'):
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', mid):
             continue
+        parent = inbox_parent(m)
         tags = m.get('tags') or []
-        if m.get('superseded_by_mission_id') or any(t.startswith('btw-parent:') or t == 'btw-subagent' for t in tags):
+        stamp = response_stamp(m)
+        unread = response_unread(m, state, selected, stamp)
+        if prefs.get('includeAutonomous'):
+            if parent and unread and status in ('failed', 'blocked', 'not_feasible'):
+                failed_parents.add(parent)
+        elif (parent or m.get('origin') == 'hermes'
+              or re.match(r'you are a sub-?agent\b', (m.get('title') or '').strip(), re.I)
+              or any(t.startswith('worker-dispatch:') or t in ('origin:hermes', 'origin:hermes-assistant') for t in tags)):
             continue
-        if not prefs.get('includeAutonomous') and (
-                m.get('parent_mission_id') or m.get('callback_parent_mission_id') or m.get('origin') == 'hermes'
-                or re.match(r'you are a sub-?agent\b', m.get('title') or '', re.I)
-                or any(t.startswith('worker-dispatch:') or t in ('origin:hermes', 'origin:hermes-assistant') for t in tags)):
+        slug = (m.get('project') or '').strip()
+        if projects and ((not slug and not client_placement(m)) or (slug or 'default') not in slugs):
             continue
-        stamp = max(timestamp_ms(m.get(k)) for k in ('updated_at', 'created_at', 'last_output_at'))
-        key = 'seen:' + mid
-        seen = state.get(key)
-        forced = seen is not None and seen < 0 and stamp <= -seen + 1000
-        viewed = timestamp_ms(m.get('first_viewed_at'))
-        if not forced and ((viewed and viewed + 2000 >= stamp) or (seen is not None and seen >= stamp)):
+        if status == 'interrupted' and m.get('terminal_reason') == 'usage_limit_wait' and m.get('recovery') is not None:
             continue
-        rows.append((status not in NEEDS_ATTENTION, -stamp, mid, max(1, stamp), state.get('_versions', {}).get(key, 0)))
-    return [('I', 'enabled')] + [('U', mid, stamp, str(version)) for _, _, mid, stamp, version in sorted(rows)]
+        rows.append((status not in NEEDS_ATTENTION, -stamp, mid, unread))
+    # Solid's sort preserves input order for equal category and response time.
+    rows.sort(key=lambda r: r[:2])
+    return [('I', 'enabled')] + [
+        ('U', mid, max(1, -negative_stamp), str(state.get('_versions', {}).get('seen:' + mid, 0)))
+        for _, negative_stamp, mid, unread in rows if unread or mid in failed_parents]
 
 
-def project_history(c, slug, rules):
+def inbox_parent(m):
+    _, parent, callback, fork, _ = mission_hierarchy(m)
+    return (parent if parent != fork else None) or callback
+
+
+INBOX_READ_SECONDS = 4
+INBOX_PROJECT_REFRESH_SECONDS = 30
+MISSING_ANCESTOR = object()
+
+
+class InboxWindows:
+    """One subscription owns the staged reads and its last complete project windows."""
+    def __init__(self):
+        self.last_progress = 0
+        self.scope = None
+        self.pages = {}
+        self.project_sources = None
+        self.project_refresh_at = 0
+
+
+def inbox_with_ancestors(get, rows, known):
+    """Match withAncestors: insert fetched parents immediately before their first child."""
+    known.update((m['id'], m) for m in rows)
+    listed = {m['id'] for m in rows}
+    fetched = {}
+    frontier = rows
+    for _ in range(8):
+        wanted = dict.fromkeys(inbox_parent(m) for m in frontier)
+        frontier = []
+        for mid in wanted:
+            if not mid or mid in listed or mid in fetched:
+                continue
+            if mid not in known:
+                try:
+                    ancestor = get('/api/control/missions/' + urllib.parse.quote(mid, safe='') + '?include_history=false')
+                except urllib.error.HTTPError as error:
+                    if error.code not in (403, 404):
+                        raise
+                    error.close()
+                    ancestor = None
+                else:
+                    if ancestor is MISSING_ANCESTOR:
+                        ancestor = None
+                    elif not isinstance(ancestor, dict) or ancestor.get('id') != mid:
+                        raise ValueError('invalid mission ancestor')
+                known[mid] = ancestor
+            ancestor = known[mid]
+            if ancestor:
+                fetched[mid] = ancestor
+                frontier.append(ancestor)
+        if not frontier:
+            break
+    ordered = {}
+    for row in rows:
+        chain = {row['id']: row}
+        parent = inbox_parent(row)
+        while parent in fetched and parent not in ordered and parent not in chain:
+            chain[parent] = fetched[parent]
+            parent = inbox_parent(fetched[parent])
+        ordered.update(reversed(chain.items()))
+    return ordered.values()
+
+
+def inbox_snapshot(c, projects, selected, rules=None, windows=None, roster=None):
+    windows = windows or InboxWindows()
+    projects = [p for p in projects if p.get('status') not in ('archived', 'deleted')]
+    scope = tuple(p['slug'] for p in projects)
+    now = time.monotonic()
+    if scope != windows.scope or now - windows.last_progress >= 60:
+        windows.pages.clear()
+        windows.project_sources = None
+        windows.scope = scope
+        windows.last_progress = now
+    end = now + INBOX_READ_SECONDS
+
+    def read(path):
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('inbox read deadline')
+        return c.get(path, 8 << 20, deadline=remaining)
+
+    def source_read(path):
+        if path not in windows.pages:
+            collection = path.startswith('/api/control/missions?')
+            try:
+                data = read(path)
+            except urllib.error.HTTPError as error:
+                if collection or error.code not in (403, 404):
+                    raise
+                error.close()
+                data = MISSING_ANCESTOR
+            else:
+                if collection:
+                    if not isinstance(data, list) or any(not isinstance(m, dict) or not m.get('id') for m in data):
+                        raise ValueError('invalid inbox window')
+                elif not isinstance(data, dict) or data.get('id') != urllib.parse.unquote(path.split('?')[0].rsplit('/', 1)[-1]):
+                    raise ValueError('invalid mission ancestor')
+            windows.pages[path] = data
+            windows.last_progress = time.monotonic()
+        return windows.pages[path]
+
+    state = read(INBOX_PATH)
+    if (not isinstance(state, dict) or not isinstance(state.get('_versions', {}), dict)
+            or not isinstance(state.get('preferences') or {}, dict)):
+        raise ValueError('invalid inbox state')
+    if (state.get('preferences') or {}).get('inboxEnabled') is False:
+        windows.pages.clear()
+        windows.project_sources = None
+        return [('I', 'disabled')]
+    refresh_projects = windows.project_sources is None or now >= windows.project_refresh_at
+    if refresh_projects:
+        hidden = set()
+        project_rows = [project_history(source_read, slug, rules, inbox_hidden=hidden) for slug in scope]
+    else:
+        project_rows, hidden = windows.project_sources
+    completed = source_read('/api/control/missions?status=completed&limit=100')
+    # Core sorts the page and its context together. Its first 200 non-archived
+    # rows are the original page; the other rows can satisfy ancestor lookups.
+    known = {m['id']: m for m in roster} if roster is not None else {}
+    current = (source_read(f'/api/control/missions?limit={CURRENT_MISSION_LIMIT}') if roster is None else
+               [m for m in roster if m.get('status') not in ('acknowledged', 'archived')][:CURRENT_MISSION_LIMIT])
+    current = inbox_with_ancestors(source_read, current, known)
+    result = project_inbox([*project_rows, completed, current], state, projects, selected, hidden)
+    if refresh_projects:
+        windows.project_sources = (project_rows, hidden)
+        windows.project_refresh_at = time.monotonic() + INBOX_PROJECT_REFRESH_SECONDS
+    windows.pages.clear()
+    return result
+
+
+def project_inbox(sources, state, projects, selected, hidden=()):
+    by_id = {}
+    for source in sources:
+        for m in source:
+            if m['id'] in hidden:
+                continue
+            previous = by_id.get(m['id'])
+            if previous is None or (timestamp_ms(m.get('updated_at') or m.get('created_at')) or 0) >= (
+                    timestamp_ms(previous.get('updated_at') or previous.get('created_at')) or 0):
+                by_id[m['id']] = m
+    rows = inbox_rows(by_id.values(), state, projects, selected)
+    # An off-page Inbox item carries the same summary as a sidebar mission.
+    # It enters the sidebar only when its transcript is opened.
+    return [(*r, *mission_row(by_id[r[1]])) if r[0] == 'U' else r for r in rows]
+
+
+def mission_row(m):
+    return ('M', *(m.get(k) for k in ('id','title','project','track','model','model_override',
+                                      'status','updated_at','created_at','short_description')),
+            *mission_settings(m), *mission_hierarchy(m), str(int('archived' in (m.get('tags') or []))))
+
+
+def project_history(get, slug, rules, *, inbox_hidden=None):
     """Project history plus older open work under the shared desktop policy."""
     page_size = rules['pageSize']
     query = '/api/control/missions?project=' + urllib.parse.quote(slug, safe='') + f'&limit={page_size}'
-    def get(path):
-        return read_snapshot(lambda: c.get(path), attempts=2)
-
     history = get(query + '&all=true')
     if not isinstance(history, list):
         raise ValueError('invalid project history')
@@ -675,6 +888,12 @@ def project_history(c, slug, rules):
         parent = row.get('parent_mission_id') or row.get('callback_parent_mission_id')
         if not parent or parent in members or parent in candidates or row.get('status') in rules['live']:
             members[mid] = row
+    if inbox_hidden is not None:
+        ordered = sorted(members.values(), key=lambda m: timestamp_ms(m.get('updated_at') or m.get('created_at')) or 0,
+                         reverse=True)
+        expanded = inbox_with_ancestors(get, ordered, known)
+        inbox_hidden.update(btw_ids({mid: m for mid, m in known.items() if m is not None}))
+        return [m for m in expanded if m['id'] in members or m.get('project') == slug]
     unavailable = set()
     ancestor_reads = 0
     for row in list(members.values()):
@@ -717,24 +936,24 @@ def project_history(c, slug, rules):
 
 
 def mission_rows(missions):
-    return [('M', *(m.get(k) for k in ('id','title','project','track','model','model_override',
-                                        'status','updated_at','created_at','short_description')), *mission_settings(m), *mission_hierarchy(m),
-                    str(int('archived' in (m.get('tags') or []))))
-             for m in missions if re.fullmatch(r'[A-Za-z0-9_-]{1,128}', m['id'])]
+    return [mission_row(m) for m in missions if re.fullmatch(r'[A-Za-z0-9_-]{1,128}', m['id'])]
 
 
-def roster_rows(c, include_archived=False, expanded=(), rules=None, publish_project=None):
+def roster_rows(c, include_archived=False, expanded=(), rules=None, publish_project=None, *, inbox_for=None, inbox_windows=None):
     projects = c.get('/api/projects')['projects']
     if not isinstance(projects, list):
         raise ValueError('invalid projects')
     groups = []
     by_project = {}
+    def read_project(path):
+        return read_snapshot(lambda: c.get(path), attempts=2)
+
     for slug in dict.fromkeys(expanded):
         if not any(p.get('slug') == slug for p in projects):
             continue
-        members = project_history(c, slug, rules)
+        members = project_history(read_project, slug, rules)
         if slug == 'default':
-            members += project_history(c, '__unassigned__', rules)
+            members += project_history(read_project, '__unassigned__', rules)
         listed = {m['id']: m for m in members if (m.get('project') or 'default') == slug}
         group = ('G', slug, *sorted(listed))
         groups.append(group)
@@ -754,6 +973,7 @@ def roster_rows(c, include_archived=False, expanded=(), rules=None, publish_proj
     machines = get('/api/machines')
     if not all(isinstance(x, list) for x in (projects, missions, machines)):
         raise ValueError('invalid roster')
+    current = list(missions)
     if include_archived:
         try:
             archived = get(f'/api/control/missions?status=acknowledged&limit={ARCHIVED_MISSION_LIMIT}')
@@ -763,14 +983,16 @@ def roster_rows(c, include_archived=False, expanded=(), rules=None, publish_proj
             if error.code != 404:
                 raise
     rows = [('C', c.binding), *groups]
-    try:
-        rows += inbox_rows(missions, c.get(INBOX_PATH))
-    except urllib.error.HTTPError as error:
-        if error.code in (401, 403):
-            raise
-        error.close()
-    except (urllib.error.URLError, TimeoutError, ValueError):
-        pass  # An unavailable Inbox does not invalidate the mission roster.
+    if inbox_for is not None:
+        try:
+            rows += inbox_snapshot(c, projects, inbox_for, rules, inbox_windows, current)
+        except urllib.error.HTTPError as error:
+            if error.code in (401, 403):
+                raise
+            error.close()
+            rows.append(('I', 'refreshing'))
+        except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError):
+            rows.append(('I', 'refreshing'))
     if groups:
         by_id = {m['id']: m for m in missions}
         by_id.update(by_project)
@@ -902,11 +1124,13 @@ def poll(mid, binding, tracked=None, rules=None):
         published_project = True
 
     visible = []
+    inbox_windows = InboxWindows()
     while True:
         c.check()
         try:
             if checked is None or time.monotonic() - checked >= 5:
                 rows = roster_rows(c, include_archived=True, expanded=expanded, rules=rules,
+                                   inbox_for=mid, inbox_windows=inbox_windows,
                                    publish_project=publish_project if not published_project else None)
                 found = {r[1] for r in rows if r[0] == 'M'}
                 # A sorted, limited list is positive evidence only. For every
