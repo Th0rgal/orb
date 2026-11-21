@@ -369,6 +369,8 @@ structure DesktopState where
   sidebarRows : List ChromeSidebarRow := []
   missionCards : List MissionSummaryCard := []
   fleetMachines : List FleetMachineCard := []
+  launchMachines : Option (List (String × String)) := none
+  launchMachinesFailed : Bool := false
   toasts : List ToastSpec := []
   modal : ActiveModal := .none
   composer : ComposerBuffer := {}
@@ -705,7 +707,9 @@ def currentSettings (st : DesktopState) (mid : String) : LaunchSettings :=
 def settingChoices (st : DesktopState) (mid : String) (field : SettingField) : List (String × String) :=
   let values := currentSettings st mid
   match field with
-  | .machine => [("", "Default machine")] ++ st.fleetMachines.map fun m => (m.machineId, m.name)
+  | .machine =>
+    let localMachines := st.fleetMachines.filter (·.machineId == "core")
+    (if localMachines.isEmpty then [] else [("", "Default machine")]) ++ (localMachines.map fun m => (m.machineId, m.name)) ++ st.launchMachines.getD []
   | .backend => (st.catalog.map fun c => (c.backend, c.harnessName)).eraseDups
   | .model => (st.catalog.filter (·.backend == values.backend)).map fun c => (c.model, c.modelName)
   | .effort =>
@@ -868,8 +872,11 @@ def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuR
     let choices := settingChoices st menu.mission field
     if st.catalogLoading && (field == .backend || field == .model) then
       return [{ id := 729, label := "Loading choices…", icon := "list" }]
-    if choices.isEmpty then return [{ id := 719, label := "No available choices", icon := "list" }]
-    return choices.mapIdx fun i (value, label) => { id := 2000000 + i, label, icon := "list", value }
+    let rows : List MissionMenuRow := choices.mapIdx fun i (value, label) => { id := 2000000 + i, label, icon := "list", value }
+    if field == .machine && st.launchMachines.isNone then
+      return rows ++ [{ id := 729, label := if st.launchMachinesFailed then "Could not load remote machines. Reopen to retry." else "Loading remote machines…", icon := "list" }]
+    if rows.isEmpty then return [{ id := 719, label := "No available choices", icon := "list" }]
+    return rows
   let clear : MissionMenuRow := { id := 727, label := "Clear selection", icon := "close", separatorBefore := true }
   if menu.mixed then return [{ id := 729, label := "No shared actions", icon := "list" }, clear]
   if menu.targets.length > 1 then
