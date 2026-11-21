@@ -71,6 +71,7 @@ private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale
 private inductive ReadKind where
   | roster | recover | catalog (revision : Nat) | providers
   | nativeModels (machine : String)
+  | accountRoutes (account provider action value : String)
   | launchMachines (admin : Bool) (harness : String)
   deriving BEq
 
@@ -85,6 +86,7 @@ private def startLiveRead (binding : String) (kind : ReadKind) (notify : IO Unit
     | .roster => #["-I", "-c", transport ++ "\ntry: roster()\nexcept Exception: sys.exit(1)"]
     | .recover => #["-I", "-c", transport ++ "\nrecover_roster()"]
     | .nativeModels machine => #["-I", "-c", transport ++ "\nnative_models(*sys.argv[1:])", binding, machine]
+    | .accountRoutes account provider action value => #["-I", "-c", transport ++ "\naccount_routes(*sys.argv[1:])", binding, account, provider, action, value]
     | .launchMachines admin harness => #["-I", "-c", transport ++ "\nlaunch_machines(*sys.argv[1:])", binding, if admin then "admin" else "member", harness]
     | .providers => #["-I", "-c", transport ++ "\nprovider_inventory(sys.argv[1])", binding]
     | .catalog _ => #["-I", "-c", transport ++ "\ncatalog(sys.argv[1], json.loads(sys.argv[2]))", binding, modelCatalogRules]
@@ -115,8 +117,19 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
         else if st.missionMenu.any (·.page == .picker .machine) && st.launchMachines.isNone && !st.launchMachinesFailed then
           some (.launchMachines (st.fleetMachines.any (·.machineId == "core")) st.draftSettings.backend)
         else if st.screen == .inference && st.providers.isNone && !st.providerReadFailed then some .providers
+        else if let some page := st.accountRoutePage then
+          if st.screen == .inference && !page.failed && (page.options.isNone || page.pending.isSome) then
+            some (.accountRoutes page.account.id page.account.providerType ((page.pending.map (·.action)).getD "") ((page.pending.map (·.value)).getD ""))
+          else if st.catalogLoading then some (.catalog st.catalogRevision) else none
         else if st.catalogLoading then some (.catalog st.catalogRevision)
         else (nativeCatalogRequest st).map ReadKind.nativeModels
+      -- Navigation may cancel a stale read. A submitted shared account update
+      -- must settle before another page fetches the account's saved route.
+      if let some source := current then
+        if let .accountRoutes _ _ action _ := source.kind then
+          if !action.isEmpty && source.binding == st.connectionBinding && some source.kind != kind then
+            if (← source.take).isNone then return none
+            close
       if current.any (fun r => r.binding != st.connectionBinding || some r.kind != kind) then close
       let some kind := kind | return none
       let source ← match ← slot.get with
@@ -138,6 +151,19 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
           | ["N", id, name] => some ({ backend := "antigravity", harnessName := "Antigravity CLI", model := id, modelName := name } : CatalogModel)
           | _ => none
         return some (applyNativeCatalog { st with missionMenu := menu } machine rows)
+      if let .accountRoutes account _ _ _ := source.kind then
+        let some page := st.accountRoutePage | return none
+        if page.account.id != account then return none
+        if ![some "routes", some "unconfirmed"].contains lines.head? then
+          return some { st with accountRoutePage := some { page with failed := true, pending := none } }
+        let rows := lines.filterMap fun line => match splitTab line with
+          | ["D", action, value, title, detail] => some ({ action, value, title, detail } : AccountRouteOption)
+          | _ => none
+        let changed := page.pending.isSome
+        return some { st with accountRoutePage := some { page with options := some rows, pending := none }
+                              catalogLoading := st.catalogLoading || changed
+                              catalogRevision := st.catalogRevision + (if changed then 1 else 0)
+                              writeError := if lines.head? == some "unconfirmed" then "Core could not confirm the change. Check the current setting." else "" }
       if let .launchMachines .. := source.kind then
         if lines.head? != some "machines" then return some { st with launchMachinesFailed := true }
         let nodes := lines.filterMap fun line => match splitTab line with
@@ -148,8 +174,8 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
         if lines.head? != some "accounts" then return some { st with providerReadFailed := true }
         let rows := lines.filterMap fun line =>
           match splitTab line with
-          | ["A", id, name, category, personal, globalFlag] =>
-            some ({ id, name, category, userEnabled := personal == "1", globallyEnabled := globalFlag == "1" } : ProviderAccount)
+          | ["A", id, name, category, personal, globalFlag, providerType] =>
+            some ({ id, name, category, providerType, userEnabled := personal == "1", globallyEnabled := globalFlag == "1" } : ProviderAccount)
           | _ => none
         return some { st with providers := some rows }
       let models := lines.filterMap fun line =>
