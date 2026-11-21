@@ -53,7 +53,7 @@
   /* Quota levels: warning = 80-99% used, danger = exhausted. >= 4.5:1 on --bg/--bg-elev. */
   --warning: #d9b23a;
   --danger: #ef7f8b;
-  --placeholder: #676767;
+  --placeholder: var(--fg-3);
   --plus-bg: #2c2c2c;
   --scroll-thumb: #e4e4e411;
   --scroll-thumb-hover: #e4e4e438;
@@ -119,7 +119,7 @@
   --amber: #8a6d0b;
   --warning: #876a0a;
   --danger: #c0283a;
-  --placeholder: #a3a29c;
+  --placeholder: #6b6a66;
   --plus-bg: #e8e7e3;
   --scroll-thumb: #00000018;
   --scroll-thumb-hover: #00000030;

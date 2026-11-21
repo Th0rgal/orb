@@ -18,3 +18,25 @@ test('composer expands for a soft wrap and shrinks back to one row', async ({pag
  expect((await input.boundingBox())!.height).toBeLessThanOrEqual(24);
  await page.screenshot({path:testInfo.outputPath('empty.png')});
 });
+
+for (const theme of ['dark', 'light']) {
+  test(`empty composer hint is legible in the ${theme} theme`, async ({page}) => {
+    await page.goto('/tests/form-feedback.html?voice');
+    const input = page.locator('.composer textarea');
+    await expect(input).toBeVisible();
+    const contrast = await input.evaluate((field, theme) => {
+      document.documentElement.dataset.theme = theme;
+      function luminance(rgb: string) {
+        const [r, g, b] = rgb.match(/[\d.]+/g)!.map(value => {
+          const channel = Number(value) / 255;
+          return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+        });
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      }
+      const hint = luminance(getComputedStyle(field, '::placeholder').color);
+      const surface = luminance(getComputedStyle(field.closest('.composer')!).backgroundColor);
+      return (Math.max(hint, surface) + 0.05) / (Math.min(hint, surface) + 0.05);
+    }, theme);
+    expect(contrast).toBeGreaterThanOrEqual(4.5);
+  });
+}
