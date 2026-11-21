@@ -1343,7 +1343,7 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
       ...(authItems.length > 0 ? [{ kind: "sep" as const }] : []),
       ...rankItems,
       ...(rankItems.length > 0 ? [{ kind: "sep" as const }] : []),
-      { kind: "item", label: globallyDisabled() ? "Enable" : "Disable", icon: globallyDisabled() ? Ic.CheckIcon : Ic.BanIcon, onClick: () => p.onToggle(globallyDisabled()) },
+      ...(isAdminUser() ? [{ kind: "item" as const, label: globallyDisabled() ? "Enable" : "Disable", icon: globallyDisabled() ? Ic.CheckIcon : Ic.BanIcon, onClick: () => p.onToggle(globallyDisabled()) }] : []),
       ...(p.onToggleUserPref && currentUser()
         ? [{
             kind: "item" as const,
