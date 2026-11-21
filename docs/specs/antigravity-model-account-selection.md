@@ -433,8 +433,11 @@ The owner’s fleet row and enrollment detail expose Core’s `launch_block` rea
 New Agent shows that reason before a standard or Goal send, including after reopening.
 A fresh fleet read also checks the reason at submit time. The owner can select a
 different machine and send the same draft. Desktop provider settings show the
-same reason alongside the enrolled account. The native iOS and Android clients
-currently lack the dedicated-account enrollment screen and this pre-send warning.
+same reason alongside the enrolled account. On iOS and Android the new-mission composer shows the same reason on the
+selected machine. Before sending to a fixed remote node, both clients read its
+current fleet row again so an enrollment change keeps the draft available.
+Core and standard auto-managed launches bypass this check. Mobile enrollment
+management remains a separate Settings feature.
 
 This increment reserves the node. A signed job for another owner fails node
 admission. A matching owner also receives a refusal because execution under

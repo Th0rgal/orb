@@ -113,7 +113,10 @@ struct OrbConversation: View {
     static let goalHarnesses: Set<String> = ["antigravity", "claudecode", "codex", "grok", "opencode"]
     var supportsMode: Bool { !isCloud && (selection.backend.isEmpty || Self.goalHarnesses.contains(selection.backend)) }
     var remoteGoalTarget: Bool { !isCloud && !selection.node.isEmpty && selection.node != "core" }
-    @State var remoteGoalHarnesses: Set<String> = []
+    @State var launchFleet: OrbJSON = .null
+    var draftRemoteNode: String? { id == nil && remoteGoalTarget ? selection.node : nil }
+    var nativeLaunchWarning: String? { draftRemoteNode.flatMap { OrbNativeLaunch.warning(launchFleet, nodeID: $0) } }
+    var remoteGoalHarnesses: Set<String> { Set(launchFleet["remote_launch"]["goal_harnesses"].items.map(\.text)) }
     var offersGoal: Bool { !remoteGoalTarget || (id == nil && remoteGoalHarnesses.contains(selection.backend)) }
     var remoteGoalPhase: OrbRemoteGoal.Phase? {
         guard mission["goal_mode"].flag, mission["backend"].text == "opencode", remoteGoalTarget else { return nil }

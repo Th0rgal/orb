@@ -581,10 +581,12 @@ extension OrbConversation {
                     : (selection.cloud || selection.node.isEmpty ? "core" : selection.node)
                 let uploadTargetNode = OrbManaged.isAutoManagedTarget(rawTargetNode) ? "core" : rawTargetNode
                 let goalRequest = OrbCyberAccess.isGoal(prompt)
-                if goalRequest && rawTargetNode != "core" && !isCloud {
-                    guard id == nil else { throw OrbHTTPError(status: 400, detail: OrbRemoteGoal.unsupported) }
-                    let fleet = try await api.call("/api/remote-nodes")
-                    guard fleet["remote_launch"]["goal_harnesses"].items.contains(where: { $0.text == selection.backend }) else {
+                if !isCloud && rawTargetNode != "core" {
+                    if id == nil {
+                        try await OrbNativeLaunch.require(nodeID: rawTargetNode, goalBackend: goalRequest ? selection.backend : nil) {
+                            try await api.call("/api/remote-nodes")
+                        }
+                    } else if goalRequest {
                         throw OrbHTTPError(status: 400, detail: OrbRemoteGoal.unsupported)
                     }
                 }
@@ -691,9 +693,9 @@ extension OrbConversation {
                         if selection.worktreeMode != "auto" {
                             body["worktree_mode"] = .string(selection.worktreeMode)
                         }
-                        if !selection.node.isEmpty && selection.node != "core" {
-                            body["remote_node_id"] = .string(selection.node)
-                            if selection.allow24hCommitment && OrbManaged.isAutoManagedTarget(selection.node) {
+                        if rawTargetNode != "core" {
+                            body["remote_node_id"] = .string(rawTargetNode)
+                            if selection.allow24hCommitment && OrbManaged.isAutoManagedTarget(rawTargetNode) {
                                 body["managed_allow_24h_commitment"] = .bool(true)
                             }
                         }
