@@ -1760,6 +1760,105 @@ private def memberNativeCatalog (store : CoreStore) (root : String) : IO Unit :=
     for file in #[first, second] do
       try IO.FS.removeFile file catch _ => pure ()
 
+/-- A host key must not change the transport of a bound subscription. Both signed-in
+    users can configure the route, while the credential stays with its original owner. -/
+private def sharedCredentialRouting (app : CoreAppState) (root admin member : String) (now : UInt64) : IO Unit := do
+  let codex := "fixture-bound-codex"
+  let file := s!"{root}/auth-empty/codex-bound.json"
+  let legacy := s!"{root}/.sandboxed-sh/ai_providers.json"
+  let saved ← IO.FS.readFile legacy
+  let vars := #["OPENAI_API_KEY", "CLAUDE_CODE_PROXY_BASE_URL", "CLI_PROXY_MANAGEMENT_KEY"]
+  let previous ← vars.mapM IO.getEnv
+  let (fd, port) ← IO.ofExcept (← LeanSys.Posix.tcpListen "127.0.0.1" 0 8)
+  let endpoint := s!"http://127.0.0.1:{port}"
+  let relay ← IO.mkRef ""
+  let received ← IO.mkRef (0 : Nat)
+  let handler : String → String → IO (Nat × String) := fun line body => do
+    let request := (OrbBin.Json.parse body).toOption.getD .null
+    if line.startsWith "GET /v8/management/credentials/download?name=codex-bound.json " then
+      return (200, renderCompact (.obj #[("prefix", .str codex), ("proxy_url", .str (← relay.get))]))
+    if line.startsWith "PATCH /v8/management/credentials/fields " &&
+        request.fieldStr? "name" == some "codex-bound.json" then
+      let some url := request.fieldStr? "proxy_url" | return (400, "{}")
+      relay.set url
+      return (200, "{\"status\":\"ok\"}")
+    let model := request.fieldStr? "model"
+    if line.startsWith "POST /v1/chat/completions " && model == some (codex ++ "/gpt-5") ||
+        line.startsWith "POST /v1beta/openai/chat/completions " && model == some "gemini-fixture" then
+      received.modify (· + 1)
+      return (200, "{\"choices\":[{\"message\":{\"content\":\"fixture-ok\"}}]}")
+    return (404, "{}")
+  let stop ← IO.mkRef false
+  let server ← mockSidecarAuthFiles fd (← IO.mkRef 0) (← IO.mkRef handler) stop
+  let pool ← Std.Mutex.new ({} : AccountVpnPool.PoolState)
+  let app := { app with vpnRelayPort? := some 41001, vpnPool? := some pool }
+  let mut added := ""
+  try
+    setenvVar "OPENAI_API_KEY" "fixture-instance-key"
+    setenvVar "CLAUDE_CODE_PROXY_BASE_URL" endpoint
+    setenvVar "CLI_PROXY_MANAGEMENT_KEY" "fixture-management"
+    IO.FS.writeFile file (renderCompact (.obj #[("type", .str "codex"), ("prefix", .str codex),
+      ("access_token", .str "fixture-subscription")]))
+    IO.ofExcept (← upsertAIProvider app.store { id := codex, providerType := "openai", name := "Subscription",
+      apiKey := "cli-proxy-managed" })
+    IO.FS.writeFile legacy "[{\"id\":\"legacy-google-key\",\"name\":\"Gemini\",\"provider_type\":\"google\",\"api_key\":\"fixture-legacy-key\"}]"
+    let (status, row) ← postJson app member "/api/ai/providers"
+      "{\"provider_type\":\"google\",\"name\":\"Member Gemini\",\"api_key\":\"fixture-member-key\"}" now
+    added := (row.fieldStr? "id").getD ""
+    unless status == 201 && !added.isEmpty do throw (IO.userError "member Gemini key creation failed")
+    let accounts ← loadHydratedProviders app.store root
+    for (id, provider, model, key) in #[(codex, "openai", "gpt-5", "fixture-service-key"),
+        (added, "google", "gemini-fixture", "fixture-member-key"),
+        ("legacy-google-key", "google", "gemini-fixture", "fixture-legacy-key")] do
+      for session in #[admin, member] do
+        let settings ← getJson app session s!"/api/ai/providers/{id}/vpn" now
+        unless settings.fieldBool? "can_configure" == some true do
+          throw (IO.userError s!"Missing shared VPN settings for {provider}")
+      let entry := renderCompact (.arr #[.obj #[("account_id", .str id), ("provider_id", .str provider),
+        ("model_id", .str model)]])
+      let targets := parseChainTargetsJson entry (← listAIProviders app.store) accounts endpoint "fixture-service-key"
+      let #[target] := targets | throw (IO.userError "expected one pinned inference target")
+      unless target.accountId == id && target.apiKey == key do throw (IO.userError "credential owner changed")
+      let routed ← if provider == "openai" then do
+          unless target.baseUrl == endpoint && target.sidecarCredential?.any (·.file == "codex-bound.json") do
+            throw (IO.userError "Codex did not resolve to its bound sidecar credential")
+          pure target
+        else do
+          unless target.baseUrl == "https://generativelanguage.googleapis.com/v1beta/openai" &&
+              target.sidecarCredential?.isNone do throw (IO.userError "unexpected Gemini API transport")
+          pure { target with baseUrl := endpoint ++ "/v1beta/openai" }
+      let chain : RoutingChain := { id := "fixture-chain", name := "test", targets := #[routed] }
+      let testApp := { app with chainsRef := ← IO.mkRef #[chain], proxyCooldownsRef := ← IO.mkRef #[] }
+      let vpn := s!"/api/ai/providers/{id}/vpn"
+      let chat := "{\"model\":\"fixture-chain\",\"messages\":[{\"role\":\"user\",\"content\":\"test\"}]}"
+      let (savedCode, _) ← putJson testApp member vpn "{\"mode\":\"vpn\",\"country\":\"NL\"}" now
+      let shared ← getJson testApp admin vpn now
+      unless savedCode == 200 && shared.fieldStr? "country" == some "NL" do
+        throw (IO.userError s!"Shared {provider} VPN selection did not persist")
+      let before ← received.get
+      let (blocked, _) ← postJson testApp member "/v1/chat/completions" chat now
+      unless blocked >= 400 && (← received.get) == before do
+        throw (IO.userError "An unavailable VPN forwarded the request")
+      let (direct, _) ← putJson testApp admin vpn "{\"mode\":\"direct\"}" now
+      unless direct == 200 && (← getJson testApp member vpn now).fieldStr? "mode" == some "direct" do
+        throw (IO.userError "Member did not observe shared Direct route")
+      for session in #[admin, member] do
+        let (code, _) ← postJson testApp session "/v1/chat/completions" chat (now + 300)
+        unless code == 200 do throw (IO.userError s!"Pinned {provider} inference returned {code}")
+      unless (← received.get) == before + 2 do throw (IO.userError "Missing loopback inference receipts")
+  finally
+    stop.set true
+    discard <| IO.wait server
+    discard <| LeanSys.Posix.closeFd fd
+    for (name, value) in vars.zip previous do
+      match value with
+      | some v => setenvVar name v
+      | none => unsetenvVar name
+    IO.FS.writeFile legacy saved
+    IO.FS.removeFile file
+    IO.ofExcept (← deleteAIProvider app.store codex)
+    if !added.isEmpty then IO.ofExcept (← deleteAIProvider app.store added)
+
 def run : IO Unit := do
   let fixtureRaw ← IO.FS.readFile "shared/orb-spec/fixtures/provider-response-contract.json"
   let .ok fixture := OrbBin.Json.parse fixtureRaw
@@ -1810,6 +1909,7 @@ def run : IO Unit := do
         | throw (IO.userError "VPN settings member creation failed")
       nativeGatewayContract app member.id root now
       let memberJwt := mintSessionTokenV2 cfg.jwtSecret member.id member.role member.sessionEpoch (now + 3600)
+      sharedCredentialRouting app root jwt memberJwt now
       let a : HydratedProvider := { (default : HydratedProvider) with
         id := "fixture-a"
         providerType := "openai"

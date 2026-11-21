@@ -1950,7 +1950,16 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     (bodyTimedOutRef? := some bodyTimedOutRef)
     (resolveTransport := fun target => do
       let some owner := target.sidecarCredential? |
-        return ← AccountVpnPool.resolve st.vpnPool? st.store st.vpnCoordinatorDir target.accountId
+        return ← AccountVpnRoutes.resolve st.store.missionsDb target.accountId fun pref => do
+          let some pool := st.vpnPool? | return .error "vpn_coordinator_unavailable"
+          let provider? ← match ← getAIProvider? st.store target.accountId with
+            | some row => pure (some row.providerType)
+            | none => do
+              let accounts ← loadHydratedProviders st.store st.cfg.workingDir
+              pure ((accounts.find? (fun p => p.id == target.accountId && p.hasAccountApiKey && !p.hasOAuth)).map (·.providerType))
+          let some provider := provider? | return .error "vpn_credential_owner_unknown"
+          AccountVpnPool.allocate pool st.store.rootDir st.vpnCoordinatorDir st.store.missionsDb
+            target.accountId provider pref
       let .ok pref ← AccountVpnRoutes.read st.store.missionsDb target.accountId | return .error "vpn_route_store_unavailable"
       let some selected := pref | return .ok none
       unless !owner.modelPrefix.isEmpty && target.modelId.startsWith (owner.modelPrefix ++ "/") do
@@ -3740,8 +3749,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         match ← AccountVpnSidecar.alternativeRouterAccess (← resolveCliProxyBaseUrl) key file allowed? with
         | .ok allowed => return .ok (mkJson 200 (renderCompact (.obj #[("allowed", .bool allowed)])))
         | .error reason => return .ok (mkJson 503 (renderCompact (.obj #[("error", .str reason)])))
-      let stored ← getAIProvider? st.store account
-      let coreOwned := !hp.hasOAuth && stored.any (fun p => !p.apiKey.isEmpty && p.apiKey != "cli-proxy-managed")
+      let coreOwned := !hp.hasOAuth && hp.hasAccountApiKey
       let mut configure? : Option (Bool → IO (Except String Unit)) := none
       if hp.hasOAuth && !hp.hasApiKey && ["codex", "claude", "antigravity", "kimi"].any (providerTypeMatchesAuthType hp.providerType) &&
           !file.isEmpty then

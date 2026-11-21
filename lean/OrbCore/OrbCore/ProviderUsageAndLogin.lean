@@ -377,6 +377,8 @@ structure HydratedProvider where
   baseUrl         : String
   apiKey          : String
   hasApiKey       : Bool
+  /-- Key stored on this account, excluding the instance environment fallback. -/
+  hasAccountApiKey : Bool := false
   hasOAuth        : Bool
   oauthToken      : String
   oauthFile       : String
@@ -462,13 +464,15 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
     let boundAuth? := matchFile false
     let matchedAuth? := boundAuth?.orElse fun _ => if singleton then matchFile true else none
 
-    let metaInfo := lookupProviderMeta p.providerType
-    let envKeyVal ← match metaInfo.envVar? with
-      | some ev => if memberAdded then pure "" else pure ((← lookupEnvWithFiles? ev).getD "")
-      | none => pure ""
-    let effApiKey := if !plainKey.isEmpty && plainKey != "cli-proxy-managed" then plainKey else envKeyVal
-    let hasApiKey := !effApiKey.isEmpty
     let hasOAuth := matchedAuth?.isSome || (!legAccessTok.isEmpty) || (p.providerType.toLower == "muse-code" && !legRefreshFile.isEmpty && !legRefreshFile.endsWith ".json") || plainKey == "cli-proxy-managed"
+    let hasAccountKey := !plainKey.isEmpty && plainKey != "cli-proxy-managed"
+    let metaInfo := lookupProviderMeta p.providerType
+    let effApiKey ← if hasAccountKey then pure plainKey
+      else if memberAdded || hasOAuth then pure ""
+      else match metaInfo.envVar? with
+        | some ev => pure ((← lookupEnvWithFiles? ev).getD "")
+        | none => pure ""
+    let hasApiKey := !effApiKey.isEmpty
     let effEmail :=
       if !legEmail.isEmpty then legEmail
       else (matchedAuth?.map (·.email)).getD ""
@@ -511,6 +515,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
       baseUrl := p.baseUrl
       apiKey := effApiKey
       hasApiKey := hasApiKey
+      hasAccountApiKey := hasAccountKey
       hasOAuth := hasOAuth
       oauthToken := effOauthTok
       oauthFile := effOauthFile
@@ -563,6 +568,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
         baseUrl := bUrl
         apiKey := if hasApi then aKey else ""
         hasApiKey := hasApi
+        hasAccountApiKey := hasApi
         hasOAuth := hasOa
         oauthToken := (matchedAuth?.map (·.accessToken)).getD effLegTok
         oauthFile := (matchedAuth?.map (·.fileName)).getD refFile
