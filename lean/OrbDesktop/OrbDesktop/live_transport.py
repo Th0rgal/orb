@@ -577,8 +577,10 @@ def btw_ids(by_id):
                 known[current] = True
                 break
             parent = m.get('parent_mission_id')
+            # Core rows have already passed stickHierarchy in the GTK client.
+            # isBtwMission falls back to that observed parent even for a fork.
             fork = next((t[8:] for t in tags if t.startswith('fork-of:')), None)
-            current = parent if parent and parent != fork else m.get('callback_parent_mission_id')
+            current = (parent if parent != fork else None) or m.get('callback_parent_mission_id') or parent
         known.update(dict.fromkeys(path, known.get(current, False)))
     return {mid for mid, excluded in known.items() if excluded}
 
@@ -597,8 +599,7 @@ def inbox_rows(missions, state, projects=(), selected=''):
             continue
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', mid):
             continue
-        _, parent, callback, fork, _ = mission_hierarchy(m)
-        parent = (parent if parent != fork else None) or callback
+        parent = inbox_parent(m)
         tags = m.get('tags') or []
         stamp = response_stamp(m)
         unread = response_unread(m, state, selected, stamp)
@@ -622,19 +623,117 @@ def inbox_rows(missions, state, projects=(), selected=''):
         for _, negative_stamp, mid, unread in rows if unread or mid in failed_parents]
 
 
+def inbox_parent(m):
+    _, parent, callback, fork, _ = mission_hierarchy(m)
+    return (parent if parent != fork else None) or callback
+
+
+class InboxSources:
+    def __init__(self, c):
+        self.connection = c
+        self.observed = {}
+        self.lookup = {}
+        self.next_offset = 0
+
+    def page(self, query):
+        rows = self.connection.get('/api/control/missions?' + query)
+        if not isinstance(rows, list):
+            raise ValueError('invalid inbox page')
+        self.observed.update((m['id'], m) for m in rows)
+        return rows
+
+    def ancestor(self, mid):
+        # Core's single-mission detail can embed history even for include_history=false.
+        # Unlisted rows from this lookup supply ancestry only, never candidate membership.
+        while mid not in self.observed and mid not in self.lookup and self.next_offset is not None:
+            rows = self.connection.get(f'/api/control/missions?all=true&limit=200&offset={self.next_offset}')
+            if not isinstance(rows, list):
+                raise ValueError('invalid ancestor page')
+            self.lookup.update((m['id'], m) for m in rows)
+            self.next_offset = self.next_offset + len(rows) if len(rows) == 200 else None
+        row = self.observed.get(mid) or self.lookup.get(mid)
+        if row:
+            self.observed[mid] = row
+        return row
+
+
+def inbox_with_ancestors(sources, rows):
+    """Match withAncestors: insert fetched parents immediately before their first child."""
+    listed = {m['id'] for m in rows}
+    fetched = {}
+    frontier = rows
+    for _ in range(8):
+        wanted = dict.fromkeys(inbox_parent(m) for m in frontier)
+        frontier = []
+        for mid in wanted:
+            if not mid or mid in listed or mid in fetched:
+                continue
+            ancestor = sources.ancestor(mid)
+            if ancestor:
+                fetched[mid] = ancestor
+                frontier.append(ancestor)
+        if not frontier:
+            break
+    ordered = {}
+    for row in rows:
+        chain = {row['id']: row}
+        parent = inbox_parent(row)
+        while parent in fetched and parent not in ordered and parent not in chain:
+            chain[parent] = fetched[parent]
+            parent = inbox_parent(fetched[parent])
+        ordered.update(reversed(chain.items()))
+    return ordered.values()
+
+
+def inbox_project_page(sources, slug, now_ms):
+    path = 'project=' + urllib.parse.quote(slug, safe='') + '&limit=200'
+    history = sources.page(path + '&all=true')
+    live = []
+    for offset in range(0, 1000, 200):
+        page = sources.page(path + (f'&offset={offset}' if offset else ''))
+        live.extend(page)
+        if len(page) < 200:
+            break
+    known = {m['id'] for m in history}
+    hidden = btw_ids({m['id']: m for m in [*history, *live]})
+    always = {'active', 'running', 'pending', 'queued', 'awaiting_user', 'resuming', 'starting', 'waiting_background'}
+    recent = {'interrupted', 'failed', 'paused', 'blocked'}
+    def at(m):
+        return timestamp_ms(m.get('updated_at') or m.get('created_at')) or 0
+    wanted = [m for m in live if m['id'] not in known and m['id'] not in hidden and
+              (m['status'] in always or (m['status'] in recent and now_ms - at(m) <= 7 * 86400000))]
+    listed = known.union(m['id'] for m in wanted)
+    rows = {m['id']: m for m in history}
+    for m in wanted:
+        parent = m.get('parent_mission_id') or m.get('callback_parent_mission_id')
+        if not parent or m['status'] in always or parent in listed:
+            rows.setdefault(m['id'], m)
+    expanded = inbox_with_ancestors(sources, sorted(rows.values(), key=at, reverse=True))
+    hidden = btw_ids({m['id']: m for m in expanded})
+    return [m for m in expanded if m['id'] not in hidden and (m['id'] in rows or m.get('project') == slug)]
+
+
 def inbox_snapshot(c, projects, selected):
     state = c.get(INBOX_PATH)
+    if (state.get('preferences') or {}).get('inboxEnabled') is False:
+        return [('I', 'disabled')]
+    projects = [p for p in projects if p.get('status') not in ('archived', 'deleted')]
+    reader = InboxSources(c)
+    current = reader.page('limit=200')
+    completed = reader.page('status=completed&limit=100')
+    now_ms = int(time.time() * 1000)
+    sources = [inbox_project_page(reader, p['slug'], now_ms) for p in projects]
+    sources.extend([completed, inbox_with_ancestors(reader, current)])
+    hidden = btw_ids(reader.observed)
     by_id = {}
-    if (state.get('preferences') or {}).get('inboxEnabled') is not False:
-        offset = 0
-        while True:
-            page = c.get(f'/api/control/missions?all=true&limit={CURRENT_MISSION_LIMIT}&offset={offset}')
-            if not isinstance(page, list):
-                raise ValueError('invalid inbox page')
-            by_id.update((m['id'], m) for m in page)
-            if len(page) < CURRENT_MISSION_LIMIT:
-                break
-            offset += len(page)
+    for source in sources:
+        for m in source:
+            if m['id'] in hidden:
+                continue
+            previous = by_id.get(m['id'])
+            if previous is None or (timestamp_ms(m.get('updated_at') or m.get('created_at')) or 0) >= (
+                    timestamp_ms(previous.get('updated_at') or previous.get('created_at')) or 0):
+                by_id[m['id']] = m
     rows = inbox_rows(by_id.values(), state, projects, selected)
     # An off-page Inbox item carries the same summary as a sidebar mission.
     # It enters the sidebar only when its transcript is opened.

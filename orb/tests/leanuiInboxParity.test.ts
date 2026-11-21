@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Mission, ProjectSummary } from "../src/api";
-import { listUnreadInboxCandidates } from "../src/inboxUnread";
+import { clearConnection, setConnection, listProjects, listMissions, listCompletedMissions, listProjectMissions } from "../src/api";
+import { inboxMissionUnion, listUnreadInboxCandidates } from "../src/inboxUnread";
 import { applySharedInboxSeen } from "../src/missionUnread";
 
 const session = vi.hoisted(() => ({ user: "" }));
@@ -13,7 +14,7 @@ const time = "2026-11-01T00:00:00Z";
 const stamp = Date.parse(time);
 const mission = (id: string, fields: Partial<Mission> = {}): Mission =>
   ({ id, title: id, status: "completed", project: "live", created_at: time, ...fields } as Mission);
-const projects = [{ slug: "live" }] as ProjectSummary[];
+const projects = [{ slug: "live" }, { slug: "retired-project", status: "archived" }] as ProjectSummary[];
 const missions = [
   mission("early"),
   mission("tagged", { tags: ["archived"] }),
@@ -33,7 +34,8 @@ const missions = [
   mission("new-output", { last_output_at: "2026-11-02T00:00:00Z" }),
   mission("selected"),
   ...Array.from({ length: 390 }, (_, i) => mission("working-" + i, { status: "active" })),
-  mission("old-question", { status: "waiting_user" }),
+  mission("old-question", { status: "awaiting_user" }),
+  mission("old-waiting", { status: "waiting_user" }),
   mission("btw-child", { callback_parent_mission_id: "btw-root" }),
   mission("btw-root", { status: "acknowledged", tags: ["btw-parent:main"] }),
   mission("fork", { parent_mission_id: "btw-root", tags: ["fork-of:btw-root"] }),
@@ -41,7 +43,7 @@ const missions = [
   mission("retired", { superseded_by_mission_id: "early" }),
 ];
 
-// Use the actual paged transport entry point and reject every unexpected path.
+// Replay the exact GET responses requested by the GTK data sources in the native reader.
 const native = `
 import json, sys
 sys.path.insert(0, '../lean/OrbDesktop/OrbDesktop')
@@ -52,20 +54,54 @@ class Core:
         if path == live.INBOX_PATH:
             return f['state']
         prefix = '/api/control/missions?all=true&limit=200&offset='
-        assert path.startswith(prefix), path
-        start = int(path[len(prefix):])
-        return f['missions'][start:start + 200]
+        if path.startswith(prefix):  # history-free ancestor lookup on the identical fixture
+            start = int(path[len(prefix):])
+            return f['missions'][start:start+200]
+        return f['responses'][path]
 rows = live.inbox_snapshot(Core(), f['projects'], f['selected'])
 print(json.dumps([r[1] for r in rows if r[0] == 'U']))
 `;
 
+afterEach(() => { clearConnection(); vi.unstubAllGlobals(); });
+
+async function gtkSnapshot(user: string, input = missions) {
+  const responses: Record<string, unknown> = {};
+  setConnection("https://fixture.test", user);
+  vi.stubGlobal("fetch", async (raw: string, init?: RequestInit) => {
+    const url = new URL(raw);
+    const q = url.searchParams;
+    expect(init?.method ?? "GET").toBe("GET");
+    let result: unknown;
+    if (url.pathname === "/api/projects") result = { projects };
+    else if (url.pathname === "/api/control/missions") {
+      const offset = Number(q.get("offset"));
+      const rows = input.filter(m =>
+        (!q.has("project") || m.project === q.get("project")) &&
+        (q.has("status") ? m.status === q.get("status") : q.has("all") || m.status !== "acknowledged"));
+      result = rows.slice(offset, offset + Number(q.get("limit")));
+    } else {
+      expect(q.get("include_history")).toBe("false");
+      result = input.find(m => url.pathname === "/api/control/missions/" + m.id);
+      expect(result).toBeDefined();
+    }
+    responses[url.pathname + url.search] = result;
+    return Response.json(result);
+  });
+  const live = await listProjects(true);
+  const current = await listMissions(200);
+  const completed = await listCompletedMissions(100);
+  const byProject: Record<string, Mission[]> = {};
+  for (const p of live) byProject[p.slug] = await listProjectMissions(p.slug);
+  return { live, rows: inboxMissionUnion(byProject, completed!, current, () => false), responses };
+}
+
 describe("LeanUI and Solid Inbox candidate IDs", () => {
   for (const [user, includeAutonomous, expected] of [
-    ["Thomas", true, ["failed-child", "old-question", "new-output", "tagged", "typed-client",
-      "legacy-client", "origin-client", "revived-parent", "manual", "fork"]],
-    ["Ben", false, ["new-output", "early", "tagged", "typed-client", "legacy-client", "origin-client", "fork"]],
+    ["Thomas", true, ["failed-child", "old-question", "new-output", "tagged", "revived-parent",
+      "manual", "typed-client", "legacy-client", "origin-client"]],
+    ["Ben", false, ["new-output", "early", "tagged", "typed-client", "legacy-client", "origin-client"]],
   ] as const) {
-    it(user + " sees the same ordered IDs across all three summary pages", () => {
+    it(user + " sees the same ordered IDs on the GTK source projection", async () => {
       session.user = user;
       const state = {
         preferences: { includeAutonomous, aiSummary: false, model: "" },
@@ -75,13 +111,32 @@ describe("LeanUI and Solid Inbox candidate IDs", () => {
         ["seen:" + (user === "Thomas" ? "early" : "old-question")]: stamp,
       };
       applySharedInboxSeen(state);
-      const solid = listUnreadInboxCandidates(missions, projects, undefined, undefined, "selected", { includeAutonomous });
+      const gtk = await gtkSnapshot(user);
+      expect(gtk.rows.some(m => m.id === "old-waiting")).toBe(false);
+      expect(gtk.rows.some(m => m.id === "old-question")).toBe(true);
+      const solid = listUnreadInboxCandidates(gtk.rows, gtk.live, undefined, undefined, "selected", { includeAutonomous });
       const ids = solid.map(row => row.id);
       expect(ids).toEqual(expected);
       const output = execFileSync("python3", ["-I", "-c", native], {
-        input: JSON.stringify({ missions, projects, state, selected: "selected" }), encoding: "utf8",
+        input: JSON.stringify({ responses: gtk.responses, missions, projects, state, selected: "selected" }), encoding: "utf8",
       });
       expect(JSON.parse(output)).toEqual(ids);
     });
   }
+  it("excludes both unplaced candidates from a six-mission member account", async () => {
+    session.user = "member-six";
+    const input = [
+      mission("belongs"), mission("unplaced-1", { project: null }), mission("unplaced-2", { project: null }),
+      mission("running", { status: "active" }), mission("read"), mission("ack", { status: "acknowledged" }),
+    ];
+    const state = { "seen:read": stamp };
+    applySharedInboxSeen(state);
+    const gtk = await gtkSnapshot(session.user, input);
+    const ids = listUnreadInboxCandidates(gtk.rows, gtk.live).map(row => row.id);
+    expect(ids).toEqual(["belongs"]);
+    const output = execFileSync("python3", ["-I", "-c", native], {
+      input: JSON.stringify({ responses: gtk.responses, missions: input, projects, state, selected: "" }), encoding: "utf8",
+    });
+    expect(JSON.parse(output)).toEqual(ids);
+  });
 });

@@ -9,7 +9,7 @@ namespace OrbDesktop
 projection rather than passing credentials through the UI state.  `--headless`
 golden paths never call this module and remain deterministic fixtures. -/
 
-/-- Embedded connection-bound HTTP reader and writer. -/
+/-- Embed the connection-bound HTTP reader, including the GTK Inbox source projection. -/
 private def transport : String := include_str "live_transport.py"
 
 private def modelCatalogRules : String := include_str "../../../orb/src/modelSuccessors.json"

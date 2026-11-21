@@ -53,7 +53,7 @@ class Delivery(unittest.TestCase):
             def do_GET(self):
                 if self.path == live.INBOX_PATH:
                     self.reply(states[self.headers['Authorization'].split()[1]])
-                elif self.path.startswith('/api/control/missions?all=true&limit='):
+                elif self.path == '/api/control/missions?status=completed&limit=100':
                     self.reply([mission])
                 elif self.path == '/api/projects':
                     self.reply({'projects': []})
@@ -119,18 +119,18 @@ class Delivery(unittest.TestCase):
             def get(self, path):
                 paths.append(path)
                 if path == '/api/projects':
-                    return {'projects': []}
+                    return {'projects': [{'slug': 'live'}]}
                 if path == live.INBOX_PATH:
                     return {}
-                if path.endswith('offset=0'):
+                if path.endswith('project=live&limit=200'):
                     return [dict(id=str(i), status='completed') for i in range(200)]
                 if path.endswith('offset=200'):
                     raise TimeoutError()
                 return []
         c = Core()
-        self.assertEqual(live.roster_rows(c, include_archived=True), [('C', 'fixture')])
+        boot = live.roster_rows(c, include_archived=True)
         self.assertFalse(any(p == live.INBOX_PATH or 'offset=' in p for p in paths))
-        self.assertEqual(live.roster_rows(c, include_archived=True, inbox_for=''), [('C', 'fixture')])
+        self.assertEqual(live.roster_rows(c, include_archived=True, inbox_for=''), boot)
         self.assertTrue(paths[-1].endswith('offset=200'))
 
     def test_inbox_preferences_response_time_and_order(self):
