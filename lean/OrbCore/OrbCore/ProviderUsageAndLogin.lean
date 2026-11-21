@@ -298,6 +298,8 @@ def scanCliProxyAuthFiles : IO (Array CliAuthFileInfo) := do
                   prefixId := pfx
                   disabled := dis
                   mtimeSec := st.mtime
+                  nativeOnly := inferredType == "antigravity" &&
+                    ((AccountVpnSidecar.credentialModelExclusions? jv).map (·.contains "*")).getD true
                   fingerprint := hash raw
                   deviceToken := deviceTok
                 }
@@ -370,6 +372,7 @@ structure HydratedProvider where
   hasOAuth        : Bool
   oauthToken      : String
   oauthFile       : String
+  nativeOnly      : Bool := false
   /-- A credential matched to this account independently of legacy display fallbacks. -/
   boundOauthFile  : String := ""
   accountEmail    : String
@@ -503,6 +506,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
       hasOAuth := hasOAuth
       oauthToken := effOauthTok
       oauthFile := effOauthFile
+      nativeOnly := matchedAuth?.any (·.nativeOnly)
       boundOauthFile := (boundAuth?.map (·.fileName)).getD ""
       modelPrefix := (matchedAuth?.map uniquePrefix).getD ""
       accountEmail := effEmail
@@ -554,6 +558,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
         hasOAuth := hasOa
         oauthToken := (matchedAuth?.map (·.accessToken)).getD effLegTok
         oauthFile := (matchedAuth?.map (·.fileName)).getD refFile
+        nativeOnly := matchedAuth?.any (·.nativeOnly)
         boundOauthFile := (matchedAuth?.map (·.fileName)).getD ""
         modelPrefix := (matchedAuth?.map uniquePrefix).getD ""
         accountEmail := if !email.isEmpty then email else (matchedAuth?.map (·.email)).getD ""
@@ -586,6 +591,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
         hasOAuth := true
         oauthToken := af.accessToken
         oauthFile := af.fileName
+        nativeOnly := af.nativeOnly
         boundOauthFile := af.fileName
         modelPrefix := uniquePrefix af
         accountEmail := af.email
@@ -708,7 +714,7 @@ def renderHydratedProviderJv (hp : HydratedProvider) (userEnabled? : Option Bool
     ("uses_oauth", .bool metaInfo.usesOAuth),
     ("env_var", match metaInfo.envVar? with | some ev => .str ev | none => .null),
     ("account_email", if hp.accountEmail.isEmpty then .null else .str hp.accountEmail),
-    ("use_for_backends", .arr (hp.useForBackends.map JVal.str)),
+    ("use_for_backends", .arr ((if hp.nativeOnly then #["antigravity"] else hp.useForBackends).map JVal.str)),
     ("custom_models", .arr hp.customModels),
     ("priority", JVal.nat hp.priority),
     ("status", statusObj),
