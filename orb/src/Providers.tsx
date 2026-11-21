@@ -8,7 +8,6 @@ import {CloudProviders} from './CloudProviders';
 import { cloudAccounts } from "./cloudAgentApi";
 import { ProvidersLoadingCard } from "./ProvidersSkeleton";
 import {ProviderUsageChip, ProviderUsageMeter} from './ProviderUsageMeter';
-import { Dynamic } from "solid-js/web";
 import { quotaStatus, usageChips, codingPlanWindows, kimiWindows, codexWindowLabel, effectiveProviderStatus, hasProviderUsageDetails, sharedAnthropicOrganizations, subscriptionResetSummary, supportsSubscriptionReset, usageLimitStatus, usageWindows, verificationUrl } from "./providerUsage";
 import { Menu, MenuList, type MenuEntry } from "./Menu";
 import { ProviderLogo } from "./ProviderLogo";
@@ -1314,7 +1313,6 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
   };
   const email = () => a.account_email || p.usage?.account_email || a.name.match(/\(([^()]+@[^()]+)\)/)?.[1];
   const hasUsageDetails = () => hasProviderUsageDetails(p.usage, email());
-  const expandable = () => isAdminUser() || !!p.rank || resetSupported() || !!resetInfo() || status() === "out_of_credit" || status() === "auth_failed" || status() === "needs_verification" || status() === "disabled_by_provider" || a.provider_type === "antigravity" || (!!p.onEditKey && isKeyRow()) || (canReconnect() && needsAuth()) || mistralSubscription() || hasUsageDetails() || !!problem();
   const plan = () => a.provider_type === "antigravity" ? p.usage?.antigravity_plan || "Subscription account"
     : a.provider_type === "google" ? (a.has_api_key && !a.has_oauth ? "API key" : "Model routing")
     : p.usage?.codex_plan_type || p.usage?.xai_plan || p.usage?.kimi_plan || p.usage?.zai_plan ? `${p.usage!.codex_plan_type || p.usage!.xai_plan || p.usage!.kimi_plan || p.usage!.zai_plan}`
@@ -1344,7 +1342,7 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
       ...(authItems.length > 0 ? [{ kind: "sep" as const }] : []),
       ...rankItems,
       ...(rankItems.length > 0 ? [{ kind: "sep" as const }] : []),
-      { kind: "item", label: globallyDisabled() ? "Enable" : "Disable", icon: globallyDisabled() ? Ic.CheckIcon : Ic.BanIcon, onClick: () => p.onToggle(globallyDisabled()) },
+      ...(isAdminUser() ? [{ kind: "item" as const, label: globallyDisabled() ? "Enable" : "Disable", icon: globallyDisabled() ? Ic.CheckIcon : Ic.BanIcon, onClick: () => p.onToggle(globallyDisabled()) }] : []),
       ...(p.onToggleUserPref && currentUser()
         ? [{
             kind: "item" as const,
@@ -1363,7 +1361,7 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
       onDragLeave={() => setDropping(false)}
       onDrop={e => { setDropping(false); const from = e.dataTransfer?.getData(RANK_DRAG_TYPE); if (p.rank && from) { e.preventDefault(); if (Number(from) !== p.rank.index) p.rank.move(p.rank.index); } }}>
       <div class="p-account-header">
-      <Dynamic component={expandable() ? "button" : "div"} class={`s-row p-acc ${expandable() ? "p-acc-btn" : ""}`} aria-expanded={expandable() ? open() : undefined} onClick={expandable() ? () => setOpen(!open()) : undefined}>
+      <button class="s-row p-acc p-acc-btn" aria-expanded={open()} onClick={() => setOpen(!open())}>
         <ProviderLogo type={a.provider_type} name={a.name} />
         <div class="s-row-text">
           <div class="s-row-title">
@@ -1391,17 +1389,17 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
         <Show when={!open() && p.usage && !p.usage!.error}>
           <UsageSummary usage={p.usage!} />
         </Show>
-        <Show when={expandable()}><span class={`chev p-acc-chev ${open() ? "open" : ""}`} aria-hidden="true"><Ic.ChevronRight size={14} /></span></Show>
-      </Dynamic>
+        <span class={`chev p-acc-chev ${open() ? "open" : ""}`} aria-hidden="true"><Ic.ChevronRight size={14} /></span>
+      </button>
       <Show when={mistralSubscription() && !open() && p.usage?.mistral_usage_session !== "connected"}>
         <button class="s-btn quiet" aria-label="View Mistral monthly usage" onClick={() => void openExternalUrl("https://admin.mistral.ai/subscription")}>Monthly usage ↗</button>
       </Show>
       <button ref={el => { menuBtn = el; }} class="icon-btn p-account-menu" aria-label={`Actions for ${a.name}`} aria-haspopup="menu" aria-expanded={menu()} onClick={() => setMenu(m => !m)}><Ic.DotsIcon size={16} /></button>
       </div>
       <Show when={menu()}><Menu label="Actions" anchor={menuBtn} placement="bottom-end" width={196} class="popup-menu" onClose={() => setMenu(false)}><MenuList items={menuItems()} onPick={() => setMenu(false)} /></Menu></Show>
-      <Show when={open() && expandable()}>
+      <Show when={open()}>
         <div class="p-acc-body">
-          <Show when={isAdminUser()}><AccountVpnSettings account={a.id} /></Show>
+          <AccountVpnSettings account={a.id} />
           <Show when={p.rank}>{r => <RankControls rank={r()} name={email() ?? a.name} title={title()} />}</Show>
           <Show when={mistralSubscription()}>
             <MistralUsageConnect a={a} usage={p.usage} onUsage={p.onUsage} />

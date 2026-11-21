@@ -1721,6 +1721,79 @@ def run : IO Unit := do
         let (memberCode, _) ← putJson app memberJwt path "{}" now
         if anonymous != 401 || memberCode != 403 then
           failures := failures.push s!"VPN settings authority {path}: anonymous={anonymous}, member={memberCode}"
+      let ownerRow : AIProviderRecord := {
+        id := "vpn-owner-fixture"
+        name := "Owner fixture"
+        providerType := "openai"
+        apiKey := "fixture-only"
+      }
+      IO.ofExcept (← upsertAIProvider store ownerRow)
+      let ownerRoute := s!"/api/ai/providers/{ownerRow.id}/vpn"
+      let ownRoute ← getJson app memberJwt ownerRoute now
+      unless ownRoute.fieldBool? "can_configure" == some true do
+        failures := failures.push "A member can configure a shared provider"
+      let testPool ← Std.Mutex.new ({} : AccountVpnPool.PoolState)
+      let (memberCode, saved) ← putJson { app with vpnPool? := some testPool } memberJwt ownerRoute
+        "{\"mode\":\"vpn\",\"country\":\"NL\"}" now
+      let adminView ← getJson app jwt ownerRoute now
+      unless memberCode == 200 && saved.fieldStr? "country" == some "NL" &&
+          adminView.fieldStr? "country" == some "NL" do
+        failures := failures.push "An administrator must see the shared country saved by a member"
+      let configuredIdentities := fun (session : String) => do
+        let rows := (← getJson app session "/api/ai/providers" now).asArr?.getD #[]
+        return (rows.filter (·.fieldBool? "has_credentials" == some true)).map fun row =>
+          (row.fieldStr? "id", row.fieldStr? "provider_type", row.fieldBool? "enabled",
+           (row.fieldOrNull "status").fieldStr? "type")
+      unless (← configuredIdentities memberJwt) == (← configuredIdentities jwt) do
+        failures := failures.push "Both sessions list the same configured IDs, types, global state and credential status"
+      let listRow : String → IO JVal := fun session => do
+        let rows := (← getJson app session "/api/ai/providers" now).asArr?.getD #[]
+        pure ((rows.find? (·.fieldStr? "id" == some ownerRow.id)).getD .null)
+      let inChooser : String → IO Bool := fun session => do
+        let catalog ← getJson app session "/api/providers" now
+        pure (((catalog.fieldArr? "configured_ids").getD #[]).contains (.str ownerRow.id))
+      let (prefCode, _) ← putJson app memberJwt (s!"/api/ai/providers/{ownerRow.id}/preference")
+        "{\"enabled\":false}" now
+      unless prefCode == 200 && (← listRow memberJwt).fieldBool? "user_enabled" == some false &&
+          (← listRow jwt).fieldBool? "user_enabled" == some true &&
+          !(← inChooser memberJwt) && (← inChooser jwt) do
+        failures := failures.push "Personal preference persists on list reload and filters only the member's chooser"
+      IO.ofExcept (← upsertAIProvider store { ownerRow with enabled := false })
+      if (← upsertAIProvider store ownerRow (memberEdit := true)).isOk then
+        failures := failures.push "A stale member edit cannot restore the previous global state"
+      let disabledMember ← listRow memberJwt
+      let disabledAdmin ← listRow jwt
+      unless disabledMember.fieldStr? "id" == some ownerRow.id &&
+          disabledAdmin.fieldStr? "id" == some ownerRow.id &&
+          disabledMember.fieldBool? "enabled" == some false &&
+          disabledAdmin.fieldBool? "effective_enabled" == some false &&
+          (disabledMember.fieldOrNull "status").fieldStr? "type" == some "connected" &&
+          (disabledMember.field? "base_url").isNone &&
+          (← getJson app memberJwt ownerRoute now).fieldStr? "country" == some "NL" do
+        failures := failures.push "Both sessions retain the disabled configured account and its shared VPN country"
+      let legacyFile := s!"{root}/.sandboxed-sh/ai_providers.json"
+      IO.FS.rename legacyFile (legacyFile ++ ".saved")
+      try
+        let dbMember ← listRow memberJwt
+        let dbAdmin ← listRow jwt
+        unless dbMember.fieldStr? "id" == some ownerRow.id &&
+            dbMember.fieldBool? "user_enabled" == some false && dbAdmin.fieldBool? "user_enabled" == some true &&
+            dbMember.fieldBool? "globally_enabled" == some false && (dbMember.field? "base_url").isNone do
+          failures := failures.push "Database-only list retains disabled accounts with the same redaction and preferences"
+      finally
+        IO.FS.rename (legacyFile ++ ".saved") legacyFile
+      let (enableCode, _) ← putJson app memberJwt s!"/api/ai/providers/{ownerRow.id}" "{\"enabled\":true}" now
+      let pinned := renderCompact (.arr #[.obj #[("provider_id", .str "openai"),
+        ("account_id", .str ownerRow.id), ("model_id", .str "fixture-model")]])
+      unless enableCode == 403 && !(← inChooser jwt) &&
+          (parseChainTargetsJson pinned (← listAIProviders store) (← loadHydratedProviders store root)).isEmpty do
+        failures := failures.push "Global disable excludes pinned inference targets and chooser options"
+      IO.ofExcept (← upsertAIProvider store { ownerRow with enabled := false, apiKey := "", providerType := "custom" })
+      let (hiddenCode, _) ← putJson app memberJwt ownerRoute "{\"mode\":\"direct\"}" now
+      unless hiddenCode == 403 && (← listRow memberJwt) == .null &&
+          (← listRow jwt).fieldBool? "has_credentials" == some false do
+        failures := failures.push "Only the operator sees this unconfigured placeholder"
+      IO.ofExcept (← deleteAIProvider store ownerRow.id)
       let (missing, _) ← putJson app jwt accountRoute "{}" now
       if missing != 404 then failures := failures.push "VPN admin route must resolve the selected account"
       let settings ← getJson app jwt vpnSettings now

@@ -268,8 +268,8 @@ struct OrbProvidersSettings: View {
                             Text("This login is disabled in CLIProxyAPI. Re-enable the Core provider to restore it.")
                                 .font(.caption).foregroundStyle(.orange)
                         }
-                        if isAdmin { OrbAccountVpnSettings(client: client, account: provider["id"].text).id(provider["id"].text) }
                         let manages = Self.canManageProvider(provider, isAdmin: isAdmin)
+                        OrbAccountVpnSettings(client: client, account: provider["id"].text).id(provider["id"].text)
                         let unverified = detail["status"].text == "needs_verification"
                         if unverified && manages {
                             // Google refuses this login until its owner verifies it; the
@@ -297,10 +297,12 @@ struct OrbProvidersSettings: View {
                             }
                         }
                         let globallyDisabled = !Self.isGloballyEnabled(provider)
-                        Button(globallyDisabled ? "Enable" : "Disable") {
-                            Task { await toggleGlobal(provider) }
+                        if isAdmin {
+                            Button(globallyDisabled ? "Enable" : "Disable") {
+                                Task { await toggleGlobal(provider) }
+                            }
+                            .disabled(!ready || busy)
                         }
-                        .disabled(!ready || busy)
                         if OrbCore.shared.currentUser != nil {
                             let userSkipped = Self.isUserSkipped(provider)
                             Button(userSkipped ? "Use for my missions" : "Skip for my missions") {
