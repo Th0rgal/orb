@@ -113,6 +113,7 @@ for i in range(300):
             pointer = Pointer(graphical)
             stack.callback(pointer.close)
             click = pointer.click
+        stack.enter_context(process(['wtype', '-k', 'Shift_L', '-s', '120000'], graphical, tmp))
         if menu_client is not None:
             from linux_sidebar_menu import exercise
             return exercise(ROOT, tmp, api, graphical, click, process, wait, stack, menu_client)
@@ -122,7 +123,6 @@ for i in range(300):
             client.append('--leanui')
         desktop = stack.enter_context(process(client, graphical, ROOT))
         wait('native window', lambda: b'"orb-desktop"' in sway('-t', 'get_tree'), 300)
-        stack.enter_context(process(['wtype', '-k', 'Shift_L', '-s', '120000'], graphical, tmp))
         time.sleep(.5)
         def keys(*args):
             subprocess.run(['wtype', '-s', '200', *args], check=True, env=graphical)

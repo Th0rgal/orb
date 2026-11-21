@@ -210,3 +210,26 @@ it('normalizes Core-scoped OpenCode models and records settled local turn errors
   detail:'Model unavailable: builtin/fast',
  });
 });
+
+it.each([
+ ['project', () => listProjectMissions('test')],
+ ['roster', () => listMissions()],
+ ['conversation', () => getMission('local-id')],
+] as const)('cancels an outstanding %s journal read when switching sessions', async (_, read) => {
+ setConnection('http://offline.test', 'first');
+ const local = {id: 'local-id', project: 'test', status: 'active', local_sync_pending: true};
+ const invoke = vi.fn(async () => [local]);
+ (window as any).__TAURI_INTERNALS__ = {invoke};
+ let finish!: () => void;
+ const offline = new Promise<Response>((_, reject) => { finish = () => reject(new TypeError('offline')); });
+ const fetcher = vi.fn(() => offline);
+ vi.stubGlobal('fetch', fetcher);
+ const pending = read();
+ await vi.waitFor(() => {
+   expect(invoke).toHaveBeenCalledWith('local_origin_list', expect.anything());
+   expect(fetcher).toHaveBeenCalled();
+ });
+ setConnection('http://offline.test', 'second');
+ finish();
+ await expect(pending).rejects.toThrow('The backend changed');
+});

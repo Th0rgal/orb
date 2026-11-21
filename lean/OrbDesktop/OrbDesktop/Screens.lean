@@ -1062,6 +1062,52 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
 
   let rightColumn : WidgetNode :=
     match st.screen with
+    | .cloud => Id.run do
+      let w := min (pxToSub 608) (mainW - pxToSub 32)
+      let line := fun width title =>
+        screenTextLine theme width (pxToSub 36) (pxToSub 14) (pxToSub 24) pal.textPrimary title
+      let button := fun id width title => inventoryTarget theme hoverRow id width (pxToSub 36) (line width title)
+      let topic := if st.cloudMission.isEmpty then "connected accounts" else "conversation"
+      let heading := if st.cloudMission.isEmpty then "Connected accounts" else
+        ((st.missionCards.find? (·.missionId == st.cloudMission)).map (·.title)).getD "Conversation"
+      let toolbar := (if st.cloudMission.isEmpty then [] else [button 963 (w / 3) "Back"]) ++
+        (if st.cloudFailed || st.cloudLines.isSome then [button 960 (w / 3) (if st.cloudFailed then "Retry" else "Refresh")] else [])
+      let status := if st.cloudFailed then [line w ("Could not load " ++ topic ++ ".")]
+        else if st.cloudLines.isNone then [line w ("Loading " ++ topic ++ "…")]
+        else if st.cloudLines == some [] then [line w (if st.cloudMission.isEmpty then "No connected accounts" else "No turns yet")]
+        else []
+      let items := st.cloudItems
+      let rows := ((items.drop (4 * st.cloudPage)).take 4).mapIdx fun i (mission, title) =>
+        if mission.isEmpty then line w title else button (964 + i) w title
+      let create := st.cloudCanCreate
+      let picks := if create then Id.run do
+        let projects := st.cloudProjects
+        let profile := (st.cloudAccounts[st.cloudAccountIndex]?.map (·.2.2)).getD ""
+        let project := (st.cloudSelectedProject.map (·.title)).getD ""
+        let pick := fun id count caption => if count > 1 then button id (w / 2) (caption ++ " ›") else line (w / 2) caption
+        return [WidgetNode.box (BoxStyle.row 0) [pick 971 projects.length project, pick 970 st.cloudAccounts.length profile]]
+        else []
+      let editor := if create || st.cloudAllows "send" then
+        let placeholder := if create then "Describe a task for your cloud agent" else "Send follow-up"
+        let runs := buildComposerInlineRuns theme { st.cloudDraft with placeholder }
+        let innerW := w - pxToSub 32
+        let editorH := max (pxToSub (if create then 74 else 50)) (min (pxToSub 150) ((wrapInlineRuns innerW (pxToSub 20) runs).2.2 + pxToSub 20))
+        let field := WidgetNode.rrect
+          (BoxStyle.col 0 |>.withPadding (Edges.xy (pxToSub 16) (pxToSub 10)) |>.withFixedSize w editorH)
+          pal.elevatedSurface (CornerRadii.uniform (pxToSub 12)) (BorderStyle.uniform theme.borderWidth pal.border)
+          [WidgetNode.text (BoxStyle.row 0 |>.withFixedSize innerW (editorH - pxToSub 20)) (pxToSub 20) runs]
+        [inventoryTarget theme hoverRow 1 w editorH field] ++
+          (if st.cloudDraft.text.trimAscii.isEmpty || !st.cloudDraft.imePreeditText.isEmpty then [] else [button 968 (w / 3) (if create then "Create cloud agent" else "Send")])
+        else []
+      let actions := picks ++ editor ++ (if st.cloudAllows "cancel" then [button 969 (w / 3) "Stop"] else [])
+      let errors := if st.writeError.isEmpty then [] else [line w st.writeError]
+      let pager := (if st.cloudPage > 0 then [button 961 (w / 3) "Previous"] else []) ++
+        (if 4 * (st.cloudPage + 1) < items.length then [button 962 (w / 3) "Next"] else [])
+      let body := WidgetNode.box
+        (BoxStyle.col (pxToSub 3) |>.withAlign .center |>.withJustify .center |>.withFixedSize mainW (availH - headerH))
+        ([WidgetNode.box (BoxStyle.row 0) ([line (w / 3) heading] ++ toolbar)] ++ status ++ rows ++
+          [WidgetNode.box (BoxStyle.row 0) pager] ++ actions ++ errors)
+      return WidgetNode.box (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill) [headerNode, body]
     | .resources => Id.run do
       let w := min (pxToSub 640) (mainW - pxToSub 24)
       let line := fun (width : SubPx) (t : String) =>
