@@ -487,6 +487,7 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
 def shutdownRuntime {σ : Type} (rt : RuntimeState σ) : IO Unit := do
   if rt.wayland.xkbState != 0 then
     FFI.xkbFree rt.wayland.xkbState
+  for face in rt.atlas.fallbackFonts do Text.closeFont face
   Text.closeFont rt.primaryFont
   Text.closeFont rt.monoFont
   Text.closeFont rt.boldFont

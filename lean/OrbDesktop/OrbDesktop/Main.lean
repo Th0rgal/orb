@@ -96,17 +96,17 @@ def shapeDesktopRuns (ac : Text.GlyphAtlasCache) (font : Text.FontHandle)
     if cacheable then
       if let some hit := ac.resolved.find? (fun e => e.face == font.facePtr && e.scale == scale120 && e.text == text && e.style == style) then
         return (ac, [hit.run])
-    let (ac', shaped) ← Text.shapeTextCached ac font devSize64 text ""
+    let (ac', shaped) ← Text.shapeWithFallback ac font devSize64 text
     let mut curAc := ac'
     let mut glyphs : Array ShapedGlyph := #[]
     let scDen : Int := scaleDen
     let scNum : Int := if scale120 == 0 then 120 else scale120
     let mut penDev64 : Int := 0
-    for sg in shaped do
+    for (face, sg) in shaped do
       let glyphDev64 := penDev64 + sg.xOffset64
       let fraction := glyphDev64 % 64
       let subpx := (fraction.toNat / 16).toUInt32
-      let (ac', entry) ← Text.getOrRasterizeGlyph curAc font sg.glyphId devSize64 subpx
+      let (ac', entry) ← Text.getOrRasterizeGlyph curAc face sg.glyphId devSize64 subpx
       curAc := ac'
       let advSubNat : SubPx := ((max 0 sg.xAdvance64 * scDen) / scNum).toNat
       -- The glyph bitmap already contains its fractional horizontal phase.
@@ -339,16 +339,16 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
     if let .activate id := ev then
       if st.hasLiveConnection && st.missionMenu.isNone && st.writeRequest.isNone then
         if let some field := settingTrigger id then
-          let some (_, r) := rt.hitRegions.find? (·.1 == id) | return (st, none)
+          let some (_, r) := rt.hitRegions.find? (fun (entry : EntityId × Rect) => entry.1 == id) | return (st, none)
           return ({ st with missionMenu := some {
             mission := st.openMission.getD "", x := r.x, y := r.bottom, trigger := id,
             page := .picker field } }, some viewport)
-    let menuTarget := match ev with
+    let menuTarget : Option (EntityId × Int × Int) := match ev with
       | .pointerButton x y 0x111 true => (hitTest rt.hitRegions x y).map fun id => (id, x, y)
       | .key key mods .pressed =>
         if key == 0xff67 || (key == 0xffc7 && mods == 1) then do
           let id ← rt.focus.owner
-          let (_, bounds) ← rt.hitRegions.find? (·.1 == id)
+          let (_, bounds) ← rt.hitRegions.find? (fun (entry : EntityId × Rect) => entry.1 == id)
           pure (id, bounds.x, bounds.bottom)
         else none
       | _ => none
