@@ -200,7 +200,7 @@ separately authenticated workspace executor.
   · [Remote Agents](https://antigravity.google/docs/remote-agents/)
   · [SSH](https://antigravity.google/docs/ssh/)
 
-**Minimal upstream request.** Add a mandatory workspace-executor mode to
+**Minimal upstream request for native tool execution.** Add a mandatory workspace-executor mode to
 `agy acp`. Let the authenticated service bind a session to a caller-supplied
 executor for all workspace file access and process execution, including
 terminal commands, hooks, and stdio MCP. Unsupported local integrations must
@@ -257,6 +257,48 @@ trusting the checkout, its tools and its integrations as that owner. It is not
 a deployment for untrusted Orb mission workspaces.
 [Headless login](https://antigravity.google/docs/cli/headless/)
 · [CLI proxy settings](https://antigravity.google/docs/settings/)
+
+#### Restricted main agent and a separate workspace MCP
+
+Google also supports selecting a custom main agent whose Markdown frontmatter
+sets `tools: []`, `mainAgent: true` and `subagent: false`. We selected this
+agent using `--agent orb-workspace`, gave it a private empty session directory
+and configured a single trusted MCP transport. The account process never
+loads workspace customizations. The real checkout belongs to another UID.
+Orb's existing `workspace-mcp` runs as that workspace UID and accepts stdio
+from the supervisor's private Unix socket. The profile-side stdio adapter only
+relays bytes. [Custom agent tool selection](https://antigravity.google/docs/subagents/)
+
+The Linux arm64 agy 1.5.14 fixture contacted only a loopback synthetic Gemini
+model endpoint. The CLI exposed MCP call and resource tools plus
+`manage_task`. A write followed by a resume changed the ledger under the
+workspace UID for each of the Carbon and Neon model identifiers. The two
+principals could not read each other's directory. When the socket disappeared,
+the ledger and local session directory remained unchanged. The CLI could
+still report a successful conversational turn. A deployment must detect
+executor loss independently of the final CLI status, enforce the grant
+lifetime, and bind resume to the same account, workspace and conversation.
+The fixture does not use a Google subscription or verify Internet egress.
+
+To replay on a Linux host with subordinate user and group IDs, Python 3,
+`socat`, `ip`, `agy` and a native Orb `workspace-mcp` binary:
+
+```sh
+unshare --user --map-root-user --map-auto --net sh -ec '
+  ip link set lo up
+  for model in gemini-4-carbon-high gemini-4-neon-high; do
+    python3 scripts/test_antigravity_workspace_executor.py \
+      --agy "$(command -v agy)" --workspace-mcp "$1" --model "$model"
+  done
+' sh /absolute/path/to/workspace-mcp
+```
+
+This qualifies file operations in a synthetic restricted-agent configuration.
+The workspace MCP currently exposes eight tools including file read and write,
+with no command execution. Its working directory is a path-resolution
+default. Production needs an OS-confined workspace process with only the
+job's filesystem available. Each concurrent account job also needs private
+session state, trusted settings and its own authenticated workspace channel.
 
 #### Whole-process account egress fixture
 
