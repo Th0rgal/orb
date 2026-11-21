@@ -59,6 +59,7 @@ private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale
     { widgetId := 102, rowId := "nav:inbox", kind := "nav", title := "Inbox", shortcut := "⌘I" },
     { widgetId := 112, rowId := "nav:machines", kind := "nav", title := "Machines", shortcut := "⌘3" },
     { widgetId := 113, rowId := "nav:inference", kind := "nav", title := "Inference", shortcut := "⌘4" },
+    { widgetId := 114, rowId := "nav:resources", kind := "nav", title := "Resources", shortcut := "⌘6" },
     { widgetId := 109, rowId := "section:missions", kind := "section", title := "Missions" }] ++ missionRows ++
     [{ widgetId := 108, rowId := "section:projects", kind := "section", title := "Projects" }] ++ projects
   return { DesktopState.liveUnavailable isDark scale120 with
@@ -78,6 +79,7 @@ private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale
 
 private inductive ReadKind where
   | roster | recover | catalog (revision : Nat) | providers
+  | resources (range : String)
   | nativeModels (machine : String)
   | accountRoutes (account provider action value : String)
   | directories (machine path : String)
@@ -98,6 +100,7 @@ private def startLiveRead (binding : String) (kind : ReadKind) (notify : IO Unit
     | .accountRoutes account provider action value => #["-I", "-c", transport ++ "\naccount_routes(*sys.argv[1:])", binding, account, provider, action, value]
     | .directories machine path => #["-I", "-c", transport ++ "\nlist_directories(*sys.argv[1:])", binding, machine, path]
     | .launchMachines admin harness => #["-I", "-c", transport ++ "\nlaunch_machines(*sys.argv[1:])", binding, if admin then "admin" else "member", harness]
+    | .resources range => #["-I", "-c", transport ++ "\nresource_inventory(*sys.argv[1:])", binding, range]
     | .providers => #["-I", "-c", transport ++ "\nprovider_inventory(sys.argv[1])", binding]
     | .catalog _ => #["-I", "-c", transport ++ "\ncatalog(sys.argv[1], json.loads(sys.argv[2]))", binding, modelCatalogRules]
   let child ← IO.Process.spawn { cmd := "python3", args, stdout := .piped, stderr := .null }
@@ -130,6 +133,7 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
             (!st.draftSettings.machine.isEmpty || st.fleetMachines.any (·.machineId == "core")) then
           let machine := if st.draftSettings.machine.isEmpty then "core" else st.draftSettings.machine
           some (.directories machine ((st.missionMenu.map (·.browsePath)).getD ""))
+        else if st.screen == .resources && st.resourceRows.isNone && !st.resourceFailed then some (.resources st.resourceRange)
         else if st.screen == .inference && st.providers.isNone && !st.providerReadFailed then some .providers
         else if let some page := st.accountRoutePage then
           if st.screen == .inference && !page.failed && (page.options.isNone || page.pending.isSome) then
@@ -157,6 +161,12 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
       if source.binding.isEmpty then
         if let some ready := liveStateFromProjection lines isDark st.scale120 then return some ready
         return if st.initialRosterPending then some { st with initialRosterPending := false } else none
+      if let .resources _ := source.kind then
+        if lines.head? != some "resources" then return some { st with resourceFailed := true }
+        let rows := lines.filterMap fun line => match splitTab line with
+          | ["R", mission, title, usage] => some (⟨mission, title, usage⟩ : ResourceRow)
+          | _ => none
+        return some { st with resourceRows := some rows }
       if let .nativeModels machine := source.kind then
         let ok := lines.head? == some "native-models"
         let menu := st.missionMenu.map fun m => { m with nativeCatalogResult := some ok }

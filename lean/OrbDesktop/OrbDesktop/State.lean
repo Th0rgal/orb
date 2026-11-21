@@ -35,6 +35,7 @@ inductive ScreenId where
   | missionTranscript   -- `03_mission_transcript` (`/?screen=mission&id=m-active`)
   | missionSplitDiff    -- `04_mission_split_diff` (`/?screen=mission&id=m-diff&mode=split`)
   | machinesFleet       -- `05_machines_fleet` (`/?screen=machines`)
+  | resources
   | inbox               -- authenticated unread responses
   | inference           -- authenticated provider accounts
   | settingsGeneral     -- `06_settings_general` (`/?screen=settings&tab=general`)
@@ -66,6 +67,7 @@ def fileStem : ScreenId → String
   | .missionSplitDiff   => "04_mission_split_diff"
   | .machinesFleet      => "05_machines_fleet"
   | .inbox              => "live-inbox"
+  | .resources          => "resources"
   | .inference          => "inference"
   | .settingsGeneral    => "06_settings_general"
   | .searchDialog       => "07_search_dialog"
@@ -80,6 +82,7 @@ def w0Alias : ScreenId → String
   | .missionSplitDiff   => "diff"
   | .machinesFleet      => "streaming"
   | .inbox              => "live-inbox"
+  | .resources          => "resources"
   | .inference          => "providers"
   | .settingsGeneral    => "settings"
   | .searchDialog       => "search"
@@ -94,6 +97,7 @@ def routeQuery : ScreenId → String
   | .missionSplitDiff   => "/?screen=mission&id=m-diff&mode=split"
   | .machinesFleet      => "/?screen=machines"
   | .inbox              => "/?screen=inbox"
+  | .resources          => "/?screen=resources"
   | .inference          => "/?screen=inference"
   | .settingsGeneral    => "/?screen=settings&tab=general"
   | .searchDialog       => "/?screen=control&modal=search"
@@ -108,6 +112,7 @@ def headerTitle : ScreenId → String
   | .missionSplitDiff   => "Long mission"
   | .machinesFleet      => "Machines"
   | .inbox              => "Inbox"
+  | .resources          => "Resources"
   | .inference          => "Inference"
   | .settingsGeneral    => "Settings"
   | .searchDialog       => "New Agent"
@@ -117,6 +122,7 @@ def headerTitle : ScreenId → String
 /-- Parse a screen identifier or route query into a `ScreenId`. -/
 def parse? (s : String) : Option ScreenId :=
   match s with
+  | "resources" | "/?screen=resources" => some .resources
   | "01_control_empty"       | "control_empty"       | "inbox"         | "/?screen=control" => some .controlEmpty
   | "02_control_populated"   | "control_populated"   | "approvals"     | "/?screen=control&fixture=populated" => some .controlPopulated
   | "03_mission_transcript"  | "mission_transcript"  | "transcript"    | "/?screen=mission&id=m-active" => some .missionTranscript
@@ -329,6 +335,14 @@ structure AccountRoutePage where
   failed : Bool := false
   deriving BEq, Repr, Inhabited
 
+def resourceRanges := ["30m", "1h", "6h", "24h", "7d"]
+
+structure ResourceRow where
+  mission : String
+  title : String
+  usage : String
+  deriving BEq, Repr, Inhabited
+
 structure InboxItem where
   mission : String
   stamp : Nat
@@ -408,6 +422,10 @@ structure DesktopState where
   syncCursor : SyncCursorState := {}
   badgePhase : Nat := 0
   sidebarRows : List ChromeSidebarRow := []
+  resourceRows : Option (List ResourceRow) := none
+  resourceFailed : Bool := false
+  resourcePage : Nat := 0
+  resourceRange : String := "6h"
   inboxItems : List InboxItem := []
   inboxAvailable : Bool := false
   inboxEnabled : Bool := true
@@ -832,7 +850,8 @@ def DesktopState.sidebarHoverRow (st : DesktopState) (hit : Option WidgetId) : O
 
 def DesktopState.hoverTarget (st : DesktopState) (hit : Option WidgetId) : Option WidgetId := do
   let id ← hit
-  if st.screen == .inference && id >= providersBackId then some id else st.sidebarHoverRow hit
+  if st.screen == .resources && id >= 945 && id < 960 then some id
+  else if st.screen == .inference && id >= providersBackId then some id else st.sidebarHoverRow hit
 
 def DesktopState.sidebarHoverDamage (st : DesktopState) (regions : List (WidgetId × Rect)) (scale : Nat)
     (previous next : Option WidgetId) : Damage := Id.run do
@@ -1074,6 +1093,9 @@ def desktopFocusChange (before after : DesktopState) (ev : Event) : Option Nat :
     | none, some _ => some providersBackId
     | some page, none => ((after.providers.getD []).findIdx? (·.id == page.account.id)).map providerSettingsId
     | _, _ => none
+  else if after.screen == .resources && before.screen != .resources then some 114
+  else if after.screen == .resources && after.resourceRows.isSome && before.resourcePage != after.resourcePage then
+    some (if before.resourcePage < after.resourcePage then 947 else 946)
   else if after.screen == .inbox && before.screen != .inbox then some (if after.inboxItems.isEmpty then 102 else 940)
   else if after.hasLiveConnection && after.missionMenu.isNone && after.screen == .controlEmpty then
     let shortcut := match ev with
@@ -1169,18 +1191,20 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
         -- XKB reports modifiers even when the key was held before this window gained focus.
         if mods &&& 0x0a == 0 then 0
         else if key == 0x69 || key == 0x49 then 102
+        else if key == 0x36 then 114
         else if key == 0x34 then 113
         else if key == 0x33 then 112
         else if key == 0x6e || key == 0x4e then 101 else 0
       | _ => 0
     if navId == 102 && !st.inboxEnabled then return (st, none)
-    if [101, 102, 112, 113].contains navId then
-      let screen := if navId == 102 then ScreenId.inbox else if navId == 113 then .inference else if navId == 112 then .machinesFleet else .controlEmpty
+    if [101, 102, 112, 113, 114].contains navId then
+      let screen := if navId == 114 then ScreenId.resources else if navId == 102 then .inbox else if navId == 113 then .inference else if navId == 112 then .machinesFleet else .controlEmpty
       let next := resetSelection { st with screen, fleetTopSub := 0, writeError := "", accountRoutePage := none } none
       -- These pages share the New Agent draft. A mission follow-up belongs only to its transcript.
       let next := if st.openMission.isNone then
           { next with composer := { st.composer with imePreeditText := "" } }
         else { next with draftProject := "" }
+      let next := if navId == 114 then { next with resourceRows := none, resourceFailed := false, resourcePage := 0 } else next
       let next := if navId == 113 then { next with providers := none, providerReadFailed := false } else next
       return ({ next with sidebarRows := next.sidebarRows.map fun row => { row with selected := row.widgetId == navId } }, some viewport)
     if st.screen == .inference then
@@ -1198,6 +1222,22 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       else if navId >= providerSettingsId 0 then
         if let some account := (st.providers.getD [])[navId - providerSettingsId 0]? then
           return ({ st with accountRoutePage := some { account, previousTop := st.fleetTopSub }, fleetTopSub := 0, writeError := "" }, some viewport)
+    if st.screen == .resources then
+      if navId == 945 then
+        return ({ st with resourceRows := none, resourceFailed := false, resourcePage := 0 }, some viewport)
+      if navId >= 955 && navId < 960 then
+        let range := resourceRanges.getD (navId - 955) "6h"
+        return ({ st with resourceRange := range, resourceRows := none, resourceFailed := false, resourcePage := 0 }, some viewport)
+      let rows := st.resourceRows.getD []
+      if navId == 946 || (ev matches .key 0xff55 0 .pressed) then
+        return ({ st with resourcePage := st.resourcePage - 1 }, some viewport)
+      if navId == 947 || (ev matches .key 0xff56 0 .pressed) then
+        return ({ st with resourcePage := min ((rows.length - 1) / 4) (st.resourcePage + 1) }, some viewport)
+      if navId >= 950 && navId < 954 then
+        if let some row := rows[4 * st.resourcePage + navId - 950]? then
+          if let some card := st.missionCards.find? (fun c => !row.mission.isEmpty && c.missionId == row.mission) then
+            return (resetSelection { st with screen := .missionTranscript } (some card), some viewport)
+      if ev matches .composerReturn .. then return (st, none)
     if st.screen == .inbox then
       let index := min st.inboxIndex (st.inboxItems.length - 1)
       if navId == 942 || (ev matches .key 0xff52 _ .pressed) then

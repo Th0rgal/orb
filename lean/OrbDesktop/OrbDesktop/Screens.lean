@@ -1062,6 +1062,28 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
 
   let rightColumn : WidgetNode :=
     match st.screen with
+    | .resources => Id.run do
+      let w := min (pxToSub 640) (mainW - pxToSub 24)
+      let line := fun (width : SubPx) (t : String) =>
+        screenTextLine theme width (pxToSub 32) (pxToSub 14) (pxToSub 24) pal.textPrimary t
+      let button := fun id width title =>
+        inventoryTarget theme hoverRow id width (pxToSub 32) (line width title)
+      let ranges := resourceRanges.mapIdx fun i range =>
+        button (955 + i) (w / 7) (if st.resourceRange == range then "✓ " ++ range else range)
+      let toolbar := WidgetNode.box (BoxStyle.row 0) (ranges ++ [button 945 (2 * w / 7) "Refresh"])
+      let rows := st.resourceRows.getD []
+      let controls := WidgetNode.box (BoxStyle.row (pxToSub 6))
+        [button 946 (w / 3) "Previous", line (w / 4) s!"{st.resourcePage + 1} / {(rows.length + 3) / 4}",
+         button 947 (w / 3) "Next"]
+      let items := ((rows.drop (4 * st.resourcePage)).take 4).mapIdx fun i r =>
+        let canOpen := !r.mission.isEmpty && st.missionCards.any (·.missionId == r.mission)
+        let item := buildMachineRow theme w (pxToSub 60) r.title r.usage (if canOpen then "Open ›" else "") true false
+        if canOpen then inventoryTarget theme hoverRow (950 + i) w (pxToSub 60) item else item
+      let content := if st.resourceFailed then [line w "Could not load resources. Refresh to retry."]
+        else if st.resourceRows.isNone then [line w "Loading resources…"]
+        else if rows.isEmpty then [line w s!"No resource usage · {st.resourceRange}"]
+        else items ++ (if rows.length > 4 then [controls] else [])
+      return WidgetNode.box (BoxStyle.col 0 |>.withAlign .center |>.withFixedSize mainW availH) (headerNode :: toolbar :: content)
     | .inbox => Id.run do
       let line := fun (w : SubPx) (text : String) => screenTextLine theme w (pxToSub 32) (pxToSub 14) (pxToSub 24) pal.textPrimary text
       let button := fun (id : Nat) (width : SubPx) (title : String) =>
