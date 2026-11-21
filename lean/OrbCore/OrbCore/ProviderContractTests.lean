@@ -1636,6 +1636,79 @@ private def r21aAdapterReplays (store : CoreStore) (root : String) : IO Unit := 
   IO.FS.removeFile kimiFile
   IO.FS.removeFile museFile
 
+private def startNativeFixtureJob (store : CoreStore) (mid : String) : IO String := do
+  OrbCore.RemoteFleetAndRelay.ensureDurableJobsTable store
+  let job ← newUuidV4
+  discard <| IO.ofExcept (← execParamQuery store.missionsDb
+    ("INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,payload_json,created_at,updated_at) " ++
+     "VALUES(?1,?2,'fixture','running','{}','fixture','fixture');") #[job, mid])
+  return job
+
+private def nativeGrantContract (store : CoreStore) : IO Unit := do
+  let job ← startNativeFixtureJob store "mission"
+  let grant ← IO.ofExcept (← mintNativeAntigravityToken store "mission" "member" job "a/b" "carbon" 100)
+  let expected : NativeAntigravityGrant := ⟨"mission", "member", "a/b", "carbon"⟩
+  unless (← resolveNativeAntigravityToken? store grant 99) == some expected do
+    throw (IO.userError "Native grant lost its bound account or model")
+  let generic ← IO.ofExcept (← mintMissionProxyToken store "mission" "member" 100)
+  if (← resolveNativeAntigravityToken? store generic 99).isSome ||
+      (← resolveMissionProxyToken? store grant 99).isSome ||
+      (← resolveNativeAntigravityToken? store (grant ++ "30") 99).isSome ||
+      (← resolveNativeAntigravityToken? store grant 100).isSome then
+    throw (IO.userError "Native grant scope, integrity, or expiry failed")
+  revokeSingleMissionProxyToken store grant
+  if (← resolveNativeAntigravityToken? store grant 99).isSome ||
+      (← resolveMissionProxyToken? store generic 99).isNone then
+    throw (IO.userError "Native grant revocation affected the wrong bearer")
+  let moved ← mintNativeAntigravityToken store "mission" "member" job "other" "carbon" 200
+  unless (moved matches .error "antigravity_continuity_required") do
+    throw (IO.userError "Resuming a native conversation switched its account")
+  revokeMissionProxyTokensForMission store "mission"
+
+private def nativeGatewayContract (app : CoreAppState) (owner root : String) (now : UInt64) : IO Unit := do
+  let file := s!"{root}/auth-empty/antigravity-gateway.json"
+  IO.FS.writeFile file (renderCompact (.obj #[("type", .str "antigravity"), ("access_token", .str "fixture-vendor")]))
+  try
+    let some account := (← loadHydratedProviders app.store root).find? (·.boundOauthFile == "antigravity-gateway.json")
+      | throw (IO.userError "Gateway fixture account missing")
+    let mission : MissionRecord := {
+      id := ← newUuidV4, title := "Gateway fixture", backend := "antigravity", status := "active"
+      ownerUserId := owner, modelOverride := "gemini-4-carbon", workingDirectory := root
+      createdAt := "2026-01-01T00:00:00Z", updatedAt := "2026-01-01T00:00:00Z" }
+    IO.ofExcept (← insertNewMission app.store mission)
+    let job ← startNativeFixtureJob app.store mission.id
+    let native ← IO.ofExcept (← mintNativeAntigravityToken app.store mission.id owner job account.id "gemini-4-carbon" (now + 60))
+    let generic ← IO.ofExcept (← mintMissionProxyToken app.store mission.id owner (now + 60))
+    let attempts ← IO.mkRef 0
+    let hub ← newProviderRuntimeHub
+    let closed := { hub with
+      resolveTransport? := some fun _ _ => do
+        attempts.modify (· + 1)
+        return .error "fixture_offline" }
+    let app := { app with providerHub? := some closed }
+    let call := fun token rpc body => postJson app token ("/api/native/antigravity/v1internal:" ++ rpc) body now
+    let body := renderCompact (.obj #[("model", .str "gemini-4-carbon")])
+    unless (← call generic "streamGenerateContent" body).1 == 401 &&
+        (← call native "streamGenerateContent" "{}").1 == 400 &&
+        (← call native "streamGenerateContent" "{\"model\":\"other\"}").1 == 403 &&
+        (← call native "writeTrajectoryAcls" "{}").1 == 403 && (← attempts.get) == 0 do
+      throw (IO.userError "Gateway accepted the wrong credential, model, or account operation")
+    unless (← call native "streamGenerateContent" body).1 == 503 && (← attempts.get) == 1 do
+      throw (IO.userError "Gateway did not surface an unavailable account route")
+    unless (← call native "fetchUserInfo" "{}").1 == 503 && (← attempts.get) == 2 do
+      throw (IO.userError "Shared account eligibility bypassed the account route")
+    IO.ofExcept (← setUserProviderPref app.store owner account.id false "fixture")
+    unless (← call native "streamGenerateContent" body).1 == 403 && (← attempts.get) == 2 do
+      throw (IO.userError "An opted-out account still attempted an upstream call")
+    discard <| IO.ofExcept (← execParamQuery app.store.missionsDb
+      "UPDATE remote_node_jobs SET state='succeeded' WHERE job_id=?1;" #[job])
+    unless (← call native "fetchAdminControls" "{}").1 == 401 do
+      throw (IO.userError "A finished job retained access after a poller restart")
+    revokeMissionProxyTokensForMission app.store mission.id
+    unless (← call native "fetchAdminControls" "{}").1 == 401 do
+      throw (IO.userError "Gateway retained a revoked mission")
+  finally IO.FS.removeFile file
+
 /-- A member catalog is discovered by the native CLI using a private account profile.
     Use a fake executable to check the effective HOME and egress without a vendor call. -/
 private def memberNativeCatalog (store : CoreStore) (root : String) : IO Unit := do
@@ -1702,6 +1775,7 @@ def run : IO Unit := do
     let .ok store ← openCoreStore s!"{root}/.sandboxed-sh"
       | throw (IO.userError "provider contract store open failed")
     try
+      nativeGrantContract store
       memberNativeCatalog store root
       r21aGoogleAcquisition
       r21aAdapterReplays store root
@@ -1734,6 +1808,7 @@ def run : IO Unit := do
       let .ok member ← createUserRecord store "vpn-settings-member" "vpn-member-fixture-password" "member"
           none none "2026-11-16T00:00:00Z"
         | throw (IO.userError "VPN settings member creation failed")
+      nativeGatewayContract app member.id root now
       let memberJwt := mintSessionTokenV2 cfg.jwtSecret member.id member.role member.sessionEpoch (now + 3600)
       let a : HydratedProvider := { (default : HydratedProvider) with
         id := "fixture-a"

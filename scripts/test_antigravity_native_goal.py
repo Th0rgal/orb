@@ -50,11 +50,10 @@ def run(model, consumer=False):
         settings.parent.mkdir(parents=True)
         provider_settings = {} if consumer else {"modelProvider": "gemini"}
         settings.write_text(json.dumps(provider_settings))
+        launch = [binary]
         if consumer:
-            profile = settings.with_name("antigravity-oauth-token")
-            profile.write_text(json.dumps({"auth_method": "consumer", "token": {
-                "access_token": "fixture-mission", "token_type": "Bearer", "expiry": "2030-01-01T00:00:00Z"}}))
-            profile.chmod(0o600)
+            private_launch = Path(__file__).resolve().parents[1] / "lean/OrbCore/OrbCore/antigravity_native_launch.py"
+            launch = [sys.executable, "-I", str(private_launch), binary]
         receipt = root / "fleet-receipt"
         mcp = root / ".agents/mcp_config.json"
         mcp.parent.mkdir()
@@ -82,7 +81,7 @@ def run(model, consumer=False):
                     raw = gzip.decompress(raw)
                 body = json.loads(raw or b"{}")
                 if consumer:
-                    if self.headers.get("Authorization") != "Bearer fixture-mission":
+                    if self.headers.get("Authorization") != "Bearer orb-agy-v1_fixture":
                         self.send_error(401)
                         return
                     if ":streamGenerateContent" not in self.path:
@@ -139,14 +138,15 @@ def run(model, consumer=False):
             endpoint = f"http://127.0.0.1:{server.server_port}"
             env = {"PATH": os.environ["PATH"], "HOME": directory, "TERM": "dumb"}
             if consumer:
-                env.update(CLOUD_CODE_URL=endpoint, HTTPS_PROXY="http://127.0.0.1:1",
+                env.update(CLOUD_CODE_URL=endpoint + "/api/native/antigravity", ORB_NATIVE_ANTIGRAVITY_TOKEN="orb-agy-v1_fixture",
+                           ORB_NATIVE_ANTIGRAVITY_HOME=directory, HTTPS_PROXY="http://127.0.0.1:1",
                            HTTP_PROXY="http://127.0.0.1:1", NO_PROXY="127.0.0.1")
             else:
                 env.update(GEMINI_API_KEY="local-fixture", GOOGLE_GEMINI_BASE_URL=endpoint)
 
             def turn(*options):
                 model_flags = ["--model", model] if model else []
-                proc = subprocess.run([binary, "--settings", goal_settings.read_text(), *model_flags, "--mode", "accept-edits", "--output-format", "stream-json",
+                proc = subprocess.run([*launch, "--settings", goal_settings.read_text(), *model_flags, "--mode", "accept-edits", "--output-format", "stream-json",
                                        *options, "--print=Perform the next fixture step"], cwd=root, env=env,
                                       capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=40)
                 assert proc.returncode == 0, f"agy exited with status {proc.returncode}"
@@ -173,7 +173,7 @@ def run(model, consumer=False):
                 assert len(requests) == 4
                 if model:
                     upstream = "gemini-4-carbon" if model == "gemini-4-carbon-high" else model
-                    expected_path = "/v1internal:streamGenerateContent" if consumer else f"/v1beta/models/{upstream}:streamGenerateContent"
+                    expected_path = "/api/native/antigravity/v1internal:streamGenerateContent" if consumer else f"/v1beta/models/{upstream}:streamGenerateContent"
                     assert requests == [expected_path] * 4, requests
 
                 # A user policy still wins over the mission-scoped approval.

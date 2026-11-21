@@ -642,8 +642,8 @@ private def probeNativeAccount (hp : HydratedProvider) (resolve : ResolveTranspo
 
 /-- The admin CLI profile has its own catalog. Members see positively discovered
     models of enabled, unambiguously bound accounts they have opted into. -/
-def memberAntigravityModels (hub : ProviderRuntimeHub) (store : CoreStore) (workingDir userId : String)
-    (probe : Bool) : IO (Array (String × String)) := do
+def nativeAntigravityAccounts (hub : ProviderRuntimeHub) (store : CoreStore) (workingDir userId : String)
+    (probe : Bool) : IO (Array (String × Array (String × String))) := do
   if userId.isEmpty then return #[]
   let accounts ← loadHydratedProviders store workingDir
   let prefs ← getUserProviderPrefs store userId
@@ -672,7 +672,7 @@ def memberAntigravityModels (hub : ProviderRuntimeHub) (store : CoreStore) (work
       set { state with memberAgyCatalogs := (fresh.filter (fun (row : NativeCatalogRead) => row.account != hp.id)).push entry }
       return some entry
     if let some entry := read? then reads := reads.push entry
-  let mut models : Array (String × String) := #[]
+  let mut catalogs := #[]
   for entry in reads do
     if !probe && !(← IO.hasFinished entry.result) then continue
     let .ok rows ← IO.wait entry.result |
@@ -682,10 +682,17 @@ def memberAntigravityModels (hub : ProviderRuntimeHub) (store : CoreStore) (work
           !(r.account == entry.account && r.started == entry.started &&
             r.routeRevision == entry.routeRevision && r.credentialHash == entry.credentialHash) }
       continue
+    catalogs := catalogs.push (entry.account, rows)
+  if probe && catalogs.isEmpty && failed then
+    throw (IO.userError "Native Antigravity model discovery temporarily unavailable")
+  return catalogs
+
+def memberAntigravityModels (hub : ProviderRuntimeHub) (store : CoreStore) (workingDir userId : String)
+    (probe : Bool) : IO (Array (String × String)) := do
+  let mut models : Array (String × String) := #[]
+  for (_, rows) in ← nativeAntigravityAccounts hub store workingDir userId probe do
     for row in rows do
       unless models.any (fun m => m.1 == row.1) do models := models.push row
-  if probe && models.isEmpty && failed then
-    throw (IO.userError "Native Antigravity model discovery temporarily unavailable")
   return models
 
 def memberProviderDisplayName (hps : Array HydratedProvider) (hp : HydratedProvider) : String := Id.run do

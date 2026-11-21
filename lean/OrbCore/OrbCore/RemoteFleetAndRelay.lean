@@ -1557,7 +1557,7 @@ def deleteManagedSnapshot (mc : ManagedComputeStore) (dataRoot snapId : String) 
 
 /-! ## Durable Node Job Ledger Queries (`/api/durable-jobs*`) -/
 
-private def ensureDurableJobsTable (store : CoreStore) : IO Unit := do
+def ensureDurableJobsTable (store : CoreStore) : IO Unit := do
   discard <| execParamQuery store.missionsDb
     "CREATE TABLE IF NOT EXISTS remote_node_jobs (job_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL DEFAULT '', node_id TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'queued', payload_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" #[]
 
