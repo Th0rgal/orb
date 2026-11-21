@@ -42,6 +42,8 @@ class CloudDestination(unittest.TestCase):
                     self.reply(dict(mission_id='proof', selection=dict(provider='cursor_cloud', account='cursor'),
                                     turns=[dict(prompt='Prove one plus one', result='Two.', external_id='turn',
                                                 phase='reconnect_required' if stopped else 'running')]))
+                elif self.path == '/api/auth/me':
+                    self.reply({'user': {'username': 'fixture'}})
                 elif self.path == '/api/projects':
                     self.reply(dict(projects=[dict(slug='demo', title='Demo')]))
                 elif self.path == '/api/control/inbox-state':

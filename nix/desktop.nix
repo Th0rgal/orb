@@ -39,6 +39,7 @@ stdenv.mkDerivation {
   installPhase = ''
     mkdir -p "$out/bin" "$out/share/applications" "$out/share/orb-desktop"
     makeBinaryWrapper "${core}/bin/orb-desktop-native" "$out/bin/orb-desktop-native" \
+      --set ORB_ACCOUNT_LAUNCHER "$out/bin/orb-desktop" \
       --prefix PATH : "${lib.makeBinPath [python3 pulseaudio wl-clipboard zenity]}"
     install -Dm0755 linux_shell/orb-sidebar-host.so "$out/lib/orb-sidebar-host.so"
     makeBinaryWrapper "${core}/bin/orb-desktop-native" "$out/bin/orb-desktop-hybrid" \

@@ -33,6 +33,8 @@ class ResourceInventory(unittest.TestCase):
                     body = missions
                 elif self.path == '/api/control/inbox-state':
                     body = {}
+                elif self.path == '/api/auth/me':
+                    body = {'user': {'username': 'fixture'}}
                 elif self.path == '/api/projects':
                     body = dict(projects=[])
                 else:
