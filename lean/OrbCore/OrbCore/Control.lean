@@ -862,8 +862,14 @@ def parseChainTargetsJson
         hydratedProvs.any (fun hp => hp.id == acctRaw))
       let eligibleRows := if pinned then providers.filter (fun p => p.id == acctRaw) else providers
       let eligibleHydrated := if pinned then hydratedProvs.filter (fun p => p.id == acctRaw) else hydratedProvs
+      -- A stored restriction also rules out explicit chains and generic pool
+      -- fallbacks when there is no remaining alternative-router credential.
+      if pinned && eligibleHydrated.any (·.nativeOnly) then continue
+      if provRaw == "antigravity" || provRaw.startsWith "antigravity:" then
+        let pool := eligibleHydrated.filter (fun hp => hp.providerType == "antigravity" && hp.enabled)
+        if !pool.isEmpty && pool.all (·.nativeOnly) then continue
       let matchedHydrated? := eligibleHydrated.find? fun hp =>
-        hp.enabled && (hp.hasApiKey || hp.hasOAuth) && (
+        hp.enabled && !hp.nativeOnly && (hp.hasApiKey || hp.hasOAuth) && (
           hp.id == acctRaw ||
           hp.id == strippedProv ||
           (!provRaw.startsWith "custom:" && hp.providerType == provRaw) ||

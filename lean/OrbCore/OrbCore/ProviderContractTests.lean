@@ -1707,6 +1707,15 @@ def run : IO Unit := do
       unless viaOwner.any (fun t => t.modelId == "selected/gpt-5" &&
           t.sidecarCredential?.any (fun c => c.file == "selected.json" && c.modelPrefix == "selected")) do
         failures := failures.push "A pinned sidecar account must use the selected credential’s model namespace"
+      let nativeOnly := { sidecarAccount with providerType := "antigravity", nativeOnly := true }
+      let routedGoogle := { nativeOnly with id := "other-google", nativeOnly := false }
+      let googleEntry := "[{\"provider_id\":\"antigravity\",\"model_id\":\"agy-model-high\"}]"
+      let selectedGoogle := "[{\"provider_id\":\"antigravity\",\"account_id\":\"fixture-b\",\"model_id\":\"agy-model-high\"}]"
+      let targetsFor := fun entry accounts => parseChainTargetsJson entry #[] accounts "http://127.0.0.1:8317" "fixture-sidecar"
+      unless (targetsFor selectedGoogle #[nativeOnly, routedGoogle]).isEmpty &&
+          (targetsFor googleEntry #[nativeOnly]).isEmpty &&
+          !(targetsFor googleEntry #[nativeOnly, routedGoogle]).isEmpty do
+        failures := failures.push "A restricted Antigravity account must stay out of explicit and fallback proxy chains"
       let duplicate := { sidecarAccount with id := "fixture-c" }
       unless (accountRoutingFile #[sidecarAccount, duplicate] sidecarAccount).isEmpty do
         failures := failures.push "Two accounts claiming one file must lose routing authority"

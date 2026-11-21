@@ -64,7 +64,7 @@ def configure (base key file relay : String) (enable : Bool) : IO (Except String
 /-- An Antigravity login can stay available to agy while the sidecar excludes
 all models for this particular credential. Retain any individual exclusions
 when changing the wildcard. Never return credential metadata to the caller. -/
-private def exclusions? (credential : JVal) : Option (Array String) := do
+def credentialModelExclusions? (credential : JVal) : Option (Array String) := do
   match (credential.field? "excluded_models").orElse (fun _ => credential.field? "excluded-models") with
   | none | some .null => return #[]
   | some (.arr values) => values.mapM JVal.asStr?
@@ -76,7 +76,7 @@ def alternativeRouterAccess (base key file : String) (allowed? : Option Bool) : 
     return .error unavailable
   let .ok credential ← readCredential base key file | return .error unavailable
   unless credential.fieldStr? "type" == some "antigravity" do return .error unavailable
-  let some before := exclusions? credential | return .error unavailable
+  let some before := credentialModelExclusions? credential | return .error unavailable
   let allowed := !before.contains "*"
   let some next := allowed? | return .ok allowed
   if next == allowed then return .ok allowed
@@ -86,7 +86,7 @@ def alternativeRouterAccess (base key file : String) (allowed? : Option Bool) : 
       (some key) (some patch) #[] 4000 8192 | return .error unavailable
   unless ack.fieldStr? "status" == some "ok" do return .error unavailable
   let .ok updated ← readCredential base key file | return .error unavailable
-  if exclusions? updated != some after then return .error "router_access_readback_failed"
+  if credentialModelExclusions? updated != some after then return .error "router_access_readback_failed"
   return .ok next
 
 end OrbCore.AccountVpnSidecar
