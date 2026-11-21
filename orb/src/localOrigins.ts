@@ -85,26 +85,32 @@ export function rememberCoreState(local:Mission[],remote:Mission[],observedAt:nu
 }
 /** Lists leave out archived rows. Ask Core about synchronized journal missions it did not list. */
 export async function unlistedCoreState(local:Mission[],listed:Mission[],read:(id:string)=>Promise<Mission>):Promise<Mission[]>{
+ const version=connectionVersion();
+ if(unlistedVersion!==version){unlistedReads=new Map();unlistedVersion=version;}
+ const reads=unlistedReads;
  const seen=new Set(listed.map(mission=>mission.id));
  const missing=local.filter(mission=>!seen.has(mission.id)&&!localPending(mission)).slice(0,20);
  // The list refreshes every few seconds; a conversation outside it is read far less often.
- const now=Date.now(),due=missing.filter(mission=>{const last=unlistedReads.get(mission.id);return !last||now-last.at>=(last.mission&&isLive(last.mission.status)?UNLISTED_LIVE_MS:UNLISTED_SETTLED_MS);});
+ const now=Date.now(),due=missing.filter(mission=>{const last=reads.get(mission.id);return !last||now-last.at>=(last.mission&&isLive(last.mission.status)?UNLISTED_LIVE_MS:UNLISTED_SETTLED_MS);});
  const deletedIds:string[]=[];
  await Promise.allSettled(due.map(async mission=>{
-  try{const value=await read(mission.id);unlistedReads.set(mission.id,{at:Date.now(),mission:value?.id?value:undefined});}
+  try{const value=await read(mission.id);reads.set(mission.id,{at:Date.now(),mission:value?.id?value:undefined});}
   catch(error){
-   unlistedReads.set(mission.id,{at:Date.now(),mission:undefined});
+   reads.set(mission.id,{at:Date.now(),mission:undefined});
    if((error as {status?:number})?.status===404||/\b404\b|not found/i.test(String(error)))deletedIds.push(mission.id);
   }
  }));
+ if(version!==connectionVersion())return [];
  if(deletedIds.length){
   await confirmDeletedLocalOrigins(deletedIds);
+  if(version!==connectionVersion())return [];
   // Retirement invalidates cached rows; retain the 404 backoff for journals
   // still present in this refresh's local snapshot.
-  for(const id of deletedIds)unlistedReads.set(id,{at:Date.now(),mission:undefined});
+  for(const id of deletedIds)reads.set(id,{at:Date.now(),mission:undefined});
  }
- return missing.flatMap(mission=>{const value=unlistedReads.get(mission.id)?.mission;return value?[value]:[];});
+ return missing.flatMap(mission=>{const value=reads.get(mission.id)?.mission;return value?[value]:[];});
 }
 const UNLISTED_LIVE_MS=30_000,UNLISTED_SETTLED_MS=10*60_000;
-const unlistedReads=new Map<string,{at:number;mission?:Mission}>();
+let unlistedVersion:number|undefined;
+let unlistedReads=new Map<string,{at:number;mission?:Mission}>();
 export function forgetUnlistedReads(){unlistedReads.clear();}
