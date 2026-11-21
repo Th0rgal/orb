@@ -288,8 +288,14 @@ def mutate(binding, action, mid):
     if action.startswith('bulk-'):
         return bulk_write(c, action.removeprefix('bulk-'), key)
     if action == 'create':
-        values = sys.stdin.buffer.read().decode().split('\t', 6)
+        payload = sys.stdin.buffer.read().decode()
+        directory, separator, settings = payload.partition('\0')
+        values = (settings if separator else payload).split('\t', 6)
         body = {'title': 'New mission'}
+        if separator and directory:
+            if not directory.startswith('/'):
+                raise ValueError('expected an absolute working directory')
+            body['working_directory'] = directory
         if len(values) == 7:
             prompt = values.pop()
             if not prompt.strip():
@@ -355,6 +361,23 @@ def mutate(binding, action, mid):
 
 def label(v):
     return ''.join(c if c.isprintable() else ' ' for c in str(v or '')[:512])
+
+
+def list_directories(binding, machine, path):
+    c = Connection()
+    if c.binding != binding:
+        raise ValueError('connection changed')
+    quote = urllib.parse.quote
+    prefix = '/api' if machine == 'core' else '/api/remote-nodes/' + quote(machine, safe='')
+    rows = c.request(prefix + '/fs/list?' + urllib.parse.urlencode({'path': path or '.'}), deadline=18)
+    if not isinstance(rows, list):
+        raise ValueError('invalid folder list')
+    print('directories')
+    for row in sorted(rows, key=lambda item: str(item.get('name', '')).casefold()):
+        name, full = row.get('name'), row.get('path')
+        if (row.get('kind') == 'dir' and name and name not in ('.', '..') and isinstance(full, str)
+                and full.startswith('/') and full.isprintable()):
+            print('D', full, label(name), sep='\t')
 
 
 def mission_settings(m):

@@ -161,6 +161,27 @@ def redo (buf : ComposerBuffer) : ComposerBuffer :=
       imePreeditLen := 0
       imePreeditText := "" }
 
+/-- Edit an active text field using XKB navigation and editing keys. Leave IME
+    preedit to the input method until it commits or cancels. -/
+def editKey? (buf : ComposerBuffer) (key mods : UInt32) : Option ComposerBuffer := Id.run do
+  if !buf.imePreeditText.isEmpty then return none
+  if mods == 2 || mods == 8 then
+    if key == 0x7a then return some buf.undo
+    if key == 0x79 then return some buf.redo
+  if (mods == 3 || mods == 9) && (key == 0x5a || key == 0x7a) then return some buf.redo
+  if mods != 0 then return none
+  let cur := clampCursor buf.text buf.cursorOffset
+  let len := buf.text.length
+  if key == 0xff08 then return some (if cur == 0 then buf else buf.deleteAroundCursor 1 0)
+  if key == 0xffff then return some (if cur == len then buf else buf.deleteAroundCursor 0 1)
+  let pos ← match key with
+    | 0xff51 => pure (cur - 1)
+    | 0xff53 => pure (min len (cur + 1))
+    | 0xff50 => pure (cur - ((buf.text.toList.take cur).reverse.takeWhile (· != '\n')).length)
+    | 0xff57 => pure (cur + ((buf.text.toList.drop cur).takeWhile (· != '\n')).length)
+    | _ => return none
+  return some { buf with cursorOffset := pos, imePreeditOffset := pos }
+
 /-- Attach a file/payload chip to the composer buffer. -/
 def addAttachment (buf : ComposerBuffer) (att : ComposerAttachment) : ComposerBuffer :=
   { buf with attachments := buf.attachments ++ [att], dragHoverActive := false }
@@ -188,6 +209,22 @@ end ComposerBuffer
     }
   { glyphs := glyphs, style := style, allowBreakAfter := true, hardBreakAfter := false }
 
+/-- Keep explicit line breaks and word boundaries through native font shaping. -/
+private def composerTextRuns (style : TextStyle) (text : String) : List InlineRun := Id.run do
+  let mut out := #[]
+  let mut word := ""
+  for ch in text.toList do
+    if ch == '\n' then
+      out := out.push { (composerSynthRun style word) with hardBreakAfter := true }
+      word := ""
+    else
+      word := word.push ch
+      if ch == ' ' then
+        out := out.push (composerSynthRun style word)
+        word := ""
+  if !word.isEmpty then out := out.push (composerSynthRun style word)
+  return out.toList
+
 /-- Build styled `InlineRun`s for a `ComposerBuffer`, highlighting the active IME preedit span
 with an underline and accent color when `imePreeditLen > 0`. -/
 def buildComposerInlineRuns (theme : Theme) (buf : ComposerBuffer)
@@ -210,11 +247,11 @@ def buildComposerInlineRuns (theme : Theme) (buf : ComposerBuffer)
         color := pal.accent
         underline := true
       }
-      let beforeRun := if beforeStr.isEmpty then [] else [composerSynthRun bodyStyle beforeStr]
+      let beforeRun := composerTextRuns bodyStyle beforeStr
       let preeditRun :=
         if buf.imePreeditText.isEmpty then []
         else [composerSynthRun preeditStyle buf.imePreeditText]
-      let afterRun := if afterStr.isEmpty then [] else [composerSynthRun bodyStyle afterStr]
+      let afterRun := composerTextRuns bodyStyle afterStr
       beforeRun ++ preeditRun ++ afterRun
 
 /-- Build an attachment chip widget for a single `ComposerAttachment`. -/
@@ -245,9 +282,10 @@ def buildAttachmentChipWidget (theme : Theme) (att : ComposerAttachment) : Widge
 editor centred in a column of at most `748 px`, as `.dock > .col > .composer` in the SolidJS
 desktop. The pill holds the round attach button, the text and the send button. -/
 def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
-    (buf : ComposerBuffer) (overrideRuns : List InlineRun := []) (controls : Option WidgetNode := none) : WidgetNode :=
+    (buf : ComposerBuffer) (overrideRuns : List InlineRun := []) (controls : Option WidgetNode := none) (newAgentHeader : Option WidgetNode := none) : WidgetNode :=
   let pal := theme.palette
-  let colW : SubPx := min (pxToSub 748) (availW - pxToSub 68)
+  let tall := newAgentHeader.isSome
+  let colW : SubPx := if tall then min (pxToSub 608) (availW - pxToSub 32) else min (pxToSub 748) (availW - pxToSub 68)
   let isRunning := buf.isRunning
   let hasChips := !buf.attachments.isEmpty
   let chipRowH : SubPx := pxToSub 28
@@ -275,17 +313,19 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
   let hasText := !buf.text.isEmpty || !buf.imePreeditText.isEmpty
   -- Two 24px buttons, two 8px gaps, pill padding, text inset and border.
   let placeholderWidth := colW - pxToSub (48 + 16 + 22 + 2) - 2 * theme.borderWidth
+  let runs := buildComposerInlineRuns theme buf overrideRuns
+  let editH := if tall then max (pxToSub 48) (min (pxToSub 180) (wrapInlineRuns (colW - pxToSub 26) (pxToSub 18) runs).2.2) else pxToSub 18
   let textNode : WidgetNode :=
     WidgetNode.text
       { BoxStyle.row 0 with
         grow := 1
         clip := !hasText
-        maxWidth := if hasText then (BoxStyle.row 0).maxWidth else placeholderWidth
-        minHeight := pxToSub 18
-        maxHeight := pxToSub 18
+        maxWidth := if tall then colW - pxToSub 26 else if hasText then (BoxStyle.row 0).maxWidth else placeholderWidth
+        minHeight := editH
+        maxHeight := editH
         padding := Edges.trbl 0 0 0 (pxToSub 2) }
       (pxToSub 18)
-      (buildComposerInlineRuns theme buf overrideRuns)
+      runs
   let sendBgCol := if hasText || isRunning then pal.sendBg else ((pal.sendBg &&& 0xFFFFFF00) ||| 0x47)
   let glyph : WidgetNode := if isRunning then
       WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 6) (pxToSub 6)) pal.sendFg
@@ -341,11 +381,21 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
         (BoxStyle.row (pxToSub 6) |>.withAlign .center |>.withFixedSize colW chipRowH)
         (buf.attachments.map (buildAttachmentChipWidget theme))]
     else []
-  WidgetNode.box
-    (BoxStyle.col 0
-      |>.withAlign .center
-      |>.withPadding (Edges.trbl (pxToSub 10) (pxToSub 34) 0 (pxToSub 34))
-      |>.withFixedSize availW composerH)
-    (chipBar ++ [pill, controls.getD underRow])
+  if let some header := newAgentHeader then
+    let toolbar := WidgetNode.box (BoxStyle.row (pxToSub 8) |>.withAlign .center |>.withFixedSize (colW - pxToSub 26) (pxToSub 24))
+      ([attachBtn] ++ controls.toList ++ [sendBtn])
+    let card := WidgetNode.focusable buf.composerWidgetId <| WidgetNode.box
+      (BoxStyle.col (pxToSub 6) |>.withPadding (Edges.trbl (pxToSub 10) (pxToSub 12) (pxToSub 8) (pxToSub 12))
+        |>.withFixedSize colW (pxToSub 50 + editH + (if hasChips then chipRowH else 0))
+        |>.withBg pillBg |>.withRadius (pxToSub 12) |>.withBorder theme.borderWidth borderCol)
+      (chipBar ++ [textNode, toolbar])
+    WidgetNode.box (BoxStyle.col (pxToSub 10) |>.withAlign .center) [header, card]
+  else
+    WidgetNode.box
+      (BoxStyle.col 0
+        |>.withAlign .center
+        |>.withPadding (Edges.trbl (pxToSub 10) (pxToSub 34) 0 (pxToSub 34))
+        |>.withFixedSize availW composerH)
+      (chipBar ++ [pill, controls.getD underRow])
 
 end LeanUI.Widgets

@@ -6,6 +6,13 @@ open OrbDesktop LeanUI
 
 private def vp : Rect := { x := 0, y := 0, w := 800, h := 600 }
 
+private def typed : Widgets.ComposerBuffer := { text := "one\n二X", cursorOffset := 6 }
+#guard (typed.editKey? 0xff08 0).map (·.text) == some "one\n二"
+#guard (typed.editKey? 0xff50 0).map (·.cursorOffset) == some 4
+#guard ((typed.editKey? 0xff50 0).bind (·.editKey? 0xffff 0)).map (·.text) == some "one\nX"
+#guard ((typed.editKey? 0xff08 0).bind (·.editKey? 0x7a 2)).map (·.text) == some typed.text
+#guard ((typed.setPreedit "あ").editKey? 0xff08 0).isNone
+
 private def hierarchyFixture : DesktopState := {
   DesktopState.liveUnavailable with
   connectionBinding := "fixture"
@@ -102,6 +109,13 @@ private def unsentDraft : DesktopState :=
   (.composerReturn false)).1.writeRequest.isNone
 
 private def projectDraft : DesktopState := { unsentDraft with screen := .controlEmpty, draftProject := "now" }
+private def pickedProject : DesktopState :=
+  let menu : MissionMenu := { mission := "", x := 0, y := 0, page := .draftProject }
+  let state := { unsentDraft with screen := .controlEmpty, missionMenu := some menu }
+  (stepDesktopEvent 120 vp state (.activate 2000000)).1
+#guard pickedProject.draftProject == "now" && pickedProject.composer.text == unsentDraft.composer.text
+#guard pickedProject.missionMenu.isNone && pickedProject.writeRequest.isNone
+
 private def inferencePage := (stepDesktopEvent 120 vp projectDraft (.activate 113)).1
 private def machinesPage := (stepDesktopEvent 120 vp inferencePage (.activate 112)).1
 private def returnedDraft := (stepDesktopEvent 120 vp machinesPage (.activate 101)).1

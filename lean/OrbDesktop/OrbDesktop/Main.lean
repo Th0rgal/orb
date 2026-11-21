@@ -332,15 +332,29 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
   let scale := rt.wayland.scale120
   let viewport := rt.viewportDeviceRect
   fun st ev => Id.run do
+    if let .key key mods state := ev then
+      if rt.focus.owner == some 1 && state != .released && st.hasLiveConnection && st.writeRequest.isNone then
+        if let some menu := st.missionMenu then
+          if menu.page == .rename || menu.page == .draftDirectory then
+            if let some draft := menu.draft.editKey? key mods then
+              return ({ st with missionMenu := some { menu with draft } }, if draft == menu.draft then none else some viewport)
+        else if st.openMission.isSome || st.screen == .controlEmpty || st.screen == .controlPopulated then
+          if let some composer := st.composer.editKey? key mods then
+            return ({ st with composer }, if composer == st.composer then none else some viewport)
     if let .pointerMove x y := ev then
       return (st, st.sidebarHoverDamage rt.hitRegions scale rt.hoveredEntity (hitTest rt.hitRegions x y))
     if let .pointerLeave := ev then
       return (st, st.sidebarHoverDamage rt.hitRegions scale rt.hoveredEntity none)
     if let .activate id := ev then
       if st.hasLiveConnection && st.missionMenu.isNone && st.writeRequest.isNone then
-        if id == 714 then
+        if id == draftDirectoryPickerId && st.openMission.isNone then
           let some (_, r) := rt.hitRegions.find? (fun (entry : EntityId × Rect) => entry.1 == id) | return (st, none)
-          return ({ st with missionMenu := some { mission := st.openMission.getD "", x := r.x, y := r.bottom, trigger := id, page := .settings } }, some viewport)
+          let draft : Widgets.ComposerBuffer := { text := st.draftDirectory, cursorOffset := st.draftDirectory.length }
+          let menu : MissionMenu := { mission := "", x := r.x, y := r.bottom, trigger := id, page := .draftDirectory, draft, browsePath := st.draftDirectory }
+          return ({ st with missionMenu := some menu }, some viewport)
+        if id == 714 || (id == draftProjectPickerId && st.openMission.isNone) then
+          let some (_, r) := rt.hitRegions.find? (fun (entry : EntityId × Rect) => entry.1 == id) | return (st, none)
+          return ({ st with missionMenu := some { mission := st.openMission.getD "", x := r.x, y := r.bottom, trigger := id, page := if id == draftProjectPickerId then .draftProject else .settings } }, some viewport)
         if let some field := settingTrigger id then
           let some (_, r) := rt.hitRegions.find? (fun (entry : EntityId × Rect) => entry.1 == id) | return (st, none)
           let st := if field == .machine then { st with launchMachines := none, launchMachinesFailed := false } else st
