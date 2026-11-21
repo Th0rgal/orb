@@ -118,7 +118,7 @@ for i in range(300):
             return exercise(ROOT, tmp, api, graphical, click, process, wait, stack, menu_client)
         binary = os.environ.get('ORB_LEANUI_TEST_BINARY')
         client = [str(Path(binary).resolve(strict=True))] if binary else [ROOT / 'scripts/orb_desktop_dev.sh', '--leanui']
-        if binary and Path(binary).name == 'orb-desktop':
+        if binary and Path(binary).name in ('orb', 'orb-desktop'):
             client.append('--leanui')
         desktop = stack.enter_context(process(client, graphical, ROOT))
         wait('native window', lambda: b'"orb-desktop"' in sway('-t', 'get_tree'), 300)
@@ -235,8 +235,13 @@ for i in range(300):
             select('move', region)
             select('menu', region)
             wait('moved mission', lambda: api(path).get('project') == 'menu-test')
-            if not locate('indigo', sidebar_region):
-                select('menu', sidebar_region)
+            # The Core receipt can arrive while the source still shows its old row.
+            # Wait for the collapsed destination and both project labels in one frame.
+            def moved_out_of_source():
+                labels = {word for word, _, _ in read_words(crop(sidebar_region), sidebar_region)}
+                return {'menu', 'source'} <= labels and 'indigo' not in labels
+            wait('source row removed after move', moved_out_of_source)
+            select('menu', sidebar_region)
             region = open_actions()
             select('settings', region)
             select('effort', region)
