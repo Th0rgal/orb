@@ -315,3 +315,94 @@ relay up: native turn=SUCCESS shell namespace=job direct TCP/DNS=blocked
 relay down: established TLS closed native resume=ERROR upstream delta=0 direct TCP/DNS=blocked
 relay restored: native resume=SUCCESS same conversation=true direct model calls=0 job DNS packets=0
 ```
+
+#### Admission at the real node dispatcher
+
+The optional `--node /absolute/path/to/sandboxed-node` variant starts a
+disposable node in the isolated network namespace. A fixture client performs
+the Core side of the signed `job:submit` exchange with this node's temporary
+secret. Each turn is a new `POST /jobs` for the same mission and owner. The
+client waits for the node ledger's terminal state. The fixture names one synthetic owner in admin-role leases. The daemon and
+harness run under one unprivileged guest UID. The synthetic native profile
+sits outside the mission checkout. The real MCP launcher uses a disposable
+mission-scoped capabilities/call endpoint inside the namespace.
+The guest also needs `env`, `sqlite3`, and `sandboxed-mcp` on PATH. Use
+the preceding guest setup and add `--node /bin/sandboxed-node` to the
+test command. No request is sent to an existing Core or node.
+
+**Prerequisite for a dev runtime.** A trusted-owner enrollment record must bind
+the authenticated Orb user, exact provider account, concrete node identity,
+and local Unix principal/profile. Both Core and the node need to enforce this
+binding on initial launch and resume. Core must check it before account catalog
+probing, which can already open the Core-held credential. The node must check
+it before opening the owner's native profile or starting a workspace process.
+Changes to the owner, account, node, or route must invalidate an outstanding
+launch. Generic and admin jobs must not be able to run an unrelated mission
+as the enrolled profile owner.
+
+The current static node roster stores ID, base URL, token environment name
+and labels. Its signed job lease carries mission, node, job, owner, role, Unix
+user, scope and expiry. Neither identifies an owner-enrolled Google profile.
+The native mission grant binds an account and model for gateway RPCs, but
+does not designate an owner-enrolled execution node. Initial account selection
+can perform model discovery across the user's enabled accounts. Limiting user
+preferences to one account does not establish node ownership.
+[Core dispatch](../../lean/OrbCore/OrbCore/RemoteDispatch.lean)
+· [Node lease](../../lean/OrbNode/OrbNode/Lease.lean)
+
+The verified account SOCKS listener lives on **Core's loopback**. The fixture
+has both ends in one VM. A remote node needs a private authenticated path to
+that particular Core relay, with job-lifetime authority and revocation. It also
+needs a distinct mission-scoped path to Core's MCP endpoint inside the job
+boundary. Exposing the relay's long-lived account credential in a raw job
+payload would persist authority outside that lifetime. Neither a node label
+nor a proxy environment variable supplies these two paths.
+[Account relay](../../lean/OrbCore/OrbCore/AccountVpnRelay.lean)
+· [Node job admission](../../lean/OrbNode/OrbNode/Server.lean)
+
+**Owner steps.** Current Orb UI can configure the account route: open
+**Inference → the Antigravity account → Account connection**, choose
+**AirVPN · NL**, and check **Verified exit**. Keep **Allow alternative
+routers** off for native-only use. Machines shows the registered node. Neither
+screen enrolls the owner/account/profile tuple. There is currently no supported
+Orb UI action or CLI command to complete trusted-owner enrollment.
+
+Once that admission and the node-to-Core path exist, the owner must perform
+Google's native login from a terminal running as the bound Unix user, inside
+the account-routed environment and using the persistent private home/keyring.
+An eligible existing native session for that same profile can be reused.
+Otherwise, over SSH, run `agy acp --login`, open its URL in the owner's
+browser, choose the intended personal Google account, complete Google's
+consent and eligibility prompts, and paste the returned one-time code into
+that same terminal. An interactive `agy` session also supports this SSH flow.
+Run `agy models` in the same context to check catalog access before a dev
+mission. Only the owner can complete Google's interactive step.
+
+The existing dev OAuth remains usable by the Core integration that owns it.
+Google documents reuse of the CLI's cached native session. We found no
+documented exchange of an Orb/CLIProxyAPI grant for that owner-held CLI
+session. Orb's separate managed-auth installer takes access and refresh
+tokens and attaches a credential file to a workspace. That is a different
+credential distribution model from owner enrollment.
+[Google SSH OAuth](https://antigravity.google/docs/install/#remote-ssh-oauth-flow)
+· [Google ACP login](https://antigravity.google/docs/ide/extensions/acp/)
+· [Orb managed-auth installer](../../lean/OrbNode/OrbNode/FileBrowser.lean)
+
+Node dispatcher receipt (agy 1.5.14; installed Linux node binary SHA-256
+`6d9b838e8d9dd5833350e7ffe945e8b74377c39b4ab18fa5f2a82fdbd9ae7c0f`):
+
+```text
+missing signed node ID: HTTP 400, job absent
+different signed node ID: HTTP 400, job absent
+node job=9760a1e5-dda0-4e53-ad36-d368cdb2a01d mission=a1033f4c-8e1c-4d14-a190-672294dc49c4 state=succeeded
+native MCP get_compute_fleet: same mission receipt
+relay up: native turn=SUCCESS shell namespace=job direct TCP/DNS=blocked
+node job=07b835e5-e6d2-4283-9597-69d20fa88c69 mission=a1033f4c-8e1c-4d14-a190-672294dc49c4 state=failed
+relay down: established TLS closed native resume=ERROR upstream delta=0 direct TCP/DNS=blocked
+node job=0ee38fcf-646c-41bd-89dd-3118084665d3 mission=a1033f4c-8e1c-4d14-a190-672294dc49c4 state=succeeded
+relay restored: native resume=SUCCESS same conversation=true direct model calls=0 job DNS packets=0
+```
+
+The two HTTP 400s exercise the existing node-ID check. They do not demonstrate
+a trusted owner/profile admission check. The latter has no enrollment record
+or signed claim in this protocol.

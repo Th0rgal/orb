@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import select
+import secrets
 import shlex
 import socket
 import socketserver
@@ -17,7 +18,7 @@ import sys
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from test_account_vpn_transport import exact
 
@@ -210,7 +211,7 @@ def probe(upstream_port, dns_port):
     return os.readlink("/proc/self/ns/net")
 
 
-def run(agy, cert, key):
+def run(agy, cert, key, node=None):
     if os.geteuid() or socket.if_nameindex() != [(1, "lo")] or socket.gethostbyname(HOST) != DIRECT:
         raise SystemExit("Requires root in a disposable loopback-only guest mapping ledger.test to 127.0.0.2")
     dns_calls = []
@@ -220,6 +221,7 @@ def run(agy, cert, key):
     if Path("/etc/resolv.conf").read_text().splitlines() != [f"nameserver {DIRECT}", "options timeout:1 attempts:1"]:
         raise SystemExit("Configure the disposable guest resolver as documented")
     shell_requested = threading.Event()
+    fleet_requested = threading.Event()
 
     class DNS(socketserver.BaseRequestHandler):
         def handle(self):
@@ -247,6 +249,10 @@ def run(agy, cert, key):
                 shell_requested.set()
                 part = {"functionCall": {"name": "run_command", "args": {
                     "CommandLine": probe_command, "WaitMsBeforeAsync": 5000, "toolSummary": "Check ledger network"}}}
+            elif node and "call_mcp_tool" in names and not fleet_requested.is_set():
+                fleet_requested.set()
+                part = {"functionCall": {"name": "call_mcp_tool", "args": {
+                    "ServerName": "sandboxed", "ToolName": "get_compute_fleet", "Arguments": {}}}}
             wire = ("data: " + json.dumps({"candidates": [{"index": 0, "finishReason": "STOP",
                     "content": {"role": "model", "parts": [part]}}]}) + "\n\n").encode()
             self.send_response(200)
@@ -289,10 +295,10 @@ def run(agy, cert, key):
         def job_args(command):
             return [sys.executable, SCRIPT, "job", str(fd), *command]
 
-        def job(command):
+        def job(command, data=None):
             return subprocess.run(job_args(command), pass_fds=(fd,),
-                                  env=env, cwd=tmp, stdin=subprocess.DEVNULL, capture_output=True,
-                                  text=True, timeout=100)
+                                  env=env, cwd=tmp, input=data, stdin=subprocess.DEVNULL if data is None else None,
+                                  capture_output=True, text=True, timeout=100)
 
         def write_config(path, data):
             target = workspace / path
@@ -303,14 +309,39 @@ def run(agy, cert, key):
                     break
                 os.chown(node, JOB_UID, JOB_UID)
 
-        write_config(".gemini/antigravity-cli/settings.json", {"modelProvider": "gemini"})
+        profile = "profile/" if node else ""
+        write_config(profile + ".gemini/antigravity-cli/settings.json", {"modelProvider": "gemini"})
+        mission = str(uuid4())
+        ledger = workspace / "node" / mission / "ledger.receipt" if node else workspace / "ledger.receipt"
+        if node:
+            driver = str(Path(SCRIPT).with_name("antigravity_fixture_node.py"))
+            token = secrets.token_hex(32) + "\n"
+            # A fresh namespace with only loopback makes this a guest-local control port.
+            control = [sys.executable, driver]
+            server = stack.enter_context(subprocess.Popen(job_args([*control, "start", "3088", mission, str(node)]),
+                pass_fds=(fd,), env=env, cwd=tmp, stdin=subprocess.PIPE, text=True))
+            stack.callback(server.kill)
+            server.stdin.write(token)
+            server.stdin.close()
+            check = job([*control, "check", "3088", mission], token)
+            assert check.returncode == 0, check.stderr
+            print(check.stdout.strip(), flush=True)
+        allow = [f"command({probe_command})"]
+        if node:
+            allow.append("mcp(sandboxed/get_compute_fleet)")
+
         def turn(sid=None):
             cmd = [str(agy), "--mode", "accept-edits", "--settings",
-                   json.dumps({"permissions": {"allow": [f"command({probe_command})"]}}),
+                   json.dumps({"permissions": {"allow": allow}}),
                    "--model", "gemini-4-carbon-high", "--output-format", "stream-json", "--print-timeout", "75s"]
             if sid:
                 cmd += ["--conversation", sid]
-            proc = job([*cmd, "--print=Check the fixture ledger"])
+            invocation = [*cmd, "--print=Check the fixture ledger"]
+            if node:
+                proc = job([*control, "turn", "3088", mission, *invocation], token)
+                print(proc.stderr.strip(), flush=True)
+            else:
+                proc = job(invocation)
             events = [json.loads(line) for line in proc.stdout.splitlines() if line.startswith("{")]
             terminal = next((e["result"] for e in events if e.get("event") == "result"), None)
             assert terminal, (proc.returncode, proc.stderr[-500:])
@@ -322,7 +353,10 @@ def run(agy, cert, key):
             code, result = turn()
             assert code == 0 and result["status"] == "SUCCESS" and result["response"].strip() == "ledger complete", result
             sid = str(UUID(result["conversation_id"]))
-            assert (workspace / "ledger.receipt").read_text() == f"net:[{os.fstat(fd).st_ino}]"
+            assert ledger.read_text() == f"net:[{os.fstat(fd).st_ino}]"
+            if node:
+                assert ledger.with_name("fleet.receipt").read_text() == mission
+                print("native MCP get_compute_fleet: same mission receipt", flush=True)
             held = stack.enter_context(subprocess.Popen(job_args(
                 [sys.executable, SCRIPT, "hold", str(proxy_port), str(port)]), pass_fds=(fd,),
                 cwd=tmp, env=env, stdout=subprocess.PIPE, text=True))
@@ -364,5 +398,7 @@ if __name__ == "__main__":
         parser = argparse.ArgumentParser(description=__doc__)
         for name in ("agy", "cert", "key"):
             parser.add_argument("--" + name, type=Path, required=True)
+        parser.add_argument("--node", type=Path, help="Run native turns through a disposable sandboxed-node")
         args = parser.parse_args()
-        run(args.agy.resolve(strict=True), args.cert.resolve(strict=True), args.key.resolve(strict=True))
+        run(args.agy.resolve(strict=True), args.cert.resolve(strict=True), args.key.resolve(strict=True),
+            args.node.resolve(strict=True) if args.node else None)
