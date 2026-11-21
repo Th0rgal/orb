@@ -342,9 +342,16 @@ private def mergeRoster (st : DesktopState) (records : List String) : DesktopSta
   let oldRows := Std.HashMap.ofList (st.sidebarRows.map fun row => (row.rowId, row))
   let oldCards := Std.HashMap.ofList (st.missionCards.map fun card => (card.missionId, card))
   let mut idx := 1 + (st.sidebarRows.foldl (fun n row => max n row.widgetId) 1000 - 1000) / 3
-  let mut cards := #[]
-  let mut rows := (st.sidebarRows.filter (fun row => row.kind != "project" && row.kind != "mission")).toArray
-  let mut machines := #[]
+  let projectOnly := records.head? == some "partial-projects"
+  let incoming := Std.HashSet.ofList (if !projectOnly then [] else records.filterMap fun record =>
+    match record.splitOn "\x1c" with
+    | "M" :: id :: _ => some id
+    | _ => none)
+  let mut cards := if projectOnly then (st.missionCards.filter fun card => !incoming.contains card.missionId).toArray else #[]
+  let mut rows := (st.sidebarRows.filter fun row =>
+    if projectOnly then row.kind != "mission" || !incoming.contains (row.rowId.drop 8).toString
+    else row.kind != "project" && row.kind != "mission").toArray
+  let mut machines := if projectOnly then st.fleetMachines.toArray else #[]
   let mut memberships := st.projectMemberships
   for record in records do
     let xs := record.splitOn "\x1c"
@@ -369,6 +376,10 @@ private def mergeRoster (st : DesktopState) (records : List String) : DesktopSta
     | "G" => memberships := (id, xs.drop 2) :: memberships.filter (·.1 != id)
     | "N" => machines := machines.push (machineCard machines.size xs)
     | _ => continue
+  if !projectOnly then
+    let projects := Std.HashSet.ofList (rows.toList.filterMap fun row =>
+      if row.kind == "project" then some (row.rowId.drop 8).toString else none)
+    memberships := memberships.filter fun entry => projects.contains entry.1
   let inboxItems := records.filterMap fun r => inboxItem (r.splitOn "\x1c")
   let inboxAvailable := records.any (·.startsWith "I\x1c")
   let inboxEnabled := if inboxAvailable then !records.contains "I\x1cdisabled" else st.inboxEnabled
@@ -376,7 +387,8 @@ private def mergeRoster (st : DesktopState) (records : List String) : DesktopSta
   let inboxIndex := (st.currentInboxItem.bind fun item => inboxItems.findIdx? (·.mission == item.mission)).getD
     (min st.inboxIndex (inboxItems.length - 1))
   let updated := { st with
-    inboxItems, inboxEnabled, inboxIndex, inboxAvailable, projectMemberships := memberships
+    inboxItems, inboxEnabled, inboxIndex, projectMemberships := memberships
+    inboxAvailable := if projectOnly then st.inboxAvailable else inboxAvailable
     missionCards := cards.toList, sidebarRows := rows.toList, fleetMachines := machines.toList }
   let some selected := updated.selectedCard | return updated
   return { updated with composer := { updated.composer with isRunning := selected.isRunning } }

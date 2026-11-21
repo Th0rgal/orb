@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import Mock, call, patch
@@ -363,6 +364,8 @@ class Delivery(unittest.TestCase):
                 elif path == '/api/projects':
                     result = {'projects': [dict(slug='p', title='Project title', objective='Objective', color='blue')]}
                 elif path == '/api/control/missions?limit=200&include_ancestors=true':
+                    if mode == 'project-first' and paths.count(path) > 1:
+                        release_project.wait(8)
                     if mode == 'unavailable':
                         self.send_response(302)
                         self.send_header('Location', '/redirect')
@@ -382,6 +385,8 @@ class Delivery(unittest.TestCase):
                     if mode == 'null-retry' and paths.count(path) == 3:
                         self.send_error(503)
                         return
+                elif mode == 'project-first' and path.startswith('/api/control/missions?project=p&'):
+                    result = [dict(id='older', project='p', status='completed', tags=['archived'])]
                 elif path == live.INBOX_PATH:
                     result = {'_versions': {}}
                 elif mode == 'project-lag' and path.startswith('/api/control/missions?project=p&'):
@@ -445,7 +450,7 @@ class Delivery(unittest.TestCase):
                     self.assertNotIn(b + events, paths)
                 elif mode in ('page-two', 'null-retry', 'start-running', 'project-lag'):
                     self.assertIn(b + events, paths)
-                elif mode in ('idle-identity', 'before-open', 'unavailable', 'denied', 'idle-session'):
+                elif mode in ('idle-identity', 'before-open', 'unavailable', 'denied', 'idle-session', 'project-first'):
                     self.assertFalse(any(p.startswith(a) or p.startswith(b) for p in paths))
                 else:
                     # Scheduling can allow an extra valid sample on slow CI.
@@ -459,6 +464,9 @@ class Delivery(unittest.TestCase):
                 release_project.set()
                 server.shutdown()
                 db.close()
+
+    def test_project_cards_arrive_before_delayed_global_roster(self):
+        self.run_wire('project-first')
 
     def test_conversation_updates_while_expanded_project_read_is_pending(self):
         self.run_wire('project-lag')
@@ -590,9 +598,54 @@ class Delivery(unittest.TestCase):
         loaded = live.roster_rows(connection, expanded=['p'], rules=rules)
         self.assertIn(('G', 'p', 'archived', 'child', 'controller', 'new'), loaded)
         self.assertIn('old', [r[1] for r in loaded if r[0] == 'M'])
+        calls = []
+        def retry_page(path):
+            calls.append(path)
+            if path == query + '&offset=2' and calls.count(path) == 1:
+                raise TimeoutError()
+            return pages[path]
+        with patch.object(connection, 'get', side_effect=retry_page), patch.object(live.time, 'sleep'):
+            self.assertEqual(live.roster_rows(connection, expanded=['p'], rules=rules), loaded)
+        self.assertEqual(calls.count(query + '&all=true'), 1)
+        self.assertEqual(calls.count(query + '&offset=2'), 2)
         pages[query + '&offset=2'] = None
         with self.assertRaises(ValueError):
             live.roster_rows(connection, expanded=['p'], rules=rules)
+
+    def test_project_frame_precedes_unrelated_reads_and_reconciles_removal(self):
+        query = '/api/control/missions?project=now&limit=200'
+        members = [dict(id=str(i), project='now', status='completed') for i in range(53)]
+        members[-1]['tags'] = ['archived']
+        pages = {live.INBOX_PATH: {}, '/api/projects': {'projects': [{'slug': 'now'}]}, query + '&all=true': members,
+                 query: members, '/api/control/missions?limit=200&include_ancestors=true': members[:52],
+                 '/api/control/missions?status=acknowledged&limit=100': [], '/api/machines': []}
+        reads = []
+        def get(path):
+            reads.append(path)
+            time.sleep(0.02)
+            return pages[path]
+        c = Mock(binding='bound', get=get)
+        rules = json.loads((PKG.parents[1] / 'orb/src/projectHistoryRules.json').read_text())
+        frames = []
+        def publish(rows):
+            frames.append((rows, list(reads)))
+        full = live.roster_rows(c, True, ['now'], rules, publish)
+        early, first_reads = frames.pop()
+        self.assertEqual(first_reads, ['/api/projects', query + '&all=true'])
+        self.assertEqual([r for r in early if r[0] == 'G'], [r for r in full if r[0] == 'G'])
+        self.assertEqual(len([r for r in early if r[0] == 'M']), 53)
+        self.assertEqual(next(r for r in early if r[:2] == ('M', '52'))[-1], '1')
+        first_cycle = list(reads)
+        reads.clear()
+        members.pop()
+        full = live.roster_rows(c, True, ['now'], rules)
+        self.assertEqual(reads, first_cycle)
+        self.assertCountEqual(reads, pages.keys() - {query})
+        self.assertNotIn('52', next(r for r in full if r[0] == 'G')[2:])
+        c.check.side_effect = ValueError('connection changed')
+        with self.assertRaises(ValueError):
+            live.roster_rows(c, True, ['now'], rules, publish)
+        self.assertFalse(frames)
 
     def test_child_precedes_parent_in_live_roster(self):
         child = dict(id='child', folder='notes/today', parent_mission_id='launch',

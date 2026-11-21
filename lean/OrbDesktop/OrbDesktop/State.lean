@@ -396,6 +396,14 @@ structure MissionMenu where
   listingFailed : Bool := false
   deriving Repr, Inhabited
 
+inductive VoicePhase where
+  | idle | recording | finishing | choosing
+  deriving BEq, Repr, Inhabited
+
+def voiceLanguageId : Nat := 747
+def voiceButtonId : Nat := 745
+def voiceCancelId : Nat := 746
+
 inductive ConnectionIssue where
   | unavailable | missing | signin | denied | invalid
   deriving BEq, Repr, Inhabited
@@ -422,6 +430,12 @@ def ConnectionIssue.hint : ConnectionIssue → String
 
 /-- Complete single-owner pure state of the Orb Desktop shell. -/
 structure DesktopState where
+  voiceLanguage : String := ""
+  voicePicker : Bool := false
+  voiceAvailable : Bool := false
+  voiceBinding : String := ""
+  voiceGeneration : Nat := 0
+  voicePhase : VoicePhase := .idle
   screen : ScreenId := .missionTranscript
   theme : Theme := orbDarkTheme
   scale120 : Nat := 120
@@ -533,12 +547,16 @@ def DesktopState.openCloud (st : DesktopState) (mission : String) : DesktopState
   { st with screen := .cloud, cloudMission := mission, cloudLines := none, cloudFailed := false,
             cloudPage := 0, cloudActions := [], cloudDraft := {}, cloudAttempt := "", cloudProject := "", writeError := "" }
 
+def DesktopState.voiceDraft (st : DesktopState) : Bool :=
+  st.hasLiveConnection && st.openMission.isNone && st.writeRequest.isNone &&
+    (st.screen == .controlEmpty || st.screen == .controlPopulated)
+
 def resetSelection (st : DesktopState) (card : Option MissionSummaryCard) : DesktopState :=
   let cloud := card.filter fun c => st.screen == .missionTranscript && c.backend.startsWith "cloud_"
   let st := cloud.elim st fun c => st.openCloud c.missionId
   let mid := if cloud.isSome then none else card.map (·.missionId)
   { st with
-    openMission := mid, missionMenu := none, stream := { shown := [], pending := [], renders := 1 }, scroll := {}
+    voicePhase := .idle, voiceGeneration := st.voiceGeneration + 1, openMission := mid, missionMenu := none, stream := { shown := [], pending := [], renders := 1 }, scroll := {}
     composer := { isRunning := card.any (·.isRunning) }
     messageSent := false, missionStopped := false, missionArchived := false, sidePanelOpen := false
     sidebarRows := st.sidebarRows.map fun row => { row with selected := row.widgetId == (card.map (·.widgetId)).getD 101 } }
@@ -937,6 +955,7 @@ def DesktopState.cloudItems (st : DesktopState) : List (String × String) := Id.
   return inventory ++ conversations.map fun c => (c.missionId, "Open · " ++ c.title)
 
 def DesktopState.hoverTarget (st : DesktopState) (hit : Option WidgetId) : Option WidgetId := do
+  if hit == some voiceLanguageId || hit == some voiceButtonId || hit == some voiceCancelId then return ← hit
   let id ← hit
   if st.screen == .cloud && id >= 960 && id < 972 then some id
   else if st.screen == .resources && id >= 945 && id < 960 then some id
@@ -1189,7 +1208,8 @@ def menuFocusChange (before after : DesktopState) : Option Nat :=
 /-- Opening a live draft gives the editor keyboard focus even when New Agent
     was invoked while the empty draft screen was already visible. -/
 def desktopFocusChange (before after : DesktopState) (ev : Event) : Option Nat :=
-  if let some target := menuFocusChange before after then some target
+  if before.voicePhase != .idle && before.voicePhase != after.voicePhase && after.voiceDraft then some 1
+  else if let some target := menuFocusChange before after then some target
   else if before.screen == .inference && after.screen == .inference then
     match before.accountRoutePage, after.accountRoutePage with
     | none, some _ => some providersBackId
@@ -1245,9 +1265,9 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
       return update { menu with browsePath := row.value, first := 0, highlighted := 1, directoryRows := none,
                                 draft := { text := row.value, cursorOffset := row.value.length } }
     if menu.page == .draftDirectory && id == 716 && menu.draft.imePreeditText.isEmpty then
-      return ({ st with draftDirectory := menu.draft.text, missionMenu := none }, some viewport)
+      return ({ st with draftDirectory := menu.draft.text, missionMenu := none, voicePhase := .idle }, some viewport)
     if menu.page == .draftProject then
-      return ({ st with draftProject := row.value, missionMenu := none }, some viewport)
+      return ({ st with draftProject := row.value, missionMenu := none, voicePhase := .idle }, some viewport)
     if menu.page == .settings then
       if let some field := settingTrigger id then
         let next := { menu with page := .picker field, first := 0, highlighted := 0 }
@@ -1270,6 +1290,20 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
 def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev : Event) :
     DesktopState × Damage := Id.run do
   if st.liveData then
+    if st.voiceDraft && st.voiceAvailable && st.missionMenu.isNone then
+      if let .activate id := ev then
+        if id == voiceCancelId && st.voicePhase != .idle then
+          return ({ st with voicePhase := .idle }, some viewport)
+        if id == voiceLanguageId && st.voicePicker && st.voicePhase == .idle then
+          return ({ st with voicePhase := .choosing, voiceBinding := st.connectionBinding, voiceGeneration := st.voiceGeneration + 1 }, some viewport)
+        if id == voiceButtonId then
+          match st.voicePhase with
+          | .idle => return ({ st with voicePhase := .recording, voiceBinding := st.connectionBinding, voiceGeneration := st.voiceGeneration + 1 }, some viewport)
+          | .recording => return ({ st with voicePhase := .finishing }, some viewport)
+          | .choosing => return (st, none)
+          | .finishing => return ({ st with voicePhase := .idle }, some viewport)
+      if let .key 0xff1b _ .pressed := ev then
+        if st.voicePhase != .idle then return ({ st with voicePhase := .idle }, some viewport)
     let toggle := match ev with
       | .activate id => id == sidebarToggleId
       | .key 0x62 mods .pressed => mods == 2 || mods == 8
@@ -1452,7 +1486,7 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
             !st.composer.text.trimAscii.isEmpty && st.composer.imePreeditText.isEmpty then
           if st.draftSettings.backend == "antigravity" && st.draftSettings.model.isEmpty then
             return ({ st with writeError := "Choose an Antigravity model for this machine." }, some viewport)
-          return ({ st with writeRequest := some .create }, none)
+          return ({ st with voicePhase := .idle, writeRequest := some .create }, none)
         return (st, none)
       if id == 2 || id == 106 then
         let some card := st.selectedCard | return (st, none)
