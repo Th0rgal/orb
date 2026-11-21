@@ -5776,12 +5776,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     ]
     let configured ← configuredOpenCodeOptions st.store caller.userId isAdm
     opencodeModels := opencodeModels ++ configured.map renderCompact
-    let mut agyModels : Array String := #[]
-    if isAdm then
-      let pHub ← match st.providerHub? with | some h => pure h | none => newProviderRuntimeHub
-      let pairs ← getCachedAntigravityModels pHub false
-      for (mId, mLbl) in pairs do
-        agyModels := agyModels.push (mkOpt mId mLbl "")
+    let pHub ← match st.providerHub? with | some h => pure h | none => newProviderRuntimeHub
+    let pairs ← if isAdm then getCachedAntigravityModels pHub false else
+      memberAntigravityModels pHub st.store st.cfg.workingDir caller.userId false
+    let agyModels := pairs.map fun (mId, mLbl) => mkOpt mId mLbl ""
     let vibeModels : Array String := #[
       mkOpt "mistral/mistral-vibe-cli-latest" "Mistral Vibe" "Native Mistral Vibe CLI"
     ]

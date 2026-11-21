@@ -118,3 +118,15 @@ verified in `lean/Orb/Spec.lean` and folded through `orb_route_argmin_step`:
    - Periodic `refresh_and_sync` updates the default `antigravity` profile
      without touching `accounts/<slot>` bindings and skips legacy single-slot
      nodes that currently have an active or tentative remote job in `job_ledger`.
+
+### Member catalog discovery
+
+For a signed-in member, Core lists models discovered by the native CLI for
+enabled accounts the member has selected. Each probe uses the uniquely bound
+subscription, a private disposable CLI profile, and the account's resolved
+transport. A refresh credential stays with its owner. A personal opt-out takes
+effect even when a successful catalog is cached. Rotating the credential or
+changing the route invalidates the account's cached result. When every eligible
+probe fails, the dedicated endpoint returns a retryable failure. Restoring the
+route allows a fresh discovery. With no eligible subscription it returns an
+empty list. Loading the other harnesses never waits on native catalog discovery.

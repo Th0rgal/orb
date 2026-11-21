@@ -4325,7 +4325,7 @@ def getUserProviderPrefs (st : CoreStore) (userId : String) : IO (Array (String 
   if userId.isEmpty then return #[]
   match ← execParamQuery st.missionsDb
     "SELECT provider_id, enabled FROM user_provider_prefs WHERE user_id=?1;" #[userId] with
-  | .error _ => return #[]
+  | .error _ => throw (IO.userError "Provider preferences temporarily unavailable")
   | .ok rows =>
     let mut out : Array (String × Bool) := #[]
     for i in [1:rows.size] do
