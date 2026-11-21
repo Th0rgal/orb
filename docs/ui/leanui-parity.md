@@ -457,3 +457,5 @@ The Misc project (Core slug `default`) contains unassigned mission roots wheneve
 A committed Wayland IME batch can replace text on both sides of the caret.
 One Undo restores the original text and caret. Redo reapplies the complete
 replacement. Preedit-only updates preserve the edit history.
+
+Opening the harness picker requests the native Antigravity catalog for the selected destination and current login. Other harnesses remain selectable while discovery runs. An empty successful catalog removes that destination's native choices. A failed refresh offers a retry on reopening, and a different destination never inherits those model rows.

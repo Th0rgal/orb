@@ -76,8 +76,8 @@ def liveComposerControls (st : DesktopState) (width : SubPx) (newAgent := false)
     if interactive then WidgetNode.focusable id raw else raw
   let display := fun (s fallback : String) => if s.isEmpty then fallback else s
   let machine := ((st.launchMachines.getD []).lookup v.machine).getD <| ((st.fleetMachines.find? (·.machineId == v.machine)).map (·.name)).getD v.machine
-  let harness := ((st.catalog.find? (·.backend == v.backend)).map (·.harnessName)).getD v.backend
-  let model := ((st.catalog.find? fun c => c.backend == v.backend && c.model == v.model).map (·.modelName)).getD v.model
+  let harness := (((destinationCatalog st mid).find? (·.backend == v.backend)).map (·.harnessName)).getD v.backend
+  let model := (((destinationCatalog st mid).find? fun c => c.backend == v.backend && c.model == v.model).map (·.modelName)).getD v.model
   let machineHint := if st.fleetMachines.any (·.machineId == "core") then "Default machine" else "Choose machine"
   let children := (if newAgent then [] else [control 720 (display machine machineHint) mid.isEmpty]) ++ [control 721 (display harness "Harness") true, control 722 (display model "Model") true] ++
     (if ["codex","antigravity","claudecode"].contains v.backend then [control 723 (display v.effort "Default effort") true] else []) ++

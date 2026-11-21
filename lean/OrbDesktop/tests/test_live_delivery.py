@@ -63,7 +63,7 @@ class Delivery(unittest.TestCase):
     def test_launchable_remote_nodes_are_independent_of_personal_vms(self):
         def node(ident, **fields):
             return {'id': ident, 'status': 'online', **fields}
-        fleet = {'enabled': True, 'remote_launch': {'typed': True}, 'nodes': [
+        fleet = {'enabled': True, 'remote_launch': {'typed': True, 'harnesses': ['codex']}, 'nodes': [
             node('uruk', display_name='Uruk'), node('core'), node('admin', labels=['admin-only']),
             node('maintenance', cordoned=True), node('down', status='offline'),
             node('quarantined', quarantined_harnesses=['codex']),
@@ -81,6 +81,19 @@ class Delivery(unittest.TestCase):
         permitted = [r[1] for r in live.launch_machine_rows(fleet, True, 'codex')]
         self.assertEqual(permitted, ['uruk', 'admin', 'dgx-spark-admin'])
         self.assertEqual(list(live.launch_machine_rows({**fleet, 'remote_launch': {}}, True, '')), [])
+
+    def test_picker_uses_the_harness_and_proxy_capabilities_reported_by_core(self):
+        fleet = {'enabled': True, 'nodes': [{'id': 'uruk', 'status': 'online'}],
+                 'remote_launch': {'typed': True, 'harnesses': ['antigravity', 'codex'],
+                                   'requires_proxy_harnesses': ['codex'], 'proxy_url_configured': False}}
+        def rows(harness):
+            return list(live.launch_machine_rows(fleet, False, harness))
+        self.assertEqual(rows('opencode'), [])
+        self.assertEqual(rows('codex'), [])
+        self.assertEqual(rows('antigravity'), [('R', 'uruk', 'uruk')])
+        self.assertEqual(rows(''), [('R', 'uruk', 'uruk')])
+        fleet['remote_launch']['proxy_url_configured'] = True
+        self.assertEqual(rows('codex'), [('R', 'uruk', 'uruk')])
 
     def test_provider_inventory_projects_only_the_current_users_display_fields(self):
         accounts = [{'id': 'test-member', 'name': 'Gemini', 'label': 'Work', 'provider_type_name': 'Google',
@@ -177,6 +190,30 @@ class Delivery(unittest.TestCase):
             live.mutate('ben', 'skip-provider', 'gemini-work')
             request.assert_called_with('/api/ai/providers/gemini-work/preference',
                                        body={'enabled': False}, method='PUT')
+
+    def test_native_catalog_probes_the_selected_destination_and_rechecks_identity(self):
+        with patch.object(live, 'Connection') as conn:
+            c = conn.return_value
+            c.binding = 'ben'
+            c.request.return_value = [['gemini-4-neon', 'Neon']]
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                live.native_models('ben', 'node a')
+            c.request.assert_called_once_with('/api/providers/antigravity-models?node_id=node+a', deadline=20)
+            self.assertEqual(out.getvalue().splitlines(), ['native-models', 'N\tgemini-4-neon\tNeon'])
+            c.request.return_value = []
+            c.check.side_effect = ValueError('connection changed')
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), self.assertRaises(ValueError):
+                live.native_models('ben', 'core')
+            self.assertEqual(out.getvalue(), '')
+            c.request.assert_called_with('/api/providers/antigravity-models', deadline=20)
+            c.check.side_effect = None
+            for bad in ({}, ['xx'], [['x\ty', 'name']]):
+                c.request.return_value = bad
+                with contextlib.redirect_stdout(out), self.assertRaises(ValueError):
+                    live.native_models('ben', 'core')
+            self.assertEqual(out.getvalue(), '')
 
     def test_catalog_recovers_without_reopening_the_window(self):
         denied = live.urllib.error.HTTPError('http://localhost', 503, 'Unavailable', {}, None)
