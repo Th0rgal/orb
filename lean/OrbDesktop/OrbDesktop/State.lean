@@ -361,6 +361,30 @@ structure MissionMenu where
   listingFailed : Bool := false
   deriving Repr, Inhabited
 
+inductive ConnectionIssue where
+  | unavailable | missing | signin | denied | invalid
+  deriving BEq, Repr, Inhabited
+
+def ConnectionIssue.code : ConnectionIssue → String
+  | .unavailable => "unavailable"
+  | .missing => "missing"
+  | .signin => "signin"
+  | .denied => "denied"
+  | .invalid => "invalid"
+
+def ConnectionIssue.title : ConnectionIssue → String
+  | .unavailable => "Core unavailable"
+  | .missing => "Connect to Core"
+  | .signin => "Sign in to Core"
+  | .denied => "Access denied"
+  | .invalid => "Invalid saved connection"
+
+def ConnectionIssue.hint : ConnectionIssue → String
+  | .unavailable => "Retrying the connection to Core…"
+  | .missing => "Open Orb Settings → Account to connect."
+  | .signin | .invalid => "Reconnect in Orb Settings → Account."
+  | .denied => "Check your account’s access to this Core."
+
 /-- Complete single-owner pure state of the Orb Desktop shell. -/
 structure DesktopState where
   screen : ScreenId := .missionTranscript
@@ -373,6 +397,7 @@ structure DesktopState where
   stream : StreamCoalescer := Orb.Stream.Coalescer.empty
   liveData : Bool := false
   initialRosterPending : Bool := false
+  connectionIssue : ConnectionIssue := .unavailable
   connectionBinding : String := ""
   writeRequest : Option LiveWrite := none
   writeError : String := ""
@@ -426,7 +451,7 @@ def DesktopState.hasLiveConnection (st : DesktopState) : Bool := st.liveData && 
 
 def DesktopState.headerTitle (st : DesktopState) : String :=
   if st.initialRosterPending then "Connecting to Core…"
-  else if st.liveData && !st.hasLiveConnection then "Core unavailable"
+  else if st.liveData && !st.hasLiveConnection then st.connectionIssue.title
   else if (st.screen == .controlEmpty || st.screen == .controlPopulated) && st.openMission.isNone && !st.draftProject.isEmpty then
     ((st.sidebarRows.find? (·.rowId == "project:" ++ st.draftProject)).map (·.title)).getD st.draftProject
   else (st.selectedCard.map (·.title)).getD st.screen.headerTitle

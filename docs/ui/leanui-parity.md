@@ -4,6 +4,8 @@ How close the LeanUI desktop (`lean/OrbDesktop`, opt-in) is to the SolidJS
 desktop (`orb/`), measured per screen. The SolidJS screenshots are the
 reference; the LeanUI frames are the candidate.
 
+On startup and during recovery, the native window distinguishes an absent or invalid saved connection, a rejected session (401), denied access (403), and temporary Core unavailability. Connection details and response bodies never appear in these messages. A change of failure reason updates the open window and a successful roster read restores navigation.
+
 ## Reproduce
 
 ```sh
