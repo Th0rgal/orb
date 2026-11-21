@@ -1356,12 +1356,12 @@ function catalogStorageKey(path: string, token = getJwt()): string {
 }
 
 /** Small read-only catalogs keep local launch available across offline restarts. */
-async function cachedCatalog<T>(path:string, valid?: (value: unknown) => boolean, force = false):Promise<T>{
+async function cachedCatalog<T>(path:string, valid?: (value: unknown) => boolean, force = false, allowCachedFallback = true):Promise<T>{
  const version=connectionVersion(),token=getJwt();
  const key=catalogStorageKey(path,token);
  try{const value=await api<T>(path,force?{method:"GET"}:undefined);if(valid && !valid(value))throw new Error("Couldn’t load projects. The server returned an invalid response.");if(version===connectionVersion()){catalogMemory.set(key,value);try{localStorage.setItem(key,JSON.stringify(value));}catch{}}return value;}
  catch(error){
-  if(version!==connectionVersion()||getJwt()!==token||error instanceof ApiError)throw error;
+  if(!allowCachedFallback||version!==connectionVersion()||getJwt()!==token||error instanceof ApiError)throw error;
   if(catalogMemory.has(key)){const mem=catalogMemory.get(key);if(!valid || valid(mem))return mem as T;}
   const stored=localStorage.getItem(key);if(stored){try{const value=JSON.parse(stored);if(!valid || valid(value)){catalogMemory.set(key,value);return value as T;}}catch{}}
   throw error;
@@ -1846,12 +1846,12 @@ export function peekCachedProjects(): ProjectSummary[] | null {
   }
 }
 
-export async function listProjects(force = false): Promise<ProjectSummary[]> {
+export async function listProjects(force = false, allowCachedFallback = true): Promise<ProjectSummary[]> {
   const fetchedAt = Date.now(), url = getApiUrl();
   const data = await cachedCatalog<{ projects: ProjectSummary[] }>("/api/projects",
     value => !!value && typeof value === "object" && Array.isArray((value as {projects?: unknown}).projects)
       && (value as {projects: unknown[]}).projects.every(project => !!project && typeof project === "object" && typeof (project as {slug?: unknown}).slug === "string"),
-    force);
+    force, allowCachedFallback);
   // Colors ride on the roster; applying them never fails the list.
   try { void applyProjectRoster(data.projects ?? [], fetchedAt, url).catch(swallow("api.projectRoster")); } catch { /* keep the local colors */ }
   return (data.projects ?? []).filter(

@@ -135,6 +135,16 @@ Undo toast. Assertions identify the intended toast by its action text, without
 assuming the global toast collection has only one item or dismissing security
 warnings to make the test pass.
 
+### Cold startup in the shared desktop UI
+
+The WebKit and hybrid sidebars render the Inbox navigation immediately. For each
+connection, the first numeric badge waits for Core receipts and preferences, a
+full current and recent-completed response, and the bounded mission window of
+each live project in the catalog. A failed or partial initial load retries while
+the navigation stays quiet. Opening the panel uses the same mission union.
+The cold-start browser test records the first displayed count and IDs, the IDs
+before and after the first visit, and elapsed time to the sidebar and badge.
+
 ### LeanUI trial
 
 The live navigation badge and Inbox items use the same user-scoped snapshot.
