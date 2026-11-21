@@ -60,6 +60,32 @@ class Delivery(unittest.TestCase):
             live.roster()
         read.assert_called_once()
 
+    def test_provider_inventory_projects_only_the_current_users_display_fields(self):
+        accounts = [{'id': 'test-member', 'name': 'Gemini', 'label': 'Work', 'provider_type_name': 'Google',
+                     'enabled': True, 'user_enabled': False, 'account_email': 'private@example.test',
+                     'credential': 'PRIVATE'}, {'id': 'second', 'name': 'Cloud', 'provider_type': 'custom',
+                     'enabled': False, 'user_enabled': True}]
+        with patch.object(live, 'Connection') as conn, contextlib.redirect_stdout(io.StringIO()) as output:
+            conn.return_value.binding = 'ben'
+            conn.return_value.get.return_value = {'providers': accounts}
+            live.provider_inventory('thomas')
+            conn.return_value.get.assert_not_called()
+            live.provider_inventory('ben')
+        self.assertEqual(output.getvalue().splitlines(), [
+            'accounts', 'A\ttest-member\tWork\tGoogle\t0\t1', 'A\tsecond\tCloud\tcustom\t1\t0'])
+
+    def test_provider_toggle_requires_the_selected_account_receipt(self):
+        with patch.object(live, 'Connection') as conn:
+            conn.return_value.binding = 'ben'
+            request = conn.return_value.request
+            request.return_value = {'id': 'other', 'user_enabled': False}
+            with self.assertRaises(ValueError):
+                live.mutate('ben', 'skip-provider', 'gemini-work')
+            request.return_value = {'id': 'gemini-work', 'user_enabled': False}
+            live.mutate('ben', 'skip-provider', 'gemini-work')
+            request.assert_called_with('/api/ai/providers/gemini-work/preference',
+                                       body={'enabled': False}, method='PUT')
+
     def test_catalog_recovers_without_reopening_the_window(self):
         denied = live.urllib.error.HTTPError('http://localhost', 503, 'Unavailable', {}, None)
         rows = [('H', 'antigravity', 'Antigravity', 'gemini-4-neon', 'Neon')]
