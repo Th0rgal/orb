@@ -16,6 +16,7 @@ import LeanUI.Vulkan
 import LeanUI.Runtime
 import OrbDesktop.RepaintCheck
 import OrbDesktop.State
+import OrbDesktop.Voice
 import OrbDesktop.Core
 import OrbDesktop.Chrome
 import OrbDesktop.Screens
@@ -625,9 +626,14 @@ def main (args : List String) : IO UInt32 := do
       pure (pref.stdout.trimAscii != "false")
     catch _ => pure true
     let rt0 ← Runtime.openWindowRuntime rcfg "orb-desktop" initSt
+    let capability ← IO.mkRef ({} : VoiceCapability)
+    let voiceSlot ← IO.mkRef (none : Option VoiceSession)
     let slot ← IO.mkRef (none : Option LiveSubscription)
     let rt ← Runtime.withProducerWake fun wakeFd notify => do
       withLiveSources rcfg.darkTheme notify fun readSources => do
+        let probe ← IO.asTask (prio := .dedicated) do
+          capability.set (← probeVoice)
+          notify
         try
           Runtime.runWindow { rt0 with focus := initSt.initialFocusState } desktopReducer renderDesktopView
             (fun rt => do
@@ -637,11 +643,17 @@ def main (args : List String) : IO UInt32 := do
               let spin := animations && phase != st.badgePhase
               let damage := if spin then (runningBadgeDamage rt).elim damage (Damage.add damage) else damage
               let st := if spin then { st with badgePhase := phase } else st
-              let some updated ← readSources st | return (st, damage)
-              return (updated, some vp))
+              let updated ← readSources st
+              let next := updated.getD st
+              let voiced ← pollVoice voiceSlot capability next notify
+              return (voiced, if updated.isSome || voiced.voiceAvailable != next.voiceAvailable ||
+                voiced.voicePhase != next.voicePhase then some vp else damage))
             (·.liveData) desktopFocusChange (some wakeFd) (·.writeRequest.isSome)
             (fun rt => animations && (runningBadgeDamage rt).isSome)
-        finally closeLiveSubscription slot
+        finally
+          discard (IO.wait probe)
+          closeVoice voiceSlot
+          closeLiveSubscription slot
     Runtime.shutdownRuntime rt
     return 0
   catch e =>

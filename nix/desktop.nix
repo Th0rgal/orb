@@ -1,4 +1,4 @@
-{lib, stdenv, callPackage, clang, pkg-config, nodejs, pnpm, fetchPnpmDeps, pnpmConfigHook, gtk3, webkitgtk_4_1, makeBinaryWrapper, python3, wl-clipboard, zenity, revision ? "local checkout", turbo-lean ? null}:
+{lib, stdenv, callPackage, clang, pkg-config, nodejs, pnpm, fetchPnpmDeps, pnpmConfigHook, gtk3, webkitgtk_4_1, makeBinaryWrapper, python3, pulseaudio, wl-clipboard, zenity, revision ? "local checkout", turbo-lean ? null}:
 
 let
   core = callPackage ./package.nix {inherit turbo-lean; buildDesktop = true;};
@@ -37,7 +37,7 @@ stdenv.mkDerivation {
   installPhase = ''
     mkdir -p "$out/bin" "$out/share/applications" "$out/share/orb-desktop"
     makeBinaryWrapper "${core}/bin/orb-desktop-native" "$out/bin/orb-desktop-native" \
-      --prefix PATH : "${lib.makeBinPath [python3 wl-clipboard]}"
+      --prefix PATH : "${lib.makeBinPath [python3 pulseaudio wl-clipboard zenity]}"
     install -m 0755 orb-webkit "$out/bin/.orb-webkit"
     makeBinaryWrapper "$out/bin/.orb-webkit" "$out/bin/orb-webkit" \
       --set ORB_LOCALD_BIN "${core}/bin/orb-locald" --set ORB_UI_ROOT "${webUi}"

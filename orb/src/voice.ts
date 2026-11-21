@@ -6,6 +6,7 @@
  * to the Tauri side as a raw invoke body, and the Python worker there
  * transcribes on-device. Nothing is uploaded. See ../voice/README.md.
  */
+import voiceLanguages from "./voiceLanguages.json";
 import { nativeInvoke } from "./native";
 import { createSignal } from "solid-js";
 
@@ -14,22 +15,7 @@ import { createSignal } from "solid-js";
 // auto-detect, so every request names one. Default: the browser locale when
 // it is supported, otherwise English. The choice is remembered.
 
-export const VOICE_LANGUAGES: { code: string; label: string }[] = [
-  { code: "en", label: "English" },
-  { code: "fr", label: "Français" },
-  { code: "de", label: "Deutsch" },
-  { code: "es", label: "Español" },
-  { code: "it", label: "Italiano" },
-  { code: "pt", label: "Português" },
-  { code: "nl", label: "Nederlands" },
-  { code: "pl", label: "Polski" },
-  { code: "el", label: "Ελληνικά" },
-  { code: "ar", label: "العربية" },
-  { code: "ja", label: "日本語" },
-  { code: "zh", label: "中文" },
-  { code: "vi", label: "Tiếng Việt" },
-  { code: "ko", label: "한국어" },
-];
+export const VOICE_LANGUAGES = voiceLanguages;
 const LANGUAGE_CODES = new Set(VOICE_LANGUAGES.map((l) => l.code));
 const LANG_KEY = "orb.voiceLang";
 
