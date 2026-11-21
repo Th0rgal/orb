@@ -453,3 +453,10 @@ Picker labels stay inside the clickable row. The model picker accommodates provi
 At narrow composer widths the native client exposes placement, harness, model and effort through the Mission settings menu. A draft offers machine selection. An existing mission keeps its placement. The empty prompt truncates before the send button.
 
 The Misc project (Core slug `default`) contains unassigned mission roots whenever the project is present. Collapsing Misc hides those roots and their descendants. The sidebar connects each expanded folder or controller to its children at the icon center. A continued sibling keeps its vertical rail through nested rows. The last visible sibling ends in a rounded elbow at its own icon, irrespective of selection.
+
+A global sidebar page may contain a worker whose controller last ran before the
+page boundary. Core returns up to eight generations of authorized parents when
+the native sidebar requests ancestor context. The limit and offset select the
+initial page. An inaccessible parent ends that branch, including when an older
+ancestor is independently visible. Ordinary paginated callers retain their
+existing page size. Multiple workers referencing a controller produce one row.

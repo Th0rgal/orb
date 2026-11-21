@@ -8035,6 +8035,29 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   let .ok _ ← execParamQuery store.missionsDb
       "DELETE FROM missions WHERE id LIKE 'count-%';" #[]
     | do closeCoreStore store; return 1
+  -- The page contains two siblings. Their shared ancestor is outside the page
+  -- and the next private link must hide even an independently owned ancestor.
+  for (id, parent, owner, updated) in #[
+      ("tree-a", "tree-shared", "tree-member", "5"), ("tree-b", "tree-shared", "tree-member", "4"),
+      ("tree-shared", "tree-private", "tree-owner", "3"), ("tree-private", "tree-root", "tree-owner", "2"),
+      ("tree-root", "", "tree-member", "1")] do
+    let .ok () ← upsertMission store { m1 with id, parentMissionId := parent, ownerUserId := owner, updatedAt := updated }
+      | do closeCoreStore store; return 1
+  let .ok _ ← execParamQuery store.missionsDb
+      "INSERT INTO mission_shares(mission_id,user_id) VALUES ('tree-shared','tree-member');" #[]
+    | do closeCoreStore store; return 1
+  for (ancestors, expected) in #[(false, #["tree-a","tree-b"]), (true, #["tree-a","tree-b","tree-shared"])] do
+    let .ok body ← listMissionsJson store none (some "tree-member") { limit? := some 2, includeAncestors := ancestors }
+      | do closeCoreStore store; return 1
+    let .ok (.arr rows) := OrbBin.Json.parse body | do closeCoreStore store; return 1
+    if rows.filterMap (·.fieldStr? "id") != expected then
+      closeCoreStore store
+      IO.eprintln "[orb-core-test] FAIL: paged sidebar lost its shared parent or traversed a private mission"
+      return 1
+  let .ok _ ← execParamQuery store.missionsDb "DELETE FROM mission_shares WHERE mission_id='tree-shared';" #[]
+    | do closeCoreStore store; return 1
+  let .ok _ ← execParamQuery store.missionsDb "DELETE FROM missions WHERE id LIKE 'tree-%';" #[]
+    | do closeCoreStore store; return 1
   let txReq : TransferRecord := {
     id := "tx-1", missionId := "m-alpha", requestKey := "rk-1", revision := 0,
     phase := "preparing", destination := "ashur",

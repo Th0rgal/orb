@@ -487,7 +487,7 @@ def provider_inventory(binding):
 
 def roster_rows(c, include_archived=False):
     projects = c.get('/api/projects')['projects']
-    missions = c.get(f'/api/control/missions?limit={CURRENT_MISSION_LIMIT}')
+    missions = c.get(f'/api/control/missions?limit={CURRENT_MISSION_LIMIT}&include_ancestors=true')
     machines = c.get('/api/machines')
     if not all(isinstance(x, list) for x in (projects, missions, machines)):
         raise ValueError('invalid roster')
