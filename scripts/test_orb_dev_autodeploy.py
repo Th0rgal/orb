@@ -69,6 +69,34 @@ class DeployGateTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 64)
                 self.assertIn("usage:", result.stderr)
 
+    def test_dev_only_resolves_a_branch_commit_missing_from_build_clone(self):
+        import tempfile
+        script = (Path(__file__).parent / "ops/orb-deploy").read_text()
+        resolve = script[script.index('cd "$TREE"\ngit fetch'):script.index('say "deploy $SHA')]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            upstream, build = root / "upstream", root / "build"
+
+            def git(*args):
+                return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
+
+            git("init", "-q", "-b", "master", upstream)
+            def commit(subject):
+                git("-C", upstream, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+                    "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", subject)
+            commit("master")
+            git("clone", "-q", "--single-branch", upstream.as_uri(), build)
+            git("-C", upstream, "switch", "-qc", "candidate")
+            commit("dev candidate")
+            wanted = git("-C", upstream, "rev-parse", "HEAD")
+            with self.assertRaises(subprocess.CalledProcessError):
+                git("-C", build, "rev-parse", "--verify", "--quiet", wanted + "^{commit}")
+            result = subprocess.run(["bash", "-ec", 'TREE=$1; REF=$2; DEV_ONLY=1\n' + resolve
+                                     + 'printf %s "$SHA"', "test", str(build), wanted],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, wanted)
+
     def test_health_gate_requires_exact_build_not_only_healthy_status(self):
         import os
         import tempfile
