@@ -62,6 +62,7 @@ def run(model, consumer=False):
         goal_settings = Path(__file__).resolve().parents[1] / "lean/OrbCore/OrbCore/antigravity_goal_settings.json"
         requests = []
         advertised = []
+        resuming = False
 
         class Endpoint(BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -115,14 +116,14 @@ def run(model, consumer=False):
                 if not can_write:
                     # Some agy versions run a lightweight auxiliary model first.
                     part = {"text": "fixture"}
-                elif len(requests) == 1:
+                elif len(requests) == 1 and advertised[0]:
                     part = {"functionCall": {"name": "call_mcp_tool", "args": {
                         "ServerName": "sandboxed", "ToolName": "get_compute_fleet", "Arguments": {}}}}
-                elif len(requests) == 2:
+                elif not output.exists():
                     part = {"functionCall": {"name": "write_file", "args": {
                         "Path": str(output), "Content": "fixture proof"}}}
                 else:
-                    part = {"text": "fixture reply" if len(requests) == 3 else "<!-- GOAL_COMPLETE -->"}
+                    part = {"text": "<!-- GOAL_COMPLETE -->" if resuming else "fixture reply"}
                 candidate = {"index": 0, "finishReason": "STOP", "content": {"role": "model", "parts": [part]}}
                 response = {"candidates": [candidate]}
                 wire = ("data: " + json.dumps({"response": response} if consumer else response) + "\n\n").encode()
@@ -145,6 +146,8 @@ def run(model, consumer=False):
                 env.update(GEMINI_API_KEY="local-fixture", GOOGLE_GEMINI_BASE_URL=endpoint)
 
             def turn(*options):
+                nonlocal resuming
+                resuming = "--conversation" in options
                 model_flags = ["--model", model] if model else []
                 proc = subprocess.run([*launch, "--settings", goal_settings.read_text(), *model_flags, "--mode", "accept-edits", "--output-format", "stream-json",
                                        *options, "--print=Perform the next fixture step"], cwd=root, env=env,
@@ -179,6 +182,8 @@ def run(model, consumer=False):
                 # A user policy still wins over the mission-scoped approval.
                 receipt.unlink()
                 requests.clear()
+                advertised.clear()
+                output.unlink()
                 settings.write_text(json.dumps({**provider_settings, "permissions": {
                     "deny": ["mcp(sandboxed/get_compute_fleet)"]}}))
                 _, _, denied_steps = turn()
