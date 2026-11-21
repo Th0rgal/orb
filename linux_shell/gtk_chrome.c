@@ -12,14 +12,8 @@
 #include <sys/time.h>
 #include <unistd.h>
 #if defined(ORB_HAS_WEBKITGTK)
-#include <jsc/jsc.h>
+#include "gtk_leanui.h"
 #endif
-char *orb_json_escape_string(const char *s) {
-    if (!s) { s = ""; }
-    size_t len = strlen(s), j = 0; char *out = len <= 4096 ? malloc(len * 6 + 4) : NULL; if (!out) { return NULL; }
-    out[j++] = '"'; for (size_t i = 0; i < len; ++i) { unsigned char c = (unsigned char)s[i]; if (c == '"' || c == '\\') { out[j++] = '\\'; out[j++] = (char)c; } else if (c < 0x20 || c == 0x7F) { j += (size_t)snprintf(out + j, 8, "\\u%04x", c); } else { out[j++] = (char)c; } }
-    return out[j++] = '"', out[j] = '\0', out;
-}
 #if defined(ORB_HAS_WEBKITGTK)
 typedef struct { GtkWidget *win, *wv, *paned, *sb_box, *sb_list, *back_btn, *fwd_btn, *foot_btn, *foot_badge; OrbIconSpinner spin; JSCContext *jsc; GIOChannel *sse_ch; guint sse_src, retry_src; GString *sse_buf; GtkCssProvider *css; unsigned port; char token[128], *sb_scope; guint64 sb_req_gen, sb_scope_gen, sb_min_gen, sb_rev; int sb_inflight, sb_dirty, closed; } OrbGtkChrome;
 typedef struct { OrbGtkChrome *c; unsigned port; char token[128], *body, *resp; int kind; guint64 gen; } RpcJob;
@@ -64,7 +58,7 @@ static gboolean rpc_done(gpointer p) {
         if (res && jsc_value_is_object(res)) {
             {
                 JSCValue *rows = jsc_value_object_get_property(res, "rows"), *ft = jsc_value_object_get_property(res, "footer"); char *sc = jv_str(res, "scope"); double rv = jv_num(res, "revision");
-                if (rows && jsc_value_is_array(rows)) { if (accept_sb_resp(&c->sb_scope, &c->sb_scope_gen, c->sb_min_gen, &c->sb_rev, j->gen, sc, rv)) { populate_from_array(c, c->sb_list, rows, 0); orb_sel_sync(c->sb_list); apply_footer_state(c, ft); } } else if (j->kind == 2) { refresh_sidebar_rows(c); }
+                if (rows && jsc_value_is_array(rows)) { if (accept_sb_resp(&c->sb_scope, &c->sb_scope_gen, c->sb_min_gen, &c->sb_rev, j->gen, sc, rv)) { if (ORB_EMBEDDED) { orb_leanui_rows(c->sb_box, rows, ft, sc); } else { populate_from_array(c, c->sb_list, rows, 0); orb_sel_sync(c->sb_list); apply_footer_state(c, ft); } } } else if (j->kind == 2) { refresh_sidebar_rows(c); }
                 g_free(sc); if (ft) { g_object_unref(ft); } if (rows) { g_object_unref(rows); }
             }
         } else if (j->kind == 2) { refresh_sidebar_rows(c); }
@@ -155,21 +149,14 @@ static GtkWidget *make_tb_btn(OrbGtkChrome *c, const char *ic, const char *tip, 
 }
 static void on_foot_clicked(GtkButton *b, gpointer ud) { (void)b; OrbGtkChrome *c = (OrbGtkChrome *)ud; if (!gtk_style_context_has_class(gtk_widget_get_style_context(c->foot_btn), "orb-selected")) { eval_wv_target(c, "footer", "settings"); } }
 static void on_win_destroy(GtkWidget *w, gpointer ud) { (void)w; OrbGtkChrome *c = (OrbGtkChrome *)ud; c->closed = 1; orb_spinner_stop(&c->spin); }
-static gboolean on_win_key_press(GtkWidget *w, GdkEventKey *ev, gpointer ud) { (void)w; OrbGtkChrome *c = (OrbGtkChrome *)ud; guint mod = ev->state & gtk_accelerator_get_default_mod_mask(); gboolean prim = (mod & (GDK_CONTROL_MASK | GDK_SUPER_MASK | GDK_META_MASK)) != 0; if (prim && (ev->keyval == GDK_KEY_Delete || ev->keyval == GDK_KEY_KP_Delete) && !gtk_widget_has_focus(c->wv) && !GTK_IS_ENTRY(gtk_window_get_focus(GTK_WINDOW(c->win)))) { return orb_sel_delete(c->wv, c->sb_list, "m:current"); } /* WebView focus: ProjectFiles handles it (never while typing) */ if (ev->keyval == GDK_KEY_Escape && !gtk_widget_has_focus(c->wv) && orb_sel_clear(c->sb_list)) { return TRUE; } return FALSE; }
-static const char ORB_CHROME_CSS[] = ".orb-paned,.orb-sb scrolledwindow,.orb-sb viewport{background:transparent;background-image:none;border:none;box-shadow:none;}.orb-sb undershoot,.orb-sb overshoot,.orb-sb scrollbar,.orb-sb scrollbar contents,.orb-sb scrollbar trough,.orb-sb scrollbar slider,.orb-sb scrollbar button{opacity:0;min-width:0;min-height:0;margin:0;padding:0;background:transparent;background-image:none;border:none;box-shadow:none;}.orb-paned>separator{min-width:1px;min-height:1px;padding:0;margin:0;background-color:#2c2c2c;background-image:none;border:none;box-shadow:none;}.orb-sb{background-color:rgba(18,19,19,0.78);background-image:none;color:#d8d8d7;font-size:13px;}.orb-tb{padding:0 8px;}.orb-tb-btn{min-width:24px;min-height:24px;padding:0;margin:0;border-radius:6px;border:1px solid transparent;background:transparent;background-image:none;color:#8a8a8a;box-shadow:none;outline:none;}.orb-tb-btn:hover:not(:disabled){background-color:rgba(216,216,215,0.075);color:#d8d8d7;}.orb-tb-btn:disabled{opacity:0.42;}.orb-sb list{background:transparent;color:#d8d8d7;}.orb-sb row{min-height:30px;padding:0;margin:0 6px 1px 6px;border:1px solid transparent;border-radius:6px;background:transparent;color:#d8d8d7;outline:none;box-shadow:none;}.orb-sb row:hover:not(.orb-selected):not(.orb-sec):not(.orb-note){background-color:rgba(216,216,215,0.045);}.orb-sb row.orb-selected,.orb-multi{background-color:rgba(216,216,215,0.075);color:#e6e6e5;}.orb-sb row.orb-sec{min-height:20px;margin:13px 8px 4px 10px;color:#8a8a8a;font-size:11px;}.orb-sb row.orb-sec-toggle:hover{color:#b1b1b1;}.orb-sb row.orb-sec .orb-chev{color:inherit;font-size:11px;}.orb-sb row.orb-note{min-height:26px;margin:2px 8px 2px 10px;color:#8a8a8a;font-size:12px;}.orb-ico{color:rgba(216,216,215,0.62);}.orb-tb-btn .orb-ico{color:inherit;}.orb-sb row.orb-selected .orb-ico,.orb-foot button.orb-selected .orb-ico{color:#e6e6e5;}.orb-proj{color:#b1b1b1;}.orb-sb row:hover .orb-proj{color:#d8d8d7;}.orb-sub,.orb-sub-live{min-height:20px;min-width:0;padding:0 5px;border-radius:4px;border:1px solid transparent;background:transparent;background-image:none;color:#6c6c6b;font-size:11px;font-family:monospace;box-shadow:none;outline:none;}.orb-sub-live{color:#b1b1b1;}.orb-sub:hover,.orb-sub-live:hover{background-color:rgba(216,216,215,0.09);color:#e6e6e5;}.orb-add{min-width:18px;min-height:18px;border-radius:4px;}.orb-sb row.orb-sec .orb-add{color:#5c5c5c;}.orb-sb row:not(.orb-sec) .orb-add{opacity:0;}.orb-sb row:hover .orb-add,.orb-sb row:focus .orb-add,.orb-sb row .orb-add:focus{opacity:1;}.orb-sb row .orb-add:hover{color:#d8d8d7;}.orb-kbd{color:#5c5c5c;font-size:11px;}.orb-attn{color:#c9a227;font-size:12px;}.orb-badge{min-width:16px;min-height:16px;padding:0 5px;border-radius:999px;background-color:rgba(216,216,215,0.075);color:#8a8a8a;font-size:11px;}.orb-foot{padding:6px;border-top:1px solid #2c2c2c;}.orb-foot button{min-height:32px;padding:0 8px;border-radius:8px;border:1px solid transparent;background:transparent;background-image:none;color:#b1b1b1;box-shadow:none;outline:none;}.orb-foot button:hover:not(.orb-selected){background-color:rgba(216,216,215,0.045);color:#d8d8d7;}.orb-foot button.orb-selected{color:#d8d8d7;font-weight:500;}.orb-sb row:focus-visible,.orb-tb-btn:focus-visible,.orb-sub:focus-visible,.orb-sub-live:focus-visible,.orb-foot button:focus-visible{border-color:#5b5b5a;outline:none;box-shadow:none;}";
-/* Light theme: the same sheet with each dark token swapped for its `styles.css` light value. */
-static void orb_chrome_apply_theme(OrbGtkChrome *c, gboolean light) {
-    static const char *m[][2] = { {"#d8d8d7", "#242423"}, {"#e6e6e5", "#101010"}, {"#b1b1b1", "#535250"}, {"#8a8a8a", "#7b7a76"}, {"#6c6c6b", "#939290"}, {"#5c5c5c", "#a9a8a2"}, {"#5b5b5a", "#a9a8a2"}, {"#2c2c2c", "#e8e7e2"}, {"rgba(18,19,19,0.78)", "rgba(246,246,244,0.72)"}, {"216,216,215", "36,36,35"} };
-    char *s = g_strdup(ORB_CHROME_CSS); for (size_t i = 0; light && i < G_N_ELEMENTS(m); i++) { char **parts = g_strsplit(s, m[i][0], -1); g_free(s); s = g_strjoinv(m[i][1], parts); g_strfreev(parts); }
-    gtk_css_provider_load_from_data(c->css, s, -1, NULL); g_free(s); orb_icons_light = light; if (c->win) { gtk_widget_queue_draw(c->win); }
-}
+static gboolean on_win_key_press(GtkWidget *w, GdkEventKey *ev, gpointer ud) { (void)w; OrbGtkChrome *c = (OrbGtkChrome *)ud; guint mod = ev->state & gtk_accelerator_get_default_mod_mask(); gboolean prim = (mod & (GDK_CONTROL_MASK | GDK_SUPER_MASK | GDK_META_MASK)) != 0; if (prim && (ev->keyval == GDK_KEY_Delete || ev->keyval == GDK_KEY_KP_Delete) && !gtk_widget_has_focus(c->wv) && !GTK_IS_ENTRY(gtk_window_get_focus(GTK_WINDOW(c->win)))) { return orb_sel_delete(c->wv, c->sb_list, "m:current"); } /* WebView focus: ProjectFiles handles it (never while typing) */ if (ev->keyval == GDK_KEY_Escape && !gtk_widget_has_focus(c->wv) && orb_sel_clear(c->sb_list)) { return TRUE; } if (ORB_EMBEDDED && prim && !ev->is_modifier && !gtk_widget_has_focus(c->wv)) { gtk_widget_grab_focus(c->wv); return gtk_window_propagate_key_event(GTK_WINDOW(w), ev); } return FALSE; }
 static void on_script_msg(WebKitUserContentManager *ucm, WebKitJavascriptResult *jr, gpointer ud) {
     (void)ucm; OrbGtkChrome *c = (OrbGtkChrome *)ud; JSCValue *v = webkit_javascript_result_get_js_value(jr); if (!v || !jsc_value_is_object(v)) { return; }
     char *cmd = jv_str(v, "command"); JSCValue *args = jsc_value_object_get_property(v, "args");
     if (strcmp(cmd, "set_native_sidebar") == 0) { gboolean open = (args && jsc_value_is_object(args)) ? jv_bool(args, "open") : !gtk_widget_get_visible(c->sb_box); gtk_widget_set_visible(c->sb_box, open); }
-    else if (strcmp(cmd, "set_window_theme") == 0 && args && jsc_value_is_object(args)) { char *t = jv_str(args, "theme"); orb_chrome_apply_theme(c, t && strcmp(t, "light") == 0); g_free(t); }
+    else if (strcmp(cmd, "set_window_theme") == 0 && args && jsc_value_is_object(args)) { char *t = jv_str(args, "theme"); gboolean light = !g_strcmp0(t, "light"); orb_gtk_apply_theme(c->css, light); if (ORB_EMBEDDED) orb_leanui_theme(c->sb_box, light); gtk_widget_queue_draw(c->win); g_free(t); }
     else if (strcmp(cmd, "window_drag") == 0) { orb_gtk_begin_window_drag(c->win); }
-    else if (strcmp(cmd, "set_native_history") == 0 && args && jsc_value_is_object(args)) { gtk_widget_set_sensitive(c->back_btn, jv_bool(args, "can_back")); gtk_widget_set_sensitive(c->fwd_btn, jv_bool(args, "can_forward")); }
+    else if (strcmp(cmd, "set_native_history") == 0 && args && jsc_value_is_object(args)) { if (ORB_EMBEDDED) { orb_leanui_history(c->sb_box, jv_bool(args, "can_back"), jv_bool(args, "can_forward")); } else { gtk_widget_set_sensitive(c->back_btn, jv_bool(args, "can_back")); gtk_widget_set_sensitive(c->fwd_btn, jv_bool(args, "can_forward")); } }
     if (args) { g_object_unref(args); } g_free(cmd);
 }
 static gboolean start_sse_watch(gpointer ud);
@@ -185,10 +172,7 @@ static gboolean start_sse_watch(gpointer ud) {
     char req[512]; int len = snprintf(req, sizeof(req), "GET /__orb_events HTTP/1.1\r\nHost: 127.0.0.1:%u\r\nAccept: text/event-stream\r\nX-Orb-Token: %s\r\n\r\n", c->port, c->token); if (len > 0) { (void)send(fd, req, (size_t)len, MSG_NOSIGNAL); }
     g_string_truncate(c->sse_buf, 0); c->sse_ch = g_io_channel_unix_new(fd); c->sse_src = g_io_add_watch(c->sse_ch, G_IO_IN | G_IO_HUP | G_IO_ERR, on_sse_io, c); return FALSE;
 }
-GtkWidget *orb_gtk_chrome_wrap(GtkWidget *win, GtkWidget *wv, WebKitUserContentManager *ucm, unsigned port, const char *token) {
-    OrbGtkChrome *c = g_new0(OrbGtkChrome, 1); c->win = win; c->wv = wv; c->port = port; c->jsc = jsc_context_new(); c->sse_buf = g_string_sized_new(1024); snprintf(c->token, sizeof(c->token), "%s", token ? token : "");
-    c->css = gtk_css_provider_new(); orb_chrome_apply_theme(c, FALSE);
-    gtk_style_context_add_provider_for_screen(gtk_widget_get_screen(win), GTK_STYLE_PROVIDER(c->css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+static void build_classic_sidebar(OrbGtkChrome *c) {
     c->sb_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0); gtk_widget_set_size_request(c->sb_box, 220, -1); gtk_style_context_add_class(gtk_widget_get_style_context(c->sb_box), "orb-sb");
     GtkWidget *top = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2), *tgap = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0), *scw = gtk_scrolled_window_new(NULL, NULL), *foot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0), *fhb = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8), *fl = gtk_label_new("Settings");
     gtk_widget_set_size_request(top, -1, 35); gtk_style_context_add_class(gtk_widget_get_style_context(top), "orb-tb"); gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scw), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC); gtk_style_context_add_class(gtk_widget_get_style_context(foot), "orb-foot");
@@ -198,6 +182,22 @@ GtkWidget *orb_gtk_chrome_wrap(GtkWidget *win, GtkWidget *wv, WebKitUserContentM
     c->foot_btn = gtk_button_new(); gtk_button_set_relief(GTK_BUTTON(c->foot_btn), GTK_RELIEF_NONE); gtk_widget_set_focus_on_click(c->foot_btn, FALSE); orb_gtk_bind_pointer_cursor(c->foot_btn); gtk_label_set_xalign(GTK_LABEL(fl), 0.0f); c->foot_badge = gtk_label_new(""); gtk_style_context_add_class(gtk_widget_get_style_context(c->foot_badge), "orb-badge"); gtk_widget_set_valign(c->foot_badge, GTK_ALIGN_CENTER); gtk_widget_set_no_show_all(c->foot_badge, TRUE);
     gtk_box_pack_start(GTK_BOX(fhb), orb_make_icon_widget(&c->spin, "gear", NULL, NULL), FALSE, FALSE, 0); gtk_box_pack_start(GTK_BOX(fhb), fl, TRUE, TRUE, 0); gtk_box_pack_end(GTK_BOX(fhb), c->foot_badge, FALSE, FALSE, 0); gtk_container_add(GTK_CONTAINER(c->foot_btn), fhb); g_signal_connect(c->foot_btn, "clicked", G_CALLBACK(on_foot_clicked), c); gtk_box_pack_start(GTK_BOX(foot), c->foot_btn, TRUE, TRUE, 0);
     gtk_box_pack_start(GTK_BOX(c->sb_box), orb_gtk_drag_area(top), FALSE, FALSE, 0); gtk_box_pack_start(GTK_BOX(c->sb_box), scw, TRUE, TRUE, 0); gtk_box_pack_end(GTK_BOX(c->sb_box), foot, FALSE, FALSE, 0);
+}
+#ifdef ORB_LEANUI_HOST
+static void embedded_action(gpointer data, const char *kind, const char *target) {
+    OrbGtkChrome *c = data;
+    if (!strcmp(kind, "expand")) { toggle_row_expand(c, target); return; }
+    gtk_widget_grab_focus(c->wv);
+    if (!strcmp(kind, "hide")) on_tb_sb_clicked(NULL, c);
+    else eval_wv_target(c, kind, target);
+}
+#endif
+GtkWidget *orb_gtk_chrome_wrap(GtkWidget *win, GtkWidget *wv, WebKitUserContentManager *ucm, unsigned port, const char *token) {
+    OrbGtkChrome *c = g_new0(OrbGtkChrome, 1); c->win = win; c->wv = wv; c->port = port; c->jsc = jsc_context_new(); c->sse_buf = g_string_sized_new(1024); snprintf(c->token, sizeof(c->token), "%s", token ? token : "");
+    c->css = gtk_css_provider_new(); orb_gtk_apply_theme(c->css, FALSE);
+    gtk_style_context_add_provider_for_screen(gtk_widget_get_screen(win), GTK_STYLE_PROVIDER(c->css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    if (ORB_EMBEDDED) c->sb_list = c->sb_box = orb_leanui_new(wv, embedded_action, c);
+    else build_classic_sidebar(c);
     c->paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL); gtk_style_context_add_class(gtk_widget_get_style_context(c->paned), "orb-paned"); gtk_paned_pack1(GTK_PANED(c->paned), c->sb_box, FALSE, FALSE); gtk_paned_pack2(GTK_PANED(c->paned), wv, TRUE, FALSE); gtk_paned_set_position(GTK_PANED(c->paned), 220);
     g_signal_connect(ucm, "script-message-received::orbNative", G_CALLBACK(on_script_msg), c); webkit_user_content_manager_register_script_message_handler(ucm, "orbNative");
     return g_signal_connect(win, "destroy", G_CALLBACK(on_win_destroy), c), g_signal_connect(win, "key-press-event", G_CALLBACK(on_win_key_press), c), g_idle_add(start_sse_watch, c), c->paned;
