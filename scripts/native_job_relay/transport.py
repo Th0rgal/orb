@@ -44,6 +44,19 @@ def admission(core_port, claim):
         conn.close()
 
 
+async def checked_admission(port, claim):
+    # Bound time spent waiting for a thread as well as the loopback exchange.
+    return await asyncio.wait_for(asyncio.to_thread(admission, port, claim), 1.25)
+
+
+async def finish(writer):
+    writer.close()
+    try:
+        await asyncio.wait_for(writer.wait_closed(), 1)
+    except (OSError, asyncio.TimeoutError):
+        writer.transport.abort()
+
+
 async def copy(reader, writer):
     while data := await reader.read(16384):
         writer.write(data)
@@ -128,7 +141,7 @@ class AccountTransport:
             destination = Destination(claim["destination"])
             if claim["account"] != self.account:
                 raise PermissionError("wrong relay account")
-            current = await asyncio.to_thread(admission, self.core_port, claim)
+            current = await checked_admission(self.core_port, claim)
             expires, _ = current
             lifetime = expires - time.time()
             if lifetime <= 0:
@@ -136,7 +149,7 @@ class AccountTransport:
             async def monitor():
                 while True:
                     await asyncio.sleep(.25)
-                    if await asyncio.to_thread(admission, self.core_port, claim) != current:
+                    if await checked_admission(self.core_port, claim) != current:
                         raise PermissionError("grant changed")
 
             async def stream():
@@ -146,7 +159,7 @@ class AccountTransport:
                     writer.write(b"OK\n")
                     await writer.drain()
                     hello = await asyncio.wait_for(client_hello(reader, destination), 5)
-                    if await asyncio.to_thread(admission, self.core_port, claim) != current:
+                    if await checked_admission(self.core_port, claim) != current:
                         raise PermissionError("grant changed")
                     out.write(hello)
                     await out.drain()
@@ -155,6 +168,7 @@ class AccountTransport:
                     out.transport.abort()
 
             await asyncio.wait_for(first_completed(monitor(), stream()), lifetime)
+            await finish(writer)
         except (OSError, ValueError, KeyError, TypeError, EOFError, http.client.HTTPException,
                 asyncio.LimitOverrunError, asyncio.TimeoutError):
             pass
@@ -189,6 +203,7 @@ async def node_connection(reader, writer, context, host, port, claim):
             return channel
         channel = await asyncio.wait_for(setup(), 8)
         await first_completed(copy(reader, outer), copy(channel, writer))
+        await finish(writer)
     except (OSError, ValueError, EOFError, asyncio.TimeoutError):
         pass
     finally:

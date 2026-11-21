@@ -190,16 +190,21 @@ async def exercise(args, root, db, core_port, claim, operator):
                            GOOGLE_GEMINI_BASE_URL="https://" + HOST, GEMINI_API_KEY="fixture",
                            HTTPS_PROXY=f"socks5://127.0.0.1:{local}", HTTP_PROXY=f"socks5://127.0.0.1:{local}",
                            TERM="dumb", NO_PROXY="")
-                proc = await asyncio.create_subprocess_exec(args.agy,"--model","gemini-4-carbon-high","--output-format","stream-json",
-                    "--print=Read the disposable ledger",cwd=profile,env=env,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
-                try:
-                    events,_ = await asyncio.wait_for(proc.communicate(),50)
-                finally:
-                    if proc.returncode is None:
-                        proc.kill()
-                        await proc.wait()
-                assert proc.returncode == 0 and any(json.loads(line).get("result",{}).get("status")=="SUCCESS"
-                                                   for line in events.splitlines()), proc.returncode
+                async def native_turn():
+                    proc = await asyncio.create_subprocess_exec(
+                        args.agy, "--model", "gemini-4-carbon-high", "--output-format", "stream-json",
+                        "--print=Read the disposable ledger", cwd=profile, env=env,
+                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                    try:
+                        events, _ = await asyncio.wait_for(proc.communicate(), 50)
+                    finally:
+                        if proc.returncode is None:
+                            proc.kill()
+                            await proc.wait()
+                    return [json.loads(line)["result"]["status"] for line in events.splitlines()
+                            if "result" in json.loads(line)]
+
+                assert await native_turn() == ["SUCCESS"]
                 assert any(b":streamGenerateContent" in hit for hit in origin_hits)
                 assert relay_hits and not direct_hits
                 print("native agy 1.5.14 Carbon SUCCESS; verified provider TLS through assigned account relay; direct hits=0", flush=True)
@@ -236,8 +241,9 @@ async def exercise(args, root, db, core_port, claim, operator):
                 await relay.wait_closed()
                 before = len(origin_hits)
                 await attempt({})
+                assert await native_turn() == ["ERROR"]
                 assert len(origin_hits) == before and not direct_hits
-                print("account relay listener stopped with live grant; new connection denied; direct hits=0", flush=True)
+                print("account relay listener stopped with live grant; native agy ERROR; origin delta=0; direct hits=0", flush=True)
                 status, body = await asyncio.to_thread(request, core_port, operator, "POST",
                                                        "/api/control/missions/" + mission + "/cancel", {})
                 assert status == 200, (status, body)
