@@ -1735,7 +1735,6 @@ def run : IO Unit := do
         name := "Owner fixture"
         providerType := "openai"
         apiKey := "fixture-only"
-        createdByUserId := member.id
       }
       IO.ofExcept (← upsertAIProvider store ownerRow)
       let (wrongType, _) ← putJson app memberJwt s!"/api/ai/providers/{ownerRow.id}/alternative-routers"
@@ -1744,15 +1743,17 @@ def run : IO Unit := do
       let ownerRoute := s!"/api/ai/providers/{ownerRow.id}/vpn"
       let ownRoute ← getJson app memberJwt ownerRoute now
       unless ownRoute.fieldBool? "can_configure" == some true do
-        failures := failures.push "A named member can configure the connection of their own provider"
+        failures := failures.push "A member can configure a shared provider"
       let testPool ← Std.Mutex.new ({} : AccountVpnPool.PoolState)
-      let (ownerCode, saved) ← putJson { app with vpnPool? := some testPool } memberJwt ownerRoute
-        "{\"mode\":\"direct\"}" now
-      unless ownerCode == 200 && saved.fieldStr? "mode" == some "direct" do
-        failures := failures.push "Saving the owner's connection must succeed"
-      let (foreignCode, _) ← putJson app memberJwt "/api/ai/providers/10000000-0000-4000-8000-000000000001/vpn"
-        "{\"mode\":\"direct\"}" now
-      unless foreignCode == 403 do failures := failures.push "A member cannot change another account's route"
+      let (memberCode, saved) ← putJson { app with vpnPool? := some testPool } memberJwt ownerRoute
+        "{\"mode\":\"vpn\",\"country\":\"NL\"}" now
+      let adminView ← getJson app jwt ownerRoute now
+      unless memberCode == 200 && saved.fieldStr? "country" == some "NL" &&
+          adminView.fieldStr? "country" == some "NL" do
+        failures := failures.push "An administrator must see the shared country saved by a member"
+      IO.ofExcept (← upsertAIProvider store { ownerRow with enabled := false })
+      let (hiddenCode, _) ← putJson app memberJwt ownerRoute "{\"mode\":\"direct\"}" now
+      unless hiddenCode == 403 do failures := failures.push "Hidden providers cannot be reconfigured by members"
       IO.ofExcept (← deleteAIProvider store ownerRow.id)
       let (missing, _) ← putJson app jwt accountRoute "{}" now
       if missing != 404 then failures := failures.push "VPN admin route must resolve the selected account"

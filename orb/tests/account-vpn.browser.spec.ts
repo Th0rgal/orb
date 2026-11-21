@@ -48,7 +48,7 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
   await shared.click();
   const routerToggle = page.getByRole("switch", { name: "Allow alternative routers" });
   await expect(routerToggle).toHaveCount(0);
-  await expect(page.getByLabel("Account connection", { exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("Account connection", { exact: true })).toBeVisible();
   await shared.click();
   await page.locator(".p-acc-btn").filter({ hasText: "b@example.invalid" }).click();
   await expect(routerToggle).toBeChecked();
@@ -59,6 +59,8 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
   await own.click();
   await expect(routerToggle).not.toBeChecked();
   expect(routerWrites).toEqual(["/api/ai/providers/b/alternative-routers"]);
+  await own.click();
+  await shared.click();
   const select = page.getByLabel("Account connection", { exact: true });
   await expect(select).toHaveValue("");
   await select.selectOption("NL");
@@ -68,7 +70,7 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
   await expect(verified).toBeVisible();
   await select.selectOption("");
   await expect(verified).toHaveCount(0);
-  const path = "/api/ai/providers/b/vpn";
+  const path = "/api/ai/providers/a/vpn";
   expect(changes).toEqual([[path, { mode: "vpn", country: "NL" }], [path, { mode: "vpn", country: "NL" }], [path, { mode: "direct" }]]);
 });
 

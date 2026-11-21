@@ -1348,7 +1348,7 @@ fun OrbProvidersSettingsPage(
                                             verticalArrangement = Arrangement.spacedBy(10.dp)
                                         ) {
                                             if (manages && providerType == "antigravity") AlternativeRouterSettings(core, pid)
-                                            if (manages) AccountVpnSettings(core, pid)
+                                            AccountVpnSettings(core, pid)
                                             usageLimitStatus(detail)?.let { limit ->
                                                 Text(
                                                     text = limit.label,
