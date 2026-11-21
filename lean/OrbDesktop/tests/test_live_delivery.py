@@ -60,6 +60,9 @@ class Delivery(unittest.TestCase):
             live.roster()
         read.assert_called_once()
 
+    def test_saved_session_recovers_inside_the_window(self):
+        self.run_wire('reconnect')
+
     def run_wire(self, mode):
         paths, tokens = [], []
         db = fixture()
@@ -71,6 +74,9 @@ class Delivery(unittest.TestCase):
                 path = self.path
                 paths.append(path)
                 tokens.append(self.headers.get('Authorization'))
+                if mode == 'reconnect' and tokens[-1] == 'Bearer fixture':
+                    self.send_error(401)
+                    return
                 if path == '/api/projects':
                     result = {'projects': [dict(slug='p', title='Project title', objective='Objective')]}
                 elif path == '/api/control/missions?limit=200':
@@ -132,6 +138,11 @@ class Delivery(unittest.TestCase):
                         api_url='', apiUrl=f'http://127.0.0.1:{server.server_port}', token=token)))
                 subprocess.run(['lean', '-j', '1', '-M', '1024', '--run', 'tests/LiveDelivery.lean', mode],
                                cwd=PKG, env={**os.environ, 'ORB_STATE_DIR': root}, check=True, timeout=20)
+                if mode == 'reconnect':
+                    first = tokens.index('Bearer changed')
+                    self.assertGreater(first, 0)
+                    self.assertTrue(all(t == 'Bearer changed' for t in tokens[first:]))
+                    return
                 self.assertTrue(all(t == 'Bearer fixture' for t in tokens))
                 self.assertNotIn('/redirect', paths)
                 self.assertNotIn(a, paths)

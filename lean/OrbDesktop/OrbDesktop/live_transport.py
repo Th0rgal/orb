@@ -315,6 +315,18 @@ def roster():
         print('\t'.join(map(label, row)))
 
 
+def recover_roster():
+    """Wait for a valid saved session and a complete roster after disconnection."""
+    delay = 1
+    while True:
+        try:
+            roster()
+            return
+        except (OSError, ValueError, KeyError, StopIteration, TypeError):
+            time.sleep(delay)
+            delay = min(30, 2 * delay)
+
+
 def catalog(binding, rules):
     c = Connection()
     if c.binding != binding:

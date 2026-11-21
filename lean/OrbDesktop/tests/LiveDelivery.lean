@@ -142,6 +142,21 @@ def main (args : List String) : IO Unit := do
   let (left, _) ← Wayland.stepWireEvent entered { enter with opcode := 1, args := #[] }
   unless left.enterSerial.isNone do throw (IO.userError "cursor retained a serial after surface leave")
   let boot ← loadLiveState
+  if args == ["reconnect"] then
+    unless boot.isNone do throw (IO.userError "expired fixture token was accepted")
+    let root := System.FilePath.mk ((← IO.getEnv "ORB_STATE_DIR").getD "")
+    withLiveSources true (pure ()) fun readSources => do
+      let mut state := DesktopState.liveUnavailable
+      discard <| readSources state
+      IO.FS.rename (root / "rotated") (root / "connection.json")
+      for _ in [:300] do
+        if let some next ← readSources state then state := next
+        if state.hasLiveConnection && !state.catalogLoading then
+          unless state.missionCards.length == 2 do throw (IO.userError "incomplete recovered roster")
+          return
+        IO.sleep 20
+      throw (IO.userError "window failed to recover the new session and reload its catalog")
+    return
   if args == ["unavailable"] then
     unless boot.isNone do throw (IO.userError "failed bootstrap appeared successful")
     return

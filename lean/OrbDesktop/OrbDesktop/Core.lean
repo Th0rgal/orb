@@ -43,9 +43,9 @@ private def machineCard (idx : Nat) (xs : List String) : FleetMachineCard :=
     state := if (col xs 7).isEmpty then col xs 8 else col xs 7
     ttlLabel := col xs 9, costLabel := col xs 10, activeMissions := (col xs 11).toNat?.getD 0 }
 
-def loadLiveState (isDark := true) (scale120 := 120) : IO (Option DesktopState) := do
-  let some (header :: lines) ← (try runProjection catch _ => pure none) | return none
-  let ["C", binding] := splitTab header | return none
+private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale120 : Nat) : Option DesktopState := do
+  let header :: lines := lines | none
+  let ["C", binding] := splitTab header | none
   let ps := lines.filterMap (fun line => let xs := splitTab line; if col xs 0 == "P" then some xs else none)
   let ms := lines.filterMap (fun line => let xs := splitTab line; if col xs 0 == "M" then some xs else none)
   let ns := lines.filterMap (fun line => let xs := splitTab line; if col xs 0 == "N" then some xs else none)
@@ -58,7 +58,7 @@ def loadLiveState (isDark := true) (scale120 := 120) : IO (Option DesktopState) 
     { widgetId := 112, rowId := "nav:machines", kind := "nav", title := "Machines", shortcut := "⌘3" },
     { widgetId := 109, rowId := "section:missions", kind := "section", title := "Missions" }] ++ missionRows ++
     [{ widgetId := 108, rowId := "section:projects", kind := "section", title := "Projects" }] ++ projects
-  return some { DesktopState.liveUnavailable isDark scale120 with
+  return { DesktopState.liveUnavailable isDark scale120 with
     screen := if missions.isEmpty then .controlEmpty else .controlPopulated
     syncCursor := { epoch := 0, seq := 0 }
     connectionBinding := binding
@@ -67,28 +67,58 @@ def loadLiveState (isDark := true) (scale120 := 120) : IO (Option DesktopState) 
     missionCards := missions
     fleetMachines := machines, catalogLoading := true }
 
-/-- Load selector choices separately so a cold provider catalog cannot delay the sidebar. -/
-def withLiveCatalog {α : Type} (binding : String) (notify : IO Unit)
-    (k : IO (Option (List CatalogModel)) → IO α) : IO α := do
-  if binding.isEmpty then return ← k (pure none)
-  let child ← IO.Process.spawn {
-    cmd := "python3", args := #["-I", "-c", transport ++ "\ncatalog(sys.argv[1], json.loads(sys.argv[2]))", binding, modelCatalogRules]
-    stdout := .piped, stderr := .null }
-  let mailbox ← Std.Mutex.new (none : Option (List CatalogModel))
+def loadLiveState (isDark := true) (scale120 := 120) : IO (Option DesktopState) := do
+  let some lines ← (try runProjection catch _ => pure none) | return none
+  return liveStateFromProjection lines isDark scale120
+
+private structure LiveRead where
+  binding : String
+  take : IO (Option (List String))
+  stop : IO Unit
+
+private def startLiveRead (binding : String) (notify : IO Unit) : IO LiveRead := do
+  let args := if binding.isEmpty then #["-I", "-c", transport ++ "\nrecover_roster()"]
+    else #["-I", "-c", transport ++ "\ncatalog(sys.argv[1], json.loads(sys.argv[2]))", binding, modelCatalogRules]
+  let child ← IO.Process.spawn { cmd := "python3", args, stdout := .piped, stderr := .null }
+  let mailbox ← Std.Mutex.new (none : Option (List String))
   let reader ← IO.asTask (prio := .dedicated) do
     let out ← try child.stdout.readToEnd catch _ => pure ""
-    let models := (out.splitOn "\n").filterMap fun line =>
-      match splitTab line with
-      | ["H", backend, harnessName, model, modelName] =>
-        some ({ backend, harnessName, model, modelName } : CatalogModel)
-      | _ => none
-    mailbox.atomically (set (some models))
+    mailbox.atomically (set (some (out.splitOn "\n")))
     notify
-  try k (mailbox.atomically (modifyGet fun rows => (rows, none)))
-  finally
+  return { binding, take := mailbox.atomically (modifyGet fun rows => (rows, none)), stop := do
     try child.kill catch _ => pure ()
     discard child.wait
-    discard (IO.wait reader)
+    discard (IO.wait reader) }
+
+/-- Keep recovery and catalog reads off the window thread. A new binding retires
+    its predecessor's reader before any result can enter the new session. -/
+def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
+    (k : (DesktopState → IO (Option DesktopState)) → IO α) : IO α := do
+  let slot ← IO.mkRef (none : Option LiveRead)
+  let close := do
+    if let some r ← slot.swap none then r.stop
+  try
+    k fun st => do
+      if !st.liveData then return none
+      let current ← slot.get
+      if current.any (·.binding != st.connectionBinding) then close
+      if st.hasLiveConnection && !st.catalogLoading then return none
+      let source ← match ← slot.get with
+        | some r => pure r
+        | none => do
+          let r ← startLiveRead st.connectionBinding notify
+          slot.set (some r)
+          pure r
+      let some lines ← source.take | return none
+      close
+      if source.binding.isEmpty then return liveStateFromProjection lines isDark st.scale120
+      let models := lines.filterMap fun line =>
+        match splitTab line with
+        | ["H", backend, harnessName, model, modelName] =>
+          some ({ backend, harnessName, model, modelName } : CatalogModel)
+        | _ => none
+      return some { st with catalog := models, catalogLoading := false }
+  finally close
 
 inductive LiveUpdate where
   | sample (visible : List String) (bubble : Option (String × String × String))

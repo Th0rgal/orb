@@ -1052,7 +1052,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
              [buildComposerWidget theme mainW composerH { st.composer with placeholder := "Describe a task, / for commands, @ for context" }
                [] (some (liveComposerControls st (min (pxToSub 748) (mainW - pxToSub 68))))]
            else if st.liveData then screenTextLine theme mainW (pxToSub 32) (pxToSub 13)
-           (pxToSub 21) pal.textMuted "Core unavailable"
+           (pxToSub 21) pal.textPrimary "Waiting for a Core connection…"
            else buildNewAgentBody st mainW bodyH]
 
   let baseShell : WidgetNode :=

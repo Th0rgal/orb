@@ -595,7 +595,7 @@ def main (args : List String) : IO UInt32 := do
     let rt0 ← Runtime.openWindowRuntime rcfg "orb-desktop" initSt
     let slot ← IO.mkRef (none : Option LiveSubscription)
     let rt ← Runtime.withProducerWake fun wakeFd notify => do
-      withLiveCatalog initSt.connectionBinding notify fun takeCatalog => do
+      withLiveSources rcfg.darkTheme notify fun readSources => do
         try
           Runtime.runWindow { rt0 with focus := initSt.initialFocusState } desktopReducer renderDesktopView
             (fun rt => do
@@ -605,10 +605,9 @@ def main (args : List String) : IO UInt32 := do
               let spin := animations && phase != st.badgePhase
               let damage := if spin then (runningBadgeDamage rt).elim damage (Damage.add damage) else damage
               let st := if spin then { st with badgePhase := phase } else st
-              let some models ← takeCatalog | return (st, damage)
-              if st.connectionBinding != initSt.connectionBinding then return (st, damage)
-              return ({ st with catalog := models, catalogLoading := false }, some vp))
-            DesktopState.hasLiveConnection menuFocusChange (some wakeFd) (·.writeRequest.isSome)
+              let some updated ← readSources st | return (st, damage)
+              return (updated, some vp))
+            (·.liveData) menuFocusChange (some wakeFd) (·.writeRequest.isSome)
             (fun rt => animations && (runningBadgeDamage rt).isSome)
         finally closeLiveSubscription slot
     Runtime.shutdownRuntime rt
