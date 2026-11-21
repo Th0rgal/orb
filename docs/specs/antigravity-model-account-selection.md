@@ -130,3 +130,37 @@ changing the route invalidates the account's cached result. When every eligible
 probe fails, the dedicated endpoint returns a retryable failure. Restoring the
 route allows a fresh discovery. With no eligible subscription it returns an
 empty list. Loading the other harnesses never waits on native catalog discovery.
+
+### Consumer headless eligibility on remote workers
+
+The native launcher gives agy a local relay nonce. Core alone authenticates
+gateway requests with the selected Google account through its configured
+network route. A successful `v1internal:fetchUserInfo` response verifies only
+that gateway request. On Linux, agy 1.5.13 also sends an authenticated GET to
+`https://www.googleapis.com/oauth2/v2/userinfo` outside the configured
+`CLOUD_CODE_URL`. A 401 there can stop eligibility before generation for both
+Carbon and Neon. The terminal error alone does not identify which request
+failed.
+
+The worker cannot use the relay nonce as a Google OAuth credential. Remote
+support needs a vendor-supported way for the selected account's credential
+holder to perform this auxiliary identity check through the account's network
+route and return Google's actual decision. A plain HTTPS CONNECT proxy would
+transport the same nonce to Google.
+
+To replay the rejection, use a disposable Linux guest with only loopback
+enabled, map `www.googleapis.com` to `127.0.0.1` in the guest, and run:
+
+```sh
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -subj /CN=www.googleapis.com -addext subjectAltName=DNS:www.googleapis.com \
+  -out cert.pem -keyout key.pem
+python3 scripts/test_antigravity_native_eligibility.py \
+  --agy "$(command -v agy)" --cert cert.pem --key key.pem
+```
+
+The disposable certificate is trusted only by the test process. The test
+requires port 443 in the guest, rejects every identity request, and checks
+the actual CLI terminal result and zero generation requests. Google's
+headless CLI documentation describes using cached credentials after sign-in.
+[Headless mode](https://antigravity.google/docs/cli/headless/)
