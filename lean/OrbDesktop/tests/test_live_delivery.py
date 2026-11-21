@@ -126,6 +126,24 @@ class Delivery(unittest.TestCase):
                 live.save_account_route(c, 'account', 'vpn', 'NL/FI')
             c.request.assert_not_called()
 
+    def test_two_sessions_read_the_same_shared_route_without_enabling_the_account(self):
+        with patch.object(live, 'Connection') as conn, contextlib.redirect_stdout(io.StringIO()) as output:
+            c = conn.return_value
+            shared = dict(mode='vpn', country='NL', status='verified', server='fixture',
+                          exits=['192.0.2.35'], countries=['NL'], can_configure=True)
+            c.binding = 'ben'
+            c.request.return_value = shared
+            c.get.return_value = shared
+            live.account_routes('ben', 'shared/account', 'openai', 'vpn', 'NL')
+            c.request.assert_called_once_with('/api/ai/providers/shared%2Faccount/vpn',
+                body={'mode': 'vpn', 'country': 'NL'}, method='PUT', deadline=120)
+            saved = output.getvalue()
+            self.assertIn('Verified exit · NL · fixture · 192.0.2.35', saved)
+            c.binding = 'thomas'
+            live.account_routes('thomas', 'shared/account', 'openai', '', '')
+            self.assertEqual(output.getvalue(), saved * 2)
+            self.assertEqual(c.request.call_count, 1)
+
     def test_provider_toggle_requires_the_selected_account_receipt(self):
         with patch.object(live, 'Connection') as conn:
             conn.return_value.binding = 'ben'

@@ -117,6 +117,13 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
           else if st.catalogLoading then some (.catalog st.catalogRevision) else none
         else if st.catalogLoading then some (.catalog st.catalogRevision)
         else none
+      -- Navigation may cancel a stale read. A submitted shared account update
+      -- must settle before another page fetches the account's saved route.
+      if let some source := current then
+        if let .accountRoutes _ _ action _ := source.kind then
+          if !action.isEmpty && source.binding == st.connectionBinding && some source.kind != kind then
+            if (← source.take).isNone then return none
+            close
       if current.any (fun r => r.binding != st.connectionBinding || some r.kind != kind) then close
       let some kind := kind | return none
       let source ← match ← slot.get with
