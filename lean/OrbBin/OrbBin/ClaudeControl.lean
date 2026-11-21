@@ -1607,7 +1607,7 @@ def parseOpenCodeAcpUpdate (u : JVal) : OneShotLineParsed :=
 def antigravitySignInError? (diagnostic : String) : Option String :=
   if ["Authentication required. Please visit", "Waiting for authentication (timeout",
       "paste the authorization code here", "authentication timed out", "authentication failed or timed out",
-      "accounts.google.com/o/oauth2/auth"].any diagnostic.contains then
+      "accounts.google.com/o/oauth2/auth"].any (fun marker => diagnostic.contains marker) then
     some "Antigravity needs a native Google sign-in for the account on this machine. Check its connection in Inference before retrying."
   else none
 
