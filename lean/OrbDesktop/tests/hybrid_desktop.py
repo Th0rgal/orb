@@ -137,7 +137,9 @@ def run():
         base = 'http://127.0.0.1:' + str(http.server_port)
         dist = tmp/'dist'
         shutil.copytree(os.environ.get('ORB_DIST_DIR', ROOT/'orb/dist'), dist)
-        with (dist/'index.html').open('a') as html:
+        index = dist/'index.html'
+        index.chmod(0o600)  # The copied Nix store file is read-only.
+        with index.open('a') as html:
             html.write('<script>' + PROBE.replace('ENDPOINT', json.dumps(base+'/observe')) + '</script>')
         (tmp/'connection.json').write_text(json.dumps(dict(api_url=base, token=TOKEN)))
         env = dict(os.environ, HOME=directory, XDG_RUNTIME_DIR=directory, XDG_DATA_HOME=str(tmp/'data'),
