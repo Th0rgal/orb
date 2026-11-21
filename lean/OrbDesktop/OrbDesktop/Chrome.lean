@@ -66,7 +66,7 @@ private def sidebarToggle (theme : Theme) : WidgetNode :=
     (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 26) (pxToSub 26))
     [chromeIcon "sidebar" theme.palette.textMuted 14] (some sidebarToggleId)
 
-def liveComposerControls (st : DesktopState) (width : SubPx) : WidgetNode :=
+def liveComposerControls (st : DesktopState) (width : SubPx) (newAgent := false) : WidgetNode :=
   let mid := st.openMission.getD ""
   let v := currentSettings st mid
   let control := fun (id : Nat) (label : String) (interactive : Bool) =>
@@ -79,12 +79,11 @@ def liveComposerControls (st : DesktopState) (width : SubPx) : WidgetNode :=
   let harness := ((st.catalog.find? (·.backend == v.backend)).map (·.harnessName)).getD v.backend
   let model := ((st.catalog.find? fun c => c.backend == v.backend && c.model == v.model).map (·.modelName)).getD v.model
   let machineHint := if st.fleetMachines.any (·.machineId == "core") then "Default machine" else "Choose machine"
-  let children := [control 720 (display machine machineHint) mid.isEmpty,
-    control 721 (display harness "Harness") true, control 722 (display model "Model") true] ++
+  let children := (if newAgent then [] else [control 720 (display machine machineHint) mid.isEmpty]) ++ [control 721 (display harness "Harness") true, control 722 (display model "Model") true] ++
     (if ["codex","antigravity","claudecode"].contains v.backend then [control 723 (display v.effort "Default effort") true] else []) ++
     (if v.backend == "claudecode" then [control 724 v.permission true] else [])
   WidgetNode.box (BoxStyle.row (pxToSub 12) |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 12) 0)
-    |>.withFixedSize width (pxToSub 36)) (if width < pxToSub 520 then [control 714 "Mission settings" true] else children)
+    |>.withFixedSize width (pxToSub 36)) (if width < pxToSub (if newAgent then 424 else 520) then [control 714 "Mission settings" true] else children)
 
 def buildMissionMenu (st : DesktopState) (menu : MissionMenu) (width : SubPx) (visibleCount : Nat) : WidgetNode :=
   let pal := st.theme.palette

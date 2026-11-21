@@ -1107,9 +1107,18 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
       WidgetNode.box
         (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill)
          [headerNode, if st.hasLiveConnection then
+           let width := min (pxToSub 608) (mainW - pxToSub 32)
+           let project := ((st.sidebarRows.find? (·.rowId == "project:" ++ st.draftProject)).map (·.title)).getD "Project"
+           let v := currentSettings st ""
+           let machine := ((st.launchMachines.getD []).lookup v.machine).getD <|
+             ((st.fleetMachines.find? (·.machineId == v.machine)).map (·.name)).getD (if v.machine.isEmpty then "Choose machine" else v.machine)
+           let destination := WidgetNode.focusable 720 <| WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center)
+             [chromeIcon "server" pal.textMuted 14, chromeLabel (pxToSub 18) [overlaySynthRun (Theme.mutedText theme) machine],
+              chromeIcon "chevron-down" pal.textMuted 10] (some 720)
+           let header := WidgetNode.box (BoxStyle.row (pxToSub 16) |>.withAlign .center |>.withFixedSize width (pxToSub 24))
+             [chromeLabel (pxToSub 18) [overlaySynthRun (Theme.mutedText theme) project], destination]
            WidgetNode.box (BoxStyle.col 0 |>.withJustify .center |>.withAlign .center |>.withFixedSize mainW bodyH)
-             [buildComposerWidget theme mainW composerH { st.composer with placeholder := "Describe a task, / for commands, @ for context" }
-               [] (some (liveComposerControls st (min (pxToSub 748) (mainW - pxToSub 68))))]
+             [buildComposerWidget theme mainW composerH st.composer [] (some (liveComposerControls st (width - pxToSub 90) true)) (some header)]
            else if st.initialRosterPending then
              WidgetNode.box (BoxStyle.col 0 |>.withJustify .center |>.withAlign .center |>.withFixedSize mainW bodyH)
                [WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (min (pxToSub 748) (mainW - pxToSub 68)) (pxToSub 42))

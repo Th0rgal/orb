@@ -245,9 +245,10 @@ def buildAttachmentChipWidget (theme : Theme) (att : ComposerAttachment) : Widge
 editor centred in a column of at most `748 px`, as `.dock > .col > .composer` in the SolidJS
 desktop. The pill holds the round attach button, the text and the send button. -/
 def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
-    (buf : ComposerBuffer) (overrideRuns : List InlineRun := []) (controls : Option WidgetNode := none) : WidgetNode :=
+    (buf : ComposerBuffer) (overrideRuns : List InlineRun := []) (controls : Option WidgetNode := none) (newAgentHeader : Option WidgetNode := none) : WidgetNode :=
   let pal := theme.palette
-  let colW : SubPx := min (pxToSub 748) (availW - pxToSub 68)
+  let tall := newAgentHeader.isSome
+  let colW : SubPx := if tall then min (pxToSub 608) (availW - pxToSub 32) else min (pxToSub 748) (availW - pxToSub 68)
   let isRunning := buf.isRunning
   let hasChips := !buf.attachments.isEmpty
   let chipRowH : SubPx := pxToSub 28
@@ -279,10 +280,10 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
     WidgetNode.text
       { BoxStyle.row 0 with
         grow := 1
-        clip := !hasText
-        maxWidth := if hasText then (BoxStyle.row 0).maxWidth else placeholderWidth
-        minHeight := pxToSub 18
-        maxHeight := pxToSub 18
+        clip := tall || !hasText
+        maxWidth := if tall then colW - pxToSub 26 else if hasText then (BoxStyle.row 0).maxWidth else placeholderWidth
+        minHeight := pxToSub (if tall then 48 else 18)
+        maxHeight := pxToSub (if tall then 48 else 18)
         padding := Edges.trbl 0 0 0 (pxToSub 2) }
       (pxToSub 18)
       (buildComposerInlineRuns theme buf overrideRuns)
@@ -341,11 +342,21 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
         (BoxStyle.row (pxToSub 6) |>.withAlign .center |>.withFixedSize colW chipRowH)
         (buf.attachments.map (buildAttachmentChipWidget theme))]
     else []
-  WidgetNode.box
-    (BoxStyle.col 0
-      |>.withAlign .center
-      |>.withPadding (Edges.trbl (pxToSub 10) (pxToSub 34) 0 (pxToSub 34))
-      |>.withFixedSize availW composerH)
-    (chipBar ++ [pill, controls.getD underRow])
+  if let some header := newAgentHeader then
+    let toolbar := WidgetNode.box (BoxStyle.row (pxToSub 8) |>.withAlign .center |>.withFixedSize (colW - pxToSub 26) (pxToSub 24))
+      ([attachBtn] ++ controls.toList ++ [sendBtn])
+    let card := WidgetNode.focusable buf.composerWidgetId <| WidgetNode.box
+      (BoxStyle.col (pxToSub 6) |>.withPadding (Edges.trbl (pxToSub 10) (pxToSub 12) (pxToSub 8) (pxToSub 12))
+        |>.withFixedSize colW (pxToSub 98 + (if hasChips then chipRowH else 0))
+        |>.withBg pillBg |>.withRadius (pxToSub 12) |>.withBorder theme.borderWidth borderCol)
+      (chipBar ++ [textNode, toolbar])
+    WidgetNode.box (BoxStyle.col (pxToSub 10) |>.withAlign .center) [header, card]
+  else
+    WidgetNode.box
+      (BoxStyle.col 0
+        |>.withAlign .center
+        |>.withPadding (Edges.trbl (pxToSub 10) (pxToSub 34) 0 (pxToSub 34))
+        |>.withFixedSize availW composerH)
+      (chipBar ++ [pill, controls.getD underRow])
 
 end LeanUI.Widgets
