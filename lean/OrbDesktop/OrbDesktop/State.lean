@@ -919,7 +919,7 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
     if key == 0xff51 && menu.page == .destinations then return update { menu with page := .actions, first := 0, highlighted := 1 }
     if key == 0xff53 && menu.page == .actions && (items[menu.highlighted]?.map (·.id)) == some 711 then
       return update { menu with page := .destinations, first := 0, highlighted := 0 }
-    if key == 0xff08 && menu.page == .rename then return update { menu with draft := menu.draft.applyImeBatch 1 0 "" "" }
+    if key == 0xff08 && menu.page == .rename then return update { menu with draft := menu.draft.deleteAroundCursor 1 0 }
     return (st, none)
   | .windowFocus false => return close
   | .activate 729 => return (st, none)

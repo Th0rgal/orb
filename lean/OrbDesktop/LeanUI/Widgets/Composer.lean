@@ -106,13 +106,28 @@ def setPreedit (buf : ComposerBuffer) (preedit : String) : ComposerBuffer :=
     imePreeditLen := preedit.length
     imePreeditText := preedit }
 
+/-- Number of complete Unicode scalars covered by a Wayland UTF-8 byte count. -/
+private def coveredChars (bytes : Nat) (chars : List Char) : Nat := Id.run do
+  let mut remaining := bytes
+  let mut count := 0
+  for c in chars do
+    if remaining < c.utf8Size then break
+    remaining := remaining - c.utf8Size
+    count := count + 1
+    if remaining == 0 then break
+  return count
+
 /-- Apply an atomic `zwp-text-input-v3` `done` batch in protocol order:
 1. Delete `delBefore` / `delAfter` around cursor
 2. Commit `commitStr`
 3. Show `preeditStr` at the updated cursor position. -/
 def applyImeBatch (buf : ComposerBuffer) (delBefore delAfter : Nat)
     (commitStr preeditStr : String) : ComposerBuffer :=
-  let b1 := buf.deleteAroundCursor delBefore delAfter
+  let b1 := if delBefore == 0 && delAfter == 0 then buf else
+    let chars := buf.text.toList
+    let cur := clampCursor buf.text buf.cursorOffset
+    buf.deleteAroundCursor (coveredChars delBefore (chars.take cur).reverse)
+      (coveredChars delAfter (chars.drop cur))
   let b2 := b1.insertText commitStr
   b2.setPreedit preeditStr
 
