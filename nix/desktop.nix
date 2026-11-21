@@ -37,6 +37,7 @@ stdenv.mkDerivation {
   installPhase = ''
     mkdir -p "$out/bin" "$out/share/applications" "$out/share/orb-desktop"
     makeBinaryWrapper "${core}/bin/orb-desktop-native" "$out/bin/orb-desktop-native" \
+      --set ORB_ACCOUNT_LAUNCHER "$out/bin/orb-desktop" \
       --prefix PATH : "${lib.makeBinPath [python3 pulseaudio wl-clipboard zenity]}"
     install -m 0755 orb-webkit "$out/bin/.orb-webkit"
     makeBinaryWrapper "$out/bin/.orb-webkit" "$out/bin/orb-webkit" \

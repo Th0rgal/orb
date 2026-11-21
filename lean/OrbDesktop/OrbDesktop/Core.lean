@@ -60,6 +60,7 @@ private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale
   let machines := ns.toArray.mapIdx (fun i xs => machineCard i xs) |>.toList
   let missionRows : List ChromeSidebarRow := missions.map fun m =>
     { widgetId := m.widgetId, rowId := "mission:" ++ m.missionId, kind := "mission", title := m.title, status := m.status }
+  let account := splitTab ((lines.find? (·.startsWith "A\t")).getD "")
   let sidebar := [{ widgetId := 101, rowId := "nav:new", kind := "nav", title := "New Agent", shortcut := "⌘N", selected := true },
     { widgetId := 102, rowId := "nav:inbox", kind := "nav", title := "Inbox", shortcut := "⌘I" },
     { widgetId := 111, rowId := "nav:cloud", kind := "nav", title := "Cloud agent", shortcut := "⌘2" },
@@ -67,10 +68,12 @@ private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale
     { widgetId := 113, rowId := "nav:inference", kind := "nav", title := "Inference", shortcut := "⌘4" },
     { widgetId := 114, rowId := "nav:resources", kind := "nav", title := "Resources", shortcut := "⌘6" },
     { widgetId := 109, rowId := "section:missions", kind := "section", title := "Missions" }] ++ missionRows ++
-    [{ widgetId := 108, rowId := "section:projects", kind := "section", title := "Projects" }] ++ projects
+    [{ widgetId := 108, rowId := "section:projects", kind := "section", title := "Projects" }] ++ projects ++ [settingsFooter]
   return { DesktopState.liveUnavailable isDark scale120 with
     screen := if missions.isEmpty then .controlEmpty else .controlPopulated
     syncCursor := { epoch := 0, seq := 0 }
+    accountEndpoint := col account 1
+    accountUsername := col account 2
     connectionBinding := binding
     stream := Orb.Stream.Coalescer.empty
     expandedProjects := match projects with
@@ -81,7 +84,7 @@ private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale
     fleetMachines := machines, catalogLoading := true }
 
 private inductive ReadKind where
-  | roster (previous : String) | catalog (revision : Nat) | providers
+  | roster (previous : String) | account | catalog (revision : Nat) | providers
   | cloud (mission : String)
   | resources (range : String)
   | nativeModels (machine : String)
@@ -98,6 +101,7 @@ private structure LiveRead where
 
 private def startLiveRead (binding : String) (kind : ReadKind) (notify : IO Unit) : IO LiveRead := do
   let args := match kind with
+    | .account => #["-I", "-c", transport ++ "\nobserve_account(sys.argv[1])", binding]
     | .roster previous => #["-I", "-c", transport ++ "\nrecover_roster(sys.argv[1])", previous]
     | .nativeModels machine => #["-I", "-c", transport ++ "\nnative_models(*sys.argv[1:])", binding, machine]
     | .accountRoutes account provider action value => #["-I", "-c", transport ++ "\naccount_routes(*sys.argv[1:])", binding, account, provider, action, value]
@@ -131,6 +135,7 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
       let current ← slot.get
       let kind : Option ReadKind := if !st.hasLiveConnection then
           some (.roster (if st.initialRosterPending then "" else st.connectionIssue.code))
+        else if st.screen == .settingsGeneral then some .account
         else if st.missionMenu.any (·.page == .picker .machine) && st.launchMachines.isNone && !st.launchMachinesFailed then
           some (.launchMachines (st.fleetMachines.any (·.machineId == "core")) st.draftSettings.backend)
         else if st.missionMenu.any (fun m => m.page == .draftDirectory && m.directoryRows.isNone && !m.listingFailed) &&
@@ -164,7 +169,9 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
       let some lines ← source.take | return none
       close
       if source.binding.isEmpty then
-        if let some ready := liveStateFromProjection lines isDark st.scale120 then return some ready
+        if let some ready := liveStateFromProjection lines isDark st.scale120 then
+          return some (if st.screen == .settingsGeneral then
+            { ready with screen := .settingsGeneral, sidebarRows := ready.sidebarRows.map fun r => { r with selected := r.widgetId == 103 } } else ready)
         let issue : ConnectionIssue := match lines.head? with
           | some "F\tmissing" => .missing
           | some "F\tsignin" => .signin
@@ -173,6 +180,13 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
           | _ => .unavailable
         return if st.initialRosterPending || issue != st.connectionIssue then
           some { st with initialRosterPending := false, connectionIssue := issue } else none
+      if source.kind == .account then
+        let ["A", endpoint, username] := splitTab (lines.head?.getD "") |
+          return some { DesktopState.liveUnavailable isDark st.scale120 with
+            theme := st.theme, screen := .settingsGeneral, initialRosterPending := true }
+        slot.set (some (← startLiveRead st.connectionBinding .account notify))
+        return if st.accountUsername == username && st.accountEndpoint == endpoint then none
+          else some { st with accountEndpoint := endpoint, accountUsername := username }
       if let .cloud _ := source.kind then
         if lines.head? != some "cloud" then return some { st with cloudFailed := true }
         let accounts := lines.filterMap fun line => match splitTab line with
@@ -387,6 +401,16 @@ private def mergeRoster (st : DesktopState) (records : List String) : DesktopSta
 single-value mailbox, so a retired subscription cannot update a new mission. -/
 def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewport : LeanUI.Rect)
     (st : DesktopState) (notify : IO Unit := pure ()) : IO (DesktopState × LeanUI.Damage) := do
+  if st.openAccountForm then
+    let st := { st with openAccountForm := false, writeError := "" }
+    try
+      let launcher := (← IO.getEnv "ORB_ACCOUNT_LAUNCHER").getD "orb-desktop"
+      let child ← IO.Process.spawn {
+        cmd := launcher, args := #["--webkit", "--account-settings"]
+        stdin := .null, stdout := .null, stderr := .null }
+      discard <| IO.asTask (prio := .dedicated) (discard child.wait : IO Unit)
+      return (st, some viewport)
+    catch _ => return ({ st with writeError := "Could not open the account form." }, some viewport)
   let active ← slot.get
   if let some request := st.writeRequest then
     let st := { st with writeRequest := none, writeError := "" }
@@ -501,7 +525,9 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
       let message := if action == "inbox-read" then "Couldn't mark this item read. Check the Inbox and try again."
         else "Core did not confirm " ++ action
       return ({ st with writeError := message }, some viewport)
-  let invalidate := ({ DesktopState.liveUnavailable with theme := st.theme, scale120 := scale }, some viewport)
+  let invalidate := ({ DesktopState.liveUnavailable with
+    theme := st.theme, scale120 := scale, initialRosterPending := true
+    screen := if st.screen == .settingsGeneral then .settingsGeneral else .controlEmpty }, some viewport)
   let target := if st.hasLiveConnection then some (st.openMission.getD "") else none
   if active.map (·.mission) != target || active.any (fun sub => sub.binding != st.connectionBinding || sub.projects != st.expandedProjects) then
     closeLiveSubscription slot

@@ -56,7 +56,9 @@ class Delivery(unittest.TestCase):
 
             def do_GET(self):
                 nonlocal completed_reads
-                if self.path == live.INBOX_PATH:
+                if self.path == '/api/auth/me':
+                    self.reply({'user': {'username': self.headers['Authorization'].split()[1]}})
+                elif self.path == live.INBOX_PATH:
                     self.reply(states[self.headers['Authorization'].split()[1]])
                 elif self.path == '/api/control/missions?status=completed&limit=100':
                     completed_reads += 1
@@ -271,8 +273,10 @@ class Delivery(unittest.TestCase):
         with patch.object(live, 'Connection') as connection, patch.object(
                 live, 'roster_rows', side_effect=[TimeoutError(), snapshot]) as read, patch.object(
                 live.time, 'sleep'), contextlib.redirect_stdout(io.StringIO()) as output:
+            connection.return_value.creds = ('https://fixture.test', 'private')
+            connection.return_value.get.return_value = {'user': {'username': 'Ben'}}
             live.roster()
-        self.assertEqual(output.getvalue().splitlines(), ['C\tbinding', 'P\tsource\tSource\t'])
+        self.assertEqual(output.getvalue().splitlines(), ['C\tbinding', 'P\tsource\tSource\t', 'A\thttps://fixture.test\tBen'])
         self.assertEqual(read.call_count, 2)
         for call in read.call_args_list:
             self.assertEqual(call.args, (connection.return_value,))
@@ -495,7 +499,9 @@ class Delivery(unittest.TestCase):
                 if mode == 'reconnect' and tokens[-1] == 'Bearer fixture':
                     self.send_error(401)
                     return
-                if path == '/api/projects':
+                if path == '/api/auth/me':
+                    result = {'user': {'username': 'Ben' if tokens[-1] == 'Bearer fixture' else 'Alice'}}
+                elif path == '/api/projects':
                     result = {'projects': [dict(slug='p', title='Project title', objective='Objective', color='blue')]}
                 elif path == '/api/control/missions?limit=200&include_ancestors=true':
                     if mode == 'project-first' and paths.count(path) > 1:
@@ -572,7 +578,7 @@ class Delivery(unittest.TestCase):
                         api_url='', apiUrl=f'http://127.0.0.1:{server.server_port}', token=token)))
                 subprocess.run(['lean', '-j', '1', '-M', '1024', '--run', 'tests/LiveDelivery.lean', mode],
                                cwd=PKG, env={**os.environ, 'ORB_STATE_DIR': root}, check=True, timeout=20)
-                if mode == 'reconnect':
+                if mode in ('reconnect', 'settings-switch'):
                     first = tokens.index('Bearer changed')
                     self.assertGreater(first, 0)
                     self.assertTrue(all(t == 'Bearer changed' for t in tokens[first:]))
@@ -636,6 +642,9 @@ class Delivery(unittest.TestCase):
 
     def test_rotation_after_bootstrap(self):
         self.run_wire('before-open')
+
+    def test_settings_recovers_after_account_switch(self):
+        self.run_wire('settings-switch')
 
     def test_rotation_without_selection(self):
         self.run_wire('idle-identity')

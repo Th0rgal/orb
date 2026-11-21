@@ -2793,6 +2793,17 @@ def main : IO UInt32 := do
      | _ => false)
   if (← assertTrue "desktop_connection_save_and_disk_reload" connOk) then passed := passed + 1
 
+  let switchTo := fun token => JVal.obj #[("api_url", .str "https://orbcore.example:9443"), ("token", .str token)]
+  let disconnect := fun token => JVal.obj #[("connection", .null), ("expected", switchTo token)]
+  discard <| dispatchRpcCommand stReloadRef "desktop_connection_save" (switchTo "second")
+  discard <| dispatchRpcCommand stDiskRef "desktop_connection_save" (disconnect "tok-secret-123")
+  let retained ← dispatchRpcCommand stDiskRef "desktop_connection_load" (.obj #[])
+  discard <| dispatchRpcCommand stReloadRef "desktop_connection_save" (disconnect "second")
+  let cleared ← dispatchRpcCommand stDiskRef "desktop_connection_load" (.obj #[])
+  total := total + 1
+  if (← assertTrue "disconnect_only_matching_disk_account"
+      (retained.toOption == some (switchTo "second") && cleared.toOption == some .null)) then passed := passed + 1
+
   let _ ← dispatchRpcCommand stDiskRef "diagnostics_append" (.obj #[
     ("lines", .arr #[.str "{\"ts\":1,\"kind\":\"ok\"}", .str "bad\nmultiline"])
   ])

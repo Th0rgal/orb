@@ -236,6 +236,6 @@ export async function signInWithGitHubDesktop(
     throw new Error(verified.error);
   }
   await verifyIssuedAuthToken(verified.baseUrl, verified.token);
-  setConnection(verified.baseUrl, verified.token);
+  await setConnection(verified.baseUrl, verified.token);
   return true;
 }
