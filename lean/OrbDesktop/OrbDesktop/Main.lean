@@ -183,15 +183,15 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
     let mut curAc := ac
     let newPayload ←
       match payload with
-      | .vectorIcon paths color =>
-        let size := scaleSubPx scale120 style.minWidth
+      | .vectorIcon paths color badgeBg =>
+        let size := scaleSubPx scale120 (if badgeBg.isSome then pxToSub 10 else style.minWidth)
         let key : GlyphKey := { font := 0xFFFF, glyph := hash paths |>.toNat, sizeSub := size, subpx := 0 }
         let (ac', entry) :=
           match curAc.cache.lookup Text.hashGlyphKey key with
           | some entry => ({ curAc with hits := curAc.hits + 1 }, entry)
           | none => curAc.insertRasterized key (Text.rasterizeIcon paths size)
         curAc := ac'
-        pure (WidgetPayload.iconMask entry.page entry.uv color)
+        pure (WidgetPayload.iconMask entry.page entry.uv color badgeBg)
       | .text lineHeightSub runs =>
         let mut shapedRuns : Array InlineRun := #[]
         for r in runs do
@@ -287,6 +287,29 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
   -- This backend diffs paint commands; it does not consume per-node fingerprints.
   let sceneOut := buildSceneFromLayout sc rt.focus theme widgetRoot rootBox (recordNodes := false)
   if profile then IO.eprintln s!"u7-view-ns {t1-t0} {t2-t1} {(← IO.monoNanosNow)-t2}"
+  if let some menu := st.missionMenu then
+    let w := min availW (pxToSub 228)
+    let count := min (max 1 ((availH - pxToSub 14) / pxToSub 30)) (missionMenuRows st menu).length
+    let h := min availH (pxToSub (14 + 30 * count))
+    let left := max 0 (min menu.x (availW - w : Nat))
+    let top := max 0 (min menu.y (availH - h : Nat))
+    let raw := buildMissionMenu st menu w count
+    let (ac7, widget) ← shapeWidgetTree ac6 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc raw
+    let box := layoutNode sc rt.focus.owner pal.focusRing left top w h widget.toLayoutNode
+    let overlay := buildSceneFromLayout sc rt.focus theme widget box (recordNodes := false)
+    let outside : Rect := { x := 0, y := 0, w := availW, h := availH }
+    return ((ac7.finishUploads, if liveWindow then 0 else pal.canvas, sceneOut.prims ++ overlay.prims,
+      (719, outside) :: overlay.hitRegionsSub, overlay.focusableOrder), [])
+  if !st.writeError.isEmpty then
+    let w := min availW (pxToSub 440)
+    let h := pxToSub 40
+    let notice := buildToastWidget theme w { id := 904, kind := .warning, title := st.writeError, dismissButtonId := some 914 }
+    let (ac7, widget) ← shapeWidgetTree ac6 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc notice
+    let box := layoutNode sc rt.focus.owner pal.focusRing (availW - w - pxToSub 8 : Nat)
+      (availH - chromeComposerHeightSub - h - pxToSub 8 : Nat) w h widget.toLayoutNode
+    let overlay := buildSceneFromLayout sc rt.focus theme widget box (recordNodes := false)
+    return ((ac7.finishUploads, if liveWindow then 0 else pal.canvas, sceneOut.prims ++ overlay.prims,
+      sceneOut.hitRegionsSub ++ overlay.hitRegionsSub, sceneOut.focusableOrder ++ overlay.focusableOrder), scrollRegionsOf rootBox)
   if st.screen == .searchDialog then
     let overRaw := buildSearchModalOverlay theme availW availH
     let (ac7, overWidget) ← shapeWidgetTree ac6 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc overRaw
@@ -309,8 +332,29 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
   let scale := rt.wayland.scale120
   let viewport := rt.viewportDeviceRect
   fun st ev => Id.run do
+    if let .activate id := ev then
+      if st.hasLiveConnection && st.missionMenu.isNone && st.writeRequest.isNone then
+        if let some field := settingTrigger id then
+          let some (_, r) := rt.hitRegions.find? (·.1 == id) | return (st, none)
+          return ({ st with missionMenu := some {
+            mission := st.openMission.getD "", x := r.x, y := r.bottom, trigger := id,
+            page := .picker field } }, some viewport)
+    if let .pointerButton x y 0x111 true := ev then
+      if st.hasLiveConnection && st.writeRequest.isNone then
+        let some id := hitTest rt.hitRegions x y | return (st, none)
+        let some row := st.sidebarRows.find? (·.widgetId == id) | return (st, none)
+        let previous := st
+        let st := contextSelection st row.rowId
+        let group := st.multiRows.length > 1 && st.multiRows.contains row.rowId
+        let mixed := group && st.multiRows.any fun r => !r.startsWith "mission:"
+        if row.kind != "mission" && !mixed then return (st, if previous.multiRows == st.multiRows then none else some viewport)
+        let mid := (row.rowId.drop 8).toString
+        let targets := if group then
+            st.multiRows.filterMap fun r => if r.startsWith "mission:" then some (r.drop 8).toString else none
+          else [mid]
+        return ({ st with missionMenu := some { mission := mid, x, y, trigger := id, targets, mixed } }, some viewport)
     if let .scroll x y _ dy := ev then
-      if st.liveData then
+      if st.missionMenu.isNone && st.liveData then
         let some r := regions.find? (fun r => r.bounds.contains x y) | return (st, none)
         let h := r.bounds.h.toNat
         let content := r.limitY + h
@@ -476,7 +520,7 @@ def liveViewportRegression : Bool := Id.run do
   let some down := wheel start rosterViewportId 999999 | return false
   let (scrolled, _) := frame down
   let some (_, row) := scrolled.hitRegions.find? (fun (p : EntityId × Rect) => p.1 == last.widgetId) | return false
-  let click := fun pressed => Event.pointerButton (row.x + row.w/2) (row.y + row.h/2) 1 pressed
+  let click := fun pressed => Event.pointerButton (row.x + row.w/2) (row.y + row.h/2) 0x110 pressed
   let press := scrolled.stepEvent (desktopReducer scrolled) (click true)
   let selected := (press.stepEvent (desktopReducer press) (click false)).app
   if selected.openMission != some last.missionId then return false
@@ -508,6 +552,13 @@ def runSelfTest (cfg : Runtime.RuntimeConfig) (initSt : DesktopState) : IO UInt3
   return 0
 
 /-- Main entry point for `OrbDesktop`. -/
+private def runningBadgeDamage (rt : Runtime.RuntimeState DesktopState) : Damage :=
+  rt.app.sidebarRows.foldl (fun damage row =>
+    if row.kind != "mission" || liveBadgeKind row.status != "loader" then damage else
+      match rt.hitRegions.find? (·.1 == row.widgetId) with
+      | none => damage
+      | some (_, rect) => Damage.add damage (roundRect rt.wayland.scale120 rect)) none
+
 def main (args : List String) : IO UInt32 := do
   let dcfg := parseDesktopArgs args
   let rcfg := dcfg.runtimeCfg
@@ -524,17 +575,34 @@ def main (args : List String) : IO UInt32 := do
     return (if ok then 0 else 1)
   let scr := dcfg.screenOpt.getD .missionTranscript
   let initSt ← if dcfg.screenOpt.isNone && !dcfg.selfTest then
-    (loadLiveState).map (·.getD (DesktopState.liveUnavailable rcfg.darkTheme rcfg.scale120))
+    (loadLiveState rcfg.darkTheme rcfg.scale120).map (·.getD (DesktopState.liveUnavailable rcfg.darkTheme rcfg.scale120))
   else pure (DesktopState.forScreen scr rcfg.darkTheme rcfg.scale120)
   if dcfg.selfTest then
     return (← runSelfTest rcfg initSt)
   try
+    let animations ← try
+      let pref ← IO.Process.output { cmd := "gsettings", args := #["get", "org.gnome.desktop.interface", "enable-animations"] }
+      pure (pref.stdout.trimAscii != "false")
+    catch _ => pure true
     let rt0 ← Runtime.openWindowRuntime rcfg "orb-desktop" initSt
     let slot ← IO.mkRef (none : Option LiveSubscription)
-    let rt ← try
-      Runtime.runWindow { rt0 with focus := initSt.initialFocusState } desktopReducer renderDesktopView
-        (fun rt => readLiveFrame slot rt.wayland.scale120 rt.viewportDeviceRect rt.app) DesktopState.hasLiveConnection
-    finally closeLiveSubscription slot
+    let rt ← Runtime.withProducerWake fun wakeFd notify => do
+      withLiveCatalog initSt.connectionBinding notify fun takeCatalog => do
+        try
+          Runtime.runWindow { rt0 with focus := initSt.initialFocusState } desktopReducer renderDesktopView
+            (fun rt => do
+              let vp := rt.viewportDeviceRect
+              let (st, damage) ← readLiveFrame slot rt.wayland.scale120 vp rt.app notify
+              let phase := ((← IO.monoMsNow) / 100) % 12
+              let spin := animations && phase != st.badgePhase
+              let damage := if spin then (runningBadgeDamage rt).elim damage (Damage.add damage) else damage
+              let st := if spin then { st with badgePhase := phase } else st
+              let some models ← takeCatalog | return (st, damage)
+              if st.connectionBinding != initSt.connectionBinding then return (st, damage)
+              return ({ st with catalog := models, catalogLoading := false }, some vp))
+            DesktopState.hasLiveConnection menuFocusChange (some wakeFd) (·.writeRequest.isSome)
+            (fun rt => animations && (runningBadgeDamage rt).isSome)
+        finally closeLiveSubscription slot
     Runtime.shutdownRuntime rt
     return 0
   catch e =>

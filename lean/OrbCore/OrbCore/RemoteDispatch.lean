@@ -820,12 +820,18 @@ private def prepareRemoteHarnessCommand
     let options := OrbBin.ClaudeControl.antigravityCliOptions spec.modelOverride (some spec.modelEffort) resumeSid?
     let argv := String.intercalate " " (options.toList.map shellSingleQuote)
     -- A sentinel preserves trailing newlines across shell command substitution.
-    let inner := "agy " ++ argv ++ " --print=\"${agy_prompt%.}\""
+    let goalSettings := include_str "antigravity_goal_settings.json"
+    let goalFlags := if spec.goalDispatch?.isSome then " --settings " ++ shellSingleQuote goalSettings else ""
+    let inner := "agy " ++ argv ++ goalFlags ++ " --print=\"${agy_prompt%.}\""
+    -- Permission to call the Orb tools applies only with the mission-scoped server installed.
+    let launch := if spec.goalDispatch?.isSome then
+        "/usr/local/bin/sandboxed-mcp launch --harness antigravity -- " ++ inner
+      else wrapWithRemoteMcp "antigravity" inner
     let cmd :=
       wsPrefix ++ skillPrelude ++ fd3Prelude ++
       "command -v agy >/dev/null 2>&1 || { echo 'agy is not installed on this node' >&2; exit 127; }; " ++
       "agy_prompt=\"$(cat <&3 && printf .)\" || exit 1; " ++
-      wrapWithRemoteMcp "antigravity" inner
+      launch
     let envs := skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[("NO_COLOR", "1")]
     return .ok { command := cmd, envPairs := envs, managedAuth := #["antigravity"], proxyToken := "" }
 
@@ -856,7 +862,7 @@ private def emitMissionEventAndBroadcast
 
 private def resumableGoalSession (backend sid : String) : Bool :=
   match backend with
-  | "codex" => parseUuidCanonical? sid == some sid
+  | "codex" | "antigravity" => parseUuidCanonical? sid == some sid
   | "opencode" => sid.startsWith "ses_"
   | _ => false
 
@@ -1253,6 +1259,7 @@ private def ingestRemoteHarnessLine
       emitMissionEventAndBroadcast store broadcastHub? missionId evTy (renderCompact pl) nowIso
     if !parsed.textDelta.isEmpty then
       let (piece, lastMsg?) := OrbBin.ClaudeControl.joinHarnessText harness next.text next.lastMessageId? parsed
+      if piece.isEmpty then return next
       let full := next.text ++ piece
       next := { next with text := full, lastMessageId? := lastMsg? }
       emitMissionEventAndBroadcast store broadcastHub? missionId "text_delta"

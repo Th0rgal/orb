@@ -3,7 +3,7 @@
 namespace OrbCore.RemoteGoal
 
 /-- The current emulated adapter contract, shared by admission and discovery. -/
-def harnesses : Array String := #["opencode", "codex"]
+def harnesses : Array String := #["opencode", "codex", "antigravity"]
 
 def completionMarker := "<!-- GOAL_COMPLETE -->"
 

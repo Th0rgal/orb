@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp(sandboxed/get_capabilities)",
+      "mcp(sandboxed/get_compute_fleet)",
+      "mcp(sandboxed/start_mission)",
+      "mcp(sandboxed/get_action)",
+      "mcp(sandboxed/get_mission)",
+      "mcp(sandboxed/get_mission_events)"
+    ]
+  }
+}

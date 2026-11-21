@@ -230,7 +230,7 @@ def buildAttachmentChipWidget (theme : Theme) (att : ComposerAttachment) : Widge
 editor centred in a column of at most `748 px`, as `.dock > .col > .composer` in the SolidJS
 desktop. The pill holds the round attach button, the text and the send button. -/
 def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
-    (buf : ComposerBuffer) (overrideRuns : List InlineRun := []) : WidgetNode :=
+    (buf : ComposerBuffer) (overrideRuns : List InlineRun := []) (controls : Option WidgetNode := none) : WidgetNode :=
   let pal := theme.palette
   let colW : SubPx := min (pxToSub 748) (availW - pxToSub 68)
   let isRunning := buf.isRunning
@@ -299,7 +299,8 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
   let selector (text : String) (width : Nat) : WidgetNode :=
     WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center
       |>.withFixedSize (pxToSub (width + 14)) (pxToSub 18))
-      [metaText text (pxToSub width), metaText "⌄" (pxToSub 10)]
+      [metaText text (pxToSub width), .mk none false false (BoxStyle.row 0 |>.withFixedSize (pxToSub 10) (pxToSub 10))
+        (.vectorIcon WidgetNode.downChevronPaths pal.textMuted) []]
   let sep := metaText "·" (pxToSub 3)
   let underRow : WidgetNode :=
     WidgetNode.box
@@ -322,6 +323,6 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
       |>.withAlign .center
       |>.withPadding (Edges.trbl (pxToSub 10) (pxToSub 34) 0 (pxToSub 34))
       |>.withFixedSize availW composerH)
-    (chipBar ++ [pill, underRow])
+    (chipBar ++ [pill, controls.getD underRow])
 
 end LeanUI.Widgets

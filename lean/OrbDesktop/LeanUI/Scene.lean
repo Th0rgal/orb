@@ -17,9 +17,9 @@ inductive WidgetPayload where
   | shadow (shadow : ShadowStyle) (radius : SubPx)
   | linearGradient (c0 c1 : Color) (angleDeg : Nat) (radius : SubPx)
   | text (lineHeightSub : SubPx) (runs : List InlineRun)
-  | iconMask (page : Nat) (src : Rect) (color : Color)
+  | iconMask (page : Nat) (src : Rect) (color : Color) (badgeBg : Option Color := none)
   /-- Round-capped polylines in a 16px view box, coordinates in tenths of a pixel. -/
-  | vectorIcon (paths : List (List (Int × Int))) (color : Color)
+  | vectorIcon (paths : List (List (Int × Int))) (color : Color) (badgeBg : Option Color := none)
   /-- Tree branch behind an icon, with its small bottom-right status ring. -/
   | treeDecoration (branch : Bool) (last : Bool) (stroke status background : Color)
   | image (tex : Nat) (src : Rect) (radius : SubPx)
@@ -92,6 +92,9 @@ namespace WidgetNode
 @[inline] def icon (style : BoxStyle) (page : Nat) (src : Rect) (color : Color)
     (id : Option WidgetId := none) : WidgetNode :=
   .mk id false id.isSome style (.iconMask page src color) []
+
+/-- Chevron used by dropdown controls in the desktop chrome and composer. -/
+def downChevronPaths : List (List (Int × Int)) := [[(50,65),(80,95),(110,65)]]
 
 /-- Declarative RGBA texture image widget builder. -/
 @[inline] def image (style : BoxStyle) (tex : Nat) (src : Rect) (radius : SubPx := 0)
@@ -216,9 +219,15 @@ def emitPayloadPrims (scale120 : Nat) (box : ComputedBox) : WidgetPayload → Li
     [.linear box.rectDev c0 c1 angleDeg (scaleSubPx scale120 radius)]
   | .text _ _ =>
     emitWrappedLineGlyphs scale120 box.contentRectSub.x box.contentRectSub.y box.lines
-  | .iconMask page src color =>
+  | .iconMask page src color none =>
     [.mask page src box.contentRectDev color]
-  | .vectorIcon _ _ => [] -- Rasterized into the shared atlas before layout.
+  | .iconMask page src color (some bg) =>
+    let p (n : Nat) := Int.ofNat (scaleSubPx scale120 (pxToSub n))
+    let r := box.rectDev
+    let disc : Rect := { x := r.right - p 8, y := r.bottom - p 9, w := p 12, h := p 12 }
+    [.quad disc bg (scaleSubPx scale120 (pxToSub 6)) 0 0,
+     .mask page src { x := disc.x + p 1, y := disc.y + p 1, w := p 10, h := p 10 } color]
+  | .vectorIcon _ _ _ => [] -- Rasterized into the shared atlas before layout.
   | .treeDecoration branch last stroke status background =>
     let r := box.rectDev
     let p (n : Nat) := Int.ofNat (scaleSubPx scale120 (pxToSub n))
@@ -411,8 +420,9 @@ def lowerWidgetPair (scale120 : Nat) (focusState : FocusState) (theme : Theme)
       layerPushPrims ++
         selfBoxPrims ++
         clipPushPrims ++
-        selfPayloadPrims ++
-        childPrims ++
+        (match payload with
+         | .iconMask _ _ _ (some _) => childPrims ++ selfPayloadPrims
+         | _ => selfPayloadPrims ++ childPrims) ++
         clipPopPrims ++
         focusPrim ++
         layerPopPrims

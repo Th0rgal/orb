@@ -217,6 +217,9 @@ jobs:
       # example.invalid, unified-MCP tests use a 127.0.0.1 server. Build the native
       # Lean sandboxed-mcp companion first so test_unified_mcp_runtime.py runs.
       - name: Build native Lean sandboxed-mcp companion for runtime tests
+        env:
+          LEAN_NUM_THREADS: '1'
+          ORB_TURBO_LEAN_JOBS: '1'
         run: |
           ./scripts/ci_harden_ubuntu_apt.sh
           sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev zstd

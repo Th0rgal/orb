@@ -488,6 +488,7 @@ structure WaylandClient where
   /-- Set by the first `xdg_surface.configure`; no buffer may be attached before it. -/
   configured : Bool := false
   xkbState : USize := 0
+  pressedKeysyms : List (UInt32 × UInt32) := []
   pointerXSub : Int := 0
   pointerYSub : Int := 0
   pendingW : Nat := 1470
@@ -607,19 +608,6 @@ def waitEvents (c : WaylandClient) : IO Unit := do
 /-- `wl_shm` format code for premultiplied ARGB8888 (little-endian bytes B, G, R, A). -/
 def wlShmFormatArgb8888 : UInt32 := 0
 
-/-- Convert a straight-alpha RGBA8 framebuffer to premultiplied
-`WL_SHM_FORMAT_ARGB8888` (little-endian bytes B, G, R, A). -/
-def rgbaToArgb (rgba : ByteArray) : ByteArray := Id.run do
-  let mut out := rgba
-  for i in [0:rgba.size / 4] do
-    let o := i * 4
-    let a := (rgba.get! (o + 3)).toNat
-    let pm (c : UInt8) : UInt8 := ((c.toNat * a + 127) / 255).toUInt8
-    out := (out.set! o (pm (rgba.get! (o + 2))))
-      |>.set! (o + 1) (pm (rgba.get! (o + 1)))
-      |>.set! (o + 2) (pm (rgba.get! o))
-  return out
-
 private def releaseShm (c : WaylandClient) : IO Unit := do
   let s := c.shm
   if s.pool == 0 then return
@@ -654,7 +642,7 @@ def present (c : WaylandClient) (fb : ByteArray) : IO WaylandClient := do
     allocShm c bw bh
   let toB := !shm.frontIsB
   let (buf, offset) := if toB then (shm.bufB, bw * bh * 4) else (shm.bufA, 0)
-  FFI.memWrite (shm.ptr + offset.toUSize) (rgbaToArgb fb)
+  FFI.presentArgb (shm.ptr + offset.toUSize) fb
   let surface := c.window.surface
   let _ ← marshalRequest surface 1 0 4 0 0 #[.obj buf, .int 0, .int 0]
   let _ ← marshalRequest c.window.viewport 2 0 1 0 0 #[.int c.pendingW, .int c.pendingH]
@@ -738,6 +726,7 @@ def stepWireEvent (c : WaylandClient) (ev : WlWireEvent) : IO (WaylandClient × 
     else if ev.opcode == 1 then
       out := out.push (.windowFocus true)
     else if ev.opcode == 2 then
+      st := { st with pressedKeysyms := [] }
       out := out.push (.windowFocus false)
     else if ev.opcode == 3 then
       if let (some (WlWireArg.uint ms), some (WlWireArg.uint key), some (WlWireArg.uint kst)) := (ev.arg? 1, ev.arg? 2, ev.arg? 3) then
@@ -747,11 +736,15 @@ def stepWireEvent (c : WaylandClient) (ev : WlWireEvent) : IO (WaylandClient × 
         if st.xkbState != 0 && (keyState == .pressed || keyState == .repeated) then
           let raw ← try FFI.xkbKey st.xkbState key catch _ => pure ByteArray.empty
           let pkt := decodeXkbKeyPacket raw
+          if keyState == .pressed then
+            st := { st with pressedKeysyms := (key, pkt.keysym) :: st.pressedKeysyms.filter (·.1 != key) }
           out := out.push (.key pkt.keysym pkt.mods keyState)
           if !pkt.utf8.isEmpty && pkt.composeStatus != 1 && isPrintableKeyText pkt.mods pkt.utf8 then
             out := out.push (.text pkt.utf8)
         else
-          out := out.push (.key key 0 keyState)
+          let sym := ((st.pressedKeysyms.find? (·.1 == key)).map (·.2)).getD key
+          st := { st with pressedKeysyms := st.pressedKeysyms.filter (·.1 != key) }
+          out := out.push (.key sym 0 keyState)
     else if ev.opcode == 4 then
       if let (some (WlWireArg.uint dep), some (WlWireArg.uint lat), some (WlWireArg.uint lck), some (WlWireArg.uint grp)) :=
           (ev.arg? 1, ev.arg? 2, ev.arg? 3, ev.arg? 4) then

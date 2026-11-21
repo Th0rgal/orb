@@ -174,6 +174,25 @@ class Delivery(unittest.TestCase):
     def test_failed_bootstrap_and_redirect(self):
         self.run_wire('unavailable')
 
+    def test_model_successor_requires_the_same_provider(self):
+        rules = json.loads((PKG.parents[1]/'orb/src/modelSuccessors.json').read_text())
+        models = [{'value':'openai/gpt-6-sol', 'provider_id':'local'},
+                  {'value':'openai/gpt-6.2-sol', 'provider_id':'other'}]
+        self.assertEqual(list(live.visible_model_options('opencode', models, rules)), models)
+        models[1]['provider_id'] = 'local'
+        self.assertEqual(list(live.visible_model_options('opencode', models, rules)), models[1:])
+
+    def test_live_reader_accepts_both_full_roster_pages(self):
+        ids = [str(i).zfill(128) for i in range(300)]
+        rows = [('M', mid) for mid in ids]
+        conn = type('Connection', (), {'binding': 'bound', 'check': lambda self: None})
+        out = io.StringIO()
+        with patch.object(live, 'Connection', conn), patch.object(live, 'roster_rows', return_value=rows) as roster, patch.object(live.sys, 'stdin', io.StringIO(','.join(ids) + '\n')), patch.object(live.time, 'sleep', side_effect=KeyboardInterrupt), contextlib.redirect_stdout(out):
+            with self.assertRaises(KeyboardInterrupt):
+                live.poll('', 'bound')
+        self.assertTrue(roster.call_args.kwargs['include_archived'])
+        self.assertEqual(set(out.getvalue().strip().split('\t')[1].split('\x1f')), {'M:' + mid for mid in ids})
+
     def test_coalesces_before_ipc(self):
         class Connection:
             binding = 'bound'
@@ -189,6 +208,21 @@ class Delivery(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 live.poll('a', 'bound', {'a'})
         self.assertEqual(out.getvalue(), 'B\tM:a\tTitle\tactive\tPublic\n')
+
+    def test_unselected_status_changes_reach_sidebar(self):
+        class Connection:
+            binding = 'bound'
+            def check(self):
+                pass
+
+        def rows(status):
+            return [('M', 'b', 'Title', '', '', '', '', status)]
+
+        out = io.StringIO()
+        with patch.object(live, 'Connection', Connection), patch.object(live, 'roster_rows', side_effect=[rows('active'), rows('paused')]), patch.object(live.time, 'monotonic', side_effect=[0, 6, 6]), patch.object(live.time, 'sleep', side_effect=[None, KeyboardInterrupt]), contextlib.redirect_stdout(out):
+            with self.assertRaises(KeyboardInterrupt):
+                live.poll('', 'bound', {'b'})
+        self.assertEqual(out.getvalue().splitlines(), ['R\tM:b\x1fS:b:active', 'R\tM:b\x1fS:b:paused'])
 
     def test_rejects_foreign_projection(self):
         class Connection:

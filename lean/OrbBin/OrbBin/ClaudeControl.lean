@@ -1455,6 +1455,7 @@ def isOpenCodeCompactionSummary (text : String) : Bool :=
 /-- Structured result extracted from a single stdout line of a one-shot CLI harness (`opencode`, `codex`, `grok`, etc.). -/
 structure OneShotLineParsed where
   sessionId?       : Option String := none
+  finalTextFallback : Bool := false
   textDelta        : String := ""
   errorMsg?        : Option String := none
   activity?        : Option LocalActivityItem := none
@@ -1476,7 +1477,8 @@ def joinHarnessText (harness prevText : String) (lastMessageId? : Option String)
     (parsed : OneShotLineParsed) : String × Option String :=
   let boundary := harness == "opencode" && !prevText.isEmpty && !prevText.endsWith "\n" &&
     !parsed.textDelta.startsWith "\n"
-  if parsed.isChunk then
+  if parsed.finalTextFallback && !prevText.isEmpty then ("", lastMessageId?)
+  else if parsed.isChunk then
     let sep := if boundary && parsed.messageId? != lastMessageId? then "\n\n" else ""
     (sep ++ parsed.textDelta, parsed.messageId?)
   else
@@ -1489,7 +1491,7 @@ def antigravityCliOptions (model : String) (effort? sessionId? : Option String) 
   if !mdl.isEmpty then args := #["--model", mdl]
   if let some e := eff? then args := args ++ #["--effort", e]
   if let some sid := sessionId? then args := args ++ #["--conversation", sid]
-  return args
+  return args ++ #["--output-format", "stream-json"]
 
 /-- Build CLI invocation `args` for non-Claude local harnesses (`codex`, `opencode`, `antigravity`, `grok`, `vibe`). -/
 def buildOneShotHarnessArgs
@@ -1604,6 +1606,36 @@ def parseOpenCodeAcpUpdate (u : JVal) : OneShotLineParsed :=
 def parseOneShotHarnessEvent (harness : String) (rawLine : String) : OneShotLineParsed := Id.run do
   let trimmed := rawLine.trimAscii.toString
   if trimmed.isEmpty then return {}
+  if harness == "antigravity" then
+    let .ok event := OrbBin.Json.parse trimmed | return {}
+    match event.fieldStr? "event" with
+    | some "init" =>
+      return { sessionId? := event.fieldStr? "conversation_id" >>= parseUuidCanonical? }
+    | some "step_update" =>
+      let step := event.fieldOrNull "step_update"
+      if step.fieldStr? "step_type" == some "agent_response" then
+        return { textDelta := (step.fieldStr? "text_delta").getD "" }
+      if let some tool := step.fieldStr? "tool_name" then
+        let some index := step.fieldNat? "step_index" | return {}
+        let state := (step.fieldStr? "state").getD ""
+        let failed := state == "ERROR" || state == "FAILED"
+        let done_ := failed || state == "DONE"
+        return { activity? := some {
+          id := s!"agy-{(step.fieldStr? "conversation_id").getD ""}-{index}", label := tool, kind := "tool",
+          done := done_, failed, status := if failed then "failed" else if done_ then "completed" else "running" } }
+      return {}
+    | some "result" =>
+      let result := event.fieldOrNull "result"
+      let ok := result.fieldStr? "status" == some "SUCCESS"
+      let usage := result.fieldOrNull "usage"
+      return {
+        sessionId? := result.fieldStr? "conversation_id" >>= parseUuidCanonical?
+        textDelta := if ok then (result.fieldStr? "response").getD "" else ""
+        finalTextFallback := true
+        errorMsg? := if ok then none else some ((result.fieldStr? "error").getD "Antigravity turn failed" |>.take 500 |>.toString)
+        inputTokens? := usage.fieldUInt64? "input_tokens", outputTokens? := usage.fieldUInt64? "output_tokens",
+        cacheReadTokens? := usage.fieldUInt64? "cache_read_tokens" }
+    | _ => return {}
   if harness == "codex" || harness == "opencode" || harness == "grok" then
     let .ok jv := OrbBin.Json.parse trimmed
       | return {}
@@ -2034,6 +2066,7 @@ def startHarnessTurn
     -- Extra arguments go right after the subcommand (`codex exec -c ...`).
     let cliArgs :=
       if extraArgs.isEmpty || baseArgs.isEmpty then baseArgs
+      else if harness == "antigravity" then extraArgs ++ baseArgs
       else (baseArgs.extract 0 1) ++ extraArgs ++ (baseArgs.extract 1 baseArgs.size)
     let envPairs := (← currentEnvPairs).filter (fun (k, _) => !extraEnv.any (fun (ek, _) => ek == k)) ++ extraEnv
     let mut envStrs := envPairs.map fun (k, v) => s!"{k}={v}"

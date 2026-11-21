@@ -59,6 +59,10 @@ in `lean/Orb/Kernel.lean`, proved in `lean/Orb/Spec.lean`):
   multi-selection back to the committed item and highlights only the right-clicked
   row for the lifetime of the menu.
 
+In both Linux renderers, Ctrl-clicking A and C followed by right-clicking B clears A and C from the command targets. Escape dismisses B’s menu and leaves the previously opened conversation in place. Right-clicking C directly after selecting A and C retains both targets.
+
+Archive admission is checked in the same Core transaction as the status update. If B starts a turn after the client reads B as idle, Archive returns HTTP 409 and preserves B’s status even before its run record exists. The client reports the refusal and keeps A open.
+
 ## Regression coverage
 
 - `orb/tests/sidebar-selection.test.ts` exercises the `createTreeSelection` state
