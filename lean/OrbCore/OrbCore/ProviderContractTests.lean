@@ -1768,7 +1768,7 @@ private def sharedCredentialRouting (app : CoreAppState) (root admin member : St
   let legacy := s!"{root}/.sandboxed-sh/ai_providers.json"
   let saved ← IO.FS.readFile legacy
   let vars := #["OPENAI_API_KEY", "CLAUDE_CODE_PROXY_BASE_URL", "CLI_PROXY_MANAGEMENT_KEY"]
-  let previous ← vars.mapM IO.getEnv
+  let previous ← vars.mapM (fun name => do pure (← IO.getEnv name))
   let (fd, port) ← IO.ofExcept (← LeanSys.Posix.tcpListen "127.0.0.1" 0 8)
   let endpoint := s!"http://127.0.0.1:{port}"
   let relay ← IO.mkRef ""
@@ -1799,7 +1799,8 @@ private def sharedCredentialRouting (app : CoreAppState) (root admin member : St
     setenvVar "CLI_PROXY_MANAGEMENT_KEY" "fixture-management"
     IO.FS.writeFile file (renderCompact (.obj #[("type", .str "codex"), ("prefix", .str codex),
       ("access_token", .str "fixture-subscription")]))
-    IO.ofExcept (← upsertAIProvider app.store { id := codex, providerType := "openai", name := "Subscription",
+    IO.ofExcept (← upsertAIProvider app.store {
+      id := codex, providerType := "openai", name := "Subscription",
       apiKey := "cli-proxy-managed" })
     IO.FS.writeFile legacy "[{\"id\":\"legacy-google-key\",\"name\":\"Gemini\",\"provider_type\":\"google\",\"api_key\":\"fixture-legacy-key\"}]"
     let (status, row) ← postJson app member "/api/ai/providers"

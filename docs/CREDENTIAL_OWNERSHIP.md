@@ -19,8 +19,8 @@ the user logs in again. This can cause recurring "login expired" states for Clau
 - Without management integration, the previous ownership detection remains:
   refreshable proxy files select proxy ownership; other logins use legacy flows.
 - API keys and unsupported Google/GitHub subscription integrations retain their
-  existing owners. Gemini CLI and Copilot are not native login providers in the
-  deployed CLIProxyAPI version; Antigravity is a distinct Google integration.
+  existing owners. Orb does not offer Gemini CLI or Copilot through its managed subscription
+  login selector. Antigravity has a separate Google integration.
 - The Grok CLI harness keeps its own cached login in `~/.grok/auth.json`
   (its ACP transport accepts nothing else). Treat that as a second login on
   the same account, never a copy of the proxy's token.
@@ -39,7 +39,8 @@ A Google setup row with no account key has no credential to route. An instance
 environment key also has no individual VPN binding.
 
 The v8.0.56-0 no-plugin sidecar in CI supports configured Gemini API keys with
-per-key `proxy-url`. Those are sidecar configuration entries. Adding a key
+per-key `proxy-url` under `gemini-api-key`. Its native Interactions API has a
+separate `interactions-api-key` entry. Those are sidecar configuration entries. Adding a key
 through Core does not write a second copy there. The sidecar also has separate
 Vertex credentials and Antigravity OAuth. None supplies a Gemini CLI subscription
 to Core. The no-plugin file watcher ignores legacy `type: "gemini"` files and
@@ -48,7 +49,9 @@ built-in Google/Gemini sign-in handler. The CLI's `-login` flag alone does not
 establish a usable subscription route. The same file-watcher checks exist in
 the previously inspected 8.0.26 source.
 
-For an existing ChatGPT/Codex OAuth account, use its Connection settings. Core
+An OpenAI API key added via Core uses direct API billing. A ChatGPT subscription
+uses a Codex OAuth credential maintained by the sidecar. For an existing
+subscription account, use its Connection settings. Core
 needs a unique binding to the selected sidecar file, an account relay port, and
 a management key with a local or HTTPS management endpoint. A type-only match
 does not authorize a route. A host `OPENAI_API_KEY` belongs to a different
