@@ -21,22 +21,27 @@ The Core-side credential is the account-specific password from the existing `Acc
 
 ## Reproduce
 
-Use the disposable Linux guest from #2028 with only loopback, Python 3.12, the actual built binaries, and agy 1.5.14. Map `daily-cloudcode-pa.googleapis.com` to `127.0.0.2` in the guest. The direct-route trap binds that address on 443. Generate a disposable certificate on the fixture builder and install it and the temporary key in the guest:
+Use the disposable Linux guest from #2028 with only loopback, Python 3.12, the actual built binaries, and agy 1.5.14. Map `daily-cloudcode-pa.googleapis.com` to `127.0.0.2` in the guest. The direct-route trap binds that address on 443. Generate independent provider and adapter certificates on the fixture builder. Install the temporary files in the guest:
 
 ```sh
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   -subj /CN=daily-cloudcode-pa.googleapis.com \
-  -addext 'subjectAltName=DNS:daily-cloudcode-pa.googleapis.com,IP:127.0.0.1' \
+  -addext 'subjectAltName=DNS:daily-cloudcode-pa.googleapis.com' \
   -out transport.crt -keyout transport.key
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -subj /CN=fixture-adapter -addext 'subjectAltName=IP:127.0.0.1' \
+  -out front.crt -keyout front.key
 scripts/build_orb_bins.sh --only orb-core --only sandboxed-node
+(cd lean/OrbCore && lake build orb-airvpn-sidecar-test)
 ```
 
 From the checkout in the guest, run:
 
 ```sh
 python3 scripts/test_native_job_relay.py --core /bin/orb-core --agy /bin/agy-new \
-  --cert /transport.crt --key /transport.key
+  --driver /bin/orb-airvpn-sidecar-test --cert /transport.crt --key /transport.key \
+  --front-cert /front.crt --front-key /front.key
 python3 scripts/test_native_owner_node.py /bin/sandboxed-node
 ```
 
-The transport test seeds a synthetic running job, native grant and corresponding issuance-time binding in an isolated Core database. It runs both adapter entry points, the genuine agy CLI, the Core HTTP admission and cancellation endpoints, a synthetic account relay and a synthetic Google TLS peer. The separate node control exercises ordinary signed job execution. The fixture does not enable owner-profile dispatch or use a subscription.
+The test creates a fresh Core store using the real enrollment and grant issuers, then seeds a synthetic running job and placement. It runs both adapters, the genuine agy CLI, the Core HTTP admission and cancellation endpoints, and Orb’s authenticated account relay backed by a disposable SOCKS gateway and Google TLS peer. The separate node control exercises ordinary signed job execution. The fixture does not enable owner-profile dispatch or use a subscription.
