@@ -3751,16 +3751,22 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | .error reason => return .ok (mkJson 503 (renderCompact (.obj #[("error", .str reason)])))
       let coreOwned := !hp.hasOAuth && hp.hasAccountApiKey
       let mut configure? : Option (Bool → IO (Except String Unit)) := none
-      if hp.hasOAuth && !hp.hasApiKey && ["codex", "claude", "antigravity", "kimi"].any (providerTypeMatchesAuthType hp.providerType) &&
-          !file.isEmpty then
+      let supportsOAuthRoute := hp.hasOAuth && !hp.hasApiKey &&
+        ["codex", "claude", "antigravity", "kimi"].any (providerTypeMatchesAuthType hp.providerType)
+      if supportsOAuthRoute && !file.isEmpty then
         if let some url := st.vpnRelayPort?.bind (fun port =>
             AccountVpnRelay.proxyUrl (effectiveJwtSecret st.cfg) port hp.providerType hp.id) then
           if let some key ← resolveCliProxyMgmtKey? then
             let base ← resolveCliProxyBaseUrl
             if AccountVpnSidecar.validManagement base then
               configure? := some (AccountVpnSidecar.configure base key file url)
+      let configurationIssue := if coreOwned || configure?.isSome then none
+        else if supportsOAuthRoute && file.isEmpty then
+          some "Orb could not match a unique provider sign-in to this account. Check the account connection, then refresh."
+        else if supportsOAuthRoute then some "Check the VPN relay configuration on Core."
+        else some "VPN routing is unavailable for this credential."
       let (status, result) ← AccountVpnApi.route st.store st.vpnPool? st.vpnCoordinatorDir account hp.providerType
-        (coreOwned || configure?.isSome) req.method req.bodySlice.toByteArray configure?
+        configurationIssue req.method req.bodySlice.toByteArray configure?
       return .ok (mkJson status (renderCompact result))
 
   if cleanPath == "/api/settings/airvpn" then

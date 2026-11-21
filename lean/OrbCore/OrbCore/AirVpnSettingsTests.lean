@@ -82,11 +82,14 @@ def run (root : String) : IO Unit := do
     let pool ← Std.Mutex.new ({} : AccountVpnPool.PoolState)
     let route := AccountVpnApi.route store (some pool) "" "a" "openai"
     let payload := "{\"mode\":\"vpn\",\"country\":\"NL\"}".toUTF8
-    let (sidecar, _) ← route false "PUT" payload
+    let (_, missing) ← route (some "Missing provider sign-in") "GET" ByteArray.empty
+    check (missing.fieldBool? "can_configure" == some false &&
+      missing.fieldStr? "configuration_message" == some "Missing provider sign-in") "VPN configuration reports the credential issue"
+    let (sidecar, _) ← route (some "Missing provider sign-in") "PUT" payload
     check (sidecar == 409) "unsupported credential owner cannot enable VPN"
     let refuse : Bool → IO (Except String Unit) := fun (_ : Bool) => pure (.error "vpn_sidecar_update_failed" : Except String Unit)
-    let (failed, _) ← AccountVpnApi.route store (some pool) "" "a" "openai" true "PUT" payload (some refuse)
-    let (_, afterFailure) ← route true "GET" ByteArray.empty
+    let (failed, _) ← AccountVpnApi.route store (some pool) "" "a" "openai" none "PUT" payload (some refuse)
+    let (_, afterFailure) ← route none "GET" ByteArray.empty
     check (failed == 503 && afterFailure.fieldStr? "mode" == some "direct")
       "failed sidecar enable cannot commit the VPN preference"
     let patched ← IO.mkRef false
@@ -94,20 +97,20 @@ def run (root : String) : IO Unit := do
       let .ok none ← AccountVpnRoutes.read store.missionsDb "a" | return .error "unexpected_phase"
       patched.set enable
       return .ok ()
-    let (saved, state) ← AccountVpnApi.route store (some pool) "" "a" "openai" true "PUT" payload (some configure)
+    let (saved, state) ← AccountVpnApi.route store (some pool) "" "a" "openai" none "PUT" payload (some configure)
     check (← patched.get) "sidecar bound before VPN admission"
     check (saved == 200 && state.fieldStr? "mode" == some "vpn" &&
       state.fieldStr? "status" == some "blocked" &&
       state.fieldStr? "reason" == some "vpn_coordinator_unconfigured") "saved VPN reports blocked with reason"
     let reload := AccountVpnApi.route store (some pool) root "a" "openai"
-    let (_, noProfile) ← reload true "PUT" payload
+    let (_, noProfile) ← reload none "PUT" payload
     check (noProfile.fieldStr? "reason" == some "vpn_no_compatible_profile")
       "verification reports the missing country profile"
-    let (_, reopened) ← reload true "GET" ByteArray.empty
+    let (_, reopened) ← reload none "GET" ByteArray.empty
     check (reopened.fieldStr? "reason" == noProfile.fieldStr? "reason" &&
       reopened.fieldStr? "message" == noProfile.fieldStr? "message")
       "reopening Settings retains the actionable failure"
-    let (_, direct) ← AccountVpnApi.route store (some pool) "" "a" "openai" true "PUT" "{\"mode\":\"direct\"}".toUTF8 (some configure)
+    let (_, direct) ← AccountVpnApi.route store (some pool) "" "a" "openai" none "PUT" "{\"mode\":\"direct\"}".toUTF8 (some configure)
     check (!(← patched.get)) "sidecar unbound after explicit Direct selection"
     check (direct.fieldStr? "mode" == some "direct" && (direct.field? "exits").isNone) "direct clears VPN selection"
   finally OrbCore.Store.closeCoreStore store

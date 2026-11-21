@@ -7,6 +7,8 @@ Core's country, route status and most recently verified public exit.
 
 A signed-in member can read and change the connection of any provider account visible to them. The route belongs to the account. Other users of that account see the same country and use the same exit. An administrator can configure any account and manages the shared AirVPN credentials and profiles. A personal choice to skip a shared provider affects only the member’s missions.
 
+When configuration is unavailable, Core supplies a separate explanation alongside the saved route. The account panel can refresh this setting after provider sign-in. A refresh reads the account route and preserves the selected country.
+
 ## Admission contract
 
 The pure kernel is in `lean/Orb/AccountVpn.lean` (Orb base `9c6b94da2`).
