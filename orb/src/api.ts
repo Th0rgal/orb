@@ -2899,7 +2899,12 @@ export function completeProviderOAuth(id: string, code: string) {
 
 /** Account-entitled models from the selected execution destination, fetched independently. */
 export async function listNodeAntigravityModels(nodeId: string): Promise<[string,string][]> {
- return api(`/api/providers/antigravity-models${nodeId === "core" ? "" : `?node_id=${encodeURIComponent(nodeId)}`}`, {signal: AbortSignal.timeout(20000)});
+  const models = await api<unknown>(`/api/providers/antigravity-models${nodeId === "core" ? "" : `?node_id=${encodeURIComponent(nodeId)}`}`, {signal: AbortSignal.timeout(20000)});
+  if (!Array.isArray(models) || !models.every((row): row is [string, string] =>
+    Array.isArray(row) && row.length === 2 && typeof row[0] === "string" && row[0].length > 0 && typeof row[1] === "string")) {
+    throw new Error("Invalid Antigravity model catalog");
+  }
+  return models;
 }
 
 export interface LibrarySkillSummary {
