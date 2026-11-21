@@ -1,3 +1,4 @@
+import { AlternativeRouterSettings } from "./AlternativeRouterSettings";
 import { AccountVpnSettings } from "./AccountVpnSettings";
 import { pollWhileVisible } from "./poll";
 import { cacheLoad, cachePeek, cachePeekArray, cachePut } from "./pageCache";
@@ -1400,6 +1401,8 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
       <Show when={open()}>
         <div class="p-acc-body">
           <AccountVpnSettings account={a.id} />
+
+            <Show when={manages() && a.provider_type === "antigravity"}><AlternativeRouterSettings account={a.id} /></Show>
           <Show when={p.rank}>{r => <RankControls rank={r()} name={email() ?? a.name} title={title()} />}</Show>
           <Show when={mistralSubscription()}>
             <MistralUsageConnect a={a} usage={p.usage} onUsage={p.onUsage} />

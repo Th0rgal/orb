@@ -1347,6 +1347,7 @@ fun OrbProvidersSettingsPage(
                                                 .padding(top = 4.dp),
                                             verticalArrangement = Arrangement.spacedBy(10.dp)
                                         ) {
+                                            if (manages && providerType == "antigravity") AlternativeRouterSettings(core, pid)
                                             AccountVpnSettings(core, pid)
                                             usageLimitStatus(detail)?.let { limit ->
                                                 Text(
@@ -2206,6 +2207,37 @@ private fun OrbQuotaPoolRow(pool: String, windows: List<Pair<String, Double>>) {
             }
         }
     }
+}
+
+@Composable
+private fun AlternativeRouterSettings(core: OrbCore, account: String) {
+    val scope = rememberCoroutineScope()
+    var allowed by remember(core, account) { mutableStateOf<Boolean?>(null) }
+    var busy by remember(core, account) { mutableStateOf(false) }
+    var failed by remember(core, account) { mutableStateOf(false) }
+    suspend fun update(value: Boolean? = null) {
+        if (busy) return
+        busy = true
+        try {
+            val path = "/api/ai/providers/${core.encodeComponent(account)}/alternative-routers"
+            val result = if (value == null) core.request(path)
+                else core.request(path, method = "PUT", body = mapOf("allowed" to value))
+            allowed = OrbJSON.dict(result)?.get("allowed") as? Boolean ?: error("Missing router access")
+            failed = false
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            allowed = null
+            failed = true
+        } finally { busy = false }
+    }
+    LaunchedEffect(core, account) { update() }
+    allowed?.let { current ->
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Allow alternative routers")
+            Switch(checked = current, enabled = !busy, onCheckedChange = { value -> scope.launch { update(value) } })
+        }
+    }
+    if (failed) TextButton(enabled = !busy, onClick = { scope.launch { update() } }) { Text("Retry router settings") }
 }
 
 @Composable
