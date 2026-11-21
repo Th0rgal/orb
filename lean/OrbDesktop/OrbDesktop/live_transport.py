@@ -14,7 +14,6 @@ import uuid
 
 CURRENT_MISSION_LIMIT = 200
 ARCHIVED_MISSION_LIMIT = 100
-TRACKED_MISSION_LIMIT = CURRENT_MISSION_LIMIT + ARCHIVED_MISSION_LIMIT
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -88,6 +87,27 @@ class MissionNotIdle(ValueError):
     pass
 
 
+def run_mutation(binding, action, mid):
+    try:
+        mutate(binding, action, mid)
+        return 0
+    except MissionNotIdle:
+        return 2
+    except urllib.error.HTTPError as error:
+        with error:
+            if action in ('create', 'send') and error.code == 400:
+                try:
+                    detail = json.loads(error.read(4096)).get('error')
+                except (ValueError, AttributeError):
+                    detail = None
+                if isinstance(detail, str) and detail.partition(':')[0] in (
+                        'remote_goal_unsupported', 'remote_goal_followup_unsupported'):
+                    return 3 if action == 'create' else 4
+        return 1
+    except Exception:
+        return 1
+
+
 def change_status(c, action, mid, key):
     path = '/api/control/missions/' + mid
     if action == 'archive':
@@ -153,8 +173,13 @@ def mutate(binding, action, mid):
     if action.startswith('bulk-'):
         return bulk_write(c, action.removeprefix('bulk-'), key)
     if action == 'create':
-        values = sys.stdin.buffer.read().decode().split('\t')
+        values = sys.stdin.buffer.read().decode().split('\t', 6)
         body = {'title': 'New mission'}
+        if len(values) == 7:
+            prompt = values.pop()
+            if not prompt.strip():
+                raise ValueError('missing initial prompt')
+            body.update(prompt=prompt, title=' '.join(prompt.split())[:80])
         if values != ['']:
             if len(values) not in (5, 6):
                 raise ValueError('invalid launch settings')
@@ -224,6 +249,15 @@ def mission_settings(m):
             m.get('model_effort'), m.get('permission_mode') or 'supervised')
 
 
+def mission_hierarchy(m):
+    tags = m.get('tags') or []
+    fork = next((tag[8:] for tag in tags if tag.startswith('fork-of:')), '')
+    if not fork and (m.get('title') or '').lower().endswith(' · fork'):
+        fork = m.get('parent_mission_id')
+    return (m.get('folder'), m.get('parent_mission_id'), m.get('callback_parent_mission_id'),
+            fork, m.get('superseded_by_mission_id'))
+
+
 def visible_model_options(backend, options, rules):
     available = {(m.get('value'), m.get('provider_id')) for m in options}
     for option in options:
@@ -274,9 +308,9 @@ def roster_rows(c, include_archived=False):
             if error.code != 404:
                 raise
     rows = [('C', c.binding)]
-    rows += [('P', p['slug'], p.get('title') or p['slug'], p.get('objective')) for p in projects]
+    rows += [('P', p['slug'], p.get('title') or p['slug'], p.get('objective'), p.get('color')) for p in projects]
     rows += [('M', *(m.get(k) for k in ('id','title','project','track','model','model_override',
-                                        'status','updated_at','created_at','short_description')), *mission_settings(m))
+                                        'status','updated_at','created_at','short_description')), *mission_settings(m), *mission_hierarchy(m))
              for m in missions if re.fullmatch(r'[A-Za-z0-9_-]{1,128}', m['id'])]
     rows += [('N', *(m.get(k) for k in ('id','name','role','provider','cpu_ram','size','state',
                                         'status','expires_at','cost','active_missions'))) for m in machines]
@@ -284,18 +318,48 @@ def roster_rows(c, include_archived=False):
     return rows
 
 
+def read_snapshot(read, attempts=None):
+    delay = 1
+    while True:
+        try:
+            return read()
+        except (urllib.error.URLError, TimeoutError) as error:
+            if isinstance(error, urllib.error.HTTPError):
+                if error.code not in (408, 429, 500, 502, 503, 504):
+                    raise
+                error.close()
+            if attempts is not None:
+                attempts -= 1
+                if attempts == 0:
+                    raise
+            time.sleep(delay)
+            delay = min(30, 2 * delay)
+
+
 def roster():
     c = Connection()
-    rows = roster_rows(c, include_archived=True)
+    rows = read_snapshot(lambda: roster_rows(c, include_archived=True), attempts=2)
     for row in rows:
         print('\t'.join(map(label, row)))
+
+
+def recover_roster():
+    """Wait for a valid saved session and a complete roster after disconnection."""
+    delay = 1
+    while True:
+        try:
+            roster()
+            return
+        except (OSError, ValueError, KeyError, StopIteration, TypeError):
+            time.sleep(delay)
+            delay = min(30, 2 * delay)
 
 
 def catalog(binding, rules):
     c = Connection()
     if c.binding != binding:
         return
-    rows = list(catalog_rows(c, rules))
+    rows = read_snapshot(lambda: list(catalog_rows(c, rules)))
     c.check()
     for row in rows:
         print('\t'.join(map(label, row)))
@@ -312,11 +376,11 @@ def projection(c, mid, presence=False):
 def poll(mid, binding, tracked=None):
     c = Connection()
     if tracked is None:
-        line = sys.stdin.readline(TRACKED_MISSION_LIMIT * 129 + 1)
+        line = sys.stdin.readline()
         if not line.endswith('\n'):
             return
         tracked = set(filter(None, line.rstrip('\n').split(',')))
-    if len(tracked) > TRACKED_MISSION_LIMIT or not all(re.fullmatch(r'[A-Za-z0-9_-]{1,128}', i) for i in tracked):
+    if not all(re.fullmatch(r'[A-Za-z0-9_-]{1,128}', i) for i in tracked):
         return
     if c.binding != binding or (mid and not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', mid)):
         return  # EOF invalidates the old roster; never request with a new identity
@@ -340,22 +404,20 @@ def poll(mid, binding, tracked=None):
                             tracked.discard(missing)
                     except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError):
                         pass  # unknown for this ID, continue checking the others
-                visible = [kind + ':' + label(ident) for kind, ident, *_ in rows if kind in ('P','N')]
-                visible += ['M:' + i for i in sorted(tracked)]
-                # Project status for other visible rows too. The selected bubble
-                # carries a newer per-mission read and remains its own authority.
-                visible += ['S:' + r[1] + ':' + r[7] for r in rows if r[0] == 'M'
-                            and r[1] in tracked and r[1] != mid and len(r) > 7
-                            and isinstance(r[7], str) and re.fullmatch(r'[a-z_]+', r[7])]
+                tracked.update(found)
+                # A full sampled row owns its metadata. Displaced authorized
+                # missions keep their last row until an explicit denial.
+                visible = ['\x1c'.join(map(label, row)) for row in rows if row[0] in ('P', 'M', 'N')]
+                visible.extend('K\x1c' + ident for ident in sorted(tracked - found))
                 checked = time.monotonic()
             current = ['sample', visible.copy(), None]
-            if mid and 'M:' + mid in visible:
+            if mid and mid in tracked:
                 try:
                     current[2] = projection(c, mid)
                 except urllib.error.HTTPError as error:
                     if error.code not in (403, 404):
                         raise
-                    visible.remove('M:' + mid)
+                    visible = [row for row in visible if row.split('\x1c', 2)[:2] not in (['K', mid], ['M', mid])]
                     tracked.discard(mid)
                     current[1] = visible.copy()
                 except (ValueError, KeyError, TypeError):
@@ -375,7 +437,7 @@ def poll(mid, binding, tracked=None):
         if current != last:
             # Projection strips control characters except transcript newlines
             # and tabs. Reserve RS/US to encode those without a JSON runtime.
-            keys = '\x1f'.join(current[1])
+            keys = '=' if last is not None and current[1] == last[1] else '+' + '\x1f'.join(current[1])
             if isinstance(current[2], list):
                 title, status, text = current[2]
                 fields = ('B', keys, title, status, text.replace('\n', '\x1e').replace('\t', '\x1f'))

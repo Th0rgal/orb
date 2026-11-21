@@ -463,7 +463,7 @@ def buildMissionSplitDiffBody (st : DesktopState) (mainW bodyH : SubPx) : Widget
 
 /-- Build a `.s-row` inside a `.s-card` for `05_machines_fleet`. -/
 def buildMachineRow (theme : Theme) (w h : SubPx) (title desc rightText : String)
-    (hasBottomBorder : Bool := false) : WidgetNode :=
+    (hasBottomBorder : Bool := false) (showChevron : Bool := true) : WidgetNode :=
   let pal := theme.palette
   let bdr := theme.borderWidth
   WidgetNode.rrect
@@ -482,10 +482,32 @@ def buildMachineRow (theme : Theme) (w h : SubPx) (title desc rightText : String
         ]
     , WidgetNode.box
         (BoxStyle.row (pxToSub 8) |>.withAlign .center |>.withFixedSize (pxToSub 76) (pxToSub 18))
-        [ screenTextLine theme (pxToSub 52) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textSecondary rightText
-        , screenTextLine theme (pxToSub 16) (pxToSub 18) (pxToSub 14) (pxToSub 18) pal.textFaint "›"
-        ]
+        ([screenTextLine theme (pxToSub 52) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textSecondary rightText] ++
+        (if showChevron then [screenTextLine theme (pxToSub 16) (pxToSub 18) (pxToSub 14) (pxToSub 18) pal.textFaint "›"] else []))
     ]
+
+/-- Only materialize machine rows intersecting the viewport. A long fleet keeps
+    its full scroll extent while text shaping stays bounded by window height. -/
+private def buildLiveMachines (st : DesktopState) (width height : SubPx) : WidgetNode := Id.run do
+  let theme := st.theme
+  let pal := theme.palette
+  let colW := min (pxToSub 640) (width - pxToSub 24)
+  let rowH := pxToSub 60
+  let count := st.fleetMachines.length
+  if count == 0 then
+    return WidgetNode.box (BoxStyle.col 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize width height)
+      [screenTextLine theme colW (pxToSub 20) (pxToSub 13) (pxToSub 20) pal.textSecondary "No machines connected"]
+  let top := min st.fleetTopSub (count * rowH - height)
+  let first := top / rowH
+  let visible := (st.fleetMachines.drop first).take (height / rowH + 2)
+  let spacer := fun n => WidgetNode.box (BoxStyle.col 0 |>.withFixedSize colW (n * rowH)) []
+  let rows := visible.map fun m =>
+    let detail := String.intercalate " · " ([m.roleLabel, m.cpuRamSpec].filter (!·.isEmpty))
+    buildMachineRow theme colW rowH (if m.name.isEmpty then m.machineId else m.name) detail m.state true false
+  let content := WidgetNode.box (BoxStyle.col 0 |>.withAlign .center)
+    ([spacer first] ++ rows ++ [spacer (count - first - visible.length)])
+  return WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize width height)
+    { offsetY := top } content (some fleetViewportId)
 
 /-- Build the Compute Fleet screen (`05_machines_fleet`) matching the `640 px` SolidJS `.s-inner` column. -/
 def buildMachinesFleetBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
@@ -962,7 +984,7 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
 in `SubPx`, and optional pre-shaped `ShapedScreenRuns`. `windowEffects` is enabled only by the
 live Wayland runtime so deterministic golden renders retain the opaque parity palette. -/
 def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
-    (runs : ShapedScreenRuns := {}) (windowEffects : Bool := false) : WidgetNode :=
+    (runs : ShapedScreenRuns := {}) (windowEffects : Bool := false) (hoverRow : Option WidgetId := none) : WidgetNode :=
   let st := if windowEffects then { st with theme := Theme.withWindowEffects st.theme } else st
   let theme := st.theme
   let pal := theme.palette
@@ -971,12 +993,12 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
   let st := if windowEffects then
       { st with theme := { theme with palette := { pal with canvas := 0, header := 0 } } }
     else st
-  let sidebarW := chromeSidebarWidthSub
+  let sidebarW := st.sidebarWidth
   let headerH := chromeHeaderHeightSub
   let composerH := chromeComposerHeightSub
   let mainW : SubPx := availW - sidebarW
   let useRefSidebar := !st.liveData && !runs.headerTitleRuns.isEmpty
-  let sidebarNode := buildSidebarChrome st availH useRefSidebar
+  let sidebarNode := buildSidebarChrome st availH useRefSidebar hoverRow
   let headerNode := buildHeaderChrome st mainW runs.headerTitleRuns
 
   let rightColumn : WidgetNode :=
@@ -1015,7 +1037,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
       let bodyH := availH - headerH
       WidgetNode.box
         (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill)
-        [headerNode, buildMachinesFleetBody st mainW bodyH]
+        [headerNode, if st.hasLiveConnection then buildLiveMachines st mainW bodyH else buildMachinesFleetBody st mainW bodyH]
     | .settingsGeneral =>
       let bodyH := availH - headerH
       WidgetNode.box
@@ -1025,15 +1047,22 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
       let bodyH := availH - headerH
       WidgetNode.box
         (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill)
-         [headerNode, if st.hasLiveConnection then liveComposerControls st mainW
+         [headerNode, if st.hasLiveConnection then
+           WidgetNode.box (BoxStyle.col 0 |>.withJustify .center |>.withAlign .center |>.withFixedSize mainW bodyH)
+             [buildComposerWidget theme mainW composerH { st.composer with placeholder := "Describe a task, / for commands, @ for context" }
+               [] (some (liveComposerControls st (min (pxToSub 748) (mainW - pxToSub 68))))]
+           else if st.initialRosterPending then
+             WidgetNode.box (BoxStyle.col 0 |>.withJustify .center |>.withAlign .center |>.withFixedSize mainW bodyH)
+               [WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (min (pxToSub 748) (mainW - pxToSub 68)) (pxToSub 42))
+                 pal.elevatedSurface (CornerRadii.uniform (pxToSub 21))]
            else if st.liveData then screenTextLine theme mainW (pxToSub 32) (pxToSub 13)
-           (pxToSub 21) pal.textMuted "Core unavailable"
+             (pxToSub 21) pal.textPrimary "Check your connection in Orb Settings → Account."
            else buildNewAgentBody st mainW bodyH]
 
   let baseShell : WidgetNode :=
     WidgetNode.box
       (BoxStyle.row 0 |>.withFixedSize availW availH |>.withBg (if windowEffects then 0 else pal.canvas))
-      [sidebarNode, rightColumn]
+      (if st.sidebarHidden then [rightColumn] else [sidebarNode, rightColumn])
 
   if windowEffects then
     WidgetNode.roundedClip

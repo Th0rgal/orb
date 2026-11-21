@@ -96,17 +96,17 @@ def shapeDesktopRuns (ac : Text.GlyphAtlasCache) (font : Text.FontHandle)
     if cacheable then
       if let some hit := ac.resolved.find? (fun e => e.face == font.facePtr && e.scale == scale120 && e.text == text && e.style == style) then
         return (ac, [hit.run])
-    let (ac', shaped) ← Text.shapeTextCached ac font devSize64 text ""
+    let (ac', shaped) ← Text.shapeWithFallback ac font devSize64 text
     let mut curAc := ac'
     let mut glyphs : Array ShapedGlyph := #[]
     let scDen : Int := scaleDen
     let scNum : Int := if scale120 == 0 then 120 else scale120
     let mut penDev64 : Int := 0
-    for sg in shaped do
+    for (face, sg) in shaped do
       let glyphDev64 := penDev64 + sg.xOffset64
       let fraction := glyphDev64 % 64
       let subpx := (fraction.toNat / 16).toUInt32
-      let (ac', entry) ← Text.getOrRasterizeGlyph curAc font sg.glyphId devSize64 subpx
+      let (ac', entry) ← Text.getOrRasterizeGlyph curAc face sg.glyphId devSize64 subpx
       curAc := ac'
       let advSubNat : SubPx := ((max 0 sg.xAdvance64 * scDen) / scNum).toNat
       -- The glyph bitmap already contains its fractional horizontal phase.
@@ -268,7 +268,7 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
   let (ac5, streamRuns) ←
     shapeStreamRuns ac4 rt.primaryFont sc
       { (Theme.bodyText theme) with color := pal.textPrimary }
-      streamText (transcriptTextWidth (availW - chromeSidebarWidthSub))
+      streamText (transcriptTextWidth (availW - st.sidebarWidth))
 
   let shapedRuns : ShapedScreenRuns := {
     headerTitleRuns := hdrRuns
@@ -278,7 +278,7 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
     diffAddRuns := addRuns
   }
 
-  let widgetRootRaw := buildDesktopScreen st availW availH shapedRuns liveWindow
+  let widgetRootRaw := buildDesktopScreen st availW availH shapedRuns liveWindow (st.sidebarHoverRow rt.hoveredEntity)
   let (ac6, widgetRoot) ← shapeWidgetTree ac5 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc widgetRootRaw
   let layoutRoot := widgetRoot.toLayoutNode
   let t1 ← IO.monoNanosNow
@@ -332,16 +332,28 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
   let scale := rt.wayland.scale120
   let viewport := rt.viewportDeviceRect
   fun st ev => Id.run do
+    if let .pointerMove x y := ev then
+      return (st, st.sidebarHoverDamage rt.hitRegions scale rt.hoveredEntity (hitTest rt.hitRegions x y))
+    if let .pointerLeave := ev then
+      return (st, st.sidebarHoverDamage rt.hitRegions scale rt.hoveredEntity none)
     if let .activate id := ev then
       if st.hasLiveConnection && st.missionMenu.isNone && st.writeRequest.isNone then
         if let some field := settingTrigger id then
-          let some (_, r) := rt.hitRegions.find? (·.1 == id) | return (st, none)
+          let some (_, r) := rt.hitRegions.find? (fun (entry : EntityId × Rect) => entry.1 == id) | return (st, none)
           return ({ st with missionMenu := some {
             mission := st.openMission.getD "", x := r.x, y := r.bottom, trigger := id,
             page := .picker field } }, some viewport)
-    if let .pointerButton x y 0x111 true := ev then
-      if st.hasLiveConnection && st.writeRequest.isNone then
-        let some id := hitTest rt.hitRegions x y | return (st, none)
+    let menuTarget : Option (EntityId × Int × Int) := match ev with
+      | .pointerButton x y 0x111 true => (hitTest rt.hitRegions x y).map fun id => (id, x, y)
+      | .key key mods .pressed =>
+        if key == 0xff67 || (key == 0xffc7 && mods == 1) then do
+          let id ← rt.focus.owner
+          let (_, bounds) ← rt.hitRegions.find? (fun (entry : EntityId × Rect) => entry.1 == id)
+          pure (id, bounds.x, bounds.bottom)
+        else none
+      | _ => none
+    if let some (id, x, y) := menuTarget then
+      if st.hasLiveConnection && st.missionMenu.isNone && st.writeRequest.isNone then
         let some row := st.sidebarRows.find? (·.widgetId == id) | return (st, none)
         let previous := st
         let st := contextSelection st row.rowId
@@ -363,6 +375,10 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
           let top := scrollStep content h (min r.limitY st.rosterTopSub) dy
           if top == st.rosterTopSub then return (st, none)
           return ({ st with rosterTopSub := top }, damage)
+        if r.id == fleetViewportId && st.screen == .machinesFleet then
+          let top := scrollStep content h (min r.limitY st.fleetTopSub) dy
+          if top == st.fleetTopSub then return (st, none)
+          return ({ st with fleetTopSub := top }, damage)
         if r.id == transcriptViewportId && st.screen == .missionTranscript then
           let current := st.scroll.onLayout content h
           let next := current.onUserScroll content h dy
@@ -495,7 +511,7 @@ def liveViewportRegression : Bool := Id.run do
   let cards := (List.range 32).map fun i => { (default : MissionSummaryCard) with
     widgetId := 1001 + i, missionId := s!"m{i}", title := s!"Mission {i}" }
   let rows := cards.map fun c => { (default : ChromeSidebarRow) with
-    widgetId := c.widgetId, rowId := c.missionId, kind := "mission", title := c.title }
+    widgetId := c.widgetId, rowId := "mission:" ++ c.missionId, kind := "mission", title := c.title }
   let initial := { DesktopState.liveUnavailable with sidebarRows := rows, missionCards := cards, connectionBinding := "test" }
   let w := pxToSub 800
   let h := pxToSub 320
@@ -522,7 +538,13 @@ def liveViewportRegression : Bool := Id.run do
   let some (_, row) := scrolled.hitRegions.find? (fun (p : EntityId × Rect) => p.1 == last.widgetId) | return false
   let click := fun pressed => Event.pointerButton (row.x + row.w/2) (row.y + row.h/2) 0x110 pressed
   let press := scrolled.stepEvent (desktopReducer scrolled) (click true)
-  let selected := (press.stepEvent (desktopReducer press) (click false)).app
+  let released := press.stepEvent (desktopReducer press) (click false)
+  let selected := released.app
+  let menu := (released.stepEvent (desktopReducer released) (.key 0xffc7 1 .pressed)).app.missionMenu
+  if menu.map (·.mission) != some last.missionId then return false
+  let forward := released.stepEvent (desktopReducer released) (.key 0xff09 0 .pressed)
+  let backward := forward.stepEvent (desktopReducer forward) (.key 0xfe20 1 .pressed)
+  if backward.focus.owner != released.focus.owner then return false
   if selected.openMission != some last.missionId then return false
   let some top := wheel (frame selected).1 transcriptViewportId (-999999) | return false
   let (atTop, before) := frame top
@@ -574,9 +596,9 @@ def main (args : List String) : IO UInt32 := do
     let ok ← renderSingleGoldenToFile rcfg.width rcfg.height scr rcfg.darkTheme rcfg.scale120 outPath
     return (if ok then 0 else 1)
   let scr := dcfg.screenOpt.getD .missionTranscript
-  let initSt ← if dcfg.screenOpt.isNone && !dcfg.selfTest then
-    (loadLiveState rcfg.darkTheme rcfg.scale120).map (·.getD (DesktopState.liveUnavailable rcfg.darkTheme rcfg.scale120))
-  else pure (DesktopState.forScreen scr rcfg.darkTheme rcfg.scale120)
+  let initSt := if dcfg.screenOpt.isNone && !dcfg.selfTest then
+    { DesktopState.liveUnavailable rcfg.darkTheme rcfg.scale120 with initialRosterPending := true }
+  else DesktopState.forScreen scr rcfg.darkTheme rcfg.scale120
   if dcfg.selfTest then
     return (← runSelfTest rcfg initSt)
   try
@@ -587,7 +609,7 @@ def main (args : List String) : IO UInt32 := do
     let rt0 ← Runtime.openWindowRuntime rcfg "orb-desktop" initSt
     let slot ← IO.mkRef (none : Option LiveSubscription)
     let rt ← Runtime.withProducerWake fun wakeFd notify => do
-      withLiveCatalog initSt.connectionBinding notify fun takeCatalog => do
+      withLiveSources rcfg.darkTheme notify fun readSources => do
         try
           Runtime.runWindow { rt0 with focus := initSt.initialFocusState } desktopReducer renderDesktopView
             (fun rt => do
@@ -597,10 +619,9 @@ def main (args : List String) : IO UInt32 := do
               let spin := animations && phase != st.badgePhase
               let damage := if spin then (runningBadgeDamage rt).elim damage (Damage.add damage) else damage
               let st := if spin then { st with badgePhase := phase } else st
-              let some models ← takeCatalog | return (st, damage)
-              if st.connectionBinding != initSt.connectionBinding then return (st, damage)
-              return ({ st with catalog := models, catalogLoading := false }, some vp))
-            DesktopState.hasLiveConnection menuFocusChange (some wakeFd) (·.writeRequest.isSome)
+              let some updated ← readSources st | return (st, damage)
+              return (updated, some vp))
+            (·.liveData) desktopFocusChange (some wakeFd) (·.writeRequest.isSome)
             (fun rt => animations && (runningBadgeDamage rt).isSome)
         finally closeLiveSubscription slot
     Runtime.shutdownRuntime rt

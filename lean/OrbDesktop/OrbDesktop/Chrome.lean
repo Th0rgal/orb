@@ -53,12 +53,18 @@ def chromeIconPaths (name : String) : List (List (Int × Int)) :=
   | "folder" => [[(20,48),(20,38),(28,30),(61,30),(76,46),(122,46),(140,64),(140,114),(132,132),(38,132),(20,114),(20,48)]]
   | "chat" => [[(30,110),(20,140),(60,120),(100,120),(130,100),(140,70),(130,40),(100,20),(60,20),(30,40),(20,70),(30,110)],[(50,60),(110,60)],[(50,85),(90,85)]]
   | "list" => [[(30,40),(130,40)],[(30,80),(100,80)],[(30,120),(130,120)]]
+  | "project-folder-open" => [[(40,93),(50,74),(61,67),(133,67),(146,71),(147,83),(136,123),(129,133),(26,133),(13,120),(13,33),(26,20),(53,20),(65,27),(74,40),(120,40),(133,53),(133,67)]]
   | "project-folder" => [[(133,133),(143,129),(147,120),(147,53),(143,44),(133,40),(81,40),(74,38),(69,34),(64,26),(59,22),(53,20),(27,20),(17,24),(13,33),(13,120),(17,129),(27,133),(133,133)]]
   | _ => [[(20,48),(20,38),(28,30),(61,30),(76,46),(122,46),(140,64),(140,114),(132,132),(38,132),(20,114),(20,48)]]
 
 def chromeIcon (name : String) (color : Color) (size : Nat := 16) : WidgetNode :=
   .mk none false false (BoxStyle.row 0 |>.withFixedSize (pxToSub size) (pxToSub size))
     (.vectorIcon (chromeIconPaths name) color) []
+
+private def sidebarToggle (theme : Theme) : WidgetNode :=
+  WidgetNode.focusable sidebarToggleId <| WidgetNode.box
+    (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 26) (pxToSub 26))
+    [chromeIcon "sidebar" theme.palette.textMuted 14] (some sidebarToggleId)
 
 def liveComposerControls (st : DesktopState) (width : SubPx) : WidgetNode :=
   let mid := st.openMission.getD ""
@@ -156,18 +162,23 @@ def chromeLabel (lineH : SubPx) (runs : List InlineRun) (grow : Nat := 0) : Widg
 tall with `6 px` corners, a `16 px` icon slot (`18 px` for a mission, holding its status dot),
  the label, and an optional count pill and shortcut hint. -/
 def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarRow)
-    (margin : Edges := {}) (livePhase : Option Nat := none) : WidgetNode :=
+    (margin : Edges := {}) (livePhase : Option Nat := none) (expanded : Bool := false) (hovered : Bool := false) : WidgetNode :=
   let pal := theme.palette
   let small := Theme.mutedText theme
   if row.kind == "section" then
-    WidgetNode.box
+    let isArchives := row.rowId == "section:archives"
+    let icon := if isArchives then (if expanded then "chevron-down" else "chevron-right")
+      else if row.rowId == "section:archived" then "chevron-right" else "plus"
+    let sectionRow := WidgetNode.box
       (BoxStyle.row 0
         |>.withAlign .center
         |>.withPadding (Edges.trbl 0 (pxToSub 8) 0 (pxToSub 10))
         |>.withMargin margin
         |>.withFixedSize innerW (pxToSub 18))
        [chromeLabel small.lineHeightSub [overlaySynthRun small row.title] 1,
-        chromeIcon (if row.rowId == "section:archived" then "chevron-right" else "plus") pal.textFaint 14]
+        chromeIcon icon pal.textFaint 14]
+       (if isArchives then some row.widgetId else none)
+    if isArchives then WidgetNode.focusable row.widgetId sectionRow else sectionRow
   else
     let isFooter := row.kind == "footer"
     let isMission := row.kind == "mission"
@@ -184,7 +195,7 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
         (.treeDecoration isMission row.selected pal.borderSubtle
           (if isMission && livePhase.isNone then statusBadgeColor pal row.status else if projectRunning && livePhase.isNone then pal.accent else 0)
           (if row.selected then pal.rowActive else pal.sidebar))
-        [if isMission && livePhase.isSome then liveMissionLead theme row.status (livePhase.getD 0) else chromeIcon (if isMission then "mission" else if row.kind == "project" then "project-folder" else row.rowId) pal.textMuted]
+        [if isMission && livePhase.isSome then liveMissionLead theme row.status (livePhase.getD 0) else chromeIcon (if isMission then "mission" else if row.kind == "project" then (if expanded then "project-folder-open" else "project-folder") else row.rowId) (row.iconColor.getD pal.textMuted)]
     let labelColor : Color :=
       if isFooter then (if row.selected then pal.textPrimary else pal.textSecondary)
       else if row.selected then pal.textStrong
@@ -195,6 +206,13 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
     let labelStyle := { (chromeText theme labelColor) with lineHeightSub := pxToSub 17 }
     let badge : List WidgetNode :=
       if row.badge == 0 then []
+      else if isMission && livePhase.isSome then
+        let id := missionDisclosureId row.widgetId
+        [WidgetNode.focusable id <| WidgetNode.box
+          (BoxStyle.row (pxToSub 4) |>.withAlign .center |>.withJustify .center
+            |>.withFixedSize (pxToSub 38) (pxToSub 26))
+          [chromeLabel small.lineHeightSub [overlaySynthRun small (toString row.badge)],
+           chromeIcon (if expanded then "chevron-down" else "chevron-right") pal.textFaint 12] (some id)]
       else
         [WidgetNode.rrect
           { BoxStyle.row 0 with
@@ -205,7 +223,12 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
           BorderStyle.none
           [chromeLabel small.lineHeightSub [overlaySynthRun small (toString row.badge)]]]
     let shortcut : List WidgetNode :=
-      if row.shortcut.isEmpty || isMission then []
+      if row.kind == "project" && expanded && livePhase.isSome then
+        let id := projectNewAgentId row.widgetId
+        [WidgetNode.focusable id <| WidgetNode.box
+          (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 26) (pxToSub 26))
+          [chromeIcon "plus" pal.textMuted 13] (some id)]
+      else if row.shortcut.isEmpty || isMission then []
       else
         [chromeLabel small.lineHeightSub
           [overlaySynthRun { small with color := pal.textFaint } row.shortcut]]
@@ -216,12 +239,13 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
           |>.withPadding (Edges.trbl 0 padRight 0 padLeft)
           |>.withMargin margin
           |>.withFixedSize innerW (if isFooter then pxToSub 32 else pxToSub 30))
-        (if row.selected && !isFooter then pal.rowActive else 0x00000000)
+        (if row.selected && !isFooter then pal.rowActive
+         else if hovered then (pal.textPrimary &&& 0xFFFFFF00) ||| 0x0C else 0x00000000)
         (CornerRadii.uniform (if isFooter then pxToSub 8 else pxToSub 6))
         BorderStyle.none
         ([lead, if isMission then
             WidgetNode.text
-              { (BoxStyle.row 0 |>.withFixedSize (innerW - padLeft - padRight - leadSize - pxToSub 8) labelStyle.lineHeightSub) with clip := true }
+              { (BoxStyle.row 0 |>.withFixedSize (innerW - padLeft - padRight - leadSize - pxToSub 8 - (if badge.isEmpty then 0 else pxToSub 46)) labelStyle.lineHeightSub) with clip := true }
               labelStyle.lineHeightSub [overlaySynthRun labelStyle row.title]
           else chromeLabel labelStyle.lineHeightSub [overlaySynthRun labelStyle row.title] 1]
           ++ badge ++ shortcut)
@@ -278,19 +302,14 @@ def referenceSidebarRows (scr : ScreenId) : List ChromeSidebarRow :=
 /-- Build the left sidebar (`aside.sidebar`, `--sb-w` wide with a `1 px` right border): an empty
 band as tall as the title row, the navigation rows on a `31 px` pitch, the section label and
 project tree, and the settings button in a `45 px` footer. -/
-def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : Bool := false) : WidgetNode :=
+def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : Bool := false) (hoverRow : Option WidgetId := none) : WidgetNode :=
   let theme := st.theme
   let pal := theme.palette
   let border := theme.borderWidth
   let innerW := chromeSidebarWidthSub - border
   let rowW := innerW - pxToSub 12
   let footH := pxToSub 45
-  let rowsSource := if useReferenceTree then referenceSidebarRows st.screen else st.sidebarRows
-  let rowsSource := if st.hasLiveConnection then
-      [{ widgetId := 805, rowId := "action:create", kind := "nav", title := "Create mission" }] ++
-      (if st.selectedCard.isSome && !st.composer.isRunning then
-        [{ widgetId := 106, rowId := "action:archive", kind := "nav", title := "Archive mission" }] else []) ++ rowsSource
-    else rowsSource
+  let rowsSource := if useReferenceTree then referenceSidebarRows st.screen else st.visibleProjectRows
   let isNav (r : ChromeSidebarRow) : Bool := r.kind == "nav"
   let isFoot (r : ChromeSidebarRow) : Bool := r.kind == "footer"
   let navRows : List WidgetNode :=
@@ -299,11 +318,11 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
         if i == 0 then (if st.screen == .settingsGeneral then pxToSub 4 else 0)
         else if st.screen == .settingsGeneral && i == 1 then pxToSub 10
         else pxToSub 1
-      buildSidebarRowWidget theme rowW r (Edges.trbl topM 0 0 0)
+      buildSidebarRowWidget theme rowW r (Edges.trbl topM 0 0 0) (hovered := hoverRow == some r.widgetId)
   let archived := fun (r : ChromeSidebarRow) => st.liveData && r.kind == "mission" && r.status == "acknowledged"
   let archiveRows := rowsSource.filter archived
-  let archiveGroup : List ChromeSidebarRow := if archiveRows.isEmpty then [] else
-    [{ widgetId := 730, rowId := "section:archives", kind := "nav", title := "Archived", badge := archiveRows.length }] ++
+  let archiveGroup : List ChromeSidebarRow := if !st.hasLiveConnection then [] else
+    [{ widgetId := 730, rowId := "section:archives", kind := "section", title := "Archived" }] ++
     (if st.archivesOpen then archiveRows else [])
   let treeRows : List WidgetNode :=
     ((rowsSource.filter fun r => !isNav r && !isFoot r && !archived r) ++ archiveGroup).map fun r =>
@@ -318,9 +337,11 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
       else
         buildSidebarRowWidget theme rowW { r with selected := r.selected || st.multiRows.contains r.rowId }
           (if r.kind == "section" then Edges.trbl (pxToSub 14) 0 (pxToSub 4) 0
-           else Edges.trbl 0 0 (pxToSub 1) 0) (if st.liveData then some st.badgePhase else none)
+           else Edges.trbl 0 0 (pxToSub 1) 0) (if st.liveData then some st.badgePhase else none) (if r.rowId == "section:archives" then st.archivesOpen
+            else if r.kind == "project" then st.expandedProjects.contains (r.rowId.drop 8).toString
+            else st.expandedMissions.contains r.rowId) (hovered := hoverRow == some r.widgetId)
   let footRows : List WidgetNode :=
-    (rowsSource.filter isFoot).map fun r => buildSidebarRowWidget theme rowW r
+    (rowsSource.filter isFoot).map fun r => buildSidebarRowWidget theme rowW r (hovered := hoverRow == some r.widgetId)
   let rosterH := availH - chromeHeaderHeightSub - footH
   let rosterStyle := BoxStyle.col 0
     |>.withPadding (Edges.trbl 0 (pxToSub 6) (pxToSub 12) (pxToSub 6))
@@ -337,7 +358,7 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
     { widths := Edges.trbl 0 border 0 0, color := pal.borderSubtle }
     [ WidgetNode.box (BoxStyle.row 10 |>.withAlign .center
         |>.withPadding (Edges.xy (pxToSub 12) 0) |>.withFixedSize innerW chromeHeaderHeightSub)
-        [chromeIcon "sidebar" pal.textMuted 14,
+        [if st.liveData then sidebarToggle theme else chromeIcon "sidebar" pal.textMuted 14,
          WidgetNode.box (BoxStyle.row 0 |>.withMargin (Edges.trbl 0 0 0 (pxToSub 12))) [chromeIcon "search" pal.textMuted 14],
          WidgetNode.box { BoxStyle.row 0 with grow := 1 } [],
          chromeIcon "back" pal.textMuted 14,
@@ -368,7 +389,7 @@ def buildHeaderChrome (st : DesktopState) (mainW : SubPx)
     match st.screen with
     | .missionTranscript | .missionSplitDiff => pxToSub 7
     | _ => 0
-  let rightButtons : List WidgetNode :=
+  let rightButtons : List WidgetNode := if st.liveData then [] else
     match st.screen with
     | .missionTranscript | .missionSplitDiff =>
       let mutedSt : TextStyle := { (Theme.mutedText theme) with sizeSub := pxToSub 12, lineHeightSub := pxToSub 16 }
@@ -393,7 +414,7 @@ def buildHeaderChrome (st : DesktopState) (mainW : SubPx)
     CornerRadii.zero
     BorderStyle.none
     ([WidgetNode.box { BoxStyle.row (pxToSub 8) with grow := 1, align := .center }
-       ([chromeLabel titleStyle.lineHeightSub titleRuns] ++
+       ((if st.sidebarHidden then [sidebarToggle theme] else []) ++ [chromeLabel titleStyle.lineHeightSub titleRuns] ++
          (if inset > 0 then [chromeIcon "nav:cloud" pal.textMuted 14] else []))] ++ rightButtons)
 
 /-- Build the toast notification stack widget for `st.toasts`. -/

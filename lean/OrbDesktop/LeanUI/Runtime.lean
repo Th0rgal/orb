@@ -190,17 +190,23 @@ def stepEvent (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage) (
       else { (rt.markFullDamage) with scrollOffsetSub := nextOff }
     | .closeRequested =>
       { rt with running := false }
-    | .key keysym _mods state =>
+    | .key keysym mods state =>
       if state == .pressed || state == .repeated then
         -- Tab is handled here so every screen shares one focus traversal policy.
-        if keysym == 0xff09 then
-          let focus' := cycleFocusRuntime rt.focus rt.focusableOrder
+        if keysym == 0xff09 || keysym == 0xfe20 then
+          let reverse := keysym == 0xfe20 || mods &&& 1 != 0
+          let focus' := cycleFocusRuntime rt.focus (if reverse then rt.focusableOrder.reverse else rt.focusableOrder)
           let dmg' := if focus'.owner == rt.focus.owner then rt.damage else Damage.add rt.damage rt.viewportDeviceRect
           { rt with focus := focus', damage := dmg' }
-        else if keysym == 0xff0d || keysym == 0x20 then
+        else if keysym == 0xff0d || keysym == 0xff8d || keysym == 0x20 then
           match rt.focus.owner with
           | some id =>
-            let (app', appDmg) := onEvent rt.app (.activate id)
+            let editorReturn := id == 1 && keysym != 0x20
+            if editorReturn && state == .repeated then rt else
+            let action := if editorReturn then
+                Event.composerReturn (mods &&& 1 != 0)
+              else Event.activate id
+            let (app', appDmg) := onEvent rt.app action
             let finalDmg := match appDmg with
               | none => rt.damage
               | some r => Damage.add rt.damage r
@@ -227,16 +233,16 @@ end RuntimeState
 3. If `needsRedraw rt.damage == true`, build the `Scene`, render via `Vulkan.renderFrame`, and
    clear `rt.damage` to `none`. -/
 def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
-    (onEvent : σ → Event → σ × Damage)
+    (onEvent : RuntimeState σ → σ → Event → σ × Damage)
     (view : RuntimeState σ → IO (FrameView × List ScrollRegion))
-    (focusChange : σ → σ → Option Nat := fun _ _ => none) :
+    (focusChange : σ → σ → Event → Option Nat := fun _ _ _ => none) :
     IO (RuntimeState σ) := do
   let (wl1, evs) ← Wayland.pumpEvents rt.wayland
   let mut st := { rt with wayland := wl1 }
   for ev in evs do
     let before := st.app
-    st := st.stepEvent onEvent ev
-    if let some target := focusChange before st.app then st := st.requestFocus target st.viewportDeviceRect
+    st := st.stepEvent (onEvent st) ev
+    if let some target := focusChange before st.app ev then st := st.requestFocus target st.viewportDeviceRect
   if !needsRedraw st.damage then
     return { st with quiescentSkips := st.quiescentSkips + 1 }
   let (bw, bh) := st.wayland.deviceBufferSize
@@ -268,7 +274,7 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
 /-- Frame tick for views without independently scrollable input regions. -/
 def stepFrame {σ : Type} (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage)
     (view : RuntimeState σ → IO FrameView) : IO (RuntimeState σ) :=
-  stepFrameWithRegions rt onEvent fun st => do return (← view st, [])
+  stepFrameWithRegions rt (fun _ => onEvent) fun st => do return (← view st, [])
 
 /-- Build the canonical Orb Desktop canary scene. -/
 def buildCanaryScene (rt : RuntimeState Unit) :
@@ -445,7 +451,7 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
     (view : RuntimeState σ → IO (FrameView × List ScrollRegion))
     (pollFrame : RuntimeState σ → IO (σ × Damage) := fun rt => pure (rt.app, none))
     (hasProducer : σ → Bool := fun _ => false)
-    (focusChange : σ → σ → Option Nat := fun _ _ => none)
+    (focusChange : σ → σ → Event → Option Nat := fun _ _ _ => none)
     (wakeFd : Option UInt32 := none) (workPending : σ → Bool := fun _ => false)
     (animationVisible : RuntimeState σ → Bool := fun _ => false) : IO (RuntimeState σ) := withWindowWait rt0 wakeFd fun timedWait => do
   let mut rt := rt0
@@ -461,8 +467,13 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
       rt := { rt with app }
       if let some rect := damage then rt := rt.markDirty rect
       let rendered := rt.framesRendered
-      rt ← stepFrameWithRegions rt (onEvent rt) view focusChange
-      let wl ← Wayland.syncTextFocus rt.wayland (rt.focus.owner == some 1 && rt.focusableOrder.contains 1)
+      rt ← stepFrameWithRegions rt onEvent view focusChange
+      let shape : UInt32 := match rt.hoveredEntity with
+        | some 1 => 9  -- text in the composer
+        | some id => if rt.focusableOrder.contains id then 4 else 1
+        | none => 1
+      let wl ← Wayland.syncCursor rt.wayland shape
+      let wl ← Wayland.syncTextFocus wl (rt.focus.owner == some 1 && rt.focusableOrder.contains 1)
       rt := { rt with wayland := wl }
       if rt.framesRendered != rendered then
         let wl ← Wayland.present rt.wayland rt.vulkan.framebuffer
@@ -476,6 +487,7 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
 def shutdownRuntime {σ : Type} (rt : RuntimeState σ) : IO Unit := do
   if rt.wayland.xkbState != 0 then
     FFI.xkbFree rt.wayland.xkbState
+  for face in rt.atlas.fallbackFonts do Text.closeFont face
   Text.closeFont rt.primaryFont
   Text.closeFont rt.monoFont
   Text.closeFont rt.boldFont
