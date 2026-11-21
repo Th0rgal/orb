@@ -8,7 +8,9 @@ test('installed OpenCode exposes routing chains and direct models in composer',a
  await page.route('**/api/**',route=>{
   const path=new URL(route.request().url()).pathname;
   const json=path==='/api/backends'?[{id:'claudecode',name:'Claude Code'},{id:'opencode',name:'OpenCode'}]:
-   path==='/api/providers/backend-models'?{backends:{claudecode:[{value:'opus',label:'Opus'}],opencode:[{value:'openrouter/google/gemini',label:'OpenRouter — Gemini'},{value:'xai/grok-4.6',label:'xAI — Grok 4.6'}]}}:
+   path==='/api/providers/backend-models'?{backends:{claudecode:[{value:'opus',label:'Opus'}],opencode:[{value:'openrouter/google/gemini',label:'OpenRouter — Gemini'},{value:'xai/grok-4.6',label:'xAI — Grok 4.6'},
+    {value:'openai/gpt-6.1-sol',label:'OpenAI — GPT-6.1 Sol'},
+    {value:'openai/gpt-6.2-sol',label:'OpenAI — GPT-6.2 Sol'}]}}:
    path==='/api/model-routing/chains'?[{id:'builtin/smart',name:'Smart (Default)',is_default:true}]:
    path==='/api/projects'?{projects:[]}:
    path==='/api/control/missions'?[]:
@@ -18,10 +20,12 @@ test('installed OpenCode exposes routing chains and direct models in composer',a
  });
  await page.goto('/');
  await page.getByRole('button',{name:'Claude Code',exact:true}).click();
- await expect(page.getByRole('option',{name:/OpenCode/})).toBeVisible();
+ await expect(page.getByRole('option',{name:/OpenCode/})).toContainText('4 models');
  await page.getByRole('option',{name:/OpenCode/}).click();
  await page.getByRole('button',{name:/Smart \(Default\)/}).click();
  await expect(page.getByRole('option',{name:'Smart (Default)',exact:true})).toBeVisible();
+ await expect(page.getByRole('option')).toHaveCount(4);
+ await expect(page.getByRole('option',{name:'GPT-6.2 Sol',exact:true})).toBeVisible();
  await expect(page.getByRole('option',{name:'Gemini',exact:true})).toBeVisible();
  await expect(page.getByRole('option',{name:'Grok 4.6',exact:true})).toBeVisible();
 });
