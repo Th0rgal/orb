@@ -199,7 +199,7 @@ private def findCrlf? (buf : ByteArray) (startIdx : Nat := 0) : Option Nat := Id
       `maxTransferBytes` (`10 GiB`) directly to disk in `64 KiB` chunks! -/
 def readHttpRequest
     (cfd : UInt32) (workDir : String := "/tmp") (maxBodyBytes : Nat := 134217728)
-    (authTokens? : Option (String × Option String) := none) : IO (Except String HttpRequest) := do
+    (authTokens? : Option (String × Option String) := none) (ownerReserved : Bool := false) : IO (Except String HttpRequest) := do
   let mut buf := ByteArray.emptyWithCapacity 8192
   let mut hdrEnd? : Option Nat := none
   while hdrEnd?.isNone && buf.size < 65536 do
@@ -239,6 +239,8 @@ def readHttpRequest
   let (path, query) := parsePathAndQuery rawTarget
   let methodUp := method.toUpper
   let segs := (path.splitOn "/").filter (fun s => !s.isEmpty)
+  if ownerReserved && !(methodUp == "GET" && segs == ["heartbeat"]) then
+    return .error "owner_node_reserved"
   let isArchiveUnpack := methodUp == "POST" && segs == ["machine-transfer", "archive", "unpack"]
   let bodyStart := hdrEnd + 4
   let initialRem := if bodyStart < buf.size then buf.extract bodyStart buf.size else ByteArray.empty
@@ -1971,7 +1973,9 @@ def runServerLoop (rtInit : NodeRuntime) (dialCred? : Option OrbNode.Dial.DialCr
       else
         let _ ← IO.asTask (prio := Task.Priority.dedicated) do
           try
-            match ← readHttpRequest cfd workDirConst 134217728 authTokensConst with
+            match ← readHttpRequest cfd workDirConst 134217728 authTokensConst rtInit.cfg.dedicatedOwner?.isSome with
+            | .error "owner_node_reserved" =>
+              sendHttpResponse cfd (textResp 403 "native_owner_executor_unavailable")
             | .error "unauthorized" =>
               sendHttpResponse cfd (textResp 401 "invalid node token")
             | .error "payload_too_large" =>
