@@ -418,7 +418,9 @@ def catalog_rows(c, rules):
     chains = c.get('/api/model-routing/chains')
     by_id = {b['id']: b.get('name') or b['id'] for b in backends}
     chain_ids = {k for chain in chains for k in (chain['id'], chain['id'].removeprefix('builtin/'))}
-    for backend in ('claudecode', 'codex', 'grok', 'opencode', 'antigravity', 'vibe'):
+    if 'antigravity' in by_id:
+        yield ('native-antigravity',)
+    for backend in ('claudecode', 'codex', 'grok', 'opencode', 'vibe'):
         if backend not in by_id:
             continue
         options = models.get(backend, [])
@@ -431,8 +433,35 @@ def catalog_rows(c, rules):
                 yield ('H', backend, by_id[backend], option['value'], option.get('label') or option['value'])
 
 
+def native_models(binding, machine):
+    c = Connection()
+    if c.binding != binding or not machine:
+        return
+    query = '' if machine == 'core' else '?' + urllib.parse.urlencode({'node_id': machine})
+    pairs = c.request('/api/providers/antigravity-models' + query, deadline=20)
+    rows = []
+    if not isinstance(pairs, list):
+        raise ValueError('invalid native catalog')
+    for pair in pairs:
+        if not isinstance(pair, list) or len(pair) != 2:
+            raise ValueError('invalid native model entry')
+        ident, name = pair
+        if not isinstance(ident, str) or not ident or label(ident) != ident or not isinstance(name, str):
+            raise ValueError('invalid native model')
+        rows.append(('N', ident, label(name) or ident))
+    c.check()
+    print('native-models')
+    for row in rows:
+        print('\t'.join(row))
+
+
 def launch_machine_rows(fleet, administrative, harness):
-    if fleet['enabled'] is not True or (fleet.get('remote_launch') or {}).get('typed') is not True:
+    capability = fleet.get('remote_launch') or {}
+    if fleet['enabled'] is not True or capability.get('typed') is not True:
+        return
+    if harness and harness not in (capability.get('harnesses') or []):
+        return
+    if capability.get('proxy_url_configured') is False and harness in (capability.get('requires_proxy_harnesses') or []):
         return
     for node in fleet['nodes']:
         ident = node['id']
