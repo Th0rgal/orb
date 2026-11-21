@@ -3717,6 +3717,14 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let (_, nodes) ← loadStaticRemoteNodes
     unless (nodes.find? (fun n => n.id == node)).bind (·.dedicatedOwner?) == some caller.userId do
       return .ok (mkJson 403 "{\"error\":\"node_owner_required\"}")
+    if req.method == "GET" then
+      let .ok rows ← execParamQuery st.store.missionsDb
+          "SELECT CASE WHEN owner_id=?2 THEN account_id ELSE '' END,revision FROM native_owner_enrollments WHERE node_id=?1;"
+          #[node,caller.userId] | return .ok (mkJson 503 "{}")
+      let row := rows[1]?.getD #[]
+      let revision := ((row[1]?.getD "0").toNat?).getD 0
+      return .ok (mkJson 200 (renderCompact (.obj #[
+        ("account_id", .str (row[0]?.getD "")), ("revision", JVal.uint64 revision.toUInt64)])))
     unless req.method == "PUT" do return .ok (mkJson 405 "{}")
     let body := req.bodySlice.toByteArray
     if body.size > 2048 then return .ok (mkJson 413 "{}")

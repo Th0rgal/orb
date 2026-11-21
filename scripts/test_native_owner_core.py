@@ -71,6 +71,10 @@ def run(binary, root):
             assert status == expected, (status, body)
             return json.loads(body)
 
+        path = "/api/native-owner-enrollments/" + NODE_ID
+        assert request(port, bob, "GET", path)[0] == 403
+        status, body = request(port, alice, "GET", path)
+        assert status == 200 and json.loads(body) == {"account_id": "", "revision": 0}
         enroll(bob, "bob", 0, 403)
         enroll(alice, "bob", 0, 403)
         assert enroll(alice, "alice", 0, 200)["revision"] == 1

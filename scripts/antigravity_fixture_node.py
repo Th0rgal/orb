@@ -29,10 +29,10 @@ def request(port, token, method, path, body=None):
         connection.close()
 
 
-def submit(port, token, mission, command, node_id=NODE_ID):
+def submit(port, token, mission, command, node_id=NODE_ID, owner=OWNER):
     job = str(uuid4())
     claims = dict(mission_id=mission, node_id=node_id, scope="job:submit", expires_at=int(time.time()) + 300,
-                  job_id=job, owner_user_id=OWNER, caller_role="admin")
+                  job_id=job, owner_user_id=owner, caller_role="admin")
     if node_id is None:
         del claims["node_id"]
     encoded = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=")
