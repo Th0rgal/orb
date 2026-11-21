@@ -857,11 +857,14 @@ def parseChainTargetsJson
       let inlineUrl? := (it.fieldStr? "base_url").orElse (fun _ => it.fieldStr? "baseUrl") |>.filter (!·.isEmpty)
       let inlineKey? := (it.fieldStr? "api_key").orElse (fun _ => it.fieldStr? "apiKey") |>.filter (!·.isEmpty)
       -- A chain can name one account among several of the same provider type.
-      -- Once that identity exists, resolve credentials and limits only on its rows.
-      let pinned := hasExplicitAcct && (providers.any (fun p => p.id == acctRaw) ||
-        hydratedProvs.any (fun hp => hp.id == acctRaw))
+      -- A saved identity stays pinned across deletion. Only a default selector
+      -- may search siblings. A standalone inline entry supplies its own route.
+      let pinned := hasExplicitAcct && (!acctRaw.isEmpty && acctRaw != "default" ||
+        providers.any (fun p => p.id == acctRaw) || hydratedProvs.any (fun hp => hp.id == acctRaw))
       let eligibleRows := if pinned then providers.filter (fun p => p.id == acctRaw) else providers
       let eligibleHydrated := if pinned then hydratedProvs.filter (fun p => p.id == acctRaw) else hydratedProvs
+      if pinned && eligibleRows.isEmpty && eligibleHydrated.isEmpty &&
+          inlineUrl?.isNone && inlineKey?.isNone then continue
       -- Inline chain settings cannot override the global switch of a known account.
       if pinned && (eligibleRows.any (fun p => !p.enabled) ||
           eligibleHydrated.any (fun hp => !hp.enabled)) then continue
