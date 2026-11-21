@@ -299,9 +299,30 @@ structure ProviderAccount where
   category : String
   userEnabled : Bool
   globallyEnabled : Bool
+  providerType : String := ""
   deriving BEq, Repr, Inhabited
 
 def providerWidgetId (index : Nat) : WidgetId := 6000000 + index
+
+def providerSettingsId (index : Nat) : WidgetId := 7000000 + index
+def providerRouteId (index : Nat) : WidgetId := 8000000 + index
+def providersBackId : WidgetId := 5999998
+def providersRetryId : WidgetId := 5999999
+
+structure AccountRouteOption where
+  action : String
+  value : String
+  title : String
+  detail : String
+  deriving BEq, Repr, Inhabited
+
+structure AccountRoutePage where
+  account : ProviderAccount
+  previousTop : SubPx := 0
+  options : Option (List AccountRouteOption) := none
+  pending : Option AccountRouteOption := none
+  failed : Bool := false
+  deriving BEq, Repr, Inhabited
 
 inductive LiveWrite where
   | providerPreference (account : String) (enabled : Bool)
@@ -357,6 +378,7 @@ structure DesktopState where
   catalogRevision : Nat := 0
   providers : Option (List ProviderAccount) := none
   providerReadFailed : Bool := false
+  accountRoutePage : Option AccountRoutePage := none
   expandedProjects : List String := []
   expandedMissions : List String := []
   archivesOpen : Bool := false
@@ -747,11 +769,15 @@ def DesktopState.sidebarHoverRow (st : DesktopState) (hit : Option WidgetId) : O
   let row ← st.sidebarRows.find? (·.widgetId == rowId)
   if ["nav", "project", "mission", "footer"].contains row.kind then some rowId else none
 
+def DesktopState.hoverTarget (st : DesktopState) (hit : Option WidgetId) : Option WidgetId := do
+  let id ← hit
+  if st.screen == .inference && id >= providersBackId then some id else st.sidebarHoverRow hit
+
 def DesktopState.sidebarHoverDamage (st : DesktopState) (regions : List (WidgetId × Rect)) (scale : Nat)
     (previous next : Option WidgetId) : Damage := Id.run do
   if previous == next then return none
-  let a := st.sidebarHoverRow previous
-  let b := st.sidebarHoverRow next
+  let a := st.hoverTarget previous
+  let b := st.hoverTarget next
   if a == b then return none
   let mut damage : Damage := none
   for id in [a, b] do
@@ -929,6 +955,11 @@ def menuFocusChange (before after : DesktopState) : Option Nat :=
     was invoked while the empty draft screen was already visible. -/
 def desktopFocusChange (before after : DesktopState) (ev : Event) : Option Nat :=
   if let some target := menuFocusChange before after then some target
+  else if before.screen == .inference && after.screen == .inference then
+    match before.accountRoutePage, after.accountRoutePage with
+    | none, some _ => some providersBackId
+    | some page, none => ((after.providers.getD []).findIdx? (·.id == page.account.id)).map providerSettingsId
+    | _, _ => none
   else if after.hasLiveConnection && after.missionMenu.isNone && after.screen == .controlEmpty then
     let shortcut := match ev with
       | .key key mods .pressed => (key == 0x6e || key == 0x4e) && mods &&& 0x0a != 0
@@ -1020,14 +1051,29 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       | _ => 0
     if [101, 112, 113].contains navId then
       let screen := if navId == 113 then ScreenId.inference else if navId == 112 then .machinesFleet else .controlEmpty
-      let next := resetSelection { st with screen, fleetTopSub := 0, writeError := "" } none
+      let next := resetSelection { st with screen, fleetTopSub := 0, writeError := "", accountRoutePage := none } none
       -- These pages share the New Agent draft. A mission follow-up belongs only to its transcript.
       let next := if st.openMission.isNone then
           { next with composer := { st.composer with imePreeditText := "" } }
         else { next with draftProject := "" }
       let next := if navId == 113 then { next with providers := none, providerReadFailed := false } else next
       return ({ next with sidebarRows := next.sidebarRows.map fun row => { row with selected := row.widgetId == navId } }, some viewport)
-    if st.screen == .inference && navId >= providerWidgetId 0 then
+    if st.screen == .inference then
+      if let some page := st.accountRoutePage then
+        if navId == providersBackId || (ev matches .key 0xff1b _ .pressed) then
+          return ({ st with accountRoutePage := none, fleetTopSub := page.previousTop, writeError := "" }, some viewport)
+        if navId == providersRetryId && page.failed then
+          return ({ st with accountRoutePage := some { page with options := none, pending := none, failed := false }, writeError := "" }, some viewport)
+        if navId >= providerRouteId 0 && !page.failed && page.pending.isNone then
+          if let some row := (page.options.getD [])[navId - providerRouteId 0]? then
+            if row.action == "refresh" then
+              return ({ st with accountRoutePage := some { page with options := none }, writeError := "" }, some viewport)
+            if row.action == "vpn" || row.action == "routers" then
+              return ({ st with accountRoutePage := some { page with pending := some row }, writeError := "" }, some viewport)
+      else if navId >= providerSettingsId 0 then
+        if let some account := (st.providers.getD [])[navId - providerSettingsId 0]? then
+          return ({ st with accountRoutePage := some { account, previousTop := st.fleetTopSub }, fleetTopSub := 0, writeError := "" }, some viewport)
+    if st.screen == .inference && st.accountRoutePage.isNone && navId >= providerWidgetId 0 then
       if let some account := (st.providers.getD [])[navId - providerWidgetId 0]? then
         return ({ st with writeRequest := some (.providerPreference account.id (!account.userEnabled)) }, none)
     if let .composerReturn shift := ev then

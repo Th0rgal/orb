@@ -278,7 +278,7 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
     diffAddRuns := addRuns
   }
 
-  let widgetRootRaw := buildDesktopScreen st availW availH shapedRuns liveWindow (st.sidebarHoverRow rt.hoveredEntity)
+  let widgetRootRaw := buildDesktopScreen st availW availH shapedRuns liveWindow (st.hoverTarget rt.hoveredEntity)
   let (ac6, widgetRoot) ← shapeWidgetTree ac5 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc widgetRootRaw
   let layoutRoot := widgetRoot.toLayoutNode
   let t1 ← IO.monoNanosNow

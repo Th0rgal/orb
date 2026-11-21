@@ -70,6 +70,7 @@ private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale
 
 private inductive ReadKind where
   | roster | recover | catalog (revision : Nat) | providers
+  | accountRoutes (account provider action value : String)
   deriving BEq
 
 private structure LiveRead where
@@ -82,6 +83,7 @@ private def startLiveRead (binding : String) (kind : ReadKind) (notify : IO Unit
   let args := match kind with
     | .roster => #["-I", "-c", transport ++ "\ntry: roster()\nexcept Exception: sys.exit(1)"]
     | .recover => #["-I", "-c", transport ++ "\nrecover_roster()"]
+    | .accountRoutes account provider action value => #["-I", "-c", transport ++ "\naccount_routes(*sys.argv[1:])", binding, account, provider, action, value]
     | .providers => #["-I", "-c", transport ++ "\nprovider_inventory(sys.argv[1])", binding]
     | .catalog _ => #["-I", "-c", transport ++ "\ncatalog(sys.argv[1], json.loads(sys.argv[2]))", binding, modelCatalogRules]
   let child ← IO.Process.spawn { cmd := "python3", args, stdout := .piped, stderr := .null }
@@ -109,6 +111,10 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
       let kind : Option ReadKind := if !st.hasLiveConnection then
           some (if st.initialRosterPending then .roster else .recover)
         else if st.screen == .inference && st.providers.isNone && !st.providerReadFailed then some .providers
+        else if let some page := st.accountRoutePage then
+          if st.screen == .inference && !page.failed && (page.options.isNone || page.pending.isSome) then
+            some (.accountRoutes page.account.id page.account.providerType ((page.pending.map (·.action)).getD "") ((page.pending.map (·.value)).getD ""))
+          else if st.catalogLoading then some (.catalog st.catalogRevision) else none
         else if st.catalogLoading then some (.catalog st.catalogRevision)
         else none
       if current.any (fun r => r.binding != st.connectionBinding || some r.kind != kind) then close
@@ -124,12 +130,25 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
       if source.binding.isEmpty then
         if let some ready := liveStateFromProjection lines isDark st.scale120 then return some ready
         return if st.initialRosterPending then some { st with initialRosterPending := false } else none
+      if let .accountRoutes account _ _ _ := source.kind then
+        let some page := st.accountRoutePage | return none
+        if page.account.id != account then return none
+        if ![some "routes", some "unconfirmed"].contains lines.head? then
+          return some { st with accountRoutePage := some { page with failed := true, pending := none } }
+        let rows := lines.filterMap fun line => match splitTab line with
+          | ["D", action, value, title, detail] => some ({ action, value, title, detail } : AccountRouteOption)
+          | _ => none
+        let changed := page.pending.isSome
+        return some { st with accountRoutePage := some { page with options := some rows, pending := none }
+                              catalogLoading := st.catalogLoading || changed
+                              catalogRevision := st.catalogRevision + (if changed then 1 else 0)
+                              writeError := if lines.head? == some "unconfirmed" then "Core could not confirm the change. Check the current setting." else "" }
       if source.kind == .providers then
         if lines.head? != some "accounts" then return some { st with providerReadFailed := true }
         let rows := lines.filterMap fun line =>
           match splitTab line with
-          | ["A", id, name, category, personal, globalFlag] =>
-            some ({ id, name, category, userEnabled := personal == "1", globallyEnabled := globalFlag == "1" } : ProviderAccount)
+          | ["A", id, name, category, personal, globalFlag, providerType] =>
+            some ({ id, name, category, providerType, userEnabled := personal == "1", globallyEnabled := globalFlag == "1" } : ProviderAccount)
           | _ => none
         return some { st with providers := some rows }
       let models := lines.filterMap fun line =>

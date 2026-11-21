@@ -72,7 +72,59 @@ class Delivery(unittest.TestCase):
             conn.return_value.get.assert_not_called()
             live.provider_inventory('ben')
         self.assertEqual(output.getvalue().splitlines(), [
-            'accounts', 'A\ttest-member\tWork\tGoogle\t0\t1', 'A\tsecond\tCloud\tcustom\t1\t0'])
+            'accounts', 'A\ttest-member\tWork\tGoogle\t0\t1\t', 'A\tsecond\tCloud\tcustom\t1\t0\tcustom'])
+
+    def test_account_connection_rechecks_both_settings_after_one_failed_write(self):
+        direct = {'can_configure': True, 'countries': ['NL', 'FI', 'NL'], 'mode': 'direct', 'status': 'direct'}
+        with patch.object(live, 'Connection') as conn, contextlib.redirect_stdout(io.StringIO()) as output:
+            c = conn.return_value
+            c.binding = 'ben'
+            c.request.side_effect = TimeoutError()
+            c.get.side_effect = [direct, {'allowed': False}]
+            live.account_routes('ben', 'A/B', 'antigravity', 'routers', 'on')
+            c.request.assert_called_once_with('/api/ai/providers/A%2FB/alternative-routers',
+                                              body={'allowed': True}, method='PUT')
+            self.assertEqual([call.args[0] for call in c.get.call_args_list],
+                             ['/api/ai/providers/A%2FB/vpn', '/api/ai/providers/A%2FB/alternative-routers'])
+        rows = output.getvalue().splitlines()
+        self.assertEqual(rows[0], 'unconfirmed')
+        self.assertIn('D\t\t\tDirect\tSelected', rows)
+        self.assertEqual(rows.count('D\tvpn\tNL\tAirVPN · NL\t'), 1)
+        self.assertIn('D\trouters\ton\tAlternative routers\tOff · Native Antigravity only', rows)
+
+    def test_account_settings_keep_independent_sections_and_skip_unauthorized_controls(self):
+        read_only = {'can_configure': False, 'countries': ['NL'], 'mode': 'vpn', 'country': 'NL',
+                     'status': 'verified', 'server': 'fixture', 'exits': ['192.0.2.1']}
+        with patch.object(live, 'Connection') as conn:
+            c = conn.return_value
+            c.get.side_effect = [read_only, live.urllib.error.HTTPError('x', 503, 'Unavailable', {}, None)]
+            rows = list(live.account_route_rows(c, 'ok', True))
+            self.assertEqual(rows, [('', '', 'Account connection', 'Verified exit · NL · fixture · 192.0.2.1'),
+                                    ('refresh', '', 'Alternative routers', 'Could not load. Retry')])
+            c.get.side_effect = [live.urllib.error.HTTPError('x', code, 'Unavailable', {}, None) for code in (403, 404)]
+            self.assertEqual(list(live.account_route_rows(c, 'shared', True)), [])
+            c.binding = 'thomas'
+            c.get.reset_mock()
+            live.account_routes('ben', 'ok', 'antigravity', 'vpn', 'FI')
+            c.get.assert_not_called()
+            c.request.assert_not_called()
+
+    def test_blocked_selected_country_can_retry_and_direct_requires_confirmation(self):
+        blocked = {'can_configure': True, 'countries': ['FI'], 'mode': 'vpn', 'country': 'NL',
+                   'status': 'blocked', 'message': 'Tunnel unavailable.'}
+        rows = list(live.vpn_options(blocked))
+        self.assertIn(('vpn', 'NL', 'AirVPN · NL', 'Retry verification'), rows)
+        self.assertIn(('vpn', '', 'Direct', ''), rows)
+        with patch.object(live, 'Connection') as conn:
+            c = conn.return_value
+            c.request.return_value = blocked
+            with self.assertRaises(ValueError):
+                live.save_account_route(c, 'account', 'vpn', '')
+            c.request.assert_called_once_with('/api/ai/providers/account/vpn', body={'mode': 'direct'}, method='PUT', deadline=120)
+            c.request.reset_mock()
+            with self.assertRaises(ValueError):
+                live.save_account_route(c, 'account', 'vpn', 'NL/FI')
+            c.request.assert_not_called()
 
     def test_provider_toggle_requires_the_selected_account_receipt(self):
         with patch.object(live, 'Connection') as conn:
