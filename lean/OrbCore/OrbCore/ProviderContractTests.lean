@@ -2048,6 +2048,12 @@ def run : IO Unit := do
         failures := failures.push "A stale member edit cannot restore the previous global state"
       let disabledMember ← listRow memberJwt
       let disabledAdmin ← listRow jwt
+      let (reorderCode, reordered) ← postJson app memberJwt "/api/ai/providers/reorder"
+        (renderCompact (.obj #[("ids", .arr #[.str ownerRow.id])])) now
+      let reorderedAccount := (reordered.asArr?.getD #[]).find? (·.fieldStr? "id" == some ownerRow.id)
+      unless reorderCode == 200 && reorderedAccount == some (← listRow memberJwt) &&
+          reorderedAccount.any (fun row => row.fieldBool? "user_enabled" == some false) do
+        failures := failures.push "Reordering preserves the member's disabled account, preference and redaction"
       let detail ← getJson app memberJwt s!"/api/ai/providers/{ownerRow.id}" now
       unless detail.fieldStr? "id" == some ownerRow.id && detail.fieldBool? "user_enabled" == some false &&
           (detail.field? "base_url").isNone do
