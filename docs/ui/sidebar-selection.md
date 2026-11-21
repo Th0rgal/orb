@@ -98,3 +98,5 @@ In LeanUI, visiting Inference or Machines while composing a new agent keeps the
 committed draft text and its project. Each page shows its own title. Returning
 to New Agent restores the project title and draft. Composer shortcuts are inactive
 on the intervening pages. Text entered for an existing mission stays scoped to it.
+
+Project, roster and conversation reads belong to the connection that started them. A connection change cancels the pending read even when a local journal snapshot is available. Within the same connection, an offline read can still return locally journaled work.
