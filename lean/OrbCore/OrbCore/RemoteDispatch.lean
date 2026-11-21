@@ -856,7 +856,7 @@ private def emitMissionEventAndBroadcast
 
 private def resumableGoalSession (backend sid : String) : Bool :=
   match backend with
-  | "codex" => parseUuidCanonical? sid == some sid
+  | "codex" | "antigravity" => parseUuidCanonical? sid == some sid
   | "opencode" => sid.startsWith "ses_"
   | _ => false
 
@@ -1253,6 +1253,7 @@ private def ingestRemoteHarnessLine
       emitMissionEventAndBroadcast store broadcastHub? missionId evTy (renderCompact pl) nowIso
     if !parsed.textDelta.isEmpty then
       let (piece, lastMsg?) := OrbBin.ClaudeControl.joinHarnessText harness next.text next.lastMessageId? parsed
+      if piece.isEmpty then return next
       let full := next.text ++ piece
       next := { next with text := full, lastMessageId? := lastMsg? }
       emitMissionEventAndBroadcast store broadcastHub? missionId "text_delta"
