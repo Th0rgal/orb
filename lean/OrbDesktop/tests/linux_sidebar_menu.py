@@ -30,7 +30,7 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
         return api('/api/control/missions/' + mid)['status']
     binary = os.environ['ORB_LEANUI_TEST_BINARY' if client_kind == 'leanui' else 'ORB_WEBKIT_TEST_BINARY']
     cmd = [str(Path(binary).resolve(strict=True))]
-    if client_kind == 'leanui' and Path(binary).name == 'orb-desktop':
+    if client_kind == 'leanui' and Path(binary).name in ('orb', 'orb-desktop'):
         cmd.append('--leanui')
     home = tmp / 'home'
     graphical.update(HOME=str(home), XDG_DATA_HOME=str(home/'data'), XDG_CONFIG_HOME=str(home/'config'),
@@ -103,7 +103,10 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
         hits = wait('ordered context actions ' + ', '.join(expected), rows)
         click(*hits[choose])
     if client_kind == "leanui":
-        see("unavailable", header)
+        def needs_connection():
+            labels = {word for word, _, _ in words('0,0 1000x700')}
+            return 'unavailable' in labels or {'sign', 'core'} <= labels
+        wait('visible disconnected state', needs_connection)
         replacement = tmp / "reconnected.json"
         replacement.write_text(json.dumps(config))
         replacement.replace(config_path)

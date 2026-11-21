@@ -96,10 +96,11 @@ def buildMissionMenu (st : DesktopState) (menu : MissionMenu) (width : SubPx) (v
     let label := WidgetNode.text { (BoxStyle.row 0 |>.withFixedSize labelWidth (pxToSub 18)) with clip := true } (pxToSub 18)
       [overlaySynthRun (Theme.bodyText st.theme) item.label]
     let row := WidgetNode.focusable item.id <| WidgetNode.box
-      (BoxStyle.row (pxToSub 9) |>.withBg (if menu.first + i == menu.highlighted then pal.accentMuted else pal.elevatedSurface)
+      (BoxStyle.row (pxToSub 9) |>.withRadius (pxToSub 6)
+        |>.withBg (if menu.first + i == menu.highlighted then withAlpha pal.textPrimary 0x18 else pal.elevatedSurface)
         |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 8) 0)
         |>.withFixedSize (width - pxToSub 12) (pxToSub 30))
-      ([chromeIcon item.icon pal.textMuted 14, label] ++
+      ([chromeIcon item.icon pal.textSecondary 14, label] ++
         (if hasChevron then [chromeIcon "chevron-right" pal.textMuted 12] else []))
     if item.separatorBefore then
       [WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (width - pxToSub 12) (pxToSub 1) |>.withBg pal.border) [], row]
