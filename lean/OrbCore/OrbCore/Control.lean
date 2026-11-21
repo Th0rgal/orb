@@ -4668,7 +4668,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       if !isSafeMissionId mid then
         abortIdem
         return .ok (mkJson 400 "{\"error\":\"invalid_mission_id\"}")
-      let title := (JsonTape.lookupString? tape "title").getD "New Mission"
+      let title := (bodyVal?.bind (·.fieldStr? "title")).getD "New Mission"
       let backend := (JsonTape.lookupString? tape "backend").getD "codex"
       let rawEffort := (JsonTape.lookupString? tape "model_effort").getD ""
       let normEffort ←
@@ -4763,7 +4763,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | do abortIdem; return .ok (mkJson 400 "{\"error\":\"contradictory_authority_tags\"}")
       let bodyJv := bodyVal?.getD (.obj #[])
       let modelOverride := (JsonTape.lookupString? tape "model_override").getD ""
-      let prompt? := JsonTape.lookupString? tape "prompt"
+      let prompt? := bodyJv.fieldStr? "prompt"
       let goalObjective? := prompt?.bind Cyber.parseGoalPrefix?
       let remoteGoal := !clientPlaced && remoteNodeId?.isSome && goalObjective?.isSome
       if remoteGoal then
