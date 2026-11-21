@@ -1388,6 +1388,63 @@ private def popNextQueuedFollowup?
     | .error _ => return none
   | _ => return none
 
+/-- Serialize generation and terminal-evidence checks with settlement. The projects
+    ledger can be updated idempotently if the owning transaction has to retry. -/
+def settleLostRemoteJob (store : CoreStore) (missionId jobId reason nowIso : String)
+    (generation : UInt64) : IO (Except String Bool) :=
+  withImmediateTx store.missionsDb do
+    let args := #[missionId,jobId,s!"{generation}"]
+    let .ok newerOrSettled ← execParamQueryUnlocked store.missionsDb
+        ("SELECT 1 FROM mission_runs WHERE mission_id=?1 AND remote_job_id=?2 AND (generation>CAST(?3 AS INTEGER) OR " ++
+         "(generation=CAST(?3 AS INTEGER) AND execution_state IN ('terminal','completed','failed','aborted'))) " ++
+         "UNION ALL SELECT 1 FROM remote_node_jobs WHERE job_id=?2 AND mission_id=?1 " ++
+         "AND state IN ('succeeded','failed','cancelled','terminal','completed','aborted') LIMIT 1;")
+        args | return .error "remote_job_read_failed"
+    if newerOrSettled.size > 1 then return .ok false
+    let .ok settled ← withImmediateTx store.projectsDb do
+      let .ok terminal ← execParamQueryUnlocked store.projectsDb
+          ("SELECT 1 FROM remote_jobs WHERE job_id=?1 AND mission_id=?2 AND " ++
+           "state IN ('succeeded','failed','cancelled','terminal','completed','aborted');")
+          #[jobId,missionId] | return .error "remote_job_ledger_read_failed"
+      if terminal.size > 1 then return .ok true
+      let .ok _ ← execParamQueryUnlocked store.projectsDb
+          ("UPDATE remote_jobs SET state='lost',heartbeat_at=?2,finished_at=COALESCE(finished_at,?2),updated_at=?2 " ++
+           "WHERE job_id=?1 AND mission_id=?3;")
+          #[jobId,nowIso,missionId] | return .error "remote_job_ledger_write_failed"
+      return .ok false
+      | return .error "remote_job_ledger_unavailable"
+    if settled then return .ok false
+    let .ok _ ← execParamQueryUnlocked store.missionsDb
+        ("UPDATE mission_runs SET execution_state='terminal',terminal_reason=?2,updated_at=?3 " ++
+         "WHERE mission_id=?1 AND remote_job_id=?4 AND generation=CAST(?5 AS INTEGER);")
+        #[missionId,reason,nowIso,jobId,s!"{generation}"] | return .error "remote_run_write_failed"
+    let .ok _ ← execParamQueryUnlocked store.missionsDb
+        "UPDATE remote_node_jobs SET state='lost',updated_at=?2 WHERE job_id=?1 AND mission_id=?3;"
+        #[jobId,nowIso,missionId] | return .error "remote_job_write_failed"
+    let .ok updates ← execParamQueryUnlocked store.missionsDb
+        ("UPDATE missions SET status='interrupted',terminal_reason=?2,state_revision=state_revision+1,updated_at=?3 " ++
+         "WHERE id=?1 AND run_generation=CAST(?4 AS INTEGER) AND status IN ('active','pending') AND " ++
+         "(placement_job_id=?5 OR (COALESCE(placement_job_id,'')='' AND EXISTS " ++
+         "(SELECT 1 FROM mission_runs r WHERE r.mission_id=?1 AND r.generation=missions.run_generation AND r.remote_job_id=?5))) RETURNING id;")
+        #[missionId,reason,nowIso,s!"{generation}",jobId] | return .error "remote_mission_write_failed"
+    return .ok (updates.size > 1)
+
+/-- A transport error is conclusive only for a managed node whose provider
+    confirmed permanent loss of the current boot and provider ID. -/
+private def verifiedManagedWorkerLoss (mc? : Option ManagedComputeStore) (node : String) : IO Bool := do
+  let some mc := mc? | return false
+  if !node.startsWith "managed-" then return false
+  let .ok rows ← execParamQuery mc.db
+      ("SELECT 1 FROM managed_machines m JOIN managed_expirations e ON e.machine_id=m.id " ++
+       "AND e.boot_epoch=m.node_boot_epoch AND e.provider_id=m.provider_id " ++
+       "WHERE m.id=?1 AND m.phase_code IN (2,3) AND e.state='completed' " ++
+       "AND e.observed_state IN ('reaped','deleted','destroyed','absent') " ++
+       "AND NOT EXISTS (SELECT 1 FROM managed_resume_intents r WHERE r.machine_id=m.id AND r.state IN ('pending','aborting'));")
+      #[(node.drop 8).toString] | return false
+  if rows.size < 2 then return false
+  let (_, staticNodes) ← loadStaticRemoteNodes
+  return !staticNodes.any (·.id == node)
+
 mutual
 
 /-- Background poller streaming NDJSON logs and terminal state for an active `OrbNode` job. -/
@@ -1502,7 +1559,21 @@ partial def spawnRemoteJobPoller
               drainedMore := false
 
         -- 2. Poll job state
-        match ← callRemoteNodeHttpOpt relayHub? mc? effNodeId "GET" s!"/jobs/{jobId}" none #[] 12000 with
+        let jobStatus ← callRemoteNodeHttpOpt relayHub? mc? effNodeId "GET" s!"/jobs/{jobId}" none #[] 12000
+        let lostReason? ← match jobStatus with
+          | .ok (404, _, _, _, _) => pure (some "remote_job_missing_on_node")
+          | .error _ => pure (if ← verifiedManagedWorkerLoss mc? effNodeId then some "managed_worker_lost" else none)
+          | _ => pure none
+        if let some reason := lostReason? then
+          let .ok changed ← settleLostRemoteJob store missionId jobId reason nowIso capturedGen | do
+            IO.sleep 2000
+            continue
+          if changed then
+            if !proxyTok.isEmpty then revokeSingleMissionProxyToken store proxyTok
+            emitMissionEventAndBroadcast store broadcastHub? missionId "mission_status_changed"
+              (renderCompact (.obj #[("status", .str "interrupted"), ("reason", .str reason)])) nowIso
+          break
+        match jobStatus with
         | .error netErr =>
           consecNetErrors := consecNetErrors + 1
           -- Losing observation is not terminal evidence: the node may still be
@@ -1521,23 +1592,7 @@ partial def spawnRemoteJobPoller
                 (renderCompact (.obj #[("message", .str s!"Lost contact with remote node `{effNodeId}`; the turn remains owned and will reconcile when the node is reachable: {netErr}")])) nowIso
             IO.sleep 2000
         | .ok (jStatus, jTxt, jJv?, _, _) =>
-          if jStatus == 404 then
-            keepRunning := false
-            if !proxyTok.isEmpty then revokeSingleMissionProxyToken store proxyTok
-            let reason := "remote_job_missing_on_node"
-            discard <| execParamQuery store.missionsDb
-              "UPDATE mission_runs SET execution_state='terminal', terminal_reason=?2, updated_at=?3 WHERE mission_id=?1 AND remote_job_id=?4 AND generation=CAST(?5 AS INTEGER) AND execution_state NOT IN ('terminal','completed','failed','aborted');"
-              #[missionId, reason, nowIso, jobId, s!"{capturedGen}"]
-            discard <| execParamQuery store.missionsDb
-              "UPDATE remote_node_jobs SET state='lost', updated_at=?2 WHERE job_id=?1;" #[jobId, nowIso]
-            discard <| execParamQuery store.projectsDb
-              "UPDATE remote_jobs SET state='lost', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1;" #[jobId, nowIso]
-            discard <| execParamQuery store.missionsDb
-              "UPDATE missions SET status='interrupted', terminal_reason=?2, state_revision=state_revision+1, updated_at=?3 WHERE id=?1 AND run_generation=CAST(?4 AS INTEGER) AND status IN ('active','pending');"
-              #[missionId, reason, nowIso, s!"{capturedGen}"]
-            emitMissionEventAndBroadcast store broadcastHub? missionId "mission_status_changed"
-              (renderCompact (.obj #[("status", .str "interrupted"), ("reason", .str reason)])) nowIso
-          else if 200 ≤ jStatus && jStatus < 300 then
+          if 200 ≤ jStatus && jStatus < 300 then
             consecNetErrors := 0
             unreachableNotified := false
             let jv := jJv?.getD (.obj #[])
