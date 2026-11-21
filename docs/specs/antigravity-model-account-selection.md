@@ -216,3 +216,44 @@ edit and resume on that worker, denial before dispatch, and a disconnected
 executor producing zero local executions. The CLI scopes its local conversation
 history by working directory.
 [Conversation scoping](https://antigravity.google/docs/cli/conversations/)
+
+#### Two-UID Linux fixture
+
+The public Linux amd64 manifest identified 1.5.14. In a loopback-only guest,
+we ran that released binary as UID 16001 with a private profile. The checkout
+belonged to UID 16002 and permitted the harness to edit through group access.
+UID 16002 could not read a harmless marker in the 0700 account directory.
+The model endpoint was the existing disposable API-key protocol control;
+this experiment measures local execution identity. It used no Google login.
+
+With the current directory set to the mission checkout, the fixture ran
+`agy --settings <goal-settings> --model gemini-4-carbon-high --mode accept-edits --output-format stream-json --print=<ledger-task>`,
+then resumed with `--conversation <returned-id>`. A second guest repeated both
+turns with `--sandbox`. The native write created the ledger as UID 16001.
+The configured stdio MCP server returned its effective UID, also 16001.
+Both runs resumed the original conversation and passed the explicit MCP denial
+control. We did not measure a shell UID or inspect a keyring. The built-in
+write and MCP measurements already disqualify this arrangement for shared
+missions. They make no claim about terminal sandbox availability in the guest.
+
+Orb's privileged node launcher applies `setgid` and `setuid` when launching a
+user job and scrubs that job's environment. The launcher boundary covers the
+job as a whole. Moving agy into an account-owned job therefore changes the
+principal of the harness; the current CLI exposes no matching selector to
+put all workspace actions back into a mission-owned job.
+
+Orb resolves the account's verified VPN transport before opening the native
+upstream request and passes the resulting SOCKS port to its own network
+client. Launching a separate signed-in CLI does not itself attach that CLI
+to the selected route. Google's `sandboxProxy` setting applies to sandboxed
+terminal commands. A trusted deployment would have to enforce account egress
+for the entire CLI, DNS and auxiliary clients, with end-to-end Google TLS and
+no direct fallback. This fixture did not test a VPN route.
+
+The nearest documented topology is a dedicated **single-owner** Linux host
+or VM where the owner signs in interactively with agy and uses the same
+persistent profile and checkout for headless turns and resume. This requires
+trusting the checkout, its tools and its integrations as that owner. It is not
+a deployment for untrusted Orb mission workspaces.
+[Headless login](https://antigravity.google/docs/cli/headless/)
+· [CLI proxy settings](https://antigravity.google/docs/settings/)
