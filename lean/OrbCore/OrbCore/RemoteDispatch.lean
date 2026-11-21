@@ -286,7 +286,7 @@ def resolveConcreteRemoteTargetNode
   if staticNodes.any (fun n => n.id == clean) then
     return .ok clean
   if clean == "auto" || clean.startsWith "auto:" then
-    if let some sn := staticNodes[0]? then
+    if let some sn := staticNodes.find? (·.dedicatedOwner?.isNone) then
       return .ok sn.id
     if let some mc := mc? then
       if let some node ← scopedReadyManagedMachine? mc scope? then return .ok node

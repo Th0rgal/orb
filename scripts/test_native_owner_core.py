@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from uuid import uuid4
 import secrets
 import socket
 import sqlite3
@@ -74,6 +75,25 @@ def run(binary, root):
 
         for token, expected in ((alice, 503), (bob, 403), (login("admin"), 403)):
             assert request(port, token, "GET", "/api/providers/antigravity-models?node_id=" + NODE_ID)[0] == expected
+        for token, reason in ((alice, "native_owner_executor_unavailable"), (bob, "node_owner_required")):
+            status, body = request(port, token, "POST", "/api/missions", {
+                "backend": "antigravity", "remote_node_id": NODE_ID, "project": "tests",
+                "prompt": "Read the disposable ledger.", "writer": False,
+                "model_override": "gemini-4-carbon",
+            })
+            assert (status, json.loads(body).get("error")) == (502, reason), (status, body)
+        status, body = request(port, alice, "POST", "/api/missions", {
+            "backend": "antigravity", "remote_node_id": NODE_ID, "project": "tests", "writer": False
+        })
+        assert status in (200, 201), (status, body)
+        mission = json.loads(body)["id"]
+        db.execute("UPDATE missions SET session_id=? WHERE id=?", (str(uuid4()), mission))
+        db.commit()
+        status, body = request(port, alice, "POST", "/api/control/message", {
+            "mission_id": mission, "content": "Read the disposable ledger again."
+        })
+        assert (status, json.loads(body).get("error")) == (502, "native_owner_executor_unavailable"), (status, body)
+        assert db.execute("SELECT count(*) FROM remote_node_jobs").fetchone() == (0,)
         path = "/api/native-owner-enrollments/" + NODE_ID
         assert request(port, bob, "GET", path)[0] == 403
         status, body = request(port, alice, "GET", path)
