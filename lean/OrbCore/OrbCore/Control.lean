@@ -4966,13 +4966,12 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             discard <| writeBinding st.cfg.workingDir mid {
               revision := rev, key := s!"remote-launch:{mid}", model := effModel
             }
+        let mut response := mkJson 201 respBody
         if !idemKey.isEmpty then
           match ← recordOrReplayIdempotency st.store createScope idemKey 201 respBody s!"{nowEpochSec}" with
           | .ok rec =>
-            persistInitialCyber
-            if let some sIdx := st.searchIdx? then
-              discard <| indexConversation sIdx mid title
-            return .ok (mkJson rec.statusCode rec.bodyJson)
+            response := mkJson rec.statusCode rec.bodyJson
+            if rec.replayed then return .ok response
           | .error e =>
             if !leaseReservationId.isEmpty then
               discard <| releaseDispatchTrackLease st.store leaseReservationId s!"{nowEpochSec}"
@@ -5000,7 +4999,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               discard <| maybeSpawnWarmHarnessTurn st caller placeKind mid backend safeWorkDir deliv modelOverride normEffort permMode wtMode true
         if let some sIdx := st.searchIdx? then
           discard <| indexConversation sIdx mid title
-        return .ok (mkJson 201 respBody)
+        return .ok response
 
   -- Mission Search (`GET /api/control/missions/search`)
   if req.method == "GET" && cleanPath == "/api/control/missions/search" then

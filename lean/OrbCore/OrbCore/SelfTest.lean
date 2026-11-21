@@ -3637,8 +3637,11 @@ private def runWarmClaudeControlAndCheckpointsCoreTests (prodValid : CoreConfig)
     ("spawn_harness", .bool true),
     ("permission_mode", .str "supervised")
   ])
-  let createResp? ← dispatch s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {createBody.utf8ByteSize}\r\n\r\n{createBody}"
-  if createResp?.map (·.status) != some 201 then
+  let createRequest := s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nIdempotency-Key: warm-first-turn\r\nContent-Length: {createBody.utf8ByteSize}\r\n\r\n{createBody}"
+  let createResp? ← dispatch createRequest
+  let replay? ← dispatch createRequest
+  if createResp?.map (·.status) != some 201 || replay?.map (·.status) != some 201 ||
+      replay?.map (·.body) != createResp?.map (·.body) then
     OrbBin.ClaudeControl.stopHarnessRun warmMgr "m-warm-core-1"
     closeCoreStore store
     IO.FS.removeDirAll root
