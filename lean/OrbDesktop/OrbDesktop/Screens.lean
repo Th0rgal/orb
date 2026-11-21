@@ -486,41 +486,6 @@ def buildMachineRow (theme : Theme) (w h : SubPx) (title desc rightText : String
         (if showChevron then [screenTextLine theme (pxToSub 16) (pxToSub 18) (pxToSub 14) (pxToSub 18) pal.textFaint "›"] else []))
     ]
 
-/-- Give long inventories their full scroll extent while shaping only visible rows. -/
-private def buildLiveInventory (st : DesktopState) (width height : SubPx) : WidgetNode := Id.run do
-  let theme := st.theme
-  let colW := min (pxToSub 640) (width - pxToSub 24)
-  let rowH := pxToSub 60
-  let providers := st.screen == .inference
-  let accounts := st.providers.getD []
-  let count := if providers then accounts.length else st.fleetMachines.length
-  if count == 0 then
-    let message := if !providers then "No machines connected"
-      else if st.providerReadFailed then "Could not load accounts. Open Inference to retry."
-      else if st.providers.isNone then "Loading accounts…"
-      else "No provider accounts"
-    return WidgetNode.box (BoxStyle.col 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize width height)
-      [screenTextLine theme colW (pxToSub 20) (pxToSub 13) (pxToSub 20) theme.palette.textSecondary message]
-  let top := min st.fleetTopSub (count * rowH - height)
-  let first := top / rowH
-  let limit := height / rowH + 2
-  let spacer := fun n => WidgetNode.box (BoxStyle.col 0 |>.withFixedSize colW (n * rowH)) []
-  let rows := if providers then ((accounts.drop first).take limit).mapIdx fun i account =>
-      let id := providerWidgetId (first + i)
-      let availability := if account.globallyEnabled then "Use for my missions" else "Disabled globally"
-      let detail := if account.category.isEmpty || account.category == account.name then availability
-        else account.category ++ " · " ++ availability
-      let preference := if account.userEnabled then "Using" else "Skipped"
-      WidgetNode.focusable id <| WidgetNode.box (BoxStyle.col 0 |>.withFixedSize colW rowH)
-        [buildMachineRow theme colW rowH account.name detail preference true false] (some id)
-    else ((st.fleetMachines.drop first).take limit).map fun m =>
-      let detail := String.intercalate " · " ([m.roleLabel, m.cpuRamSpec].filter (!·.isEmpty))
-      buildMachineRow theme colW rowH (if m.name.isEmpty then m.machineId else m.name) detail m.state true false
-  let content := WidgetNode.box (BoxStyle.col 0 |>.withAlign .center)
-    ([spacer first] ++ rows ++ [spacer (count - first - rows.length)])
-  return WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize width height)
-    { offsetY := top } content (some fleetViewportId)
-
 /-- Build the Compute Fleet screen (`05_machines_fleet`) matching the `640 px` SolidJS `.s-inner` column. -/
 def buildMachinesFleetBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
   let theme := st.theme
@@ -690,6 +655,88 @@ def buildSettingsRow (theme : Theme) (rowW h : SubPx) (title desc rightLabel : S
         ]
     , rightNode
     ]
+
+private def inventoryTarget (theme : Theme) (hover : Option WidgetId) (id : WidgetId) (width height : SubPx) (child : WidgetNode) : WidgetNode :=
+  WidgetNode.focusable id <| WidgetNode.box
+    (BoxStyle.col 0 |>.withJustify .center |>.withFixedSize width height
+      |>.withBg (if hover == some id then (theme.palette.textPrimary &&& 0xFFFFFF00) ||| 0x0C else 0x00000000))
+    [child] (some id)
+
+private def routeSettingsBody (st : DesktopState) (page : AccountRoutePage) (hover : Option WidgetId) (width height colW : SubPx) : WidgetNode := Id.run do
+  let theme := st.theme
+  let pal := theme.palette
+  let line := fun (text : String) (color : Color) =>
+    screenTextLine theme colW (pxToSub 22) (pxToSub 14) (pxToSub 22) color text
+  let back := inventoryTarget theme hover providersBackId colW (pxToSub 42) (line "‹  Inference" pal.textSecondary)
+  let heading := screenTextLine theme colW (pxToSub 36) (pxToSub 20) (pxToSub 30) pal.textPrimary page.account.name 600
+  let pad := pxToSub 12
+  let rowW := colW - 2 * pad
+  let rowH := pxToSub 52
+  let settings := page.options.getD []
+  let options := settings.mapIdx fun i row =>
+    let button := match row.action with
+      | "routers" => if row.value == "off" then "Turn off" else "Turn on"
+      | "vpn" => if row.detail.isEmpty then "Select" else "Retry"
+      | "refresh" => "Retry"
+      | _ => ""
+    let body := buildSettingsRow theme rowW rowH row.title row.detail button
+      (isButton := true) (hasBottomBorder := i + 1 < settings.length)
+    if row.action.isEmpty || page.pending.isSome || page.failed then body
+    else inventoryTarget theme hover (providerRouteId i) rowW rowH body
+  let card := WidgetNode.rrect
+    (BoxStyle.col 0 |>.withPadding (Edges.xy pad 0) |>.withFixedSize colW (rowH * options.length))
+    pal.elevatedSurface (CornerRadii.uniform (pxToSub 8))
+    (BorderStyle.uniform theme.borderWidth pal.borderSubtle) options
+  let status := if page.failed then
+      [inventoryTarget theme hover providersRetryId colW (pxToSub 42) (line "Could not load account settings. Retry" pal.textPrimary)]
+    else if page.pending.isSome then [line "Saving…" pal.textSecondary]
+    else if page.options.isNone then [line "Loading account settings…" pal.textSecondary]
+    else if !st.writeError.isEmpty then [line st.writeError pal.textPrimary] else []
+  let content := WidgetNode.box (BoxStyle.col (pxToSub 4) |>.withAlign .center)
+    ([back, heading] ++ status ++ (if options.isEmpty then [] else [card]))
+  return WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize width height)
+    { offsetY := st.fleetTopSub } content (some fleetViewportId)
+
+/-- Give long inventories their full scroll extent while shaping only visible rows. -/
+private def buildLiveInventory (st : DesktopState) (hover : Option WidgetId) (width height : SubPx) : WidgetNode := Id.run do
+  let theme := st.theme
+  let colW := min (pxToSub 640) (width - pxToSub 24)
+  let rowH := pxToSub 60
+  let providers := st.screen == .inference
+  if providers then
+    if let some page := st.accountRoutePage then return routeSettingsBody st page hover width height colW
+  let accounts := st.providers.getD []
+  let count := if providers then accounts.length else st.fleetMachines.length
+  if count == 0 then
+    let message := if !providers then "No machines connected"
+      else if st.providerReadFailed then "Could not load accounts. Open Inference to retry."
+      else if st.providers.isNone then "Loading accounts…"
+      else "No provider accounts"
+    return WidgetNode.box (BoxStyle.col 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize width height)
+      [screenTextLine theme colW (pxToSub 20) (pxToSub 13) (pxToSub 20) theme.palette.textSecondary message]
+  let top := min st.fleetTopSub (count * rowH - height)
+  let first := top / rowH
+  let limit := height / rowH + 2
+  let spacer := fun n => WidgetNode.box (BoxStyle.col 0 |>.withFixedSize colW (n * rowH)) []
+  let rows := if providers then ((accounts.drop first).take limit).mapIdx fun i account =>
+      let id := providerWidgetId (first + i)
+      let availability := if account.globallyEnabled then "Use for my missions" else "Disabled globally"
+      let detail := if account.category.isEmpty || account.category == account.name then availability
+        else account.category ++ " · " ++ availability
+      let preference := if account.userEnabled then "Using" else "Skipped"
+      let settingsW := min (pxToSub 84) (colW / 4)
+      let primaryW := colW - settingsW
+      WidgetNode.box (BoxStyle.row 0 |>.withFixedSize colW rowH)
+        [inventoryTarget theme hover id primaryW rowH (buildMachineRow theme primaryW rowH account.name detail preference true false),
+         inventoryTarget theme hover (providerSettingsId (first + i)) settingsW rowH
+           (screenTextLine theme settingsW (pxToSub 20) (pxToSub 13) (pxToSub 20) theme.palette.textSecondary "Settings ›")]
+    else ((st.fleetMachines.drop first).take limit).map fun m =>
+      let detail := String.intercalate " · " ([m.roleLabel, m.cpuRamSpec].filter (!·.isEmpty))
+      buildMachineRow theme colW rowH (if m.name.isEmpty then m.machineId else m.name) detail m.state true false
+  let content := WidgetNode.box (BoxStyle.col 0 |>.withAlign .center)
+    ([spacer first] ++ rows ++ [spacer (count - first - rows.length)])
+  return WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize width height)
+    { offsetY := top } content (some fleetViewportId)
 
 /-- Build the Settings (`Account` tab) screen (`06_settings_general`) matching the `600 px` SolidJS column. -/
 def buildSettingsGeneralBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
@@ -1049,7 +1096,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
       let bodyH := availH - headerH
       WidgetNode.box
         (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill)
-        [headerNode, if st.hasLiveConnection then buildLiveInventory st mainW bodyH else buildMachinesFleetBody st mainW bodyH]
+        [headerNode, if st.hasLiveConnection then buildLiveInventory st hoverRow mainW bodyH else buildMachinesFleetBody st mainW bodyH]
     | .settingsGeneral =>
       let bodyH := availH - headerH
       WidgetNode.box

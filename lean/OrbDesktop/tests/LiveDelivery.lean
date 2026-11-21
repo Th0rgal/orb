@@ -114,6 +114,19 @@ private def returnedDraft := (stepDesktopEvent 120 vp machinesPage (.activate 10
 #guard (stepDesktopEvent 120 vp { projectDraft with openMission := some "m", screen := .missionTranscript }
   (.activate 113)).1.composer.text.isEmpty
 
+private def providerList : DesktopState :=
+  { inferencePage with fleetTopSub := 4800, providers := some [
+    { (default : ProviderAccount) with id := "first" },
+    { (default : ProviderAccount) with id := "second", providerType := "antigravity" }] }
+
+private def providerDetail := (stepDesktopEvent 120 vp providerList (.activate (providerSettingsId 1))).1
+private def providerEsc := (stepDesktopEvent 120 vp providerDetail (.key 0xff1b 0 .pressed)).1
+#guard providerDetail.accountRoutePage.any (·.account.id == "second")
+#guard providerDetail.writeRequest.isNone && providerDetail.fleetTopSub == 0
+#guard desktopFocusChange providerList providerDetail (.activate (providerSettingsId 1)) == some providersBackId
+#guard providerEsc.fleetTopSub == providerList.fleetTopSub && providerEsc.accountRoutePage.isNone
+#guard desktopFocusChange providerDetail providerEsc (.key 0xff1b 0 .pressed) == some (providerSettingsId 1)
+
 private def blankDraft : DesktopState := { hierarchyFixture with screen := .controlEmpty }
 #guard desktopFocusChange blankDraft blankDraft (.key 0x6e 2 .pressed) == some 1
 #guard desktopFocusChange blankDraft blankDraft (.key 0x6e 0 .pressed) == none

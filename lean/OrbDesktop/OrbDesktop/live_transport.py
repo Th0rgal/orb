@@ -167,6 +167,112 @@ def bulk_write(c, kind, key):
             print('failed\t' + mid)
 
 
+def account_path(account):
+    if not isinstance(account, str) or not account or account in ('.', '..') or len(account) > 256:
+        raise ValueError('invalid provider account')
+    return '/api/ai/providers/' + urllib.parse.quote(account, safe='')
+
+
+def valid_country(value):
+    return isinstance(value, str) and re.fullmatch('[A-Z]{2}', value) is not None
+
+
+def vpn_options(route):
+    mode = route['mode']
+    if mode not in ('direct', 'vpn') or not isinstance(route.get('can_configure'), bool):
+        raise ValueError('invalid account route')
+    selected = '' if mode == 'direct' else route['country']
+    if mode == 'vpn' and not valid_country(selected):
+        raise ValueError('invalid route country')
+    status = route['status']
+    if status == 'verified':
+        detail = ' · '.join(['Verified exit', selected, route['server'], ', '.join(route['exits'])])
+    elif status == 'blocked':
+        detail = selected + ' · ' + (route.get('message') or 'The VPN route is unavailable.')
+    elif status == 'direct' and not selected:
+        detail = 'Direct'
+    else:
+        raise ValueError('invalid account route status')
+    yield ('', '', 'Account connection', detail)
+    if route['can_configure']:
+        countries = route['countries']
+        if not isinstance(countries, list) or not all(valid_country(country) for country in countries):
+            raise ValueError('invalid country choices')
+        for country in dict.fromkeys(['', *([selected] if selected else []), *countries]):
+            picked = country == selected
+            caption = 'Retry verification' if picked and status == 'blocked' else 'Selected' if picked else ''
+            action = 'vpn' if not picked or status == 'blocked' else ''
+            yield (action, country, 'AirVPN · ' + country if country else 'Direct', caption)
+
+
+def router_options(settings):
+    allowed = settings['allowed']
+    if not isinstance(allowed, bool):
+        raise ValueError('invalid alternative-router setting')
+    yield ('routers', 'off' if allowed else 'on', 'Alternative routers',
+           'Allowed · OpenCode and other routed clients' if allowed else 'Off · Native Antigravity only')
+
+
+def account_route_rows(c, account, antigravity):
+    base = account_path(account)
+    sections = [('vpn', 'Account connection', vpn_options)]
+    if antigravity:
+        sections.append(('alternative-routers', 'Alternative routers', router_options))
+    for suffix, title, options in sections:
+        try:
+            rows = list(options(c.get(base + '/' + suffix)))
+        except urllib.error.HTTPError as error:
+            with error:
+                if error.code == 401:
+                    raise
+                if error.code in (403, 404):
+                    continue
+            rows = [('refresh', '', title, 'Could not load. Retry')]
+        except (OSError, ValueError, KeyError, TypeError):
+            rows = [('refresh', '', title, 'Could not load. Retry')]
+        yield from rows
+
+
+def save_account_route(c, account, action, value):
+    base = account_path(account)
+    if action == 'vpn':
+        if value and not valid_country(value):
+            raise ValueError('invalid country choice')
+        body = {'mode': 'vpn', 'country': value} if value else {'mode': 'direct'}
+        # Core verifies both exit addresses and waits for the new AirVPN session.
+        result = c.request(base + '/vpn', body=body, method='PUT', deadline=120)
+        if not isinstance(result, dict) or result.get('mode') != body['mode'] or (value and result.get('country') != value):
+            raise ValueError('unconfirmed account connection')
+    elif action == 'routers':
+        if value not in ('off', 'on'):
+            raise ValueError('invalid router choice')
+        body = {'allowed': value == 'on'}
+        result = c.request(base + '/alternative-routers', body=body, method='PUT')
+        if not isinstance(result, dict) or result.get('allowed') is not body['allowed']:
+            raise ValueError('unconfirmed router setting')
+    else:
+        raise ValueError('unknown route setting')
+
+
+def account_routes(binding, account, provider, action, value):
+    c = Connection()
+    if c.binding != binding:
+        return
+    confirmed = True
+    if action:
+        try:
+            save_account_route(c, account, action, value)
+        except (ValueError, OSError):
+            confirmed = False
+    rows = list(account_route_rows(c, account, provider == 'antigravity'))
+    c.check()
+    print('routes' if confirmed else 'unconfirmed')
+    if not rows:
+        rows = [('', '', 'Account connection', 'Routing controls are unavailable for this account on this Core.')]
+    for row in rows:
+        print('\t'.join(map(label, ('D', *row))))
+
+
 def mutate(binding, action, mid):
     c = Connection()
     if c.binding != binding:
@@ -174,9 +280,7 @@ def mutate(binding, action, mid):
     key = str(uuid.uuid4())
     if action in ('use-provider', 'skip-provider'):
         enabled = action == 'use-provider'
-        if not mid or mid in ('.', '..') or len(mid) > 256:
-            raise ValueError('missing provider account')
-        path = '/api/ai/providers/' + urllib.parse.quote(mid, safe='') + '/preference'
+        path = account_path(mid) + '/preference'
         row = c.request(path, body={'enabled': enabled}, method='PUT')
         if row.get('id') != mid or row.get('user_enabled') is not enabled:
             raise ValueError('unconfirmed provider preference')
@@ -351,7 +455,7 @@ def provider_inventory(binding):
         name = account.get('label') or account.get('name') or ident
         category = account.get('provider_type_name') or account.get('provider_type')
         rows.append(('A', ident, name, category, str(int(account.get('user_enabled', True))),
-                     str(int(account.get('globally_enabled', account['enabled'])))))
+                     str(int(account.get('globally_enabled', account['enabled']))), account.get('provider_type', '')))
     c.check()
     print('accounts')
     for row in rows:
