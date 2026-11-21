@@ -9,7 +9,7 @@ namespace OrbDesktop
 projection rather than passing credentials through the UI state.  `--headless`
 golden paths never call this module and remain deterministic fixtures. -/
 
-/-- Embedded connection-bound HTTP reader and writer. -/
+/-- Embed the connection-bound HTTP reader, including the GTK Inbox source projection. -/
 private def transport : String := include_str "live_transport.py"
 
 private def projectHistoryRules : String := include_str "../../../orb/src/projectHistoryRules.json"
@@ -19,10 +19,6 @@ private def splitTab (line : String) : List String :=
   line.splitOn "\t"
 
 private def col (xs : List String) (n : Nat) : String := xs.getD n ""
-
-private def inboxItem (xs : List String) : Option InboxItem := do
-  guard (col xs 0 == "U")
-  return { mission := col xs 1, stamp := ← (col xs 2).toNat?, version := ← (col xs 3).toNat? }
 
 private def projectRow (idx : Nat) (xs : List String) : ChromeSidebarRow :=
   { widgetId := 1000 + 3 * idx, rowId := "project:" ++ col xs 1, kind := "project"
@@ -37,6 +33,14 @@ private def missionCard (idx : Nat) (xs : List String) : MissionSummaryCard :=
     effort := col xs 14, permissionMode := col xs 15,
     folder := col xs 16, parentMissionId := col xs 17, callbackParentMissionId := col xs 18,
     forkSource := col xs 19, supersededBy := col xs 20, archiveTag := col xs 21 == "1" }
+
+private def inboxItem (xs : List String) : Option InboxItem := do
+  guard (col xs 0 == "U" && col xs 4 == "M" && col xs 5 == col xs 1)
+  return { mission := col xs 1, stamp := ← (col xs 2).toNat?, version := ← (col xs 3).toNat?
+           card := missionCard 0 (xs.drop 4) }
+
+private def nextMissionWidget (st : DesktopState) : Nat :=
+  1001 + 3 * (1 + (st.sidebarRows.foldl (fun n row => max n row.widgetId) 1000 - 1000) / 3)
 
 private def machineCard (idx : Nat) (xs : List String) : FleetMachineCard :=
   { widgetId := 1002 + 3 * idx, machineId := col xs 1, name := col xs 2
@@ -76,9 +80,6 @@ private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale
       | [onlyProject] => [(onlyProject.rowId.drop 8).toString]
       | _ => []
     sidebarRows := sidebar
-    inboxItems := lines.filterMap (fun line => inboxItem (splitTab line))
-    inboxAvailable := lines.any (·.startsWith "I\t")
-    inboxEnabled := !lines.contains "I\tdisabled"
     missionCards := missions
     fleetMachines := machines, catalogLoading := true }
 
@@ -381,9 +382,12 @@ private def mergeRoster (st : DesktopState) (records : List String) : DesktopSta
       if row.kind == "project" then some (row.rowId.drop 8).toString else none)
     memberships := memberships.filter fun entry => projects.contains entry.1
   let inboxItems := records.filterMap fun r => inboxItem (r.splitOn "\x1c")
-  let inboxAvailable := records.any (·.startsWith "I\x1c")
-  let inboxEnabled := if inboxAvailable then !records.contains "I\x1cdisabled" else st.inboxEnabled
-  let inboxItems := if inboxAvailable then inboxItems else st.inboxItems
+  -- An unfinished project or ancestor window keeps the last complete badge and items.
+  let refreshing := records.contains "I\x1crefreshing" || records.head? == some "partial-projects"
+  let finished := records.contains "I\x1cenabled" || records.contains "I\x1cdisabled"
+  let inboxAvailable := finished || (refreshing && st.inboxAvailable)
+  let inboxEnabled := if finished then !records.contains "I\x1cdisabled" else st.inboxEnabled
+  let inboxItems := if finished then inboxItems else st.inboxItems
   let inboxIndex := (st.currentInboxItem.bind fun item => inboxItems.findIdx? (·.mission == item.mission)).getD
     (min st.inboxIndex (inboxItems.length - 1))
   let updated := { st with
@@ -454,6 +458,13 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
         if openItem then
           if let some card := st.missionCards.find? (·.missionId == item.mission) then
             return (resetSelection { next with screen := .missionTranscript } (some card), some viewport)
+          let card := { item.card with widgetId := nextMissionWidget st }
+          let row : ChromeSidebarRow := {
+            widgetId := card.widgetId, rowId := "mission:" ++ card.missionId
+            kind := "mission", title := card.title, status := card.status }
+          let next := { next with
+            screen := .missionTranscript, missionCards := card :: next.missionCards, sidebarRows := row :: next.sidebarRows }
+          return (resetSelection next (some card), some viewport)
         return (next, some viewport)
       | .providerPreference account enabled =>
         let providers := st.providers.map fun rows =>
@@ -461,7 +472,7 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
         return ({ st with providers, nativeCatalog := none, catalogLoading := true, catalogRevision := st.catalogRevision + 1 }, some viewport)
       | .create =>
         let [id,title,status,machine,backend,model,effort,permissionMode,project] := splitTab (r.stdout.dropEnd 1).toString | throw (IO.userError "invalid mission")
-        let wid := 1001 + 3 * (1 + (st.sidebarRows.foldl (fun n row => max n row.widgetId) 1000 - 1000) / 3)
+        let wid := nextMissionWidget st
         let card := { (default : MissionSummaryCard) with widgetId := wid, missionId := id, title, status, machine, backend, model, effort, permissionMode, project }
         let row := { (default : ChromeSidebarRow) with widgetId := wid, rowId := "mission:" ++ id, kind := "mission", title, status }
         return (resetSelection { st with screen := .missionTranscript, missionCards := card :: st.missionCards, sidebarRows := row :: st.sidebarRows } (some card), some viewport)

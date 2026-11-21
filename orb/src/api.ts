@@ -2016,13 +2016,31 @@ async function projectRows(slug: string, priority?: RequestPriority): Promise<Mi
   const at = (m: Mission) => Date.parse(m.updated_at || m.created_at || "") || 0;
   return [...byId.values()].sort((a, b) => at(b) - at(a));
 }
+function checkMissionRead(version: number): void {
+  if (version !== connectionVersion()) throw new Error("The backend changed. Try again; your draft is kept.");
+}
+
 /** Missions tagged with this project (exact slug match on the backend). */
 export async function listProjectMissions(slug: string, opts?: { background?: boolean }): Promise<Mission[]> {
-  const origins=await import("./localOrigins"),observedAt=origins.observe();
-  const remotePromise=projectRows(slug, opts?.background ? "p2" : undefined).then(rows=>includeAncestors(rows,slug));
-  remotePromise.catch(()=>{});
-  const local=excludeBtwMissions(await origins.localOrigins()).filter(m=>m.project===slug);
-  try{const remote=await remotePromise;await origins.rememberCoreState(local,remote,observedAt);const pending=excludeBtwMissions(local.filter(origins.localPending).map(row=>stickHierarchy(origins.withCoreEffort(row,remote.find(m=>m.id===row.id)))));return [...pending,...excludeBtwMissions(remote).filter(m=>!pending.some(l=>l.id===m.id))];}catch(error){if(local.length)return partialList(local);throw error;}
+  const version = connectionVersion();
+  const origins = await import("./localOrigins");
+  checkMissionRead(version);
+  const observedAt = origins.observe();
+  const remotePromise = projectRows(slug, opts?.background ? "p2" : undefined).then(rows => includeAncestors(rows, slug));
+  remotePromise.catch(() => {});
+  const local = excludeBtwMissions(await origins.localOrigins()).filter(m => m.project === slug);
+  try {
+    const remote = await remotePromise;
+    checkMissionRead(version);
+    await origins.rememberCoreState(local, remote, observedAt);
+    checkMissionRead(version);
+    const pending = excludeBtwMissions(local.filter(origins.localPending).map(row => stickHierarchy(origins.withCoreEffort(row, remote.find(m => m.id === row.id)))));
+    return [...pending, ...excludeBtwMissions(remote).filter(m => !pending.some(l => l.id === m.id))];
+  } catch (error) {
+    checkMissionRead(version);
+    if (local.length) return partialList(local);
+    throw error;
+  }
 }
 
 export async function listProjectFiles(
@@ -2201,7 +2219,9 @@ export function recordMissionSyncCursor(rows: readonly Mission[], fullSync: bool
 }
 
 export async function listMissions(limit = 200, options?: { updatedSince?: string }): Promise<Mission[]> {
+  const version = connectionVersion();
   const origins = await import("./localOrigins"), observedAt = origins.observe();
+  checkMissionRead(version);
   const isDelta = Boolean(options?.updatedSince);
   const params = new URLSearchParams();
   if (options?.updatedSince) {
@@ -2215,17 +2235,22 @@ export async function listMissions(limit = 200, options?: { updatedSince?: strin
   const local = excludeBtwMissions(await origins.localOrigins());
   try {
     const remote = await remotePromise;
+    checkMissionRead(version);
     recordMissionSyncCursor(remote, !isDelta);
     if (!isDelta) {
-      await origins.rememberCoreState(local, [...remote, ...await origins.unlistedCoreState(local, remote, id => api<Mission>(`/api/control/missions/${id}`))], observedAt);
+      const unlisted = await origins.unlistedCoreState(local, remote, id => api<Mission>(`/api/control/missions/${id}`));
+      checkMissionRead(version);
+      await origins.rememberCoreState(local, [...remote, ...unlisted], observedAt);
     } else if (remote.length) {
       await origins.rememberCoreState(local, remote, observedAt);
     }
+    checkMissionRead(version);
     const pending = excludeBtwMissions(local.filter(origins.localPending).map(row => stickHierarchy(origins.withCoreEffort(row, remote.find(m => m.id === row.id)))));
     const merged = [...pending, ...excludeBtwMissions(remote).filter(row => !pending.some(item => item.id === row.id))];
     void flushDurableWriteOutbox();
     return isDelta ? partialList(merged) : merged;
   } catch (error) {
+    checkMissionRead(version);
     if (local.length) return partialList(local);
     throw error;
   }
@@ -2276,6 +2301,7 @@ export function seedCachedMission(mission: Mission | null | undefined, fetchedAt
 /** `coreOnly` skips the local-origin fallback: callers that need Core's
  * placement must not see a journal row that predates a machine transfer. */
 export async function getMission(id: string, options: { coreOnly?: boolean; fresh?: boolean; includeHistory?: boolean; priority?: RequestPriority } = {}): Promise<Mission> {
+  const version = connectionVersion();
   if (options.fresh) {
     seededOpenMissions.delete(id);
   } else {
@@ -2285,11 +2311,13 @@ export async function getMission(id: string, options: { coreOnly?: boolean; fres
       if (options.coreOnly) return seeded.mission;
       const origins = await import("./localOrigins");
       const local = (await origins.localOrigins(id)).find((row) => row.id === id);
+      checkMissionRead(version);
       if (local && origins.localPending(local)) return origins.withCoreEffort(local, seeded.mission);
       return seeded.mission;
     }
   }
   const origins = await import("./localOrigins"), observedAt = origins.observe();
+  checkMissionRead(version);
   const path = options.includeHistory === false
     ? `/api/control/missions/${id}?include_history=false`
     : `/api/control/missions/${id}`;
@@ -2312,10 +2340,16 @@ export async function getMission(id: string, options: { coreOnly?: boolean; fres
   const local = options.coreOnly ? undefined : (await origins.localOrigins(id)).find(row=>row.id===id);
   try{
     const remote = await remotePromise;
+    checkMissionRead(version);
     if(local && origins.localPending(local))return origins.withCoreEffort(local,remote);
     if(local)await origins.rememberCoreState([local],[remote],observedAt);
+    checkMissionRead(version);
     return remote;
-  }catch(error){if(local)return local;throw error;}
+  } catch (error) {
+    checkMissionRead(version);
+    if (local) return local;
+    throw error;
+  }
 }
 
 export async function createMission(body: CreateMissionBody): Promise<Mission> {

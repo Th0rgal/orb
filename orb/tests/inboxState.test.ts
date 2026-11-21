@@ -379,7 +379,7 @@ it("uses Core revisions and keeps a monotonic device identity across module relo
 });
 
 // Inbox settings migrate into the shared inbox state.
-it("seeds empty Core preferences from existing settings and imports existing remote choices without echoing", async () => {
+it("keeps default hydration read-only, migrates local customizations and imports remote choices without echoing", async () => {
   const write = vi.fn();
   vi.doMock("../src/inboxState", () => ({ writeInboxState: write }));
   const { inboxConfig, saveInboxConfig, applySharedInboxPreferences } = await import("../src/inboxSettings");
@@ -389,6 +389,10 @@ it("seeds empty Core preferences from existing settings and imports existing rem
     inboxEnabled: true,
     summaryMode: "standard" as const,
   };
+  applySharedInboxPreferences(undefined);
+  saveInboxConfig(inboxConfig(), false);
+  applySharedInboxPreferences(null);
+  expect(write).not.toHaveBeenCalled();
   saveInboxConfig(legacyLocal, false);
   applySharedInboxPreferences(undefined);
   expect(inboxConfig()).toEqual(expectedLocal);

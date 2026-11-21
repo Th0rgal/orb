@@ -12,7 +12,7 @@ import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from unittest.mock import Mock, call, patch
+from unittest.mock import ANY, Mock, call, patch
 
 PKG = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PKG / 'OrbDesktop'))
@@ -45,6 +45,9 @@ class Delivery(unittest.TestCase):
         states = {u: {'_versions': {}} for u in ('alice', 'bob')}
         mission = dict(id='shared', title='Result', status='completed', updated_at='2026-01-01T00:00:00Z')
 
+        completed_reads = 0
+        partial = False
+
         class Core(BaseHTTPRequestHandler):
             def reply(self, body, code=200):
                 self.send_response(code)
@@ -52,12 +55,19 @@ class Delivery(unittest.TestCase):
                 self.wfile.write(json.dumps(body).encode())
 
             def do_GET(self):
+                nonlocal completed_reads
                 if self.path == '/api/auth/me':
                     self.reply({'user': {'username': self.headers['Authorization'].split()[1]}})
                 elif self.path == live.INBOX_PATH:
                     self.reply(states[self.headers['Authorization'].split()[1]])
-                elif self.path.startswith('/api/control/missions?limit='):
-                    self.reply([mission])
+                elif self.path == '/api/control/missions?status=completed&limit=100':
+                    completed_reads += 1
+                    if partial and completed_reads > 1:
+                        self.reply([], 206)
+                    else:
+                        self.reply([mission])
+                elif partial and completed_reads and self.path == '/api/control/missions?limit=200&include_ancestors=true':
+                    self.reply([dict(id='next-roster', status='active')])
                 elif self.path == '/api/projects':
                     self.reply({'projects': []})
                 else:
@@ -83,10 +93,8 @@ class Delivery(unittest.TestCase):
             threading.Thread(target=server.serve_forever, daemon=True).start()
             url = f'http://127.0.0.1:{server.server_port}'
             def rows():
-                out = io.StringIO()
-                with contextlib.redirect_stdout(out):
-                    live.roster()
-                return [r.split('\t') for r in out.getvalue().splitlines() if r.startswith('U\t')]
+                return [[str(v) for v in row[:4]] for row in live.inbox_snapshot(live.Connection(), [], '')
+                        if row[0] == 'U']
             with patch.object(live, 'credentials', return_value=(url, 'alice')) as creds:
                 alice = live.Connection().binding
                 entry, = rows()
@@ -113,7 +121,139 @@ class Delivery(unittest.TestCase):
                                    cwd=Path(__file__).resolve().parents[1], check=True, timeout=30,
                                    env={**os.environ, 'ORB_STATE_DIR': root})
                     self.assertEqual(states[user]['seen:shared'], 1767225660000)
+                partial, completed_reads = True, 0
+                states['bob'] = {'_versions': {}}
+                subprocess.run(['lean', '--run', 'tests/LiveDelivery.lean', 'inbox', 'partial'],
+                               cwd=PKG, check=True, timeout=30, env={**os.environ, 'ORB_STATE_DIR': root})
+                self.assertEqual(states['bob'], {'_versions': {}})
             server.shutdown()
+
+    def test_inbox_reads_bounded_windows_with_irrelevant_archive(self):
+        rules = json.loads((PKG.parents[1] / 'orb/src/projectHistoryRules.json').read_text())
+        old = dict(id='question', project='p', status='awaiting_user', callback_parent_mission_id='controller')
+        parent = dict(id='controller', project='p', status='completed')
+        query = '/api/control/missions?project=p&limit=200'
+        for count in (200, 18600):
+            history = [dict(id=f'archive-{i}', status='acknowledged', project='p') for i in range(count)] + [old, parent]
+            pages = {query + '&all=true': history[:200], query: [old, parent],
+                     '/api/control/missions?status=completed&limit=100': [],
+                     live.INBOX_PATH: {'preferences': {'includeAutonomous': True}}}
+            calls = []
+            elapsed = 0
+            def get(path, cap, *, deadline):
+                nonlocal elapsed
+                calls.append(path)
+                self.assertGreater(deadline, 0)
+                result = pages[path]
+                elapsed += 0.1 + len(result) * 0.001
+                return result
+            with patch.object(live.time, 'monotonic', side_effect=lambda: elapsed):
+                result = live.inbox_snapshot(Mock(get=get), [{'slug': 'p'}], '', rules, roster=[])
+            self.assertEqual([r[1] for r in result if r[0] == 'U'], ['question', 'controller'])
+            self.assertEqual(calls, [live.INBOX_PATH, query + '&all=true', query, '/api/control/missions?status=completed&limit=100'])
+            self.assertAlmostEqual(elapsed, 0.603)
+
+    def test_project_windows_resume_and_are_reused_after_publication(self):
+        rules = json.loads((PKG.parents[1] / 'orb/src/projectHistoryRules.json').read_text())
+        rules['pageSize'] = 1
+        projects = [{'slug': str(i)} for i in range(7)]
+        elapsed = 0
+        paths = []
+        def get(path, cap, *, deadline):
+            nonlocal elapsed
+            self.assertGreaterEqual(deadline, 1)
+            elapsed += 1
+            paths.append(path)
+            if path.endswith('&all=true'):
+                return [dict(id=path, status='acknowledged', tags=['archived'])]
+            return {} if path == live.INBOX_PATH else []
+        c = Mock(get=get)
+        windows = live.InboxWindows()
+        with patch.object(live.time, 'monotonic', side_effect=lambda: elapsed):
+            for _ in range(4):
+                with self.assertRaises(TimeoutError):
+                    live.inbox_snapshot(c, projects, '', rules, windows, [])
+            self.assertEqual(live.inbox_snapshot(c, projects, '', rules, windows, []), [('I', 'enabled')])
+            project_reads = [p for p in paths if '?project=' in p]
+            self.assertEqual(len(project_reads), 14)
+            self.assertEqual(len(set(project_reads)), 14)
+            paths.clear()
+            self.assertEqual(live.inbox_snapshot(c, projects, '', rules, windows, []), [('I', 'enabled')])
+            self.assertEqual(paths, [live.INBOX_PATH, '/api/control/missions?status=completed&limit=100'])
+            paths.clear()
+            live.inbox_snapshot(c, projects[:1], '', rules, windows, [])
+            self.assertEqual(len([p for p in paths if '?project=' in p]), 2)
+
+    def test_incomplete_window_preserves_badge_and_retries_with_fresh_receipts(self):
+        c = Mock(binding='bound')
+        windows = live.InboxWindows()
+        rules = json.loads((PKG.parents[1] / 'orb/src/projectHistoryRules.json').read_text())
+        old = dict(id='a', project='p', status='completed', updated_at='2026-01-01T00:00:00Z')
+        child = dict(id='b', project='p', status='awaiting_user', callback_parent_mission_id='missing')
+        query = '/api/control/missions?project=p&limit=200'
+        completed = '/api/control/missions?status=completed&limit=100'
+        ancestor = '/api/control/missions/missing?include_history=false'
+        current = '/api/control/missions?limit=200&include_ancestors=true'
+        project_list = [{'slug': 'p'}]
+        pages = {live.INBOX_PATH: {'preferences': {'includeAutonomous': True}},
+                 '/api/projects': {'projects': project_list}, '/api/machines': [],
+                 query + '&all=true': [old], query: [old], current: [child], completed: [old]}
+        def get(path, *args, **kwargs):
+            if path == ancestor:
+                raise live.urllib.error.HTTPError(path, 404, 'missing', {}, None)
+            return pages[path]
+        c.get.side_effect = get
+        def sample():
+            return [r[:2] for r in live.roster_rows(c, rules=rules, inbox_for='', inbox_windows=windows)
+                    if r[0] in ('I', 'U')]
+        self.assertEqual(sample(), [('I', 'enabled'), ('U', 'b'), ('U', 'a')])
+        windows.project_refresh_at = 0
+        pages[completed] = {'partial': True}
+        self.assertEqual(sample(), [('I', 'refreshing')])
+        # The roster now has a newer response than the buffered project record.
+        pages[current] = [dict(old, status='running', updated_at='2026-02-01T00:00:00Z'), child]
+        pages[live.INBOX_PATH]['seen:b'] = 1
+        pages[completed] = [old]
+        c.get.reset_mock()
+        self.assertEqual(sample(), [('I', 'enabled')])
+        self.assertNotIn(query, [args.args[0] for args in c.get.call_args_list])
+        self.assertIn(call(ancestor, 8 << 20, deadline=ANY), c.get.call_args_list)
+
+    def test_slow_inbox_http_response_respects_shared_deadline(self):
+        entered = threading.Event()
+        release = threading.Event()
+        class Core(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                if self.path == live.INBOX_PATH:
+                    self.wfile.write(b'{}')
+                else:
+                    entered.set()
+                    release.wait(3)
+            def log_message(self, *_):
+                pass
+        with ThreadingHTTPServer(('127.0.0.1', 0), Core) as server:
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            creds = (f'http://127.0.0.1:{server.server_port}', 'fixture')
+            try:
+                with patch.object(live, 'credentials', return_value=creds), patch.object(live, 'INBOX_READ_SECONDS', 0.4):
+                    start = time.monotonic()
+                    with self.assertRaises(TimeoutError):
+                        live.inbox_snapshot(live.Connection(), [], '')
+                    self.assertTrue(entered.is_set())
+                    self.assertLess(time.monotonic() - start, 1.5)
+            finally:
+                release.set()
+                server.shutdown()
+
+    def test_inbox_deadline_expires_before_second_get(self):
+        with patch.object(live, 'Connection') as client, patch.object(
+                live.time, 'monotonic', side_effect=[100, 100, 104]):
+            client.return_value.get.return_value = {}
+            with self.assertRaises(TimeoutError):
+                live.inbox_snapshot(client.return_value, [], '')
+            client.return_value.get.assert_called_once()
 
     def test_inbox_preferences_response_time_and_order(self):
         base = dict(status='completed', updated_at='2026-01-01T00:00:00Z')
@@ -385,6 +525,8 @@ class Delivery(unittest.TestCase):
                     if mode == 'null-retry' and paths.count(path) == 3:
                         self.send_error(503)
                         return
+                elif path == '/api/control/missions?status=completed&limit=100':
+                    result = []
                 elif mode == 'project-first' and path.startswith('/api/control/missions?project=p&'):
                     result = [dict(id='older', project='p', status='completed', tags=['archived'])]
                 elif path == live.INBOX_PATH:
@@ -616,7 +758,7 @@ class Delivery(unittest.TestCase):
         query = '/api/control/missions?project=now&limit=200'
         members = [dict(id=str(i), project='now', status='completed') for i in range(53)]
         members[-1]['tags'] = ['archived']
-        pages = {live.INBOX_PATH: {}, '/api/projects': {'projects': [{'slug': 'now'}]}, query + '&all=true': members,
+        pages = {'/api/projects': {'projects': [{'slug': 'now'}]}, query + '&all=true': members,
                  query: members, '/api/control/missions?limit=200&include_ancestors=true': members[:52],
                  '/api/control/missions?status=acknowledged&limit=100': [], '/api/machines': []}
         reads = []

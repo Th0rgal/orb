@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
 import { privilegeSnapshot } from "./privilegeAccessFixture";
 
@@ -241,6 +242,22 @@ test(`Inbox surfaces Needs You and Ready for Review while keeping working agents
   const inboxNav = page.locator("#orb-sidebar").getByRole("button", { name: /Inbox/ });
   await expect(inboxNav).toBeVisible({ timeout: 15000 });
   await expect(inboxNav.locator(".inbox-sb-badge")).toHaveText("4");
+  const gtkIds = await page.evaluate(() =>
+    (window as Window & { orbInboxBadgeIds: () => string[] }).orbInboxBadgeIds().sort());
+  expect(gtkIds).toEqual(["m-done", "m-failed", "m-perm", "m-question"]);
+  // The pending permission is available to the mounted WebView through its observed
+  // transcript. The same Core summaries alone carry no such signal on m-perm.
+  const nativeIds: string[] = JSON.parse(execFileSync("python3", ["-I", "-c", `
+import json, sys
+sys.path.insert(0, '../lean/OrbDesktop/OrbDesktop')
+from live_transport import project_inbox
+rows = {m['id']: m for m in json.load(sys.stdin)}
+items = project_inbox([rows.values()], {}, [{'slug': 'orb'}, {'slug': 'paloma'}], '')
+print(json.dumps([r[1] for r in items if r[0] == 'U']))
+`], { input: JSON.stringify(missions), encoding: "utf8" }));
+  expect(nativeIds.sort()).toEqual(["m-done", "m-failed", "m-question"]);
+  expect(gtkIds.filter(id => !nativeIds.includes(id))).toEqual(["m-perm"]);
+
 
   // Open Inbox via ⌘I shortcut
   await page.keyboard.press("Meta+KeyI");
@@ -685,3 +702,55 @@ test("Inbox renders live production missions and projects when ORB_INBOX_PROD=1"
   }
 });
 
+
+test("badge hydrates before opening Inbox and reloads receipts on account switch", async ({ page }) => {
+  const token = (sub: string) => `header.${Buffer.from(JSON.stringify({ sub })).toString("base64url")}.fixture`;
+  const ben = token("ben");
+  const thomas = token("thomas");
+  const stamp = Date.parse("2026-10-10T00:00:00Z");
+  const missions = ["a", "b", "c", "d", "e", "f"].map((id, index) => ({
+    id, title: id, project: "default", status: index < 4 ? "completed" : "running",
+    backend: "claudecode", updated_at: new Date(stamp).toISOString(), history: [],
+  }));
+  await page.addInitScript(jwt => {
+    localStorage.setItem("orb.apiUrl", location.origin);
+    localStorage.setItem("orb.jwt", jwt);
+  }, ben);
+  let releaseBen!: () => void;
+  const pendingBen = new Promise<void>(resolve => { releaseBen = resolve; });
+  let benRequested = false;
+  await page.route("**/api/**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/control/inbox-state") {
+      const isBen = route.request().headers().authorization === `Bearer ${ben}`;
+      if (isBen) { benRequested = true; await pendingBen; }
+      return route.fulfill({ json: {
+        preferences: { aiSummary: false, includeAutonomous: false, model: "builtin/smart" },
+        ...(isBen ? { "seen:a": stamp, "seen:b": stamp, "seen:c": stamp } : { "seen:d": stamp }),
+      } });
+    }
+    if (path === "/api/projects") return route.fulfill({ json: { projects: [{ slug: "default", title: "Default" }] } });
+    if (path === "/api/control/missions") return route.fulfill({ json: missions });
+    if (path === "/api/control/stream") return route.fulfill({ contentType: "text/event-stream", body: "" });
+    return route.fulfill({ json: {} });
+  });
+  await page.goto("/");
+  const nav = page.locator("#orb-sidebar").getByRole("button", { name: /^Inbox/ });
+  const ids = () => page.evaluate(() =>
+    (window as Window & { orbInboxBadgeIds: () => string[] }).orbInboxBadgeIds().sort());
+  await expect(nav).toBeVisible();
+  await expect.poll(() => benRequested).toBe(true);
+  await expect(nav.locator(".inbox-sb-badge")).toHaveCount(0);
+  releaseBen();
+  await expect.poll(ids).toEqual(["d"]);
+  await nav.click();
+  await expect(page.locator(".inbox-page h2")).toHaveText("Inbox");
+  await expect(nav.locator(".inbox-sb-badge")).toHaveText("1");
+  await page.evaluate(async jwt => {
+    const modulePath = "/src/api.ts";
+    const api = await import(modulePath);
+    api.setConnection(location.origin, jwt, { persist: false });
+  }, thomas);
+  await expect.poll(ids).toEqual(["a", "b", "c"]);
+  await expect(nav.locator(".inbox-sb-badge")).toHaveText("3");
+});
