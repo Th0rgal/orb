@@ -3610,8 +3610,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       return .ok (mkJson 403 "{\"error\":\"operator_session_required\"}")
     let providers ← loadHydratedProviders st.store st.cfg.workingDir
     let selected := providers.find? (fun p => p.id == account)
-    if caller.role != "admin" && !selected.any (fun p => providerAddedBy p caller.userId) then
-      return .ok (mkJson 403 "{\"error\":\"not_account_owner\"}")
+    if caller.role != "admin" && !selected.any (fun p => providerVisibleTo p false caller.userId) then
+      return .ok (mkJson 403 "{\"error\":\"provider_not_visible\"}")
     let some hp := selected
       | return .ok (mkJson 404 "{\"error\":\"provider_not_found\"}")
     let stored ← getAIProvider? st.store account
