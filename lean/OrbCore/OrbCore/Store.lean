@@ -210,6 +210,7 @@ def missionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS user_daily_spend (user_id TEXT NOT NULL, utc_day TEXT NOT NULL, inference_cents INTEGER NOT NULL DEFAULT 0, compute_cents INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT '', PRIMARY KEY (user_id, utc_day));" ++
   "CREATE TABLE IF NOT EXISTS mission_proxy_tokens (token_sha256 TEXT PRIMARY KEY, mission_id TEXT NOT NULL, owner_user_id TEXT NOT NULL, expires_at_epoch INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE INDEX IF NOT EXISTS idx_mission_proxy_tokens_mission ON mission_proxy_tokens(mission_id);" ++
+  "CREATE TABLE IF NOT EXISTS native_owner_enrollments (node_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, account_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0));" ++
   "CREATE TABLE IF NOT EXISTS native_antigravity_grants (token_sha256 TEXT PRIMARY KEY REFERENCES mission_proxy_tokens(token_sha256) ON DELETE CASCADE, job_id TEXT NOT NULL, account_id TEXT NOT NULL, model TEXT NOT NULL);" ++
   "CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT 'host', owner_user_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_terminal_evidence (mission_id TEXT PRIMARY KEY, terminal_reason TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', artifact_ref TEXT NOT NULL DEFAULT '', verified INTEGER NOT NULL DEFAULT 1, evidence TEXT NOT NULL DEFAULT '{}', recorded_at TEXT NOT NULL DEFAULT '');" ++
@@ -4345,6 +4346,36 @@ def setUserProviderPref (st : CoreStore) (userId providerId : String) (enabled :
      "ON CONFLICT(user_id,provider_id) DO UPDATE SET enabled=excluded.enabled, updated_at=excluded.updated_at;")
     #[userId, providerId, if enabled then "1" else "0", nowAt]
   return res.map (fun _ => ())
+
+/-- An empty account is a tombstone. Keep the revision so an old enrollment
+    cannot become current again when the owner selects the same account. -/
+def changeNativeOwnerEnrollment (st : CoreStore) (node owner account : String)
+    (expected : UInt64) : IO (Except String String) := withImmediateTx st.missionsDb do
+  let .ok current ← execParamQueryUnlocked st.missionsDb
+      "SELECT owner_id,account_id,revision FROM native_owner_enrollments WHERE node_id=?1;"
+      #[node] | return .error "enrollment_unavailable"
+  let prior := current[1]?
+  let revision := ((prior.bind (·[2]?)).getD "0").toNat?
+  unless revision == some expected.toNat do return .error "enrollment_changed"
+  unless account.isEmpty do
+    let .ok rows ← execParamQueryUnlocked st.missionsDb
+        ("SELECT 1 FROM ai_providers WHERE id=?1 AND created_by_user_id=?2 " ++
+         "AND provider_type='antigravity' AND enabled=1;") #[account, owner]
+      | return .error "enrollment_unavailable"
+    if rows.size < 2 then return .error "provider_access_denied"
+  if (prior.bind (·[0]?)) == some owner && (prior.bind (·[1]?)) == some account then
+    return .ok (toString expected)
+  let .ok _ ← execParamQueryUnlocked st.missionsDb
+      ("UPDATE mission_proxy_tokens SET revoked=1 WHERE token_sha256 IN " ++
+       "(SELECT g.token_sha256 FROM native_antigravity_grants g JOIN remote_node_jobs j " ++
+       "ON j.job_id=g.job_id WHERE j.node_id=?1);") #[node]
+    | return .error "enrollment_unavailable"
+  let next := toString (expected.toNat + 1)
+  let result ← execParamQueryUnlocked st.missionsDb
+      ("INSERT INTO native_owner_enrollments(node_id,owner_id,account_id,revision) VALUES(?1,?2,?3,?4) " ++
+       "ON CONFLICT(node_id) DO UPDATE SET owner_id=excluded.owner_id,account_id=excluded.account_id,revision=excluded.revision;")
+      #[node,owner,account,next]
+  return result.map fun _ => next
 
 private def nativeMissionAccountSql :=
   "SELECT n.account_id FROM mission_proxy_tokens t JOIN native_antigravity_grants n USING(token_sha256) WHERE t.mission_id=?1 LIMIT 1;"

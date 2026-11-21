@@ -3709,6 +3709,26 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     | return .ok (mkJson 401 "{\"error\":\"unauthorized\"}")
   let utcDay := currentUtcDay nowEpochSec
 
+  if let ["", "api", "native-owner-enrollments", node] := cleanPath.splitOn "/" then
+    if st.cfg.instanceName != "dev" then return .ok (mkJson 404 "{}")
+    let token := (extractBearerToken? req.headers nowEpochSec).getD ""
+    unless !st.cfg.devMode && token.startsWith "orb-jwt-v2:" && !caller.disabled && !caller.userId.isEmpty do
+      return .ok (mkJson 403 "{\"error\":\"owner_session_required\"}")
+    let (_, nodes) ← loadStaticRemoteNodes
+    unless (nodes.find? (fun n => n.id == node)).bind (·.dedicatedOwner?) == some caller.userId do
+      return .ok (mkJson 403 "{\"error\":\"node_owner_required\"}")
+    unless req.method == "PUT" do return .ok (mkJson 405 "{}")
+    let body := req.bodySlice.toByteArray
+    if body.size > 2048 then return .ok (mkJson 413 "{}")
+    let some j := (OrbBin.Json.parseBytes body).toOption | return .ok (mkJson 400 "{}")
+    let some account := j.fieldStr? "account_id" | return .ok (mkJson 400 "{}")
+    let some rev := j.fieldUInt64? "expected_revision" | return .ok (mkJson 400 "{}")
+    match ← changeNativeOwnerEnrollment st.store node caller.userId account rev with
+    | .ok next => return .ok (mkJson 200 ("{\"revision\":" ++ next ++ "}"))
+    | .error reason =>
+      let status := if reason == "enrollment_changed" then 409 else if reason == "provider_access_denied" then 403 else 503
+      return .ok (mkJson status (renderCompact (.obj #[("error", .str reason)])))
+
   if let ["", "api", "ai", "providers", encodedAccount, setting] := cleanPath.splitOn "/" then
     if setting == "vpn" || setting == "alternative-routers" then
       let some account := percentDecodeStrict encodedAccount

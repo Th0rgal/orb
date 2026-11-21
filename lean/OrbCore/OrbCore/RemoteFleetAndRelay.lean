@@ -275,6 +275,7 @@ structure StaticRemoteNode where
   id       : String
   baseUrl  : String
   tokenEnv : String
+  dedicatedOwner? : Option String := none
   labels   : Array String := #[]
   deriving Repr, Inhabited
 
@@ -308,7 +309,7 @@ def parseStaticRemoteNodesRaw (raw : String) : Array StaticRemoteNode := Id.run 
         let tokEnv := ((it.fieldStr? "token_env").filter (!·.isEmpty)).getD (defaultRemoteNodeTokenEnv id)
         let lbls := ((it.fieldArr? "labels").getD #[]).filterMap JVal.asStr?
         if id.isEmpty || url.isEmpty then none
-        else some { id, baseUrl := trimTrailingSlashes url, tokenEnv := tokEnv, labels := lbls }
+        else some { id, baseUrl := trimTrailingSlashes url, tokenEnv := tokEnv, dedicatedOwner? := (it.field? "dedicated_owner_id").map (fun v => v.asStr?.getD ""), labels := lbls }
     | _ => return #[]
   else
     let entries := (trimmed.splitOn ",").map (fun e => e.trimAscii.toString) |>.filter (!·.isEmpty)
