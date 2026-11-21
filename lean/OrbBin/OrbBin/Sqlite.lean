@@ -7,6 +7,9 @@ import Std.Sync.Mutex
 
 namespace OrbBin.Sqlite
 
+@[extern "orb_sqlite_open_readonly"]
+opaque sqliteOpenReadOnlyRaw (path : @& String) : IO UInt64
+
 @[extern "orb_sqlite_open"]
 opaque sqliteOpenRaw (path : @& String) : IO UInt64
 

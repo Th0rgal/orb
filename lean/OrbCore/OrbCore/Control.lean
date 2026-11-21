@@ -3037,6 +3037,40 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   if req.method == "OPTIONS" then
     return .ok { status := 204, corsOrigin? := reqOrigin?, body := ByteArray.empty }
 
+  if cleanPath == "/api/native/antigravity/workspace-turn" then
+    let denied := mkJson 403 "{\"error\":\"native_shared_workspace_denied\"}"
+    unless st.cfg.instanceName == "dev" && !st.cfg.devMode && req.method == "POST" do return .ok denied
+    let some hub := st.providerHub? | return .ok denied
+    let some grant := lookupHeaderCI req.headers "x-orb-job-grant" | return .ok denied
+    unless grant.startsWith "orb-agy-v1_" do return .ok denied
+    let body := req.bodySlice.toByteArray
+    if body.size > 4 * 1024 * 1024 then return .ok denied
+    let some j := (OrbBin.Json.parseBytes body).toOption | return .ok denied
+    let some job := j.fieldStr? "job" | return .ok denied
+    let some node := j.fieldStr? "node" | return .ok denied
+    let some owner := j.fieldStr? "owner" | return .ok denied
+    let some prompt := j.fieldStr? "prompt" | return .ok denied
+    let some config ← OrbCore.NativeSharedWorkspace.holderFor? node | return .ok denied
+    let (_, fleet) ← loadStaticRemoteNodes
+    let some sn := fleet.find? (·.id == node) | return .ok denied
+    let .ok url := OrbBin.HttpClient.parseUrl sn.baseUrl | return .ok denied
+    unless url.host == "127.0.0.1" do return .ok denied
+    let some p ← OrbCore.NativeSharedWorkspace.placement? st.store grant job node owner nowEpochSec
+      | return .ok (mkJson 409 "{\"error\":\"native_workspace_not_running\"}")
+    let some auth ← resolveStaticNodeToken? sn | return .ok denied
+    let .ok (200, _, some status) ← OrbBin.HttpClient.sendJsonRequest "GET" (sn.baseUrl ++ "/jobs/" ++ job)
+        (some auth) none #[] 3000 131072 | return .ok denied
+    unless status.fieldStr? "state" == some "running" && status.fieldStr? "mission_id" == some p.mission &&
+        status.fieldStr? "owner_user_id" == some p.owner && status.fieldStr? "exec_unix_user" == some p.unixUser &&
+        (status.fieldNat? "exec_uid").getD 0 > 0 do return .ok denied
+    let stream := OrbCore.NativeSharedWorkspace.pumpTurn st.store hub st.cfg.workingDir grant job node
+      owner prompt (j.fieldStr? "conversation") ((status.fieldNat? "exec_uid").getD 0) config
+    return .ok {
+      status := 200
+      contentType := "application/x-ndjson"
+      body := ByteArray.empty
+      bodyStream? := some stream }
+
   -- A node may verify a shared account placement without acquiring any
   -- authority to run a profile or extracting the Google login from Core.
   if cleanPath == "/api/native/antigravity/workspace-admission" then

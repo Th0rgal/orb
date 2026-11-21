@@ -8,7 +8,7 @@ import uuid
 
 
 def start_profile(nsenter, bwrap, rootfs, home, ipc, namespace, port, uid, gid,
-                  access_token, model, conversation=None):
+                  access_token, model, conversation=None, *, workspace=True, catalog=False, diagnostic=False):
     """The private image supplies an empty /session and the CLI, setpriv and socat.
 
     home is a dedicated per-owner/mission/account directory for conversation state.
@@ -27,22 +27,29 @@ def start_profile(nsenter, bwrap, rootfs, home, ipc, namespace, port, uid, gid,
     if not model or len(model) > 128 or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789-." for c in model):
         raise ValueError("invalid native model")
     args = ["/bin/agy", "--agent", "orb-workspace", "--disable-slash-commands",
-            "--model", model, "--output-format", "stream-json", "--print-timeout", "120s"]
+            "--model", model, "--output-format", "stream-json", "--print-timeout", "120s" if workspace else "45s"]
     if conversation:
         args.extend(("--conversation", str(uuid.UUID(conversation))))
     # The caller sends {"event":"user","message":{"role":"user","content":...}} on stdin.
     args.extend(("--input-format", "stream-json"))
+    if diagnostic and not catalog:
+        args.extend(("--log-file", "/home/orb/probe.log"))
+    if catalog:
+        args = ["/bin/agy", "models"]
     token = {"auth_method": "consumer", "token": {"access_token": access_token, "token_type": "Bearer"}}
     proxy = f"socks5://127.0.0.1:{port}"
     agent = ("---\nname: orb-workspace\ndescription: Isolated Orb workspace\nmainAgent: true\n"
              "subagent: false\ntools: []\ncommandExecutionPolicy: off\n---\nUse the workspace MCP.")
     settings = {"permissions": {"allow": ["mcp(workspace/write_file)"]}}
     config = {"mcpServers": {"workspace": {"command": "/bin/socat", "args": ["STDIO", "UNIX-CONNECT:/ipc/workspace.sock"]}}}
+    if not workspace:
+        config = {"mcpServers": {}}
+        settings = {}
     files = [
         ("/home/orb/.gemini/antigravity-cli/antigravity-oauth-token", json.dumps(token)),
         ("/home/orb/.gemini/config/agents/orb-workspace.md", agent),
         ("/home/orb/.gemini/antigravity-cli/settings.json", json.dumps(settings)),
-        ("/session/.agents/mcp_config.json", json.dumps(config)),
+        ("/home/orb/.gemini/config/mcp_config.json", json.dumps(config)),
     ]
     with contextlib.ExitStack() as stack:
         mounts = []
@@ -65,4 +72,4 @@ def start_profile(nsenter, bwrap, rootfs, home, ipc, namespace, port, uid, gid,
             "--setenv", "ALL_PROXY", proxy, "--chdir", "/session", "--",
             "/bin/setpriv", "--clear-groups", "--reuid", str(uid), "--regid", str(gid), "--no-new-privs",
             "--", *args], env={}, cwd="/", pass_fds=(rootfs, home, ipc, namespace, *fds),
-            extra_groups=[], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            extra_groups=[], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE if diagnostic else subprocess.DEVNULL)

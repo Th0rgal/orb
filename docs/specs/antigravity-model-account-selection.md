@@ -523,3 +523,20 @@ checking the placement again. The receipt contains the job and mission IDs,
 read-only mode, route generation and expiry. It carries no provider credential
 or transport handle. Access to an owner-enrolled profile uses the separate
 enrollment path above.
+
+#### Native subscription acceptance
+
+A model appearing in `agy models` proves discovery. A Google userinfo HTTP 200
+through the account's assigned relay proves the token was accepted for that
+request. To qualify generation, the selected model must return the expected
+one-time response through the same route. A provider refusal ends the check.
+The test records only the selected model, country, route generation, status
+codes and an enumerated reason. The original error may carry account details
+or a sign-in link and stays out of the receipt.
+
+A tool-enabled turn additionally needs a file created by the selected workspace
+UID and read back after resuming the same conversation. The test fails when
+the subscriber returns a successful terminal event without offering a callable
+workspace tool. API-key fixtures and synthetic subscription catalogs exercise
+different provider behavior. Neither qualifies a Google subscription for
+delegation or Goal mode.

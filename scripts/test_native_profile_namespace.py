@@ -20,7 +20,7 @@ def run():
         (image / "session/.agents/mcp_config.json").touch()
         ipc.mkdir()
         home.mkdir(mode=0o700)
-        for name in (".gemini/config/agents/orb-workspace.md", ".gemini/antigravity-cli/settings.json",
+        for name in (".gemini/config/mcp_config.json", ".gemini/config/agents/orb-workspace.md", ".gemini/antigravity-cli/settings.json",
                      ".gemini/antigravity-cli/antigravity-oauth-token"):
             dest = home / name
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -50,7 +50,7 @@ token=$HOME/.gemini/antigravity-cli/antigravity-oauth-token
 IFS= read -r value <"$token" || true
 case "$value" in *access-only-value*) :;; *) exit 3;; esac
 case "$value" in *refresh_token*) exit 4;; esac
-[ -r .agents/mcp_config.json ] && [ ! -w .agents/mcp_config.json ]
+[ -r "$HOME/.gemini/config/mcp_config.json" ] && [ ! -w "$HOME/.gemini/config/mcp_config.json" ]
 IFS= read -r data
 case "$data" in *fixture-marker*) :;; *) exit 5;; esac
 echo verified

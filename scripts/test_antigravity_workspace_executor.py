@@ -12,6 +12,8 @@ import subprocess
 import tempfile
 import threading
 
+from native_job_relay.images import executable
+from native_job_relay.session import workspace_socket
 from native_job_relay.workspace import start_file_executor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -38,14 +40,7 @@ def run(agy, workspace_mcp, model):
         (image / "dev").mkdir()
         # Build the disposable image from the trusted binaries' exact runtime.
         for binary, name in ((workspace_mcp, "workspace-mcp"), (shutil.which("setpriv"), "setpriv")):
-            shutil.copy2(binary, image / "bin" / name)
-            for line in subprocess.check_output(["ldd", binary], text=True).splitlines():
-                paths = [word for word in line.split() if word.startswith("/")]
-                if paths:
-                    lib = Path(paths[0])
-                    dest = image / lib.relative_to("/")
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(lib, dest)
+            executable(image, binary, name)
         check_readonly_executor(image, work, root)
         # The account profile and the checkout are not readable across principals.
         for uid, directory in ((PROFILE, work), (WORKSPACE, home)):
@@ -69,47 +64,16 @@ def run(agy, workspace_mcp, model):
         for path in home.rglob("*"):
             os.chown(path, PROFILE, PROFILE)
 
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
-            listener.bind(str(endpoint))
-            os.chown(endpoint, PROFILE, PROFILE)
-            endpoint.chmod(0o600)
-            listener.listen()
-            listener.settimeout(0.2)
-            stop = threading.Event()
-
-            def serve_workspace():
-                children = []
-                try:
-                    while not stop.is_set():
-                        try:
-                            conn, _ = listener.accept()
-                        except TimeoutError:
-                            continue
-                        with conn:
-                            _, uid, _ = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
-                            assert uid == PROFILE
-                            rootfd = os.open(image, os.O_DIRECTORY | os.O_NOFOLLOW)
-                            workfd = os.open(work, os.O_DIRECTORY | os.O_NOFOLLOW)
-                            try:
-                                proc = start_file_executor(shutil.which("bwrap"), rootfd, workfd, WORKSPACE, WORKSPACE,
-                                                           conn, readonly=False)
-                            finally:
-                                os.close(workfd)
-                                os.close(rootfd)
-                            children.append(proc)
-                finally:
-                    for proc in children:
-                        if proc.poll() is None:
-                            proc.terminate()
-                        proc.wait()
-
-            worker = threading.Thread(target=serve_workspace)
-            worker.start()
-            try:
+        rootfd = os.open(image, os.O_RDONLY | os.O_DIRECTORY)
+        workfd = os.open(work, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with workspace_socket(root, PROFILE, PROFILE, shutil.which("bwrap"), rootfd, workfd,
+                                  WORKSPACE, WORKSPACE, readonly=False) as (connected, failed):
                 turns(agy, model, home, cwd, work, endpoint)
-            finally:
-                stop.set()
-                worker.join()
+                assert connected.is_set() and not failed.is_set()
+        finally:
+            os.close(workfd)
+            os.close(rootfd)
 
 
 def check_readonly_executor(image, work, root):

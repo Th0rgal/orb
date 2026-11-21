@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import shutil
 import subprocess
 import sys
 
@@ -18,7 +19,10 @@ def private_listener():
         resources.callback(os.close, outer)
         os.unshare(os.CLONE_NEWNET)
         try:
-            subprocess.run(["ip", "link", "set", "lo", "up"], check=True, env={"PATH": os.defpath + ":/sbin:/usr/sbin"})
+            ip = shutil.which("ip")
+            if not ip:
+                raise RuntimeError("iproute2 is required for a private profile namespace")
+            subprocess.run([ip, "link", "set", "lo", "up"], check=True, env={})
             namespace = os.open("/proc/thread-self/ns/net", os.O_RDONLY)
             resources.callback(os.close, namespace)
             listener = resources.enter_context(socket.socket())
@@ -66,8 +70,13 @@ def node_transport(config):
     return _private_transport("node", config)
 
 
-def profile_transport(verified_port):
+def profile_transport(verified_port, *, relay_account=None, relay_password=None):
     """The caller holds an admitted placement and closes this context on revocation."""
     if type(verified_port) is not int or not 0 < verified_port <= 65535:
         raise ValueError("verified account VPN required")
-    return _private_transport("profile", {"verified_port": verified_port})
+    config = {"verified_port": verified_port}
+    if relay_account is not None or relay_password is not None:
+        if not isinstance(relay_account, str) or not relay_account or not isinstance(relay_password, str) or not relay_password:
+            raise ValueError("account relay requires its scoped credential")
+        config.update(account=relay_account, password=relay_password)
+    return _private_transport("profile", config)

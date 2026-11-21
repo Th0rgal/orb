@@ -8,6 +8,7 @@ import OrbBin.PosixExt
 import OrbBin.HttpClient
 import OrbBin.ClaudeControl
 import OrbCore.Store
+import OrbCore.NativeSharedWorkspace
 import OrbCore.Spec
 import OrbCore.Managed
 import OrbCore.MemoryAndCloud
@@ -845,6 +846,14 @@ private def prepareRemoteHarnessCommand
         if !url.isHttps && !(sup.devMode && url.host == "127.0.0.1") then return .error "native_core_tls_required"
         let .ok bearer ← mintNativeAntigravityToken store spec.missionId spec.ownerUserId jobId account model (nowSec + 86400) (some effNodeId)
           | return .error "native_grant_unavailable"
+        if (← NativeSharedWorkspace.holderFor? effNodeId).isSome && !sup.devMode then
+          if spec.goalDispatch?.isSome then return .error "native_workspace_goal_unavailable"
+          let worker := include_str "antigravity_workspace_turn.py"
+          let options := #[jobId, spec.ownerUserId, effNodeId, resumeSid?.getD ""]
+          let args := String.intercalate " " (options.toList.map shellSingleQuote)
+          let cmd := wsPrefix ++ skillPrelude ++ fd3Prelude ++ "exec python3 -I -c " ++ shellSingleQuote worker ++ " " ++ args
+          return .ok { command := cmd, envPairs := skillEnvs ++ promptEnvs ++ #[
+            ("ORB_NATIVE_CORE", apiBase), ("ORB_NATIVE_ANTIGRAVITY_TOKEN", bearer)], managedAuth := #[], proxyToken := bearer }
         let bootstrap := include_str "antigravity_native_launch.py"
         let cliModel := if spec.modelOverride.isEmpty then model else spec.modelOverride
         let scopedLaunch := "python3 -I -c " ++ shellSingleQuote bootstrap ++ " sh -c " ++
