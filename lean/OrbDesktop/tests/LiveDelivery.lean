@@ -191,6 +191,14 @@ def main (args : List String) : IO Unit := do
   unless st.expandedProjects == ["p"] do throw (IO.userError "single project was collapsed at launch")
   let slot ← IO.mkRef (none : Option LiveSubscription)
   try
+    if args == ["start-running"] then
+      let st ← clickMission st b
+      if st.composer.isRunning then throw (IO.userError "pending mission offered Stop")
+      let st ← awaitState slot st (fun s => s.selectedCard.any (·.status == "active"))
+      let (next, _) := stepDesktopEvent 120 vp st (.activate 2)
+      unless next.writeRequest == some (.stop b.missionId) do
+        throw (IO.userError "active roster and bubble left Send in place of Stop")
+      return
     if args == ["page-two"] || args == ["null-retry"] then
       let st ← clickMission st b
       let st ← awaitState slot st (fun s => streamedText s == "second\n\tλ🙂\n")

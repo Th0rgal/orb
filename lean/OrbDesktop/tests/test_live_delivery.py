@@ -71,6 +71,9 @@ class Delivery(unittest.TestCase):
         self.assertEqual(output.getvalue().splitlines(), ['\t'.join(rows[0])])
         self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2])
 
+    def test_stop_appears_when_the_roster_and_bubble_both_report_active(self):
+        self.run_wire('start-running')
+
     def test_saved_session_recovers_inside_the_window(self):
         self.run_wire('reconnect')
 
@@ -103,6 +106,8 @@ class Delivery(unittest.TestCase):
                     if mode in ('page-two', 'idle-page-two') and paths.count(path) > 1:
                         ids = ['a'] + [f'new-{i}' for i in range(199)]
                     result = [dict(id=m, title=m, status='active') for m in ids]
+                    if mode == 'start-running' and paths.count(path) == 1:
+                        result[-1]['status'] = 'pending'
                     if mode == 'null-retry' and paths.count(path) == 2:
                         result = None
                     if mode == 'null-retry' and paths.count(path) == 3:
@@ -161,7 +166,7 @@ class Delivery(unittest.TestCase):
                 if mode in ('idle-share', 'idle-page-two'):
                     self.assertIn(b + events + '?presence=1', paths)
                     self.assertNotIn(b + events, paths)
-                elif mode in ('page-two', 'null-retry'):
+                elif mode in ('page-two', 'null-retry', 'start-running'):
                     self.assertIn(b + events, paths)
                 elif mode in ('idle-identity', 'before-open', 'unavailable', 'idle-session'):
                     self.assertFalse(any(p.startswith(a) or p.startswith(b) for p in paths))

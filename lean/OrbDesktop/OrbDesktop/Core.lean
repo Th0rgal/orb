@@ -204,7 +204,9 @@ private def mergeRoster (st : DesktopState) (records : List String) : DesktopSta
       rows := rows.push { row with title := card.title, status := card.status }
     | "N" => machines := machines.push (machineCard machines.size xs)
     | _ => continue
-  return { st with missionCards := cards.toList, sidebarRows := rows.toList, fleetMachines := machines.toList }
+  let updated := { st with missionCards := cards.toList, sidebarRows := rows.toList, fleetMachines := machines.toList }
+  let some selected := updated.selectedCard | return updated
+  return { updated with composer := { updated.composer with isRunning := selected.isRunning } }
 
 /-- The window thread owns selection and damage. Each reader owns a fresh,
 single-value mailbox, so a retired subscription cannot update a new mission. -/
@@ -322,7 +324,7 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
     let some card := next.selectedCard | return invalidate
     if title == card.title && status == card.status then return (next, if changed then some viewport else damage)
     return ({ next with
-      composer := { next.composer with isRunning := status == "active" || status == "running" }
+      composer := { next.composer with isRunning := ({ card with status } : MissionSummaryCard).isRunning }
       missionCards := next.missionCards.map fun m => if m.missionId == sub.mission then { m with title, status } else m
       sidebarRows := next.sidebarRows.map fun r => if r.widgetId == card.widgetId then { r with title, status } else r }, some viewport)
 

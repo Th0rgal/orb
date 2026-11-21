@@ -438,3 +438,5 @@ The native window maps immediately with its title bar and a composer placeholder
 ### Changes from a second client
 
 An open sidebar must pick up missions and projects created in another client, including a child whose parent was already visible. A new roster page updates titles, placement and archive status. Rows retain their widget identity across a reorder. A mission displaced from a limited page stays visible while its individual presence check remains authorized. Session revocation clears the previous account’s data.
+
+When a selected mission advances from pending to active, the composer shows Stop on the same update as the active sidebar row. A roster snapshot and bubble that both report active must give the same button as a bubble arriving before the roster. Preserve the draft across that transition.

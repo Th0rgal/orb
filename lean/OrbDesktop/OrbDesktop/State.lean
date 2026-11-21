@@ -378,11 +378,14 @@ def DesktopState.headerTitle (st : DesktopState) : String :=
     ((st.sidebarRows.find? (·.rowId == "project:" ++ st.draftProject)).map (·.title)).getD st.draftProject
   else (st.selectedCard.map (·.title)).getD st.screen.headerTitle
 
+def MissionSummaryCard.isRunning (card : MissionSummaryCard) : Bool :=
+  card.status == "active" || card.status == "running"
+
 def resetSelection (st : DesktopState) (card : Option MissionSummaryCard) : DesktopState :=
   let mid := card.map (·.missionId)
   { st with
     openMission := mid, missionMenu := none, stream := { shown := [], pending := [], renders := 1 }, scroll := {}
-    composer := { isRunning := (card.map (·.status)) == some "active" || (card.map (·.status)) == some "running" }
+    composer := { isRunning := card.any (·.isRunning) }
     messageSent := false, missionStopped := false, missionArchived := false, sidePanelOpen := false
     sidebarRows := st.sidebarRows.map fun row => { row with selected := row.widgetId == (card.map (·.widgetId)).getD 101 } }
 
