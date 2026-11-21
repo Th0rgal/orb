@@ -82,8 +82,8 @@ def liveComposerControls (st : DesktopState) (width : SubPx) (newAgent := false)
   let children := (if newAgent then [] else [control 720 (display machine machineHint) mid.isEmpty]) ++ [control 721 (display harness "Harness") true, control 722 (display model "Model") true] ++
     (if ["codex","antigravity","claudecode"].contains v.backend then [control 723 (display v.effort "Default effort") true] else []) ++
     (if v.backend == "claudecode" then [control 724 v.permission true] else [])
-  WidgetNode.box (BoxStyle.row (pxToSub 12) |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 12) 0)
-    |>.withFixedSize width (pxToSub 36)) (if width < pxToSub (if newAgent then 424 else 520) then [control 714 "Mission settings" true] else children)
+  WidgetNode.box (BoxStyle.row (pxToSub 12) |>.withAlign .center |>.withPadding (Edges.xy (if newAgent then 0 else pxToSub 12) 0)
+    |>.withFixedSize width (pxToSub (if newAgent then 24 else 36))) (if width < pxToSub (if newAgent then 424 else 520) then [control 714 "Mission settings" true] else children)
 
 def buildMissionMenu (st : DesktopState) (menu : MissionMenu) (width : SubPx) (visibleCount : Nat) : WidgetNode :=
   let pal := st.theme.palette
