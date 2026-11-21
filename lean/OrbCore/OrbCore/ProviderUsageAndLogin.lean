@@ -3377,7 +3377,7 @@ def dispatchProviderAndAiRoute
         (formatEpochIso8601Utc (← nowEpoch))
       let hps ← loadHydratedProviders store workingDir
       let usernames ← listUsernamesById store
-      let visible := hps.filter (fun hp => providerVisibleTo hp effAdmin callerUserId)
+      let visible := hps.filter (fun hp => providerListedFor hp effAdmin callerUserId)
       return some (jsonResp 200 (.arr (visible.map (fun hp => renderHydratedProviderForCaller hps hp effAdmin callerUserId usernames))))
 
     -- 5e. `GET /api/ai/providers/for-backend/:backend_id`
@@ -3618,7 +3618,7 @@ def dispatchProviderAndAiRoute
       if method == "GET" && segs.length == 4 then
         let some hp := matchedProv?
           | return some (jsonErr 404 "Provider not found")
-        if !providerVisibleTo hp effAdmin callerUserId then
+        if !providerListedFor hp effAdmin callerUserId then
           return some (jsonErr 404 "Provider not found")
         let rejected ← loginRejectedFor hub store hp
         let sidecarFiles ← fetchSidecarAuthFiles

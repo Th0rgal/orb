@@ -2014,6 +2014,10 @@ def run : IO Unit := do
         failures := failures.push "A stale member edit cannot restore the previous global state"
       let disabledMember ← listRow memberJwt
       let disabledAdmin ← listRow jwt
+      let detail ← getJson app memberJwt s!"/api/ai/providers/{ownerRow.id}" now
+      unless detail.fieldStr? "id" == some ownerRow.id && detail.fieldBool? "user_enabled" == some false &&
+          (detail.field? "base_url").isNone do
+        failures := failures.push "A member can reopen the redacted details of a disabled shared account"
       unless disabledMember.fieldStr? "id" == some ownerRow.id &&
           disabledAdmin.fieldStr? "id" == some ownerRow.id &&
           disabledMember.fieldBool? "enabled" == some false &&
