@@ -81,6 +81,11 @@ private def nestedControllerFixture : DesktopState :=
 private def unsentDraft : DesktopState :=
   { hierarchyFixture with composer := { text := "Keep this draft" }, draftProject := "other" }
 
+private def collapsed := (stepDesktopEvent 120 vp unsentDraft (.activate sidebarToggleId)).1
+#guard collapsed.sidebarWidth == 0 && collapsed.composer.text == unsentDraft.composer.text
+#guard (stepDesktopEvent 120 vp collapsed (.key 0x62 2 .pressed)).1.sidebarWidth == chromeSidebarWidthSub
+#guard (stepDesktopEvent 120 vp collapsed (.key 0x62 3 .pressed)).1.sidebarHidden
+
 private def openedProject := (stepDesktopEvent 120 vp unsentDraft (.activate 1000)).1
 #guard openedProject.composer.text == unsentDraft.composer.text && openedProject.draftProject == "other"
 #guard openedProject.expandedProjects == ["now"]

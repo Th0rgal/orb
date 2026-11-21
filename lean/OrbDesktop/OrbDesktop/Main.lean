@@ -268,7 +268,7 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
   let (ac5, streamRuns) ←
     shapeStreamRuns ac4 rt.primaryFont sc
       { (Theme.bodyText theme) with color := pal.textPrimary }
-      streamText (transcriptTextWidth (availW - chromeSidebarWidthSub))
+      streamText (transcriptTextWidth (availW - st.sidebarWidth))
 
   let shapedRuns : ShapedScreenRuns := {
     headerTitleRuns := hdrRuns

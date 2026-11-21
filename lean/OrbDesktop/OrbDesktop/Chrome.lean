@@ -61,6 +61,11 @@ def chromeIcon (name : String) (color : Color) (size : Nat := 16) : WidgetNode :
   .mk none false false (BoxStyle.row 0 |>.withFixedSize (pxToSub size) (pxToSub size))
     (.vectorIcon (chromeIconPaths name) color) []
 
+private def sidebarToggle (theme : Theme) : WidgetNode :=
+  WidgetNode.focusable sidebarToggleId <| WidgetNode.box
+    (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 26) (pxToSub 26))
+    [chromeIcon "sidebar" theme.palette.textMuted 14] (some sidebarToggleId)
+
 def liveComposerControls (st : DesktopState) (width : SubPx) : WidgetNode :=
   let mid := st.openMission.getD ""
   let v := currentSettings st mid
@@ -353,7 +358,7 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
     { widths := Edges.trbl 0 border 0 0, color := pal.borderSubtle }
     [ WidgetNode.box (BoxStyle.row 10 |>.withAlign .center
         |>.withPadding (Edges.xy (pxToSub 12) 0) |>.withFixedSize innerW chromeHeaderHeightSub)
-        [chromeIcon "sidebar" pal.textMuted 14,
+        [if st.liveData then sidebarToggle theme else chromeIcon "sidebar" pal.textMuted 14,
          WidgetNode.box (BoxStyle.row 0 |>.withMargin (Edges.trbl 0 0 0 (pxToSub 12))) [chromeIcon "search" pal.textMuted 14],
          WidgetNode.box { BoxStyle.row 0 with grow := 1 } [],
          chromeIcon "back" pal.textMuted 14,
@@ -384,7 +389,7 @@ def buildHeaderChrome (st : DesktopState) (mainW : SubPx)
     match st.screen with
     | .missionTranscript | .missionSplitDiff => pxToSub 7
     | _ => 0
-  let rightButtons : List WidgetNode :=
+  let rightButtons : List WidgetNode := if st.liveData then [] else
     match st.screen with
     | .missionTranscript | .missionSplitDiff =>
       let mutedSt : TextStyle := { (Theme.mutedText theme) with sizeSub := pxToSub 12, lineHeightSub := pxToSub 16 }
@@ -409,7 +414,7 @@ def buildHeaderChrome (st : DesktopState) (mainW : SubPx)
     CornerRadii.zero
     BorderStyle.none
     ([WidgetNode.box { BoxStyle.row (pxToSub 8) with grow := 1, align := .center }
-       ([chromeLabel titleStyle.lineHeightSub titleRuns] ++
+       ((if st.sidebarHidden then [sidebarToggle theme] else []) ++ [chromeLabel titleStyle.lineHeightSub titleRuns] ++
          (if inset > 0 then [chromeIcon "nav:cloud" pal.textMuted 14] else []))] ++ rightButtons)
 
 /-- Build the toast notification stack widget for `st.toasts`. -/

@@ -993,7 +993,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
   let st := if windowEffects then
       { st with theme := { theme with palette := { pal with canvas := 0, header := 0 } } }
     else st
-  let sidebarW := chromeSidebarWidthSub
+  let sidebarW := st.sidebarWidth
   let headerH := chromeHeaderHeightSub
   let composerH := chromeComposerHeightSub
   let mainW : SubPx := availW - sidebarW
@@ -1058,7 +1058,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
   let baseShell : WidgetNode :=
     WidgetNode.box
       (BoxStyle.row 0 |>.withFixedSize availW availH |>.withBg (if windowEffects then 0 else pal.canvas))
-      [sidebarNode, rightColumn]
+      (if st.sidebarHidden then [rightColumn] else [sidebarNode, rightColumn])
 
   if windowEffects then
     WidgetNode.roundedClip

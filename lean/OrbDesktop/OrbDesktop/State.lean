@@ -324,6 +324,7 @@ structure DesktopState where
   theme : Theme := orbDarkTheme
   scale120 : Nat := 120
   scroll : ScrollPolicyState := {}
+  sidebarHidden : Bool := false
   rosterTopSub : SubPx := 0
   fleetTopSub : SubPx := 0
   stream : StreamCoalescer := Orb.Stream.Coalescer.empty
@@ -591,6 +592,11 @@ def DesktopState.initialFocusState (st : DesktopState) : FocusState :=
 /-- Sidebar width in logical `SubPx`: `--sb-w` of the SolidJS desktop (`220 px`). -/
 @[inline] def chromeSidebarWidthSub : SubPx := pxToSub 220
 
+def DesktopState.sidebarWidth (st : DesktopState) : SubPx :=
+  if st.sidebarHidden then 0 else chromeSidebarWidthSub
+
+def sidebarToggleId : WidgetId := 117
+
 /-- Title row height in logical `SubPx`: `--tb-h` (`35 px`). -/
 @[inline] def chromeHeaderHeightSub : SubPx := pxToSub 35
 
@@ -600,8 +606,8 @@ def DesktopState.initialFocusState (st : DesktopState) : FocusState :=
 
 /-- Device-pixel band the composer paints into: right of the sidebar, the composer dock at the
 bottom of `viewport` (device pixels), rounded outward. -/
-def composerDamageRect (scale120 : Nat) (viewport : Rect) : Rect :=
-  let x0 := floorDev scale120 (Int.ofNat chromeSidebarWidthSub)
+def composerDamageRect (scale120 : Nat) (viewport : Rect) (sidebarWidth := chromeSidebarWidthSub) : Rect :=
+  let x0 := floorDev scale120 (Int.ofNat sidebarWidth)
   let h := ceilDev scale120 (Int.ofNat chromeComposerHeightSub)
   { x := viewport.x + x0, y := viewport.bottom - h, w := viewport.w - x0, h := h }
 
@@ -651,7 +657,7 @@ private def stepDesktopInput (scale120 : Nat) (viewport : Rect) (st : DesktopSta
   else
     -- Only the transcript has a fixed bottom composer. Other screens can center
     -- the editor; without its layout bounds use the full viewport.
-    let dmg := if composer != st.composer && st.screen == .missionTranscript then composerDamageRect scale120 viewport else viewport
+    let dmg := if composer != st.composer && st.screen == .missionTranscript then composerDamageRect scale120 viewport st.sidebarWidth else viewport
     let next := if next.openMission.isSome && next.screen != .missionTranscript then
       resetSelection next none else next
     (next, Damage.add none dmg)
@@ -948,6 +954,12 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
 def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev : Event) :
     DesktopState × Damage := Id.run do
   if st.liveData then
+    let toggle := match ev with
+      | .activate id => id == sidebarToggleId
+      | .key 0x62 mods .pressed => mods == 2 || mods == 8
+      | _ => false
+    if toggle && st.missionMenu.isNone then
+      return ({ st with sidebarHidden := !st.sidebarHidden }, some viewport)
     if !st.hasLiveConnection || st.writeRequest.isSome then return (st, none)
     if let .key key _ state := ev then
       if [0xffe1,0xffe2,0xffe3,0xffe4,0xffeb,0xffec].contains key then
@@ -1015,8 +1027,8 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
 
 /-- Device-pixel band occupied by the live transcript. Stream deltas repaint this band only; the
 sidebar, header and composer retain their framebuffer pixels. -/
-def transcriptDamageRect (scale120 : Nat) (viewport : Rect) : Rect :=
-  let x0 := floorDev scale120 (Int.ofNat chromeSidebarWidthSub)
+def transcriptDamageRect (scale120 : Nat) (viewport : Rect) (sidebarWidth := chromeSidebarWidthSub) : Rect :=
+  let x0 := floorDev scale120 (Int.ofNat sidebarWidth)
   let y0 := ceilDev scale120 (Int.ofNat chromeHeaderHeightSub)
   let bottom := viewport.bottom - ceilDev scale120 (Int.ofNat chromeComposerHeightSub)
   { x := viewport.x + x0, y := viewport.y + y0, w := viewport.w - x0, h := max 0 (bottom - (viewport.y + y0)) }
@@ -1040,7 +1052,7 @@ def flushStreamFrame (scale120 : Nat) (viewport : Rect) (st : DesktopState) : De
   if stream'.renders == st.stream.renders then
     (st, none)
   else
-    ({ st with stream := stream' }, Damage.add none (transcriptDamageRect scale120 viewport))
+    ({ st with stream := stream' }, Damage.add none (transcriptDamageRect scale120 viewport st.sidebarWidth))
 
 /-- Queue and flush a batch at the display boundary. This is the native adapter for the
 `Orb.Stream.Coalescer` contract: N deltas become one visible frame. -/
