@@ -64,6 +64,7 @@ private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale
     { widgetId := 102, rowId := "nav:inbox", kind := "nav", title := "Inbox", shortcut := "⌘I" },
     { widgetId := 112, rowId := "nav:machines", kind := "nav", title := "Machines", shortcut := "⌘3" },
     { widgetId := 113, rowId := "nav:inference", kind := "nav", title := "Inference", shortcut := "⌘4" },
+    { widgetId := 114, rowId := "nav:resources", kind := "nav", title := "Resources", shortcut := "⌘6" },
     { widgetId := 109, rowId := "section:missions", kind := "section", title := "Missions" }] ++ missionRows ++
     [{ widgetId := 108, rowId := "section:projects", kind := "section", title := "Projects" }] ++ projects
   return { DesktopState.liveUnavailable isDark scale120 with
@@ -80,6 +81,7 @@ private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale
 
 private inductive ReadKind where
   | roster (previous : String) | catalog (revision : Nat) | providers
+  | resources (range : String)
   | nativeModels (machine : String)
   | accountRoutes (account provider action value : String)
   | directories (machine path : String)
@@ -99,6 +101,7 @@ private def startLiveRead (binding : String) (kind : ReadKind) (notify : IO Unit
     | .accountRoutes account provider action value => #["-I", "-c", transport ++ "\naccount_routes(*sys.argv[1:])", binding, account, provider, action, value]
     | .directories machine path => #["-I", "-c", transport ++ "\nlist_directories(*sys.argv[1:])", binding, machine, path]
     | .launchMachines admin harness => #["-I", "-c", transport ++ "\nlaunch_machines(*sys.argv[1:])", binding, if admin then "admin" else "member", harness]
+    | .resources range => #["-I", "-c", transport ++ "\nresource_inventory(*sys.argv[1:])", binding, range]
     | .providers => #["-I", "-c", transport ++ "\nprovider_inventory(sys.argv[1])", binding]
     | .catalog _ => #["-I", "-c", transport ++ "\ncatalog(sys.argv[1], json.loads(sys.argv[2]))", binding, modelCatalogRules]
   let child ← IO.Process.spawn { cmd := "python3", args, stdout := .piped, stderr := .null }
@@ -131,6 +134,7 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
             (!st.draftSettings.machine.isEmpty || st.fleetMachines.any (·.machineId == "core")) then
           let machine := if st.draftSettings.machine.isEmpty then "core" else st.draftSettings.machine
           some (.directories machine ((st.missionMenu.map (·.browsePath)).getD ""))
+        else if st.screen == .resources && st.resourceRows.isNone && !st.resourceFailed then some (.resources st.resourceRange)
         else if st.screen == .inference && st.providers.isNone && !st.providerReadFailed then some .providers
         else if let some page := st.accountRoutePage then
           if st.screen == .inference && !page.failed && (page.options.isNone || page.pending.isSome) then
@@ -165,6 +169,12 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
           | _ => .unavailable
         return if st.initialRosterPending || issue != st.connectionIssue then
           some { st with initialRosterPending := false, connectionIssue := issue } else none
+      if let .resources _ := source.kind then
+        if lines.head? != some "resources" then return some { st with resourceFailed := true }
+        let rows := lines.filterMap fun line => match splitTab line with
+          | ["R", mission, title, usage] => some (⟨mission, title, usage⟩ : ResourceRow)
+          | _ => none
+        return some { st with resourceRows := some rows }
       if let .nativeModels machine := source.kind then
         let ok := lines.head? == some "native-models"
         let menu := st.missionMenu.map fun m => { m with nativeCatalogResult := some ok }
@@ -302,9 +312,16 @@ private def mergeRoster (st : DesktopState) (records : List String) : DesktopSta
   let oldRows := Std.HashMap.ofList (st.sidebarRows.map fun row => (row.rowId, row))
   let oldCards := Std.HashMap.ofList (st.missionCards.map fun card => (card.missionId, card))
   let mut idx := 1 + (st.sidebarRows.foldl (fun n row => max n row.widgetId) 1000 - 1000) / 3
-  let mut cards := #[]
-  let mut rows := (st.sidebarRows.filter (fun row => row.kind != "project" && row.kind != "mission")).toArray
-  let mut machines := #[]
+  let projectOnly := records.head? == some "partial-projects"
+  let incoming := Std.HashSet.ofList (if !projectOnly then [] else records.filterMap fun record =>
+    match record.splitOn "\x1c" with
+    | "M" :: id :: _ => some id
+    | _ => none)
+  let mut cards := if projectOnly then (st.missionCards.filter fun card => !incoming.contains card.missionId).toArray else #[]
+  let mut rows := (st.sidebarRows.filter fun row =>
+    if projectOnly then row.kind != "mission" || !incoming.contains (row.rowId.drop 8).toString
+    else row.kind != "project" && row.kind != "mission").toArray
+  let mut machines := if projectOnly then st.fleetMachines.toArray else #[]
   let mut memberships := st.projectMemberships
   for record in records do
     let xs := record.splitOn "\x1c"
@@ -329,6 +346,10 @@ private def mergeRoster (st : DesktopState) (records : List String) : DesktopSta
     | "G" => memberships := (id, xs.drop 2) :: memberships.filter (·.1 != id)
     | "N" => machines := machines.push (machineCard machines.size xs)
     | _ => continue
+  if !projectOnly then
+    let projects := Std.HashSet.ofList (rows.toList.filterMap fun row =>
+      if row.kind == "project" then some (row.rowId.drop 8).toString else none)
+    memberships := memberships.filter fun entry => projects.contains entry.1
   let inboxItems := records.filterMap fun r => inboxItem (r.splitOn "\x1c")
   -- An unfinished project or ancestor window keeps the last complete badge and items.
   let refreshing := records.contains "I\x1crefreshing" || records.head? == some "partial-projects"
@@ -339,7 +360,8 @@ private def mergeRoster (st : DesktopState) (records : List String) : DesktopSta
   let inboxIndex := (st.currentInboxItem.bind fun item => inboxItems.findIdx? (·.mission == item.mission)).getD
     (min st.inboxIndex (inboxItems.length - 1))
   let updated := { st with
-    inboxItems, inboxEnabled, inboxIndex, inboxAvailable, projectMemberships := memberships
+    inboxItems, inboxEnabled, inboxIndex, projectMemberships := memberships
+    inboxAvailable := if projectOnly then st.inboxAvailable else inboxAvailable
     missionCards := cards.toList, sidebarRows := rows.toList, fleetMachines := machines.toList }
   let some selected := updated.selectedCard | return updated
   return { updated with composer := { updated.composer with isRunning := selected.isRunning } }

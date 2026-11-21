@@ -35,6 +35,7 @@ inductive ScreenId where
   | missionTranscript   -- `03_mission_transcript` (`/?screen=mission&id=m-active`)
   | missionSplitDiff    -- `04_mission_split_diff` (`/?screen=mission&id=m-diff&mode=split`)
   | machinesFleet       -- `05_machines_fleet` (`/?screen=machines`)
+  | resources
   | inbox               -- authenticated unread responses
   | inference           -- authenticated provider accounts
   | settingsGeneral     -- `06_settings_general` (`/?screen=settings&tab=general`)
@@ -66,6 +67,7 @@ def fileStem : ScreenId → String
   | .missionSplitDiff   => "04_mission_split_diff"
   | .machinesFleet      => "05_machines_fleet"
   | .inbox              => "live-inbox"
+  | .resources          => "resources"
   | .inference          => "inference"
   | .settingsGeneral    => "06_settings_general"
   | .searchDialog       => "07_search_dialog"
@@ -80,6 +82,7 @@ def w0Alias : ScreenId → String
   | .missionSplitDiff   => "diff"
   | .machinesFleet      => "streaming"
   | .inbox              => "live-inbox"
+  | .resources          => "resources"
   | .inference          => "providers"
   | .settingsGeneral    => "settings"
   | .searchDialog       => "search"
@@ -94,6 +97,7 @@ def routeQuery : ScreenId → String
   | .missionSplitDiff   => "/?screen=mission&id=m-diff&mode=split"
   | .machinesFleet      => "/?screen=machines"
   | .inbox              => "/?screen=inbox"
+  | .resources          => "/?screen=resources"
   | .inference          => "/?screen=inference"
   | .settingsGeneral    => "/?screen=settings&tab=general"
   | .searchDialog       => "/?screen=control&modal=search"
@@ -108,6 +112,7 @@ def headerTitle : ScreenId → String
   | .missionSplitDiff   => "Long mission"
   | .machinesFleet      => "Machines"
   | .inbox              => "Inbox"
+  | .resources          => "Resources"
   | .inference          => "Inference"
   | .settingsGeneral    => "Settings"
   | .searchDialog       => "New Agent"
@@ -117,6 +122,7 @@ def headerTitle : ScreenId → String
 /-- Parse a screen identifier or route query into a `ScreenId`. -/
 def parse? (s : String) : Option ScreenId :=
   match s with
+  | "resources" | "/?screen=resources" => some .resources
   | "01_control_empty"       | "control_empty"       | "inbox"         | "/?screen=control" => some .controlEmpty
   | "02_control_populated"   | "control_populated"   | "approvals"     | "/?screen=control&fixture=populated" => some .controlPopulated
   | "03_mission_transcript"  | "mission_transcript"  | "transcript"    | "/?screen=mission&id=m-active" => some .missionTranscript
@@ -331,6 +337,14 @@ structure AccountRoutePage where
   failed : Bool := false
   deriving BEq, Repr, Inhabited
 
+def resourceRanges := ["30m", "1h", "6h", "24h", "7d"]
+
+structure ResourceRow where
+  mission : String
+  title : String
+  usage : String
+  deriving BEq, Repr, Inhabited
+
 structure InboxItem where
   mission : String
   stamp : Nat
@@ -374,6 +388,14 @@ structure MissionMenu where
   listingFailed : Bool := false
   deriving Repr, Inhabited
 
+inductive VoicePhase where
+  | idle | recording | finishing | choosing
+  deriving BEq, Repr, Inhabited
+
+def voiceLanguageId : Nat := 747
+def voiceButtonId : Nat := 745
+def voiceCancelId : Nat := 746
+
 inductive ConnectionIssue where
   | unavailable | missing | signin | denied | invalid
   deriving BEq, Repr, Inhabited
@@ -400,6 +422,12 @@ def ConnectionIssue.hint : ConnectionIssue → String
 
 /-- Complete single-owner pure state of the Orb Desktop shell. -/
 structure DesktopState where
+  voiceLanguage : String := ""
+  voicePicker : Bool := false
+  voiceAvailable : Bool := false
+  voiceBinding : String := ""
+  voiceGeneration : Nat := 0
+  voicePhase : VoicePhase := .idle
   screen : ScreenId := .missionTranscript
   theme : Theme := orbDarkTheme
   scale120 : Nat := 120
@@ -437,6 +465,10 @@ structure DesktopState where
   syncCursor : SyncCursorState := {}
   badgePhase : Nat := 0
   sidebarRows : List ChromeSidebarRow := []
+  resourceRows : Option (List ResourceRow) := none
+  resourceFailed : Bool := false
+  resourcePage : Nat := 0
+  resourceRange : String := "6h"
   inboxItems : List InboxItem := []
   inboxAvailable : Bool := false
   inboxEnabled : Bool := true
@@ -485,10 +517,14 @@ def restoredExecutionStatus (status : String) : String :=
 def MissionSummaryCard.isRunning (card : MissionSummaryCard) : Bool :=
   card.status == "active" || card.status == "running"
 
+def DesktopState.voiceDraft (st : DesktopState) : Bool :=
+  st.hasLiveConnection && st.openMission.isNone && st.writeRequest.isNone &&
+    (st.screen == .controlEmpty || st.screen == .controlPopulated)
+
 def resetSelection (st : DesktopState) (card : Option MissionSummaryCard) : DesktopState :=
   let mid := card.map (·.missionId)
   { st with
-    openMission := mid, missionMenu := none, stream := { shown := [], pending := [], renders := 1 }, scroll := {}
+    voicePhase := .idle, voiceGeneration := st.voiceGeneration + 1, openMission := mid, missionMenu := none, stream := { shown := [], pending := [], renders := 1 }, scroll := {}
     composer := { isRunning := card.any (·.isRunning) }
     messageSent := false, missionStopped := false, missionArchived := false, sidePanelOpen := false
     sidebarRows := st.sidebarRows.map fun row => { row with selected := row.widgetId == (card.map (·.widgetId)).getD 101 } }
@@ -866,8 +902,10 @@ def DesktopState.sidebarHoverRow (st : DesktopState) (hit : Option WidgetId) : O
   if ["nav", "project", "mission", "footer"].contains row.kind then some rowId else none
 
 def DesktopState.hoverTarget (st : DesktopState) (hit : Option WidgetId) : Option WidgetId := do
+  if hit == some voiceLanguageId || hit == some voiceButtonId || hit == some voiceCancelId then return ← hit
   let id ← hit
-  if st.screen == .inference && id >= providersBackId then some id else st.sidebarHoverRow hit
+  if st.screen == .resources && id >= 945 && id < 960 then some id
+  else if st.screen == .inference && id >= providersBackId then some id else st.sidebarHoverRow hit
 
 def DesktopState.sidebarHoverDamage (st : DesktopState) (regions : List (WidgetId × Rect)) (scale : Nat)
     (previous next : Option WidgetId) : Damage := Id.run do
@@ -1116,12 +1154,16 @@ def menuFocusChange (before after : DesktopState) : Option Nat :=
 /-- Opening a live draft gives the editor keyboard focus even when New Agent
     was invoked while the empty draft screen was already visible. -/
 def desktopFocusChange (before after : DesktopState) (ev : Event) : Option Nat :=
-  if let some target := menuFocusChange before after then some target
+  if before.voicePhase != .idle && before.voicePhase != after.voicePhase && after.voiceDraft then some 1
+  else if let some target := menuFocusChange before after then some target
   else if before.screen == .inference && after.screen == .inference then
     match before.accountRoutePage, after.accountRoutePage with
     | none, some _ => some providersBackId
     | some page, none => ((after.providers.getD []).findIdx? (·.id == page.account.id)).map providerSettingsId
     | _, _ => none
+  else if after.screen == .resources && before.screen != .resources then some 114
+  else if after.screen == .resources && after.resourceRows.isSome && before.resourcePage != after.resourcePage then
+    some (if before.resourcePage < after.resourcePage then 947 else 946)
   else if after.screen == .inbox && before.screen != .inbox then some (if after.inboxItems.isEmpty then 102 else 940)
   else if after.hasLiveConnection && after.missionMenu.isNone && after.screen == .controlEmpty then
     let shortcut := match ev with
@@ -1166,9 +1208,9 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
       return update { menu with browsePath := row.value, first := 0, highlighted := 1, directoryRows := none,
                                 draft := { text := row.value, cursorOffset := row.value.length } }
     if menu.page == .draftDirectory && id == 716 && menu.draft.imePreeditText.isEmpty then
-      return ({ st with draftDirectory := menu.draft.text, missionMenu := none }, some viewport)
+      return ({ st with draftDirectory := menu.draft.text, missionMenu := none, voicePhase := .idle }, some viewport)
     if menu.page == .draftProject then
-      return ({ st with draftProject := row.value, missionMenu := none }, some viewport)
+      return ({ st with draftProject := row.value, missionMenu := none, voicePhase := .idle }, some viewport)
     if menu.page == .settings then
       if let some field := settingTrigger id then
         let next := { menu with page := .picker field, first := 0, highlighted := 0 }
@@ -1191,6 +1233,20 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
 def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev : Event) :
     DesktopState × Damage := Id.run do
   if st.liveData then
+    if st.voiceDraft && st.voiceAvailable && st.missionMenu.isNone then
+      if let .activate id := ev then
+        if id == voiceCancelId && st.voicePhase != .idle then
+          return ({ st with voicePhase := .idle }, some viewport)
+        if id == voiceLanguageId && st.voicePicker && st.voicePhase == .idle then
+          return ({ st with voicePhase := .choosing, voiceBinding := st.connectionBinding, voiceGeneration := st.voiceGeneration + 1 }, some viewport)
+        if id == voiceButtonId then
+          match st.voicePhase with
+          | .idle => return ({ st with voicePhase := .recording, voiceBinding := st.connectionBinding, voiceGeneration := st.voiceGeneration + 1 }, some viewport)
+          | .recording => return ({ st with voicePhase := .finishing }, some viewport)
+          | .choosing => return (st, none)
+          | .finishing => return ({ st with voicePhase := .idle }, some viewport)
+      if let .key 0xff1b _ .pressed := ev then
+        if st.voicePhase != .idle then return ({ st with voicePhase := .idle }, some viewport)
     let toggle := match ev with
       | .activate id => id == sidebarToggleId
       | .key 0x62 mods .pressed => mods == 2 || mods == 8
@@ -1217,18 +1273,20 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
         -- XKB reports modifiers even when the key was held before this window gained focus.
         if mods &&& 0x0a == 0 then 0
         else if key == 0x69 || key == 0x49 then 102
+        else if key == 0x36 then 114
         else if key == 0x34 then 113
         else if key == 0x33 then 112
         else if key == 0x6e || key == 0x4e then 101 else 0
       | _ => 0
     if navId == 102 && !st.inboxEnabled then return (st, none)
-    if [101, 102, 112, 113].contains navId then
-      let screen := if navId == 102 then ScreenId.inbox else if navId == 113 then .inference else if navId == 112 then .machinesFleet else .controlEmpty
+    if [101, 102, 112, 113, 114].contains navId then
+      let screen := if navId == 114 then ScreenId.resources else if navId == 102 then .inbox else if navId == 113 then .inference else if navId == 112 then .machinesFleet else .controlEmpty
       let next := resetSelection { st with screen, fleetTopSub := 0, writeError := "", accountRoutePage := none } none
       -- These pages share the New Agent draft. A mission follow-up belongs only to its transcript.
       let next := if st.openMission.isNone then
           { next with composer := { st.composer with imePreeditText := "" } }
         else { next with draftProject := "" }
+      let next := if navId == 114 then { next with resourceRows := none, resourceFailed := false, resourcePage := 0 } else next
       let next := if navId == 113 then { next with providers := none, providerReadFailed := false } else next
       return ({ next with sidebarRows := next.sidebarRows.map fun row => { row with selected := row.widgetId == navId } }, some viewport)
     if st.screen == .inference then
@@ -1246,6 +1304,22 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       else if navId >= providerSettingsId 0 then
         if let some account := (st.providers.getD [])[navId - providerSettingsId 0]? then
           return ({ st with accountRoutePage := some { account, previousTop := st.fleetTopSub }, fleetTopSub := 0, writeError := "" }, some viewport)
+    if st.screen == .resources then
+      if navId == 945 then
+        return ({ st with resourceRows := none, resourceFailed := false, resourcePage := 0 }, some viewport)
+      if navId >= 955 && navId < 960 then
+        let range := resourceRanges.getD (navId - 955) "6h"
+        return ({ st with resourceRange := range, resourceRows := none, resourceFailed := false, resourcePage := 0 }, some viewport)
+      let rows := st.resourceRows.getD []
+      if navId == 946 || (ev matches .key 0xff55 0 .pressed) then
+        return ({ st with resourcePage := st.resourcePage - 1 }, some viewport)
+      if navId == 947 || (ev matches .key 0xff56 0 .pressed) then
+        return ({ st with resourcePage := min ((rows.length - 1) / 4) (st.resourcePage + 1) }, some viewport)
+      if navId >= 950 && navId < 954 then
+        if let some row := rows[4 * st.resourcePage + navId - 950]? then
+          if let some card := st.missionCards.find? (fun c => !row.mission.isEmpty && c.missionId == row.mission) then
+            return (resetSelection { st with screen := .missionTranscript } (some card), some viewport)
+      if ev matches .composerReturn .. then return (st, none)
     if st.screen == .inbox then
       let index := min st.inboxIndex (st.inboxItems.length - 1)
       if navId == 942 || (ev matches .key 0xff52 _ .pressed) then
@@ -1295,7 +1369,7 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
             !st.composer.text.trimAscii.isEmpty && st.composer.imePreeditText.isEmpty then
           if st.draftSettings.backend == "antigravity" && st.draftSettings.model.isEmpty then
             return ({ st with writeError := "Choose an Antigravity model for this machine." }, some viewport)
-          return ({ st with writeRequest := some .create }, none)
+          return ({ st with voicePhase := .idle, writeRequest := some .create }, none)
         return (st, none)
       if id == 2 || id == 106 then
         let some card := st.selectedCard | return (st, none)

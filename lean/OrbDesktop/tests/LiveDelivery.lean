@@ -315,6 +315,15 @@ def main (args : List String) : IO Unit := do
       unless next.writeRequest == some (.stop b.missionId) do
         throw (IO.userError "active roster and bubble left Send in place of Stop")
       return
+    if args == ["project-first"] then
+      let st := { st with inboxAvailable := true, inboxItems := [{ mission := a.missionId, card := a, stamp := 1000, version := 1 }] }
+      let next ← awaitState slot st (fun s => s.projectMemberships == [("p", ["older"])])
+      unless st.inboxAvailable && next.inboxAvailable && next.inboxItems == st.inboxItems &&
+          next.missionCards.length == 3 && next.missionCards.any (fun m => m.missionId == "older" && m.archiveTag) &&
+          next.missionCards.contains a && next.missionCards.contains b && next.fleetMachines == st.fleetMachines &&
+          next.sidebarRows.any (·.rowId == "project:p") do
+        throw (IO.userError "project sample displaced unrelated roster data")
+      return
     if args == ["project-lag"] then
       let st ← clickMission st b
       let next ← awaitState slot st (fun s => streamedText s == "second\n\tλ🙂\n")

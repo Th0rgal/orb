@@ -1,0 +1,16 @@
+[
+  {"code": "en", "label": "English"},
+  {"code": "fr", "label": "Français"},
+  {"code": "de", "label": "Deutsch"},
+  {"code": "es", "label": "Español"},
+  {"code": "it", "label": "Italiano"},
+  {"code": "pt", "label": "Português"},
+  {"code": "nl", "label": "Nederlands"},
+  {"code": "pl", "label": "Polski"},
+  {"code": "el", "label": "Ελληνικά"},
+  {"code": "ar", "label": "العربية"},
+  {"code": "ja", "label": "日本語"},
+  {"code": "zh", "label": "中文"},
+  {"code": "vi", "label": "Tiếng Việt"},
+  {"code": "ko", "label": "한국어"}
+]

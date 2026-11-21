@@ -1062,6 +1062,28 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
 
   let rightColumn : WidgetNode :=
     match st.screen with
+    | .resources => Id.run do
+      let w := min (pxToSub 640) (mainW - pxToSub 24)
+      let line := fun (width : SubPx) (t : String) =>
+        screenTextLine theme width (pxToSub 32) (pxToSub 14) (pxToSub 24) pal.textPrimary t
+      let button := fun id width title =>
+        inventoryTarget theme hoverRow id width (pxToSub 32) (line width title)
+      let ranges := resourceRanges.mapIdx fun i range =>
+        button (955 + i) (w / 7) (if st.resourceRange == range then "✓ " ++ range else range)
+      let toolbar := WidgetNode.box (BoxStyle.row 0) (ranges ++ [button 945 (2 * w / 7) "Refresh"])
+      let rows := st.resourceRows.getD []
+      let controls := WidgetNode.box (BoxStyle.row (pxToSub 6))
+        [button 946 (w / 3) "Previous", line (w / 4) s!"{st.resourcePage + 1} / {(rows.length + 3) / 4}",
+         button 947 (w / 3) "Next"]
+      let items := ((rows.drop (4 * st.resourcePage)).take 4).mapIdx fun i r =>
+        let canOpen := !r.mission.isEmpty && st.missionCards.any (·.missionId == r.mission)
+        let item := buildMachineRow theme w (pxToSub 60) r.title r.usage (if canOpen then "Open ›" else "") true false
+        if canOpen then inventoryTarget theme hoverRow (950 + i) w (pxToSub 60) item else item
+      let content := if st.resourceFailed then [line w "Could not load resources. Refresh to retry."]
+        else if st.resourceRows.isNone then [line w "Loading resources…"]
+        else if rows.isEmpty then [line w s!"No resource usage · {st.resourceRange}"]
+        else items ++ (if rows.length > 4 then [controls] else [])
+      return WidgetNode.box (BoxStyle.col 0 |>.withAlign .center |>.withFixedSize mainW availH) (headerNode :: toolbar :: content)
     | .inbox => Id.run do
       let line := fun (w : SubPx) (text : String) => screenTextLine theme w (pxToSub 32) (pxToSub 14) (pxToSub 24) pal.textPrimary text
       let button := fun (id : Nat) (width : SubPx) (title : String) =>
@@ -1138,8 +1160,28 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
              [chromeIcon "folder" pal.textMuted 14, chromeLabel (pxToSub 18) [overlaySynthRun (Theme.mutedText theme) folderLabel]] (some draftDirectoryPickerId)
            let header := WidgetNode.box (BoxStyle.row (pxToSub 16) |>.withAlign .center |>.withFixedSize width (pxToSub 24))
              ([projectPicker, destination] ++ if v.machine.startsWith "auto-managed" then [] else [folderPicker])
+           let voiceButton (id : Nat) (icon : String) :=
+             WidgetNode.focusable id <| WidgetNode.box
+               (BoxStyle.row 0 |>.withFixedSize (pxToSub 24) (pxToSub 24) |>.withJustify .center |>.withAlign .center
+                 |>.withRadius (pxToSub 12) |>.withBg (if hoverRow == some id then pal.plusBg else pal.elevatedSurface))
+               [chromeIcon icon pal.textPrimary 16] (some id)
+           let mic := if st.voiceAvailable && st.voiceDraft then some <|
+             match st.voicePhase with
+             | .idle | .choosing =>
+               let id := if st.voicePicker then some voiceLanguageId else none
+               let chip := WidgetNode.box
+                 (BoxStyle.row 0 |>.withFixedSize (pxToSub 32) (pxToSub 24) |>.withJustify .center |>.withAlign .center
+                   |>.withRadius (pxToSub 6) |>.withBg (if st.voicePicker && hoverRow == id then pal.plusBg else pal.elevatedSurface))
+                 [chromeLabel (pxToSub 18) [overlaySynthRun (Theme.mutedText theme) st.voiceLanguage.toUpper]] id
+               let chip := if st.voicePicker then WidgetNode.focusable voiceLanguageId chip else chip
+               WidgetNode.box (BoxStyle.row (pxToSub 4))
+                 [chip, if st.voicePhase == .choosing then voiceButton voiceCancelId "close" else voiceButton voiceButtonId "microphone"]
+             | .recording => WidgetNode.box (BoxStyle.row (pxToSub 4))
+                 [voiceButton voiceCancelId "close", voiceButton voiceButtonId "check"]
+             | .finishing => voiceButton voiceButtonId "close"
+             else none
            WidgetNode.box (BoxStyle.col 0 |>.withJustify .center |>.withAlign .center |>.withFixedSize mainW bodyH)
-             [buildComposerWidget theme mainW composerH { st.composer with placeholder := "Describe a task, / for commands, @ for context" } [] (some (liveComposerControls st (width - pxToSub 90) true)) (some header)]
+             [buildComposerWidget theme mainW composerH { st.composer with placeholder := "Describe a task, / for commands, @ for context" } [] (some (liveComposerControls st (width - pxToSub (if mic.isNone then 90 else if st.voicePhase == .idle || st.voicePhase == .choosing then 158 else if st.voicePhase == .recording then 150 else 122)) true)) (some header) mic]
            else if st.initialRosterPending then
              WidgetNode.box (BoxStyle.col 0 |>.withJustify .center |>.withAlign .center |>.withFixedSize mainW bodyH)
                [WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (min (pxToSub 748) (mainW - pxToSub 68)) (pxToSub 42))

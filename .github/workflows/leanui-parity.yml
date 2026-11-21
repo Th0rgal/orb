@@ -134,10 +134,13 @@ jobs:
         working-directory: lean/OrbDesktop
         run: |
           set -euo pipefail
+          python3 -IB tests/test_voice_capture.py -v
+          lake env lean --run tests/VoiceComposer.lean
           python3 -IB ../../scripts/test_leanui_local_core_u5.py
           # Resolve absolute package and orb-spec import paths from this checkout's
           # manifest. Use the already built modules, not another native build.
           lake env python3 -IB tests/test_live_delivery.py -v
+          lake env python3 -IB tests/test_resource_inventory.py -v
 
       - name: Run U2 native script under Weston
         if: ${{ !cancelled() && steps.native_build.outcome == 'success' }}

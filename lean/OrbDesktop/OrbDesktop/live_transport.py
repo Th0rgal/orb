@@ -516,6 +516,38 @@ def launch_machines(binding, role, harness):
         print('\t'.join(map(label, row)))
 
 
+def resource_inventory(binding, window):
+    c = Connection()
+    if c.binding != binding:
+        return
+    overview = c.request('/api/resources/overview?' + urllib.parse.urlencode({'range': window}), deadline=30)
+    rows = []
+    for kind, items in (('Inference', overview['inference']['pools']),
+                        ('Compute', overview['compute']['sources']),
+                        ('Mission', overview['missions'])):
+        if not isinstance(items, list):
+            raise ValueError('invalid resource inventory')
+        for item in items:
+            mission = ''
+            if kind == 'Mission':
+                mission = item['id']
+                if not mission or label(mission) != mission:
+                    raise ValueError('invalid mission identifier')
+                name = item['title'] or mission
+                usage = f"{item['status']} · {item['vcpu']:g} vCPU · {item['b_tok_per_h']:g} B tok/h"
+            elif kind == 'Compute':
+                name = item['label']
+                usage = f"{item['active_vcpu']:g}/{item['total_vcpu']:g} vCPU · ${item['est_usd_per_h']:g}/h"
+            else:
+                name = item['label']
+                usage = f"{item['current_b_tok_per_h']:g} B tok/h · ${item['est_usd_per_h']:g}/h"
+            rows.append(('R', mission, f'{kind} · {name}', usage))
+    c.check()
+    print('resources')
+    for row in rows:
+        print('\t'.join(map(label, row)))
+
+
 def provider_inventory(binding):
     c = Connection()
     if c.binding != binding:
@@ -804,7 +836,10 @@ def project_history(get, slug, rules, *, inbox_hidden=None):
     members = dict(known)
     candidates = {}
     cutoff = time.time() - rules['recentDays'] * 86400
-    for offset in range(0, rules['openLimit'], page_size):
+    # The open query is a subset of the all-status query. A short all-status
+    # page exhausts both collections, including tag-only archives.
+    open_limit = rules['openLimit'] if len(history) >= page_size else 0
+    for offset in range(0, open_limit, page_size):
         page = get(query + (f'&offset={offset}' if offset else ''))
         if not isinstance(page, list):
             raise ValueError('invalid project page')
@@ -837,6 +872,7 @@ def project_history(get, slug, rules, *, inbox_hidden=None):
         inbox_hidden.update(btw_ids({mid: m for mid, m in known.items() if m is not None}))
         return [m for m in expanded if m['id'] in members or m.get('project') == slug]
     unavailable = set()
+    ancestor_reads = 0
     for row in list(members.values()):
         current = row
         visited = {row['id']}
@@ -847,6 +883,9 @@ def project_history(get, slug, rules, *, inbox_hidden=None):
                 break
             visited.add(parent)
             if parent not in known:
+                if ancestor_reads >= rules['openLimit']:
+                    raise ValueError('project ancestor limit exceeded')
+                ancestor_reads += 1
                 try:
                     ancestor = get('/api/control/missions/' + urllib.parse.quote(parent, safe='') + '?include_history=false')
                 except urllib.error.HTTPError as error:
@@ -873,22 +912,54 @@ def project_history(get, slug, rules, *, inbox_hidden=None):
     return [row for row in members.values() if visible(row) and row.get('viewer_role') != 'participant']
 
 
-def roster_rows(c, include_archived=False, expanded=(), rules=None, *, inbox_for=None, inbox_windows=None):
+def mission_rows(missions):
+    return [mission_row(m) for m in missions if re.fullmatch(r'[A-Za-z0-9_-]{1,128}', m['id'])]
+
+
+def roster_rows(c, include_archived=False, expanded=(), rules=None, publish_project=None, *, inbox_for=None, inbox_windows=None):
     projects = c.get('/api/projects')['projects']
-    missions = c.get(f'/api/control/missions?limit={CURRENT_MISSION_LIMIT}&include_ancestors=true')
-    machines = c.get('/api/machines')
+    if not isinstance(projects, list):
+        raise ValueError('invalid projects')
+    groups = []
+    by_project = {}
+    def read_project(path):
+        return read_snapshot(lambda: c.get(path), attempts=2)
+
+    for slug in dict.fromkeys(expanded):
+        if not any(p.get('slug') == slug for p in projects):
+            continue
+        members = project_history(read_project, slug, rules)
+        if slug == 'default':
+            members += project_history(read_project, '__unassigned__', rules)
+        listed = {m['id']: m for m in members if (m.get('project') or 'default') == slug}
+        group = ('G', slug, *sorted(listed))
+        groups.append(group)
+        by_project.update(listed)
+        # Expansion prepends the clicked slug. Previously open projects can
+        # refresh in the full sample without delaying the newly opened one.
+        if len(groups) == 1 and publish_project:
+            c.check()
+            publish_project([('partial-projects',), group, *mission_rows(listed.values())])
+
+    def get(path):
+        if groups:
+            return read_snapshot(lambda: c.get(path), attempts=2)
+        return c.get(path)
+
+    missions = get(f'/api/control/missions?limit={CURRENT_MISSION_LIMIT}&include_ancestors=true')
+    machines = get('/api/machines')
     if not all(isinstance(x, list) for x in (projects, missions, machines)):
         raise ValueError('invalid roster')
     current = list(missions)
     if include_archived:
         try:
-            archived = c.get(f'/api/control/missions?status=acknowledged&limit={ARCHIVED_MISSION_LIMIT}')
+            archived = get(f'/api/control/missions?status=acknowledged&limit={ARCHIVED_MISSION_LIMIT}')
             known = {r['id'] for r in missions}
             missions += [r for r in archived if r.get('status') == 'acknowledged' and r['id'] not in known]
         except urllib.error.HTTPError as error:
             if error.code != 404:
                 raise
-    rows = [('C', c.binding)]
+    rows = [('C', c.binding), *groups]
     if inbox_for is not None:
         try:
             rows += inbox_snapshot(c, projects, inbox_for, rules, inbox_windows, current)
@@ -899,24 +970,12 @@ def roster_rows(c, include_archived=False, expanded=(), rules=None, *, inbox_for
             rows.append(('I', 'refreshing'))
         except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError):
             rows.append(('I', 'refreshing'))
-    if expanded:
+    if groups:
         by_id = {m['id']: m for m in missions}
-        for slug in expanded:
-            if not any(p.get('slug') == slug for p in projects):
-                continue
-            members = project_history(c.get, slug, rules)
-            if slug == 'default':
-                members += project_history(c.get, '__unassigned__', rules)
-            listed = []
-            for member in members:
-                if (member.get('project') or 'default') != slug:
-                    continue
-                by_id[member['id']] = member
-                listed.append(member['id'])
-            rows.append(('G', slug, *sorted(set(listed))))
+        by_id.update(by_project)
         missions = by_id.values()
     rows += [('P', p['slug'], p.get('title') or p['slug'], p.get('objective'), p.get('color')) for p in projects]
-    rows += [mission_row(m) for m in missions if re.fullmatch(r'[A-Za-z0-9_-]{1,128}', m['id'])]
+    rows += mission_rows(missions)
     rows += [('N', *(m.get(k) for k in ('id','name','role','provider','cpu_ram','size','state',
                                         'status','expires_at','cost','active_missions'))) for m in machines]
     c.check()
@@ -1031,6 +1090,16 @@ def poll(mid, binding, tracked=None, rules=None):
     if c.binding != binding or (mid and not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', mid)):
         return  # EOF invalidates the old roster; never request with a new identity
     last, failures, checked = None, 0, None
+    published_project = False
+
+    def publish_project(rows):
+        nonlocal published_project
+        frame = '\x1f'.join('\x1c'.join(map(label, row)) for row in rows)
+        c.check()
+        print('R\t+' + frame, flush=True)
+        tracked.update(row[1] for row in rows if row[0] == 'M')
+        published_project = True
+
     visible = []
     inbox_windows = InboxWindows()
     while True:
@@ -1038,7 +1107,8 @@ def poll(mid, binding, tracked=None, rules=None):
         try:
             if checked is None or time.monotonic() - checked >= 5:
                 rows = roster_rows(c, include_archived=True, expanded=expanded, rules=rules,
-                                   inbox_for=mid, inbox_windows=inbox_windows)
+                                   inbox_for=mid, inbox_windows=inbox_windows,
+                                   publish_project=publish_project if not published_project else None)
                 found = {r[1] for r in rows if r[0] == 'M'}
                 # A sorted, limited list is positive evidence only. For every
                 # absent tracked ID require an explicit per-mission denial.
