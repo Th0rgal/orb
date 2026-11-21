@@ -134,11 +134,11 @@ def run (root : String) : IO Unit := do
     "compressed and expanded IPv6 match"
   check ((parseIp "fe80::1%eth0").isNone && (parseIp "1.2.3.4\x00ignored").isNone)
     "zone and NUL reject"
-  let sessions := #[JVal.obj #[("server_name", .str "West"), ("server_country_code", .str "NL"),
+  let sessions := #[JVal.obj #[("server_name", .str "West"), ("server_country_code", .str "nl"),
     ("exit_ip", .str "1.2.3.4")]]
   let observed := AirVpnObservation.verifyObservation?
   check ((observed "west" "NL" sessions v4 (some v6)).any (fun t => t.exits == [v4, v6]))
-    "active server matches independent receiver"
+    "AirVPN lowercase country matches requested country and independent receiver"
   check ((observed "west" "US" sessions v4 none).isNone &&
       (observed "east" "NL" sessions v4 none).isNone &&
       (observed "west" "NL" sessions (.v4 123) none).isNone &&
