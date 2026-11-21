@@ -717,6 +717,14 @@ def destinationCatalog (st : DesktopState) (mid : String) : List CatalogModel :=
     | none => []
   st.catalog ++ native
 
+/-- A successful destination refresh can invalidate a new draft's explicit choice.
+    Existing mission settings remain Core-owned. -/
+def applyNativeCatalog (st : DesktopState) (machine : String) (rows : List CatalogModel) : DesktopState :=
+  let draft := st.draftSettings
+  let missing := st.missionMenu.any (·.mission.isEmpty) && catalogDestination st "" == machine &&
+    draft.backend == "antigravity" && !draft.model.isEmpty && !rows.any (·.model == draft.model)
+  { st with nativeCatalog := some (machine, rows), draftSettings := if missing then { draft with model := "" } else draft }
+
 def nativeCatalogRequest (st : DesktopState) : Option String := do
   let menu ← st.missionMenu
   guard (st.nativeHarnessAvailable && menu.nativeCatalogResult.isNone && (menu.page == .picker .backend ||

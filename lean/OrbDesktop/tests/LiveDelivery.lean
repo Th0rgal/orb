@@ -310,3 +310,10 @@ private def remoteCatalogFixture : DesktopState := {
 #guard (settingChoices remoteCatalogFixture "" .backend).length == 2
 #guard settingChoices { remoteCatalogFixture with draftSettings := { machine := "babylon" } } "" .backend == [("codex", "Codex")]
 #guard nativeCatalogRequest { remoteCatalogFixture with nativeHarnessAvailable := false } == none
+
+private def nativeDraftFixture : DesktopState := { remoteCatalogFixture with
+  draftSettings := { backend := "antigravity", model := "neon", machine := "uruk" } }
+
+#guard (applyNativeCatalog nativeDraftFixture "uruk" []).draftSettings.model == ""
+#guard (applyNativeCatalog nativeDraftFixture "babylon" []).draftSettings.model == "neon"
+#guard (applyNativeCatalog { nativeDraftFixture with missionMenu := some (compactSettings "m") } "uruk" []).draftSettings.model == "neon"

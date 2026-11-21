@@ -137,7 +137,7 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
         let rows := lines.filterMap fun line => match splitTab line with
           | ["N", id, name] => some ({ backend := "antigravity", harnessName := "Antigravity CLI", model := id, modelName := name } : CatalogModel)
           | _ => none
-        return some { st with missionMenu := menu, nativeCatalog := some (machine, rows) }
+        return some (applyNativeCatalog { st with missionMenu := menu } machine rows)
       if let .launchMachines .. := source.kind then
         if lines.head? != some "machines" then return some { st with launchMachinesFailed := true }
         let nodes := lines.filterMap fun line => match splitTab line with
