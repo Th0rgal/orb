@@ -1,5 +1,6 @@
 """Test owner enrollment over loopback against an isolated authenticated Core."""
 from contextlib import contextmanager
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -71,6 +72,8 @@ def run(binary, root):
             assert status == expected, (status, body)
             return json.loads(body)
 
+        for token, expected in ((alice, 503), (bob, 403), (login("admin"), 403)):
+            assert request(port, token, "GET", "/api/providers/antigravity-models?node_id=" + NODE_ID)[0] == expected
         path = "/api/native-owner-enrollments/" + NODE_ID
         assert request(port, bob, "GET", path)[0] == 403
         status, body = request(port, alice, "GET", path)
@@ -79,15 +82,26 @@ def run(binary, root):
         enroll(alice, "bob", 0, 403)
         assert enroll(alice, "alice", 0, 200)["revision"] == 1
         assert enroll(alice, "alice", 1, 200)["revision"] == 1
+        native_route = "/api/native/antigravity/v1internal:fetchUserInfo"
+        grants = {}
         for node in (NODE_ID, "ordinary"):
+            grants[node] = "orb-agy-v1_" + secrets.token_hex(24)
+            digest = hashlib.sha256(grants[node].encode()).hexdigest()
             db.execute("INSERT INTO remote_node_jobs(job_id,node_id,mission_id,state) VALUES(?,?,?,'running')",
                        (node, node, node))
-            db.execute("INSERT INTO mission_proxy_tokens VALUES(?,?,?,2147483647,0)", (node, node, users["alice"]))
-            db.execute("INSERT INTO native_antigravity_grants VALUES(?,?,?,?)", (node, node, "alice", "fixture"))
+            db.execute("INSERT INTO mission_proxy_tokens VALUES(?,?,?,2147483647,0)", (digest, node, users["alice"]))
+            db.execute("INSERT INTO native_antigravity_grants VALUES(?,?,?,?)", (digest, node, "alice", "fixture"))
         db.commit()
+        # Both fixture grants resolve, then the missing mission stops the RPC locally.
+        for token in grants.values():
+            status, body = request(port, token, "POST", native_route)
+            assert (status, json.loads(body)["error"]) == (403, "native_mission_unavailable")
         enroll(alice, "", 0, 409)
         assert enroll(alice, "", 1, 200)["revision"] == 2
-        assert dict(db.execute("SELECT token_sha256,revoked FROM mission_proxy_tokens")) == {NODE_ID: 1, "ordinary": 0}
+        status, body = request(port, grants[NODE_ID], "POST", native_route)
+        assert (status, json.loads(body)["error"]) == (401, "invalid_native_grant")
+        status, body = request(port, grants["ordinary"], "POST", native_route)
+        assert (status, json.loads(body)["error"]) == (403, "native_mission_unavailable")
         enroll(alice, "alice", 1, 409)
         print("other node owner 403; other account owner 403; owner revision 1; stale revision 409")
         print("unbind revision 2; dedicated grant revoked; unrelated grant active")

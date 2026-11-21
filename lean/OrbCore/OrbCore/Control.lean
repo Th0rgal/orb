@@ -3709,12 +3709,18 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     | return .ok (mkJson 401 "{\"error\":\"unauthorized\"}")
   let utcDay := currentUtcDay nowEpochSec
 
-  if let ["", "api", "native-owner-enrollments", node] := cleanPath.splitOn "/" then
+  if cleanPath == "/api/native-owner-enrollments" || cleanPath.startsWith "/api/native-owner-enrollments/" then
     if st.cfg.instanceName != "dev" then return .ok (mkJson 404 "{}")
     let token := (extractBearerToken? req.headers nowEpochSec).getD ""
     unless !st.cfg.devMode && token.startsWith "orb-jwt-v2:" && !caller.disabled && !caller.userId.isEmpty do
       return .ok (mkJson 403 "{\"error\":\"owner_session_required\"}")
     let (_, nodes) ← loadStaticRemoteNodes
+    if cleanPath == "/api/native-owner-enrollments" && req.method == "GET" then
+      let owned := nodes.filter (fun n => n.dedicatedOwner? == some caller.userId)
+      return .ok (mkJson 200 (renderCompact (.arr (owned.map fun n => .str n.id))))
+    let ["", "api", "native-owner-enrollments", encodedNode] := cleanPath.splitOn "/"
+      | return .ok (mkJson 404 "{}")
+    let some node := percentDecodeStrict encodedNode | return .ok (mkJson 400 "{}")
     unless (nodes.find? (fun n => n.id == node)).bind (·.dedicatedOwner?) == some caller.userId do
       return .ok (mkJson 403 "{\"error\":\"node_owner_required\"}")
     if req.method == "GET" then
@@ -5847,6 +5853,14 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
 
   if req.method == "GET" && cleanPath == "/api/providers" then
     return .ok (mkJson 200 (← renderProviderCatalogJson st.store st.cfg.workingDir caller))
+
+  if req.method == "GET" && ["/api/providers/antigravity-models", "/api/antigravity-models",
+      "/api/providers/backend-models"].contains cleanPath then
+    if let some (_, node) := (parseQueryParams rawTarget).find? (fun p => p.1 == "node_id") then
+      let (_, nodes) ← loadStaticRemoteNodes
+      if let some owner := (nodes.find? (fun n => n.id == node)).bind (·.dedicatedOwner?) then
+        if owner.isEmpty || caller.userId != owner then return .ok (mkJson 403 "{\"error\":\"node_owner_required\"}")
+        return .ok (mkJson 503 "{\"error\":\"native_owner_executor_unavailable\"}")
 
   if cleanPath.startsWith "/api/providers/" || cleanPath == "/api/antigravity-models" then
     if cleanPath != "/api/providers/backend-models" then
