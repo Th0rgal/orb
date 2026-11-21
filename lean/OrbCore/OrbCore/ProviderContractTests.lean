@@ -1792,7 +1792,7 @@ private def sharedCredentialRouting (app : CoreAppState) (root admin member : St
   let server ← mockSidecarAuthFiles fd (← IO.mkRef 0) (← IO.mkRef handler) stop
   let pool ← Std.Mutex.new ({} : AccountVpnPool.PoolState)
   let app := { app with vpnRelayPort? := some 41001, vpnPool? := some pool }
-  let mut added := ""
+  let addedId ← IO.mkRef ""
   try
     setenvVar "OPENAI_API_KEY" "fixture-instance-key"
     setenvVar "CLAUDE_CODE_PROXY_BASE_URL" endpoint
@@ -1805,7 +1805,8 @@ private def sharedCredentialRouting (app : CoreAppState) (root admin member : St
     IO.FS.writeFile legacy "[{\"id\":\"legacy-google-key\",\"name\":\"Gemini\",\"provider_type\":\"google\",\"api_key\":\"fixture-legacy-key\"}]"
     let (status, row) ← postJson app member "/api/ai/providers"
       "{\"provider_type\":\"google\",\"name\":\"Member Gemini\",\"api_key\":\"fixture-member-key\"}" now
-    added := (row.fieldStr? "id").getD ""
+    let added := (row.fieldStr? "id").getD ""
+    addedId.set added
     unless status == 201 && !added.isEmpty do throw (IO.userError "member Gemini key creation failed")
     let accounts ← loadHydratedProviders app.store root
     for (id, provider, model, key) in #[(codex, "openai", "gpt-5", "fixture-service-key"),
@@ -1858,6 +1859,7 @@ private def sharedCredentialRouting (app : CoreAppState) (root admin member : St
     IO.FS.writeFile legacy saved
     IO.FS.removeFile file
     IO.ofExcept (← deleteAIProvider app.store codex)
+    let added ← addedId.get
     if !added.isEmpty then IO.ofExcept (← deleteAIProvider app.store added)
 
 def run : IO Unit := do
