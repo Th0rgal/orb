@@ -18,6 +18,19 @@ private def hierarchyFixture : DesktopState := {
 #guard (({ hierarchyFixture with expandedProjects := ["now"] } : DesktopState).visibleProjectRows.map
   (fun r => (r.rowId, r.depth))) == [("project:now", 0), ("mission:m", 1)]
 
+private def treeRow (depth : Nat) (selected := false) : ChromeSidebarRow :=
+  { widgetId := 1001, rowId := "row", kind := "mission", title := "Row", depth, selected }
+private def treeGeometry (rows : List ChromeSidebarRow) :=
+  (sidebarTreeBranches rows).map fun (_, last, children, rails) => (last, children, rails)
+#guard treeGeometry [treeRow 0, treeRow 1 true, treeRow 2, treeRow 1] ==
+  [(true, true, []), (false, true, []), (true, false, [1]), (true, false, [])]
+#guard treeGeometry [treeRow 0, treeRow 1] == [(true, true, []), (true, false, [])]
+private def miscFixture : DesktopState := { hierarchyFixture with
+  missionCards := [{ (default : MissionSummaryCard) with widgetId := 1001, missionId := "m" }]
+  sidebarRows := [hierarchyFixture.sidebarRows.head!, { widgetId := 1000, rowId := "project:default", kind := "project", title := "Misc" }] }
+#guard (miscFixture.visibleProjectRows.map (·.rowId)) == ["project:default"]
+#guard (({ miscFixture with expandedProjects := ["default"] } : DesktopState).visibleProjectRows.map (·.depth)) == [0, 1]
+
 private def hoverRegions : List (WidgetId × Rect) :=
   [(1001, { x := 0, y := 64, w := 640, h := 192 }), (1000, { x := 0, y := 256, w := 640, h := 192 })]
 
