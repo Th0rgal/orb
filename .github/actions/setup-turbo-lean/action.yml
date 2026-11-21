@@ -206,6 +206,13 @@ runs:
         chmod 755 "$RUNNER_TEMP/orb-cc/clang"
         {
           echo "LEAN_CC=$RUNNER_TEMP/orb-cc/clang"
+          if [[ "$GITHUB_JOB" == test && "$RUNNER_NAME" == boost-jit-* ]]; then
+            # Lake fans out native object builds independently of turbo-lean's
+            # module budget. Serialize cache misses; hits still run in parallel.
+            printf '%s\n' '#!/bin/sh' 'exec flock -F "$RUNNER_TEMP/orb-cc/compile.lock" "$@"' > "$RUNNER_TEMP/orb-cc/compile-one"
+            chmod 755 "$RUNNER_TEMP/orb-cc/compile-one"
+            echo "CCACHE_PREFIX=$RUNNER_TEMP/orb-cc/compile-one"
+          fi
           # lean.ci may serve a different cache partition on each runner.
           # Restore the object cache alongside the matching Lean build, rather
           # than depending on two independent fallback lookups there.
