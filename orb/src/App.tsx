@@ -331,6 +331,7 @@ export default function App() {
   };
   let launchAttempt: { signature: string; key: string } | undefined;
   const MACHINE_KEY = "orb.machine";
+  const [newAgentHasDraft, setNewAgentHasDraft] = createSignal(false);
   const [explicitMachine, setExplicitMachine] = createSignal(false);
   const initialStoredMachine = readString(MACHINE_KEY);
   const [newMachine, setNewMachine] = createSignal(
@@ -848,7 +849,7 @@ export default function App() {
     const next = resolveDefaultComposerMachine({
       isAdmin: isAdminUser(),
       current: newMachine(),
-      explicit: explicitMachine(),
+      explicit: explicitMachine() || newAgentHasDraft(),
       firstNodeId: firstNodeId(),
       remoteReady: remoteLaunch().state === "ready",
       fleetNodes: fleetNodes(),
@@ -1012,9 +1013,7 @@ export default function App() {
     if (id === "inbox" && !inboxConfig().inboxEnabled) id = null;
     if(id===null){
       setLaunchPreview(null);setLaunchViewKey('');
-      setExplicitMachine(false);
-      const first = firstNodeId();
-      if (first) setNewMachine(first);
+      if (!newAgentHasDraft()) setExplicitMachine(false);
     }
     if (id) id = settingsPageId(id);
     if (selected() === "routing" && id !== "routing" && !confirmLeaveRouting(() => open(id, push))) return false;
@@ -2285,7 +2284,10 @@ export default function App() {
                   onSend={create}
                   onPending={prepareLaunch}
                   onSendError={setCreateError}
-                  onDraft={(text) => { if (createError() === EMPTY_GOAL_ERROR && goalDraft(text).kind !== "empty") setCreateError(null); }}
+                  onDraft={(text, hasAttachments) => {
+                    setNewAgentHasDraft(Boolean(text) || hasAttachments);
+                    if (createError() === EMPTY_GOAL_ERROR && goalDraft(text).kind !== "empty") setCreateError(null);
+                  }}
                   autofocus
                   tall
                   scope="new-agent"
