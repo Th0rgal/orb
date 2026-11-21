@@ -1069,7 +1069,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
       let content := if !st.inboxAvailable then [line mainW "Inbox unavailable. Retrying…"] else match st.currentInboxItem with
         | none => [line mainW "No unread items"]
         | some item =>
-          let title := ((st.missionCards.find? (·.missionId == item.mission)).map (·.title)).getD item.mission
+          let title := item.card.title
           let index := min st.inboxIndex (st.inboxItems.length - 1)
           [line mainW s!"{index + 1} of {st.inboxItems.length}",
            button 940 mainW ("Open · " ++ title),

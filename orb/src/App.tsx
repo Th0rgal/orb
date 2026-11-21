@@ -174,7 +174,7 @@ const UsageTelemetrySettings = lazy(() => import("./UsageTelemetrySettings").the
 const BitwardenSettings = lazy(() => import("./BitwardenSettings").then(module => ({ default: module.BitwardenSettings })));
 const InboxPage = lazy(() => import("./Inbox").then(module => ({ default: module.InboxPage })));
 import { requestInboxDigest } from "./inboxDigest";
-import { countUnreadInboxMissions, listUnreadInboxCandidates } from "./inboxUnread";
+import { inboxMissionUnion, listUnreadInboxCandidates } from "./inboxUnread";
 import { inboxConfig } from "./inboxSettings";
 const InboxSettings = lazy(() => import("./InboxSettingsPanels").then(module => ({ default: module.InboxSettings })));
 const InboxSummariesSettings = lazy(() => import("./InboxSettingsPanels").then(module => ({ default: module.InboxSummariesSettings })));
@@ -695,36 +695,7 @@ export default function App() {
   }, { defer: true }));
   let prevInboxMissions: Mission[] = [];
   const inboxMissions = createMemo(() => {
-    const byId = new Map<string, Mission>();
-    const put = (m: Mission) => {
-      if (!m?.id || isMissionDeleting(m.id)) return;
-      const prev = byId.get(m.id);
-      if (!prev) {
-        byId.set(m.id, m);
-        return;
-      }
-      const prevTs = Date.parse(prev.updated_at || prev.created_at || "") || 0;
-      const nextTs = Date.parse(m.updated_at || m.created_at || "") || 0;
-      if (nextTs >= prevTs) {
-        if (!prev.history?.length || m.history?.length) {
-          byId.set(m.id, m);
-        } else {
-          byId.set(m.id, { ...prev, ...m, history: prev.history });
-        }
-      } else {
-        if (!m.history?.length || prev.history?.length) {
-          byId.set(m.id, prev);
-        } else {
-          byId.set(m.id, { ...m, ...prev, history: m.history });
-        }
-      }
-    };
-    for (const rows of Object.values(projectMissions())) {
-      for (const m of rows) put(m);
-    }
-    for (const m of completedMissions()) put(m);
-    for (const m of missions()) put(m);
-    prevInboxMissions = mergeById(prevInboxMissions, Array.from(byId.values()));
+    prevInboxMissions = mergeById(prevInboxMissions, inboxMissionUnion(projectMissions(), completedMissions(), missions(), isMissionDeleting));
     return withMovedMissions(withRenamedTitles("mission", prevInboxMissions, m => m.id));
   });
   const currentMissionId = createMemo(() => {
@@ -750,19 +721,26 @@ export default function App() {
     const found = findKnownMission(id);
     return found ?? (previous?.id === id ? previous : null);
   }, null);
-  const inboxCount = createMemo(() => {
+  const inboxBadgeIds = createMemo(() => {
     transcriptVersion();
     unreadVersion();
     const cfg = inboxConfig();
-    if (!cfg.inboxEnabled || !isConnected()) return 0;
-    return countUnreadInboxMissions(
+    if (!cfg.inboxEnabled || !isConnected()) return [];
+    return listUnreadInboxCandidates(
       inboxMissions(),
       liveProjects(),
       (id) => peekReadyTranscript(id)?.items,
       pendingMissionInteraction,
       currentMissionId(),
       cfg,
-    );
+    ).map(item => item.id);
+  });
+  const inboxCount = () => inboxBadgeIds().length;
+  onMount(() => {
+    // Web Inspector can read the actual badge inputs without opening a mission or fetching a transcript.
+    const inspector = window as Window & { orbInboxBadgeIds?: () => string[] };
+    inspector.orbInboxBadgeIds = () => [...inboxBadgeIds()];
+    onCleanup(() => { delete inspector.orbInboxBadgeIds; });
   });
   createEffect(() => {
     if (!inboxConfig().inboxEnabled && selected() === "inbox") open(null);
