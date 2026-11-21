@@ -632,6 +632,7 @@ def main (args : List String) : IO UInt32 := do
     let capability ← IO.mkRef ({} : VoiceCapability)
     let voiceSlot ← IO.mkRef (none : Option VoiceSession)
     let slot ← IO.mkRef (none : Option LiveSubscription)
+    let traceInbox := (← IO.getEnv "ORB_TRACE_INBOX_IDS") == some "1"
     let rt ← Runtime.withProducerWake fun wakeFd notify => do
       withLiveSources rcfg.darkTheme notify fun readSources => do
         let probe ← IO.asTask (prio := .dedicated) do
@@ -642,6 +643,10 @@ def main (args : List String) : IO UInt32 := do
             (fun rt => do
               let vp := rt.viewportDeviceRect
               let (st, damage) ← readLiveFrame slot rt.wayland.scale120 vp rt.app notify
+              if traceInbox && st.inboxAvailable &&
+                  (!rt.app.inboxAvailable || st.inboxItems != rt.app.inboxItems || st.inboxEnabled != rt.app.inboxEnabled) then
+                let ids := if st.inboxEnabled then st.inboxItems.map (·.mission) else []
+                IO.eprintln ("Inbox badge IDs: " ++ String.intercalate "," ids)
               let phase := ((← IO.monoMsNow) / 100) % 12
               let spin := animations && phase != st.badgePhase
               let damage := if spin then (runningBadgeDamage rt).elim damage (Damage.add damage) else damage

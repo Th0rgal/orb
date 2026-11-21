@@ -137,8 +137,18 @@ warnings to make the test pass.
 
 ### LeanUI trial
 
-The live navigation badge and Inbox items use the same connection-bound roster
-snapshot. Opening Inbox leaves receipts untouched. Opening an item or choosing
+The live navigation badge and Inbox items use the same user-scoped snapshot.
+After sidebar bootstrap, the native reader combines the same Core sources as a
+refreshed GTK sidebar: loaded project history and eligible older open missions,
+the latest 100 completed missions, and the current 200 missions with their
+ancestors. Core bounds each collection before returning it. Each project contributes
+its recent history and eligible older open work under the shared project-history rules.
+Missing ancestors are fetched as summaries. A refresh has a four-second HTTP
+budget and can resume validated windows on the next poll. Only a complete
+set of sources replaces the previous badge. Within a subscription the reader reuses
+completed project windows for up to 30 seconds. It refreshes current missions, recent
+completions and user receipts on each poll. An off-page
+item carries the summary needed to open its transcript. Opening Inbox leaves receipts untouched. Opening an item or choosing
 Mark read acknowledges only its displayed response timestamp and observed Core
 entry version. Another user can still see the same shared mission as unread.
 A newer response becomes unread again. Ctrl/Cmd+I opens Inbox, Up/Down moves
@@ -146,7 +156,18 @@ between items, and Tab and Enter activate the displayed controls.
 
 GTK receives its badge from the Web Inbox projection. Web and LeanUI both
 prioritize replies needing attention over ready results and honor the user's
-Inbox preferences and signed seen timestamps. The trial operates on the current
-Core mission roster. Web also considers pending interactions observed in the
-transcript and offers digest previews. LeanUI opens the mission transcript
+Inbox preferences and signed seen timestamps. Both apply project membership,
+client placement, BTW ancestry, scheduled recovery and unread child failure
+rules. A completed mission carrying only an `archived` tag remains eligible
+under Solid's unread classifier. An acknowledged mission is ineligible.
+
+The parity test calls the GTK data loaders and Inbox union, gives the native
+reader the same underlying collection, and compares the ordered IDs. Web also uses local pending missions, cached hierarchy links and
+observed transcript interactions, and offers digest previews. LeanUI opens the mission transcript
 directly and writes the per-user seen receipt.
+
+To capture the IDs of the visible badges for a read-only comparison, evaluate
+`window.orbInboxBadgeIds()` in the GTK Web Inspector and launch the LeanUI
+trial with `ORB_TRACE_INBOX_IDS=1`. Its stderr prints `Inbox badge IDs:` when
+the displayed snapshot changes. Capture both for the same account and selected
+mission. Opening an unread conversation changes the receipt being compared.

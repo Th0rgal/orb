@@ -272,24 +272,35 @@ def main (args : List String) : IO Unit := do
     return
   let some st := boot | throw (IO.userError "bootstrap failed")
   if let ["inbox", action] := args then
-    let page := (stepDesktopEvent 120 vp st (.key 0x69 2 .pressed)).1
-    let tree := buildDesktopScreen page (pxToSub 800) (pxToSub 600)
-    let (_, scene) := renderWidgetTree 120 (pxToSub 800) (pxToSub 600) page.initialFocusState page.theme tree
-    unless page.screen == .inbox && page.inboxAvailable &&
-        page.visibleProjectRows.any (fun r => r.rowId == "nav:inbox" && r.badge == 1) &&
-        [940, 941].all scene.focusableOrder.contains do throw (IO.userError "missing unread item or controls")
-    let rt : Runtime.RuntimeState DesktopState := {
-      app := page, focus := page.initialFocusState.request 940
-      focusableOrder := scene.focusableOrder }
-    let reduce := stepDesktopEvent 120 vp
-    let rt := if action == "read" then rt.stepEvent reduce (.key 0xff09 0 .pressed) else rt
-    let rt := rt.stepEvent reduce (.key 0xff0d 0 .pressed)
+    unless !st.inboxAvailable && st.missionCards.isEmpty do throw (IO.userError "bootstrap waited for Inbox history")
     let slot ← IO.mkRef none
-    let (next, _) ← readLiveFrame slot 120 vp rt.app
-    unless next.visibleProjectRows.any (fun r => r.rowId == "nav:inbox" && r.badge == 0) && next.writeError.isEmpty &&
-        next.openMission == (if action == "open" then some "shared" else none) do
-      throw (IO.userError "keyboard activation did not acknowledge the item")
-    return
+    try
+      let st ← awaitState slot st (·.inboxAvailable)
+      let page := (stepDesktopEvent 120 vp st (.key 0x69 2 .pressed)).1
+      let tree := buildDesktopScreen page (pxToSub 800) (pxToSub 600)
+      let (_, scene) := renderWidgetTree 120 (pxToSub 800) (pxToSub 600) page.initialFocusState page.theme tree
+      unless page.screen == .inbox && page.inboxAvailable &&
+          page.visibleProjectRows.any (fun r => r.rowId == "nav:inbox" && r.badge == 1) &&
+          [940, 941].all scene.focusableOrder.contains do throw (IO.userError "missing unread item or controls")
+      if action == "partial" then
+        let next ← awaitState slot st fun s => s.missionCards.any (·.missionId == "next-roster")
+        unless next.inboxAvailable && next.inboxItems == st.inboxItems &&
+            next.visibleProjectRows.any (fun r => r.rowId == "nav:inbox" && r.badge == 1) do
+          throw (IO.userError "partial Core response replaced the last complete Inbox")
+        return
+      let rt : Runtime.RuntimeState DesktopState := {
+        app := page, focus := page.initialFocusState.request 940
+        focusableOrder := scene.focusableOrder }
+      let reduce := stepDesktopEvent 120 vp
+      let rt := if action == "read" then rt.stepEvent reduce (.key 0xff09 0 .pressed) else rt
+      let rt := rt.stepEvent reduce (.key 0xff0d 0 .pressed)
+      let (next, _) ← readLiveFrame slot 120 vp rt.app
+      unless next.visibleProjectRows.any (fun r => r.rowId == "nav:inbox" && r.badge == 0) && next.writeError.isEmpty &&
+          next.openMission == (if action == "open" then some "shared" else none) do
+        throw (IO.userError "keyboard activation did not acknowledge the item")
+      return
+    finally
+      closeLiveSubscription slot
   let [a,b] := st.missionCards | throw (IO.userError "bad roster")
   unless st.sidebarRows.any (fun r => r.title == "Project title" && r.subtitle == "Objective" && r.iconColor == some 0x8aaed4ff) do
     throw (IO.userError "wrong project fields")
@@ -305,6 +316,7 @@ def main (args : List String) : IO Unit := do
         throw (IO.userError "active roster and bubble left Send in place of Stop")
       return
     if args == ["project-first"] then
+      let st := { st with inboxAvailable := true, inboxItems := [{ mission := a.missionId, card := a, stamp := 1000, version := 1 }] }
       let next ← awaitState slot st (fun s => s.projectMemberships == [("p", ["older"])])
       unless st.inboxAvailable && next.inboxAvailable && next.inboxItems == st.inboxItems &&
           next.missionCards.length == 3 && next.missionCards.any (fun m => m.missionId == "older" && m.archiveTag) &&
@@ -425,7 +437,7 @@ private def nativeDraftFixture : DesktopState := { remoteCatalogFixture with
 
 private def inboxFixture : DesktopState := { hierarchyFixture with
   inboxAvailable := true
-  inboxItems := [⟨"first", 10, 0⟩, ⟨"second", 20, 3⟩]
+  inboxItems := [⟨"first", 10, 0, default⟩, ⟨"second", 20, 3, default⟩]
   sidebarRows := [{ widgetId := 102, rowId := "nav:inbox", kind := "nav", title := "Inbox" }] }
 private def inboxStep (st : DesktopState) (event : Event) :=
   (stepDesktopEvent 120 vp st event).1
@@ -433,5 +445,5 @@ private def inboxOpened := inboxStep inboxFixture (.key 0x69 2 .pressed)
 private def inboxSecond := inboxStep inboxOpened (.key 0xff54 0 .pressed)
 #guard inboxOpened.screen == .inbox && inboxOpened.writeRequest.isNone
 #guard desktopFocusChange inboxFixture inboxOpened (.activate 102) == some 940
-#guard (inboxStep inboxSecond (.activate 941)).writeRequest == some (.inboxRead ⟨"second", 20, 3⟩ false)
-#guard (inboxStep inboxSecond (.activate 940)).writeRequest == some (.inboxRead ⟨"second", 20, 3⟩ true)
+#guard (inboxStep inboxSecond (.activate 941)).writeRequest == some (.inboxRead ⟨"second", 20, 3, default⟩ false)
+#guard (inboxStep inboxSecond (.activate 940)).writeRequest == some (.inboxRead ⟨"second", 20, 3, default⟩ true)

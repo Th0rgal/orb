@@ -355,6 +355,7 @@ structure InboxItem where
   mission : String
   stamp : Nat
   version : Nat
+  card : MissionSummaryCard := default
   deriving BEq, Repr, Inhabited
 
 inductive LiveWrite where
