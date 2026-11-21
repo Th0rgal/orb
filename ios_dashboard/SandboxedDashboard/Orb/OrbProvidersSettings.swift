@@ -297,10 +297,12 @@ struct OrbProvidersSettings: View {
                             }
                         }
                         let globallyDisabled = !Self.isGloballyEnabled(provider)
-                        Button(globallyDisabled ? "Enable" : "Disable") {
-                            Task { await toggleGlobal(provider) }
+                        if isAdmin {
+                            Button(globallyDisabled ? "Enable" : "Disable") {
+                                Task { await toggleGlobal(provider) }
+                            }
+                            .disabled(!ready || busy)
                         }
-                        .disabled(!ready || busy)
                         if OrbCore.shared.currentUser != nil {
                             let userSkipped = Self.isUserSkipped(provider)
                             Button(userSkipped ? "Use for my missions" : "Skip for my missions") {
