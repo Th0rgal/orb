@@ -225,4 +225,6 @@ An administrator or the member who added an Antigravity account can choose wheth
 
 Core resolves the account to a single credential before reading or changing its exclusions through the sidecar management API. Disabling alternative routers adds the wildcard model exclusion. Enabling them removes only the wildcard and keeps model-specific exclusions. A successful update requires a readback. An unavailable sidecar or an ambiguous credential binding leaves the control unavailable.
 
+Reconnecting an existing Antigravity account targets its exact credential in both Direct and VPN mode, so the login preserves its routing exclusions. A sidecar that cannot acknowledge the target must fail the reconnect.
+
 The isolated sidecar test sends buffered and streaming requests before restricting the account. It then requests the model by its account prefix and its unqualified ID, checks that neither request reaches the simulated Google generation endpoint, and checks another provider during the restriction. Refresh and targeted reconnect must preserve the exclusion before the operator can restore access.

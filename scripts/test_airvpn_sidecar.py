@@ -412,6 +412,15 @@ def run(binary, reconnect=False, orb_configure=None):
                     print("Targeted OAuth reconnect passed for two ChatGPT fixtures, Claude, Google Antigravity and Kimi.")
                 saved_google = api("GET", "credentials/download?name=d.json")
                 assert saved_google.get("excluded_models") == ["fixture-retired-*", "*"], "refresh or reconnect lost router restriction"
+                if reconnect:
+                    # Direct reconnects also have to adopt the restricted credential.
+                    api("PATCH", "credentials/fields", {"name": "d.json", "proxy_url": ""})
+                    direct = api("POST", "oauth/auth-url", {"provider": "antigravity", "name": "d.json"})
+                    assert direct["target_auth_id"] == "d.json"
+                    api("DELETE", "oauth/session?state=" + urllib.parse.quote(direct["state"]))
+                    saved = api("GET", "credentials/download?name=d.json")
+                    assert not saved.get("proxy_url") and saved["excluded_models"] == ["fixture-retired-*", "*"]
+                    api("PATCH", "credentials/fields", {"name": "d.json", "proxy_url": routes["d"]})
                 set_google_exclusions(["fixture-retired-*"], True)
                 chat_inference(google_models[0], False, b"fixture-google")
                 assert ("refresh_token", "127.0.0.2") in claude_oauth, claude_oauth

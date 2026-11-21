@@ -3337,18 +3337,25 @@ def dispatchProviderAndAiRoute
           let .ok route ← AccountVpnRoutes.snapshot store.missionsDb account
             | return some (jsonErr 503 "VPN route storage unavailable")
           routeGeneration := route.generation
-          if let .vpn _ := route then
+          let usesVpn := match route with
+            | .vpn _ => true
+            | .direct _ => false
+          -- A Direct Antigravity login still owns its per-file router exclusions.
+          if usesVpn || authType == "antigravity" then
             let accounts ← loadHydratedProviders store workingDir
             let some hp := accounts.find? (fun p => p.id == account)
-              | return some (jsonErr 409 "VPN credential unavailable")
-            let some url := hub.accountRelayUrl?.bind (fun sign => sign hp.providerType hp.id)
-              | return some (jsonErr 503 "VPN relay unavailable")
+              | return some (jsonErr 409 "Selected credential unavailable")
             let file := accountRoutingFile accounts hp
             unless providerTypeMatchesAuthType hp.providerType authType && !file.isEmpty &&
                 AccountVpnSidecar.validManagement mgmtBase &&
                 (effAdmin || (!callerUserId.isEmpty && hp.createdByUserId == callerUserId)) do
-              return some (jsonErr 403 "VPN credential ownership could not be verified")
-            routedRequest? := some (.obj #[("provider", .str authType), ("name", .str file), ("proxy_url", .str url)])
+              return some (jsonErr 403 "Credential ownership could not be verified")
+            let mut request := JVal.obj #[("provider", .str authType), ("name", .str file)]
+            if usesVpn then
+              let some url := hub.accountRelayUrl?.bind (fun sign => sign hp.providerType hp.id)
+                | return some (jsonErr 503 "VPN relay unavailable")
+              request := request.setField "proxy_url" (.str url)
+            routedRequest? := some request
         let login ← match routedRequest? with
           | some data => sendJsonRequest "POST" s!"{mgmtBase}/v8/management/oauth/auth-url" (some mgmtKey) (some data) #[] 15000 262144
           | none => sendJsonRequest "GET" s!"{mgmtBase}/v0/management/{slug}-auth-url" (some mgmtKey) none #[] 15000 262144
