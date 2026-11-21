@@ -90,6 +90,7 @@ lean_obj_res lean_ui_call(size_t fn, b_lean_obj_arg args, lean_obj_arg w);
 lean_obj_res lean_ui_mem_alloc(size_t size, lean_obj_arg w);
 lean_obj_res lean_ui_mem_free(size_t ptr, lean_obj_arg w);
 /* Copy bytes into / out of native memory (also used on mapped VkDeviceMemory). */
+lean_obj_res lean_ui_present_argb(size_t ptr, b_lean_obj_arg bytes, lean_obj_arg w);
 lean_obj_res lean_ui_mem_write(size_t ptr, b_lean_obj_arg bytes, lean_obj_arg w);
 lean_obj_res lean_ui_mem_read(size_t ptr, size_t size, lean_obj_arg w);
 lean_obj_res lean_ui_icon_mask(b_lean_obj_arg segments, size_t size);

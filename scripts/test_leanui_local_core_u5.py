@@ -30,7 +30,7 @@ def test_live_core_bootstrap_reads_saved_connection() -> None:
 
 
 def test_normal_launch_uses_live_state_and_goldens_keep_fixtures() -> None:
-    assert "loadLiveState" in MAIN
+    assert "initialRosterPending := true" in MAIN and "withLiveSources" in MAIN
     assert "dcfg.screenOpt.isNone && !dcfg.selfTest" in MAIN
     assert "DesktopState.forScreen" in MAIN
     assert 'exec "$STAGE_BIN_DIR/orb-desktop-native"' in SCRIPT

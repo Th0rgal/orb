@@ -3391,7 +3391,9 @@ def setMissionStatusFromClient
       if rows.size ≤ 1 then return .error "mission_not_found"
       let curStatus := (rows[1]?.bind (·[0]?)).getD ""
       let liveRuns := ((rows[1]?.bind (·[1]?)).bind String.toNat?).getD 0
-      if liveRuns > 0 then return .error "mission_running"
+      -- Turn acceptance can mark a mission live before its run row is inserted.
+      if liveRuns > 0 || (nextStatus == "acknowledged" && isLiveMissionStatus curStatus) then
+        return .error "mission_running"
       if curStatus == nextStatus then return .ok false
       if nextStatus == "acknowledged" && !(← fenceArchive) then return .error "mission_running"
       let upd ← execParamQueryUnlocked st.missionsDb

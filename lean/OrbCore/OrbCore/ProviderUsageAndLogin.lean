@@ -48,6 +48,23 @@ open OrbCore.ProxyModelRouting
 open OrbCore.R7Core
 open OrbCore.LegacyHydrate
 
+/-- Caller-visible model overrides configured on provider accounts. Custom routes
+    use the provider name understood by directEntry?, rather than the account UUID. -/
+def configuredOpenCodeOptions (store : CoreStore) (userId : String) (admin : Bool) : IO (Array JVal) := do
+  let prefs ← getUserProviderPrefs store userId
+  let mut options : Array JVal := #[]
+  for p in ← listAIProviders store do
+    if p.enabled && (admin || !p.apiKey.isEmpty) && isUserProviderEnabled prefs p.id then
+      let provider := if p.providerType == "custom" then customProviderName p.name else p.id
+      for cm in p.customModels do
+        let mid := cm.id.trimAscii.toString
+        if !provider.isEmpty && !mid.isEmpty && customProviderModelAllowed provider p.baseUrl mid then
+          let value := s!"{provider}/{mid}"
+          unless options.any (fun opt => opt.fieldStr? "value" == some value) do
+            let label := (cm.name?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)).getD mid
+            options := options.push (.obj #[("value", .str value), ("label", .str s!"{p.name} — {label}")])
+  return options
+
 /-! ## Runtime Caches (`ProviderRuntimeHub`) -/
 
 structure CachedUsageEntry where
@@ -1565,7 +1582,7 @@ private def fetchSidecarAuthFiles (http : UsageHttp := liveUsageHttp) : IO (Arra
           provider := prov
           email := email
           disabled := disabled
-          needsReauth := loginReason != 0
+          needsReauth := !disabled && loginReason != 0
           loginReason := loginReason
           remainingSecs := bestRem
           retryAt? := bestRetry?
@@ -2553,7 +2570,7 @@ def sidecarLoginFailureMessage (store : CoreStore) (workingDir : String)
     (matchSidecarFileForProvider? hps files hp (includeDisabled := true)).bind fun file =>
       if file.email.trimAscii.toString.isEmpty then none else some file.email.trimAscii.toString
   let identity := if emails.isEmpty then "the provider login" else String.intercalate ", " emails.toList
-  return some s!"Sign in again for {identity}: the login is refresh-failed, disabled, expired or quota-exhausted. See Providers for the sidecar's reported reset."
+  return some s!"Sign in again for {identity}: the login is refresh-failed, expired or quota-exhausted. See Providers for the sidecar's reported reset."
 
 /-- Clear a matched sidecar auth file's parked state by toggling `disabled: true` then `disabled: false`
     via `PATCH /v0/management/auth-files/status` (2-second timeout per call).
@@ -3295,9 +3312,10 @@ def dispatchProviderAndAiRoute
         let targetProvId? := reqJv.fieldStr? "provider_id"
         if !effAdmin then
           if let some tid := targetProvId? then
-            if let some trow ← getAIProvider? store tid then
-              if !(trow.createdByUserId == callerUserId && !callerUserId.isEmpty) then
-                return some (jsonErr 403 "not_account_owner")
+            let some trow ← getAIProvider? store tid
+              | return some (jsonErr 403 "not_account_owner")
+            unless !callerUserId.isEmpty && trow.createdByUserId == callerUserId do
+              return some (jsonErr 403 "not_account_owner")
         let beforeFiles := (← scanCliProxyAuthFiles).map (fun af => (af.fileName, af.fingerprint))
         match ← sendJsonRequest "GET" s!"{mgmtBase}/v0/management/{slug}-auth-url" (some mgmtKey) none #[] 15000 262144 with
         | .ok (code, rawTxt, some uJv) =>

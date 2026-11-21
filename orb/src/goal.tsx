@@ -90,7 +90,7 @@ export function remoteGoalSupport(capability: { goal_harnesses?: string[] } | nu
   return !!backend && capability?.goal_harnesses?.includes(backend) === true;
 }
 
-export const REMOTE_GOAL_UNSUPPORTED = "Goal mode is unavailable for this remote harness because it cannot continue the objective safely. Choose OpenCode on a Goal-capable remote node, or use a standard turn.";
+export const REMOTE_GOAL_UNSUPPORTED = "This harness does not support Goals on this node. Choose a Goal-capable harness or remove /goal to send a standard turn.";
 
 /** `/` plus a query with no whitespace — the Cursor slash palette trigger. */
 export function slashQuery(text: string): { open: boolean; query: string } {

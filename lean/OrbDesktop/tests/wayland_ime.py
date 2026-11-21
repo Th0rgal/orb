@@ -1,8 +1,9 @@
-"""One-shot input-method-v2 client for the private headless Sway session.
+"""Persistent input-method-v2 client for the private headless Sway session.
 
 Wait for compositor activation before committing; wtype's Unicode keysyms do
 not exercise text-input-v3. No connection to Core or to the Orb process.
 """
+from contextlib import contextmanager
 import os
 import socket
 import struct
@@ -13,7 +14,8 @@ def string(text):
     return struct.pack('=I', len(data)) + data + bytes(-len(data) % 4)
 
 
-def commit(text, env, preedit=''):
+@contextmanager
+def session(env):
     with socket.socket(socket.AF_UNIX) as sock:
         sock.settimeout(10)
         sock.connect(os.path.join(env['XDG_RUNTIME_DIR'], env['WAYLAND_DISPLAY']))
@@ -34,7 +36,10 @@ def commit(text, env, preedit=''):
         globals_seen = {}
         active = False
         serial = 0
-        while True:
+        callback = 5
+
+        def receive():
+            nonlocal active, serial
             obj, header = struct.unpack('=II', read(8))
             op = header & 65535
             body = read((header >> 16) - 8)
@@ -54,13 +59,31 @@ def commit(text, env, preedit=''):
                     active = op == 0
                 elif op == 5:  # done
                     serial += 1
-                    if active:
-                        send(5, 0, string(text))
-                        if preedit:
-                            send(5, 1, string(preedit) + struct.pack('=ii', 0, 0))
-                        send(5, 3, struct.pack('=I', serial))
-                        send(1, 0, struct.pack('=I', 6))  # barrier before disconnect
                 elif op == 6:
                     raise RuntimeError('input method unavailable')
-            if obj == 6:
-                return
+            return obj
+
+        def sync():
+            nonlocal callback
+            callback += 1
+            send(1, 0, struct.pack('=I', callback))
+            while receive() != callback:
+                pass
+
+        def edit(batches, preedit=''):
+            # Drain focus changes from the previous field before editing this one.
+            sync()
+            while not active:
+                receive()
+            for text, before, after in batches:
+                if before or after:
+                    send(5, 2, struct.pack('=II', before, after))
+                send(5, 0, string(text))
+                if preedit:
+                    send(5, 1, string(preedit) + struct.pack('=ii', 0, 0))
+                send(5, 3, struct.pack('=I', serial))
+                sync()
+
+        while len(globals_seen) != 2:
+            receive()
+        yield edit

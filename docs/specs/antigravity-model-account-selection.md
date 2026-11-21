@@ -105,6 +105,7 @@ verified in `lean/Orb/Spec.lean` and folded through `orb_route_argmin_step`:
    that exact slot while keeping `conversations/` and `brain/` inside
    `<mission_dir>/.gemini/antigravity-cli/`. Concurrent Carbon and non-Carbon
    jobs on the same node never share or overwrite each other's OAuth token.
+   Provisioning with a named slot and `default=false` leaves the default unmodified even on a fresh node. A request with `default=false` and no named slot is invalid. Omitting the flag retains the default-profile behavior.
 3. **Legacy Node & Discovery Non-Clobbering:**
    - `submit_leased_remote_job` syncs the model-selected credential immediately
      before `submit_job` and selects `antigravity:<slot>` whenever the node

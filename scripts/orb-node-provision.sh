@@ -17,7 +17,8 @@ machine_id=${2:?managed machine id required}
 [[ $machine_id =~ ^[A-Za-z0-9_-]+$ ]] || exit 1
 
 systemctl stop orb-node.service 2>/dev/null || true
-id orbnode >/dev/null 2>&1 || useradd --system --create-home --home-dir /var/lib/orb-node --shell /bin/bash orbnode
+getent group orbnode >/dev/null || groupadd --system orbnode
+id orbnode >/dev/null 2>&1 || useradd --system --gid orbnode --create-home --home-dir /var/lib/orb-node --shell /bin/bash orbnode
 install -d -m 0750 -o orbnode -g orbnode /var/lib/orb-node /var/lib/orb-node/work
 # The node runs as orbnode. A root-only /etc/resolv.conf (lean.ci image, 15 Nov) leaves it without DNS:
 # every enrolment attempt then fails at once while root curl still works.

@@ -337,6 +337,7 @@ private def missionBoardClauseFixtures (root : String) : IO Unit := do
     addMission "b2b-race-fence" "a" "clause-race" "Race fence"
     addMission "b2b-race-open" "a" "clause-race" "Race open"
     addMission "b2b-del-race" "a" "clause-race" "Race delete"
+    addMission "b2b-del-ordered" "a" "clause-race" "Ordered delete"
     addMission "b2b-truth" "a" "clause-truth" "Truth"
     addMission "b2b-alias" "a" "clause-alias" "Alias"
     addMission "b2b-shared-a" "a" "a:shared-slug" "Shared A"
@@ -573,10 +574,6 @@ private def missionBoardClauseFixtures (root : String) : IO Unit := do
       sql store2.missionsDb
         "INSERT INTO mission_board(mission_id,text,updated_at,updated_by_mission_id,text_sha256) VALUES(?1,?2,?3,?1,?4) ON CONFLICT(mission_id) DO UPDATE SET text=excluded.text,updated_at=excluded.updated_at,updated_by_mission_id=excluded.updated_by_mission_id,text_sha256=excluded.text_sha256;"
         #[mid, text, time, MissionBoard.digest text]
-    let boardCount (mid : String) : IO Nat := do
-      let .ok rows ← execParamQuery store2.missionsDb "SELECT COUNT(*) FROM mission_board WHERE mission_id=?1;" #[mid]
-        | throw (IO.userError "B2b board count")
-      return ((rows[1]?.bind (·[0]?)).getD "0").toNat?.getD 0
     let readBoard (uid mid : String) : IO JVal := do
       let .ok doc ← MissionBoard.read store2.missionsDb { userId := uid } mid
         | throw (IO.userError s!"B2b read {mid}")
@@ -611,7 +608,7 @@ private def missionBoardClauseFixtures (root : String) : IO Unit := do
           ok := ok && doc.fieldStr? "text_sha256" == some (MissionBoard.digest text)
         | .error _ => ok := false
       return ok
-    let _ := writer.get
+    IO.ofExcept (← IO.wait writer)
     let .ok reader1Ok := reader1.get | throw (IO.userError "B2b concurrent reader 1 failed")
     let .ok reader2Ok := reader2.get | throw (IO.userError "B2b concurrent reader 2 failed")
     check (reader1Ok && reader2Ok) "B2b concurrency: readers never see partial text or mismatched hash"
@@ -641,21 +638,31 @@ private def missionBoardClauseFixtures (root : String) : IO Unit := do
     check (openText == some "open-a" || openText == some "open-b")
       "B2b concurrency: later unfenced commit wins whole text"
 
-    putBoard "b2b-del-race" "before" "2026-11-15T00:00:06Z"
-    let raceWrite ← IO.asTask (prio := .dedicated)
-      (writeAs { userId := "a", missionId := "b2b-del-race" } "b2b-del-race" "after" "2026-11-15T00:00:07Z" "B2b-del-race")
-    let raceDelete ← IO.asTask (prio := .dedicated) do
-      let .ok _ ← execParamQuery store2.missionsDb "DELETE FROM missions WHERE id='b2b-del-race';" #[]
-        | throw (IO.userError "B2b delete race")
-      return ()
-    let rw := raceWrite.get
-    let _ := raceDelete.get
-    let deleteRaceValid := match rw with
-      | .ok (.ok _) => true
-      | .ok (.error e) => e == "mission_not_found"
-      | .error _ => false
-    check (deleteRaceValid && (← boardCount "b2b-del-race") == 0)
-      "B2b event order 9: delete/write race leaves no orphan board"
+    let writeTarget (mid : String) := writeAs { userId := "a", missionId := mid } mid
+      "after" "2026-11-15T00:00:07Z" ("write-" ++ mid)
+    let deleteTarget (mid : String) := sql store2.missionsDb "DELETE FROM missions WHERE id=?1;" #[mid]
+    let checkGone (mid : String) : IO Unit := do
+      let rows ← IO.ofExcept (← execParamQuery store2.missionsDb
+        "SELECT (SELECT COUNT(*) FROM missions WHERE id=?1), (SELECT COUNT(*) FROM mission_board WHERE mission_id=?1);" #[mid])
+      check (rows[1]? == some #["0", "0"]) s!"B2b event order 9: {mid} mission and board must both be absent"
+
+    let ordered := "b2b-del-ordered"
+    discard <| IO.ofExcept (← writeTarget ordered)
+    deleteTarget ordered
+    checkGone ordered
+    let .error "mission_not_found" ← writeTarget ordered | throw (IO.userError "B2b write after delete must fail")
+    checkGone ordered
+
+    let racing := "b2b-del-race"
+    putBoard racing "before" "2026-11-15T00:00:06Z"
+    let raceWrite ← IO.asTask (prio := .dedicated) (writeTarget racing)
+    let raceDelete ← IO.asTask (prio := .dedicated) (deleteTarget racing)
+    -- An unused pure Task.get is erased; join both effects before observing the database.
+    let rw ← IO.wait raceWrite
+    IO.ofExcept (← IO.wait raceDelete)
+    if let .error e ← IO.ofExcept rw then
+      check (e == "mission_not_found") s!"B2b event order 9: unexpected write error: {e}"
+    checkGone racing
 
     putBoard "b2b-truth" "transport text" "2026-11-16T00:00:00Z"
     let truthWrite ← writeAs { userId := "a", missionId := "b2b-truth" } "b2b-truth" "transport text" "2026-11-16T00:00:01Z" "B2b-transport"
@@ -1797,6 +1804,11 @@ def run (root : String) : IO Unit := do
           discard <| LeanSys.Posix.closeFd client
         | .error _ => pure ()
     try
+      for id in #["iso-claude-oauth", "missing-provider"] do
+        let (status, body) ← send "POST" "/api/ai/providers/cli-proxy-login" member
+          (.obj #[("provider", .str "anthropic"), ("provider_id", .str id)]) stWithProviders
+        check (status == 403 && body.fieldStr? "error" == some "not_account_owner")
+          "targeted reconnect requires a registered account owned by the caller"
       for (roleLbl, bearer) in #[("admin", admin), ("member", member)] do
         let (hSt, hDoc) ← send "GET" "/api/model-routing/health" bearer (.obj #[]) stWithProviders
         let hRaw := renderCompact hDoc

@@ -490,7 +490,7 @@ def run : IO Unit := do
         "no automatic continuation dispatches after Stop"
       newMission "m-goal-dispatch" "[\"remote-node:mockgoal\"]"
       discard <| execParamQuery db
-        ("UPDATE missions SET backend='opencode',goal_mode=1,goal_objective='Ship it',session_id='ses_goal_fixture'," ++
+        ("UPDATE missions SET backend='codex',goal_mode=1,goal_objective='Ship it',session_id='019ad719-730d-7777-9221-e0eabcd44611'," ++
          "placement_job_id='first-goal-job',terminal_reason='remote_node_job' WHERE id='m-goal-dispatch';") #[]
       let .ok (some _) ← settleRemoteGoal store "m-goal-dispatch" "first-goal-job" "Ship it" "Still working" 1 20 true true
         | throw (IO.userError "Goal dispatch fixture did not arm")
@@ -505,7 +505,7 @@ def run : IO Unit := do
           let response := s!"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\nConnection: close\r\n\r\n{body}"
           let _ ← LeanSys.Posix.writeAll conn response.toUTF8
           return req.method == "POST" && req.path == "/jobs" &&
-            ((String.fromUTF8? req.bodySlice.toByteArray).getD "").contains "--session 'ses_goal_fixture'"
+            ((String.fromUTF8? req.bodySlice.toByteArray).getD "").contains "resume '019ad719-730d-7777-9221-e0eabcd44611' -"
         finally
           discard <| LeanSys.Posix.closeFd conn
       setenvVar "SANDBOXED_REMOTE_NODES_ENABLED" "true"
@@ -539,7 +539,7 @@ def run : IO Unit := do
            s!"Core rejects a remote Goal follow-up before appending or queueing (got {rejected.status}: {rejection})"
          let fired ← tickContinuationScheduler store none none none sup none root (some launch) (some 22)
          check ((← IO.ofExcept accepted.get) && fired == 1 && (← launches.get) == 0 &&
-           (← statusOf "m-goal-dispatch") == "active") "Goal scheduler recovers a claimed intent in the same OpenCode session"
+           (← statusOf "m-goal-dispatch") == "active") "Goal scheduler recovers a claimed intent in the same Codex thread"
          let replayed ← tickContinuationScheduler store none none none sup none root (some launch) (some 22)
          check (replayed == 0) "a recovered claim is not dispatched twice"
          let jobId ← cellOf db "SELECT placement_job_id FROM missions WHERE id='m-goal-dispatch';"

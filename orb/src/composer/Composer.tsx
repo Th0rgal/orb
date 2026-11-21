@@ -23,7 +23,7 @@ import { ConfirmDialog } from "../Dialog";
 import { ErrorToast, StatusToast } from "../toast";
 import { isAutoManagedTarget } from "../machines/nodes";
 import { type RemoteSupport } from "../missionLaunch";
-import { absorbGoalPrefix, composerModes, filterSlash, slashQuery, modePrompt, ModeChip, type ComposerMode } from "../goal";
+import { absorbGoalPrefix, goalDraft, composerModes, filterSlash, slashQuery, modePrompt, ModeChip, type ComposerMode } from "../goal";
 import { filterSkills, insertSkill, removeSkill, selectedSkillNames, skillPreview, skillQuery, validateSkillSelection, type SkillChoice } from "../skillSlash";
 import { getSkillDelivery } from "../skillsApi";
 import { localInvocableSkills, localBinding, localWorkspace } from "../localAgents";
@@ -717,17 +717,15 @@ export function Composer(p: {
     ta.setSelectionRange(next.caret, next.caret);
     setCaret(next.caret);
   };
+  const goalBlocked = () => p.goalUnavailable && (mode() === "goal" || goalDraft(text()).kind !== "none");
   const send = async () => {
+    if (goalBlocked()) return;
     // A direct upload stays attached even if its token was edited out of the draft.
     const missingTokens = p.directFileUpload ? uploaded.map(file => uploadToken(file.path)).filter(token => !text().includes(token)) : [];
     const original = missingTokens.length ? `${text().trimEnd()}${text().trim() ? "\n\n" : ""}${missingTokens.join(" ")}` : text();
     let payload = draftOf(original);
     if (!payload && !images().length && p.onEmptySubmit && !p.disabled && !sending()) { p.onEmptySubmit(); return; }
     if (p.disabled || (!payload && !images().length) || sendingLocked() || uploading() || readingImages()) return;
-    if (p.goalUnavailable && (mode() === "goal" || /^\s*\/goal(?:\s|$)/.test(payload))) {
-      setUploadError(p.goalUnavailable);
-      return;
-    }
     if (folderBusy()) { setUploadError("Wait for the folder upload to finish, or cancel it. Your draft is kept."); return; }
     const skillError = validateSkillSelection(payload, backend(), availableSkills());
     if (skillError) { setUploadError(`${skillError}. Your draft is kept.`); return; }
@@ -946,7 +944,7 @@ export function Composer(p: {
                   const c = harnessChoices(p.uploadTarget).find(c => c.backend.id === id);
                   if (c && id !== pick()?.backend) {
                     const effort = normalizeEffort(pick()?.effort, id);
-                    setHarnessPick({backend:id,model:c.models[0].value,...(effort ? {effort} : {})});
+                    setHarnessPick({backend:id,model:modelPickerItems(c.models, id)[0].id,...(effort ? {effort} : {})});
                   }
                   setWhich(null);
                 }}/>
@@ -964,7 +962,7 @@ export function Composer(p: {
             </button>
             <Show when={which() === "model"}>
               <Picker label="Models" searchLabel="Search models" selected={pick()?.model}
-                items={modelPickerItems(choice()?.models ?? [])}
+                items={modelPickerItems(choice()?.models ?? [], choice()?.backend.id ?? "")}
                 onClose={() => setWhich(null)} onSelect={value => {
                   const backend = choice()!.backend.id;
                   const effort = normalizeEffort(pick()?.effort, backend);
@@ -1018,7 +1016,7 @@ export function Composer(p: {
   const sendBtn = (
     <div class="send-slot">
       <Show when={(text().trim() || images().length) && !slash() && !voiceActive()}>
-        <button class="send" disabled={p.disabled || uploading() || sendingLocked() || readingImages()} onClick={send} aria-label={p.sendLabel} title={mode()==="btw" ? "Ask side question" : p.busy ? "Queue for next turn" : p.sendLabel ?? "Send"}>
+        <button class="send" disabled={p.disabled || !!goalBlocked() || uploading() || sendingLocked() || readingImages()} onClick={send} aria-label={p.sendLabel} title={mode()==="btw" ? "Ask side question" : p.busy ? "Queue for next turn" : p.sendLabel ?? "Send"}>
           <Ic.ArrowUpIcon size={14} />
         </button>
       </Show>
@@ -1152,7 +1150,6 @@ export function Composer(p: {
         action={!p.textOnly && !p.imagesOnly ? { label: "Re-attach", primary: true, run: () => { setStaleFiles([]); void chooseFiles(); } } : undefined}
       />
       <ErrorToast error={uploadError()} title="Couldn’t upload the file" onDismiss={() => setUploadError(null)} />
-      <Show when={p.goalUnavailable && (/^\/g(?:o(?:a(?:l)?)?)?\b/i.test(text()) || mode() === "goal")}>{p.goalUnavailable}</Show>
       <Show when={mode()}>{m => <ModeChip mode={m()} onClear={clearMode} />}</Show>
       <Show when={selectedSkills().length}><div class="skill-chips" aria-label="Selected skills"><For each={selectedSkills()}>{name => <span class="mode-chip skill-chip" role="status"><Ic.SkillsIcon size={12}/><span class="mode-chip-label">/{name}</span><button type="button" class="mode-chip-x" title={`Remove ${name}`} aria-label={`Remove skill ${name}`} onClick={e => { e.preventDefault(); e.stopPropagation(); clearSkill(name); }}><Ic.CloseIcon size={10}/></button></span>}</For></div></Show>
       <Show when={!mode() && p.editingQueued}>{editing => <span class="mode-chip edit-queued" role="status" aria-label="Editing a queued message">
@@ -1246,6 +1243,7 @@ export function Composer(p: {
       {voice}
       {sendBtn}
     </div>
+    <Show when={goalBlocked()}><p class="composer-warning" role="status">{p.goalUnavailable}</p></Show>
   </>);
 }
 

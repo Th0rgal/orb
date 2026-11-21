@@ -912,7 +912,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
   const beginLogin = () => {
     setPhase("starting"); setError(null); setPaste("");
     const start = polledLogin
-      ? startSubscriptionLogin(p.provider.provider_type, /^[0-9a-f-]{36}$/i.test(p.provider.id) ? p.provider.id : undefined).then(s => ({ id: s.session_id, url: s.auth_url, flow: s.flow, instructions: s.instructions }))
+      ? startSubscriptionLogin(p.provider.provider_type, p.provider.id || undefined).then(s => ({ id: s.session_id, url: s.auth_url, flow: s.flow, instructions: s.instructions }))
       : startProviderOAuth(p.provider.id).then(s => ({ id: p.provider.id, url: s.url, flow: s.method, instructions: s.instructions }));
     start
       .then((s) => {
@@ -1071,12 +1071,12 @@ function windowGroups<W extends { label: string }>(windows: W[]) {
   return groups;
 }
 
-function UsageDetail(p: { usage: ProviderUsage; headerEmail?: string; planInHeader?: boolean; sharedOrg?: boolean }) {
+function UsageDetail(p: { usage: ProviderUsage; disabled?: boolean; headerEmail?: string; planInHeader?: boolean; sharedOrg?: boolean }) {
   const u = () => p.usage;
   const type = () => u().provider_type;
   return (
     <div class="p-detail">
-      <Show when={u().status === "needs_reauth"}><p class="s-row-desc inline-error">Reconnect this account to check its quota and use it for new requests.</p></Show>
+      <Show when={!p.disabled && u().status === "needs_reauth"}><p class="s-row-desc inline-error">Reconnect this account to check its quota and use it for new requests.</p></Show>
       <div class="p-detail-meta">
         <Show when={u().account_email && u().account_email !== p.headerEmail}><span>{u().account_email}</span></Show>
         <Show when={u().account_name}><span>{u().account_name}</span></Show>
@@ -1164,7 +1164,7 @@ function UsageDetail(p: { usage: ProviderUsage; headerEmail?: string; planInHead
       </Show>
 
       <Show when={u().usage_note}><p class="s-row-desc">{u().usage_note}</p></Show>
-      <Show when={u().error}>
+      <Show when={!p.disabled && u().error}>
         <p class="s-row-desc inline-error">{u().error?.replace(/\s*—\s*/g, ". ")}</p>
       </Show>
     </div>
@@ -1292,7 +1292,7 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
   const canReconnect = () => !!p.onReconnect && reconnectable(a);
   const mistralSubscription = () => isAdminUser() && a.provider_type === "mistral" && a.uses_oauth;
   // Core sends an informational message ("Connected via OAuth") for healthy accounts; only a problem is worth showing.
-  const problem = () => status() === "connected" || status() === "disabled_by_provider" ? undefined : (a.status.reason || a.status.message);
+  const problem = () => status() === "connected" || status() === "disabled" || status() === "disabled_by_provider" ? undefined : (a.status.reason || a.status.message);
   const isKeyRow = () => !(a.provider_type === "mistral" && a.uses_oauth) && ((a.has_api_key === true && a.has_oauth === false) || !a.uses_oauth);
   const editLabel = () => manages() && isKeyRow() ? "Edit API key" : "Edit settings";
   const [localOpen, setLocalOpen] = createSignal(false);
@@ -1405,7 +1405,7 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
             <MistralUsageConnect a={a} usage={p.usage} onUsage={p.onUsage} />
           </Show>
           <Show when={hasUsageDetails()}>
-            <UsageDetail usage={p.usage!} sharedOrg={!!p.usage?.organization_id && !!p.sharedOrgs?.has(p.usage.organization_id)} headerEmail={email()} planInHeader />
+            <UsageDetail disabled={status() === "disabled"} usage={p.usage!} sharedOrg={!!p.usage?.organization_id && !!p.sharedOrgs?.has(p.usage.organization_id)} headerEmail={email()} planInHeader />
           </Show>
           <Show when={status() === "needs_verification"}>
             <p class="s-row-desc inline-error">Google requires you to verify this account.</p>

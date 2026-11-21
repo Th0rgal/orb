@@ -1,0 +1,23 @@
+{
+  "harnessProvider": {
+    "codex": "openai",
+    "claudecode": "anthropic",
+    "grok": "xai"
+  },
+  "modelSuccessors": {
+    "openai": {
+      "gpt-6-sol": "gpt-6.2-sol",
+      "gpt-6.1-sol": "gpt-6.2-sol",
+      "gpt-6-astra": "gpt-6.2-astra"
+    },
+    "anthropic": {
+      "claude-opus-5": "claude-opus-5-5",
+      "claude-sonnet-4-6": "claude-sonnet-5-5",
+      "claude-fable-5": "claude-fable-5-2",
+      "claude-fable-5-1": "claude-fable-5-2"
+    },
+    "xai": {
+      "grok-4.6": "grok-4.7"
+    }
+  }
+}

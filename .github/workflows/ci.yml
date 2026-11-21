@@ -7,6 +7,10 @@ on:
         description: Use lean.ci runners (also requires ORB_LEAN_RUNNERS=true)
         type: boolean
         default: false
+      cold_project:
+        description: Measure a full run without restoring or publishing project build caches
+        type: boolean
+        default: false
   push:
     branches: [master, main, "release/*"]
     # Roadmap/docs pushes must not queue behind (and so cancel) pending master runs.
@@ -48,6 +52,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  ORB_COLD_PROJECT: ${{ inputs.cold_project && '1' || '0' }}
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -97,7 +102,7 @@ jobs:
 
   test:
     name: Test
-    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && github.repository == 'Th0rgal/orb' && ((github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) && 'lean-4vcpu-ubuntu-2604' || 'ubuntu-latest' }}
+    runs-on: ${{ vars.ORB_LEAN_RUNNERS == 'true' && github.repository == 'Th0rgal/orb' && ((github.event_name != 'workflow_dispatch' || inputs.use_lean_runners) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) && 'lean-8vcpu-ubuntu-2604' || 'ubuntu-latest' }}
     # Skip CI on draft PRs unless explicitly requested
     needs: plan
     if: (needs.plan.outputs.run_test == 'true') && (github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
@@ -117,6 +122,7 @@ jobs:
           # One turbo-lean run per package builds its binaries and tests together, then
           # the tests run; building the test targets separately rebuilt each package.
           ./scripts/build_orb_bins.sh --ensure-lean --with-tests --out-dir target/debug
+          ccache --show-stats --verbose
           for bin in fido-agent-proxy orb-privd orb-sudo lean-mesh palomactl sandboxed-mcp workspace-mcp desktop-mcp automation-manager-mcp sandboxed-node orb-core orb-locald; do
             test -x "target/debug/$bin"
             elab_syms=$(nm -u "target/debug/$bin" | grep -c lean_elab || true)
@@ -194,6 +200,9 @@ jobs:
       # example.invalid, unified-MCP tests use a 127.0.0.1 server. Build the native
       # Lean sandboxed-mcp companion first so test_unified_mcp_runtime.py runs.
       - name: Build native Lean sandboxed-mcp companion for runtime tests
+        env:
+          LEAN_NUM_THREADS: '1'
+          ORB_TURBO_LEAN_JOBS: '1'
         run: |
           ./scripts/ci_harden_ubuntu_apt.sh
           sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev zstd
@@ -233,6 +242,7 @@ jobs:
         run: pnpm install --frozen-lockfile
       - uses: actions/cache@v5
         id: dist
+        if: env.ORB_COLD_PROJECT != '1'
         with:
           path: orb/dist
           key: orb-dist-v1-${{ runner.os }}-${{ runner.arch }}-node22-${{ needs.plan.outputs.orb_build_hash }}
@@ -241,13 +251,16 @@ jobs:
       - uses: actions/download-artifact@v4
         id: promoted-dist
         continue-on-error: true
-        if: steps.dist.outputs.cache-hit != 'true' && needs.plan.outputs.dist_run_id != ''
+        if: env.ORB_COLD_PROJECT != '1' && steps.dist.outputs.cache-hit != 'true' && needs.plan.outputs.dist_run_id != ''
         with:
           name: orb-dist
           path: orb/dist
           github-token: ${{ github.token }}
           run-id: ${{ needs.plan.outputs.dist_run_id }}
-      - if: steps.dist.outputs.cache-hit != 'true' && (needs.plan.outputs.dist_run_id == '' || steps.promoted-dist.outcome == 'failure')
+      - name: Verify cold web output before build
+        if: env.ORB_COLD_PROJECT == '1'
+        run: test ! -e dist && echo 'orb/dist absent'
+      - if: env.ORB_COLD_PROJECT == '1' || (steps.dist.outputs.cache-hit != 'true' && (needs.plan.outputs.dist_run_id == '' || steps.promoted-dist.outcome == 'failure'))
         env:
           ORB_BUILD_ID: ${{ needs.plan.outputs.orb_build_hash }}
         run: pnpm build
@@ -419,6 +432,7 @@ jobs:
       # exact inputs, but always compile/test the shell and replay wakeup tests.
       - uses: actions/cache@v5
         id: desktop-bins
+        if: env.ORB_COLD_PROJECT != '1'
         with:
           path: |
             target/debug/orb-locald
@@ -427,7 +441,7 @@ jobs:
       - uses: actions/download-artifact@v4
         id: promoted-desktop
         continue-on-error: true
-        if: steps.desktop-bins.outputs.cache-hit != 'true' && needs.plan.outputs.desktop_run_id != ''
+        if: env.ORB_COLD_PROJECT != '1' && steps.desktop-bins.outputs.cache-hit != 'true' && needs.plan.outputs.desktop_run_id != ''
         with:
           name: desktop-bins
           path: .ci/desktop
@@ -435,14 +449,24 @@ jobs:
           run-id: ${{ needs.plan.outputs.desktop_run_id }}
       - if: steps.promoted-desktop.outcome == 'success'
         run: tar -xf .ci/desktop/bins.tar
+      # APT still resolves versions and authenticates packages against the
+      # current signed indexes. Cache downloads only, never installed files.
+      - uses: actions/cache@v5
+        if: needs.plan.outputs.run_orb_desktop_shell == 'true'
+        with:
+          path: ~/orb-desktop-debs
+          key: desktop-debs-ubuntu24-${{ runner.arch }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: desktop-debs-ubuntu24-${{ runner.arch }}-
       - name: Install WebKitGTK and Lean build deps
         if: needs.plan.outputs.run_orb_desktop_shell == 'true' || (steps.desktop-bins.outputs.cache-hit != 'true' && steps.promoted-desktop.outcome != 'success')
         run: |
           ./scripts/ci_harden_ubuntu_apt.sh
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+          mkdir -p "$HOME/orb-desktop-debs"
+          sudo apt-get -o Dir::Cache::archives="$HOME/orb-desktop-debs" install -y --no-install-recommends libwebkit2gtk-4.1-dev \
             libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libssl-dev libsqlite3-dev zstd \
             libwayland-dev libxkbcommon-dev libfreetype-dev libharfbuzz-dev libfontconfig-dev
+          sudo rm -rf "$HOME/orb-desktop-debs/partial" "$HOME/orb-desktop-debs/lock"
       - name: Build orb-locald + sandboxed-mcp
         if: steps.desktop-bins.outputs.cache-hit != 'true' && steps.promoted-desktop.outcome != 'success'
         run: ./scripts/build_orb_bins.sh --ensure-lean --out-dir target/debug --only orb-locald --only sandboxed-mcp
@@ -535,8 +559,9 @@ jobs:
           push: false
           load: true
           tags: orb-ci:local
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          no-cache: ${{ inputs.cold_project == true }}
+          cache-from: ${{ !inputs.cold_project && 'type=gha' || '' }}
+          cache-to: ${{ !inputs.cold_project && 'type=gha,mode=max' || '' }}
 
       - name: Check fail-closed auth defaults and API proxy on default/custom backend ports
         run: |
@@ -611,6 +636,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
       - uses: actions/cache/save@v5
+        if: env.ORB_COLD_PROJECT != '1'
         with:
           path: .ci/verified.json
           key: ci-verified-tree-${{ needs.plan.outputs.tree_hash }}

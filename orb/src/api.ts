@@ -1,3 +1,4 @@
+import modelCatalogRules from "./modelSuccessors.json";
 import { nativeInvoke } from "./native";
 import { missionNode } from "./machines/nodes";
 import { harnessRank, isHarness } from "./harnesses";
@@ -492,7 +493,7 @@ export async function bootstrapDesktopRuntime(): Promise<void> {
       const prefsApplied = await applyBootstrappedDesktopPrefs(boot.prefs).catch(() => false);
       if (!prefsApplied) await initDesktopPrefs().catch(() => null);
       const cleanUrl = getApiUrl().trim().replace(/\/+$/, "");
-      if (boot.transport && (!cleanUrl.startsWith("https://") || boot.transport.configured_target === cleanUrl)) {
+      if (boot.transport && cleanUrl.toLowerCase().startsWith("https://") && boot.transport.configured_target === cleanUrl) {
         applyTransportBridgeInfo(cleanUrl, boot.transport);
       } else {
         await resolveTransportBase(cleanUrl).catch(() => null);
@@ -1400,10 +1401,26 @@ export function modelLabelGroup(label: string): string | undefined {
   return head || undefined;
 }
 
-export function modelPickerItems(models: BackendModelOption[]): { id: string; label: string; description?: string; group?: string }[] {
-  const groups = new Set(models.map(m => modelLabelGroup(m.label)).filter((g): g is string => !!g));
+// Direct harness IDs and OpenCode provider-qualified IDs use the same catalog rules.
+const modelSuccessors: Record<string, Record<string, string>> = modelCatalogRules.modelSuccessors;
+const harnessProvider: Record<string, string> = modelCatalogRules.harnessProvider;
+
+export function availableModelSuccessor(backend: string, value: string, models: BackendModelOption[], providerId?: string): string | undefined {
+  const slash = value.indexOf("/");
+  const namespace = slash < 0 ? "" : value.slice(0, slash + 1);
+  const provider = backend === "opencode" ? namespace.slice(0, -1) : harnessProvider[backend];
+  if (!provider || (namespace && namespace !== provider + "/")) return;
+  const successor = modelSuccessors[provider]?.[value.slice(namespace.length)];
+  if (typeof successor !== "string") return;
+  const candidate = namespace + successor;
+  return models.some(m => m.value === candidate && m.provider_id === providerId) ? candidate : undefined;
+}
+
+export function modelPickerItems(models: BackendModelOption[], backend: string): { id: string; label: string; description?: string; group?: string }[] {
+  const visible = models.filter(m => !availableModelSuccessor(backend, m.value, models, m.provider_id));
+  const groups = new Set(visible.map(m => modelLabelGroup(m.label)).filter((g): g is string => !!g));
   const showGroups = groups.size > 1;
-  return models.map(m => ({
+  return visible.map(m => ({
     id: m.value,
     label: shortModelLabel(m.label),
     ...(m.description ? { description: m.description } : {}),
@@ -1780,12 +1797,12 @@ export const updateProject = createProject;
 
 const archivedSlugs = new Set<string>();
 
-/** Board archive. The roster row stays; the project leaves the live list. */
-export async function archiveProject(slug: string): Promise<void> {
+/** Retire a project from the live roster without deleting its conversations. */
+export async function retireProject(slug: string, action: "archive" | "delete"): Promise<void> {
   await api(`/api/projects/${encodeURIComponent(slug)}/action`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "archive" }),
+    body: JSON.stringify({ action }),
   });
   archivedSlugs.add(slug);
 }
