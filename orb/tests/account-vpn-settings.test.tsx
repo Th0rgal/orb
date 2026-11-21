@@ -20,3 +20,16 @@ it("saves only the expanded account and retries a saved route when a slot opens"
   fireEvent.click(screen.getByRole("button", { name: "Retry verification" }));
   await screen.findByText("Verified exit · west · 192.0.2.20");
 });
+
+it("shows why the selected account cannot route and rereads it after reconnection", async () => {
+  const direct = { countries: ["NL"], mode: "direct", status: "direct" };
+  vi.mocked(api).mockClear().mockResolvedValueOnce({ ...direct, can_configure: false,
+    configuration_message: "Check the account connection, then refresh." })
+    .mockResolvedValueOnce({ ...direct, can_configure: true });
+  render(() => <AccountVpnSettings account="second" />);
+  await screen.findByText("Check the account connection, then refresh.");
+  expect((screen.getByLabelText("Account connection") as HTMLSelectElement).disabled).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "Refresh connection settings" }));
+  await vi.waitFor(() => expect((screen.getByLabelText("Account connection") as HTMLSelectElement).disabled).toBe(false));
+  expect(vi.mocked(api).mock.calls).toEqual(Array(2).fill(["/api/ai/providers/second/vpn", undefined]));
+});
