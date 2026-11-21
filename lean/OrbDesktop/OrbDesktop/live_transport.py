@@ -7,6 +7,7 @@ import re
 import signal
 import sys
 import time
+import textwrap
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -279,6 +280,17 @@ def mutate(binding, action, mid):
     if c.binding != binding:
         raise ValueError('connection changed')
     key = str(uuid.uuid4())
+    if action == 'cloud-create':
+        attempt, provider, account, project, prompt = sys.stdin.buffer.read().decode().split('\n', 4)
+        attempt = attempt or key
+        print(attempt, flush=True)
+        row = c.request('/api/control/missions', key=attempt, body={
+            'idempotency_key': attempt, 'title': prompt[:100], 'prompt': prompt, 'project': project,
+            'cloud': {'provider': provider, 'account': account}})
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', row['id']):
+            raise ValueError('invalid cloud mission')
+        print(row['id'])
+        return
     if action == 'inbox-read':
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', mid):
             raise ValueError('invalid mission')
@@ -326,7 +338,18 @@ def mutate(binding, action, mid):
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', mid):
         raise ValueError('invalid mission')
     path = '/api/control/missions/' + mid
-    if action == 'send':
+    if action == 'cloud-cancel':
+        c.request(path + '/cloud/cancel', method='POST', body={})
+    elif action == 'cloud-send':
+        attempt, content = sys.stdin.buffer.read().decode().split('\n', 1)
+        if not attempt:
+            attempt = key
+        print(attempt, flush=True)
+        receipt = c.request('/api/control/message', body={'mission_id': mid, 'content': content,
+                  'client_message_id': attempt}, key='msg:' + mid + ':' + attempt)
+        if receipt.get('message_accepted') is False:
+            raise ValueError('message refused')
+    elif action == 'send':
         receipt = c.request('/api/control/message', body={'mission_id': mid, 'content': sys.stdin.buffer.read().decode(),
                             'queue_followup': True, 'client_message_id': key}, key='msg:' + mid + ':' + key)
         if not receipt.get('id') or receipt.get('message_accepted') is False:
@@ -759,3 +782,77 @@ def poll(mid, binding, tracked=None):
             print('\t'.join(fields), flush=True)
             last = current
         time.sleep(1)
+
+
+def cloud_inventory(binding, mission):
+    c = Connection()
+    if c.binding != binding:
+        return
+    lines = []
+    actions = []
+    profiles = []
+    if mission:
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', mission):
+            raise ValueError('invalid mission')
+        execution = c.get(f'/api/control/missions/{mission}/cloud')
+        if execution['mission_id'] != mission or not isinstance(execution['turns'], list):
+            raise ValueError('invalid cloud execution')
+        selection = execution['selection']
+        try:
+            accounts = c.get('/api/cloud/accounts')
+            if not isinstance(accounts, list):
+                raise ValueError('invalid cloud inventory')
+        except urllib.error.HTTPError as error:
+            if error.code in (401, 403):
+                raise
+            error.close()
+            accounts = []
+            lines.append('Account actions unavailable. Refresh to retry.')
+        except (urllib.error.URLError, TimeoutError, ValueError):
+            accounts = []
+            lines.append('Account actions unavailable. Refresh to retry.')
+        account = next((a for a in accounts if a['id'] == selection['account'] and
+                        a['provider'] == selection['provider']), {})
+        caps = account.get('capabilities', {})
+        turns = execution['turns']
+        if caps.get('follow_up') is True:
+            if not any(t['phase'] in ('submission_uncertain', 'incompatible', 'reconnect_required') for t in turns):
+                actions.append('send')
+            if caps.get('cancel') is True and any(t.get('external_id') and t['phase'] in
+                    ('running', 'submitting', 'waiting_user') for t in turns):
+                actions.append('cancel')
+        phases = {'queued': 'Queued', 'submitting': 'Starting', 'submission_uncertain': 'Submission needs verification',
+                  'running': 'Working', 'waiting_user': 'Waiting for your reply', 'reconnect_required': 'Reconnect account',
+                  'response_complete': 'Response complete', 'failed': 'Failed', 'cancel_requested': 'Stopping — awaiting confirmation',
+                  'cancelled': 'Stopped', 'incompatible': 'Connector incompatible'}
+        for turn in turns:
+            for name, value in [('You', turn['prompt']), ('Status', phases.get(turn['phase'], 'Unknown provider state')),
+                                ('Agent', turn.get('result')), ('Detail', turn.get('detail'))]:
+                if value:
+                    for paragraph in (name + ' · ' + value).splitlines():
+                        lines.extend(textwrap.wrap(paragraph, width=56))
+    else:
+        accounts = c.get('/api/cloud/accounts')
+        if not isinstance(accounts, list):
+            raise ValueError('invalid cloud inventory')
+        providers = {'cursor_cloud': 'Cursor Cloud', 'grok_bot': 'Grok Bot', 'hermes': 'Hermes'}
+        for account in accounts:
+            if not isinstance(account['available'], bool):
+                raise ValueError('invalid availability')
+            provider = providers.get(account['provider'], account['provider'])
+            name = account['label'].removeprefix(provider + ' · ')
+            status = 'Available' if account['available'] else account.get('reason') or 'Unavailable'
+            lines.append(' · '.join([provider, name, status]))
+            if account['available'] and account['provider'] in providers:
+                account_id = account['id']
+                if not isinstance(account_id, str) or not account_id or label(account_id) != account_id:
+                    raise ValueError('invalid account identifier')
+                profiles.append((account['provider'], account_id, provider + ' · ' + name))
+    c.check()
+    print('cloud')
+    for profile in profiles:
+        print('P\t' + '\t'.join(map(label, profile)))
+    for action in actions:
+        print('A\t' + action)
+    for line in lines:
+        print('L\t' + label(line))
