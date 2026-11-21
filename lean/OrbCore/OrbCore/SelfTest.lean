@@ -3628,17 +3628,21 @@ private def runWarmClaudeControlAndCheckpointsCoreTests (prodValid : CoreConfig)
       | .error _ => return none
     | .error _ => return none
 
-  let createBody := OrbBin.Json.renderCompact (.obj #[
+  let firstPrompt := "Update tracked.txt\n日本語 🙂"
+  let createBody := (OrbBin.Json.renderCompact (.obj #[
     ("id", .str "m-warm-core-1"),
     ("title", .str "Warm Claude Core Test"),
     ("backend", .str "claudecode"),
     ("working_directory", .str repoFp.toString),
-    ("prompt", .str "Update tracked.txt"),
+    ("prompt", .str firstPrompt),
     ("spawn_harness", .bool true),
     ("permission_mode", .str "supervised")
-  ])
-  let createResp? ← dispatch s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {createBody.utf8ByteSize}\r\n\r\n{createBody}"
-  if createResp?.map (·.status) != some 201 then
+  ])).replace "日本語 🙂" "\\u65e5\\u672c\\u8a9e \\ud83d\\ude42"
+  let createRequest := s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nIdempotency-Key: warm-first-turn\r\nContent-Length: {createBody.utf8ByteSize}\r\n\r\n{createBody}"
+  let createResp? ← dispatch createRequest
+  let replay? ← dispatch createRequest
+  if createResp?.map (·.status) != some 201 || replay?.map (·.status) != some 201 ||
+      replay?.map (·.body) != createResp?.map (·.body) then
     OrbBin.ClaudeControl.stopHarnessRun warmMgr "m-warm-core-1"
     closeCoreStore store
     IO.FS.removeDirAll root
@@ -3651,6 +3655,14 @@ private def runWarmClaudeControlAndCheckpointsCoreTests (prodValid : CoreConfig)
   while waitedPerm < 4000 && !sawNativeReq do
     if let some evResp ← dispatch s!"GET /api/control/missions/m-warm-core-1/events HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n" then
       hasEventsHdr := evResp.extraHdrs.any (fun p => p.1 == "X-Orb-Events-Protocol" && p.2 == "1")
+      let events := ((OrbBin.Json.parseBytes evResp.body).toOption.bind (·.asArr?)).getD #[]
+      let messages := events.filter fun event => event.fieldStr? "event_type" == some "user_message"
+      if messages.map (·.fieldStr? "content") != #[some firstPrompt] then
+        OrbBin.ClaudeControl.stopHarnessRun warmMgr "m-warm-core-1"
+        closeCoreStore store
+        IO.FS.removeDirAll root
+        IO.eprintln "[orb-core-test] FAIL: first prompt was duplicated or changed on create"
+        return 1
       let bodyStr := String.fromUTF8? evResp.body |>.getD ""
       if (bodyStr.splitOn "core-perm-1").length >= 2 && (bodyStr.splitOn "ui_native_request").length >= 2 then
         sawNativeReq := true
