@@ -11,7 +11,7 @@ import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 PKG = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PKG / 'OrbDesktop'))
@@ -314,12 +314,32 @@ class Delivery(unittest.TestCase):
     def test_stop_appears_when_the_roster_and_bubble_both_report_active(self):
         self.run_wire('start-running')
 
+    def test_recovery_reports_changed_reason_without_server_details(self):
+        denied = live.urllib.error.HTTPError('http://localhost', 401, 'private response', {}, None)
+        with patch.object(live, 'roster', side_effect=[FileNotFoundError(), denied]), patch.object(
+                live.time, 'sleep') as sleep, contextlib.redirect_stdout(io.StringIO()) as out:
+            live.recover_roster('missing')
+        sleep.assert_called_once_with(1)
+        self.assertEqual(out.getvalue(), 'F\tsignin\n')
+
+    def test_invalid_saved_session_is_reported_without_echoing_contents(self):
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, ORB_STATE_DIR=home):
+            Path(home, 'connection.json').write_text('["private"]')
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                live.recover_roster('')
+            self.assertEqual(out.getvalue(), 'F\tinvalid\n')
+
+    def test_denied_account_has_its_own_window_state(self):
+        self.run_wire('denied')
+
     def test_saved_session_recovers_inside_the_window(self):
         self.run_wire('reconnect')
 
     def run_wire(self, mode):
         paths, tokens = [], []
         db = fixture()
+        project_started = threading.Event()
+        release_project = threading.Event()
         events = '/current-bubble'
         a, b = ('/api/control/missions/' + m for m in ('a', 'b'))
 
@@ -328,6 +348,9 @@ class Delivery(unittest.TestCase):
                 path = self.path
                 paths.append(path)
                 tokens.append(self.headers.get('Authorization'))
+                if mode == 'denied':
+                    self.send_error(403)
+                    return
                 if mode == 'reconnect' and tokens[-1] == 'Bearer fixture':
                     self.send_error(401)
                     return
@@ -355,11 +378,17 @@ class Delivery(unittest.TestCase):
                         return
                 elif path == live.INBOX_PATH:
                     result = {'_versions': {}}
-                elif path == '/api/machines':
+                elif mode == 'project-lag' and path.startswith('/api/control/missions?project=p&'):
+                    project_started.set()
+                    release_project.wait(8)
+                    result = []
+                elif path.startswith('/api/control/missions?project=p&') or path == '/api/machines':
                     result = []
                 elif path.split('?')[0] in (a + events, b + events):
                     mid = path.split('/')[-2]
                     presence = path.endswith('?presence=1')
+                    if mode == 'project-lag' and mid == 'b':
+                        project_started.wait(3)
                     if mode == 'selected-session' and mid == 'b' and paths.count(path) > 1:
                         self.send_error(401)
                         return
@@ -408,9 +437,9 @@ class Delivery(unittest.TestCase):
                 if mode in ('idle-share', 'idle-page-two'):
                     self.assertIn(b + events + '?presence=1', paths)
                     self.assertNotIn(b + events, paths)
-                elif mode in ('page-two', 'null-retry', 'start-running'):
+                elif mode in ('page-two', 'null-retry', 'start-running', 'project-lag'):
                     self.assertIn(b + events, paths)
-                elif mode in ('idle-identity', 'before-open', 'unavailable', 'idle-session'):
+                elif mode in ('idle-identity', 'before-open', 'unavailable', 'denied', 'idle-session'):
                     self.assertFalse(any(p.startswith(a) or p.startswith(b) for p in paths))
                 else:
                     # Scheduling can allow an extra valid sample on slow CI.
@@ -421,8 +450,12 @@ class Delivery(unittest.TestCase):
                     if mode == 'leave':
                         self.assertEqual(paths.count(b + events), 1)
             finally:
+                release_project.set()
                 server.shutdown()
                 db.close()
+
+    def test_conversation_updates_while_expanded_project_read_is_pending(self):
+        self.run_wire('project-lag')
 
     def test_revocation(self):
         self.run_wire('revoke')
@@ -515,9 +548,46 @@ class Delivery(unittest.TestCase):
             self.assertEqual(request.kwargs['body']['working_directory'], directory)
             self.assertNotIn('remote_node_id', request.kwargs['body'])
 
+    def test_restore_clears_archive_tag_without_changing_completed_work(self):
+        path = '/api/control/missions/worker'
+        c = Mock()
+        c.get.return_value = dict(id='worker', status='completed', tags=['archived'])
+        live.change_status(c, 'restore', 'worker', 'key')
+        self.assertEqual(c.request.call_args_list, [call(path + '/archive', body={'archived': False}, key='key-tag')])
+        c.reset_mock()
+        c.get.return_value['status'] = 'acknowledged'
+        live.change_status(c, 'restore', 'worker', 'key')
+        self.assertEqual(c.request.call_args_list, [
+            call(path + '/archive', body={'archived': False}, key='key-tag'),
+            call(path + '/status', body={'status': 'paused'}, key='key')])
+
+    def test_expanded_project_restores_older_active_worker_and_its_controller(self):
+        query = '/api/control/missions?project=p&limit=2'
+        def row(mid, status, **fields):
+            return dict(id=mid, project='p', status=status, **fields)
+        old = row('old', 'completed')
+        child = row('child', 'active', parent_mission_id='controller')
+        history = [row('new', 'completed'), row('archived', 'acknowledged')]
+        pages = {live.INBOX_PATH: {}, query + '&all=true': history, query: [history[0], old],
+                 query + '&offset=2': [child, row('side', 'active', tags=['btw-parent:child'])],
+                 query + '&offset=4': [], '/api/control/missions/controller?include_history=false': row('controller', 'completed'),
+                 '/api/projects': {'projects': [{'slug': 'p'}]}, '/api/machines': [],
+                 '/api/control/missions?limit=200&include_ancestors=true': [old]}
+        connection = type('Fixture', (), {'binding': 'bound', 'check': lambda _: None, 'get': lambda _, path: pages[path]})()
+        rules = json.loads((PKG.parents[1] / 'orb/src/projectHistoryRules.json').read_text())
+        rules['pageSize'] = 2
+        initial = live.roster_rows(connection)
+        self.assertEqual([r[1] for r in initial if r[0] == 'M'], ['old'])
+        loaded = live.roster_rows(connection, expanded=['p'], rules=rules)
+        self.assertIn(('G', 'p', 'archived', 'child', 'controller', 'new'), loaded)
+        self.assertIn('old', [r[1] for r in loaded if r[0] == 'M'])
+        pages[query + '&offset=2'] = None
+        with self.assertRaises(ValueError):
+            live.roster_rows(connection, expanded=['p'], rules=rules)
+
     def test_child_precedes_parent_in_live_roster(self):
         child = dict(id='child', folder='notes/today', parent_mission_id='launch',
-                     callback_parent_mission_id='callback', tags=['fork-of:source'],
+                     callback_parent_mission_id='callback', tags=['fork-of:source', 'archived'],
                      superseded_by_mission_id='next')
         pages = {live.INBOX_PATH: {}, '/api/projects': {'projects': []}, '/api/machines': [],
                  '/api/control/missions?limit=200&include_ancestors=true': [child]}
@@ -526,7 +596,7 @@ class Delivery(unittest.TestCase):
         for missions in ([child], [child, dict(id='launch')]):
             pages['/api/control/missions?limit=200&include_ancestors=true'] = missions
             projected = next(row for row in live.roster_rows(connection) if row[0] == 'M')
-            self.assertEqual(projected[16:], ('notes/today', 'launch', 'callback', 'source', 'next'))
+            self.assertEqual(projected[16:], ('notes/today', 'launch', 'callback', 'source', 'next', '1'))
 
     def test_live_reader_accepts_both_full_roster_pages(self):
         ids = [str(i).zfill(128) for i in range(300)]
@@ -552,8 +622,8 @@ class Delivery(unittest.TestCase):
         out = io.StringIO()
         with patch.object(live, 'roster_rows', return_value=[('M','a','Title')]), patch.object(live, 'Connection', Connection), patch.object(live.time, 'sleep', side_effect=[None, KeyboardInterrupt]), contextlib.redirect_stdout(out):
             with self.assertRaises(KeyboardInterrupt):
-                live.poll('a', 'bound', {'a'})
-        self.assertEqual(out.getvalue(), 'B\t+M\x1ca\x1cTitle\tTitle\tactive\tPublic\n')
+                live.poll_bubble('a', 'bound')
+        self.assertEqual(out.getvalue(), 'B\tTitle\tactive\tPublic\n')
 
     def test_unselected_status_changes_reach_sidebar(self):
         class Connection:

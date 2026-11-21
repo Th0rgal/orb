@@ -1145,7 +1145,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
                [WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (min (pxToSub 748) (mainW - pxToSub 68)) (pxToSub 42))
                  pal.elevatedSurface (CornerRadii.uniform (pxToSub 21))]
            else if st.liveData then screenTextLine theme mainW (pxToSub 32) (pxToSub 13)
-             (pxToSub 21) pal.textPrimary "Check your connection in Orb Settings → Account."
+             (pxToSub 21) pal.textPrimary st.connectionIssue.hint
            else buildNewAgentBody st mainW bodyH]
 
   let baseShell : WidgetNode :=
