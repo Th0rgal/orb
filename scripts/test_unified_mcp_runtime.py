@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -179,6 +180,26 @@ print(str(credential))
                                     capture_output=True, text=True, env=env_no_mission, timeout=15)
             self.assertEqual(ext_ok.returncode, 0, ext_ok.stderr)
             self.assertIsNone(json.loads(ext_ok.stdout)["identity"]["mission_id"])
+
+    def test_antigravity_overlay_checks_mission_identity(self):
+        with core() as (url, _), tempfile.TemporaryDirectory() as directory:
+            probe = """import json, pathlib, subprocess
+config = json.loads(pathlib.Path('.agents/mcp_config.json').read_text())
+server = config['mcpServers']['sandboxed']
+result = subprocess.check_output([server['command'], *server['args'], '--check'])
+print(json.loads(result)['identity']['mission_id'])
+"""
+            env = {"PATH": os.environ["PATH"], "HOME": directory, "SANDBOXED_MCP_API_URL": url,
+                   "SANDBOXED_MCP_TOKEN": "mcp1.initial", "SANDBOXED_SH_MISSION_ID": MISSION}
+            command = [str(BINARY), "launch", "--harness", "antigravity", "--", sys.executable, "-c", probe]
+            result = subprocess.run(command, cwd=directory, env=env, capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), MISSION)
+            env["SANDBOXED_SH_MISSION_ID"] = "00000000-0000-0000-0000-000000000002"
+            denied = subprocess.run(command, cwd=directory, env=env, capture_output=True, text=True, timeout=15)
+            self.assertNotEqual(denied.returncode, 0)
+            self.assertIn("identity", denied.stderr.lower())
+            self.assertFalse((Path(directory) / ".agents/mcp_config.json").exists())
 
     def test_scoped_renewal_survives_client_restart(self):
         with core(expiring=True) as (url, state), tempfile.TemporaryDirectory() as directory:
