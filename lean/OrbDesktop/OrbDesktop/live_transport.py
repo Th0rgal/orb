@@ -288,7 +288,7 @@ def roster_rows(c, include_archived=False):
             if error.code != 404:
                 raise
     rows = [('C', c.binding)]
-    rows += [('P', p['slug'], p.get('title') or p['slug'], p.get('objective')) for p in projects]
+    rows += [('P', p['slug'], p.get('title') or p['slug'], p.get('objective'), p.get('color')) for p in projects]
     rows += [('M', *(m.get(k) for k in ('id','title','project','track','model','model_override',
                                         'status','updated_at','created_at','short_description')), *mission_settings(m), *mission_hierarchy(m))
              for m in missions if re.fullmatch(r'[A-Za-z0-9_-]{1,128}', m['id'])]

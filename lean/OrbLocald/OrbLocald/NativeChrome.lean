@@ -1,4 +1,5 @@
 import LeanSys
+import Orb.ProjectAppearance
 import Orb.Kernel
 import OrbBin.Json
 import Std.Data.HashMap
@@ -289,20 +290,11 @@ def parseUpdatedAtMs (jv : JVal) : UInt64 := Id.run do
         return normalizeEpochScale dec.toUInt64
   return 0
 
-private def normalizeProjectColor (raw : String) : String :=
-  let c := raw.trimAscii.toString.toLower
-  if c == "#8aaed4" || c == "blue" then "#8aaed4"
-  else if c == "#94b89a" || c == "green" then "#94b89a"
-  else if c == "#c5aa70" || c == "amber" then "#c5aa70"
-  else if c == "#cb929f" || c == "rose" then "#cb929f"
-  else if c == "#ad9acb" || c == "purple" then "#ad9acb"
-  else ""
-
 def parseProjectInput? (jv : JVal) : Option ChromeProjectInput := do
   let slug := ((jv.fieldStr? "slug").orElse (fun _ => jv.fieldStr? "id")).getD "" |>.trimAscii.toString
   if slug.isEmpty then none
   let name := ((jv.fieldStr? "name").orElse (fun _ => jv.fieldStr? "title")).getD slug |>.trimAscii.toString
-  let color := normalizeProjectColor ((jv.fieldStr? "color").getD "")
+  let color := Orb.ProjectAppearance.css ((jv.fieldStr? "color").getD "")
   let rawFolders := (jv.fieldArr? "folders").getD #[]
   let folders := rawFolders.filterMap fun f =>
     let p := match f.asStr? with

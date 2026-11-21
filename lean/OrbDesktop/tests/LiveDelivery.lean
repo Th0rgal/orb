@@ -162,8 +162,9 @@ def main (args : List String) : IO Unit := do
     return
   let some st := boot | throw (IO.userError "bootstrap failed")
   let [a,b] := st.missionCards | throw (IO.userError "bad roster")
-  unless st.sidebarRows.any (fun r => r.title == "Project title" && r.subtitle == "Objective") do
+  unless st.sidebarRows.any (fun r => r.title == "Project title" && r.subtitle == "Objective" && r.iconColor == some 0x8aaed4ff) do
     throw (IO.userError "wrong project fields")
+  unless st.expandedProjects == ["p"] do throw (IO.userError "single project was collapsed at launch")
   let slot ← IO.mkRef (none : Option LiveSubscription)
   try
     if args == ["page-two"] || args == ["null-retry"] then

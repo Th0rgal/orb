@@ -78,7 +78,7 @@ class Delivery(unittest.TestCase):
                     self.send_error(401)
                     return
                 if path == '/api/projects':
-                    result = {'projects': [dict(slug='p', title='Project title', objective='Objective')]}
+                    result = {'projects': [dict(slug='p', title='Project title', objective='Objective', color='blue')]}
                 elif path == '/api/control/missions?limit=200':
                     if mode == 'unavailable':
                         self.send_response(302)

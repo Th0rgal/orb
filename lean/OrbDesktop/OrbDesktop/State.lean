@@ -215,6 +215,7 @@ structure ChromeSidebarRow where
   depth : Nat := 0
   title : String
   subtitle : String := ""
+  iconColor : Option Color := none
   status : String := "" -- `"running"`, `"completed"`, `"attention"`, `""`
   shortcut : String := ""
   badge : Nat := 0

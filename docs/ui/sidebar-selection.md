@@ -23,6 +23,8 @@ the open conversation:
 
 ## Live native desktop hierarchy
 
+On the first live roster, a sole project opens automatically. Its folder icon uses the project color from Core, with the theme’s muted icon color for a missing or unknown value. Multiple projects start collapsed when no mission is selected.
+
 Opening or closing a project changes the tree disclosure. The current view,
 draft text, and draft destination survive either gesture. The open folder icon
 identifies an expanded project. Its plus button starts a new draft in that project.

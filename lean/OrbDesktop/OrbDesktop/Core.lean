@@ -1,4 +1,5 @@
 import OrbDesktop.State
+import Orb.ProjectAppearance
 import Std.Sync.Mutex
 import Std.Data.HashMap
 
@@ -25,7 +26,8 @@ private def runProjection : IO (Option (List String)) := do
 
 private def projectRow (idx : Nat) (xs : List String) : ChromeSidebarRow :=
   { widgetId := 1000 + 3 * idx, rowId := "project:" ++ col xs 1, kind := "project"
-    title := col xs 2, subtitle := col xs 3 }
+    title := col xs 2, subtitle := col xs 3
+    iconColor := (Orb.ProjectAppearance.rgb? (col xs 4)).map fun rgb => (rgb * 256 + 255).toUInt32 }
 
 private def missionCard (idx : Nat) (xs : List String) : MissionSummaryCard :=
   { widgetId := 1001 + 3 * idx, missionId := col xs 1, title := col xs 2, project := col xs 3
@@ -63,6 +65,9 @@ private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale
     syncCursor := { epoch := 0, seq := 0 }
     connectionBinding := binding
     stream := Orb.Stream.Coalescer.empty
+    expandedProjects := match projects with
+      | [onlyProject] => [(onlyProject.rowId.drop 8).toString]
+      | _ => []
     sidebarRows := sidebar
     missionCards := missions
     fleetMachines := machines, catalogLoading := true }
