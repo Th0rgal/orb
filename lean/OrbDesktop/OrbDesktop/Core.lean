@@ -230,9 +230,13 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
           | .effort => "effort" | .permission => "permission"
         ("settings", mid, key ++ "\t" ++ encode values)
     try
-      let r ← IO.Process.output { cmd := "python3", args := #["-I", "-c", transport ++ "\ntry: mutate(*sys.argv[1:])\nexcept MissionNotIdle: sys.exit(2)\nexcept Exception: sys.exit(1)", st.connectionBinding, action, mid] } (input? := some text)
+      let r ← IO.Process.output { cmd := "python3", args := #["-I", "-c", transport ++ "\nsys.exit(run_mutation(*sys.argv[1:]))", st.connectionBinding, action, mid] } (input? := some text)
       if action == "archive" && r.exitCode == 2 then
         return ({ st with writeError := "Stop or finish this agent before archiving it." }, some viewport)
+      if r.exitCode == 3 then
+        return ({ st with writeError := "Choose a Goal-capable harness or remove /goal." }, some viewport)
+      if r.exitCode == 4 then
+        return ({ st with writeError := "Start a new Goal mission or remove /goal." }, some viewport)
       if r.exitCode != 0 then throw (IO.userError "write failed")
       closeLiveSubscription slot
       match request with

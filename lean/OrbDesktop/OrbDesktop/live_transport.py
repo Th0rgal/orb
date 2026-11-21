@@ -87,6 +87,27 @@ class MissionNotIdle(ValueError):
     pass
 
 
+def run_mutation(binding, action, mid):
+    try:
+        mutate(binding, action, mid)
+        return 0
+    except MissionNotIdle:
+        return 2
+    except urllib.error.HTTPError as error:
+        with error:
+            if action in ('create', 'send') and error.code == 400:
+                try:
+                    detail = json.loads(error.read(4096)).get('error')
+                except (ValueError, AttributeError):
+                    detail = None
+                if isinstance(detail, str) and detail.partition(':')[0] in (
+                        'remote_goal_unsupported', 'remote_goal_followup_unsupported'):
+                    return 3 if action == 'create' else 4
+        return 1
+    except Exception:
+        return 1
+
+
 def change_status(c, action, mid, key):
     path = '/api/control/missions/' + mid
     if action == 'archive':

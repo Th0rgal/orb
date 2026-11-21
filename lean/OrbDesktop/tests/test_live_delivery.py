@@ -224,6 +224,17 @@ class Delivery(unittest.TestCase):
         models[1]['provider_id'] = 'local'
         self.assertEqual(list(live.visible_model_options('opencode', models, rules)), models[1:])
 
+    def test_goal_refusals_keep_server_text_out_of_the_notice(self):
+        for action, reason, expected in [
+                ('create', 'remote_goal_unsupported: detail', 3),
+                ('send', 'remote_goal_followup_unsupported: detail', 4),
+                ('create', 'unrelated error', 1),
+                ('rename', 'remote_goal_unsupported: detail', 1)]:
+            body = io.BytesIO(json.dumps({'error': reason}).encode())
+            error = live.urllib.error.HTTPError('http://localhost', 400, '', {}, body)
+            with self.subTest(action=action, reason=reason), patch.object(live, 'mutate', side_effect=error):
+                self.assertEqual(live.run_mutation('binding', action, 'm'), expected)
+
     def test_new_agent_sends_the_first_prompt_in_the_create_request(self):
         prompt = 'First line\tcontains a tab.\nSecond line.'
         payload = '\t'.join(['core', 'codex', 'model', '', 'supervised', 'now', prompt])
