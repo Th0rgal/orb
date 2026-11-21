@@ -190,15 +190,19 @@ def run():
                 def row(label):
                     return next((r for r in projection()['rows'] if r['title'].lower() == label), None)
 
-                def words():
+                def words(expected=None):
                     pointer.move(750, 650)
                     time.sleep(.1)
                     area = '0,30 219x670'
                     image = subprocess.check_output(['grim', '-t', 'ppm', '-g', area, '-'], env=env)
-                    return {word: (x, y) for word, x, y in read_words(image, area)}
+                    labels = {word: (x, y) for word, x, y in read_words(image, area)}
+                    if expected not in labels:
+                        # Tesseract can discard dark text on the translucent light sidebar.
+                        labels.update((word, (x, y)) for word, x, y in read_words(image, area, binarize=True))
+                    return labels
 
                 def click(word):
-                    pointer.click(*check('sidebar ' + word, lambda: words().get(word)))
+                    pointer.click(*check('sidebar ' + word, lambda: words(word).get(word)))
 
                 see('native')
                 check('Machines in the shared sidebar projection', lambda: row('machines'))
