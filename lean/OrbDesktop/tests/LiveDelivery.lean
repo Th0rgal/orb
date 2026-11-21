@@ -247,6 +247,9 @@ def main (args : List String) : IO Unit := do
     return
   let some st := boot | throw (IO.userError "bootstrap failed")
   if let ["inbox", action] := args then
+    unless !st.inboxAvailable && st.missionCards.isEmpty do throw (IO.userError "bootstrap waited for Inbox history")
+    let slot ← IO.mkRef none
+    let st ← awaitState slot st (·.inboxAvailable)
     let page := (stepDesktopEvent 120 vp st (.key 0x69 2 .pressed)).1
     let tree := buildDesktopScreen page (pxToSub 800) (pxToSub 600)
     let (_, scene) := renderWidgetTree 120 (pxToSub 800) (pxToSub 600) page.initialFocusState page.theme tree
@@ -259,7 +262,6 @@ def main (args : List String) : IO Unit := do
     let reduce := stepDesktopEvent 120 vp
     let rt := if action == "read" then rt.stepEvent reduce (.key 0xff09 0 .pressed) else rt
     let rt := rt.stepEvent reduce (.key 0xff0d 0 .pressed)
-    let slot ← IO.mkRef none
     let (next, _) ← readLiveFrame slot 120 vp rt.app
     unless next.visibleProjectRows.any (fun r => r.rowId == "nav:inbox" && r.badge == 0) && next.writeError.isEmpty &&
         next.openMission == (if action == "open" then some "shared" else none) do
@@ -387,7 +389,7 @@ private def nativeDraftFixture : DesktopState := { remoteCatalogFixture with
 
 private def inboxFixture : DesktopState := { hierarchyFixture with
   inboxAvailable := true
-  inboxItems := [⟨"first", 10, 0⟩, ⟨"second", 20, 3⟩]
+  inboxItems := [⟨"first", 10, 0, default⟩, ⟨"second", 20, 3, default⟩]
   sidebarRows := [{ widgetId := 102, rowId := "nav:inbox", kind := "nav", title := "Inbox" }] }
 private def inboxStep (st : DesktopState) (event : Event) :=
   (stepDesktopEvent 120 vp st event).1
@@ -395,5 +397,5 @@ private def inboxOpened := inboxStep inboxFixture (.key 0x69 2 .pressed)
 private def inboxSecond := inboxStep inboxOpened (.key 0xff54 0 .pressed)
 #guard inboxOpened.screen == .inbox && inboxOpened.writeRequest.isNone
 #guard desktopFocusChange inboxFixture inboxOpened (.activate 102) == some 940
-#guard (inboxStep inboxSecond (.activate 941)).writeRequest == some (.inboxRead ⟨"second", 20, 3⟩ false)
-#guard (inboxStep inboxSecond (.activate 940)).writeRequest == some (.inboxRead ⟨"second", 20, 3⟩ true)
+#guard (inboxStep inboxSecond (.activate 941)).writeRequest == some (.inboxRead ⟨"second", 20, 3, default⟩ false)
+#guard (inboxStep inboxSecond (.activate 940)).writeRequest == some (.inboxRead ⟨"second", 20, 3, default⟩ true)

@@ -137,8 +137,11 @@ warnings to make the test pass.
 
 ### LeanUI trial
 
-The live navigation badge and Inbox items use the same connection-bound roster
-snapshot. Opening Inbox leaves receipts untouched. Opening an item or choosing
+The live navigation badge and Inbox items use the same user-scoped snapshot.
+After the sidebar bootstrap, the background reader pages through authorized Core
+mission summaries, including archived rows needed to resolve BTW ancestry.
+It publishes candidates after the final page. Items outside the sidebar page
+carry their mission summary so Open can navigate directly to the transcript. Opening Inbox leaves receipts untouched. Opening an item or choosing
 Mark read acknowledges only its displayed response timestamp and observed Core
 entry version. Another user can still see the same shared mission as unread.
 A newer response becomes unread again. Ctrl/Cmd+I opens Inbox, Up/Down moves
@@ -146,7 +149,12 @@ between items, and Tab and Enter activate the displayed controls.
 
 GTK receives its badge from the Web Inbox projection. Web and LeanUI both
 prioritize replies needing attention over ready results and honor the user's
-Inbox preferences and signed seen timestamps. The trial operates on the current
-Core mission roster. Web also considers pending interactions observed in the
-transcript and offers digest previews. LeanUI opens the mission transcript
+Inbox preferences and signed seen timestamps. Both apply project membership,
+client placement, BTW ancestry, scheduled recovery and unread child failure
+rules. A completed mission carrying only an `archived` tag remains eligible
+under Solid's unread classifier. An acknowledged mission is ineligible.
+
+The parity test runs Solid and the native summary reader on identical paged
+fixtures. Web also uses local pending missions, cached hierarchy links and
+observed transcript interactions, and offers digest previews. LeanUI opens the mission transcript
 directly and writes the per-user seen receipt.

@@ -53,7 +53,7 @@ class Delivery(unittest.TestCase):
             def do_GET(self):
                 if self.path == live.INBOX_PATH:
                     self.reply(states[self.headers['Authorization'].split()[1]])
-                elif self.path.startswith('/api/control/missions?limit='):
+                elif self.path.startswith('/api/control/missions?all=true&limit='):
                     self.reply([mission])
                 elif self.path == '/api/projects':
                     self.reply({'projects': []})
@@ -80,10 +80,8 @@ class Delivery(unittest.TestCase):
             threading.Thread(target=server.serve_forever, daemon=True).start()
             url = f'http://127.0.0.1:{server.server_port}'
             def rows():
-                out = io.StringIO()
-                with contextlib.redirect_stdout(out):
-                    live.roster()
-                return [r.split('\t') for r in out.getvalue().splitlines() if r.startswith('U\t')]
+                return [[str(v) for v in row[:4]] for row in live.inbox_snapshot(live.Connection(), [], '')
+                        if row[0] == 'U']
             with patch.object(live, 'credentials', return_value=(url, 'alice')) as creds:
                 alice = live.Connection().binding
                 entry, = rows()
@@ -111,6 +109,29 @@ class Delivery(unittest.TestCase):
                                    env={**os.environ, 'ORB_STATE_DIR': root})
                     self.assertEqual(states[user]['seen:shared'], 1767225660000)
             server.shutdown()
+
+    def test_inbox_paging_is_deferred_and_partial_pages_do_not_publish_a_badge(self):
+        paths = []
+        class Core:
+            binding = 'fixture'
+            def check(self):
+                pass
+            def get(self, path):
+                paths.append(path)
+                if path == '/api/projects':
+                    return {'projects': []}
+                if path == live.INBOX_PATH:
+                    return {}
+                if path.endswith('offset=0'):
+                    return [dict(id=str(i), status='completed') for i in range(200)]
+                if path.endswith('offset=200'):
+                    raise TimeoutError()
+                return []
+        c = Core()
+        self.assertEqual(live.roster_rows(c, include_archived=True), [('C', 'fixture')])
+        self.assertFalse(any(p == live.INBOX_PATH or 'offset=' in p for p in paths))
+        self.assertEqual(live.roster_rows(c, include_archived=True, inbox_for=''), [('C', 'fixture')])
+        self.assertTrue(paths[-1].endswith('offset=200'))
 
     def test_inbox_preferences_response_time_and_order(self):
         base = dict(status='completed', updated_at='2026-01-01T00:00:00Z')
@@ -353,6 +374,8 @@ class Delivery(unittest.TestCase):
                     if mode == 'null-retry' and paths.count(path) == 3:
                         self.send_error(503)
                         return
+                elif path.startswith('/api/control/missions?all=true&limit='):
+                    result = []
                 elif path == live.INBOX_PATH:
                     result = {'_versions': {}}
                 elif path == '/api/machines':
