@@ -329,7 +329,12 @@ def native_models(binding, machine):
 
 
 def launch_machine_rows(fleet, administrative, harness):
-    if fleet['enabled'] is not True or (fleet.get('remote_launch') or {}).get('typed') is not True:
+    capability = fleet.get('remote_launch') or {}
+    if fleet['enabled'] is not True or capability.get('typed') is not True:
+        return
+    if harness and harness not in (capability.get('harnesses') or []):
+        return
+    if capability.get('proxy_url_configured') is False and harness in (capability.get('requires_proxy_harnesses') or []):
         return
     for node in fleet['nodes']:
         ident = node['id']

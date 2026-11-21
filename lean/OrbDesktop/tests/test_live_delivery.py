@@ -63,7 +63,7 @@ class Delivery(unittest.TestCase):
     def test_launchable_remote_nodes_are_independent_of_personal_vms(self):
         def node(ident, **fields):
             return {'id': ident, 'status': 'online', **fields}
-        fleet = {'enabled': True, 'remote_launch': {'typed': True}, 'nodes': [
+        fleet = {'enabled': True, 'remote_launch': {'typed': True, 'harnesses': ['codex']}, 'nodes': [
             node('uruk', display_name='Uruk'), node('core'), node('admin', labels=['admin-only']),
             node('maintenance', cordoned=True), node('down', status='offline'),
             node('quarantined', quarantined_harnesses=['codex']),
@@ -81,6 +81,19 @@ class Delivery(unittest.TestCase):
         permitted = [r[1] for r in live.launch_machine_rows(fleet, True, 'codex')]
         self.assertEqual(permitted, ['uruk', 'admin', 'dgx-spark-admin'])
         self.assertEqual(list(live.launch_machine_rows({**fleet, 'remote_launch': {}}, True, '')), [])
+
+    def test_picker_uses_the_harness_and_proxy_capabilities_reported_by_core(self):
+        fleet = {'enabled': True, 'nodes': [{'id': 'uruk', 'status': 'online'}],
+                 'remote_launch': {'typed': True, 'harnesses': ['antigravity', 'codex'],
+                                   'requires_proxy_harnesses': ['codex'], 'proxy_url_configured': False}}
+        def rows(harness):
+            return list(live.launch_machine_rows(fleet, False, harness))
+        self.assertEqual(rows('opencode'), [])
+        self.assertEqual(rows('codex'), [])
+        self.assertEqual(rows('antigravity'), [('R', 'uruk', 'uruk')])
+        self.assertEqual(rows(''), [('R', 'uruk', 'uruk')])
+        fleet['remote_launch']['proxy_url_configured'] = True
+        self.assertEqual(rows('codex'), [('R', 'uruk', 'uruk')])
 
     def test_provider_inventory_projects_only_the_current_users_display_fields(self):
         accounts = [{'id': 'test-member', 'name': 'Gemini', 'label': 'Work', 'provider_type_name': 'Google',
