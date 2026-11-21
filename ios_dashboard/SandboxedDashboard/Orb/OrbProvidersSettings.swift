@@ -269,7 +269,7 @@ struct OrbProvidersSettings: View {
                                 .font(.caption).foregroundStyle(.orange)
                         }
                         let manages = Self.canManageProvider(provider, isAdmin: isAdmin)
-                        if manages { OrbAccountVpnSettings(client: client, account: provider["id"].text).id(provider["id"].text) }
+                        OrbAccountVpnSettings(client: client, account: provider["id"].text).id(provider["id"].text)
                         let unverified = detail["status"].text == "needs_verification"
                         if unverified && manages {
                             // Google refuses this login until its owner verifies it; the

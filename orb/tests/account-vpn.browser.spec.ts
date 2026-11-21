@@ -37,9 +37,6 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
   if (await group.getAttribute("aria-expanded") === "false") await group.click();
   const shared = page.locator(".p-acc-btn").filter({ hasText: "a@example.invalid" });
   await shared.click();
-  await expect(page.getByLabel("Account connection", { exact: true })).toHaveCount(0);
-  await shared.click();
-  await page.locator(".p-acc-btn").filter({ hasText: "b@example.invalid" }).click();
   const select = page.getByLabel("Account connection", { exact: true });
   await expect(select).toHaveValue("");
   await select.selectOption("NL");
@@ -49,7 +46,7 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
   await expect(verified).toBeVisible();
   await select.selectOption("");
   await expect(verified).toHaveCount(0);
-  const path = "/api/ai/providers/b/vpn";
+  const path = "/api/ai/providers/a/vpn";
   expect(changes).toEqual([[path, { mode: "vpn", country: "NL" }], [path, { mode: "vpn", country: "NL" }], [path, { mode: "direct" }]]);
 });
 
