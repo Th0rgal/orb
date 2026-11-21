@@ -433,6 +433,9 @@ structure DesktopState where
   liveData : Bool := false
   initialRosterPending : Bool := false
   connectionIssue : ConnectionIssue := .unavailable
+  accountEndpoint : String := ""
+  accountUsername : String := ""
+  openAccountForm : Bool := false
   connectionBinding : String := ""
   writeRequest : Option LiveWrite := none
   writeError : String := ""
@@ -492,9 +495,14 @@ structure DesktopState where
   sidePanelOpen : Bool := false
   deriving Repr, Inhabited
 
+def settingsFooter : ChromeSidebarRow :=
+  { widgetId := 103, rowId := "nav:settings", kind := "footer", title := "Settings" }
+
+def accountFormId : Nat := 972
+
 /-- A failed bootstrap or invalidated identity must not fall back to golden fixtures. -/
 def DesktopState.liveUnavailable (isDark := true) (scale120 := 120) : DesktopState :=
-  { liveData := true, screen := .controlEmpty, theme := if isDark then orbDarkTheme else orbLightTheme
+  { liveData := true, sidebarRows := [settingsFooter], screen := .controlEmpty, theme := if isDark then orbDarkTheme else orbLightTheme
     scale120, syncCursor := { epoch := 0, seq := 0 } }
 
 def DesktopState.selectedCard (st : DesktopState) : Option MissionSummaryCard :=
@@ -1187,6 +1195,7 @@ def desktopFocusChange (before after : DesktopState) (ev : Event) : Option Nat :
     | none, some _ => some providersBackId
     | some page, none => ((after.providers.getD []).findIdx? (·.id == page.account.id)).map providerSettingsId
     | _, _ => none
+  else if after.screen == .settingsGeneral && before.screen != after.screen then some accountFormId
   else if after.screen == .cloud && before.screen != .cloud then some 111
   else if after.screen == .cloud && before.cloudMission != after.cloudMission then some (if after.cloudMission.isEmpty then 111 else 963)
   else if after.screen == .resources && before.screen != .resources then some 114
@@ -1267,6 +1276,19 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       | _ => false
     if toggle && st.missionMenu.isNone then
       return ({ st with sidebarHidden := !st.sidebarHidden }, some viewport)
+    let settings := match ev with
+      | .activate 103 => true
+      | .key 0x2c mods .pressed => mods == 2 || mods == 8
+      | _ => false
+    if settings then
+      let next := resetSelection { st with screen := .settingsGeneral, modal := .none, multiRows := [], writeError := "" } none
+      return ({ next with sidebarRows := next.sidebarRows.map fun r => { r with selected := r.widgetId == 103 } }, some viewport)
+    if st.screen == .settingsGeneral then
+      match ev with
+      | .text _ | .preedit .. | .imeBatch .. | .composerReturn .. => return (st, none)
+      | _ => pure ()
+      if let .activate id := ev then
+        if id == accountFormId then return ({ st with openAccountForm := true }, some viewport)
     if !st.hasLiveConnection || st.writeRequest.isSome then return (st, none)
     if let .key key _ state := ev then
       if [0xffe1,0xffe2,0xffe3,0xffe4,0xffeb,0xffec].contains key then

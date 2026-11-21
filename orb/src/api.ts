@@ -454,19 +454,26 @@ export const [connectionVersion, bumpConnectionVersion] = createSignal(0);
 let connectionSave = Promise.resolve();
 let connectionSavesInFlight = 0;
 export const isDesktopConnectionSaving = (): boolean => connectionSavesInFlight > 0;
-function persistDesktopConnection(connection: {api_url:string;token:string}|null) {
-  const invoke=nativeInvoke();
-  if(!invoke)return;
+type DesktopCredential = { api_url: string; token: string };
+export const accountHandoff = () => !!nativeInvoke() && window.location.hash === "#account-settings";
+function persistDesktopConnection(connection: DesktopCredential | null, expected?: DesktopCredential) {
+  const invoke = nativeInvoke();
+  if (!invoke) return Promise.resolve();
   connectionSavesInFlight++;
-  connectionSave=connectionSave.catch(()=>{}).then(()=>invoke('desktop_connection_save',{connection})).catch(swallow("api.connectionSave")).finally(()=>{connectionSavesInFlight--;});
+  const args = expected ? { connection, expected } : { connection };
+  const write = connectionSave.then(() => invoke<void>("desktop_connection_save", args))
+    .finally(() => { connectionSavesInFlight--; });
+  connectionSave = write.catch(swallow("api.connectionSave"));
+  return write;
 }
 export async function restoreDesktopConnection() {
   const invoke=nativeInvoke();
   if(!invoke)return;
   // Migrate an existing web-origin login before consulting the desktop store.
-  if(getJwt()){persistDesktopConnection({api_url:getApiUrl(),token:getJwt()!});return;}
+  if(!accountHandoff() && getJwt()){persistDesktopConnection({api_url:getApiUrl(),token:getJwt()!});return;}
   const saved=await invoke('desktop_connection_load').catch(()=>null);
   if(saved?.api_url&&saved?.token)setConnection(saved.api_url,saved.token,{persist:false});
+  else if(accountHandoff())clearConnection({persist:false});
 }
 
 /** Single-IPC desktop cold-start bootstrap (`desktop_bootstrap`) consolidating
@@ -486,10 +493,12 @@ export async function bootstrapDesktopRuntime(): Promise<void> {
       transport?: TransportBridgeInfo;
     }>("desktop_bootstrap", getJwt() ? { apiUrl: getApiUrl() } : {});
     if (boot && typeof boot === "object" && ("connection" in boot || "prefs" in boot || "transport" in boot)) {
-      if (getJwt()) {
+      if (!accountHandoff() && getJwt()) {
         persistDesktopConnection({ api_url: getApiUrl(), token: getJwt()! });
       } else if (boot.connection?.api_url && boot.connection?.token) {
         setConnection(boot.connection.api_url, boot.connection.token, { persist: false });
+      } else if (accountHandoff()) {
+        clearConnection({persist:false});
       }
       const prefsApplied = await applyBootstrappedDesktopPrefs(boot.prefs).catch(() => false);
       if (!prefsApplied) await initDesktopPrefs().catch(() => null);
@@ -513,15 +522,19 @@ export async function bootstrapDesktopRuntime(): Promise<void> {
 
 function disconnectNativeSync(){
   const invoke=nativeInvoke();
-  if(!invoke||!getJwt())return;
+  if(!invoke||!getJwt()||accountHandoff())return;
   void invoke("project_context_disconnect",{request:{endpoint:getApiUrl(),token:getJwt(),project:"disconnect"}}).catch(swallow("api.disconnect.projectContext"));
   void invoke("local_origin_disconnect",{connection:{api_url:getApiUrl(),token:getJwt()}}).catch(swallow("api.disconnect.localOrigin"));
 }
-export function setConnection(url: string, token: string, options?: { persist?: boolean }) {
+export function setConnection(url: string, token: string, options?: { persist?: boolean }): void | Promise<void> {
+  if (options?.persist !== false && accountHandoff()) {
+    return persistDesktopConnection({ api_url: url.trim().replace(/\/+$/, ""), token })
+      .then(() => setConnection(url, token, { persist: false }));
+  }
   const hadJwt = !!getJwt();
   const changed = url.replace(/\/+$/,"")!==getApiUrl() || token!==getJwt();
-  if(hadJwt && changed)disconnectNativeSync();
-  if(changed){resetMissionHierarchy();ancestorCache.clear();if(hadJwt)void clearPersistentCache();resetCurrentUserState();}
+  if(hadJwt && changed && options?.persist !== false)disconnectNativeSync();
+  if(changed){resetMissionHierarchy();ancestorCache.clear();if(hadJwt && !accountHandoff())void clearPersistentCache();resetCurrentUserState();}
   resetNetworkHealth();
   setApiUrl(url);
   localStorage.setItem(JWT_KEY, token);
@@ -533,13 +546,22 @@ export function setConnection(url: string, token: string, options?: { persist?: 
   bumpConnectionVersion(v => v + 1);
 }
 
-export function clearConnection(options?: { persist?: boolean }) {
-  disconnectNativeSync();
+export function clearConnection(options?: { persist?: boolean }): void | Promise<void> {
+  const token = getJwt();
+  const expected = token ? { api_url: getApiUrl(), token } : undefined;
+  if (expected && options?.persist !== false && accountHandoff()) {
+    return persistDesktopConnection(null, expected).then(() => {
+      if (getApiUrl() === expected.api_url && getJwt() === expected.token) {
+        clearConnection({ persist: false });
+      }
+    });
+  }
+  if(options?.persist !== false)disconnectNativeSync();
   resetMissionHierarchy();
   ancestorCache.clear();
   resetNetworkHealth();
   resetCurrentUserState();
-  void clearPersistentCache();
+  if (!accountHandoff()) void clearPersistentCache();
   const hadConnection = connected() || !!getJwt();
   localStorage.removeItem(JWT_KEY);
   try {
@@ -548,7 +570,7 @@ export function clearConnection(options?: { persist?: boolean }) {
       if (k && k.startsWith("orb.catalog:")) localStorage.removeItem(k);
     }
   } catch { /* ignore storage errors */ }
-  if(options?.persist!==false)persistDesktopConnection(null);
+  if(options?.persist!==false && expected)persistDesktopConnection(null, expected);
   setConnected(false);
   catalogMemory.clear();
   if (!hadConnection) return;
@@ -776,7 +798,7 @@ export async function login(password: string, username?: string): Promise<void> 
   }
   const data = (await res.json()) as { token?: string };
   if (!data.token) throw new Error("Login response did not include a token");
-  setConnection(getApiUrl(), data.token);
+  await setConnection(getApiUrl(), data.token);
 }
 
 import { classifyConflictError, parseConflictCodeFromDetail } from "./conflictClassification";
@@ -985,7 +1007,7 @@ async function sendRequestOnce<T>(
     if (path === "/api/auth/change-password" && /current password/i.test(detail)) {
       throw new ApiError(401, detail);
     }
-    if (connectionVersion() === version) clearConnection();
+    if (connectionVersion() === version) clearConnection({persist:false});
     throw new Error("401 Unauthorized — reconnect in Settings → Backend");
   }
   const observedBuildHeader = res.headers?.get?.("x-orb-server-build") ?? res.headers?.get?.("x-orb-version");

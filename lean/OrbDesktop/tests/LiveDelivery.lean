@@ -229,6 +229,26 @@ private def awaitState (slot : IO.Ref (Option LiveSubscription)) (st : DesktopSt
   throw (IO.userError "poll timed out")
 
 def main (args : List String) : IO Unit := do
+  for dark in [true, false] do
+    for width in [480, 1000] do
+      let cold := { DesktopState.liveUnavailable dark with initialRosterPending := true }
+      let page := (stepDesktopEvent 120 vp cold (.key 0x2c 2 .pressed)).1
+      let w := pxToSub width
+      let h := pxToSub 480
+      let (_, scene) := renderWidgetTree 120 w h page.initialFocusState page.theme (buildDesktopScreen page w h)
+      unless page.screen == .settingsGeneral && [103, accountFormId].all scene.focusableOrder.contains do
+        throw (IO.userError "cold Settings footer or sign-in action missing")
+      for id in [103, accountFormId] do
+        let some (_, r) := scene.hitRegionsSub.find? (·.1 == id) | throw (IO.userError "missing target")
+        unless r.w > 0 && r.h > 0 && r.x >= 0 && r.right <= w && r.y >= 0 && r.bottom <= h do
+          throw (IO.userError "account target clipped")
+      let rt : Runtime.RuntimeState DesktopState := {
+        app := page, focus := page.initialFocusState.request accountFormId
+        focusableOrder := scene.focusableOrder }
+      unless (rt.stepEvent (stepDesktopEvent 120 vp) (.key 0xff0d 0 .pressed)).app.openAccountForm do
+        throw (IO.userError "keyboard sign-in unavailable")
+      let page := (stepDesktopEvent 120 vp page (.text "ignored")).1
+      unless page.composer.text.isEmpty && page.writeRequest.isNone do throw (IO.userError "editable native account view")
   let enter : Wayland.WlWireEvent := {
     tag := Wayland.tagPointer, proxy := 0, opcode := 0,
     args := #[.uint 417, .obj 0, .fixed 256, .fixed 512] }
@@ -262,7 +282,7 @@ def main (args : List String) : IO Unit := do
       for _ in [:300] do
         if let some next ← readSources state then state := next
         if state.hasLiveConnection && !state.catalogLoading then
-          unless state.missionCards.length == 2 do throw (IO.userError "incomplete recovered roster")
+          unless state.missionCards.length == 2 && state.accountUsername == "Alice" && !state.accountEndpoint.isEmpty do throw (IO.userError "incomplete recovered roster")
           return
         IO.sleep 20
       throw (IO.userError "window failed to recover the new session and reload its catalog")
@@ -271,6 +291,25 @@ def main (args : List String) : IO Unit := do
     unless boot.isNone do throw (IO.userError "failed bootstrap appeared successful")
     return
   let some st := boot | throw (IO.userError "bootstrap failed")
+  if args == ["settings-switch"] then
+    withLiveSources true (pure ()) fun readSources => do
+      let mut page := (stepDesktopEvent 120 vp st (.activate 103)).1
+      unless page.accountUsername == "Ben" && page.screen == .settingsGeneral do throw (IO.userError "wrong initial account")
+      discard <| readSources page
+      let dir := System.FilePath.mk ((← IO.getEnv "ORB_STATE_DIR").getD "")
+      IO.FS.rename (dir / "rotated") (dir / "connection.json")
+      let mut sawReset := false
+      for _ in [:600] do
+        if let some next ← readSources page then page := next
+        unless page.screen == .settingsGeneral do throw (IO.userError "account switch navigated away")
+        if !page.hasLiveConnection then
+          unless page.accountUsername.isEmpty && page.missionCards.isEmpty && page.sidebarRows == [settingsFooter] do
+            throw (IO.userError "stale account data survived rotation")
+          sawReset := true
+        if page.accountUsername == "Alice" && sawReset && page.hasLiveConnection then return
+        IO.sleep 20
+      throw (IO.userError "new account did not recover")
+    return
   if let ["inbox", action] := args then
     let page := (stepDesktopEvent 120 vp st (.key 0x69 2 .pressed)).1
     let tree := buildDesktopScreen page (pxToSub 800) (pxToSub 600)
@@ -325,7 +364,7 @@ def main (args : List String) : IO Unit := do
       return
     if args == ["idle-session"] then
       let next ← awaitState slot st (!·.hasLiveConnection)
-      unless next.missionCards.isEmpty && next.sidebarRows.isEmpty do throw (IO.userError "idle session retained data")
+      unless next.missionCards.isEmpty && next.sidebarRows == [settingsFooter] do throw (IO.userError "idle session retained data")
       return
     if args == ["idle-share"] then
       let next ← awaitState slot st (·.missionCards.length == 1)
@@ -333,12 +372,14 @@ def main (args : List String) : IO Unit := do
           !next.sidebarRows.any (·.widgetId == b.widgetId) do throw (IO.userError "idle share removal incorrect")
       return
     if args == ["idle-identity"] || args == ["before-open"] then
+      unless st.accountUsername == "Ben" do throw (IO.userError "missing authenticated username")
+      let st := (stepDesktopEvent 120 vp st (.activate 103)).1
       discard <| readLiveFrame slot 120 vp st
       let root := (← IO.getEnv "ORB_STATE_DIR").getD ""
       IO.FS.rename (System.FilePath.mk root / "rotated") (System.FilePath.mk root / "connection.json")
       let st := if args == ["before-open"] then (stepDesktopEvent 120 vp st (.activate a.widgetId)).1 else st
       let st ← awaitState slot st (!·.hasLiveConnection)
-      unless st.missionCards.isEmpty && (← slot.get).isNone do throw (IO.userError "roster outlived identity")
+      unless st.missionCards.isEmpty && st.accountUsername.isEmpty && st.accountEndpoint.isEmpty && (← slot.get).isNone do throw (IO.userError "roster outlived identity")
       return
     let st ← clickMission st a
     let st ← awaitState slot st (fun s => streamedText s == "canonical")
@@ -379,7 +420,7 @@ def main (args : List String) : IO Unit := do
       let root := (← IO.getEnv "ORB_STATE_DIR").getD ""
       IO.FS.rename (System.FilePath.mk root / "rotated") (System.FilePath.mk root / "connection.json")
     let st ← awaitState slot st (·.connectionBinding.isEmpty)
-    unless st.openMission.isNone && st.missionCards.isEmpty && st.sidebarRows.isEmpty &&
+    unless st.openMission.isNone && st.missionCards.isEmpty && st.sidebarRows == [settingsFooter] &&
         (streamedText st).isEmpty && (← slot.get).isNone do throw (IO.userError "invalidation leaked state")
   finally closeLiveSubscription slot
 
