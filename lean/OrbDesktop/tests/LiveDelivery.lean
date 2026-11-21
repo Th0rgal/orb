@@ -6,6 +6,13 @@ open OrbDesktop LeanUI
 
 private def vp : Rect := { x := 0, y := 0, w := 800, h := 600 }
 
+private def typed : Widgets.ComposerBuffer := { text := "one\n二X", cursorOffset := 6 }
+#guard (typed.editKey? 0xff08 0).map (·.text) == some "one\n二"
+#guard (typed.editKey? 0xff50 0).map (·.cursorOffset) == some 4
+#guard ((typed.editKey? 0xff50 0).bind (·.editKey? 0xffff 0)).map (·.text) == some "one\nX"
+#guard ((typed.editKey? 0xff08 0).bind (·.editKey? 0x7a 2)).map (·.text) == some typed.text
+#guard ((typed.setPreedit "あ").editKey? 0xff08 0).isNone
+
 private def hierarchyFixture : DesktopState := {
   DesktopState.liveUnavailable with
   connectionBinding := "fixture"
