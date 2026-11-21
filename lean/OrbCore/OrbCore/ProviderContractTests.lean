@@ -1740,6 +1740,13 @@ def run : IO Unit := do
       unless memberCode == 200 && saved.fieldStr? "country" == some "NL" &&
           adminView.fieldStr? "country" == some "NL" do
         failures := failures.push "An administrator must see the shared country saved by a member"
+      let configuredIdentities := fun (session : String) => do
+        let rows := (← getJson app session "/api/ai/providers" now).asArr?.getD #[]
+        return (rows.filter (·.fieldBool? "has_credentials" == some true)).map fun row =>
+          (row.fieldStr? "id", row.fieldStr? "provider_type", row.fieldBool? "enabled",
+           (row.fieldOrNull "status").fieldStr? "type")
+      unless (← configuredIdentities memberJwt) == (← configuredIdentities jwt) do
+        failures := failures.push "Both sessions list the same configured IDs, types, global state and credential status"
       let listRow : String → IO JVal := fun session => do
         let rows := (← getJson app session "/api/ai/providers" now).asArr?.getD #[]
         pure ((rows.find? (·.fieldStr? "id" == some ownerRow.id)).getD .null)
