@@ -228,3 +228,5 @@ Core resolves the account to a single credential before reading or changing its 
 Reconnecting an existing Antigravity account targets its exact credential in both Direct and VPN mode, so the login preserves its routing exclusions. A sidecar that cannot acknowledge the target must fail the reconnect.
 
 The isolated sidecar test sends buffered and streaming requests before restricting the account. It then requests the model by its account prefix and its unqualified ID, checks that neither request reaches the simulated Google generation endpoint, and checks another provider during the restriction. Refresh and targeted reconnect must preserve the exclusion before the operator can restore access.
+
+Before confirming a native-only Antigravity setting, Core checks both the saved wildcard and the sidecar’s live model registry for the selected credential. If any model is still registered or the registry cannot be queried, the client must surface an unconfirmed setting. A sibling credential may continue serving the same model.
