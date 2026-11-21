@@ -212,6 +212,7 @@ def missionsSchemaSql : String :=
   "CREATE INDEX IF NOT EXISTS idx_mission_proxy_tokens_mission ON mission_proxy_tokens(mission_id);" ++
   "CREATE TABLE IF NOT EXISTS native_owner_enrollments (node_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, account_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0));" ++
   "CREATE TABLE IF NOT EXISTS native_antigravity_grants (token_sha256 TEXT PRIMARY KEY REFERENCES mission_proxy_tokens(token_sha256) ON DELETE CASCADE, job_id TEXT NOT NULL, account_id TEXT NOT NULL, model TEXT NOT NULL);" ++
+  "CREATE TABLE IF NOT EXISTS native_job_relay_bindings (token_sha256 TEXT PRIMARY KEY REFERENCES native_antigravity_grants(token_sha256) ON DELETE CASCADE, node_id TEXT NOT NULL, enrollment_revision INTEGER NOT NULL, route_generation INTEGER NOT NULL);" ++
   "CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT 'host', owner_user_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_terminal_evidence (mission_id TEXT PRIMARY KEY, terminal_reason TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', artifact_ref TEXT NOT NULL DEFAULT '', verified INTEGER NOT NULL DEFAULT 1, evidence TEXT NOT NULL DEFAULT '{}', recorded_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS effect_outbox (effect_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, state_revision INTEGER NOT NULL, intent_kind TEXT NOT NULL, payload_json TEXT NOT NULL, phase INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0, attempt_epoch INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
@@ -4384,7 +4385,7 @@ def nativeMissionAccount? (st : CoreStore) (mission : String) : IO (Except Strin
   return (← execParamQuery st.missionsDb nativeMissionAccountSql #[mission]).map fun rows => rows[1]?.bind (·[0]?)
 
 private def issueProxyToken (st : CoreStore) (tokenPrefix mission owner : String) (expires : UInt64)
-    (native? : Option (String × String × String) := none) : IO (Except String String) := do
+    (native? : Option (String × String × String) := none) (relayNode? : Option String := none) : IO (Except String String) := do
   let .ok rnd ← OrbNetLeaf.Crypto.randBytes 24 | return .error "csprng_failed"
   let token := tokenPrefix ++ bytesToHexLower rnd
   let digest := bytesToHexLower (sha256Bytes token.toUTF8)
@@ -4402,6 +4403,13 @@ private def issueProxyToken (st : CoreStore) (tokenPrefix mission owner : String
         "INSERT INTO native_antigravity_grants(token_sha256,job_id,account_id,model) VALUES(?1,?2,?3,?4);"
         #[digest, job, account, model]
       if let .error err := bindingResult then return .error err
+      if let some node := relayNode? then
+        let bound ← execParamQueryUnlocked st.missionsDb
+          ("INSERT INTO native_job_relay_bindings SELECT ?1,e.node_id,e.revision,v.generation " ++
+           "FROM native_owner_enrollments e JOIN account_vpn_routes v ON v.account_id=e.account_id " ++
+           "WHERE e.node_id=?2 AND e.owner_id=?3 AND e.account_id=?4 AND length(v.country)=2;")
+          #[digest,node,owner,account]
+        if let .error err := bound then return .error err
     return .ok token
 
 private def resolveScopedProxyToken?
@@ -4432,10 +4440,11 @@ def resolveMissionProxyToken? (st : CoreStore) (rawTok : String) (nowEpoch : UIn
 
 /-- Native jobs share the mission revocation ledger. The account and model stay on
     Core, and the first native turn binds subsequent turns to the same account. -/
-def mintNativeAntigravityToken (st : CoreStore) (mission owner job account model : String) (expires : UInt64) :
+def mintNativeAntigravityToken (st : CoreStore) (mission owner job account model : String) (expires : UInt64)
+    (relayNode? : Option String := none) :
     IO (Except String String) := do
   if [mission, owner, job, account, model].any String.isEmpty then return .error "invalid_antigravity_grant"
-  issueProxyToken st "orb-agy-v1_" mission owner expires (some (job, account, model))
+  issueProxyToken st "orb-agy-v1_" mission owner expires (some (job, account, model)) relayNode?
 
 structure NativeAntigravityGrant where
   mission : String

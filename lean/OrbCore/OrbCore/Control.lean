@@ -3036,6 +3036,43 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   if req.method == "OPTIONS" then
     return .ok { status := 204, corsOrigin? := reqOrigin?, body := ByteArray.empty }
 
+  -- The trusted account relay asks Core on admission and during each stream.
+  -- No gateway address, provider credential or reusable relay secret leaves Core here.
+  if cleanPath == "/api/native/antigravity/relay-admission" then
+    let denied := mkJson 403 "{\"error\":\"relay_denied\"}"
+    unless st.cfg.instanceName == "dev" && !st.cfg.devMode && req.method == "POST" do
+      return .ok denied
+    let nodeToken := (extractBearerToken? req.headers nowEpochSec).getD ""
+    let some node ← authenticateStaticNodeToken? nodeToken | return .ok denied
+    let body := req.bodySlice.toByteArray
+    if body.size > 4096 then return .ok denied
+    let some j := (OrbBin.Json.parseBytes body).toOption | return .ok denied
+    let some job := j.fieldStr? "job" | return .ok denied
+    let some owner := j.fieldStr? "owner" | return .ok denied
+    let some account := j.fieldStr? "account" | return .ok denied
+    let some revision := j.fieldUInt64? "revision" | return .ok denied
+    let some grant := lookupHeaderCI req.headers "x-orb-job-grant" | return .ok denied
+    unless !owner.isEmpty && grant.startsWith "orb-agy-v1_" && j.fieldStr? "node" == some node do return .ok denied
+    let (_, nodes) ← loadStaticRemoteNodes
+    unless (nodes.find? (fun n => n.id == node)).bind (·.dedicatedOwner?) == some owner do return .ok denied
+    let digest := bytesToHexLower (sha256Bytes grant.toUTF8)
+    let .ok rows ← execParamQuery st.store.missionsDb
+        ("SELECT t.expires_at_epoch,v.generation FROM native_antigravity_grants g " ++
+         "JOIN native_job_relay_bindings b USING(token_sha256) JOIN mission_proxy_tokens t USING(token_sha256) " ++
+         "JOIN remote_node_jobs j ON g.job_id=j.job_id AND j.node_id=b.node_id " ++
+         "JOIN missions m ON m.id=t.mission_id AND m.id=j.mission_id AND m.owner_user_id=t.owner_user_id " ++
+         "JOIN users u ON u.id=m.owner_user_id AND u.disabled=0 " ++
+         "JOIN native_owner_enrollments e ON e.node_id=j.node_id AND e.owner_id=u.id AND e.account_id=g.account_id " ++
+         "JOIN ai_providers p ON p.id=e.account_id AND p.enabled=1 AND p.provider_type='antigravity' AND p.created_by_user_id=u.id " ++
+         "JOIN account_vpn_routes v ON v.account_id=e.account_id AND length(v.country)=2 AND v.generation>0 " ++
+         "LEFT JOIN user_provider_prefs f ON f.user_id=u.id AND f.provider_id=p.id " ++
+         "WHERE t.token_sha256=?1 AND j.job_id=?2 AND j.node_id=?3 AND u.id=?4 AND e.account_id=?5 " ++
+         "AND e.revision=b.enrollment_revision AND v.generation=b.route_generation AND e.revision=CAST(?6 AS INTEGER) AND t.revoked=0 AND t.expires_at_epoch>CAST(?7 AS INTEGER) " ++
+         "AND j.state='running' AND m.placement_job_id=j.job_id AND m.backend='antigravity' AND m.status='active' AND COALESCE(f.enabled,1)=1;")
+        #[digest,job,node,owner,account,toString revision,toString nowEpochSec] | return .ok denied
+    let some row := rows[1]? | return .ok denied
+    return .ok (mkJson 200 (renderCompact (.obj #[("expires", .str (cell row 0)), ("route_generation", .str (cell row 1))])))
+
   if cleanPath.startsWith "/api/native/antigravity/v1internal:" then
     return .ok (← handleNativeAntigravity st req rawTarget nowEpochSec)
 

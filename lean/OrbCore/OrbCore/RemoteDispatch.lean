@@ -843,7 +843,7 @@ private def prepareRemoteHarnessCommand
           | return .error "antigravity_account_model_unavailable"
         let .ok url := parseUrl apiBase | return .error "native_core_url_unavailable"
         if !url.isHttps && !(sup.devMode && url.host == "127.0.0.1") then return .error "native_core_tls_required"
-        let .ok bearer ← mintNativeAntigravityToken store spec.missionId spec.ownerUserId jobId account model (nowSec + 86400)
+        let .ok bearer ← mintNativeAntigravityToken store spec.missionId spec.ownerUserId jobId account model (nowSec + 86400) (some effNodeId)
           | return .error "native_grant_unavailable"
         let bootstrap := include_str "antigravity_native_launch.py"
         let cliModel := if spec.modelOverride.isEmpty then model else spec.modelOverride
