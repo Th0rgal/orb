@@ -19,11 +19,6 @@ private def splitTab (line : String) : List String :=
 
 private def col (xs : List String) (n : Nat) : String := xs.getD n ""
 
-private def runProjection : IO (Option (List String)) := do
-  let r ← IO.Process.output { cmd := "python3", args := #["-I", "-c", transport ++ "\ntry: roster()\nexcept Exception: sys.exit(1)"] }
-  if r.exitCode != 0 then return none
-  return some (r.stdout.splitOn "\n" |>.filter (fun x => !x.trimAscii.toString.isEmpty))
-
 private def projectRow (idx : Nat) (xs : List String) : ChromeSidebarRow :=
   { widgetId := 1000 + 3 * idx, rowId := "project:" ++ col xs 1, kind := "project"
     title := col xs 2, subtitle := col xs 3
@@ -72,17 +67,14 @@ private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale
     missionCards := missions
     fleetMachines := machines, catalogLoading := true }
 
-def loadLiveState (isDark := true) (scale120 := 120) : IO (Option DesktopState) := do
-  let some lines ← (try runProjection catch _ => pure none) | return none
-  return liveStateFromProjection lines isDark scale120
-
 private structure LiveRead where
   binding : String
   take : IO (Option (List String))
   stop : IO Unit
 
-private def startLiveRead (binding : String) (notify : IO Unit) : IO LiveRead := do
-  let args := if binding.isEmpty then #["-I", "-c", transport ++ "\nrecover_roster()"]
+private def startLiveRead (binding : String) (initial : Bool) (notify : IO Unit) : IO LiveRead := do
+  let args := if initial then #["-I", "-c", transport ++ "\ntry: roster()\nexcept Exception: sys.exit(1)"]
+    else if binding.isEmpty then #["-I", "-c", transport ++ "\nrecover_roster()"]
     else #["-I", "-c", transport ++ "\ncatalog(sys.argv[1], json.loads(sys.argv[2]))", binding, modelCatalogRules]
   let child ← IO.Process.spawn { cmd := "python3", args, stdout := .piped, stderr := .null }
   let mailbox ← Std.Mutex.new (none : Option (List String))
@@ -111,12 +103,14 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
       let source ← match ← slot.get with
         | some r => pure r
         | none => do
-          let r ← startLiveRead st.connectionBinding notify
+          let r ← startLiveRead st.connectionBinding st.initialRosterPending notify
           slot.set (some r)
           pure r
       let some lines ← source.take | return none
       close
-      if source.binding.isEmpty then return liveStateFromProjection lines isDark st.scale120
+      if source.binding.isEmpty then
+        if let some ready := liveStateFromProjection lines isDark st.scale120 then return some ready
+        return if st.initialRosterPending then some { st with initialRosterPending := false } else none
       let models := lines.filterMap fun line =>
         match splitTab line with
         | ["H", backend, harnessName, model, modelName] =>

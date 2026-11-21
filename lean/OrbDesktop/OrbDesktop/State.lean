@@ -329,6 +329,7 @@ structure DesktopState where
   fleetTopSub : SubPx := 0
   stream : StreamCoalescer := Orb.Stream.Coalescer.empty
   liveData : Bool := false
+  initialRosterPending : Bool := false
   connectionBinding : String := ""
   writeRequest : Option LiveWrite := none
   writeError : String := ""
@@ -371,7 +372,8 @@ def DesktopState.selectedCard (st : DesktopState) : Option MissionSummaryCard :=
 def DesktopState.hasLiveConnection (st : DesktopState) : Bool := st.liveData && !st.connectionBinding.isEmpty
 
 def DesktopState.headerTitle (st : DesktopState) : String :=
-  if st.liveData && !st.hasLiveConnection then "Core unavailable"
+  if st.initialRosterPending then "Connecting to Core…"
+  else if st.liveData && !st.hasLiveConnection then "Core unavailable"
   else if st.openMission.isNone && !st.draftProject.isEmpty then
     ((st.sidebarRows.find? (·.rowId == "project:" ++ st.draftProject)).map (·.title)).getD st.draftProject
   else (st.selectedCard.map (·.title)).getD st.screen.headerTitle

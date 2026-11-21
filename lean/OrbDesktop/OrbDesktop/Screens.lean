@@ -1051,8 +1051,12 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
            WidgetNode.box (BoxStyle.col 0 |>.withJustify .center |>.withAlign .center |>.withFixedSize mainW bodyH)
              [buildComposerWidget theme mainW composerH { st.composer with placeholder := "Describe a task, / for commands, @ for context" }
                [] (some (liveComposerControls st (min (pxToSub 748) (mainW - pxToSub 68))))]
+           else if st.initialRosterPending then
+             WidgetNode.box (BoxStyle.col 0 |>.withJustify .center |>.withAlign .center |>.withFixedSize mainW bodyH)
+               [WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (min (pxToSub 748) (mainW - pxToSub 68)) (pxToSub 42))
+                 pal.elevatedSurface (CornerRadii.uniform (pxToSub 21))]
            else if st.liveData then screenTextLine theme mainW (pxToSub 32) (pxToSub 13)
-           (pxToSub 21) pal.textPrimary "Waiting for a Core connection…"
+             (pxToSub 21) pal.textPrimary "Check your connection in Orb Settings → Account."
            else buildNewAgentBody st mainW bodyH]
 
   let baseShell : WidgetNode :=

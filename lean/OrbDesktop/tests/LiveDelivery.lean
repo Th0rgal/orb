@@ -157,7 +157,15 @@ def main (args : List String) : IO Unit := do
     throw (IO.userError "pointer entry must use its own serial even when returning to the same row")
   let (left, _) ← Wayland.stepWireEvent entered { enter with opcode := 1, args := #[] }
   unless left.enterSerial.isNone do throw (IO.userError "cursor retained a serial after surface leave")
-  let boot ← loadLiveState
+  let boot ← withLiveSources true (pure ()) fun readSources => do
+    let pending := { DesktopState.liveUnavailable with initialRosterPending := true }
+    unless pending.headerTitle == "Connecting to Core…" do throw (IO.userError "missing initial loading state")
+    for _ in [:1000] do
+      if let some next ← readSources pending then
+        if next.initialRosterPending then throw (IO.userError "initial read failed to settle")
+        return if next.hasLiveConnection then some next else none
+      IO.sleep 20
+    throw (IO.userError "initial roster did not finish")
   if args == ["reconnect"] then
     unless boot.isNone do throw (IO.userError "expired fixture token was accepted")
     let root := System.FilePath.mk ((← IO.getEnv "ORB_STATE_DIR").getD "")

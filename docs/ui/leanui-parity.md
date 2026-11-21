@@ -430,3 +430,7 @@ constant surfaces, empty images, and zero sigma. The native package owns both
 default package-local source directory. Use the pinned turbo-lean revision in
 `lean/turbo-lean-revision`. No raw-Lake fallback or cache reset is needed after
 LeanUI edits.
+
+### Opening the window with a slow Core
+
+The native window maps immediately with its title bar and a composer placeholder while the first roster request runs. A successful response populates the same window. A failed first read shows the connection hint and starts background recovery. A replaced session must discard the previous identity’s roster before showing the new one.
