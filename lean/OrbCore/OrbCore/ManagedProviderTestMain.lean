@@ -7,6 +7,7 @@ import OrbCore.ManagedProviderLeanciTests
 import OrbCore.ManagedProviderColabTests
 import OrbCore.ManagedProvisioningTests
 import OrbCore.ManagedProviderSealingTests
+import OrbCore.AirVpnSettingsTests
 import OrbCore.ManagedProviderAvailabilityTests
 import OrbCore.ManagedSpawnActionsTests
 import OrbCore.ManagedResumeTests
@@ -24,6 +25,7 @@ def main : IO UInt32 := do
     OrbCore.ManagedProviderColabTests.run
     OrbCore.ManagedProvisioningTests.run root
     OrbCore.ManagedProviderSealingTests.run root
+    OrbCore.AirVpnSettingsTests.run root
     OrbCore.ManagedProviderAvailabilityTests.run root
     OrbCore.ManagedSpawnActionsTests.run store
     OrbCore.ManagedResumeTests.run root

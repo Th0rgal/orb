@@ -34,6 +34,9 @@ import OrbCore.LegacyHydrate
 import OrbCore.SecretAndApproval
 import OrbCore.RemoteFleetAndRelay
 import OrbCore.ManagedProviderSealing
+import OrbCore.AirVpnSettings
+import OrbCore.AccountVpnApi
+import OrbCore.AccountVpnRelay
 import OrbCore.AutoPlacement
 import OrbCore.RemoteDispatch
 import OrbCore.ProjectFilesAndController
@@ -114,6 +117,9 @@ structure CoreAppState where
   pacingTracker?  : Option ProxyPacingTracker := none
   healthTracker?  : Option ProviderHealthTracker := none
   proxyMockTransport? : Option (ProviderTarget → IO (Except String HttpsResponse)) := none
+  vpnPool? : Option AccountVpnPool.Pool := none
+  vpnCoordinatorDir : String := ""
+  vpnRelayPort? : Option UInt16 := none
   proxyStreamLimits?  : Option StreamLimits := none
   sseKeepAliveMs?     : Option Nat := none
   authRoot        : String := ""
@@ -850,15 +856,21 @@ def parseChainTargetsJson
       let mdlRaw := (it.fieldStr? "model_id").orElse (fun _ => it.fieldStr? "modelId") |>.getD ""
       let inlineUrl? := (it.fieldStr? "base_url").orElse (fun _ => it.fieldStr? "baseUrl") |>.filter (!·.isEmpty)
       let inlineKey? := (it.fieldStr? "api_key").orElse (fun _ => it.fieldStr? "apiKey") |>.filter (!·.isEmpty)
-      let matchedHydrated? := hydratedProvs.find? fun hp =>
+      -- A chain can name one account among several of the same provider type.
+      -- Once that identity exists, resolve credentials and limits only on its rows.
+      let pinned := hasExplicitAcct && (providers.any (fun p => p.id == acctRaw) ||
+        hydratedProvs.any (fun hp => hp.id == acctRaw))
+      let eligibleRows := if pinned then providers.filter (fun p => p.id == acctRaw) else providers
+      let eligibleHydrated := if pinned then hydratedProvs.filter (fun p => p.id == acctRaw) else hydratedProvs
+      let matchedHydrated? := eligibleHydrated.find? fun hp =>
         hp.enabled && (hp.hasApiKey || hp.hasOAuth) && (
           hp.id == acctRaw ||
           hp.id == strippedProv ||
           (!provRaw.startsWith "custom:" && hp.providerType == provRaw) ||
           (!provSlug.isEmpty && providerSlugOf hp.name == provSlug)
         )
-      let matchedProv? := matchProviderForChainTarget? providers acctRaw provRaw
-      let anyCfgProv? := providers.find? fun p =>
+      let matchedProv? := matchProviderForChainTarget? eligibleRows acctRaw provRaw
+      let anyCfgProv? := eligibleRows.find? fun p =>
         p.id == acctRaw || p.id == strippedProv ||
         (!provRaw.startsWith "custom:" && p.providerType == provRaw) ||
         (!provSlug.isEmpty && providerSlugOf p.name == provSlug)
@@ -884,8 +896,8 @@ def parseChainTargetsJson
         (!providers.isEmpty || !hydratedProvs.isEmpty) &&
         inlineKey?.isNone && inlineUrl?.isNone &&
         matchedHydrated?.isNone && matchedProv?.isNone &&
-        (anyCfgProv?.map (!·.enabled) |>.getD false) &&
-        !isAg
+        ((anyCfgProv?.map (!·.enabled) |>.getD false) ||
+          (pinned && eligibleHydrated.any (fun hp => !hp.enabled))) && (!isAg || pinned)
       if !explicitlyDisabledInStore then
         let useCliProxy :=
           !cliProxyKey.isEmpty && !cliProxyUrl.isEmpty && inlineKey?.isNone && inlineUrl?.isNone && (
@@ -895,6 +907,13 @@ def parseChainTargetsJson
              | none => false)
           )
         if useCliProxy then
+          let credential? : Option SidecarCredential := if pinned then matchedHydrated?.map (fun hp =>
+            ⟨hp.providerType, accountRoutingFile hydratedProvs hp, hp.modelPrefix⟩) else none
+          let rawModel := if isAg then mdl else OrbCore.ProxyModelRouting.cliProxyModelId effProvType mdl
+          let routedModel := match credential? with
+            | some c => if c.modelPrefix.isEmpty || rawModel.isEmpty || rawModel.startsWith (c.modelPrefix ++ "/")
+                        then rawModel else c.modelPrefix ++ "/" ++ rawModel
+            | none => rawModel
           let acct :=
             if hasExplicitAcct then acctRaw
             else match matchedHydrated? with
@@ -905,7 +924,8 @@ def parseChainTargetsJson
             provider               := provRaw
             baseUrl                := cliProxyUrl
             apiKey                 := cliProxyKey
-            modelId                := if isAg then mdl else OrbCore.ProxyModelRouting.cliProxyModelId effProvType mdl
+            modelId                := routedModel
+            sidecarCredential?     := credential?
             accountRpmLimit?       := inlineAcctRpm?.orElse (fun _ => matchedHydrated?.bind (·.rpmLimit?))
             accountMaxConcurrency? := (inlineAcctConc?.orElse (fun _ => matchedHydrated?.bind (·.maxConcurrency?))).orElse
                (fun _ => if effProvType == "google" || effProvType == "antigravity" then googleMaxConcurrency? else none)
@@ -1823,6 +1843,25 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     (authEvidence? := some authEvidence)
     (streamLimits? := st.proxyStreamLimits?)
     (bodyTimedOutRef? := some bodyTimedOutRef)
+    (resolveTransport := fun target => do
+      let some owner := target.sidecarCredential? |
+        return ← AccountVpnPool.resolve st.vpnPool? st.store st.vpnCoordinatorDir target.accountId
+      let .ok pref ← AccountVpnRoutes.read st.store.missionsDb target.accountId | return .error "vpn_route_store_unavailable"
+      let some selected := pref | return .ok none
+      unless !owner.modelPrefix.isEmpty && target.modelId.startsWith (owner.modelPrefix ++ "/") do
+        return .error "vpn_sidecar_binding_unavailable"
+      let base ← resolveCliProxyBaseUrl
+      unless base == target.baseUrl do return .error "vpn_sidecar_binding_changed"
+      let some key ← resolveCliProxyMgmtKey? | return .error "vpn_sidecar_unavailable"
+      let some url := st.vpnRelayPort?.bind (fun port =>
+        AccountVpnRelay.proxyUrl (effectiveJwtSecret st.cfg) port owner.provider target.accountId)
+        | return .error "vpn_sidecar_unavailable"
+      if let .error e ← AccountVpnSidecar.confirm base key owner.file url owner.modelPrefix then return .error e
+      -- A sidecar can reuse an upstream connection without opening another SOCKS session.
+      let some pool := st.vpnPool? | return .error "vpn_coordinator_unavailable"
+      if let .error e ← AccountVpnPool.allocate pool st.store.rootDir st.vpnCoordinatorDir st.store.missionsDb
+          target.accountId owner.provider selected then return .error e
+      return .ok none)
   let selectedAccountAfterStream : IO String := do
     match out.streamSelectedAccountRef? with
     | some ref => ref.get
@@ -3561,6 +3600,43 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   let some caller ← resolveCallerPrincipal? st req.headers nowEpochSec
     | return .ok (mkJson 401 "{\"error\":\"unauthorized\"}")
   let utcDay := currentUtcDay nowEpochSec
+
+  if let ["", "api", "ai", "providers", encodedAccount, "vpn"] := cleanPath.splitOn "/" then
+    let some account := percentDecodeStrict encodedAccount
+      | return .ok (mkJson 400 "{\"error\":\"invalid_provider_id\"}")
+    if let some (status, body) := requireAdminPrincipal caller then return .ok (mkJson status body)
+    let token := (extractBearerToken? req.headers nowEpochSec).getD ""
+    unless token.startsWith "orb-jwt-v2:" && !st.cfg.devMode do
+      return .ok (mkJson 403 "{\"error\":\"operator_session_required\"}")
+    let providers ← loadHydratedProviders st.store st.cfg.workingDir
+    let some hp := providers.find? (fun p => p.id == account)
+      | return .ok (mkJson 404 "{\"error\":\"provider_not_found\"}")
+    let stored ← getAIProvider? st.store account
+    let coreOwned := !hp.hasOAuth && stored.any (fun p => !p.apiKey.isEmpty && p.apiKey != "cli-proxy-managed")
+    let mut configure? : Option (Bool → IO (Except String Unit)) := none
+    let file := accountRoutingFile providers hp
+    if hp.hasOAuth && !hp.hasApiKey && ["codex", "claude", "antigravity", "kimi"].any (providerTypeMatchesAuthType hp.providerType) &&
+        !file.isEmpty then
+      if let some url := st.vpnRelayPort?.bind (fun port =>
+          AccountVpnRelay.proxyUrl (effectiveJwtSecret st.cfg) port hp.providerType hp.id) then
+        if let some key ← resolveCliProxyMgmtKey? then
+          let base ← resolveCliProxyBaseUrl
+          if AccountVpnSidecar.validManagement base then
+            configure? := some (AccountVpnSidecar.configure base key file url)
+    let (status, result) ← AccountVpnApi.route st.store st.vpnPool? st.vpnCoordinatorDir account hp.providerType
+      (coreOwned || configure?.isSome) req.method req.bodySlice.toByteArray configure?
+    return .ok (mkJson status (renderCompact result))
+
+  if cleanPath == "/api/settings/airvpn" then
+    if let some (status, body) := requireAdminPrincipal caller then
+      return .ok (mkJson status body)
+    let token := (extractBearerToken? req.headers nowEpochSec).getD ""
+    unless token.startsWith "orb-jwt-v2:" && !st.cfg.devMode do
+      return .ok (mkJson 403 "{\"error\":\"operator_session_required\"}")
+    let save := st.vpnPool?.map AccountVpnPool.saveSecret
+    let (status, body) ← OrbCore.AirVpnSettings.settings st.store.rootDir req.method req.bodySlice.toByteArray
+      (save.getD OrbCore.Managed.sealAirVpnSecret)
+    return .ok (mkJson status (renderCompact body))
 
   -- Explicit operator-triggered vault-to-Core sealing. Reauthenticate with dev
   -- bypass disabled: an open dev-mode API must not grant vault authority.
@@ -8007,16 +8083,23 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let broadcastHub ← newBroadcastHub
     let relayHub ← newRelayHub (if maxRequests?.isSome then 0 else 25000)
     let cloudHub ← newCloudRuntimeHub
-    let providerHub ← newProviderRuntimeHub
+    let baseProviderHub ← newProviderRuntimeHub
     let systemHub ← newSystemRuntimeHub
     let remoteSup ← newRemoteJobSupervisor (effectiveJwtSecret cfg) cfg.devMode (some telemetrySink)
     let macTetherRt ← startMacTetherRuntime store
+    let vpnPool ← Std.Mutex.new ({} : AccountVpnPool.PoolState)
+    let vpnCoordinatorDir := (← IO.getEnv "ORB_AIRVPN_COORDINATOR_DIR").getD ""
+    let providerHub := { baseProviderHub with
+      resolveTransport? := some (fun provider account => AccountVpnRoutes.resolve store.missionsDb account fun pref =>
+        AccountVpnPool.allocate vpnPool store.rootDir vpnCoordinatorDir store.missionsDb account provider pref) }
     let appState : CoreAppState := {
       cfg := cfg
       store := store
       searchIdx? := searchRes.toOption
       managedRef := managedRef
       chainsRef := chainsRef
+      vpnPool? := some vpnPool
+      vpnCoordinatorDir := vpnCoordinatorDir
       proxyCooldownsRef := proxyCooldownsRef
       seqRef := seqRef
       pacingTracker? := some healthTracker.pacing
@@ -8057,6 +8140,19 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       closeCoreStore store
       IO.eprintln s!"[sandboxed-sh] FATAL: remote submission startup fence failed: {e}"
       return 1
+    let vpnRelay? ← match ← AccountVpnRelay.configured (← IO.getEnv "ORB_AIRVPN_RELAY_PORT")
+        (effectiveJwtSecret cfg) vpnCoordinatorDir (!cfg.devMode) vpnPool store with
+      | .ok listener => pure listener
+      | .error e =>
+        discard <| closeFd listenFd
+        stopMacTetherRuntime macTetherRt
+        closeManagedComputeStore managedStore
+        closeCoreStore store
+        IO.eprintln s!"[sandboxed-sh] Failed to initialize the AirVPN account relay: {e}"
+        return 1
+    let relayUrl? := vpnRelay?.map fun listener => AccountVpnRelay.proxyUrl (effectiveJwtSecret cfg) listener.port
+    let providerHub := { providerHub with accountRelayUrl? := relayUrl? }
+    let appState := { appState with vpnRelayPort? := vpnRelay?.map (·.port), providerHub? := some providerHub }
     let lostTurns ← interruptTurnsLostToRestart store.missionsDb
     if lostTurns > 0 then
       IO.eprintln s!"[sandboxed-sh] {lostTurns} mission turn(s) lost to the restart marked interrupted"
@@ -8188,6 +8284,8 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     discard <| closeFd listenFd
     stopMacTetherRuntime macTetherRt
     closeManagedComputeStore managedStore
+    if let some listener := vpnRelay? then listener.stop
+    AccountVpnPool.shutdown vpnPool
     closeCoreStore store
     return 0
 

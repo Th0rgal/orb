@@ -21,6 +21,9 @@
 -/
 import Std.Sync.Mutex
 import Orb.ProviderLogin
+import OrbCore.ProviderCredentialIdentity
+import OrbCore.AccountVpnRoutes
+import OrbCore.AccountVpnSidecar
 import LeanSys.Auth
 import LeanSys.Http
 import OrbBin.Json
@@ -85,6 +88,8 @@ structure CliLoginSession where
   flow          : String
   createdSec    : UInt64
   beforeFiles   : Array (String × UInt64)
+  routedFile? : Option String := none
+  routeGeneration : Nat := 0
   completionStartedSec? : Option UInt64 := none
   status        : String := "pending"
   message?      : Option String := none
@@ -115,6 +120,8 @@ def liveUsageHttp : UsageHttp :=
 structure ProviderRuntimeHub where
   mu : Std.Mutex ProviderHubState
   usageProbe? : Option (String → IO JVal) := none
+  resolveTransport? : Option (String → String → ResolveTransport) := none
+  accountRelayUrl? : Option (String → String → Option String) := none
   /-- Vendor transport of the usage adapters. Only tests replace it. -/
   usageHttp : UsageHttp := liveUsageHttp
 
@@ -251,21 +258,6 @@ def candidateCliProxyAuthDirs : IO (Array String) := do
     dirs := dirs.push "/root/.cli-proxy-api"
   return dirs
 
-structure CliAuthFileInfo where
-  fileName    : String
-  fullPath    : String
-  authType    : String
-  email       : String
-  accessToken : String
-  accountId   : String
-  prefixId    : String
-  disabled    : Bool
-  mtimeSec    : UInt64
-  fingerprint : UInt64 := 0
-  /-- Muse Code device credential (`dca_token`); empty for every other login type. -/
-  deviceToken : String := ""
-  deriving Repr, Inhabited
-
 def scanCliProxyAuthFiles : IO (Array CliAuthFileInfo) := do
   let dirs ← candidateCliProxyAuthDirs
   let mut out : Array CliAuthFileInfo := #[]
@@ -310,16 +302,6 @@ def scanCliProxyAuthFiles : IO (Array CliAuthFileInfo) := do
                   deviceToken := deviceTok
                 }
   return out
-
-private def providerTypeMatchesAuthType (provType authType : String) : Bool :=
-  match provType.toLower, authType.toLower with
-  | "anthropic", "claude" | "anthropic", "anthropic" => true
-  | "openai", "codex" | "openai", "openai" => true
-  | "antigravity", "antigravity" => true
-  | "kimi", "kimi" => true
-  | "xai", "xai" => true
-  | "muse-code", "meta" | "muse-code", "muse-code" => true
-  | _, _ => false
 
 /-! ## Built-in Provider Metadata & Rich `ProviderResponse` Hydration -/
 
@@ -388,6 +370,8 @@ structure HydratedProvider where
   hasOAuth        : Bool
   oauthToken      : String
   oauthFile       : String
+  /-- A credential matched to this account independently of legacy display fallbacks. -/
+  boundOauthFile  : String := ""
   accountEmail    : String
   enabled         : Bool
   isDefault       : Bool
@@ -400,6 +384,7 @@ structure HydratedProvider where
   updatedAt       : String
   /-- User who added the account (`''` for operator/legacy rows). -/
   createdByUserId : String := ""
+  modelPrefix : String := ""
   /-- Muse Code device credential (`dca_token` in the CLIProxyAPI auth file). The vendor quota
       endpoint accepts this credential, not the minted `access_token`. Never rendered. -/
   deviceToken     : String := ""
@@ -432,6 +417,10 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
   let defaultId := (defJv.fieldStr? "default_provider_id").getD ""
   let backendsJv ← readDataJsonFile workingDir store.rootDir "provider_backends.json"
   let authFiles ← scanCliProxyAuthFiles
+  let uniquePrefix := fun (file : CliAuthFileInfo) =>
+    if !file.prefixId.isEmpty && !file.prefixId.contains '/' &&
+        (authFiles.filter (fun f => f.prefixId == file.prefixId)).size == 1 then file.prefixId else ""
+
   let nowIso := formatEpochIso8601Utc (← nowEpoch)
   -- Accounts added by a member never inherit the operator's credentials: no instance env-key
   -- fallback and no CLIProxy auth file joined by provider type or email, only by exact row id.
@@ -456,15 +445,11 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
      let legSandboxedId := (leg?.bind (fun j => (j.fieldStr? "sandboxed_provider_id").orElse (fun _ => j.fieldStr? "account_id"))).getD ""
     let legAccessTok := (legOauthObj?.bind (fun o => o.fieldStr? "access_token")).getD ""
 
-    -- Match CLIProxy auth file by prefix == p.id, refresh_token filename, email, or provider type
-    let matchedAuth? :=
-      if memberAdded then authFiles.find? (fun af => !af.disabled && af.prefixId == p.id) else
-       (authFiles.find? (fun af => !af.disabled && (af.prefixId == p.id || af.accountId == p.id))).orElse fun _ =>
-       (authFiles.find? (fun af => !af.disabled && !legAuthFile.isEmpty && af.fileName == legAuthFile)).orElse fun _ =>
-       (authFiles.find? (fun af => !af.disabled && !legSandboxedId.isEmpty && (af.prefixId == legSandboxedId || af.accountId == legSandboxedId))).orElse fun _ =>
-      (authFiles.find? (fun af => !af.disabled && !legRefreshFile.isEmpty && af.fileName == legRefreshFile)).orElse fun _ =>
-      (authFiles.find? (fun af => !af.disabled && !legEmail.isEmpty && af.email.toLower == legEmail.toLower && providerTypeMatchesAuthType p.providerType af.authType)).orElse fun _ =>
-      (authFiles.find? (fun af => !af.disabled && providerTypeMatchesAuthType p.providerType af.authType))
+    let typed := authFiles.filter (fun f => !f.disabled && providerTypeMatchesAuthType p.providerType f.authType)
+    let singleton := plainKey == "cli-proxy-managed" && (dbProvs.filter (fun r => r.providerType == p.providerType)).size == 1
+    let matchFile := matchCredential? typed p.id memberAdded legAuthFile legRefreshFile legSandboxedId legEmail
+    let boundAuth? := matchFile false
+    let matchedAuth? := boundAuth?.orElse fun _ => if singleton then matchFile true else none
 
     let metaInfo := lookupProviderMeta p.providerType
     let envKeyVal ← match metaInfo.envVar? with
@@ -518,6 +503,8 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
       hasOAuth := hasOAuth
       oauthToken := effOauthTok
       oauthFile := effOauthFile
+      boundOauthFile := (boundAuth?.map (·.fileName)).getD ""
+      modelPrefix := (matchedAuth?.map uniquePrefix).getD ""
       accountEmail := effEmail
       enabled := p.enabled
       isDefault := (p.id == defaultId)
@@ -547,9 +534,9 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
       let oauthObj? := leg.field? "oauth"
       let refFile := (oauthObj?.bind (fun o => o.fieldStr? "refresh_token")).getD ""
       let accTok := (oauthObj?.bind (fun o => o.fieldStr? "access_token")).getD ""
-      let matchedAuth? :=
-         (authFiles.find? (fun af => !af.disabled && (af.prefixId == lid || af.accountId == lid || (!refFile.isEmpty && af.fileName == refFile)))).orElse fun _ =>
-        (authFiles.find? (fun af => !af.disabled && !email.isEmpty && af.email.toLower == email.toLower && providerTypeMatchesAuthType pType af.authType))
+      let typed := authFiles.filter (fun f => !f.disabled && providerTypeMatchesAuthType pType f.authType)
+      let authFile := ((leg.fieldStr? "cli_proxy_auth_file").orElse fun _ => leg.fieldStr? "auth_file").getD ""
+      let matchedAuth? := matchCredential? typed lid false authFile refFile "" email false
       let hasApi := !aKey.isEmpty && aKey != "cli-proxy-managed"
       let hasOa := matchedAuth?.isSome || !accTok.isEmpty || (pType.toLower == "muse-code" && !refFile.isEmpty && !refFile.endsWith ".json")
       let effLegTok :=
@@ -567,6 +554,8 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
         hasOAuth := hasOa
         oauthToken := (matchedAuth?.map (·.accessToken)).getD effLegTok
         oauthFile := (matchedAuth?.map (·.fileName)).getD refFile
+        boundOauthFile := (matchedAuth?.map (·.fileName)).getD ""
+        modelPrefix := (matchedAuth?.map uniquePrefix).getD ""
         accountEmail := if !email.isEmpty then email else (matchedAuth?.map (·.email)).getD ""
         enabled := en
         isDefault := (lid == defaultId)
@@ -588,20 +577,28 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
   for af in authFiles do
     let pType := if af.authType == "codex" then "openai" else if af.authType == "claude" then "anthropic" else af.authType
     if !out.any (fun hp => hp.oauthFile == af.fileName ||
-        hp.id == af.prefixId || hp.providerType == pType) then
+        (!hp.enabled && hp.id == af.prefixId && !af.prefixId.isEmpty)) then
       out := out.push { (default : HydratedProvider) with
-        id := if af.prefixId.isEmpty then s!"cliproxyapi:{pType}" else af.prefixId
+        id := if af.prefixId.isEmpty || af.prefixId == vpnModelPrefix af.fileName || out.any (fun hp => hp.id == af.prefixId) ||
+            (authFiles.filter (fun f => f.prefixId == af.prefixId)).size != 1 then fileAccountId pType af.fileName else af.prefixId
         name := (lookupProviderMeta pType).name
         providerType := pType
         hasOAuth := true
         oauthToken := af.accessToken
         oauthFile := af.fileName
+        boundOauthFile := af.fileName
+        modelPrefix := uniquePrefix af
         accountEmail := af.email
         enabled := !af.disabled
         priority := out.size
         deviceToken := af.deviceToken
       }
   return out.qsort (fun a b => a.priority < b.priority)
+
+/-- Legacy rows can claim the same file. Only an unambiguous binding authorizes routing. -/
+def accountRoutingFile (accounts : Array HydratedProvider) (hp : HydratedProvider) : String :=
+  if !hp.boundOauthFile.isEmpty && (accounts.filter (fun p => p.oauthFile == hp.boundOauthFile)).size == 1
+    then hp.boundOauthFile else ""
 
 def memberProviderDisplayName (hps : Array HydratedProvider) (hp : HydratedProvider) : String := Id.run do
   let metaInfo := lookupProviderMeta hp.providerType
@@ -1614,7 +1611,12 @@ private def antigravityCall (http : UsageHttp) (token method : String) (body : J
 
 /-- Read one provider account's usage from its vendor. `http` is the only way out to the vendor
     for the Kimi, Muse Code and Antigravity adapters (and the sidecar row Antigravity joins). -/
-def fetchLiveProviderUsage (hp : HydratedProvider) (http : UsageHttp := liveUsageHttp) : IO JVal := do
+def fetchLiveProviderUsage (hp : HydratedProvider) (managementHttp : UsageHttp := liveUsageHttp)
+    (resolveTransport? : Option ResolveTransport := none) : IO JVal := do
+  let http : UsageHttp := match resolveTransport? with
+    | none => managementHttp
+    | some resolve => fun method url bearer body headers timeoutMs maxBytes =>
+      sendJsonRequest method url bearer body headers timeoutMs maxBytes (some resolve)
   let nowSec ← nowEpoch
   let nowIso := formatEpochIso8601Utc nowSec
   let pType := hp.providerType.toLower
@@ -1638,7 +1640,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) (http : UsageHttp := liveUsag
   -- 1. OpenAI Codex OAuth (`wham/usage`) or OpenAI API Key rate-limit probe
   if pType == "openai" then
     if hp.hasOAuth && !hp.oauthToken.isEmpty then
-      if let .ok (code, _, some wham) ← sendJsonRequest "GET" "https://chatgpt.com/backend-api/wham/usage" (some hp.oauthToken) none #[] 6000 262144 then
+      if let .ok (code, _, some wham) ← http "GET" "https://chatgpt.com/backend-api/wham/usage" (some hp.oauthToken) none #[] 6000 262144 then
         if 200 ≤ code && code < 300 then
           let (fields, windows, primary) := projectCodexUsage wham
           extraFields := fields
@@ -1653,7 +1655,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) (http : UsageHttp := liveUsag
         ("max_tokens", JVal.nat 1),
         ("messages", .arr #[.obj #[("role", .str "user"), ("content", .str "hi")]])
       ])).toUTF8
-      if let .ok resp ← sendRequest "POST" "https://api.openai.com/v1/chat/completions" hdrs probeBody 6000 65536 then
+      if let .ok resp ← sendRequest (resolveTransport? := resolveTransport?) "POST" "https://api.openai.com/v1/chat/completions" hdrs probeBody 6000 65536 then
         extraFields := extraFields.push ("status_code", JVal.nat resp.status)
         if resp.status == 401 || resp.status == 403 then
           statusStr := "needs_reauth"
@@ -1687,7 +1689,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) (http : UsageHttp := liveUsag
           ("messages", .arr #[.obj #[("role", .str "user"), ("content", .str "hi")]])
         ]
       let probeBody := (renderCompact (.obj probeObj)).toUTF8
-      if let .ok resp ← sendRequest "POST" "https://api.anthropic.com/v1/messages" hdrs probeBody 6000 65536 then
+      if let .ok resp ← sendRequest (resolveTransport? := resolveTransport?) "POST" "https://api.anthropic.com/v1/messages" hdrs probeBody 6000 65536 then
         extraFields := extraFields.push ("status_code", JVal.nat resp.status)
         if resp.status == 401 || resp.status == 403 then
           statusStr := "needs_reauth"
@@ -1731,7 +1733,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) (http : UsageHttp := liveUsag
       -- Model-specific weekly limits (Opus, Sonnet, Fable, ...) are metered apart from the
       -- overall weekly limit and only reported by the OAuth usage endpoint.
       if !hp.oauthToken.isEmpty then
-        if let .ok (code, _, some uJv) ← sendJsonRequest "GET" "https://api.anthropic.com/api/oauth/usage"
+        if let .ok (code, _, some uJv) ← http "GET" "https://api.anthropic.com/api/oauth/usage"
             (some hp.oauthToken) none #[("anthropic-beta", "oauth-2025-04-20")] 6000 65536 then
           if 200 ≤ code && code < 300 then
             let wins := anthropicModelWindows uJv
@@ -1767,7 +1769,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) (http : UsageHttp := liveUsag
 
   -- 4. Z.ai Quota Monitor
   else if pType == "zai" && !hp.apiKey.isEmpty then
-    if let .ok (code, _, body?) ← sendJsonRequest "GET" "https://api.z.ai/api/monitor/usage/quota/limit" none none #[("Authorization", hp.apiKey)] 5000 262144 then
+    if let .ok (code, _, body?) ← http "GET" "https://api.z.ai/api/monitor/usage/quota/limit" none none #[("Authorization", hp.apiKey)] 5000 262144 then
       if 200 ≤ code && code < 300 then
         if let some zJv := body? then
           let (fields, windows, primary) := projectZaiUsage zJv
@@ -1812,10 +1814,10 @@ def fetchLiveProviderUsage (hp : HydratedProvider) (http : UsageHttp := liveUsag
     if !hp.oauthToken.isEmpty then
       let xHdrs := #[("x-xai-token-auth", "xai-grok-cli"), ("User-Agent", "grok-cli/0.1.0")]
       let mut settingsJv? : Option JVal := none
-      if let .ok (sCode, _, some sJv) ← sendJsonRequest "GET" "https://cli-chat-proxy.grok.com/v1/settings" (some hp.oauthToken) none xHdrs 5000 65536 then
+      if let .ok (sCode, _, some sJv) ← http "GET" "https://cli-chat-proxy.grok.com/v1/settings" (some hp.oauthToken) none xHdrs 5000 65536 then
         if 200 ≤ sCode && sCode < 300 then settingsJv? := some sJv
         else if sCode == 401 || sCode == 403 then statusStr := "needs_reauth"
-      if let .ok (bCode, _, body?) ← sendJsonRequest "GET" "https://cli-chat-proxy.grok.com/v1/billing?format=credits" (some hp.oauthToken) none xHdrs 5000 262144 then
+      if let .ok (bCode, _, body?) ← http "GET" "https://cli-chat-proxy.grok.com/v1/billing?format=credits" (some hp.oauthToken) none xHdrs 5000 262144 then
         if 200 ≤ bCode && bCode < 300 then
           if let some bJv := body? then
             let (fields, windows, primary) := projectXaiBillingUsage bJv settingsJv?
@@ -1825,7 +1827,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) (http : UsageHttp := liveUsag
         else if bCode == 401 || bCode == 403 then
           statusStr := "needs_reauth"
     if !hp.apiKey.isEmpty then
-      if let .ok (kCode, _, body?) ← sendJsonRequest "GET" "https://api.x.ai/v1/api-key" (some hp.apiKey) none #[] 5000 65536 then
+      if let .ok (kCode, _, body?) ← http "GET" "https://api.x.ai/v1/api-key" (some hp.apiKey) none #[] 5000 65536 then
         extraFields := extraFields.push ("status_code", JVal.nat kCode)
         if 200 ≤ kCode && kCode < 300 then
           if let some kJv := body? then
@@ -1842,7 +1844,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) (http : UsageHttp := liveUsag
   else if pType == "minimax" then
     let tok := if !hp.apiKey.isEmpty then hp.apiKey else hp.oauthToken
     if !tok.isEmpty then
-      if let .ok (code, _, body?) ← sendJsonRequest "GET" "https://www.minimax.io/v1/api/openplatform/coding_plan/remains" (some tok) none #[] 6000 262144 then
+      if let .ok (code, _, body?) ← http "GET" "https://www.minimax.io/v1/api/openplatform/coding_plan/remains" (some tok) none #[] 6000 262144 then
         if 200 ≤ code && code < 300 then
           if let some mJv := body? then
             let (fields, windows, primary) := projectMinimaxUsage mJv
@@ -1860,7 +1862,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) (http : UsageHttp := liveUsag
       ("max_tokens", JVal.nat 1),
       ("messages", .arr #[.obj #[("role", .str "user"), ("content", .str "hi")]])
     ])).toUTF8
-    if let .ok resp ← sendRequest "POST" "https://api.cerebras.ai/v1/chat/completions" hdrs probeBody 6000 65536 then
+    if let .ok resp ← sendRequest (resolveTransport? := resolveTransport?) "POST" "https://api.cerebras.ai/v1/chat/completions" hdrs probeBody 6000 65536 then
       extraFields := extraFields.push ("status_code", JVal.nat resp.status)
       if resp.status == 401 || resp.status == 403 then
         statusStr := "needs_reauth"
@@ -1941,7 +1943,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) (http : UsageHttp := liveUsag
     -- Google can accept the login and still refuse every request until its owner verifies the
     -- account. That refusal, and its link, exist only on the sidecar's row for this auth file.
     if !hp.oauthFile.isEmpty then
-      let sidecarFiles ← fetchSidecarAuthFiles http
+      let sidecarFiles ← fetchSidecarAuthFiles managementHttp
       if let some row := sidecarFiles.find? (fun f => f.name == hp.oauthFile && f.needsVerification) then
         statusStr := "needs_verification"
         if !verifyNoted then
@@ -1966,7 +1968,7 @@ def fetchLiveProviderUsage (hp : HydratedProvider) (http : UsageHttp := liveUsag
 private def probeProviderUsage (hub : ProviderRuntimeHub) (hp : HydratedProvider) : IO JVal :=
   match hub.usageProbe? with
   | some probe => probe hp.id
-  | none => fetchLiveProviderUsage hp hub.usageHttp
+  | none => fetchLiveProviderUsage hp hub.usageHttp (hub.resolveTransport?.map (fun resolve => resolve hp.providerType hp.id))
 
 /-- Seconds after which a cached usage entry is refreshed again. -/
 def usageRefreshAfterSecs : UInt64 := 120
@@ -2463,9 +2465,11 @@ def reconcileCliLoginCompletion
   let candidate (f : CliAuthFileInfo) : Bool :=
     f.authType == sess.authFileType && !f.disabled && !f.accessToken.isEmpty &&
     !(sess.beforeFiles.contains (f.fileName, f.fingerprint)) &&
-    match target? with
-    | none => true
-    | some hp =>
+    match sess.routedFile?, target? with
+    | some file, some hp => f.fileName == file && hp.oauthFile == file
+    | some _, none => false
+    | none, none => true
+    | none, some hp =>
       let typeOk := providerTypeMatchesAuthType hp.providerType f.authType
       let idOk := f.prefixId == hp.id || f.accountId == hp.id
       let emailOk := !hp.accountEmail.isEmpty && !f.email.isEmpty && hp.accountEmail.toLower == f.email.toLower
@@ -2509,6 +2513,14 @@ def reconcileCliLoginCompletion
   hub.mu.atomically do
     modify fun st => { st with loginSessions := st.loginSessions.map (fun s => if s.sessionId == sess.sessionId then result else s) }
   return result
+
+private def changedLoginRoute? (store : CoreStore) (sess : CliLoginSession) :
+    IO (Option (Nat × String × ByteArray)) := do
+  let some account := sess.targetProvId? | return none
+  match ← AccountVpnRoutes.checkGeneration store.missionsDb account sess.routeGeneration with
+  | .ok () => return none
+  | .error "vpn_route_changed" => return some (jsonErr 409 "The account connection changed. Start sign-in again.")
+  | .error _ => return some (jsonErr 503 "VPN route storage unavailable")
 
 private def loginSessionResponse (sess : CliLoginSession) : Nat × String × ByteArray :=
   jsonResp 200 (.obj #[("status", .str sess.status), ("auth_url", .str sess.authUrl),
@@ -2648,7 +2660,7 @@ def customModelsUrl (baseUrl : String) : String := Id.run do
 
 /-- Refresh only server-owned custom credentials. Persist allowlisted model metadata,
     retaining the last successful observation when an upstream is unavailable. -/
-def refreshCustomModelDiscovery (store : CoreStore) (workingDir : String) : IO Unit := do
+def refreshCustomModelDiscovery (store : CoreStore) (workingDir : String) (hub : ProviderRuntimeHub) : IO Unit := do
   let old ← readDataJsonFile workingDir store.rootDir "model-discovery.json"
   let mut connections := (old.fieldArr? "connections").getD #[]
   let stamp := formatEpochIso8601Utc (← nowEpoch)
@@ -2661,7 +2673,10 @@ def refreshCustomModelDiscovery (store : CoreStore) (workingDir : String) : IO U
         |>.setField "checked_at" (.str stamp)
         |>.setField "status" (.str "failed")
         |>.setField "source" (.str "stale_discovery")
-      match ← sendJsonRequest "GET" (customModelsUrl hp.baseUrl) (some hp.apiKey) none #[] 5000 1048576 with
+      let resolve := match hub.resolveTransport? with
+        | some transport => transport hp.providerType hp.id
+        | none => AccountVpnRoutes.resolve store.missionsDb hp.id fun _ => pure (.error "vpn_coordinator_unavailable")
+      match ← sendJsonRequest "GET" (customModelsUrl hp.baseUrl) (some hp.apiKey) none #[] 5000 1048576 (some resolve) with
       | .ok (code, _, some doc) =>
         if 200 ≤ code && code < 300 then
           if let some rows := doc.fieldArr? "data" then
@@ -2768,7 +2783,7 @@ def dispatchProviderAndAiRoute
 
   if segs == ["api", "providers", "catalog", "refresh"] && method == "POST" then
     if !effAdmin then return some (jsonErr 403 "admin_required")
-    refreshCustomModelDiscovery store workingDir
+    refreshCustomModelDiscovery store workingDir hub
     let _ ← getCachedAntigravityModels hub true
     let nowSec ← nowEpoch
     hub.mu.atomically do
@@ -3317,18 +3332,42 @@ def dispatchProviderAndAiRoute
             unless !callerUserId.isEmpty && trow.createdByUserId == callerUserId do
               return some (jsonErr 403 "not_account_owner")
         let beforeFiles := (← scanCliProxyAuthFiles).map (fun af => (af.fileName, af.fingerprint))
-        match ← sendJsonRequest "GET" s!"{mgmtBase}/v0/management/{slug}-auth-url" (some mgmtKey) none #[] 15000 262144 with
+        let mut routedRequest? : Option JVal := none
+        let mut routeGeneration : Nat := 0
+        if let some account := targetProvId? then
+          let .ok route ← AccountVpnRoutes.snapshot store.missionsDb account
+            | return some (jsonErr 503 "VPN route storage unavailable")
+          routeGeneration := route.generation
+          if let .vpn _ := route then
+            let accounts ← loadHydratedProviders store workingDir
+            let some hp := accounts.find? (fun p => p.id == account)
+              | return some (jsonErr 409 "VPN credential unavailable")
+            let some url := hub.accountRelayUrl?.bind (fun sign => sign hp.providerType hp.id)
+              | return some (jsonErr 503 "VPN relay unavailable")
+            let file := accountRoutingFile accounts hp
+            unless providerTypeMatchesAuthType hp.providerType authType && !file.isEmpty &&
+                AccountVpnSidecar.validManagement mgmtBase &&
+                (effAdmin || (!callerUserId.isEmpty && hp.createdByUserId == callerUserId)) do
+              return some (jsonErr 403 "VPN credential ownership could not be verified")
+            routedRequest? := some (.obj #[("provider", .str authType), ("name", .str file), ("proxy_url", .str url)])
+        let login ← match routedRequest? with
+          | some data => sendJsonRequest "POST" s!"{mgmtBase}/v8/management/oauth/auth-url" (some mgmtKey) (some data) #[] 15000 262144
+          | none => sendJsonRequest "GET" s!"{mgmtBase}/v0/management/{slug}-auth-url" (some mgmtKey) none #[] 15000 262144
+        match login with
         | .ok (code, rawTxt, some uJv) =>
           if 200 ≤ code && code < 300 then
             let authUrl := (uJv.fieldStr? "url").getD ""
             let stTok := (uJv.fieldStr? "state").getD ""
             if authUrl.isEmpty || stTok.isEmpty then
               return some (jsonErr 502 "CLIProxy returned incomplete auth URL response")
+            let routedFile? := routedRequest?.bind (fun data => data.fieldStr? "name")
+            if routedFile?.isSome && uJv.fieldStr? "target_auth_id" != routedFile? then
+              return some (jsonErr 502 "Sidecar did not confirm the requested OAuth credential.")
             let sid ← newUuidV4
             let nowSec ← nowEpoch
             let sess : CliLoginSession := {
               sessionId := sid, providerSlug := slug, authFileType := authType,
-              targetProvId? := targetProvId?, stateToken := stTok, authUrl := authUrl,
+              targetProvId? := targetProvId?, routedFile? := routedFile?, routeGeneration := routeGeneration, stateToken := stTok, authUrl := authUrl,
               flow := flow, createdSec := nowSec, beforeFiles := beforeFiles,
               userId := callerUserId
             }
@@ -3348,6 +3387,8 @@ def dispatchProviderAndAiRoute
               ("instructions", .str instr)
             ]))
           else
+            if routedRequest?.isSome then
+              return some (jsonErr 502 "Sidecar could not start a VPN-bound OAuth exchange. A sidecar with per-login OAuth proxy support is required.")
             return some (jsonErr 502 s!"CLIProxy auth-url failed: {rawTxt}")
         | _ => return some (jsonErr 502 "Failed reaching CLIProxy management endpoint")
 
@@ -3363,7 +3404,8 @@ def dispatchProviderAndAiRoute
           return some (jsonErr 404 "Login session not found or expired")
 
         if method == "DELETE" then
-          let _ ← sendJsonRequest "DELETE" s!"{mgmtBase}/v0/management/oauth-session?state={urlEncodeComponent sess.stateToken}" (some mgmtKey) none #[] 5000 65536
+          let path := if sess.routedFile?.isSome then "/v8/management/oauth/session" else "/v0/management/oauth-session"
+          let _ ← sendJsonRequest "DELETE" s!"{mgmtBase}{path}?state={urlEncodeComponent sess.stateToken}" (some mgmtKey) none #[] 5000 65536
           hub.mu.atomically do
             let st ← get
             set { st with loginSessions := st.loginSessions.filter (fun s => s.sessionId != sid) }
@@ -3372,12 +3414,14 @@ def dispatchProviderAndAiRoute
         if method == "GET" then
           if sess.status == "completed" || sess.status == "failed" then
             return some (loginSessionResponse sess)
+          if let some failed ← changedLoginRoute? store sess then return some failed
           -- While not terminal, keep asking the sidecar even mid-completion: it accepts a
           -- callback before it exchanges the code, so only a later `error` reports why a
           -- wrong or expired callback URL will never produce a file. `ok` alone still
           -- never completes: that belongs to `reconcileCliLoginCompletion`'s visibility
           -- check.
-          match ← sendJsonRequest "GET" s!"{mgmtBase}/v0/management/get-auth-status?state={urlEncodeComponent sess.stateToken}" (some mgmtKey) none #[] 8000 262144 with
+          let path := if sess.routedFile?.isSome then "/v8/management/oauth/status" else "/v0/management/get-auth-status"
+          match ← sendJsonRequest "GET" s!"{mgmtBase}{path}?state={urlEncodeComponent sess.stateToken}" (some mgmtKey) none #[] 8000 262144 with
           | .ok (200, _, some stJv) =>
             let stStr := ((stJv.fieldStr? "status").getD "wait").toLower
             if stStr == "error" then
@@ -3386,10 +3430,13 @@ def dispatchProviderAndAiRoute
               hub.mu.atomically do
                 modify fun st => { st with loginSessions := st.loginSessions.map (fun s => if s.sessionId == sess.sessionId then failed else s) }
               return some (loginSessionResponse failed)
-            if sess.completionStartedSec?.isNone && stStr != "ok" then
+            if let some file := sess.routedFile? then
+              if stStr == "ok" && (stJv.fieldStr? "auth_id" != some file || stJv.fieldBool? "adopted" != some true) then
+                return some (loginSessionResponse { sess with status := "failed", message? := some "Sidecar could not confirm the reconnected credential." })
+            if (sess.routedFile?.isSome || sess.completionStartedSec?.isNone) && stStr != "ok" then
               return some (jsonResp 200 (.obj #[("status", .str "pending"), ("auth_url", .str sess.authUrl), ("message", .null)]))
           | _ =>
-            if sess.completionStartedSec?.isNone then
+            if sess.routedFile?.isSome || sess.completionStartedSec?.isNone then
               return some (jsonResp 200 (.obj #[("status", .str sess.status), ("auth_url", .str sess.authUrl), ("message", .null)]))
           return some (loginSessionResponse (← reconcileCliLoginCompletion hub store workingDir proxyCooldownsRef healthTracker? sess nowSec))
 
@@ -3419,14 +3466,17 @@ def dispatchProviderAndAiRoute
             | _ => sess.stateToken)
         if stateParam != sess.stateToken then
           return some (jsonErr 400 "Callback state does not match login session")
+        if let some failed ← changedLoginRoute? store sess then return some failed
         let cbPayload : JVal := .obj #[
-          ("provider", .str sess.providerSlug),
+          ("provider", .str (if sess.routedFile?.isSome then sess.authFileType else sess.providerSlug)),
           ("code", .str codeParam),
           ("state", .str stateParam)
         ]
-        match ← sendJsonRequest "POST" s!"{mgmtBase}/v0/management/oauth-callback" (some mgmtKey) (some cbPayload) #[] 15000 262144 with
+        let path := if sess.routedFile?.isSome then "/v8/management/oauth/callback" else "/v0/management/oauth-callback"
+        match ← sendJsonRequest "POST" s!"{mgmtBase}{path}" (some mgmtKey) (some cbPayload) #[] 15000 262144 with
         | .ok (c, _, _) =>
           if 200 ≤ c && c < 300 then
+            if sess.routedFile?.isSome then return some (loginSessionResponse { sess with status := "completing" })
             return some (loginSessionResponse (← reconcileCliLoginCompletion hub store workingDir proxyCooldownsRef healthTracker? sess nowSec))
           return some (loginSessionResponse { sess with status := "failed", message? := some "CLIProxy rejected the callback" })
         | .error e =>

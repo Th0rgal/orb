@@ -46,6 +46,12 @@ lean_exe «orb-core-test» where
   root := `OrbCore.SelfTest
   supportInterpreter := false
 
+/-- Credential-owner integration fixture for scripts/test_airvpn_sidecar.py. -/
+lean_exe «orb-airvpn-sidecar-test» where
+  moreLinkArgs := if System.Platform.isOSX then #["-lssl", "-lcrypto"] else #["-lssl", "-lcrypto", "-lutil", "-ldl"]
+  root := `OrbCore.AccountVpnSidecarTestMain
+  supportInterpreter := false
+
 /-- Focused inner loop; reuses the tests in orb-core-test without compiling Control. -/
 lean_exe «orb-managed-provider-test» where
   moreLinkArgs := if System.Platform.isOSX then #["-lssl", "-lcrypto"] else #["-lssl", "-lcrypto", "-lutil", "-ldl"]

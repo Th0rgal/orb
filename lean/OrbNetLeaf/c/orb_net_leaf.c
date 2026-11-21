@@ -23,7 +23,7 @@
 #endif
 #include <openssl/err.h>
 #include <openssl/evp.h>
-#include <openssl/rand.h>
+#include <limits.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
 #ifndef SOCK_CLOEXEC
@@ -66,13 +66,6 @@ static int onl_connect_sock(const char *h, uint16_t port, int socktype, uint32_t
     return freeaddrinfo(res), errno = saved, fd;
 }
 LEAN_EXPORT lean_obj_res orb_net_leaf_tcp_connect(b_lean_obj_arg host, uint16_t port, uint32_t timeout_ms) { const char *h = onl_cstr(host); return onl_pack(h ? onl_connect_sock(h, port, SOCK_STREAM, timeout_ms) : (errno = EINVAL, -1)); }
-LEAN_EXPORT lean_obj_res orb_net_leaf_rand_bytes(size_t n) {
-    if (n > 0x40000000ULL) return lean_io_result_mk_ok(lean_alloc_sarray(1, 0, 0));
-    lean_object *out = lean_alloc_sarray(1, 0, n);
-    if (n > 0 && RAND_bytes(lean_sarray_cptr(out), (int)n) != 1)
-        return lean_dec_ref(out), lean_io_result_mk_ok(lean_alloc_sarray(1, 0, 0));
-    return lean_sarray_set_size(out, n), lean_io_result_mk_ok(out);
-}
 LEAN_EXPORT lean_obj_res orb_net_leaf_aead(uint8_t alg, uint8_t enc, b_lean_obj_arg key, b_lean_obj_arg nonce, b_lean_obj_arg aad, b_lean_obj_arg buf) {
     const EVP_CIPHER *cip = alg == 0 ? EVP_aes_256_gcm() : (alg == 1 ? EVP_chacha20_poly1305() : (alg == 2 ? EVP_aes_128_gcm() : NULL));
     size_t want_k = (alg == 2) ? 16 : 32, klen = lean_sarray_size(key), nlen = lean_sarray_size(nonce), alen = lean_sarray_size(aad), blen = lean_sarray_size(buf);
@@ -107,33 +100,6 @@ LEAN_EXPORT lean_obj_res orb_net_leaf_quic_hp_mask(uint8_t hp_alg, b_lean_obj_ar
     lean_object *out = lean_alloc_sarray(1, 5, 5);
     return memcpy(lean_sarray_cptr(out), block, 5), lean_io_result_mk_ok(out);
 }
-LEAN_EXPORT lean_obj_res orb_net_leaf_ed_x25519(uint8_t op, b_lean_obj_arg k1, b_lean_obj_arg k2, b_lean_obj_arg msg) {
-    size_t n1 = lean_sarray_size(k1), n2 = lean_sarray_size(k2), nm = lean_sarray_size(msg), olen = 0;
-    EVP_PKEY *pk1 = NULL, *pk2 = NULL; EVP_MD_CTX *mctx = NULL; EVP_PKEY_CTX *pctx = NULL;
-    lean_object *out = lean_alloc_sarray(1, 0, op == 1 ? 64 : (op == 2 ? 1 : 32)); int ok = 0;
-    if (op == 0 && n1 == 32 && n2 == 0 && nm == 0) {
-        pk1 = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, NULL, lean_sarray_cptr(k1), 32); olen = 32;
-        ok = pk1 && EVP_PKEY_get_raw_public_key(pk1, lean_sarray_cptr(out), &olen) == 1 && olen == 32;
-    } else if (op == 1 && n1 == 32 && n2 == 0) {
-        pk1 = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, NULL, lean_sarray_cptr(k1), 32); mctx = EVP_MD_CTX_new(); olen = 64;
-        ok = pk1 && mctx && EVP_DigestSignInit(mctx, NULL, NULL, NULL, pk1) == 1 && EVP_DigestSign(mctx, lean_sarray_cptr(out), &olen, lean_sarray_cptr(msg), nm) == 1 && olen == 64;
-    } else if (op == 2 && n1 == 32 && n2 == 64) {
-        pk1 = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, NULL, lean_sarray_cptr(k1), 32); mctx = EVP_MD_CTX_new();
-        ok = pk1 && mctx && EVP_DigestVerifyInit(mctx, NULL, NULL, NULL, pk1) == 1 && EVP_DigestVerify(mctx, lean_sarray_cptr(k2), 64, lean_sarray_cptr(msg), nm) == 1;
-        if (ok) { lean_sarray_cptr(out)[0] = 1; olen = 1; }
-    } else if (op == 3 && n1 == 32 && n2 == 0 && nm == 0) {
-        pk1 = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL, lean_sarray_cptr(k1), 32); olen = 32;
-        ok = pk1 && EVP_PKEY_get_raw_public_key(pk1, lean_sarray_cptr(out), &olen) == 1 && olen == 32;
-    } else if (op == 4 && n1 == 32 && n2 == 32 && nm == 0) {
-        pk1 = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL, lean_sarray_cptr(k1), 32);
-        pk2 = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, NULL, lean_sarray_cptr(k2), 32);
-        pctx = pk1 ? EVP_PKEY_CTX_new(pk1, NULL) : NULL; olen = 32;
-        ok = pk2 && pctx && EVP_PKEY_derive_init(pctx) == 1 && EVP_PKEY_derive_set_peer(pctx, pk2) == 1 && EVP_PKEY_derive(pctx, lean_sarray_cptr(out), &olen) == 1 && olen == 32;
-    }
-    EVP_PKEY_CTX_free(pctx); EVP_MD_CTX_free(mctx); EVP_PKEY_free(pk2); EVP_PKEY_free(pk1);
-    if (!ok) return lean_dec_ref(out), lean_io_result_mk_ok(lean_alloc_sarray(1, 0, 0));
-    return lean_sarray_set_size(out, olen), lean_io_result_mk_ok(out);
-}
 LEAN_EXPORT lean_obj_res orb_net_leaf_openpty(uint16_t rows, uint16_t cols) {
     int mfd = -1, sfd = -1; struct winsize ws = { .ws_row = rows ? rows : 24, .ws_col = cols ? cols : 80 };
     if (openpty(&mfd, &sfd, NULL, NULL, &ws) < 0) return onl_pack(-1);
@@ -158,28 +124,62 @@ static int onl_ssl_write_all(SSL *ssl, b_lean_obj_arg buf) {
     }
     return 1;
 }
-LEAN_EXPORT lean_obj_res orb_net_leaf_tls_open(b_lean_obj_arg host, uint16_t port, b_lean_obj_arg req, uint8_t verify_peer, uint8_t alpn_mode, uint32_t timeout_ms) {
+static lean_obj_res onl_tls_open(b_lean_obj_arg host, uint16_t port, b_lean_obj_arg req,
+                                 uint8_t verify_peer, uint8_t alpn_mode, uint32_t timeout_ms, int supplied_fd) {
     pthread_once(&g_onl_tls_once, onl_tls_reg);
-    const char *h = onl_cstr(host); char pstr[8]; snprintf(pstr, sizeof(pstr), "%u", (unsigned)port); struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_STREAM }, *res = NULL;
-    if (!h || !*h || getaddrinfo(h, pstr, &hints, &res) != 0 || !res) return lean_io_result_mk_ok(lean_box(0));
-    onl_tls_t *s = (onl_tls_t *)calloc(1, sizeof(onl_tls_t)); if (!s || pthread_mutex_init(&s->mu, NULL) != 0) return freeaddrinfo(res), free(s), lean_io_result_mk_ok(lean_box(0));
-    s->fd = -1; int ok = (s->ctx = SSL_CTX_new(TLS_client_method())) != NULL, no_h2 = 0, conn = 0;
+    const char *h = onl_cstr(host);
+    struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_STREAM }, *res = NULL;
+    if (!h || !*h) {
+        if (supplied_fd >= 0) close(supplied_fd);
+        return lean_io_result_mk_ok(lean_box(0));
+    }
+    if (supplied_fd < 0) {
+        char service[8];
+        snprintf(service, sizeof(service), "%u", (unsigned)port);
+        if (getaddrinfo(h, service, &hints, &res) != 0 || !res)
+            return lean_io_result_mk_ok(lean_box(0));
+    }
+    onl_tls_t *s = calloc(1, sizeof(*s));
+    if (!s || pthread_mutex_init(&s->mu, NULL) != 0) {
+        if (res) freeaddrinfo(res);
+        if (supplied_fd >= 0) close(supplied_fd);
+        free(s);
+        return lean_io_result_mk_ok(lean_box(0));
+    }
+    s->fd = supplied_fd; int ok = (s->ctx = SSL_CTX_new(TLS_client_method())) != NULL, no_h2 = 0, conn = 0;
     if (ok && verify_peer) { SSL_CTX_set_verify(s->ctx, SSL_VERIFY_PEER, NULL); ok = SSL_CTX_set_default_verify_paths(s->ctx) == 1; if (ok && access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0) SSL_CTX_load_verify_locations(s->ctx, "/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/certs"); }
     static const unsigned char h2_alpn[] = { 2, 'h', '2' }, h1_alpn[] = { 8, 'h', 't', 't', 'p', '/', '1', '.', '1' };
     if (ok) ok = SSL_CTX_set_alpn_protos(s->ctx, alpn_mode == 1 ? h2_alpn : h1_alpn, alpn_mode == 1 ? 3 : 9) == 0;
     uint32_t ms = timeout_ms ? timeout_ms : 30000U; int pms = ms > 0x7FFFFFFFU ? 0x7FFFFFFF : (int)ms, cms = pms > 2000 ? 2000 : pms;
     struct timeval tv = { .tv_sec = (time_t)(ms / 1000U), .tv_usec = (suseconds_t)((ms % 1000U) * 1000U) }; unsigned char ipb[16]; int is_ip = inet_pton(AF_INET, h, ipb) == 1 || inet_pton(AF_INET6, h, ipb) == 1;
-    for (struct addrinfo *ai = res; ok && !conn && !no_h2 && ai; ai = ai->ai_next)
-        if ((s->fd = onl_try_sock(ai, ai->ai_next ? cms : pms, &tv, SOCK_STREAM)) >= 0) {
+    if (supplied_fd >= 0 && (setsockopt(supplied_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0 ||
+                             setsockopt(supplied_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) != 0)) ok = 0;
+    struct addrinfo *ai = res;
+    while (ok && !conn && !no_h2 && (s->fd >= 0 || ai)) {
+        if (ai) {
+            s->fd = onl_try_sock(ai, ai->ai_next ? cms : pms, &tv, SOCK_STREAM);
+            ai = ai->ai_next;
+        }
+        if (s->fd >= 0) {
             if ((s->ssl = SSL_new(s->ctx)) != NULL && (is_ip ? (!verify_peer || X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(s->ssl), h) == 1) : (SSL_set_tlsext_host_name(s->ssl, h) == 1 && (!verify_peer || SSL_set1_host(s->ssl, h) == 1))) && SSL_set_fd(s->ssl, s->fd) == 1 && SSL_connect(s->ssl) == 1) {
                 const unsigned char *sel = NULL; unsigned int slen = 0; if (alpn_mode == 1) SSL_get0_alpn_selected(s->ssl, &sel, &slen);
                 if (alpn_mode == 1 && !(slen == 2 && sel && sel[0] == 'h' && sel[1] == '2')) no_h2 = 1; else conn = 1;
             } else { if (s->ssl) { SSL_free(s->ssl); s->ssl = NULL; } close(s->fd); s->fd = -1; }
         }
-    freeaddrinfo(res); if (no_h2) return onl_tls_fin(s), lean_io_result_mk_ok(lean_box(1)); else ok = conn;
+    }
+    if (res) freeaddrinfo(res);
+    if (no_h2) return onl_tls_fin(s), lean_io_result_mk_ok(lean_box(1)); else ok = conn;
     if (ok) ok = onl_ssl_write_all(s->ssl, req);
     if (!ok) return onl_tls_fin(s), lean_io_result_mk_ok(lean_box(0));
     lean_object *some = lean_alloc_ctor(2, 1, 0); return lean_ctor_set(some, 0, lean_alloc_external(g_onl_tls_cls, s)), lean_io_result_mk_ok(some);
+}
+LEAN_EXPORT lean_obj_res orb_net_leaf_tls_open(b_lean_obj_arg host, uint16_t port, b_lean_obj_arg req, uint8_t verify_peer, uint8_t alpn_mode, uint32_t timeout_ms) {
+    return onl_tls_open(host, port, req, verify_peer, alpn_mode, timeout_ms, -1);
+}
+/* Takes ownership of an already connected tunnel. The upstream hostname is used only for TLS. */
+LEAN_EXPORT lean_obj_res orb_net_leaf_tls_open_tunnel(b_lean_obj_arg host, uint32_t fd, b_lean_obj_arg req, uint32_t timeout_ms) {
+    if (fd > INT_MAX) return lean_io_result_mk_ok(lean_box(0));
+    return onl_tls_open(host, 0, req, 1, 0, timeout_ms, (int)fd);
 }
 LEAN_EXPORT lean_obj_res orb_net_leaf_tls_write(b_lean_obj_arg h_obj, b_lean_obj_arg buf) {
     onl_tls_t *s = (onl_tls_t *)lean_get_external_data(h_obj); if (!s) return lean_io_result_mk_ok(lean_box(0));

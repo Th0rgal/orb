@@ -25,6 +25,12 @@ open OrbCore.Spec
 open OrbCore.Store
 open OrbNetLeaf.TlsHttp
 
+structure SidecarCredential where
+  provider : String
+  file : String
+  modelPrefix : String
+  deriving Repr, DecidableEq, Inhabited
+
 /-- Single upstream provider target inside a model-routing fallback chain. -/
 structure ProviderTarget where
   accountId             : String
@@ -39,6 +45,7 @@ structure ProviderTarget where
   modelMaxConcurrency?  : Option UInt32 := none
   /-- Maximum input context accepted by this target, used before cross-target recovery. -/
   contextLimit            : UInt32 := 128000
+  sidecarCredential? : Option SidecarCredential := none
   deriving Repr, DecidableEq, Inhabited
 
 /-- In-memory sliding-window RPM, active in-flight concurrency & learned upstream header state. -/
@@ -1243,7 +1250,8 @@ private def openTlsUpstreamReader (method host : String) (port : UInt16) (path :
     (idleLimitMs : Nat := upstreamIdleLimitMs)
     (totalLimitMs : Nat := upstreamTotalLimitMs)
     (headDeadlineMs? : Option Nat := none)
-    (headCommittedRef? : Option (IO.Ref Bool) := none) : IO (Except String UpstreamReader) := do
+    (headCommittedRef? : Option (IO.Ref Bool) := none)
+    (socksPort? : Option UInt16 := none) : IO (Except String UpstreamReader) := do
   let connWaitMs : Nat ←
     match headDeadlineMs? with
     | some dl => do
@@ -1252,7 +1260,7 @@ private def openTlsUpstreamReader (method host : String) (port : UInt16) (path :
     | none => pure (Nat.min 15000 idleLimitMs)
   if connWaitMs == 0 then
     return .error "upstream_idle_timeout"
-  match ← openHttps11Stream method host port path headers body true connWaitMs.toUInt32 with
+  match ← openHttps11Stream method host port path headers body true connWaitMs.toUInt32 (socksPort? := socksPort?) with
   | .error e => return .error e
   | .ok sess =>
     let t0 ← IO.monoMsNow
@@ -1362,11 +1370,13 @@ def streamingUpstreamRequest (isTls : Bool) (method host : String) (port : UInt1
     (idleLimitMs : Nat := upstreamIdleLimitMs)
     (totalLimitMs : Nat := upstreamTotalLimitMs)
     (headDeadlineMs? : Option Nat := none)
-    (bodyTimedOutRef? : Option (IO.Ref Bool) := none) :
+    (bodyTimedOutRef? : Option (IO.Ref Bool) := none)
+    (socksPort? : Option UInt16 := none) :
     IO (Except String (HttpsResponse × Option BodyPump)) := do
+  if socksPort?.isSome && !isTls then return .error "vpn_requires_tls"
   let headCommitted ← IO.mkRef false
   let opened ← if isTls then
-      openTlsUpstreamReader method host port path headers body idleLimitMs totalLimitMs headDeadlineMs? (some headCommitted)
+      openTlsUpstreamReader method host port path headers body idleLimitMs totalLimitMs headDeadlineMs? (some headCommitted) socksPort?
     else
       openLoopbackUpstreamReader method host port path headers body idleLimitMs totalLimitMs headDeadlineMs? (some headCommitted)
   let r ← match opened with
@@ -1644,6 +1654,26 @@ private def recoverBufferedStream
             result := some (← emittedRef.get, false)
   return result.get!
 
+/-- Resolve the chosen credential on each transport open, including a stream retry. -/
+abbrev ResolveAccountTransport := ProviderTarget → IO (Except String (Option UInt16))
+
+private def openAccountRequest (resolve : ResolveAccountTransport) (target : ProviderTarget)
+    (stream tls : Bool) (method host : String) (port : UInt16) (path : String)
+    (headers : Array (String × String)) (body : ByteArray) (limits : StreamLimits)
+    (deadline : Option Nat) (timedOut : Option (IO.Ref Bool)) :
+    IO (Except String (HttpsResponse × Option BodyPump)) := do
+  if port == 0 then return .error "invalid_upstream_port"
+  let .ok socksPort? ← resolve target | return .error "account_vpn_unavailable"
+  if !tls then
+    if socksPort?.isSome then return .error "vpn_requires_tls"
+    if !isPrivatePlaintextHost host then return .error "plaintext_upstream_disabled"
+  if stream then
+    return ← streamingUpstreamRequest tls method host port path headers body
+      limits.idleMs limits.totalMs deadline timedOut socksPort?
+  if tls then
+    return (← httpsRequest method host port path headers body (socksPort? := socksPort?)).map (·, none)
+  return (← loopbackHttpRequest method host port path headers body).map (·, none)
+
 /- Execute a bounded `/v1/*` proxy forward across `chain.targets` with proactive pacing spillover,
     sticky `firstByteCommitted` pin enforcement via `Orb.HarnessCloud.stepProviderAttemptSlice` /
     `classifyProviderAttempt` (`SM-21`), pre-header failover on `402`, `429`, and `5xx` via
@@ -1665,7 +1695,8 @@ def forwardProxyChain
     (pinnedAccount? : Option String := none)
     (authEvidence? : Option (IO.Ref (Array (String × String))) := none)
     (streamLimits? : Option StreamLimits := none)
-    (bodyTimedOutRef? : Option (IO.Ref Bool) := none) :
+    (bodyTimedOutRef? : Option (IO.Ref Bool) := none)
+    (resolveTransport : ResolveAccountTransport := fun _ => pure (.ok none)) :
     IO ProxyOutcome := do
   let wantsStream := requestWantsStream relPath body
   let effStreamLimits := streamLimits?.getD {}
@@ -1930,17 +1961,8 @@ def forwardProxyChain
           match mockTransport? with
           | some mockFn => pure ((← mockFn tgt).map (·, none))
           | none =>
-            if port == 0 then
-              pure (.error "invalid_upstream_port")
-            else if !isTls && !isPrivatePlaintextHost host then
-              pure (.error "plaintext_upstream_disabled")
-            else if wantsStream then
-              streamingUpstreamRequest isTls method host port fullPath reqHdrs outBody
-                effStreamLimits.idleMs effStreamLimits.totalMs streamHeadDeadlineMs? bodyTimedOutRef?
-            else if isTls then
-              pure ((← httpsRequest method host port fullPath reqHdrs outBody).map (·, none))
-            else
-              pure ((← loopbackHttpRequest method host port fullPath reqHdrs outBody).map (·, none))
+            openAccountRequest resolveTransport tgt wantsStream isTls method host port fullPath
+              reqHdrs outBody effStreamLimits streamHeadDeadlineMs? bodyTimedOutRef?
         catch e =>
           if let some tracker := effPacing? then
             releaseTargetSlot tracker tgt
@@ -2037,13 +2059,9 @@ def forwardProxyChain
                       if let some tracker := effPacing? then
                         releaseTargetSlot tracker retryTarget
                       pure none
-                    else if retryPort == 0 || (!retryTls && !isPrivatePlaintextHost retryHost) then
-                      if let some tracker := effPacing? then
-                        releaseTargetSlot tracker retryTarget
-                      pure none
                     else
-                      match ← streamingUpstreamRequest retryTls method retryHost retryPort retryPath retryHdrs retryWireBody
-                        effStreamLimits.idleMs effStreamLimits.totalMs streamHeadDeadlineMs? bodyTimedOutRef? with
+                      match ← openAccountRequest resolveTransport retryTarget true retryTls method retryHost
+                        retryPort retryPath retryHdrs retryWireBody effStreamLimits streamHeadDeadlineMs? bodyTimedOutRef? with
                       | .ok (retryResp, some p) =>
                         if let some tracker := effPacing? then
                           recordObservedHeaders tracker retryTarget.accountId retryResp.headers
