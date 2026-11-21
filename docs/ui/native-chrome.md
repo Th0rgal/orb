@@ -26,7 +26,9 @@ participate in the hybrid launch.
 
 The private Sway replay in `lean/OrbDesktop/tests/hybrid_desktop.py` compares the
 two launchers with one member account, two project missions and a configured
-machine provider. The Nix workflow's `hybrid_desktop` dispatch runs it against
+machine provider. Returning to a mission waiting for the user must show the earlier
+and latest turns. The raw lifecycle value must stay out of the visible transcript.
+The Nix workflow's `hybrid_desktop` dispatch runs it against
 the packaged clients on a native aarch64 runner.
 
 ## Single Owner & Cold-Start Hydration (`AGENTS.md` Principle 3)
