@@ -32,7 +32,7 @@ private def missionCard (idx : Nat) (xs : List String) : MissionSummaryCard :=
     summaryText := col xs 10, machine := col xs 11, backend := col xs 12,
     effort := col xs 14, permissionMode := col xs 15,
     folder := col xs 16, parentMissionId := col xs 17, callbackParentMissionId := col xs 18,
-    forkSource := col xs 19, supersededBy := col xs 20 }
+    forkSource := col xs 19, supersededBy := col xs 20, archiveTag := col xs 21 == "1" }
 
 private def machineCard (idx : Nat) (xs : List String) : FleetMachineCard :=
   { widgetId := 1002 + 3 * idx, machineId := col xs 1, name := col xs 2
@@ -374,8 +374,8 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
         return (if st.openMission == some mid then resetSelection { next with screen := .controlEmpty } none else next, some viewport)
       | .restore _ =>
         return ({ st with
-                          missionCards := st.missionCards.map fun m => if m.missionId == mid then { m with status := "paused" } else m,
-                          sidebarRows := st.sidebarRows.map fun row => if row.rowId == "mission:" ++ mid then { row with status := "paused" } else row }, some viewport)
+                          missionCards := st.missionCards.map fun m => if m.missionId == mid then { m with status := restoredExecutionStatus m.status, archiveTag := false } else m,
+                          sidebarRows := st.sidebarRows.map fun row => if row.rowId == "mission:" ++ mid then { row with status := restoredExecutionStatus row.status } else row }, some viewport)
       | .rename _ title =>
         return ({ st with
                           missionCards := st.missionCards.map fun m => if m.missionId == mid then { m with title } else m,
@@ -388,13 +388,13 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
         let changed := receipts.filterMap fun xs => if col xs 0 == "ok" then some (col xs 1) else none
         let failed := receipts.filterMap fun xs => if col xs 0 == "failed" then some (col xs 1) else none
         let remove := kind == "delete"
-        let status := if kind == "archive" then "acknowledged" else "paused"
+        let nextStatus := fun previous => if kind == "archive" then "acknowledged" else restoredExecutionStatus previous
         let cards := st.missionCards.filterMap fun m =>
           if !changed.contains m.missionId then some m
-          else if remove then none else if kind == "move" then some { m with project } else some { m with status }
+          else if remove then none else if kind == "move" then some { m with project } else some { m with status := nextStatus m.status, archiveTag := kind == "archive" && m.archiveTag }
         let rows := st.sidebarRows.filterMap fun row =>
           if !changed.contains (row.rowId.drop 8).toString || row.kind != "mission" then some row
-          else if remove then none else if kind == "move" then some row else some { row with status }
+          else if remove then none else if kind == "move" then some row else some { row with status := nextStatus row.status }
         let next := { st with
           missionCards := cards, sidebarRows := rows, multiRows := failed.map ("mission:" ++ ·),
           selectionAnchor := none, writeError := if failed.isEmpty then "" else s!"Core did not confirm {kind} for {failed.length} missions" }

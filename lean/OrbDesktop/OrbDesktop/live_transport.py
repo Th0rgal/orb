@@ -130,9 +130,13 @@ def change_status(c, action, mid, key):
             raise
     elif action == 'restore':
         row = c.get(path + '?include_history=false')
-        if row['id'] != mid or row['status'] != 'acknowledged' or (row.get('execution') or {}).get('state') == 'running':
+        tagged = 'archived' in (row.get('tags') or [])
+        if row['id'] != mid or (not tagged and row['status'] != 'acknowledged') or (row.get('execution') or {}).get('state') == 'running':
             raise ValueError('mission not archived')
-        c.request(path + '/status', body={'status': 'paused'}, key=key)
+        if tagged:
+            c.request(path + '/archive', body={'archived': False}, key=key + '-tag')
+        if row['status'] == 'acknowledged':
+            c.request(path + '/status', body={'status': 'paused'}, key=key)
 
 
 def bulk_write(c, kind, key):
@@ -622,7 +626,8 @@ def roster_rows(c, include_archived=False, expanded=(), rules=None):
         missions = by_id.values()
     rows += [('P', p['slug'], p.get('title') or p['slug'], p.get('objective'), p.get('color')) for p in projects]
     rows += [('M', *(m.get(k) for k in ('id','title','project','track','model','model_override',
-                                        'status','updated_at','created_at','short_description')), *mission_settings(m), *mission_hierarchy(m))
+                                        'status','updated_at','created_at','short_description')), *mission_settings(m), *mission_hierarchy(m),
+                    str(int('archived' in (m.get('tags') or []))))
              for m in missions if re.fullmatch(r'[A-Za-z0-9_-]{1,128}', m['id'])]
     rows += [('N', *(m.get(k) for k in ('id','name','role','provider','cpu_ram','size','state',
                                         'status','expires_at','cost','active_missions'))) for m in machines]

@@ -113,6 +113,18 @@ private def nestedControllerFixture : DesktopState :=
 #guard (({ nestedControllerFixture with expandedMissions := ["mission:m"] } : DesktopState).visibleProjectRows.map
   (fun r => (r.rowId, r.badge))) == [("project:now", 0), ("mission:m", 2), ("mission:child", 1)]
 
+-- Tagged workers retain their execution status. A tagged parent supplies context only
+-- while a visible worker needs it, regardless of whether the controller is expanded.
+private def archiveFixture (ids : List String) :=
+  let cards := nestedControllerFixture.missionCards.map fun c => { c with archiveTag := ids.contains c.missionId }
+  { nestedControllerFixture with expandedMissions := ["mission:m", "mission:child"], missionCards := cards }
+
+#guard ((archiveFixture ["child"]).visibleProjectRows.map fun r => (r.rowId, r.badge, r.archiveOnly)) ==
+  [("project:now", 0, false), ("mission:m", 2, false), ("mission:child", 1, false), ("mission:grandchild", 0, false)]
+#guard (((archiveFixture ["child", "grandchild"]).visibleProjectRows.filter (!·.archiveOnly)).map fun r => (r.rowId, r.badge)) ==
+  [("project:now", 0), ("mission:m", 0)]
+#guard ((archiveFixture ["child", "grandchild"]).visibleProjectRows.filter (·.archiveOnly)).length == 2
+
 private def unsentDraft : DesktopState :=
   { hierarchyFixture with composer := { text := "Keep this draft" }, draftProject := "other" }
 

@@ -11,7 +11,7 @@ import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 PKG = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PKG / 'OrbDesktop'))
@@ -440,6 +440,19 @@ class Delivery(unittest.TestCase):
             self.assertEqual(request.kwargs['body']['working_directory'], directory)
             self.assertNotIn('remote_node_id', request.kwargs['body'])
 
+    def test_restore_clears_archive_tag_without_changing_completed_work(self):
+        path = '/api/control/missions/worker'
+        c = Mock()
+        c.get.return_value = dict(id='worker', status='completed', tags=['archived'])
+        live.change_status(c, 'restore', 'worker', 'key')
+        self.assertEqual(c.request.call_args_list, [call(path + '/archive', body={'archived': False}, key='key-tag')])
+        c.reset_mock()
+        c.get.return_value['status'] = 'acknowledged'
+        live.change_status(c, 'restore', 'worker', 'key')
+        self.assertEqual(c.request.call_args_list, [
+            call(path + '/archive', body={'archived': False}, key='key-tag'),
+            call(path + '/status', body={'status': 'paused'}, key='key')])
+
     def test_expanded_project_restores_older_active_worker_and_its_controller(self):
         query = '/api/control/missions?project=p&limit=2'
         def row(mid, status, **fields):
@@ -466,7 +479,7 @@ class Delivery(unittest.TestCase):
 
     def test_child_precedes_parent_in_live_roster(self):
         child = dict(id='child', folder='notes/today', parent_mission_id='launch',
-                     callback_parent_mission_id='callback', tags=['fork-of:source'],
+                     callback_parent_mission_id='callback', tags=['fork-of:source', 'archived'],
                      superseded_by_mission_id='next')
         pages = {'/api/projects': {'projects': []}, '/api/machines': [],
                  '/api/control/missions?limit=200&include_ancestors=true': [child]}
@@ -475,7 +488,7 @@ class Delivery(unittest.TestCase):
         for missions in ([child], [child, dict(id='launch')]):
             pages['/api/control/missions?limit=200&include_ancestors=true'] = missions
             projected = next(row for row in live.roster_rows(connection) if row[0] == 'M')
-            self.assertEqual(projected[16:], ('notes/today', 'launch', 'callback', 'source', 'next'))
+            self.assertEqual(projected[16:], ('notes/today', 'launch', 'callback', 'source', 'next', '1'))
 
     def test_live_reader_accepts_both_full_roster_pages(self):
         ids = [str(i).zfill(128) for i in range(300)]
