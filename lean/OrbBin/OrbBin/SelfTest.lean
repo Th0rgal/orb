@@ -1053,6 +1053,13 @@ def runAllTests : IO UInt32 := do
   let failure := agEvent "{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"error\":\"fixture refusal\"}}"
   assertEq "Antigravity reports terminal inference error" failure.errorMsg? (some "fixture refusal")
   assertEq "Antigravity diagnostics are not displayed as assistant text" (agEvent "diagnostic").textDelta ""
+  let authLine := "Authentication required. Please visit the URL to log in: https://accounts.google.com/o/oauth2/auth?state=test-marker"
+  let authMessage := (agEvent authLine).errorMsg?
+  assertEq "Antigravity login challenge gives an actionable, redacted error"
+    (authMessage.any fun m => m.contains "native Google sign-in" && !m.contains "test-marker") true
+  let authFailure := agEvent (renderCompact (.obj #[("event", .str "result"),
+    ("result", .obj #[("status", .str "ERROR"), ("error", .str authLine)])]))
+  assertEq "Structured Antigravity login failures use the same diagnostic" authFailure.errorMsg? authMessage
   runOpenCodeAcpTests
   IO.println "=== OrbBin Wave 1 Companion Binaries Self-Test ==="
 

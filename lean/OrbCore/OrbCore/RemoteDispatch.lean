@@ -1266,6 +1266,12 @@ private def ingestRemoteHarnessLine
         (renderCompact (.obj #[("content", .str full)])) nowIso
     return next
 
+/-- Only protocol events are assistant output for native agy. Its raw log can contain an
+    interactive login URL or a partial JSON line when bounded by the node's tail limit. -/
+private def missionLogTail (backend raw : String) : String :=
+  if backend == "antigravity" then (OrbBin.ClaudeControl.antigravitySignInError? raw).getD ""
+  else raw.trimAscii.toString
+
 private def splitCompleteLines (buf : String) : Array String × String := Id.run do
   let parts := buf.splitOn "\n"
   if parts.length ≤ 1 then
@@ -1556,7 +1562,7 @@ partial def spawnRemoteJobPoller
               discard <| callRemoteNodeHttpOpt relayHub? mc? effNodeId "POST" s!"/jobs/{jobId}/cancel" (some (.obj #[])) hdrs 8000
               if !proxyTok.isEmpty then revokeSingleMissionProxyToken store proxyTok
               let reason := "harness_no_output"
-              let logTail := ((jv.fieldStr? "log_tail").getD "").trimAscii.toString
+              let logTail := missionLogTail backend ((jv.fieldStr? "log_tail").getD "")
               let detail := acc.lastError?.getD (if logTail.isEmpty then "" else (logTail.takeEnd 600).toString)
               discard <| execParamQuery store.missionsDb
                 "UPDATE remote_node_jobs SET state='cancelled', updated_at=?2 WHERE job_id=?1;"
@@ -1606,13 +1612,14 @@ partial def spawnRemoteJobPoller
               keepRunning := false
               if !proxyTok.isEmpty then
                 revokeSingleMissionProxyToken store proxyTok
-              let nodeErr? := (jv.fieldStr? "error").filter (!·.trimAscii.toString.isEmpty)
-              let logTail := (jv.fieldStr? "log_tail").getD ""
+              let nodeErr? := ((jv.fieldStr? "error").filter (!·.trimAscii.toString.isEmpty)).map fun msg =>
+                if backend == "antigravity" then (OrbBin.ClaudeControl.antigravitySignInError? msg).getD msg else msg
+              let logTail := missionLogTail backend ((jv.fieldStr? "log_tail").getD "")
               let exitCode := (jv.fieldInt? "exit_code").getD (if jState == "succeeded" then 0 else 1)
               let finalText :=
                 if !acc.text.trimAscii.toString.isEmpty then acc.text
                 else if jState == "succeeded" && !logTail.trimAscii.toString.isEmpty &&
-                        backend != "opencode" && backend != "claudecode" && backend != "claude" && backend != "codex" then
+                        backend != "opencode" && backend != "claudecode" && backend != "claude" && backend != "codex" && backend != "antigravity" then
                   logTail.trimAscii.toString
                 else ""
               if jState == "succeeded" && !finalText.isEmpty then
