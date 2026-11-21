@@ -343,9 +343,17 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
           return ({ st with missionMenu := some {
             mission := st.openMission.getD "", x := r.x, y := r.bottom, trigger := id,
             page := .picker field } }, some viewport)
-    if let .pointerButton x y 0x111 true := ev then
-      if st.hasLiveConnection && st.writeRequest.isNone then
-        let some id := hitTest rt.hitRegions x y | return (st, none)
+    let menuTarget := match ev with
+      | .pointerButton x y 0x111 true => (hitTest rt.hitRegions x y).map fun id => (id, x, y)
+      | .key key mods .pressed =>
+        if key == 0xff67 || (key == 0xffc7 && mods == 1) then do
+          let id ← rt.focus.owner
+          let (_, bounds) ← rt.hitRegions.find? (·.1 == id)
+          pure (id, bounds.x, bounds.bottom)
+        else none
+      | _ => none
+    if let some (id, x, y) := menuTarget then
+      if st.hasLiveConnection && st.missionMenu.isNone && st.writeRequest.isNone then
         let some row := st.sidebarRows.find? (·.widgetId == id) | return (st, none)
         let previous := st
         let st := contextSelection st row.rowId
@@ -503,7 +511,7 @@ def liveViewportRegression : Bool := Id.run do
   let cards := (List.range 32).map fun i => { (default : MissionSummaryCard) with
     widgetId := 1001 + i, missionId := s!"m{i}", title := s!"Mission {i}" }
   let rows := cards.map fun c => { (default : ChromeSidebarRow) with
-    widgetId := c.widgetId, rowId := c.missionId, kind := "mission", title := c.title }
+    widgetId := c.widgetId, rowId := "mission:" ++ c.missionId, kind := "mission", title := c.title }
   let initial := { DesktopState.liveUnavailable with sidebarRows := rows, missionCards := cards, connectionBinding := "test" }
   let w := pxToSub 800
   let h := pxToSub 320
@@ -530,7 +538,13 @@ def liveViewportRegression : Bool := Id.run do
   let some (_, row) := scrolled.hitRegions.find? (fun (p : EntityId × Rect) => p.1 == last.widgetId) | return false
   let click := fun pressed => Event.pointerButton (row.x + row.w/2) (row.y + row.h/2) 0x110 pressed
   let press := scrolled.stepEvent (desktopReducer scrolled) (click true)
-  let selected := (press.stepEvent (desktopReducer press) (click false)).app
+  let released := press.stepEvent (desktopReducer press) (click false)
+  let selected := released.app
+  let menu := (released.stepEvent (desktopReducer released) (.key 0xffc7 1 .pressed)).app.missionMenu
+  if menu.map (·.mission) != some last.missionId then return false
+  let forward := released.stepEvent (desktopReducer released) (.key 0xff09 0 .pressed)
+  let backward := forward.stepEvent (desktopReducer forward) (.key 0xfe20 1 .pressed)
+  if backward.focus.owner != released.focus.owner then return false
   if selected.openMission != some last.missionId then return false
   let some top := wheel (frame selected).1 transcriptViewportId (-999999) | return false
   let (atTop, before) := frame top

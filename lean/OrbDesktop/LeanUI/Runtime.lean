@@ -193,8 +193,9 @@ def stepEvent (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage) (
     | .key keysym mods state =>
       if state == .pressed || state == .repeated then
         -- Tab is handled here so every screen shares one focus traversal policy.
-        if keysym == 0xff09 then
-          let focus' := cycleFocusRuntime rt.focus rt.focusableOrder
+        if keysym == 0xff09 || keysym == 0xfe20 then
+          let reverse := keysym == 0xfe20 || mods &&& 1 != 0
+          let focus' := cycleFocusRuntime rt.focus (if reverse then rt.focusableOrder.reverse else rt.focusableOrder)
           let dmg' := if focus'.owner == rt.focus.owner then rt.damage else Damage.add rt.damage rt.viewportDeviceRect
           { rt with focus := focus', damage := dmg' }
         else if keysym == 0xff0d || keysym == 0xff8d || keysym == 0x20 then
@@ -232,7 +233,7 @@ end RuntimeState
 3. If `needsRedraw rt.damage == true`, build the `Scene`, render via `Vulkan.renderFrame`, and
    clear `rt.damage` to `none`. -/
 def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
-    (onEvent : σ → Event → σ × Damage)
+    (onEvent : RuntimeState σ → σ → Event → σ × Damage)
     (view : RuntimeState σ → IO (FrameView × List ScrollRegion))
     (focusChange : σ → σ → Event → Option Nat := fun _ _ _ => none) :
     IO (RuntimeState σ) := do
@@ -240,7 +241,7 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
   let mut st := { rt with wayland := wl1 }
   for ev in evs do
     let before := st.app
-    st := st.stepEvent onEvent ev
+    st := st.stepEvent (onEvent st) ev
     if let some target := focusChange before st.app ev then st := st.requestFocus target st.viewportDeviceRect
   if !needsRedraw st.damage then
     return { st with quiescentSkips := st.quiescentSkips + 1 }
@@ -273,7 +274,7 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
 /-- Frame tick for views without independently scrollable input regions. -/
 def stepFrame {σ : Type} (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage)
     (view : RuntimeState σ → IO FrameView) : IO (RuntimeState σ) :=
-  stepFrameWithRegions rt onEvent fun st => do return (← view st, [])
+  stepFrameWithRegions rt (fun _ => onEvent) fun st => do return (← view st, [])
 
 /-- Build the canonical Orb Desktop canary scene. -/
 def buildCanaryScene (rt : RuntimeState Unit) :
@@ -466,7 +467,7 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
       rt := { rt with app }
       if let some rect := damage then rt := rt.markDirty rect
       let rendered := rt.framesRendered
-      rt ← stepFrameWithRegions rt (onEvent rt) view focusChange
+      rt ← stepFrameWithRegions rt onEvent view focusChange
       let shape : UInt32 := match rt.hoveredEntity with
         | some 1 => 9  -- text in the composer
         | some id => if rt.focusableOrder.contains id then 4 else 1
