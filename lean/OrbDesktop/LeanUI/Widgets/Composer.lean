@@ -63,40 +63,30 @@ def pushUndoSnapshot (buf : ComposerBuffer) : ComposerBuffer :=
   let nextUndo := (snap :: buf.undoStack).take (max 1 buf.maxUndoDepth)
   { buf with undoStack := nextUndo, redoStack := [] }
 
-/-- Insert committed UTF-8 text at `cursorOffset` and advance the cursor. -/
-def insertText (buf : ComposerBuffer) (inserted : String) : ComposerBuffer :=
-  if inserted.isEmpty then buf
+/-- Replace the range around the caret as one undoable edit. Counts are Unicode scalars. -/
+private def replaceAroundCursor (buf : ComposerBuffer) (delBefore delAfter : Nat)
+    (inserted : String) : ComposerBuffer :=
+  let cur := clampCursor buf.text buf.cursorOffset
+  let start := cur - delBefore
+  let stop := min buf.text.length (cur + delAfter)
+  if inserted.isEmpty && start == stop then buf
   else
-    let b := buf.pushUndoSnapshot
-    let chars := b.text.toList
-    let cur := clampCursor b.text b.cursorOffset
-    let before := chars.take cur
-    let after := chars.drop cur
-    let insChars := inserted.toList
-    let nextText := String.ofList (before ++ insChars ++ after)
-    let nextCursor := cur + insChars.length
-    { b with
-      text := nextText
+    let chars := buf.text.toList
+    let nextCursor := start + inserted.length
+    { buf.pushUndoSnapshot with
+      text := String.ofList (chars.take start ++ inserted.toList ++ chars.drop stop)
       cursorOffset := nextCursor
       imePreeditOffset := nextCursor
       imePreeditLen := 0
       imePreeditText := "" }
 
-/-- Delete `delBefore` characters before `cursorOffset` and `delAfter` characters after `cursorOffset`. -/
+/-- Insert committed UTF-8 text at the caret. -/
+def insertText (buf : ComposerBuffer) (inserted : String) : ComposerBuffer :=
+  if inserted.isEmpty then buf else buf.replaceAroundCursor 0 0 inserted
+
+/-- Delete Unicode scalars on either side of the caret. -/
 def deleteAroundCursor (buf : ComposerBuffer) (delBefore delAfter : Nat) : ComposerBuffer :=
-  if delBefore == 0 && delAfter == 0 then buf
-  else
-    let b := buf.pushUndoSnapshot
-    let chars := b.text.toList
-    let cur := clampCursor b.text b.cursorOffset
-    let keepBeforeCount := cur - min cur delBefore
-    let before := chars.take keepBeforeCount
-    let after := chars.drop (cur + delAfter)
-    let nextText := String.ofList (before ++ after)
-    { b with
-      text := nextText
-      cursorOffset := keepBeforeCount
-      imePreeditOffset := keepBeforeCount }
+  buf.replaceAroundCursor delBefore delAfter ""
 
 /-- Set or clear the active IME preedit composition string at `cursorOffset`. -/
 def setPreedit (buf : ComposerBuffer) (preedit : String) : ComposerBuffer :=
@@ -123,13 +113,12 @@ private def coveredChars (bytes : Nat) (chars : List Char) : Nat := Id.run do
 3. Show `preeditStr` at the updated cursor position. -/
 def applyImeBatch (buf : ComposerBuffer) (delBefore delAfter : Nat)
     (commitStr preeditStr : String) : ComposerBuffer :=
-  let b1 := if delBefore == 0 && delAfter == 0 then buf else
+  let edited := if delBefore == 0 && delAfter == 0 then buf.insertText commitStr else
     let chars := buf.text.toList
     let cur := clampCursor buf.text buf.cursorOffset
-    buf.deleteAroundCursor (coveredChars delBefore (chars.take cur).reverse)
-      (coveredChars delAfter (chars.drop cur))
-  let b2 := b1.insertText commitStr
-  b2.setPreedit preeditStr
+    buf.replaceAroundCursor (coveredChars delBefore (chars.take cur).reverse)
+      (coveredChars delAfter (chars.drop cur)) commitStr
+  edited.setPreedit preeditStr
 
 /-- Undo the most recent edit, pushing the current state onto `redoStack`. -/
 def undo (buf : ComposerBuffer) : ComposerBuffer :=

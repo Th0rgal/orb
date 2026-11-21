@@ -171,6 +171,9 @@ for i in range(300):
             click(540, 347)
             keys(typed)
             edit([("日本猫", 0, 0), ("語", len("猫".encode()), 0)])
+            # Undo the IME replacement; the next replacement must still see 猫 at the caret.
+            keys('-M', 'ctrl', '-k', 'z', '-m', 'ctrl')
+            edit([("語", len("猫".encode()), 0)])
             click(944, 347)
         else:
             roster = '10,110 195x180'

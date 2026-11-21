@@ -454,4 +454,8 @@ At narrow composer widths the native client exposes placement, harness, model an
 
 The Misc project (Core slug `default`) contains unassigned mission roots whenever the project is present. Collapsing Misc hides those roots and their descendants. The sidebar connects each expanded folder or controller to its children at the icon center. A continued sibling keeps its vertical rail through nested rows. The last visible sibling ends in a rounded elbow at its own icon, irrespective of selection.
 
+A committed Wayland IME batch can replace text on both sides of the caret.
+One Undo restores the original text and caret. Redo reapplies the complete
+replacement. Preedit-only updates preserve the edit history.
+
 Opening the harness picker requests the native Antigravity catalog for the selected destination and current login. Other harnesses remain selectable while discovery runs. An empty successful catalog removes that destination's native choices. A failed refresh offers a retry on reopening, and a different destination never inherits those model rows.
