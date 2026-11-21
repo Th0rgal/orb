@@ -158,7 +158,7 @@ private def reconcileExpiredResume (mc : ManagedComputeStore) (m : ManagedMachin
     | .ok remote => pure (remote.providerId == m.providerId &&
         #["reaped", "deleted", "destroyed"].contains (safeState remote.state))
     | .error e => pure (e.status == 404 || e.status == 410)
-  if gone then discard <| abortManagedResume mc (cell rows[1]! 0)
+  if gone then discard <| abortManagedResume mc (cell rows[1]! 0) (some m.providerId)
 
 /-- TTL is an explicit hard boundary, including busy guests. Provider errors keep
     cleanup pending; an expiry never becomes successful just because polls stop.

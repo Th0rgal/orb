@@ -1493,12 +1493,17 @@ def fenceManagedResumeCleanup (st : ManagedComputeStore) (requestKey : String) :
 
 /-- Called only after the failed successor guest is confirmed destroyed. The
     retained stopped source remains resumable, but none of its old tokens revive. -/
-def abortManagedResume (st : ManagedComputeStore) (requestKey : String) : IO (Except String Unit) := do
+def abortManagedResume (st : ManagedComputeStore) (requestKey : String)
+    (observedInPlaceId? : Option String := none) : IO (Except String Unit) := do
   withImmediateTx st.db do
     let .ok (some intent) ← getResumeIntentTx st requestKey | return .error "managed_resume_missing"
     let .ok (some (m, slice)) ← selectMachineTx st.db intent.machineId | return .error "managed_machine_missing"
     if (intent.state != "pending" && intent.state != "aborting") || slice.phaseCode != 2 || slice.nodeBootEpoch + 1 != intent.expectedBoot then
       return .error "stale_boot_epoch"
+    if let some id := observedInPlaceId? then
+      if id.isEmpty || m.providerId != id || intent.oldProviderId != id ||
+          (!intent.newProviderId.isEmpty && intent.newProviderId != id) then
+        return .error "managed_resume_identity_changed"
     let .ok () ← upsertMachineTx st.db {
         m with
         providerId := intent.oldProviderId

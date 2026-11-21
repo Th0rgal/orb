@@ -542,6 +542,21 @@ private def expiredResumeTests (root : String) : IO Unit := do
       observed.set state
       discard <| requireOk (← advance 1401) "uncertain provider observation"
       check ((← machine mc original.id).status == "provisioning") "uncertain resume remains owned"
+    let racing ← seed mc "racing-identity"
+    stop mc racing 1050
+    discard <| sql mc "UPDATE managed_machines SET provider='leanci' WHERE id=?1;" #[racing.id]
+    discard <| requireOk (← prepareManagedResume mc fleet racing.id "racing-resume" "second-enrollment"
+      5 5 1100 1200) "reserve second resume"
+    let changedProvider := { provider with get := fun id => do
+      if id == racing.providerId then
+        discard <| requireOk (← bindManagedResumeProvider mc "racing-resume" "different-vm") "racing bind"
+        return .ok { providerId := id, state := "reaped" }
+      return .ok { providerId := id, state := "running" } }
+    discard <| requireOk (← tick mc core fleet (fun _ => pure (.ok changedProvider)) 1401)
+      "provider probe races a different binding"
+    let changed ← machine mc racing.id
+    check (changed.status == "provisioning" && changed.providerId == "different-vm" &&
+      changed.expiryCleanupState.isEmpty) "provider observation cannot roll back a different successor"
     observed.set "reaped"
     discard <| requireOk (← advance 1401) "both leases expired and exact VM reaped"
     let ended ← machine mc original.id
