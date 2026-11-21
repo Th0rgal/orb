@@ -248,7 +248,7 @@ class Delivery(unittest.TestCase):
                     return
                 if path == '/api/projects':
                     result = {'projects': [dict(slug='p', title='Project title', objective='Objective', color='blue')]}
-                elif path == '/api/control/missions?limit=200':
+                elif path == '/api/control/missions?limit=200&include_ancestors=true':
                     if mode == 'unavailable':
                         self.send_response(302)
                         self.send_header('Location', '/redirect')
@@ -433,11 +433,11 @@ class Delivery(unittest.TestCase):
                      callback_parent_mission_id='callback', tags=['fork-of:source'],
                      superseded_by_mission_id='next')
         pages = {'/api/projects': {'projects': []}, '/api/machines': [],
-                 '/api/control/missions?limit=200': [child]}
+                 '/api/control/missions?limit=200&include_ancestors=true': [child]}
         connection = type('Fixture', (), {'binding': 'bound', 'check': lambda _: None,
                                           'get': lambda _, path: pages[path]})()
         for missions in ([child], [child, dict(id='launch')]):
-            pages['/api/control/missions?limit=200'] = missions
+            pages['/api/control/missions?limit=200&include_ancestors=true'] = missions
             projected = next(row for row in live.roster_rows(connection) if row[0] == 'M')
             self.assertEqual(projected[16:], ('notes/today', 'launch', 'callback', 'source', 'next'))
 

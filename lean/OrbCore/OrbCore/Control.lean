@@ -4624,6 +4624,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         offset?          := (qLookup "offset").bind String.toNat?
         updatedSince?    := (qLookup "updated_since").orElse (fun _ => qLookup "since_updated_at")
         statusesFilter   := statusesArr
+        includeAncestors := qLookup "include_ancestors" == some "true"
         includeArchived  := includeArchived
         bootstrapAdminId := st.bootstrapAdminId
         project?         := if unassignedOnly then none else rawProjF?.filter (!·.isEmpty)
