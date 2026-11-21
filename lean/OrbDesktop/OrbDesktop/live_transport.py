@@ -513,7 +513,7 @@ def resource_inventory(binding, window):
     c = Connection()
     if c.binding != binding:
         return
-    overview = c.get('/api/resources/overview?' + urllib.parse.urlencode({'range': window}))
+    overview = c.request('/api/resources/overview?' + urllib.parse.urlencode({'range': window}), deadline=30)
     rows = []
     for kind, items in (('Inference', overview['inference']['pools']),
                         ('Compute', overview['compute']['sources']),
