@@ -71,6 +71,8 @@ unexpired, unchanged since shown, and either below critical risk or
 explicitly confirmed. A batch is admitted only when every item is.
 `approval_queue::admit` is the only caller.
 
+A pending secret request expires at its recorded deadline. It then appears as expired in the broker history and leaves the approval queue. Refreshing either view uses the server clock.
+
 ## Approve all
 
 `POST /api/approvals/approve-all` (always device-signed through

@@ -4,6 +4,8 @@ How close the LeanUI desktop (`lean/OrbDesktop`, opt-in) is to the SolidJS
 desktop (`orb/`), measured per screen. The SolidJS screenshots are the
 reference; the LeanUI frames are the candidate.
 
+On startup and during recovery, the native window distinguishes an absent or invalid saved connection, a rejected session (401), denied access (403), and temporary Core unavailability. Connection details and response bodies never appear in these messages. A change of failure reason updates the open window and a successful roster read restores navigation.
+
 ## Reproduce
 
 ```sh
@@ -319,6 +321,8 @@ light, 2x: [SolidJS](crops/04_mission_split_diff_light_2x_ref_crop.png) → [Lea
 
 ### 05_machines_fleet
 
+The Local and Remote sections appear as soon as Machines opens. A pending or unavailable managed-provider catalog leaves existing machines visible. Configured providers without a machine get their group when the catalog arrives.
+
 <!-- parity:crop 05_machines_fleet_dark_1x 540 180 50 16 -->
 dark, 1x: [SolidJS](crops/05_machines_fleet_dark_1x_ref_crop.png) → [LeanUI](crops/05_machines_fleet_dark_1x_leanui_crop.png).
 
@@ -442,3 +446,39 @@ An open sidebar must pick up missions and projects created in another client, in
 When a selected mission advances from pending to active, the composer shows Stop on the same update as the active sidebar row. A roster snapshot and bubble that both report active must give the same button as a bubble arriving before the roster. Preserve the draft across that transition.
 
 Inference loads the signed-in user's provider inventory when opened. Each account shows its personal routing preference and any global disablement. Clicking a row changes only the signed-in user's preference. The confirmed response must name that account and return the requested preference. Reopening Inference reads the setting from Core, and a change invalidates any in-flight model catalog from before the update.
+
+The live sidebar keeps Account Settings in its footer during startup, recovery and normal use. Ctrl+, or Super+, opens it even with the sidebar hidden. Opening Settings reads the saved endpoint and the identity returned by Core. A pending roster, an expired session and a forbidden request have separate states. Changing the saved credential retires the previous account’s identity and roster before displaying the next account.
+
+The keyboard-focusable account action opens the desktop Backend form in a private WebKit window. Passwords go through its masked field and existing HTTP login. Locald serializes credential changes against the on-disk connection. A disconnect supplies the endpoint and session token that the form displayed. If another client switches accounts first, the newer credential survives. The form reports a storage failure and keeps its previous state when the credential store is read-only.
+
+The Settings button beside a provider opens the connection settings for that account. Core supplies the selectable countries, the saved route, exit verification and whether the user may change it. An Antigravity account also shows whether alternative routers may use it. Opening the page only reads settings. A change sends one PUT and reads both settings again, including after a timeout or refusal. A failure to load one section leaves the other usable. Escape returns keyboard focus and scroll position to the account in the inventory.
+New Agent keeps the project, machine and working directory above its multiline draft. Choosing a project preserves the draft. Choosing a different machine clears the previous machine’s directory. The folder menu lists directories through the selected machine’s filesystem API and also accepts an absolute path. Creating the mission sends that path in `working_directory`, the selected project in `project` and the original multiline prompt in `prompt`.
+
+Opening the New Agent machine picker reads the connected user's current remote-node inventory. A member with zero personal VMs can choose an available shared worker such as uruk. Core remains available to callers whose machine inventory includes Core. The picker checks the typed-launch capability, node availability, administrative scope and harness quarantine. Closing or reopening the picker retires its pending read.
+
+Picker labels stay inside the clickable row. The model picker accommodates provider-qualified names and elides overflow at narrow viewport widths. Clicking the Astra suffix selects Astra, including when Sol was previously selected.
+
+At narrow composer widths the native client exposes placement, harness, model and effort through the Mission settings menu. A draft offers machine selection. An existing mission keeps its placement. The empty prompt truncates before the send button.
+
+A global sidebar page may contain a worker whose controller last ran before the
+page boundary. Core returns up to eight generations of authorized parents when
+the native sidebar requests ancestor context. The limit and offset select the
+initial page. An inaccessible parent ends that branch, including when an older
+ancestor is independently visible. Ordinary paginated callers retain their
+existing page size. Multiple workers referencing a controller produce one row.
+
+Opening a project shows the cached activity rows immediately, then loads the same project history and older open conversations as the WebKit sidebar. A completed project read determines which rows belong in that project's tree. A mission kept in the global activity cache can still receive updates after it leaves the tree. An older controller outside the history page remains visible when an eligible child needs it for context.
+
+Replay this sequence with two projects. Fill the global page with recent activity from the first project. Expand the second, whose controller and child are older than the global page. Both appear when the project read completes. An older completed sibling outside the project history stays hidden. Collapse and reopen while a read is pending, refresh the global roster, then replay a transient failure. The expanded tree keeps the last successful project membership until a newer project read or an explicit move, archive or access revocation changes it. Switching account discards the previous account's membership. A project-only update also preserves the current Inbox entries and availability until the next full roster response.
+
+On expansion the first complete project membership and its mission cards may arrive before the global mission, archive and machine lists. This sample owns only the named memberships and supplied cards. The following full sample reuses those same project reads. A short all-status project page exhausts the open list as well. A full page still requires the bounded open scan and ancestor resolution.
+
+The Misc project (Core slug `default`) contains unassigned mission roots whenever the project is present. Collapsing Misc hides those roots and their descendants. The sidebar connects each expanded folder or controller to its children at the icon center. A continued sibling keeps its vertical rail through nested rows. The last visible sibling ends in a rounded elbow at its own icon, irrespective of selection.
+
+A committed Wayland IME batch can replace text on both sides of the caret.
+One Undo restores the original text and caret. Redo reapplies the complete
+replacement. Preedit-only updates preserve the edit history.
+
+Opening the harness picker requests the native Antigravity catalog for the selected destination and current login. Other harnesses remain selectable while discovery runs. An empty successful catalog removes that destination's native choices. A failed refresh offers a retry on reopening, and a different destination never inherits those model rows.
+
+The installed GTK sidebar treats the Core `archived` tag independently of execution status. LeanUI excludes tagged and acknowledged workers from project badges and places them under Archived. An archived ancestor needed to reach a visible worker appears once in its project. Restoring a tag-only archive clears the tag and preserves execution status.

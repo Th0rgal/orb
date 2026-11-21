@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
 import { privilegeSnapshot } from "./privilegeAccessFixture";
 
@@ -241,6 +242,22 @@ test(`Inbox surfaces Needs You and Ready for Review while keeping working agents
   const inboxNav = page.locator("#orb-sidebar").getByRole("button", { name: /Inbox/ });
   await expect(inboxNav).toBeVisible({ timeout: 15000 });
   await expect(inboxNav.locator(".inbox-sb-badge")).toHaveText("4");
+  const gtkIds = await page.evaluate(() =>
+    (window as Window & { orbInboxBadgeIds: () => string[] }).orbInboxBadgeIds().sort());
+  expect(gtkIds).toEqual(["m-done", "m-failed", "m-perm", "m-question"]);
+  // The pending permission is available to the mounted WebView through its observed
+  // transcript. The same Core summaries alone carry no such signal on m-perm.
+  const nativeIds: string[] = JSON.parse(execFileSync("python3", ["-I", "-c", `
+import json, sys
+sys.path.insert(0, '../lean/OrbDesktop/OrbDesktop')
+from live_transport import project_inbox
+rows = {m['id']: m for m in json.load(sys.stdin)}
+items = project_inbox([rows.values()], {}, [{'slug': 'orb'}, {'slug': 'paloma'}], '')
+print(json.dumps([r[1] for r in items if r[0] == 'U']))
+`], { input: JSON.stringify(missions), encoding: "utf8" }));
+  expect(nativeIds.sort()).toEqual(["m-done", "m-failed", "m-question"]);
+  expect(gtkIds.filter(id => !nativeIds.includes(id))).toEqual(["m-perm"]);
+
 
   // Open Inbox via ⌘I shortcut
   await page.keyboard.press("Meta+KeyI");
@@ -685,3 +702,136 @@ test("Inbox renders live production missions and projects when ORB_INBOX_PROD=1"
   }
 });
 
+
+test("badge hydrates before opening Inbox and reloads receipts on account switch", async ({ page }) => {
+  const token = (sub: string) => `header.${Buffer.from(JSON.stringify({ sub })).toString("base64url")}.fixture`;
+  const ben = token("ben");
+  const thomas = token("thomas");
+  const stamp = Date.parse("2026-10-10T00:00:00Z");
+  const missions = ["a", "b", "c", "d", "e", "f"].map((id, index) => ({
+    id, title: id, project: "default", status: index < 4 ? "completed" : "running",
+    backend: "claudecode", updated_at: new Date(stamp).toISOString(), history: [],
+  }));
+  await page.addInitScript(jwt => {
+    localStorage.setItem("orb.apiUrl", location.origin);
+    localStorage.setItem("orb.jwt", jwt);
+  }, ben);
+  let releaseBen!: () => void;
+  const pendingBen = new Promise<void>(resolve => { releaseBen = resolve; });
+  let benAttempts = 0;
+  await page.route("**/api/**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/control/inbox-state") {
+      const isBen = route.request().headers().authorization === `Bearer ${ben}`;
+      if (isBen) {
+        if (++benAttempts === 1) return route.fulfill({ status: 503 });
+        await pendingBen;
+      }
+      return route.fulfill({ json: {
+        preferences: { aiSummary: false, includeAutonomous: false, model: "builtin/smart" },
+        ...(isBen ? { "seen:a": stamp, "seen:b": stamp, "seen:c": stamp } : { "seen:d": stamp }),
+      } });
+    }
+    if (path === "/api/projects") return route.fulfill({ json: { projects: [{ slug: "default", title: "Default" }] } });
+    if (path === "/api/control/missions") return route.fulfill({ json: missions });
+    if (path === "/api/control/stream") return route.fulfill({ contentType: "text/event-stream", body: "" });
+    return route.fulfill({ json: {} });
+  });
+  await page.goto("/");
+  const nav = page.locator("#orb-sidebar").getByRole("button", { name: /^Inbox/ });
+  const ids = () => page.evaluate(() =>
+    (window as Window & { orbInboxBadgeIds: () => string[] }).orbInboxBadgeIds().sort());
+  await expect(nav).toBeVisible();
+  await expect.poll(() => benAttempts).toBe(1);
+  await expect.poll(async () => {
+    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    return benAttempts;
+  }).toBe(2);
+  await expect(nav.locator(".inbox-sb-badge")).toHaveCount(0);
+  releaseBen();
+  await expect.poll(ids).toEqual(["d"]);
+  await nav.click();
+  await expect(page.locator(".inbox-page h2")).toHaveText("Inbox");
+  await expect(nav.locator(".inbox-sb-badge")).toHaveText("1");
+  await page.evaluate(async jwt => {
+    const modulePath = "/src/api.ts";
+    const api = await import(modulePath);
+    api.setConnection(location.origin, jwt, { persist: false });
+  }, thomas);
+  await expect.poll(ids).toEqual(["a", "b", "c"]);
+  await expect(nav.locator(".inbox-sb-badge")).toHaveText("3");
+});
+
+test("cold startup publishes its first numeric badge after the late project window", async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem("orb.apiUrl", location.origin);
+    localStorage.setItem("orb.jwt", "fixture");
+    const receipt = { shellMs: 0, counts: [] as { count: string; ms: number; ids: string[] }[] };
+    Object.assign(window, { startupReceipt: receipt });
+    new MutationObserver(() => {
+      const nav = document.querySelector('#orb-sidebar .inbox-sb-badge');
+      if (!receipt.shellMs && document.querySelector("#orb-sidebar button")) receipt.shellMs = performance.now();
+      const count = nav?.textContent;
+      if (count && count !== receipt.counts.at(-1)?.count) {
+        const ids = (window as Window & { orbInboxBadgeIds(): string[] }).orbInboxBadgeIds().sort();
+        receipt.counts.push({ count, ms: performance.now(), ids });
+      }
+    }).observe(document, { subtree: true, childList: true, characterData: true });
+  });
+  const row = (id: string, project: string, status: string, extra = {}) => ({
+    id, title: id, project, status, backend: "claudecode", updated_at: "2026-10-10T10:00:00Z", ...extra,
+  });
+  const current = [row("question", "first", "awaiting_user"), row("seen", "first", "completed"),
+    ...Array.from({ length: 198 }, (_, i) => row("worker-" + i, "first", "running"))];
+  const late = [row("older", "late", "awaiting_user"),
+    row("automatic", "late", "failed", { origin: "hermes" })];
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let waiting = false;
+  await page.route("**/api/**", async route => {
+    const url = new URL(route.request().url()), path = url.pathname, q = url.searchParams;
+    if (path === "/api/control/inbox-state") return route.fulfill({ json: {
+      "seen:seen": Date.parse("2026-10-11"), preferences: { includeAutonomous: true, aiSummary: false, model: "builtin/smart" },
+    } });
+    if (path === "/api/projects") return route.fulfill({ json: { projects: ["first", "late"].map(slug => ({ slug, title: slug })) } });
+    if (path === "/api/control/missions") {
+      if (q.get("project") === "late") { waiting = true; await gate; }
+      const rows = q.get("project") === "late" ? late : q.has("status") ? current.slice(1, 2) : current;
+      const offset = Number(q.get("offset") ?? 0);
+      return route.fulfill({ json: rows.slice(offset, offset + Number(q.get("limit") ?? 200)) });
+    }
+    if (path.endsWith("/events")) return route.fulfill({ headers: { "X-Orb-Events-Protocol": "1", "X-Has-More": "false" }, json: [] });
+    if (path === "/api/control/stream") return route.fulfill({ contentType: "text/event-stream", body: "" });
+    return route.fulfill({ json: {} });
+  });
+  await page.goto("/");
+  const nav = page.locator("#orb-sidebar").getByRole("button", { name: /^Inbox/ });
+  await expect(nav).toBeVisible({ timeout: 15000 });
+  await expect.poll(() => waiting).toBe(true);
+  // Confirm the receipt has actually been applied while the project is held.
+  await page.waitForFunction(() => {
+    const key = "orb.btw:v1:" + JSON.stringify([location.origin, "authenticated", "mission-seen:shared-v1"]);
+    return JSON.parse(localStorage.getItem(key) ?? "{}").seen === Date.parse("2026-10-11");
+  });
+  const ids = () => page.evaluate(() => (window as Window & { orbInboxBadgeIds(): string[] }).orbInboxBadgeIds().sort());
+  await expect(page.locator(".inbox-page")).toHaveCount(0);
+  const earlyIds = await ids();
+  release();
+  const expected = ["automatic", "older", "question"];
+  await expect.poll(ids).toEqual(expected);
+  const before = await ids();
+  await nav.click();
+  await expect(page.locator(".inbox-page h2")).toHaveText("Inbox");
+  const after = await ids();
+  const receipt = await page.evaluate(() => (window as Window & {
+    startupReceipt: { shellMs: number; counts: { count: string; ms: number; ids: string[] }[] }
+  }).startupReceipt);
+  const evidence = JSON.stringify({ earlyIds, before, after, ...receipt });
+  await test.info().attach("inbox-cold-start.json", { body: evidence, contentType: "application/json" });
+  console.log("Inbox cold startup", evidence);
+  expect(after).toEqual(before);
+  expect(earlyIds).toEqual([]);
+  expect(receipt.counts.map(x => [x.count, x.ids])).toEqual([["3", expected]]);
+  expect(receipt.shellMs).toBeGreaterThan(0);
+  expect(receipt.shellMs).toBeLessThan(receipt.counts[0].ms);
+});

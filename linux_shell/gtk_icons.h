@@ -9,6 +9,7 @@ int orb_gtk_icons_self_test(void);
 
 #if defined(ORB_HAS_WEBKITGTK)
 #include <gtk/gtk.h>
+void orb_gtk_apply_theme(GtkCssProvider *css, gboolean light);
 typedef struct { GPtrArray *spinning; guint src; int step; } OrbIconSpinner;
 void orb_spinner_stop(OrbIconSpinner *sp);
 GtkWidget *orb_menu_row(GtkWidget *page, const char *label, const char *icon);
