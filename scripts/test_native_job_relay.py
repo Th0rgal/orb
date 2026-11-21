@@ -107,7 +107,12 @@ async def exercise(args, root, db, core_port, claim, mission, short_grant):
             else:
                 payload = {"candidates":[{"index":0, "finishReason":"STOP",
                             "content":{"role":"model", "parts":[{"text":"ledger complete"}]}}]}
-                if request_ledger and b":streamGenerateContent" in line:
+                headers = dict(field.lower().split(b":", 1) for field in head.splitlines()[1:] if b":" in field)
+                body = await r.readexactly(int(headers.get(b"content-length", 0)))
+                tools = json.loads(body).get("tools", []) if body and b":streamGenerateContent" in line else []
+                declared = {f["name"] for tool in tools for f in
+                            tool.get("functionDeclarations", tool.get("function_declarations", []))}
+                if request_ledger and "run_command" in declared:
                     request_ledger = False
                     payload["candidates"][0]["content"]["parts"] = [{"functionCall": {"name": "run_command",
                         "args": {"CommandLine": ledger_command, "WaitMsBeforeAsync": 5000,

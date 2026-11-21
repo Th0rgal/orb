@@ -76,3 +76,31 @@ The native CLI uses its Gemini API-key interface with a disposable fixture value
 A network namespace controls sockets. The authenticated CLI still needs a way to delegate **all** workspace file access, commands, hooks and stdio MCP to a different OS identity, including after resume. The tested agy interface lacks a documented mandatory executor with fail-closed disconnect. Until that exists, a private native login on the CLI identity would be accessible to local workspace tools. The [capability investigation](../../docs/specs/antigravity-model-account-selection.md) records the ACP handshake and native UID evidence. The supervisor is independently callable. Core and the node continue to deny shared-profile execution.
 
 The crash regression waits for a SOCKS greeting, exits the supervisor immediately and holds an independent reference to the job namespace. It requires EOF on the established socket and ECONNREFUSED on a fresh connection while that namespace still exists. Closing only the asyncio server listener left the active socket open until the protocol timeout on Python 3.12. The adapter now cancels accepted handlers when the lifetime pipe closes.
+
+Final disposable guest output (Core startup lines omitted)
+
+```text
+9 rejected requests; account-relay connects=0
+old grant with updated enrollment revision denied
+unlisted SOCKS host, port 80 and mismatched inner TLS SNI denied
+gemini-4-carbon-high: native workspace file uid=16001; same conversation resumed
+gemini-4-neon-high: native workspace file uid=16001; same conversation resumed
+grant expiry closed established TLS; reconnect denied
+gemini-4-carbon-high: gateway unavailable; resume ERROR; origin delta=0; direct hits=0
+gemini-4-neon-high: gateway unavailable; resume ERROR; origin delta=0; direct hits=0
+Core cancellation closed established TLS; reconnect denied
+supervisor teardown: temporary profile removed; job namespace released
+transport exit=0
+reserved node: signed owner and other-user jobs 403; unauthenticated job 401; workspace absent
+restart with missing or changed owner binding: refused before listening
+ordinary node: valid signed job admitted and succeeded
+ordinary and reserved node controls exit=0
+initial and resumed mission dispatch denied; zero node jobs
+targeted catalog: owner 503, other user and admin 403
+other node owner 403; other account owner 403; owner revision 1; stale revision 409
+rebind revision 2; old grant 401; unrelated grant active; restore original account at revision 4: old grant 401
+restart without roster owner: persisted reservation refused catalog access
+mission admission exit=0
+supervisor process loss: active SOCKS connection closed; listener refused reconnect
+supervisor loss exit=0
+```
