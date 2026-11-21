@@ -16,7 +16,8 @@ open OrbCore.ProviderUsageAndLogin
 def checkDiscovery (root url : String) (port : UInt16) : IO Unit := do
   let st ← IO.ofExcept (← openCoreStore root)
   try
-    let hp : AIProviderRecord := { id := "fixture", providerType := "custom", name := "Fixture", baseUrl := url, apiKey := "fixture-only" }
+    let hp : AIProviderRecord := { id := "fixture", providerType := "custom", name := "Fixture", baseUrl := url, apiKey := "fixture-only"
+        customModels := #[{ id := "fixture-model" }] }
     IO.ofExcept (← upsertAIProvider st hp)
     let hub ← newProviderRuntimeHub
     let verify := fun (hub : ProviderRuntimeHub) (expected : String) => do
@@ -1739,9 +1740,51 @@ def run : IO Unit := do
       unless memberCode == 200 && saved.fieldStr? "country" == some "NL" &&
           adminView.fieldStr? "country" == some "NL" do
         failures := failures.push "An administrator must see the shared country saved by a member"
+      let listRow : String → IO JVal := fun session => do
+        let rows := (← getJson app session "/api/ai/providers" now).asArr?.getD #[]
+        pure ((rows.find? (·.fieldStr? "id" == some ownerRow.id)).getD .null)
+      let inChooser : String → IO Bool := fun session => do
+        let catalog ← getJson app session "/api/providers/catalog" now
+        pure (((catalog.fieldArr? "configured_ids").getD #[]).contains (.str ownerRow.id))
+      let (prefCode, _) ← putJson app memberJwt (s!"/api/ai/providers/{ownerRow.id}/preference")
+        "{\"enabled\":false}" now
+      unless prefCode == 200 && (← listRow memberJwt).fieldBool? "user_enabled" == some false &&
+          (← listRow jwt).fieldBool? "user_enabled" == some true &&
+          !(← inChooser memberJwt) && (← inChooser jwt) do
+        failures := failures.push "Personal preference persists on list reload and filters only the member's chooser"
       IO.ofExcept (← upsertAIProvider store { ownerRow with enabled := false })
+      let disabledMember ← listRow memberJwt
+      let disabledAdmin ← listRow jwt
+      unless disabledMember.fieldStr? "id" == some ownerRow.id &&
+          disabledAdmin.fieldStr? "id" == some ownerRow.id &&
+          disabledMember.fieldBool? "enabled" == some false &&
+          disabledAdmin.fieldBool? "effective_enabled" == some false &&
+          (disabledMember.fieldOrNull "status").fieldStr? "type" == some "connected" &&
+          (disabledMember.field? "base_url").isNone &&
+          (← getJson app memberJwt ownerRoute now).fieldStr? "country" == some "NL" do
+        failures := failures.push "Both sessions retain the disabled configured account and its shared VPN country"
+      let legacyFile := s!"{root}/.sandboxed-sh/ai_providers.json"
+      IO.FS.rename legacyFile (legacyFile ++ ".saved")
+      try
+        let dbMember ← listRow memberJwt
+        let dbAdmin ← listRow jwt
+        unless dbMember.fieldStr? "id" == some ownerRow.id &&
+            dbMember.fieldBool? "user_enabled" == some false && dbAdmin.fieldBool? "user_enabled" == some true &&
+            dbMember.fieldBool? "globally_enabled" == some false && (dbMember.field? "base_url").isNone do
+          failures := failures.push "Database-only list retains disabled accounts with the same redaction and preferences"
+      finally
+        IO.FS.rename (legacyFile ++ ".saved") legacyFile
+      let (enableCode, _) ← putJson app memberJwt s!"/api/ai/providers/{ownerRow.id}" "{\"enabled\":true}" now
+      let pinned := renderCompact (.arr #[.obj #[("provider_id", .str "openai"),
+        ("account_id", .str ownerRow.id), ("model_id", .str "fixture-model")]])
+      unless enableCode == 403 && !(← inChooser jwt) &&
+          (parseChainTargetsJson pinned (← listAIProviders store) (← loadHydratedProviders store root)).isEmpty do
+        failures := failures.push "Global disable excludes pinned inference targets and chooser options"
+      IO.ofExcept (← upsertAIProvider store { ownerRow with enabled := false, apiKey := "", providerType := "custom" })
       let (hiddenCode, _) ← putJson app memberJwt ownerRoute "{\"mode\":\"direct\"}" now
-      unless hiddenCode == 403 do failures := failures.push "Hidden providers cannot be reconfigured by members"
+      unless hiddenCode == 403 && (← listRow memberJwt) == .null &&
+          (← listRow jwt).fieldBool? "has_credentials" == some false do
+        failures := failures.push "Only the operator sees this unconfigured placeholder"
       IO.ofExcept (← deleteAIProvider store ownerRow.id)
       let (missing, _) ← putJson app jwt accountRoute "{}" now
       if missing != 404 then failures := failures.push "VPN admin route must resolve the selected account"

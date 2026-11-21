@@ -133,7 +133,7 @@ it("lets a member edit non-credential settings on another user's account while h
   render(() => <Providers />);
   fireEvent.click(await screen.findByRole("button", { name: "Actions for Shared Custom", exact: true }));
   expect(screen.queryByRole("menuitem", { name: "Remove provider…", exact: true })).toBeNull();
-  expect(screen.getByRole("menuitem", { name: "Disable", exact: true })).toBeTruthy();
+  expect(screen.queryByRole("menuitem", { name: "Disable", exact: true })).toBeNull();
   expect(screen.getByRole("menuitem", { name: "Skip for my missions", exact: true })).toBeTruthy();
   fireEvent.click(screen.getByRole("menuitem", { name: "Edit settings", exact: true }));
   expect(await screen.findByRole("heading", { name: "Edit provider settings" })).toBeTruthy();
