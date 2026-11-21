@@ -36,15 +36,16 @@ def run(agy, workspace_mcp, model):
         (image / "bin").mkdir(parents=True)
         (image / "workspace").mkdir()
         (image / "dev").mkdir()
-        shutil.copy2(workspace_mcp, image / "bin/workspace-mcp")
-        # Build the disposable image from this trusted binary's exact runtime.
-        for line in subprocess.check_output(["ldd", workspace_mcp], text=True).splitlines():
-            paths = [word for word in line.split() if word.startswith("/")]
-            if paths:
-                lib = Path(paths[0])
-                dest = image / lib.relative_to("/")
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(lib, dest)
+        # Build the disposable image from the trusted binaries' exact runtime.
+        for binary, name in ((workspace_mcp, "workspace-mcp"), (shutil.which("setpriv"), "setpriv")):
+            shutil.copy2(binary, image / "bin" / name)
+            for line in subprocess.check_output(["ldd", binary], text=True).splitlines():
+                paths = [word for word in line.split() if word.startswith("/")]
+                if paths:
+                    lib = Path(paths[0])
+                    dest = image / lib.relative_to("/")
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(lib, dest)
         check_readonly_executor(image, work, root)
         # The account profile and the checkout are not readable across principals.
         for uid, directory in ((PROFILE, work), (WORKSPACE, home)):

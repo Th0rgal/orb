@@ -6,12 +6,12 @@ import subprocess
 
 
 def start_file_executor(bwrap, rootfs, workspace, uid, gid, stream, *, readonly):
-    """rootfs is a trusted minimal image containing /bin/workspace-mcp and /workspace.
+    """rootfs is a trusted image containing /bin/setpriv, /bin/workspace-mcp and /workspace.
 
     Both descriptors must come from the placement supervisor. Neither authority
     nor host paths are accepted from MCP requests. Only stdio reaches the tool.
     """
-    if uid <= 0 or gid <= 0:
+    if os.geteuid() != 0 or uid <= 0 or gid <= 0:
         raise ValueError("expected an unprivileged workspace identity")
     image = os.fstat(rootfs)
     checkout = os.fstat(workspace)
@@ -20,8 +20,11 @@ def start_file_executor(bwrap, rootfs, workspace, uid, gid, stream, *, readonly)
     if not stat.S_ISDIR(checkout.st_mode) or checkout.st_uid != uid:
         raise ValueError("workspace owner differs from placement")
     return subprocess.Popen([
-        bwrap, "--unshare-all", "--unshare-user", "--disable-userns", "--new-session", "--die-with-parent", "--cap-drop", "ALL",
+        bwrap, "--unshare-pid", "--unshare-ipc", "--unshare-net", "--unshare-uts", "--new-session", "--die-with-parent",
+        "--cap-drop", "ALL", "--cap-add", "CAP_SETUID", "--cap-add", "CAP_SETGID",
         "--ro-bind-fd", str(rootfs), "/", "--ro-bind-fd" if readonly else "--bind-fd", str(workspace), "/workspace",
-        "--dev", "/dev", "--clearenv", "--setenv", "HOME", "/nonexistent", "--chdir", "/workspace", "--", "/bin/workspace-mcp",
+        "--dev", "/dev", "--clearenv", "--setenv", "HOME", "/nonexistent", "--setenv", "SANDBOXED_SH_WORKSPACE", "/workspace", "--chdir", "/",
+        "--", "/bin/setpriv", "--clear-groups", "--reuid", str(uid), "--regid", str(gid), "--no-new-privs",
+        "--", "/bin/workspace-mcp",
     ], stdin=stream, stdout=stream, stderr=subprocess.DEVNULL, env={}, cwd="/", pass_fds=(rootfs, workspace),
-       user=uid, group=gid, extra_groups=[])
+       extra_groups=[])
