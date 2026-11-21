@@ -1026,7 +1026,25 @@ def runOpenCodeAcpTests : IO Unit := do
   assertEq "ACP model unknown to the agent" (resolveAcpModel "nope/zzz" #["orbrouter/builtin/smart"]) none
   IO.FS.removeDirAll tmpDir
 
+open OrbBin.ClaudeControl in
+private def runCodexMessageBoundaryTests : IO Unit := do
+  -- Codex emits complete assistant items on either side of a tool call.
+  let mut codexText := ""
+  for line in #[
+    "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"id\":\"a\",\"text\":\"Checking.\"}}",
+    "{\"type\":\"item.started\",\"item\":{\"type\":\"command_execution\",\"id\":\"tool\"}}",
+    "{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\",\"id\":\"tool\"}}",
+    "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"id\":\"b\",\"text\":\"abc123\"}}"
+  ] do
+    let parsed := parseOneShotHarnessEvent "codex" line
+    if !parsed.textDelta.isEmpty then
+      codexText := codexText ++ (joinHarnessText "codex" codexText none parsed).1
+  assertEq "Codex tool commentary and final item retain a paragraph boundary" codexText "Checking.\n\nabc123"
+  let codexChunk := parseOneShotHarnessEvent "codex" "{\"type\":\"text\",\"text\":\"lo\"}"
+  assertEq "Codex partial text frames stay contiguous" (joinHarnessText "codex" "Hel" none codexChunk).1 "lo"
+
 def runAllTests : IO UInt32 := do
+  runCodexMessageBoundaryTests
   let prompt := "--model is part of this prompt\nwith 'quotes' and a trailing newline\n"
   assertEq "Antigravity delivers a flag-shaped prompt verbatim alongside model, effort and resume"
     (OrbBin.ClaudeControl.buildOneShotHarnessArgs "antigravity" prompt (some "custom-model") (some "high") (some "session"))
