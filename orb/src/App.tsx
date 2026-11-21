@@ -175,12 +175,13 @@ const BitwardenSettings = lazy(() => import("./BitwardenSettings").then(module =
 const InboxPage = lazy(() => import("./Inbox").then(module => ({ default: module.InboxPage })));
 import { requestInboxDigest } from "./inboxDigest";
 import { inboxMissionUnion, listUnreadInboxCandidates } from "./inboxUnread";
-import { inboxConfig } from "./inboxSettings";
+import { readInboxState } from "./inboxState";
+import { applySharedInboxPreferences, inboxConfig } from "./inboxSettings";
 const InboxSettings = lazy(() => import("./InboxSettingsPanels").then(module => ({ default: module.InboxSettings })));
 const InboxSummariesSettings = lazy(() => import("./InboxSettingsPanels").then(module => ({ default: module.InboxSummariesSettings })));
 import { shouldRequestInboxDigest } from "./inboxPolicy";
 import { pendingMissionInteraction } from "./missionAttention";
-import { markMissionRead, unreadVersion } from "./missionUnread";
+import { applySharedInboxSeen, markMissionRead, unreadVersion } from "./missionUnread";
 
 import { harnessChoices, harnessPick, effectivePick, refreshHarnessChoices, refreshNodeAntigravityModels, type HarnessPick } from "./harnessPick";
 import { Composer } from "./composer/Composer";
@@ -721,11 +722,38 @@ export default function App() {
     const found = findKnownMission(id);
     return found ?? (previous?.id === id ? previous : null);
   }, null);
+  const [inboxStateVersion, setInboxStateVersion] = createSignal<number>();
+  createEffect(on([isConnected, connectionVersion], ([connected, version]) => {
+    if (!connected) return;
+    let active = true;
+    let reading = false;
+    const refresh = async () => {
+      if (reading || !active) return;
+      reading = true;
+      try {
+        const state = await readInboxState();
+        if (!active || connectionVersion() !== version) return;
+        batch(() => {
+          if (state) {
+            applySharedInboxSeen(state);
+            applySharedInboxPreferences(state.preferences);
+          }
+          // A failed read falls back to this account's cache until the next poll.
+          setInboxStateVersion(version);
+        });
+      } finally {
+        reading = false;
+      }
+    };
+    void refresh();
+    const stop = pollWhileVisible(refresh, 10_000, "inbox.sharedState");
+    onCleanup(() => { active = false; stop(); });
+  }));
   const inboxBadgeIds = createMemo(() => {
     transcriptVersion();
     unreadVersion();
     const cfg = inboxConfig();
-    if (!cfg.inboxEnabled || !isConnected()) return [];
+    if (!cfg.inboxEnabled || !isConnected() || inboxStateVersion() !== connectionVersion()) return [];
     return listUnreadInboxCandidates(
       inboxMissions(),
       liveProjects(),
